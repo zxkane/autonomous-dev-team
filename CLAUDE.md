@@ -30,9 +30,9 @@ This project enforces a strict end-to-end development workflow through Claude Co
 │                                                                     │
 │  Step 1          Step 2          Step 3          Step 4            │
 │  ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐      │
-│  │ Design   │───▶│ Test     │───▶│ Implement│───▶│ Unit     │      │
-│  │ Canvas   │    │ Cases    │    │ Code     │    │ Tests    │      │
-│  │ (Pencil) │    │ (TDD)    │    │          │    │ Pass     │      │
+│  │ Design   │───▶│ Create   │───▶│ Test     │───▶│ Implement│      │
+│  │ Canvas   │    │ Worktree │    │ Cases    │    │ Code     │      │
+│  │ (Pencil) │    │ (MUST)   │    │ (TDD)    │    │          │      │
 │  └──────────┘    └──────────┘    └──────────┘    └──────────┘      │
 │       │                                               │             │
 │       │                                               ▼             │
@@ -42,13 +42,13 @@ This project enforces a strict end-to-end development workflow through Claude Co
 │       │         │  2. Local lint/type check passes              │   │
 │       │         └──────────────────────────────────────────────┘   │
 │       │                                               │             │
-│       │         Step 5          Step 6               │             │
+│       │         Step 6          Step 7               │             │
 │       │         ┌──────────┐    ┌──────────┐         │             │
 │       │    ┌───▶│ PR Review│───▶│ Git Push │◀────────┘             │
 │       │    │    │ Agent    │    │          │                       │
 │       │    │    └──────────┘    └──────────┘                       │
 │       │    │                          │                            │
-│       │    │    Step 7               ▼                             │
+│       │    │    Step 8               ▼                             │
 │       │    │    ┌──────────────────────────────┐                   │
 │       │    │    │ Wait for GitHub CI Checks    │                   │
 │       │    │    │ - Lint & Type Check          │                   │
@@ -57,7 +57,7 @@ This project enforces a strict end-to-end development workflow through Claude Co
 │       │    │    └──────────────────────────────┘                   │
 │       │    │                          │                            │
 │       │    │                          ▼                            │
-│       │    │    Step 8                                             │
+│       │    │    Step 9                                             │
 │       │    │    ┌──────────────────────────────┐                   │
 │       │    │    │ E2E Tests (Chrome DevTools)  │                   │
 │       │    │    │ Verify on Preview Environment│                   │
@@ -67,6 +67,13 @@ This project enforces a strict end-to-end development workflow through Claude Co
 │       │    └───────────────────  ┌──────────────┐                  │
 │       │                          │ Notify User  │                  │
 │       │                          │ Peer Review  │                  │
+│       │                          └──────────────┘                  │
+│       │                                │                           │
+│       │                                ▼                           │
+│       │                          ┌──────────────┐                  │
+│       │                          │ Step 10:     │                  │
+│       │                          │ Cleanup      │                  │
+│       │                          │ Worktree     │                  │
 │       │                          └──────────────┘                  │
 │       └────────────────────────────────────────────────────────▶   │
 │                         Return to Step 1 (if changes needed)        │
@@ -136,7 +143,60 @@ Before proceeding to implementation:
 3. Document any feedback or changes
 4. Mark design status as `Approved`
 
-### Step 2: Test Case Design (Test First - Mandatory)
+### Step 2: Create Git Worktree (MANDATORY)
+
+**⚠️ CRITICAL: Every change MUST be developed in an isolated git worktree. Never develop directly on the main workspace.**
+
+- Input: Approved design / Task description
+- Output: Isolated worktree with clean baseline
+
+#### Why Worktrees?
+
+- **Isolation**: Each feature/fix gets its own directory, preventing accidental cross-contamination
+- **Parallel work**: Multiple features can be in progress simultaneously
+- **Clean main workspace**: The main checkout stays on `main`, always ready for quick checks or hotfixes
+- **Safe rollback**: Discard a worktree without affecting the main workspace
+
+#### Worktree Creation Process
+
+```bash
+# 1. Determine branch name based on change type
+BRANCH_NAME="feat/my-feature"  # or fix/<name>, refactor/<name>, etc.
+
+# 2. Create worktree with new branch from main
+git worktree add .worktrees/$BRANCH_NAME -b $BRANCH_NAME
+
+# 3. Enter the worktree
+cd .worktrees/$BRANCH_NAME
+
+# 4. Install dependencies
+npm install  # or: bun install, yarn install, pnpm install
+
+# 5. Verify clean baseline
+npm run build && npm test
+```
+
+#### Directory Convention
+
+| Item | Value |
+|------|-------|
+| Worktree root | `.worktrees/` (project-local, gitignored) |
+| Path pattern | `.worktrees/<branch-name>` |
+| Example | `.worktrees/feat/user-authentication` |
+
+#### Safety Checks
+
+Before creating any worktree, verify `.worktrees/` is in `.gitignore`:
+
+```bash
+git check-ignore -q .worktrees 2>/dev/null || echo "WARNING: .worktrees not in .gitignore!"
+```
+
+#### All Subsequent Steps Run INSIDE the Worktree
+
+After creating the worktree, **all development commands** (test, lint, build, commit, push) are executed from within the worktree directory. The main workspace is not touched until cleanup.
+
+### Step 3: Test Case Design (Test First - Mandatory)
 
 **⚠️ This is a mandatory step that must be completed before writing any implementation code**
 
@@ -153,16 +213,16 @@ Before proceeding to implementation:
 
 **Test Case Document Template**: See `docs/templates/test-case-template.md`
 
-### Step 3: Implementation
+### Step 4: Implementation
 
 - Input: Design canvas + Test cases
 - Output: Implementation code
 - Tasks:
-  1. Implement features following test cases
+  1. Implement features following test cases (inside worktree)
   2. Ensure implementation covers all test scenarios
   3. Manually verify basic functionality locally
 
-### Step 4: Unit Test Implementation & Verification
+### Step 5: Unit Test Implementation & Verification
 
 - Input: Implementation code + Test skeleton
 - Output: Complete unit tests, all passing
@@ -173,7 +233,7 @@ Before proceeding to implementation:
   3. Fix failing tests
   4. Ensure all tests pass
 
-### Step 5: Code Review (Pre-Commit)
+### Step 6: Code Review (Pre-Commit)
 
 **⚠️ Hook enforced - must complete before commit**
 
@@ -190,7 +250,7 @@ Before proceeding to implementation:
      .claude/hooks/state-manager.sh mark code-simplifier
      ```
 
-### Step 6: PR Review (Pre-Push)
+### Step 7: PR Review (Pre-Push)
 
 **⚠️ Hook enforced - must complete before push**
 
@@ -211,7 +271,7 @@ Before proceeding to implementation:
      .claude/hooks/state-manager.sh mark pr-review
      ```
 
-### Step 7: Wait for CI Checks
+### Step 8: Wait for CI Checks
 
 **⚠️ Hook enforced - must verify before task completion**
 
@@ -221,9 +281,9 @@ Before proceeding to implementation:
   - ✅ Lint & Type Check
   - ✅ Unit Tests
   - ✅ Build
-- If any check fails → Return to Step 3 to fix
+- If any check fails → Return to Step 4 to fix
 
-### Step 8: E2E Test Verification
+### Step 9: E2E Test Verification
 
 **⚠️ Hook enforced - must execute before task completion**
 
@@ -238,6 +298,21 @@ Before proceeding to implementation:
      .claude/hooks/state-manager.sh mark e2e-tests
      ```
 
+### Step 10: Cleanup Worktree
+
+After the PR is merged or closed:
+
+```bash
+# Return to main workspace
+cd $(git rev-parse --show-toplevel)
+
+# Remove the worktree
+git worktree remove .worktrees/<branch-name>
+
+# Prune stale worktree references
+git worktree prune
+```
+
 ---
 
 ## Acceptance Checklist
@@ -245,6 +320,7 @@ Before proceeding to implementation:
 Before merging any PR, confirm:
 
 - [ ] Design canvas created/updated (`docs/designs/<feature>.pen`)
+- [ ] Git worktree created for development
 - [ ] Test case document created (`docs/test-cases/<feature>.md`)
 - [ ] Feature code complete and locally verified
 - [ ] Unit test coverage >80%
@@ -254,12 +330,19 @@ Before merging any PR, confirm:
 - [ ] **All GitHub PR Checks pass**
 - [ ] E2E tests pass (Chrome DevTools)
 - [ ] User Peer Review complete
+- [ ] Worktree cleaned up after merge
 
 ---
 
 ## Common Commands
 
 ```bash
+# Worktree Management
+git worktree add .worktrees/<branch> -b <branch>   # Create worktree
+git worktree list                                   # List worktrees
+git worktree remove .worktrees/<branch>             # Remove worktree
+git worktree prune                                  # Prune stale refs
+
 # Development
 npm run dev                    # Start local development server
 npm run build                  # Build project
@@ -309,6 +392,7 @@ project-root/
 │           └── scripts/         # Utility scripts
 │               ├── reply-to-comments.sh
 │               └── resolve-threads.sh
+├── .worktrees/                  # Git worktrees (gitignored)
 ├── docs/
 │   ├── designs/                 # Design canvas documents (.pen files)
 │   ├── test-cases/              # Test case documents
@@ -352,17 +436,19 @@ project-root/
 
 The `github-workflow` skill provides standardized guidance for the complete development workflow.
 
-**Trigger phrases**: "design a feature", "create UI mockup", "create a PR", "address review comments", "resolve review threads", "/q review", "/codex review", "merge PR", "push changes", "check CI status"
+**Trigger phrases**: "design a feature", "create UI mockup", "create a PR", "create worktree", "address review comments", "resolve review threads", "/q review", "/codex review", "merge PR", "push changes", "check CI status"
 
 **Location**: `.claude/skills/github-workflow/SKILL.md`
 
 **Key features**:
 - Design Canvas workflow using Pencil tool
+- **Git worktree creation for isolated development**
 - Branch naming and commit conventions
 - PR creation and review process
 - Reviewer bot interaction (Amazon Q, Codex)
 - CI/CD check monitoring
 - Review thread management
+- **Worktree cleanup after merge**
 
 **Utility scripts**:
 ```bash

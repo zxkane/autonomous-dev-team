@@ -55,6 +55,9 @@ lerna-debug.log*
 # Claude Code state (auto-managed)
 .claude/state/
 
+# Git worktrees
+.worktrees/
+
 # Temporary files
 tmp/
 temp/
