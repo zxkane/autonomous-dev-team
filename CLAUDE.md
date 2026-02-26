@@ -11,7 +11,7 @@
 [Fill in based on your actual project]
 
 | Component | Choice | Rationale |
-|-----------|--------|-----------|}
+|-----------|--------|-----------|
 | Frontend | - | - |
 | Backend | - | - |
 | Database | - | - |
