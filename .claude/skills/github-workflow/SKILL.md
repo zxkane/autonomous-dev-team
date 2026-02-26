@@ -1,6 +1,6 @@
 ---
 name: github-workflow
-description: This skill should be used when the user asks to "design a feature", "create UI mockup", "create a PR", "address review comments", "resolve review threads", "retrigger Q review", "/q review", "respond to Amazon Q", "/codex review", "respond to Codex", "handle reviewer findings", "merge PR", "push changes", "check CI status", or mentions design canvas, Pencil tool, PR workflow, code review, reviewer bots, or GitHub Actions checks.
+description: This skill should be used when the user asks to "design a feature", "create UI mockup", "create a PR", "address review comments", "resolve review threads", "retrigger Q review", "/q review", "respond to Amazon Q", "/codex review", "respond to Codex", "handle reviewer findings", "merge PR", "push changes", "check CI status", "create worktree", or mentions design canvas, Pencil tool, PR workflow, code review, reviewer bots, GitHub Actions checks, or git worktree for development.
 ---
 
 # GitHub Development Workflow
@@ -9,17 +9,19 @@ This skill provides standardized guidance for the complete GitHub development wo
 
 ## Development Workflow Overview
 
-Follow this 12-step workflow for all feature development and bug fixes:
+Follow this workflow for all feature development and bug fixes:
 
 ```
-Step 1: DESIGN CANVAS (Pencil Tool) ← NEW
+Step 1: DESIGN CANVAS (Pencil Tool)
   - Open/create .pen file for feature design
   - Create UI mockups, wireframes, architecture diagrams
   - Document component structure and data flow
   - Get user approval before proceeding
        ↓
-Step 2: CREATE BRANCH
-  git checkout -b feat/<name> or fix/<name>
+Step 2: CREATE GIT WORKTREE (MANDATORY)
+  - Create isolated worktree for this change
+  - All code development MUST happen inside the worktree
+  - Never develop directly on the main workspace
        ↓
 Step 3: WRITE TEST CASES (TDD)
   - Create test case document: docs/test-cases/<feature>.md
@@ -27,7 +29,7 @@ Step 3: WRITE TEST CASES (TDD)
   - Write E2E test cases if applicable
        ↓
 Step 4: IMPLEMENT CHANGES
-  - Write code following test cases
+  - Write code following test cases (inside worktree)
   - Write new unit tests for new functionality
   - Update existing tests if behavior changed
        ↓
@@ -76,6 +78,10 @@ Step 12: E2E TESTS & READY FOR MERGE
   - Update PR checklist to show all items complete
   - STOP HERE: Report status to user
   - User decides when to merge
+       ↓
+Step 13: CLEANUP WORKTREE
+  - Remove the worktree after merge/close
+  - git worktree remove <worktree-path>
 ```
 
 ## Step 1: Design Canvas (Pencil Tool)
@@ -172,6 +178,78 @@ Before proceeding to implementation:
 3. Document any feedback or changes
 4. Update design status to "Approved"
 
+## Step 2: Create Git Worktree (MANDATORY)
+
+**Every change MUST be developed in an isolated git worktree. Never develop directly on the main workspace.**
+
+### Why Worktrees?
+
+- **Isolation**: Each feature/fix gets its own directory, preventing accidental cross-contamination
+- **Parallel work**: Multiple features can be in progress simultaneously
+- **Clean main workspace**: The main checkout stays on `main`, always ready for quick checks or hotfixes
+- **Safe rollback**: Discard a worktree without affecting the main workspace
+
+### Worktree Creation Process
+
+```bash
+# 1. Determine branch name based on change type
+#    feat/<name>, fix/<name>, refactor/<name>, etc.
+BRANCH_NAME="feat/my-feature"
+
+# 2. Create worktree with new branch from main
+git worktree add .worktrees/$BRANCH_NAME -b $BRANCH_NAME
+
+# 3. Enter the worktree
+cd .worktrees/$BRANCH_NAME
+
+# 4. Install dependencies (use your project's package manager)
+npm install  # or: bun install, yarn install, pnpm install
+
+# 5. Verify clean baseline
+npm run build && npm test
+```
+
+### Directory Convention
+
+| Item | Value |
+|------|-------|
+| Worktree root | `.worktrees/` (project-local, gitignored) |
+| Path pattern | `.worktrees/<branch-name>` |
+| Example | `.worktrees/feat/user-authentication` |
+
+### Safety Checks
+
+Before creating any worktree, verify `.worktrees/` is in `.gitignore`:
+
+```bash
+git check-ignore -q .worktrees 2>/dev/null || echo "WARNING: .worktrees not in .gitignore!"
+```
+
+### All Subsequent Steps Run INSIDE the Worktree
+
+After creating the worktree, **all development commands** (test, lint, build, commit, push) are executed from within the worktree directory. The main workspace is not touched until cleanup.
+
+### Red Flags
+
+- Developing code in the main workspace instead of a worktree
+- Forgetting to install dependencies inside the worktree
+- Not verifying baseline tests pass before starting work
+
+### Worktree Cleanup (Step 13)
+
+After the PR is merged or closed:
+
+```bash
+# Return to main workspace
+cd $(git rev-parse --show-toplevel)
+
+# Remove the worktree
+git worktree remove .worktrees/<branch-name>
+
+# Prune stale worktree references
+git worktree prune
+```
+
 ## PR Description Template
 
 When creating a PR, include this checklist in the description. Update it as each step completes:
@@ -242,7 +320,7 @@ gh pr checks {pr_number}
 Multiple review bots can provide automated code review findings on PRs:
 
 | Bot | Trigger Command | Bot Username |
-|-----|-----------------|--------------|
+|-----|-----------------|------------|
 | Amazon Q Developer | `/q review` | `amazon-q-developer[bot]` |
 | Codex | `/codex review` | `codex[bot]` |
 | Other bots | See bot documentation | Varies |
@@ -379,7 +457,11 @@ The referenced file {filename} exists in the repository at {path}. This is a ref
 ## Quick Reference
 
 | Task | Command |
-|------|---------|
+|------|--------|
+| Create worktree | `git worktree add .worktrees/<branch> -b <branch>` |
+| List worktrees | `git worktree list` |
+| Remove worktree | `git worktree remove .worktrees/<branch>` |
+| Prune worktrees | `git worktree prune` |
 | Create design | Pencil MCP tools |
 | Create PR | `gh pr create --title "..." --body "..."` |
 | Watch checks | `gh pr checks {pr} --watch` |
