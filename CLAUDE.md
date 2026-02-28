@@ -11,7 +11,7 @@
 [Fill in based on your actual project]
 
 | Component | Choice | Rationale |
-|-----------|--------|-----------|
+|-----------|--------|----------|
 | Frontend | - | - |
 | Backend | - | - |
 | Database | - | - |
@@ -23,10 +23,18 @@
 
 This project enforces a strict end-to-end development workflow through Claude Code hooks:
 
+### Mandatory Rules (Hook Enforced)
+
+1. **All code changes must be developed in a Git Worktree** — commits outside `.worktrees/` are automatically blocked by `block-commit-outside-worktree.sh`
+2. **All changes must go through Pull Requests** — direct pushes to `main` are automatically blocked by `block-push-to-main.sh`
+3. **Code review before commit** — code-simplifier must run before committing
+4. **PR review before push** — pr-review agent must run before pushing
+
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │                    Feature/Bug Fix Development Flow                  │
 ├─────────────────────────────────────────────────────────────────────┤
+│  ⛔ Prerequisites: Must be in Git Worktree + on feature branch       │
 │                                                                     │
 │  Step 1          Step 2          Step 3          Step 4            │
 │  ┌──────────┐    ┌──────────┐    ┌──────────┐    ┌──────────┐      │
@@ -56,7 +64,7 @@ This project enforces a strict end-to-end development workflow through Claude Co
 │       │    │    │ - Build                      │                   │
 │       │    │    └──────────────────────────────┘                   │
 │       │    │                          │                            │
-│       │    │                          ▼                            │
+│       │    │                          ▼                             │
 │       │    │    Step 9                                             │
 │       │    │    ┌──────────────────────────────┐                   │
 │       │    │    │ E2E Tests (Chrome DevTools)  │                   │
@@ -143,9 +151,12 @@ Before proceeding to implementation:
 3. Document any feedback or changes
 4. Mark design status as `Approved`
 
-### Step 2: Create Git Worktree (MANDATORY)
+### Step 2: Create Git Worktree (MANDATORY — Hook Enforced)
 
-**⚠️ CRITICAL: Every change MUST be developed in an isolated git worktree. Never develop directly on the main workspace.**
+**⛔ Every change MUST be developed in an isolated git worktree. Never develop directly on the main workspace.**
+
+> This is enforced by `block-commit-outside-worktree.sh` hook. Commits outside worktrees will be **automatically blocked**.
+> Direct pushes to main are also blocked by `block-push-to-main.sh` hook.
 
 - Input: Approved design / Task description
 - Output: Isolated worktree with clean baseline
@@ -375,6 +386,8 @@ project-root/
 │   ├── hooks/                   # Hook scripts
 │   │   ├── lib.sh               # Shared utility functions
 │   │   ├── state-manager.sh     # State manager
+│   │   ├── block-push-to-main.sh        # Blocks direct push to main
+│   │   ├── block-commit-outside-worktree.sh  # Blocks commits outside worktrees
 │   │   ├── check-design-canvas.sh
 │   │   ├── check-test-plan.sh
 │   │   ├── check-code-simplifier.sh
@@ -442,13 +455,14 @@ The `github-workflow` skill provides standardized guidance for the complete deve
 
 **Key features**:
 - Design Canvas workflow using Pencil tool
-- **Git worktree creation for isolated development**
+- **Git worktree creation for isolated development (hook enforced)**
+- **PR-only workflow — no direct pushes to main (hook enforced)**
 - Branch naming and commit conventions
 - PR creation and review process
 - Reviewer bot interaction (Amazon Q, Codex)
 - CI/CD check monitoring
 - Review thread management
-- **Worktree cleanup after merge**
+- Worktree cleanup after merge
 
 **Utility scripts**:
 ```bash
