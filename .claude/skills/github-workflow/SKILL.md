@@ -18,10 +18,12 @@ Step 1: DESIGN CANVAS (Pencil Tool)
   - Document component structure and data flow
   - Get user approval before proceeding
        ↓
-Step 2: CREATE GIT WORKTREE (MANDATORY)
+Step 2: CREATE GIT WORKTREE (MANDATORY — Hook Enforced)
   - Create isolated worktree for this change
   - All code development MUST happen inside the worktree
   - Never develop directly on the main workspace
+  - Enforced by block-commit-outside-worktree.sh
+  - Direct pushes to main blocked by block-push-to-main.sh
        ↓
 Step 3: WRITE TEST CASES (TDD)
   - Create test case document: docs/test-cases/<feature>.md
@@ -178,9 +180,12 @@ Before proceeding to implementation:
 3. Document any feedback or changes
 4. Update design status to "Approved"
 
-## Step 2: Create Git Worktree (MANDATORY)
+## Step 2: Create Git Worktree (MANDATORY — Hook Enforced)
 
-**Every change MUST be developed in an isolated git worktree. Never develop directly on the main workspace.**
+**⛔ Every change MUST be developed in an isolated git worktree. Never develop directly on the main workspace.**
+
+> This is enforced by `block-commit-outside-worktree.sh` hook. Commits outside worktrees will be **automatically blocked**.
+> Direct pushes to main are also blocked by `block-push-to-main.sh` hook.
 
 ### Why Worktrees?
 
