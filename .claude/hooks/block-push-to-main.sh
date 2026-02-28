@@ -18,9 +18,15 @@ fi
 current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
 
 # Block pushes targeting main:
-# 1. Pushing while on main (without explicit refspec)
-# 2. Using refspec to push to main (e.g., git push origin feature:main)
-if [[ "$command" =~ :main([[:space:]]|$) ]] || [[ "$current_branch" == "main" && ! "$command" =~ : ]]; then
+# 1. Refspec targeting main (e.g., git push origin feature:main)
+# 2. Explicit main as push target (e.g., git push origin main)
+# 3. Bulk push commands that include main (--all, --mirror)
+# 4. Pushing while on main without explicit refspec
+if [[ "$command" =~ :main([[:space:]]|$) ]] \
+  || [[ "$command" =~ (^|[[:space:]])main([[:space:]]|$) ]] \
+  || [[ "$command" =~ --all([[:space:]]|$) ]] \
+  || [[ "$command" =~ --mirror([[:space:]]|$) ]] \
+  || [[ "$current_branch" == "main" && ! "$command" =~ : ]]; then
   cat >&2 <<'EOF'
 ## BLOCKED - Direct Push to Main
 
