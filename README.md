@@ -2,8 +2,10 @@
 
 A development workflow template for Claude Code that enforces end-to-end development processes through a hook system, ensuring AI agents follow TDD (Test-Driven Development) and code review best practices for feature development and bug fixes.
 
-## 🎯 Features
+## Features
 
+- **Worktree Enforcement**: Blocks commits outside git worktrees (hook enforced)
+- **PR-Only Workflow**: Blocks direct pushes to main branch (hook enforced)
 - **Design First**: Enforces design canvas creation before implementation
 - **Test-Driven Development (TDD)**: Enforces test case creation before writing code
 - **Code Simplification**: Blocks commits until code-simplifier agent review is complete
@@ -11,7 +13,7 @@ A development workflow template for Claude Code that enforces end-to-end develop
 - **CI Verification**: Blocks task completion until CI passes
 - **E2E Testing**: Enforces E2E test execution on Preview environment
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 .
@@ -21,6 +23,8 @@ A development workflow template for Claude Code that enforces end-to-end develop
 │   ├── hooks/                   # Hook scripts
 │   │   ├── lib.sh               # Shared utility functions
 │   │   ├── state-manager.sh     # Workflow state management
+│   │   ├── block-push-to-main.sh        # Blocks direct push to main
+│   │   ├── block-commit-outside-worktree.sh  # Blocks commits outside worktrees
 │   │   ├── check-design-canvas.sh   # Design canvas check
 │   │   ├── check-test-plan.sh       # Test plan check
 │   │   ├── check-code-simplifier.sh # Code simplification check
@@ -33,7 +37,7 @@ A development workflow template for Claude Code that enforces end-to-end develop
 │   │   └── verify-completion.sh     # Task completion verification
 │   └── skills/                  # Claude Code skills
 │       └── github-workflow/     # GitHub development workflow skill
-│           ├── SKILL.md         # Main skill definition (12-step workflow)
+│           ├── SKILL.md         # Main skill definition (13-step workflow)
 │           ├── references/      # Reference documentation
 │           │   ├── commit-conventions.md  # Branch naming & commit standards
 │           │   └── review-commands.md     # GitHub CLI & GraphQL commands
@@ -49,7 +53,7 @@ A development workflow template for Claude Code that enforces end-to-end develop
 └── .github/                     # (CI workflow needs manual setup)
 ```
 
-## 🚀 Usage
+## Usage
 
 ### 1. Create a New Project from Template
 
@@ -74,7 +78,7 @@ git init
 
 When using Claude Code for development, hooks will automatically enforce the workflow.
 
-## 🎨 Using Skills to Follow the Workflow
+## Using Skills to Follow the Workflow
 
 The `github-workflow` skill provides Claude Code with comprehensive guidance to follow the development workflow. Skills are automatically triggered by natural language prompts or can be invoked via slash commands.
 
@@ -83,84 +87,65 @@ The `github-workflow` skill provides Claude Code with comprehensive guidance to 
 Claude Code will automatically activate the `github-workflow` skill when you use these phrases:
 
 | Category | Example Prompts |
-|----------|-----------------|
+|----------|----------------|
 | **Design** | "design a feature", "create UI mockup", "create design canvas" |
 | **PR Management** | "create a PR", "push changes", "merge PR" |
 | **Code Review** | "address review comments", "resolve review threads", "handle reviewer findings" |
 | **Bot Reviews** | "/q review", "/codex review", "respond to Amazon Q", "respond to Codex" |
 | **CI/CD** | "check CI status", "wait for checks to pass" |
 
-### Slash Command
-
-You can also explicitly invoke the skill:
-
-```
-/github-workflow <action>
-```
-
-Examples:
-```
-/github-workflow check the review comments
-/github-workflow create a PR for this feature
-/github-workflow resolve all review threads
-```
-
 ### How It Works
 
 1. **Skill Detection**: When you mention workflow-related tasks, Claude Code automatically loads the `github-workflow` skill
-2. **Step-by-Step Guidance**: The skill provides the 12-step workflow with detailed instructions
+2. **Step-by-Step Guidance**: The skill provides the 13-step workflow with detailed instructions
 3. **Tool Integration**: Uses Pencil MCP for design, GitHub MCP/CLI for PR management, Chrome DevTools for E2E testing
 4. **Hook Enforcement**: Pre/Post hooks validate each step is completed before proceeding
 
-### Workflow Automation Example
+## Development Workflow
 
 ```
-User: "I want to add a new feature for user authentication"
-
-Claude Code will:
-1. Load github-workflow skill automatically
-2. Guide you through:
-   - Step 1: Create design canvas using Pencil tool
-   - Step 2: Write test cases (TDD)
-   - Step 3-4: Implementation + Unit tests
-   - Step 5-6: Code review agents (code-simplifier, pr-review)
-   - Step 7: Create PR and monitor CI
-   - Step 8-11: Handle reviewer bot comments
-   - Step 12: E2E verification
-```
-
-## 🔧 Development Workflow
-
-```
+Step 0: MANDATORY PREREQUISITES (Hook Enforced)
+    - Must be in a git worktree (.worktrees/<branch>)
+    - Must be on a feature branch (not main)
+    ↓
 Step 1: Design Canvas (Pencil)
     ↓
-Step 2: Test Cases (TDD)
+Step 2: Create Git Worktree (MANDATORY)
     ↓
-Step 3: Implementation
+Step 3: Test Cases (TDD)
     ↓
-Step 4: Unit Tests Pass
+Step 4: Implementation
     ↓
-Step 5: code-simplifier review → commit
+Step 5: Unit Tests Pass
     ↓
-Step 6: pr-review review → push
+Step 6: code-simplifier review → commit
     ↓
-Step 7: Wait for CI to pass
+Step 7: pr-review review → push
     ↓
-Step 8: E2E Tests (Chrome DevTools)
+Step 8: Wait for CI to pass
+    ↓
+Step 9: E2E Tests (Chrome DevTools)
     ↓
 ✅ Task Complete → Peer Review
 ```
 
-## 📋 Hook Reference
+## Hook Reference
 
-### PreToolUse Hooks
+### Enforcement Hooks (Blocking)
+
+| Hook | Trigger | Behavior |
+|------|---------|----------|
+| block-push-to-main | git push on main | **Blocks** direct pushes to main branch |
+| block-commit-outside-worktree | git commit outside worktree | **Blocks** commits in main workspace |
+| check-code-simplifier | git commit | **Blocks** unreviewed commits |
+| check-pr-review | git push | **Blocks** unreviewed pushes |
+
+### Reminder Hooks (Non-Blocking)
 
 | Hook | Trigger | Behavior |
 |------|---------|----------|
 | check-design-canvas | git commit | Reminds to create design docs |
 | check-test-plan | Write/Edit new file | Reminds to create test plan |
-| check-code-simplifier | git commit | **Blocks** unreviewed commits |
-| check-pr-review | git push | **Blocks** unreviewed pushes |
 | check-unit-tests | git commit | Reminds to run unit tests |
 | warn-skip-verification | git --no-verify | Warns about skipping verification |
 
@@ -178,7 +163,7 @@ Step 8: E2E Tests (Chrome DevTools)
 |------|---------|----------|
 | verify-completion | Task end | **Blocks** tasks without verification |
 
-## 🔗 MCP Tool Integration
+## MCP Tool Integration
 
 The workflow integrates with several MCP (Model Context Protocol) tools:
 
@@ -188,28 +173,7 @@ The workflow integrates with several MCP (Model Context Protocol) tools:
 | **GitHub MCP** | PR creation, review management | Steps 7-11: PR & Review |
 | **Chrome DevTools MCP** | E2E testing on preview environments | Step 12: E2E Tests |
 
-### Pencil Tool Commands
-
-```
-get_editor_state()           # Check current .pen file status
-open_document("path.pen")    # Open existing or create new design
-get_guidelines(topic)        # Get design guidelines
-get_style_guide(tags)        # Get style inspiration
-batch_design(operations)     # Create design elements
-get_screenshot()             # Validate design visually
-```
-
-### GitHub Workflow Scripts
-
-```bash
-# Reply to a specific review comment
-.claude/skills/github-workflow/scripts/reply-to-comments.sh <owner> <repo> <pr> <comment_id> "<message>"
-
-# Resolve all unresolved review threads
-.claude/skills/github-workflow/scripts/resolve-threads.sh <owner> <repo> <pr>
-```
-
-## 🛠 State Management
+## State Management
 
 Use `state-manager.sh` to manage workflow states:
 
@@ -230,32 +194,7 @@ Use `state-manager.sh` to manage workflow states:
 .claude/hooks/state-manager.sh clear-all
 ```
 
-## 📝 Document Templates
-
-### Design Canvas Template
-
-Location: `docs/templates/design-canvas-template.md`
-
-Includes:
-- Problem statement
-- Architecture design
-- API design
-- Data model
-- UI design
-- Security considerations
-
-### Test Case Template
-
-Location: `docs/templates/test-case-template.md`
-
-Includes:
-- Test scenario definitions
-- Test steps
-- Expected results
-- Priority markers
-- Acceptance criteria
-
-## 🔐 Required Claude Code Plugins
+## Required Claude Code Plugins
 
 Ensure these official Claude Code plugins are enabled:
 
@@ -272,7 +211,7 @@ For full workflow support, configure these MCP servers:
 | GitHub | PR and review management | `gh auth login` for CLI access |
 | Chrome DevTools | E2E testing | Chrome with remote debugging enabled |
 
-## 📊 GitHub Actions
+## GitHub Actions
 
 CI workflow needs to be added manually (see `docs/github-actions-setup.md`).
 
@@ -288,10 +227,10 @@ Optional:
 > **Note**: Due to GitHub token permission restrictions, CI workflow files need to be added manually.
 > See `docs/github-actions-setup.md` for complete configuration instructions.
 
-## 🤝 Reference Project
+## Reference Project
 
 This template is based on the Claude Code memory and hook system implementation from [VidSyllabus](https://github.com/zxkane/VidSyllabus).
 
-## 📄 License
+## License
 
 MIT License
