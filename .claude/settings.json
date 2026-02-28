@@ -10,6 +10,16 @@
         "hooks": [
           {
             "type": "command",
+            "command": ".claude/hooks/block-push-to-main.sh",
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": ".claude/hooks/block-commit-outside-worktree.sh",
+            "timeout": 5
+          },
+          {
+            "type": "command",
             "command": ".claude/hooks/check-design-canvas.sh",
             "timeout": 5
           },
