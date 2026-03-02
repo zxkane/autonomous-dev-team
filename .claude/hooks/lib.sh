@@ -9,7 +9,7 @@ resolve_project_root() {
   if [[ -n "${CLAUDE_PROJECT_DIR:-}" ]]; then
     echo "$CLAUDE_PROJECT_DIR"
   else
-    git rev-parse --path-format=absolute --git-common-dir 2>/dev/null | sed 's|/\.git\(/.*\)\{0,1\}$||' || git rev-parse --show-toplevel 2>/dev/null || pwd
+    git rev-parse --path-format=absolute --git-common-dir 2>/dev/null | sed 's|/\.git$||' || git rev-parse --show-toplevel 2>/dev/null || pwd
   fi
 }
 
