@@ -4,8 +4,7 @@
 set -e
 
 # Source shared lib for resolve_project_root
-# Use readlink -f to resolve symlinks, falling back to BASH_SOURCE directly
-source "$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}" || echo "${BASH_SOURCE[0]}")")" && pwd)/lib.sh"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 STATE_DIR="$(resolve_project_root)/.claude/state"
 
 # Ensure state directory exists
