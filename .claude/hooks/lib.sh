@@ -2,6 +2,17 @@
 # Shared utility functions for hook scripts
 # Note: Does not use 'set -e' as this is a library meant to be sourced
 
+# Resolve main project root (works from worktrees and subdirectories).
+# Git worktrees have their own .git file pointing to the main repo's .git/worktrees/<name>.
+# --git-common-dir returns the main repo's .git directory in both cases.
+resolve_project_root() {
+  if [[ -n "${CLAUDE_PROJECT_DIR:-}" ]]; then
+    echo "$CLAUDE_PROJECT_DIR"
+  else
+    git rev-parse --path-format=absolute --git-common-dir 2>/dev/null | sed 's|/\.git$||' || git rev-parse --show-toplevel 2>/dev/null || pwd
+  fi
+}
+
 # Parse JSON input and extract a field
 # Usage: parse_json_field "field.path" "$json_input"
 # Returns: field value or empty string
@@ -61,13 +72,8 @@ is_git_command() {
   [[ "$command" =~ git[[:space:]]+${operation} ]]
 }
 
-# Get the project root directory
+# Get the project root directory (delegates to resolve_project_root)
 # Usage: get_project_root
 get_project_root() {
-  local dir="${CLAUDE_PROJECT_DIR:-.}"
-  if [[ -d "$dir" ]]; then
-    echo "$dir"
-  else
-    echo "."
-  fi
+  resolve_project_root
 }

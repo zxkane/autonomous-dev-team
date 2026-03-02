@@ -3,7 +3,9 @@
 # Manages state for: design-canvas, test-plan, code-simplifier, pr-review, unit-tests, e2e-tests
 set -e
 
-STATE_DIR="${CLAUDE_PROJECT_DIR:-.}/.claude/state"
+# Source shared lib for resolve_project_root
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
+STATE_DIR="$(resolve_project_root)/.claude/state"
 
 # Ensure state directory exists
 mkdir -p "$STATE_DIR"
@@ -117,7 +119,7 @@ EOF
 EOF
   fi
 
-  echo "✅ Marked '$action' as completed at $timestamp"
+  echo "Marked '$action' as completed at $timestamp"
 }
 
 check_action() {
@@ -165,24 +167,24 @@ clear_action() {
 
   if [[ -f "$state_file" ]]; then
     rm -f "$state_file"
-    echo "🗑️  Cleared state for '$action'"
+    echo "Cleared state for '$action'"
   else
-    echo "ℹ️  No state found for '$action'"
+    echo "No state found for '$action'"
   fi
 }
 
 clear_all() {
   rm -f "$STATE_DIR"/*.json 2>/dev/null || true
-  echo "🗑️  Cleared all state files"
+  echo "Cleared all state files"
 }
 
 list_states() {
   if [[ ! -d "$STATE_DIR" ]] || [[ -z "$(ls -A "$STATE_DIR" 2>/dev/null)" ]]; then
-    echo "📋 No states recorded"
+    echo "No states recorded"
     return
   fi
 
-  echo "📋 Current states:"
+  echo "Current states:"
   for state_file in "$STATE_DIR"/*.json; do
     [[ -f "$state_file" ]] || continue
     local action
@@ -192,9 +194,9 @@ list_states() {
       timestamp=$(jq -r '.timestamp' "$state_file")
       local branch
       branch=$(jq -r '.branch // "unknown"' "$state_file")
-      echo "  ✅ $action (at $timestamp on $branch)"
+      echo "  $action (at $timestamp on $branch)"
     else
-      echo "  ✅ $action"
+      echo "  $action"
     fi
   done
 }
