@@ -229,7 +229,7 @@ Optional:
 
 ## Reference Project
 
-This template is based on the Claude Code memory and hook system implementation from [VidSyllabus](https://github.com/zxkane/VidSyllabus).
+This template is based on the Claude Code memory and hook system implementation from [Openhands Infra](https://github.com/zxkane/openhands-infra).
 
 ## License
 
