@@ -5,7 +5,7 @@ description: This skill should be used when the user asks to "design a feature",
 
 # GitHub Development Workflow
 
-> **\u26d4 NON-NEGOTIABLE RULES \u2014 Every step marked \u26d4 MANDATORY is required. You MUST NOT skip, defer, or ask the user whether to run these steps. Execute them automatically as part of the workflow. This includes: creating PRs, waiting for CI, running E2E tests, and addressing reviewer findings.**
+> **⛔ NON-NEGOTIABLE RULES — Every step marked ⛔ MANDATORY is required. You MUST NOT skip, defer, or ask the user whether to run these steps. Execute them automatically as part of the workflow. This includes: creating PRs, waiting for CI, running E2E tests, and addressing reviewer findings.**
 
 This skill provides standardized guidance for the complete GitHub development workflow, including **design canvas creation using Pencil**, branch management, PR creation, CI monitoring, and reviewer bot interaction.
 
@@ -19,71 +19,71 @@ Step 1: DESIGN CANVAS (Pencil Tool)
   - Create UI mockups, wireframes, architecture diagrams
   - Document component structure and data flow
   - Get user approval before proceeding
-       \u2193
-Step 2: CREATE GIT WORKTREE (MANDATORY \u2014 Hook Enforced)
+       ↓
+Step 2: CREATE GIT WORKTREE (MANDATORY — Hook Enforced)
   - Create isolated worktree for this change
   - All code development MUST happen inside the worktree
   - Never develop directly on the main workspace
   - Enforced by block-commit-outside-worktree.sh
   - Direct pushes to main blocked by block-push-to-main.sh
-       \u2193
+       ↓
 Step 3: WRITE TEST CASES (TDD)
   - Create test case document: docs/test-cases/<feature>.md
   - Write unit test skeletons
   - Write E2E test cases if applicable
-       \u2193
+       ↓
 Step 4: IMPLEMENT CHANGES
   - Write code following test cases (inside worktree)
   - Write new unit tests for new functionality
   - Update existing tests if behavior changed
-       \u2193
+       ↓
 Step 5: LOCAL VERIFICATION
   - npm run build
   - npm run test
   - Deploy and verify (if applicable)
-       \u2193
+       ↓
 Step 6: CODE SIMPLIFICATION
-  - Run code-simplifier agent
+  - Run code-simplifier:code-simplifier subagent (fallback: /simplify skill)
   - Address simplification suggestions
   - Mark complete: .claude/hooks/state-manager.sh mark code-simplifier
-       \u2193
-Step 7: COMMIT AND CREATE PR \u26d4 MANDATORY
+       ↓
+Step 7: COMMIT AND CREATE PR ⛔ MANDATORY
   - git add && git commit -m "type(scope): description"
   - git push -u origin <branch-name>
   - Create PR via GitHub MCP or gh CLI
   - Include checklist in PR description (see template below)
-       \u2193
-Step 8: PR REVIEW AGENT \u26d4 MANDATORY
+       ↓
+Step 8: PR REVIEW AGENT ⛔ MANDATORY
   - Run /pr-review-toolkit:review-pr
   - Address findings by severity
   - Mark complete: .claude/hooks/state-manager.sh mark pr-review
-       \u2193
-Step 9: WAIT FOR ALL CI CHECKS \u26d4 MANDATORY \u2014 DO NOT SKIP
+       ↓
+Step 9: WAIT FOR ALL CI CHECKS ⛔ MANDATORY — DO NOT SKIP
   - Run: gh pr checks {pr_number} --watch --interval 30
   - ALL checks must pass: Lint, Unit Tests, Build, Deploy Preview, E2E Tests
-  - If ANY check fails \u2192 analyze logs, fix, push, re-watch
+  - If ANY check fails → analyze logs, fix, push, re-watch
   - DO NOT proceed until every check shows "pass"
-       \u2193
-Step 10: ADDRESS REVIEWER BOT FINDINGS \u26d4 MANDATORY
+       ↓
+Step 10: ADDRESS REVIEWER BOT FINDINGS ⛔ MANDATORY
   - Review all bot comments (Amazon Q, Codex, etc.)
   - Fix issues or document design decisions
   - Reply DIRECTLY to each comment thread
   - RESOLVE each conversation
   - Retrigger review: /q review, /codex review
-       \u2193
+       ↓
 Step 11: ITERATE UNTIL NO FINDINGS
   - Check for new bot findings
-  - If new findings \u2192 Return to Step 10
-  - If no findings \u2192 Update PR checklist, proceed to Step 12
-       \u2193
-Step 12: E2E TESTS & READY FOR MERGE \u26d4 MANDATORY \u2014 DO NOT SKIP
+  - If new findings → Return to Step 10
+  - If no findings → Update PR checklist, proceed to Step 12
+       ↓
+Step 12: E2E TESTS & READY FOR MERGE ⛔ MANDATORY — DO NOT SKIP
   - Run E2E tests against deployed Preview environment
   - ALL tests must pass (skipped agent-dependent tests are acceptable)
   - Mark complete: .claude/hooks/state-manager.sh mark e2e-tests
   - Update PR checklist to show all items complete
   - STOP HERE: Report status to user
   - User decides when to merge
-       \u2193
+       ↓
 Step 13: CLEANUP WORKTREE
   - Remove the worktree after merge/close
   - git worktree remove <worktree-path>
@@ -145,34 +145,34 @@ Step 13: CLEANUP WORKTREE
 ### Design Canvas Template Structure
 
 ```
-\u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510
-\u2502 Feature: <Feature Name>                 \u2502
-\u2502 Date: YYYY-MM-DD                        \u2502
-\u2502 Status: Draft | In Review | Approved    \u2502
-\u251c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2524
-\u2502                                         \u2502
-\u2502  \u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510   \u2502
-\u2502  \u2502      UI Mockup / Wireframe      \u2502   \u2502
-\u2502  \u2502                                 \u2502   \u2502
-\u2502  \u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518   \u2502
-\u2502                                         \u2502
-\u2502  \u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510   \u2502
-\u2502  \u2502    Component Architecture       \u2502   \u2502
-\u2502  \u2502    - Component tree             \u2502   \u2502
-\u2502  \u2502    - Props/State flow           \u2502   \u2502
-\u2502  \u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518   \u2502
-\u2502                                         \u2502
-\u2502  \u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510   \u2502
-\u2502  \u2502    Data Flow Diagram            \u2502   \u2502
-\u2502  \u2502    - API calls                  \u2502   \u2502
-\u2502  \u2502    - State management           \u2502   \u2502
-\u2502  \u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518   \u2502
-\u2502                                         \u2502
-\u2502  Design Notes:                          \u2502
-\u2502  - Key decisions and rationale          \u2502
-\u2502  - Accessibility considerations         \u2502
-\u2502  - Responsive behavior                  \u2502
-\u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518
+┌─────────────────────────────────────────┐
+│ Feature: <Feature Name>                 │
+│ Date: YYYY-MM-DD                        │
+│ Status: Draft | In Review | Approved    │
+├─────────────────────────────────────────┤
+│                                         │
+│  ┌─────────────────────────────────┐   │
+│  │      UI Mockup / Wireframe      │   │
+│  │                                 │   │
+│  └─────────────────────────────────┘   │
+│                                         │
+│  ┌─────────────────────────────────┐   │
+│  │    Component Architecture       │   │
+│  │    - Component tree             │   │
+│  │    - Props/State flow           │   │
+│  └─────────────────────────────────┘   │
+│                                         │
+│  ┌─────────────────────────────────┐   │
+│  │    Data Flow Diagram            │   │
+│  │    - API calls                  │   │
+│  │    - State management           │   │
+│  └─────────────────────────────────┘   │
+│                                         │
+│  Design Notes:                          │
+│  - Key decisions and rationale          │
+│  - Accessibility considerations         │
+│  - Responsive behavior                  │
+└─────────────────────────────────────────┘
 ```
 
 ### Design Approval
@@ -183,9 +183,9 @@ Before proceeding to implementation:
 3. Document any feedback or changes
 4. Update design status to "Approved"
 
-## Step 2: Create Git Worktree (MANDATORY \u2014 Hook Enforced)
+## Step 2: Create Git Worktree (MANDATORY — Hook Enforced)
 
-**\u26d4 Every change MUST be developed in an isolated git worktree. Never develop directly on the main workspace.**
+**⛔ Every change MUST be developed in an isolated git worktree. Never develop directly on the main workspace.**
 
 > This is enforced by `block-commit-outside-worktree.sh` hook. Commits outside worktrees will be **automatically blocked**.
 > Direct pushes to main are also blocked by `block-push-to-main.sh` hook.
@@ -337,8 +337,8 @@ Multiple review bots can provide automated code review findings on PRs:
 
 1. **Review all comments** - Read each finding carefully
 2. **Determine action**:
-   - If valid issue \u2192 Fix the code and push
-   - If false positive \u2192 Reply explaining the design decision
+   - If valid issue → Fix the code and push
+   - If false positive → Reply explaining the design decision
 3. **Reply to each thread** - Use direct reply, not general PR comment
 4. **Resolve each thread** - Mark conversation as resolved
 5. **Retrigger review** - Comment with appropriate trigger (e.g., `/q review`, `/codex review`)
@@ -367,7 +367,7 @@ Wait 60-90 seconds for the review to complete, then check for new comments.
 4. Trigger review command (`/q review`, `/codex review`, etc.)
 5. Wait 60-90 seconds
 6. Check for new findings
-7. **If new findings \u2192 repeat from step 1**
+7. **If new findings → repeat from step 1**
 8. **Only proceed to merge when no new positive findings appear**
 
 This loop is essential - review bots may find new issues in your fixes.

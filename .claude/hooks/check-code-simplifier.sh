@@ -43,12 +43,11 @@ cat >&2 <<'EOF'
 Before committing, you must run the code-simplifier agent to review and clean up your changes.
 
 ### Required Steps:
-1. Run the code-simplifier agent:
-   ```
-   Use Task tool with subagent_type: code-simplifier:code-simplifier
-   ```
+1. Run the code-simplifier agent (try in order):
+   a. Use Agent tool with subagent_type: code-simplifier:code-simplifier
+   b. If agent not found, fallback to: /simplify skill
 
-2. After code-simplifier completes, mark it:
+2. After code-simplifier/simplify completes, mark it:
    ```bash
    .claude/hooks/state-manager.sh mark code-simplifier
    ```
