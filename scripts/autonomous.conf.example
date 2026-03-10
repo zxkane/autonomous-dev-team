@@ -1,0 +1,39 @@
+#!/bin/bash
+# autonomous.conf — Configuration for the Autonomous Dev Team pipeline.
+# Copy this file to autonomous.conf and fill in your project values.
+# Values can also be overridden via environment variables.
+
+# === Project Identity ===
+PROJECT_ID="my-project"
+REPO="owner/repo-name"
+REPO_OWNER="owner"
+REPO_NAME="repo-name"
+PROJECT_DIR="/path/to/project"
+
+# === Agent Configuration ===
+AGENT_CMD="claude"
+AGENT_DEV_MODEL=""
+AGENT_REVIEW_MODEL="sonnet"
+AGENT_PERMISSION_MODE="bypassPermissions"
+
+# === GitHub Authentication ===
+GH_AUTH_MODE="token"
+DEV_AGENT_APP_ID=""
+DEV_AGENT_APP_PEM=""
+REVIEW_AGENT_APP_ID=""
+REVIEW_AGENT_APP_PEM=""
+DISPATCHER_APP_ID=""
+DISPATCHER_APP_PEM=""
+
+# === Concurrency ===
+MAX_CONCURRENT=5
+
+# === Dev Agent ===
+DEV_SKILL_CMD="/github-workflow"
+
+# === E2E Verification (optional) ===
+E2E_ENABLED="false"
+E2E_PREVIEW_URL_PATTERN=""
+E2E_TEST_USER_EMAIL=""
+E2E_TEST_USER_PASSWORD=""
+E2E_SCREENSHOT_UPLOAD="false"
