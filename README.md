@@ -1,24 +1,28 @@
 # Autonomous Dev Team
 
-A fully automated development pipeline that turns GitHub issues into merged pull requests — no human intervention required. A dispatcher scans for issues labeled `autonomous`, a **Dev Agent** implements the feature with tests in an isolated worktree, and a **Review Agent** performs code review with optional E2E verification. The entire cycle runs unattended on a cron schedule.
+A fully automated development pipeline that turns GitHub issues into merged pull requests — no human intervention required. Powered by [**OpenClaw**](https://github.com/zxkane/openclaw) as the orchestration layer, it scans for issues labeled `autonomous`, dispatches a **Dev Agent** to implement the feature with tests in an isolated worktree, and hands off to a **Review Agent** for code review with optional E2E verification. The entire cycle runs unattended on a cron schedule.
 
 Supports multiple coding agent CLIs — Claude Code, Codex CLI, and Kiro CLI — with a pluggable agent abstraction layer.
 
 ## How It Works
 
 ```
-GitHub Issue              Dev Agent                    Review Agent
-(autonomous label)        (implements)                 (verifies)
-       │                       │                            │
-       ▼                       ▼                            ▼
-┌─────────────┐     ┌───────────────────┐      ┌────────────────────┐
-│ Dispatcher  │────▶│ Create worktree   │─────▶│ Find linked PR     │
-│ (cron 5min) │     │ Read issue        │      │ Check CI status    │
-│             │     │ Implement feature │      │ Review code diff   │
-│ Scans for   │     │ Write tests       │      │ Run E2E tests      │
-│ autonomous  │     │ Create PR         │      │ Approve or reject  │
-│ issues      │     │ Push to branch    │      │ Auto-merge PR      │
-└─────────────┘     └───────────────────┘      └────────────────────┘
+                        ┌──────────────────────────────────────────────────────────┐
+                        │                    OpenClaw Orchestration                 │
+                        │                                                          │
+GitHub Issue            │   Dispatcher            Dev Agent         Review Agent   │
+(autonomous label)      │   (cron 5min)           (implements)     (verifies)     │
+       │                │        │                     │                │          │
+       ▼                │        ▼                     ▼                ▼          │
+  ┌──────────┐          │  ┌───────────┐     ┌──────────────┐  ┌──────────────┐   │
+  │ GitHub   │─────────▶│  │ Scan      │────▶│ Worktree     │─▶│ Find PR      │   │
+  │ Issues   │          │  │ issues    │     │ + Implement  │  │ + Review     │   │
+  │          │◀─────────│──│ Dispatch  │     │ + Test       │  │ + E2E verify │   │
+  │ Labels:  │          │  │ agents    │     │ + Create PR  │  │ + Approve    │   │
+  │ auto     │          │  │           │     │              │  │ + Merge      │   │
+  └──────────┘          │  └───────────┘     └──────────────┘  └──────────────┘   │
+                        │                                                          │
+                        └──────────────────────────────────────────────────────────┘
 ```
 
 ### Label State Machine
@@ -67,9 +71,9 @@ The review agent finds the PR linked to an issue, performs code review, optional
 **Wrapper**: `scripts/autonomous-review.sh`
 **Skill**: `.claude/skills/autonomous-review/SKILL.md`
 
-### Dispatcher (OpenClaw)
+### Dispatcher ([OpenClaw](https://github.com/zxkane/openclaw))
 
-The dispatcher runs on a cron schedule, scans GitHub for actionable issues, and spawns the appropriate agent.
+The dispatcher is an [OpenClaw](https://github.com/zxkane/openclaw) skill that orchestrates the entire pipeline. OpenClaw runs it on a cron schedule, scanning GitHub for actionable issues and spawning the appropriate agent. The dispatcher skill defines the orchestration logic; OpenClaw provides the execution runtime.
 
 | Capability | Description |
 |-----------|-------------|
@@ -78,7 +82,7 @@ The dispatcher runs on a cron schedule, scans GitHub for actionable issues, and 
 | **Stale detection** | Detects and recovers from zombie agent processes |
 | **Local dispatch** | Spawns agents via `nohup` with post-spawn health check |
 
-**Skill**: `openclaw/skills/autonomous-dispatcher/SKILL.md`
+**OpenClaw Skill**: `openclaw/skills/autonomous-dispatcher/SKILL.md`
 **Dispatch script**: `openclaw/skills/autonomous-dispatcher/dispatch-local.sh`
 
 ### Supported Agent CLIs
@@ -101,12 +105,16 @@ Configure via `AGENT_CMD` in `scripts/autonomous.conf`.
    # Edit autonomous.conf — set REPO, PROJECT_DIR, agent CLI, etc.
    ```
 
-2. **Set up the dispatcher** ([OpenClaw](https://github.com/zxkane/openclaw)):
+2. **Install [OpenClaw](https://github.com/zxkane/openclaw)** and set up the dispatcher cron:
    ```bash
+   # Install OpenClaw (the orchestration engine)
+   # See https://github.com/zxkane/openclaw for installation
+
+   # Schedule the dispatcher to run every 5 minutes
    */5 * * * * cd /path/to/project && openclaw run openclaw/skills/autonomous-dispatcher/SKILL.md
    ```
 
-3. **Create an issue** with the `autonomous` label and watch the pipeline work.
+3. **Create an issue** with the `autonomous` label and watch the pipeline work — OpenClaw dispatches agents, tracks progress via labels, and merges the PR when review passes.
 
 ### GitHub App Authentication (Optional)
 
