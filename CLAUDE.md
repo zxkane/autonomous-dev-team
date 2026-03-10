@@ -476,3 +476,71 @@ The `github-workflow` skill provides standardized guidance for the complete deve
 **Reference documentation**:
 - `references/commit-conventions.md` - Branch naming and commit message standards
 - `references/review-commands.md` - GitHub CLI and GraphQL commands
+
+---
+
+## Autonomous Dev Team
+
+A fully automated pipeline: GitHub issue → Dev Agent → Review Agent → merged PR. Runs unattended via an OpenClaw dispatcher on a 5-minute cron cycle. Supports multiple coding agent CLIs (Claude Code, Codex, Kiro) with a pluggable abstraction layer.
+
+For the complete pipeline design, label state machine, and concurrency model, see `docs/autonomous-pipeline.md`.
+
+### Dev Agent
+
+Receives a GitHub issue, creates an isolated worktree, implements the feature with tests, and creates a pull request.
+
+- **Worktree isolation**: Each issue gets its own git worktree
+- **TDD workflow**: Follows the project's `github-workflow` skill
+- **Issue checkbox tracking**: Marks `## Requirements` checkboxes as implemented
+- **Resume support**: Can resume after review feedback (`--mode resume`)
+- **Exit-aware cleanup**: Success → `pending-review`; failure → `pending-dev` for retry
+- **Wrapper**: `scripts/autonomous-dev.sh`
+- **Skill**: `.claude/skills/autonomous-dev/SKILL.md`
+
+### Review Agent
+
+Finds the linked PR, performs code review, optionally runs E2E verification, and either approves+merges or sends back with feedback.
+
+- **PR discovery**: Finds linked PR via body reference, issue comments, or search
+- **Merge conflict resolution**: Automatically rebases conflicting PRs
+- **Code review checklist**: Verifies design docs, tests, CI, PR conventions
+- **Amazon Q integration**: Triggers and monitors Amazon Q Developer review
+- **E2E verification**: Optional Chrome DevTools MCP testing with screenshot evidence (enabled by `E2E_ENABLED=true`)
+- **Acceptance criteria tracking**: Marks `## Acceptance Criteria` checkboxes as verified
+- **Auto-merge**: Squash-merges and closes the issue on pass
+- **Wrapper**: `scripts/autonomous-review.sh`
+- **Skill**: `.claude/skills/autonomous-review/SKILL.md`
+
+### Dispatcher (OpenClaw)
+
+Scans GitHub for actionable issues and spawns the appropriate agent process.
+
+- **Issue scanning**: `autonomous`, `pending-dev`, `pending-review` labels
+- **Concurrency control**: `MAX_CONCURRENT` limit via PID file checks
+- **Stale detection**: Recovers from zombie agent processes
+- **Local dispatch**: `nohup` spawn with post-spawn health check
+- **Skill**: `openclaw/skills/autonomous-dispatcher/SKILL.md`
+
+### Configuration
+
+```bash
+cp scripts/autonomous.conf.example scripts/autonomous.conf
+```
+
+Key settings: `REPO`, `PROJECT_DIR`, `AGENT_CMD` (claude/codex/kiro), `GH_AUTH_MODE` (token/app), `MAX_CONCURRENT`, E2E options. See comments in the example file.
+
+### Key Scripts
+
+| Script | Purpose |
+|--------|---------|
+| `scripts/lib-agent.sh` | Agent CLI abstraction (`run_agent`, `resume_agent`) |
+| `scripts/lib-auth.sh` | GitHub auth abstraction (PAT or GitHub App mode) |
+| `scripts/gh-app-token.sh` | GitHub App JWT generation + installation token exchange |
+| `scripts/gh-token-refresh-daemon.sh` | Background daemon — refreshes tokens every 45 min |
+| `scripts/gh-with-token-refresh.sh` | `gh` CLI wrapper that reads latest token before each call |
+| `scripts/mark-issue-checkbox.sh` | Mark issue body checkboxes as complete |
+| `scripts/upload-screenshot.sh` | Upload E2E screenshots to GitHub |
+
+### GitHub App Setup
+
+For multi-agent authentication with separate bot identities, see `docs/github-app-setup.md`.

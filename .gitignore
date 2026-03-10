@@ -91,3 +91,6 @@ temp/
 *.pem
 *.key
 secrets/
+
+# Autonomous pipeline config (contains project-specific values)
+scripts/autonomous.conf
