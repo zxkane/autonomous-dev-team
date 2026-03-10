@@ -476,3 +476,55 @@ The `github-workflow` skill provides standardized guidance for the complete deve
 **Reference documentation**:
 - `references/commit-conventions.md` - Branch naming and commit message standards
 - `references/review-commands.md` - GitHub CLI and GraphQL commands
+
+---
+
+## Autonomous Dev Team
+
+A fully automated development pipeline that converts GitHub issues into merged pull requests. An OpenClaw dispatcher scans for issues labeled `autonomous`, assigns a dev agent to implement the feature in an isolated worktree, and then hands off to a review agent for code review and E2E verification. The pipeline runs unattended on a 5-minute cron cycle.
+
+For the complete pipeline design, label state machine, and concurrency model, see `docs/autonomous-pipeline.md`.
+
+### Configuration
+
+Copy the template and fill in your project settings:
+
+```bash
+cp scripts/autonomous.conf.example scripts/autonomous.conf
+```
+
+Key settings include `REPO`, `PROJECT_DIR`, agent CLI choice, GitHub App credentials, and concurrency limits. See the comments in `scripts/autonomous.conf.example` for details.
+
+### Skills
+
+| Skill | Location | Purpose |
+|-------|----------|---------|
+| `autonomous-dev` | `.claude/skills/autonomous-dev/SKILL.md` | Autonomous development -- implements features, creates PRs |
+| `autonomous-review` | `.claude/skills/autonomous-review/SKILL.md` | Autonomous review -- code review, E2E verification, approve/request changes |
+
+### Dispatcher
+
+| File | Purpose |
+|------|---------|
+| `openclaw/skills/autonomous-dispatcher/SKILL.md` | OpenClaw dispatcher skill -- scans issues, manages concurrency, dispatches agents |
+| `openclaw/skills/autonomous-dispatcher/dispatch-local.sh` | Local dispatch script for testing without OpenClaw |
+
+### Key Scripts
+
+| Script | Purpose |
+|--------|---------|
+| `scripts/autonomous-dev.sh` | Dev agent wrapper -- sets up worktree, runs agent CLI, manages label transitions |
+| `scripts/autonomous-review.sh` | Review agent wrapper -- runs review agent, approves or requests changes |
+| `scripts/autonomous.conf.example` | Configuration template for the pipeline |
+| `scripts/lib-agent.sh` | Agent abstraction layer -- supports Claude Code, Codex CLI, Kiro |
+| `scripts/lib-auth.sh` | GitHub authentication abstraction -- PAT or GitHub App |
+| `scripts/gh-app-token.sh` | Generate installation tokens from GitHub App credentials |
+| `scripts/gh-as-user.sh` | Run `gh` CLI commands as a GitHub App user |
+| `scripts/gh-token-refresh-daemon.sh` | Background daemon that refreshes tokens before expiry |
+| `scripts/gh-with-token-refresh.sh` | Wrapper that ensures `gh` CLI always has a valid token |
+| `scripts/mark-issue-checkbox.sh` | Utility to mark issue body checkboxes as complete |
+| `scripts/upload-screenshot.sh` | Upload screenshots to GitHub issues/PRs |
+
+### GitHub App Setup
+
+For multi-agent authentication using GitHub Apps (recommended for production), see `docs/github-app-setup.md`.
