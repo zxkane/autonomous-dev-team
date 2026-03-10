@@ -28,8 +28,8 @@ _generate_jwt() {
   fi
 
   # Prevent path traversal in PEM file path
-  if [[ "$pem_file" == *".."* ]]; then
-    echo "ERROR: PEM file path contains invalid sequences" >&2
+  if [[ "$pem_file" == *".."* ]] || [[ "$pem_file" == /* ]] || [[ "$pem_file" == ~* ]]; then
+    echo "ERROR: PEM file path must be relative and must not contain '..' sequences" >&2
     return 1
   fi
 
@@ -93,18 +93,19 @@ _parse_json_field() {
 
   python3 -c "
 import sys, json
-field = '$field'
+field = sys.argv[1]
+context = sys.argv[2]
 data = json.load(sys.stdin)
 if field not in data:
     msg = data.get('message', 'field not found')
-    print(f'API error ($context): {msg}', file=sys.stderr)
+    print(f'API error ({context}): {msg}', file=sys.stderr)
     sys.exit(1)
 val = data[field]
 if val is None:
     print(f'ERROR: field {field} is null', file=sys.stderr)
     sys.exit(1)
 print(val)
-"
+" "$field" "$context"
 }
 
 # Get a GitHub App installation token for a specific repository.

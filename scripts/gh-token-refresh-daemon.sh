@@ -28,13 +28,14 @@ source "${SCRIPT_DIR}/gh-app-token.sh"
 
 log() { echo "[token-refresh] $(date -u +%H:%M:%S) $*"; }
 
-# Write initial token
+# Write initial token atomically with restrictive permissions
 TOKEN=$(get_gh_app_token "$APP_ID" "$PEM_FILE" "$REPO_OWNER" "$REPO_NAME") || {
   log "ERROR: Failed to generate initial token"
   exit 1
 }
-echo "$TOKEN" > "$TOKEN_FILE"
-chmod 600 "$TOKEN_FILE"
+TOKEN_TMP="${TOKEN_FILE}.tmp.$$"
+(umask 077 && echo "$TOKEN" > "$TOKEN_TMP")
+mv -f "$TOKEN_TMP" "$TOKEN_FILE"
 log "Initial token written to $TOKEN_FILE"
 
 # Refresh loop
@@ -46,6 +47,8 @@ while true; do
     continue
   }
 
-  echo "$NEW_TOKEN" > "$TOKEN_FILE"
+  TOKEN_TMP="${TOKEN_FILE}.tmp.$$"
+  (umask 077 && echo "$NEW_TOKEN" > "$TOKEN_TMP")
+  mv -f "$TOKEN_TMP" "$TOKEN_FILE"
   log "Token refreshed"
 done

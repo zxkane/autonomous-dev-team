@@ -29,6 +29,10 @@ source "${SCRIPT_DIR}/lib-auth.sh"
 # GitHub authentication
 # ---------------------------------------------------------------------------
 if [[ "$GH_AUTH_MODE" == "app" ]]; then
+  if [[ -z "${DEV_AGENT_APP_ID:-}" || -z "${DEV_AGENT_APP_PEM:-}" ]]; then
+    echo "Error: GH_AUTH_MODE=app requires DEV_AGENT_APP_ID and DEV_AGENT_APP_PEM" >&2
+    exit 1
+  fi
   setup_github_auth "${DEV_AGENT_APP_ID}" "${DEV_AGENT_APP_PEM}"
 else
   setup_github_auth
@@ -48,10 +52,20 @@ while [[ $# -gt 0 ]]; do
       ISSUE_NUMBER="$2"; shift 2 ;;
     --mode)
       [[ $# -ge 2 ]] || { echo "Error: --mode requires argument" >&2; exit 1; }
-      MODE="$2"; shift 2 ;;
+      MODE="$2"
+      if ! [[ "$MODE" =~ ^(new|resume)$ ]]; then
+        echo "Error: --mode must be 'new' or 'resume', got '$MODE'" >&2
+        exit 1
+      fi
+      shift 2 ;;
     --session)
       [[ $# -ge 2 ]] || { echo "Error: --session requires argument" >&2; exit 1; }
-      SESSION_ID="$2"; shift 2 ;;
+      SESSION_ID="$2"
+      if ! [[ "$SESSION_ID" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+        echo "Error: --session must contain only alphanumeric, underscore, or hyphen characters" >&2
+        exit 1
+      fi
+      shift 2 ;;
     *)
       echo "Unknown option: $1" >&2; exit 1 ;;
   esac

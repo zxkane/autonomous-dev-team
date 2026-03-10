@@ -29,7 +29,11 @@ source "${SCRIPT_DIR}/lib-auth.sh"
 # GitHub authentication
 # ---------------------------------------------------------------------------
 if [[ "$GH_AUTH_MODE" == "app" ]]; then
-  setup_github_auth "${REVIEW_AGENT_APP_ID:-}" "${REVIEW_AGENT_APP_PEM:-}"
+  if [[ -z "${REVIEW_AGENT_APP_ID:-}" || -z "${REVIEW_AGENT_APP_PEM:-}" ]]; then
+    echo "Error: GH_AUTH_MODE=app requires REVIEW_AGENT_APP_ID and REVIEW_AGENT_APP_PEM" >&2
+    exit 1
+  fi
+  setup_github_auth "${REVIEW_AGENT_APP_ID}" "${REVIEW_AGENT_APP_PEM}"
 else
   setup_github_auth
 fi
@@ -371,12 +375,19 @@ log "Review CC exited with code: $CC_EXIT"
 # ---------------------------------------------------------------------------
 log "Parsing review result from issue comments..."
 
-# Wait for the agent's comment to be posted to GitHub
-sleep 5
-
-# Check the latest comment for pass/fail
-LATEST_COMMENT=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json comments \
-  -q '.comments | last | .body' 2>/dev/null || true)
+# Poll for the agent's review comment (contains "Review PASSED" or "Review findings:")
+# Retry up to 6 times (30s total) to avoid race conditions with concurrent comments
+LATEST_COMMENT=""
+for _poll_attempt in $(seq 1 6); do
+  sleep 5
+  # Find the most recent comment that matches the review output format
+  LATEST_COMMENT=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json comments \
+    -q '[.comments[] | select(.body | test("Review PASSED|Review findings:"; "i"))] | last | .body' 2>/dev/null || true)
+  if [[ -n "$LATEST_COMMENT" ]]; then
+    break
+  fi
+  log "Waiting for review comment to appear (attempt ${_poll_attempt}/6)..."
+done
 
 if echo "$LATEST_COMMENT" | grep -qi "Review PASSED"; then
   log "Review PASSED for PR #${PR_NUMBER}."
