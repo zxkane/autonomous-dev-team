@@ -31,7 +31,11 @@ setup_github_auth() {
 
     source "${_LIB_AUTH_DIR}/gh-app-token.sh"
 
-    GH_TOKEN_FILE="/tmp/cc-${PROJECT_ID:-project}-gh-token-$$.txt"
+    # Use a private directory for token files (not predictable /tmp paths)
+    local token_dir
+    token_dir=$(mktemp -d "/tmp/cc-auth-XXXXXX")
+    chmod 700 "$token_dir"
+    GH_TOKEN_FILE="${token_dir}/token"
 
     bash "${_LIB_AUTH_DIR}/gh-token-refresh-daemon.sh" \
       "$GH_TOKEN_FILE" "$app_id" "$app_pem" "$REPO_OWNER" "$REPO_NAME" &
@@ -77,7 +81,14 @@ cleanup_github_auth() {
     kill "$TOKEN_DAEMON_PID" 2>/dev/null || true
     wait "$TOKEN_DAEMON_PID" 2>/dev/null || true
   fi
-  rm -f "$GH_TOKEN_FILE" "${_LIB_AUTH_DIR}/gh" 2>/dev/null || true
+  # Remove token file and its private directory
+  if [[ -n "$GH_TOKEN_FILE" ]]; then
+    local token_dir
+    token_dir=$(dirname "$GH_TOKEN_FILE")
+    rm -f "$GH_TOKEN_FILE" 2>/dev/null || true
+    [[ "$token_dir" == /tmp/cc-auth-* ]] && rmdir "$token_dir" 2>/dev/null || true
+  fi
+  rm -f "${_LIB_AUTH_DIR}/gh" 2>/dev/null || true
 }
 
 # Export GH_USER_PAT if available (for gh-as-user.sh bot workaround).

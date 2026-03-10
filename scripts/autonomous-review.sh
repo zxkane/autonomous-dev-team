@@ -70,7 +70,11 @@ cd "$PROJECT_DIR" || { echo "Error: cannot cd to $PROJECT_DIR" >&2; exit 1; }
 LOG_FILE="/tmp/cc-${PROJECT_ID}-review-${ISSUE_NUMBER}.log"
 PID_FILE="/tmp/cc-${PROJECT_ID}-review-${ISSUE_NUMBER}.pid"
 
-# Write PID for stale detection
+# Create log file with restrictive permissions (sensitive agent output)
+install -m 600 /dev/null "$LOG_FILE" 2>/dev/null || true
+
+# Write PID for stale detection (reject symlinks to prevent redirect attacks)
+[[ -L "$PID_FILE" ]] && { echo "Error: PID file is a symlink — possible attack" >&2; exit 1; }
 echo $$ > "$PID_FILE"
 
 # ---------------------------------------------------------------------------
@@ -242,9 +246,12 @@ $(if [[ "${E2E_ENABLED:-false}" == "true" ]]; then cat <<E2E_BLOCK
 **This section is NON-NEGOTIABLE. You MUST perform E2E verification using Chrome DevTools MCP.**
 
 Preview URL: ${PREVIEW_URL:-NOT_FOUND}
-Test user email: ${E2E_TEST_USER_EMAIL:-}
-Test user password: ${E2E_TEST_USER_PASSWORD:-}
+Test user email: available via \\\$E2E_TEST_USER_EMAIL environment variable
+Test user password: available via \\\$E2E_TEST_USER_PASSWORD environment variable
 Screenshot upload available: ${SCREENSHOT_UPLOAD_AVAILABLE}
+
+NOTE: E2E credentials are passed as environment variables for security.
+Read them at runtime: \\\$(printenv E2E_TEST_USER_EMAIL) and \\\$(printenv E2E_TEST_USER_PASSWORD)
 
 ### Step 1: Verify preview URL availability
 - If the preview URL above is "NOT_FOUND" or empty, the review MUST FAIL immediately.
@@ -342,7 +349,8 @@ After thorough review:
 
 - If ALL checklist items pass AND code quality is good$(if [[ "${E2E_ENABLED:-false}" == "true" ]]; then echo " AND all E2E tests pass"; fi):
   Post a comment on issue #${ISSUE_NUMBER} with:
-  "Review PASSED - All checklist items verified, code quality good.$(if [[ "${E2E_ENABLED:-false}" == "true" ]]; then echo " E2E verification completed."; fi)"
+  "Review PASSED - All checklist items verified, code quality good.$(if [[ "${E2E_ENABLED:-false}" == "true" ]]; then echo " E2E verification completed."; fi)
+  Session: \`${SESSION_ID}\`"
   Then exit.
 
 - If ANY item fails$(if [[ "${E2E_ENABLED:-false}" == "true" ]]; then echo " OR any E2E test fails OR preview URL is unavailable"; fi):
@@ -350,6 +358,7 @@ After thorough review:
   "Review findings:"
   followed by a numbered list of each failing item with specific remediation instructions.$(if [[ "${E2E_ENABLED:-false}" == "true" ]]; then echo "
   Include E2E failure details with screenshot evidence."; fi)
+  End the comment with: "Session: \`${SESSION_ID}\`"
   Then exit.
 
 IMPORTANT: Work autonomously. Be thorough but fair. Focus on correctness and compliance.
@@ -362,6 +371,12 @@ EOF
 # ---------------------------------------------------------------------------
 SESSION_ID=$(uuidgen)
 log "Starting review session: ${SESSION_ID} (model: ${AGENT_REVIEW_MODEL:-sonnet})"
+
+# Export E2E credentials as env vars (not in prompt) for agent to read at runtime
+if [[ "${E2E_ENABLED:-false}" == "true" ]]; then
+  export E2E_TEST_USER_EMAIL="${E2E_TEST_USER_EMAIL:-}"
+  export E2E_TEST_USER_PASSWORD="${E2E_TEST_USER_PASSWORD:-}"
+fi
 
 set +e
 run_agent "$SESSION_ID" "$PROMPT" "${AGENT_REVIEW_MODEL:-sonnet}" 2>&1 | tee "$LOG_FILE"
@@ -380,9 +395,11 @@ log "Parsing review result from issue comments..."
 LATEST_COMMENT=""
 for _poll_attempt in $(seq 1 6); do
   sleep 5
-  # Find the most recent comment that matches the review output format
+  # Find the most recent comment that matches the review output format.
+  # SECURITY: Filter by the current session ID to prevent verdict spoofing
+  # from other commenters (dev agent, external users).
   LATEST_COMMENT=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json comments \
-    -q '[.comments[] | select(.body | test("Review PASSED|Review findings:"; "i"))] | last | .body' 2>/dev/null || true)
+    -q "[.comments[] | select((.body | test(\"Review PASSED|Review findings:\"; \"i\")) and (.body | test(\"Session.*${SESSION_ID}\")))] | last | .body" 2>/dev/null || true)
   if [[ -n "$LATEST_COMMENT" ]]; then
     break
   fi

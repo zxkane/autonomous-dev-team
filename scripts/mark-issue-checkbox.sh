@@ -37,6 +37,16 @@ if ! [[ "$ISSUE_NUMBER" =~ ^[0-9]+$ ]]; then
   exit 1
 fi
 
+# Validate CHECKBOX_TEXT: reject control characters, newlines, and excessive length
+if [[ ${#CHECKBOX_TEXT} -gt 500 ]]; then
+  echo "Error: checkbox text too long (${#CHECKBOX_TEXT} chars, max 500)" >&2
+  exit 1
+fi
+if [[ "$CHECKBOX_TEXT" =~ $'\n' ]] || [[ "$CHECKBOX_TEXT" =~ $'\r' ]]; then
+  echo "Error: checkbox text must not contain newlines" >&2
+  exit 1
+fi
+
 mark_checkbox() {
   # Fetch current issue body
   local body

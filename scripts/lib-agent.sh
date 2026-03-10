@@ -13,7 +13,7 @@ fi
 AGENT_CMD="${AGENT_CMD:-claude}"
 AGENT_DEV_MODEL="${AGENT_DEV_MODEL:-}"
 AGENT_REVIEW_MODEL="${AGENT_REVIEW_MODEL:-sonnet}"
-AGENT_PERMISSION_MODE="${AGENT_PERMISSION_MODE:-bypassPermissions}"
+AGENT_PERMISSION_MODE="${AGENT_PERMISSION_MODE:-auto}"
 
 # Run agent with a new session.
 # Args: $1=session_id, $2=prompt, $3=model (optional)

@@ -31,6 +31,6 @@ if env -u GH_TOKEN -u GITHUB_TOKEN -u GITHUB_PERSONAL_ACCESS_TOKEN \
   exec env -u GH_TOKEN -u GITHUB_TOKEN -u GITHUB_PERSONAL_ACCESS_TOKEN "$REAL_GH" "$@"
 fi
 
-# Priority 3: No user auth available — warn and skip
+# Priority 3: No user auth available — exit with distinct code
 echo "WARNING: No user auth available for gh (GH_USER_PAT not set, no host gh auth session). Skipping." >&2
-exit 0
+exit 2
