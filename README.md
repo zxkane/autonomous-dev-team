@@ -1,18 +1,138 @@
-# Claude Code Development Workflow Template
+# Autonomous Dev Team
 
-A development workflow template for Claude Code that enforces end-to-end development processes through a hook system, ensuring AI agents follow TDD (Test-Driven Development) and code review best practices for feature development and bug fixes.
+A fully automated development pipeline that turns GitHub issues into merged pull requests — no human intervention required. A dispatcher scans for issues labeled `autonomous`, a **Dev Agent** implements the feature with tests in an isolated worktree, and a **Review Agent** performs code review with optional E2E verification. The entire cycle runs unattended on a cron schedule.
 
-## Features
+Supports multiple coding agent CLIs — Claude Code, Codex CLI, and Kiro CLI — with a pluggable agent abstraction layer.
 
-- **Worktree Enforcement**: Blocks commits outside git worktrees (hook enforced)
-- **PR-Only Workflow**: Blocks direct pushes to main branch (hook enforced)
-- **Design First**: Enforces design canvas creation before implementation
-- **Test-Driven Development (TDD)**: Enforces test case creation before writing code
-- **Code Simplification**: Blocks commits until code-simplifier agent review is complete
-- **Code Review**: Blocks pushes until pr-review agent review is complete
-- **CI Verification**: Blocks task completion until CI passes
-- **E2E Testing**: Enforces E2E test execution on Preview environment
-- **Autonomous Dev Team**: Fully automated issue-to-dev-to-review-to-merge pipeline with multi-agent support
+## How It Works
+
+```
+GitHub Issue              Dev Agent                    Review Agent
+(autonomous label)        (implements)                 (verifies)
+       │                       │                            │
+       ▼                       ▼                            ▼
+┌─────────────┐     ┌───────────────────┐      ┌────────────────────┐
+│ Dispatcher  │────▶│ Create worktree   │─────▶│ Find linked PR     │
+│ (cron 5min) │     │ Read issue        │      │ Check CI status    │
+│             │     │ Implement feature │      │ Review code diff   │
+│ Scans for   │     │ Write tests       │      │ Run E2E tests      │
+│ autonomous  │     │ Create PR         │      │ Approve or reject  │
+│ issues      │     │ Push to branch    │      │ Auto-merge PR      │
+└─────────────┘     └───────────────────┘      └────────────────────┘
+```
+
+### Label State Machine
+
+Issues progress through labels managed automatically by the agents:
+
+```
+autonomous → in-progress → pending-review → reviewing → approved (merged)
+                                                 │
+                                                 └─→ pending-dev (loop back if review fails)
+```
+
+When the `no-auto-close` label is present, the PR is approved but not auto-merged — the repo owner is notified instead.
+
+## Agents
+
+### Dev Agent
+
+The dev agent receives a GitHub issue, creates an isolated worktree, implements the feature, writes tests, and creates a pull request.
+
+| Capability | Description |
+|-----------|-------------|
+| **Worktree isolation** | Each issue gets its own git worktree — no cross-contamination |
+| **TDD workflow** | Follows the project's github-workflow skill for test-first development |
+| **Issue checkbox tracking** | Marks `## Requirements` checkboxes as items are implemented |
+| **Resume support** | Can resume a previous session after review feedback (`--mode resume`) |
+| **Exit-aware cleanup** | On success → `pending-review`; on failure → `pending-dev` for retry |
+
+**Wrapper**: `scripts/autonomous-dev.sh`
+**Skill**: `.claude/skills/autonomous-dev/SKILL.md`
+
+### Review Agent
+
+The review agent finds the PR linked to an issue, performs code review, optionally runs E2E verification via Chrome DevTools MCP, and either approves+merges or sends back with specific feedback.
+
+| Capability | Description |
+|-----------|-------------|
+| **PR discovery** | Finds the linked PR via body reference, issue comments, or search |
+| **Merge conflict resolution** | Automatically rebases if the PR conflicts with main |
+| **Code review checklist** | Verifies design docs, tests, CI status, and PR conventions |
+| **Amazon Q integration** | Triggers and monitors Amazon Q Developer review |
+| **E2E verification** | Optional Chrome DevTools MCP testing with screenshot evidence |
+| **Acceptance criteria tracking** | Marks `## Acceptance Criteria` checkboxes as verified |
+| **Auto-merge** | Squash-merges and closes the issue on review pass |
+
+**Wrapper**: `scripts/autonomous-review.sh`
+**Skill**: `.claude/skills/autonomous-review/SKILL.md`
+
+### Dispatcher (OpenClaw)
+
+The dispatcher runs on a cron schedule, scans GitHub for actionable issues, and spawns the appropriate agent.
+
+| Capability | Description |
+|-----------|-------------|
+| **Issue scanning** | Finds issues with `autonomous`, `pending-dev`, or `pending-review` labels |
+| **Concurrency control** | Enforces `MAX_CONCURRENT` limit via PID file checks |
+| **Stale detection** | Detects and recovers from zombie agent processes |
+| **Local dispatch** | Spawns agents via `nohup` with post-spawn health check |
+
+**Skill**: `openclaw/skills/autonomous-dispatcher/SKILL.md`
+**Dispatch script**: `openclaw/skills/autonomous-dispatcher/dispatch-local.sh`
+
+### Supported Agent CLIs
+
+| Agent CLI | Command | New Session | Resume | Status |
+|-----------|---------|-------------|--------|--------|
+| Claude Code | `claude` | `--session-id` | `--resume` | Full support |
+| Codex CLI | `codex` | `-p` | (falls back to new) | Basic support |
+| Kiro CLI | `kiro` | `-p` | (falls back to new) | Planned |
+
+Configure via `AGENT_CMD` in `scripts/autonomous.conf`.
+
+## Quick Start
+
+1. **Clone and configure**:
+   ```bash
+   gh repo create my-project --template zxkane/claude-code-workflow
+   cd my-project
+   cp scripts/autonomous.conf.example scripts/autonomous.conf
+   # Edit autonomous.conf — set REPO, PROJECT_DIR, agent CLI, etc.
+   ```
+
+2. **Set up the dispatcher** ([OpenClaw](https://github.com/zxkane/openclaw)):
+   ```bash
+   */5 * * * * cd /path/to/project && openclaw run openclaw/skills/autonomous-dispatcher/SKILL.md
+   ```
+
+3. **Create an issue** with the `autonomous` label and watch the pipeline work.
+
+### GitHub App Authentication (Optional)
+
+For production use with separate bot identities per agent, set up GitHub Apps. See `docs/github-app-setup.md` for the full guide.
+
+## Development Workflow (Hook System)
+
+Beyond autonomous mode, this template also provides a **hook-enforced development workflow** for interactive Claude Code sessions:
+
+```
+Step 0: Prerequisites (Hook Enforced)
+    - Must be in a git worktree
+    - Must be on a feature branch (not main)
+    ↓
+Step 1: Design Canvas (Pencil) → Step 2: Create Worktree
+    ↓
+Step 3: Test Cases (TDD) → Step 4: Implementation
+    ↓
+Step 5: Unit Tests Pass → Step 6: code-simplifier review → commit
+    ↓
+Step 7: pr-review agent → push → Step 8: Wait for CI
+    ↓
+Step 9: E2E Tests (Chrome DevTools) → ✅ Peer Review
+```
+
+See `CLAUDE.md` for detailed step-by-step instructions.
 
 ## Project Structure
 
@@ -78,145 +198,13 @@ A development workflow template for Claude Code that enforces end-to-end develop
 └── .github/                     # (CI workflow needs manual setup)
 ```
 
-## Usage
-
-### 1. Create a New Project from Template
-
-```bash
-# Using GitHub CLI
-gh repo create my-project --template zxkane/claude-code-workflow
-
-# Or manually clone
-git clone https://github.com/zxkane/claude-code-workflow.git my-project
-cd my-project
-rm -rf .git
-git init
-```
-
-### 2. Customize Configuration
-
-1. **Update CLAUDE.md**: Modify project overview, tech stack, etc.
-2. **Adjust hook scripts**: Modify file matching patterns based on project needs
-3. **Configure CI**: Adjust GitHub Actions workflow based on project requirements
-
-### 3. Start Development
-
-When using Claude Code for development, hooks will automatically enforce the workflow.
-
-## Using Skills to Follow the Workflow
-
-The `github-workflow` skill provides Claude Code with comprehensive guidance to follow the development workflow. Skills are automatically triggered by natural language prompts or can be invoked via slash commands.
-
-### Trigger Phrases (Natural Language)
-
-Claude Code will automatically activate the `github-workflow` skill when you use these phrases:
-
-| Category | Example Prompts |
-|----------|----------------|
-| **Design** | "design a feature", "create UI mockup", "create design canvas" |
-| **PR Management** | "create a PR", "push changes", "merge PR" |
-| **Code Review** | "address review comments", "resolve review threads", "handle reviewer findings" |
-| **Bot Reviews** | "/q review", "/codex review", "respond to Amazon Q", "respond to Codex" |
-| **CI/CD** | "check CI status", "wait for checks to pass" |
-
-### How It Works
-
-1. **Skill Detection**: When you mention workflow-related tasks, Claude Code automatically loads the `github-workflow` skill
-2. **Step-by-Step Guidance**: The skill provides the 13-step workflow with detailed instructions
-3. **Tool Integration**: Uses Pencil MCP for design, GitHub MCP/CLI for PR management, Chrome DevTools for E2E testing
-4. **Hook Enforcement**: Pre/Post hooks validate each step is completed before proceeding
-
-## Development Workflow
-
-```
-Step 0: MANDATORY PREREQUISITES (Hook Enforced)
-    - Must be in a git worktree (.worktrees/<branch>)
-    - Must be on a feature branch (not main)
-    ↓
-Step 1: Design Canvas (Pencil)
-    ↓
-Step 2: Create Git Worktree (MANDATORY)
-    ↓
-Step 3: Test Cases (TDD)
-    ↓
-Step 4: Implementation
-    ↓
-Step 5: Unit Tests Pass
-    ↓
-Step 6: code-simplifier review → commit
-    ↓
-Step 7: pr-review review → push
-    ↓
-Step 8: Wait for CI to pass
-    ↓
-Step 9: E2E Tests (Chrome DevTools)
-    ↓
-✅ Task Complete → Peer Review
-```
-
-## Autonomous Dev Team
-
-An autonomous development pipeline that turns GitHub issues into merged pull requests without human intervention. A dispatcher watches for issues labeled `autonomous`, spins up a dev agent to implement the feature, then hands off to a review agent for code review and E2E verification. The entire cycle -- from issue triage to PR merge -- runs unattended.
-
-### Supported Agents
-
-| Agent | CLI Command | Status |
-|-------|-------------|--------|
-| Claude Code | `claude` | Full support |
-| Codex CLI | `codex` | Basic support |
-| Kiro CLI | `kiro` | Planned |
-
-### Quick Start
-
-1. Clone the repo and copy the configuration template:
-   ```bash
-   cp scripts/autonomous.conf.example scripts/autonomous.conf
-   ```
-2. Edit `scripts/autonomous.conf` to set your project settings (`REPO`, `PROJECT_DIR`, agent CLI, etc.).
-3. Install the [OpenClaw](https://github.com/zxkane/openclaw) dispatcher.
-4. Set up a cron job (runs every 5 minutes):
-   ```bash
-   */5 * * * * cd /path/to/project && openclaw run openclaw/skills/autonomous-dispatcher/SKILL.md
-   ```
-5. Create a GitHub issue with the `autonomous` label.
-6. Watch the pipeline work -- the dev agent implements, the review agent verifies, and the PR is merged automatically.
-
-### Architecture
-
-```
-GitHub Issue (autonomous label)
-    |
-    v
-OpenClaw Dispatcher (cron 5min)
-    |
-    v
-+-------------+    +----------------+
-| Dev Agent   |--->| Review Agent   |
-| (Opus)      |    | (Sonnet)       |
-+-------------+    +----------------+
-    |                    |
-    v                    v
-Create PR          Review + E2E
-    |                    |
-    v                    v
-pending-review     approved/merged
-```
-
-### State Machine
-
-Issues progress through labels managed by the agents:
-
-`autonomous` --> `in-progress` --> `pending-review` --> `reviewing` --> `approved` (merged)
-
-If the review agent requests changes, the issue moves to `pending-dev` and loops back to `in-progress` for the dev agent to address feedback.
-
-When the `no-auto-close` label is present, the PR is approved but not auto-merged, and the issue is not auto-closed -- the repo owner is notified instead.
-
-### Documentation
+## Documentation
 
 - **Pipeline overview**: `docs/autonomous-pipeline.md`
 - **GitHub App setup**: `docs/github-app-setup.md`
+- **E2E config template**: `docs/templates/e2e-config-template.md`
 - **Dispatcher skill**: `openclaw/skills/autonomous-dispatcher/SKILL.md`
+- **CI setup**: `docs/github-actions-setup.md`
 
 ## Hook Reference
 
