@@ -19,7 +19,7 @@ Scan GitHub issues and dispatch dev/review tasks locally.
 source "${PROJECT_DIR}/scripts/gh-app-token.sh"
 
 # Generate token for the dispatcher's GitHub App
-GH_TOKEN=$(get_gh_app_token "$DISPATCHER_APP_ID" "$DISPATCHER_APP_PEM" "$REPO") || {
+GH_TOKEN=$(get_gh_app_token "$DISPATCHER_APP_ID" "$DISPATCHER_APP_PEM" "$REPO_OWNER" "$REPO_NAME") || {
   echo "FATAL: Failed to generate GitHub App token" >&2
   exit 1
 }

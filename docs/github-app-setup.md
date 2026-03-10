@@ -126,7 +126,7 @@ GitHub App installation tokens expire after 1 hour. The pipeline includes a back
 1. When `GH_AUTH_MODE=app`, `lib-auth.sh` starts `gh-token-refresh-daemon.sh` in the background
 2. The daemon writes the current token to a file: `/tmp/cc-${PROJECT_ID}-gh-token-<pid>.txt`
 3. The `gh-with-token-refresh.sh` wrapper reads the latest token from this file before each `gh` command
-4. The daemon refreshes the token every 50 minutes (before the 60-minute expiry)
+4. The daemon refreshes the token every 45 minutes (before the 60-minute expiry)
 5. On cleanup (script exit), the daemon is killed and the token file is removed
 
 ### Token Flow
@@ -134,7 +134,7 @@ GitHub App installation tokens expire after 1 hour. The pipeline includes a back
 ```
 ┌──────────────┐     writes token     ┌─────────────────┐
 │ Token Refresh │ ──────────────────► │  Token File      │
-│ Daemon        │  (every 50 min)     │  /tmp/cc-*.txt   │
+│ Daemon        │  (every 45 min)     │  /tmp/cc-*.txt   │
 └──────────────┘                      └────────┬────────┘
                                                │ reads
                                       ┌────────▼────────┐
