@@ -135,10 +135,19 @@ cleanup() {
 EOF
 )" || log "WARNING: Failed to post session report comment"
 
-  # Transition: remove in-progress/pending-dev, add pending-review
-  gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
-    --remove-label "in-progress" --remove-label "pending-dev" \
-    --add-label "pending-review" || log "WARNING: Failed to update issue labels"
+  # Transition labels based on whether CC succeeded or failed
+  if [[ $exit_code -eq 0 ]]; then
+    # Success: move to pending-review for the review agent
+    gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
+      --remove-label "in-progress" --remove-label "pending-dev" \
+      --add-label "pending-review" || log "WARNING: Failed to update issue labels"
+  else
+    # Failure: move back to pending-dev so dispatcher can retry
+    gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
+      --remove-label "in-progress" \
+      --add-label "pending-dev" || log "WARNING: Failed to update issue labels"
+    log "CC failed (exit $exit_code). Issue remains in pending-dev for retry."
+  fi
 
   cleanup_github_auth
 }

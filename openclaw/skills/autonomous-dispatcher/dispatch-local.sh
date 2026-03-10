@@ -42,7 +42,7 @@ case "$TYPE" in
     nohup "${PROJECT_DIR}/scripts/autonomous-dev.sh" \
       --issue "$ISSUE_NUM" --mode new \
       > "/tmp/cc-${PROJECT_ID}-issue-${ISSUE_NUM}.log" 2>&1 &
-    echo "Dispatched dev-new for issue #${ISSUE_NUM} (PID: $!)"
+    CHILD_PID=$!
     ;;
   dev-resume)
     if [[ -z "$SESSION_ID" ]]; then
@@ -52,16 +52,24 @@ case "$TYPE" in
     nohup "${PROJECT_DIR}/scripts/autonomous-dev.sh" \
       --issue "$ISSUE_NUM" --mode resume --session "$SESSION_ID" \
       > "/tmp/cc-${PROJECT_ID}-issue-${ISSUE_NUM}.log" 2>&1 &
-    echo "Dispatched dev-resume for issue #${ISSUE_NUM} (PID: $!)"
+    CHILD_PID=$!
     ;;
   review)
     nohup "${PROJECT_DIR}/scripts/autonomous-review.sh" \
       --issue "$ISSUE_NUM" \
       > "/tmp/cc-${PROJECT_ID}-review-${ISSUE_NUM}.log" 2>&1 &
-    echo "Dispatched review for issue #${ISSUE_NUM} (PID: $!)"
+    CHILD_PID=$!
     ;;
   *)
     echo "ERROR: unknown type '$TYPE'. Use dev-new, dev-resume, or review" >&2
     exit 1
     ;;
 esac
+
+# Verify the background process started successfully
+sleep 1
+if ! kill -0 "$CHILD_PID" 2>/dev/null; then
+  echo "ERROR: ${TYPE} process for issue #${ISSUE_NUM} exited immediately. Check log: /tmp/cc-${PROJECT_ID}-*-${ISSUE_NUM}.log" >&2
+  exit 1
+fi
+echo "Dispatched ${TYPE} for issue #${ISSUE_NUM} (PID: ${CHILD_PID})"

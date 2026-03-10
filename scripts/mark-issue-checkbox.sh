@@ -88,9 +88,14 @@ mark_checkbox() {
   echo "Checked: ${CHECKBOX_TEXT}"
 }
 
-# Try once, retry on failure (handles concurrent edit conflicts)
-if ! mark_checkbox; then
-  EXIT_CODE=$?
+# Try once, retry on failure (handles concurrent edit conflicts).
+# Note: must disable set -e around mark_checkbox to capture its exit code.
+set +e
+mark_checkbox
+EXIT_CODE=$?
+set -e
+
+if [[ $EXIT_CODE -ne 0 ]]; then
   # Don't retry on "not found" (exit 2) — it won't become found after waiting
   if [[ $EXIT_CODE -eq 2 ]]; then
     exit 2

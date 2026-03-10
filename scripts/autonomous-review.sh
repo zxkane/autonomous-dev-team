@@ -236,7 +236,7 @@ Amazon Q ignores /q review comments from bot accounts. You MUST use \`scripts/gh
 4. Read Q review inline comments and check for unresolved threads
 5. Report Q review status in the E2E verification report table
 
-$(if [[ "${E2E_ENABLED:-false}" == "true" ]]; then cat <<'E2E_BLOCK'
+$(if [[ "${E2E_ENABLED:-false}" == "true" ]]; then cat <<E2E_BLOCK
 ## E2E Verification via Chrome DevTools MCP — MANDATORY
 
 **This section is NON-NEGOTIABLE. You MUST perform E2E verification using Chrome DevTools MCP.**

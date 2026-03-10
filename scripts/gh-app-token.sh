@@ -28,8 +28,8 @@ _generate_jwt() {
   fi
 
   # Prevent path traversal in PEM file path
-  if [[ "$pem_file" == *".."* ]] || [[ "$pem_file" == /* ]] || [[ "$pem_file" == ~* ]]; then
-    echo "ERROR: PEM file path must be relative and must not contain '..' sequences" >&2
+  if [[ "$pem_file" == *".."* ]] || [[ "$pem_file" == ~* ]]; then
+    echo "ERROR: PEM file path must not contain '..' sequences or start with '~'" >&2
     return 1
   fi
 
