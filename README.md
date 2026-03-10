@@ -1,6 +1,6 @@
 # Autonomous Dev Team
 
-A fully automated development pipeline that turns GitHub issues into merged pull requests — no human intervention required. Powered by [**OpenClaw**](https://github.com/zxkane/openclaw) as the orchestration layer, it scans for issues labeled `autonomous`, dispatches a **Dev Agent** to implement the feature with tests in an isolated worktree, and hands off to a **Review Agent** for code review with optional E2E verification. The entire cycle runs unattended on a cron schedule.
+A fully automated development pipeline that turns GitHub issues into merged pull requests — no human intervention required. Powered by [**OpenClaw**](https://github.com/OpenClaw/OpenClaw) as the orchestration layer, it scans for issues labeled `autonomous`, dispatches a **Dev Agent** to implement the feature with tests in an isolated worktree, and hands off to a **Review Agent** for code review with optional E2E verification. The entire cycle runs unattended on a cron schedule.
 
 Supports multiple coding agent CLIs — Claude Code, Codex CLI, and Kiro CLI — with a pluggable agent abstraction layer.
 
@@ -71,9 +71,9 @@ The review agent finds the PR linked to an issue, performs code review, optional
 **Wrapper**: `scripts/autonomous-review.sh`
 **Skill**: `.claude/skills/autonomous-review/SKILL.md`
 
-### Dispatcher ([OpenClaw](https://github.com/zxkane/openclaw))
+### Dispatcher ([OpenClaw](https://github.com/OpenClaw/OpenClaw))
 
-The dispatcher is an [OpenClaw](https://github.com/zxkane/openclaw) skill that orchestrates the entire pipeline. OpenClaw runs it on a cron schedule, scanning GitHub for actionable issues and spawning the appropriate agent. The dispatcher skill defines the orchestration logic; OpenClaw provides the execution runtime.
+The dispatcher is an [OpenClaw](https://github.com/OpenClaw/OpenClaw) skill that orchestrates the entire pipeline. OpenClaw runs it on a cron schedule, scanning GitHub for actionable issues and spawning the appropriate agent. The dispatcher skill defines the orchestration logic; OpenClaw provides the execution runtime.
 
 | Capability | Description |
 |-----------|-------------|
@@ -105,10 +105,10 @@ Configure via `AGENT_CMD` in `scripts/autonomous.conf`.
    # Edit autonomous.conf — set REPO, PROJECT_DIR, agent CLI, etc.
    ```
 
-2. **Install [OpenClaw](https://github.com/zxkane/openclaw)** and set up the dispatcher cron:
+2. **Install [OpenClaw](https://github.com/OpenClaw/OpenClaw)** and set up the dispatcher cron:
    ```bash
    # Install OpenClaw (the orchestration engine)
-   # See https://github.com/zxkane/openclaw for installation
+   # See https://github.com/OpenClaw/OpenClaw for installation
 
    # Schedule the dispatcher to run every 5 minutes
    */5 * * * * cd /path/to/project && openclaw run openclaw/skills/autonomous-dispatcher/SKILL.md
