@@ -99,7 +99,7 @@ Configure via `AGENT_CMD` in `scripts/autonomous.conf`.
 
 1. **Clone and configure**:
    ```bash
-   gh repo create my-project --template zxkane/claude-code-workflow
+   gh repo create my-project --template zxkane/autonomous-dev-team
    cd my-project
    cp scripts/autonomous.conf.example scripts/autonomous.conf
    # Edit autonomous.conf — set REPO, PROJECT_DIR, agent CLI, etc.
