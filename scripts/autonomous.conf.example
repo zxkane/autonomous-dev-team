@@ -32,7 +32,7 @@ DISPATCHER_APP_PEM=""
 MAX_CONCURRENT=5
 
 # === Dev Agent ===
-DEV_SKILL_CMD="/github-workflow"
+DEV_SKILL_CMD="/autonomous-dev"
 
 # === E2E Verification (optional) ===
 E2E_ENABLED="false"
