@@ -77,3 +77,18 @@ is_git_command() {
 get_project_root() {
   resolve_project_root
 }
+
+# Resolve state directory (works across IDEs)
+# Prefers IDE-specific state dir if it exists, falls back to .agents/state/
+resolve_state_dir() {
+  local project_root
+  project_root=$(resolve_project_root)
+  if [[ -d "$project_root/.claude/state" ]]; then
+    echo "$project_root/.claude/state"
+  elif [[ -d "$project_root/.kiro/state" ]]; then
+    echo "$project_root/.kiro/state"
+  else
+    mkdir -p "$project_root/.agents/state"
+    echo "$project_root/.agents/state"
+  fi
+}
