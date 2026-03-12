@@ -152,13 +152,13 @@ git status --short
 STAGED_LINES=$(git diff --cached | wc -l)
 UNSTAGED_LINES=$(git diff | wc -l)
 
-# List untracked files
+# List untracked files (null-delimited for safe handling)
 UNTRACKED=$(git ls-files --others --exclude-standard)
 
-# Count untracked file content lines
+# Count untracked file content lines (handles spaces in filenames)
 UNTRACKED_LINES=0
 if [ -n "$UNTRACKED" ]; then
-  UNTRACKED_LINES=$(echo "$UNTRACKED" | xargs cat 2>/dev/null | wc -l)
+  UNTRACKED_LINES=$(git ls-files --others --exclude-standard -z | xargs -0 cat 2>/dev/null | wc -l)
 fi
 
 TOTAL_DIFF_LINES=$((STAGED_LINES + UNSTAGED_LINES + UNTRACKED_LINES))
