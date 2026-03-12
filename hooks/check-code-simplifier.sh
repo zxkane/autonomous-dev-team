@@ -49,7 +49,7 @@ Before committing, you must run the code-simplifier agent to review and clean up
 
 2. After code-simplifier/simplify completes, mark it:
    ```bash
-   .claude/hooks/state-manager.sh mark code-simplifier
+   hooks/state-manager.sh mark code-simplifier
    ```
 
 3. Retry the commit

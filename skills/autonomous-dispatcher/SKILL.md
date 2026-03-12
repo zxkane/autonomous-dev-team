@@ -48,23 +48,23 @@ This ensures all issue comments, label changes, and API calls appear as the conf
 
 ## Local Dispatch Helper Script
 
-**CRITICAL:** All task dispatches (dev-new, dev-resume, review) MUST use the helper script `dispatch-local.sh` in the same directory as this SKILL.md. The script handles:
+**CRITICAL:** All task dispatches (dev-new, dev-resume, review) MUST use the helper script `scripts/dispatch-local.sh` in the project root's `scripts/` directory. The script handles:
 - Background process spawning via `nohup`
 - Input validation (numeric issue numbers, safe session IDs)
 - Config loading from `scripts/autonomous.conf`
 
 **Usage:**
 ```bash
-# SKILL_DIR is the directory containing SKILL.md and dispatch-local.sh
+# PROJECT_DIR is the absolute path to the project root
 
 # For new dev task:
-bash "$SKILL_DIR/dispatch-local.sh" dev-new ISSUE_NUM
+bash "$PROJECT_DIR/scripts/dispatch-local.sh" dev-new ISSUE_NUM
 
 # For review task:
-bash "$SKILL_DIR/dispatch-local.sh" review ISSUE_NUM
+bash "$PROJECT_DIR/scripts/dispatch-local.sh" review ISSUE_NUM
 
 # For resume dev task:
-bash "$SKILL_DIR/dispatch-local.sh" dev-resume ISSUE_NUM SESSION_ID
+bash "$PROJECT_DIR/scripts/dispatch-local.sh" dev-resume ISSUE_NUM SESSION_ID
 ```
 
 **DO NOT construct dispatch commands manually.** Always use the dispatch-local.sh script.
@@ -111,7 +111,7 @@ For each found issue (respecting concurrency limit):
 2. Comment: `Dispatching autonomous development...`
 3. Dispatch via helper script:
 ```bash
-bash "$SKILL_DIR/dispatch-local.sh" dev-new ISSUE_NUM
+bash "$PROJECT_DIR/scripts/dispatch-local.sh" dev-new ISSUE_NUM
 ```
 4. Re-check concurrency after each dispatch
 
@@ -129,7 +129,7 @@ For each found issue (respecting concurrency limit):
 2. Comment: `Dispatching autonomous review...`
 3. Dispatch via helper script:
 ```bash
-bash "$SKILL_DIR/dispatch-local.sh" review ISSUE_NUM
+bash "$PROJECT_DIR/scripts/dispatch-local.sh" review ISSUE_NUM
 ```
 
 ### Step 4: Scan for Pending-Dev (Resume)
@@ -146,7 +146,7 @@ For each found issue (respecting concurrency limit):
 3. Comment: `Resuming development (session: SESSION_ID)...`
 4. Dispatch via helper script:
 ```bash
-bash "$SKILL_DIR/dispatch-local.sh" dev-resume ISSUE_NUM SESSION_ID
+bash "$PROJECT_DIR/scripts/dispatch-local.sh" dev-resume ISSUE_NUM SESSION_ID
 ```
 
 ### Step 5: Stale Detection

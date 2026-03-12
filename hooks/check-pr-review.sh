@@ -47,7 +47,7 @@ Before pushing, you must complete a code review using the PR review toolkit.
 
 3. After review completes and issues resolved, mark it:
    ```bash
-   .claude/hooks/state-manager.sh mark pr-review
+   hooks/state-manager.sh mark pr-review
    ```
 
 4. Retry the push

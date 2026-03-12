@@ -1,11 +1,25 @@
 ---
 name: autonomous-review
-description: Use when reviewing a PR as part of the autonomous pipeline. Performs thorough code review, checklist verification, and optional E2E verification via Chrome DevTools MCP. Triggered by scripts/autonomous-review.sh wrapper.
+description: >
+  Autonomous PR code review with checklist verification, merge conflict
+  resolution, E2E testing via browser automation, and auto-merge.
+  Triggered by the autonomous review wrapper script.
 ---
 
 # Autonomous Review Mode
 
 You are reviewing a PR created by an autonomous development session. Be thorough and objective.
+
+## Cross-Platform Notes
+
+This skill works with any IDE/CLI that supports skills. Browser automation
+steps use Chrome DevTools MCP — ensure your IDE has this MCP server configured
+for E2E verification.
+
+### Hooks (Optional)
+If your IDE supports hooks (Claude Code, Kiro CLI), workflow enforcement
+hooks in `hooks/` provide automatic gate checks. Without hooks, follow
+each step manually.
 
 ## Review Checklist
 
@@ -136,7 +150,7 @@ Before starting the review, check whether the PR branch has merge conflicts with
 1. **Read the issue** to understand requirements
 2. **Read the PR diff** thoroughly (`gh pr diff <number>`)
 3. **Check CI status** (`gh pr checks <number>`)
-4. **Verify file existence** for design docs, test cases, etc.
+4. **Read the files** for design docs, test cases, etc. to verify they exist
 5. **Assess code quality** against the checklist above
 6. **Verify bot reviewer findings** (if configured — see checklist section 5)
 7. **Select happy path test cases** based on PR diff analysis (see below)
@@ -264,7 +278,7 @@ When using Chrome DevTools MCP to take screenshots during E2E verification, **up
 
 ### Upload Workflow
 
-After each `take_screenshot`, use the upload helper script to get a GitHub blob URL:
+After each `take_screenshot`, run the upload helper script to get a GitHub blob URL:
 
 ```bash
 # Usage: scripts/upload-screenshot.sh <png-path> <pr-number> <test-case-id>
@@ -274,7 +288,7 @@ URL=$(scripts/upload-screenshot.sh /tmp/screenshot.png 42 TC-HP-001)
 # -> https://github.com/{REPO}/blob/screenshots/pr-42/TC-HP-001.png
 ```
 
-**To call from within the CC review session**, use the Bash tool:
+Execute in your terminal to upload from within the review session:
 
 ```bash
 SCREENSHOT_URL=$(bash scripts/upload-screenshot.sh "<screenshot-path>" "<PR_NUMBER>" "<TC-ID>")

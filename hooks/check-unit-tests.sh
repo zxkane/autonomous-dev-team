@@ -49,7 +49,7 @@ You're committing code changes but unit tests haven't been run recently.
 
 3. Mark tests as run (optional - auto-cleared after commit):
    ```bash
-   .claude/hooks/state-manager.sh mark unit-tests
+   hooks/state-manager.sh mark unit-tests
    ```
 
 ### Project Requirements (CLAUDE.md Step 4):

@@ -5,7 +5,7 @@ set -e
 
 # Source shared lib for resolve_project_root
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
-STATE_DIR="$(resolve_project_root)/.claude/state"
+STATE_DIR="$(resolve_state_dir)"
 
 # Ensure state directory exists
 mkdir -p "$STATE_DIR"

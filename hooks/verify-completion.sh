@@ -156,7 +156,7 @@ if [[ "$status" == "completed" && "$conclusion" == "success" ]]; then
     exit 0
   else
     # E2E tests not run yet - BLOCK
-    output_block_response "## ⛔ BLOCKED - E2E Tests Required\\n\\nCI passed on branch '$current_branch', but E2E tests have not been run.\\n\\n### Required Steps (Step 8):\\n1. Get the PR preview URL:\\n   \`\`\`bash\\n   gh pr view --json url\\n   \`\`\`\\n\\n2. Run E2E tests using Chrome DevTools MCP:\\n   - Navigate to the preview URL\\n   - Test authentication flows (if applicable)\\n   - Test the specific functionality changed\\n   - Verify no console errors\\n   - Capture screenshots if needed\\n\\n3. After E2E verification, mark as complete:\\n   \`\`\`bash\\n   .claude/hooks/state-manager.sh mark e2e-tests\\n   \`\`\`\\n\\n4. Retry task completion\\n\\n**Cannot complete task without E2E verification.**"
+    output_block_response "## ⛔ BLOCKED - E2E Tests Required\\n\\nCI passed on branch '$current_branch', but E2E tests have not been run.\\n\\n### Required Steps (Step 8):\\n1. Get the PR preview URL:\\n   \`\`\`bash\\n   gh pr view --json url\\n   \`\`\`\\n\\n2. Run E2E tests using Chrome DevTools MCP:\\n   - Navigate to the preview URL\\n   - Test authentication flows (if applicable)\\n   - Test the specific functionality changed\\n   - Verify no console errors\\n   - Capture screenshots if needed\\n\\n3. After E2E verification, mark as complete:\\n   \`\`\`bash\\n   hooks/state-manager.sh mark e2e-tests\\n   \`\`\`\\n\\n4. Retry task completion\\n\\n**Cannot complete task without E2E verification.**"
   fi
 fi
 
