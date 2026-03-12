@@ -17,6 +17,11 @@ E2E testing via browser automation, and auto-merge.
 GitHub issue scanner that dispatches dev and review agents on a cron
 schedule. Manages the autonomous pipeline lifecycle via labels.
 
+### create-issue
+Interactive GitHub issue creation with structured templates, autonomous
+label guidance, and workspace change attachment. Supports feature
+requests and bug reports.
+
 ## Workflow Summary
 
 1. Design -> 2. Worktree -> 3. Tests -> 4. Implement -> 5. Verify ->
