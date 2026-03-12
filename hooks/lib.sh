@@ -28,7 +28,7 @@ parse_json_field() {
   fi
 
   # Validate field path to prevent injection - only allow alphanumeric, dots, underscores, and brackets
-  if [[ ! "$field_path" =~ ^[a-zA-Z0-9._\[\]\"]+$ ]]; then
+  if [[ ! "$field_path" =~ ^[]a-zA-Z0-9._[\"]+$ ]]; then
     echo "Error: Invalid field path" >&2
     echo ""
     return 1
