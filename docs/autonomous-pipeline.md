@@ -110,7 +110,7 @@ openclaw cron add \
 
 ```bash
 # Run the dispatcher manually
-bash openclaw/skills/autonomous-dispatcher/dispatch-local.sh
+bash scripts/dispatch-local.sh
 ```
 
 ### 5. Create an issue with the `autonomous` label
@@ -152,7 +152,7 @@ All configuration is stored in `scripts/autonomous.conf`. Values can also be set
 | `DISPATCHER_APP_ID` | GitHub App ID for dispatcher (app mode only) | — | If app mode |
 | `DISPATCHER_APP_PEM` | Path to dispatcher App private key PEM | — | If app mode |
 | `MAX_CONCURRENT` | Maximum concurrent agent tasks | `5` | No |
-| `DEV_SKILL_CMD` | Skill command for dev agent prompt | `/github-workflow` | No |
+| `DEV_SKILL_CMD` | Skill command for dev agent prompt | `/autonomous-dev` | No |
 | `E2E_ENABLED` | Enable E2E verification in review | `false` | No |
 | `E2E_PREVIEW_URL_PATTERN` | Preview URL template (`{N}` = PR number) | — | If E2E enabled |
 | `E2E_TEST_USER_EMAIL` | Test user email for E2E login | — | If E2E enabled |
@@ -281,7 +281,7 @@ Set `AGENT_CMD` in `autonomous.conf` to switch agents. Claude Code is recommende
 | `scripts/gh-as-user.sh` | Run `gh` commands as a real user (for bot workarounds) |
 | `scripts/mark-issue-checkbox.sh` | Mark issue checkboxes (used by both agents) |
 | `scripts/upload-screenshot.sh` | Upload E2E screenshots to GitHub |
-| `.claude/skills/autonomous-dev/SKILL.md` | Dev agent skill definition |
-| `.claude/skills/autonomous-review/SKILL.md` | Review agent skill definition |
-| `openclaw/skills/autonomous-dispatcher/SKILL.md` | Dispatcher skill definition |
-| `openclaw/skills/autonomous-dispatcher/dispatch-local.sh` | Local dispatch helper |
+| `skills/autonomous-dev/SKILL.md` | Dev agent skill definition |
+| `skills/autonomous-review/SKILL.md` | Review agent skill definition |
+| `skills/autonomous-dispatcher/SKILL.md` | Dispatcher skill definition |
+| `scripts/dispatch-local.sh` | Local dispatch helper |
