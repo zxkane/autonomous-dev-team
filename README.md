@@ -4,6 +4,17 @@ A fully automated development pipeline that turns GitHub issues into merged pull
 
 Supports multiple coding agent CLIs — Claude Code, Codex CLI, and Kiro CLI — with a pluggable agent abstraction layer.
 
+## Install as Skills
+
+Install these skills into any supported coding agent:
+
+```bash
+npx skills add zxkane/autonomous-dev-team
+```
+
+Supports 40+ agents including Claude Code, Cursor, Windsurf, Gemini CLI,
+Kiro CLI, and more. See [skills.sh](https://skills.sh) for the full ecosystem.
+
 ## How It Works
 
 ```
@@ -46,13 +57,13 @@ The dev agent receives a GitHub issue, creates an isolated worktree, implements 
 | Capability | Description |
 |-----------|-------------|
 | **Worktree isolation** | Each issue gets its own git worktree — no cross-contamination |
-| **TDD workflow** | Follows the project's github-workflow skill for test-first development |
+| **TDD workflow** | Follows the project's autonomous-dev skill for test-first development |
 | **Issue checkbox tracking** | Marks `## Requirements` checkboxes as items are implemented |
 | **Resume support** | Can resume a previous session after review feedback (`--mode resume`) |
 | **Exit-aware cleanup** | On success → `pending-review`; on failure → `pending-dev` for retry |
 
 **Wrapper**: `scripts/autonomous-dev.sh`
-**Skill**: `.claude/skills/autonomous-dev/SKILL.md`
+**Skill**: `skills/autonomous-dev/SKILL.md`
 
 ### Review Agent
 
@@ -69,7 +80,7 @@ The review agent finds the PR linked to an issue, performs code review, optional
 | **Auto-merge** | Squash-merges and closes the issue on review pass |
 
 **Wrapper**: `scripts/autonomous-review.sh`
-**Skill**: `.claude/skills/autonomous-review/SKILL.md`
+**Skill**: `skills/autonomous-review/SKILL.md`
 
 ### Dispatcher ([OpenClaw](https://github.com/OpenClaw/OpenClaw))
 
@@ -82,8 +93,8 @@ The dispatcher is an [OpenClaw](https://github.com/OpenClaw/OpenClaw) skill that
 | **Stale detection** | Detects and recovers from zombie agent processes |
 | **Local dispatch** | Spawns agents via `nohup` with post-spawn health check |
 
-**OpenClaw Skill**: `openclaw/skills/autonomous-dispatcher/SKILL.md`
-**Dispatch script**: `openclaw/skills/autonomous-dispatcher/dispatch-local.sh`
+**OpenClaw Skill**: `skills/autonomous-dispatcher/SKILL.md`
+**Dispatch script**: `scripts/dispatch-local.sh`
 
 ### Supported Agent CLIs
 
@@ -111,7 +122,7 @@ Configure via `AGENT_CMD` in `scripts/autonomous.conf`.
    # See https://github.com/OpenClaw/OpenClaw for installation
 
    # Schedule the dispatcher to run every 5 minutes
-   */5 * * * * cd /path/to/project && openclaw run openclaw/skills/autonomous-dispatcher/SKILL.md
+   */5 * * * * cd /path/to/project && openclaw run skills/autonomous-dispatcher/SKILL.md
    ```
 
 3. **Create an issue** with the `autonomous` label and watch the pipeline work — OpenClaw dispatches agents, tracks progress via labels, and merges the PR when review passes.
@@ -149,38 +160,37 @@ See `CLAUDE.md` for detailed step-by-step instructions.
 ├── CLAUDE.md                     # Project config and workflow documentation
 ├── .claude/
 │   ├── settings.json            # Claude Code hooks configuration
-│   ├── hooks/                   # Hook scripts
-│   │   ├── lib.sh               # Shared utility functions
-│   │   ├── state-manager.sh     # Workflow state management
-│   │   ├── block-push-to-main.sh        # Blocks direct push to main
-│   │   ├── block-commit-outside-worktree.sh  # Blocks commits outside worktrees
-│   │   ├── check-design-canvas.sh   # Design canvas check
-│   │   ├── check-test-plan.sh       # Test plan check
-│   │   ├── check-code-simplifier.sh # Code simplification check
-│   │   ├── check-pr-review.sh       # PR review check
-│   │   ├── check-unit-tests.sh      # Unit tests check
-│   │   ├── warn-skip-verification.sh # --no-verify warning
-│   │   ├── post-file-edit-reminder.sh # Post-edit reminder
-│   │   ├── post-git-action-clear.sh # Git action state cleanup
-│   │   ├── post-git-push.sh         # Post-push verification reminder
-│   │   └── verify-completion.sh     # Task completion verification
-│   └── skills/                  # Claude Code skills
-│       ├── github-workflow/     # GitHub development workflow skill
-│       │   ├── SKILL.md         # Main skill definition (13-step workflow)
-│       │   ├── references/      # Reference documentation
-│       │   │   ├── commit-conventions.md  # Branch naming & commit standards
-│       │   │   └── review-commands.md     # GitHub CLI & GraphQL commands
-│       │   └── scripts/         # Utility scripts
-│       │       ├── reply-to-comments.sh   # Reply to PR review comments
-│       │       └── resolve-threads.sh     # Batch resolve review threads
-│       ├── autonomous-dev/      # Autonomous development skill
-│       │   └── SKILL.md         # Dev agent instructions
-│       └── autonomous-review/   # Autonomous review skill
-│           └── SKILL.md         # Review agent instructions
-├── scripts/                     # Autonomous pipeline scripts
+│   └── skills -> ../skills      # Symlink to top-level skills/
+├── hooks/                       # Hook scripts (project root)
+│   ├── lib.sh                   # Shared utility functions
+│   ├── state-manager.sh         # Workflow state management
+│   ├── block-push-to-main.sh            # Blocks direct push to main
+│   ├── block-commit-outside-worktree.sh # Blocks commits outside worktrees
+│   ├── check-design-canvas.sh   # Design canvas check
+│   ├── check-test-plan.sh       # Test plan check
+│   ├── check-code-simplifier.sh # Code simplification check
+│   ├── check-pr-review.sh       # PR review check
+│   ├── check-unit-tests.sh      # Unit tests check
+│   ├── warn-skip-verification.sh    # --no-verify warning
+│   ├── post-file-edit-reminder.sh   # Post-edit reminder
+│   ├── post-git-action-clear.sh     # Git action state cleanup
+│   ├── post-git-push.sh            # Post-push verification reminder
+│   └── verify-completion.sh        # Task completion verification
+├── skills/                      # Agent skills (portable, skills.sh compatible)
+│   ├── autonomous-dev/          # Development workflow skill
+│   │   ├── SKILL.md             # Main skill definition
+│   │   └── references/          # Reference documentation
+│   │       ├── commit-conventions.md  # Branch naming & commit standards
+│   │       └── review-commands.md     # GitHub CLI & GraphQL commands
+│   ├── autonomous-review/       # Autonomous review skill
+│   │   └── SKILL.md             # Review agent instructions
+│   └── autonomous-dispatcher/   # OpenClaw dispatcher skill
+│       └── SKILL.md             # Dispatcher instructions
+├── scripts/                     # Pipeline and utility scripts
 │   ├── autonomous.conf.example  # Configuration template
 │   ├── autonomous-dev.sh        # Dev agent wrapper
 │   ├── autonomous-review.sh     # Review agent wrapper
+│   ├── dispatch-local.sh        # Local dispatch script
 │   ├── lib-agent.sh             # Agent abstraction (Claude/Codex/Kiro)
 │   ├── lib-auth.sh              # GitHub auth abstraction
 │   ├── gh-app-token.sh          # GitHub App token generation
@@ -188,12 +198,9 @@ See `CLAUDE.md` for detailed step-by-step instructions.
 │   ├── gh-token-refresh-daemon.sh   # Background token refresh
 │   ├── gh-with-token-refresh.sh     # gh CLI with auto-refresh
 │   ├── mark-issue-checkbox.sh   # Mark issue checkboxes
+│   ├── reply-to-comments.sh     # Reply to PR review comments
+│   ├── resolve-threads.sh       # Batch resolve review threads
 │   └── upload-screenshot.sh     # Upload screenshots to issues
-├── openclaw/
-│   └── skills/
-│       └── autonomous-dispatcher/   # OpenClaw dispatcher skill
-│           ├── SKILL.md             # Dispatcher instructions
-│           └── dispatch-local.sh    # Local dispatch script
 ├── docs/
 │   ├── autonomous-pipeline.md   # Pipeline overview documentation
 │   ├── github-app-setup.md      # GitHub App configuration guide
@@ -211,7 +218,7 @@ See `CLAUDE.md` for detailed step-by-step instructions.
 - **Pipeline overview**: `docs/autonomous-pipeline.md`
 - **GitHub App setup**: `docs/github-app-setup.md`
 - **E2E config template**: `docs/templates/e2e-config-template.md`
-- **Dispatcher skill**: `openclaw/skills/autonomous-dispatcher/SKILL.md`
+- **Dispatcher skill**: `skills/autonomous-dispatcher/SKILL.md`
 - **CI setup**: `docs/github-actions-setup.md`
 
 ## Hook Reference
@@ -264,19 +271,19 @@ Use `state-manager.sh` to manage workflow states:
 
 ```bash
 # View current states
-.claude/hooks/state-manager.sh list
+hooks/state-manager.sh list
 
 # Mark action as complete
-.claude/hooks/state-manager.sh mark design-canvas
-.claude/hooks/state-manager.sh mark test-plan
-.claude/hooks/state-manager.sh mark code-simplifier
-.claude/hooks/state-manager.sh mark pr-review
-.claude/hooks/state-manager.sh mark unit-tests
-.claude/hooks/state-manager.sh mark e2e-tests
+hooks/state-manager.sh mark design-canvas
+hooks/state-manager.sh mark test-plan
+hooks/state-manager.sh mark code-simplifier
+hooks/state-manager.sh mark pr-review
+hooks/state-manager.sh mark unit-tests
+hooks/state-manager.sh mark e2e-tests
 
 # Clear state
-.claude/hooks/state-manager.sh clear <action>
-.claude/hooks/state-manager.sh clear-all
+hooks/state-manager.sh clear <action>
+hooks/state-manager.sh clear-all
 ```
 
 ## Required Claude Code Plugins
