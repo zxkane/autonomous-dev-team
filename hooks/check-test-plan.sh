@@ -57,7 +57,7 @@ You're creating a new implementation file. Per CLAUDE.md Step 2, the test-driven
 ### After Test Plan Created:
 Mark as complete:
 ```bash
-.claude/hooks/state-manager.sh mark test-plan
+hooks/state-manager.sh mark test-plan
 ```
 
 ### Skip Conditions:

@@ -73,7 +73,7 @@ You're committing on feature branch '$current_branch' but no design canvas was f
 2. **After creating design**:
    Mark as complete:
    \`\`\`bash
-   .claude/hooks/state-manager.sh mark design-canvas
+   hooks/state-manager.sh mark design-canvas
    \`\`\`
 
 ### Skip Conditions:
