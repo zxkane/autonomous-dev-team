@@ -14,10 +14,24 @@ REAL_GH=$(PATH="$CLEAN_PATH" command -v gh 2>/dev/null) || {
   exit 1
 }
 
-# Read latest token from file if available
-if [[ -n "$GH_TOKEN_FILE" && -s "$GH_TOKEN_FILE" ]]; then
-  export GH_TOKEN=$(cat "$GH_TOKEN_FILE")
-  export GITHUB_PERSONAL_ACCESS_TOKEN="$GH_TOKEN"
+# Read latest token from file if available.
+# Retry briefly if the file is momentarily empty (race during daemon refresh).
+# IMPORTANT: Never fall through without a token — the host `gh auth` session
+# may be logged in as a different user (e.g., the repo owner), which would
+# cause comments to be attributed to that user instead of the bot.
+if [[ -n "${GH_TOKEN_FILE:-}" ]]; then
+  for _attempt in 1 2 3; do
+    if [[ -s "$GH_TOKEN_FILE" ]]; then
+      export GH_TOKEN=$(cat "$GH_TOKEN_FILE")
+      export GITHUB_PERSONAL_ACCESS_TOKEN="$GH_TOKEN"
+      break
+    fi
+    sleep 1
+  done
+  if [[ -z "${GH_TOKEN:-}" ]]; then
+    echo "ERROR: GH_TOKEN_FILE is set but token file is empty after retries: $GH_TOKEN_FILE" >&2
+    exit 1
+  fi
 fi
 
 exec "$REAL_GH" "$@"
