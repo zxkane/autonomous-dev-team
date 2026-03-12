@@ -1,0 +1,113 @@
+# Dependencies
+node_modules/
+.pnp/
+.pnp.js
+
+# Build outputs
+dist/
+build/
+out/
+.next/
+.nuxt/
+.output/
+
+# Testing
+coverage/
+.nyc_output/
+playwright-report/
+test-results/
+
+# IDE and editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+
+# Environment variables
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Claude Code state (auto-managed)
+.claude/state/
+
+# Git worktrees
+.worktrees/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.temp
+
+# Cache
+.cache/
+.parcel-cache/
+.eslintcache
+.stylelintcache
+
+# Package manager locks (choose one to keep)
+# package-lock.json
+# yarn.lock
+# pnpm-lock.yaml
+
+# TypeScript
+*.tsbuildinfo
+
+# Debug
+.npm/
+.pnpm-debug.log*
+
+# Optional: Large files
+*.zip
+*.tar.gz
+*.rar
+
+# Secrets (never commit)
+*.pem
+*.key
+secrets/
+
+# Claude Code local files
+CLAUDE.local.md
+*.local.*
+.local.json
+
+# Agent state directories (Kiro, generic)
+.kiro/state/
+.agents/state/
+
+# skills.sh managed skills (installed via npx skills add)
+.agents/
+.agent/
+.kiro/skills/
+.trae/
+.windsurf/
+skills-lock.json
+
+# Autonomous pipeline config (contains project-specific values)
+scripts/autonomous.conf
