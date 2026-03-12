@@ -25,6 +25,7 @@ This skill wraps the standard github-workflow for autonomous execution. You are 
 5. Execute Steps 1-12 of github-workflow autonomously with these adaptations:
    - Step 1 (Design): Create design doc, skip user approval
    - **After each requirement implemented**: Mark checkbox (see "Marking Requirements Progress")
+   - Step 7 (PR creation): Trigger bot review if configured (see "Bot Review Integration")
    - Step 12 (Verification): Run verification, then STOP (don't wait for user merge)
 6. Post progress comments to the issue at each major milestone:
    - After design canvas created
@@ -119,6 +120,74 @@ git commit -m "apply: pre-existing workspace changes from issue #<number>"
 - If cherry-pick or apply fails due to conflicts, log a warning in the issue comment and proceed with normal development
 - If the branch does not exist, skip silently
 - Always continue with normal development after applying (or failing to apply) pre-existing changes
+
+## Bot Review Integration
+
+After creating a PR, the dev agent should trigger and handle any configured bot reviewers (e.g., Amazon Q Developer, Codex).
+
+### Trigger Bot Review
+
+Some bot reviewers ignore comments posted by GitHub App bot accounts. If your project uses `scripts/gh-as-user.sh`, use it to trigger bot reviews so the comment is attributed to a real user:
+
+```bash
+bash scripts/gh-as-user.sh pr comment {pr_number} --body "/q review"
+```
+
+> **Do NOT use the default `gh` wrapper** (`gh-with-token-refresh.sh`) for bot review triggers — it authenticates as a bot, which some reviewers ignore. All other `gh` operations should continue using the default `gh` wrapper.
+
+### Wait for Bot Review
+
+Poll for bot review to appear (timeout 3 minutes):
+
+```bash
+# Poll every 30 seconds for up to 3 minutes
+for i in $(seq 1 6); do
+  REVIEWS=$(gh api repos/{owner}/{repo}/pulls/{pr_number}/reviews \
+    --jq '[.[] | select(.user.login == "<bot-login>")] | length')
+  if [ "$REVIEWS" -gt 0 ]; then
+    echo "Bot review found"
+    break
+  fi
+  sleep 30
+done
+```
+
+### Handle Bot Review Findings
+
+After bot review appears, read and address all findings:
+
+1. **Read bot review comments**: Use `gh api repos/{owner}/{repo}/pulls/{pr_number}/comments` and filter by bot author
+2. **For each finding**:
+   - **Real issue**: fix it, commit, push
+   - **False positive**: reply explaining why, resolve the thread
+3. **Re-trigger** bot review via `bash scripts/gh-as-user.sh pr comment {pr_number} --body "<trigger command>"` if fixes were pushed
+4. **Iterate** until no unresolved bot findings remain
+
+If bot review does not appear within 3 minutes, proceed without it — the review agent will re-trigger bot review during its verification step.
+
+## Local E2E Verification (Before Push)
+
+Before pushing changes that modify E2E tests or UI components, verify the changes are sound:
+
+1. **If E2E tests were modified**, run a quick local check:
+   ```bash
+   # Verify TypeScript compilation of E2E tests (if using TypeScript)
+   bunx tsc --noEmit --project tsconfig.json
+
+   # Verify test helper imports are correct
+   grep -l "takeScreenshot" e2e/*.spec.ts
+   ```
+
+2. **Screenshot generation will be verified in CI** — ensure your Playwright config includes a JSON reporter and screenshot helpers save to a known directory. CI should upload these as artifacts.
+
+3. **Local dev server**: For local E2E testing:
+   ```bash
+   # Option A: Let Playwright start the dev server automatically
+   bunx playwright test
+
+   # Option B: Start dev server manually first
+   PLAYWRIGHT_BASE_URL=http://localhost:3000 bunx playwright test
+   ```
 
 ## Decision Making Guidelines
 
