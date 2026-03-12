@@ -101,5 +101,13 @@ CLAUDE.local.md
 .kiro/state/
 .agents/state/
 
+# skills.sh managed skills (installed via npx skills add)
+.agents/
+.agent/
+.kiro/skills/
+.trae/
+.windsurf/
+skills-lock.json
+
 # Autonomous pipeline config (contains project-specific values)
 scripts/autonomous.conf
