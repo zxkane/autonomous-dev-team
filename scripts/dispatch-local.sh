@@ -29,7 +29,7 @@ fi
 
 # Load config
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPO_ROOT="${SCRIPT_DIR}/../.."
+REPO_ROOT="${SCRIPT_DIR}/.."
 if [[ -f "${REPO_ROOT}/scripts/autonomous.conf" ]]; then
   source "${REPO_ROOT}/scripts/autonomous.conf"
 fi
