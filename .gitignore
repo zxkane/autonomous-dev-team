@@ -92,5 +92,14 @@ temp/
 *.key
 secrets/
 
+# Claude Code local files
+CLAUDE.local.md
+*.local.*
+.local.json
+
+# Agent state directories (Kiro, generic)
+.kiro/state/
+.agents/state/
+
 # Autonomous pipeline config (contains project-specific values)
 scripts/autonomous.conf
