@@ -71,7 +71,8 @@ LOG_FILE="/tmp/agent-${PROJECT_ID}-review-${ISSUE_NUMBER}.log"
 PID_FILE="/tmp/agent-${PROJECT_ID}-review-${ISSUE_NUMBER}.pid"
 
 # Create log file with restrictive permissions (sensitive agent output)
-install -m 600 /dev/null "$LOG_FILE" 2>/dev/null || true
+# Note: log file is created by nohup redirect in dispatch-local.sh.
+# Do NOT truncate it here (install -m 600 /dev/null would destroy nohup output).
 
 # Write PID for stale detection (reject symlinks to prevent redirect attacks)
 [[ -L "$PID_FILE" ]] && { echo "Error: PID file is a symlink — possible attack" >&2; exit 1; }
@@ -230,7 +231,10 @@ Quick reference:
    sleep 10
    gh pr checks ${PR_NUMBER} --watch --interval 30
    \`\`\`
-4. If rebase fails (conflicts) — FAIL the review with "[BLOCKING] Merge conflict with main" and exit
+4. If rebase fails (conflicts) — FAIL the review with "[BLOCKING] Merge conflict with main".
+   Include the list of conflicting files and step-by-step instructions for the dev agent:
+   \`git fetch origin main\`, \`git rebase origin/main\`, resolve conflicts, \`git rebase --continue\`,
+   \`git push --force-with-lease origin ${PR_BRANCH}\`. Then exit.
 5. If "UNKNOWN" — wait 10s and retry up to 3 times
 
 ## Review Checklist
@@ -241,11 +245,18 @@ Verify ALL of the following were completed:
 3. [ ] Test cases documented (docs/test-cases/)
 4. [ ] Unit tests written and passing
 5. [ ] E2E tests written/updated if UI changes
-6. [ ] code-simplifier was run
-7. [ ] pr-review agent was run
-8. [ ] CI checks all passing
+6. [ ] CI checks all passing
+$(if [[ "${AGENT_CMD:-claude}" != "kiro" ]]; then cat <<'CHECKLIST_EXTRA'
+7. [ ] code-simplifier review passed
+8. [ ] PR review agent review passed
 9. [ ] Reviewer bot findings addressed
 10. [ ] PR description follows template
+CHECKLIST_EXTRA
+else cat <<'CHECKLIST_KIRO'
+7. [ ] Reviewer bot findings addressed
+8. [ ] PR description follows template
+CHECKLIST_KIRO
+fi)
 
 ## Acceptance Criteria Verification — MANDATORY
 Read the issue body for an \`## Acceptance Criteria\` section. For EACH criterion:

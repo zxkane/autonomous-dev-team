@@ -1,7 +1,25 @@
 {
-  "name": "autonomous-dev-team",
+  "name": "autonomous-dev",
   "description": "Autonomous development agent with TDD workflow enforcement hooks",
   "prompt": "file://../../CLAUDE.md",
+  "tools": [
+    "fs_read",
+    "fs_write",
+    "execute_bash",
+    "use_aws",
+    "web_search",
+    "web_fetch",
+    "thinking"
+  ],
+  "allowedTools": [
+    "fs_read",
+    "fs_write",
+    "execute_bash",
+    "use_aws",
+    "web_search",
+    "web_fetch",
+    "thinking"
+  ],
   "resources": [
     "file://../../AGENTS.md",
     "skill://../../skills/*/SKILL.md"
@@ -25,16 +43,6 @@
       },
       {
         "matcher": "execute_bash",
-        "command": "hooks/check-code-simplifier.sh",
-        "timeout_ms": 5000
-      },
-      {
-        "matcher": "execute_bash",
-        "command": "hooks/check-pr-review.sh",
-        "timeout_ms": 5000
-      },
-      {
-        "matcher": "execute_bash",
         "command": "hooks/check-unit-tests.sh",
         "timeout_ms": 5000
       },
@@ -42,6 +50,11 @@
         "matcher": "execute_bash",
         "command": "hooks/warn-skip-verification.sh",
         "timeout_ms": 5000
+      },
+      {
+        "matcher": "execute_bash",
+        "command": "hooks/check-rebase-before-push.sh",
+        "timeout_ms": 10000
       },
       {
         "matcher": "fs_write",
@@ -52,17 +65,7 @@
     "postToolUse": [
       {
         "matcher": "execute_bash",
-        "command": "hooks/post-git-action-clear.sh commit code-simplifier",
-        "timeout_ms": 5000
-      },
-      {
-        "matcher": "execute_bash",
         "command": "hooks/post-git-action-clear.sh commit design-canvas",
-        "timeout_ms": 5000
-      },
-      {
-        "matcher": "execute_bash",
-        "command": "hooks/post-git-action-clear.sh push pr-review",
         "timeout_ms": 5000
       },
       {

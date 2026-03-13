@@ -112,6 +112,9 @@ Before starting the review, check whether the PR branch has merge conflicts with
 
 5. **If rebase fails** (merge conflicts that cannot be auto-resolved):
    ```bash
+   # Capture conflicting files before aborting
+   CONFLICT_FILES=$(git diff --name-only --diff-filter=U 2>/dev/null || echo "unknown")
+
    # Abort the rebase
    git rebase --abort
 
@@ -126,9 +129,14 @@ Before starting the review, check whether the PR branch has merge conflicts with
    Findings->Decision Gate: 1 blocking finding(s) -- FAIL.
 
    1. **[BLOCKING] Merge conflict with main** - The PR branch `<PR_BRANCH>` has conflicts
-      with `main` that require manual resolution.
-      - Conflicting files: <list files from rebase error output>
-      - Action: Rebase `<PR_BRANCH>` onto `main`, resolve conflicts, and force push.
+      with `main` that the review agent could not auto-resolve.
+      - Conflicting files: <list from CONFLICT_FILES>
+      - Dev agent must resolve these conflicts before re-review:
+        1. `git fetch origin main`
+        2. `git rebase origin/main`
+        3. Resolve conflicts in the listed files
+        4. `git rebase --continue`
+        5. `git push --force-with-lease origin <PR_BRANCH>`
    ```
    Post this on the issue and exit. The wrapper script will transition the issue to `pending-dev`.
 

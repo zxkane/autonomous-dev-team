@@ -171,10 +171,10 @@ gh issue list --repo "$REPO" --state open --limit 100 \
 
 For each found issue (respecting concurrency limit):
 
-**1. Check retry count** — before dispatching, count the number of `Agent Session Report (Dev)` comments on the issue to determine how many dev attempts have already been made:
+**1. Check retry count** — before dispatching, count the number of **failed** `Agent Session Report (Dev)` comments (exit code ≠ 0) on the issue. Successful dev completions (exit code 0) that were sent back by review do NOT count as retries:
 ```bash
 RETRY_COUNT=$(gh issue view ISSUE_NUM --repo "$REPO" --json comments \
-  -q '[.comments[] | select(.body | test("Agent Session Report \\(Dev\\)"))] | length')
+  -q '[.comments[] | select((.body | test("Agent Session Report \\(Dev\\)")) and (.body | test("Exit code: 0") | not))] | length')
 
 MAX_RETRIES="${MAX_RETRIES:-3}"
 
@@ -184,12 +184,12 @@ if [ "$RETRY_COUNT" -ge "$MAX_RETRIES" ]; then
     --remove-label "pending-dev" \
     --add-label "stalled"
   gh issue comment ISSUE_NUM --repo "$REPO" \
-    --body "Issue has exceeded the maximum retry limit ($MAX_RETRIES attempts). Marking as stalled. @${REPO_OWNER} please investigate manually."
+    --body "Issue has exceeded the maximum retry limit ($MAX_RETRIES failed attempts). Marking as stalled. @${REPO_OWNER} please investigate manually."
   continue
 fi
 ```
 
-If retry count exceeds `MAX_RETRIES` (default 3), add `stalled` label, remove `pending-dev`, post a comment, and **skip this issue**.
+If failed retry count exceeds `MAX_RETRIES` (default 3), add `stalled` label, remove `pending-dev`, post a comment, and **skip this issue**.
 
 **2.** Extract latest dev session ID from issue comments (search for `Dev Session ID:` — do NOT match `Review Session ID:`):
 ```bash

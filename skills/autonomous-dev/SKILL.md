@@ -527,15 +527,32 @@ When you need to make a decision that would normally require user input:
 
 ### Resume Awareness
 
-On resume (or new session for a previously started issue), check which requirements are already done:
+On resume (or new session for a previously started issue), perform these checks before writing code:
 
-1. Read the issue body: `gh issue view <ISSUE_NUMBER> --json body -q '.body'`
-2. Parse the `## Requirements` section for checkbox states
+1. **Read the issue body**: `gh issue view <ISSUE_NUMBER> --json body -q '.body'`
+2. **Parse the `## Requirements` section** for checkbox states
 3. Items marked `- [x]` are already implemented -- **skip them**
 4. Items marked `- [ ]` are remaining work -- implement these
-5. Verify the existing code in the worktree matches the checked items (quick sanity check)
+5. **Read review feedback from issue comments** -- look for "Review findings:" comments
+6. **Read PR inline review comments** -- these contain file-specific feedback from the review agent:
+   ```bash
+   # Find the PR linked to this issue
+   PR_NUM=$(gh pr list --repo <REPO> --state open --json number,body \
+     -q '[.[] | select(.body | test("#<ISSUE_NUMBER>"))] | .[0].number // empty')
 
-This prevents duplicate work when the dev agent crashes mid-implementation and is resumed by the dispatcher.
+   # Fetch inline review comments
+   gh api repos/<REPO>/pulls/$PR_NUM/comments \
+     --jq '.[] | "\(.path):\(.line // .original_line) — \(.body)"'
+   ```
+7. **Address ALL feedback** from both issue comments and PR inline comments
+8. **Reply to and resolve** each PR review thread after fixing:
+   ```bash
+   scripts/reply-to-comments.sh <owner> <repo> <pr> <comment_id> "Fixed in <commit>"
+   scripts/resolve-threads.sh <owner> <repo> <pr>
+   ```
+9. Verify the existing code in the worktree matches the checked items (quick sanity check)
+
+This prevents duplicate work and ensures review feedback is fully addressed on resume.
 
 ### Marking Requirements Progress
 

@@ -19,6 +19,7 @@ AGENT_CMD="${AGENT_CMD:-claude}"
 AGENT_DEV_MODEL="${AGENT_DEV_MODEL:-}"
 AGENT_REVIEW_MODEL="${AGENT_REVIEW_MODEL:-sonnet}"
 AGENT_PERMISSION_MODE="${AGENT_PERMISSION_MODE:-auto}"
+KIRO_AGENT_NAME="${KIRO_AGENT_NAME:-autonomous-dev}"
 
 # Run agent with a new session.
 # Args: $1=session_id, $2=prompt, $3=model (optional)
@@ -44,8 +45,10 @@ run_agent() {
     kiro)
       # Kiro CLI does not support named sessions (session_id is ignored).
       # Each invocation starts a new conversation in the current directory.
+      # --agent ensures the workspace agent (with TDD hooks) is used.
+      # Tool trust is handled by allowedTools in .kiro/agents/default.json.
       kiro-cli chat \
-        --trust-all-tools \
+        --agent "$KIRO_AGENT_NAME" \
         --no-interactive \
         ${model:+--model "$model"} \
         "$prompt"
@@ -73,15 +76,11 @@ resume_agent() {
         --output-format json
       ;;
     kiro)
-      # Kiro CLI --resume resumes the most recent conversation in the current
-      # directory (not by session_id). This is the closest equivalent to
-      # Claude Code's named session resume.
-      kiro-cli chat \
-        --trust-all-tools \
-        --no-interactive \
-        --resume \
-        ${model:+--model "$model"} \
-        "$prompt"
+      # Kiro CLI --resume cannot inject new review feedback effectively —
+      # the resumed context sees "all done" and exits immediately.
+      # Fall back to a new session so the full prompt (with review findings)
+      # is treated as fresh instructions.
+      run_agent "$session_id" "$prompt" "$model"
       ;;
     *)
       # Agents without resume support start a new session
