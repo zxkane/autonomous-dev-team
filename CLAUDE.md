@@ -385,6 +385,10 @@ project-root/
 ├── .claude/
 │   ├── settings.json            # Claude Code hooks configuration
 │   └── skills -> ../skills      # Symlink for Claude Code discovery
+├── .kiro/
+│   ├── agents/
+│   │   └── default.json         # Kiro CLI agent config (hooks + skill resources)
+│   └── skills -> ../skills      # Symlink for Kiro CLI discovery
 ├── hooks/                       # Workflow enforcement hooks
 │   ├── README.md                # Per-IDE setup instructions
 │   ├── lib.sh                   # Shared utility functions
