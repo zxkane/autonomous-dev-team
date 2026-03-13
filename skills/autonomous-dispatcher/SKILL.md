@@ -1,6 +1,12 @@
 ---
 name: autonomous-dispatcher
-description: Scans GitHub issues with 'autonomous' label and dispatches development/review tasks locally. Triggered by cron every 5 minutes.
+description: >
+  This skill should be used when dispatching autonomous development or review
+  tasks from GitHub issues. Covers scanning for new issues with the 'autonomous'
+  label, dispatching dev-new/dev-resume/review processes, dependency checking,
+  retry counting, stale process detection, and concurrency limiting. Use when
+  asked to "run the dispatcher", "scan for pending issues", "dispatch autonomous
+  tasks", "check stale agents", or "set up the dispatch cron".
 metadata: {"openclaw": {"requires": {"bins": ["gh", "jq"], "env": ["PROJECT_DIR"]}}}
 ---
 
@@ -42,6 +48,7 @@ This ensures all issue comments, label changes, and API calls appear as the conf
 - `REPO`: GitHub repo in `owner/repo` format (e.g., `myorg/myproject`)
 - `PROJECT_DIR`: Absolute path to the project root on the local machine
 - `MAX_CONCURRENT`: Max parallel tasks (default: `5`)
+- `MAX_RETRIES`: Max dev retry attempts before marking issue as `stalled` (default: `3`)
 - `PROJECT_ID`: Project identifier for log/PID files (default: `project`)
 - `DISPATCHER_APP_ID`: GitHub App ID for the dispatcher bot
 - `DISPATCHER_APP_PEM`: Path to the GitHub App private key PEM file
@@ -84,7 +91,7 @@ When triggered (cron every 5 minutes), execute the following steps IN ORDER:
 
 Count issues with labels `in-progress` OR `reviewing`:
 ```bash
-ACTIVE=$(gh issue list --repo "$REPO" --state open \
+ACTIVE=$(gh issue list --repo "$REPO" --state open --limit 100 \
   --label "autonomous" --json labels \
   -q '[.[] | select(.labels[].name | IN("in-progress","reviewing"))] | length')
 ```
@@ -94,32 +101,60 @@ If ACTIVE >= MAX_CONCURRENT (default 5), STOP. Log "Concurrency limit reached (A
 
 Find issues with `autonomous` label but NO state labels:
 ```bash
-gh issue list --repo "$REPO" --state open \
+gh issue list --repo "$REPO" --state open --limit 100 \
   --label "autonomous" --json number,labels,title \
   -q '[.[] | select(
     [.labels[].name] | (
       contains(["in-progress"]) or
       contains(["pending-review"]) or
       contains(["reviewing"]) or
-      contains(["pending-dev"])
+      contains(["pending-dev"]) or
+      contains(["stalled"]) or
+      contains(["approved"])
     ) | not
   )]'
 ```
 
 For each found issue (respecting concurrency limit):
-1. Add `in-progress` label
-2. Comment: `Dispatching autonomous development...`
-3. Dispatch via helper script:
+
+**1. Check Dependencies** — before dispatching, read the issue body and look for a `## Dependencies` section. Parse issue references (`#N`) from that section. For each referenced issue, check if it is closed:
+```bash
+# Extract dependency issue numbers from the issue body
+DEPS=$(gh issue view ISSUE_NUM --repo "$REPO" --json body -q '.body' \
+  | sed -n '/^## Dependencies/,/^## /p' \
+  | grep -oP '#\K[0-9]+')
+
+# Check if all dependencies are closed
+BLOCKED=false
+for DEP in $DEPS; do
+  STATE=$(gh issue view "$DEP" --repo "$REPO" --json state -q '.state')
+  if [ "$STATE" != "CLOSED" ]; then
+    BLOCKED=true
+    break
+  fi
+done
+
+if [ "$BLOCKED" = true ]; then
+  # Skip this issue — dependency not yet resolved
+  continue
+fi
+```
+
+If any dependency issue is still open, **skip this issue silently** (do not add labels or comment). It will be picked up in the next dispatch cycle after its dependencies are resolved.
+
+**2.** Add `in-progress` label
+**3.** Comment: `Dispatching autonomous development...`
+**4.** Dispatch via helper script:
 ```bash
 bash "$PROJECT_DIR/scripts/dispatch-local.sh" dev-new ISSUE_NUM
 ```
-4. Re-check concurrency after each dispatch
+**5.** Re-check concurrency after each dispatch
 
 ### Step 3: Scan for Review Tasks
 
 Find issues with `autonomous` + `pending-review` (no `reviewing`):
 ```bash
-gh issue list --repo "$REPO" --state open \
+gh issue list --repo "$REPO" --state open --limit 100 \
   --label "autonomous,pending-review" --json number,labels \
   -q '[.[] | select([.labels[].name] | contains(["reviewing"]) | not)]'
 ```
@@ -136,15 +171,41 @@ bash "$PROJECT_DIR/scripts/dispatch-local.sh" review ISSUE_NUM
 
 Find issues with `autonomous` + `pending-dev`:
 ```bash
-gh issue list --repo "$REPO" --state open \
+gh issue list --repo "$REPO" --state open --limit 100 \
   --label "autonomous,pending-dev" --json number,labels,comments
 ```
 
 For each found issue (respecting concurrency limit):
-1. Extract latest session ID from issue comments (search for "Session ID: `...")
-2. Remove `pending-dev`, add `in-progress`
-3. Comment: `Resuming development (session: SESSION_ID)...`
-4. Dispatch via helper script:
+
+**1. Check retry count** — before dispatching, count the number of **failed** `Agent Session Report (Dev)` comments (exit code ≠ 0) on the issue. Successful dev completions (exit code 0) that were sent back by review do NOT count as retries:
+```bash
+RETRY_COUNT=$(gh issue view ISSUE_NUM --repo "$REPO" --json comments \
+  -q '[.comments[] | select((.body | test("Agent Session Report \\(Dev\\)")) and (.body | test("Exit code: 0") | not))] | length')
+
+MAX_RETRIES="${MAX_RETRIES:-3}"
+
+if [ "$RETRY_COUNT" -ge "$MAX_RETRIES" ]; then
+  # Issue has exceeded retry limit — mark as stalled
+  gh issue edit ISSUE_NUM --repo "$REPO" \
+    --remove-label "pending-dev" \
+    --add-label "stalled"
+  gh issue comment ISSUE_NUM --repo "$REPO" \
+    --body "Issue has exceeded the maximum retry limit ($MAX_RETRIES failed attempts). Marking as stalled. @${REPO_OWNER} please investigate manually."
+  continue
+fi
+```
+
+If failed retry count exceeds `MAX_RETRIES` (default 3), add `stalled` label, remove `pending-dev`, post a comment, and **skip this issue**.
+
+**2.** Extract latest dev session ID from issue comments (search for `Dev Session ID:` — do NOT match `Review Session ID:`):
+```bash
+SESSION_ID=$(gh issue view ISSUE_NUM --repo "$REPO" --json comments \
+  -q '[.comments[].body | capture("Dev Session ID: `(?P<id>[a-zA-Z0-9_-]+)`"; "g") | .id] | last // empty')
+```
+
+**3.** Remove `pending-dev`, add `in-progress`
+**4.** Comment: `Resuming development (session: SESSION_ID)...`
+**5.** Dispatch via helper script:
 ```bash
 bash "$PROJECT_DIR/scripts/dispatch-local.sh" dev-resume ISSUE_NUM SESSION_ID
 ```
@@ -153,9 +214,17 @@ bash "$PROJECT_DIR/scripts/dispatch-local.sh" dev-resume ISSUE_NUM SESSION_ID
 
 Find issues with `in-progress` or `reviewing` that may be stuck.
 
-For each such issue, check if the CC process is still alive locally:
+For each such issue, check if the agent process is still alive locally. Use the correct PID file prefix based on the issue's current label:
+
+- `in-progress` issues use PID file: `/tmp/agent-${PROJECT_ID}-issue-ISSUE_NUM.pid`
+- `reviewing` issues use PID file: `/tmp/agent-${PROJECT_ID}-review-ISSUE_NUM.pid`
+
 ```bash
-kill -0 $(cat /tmp/cc-${PROJECT_ID}-issue-ISSUE_NUM.pid 2>/dev/null) 2>/dev/null && echo ALIVE || echo DEAD
+# For in-progress issues:
+kill -0 $(cat /tmp/agent-${PROJECT_ID}-issue-ISSUE_NUM.pid 2>/dev/null) 2>/dev/null && echo ALIVE || echo DEAD
+
+# For reviewing issues:
+kill -0 $(cat /tmp/agent-${PROJECT_ID}-review-ISSUE_NUM.pid 2>/dev/null) 2>/dev/null && echo ALIVE || echo DEAD
 ```
 
 If DEAD and issue still has `in-progress`:
@@ -182,12 +251,13 @@ openclaw cron add \
 | Label | Color | Description |
 |-------|-------|-------------|
 | `autonomous` | `#0E8A16` | Issue should be processed by autonomous pipeline |
-| `in-progress` | `#FBCA04` | CC is actively developing |
+| `in-progress` | `#FBCA04` | Agent is actively developing |
 | `pending-review` | `#1D76DB` | Development complete, awaiting review |
-| `reviewing` | `#5319E7` | CC is actively reviewing |
+| `reviewing` | `#5319E7` | Agent is actively reviewing |
 | `pending-dev` | `#E99695` | Review failed, needs more development |
 | `approved` | `#0E8A16` | Review passed. PR merged (or awaiting manual merge if `no-auto-close` present) |
 | `no-auto-close` | `#d4c5f9` | Used with `autonomous` — skip auto-merge after review passes, requires manual approval |
+| `stalled` | `#B60205` | Issue exceeded max retry attempts; requires manual investigation |
 
 ## Model Strategy
 

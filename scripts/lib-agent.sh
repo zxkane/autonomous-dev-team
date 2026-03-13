@@ -9,11 +9,17 @@ if [[ -f "${_LIB_AGENT_DIR}/autonomous.conf" ]]; then
   source "${_LIB_AGENT_DIR}/autonomous.conf"
 fi
 
+# Ensure PROJECT_DIR is an absolute path to the repo root.
+# autonomous.conf may use a relative BASH_SOURCE trick that can resolve
+# incorrectly when sourced indirectly. Fall back to _LIB_AGENT_DIR/..
+PROJECT_DIR="${PROJECT_DIR:-$(cd "${_LIB_AGENT_DIR}/.." && pwd)}"
+
 # Agent configuration (overridable via env or autonomous.conf)
 AGENT_CMD="${AGENT_CMD:-claude}"
 AGENT_DEV_MODEL="${AGENT_DEV_MODEL:-}"
 AGENT_REVIEW_MODEL="${AGENT_REVIEW_MODEL:-sonnet}"
 AGENT_PERMISSION_MODE="${AGENT_PERMISSION_MODE:-auto}"
+KIRO_AGENT_NAME="${KIRO_AGENT_NAME:-autonomous-dev}"
 
 # Run agent with a new session.
 # Args: $1=session_id, $2=prompt, $3=model (optional)
@@ -24,7 +30,8 @@ run_agent() {
 
   case "$AGENT_CMD" in
     claude)
-      "$AGENT_CMD" --session-id "$session_id" \
+      # Unset CLAUDECODE to allow launching from within an existing session
+      env -u CLAUDECODE "$AGENT_CMD" --session-id "$session_id" \
         --permission-mode "$AGENT_PERMISSION_MODE" \
         ${model:+--model "$model"} \
         -p "$prompt" \
@@ -34,6 +41,17 @@ run_agent() {
       "$AGENT_CMD" \
         ${model:+--model "$model"} \
         -p "$prompt"
+      ;;
+    kiro)
+      # Kiro CLI does not support named sessions (session_id is ignored).
+      # Each invocation starts a new conversation in the current directory.
+      # --agent ensures the workspace agent (with TDD hooks) is used.
+      # Tool trust is handled by allowedTools in .kiro/agents/default.json.
+      kiro-cli chat \
+        --agent "$KIRO_AGENT_NAME" \
+        --no-interactive \
+        ${model:+--model "$model"} \
+        "$prompt"
       ;;
     *)
       "$AGENT_CMD" -p "$prompt"
@@ -50,11 +68,19 @@ resume_agent() {
 
   case "$AGENT_CMD" in
     claude)
-      "$AGENT_CMD" --resume "$session_id" \
+      # Unset CLAUDECODE to allow launching from within an existing session
+      env -u CLAUDECODE "$AGENT_CMD" --resume "$session_id" \
         --permission-mode "$AGENT_PERMISSION_MODE" \
         ${model:+--model "$model"} \
         -p "$prompt" \
         --output-format json
+      ;;
+    kiro)
+      # Kiro CLI --resume cannot inject new review feedback effectively —
+      # the resumed context sees "all done" and exits immediately.
+      # Fall back to a new session so the full prompt (with review findings)
+      # is treated as fresh instructions.
+      run_agent "$session_id" "$prompt" "$model"
       ;;
     *)
       # Agents without resume support start a new session

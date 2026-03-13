@@ -43,6 +43,7 @@ IDEs without hook support (Cursor, Windsurf, Gemini CLI, etc.) rely on skill ins
 | `check-test-plan.sh` | PreToolUse | Write/Edit | Reminds about test plan before code changes |
 | `check-unit-tests.sh` | PreToolUse | Bash | Warns about unrun unit tests |
 | `warn-skip-verification.sh` | PreToolUse | Bash | Warns about --no-verify usage |
+| `check-rebase-before-push.sh` | PreToolUse | Bash | Blocks push if branch is behind origin/main |
 | `post-git-action-clear.sh` | PostToolUse | Bash | Clears state after git actions |
 | `post-git-push.sh` | PostToolUse | Bash | Post-push reminder for CI/E2E |
 | `post-file-edit-reminder.sh` | PostToolUse | Write/Edit | Reminds to run tests after edits |

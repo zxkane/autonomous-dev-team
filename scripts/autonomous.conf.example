@@ -30,6 +30,7 @@ DISPATCHER_APP_PEM=""
 
 # === Concurrency ===
 MAX_CONCURRENT=5
+MAX_RETRIES=3
 
 # === Dev Agent ===
 DEV_SKILL_CMD="/autonomous-dev"

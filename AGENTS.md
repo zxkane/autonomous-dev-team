@@ -1,8 +1,16 @@
 # Autonomous Dev Team
 
-## Available Skills
+## Install Skills
 
-Install via: `npx skills add zxkane/autonomous-dev-team`
+Install all skills into any of 40+ supported coding agents:
+
+```bash
+npx skills add zxkane/autonomous-dev-team
+```
+
+Supports Claude Code, Cursor, Windsurf, Gemini CLI, Kiro CLI, and [more](https://skills.sh).
+
+## Available Skills
 
 ### autonomous-dev
 TDD development workflow with git worktree isolation, design canvas,
@@ -27,12 +35,12 @@ requests and bug reports.
 1. Design -> 2. Worktree -> 3. Tests -> 4. Implement -> 5. Verify ->
 6. Review -> 7. PR -> 8. CI -> 9. E2E -> 10. Merge
 
+## Hooks
+
+Optional workflow enforcement hooks in `hooks/`. Supported by Claude Code
+and Kiro CLI. See `hooks/README.md` for per-agent setup.
+
 ## Scripts
 
 Supporting scripts in `scripts/` provide agent CLI abstraction,
 GitHub authentication, and pipeline utilities.
-
-## Hooks
-
-Optional workflow enforcement hooks in `hooks/`. See `hooks/README.md`
-for IDE-specific setup.

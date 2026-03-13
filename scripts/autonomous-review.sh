@@ -1,5 +1,5 @@
 #!/bin/bash
-# autonomous-review.sh — Wrapper for CC autonomous review tasks.
+# autonomous-review.sh — Wrapper for autonomous review agent tasks.
 #
 # Reviews a PR linked to an issue, then either merges (pass) or sends back (fail).
 # Uses a lighter model by default to avoid quota contention with dev tasks.
@@ -67,11 +67,12 @@ fi
 # Ensure we're in the project directory (needed when called directly, not just via SSM)
 cd "$PROJECT_DIR" || { echo "Error: cannot cd to $PROJECT_DIR" >&2; exit 1; }
 
-LOG_FILE="/tmp/cc-${PROJECT_ID}-review-${ISSUE_NUMBER}.log"
-PID_FILE="/tmp/cc-${PROJECT_ID}-review-${ISSUE_NUMBER}.pid"
+LOG_FILE="/tmp/agent-${PROJECT_ID}-review-${ISSUE_NUMBER}.log"
+PID_FILE="/tmp/agent-${PROJECT_ID}-review-${ISSUE_NUMBER}.pid"
 
 # Create log file with restrictive permissions (sensitive agent output)
-install -m 600 /dev/null "$LOG_FILE" 2>/dev/null || true
+# Note: log file is created by nohup redirect in dispatch-local.sh.
+# Do NOT truncate it here (install -m 600 /dev/null would destroy nohup output).
 
 # Write PID for stale detection (reject symlinks to prevent redirect attacks)
 [[ -L "$PID_FILE" ]] && { echo "Error: PID file is a symlink — possible attack" >&2; exit 1; }
@@ -82,8 +83,45 @@ echo $$ > "$PID_FILE"
 # ---------------------------------------------------------------------------
 log() { echo "[autonomous-review] $(date -u +%H:%M:%S) $*"; }
 
+# Track whether normal result parsing completed (set at end of script)
+RESULT_PARSED=false
+
 cleanup() {
+  local exit_code=$?
+
+  # Cleanup PID file always
   rm -f "$PID_FILE" 2>/dev/null || true
+
+  # If result was already parsed by the main script, labels are handled there
+  if [[ "$RESULT_PARSED" == "true" ]]; then
+    cleanup_github_auth
+    return
+  fi
+
+  # Crash path: review agent died before parsing results — transition labels
+  if [[ $exit_code -ne 0 ]]; then
+    log "Review process crashed (exit $exit_code). Updating issue labels..."
+
+    # Refresh token for cleanup (app mode)
+    if [[ "$GH_AUTH_MODE" == "app" ]]; then
+      if command -v get_gh_app_token &>/dev/null; then
+        GH_TOKEN=$(get_gh_app_token "${REVIEW_AGENT_APP_ID}" "${REVIEW_AGENT_APP_PEM}" "$REPO_OWNER" "$REPO_NAME") || {
+          log "WARNING: Failed to refresh GitHub App token for cleanup"
+        }
+        export GH_TOKEN
+        export GITHUB_PERSONAL_ACCESS_TOKEN="$GH_TOKEN"
+      fi
+    fi
+
+    gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
+      --body "Review process crashed (exit code: ${exit_code}). Moving back to development for retry." 2>/dev/null || true
+    gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
+      --remove-label "reviewing" \
+      --add-label "pending-dev" 2>/dev/null || true
+
+    log "Issue #${ISSUE_NUMBER} moved to pending-dev due to crash."
+  fi
+
   cleanup_github_auth
 }
 trap cleanup EXIT
@@ -166,6 +204,8 @@ fi
 PR_BRANCH=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefName -q '.headRefName' 2>/dev/null || true)
 log "PR branch: ${PR_BRANCH:-UNKNOWN}"
 
+SESSION_ID=$(uuidgen)
+
 PROMPT="$(cat <<EOF
 You are reviewing PR #${PR_NUMBER} for issue #${ISSUE_NUMBER} in the ${REPO} project.
 PR branch: ${PR_BRANCH:-UNKNOWN}
@@ -191,7 +231,10 @@ Quick reference:
    sleep 10
    gh pr checks ${PR_NUMBER} --watch --interval 30
    \`\`\`
-4. If rebase fails (conflicts) — FAIL the review with "[BLOCKING] Merge conflict with main" and exit
+4. If rebase fails (conflicts) — FAIL the review with "[BLOCKING] Merge conflict with main".
+   Include the list of conflicting files and step-by-step instructions for the dev agent:
+   \`git fetch origin main\`, \`git rebase origin/main\`, resolve conflicts, \`git rebase --continue\`,
+   \`git push --force-with-lease origin ${PR_BRANCH}\`. Then exit.
 5. If "UNKNOWN" — wait 10s and retry up to 3 times
 
 ## Review Checklist
@@ -202,19 +245,36 @@ Verify ALL of the following were completed:
 3. [ ] Test cases documented (docs/test-cases/)
 4. [ ] Unit tests written and passing
 5. [ ] E2E tests written/updated if UI changes
-6. [ ] code-simplifier was run
-7. [ ] pr-review agent was run
-8. [ ] CI checks all passing
+6. [ ] CI checks all passing
+$(if [[ "${AGENT_CMD:-claude}" != "kiro" ]]; then cat <<'CHECKLIST_EXTRA'
+7. [ ] code-simplifier review passed
+8. [ ] PR review agent review passed
 9. [ ] Reviewer bot findings addressed
 10. [ ] PR description follows template
+CHECKLIST_EXTRA
+else cat <<'CHECKLIST_KIRO'
+7. [ ] Reviewer bot findings addressed
+8. [ ] PR description follows template
+CHECKLIST_KIRO
+fi)
+
+## Acceptance Criteria Verification — MANDATORY
+Read the issue body for an \`## Acceptance Criteria\` section. For EACH criterion:
+1. Verify whether the PR implementation satisfies it (check code, tests, build output)
+2. If verified, mark the checkbox as complete using the mark-issue-checkbox script:
+   \`\`\`bash
+   bash scripts/mark-issue-checkbox.sh ${REPO_OWNER} ${REPO_NAME} ${ISSUE_NUMBER} "the exact checkbox text"
+   \`\`\`
+3. If NOT verified, leave unchecked and include it in your review findings
 
 ## Review Process
 1. Read the issue body to understand requirements
 2. Read the PR diff to verify implementation
-3. Check that CI checks are passing: gh pr checks ${PR_NUMBER}
-4. Verify test coverage and quality
-5. Check for security issues, code quality, and best practices
-6. Trigger and verify Amazon Q Developer review (see below)
+3. Verify acceptance criteria (see above)
+4. Check that CI checks are passing: gh pr checks ${PR_NUMBER}
+5. Verify test coverage and quality
+6. Check for security issues, code quality, and best practices
+7. Trigger and verify Amazon Q Developer review (see below)
 
 ## Amazon Q Developer Review — MANDATORY
 
@@ -350,7 +410,7 @@ After thorough review:
 - If ALL checklist items pass AND code quality is good$(if [[ "${E2E_ENABLED:-false}" == "true" ]]; then echo " AND all E2E tests pass"; fi):
   Post a comment on issue #${ISSUE_NUMBER} with:
   "Review PASSED - All checklist items verified, code quality good.$(if [[ "${E2E_ENABLED:-false}" == "true" ]]; then echo " E2E verification completed."; fi)
-  Session: \`${SESSION_ID}\`"
+  Review Session: \`${SESSION_ID}\`"
   Then exit.
 
 - If ANY item fails$(if [[ "${E2E_ENABLED:-false}" == "true" ]]; then echo " OR any E2E test fails OR preview URL is unavailable"; fi):
@@ -358,7 +418,7 @@ After thorough review:
   "Review findings:"
   followed by a numbered list of each failing item with specific remediation instructions.$(if [[ "${E2E_ENABLED:-false}" == "true" ]]; then echo "
   Include E2E failure details with screenshot evidence."; fi)
-  End the comment with: "Session: \`${SESSION_ID}\`"
+  End the comment with: "Review Session: \`${SESSION_ID}\`"
   Then exit.
 
 IMPORTANT: Work autonomously. Be thorough but fair. Focus on correctness and compliance.
@@ -367,9 +427,8 @@ EOF
 )"
 
 # ---------------------------------------------------------------------------
-# Run CC review
+# Run review agent
 # ---------------------------------------------------------------------------
-SESSION_ID=$(uuidgen)
 log "Starting review session: ${SESSION_ID} (model: ${AGENT_REVIEW_MODEL:-sonnet})"
 
 # Export E2E credentials as env vars (not in prompt) for agent to read at runtime
@@ -379,11 +438,11 @@ if [[ "${E2E_ENABLED:-false}" == "true" ]]; then
 fi
 
 set +e
-run_agent "$SESSION_ID" "$PROMPT" "${AGENT_REVIEW_MODEL:-sonnet}" 2>&1 | tee "$LOG_FILE"
-CC_EXIT=${PIPESTATUS[0]}
+run_agent "$SESSION_ID" "$PROMPT" "${AGENT_REVIEW_MODEL:-sonnet}" 2>&1
+AGENT_EXIT=$?
 set -e
 
-log "Review CC exited with code: $CC_EXIT"
+log "Review agent exited with code: $AGENT_EXIT"
 
 # ---------------------------------------------------------------------------
 # Parse result and update issue/PR state
@@ -399,14 +458,14 @@ for _poll_attempt in $(seq 1 6); do
   # SECURITY: Filter by the current session ID to prevent verdict spoofing
   # from other commenters (dev agent, external users).
   LATEST_COMMENT=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json comments \
-    -q "[.comments[] | select((.body | test(\"Review PASSED|Review findings:\"; \"i\")) and (.body | test(\"Session.*${SESSION_ID}\")))] | last | .body" 2>/dev/null || true)
+    -q "[.comments[] | select((.body | test(\"Review PASSED|Review findings:\"; \"i\")) and (.body | test(\"Review Session.*${SESSION_ID}\")))] | last | .body" 2>/dev/null || true)
   if [[ -n "$LATEST_COMMENT" ]]; then
     break
   fi
   log "Waiting for review comment to appear (attempt ${_poll_attempt}/6)..."
 done
 
-if echo "$LATEST_COMMENT" | grep -qi "Review PASSED"; then
+if echo "$LATEST_COMMENT" | head -1 | grep -qi "^Review PASSED"; then
   log "Review PASSED for PR #${PR_NUMBER}."
 
   # Formal PR approval from review agent
@@ -469,10 +528,10 @@ if echo "$LATEST_COMMENT" | grep -qi "Review PASSED"; then
 else
   log "Review FAILED or inconclusive. Sending back to dev."
 
-  # If CC crashed without posting a comment, add a fallback
-  if [[ $CC_EXIT -ne 0 ]] && [[ -z "$LATEST_COMMENT" ]]; then
+  # If agent crashed without posting a comment, add a fallback
+  if [[ $AGENT_EXIT -ne 0 ]] && [[ -z "$LATEST_COMMENT" ]]; then
     gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
-      --body "Review process encountered an error (CC exit code: ${CC_EXIT}). Moving back to development for investigation." 2>/dev/null || true
+      --body "Review process encountered an error (agent exit code: ${AGENT_EXIT}). Moving back to development for investigation." 2>/dev/null || true
   fi
 
   gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
@@ -482,5 +541,6 @@ else
   log "Issue #${ISSUE_NUMBER} moved to pending-dev."
 fi
 
+RESULT_PARSED=true
 log "Review complete."
 exit 0

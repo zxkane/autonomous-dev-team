@@ -1,19 +1,61 @@
 # Autonomous Dev Team
 
-A fully automated development pipeline that turns GitHub issues into merged pull requests — no human intervention required. Powered by [**OpenClaw**](https://github.com/OpenClaw/OpenClaw) as the orchestration layer, it scans for issues labeled `autonomous`, dispatches a **Dev Agent** to implement the feature with tests in an isolated worktree, and hands off to a **Review Agent** for code review with optional E2E verification. The entire cycle runs unattended on a cron schedule.
+A fully automated development pipeline that turns GitHub issues into merged pull requests — no human intervention required. It scans for issues labeled `autonomous`, dispatches a **Dev Agent** to implement the feature with tests in an isolated worktree, and hands off to a **Review Agent** for code review with optional E2E verification. The entire cycle runs unattended on a cron schedule.
 
 Supports multiple coding agent CLIs — Claude Code, Codex CLI, and Kiro CLI — with a pluggable agent abstraction layer.
 
-## Install as Skills
+## Getting Started
 
-Install these skills into any supported coding agent:
+### Option A: Install as Portable Skills (Recommended)
+
+Install the skills into **any** of 40+ supported coding agents with a single command:
 
 ```bash
 npx skills add zxkane/autonomous-dev-team
 ```
 
-Supports 40+ agents including Claude Code, Cursor, Windsurf, Gemini CLI,
-Kiro CLI, and more. See [skills.sh](https://skills.sh) for the full ecosystem.
+This installs the following skills into your agent:
+
+| Skill | Description |
+|-------|-------------|
+| **autonomous-dev** | TDD workflow with git worktree isolation, design canvas, test-first development, code review, and CI verification |
+| **autonomous-review** | PR code review with checklist verification, merge conflict resolution, E2E testing, and auto-merge |
+| **autonomous-dispatcher** | GitHub issue scanner that dispatches dev and review agents on a cron schedule |
+| **create-issue** | Structured GitHub issue creation with templates, autonomous label guidance, and workspace change attachment |
+
+Supported agents include Claude Code, Cursor, Windsurf, Gemini CLI, Kiro CLI, and [many more](https://skills.sh). See the [skills.sh docs](https://skills.sh/docs) for the full list and usage guide.
+
+### Option B: Use as GitHub Template (Full Pipeline)
+
+For the complete autonomous pipeline — including hooks, wrapper scripts, dispatcher cron, and GitHub App auth:
+
+1. **Clone and configure**:
+   ```bash
+   gh repo create my-project --template zxkane/autonomous-dev-team
+   cd my-project
+   cp scripts/autonomous.conf.example scripts/autonomous.conf
+   # Edit autonomous.conf — set REPO, PROJECT_DIR, agent CLI, etc.
+   ```
+
+2. **Set up GitHub labels**:
+   ```bash
+   bash scripts/setup-labels.sh owner/repo
+   ```
+
+3. **Install [OpenClaw](https://github.com/OpenClaw/OpenClaw)** and set up the dispatcher cron:
+   ```bash
+   # Install OpenClaw (the orchestration engine)
+   # See https://github.com/OpenClaw/OpenClaw for installation
+
+   # Schedule the dispatcher to run every 5 minutes
+   */5 * * * * cd /path/to/project && openclaw run skills/autonomous-dispatcher/SKILL.md
+   ```
+
+4. **Create an issue** with the `autonomous` label and watch the pipeline work — the dispatcher spawns agents, tracks progress via labels, and merges the PR when review passes.
+
+#### GitHub App Authentication (Optional)
+
+For production use with separate bot identities per agent, set up GitHub Apps. See `docs/github-app-setup.md` for the full guide.
 
 ## How It Works
 
@@ -102,38 +144,13 @@ The dispatcher is an [OpenClaw](https://github.com/OpenClaw/OpenClaw) skill that
 |-----------|---------|-------------|--------|--------|
 | Claude Code | `claude` | `--session-id` | `--resume` | Full support |
 | Codex CLI | `codex` | `-p` | (falls back to new) | Basic support |
-| Kiro CLI | `kiro` | `-p` | (falls back to new) | Planned |
+| Kiro CLI | `kiro` | `--agent` | (falls back to new) | Basic support |
 
 Configure via `AGENT_CMD` in `scripts/autonomous.conf`.
 
-## Quick Start
-
-1. **Clone and configure**:
-   ```bash
-   gh repo create my-project --template zxkane/autonomous-dev-team
-   cd my-project
-   cp scripts/autonomous.conf.example scripts/autonomous.conf
-   # Edit autonomous.conf — set REPO, PROJECT_DIR, agent CLI, etc.
-   ```
-
-2. **Install [OpenClaw](https://github.com/OpenClaw/OpenClaw)** and set up the dispatcher cron:
-   ```bash
-   # Install OpenClaw (the orchestration engine)
-   # See https://github.com/OpenClaw/OpenClaw for installation
-
-   # Schedule the dispatcher to run every 5 minutes
-   */5 * * * * cd /path/to/project && openclaw run skills/autonomous-dispatcher/SKILL.md
-   ```
-
-3. **Create an issue** with the `autonomous` label and watch the pipeline work — OpenClaw dispatches agents, tracks progress via labels, and merges the PR when review passes.
-
-### GitHub App Authentication (Optional)
-
-For production use with separate bot identities per agent, set up GitHub Apps. See `docs/github-app-setup.md` for the full guide.
-
 ## Development Workflow (Hook System)
 
-Beyond autonomous mode, this template also provides a **hook-enforced development workflow** for interactive Claude Code sessions:
+Beyond autonomous mode, this template also provides a **hook-enforced development workflow** for interactive coding agent sessions:
 
 ```
 Step 0: Prerequisites (Hook Enforced)
@@ -146,9 +163,9 @@ Step 3: Test Cases (TDD) → Step 4: Implementation
     ↓
 Step 5: Unit Tests Pass → Step 6: code-simplifier review → commit
     ↓
-Step 7: pr-review agent → push → Step 8: Wait for CI
+Step 7: pr-review agent → rebase check → push → Step 8: Wait for CI
     ↓
-Step 9: E2E Tests (Chrome DevTools) → ✅ Peer Review
+Step 9: E2E Tests (Chrome DevTools) → Peer Review
 ```
 
 See `CLAUDE.md` for detailed step-by-step instructions.
@@ -158,9 +175,14 @@ See `CLAUDE.md` for detailed step-by-step instructions.
 ```
 .
 ├── CLAUDE.md                     # Project config and workflow documentation
+├── AGENTS.md                    # Cross-platform skill discovery
 ├── .claude/
 │   ├── settings.json            # Claude Code hooks configuration
 │   └── skills -> ../skills      # Symlink to top-level skills/
+├── .kiro/
+│   ├── agents/
+│   │   └── default.json         # Kiro CLI agent config (hooks + tools)
+│   └── skills -> ../skills      # Symlink for Kiro CLI discovery
 ├── hooks/                       # Hook scripts (project root)
 │   ├── lib.sh                   # Shared utility functions
 │   ├── state-manager.sh         # Workflow state management
@@ -171,11 +193,12 @@ See `CLAUDE.md` for detailed step-by-step instructions.
 │   ├── check-code-simplifier.sh # Code simplification check
 │   ├── check-pr-review.sh       # PR review check
 │   ├── check-unit-tests.sh      # Unit tests check
-│   ├── warn-skip-verification.sh    # --no-verify warning
-│   ├── post-file-edit-reminder.sh   # Post-edit reminder
-│   ├── post-git-action-clear.sh     # Git action state cleanup
-│   ├── post-git-push.sh            # Post-push verification reminder
-│   └── verify-completion.sh        # Task completion verification
+│   ├── check-rebase-before-push.sh    # Rebase check before push
+│   ├── warn-skip-verification.sh      # --no-verify warning
+│   ├── post-file-edit-reminder.sh     # Post-edit reminder
+│   ├── post-git-action-clear.sh       # Git action state cleanup
+│   ├── post-git-push.sh              # Post-push verification reminder
+│   └── verify-completion.sh          # Task completion verification
 ├── skills/                      # Agent skills (portable, skills.sh compatible)
 │   ├── autonomous-dev/          # Development workflow skill
 │   │   ├── SKILL.md             # Main skill definition
@@ -184,8 +207,10 @@ See `CLAUDE.md` for detailed step-by-step instructions.
 │   │       └── review-commands.md     # GitHub CLI & GraphQL commands
 │   ├── autonomous-review/       # Autonomous review skill
 │   │   └── SKILL.md             # Review agent instructions
-│   └── autonomous-dispatcher/   # OpenClaw dispatcher skill
-│       └── SKILL.md             # Dispatcher instructions
+│   ├── autonomous-dispatcher/   # OpenClaw dispatcher skill
+│   │   └── SKILL.md             # Dispatcher instructions
+│   └── create-issue/            # Issue creation skill
+│       └── SKILL.md             # Issue creation instructions
 ├── scripts/                     # Pipeline and utility scripts
 │   ├── autonomous.conf.example  # Configuration template
 │   ├── autonomous-dev.sh        # Dev agent wrapper
@@ -200,6 +225,7 @@ See `CLAUDE.md` for detailed step-by-step instructions.
 │   ├── mark-issue-checkbox.sh   # Mark issue checkboxes
 │   ├── reply-to-comments.sh     # Reply to PR review comments
 │   ├── resolve-threads.sh       # Batch resolve review threads
+│   ├── setup-labels.sh          # Create GitHub labels for the pipeline
 │   └── upload-screenshot.sh     # Upload screenshots to issues
 ├── docs/
 │   ├── autonomous-pipeline.md   # Pipeline overview documentation
@@ -213,14 +239,6 @@ See `CLAUDE.md` for detailed step-by-step instructions.
 └── .github/                     # (CI workflow needs manual setup)
 ```
 
-## Documentation
-
-- **Pipeline overview**: `docs/autonomous-pipeline.md`
-- **GitHub App setup**: `docs/github-app-setup.md`
-- **E2E config template**: `docs/templates/e2e-config-template.md`
-- **Dispatcher skill**: `skills/autonomous-dispatcher/SKILL.md`
-- **CI setup**: `docs/github-actions-setup.md`
-
 ## Hook Reference
 
 ### Enforcement Hooks (Blocking)
@@ -231,6 +249,7 @@ See `CLAUDE.md` for detailed step-by-step instructions.
 | block-commit-outside-worktree | git commit outside worktree | **Blocks** commits in main workspace |
 | check-code-simplifier | git commit | **Blocks** unreviewed commits |
 | check-pr-review | git push | **Blocks** unreviewed pushes |
+| check-rebase-before-push | git push | **Blocks** push if branch is behind origin/main |
 
 ### Reminder Hooks (Non-Blocking)
 
@@ -254,6 +273,14 @@ See `CLAUDE.md` for detailed step-by-step instructions.
 | Hook | Trigger | Behavior |
 |------|---------|----------|
 | verify-completion | Task end | **Blocks** tasks without verification |
+
+## Documentation
+
+- **Pipeline overview**: `docs/autonomous-pipeline.md`
+- **GitHub App setup**: `docs/github-app-setup.md`
+- **E2E config template**: `docs/templates/e2e-config-template.md`
+- **Dispatcher skill**: `skills/autonomous-dispatcher/SKILL.md`
+- **CI setup**: `docs/github-actions-setup.md`
 
 ## MCP Tool Integration
 
