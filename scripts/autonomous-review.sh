@@ -1,5 +1,5 @@
 #!/bin/bash
-# autonomous-review.sh — Wrapper for CC autonomous review tasks.
+# autonomous-review.sh — Wrapper for autonomous review agent tasks.
 #
 # Reviews a PR linked to an issue, then either merges (pass) or sends back (fail).
 # Uses a lighter model by default to avoid quota contention with dev tasks.
@@ -67,8 +67,8 @@ fi
 # Ensure we're in the project directory (needed when called directly, not just via SSM)
 cd "$PROJECT_DIR" || { echo "Error: cannot cd to $PROJECT_DIR" >&2; exit 1; }
 
-LOG_FILE="/tmp/cc-${PROJECT_ID}-review-${ISSUE_NUMBER}.log"
-PID_FILE="/tmp/cc-${PROJECT_ID}-review-${ISSUE_NUMBER}.pid"
+LOG_FILE="/tmp/agent-${PROJECT_ID}-review-${ISSUE_NUMBER}.log"
+PID_FILE="/tmp/agent-${PROJECT_ID}-review-${ISSUE_NUMBER}.pid"
 
 # Create log file with restrictive permissions (sensitive agent output)
 install -m 600 /dev/null "$LOG_FILE" 2>/dev/null || true
@@ -203,6 +203,8 @@ fi
 PR_BRANCH=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefName -q '.headRefName' 2>/dev/null || true)
 log "PR branch: ${PR_BRANCH:-UNKNOWN}"
 
+SESSION_ID=$(uuidgen)
+
 PROMPT="$(cat <<EOF
 You are reviewing PR #${PR_NUMBER} for issue #${ISSUE_NUMBER} in the ${REPO} project.
 PR branch: ${PR_BRANCH:-UNKNOWN}
@@ -245,13 +247,23 @@ Verify ALL of the following were completed:
 9. [ ] Reviewer bot findings addressed
 10. [ ] PR description follows template
 
+## Acceptance Criteria Verification — MANDATORY
+Read the issue body for an \`## Acceptance Criteria\` section. For EACH criterion:
+1. Verify whether the PR implementation satisfies it (check code, tests, build output)
+2. If verified, mark the checkbox as complete using the mark-issue-checkbox script:
+   \`\`\`bash
+   bash scripts/mark-issue-checkbox.sh ${REPO_OWNER} ${REPO_NAME} ${ISSUE_NUMBER} "the exact checkbox text"
+   \`\`\`
+3. If NOT verified, leave unchecked and include it in your review findings
+
 ## Review Process
 1. Read the issue body to understand requirements
 2. Read the PR diff to verify implementation
-3. Check that CI checks are passing: gh pr checks ${PR_NUMBER}
-4. Verify test coverage and quality
-5. Check for security issues, code quality, and best practices
-6. Trigger and verify Amazon Q Developer review (see below)
+3. Verify acceptance criteria (see above)
+4. Check that CI checks are passing: gh pr checks ${PR_NUMBER}
+5. Verify test coverage and quality
+6. Check for security issues, code quality, and best practices
+7. Trigger and verify Amazon Q Developer review (see below)
 
 ## Amazon Q Developer Review — MANDATORY
 
@@ -404,9 +416,8 @@ EOF
 )"
 
 # ---------------------------------------------------------------------------
-# Run CC review
+# Run review agent
 # ---------------------------------------------------------------------------
-SESSION_ID=$(uuidgen)
 log "Starting review session: ${SESSION_ID} (model: ${AGENT_REVIEW_MODEL:-sonnet})"
 
 # Export E2E credentials as env vars (not in prompt) for agent to read at runtime
@@ -416,11 +427,11 @@ if [[ "${E2E_ENABLED:-false}" == "true" ]]; then
 fi
 
 set +e
-run_agent "$SESSION_ID" "$PROMPT" "${AGENT_REVIEW_MODEL:-sonnet}" 2>&1 | tee "$LOG_FILE"
-CC_EXIT=${PIPESTATUS[0]}
+run_agent "$SESSION_ID" "$PROMPT" "${AGENT_REVIEW_MODEL:-sonnet}" 2>&1
+AGENT_EXIT=$?
 set -e
 
-log "Review CC exited with code: $CC_EXIT"
+log "Review agent exited with code: $AGENT_EXIT"
 
 # ---------------------------------------------------------------------------
 # Parse result and update issue/PR state
@@ -443,7 +454,7 @@ for _poll_attempt in $(seq 1 6); do
   log "Waiting for review comment to appear (attempt ${_poll_attempt}/6)..."
 done
 
-if echo "$LATEST_COMMENT" | grep -qi "Review PASSED"; then
+if echo "$LATEST_COMMENT" | head -1 | grep -qi "^Review PASSED"; then
   log "Review PASSED for PR #${PR_NUMBER}."
 
   # Formal PR approval from review agent
@@ -506,10 +517,10 @@ if echo "$LATEST_COMMENT" | grep -qi "Review PASSED"; then
 else
   log "Review FAILED or inconclusive. Sending back to dev."
 
-  # If CC crashed without posting a comment, add a fallback
-  if [[ $CC_EXIT -ne 0 ]] && [[ -z "$LATEST_COMMENT" ]]; then
+  # If agent crashed without posting a comment, add a fallback
+  if [[ $AGENT_EXIT -ne 0 ]] && [[ -z "$LATEST_COMMENT" ]]; then
     gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
-      --body "Review process encountered an error (CC exit code: ${CC_EXIT}). Moving back to development for investigation." 2>/dev/null || true
+      --body "Review process encountered an error (agent exit code: ${AGENT_EXIT}). Moving back to development for investigation." 2>/dev/null || true
   fi
 
   gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \

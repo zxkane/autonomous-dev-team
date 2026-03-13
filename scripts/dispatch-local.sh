@@ -41,7 +41,7 @@ case "$TYPE" in
   dev-new)
     nohup "${PROJECT_DIR}/scripts/autonomous-dev.sh" \
       --issue "$ISSUE_NUM" --mode new \
-      > "/tmp/cc-${PROJECT_ID}-issue-${ISSUE_NUM}.log" 2>&1 &
+      > "/tmp/agent-${PROJECT_ID}-issue-${ISSUE_NUM}.log" 2>&1 &
     CHILD_PID=$!
     ;;
   dev-resume)
@@ -51,13 +51,13 @@ case "$TYPE" in
     fi
     nohup "${PROJECT_DIR}/scripts/autonomous-dev.sh" \
       --issue "$ISSUE_NUM" --mode resume --session "$SESSION_ID" \
-      > "/tmp/cc-${PROJECT_ID}-issue-${ISSUE_NUM}.log" 2>&1 &
+      > "/tmp/agent-${PROJECT_ID}-issue-${ISSUE_NUM}.log" 2>&1 &
     CHILD_PID=$!
     ;;
   review)
     nohup "${PROJECT_DIR}/scripts/autonomous-review.sh" \
       --issue "$ISSUE_NUM" \
-      > "/tmp/cc-${PROJECT_ID}-review-${ISSUE_NUM}.log" 2>&1 &
+      > "/tmp/agent-${PROJECT_ID}-review-${ISSUE_NUM}.log" 2>&1 &
     CHILD_PID=$!
     ;;
   *)
@@ -69,7 +69,7 @@ esac
 # Verify the background process started successfully
 sleep 1
 if ! kill -0 "$CHILD_PID" 2>/dev/null; then
-  echo "ERROR: ${TYPE} process for issue #${ISSUE_NUM} exited immediately. Check log: /tmp/cc-${PROJECT_ID}-*-${ISSUE_NUM}.log" >&2
+  echo "ERROR: ${TYPE} process for issue #${ISSUE_NUM} exited immediately. Check log: /tmp/agent-${PROJECT_ID}-*-${ISSUE_NUM}.log" >&2
   exit 1
 fi
 echo "Dispatched ${TYPE} for issue #${ISSUE_NUM} (PID: ${CHILD_PID})"

@@ -33,7 +33,7 @@ setup_github_auth() {
 
     # Use a private directory for token files (not predictable /tmp paths)
     local token_dir
-    token_dir=$(mktemp -d "/tmp/cc-auth-XXXXXX")
+    token_dir=$(mktemp -d "/tmp/agent-auth-XXXXXX")
     chmod 700 "$token_dir"
     GH_TOKEN_FILE="${token_dir}/token"
 
@@ -86,7 +86,7 @@ cleanup_github_auth() {
     local token_dir
     token_dir=$(dirname "$GH_TOKEN_FILE")
     rm -f "$GH_TOKEN_FILE" 2>/dev/null || true
-    [[ "$token_dir" == /tmp/cc-auth-* ]] && rmdir "$token_dir" 2>/dev/null || true
+    [[ "$token_dir" == /tmp/agent-auth-* ]] && rmdir "$token_dir" 2>/dev/null || true
   fi
   rm -f "${_LIB_AUTH_DIR}/gh" 2>/dev/null || true
 }

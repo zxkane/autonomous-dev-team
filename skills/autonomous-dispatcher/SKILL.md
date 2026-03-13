@@ -103,7 +103,8 @@ gh issue list --repo "$REPO" --state open --limit 100 \
       contains(["pending-review"]) or
       contains(["reviewing"]) or
       contains(["pending-dev"]) or
-      contains(["stalled"])
+      contains(["stalled"]) or
+      contains(["approved"])
     ) | not
   )]'
 ```
@@ -170,10 +171,10 @@ gh issue list --repo "$REPO" --state open --limit 100 \
 
 For each found issue (respecting concurrency limit):
 
-**1. Check retry count** — before dispatching, count the number of `CC Session Report (Dev)` comments on the issue to determine how many dev attempts have already been made:
+**1. Check retry count** — before dispatching, count the number of `Agent Session Report (Dev)` comments on the issue to determine how many dev attempts have already been made:
 ```bash
 RETRY_COUNT=$(gh issue view ISSUE_NUM --repo "$REPO" --json comments \
-  -q '[.comments[] | select(.body | test("CC Session Report \\(Dev\\)"))] | length')
+  -q '[.comments[] | select(.body | test("Agent Session Report \\(Dev\\)"))] | length')
 
 MAX_RETRIES="${MAX_RETRIES:-3}"
 
@@ -207,17 +208,17 @@ bash "$PROJECT_DIR/scripts/dispatch-local.sh" dev-resume ISSUE_NUM SESSION_ID
 
 Find issues with `in-progress` or `reviewing` that may be stuck.
 
-For each such issue, check if the CC process is still alive locally. Use the correct PID file prefix based on the issue's current label:
+For each such issue, check if the agent process is still alive locally. Use the correct PID file prefix based on the issue's current label:
 
-- `in-progress` issues use PID file: `/tmp/cc-${PROJECT_ID}-issue-ISSUE_NUM.pid`
-- `reviewing` issues use PID file: `/tmp/cc-${PROJECT_ID}-review-ISSUE_NUM.pid`
+- `in-progress` issues use PID file: `/tmp/agent-${PROJECT_ID}-issue-ISSUE_NUM.pid`
+- `reviewing` issues use PID file: `/tmp/agent-${PROJECT_ID}-review-ISSUE_NUM.pid`
 
 ```bash
 # For in-progress issues:
-kill -0 $(cat /tmp/cc-${PROJECT_ID}-issue-ISSUE_NUM.pid 2>/dev/null) 2>/dev/null && echo ALIVE || echo DEAD
+kill -0 $(cat /tmp/agent-${PROJECT_ID}-issue-ISSUE_NUM.pid 2>/dev/null) 2>/dev/null && echo ALIVE || echo DEAD
 
 # For reviewing issues:
-kill -0 $(cat /tmp/cc-${PROJECT_ID}-review-ISSUE_NUM.pid 2>/dev/null) 2>/dev/null && echo ALIVE || echo DEAD
+kill -0 $(cat /tmp/agent-${PROJECT_ID}-review-ISSUE_NUM.pid 2>/dev/null) 2>/dev/null && echo ALIVE || echo DEAD
 ```
 
 If DEAD and issue still has `in-progress`:
@@ -244,9 +245,9 @@ openclaw cron add \
 | Label | Color | Description |
 |-------|-------|-------------|
 | `autonomous` | `#0E8A16` | Issue should be processed by autonomous pipeline |
-| `in-progress` | `#FBCA04` | CC is actively developing |
+| `in-progress` | `#FBCA04` | Agent is actively developing |
 | `pending-review` | `#1D76DB` | Development complete, awaiting review |
-| `reviewing` | `#5319E7` | CC is actively reviewing |
+| `reviewing` | `#5319E7` | Agent is actively reviewing |
 | `pending-dev` | `#E99695` | Review failed, needs more development |
 | `approved` | `#0E8A16` | Review passed. PR merged (or awaiting manual merge if `no-auto-close` present) |
 | `no-auto-close` | `#d4c5f9` | Used with `autonomous` — skip auto-merge after review passes, requires manual approval |

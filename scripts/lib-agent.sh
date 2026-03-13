@@ -9,6 +9,11 @@ if [[ -f "${_LIB_AGENT_DIR}/autonomous.conf" ]]; then
   source "${_LIB_AGENT_DIR}/autonomous.conf"
 fi
 
+# Ensure PROJECT_DIR is an absolute path to the repo root.
+# autonomous.conf may use a relative BASH_SOURCE trick that can resolve
+# incorrectly when sourced indirectly. Fall back to _LIB_AGENT_DIR/..
+PROJECT_DIR="${PROJECT_DIR:-$(cd "${_LIB_AGENT_DIR}/.." && pwd)}"
+
 # Agent configuration (overridable via env or autonomous.conf)
 AGENT_CMD="${AGENT_CMD:-claude}"
 AGENT_DEV_MODEL="${AGENT_DEV_MODEL:-}"
@@ -24,7 +29,8 @@ run_agent() {
 
   case "$AGENT_CMD" in
     claude)
-      "$AGENT_CMD" --session-id "$session_id" \
+      # Unset CLAUDECODE to allow launching from within an existing session
+      env -u CLAUDECODE "$AGENT_CMD" --session-id "$session_id" \
         --permission-mode "$AGENT_PERMISSION_MODE" \
         ${model:+--model "$model"} \
         -p "$prompt" \
@@ -39,7 +45,6 @@ run_agent() {
       # Kiro CLI does not support named sessions (session_id is ignored).
       # Each invocation starts a new conversation in the current directory.
       kiro-cli chat \
-        --agent default \
         --trust-all-tools \
         --no-interactive \
         ${model:+--model "$model"} \
@@ -60,7 +65,8 @@ resume_agent() {
 
   case "$AGENT_CMD" in
     claude)
-      "$AGENT_CMD" --resume "$session_id" \
+      # Unset CLAUDECODE to allow launching from within an existing session
+      env -u CLAUDECODE "$AGENT_CMD" --resume "$session_id" \
         --permission-mode "$AGENT_PERMISSION_MODE" \
         ${model:+--model "$model"} \
         -p "$prompt" \
@@ -71,7 +77,6 @@ resume_agent() {
       # directory (not by session_id). This is the closest equivalent to
       # Claude Code's named session resume.
       kiro-cli chat \
-        --agent default \
         --trust-all-tools \
         --no-interactive \
         --resume \

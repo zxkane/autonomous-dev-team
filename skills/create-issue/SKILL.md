@@ -82,13 +82,13 @@ Use the appropriate template based on issue type.
 - [ ] <Happy path: user performs X and sees Y>
 - [ ] <Edge case: empty state / error state / unauthorized access>
 
-## Dependencies
-<List issues that must be completed before this issue can begin. Use GitHub issue links.>
-- None | Depends on #N (<brief reason>)
-
 ## Acceptance Criteria
 - [ ] <Criterion 1 -- how to verify>
 - [ ] <Criterion 2>
+
+## Dependencies
+<List issues that must be completed before this issue can begin. Use GitHub issue links.>
+- None | Depends on #N (<brief reason>)
 
 ## Design Considerations
 <Architecture notes, API changes, data model impact -- if applicable>
