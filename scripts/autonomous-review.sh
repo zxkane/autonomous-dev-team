@@ -82,8 +82,45 @@ echo $$ > "$PID_FILE"
 # ---------------------------------------------------------------------------
 log() { echo "[autonomous-review] $(date -u +%H:%M:%S) $*"; }
 
+# Track whether normal result parsing completed (set at end of script)
+RESULT_PARSED=false
+
 cleanup() {
+  local exit_code=$?
+
+  # Cleanup PID file always
   rm -f "$PID_FILE" 2>/dev/null || true
+
+  # If result was already parsed by the main script, labels are handled there
+  if [[ "$RESULT_PARSED" == "true" ]]; then
+    cleanup_github_auth
+    return
+  fi
+
+  # Crash path: review agent died before parsing results — transition labels
+  if [[ $exit_code -ne 0 ]]; then
+    log "Review process crashed (exit $exit_code). Updating issue labels..."
+
+    # Refresh token for cleanup (app mode)
+    if [[ "$GH_AUTH_MODE" == "app" ]]; then
+      if command -v get_gh_app_token &>/dev/null; then
+        GH_TOKEN=$(get_gh_app_token "${REVIEW_AGENT_APP_ID}" "${REVIEW_AGENT_APP_PEM}" "$REPO_OWNER" "$REPO_NAME") || {
+          log "WARNING: Failed to refresh GitHub App token for cleanup"
+        }
+        export GH_TOKEN
+        export GITHUB_PERSONAL_ACCESS_TOKEN="$GH_TOKEN"
+      fi
+    fi
+
+    gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
+      --body "Review process crashed (exit code: ${exit_code}). Moving back to development for retry." 2>/dev/null || true
+    gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
+      --remove-label "reviewing" \
+      --add-label "pending-dev" 2>/dev/null || true
+
+    log "Issue #${ISSUE_NUMBER} moved to pending-dev due to crash."
+  fi
+
   cleanup_github_auth
 }
 trap cleanup EXIT
@@ -350,7 +387,7 @@ After thorough review:
 - If ALL checklist items pass AND code quality is good$(if [[ "${E2E_ENABLED:-false}" == "true" ]]; then echo " AND all E2E tests pass"; fi):
   Post a comment on issue #${ISSUE_NUMBER} with:
   "Review PASSED - All checklist items verified, code quality good.$(if [[ "${E2E_ENABLED:-false}" == "true" ]]; then echo " E2E verification completed."; fi)
-  Session: \`${SESSION_ID}\`"
+  Review Session: \`${SESSION_ID}\`"
   Then exit.
 
 - If ANY item fails$(if [[ "${E2E_ENABLED:-false}" == "true" ]]; then echo " OR any E2E test fails OR preview URL is unavailable"; fi):
@@ -358,7 +395,7 @@ After thorough review:
   "Review findings:"
   followed by a numbered list of each failing item with specific remediation instructions.$(if [[ "${E2E_ENABLED:-false}" == "true" ]]; then echo "
   Include E2E failure details with screenshot evidence."; fi)
-  End the comment with: "Session: \`${SESSION_ID}\`"
+  End the comment with: "Review Session: \`${SESSION_ID}\`"
   Then exit.
 
 IMPORTANT: Work autonomously. Be thorough but fair. Focus on correctness and compliance.
@@ -399,7 +436,7 @@ for _poll_attempt in $(seq 1 6); do
   # SECURITY: Filter by the current session ID to prevent verdict spoofing
   # from other commenters (dev agent, external users).
   LATEST_COMMENT=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json comments \
-    -q "[.comments[] | select((.body | test(\"Review PASSED|Review findings:\"; \"i\")) and (.body | test(\"Session.*${SESSION_ID}\")))] | last | .body" 2>/dev/null || true)
+    -q "[.comments[] | select((.body | test(\"Review PASSED|Review findings:\"; \"i\")) and (.body | test(\"Review Session.*${SESSION_ID}\")))] | last | .body" 2>/dev/null || true)
   if [[ -n "$LATEST_COMMENT" ]]; then
     break
   fi
@@ -482,5 +519,6 @@ else
   log "Issue #${ISSUE_NUMBER} moved to pending-dev."
 fi
 
+RESULT_PARSED=true
 log "Review complete."
 exit 0

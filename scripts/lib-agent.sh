@@ -35,6 +35,16 @@ run_agent() {
         ${model:+--model "$model"} \
         -p "$prompt"
       ;;
+    kiro)
+      # Kiro CLI does not support named sessions (session_id is ignored).
+      # Each invocation starts a new conversation in the current directory.
+      kiro-cli chat \
+        --agent default \
+        --trust-all-tools \
+        --no-interactive \
+        ${model:+--model "$model"} \
+        "$prompt"
+      ;;
     *)
       "$AGENT_CMD" -p "$prompt"
       ;;
@@ -55,6 +65,18 @@ resume_agent() {
         ${model:+--model "$model"} \
         -p "$prompt" \
         --output-format json
+      ;;
+    kiro)
+      # Kiro CLI --resume resumes the most recent conversation in the current
+      # directory (not by session_id). This is the closest equivalent to
+      # Claude Code's named session resume.
+      kiro-cli chat \
+        --agent default \
+        --trust-all-tools \
+        --no-interactive \
+        --resume \
+        ${model:+--model "$model"} \
+        "$prompt"
       ;;
     *)
       # Agents without resume support start a new session

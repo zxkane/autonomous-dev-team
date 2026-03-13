@@ -130,8 +130,8 @@ cleanup() {
 
   # Post session report
   gh issue comment "$ISSUE_NUMBER" --repo "$REPO" --body "$(cat <<EOF
-**CC Session Report**
-- Session ID: \`${SESSION_ID}\`
+**CC Session Report (Dev)**
+- Dev Session ID: \`${SESSION_ID}\`
 - Exit code: ${exit_code}
 - Mode: ${MODE}
 - Timestamp: $(date -u +"%Y-%m-%dT%H:%M:%SZ")

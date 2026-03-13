@@ -425,7 +425,8 @@ project-root/
 │   ├── mark-issue-checkbox.sh
 │   ├── upload-screenshot.sh
 │   ├── reply-to-comments.sh
-│   └── resolve-threads.sh
+│   ├── resolve-threads.sh
+│   └── setup-labels.sh
 ├── .worktrees/                  # Git worktrees (gitignored)
 ├── docs/
 │   ├── designs/                 # Design canvas documents (.pen files)
@@ -529,6 +530,7 @@ Finds the linked PR, performs code review, optionally runs E2E verification, and
 - **Amazon Q integration**: Triggers and monitors Amazon Q Developer review
 - **E2E verification**: Optional Chrome DevTools MCP testing with screenshot evidence (enabled by `E2E_ENABLED=true`)
 - **Acceptance criteria tracking**: Marks `## Acceptance Criteria` checkboxes as verified
+- **Crash recovery**: Trap handler moves issue back to `pending-dev` on agent crash
 - **Auto-merge**: Squash-merges and closes the issue on pass
 - **Wrapper**: `scripts/autonomous-review.sh`
 - **Skill**: `skills/autonomous-review/SKILL.md`
@@ -538,8 +540,10 @@ Finds the linked PR, performs code review, optionally runs E2E verification, and
 Scans GitHub for actionable issues and spawns the appropriate agent process.
 
 - **Issue scanning**: `autonomous`, `pending-dev`, `pending-review` labels
+- **Dependency checking**: Skips issues with open dependencies in `## Dependencies` section
+- **Retry limiting**: Marks issues as `stalled` after `MAX_RETRIES` (default 3) failed attempts
 - **Concurrency control**: `MAX_CONCURRENT` limit via PID file checks
-- **Stale detection**: Recovers from zombie agent processes
+- **Stale detection**: Recovers from zombie agent processes (disambiguates dev vs review PID files)
 - **Local dispatch**: `nohup` spawn with post-spawn health check
 - **Skill**: `skills/autonomous-dispatcher/SKILL.md`
 
@@ -549,7 +553,7 @@ Scans GitHub for actionable issues and spawns the appropriate agent process.
 cp scripts/autonomous.conf.example scripts/autonomous.conf
 ```
 
-Key settings: `REPO`, `PROJECT_DIR`, `AGENT_CMD` (claude/codex/kiro), `GH_AUTH_MODE` (token/app), `MAX_CONCURRENT`, E2E options. See comments in the example file.
+Key settings: `REPO`, `PROJECT_DIR`, `AGENT_CMD` (claude/codex/kiro), `GH_AUTH_MODE` (token/app), `MAX_CONCURRENT`, `MAX_RETRIES`, E2E options. See comments in the example file.
 
 ### Key Scripts
 
@@ -562,6 +566,7 @@ Key settings: `REPO`, `PROJECT_DIR`, `AGENT_CMD` (claude/codex/kiro), `GH_AUTH_M
 | `scripts/gh-with-token-refresh.sh` | `gh` CLI wrapper that reads latest token before each call |
 | `scripts/mark-issue-checkbox.sh` | Mark issue body checkboxes as complete |
 | `scripts/upload-screenshot.sh` | Upload E2E screenshots to GitHub |
+| `scripts/setup-labels.sh` | Create all GitHub labels required by the autonomous pipeline |
 
 ### GitHub App Setup
 

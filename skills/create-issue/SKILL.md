@@ -82,6 +82,10 @@ Use the appropriate template based on issue type.
 - [ ] <Happy path: user performs X and sees Y>
 - [ ] <Edge case: empty state / error state / unauthorized access>
 
+## Dependencies
+<List issues that must be completed before this issue can begin. Use GitHub issue links.>
+- None | Depends on #N (<brief reason>)
+
 ## Acceptance Criteria
 - [ ] <Criterion 1 -- how to verify>
 - [ ] <Criterion 2>
@@ -377,6 +381,17 @@ Frame the question as:
 - **Acceptance criteria**: Must be objectively verifiable, not subjective
 - **Scope**: Prefer smaller, focused issues over large multi-part ones
 - **References**: Link to related issues, PRD sections, or code paths when relevant
+- **Dependencies**: When creating multiple related issues, populate the `## Dependencies` section with links to blocking issues. Create issues in dependency order so earlier issue numbers are available for later ones. The dispatcher will skip issues whose dependencies are still open.
 - **Testing Requirements**: ALWAYS include the "Testing Requirements" section. The dev agent follows the project's TDD workflow but has been observed to skip E2E tests or test-case docs when the issue doesn't explicitly call them out. Be specific about:
   - Key scenarios each test type must cover (2-4 bullet points)
   - For bugs: the regression test must fail before the fix and pass after
+
+## Multi-Issue Creation
+
+When breaking a large feature into multiple issues:
+
+1. **Create issues in dependency order** — issues with no dependencies first, then issues that depend on them. This ensures issue numbers are known when writing dependency references.
+2. **Populate the `## Dependencies` section** in each issue body with `#N` links to blocking issues.
+3. **Use a consistent naming scheme** — prefix titles with the project/feature name for easy filtering (e.g., "MyProject: Add DynamoDB infrastructure").
+4. **Cross-reference the plan** — if an implementation plan exists, link each issue to the relevant plan tasks/chunks.
+5. **The dispatcher skips blocked issues** — issues with open dependencies in the `## Dependencies` section are ignored by the autonomous dispatcher until all dependencies are resolved (closed/merged).
