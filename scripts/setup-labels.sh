@@ -21,9 +21,9 @@ REPO="${1:-${REPO:?Usage: setup-labels.sh [owner/repo] or set REPO in autonomous
 # Label definitions: name|color|description
 LABELS=(
   "autonomous|0E8A16|Issue should be processed by autonomous pipeline"
-  "in-progress|FBCA04|CC is actively developing"
+  "in-progress|FBCA04|Agent is actively developing"
   "pending-review|1D76DB|Development complete, awaiting review"
-  "reviewing|5319E7|CC is actively reviewing"
+  "reviewing|5319E7|Agent is actively reviewing"
   "pending-dev|E99695|Review failed, needs more development"
   "approved|0E8A16|Review passed, PR merged or awaiting manual merge"
   "no-auto-close|d4c5f9|Skip auto-merge after review passes, requires manual approval"
