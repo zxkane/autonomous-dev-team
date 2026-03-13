@@ -153,13 +153,22 @@ project-root/
 │   │   ├── SKILL.md
 │   │   └── references/
 │   │       ├── commit-conventions.md
-│   │       └── review-commands.md
+│   │       ├── review-commands.md
+│   │       ├── review-threads.md
+│   │       └── autonomous-mode.md
 │   ├── autonomous-review/       # PR review workflow
-│   │   └── SKILL.md
+│   │   ├── SKILL.md
+│   │   └── references/
+│   │       ├── merge-conflict-resolution.md
+│   │       ├── e2e-verification.md
+│   │       └── decision-gate.md
 │   ├── autonomous-dispatcher/   # Issue dispatcher
 │   │   └── SKILL.md
 │   └── create-issue/            # GitHub issue creation
-│       └── SKILL.md
+│       ├── SKILL.md
+│       └── references/
+│           ├── issue-templates.md
+│           └── workspace-changes.md
 ├── scripts/                     # Pipeline and utility scripts
 │   ├── autonomous-dev.sh
 │   ├── autonomous-review.sh

@@ -1,6 +1,12 @@
 ---
 name: autonomous-dispatcher
-description: Scans GitHub issues with 'autonomous' label and dispatches development/review tasks locally. Triggered by cron every 5 minutes.
+description: >
+  This skill should be used when dispatching autonomous development or review
+  tasks from GitHub issues. Covers scanning for new issues with the 'autonomous'
+  label, dispatching dev-new/dev-resume/review processes, dependency checking,
+  retry counting, stale process detection, and concurrency limiting. Use when
+  asked to "run the dispatcher", "scan for pending issues", "dispatch autonomous
+  tasks", "check stale agents", or "set up the dispatch cron".
 metadata: {"openclaw": {"requires": {"bins": ["gh", "jq"], "env": ["PROJECT_DIR"]}}}
 ---
 
