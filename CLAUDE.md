@@ -400,6 +400,7 @@ project-root/
 │   ├── check-code-simplifier.sh
 │   ├── check-pr-review.sh
 │   ├── check-unit-tests.sh
+│   ├── check-rebase-before-push.sh
 │   ├── post-git-action-clear.sh
 │   ├── post-git-push.sh
 │   ├── post-file-edit-reminder.sh
