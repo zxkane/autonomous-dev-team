@@ -41,9 +41,17 @@ setup_github_auth() {
       "$GH_TOKEN_FILE" "$app_id" "$app_pem" "$REPO_OWNER" "$REPO_NAME" &
     TOKEN_DAEMON_PID=$!
 
-    sleep 1
+    # Poll for token file (token generation involves multiple API calls and
+    # can take >1s depending on network latency)
+    local _wait_max=10
+    local _waited=0
+    while [[ $_waited -lt $_wait_max ]] && [[ ! -s "$GH_TOKEN_FILE" ]]; do
+      sleep 1
+      _waited=$((_waited + 1))
+    done
+
     if [[ ! -s "$GH_TOKEN_FILE" ]]; then
-      echo "FATAL: Token daemon failed to write initial token" >&2
+      echo "FATAL: Token daemon failed to write initial token after ${_wait_max}s" >&2
       kill "$TOKEN_DAEMON_PID" 2>/dev/null || true
       return 1
     fi
