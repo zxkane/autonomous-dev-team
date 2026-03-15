@@ -1,0 +1,1 @@
+../../autonomous-common/scripts/reply-to-comments.sh
