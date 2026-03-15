@@ -49,6 +49,11 @@ The pipeline runs without human intervention, using AI coding agents (Claude Cod
 | Dev Agent | Coding agent session | Implements requirements, writes tests, creates PR |
 | Review Agent | Coding agent session | Reviews PR, runs E2E tests, approves or requests changes |
 
+> **Note:** Scripts are bundled inside skill directories for portability.
+> The project-root `scripts/` directory is a symlink to
+> `skills/autonomous-dispatcher/scripts/`. Shared scripts are symlinked
+> from `skills/autonomous-common/scripts/`.
+
 ## Prerequisites
 
 - **OpenClaw** — Agent orchestration platform (or use `dispatch-local.sh` for local dispatch)

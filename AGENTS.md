@@ -25,6 +25,11 @@ E2E testing via browser automation, and auto-merge.
 GitHub issue scanner that dispatches dev and review agents on a cron
 schedule. Manages the autonomous pipeline lifecycle via labels.
 
+### autonomous-common
+Shared infrastructure: workflow enforcement hooks and agent-callable utility
+scripts (mark-issue-checkbox, reply-to-comments, resolve-threads, gh-as-user).
+Required by autonomous-dev and autonomous-review. Not directly invocable.
+
 ### create-issue
 Interactive GitHub issue creation with structured templates, autonomous
 label guidance, and workspace change attachment. Supports feature
@@ -37,10 +42,18 @@ requests and bug reports.
 
 ## Hooks
 
-Optional workflow enforcement hooks in `hooks/`. Supported by Claude Code
-and Kiro CLI. See `hooks/README.md` for per-agent setup.
+Workflow enforcement hooks are bundled in `skills/autonomous-common/hooks/`
+and accessible via the `hooks/` symlink at the project root. Supported by
+Claude Code and Kiro CLI. See `hooks/README.md` for per-agent setup.
+
+For `npx skills add` users, hooks are also available via skill frontmatter
+in autonomous-dev and autonomous-review SKILL.md files.
 
 ## Scripts
 
-Supporting scripts in `scripts/` provide agent CLI abstraction,
-GitHub authentication, and pipeline utilities.
+Pipeline and utility scripts are bundled inside skill directories:
+- Shared scripts: `skills/autonomous-common/scripts/`
+- Pipeline scripts: `skills/autonomous-dispatcher/scripts/`
+- Review scripts: `skills/autonomous-review/scripts/`
+
+All accessible via the `scripts/` symlink at the project root.

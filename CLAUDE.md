@@ -131,24 +131,33 @@ project-root/
 │   ├── agents/
 │   │   └── default.json         # Kiro CLI agent config (hooks + tools)
 │   └── skills -> ../skills      # Symlink for Kiro CLI discovery
-├── hooks/                       # Workflow enforcement hooks
-│   ├── README.md                # Per-IDE setup instructions
-│   ├── lib.sh                   # Shared utility functions
-│   ├── state-manager.sh         # State manager
-│   ├── block-push-to-main.sh
-│   ├── block-commit-outside-worktree.sh
-│   ├── check-design-canvas.sh
-│   ├── check-test-plan.sh
-│   ├── check-code-simplifier.sh
-│   ├── check-pr-review.sh
-│   ├── check-unit-tests.sh
-│   ├── check-rebase-before-push.sh
-│   ├── warn-skip-verification.sh
-│   ├── post-git-action-clear.sh
-│   ├── post-git-push.sh
-│   ├── post-file-edit-reminder.sh
-│   └── verify-completion.sh
+├── hooks -> skills/autonomous-common/hooks   # Symlink for backward compat
+├── scripts -> skills/autonomous-dispatcher/scripts  # Symlink for backward compat
 ├── skills/                      # Cross-platform skills (skills.sh compatible)
+│   ├── autonomous-common/       # Shared hooks + agent-callable scripts
+│   │   ├── SKILL.md
+│   │   ├── hooks/               # Workflow enforcement hooks
+│   │   │   ├── README.md
+│   │   │   ├── lib.sh
+│   │   │   ├── state-manager.sh
+│   │   │   ├── block-push-to-main.sh
+│   │   │   ├── block-commit-outside-worktree.sh
+│   │   │   ├── check-design-canvas.sh
+│   │   │   ├── check-code-simplifier.sh
+│   │   │   ├── check-pr-review.sh
+│   │   │   ├── check-test-plan.sh
+│   │   │   ├── check-unit-tests.sh
+│   │   │   ├── check-rebase-before-push.sh
+│   │   │   ├── warn-skip-verification.sh
+│   │   │   ├── post-git-action-clear.sh
+│   │   │   ├── post-git-push.sh
+│   │   │   ├── post-file-edit-reminder.sh
+│   │   │   └── verify-completion.sh
+│   │   └── scripts/             # Shared agent-callable scripts
+│   │       ├── mark-issue-checkbox.sh
+│   │       ├── gh-as-user.sh
+│   │       ├── reply-to-comments.sh
+│   │       └── resolve-threads.sh
 │   ├── autonomous-dev/          # TDD development workflow
 │   │   ├── SKILL.md
 │   │   └── references/
@@ -158,33 +167,30 @@ project-root/
 │   │       └── autonomous-mode.md
 │   ├── autonomous-review/       # PR review workflow
 │   │   ├── SKILL.md
+│   │   ├── scripts/
+│   │   │   └── upload-screenshot.sh
 │   │   └── references/
 │   │       ├── merge-conflict-resolution.md
 │   │       ├── e2e-verification.md
 │   │       └── decision-gate.md
-│   ├── autonomous-dispatcher/   # Issue dispatcher
-│   │   └── SKILL.md
+│   ├── autonomous-dispatcher/   # Issue dispatcher + pipeline scripts
+│   │   ├── SKILL.md
+│   │   └── scripts/
+│   │       ├── autonomous-dev.sh
+│   │       ├── autonomous-review.sh
+│   │       ├── autonomous.conf.example
+│   │       ├── dispatch-local.sh
+│   │       ├── lib-agent.sh
+│   │       ├── lib-auth.sh
+│   │       ├── gh-app-token.sh
+│   │       ├── gh-token-refresh-daemon.sh
+│   │       ├── gh-with-token-refresh.sh
+│   │       └── setup-labels.sh
 │   └── create-issue/            # GitHub issue creation
 │       ├── SKILL.md
 │       └── references/
 │           ├── issue-templates.md
 │           └── workspace-changes.md
-├── scripts/                     # Pipeline and utility scripts
-│   ├── autonomous-dev.sh
-│   ├── autonomous-review.sh
-│   ├── autonomous.conf.example
-│   ├── dispatch-local.sh
-│   ├── setup-labels.sh
-│   ├── lib-agent.sh
-│   ├── lib-auth.sh
-│   ├── gh-app-token.sh
-│   ├── gh-token-refresh-daemon.sh
-│   ├── gh-with-token-refresh.sh
-│   ├── gh-as-user.sh
-│   ├── mark-issue-checkbox.sh
-│   ├── upload-screenshot.sh
-│   ├── reply-to-comments.sh
-│   └── resolve-threads.sh
 ├── .worktrees/                  # Git worktrees (gitignored)
 ├── docs/
 │   ├── designs/                 # Design canvas documents
@@ -203,7 +209,7 @@ project-root/
 
 ## Skills Reference
 
-This project provides four portable skills, installable into 40+ coding agents:
+This project provides five portable skills, installable into 40+ coding agents:
 
 ```bash
 npx skills add zxkane/autonomous-dev-team
@@ -215,6 +221,7 @@ npx skills add zxkane/autonomous-dev-team
 | **autonomous-review** | `skills/autonomous-review/SKILL.md` | PR code review with checklist, merge conflict resolution, E2E testing, and auto-merge |
 | **autonomous-dispatcher** | `skills/autonomous-dispatcher/SKILL.md` | GitHub issue scanner that dispatches dev/review agents on a cron schedule |
 | **create-issue** | `skills/create-issue/SKILL.md` | Structured GitHub issue creation with templates and autonomous label guidance |
+| **autonomous-common** | `skills/autonomous-common/SKILL.md` | Shared workflow enforcement hooks and agent-callable utility scripts used by other autonomous-* skills |
 
 ---
 
@@ -233,6 +240,8 @@ cp scripts/autonomous.conf.example scripts/autonomous.conf
 Key settings: `REPO`, `PROJECT_DIR`, `AGENT_CMD` (claude/codex/kiro), `GH_AUTH_MODE` (token/app), `MAX_CONCURRENT`, `MAX_RETRIES`, E2E options. See comments in the example file.
 
 ### Key Scripts
+
+> Note: Scripts are now bundled inside skill directories and accessible via the `scripts/` symlink at the project root.
 
 | Script | Purpose |
 |--------|---------|
