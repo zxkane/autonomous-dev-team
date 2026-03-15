@@ -29,9 +29,9 @@ fi
 
 # Load config
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPO_ROOT="${SCRIPT_DIR}/.."
-if [[ -f "${REPO_ROOT}/scripts/autonomous.conf" ]]; then
-  source "${REPO_ROOT}/scripts/autonomous.conf"
+REPO_ROOT="${SCRIPT_DIR}/../../.."
+if [[ -f "${SCRIPT_DIR}/autonomous.conf" ]]; then
+  source "${SCRIPT_DIR}/autonomous.conf"
 fi
 
 PROJECT_ID="${PROJECT_ID:-project}"

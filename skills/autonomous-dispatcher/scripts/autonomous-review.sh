@@ -188,7 +188,7 @@ fi
 # ---------------------------------------------------------------------------
 # Screenshot upload availability
 # ---------------------------------------------------------------------------
-if [[ "${E2E_SCREENSHOT_UPLOAD:-false}" == "true" && -x "${SCRIPT_DIR}/upload-screenshot.sh" ]]; then
+if [[ "${E2E_SCREENSHOT_UPLOAD:-false}" == "true" && -x "${PROJECT_DIR}/skills/autonomous-review/scripts/upload-screenshot.sh" ]]; then
   SCREENSHOT_UPLOAD_AVAILABLE="true"
   log "Screenshot upload script available"
 else
