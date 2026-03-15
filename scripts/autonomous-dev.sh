@@ -203,10 +203,11 @@ If you encounter a blocking error, document it in a comment on issue #${ISSUE_NU
 EOF
 )"
 
-  log "Starting new session: ${SESSION_ID}"
+  SESSION_NAME="dev-issue-${ISSUE_NUMBER}"
+  log "Starting new session: ${SESSION_ID} (name: ${SESSION_NAME})"
   AGENT_RAN=true
   set +e
-  run_agent "$SESSION_ID" "$PROMPT" "$AGENT_DEV_MODEL" 2>&1
+  run_agent "$SESSION_ID" "$PROMPT" "$AGENT_DEV_MODEL" "$SESSION_NAME" 2>&1
   AGENT_EXIT=$?
   set -e
 
@@ -261,7 +262,7 @@ EOF
   log "Resuming session: ${SESSION_ID}"
   AGENT_RAN=true
   set +e
-  resume_agent "$SESSION_ID" "$RESUME_PROMPT" "$AGENT_DEV_MODEL" 2>&1
+  resume_agent "$SESSION_ID" "$RESUME_PROMPT" "$AGENT_DEV_MODEL" "" 2>&1
   AGENT_EXIT=$?
   set -e
 
@@ -274,6 +275,7 @@ EOF
       --body "Resume failed (session \`${SESSION_ID}\`). Starting new session \`${NEW_SESSION_ID}\`." 2>/dev/null || true
 
     SESSION_ID="$NEW_SESSION_ID"
+    SESSION_NAME="dev-issue-${ISSUE_NUMBER}-retry"
 
     # Re-fetch issue for full context
     ISSUE_BODY=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json title,body -q '.')
@@ -319,7 +321,7 @@ EOF
 
     AGENT_RAN=true
     set +e
-    run_agent "$SESSION_ID" "$FULL_PROMPT" "$AGENT_DEV_MODEL" 2>&1
+    run_agent "$SESSION_ID" "$FULL_PROMPT" "$AGENT_DEV_MODEL" "$SESSION_NAME" 2>&1
     AGENT_EXIT=$?
     set -e
   fi

@@ -429,7 +429,8 @@ EOF
 # ---------------------------------------------------------------------------
 # Run review agent
 # ---------------------------------------------------------------------------
-log "Starting review session: ${SESSION_ID} (model: ${AGENT_REVIEW_MODEL:-sonnet})"
+SESSION_NAME="review-pr-${PR_NUMBER}-issue-${ISSUE_NUMBER}"
+log "Starting review session: ${SESSION_ID} (name: ${SESSION_NAME}, model: ${AGENT_REVIEW_MODEL:-sonnet})"
 
 # Export E2E credentials as env vars (not in prompt) for agent to read at runtime
 if [[ "${E2E_ENABLED:-false}" == "true" ]]; then
@@ -438,7 +439,7 @@ if [[ "${E2E_ENABLED:-false}" == "true" ]]; then
 fi
 
 set +e
-run_agent "$SESSION_ID" "$PROMPT" "${AGENT_REVIEW_MODEL:-sonnet}" 2>&1
+run_agent "$SESSION_ID" "$PROMPT" "${AGENT_REVIEW_MODEL:-sonnet}" "$SESSION_NAME" 2>&1
 AGENT_EXIT=$?
 set -e
 
