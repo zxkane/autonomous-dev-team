@@ -111,9 +111,11 @@ skills-lock.json
 
 # Autonomous pipeline config (contains project-specific values)
 scripts/autonomous.conf
+skills/autonomous-dispatcher/scripts/autonomous.conf
 
 # Runtime symlink created by lib-auth.sh (points to gh-with-token-refresh.sh)
 scripts/gh
+skills/autonomous-dispatcher/scripts/gh
 
 # Claude Code scheduled tasks lock
 .claude/scheduled_tasks.lock
