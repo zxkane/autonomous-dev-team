@@ -14,6 +14,8 @@ metadata: {"openclaw": {"requires": {"bins": ["gh", "jq"], "env": ["PROJECT_DIR"
 
 Scan GitHub issues and dispatch dev/review tasks locally.
 
+> **Security Note**: This dispatcher processes GitHub issue content as input. In public repositories, issue content is untrusted — anyone can create issues. Ensure the `autonomous` label can only be applied by trusted maintainers (use GitHub branch rulesets or organizational policies). The dispatcher itself only reads labels/comments and spawns local processes — it does NOT modify source code or push to branches.
+
 ## GitHub Authentication — USE APP TOKEN, NOT USER TOKEN
 
 **CRITICAL:** All `gh` CLI calls MUST use a GitHub App token, NOT the default user token.
