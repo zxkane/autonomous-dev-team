@@ -1,0 +1,1 @@
+../../autonomous-common/scripts/gh-as-user.sh

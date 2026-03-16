@@ -1,0 +1,1 @@
+../../autonomous-common/scripts/mark-issue-checkbox.sh

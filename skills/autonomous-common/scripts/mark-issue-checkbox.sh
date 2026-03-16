@@ -19,9 +19,16 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-if [[ -f "${SCRIPT_DIR}/autonomous.conf" ]]; then
-  source "${SCRIPT_DIR}/autonomous.conf"
-fi
+# Load config: check co-located, then dispatcher scripts, then project root scripts/
+for _conf_candidate in \
+    "${SCRIPT_DIR}/autonomous.conf" \
+    "${SCRIPT_DIR}/../../autonomous-dispatcher/scripts/autonomous.conf" \
+    "$(cd "${SCRIPT_DIR}/../../.." 2>/dev/null && pwd)/scripts/autonomous.conf"; do
+  if [[ -f "$_conf_candidate" ]]; then
+    source "$_conf_candidate"
+    break
+  fi
+done
 REPO="${GITHUB_REPO:-${REPO:-owner/repo}}"
 
 ISSUE_NUMBER="${1:-}"

@@ -1,0 +1,1 @@
+../../autonomous-review/scripts/upload-screenshot.sh

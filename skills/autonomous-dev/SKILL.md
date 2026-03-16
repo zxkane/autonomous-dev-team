@@ -9,6 +9,74 @@ description: >
   worktree creation, test-first development, code review, PR creation, CI
   verification, reviewer bot interaction, E2E testing, and worktree cleanup.
   Supports interactive and fully autonomous modes for GitHub issue implementation.
+hooks:
+  PreToolUse:
+    - matcher: "Bash"
+      hooks:
+        - type: command
+          command: "\"$CLAUDE_PROJECT_DIR\"/hooks/block-push-to-main.sh"
+          timeout: 5
+        - type: command
+          command: "\"$CLAUDE_PROJECT_DIR\"/hooks/block-commit-outside-worktree.sh"
+          timeout: 5
+        - type: command
+          command: "\"$CLAUDE_PROJECT_DIR\"/hooks/check-design-canvas.sh"
+          timeout: 5
+        - type: command
+          command: "\"$CLAUDE_PROJECT_DIR\"/hooks/check-code-simplifier.sh"
+          timeout: 5
+        - type: command
+          command: "\"$CLAUDE_PROJECT_DIR\"/hooks/check-pr-review.sh"
+          timeout: 5
+        - type: command
+          command: "\"$CLAUDE_PROJECT_DIR\"/hooks/check-unit-tests.sh"
+          timeout: 5
+        - type: command
+          command: "\"$CLAUDE_PROJECT_DIR\"/hooks/warn-skip-verification.sh"
+          timeout: 5
+        - type: command
+          command: "\"$CLAUDE_PROJECT_DIR\"/hooks/check-rebase-before-push.sh"
+          timeout: 10
+    - matcher: "Write"
+      hooks:
+        - type: command
+          command: "\"$CLAUDE_PROJECT_DIR\"/hooks/check-test-plan.sh"
+          timeout: 5
+    - matcher: "Edit"
+      hooks:
+        - type: command
+          command: "\"$CLAUDE_PROJECT_DIR\"/hooks/check-test-plan.sh"
+          timeout: 5
+  PostToolUse:
+    - matcher: "Bash"
+      hooks:
+        - type: command
+          command: "\"$CLAUDE_PROJECT_DIR\"/hooks/post-git-action-clear.sh commit code-simplifier"
+          timeout: 5
+        - type: command
+          command: "\"$CLAUDE_PROJECT_DIR\"/hooks/post-git-action-clear.sh commit design-canvas"
+          timeout: 5
+        - type: command
+          command: "\"$CLAUDE_PROJECT_DIR\"/hooks/post-git-action-clear.sh push pr-review"
+          timeout: 5
+        - type: command
+          command: "\"$CLAUDE_PROJECT_DIR\"/hooks/post-git-push.sh"
+          timeout: 30
+    - matcher: "Write"
+      hooks:
+        - type: command
+          command: "\"$CLAUDE_PROJECT_DIR\"/hooks/post-file-edit-reminder.sh"
+          timeout: 5
+    - matcher: "Edit"
+      hooks:
+        - type: command
+          command: "\"$CLAUDE_PROJECT_DIR\"/hooks/post-file-edit-reminder.sh"
+          timeout: 5
+  Stop:
+    - hooks:
+        - type: command
+          command: "\"$CLAUDE_PROJECT_DIR\"/hooks/verify-completion.sh"
+          timeout: 10
 ---
 
 # TDD Development Workflow

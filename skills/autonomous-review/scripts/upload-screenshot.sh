@@ -28,9 +28,16 @@ PR_NUMBER="${2:-}"
 TC_ID="${3:-}"
 
 _SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-if [[ -f "${_SCRIPT_DIR}/autonomous.conf" ]]; then
-  source "${_SCRIPT_DIR}/autonomous.conf"
-fi
+# Load config: check co-located, then dispatcher scripts, then project root scripts/
+for _conf_candidate in \
+    "${_SCRIPT_DIR}/autonomous.conf" \
+    "${_SCRIPT_DIR}/../../autonomous-dispatcher/scripts/autonomous.conf" \
+    "$(cd "${_SCRIPT_DIR}/../../.." 2>/dev/null && pwd)/scripts/autonomous.conf"; do
+  if [[ -f "$_conf_candidate" ]]; then
+    source "$_conf_candidate"
+    break
+  fi
+done
 REPO="${REPO:-owner/repo}"
 BRANCH="screenshots"
 

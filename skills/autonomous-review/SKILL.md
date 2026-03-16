@@ -7,6 +7,18 @@ description: >
   a pull request. Use when asked to "review this PR", "check PR status",
   "run E2E verification", "verify acceptance criteria", "resolve merge
   conflicts", "approve and merge", or during autonomous review dispatch.
+hooks:
+  PreToolUse:
+    - matcher: "Bash"
+      hooks:
+        - type: command
+          command: "\"$CLAUDE_PROJECT_DIR\"/hooks/block-push-to-main.sh"
+          timeout: 5
+  Stop:
+    - hooks:
+        - type: command
+          command: "\"$CLAUDE_PROJECT_DIR\"/hooks/verify-completion.sh"
+          timeout: 10
 ---
 
 # Autonomous Review Mode

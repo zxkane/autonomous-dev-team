@@ -11,8 +11,8 @@ fi
 
 # Ensure PROJECT_DIR is an absolute path to the repo root.
 # autonomous.conf may use a relative BASH_SOURCE trick that can resolve
-# incorrectly when sourced indirectly. Fall back to _LIB_AGENT_DIR/..
-PROJECT_DIR="${PROJECT_DIR:-$(cd "${_LIB_AGENT_DIR}/.." && pwd)}"
+# incorrectly when sourced indirectly. Fall back to _LIB_AGENT_DIR/../../..
+PROJECT_DIR="${PROJECT_DIR:-$(cd "${_LIB_AGENT_DIR}/../../.." && pwd)}"
 
 # Agent configuration (overridable via env or autonomous.conf)
 AGENT_CMD="${AGENT_CMD:-claude}"
