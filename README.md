@@ -183,50 +183,42 @@ See `CLAUDE.md` for detailed step-by-step instructions.
 │   ├── agents/
 │   │   └── default.json         # Kiro CLI agent config (hooks + tools)
 │   └── skills -> ../skills      # Symlink for Kiro CLI discovery
-├── hooks/                       # Hook scripts (project root)
-│   ├── lib.sh                   # Shared utility functions
-│   ├── state-manager.sh         # Workflow state management
-│   ├── block-push-to-main.sh            # Blocks direct push to main
-│   ├── block-commit-outside-worktree.sh # Blocks commits outside worktrees
-│   ├── check-design-canvas.sh   # Design canvas check
-│   ├── check-test-plan.sh       # Test plan check
-│   ├── check-code-simplifier.sh # Code simplification check
-│   ├── check-pr-review.sh       # PR review check
-│   ├── check-unit-tests.sh      # Unit tests check
-│   ├── check-rebase-before-push.sh    # Rebase check before push
-│   ├── warn-skip-verification.sh      # --no-verify warning
-│   ├── post-file-edit-reminder.sh     # Post-edit reminder
-│   ├── post-git-action-clear.sh       # Git action state cleanup
-│   ├── post-git-push.sh              # Post-push verification reminder
-│   └── verify-completion.sh          # Task completion verification
+├── hooks -> skills/autonomous-common/hooks   # Symlink for backward compat
+├── scripts -> skills/autonomous-dispatcher/scripts  # Symlink for backward compat
 ├── skills/                      # Agent skills (portable, skills.sh compatible)
+│   ├── autonomous-common/       # Shared hooks + agent-callable scripts
+│   │   ├── SKILL.md
+│   │   ├── hooks/               # Workflow enforcement hooks
+│   │   │   ├── lib.sh, state-manager.sh
+│   │   │   ├── block-push-to-main.sh, block-commit-outside-worktree.sh
+│   │   │   ├── check-*.sh       # Pre-commit/push checks
+│   │   │   ├── post-*.sh        # Post-action hooks
+│   │   │   └── verify-completion.sh
+│   │   └── scripts/             # Shared agent-callable scripts
+│   │       ├── mark-issue-checkbox.sh
+│   │       ├── gh-as-user.sh
+│   │       ├── reply-to-comments.sh
+│   │       └── resolve-threads.sh
 │   ├── autonomous-dev/          # Development workflow skill
-│   │   ├── SKILL.md             # Main skill definition
+│   │   ├── SKILL.md             # Main skill definition (includes hooks frontmatter)
 │   │   └── references/          # Reference documentation
 │   │       ├── commit-conventions.md  # Branch naming & commit standards
 │   │       └── review-commands.md     # GitHub CLI & GraphQL commands
 │   ├── autonomous-review/       # Autonomous review skill
-│   │   └── SKILL.md             # Review agent instructions
-│   ├── autonomous-dispatcher/   # OpenClaw dispatcher skill
-│   │   └── SKILL.md             # Dispatcher instructions
+│   │   ├── SKILL.md             # Review agent instructions (includes hooks frontmatter)
+│   │   └── scripts/
+│   │       └── upload-screenshot.sh
+│   ├── autonomous-dispatcher/   # Issue dispatcher + pipeline scripts
+│   │   ├── SKILL.md             # Dispatcher instructions
+│   │   └── scripts/
+│   │       ├── autonomous-dev.sh, autonomous-review.sh
+│   │       ├── dispatch-local.sh, autonomous.conf.example
+│   │       ├── lib-agent.sh, lib-auth.sh
+│   │       ├── gh-app-token.sh, gh-token-refresh-daemon.sh
+│   │       ├── gh-with-token-refresh.sh
+│   │       └── setup-labels.sh
 │   └── create-issue/            # Issue creation skill
 │       └── SKILL.md             # Issue creation instructions
-├── scripts/                     # Pipeline and utility scripts
-│   ├── autonomous.conf.example  # Configuration template
-│   ├── autonomous-dev.sh        # Dev agent wrapper
-│   ├── autonomous-review.sh     # Review agent wrapper
-│   ├── dispatch-local.sh        # Local dispatch script
-│   ├── lib-agent.sh             # Agent abstraction (Claude/Codex/Kiro)
-│   ├── lib-auth.sh              # GitHub auth abstraction
-│   ├── gh-app-token.sh          # GitHub App token generation
-│   ├── gh-as-user.sh            # Run gh CLI as a GitHub App user
-│   ├── gh-token-refresh-daemon.sh   # Background token refresh
-│   ├── gh-with-token-refresh.sh     # gh CLI with auto-refresh
-│   ├── mark-issue-checkbox.sh   # Mark issue checkboxes
-│   ├── reply-to-comments.sh     # Reply to PR review comments
-│   ├── resolve-threads.sh       # Batch resolve review threads
-│   ├── setup-labels.sh          # Create GitHub labels for the pipeline
-│   └── upload-screenshot.sh     # Upload screenshots to issues
 ├── docs/
 │   ├── autonomous-pipeline.md   # Pipeline overview documentation
 │   ├── github-app-setup.md      # GitHub App configuration guide
