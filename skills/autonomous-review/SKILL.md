@@ -98,15 +98,38 @@ MERGEABLE=$(gh pr view <PR_NUMBER> --repo <REPO> --json mergeable -q '.mergeable
 ## Review Process
 
 1. **Read the issue** to understand requirements
-2. **Read the PR diff** thoroughly (`gh pr diff <number>`)
-3. **Check CI status** (`gh pr checks <number>`)
-4. **Read the files** for design docs, test cases, etc. to verify they exist
-5. **Assess code quality** against the checklist above
-6. **Verify bot reviewer findings** (if configured — see checklist section 5)
-7. **Select happy path test cases** based on PR diff analysis (see below)
-8. **Perform E2E verification** (if configured — see procedure below)
-9. **Mark acceptance criteria** — for each verified criterion, mark its checkbox in the issue body (see "Marking Acceptance Criteria")
-10. **MANDATORY SELF-CHECK GATE** — execute the Findings->Decision Gate (see below) BEFORE submitting any review verdict
+2. **Read ALL issue comments** to detect requirement changes (see "Requirement Drift Detection" below)
+3. **Read the PR diff** thoroughly (`gh pr diff <number>`)
+4. **Check CI status** (`gh pr checks <number>`)
+5. **Read the files** for design docs, test cases, etc. to verify they exist
+6. **Assess code quality** against the checklist above
+7. **Verify bot reviewer findings** (if configured — see checklist section 5)
+8. **Select happy path test cases** based on PR diff analysis (see below)
+9. **Perform E2E verification** (if configured — see procedure below)
+10. **Mark acceptance criteria** — for each verified criterion, mark its checkbox in the issue body (see "Marking Acceptance Criteria")
+11. **MANDATORY SELF-CHECK GATE** — execute the Findings->Decision Gate (see below) BEFORE submitting any review verdict
+
+## Requirement Drift Detection — MANDATORY
+
+> **This step MUST be performed BEFORE reading the PR diff. Requirements can change after implementation via issue comments from the repo owner or maintainers.**
+
+Read ALL comments on the issue (not just the body) and look for:
+- Scope changes ("remove", "no longer", "drop", "don't support", "instead of")
+- New requirements added after the original issue was created
+- Corrections or clarifications from the repo owner
+- Explicit instructions to the dev agent that may not yet be reflected in the PR code
+
+```bash
+# Read all issue comments to check for requirement changes
+gh issue view <ISSUE_NUMBER> --repo <REPO> --json comments \
+  -q '.comments[] | "\(.author.login) [\(.createdAt)]: \(.body[0:500])"'
+```
+
+If any requirement change is found that the PR code does **NOT** reflect:
+- This is a **[BLOCKING] Requirement drift** finding
+- The PR must be sent back to dev with specific instructions about what changed
+- Quote the comment that changed the requirement
+- List the specific code/files that need to be updated
 
 ## Happy Path Test Cases
 

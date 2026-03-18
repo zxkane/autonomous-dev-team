@@ -237,6 +237,23 @@ Quick reference:
    \`git push --force-with-lease origin ${PR_BRANCH}\`. Then exit.
 5. If "UNKNOWN" — wait 10s and retry up to 3 times
 
+## Step 0.5: Requirement Drift Detection — MANDATORY PRE-REVIEW
+
+**Before reading the PR diff**, read ALL comments on issue #${ISSUE_NUMBER} to detect requirement changes posted after implementation:
+
+\`\`\`bash
+gh issue view ${ISSUE_NUMBER} --repo ${REPO} --json comments \\
+  -q '.comments[] | "\\(.author.login) [\\(.createdAt)]: \\(.body[0:500])"'
+\`\`\`
+
+Look for:
+- Scope changes ("remove", "no longer", "drop", "don't support", "instead of")
+- New requirements added after the original issue
+- Corrections or clarifications from the repo owner (@${REPO_OWNER})
+- Explicit instructions to the dev agent that may not yet be reflected in the PR code
+
+**If any requirement change is found that the PR code does NOT reflect, this is a [BLOCKING] Requirement drift finding.** Quote the comment and list the specific code that needs updating.
+
 ## Review Checklist
 Verify ALL of the following were completed:
 
@@ -269,12 +286,13 @@ Read the issue body for an \`## Acceptance Criteria\` section. For EACH criterio
 
 ## Review Process
 1. Read the issue body to understand requirements
-2. Read the PR diff to verify implementation
-3. Verify acceptance criteria (see above)
-4. Check that CI checks are passing: gh pr checks ${PR_NUMBER}
-5. Verify test coverage and quality
-6. Check for security issues, code quality, and best practices
-7. Trigger and verify Amazon Q Developer review (see below)
+2. Read ALL issue comments to detect requirement changes (Step 0.5 above)
+3. Read the PR diff to verify implementation
+4. Verify acceptance criteria (see above)
+5. Check that CI checks are passing: gh pr checks ${PR_NUMBER}
+6. Verify test coverage and quality
+7. Check for security issues, code quality, and best practices
+8. Trigger and verify Amazon Q Developer review (see below)
 
 ## Amazon Q Developer Review — MANDATORY
 
@@ -374,7 +392,7 @@ Post a structured comment on PR #${PR_NUMBER} (NOT the issue) with this format:
 
 ### Summary
 | Total | Passed | Failed | Skipped |
-|-------|--------|--------|---------|
+|-------|--------|--------|--------|
 | N     | X      | Y      | Z       |
 
 ### Happy Path Results
@@ -407,13 +425,13 @@ fi)
 ## Decision
 After thorough review:
 
-- If ALL checklist items pass AND code quality is good$(if [[ "${E2E_ENABLED:-false}" == "true" ]]; then echo " AND all E2E tests pass"; fi):
+- If ALL checklist items pass AND code quality is good$(if [[ "${E2E_ENABLED:-false}" == "true" ]]; then echo " AND all E2E tests pass"; fi) AND no requirement drift detected:
   Post a comment on issue #${ISSUE_NUMBER} with:
-  "Review PASSED - All checklist items verified, code quality good.$(if [[ "${E2E_ENABLED:-false}" == "true" ]]; then echo " E2E verification completed."; fi)
+  "Review PASSED - All checklist items verified, code quality good.$(if [[ "${E2E_ENABLED:-false}" == "true" ]]; then echo " E2E verification completed."; fi) No requirement drift.
   Review Session: \`${SESSION_ID}\`"
   Then exit.
 
-- If ANY item fails$(if [[ "${E2E_ENABLED:-false}" == "true" ]]; then echo " OR any E2E test fails OR preview URL is unavailable"; fi):
+- If ANY item fails$(if [[ "${E2E_ENABLED:-false}" == "true" ]]; then echo " OR any E2E test fails OR preview URL is unavailable"; fi) OR requirement drift is detected:
   Post a comment on issue #${ISSUE_NUMBER} with:
   "Review findings:"
   followed by a numbered list of each failing item with specific remediation instructions.$(if [[ "${E2E_ENABLED:-false}" == "true" ]]; then echo "
