@@ -79,7 +79,7 @@ The referenced file {filename} exists in the repository at {path}. This is a ref
 ## Quick Reference
 
 | Task | Command |
-|------|---------|
+|------|--------|
 | Create worktree | `git worktree add .worktrees/<branch> -b <branch>` |
 | List worktrees | `git worktree list` |
 | Remove worktree | `git worktree remove .worktrees/<branch>` |
@@ -90,8 +90,8 @@ The referenced file {filename} exists in the repository at {path}. This is a ref
 | Get comments | `gh api repos/{o}/{r}/pulls/{pr}/comments` |
 | Reply to comment | `gh api ... -X POST -F in_reply_to=<id>` |
 | Resolve thread | GraphQL `resolveReviewThread` mutation |
-| Trigger Q review | `gh pr comment {pr} --body "/q review"` |
-| Trigger Codex review | `gh pr comment {pr} --body "/codex review"` |
+| Trigger Q review | `bash scripts/gh-as-user.sh pr comment {pr} --body "/q review"` |
+| Trigger Codex review | `bash scripts/gh-as-user.sh pr comment {pr} --body "/codex review"` |
 | Reply to comment (script) | `scripts/reply-to-comments.sh {owner} {repo} {pr} {comment_id} "{message}"` |
 | Resolve all threads (script) | `scripts/resolve-threads.sh {owner} {repo} {pr}` |
 | Mark hook state | `hooks/state-manager.sh mark <action>` |

@@ -420,13 +420,17 @@ Multiple review bots can provide automated code review findings on PRs:
 
 ### Retrigger Bot Reviews
 
+> **IMPORTANT:** Some bot reviewers (e.g., Amazon Q Developer) ignore `/q review` comments posted by GitHub App bot accounts. If your project uses `scripts/gh-as-user.sh`, you **MUST** use it to trigger bot reviews so the comment is attributed to a real user. Do NOT use the default `gh` wrapper for bot review triggers.
+
 ```bash
-# Amazon Q Developer
-gh pr comment {pr_number} --body "/q review"
+# Amazon Q Developer (use gh-as-user.sh to post as a real user)
+bash scripts/gh-as-user.sh pr comment {pr_number} --body "/q review"
 
 # Codex
-gh pr comment {pr_number} --body "/codex review"
+bash scripts/gh-as-user.sh pr comment {pr_number} --body "/codex review"
 ```
+
+If `scripts/gh-as-user.sh` is not available in your project, use `gh pr comment` directly as a fallback.
 
 Wait 60-90 seconds for the review to complete, then check for new comments.
 

@@ -68,7 +68,14 @@ Verify ALL of the following:
 ### 5. Optional: Bot Reviewer Verification
 - [ ] If configured bot reviewers have posted reviews, verify their findings are addressed
 - [ ] All bot review threads are resolved
-- [ ] If bot review is missing and configured, trigger it and wait
+- [ ] If bot review is missing and configured, trigger it using `scripts/gh-as-user.sh` (see below) and wait
+
+> **IMPORTANT:** Some bot reviewers (e.g., Amazon Q Developer) ignore trigger comments posted by GitHub App bot accounts. When triggering bot reviews, you **MUST** use `scripts/gh-as-user.sh` so the comment is attributed to a real user:
+> ```bash
+> bash scripts/gh-as-user.sh pr comment {pr_number} --body "/q review"
+> bash scripts/gh-as-user.sh pr comment {pr_number} --body "/codex review"
+> ```
+> Do NOT use the default `gh` wrapper for bot review triggers — it authenticates as a bot, which some reviewers ignore. If `scripts/gh-as-user.sh` is not available, fall back to `gh pr comment` directly.
 
 ### 6. E2E Verification via Chrome DevTools MCP
 
