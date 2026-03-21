@@ -65,15 +65,17 @@ gh api repos/{owner}/{repo}/pulls/{pr}/reviews \
 
 ### Trigger Bot Reviews
 
-Add a comment to trigger bot rescans:
+> **IMPORTANT:** Some bot reviewers (e.g., Amazon Q Developer) ignore comments posted by GitHub App bot accounts. If your project has `scripts/gh-as-user.sh`, use it so the comment is attributed to a real user.
 
 ```bash
-# Amazon Q Developer
-gh pr comment {pr} --body "/q review"
+# Amazon Q Developer (post as real user — bots ignore bot-posted triggers)
+bash scripts/gh-as-user.sh pr comment {pr} --body "/q review"
 
 # Codex
-gh pr comment {pr} --body "/codex review"
+bash scripts/gh-as-user.sh pr comment {pr} --body "/codex review"
 ```
+
+If `scripts/gh-as-user.sh` is not available, fall back to `gh pr comment` directly.
 
 ### Monitor PR Checks
 
@@ -235,13 +237,13 @@ gh api repos/{owner}/{repo}/pulls/{pr}/comments \
 # Use the batch resolve script or loop above
 ```
 
-4. **Trigger new review** (use appropriate bot command):
+4. **Trigger new review** (use `gh-as-user.sh` so bots don't ignore the trigger):
 ```bash
 # Amazon Q
-gh pr comment {pr} --body "/q review"
+bash scripts/gh-as-user.sh pr comment {pr} --body "/q review"
 
 # Codex
-gh pr comment {pr} --body "/codex review"
+bash scripts/gh-as-user.sh pr comment {pr} --body "/codex review"
 ```
 
 5. **Wait and check for new comments**:
