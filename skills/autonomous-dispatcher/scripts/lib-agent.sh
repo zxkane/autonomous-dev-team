@@ -21,6 +21,23 @@ AGENT_REVIEW_MODEL="${AGENT_REVIEW_MODEL:-sonnet}"
 AGENT_PERMISSION_MODE="${AGENT_PERMISSION_MODE:-auto}"
 KIRO_AGENT_NAME="${KIRO_AGENT_NAME:-autonomous-dev}"
 
+# Acquire PID guard: prevent duplicate instances for the same issue.
+# Checks for symlink attacks, running processes, then writes current PID.
+# Args: $1=pid_file, $2=label (e.g. "autonomous-dev"), $3=issue_number
+acquire_pid_guard() {
+  local pid_file="$1" label="$2" issue_num="$3"
+  [[ -L "$pid_file" ]] && { echo "Error: PID file is a symlink — possible attack" >&2; exit 1; }
+  if [[ -f "$pid_file" ]]; then
+    local existing_pid
+    existing_pid=$(cat "$pid_file" 2>/dev/null)
+    if [[ -n "$existing_pid" ]] && kill -0 "$existing_pid" 2>/dev/null; then
+      echo "[$label] Another instance for issue #${issue_num} is already running (PID $existing_pid). Exiting." >&2
+      exit 0
+    fi
+  fi
+  echo $$ > "$pid_file"
+}
+
 # Run agent with a new session.
 # Args: $1=session_id, $2=prompt, $3=model (optional), $4=session_name (optional)
 run_agent() {

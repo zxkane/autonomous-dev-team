@@ -92,9 +92,8 @@ AGENT_RAN=false
 # Note: log file is created by nohup redirect in dispatch-local.sh.
 # Do NOT truncate it here (install -m 600 /dev/null would destroy nohup output).
 
-# Write PID for stale detection (reject symlinks to prevent redirect attacks)
-[[ -L "$PID_FILE" ]] && { echo "Error: PID file is a symlink — possible attack" >&2; exit 1; }
-echo $$ > "$PID_FILE"
+# PID guard: prevent duplicate instances for the same issue
+acquire_pid_guard "$PID_FILE" "autonomous-dev" "$ISSUE_NUMBER"
 
 # ---------------------------------------------------------------------------
 # Helpers
