@@ -487,6 +487,20 @@ done
 if echo "$LATEST_COMMENT" | head -1 | grep -qi "^Review PASSED"; then
   log "Review PASSED for PR #${PR_NUMBER}."
 
+  # ---------------------------------------------------------------------------
+  # Guard: verify PR is still open before approving/merging.
+  # A concurrent review (e.g. manual `/q review` + dispatcher) may have already
+  # approved and merged the PR while this review was running.
+  # ---------------------------------------------------------------------------
+  PR_STATE=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json state -q '.state' 2>/dev/null || echo "UNKNOWN")
+  if [[ "$PR_STATE" != "OPEN" ]]; then
+    log "PR #${PR_NUMBER} is no longer open (state: ${PR_STATE}). Skipping approve/merge — another review likely completed first."
+    gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
+      --remove-label "reviewing" 2>/dev/null || true
+    RESULT_PARSED=true
+    exit 0
+  fi
+
   # Formal PR approval from review agent
   if ! refresh_token_env; then
     log "ERROR: Token refresh failed — token daemon may have crashed. Attempting approval with current token..."
