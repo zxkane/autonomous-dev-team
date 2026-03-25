@@ -87,7 +87,14 @@ All code changes happen via the autonomous-dev/review scripts. The dispatcher MU
 
 ## Dispatch Logic
 
-When triggered (cron every 5 minutes), execute the following steps IN ORDER:
+When triggered (cron every 5 minutes), execute the following steps IN ORDER.
+
+**Important:** Maintain a `JUST_DISPATCHED` array to track issue numbers dispatched in the current cycle. This prevents Step 5 from false-positive stale detection on freshly dispatched processes whose PID files haven't been written yet.
+
+```bash
+# Initialize at the start of each dispatch cycle
+JUST_DISPATCHED=()
+```
 
 ### Step 1: Check Concurrency
 
@@ -150,7 +157,8 @@ If any dependency issue is still open, **skip this issue silently** (do not add 
 ```bash
 bash "$PROJECT_DIR/scripts/dispatch-local.sh" dev-new ISSUE_NUM
 ```
-**5.** Re-check concurrency after each dispatch
+**5.** Track dispatched issue: `JUST_DISPATCHED+=(ISSUE_NUM)`
+**6.** Re-check concurrency after each dispatch
 
 ### Step 3: Scan for Review Tasks
 
@@ -162,12 +170,13 @@ gh issue list --repo "$REPO" --state open --limit 100 \
 ```
 
 For each found issue (respecting concurrency limit):
-1. Remove `pending-review`, add `reviewing`
-2. Comment: `Dispatching autonomous review...`
-3. Dispatch via helper script:
+**1.** Remove `pending-review`, add `reviewing`
+**2.** Comment: `Dispatching autonomous review...`
+**3.** Dispatch via helper script:
 ```bash
 bash "$PROJECT_DIR/scripts/dispatch-local.sh" review ISSUE_NUM
 ```
+**4.** Track dispatched issue: `JUST_DISPATCHED+=(ISSUE_NUM)`
 
 ### Step 4: Scan for Pending-Dev (Resume)
 
@@ -179,11 +188,17 @@ gh issue list --repo "$REPO" --state open --limit 100 \
 
 For each found issue (respecting concurrency limit):
 
-**1. Check retry count** — before dispatching, count the number of **failed** `Agent Session Report (Dev)` comments (exit code ≠ 0) on the issue. Successful dev completions (exit code 0) that were sent back by review do NOT count as retries:
+**1. Check retry count** — before dispatching, count BOTH **failed** `Agent Session Report (Dev)` comments (exit code ≠ 0) AND **dispatcher-detected crash** comments. Successful dev completions (exit code 0) that were sent back by review do NOT count as retries:
 ```bash
-RETRY_COUNT=$(gh issue view ISSUE_NUM --repo "$REPO" --json comments \
+# Count failed agent session reports
+AGENT_FAILURES=$(gh issue view ISSUE_NUM --repo "$REPO" --json comments \
   -q '[.comments[] | select((.body | test("Agent Session Report \\(Dev\\)")) and (.body | test("Exit code: 0") | not))] | length')
 
+# Count dispatcher-detected crashes (stale detection or review crash comments)
+DISPATCHER_CRASHES=$(gh issue view ISSUE_NUM --repo "$REPO" --json comments \
+  -q '[.comments[] | select(.body | test("Task appears to have crashed|process not found|crashed \\(no PR found\\)|crashed\\. PR found"))] | length')
+
+RETRY_COUNT=$((AGENT_FAILURES + DISPATCHER_CRASHES))
 MAX_RETRIES="${MAX_RETRIES:-3}"
 
 if [ "$RETRY_COUNT" -ge "$MAX_RETRIES" ]; then
@@ -192,12 +207,12 @@ if [ "$RETRY_COUNT" -ge "$MAX_RETRIES" ]; then
     --remove-label "pending-dev" \
     --add-label "stalled"
   gh issue comment ISSUE_NUM --repo "$REPO" \
-    --body "Issue has exceeded the maximum retry limit ($MAX_RETRIES failed attempts). Marking as stalled. @${REPO_OWNER} please investigate manually."
+    --body "Issue has exceeded the maximum retry limit ($MAX_RETRIES failed attempts: $AGENT_FAILURES agent failures + $DISPATCHER_CRASHES dispatcher-detected crashes). Marking as stalled. @${REPO_OWNER} please investigate manually."
   continue
 fi
 ```
 
-If failed retry count exceeds `MAX_RETRIES` (default 3), add `stalled` label, remove `pending-dev`, post a comment, and **skip this issue**.
+If combined retry count exceeds `MAX_RETRIES` (default 3), add `stalled` label, remove `pending-dev`, post a comment, and **skip this issue**.
 
 **2.** Extract latest dev session ID from issue comments (search for `Dev Session ID:` — do NOT match `Review Session ID:`):
 ```bash
@@ -211,12 +226,23 @@ SESSION_ID=$(gh issue view ISSUE_NUM --repo "$REPO" --json comments \
 ```bash
 bash "$PROJECT_DIR/scripts/dispatch-local.sh" dev-resume ISSUE_NUM SESSION_ID
 ```
+**6.** Track dispatched issue: `JUST_DISPATCHED+=(ISSUE_NUM)`
 
 ### Step 5: Stale Detection
 
 Find issues with `in-progress` or `reviewing` that may be stuck.
 
-For each such issue, check if the agent process is still alive locally. Use the correct PID file prefix based on the issue's current label:
+**Skip freshly dispatched issues:** Before checking any issue, verify it was NOT dispatched in the current cycle. Issues in `JUST_DISPATCHED` must be skipped — their PID files may not exist yet.
+
+```bash
+# Skip issues dispatched in this cycle
+if [[ " ${JUST_DISPATCHED[*]} " == *" ISSUE_NUM "* ]]; then
+  # Skip — just dispatched this cycle, PID file may not exist yet
+  continue
+fi
+```
+
+For each remaining issue, check if the agent process is still alive locally. Use the correct PID file prefix based on the issue's current label:
 
 - `in-progress` issues use PID file: `/tmp/agent-${PROJECT_ID}-issue-ISSUE_NUM.pid`
 - `reviewing` issues use PID file: `/tmp/agent-${PROJECT_ID}-review-ISSUE_NUM.pid`
@@ -229,9 +255,21 @@ kill -0 $(cat /tmp/agent-${PROJECT_ID}-issue-ISSUE_NUM.pid 2>/dev/null) 2>/dev/n
 kill -0 $(cat /tmp/agent-${PROJECT_ID}-review-ISSUE_NUM.pid 2>/dev/null) 2>/dev/null && echo ALIVE || echo DEAD
 ```
 
-If DEAD and issue still has `in-progress`:
-1. Comment: `Task appears to have crashed. Moving to pending-review for assessment.`
-2. Remove `in-progress`, add `pending-review`
+If DEAD and issue still has `in-progress`, **check whether a PR exists before deciding the transition**:
+```bash
+PR_EXISTS=$(gh pr list --repo "$REPO" --state open --json number,body \
+  -q "[.[] | select(.body | test(\"#ISSUE_NUM[^0-9]\") or test(\"#ISSUE_NUM$\"))] | length")
+
+if [ "$PR_EXISTS" -gt 0 ]; then
+  # PR exists — review agent can assess the work
+  # Comment: "Task appears to have crashed. PR found — moving to pending-review for assessment."
+  # Remove `in-progress`, add `pending-review`
+else
+  # No PR — dev agent didn't finish, retry development
+  # Comment: "Task appears to have crashed (no PR found). Moving to pending-dev for retry."
+  # Remove `in-progress`, add `pending-dev`
+fi
+```
 
 If DEAD and issue still has `reviewing`:
 1. Comment: `Review process appears to have crashed. Moving to pending-dev for retry.`
