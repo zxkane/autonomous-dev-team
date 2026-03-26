@@ -26,6 +26,11 @@
           },
           {
             "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/hooks/check-shellcheck.sh",
+            "timeout": 15
+          },
+          {
+            "type": "command",
             "command": "\"$CLAUDE_PROJECT_DIR\"/hooks/check-pr-review.sh",
             "timeout": 5
           },

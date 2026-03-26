@@ -38,6 +38,7 @@ Workflow enforcement hooks in `hooks/` directory. See `hooks/README.md` for the 
 | `check-code-simplifier.sh` | PreToolUse | Blocks commits until code-simplifier review |
 | `check-pr-review.sh` | PreToolUse | Blocks pushes until PR review |
 | `check-test-plan.sh` | PreToolUse | Reminds about test plan |
+| `check-shellcheck.sh` | PreToolUse | Blocks commits if staged .sh files have shellcheck errors |
 | `check-unit-tests.sh` | PreToolUse | Warns about unrun unit tests |
 | `check-rebase-before-push.sh` | PreToolUse | Blocks push if behind origin/main |
 | `warn-skip-verification.sh` | PreToolUse | Warns about --no-verify |
