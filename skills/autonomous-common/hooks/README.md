@@ -41,6 +41,7 @@ IDEs without hook support (Cursor, Windsurf, Gemini CLI, etc.) rely on skill ins
 | `check-code-simplifier.sh` | PreToolUse | Bash | Blocks commits until code-simplifier review |
 | `check-pr-review.sh` | PreToolUse | Bash | Blocks pushes until PR review complete |
 | `check-test-plan.sh` | PreToolUse | Write/Edit | Reminds about test plan before code changes |
+| `check-shellcheck.sh` | PreToolUse | Bash | Blocks commits if staged .sh files have shellcheck errors |
 | `check-unit-tests.sh` | PreToolUse | Bash | Warns about unrun unit tests |
 | `warn-skip-verification.sh` | PreToolUse | Bash | Warns about --no-verify usage |
 | `check-rebase-before-push.sh` | PreToolUse | Bash | Blocks push if branch is behind origin/main |
