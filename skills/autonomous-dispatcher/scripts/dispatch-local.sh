@@ -28,9 +28,11 @@ if [[ -n "$SESSION_ID" ]] && ! [[ "$SESSION_ID" =~ ^[a-zA-Z0-9_-]+$ ]]; then
 fi
 
 # Load config
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 if [[ -f "${SCRIPT_DIR}/autonomous.conf" ]]; then
   source "${SCRIPT_DIR}/autonomous.conf"
+elif [[ -f "${SCRIPT_DIR}/../../../scripts/autonomous.conf" ]]; then
+  source "${SCRIPT_DIR}/../../../scripts/autonomous.conf"
 fi
 
 PROJECT_ID="${PROJECT_ID:-project}"

@@ -14,7 +14,7 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$([ -L "$0" ] && readlink "$0" || echo "$0")")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 source "${SCRIPT_DIR}/lib-agent.sh"
 source "${SCRIPT_DIR}/lib-auth.sh"
 
