@@ -275,6 +275,57 @@ else
   ((FAIL++))
 fi
 
+echo "TC-CONTENT-006: lib-agent.sh has config fallback"
+if [[ -f "$LIB_AGENT" ]]; then
+  LIB_CONTENT=$(cat "$LIB_AGENT")
+  assert_contains "Fallback config path in lib-agent.sh" '../../../scripts/autonomous.conf' "$LIB_CONTENT"
+else
+  echo -e "  ${RED}FAIL${NC}: lib-agent.sh not found"
+  ((FAIL++))
+fi
+
+echo "TC-CONTENT-007: lib-auth.sh has config fallback"
+if [[ -f "$LIB_AUTH" ]]; then
+  LIB_AUTH_CONTENT=$(cat "$LIB_AUTH")
+  assert_contains "Fallback config path in lib-auth.sh" '../../../scripts/autonomous.conf' "$LIB_AUTH_CONTENT"
+else
+  echo -e "  ${RED}FAIL${NC}: lib-auth.sh not found"
+  ((FAIL++))
+fi
+
+# ===========================================================================
+# TC-SYM-006: lib-agent.sh config fallback works via installed skill path
+# ===========================================================================
+echo ""
+echo "=== TC-SYM-006: lib-agent.sh config fallback via installed skill path ==="
+echo ""
+
+# Simulates: .agents/skills/autonomous-dispatcher/scripts/lib-agent.sh
+# with autonomous.conf at <project>/scripts/autonomous.conf
+mkdir -p "$TMPDIR/sym-006/skills/autonomous-dispatcher/scripts"
+mkdir -p "$TMPDIR/sym-006/scripts"
+
+cat > "$TMPDIR/sym-006/scripts/autonomous.conf" <<'CONF'
+PROJECT_ID="installed-skill-project"
+PROJECT_DIR="/tmp/fake-project"
+CONF
+
+cat > "$TMPDIR/sym-006/skills/autonomous-dispatcher/scripts/test-lib-config.sh" <<'SCRIPT'
+#!/bin/bash
+_LIB_AGENT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+PROJECT_ID=""
+if [[ -f "${_LIB_AGENT_DIR}/autonomous.conf" ]]; then
+  source "${_LIB_AGENT_DIR}/autonomous.conf"
+elif [[ -f "${_LIB_AGENT_DIR}/../../../scripts/autonomous.conf" ]]; then
+  source "${_LIB_AGENT_DIR}/../../../scripts/autonomous.conf"
+fi
+echo "$PROJECT_ID"
+SCRIPT
+chmod +x "$TMPDIR/sym-006/skills/autonomous-dispatcher/scripts/test-lib-config.sh"
+
+RESULT=$(bash "$TMPDIR/sym-006/skills/autonomous-dispatcher/scripts/test-lib-config.sh")
+assert_eq "lib-agent.sh finds config via fallback from installed skill path" "installed-skill-project" "$RESULT"
+
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
