@@ -23,7 +23,7 @@ REPO_NAME="${5:?Missing repo_name}"
 # Refresh every 45 minutes (token TTL is 60 minutes)
 REFRESH_INTERVAL="${GH_TOKEN_REFRESH_INTERVAL:-2700}"
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 source "${SCRIPT_DIR}/gh-app-token.sh"
 
 log() { echo "[token-refresh] $(date -u +%H:%M:%S) $*"; }

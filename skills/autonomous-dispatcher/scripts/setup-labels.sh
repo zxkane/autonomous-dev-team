@@ -9,11 +9,13 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 
 # Load config for REPO default
 if [[ -f "${SCRIPT_DIR}/autonomous.conf" ]]; then
   source "${SCRIPT_DIR}/autonomous.conf"
+elif [[ -f "${SCRIPT_DIR}/../../../scripts/autonomous.conf" ]]; then
+  source "${SCRIPT_DIR}/../../../scripts/autonomous.conf"
 fi
 
 REPO="${1:-${REPO:?Usage: setup-labels.sh [owner/repo] or set REPO in autonomous.conf}}"

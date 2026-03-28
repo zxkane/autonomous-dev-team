@@ -5,11 +5,14 @@
 #   - "app": uses GitHub App tokens with background refresh daemon
 # Source this file in autonomous-dev.sh and autonomous-review.sh.
 
-_LIB_AUTH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_LIB_AUTH_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 
-# Load project config if available
+# Load project config if available.
+# Fall back to <project-root>/scripts/autonomous.conf when installed via skills.
 if [[ -f "${_LIB_AUTH_DIR}/autonomous.conf" ]]; then
   source "${_LIB_AUTH_DIR}/autonomous.conf"
+elif [[ -f "${_LIB_AUTH_DIR}/../../../scripts/autonomous.conf" ]]; then
+  source "${_LIB_AUTH_DIR}/../../../scripts/autonomous.conf"
 fi
 
 GH_AUTH_MODE="${GH_AUTH_MODE:-token}"

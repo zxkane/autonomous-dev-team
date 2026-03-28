@@ -7,7 +7,7 @@
 # This wrapper is placed earlier in PATH so Claude Code's Bash tool uses it.
 
 # Find the real gh binary (skip ourselves by temporarily removing our dir from PATH)
-SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+SELF_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 CLEAN_PATH=$(echo "$PATH" | tr ':' '\n' | grep -v "^${SELF_DIR}$" | tr '\n' ':' | sed 's/:$//')
 REAL_GH=$(PATH="$CLEAN_PATH" command -v gh 2>/dev/null) || {
   echo "ERROR: Cannot find real gh binary (looked in PATH minus ${SELF_DIR})" >&2
