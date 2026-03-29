@@ -188,15 +188,20 @@ gh issue list --repo "$REPO" --state open --limit 100 \
 
 For each found issue (respecting concurrency limit):
 
-**1. Check retry count** — before dispatching, count BOTH **failed** `Agent Session Report (Dev)` comments (exit code ≠ 0) AND **dispatcher-detected crash** comments. Successful dev completions (exit code 0) that were sent back by review do NOT count as retries:
+**1. Check retry count** — before dispatching, count BOTH **failed** `Agent Session Report (Dev)` comments (exit code ≠ 0) AND **dispatcher-detected crash** comments. Only count failures that occurred **after the last stalled→unstalled transition** (i.e., after the most recent "Marking as stalled" comment). This ensures that removing the `stalled` label resets the retry counter. Successful dev completions (exit code 0) that were sent back by review do NOT count as retries:
 ```bash
-# Count failed agent session reports
-AGENT_FAILURES=$(gh issue view ISSUE_NUM --repo "$REPO" --json comments \
-  -q '[.comments[] | select((.body | test("Agent Session Report \\(Dev\\)")) and (.body | test("Exit code: 0") | not))] | length')
+# Find the timestamp of the last "Marking as stalled" comment (retry counter cutoff).
+# If the issue was never stalled, use epoch (1970-01-01T00:00:00Z) to count all comments.
+LAST_STALLED_AT=$(gh issue view ISSUE_NUM --repo "$REPO" --json comments \
+  -q '[.comments[] | select(.body | test("Marking as stalled"))] | last | .createdAt // "1970-01-01T00:00:00Z"')
 
-# Count dispatcher-detected crashes (stale detection or review crash comments)
+# Count failed agent session reports (only after last stalled cutoff)
+AGENT_FAILURES=$(gh issue view ISSUE_NUM --repo "$REPO" --json comments \
+  -q "[.comments[] | select((.createdAt > \"${LAST_STALLED_AT}\") and (.body | test(\"Agent Session Report \\\\(Dev\\\\)\")) and (.body | test(\"Exit code: 0\") | not))] | length")
+
+# Count dispatcher-detected crashes (only after last stalled cutoff)
 DISPATCHER_CRASHES=$(gh issue view ISSUE_NUM --repo "$REPO" --json comments \
-  -q '[.comments[] | select(.body | test("Task appears to have crashed|process not found|crashed \\(no PR found\\)|crashed\\. PR found"))] | length')
+  -q "[.comments[] | select((.createdAt > \"${LAST_STALLED_AT}\") and (.body | test(\"Task appears to have crashed|process not found|crashed \\\\(no PR found\\\\)|crashed\\\\. PR found\")))] | length")
 
 RETRY_COUNT=$((AGENT_FAILURES + DISPATCHER_CRASHES))
 MAX_RETRIES="${MAX_RETRIES:-3}"
@@ -212,7 +217,7 @@ if [ "$RETRY_COUNT" -ge "$MAX_RETRIES" ]; then
 fi
 ```
 
-If combined retry count exceeds `MAX_RETRIES` (default 3), add `stalled` label, remove `pending-dev`, post a comment, and **skip this issue**.
+If combined retry count exceeds `MAX_RETRIES` (default 3), add `stalled` label, remove `pending-dev`, post a comment, and **skip this issue**. When a user removes the `stalled` label to re-dispatch, the retry counter automatically resets because only crashes after the latest "Marking as stalled" comment are counted.
 
 **2.** Extract latest dev session ID from issue comments (search for `Dev Session ID:` — do NOT match `Review Session ID:`):
 ```bash
