@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Run all unit tests
+        run: |
+          failed=0
+          for test in tests/unit/test-*.sh; do
+            echo "::group::Running $test"
+            if bash "$test"; then
+              echo "::endgroup::"
+            else
+              echo "::endgroup::"
+              echo "::error::$test failed"
+              failed=1
+            fi
+          done
+          exit $failed
+
+  shellcheck:
+    name: ShellCheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install shellcheck
+        run: sudo apt-get install -y shellcheck
+
+      - name: Lint dispatcher scripts
+        run: |
+          shellcheck -S error \
+            skills/autonomous-dispatcher/scripts/autonomous-dev.sh \
+            skills/autonomous-dispatcher/scripts/autonomous-review.sh \
+            skills/autonomous-dispatcher/scripts/dispatch-local.sh \
+            skills/autonomous-dispatcher/scripts/lib-agent.sh \
+            skills/autonomous-dispatcher/scripts/lib-auth.sh \
+            skills/autonomous-dispatcher/scripts/setup-labels.sh \
+            skills/autonomous-dispatcher/scripts/gh-token-refresh-daemon.sh \
+            skills/autonomous-dispatcher/scripts/gh-with-token-refresh.sh

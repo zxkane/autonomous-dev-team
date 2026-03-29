@@ -3,12 +3,14 @@
 # Supports: claude (default), codex, kiro, and generic fallback.
 # Source this file in autonomous-dev.sh and autonomous-review.sh.
 
-# Load project config if available.
-# When installed via `npx skills add`, the real path is under
-# .agents/skills/autonomous-dispatcher/scripts/ where autonomous.conf
-# does not exist. Fall back to <project-root>/scripts/autonomous.conf.
-_LIB_AGENT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
-if [[ -f "${_LIB_AGENT_DIR}/autonomous.conf" ]]; then
+# Load project config — priority order:
+# 1. AUTONOMOUS_CONF env var (explicit path, works in bash -c / remote contexts)
+# 2. Local autonomous.conf in same directory as this script
+# 3. Fallback: <project-root>/scripts/autonomous.conf
+_LIB_AGENT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]:-$0}")")" && pwd)"
+if [[ -n "${AUTONOMOUS_CONF:-}" ]] && [[ -f "${AUTONOMOUS_CONF}" ]]; then
+  source "${AUTONOMOUS_CONF}"
+elif [[ -f "${_LIB_AGENT_DIR}/autonomous.conf" ]]; then
   source "${_LIB_AGENT_DIR}/autonomous.conf"
 elif [[ -f "${_LIB_AGENT_DIR}/../../../scripts/autonomous.conf" ]]; then
   source "${_LIB_AGENT_DIR}/../../../scripts/autonomous.conf"
