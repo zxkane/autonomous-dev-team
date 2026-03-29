@@ -39,7 +39,7 @@ jobs:
 
       - name: Lint dispatcher scripts
         run: |
-          shellcheck -S warning \
+          shellcheck -S error \
             skills/autonomous-dispatcher/scripts/autonomous-dev.sh \
             skills/autonomous-dispatcher/scripts/autonomous-review.sh \
             skills/autonomous-dispatcher/scripts/dispatch-local.sh \
