@@ -140,10 +140,23 @@ EOF
 
   # Transition labels based on whether agent succeeded or failed
   if [[ $exit_code -eq 0 ]]; then
-    # Success: move to pending-review for the review agent
-    gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
-      --remove-label "in-progress" --remove-label "pending-dev" \
-      --add-label "pending-review" || log "WARNING: Failed to update issue labels"
+    # Verify a PR was actually created before declaring success
+    PR_EXISTS=$(gh pr list --repo "$REPO" --state open --json body \
+      -q "[.[] | select(.body | test(\"#${ISSUE_NUMBER}[^0-9]\") or test(\"#${ISSUE_NUMBER}$\"))] | length" 2>/dev/null || echo "0")
+    if [[ "$PR_EXISTS" -gt 0 ]]; then
+      # PR found: move to pending-review for the review agent
+      gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
+        --remove-label "in-progress" --remove-label "pending-dev" \
+        --add-label "pending-review" || log "WARNING: Failed to update issue labels"
+    else
+      # Agent exited 0 but no PR was created — retry development
+      log "WARNING: Agent exited 0 but no PR was created for issue #${ISSUE_NUMBER}"
+      gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
+        --body "Agent exited successfully but no PR was created. Moving to pending-dev for retry." 2>/dev/null || true
+      gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
+        --remove-label "in-progress" \
+        --add-label "pending-dev" || log "WARNING: Failed to update issue labels"
+    fi
   else
     # Failure: move back to pending-dev so dispatcher can retry
     gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
