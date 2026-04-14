@@ -42,12 +42,21 @@ requests and bug reports.
 
 ## Hooks
 
-Workflow enforcement hooks are bundled in `skills/autonomous-common/hooks/`
-and accessible via the `hooks/` symlink at the project root. Supported by
-Claude Code and Kiro CLI. See `hooks/README.md` for per-agent setup.
+Workflow enforcement hooks are bundled in `skills/autonomous-common/hooks/`.
+Hook commands in `autonomous-dev` and `autonomous-review` SKILL.md frontmatter
+reference `$CLAUDE_PROJECT_DIR/hooks/`, so a symlink is required at the project root.
 
-For `npx skills add` users, hooks are also available via skill frontmatter
-in autonomous-dev and autonomous-review SKILL.md files.
+**Template users** already have `hooks -> skills/autonomous-common/hooks`.
+
+**`npx skills add` users** must create the symlink manually after install:
+
+```bash
+ln -sf .claude/skills/autonomous-common/hooks hooks
+ln -sf .claude/skills/autonomous-dispatcher/scripts scripts
+```
+
+Hooks are supported by Claude Code and Kiro CLI. Other IDEs follow the
+workflow steps manually. See `hooks/README.md` for the full reference.
 
 ## Scripts
 
