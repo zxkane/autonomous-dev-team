@@ -25,6 +25,31 @@ This installs the following skills into your agent:
 
 Supported agents include Claude Code, Cursor, Windsurf, Gemini CLI, Kiro CLI, and [many more](https://skills.sh). See the [skills.sh docs](https://skills.sh/docs) for the full list and usage guide.
 
+#### Post-Install: Enable Workflow Hooks (Claude Code / Kiro CLI)
+
+The `autonomous-dev` and `autonomous-review` skills define [Claude Code hooks](https://docs.anthropic.com/en/docs/claude-code/hooks) in their SKILL.md frontmatter. These hooks enforce the TDD workflow (block direct pushes to main, require code review before commit, etc.). The hook commands reference `$CLAUDE_PROJECT_DIR/hooks/...`, but `npx skills add` places hook scripts inside `.claude/skills/autonomous-common/hooks/`. You need to create symlinks so the paths resolve:
+
+```bash
+# From your project root — create symlinks after npx skills add:
+ln -sf .claude/skills/autonomous-common/hooks hooks
+ln -sf .claude/skills/autonomous-dispatcher/scripts scripts
+```
+
+> **Why symlinks?** `npx skills add` copies each skill directory into `.claude/skills/`, but hook commands use `$CLAUDE_PROJECT_DIR/hooks/` (the project root). The symlinks bridge this gap. The `scripts/` symlink enables agent-callable utility scripts referenced by the skills (e.g., `scripts/gh-as-user.sh`).
+
+**Required Claude Code plugins** (add to `.claude/settings.json` under `enabledPlugins`):
+
+```json
+{
+  "enabledPlugins": {
+    "code-simplifier@claude-plugins-official": true,
+    "pr-review-toolkit@claude-plugins-official": true
+  }
+}
+```
+
+> **Note:** If your IDE does not support hooks (Cursor, Windsurf, Gemini CLI), the skills still work — follow each workflow step manually. Hooks only provide automatic enforcement.
+
 ### Option B: Use as GitHub Template (Full Pipeline)
 
 For the complete autonomous pipeline — including hooks, wrapper scripts, dispatcher cron, and GitHub App auth:

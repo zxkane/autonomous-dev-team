@@ -16,7 +16,7 @@ Shared hooks and scripts used by the autonomous-dev, autonomous-review, and auto
 
 ## Setup for `npx skills add` Users
 
-If you installed these skills via `npx skills add`, create symlinks at your project root so that path references in the other skills resolve correctly:
+If you installed these skills via `npx skills add`, hook commands in the `autonomous-dev` and `autonomous-review` SKILL.md frontmatter reference `$CLAUDE_PROJECT_DIR/hooks/` and `$CLAUDE_PROJECT_DIR/scripts/`, but `npx skills add` places these files inside `.claude/skills/`. Create symlinks at your project root so the paths resolve:
 
 ```bash
 # From your project root:
@@ -24,7 +24,18 @@ ln -sf .claude/skills/autonomous-common/hooks hooks
 ln -sf .claude/skills/autonomous-dispatcher/scripts scripts
 ```
 
-Then copy and configure `.claude/settings.json` from the autonomous-dev-team template repository to enable workflow enforcement hooks.
+Required Claude Code plugins (add to `.claude/settings.json` under `enabledPlugins`):
+
+```json
+{
+  "enabledPlugins": {
+    "code-simplifier@claude-plugins-official": true,
+    "pr-review-toolkit@claude-plugins-official": true
+  }
+}
+```
+
+> IDEs without hook support (Cursor, Windsurf, Gemini CLI) don't need symlinks — the skills work without hooks, but workflow steps must be followed manually.
 
 ## Hooks
 
