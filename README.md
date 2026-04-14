@@ -27,7 +27,7 @@ Supported agents include Claude Code, Cursor, Windsurf, Gemini CLI, Kiro CLI, an
 
 #### Post-Install: Enable Workflow Hooks (Claude Code / Kiro CLI)
 
-The `autonomous-dev` and `autonomous-review` skills define [Claude Code hooks](https://docs.anthropic.com/en/docs/claude-code/hooks) in their SKILL.md frontmatter. These hooks enforce the TDD workflow (block direct pushes to main, require code review before commit, etc.). The hook commands reference `$CLAUDE_PROJECT_DIR/hooks/...`, but `npx skills add` places hook scripts inside `.claude/skills/autonomous-common/hooks/`. You need to create symlinks so the paths resolve:
+The `autonomous-dev` and `autonomous-review` skills define Claude Code hooks in their SKILL.md frontmatter. These hooks enforce the TDD workflow (block direct pushes to main, require code review before commit, etc.). The hook commands reference `$CLAUDE_PROJECT_DIR/hooks/...`, but `npx skills add` places hook scripts inside `.claude/skills/autonomous-common/hooks/`. You need to create symlinks so the paths resolve:
 
 ```bash
 # From your project root — create symlinks after npx skills add:
