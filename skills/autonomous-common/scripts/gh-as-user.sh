@@ -30,7 +30,7 @@ REAL_GH=$(PATH="$CLEAN_PATH" command -v gh 2>/dev/null) || {
 
 # Priority 1: Use explicit user PAT
 if [[ -n "${GH_USER_PAT:-}" ]]; then
-  exec env GH_TOKEN="$GH_USER_PAT" -u GH_TOKEN_FILE "$REAL_GH" "$@"
+  exec env -u GH_TOKEN_FILE GH_TOKEN="$GH_USER_PAT" "$REAL_GH" "$@"
 fi
 
 # Priority 2: Use host gh auth session.
