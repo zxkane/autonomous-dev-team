@@ -19,6 +19,7 @@
 SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
 CLEAN_PATH=$(echo "$PATH" | tr ':' '\n' \
   | while IFS= read -r dir; do
+      [[ -z "$dir" ]] && continue
       [[ -e "${dir}/gh-with-token-refresh.sh" ]] && continue
       [[ "$dir" == "$SELF_DIR" ]] && continue
       printf '%s:' "$dir"
