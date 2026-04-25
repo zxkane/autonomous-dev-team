@@ -32,6 +32,8 @@ cat >&2 <<'EOF'
 ## ⛔ BLOCKED - Run PR Review First
 
 Before pushing, you must complete a code review using the PR review toolkit.
+The mark is bound to the current HEAD commit: any new commit invalidates it,
+so you must re-run the review after each commit (issue #48).
 
 ### Required Steps:
 1. Run the PR review command:
@@ -49,6 +51,8 @@ Before pushing, you must complete a code review using the PR review toolkit.
    ```bash
    hooks/state-manager.sh mark pr-review
    ```
+   The mark stores the current HEAD SHA. If you commit again, re-run
+   the review and re-mark before pushing.
 
 4. Retry the push
 

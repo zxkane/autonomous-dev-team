@@ -64,12 +64,73 @@ parse_file_path() {
   parse_json_field "tool_input.file_path" "$1"
 }
 
-# Check if command matches a git operation
+# Check if command invokes a given git subcommand.
 # Usage: is_git_command "commit" "$command"
+#
+# Matches when `git <operation>` appears as an actual invocation in the
+# command line. Ignores occurrences inside quoted strings or as
+# substrings of other tokens (e.g. `push-something`, or `git push`
+# inside an issue body). Supports global flags before the subcommand
+# (`git -c key=val push`, `git --git-dir=/x push`) and command chains
+# (`cd /tmp && git push`).
+#
+# Limitation: the quote-stripping pass does not understand escaped
+# quotes (`"see \"git push\" docs"`). This is acceptable because the
+# intent is defense-in-depth against incidental mentions, not
+# adversarial bypass (any workflow author who wants to dodge the hook
+# can use `--no-verify`).
 is_git_command() {
   local operation="$1"
   local command="$2"
-  [[ "$command" =~ git[[:space:]]+${operation} ]]
+
+  # Strip single- and double-quoted regions so mentions inside quoted
+  # strings (e.g. `--body "see git push docs"`) cannot match.
+  local stripped="$command"
+  while [[ "$stripped" =~ \"[^\"]*\" ]]; do
+    stripped="${stripped/${BASH_REMATCH[0]}/ }"
+  done
+  while [[ "$stripped" =~ \'[^\']*\' ]]; do
+    stripped="${stripped/${BASH_REMATCH[0]}/ }"
+  done
+
+  # Split on shell separators so each segment can be scanned independently.
+  local normalised
+  normalised=$(printf '%s' "$stripped" | sed -E 's/(\|\||&&|;|\||&)/\n/g')
+
+  local segment
+  while IFS= read -r segment; do
+    local -a tokens
+    read -ra tokens <<<"$segment"
+    local i=0 n=${#tokens[@]}
+    # Find the `git` token (as a whole token — not a substring).
+    while (( i < n )) && [[ "${tokens[i]}" != "git" ]]; do
+      ((i++))
+    done
+    (( i >= n )) && continue
+    ((i++))
+    # Skip git global flags before the subcommand. Two-token forms
+    # (-c key=val, -C path, --git-dir path) consume two slots;
+    # attached forms (--git-dir=path) consume one. Bounds are clamped
+    # to n so a stray trailing flag cannot skip past the end.
+    while (( i < n )); do
+      case "${tokens[i]}" in
+        -c|-C|--git-dir|--work-tree|--namespace|--super-prefix)
+          i=$(( i + 2 > n ? n : i + 2 ))
+          ;;
+        --*=*|--*)
+          ((i++))
+          ;;
+        *)
+          break
+          ;;
+      esac
+    done
+    (( i >= n )) && continue
+    if [[ "${tokens[i]}" == "$operation" ]]; then
+      return 0
+    fi
+  done <<<"$normalised"
+  return 1
 }
 
 # Get the project root directory (delegates to resolve_project_root)
