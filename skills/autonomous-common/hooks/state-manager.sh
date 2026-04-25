@@ -156,20 +156,32 @@ check_action() {
       exit 1
     fi
 
-    # Commit-SHA binding for pr-review: the mark must reference the
-    # current HEAD. Any new commit invalidates the mark, forcing a
-    # fresh review. Without this, `mark pr-review` becomes a 30-minute
-    # rubber stamp covering any number of subsequent commits (issue #48).
-    if [[ "$action" == "pr-review" ]]; then
-      local stored_head current_head
+  fi
+
+  # Commit-SHA binding for pr-review: the mark must reference the
+  # current HEAD. Any new commit invalidates the mark, forcing a
+  # fresh review. Without this, `mark pr-review` becomes a 30-minute
+  # rubber stamp covering any number of subsequent commits (issue #48).
+  # Runs whether or not jq is available so the bypass does not silently
+  # return on systems missing jq.
+  if [[ "$action" == "pr-review" ]]; then
+    local stored_head current_head
+    if command -v jq &> /dev/null; then
       stored_head=$(jq -r '.git_head // ""' "$state_file" 2>/dev/null)
-      current_head=$(get_git_head)
-      if [[ -z "$stored_head" || "$stored_head" == "unknown" \
-            || "$current_head" == "unknown" \
-            || "$stored_head" != "$current_head" ]]; then
-        rm -f "$state_file" 2>/dev/null
-        exit 1
-      fi
+    else
+      # Fallback: extract git_head value from the JSON without jq.
+      # State files are written by mark_action using a known template,
+      # so a grep-based extraction is safe here.
+      stored_head=$(grep -E '"git_head"[[:space:]]*:' "$state_file" 2>/dev/null \
+                      | sed -E 's/.*"git_head"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/' \
+                      | head -n 1)
+    fi
+    current_head=$(get_git_head)
+    if [[ -z "$stored_head" || "$stored_head" == "unknown" \
+          || "$current_head" == "unknown" \
+          || "$stored_head" != "$current_head" ]]; then
+      rm -f "$state_file" 2>/dev/null
+      exit 1
     fi
   fi
 

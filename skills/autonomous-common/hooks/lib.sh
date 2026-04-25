@@ -110,11 +110,12 @@ is_git_command() {
     ((i++))
     # Skip git global flags before the subcommand. Two-token forms
     # (-c key=val, -C path, --git-dir path) consume two slots;
-    # attached forms (--git-dir=path) consume one.
+    # attached forms (--git-dir=path) consume one. Bounds are clamped
+    # to n so a stray trailing flag cannot skip past the end.
     while (( i < n )); do
       case "${tokens[i]}" in
         -c|-C|--git-dir|--work-tree|--namespace|--super-prefix)
-          ((i += 2))
+          i=$(( i + 2 > n ? n : i + 2 ))
           ;;
         --*=*|--*)
           ((i++))

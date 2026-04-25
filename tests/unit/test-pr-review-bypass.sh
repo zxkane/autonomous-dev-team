@@ -128,6 +128,28 @@ assert_exit "check returns 1 with no state file" "1" "$exit_code"
 
 # ===========================================================================
 echo ""
+echo "=== TC-PRB-007: SHA binding enforced even without jq installed ==="
+echo ""
+# Simulate a system without jq by putting a stub earlier on PATH that
+# makes `command -v jq` fail. The state file is written by the current
+# jq-enabled mark, then check runs with jq hidden.
+run_mark pr-review
+HIDDEN_PATH=$(mktemp -d)
+trap 'rm -rf "$TMPDIR" "$HIDDEN_PATH"' EXIT
+# Create a PATH that contains only coreutils dirs, no jq.
+JQ_BIN=$(command -v jq)
+ORIG_PATH="$PATH"
+# Build PATH without the directory containing jq.
+JQ_DIR=$(dirname "$JQ_BIN")
+NEW_PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -v "^${JQ_DIR}\$" | tr '\n' ':')
+NEW_PATH="${NEW_PATH%:}"
+new_commit
+exit_code=$(cd "$TMPDIR" && PATH="$NEW_PATH" "$STATE_MANAGER" check pr-review >/dev/null 2>&1; echo $?)
+assert_exit "check rejects stale state even without jq" "1" "$exit_code"
+PATH="$ORIG_PATH"
+
+# ===========================================================================
+echo ""
 echo "=== TC-PRB-006: check pr-review fails when git_head is 'unknown' ==="
 echo ""
 # Write a state file manually with git_head="unknown"

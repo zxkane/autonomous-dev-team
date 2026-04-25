@@ -66,6 +66,10 @@ assert_match    "--work-tree two-token form"           push   "git --work-tree /
 # Path after --git-dir must not be mistaken for the subcommand.
 assert_no_match "--git-dir path alone is not push"     push   "git --git-dir /tmp/push"
 
+# Array bounds: trailing -c with no value must not skip past the end.
+assert_no_match "trailing -c with no value"            push   "git -c"
+assert_no_match "trailing --git-dir with no value"     push   "git --git-dir"
+
 # Summary
 echo ""
 echo "========================================"
