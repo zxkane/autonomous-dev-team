@@ -28,6 +28,17 @@ assert_contains() {
   fi
 }
 
+assert_not_contains() {
+  local desc="$1" needle="$2" haystack="$3"
+  if [[ "$haystack" != *"$needle"* ]]; then
+    echo -e "  ${GREEN}PASS${NC}: $desc"
+    ((PASS++))
+  else
+    echo -e "  ${RED}FAIL${NC}: $desc (expected NOT to contain '$needle')"
+    ((FAIL++))
+  fi
+}
+
 SKILL_MD="$PROJECT_ROOT/skills/autonomous-dispatcher/SKILL.md"
 
 if [[ ! -f "$SKILL_MD" ]]; then
@@ -65,6 +76,20 @@ echo "=== TC-RCR-003: Backward compatible when no stalled history ==="
 echo ""
 
 assert_contains "Fallback epoch for no stalled history" '1970' "$CONTENT"
+
+# ===========================================================================
+# TC-RCR-004: PR-found handoff uses non-crash wording
+# ===========================================================================
+# Rationale: when the dev process exits after producing a PR, that is forward
+# progress (handed to review), not a retry. The Step 5 comment must not contain
+# the word "crashed", so the Step 4 retry-counter regex cannot substring-match
+# it and trigger a premature `stalled` label.
+echo ""
+echo "=== TC-RCR-004: Step 5 'PR found' comment uses non-crash wording ==="
+echo ""
+
+assert_contains "Uses 'Dev process exited (PR found)' wording" 'Dev process exited (PR found)' "$CONTENT"
+assert_not_contains "Drops old 'crashed. PR found' wording" 'Task appears to have crashed. PR found' "$CONTENT"
 
 # ---------------------------------------------------------------------------
 # Summary

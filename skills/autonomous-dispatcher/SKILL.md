@@ -199,9 +199,12 @@ LAST_STALLED_AT=$(gh issue view ISSUE_NUM --repo "$REPO" --json comments \
 AGENT_FAILURES=$(gh issue view ISSUE_NUM --repo "$REPO" --json comments \
   -q "[.comments[] | select((.createdAt > \"${LAST_STALLED_AT}\") and (.body | test(\"Agent Session Report \\\\(Dev\\\\)\")) and (.body | test(\"Exit code: 0\") | not))] | length")
 
-# Count dispatcher-detected crashes (only after last stalled cutoff)
+# Count dispatcher-detected crashes (only after last stalled cutoff).
+# Note: a dev process that exits after producing a PR is forward progress
+# (the PR is handed to review via "Dev process exited (PR found)" in Step 5),
+# so that transition is NOT counted toward retries.
 DISPATCHER_CRASHES=$(gh issue view ISSUE_NUM --repo "$REPO" --json comments \
-  -q "[.comments[] | select((.createdAt > \"${LAST_STALLED_AT}\") and (.body | test(\"Task appears to have crashed|process not found|crashed \\\\(no PR found\\\\)|crashed\\\\. PR found\")))] | length")
+  -q "[.comments[] | select((.createdAt > \"${LAST_STALLED_AT}\") and (.body | test(\"Task appears to have crashed|process not found|crashed \\\\(no PR found\\\\)\")))] | length")
 
 RETRY_COUNT=$((AGENT_FAILURES + DISPATCHER_CRASHES))
 MAX_RETRIES="${MAX_RETRIES:-3}"
@@ -266,9 +269,10 @@ PR_EXISTS=$(gh pr list --repo "$REPO" --state open --json number,body \
   -q "[.[] | select(.body | test(\"#ISSUE_NUM[^0-9]\") or test(\"#ISSUE_NUM$\"))] | length")
 
 if [ "$PR_EXISTS" -gt 0 ]; then
-  # PR exists — review agent can assess the work
-  # Comment: "Task appears to have crashed. PR found — moving to pending-review for assessment."
+  # PR exists — forward progress. Review agent can assess the work.
+  # Comment: "Dev process exited (PR found). Moving to pending-review for assessment."
   # Remove `in-progress`, add `pending-review`
+  # (Wording avoids "crashed" so the Step 4 retry-counter regex does not match it.)
 else
   # No PR — dev agent didn't finish, retry development
   # Comment: "Task appears to have crashed (no PR found). Moving to pending-dev for retry."
