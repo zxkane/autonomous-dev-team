@@ -16,16 +16,19 @@ Unit tests guarding the SKILL.md contract. Extends
 
 ### TC-RCR-005 — Step 4 retry-counter regex is anchored on explicit preambles
 - **Given** the Step 4 `DISPATCHER_CRASHES` jq regex in SKILL.md
-- **Extract** the full `test(...)` argument from the `DISPATCHER_CRASHES=` line only
-  (so other file occurrences of the phrase don't leak into the assertion)
+- **Extract** every `test(...)` argument from the `DISPATCHER_CRASHES=` statement
+  (the assignment line and the next 3 lines, to tolerate benign reformatting)
+- **Expect** exactly ONE `test(...)` argument is extracted — extraction returning
+  zero means SKILL.md layout changed and the guard is blind; more than one means
+  an additional test() alternative was injected into the retry counter
 - **Expect** the extracted regex is exactly `test("Task appears to have crashed \(no PR found\)|process not found")`
 - **Expect** the extracted regex does NOT contain the `crashed\. PR found` alternative
 - **Why** Guards against future edits broadening the regex — a bare `crashed`
-  alternative, a `crashed[^(]` alternative, or re-adding `crashed. PR found`
-  would all substring-match the forward-progress `Dev process exited (PR found)`
-  comment and reintroduce this bug. Extracting the exact regex argument (rather
-  than scanning the whole file) avoids false positives from prose references to
-  the same phrase elsewhere in SKILL.md.
+  alternative, a `crashed[^(]` alternative, a chained second `test(...)` call,
+  or re-adding `crashed. PR found` would all substring-match the forward-progress
+  `Dev process exited (PR found)` comment and reintroduce this bug. Extracting
+  the exact regex argument (rather than scanning the whole file) avoids false
+  positives from prose references to the same phrase elsewhere in SKILL.md.
 
 ## Out of scope
 

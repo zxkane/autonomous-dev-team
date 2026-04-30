@@ -101,17 +101,30 @@ echo ""
 echo "=== TC-RCR-005: Retry-counter regex anchored on explicit preambles ==="
 echo ""
 
-# Extract the exact jq test(...) regex argument on the DISPATCHER_CRASHES line
-# and assert its full content. This catches ANY broadening — bare `crashed`,
-# `crashed. PR found`, `crashed[^(]`, etc. — regardless of shape.
-DISPATCHER_CRASH_REGEX=$(grep -A1 '^DISPATCHER_CRASHES=' "$SKILL_MD" \
-  | grep -oE 'test\(\\"[^"]*\\"\)' | head -1)
+# Extract the jq test(...) regex argument(s) from the DISPATCHER_CRASHES
+# statement and assert there is EXACTLY one, with EXACTLY the intended content.
+# Catches any broadening — bare `crashed`, `crashed. PR found`, `crashed[^(]`,
+# an injected second test(...) alternative, etc.
+#
+# Uses -A3 to tolerate benign reformatting (line breaks within the statement);
+# the statement is the only one in SKILL.md starting with `DISPATCHER_CRASHES=`.
+mapfile -t DISPATCHER_CRASH_REGEXES < <(
+  grep -A3 '^DISPATCHER_CRASHES=' "$SKILL_MD" | grep -oE 'test\(\\"[^"]*\\"\)'
+)
 
-assert_contains "Regex is exactly the two explicit Step 5 preambles" \
-  'test(\"Task appears to have crashed \\\\(no PR found\\\\)|process not found\")' \
-  "$DISPATCHER_CRASH_REGEX"
-assert_not_contains "Regex does not re-add 'crashed. PR found' alternative" \
-  'crashed\\\\. PR found' "$DISPATCHER_CRASH_REGEX"
+if [[ ${#DISPATCHER_CRASH_REGEXES[@]} -eq 0 ]]; then
+  echo -e "  ${RED}FAIL${NC}: Could not extract any test(...) from DISPATCHER_CRASHES statement — SKILL.md layout changed"
+  ((FAIL++))
+elif [[ ${#DISPATCHER_CRASH_REGEXES[@]} -gt 1 ]]; then
+  echo -e "  ${RED}FAIL${NC}: Extracted ${#DISPATCHER_CRASH_REGEXES[@]} test(...) calls, expected exactly 1 (a second test() may have broadened the retry counter)"
+  ((FAIL++))
+else
+  assert_contains "Regex is exactly the two explicit Step 5 preambles" \
+    'test(\"Task appears to have crashed \\\\(no PR found\\\\)|process not found\")' \
+    "${DISPATCHER_CRASH_REGEXES[0]}"
+  assert_not_contains "Regex does not re-add 'crashed. PR found' alternative" \
+    'crashed\\\\. PR found' "${DISPATCHER_CRASH_REGEXES[0]}"
+fi
 
 # ---------------------------------------------------------------------------
 # Summary
