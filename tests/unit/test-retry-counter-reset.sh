@@ -118,6 +118,9 @@ else
   if [[ "$TEST_CALL_COUNT" != "1" ]]; then
     echo -e "  ${RED}FAIL${NC}: DISPATCHER_CRASHES statement has $TEST_CALL_COUNT test() calls, expected 1 (a chained test() may have broadened the retry counter)"
     ((FAIL++))
+  else
+    echo -e "  ${GREEN}PASS${NC}: Statement has exactly one test() call"
+    ((PASS++))
   fi
 
   # Required: the two explicit Step 5 crash preambles
