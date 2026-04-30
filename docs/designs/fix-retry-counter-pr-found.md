@@ -2,9 +2,8 @@
 
 ## Problem
 
-Issue zxkane/quant-scorer#192 was marked `stalled` right after the review agent
-completed its first review and posted blocking findings. See the 06:41 comment:
-https://github.com/zxkane/quant-scorer/issues/192#issuecomment-4350233257
+An autonomous issue was marked `stalled` right after the review agent completed
+its first review and posted blocking findings.
 
 ### Observed timeline
 1. 06:08 — dispatcher: "Task appears to have crashed (no PR found)" (real crash #1)
