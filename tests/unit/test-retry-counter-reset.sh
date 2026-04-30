@@ -101,12 +101,17 @@ echo ""
 echo "=== TC-RCR-005: Retry-counter regex anchored on explicit preambles ==="
 echo ""
 
-assert_contains "Regex anchors on explicit '(no PR found)' variant" \
-  'Task appears to have crashed \\\\(no PR found\\\\)' "$CONTENT"
-assert_not_contains "Regex drops bare 'Task appears to have crashed' alternative" \
-  'test(\"Task appears to have crashed|' "$CONTENT"
+# Extract the exact jq test(...) regex argument on the DISPATCHER_CRASHES line
+# and assert its full content. This catches ANY broadening — bare `crashed`,
+# `crashed. PR found`, `crashed[^(]`, etc. — regardless of shape.
+DISPATCHER_CRASH_REGEX=$(grep -A1 '^DISPATCHER_CRASHES=' "$SKILL_MD" \
+  | grep -oE 'test\(\\"[^"]*\\"\)' | head -1)
+
+assert_contains "Regex is exactly the two explicit Step 5 preambles" \
+  'test(\"Task appears to have crashed \\\\(no PR found\\\\)|process not found\")' \
+  "$DISPATCHER_CRASH_REGEX"
 assert_not_contains "Regex does not re-add 'crashed. PR found' alternative" \
-  'crashed\\\\. PR found' "$CONTENT"
+  'crashed\\\\. PR found' "$DISPATCHER_CRASH_REGEX"
 
 # ---------------------------------------------------------------------------
 # Summary
