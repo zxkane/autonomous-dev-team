@@ -200,11 +200,12 @@ AGENT_FAILURES=$(gh issue view ISSUE_NUM --repo "$REPO" --json comments \
   -q "[.comments[] | select((.createdAt > \"${LAST_STALLED_AT}\") and (.body | test(\"Agent Session Report \\\\(Dev\\\\)\")) and (.body | test(\"Exit code: 0\") | not))] | length")
 
 # Count dispatcher-detected crashes (only after last stalled cutoff).
-# Note: a dev process that exits after producing a PR is forward progress
-# (the PR is handed to review via "Dev process exited (PR found)" in Step 5),
-# so that transition is NOT counted toward retries.
+# The regex is anchored on explicit Step 5 crash preambles. A dev process that
+# exits after producing a PR is forward progress (handed to review as
+# "Dev process exited (PR found)") and MUST NOT match this regex — do not add
+# a broad `crashed` or `exited` alternative here.
 DISPATCHER_CRASHES=$(gh issue view ISSUE_NUM --repo "$REPO" --json comments \
-  -q "[.comments[] | select((.createdAt > \"${LAST_STALLED_AT}\") and (.body | test(\"Task appears to have crashed|process not found|crashed \\\\(no PR found\\\\)\")))] | length")
+  -q "[.comments[] | select((.createdAt > \"${LAST_STALLED_AT}\") and (.body | test(\"Task appears to have crashed \\\\(no PR found\\\\)|process not found\")))] | length")
 
 RETRY_COUNT=$((AGENT_FAILURES + DISPATCHER_CRASHES))
 MAX_RETRIES="${MAX_RETRIES:-3}"

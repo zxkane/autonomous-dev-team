@@ -82,14 +82,31 @@ assert_contains "Fallback epoch for no stalled history" '1970' "$CONTENT"
 # ===========================================================================
 # Rationale: when the dev process exits after producing a PR, that is forward
 # progress (handed to review), not a retry. The Step 5 comment must not contain
-# the word "crashed", so the Step 4 retry-counter regex cannot substring-match
-# it and trigger a premature `stalled` label.
+# "crashed", so the Step 4 retry-counter regex cannot match it and trigger a
+# premature `stalled` label.
 echo ""
 echo "=== TC-RCR-004: Step 5 'PR found' comment uses non-crash wording ==="
 echo ""
 
 assert_contains "Uses 'Dev process exited (PR found)' wording" 'Dev process exited (PR found)' "$CONTENT"
 assert_not_contains "Drops old 'crashed. PR found' wording" 'Task appears to have crashed. PR found' "$CONTENT"
+
+# ===========================================================================
+# TC-RCR-005: Retry-counter regex is anchored on explicit Step 5 preambles
+# ===========================================================================
+# Guards against future edits re-adding a broad `crashed` alternative that
+# would substring-match the forward-progress "Dev process exited (PR found)"
+# comment and reintroduce the premature-stalled bug.
+echo ""
+echo "=== TC-RCR-005: Retry-counter regex anchored on explicit preambles ==="
+echo ""
+
+assert_contains "Regex anchors on explicit '(no PR found)' variant" \
+  'Task appears to have crashed \\\\(no PR found\\\\)' "$CONTENT"
+assert_not_contains "Regex drops bare 'Task appears to have crashed' alternative" \
+  'test(\"Task appears to have crashed|' "$CONTENT"
+assert_not_contains "Regex does not re-add 'crashed. PR found' alternative" \
+  'crashed\\\\. PR found' "$CONTENT"
 
 # ---------------------------------------------------------------------------
 # Summary

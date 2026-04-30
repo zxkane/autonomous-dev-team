@@ -34,13 +34,18 @@ path. This keeps counting accurate without adding new state.
 ### Changes
 
 1. `skills/autonomous-dispatcher/SKILL.md` Step 4:
-   - Drop `|crashed\\. PR found` from the `DISPATCHER_CRASHES` regex.
+   - Tighten the `DISPATCHER_CRASHES` regex from three loose alternatives
+     (`Task appears to have crashed|process not found|crashed \(no PR found\)|crashed\. PR found`)
+     down to two explicit Step 5 preambles
+     (`Task appears to have crashed \(no PR found\)|process not found`).
+   - Add an inline rationale comment warning future editors not to re-introduce
+     a broad `crashed` or `exited` alternative.
 2. `skills/autonomous-dispatcher/SKILL.md` Step 5:
    - Change the "PR found" comment from `"Task appears to have crashed. PR found — moving to pending-review for assessment."` to `"Dev process exited (PR found). Moving to pending-review for assessment."`
-   - This avoids future regex collisions and reads accurately: a PR is not a crash.
+   - Reads accurately: a PR is not a crash.
 3. `tests/unit/test-retry-counter-reset.sh`:
-   - Add TC-RCR-004 asserting `crashed. PR found` is no longer in the counting regex.
-   - Add TC-RCR-005 asserting the "Dev process exited; PR found" wording is used.
+   - Add TC-RCR-004 guarding the new Step 5 wording.
+   - Add TC-RCR-005 guarding the tightened Step 4 regex (regression guard).
 
 ### Non-goals
 

@@ -11,11 +11,17 @@ Unit tests guarding the SKILL.md contract. Extends
 - **Given** Step 5 stale-detection guidance for the `in-progress` + PR-exists branch
 - **Expect** SKILL.md documents the comment `Dev process exited (PR found). Moving to pending-review for assessment.`
 - **Expect** SKILL.md does NOT contain the old `Task appears to have crashed. PR found` phrasing
-- **Why** The Step 4 retry-counter regex treats `Task appears to have crashed` as a
-  crash marker. Removing the phrase from the forward-progress branch is the single
-  behavioral guarantee that prevents premature `stalled` — guarding the comment
-  wording also guards the regex indirectly (since the regex alternative literal
-  was already dropped in the matching change).
+- **Why** Removing the "crashed" wording from the forward-progress branch is the
+  behavioral guarantee that prevents premature `stalled` after review returns work.
+
+### TC-RCR-005 — Step 4 retry-counter regex is anchored on explicit preambles
+- **Given** the Step 4 `DISPATCHER_CRASHES` jq regex in SKILL.md
+- **Expect** the regex contains the explicit `Task appears to have crashed \(no PR found\)` alternative
+- **Expect** the regex does NOT contain the bare `Task appears to have crashed` alternative
+- **Expect** the regex does NOT contain the `crashed\. PR found` alternative
+- **Why** Guards against future edits re-introducing a broad `crashed` alternative
+  that would substring-match the forward-progress `Dev process exited (PR found)`
+  comment and reintroduce this bug.
 
 ## Out of scope
 
