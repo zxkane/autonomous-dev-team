@@ -101,29 +101,36 @@ echo ""
 echo "=== TC-RCR-005: Retry-counter regex anchored on explicit preambles ==="
 echo ""
 
-# Extract the jq test(...) regex argument(s) from the DISPATCHER_CRASHES
-# statement and assert there is EXACTLY one, with EXACTLY the intended content.
-# Catches any broadening — bare `crashed`, `crashed. PR found`, `crashed[^(]`,
-# an injected second test(...) alternative, etc.
-#
-# Uses -A3 to tolerate benign reformatting (line breaks within the statement);
-# the statement is the only one in SKILL.md starting with `DISPATCHER_CRASHES=`.
-mapfile -t DISPATCHER_CRASH_REGEXES < <(
-  grep -A3 '^DISPATCHER_CRASHES=' "$SKILL_MD" | grep -oE 'test\(\\"[^"]*\\"\)'
-)
+# Grab the multi-line DISPATCHER_CRASHES=... statement as a blob and run
+# semantic checks against it directly. This approach does NOT depend on a
+# specific quoting style (\", '"', heredoc) — any future reformat that keeps
+# the statement textually present will still be guarded. Uses -A3 to tolerate
+# line breaks within the statement (the real block is 2 lines today).
+DISPATCHER_CRASH_STMT=$(grep -A3 '^DISPATCHER_CRASHES=' "$SKILL_MD")
 
-if [[ ${#DISPATCHER_CRASH_REGEXES[@]} -eq 0 ]]; then
-  echo -e "  ${RED}FAIL${NC}: Could not extract any test(...) from DISPATCHER_CRASHES statement — SKILL.md layout changed"
-  ((FAIL++))
-elif [[ ${#DISPATCHER_CRASH_REGEXES[@]} -gt 1 ]]; then
-  echo -e "  ${RED}FAIL${NC}: Extracted ${#DISPATCHER_CRASH_REGEXES[@]} test(...) calls, expected exactly 1 (a second test() may have broadened the retry counter)"
+if [[ -z "$DISPATCHER_CRASH_STMT" ]]; then
+  echo -e "  ${RED}FAIL${NC}: DISPATCHER_CRASHES= statement not found in SKILL.md — layout changed, guard is blind"
   ((FAIL++))
 else
-  assert_contains "Regex is exactly the two explicit Step 5 preambles" \
-    'test(\"Task appears to have crashed \\\\(no PR found\\\\)|process not found\")' \
-    "${DISPATCHER_CRASH_REGEXES[0]}"
-  assert_not_contains "Regex does not re-add 'crashed. PR found' alternative" \
-    'crashed\\\\. PR found' "${DISPATCHER_CRASH_REGEXES[0]}"
+  # Expect exactly one test() call in the statement. More than one means a
+  # second alternative was chained in and the retry counter was broadened.
+  TEST_CALL_COUNT=$(grep -oE 'test\(' <<<"$DISPATCHER_CRASH_STMT" | wc -l | tr -d ' ')
+  if [[ "$TEST_CALL_COUNT" != "1" ]]; then
+    echo -e "  ${RED}FAIL${NC}: DISPATCHER_CRASHES statement has $TEST_CALL_COUNT test() calls, expected 1 (a chained test() may have broadened the retry counter)"
+    ((FAIL++))
+  fi
+
+  # Required: the two explicit Step 5 crash preambles
+  assert_contains "Statement includes '(no PR found)' alternative" \
+    'Task appears to have crashed \\\\(no PR found\\\\)' "$DISPATCHER_CRASH_STMT"
+  assert_contains "Statement includes 'process not found' alternative" \
+    'process not found' "$DISPATCHER_CRASH_STMT"
+
+  # Forbidden: the old over-broad alternatives
+  assert_not_contains "Statement does not re-add 'crashed. PR found' alternative" \
+    'crashed\\\\. PR found' "$DISPATCHER_CRASH_STMT"
+  assert_not_contains "Statement does not re-add bare 'Task appears to have crashed|' alternative" \
+    'Task appears to have crashed|' "$DISPATCHER_CRASH_STMT"
 fi
 
 # ---------------------------------------------------------------------------
