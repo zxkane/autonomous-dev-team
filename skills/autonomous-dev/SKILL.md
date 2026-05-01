@@ -62,16 +62,6 @@ hooks:
         - type: command
           command: "\"$CLAUDE_PROJECT_DIR\"/hooks/post-git-push.sh"
           timeout: 30
-    - matcher: "Write"
-      hooks:
-        - type: command
-          command: "\"$CLAUDE_PROJECT_DIR\"/hooks/post-file-edit-reminder.sh"
-          timeout: 5
-    - matcher: "Edit"
-      hooks:
-        - type: command
-          command: "\"$CLAUDE_PROJECT_DIR\"/hooks/post-file-edit-reminder.sh"
-          timeout: 5
   Stop:
     - hooks:
         - type: command

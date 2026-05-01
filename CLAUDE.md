@@ -151,7 +151,6 @@ project-root/
 │   │   │   ├── warn-skip-verification.sh
 │   │   │   ├── post-git-action-clear.sh
 │   │   │   ├── post-git-push.sh
-│   │   │   ├── post-file-edit-reminder.sh
 │   │   │   └── verify-completion.sh
 │   │   └── scripts/             # Shared agent-callable scripts
 │   │       ├── mark-issue-checkbox.sh
