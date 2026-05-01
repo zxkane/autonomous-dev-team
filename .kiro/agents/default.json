@@ -72,11 +72,6 @@
         "matcher": "execute_bash",
         "command": "hooks/post-git-push.sh",
         "timeout_ms": 30000
-      },
-      {
-        "matcher": "fs_write",
-        "command": "hooks/post-file-edit-reminder.sh",
-        "timeout_ms": 5000
       }
     ],
     "stop": [

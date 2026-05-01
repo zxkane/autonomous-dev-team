@@ -317,7 +317,6 @@ See `CLAUDE.md` for detailed step-by-step instructions.
 |------|---------|----------|
 | post-git-action-clear | git commit/push success | Clears completed states |
 | post-git-push | git push success | Reminds CI and E2E verification |
-| post-file-edit-reminder | Write/Edit source code | Reminds to run tests |
 
 ### Stop Hook
 

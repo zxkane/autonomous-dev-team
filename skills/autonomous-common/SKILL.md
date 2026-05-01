@@ -55,7 +55,6 @@ Workflow enforcement hooks in `hooks/` directory. See `hooks/README.md` for the 
 | `warn-skip-verification.sh` | PreToolUse | Warns about --no-verify |
 | `post-git-action-clear.sh` | PostToolUse | Clears state after git actions |
 | `post-git-push.sh` | PostToolUse | Post-push CI/E2E reminder |
-| `post-file-edit-reminder.sh` | PostToolUse | Reminds to run tests after edits |
 | `verify-completion.sh` | Stop | Blocks completion until CI/E2E pass |
 
 ## Scripts
