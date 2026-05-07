@@ -491,10 +491,14 @@ done
 # Only emitted when the agent produced a verdict comment — a missing verdict
 # already routes to pending-dev via the FAILED branch below.
 if [[ -n "$LATEST_COMMENT" && -n "$PR_HEAD_SHA" ]]; then
-  gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
+  # Capture stderr so token/permission/rate-limit failures are diagnosable.
+  # If this post fails persistently the dispatcher cannot detect SHA-match,
+  # so the WARNING is the only operator-visible breadcrumb (see SKILL.md
+  # Step 5 empty-trailer fallthrough).
+  _trailer_err=$(gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
     --body "Reviewed HEAD: \`${PR_HEAD_SHA}\` (issue #${ISSUE_NUMBER}, session \`${SESSION_ID}\`)" \
-    >/dev/null 2>&1 \
-    || log "WARNING: Failed to post Reviewed HEAD trailer (non-fatal — dispatcher will route to pending-review)"
+    2>&1 >/dev/null) \
+    || log "WARNING: Failed to post Reviewed HEAD trailer (non-fatal): ${_trailer_err}"
 fi
 
 if echo "$LATEST_COMMENT" | head -1 | grep -qi "^Review PASSED"; then

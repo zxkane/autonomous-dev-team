@@ -89,8 +89,15 @@ TRAILER_BLOCK=$(awk '
   }
 ' "$REVIEW_SCRIPT")
 
-assert_match "Trailer post tolerates failure (|| true or || log fallback)" \
-  '\|\| (true|log )' "$TRAILER_BLOCK"
+# Guard against silent vacuous-pass if the trailer layout changes and the
+# block extractor produces an empty match — fail loudly instead.
+if [[ -z "$TRAILER_BLOCK" ]]; then
+  echo -e "  ${RED}FAIL${NC}: trailer block extraction empty — script layout changed, update awk pattern"
+  FAIL=$((FAIL+1))
+else
+  assert_match "Trailer post tolerates failure (|| true or || log fallback)" \
+    '\|\| (true|log )' "$TRAILER_BLOCK"
+fi
 
 # ============================================================================
 # TC-DSRR-003: Dispatcher SKILL.md describes SHA comparison
@@ -158,6 +165,7 @@ echo
 if ! command -v jq >/dev/null 2>&1; then
   echo -e "  ${RED}SKIP${NC}: jq not installed"
 else
+  # Single-trailer fixture
   SAMPLE=$(cat <<'EOF'
 {
   "comments": [
@@ -178,6 +186,29 @@ EOF
     PASS=$((PASS+1))
   else
     echo -e "  ${RED}FAIL${NC}: jq capture did not return SHA, got: '$EXTRACTED'"
+    FAIL=$((FAIL+1))
+  fi
+
+  # Multi-trailer fixture — assert `last` returns the newest SHA, not the oldest.
+  # Guards against a regression that swaps `last` for `first`.
+  MULTI_SAMPLE=$(cat <<'EOF'
+{
+  "comments": [
+    {"body": "Reviewed HEAD: `1111111111111111111111111111111111111111` (issue #1, session `aaa`)"},
+    {"body": "Resuming development..."},
+    {"body": "Reviewed HEAD: `2222222222222222222222222222222222222222` (issue #1, session `bbb`)"}
+  ]
+}
+EOF
+  )
+  MULTI_EXTRACTED=$(echo "$MULTI_SAMPLE" | jq -r '
+    [.comments[].body | capture("Reviewed HEAD: `(?<sha>[0-9a-f]{7,40})`"; "g") | .sha] | last // empty
+  ')
+  if [[ "$MULTI_EXTRACTED" == "2222222222222222222222222222222222222222" ]]; then
+    echo -e "  ${GREEN}PASS${NC}: jq capture returns newest SHA across multiple trailers"
+    PASS=$((PASS+1))
+  else
+    echo -e "  ${RED}FAIL${NC}: expected newest SHA from multi-trailer fixture, got: '$MULTI_EXTRACTED'"
     FAIL=$((FAIL+1))
   fi
 fi

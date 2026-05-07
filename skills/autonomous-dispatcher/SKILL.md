@@ -301,7 +301,12 @@ else
 fi
 ```
 
-> **Note on the empty-trailer fallthrough:** an empty `LAST_REVIEWED_HEAD` (no prior review trailer found) routes to `pending-review`, not `pending-dev`. This protects the first-review path: review must see the PR at least once before any "no new commits" gate can apply.
+> **Note on the empty-trailer fallthrough:** an empty `LAST_REVIEWED_HEAD` (no prior review trailer found) routes to `pending-review`, not `pending-dev`. Two distinct causes can produce an empty value, both routed identically but with different operational meaning:
+>
+> 1. **Review never ran successfully against this PR yet** — the safe first-review case. `pending-review` correctly hands the PR to the review agent.
+> 2. **Trailer post failed** (token expiry, 403, rate limit) — the wrapper logs `WARNING: Failed to post Reviewed HEAD trailer` to its review log. Operationally this means SHA-match detection is broken; if you observe `pending-review` cycling without new commits across multiple dispatch ticks, grep the review log at `/tmp/agent-${PROJECT_ID}-review-*.log` for that warning.
+>
+> The trailer marker is wrapper-managed: only `autonomous-review.sh` should write `Reviewed HEAD: \`<sha>\``. A maintainer comment containing the literal phrase would be picked up too — acceptable trade-off given the 40-char hex match is unlikely in casual prose.
 
 If DEAD and issue still has `reviewing`:
 1. Comment: `Review process appears to have crashed. Moving to pending-dev for retry.`

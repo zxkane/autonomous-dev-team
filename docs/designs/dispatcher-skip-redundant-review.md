@@ -45,8 +45,7 @@ if [ "$PR_EXISTS" = "1" ]; then
   LAST_REVIEWED_HEAD=$(gh issue view "$ISSUE_NUM" --repo "$REPO" --json comments \
     -q '[.comments[].body | capture("Reviewed HEAD: `(?P<sha>[0-9a-f]{7,40})`"; "g") | .sha] | last // empty')
 
-  if [[ -n "$LAST_REVIEWED_HEAD" && -n "$CURRENT_HEAD" ]] \
-       && [[ "$CURRENT_HEAD" == "$LAST_REVIEWED_HEAD"* || "$LAST_REVIEWED_HEAD" == "$CURRENT_HEAD"* ]]; then
+  if [[ -n "$LAST_REVIEWED_HEAD" && -n "$CURRENT_HEAD" && "$CURRENT_HEAD" == "$LAST_REVIEWED_HEAD" ]]; then
     # No new commits since last review — retry dev so it can act on existing findings.
     # (Wording avoids "crashed" so retry-counter regex from Step 4 does not match.)
     gh issue comment "$ISSUE_NUM" --repo "$REPO" \
@@ -77,7 +76,7 @@ The chosen wording avoids "crashed" and "process not found", so this finding doe
 
 - **No prior review yet**: `LAST_REVIEWED_HEAD` is empty → falls through to `pending-review`. Correct: review hasn't seen the PR yet.
 - **Review trailer post failed**: `LAST_REVIEWED_HEAD` is empty → `pending-review`. Same fallback as above; review will run again, but no worse than today's behavior.
-- **SHA prefix vs full**: GitHub `headRefOid` returns the full 40-char SHA. The trailer also stores the full SHA. Use `==` for an exact match; the prefix-match safety net handles legacy data only.
+- **SHA prefix vs full**: GitHub `headRefOid` returns the full 40-char SHA, and the wrapper writes the full SHA into the trailer. Exact `==` is sufficient; no prefix-match safety net needed because there is no legacy non-full-SHA trailer format to support.
 - **Dev pushed and then crashed**: `CURRENT_HEAD` differs from `LAST_REVIEWED_HEAD` → `pending-review`. Correct: new code needs review.
 - **Multiple PRs on same issue** (rare): the existing `gh pr list` query already takes the first match. No change.
 
