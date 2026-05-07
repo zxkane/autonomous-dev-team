@@ -264,22 +264,49 @@ kill -0 $(cat /tmp/agent-${PROJECT_ID}-issue-ISSUE_NUM.pid 2>/dev/null) 2>/dev/n
 kill -0 $(cat /tmp/agent-${PROJECT_ID}-review-ISSUE_NUM.pid 2>/dev/null) 2>/dev/null && echo ALIVE || echo DEAD
 ```
 
-If DEAD and issue still has `in-progress`, **check whether a PR exists before deciding the transition**:
+If DEAD and issue still has `in-progress`, **check whether a PR exists before deciding the transition**, and if it does, **compare the PR HEAD SHA against the last reviewed SHA** so a redundant review is skipped when no new commits were pushed:
 ```bash
-PR_EXISTS=$(gh pr list --repo "$REPO" --state open --json number,body \
-  -q "[.[] | select(.body | test(\"#ISSUE_NUM[^0-9]\") or test(\"#ISSUE_NUM$\"))] | length")
+# Fetch current PR (number + HEAD SHA + body) in a single call.
+PR_INFO=$(gh pr list --repo "$REPO" --state open --json number,body,headRefOid \
+  -q "[.[] | select(.body | test(\"#ISSUE_NUM[^0-9]\") or test(\"#ISSUE_NUM$\"))] | .[0] // empty")
 
-if [ "$PR_EXISTS" -gt 0 ]; then
-  # PR exists — forward progress. Review agent can assess the work.
-  # Comment: "Dev process exited (PR found). Moving to pending-review for assessment."
-  # Remove `in-progress`, add `pending-review`
-  # (Wording avoids "crashed" so the Step 4 retry-counter regex does not match it.)
+if [ -n "$PR_INFO" ]; then
+  CURRENT_HEAD=$(jq -r '.headRefOid // empty' <<<"$PR_INFO")
+
+  # Find the most recent "Reviewed HEAD: `<sha>`" trailer the review wrapper
+  # posted after the previous verdict comment. Empty means review never ran
+  # successfully against the current PR (or trailer post failed).
+  LAST_REVIEWED_HEAD=$(gh issue view ISSUE_NUM --repo "$REPO" --json comments \
+    -q '[.comments[].body | capture("Reviewed HEAD: `(?<sha>[0-9a-f]{7,40})`"; "g") | .sha] | last // empty')
+
+  if [ -n "$LAST_REVIEWED_HEAD" ] && [ -n "$CURRENT_HEAD" ] && [ "$CURRENT_HEAD" = "$LAST_REVIEWED_HEAD" ]; then
+    # No new commits since last review. Re-running review would re-emit the
+    # same findings against identical code. Retry dev so it can act on the
+    # existing review feedback instead.
+    # (Wording avoids "crashed" / "process not found" so the Step 4 retry
+    #  counter regex does not match it.)
+    # Comment: "Dev process exited (no new commits since last review at `<sha>`). Moving to pending-dev for retry."
+    # Remove `in-progress`, add `pending-dev`
+  else
+    # PR has new commits OR no prior review trailer was found — let the
+    # review agent assess the work.
+    # Comment: "Dev process exited (PR found). Moving to pending-review for assessment."
+    # Remove `in-progress`, add `pending-review`
+    # (Wording avoids "crashed" so the Step 4 retry-counter regex does not match it.)
+  fi
 else
-  # No PR — dev agent didn't finish, retry development
+  # No PR — dev agent didn't finish, retry development.
   # Comment: "Task appears to have crashed (no PR found). Moving to pending-dev for retry."
   # Remove `in-progress`, add `pending-dev`
 fi
 ```
+
+> **Note on the empty-trailer fallthrough:** an empty `LAST_REVIEWED_HEAD` (no prior review trailer found) routes to `pending-review`, not `pending-dev`. Two distinct causes can produce an empty value, both routed identically but with different operational meaning:
+>
+> 1. **Review never ran successfully against this PR yet** — the safe first-review case. `pending-review` correctly hands the PR to the review agent.
+> 2. **Trailer post failed** (token expiry, 403, rate limit) — the wrapper logs `WARNING: Failed to post Reviewed HEAD trailer` to its review log. Operationally this means SHA-match detection is broken; if you observe `pending-review` cycling without new commits across multiple dispatch ticks, grep the review log at `/tmp/agent-${PROJECT_ID}-review-*.log` for that warning.
+>
+> The trailer marker is wrapper-managed: only `autonomous-review.sh` should write `Reviewed HEAD: \`<sha>\``. A maintainer comment containing the literal phrase would be picked up too — acceptable trade-off given the 40-char hex match is unlikely in casual prose.
 
 If DEAD and issue still has `reviewing`:
 1. Comment: `Review process appears to have crashed. Moving to pending-dev for retry.`

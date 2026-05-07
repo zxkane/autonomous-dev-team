@@ -174,7 +174,18 @@ if [[ -f "$SKILL_MD" ]]; then
   assert_contains "Skip freshly dispatched check" 'JUST_DISPATCHED[*]' "$SKILL_CONTENT"
 
   echo "TC-SKILL-002: SKILL.md has PR existence check in crash transition"
-  assert_contains "PR existence check" "PR_EXISTS" "$SKILL_CONTENT"
+  # Step 5 must gate the dead-with-PR transition on a non-empty test of the
+  # fetched PR object. The variable name evolved from PR_EXISTS to PR_INFO
+  # when the SHA-comparison logic landed (#54), so accept either — but only
+  # if it appears in a real conditional (-gt 0 for the count form, or -n for
+  # the object form), not just any mention.
+  if echo "$SKILL_CONTENT" | grep -qE '\[ "?\$PR_EXISTS"? -gt 0 \]|\[ -n "?\$PR_INFO"? \]'; then
+    echo -e "  ${GREEN}PASS${NC}: PR existence check"
+    PASS=$((PASS+1))
+  else
+    echo -e "  ${RED}FAIL${NC}: PR existence check (expected '[ \$PR_EXISTS -gt 0 ]' or '[ -n \$PR_INFO ]')"
+    FAIL=$((FAIL+1))
+  fi
   assert_contains "No PR crash path" "No PR" "$SKILL_CONTENT"
 
   echo "TC-SKILL-003: SKILL.md counts dispatcher crashes in retry count"

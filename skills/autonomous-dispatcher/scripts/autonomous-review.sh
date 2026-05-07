@@ -201,7 +201,8 @@ fi
 # Build review prompt
 # ---------------------------------------------------------------------------
 PR_BRANCH=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefName -q '.headRefName' 2>/dev/null || true)
-log "PR branch: ${PR_BRANCH:-UNKNOWN}"
+PR_HEAD_SHA=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefOid -q '.headRefOid' 2>/dev/null || true)
+log "PR branch: ${PR_BRANCH:-UNKNOWN} (HEAD: ${PR_HEAD_SHA:0:7})"
 
 SESSION_ID=$(uuidgen)
 
@@ -482,6 +483,23 @@ for _poll_attempt in $(seq 1 6); do
   fi
   log "Waiting for review comment to appear (attempt ${_poll_attempt}/6)..."
 done
+
+# Post a "Reviewed HEAD" trailer comment so the dispatcher can detect whether
+# new commits have landed since the last review. The dispatcher uses this to
+# decide between routing a dead-with-PR transition to pending-review (new code
+# to review) vs. pending-dev (no new code, retry dev).
+# Only emitted when the agent produced a verdict comment — a missing verdict
+# already routes to pending-dev via the FAILED branch below.
+if [[ -n "$LATEST_COMMENT" && -n "$PR_HEAD_SHA" ]]; then
+  # Capture stderr so token/permission/rate-limit failures are diagnosable.
+  # If this post fails persistently the dispatcher cannot detect SHA-match,
+  # so the WARNING is the only operator-visible breadcrumb (see SKILL.md
+  # Step 5 empty-trailer fallthrough).
+  _trailer_err=$(gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
+    --body "Reviewed HEAD: \`${PR_HEAD_SHA}\` (issue #${ISSUE_NUMBER}, session \`${SESSION_ID}\`)" \
+    2>&1 >/dev/null) \
+    || log "WARNING: Failed to post Reviewed HEAD trailer (non-fatal): ${_trailer_err}"
+fi
 
 if echo "$LATEST_COMMENT" | head -1 | grep -qi "^Review PASSED"; then
   log "Review PASSED for PR #${PR_NUMBER}."
