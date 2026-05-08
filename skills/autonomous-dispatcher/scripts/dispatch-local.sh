@@ -55,31 +55,71 @@ esac
 # new wrapper starts from a clean state.
 #
 # Refuses to follow symlinks (CWE-59) — same defense as acquire_pid_guard.
+#
+# Return codes:
+#   0 — safe to spawn (PID file gone, no live holder)
+#   1 — refuse to spawn: symlink, unreadable PID file, or process still alive
+#       after SIGKILL+grace
+#
+# `kill ... || true` on success paths is intentional. ESRCH (process gone
+# between checks) is the only "expected benign" failure of `kill`; we capture
+# stderr to distinguish it from EPERM/EINVAL/etc and surface real errors.
 kill_stale_wrapper() {
   local pid_file="$1"
   if [[ -L "$pid_file" ]]; then
     echo "ERROR: PID file is a symlink, refusing to operate on it: $pid_file" >&2
     return 1
   fi
-  if [[ -f "$pid_file" ]]; then
-    local old_pid
-    old_pid=$(cat "$pid_file" 2>/dev/null)
-    if [[ -n "$old_pid" ]] && kill -0 "$old_pid" 2>/dev/null; then
-      echo "Found existing wrapper for issue #${ISSUE_NUM} (PID ${old_pid}); sending SIGTERM..." >&2
-      kill "$old_pid" 2>/dev/null || true
-      local _i
-      for _i in 1 2 3 4 5; do
-        kill -0 "$old_pid" 2>/dev/null || break
-        sleep 1
-      done
+  if [[ ! -f "$pid_file" ]]; then
+    return 0
+  fi
+
+  # Distinguish empty content from "could not read". Deleting an unreadable
+  # PID file would leave a possibly-still-running wrapper untracked.
+  # Test readability first; only then capture content.
+  if ! [[ -r "$pid_file" ]]; then
+    echo "ERROR: cannot read PID file $pid_file (permission denied or removed)" >&2
+    return 1
+  fi
+  local old_pid
+  old_pid=$(cat "$pid_file" 2>/dev/null)
+
+  if [[ -n "$old_pid" ]] && kill -0 "$old_pid" 2>/dev/null; then
+    echo "Found existing wrapper for issue #${ISSUE_NUM} (PID ${old_pid}); sending SIGTERM..." >&2
+    local term_err
+    term_err=$(kill "$old_pid" 2>&1) || {
+      # ESRCH (no such process) is benign — the process exited between the
+      # liveness check and the kill. Anything else is a real problem.
+      if [[ "$term_err" != *"No such process"* && -n "$term_err" ]]; then
+        echo "WARNING: SIGTERM to PID ${old_pid} failed: ${term_err}" >&2
+      fi
+    }
+    local _i
+    for _i in 1 2 3 4 5; do
+      kill -0 "$old_pid" 2>/dev/null || break
+      sleep 1
+    done
+    if kill -0 "$old_pid" 2>/dev/null; then
+      echo "WARNING: PID ${old_pid} ignored SIGTERM after 5s; escalating to SIGKILL" >&2
+      local kill_err
+      kill_err=$(kill -9 "$old_pid" 2>&1) || {
+        if [[ "$kill_err" != *"No such process"* && -n "$kill_err" ]]; then
+          echo "WARNING: SIGKILL to PID ${old_pid} failed: ${kill_err}" >&2
+        fi
+      }
+      sleep 1
+      # Final liveness check — if still alive, we cannot safely spawn.
       if kill -0 "$old_pid" 2>/dev/null; then
-        echo "PID ${old_pid} ignored SIGTERM after 5s; escalating to SIGKILL" >&2
-        kill -9 "$old_pid" 2>/dev/null || true
-        sleep 1
+        echo "ERROR: PID ${old_pid} survived SIGKILL+1s grace; refusing to spawn alongside it" >&2
+        return 1
       fi
     fi
-    rm -f "$pid_file"
   fi
+
+  # Remove PID file regardless. If `rm -f` fails (read-only mount, perm),
+  # acquire_pid_guard in the new wrapper re-validates liveness on whatever
+  # PID is in the file — and we just verified that PID is no longer alive.
+  rm -f "$pid_file"
   return 0
 }
 

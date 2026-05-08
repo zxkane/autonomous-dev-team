@@ -108,6 +108,26 @@ fi
 assert_match "PID_FILE selected per type" \
   'dev-new\|dev-resume\)\s*PID_FILE=|case "?\$TYPE"? in.*PID_FILE' "$DISPATCH_CONTENT"
 
+# Each branch must pick the correct path: dev paths use -issue-, review uses
+# -review-. Guard against a swap-typo regression where dev-new accidentally
+# points at the review PID file or vice-versa.
+DEV_PATH_BLOCK=$(grep -E 'dev-new\|dev-resume\)\s*PID_FILE=' <<<"$DISPATCH_CONTENT")
+REVIEW_PATH_BLOCK=$(grep -E 'review\)\s*PID_FILE=' <<<"$DISPATCH_CONTENT")
+if [[ "$DEV_PATH_BLOCK" == *"-issue-"* ]] && [[ "$DEV_PATH_BLOCK" != *"-review-"* ]]; then
+  echo -e "  ${GREEN}PASS${NC}: dev-new/dev-resume picks the -issue- PID file"
+  PASS=$((PASS+1))
+else
+  echo -e "  ${RED}FAIL${NC}: dev branch path is wrong: '$DEV_PATH_BLOCK'"
+  FAIL=$((FAIL+1))
+fi
+if [[ "$REVIEW_PATH_BLOCK" == *"-review-"* ]] && [[ "$REVIEW_PATH_BLOCK" != *"-issue-"* ]]; then
+  echo -e "  ${GREEN}PASS${NC}: review picks the -review- PID file"
+  PASS=$((PASS+1))
+else
+  echo -e "  ${RED}FAIL${NC}: review branch path is wrong: '$REVIEW_PATH_BLOCK'"
+  FAIL=$((FAIL+1))
+fi
+
 # ============================================================================
 # TC-DKBS-008: Log message emitted on kill
 # ============================================================================
@@ -123,41 +143,39 @@ assert_match "Stderr log on found wrapper" \
 # against synthetic processes.
 # ============================================================================
 
-# Extract the kill block as a sourceable function. Strategy: read the file,
-# wrap the kill-before-spawn block in a function, source it. If the project
-# uses a helper function, just source the file's relevant section.
-#
-# To avoid coupling to the exact function signature, we replicate the
-# documented behavior in this test file. The static checks above ensure
-# the actual implementation matches the same semantics.
-#
-# This local replica is what the implementation is required to behave like.
+# Source the actual implementation so behavioral tests verify the real
+# function — no replica drift. Strategy: extract the function definition from
+# dispatch-local.sh into a temp file and source it. ISSUE_NUM is required by
+# the function's log messages, so set a placeholder.
+EXTRACT_FILE=$(mktemp)
+awk '
+  /^kill_stale_wrapper\(\) \{$/ { in_fn=1 }
+  in_fn { print }
+  in_fn && /^\}$/ { in_fn=0 }
+' "$DISPATCH_SCRIPT" > "$EXTRACT_FILE"
+if [[ ! -s "$EXTRACT_FILE" ]]; then
+  echo -e "${RED}FATAL${NC}: failed to extract kill_stale_wrapper from $DISPATCH_SCRIPT"
+  rm -f "$EXTRACT_FILE"
+  exit 1
+fi
+ISSUE_NUM="test"  # for log messages inside the function
+# shellcheck source=/dev/null
+source "$EXTRACT_FILE"
+rm -f "$EXTRACT_FILE"
 
-kill_stale_wrapper_test_replica() {
-  local pid_file="$1"
-  [[ -L "$pid_file" ]] && return 1
-  if [[ -f "$pid_file" ]]; then
-    local old_pid
-    old_pid=$(cat "$pid_file" 2>/dev/null)
-    if [[ -n "$old_pid" ]] && kill -0 "$old_pid" 2>/dev/null; then
-      kill "$old_pid" 2>/dev/null || true
-      local i
-      for i in 1 2 3 4 5; do
-        kill -0 "$old_pid" 2>/dev/null || break
-        sleep 1
-      done
-      if kill -0 "$old_pid" 2>/dev/null; then
-        kill -9 "$old_pid" 2>/dev/null || true
-        sleep 1
-      fi
-    fi
-    rm -f "$pid_file"
-  fi
-  return 0
+# Bounded reap-poll: kill returns before the OS reaps. Wait up to ~2s,
+# breaking as soon as the PID is gone. Avoids fixed-sleep flakes on slow CI.
+wait_for_pid_gone() {
+  local pid="$1" timeout="${2:-20}" i
+  for ((i = 0; i < timeout; i++)); do
+    kill -0 "$pid" 2>/dev/null || return 0
+    sleep 0.1
+  done
+  return 1
 }
 
 TMPDIR=$(mktemp -d)
-trap 'rm -rf "$TMPDIR"' EXIT
+trap 'rm -rf "$TMPDIR"; rm -f "$EXTRACT_FILE"' EXIT
 
 # ============================================================================
 # TC-DKBS-002: Alive PID gets killed
@@ -173,17 +191,15 @@ echo "$ALIVE_PID" > "$PID_FILE"
 
 # Confirm the process is alive before killing
 if kill -0 "$ALIVE_PID" 2>/dev/null; then
-  kill_stale_wrapper_test_replica "$PID_FILE"
+  kill_stale_wrapper "$PID_FILE"
   RC=$?
-  # Give the OS a moment to reap
-  sleep 0.2
-  if kill -0 "$ALIVE_PID" 2>/dev/null; then
+  if wait_for_pid_gone "$ALIVE_PID"; then
+    echo -e "  ${GREEN}PASS${NC}: alive PID $ALIVE_PID was killed"
+    PASS=$((PASS+1))
+  else
     echo -e "  ${RED}FAIL${NC}: alive sleep PID $ALIVE_PID still running after kill_stale"
     kill -9 "$ALIVE_PID" 2>/dev/null || true
     FAIL=$((FAIL+1))
-  else
-    echo -e "  ${GREEN}PASS${NC}: alive PID $ALIVE_PID was killed"
-    PASS=$((PASS+1))
   fi
   assert_eq "Function returned 0" "0" "$RC"
   if [[ -e "$PID_FILE" ]]; then
@@ -208,7 +224,7 @@ echo
 PID_FILE="$TMPDIR/test-003.pid"
 echo "99999999" > "$PID_FILE"  # very unlikely to exist
 START_TIME=$SECONDS
-kill_stale_wrapper_test_replica "$PID_FILE"
+kill_stale_wrapper "$PID_FILE"
 RC=$?
 ELAPSED=$(( SECONDS - START_TIME ))
 assert_eq "Function returned 0 for dead PID" "0" "$RC"
@@ -241,23 +257,23 @@ RESISTANT_PID=$!
 echo "$RESISTANT_PID" > "$PID_FILE"
 
 START_TIME=$SECONDS
-kill_stale_wrapper_test_replica "$PID_FILE"
+kill_stale_wrapper "$PID_FILE"
 ELAPSED=$(( SECONDS - START_TIME ))
-sleep 0.2
-if kill -0 "$RESISTANT_PID" 2>/dev/null; then
+if wait_for_pid_gone "$RESISTANT_PID"; then
+  echo -e "  ${GREEN}PASS${NC}: SIGTERM-resistant PID was eventually killed (took ${ELAPSED}s)"
+  PASS=$((PASS+1))
+else
   echo -e "  ${RED}FAIL${NC}: SIGTERM-resistant PID $RESISTANT_PID still running"
   kill -9 "$RESISTANT_PID" 2>/dev/null || true
   FAIL=$((FAIL+1))
-else
-  echo -e "  ${GREEN}PASS${NC}: SIGTERM-resistant PID was eventually killed (took ${ELAPSED}s)"
-  PASS=$((PASS+1))
 fi
-# Should take 5s grace + 1s escalation settle ≈ 6s, but allow up to 8s slack
-if [[ "$ELAPSED" -ge 5 && "$ELAPSED" -le 8 ]]; then
-  echo -e "  ${GREEN}PASS${NC}: escalation timing within expected 5-8s window (${ELAPSED}s)"
+# Should take 5s grace + 1s escalation settle ≈ 6s. Generous bounds to absorb
+# slow CI runners: at least 5s (the grace MUST elapse) and no more than 12s.
+if [[ "$ELAPSED" -ge 5 && "$ELAPSED" -le 12 ]]; then
+  echo -e "  ${GREEN}PASS${NC}: escalation timing within expected 5-12s window (${ELAPSED}s)"
   PASS=$((PASS+1))
 else
-  echo -e "  ${RED}FAIL${NC}: escalation took ${ELAPSED}s — outside expected 5-8s window"
+  echo -e "  ${RED}FAIL${NC}: escalation took ${ELAPSED}s — outside expected 5-12s window"
   FAIL=$((FAIL+1))
 fi
 
@@ -270,7 +286,7 @@ echo
 
 PID_FILE="$TMPDIR/test-005.pid"
 : > "$PID_FILE"  # touch empty
-kill_stale_wrapper_test_replica "$PID_FILE"
+kill_stale_wrapper "$PID_FILE"
 RC=$?
 assert_eq "Function returned 0 for empty file" "0" "$RC"
 if [[ -e "$PID_FILE" ]]; then
@@ -292,7 +308,7 @@ PID_FILE="$TMPDIR/test-006.pid"
 TARGET="$TMPDIR/symlink-target"
 echo "should-not-be-deleted" > "$TARGET"
 ln -sf "$TARGET" "$PID_FILE"
-kill_stale_wrapper_test_replica "$PID_FILE"
+kill_stale_wrapper "$PID_FILE"
 RC=$?
 # Function should refuse (return non-zero) and NOT remove the target.
 if [[ -f "$TARGET" ]]; then
@@ -302,6 +318,44 @@ else
   echo -e "  ${RED}FAIL${NC}: symlink target was deleted — security regression"
   FAIL=$((FAIL+1))
 fi
+
+# ============================================================================
+# TC-DKBS-009: Unreadable PID file returns 1 (does NOT delete it)
+# ============================================================================
+echo
+echo "=== TC-DKBS-009: unreadable PID file is refused, not silently deleted ==="
+echo
+
+PID_FILE="$TMPDIR/test-009.pid"
+echo "12345" > "$PID_FILE"
+chmod 000 "$PID_FILE"
+# Skip if running as root (chmod 000 is bypassed)
+if [[ "$(id -u)" == "0" ]]; then
+  echo -e "  ${RED}SKIP${NC}: running as root, chmod 000 is bypassed"
+  chmod 644 "$PID_FILE"
+else
+  set +e
+  kill_stale_wrapper "$PID_FILE" >/tmp/test-009.stderr 2>&1
+  RC=$?
+  set -e
+  chmod 644 "$PID_FILE"  # restore so trap can clean up
+  if [[ "$RC" != "0" ]]; then
+    echo -e "  ${GREEN}PASS${NC}: unreadable PID file → return code $RC (not 0)"
+    PASS=$((PASS+1))
+  else
+    echo -e "  ${RED}FAIL${NC}: unreadable PID file silently returned 0"
+    FAIL=$((FAIL+1))
+  fi
+  # File must still exist — we refused to operate on it, didn't delete it
+  if [[ -e "$PID_FILE" ]]; then
+    echo -e "  ${GREEN}PASS${NC}: unreadable PID file preserved (not deleted)"
+    PASS=$((PASS+1))
+  else
+    echo -e "  ${RED}FAIL${NC}: unreadable PID file was deleted — silent-failure regression"
+    FAIL=$((FAIL+1))
+  fi
+fi
+rm -f /tmp/test-009.stderr
 
 # ----------------------------------------------------------------------------
 # Summary
