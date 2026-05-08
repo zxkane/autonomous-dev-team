@@ -347,10 +347,11 @@ if [[ "$(id -u)" == "0" ]]; then
   echo -e "  ${RED}SKIP${NC}: running as root, chmod 000 is bypassed"
   chmod 644 "$PID_FILE"
 else
-  set +e
-  kill_stale_wrapper "$PID_FILE" >/tmp/test-009.stderr 2>&1
+  # Capture function output into the per-run TMPDIR (not /tmp) so concurrent
+  # test runs don't collide on a fixed path (Q PR #57 review, CWE-377).
+  STDERR_FILE="$TMPDIR/test-009.stderr"
+  kill_stale_wrapper "$PID_FILE" >"$STDERR_FILE" 2>&1
   RC=$?
-  set -e
   chmod 644 "$PID_FILE"  # restore so trap can clean up
   if [[ "$RC" != "0" ]]; then
     echo -e "  ${GREEN}PASS${NC}: unreadable PID file → return code $RC (not 0)"
@@ -368,7 +369,7 @@ else
     FAIL=$((FAIL+1))
   fi
 fi
-rm -f /tmp/test-009.stderr
+# STDERR_FILE is inside TMPDIR which the EXIT trap removes — no separate cleanup needed.
 
 # ----------------------------------------------------------------------------
 # Summary
