@@ -258,11 +258,105 @@ For each remaining issue, check if the agent process is still alive locally. Use
 
 ```bash
 # For in-progress issues:
-kill -0 $(cat /tmp/agent-${PROJECT_ID}-issue-ISSUE_NUM.pid 2>/dev/null) 2>/dev/null && echo ALIVE || echo DEAD
+PID=$(cat /tmp/agent-${PROJECT_ID}-issue-ISSUE_NUM.pid 2>/dev/null)
+kill -0 "$PID" 2>/dev/null && echo ALIVE || echo DEAD
 
 # For reviewing issues:
 kill -0 $(cat /tmp/agent-${PROJECT_ID}-review-ISSUE_NUM.pid 2>/dev/null) 2>/dev/null && echo ALIVE || echo DEAD
 ```
+
+#### Step 5a (NEW): ALIVE + PR ready for review (issue #54)
+
+If ALIVE and issue still has `in-progress`, the agent process is running but its real work may already be done — PR opened, CI green, and no recent activity for several minutes. In that case the wrapper is hung (polling loop, stuck IO) and is blocking the issue from progressing. Send `SIGTERM` and transition to `pending-review`:
+
+```bash
+PR_INFO=$(gh pr list --repo "$REPO" --state open --json number,body,updatedAt \
+  -q "[.[] | select(.body | test(\"#ISSUE_NUM[^0-9]\") or test(\"#ISSUE_NUM$\"))] | .[0] // empty")
+
+if [ -n "$PR_INFO" ]; then
+  PR_NUM=$(jq -r '.number // empty' <<<"$PR_INFO")
+  PR_UPDATED_AT=$(jq -r '.updatedAt // empty' <<<"$PR_INFO")
+
+  # Validate jq outputs — schema drift or partial JSON would otherwise let
+  # `null` propagate into `gh pr checks "null"` (silent 404 loop).
+  if ! [[ "$PR_NUM" =~ ^[0-9]+$ ]] || [ -z "$PR_UPDATED_AT" ]; then
+    echo "WARN: malformed PR info for issue ISSUE_NUM (PR_NUM='$PR_NUM', PR_UPDATED_AT='$PR_UPDATED_AT'); leaving as-is" >&2
+  else
+    # CI green = at least one check, all SUCCESS. Empty / pending / failed / skipped → not green.
+    # Capture stderr so a transport error (token expiry, rate limit) is diagnosable
+    # rather than silently equivalent to "no checks".
+    # Use mktemp (not a fixed /tmp path) — concurrent dispatcher instances would
+    # otherwise collide on the same file (CWE-377: insecure temporary file).
+    CI_STATES_ERR=""
+    CI_ERR_FILE=$(mktemp)
+    CI_STATES=$(gh pr checks "$PR_NUM" --repo "$REPO" --json state -q '[.[].state]' 2>"$CI_ERR_FILE") \
+      || { CI_STATES_ERR=$(cat "$CI_ERR_FILE"); CI_STATES='[]'; }
+    rm -f "$CI_ERR_FILE"
+    if [ -n "$CI_STATES_ERR" ]; then
+      echo "WARN: gh pr checks failed for PR #${PR_NUM}: ${CI_STATES_ERR}" >&2
+    fi
+    CI_GREEN=$(jq -e 'length > 0 and all(. == "SUCCESS")' <<<"$CI_STATES" >/dev/null 2>&1 && echo 1 || echo 0)
+
+    if [ "$CI_GREEN" = "1" ]; then
+      # Idle = seconds since the PR was last updated.
+      # `date -d` is GNU-only; macOS/BSD uses `date -j -f`. Fall back across
+      # the two so the dispatcher works on both. On parse failure, fail-CLOSED:
+      # leave the PR alone instead of treating it as 1.7e9-seconds idle (which
+      # would unconditionally fire SIGTERM).
+      PR_UPDATED_EPOCH=$(date -u -d "$PR_UPDATED_AT" +%s 2>/dev/null \
+        || date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$PR_UPDATED_AT" +%s 2>/dev/null \
+        || echo "")
+      if [ -z "$PR_UPDATED_EPOCH" ]; then
+        echo "WARN: cannot parse PR.updatedAt='${PR_UPDATED_AT}' for issue ISSUE_NUM; leaving as-is" >&2
+      else
+        NOW_EPOCH=$(date -u +%s)
+        IDLE_SECONDS=$(( NOW_EPOCH - PR_UPDATED_EPOCH ))
+
+        if [ "$IDLE_SECONDS" -gt 300 ]; then
+          # Re-verify the PID is still alive AND still ours. Between the
+          # earlier kill -0 check and this point, the wrapper could have
+          # exited and the PID could have been reassigned to an unrelated
+          # process. If recheck fails, treat as DEAD and fall through to
+          # the existing DEAD-with-PR path on the next cron tick.
+          if ! kill -0 "$PID" 2>/dev/null; then
+            echo "INFO: wrapper PID ${PID} for issue ISSUE_NUM exited between checks; deferring to next cycle" >&2
+          else
+            # Agent hasn't touched the PR in 5+ minutes and CI is green.
+            # SIGTERM the wrapper so its PID file clears, then hand off to review.
+            if kill "$PID" 2>/dev/null; then
+              KILL_NOTE="Sent SIGTERM to PID ${PID}"
+            else
+              KILL_NOTE="PID ${PID} already gone"
+            fi
+            gh issue comment ISSUE_NUM --repo "$REPO" \
+              --body "Dev process still alive but PR #${PR_NUM} is ready (all CI checks passed, idle ${IDLE_SECONDS}s). ${KILL_NOTE}. Moving to pending-review."
+            gh issue edit ISSUE_NUM --repo "$REPO" \
+              --remove-label "in-progress" --add-label "pending-review"
+            continue   # done with this issue this cycle
+          fi
+        fi
+        # Else: PR moved within the last 5 min — agent may still be doing cleanup
+        #       (closing worktree, posting status, etc). Leave alone for now.
+      fi
+    fi
+    # Else: CI not green (pending or failing) — leave alone, agent is presumably
+    #       still working on it.
+  fi
+fi
+# Else: no PR yet — agent is still developing, leave alone.
+
+# Fall through to the existing ALIVE-skip below (no transition).
+```
+
+> **Concurrent-shutdown race:** between `kill "$PID"` and `gh issue edit ... pending-review`, the wrapper's own SIGTERM trap may also call `gh issue edit` (its `cleanup()` trap posts a session report and may set labels). Outcomes are bounded — the wrapper trap targets `pending-review` (PR exists, exit 0 path) or `pending-dev` (failure path); in the worst case the labels flip back and forth for one cron tick, but the next cycle stabilizes (Step 3 picks up `pending-review`, Step 4 picks up `pending-dev`). No data loss, just one extra comment per ~1% of transitions.
+
+**Why a 5-minute idle gate (idle > 300s):** without it, the dispatcher might SIGTERM an agent that just pushed its passing CI build and is about to do its own cleanup. 5 min matches the dispatcher cron interval — the next cycle will be the one to act, not the cycle that detected green CI.
+
+**Why SIGTERM, not SIGKILL:** agent shells trap SIGTERM and clean up (close worktree handles, flush logs). Plain `kill` defaults to SIGTERM. We do NOT escalate to SIGKILL here — a SIGTERM-resistant agent is rare and best handled by an operator.
+
+**Guard rails:** the new branch fires only when ALL of these hold — alive PID, **PR exists for the issue** (no PR yet → leave alone), **CI green** (CI not green → leave alone), **idle > 300s** (recent activity → leave alone). Each guard is enforced by the conditional structure above.
+
+#### Step 5b: DEAD branch (existing)
 
 If DEAD and issue still has `in-progress`, **check whether a PR exists before deciding the transition**, and if it does, **compare the PR HEAD SHA against the last reviewed SHA** so a redundant review is skipped when no new commits were pushed:
 ```bash
