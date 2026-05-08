@@ -191,23 +191,36 @@ echo "$ALIVE_PID" > "$PID_FILE"
 
 # Confirm the process is alive before killing
 if kill -0 "$ALIVE_PID" 2>/dev/null; then
-  kill_stale_wrapper "$PID_FILE"
+  # Note: this script runs with `set -uo pipefail` (no errexit), so
+  # `kill_stale_wrapper` returning non-zero won't abort the test — that's
+  # exactly the assertion path we want to exercise.
+  kill_stale_wrapper "$PID_FILE" >/dev/null 2>&1
   RC=$?
-  if wait_for_pid_gone "$ALIVE_PID"; then
-    echo -e "  ${GREEN}PASS${NC}: alive PID $ALIVE_PID was killed"
-    PASS=$((PASS+1))
-  else
-    echo -e "  ${RED}FAIL${NC}: alive sleep PID $ALIVE_PID still running after kill_stale"
-    kill -9 "$ALIVE_PID" 2>/dev/null || true
-    FAIL=$((FAIL+1))
-  fi
+  # Assert function-level success FIRST. If the function reports an error,
+  # don't let an incidental external-cause death of the sleep process mask it.
+  # (Q PR #57: race-condition risk where wait_for_pid_gone could pass while
+  # kill_stale_wrapper actually returned non-zero.)
   assert_eq "Function returned 0" "0" "$RC"
-  if [[ -e "$PID_FILE" ]]; then
-    echo -e "  ${RED}FAIL${NC}: PID file still exists"
-    FAIL=$((FAIL+1))
+  if [[ "$RC" == "0" ]]; then
+    if wait_for_pid_gone "$ALIVE_PID"; then
+      echo -e "  ${GREEN}PASS${NC}: alive PID $ALIVE_PID was killed"
+      PASS=$((PASS+1))
+    else
+      echo -e "  ${RED}FAIL${NC}: alive sleep PID $ALIVE_PID still running after kill_stale"
+      kill -9 "$ALIVE_PID" 2>/dev/null || true
+      FAIL=$((FAIL+1))
+    fi
+    if [[ -e "$PID_FILE" ]]; then
+      echo -e "  ${RED}FAIL${NC}: PID file still exists"
+      FAIL=$((FAIL+1))
+    else
+      echo -e "  ${GREEN}PASS${NC}: PID file removed"
+      PASS=$((PASS+1))
+    fi
   else
-    echo -e "  ${GREEN}PASS${NC}: PID file removed"
-    PASS=$((PASS+1))
+    # Skip downstream assertions; cleanup the leaked sleep before continuing.
+    kill -9 "$ALIVE_PID" 2>/dev/null || true
+    rm -f "$PID_FILE"
   fi
 else
   echo -e "  ${RED}FAIL${NC}: setup error — sleep didn't start"
