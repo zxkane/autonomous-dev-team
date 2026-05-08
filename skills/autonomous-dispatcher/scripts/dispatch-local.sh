@@ -45,6 +45,53 @@ case "$TYPE" in
   review)             install -m 600 /dev/null "${LOG_PREFIX}-review-${ISSUE_NUM}.log" 2>/dev/null || true ;;
 esac
 
+# Kill any stale wrapper that still holds the PID file for this issue+type.
+# Closes #55: previously a lingering wrapper (inner CLI dead, outer bash hung)
+# would block `acquire_pid_guard` in the new wrapper, which silently exit 0'd
+# and left the issue oscillating between labels with no real progress.
+#
+# Strategy: SIGTERM, give the trap up to 5 seconds to clean up, escalate to
+# SIGKILL only if the process is still alive. Then remove the PID file so the
+# new wrapper starts from a clean state.
+#
+# Refuses to follow symlinks (CWE-59) — same defense as acquire_pid_guard.
+kill_stale_wrapper() {
+  local pid_file="$1"
+  if [[ -L "$pid_file" ]]; then
+    echo "ERROR: PID file is a symlink, refusing to operate on it: $pid_file" >&2
+    return 1
+  fi
+  if [[ -f "$pid_file" ]]; then
+    local old_pid
+    old_pid=$(cat "$pid_file" 2>/dev/null)
+    if [[ -n "$old_pid" ]] && kill -0 "$old_pid" 2>/dev/null; then
+      echo "Found existing wrapper for issue #${ISSUE_NUM} (PID ${old_pid}); sending SIGTERM..." >&2
+      kill "$old_pid" 2>/dev/null || true
+      local _i
+      for _i in 1 2 3 4 5; do
+        kill -0 "$old_pid" 2>/dev/null || break
+        sleep 1
+      done
+      if kill -0 "$old_pid" 2>/dev/null; then
+        echo "PID ${old_pid} ignored SIGTERM after 5s; escalating to SIGKILL" >&2
+        kill -9 "$old_pid" 2>/dev/null || true
+        sleep 1
+      fi
+    fi
+    rm -f "$pid_file"
+  fi
+  return 0
+}
+
+case "$TYPE" in
+  dev-new|dev-resume) PID_FILE="${LOG_PREFIX}-issue-${ISSUE_NUM}.pid" ;;
+  review)             PID_FILE="${LOG_PREFIX}-review-${ISSUE_NUM}.pid" ;;
+  *)                  PID_FILE="" ;;
+esac
+if [[ -n "$PID_FILE" ]]; then
+  kill_stale_wrapper "$PID_FILE" || exit 1
+fi
+
 case "$TYPE" in
   dev-new)
     nohup "${PROJECT_DIR}/scripts/autonomous-dev.sh" \
