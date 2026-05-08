@@ -297,6 +297,24 @@ echo
 assert_contains "gh pr checks failure logged" \
   "gh pr checks failed" "$SKILL_CONTENT"
 
+# ============================================================================
+# TC-DSAP-015: Stderr capture uses mktemp, not a fixed /tmp path
+# ============================================================================
+echo
+echo "=== TC-DSAP-015: stderr capture uses mktemp (CWE-377) ==="
+echo
+# Concurrent dispatcher instances would race on a fixed /tmp/_gh-checks-err
+# path. Q flagged this as a security vulnerability; the regression guard
+# checks both that mktemp is used and that no fixed path appears.
+assert_contains "mktemp used for stderr capture" "mktemp" "$SKILL_CONTENT"
+if [[ -n "$(grep -E '/tmp/_gh-checks-err' <<<"$SKILL_CONTENT")" ]]; then
+  echo -e "  ${RED}FAIL${NC}: SKILL.md still references the fixed /tmp/_gh-checks-err path"
+  FAIL=$((FAIL+1))
+else
+  echo -e "  ${GREEN}PASS${NC}: no fixed /tmp/_gh-checks-err reference"
+  PASS=$((PASS+1))
+fi
+
 # ----------------------------------------------------------------------------
 # Summary
 # ----------------------------------------------------------------------------

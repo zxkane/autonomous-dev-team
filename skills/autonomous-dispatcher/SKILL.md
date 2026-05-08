@@ -285,10 +285,13 @@ if [ -n "$PR_INFO" ]; then
     # CI green = at least one check, all SUCCESS. Empty / pending / failed / skipped → not green.
     # Capture stderr so a transport error (token expiry, rate limit) is diagnosable
     # rather than silently equivalent to "no checks".
+    # Use mktemp (not a fixed /tmp path) — concurrent dispatcher instances would
+    # otherwise collide on the same file (CWE-377: insecure temporary file).
     CI_STATES_ERR=""
-    CI_STATES=$(gh pr checks "$PR_NUM" --repo "$REPO" --json state -q '[.[].state]' 2>/tmp/_gh-checks-err) \
-      || { CI_STATES_ERR=$(cat /tmp/_gh-checks-err); CI_STATES='[]'; }
-    rm -f /tmp/_gh-checks-err
+    CI_ERR_FILE=$(mktemp)
+    CI_STATES=$(gh pr checks "$PR_NUM" --repo "$REPO" --json state -q '[.[].state]' 2>"$CI_ERR_FILE") \
+      || { CI_STATES_ERR=$(cat "$CI_ERR_FILE"); CI_STATES='[]'; }
+    rm -f "$CI_ERR_FILE"
     if [ -n "$CI_STATES_ERR" ]; then
       echo "WARN: gh pr checks failed for PR #${PR_NUM}: ${CI_STATES_ERR}" >&2
     fi
