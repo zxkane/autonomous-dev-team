@@ -258,11 +258,64 @@ For each remaining issue, check if the agent process is still alive locally. Use
 
 ```bash
 # For in-progress issues:
-kill -0 $(cat /tmp/agent-${PROJECT_ID}-issue-ISSUE_NUM.pid 2>/dev/null) 2>/dev/null && echo ALIVE || echo DEAD
+PID=$(cat /tmp/agent-${PROJECT_ID}-issue-ISSUE_NUM.pid 2>/dev/null)
+kill -0 "$PID" 2>/dev/null && echo ALIVE || echo DEAD
 
 # For reviewing issues:
 kill -0 $(cat /tmp/agent-${PROJECT_ID}-review-ISSUE_NUM.pid 2>/dev/null) 2>/dev/null && echo ALIVE || echo DEAD
 ```
+
+#### Step 5a (NEW): ALIVE + PR ready for review (issue #54)
+
+If ALIVE and issue still has `in-progress`, the agent process is running but its real work may already be done — PR opened, CI green, and no recent activity for several minutes. In that case the wrapper is hung (polling loop, stuck IO) and is blocking the issue from progressing. Send `SIGTERM` and transition to `pending-review`:
+
+```bash
+PR_INFO=$(gh pr list --repo "$REPO" --state open --json number,body,updatedAt \
+  -q "[.[] | select(.body | test(\"#ISSUE_NUM[^0-9]\") or test(\"#ISSUE_NUM$\"))] | .[0] // empty")
+
+if [ -n "$PR_INFO" ]; then
+  PR_NUM=$(jq -r '.number' <<<"$PR_INFO")
+  PR_UPDATED_AT=$(jq -r '.updatedAt' <<<"$PR_INFO")
+
+  # CI green = at least one check, all SUCCESS. Empty / pending / failed / skipped → not green.
+  CI_STATES=$(gh pr checks "$PR_NUM" --repo "$REPO" --json state -q '[.[].state]' 2>/dev/null || echo '[]')
+  CI_GREEN=$(jq -e 'length > 0 and all(. == "SUCCESS")' <<<"$CI_STATES" >/dev/null 2>&1 && echo 1 || echo 0)
+
+  if [ "$CI_GREEN" = "1" ]; then
+    # Idle = seconds since the PR was last updated. Uses GNU `date -d` to parse
+    # the GitHub ISO-8601 timestamp; `date +%s` for the current epoch.
+    PR_UPDATED_EPOCH=$(date -u -d "$PR_UPDATED_AT" +%s 2>/dev/null || echo 0)
+    NOW_EPOCH=$(date -u +%s)
+    IDLE_SECONDS=$(( NOW_EPOCH - PR_UPDATED_EPOCH ))
+
+    if [ "$IDLE_SECONDS" -gt 300 ]; then
+      # Agent hasn't touched the PR in 5+ minutes and CI is green.
+      # SIGTERM the wrapper so its PID file clears, then hand off to review.
+      kill "$PID" 2>/dev/null || true
+      gh issue comment ISSUE_NUM --repo "$REPO" \
+        --body "Dev process still alive but PR #${PR_NUM} is ready (all CI checks passed, idle ${IDLE_SECONDS}s). Sent SIGTERM to PID ${PID}. Moving to pending-review."
+      gh issue edit ISSUE_NUM --repo "$REPO" \
+        --remove-label "in-progress" --add-label "pending-review"
+      continue   # done with this issue this cycle
+    fi
+    # Else: PR moved within the last 5 min — agent may still be doing cleanup
+    #       (closing worktree, posting status, etc). Leave alone for now.
+  fi
+  # Else: CI not green (pending or failing) — leave alone, agent is presumably
+  #       still working on it.
+fi
+# Else: no PR yet — agent is still developing, leave alone.
+
+# Fall through to the existing ALIVE-skip below (no transition).
+```
+
+**Why a 5-minute idle gate (idle > 300s):** without it, the dispatcher might SIGTERM an agent that just pushed its passing CI build and is about to do its own cleanup. 5 min matches the dispatcher cron interval — the next cycle will be the one to act, not the cycle that detected green CI.
+
+**Why SIGTERM, not SIGKILL:** agent shells trap SIGTERM and clean up (close worktree handles, flush logs). Plain `kill` defaults to SIGTERM. We do NOT escalate to SIGKILL here — a SIGTERM-resistant agent is rare and best handled by an operator.
+
+**Guard rails:** the new branch fires only when ALL of these hold — alive PID, **PR exists for the issue** (no PR yet → leave alone), **CI green** (CI not green → leave alone), **idle > 300s** (recent activity → leave alone). Each guard is enforced by the conditional structure above.
+
+#### Step 5b: DEAD branch (existing)
 
 If DEAD and issue still has `in-progress`, **check whether a PR exists before deciding the transition**, and if it does, **compare the PR HEAD SHA against the last reviewed SHA** so a redundant review is skipped when no new commits were pushed:
 ```bash
