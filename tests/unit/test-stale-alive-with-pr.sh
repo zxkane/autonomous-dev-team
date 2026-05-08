@@ -217,6 +217,86 @@ else
   FAIL=$((FAIL+1))
 fi
 
+# ============================================================================
+# TC-DSAP-010: Date-parse failure must NOT fall back to epoch 0
+# ============================================================================
+echo
+echo "=== TC-DSAP-010: Date-parse fail-CLOSED ==="
+echo
+# Regression guard for the fail-OPEN bug surfaced in PR review:
+# `PR_UPDATED_EPOCH=$(date -u -d ... || echo 0)` would make IDLE_SECONDS huge
+# and unconditionally fire SIGTERM. The fix must NOT use `|| echo 0` *as the
+# fallback specifically for PR_UPDATED_EPOCH*; it must either fail-closed
+# (skip the issue this cycle) or use `$NOW_EPOCH` as the safe default.
+#
+# (Note: an unrelated `|| echo 0` is fine for CI_GREEN, where 0 means
+#  "not green" — that is the safe direction.)
+PR_EPOCH_BLOCK=$(awk '/PR_UPDATED_EPOCH=/{found=1} found{print; if (/\)$|fi$/) found=0}' \
+  <<<"$SKILL_CONTENT")
+if [[ -n "$(grep -E '\|\| *echo *0\b' <<<"$PR_EPOCH_BLOCK")" ]]; then
+  echo -e "  ${RED}FAIL${NC}: SKILL.md still uses '|| echo 0' for PR_UPDATED_EPOCH (fail-OPEN regression)"
+  FAIL=$((FAIL+1))
+else
+  echo -e "  ${GREEN}PASS${NC}: PR_UPDATED_EPOCH does not fall back to 0 (fail-CLOSED)"
+  PASS=$((PASS+1))
+fi
+# Also assert that the parse-failure path is documented as leaving the issue
+# alone (fail-CLOSED).
+assert_contains "Date-parse failure documented as leave-alone" \
+  "cannot parse PR.updatedAt" "$SKILL_CONTENT"
+
+# ============================================================================
+# TC-DSAP-011: BSD/macOS date fallback present
+# ============================================================================
+echo
+echo "=== TC-DSAP-011: BSD/macOS date fallback ==="
+echo
+# `date -d` is GNU-only. Without a BSD fallback the dispatcher would
+# misbehave on macOS even after the fail-CLOSED fix.
+assert_match "macOS date -j -f fallback present" \
+  'date -[uU]? *-j -f' "$SKILL_CONTENT"
+
+# ============================================================================
+# TC-DSAP-012: Null-guard on jq-extracted PR_NUM
+# ============================================================================
+echo
+echo "=== TC-DSAP-012: PR_NUM null-guard ==="
+echo
+# Without a guard, malformed PR_INFO → PR_NUM='null' → `gh pr checks "null"`
+# 404 forever.
+assert_match "PR_NUM validated as positive integer" \
+  'PR_NUM.*=~.*\^\[0-9\]\+\$|\[\[.*PR_NUM.*\[0-9\]' "$SKILL_CONTENT"
+
+# ============================================================================
+# TC-DSAP-013: PID re-verified before SIGTERM
+# ============================================================================
+echo
+echo "=== TC-DSAP-013: PID re-verified before SIGTERM ==="
+echo
+# Mitigates PID-reuse hazard between the earlier kill -0 check and the actual
+# kill. SKILL.md must show a recheck (kill -0) inside the new branch, not just
+# at the top.
+RECHECK_COUNT=$(grep -c 'kill -0 "\$PID"' <<<"$SKILL_CONTENT" || true)
+if [[ "$RECHECK_COUNT" -ge 2 ]]; then
+  echo -e "  ${GREEN}PASS${NC}: PID is rechecked with kill -0 inside Step 5a (count=${RECHECK_COUNT})"
+  PASS=$((PASS+1))
+else
+  echo -e "  ${RED}FAIL${NC}: only ${RECHECK_COUNT} 'kill -0 \"\$PID\"' calls found (expected at least 2: liveness + pre-SIGTERM recheck)"
+  FAIL=$((FAIL+1))
+fi
+
+# ============================================================================
+# TC-DSAP-014: gh pr checks failure produces a diagnostic
+# ============================================================================
+echo
+echo "=== TC-DSAP-014: gh pr checks failure is observable ==="
+echo
+# The original `2>/dev/null || echo '[]'` discarded stderr. The fix must
+# capture it and surface it (via WARN log or stderr) so a chronic gh failure
+# is diagnosable instead of silently skipping issues forever.
+assert_contains "gh pr checks failure logged" \
+  "gh pr checks failed" "$SKILL_CONTENT"
+
 # ----------------------------------------------------------------------------
 # Summary
 # ----------------------------------------------------------------------------
