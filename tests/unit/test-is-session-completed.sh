@@ -123,6 +123,24 @@ write_log 1009 '{"type":"result"}'
 assert_returns "result missing stop_reason and terminal_reason → false" 1 is_session_completed 1009
 cleanup_log 1009
 
+# Realistic Claude log shape: result with nested usage object AND model
+# output containing `}` inside the .result string. Earlier regex
+# `\{"type":"result"[^}]*\}` would truncate at the first inner `}` and the
+# parse would fail — verifying the line-based extractor handles it.
+write_log 1010 '[autonomous-dev] 21:41:15 Resuming session: abc-123
+{"type":"result","subtype":"success","is_error":false,"duration_ms":138004,"num_turns":31,"result":"Done. The fix is `{...}` and the test passes.","stop_reason":"end_turn","session_id":"abc-123","total_cost_usd":0.33,"usage":{"input_tokens":168,"output_tokens":3982,"cache_creation":{"ephemeral_1h_input_tokens":0}},"permission_denials":[],"terminal_reason":"completed","uuid":"xyz"}
+[autonomous-dev] 21:44:01 Agent exited with code: 0'
+assert_returns "realistic Claude shape with nested usage and {} in result string → true" 0 is_session_completed 1010
+cleanup_log 1010
+
+# Realistic shape, but is_error=true (api_error_status=400) and a non-end_turn
+# stop. The wrapper logged this with `prompt_too_long` terminal_reason.
+# Resume against THIS terminal state should still fail the gate (it's a
+# retry-worthy condition, not a true completion).
+write_log 1011 '{"type":"result","subtype":"success","is_error":true,"api_error_status":400,"result":"Prompt is too long","stop_reason":"stop_sequence","session_id":"abc","usage":{"input_tokens":0},"terminal_reason":"prompt_too_long"}'
+assert_returns "is_error=true with prompt_too_long → false (legit retry case)" 1 is_session_completed 1011
+cleanup_log 1011
+
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== Summary ==="

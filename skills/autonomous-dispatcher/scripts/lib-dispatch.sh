@@ -211,18 +211,24 @@ is_session_completed() {
   local log_file="/tmp/agent-${PROJECT_ID}-issue-${issue_num}.log"
   [ -r "$log_file" ] || return 1
 
-  # Pull the last well-formed top-level JSON object that looks like a result
-  # or assistant turn. Claude --output-format json emits exactly one final
-  # `{"type":"result", ...}` object on clean exit; on crash there may be
-  # partial JSON which jq -e rejects.
-  local last_obj
-  last_obj=$(grep -oE '\{"type":"result"[^}]*\}' "$log_file" 2>/dev/null | tail -1)
-  [ -n "$last_obj" ] || return 1
+  # Claude --output-format json emits one full JSON object per line, including
+  # a final `{"type":"result", ...}` with stop_reason and terminal_reason on
+  # clean exit. We must NOT regex-truncate this object — it contains nested
+  # objects (`usage`) and the model's `result` string (which routinely
+  # contains `}` inside markdown / code blocks). Instead grab the whole last
+  # `result` line and let jq parse it.
+  #
+  # Multiple result objects are possible (resume cycles): the LAST line wins.
+  # If the last result represents a non-terminal end (api_error_status set,
+  # stop_reason=stop_sequence, terminal_reason=prompt_too_long, etc.) we
+  # return false and a resume retry is still legitimate.
+  local last_line
+  last_line=$(grep '^{"type":"result"' "$log_file" 2>/dev/null | tail -1)
+  [ -n "$last_line" ] || return 1
 
-  local stop terminal
-  stop=$(jq -er '.stop_reason // empty' <<<"$last_obj" 2>/dev/null) || return 1
-  terminal=$(jq -er '.terminal_reason // empty' <<<"$last_obj" 2>/dev/null) || return 1
-  [ "$stop" = "end_turn" ] && [ "$terminal" = "completed" ]
+  local fields
+  fields=$(jq -er '"\(.stop_reason // "")|\(.terminal_reason // "")"' <<<"$last_line" 2>/dev/null) || return 1
+  [ "$fields" = "end_turn|completed" ]
 }
 
 # ---------------------------------------------------------------------------
