@@ -58,6 +58,44 @@ if [[ ! -r "$CONF" ]]; then
   exit 1
 fi
 
+# Trust gate before sourcing (CWE-94 mitigation, Q PR-78 finding):
+# `source` of an attacker-writable file executes arbitrary code as the
+# dispatcher user. Refuse to source if the file is owned by someone else
+# or is group/other-writable. Same trust model sudo/ssh-config use.
+#
+# Refuses also if the parent dir is g+w / o+w, since an attacker who can
+# rename a sibling file into the parent could swap the sentinel.
+#
+# Disabled when AUTONOMOUS_TRUST_CONF=1 (escape hatch for shared-dev
+# scenarios like dev VMs where the operator owns the conf via a different
+# uid; documented in dispatcher.conf.example).
+trust_check() {
+  local path="$1" label="$2"
+  if [[ -n "${AUTONOMOUS_TRUST_CONF:-}" ]]; then
+    return 0
+  fi
+  local owner perms parent_perms
+  owner=$(stat -c '%u' "$path" 2>/dev/null || stat -f '%u' "$path" 2>/dev/null)
+  perms=$(stat -c '%a' "$path" 2>/dev/null || stat -f '%Lp' "$path" 2>/dev/null)
+  if [[ "$owner" != "$(id -u)" && "$owner" != "0" ]]; then
+    echo "ERROR: $label at '$path' is not owned by current user or root (uid=$owner). Refusing to source. Set AUTONOMOUS_TRUST_CONF=1 to override." >&2
+    return 1
+  fi
+  # Group or other write bit set — anyone in the group (or anyone, period)
+  # can edit the file and inject code that we'd execute on the next tick.
+  if [[ -n "$perms" ]] && (( (10#$perms & 0022) != 0 )); then
+    echo "ERROR: $label at '$path' has insecure permissions ($perms). Refusing to source — chmod go-w. Set AUTONOMOUS_TRUST_CONF=1 to override." >&2
+    return 1
+  fi
+  parent_perms=$(stat -c '%a' "$(dirname "$path")" 2>/dev/null || stat -f '%Lp' "$(dirname "$path")" 2>/dev/null)
+  if [[ -n "$parent_perms" ]] && (( (10#$parent_perms & 0022) != 0 )); then
+    echo "ERROR: parent directory of '$path' is g+w or o+w ($parent_perms). Refusing to source — chmod go-w on the parent." >&2
+    return 1
+  fi
+}
+
+trust_check "$CONF" "dispatcher.conf" || exit 1
+
 # ---------------------------------------------------------------------------
 # Load PROJECTS array
 # ---------------------------------------------------------------------------

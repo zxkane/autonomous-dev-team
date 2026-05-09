@@ -50,6 +50,12 @@ assert_rc() {
 # Sandbox: copy wrapper + stub tick into a temp dir to control its lookup.
 TMPROOT=$(mktemp -d)
 trap 'rm -rf "$TMPROOT"' EXIT
+
+# /tmp is 1777 (world-writable, sticky) on every Linux distro, so the
+# wrapper's trust gate (CWE-94 mitigation) refuses to source confs under
+# it without the explicit opt-out. Tests run on /tmp because mktemp -d
+# defaults there; AUTONOMOUS_TRUST_CONF=1 disables the gate.
+export AUTONOMOUS_TRUST_CONF=1
 SANDBOX="$TMPROOT/scripts"
 mkdir -p "$SANDBOX"
 cp "$WRAPPER_SRC" "$SANDBOX/dispatcher-multi-tick.sh"
@@ -234,6 +240,35 @@ case "$(cat "$stderr_log")" in
     PASS=$((PASS + 1)) ;;
   *)
     echo -e "  ${RED}FAIL${NC}: expected 'PROJECTS array' in stderr"
+    FAIL=$((FAIL + 1)) ;;
+esac
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-MP-009: Trust gate refuses world-writable conf parent (CWE-94) ==="
+# ---------------------------------------------------------------------------
+# Q PR-78 finding: source of an attacker-writable file = arbitrary code
+# execution. Verify the trust gate fires when AUTONOMOUS_TRUST_CONF is unset
+# (default-secure). /tmp is mode 1777 → trust gate refuses → wrapper exits 1
+# with a clear stderr message.
+stderr_log="$TMPROOT/stderr-009"
+DISPATCHER_CONF="$CONF" \
+  env -u AUTONOMOUS_TRUST_CONF \
+  bash "$SANDBOX/dispatcher-multi-tick.sh" >/dev/null 2>"$stderr_log"
+rc=$?
+[ "$rc" -ne 0 ] && {
+  echo -e "  ${GREEN}PASS${NC}: trust gate rejects world-writable parent (rc=$rc)"
+  PASS=$((PASS + 1))
+} || {
+  echo -e "  ${RED}FAIL${NC}: expected non-zero rc when AUTONOMOUS_TRUST_CONF unset"
+  FAIL=$((FAIL + 1))
+}
+case "$(cat "$stderr_log")" in
+  *"insecure permissions"*|*"parent directory"*|*"not owned"*)
+    echo -e "  ${GREEN}PASS${NC}: trust-gate diagnostic in stderr"
+    PASS=$((PASS + 1)) ;;
+  *)
+    echo -e "  ${RED}FAIL${NC}: expected trust-gate diagnostic in stderr; got: $(cat "$stderr_log")"
     FAIL=$((FAIL + 1)) ;;
 esac
 

@@ -121,6 +121,20 @@ DISPATCHER_CONF="$HOME/.autonomous/dispatcher.conf" \
 
 Both are documented in SKILL.md; the multi-project form is recommended when more than one repo is in scope.
 
+## Trust gate on dispatcher.conf source (CWE-94)
+
+`source` of an operator-controlled file means arbitrary code execution as the dispatcher user. The wrapper enforces a trust gate before sourcing `dispatcher.conf`:
+
+- File must be owned by the current uid (or root).
+- File must NOT be group- or other-writable.
+- Parent directory must NOT be group- or other-writable.
+
+These are the same trust checks `sudo` and `ssh` apply to their config files. `/tmp` (mode 1777) is rejected by the parent-dir check, so operators are nudged toward `$HOME/.autonomous/dispatcher.conf` (mode 0700 home dir).
+
+Escape hatch: `AUTONOMOUS_TRUST_CONF=1` disables the gate. Documented in `dispatcher.conf.example` for shared-VM cases where the conf is owned by a different uid by design.
+
+The gate applies only to `dispatcher.conf` in this PR — per-project `autonomous.conf` files are sourced inside the subshell via `lib-config.sh::load_autonomous_conf` (existing pattern, not modified here). A follow-up PR could extend the trust gate to that path; out of scope for this change.
+
 ## What we're explicitly not doing
 
 - **Not** changing dispatcher-tick.sh's interface or any of its 5 steps.
