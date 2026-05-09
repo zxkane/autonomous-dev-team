@@ -131,17 +131,30 @@ fi
 # defense-in-depth against accidental injection from copy-paste.
 validate_inline_block() {
   local block="$1"
-  local line
+  local line lhs rhs
   while IFS= read -r line; do
     # Strip leading whitespace.
     line="${line#"${line%%[![:space:]]*}"}"
     # Allow blank lines and comments.
     [[ -z "$line" || "${line:0:1}" == "#" ]] && continue
-    # Allow `KEY=value` and `export KEY=value` (optional spaces around `=`
-    # NOT allowed — bash itself rejects that anyway).
+    # The line must look like KEY=value or `export KEY=value`. Optional
+    # spaces around `=` are NOT allowed — bash itself rejects that anyway.
     if ! [[ "$line" =~ ^(export[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*= ]]; then
       return 1
     fi
+    # Q PR-80 finding (CWE-95): the LHS check above doesn't constrain the
+    # RHS, so values like `REPO=$(malicious_command)` or `KEY=`cmd`` would
+    # pass validation and execute on `eval`. Block code-injection metachars
+    # in the value portion. `$` blocks both `$(cmd)` and `${VAR}`/`$VAR`
+    # expansion (we don't have any schema field that legitimately uses
+    # variable expansion). Backticks block legacy command substitution.
+    # `;`/`&`/`|` block chained commands. Backslash blocks line
+    # continuations and escape sequences.
+    rhs="${line#*=}"
+    case "$rhs" in
+      *'$'*|*'`'*|*';'*|*'&'*|*'|'*|*'\'*)
+        return 1 ;;
+    esac
   done <<<"$block"
   return 0
 }

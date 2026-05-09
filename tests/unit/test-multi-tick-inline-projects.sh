@@ -163,6 +163,62 @@ esac
 
 # ---------------------------------------------------------------------------
 echo ""
+echo "=== TC-EB-015b: Q PR-80 — value-side metachars rejected (CWE-95) ==="
+# ---------------------------------------------------------------------------
+# Q's finding: pre-fix, validator only checked LHS, so values like
+# `REPO=$(rm -rf /)` would pass validation and execute on eval.
+for badval in \
+  'REPO=$(echo PWNED)' \
+  'REPO=`echo PWNED`' \
+  'REPO=foo;rm -rf /' \
+  'REPO=foo&&evil' \
+  'REPO=foo|evil' \
+  'REPO=foo$VAR' \
+  'REPO=foo\nnewlinetrick' ; do
+  CONF="$TMPROOT/disp-015b.conf"
+  RECORD="$TMPROOT/record-015b"
+  : > "$RECORD"
+  printf 'PROJECTS=()\nPROJECTS+=( '\''\nPROJECT_ID=test\n%s\nEXECUTION_BACKEND=remote-aws-ssm\nSSM_INSTANCE_ID=i-x\nSSM_REMOTE_PROJECT_DIR=/data/test\nSSM_REMOTE_PROJECT_ID=test\n'\'' )\n' "$badval" > "$CONF"
+  stderr_log="$TMPROOT/stderr-015b"
+  DISPATCHER_CONF="$CONF" TICK_RECORD_FILE="$RECORD" \
+    bash "$SANDBOX/dispatcher-multi-tick.sh" >/dev/null 2>"$stderr_log"
+  rc=$?
+  if [ "$rc" -eq 0 ] && [ ! -s "$RECORD" ]; then
+    echo -e "  ${GREEN}PASS${NC}: rejected metachar value: $badval"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${NC}: did NOT reject: $badval (rc=$rc, record=$(wc -l <"$RECORD"))"
+    FAIL=$((FAIL + 1))
+  fi
+done
+
+# Sanity: a legitimate value WITHOUT metachars must still pass.
+CONF="$TMPROOT/disp-015c.conf"
+RECORD="$TMPROOT/record-015c"
+: > "$RECORD"
+cat > "$CONF" <<'EOF'
+PROJECTS=()
+PROJECTS+=( '
+PROJECT_ID=projB
+REPO=myorg/projB
+EXECUTION_BACKEND=remote-aws-ssm
+SSM_INSTANCE_ID=i-0abc123
+SSM_REMOTE_PROJECT_DIR=/data/git/projB
+SSM_REMOTE_PROJECT_ID=projB
+' )
+EOF
+DISPATCHER_CONF="$CONF" TICK_RECORD_FILE="$RECORD" \
+  bash "$SANDBOX/dispatcher-multi-tick.sh" >/dev/null 2>&1
+[ -s "$RECORD" ] && {
+  echo -e "  ${GREEN}PASS${NC}: legitimate metachar-free values still accepted"
+  PASS=$((PASS + 1))
+} || {
+  echo -e "  ${RED}FAIL${NC}: legitimate values were rejected — validator too strict"
+  FAIL=$((FAIL + 1))
+}
+
+# ---------------------------------------------------------------------------
+echo ""
 echo "=== TC-EB-016: inline block missing REPO → warn-and-skip ==="
 # ---------------------------------------------------------------------------
 CONF="$TMPROOT/disp-016.conf"
