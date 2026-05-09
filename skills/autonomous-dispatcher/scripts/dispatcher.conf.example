@@ -1,0 +1,24 @@
+# dispatcher.conf — multi-project dispatcher configuration
+#
+# Copied to:
+#   $DISPATCHER_CONF                              (env override; takes priority)
+#   $HOME/.autonomous/dispatcher.conf             (default)
+#   $XDG_CONFIG_HOME/autonomous/dispatcher.conf   (XDG fallback)
+#
+# Read by `dispatcher-multi-tick.sh`. Each cron tick iterates PROJECTS[]
+# and runs one `dispatcher-tick.sh` per project, sourcing the project's
+# own `autonomous.conf` via the AUTONOMOUS_CONF env override (#62).
+#
+# This file does NOT replace per-project `autonomous.conf` — REPO,
+# PROJECT_ID, DISPATCHER_APP_ID, MAX_CONCURRENT, etc. all stay there.
+# Per-project values are sourced fresh in a subshell each iteration so
+# settings cannot leak between projects.
+
+# Required: paths to per-project `autonomous.conf` files.
+# Each path is sourced in a subshell before running one tick for that
+# project. Missing paths cause that project's tick to be skipped with a
+# warning — they do NOT block other projects.
+PROJECTS=(
+  "/data/git/myrepo-a/scripts/autonomous.conf"
+  "/data/git/myrepo-b/scripts/autonomous.conf"
+)
