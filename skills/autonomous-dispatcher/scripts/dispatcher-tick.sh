@@ -1,0 +1,275 @@
+#!/bin/bash
+# dispatcher-tick.sh — single entry point for one autonomous-dispatcher tick.
+#
+# Replaces the 224 lines of bash that used to live in
+# `skills/autonomous-dispatcher/SKILL.md` with a single script the dispatcher
+# agent calls once per cron cycle. Pure refactor (PR-3) — behavior identical
+# to the prior SKILL.md tick.
+#
+# Usage: bash dispatcher-tick.sh
+#   Reads autonomous.conf via lib-dispatch.sh (sourced).
+#   Maintains JUST_DISPATCHED tick-local across Steps 2/3/4 → Step 5.
+#
+# See docs/pipeline/dispatcher-flow.md for the spec.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+
+# Load config from autonomous.conf — same priority order as lib-agent.sh.
+# Set up before sourcing lib-dispatch.sh because lib-dispatch.sh enforces
+# REPO/REPO_OWNER/PROJECT_ID via `: "${VAR:?...}"`.
+if [[ -n "${AUTONOMOUS_CONF:-}" ]] && [[ -f "${AUTONOMOUS_CONF}" ]]; then
+  # shellcheck disable=SC1090
+  source "${AUTONOMOUS_CONF}"
+elif [[ -f "${SCRIPT_DIR}/autonomous.conf" ]]; then
+  # shellcheck disable=SC1091
+  source "${SCRIPT_DIR}/autonomous.conf"
+elif [[ -f "${SCRIPT_DIR}/../../../scripts/autonomous.conf" ]]; then
+  # shellcheck disable=SC1091
+  source "${SCRIPT_DIR}/../../../scripts/autonomous.conf"
+fi
+
+# shellcheck source=lib-dispatch.sh
+source "${SCRIPT_DIR}/lib-dispatch.sh"
+
+: "${PROJECT_DIR:?PROJECT_DIR must be set in autonomous.conf}"
+
+log() { echo "[dispatcher-tick] $(date -u +%H:%M:%S) $*"; }
+
+# Tick-local state. JUST_DISPATCHED holds issue numbers dispatched in
+# Steps 2/3/4 of this tick, so Step 5 can skip them ([INV-09]).
+JUST_DISPATCHED=()
+
+# ---------------------------------------------------------------------------
+# Step 1: Concurrency gate
+# ---------------------------------------------------------------------------
+ACTIVE=$(count_active)
+if [ "$ACTIVE" -ge "$MAX_CONCURRENT" ]; then
+  log "Concurrency limit reached ($ACTIVE/$MAX_CONCURRENT). Aborting tick."
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Step 2: scan-new
+# ---------------------------------------------------------------------------
+log "Step 2: scanning for new autonomous issues..."
+new_issues=$(list_new_issues)
+new_count=$(jq 'length' <<<"$new_issues")
+log "  found $new_count new issue(s)"
+
+for i in $(seq 0 $((new_count - 1))); do
+  ACTIVE=$(count_active)
+  if [ "$ACTIVE" -ge "$MAX_CONCURRENT" ]; then
+    log "  concurrency reached during scan-new ($ACTIVE/$MAX_CONCURRENT) — stopping"
+    break
+  fi
+
+  issue_num=$(jq -r ".[$i].number" <<<"$new_issues")
+
+  if ! check_deps_resolved "$issue_num"; then
+    log "  issue #${issue_num} has unresolved dependencies — skipping silently"
+    continue
+  fi
+
+  log "  dispatching dev-new for issue #${issue_num}"
+  label_swap "$issue_num" "" "in-progress"
+  gh issue comment "$issue_num" --repo "$REPO" \
+    --body "Dispatching autonomous development..."
+  bash "$PROJECT_DIR/scripts/dispatch-local.sh" dev-new "$issue_num"
+  JUST_DISPATCHED+=("$issue_num")
+done
+
+# ---------------------------------------------------------------------------
+# Step 3: scan-pending-review
+# ---------------------------------------------------------------------------
+log "Step 3: scanning for issues pending review..."
+pending_review=$(list_pending_review)
+pr_count=$(jq 'length' <<<"$pending_review")
+log "  found $pr_count pending-review issue(s)"
+
+for i in $(seq 0 $((pr_count - 1))); do
+  ACTIVE=$(count_active)
+  if [ "$ACTIVE" -ge "$MAX_CONCURRENT" ]; then
+    log "  concurrency reached during scan-pending-review ($ACTIVE/$MAX_CONCURRENT) — stopping"
+    break
+  fi
+
+  issue_num=$(jq -r ".[$i].number" <<<"$pending_review")
+
+  log "  dispatching review for issue #${issue_num}"
+  label_swap "$issue_num" "pending-review" "reviewing"
+  gh issue comment "$issue_num" --repo "$REPO" \
+    --body "Dispatching autonomous review..."
+  bash "$PROJECT_DIR/scripts/dispatch-local.sh" review "$issue_num"
+  JUST_DISPATCHED+=("$issue_num")
+done
+
+# ---------------------------------------------------------------------------
+# Step 4: scan-pending-dev (resume)
+# ---------------------------------------------------------------------------
+log "Step 4: scanning for issues pending dev resume..."
+pending_dev=$(list_pending_dev)
+pd_count=$(jq 'length' <<<"$pending_dev")
+log "  found $pd_count pending-dev issue(s)"
+
+for i in $(seq 0 $((pd_count - 1))); do
+  ACTIVE=$(count_active)
+  if [ "$ACTIVE" -ge "$MAX_CONCURRENT" ]; then
+    log "  concurrency reached during scan-pending-dev ($ACTIVE/$MAX_CONCURRENT) — stopping"
+    break
+  fi
+
+  issue_num=$(jq -r ".[$i].number" <<<"$pending_dev")
+
+  retry_count=$(count_retries "$issue_num")
+  if [ "$retry_count" -ge "$MAX_RETRIES" ]; then
+    log "  issue #${issue_num} retry exhausted ($retry_count/$MAX_RETRIES) — marking stalled"
+    mark_stalled "$issue_num"
+    continue
+  fi
+
+  session_id=$(extract_dev_session_id "$issue_num")
+  log "  dispatching dev-resume for issue #${issue_num} (session: ${session_id:-<none>})"
+  label_swap "$issue_num" "pending-dev" "in-progress"
+  gh issue comment "$issue_num" --repo "$REPO" \
+    --body "Resuming development (session: ${session_id})..."
+  bash "$PROJECT_DIR/scripts/dispatch-local.sh" dev-resume "$issue_num" "$session_id"
+  JUST_DISPATCHED+=("$issue_num")
+done
+
+# ---------------------------------------------------------------------------
+# Step 5: stale detection
+# ---------------------------------------------------------------------------
+log "Step 5: stale detection..."
+
+# Export JUST_DISPATCHED so was_just_dispatched() in lib-dispatch.sh can read.
+JUST_DISPATCHED_STR="${JUST_DISPATCHED[*]:-}"
+export JUST_DISPATCHED="$JUST_DISPATCHED_STR"
+
+candidates=$(list_stale_candidates)
+cand_count=$(jq 'length' <<<"$candidates")
+log "  $cand_count active issue(s) to evaluate"
+
+for i in $(seq 0 $((cand_count - 1))); do
+  issue_num=$(jq -r ".[$i].number" <<<"$candidates")
+  labels=$(jq -r ".[$i].labels[].name" <<<"$candidates")
+
+  # Skip freshly dispatched ([INV-09]).
+  if was_just_dispatched "$issue_num"; then
+    log "  issue #${issue_num} just dispatched this tick — skipping"
+    continue
+  fi
+
+  # Determine which active label and corresponding PID file kind.
+  if grep -q "^in-progress$" <<<"$labels"; then
+    kind="issue"
+  elif grep -q "^reviewing$" <<<"$labels"; then
+    kind="review"
+  else
+    # Should not happen given list_stale_candidates filter, but defensive.
+    continue
+  fi
+
+  if pid_alive "$kind" "$issue_num"; then
+    # ALIVE branch — only Step 5a applies (and only for in-progress; review
+    # wrappers are bounded by their own polling, no SIGTERM logic).
+    if [ "$kind" != "issue" ]; then
+      continue
+    fi
+
+    pid=$(get_pid "$kind" "$issue_num")
+
+    # Step 5a: ALIVE + PR ready for review.
+    pr_info=$(fetch_pr_for_issue "$issue_num" "number,body,updatedAt")
+    if [ -z "$pr_info" ]; then
+      # No PR — agent still developing, leave alone.
+      continue
+    fi
+
+    pr_num=$(jq -r '.number // empty' <<<"$pr_info")
+    pr_updated_at=$(jq -r '.updatedAt // empty' <<<"$pr_info")
+
+    # Validate jq outputs (schema drift / partial JSON guard).
+    if ! [[ "$pr_num" =~ ^[0-9]+$ ]] || [ -z "$pr_updated_at" ]; then
+      echo "WARN: malformed PR info for issue ${issue_num} (PR_NUM='$pr_num', PR_UPDATED_AT='$pr_updated_at'); leaving as-is" >&2
+      continue
+    fi
+
+    if ! ci_is_green "$pr_num"; then
+      # CI not green — agent still working.
+      continue
+    fi
+
+    idle_seconds=$(pr_idle_seconds "$pr_updated_at")
+    if [ -z "$idle_seconds" ]; then
+      echo "WARN: cannot parse PR.updatedAt='${pr_updated_at}' for issue ${issue_num}; leaving as-is" >&2
+      continue
+    fi
+
+    # [INV-10] strict > 300s.
+    if [ "$idle_seconds" -le 300 ]; then
+      # Recent activity — agent may be cleaning up. Leave alone.
+      continue
+    fi
+
+    # Re-verify PID is still alive (could have exited between the original
+    # probe and now; if reassigned we'd SIGTERM an unrelated process).
+    if ! kill -0 "$pid" 2>/dev/null; then
+      echo "INFO: wrapper PID ${pid} for issue ${issue_num} exited between checks; deferring to next cycle" >&2
+      continue
+    fi
+
+    # Fire SIGTERM and transition to pending-review.
+    if kill "$pid" 2>/dev/null; then
+      kill_note="Sent SIGTERM to PID ${pid}"
+    else
+      kill_note="PID ${pid} already gone"
+    fi
+    gh issue comment "$issue_num" --repo "$REPO" \
+      --body "Dev process still alive but PR #${pr_num} is ready (all CI checks passed, idle ${idle_seconds}s). ${kill_note}. Moving to pending-review."
+    label_swap "$issue_num" "in-progress" "pending-review"
+
+  else
+    # DEAD branch — Step 5b.
+    if [ "$kind" = "issue" ]; then
+      # DEAD + in-progress: branch on whether a PR exists, and if it does,
+      # branch again on whether its HEAD has new commits since the last
+      # review trailer ([INV-04], [INV-07]).
+      pr_info=$(fetch_pr_for_issue "$issue_num" "number,body,headRefOid")
+
+      if [ -z "$pr_info" ]; then
+        # No PR — dev didn't finish, retry.
+        gh issue comment "$issue_num" --repo "$REPO" \
+          --body "Task appears to have crashed (no PR found). Moving to pending-dev for retry."
+        label_swap "$issue_num" "in-progress" "pending-dev"
+        continue
+      fi
+
+      current_head=$(jq -r '.headRefOid // empty' <<<"$pr_info")
+      last_head=$(last_reviewed_head "$issue_num")
+
+      if [ -n "$last_head" ] && [ -n "$current_head" ] && [ "$current_head" = "$last_head" ]; then
+        # No new commits since last review — retry dev so it can act on
+        # existing review feedback. ([INV-06] keyword guard: avoid
+        # "crashed" / "process not found" so Step 4a doesn't count this.)
+        gh issue comment "$issue_num" --repo "$REPO" \
+          --body "Dev process exited (no new commits since last review at \`${last_head}\`). Moving to pending-dev for retry."
+        label_swap "$issue_num" "in-progress" "pending-dev"
+      else
+        # PR has new commits OR no prior trailer — let review assess
+        # ([INV-07] empty-trailer fallthrough).
+        gh issue comment "$issue_num" --repo "$REPO" \
+          --body "Dev process exited (PR found). Moving to pending-review for assessment."
+        label_swap "$issue_num" "in-progress" "pending-review"
+      fi
+    else
+      # DEAD + reviewing: review wrapper crashed without its own trap firing.
+      gh issue comment "$issue_num" --repo "$REPO" \
+        --body "Review process appears to have crashed. Moving to pending-dev for retry."
+      label_swap "$issue_num" "reviewing" "pending-dev"
+    fi
+  fi
+done
+
+log "Tick complete. Dispatched: ${JUST_DISPATCHED[*]:-<none>}"

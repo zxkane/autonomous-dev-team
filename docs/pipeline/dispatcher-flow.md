@@ -2,7 +2,7 @@
 
 The dispatcher runs as a cron job (default every 5 minutes) and is **stateless across ticks**. Each tick reads the current label set on every `autonomous` issue, reads PID files for any wrappers it might be tracking, makes decisions, dispatches subprocesses, and updates labels. There is no in-memory carry-over from the previous tick.
 
-The behavior described here lives in `skills/autonomous-dispatcher/SKILL.md` (the prompt the dispatcher agent reads + executes). PR-3 will move this logic into a `dispatcher-tick.sh` script + `lib-dispatch.sh`; for now the SKILL.md is the source of truth.
+The behavior described here is implemented by `skills/autonomous-dispatcher/scripts/dispatcher-tick.sh` (the single entry point) backed by `skills/autonomous-dispatcher/scripts/lib-dispatch.sh` (composable helpers — one function per gh/jq query). The dispatcher agent reads `SKILL.md` and runs `bash "$PROJECT_DIR/scripts/dispatcher-tick.sh"`; that script does everything described below in one process. Function names cited below (e.g. `count_active`, `check_deps_resolved`) are defined in `lib-dispatch.sh`.
 
 ## Tick lifecycle
 
@@ -27,6 +27,8 @@ flowchart TD
 
 ## Step 1: concurrency gate
 
+Implementation: `lib-dispatch.sh::count_active`.
+
 ```
 ACTIVE = count of issues labeled autonomous AND (in-progress OR reviewing)
 if ACTIVE >= MAX_CONCURRENT: abort tick
@@ -37,6 +39,8 @@ if ACTIVE >= MAX_CONCURRENT: abort tick
 If the cap is hit, the tick aborts entirely — no Step 2/3/4/5. This is intentional: dispatching new work while at the cap would just produce wrappers that immediately collide with `acquire_pid_guard` or starve on quota.
 
 ## Step 2: scan-new
+
+Implementation: `lib-dispatch.sh::list_new_issues`, `check_deps_resolved`, `label_swap`.
 
 Find issues labeled `autonomous` with **no other active state label** (no `in-progress`, `pending-review`, `reviewing`, `pending-dev`, `stalled`, `approved`).
 
@@ -53,6 +57,8 @@ The issue is now in `in-progress`; the dev wrapper is launching via `nohup`. Ste
 
 ## Step 3: scan-pending-review
 
+Implementation: `lib-dispatch.sh::list_pending_review`, `label_swap`.
+
 Find issues labeled `autonomous` AND `pending-review` AND NOT `reviewing`.
 
 For each match, in order:
@@ -63,6 +69,8 @@ For each match, in order:
 4. **Append to `JUST_DISPATCHED`.**
 
 ## Step 4: scan-pending-dev
+
+Implementation: `lib-dispatch.sh::list_pending_dev`, `count_retries`, `mark_stalled`, `extract_dev_session_id`, `label_swap`.
 
 Find issues labeled `autonomous` AND `pending-dev`.
 
@@ -105,6 +113,8 @@ If no session-id can be extracted, the resume cannot proceed. Today, the dispatc
 4. **Append to `JUST_DISPATCHED`.**
 
 ## Step 5: stale detection
+
+Implementation: `lib-dispatch.sh::list_stale_candidates`, `was_just_dispatched`, `pid_alive`, `get_pid`, `fetch_pr_for_issue`, `ci_is_green`, `pr_idle_seconds`, `last_reviewed_head`, `label_swap`.
 
 Find issues labeled `in-progress` OR `reviewing`.
 

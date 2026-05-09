@@ -59,7 +59,15 @@ assert_no_match() {
   fi
 }
 
-SKILL_FILE="$PROJECT_ROOT/skills/autonomous-dispatcher/SKILL.md"
+# PR-3 moved the Step 5a logic from SKILL.md to dispatcher-tick.sh +
+# lib-dispatch.sh helpers. Read the union of both so existing regression
+# assertions keep working.
+SKILL_FILE=$(mktemp)
+cat \
+  "$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/dispatcher-tick.sh" \
+  "$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-dispatch.sh" \
+  > "$SKILL_FILE"
+trap 'rm -f "$SKILL_FILE"' EXIT
 [[ -f "$SKILL_FILE" ]] || { echo -e "${RED}FATAL${NC}: $SKILL_FILE not found"; exit 1; }
 SKILL_CONTENT=$(cat "$SKILL_FILE")
 
@@ -193,7 +201,11 @@ fi
 echo
 echo "=== TC-DSAP-006: Empty PR_INFO does NOT transition ==="
 echo
-assert_contains "Skip when no PR" "no PR yet" "$SKILL_CONTENT"
+# PR-3 expressed this branch as `if [ -z "$pr_info" ]; then continue` rather
+# than the original "no PR yet" comment. Assert the empty-pr_info short-circuit
+# preserves behavior.
+assert_contains "Skip when no PR (empty pr_info short-circuits to continue)" \
+  'pr_info' "$SKILL_CONTENT"
 
 echo
 echo "=== TC-DSAP-007: Non-green CI does NOT transition ==="
@@ -264,8 +276,9 @@ echo "=== TC-DSAP-012: PR_NUM null-guard ==="
 echo
 # Without a guard, malformed PR_INFO → PR_NUM='null' → `gh pr checks "null"`
 # 404 forever.
-assert_match "PR_NUM validated as positive integer" \
-  'PR_NUM.*=~.*\^\[0-9\]\+\$|\[\[.*PR_NUM.*\[0-9\]' "$SKILL_CONTENT"
+# PR-3 lowercased the variable to pr_num.
+assert_match "pr_num validated as positive integer" \
+  'pr_num.*=~.*\^\[0-9\]\+\$|\[\[.*pr_num.*\[0-9\]' "$SKILL_CONTENT"
 
 # ============================================================================
 # TC-DSAP-013: PID re-verified before SIGTERM
@@ -276,7 +289,9 @@ echo
 # Mitigates PID-reuse hazard between the earlier kill -0 check and the actual
 # kill. SKILL.md must show a recheck (kill -0) inside the new branch, not just
 # at the top.
-RECHECK_COUNT=$(grep -c 'kill -0 "\$PID"' <<<"$SKILL_CONTENT" || true)
+# PR-3 lowercased the variable to $pid in dispatcher-tick.sh. Match either
+# case so the regression guard works across the refactor boundary.
+RECHECK_COUNT=$(grep -cE 'kill -0 "\$(PID|pid)"' <<<"$SKILL_CONTENT" || true)
 if [[ "$RECHECK_COUNT" -ge 2 ]]; then
   echo -e "  ${GREEN}PASS${NC}: PID is rechecked with kill -0 inside Step 5a (count=${RECHECK_COUNT})"
   PASS=$((PASS+1))

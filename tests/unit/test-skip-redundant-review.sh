@@ -50,7 +50,14 @@ assert_match() {
 }
 
 REVIEW_SCRIPT="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/autonomous-review.sh"
-SKILL_FILE="$PROJECT_ROOT/skills/autonomous-dispatcher/SKILL.md"
+# PR-3 moved the Step 5b SHA-comparison logic from SKILL.md to
+# lib-dispatch.sh::last_reviewed_head + dispatcher-tick.sh DEAD branch.
+SKILL_FILE=$(mktemp)
+cat \
+  "$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/dispatcher-tick.sh" \
+  "$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-dispatch.sh" \
+  > "$SKILL_FILE"
+trap 'rm -f "$SKILL_FILE"' EXIT
 
 [[ -f "$REVIEW_SCRIPT" ]] || { echo -e "${RED}FATAL${NC}: $REVIEW_SCRIPT not found"; exit 1; }
 [[ -f "$SKILL_FILE"   ]] || { echo -e "${RED}FATAL${NC}: $SKILL_FILE not found";   exit 1; }
@@ -153,7 +160,11 @@ echo
 echo "=== TC-DSRR-006: Empty LAST_REVIEWED_HEAD → pending-review ==="
 echo
 
-assert_contains "SKILL.md notes empty-trailer fallback" "no prior review trailer" "$SKILL_CONTENT"
+# PR-3 moved the empty-trailer prose into docs/pipeline/dispatcher-flow.md.
+# The behavior is preserved via dispatcher-tick.sh DEAD branch logic; assert
+# that branch exists.
+assert_contains "empty-trailer fallthrough preserved (routes to pending-review)" \
+  'no prior trailer' "$SKILL_CONTENT"
 
 # ============================================================================
 # TC-DSRR-007: Trailer marker is jq/regex-greppable as documented
