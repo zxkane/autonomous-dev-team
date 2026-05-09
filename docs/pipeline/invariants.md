@@ -10,7 +10,7 @@ Each invariant has the same shape:
 - **Consumer** — which actor relies on it
 - **Test** — where it's verified, or "TODO: add test"
 
-Three invariants below ([INV-12](#inv-12-resume-only-against-unfinished-sessions), [INV-13](#inv-13-wall-clock-cap-on-agent-invocations), [INV-14](#inv-14-lib-agentsh-config-lookup-honors-symlink-vendor-pattern)) describe behavior the **code does not yet enforce** — they document the rule we will add as part of PR-4 and PR-5. They are explicitly marked.
+Some invariants below describe behavior the **code does not yet enforce** — they are explicitly marked with `Status: NOT YET ENFORCED` or `Status: DOCUMENTED, NOT YET FIXED`. PR-4 enforced INV-11, INV-14, and INV-16. INV-12, INV-13, and INV-15 remain to be enforced in subsequent PRs.
 
 ---
 
@@ -140,10 +140,10 @@ The cutoff timestamp falls back to epoch (1970-01-01) for issues that have never
 
 **Why**: When a `## Dependencies` section references a PR that has been merged, `gh issue view N --json state` returns `state: "MERGED"`. A naive `state != "CLOSED"` check leaves the dependent issue blocked forever (#61).
 
-**Producer**: dispatcher Step 2.
+**Producer**: dispatcher Step 2 (`lib-dispatch.sh::check_deps_resolved`).
 **Consumer**: itself.
-**Status**: **NOT YET ENFORCED.** Current SKILL.md uses `state != "CLOSED"`. Fix scheduled for **PR-4** alongside #58.
-**Test**: will be added when fix lands.
+**Status**: **ENFORCED** in PR-4 (closes #61). The check now reads `state ∉ {"CLOSED", "MERGED"}`.
+**Test**: `tests/unit/test-check-deps-resolved.sh` covers single-CLOSED, single-MERGED, single-OPEN, and multi-dep mixed-state scenarios.
 
 ## INV-12: Resume only against unfinished sessions
 
@@ -167,16 +167,16 @@ The cutoff timestamp falls back to epoch (1970-01-01) for issues that have never
 **Status**: **NOT YET ENFORCED.** Fix scheduled for **PR-5**.
 **Test**: will be added when fix lands.
 
-## INV-14: `lib-agent.sh` config lookup honors symlink-vendor pattern
+## INV-14: Config lookup honors symlink-vendor pattern
 
-**Rule**: `lib-agent.sh` (and `lib-auth.sh`) MUST resolve their own dir using `${BASH_SOURCE[0]}` directly, NOT `readlink -f`. The autonomous.conf fallback search path MUST cover the symlink-vendor layout (project's `scripts/lib-agent.sh` is a symlink into `.claude/skills/.../lib-agent.sh`).
+**Rule**: Scripts that load `autonomous.conf` MUST resolve their own dir using `${BASH_SOURCE[0]:-$0}` directly, NOT `readlink -f`. The autonomous.conf fallback search path MUST cover the symlink-vendor layout (project's `scripts/lib-agent.sh` is a symlink into `.claude/skills/.../lib-agent.sh`).
 
 **Why**: When projects vendor scripts as symlinks, `readlink -f` resolves to the skill installation dir — but `autonomous.conf` lives in the project's `scripts/`, not in the skill installation. The lookup misses, the wrapper exits at `: "${REPO:?Set REPO in autonomous.conf}"`, the dispatcher sees crash → eventually marks stalled (#58).
 
-**Producer**: `lib-agent.sh`, `lib-auth.sh`.
-**Consumer**: every wrapper that sources them.
-**Status**: **NOT YET ENFORCED.** Fix scheduled for **PR-4**.
-**Test**: will be added when fix lands — should stage a fake project with the symlink layout and assert `REPO` is non-empty after sourcing.
+**Producer**: `lib-config.sh::load_autonomous_conf` (consolidated in PR-4 from three byte-identical inline blocks that previously lived in `lib-agent.sh`, `lib-auth.sh`, and `dispatcher-tick.sh`).
+**Consumer**: every wrapper / dispatcher path that sources `lib-config.sh`.
+**Status**: **ENFORCED** in PR-4 (closes #58). The shared helper uses `${BASH_SOURCE[0]:-$0}` (no `readlink -f`) and falls back to `${PROJECT_DIR}/scripts/autonomous.conf` (NOT the broken `../../../scripts/`).
+**Test**: `tests/unit/test-bash-source-empty.sh` (TC-CONTENT-003) and `tests/unit/test-symlink-resolution.sh` (TC-CONTENT-006/007) assert no callsite uses `readlink -f` and that all three callsites delegate to `lib-config.sh::load_autonomous_conf`.
 
 ## INV-15: Step 5a SIGTERM race is non-deterministic
 
@@ -190,6 +190,20 @@ The cutoff timestamp falls back to epoch (1970-01-01) for issues that have never
 **Consumer**: future dispatcher tick that has to pick up the resulting state.
 **Status**: **DOCUMENTED, NOT YET FIXED.** Possible fixes: (a) install a SIGTERM trap in the dev wrapper that flips a `RECEIVED_SIGTERM` flag, then `cleanup()` treats `flag && PR_EXISTS` as exit-0-with-PR ⇒ `pending-review`. (b) Or: have Step 5a NOT write labels itself — just SIGTERM and let the trap handle it, after fixing (a). Both are out of scope for the docs-only PRs and will be tracked as a separate issue.
 **Test**: future test that simulates Step 5a + a wrapper that captures SIGTERM, asserts final label is `pending-review`.
+
+## INV-16: jq named-group regex uses Oniguruma syntax, not Python
+
+**Rule**: Any jq regex that names a capture group MUST use Oniguruma syntax `(?<name>...)`, NOT Python-style `(?P<name>...)`. jq 1.6+ uses Oniguruma; the Python-style form errors with `Regex failure: undefined group option`.
+
+**Why**: surfaced by PR-3's unit testing of `extract_dev_session_id` (#70). The original SKILL.md regex used `(?P<id>...)` — every `gh issue view ... -q '...capture(...)...'` call returned exit 5 with the regex error in stderr, and the `// empty` fallback did NOT catch it (jq exits before `//` is evaluated). In production this meant `extract_dev_session_id` always returned empty, and `dispatch-local.sh dev-resume <issue> ""` either failed input validation or silently fell back to a fresh session — i.e. resume mode was probably never resuming context across review cycles.
+
+**Producer**: any helper in `lib-dispatch.sh` (or future jq-using code) that captures a named group. Today: `extract_dev_session_id`, `last_reviewed_head`. Both use the correct `(?<...>)` after PR-4.
+
+**Consumer**: dispatcher Step 4 (which calls `extract_dev_session_id` to find the session-id to resume) and Step 5b (which calls `last_reviewed_head` to compare against the current PR HEAD).
+
+**Status**: **ENFORCED** in PR-4 (closes #70). Both helpers verified.
+
+**Test**: `tests/unit/test-lib-dispatch.sh` asserts that `extract_dev_session_id` returns `abc-123-def` for a comment containing `Dev Session ID: \`abc-123-def\`` (was previously asserting empty under the broken regex).
 
 ---
 

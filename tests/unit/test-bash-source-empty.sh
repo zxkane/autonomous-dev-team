@@ -159,23 +159,52 @@ echo ""
 LIB_AGENT="$DISPATCHER_SCRIPTS/lib-agent.sh"
 LIB_AUTH="$DISPATCHER_SCRIPTS/lib-auth.sh"
 
-echo "TC-CONTENT-001: lib-agent.sh supports AUTONOMOUS_CONF"
+# PR-4 (#58 fix) consolidated AUTONOMOUS_CONF / BASH_SOURCE handling into
+# lib-config.sh::load_autonomous_conf. lib-agent.sh and lib-auth.sh now
+# delegate via `source lib-config.sh; load_autonomous_conf "$dir"`.
+LIB_CONFIG="$DISPATCHER_SCRIPTS/lib-config.sh"
+
+echo "TC-CONTENT-001: lib-agent.sh delegates to lib-config.sh"
 if [[ -f "$LIB_AGENT" ]]; then
   CONTENT=$(cat "$LIB_AGENT")
-  assert_contains "AUTONOMOUS_CONF check in lib-agent.sh" 'AUTONOMOUS_CONF' "$CONTENT"
+  assert_contains "lib-agent.sh sources lib-config.sh" 'lib-config.sh' "$CONTENT"
+  assert_contains "lib-agent.sh calls load_autonomous_conf" 'load_autonomous_conf' "$CONTENT"
   assert_contains "BASH_SOURCE fallback in lib-agent.sh" 'BASH_SOURCE[0]:-$0' "$CONTENT"
 else
   echo -e "  ${RED}FAIL${NC}: lib-agent.sh not found"
   ((FAIL++))
 fi
 
-echo "TC-CONTENT-002: lib-auth.sh supports AUTONOMOUS_CONF"
+echo "TC-CONTENT-002: lib-auth.sh delegates to lib-config.sh"
 if [[ -f "$LIB_AUTH" ]]; then
   CONTENT=$(cat "$LIB_AUTH")
-  assert_contains "AUTONOMOUS_CONF check in lib-auth.sh" 'AUTONOMOUS_CONF' "$CONTENT"
+  assert_contains "lib-auth.sh sources lib-config.sh" 'lib-config.sh' "$CONTENT"
+  assert_contains "lib-auth.sh calls load_autonomous_conf" 'load_autonomous_conf' "$CONTENT"
   assert_contains "BASH_SOURCE fallback in lib-auth.sh" 'BASH_SOURCE[0]:-$0' "$CONTENT"
 else
   echo -e "  ${RED}FAIL${NC}: lib-auth.sh not found"
+  ((FAIL++))
+fi
+
+echo "TC-CONTENT-003: lib-config.sh implements the 3-priority lookup (#58)"
+if [[ -f "$LIB_CONFIG" ]]; then
+  CONTENT=$(cat "$LIB_CONFIG")
+  assert_contains "lib-config.sh defines load_autonomous_conf" 'load_autonomous_conf()' "$CONTENT"
+  assert_contains "lib-config.sh AUTONOMOUS_CONF priority 1" 'AUTONOMOUS_CONF' "$CONTENT"
+  assert_contains "lib-config.sh script-local priority 2" 'script_dir' "$CONTENT"
+  assert_contains "lib-config.sh PROJECT_DIR fallback priority 3" 'PROJECT_DIR' "$CONTENT"
+  # The whole point of #58: do NOT call readlink -f. Strip comments
+  # before grepping so prose mentioning the disallowed call (e.g., a
+  # commit-message reference) doesn't trigger a false positive.
+  if grep -v '^[[:space:]]*#' "$LIB_CONFIG" | grep -q 'readlink -f'; then
+    echo -e "  ${RED}FAIL${NC}: lib-config.sh contains a readlink -f call outside comments (#58 regression)"
+    ((FAIL++))
+  else
+    echo -e "  ${GREEN}PASS${NC}: lib-config.sh does not call readlink -f (#58 mitigation in place)"
+    ((PASS++))
+  fi
+else
+  echo -e "  ${RED}FAIL${NC}: lib-config.sh not found"
   ((FAIL++))
 fi
 

@@ -275,19 +275,38 @@ else
   ((FAIL++))
 fi
 
-echo "TC-CONTENT-006: lib-agent.sh has config fallback"
+echo "TC-CONTENT-006: lib-agent.sh delegates config-loading to lib-config.sh (#58)"
+# Was: assert presence of '../../../scripts/autonomous.conf' fallback inline.
+# After PR-4 / #58: that broken-depth fallback is replaced by lib-config.sh's
+# correct PROJECT_DIR-based fallback. Assert lib-agent.sh just delegates.
 if [[ -f "$LIB_AGENT" ]]; then
   LIB_CONTENT=$(cat "$LIB_AGENT")
-  assert_contains "Fallback config path in lib-agent.sh" '../../../scripts/autonomous.conf' "$LIB_CONTENT"
+  assert_contains "lib-agent.sh sources lib-config.sh" 'lib-config.sh' "$LIB_CONTENT"
+  assert_contains "lib-agent.sh calls load_autonomous_conf" 'load_autonomous_conf' "$LIB_CONTENT"
+  if grep -v '^[[:space:]]*#' "$LIB_AGENT" | grep -q 'readlink -f'; then
+    echo -e "  ${RED}FAIL${NC}: lib-agent.sh has a readlink -f call outside comments (#58 regression)"
+    ((FAIL++))
+  else
+    echo -e "  ${GREEN}PASS${NC}: lib-agent.sh has no readlink -f call (#58 fix in place)"
+    ((PASS++))
+  fi
 else
   echo -e "  ${RED}FAIL${NC}: lib-agent.sh not found"
   ((FAIL++))
 fi
 
-echo "TC-CONTENT-007: lib-auth.sh has config fallback"
+echo "TC-CONTENT-007: lib-auth.sh delegates config-loading to lib-config.sh (#58)"
 if [[ -f "$LIB_AUTH" ]]; then
   LIB_AUTH_CONTENT=$(cat "$LIB_AUTH")
-  assert_contains "Fallback config path in lib-auth.sh" '../../../scripts/autonomous.conf' "$LIB_AUTH_CONTENT"
+  assert_contains "lib-auth.sh sources lib-config.sh" 'lib-config.sh' "$LIB_AUTH_CONTENT"
+  assert_contains "lib-auth.sh calls load_autonomous_conf" 'load_autonomous_conf' "$LIB_AUTH_CONTENT"
+  if grep -qE '^[^#]*readlink -f' "$LIB_AUTH"; then
+    echo -e "  ${RED}FAIL${NC}: lib-auth.sh has a readlink -f call (#58 regression)"
+    ((FAIL++))
+  else
+    echo -e "  ${GREEN}PASS${NC}: lib-auth.sh has no readlink -f call (#58 fix in place)"
+    ((PASS++))
+  fi
 else
   echo -e "  ${RED}FAIL${NC}: lib-auth.sh not found"
   ((FAIL++))

@@ -46,6 +46,7 @@ jobs:
             skills/autonomous-dispatcher/scripts/dispatcher-tick.sh \
             skills/autonomous-dispatcher/scripts/lib-agent.sh \
             skills/autonomous-dispatcher/scripts/lib-auth.sh \
+            skills/autonomous-dispatcher/scripts/lib-config.sh \
             skills/autonomous-dispatcher/scripts/lib-dispatch.sh \
             skills/autonomous-dispatcher/scripts/setup-labels.sh \
             skills/autonomous-dispatcher/scripts/gh-token-refresh-daemon.sh \
