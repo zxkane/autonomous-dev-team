@@ -98,8 +98,13 @@ pid_dir_for_project() {
     return 1
   fi
   # chmod every call: cheap, and self-heals if a previous run created the
-  # dir before we started enforcing 0700.
-  chmod 700 "$dir" 2>/dev/null || true
+  # dir before we started enforcing 0700. Fail loudly if chmod errors —
+  # silently swallowing it would defeat the entire CWE-377 mitigation
+  # (a dir left at 0755 is exactly what this PR is closing).
+  if ! chmod 700 "$dir" 2>/dev/null; then
+    echo "pid_dir_for_project: cannot set mode 700 on $dir — refusing to write PID files to a non-private directory" >&2
+    return 1
+  fi
 
   echo "$dir"
 }

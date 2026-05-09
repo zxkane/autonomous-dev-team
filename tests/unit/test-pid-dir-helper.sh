@@ -124,6 +124,21 @@ export PROJECT_ID="test-piddir"
 rc=$?
 assert_rc "unset PROJECT_ID → non-zero rc" 1 "$rc"
 
+# Source-of-truth check: chmod failure must return rc=1 (Q PR-77 finding —
+# silently swallowing chmod 700 failure would defeat the entire CWE-377
+# mitigation). Hard to simulate chmod failure portably in unit tests; assert
+# the source contains the loud-failure path so a regression to `|| true`
+# would fail this test.
+LIB="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-config.sh"
+if grep -q 'cannot set mode 700' "$LIB" \
+   && ! grep -q 'chmod 700.*|| true' "$LIB"; then
+  echo -e "  ${GREEN}PASS${NC}: chmod failure routes to rc=1 (no '|| true' silent swallow)"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: chmod failure path missing or '|| true' silent-swallow regressed"
+  FAIL=$((FAIL + 1))
+fi
+
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== Summary ==="
