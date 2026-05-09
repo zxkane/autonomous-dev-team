@@ -33,7 +33,12 @@ DISPATCHER_CONF="$HOME/.autonomous/dispatcher.conf" \
   bash "$PROJECT_DIR/scripts/dispatcher-multi-tick.sh"
 ```
 
-The multi-tick wrapper iterates `PROJECTS=()` from `dispatcher.conf` and runs one `dispatcher-tick.sh` per project, with each project's `autonomous.conf` sourced in a subshell via the `AUTONOMOUS_CONF` env override. Per-project failures are logged to stderr but do not stall other projects. See `scripts/dispatcher.conf.example` for the schema.
+The multi-tick wrapper iterates `PROJECTS=()` from `dispatcher.conf` and runs one `dispatcher-tick.sh` per project. Per-project failures are logged to stderr but do not stall other projects. See `scripts/dispatcher.conf.example` for the schema.
+
+Each `PROJECTS[]` entry is one of two shapes:
+
+- **Local project** (file path): a path to a per-project `autonomous.conf` on this dispatcher box. The dispatcher and the project source live on the same machine. The wrapper sources the conf via the `AUTONOMOUS_CONF` priority-1 path (PR-4 / [INV-14]).
+- **Remote project** (inline metadata block): used when the project source lives on a remote dev box reached via AWS SSM. The dispatcher box does NOT have the project's `autonomous.conf` — everything the dispatcher needs to scan issues + dispatch is declared inline in `dispatcher.conf`. `EXECUTION_BACKEND=remote-aws-ssm` and `SSM_INSTANCE_ID` route the actual `dispatch-local.sh` invocation to the remote box via `aws ssm send-command`. (#62)
 
 Either form runs the same 5-step tick:
 
@@ -58,15 +63,24 @@ export GH_TOKEN
 
 The token is valid for 1 hour and scoped to the target repo only. `dispatcher-tick.sh` typically completes in well under a minute, so a single token covers the whole tick.
 
-## Local Dispatch Helper
+## Dispatch Helpers
 
-`dispatcher-tick.sh` invokes `scripts/dispatch-local.sh` for each task type. **Do NOT spawn agent processes any other way.** The helper handles `nohup`, input validation (numeric issue numbers, safe session IDs), pre-creating log files at mode 0600 (agent output may contain secrets), and killing stale wrappers before spawning new ones (see [INV-09](../../docs/pipeline/invariants.md#inv-09-just_dispatched-skip-rule), `dispatch-local.sh::kill_stale_wrapper`).
+`dispatcher-tick.sh` calls a `dispatch()` helper for each task type, which routes to the configured execution backend. **Do NOT spawn agent processes any other way.** Each backend handles `nohup`, input validation, log-file mode 0600, and stale-wrapper kill ([INV-09](../../docs/pipeline/invariants.md#inv-09-just_dispatched-skip-rule)).
+
+Backends today:
+
+| `EXECUTION_BACKEND` | Driver | When to use |
+|---|---|---|
+| `local` (default, also when unset) | `scripts/dispatch-local.sh` | Wrapper runs on the same box as the dispatcher. |
+| `remote-aws-ssm` | `scripts/dispatch-remote-aws-ssm.sh` | Wrapper runs on a remote dev EC2 reached via AWS Systems Manager. The dispatcher sends `aws ssm send-command` to invoke `dispatch-local.sh` on the remote box. |
+
+Per-task command shapes (passed through both backends identically):
 
 | Type | Command |
 |---|---|
-| New dev task | `bash "$PROJECT_DIR/scripts/dispatch-local.sh" dev-new ISSUE_NUM` |
-| Review task | `bash "$PROJECT_DIR/scripts/dispatch-local.sh" review ISSUE_NUM` |
-| Resume dev task | `bash "$PROJECT_DIR/scripts/dispatch-local.sh" dev-resume ISSUE_NUM SESSION_ID` |
+| New dev task | `dispatch dev-new ISSUE_NUM` |
+| Review task | `dispatch review ISSUE_NUM` |
+| Resume dev task | `dispatch dev-resume ISSUE_NUM SESSION_ID` |
 
 ## What the dispatcher MUST NOT do
 
@@ -74,7 +88,7 @@ The dispatcher is a label-and-spawn coordinator, not a code-changer:
 
 - MUST NOT commit or push to the target repository.
 - MUST NOT modify source files in `$PROJECT_DIR`.
-- MUST ONLY read issue labels/comments via the GitHub API, update labels via the GitHub API, and dispatch local processes via `dispatch-local.sh`.
+- MUST ONLY read issue labels/comments via the GitHub API, update labels via the GitHub API, and dispatch wrapper processes via the configured backend (`dispatch-local.sh` or `dispatch-remote-aws-ssm.sh`).
 
 Any code changes happen via the wrapper-spawned dev / review agents.
 

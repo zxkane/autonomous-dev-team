@@ -118,30 +118,135 @@ if [[ "${#PROJECTS[@]}" -eq 0 ]]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Inline-block validator (#62 axis 2)
+# ---------------------------------------------------------------------------
+# Remote projects describe themselves inline in dispatcher.conf because the
+# dispatcher box does NOT have their autonomous.conf on disk (autonomous.conf
+# lives on the remote dev box). The block contains bash KEY=VALUE lines.
+#
+# Before eval we sanity-check: every non-blank, non-comment line must look
+# like KEY=value (allow optional `export KEY=`). Reject anything else —
+# in particular, function calls or commands that would be code-executed.
+# `dispatcher.conf` is already trusted (PR-8 trust gate), so this is
+# defense-in-depth against accidental injection from copy-paste.
+validate_inline_block() {
+  local block="$1"
+  local line
+  while IFS= read -r line; do
+    # Strip leading whitespace.
+    line="${line#"${line%%[![:space:]]*}"}"
+    # Allow blank lines and comments.
+    [[ -z "$line" || "${line:0:1}" == "#" ]] && continue
+    # Allow `KEY=value` and `export KEY=value` (optional spaces around `=`
+    # NOT allowed — bash itself rejects that anyway).
+    if ! [[ "$line" =~ ^(export[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*= ]]; then
+      return 1
+    fi
+  done <<<"$block"
+  return 0
+}
+
+# Run a per-project tick from an inline metadata block.
+# Eval'd inside a subshell so vars cannot leak between projects.
+# Auto-derives REPO_OWNER and REPO_NAME from REPO when missing.
+tick_inline_project() {
+  local block="$1" entry_label="$2"
+
+  if ! validate_inline_block "$block"; then
+    warn "  WARN: skipping $entry_label — inline block contains non-assignment lines (refusing to eval)"
+    return 1
+  fi
+
+  (
+    set +u
+    # shellcheck disable=SC2294
+    eval "$block"
+    : "${REPO:?inline project missing REPO}"
+    : "${PROJECT_ID:?inline project missing PROJECT_ID}"
+    # Auto-derive owner/name from REPO=owner/name.
+    : "${REPO_OWNER:=${REPO%%/*}}"
+    : "${REPO_NAME:=${REPO##*/}}"
+    export REPO REPO_OWNER REPO_NAME PROJECT_ID
+    # Optional vars consumed by the router and dispatch-remote-aws-ssm.sh.
+    [[ -n "${EXECUTION_BACKEND:-}" ]]      && export EXECUTION_BACKEND
+    [[ -n "${SSM_INSTANCE_ID:-}" ]]        && export SSM_INSTANCE_ID
+    [[ -n "${SSM_REGION:-}" ]]             && export SSM_REGION
+    [[ -n "${SSM_REMOTE_USER:-}" ]]        && export SSM_REMOTE_USER
+    [[ -n "${SSM_REMOTE_SHELL:-}" ]]       && export SSM_REMOTE_SHELL
+    [[ -n "${SSM_REMOTE_PROFILE:-}" ]]     && export SSM_REMOTE_PROFILE
+    [[ -n "${SSM_REMOTE_PROJECT_DIR:-}" ]] && export SSM_REMOTE_PROJECT_DIR
+    [[ -n "${SSM_REMOTE_PROJECT_ID:-}" ]]  && export SSM_REMOTE_PROJECT_ID
+    [[ -n "${DISPATCHER_APP_ID:-}" ]]      && export DISPATCHER_APP_ID
+    [[ -n "${DISPATCHER_APP_PEM:-}" ]]     && export DISPATCHER_APP_PEM
+    [[ -n "${GH_AUTH_MODE:-}" ]]           && export GH_AUTH_MODE
+    [[ -n "${MAX_CONCURRENT:-}" ]]         && export MAX_CONCURRENT
+    [[ -n "${MAX_RETRIES:-}" ]]            && export MAX_RETRIES
+    # Inline projects don't have a dispatcher-side PROJECT_DIR (the source
+    # lives on the remote box). dispatcher-tick.sh validates PROJECT_DIR is
+    # non-empty; for the local backend it's the project root, for remote
+    # it's only used by lib-config.sh's autonomous.conf fallback path
+    # (which we don't need — AUTONOMOUS_CONF is empty for inline). Set it
+    # to a placeholder that is harmless on the dispatcher side; the actual
+    # remote PROJECT_DIR is in SSM_REMOTE_PROJECT_DIR.
+    : "${PROJECT_DIR:=/}"
+    export PROJECT_DIR
+    # AUTONOMOUS_CONF must be UNSET for inline projects so lib-config.sh
+    # doesn't try to source a stale path from the parent multi-tick env.
+    unset AUTONOMOUS_CONF
+    set -u
+    bash "$SCRIPT_DIR/dispatcher-tick.sh"
+  )
+}
+
+# Classify a PROJECTS[i] entry: file path (PR-8 local) vs inline metadata (#62).
+# A file path is detected by: contains "/" AND exists as a regular file.
+# Anything else is treated as inline metadata.
+is_path_entry() {
+  local entry="$1"
+  [[ "$entry" == *"/"* && -f "$entry" ]]
+}
+
+# ---------------------------------------------------------------------------
 # Per-project tick loop
 # ---------------------------------------------------------------------------
-# Each iteration runs dispatcher-tick.sh in a subshell (parentheses) with
-# AUTONOMOUS_CONF set to the project's conf path. The subshell's exit code
-# is captured but does NOT short-circuit the loop — one bad project must
-# not block ticks for the others.
+# Each iteration runs dispatcher-tick.sh in a subshell. For path entries
+# (PR-8 local), AUTONOMOUS_CONF is set so lib-config.sh sources that file.
+# For inline entries (#62 remote), the metadata is eval'd in the subshell.
+# Subshell exit codes are captured but do NOT short-circuit the loop —
+# one bad project must not block ticks for the others.
 log "scanning ${#PROJECTS[@]} project(s) from $CONF"
 
 OK=0
 FAIL=0
-for proj_conf in "${PROJECTS[@]}"; do
-  if [[ ! -r "$proj_conf" ]]; then
-    warn "  WARN: skipping unreadable project conf: $proj_conf"
-    FAIL=$((FAIL + 1))
-    continue
-  fi
-
-  log "  ticking project: $proj_conf"
-  if ( AUTONOMOUS_CONF="$proj_conf" bash "$SCRIPT_DIR/dispatcher-tick.sh" ); then
-    OK=$((OK + 1))
+for entry in "${PROJECTS[@]}"; do
+  if is_path_entry "$entry"; then
+    if [[ ! -r "$entry" ]]; then
+      warn "  WARN: skipping unreadable project conf: $entry"
+      FAIL=$((FAIL + 1))
+      continue
+    fi
+    log "  ticking local project: $entry"
+    if ( AUTONOMOUS_CONF="$entry" bash "$SCRIPT_DIR/dispatcher-tick.sh" ); then
+      OK=$((OK + 1))
+    else
+      rc=$?
+      warn "  WARN: tick failed for $entry (rc=$rc)"
+      FAIL=$((FAIL + 1))
+    fi
   else
-    rc=$?
-    warn "  WARN: tick failed for $proj_conf (rc=$rc)"
-    FAIL=$((FAIL + 1))
+    # Inline metadata. Identify it by a stable label for log lines —
+    # extract REPO from the block on a best-effort basis.
+    label=$(grep -oE '^[[:space:]]*(export[[:space:]]+)?REPO=[^[:space:]]+' <<<"$entry" \
+            | head -1 | sed 's/^[[:space:]]*\(export[[:space:]]\+\)\?REPO=//')
+    [[ -z "$label" ]] && label="<inline-$((OK+FAIL+1))>"
+    log "  ticking remote project: $label"
+    if tick_inline_project "$entry" "$label"; then
+      OK=$((OK + 1))
+    else
+      rc=$?
+      warn "  WARN: tick failed for inline project $label (rc=$rc)"
+      FAIL=$((FAIL + 1))
+    fi
   fi
 done
 

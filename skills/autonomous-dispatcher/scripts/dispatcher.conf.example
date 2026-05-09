@@ -1,35 +1,99 @@
 # dispatcher.conf — multi-project dispatcher configuration
 #
-# Copied to:
-#   $DISPATCHER_CONF                              (env override; takes priority)
+# Lookup priority:
+#   $DISPATCHER_CONF                              (env override)
 #   $HOME/.autonomous/dispatcher.conf             (default)
 #   $XDG_CONFIG_HOME/autonomous/dispatcher.conf   (XDG fallback)
 #
 # Read by `dispatcher-multi-tick.sh`. Each cron tick iterates PROJECTS[]
-# and runs one `dispatcher-tick.sh` per project, sourcing the project's
-# own `autonomous.conf` via the AUTONOMOUS_CONF env override (#62).
+# and runs one `dispatcher-tick.sh` per project. Per-project values are
+# sourced fresh in a subshell each iteration so settings cannot leak
+# between projects.
 #
-# This file does NOT replace per-project `autonomous.conf` — REPO,
-# PROJECT_ID, DISPATCHER_APP_ID, MAX_CONCURRENT, etc. all stay there.
-# Per-project values are sourced fresh in a subshell each iteration so
-# settings cannot leak between projects.
-
-# Trust gate: dispatcher-multi-tick.sh refuses to source a `dispatcher.conf`
-# (or its parent dir) that is group/other-writable, or owned by a different
-# user, because `source` of an attacker-writable file means arbitrary code
-# execution as the dispatcher user (CWE-94). Recommended file mode: 0644
-# owned by the dispatcher user, or 0600 if the conf has secrets. Recommended
-# parent dir mode: 0755 (or 0700).
+# Each PROJECTS[] entry is one of two shapes:
 #
-# Set AUTONOMOUS_TRUST_CONF=1 to disable the trust gate (e.g. shared dev
-# VMs where the conf is owned by a tooling uid distinct from the runtime
-# uid). Off by default — opt in only when you understand the risk.
+#   1. A FILE PATH to a per-project autonomous.conf (PR-8 — local backend).
+#      The file lives on this dispatcher box. Used when the dispatcher and
+#      the project source live on the same machine.
+#
+#   2. An INLINE METADATA BLOCK (PR-9, #62 — remote-aws-ssm backend).
+#      Used when the dispatcher and the project source live on DIFFERENT
+#      machines (the project lives on a remote dev box reached via AWS SSM).
+#      The dispatcher box doesn't have the project's autonomous.conf —
+#      everything the dispatcher needs is declared inline here.
+#
+# Mix and match in the same array.
 
-# Required: paths to per-project `autonomous.conf` files.
-# Each path is sourced in a subshell before running one tick for that
-# project. Missing paths cause that project's tick to be skipped with a
-# warning — they do NOT block other projects.
-PROJECTS=(
-  "/data/git/myrepo-a/scripts/autonomous.conf"
-  "/data/git/myrepo-b/scripts/autonomous.conf"
-)
+# === Trust gate ===
+# dispatcher-multi-tick.sh refuses to source a `dispatcher.conf` that is
+# group/other-writable or owned by a different user (CWE-94 mitigation —
+# `source` of an attacker-writable file is arbitrary code execution).
+# Recommended: file mode 0644 (or 0600 if it has secrets), parent dir 0755.
+# Override with AUTONOMOUS_TRUST_CONF=1 (only when you know what you're doing).
+
+PROJECTS=()
+
+# ---------------------------------------------------------------------------
+# Example 1: LOCAL project (PR-8 — autonomous.conf on this box)
+# ---------------------------------------------------------------------------
+PROJECTS+=( "/data/git/myrepo-local/scripts/autonomous.conf" )
+
+# ---------------------------------------------------------------------------
+# Example 2: REMOTE project (PR-9 — autonomous.conf on a remote dev box)
+# ---------------------------------------------------------------------------
+# The dispatcher box uses these vars to scan issues + dispatch over SSM.
+# The remote box has its own autonomous.conf for the wrapper to use.
+#
+# Required:
+#   PROJECT_ID, REPO        — for GitHub API calls from the dispatcher
+#   EXECUTION_BACKEND=remote-aws-ssm
+#   SSM_INSTANCE_ID         — EC2 instance running dispatch-local.sh + wrapper
+#   SSM_REMOTE_PROJECT_DIR  — absolute path to the project root on remote
+#   SSM_REMOTE_PROJECT_ID   — project_id used in remote PID/log paths
+#
+# Auto-derived:
+#   REPO_OWNER, REPO_NAME   — split from REPO=owner/name
+#
+# Optional (with defaults):
+#   SSM_REGION         (default ap-southeast-1)
+#   SSM_REMOTE_USER    (default ubuntu)         — sudo -u target on remote
+#   SSM_REMOTE_SHELL   (default bash)           — bash | zsh | sh; runs as login shell
+#   SSM_REMOTE_PROFILE (default empty, no source)  — file to source before INNER_CMD
+#                       e.g. /home/ubuntu/.bash_aliases for env-var setup that
+#                       interactive shells normally don't load
+#
+# GitHub App auth (when GH_AUTH_MODE=app):
+#   DISPATCHER_APP_ID, DISPATCHER_APP_PEM   — read by gh-app-token.sh
+#
+PROJECTS+=( '
+PROJECT_ID=projB
+REPO=myorg/projB
+EXECUTION_BACKEND=remote-aws-ssm
+SSM_INSTANCE_ID=i-0abc1234567890def
+SSM_REGION=ap-southeast-1
+SSM_REMOTE_USER=ubuntu
+SSM_REMOTE_SHELL=bash
+SSM_REMOTE_PROFILE=/home/ubuntu/.bash_aliases
+SSM_REMOTE_PROJECT_DIR=/data/git/projB
+SSM_REMOTE_PROJECT_ID=projB
+GH_AUTH_MODE=app
+DISPATCHER_APP_ID=3013418
+DISPATCHER_APP_PEM=/data/auth/projB.pem
+MAX_CONCURRENT=5
+MAX_RETRIES=3
+' )
+
+# ---------------------------------------------------------------------------
+# Example 3: another remote project on a DIFFERENT EC2 (per-project mapping)
+# ---------------------------------------------------------------------------
+PROJECTS+=( '
+PROJECT_ID=projC
+REPO=myorg/projC
+EXECUTION_BACKEND=remote-aws-ssm
+SSM_INSTANCE_ID=i-0def4567890abc123
+SSM_REMOTE_PROJECT_DIR=/data/git/projC
+SSM_REMOTE_PROJECT_ID=projC
+GH_AUTH_MODE=app
+DISPATCHER_APP_ID=3013418
+DISPATCHER_APP_PEM=/data/auth/projC.pem
+' )

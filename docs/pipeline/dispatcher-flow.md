@@ -6,11 +6,37 @@ The behavior described here is implemented by `skills/autonomous-dispatcher/scri
 
 ## Multi-project outer loop (PR-8, #62)
 
-For deployments that scan more than one repository per cron, `dispatcher-multi-tick.sh` wraps `dispatcher-tick.sh` in an outer iteration over a `PROJECTS=()` array declared in a separate `dispatcher.conf` file. Each iteration sets `AUTONOMOUS_CONF` to a per-project path and runs `dispatcher-tick.sh` in a subshell, so per-project state cannot leak between iterations.
+For deployments that scan more than one repository per cron, `dispatcher-multi-tick.sh` wraps `dispatcher-tick.sh` in an outer iteration over a `PROJECTS=()` array declared in a separate `dispatcher.conf` file. Each iteration runs `dispatcher-tick.sh` in a subshell, so per-project state cannot leak between iterations.
 
-The outer loop intentionally does NOT carry shared state (no global concurrency cap, no cross-project JUST_DISPATCHED). Each project's tick is independent — concurrency is enforced per-project against that project's `MAX_CONCURRENT`. This keeps the multi-project layer minimal: just a `for` loop over `bash -c '... dispatcher-tick.sh'`. Per-project failures are logged but do not abort sibling projects.
+Each `PROJECTS[]` entry is one of two shapes (PR-9, #62 axis 2):
 
-The rest of this document describes the per-project tick in isolation; everything below applies whether `dispatcher-tick.sh` is invoked directly (single-project) or by the multi-tick wrapper (one of N projects).
+- **Local project — file path**: a path to a per-project `autonomous.conf` on this dispatcher box. The wrapper sources it via the `AUTONOMOUS_CONF` priority-1 path. Used when the dispatcher and project source live on the same machine.
+- **Remote project — inline metadata block**: a multi-line string of bash assignments (REPO, EXECUTION_BACKEND=remote-aws-ssm, SSM_INSTANCE_ID, SSM_REMOTE_PROJECT_DIR, etc.). Used when the project source lives on a remote dev EC2 — the dispatcher box does NOT have the project's `autonomous.conf`. The wrapper validates the block (KEY=VALUE lines only — defense-in-depth against accidental injection), eval's it in the subshell, and auto-derives `REPO_OWNER`/`REPO_NAME` from `REPO`.
+
+The outer loop intentionally does NOT carry shared state (no global concurrency cap, no cross-project JUST_DISPATCHED). Each project's tick is independent — concurrency is enforced per-project against that project's `MAX_CONCURRENT`. Per-project failures are logged but do not abort sibling projects.
+
+## Backend routing (PR-9, #62 axis 2)
+
+`dispatcher-tick.sh` defines a `dispatch()` helper that routes wrapper-spawn requests by `EXECUTION_BACKEND`:
+
+| Backend | Driver script | What happens |
+|---|---|---|
+| `local` (default) | `scripts/dispatch-local.sh` (in `$PROJECT_DIR/scripts/`) | Same as PR-8 single-machine flow: nohup-spawn the wrapper on this box. |
+| `remote-aws-ssm` | `scripts/dispatch-remote-aws-ssm.sh` (in the skill scripts dir) | Build a `sudo -u $SSM_REMOTE_USER $SSM_REMOTE_SHELL -l -c '<inner>'` command, JSON-escape via `jq -n --arg cmd`, and `aws ssm send-command` to `$SSM_INSTANCE_ID`. The inner command runs `dispatch-local.sh` on the remote box. SSM is purely transport — PID/process management still belongs to `dispatch-local.sh` on whatever box runs it. |
+| anything else | — | Logged as ERROR; that step skips the dispatch (issue stays in its current label state). Step 5b will re-evaluate next tick. |
+
+The rest of this document describes the per-project tick in isolation; everything below applies whether `dispatcher-tick.sh` is invoked directly (single-project), by the multi-tick wrapper (one of N projects), and whether the dispatch goes via `local` or `remote-aws-ssm`.
+
+### Caveat: remote backend + PID liveness
+
+`lib-dispatch.sh::pid_alive` does `kill -0 $(cat $PID_FILE)` against `${XDG_RUNTIME_DIR}/autonomous-${PROJECT_ID}/issue-N.pid` ([INV-01]). For a remote project, the PID file is on the remote dev box, not on the dispatcher box. The dispatcher's `kill -0` always fails → all remote projects appear DEAD to the dispatcher.
+
+Effects on Step 5:
+
+- **Step 5a (ALIVE + PR ready) is unreachable for remote projects.** The proactive "SIGTERM-when-PR-ready" optimization doesn't fire; review delay grows from "next tick after CI passes" to "next tick after the wrapper exits naturally."
+- **Step 5b DEAD-branch is the only path.** Each tick treats every active remote issue as DEAD and routes via the PR-state machine ([INV-04], [INV-06], [INV-07]). The wall-clock timeout in `lib-agent.sh::run_agent` ([INV-13], default 4h) bounds the worst case.
+
+This is acceptable for this PR's surface area. A real remote-alive check (per-tick `aws ssm send-command kill -0 $PID`) would 2-3x the SSM call volume; not worth doing speculatively.
 
 ## Tick lifecycle
 

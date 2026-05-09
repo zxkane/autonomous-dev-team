@@ -30,6 +30,27 @@ source "${SCRIPT_DIR}/lib-dispatch.sh"
 
 log() { echo "[dispatcher-tick] $(date -u +%H:%M:%S) $*"; }
 
+# dispatch — route a wrapper-spawn request to the configured backend (#62 axis 2).
+# Backends today: "local" (default — same-box dispatch-local.sh) and
+# "remote-aws-ssm" (sends an `aws ssm send-command` to a remote dev box).
+# Other backends (k8s, gha-runner) can be added with one case arm here.
+#
+# Args: <type> <issue_num> [session_id]   — passed through verbatim.
+dispatch() {
+  case "${EXECUTION_BACKEND:-local}" in
+    local)
+      bash "$PROJECT_DIR/scripts/dispatch-local.sh" "$@"
+      ;;
+    remote-aws-ssm)
+      bash "$SCRIPT_DIR/dispatch-remote-aws-ssm.sh" "$@"
+      ;;
+    *)
+      log "  ERROR: unknown EXECUTION_BACKEND='${EXECUTION_BACKEND}' — skipping dispatch"
+      return 1
+      ;;
+  esac
+}
+
 # Tick-local state. JUST_DISPATCHED holds issue numbers dispatched in
 # Steps 2/3/4 of this tick, so Step 5 can skip them ([INV-09]).
 JUST_DISPATCHED=()
@@ -69,7 +90,7 @@ for i in $(seq 0 $((new_count - 1))); do
   label_swap "$issue_num" "" "in-progress"
   gh issue comment "$issue_num" --repo "$REPO" \
     --body "Dispatching autonomous development..."
-  bash "$PROJECT_DIR/scripts/dispatch-local.sh" dev-new "$issue_num"
+  dispatch dev-new "$issue_num"
   JUST_DISPATCHED+=("$issue_num")
 done
 
@@ -94,7 +115,7 @@ for i in $(seq 0 $((pr_count - 1))); do
   label_swap "$issue_num" "pending-review" "reviewing"
   gh issue comment "$issue_num" --repo "$REPO" \
     --body "Dispatching autonomous review..."
-  bash "$PROJECT_DIR/scripts/dispatch-local.sh" review "$issue_num"
+  dispatch review "$issue_num"
   JUST_DISPATCHED+=("$issue_num")
 done
 
@@ -149,7 +170,7 @@ for i in $(seq 0 $((pd_count - 1))); do
   label_swap "$issue_num" "pending-dev" "in-progress"
   gh issue comment "$issue_num" --repo "$REPO" \
     --body "Resuming development (session: ${session_id})..."
-  bash "$PROJECT_DIR/scripts/dispatch-local.sh" dev-resume "$issue_num" "$session_id"
+  dispatch dev-resume "$issue_num" "$session_id"
   JUST_DISPATCHED+=("$issue_num")
 done
 
