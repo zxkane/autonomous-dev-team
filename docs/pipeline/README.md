@@ -36,10 +36,10 @@ Fixing a bug:
 
 | Doc | Status |
 |---|---|
-| `README.md` | Done (this file) |
-| `state-machine.md` | Stub — filled in PR-2 |
-| `dispatcher-flow.md` | Stub — filled in PR-2 |
-| `dev-agent-flow.md` | Stub — filled in PR-2 |
-| `review-agent-flow.md` | Stub — filled in PR-2 |
-| `handoffs.md` | Stub — filled in PR-2 |
-| `invariants.md` | Stub — filled in PR-2 |
+| `README.md` | Done |
+| `state-machine.md` | Done |
+| `dispatcher-flow.md` | Done |
+| `dev-agent-flow.md` | Done |
+| `review-agent-flow.md` | Done |
+| `handoffs.md` | Done |
+| `invariants.md` | Done (INV-01..INV-14; INV-12, INV-13, INV-14 are documented but not yet code-enforced — see notes inside) |

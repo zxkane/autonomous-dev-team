@@ -1,5 +1,7 @@
 # Autonomous Dev Team Pipeline
 
+> **For the authoritative state machine, dispatcher / dev / review flows, handoff invariants, and the full INV-NN catalogue, see [`docs/pipeline/`](pipeline/README.md).** This file is the orientation; that directory is the spec. Pipeline bug fixes MUST update `docs/pipeline/` (per [`CONTRIBUTING.md`](../CONTRIBUTING.md) Rule 1).
+
 ## Overview
 
 The Autonomous Dev Team pipeline automates the full software development lifecycle for GitHub issues. When an issue is labeled with `autonomous`, the pipeline automatically:
