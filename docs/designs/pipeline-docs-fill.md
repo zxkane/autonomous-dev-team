@@ -8,7 +8,6 @@ Strictly docs-only. Zero changes to:
 
 - `skills/**/*.sh` or `skills/**/SKILL.md`
 - `.github/workflows/`
-- `CONTRIBUTING.md`
 - Any other code or config
 
 What gets edited:
@@ -18,9 +17,10 @@ What gets edited:
 - `docs/pipeline/dev-agent-flow.md` — dev wrapper lifecycle
 - `docs/pipeline/review-agent-flow.md` — review wrapper lifecycle
 - `docs/pipeline/handoffs.md` — 5 handoff points + invariants
-- `docs/pipeline/invariants.md` — INV-01..INV-14
+- `docs/pipeline/invariants.md` — INV-01..INV-15 (INV-15 added in fix commit after code review surfaced the SIGTERM race contradiction)
 - `docs/pipeline/README.md` — flip status column from "Stub" to "Done"
 - `docs/autonomous-pipeline.md` — add a pointer to `docs/pipeline/`
+- `CONTRIBUTING.md` — add a "Editing or adding mermaid diagrams" sub-section under Rule 1, documenting the 3 syntax landmines (semicolons, literal `\n` in stateDiagram, double quotes in flowchart node labels) and the github.com-visual-check validation procedure. **Added in-flight after this PR's first push surfaced 5 of 7 mermaid blocks failing to render** — keeping the lesson where future contributors will see it.
 
 ## Source of truth
 

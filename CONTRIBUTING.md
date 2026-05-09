@@ -47,6 +47,32 @@ Most pipeline bugs surface a previously-implicit invariant. After fixing the bug
 - Producer (which actor must uphold it) and consumer (which actor relies on it)
 - Where it's tested (or "TODO: add test")
 
+### Editing or adding mermaid diagrams
+
+`docs/pipeline/` uses mermaid for state machines, sequence diagrams, and flowcharts. **A mermaid block that fails to parse renders as a giant red error box on github.com — this looks worse than no diagram at all.** GitHub renders mermaid client-side via mermaid 10.x; the only reliable validation is to push to a branch and look at the rendered file on github.com. `bash -n`, fence-pair counting, and prose review will all pass on broken diagrams.
+
+#### Three syntax landmines to avoid
+
+These caused 5 of 7 mermaid blocks to fail in the first commit of PR-2 ([#66](https://github.com/zxkane/autonomous-dev-team/pull/66)):
+
+1. **No `;` inside `stateDiagram-v2` edge labels or `sequenceDiagram` message text.** Mermaid treats `;` as a statement separator, so `agent runs; eventually exits` parses as two messages and the second one has no arrow. Use `,` or `-` or rephrase.
+
+2. **In `stateDiagram-v2` edge labels, literal `\n` is the two characters `\n`, not a line break.** It does NOT render as a newline. Either use `<br/>` (which works in flowchart but is hit-or-miss in stateDiagram) or just remove the line break and write a one-line label. `flowchart` blocks tolerate `<br/>` reliably; prefer that there.
+
+3. **No double quotes `"..."` inside flowchart `[]` node labels.** The inner `"` confuses the parser. Use single quotes `'...'`, or rephrase to avoid the quote entirely. Example: `[comment "exited 0 but no PR"]` → `[comment 'exited 0 but no PR']`.
+
+Side notes: `≥`, `≠`, `⇒` (Unicode comparison/arrow chars) render fine. Parens around words are fine (`[Step 1<br/>concurrency cap?]`). The Unicode minus `−` in node labels is fine but `+` and `=` adjacent to identifiers can confuse the parser — write the words `add`/`remove` if in doubt.
+
+#### Validation procedure (mandatory for any PR that adds or edits a mermaid block)
+
+1. Push your branch to GitHub.
+2. Compute the head SHA: `gh pr view <N> --json headRefOid -q .headRefOid` (or use the commit SHA if PR isn't open yet).
+3. For each `*.md` you touched that contains a mermaid block, open `https://github.com/<owner>/<repo>/blob/<sha>/<path>.md` in a browser.
+4. Confirm each mermaid block renders as a diagram (not a red "Parse error on line N" box). The rendered block has buttons "Open dialog" and "Copy mermaid code" beneath it.
+5. If using Claude Code with the chrome-devtools MCP installed, `mcp__chrome-devtools__new_page` + `wait_for(["Parse error", "<a heading after the block>"])` automates this — see [PR #66](https://github.com/zxkane/autonomous-dev-team/pull/66) discussion for the playbook.
+
+If a block fails, fix it locally, push again, re-verify. Do NOT merge a PR with a broken mermaid block visible on github.com.
+
 ### Escape hatch: `pipeline-docs:none` label
 
 Some PRs legitimately don't change pipeline behavior even though they touch a watched path:
@@ -95,6 +121,7 @@ Before opening a PR, confirm:
 - [ ] Design canvas at `docs/designs/<feature>.md` (for non-trivial changes)
 - [ ] Pipeline docs synced (Rule 1) OR `pipeline-docs:none` label applied
 - [ ] Local tests pass (`bash -n` on changed shell scripts at minimum; shellcheck if installed)
+- [ ] If the PR adds or edits any mermaid block, every block was visually verified on github.com (see "Editing or adding mermaid diagrams" above)
 - [ ] `Closes #N` in the PR body if it fixes an open issue
 - [ ] Conventional-commit-style PR title (`fix(dispatcher): ...`, `docs(pipeline): ...`, etc.)
 
