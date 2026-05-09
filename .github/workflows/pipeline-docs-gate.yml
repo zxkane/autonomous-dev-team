@@ -41,15 +41,20 @@ jobs:
             exit 1
           fi
           MERGE_BASE=$(git merge-base "$BASE_SHA" "$HEAD_SHA")
-          git diff --name-only "$MERGE_BASE" "$HEAD_SHA" > /tmp/changed.txt
+          # Use mktemp instead of a fixed /tmp path to avoid CWE-377 symlink races.
+          CHANGED_FILE=$(mktemp)
+          git diff --name-only "$MERGE_BASE" "$HEAD_SHA" > "$CHANGED_FILE"
           echo "Changed files in PR:"
-          cat /tmp/changed.txt
+          cat "$CHANGED_FILE"
+          echo "changed_file=$CHANGED_FILE" >> "$GITHUB_OUTPUT"
 
       - name: Classify changes
         id: classify
+        env:
+          CHANGED_FILE: ${{ steps.diff.outputs.changed_file }}
         run: |
           set -euo pipefail
-          changed_file=/tmp/changed.txt
+          changed_file="$CHANGED_FILE"
 
           # Watched paths — touching any of these requires a docs/pipeline/
           # update (or the override label). Keep in sync with CONTRIBUTING.md.

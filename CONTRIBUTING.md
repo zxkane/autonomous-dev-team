@@ -12,12 +12,14 @@ To stop that pattern: **any change to pipeline behavior MUST update [`docs/pipel
 
 A change is a pipeline-behavior change if it touches any of:
 
-- `skills/autonomous-dispatcher/scripts/**/*.sh`
-- `skills/autonomous-dev/scripts/**/*.sh`
-- `skills/autonomous-review/scripts/**/*.sh`
-- `skills/autonomous-common/hooks/**/*.sh`
-- `skills/autonomous-common/scripts/**/*.sh`
+- `skills/autonomous-dispatcher/scripts/**/*.sh` (recursive — any depth)
+- `skills/autonomous-dev/scripts/**/*.sh` (recursive)
+- `skills/autonomous-review/scripts/**/*.sh` (recursive)
+- `skills/autonomous-common/hooks/**/*.sh` (recursive)
+- `skills/autonomous-common/scripts/**/*.sh` (recursive)
 - `skills/autonomous-{dispatcher,dev,review,common}/SKILL.md`
+
+(The `**` glob notation is for human readability — the CI gate uses an equivalent ERE regex with `.*` which matches across directory separators, so subdirectories of `scripts/` and `hooks/` are correctly covered.)
 
 If your PR diff touches any of those paths, it MUST also touch one or more files under `docs/pipeline/`. CI enforces this — see [`.github/workflows/pipeline-docs-gate.yml`](.github/workflows/pipeline-docs-gate.yml).
 
