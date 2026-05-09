@@ -30,10 +30,26 @@ source "${SCRIPT_DIR}/lib-dispatch.sh"
 
 log() { echo "[dispatcher-tick] $(date -u +%H:%M:%S) $*"; }
 
+# Validate EXECUTION_BACKEND ONCE upfront, before any label transitions.
+# H1 (PR-9 review): if dispatch() returned 1 from inside a step body, the
+# step had already swapped the issue's label to in-progress and posted a
+# comment — leaving a stuck issue + burning retries every tick. Catching
+# the typo here aborts the tick before any side effect.
+case "${EXECUTION_BACKEND:-local}" in
+  local|remote-aws-ssm) ;;
+  *)
+    echo "[dispatcher-tick] FATAL: unknown EXECUTION_BACKEND='${EXECUTION_BACKEND}'. Allowed: local, remote-aws-ssm." >&2
+    exit 1
+    ;;
+esac
+
 # dispatch — route a wrapper-spawn request to the configured backend (#62 axis 2).
 # Backends today: "local" (default — same-box dispatch-local.sh) and
 # "remote-aws-ssm" (sends an `aws ssm send-command` to a remote dev box).
 # Other backends (k8s, gha-runner) can be added with one case arm here.
+# The unknown-backend case is unreachable because we validate above; the
+# `*)` arm is a defensive assertion in case allowed-list values get out of
+# sync between the upfront check and the runtime dispatch.
 #
 # Args: <type> <issue_num> [session_id]   — passed through verbatim.
 dispatch() {
@@ -45,8 +61,10 @@ dispatch() {
       bash "$SCRIPT_DIR/dispatch-remote-aws-ssm.sh" "$@"
       ;;
     *)
-      log "  ERROR: unknown EXECUTION_BACKEND='${EXECUTION_BACKEND}' — skipping dispatch"
-      return 1
+      # Should never reach here because of the upfront check, but be loud
+      # if invariants drift.
+      echo "[dispatcher-tick] BUG: dispatch() reached unknown EXECUTION_BACKEND='${EXECUTION_BACKEND}' at runtime" >&2
+      exit 1
       ;;
   esac
 }

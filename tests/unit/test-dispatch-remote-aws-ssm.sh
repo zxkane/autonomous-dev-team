@@ -148,6 +148,40 @@ assert_rc "SSM_REMOTE_USER with semicolon → rc=1" 1 "$?"
 assert_rc "SSM_REMOTE_SHELL not in allow-list → rc=1" 1 "$?"
 
 # ---------------------------------------------------------------------------
+# PR-9 review C1 + C2: shell metachars must be rejected on every operator-
+# controlled value embedded in INNER_CMD. The prior validator missed `'`,
+# `"`, `<`, `>`, `\n` — these break out of the
+# `sudo -u $USER $SHELL -l -c '<INNER_CMD>'` single-quote wrap on the
+# remote side.
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-EB-007c: C1 — single-quote in SSM_REMOTE_PROJECT_DIR rejected ==="
+( export SSM_REMOTE_PROJECT_DIR="/data/git/foo' >/tmp/PWNED '"; run_driver dev-new 99 ) >/dev/null 2>&1
+assert_rc "single-quote in SSM_REMOTE_PROJECT_DIR → rc=1" 1 "$?"
+
+( export SSM_REMOTE_PROJECT_DIR='/data/git/foo<bar'; run_driver dev-new 99 ) >/dev/null 2>&1
+assert_rc "redirect-char in SSM_REMOTE_PROJECT_DIR → rc=1" 1 "$?"
+
+( export SSM_REMOTE_PROJECT_DIR='/data/git/foo*'; run_driver dev-new 99 ) >/dev/null 2>&1
+assert_rc "glob-char in SSM_REMOTE_PROJECT_DIR → rc=1" 1 "$?"
+
+newline_value=$'/data/git/foo\nrm -rf /'
+( export SSM_REMOTE_PROJECT_DIR="$newline_value"; run_driver dev-new 99 ) >/dev/null 2>&1
+assert_rc "newline in SSM_REMOTE_PROJECT_DIR → rc=1" 1 "$?"
+
+echo ""
+echo "=== TC-EB-009b: C2 — SSM_REMOTE_PROFILE metachar gate ==="
+( export SSM_REMOTE_PROFILE="/etc/foo'; touch /tmp/PWNED; '"; run_driver dev-new 99 ) >/dev/null 2>&1
+assert_rc "single-quote in SSM_REMOTE_PROFILE → rc=1" 1 "$?"
+
+( export SSM_REMOTE_PROFILE='/etc/foo$(rm -rf /)'; run_driver dev-new 99 ) >/dev/null 2>&1
+assert_rc "command-substitution in SSM_REMOTE_PROFILE → rc=1" 1 "$?"
+
+newline_profile=$'/etc/foo\nrm -rf /'
+( export SSM_REMOTE_PROFILE="$newline_profile"; run_driver dev-new 99 ) >/dev/null 2>&1
+assert_rc "newline in SSM_REMOTE_PROFILE → rc=1" 1 "$?"
+
+# ---------------------------------------------------------------------------
 echo ""
 echo "=== TC-EB-008: defaults applied when optional env unset ==="
 # ---------------------------------------------------------------------------

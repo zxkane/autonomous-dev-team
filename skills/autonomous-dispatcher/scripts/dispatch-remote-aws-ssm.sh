@@ -58,10 +58,25 @@ if ! [[ "$SSM_REMOTE_PROJECT_ID" =~ ^[a-zA-Z0-9_-]+$ ]]; then
   echo "ERROR: SSM_REMOTE_PROJECT_ID contains unsafe characters: '$SSM_REMOTE_PROJECT_ID'" >&2
   exit 1
 fi
-# SSM_REMOTE_PROJECT_DIR must be an absolute path; reject command-injection
-# shapes ($, `, ;, newline). The remote shell would expand them otherwise.
-if [[ "$SSM_REMOTE_PROJECT_DIR" != /* ]] \
-   || [[ "$SSM_REMOTE_PROJECT_DIR" == *[\$\`\;\&\|]* ]]; then
+# Shell-metachar reject. Any of these in an operator-controlled value can
+# break out of the `sudo -u $USER $SHELL -l -c '<INNER_CMD>'` single-quote
+# wrap on the remote side and execute arbitrary code as $SSM_REMOTE_USER:
+#   $ ` ; & | ' " < > * ? newline carriage-return
+# Found via PR-9 code review (C1+C2): the prior validator missed `'`, `"`,
+# `<`, `>`, `\n`, which reach the remote shell verbatim.
+_has_shell_metachar() {
+  local val="$1"
+  case "$val" in
+    *['$`;&|<>*?'\'\"]*) return 0 ;;
+    *)                   ;;
+  esac
+  case "$val" in
+    *$'\n'*|*$'\r'*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+if [[ "$SSM_REMOTE_PROJECT_DIR" != /* ]] || _has_shell_metachar "$SSM_REMOTE_PROJECT_DIR"; then
   echo "ERROR: SSM_REMOTE_PROJECT_DIR must be an absolute path with no shell metachars: '$SSM_REMOTE_PROJECT_DIR'" >&2
   exit 1
 fi
@@ -108,10 +123,11 @@ DISPATCH_LOCAL="${SSM_REMOTE_PROJECT_DIR}/scripts/dispatch-local.sh"
 # login shell PATH only).
 prefix=""
 if [[ -n "$SSM_REMOTE_PROFILE" ]]; then
-  # The profile path is operator-controlled; quote it so a path with spaces
-  # works, but allow standard absolute paths only.
-  if [[ "$SSM_REMOTE_PROFILE" != /* ]]; then
-    echo "ERROR: SSM_REMOTE_PROFILE must be an absolute path: '$SSM_REMOTE_PROFILE'" >&2
+  # The profile path is operator-controlled; same metachar gate as
+  # SSM_REMOTE_PROJECT_DIR (PR-9 review C2: previously this only checked
+  # absoluteness, leaving `'` / newlines / `$()` open to remote RCE).
+  if [[ "$SSM_REMOTE_PROFILE" != /* ]] || _has_shell_metachar "$SSM_REMOTE_PROFILE"; then
+    echo "ERROR: SSM_REMOTE_PROFILE must be an absolute path with no shell metachars: '$SSM_REMOTE_PROFILE'" >&2
     exit 1
   fi
   prefix="source ${SSM_REMOTE_PROFILE}; "
