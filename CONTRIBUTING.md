@@ -61,6 +61,8 @@ These caused 5 of 7 mermaid blocks to fail in the first commit of PR-2 ([#66](ht
 
 3. **No double quotes `"..."` inside flowchart `[]` node labels.** The inner `"` confuses the parser. Use single quotes `'...'`, or rephrase to avoid the quote entirely. Example: `[comment "exited 0 but no PR"]` → `[comment 'exited 0 but no PR']`.
 
+4. **Avoid `<br/>` inside `sequenceDiagram` message text and minimize `<br/>` count in flowchart `[]` node labels.** This is a *runtime layout error*, not a parse error: the d3-curve label-placement pass throws *"Could not find a suitable point for the given distance"* and the diagram renders as an empty box on github.com. The failure is non-deterministic across feature branches vs. main (different cache/build of GitHub's mermaid renderer), so it's possible for a PR review to show all blocks rendering fine and then break after merge — that exact regression is what surfaced this rule ([PR #66](https://github.com/zxkane/autonomous-dev-team/pull/66) post-merge). Prefer single-line message and node labels; if a label feels too long, restate the detail in the prose immediately after the diagram.
+
 Side notes: `≥`, `≠`, `⇒` (Unicode comparison/arrow chars) render fine. Parens around words are fine (`[Step 1<br/>concurrency cap?]`). The Unicode minus `−` in node labels is fine but `+` and `=` adjacent to identifiers can confuse the parser — write the words `add`/`remove` if in doubt.
 
 #### Validation procedure (mandatory for any PR that adds or edits a mermaid block)
@@ -72,6 +74,8 @@ Side notes: `≥`, `≠`, `⇒` (Unicode comparison/arrow chars) render fine. Pa
 5. If using Claude Code with the chrome-devtools MCP installed, `mcp__chrome-devtools__new_page` + `wait_for(["Parse error", "<a heading after the block>"])` automates this — see [PR #66](https://github.com/zxkane/autonomous-dev-team/pull/66) discussion for the playbook.
 
 If a block fails, fix it locally, push again, re-verify. Do NOT merge a PR with a broken mermaid block visible on github.com.
+
+**After merge, re-verify on `main`.** GitHub's mermaid renderer (`viewscreen.githubusercontent.com`) caches per ref, and feature-branch and main caches can hit different mermaid builds. A block that renders fine on the PR head can break on main (rule 4 above is the symptom this exposes). Open `https://github.com/<owner>/<repo>/blob/main/<path>.md` once the merge lands.
 
 ### Escape hatch: `pipeline-docs:none` label
 

@@ -15,7 +15,7 @@ sequenceDiagram
     participant GH as GitHub API
 
     D->>D: kill_stale_wrapper(PID_FILE)
-    D->>W: nohup autonomous-dev.sh --issue N --mode new<br/>(or --mode resume --session ID)
+    D->>W: nohup autonomous-dev.sh --issue N --mode new (or --mode resume --session ID)
     W->>L: source lib-agent.sh and lib-auth.sh
     W->>W: setup_github_auth (token or App)
     W->>W: acquire_pid_guard(PID_FILE)
@@ -106,20 +106,20 @@ The trap is the wrapper's actual contract with the dispatcher — it runs on eve
 
 ```mermaid
 flowchart TD
-    enter([trap fires<br/>exit_code captured]) --> rm_pid[rm -f PID_FILE]
+    enter([trap fires]) --> rm_pid[rm -f PID_FILE]
     rm_pid --> ran{AGENT_RAN?}
     ran -- false --> auth_done[cleanup_github_auth]
     auth_done --> done([exit])
 
-    ran -- true --> refresh[refresh GH App token<br/>just in case]
-    refresh --> session_report[post Agent Session Report<br/>session_id, exit_code, mode, log path]
+    ran -- true --> refresh[refresh App token]
+    refresh --> session_report[post Session Report]
     session_report --> exit_branch{exit_code == 0?}
 
-    exit_branch -- yes --> pr_check{PR exists for issue?}
-    pr_check -- yes --> to_review[remove in-progress<br/>remove pending-dev<br/>add pending-review]
-    pr_check -- no --> to_dev_no_pr[comment 'exited 0 but no PR'<br/>remove in-progress<br/>add pending-dev]
+    exit_branch -- yes --> pr_check{PR exists?}
+    pr_check -- yes --> to_review[set pending-review]
+    pr_check -- no --> to_dev_no_pr[set pending-dev no-PR]
 
-    exit_branch -- no --> to_dev_fail[remove in-progress<br/>add pending-dev]
+    exit_branch -- no --> to_dev_fail[set pending-dev fail]
 
     to_review --> auth_done
     to_dev_no_pr --> auth_done
