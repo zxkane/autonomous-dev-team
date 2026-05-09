@@ -52,8 +52,10 @@ After the guards: `nohup autonomous-dev.sh --issue N --mode {new|resume} ... >> 
 
 The PID file naming is fixed by [INV-01](invariants.md#inv-01-pid-file-naming):
 
-- dev-new / dev-resume → `/tmp/agent-${PROJECT_ID}-issue-<N>.pid`
-- review → `/tmp/agent-${PROJECT_ID}-review-<N>.pid` (different prefix so dev and review for the same issue don't collide).
+- dev-new / dev-resume → `${PID_DIR}/issue-<N>.pid`
+- review → `${PID_DIR}/review-<N>.pid` (different basename so dev and review for the same issue don't collide).
+
+`${PID_DIR}` is the per-user runtime directory returned by `lib-config.sh::pid_dir_for_project` (`$XDG_RUNTIME_DIR/autonomous-${PROJECT_ID}` or `$HOME/.local/state/autonomous-${PROJECT_ID}`, mode 0700). PR-7 moved PID files out of `/tmp` to close CWE-377 (#72).
 
 ## Auth setup (`lib-auth.sh`)
 

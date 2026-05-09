@@ -133,9 +133,10 @@ Find issues labeled `in-progress` OR `reviewing`.
 For each match:
 
 1. **Skip if in `JUST_DISPATCHED`** ([INV-09](invariants.md#inv-09-just_dispatched-skip-rule)).
-2. **Locate PID file**:
-   - `in-progress` → `/tmp/agent-${PROJECT_ID}-issue-<N>.pid` ([INV-01](invariants.md#inv-01-pid-file-naming))
-   - `reviewing` → `/tmp/agent-${PROJECT_ID}-review-<N>.pid`
+2. **Locate PID file** ([INV-01](invariants.md#inv-01-pid-file-naming)):
+   - `in-progress` → `${PID_DIR}/issue-<N>.pid`
+   - `reviewing` → `${PID_DIR}/review-<N>.pid`
+   - `${PID_DIR}` is computed by `lib-config.sh::pid_dir_for_project` (per-user runtime dir, mode 0700).
 3. **Liveness probe**: `kill -0 $(cat <pid-file>)`. PID file is also re-checked for the symlink-attack defense ([INV-02](invariants.md#inv-02-pid-file-is-not-a-symlink)).
 4. Branch on liveness:
    - **ALIVE + `in-progress`** → Step 5a (below). Reviewers in `reviewing` are not subject to the 5a SIGTERM logic — review wrappers are bounded by their own internal polling.

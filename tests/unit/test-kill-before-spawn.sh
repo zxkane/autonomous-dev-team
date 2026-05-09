@@ -108,20 +108,23 @@ fi
 assert_match "PID_FILE selected per type" \
   'dev-new\|dev-resume\)\s*PID_FILE=|case "?\$TYPE"? in.*PID_FILE' "$DISPATCH_CONTENT"
 
-# Each branch must pick the correct path: dev paths use -issue-, review uses
-# -review-. Guard against a swap-typo regression where dev-new accidentally
-# points at the review PID file or vice-versa.
+# Each branch must pick the correct path: dev paths contain "issue-N", review
+# contains "review-N". Guard against a swap-typo regression where dev-new
+# accidentally points at the review PID file or vice-versa.
+# PR-7 (#72) moved PID files from /tmp/agent-${PROJECT_ID}-{issue,review}-N.pid
+# to ${PID_DIR}/{issue,review}-N.pid — so the substring marker becomes the
+# basename rather than a "-issue-" / "-review-" infix.
 DEV_PATH_BLOCK=$(grep -E 'dev-new\|dev-resume\)\s*PID_FILE=' <<<"$DISPATCH_CONTENT")
 REVIEW_PATH_BLOCK=$(grep -E 'review\)\s*PID_FILE=' <<<"$DISPATCH_CONTENT")
-if [[ "$DEV_PATH_BLOCK" == *"-issue-"* ]] && [[ "$DEV_PATH_BLOCK" != *"-review-"* ]]; then
-  echo -e "  ${GREEN}PASS${NC}: dev-new/dev-resume picks the -issue- PID file"
+if [[ "$DEV_PATH_BLOCK" == *"issue-"* ]] && [[ "$DEV_PATH_BLOCK" != *"review-"* ]]; then
+  echo -e "  ${GREEN}PASS${NC}: dev-new/dev-resume picks the issue-N PID file"
   PASS=$((PASS+1))
 else
   echo -e "  ${RED}FAIL${NC}: dev branch path is wrong: '$DEV_PATH_BLOCK'"
   FAIL=$((FAIL+1))
 fi
-if [[ "$REVIEW_PATH_BLOCK" == *"-review-"* ]] && [[ "$REVIEW_PATH_BLOCK" != *"-issue-"* ]]; then
-  echo -e "  ${GREEN}PASS${NC}: review picks the -review- PID file"
+if [[ "$REVIEW_PATH_BLOCK" == *"review-"* ]] && [[ "$REVIEW_PATH_BLOCK" != *"issue-"* ]]; then
+  echo -e "  ${GREEN}PASS${NC}: review picks the review-N PID file"
   PASS=$((PASS+1))
 else
   echo -e "  ${RED}FAIL${NC}: review branch path is wrong: '$REVIEW_PATH_BLOCK'"

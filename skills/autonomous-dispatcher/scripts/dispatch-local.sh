@@ -38,6 +38,13 @@ fi
 PROJECT_ID="${PROJECT_ID:-project}"
 PROJECT_DIR="${PROJECT_DIR:?Set PROJECT_DIR in autonomous.conf}"
 
+# Pull in pid_dir_for_project (closes #72). Must be sourced AFTER PROJECT_ID
+# is in scope — the helper enforces it via : "${PROJECT_ID:?...}".
+# shellcheck source=lib-config.sh
+source "${SCRIPT_DIR}/lib-config.sh"
+
+PID_DIR=$(pid_dir_for_project) || { echo "ERROR: cannot resolve PID dir" >&2; exit 1; }
+
 # Pre-create log files with restrictive permissions (agent output may contain secrets)
 LOG_PREFIX="/tmp/agent-${PROJECT_ID}"
 case "$TYPE" in
@@ -124,8 +131,8 @@ kill_stale_wrapper() {
 }
 
 case "$TYPE" in
-  dev-new|dev-resume) PID_FILE="${LOG_PREFIX}-issue-${ISSUE_NUM}.pid" ;;
-  review)             PID_FILE="${LOG_PREFIX}-review-${ISSUE_NUM}.pid" ;;
+  dev-new|dev-resume) PID_FILE="${PID_DIR}/issue-${ISSUE_NUM}.pid" ;;
+  review)             PID_FILE="${PID_DIR}/review-${ISSUE_NUM}.pid" ;;
   *)                  PID_FILE="" ;;
 esac
 if [[ -n "$PID_FILE" ]]; then

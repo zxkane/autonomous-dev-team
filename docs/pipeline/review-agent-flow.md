@@ -55,7 +55,7 @@ sequenceDiagram
 
 Same pattern as the dev wrapper — see [`dev-agent-flow.md`](dev-agent-flow.md#spawn-in-dispatch-localsh) — except:
 
-- PID file: `/tmp/agent-${PROJECT_ID}-review-<N>.pid` ([INV-01](invariants.md#inv-01-pid-file-naming)).
+- PID file: `${PID_DIR}/review-<N>.pid` ([INV-01](invariants.md#inv-01-pid-file-naming)) — `${PID_DIR}` resolved by `lib-config.sh::pid_dir_for_project`.
 - Auth: review-agent app mode uses `REVIEW_AGENT_APP_ID` / `REVIEW_AGENT_APP_PEM` (separate App identity from dev so reviewer comments are attributed correctly).
 
 ## PR discovery (3 fallback methods)

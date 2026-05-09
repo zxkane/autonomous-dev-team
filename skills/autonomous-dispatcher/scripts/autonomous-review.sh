@@ -68,7 +68,10 @@ fi
 cd "$PROJECT_DIR" || { echo "Error: cannot cd to $PROJECT_DIR" >&2; exit 1; }
 
 LOG_FILE="/tmp/agent-${PROJECT_ID}-review-${ISSUE_NUMBER}.log"
-PID_FILE="/tmp/agent-${PROJECT_ID}-review-${ISSUE_NUMBER}.pid"
+# PID file lives in the per-user PID dir (closes #72). pid_dir_for_project
+# is in lib-config.sh, sourced transitively via lib-agent.sh.
+PID_DIR=$(pid_dir_for_project) || { echo "ERROR: cannot resolve PID dir" >&2; exit 1; }
+PID_FILE="${PID_DIR}/review-${ISSUE_NUMBER}.pid"
 
 # Create log file with restrictive permissions (sensitive agent output)
 # Note: log file is created by nohup redirect in dispatch-local.sh.

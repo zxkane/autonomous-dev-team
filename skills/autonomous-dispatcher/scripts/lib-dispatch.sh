@@ -235,12 +235,24 @@ is_session_completed() {
 # Step 5: stale detection helpers
 # ---------------------------------------------------------------------------
 
+# Resolve the PID file path for this issue+kind. Centralized so pid_alive
+# and get_pid stay in lockstep with the wrapper-side path scheme.
+# Echoes the path (or empty string if pid_dir_for_project fails — the
+# callers already treat "no PID file" as "DEAD" so a soft failure here is
+# safe and matches the prior /tmp behavior on filesystem errors).
+_pid_file_for() {
+  local kind="$1" issue_num="$2" dir
+  dir=$(pid_dir_for_project 2>/dev/null) || return 0
+  echo "${dir}/${kind}-${issue_num}.pid"
+}
+
 # Returns 0 if the wrapper PID for this issue+kind is alive, 1 otherwise.
 # `kind` is "issue" (dev wrapper) or "review".
 pid_alive() {
   local kind="$1" issue_num="$2"
   local pid_file pid
-  pid_file="/tmp/agent-${PROJECT_ID}-${kind}-${issue_num}.pid"
+  pid_file=$(_pid_file_for "$kind" "$issue_num")
+  [ -n "$pid_file" ] || return 1
   pid=$(cat "$pid_file" 2>/dev/null || echo "")
   [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
 }
@@ -248,7 +260,9 @@ pid_alive() {
 # Echoes the current PID for the issue+kind, or empty if none.
 get_pid() {
   local kind="$1" issue_num="$2"
-  cat "/tmp/agent-${PROJECT_ID}-${kind}-${issue_num}.pid" 2>/dev/null || echo ""
+  local pid_file
+  pid_file=$(_pid_file_for "$kind" "$issue_num")
+  [ -n "$pid_file" ] && cat "$pid_file" 2>/dev/null || echo ""
 }
 
 # Step 5a/5b: fetch PR info for the issue. Echoes the JSON object (single

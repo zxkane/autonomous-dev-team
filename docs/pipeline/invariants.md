@@ -16,23 +16,32 @@ Some invariants below describe behavior the **code does not yet enforce** — th
 
 ## INV-01: PID file naming
 
-**Rule**: Wrappers write their PID to a file named `/tmp/agent-${PROJECT_ID}-issue-<N>.pid` (dev wrapper) or `/tmp/agent-${PROJECT_ID}-review-<N>.pid` (review wrapper).
+**Rule**: Wrappers write their PID to `${PID_DIR}/issue-<N>.pid` (dev wrapper) or `${PID_DIR}/review-<N>.pid` (review wrapper), where `${PID_DIR}` is the per-user runtime directory returned by `lib-config.sh::pid_dir_for_project`.
 
-**Why**: The dispatcher's Step 5 stale-detection relies on knowing exactly where to look for a wrapper's liveness. Different prefixes for dev vs. review let the dispatcher distinguish ALIVE-in-progress (eligible for Step 5a) from ALIVE-reviewing (not eligible).
+`PID_DIR` resolution priority:
 
-**Producer**: `acquire_pid_guard` in `lib-agent.sh`, called from `autonomous-dev.sh` and `autonomous-review.sh`.
-**Consumer**: dispatcher Step 5a / 5b, `dispatch-local.sh::kill_stale_wrapper`.
-**Test**: TODO: add test (`tests/unit/test-pid-file-naming.sh`).
+1. `${AUTONOMOUS_PID_DIR}` — env override (used by tests).
+2. `${XDG_RUNTIME_DIR}/autonomous-${PROJECT_ID}` — canonical Linux per-user runtime, mode 0700 by spec.
+3. `${HOME}/.local/state/autonomous-${PROJECT_ID}` — fallback when `XDG_RUNTIME_DIR` is unset.
+
+The helper `mkdir -p`s the directory and `chmod 700`s it on first call.
+
+**Why**: The dispatcher's Step 5 stale-detection relies on knowing exactly where to look for a wrapper's liveness. Different basenames (`issue-N` vs `review-N`) let the dispatcher distinguish ALIVE-in-progress (eligible for Step 5a) from ALIVE-reviewing (not eligible). PR-7 moved these out of the predictable `/tmp/agent-${PROJECT_ID}-{issue,review}-N.pid` paths because predictable `/tmp` paths are CWE-377 (Insecure Temporary File): a local attacker who can guess `PROJECT_ID` and issue numbers could DoS the pipeline by planting symlinks faster than wrappers can spawn (#72). The per-user dir's 0700 mode makes the predictability harmless — no other local user can plant in there.
+
+**Producer**: `acquire_pid_guard` in `lib-agent.sh`, called from `autonomous-dev.sh` and `autonomous-review.sh`. The PID file path is computed at the call site by combining `pid_dir_for_project` output with `issue-<N>.pid` / `review-<N>.pid`.
+**Consumer**: dispatcher Step 5a / 5b (`lib-dispatch.sh::pid_alive`, `get_pid` — both use the same helper), `dispatch-local.sh::kill_stale_wrapper`.
+**Status**: **ENFORCED** in PR-7 (closes #72).
+**Test**: `tests/unit/test-pid-dir-helper.sh` (13 cases) covers the helper. `tests/unit/test-kill-before-spawn.sh` covers the call sites.
 
 ## INV-02: PID file is not a symlink
 
 **Rule**: Both `acquire_pid_guard` (in `lib-agent.sh`) and `kill_stale_wrapper` (in `dispatch-local.sh`) MUST refuse to operate on a PID file that is a symlink, and exit 1 immediately on detection.
 
-**Why**: CWE-59 — without this check, a local attacker could plant a symlink at `/tmp/agent-${PROJECT_ID}-issue-N.pid → /etc/passwd` and trigger a write or `cat` against arbitrary files when the dispatcher / wrapper next ran.
+**Why**: CWE-59 (Link Following). Originally the primary defense for the predictable `/tmp` PID paths; with [INV-01]'s per-user PID dir (PR-7, mode 0700), this becomes belt-and-suspenders rather than the only line of defense. The defense costs ~3 lines of bash and remains valuable: `pid_dir_for_project` itself refuses a symlinked dir, and the per-PID-file check catches edge cases where the user's own ~/.local/state/autonomous-${PROJECT_ID} is somehow tampered with.
 
-**Producer**: `acquire_pid_guard`, `kill_stale_wrapper`.
+**Producer**: `acquire_pid_guard`, `kill_stale_wrapper`, plus `pid_dir_for_project` (which refuses to use a symlinked parent dir — same defense one level up).
 **Consumer**: itself (the check is a precondition, not a consumed value).
-**Test**: TODO: add test (`tests/unit/test-pid-file-symlink-refuse.sh`).
+**Test**: `tests/unit/test-kill-before-spawn.sh` TC-DKBS-006, `tests/unit/test-pid-dir-helper.sh` TC-PD-005.
 
 ## INV-03: Dev session report comment format
 

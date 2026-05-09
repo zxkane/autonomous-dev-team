@@ -54,3 +54,52 @@ load_autonomous_conf() {
   export AUTONOMOUS_CONF_LOADED_FROM
   return 0
 }
+
+# pid_dir_for_project — echo the per-user directory holding wrapper PID
+# files for this project. Replaces the predictable `/tmp/agent-...` paths
+# (CWE-377, #72) with a path under $XDG_RUNTIME_DIR (canonical Linux per-user
+# runtime, mode 0700 by spec) or the $HOME/.local/state fallback. Both are
+# already inaccessible to other local users, so no per-spawn mktemp
+# randomness is needed.
+#
+# Path resolution priority:
+#   1. ${AUTONOMOUS_PID_DIR}                         (override; used by tests)
+#   2. ${XDG_RUNTIME_DIR}/autonomous-${PROJECT_ID}   (preferred)
+#   3. ${HOME}/.local/state/autonomous-${PROJECT_ID} (fallback)
+#
+# Idempotent: creates the dir + chmod 700 on first call, leaves it alone
+# on subsequent calls. Refuses to operate if the path is a pre-existing
+# symlink (CWE-59 defense in depth — the parent dir mode is 0700 so this
+# should never trigger, but cheap to keep).
+#
+# Returns:
+#   echoes path on stdout, rc=0 on success.
+#   echoes nothing, rc=1 on error (writes diagnostic to stderr).
+pid_dir_for_project() {
+  : "${PROJECT_ID:?pid_dir_for_project: PROJECT_ID must be set}"
+
+  local dir
+  if [[ -n "${AUTONOMOUS_PID_DIR:-}" ]]; then
+    dir="${AUTONOMOUS_PID_DIR}"
+  elif [[ -n "${XDG_RUNTIME_DIR:-}" ]] && [[ -d "${XDG_RUNTIME_DIR}" ]]; then
+    dir="${XDG_RUNTIME_DIR}/autonomous-${PROJECT_ID}"
+  else
+    : "${HOME:?pid_dir_for_project: HOME must be set when XDG_RUNTIME_DIR is unset}"
+    dir="${HOME}/.local/state/autonomous-${PROJECT_ID}"
+  fi
+
+  if [[ -L "$dir" ]]; then
+    echo "pid_dir_for_project: refusing to use symlinked path: $dir" >&2
+    return 1
+  fi
+
+  if ! mkdir -p "$dir" 2>/dev/null; then
+    echo "pid_dir_for_project: cannot create $dir" >&2
+    return 1
+  fi
+  # chmod every call: cheap, and self-heals if a previous run created the
+  # dir before we started enforcing 0700.
+  chmod 700 "$dir" 2>/dev/null || true
+
+  echo "$dir"
+}
