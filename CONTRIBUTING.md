@@ -13,8 +13,8 @@ To stop that pattern: **any change to pipeline behavior MUST update [`docs/pipel
 A change is a pipeline-behavior change if it touches any of:
 
 - `skills/autonomous-dispatcher/scripts/**/*.sh`
-- `skills/autonomous-dev/scripts/**/*.sh` (when added)
-- `skills/autonomous-review/scripts/**/*.sh` (when added)
+- `skills/autonomous-dev/scripts/**/*.sh`
+- `skills/autonomous-review/scripts/**/*.sh`
 - `skills/autonomous-common/hooks/**/*.sh`
 - `skills/autonomous-common/scripts/**/*.sh`
 - `skills/autonomous-{dispatcher,dev,review,common}/SKILL.md`
