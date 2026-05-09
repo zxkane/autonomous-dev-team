@@ -89,6 +89,24 @@ LOG_FILE="/tmp/agent-${PROJECT_ID}-issue-${ISSUE_NUMBER}.log"
 PID_FILE="/tmp/agent-${PROJECT_ID}-issue-${ISSUE_NUMBER}.pid"
 AGENT_RAN=false
 
+# SIGTERM-aware exit routing (INV-15, closes #67).
+# Dispatcher Step 5a SIGTERMs us when "ALIVE + PR ready". Bash exits with
+# status 143; without this flag the cleanup trap takes the failure branch
+# and writes +pending-dev — but the dispatcher writes +pending-review.
+# Two writers, divergent targets → last-writer-wins (typically pending-dev).
+# Flipping this flag lets cleanup() rewrite exit_code=0 when a PR exists,
+# converging both writers on +pending-review.
+RECEIVED_SIGTERM=0
+on_sigterm() {
+  RECEIVED_SIGTERM=1
+  # Forward TERM to descendants so the agent CLI exits promptly. Without this,
+  # bash queues the signal until the foreground `run_agent` returns naturally
+  # (which is potentially hours away). pkill -P matches direct children only;
+  # the timeout/agent process tree exits cleanly via SIGTERM cascade.
+  pkill -TERM -P $$ 2>/dev/null || true
+}
+trap on_sigterm TERM
+
 # Note: log file is created by nohup redirect in dispatch-local.sh.
 # Do NOT truncate it here (install -m 600 /dev/null would destroy nohup output).
 
@@ -127,6 +145,24 @@ cleanup() {
     fi
   fi
 
+  # Look up PR-exists state once (used by SIGTERM rewrite and the success path).
+  local PR_EXISTS
+  PR_EXISTS=$(gh pr list --repo "$REPO" --state open --json body \
+    -q "[.[] | select(.body | test(\"#${ISSUE_NUMBER}[^0-9]\") or test(\"#${ISSUE_NUMBER}$\"))] | length" 2>/dev/null || echo "0")
+
+  # SIGTERM convergence (INV-15): Step 5a only kills us when a PR is ready.
+  # Treat SIGTERM+PR as a successful handoff (exit_code → 0) so the success
+  # branch routes to pending-review instead of the failure branch routing to
+  # pending-dev. SIGTERM without a PR is still a failure (e.g. operator kill).
+  if [[ "$RECEIVED_SIGTERM" -eq 1 ]]; then
+    if [[ "$PR_EXISTS" -gt 0 ]]; then
+      log "Caught SIGTERM with PR present; treating as PR-handoff (exit_code 143 → 0)."
+      exit_code=0
+    else
+      log "Caught SIGTERM with no PR; keeping exit_code ${exit_code} (will route to pending-dev)."
+    fi
+  fi
+
   # Post session report
   gh issue comment "$ISSUE_NUMBER" --repo "$REPO" --body "$(cat <<EOF
 **Agent Session Report (Dev)**
@@ -140,9 +176,6 @@ EOF
 
   # Transition labels based on whether agent succeeded or failed
   if [[ $exit_code -eq 0 ]]; then
-    # Verify a PR was actually created before declaring success
-    PR_EXISTS=$(gh pr list --repo "$REPO" --state open --json body \
-      -q "[.[] | select(.body | test(\"#${ISSUE_NUMBER}[^0-9]\") or test(\"#${ISSUE_NUMBER}$\"))] | length" 2>/dev/null || echo "0")
     if [[ "$PR_EXISTS" -gt 0 ]]; then
       # PR found: move to pending-review for the review agent
       gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \

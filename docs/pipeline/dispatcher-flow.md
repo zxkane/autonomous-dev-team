@@ -105,6 +105,18 @@ Find the most recent comment matching `Dev Session ID: \`<id>\`` (note: `Review 
 
 If no session-id can be extracted, the resume cannot proceed. Today, the dispatcher dispatches a new dev session anyway (the wrapper's `--mode resume` path falls back to `--mode new` when `SESSION_ID` is empty — see [`dev-agent-flow.md`](dev-agent-flow.md#mode-normalization)).
 
+### Step 4b.5: terminal-state gate (PR-6, [INV-12](invariants.md#inv-12-resume-only-against-unfinished-sessions))
+
+Before dispatching a resume, call `is_session_completed <issue>` (in `lib-dispatch.sh`). The helper inspects the agent log at `/tmp/agent-${PROJECT_ID}-issue-<N>.log`, finds the last `{"type":"result", ...}` JSON object, and returns 0 if `stop_reason=end_turn` AND `terminal_reason=completed`.
+
+If the gate fires:
+
+1. Post a comment naming the session-id and inviting an operator to manually flip to `pending-review` (PR exists) or close the issue (work done).
+2. Append the issue to `JUST_DISPATCHED` so Step 5 doesn't reprobe it on the same tick.
+3. **Do not** transition the label automatically. The issue stays in `pending-dev`. Silent recovery would mask other failure modes — surface the symptom and let a human decide.
+
+This is a conservative gate: it only fires when the helper is certain the prior session ended cleanly. False negatives (claiming "not completed" when it was) just keep the prior behavior — Step 4c attempts the resume, and the wall-clock timeout from [INV-13](invariants.md#inv-13-wall-clock-cap-on-agent-invocations) bounds the damage to `AGENT_TIMEOUT` (default `4h`).
+
 ### Step 4c: dispatch resume
 
 1. **Atomic label swap**: `gh issue edit --remove-label pending-dev --add-label in-progress`.
@@ -149,7 +161,7 @@ When all gates hold:
 2. Comment: "Dev process still alive but PR #N is ready (all CI checks passed, idle Ns). Sent SIGTERM to PID. Moving to pending-review."
 3. `gh issue edit --remove-label in-progress --add-label pending-review`.
 
-**Known imperfection** ([INV-15](invariants.md#inv-15-step-5a-sigterm-race-is-non-deterministic)): the wrapper trap fires on SIGTERM with bash exit 143, takes the failure branch, and writes `+pending-dev` — different from the dispatcher's `+pending-review`. The race outcome is whichever `gh issue edit` lands last; in practice the trap's edit lands ~1s later (it posts the Session Report comment first), so the typical outcome is the issue ending up at `pending-dev`. The PR is preserved; the next dispatcher tick recovers via dev-resume. Review is delayed by one tick. See [`state-machine.md` § Wrapper trap vs. dispatcher Step 5](state-machine.md#wrapper-trap-vs-dispatcher-step-5).
+**Convergence with the wrapper trap** ([INV-15](invariants.md#inv-15-step-5a-sigterm-race-is-non-deterministic)) — fixed in PR-6: the dev wrapper installs `trap on_sigterm TERM` that sets `RECEIVED_SIGTERM=1` and forwards SIGTERM to descendants. Its `cleanup()` rewrites `exit_code 143 → 0` when a PR exists, so the wrapper's own label edit also targets `+pending-review`. Both writers now agree on the target; the dispatcher's edit here is belt-and-suspenders against SIGKILL escalation (where the trap may not fire at all). See [`state-machine.md` § Wrapper trap vs. dispatcher Step 5](state-machine.md#wrapper-trap-vs-dispatcher-step-5).
 
 #### Robustness against malformed responses
 
@@ -194,7 +206,7 @@ Labels: `−reviewing +pending-dev`.
 | `date` parse fails on PR.updatedAt | Step 5a | WARN, leave alone (fail-closed — see above). |
 | Concurrent dispatcher instance | tick-tick | `mktemp` for CI-error capture file (CWE-377 mitigation). Concurrent ticks otherwise serialize on `gh issue edit` — the second one's edits race but converge. |
 | `JUST_DISPATCHED` not maintained | Step 5 | Step 5 evaluates a freshly-dispatched issue, sees no PID file yet, diagnoses DEAD-no-PR, increments crash counter, eventually marks stalled. **This was the root of #34, #41 — the array exists specifically to prevent this.** |
-| Resume against a completed session | Step 4 | Currently the wrapper hangs indefinitely on the streaming socket. Tracked by [#59](https://github.com/zxkane/autonomous-dev-team/issues/59); fix in PR-5 will add a session-terminal-state check before resume ([INV-12](invariants.md#inv-12-resume-only-against-unfinished-sessions)). |
+| Resume against a completed session | Step 4b.5 | PR-6 added `is_session_completed` ([INV-12](invariants.md#inv-12-resume-only-against-unfinished-sessions)). Step 4b.5 inspects the agent log; if the prior turn ended with `stop_reason=end_turn` AND `terminal_reason=completed`, the dispatcher posts an explanatory comment and skips the resume — leaving the issue in `pending-dev` for an operator to flip manually. The wall-clock timeout ([INV-13](invariants.md#inv-13-wall-clock-cap-on-agent-invocations)) is the safety net for false negatives. |
 | Agent invocation hangs in CLI | wrapper, not dispatcher | Bounded by future wall-clock timeout ([#60](https://github.com/zxkane/autonomous-dev-team/issues/60), [INV-13](invariants.md#inv-13-wall-clock-cap-on-agent-invocations)). Until then the dispatcher's Step 5a is the only way to clear it. |
 
 ## Cross-references

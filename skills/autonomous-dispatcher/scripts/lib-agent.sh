@@ -24,6 +24,38 @@ AGENT_REVIEW_MODEL="${AGENT_REVIEW_MODEL:-sonnet}"
 AGENT_PERMISSION_MODE="${AGENT_PERMISSION_MODE:-auto}"
 KIRO_AGENT_NAME="${KIRO_AGENT_NAME:-autonomous-dev}"
 
+# Wall-clock cap on agent invocations (INV-13, closes #60).
+# Wraps run_agent / resume_agent in coreutils `timeout` so a hung CLI cannot
+# eat indefinite wall time (observed: claude --resume against a completed
+# session sat in epoll_wait for 8h, #59).
+#
+# AGENT_TIMEOUT accepts the same units as `timeout(1)` (s/m/h/d). Default 4h
+# is generous — the longest healthy real run we have observed is ~6h, and
+# the hang case sat for 8h+. Override per-deployment in autonomous.conf.
+#
+# We resolve the binary once at source time (not per-call): on macOS users
+# install GNU coreutils via Homebrew, which provides `gtimeout`. If neither
+# is available we fall through to an unwrapped invocation with a one-time
+# WARN log — no hard requirement.
+AGENT_TIMEOUT="${AGENT_TIMEOUT:-4h}"
+_AGENT_TIMEOUT_CMD="$(command -v timeout || command -v gtimeout || true)"
+if [[ -z "$_AGENT_TIMEOUT_CMD" ]]; then
+  echo "[lib-agent] WARN: neither 'timeout' nor 'gtimeout' found on PATH; agent invocations will run without a wall-clock bound. Install coreutils to enable INV-13." >&2
+fi
+
+# _run_with_timeout — invoke "$@" under timeout if available, otherwise run
+# directly. --kill-after=30s escalates to SIGKILL if the agent ignores the
+# initial SIGTERM (some MCP children trap TERM and need the harder push).
+# --signal=TERM lets the agent flush any final SSE bytes before dying.
+# Exit codes: passthrough on normal exit; 124 on TERM-timeout; 137 on KILL.
+_run_with_timeout() {
+  if [[ -n "$_AGENT_TIMEOUT_CMD" ]]; then
+    "$_AGENT_TIMEOUT_CMD" --kill-after=30s --signal=TERM "$AGENT_TIMEOUT" "$@"
+  else
+    "$@"
+  fi
+}
+
 # Acquire PID guard: prevent duplicate instances for the same issue.
 # Checks for symlink attacks, running processes, then writes current PID.
 # Args: $1=pid_file, $2=label (e.g. "autonomous-dev"), $3=issue_number
@@ -52,7 +84,7 @@ run_agent() {
   case "$AGENT_CMD" in
     claude)
       # Unset CLAUDECODE to allow launching from within an existing session
-      env -u CLAUDECODE "$AGENT_CMD" --session-id "$session_id" \
+      _run_with_timeout env -u CLAUDECODE "$AGENT_CMD" --session-id "$session_id" \
         ${session_name:+--name "$session_name"} \
         --permission-mode "$AGENT_PERMISSION_MODE" \
         ${model:+--model "$model"} \
@@ -60,7 +92,7 @@ run_agent() {
         --output-format json
       ;;
     codex)
-      "$AGENT_CMD" \
+      _run_with_timeout "$AGENT_CMD" \
         ${model:+--model "$model"} \
         -p "$prompt"
       ;;
@@ -69,14 +101,14 @@ run_agent() {
       # Each invocation starts a new conversation in the current directory.
       # --agent ensures the workspace agent (with TDD hooks) is used.
       # Tool trust is handled by allowedTools in .kiro/agents/default.json.
-      kiro-cli chat \
+      _run_with_timeout kiro-cli chat \
         --agent "$KIRO_AGENT_NAME" \
         --no-interactive \
         ${model:+--model "$model"} \
         "$prompt"
       ;;
     *)
-      "$AGENT_CMD" -p "$prompt"
+      _run_with_timeout "$AGENT_CMD" -p "$prompt"
       ;;
   esac
 }
@@ -96,7 +128,7 @@ resume_agent() {
     claude)
       # Unset CLAUDECODE to allow launching from within an existing session
       # --name is omitted: the session retains the name set at creation.
-      env -u CLAUDECODE "$AGENT_CMD" --resume "$session_id" \
+      _run_with_timeout env -u CLAUDECODE "$AGENT_CMD" --resume "$session_id" \
         --permission-mode "$AGENT_PERMISSION_MODE" \
         ${model:+--model "$model"} \
         -p "$prompt" \

@@ -123,6 +123,19 @@ for i in $(seq 0 $((pd_count - 1))); do
   fi
 
   session_id=$(extract_dev_session_id "$issue_num")
+
+  # [INV-12] Skip resume if the prior session ended normally (closes #59).
+  # Resuming a completed claude session attaches to the SSE stream forever.
+  # Don't auto-recover: leave the issue in pending-dev so an operator decides
+  # whether to flip to pending-review (PR present) or close (work done).
+  if [ -n "$session_id" ] && is_session_completed "$issue_num"; then
+    log "  issue #${issue_num} session ${session_id} already completed — skipping resume"
+    gh issue comment "$issue_num" --repo "$REPO" \
+      --body "Session \`${session_id}\` already ended (stop_reason=end_turn, terminal_reason=completed). Resume would hang on idle SSE — skipping. Manually transition to \`pending-review\` if a PR exists, or close the issue if work is done."
+    JUST_DISPATCHED+=("$issue_num")
+    continue
+  fi
+
   log "  dispatching dev-resume for issue #${issue_num} (session: ${session_id:-<none>})"
   label_swap "$issue_num" "pending-dev" "in-progress"
   gh issue comment "$issue_num" --repo "$REPO" \

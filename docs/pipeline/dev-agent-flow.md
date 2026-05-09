@@ -94,11 +94,14 @@ The `AUTONOMOUS_CONF` env var bypass takes precedence over filesystem detection 
 
 `autonomous-dev.sh` accepts `--mode resume` with no `--session`. In that case it logs a WARN and falls back to `--mode new`. This handles the dispatcher edge case where Step 4b couldn't extract a session-id from comments — the wrapper still does *something* useful (start fresh) instead of erroring out.
 
-### Resume-on-completed-session hang (#59)
+### Resume-on-completed-session hang (#59) — fixed in PR-6
 
-If the dispatcher resumes a session whose terminal state is `completed` (the previous run ended with `stop_reason=end_turn`, not a crash), the `claude --resume` call connects to the streaming endpoint and never returns — the SSE keepalive holds the socket open while the model has nothing to do.
+If the dispatcher resumes a session whose terminal state is `completed` (the previous run ended with `stop_reason=end_turn`, not a crash), the `claude --resume` call would connect to the streaming endpoint and never return — the SSE keepalive holds the socket open while the model has nothing to do.
 
-The fix (planned for PR-5, [INV-12](invariants.md#inv-12-resume-only-against-unfinished-sessions)) is for the dispatcher's Step 4 to query the session terminal state before issuing a resume, and skip if `terminal_reason=completed`. Combined with the future wall-clock timeout ([INV-13](invariants.md#inv-13-wall-clock-cap-on-agent-invocations)) this becomes defense-in-depth.
+PR-6 closes this with two layers ([INV-12](invariants.md#inv-12-resume-only-against-unfinished-sessions), [INV-13](invariants.md#inv-13-wall-clock-cap-on-agent-invocations)):
+
+1. **Dispatcher gate**: Step 4 calls `is_session_completed` before issuing a resume. If true, it posts a comment naming the session-id and asking the operator to manually decide between `pending-review` (PR exists) or close (work done). The issue stays in `pending-dev` rather than auto-recovering, so the symptom is visible.
+2. **Wall-clock safety net**: even if the gate is wrong (false negative), `lib-agent.sh::_run_with_timeout` caps the CLI at `AGENT_TIMEOUT` (default `4h`). The wrapper then exits with `124`, the trap routes to `pending-dev`, and the next tick decides whether to retry — instead of the wrapper sitting in `epoll_wait` for 8h+.
 
 ## Exit trap (`cleanup`)
 
@@ -112,7 +115,11 @@ flowchart TD
     auth_done --> done([exit])
 
     ran -- true --> refresh[refresh App token]
-    refresh --> session_report[post Session Report]
+    refresh --> pr_lookup[lookup PR_EXISTS once]
+    pr_lookup --> sigterm_check{RECEIVED_SIGTERM AND PR?}
+    sigterm_check -- yes --> rewrite[rewrite exit_code 143 to 0]
+    sigterm_check -- no --> session_report
+    rewrite --> session_report[post Session Report]
     session_report --> exit_branch{exit_code == 0?}
 
     exit_branch -- yes --> pr_check{PR exists?}
@@ -133,7 +140,8 @@ flowchart TD
 - **Session Report format**: see [INV-03](invariants.md#inv-03-dev-session-report-comment-format). The dispatcher's Step 4a parses these to count agent failures.
 - **Token refresh inside trap**: the trap might run hours after `setup_github_auth`; the App token is only valid for 1 hour. The trap proactively refreshes (best-effort — failure is logged but doesn't block label updates from being attempted).
 - **Idempotent against label state** ([INV-08](invariants.md#inv-08-wrapper-exit-trap-is-idempotent-against-label-state)): the trap uses `--remove-label X --add-label Y` in single calls (no temporary "neither label" window for any single side). However, the trap and the dispatcher can target **different** final states — see the next bullet. INV-08 is about the per-edit atomicity, not about cross-actor convergence.
-- **SIGTERM races route to `pending-dev`, NOT `pending-review`** ([INV-15](invariants.md#inv-15-step-5a-sigterm-race-is-non-deterministic)): when Step 5a sends SIGTERM, bash exits with status 143. The trap captures `exit_code=143`, takes the `else` branch (line 160-165 in `autonomous-dev.sh`), and writes `−in-progress +pending-dev`. So the trap and the dispatcher write **different** target states (`pending-dev` vs. `pending-review`); whichever `gh issue edit` lands last wins. Typical timing has the dispatcher's edit landing first, so the trap's `pending-dev` overwrites it ~1s later. This is a known imperfection — the PR is preserved, the next dispatcher tick recovers via dev-resume, but review doesn't fire on this tick.
+- **SIGTERM convergence on `pending-review`** ([INV-15](invariants.md#inv-15-step-5a-sigterm-race-is-non-deterministic)) — fixed in PR-6: a `trap on_sigterm TERM` sets `RECEIVED_SIGTERM=1` and forwards SIGTERM to descendants via `pkill -TERM -P $$` (so the agent CLI exits promptly instead of bash queueing the signal until the foreground `run_agent` returns naturally). In `cleanup()`, when `RECEIVED_SIGTERM=1 && PR_EXISTS>0`, the trap rewrites `exit_code 143 → 0` so it routes through the success branch to `+pending-review`, converging with the dispatcher's Step 5a edit. SIGTERM with no PR keeps `exit_code=143` → `+pending-dev` (covers operator-kill / orphan cases). Step 5a still writes its own label edit as belt-and-suspenders against SIGKILL escalation; both writers now agree on the target.
+- **Wall-clock cap on agent invocations** ([INV-13](invariants.md#inv-13-wall-clock-cap-on-agent-invocations)) — added in PR-6: `lib-agent.sh::_run_with_timeout` wraps every `run_agent` / `resume_agent` invocation in `timeout --kill-after=30s --signal=TERM ${AGENT_TIMEOUT:-4h}`. On exit 124 (or 137 on KILL escalation), the trap sees a non-zero exit_code, takes the failure branch, and routes to `+pending-dev`. This is the universal safety net — it bounds the damage from any hang regardless of root cause (SSE keepalive, MCP stdio deadlock, DNS black hole).
 
 ## Cross-references
 

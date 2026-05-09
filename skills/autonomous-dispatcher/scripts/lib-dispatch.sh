@@ -193,6 +193,38 @@ extract_dev_session_id() {
     -q '[.comments[].body | capture("Dev Session ID: `(?<id>[a-zA-Z0-9_-]+)`"; "g") | .id] | last // empty'
 }
 
+# is_session_completed — return 0 if the agent's last log object indicates a
+# normal end-of-turn (stop_reason=end_turn AND terminal_reason=completed).
+# Used by Step 4 (INV-12, closes #59) to skip resume against a session that
+# the model has nothing left to do for — those resumes attach to the SSE
+# stream and never return.
+#
+# Returns 1 (false) for: AGENT_CMD != claude (other CLIs don't emit the same
+# JSON shape), missing/unreadable log, no JSON object found, malformed JSON,
+# or any non-terminal stop reason. Conservative: a false negative just means
+# we still try to resume (existing behavior); a false positive (claiming
+# completed when it isn't) would mistakenly skip a legitimate retry.
+is_session_completed() {
+  local issue_num="$1"
+  [ "${AGENT_CMD:-claude}" = "claude" ] || return 1
+
+  local log_file="/tmp/agent-${PROJECT_ID}-issue-${issue_num}.log"
+  [ -r "$log_file" ] || return 1
+
+  # Pull the last well-formed top-level JSON object that looks like a result
+  # or assistant turn. Claude --output-format json emits exactly one final
+  # `{"type":"result", ...}` object on clean exit; on crash there may be
+  # partial JSON which jq -e rejects.
+  local last_obj
+  last_obj=$(grep -oE '\{"type":"result"[^}]*\}' "$log_file" 2>/dev/null | tail -1)
+  [ -n "$last_obj" ] || return 1
+
+  local stop terminal
+  stop=$(jq -er '.stop_reason // empty' <<<"$last_obj" 2>/dev/null) || return 1
+  terminal=$(jq -er '.terminal_reason // empty' <<<"$last_obj" 2>/dev/null) || return 1
+  [ "$stop" = "end_turn" ] && [ "$terminal" = "completed" ]
+}
+
 # ---------------------------------------------------------------------------
 # Step 5: stale detection helpers
 # ---------------------------------------------------------------------------
