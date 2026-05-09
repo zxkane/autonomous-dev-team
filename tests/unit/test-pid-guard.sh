@@ -164,7 +164,15 @@ echo ""
 echo "=== SKILL.md Content Verification ==="
 echo ""
 
-SKILL_MD="$PROJECT_ROOT/skills/autonomous-dispatcher/SKILL.md"
+# PR-3 moved the dispatcher tick logic from SKILL.md to dispatcher-tick.sh
+# + lib-dispatch.sh. Read the union of those two scripts so the existing
+# regression assertions (which look for specific bash patterns) keep working.
+SKILL_MD=$(mktemp)
+cat \
+  "$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/dispatcher-tick.sh" \
+  "$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-dispatch.sh" \
+  > "$SKILL_MD"
+trap 'rm -f "$SKILL_MD"' EXIT
 
 if [[ -f "$SKILL_MD" ]]; then
   SKILL_CONTENT=$(cat "$SKILL_MD")
@@ -179,7 +187,9 @@ if [[ -f "$SKILL_MD" ]]; then
   # when the SHA-comparison logic landed (#54), so accept either — but only
   # if it appears in a real conditional (-gt 0 for the count form, or -n for
   # the object form), not just any mention.
-  if echo "$SKILL_CONTENT" | grep -qE '\[ "?\$PR_EXISTS"? -gt 0 \]|\[ -n "?\$PR_INFO"? \]'; then
+  # PR-3 renamed PR_INFO → pr_info; the existence check is the same
+  # bracket-test pattern but with lowercase variable.
+  if echo "$SKILL_CONTENT" | grep -qE '\[ "?\$PR_EXISTS"? -gt 0 \]|\[ -n "?\$PR_INFO"? \]|\[ -z "?\$pr_info"? \]'; then
     echo -e "  ${GREEN}PASS${NC}: PR existence check"
     PASS=$((PASS+1))
   else
@@ -189,8 +199,11 @@ if [[ -f "$SKILL_MD" ]]; then
   assert_contains "No PR crash path" "No PR" "$SKILL_CONTENT"
 
   echo "TC-SKILL-003: SKILL.md counts dispatcher crashes in retry count"
-  assert_contains "DISPATCHER_CRASHES variable" "DISPATCHER_CRASHES" "$SKILL_CONTENT"
-  assert_contains "Combined retry count" 'AGENT_FAILURES + DISPATCHER_CRASHES' "$SKILL_CONTENT"
+  # PR-3 renamed UPPER_CASE → lowercase locals in lib-dispatch.sh helpers.
+  # The semantics (counting two crash sources) are preserved via separate
+  # count_agent_failures + count_dispatcher_crashes functions.
+  assert_contains "dispatcher_crashes counter exists" "dispatcher_crashes" "$SKILL_CONTENT"
+  assert_contains "Combined retry count via two sources" "agent_failures + dispatcher_crashes" "$SKILL_CONTENT"
 else
   echo -e "  ${RED}FAIL${NC}: SKILL.md not found at $SKILL_MD"
   ((FAIL++))

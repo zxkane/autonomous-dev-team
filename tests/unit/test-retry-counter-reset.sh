@@ -39,7 +39,13 @@ assert_not_contains() {
   fi
 }
 
-SKILL_MD="$PROJECT_ROOT/skills/autonomous-dispatcher/SKILL.md"
+# PR-3 moved the retry-counter logic from SKILL.md to lib-dispatch.sh.
+SKILL_MD=$(mktemp)
+cat \
+  "$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/dispatcher-tick.sh" \
+  "$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-dispatch.sh" \
+  > "$SKILL_MD"
+trap 'rm -f "$SKILL_MD"' EXIT
 
 if [[ ! -f "$SKILL_MD" ]]; then
   echo -e "${RED}FATAL${NC}: SKILL.md not found at $SKILL_MD"
@@ -56,7 +62,8 @@ echo "=== TC-RCR-001: Stalled cutoff logic exists ==="
 echo ""
 
 assert_contains "References stalled marker comment" 'Marking as stalled' "$CONTENT"
-assert_contains "Has LAST_STALLED_AT variable" 'LAST_STALLED_AT' "$CONTENT"
+# PR-3 lowercased the local variable to last_stalled_at in lib-dispatch.sh.
+assert_contains "Has last_stalled_at cutoff variable" 'last_stalled_at' "$CONTENT"
 
 # ===========================================================================
 # TC-RCR-002: SKILL.md filters crashes by timestamp
@@ -66,7 +73,7 @@ echo "=== TC-RCR-002: Filters crashes after stalled cutoff ==="
 echo ""
 
 assert_contains "Filters by createdAt" 'createdAt' "$CONTENT"
-assert_contains "Compares timestamps for crash filtering" 'LAST_STALLED_AT' "$CONTENT"
+assert_contains "Compares timestamps for crash filtering" 'last_stalled_at' "$CONTENT"
 
 # ===========================================================================
 # TC-RCR-003: Backward compatible fallback
@@ -106,20 +113,28 @@ echo ""
 # specific quoting style (\", '"', heredoc) — any future reformat that keeps
 # the statement textually present will still be guarded. Uses -A3 to tolerate
 # line breaks within the statement (the real block is 2 lines today).
-DISPATCHER_CRASH_STMT=$(grep -A3 '^DISPATCHER_CRASHES=' "$SKILL_MD")
+# PR-3 moved this from inline DISPATCHER_CRASHES= into a function.
+# count_dispatcher_crashes() now has TWO test() calls in its body:
+#   1. test("Marking as stalled")     — locates the cutoff timestamp
+#   2. test("Task appears...|process") — the actual crash-regex
+# Only #2 is the one we're regression-guarding (broadening it would re-
+# introduce the false-positive bug). Grab only the line with the crash regex.
+DISPATCHER_CRASH_STMT=$(awk '/^count_dispatcher_crashes\(\)/,/^}$/' "$SKILL_MD" \
+  | grep -E "Task appears to have crashed|process not found")
 
 if [[ -z "$DISPATCHER_CRASH_STMT" ]]; then
-  echo -e "  ${RED}FAIL${NC}: DISPATCHER_CRASHES= statement not found in SKILL.md — layout changed, guard is blind"
+  echo -e "  ${RED}FAIL${NC}: crash-regex line not found in count_dispatcher_crashes() — layout changed, guard is blind"
   ((FAIL++))
 else
-  # Expect exactly one test() call in the statement. More than one means a
-  # second alternative was chained in and the retry counter was broadened.
+  # Expect exactly one test() call on this line — i.e. the crash regex itself.
+  # More than one means a second alternative was chained in and the retry
+  # counter was broadened.
   TEST_CALL_COUNT=$(grep -oE 'test\(' <<<"$DISPATCHER_CRASH_STMT" | wc -l | tr -d ' ')
   if [[ "$TEST_CALL_COUNT" != "1" ]]; then
-    echo -e "  ${RED}FAIL${NC}: DISPATCHER_CRASHES statement has $TEST_CALL_COUNT test() calls, expected 1 (a chained test() may have broadened the retry counter)"
+    echo -e "  ${RED}FAIL${NC}: crash-regex line has $TEST_CALL_COUNT test() calls, expected 1 (a chained test() may have broadened the retry counter)"
     ((FAIL++))
   else
-    echo -e "  ${GREEN}PASS${NC}: Statement has exactly one test() call"
+    echo -e "  ${GREEN}PASS${NC}: crash-regex line has exactly one test() call"
     ((PASS++))
   fi
 
