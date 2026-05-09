@@ -10,7 +10,7 @@ The behavior described here lives in `skills/autonomous-dispatcher/SKILL.md` (th
 flowchart TD
     start([cron fires]) --> init[Initialize JUST_DISPATCHED empty]
     init --> step1{Step 1<br/>concurrency cap?}
-    step1 -- ACTIVE at MAX --> exit_cap([abort tick])
+    step1 -- ACTIVE >= MAX --> exit_cap([abort tick])
     step1 -- room available --> step2[Step 2 scan-new]
     step2 --> step3[Step 3 scan-pending-review]
     step3 --> step4[Step 4 scan-pending-dev]
