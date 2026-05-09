@@ -1,0 +1,142 @@
+name: Pipeline Docs Gate
+
+# Enforces CONTRIBUTING.md Rule 1: any PR that touches pipeline behavior MUST
+# also touch docs/pipeline/. Override with the `pipeline-docs:none` label.
+#
+# See docs/pipeline/README.md for what lives in pipeline docs.
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  gate:
+    name: Require pipeline docs update
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          # Need merge-base with the PR's base branch to diff PR-only changes.
+          fetch-depth: 0
+
+      - name: Compute changed files
+        id: diff
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          # Validate inputs are 40-char SHAs to defend against unexpected refs.
+          if ! [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::BASE_SHA does not look like a SHA: $BASE_SHA"
+            exit 1
+          fi
+          if ! [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::HEAD_SHA does not look like a SHA: $HEAD_SHA"
+            exit 1
+          fi
+          MERGE_BASE=$(git merge-base "$BASE_SHA" "$HEAD_SHA")
+          git diff --name-only "$MERGE_BASE" "$HEAD_SHA" > /tmp/changed.txt
+          echo "Changed files in PR:"
+          cat /tmp/changed.txt
+
+      - name: Classify changes
+        id: classify
+        run: |
+          set -euo pipefail
+          changed_file=/tmp/changed.txt
+
+          # Watched paths — touching any of these requires a docs/pipeline/
+          # update (or the override label). Keep in sync with CONTRIBUTING.md.
+          watched_regex='^(skills/autonomous-(dispatcher|dev|review)/scripts/.*\.sh$|skills/autonomous-common/(hooks|scripts)/.*\.sh$|skills/autonomous-(dispatcher|dev|review|common)/SKILL\.md$)'
+
+          docs_regex='^docs/pipeline/.*\.md$'
+
+          touches_pipeline=0
+          touches_docs=0
+          if grep -E -q "$watched_regex" "$changed_file"; then
+            touches_pipeline=1
+          fi
+          if grep -E -q "$docs_regex" "$changed_file"; then
+            touches_docs=1
+          fi
+
+          echo "touches_pipeline=$touches_pipeline" >> "$GITHUB_OUTPUT"
+          echo "touches_docs=$touches_docs" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## Pipeline Docs Gate"
+            echo ""
+            echo "- Touches pipeline behavior: \`$touches_pipeline\`"
+            echo "- Touches \`docs/pipeline/\`: \`$touches_docs\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Check for override label
+        id: override
+        env:
+          # toJson returns a JSON array of label-name strings. We feed it
+          # to jq via stdin, never via shell interpolation, so attacker-
+          # controlled label names cannot inject shell.
+          LABELS_JSON: ${{ toJson(github.event.pull_request.labels.*.name) }}
+        run: |
+          set -euo pipefail
+          has_override=0
+          if printf '%s' "$LABELS_JSON" | jq -e 'any(. == "pipeline-docs:none")' >/dev/null; then
+            has_override=1
+          fi
+          echo "has_override=$has_override" >> "$GITHUB_OUTPUT"
+          echo "- Override label \`pipeline-docs:none\` applied: \`$has_override\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Enforce gate
+        env:
+          TOUCHES_PIPELINE: ${{ steps.classify.outputs.touches_pipeline }}
+          TOUCHES_DOCS: ${{ steps.classify.outputs.touches_docs }}
+          HAS_OVERRIDE: ${{ steps.override.outputs.has_override }}
+        run: |
+          set -euo pipefail
+          if [ "$TOUCHES_PIPELINE" = "0" ]; then
+            echo "PR does not touch watched pipeline paths — gate not applicable."
+            {
+              echo ""
+              echo "**Result: PASS** (no watched paths in diff)"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          if [ "$HAS_OVERRIDE" = "1" ]; then
+            echo "Override label 'pipeline-docs:none' is applied — gate bypassed."
+            {
+              echo ""
+              echo "**Result: PASS** (override label applied)"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          if [ "$TOUCHES_DOCS" = "1" ]; then
+            echo "Pipeline behavior changed AND docs/pipeline/ updated — gate satisfied."
+            {
+              echo ""
+              echo "**Result: PASS** (docs synced)"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          echo "::error::Pipeline behavior changed but docs/pipeline/ was not updated."
+          {
+            echo ""
+            echo "**Result: FAIL**"
+            echo ""
+            echo "This PR modifies files that influence pipeline behavior, but does not"
+            echo "update any file under \`docs/pipeline/\`. Per CONTRIBUTING.md Rule 1:"
+            echo ""
+            echo "1. Update the relevant file(s) in \`docs/pipeline/\` describing the new behavior, **or**"
+            echo "2. Apply the \`pipeline-docs:none\` label to attest this PR has no observable pipeline change."
+            echo ""
+            echo "See \`docs/pipeline/README.md\` for which file to update."
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 1
