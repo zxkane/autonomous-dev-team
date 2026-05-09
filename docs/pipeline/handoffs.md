@@ -160,7 +160,11 @@ These don't belong to any single handoff but cut across multiple:
 
 ### Wrapper-trap-vs-dispatcher race (H3 / H4 / H5)
 
-Whenever the dispatcher's Step 5 acts on the same issue as a still-running wrapper's trap, label edits race. The contract: wrappers ALWAYS use `−from +to` in single `gh issue edit` calls, never sequential add-then-remove. The dispatcher does the same. As long as both sides target the SAME final state (which Step 5a's PR-ready logic ensures), the race is benign. Where they could diverge — e.g. wrapper trap thinks "exit 0 + PR" → `+pending-review` while dispatcher Step 5b thinks "DEAD + PR + no-new-commits" → `+pending-dev` — the wrapper's trap runs first by definition of how Step 5b detects DEAD. So Step 5b sees the post-trap state.
+Whenever the dispatcher's Step 5 acts on the same issue as a still-running wrapper's trap, label edits race. The contract: wrappers ALWAYS use `−from +to` in single `gh issue edit` calls, never sequential add-then-remove. The dispatcher does the same.
+
+**Step 5b case (DEAD)**: the wrapper trap has already finished by the time Step 5b probes the PID. So Step 5b sees the post-trap state. No live race.
+
+**Step 5a case (ALIVE+PR ready ⇒ SIGTERM)**: a genuine race with non-deterministic outcome — see [INV-15](invariants.md#inv-15-step-5a-sigterm-race-is-non-deterministic). The dispatcher and trap target **different** final states (`pending-review` vs `pending-dev`). The race is non-fatal — the PR is preserved either way and the next dispatcher tick recovers — but review can be delayed by one tick. This is a known imperfection captured in the invariant; fix is out of scope for the docs PR.
 
 ### Trailer empty fallthrough (H3 / H5b)
 

@@ -27,7 +27,8 @@ stateDiagram-v2
 
     in_progress --> pending_review: Dev wrapper trap\n(exit 0, PR exists)
     in_progress --> pending_dev: Dev wrapper trap\n(exit 0 no PR\nor exit ≠ 0)
-    in_progress --> pending_review: Dispatcher Step 5a\n(ALIVE+PR ready,\nidle 5min, CI green)
+    in_progress --> pending_review: Dispatcher Step 5a\n(ALIVE+PR ready,\nidle 5min, CI green;\nrace with trap, INV-15)
+    in_progress --> pending_dev: Step 5a trap path\n(SIGTERM ⇒ exit 143 ⇒\ntrap fail branch, INV-15)
     in_progress --> pending_review: Dispatcher Step 5b\n(DEAD+PR, new commits)
     in_progress --> pending_dev: Dispatcher Step 5b\n(DEAD+PR, no new commits)
     in_progress --> pending_dev: Dispatcher Step 5b\n(DEAD, no PR)
@@ -60,7 +61,7 @@ Each row is one legal transition. "Actor" identifies who writes the labels. "Pre
 | `in-progress` | `−in-progress +pending-review` | Dev wrapper exit 0 with PR for issue | Dev wrapper trap | Wrapper exit 0; `gh pr list` finds PR whose body references `#N` | Agent Session Report (Dev) ([INV-03](invariants.md#inv-03-dev-session-report-comment-format)) |
 | `in-progress` | `−in-progress +pending-dev` | Dev wrapper exit 0 with NO PR | Dev wrapper trap | Wrapper exit 0; no PR found | "Agent exited successfully but no PR was created. Moving to pending-dev for retry." + Session Report |
 | `in-progress` | `−in-progress +pending-dev` | Dev wrapper exit ≠ 0 | Dev wrapper trap | Wrapper exit ≠ 0 | Agent Session Report (with non-zero exit code) |
-| `in-progress` | `−in-progress +pending-review` | Step 5a: ALIVE+PR ready | Dispatcher | Wrapper PID alive; PR exists; CI all SUCCESS; `PR.updatedAt` > 300s ago; PID still alive on recheck ([INV-09](invariants.md#inv-09-just_dispatched-skip-rule), [INV-10](invariants.md#inv-10-5-minute-idle-gate-before-sigterm)) | "Dev process still alive but PR #N is ready... Moving to pending-review." (after `kill PID` SIGTERM) |
+| `in-progress` | `−in-progress +pending-review` | Step 5a: ALIVE+PR ready | Dispatcher | Wrapper PID alive; PR exists; CI all SUCCESS; `PR.updatedAt` > 300s ago (strict `-gt`); PID still alive on recheck ([INV-09](invariants.md#inv-09-just_dispatched-skip-rule), [INV-10](invariants.md#inv-10-5-minute-idle-gate-before-sigterm), [INV-15](invariants.md#inv-15-step-5a-sigterm-race-is-non-deterministic)) | "Dev process still alive but PR #N is ready... Moving to pending-review." (after `kill PID` SIGTERM; the wrapper trap may then also write `pending-dev` — see [INV-15](invariants.md#inv-15-step-5a-sigterm-race-is-non-deterministic)) |
 | `in-progress` | `−in-progress +pending-review` | Step 5b: DEAD+PR with new commits | Dispatcher | Wrapper PID dead; PR exists; current `headRefOid` ≠ last `Reviewed HEAD` trailer ([INV-04](invariants.md#inv-04-reviewed-head-trailer-format), [INV-07](invariants.md#inv-07-empty-reviewed-head-trailer-routes-to-pending-review)) | "Dev process exited (PR found). Moving to pending-review for assessment." ([INV-06](invariants.md#inv-06-crashed--process-not-found-keyword-contract)) |
 | `in-progress` | `−in-progress +pending-dev` | Step 5b: DEAD+PR with NO new commits | Dispatcher | Wrapper PID dead; PR exists; current `headRefOid` = last `Reviewed HEAD` trailer | "Dev process exited (no new commits since last review at \`<sha>\`). Moving to pending-dev for retry." ([INV-06](invariants.md#inv-06-crashed--process-not-found-keyword-contract)) |
 | `in-progress` | `−in-progress +pending-dev` | Step 5b: DEAD, NO PR | Dispatcher | Wrapper PID dead; no PR found | "Task appears to have crashed (no PR found). Moving to pending-dev for retry." |
@@ -95,11 +96,15 @@ Two cases dominate the race surface:
 
 ### Wrapper trap vs. dispatcher Step 5
 
-The dispatcher's Step 5a / 5b can edit labels on the same issue at the same time as the wrapper's exit trap. Both sides are designed to converge:
+The dispatcher's Step 5a / 5b can edit labels on the same issue at the same time as the wrapper's exit trap. The two cases differ:
 
-- **Step 5a SIGTERM path**: dispatcher sends `kill $PID` (SIGTERM), then immediately edits labels to `pending-review`. The wrapper trap also runs (the SIGTERM triggers it), and its `cleanup()` will edit labels based on whether a PR exists. If both succeed, the labels are written twice but the final state is `pending-review` either way (PR exists, dev exit considered 0 by trap context). The race is bounded — at worst there's one extra Agent Session Report comment per ~1% of transitions. See [`docs/designs/dispatcher-stale-alive-with-pr.md`](../designs/dispatcher-stale-alive-with-pr.md).
+- **Step 5b DEAD path**: the wrapper has already exited; trap already ran. The dispatcher reads the post-trap label state and decides. No live race — Step 5b sees the post-trap labels and chooses.
 
-- **Step 5b DEAD path**: the wrapper has already exited; trap already ran. The dispatcher reads the post-trap label state and decides. No live race.
+- **Step 5a SIGTERM path**: a genuine race with **non-deterministic outcome** today, captured as [INV-15](invariants.md#inv-15-step-5a-sigterm-race-is-non-deterministic). Dispatcher sends `kill $PID` (SIGTERM), then immediately edits labels to `pending-review`. The wrapper trap fires from the SIGTERM (bash exits with status 143 = 128+SIGTERM). The trap's `cleanup()` sees `exit_code != 0` and takes the failure branch — which writes **`pending-dev`**, not `pending-review`. Two writers, two different target states. Whichever `gh issue edit` lands last wins.
+
+  In practice the dispatcher's edit usually lands first because the trap has to post the Session Report comment before its own `gh issue edit`. So the typical outcome is: dispatcher writes `pending-review`, trap writes `pending-dev` ~1s later, and the issue ends up at `pending-dev` — review never fires, but the next dispatcher tick sees `pending-dev` and dispatches a dev-resume. The PR work is preserved (the PR is still open; new commits, if any, will land on next review when the resume completes). See [`docs/designs/dispatcher-stale-alive-with-pr.md`](../designs/dispatcher-stale-alive-with-pr.md) for the original design intent.
+
+  This is a known-suboptimal corner: the SIGTERM was supposed to be terminal-with-PR ⇒ `pending-review`, but the dev wrapper has no SIGTERM-aware exit code path. Documented as [INV-15](invariants.md#inv-15-step-5a-sigterm-race-is-non-deterministic); fix scheduled separately (likely a SIGTERM trap in the wrapper that flips a `RECEIVED_SIGTERM` flag and treats subsequent exit as "PR-aware exit 0"). Until that lands, the existing recovery via the next dispatcher tick is sufficient — the PR is preserved and review eventually fires.
 
 ### `JUST_DISPATCHED` skip
 

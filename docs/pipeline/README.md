@@ -42,4 +42,4 @@ Fixing a bug:
 | `dev-agent-flow.md` | Done |
 | `review-agent-flow.md` | Done |
 | `handoffs.md` | Done |
-| `invariants.md` | Done (INV-01..INV-14; INV-12, INV-13, INV-14 are documented but not yet code-enforced — see notes inside) |
+| `invariants.md` | Done (INV-01..INV-15; INV-11, INV-12, INV-13, INV-14, INV-15 are documented but not yet code-enforced — see notes inside) |

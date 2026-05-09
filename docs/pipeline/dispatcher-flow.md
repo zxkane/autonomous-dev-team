@@ -130,16 +130,16 @@ All these gates must hold before sending SIGTERM (any one failing → leave alon
 |---|---|---|
 | **PR exists** | `gh pr list` finds an open PR whose body references `#N` | Agent still developing; leave alone. |
 | **CI green** | `gh pr checks <pr>` returns ≥1 check, all `SUCCESS` | CI pending or failed; agent still working. |
-| **Idle** | `now - PR.updatedAt >= 300s` ([INV-10](invariants.md#inv-10-5-minute-idle-gate-before-sigterm)) | Recent activity; agent may be cleaning up. |
+| **Idle** | `now - PR.updatedAt > 300s` (strict `-gt`, [INV-10](invariants.md#inv-10-5-minute-idle-gate-before-sigterm)) | Recent activity; agent may be cleaning up. |
 | **PID still alive on recheck** | `kill -0 $PID` after the prior gates | Wrapper exited between the original probe and the SIGTERM decision; defer to next tick which will hit Step 5b DEAD. |
 
 When all gates hold:
 
-1. `kill $PID` (SIGTERM, NOT SIGKILL — wrapper trap needs to clean up; see [INV-08](invariants.md#inv-08-wrapper-exit-trap-is-idempotent-against-label-state)).
+1. `kill $PID` (SIGTERM, NOT SIGKILL — wrapper trap needs to clean up).
 2. Comment: "Dev process still alive but PR #N is ready (all CI checks passed, idle Ns). Sent SIGTERM to PID. Moving to pending-review."
 3. `gh issue edit --remove-label in-progress --add-label pending-review`.
 
-There's a known race here — the wrapper trap may also flip labels ([INV-08](invariants.md#inv-08-wrapper-exit-trap-is-idempotent-against-label-state)). Both sides converge to `pending-review` since a PR exists. See [`state-machine.md` § Wrapper trap vs. dispatcher Step 5](state-machine.md#wrapper-trap-vs-dispatcher-step-5).
+**Known imperfection** ([INV-15](invariants.md#inv-15-step-5a-sigterm-race-is-non-deterministic)): the wrapper trap fires on SIGTERM with bash exit 143, takes the failure branch, and writes `+pending-dev` — different from the dispatcher's `+pending-review`. The race outcome is whichever `gh issue edit` lands last; in practice the trap's edit lands ~1s later (it posts the Session Report comment first), so the typical outcome is the issue ending up at `pending-dev`. The PR is preserved; the next dispatcher tick recovers via dev-resume. Review is delayed by one tick. See [`state-machine.md` § Wrapper trap vs. dispatcher Step 5](state-machine.md#wrapper-trap-vs-dispatcher-step-5).
 
 #### Robustness against malformed responses
 

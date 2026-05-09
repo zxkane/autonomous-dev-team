@@ -102,15 +102,17 @@ The cutoff timestamp falls back to epoch (1970-01-01) for issues that have never
 **Test**: TODO: add test for both empty-trailer causes.
 **Operator note**: if `pending-review` cycles repeatedly without new commits, grep `/tmp/agent-${PROJECT_ID}-review-*.log` for `WARNING: Failed to post Reviewed HEAD trailer`.
 
-## INV-08: Wrapper exit trap is idempotent against label state
+## INV-08: Wrapper exit trap label edits are atomic per call
 
-**Rule**: Wrapper exit traps MUST update labels using single `gh issue edit --remove-label X --add-label Y` calls, never two separate calls. They must tolerate the case where the dispatcher's Step 5 has already moved the issue to the same target state (the `−X` is a no-op when X is already absent, the `+Y` is a no-op when Y is already present).
+**Rule**: Wrapper exit traps MUST update labels using single `gh issue edit --remove-label X --add-label Y` calls, never two separate calls. This guarantees no transient "both labels present" or "neither label present" state visible to the dispatcher between calls.
 
-**Why**: Step 5a's SIGTERM races the wrapper trap. Both sides edit labels in a few-second window. Single-call atomic swap means each edit converges; sequential add-then-remove would leave a window where both labels coexist or neither does.
+**Why**: Without single-call atomicity, a maintainer or another dispatcher cron tick reading labels at the wrong instant could see `pending-review + pending-dev` (forbidden, see [`state-machine.md` § Forbidden transitions](state-machine.md#forbidden-transitions)) or no active state at all (would reset the issue to "fresh autonomous, dispatch new" via Step 2).
 
-**Producer**: dev wrapper trap, review wrapper trap.
-**Consumer**: dispatcher Step 5 (relies on the wrapper trap converging to the same state Step 5 chose).
-**Test**: TODO: add test that simulates the race (mocking `gh issue edit` to record call order).
+**Note**: this invariant is about **per-edit atomicity**, NOT about cross-actor convergence. When the dispatcher's Step 5a and the wrapper trap both edit labels in the same window, they may target *different* final states — see [INV-15](#inv-15-step-5a-sigterm-race-is-non-deterministic). Each side's individual edit is still atomic, but the last-writer-wins outcome is non-deterministic.
+
+**Producer**: dev wrapper trap, review wrapper trap, dispatcher Step 2/3/4/5.
+**Consumer**: any reader of issue labels (other dispatcher ticks, maintainers).
+**Test**: TODO: add test that mocks `gh issue edit` and asserts no two-call sequences exist.
 
 ## INV-09: `JUST_DISPATCHED` skip rule
 
@@ -124,13 +126,13 @@ The cutoff timestamp falls back to epoch (1970-01-01) for issues that have never
 
 ## INV-10: 5-minute idle gate before SIGTERM
 
-**Rule**: Step 5a MUST require `now - PR.updatedAt >= 300s` before sending SIGTERM to an alive wrapper.
+**Rule**: Step 5a MUST require `now - PR.updatedAt > 300s` (strict greater-than, matching SKILL.md's `[ "$IDLE_SECONDS" -gt 300 ]`) before sending SIGTERM to an alive wrapper.
 
 **Why**: Without it, the dispatcher might SIGTERM an agent that just pushed its passing CI build and is in the middle of its own cleanup (closing worktree handles, posting status comments, etc.). 5 min matches the dispatcher cron interval — the *next* tick will be the one to act on a wrapper still alive after CI is green, not the tick that detected green CI (#56).
 
 **Producer**: dispatcher Step 5a.
 **Consumer**: itself.
-**Test**: TODO: add test that varies `PR.updatedAt` and confirms gate behavior.
+**Test**: TODO: add test that varies `PR.updatedAt` and confirms gate behavior at 300s, 301s.
 
 ## INV-11: Dependency state includes `MERGED`
 
@@ -175,6 +177,19 @@ The cutoff timestamp falls back to epoch (1970-01-01) for issues that have never
 **Consumer**: every wrapper that sources them.
 **Status**: **NOT YET ENFORCED.** Fix scheduled for **PR-4**.
 **Test**: will be added when fix lands — should stage a fake project with the symlink layout and assert `REPO` is non-empty after sourcing.
+
+## INV-15: Step 5a SIGTERM race is non-deterministic
+
+**Rule**: When the dispatcher's Step 5a sends SIGTERM to an alive wrapper for a PR-ready issue, the dispatcher writes `+pending-review` AND the wrapper's exit trap (which fires from the SIGTERM with bash exit status 143) writes `+pending-dev` — they target **different** final states. The race outcome is whichever `gh issue edit` lands last; in practice the trap's edit lands ~1s after the dispatcher's because the trap also posts a Session Report comment first.
+
+**Why**: surfaced by the PR-2 docs review. The dev wrapper has no SIGTERM-aware code path; `cleanup()` only inspects `$exit_code` (143 ≠ 0 ⇒ failure branch ⇒ `pending-dev`). The dispatcher's Step 5a was designed under the assumption that the trap would route to `pending-review` (the "PR-ready" intent). It does not.
+
+**Effect**: the issue typically lands in `pending-dev` after Step 5a fires (trap's later write wins). The PR is preserved (still open). The next dispatcher tick sees `pending-dev` and dispatches dev-resume. Review is delayed by one tick (~5 min) but no work is lost.
+
+**Producer**: dispatcher Step 5a + dev wrapper trap (jointly).
+**Consumer**: future dispatcher tick that has to pick up the resulting state.
+**Status**: **DOCUMENTED, NOT YET FIXED.** Possible fixes: (a) install a SIGTERM trap in the dev wrapper that flips a `RECEIVED_SIGTERM` flag, then `cleanup()` treats `flag && PR_EXISTS` as exit-0-with-PR ⇒ `pending-review`. (b) Or: have Step 5a NOT write labels itself — just SIGTERM and let the trap handle it, after fixing (a). Both are out of scope for the docs-only PRs and will be tracked as a separate issue.
+**Test**: future test that simulates Step 5a + a wrapper that captures SIGTERM, asserts final label is `pending-review`.
 
 ---
 
