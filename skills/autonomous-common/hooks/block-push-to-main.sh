@@ -1,10 +1,18 @@
 #!/bin/bash
 # PreToolUse hook - blocks git push directly to main branch
-# All changes must go through PR workflow
+# All changes must go through PR workflow.
+#
+# Closes #64: previous regex-only approach had a false positive
+# (feature push from a trunk-checked-out clone got blocked) and a
+# false negative (`HEAD:refs/heads/main` slipped through). Now uses
+# the lib-push.sh parser to identify the actual destination ref(s).
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib.sh
 source "$SCRIPT_DIR/lib.sh"
+# shellcheck source=lib-push.sh
+source "$SCRIPT_DIR/lib-push.sh"
 
 input=$(cat)
 command=$(parse_command "$input")
@@ -14,19 +22,22 @@ if ! is_git_command "push" "$command"; then
   exit 0
 fi
 
-# Get current branch
-current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+# Trunk branch name. Default to `main`; respect TRUNK_BRANCH override
+# for repos with a different trunk (e.g. `master`, `trunk`).
+trunk="${TRUNK_BRANCH:-main}"
 
-# Block pushes targeting main:
-# 1. Refspec targeting main (e.g., git push origin feature:main)
-# 2. Explicit main as push target (e.g., git push origin main)
-# 3. Bulk push commands that include main (--all, --mirror)
-# 4. Pushing while on main without explicit refspec
-if [[ "$command" =~ :main([[:space:]]|$) ]] \
-  || [[ "$command" =~ (^|[[:space:]])main([[:space:]]|$) ]] \
-  || [[ "$command" =~ --all([[:space:]]|$) ]] \
-  || [[ "$command" =~ --mirror([[:space:]]|$) ]] \
-  || [[ "$current_branch" == "main" && ! "$command" =~ : ]]; then
+# Parse the destination ref(s) the push would write to. Block if any of
+# them target the trunk (covers --all/--mirror via __ALL__/__MIRROR__).
+should_block=0
+while IFS= read -r ref; do
+  [[ -z "$ref" ]] && continue
+  if is_trunk_ref "$ref" "$trunk"; then
+    should_block=1
+    break
+  fi
+done < <(parse_push_target_refspec "$command")
+
+if (( should_block == 1 )); then
   cat >&2 <<'EOF'
 ## BLOCKED - Direct Push to Main
 

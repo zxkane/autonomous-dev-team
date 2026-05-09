@@ -50,4 +50,7 @@ jobs:
             skills/autonomous-dispatcher/scripts/lib-dispatch.sh \
             skills/autonomous-dispatcher/scripts/setup-labels.sh \
             skills/autonomous-dispatcher/scripts/gh-token-refresh-daemon.sh \
-            skills/autonomous-dispatcher/scripts/gh-with-token-refresh.sh
+            skills/autonomous-dispatcher/scripts/gh-with-token-refresh.sh \
+            skills/autonomous-common/hooks/lib-push.sh \
+            skills/autonomous-common/hooks/install-git-pre-push.sh \
+            skills/autonomous-common/scripts/install-claude-hooks.sh
