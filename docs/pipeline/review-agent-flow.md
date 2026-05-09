@@ -22,33 +22,33 @@ sequenceDiagram
     W->>W: acquire_pid_guard(PID_FILE)
     W->>GH: find PR linked to issue (3 fallback methods)
     alt no PR found
-        W->>GH: comment "Review failed: no PR found..."
-        W->>GH: −reviewing +pending-dev
+        W->>GH: comment 'Review failed - no PR found'
+        W->>GH: remove reviewing, add pending-dev
         W-->>D: exit 1
     end
     W->>GH: extract preview URL (if E2E_ENABLED)
     W->>W: build review prompt (mergeability, drift, checklist, decision)
     W->>L: run_agent
     L->>A: claude --session-id ... --model sonnet -p PROMPT
-    A->>GH: post verdict comment ("Review PASSED" / "Review findings:")
+    A->>GH: post verdict comment ('Review PASSED' or 'Review findings')
     A-->>L: agent exits
-    W->>GH: poll for verdict comment (6×5s, session-id filtered)
-    W->>GH: post "Reviewed HEAD" trailer (if verdict + SHA known)
+    W->>GH: poll for verdict comment (6 attempts, 5s each, session-id filtered)
+    W->>GH: post 'Reviewed HEAD' trailer (if verdict and SHA known)
     alt verdict PASS
         W->>GH: gh pr view --json state (re-check OPEN)
         W->>GH: gh pr review --approve
         opt no-auto-close NOT set
             W->>GH: gh pr merge --squash --delete-branch
             W->>GH: gh issue close completed
-            W->>GH: −autonomous −reviewing +approved
+            W->>GH: remove autonomous and reviewing, add approved
         end
         opt no-auto-close set
-            W->>GH: −reviewing +approved (autonomous KEPT)
+            W->>GH: remove reviewing, add approved (autonomous KEPT)
         end
     else verdict FAIL or missing
-        W->>GH: −reviewing +pending-dev
+        W->>GH: remove reviewing, add pending-dev
     end
-    W->>W: rm -f PID_FILE; cleanup_github_auth
+    W->>W: rm -f PID_FILE and cleanup_github_auth
 ```
 
 ## Spawn, PID guard, auth
@@ -170,8 +170,8 @@ flowchart TD
     parsed -- false --> exit_branch{exit_code != 0?}
     exit_branch -- no --> auth_done
     exit_branch -- yes --> refresh[refresh GH App token]
-    refresh --> crash_comment[comment "Review process crashed exit N..."]
-    crash_comment --> to_dev[−reviewing +pending-dev]
+    refresh --> crash_comment[comment 'Review process crashed exit N']
+    crash_comment --> to_dev[remove reviewing<br/>add pending-dev]
     to_dev --> auth_done
 ```
 

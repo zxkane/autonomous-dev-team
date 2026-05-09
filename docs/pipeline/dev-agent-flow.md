@@ -16,18 +16,18 @@ sequenceDiagram
 
     D->>D: kill_stale_wrapper(PID_FILE)
     D->>W: nohup autonomous-dev.sh --issue N --mode new<br/>(or --mode resume --session ID)
-    W->>L: source lib-agent.sh, lib-auth.sh
+    W->>L: source lib-agent.sh and lib-auth.sh
     W->>W: setup_github_auth (token or App)
     W->>W: acquire_pid_guard(PID_FILE)
-    W->>GH: gh issue view (fetch issue body+comments)
+    W->>GH: gh issue view (fetch issue body and comments)
     W->>W: build prompt (new or resume variant)
     W->>L: run_agent / resume_agent
     L->>A: claude --session-id ... -p PROMPT --output-format json
-    A-->>L: agent runs; eventually exits
+    A-->>L: agent runs, eventually exits
     L-->>W: AGENT_EXIT
-    W->>GH: cleanup() trap: post Session Report
-    W->>GH: cleanup() trap: gh issue edit labels
-    W->>W: rm -f PID_FILE; cleanup_github_auth
+    W->>GH: cleanup trap, post Session Report
+    W->>GH: cleanup trap, gh issue edit labels
+    W->>W: rm -f PID_FILE and cleanup_github_auth
     W-->>D: process exits
 ```
 
@@ -116,10 +116,10 @@ flowchart TD
     session_report --> exit_branch{exit_code == 0?}
 
     exit_branch -- yes --> pr_check{PR exists for issue?}
-    pr_check -- yes --> to_review[−in-progress<br/>−pending-dev<br/>+pending-review]
-    pr_check -- no --> to_dev_no_pr[comment "exited 0 but no PR"<br/>−in-progress<br/>+pending-dev]
+    pr_check -- yes --> to_review[remove in-progress<br/>remove pending-dev<br/>add pending-review]
+    pr_check -- no --> to_dev_no_pr[comment 'exited 0 but no PR'<br/>remove in-progress<br/>add pending-dev]
 
-    exit_branch -- no --> to_dev_fail[−in-progress<br/>+pending-dev]
+    exit_branch -- no --> to_dev_fail[remove in-progress<br/>add pending-dev]
 
     to_review --> auth_done
     to_dev_no_pr --> auth_done

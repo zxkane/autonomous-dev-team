@@ -8,19 +8,19 @@ The behavior described here lives in `skills/autonomous-dispatcher/SKILL.md` (th
 
 ```mermaid
 flowchart TD
-    start([cron fires]) --> init[Initialize JUST_DISPATCHED=]
-    init --> step1{Step 1\nconcurrency cap?}
-    step1 -- ACTIVE ≥ MAX --> exit_cap([abort tick])
-    step1 -- room available --> step2[Step 2: scan-new]
-    step2 --> step3[Step 3: scan-pending-review]
-    step3 --> step4[Step 4: scan-pending-dev]
-    step4 --> step5[Step 5: stale detection]
+    start([cron fires]) --> init[Initialize JUST_DISPATCHED empty]
+    init --> step1{Step 1<br/>concurrency cap?}
+    step1 -- ACTIVE at MAX --> exit_cap([abort tick])
+    step1 -- room available --> step2[Step 2 scan-new]
+    step2 --> step3[Step 3 scan-pending-review]
+    step3 --> step4[Step 4 scan-pending-dev]
+    step4 --> step5[Step 5 stale detection]
     step5 --> done([end tick])
 
-    step2 -. for each match .-> dispatch_dev[dispatch dev-new\nlabel +in-progress\nappend JUST_DISPATCHED]
-    step3 -. for each match .-> dispatch_review[dispatch review\nlabel −pending-review +reviewing\nappend JUST_DISPATCHED]
-    step4 -. retries OK .-> dispatch_resume[dispatch dev-resume\nlabel −pending-dev +in-progress\nappend JUST_DISPATCHED]
-    step4 -. retries exhausted .-> stall[label −pending-dev +stalled\ncomment @owner]
+    step2 -. for each match .-> dispatch_dev[dispatch dev-new<br/>add in-progress label<br/>append JUST_DISPATCHED]
+    step3 -. for each match .-> dispatch_review[dispatch review<br/>remove pending-review add reviewing<br/>append JUST_DISPATCHED]
+    step4 -. retries OK .-> dispatch_resume[dispatch dev-resume<br/>remove pending-dev add in-progress<br/>append JUST_DISPATCHED]
+    step4 -. retries exhausted .-> stall[remove pending-dev add stalled<br/>comment @owner]
 ```
 
 `JUST_DISPATCHED` is the only piece of state the tick maintains in memory — and it dies when the tick ends.

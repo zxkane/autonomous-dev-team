@@ -21,31 +21,31 @@ The five **active** states are `autonomous` (no other state label), `in-progress
 
 ```mermaid
 stateDiagram-v2
-    [*] --> autonomous: maintainer applies\nautonomous label
+    [*] --> autonomous: maintainer applies autonomous label
 
-    autonomous --> in_progress: Dispatcher Step 2\nscan-new\n(deps resolved)
+    autonomous --> in_progress: Dispatcher Step 2 scan-new (deps resolved)
 
-    in_progress --> pending_review: Dev wrapper trap\n(exit 0, PR exists)
-    in_progress --> pending_dev: Dev wrapper trap\n(exit 0 no PR\nor exit ≠ 0)
-    in_progress --> pending_review: Dispatcher Step 5a\n(ALIVE+PR ready,\nidle 5min, CI green;\nrace with trap, INV-15)
-    in_progress --> pending_dev: Step 5a trap path\n(SIGTERM ⇒ exit 143 ⇒\ntrap fail branch, INV-15)
-    in_progress --> pending_review: Dispatcher Step 5b\n(DEAD+PR, new commits)
-    in_progress --> pending_dev: Dispatcher Step 5b\n(DEAD+PR, no new commits)
-    in_progress --> pending_dev: Dispatcher Step 5b\n(DEAD, no PR)
+    in_progress --> pending_review: Dev wrapper trap (exit 0, PR exists)
+    in_progress --> pending_dev: Dev wrapper trap (exit 0 no PR, or exit non-zero)
+    in_progress --> pending_review: Dispatcher Step 5a (ALIVE+PR ready, idle 5min, CI green - INV-15 race)
+    in_progress --> pending_dev: Step 5a trap path (SIGTERM exit 143 trap fail branch, INV-15)
+    in_progress --> pending_review: Dispatcher Step 5b (DEAD+PR, new commits)
+    in_progress --> pending_dev: Dispatcher Step 5b (DEAD+PR, no new commits)
+    in_progress --> pending_dev: Dispatcher Step 5b (DEAD, no PR)
 
-    pending_review --> reviewing: Dispatcher Step 3\nscan-pending-review
+    pending_review --> reviewing: Dispatcher Step 3 scan-pending-review
 
-    reviewing --> approved: Review wrapper\nverdict PASS\n(merged or manual)
-    reviewing --> pending_dev: Review wrapper\nverdict FAIL
-    reviewing --> pending_dev: Review wrapper trap\n(crash exit ≠ 0)
-    reviewing --> pending_dev: Dispatcher Step 5b\n(DEAD reviewing)
+    reviewing --> approved: Review wrapper verdict PASS (merged or manual)
+    reviewing --> pending_dev: Review wrapper verdict FAIL
+    reviewing --> pending_dev: Review wrapper trap (crash exit non-zero)
+    reviewing --> pending_dev: Dispatcher Step 5b (DEAD reviewing)
 
-    pending_dev --> in_progress: Dispatcher Step 4\nscan-pending-dev\n(retries < MAX)
-    pending_dev --> stalled: Dispatcher Step 4\n(retries ≥ MAX)
+    pending_dev --> in_progress: Dispatcher Step 4 scan-pending-dev (retries below MAX)
+    pending_dev --> stalled: Dispatcher Step 4 (retries at MAX)
 
-    stalled --> pending_dev: Maintainer\nremoves stalled label\n(retry counter resets)
+    stalled --> pending_dev: Maintainer removes stalled label (retry counter resets)
 
-    approved --> [*]: PR merged\n(auto or manual)
+    approved --> [*]: PR merged (auto or manual)
 ```
 
 (Edges are condensed; see the transition table below for preconditions and side effects.)
