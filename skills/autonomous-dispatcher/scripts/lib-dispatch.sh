@@ -88,21 +88,29 @@ list_stale_candidates() {
 # ---------------------------------------------------------------------------
 
 # Returns 0 (resolved) if every issue referenced in the issue body's
-# `## Dependencies` section is in state CLOSED. Returns 1 (blocked) on
-# the first unresolved dependency. Returns 0 if no dependencies are listed.
+# `## Dependencies` section is in a resolved state (CLOSED or MERGED).
+# Returns 1 (blocked) on the first unresolved dependency. Returns 0 if no
+# dependencies are listed.
 #
-# NOTE: this preserves the current "state != CLOSED" check, which means
-# MERGED PRs are treated as unresolved (#61). PR-4 will fix that.
+# Closes #61 (MERGED PRs report `state: "MERGED"`, not `"CLOSED"`) and
+# #73 (replace GNU-only `grep -oP '#\K[0-9]+'` with portable extraction).
+# Both fixes are in the same function and ship together.
 check_deps_resolved() {
   local issue_num="$1"
   local deps state
+  # Portable dep-number extraction: grep -oE matches `#NNN`, sed strips
+  # the leading `#`. Equivalent to the GNU-only `grep -oP '#\K[0-9]+'`
+  # but works on macOS / BSD grep too.
   deps=$(gh issue view "$issue_num" --repo "$REPO" --json body -q '.body' \
     | sed -n '/^## Dependencies/,/^## /p' \
-    | grep -oP '#\K[0-9]+' || true)
+    | grep -oE '#[0-9]+' \
+    | sed 's/^#//' || true)
 
   for dep in $deps; do
     state=$(gh issue view "$dep" --repo "$REPO" --json state -q '.state')
-    if [ "$state" != "CLOSED" ]; then
+    # Both CLOSED (issues, closed PRs) and MERGED (merged PRs) count as
+    # resolved. `gh issue view` on a merged PR returns state "MERGED".
+    if [ "$state" != "CLOSED" ] && [ "$state" != "MERGED" ]; then
       return 1
     fi
   done
@@ -174,10 +182,15 @@ mark_stalled() {
 
 # Echoes the most recent Dev Session ID for the issue (must NOT match
 # Review Session ID — see [INV-03]). Echoes empty string if none found.
+#
+# Closes #70: jq 1.6+ uses Oniguruma which expects `(?<id>...)` — Python
+# style `(?P<id>...)` errors with "Regex failure: undefined group option"
+# and the `// empty` fallback does NOT catch it (jq exits non-zero before
+# `//` is evaluated). See [INV-16].
 extract_dev_session_id() {
   local issue_num="$1"
   gh issue view "$issue_num" --repo "$REPO" --json comments \
-    -q '[.comments[].body | capture("Dev Session ID: `(?P<id>[a-zA-Z0-9_-]+)`"; "g") | .id] | last // empty'
+    -q '[.comments[].body | capture("Dev Session ID: `(?<id>[a-zA-Z0-9_-]+)`"; "g") | .id] | last // empty'
 }
 
 # ---------------------------------------------------------------------------

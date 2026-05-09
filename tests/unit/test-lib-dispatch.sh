@@ -82,23 +82,20 @@ assert_eq() {
 echo "=== extract_dev_session_id ([INV-03]) ==="
 # ---------------------------------------------------------------------------
 
-# NOTE: PR-3 preserves a latent bug in this regex (issue #70). The original
-# SKILL.md uses `(?P<id>...)` (Python-style named group) which jq 1.6+
-# Oniguruma rejects with "Regex failure: undefined group option". Tests
-# assert the BROKEN behavior here so PR-3 stays a pure refactor; a future
-# PR will fix the regex AND update these assertions.
+# PR-4 (#70 fix) flipped the regex from Python-style `(?P<id>...)` to
+# Oniguruma `(?<id>...)`. Tests now assert REAL extraction. See [INV-16].
 
 _MOCK_COMMENTS_JSON='{"comments":[{"body":"**Agent Session Report (Dev)**\nDev Session ID: `abc-123-def`\nExit code: 0"}]}'
-out=$(extract_dev_session_id 99 2>/dev/null)
-assert_eq "Dev Session ID extraction CURRENTLY broken (issue #70) → empty" "" "$out"
+assert_eq "Dev Session ID extracted from one comment" "abc-123-def" "$(extract_dev_session_id 99)"
 
 _MOCK_COMMENTS_JSON='{"comments":[{"body":"Review PASSED ... Review Session ID: `xyz-789`"}]}'
-out=$(extract_dev_session_id 99 2>/dev/null)
-assert_eq "Review Session ID does NOT match Dev pattern (broken or working, both → empty)" "" "$out"
+assert_eq "Review Session ID does NOT match Dev pattern (regex anchored on 'Dev Session ID')" "" "$(extract_dev_session_id 99)"
+
+_MOCK_COMMENTS_JSON='{"comments":[{"body":"Dev Session ID: `older-dev-id`"},{"body":"Review Session: `some-review`"},{"body":"Dev Session ID: `newer-dev-id`"}]}'
+assert_eq "latest Dev Session ID wins across multiple comments" "newer-dev-id" "$(extract_dev_session_id 99)"
 
 _MOCK_COMMENTS_JSON='{"comments":[]}'
-out=$(extract_dev_session_id 99 2>/dev/null)
-assert_eq "no comments → empty" "" "$out"
+assert_eq "no comments → empty" "" "$(extract_dev_session_id 99)"
 
 # ---------------------------------------------------------------------------
 echo ""

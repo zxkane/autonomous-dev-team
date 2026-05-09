@@ -16,19 +16,12 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 
-# Load config from autonomous.conf — same priority order as lib-agent.sh.
-# Set up before sourcing lib-dispatch.sh because lib-dispatch.sh enforces
+# Load config via the shared helper (closes #58 for the dispatcher path).
+# Must run before sourcing lib-dispatch.sh — lib-dispatch.sh enforces
 # REPO/REPO_OWNER/PROJECT_ID via `: "${VAR:?...}"`.
-if [[ -n "${AUTONOMOUS_CONF:-}" ]] && [[ -f "${AUTONOMOUS_CONF}" ]]; then
-  # shellcheck disable=SC1090
-  source "${AUTONOMOUS_CONF}"
-elif [[ -f "${SCRIPT_DIR}/autonomous.conf" ]]; then
-  # shellcheck disable=SC1091
-  source "${SCRIPT_DIR}/autonomous.conf"
-elif [[ -f "${SCRIPT_DIR}/../../../scripts/autonomous.conf" ]]; then
-  # shellcheck disable=SC1091
-  source "${SCRIPT_DIR}/../../../scripts/autonomous.conf"
-fi
+# shellcheck source=lib-config.sh
+source "${SCRIPT_DIR}/lib-config.sh"
+load_autonomous_conf "${SCRIPT_DIR}" || true
 
 # shellcheck source=lib-dispatch.sh
 source "${SCRIPT_DIR}/lib-dispatch.sh"

@@ -3,18 +3,14 @@
 # Supports: claude (default), codex, kiro, and generic fallback.
 # Source this file in autonomous-dev.sh and autonomous-review.sh.
 
-# Load project config — priority order:
-# 1. AUTONOMOUS_CONF env var (explicit path, works in bash -c / remote contexts)
-# 2. Local autonomous.conf in same directory as this script
-# 3. Fallback: <project-root>/scripts/autonomous.conf
-_LIB_AGENT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]:-$0}")")" && pwd)"
-if [[ -n "${AUTONOMOUS_CONF:-}" ]] && [[ -f "${AUTONOMOUS_CONF}" ]]; then
-  source "${AUTONOMOUS_CONF}"
-elif [[ -f "${_LIB_AGENT_DIR}/autonomous.conf" ]]; then
-  source "${_LIB_AGENT_DIR}/autonomous.conf"
-elif [[ -f "${_LIB_AGENT_DIR}/../../../scripts/autonomous.conf" ]]; then
-  source "${_LIB_AGENT_DIR}/../../../scripts/autonomous.conf"
-fi
+# Load project config via the shared helper (closes #58).
+# Note: ${BASH_SOURCE[0]:-$0} (NOT readlink -f) so the symlink-vendor
+# pattern resolves to the project's scripts/ rather than the skill
+# installation dir.
+_LIB_AGENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# shellcheck source=lib-config.sh
+source "${_LIB_AGENT_DIR}/lib-config.sh"
+load_autonomous_conf "${_LIB_AGENT_DIR}" || true
 
 # Ensure PROJECT_DIR is an absolute path to the repo root.
 # autonomous.conf may use a relative BASH_SOURCE trick that can resolve
