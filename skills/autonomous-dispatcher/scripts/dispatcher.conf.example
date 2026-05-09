@@ -1,0 +1,35 @@
+# dispatcher.conf — multi-project dispatcher configuration
+#
+# Copied to:
+#   $DISPATCHER_CONF                              (env override; takes priority)
+#   $HOME/.autonomous/dispatcher.conf             (default)
+#   $XDG_CONFIG_HOME/autonomous/dispatcher.conf   (XDG fallback)
+#
+# Read by `dispatcher-multi-tick.sh`. Each cron tick iterates PROJECTS[]
+# and runs one `dispatcher-tick.sh` per project, sourcing the project's
+# own `autonomous.conf` via the AUTONOMOUS_CONF env override (#62).
+#
+# This file does NOT replace per-project `autonomous.conf` — REPO,
+# PROJECT_ID, DISPATCHER_APP_ID, MAX_CONCURRENT, etc. all stay there.
+# Per-project values are sourced fresh in a subshell each iteration so
+# settings cannot leak between projects.
+
+# Trust gate: dispatcher-multi-tick.sh refuses to source a `dispatcher.conf`
+# (or its parent dir) that is group/other-writable, or owned by a different
+# user, because `source` of an attacker-writable file means arbitrary code
+# execution as the dispatcher user (CWE-94). Recommended file mode: 0644
+# owned by the dispatcher user, or 0600 if the conf has secrets. Recommended
+# parent dir mode: 0755 (or 0700).
+#
+# Set AUTONOMOUS_TRUST_CONF=1 to disable the trust gate (e.g. shared dev
+# VMs where the conf is owned by a tooling uid distinct from the runtime
+# uid). Off by default — opt in only when you understand the risk.
+
+# Required: paths to per-project `autonomous.conf` files.
+# Each path is sourced in a subshell before running one tick for that
+# project. Missing paths cause that project's tick to be skipped with a
+# warning — they do NOT block other projects.
+PROJECTS=(
+  "/data/git/myrepo-a/scripts/autonomous.conf"
+  "/data/git/myrepo-b/scripts/autonomous.conf"
+)

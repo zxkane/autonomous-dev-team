@@ -18,13 +18,24 @@ Scan GitHub issues and dispatch dev/review tasks locally. One cron tick is one i
 
 ## What to do
 
-When the cron fires (default: every 5 min), run:
+When the cron fires (default: every 5 min), run **one** of:
+
+**Single-project deployment** (one repo per dispatcher):
 
 ```bash
 bash "$PROJECT_DIR/scripts/dispatcher-tick.sh"
 ```
 
-That's it. The script handles all 5 steps of one tick:
+**Multi-project deployment** (one cron, many repos — closes #62):
+
+```bash
+DISPATCHER_CONF="$HOME/.autonomous/dispatcher.conf" \
+  bash "$PROJECT_DIR/scripts/dispatcher-multi-tick.sh"
+```
+
+The multi-tick wrapper iterates `PROJECTS=()` from `dispatcher.conf` and runs one `dispatcher-tick.sh` per project, with each project's `autonomous.conf` sourced in a subshell via the `AUTONOMOUS_CONF` env override. Per-project failures are logged to stderr but do not stall other projects. See `scripts/dispatcher.conf.example` for the schema.
+
+Either form runs the same 5-step tick:
 
 1. **Concurrency gate** — abort if `count(in-progress + reviewing) >= MAX_CONCURRENT`.
 2. **scan-new** — find `autonomous`-only issues, check dependencies, dispatch dev-new.
