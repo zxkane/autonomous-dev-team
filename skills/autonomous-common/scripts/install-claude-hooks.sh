@@ -70,7 +70,8 @@ if [[ ! -f "$settings_file" ]]; then
   echo "Created: $settings_file (from template)" >&2
 else
   # Backup the existing file before mutation.
-  backup="$settings_file.bak.$(date +%s)"
+  # Append $$ for uniqueness if two installs race within the same second.
+  backup="$settings_file.bak.$(date +%s).$$"
   cp "$settings_file" "$backup"
 
   # Compose: existing settings + (template's _managed_by, _managed_note,

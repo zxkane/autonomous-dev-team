@@ -47,7 +47,9 @@ trunk="${trunk:-main}"
 
 # If a pre-push hook exists and is NOT ours, back it up.
 if [[ -f "$target" ]] && ! grep -q "$sentinel" "$target" 2>/dev/null; then
-  backup="$target.bak.$(date +%s)"
+  # Append $$ for uniqueness if two installs race within the same second
+  # (not a real attack vector, but cheap defense-in-depth).
+  backup="$target.bak.$(date +%s).$$"
   mv "$target" "$backup"
   echo "Existing unmanaged pre-push hook backed up to: $backup" >&2
 fi
