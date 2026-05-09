@@ -19,6 +19,13 @@ AGENT_REVIEW_MODEL="sonnet"
 # For production on shared hosts, use 'auto' or 'plan'.
 AGENT_PERMISSION_MODE="auto"
 
+# Wall-clock cap for each agent invocation (run_agent / resume_agent).
+# Accepts coreutils `timeout` units: s, m, h, d. Default 4h.
+# Prevents hung CLI processes (e.g. claude --resume against a completed
+# session, MCP stdio deadlock) from monopolizing wrapper PID slots.
+# Closes #60 (INV-13).
+AGENT_TIMEOUT="4h"
+
 # === GitHub Authentication ===
 GH_AUTH_MODE="token"
 DEV_AGENT_APP_ID=""

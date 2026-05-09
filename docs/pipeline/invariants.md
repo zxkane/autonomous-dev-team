@@ -10,7 +10,7 @@ Each invariant has the same shape:
 - **Consumer** — which actor relies on it
 - **Test** — where it's verified, or "TODO: add test"
 
-Some invariants below describe behavior the **code does not yet enforce** — they are explicitly marked with `Status: NOT YET ENFORCED` or `Status: DOCUMENTED, NOT YET FIXED`. PR-4 enforced INV-11, INV-14, and INV-16. INV-12, INV-13, and INV-15 remain to be enforced in subsequent PRs.
+Some invariants below describe behavior the **code does not yet enforce** — they are explicitly marked with `Status: NOT YET ENFORCED` or `Status: DOCUMENTED, NOT YET FIXED`. PR-4 enforced INV-11, INV-14, and INV-16. PR-6 enforced INV-12, INV-13, and INV-15.
 
 ---
 
@@ -151,10 +151,10 @@ The cutoff timestamp falls back to epoch (1970-01-01) for issues that have never
 
 **Why**: A `claude --resume` against a session whose final turn ended with `stop_reason=end_turn` connects to the SSE streaming endpoint and never returns — the model has no work to do, the server keeps the connection alive, and the wrapper hangs indefinitely (#59).
 
-**Producer**: dispatcher Step 4 (will gain a new pre-dispatch check).
+**Producer**: dispatcher Step 4 (`lib-dispatch.sh::is_session_completed` invoked from `dispatcher-tick.sh` Step 4).
 **Consumer**: prevents the wrapper from being put in a hang state.
-**Status**: **NOT YET ENFORCED.** Fix scheduled for **PR-5**.
-**Test**: will be added when fix lands.
+**Status**: **ENFORCED** in PR-6 (closes #59). The dispatcher reads the agent log at `/tmp/agent-${PROJECT_ID}-issue-${N}.log`, finds the last `{"type":"result", ...}` object, and skips dispatch if `stop_reason=end_turn` AND `terminal_reason=completed`. Skip is conservative: the issue stays in `pending-dev` and a comment is posted asking an operator to manually decide between `pending-review` (PR exists) or close (work done) — the helper deliberately doesn't auto-recover, since silent recovery would mask other failure modes.
+**Test**: `tests/unit/test-is-session-completed.sh` (11 cases): clean exit returns true; non-end_turn / non-completed / non-claude / missing log / multiple-result / malformed JSON / missing fields all return false.
 
 ## INV-13: Wall-clock cap on agent invocations
 
@@ -162,10 +162,10 @@ The cutoff timestamp falls back to epoch (1970-01-01) for issues that have never
 
 **Why**: Any of: SSE keepalive without stop event (#59 root cause), MCP server stdio deadlock, DNS/TCP black hole. Without a wall-clock cap, any of those can pin a wrapper for 8+ hours (#60).
 
-**Producer**: `lib-agent.sh::run_agent` and `resume_agent`.
+**Producer**: `lib-agent.sh::run_agent` and `resume_agent` via the shared `_run_with_timeout` helper.
 **Consumer**: prevents wrappers from monopolizing PID slots and quota.
-**Status**: **NOT YET ENFORCED.** Fix scheduled for **PR-5**.
-**Test**: will be added when fix lands.
+**Status**: **ENFORCED** in PR-6 (closes #60). The helper resolves `timeout`/`gtimeout` once at source time and falls through to an unwrapped invocation with a one-time WARN log when neither is on PATH. All four AGENT_CMD branches (claude / codex / kiro / fallback) and both call sites (run_agent / resume_agent) get the same wrapper.
+**Test**: `tests/unit/test-agent-timeout-wrapper.sh` (6 cases): timeout fires within budget on `sleep 5` vs `AGENT_TIMEOUT=1s`; passthrough exit codes preserved (0 and non-zero); fallback path with `_AGENT_TIMEOUT_CMD=""` works for both success and non-zero commands.
 
 ## INV-14: Config lookup honors symlink-vendor pattern
 
@@ -188,8 +188,8 @@ The cutoff timestamp falls back to epoch (1970-01-01) for issues that have never
 
 **Producer**: dispatcher Step 5a + dev wrapper trap (jointly).
 **Consumer**: future dispatcher tick that has to pick up the resulting state.
-**Status**: **DOCUMENTED, NOT YET FIXED.** Possible fixes: (a) install a SIGTERM trap in the dev wrapper that flips a `RECEIVED_SIGTERM` flag, then `cleanup()` treats `flag && PR_EXISTS` as exit-0-with-PR ⇒ `pending-review`. (b) Or: have Step 5a NOT write labels itself — just SIGTERM and let the trap handle it, after fixing (a). Both are out of scope for the docs-only PRs and will be tracked as a separate issue.
-**Test**: future test that simulates Step 5a + a wrapper that captures SIGTERM, asserts final label is `pending-review`.
+**Status**: **ENFORCED** in PR-6 (closes #67). `autonomous-dev.sh` installs `trap on_sigterm TERM` that sets `RECEIVED_SIGTERM=1` and forwards SIGTERM to descendants via `pkill -TERM -P $$` (so the agent CLI exits promptly instead of bash queueing the signal until the foreground `run_agent` returns naturally). The `cleanup()` EXIT trap then rewrites `exit_code 143 → 0` when `RECEIVED_SIGTERM=1 && PR_EXISTS>0`, routing through the success branch to `pending-review`. SIGTERM with no PR keeps `exit_code=143` → `pending-dev` (covers operator-kill / orphan cases). Step 5a still writes its own label edit as belt-and-suspenders against SIGKILL escalation; both writers now converge on `pending-review`.
+**Test**: `tests/unit/test-sigterm-trap.sh` (8 cases): the bug being fixed (143 + PR → pending-review) plus regression guards for clean exit / crash / timeout / no-PR variants, plus a source-of-truth grep on the wrapper to detect drift.
 
 ## INV-16: jq named-group regex uses Oniguruma syntax, not Python
 

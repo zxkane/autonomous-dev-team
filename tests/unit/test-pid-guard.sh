@@ -189,7 +189,11 @@ if [[ -f "$SKILL_MD" ]]; then
   # the object form), not just any mention.
   # PR-3 renamed PR_INFO → pr_info; the existence check is the same
   # bracket-test pattern but with lowercase variable.
-  if echo "$SKILL_CONTENT" | grep -qE '\[ "?\$PR_EXISTS"? -gt 0 \]|\[ -n "?\$PR_INFO"? \]|\[ -z "?\$pr_info"? \]'; then
+  # Read from the file directly (no pipe) so pipefail doesn't surface SIGPIPE
+  # 141 when grep -q closes its stdin early after a match. The bug:
+  # `echo "$LARGE_CONTENT" | grep -qE PATTERN` succeeds, but echo gets SIGPIPE
+  # → exit 141 → pipefail propagates it as the pipeline exit code.
+  if grep -qE '\[ "?\$PR_EXISTS"? -gt 0 \]|\[ -n "?\$PR_INFO"? \]|\[ -z "?\$pr_info"? \]' "$SKILL_MD"; then
     echo -e "  ${GREEN}PASS${NC}: PR existence check"
     PASS=$((PASS+1))
   else
