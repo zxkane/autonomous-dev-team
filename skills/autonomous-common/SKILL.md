@@ -18,7 +18,17 @@ Shared workflow-enforcement hooks and agent-callable utility scripts used by `au
 
 ## Setup for `npx skills add` Users
 
-If you installed these skills via `npx skills add`, hook commands in the `autonomous-dev` and `autonomous-review` SKILL.md frontmatter reference `$CLAUDE_PROJECT_DIR/hooks/` and `$CLAUDE_PROJECT_DIR/scripts/`, but `npx skills add` places these files inside `.claude/skills/`. Create symlinks at your project root so the paths resolve:
+After `npx skills add`, run the bundled installer once from the project root:
+
+```bash
+bash .claude/skills/autonomous-common/scripts/install-claude-hooks.sh
+```
+
+The installer wires up the workflow hooks at the **project scope** (writing into `.claude/settings.json`), so they fire on every Bash invocation in the repo — not only when an autonomous-* skill is explicitly loaded. Without this, the hook commands declared in skill frontmatter only run while a skill is active in the conversation, which is the regression that closed #68.
+
+### What if you can't run the installer
+
+If installing into your `.claude/settings.json` is undesirable (shared repo, you want hooks isolated to autonomous-* skills only), the legacy fallback is to symlink the hook directories so the skill-scoped hook commands resolve:
 
 ```bash
 # From your project root:
@@ -26,11 +36,11 @@ ln -sf .claude/skills/autonomous-common/hooks hooks
 ln -sf .claude/skills/autonomous-dispatcher/scripts scripts
 ```
 
-> Without these symlinks, hook commands silently fail to fire (they look up `$CLAUDE_PROJECT_DIR/hooks/...` but the path doesn't exist). If "the push hook isn't blocking" or "the commit-outside-worktree check isn't running" — check the symlinks first.
+This keeps hooks scoped to the skills' frontmatter (Claude Code only fires them when a skill is active). If the push hook isn't blocking or the commit-outside-worktree check isn't running, check the symlinks — but prefer the installer for full coverage.
 
 ### Required Claude Code plugins
 
-Claude Code only. Add to `.claude/settings.json` under `enabledPlugins`:
+Claude Code only. The installer prompts for these; if installing manually, add to `.claude/settings.json` under `enabledPlugins`:
 
 ```json
 {
@@ -41,12 +51,14 @@ Claude Code only. Add to `.claude/settings.json` under `enabledPlugins`:
 }
 ```
 
-> IDEs without hook support (Cursor, Windsurf, Gemini CLI) don't need symlinks or plugins — the skills work without hooks, but workflow steps must be followed manually.
+> IDEs without hook support (Cursor, Windsurf, Gemini CLI) skip both the installer and the symlinks — the skills work without hooks, but workflow steps must be followed manually.
 
 ## What's here
 
 - **`hooks/`** — workflow-enforcement hooks (block-push-to-main, block-commit-outside-worktree, check-pr-review, check-shellcheck, verify-completion, …). See `hooks/README.md` for the canonical list and per-hook semantics.
 - **`scripts/`** — agent-callable utilities used by the dev/review skills:
+  - `install-claude-hooks.sh` — one-shot installer that wires the hooks into project-scoped `.claude/settings.json` (closes #68 — recommended setup, see "Setup" above)
+  - `claude-settings.template.json` — the canonical hook list the installer applies
   - `gh-as-user.sh` — runs `gh` as a real user (needed when retriggering bot reviews like `/q review`)
   - `mark-issue-checkbox.sh` — toggles GitHub issue body checkboxes from the agent
   - `reply-to-comments.sh` — replies to PR review comments
