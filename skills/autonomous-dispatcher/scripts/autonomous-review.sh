@@ -17,6 +17,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 source "${SCRIPT_DIR}/lib-agent.sh"
 source "${SCRIPT_DIR}/lib-auth.sh"
+# shellcheck source=lib-review-bots.sh
+source "${SCRIPT_DIR}/lib-review-bots.sh"
 
 # Validate required config (loaded by lib-agent.sh from autonomous.conf)
 : "${PROJECT_ID:?Set PROJECT_ID in autonomous.conf}"
@@ -24,6 +26,13 @@ source "${SCRIPT_DIR}/lib-auth.sh"
 : "${REPO_OWNER:?Set REPO_OWNER in autonomous.conf}"
 : "${REPO_NAME:?Set REPO_NAME in autonomous.conf}"
 : "${PROJECT_DIR:?Set PROJECT_DIR in autonomous.conf}"
+
+# Validate REVIEW_BOTS at startup so a typo (e.g. REVIEW_BOTS="q codx")
+# fails fast with a clear error instead of silently dropping the bot.
+# Empty REVIEW_BOTS is allowed — the bot-review section is omitted from
+# the prompt entirely and the review agent proceeds without bot
+# enforcement.
+REVIEW_BOTS_VALIDATED=$(parse_review_bots "${REVIEW_BOTS:-}") || exit 1
 
 # ---------------------------------------------------------------------------
 # GitHub authentication
@@ -295,31 +304,9 @@ Read the issue body for an \`## Acceptance Criteria\` section. For EACH criterio
 5. Check that CI checks are passing: gh pr checks ${PR_NUMBER}
 6. Verify test coverage and quality
 7. Check for security issues, code quality, and best practices
-8. Trigger and verify Amazon Q Developer review (see below)
+8. Trigger and verify configured review bots (see below)$(if [[ -z "$REVIEW_BOTS_VALIDATED" ]]; then printf '\n   (REVIEW_BOTS is empty — bot-review enforcement is disabled for this project.)'; fi)
 
-## Amazon Q Developer Review — MANDATORY
-
-Amazon Q ignores /q review comments from bot accounts. You MUST use \`scripts/gh-as-user.sh\` to trigger Q review as a real user.
-
-### Steps:
-1. Check if Q review already exists:
-   \`\`\`bash
-   Q_COUNT=\$(gh api repos/${REPO}/pulls/${PR_NUMBER}/reviews --jq '[.[] | select(.user.login == "amazon-q-developer[bot]")] | length')
-   \`\`\`
-2. If Q_COUNT is 0, trigger Q review (must use user auth, not bot token):
-   \`\`\`bash
-   bash scripts/gh-as-user.sh pr comment ${PR_NUMBER} --body "/q review"
-   \`\`\`
-3. Poll for Q review to appear (every 30s, timeout 3 min):
-   \`\`\`bash
-   for i in {1..6}; do
-     sleep 30
-     Q_COUNT=\$(gh api repos/${REPO}/pulls/${PR_NUMBER}/reviews --jq '[.[] | select(.user.login == "amazon-q-developer[bot]")] | length')
-     if [[ "\$Q_COUNT" -gt 0 ]]; then break; fi
-   done
-   \`\`\`
-4. Read Q review inline comments and check for unresolved threads
-5. Report Q review status in the E2E verification report table
+$(render_bot_review_section "$REVIEW_BOTS_VALIDATED" "$PR_NUMBER" "$REPO")
 
 $(if [[ "${E2E_ENABLED:-false}" == "true" ]]; then cat <<E2E_BLOCK
 ## E2E Verification via Chrome DevTools MCP — MANDATORY
@@ -415,12 +402,16 @@ Post a structured comment on PR #${PR_NUMBER} (NOT the issue) with this format:
 | Navigation | PASS/FAIL |
 | Console errors | PASS/FAIL |
 
-### Amazon Q Developer Review
-| Check | Status |
-|-------|--------|
-| Q review triggered | PASS/FAIL |
-| Q review received | PASS/FAIL |
-| All Q threads resolved | PASS/FAIL |
+### Configured Review Bots ($(if [[ -n "$REVIEW_BOTS_VALIDATED" ]]; then echo "$REVIEW_BOTS_VALIDATED"; else echo "none configured"; fi))
+| Bot | Triggered | Review received | All threads resolved |
+|-----|-----------|-----------------|----------------------|
+$(if [[ -n "$REVIEW_BOTS_VALIDATED" ]]; then
+  for _bot in $REVIEW_BOTS_VALIDATED; do
+    echo "| ${_bot} | PASS/FAIL | PASS/FAIL | PASS/FAIL |"
+  done
+else
+  echo "| (none) | n/a | n/a | n/a |"
+fi)
 \`\`\`
 E2E_BLOCK
 fi)

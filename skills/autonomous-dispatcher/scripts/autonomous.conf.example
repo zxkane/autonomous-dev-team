@@ -42,6 +42,30 @@ MAX_RETRIES=3
 # === Dev Agent ===
 DEV_SKILL_CMD="/autonomous-dev"
 
+# === Review Bots ===
+# Space-separated short names of bot reviewers that MUST run on every PR
+# before the autonomous-review wrapper approves. Configured bots are
+# mandatory: the review prompt triggers each, polls for the bot's review
+# (every 30s, timeout 3 min), and fails the review if any configured bot
+# doesn't respond in time.
+#
+# Built-in registry:
+#   q      → trigger "/q review",     login "amazon-q-developer[bot]"
+#   codex  → trigger "/codex review", login "codex[bot]"
+#   claude → trigger "@claude review", login "claude[bot]"
+#
+# Empty string disables bot-review enforcement entirely (the wrapper omits
+# the bot-review section from the agent prompt).
+#
+# Custom bots: add the short name to REVIEW_BOTS, then declare
+#   REVIEW_BOTS_<UPPERCASE_NAME>_TRIGGER="/your trigger"
+#   REVIEW_BOTS_<UPPERCASE_NAME>_LOGIN="your-bot[bot]"
+# Both must be set or the dispatcher tick fails fast at config validation.
+#
+# All three built-in bots reject GitHub App bot triggers, so the wrapper
+# uses scripts/gh-as-user.sh to post as a real user.
+REVIEW_BOTS="q"
+
 # === E2E Verification (optional) ===
 E2E_ENABLED="false"
 E2E_PREVIEW_URL_PATTERN=""

@@ -82,12 +82,24 @@ Verify ALL of the following:
 
 #### Triggering Bot Reviewers
 
-**`scripts/gh-as-user.sh` is required when retriggering bot reviews.** Some bot reviewers (e.g., Amazon Q Developer) ignore trigger comments posted by GitHub App bot accounts; the wrapper script posts as a real user so the bot picks it up.
+The set of mandatory bots is determined by `REVIEW_BOTS` in the project's `autonomous.conf`. Empty `REVIEW_BOTS` skips this section entirely; otherwise trigger each configured bot.
+
+**`scripts/gh-as-user.sh` is required.** All built-in bots (Amazon Q, Codex, Claude) reject trigger comments posted by GitHub App bot accounts; the wrapper posts as a real user.
+
+Built-in bot triggers:
 
 ```bash
+# When q ∈ REVIEW_BOTS:
 bash scripts/gh-as-user.sh pr comment {pr_number} --body "/q review"
+
+# When codex ∈ REVIEW_BOTS:
 bash scripts/gh-as-user.sh pr comment {pr_number} --body "/codex review"
+
+# When claude ∈ REVIEW_BOTS (note: @claude, not /claude):
+bash scripts/gh-as-user.sh pr comment {pr_number} --body "@claude review"
 ```
+
+For custom bots declared via `REVIEW_BOTS_<NAME>_TRIGGER`, use the configured trigger.
 
 Do NOT use the default `gh pr comment` for bot review triggers — it authenticates as a bot. If `scripts/gh-as-user.sh` is not available in your project, fall back to `gh pr comment` and accept that some bots may ignore the trigger.
 

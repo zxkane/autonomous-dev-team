@@ -65,15 +65,23 @@ gh api repos/{owner}/{repo}/pulls/{pr}/reviews \
 
 ### Trigger Bot Reviews
 
-> **IMPORTANT:** Some bot reviewers (e.g., Amazon Q Developer) ignore comments posted by GitHub App bot accounts. If your project has `scripts/gh-as-user.sh`, use it so the comment is attributed to a real user.
+Apply only the triggers for bots listed in your project's `REVIEW_BOTS` (per-project `autonomous.conf` setting). Empty `REVIEW_BOTS` means no bot is mandatory; skip this section.
+
+> **IMPORTANT:** All three built-in bot reviewers (Amazon Q, Codex, Claude) ignore trigger comments posted by GitHub App bot accounts. If your project has `scripts/gh-as-user.sh`, use it so the comment is attributed to a real user.
 
 ```bash
-# Amazon Q Developer (post as real user — bots ignore bot-posted triggers)
+# Amazon Q Developer (when q ∈ REVIEW_BOTS)
 bash scripts/gh-as-user.sh pr comment {pr} --body "/q review"
 
-# Codex
+# Codex (when codex ∈ REVIEW_BOTS)
 bash scripts/gh-as-user.sh pr comment {pr} --body "/codex review"
+
+# Claude (when claude ∈ REVIEW_BOTS)
+# Note: Claude uses @claude review, NOT /claude review.
+bash scripts/gh-as-user.sh pr comment {pr} --body "@claude review"
 ```
+
+For custom bots (declared via `REVIEW_BOTS_<NAME>_TRIGGER` and `_LOGIN`), use the trigger phrase you set.
 
 If `scripts/gh-as-user.sh` is not available, fall back to `gh pr comment` directly.
 
@@ -237,13 +245,16 @@ gh api repos/{owner}/{repo}/pulls/{pr}/comments \
 # Use the batch resolve script or loop above
 ```
 
-4. **Trigger new review** (use `gh-as-user.sh` so bots don't ignore the trigger):
+4. **Trigger new review for each bot in `REVIEW_BOTS`** (use `gh-as-user.sh` so bots don't ignore the trigger):
 ```bash
-# Amazon Q
+# When q ∈ REVIEW_BOTS:
 bash scripts/gh-as-user.sh pr comment {pr} --body "/q review"
 
-# Codex
+# When codex ∈ REVIEW_BOTS:
 bash scripts/gh-as-user.sh pr comment {pr} --body "/codex review"
+
+# When claude ∈ REVIEW_BOTS:
+bash scripts/gh-as-user.sh pr comment {pr} --body "@claude review"
 ```
 
 5. **Wait and check for new comments**:
