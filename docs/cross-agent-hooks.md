@@ -15,14 +15,14 @@ What differs between agents is **how to declare which script runs when** — i.e
 | **Claude Code** | `.claude/settings.json` | Reference (JSON, `PreToolUse`, …) | `Bash`, `Write`, `Edit` | `2` | `install-claude-hooks.sh` (PR-5) |
 | **Qoder** | `.qoder/settings.json` | Identical to Claude Code | `Bash`, `Write`, `Edit` | `2` | `install-qoder-hooks.sh` (PR-11a) |
 | **Antigravity** | `.antigravity/hooks.json` | Identical to Claude Code (undocumented) | `Bash` | `2` | `install-antigravity-hooks.sh` (PR-11a) |
-| Cursor | `.cursor/hooks.json` | Claude-style + shell-specific event | `Shell` (or pipe regex on cmd) | `2` | PR-11b (planned) |
-| Kiro CLI / Amazon Q | `.kiro/agents/<name>.json` | camelCase events, `timeout_ms` | `execute_bash`, `fs_write` | `2` | PR-11b (planned) |
-| Gemini CLI | `.gemini/settings.json` | `BeforeTool`/`AfterTool` regex | `run_shell_command`, `write_file`, `replace` | `2` | PR-11b (planned) |
-| Codex CLI | `.codex/hooks.json` + `[features]codex_hooks=true` | Claude-style | undocumented | `2` | PR-11b (planned) |
+| **Cursor** | `.cursor/hooks.json` | Claude-style, camelCase events, `version: 1` envelope | `Shell` (or pipe regex on cmd) | `2` | `install-cursor-hooks.sh` (PR-11b) |
+| **Kiro CLI / Amazon Q** | `.kiro/agents/<name>.json` | Agent definition; camelCase events; `timeout_ms` (ms not seconds) | `execute_bash`, `fs_write` (Write+Edit unified) | `2` | `install-kiro-hooks.sh` (PR-11b) |
+| **Gemini CLI** | `.gemini/settings.json` | `BeforeTool`/`AfterTool` events; provides `$CLAUDE_PROJECT_DIR` env compat alias | `run_shell_command`, `write_file`, `replace` | `2` | `install-gemini-hooks.sh` (PR-11b) |
+| **Codex CLI** | `.codex/hooks.json` + `[features]codex_hooks=true` in `config.toml` | Claude-style (modeled verbatim) | `Bash`, `Write`, `Edit` (undocumented but inferred) | `2` | `install-codex-hooks.sh` (PR-11b) |
 | Windsurf | `.windsurf/hooks.json` | snake_case, **no matcher field** | filter inside script | `2` | PR-11c (planned) |
 | Kimi CLI | `~/.kimi/config.toml` | TOML, `[[hooks]]` array | regex (e.g. `WriteFile\|StrReplaceFile`) | `2` | PR-11c (planned) |
 
-## Per-agent installation (PR-11a coverage)
+## Per-agent installation
 
 After `npx skills add zxkane/autonomous-dev-team`, run **one** of these from the project root:
 
@@ -35,6 +35,18 @@ bash .claude/skills/autonomous-common/scripts/install-qoder-hooks.sh
 
 # Antigravity (undocumented contract — see caveat below)
 bash .claude/skills/autonomous-common/scripts/install-antigravity-hooks.sh
+
+# Cursor
+bash .claude/skills/autonomous-common/scripts/install-cursor-hooks.sh
+
+# Kiro CLI / Amazon Q (default agent name is "default"; override with --agent <name>)
+bash .claude/skills/autonomous-common/scripts/install-kiro-hooks.sh
+
+# Gemini CLI
+bash .claude/skills/autonomous-common/scripts/install-gemini-hooks.sh
+
+# Codex CLI (also enables [features] codex_hooks = true in .codex/config.toml)
+bash .claude/skills/autonomous-common/scripts/install-codex-hooks.sh
 ```
 
 Each installer is idempotent and preserves any other top-level keys you have in the agent's config file. They also install a per-worktree git pre-push hook (closes #65); pass `--no-git-hook` to skip.
