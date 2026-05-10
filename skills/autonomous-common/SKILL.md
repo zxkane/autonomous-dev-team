@@ -1,18 +1,20 @@
 ---
 name: autonomous-common
 description: >
-  Shared infrastructure for the autonomous dev team skills. Provides workflow
-  enforcement hooks (block-push-to-main, block-commit-outside-worktree,
-  check-design-canvas, etc.) and agent-callable utility scripts
-  (mark-issue-checkbox, reply-to-comments, resolve-threads, gh-as-user).
-  This skill is loaded automatically as background context by other
-  autonomous-* skills. Do not invoke directly.
-user-invocable: false
+  Use when setting up, troubleshooting, or modifying the shared hooks and
+  agent-callable utility scripts that enforce the autonomous dev/review
+  workflow. Triggers on phrases like "push to main is blocked",
+  "block-commit-outside-worktree hook failing", "configure hooks after
+  npx skills add", "what does check-pr-review.sh do", "set up workflow
+  hook symlinks", or when editing files under `skills/autonomous-common/`.
+  Provides the hooks the autonomous-dev / autonomous-review skills depend
+  on, plus utility scripts (gh-as-user.sh, mark-issue-checkbox.sh,
+  reply-to-comments.sh, resolve-threads.sh).
 ---
 
 # Autonomous Common Infrastructure
 
-Shared hooks and scripts used by the autonomous-dev, autonomous-review, and autonomous-dispatcher skills.
+Shared workflow-enforcement hooks and agent-callable utility scripts used by `autonomous-dev`, `autonomous-review`, and `autonomous-dispatcher`. The other autonomous-* skills reference scripts and hooks here — when those reference paths break, this is usually the skill to look at.
 
 ## Setup for `npx skills add` Users
 
@@ -24,7 +26,11 @@ ln -sf .claude/skills/autonomous-common/hooks hooks
 ln -sf .claude/skills/autonomous-dispatcher/scripts scripts
 ```
 
-Required Claude Code plugins (add to `.claude/settings.json` under `enabledPlugins`):
+> Without these symlinks, hook commands silently fail to fire (they look up `$CLAUDE_PROJECT_DIR/hooks/...` but the path doesn't exist). If "the push hook isn't blocking" or "the commit-outside-worktree check isn't running" — check the symlinks first.
+
+### Required Claude Code plugins
+
+Claude Code only. Add to `.claude/settings.json` under `enabledPlugins`:
 
 ```json
 {
@@ -35,35 +41,15 @@ Required Claude Code plugins (add to `.claude/settings.json` under `enabledPlugi
 }
 ```
 
-> IDEs without hook support (Cursor, Windsurf, Gemini CLI) don't need symlinks — the skills work without hooks, but workflow steps must be followed manually.
+> IDEs without hook support (Cursor, Windsurf, Gemini CLI) don't need symlinks or plugins — the skills work without hooks, but workflow steps must be followed manually.
 
-## Hooks
+## What's here
 
-Workflow enforcement hooks in `hooks/` directory. See `hooks/README.md` for the full reference.
+- **`hooks/`** — workflow-enforcement hooks (block-push-to-main, block-commit-outside-worktree, check-pr-review, check-shellcheck, verify-completion, …). See `hooks/README.md` for the canonical list and per-hook semantics.
+- **`scripts/`** — agent-callable utilities used by the dev/review skills:
+  - `gh-as-user.sh` — runs `gh` as a real user (needed when retriggering bot reviews like `/q review`)
+  - `mark-issue-checkbox.sh` — toggles GitHub issue body checkboxes from the agent
+  - `reply-to-comments.sh` — replies to PR review comments
+  - `resolve-threads.sh` — batch-resolves review threads on a PR
 
-| Hook | Type | Purpose |
-|------|------|---------|
-| `block-push-to-main.sh` | PreToolUse | Blocks direct pushes to main |
-| `block-commit-outside-worktree.sh` | PreToolUse | Blocks commits outside worktrees |
-| `check-design-canvas.sh` | PreToolUse | Reminds about design canvas |
-| `check-code-simplifier.sh` | PreToolUse | Blocks commits until code-simplifier review |
-| `check-pr-review.sh` | PreToolUse | Blocks pushes until PR review |
-| `check-test-plan.sh` | PreToolUse | Reminds about test plan |
-| `check-shellcheck.sh` | PreToolUse | Blocks commits if staged .sh files have shellcheck errors |
-| `check-unit-tests.sh` | PreToolUse | Warns about unrun unit tests |
-| `check-rebase-before-push.sh` | PreToolUse | Blocks push if behind origin/main |
-| `warn-skip-verification.sh` | PreToolUse | Warns about --no-verify |
-| `post-git-action-clear.sh` | PostToolUse | Clears state after git actions |
-| `post-git-push.sh` | PostToolUse | Post-push CI/E2E reminder |
-| `verify-completion.sh` | Stop | Blocks completion until CI/E2E pass |
-
-## Scripts
-
-Agent-callable utility scripts in `scripts/` directory.
-
-| Script | Used By | Purpose |
-|--------|---------|---------|
-| `mark-issue-checkbox.sh` | autonomous-dev, autonomous-review | Mark issue checkboxes as complete |
-| `gh-as-user.sh` | autonomous-dev, autonomous-review | Run `gh` as real user (not bot) |
-| `reply-to-comments.sh` | autonomous-dev | Reply to PR review comments |
-| `resolve-threads.sh` | autonomous-dev | Batch resolve review threads |
+> The hooks and scripts are documented in detail in their respective README/source files. This SKILL.md only catalogs what's available so you can find the right file to edit.

@@ -1,18 +1,27 @@
 ---
 name: autonomous-dispatcher
 description: >
-  This skill should be used when dispatching autonomous development or review
-  tasks from GitHub issues. Covers scanning for new issues with the 'autonomous'
-  label, dispatching dev-new/dev-resume/review processes, dependency checking,
-  retry counting, stale process detection, and concurrency limiting. Use when
-  asked to "run the dispatcher", "scan for pending issues", "dispatch autonomous
-  tasks", "check stale agents", or "set up the dispatch cron".
-metadata: {"openclaw": {"requires": {"bins": ["gh", "jq"], "env": ["PROJECT_DIR"]}}}
+  Use when running, configuring, or troubleshooting the autonomous-dev-team
+  dispatcher cron. Triggers on phrases like "run the dispatcher", "scan for
+  pending issues", "dispatch autonomous tasks", "set up the dispatch cron",
+  "configure dispatcher.conf", "set up multi-project dispatcher", "dispatch
+  to a remote dev box via SSM", "EXECUTION_BACKEND=remote-aws-ssm",
+  "stale agent detection", or working on dispatcher-tick.sh /
+  dispatcher-multi-tick.sh / dispatch-local.sh / dispatch-remote-aws-ssm.sh.
+  Covers per-project tick (5 steps: concurrency, scan-new, scan-pending-review,
+  scan-pending-dev, stale detection), the multi-project outer loop, and
+  pluggable local-vs-remote-AWS-SSM execution backends.
 ---
 
 # Autonomous Dev Team Dispatcher
 
-Scan GitHub issues and dispatch dev/review tasks locally. One cron tick is one invocation of `dispatcher-tick.sh`. The full state machine, per-step semantics, and invariants live in [`docs/pipeline/`](../../docs/pipeline/) — that's the spec; this file is the agent's invocation contract.
+Scan GitHub issues and dispatch dev/review tasks. One cron tick is one invocation of `dispatcher-tick.sh` (single-project) or `dispatcher-multi-tick.sh` (multi-project). The full state machine, per-step semantics, and invariants live at [`docs/pipeline/` in the source repo](https://github.com/zxkane/autonomous-dev-team/tree/main/docs/pipeline) — that's the spec; this file is the agent's invocation contract.
+
+## Prerequisites
+
+- `gh` and `jq` on `PATH`.
+- For the local backend: `$PROJECT_DIR` set, pointing at the project root. Per-project `autonomous.conf` (see `scripts/autonomous.conf.example`).
+- For multi-project / remote backends: `dispatcher.conf` declaring `PROJECTS=()` (see `scripts/dispatcher.conf.example`).
 
 > **Security note**: This dispatcher processes GitHub issue content as input. In public repositories, issue content is untrusted — anyone can create issues. Ensure the `autonomous` label can only be applied by trusted maintainers (use GitHub branch rulesets or organizational policies). The dispatcher only reads labels/comments and spawns local processes via the helper script — it does NOT modify source code or push to branches.
 
@@ -48,7 +57,7 @@ Either form runs the same 5-step tick:
 4. **scan-pending-dev** — find `pending-dev` issues, retry-counter check, dispatch dev-resume (or mark stalled if exhausted).
 5. **stale detection** — for `in-progress` / `reviewing` issues, probe wrapper PID, branch on alive/dead and on PR/CI/idle gates.
 
-The logic is in [`scripts/dispatcher-tick.sh`](scripts/dispatcher-tick.sh) and the helpers in [`scripts/lib-dispatch.sh`](scripts/lib-dispatch.sh). For the spec each step is implementing, see [`docs/pipeline/dispatcher-flow.md`](../../docs/pipeline/dispatcher-flow.md).
+The logic is in [`scripts/dispatcher-tick.sh`](scripts/dispatcher-tick.sh) and the helpers in [`scripts/lib-dispatch.sh`](scripts/lib-dispatch.sh). For the spec each step is implementing, see [`docs/pipeline/dispatcher-flow.md` in the source repo](https://github.com/zxkane/autonomous-dev-team/blob/main/docs/pipeline/dispatcher-flow.md).
 
 ## GitHub Authentication — App token, not user token
 
@@ -65,7 +74,7 @@ The token is valid for 1 hour and scoped to the target repo only. `dispatcher-ti
 
 ## Dispatch Helpers
 
-`dispatcher-tick.sh` calls a `dispatch()` helper for each task type, which routes to the configured execution backend. **Do NOT spawn agent processes any other way.** Each backend handles `nohup`, input validation, log-file mode 0600, and stale-wrapper kill ([INV-09](../../docs/pipeline/invariants.md#inv-09-just_dispatched-skip-rule)).
+`dispatcher-tick.sh` calls a `dispatch()` helper for each task type, which routes to the configured execution backend. **Do NOT spawn agent processes any other way.** Each backend handles `nohup`, input validation, log-file mode 0600, and stale-wrapper kill ([INV-09](https://github.com/zxkane/autonomous-dev-team/blob/main/docs/pipeline/invariants.md#inv-09-just_dispatched-skip-rule)).
 
 Backends today:
 
@@ -129,7 +138,7 @@ openclaw cron add \
 | `no-auto-close` | `#d4c5f9` | Used with `autonomous` — skip auto-merge after review passes, requires manual approval |
 | `stalled` | `#B60205` | Issue exceeded max retry attempts; requires manual investigation |
 
-For the full state machine, see [`docs/pipeline/state-machine.md`](../../docs/pipeline/state-machine.md).
+For the full state machine, see [`docs/pipeline/state-machine.md` in the source repo](https://github.com/zxkane/autonomous-dev-team/blob/main/docs/pipeline/state-machine.md).
 
 ## Model Strategy
 
