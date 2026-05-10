@@ -154,15 +154,28 @@ exit 0
 EOF
 chmod +x "$GH_STUB_DIR/gh"
 
+# Stub dispatch-local.sh under PROJECT_DIR/scripts/ so the tick's
+# dispatch() helper can spawn a no-op when a list_*() stub returns a
+# real issue (TC-001 needs this so a `gh issue comment` actually fires
+# through our PATH stub, otherwise the auth-block-runs-before-gh
+# invariant is asserted vacuously).
+FAKE_PROJECT_DIR="$TMPROOT/proj"
+mkdir -p "$FAKE_PROJECT_DIR/scripts"
+cat > "$FAKE_PROJECT_DIR/scripts/dispatch-local.sh" <<'EOF'
+#!/bin/bash
+exit 0
+EOF
+chmod +x "$FAKE_PROJECT_DIR/scripts/dispatch-local.sh"
+
 # Common autonomous.conf for tests. Each case overrides selected vars
-# via env.
+# via env. PROJECT_DIR points to the fake dir created above.
 COMMON_CONF="$TMPROOT/autonomous.conf"
-cat > "$COMMON_CONF" <<'EOF'
+cat > "$COMMON_CONF" <<EOF
 REPO=myorg/myrepo
 REPO_OWNER=myorg
 REPO_NAME=myrepo
 PROJECT_ID=test-proj
-PROJECT_DIR=/tmp/test-proj
+PROJECT_DIR=$FAKE_PROJECT_DIR
 MAX_CONCURRENT=5
 MAX_RETRIES=3
 REVIEW_BOTS=""
@@ -203,20 +216,33 @@ FAKE_PEM="$TMPROOT/fake.pem"
 echo "-----BEGIN RSA PRIVATE KEY-----" > "$FAKE_PEM"
 
 # ---------------------------------------------------------------------------
-echo "=== TC-DISP-AUTH-001: GH_AUTH_MODE=app + valid id/pem → token generated, exported, used ==="
+echo "=== TC-DISP-AUTH-001: GH_AUTH_MODE=app + valid id/pem → token generated, exported, observed by first gh call ==="
 # ---------------------------------------------------------------------------
+# Override list_new_issues so Step 2 actually fires `gh issue comment`
+# through the PATH stub. Without a non-empty issue list, GH_RECORD stays
+# empty and the "token observed by gh" assertion is vacuous.
+ORIG_LIB_DISPATCH=$(cat "$SANDBOX/lib-dispatch.sh")
+{
+  echo "$ORIG_LIB_DISPATCH"
+  echo 'list_new_issues() { echo '\''[{"number":42,"labels":[],"title":"t"}]'\''; }'
+} > "$SANDBOX/lib-dispatch.sh"
+
 GH_AUTH_MODE=app \
 DISPATCHER_APP_ID=12345 \
 DISPATCHER_APP_PEM="$FAKE_PEM" \
 GH_APP_TOKEN_OVERRIDE="" \
   run_tick "001"
 
+# Restore the empty-issue stub for subsequent cases.
+echo "$ORIG_LIB_DISPATCH" > "$SANDBOX/lib-dispatch.sh"
+
 assert_eq "tick exits 0" 0 "$RC"
 assert_contains "get_gh_app_token called once with correct args" \
   "GH_APP_TOKEN_CALL app_id=12345 pem=$FAKE_PEM owner=myorg name=myrepo" "$AUTH_LOG"
-# Stubbed lib-dispatch helpers return [] so no gh calls fire in this run,
-# but the invariant we care about is: IF any gh runs, it sees the sentinel
-# token, never an unset one.
+# Real assertion: at least one gh call DID fire and it carried the
+# sentinel token (proves the auth block ran before the first gh call).
+assert_contains "gh call observed sentinel token" \
+  "token=sentinel-token-abc123" "$GH_LOG"
 assert_not_contains "no gh call observed token=<unset>" \
   "token=<unset>" "$GH_LOG"
 
@@ -304,6 +330,44 @@ run_tick "007"
 
 assert_eq "tick exits 0 with GH_AUTH_MODE unset" 0 "$RC"
 assert_eq "get_gh_app_token NOT invoked when GH_AUTH_MODE unset" "" "$AUTH_LOG"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-DISP-AUTH-008: REPO_NAME missing in conf → auto-derived from REPO ==="
+# ---------------------------------------------------------------------------
+# Older path-entry autonomous.conf may set REPO=owner/name without REPO_NAME.
+# The auth block must auto-derive REPO_NAME so set -u doesn't trip.
+NO_REPO_NAME_CONF="$TMPROOT/autonomous-no-name.conf"
+cat > "$NO_REPO_NAME_CONF" <<EOF
+REPO=acme/widget
+REPO_OWNER=acme
+PROJECT_ID=test-proj
+PROJECT_DIR=$FAKE_PROJECT_DIR
+MAX_CONCURRENT=5
+MAX_RETRIES=3
+REVIEW_BOTS=""
+EOF
+
+auth_record="$TMPROOT/auth-008.log"
+gh_record="$TMPROOT/gh-008.log"
+stderr_log="$TMPROOT/stderr-008.log"
+: > "$auth_record"
+: > "$gh_record"
+: > "$stderr_log"
+
+AUTH_RECORD="$auth_record" GH_RECORD="$gh_record" \
+AUTONOMOUS_CONF="$NO_REPO_NAME_CONF" \
+GH_AUTH_MODE=app DISPATCHER_APP_ID=99 DISPATCHER_APP_PEM="$FAKE_PEM" \
+GH_APP_TOKEN_OVERRIDE="" \
+PATH="$GH_STUB_DIR:$PATH" \
+  bash "$SANDBOX/dispatcher-tick.sh" >/dev/null 2>"$stderr_log"
+RC=$?
+AUTH_LOG=$(cat "$auth_record")
+STDERR_LOG=$(cat "$stderr_log")
+
+assert_eq "tick exits 0 (no unbound-var error from set -u)" 0 "$RC"
+assert_contains "REPO_NAME auto-derived from REPO=acme/widget" \
+  "owner=acme name=widget" "$AUTH_LOG"
 
 # ---------------------------------------------------------------------------
 echo ""

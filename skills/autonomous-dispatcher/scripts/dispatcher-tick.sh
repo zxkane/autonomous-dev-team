@@ -72,6 +72,10 @@ if [[ "${GH_AUTH_MODE:-token}" == "app" ]]; then
     echo "[dispatcher-tick] FATAL: GH_AUTH_MODE=app requires DISPATCHER_APP_ID and DISPATCHER_APP_PEM (one or both are empty)." >&2
     exit 1
   fi
+  # Auto-derive REPO_NAME from REPO when an older path-entry autonomous.conf
+  # forgot to set it. Inline projects already do this in tick_inline_project;
+  # mirror it here so set -u doesn't trip on `"$REPO_NAME"` below.
+  : "${REPO_NAME:=${REPO##*/}}"
   # shellcheck source=gh-app-token.sh
   source "${SCRIPT_DIR}/gh-app-token.sh"
   _dispatcher_token=$(get_gh_app_token \
