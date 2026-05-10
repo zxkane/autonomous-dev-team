@@ -2,7 +2,7 @@
 
 A fully automated development pipeline that turns GitHub issues into merged pull requests — no human intervention required. It scans for issues labeled `autonomous`, dispatches a **Dev Agent** to implement the feature with tests in an isolated worktree, and hands off to a **Review Agent** for code review with optional E2E verification. The entire cycle runs unattended on a cron schedule.
 
-Supports multiple coding agent CLIs — Claude Code, Codex CLI, Kiro CLI, Cursor Agent, Gemini CLI, and most CLIs with a `-p <prompt>` non-interactive flag — via a pluggable agent abstraction layer.
+Supports multiple coding agent CLIs — Claude Code, Codex CLI, Kiro CLI, opencode, Cursor Agent, Gemini CLI, and most CLIs with a `-p <prompt>` non-interactive flag — via a pluggable agent abstraction layer.
 
 ## Getting Started
 
@@ -168,7 +168,7 @@ The file is a bash script that's `source`d at every dispatcher tick and wrapper 
 | `REPO` | Yes | `owner/repo-name` | The GitHub repo the pipeline watches. |
 | `REPO_OWNER`, `REPO_NAME` | Yes | Split form of `REPO` | Used for App-token scoping. |
 | `PROJECT_DIR` | Yes | Absolute path to the project root on the dispatcher box | Where the agent runs. |
-| `AGENT_CMD` | No (default `claude`) | `claude`, `codex`, or `kiro` | The CLI used to spawn dev/review agents. Other CLIs work via the generic `<cli> -p <prompt>` fallback. See the Supported Agent CLIs table for resume semantics per CLI. |
+| `AGENT_CMD` | No (default `claude`) | `claude`, `codex`, `kiro`, or `opencode` | The CLI used to spawn dev/review agents. Other CLIs work via the generic `<cli> -p <prompt>` fallback. See the Supported Agent CLIs table for resume semantics per CLI. |
 | `AGENT_DEV_MODEL`, `AGENT_REVIEW_MODEL` | No (default empty / `sonnet`) | Model name passed to the agent CLI | Empty = let the CLI pick. The review model defaults to `sonnet` to keep review costs predictable. |
 | `AGENT_PERMISSION_MODE` | No (default `auto`) | `auto`, `plan`, or `bypassPermissions` | `bypassPermissions` grants the agent unrestricted shell access — only use in a trusted sandbox. |
 | `AGENT_TIMEOUT` | No (default `4h`) | coreutils `timeout` units (e.g. `30m`, `2h`, `1d`) | Wall-clock cap on each agent invocation. Prevents hung CLI processes (stale `--resume`, MCP stdio deadlock) from monopolizing wrapper PID slots. |
@@ -373,9 +373,9 @@ The dispatcher is an [OpenClaw](https://github.com/OpenClaw/OpenClaw) skill that
 | Kiro CLI | `kiro-cli` | `chat --no-interactive [--agent <name>]` | (falls back to new) | Basic support |
 | Cursor Agent | `agent` | `-p "<prompt>"` | `--resume=<chat-id>` | Generic fallback (untested explicit branch) |
 | Gemini CLI | `gemini` | `-p "<prompt>"` | (no documented resume flag) | Generic fallback (untested explicit branch) |
-| opencode (`anomalyco/opencode`) | `opencode` | `run "<prompt>"` (positional) | `run --session <id>` — but **caller cannot pre-mint the session id**; opencode mints its own. Needs an explicit `lib-agent.sh` adapter (capture session id from `--format json` stdout, persist sidecar) before resume works. | Generic fallback only (currently); explicit branch tracked as a follow-up |
+| opencode | `opencode` | `run --format json [PROMPT]` | `run --session <sessionID>` (captured from JSON stream) | Full support |
 
-Configure via `AGENT_CMD` in `scripts/autonomous.conf`. The `claude`, `codex`, and `kiro` rows have explicit branches in `scripts/lib-agent.sh`; the others run through the generic `<cli> -p <prompt>` fallback. Any CLI not listed should still work if it accepts a `-p <prompt>` non-interactive flag — the abstraction layer is intentionally permissive.
+Configure via `AGENT_CMD` in `scripts/autonomous.conf`. The `claude`, `codex`, `kiro`, and `opencode` rows have explicit branches in `scripts/lib-agent.sh`; the others run through the generic `<cli> -p <prompt>` fallback. Any CLI not listed should still work if it accepts a `-p <prompt>` non-interactive flag — the abstraction layer is intentionally permissive.
 
 ## Development Workflow (Hook System)
 
