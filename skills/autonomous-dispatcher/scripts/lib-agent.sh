@@ -1,7 +1,20 @@
 #!/bin/bash
 # lib-agent.sh — Agent CLI abstraction layer.
+#
 # Supports: claude (default), codex, kiro, and generic fallback.
 # Source this file in autonomous-dev.sh and autonomous-review.sh.
+#
+# Session-id semantics differ across CLIs:
+#   claude — caller pre-mints `--session-id <UUID>`; same id used for both
+#            run and resume. Cleanest fit for the dispatcher's session_id.
+#   codex  — CLI mints its own thread_id per `codex exec` invocation. We
+#            capture it from `--json` stdout via _codex_capture_thread and
+#            persist a sidecar under pid_dir_for_project() keyed by the
+#            dispatcher's session_id, then feed it back to
+#            `codex exec resume <thread_id>` on resume.
+#   kiro   — no session model; every invocation is a fresh conversation.
+#            resume_agent falls back to run_agent.
+#   *      — generic <cli> -p <prompt> fallback; resume falls back to new.
 
 # Load project config via the shared helper (closes #58).
 # Note: ${BASH_SOURCE[0]:-$0} (NOT readlink -f) so the symlink-vendor
@@ -56,6 +69,86 @@ _run_with_timeout() {
   fi
 }
 
+# Codex thread-id capture/recall.
+#
+# Codex `exec` mints its own thread (UUID) per invocation and does NOT accept
+# a caller-provided ID — unlike Claude Code, which lets us pre-mint
+# `--session-id <UUID>`. To resume a codex session correctly we must capture
+# the CLI-assigned thread_id after `run_agent` and feed it into
+# `codex exec resume <id>` on `resume_agent`. We persist it in a sidecar
+# under pid_dir_for_project() (mode 0700, per-user, already used for PID
+# files) keyed by the dispatcher's session_id.
+
+_codex_thread_file() {
+  local session_id="$1"
+  local pid_dir
+  pid_dir=$(pid_dir_for_project) || return 1
+  printf '%s/codex-thread-%s\n' "$pid_dir" "$session_id"
+}
+
+# _codex_capture_thread <session_id>
+#
+# Pipeline filter: streams stdin → stdout unchanged so the wrapper still sees
+# every JSON event for logging, and as a side effect writes the first
+# observed thread_id to the sidecar. Robust to:
+#   - thread.started not being literally the first line (we keep scanning)
+#   - the agent crashing before any thread_id arrives (sidecar stays empty
+#     → resume_agent falls back to a fresh run_agent, same pattern as kiro)
+#   - re-runs against the same dispatcher session_id (we overwrite, not
+#     append)
+#
+# Why awk and not jq: jq is not a hard dependency of this lib; awk is
+# universal. Codex `--json` emits one event per line (JSONL), and the
+# `thread.started` event has the shape `{"type":"thread.started",
+# "thread_id":"<UUID>"}` — a single line with no embedded newlines.
+_codex_capture_thread() {
+  local session_id="$1"
+  local thread_file
+  thread_file=$(_codex_thread_file "$session_id") || { cat; return 0; }
+  awk -v out="$thread_file" '
+    BEGIN {
+      # Tracked together with the regex below so length math stays correct
+      # if either is edited later. prefix matches the literal lead-in of a
+      # codex thread.started JSON line; the inner [a-f0-9-]+ is the part we
+      # want to extract.
+      prefix = "\"thread_id\":\""
+    }
+    {
+      print
+      fflush()
+      if (!captured && /"type":"thread.started"/) {
+        if (match($0, /"thread_id":"[a-f0-9-]+"/)) {
+          # Strip the prefix and the trailing closing quote.
+          tid = substr($0, RSTART + length(prefix), RLENGTH - length(prefix) - 1)
+          # Symlink-defense: refuse to clobber an existing symlink at the
+          # sidecar path. pid_dir is mode 0700 so this is defense in depth,
+          # but cheap to keep (CWE-59).
+          cmd = "test -L \"" out "\" && exit 0; printf \"%s\\n\" \"" tid "\" > \"" out "\""
+          system(cmd)
+          captured = 1
+        }
+      }
+    }'
+}
+
+# _codex_thread_id <session_id>
+#
+# Read the captured thread_id from the sidecar, validating the format.
+# Echo the id and rc=0 on hit; echo nothing and rc=1 on miss / malformed.
+# The UUID-only regex protects against a future bug overwriting the sidecar
+# with attacker-controlled data — pid_dir is 0700 so the surface is small,
+# but the explicit failure mode is worth the two extra lines.
+_codex_thread_id() {
+  local session_id="$1"
+  local thread_file tid
+  thread_file=$(_codex_thread_file "$session_id") || return 1
+  [[ -L "$thread_file" ]] && return 1
+  [[ -f "$thread_file" ]] || return 1
+  tid=$(head -n1 "$thread_file" 2>/dev/null)
+  [[ "$tid" =~ ^[a-f0-9-]+$ ]] || return 1
+  printf '%s\n' "$tid"
+}
+
 # Acquire PID guard: prevent duplicate instances for the same issue.
 # Checks for symlink attacks, running processes, then writes current PID.
 # Args: $1=pid_file, $2=label (e.g. "autonomous-dev"), $3=issue_number
@@ -92,9 +185,23 @@ run_agent() {
         --output-format json
       ;;
     codex)
-      _run_with_timeout "$AGENT_CMD" \
+      # Codex CLI: headless invocation is `codex exec [PROMPT]` (positional
+      # prompt). The legacy `-p` flag now means `--profile` and would parse
+      # the prompt as a TOML config profile name — silent breakage.
+      #
+      # `--json` streams JSONL events to stdout, including the
+      # `thread.started` event from which we capture the thread_id for
+      # resume_agent. We pipe through _codex_capture_thread (pass-through
+      # filter) to keep the wrapper's stdout consumption untouched while
+      # writing the sidecar.
+      #
+      # PIPESTATUS[0] surfaces codex's exit code (the awk filter at the end
+      # of the pipeline is well-behaved and rc=0 on every input).
+      _run_with_timeout "$AGENT_CMD" exec --json \
         ${model:+--model "$model"} \
-        -p "$prompt"
+        "$prompt" \
+        | _codex_capture_thread "$session_id"
+      return "${PIPESTATUS[0]}"
       ;;
     kiro)
       # Kiro CLI does not support named sessions (session_id is ignored).
@@ -133,6 +240,29 @@ resume_agent() {
         ${model:+--model "$model"} \
         -p "$prompt" \
         --output-format json
+      ;;
+    codex)
+      # Codex `exec resume <thread_id> [PROMPT]` resumes the conversation.
+      # The dispatcher's session_id and codex's thread_id are NOT the same:
+      # codex mints its own UUID and we capture it during run_agent into a
+      # sidecar keyed by our session_id. Read it back here.
+      #
+      # If the sidecar is missing (run_agent crashed before thread.started,
+      # or this resume_agent is being called without a prior run_agent),
+      # fall back to a fresh new-session run — same defensive pattern as
+      # the kiro branch, since resuming-a-nonexistent-thread is worse UX
+      # than starting clean with the full prompt.
+      local _codex_tid
+      if _codex_tid=$(_codex_thread_id "$session_id"); then
+        _run_with_timeout "$AGENT_CMD" exec resume "$_codex_tid" --json \
+          ${model:+--model "$model"} \
+          "$prompt" \
+          | _codex_capture_thread "$session_id"
+        return "${PIPESTATUS[0]}"
+      else
+        echo "[lib-agent] no captured codex thread_id for session $session_id; starting a new codex session" >&2
+        run_agent "$session_id" "$prompt" "$model" "$session_name"
+      fi
       ;;
     kiro)
       # Kiro CLI --resume cannot inject new review feedback effectively —
