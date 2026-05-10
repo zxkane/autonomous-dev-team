@@ -175,7 +175,7 @@ The review agent finds the PR linked to an issue, performs code review, optional
 | **PR discovery** | Finds the linked PR via body reference, issue comments, or search |
 | **Merge conflict resolution** | Automatically rebases if the PR conflicts with main |
 | **Code review checklist** | Verifies design docs, tests, CI status, and PR conventions |
-| **Amazon Q integration** | Triggers and monitors Amazon Q Developer review |
+| **Configurable bot reviewers** | Triggers and monitors PR review bots per `REVIEW_BOTS` setting (built-in: Amazon Q `/q`, Codex `/codex`, Claude `@claude`; custom bots via env vars) |
 | **E2E verification** | Optional Chrome DevTools MCP testing with screenshot evidence |
 | **Acceptance criteria tracking** | Marks `## Acceptance Criteria` checkboxes as verified |
 | **Auto-merge** | Squash-merges and closes the issue on review pass |
