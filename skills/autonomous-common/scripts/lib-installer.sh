@@ -86,8 +86,11 @@ merge_hooks_settings() {
   # field documents this).
   local tmp
   tmp=$(mktemp)
+  # EXIT (not RETURN) so cleanup fires even on `set -e` abort paths inside
+  # this function. Caller scripts run with `set -euo pipefail`; jq failures
+  # on a malformed existing target would otherwise leak the tmp file.
   # shellcheck disable=SC2064
-  trap "rm -f '$tmp'" RETURN
+  trap "rm -f '$tmp'" EXIT
   jq -s '
     .[0] as $existing |
     .[1] as $tmpl |
@@ -95,13 +98,21 @@ merge_hooks_settings() {
       + ($tmpl | {_managed_by, _managed_note, hooks})
   ' "$target" "$template" > "$tmp"
 
-  if ! jq -e "$verify_filter" "$tmp" >/dev/null; then
+  # Verify the merged file is sane:
+  #   - Caller-supplied filter (typically '.hooks.PreToolUse | length > 0')
+  #     catches wholesale hook-block destruction.
+  #   - We additionally hard-check `_managed_by == "autonomous-common"` so
+  #     a template edit that silently drops the management annotation is
+  #     also caught (without it, the "hand-edits will be overwritten on
+  #     re-run" contract documented in _managed_note is invisible).
+  if ! jq -e "($verify_filter) and (._managed_by == \"autonomous-common\")" "$tmp" >/dev/null; then
     mv "$backup" "$target"
     echo "ERROR: merge produced an unexpected result; restored backup" >&2
     exit 1
   fi
 
   mv "$tmp" "$target"
+  trap - EXIT
   echo "Updated: $target (backup at $backup)" >&2
 }
 
