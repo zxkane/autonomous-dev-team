@@ -59,6 +59,32 @@ flowchart TD
 
 `JUST_DISPATCHED` is the only piece of state the tick maintains in memory — and it dies when the tick ends.
 
+## Pre-step: GitHub authentication (closes #91)
+
+`dispatcher-tick.sh` resolves auth before any `gh` call so the dispatcher's
+issue comments and label changes appear under the configured identity.
+
+Behavior:
+
+| `GH_AUTH_MODE` | Setup | Token source for `gh` |
+|---|---|---|
+| `app` | sources `gh-app-token.sh::get_gh_app_token`, exports `GH_TOKEN` | Installation token scoped to one repo, valid 1h. A single token covers the whole tick (typically <1 min) — no refresh daemon. |
+| `token` (default) | none | `GH_TOKEN` env or `gh auth login` token |
+
+Required when `GH_AUTH_MODE=app`: `DISPATCHER_APP_ID`, `DISPATCHER_APP_PEM`,
+`REPO`, `REPO_OWNER`. `REPO_NAME` is auto-derived from `REPO` if unset (older
+path-entry confs sometimes omit it).
+
+Failure modes — all exit 1 with `FATAL`, before any `gh` call:
+
+- Missing `DISPATCHER_APP_ID` or `DISPATCHER_APP_PEM` while `GH_AUTH_MODE=app`.
+- `get_gh_app_token` returns non-zero (network / API error / bad PEM / app not
+  installed for repo).
+- Token returned is empty.
+
+There is no silent fallback to user auth — silently impersonating the
+operator was the bug closed by #91.
+
 ## Step 1: concurrency gate
 
 Implementation: `lib-dispatch.sh::count_active`.
