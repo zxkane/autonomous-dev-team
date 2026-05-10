@@ -168,7 +168,7 @@ The file is a bash script that's `source`d at every dispatcher tick and wrapper 
 | `REPO` | Yes | `owner/repo-name` | The GitHub repo the pipeline watches. |
 | `REPO_OWNER`, `REPO_NAME` | Yes | Split form of `REPO` | Used for App-token scoping. |
 | `PROJECT_DIR` | Yes | Absolute path to the project root on the dispatcher box | Where the agent runs. |
-| `AGENT_CMD` | No (default `claude`) | `claude`, `codex`, `kiro`, or `opencode` | The CLI used to spawn dev/review agents. Other CLIs work via the generic `<cli> -p <prompt>` fallback. See the Supported Agent CLIs table for resume semantics per CLI. |
+| `AGENT_CMD` | No (default `claude`) | `claude`, `codex`, `kiro`, or `opencode` | The CLI used to spawn dev/review agents. Other CLIs work via the generic `<cli> -p <prompt>` fallback. See the Supported Agent CLIs table for resume semantics per CLI. **`opencode` requires `opencode providers login` and explicit `AGENT_DEV_MODEL`/`AGENT_REVIEW_MODEL` values** — see the table footnote. |
 | `AGENT_DEV_MODEL`, `AGENT_REVIEW_MODEL` | No (default empty / `sonnet`) | Model name passed to the agent CLI | Empty = let the CLI pick. The review model defaults to `sonnet` to keep review costs predictable. |
 | `AGENT_PERMISSION_MODE` | No (default `auto`) | `auto`, `plan`, or `bypassPermissions` | `bypassPermissions` grants the agent unrestricted shell access — only use in a trusted sandbox. |
 | `AGENT_TIMEOUT` | No (default `4h`) | coreutils `timeout` units (e.g. `30m`, `2h`, `1d`) | Wall-clock cap on each agent invocation. Prevents hung CLI processes (stale `--resume`, MCP stdio deadlock) from monopolizing wrapper PID slots. |
@@ -373,7 +373,17 @@ The dispatcher is an [OpenClaw](https://github.com/OpenClaw/OpenClaw) skill that
 | Kiro CLI | `kiro-cli` | `chat --no-interactive [--agent <name>]` | (falls back to new) | Basic support |
 | Cursor Agent | `agent` | `-p "<prompt>"` | `--resume=<chat-id>` | Generic fallback (untested explicit branch) |
 | Gemini CLI | `gemini` | `-p "<prompt>"` | (no documented resume flag) | Generic fallback (untested explicit branch) |
-| opencode | `opencode` | `run --format json [PROMPT]` | `run --session <sessionID>` (captured from JSON stream) | Full support |
+| opencode | `opencode` | `run --format json [PROMPT]` | `run --session <sessionID>` (captured from JSON stream) | Full support † |
+
+† **opencode prerequisites.** Unlike Claude Code (Anthropic-bound) or Codex CLI (OpenAI-bound), opencode is provider-agnostic — it has no default model, and no built-in credentials. Before setting `AGENT_CMD=opencode`:
+
+1. **Authenticate a provider.** Run `opencode providers login` once on the dispatcher box (or every box that runs the wrapper if `EXECUTION_BACKEND=remote-aws-ssm`). Without this, the agent enters a session but produces no output and the pipeline silently makes no progress.
+2. **Set an explicit model.** opencode's `--model` argument expects `provider/model` form (e.g. `anthropic/claude-sonnet-4-6`, `openai/gpt-5.4`). The wrapper forwards `AGENT_DEV_MODEL` / `AGENT_REVIEW_MODEL` from `autonomous.conf`; leave them empty and opencode will either error out or wait for interactive selection (which never arrives in headless mode). Recommended:
+   ```bash
+   AGENT_DEV_MODEL="anthropic/claude-sonnet-4-6"
+   AGENT_REVIEW_MODEL="anthropic/claude-haiku-4-5"
+   ```
+3. **`AGENT_PERMISSION_MODE=bypassPermissions` is not yet wired** to opencode's `--dangerously-skip-permissions` flag (same gap as the codex branch — tracked as a follow-up). For now, run opencode in a sandboxed environment where the missing permission flag is acceptable.
 
 Configure via `AGENT_CMD` in `scripts/autonomous.conf`. The `claude`, `codex`, `kiro`, and `opencode` rows have explicit branches in `scripts/lib-agent.sh`; the others run through the generic `<cli> -p <prompt>` fallback. Any CLI not listed should still work if it accepts a `-p <prompt>` non-interactive flag — the abstraction layer is intentionally permissive.
 
