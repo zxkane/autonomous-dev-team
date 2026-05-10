@@ -59,29 +59,83 @@ config_toml="$target_dir/config.toml"
 write_hooks_only_settings "$TEMPLATE" "$target"
 
 # Toggle the [features] codex_hooks = true flag. This is required
-# upstream; without it, the hooks.json file is ignored. We append the
-# section if missing, or no-op if already set.
+# upstream; without it, the hooks.json file is ignored.
+#
+# TOML constraint (PR-11b code review C1): defining `[features]` more
+# than once is invalid TOML — the Rust `toml` crate that Codex uses
+# rejects the entire config. So we MUST NOT blindly append a second
+# `[features]` block. The strategy:
+#
+#   1. No file → create a fresh one with a single `[features]` block.
+#   2. File has `codex_hooks = true` already (anywhere) → no-op.
+#   3. File has `codex_hooks = false` → refuse + ask operator to fix.
+#      (We assume `false` is intentional; flipping it would surprise.)
+#   4. File has a `[features]` section → insert `codex_hooks = true` as
+#      the first line of that section.
+#   5. File has no `[features]` section → append a new one at EOF.
 mkdir -p "$target_dir"
-if [[ -f "$config_toml" ]]; then
-  if grep -qE '^\s*codex_hooks\s*=\s*true\s*$' "$config_toml"; then
-    echo "Note: codex_hooks already enabled in $config_toml" >&2
-  else
-    {
-      echo ""
-      echo "# Added by install-codex-hooks.sh — required for hooks.json to take effect."
-      echo "[features]"
-      echo "codex_hooks = true"
-    } >> "$config_toml"
-    echo "Updated: $config_toml (appended [features] codex_hooks = true)" >&2
-  fi
-else
-  cat > "$config_toml" <<'EOF'
+
+toggle_codex_hooks_flag() {
+  local file="$1"
+
+  if [[ ! -f "$file" ]]; then
+    cat > "$file" <<'EOF'
 # Created by install-codex-hooks.sh — required for hooks.json to take effect.
 [features]
 codex_hooks = true
 EOF
-  echo "Created: $config_toml" >&2
-fi
+    echo "Created: $file" >&2
+    return 0
+  fi
+
+  # Already enabled? (No-op.)
+  if grep -qE '^[[:space:]]*codex_hooks[[:space:]]*=[[:space:]]*true' "$file"; then
+    echo "Note: codex_hooks already enabled in $file" >&2
+    return 0
+  fi
+
+  # Explicitly disabled? Refuse — operator likely set it on purpose.
+  if grep -qE '^[[:space:]]*codex_hooks[[:space:]]*=[[:space:]]*false' "$file"; then
+    echo "ERROR: $file contains 'codex_hooks = false'. Hooks would not fire." >&2
+    echo "       Edit that line to 'true' (or remove it) and re-run." >&2
+    return 1
+  fi
+
+  # Insert into existing [features] section, or append a new section.
+  if grep -qE '^[[:space:]]*\[features\][[:space:]]*$' "$file"; then
+    # Use awk to insert `codex_hooks = true` as the first line after
+    # the `[features]` header. Robust against trailing whitespace and
+    # blank lines.
+    local tmp
+    tmp=$(mktemp)
+    # shellcheck disable=SC2064
+    trap "rm -f '$tmp'" RETURN
+    awk '
+      BEGIN { inserted = 0 }
+      /^[[:space:]]*\[features\][[:space:]]*$/ {
+        print
+        if (!inserted) {
+          print "codex_hooks = true  # added by install-codex-hooks.sh"
+          inserted = 1
+        }
+        next
+      }
+      { print }
+    ' "$file" > "$tmp"
+    mv "$tmp" "$file"
+    trap - RETURN
+    echo "Updated: $file (inserted codex_hooks = true into existing [features] section)" >&2
+  else
+    {
+      printf '\n# Added by install-codex-hooks.sh — required for hooks.json to take effect.\n'
+      printf '[features]\n'
+      printf 'codex_hooks = true\n'
+    } >> "$file"
+    echo "Updated: $file (appended new [features] section)" >&2
+  fi
+}
+
+toggle_codex_hooks_flag "$config_toml" || exit 1
 
 if (( INSTALL_GIT_HOOK == 1 )); then
   install_per_worktree_pre_push

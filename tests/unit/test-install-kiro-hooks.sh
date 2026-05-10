@@ -120,6 +120,35 @@ fi
 
 # ---------------------------------------------------------------------------
 echo ""
+echo "=== TC-KIRO-04b: Write+Edit deduplicated to single fs_write entry (PR-11b C2) ==="
+# ---------------------------------------------------------------------------
+# Many-to-one tool mapping (Write → fs_write AND Edit → fs_write) must
+# merge into a single matcher entry, not two duplicates that fire the
+# same hook twice.
+fs_write_count=$(jq '[.hooks.preToolUse[] | select(.matcher == "fs_write")] | length' "$target")
+if [[ "$fs_write_count" -eq 1 ]]; then
+  echo -e "  ${GREEN}PASS${NC}: exactly 1 fs_write matcher entry (no duplicates)"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: expected 1 fs_write entry, got $fs_write_count (duplicate matchers fire hooks twice)"
+  FAIL=$((FAIL + 1))
+fi
+
+# The merged fs_write entry should contain hooks from BOTH Write and Edit.
+# In the canonical template, Write has 1 hook (check-test-plan.sh) and
+# Edit has 1 hook (also check-test-plan.sh). After dedup, fs_write should
+# have 2 hooks total (the concat).
+fs_write_hooks=$(jq '.hooks.preToolUse[] | select(.matcher == "fs_write") | .hooks | length' "$target")
+if [[ "$fs_write_hooks" -ge 2 ]]; then
+  echo -e "  ${GREEN}PASS${NC}: fs_write entry has $fs_write_hooks merged hooks (Write+Edit both preserved)"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: fs_write entry has only $fs_write_hooks hook(s) — Write+Edit not merged"
+  FAIL=$((FAIL + 1))
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
 echo "=== TC-KIRO-05: --agent <name> overrides default agent name ==="
 # ---------------------------------------------------------------------------
 mkdir -p "$TMPDIR/repo2"

@@ -118,11 +118,81 @@ else
   FAIL=$((FAIL + 1))
 fi
 
-if grep -qE '^\s*codex_hooks\s*=\s*true\s*$' "$TMPDIR/repo2/.codex/config.toml"; then
+if grep -qE '^\s*codex_hooks\s*=\s*true' "$TMPDIR/repo2/.codex/config.toml"; then
   echo -e "  ${GREEN}PASS${NC}: codex_hooks flag appended"
   PASS=$((PASS + 1))
 else
   echo -e "  ${RED}FAIL${NC}: codex_hooks flag NOT appended"
+  FAIL=$((FAIL + 1))
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-CDX-06: existing [features] section → insert into it (don't duplicate the table) ==="
+# ---------------------------------------------------------------------------
+# C1 from PR-11b code review: TOML rejects duplicate table headers.
+mkdir -p "$TMPDIR/repo3/.codex"
+git -C "$TMPDIR/repo3" init --quiet --initial-branch=main
+cat > "$TMPDIR/repo3/.codex/config.toml" <<'EOF'
+# user config
+[features]
+some_other_flag = true
+EOF
+(cd "$TMPDIR/repo3" && bash "$INSTALLER" --no-git-hook >/dev/null 2>&1)
+target3="$TMPDIR/repo3/.codex/config.toml"
+
+# Should have exactly ONE [features] header (not duplicated)
+header_count=$(grep -cE '^\[features\][[:space:]]*$' "$target3")
+if [[ "$header_count" -eq 1 ]]; then
+  echo -e "  ${GREEN}PASS${NC}: only one [features] header (TOML stays valid)"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: [features] appears $header_count times — TOML invalid"
+  FAIL=$((FAIL + 1))
+fi
+
+# Both flags should still be present
+if grep -qE '^\s*some_other_flag\s*=' "$target3" && \
+   grep -qE '^\s*codex_hooks\s*=\s*true' "$target3"; then
+  echo -e "  ${GREEN}PASS${NC}: both old and new flags inside same [features] block"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: missing flag — old: $(grep -c some_other_flag "$target3"), new: $(grep -c codex_hooks "$target3")"
+  FAIL=$((FAIL + 1))
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-CDX-07: codex_hooks = false → installer refuses (operator set on purpose) ==="
+# ---------------------------------------------------------------------------
+mkdir -p "$TMPDIR/repo4/.codex"
+git -C "$TMPDIR/repo4" init --quiet --initial-branch=main
+cat > "$TMPDIR/repo4/.codex/config.toml" <<'EOF'
+[features]
+codex_hooks = false
+EOF
+err=$(cd "$TMPDIR/repo4" && bash "$INSTALLER" --no-git-hook 2>&1 >/dev/null) || rc=$?
+if [[ "${rc:-0}" -ne 0 ]]; then
+  echo -e "  ${GREEN}PASS${NC}: installer refused (rc=${rc:-0})"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: installer should refuse when codex_hooks = false"
+  FAIL=$((FAIL + 1))
+fi
+case "$err" in
+  *"codex_hooks = false"*)
+    echo -e "  ${GREEN}PASS${NC}: stderr explains the conflict"
+    PASS=$((PASS + 1)) ;;
+  *)
+    echo -e "  ${RED}FAIL${NC}: stderr should mention 'codex_hooks = false'; got: $err"
+    FAIL=$((FAIL + 1)) ;;
+esac
+# Operator's `false` setting must NOT have been overwritten
+if grep -qE '^\s*codex_hooks\s*=\s*false' "$TMPDIR/repo4/.codex/config.toml"; then
+  echo -e "  ${GREEN}PASS${NC}: operator's codex_hooks = false preserved"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: operator's codex_hooks = false was modified"
   FAIL=$((FAIL + 1))
 fi
 

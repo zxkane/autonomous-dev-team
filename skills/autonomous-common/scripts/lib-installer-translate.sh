@@ -112,11 +112,18 @@ translate_template_hooks() {
   done
   tool_remap="{${tool_remap%, }}"
 
+  # Three passes inside one jq:
+  #   1. with_entries: rename event keys.
+  #   2. map: rename matcher values (or drop if mapped to "").
+  #   3. group_by(.matcher) + reduce: merge entries with the same
+  #      matcher value (concat their `hooks` arrays). Many-to-one tool
+  #      mappings (e.g. Kiro's Write→fs_write + Edit→fs_write) would
+  #      otherwise produce duplicate matcher entries that fire the same
+  #      check twice (PR-11b code review C2).
   jq --argjson event_map "$event_remap" --argjson tool_map "$tool_remap" '
     .hooks
     | with_entries(
-        .key as $orig_event
-        | .key |= ($event_map[.] // .)
+        .key |= ($event_map[.] // .)
         | .value |= map(
             if has("matcher")
             then
@@ -128,6 +135,20 @@ translate_template_hooks() {
             else .
             end
           )
+        | .value |=
+            (
+              # Group by matcher (or by absence of matcher), then merge
+              # each group into a single entry whose .hooks is the
+              # concatenation of all source .hooks arrays.
+              group_by(.matcher // "__no_matcher__")
+              | map(
+                  reduce .[] as $entry (
+                    {hooks: []};
+                    (if $entry | has("matcher") then .matcher = $entry.matcher else . end)
+                    | .hooks += $entry.hooks
+                  )
+                )
+            )
       )
   ' "$template"
 }
