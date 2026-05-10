@@ -46,7 +46,8 @@ flowchart LR
 
 **Failure modes**:
 
-- Wrapper fails to start (config error, missing arg) → wrapper exits before `AGENT_RAN=true` → trap doesn't edit labels → next-tick Step 5b sees DEAD-no-PR → bumps retry counter → eventually `stalled`. This is correct: the dispatcher acts as the safety net for wrapper-startup bugs.
+- Wrapper fails to start *after* arg parsing (e.g. `gh-with-token-refresh.sh` can't find real `gh` per #92, missing required env, auth setup failure) → trap posts `Agent Session Report (Dev) ... Mode: startup-failure` with non-zero exit code AND flips `in-progress` → `pending-dev`. The dispatcher's `count_agent_failures` counter sees it next tick (correct retry counting), and the underlying error is visible on the issue itself instead of buried in `/tmp/agent-*.log`. The dispatcher Step 5b is no longer the primary recovery path for this class of failure — though it remains the safety net for the residual case below.
+- Wrapper fails *before* arg parsing (e.g. malformed `--issue` arg before `ISSUE_NUMBER` is set) → trap stays silent (nowhere to post) → next-tick Step 5b sees DEAD-no-PR → bumps the dispatcher-crash counter → eventually `stalled`.
 - `dispatch-local.sh` errors out before `nohup` (e.g. `kill_stale_wrapper` refuses because a previous wrapper survived SIGKILL) → returns exit 1 to dispatcher. Dispatcher Step 2 currently doesn't check the return code — issue is already labeled `in-progress` but no wrapper is running. Step 5b next tick sees DEAD-no-PR, recovers. Tracked as a soft-bug; not worth a synchronous check given the recovery path works.
 
 ## H2: dispatcher → dev (resume)
