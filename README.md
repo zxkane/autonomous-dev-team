@@ -177,6 +177,7 @@ The file is a bash script that's `source`d at every dispatcher tick and wrapper 
 | `MAX_RETRIES` | No (default `3`) | Number | Dev-agent retry budget before issue is marked `stalled`. |
 | `REVIEW_BOTS` | No (default `q`) | Space-separated short names | Bot reviewers that MUST run on every PR before approval. Built-in: `q` / `codex` / `claude`. Empty string disables bot enforcement. Custom bots: see `autonomous.conf.example`. |
 | `E2E_ENABLED` | No (default `false`) | `true` / `false` | Enable Chrome DevTools MCP E2E verification in the review step. |
+| `REAL_GH` | No (default empty) | Absolute path to the real `gh` binary | Set when `gh` is installed outside the minimal POSIX PATH (Homebrew, nvm, asdf, `~/bin`, `/snap/bin`, container `/opt/gh`, etc.) AND the dispatcher/wrappers may be spawned from a non-interactive shell (cron, systemd, AWS SSM, GitHub Actions, `nohup`). Skip when `gh` lives at `/usr/bin/gh` or `/usr/local/bin/gh`. |
 
 **Validate the config:**
 
