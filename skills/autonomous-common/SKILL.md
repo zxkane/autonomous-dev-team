@@ -18,13 +18,19 @@ Shared workflow-enforcement hooks and agent-callable utility scripts used by `au
 
 ## Setup for `npx skills add` Users
 
-After `npx skills add`, run the bundled installer once from the project root:
+After `npx skills add`, run the installer for your coding agent once from the project root:
 
-```bash
-bash .claude/skills/autonomous-common/scripts/install-claude-hooks.sh
-```
+| Agent | Installer | Writes to |
+|---|---|---|
+| Claude Code | `bash .claude/skills/autonomous-common/scripts/install-claude-hooks.sh` | `.claude/settings.json` |
+| Qoder | `bash .claude/skills/autonomous-common/scripts/install-qoder-hooks.sh` | `.qoder/settings.json` |
+| Antigravity | `bash .claude/skills/autonomous-common/scripts/install-antigravity-hooks.sh` | `.antigravity/hooks.json` |
+| Cursor / Kiro CLI / Gemini CLI / Codex CLI | _coming in PR-11b_ | — |
+| Windsurf / Kimi CLI | _coming in PR-11c_ | — |
 
-The installer wires up the workflow hooks at the **project scope** (writing into `.claude/settings.json`), so they fire on every Bash invocation in the repo — not only when an autonomous-* skill is explicitly loaded. Without this, the hook commands declared in skill frontmatter only run while a skill is active in the conversation, which is the regression that closed #68.
+Each installer wires up the workflow hooks at the **project scope**, so they fire on every shell command in the repo — not only when an autonomous-* skill is explicitly loaded. Without this, the hook commands declared in skill frontmatter only run while a skill is active in the conversation, which is the regression that closed #68.
+
+For the per-agent schema mapping reference, see [`docs/cross-agent-hooks.md`](https://github.com/zxkane/autonomous-dev-team/blob/main/docs/cross-agent-hooks.md).
 
 ### What if you can't run the installer
 
@@ -57,8 +63,11 @@ Claude Code only. The installer prompts for these; if installing manually, add t
 
 - **`hooks/`** — workflow-enforcement hooks (block-push-to-main, block-commit-outside-worktree, check-pr-review, check-shellcheck, verify-completion, …). See `hooks/README.md` for the canonical list and per-hook semantics.
 - **`scripts/`** — agent-callable utilities used by the dev/review skills:
-  - `install-claude-hooks.sh` — one-shot installer that wires the hooks into project-scoped `.claude/settings.json` (closes #68 — recommended setup, see "Setup" above)
-  - `claude-settings.template.json` — the canonical hook list the installer applies
+  - `lib-installer.sh` — shared merge/write helpers used by every per-agent installer
+  - `install-claude-hooks.sh` — Claude Code installer (writes `.claude/settings.json`)
+  - `install-qoder-hooks.sh` — Qoder installer (writes `.qoder/settings.json` — same schema as Claude Code)
+  - `install-antigravity-hooks.sh` — Antigravity installer (writes `.antigravity/hooks.json` — hooks-only file; contract is community-observed, undocumented by Google)
+  - `claude-settings.template.json` — canonical hook list applied by all per-agent installers
   - `gh-as-user.sh` — runs `gh` as a real user (needed when retriggering bot reviews like `/q review`)
   - `mark-issue-checkbox.sh` — toggles GitHub issue body checkboxes from the agent
   - `reply-to-comments.sh` — replies to PR review comments
