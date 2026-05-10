@@ -56,6 +56,15 @@ REVIEW_BOTS_MYCOMPANY_LOGIN="mycompany-reviewer[bot]"
 
 The lookup falls back to env-var pairs `REVIEW_BOTS_<UPPERCASE>_TRIGGER` and `REVIEW_BOTS_<UPPERCASE>_LOGIN` for any short name not in the built-in registry. Missing env vars → fail-fast at config-validation time (loud error during dispatcher tick).
 
+### Two layers of validation
+
+`parse_review_bots` is called twice, on purpose:
+
+1. **`dispatcher-tick.sh` startup precheck** — before any GitHub API calls or label transitions. A bad value (typo, missing custom env-var pair) aborts the entire tick with `exit 1` and a clear error. No issue gets a label change, no retry counter advances. The single-project tick fails clean; the multi-project wrapper logs the failure for that project and continues with the rest.
+2. **`autonomous-review.sh` startup validation** — defense in depth: the wrapper re-validates after sourcing `autonomous.conf`, in case the wrapper is invoked outside the dispatcher (manual run, custom backend).
+
+Without layer 1, a typo would let the tick swap an issue's label to `reviewing` and spawn the wrapper, which then exits 1 — burning a retry slot every tick until `MAX_RETRIES` is hit. The precheck makes config errors loud and reversible.
+
 ## Behavior changes
 
 ### `autonomous-review.sh` review prompt
