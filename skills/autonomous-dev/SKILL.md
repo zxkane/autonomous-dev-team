@@ -1,14 +1,16 @@
 ---
 name: autonomous-dev
 description: >
-  This skill should be used when the user wants to develop a feature, fix a bug,
-  create a pull request, set up a git worktree, design a UI component, write test
-  cases, push changes, check CI status, address review comments, resolve review
-  threads, trigger bot reviews (/q review, /codex review), or follow a TDD
-  development workflow. Covers the complete lifecycle from design canvas through
-  worktree creation, test-first development, code review, PR creation, CI
-  verification, reviewer bot interaction, E2E testing, and worktree cleanup.
-  Supports interactive and fully autonomous modes for GitHub issue implementation.
+  Use to develop a feature or bug fix end-to-end through a TDD git-worktree
+  workflow — interactively (developer-led) or unattended (autonomous-mode,
+  driven by the dispatcher). Triggers on phrases like "implement issue #N",
+  "fix this bug", "add a feature", "create a worktree", "write test cases",
+  "push and open a PR", "check CI", "address review comments", "resolve
+  review threads", "/q review", "/codex review", "implement this autonomously",
+  or any partial step in the design → worktree → tests → implement → verify →
+  review → PR → CI → E2E lifecycle. Interactive mode asks for decisions;
+  autonomous mode makes decisions per autonomous-mode.md and posts progress
+  comments to the GitHub issue.
 hooks:
   PreToolUse:
     - matcher: "Bash"
@@ -73,7 +75,7 @@ hooks:
 
 A complete development workflow enforcing test-driven development, git worktree isolation, code review, CI verification, and E2E testing. Works in two modes: interactive (default) for human-guided sessions, and autonomous for fully unattended GitHub issue implementation.
 
-> **NON-NEGOTIABLE RULES -- Every step marked MANDATORY is required. You MUST NOT skip, defer, or ask the user whether to run these steps. Execute them automatically as part of the workflow. This includes: creating PRs, waiting for CI, running E2E tests, and addressing reviewer findings.**
+> **NON-NEGOTIABLE RULES — every step marked MANDATORY is required.** Do not skip, defer, or ask the user whether to run these steps. Execute them automatically as part of the workflow. This covers creating PRs, waiting for CI, running E2E tests, and addressing reviewer findings.
 
 ---
 
@@ -100,30 +102,9 @@ Triggered when running inside the `scripts/autonomous-dev.sh` wrapper. The workf
 
 ## Cross-Platform Notes
 
-### Hooks Support
+This skill works across IDEs that support skills.sh. Map generic verbs in this doc to your IDE's tools (Claude Code's Bash → terminal in Cursor, etc.). Hook-based enforcement is available on Claude Code and Kiro CLI; on Cursor / Windsurf / Gemini CLI, follow each step manually — the discipline is the same.
 
-| IDE/CLI | Hooks Support | Setup |
-|---------|--------------|-------|
-| Claude Code | Full | `hooks/README.md` |
-| Kiro CLI | Full | `hooks/README.md` |
-| Cursor | None | Follow steps manually |
-| Windsurf | None | Follow steps manually |
-| Gemini CLI | None | Follow steps manually |
-
-### Tool Name Mapping
-
-This skill uses generic language. Map to your IDE's tools:
-- "Execute in your terminal" = Bash tool (Claude Code), terminal (Cursor), shell (Gemini CLI), etc.
-- "Read the file" = Read tool, file viewer, or `cat`
-- "Create or edit the file" = Write/Edit tool, editor, or manual editing
-- "Use a subagent" = Task/Agent tool (Claude Code), or follow the steps manually if unsupported
-- "Load the skill" = Skill tool (Claude Code), or read the referenced SKILL.md directly
-
-### Workflow Enforcement (Optional Hooks)
-
-If your IDE/CLI supports hooks (Claude Code, Kiro CLI), install them from `hooks/` for hard enforcement. See `hooks/README.md` for setup.
-
-Without hooks, follow each step manually -- the discipline is the same.
+For the full IDE table + verb-to-tool map, see [`references/cross-platform.md`](references/cross-platform.md).
 
 ---
 
@@ -151,42 +132,12 @@ Step 13: CLEANUP WORKTREE
 
 ## Step 1: Design Canvas
 
-**Available if your IDE has Pencil MCP.** If Pencil MCP is not available, create a design document (`docs/designs/<feature>.md`) manually instead.
+Create a design canvas for new UI work, user-facing features, architecture decisions, and complex data flows. Skip for trivial fixes or refactors that don't change behavior.
 
-### When to Create a Design Canvas
+- IDEs with Pencil MCP: create `docs/designs/<feature>.pen`.
+- IDEs without Pencil MCP: create `docs/designs/<feature>.md`.
 
-- New UI components or pages
-- Feature implementations with user-facing changes
-- Architecture decisions that benefit from visualization
-- Complex data flows or state management
-
-### Pencil MCP Workflow
-
-1. **Check editor state**: call `get_editor_state()` to see if a `.pen` file is open.
-2. **Open or create design file**: call `open_document("docs/designs/<feature>.pen")` or `open_document("new")`.
-3. **Get design guidelines** (if needed): call `get_guidelines(topic="landing-page|table|tailwind|code")`.
-4. **Get style guide** for consistent design: call `get_style_guide_tags()` then `get_style_guide(tags=[...])`.
-5. **Create design elements**: call `batch_design(operations)` to create UI mockups, component hierarchy diagrams, data flow visualizations, and architecture diagrams.
-6. **Validate design visually**: call `get_screenshot()` to verify the design looks correct.
-7. **Document design decisions**: add text annotations explaining choices, component specifications, and interaction patterns.
-
-### Design Canvas Template Structure
-
-```
-Feature: <Feature Name>
-Date: YYYY-MM-DD
-Status: Draft | In Review | Approved
-
-- UI Mockup / Wireframe
-- Component Architecture (component tree, props/state flow)
-- Data Flow Diagram (API calls, state management)
-- Design Notes (key decisions, accessibility, responsive behavior)
-```
-
-### Design Approval
-
-- **Interactive mode**: Present the design canvas to the user, get explicit approval, document feedback, update status to "Approved."
-- **Autonomous mode**: Create the design doc and proceed immediately -- no approval gate.
+For the full Pencil MCP call sequence, the markdown canvas template, and the per-mode (interactive vs autonomous) approval gate, see [`references/design-canvas.md`](references/design-canvas.md).
 
 ---
 
@@ -390,39 +341,11 @@ If ANY check fails: analyze logs, fix, push, re-watch. DO NOT proceed until ever
 
 ## Step 10: Address Reviewer Bot Findings (MANDATORY)
 
-Multiple review bots can provide automated code review findings on PRs:
+Read each finding from Amazon Q (`/q review`), Codex (`/codex review`), and any other configured bots. For each: either fix the code, or reply explaining the design decision (false positive). Then reply to the comment thread, resolve it, and retrigger the bot.
 
-| Bot | Trigger Command | Bot Username |
-|-----|-----------------|------------|
-| Amazon Q Developer | `/q review` | `amazon-q-developer[bot]` |
-| Codex | `/codex review` | `codex[bot]` |
-| Other bots | See bot documentation | Varies |
+> **Use `scripts/gh-as-user.sh` to retrigger bot reviews.** Some bots (notably Amazon Q) ignore trigger comments posted by GitHub App bot accounts; the wrapper posts as a real user.
 
-### Handling Bot Review Findings
-
-1. **Review all comments** -- read each finding carefully
-2. **Determine action**:
-   - Valid issue: fix the code and push
-   - False positive: reply explaining the design decision
-3. **Reply to each thread** -- use direct reply, not a general PR comment
-4. **Resolve each thread** -- mark conversation as resolved
-5. **Retrigger review** -- comment with the appropriate trigger (e.g., `/q review`, `/codex review`)
-
-### Retrigger Bot Reviews
-
-> **IMPORTANT:** Some bot reviewers (e.g., Amazon Q Developer) ignore `/q review` comments posted by GitHub App bot accounts. If your project uses `scripts/gh-as-user.sh`, you **MUST** use it to trigger bot reviews so the comment is attributed to a real user. Do NOT use the default `gh` wrapper for bot review triggers.
-
-```bash
-# Amazon Q Developer (use gh-as-user.sh to post as a real user)
-bash scripts/gh-as-user.sh pr comment {pr_number} --body "/q review"
-
-# Codex
-bash scripts/gh-as-user.sh pr comment {pr_number} --body "/codex review"
-```
-
-If `scripts/gh-as-user.sh` is not available in your project, use `gh pr comment` directly as a fallback.
-
-Wait 60-90 seconds for the review to complete, then check for new comments.
+For the full retrigger commands, reply patterns, and thread resolution semantics, see [`references/review-threads.md`](references/review-threads.md).
 
 ---
 

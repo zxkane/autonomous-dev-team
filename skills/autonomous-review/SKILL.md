@@ -1,12 +1,14 @@
 ---
 name: autonomous-review
 description: >
-  This skill should be used when performing autonomous PR code review,
-  verifying acceptance criteria, resolving merge conflicts, running E2E
-  tests via browser automation, or deciding whether to approve and merge
-  a pull request. Use when asked to "review this PR", "check PR status",
-  "run E2E verification", "verify acceptance criteria", "resolve merge
-  conflicts", "approve and merge", or during autonomous review dispatch.
+  Use to perform an end-to-end PR review and reach an approve/request-changes
+  verdict — including verifying acceptance criteria, running E2E tests via
+  browser automation, resolving merge conflicts, and (when verdict passes)
+  merging the PR. Triggers on phrases like "review this PR", "decide whether
+  to approve and merge", "run E2E verification", "resolve merge conflicts on
+  PR #N", or when the dispatcher hands off a PR labeled `pending-review` /
+  `reviewing` for autonomous review. Distinct from in-flight dev-side
+  self-review (that lives in autonomous-dev's pr-review step).
 hooks:
   PreToolUse:
     - matcher: "Bash"
@@ -23,7 +25,15 @@ hooks:
 
 # Autonomous Review Mode
 
-You are reviewing a PR created by an autonomous development session. Be thorough and objective.
+Review PRs created by autonomous development sessions thoroughly and objectively, then reach a verdict (approve + merge, or request changes).
+
+## When to Use
+
+| Use this skill | Use a different skill |
+|---|---|
+| Final verdict on a completed PR (approve + merge, or send back for fixes) | In-flight dev-side self-review during implementation → use `autonomous-dev` Step 8 (pr-review) |
+| Dispatcher handed off a PR labeled `pending-review` or `reviewing` | Manual partial review of a draft PR → use the `pr-review-toolkit` agents directly |
+| Run E2E verification + check acceptance criteria + resolve merge conflicts | Just check CI status → use `gh pr checks` directly |
 
 ## Cross-Platform Notes
 
@@ -68,14 +78,18 @@ Verify ALL of the following:
 ### 5. Optional: Bot Reviewer Verification
 - [ ] If configured bot reviewers have posted reviews, verify their findings are addressed
 - [ ] All bot review threads are resolved
-- [ ] If bot review is missing and configured, trigger it using `scripts/gh-as-user.sh` (see below) and wait
+- [ ] If bot review is missing and configured, trigger it using `scripts/gh-as-user.sh` (see "Triggering Bot Reviewers" below)
 
-> **IMPORTANT:** Some bot reviewers (e.g., Amazon Q Developer) ignore trigger comments posted by GitHub App bot accounts. When triggering bot reviews, you **MUST** use `scripts/gh-as-user.sh` so the comment is attributed to a real user:
-> ```bash
-> bash scripts/gh-as-user.sh pr comment {pr_number} --body "/q review"
-> bash scripts/gh-as-user.sh pr comment {pr_number} --body "/codex review"
-> ```
-> Do NOT use the default `gh` wrapper for bot review triggers — it authenticates as a bot, which some reviewers ignore. If `scripts/gh-as-user.sh` is not available, fall back to `gh pr comment` directly.
+#### Triggering Bot Reviewers
+
+**`scripts/gh-as-user.sh` is required when retriggering bot reviews.** Some bot reviewers (e.g., Amazon Q Developer) ignore trigger comments posted by GitHub App bot accounts; the wrapper script posts as a real user so the bot picks it up.
+
+```bash
+bash scripts/gh-as-user.sh pr comment {pr_number} --body "/q review"
+bash scripts/gh-as-user.sh pr comment {pr_number} --body "/codex review"
+```
+
+Do NOT use the default `gh pr comment` for bot review triggers — it authenticates as a bot. If `scripts/gh-as-user.sh` is not available in your project, fall back to `gh pr comment` and accept that some bots may ignore the trigger.
 
 ### 6. E2E Verification via Chrome DevTools MCP
 

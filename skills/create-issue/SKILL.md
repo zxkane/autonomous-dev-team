@@ -1,11 +1,11 @@
 ---
 name: create-issue
 description: >
-  This skill should be used when the user asks to "create an issue", "file a bug",
-  "create a feature request", "open a GitHub issue", "report a bug", "request a feature",
-  "create a task", "break this into issues", or describes a feature/bug they want tracked
-  in GitHub. Guides interactive issue creation with structured templates, workspace change
-  attachment, and optional autonomous label for the automated pipeline.
+  Use when the user asks to create a GitHub issue, file a bug, request a feature,
+  open a tracking issue, or break a feature into multiple sub-issues. Guides
+  interactive issue drafting with structured templates, workspace-change
+  attachment, dependency linking, and the optional `autonomous` label for the
+  automated dev pipeline.
 ---
 
 # Create GitHub Issue
@@ -56,7 +56,7 @@ Both templates include these required sections:
 - **Acceptance Criteria** with checkboxes
 - **Dependencies** section for issue ordering
 
-### Step 2.5: Detect & Attach Workspace Changes
+### Step 3: Detect & Attach Workspace Changes
 
 After drafting the issue, check the workspace for local changes that may provide useful context for the autonomous dev agent. For the complete detection, attachment, and cleanup procedure, consult **`references/workspace-changes.md`**.
 
@@ -67,7 +67,7 @@ Summary:
 4. Add a `## Pre-existing Changes` section to the issue body
 5. Optionally clean up local changes after attachment
 
-### Step 3: Confirm with User
+### Step 4: Confirm with User
 
 Present the draft issue to the user with:
 1. Proposed title (concise, descriptive)
@@ -79,7 +79,7 @@ Use AskUserQuestion to confirm:
 - "Does this issue look correct? Should I create it?"
 - Ask about autonomous label: whether AI should handle this automatically
 
-### Step 4: Create the Issue
+### Step 5: Create the Issue
 
 Use GitHub MCP tools or `gh` CLI to create the issue with:
 - `title`: The confirmed title
@@ -91,7 +91,7 @@ Report the created issue URL to the user.
 **If branch push was deferred (large diff strategy):**
 
 After the issue is created and the issue number is known:
-1. Execute the branch push commands from Step 2.5.5 using the actual issue number
+1. Execute the branch push commands from Step 3 using the actual issue number
 2. Update the issue body to include the branch reference section
 
 ## Label Guide
