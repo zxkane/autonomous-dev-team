@@ -43,6 +43,19 @@ case "${EXECUTION_BACKEND:-local}" in
     ;;
 esac
 
+# Validate REVIEW_BOTS upfront for the same reason: a typo (e.g.
+# REVIEW_BOTS="q codx") would let the tick swap labels to `reviewing` and
+# spawn the review wrapper, which then exits 1 at startup — burning a
+# retry slot every tick until the issue hits MAX_RETRIES. Catching the
+# typo here aborts the entire tick before any side-effect, with no retry
+# counted. Empty REVIEW_BOTS is allowed (bot enforcement disabled).
+# shellcheck source=lib-review-bots.sh
+source "${SCRIPT_DIR}/lib-review-bots.sh"
+if ! parse_review_bots "${REVIEW_BOTS:-}" >/dev/null; then
+  echo "[dispatcher-tick] FATAL: REVIEW_BOTS validation failed (see error above). Fix autonomous.conf before the next tick." >&2
+  exit 1
+fi
+
 # dispatch — route a wrapper-spawn request to the configured backend (#62 axis 2).
 # Backends today: "local" (default — same-box dispatch-local.sh) and
 # "remote-aws-ssm" (sends an `aws ssm send-command` to a remote dev box).

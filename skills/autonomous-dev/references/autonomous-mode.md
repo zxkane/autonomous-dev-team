@@ -99,13 +99,20 @@ git commit -m "apply: pre-existing workspace changes from issue #<number>"
 
 ## Bot Review Integration
 
-After creating a PR, trigger and handle any configured bot reviewers (e.g., Amazon Q Developer, Codex).
+After creating a PR, trigger and handle each bot listed in the project's `REVIEW_BOTS` (per-project `autonomous.conf` setting). Empty `REVIEW_BOTS` means no bot is mandatory — skip this section.
 
-Some bot reviewers ignore comments posted by GitHub App bot accounts. If your project uses `scripts/gh-as-user.sh`, use it to trigger bot reviews so the comment is attributed to a real user:
+Built-in bot triggers (apply only those in `REVIEW_BOTS`):
 
 ```bash
+# q ∈ REVIEW_BOTS
 bash scripts/gh-as-user.sh pr comment {pr_number} --body "/q review"
+# codex ∈ REVIEW_BOTS
+bash scripts/gh-as-user.sh pr comment {pr_number} --body "/codex review"
+# claude ∈ REVIEW_BOTS (note: @claude, not /claude)
+bash scripts/gh-as-user.sh pr comment {pr_number} --body "@claude review"
 ```
+
+All built-in bots reject GitHub App bot triggers; `scripts/gh-as-user.sh` posts as a real user.
 
 > Do NOT use the default `gh` wrapper (`gh-with-token-refresh.sh`) for bot review triggers -- it authenticates as a bot, which some reviewers ignore. All other `gh` operations should continue using the default `gh` wrapper.
 

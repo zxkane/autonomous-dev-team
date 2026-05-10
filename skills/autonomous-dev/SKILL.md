@@ -333,17 +333,26 @@ If ANY check fails: analyze logs, fix, push, re-watch. DO NOT proceed until ever
 |-------|-------------|------------------|
 | CI / build-and-test | Build + unit tests | Fix code or update snapshots |
 | Security Scan | SAST, npm audit | Fix security issues |
-| Amazon Q Developer | Security review | Address findings, retrigger with `/q review` |
-| Codex | AI code review | Address findings, retrigger with `/codex review` |
+| Configured `REVIEW_BOTS` | Per-project bot reviewers (`q`, `codex`, `claude`, custom) | Address findings, retrigger via `gh-as-user.sh` |
 | Other review bots | Various checks | Address findings, retrigger per bot docs |
 
 ---
 
-## Step 10: Address Reviewer Bot Findings (MANDATORY)
+## Step 10: Address Reviewer Bot Findings (MANDATORY when `REVIEW_BOTS` is non-empty)
 
-Read each finding from Amazon Q (`/q review`), Codex (`/codex review`), and any other configured bots. For each: either fix the code, or reply explaining the design decision (false positive). Then reply to the comment thread, resolve it, and retrigger the bot.
+If the project's `autonomous.conf` declares `REVIEW_BOTS` (space-separated short names like `q codex claude`), each configured bot's findings are mandatory: either fix the code, or reply explaining the design decision (false positive). Then reply to the thread, resolve it, and retrigger the bot.
 
-> **Use `scripts/gh-as-user.sh` to retrigger bot reviews.** Some bots (notably Amazon Q) ignore trigger comments posted by GitHub App bot accounts; the wrapper posts as a real user.
+If `REVIEW_BOTS=""` (or the variable is unset), this step is **skipped entirely** — the project doesn't enforce any external bot review.
+
+Built-in bot triggers:
+
+| Short name | Trigger phrase | Bot login (filter `user.login`) |
+|---|---|---|
+| `q` | `/q review` | `amazon-q-developer[bot]` |
+| `codex` | `/codex review` | `codex[bot]` |
+| `claude` | `@claude review` | `claude[bot]` |
+
+> **Use `scripts/gh-as-user.sh` to retrigger bot reviews.** All three built-in bots reject trigger comments posted by GitHub App bot accounts; the wrapper posts as a real user.
 
 For the full retrigger commands, reply patterns, and thread resolution semantics, see [`references/review-threads.md`](references/review-threads.md).
 
