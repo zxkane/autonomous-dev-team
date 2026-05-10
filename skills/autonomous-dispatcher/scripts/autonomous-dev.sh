@@ -121,16 +121,46 @@ acquire_pid_guard "$PID_FILE" "autonomous-dev" "$ISSUE_NUMBER"
 # ---------------------------------------------------------------------------
 log() { echo "[autonomous-dev] $(date -u +%H:%M:%S) $*"; }
 
-# Ensure labels are updated on exit (trap) — only if agent actually ran
+# Ensure labels are updated on exit (trap)
 cleanup() {
   local exit_code=$?
 
   # Cleanup PID file always
   rm -f "$PID_FILE" 2>/dev/null || true
 
-  # Only update issue labels if agent was actually invoked
+  # Wrapper failed before invoking the agent (e.g. gh-with-token-refresh
+  # couldn't find a real gh — issue #92, or any future startup-time
+  # wrapper failure). Pre-#92 we returned silently, which left the issue
+  # stuck in `in-progress` and made the dispatcher count this as a
+  # "dispatcher-detected crash" instead of an "agent failure" — masking
+  # the real cause until MAX_RETRIES marked it stalled.
+  #
+  # If we have enough context to post (ISSUE_NUMBER parsed, gh resolvable),
+  # emit a session report so count_agent_failures sees it, and flip the
+  # label to pending-dev so the next tick retries.
   if [[ "$AGENT_RAN" != "true" ]]; then
-    log "Exiting with code $exit_code (agent never ran, skipping label update)."
+    if [[ -n "${ISSUE_NUMBER:-}" ]] && command -v gh &>/dev/null; then
+      log "Exiting with code $exit_code (agent never ran). Posting startup-failure report."
+      gh issue comment "$ISSUE_NUMBER" --repo "$REPO" --body "$(cat <<EOF
+**Agent Session Report (Dev)**
+- Dev Session ID: \`${SESSION_ID:-<none>}\`
+- Exit code: ${exit_code}
+- Mode: startup-failure
+- Timestamp: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
+- Log: \`${LOG_FILE:-<unknown>}\`
+
+The wrapper exited before the agent ran. Common causes: \`gh\` binary
+not on PATH (set \`REAL_GH\` in autonomous.conf — see #92), missing
+required env, or auth setup failure. Inspect the log file above.
+EOF
+)" 2>/dev/null || log "WARNING: Failed to post startup-failure report"
+      gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
+        --remove-label "in-progress" \
+        --add-label "pending-dev" 2>/dev/null \
+        || log "WARNING: Failed to update issue labels on startup failure"
+    else
+      log "Exiting with code $exit_code (agent never ran, no ISSUE_NUMBER or gh — silent)."
+    fi
     cleanup_github_auth
     return
   fi

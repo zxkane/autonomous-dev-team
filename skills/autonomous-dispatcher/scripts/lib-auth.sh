@@ -105,3 +105,10 @@ cleanup_github_auth() {
 if [[ -n "${GH_USER_PAT:-}" ]]; then
   export GH_USER_PAT
 fi
+
+# Export REAL_GH if set in autonomous.conf so gh-with-token-refresh.sh sees
+# it across the PATH-injection boundary (closes #92). The wrapper child
+# only reads its env, not the parent's shell vars.
+if [[ -n "${REAL_GH:-}" ]]; then
+  export REAL_GH
+fi

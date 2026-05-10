@@ -3,16 +3,28 @@
 # from a token file before each invocation. Used by autonomous dev/review scripts
 # to keep GH_TOKEN fresh when the original token may have expired.
 #
-# The real `gh` binary is expected at /usr/bin/gh or /usr/local/bin/gh.
+# Locating the real `gh` binary:
+#   1. If `REAL_GH` is set in the environment AND points to an executable
+#      file, use it directly. This is the escape hatch for installs outside
+#      the minimal POSIX PATH (Homebrew, nvm, asdf, ~/bin, /snap/bin,
+#      container /opt/gh, etc.) when the wrapper is spawned from a
+#      non-interactive shell that didn't source rc files (cron, systemd,
+#      AWS SSM, GitHub Actions, nohup). Closes #92.
+#   2. Otherwise, fall back to `command -v gh` against PATH minus our own
+#      directory (avoid self-recursion).
+#
 # This wrapper is placed earlier in PATH so Claude Code's Bash tool uses it.
 
-# Find the real gh binary (skip ourselves by temporarily removing our dir from PATH)
 SELF_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
-CLEAN_PATH=$(echo "$PATH" | tr ':' '\n' | grep -v "^${SELF_DIR}$" | tr '\n' ':' | sed 's/:$//')
-REAL_GH=$(PATH="$CLEAN_PATH" command -v gh 2>/dev/null) || {
-  echo "ERROR: Cannot find real gh binary (looked in PATH minus ${SELF_DIR})" >&2
-  exit 1
-}
+if [[ -n "${REAL_GH:-}" && -x "$REAL_GH" ]]; then
+  : # explicit override — fall through to the exec at the bottom
+else
+  CLEAN_PATH=$(echo "$PATH" | tr ':' '\n' | grep -v "^${SELF_DIR}$" | tr '\n' ':' | sed 's/:$//')
+  REAL_GH=$(PATH="$CLEAN_PATH" command -v gh 2>/dev/null) || {
+    echo "ERROR: Cannot find real gh binary (looked in PATH minus ${SELF_DIR}). Set REAL_GH in autonomous.conf to override (e.g. REAL_GH=/home/ubuntu/.linuxbrew/homebrew/bin/gh)." >&2
+    exit 1
+  }
+fi
 
 # Read latest token from file if available.
 # Retry briefly if the file is momentarily empty (race during daemon refresh).

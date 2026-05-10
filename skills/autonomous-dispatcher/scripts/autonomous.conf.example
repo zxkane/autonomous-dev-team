@@ -50,6 +50,15 @@ REVIEW_AGENT_APP_PEM=""
 DISPATCHER_APP_ID=""
 DISPATCHER_APP_PEM=""
 
+# Absolute path to the real `gh` CLI binary. Set this when `gh` is installed
+# outside the minimal POSIX PATH (Homebrew, nvm, asdf, ~/bin, /snap/bin,
+# container /opt/gh, etc.) AND the dispatcher/wrappers may be spawned from
+# a non-interactive shell that didn't source rc files (cron, systemd,
+# AWS SSM, GitHub Actions, nohup). Closes #92.
+# Example:
+#   REAL_GH="/home/ubuntu/.linuxbrew/homebrew/bin/gh"
+REAL_GH=""
+
 # === Concurrency ===
 MAX_CONCURRENT=5
 MAX_RETRIES=3
