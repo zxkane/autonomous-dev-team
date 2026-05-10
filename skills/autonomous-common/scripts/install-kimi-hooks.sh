@@ -219,7 +219,7 @@ list at github.com/MoonshotAI/kimi-cli — verify your first hook
 fires before relying on them.
 
 Wrote to: $target
-$([[ "$USE_PROJECT_LEVEL" == "1" ]] && echo "(project-level — experimental, Kimi may only read user-level)")
+$( (( USE_PROJECT_LEVEL == 1 )) && echo "(project-level — experimental, Kimi may only read user-level)" )
 
 EOF
 echo "Done. Kimi hooks installed at $target." >&2
