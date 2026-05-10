@@ -1,20 +1,27 @@
 #!/bin/bash
 # lib-agent.sh — Agent CLI abstraction layer.
 #
-# Supports: claude (default), codex, kiro, and generic fallback.
+# Supports: claude (default), codex, kiro, opencode, and generic fallback.
 # Source this file in autonomous-dev.sh and autonomous-review.sh.
 #
 # Session-id semantics differ across CLIs:
-#   claude — caller pre-mints `--session-id <UUID>`; same id used for both
-#            run and resume. Cleanest fit for the dispatcher's session_id.
-#   codex  — CLI mints its own thread_id per `codex exec` invocation. We
-#            capture it from `--json` stdout via _codex_capture_thread and
-#            persist a sidecar under pid_dir_for_project() keyed by the
-#            dispatcher's session_id, then feed it back to
-#            `codex exec resume <thread_id>` on resume.
-#   kiro   — no session model; every invocation is a fresh conversation.
-#            resume_agent falls back to run_agent.
-#   *      — generic <cli> -p <prompt> fallback; resume falls back to new.
+#   claude   — caller pre-mints `--session-id <UUID>`; same id used for
+#              both run and resume. Cleanest fit for the dispatcher's
+#              session_id.
+#   codex    — CLI mints its own thread_id per `codex exec` invocation.
+#              We capture it from `--json` stdout via
+#              _codex_capture_thread and persist a sidecar under
+#              pid_dir_for_project() keyed by the dispatcher's
+#              session_id, then feed it back to
+#              `codex exec resume <thread_id>` on resume.
+#   kiro     — no session model; every invocation is a fresh conversation.
+#              resume_agent falls back to run_agent.
+#   opencode — same CLI-minted-session-id wrinkle as codex but with a
+#              `sessionID` field on every JSON event. Captured the same
+#              way (_opencode_capture_session) and fed back to
+#              `opencode run --session <id>` on resume.
+#   *        — generic <cli> -p <prompt> fallback; resume falls back to
+#              a fresh run.
 
 # Load project config via the shared helper (closes #58).
 # Note: ${BASH_SOURCE[0]:-$0} (NOT readlink -f) so the symlink-vendor
@@ -149,6 +156,74 @@ _codex_thread_id() {
   printf '%s\n' "$tid"
 }
 
+# Opencode session-id capture/recall.
+#
+# opencode `run` mints its own session id (`ses_<base62>`) per invocation
+# and accepts `--session <id>` only for resuming an existing one — same
+# CLI-minted-id wrinkle as codex. Mirror the codex helpers, with two
+# differences:
+#   - Field name is `sessionID` (camelCase, capital ID), not `thread_id`.
+#   - The id is on EVERY event in the JSON stream, not gated on a single
+#     event type. We still capture the first occurrence, which arrives in
+#     the very first event.
+
+_opencode_session_file() {
+  local session_id="$1"
+  local pid_dir
+  pid_dir=$(pid_dir_for_project) || return 1
+  printf '%s/opencode-session-%s\n' "$pid_dir" "$session_id"
+}
+
+# _opencode_capture_session <dispatcher_session_id>
+#
+# Pipeline filter: pass-through awk filter that streams stdin → stdout
+# unchanged and writes the first observed sessionID to a sidecar. Same
+# pattern + safety properties as _codex_capture_thread.
+#
+# opencode emits one JSON event per line with a `"sessionID":"ses_..."`
+# field on every event. Format verified against opencode v1.14.46 output.
+_opencode_capture_session() {
+  local session_id="$1"
+  local sess_file
+  sess_file=$(_opencode_session_file "$session_id") || { cat; return 0; }
+  awk -v out="$sess_file" '
+    BEGIN {
+      # opencode session ids look like `ses_<base62>` (e.g. ses_1ee2d8d...).
+      # Tracked together with the regex below so the math stays in sync.
+      prefix = "\"sessionID\":\""
+    }
+    {
+      print
+      fflush()
+      if (!captured) {
+        if (match($0, /"sessionID":"ses_[A-Za-z0-9]+"/)) {
+          sid = substr($0, RSTART + length(prefix), RLENGTH - length(prefix) - 1)
+          # Same CWE-59 defense as _codex_capture_thread.
+          cmd = "test -L \"" out "\" && exit 0; printf \"%s\\n\" \"" sid "\" > \"" out "\""
+          system(cmd)
+          captured = 1
+        }
+      }
+    }'
+}
+
+# _opencode_session_id <dispatcher_session_id>
+#
+# Read the captured opencode sessionID from the sidecar. Echo + rc=0 on
+# hit, echo nothing + rc=1 on miss/malformed. The `^ses_[A-Za-z0-9]+$`
+# regex matches the documented opencode format and protects the
+# downstream `opencode run --session <id>` invocation from injection.
+_opencode_session_id() {
+  local session_id="$1"
+  local sess_file sid
+  sess_file=$(_opencode_session_file "$session_id") || return 1
+  [[ -L "$sess_file" ]] && return 1
+  [[ -f "$sess_file" ]] || return 1
+  sid=$(head -n1 "$sess_file" 2>/dev/null)
+  [[ "$sid" =~ ^ses_[A-Za-z0-9]+$ ]] || return 1
+  printf '%s\n' "$sid"
+}
+
 # Acquire PID guard: prevent duplicate instances for the same issue.
 # Checks for symlink attacks, running processes, then writes current PID.
 # Args: $1=pid_file, $2=label (e.g. "autonomous-dev"), $3=issue_number
@@ -214,6 +289,21 @@ run_agent() {
         ${model:+--model "$model"} \
         "$prompt"
       ;;
+    opencode)
+      # opencode `run [message..]` is the headless invocation. opencode
+      # mints its own session id and emits it on every event in the JSON
+      # event stream, so we capture it the same way as codex.
+      #
+      # The session_name we got from the dispatcher is passed to --title
+      # so opencode's session list shows a human-readable handle alongside
+      # the ses_<base62> id.
+      _run_with_timeout "$AGENT_CMD" run --format json \
+        ${model:+--model "$model"} \
+        ${session_name:+--title "$session_name"} \
+        "$prompt" \
+        | _opencode_capture_session "$session_id"
+      return "${PIPESTATUS[0]}"
+      ;;
     *)
       _run_with_timeout "$AGENT_CMD" -p "$prompt"
       ;;
@@ -270,6 +360,23 @@ resume_agent() {
       # Fall back to a new session so the full prompt (with review findings)
       # is treated as fresh instructions.
       run_agent "$session_id" "$prompt" "$model" "$session_name"
+      ;;
+    opencode)
+      # `opencode run --session <id> [PROMPT]` resumes the conversation.
+      # Same pattern as the codex branch: read the captured opencode
+      # session id from the sidecar, fall back to a new run if missing
+      # (run_agent crashed before the first JSON event reached us).
+      local _opencode_sid
+      if _opencode_sid=$(_opencode_session_id "$session_id"); then
+        _run_with_timeout "$AGENT_CMD" run --format json --session "$_opencode_sid" \
+          ${model:+--model "$model"} \
+          "$prompt" \
+          | _opencode_capture_session "$session_id"
+        return "${PIPESTATUS[0]}"
+      else
+        echo "[lib-agent] no captured opencode sessionID for session $session_id; starting a new opencode session" >&2
+        run_agent "$session_id" "$prompt" "$model" "$session_name"
+      fi
       ;;
     *)
       # Agents without resume support start a new session
