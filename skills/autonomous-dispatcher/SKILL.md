@@ -61,16 +61,19 @@ The logic is in [`scripts/dispatcher-tick.sh`](scripts/dispatcher-tick.sh) and t
 
 ## GitHub Authentication — App token, not user token
 
-All `gh` calls inside the dispatcher MUST use a GitHub App token, not the default user token. The wrappers (`autonomous-dev.sh`, `autonomous-review.sh`) handle their own auth via `lib-auth.sh`. The dispatcher itself runs in the OpenClaw cron session — generate the App token at the start of each tick using `scripts/gh-app-token.sh`:
+All `gh` calls inside the dispatcher use a GitHub App token, not the default user token. The wrappers (`autonomous-dev.sh`, `autonomous-review.sh`) handle their own auth via `lib-auth.sh`; the dispatcher tick handles its own.
 
-```bash
-source "${PROJECT_DIR}/scripts/gh-app-token.sh"
-GH_TOKEN=$(get_gh_app_token "$DISPATCHER_APP_ID" "$DISPATCHER_APP_PEM" "$REPO_OWNER" "$REPO_NAME") || exit 1
-[ -z "$GH_TOKEN" ] && { echo "FATAL: empty App token" >&2; exit 1; }
-export GH_TOKEN
+When `GH_AUTH_MODE=app`, `dispatcher-tick.sh` automatically calls `gh-app-token.sh::get_gh_app_token` after upfront validation and exports `GH_TOKEN` before any `gh` call (#91). Required vars in the project's autonomous.conf or the inline metadata block:
+
+```
+GH_AUTH_MODE=app
+DISPATCHER_APP_ID=<numeric app id>
+DISPATCHER_APP_PEM=<absolute path to PEM>
 ```
 
-The token is valid for 1 hour and scoped to the target repo only. `dispatcher-tick.sh` typically completes in well under a minute, so a single token covers the whole tick.
+If any of those are missing, or if token generation fails, the tick exits 1 with a `FATAL` message — there is no silent fallback to user auth.
+
+The token is valid for 1 hour and scoped to the target repo only. `dispatcher-tick.sh` typically completes in well under a minute, so a single token covers the whole tick. When `GH_AUTH_MODE=token` (default) or unset, the dispatcher uses whatever `GH_TOKEN` / `gh auth login` token the caller provides.
 
 ## Dispatch Helpers
 

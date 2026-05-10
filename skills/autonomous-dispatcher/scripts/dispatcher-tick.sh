@@ -56,6 +56,38 @@ if ! parse_review_bots "${REVIEW_BOTS:-}" >/dev/null; then
   exit 1
 fi
 
+# Generate a GitHub App installation token for the dispatcher when
+# GH_AUTH_MODE=app (closes #91). Pre-fix, the dispatcher's `gh` calls fell
+# back to the user's `gh auth login` token, so issue comments + label
+# changes appeared as the user instead of the bot identity.
+#
+# A single token covers the whole tick (valid 1h, scope: this repo only).
+# We don't run gh-token-refresh-daemon here — that's for long-lived agent
+# wrappers; the tick completes in <1 min.
+#
+# Fail-fast on misconfig (missing id/pem, token API failure, empty result):
+# silently falling back to user auth is precisely the bug being closed.
+if [[ "${GH_AUTH_MODE:-token}" == "app" ]]; then
+  if [[ -z "${DISPATCHER_APP_ID:-}" || -z "${DISPATCHER_APP_PEM:-}" ]]; then
+    echo "[dispatcher-tick] FATAL: GH_AUTH_MODE=app requires DISPATCHER_APP_ID and DISPATCHER_APP_PEM (one or both are empty)." >&2
+    exit 1
+  fi
+  # shellcheck source=gh-app-token.sh
+  source "${SCRIPT_DIR}/gh-app-token.sh"
+  _dispatcher_token=$(get_gh_app_token \
+    "$DISPATCHER_APP_ID" "$DISPATCHER_APP_PEM" \
+    "$REPO_OWNER" "$REPO_NAME") || {
+    echo "[dispatcher-tick] FATAL: failed to generate GitHub App token for ${REPO_OWNER}/${REPO_NAME}." >&2
+    exit 1
+  }
+  if [[ -z "$_dispatcher_token" ]]; then
+    echo "[dispatcher-tick] FATAL: gh-app-token returned an empty token for ${REPO_OWNER}/${REPO_NAME}." >&2
+    exit 1
+  fi
+  export GH_TOKEN="$_dispatcher_token"
+  unset _dispatcher_token
+fi
+
 # dispatch — route a wrapper-spawn request to the configured backend (#62 axis 2).
 # Backends today: "local" (default — same-box dispatch-local.sh) and
 # "remote-aws-ssm" (sends an `aws ssm send-command` to a remote dev box).
