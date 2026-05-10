@@ -2,7 +2,7 @@
 
 A fully automated development pipeline that turns GitHub issues into merged pull requests — no human intervention required. It scans for issues labeled `autonomous`, dispatches a **Dev Agent** to implement the feature with tests in an isolated worktree, and hands off to a **Review Agent** for code review with optional E2E verification. The entire cycle runs unattended on a cron schedule.
 
-Supports multiple coding agent CLIs — Claude Code, Codex CLI, and Kiro CLI — with a pluggable agent abstraction layer.
+Supports multiple coding agent CLIs — Claude Code, Kiro CLI, Cursor Agent, Gemini CLI, and most CLIs with a `-p <prompt>` non-interactive flag — via a pluggable agent abstraction layer. (Codex CLI is supported in principle but its branch is currently broken — see the Supported Agent CLIs table.)
 
 ## Getting Started
 
@@ -67,20 +67,187 @@ For the complete autonomous pipeline — including hooks, wrapper scripts, dispa
    bash scripts/setup-labels.sh owner/repo
    ```
 
-3. **Install [OpenClaw](https://github.com/OpenClaw/OpenClaw)** and set up the dispatcher cron:
-   ```bash
-   # Install OpenClaw (the orchestration engine)
-   # See https://github.com/OpenClaw/OpenClaw for installation
+3. **Install a dispatcher orchestration host and schedule the tick.** The dispatcher skill is a standard skills.sh skill — anything that can run a coding-agent CLI on a schedule works. Pick one:
 
-   # Schedule the dispatcher to run every 5 minutes
+   | Host | When to use | Example tick command |
+   |------|------------|---------------------|
+   | [OpenClaw](https://github.com/OpenClaw/OpenClaw) (recommended) | Purpose-built skill runtime; first-class support for skill invocation. | `openclaw run skills/autonomous-dispatcher/SKILL.md` |
+   | Plain cron + agent CLI | Zero extra infra; you already have an agent CLI installed. | `bash skills/autonomous-dispatcher/scripts/dispatcher-tick.sh` (the tick script doesn't need an agent CLI to run — see note below). |
+   | Claude Cowork / GitHub Actions schedule / any scheduled-agent runtime | You want the dispatcher to run on managed infra rather than a local box. | Schedule a job that runs `bash skills/autonomous-dispatcher/scripts/dispatcher-tick.sh` (or `dispatcher-multi-tick.sh` for multi-project). |
+
+   ```cron
+   # Example A — OpenClaw via OS cron, every 5 minutes
    */5 * * * * cd /path/to/project && openclaw run skills/autonomous-dispatcher/SKILL.md
+
+   # Example B — plain cron without OpenClaw
+   */5 * * * * cd /path/to/project && bash skills/autonomous-dispatcher/scripts/dispatcher-tick.sh
    ```
+
+   The tick script (`dispatcher-tick.sh`) is host-agnostic — it only needs `gh`, `jq`, and a per-project `autonomous.conf` reachable via `$AUTONOMOUS_CONF`, `$PROJECT_DIR/scripts/autonomous.conf`, or the script's own directory. The agent CLI (`claude` / `codex` / etc.) is invoked by the **wrapper** that the tick spawns, not by the tick itself. So the orchestration host only needs to be able to call a shell command on a cadence.
 
 4. **Create an issue** with the `autonomous` label and watch the pipeline work — the dispatcher spawns agents, tracks progress via labels, and merges the PR when review passes.
 
 #### GitHub App Authentication (Optional)
 
 For production use with separate bot identities per agent, set up GitHub Apps. See `docs/github-app-setup.md` for the full guide.
+
+## For AI Agents — Install and Configure
+
+This section is written for an AI coding agent (Claude Code, Cursor, Codex CLI, Kiro, etc.) driving the install on the user's behalf. Every command is copy-pasteable; every step has a verifiable outcome. If you are a human reader, follow these steps yourself or paste the prompt at the bottom into your agent.
+
+### Step 1 — Install the skills
+
+Use the `skills` CLI (note the trailing `s` — `skill` without `s` is a different tool that targets `.codebuddy/skills/`).
+
+```bash
+# Install all four skills into the current project, targeting Claude Code only.
+# -a claude-code: scope the install to Claude Code (omit and the CLI creates
+#                 empty placeholder dirs for every other agent it knows about,
+#                 polluting the workspace).
+# -y           : skip interactive confirmation.
+npx skills add zxkane/autonomous-dev-team -a claude-code -y
+```
+
+For a single skill from the bundle (rare — most users want all four):
+
+```bash
+npx skills add zxkane/autonomous-dev-team --skill autonomous-dev -a claude-code -y
+```
+
+**Verify the install:**
+
+```bash
+ls .claude/skills
+# Expect: autonomous-common  autonomous-dev  autonomous-dispatcher  autonomous-review  create-issue
+```
+
+### Step 2 — Wire the symlinks (Claude Code / Kiro CLI only)
+
+Hook scripts and agent-callable scripts live inside the installed skill dirs but are referenced from the project root. Create the symlinks so the paths resolve:
+
+```bash
+ln -sf .claude/skills/autonomous-common/hooks   hooks
+ln -sf .claude/skills/autonomous-dispatcher/scripts scripts
+```
+
+**Verify the symlinks:**
+
+```bash
+test -x hooks/state-manager.sh && echo "hooks OK"
+test -f scripts/autonomous.conf.example && echo "scripts OK"
+```
+
+If your IDE has no hook support (Cursor, Windsurf, Gemini CLI), skip this step — the skills still work; you just enforce the workflow manually.
+
+### Step 3 — Enable required Claude Code plugins
+
+Edit `.claude/settings.json` and add these to `enabledPlugins`:
+
+```json
+{
+  "enabledPlugins": {
+    "code-simplifier@claude-plugins-official": true,
+    "pr-review-toolkit@claude-plugins-official": true
+  }
+}
+```
+
+The hooks reference subagents from these plugins (`code-simplifier:code-simplifier`, `pr-review-toolkit:code-reviewer`). Without them, the `check-code-simplifier.sh` and `check-pr-review.sh` gates will block commits/pushes.
+
+### Step 4 — Create per-project `autonomous.conf`
+
+```bash
+cp scripts/autonomous.conf.example scripts/autonomous.conf
+```
+
+The file is a bash script that's `source`d at every dispatcher tick and wrapper invocation. Fill in these required values:
+
+| Variable | Required | What to set | Notes |
+|---|---|---|---|
+| `PROJECT_ID` | Yes | Short identifier (e.g. `acme-api`) | Used in PID/log file names. Must be unique per project. |
+| `REPO` | Yes | `owner/repo-name` | The GitHub repo the pipeline watches. |
+| `REPO_OWNER`, `REPO_NAME` | Yes | Split form of `REPO` | Used for App-token scoping. |
+| `PROJECT_DIR` | Yes | Absolute path to the project root on the dispatcher box | Where the agent runs. |
+| `AGENT_CMD` | No (default `claude`) | `claude` (recommended) or `kiro` | The CLI used to spawn dev/review agents. `codex` is currently broken — `lib-agent.sh` uses the legacy `-p` flag, which today's Codex parses as `--profile`. See the Supported Agent CLIs table. Other CLIs work via the generic `<cli> -p <prompt>` fallback. |
+| `AGENT_DEV_MODEL`, `AGENT_REVIEW_MODEL` | No (default empty / `sonnet`) | Model name passed to the agent CLI | Empty = let the CLI pick. The review model defaults to `sonnet` to keep review costs predictable. |
+| `AGENT_PERMISSION_MODE` | No (default `auto`) | `auto`, `plan`, or `bypassPermissions` | `bypassPermissions` grants the agent unrestricted shell access — only use in a trusted sandbox. |
+| `AGENT_TIMEOUT` | No (default `4h`) | coreutils `timeout` units (e.g. `30m`, `2h`, `1d`) | Wall-clock cap on each agent invocation. Prevents hung CLI processes (stale `--resume`, MCP stdio deadlock) from monopolizing wrapper PID slots. |
+| `GH_AUTH_MODE` | No (default `token`) | `token` or `app` | `token` uses `GH_TOKEN`/`gh auth`. `app` uses GitHub App private keys (see `docs/github-app-setup.md`). |
+| `MAX_CONCURRENT` | No (default `5`) | Number | Cap on parallel agent processes. |
+| `MAX_RETRIES` | No (default `3`) | Number | Dev-agent retry budget before issue is marked `stalled`. |
+| `REVIEW_BOTS` | No (default `q`) | Space-separated short names | Bot reviewers that MUST run on every PR before approval. Built-in: `q` / `codex` / `claude`. Empty string disables bot enforcement. Custom bots: see `autonomous.conf.example`. |
+| `E2E_ENABLED` | No (default `false`) | `true` / `false` | Enable Chrome DevTools MCP E2E verification in the review step. |
+
+**Validate the config:**
+
+```bash
+bash -n scripts/autonomous.conf            # syntax check
+( source scripts/autonomous.conf && \
+  echo "REPO=$REPO PROJECT_DIR=$PROJECT_DIR AGENT_CMD=${AGENT_CMD:-claude} REVIEW_BOTS='${REVIEW_BOTS:-q}'" )
+```
+
+### Step 5 — Create the GitHub labels
+
+```bash
+# Source the config first so $REPO resolves; subshell prevents leaking vars.
+( source scripts/autonomous.conf && bash scripts/setup-labels.sh "$REPO" )
+```
+
+Creates `autonomous`, `pending-dev`, `in-progress`, `pending-review`, `reviewing`, `done`, `stalled`, `no-auto-close`, etc. Idempotent — safe to re-run.
+
+### Step 6 — Smoke-test the wrappers (no actual agent spawn)
+
+```bash
+bash -n scripts/autonomous-dev.sh        # spawned per-issue by the dispatcher (dev path)
+bash -n scripts/autonomous-review.sh     # spawned per-issue by the dispatcher (review path)
+bash -n scripts/dispatcher-tick.sh       # the per-tick entry point, called by every orchestration host in Option B Step 3
+```
+
+All three should print nothing (clean syntax). At runtime, if `dispatcher-tick.sh` reports `REVIEW_BOTS validation failed`, fix the typo in `autonomous.conf` and re-run — the precheck aborts the whole tick before any GitHub API call, so no retry counter advances.
+
+### Copy-paste prompt for an AI agent
+
+Paste this into Claude Code, Cursor, Codex CLI, or any agent that can run shell commands. The agent will execute the steps above end-to-end.
+
+````markdown
+Install the autonomous-dev-team skills into this project. The repo is `zxkane/autonomous-dev-team` on GitHub.
+
+Do these steps in order. After each step, verify the outcome before moving on.
+
+1. Run `npx skills add zxkane/autonomous-dev-team -a claude-code -y` and confirm
+   `.claude/skills/autonomous-{common,dev,dispatcher,review}` and
+   `.claude/skills/create-issue` exist.
+
+2. Create the two project-root symlinks:
+   `ln -sf .claude/skills/autonomous-common/hooks hooks`
+   `ln -sf .claude/skills/autonomous-dispatcher/scripts scripts`
+   Verify `hooks/state-manager.sh` and `scripts/autonomous.conf.example` are
+   reachable.
+
+3. Add `code-simplifier@claude-plugins-official` and
+   `pr-review-toolkit@claude-plugins-official` to `enabledPlugins` in
+   `.claude/settings.json` (create the file if missing).
+
+4. Copy `scripts/autonomous.conf.example` to `scripts/autonomous.conf`. Then
+   ASK ME for the values of: `PROJECT_ID`, `REPO`, `PROJECT_DIR`, `AGENT_CMD`
+   (default `claude`), `REVIEW_BOTS` (default `q`), `GH_AUTH_MODE` (default
+   `token`). Edit the file in place; do not commit secrets. After editing,
+   run `bash -n scripts/autonomous.conf` and source it to confirm the values
+   echo back correctly.
+
+5. Source the config and run `bash scripts/setup-labels.sh "$REPO"` to create the GitHub labels. (Without sourcing first, `$REPO` will be empty and `setup-labels.sh` will target the wrong repo or fail.)
+   ```bash
+   ( source scripts/autonomous.conf && bash scripts/setup-labels.sh "$REPO" )
+   ```
+
+6. Smoke-test syntax: `bash -n scripts/autonomous-dev.sh
+   scripts/autonomous-review.sh scripts/dispatcher-tick.sh`. Report any errors.
+
+7. STOP HERE. Do NOT schedule the dispatcher cron — that's a separate decision
+   the user makes based on which orchestration host they use (OpenClaw, plain
+   cron + claude CLI, GitHub Actions schedule, etc.). Tell the user what
+   options the README's Option B Step 3 lists and let them pick.
+````
 
 ## Security Considerations
 
@@ -201,11 +368,13 @@ The dispatcher is an [OpenClaw](https://github.com/OpenClaw/OpenClaw) skill that
 
 | Agent CLI | Command | New Session | Resume | Status |
 |-----------|---------|-------------|--------|--------|
-| Claude Code | `claude` | `--session-id` | `--resume` | Full support |
-| Codex CLI | `codex` | `-p` | (falls back to new) | Basic support |
-| Kiro CLI | `kiro` | `--agent` | (falls back to new) | Basic support |
+| Claude Code | `claude` | `--session-id <UUID>` | `--resume <id>` | Full support |
+| Codex CLI ⚠️ | `codex` | `exec "<prompt>"` | `exec resume --last` / `resume <id>` | **Code-side broken** — `lib-agent.sh` still uses the legacy `-p` flag, which today's Codex parses as `--profile`. A follow-up `fix(dispatcher)` PR will switch to `codex exec`. |
+| Kiro CLI | `kiro-cli` | `chat --no-interactive [--agent <name>]` | (falls back to new) | Basic support |
+| Cursor Agent | `agent` | `-p "<prompt>"` | `--resume=<chat-id>` | Generic fallback (untested explicit branch) |
+| Gemini CLI | `gemini` | `-p "<prompt>"` | (no documented resume flag) | Generic fallback (untested explicit branch) |
 
-Configure via `AGENT_CMD` in `scripts/autonomous.conf`.
+Configure via `AGENT_CMD` in `scripts/autonomous.conf`. The `claude`, `codex`, and `kiro` rows have explicit branches in `scripts/lib-agent.sh`; the others run through the generic `<cli> -p <prompt>` fallback. Any CLI not listed should still work if it accepts a `-p <prompt>` non-interactive flag — the abstraction layer is intentionally permissive.
 
 ## Development Workflow (Hook System)
 
