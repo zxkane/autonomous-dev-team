@@ -168,3 +168,84 @@ convert_timeouts_to_ms() {
     )
   '
 }
+
+# fold_matcher_into_event — for agents whose event names already encode
+# the tool kind (e.g. Windsurf has separate `pre_run_command` vs
+# `pre_write_code` events instead of `PreToolUse + matcher`). Folds the
+# Claude `event + matcher` pair into a single agent event name.
+#
+# Map syntax: AGENT_FOLD_MAP is a whitespace-separated list of triplets
+# of the form `<claude_event>:<claude_matcher>:<agent_event>`. Empty
+# matcher is allowed for events with no matcher (Stop etc.).
+#
+#   Example for Windsurf:
+#     AGENT_FOLD_MAP="
+#       PreToolUse:Bash:pre_run_command
+#       PreToolUse:Write:pre_write_code
+#       PreToolUse:Edit:pre_write_code
+#       PostToolUse:Bash:post_run_command
+#       Stop::post_cascade_response
+#     "
+#
+# Output shape:
+#   {
+#     "<agent-event>": [
+#       {command, timeout, ...},   # flat hook list — no matcher field
+#       ...
+#     ],
+#     ...
+#   }
+#
+# Multiple Claude `(event, matcher)` pairs that map to the same agent
+# event get their hooks lists concatenated (e.g. Edit + Write →
+# pre_write_code). Claude pairs not in the fold map are dropped (they
+# don't map to anything in the target schema).
+#
+# Args: $1 — source template path (claude-settings.template.json)
+# Output: JSON to stdout.
+fold_matcher_into_event() {
+  local template="$1"
+
+  # Build a JSON array of fold-map triplets that jq can iterate over.
+  local fold_array_items="" triplet
+  for triplet in ${AGENT_FOLD_MAP:-}; do
+    local claude_evt rest claude_match agent_evt
+    claude_evt="${triplet%%:*}"
+    rest="${triplet#*:}"
+    claude_match="${rest%%:*}"
+    agent_evt="${rest#*:}"
+    fold_array_items+="{\"claude_event\":\"$claude_evt\",\"claude_matcher\":\"$claude_match\",\"agent_event\":\"$agent_evt\"}, "
+  done
+  local fold_array="[${fold_array_items%, }]"
+
+  jq --argjson fold_map "$fold_array" '
+    .hooks
+    | to_entries
+    | map(
+        .key as $claude_event
+        | .value
+        | map(
+            (.matcher // "") as $matcher
+            | .hooks
+            | map(
+                . + {
+                  __target: (
+                    [
+                      $fold_map[]
+                      | select(.claude_event == $claude_event)
+                      | select(.claude_matcher == $matcher)
+                      | .agent_event
+                    ] | first
+                  )
+                }
+              )
+          )
+        | flatten
+      )
+    | flatten
+    | map(select(.__target != null))
+    | group_by(.__target)
+    | map({key: .[0].__target, value: map(del(.__target))})
+    | from_entries
+  ' "$template"
+}

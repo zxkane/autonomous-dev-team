@@ -19,8 +19,8 @@ What differs between agents is **how to declare which script runs when** — i.e
 | **Kiro CLI / Amazon Q** | `.kiro/agents/<name>.json` | Agent definition; camelCase events; `timeout_ms` (ms not seconds) | `execute_bash`, `fs_write` (Write+Edit unified) | `2` | `install-kiro-hooks.sh` (PR-11b) |
 | **Gemini CLI** | `.gemini/settings.json` | `BeforeTool`/`AfterTool` events; provides `$CLAUDE_PROJECT_DIR` env compat alias | `run_shell_command`, `write_file`, `replace` | `2` | `install-gemini-hooks.sh` (PR-11b) |
 | **Codex CLI** | `.codex/hooks.json` + `[features]codex_hooks=true` in `config.toml` | Claude-style (modeled verbatim) | `Bash`, `Write`, `Edit` (undocumented but inferred) | `2` | `install-codex-hooks.sh` (PR-11b) |
-| Windsurf | `.windsurf/hooks.json` | snake_case, **no matcher field** | filter inside script | `2` | PR-11c (planned) |
-| Kimi CLI | `~/.kimi/config.toml` | TOML, `[[hooks]]` array | regex (e.g. `WriteFile\|StrReplaceFile`) | `2` | PR-11c (planned) |
+| **Windsurf** | `.windsurf/hooks.json` | snake_case events that fold matcher info; **no matcher field** on entries | event encodes the kind: `pre_run_command` (Bash) / `pre_write_code` (Write+Edit merged) / etc. | `2` | `install-windsurf-hooks.sh` (PR-11c) |
+| **Kimi CLI** | `~/.kimi/config.toml` (or `.kimi/config.toml` with `--project`) | TOML, `[[hooks]]` array of tables | exact / regex (`RunShell`, `WriteFile`, `StrReplaceFile`) | `2` | `install-kimi-hooks.sh` (PR-11c) |
 
 ## Per-agent installation
 
@@ -47,6 +47,12 @@ bash .claude/skills/autonomous-common/scripts/install-gemini-hooks.sh
 
 # Codex CLI (also enables [features] codex_hooks = true in .codex/config.toml)
 bash .claude/skills/autonomous-common/scripts/install-codex-hooks.sh
+
+# Windsurf (folds Bash/Write/Edit matchers into pre_run_command / pre_write_code events)
+bash .claude/skills/autonomous-common/scripts/install-windsurf-hooks.sh
+
+# Kimi CLI (default: ~/.kimi/config.toml; --project for .kimi/config.toml)
+bash .claude/skills/autonomous-common/scripts/install-kimi-hooks.sh
 ```
 
 Each installer is idempotent and preserves any other top-level keys you have in the agent's config file. They also install a per-worktree git pre-push hook (closes #65); pass `--no-git-hook` to skip.
@@ -55,8 +61,8 @@ Each installer is idempotent and preserves any other top-level keys you have in 
 
 - **Antigravity**: Google has not documented hook support. Community evidence shows the Claude Code schema works in practice, but it could change without notice. Treat as best-effort.
 - **Codex CLI** (PR-11b): hook support is behind an experimental feature flag (`codex_hooks = true` in `~/.codex/config.toml`). Tool-name matchers like `Bash`, `Write` are modeled on Claude Code but not officially documented.
-- **Windsurf** (PR-11c): no per-tool matcher field. The hook fires for every shell command (or every file write); filter inside your script using the stdin JSON.
-- **Kimi CLI** (PR-11c): TOML config, beta feature. Tool names differ (e.g. `WriteFile` not `Write`).
+- **Windsurf**: no per-tool matcher field — `pre_run_command` fires for every shell command, `pre_write_code` for every file write/edit. Hooks must self-filter inside the script (e.g., `block-push-to-main.sh` already inspects the command). The installer folds Claude's `(event, matcher)` pairs into Windsurf's tool-specific events.
+- **Kimi CLI**: TOML config, beta feature upstream. Tool names differ (`WriteFile`/`StrReplaceFile`/`RunShell` rather than Claude's `Write`/`Edit`/`Bash`). Default install target is user-level (`~/.kimi/config.toml`); `--project` writes `.kimi/config.toml` (experimental — Kimi may only read user-level).
 
 ## Hook-script portability
 

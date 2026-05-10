@@ -29,7 +29,8 @@ After `npx skills add`, run the installer for your coding agent once from the pr
 | Kiro CLI | `bash .claude/skills/autonomous-common/scripts/install-kiro-hooks.sh [--agent <name>]` | `.kiro/agents/<name>.json` (default: `default`) |
 | Gemini CLI | `bash .claude/skills/autonomous-common/scripts/install-gemini-hooks.sh` | `.gemini/settings.json` |
 | Codex CLI | `bash .claude/skills/autonomous-common/scripts/install-codex-hooks.sh` | `.codex/hooks.json` + `.codex/config.toml` |
-| Windsurf / Kimi CLI | _coming in PR-11c_ | — |
+| Windsurf | `bash .claude/skills/autonomous-common/scripts/install-windsurf-hooks.sh` | `.windsurf/hooks.json` |
+| Kimi CLI | `bash .claude/skills/autonomous-common/scripts/install-kimi-hooks.sh [--project]` | `~/.kimi/config.toml` (default; `--project` writes `.kimi/config.toml`) |
 
 Each installer wires up the workflow hooks at the **project scope**, so they fire on every shell command in the repo — not only when an autonomous-* skill is explicitly loaded. Without this, the hook commands declared in skill frontmatter only run while a skill is active in the conversation, which is the regression that closed #68.
 
@@ -75,6 +76,8 @@ Claude Code only. The installer prompts for these; if installing manually, add t
   - `install-kiro-hooks.sh` — Kiro CLI / Amazon Q installer (writes `.kiro/agents/<name>.json` — agent definition with camelCase events, `execute_bash`/`fs_write` matchers, `timeout_ms` in milliseconds)
   - `install-gemini-hooks.sh` — Gemini CLI installer (writes `.gemini/settings.json` — `BeforeTool`/`AfterTool` events, `run_shell_command`/`write_file`/`replace` matchers)
   - `install-codex-hooks.sh` — Codex CLI installer (writes `.codex/hooks.json` + sets `[features] codex_hooks = true` in `.codex/config.toml`)
+  - `install-windsurf-hooks.sh` — Windsurf installer (writes `.windsurf/hooks.json` — snake_case events that fold matcher info; no per-tool matcher field)
+  - `install-kimi-hooks.sh` — Kimi CLI installer (writes `~/.kimi/config.toml` user-level by default, or `.kimi/config.toml` with `--project`; emits TOML `[[hooks]]` blocks)
   - `claude-settings.template.json` — canonical hook list applied by all per-agent installers
   - `gh-as-user.sh` — runs `gh` as a real user (needed when retriggering bot reviews like `/q review`)
   - `mark-issue-checkbox.sh` — toggles GitHub issue body checkboxes from the agent
