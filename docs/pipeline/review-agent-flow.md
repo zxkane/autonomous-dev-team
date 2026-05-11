@@ -96,12 +96,24 @@ The session-id trailer is the wrapper's only way to identify which comment is it
 
 After the agent exits, the wrapper polls issue comments up to 6 times (5s interval = 30s window) looking for a comment that satisfies BOTH:
 
-- Body matches `Review PASSED|Review findings:` (case-insensitive).
+- Body matches a verdict phrasing (case-insensitive). The supported set was broadened in #95 to handle agent phrasing drift:
+  - **Pass-side**: `Review PASSED`, `Review APPROVED`, `APPROVED FOR MERGE`, `LGTM`, `Review PASS`.
+  - **Fail-side**: `Review findings:`, `Review FAILED`, `Review REJECTED`, `Changes requested`.
 - Body matches `Review Session.*<SESSION_ID>` (the wrapper-generated session-id).
 
-The session-id filter is a **verdict-spoofing defense**: without it, any comment containing "Review PASSED" — including a maintainer's typed message, or a stray comment from another tool — could be picked up as the verdict.
+The session-id filter is a **verdict-spoofing defense**: without it, any comment containing one of the verdict phrasings — including a maintainer's typed message, or a stray comment from another tool — could be picked up as the verdict.
 
 If polling completes without finding a verdict comment, the wrapper proceeds to the FAIL branch (no false-positive PASS).
+
+### Pass-vs-fail classification
+
+Once polling finds a candidate comment, the wrapper applies a two-step classification (#95 — was previously a brittle `head -1 | grep -qi "^Review PASSED"` check that missed "APPROVED FOR MERGE" and similar drift):
+
+1. **FAIL pattern first** (`Review FAILED|Review REJECTED|Review findings:|Changes requested`) — if any matches, classify as FAIL. Conservative on ambiguity: a comment containing both "LGTM" and "Review findings:" routes to FAIL since the agent flagged at least one issue.
+2. **PASS pattern next** (`Review PASSED|Review APPROVED|APPROVED FOR MERGE|LGTM|Review PASS\b`) — if any matches and no FAIL phrasing did, classify as PASS.
+3. Otherwise FAIL by default.
+
+The classification scans the entire body, not just the first line, because some agents emit a heading (`## Review Verdict`) on line 1 and the verdict on line 2.
 
 ## Reviewed HEAD trailer
 
