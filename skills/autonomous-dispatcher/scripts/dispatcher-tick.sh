@@ -173,8 +173,10 @@ for i in $(seq 0 $((new_count - 1))); do
 
   log "  dispatching dev-new for issue #${issue_num}"
   label_swap "$issue_num" "" "in-progress"
-  gh issue comment "$issue_num" --repo "$REPO" \
-    --body "Dispatching autonomous development..."
+  # Bug 1+2 (#99): write a dispatcher-controlled marker that records the
+  # dispatch timestamp ([INV-17]). Step 5 uses this to honor a cold-start
+  # grace window before classifying the wrapper as crashed.
+  post_dispatch_token "$issue_num" "dev-new"
   dispatch dev-new "$issue_num"
   JUST_DISPATCHED+=("$issue_num")
 done
@@ -198,8 +200,7 @@ for i in $(seq 0 $((pr_count - 1))); do
 
   log "  dispatching review for issue #${issue_num}"
   label_swap "$issue_num" "pending-review" "reviewing"
-  gh issue comment "$issue_num" --repo "$REPO" \
-    --body "Dispatching autonomous review..."
+  post_dispatch_token "$issue_num" "review"
   dispatch review "$issue_num"
   JUST_DISPATCHED+=("$issue_num")
 done
@@ -228,6 +229,23 @@ for i in $(seq 0 $((pd_count - 1))); do
     continue
   fi
 
+  # Bug 3 (#99): if a PR already exists for this issue, the agent already
+  # finished development — any subsequent crash (e.g. cleanup-time exit
+  # non-zero after gh pr create) routed us to pending-dev, but re-developing
+  # would just re-do work. Hand off to review instead.
+  pr_for_issue=$(fetch_pr_for_issue "$issue_num" "number")
+  if [ -n "$pr_for_issue" ]; then
+    pr_num=$(jq -r '.number // empty' <<<"$pr_for_issue")
+    pr_ref="${pr_num:+#${pr_num}}"
+    pr_ref="${pr_ref:-(number unknown)}"
+    log "  issue #${issue_num} has PR ${pr_ref} — transitioning to pending-review (Bug 3 fix)"
+    gh issue comment "$issue_num" --repo "$REPO" \
+      --body "PR ${pr_ref} exists for this issue; transitioning to pending-review instead of retrying dev (#99 Bug 3)."
+    label_swap "$issue_num" "pending-dev" "pending-review"
+    JUST_DISPATCHED+=("$issue_num")
+    continue
+  fi
+
   session_id=$(extract_dev_session_id "$issue_num")
 
   # [INV-12] Skip resume if the prior session ended normally (closes #59).
@@ -253,8 +271,7 @@ for i in $(seq 0 $((pd_count - 1))); do
 
   log "  dispatching dev-resume for issue #${issue_num} (session: ${session_id:-<none>})"
   label_swap "$issue_num" "pending-dev" "in-progress"
-  gh issue comment "$issue_num" --repo "$REPO" \
-    --body "Resuming development (session: ${session_id})..."
+  post_dispatch_token "$issue_num" "dev-resume"
   dispatch dev-resume "$issue_num" "$session_id"
   JUST_DISPATCHED+=("$issue_num")
 done
@@ -279,6 +296,16 @@ for i in $(seq 0 $((cand_count - 1))); do
   # Skip freshly dispatched ([INV-09]).
   if was_just_dispatched "$issue_num"; then
     log "  issue #${issue_num} just dispatched this tick — skipping"
+    continue
+  fi
+
+  # Bug 1 (#99) [INV-17]: skip stale detection during the cold-start grace
+  # window. JUST_DISPATCHED only protects the current tick; a wrapper that
+  # hasn't yet written its PID file (session spawn + model first call can
+  # take 1–3 min) must not be classified as crashed on the very next tick.
+  # Defaults to 30 min via DISPATCH_GRACE_PERIOD_SECONDS=1800.
+  if is_within_grace_period "$issue_num"; then
+    log "  issue #${issue_num} within dispatch grace period — skipping (#99 Bug 1)"
     continue
   fi
 

@@ -125,10 +125,22 @@ _MOCK_COMMENTS_JSON='{"comments":[
 assert_eq "Exit code: 0 dev report does NOT count" "0" "$(count_retries 99)"
 
 # Dispatcher crash regex matches "Task appears to have crashed (no PR found)".
+# Bug 5 fix (#99) requires session-id confirmation for dispatcher crashes
+# to count — without a Dev Session ID comment in the cycle, this is treated
+# as a dispatcher false positive and suppressed (returns 0).
+_MOCK_COMMENTS_JSON='{"comments":[
+  {"createdAt":"2026-01-01T00:00:00Z","body":"Dev Session ID: `abc-confirmed`"},
+  {"createdAt":"2026-01-02T00:00:00Z","body":"Task appears to have crashed (no PR found). Moving to pending-dev for retry."}
+]}'
+assert_eq "dispatcher crash 'Task appears to have crashed (no PR found)' WITH session ID → 1" "1" "$(count_retries 99)"
+
+# Bug 5 (#99): dispatcher crash WITHOUT a session-id comment is a false
+# positive (cold-start window, missing exec bit, etc.) and must NOT consume
+# MAX_RETRIES.
 _MOCK_COMMENTS_JSON='{"comments":[
   {"createdAt":"2026-01-01T00:00:00Z","body":"Task appears to have crashed (no PR found). Moving to pending-dev for retry."}
 ]}'
-assert_eq "dispatcher crash 'Task appears to have crashed (no PR found)' → 1" "1" "$(count_retries 99)"
+assert_eq "dispatcher crash WITHOUT session ID → 0 (false positive suppressed, #99)" "0" "$(count_retries 99)"
 
 # Forward-progress comment must NOT count [INV-06].
 _MOCK_COMMENTS_JSON='{"comments":[

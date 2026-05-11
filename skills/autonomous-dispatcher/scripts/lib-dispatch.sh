@@ -124,23 +124,65 @@ check_deps_resolved() {
 # Echoes the count of failure events on the issue, using the stalled-cutoff
 # rule [INV-05]: only count failures after the most recent
 # "Marking as stalled" comment. Two event sources are counted:
-#   - Agent Session Report (Dev) comments with non-zero exit code
-#   - Dispatcher-detected crash comments matching [INV-06]'s keyword regex
+#   - Agent Session Report (Dev) comments with non-zero exit code (always)
+#   - Dispatcher-detected crash comments matching [INV-06]'s keyword regex,
+#     BUT only when the agent has confirmed startup at some point in the
+#     current retry cycle (a "Dev Session ID:" comment exists post-cutoff).
+#     Without that gate, dispatcher false positives from the cold-start
+#     window (Bug 1 in #99) consume MAX_RETRIES even though the agent
+#     never actually failed. See [INV-18].
 #
 # When MAX_RETRIES is hit, mark_stalled() is the appropriate action.
 count_retries() {
   local issue_num="$1"
-  local last_stalled_at agent_failures dispatcher_crashes
+  local agent_failures dispatcher_crashes
+  agent_failures=$(count_agent_failures "$issue_num")
+  dispatcher_crashes=$(count_dispatcher_crashes "$issue_num")
+
+  # Bug 5 (#99): only count dispatcher-detected crashes when the agent has
+  # confirmed startup at some point in this retry cycle. Pre-confirmation
+  # crashes are dispatcher-side false positives (cold-start window, missing
+  # exec bit, broken auth handoff) and must NOT consume MAX_RETRIES.
+  if _agent_started_since_stall "$issue_num"; then
+    echo $((agent_failures + dispatcher_crashes))
+  else
+    echo "$agent_failures"
+  fi
+}
+
+# Echoes the count of dispatcher-detected false positives (no session ID
+# observed in this retry cycle). Reported alongside the canonical counters
+# in mark_stalled() so operators can see Bug 1 cold-start crashes are
+# being suppressed instead of silently absorbed.
+count_dispatcher_false_positives() {
+  local issue_num="$1"
+  if _agent_started_since_stall "$issue_num"; then
+    echo 0
+  else
+    count_dispatcher_crashes "$issue_num"
+  fi
+}
+
+# Returns 0 if at least one "Dev Session ID: <id>" comment appears after the
+# most recent "Marking as stalled" cutoff AND that comment did NOT come from
+# a startup-failure path (i.e., the agent really did start, not just
+# wrapper-side post-mortem with a forwarded session id). [INV-19] gate for
+# Bug 5.
+#
+# Why exclude `Mode: startup-failure`: autonomous-dev.sh's startup-failure
+# trap (when AGENT_RAN=false, e.g. gh-with-token-refresh couldn't find a
+# real gh — #92) still emits a session report containing the SESSION_ID
+# that was passed to --session for dev-resume mode. Counting that as
+# "agent confirmed startup" would arm dispatcher-crash counting on a
+# wrapper that never actually invoked the agent.
+_agent_started_since_stall() {
+  local issue_num="$1"
+  local last_stalled_at session_seen
   last_stalled_at=$(gh issue view "$issue_num" --repo "$REPO" --json comments \
     -q '[.comments[] | select(.body | test("Marking as stalled"))] | last | .createdAt // "1970-01-01T00:00:00Z"')
-
-  agent_failures=$(gh issue view "$issue_num" --repo "$REPO" --json comments \
-    -q "[.comments[] | select((.createdAt > \"${last_stalled_at}\") and (.body | test(\"Agent Session Report \\\\(Dev\\\\)\")) and (.body | test(\"Exit code: 0\") | not))] | length")
-
-  dispatcher_crashes=$(gh issue view "$issue_num" --repo "$REPO" --json comments \
-    -q "[.comments[] | select((.createdAt > \"${last_stalled_at}\") and (.body | test(\"Task appears to have crashed \\\\(no PR found\\\\)|process not found\")))] | length")
-
-  echo $((agent_failures + dispatcher_crashes))
+  session_seen=$(gh issue view "$issue_num" --repo "$REPO" --json comments \
+    -q "[.comments[] | select((.createdAt > \"${last_stalled_at}\") and (.body | test(\"Dev Session ID: .[a-zA-Z0-9_-]+\")) and (.body | test(\"Mode: startup-failure\") | not))] | length")
+  [ "${session_seen:-0}" -gt 0 ]
 }
 
 # Echoes the agent_failures count separately (used by mark_stalled comment).
@@ -166,14 +208,20 @@ count_dispatcher_crashes() {
 # stalled" comment that the next stalled-cutoff calculation will key off.
 mark_stalled() {
   local issue_num="$1"
-  local agent_failures dispatcher_crashes
+  local agent_failures dispatcher_crashes false_positives
   agent_failures=$(count_agent_failures "$issue_num")
   dispatcher_crashes=$(count_dispatcher_crashes "$issue_num")
+  false_positives=$(count_dispatcher_false_positives "$issue_num")
   gh issue edit "$issue_num" --repo "$REPO" \
     --remove-label "pending-dev" \
     --add-label "stalled"
+  # Operator visibility: counted vs. suppressed dispatcher events ([INV-18]).
+  # Suppressed events are dispatcher-detected crashes that occurred before the
+  # agent confirmed startup (no Dev Session ID written) — these are
+  # dispatcher-side false positives and do NOT consume MAX_RETRIES.
+  local counted_dispatcher_crashes=$(( dispatcher_crashes - false_positives ))
   gh issue comment "$issue_num" --repo "$REPO" \
-    --body "Issue has exceeded the maximum retry limit (${MAX_RETRIES} failed attempts: ${agent_failures} agent failures + ${dispatcher_crashes} dispatcher-detected crashes). Marking as stalled. @${REPO_OWNER} please investigate manually."
+    --body "Issue has exceeded the maximum retry limit (${MAX_RETRIES} failed attempts: ${agent_failures} agent failures + ${counted_dispatcher_crashes} dispatcher-detected crashes; ${false_positives} dispatcher false positives suppressed per #99). Marking as stalled. @${REPO_OWNER} please investigate manually."
 }
 
 # ---------------------------------------------------------------------------
@@ -229,6 +277,95 @@ is_session_completed() {
   local fields
   fields=$(jq -er '"\(.stop_reason // "")|\(.terminal_reason // "")"' <<<"$last_line" 2>/dev/null) || return 1
   [ "$fields" = "end_turn|completed" ]
+}
+
+# ---------------------------------------------------------------------------
+# Dispatch-token marker (Bugs 1 + 2 in #99 — [INV-17])
+# ---------------------------------------------------------------------------
+#
+# At dispatch time the dispatcher writes a structured marker to the issue:
+#
+#   <!-- dispatcher-token: <uuid> at <iso8601> mode=<dev-new|dev-resume|review> -->
+#   Dispatching autonomous development...
+#
+# The HTML comment is machine-parseable; the human-readable line preserves
+# the existing wording for backward compat. Two roles:
+#
+#   1. Cold-start grace period (Bug 1). Step 5 reads the latest token's age
+#      via latest_dispatch_token_age_seconds and skips stale detection if
+#      `age < DISPATCH_GRACE_PERIOD_SECONDS`. Defaults to 30 min — long
+#      enough for session spawn + model first call without trapping
+#      genuinely-dead wrappers indefinitely.
+#
+#   2. Dispatcher-controlled dispatch identity (Bug 2). The dispatcher no
+#      longer relies on the agent's session-id-comment to know "did we just
+#      dispatch this?" — which used to fail when the agent crashed before
+#      its EXIT trap.
+
+# Echoes seconds since the most recent dispatch-token comment on the issue.
+# Empty if no token comment exists, or if the timestamp is unparseable.
+latest_dispatch_token_age_seconds() {
+  local issue_num="$1"
+  local latest_iso
+  latest_iso=$(gh issue view "$issue_num" --repo "$REPO" --json comments \
+    -q '[.comments[].body | capture("<!-- dispatcher-token: [a-zA-Z0-9_-]+ at (?<ts>[0-9TZ:-]+) mode=[a-z-]+ -->"; "g") | .ts] | last // empty')
+  [ -n "$latest_iso" ] || { echo ""; return; }
+  _iso_age_seconds "$latest_iso"
+}
+
+# Echoes seconds between now and an ISO-8601 UTC timestamp. Empty on parse
+# failure. Cross-platform (GNU `date -d` vs BSD `date -j -f`). Shared by
+# pr_idle_seconds and latest_dispatch_token_age_seconds.
+_iso_age_seconds() {
+  local iso="$1"
+  local epoch now_epoch
+  epoch=$(date -u -d "$iso" +%s 2>/dev/null \
+    || date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$iso" +%s 2>/dev/null \
+    || echo "")
+  [ -n "$epoch" ] || { echo ""; return; }
+  now_epoch=$(date -u +%s)
+  echo $(( now_epoch - epoch ))
+}
+
+# Returns 0 if the issue's latest dispatch token is younger than
+# DISPATCH_GRACE_PERIOD_SECONDS. Returns 1 otherwise (also when no token
+# exists — backward-compat fallthrough). Strict `<`: at-or-past the
+# threshold is OUT of grace.
+#
+# DISPATCH_GRACE_PERIOD_SECONDS=0 disables the grace window entirely.
+is_within_grace_period() {
+  local issue_num="$1"
+  local grace="${DISPATCH_GRACE_PERIOD_SECONDS:-1800}"
+  [ "$grace" -gt 0 ] || return 1
+  local age
+  age=$(latest_dispatch_token_age_seconds "$issue_num")
+  [ -n "$age" ] || return 1
+  [ "$age" -lt "$grace" ]
+}
+
+# Post a dispatcher-controlled dispatch-token marker as an issue comment.
+# Args: <issue_num> <mode>   where mode ∈ dev-new|dev-resume|review.
+# Body retains the existing human-readable phrasing, prefixed with the
+# machine-parseable HTML comment.
+post_dispatch_token() {
+  local issue_num="$1" mode="$2"
+  local token now human
+  if command -v uuidgen >/dev/null 2>&1; then
+    token=$(uuidgen | tr 'A-Z' 'a-z' | tr -d '-' | cut -c1-12)
+  else
+    # Fallback: 12 hex chars from /dev/urandom.
+    token=$(od -An -N6 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n' || echo "$$$(date +%s%N)")
+  fi
+  now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  case "$mode" in
+    dev-new)     human="Dispatching autonomous development..." ;;
+    dev-resume)  human="Resuming autonomous development..." ;;
+    review)      human="Dispatching autonomous review..." ;;
+    *)           human="Dispatching ${mode}..." ;;
+  esac
+  gh issue comment "$issue_num" --repo "$REPO" \
+    --body "<!-- dispatcher-token: ${token} at ${now} mode=${mode} -->
+${human}"
 }
 
 # ---------------------------------------------------------------------------
@@ -298,20 +435,9 @@ ci_is_green() {
 }
 
 # Step 5a: echoes seconds since PR.updatedAt. Empty on parse failure
-# (caller should fail-closed and leave the issue alone). Cross-platform
-# date parsing (GNU `date -d` vs BSD `date -j -f`).
+# (caller should fail-closed and leave the issue alone).
 pr_idle_seconds() {
-  local pr_updated_at="$1"
-  local pr_updated_epoch now_epoch
-  pr_updated_epoch=$(date -u -d "$pr_updated_at" +%s 2>/dev/null \
-    || date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$pr_updated_at" +%s 2>/dev/null \
-    || echo "")
-  if [ -z "$pr_updated_epoch" ]; then
-    echo ""
-    return
-  fi
-  now_epoch=$(date -u +%s)
-  echo $(( now_epoch - pr_updated_epoch ))
+  _iso_age_seconds "$1"
 }
 
 # Step 5b: echoes the SHA from the most recent "Reviewed HEAD: \`<sha>\`"
