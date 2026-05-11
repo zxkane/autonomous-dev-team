@@ -24,7 +24,7 @@ Issue #99 reports five bugs causing false crash detection, incorrect retry count
 
 At dispatch time the dispatcher writes a structured marker comment to the issue: `Dispatch token: <uuid> at <ISO-8601>`. This serves two roles:
 
-1. **Grace period probe (Fix 1).** Step 5 reads the most recent dispatch token's timestamp before classifying any in-progress / reviewing issue. If `now - dispatch_time < DISPATCH_GRACE_PERIOD_SECONDS` (default 1800 = 30 min), skip stale detection for this issue this tick. JUST_DISPATCHED already covers the current-tick case; this extends protection across the cold-start window.
+1. **Grace period probe (Fix 1).** Step 5 reads the most recent dispatch token's timestamp before classifying any in-progress / reviewing issue. If `now - dispatch_time < DISPATCH_GRACE_PERIOD_SECONDS` (default 600 = 10 min), skip stale detection for this issue this tick. JUST_DISPATCHED already covers the current-tick case; this extends protection across the cold-start window.
 2. **Dispatcher-side dispatch identity (Fix 2).** The token does NOT replace the agent's session report (which is needed for `--resume <session-id>`), but it gives the dispatcher a marker it controls — used by Fix 5 below to distinguish "agent never started" from "agent ran and failed".
 
 Marker format:

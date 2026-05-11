@@ -293,9 +293,10 @@ is_session_completed() {
 #
 #   1. Cold-start grace period (Bug 1). Step 5 reads the latest token's age
 #      via latest_dispatch_token_age_seconds and skips stale detection if
-#      `age < DISPATCH_GRACE_PERIOD_SECONDS`. Defaults to 30 min — long
-#      enough for session spawn + model first call without trapping
-#      genuinely-dead wrappers indefinitely.
+#      `age < DISPATCH_GRACE_PERIOD_SECONDS`. Defaults to 10 min — empirical
+#      wrapper startup is 1–7 sec, this leaves ~90× headroom for slow MCP
+#      negotiation or remote SSM dispatch without trapping genuinely-dead
+#      wrappers indefinitely.
 #
 #   2. Dispatcher-controlled dispatch identity (Bug 2). The dispatcher no
 #      longer relies on the agent's session-id-comment to know "did we just

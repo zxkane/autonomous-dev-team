@@ -303,7 +303,7 @@ for i in $(seq 0 $((cand_count - 1))); do
   # window. JUST_DISPATCHED only protects the current tick; a wrapper that
   # hasn't yet written its PID file (session spawn + model first call can
   # take 1–3 min) must not be classified as crashed on the very next tick.
-  # Defaults to 30 min via DISPATCH_GRACE_PERIOD_SECONDS=1800.
+  # Defaults to 10 min via DISPATCH_GRACE_PERIOD_SECONDS=600.
   if is_within_grace_period "$issue_num"; then
     log "  issue #${issue_num} within dispatch grace period — skipping (#99 Bug 1)"
     continue
