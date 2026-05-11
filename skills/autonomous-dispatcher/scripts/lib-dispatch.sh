@@ -335,7 +335,7 @@ _iso_age_seconds() {
 # DISPATCH_GRACE_PERIOD_SECONDS=0 disables the grace window entirely.
 is_within_grace_period() {
   local issue_num="$1"
-  local grace="${DISPATCH_GRACE_PERIOD_SECONDS:-1800}"
+  local grace="${DISPATCH_GRACE_PERIOD_SECONDS:-600}"
   [ "$grace" -gt 0 ] || return 1
   local age
   age=$(latest_dispatch_token_age_seconds "$issue_num")

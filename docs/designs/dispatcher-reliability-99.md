@@ -38,7 +38,7 @@ The HTML comment carries machine-parseable fields (token, timestamp, mode); the 
 
 A new helper `latest_dispatch_token_age_seconds` extracts the latest token's age. `is_within_grace_period` returns 0 if `age < DISPATCH_GRACE_PERIOD_SECONDS`. Step 5 calls it after the JUST_DISPATCHED check and before the DEAD/ALIVE branching. Returning 0 means "leave alone, still in grace period".
 
-`DISPATCH_GRACE_PERIOD_SECONDS` defaults to 1800 (30 min) and is configurable in `autonomous.conf`.
+`DISPATCH_GRACE_PERIOD_SECONDS` defaults to 600 (10 min) and is configurable in `autonomous.conf`. Default chosen empirically: real-world wrapper startup → first agent activity is 1–7 seconds across 10 sampled runs on a real dev box; 10 min leaves 90× headroom while still catching genuinely-dead wrappers within ~2 ticks.
 
 ### Fix 3 — Step 4 PR-exists short-circuit
 
