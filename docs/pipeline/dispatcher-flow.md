@@ -59,6 +59,19 @@ flowchart TD
 
 `JUST_DISPATCHED` is the only piece of state the tick maintains in memory — and it dies when the tick ends.
 
+## Pre-step: wrapper exec-bit self-heal (closes #97)
+
+Before sourcing config, `dispatcher-tick.sh` self-heals the execute bit on the two scripts that `dispatch-local.sh` invokes directly via `nohup`:
+
+- `autonomous-dev.sh`
+- `autonomous-review.sh`
+
+Some installs strip `+x` (a 644-mode upstream commit, the skills CLI's content-only hashing, or a consumer-side `git clone` under a restrictive umask). Without `+x`, the wrapper exits before the agent starts, no Session Report is posted, and Step 5b counts the issue as a crash.
+
+The self-heal is **scoped narrowly** — only the two directly-executed scripts. Sourced-only siblings (`lib-*.sh`) are deliberately not touched; flipping their mode would propagate the wrong contract.
+
+Defense in depth: the same heal also runs in every `install-*-hooks.sh` via `lib-installer.sh::ensure_dispatcher_scripts_executable`, so consumers re-running the installer get the heal even if their installed skill version still has the broken mode (the skills CLI's `computedHash` is content-only, not mode-aware).
+
 ## Pre-step: GitHub authentication (closes #91)
 
 `dispatcher-tick.sh` resolves auth before any `gh` call so the dispatcher's
