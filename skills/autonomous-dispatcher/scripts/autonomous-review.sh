@@ -519,7 +519,7 @@ fi
 # binding above provides authenticity; line position doesn't add safety.
 if echo "$LATEST_COMMENT" | grep -qiE 'Review (FAILED|REJECTED)|Review findings:|Changes requested'; then
   PASSED_VERDICT=false
-elif echo "$LATEST_COMMENT" | grep -qiE 'Review PASSED|Review APPROVED|APPROVED FOR MERGE|LGTM|Review PASS\b'; then
+elif echo "$LATEST_COMMENT" | grep -qiE 'Review PASSED|Review APPROVED|APPROVED FOR MERGE|LGTM|Review PASS'; then
   PASSED_VERDICT=true
 else
   PASSED_VERDICT=false
