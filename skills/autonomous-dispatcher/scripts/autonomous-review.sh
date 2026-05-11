@@ -419,18 +419,29 @@ fi)
 ## Decision
 After thorough review:
 
+**CRITICAL — verdict phrasing**: the wrapper script polls for your
+verdict comment by matching specific keywords. If your comment doesn't
+contain one of the recognized phrasings, the wrapper falls through to
+the FAILED branch and the dispatcher will eventually mark the issue
+\`stalled\` after \`MAX_RETRIES\` (closes #95). Use the EXACT prefix
+shown below — alternative phrasings like "APPROVED FOR MERGE" or "LGTM"
+also work, but stick to the canonical form when possible.
+
 - If ALL checklist items pass AND code quality is good$(if [[ "${E2E_ENABLED:-false}" == "true" ]]; then echo " AND all E2E tests pass"; fi) AND no requirement drift detected:
-  Post a comment on issue #${ISSUE_NUMBER} with:
-  "Review PASSED - All checklist items verified, code quality good.$(if [[ "${E2E_ENABLED:-false}" == "true" ]]; then echo " E2E verification completed."; fi) No requirement drift.
-  Review Session: \`${SESSION_ID}\`"
+  Post a comment on issue #${ISSUE_NUMBER} starting with the exact text
+  **\`Review PASSED\`** on the FIRST LINE, like:
+
+  > Review PASSED - All checklist items verified, code quality good.$(if [[ "${E2E_ENABLED:-false}" == "true" ]]; then echo " E2E verification completed."; fi) No requirement drift.
+  > Review Session: \`${SESSION_ID}\`
+
   Then exit.
 
 - If ANY item fails$(if [[ "${E2E_ENABLED:-false}" == "true" ]]; then echo " OR any E2E test fails OR preview URL is unavailable"; fi) OR requirement drift is detected:
-  Post a comment on issue #${ISSUE_NUMBER} with:
-  "Review findings:"
-  followed by a numbered list of each failing item with specific remediation instructions.$(if [[ "${E2E_ENABLED:-false}" == "true" ]]; then echo "
+  Post a comment on issue #${ISSUE_NUMBER} starting with the exact text
+  **\`Review findings:\`** on the FIRST LINE, followed by a numbered list
+  of each failing item with specific remediation instructions.$(if [[ "${E2E_ENABLED:-false}" == "true" ]]; then echo "
   Include E2E failure details with screenshot evidence."; fi)
-  End the comment with: "Review Session: \`${SESSION_ID}\`"
+  End the comment with: \`Review Session: \\\`${SESSION_ID}\\\`\`
   Then exit.
 
 IMPORTANT: Work autonomously. Be thorough but fair. Focus on correctness and compliance.
@@ -462,16 +473,21 @@ log "Review agent exited with code: $AGENT_EXIT"
 # ---------------------------------------------------------------------------
 log "Parsing review result from issue comments..."
 
-# Poll for the agent's review comment (contains "Review PASSED" or "Review findings:")
-# Retry up to 6 times (30s total) to avoid race conditions with concurrent comments
+# Poll for the agent's review comment. The polling regex (closes #95)
+# accepts the canonical phrasings ("Review PASSED" / "Review findings:")
+# AND common drift patterns: APPROVED FOR MERGE, Review APPROVED, LGTM,
+# Review FAILED, Review REJECTED, Changes requested. The pass-vs-fail
+# decision is made below by the classification grep — the polling step
+# only narrows down to "this looks like a verdict comment".
+#
+# Retry up to 6 times (30s total) to avoid race conditions with concurrent comments.
+# SECURITY: the session-id binding (`Review Session.*${SESSION_ID}`) is
+# kept intact — without it a stray third-party comment could spoof a verdict.
 LATEST_COMMENT=""
 for _poll_attempt in $(seq 1 6); do
   sleep 5
-  # Find the most recent comment that matches the review output format.
-  # SECURITY: Filter by the current session ID to prevent verdict spoofing
-  # from other commenters (dev agent, external users).
   LATEST_COMMENT=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json comments \
-    -q "[.comments[] | select((.body | test(\"Review PASSED|Review findings:\"; \"i\")) and (.body | test(\"Review Session.*${SESSION_ID}\")))] | last | .body" 2>/dev/null || true)
+    -q "[.comments[] | select((.body | test(\"Review PASSED|Review APPROVED|APPROVED FOR MERGE|LGTM|Review PASS|Review findings:|Review FAILED|Review REJECTED|Changes requested\"; \"i\")) and (.body | test(\"Review Session.*${SESSION_ID}\")))] | last | .body" 2>/dev/null || true)
   if [[ -n "$LATEST_COMMENT" ]]; then
     break
   fi
@@ -495,7 +511,21 @@ if [[ -n "$LATEST_COMMENT" && -n "$PR_HEAD_SHA" ]]; then
     || log "WARNING: Failed to post Reviewed HEAD trailer (non-fatal): ${_trailer_err}"
 fi
 
-if echo "$LATEST_COMMENT" | head -1 | grep -qi "^Review PASSED"; then
+# Classify the verdict (closes #95). Conservative ambiguity rule:
+# if BOTH a pass-pattern and a fail-pattern appear in the body, treat
+# the comment as FAIL — the agent flagged at least one issue.
+# Drop the `head -1` constraint that the previous code used: some agents
+# put a heading on line 1 and the verdict on line 2. The session-id
+# binding above provides authenticity; line position doesn't add safety.
+if echo "$LATEST_COMMENT" | grep -qiE 'Review (FAILED|REJECTED)|Review findings:|Changes requested'; then
+  PASSED_VERDICT=false
+elif echo "$LATEST_COMMENT" | grep -qiE 'Review PASSED|Review APPROVED|APPROVED FOR MERGE|LGTM|Review PASS'; then
+  PASSED_VERDICT=true
+else
+  PASSED_VERDICT=false
+fi
+
+if [[ "$PASSED_VERDICT" == "true" ]]; then
   log "Review PASSED for PR #${PR_NUMBER}."
 
   # ---------------------------------------------------------------------------
