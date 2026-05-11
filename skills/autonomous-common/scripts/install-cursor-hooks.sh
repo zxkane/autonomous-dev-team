@@ -80,4 +80,6 @@ if (( INSTALL_GIT_HOOK == 1 )); then
   install_per_worktree_pre_push
 fi
 
+ensure_dispatcher_scripts_executable
+
 echo "Done. Project-scoped Cursor hooks installed at $target." >&2

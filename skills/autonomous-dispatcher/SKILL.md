@@ -22,6 +22,7 @@ Scan GitHub issues and dispatch dev/review tasks. One cron tick is one invocatio
 - `gh` and `jq` on `PATH`.
 - For the local backend: `$PROJECT_DIR` set, pointing at the project root. Per-project `autonomous.conf` (see `scripts/autonomous.conf.example`).
 - For multi-project / remote backends: `dispatcher.conf` declaring `PROJECTS=()` (see `scripts/dispatcher.conf.example`).
+- `autonomous-dev.sh` and `autonomous-review.sh` need the execute bit (mode `100755`) — restored upstream and self-healed by `dispatcher-tick.sh` on every tick (#97).
 
 > **Security note**: This dispatcher processes GitHub issue content as input. In public repositories, issue content is untrusted — anyone can create issues. Ensure the `autonomous` label can only be applied by trusted maintainers (use GitHub branch rulesets or organizational policies). The dispatcher only reads labels/comments and spawns local processes via the helper script — it does NOT modify source code or push to branches.
 

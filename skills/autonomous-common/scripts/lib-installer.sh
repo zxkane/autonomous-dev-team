@@ -143,6 +143,54 @@ write_hooks_only_settings() {
   fi
 }
 
+# ensure_dispatcher_scripts_executable
+#
+# Heal +x on the autonomous-dispatcher's directly-invoked wrapper scripts
+# in the consumer's installed tree (closes #97). The skills CLI hashes
+# only path + content (not file mode), so a 644→755 mode flip in the
+# upstream repo does NOT change the consumer's computedHash and they
+# never see the fix via `npx skills update`. This helper closes that gap
+# at install-time: if the consumer ever re-runs install-*-hooks.sh, the
+# wrapper scripts get +x even when the underlying skill bits are stale.
+#
+# Scoped to the two scripts dispatch-local.sh invokes directly. Sourced-
+# only siblings (lib-*.sh) are deliberately left alone — the contract is
+# "wrapper scripts get +x, libs don't". Best-effort: a missing file or
+# read-only filesystem warns and continues; never aborts the installer.
+ensure_dispatcher_scripts_executable() {
+  local root candidate dispatcher_dir
+  root="$(project_root)"
+  dispatcher_dir=""
+  # Resolve the consumer-side dispatcher scripts dir. The skills CLI may
+  # install under .agents/skills/, .claude/skills/, or directly at
+  # skills/ depending on the consumer's project shape. Probe each.
+  for candidate in \
+    "$root/.agents/skills/autonomous-dispatcher/scripts" \
+    "$root/.claude/skills/autonomous-dispatcher/scripts" \
+    "$root/skills/autonomous-dispatcher/scripts"; do
+    if [[ -d "$candidate" ]]; then
+      dispatcher_dir="$candidate"
+      break
+    fi
+  done
+
+  if [[ -z "$dispatcher_dir" ]]; then
+    echo "WARN: ensure_dispatcher_scripts_executable: no autonomous-dispatcher/scripts dir found under $root — skipping" >&2
+    return 0
+  fi
+
+  local f
+  for f in autonomous-dev.sh autonomous-review.sh; do
+    if [[ -f "$dispatcher_dir/$f" && ! -x "$dispatcher_dir/$f" ]]; then
+      if chmod +x "$dispatcher_dir/$f" 2>/dev/null; then
+        echo "Restored +x: $dispatcher_dir/$f" >&2
+      else
+        echo "WARN: failed to chmod +x $dispatcher_dir/$f (read-only?) — skipping" >&2
+      fi
+    fi
+  done
+}
+
 # install_per_worktree_pre_push
 #
 # Calls the per-worktree git pre-push hook installer (closes #65).

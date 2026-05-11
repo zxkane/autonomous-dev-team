@@ -16,6 +16,24 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 
+# Self-heal exec bits on the directly-invoked sibling scripts (closes #97).
+# Some installs strip +x — git mode 100644 propagated through the skills CLI
+# in earlier versions, and consumer-side tooling under restrictive umasks
+# can also drop it. If +x is missing, dispatch-local.sh's
+# `nohup .../autonomous-{dev,review}.sh` fails with `Permission denied`
+# before the agent even starts, the dispatcher misclassifies it as a crash,
+# and after MAX_RETRIES the issue stalls.
+#
+# Scoped narrowly to the two scripts dispatch-local.sh actually invokes —
+# sourced-only siblings (lib-*.sh) are deliberately left alone. Best-effort
+# (`|| true`) so a chmod failure on a read-only mount never aborts a tick.
+for _need_exec in autonomous-dev.sh autonomous-review.sh; do
+  if [[ -f "$SCRIPT_DIR/$_need_exec" && ! -x "$SCRIPT_DIR/$_need_exec" ]]; then
+    chmod +x "$SCRIPT_DIR/$_need_exec" 2>/dev/null || true
+  fi
+done
+unset _need_exec
+
 # Load config via the shared helper (closes #58 for the dispatcher path).
 # Must run before sourcing lib-dispatch.sh — lib-dispatch.sh enforces
 # REPO/REPO_OWNER/PROJECT_ID via `: "${VAR:?...}"`.
