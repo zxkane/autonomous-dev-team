@@ -121,12 +121,12 @@ For each match, in order:
 
 1. **Dependency check.** Read the issue body for a `## Dependencies` section. Extract every `#N` reference. For each, call `gh issue view N --json state` and require state `CLOSED` or `MERGED` ([INV-11](invariants.md#inv-11-dependency-state-includes-merged) — PRs report `MERGED`, not `CLOSED`). If any dependency is still open, **skip silently** — no comment, no label change. The issue picks up next tick once dependencies clear.
 2. **Add `in-progress` label.**
-3. **Comment**: "Dispatching autonomous development..."
+3. **Post dispatch token** ([INV-18](invariants.md#inv-18-cold-start-grace-period-before-stale-detection)): write `<!-- dispatcher-token: <id> at <iso> mode=dev-new -->` followed by the human-readable "Dispatching autonomous development..." line. The HTML comment encodes the dispatch timestamp for Step 5's grace-period check.
 4. **Dispatch**: `bash $PROJECT_DIR/scripts/dispatch-local.sh dev-new <issue>`
 5. **Append issue to `JUST_DISPATCHED`.**
 6. **Re-check concurrency** before processing the next match.
 
-The issue is now in `in-progress`; the dev wrapper is launching via `nohup`. Step 5 must skip this issue this tick ([INV-09](invariants.md#inv-09-just_dispatched-skip-rule)).
+The issue is now in `in-progress`; the dev wrapper is launching via `nohup`. Step 5 must skip this issue this tick ([INV-09](invariants.md#inv-09-just_dispatched-skip-rule)) and for the duration of the dispatch-token grace period ([INV-18](invariants.md#inv-18-cold-start-grace-period-before-stale-detection)).
 
 ## Step 3: scan-pending-review
 
@@ -137,7 +137,7 @@ Find issues labeled `autonomous` AND `pending-review` AND NOT `reviewing`.
 For each match, in order:
 
 1. **Atomic label swap**: `gh issue edit --remove-label pending-review --add-label reviewing` in a single call. (Two separate `gh issue edit` calls would create a `pending-review` + `reviewing` window — see [Forbidden transitions](state-machine.md#forbidden-transitions).)
-2. **Comment**: "Dispatching autonomous review..."
+2. **Post dispatch token** ([INV-18](invariants.md#inv-18-cold-start-grace-period-before-stale-detection)): `<!-- dispatcher-token: <id> at <iso> mode=review -->` + "Dispatching autonomous review...".
 3. **Dispatch**: `bash $PROJECT_DIR/scripts/dispatch-local.sh review <issue>`
 4. **Append to `JUST_DISPATCHED`.**
 
@@ -155,8 +155,8 @@ This is the most subtle gate in the dispatcher. Two failure events count toward 
 
 Failure events:
 
-- **`Agent Session Report (Dev)` comments with non-zero exit code.** Posted by the dev wrapper trap on agent failure ([INV-03](invariants.md#inv-03-dev-session-report-comment-format)).
-- **Dispatcher-detected crash comments matching the regex `Task appears to have crashed \(no PR found\)|process not found`.** This regex anchors only on Step 5b-DEAD-no-PR comments and explicit "process not found" wording. It MUST NOT match the forward-progress phrases — see [INV-06](invariants.md#inv-06-crashed--process-not-found-keyword-contract).
+- **`Agent Session Report (Dev)` comments with non-zero exit code.** Posted by the dev wrapper trap on agent failure ([INV-03](invariants.md#inv-03-dev-session-report-comment-format)). Always count.
+- **Dispatcher-detected crash comments matching the regex `Task appears to have crashed \(no PR found\)|process not found`.** This regex anchors only on Step 5b-DEAD-no-PR comments and explicit "process not found" wording. It MUST NOT match the forward-progress phrases — see [INV-06](invariants.md#inv-06-crashed--process-not-found-keyword-contract). **Only counts when the agent has confirmed startup** in this retry cycle (a `Dev Session ID:` comment exists post-cutoff) — see [INV-19](invariants.md#inv-19-retry-counter-requires-confirmed-agent-startup).
 
 Pseudocode:
 
@@ -164,13 +164,26 @@ Pseudocode:
 LAST_STALLED_AT = timestamp of last comment matching "Marking as stalled" (else epoch)
 AGENT_FAILURES = count of Dev Session Reports with non-zero exit AFTER LAST_STALLED_AT
 DISPATCHER_CRASHES = count of comments matching the crash regex AFTER LAST_STALLED_AT
-RETRY_COUNT = AGENT_FAILURES + DISPATCHER_CRASHES
+SESSION_SEEN = count of "Dev Session ID: ..." comments AFTER LAST_STALLED_AT (INV-19)
+RETRY_COUNT = AGENT_FAILURES + (SESSION_SEEN > 0 ? DISPATCHER_CRASHES : 0)
 
 if RETRY_COUNT >= MAX_RETRIES (default 3):
   remove pending-dev, add stalled
-  comment "Marking as stalled. @owner please investigate manually."
+  comment "Marking as stalled. <counter breakdown including suppressed false positives> @owner please investigate manually."
   skip
 ```
+
+### Step 4a.5: PR-exists short-circuit (#99 Bug 3)
+
+Before extracting the session-id and dispatching a resume, check `fetch_pr_for_issue`. If a PR is already open and references this issue, the agent had finished publishing — any subsequent crash that landed it in `pending-dev` (e.g. cleanup-trap fired with non-zero exit after `gh pr create` succeeded) does not warrant re-developing.
+
+Action when a PR exists:
+
+1. Comment: "PR #N exists for this issue; transitioning to pending-review instead of retrying dev (#99 Bug 3)."
+2. `gh issue edit --remove-label pending-dev --add-label pending-review`.
+3. Append the issue to `JUST_DISPATCHED` so Step 5 doesn't reprobe it on the same tick.
+
+This is the Step 4 mirror of Step 5b's "DEAD + in-progress + PR exists" branch — it covers the case where the cleanup trap got there first and the issue is already on `pending-dev` when the next tick arrives.
 
 ### Step 4b: extract session-id
 
@@ -193,7 +206,7 @@ This is a conservative gate: it only fires when the helper is certain the prior 
 ### Step 4c: dispatch resume
 
 1. **Atomic label swap**: `gh issue edit --remove-label pending-dev --add-label in-progress`.
-2. **Comment**: "Resuming development (session: <id>)..."
+2. **Post dispatch token** ([INV-18](invariants.md#inv-18-cold-start-grace-period-before-stale-detection)): `<!-- dispatcher-token: <id> at <iso> mode=dev-resume -->` + "Resuming autonomous development...".
 3. **Dispatch**: `bash $PROJECT_DIR/scripts/dispatch-local.sh dev-resume <issue> <session-id>`
 4. **Append to `JUST_DISPATCHED`.**
 
@@ -206,7 +219,8 @@ Find issues labeled `in-progress` OR `reviewing`.
 For each match:
 
 1. **Skip if in `JUST_DISPATCHED`** ([INV-09](invariants.md#inv-09-just_dispatched-skip-rule)).
-2. **Locate PID file** ([INV-01](invariants.md#inv-01-pid-file-naming)):
+2. **Skip if within cold-start grace period** ([INV-18](invariants.md#inv-18-cold-start-grace-period-before-stale-detection)) — `is_within_grace_period` reads the most recent `<!-- dispatcher-token: ... -->` marker comment. While its age is below `DISPATCH_GRACE_PERIOD_SECONDS` (default 600 = 10 min), defer all stale-detection branching to a future tick. JUST_DISPATCHED only protects the current tick; this rule extends protection across the cold-start window during which the wrapper has not yet written its PID file. (Empirical wrapper startup is 1–7 sec; 10 min leaves headroom for slow MCP / remote SSM paths.)
+3. **Locate PID file** ([INV-01](invariants.md#inv-01-pid-file-naming)):
    - `in-progress` → `${PID_DIR}/issue-<N>.pid`
    - `reviewing` → `${PID_DIR}/review-<N>.pid`
    - `${PID_DIR}` is computed by `lib-config.sh::pid_dir_for_project` (per-user runtime dir, mode 0700).

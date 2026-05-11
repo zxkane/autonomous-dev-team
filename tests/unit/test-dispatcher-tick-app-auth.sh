@@ -104,6 +104,15 @@ pid_alive() { return 1; }
 get_pid() { echo ""; }
 label_swap() { :; }
 was_just_dispatched() { return 1; }
+# Bug 1+2 (#99): dispatcher-tick.sh now calls these in Steps 2/3/4 + Step 5.
+# post_dispatch_token writes a marker comment via `gh issue comment`; the
+# stub mirrors that so the auth-runs-before-first-gh-call test still has a
+# real gh invocation to assert against.
+post_dispatch_token() {
+  gh issue comment "$1" --repo "$REPO" --body "Dispatch token (mode=$2)"
+}
+is_within_grace_period() { return 1; }
+latest_dispatch_token_age_seconds() { echo ""; }
 EOF
 
 # Stub gh-app-token.sh: record the call, return a sentinel token. The token

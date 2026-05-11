@@ -63,6 +63,19 @@ REAL_GH=""
 MAX_CONCURRENT=5
 MAX_RETRIES=3
 
+# Cold-start grace window for stale detection ([INV-18], #99 Bug 1).
+# After a Step 2/3/4 dispatch, the wrapper needs time to spawn the session,
+# have the agent CLI make its first API call, and write its PID file. Step 5
+# must NOT classify the wrapper as crashed during this window.
+#
+# Empirical measurements on a real dev box: wrapper startup → first agent
+# activity is consistently 1–7 seconds across 10 sampled runs. 600 (10 min)
+# leaves 90× headroom for slow MCP negotiation, model first-call slowness,
+# or remote SSM dispatch latency, while still catching genuinely-dead
+# wrappers within two ticks. Set to 0 to disable (not recommended — false-
+# positive crash detection is the failure mode this knob exists to prevent).
+DISPATCH_GRACE_PERIOD_SECONDS=600
+
 # === Dev Agent ===
 DEV_SKILL_CMD="/autonomous-dev"
 
