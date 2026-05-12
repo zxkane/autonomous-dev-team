@@ -41,20 +41,16 @@ assert_eq() {
   fi
 }
 
-# Extract the verdict-polling jq pattern from the wrapper. The poll line
-# is the one containing both `select((.body | test(` and the
-# session-id binding `Review Session.*${SESSION_ID}`.
-POLL_LINE=$(grep -nF 'select((.body | test(' "$WRAPPER" | head -1 | cut -d: -f1)
-if [[ -z "$POLL_LINE" ]]; then
-  echo -e "${RED}FAIL${NC}: could not locate verdict-poll line in $WRAPPER" >&2
-  exit 1
-fi
-# Capture the FIRST quoted regex inside test(...), unescaping the wrapper's
-# shell-level backslash-escapes: \" → ".
-POLL_PATTERN=$(sed -n "${POLL_LINE}p" "$WRAPPER" \
-  | grep -oE 'test\(\\"[^\\]+\\"' \
-  | head -1 \
-  | sed -E 's/^test\(\\"//; s/\\"$//')
+# Extract the verdict-polling jq pattern from the wrapper.
+#
+# Post-Fix-1: the wrapper holds the verdict regex in a shell variable
+# `_VERDICT_RE='...'` and references it inside two jq queries (one for
+# the actor+window path, one for the legacy session-id fallback). We
+# read the variable assignment directly — it is the canonical source.
+#
+# Anchor: the line `_VERDICT_RE='...'` near the polling loop.
+POLL_PATTERN=$(grep -E "^_VERDICT_RE=" "$WRAPPER" | head -1 \
+  | sed -E "s/^_VERDICT_RE='//; s/'$//")
 
 # Extract the FAIL and PASS classification regex patterns.
 # The post-fix wrapper has two `grep -qiE '...'` checks: FAIL first

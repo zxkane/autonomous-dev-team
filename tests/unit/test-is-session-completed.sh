@@ -133,13 +133,20 @@ write_log 1010 '[autonomous-dev] 21:41:15 Resuming session: abc-123
 assert_returns "realistic Claude shape with nested usage and {} in result string → true" 0 is_session_completed 1010
 cleanup_log 1010
 
-# Realistic shape, but is_error=true (api_error_status=400) and a non-end_turn
-# stop. The wrapper logged this with `prompt_too_long` terminal_reason.
-# Resume against THIS terminal state should still fail the gate (it's a
-# retry-worthy condition, not a true completion).
+# prompt_too_long: claude -p has no auto-compaction, so resume re-feeds the
+# whole transcript and crashes again. The dispatcher must treat this as
+# terminal so dispatcher-tick routes to a fresh session instead of looping.
+# Behavior change: pre-Fix-3 returned 1 (retry-worthy); post-Fix-3 returns 0
+# (terminal — caller flips label so next tick mints a fresh session).
 write_log 1011 '{"type":"result","subtype":"success","is_error":true,"api_error_status":400,"result":"Prompt is too long","stop_reason":"stop_sequence","session_id":"abc","usage":{"input_tokens":0},"terminal_reason":"prompt_too_long"}'
-assert_returns "is_error=true with prompt_too_long → false (legit retry case)" 1 is_session_completed 1011
+assert_returns "prompt_too_long → terminal (no auto-compact in claude -p; force fresh)" 0 is_session_completed 1011
 cleanup_log 1011
+
+# Transient api_error (e.g. Bedrock 503, not a context overflow) should
+# remain non-terminal — resume might succeed when the upstream recovers.
+write_log 1013 '{"type":"result","subtype":"error","is_error":true,"api_error_status":503,"result":"Service unavailable","stop_reason":"end_turn","session_id":"abc","usage":{"input_tokens":1},"terminal_reason":"api_error"}'
+assert_returns "api_error → not terminal (transient, resume worthwhile)" 1 is_session_completed 1013
+cleanup_log 1013
 
 # ---------------------------------------------------------------------------
 echo ""

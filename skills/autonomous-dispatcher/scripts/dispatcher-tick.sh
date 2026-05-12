@@ -248,15 +248,41 @@ for i in $(seq 0 $((pd_count - 1))); do
 
   session_id=$(extract_dev_session_id "$issue_num")
 
-  # [INV-12] Skip resume if the prior session ended normally (closes #59).
-  # Resuming a completed claude session attaches to the SSE stream forever.
-  # Don't auto-recover: leave the issue in pending-dev so an operator decides
-  # whether to flip to pending-review (PR present) or close (work done).
+  # [INV-12] Skip resume if the prior session reached a terminal state
+  # that resume cannot recover from. Two cases:
+  #   end_turn|completed → operator handoff (closes #59).
+  #   *|prompt_too_long  → auto-recover via fresh session (no auto-compact
+  #                        in claude -p; the only fix is a new session_id).
+  # See lib-dispatch.sh:is_session_completed for the full rationale.
   #
-  # Idempotency: only post the operator notice the FIRST time the gate fires
-  # for a given session-id. Without this, every 5-min tick posts the same
-  # comment (~288/day) since the issue stays in pending-dev.
-  if [ -n "$session_id" ] && is_session_completed "$issue_num"; then
+  # Idempotency: post the operator notice at most once per session-id.
+  # Without this, every 5-min tick posts the same comment (~288/day) for
+  # the COMPLETED case (pending-dev → pending-dev). For the PTL case we
+  # flip the label so the comment fires at most once anyway.
+  _session_terminal_reason=""
+  if [ -n "$session_id" ] && is_session_completed "$issue_num" _session_terminal_reason; then
+    if [ "$_session_terminal_reason" = "prompt_too_long" ]; then
+      log "  issue #${issue_num} session ${session_id} hit prompt_too_long — clearing for fresh dispatch"
+      notice_marker="INV-12-prompt-too-long:${session_id}"
+      if gh issue view "$issue_num" --repo "$REPO" --json comments \
+          -q "[.comments[].body | select(contains(\"${notice_marker}\"))] | length" \
+          2>/dev/null | grep -q '^0$'; then
+        gh issue comment "$issue_num" --repo "$REPO" \
+          --body "Session \`${session_id}\` exhausted the model context window (terminal_reason=prompt_too_long). \`claude -p\` does not auto-compact, so resume would crash again. Forcing a fresh dev session on the next tick. (\`${notice_marker}\`)"
+      fi
+      # Truncate the log so the next tick sees an empty/missing log and
+      # doesn't re-trigger this is_session_completed branch. The dev-new
+      # dispatch below mints a new session_id and writes fresh result lines.
+      : > "/tmp/agent-${PROJECT_ID}-issue-${issue_num}.log" 2>/dev/null || true
+      log "  dispatching dev-new for issue #${issue_num} (fresh after prompt_too_long)"
+      label_swap "$issue_num" "pending-dev" "in-progress"
+      post_dispatch_token "$issue_num" "dev-new"
+      dispatch dev-new "$issue_num"
+      JUST_DISPATCHED+=("$issue_num")
+      continue
+    fi
+
+    # end_turn|completed — operator must decide.
     log "  issue #${issue_num} session ${session_id} already completed — skipping resume"
     notice_marker="INV-12-completed:${session_id}"
     if gh issue view "$issue_num" --repo "$REPO" --json comments \

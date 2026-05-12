@@ -242,18 +242,33 @@ extract_dev_session_id() {
 }
 
 # is_session_completed — return 0 if the agent's last log object indicates a
-# normal end-of-turn (stop_reason=end_turn AND terminal_reason=completed).
-# Used by Step 4 (INV-12, closes #59) to skip resume against a session that
-# the model has nothing left to do for — those resumes attach to the SSE
-# stream and never return.
+# session state that resume cannot recover from. Two cases qualify:
+#
+#   1. end_turn|completed         — normal exit, agent has nothing left to do.
+#                                   Resuming would attach to a closed SSE
+#                                   stream and hang (#59, INV-12).
+#   2. *|prompt_too_long          — JSONL transcript exceeded the model's
+#                                   input window. claude -p has no auto-
+#                                   compaction, so resuming re-feeds the
+#                                   whole transcript and crashes again. The
+#                                   only recovery is a fresh session with a
+#                                   smaller seed prompt.
+#
+# Used by Step 4 to skip resume against a session that cannot make progress.
+# The caller distinguishes (1) vs (2) via the optional capture-mode arg
+# (`is_session_completed N reason_var`) — case (1) is left for the operator
+# to decide; case (2) flips the label back to pending-dev so the next tick
+# auto-retries with a fresh session.
 #
 # Returns 1 (false) for: AGENT_CMD != claude (other CLIs don't emit the same
 # JSON shape), missing/unreadable log, no JSON object found, malformed JSON,
-# or any non-terminal stop reason. Conservative: a false negative just means
-# we still try to resume (existing behavior); a false positive (claiming
-# completed when it isn't) would mistakenly skip a legitimate retry.
+# or any non-terminal stop reason (api_error, stop_sequence, etc.).
+# Conservative: a false negative just means we still try to resume (existing
+# behavior); a false positive (claiming terminal when it isn't) would
+# mistakenly skip a legitimate retry.
 is_session_completed() {
   local issue_num="$1"
+  local reason_var="${2:-}"
   [ "${AGENT_CMD:-claude}" = "claude" ] || return 1
 
   local log_file="/tmp/agent-${PROJECT_ID}-issue-${issue_num}.log"
@@ -267,16 +282,20 @@ is_session_completed() {
   # `result` line and let jq parse it.
   #
   # Multiple result objects are possible (resume cycles): the LAST line wins.
-  # If the last result represents a non-terminal end (api_error_status set,
-  # stop_reason=stop_sequence, terminal_reason=prompt_too_long, etc.) we
-  # return false and a resume retry is still legitimate.
   local last_line
   last_line=$(grep '^{"type":"result"' "$log_file" 2>/dev/null | tail -1)
   [ -n "$last_line" ] || return 1
 
   local fields
   fields=$(jq -er '"\(.stop_reason // "")|\(.terminal_reason // "")"' <<<"$last_line" 2>/dev/null) || return 1
-  [ "$fields" = "end_turn|completed" ]
+
+  local terminal_reason="${fields##*|}"
+
+  if [ "$fields" = "end_turn|completed" ] || [ "$terminal_reason" = "prompt_too_long" ]; then
+    [ -n "$reason_var" ] && printf -v "$reason_var" '%s' "$terminal_reason"
+    return 0
+  fi
+  return 1
 }
 
 # ---------------------------------------------------------------------------

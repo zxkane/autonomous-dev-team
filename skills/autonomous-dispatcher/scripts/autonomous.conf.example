@@ -41,6 +41,25 @@ AGENT_PERMISSION_MODE="auto"
 # Closes #60 (INV-13).
 AGENT_TIMEOUT="4h"
 
+# Optional launcher prefix that wraps every agent CLI invocation in
+# run_agent / resume_agent. Use case: bridge dispatcher-spawned wrappers
+# into the same env you set up for interactive `claude` runs (Bedrock
+# auth, MCP servers, telemetry tags, etc.) without duplicating that env
+# in autonomous.conf.
+#
+# The wrappers also export CC_USER=autonomous-{dev,review}-bot and
+# CC_ROLE_KIND={dev,review} before invoking the launcher, so a
+# launcher that consumes those env vars can attribute autonomous-pipeline
+# traffic separately from interactive sessions in cost / telemetry
+# pipelines.
+#
+# Example — a `cc` shell function in ~/.bash_aliases that injects
+# Bedrock + telemetry env:
+#   AGENT_LAUNCHER='bash -c '\''source ~/.bash_aliases && exec cc "$@"'\'' --'
+#
+# Empty (default): no wrapping; $AGENT_CMD is invoked directly.
+AGENT_LAUNCHER=""
+
 # === GitHub Authentication ===
 GH_AUTH_MODE="token"
 DEV_AGENT_APP_ID=""

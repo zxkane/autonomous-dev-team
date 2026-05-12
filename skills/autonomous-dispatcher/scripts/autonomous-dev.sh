@@ -85,6 +85,12 @@ fi
 # Ensure we're in the project directory (needed when called directly, not just via SSM)
 cd "$PROJECT_DIR" || { echo "Error: cannot cd to $PROJECT_DIR" >&2; exit 1; }
 
+# Bot identity for downstream telemetry / cost attribution (Fix 2).
+# Picked up by AGENT_LAUNCHER (e.g. user's `cc` shell function) when set;
+# harmless extra env when AGENT_LAUNCHER is empty.
+export CC_USER="${CC_USER:-autonomous-dev-bot}"
+export CC_ROLE_KIND="${CC_ROLE_KIND:-dev}"
+
 LOG_FILE="/tmp/agent-${PROJECT_ID}-issue-${ISSUE_NUMBER}.log"
 # PID file lives in the per-user PID dir (closes #72). pid_dir_for_project
 # is in lib-config.sh, sourced transitively via lib-agent.sh.
@@ -349,8 +355,15 @@ EOF
     NEW_SESSION_ID=$(uuidgen)
     log "Resume failed (exit $AGENT_EXIT). Starting new session: ${NEW_SESSION_ID}"
 
+    # Post the explanatory comment AND a dispatcher-readable Dev Session ID
+    # marker. The latter ensures the next tick's extract_dev_session_id sees
+    # the fresh id even if this wrapper crashes after run_agent but before
+    # the trap-on-exit session report fires (Fix 3 — prompt_too_long path).
+    # Two separate posts so a single failure doesn't void the marker.
     gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
       --body "Resume failed (session \`${SESSION_ID}\`). Starting new session \`${NEW_SESSION_ID}\`." 2>/dev/null || true
+    gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
+      --body "Dev Session ID: \`${NEW_SESSION_ID}\` (mode: resume-fallback)" 2>/dev/null || true
 
     SESSION_ID="$NEW_SESSION_ID"
     SESSION_NAME="dev-issue-${ISSUE_NUMBER}-retry"

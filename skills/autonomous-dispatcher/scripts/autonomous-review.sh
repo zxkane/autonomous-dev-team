@@ -76,6 +76,12 @@ fi
 # Ensure we're in the project directory (needed when called directly, not just via SSM)
 cd "$PROJECT_DIR" || { echo "Error: cannot cd to $PROJECT_DIR" >&2; exit 1; }
 
+# Bot identity for downstream telemetry / cost attribution (Fix 2).
+# Picked up by AGENT_LAUNCHER (e.g. user's `cc` shell function) when set;
+# harmless extra env when AGENT_LAUNCHER is empty.
+export CC_USER="${CC_USER:-autonomous-review-bot}"
+export CC_ROLE_KIND="${CC_ROLE_KIND:-review}"
+
 LOG_FILE="/tmp/agent-${PROJECT_ID}-review-${ISSUE_NUMBER}.log"
 # PID file lives in the per-user PID dir (closes #72). pid_dir_for_project
 # is in lib-config.sh, sourced transitively via lib-agent.sh.
@@ -217,6 +223,21 @@ PR_HEAD_SHA=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefOid -q '.head
 log "PR branch: ${PR_BRANCH:-UNKNOWN} (HEAD: ${PR_HEAD_SHA:0:7})"
 
 SESSION_ID=$(uuidgen)
+
+# Verdict-detection bindings (Fix 1: actor + time window replaces session-id binding).
+# WRAPPER_START_TS — ISO-8601 UTC timestamp captured BEFORE run_agent.
+# Verdict comments older than this are stale (prior tick) and ignored.
+WRAPPER_START_TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+# BOT_LOGIN — the bot identity this wrapper authenticates as. The agent
+# inside the wrapper inherits this gh auth, so any comment it posts will
+# be authored by BOT_LOGIN. If the API call fails, the verdict detector
+# below falls back to the legacy session-id binding to preserve safety.
+BOT_LOGIN=$(gh api user --jq '.login' 2>/dev/null || echo "")
+if [[ -n "$BOT_LOGIN" ]]; then
+  log "Verdict will bind to actor=${BOT_LOGIN}, createdAt >= ${WRAPPER_START_TS}"
+else
+  log "WARNING: gh api user failed; verdict detector will fall back to session-id binding"
+fi
 
 PROMPT="$(cat <<EOF
 You are reviewing PR #${PR_NUMBER} for issue #${ISSUE_NUMBER} in the ${REPO} project.
@@ -473,21 +494,48 @@ log "Review agent exited with code: $AGENT_EXIT"
 # ---------------------------------------------------------------------------
 log "Parsing review result from issue comments..."
 
-# Poll for the agent's review comment. The polling regex (closes #95)
-# accepts the canonical phrasings ("Review PASSED" / "Review findings:")
-# AND common drift patterns: APPROVED FOR MERGE, Review APPROVED, LGTM,
-# Review FAILED, Review REJECTED, Changes requested. The pass-vs-fail
-# decision is made below by the classification grep — the polling step
-# only narrows down to "this looks like a verdict comment".
+# Poll for the agent's review comment.
 #
-# Retry up to 6 times (30s total) to avoid race conditions with concurrent comments.
-# SECURITY: the session-id binding (`Review Session.*${SESSION_ID}`) is
-# kept intact — without it a stray third-party comment could spoof a verdict.
+# Pattern (closes #95): the verdict-keyword regex accepts canonical
+# phrasings ("Review PASSED" / "Review findings:") plus common drift
+# variants (APPROVED FOR MERGE, Review APPROVED, LGTM, Review FAILED,
+# Review REJECTED, Changes requested). The pass-vs-fail decision is
+# made below by the classification grep — this polling step only
+# narrows down to "this looks like a verdict comment".
+#
+# Authenticity binding (Fix 1): actor + time window. The comment must
+# (a) be authored by BOT_LOGIN (the bot this wrapper runs as), and
+# (b) have createdAt >= WRAPPER_START_TS. Both are observable to the
+# wrapper without trusting the agent's body content. The agent can
+# mint whatever session-id text it wants — we don't read it.
+#
+# Why this is safer than the prior session-id binding: the agent
+# inside the wrapper sometimes invents a different UUID for the
+# Review Session line (especially under context pressure), causing
+# the prior `Review Session.*${SESSION_ID}` regex to miss valid
+# verdicts and force the FAILED branch. A foreign actor would need
+# to be authenticated as BOT_LOGIN AND post within the wrapper's
+# narrow time window — both imply pre-existing write access.
+#
+# Fallback: if BOT_LOGIN resolution failed at startup, fall back to
+# the legacy session-id binding so a transient API failure doesn't
+# remove all spoof protection.
+#
+# Retry up to 6 times (30s total) to avoid race conditions.
 LATEST_COMMENT=""
+_VERDICT_RE='Review PASSED|Review APPROVED|APPROVED FOR MERGE|LGTM|Review PASS|Review findings:|Review FAILED|Review REJECTED|Changes requested'
+# Build the authenticity predicate once. Primary: actor + time window.
+# Fallback (BOT_LOGIN empty): legacy session-id trailer match.
+if [[ -n "$BOT_LOGIN" ]]; then
+  _AUTH_PREDICATE="(.author.login == \"${BOT_LOGIN}\") and (.createdAt >= \"${WRAPPER_START_TS}\")"
+else
+  _AUTH_PREDICATE="(.body | test(\"Review Session.*${SESSION_ID}\"))"
+fi
+_VERDICT_JQ="[.comments[] | select(${_AUTH_PREDICATE} and (.body | test(\"${_VERDICT_RE}\"; \"i\")))] | last | .body"
 for _poll_attempt in $(seq 1 6); do
   sleep 5
   LATEST_COMMENT=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json comments \
-    -q "[.comments[] | select((.body | test(\"Review PASSED|Review APPROVED|APPROVED FOR MERGE|LGTM|Review PASS|Review findings:|Review FAILED|Review REJECTED|Changes requested\"; \"i\")) and (.body | test(\"Review Session.*${SESSION_ID}\")))] | last | .body" 2>/dev/null || true)
+    -q "$_VERDICT_JQ" 2>/dev/null || true)
   if [[ -n "$LATEST_COMMENT" ]]; then
     break
   fi
