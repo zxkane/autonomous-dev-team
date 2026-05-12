@@ -29,31 +29,44 @@ The `Review Session.*${SESSION_ID}` predicate exists "for security so a stray th
 
 ### New design
 
-Replace the session-id predicate with two predicates that the wrapper itself controls:
+Replace the session-id predicate with three layered predicates that the wrapper itself controls:
 
 1. **Actor binding** — the comment's `author.login` must equal the bot account that this wrapper is authenticated as. Resolved once at wrapper start via `gh api user --jq .login` (works for both PAT and GitHub App auth).
 2. **Time window binding** — the comment's `createdAt` must be ≥ the wrapper's start time (captured before `run_agent`, in ISO-8601 UTC).
+3. **Body trailer presence** — the comment must contain the literal substring `Review Session` (NOT bound to a specific UUID). The review agent's prompt instructs it to emit this trailer; the wrapper just checks it's there.
 
-Both predicates are observable to the wrapper without trusting the agent's output. The agent can still mint whatever session-id text it wants in the body — we don't read it.
+The first two are observable to the wrapper without trusting the agent's output. The third is the defense-in-depth layer that matters specifically in `GH_AUTH_MODE=token`: dev and review wrappers share an identity, so the dev agent's status comments could otherwise contain `LGTM` or `Review findings` and pass the actor+window predicate. The trailer requirement excludes them — the dev agent's prompt does not instruct it to emit `Review Session`, and a status comment quoting prior verdicts as conversation history doesn't contain the literal trailer phrase as a structured marker.
 
 ```bash
 WRAPPER_START_TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-BOT_LOGIN=$(gh api user --jq '.login' 2>/dev/null || echo "")
+_bot_raw=$(gh api user --jq '.login' 2>&1) && BOT_LOGIN="$_bot_raw" || {
+  log "WARNING: gh api user failed; falling back to session-id binding. stderr: ${_bot_raw}"
+  BOT_LOGIN=""
+}
+[[ "$BOT_LOGIN" == "null" || -z "$BOT_LOGIN" ]] && BOT_LOGIN=""
 
 # ... after run_agent ...
-LATEST_COMMENT=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json comments \
-  -q "[.comments[] | select(
-        (.author.login == \"${BOT_LOGIN}\") and
-        (.createdAt >= \"${WRAPPER_START_TS}\") and
-        (.body | test(\"Review PASSED|...|Changes requested\"; \"i\"))
-      )] | last | .body" 2>/dev/null || true)
+# Predicate construction:
+if [[ -n "$BOT_LOGIN" ]]; then
+  _AUTH_PREDICATE="(.author.login == \"${BOT_LOGIN}\") and (.createdAt >= \"${WRAPPER_START_TS}\") and (.body | test(\"Review Session\"))"
+else
+  _AUTH_PREDICATE="(.createdAt >= \"${WRAPPER_START_TS}\") and (.body | test(\"Review Session.*${SESSION_ID}\"))"
+fi
 ```
 
-If `BOT_LOGIN` is empty (e.g. `gh api user` failed in a degraded environment), fall back to the previous session-id binding so we don't lose all safety on a single transient API failure. The classification step (FAIL pattern wins on ambiguity) is unchanged.
+If `BOT_LOGIN` is empty (`gh api user` failed, returned empty, or returned the literal string `"null"`), fall back to a tighter trailer match that includes the wrapper's specific `SESSION_ID`. This re-introduces the brittleness this PR was trying to remove, but only on the rare path where actor binding is unavailable, and the time-window predicate still narrows out stale comments.
 
-### Why this is safe
+### Why this is safe in `GH_AUTH_MODE=app`
 
-The agent runs inside the wrapper's authenticated `gh` context, so any comment it posts will be authored by `BOT_LOGIN`. A third party would need to (a) be authenticated as the same bot identity AND (b) post in the wrapper's narrow time window — both conditions imply they already had write access to the bot account. The session-id binding only ever protected against a different bot or a human reviewer accidentally writing "Review PASSED" — both of which are still excluded by the actor + time window check.
+Each wrapper authenticates as a distinct GitHub App (e.g. `kane-coding-agent[bot]` for dev, `kane-test-agent[bot]` for review). `BOT_LOGIN` resolves to the review-app login, so even if a dev agent posts a comment containing verdict keywords on the same issue, it will be authored by a different login and the actor predicate excludes it. The trailer requirement is defense-in-depth.
+
+### Why this is safe in `GH_AUTH_MODE=token`
+
+Dev and review wrappers share `BOT_LOGIN`, so the actor predicate alone does NOT separate them. The trailer requirement is load-bearing here: only the review agent's prompt instructs it to emit `Review Session: <id>`. A dev agent writing a status comment that contains `LGTM` or `Review findings` will not contain the trailer marker, so the review wrapper's verdict capture excludes it. Time window further narrows to the current review run.
+
+### Why this is safer than the prior session-id binding
+
+The prior code required the agent to echo the wrapper's UUID verbatim (`Review Session.*${SESSION_ID}`). When the agent occasionally rewrote the UUID (observed in production), the regex missed valid verdicts and the wrapper fell through to the FAILED branch. The new design checks for the trailer's *presence* but not its UUID content, eliminating that brittleness while keeping spoof protection through actor + time window.
 
 Existing `tests/unit/test-autonomous-review-verdict-regex.sh` cases TC-RVR-009 and TC-RVR-010 (which assert "no session id" and "wrong session id" → no-match) need updating — under the new model, those comments DO match because the actor and time window are right. New anti-spoof cases will assert "wrong author" and "comment older than wrapper start" → no-match.
 

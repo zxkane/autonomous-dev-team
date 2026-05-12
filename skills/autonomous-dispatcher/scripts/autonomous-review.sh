@@ -76,7 +76,7 @@ fi
 # Ensure we're in the project directory (needed when called directly, not just via SSM)
 cd "$PROJECT_DIR" || { echo "Error: cannot cd to $PROJECT_DIR" >&2; exit 1; }
 
-# Bot identity for downstream telemetry / cost attribution (Fix 2).
+# Bot identity for downstream telemetry / cost attribution.
 # Picked up by AGENT_LAUNCHER (e.g. user's `cc` shell function) when set;
 # harmless extra env when AGENT_LAUNCHER is empty.
 export CC_USER="${CC_USER:-autonomous-review-bot}"
@@ -224,19 +224,30 @@ log "PR branch: ${PR_BRANCH:-UNKNOWN} (HEAD: ${PR_HEAD_SHA:0:7})"
 
 SESSION_ID=$(uuidgen)
 
-# Verdict-detection bindings (Fix 1: actor + time window replaces session-id binding).
-# WRAPPER_START_TS — ISO-8601 UTC timestamp captured BEFORE run_agent.
-# Verdict comments older than this are stale (prior tick) and ignored.
+# Verdict-detection bindings: actor + time window + body-trailer
+# presence. Replaces the prior session-id-only binding (which depended
+# on the agent echoing the wrapper's UUID verbatim).
+#
+# WRAPPER_START_TS — ISO-8601 UTC captured BEFORE run_agent. Verdict
+# comments older than this are stale (prior tick) and ignored.
 WRAPPER_START_TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-# BOT_LOGIN — the bot identity this wrapper authenticates as. The agent
-# inside the wrapper inherits this gh auth, so any comment it posts will
-# be authored by BOT_LOGIN. If the API call fails, the verdict detector
-# below falls back to the legacy session-id binding to preserve safety.
-BOT_LOGIN=$(gh api user --jq '.login' 2>/dev/null || echo "")
+# BOT_LOGIN — the bot identity this wrapper authenticates as. Capture
+# stderr so a non-empty failure (token expired, GH App perms reduced,
+# rate limit) shows up actionably in the per-issue log. An empty login
+# from a successful call is treated the same as a failed call —
+# without an actor binding the predicate must fall back to legacy mode.
+_bot_login_raw=$(gh api user --jq '.login' 2>&1) && BOT_LOGIN="$_bot_login_raw" || {
+  log "WARNING: gh api user failed; verdict detector falling back to session-id binding. stderr: ${_bot_login_raw}"
+  BOT_LOGIN=""
+}
+# A literal "null" string can come back from `--jq '.login'` if /user
+# returns null (rare App-token misconfig). Treat as failure.
+if [[ "$BOT_LOGIN" == "null" || -z "$BOT_LOGIN" ]]; then
+  [[ "$BOT_LOGIN" == "null" ]] && log "WARNING: gh api user returned null login; falling back to session-id binding"
+  BOT_LOGIN=""
+fi
 if [[ -n "$BOT_LOGIN" ]]; then
-  log "Verdict will bind to actor=${BOT_LOGIN}, createdAt >= ${WRAPPER_START_TS}"
-else
-  log "WARNING: gh api user failed; verdict detector will fall back to session-id binding"
+  log "Verdict will bind to actor=${BOT_LOGIN}, createdAt >= ${WRAPPER_START_TS}, body must contain 'Review Session'"
 fi
 
 PROMPT="$(cat <<EOF
@@ -503,33 +514,48 @@ log "Parsing review result from issue comments..."
 # made below by the classification grep — this polling step only
 # narrows down to "this looks like a verdict comment".
 #
-# Authenticity binding (Fix 1): actor + time window. The comment must
-# (a) be authored by BOT_LOGIN (the bot this wrapper runs as), and
-# (b) have createdAt >= WRAPPER_START_TS. Both are observable to the
-# wrapper without trusting the agent's body content. The agent can
-# mint whatever session-id text it wants — we don't read it.
+# Authenticity binding: see the predicate construction below for the
+# three-layer rationale (actor + time window + body trailer).
 #
-# Why this is safer than the prior session-id binding: the agent
-# inside the wrapper sometimes invents a different UUID for the
-# Review Session line (especially under context pressure), causing
-# the prior `Review Session.*${SESSION_ID}` regex to miss valid
-# verdicts and force the FAILED branch. A foreign actor would need
-# to be authenticated as BOT_LOGIN AND post within the wrapper's
-# narrow time window — both imply pre-existing write access.
+# Why we no longer bind to the wrapper's specific session UUID: the
+# agent occasionally rewrites the Review Session UUID in its comment
+# body, so a strict body-text match would miss valid verdicts and the
+# wrapper would fall through to the no-verdict-found FAILED branch.
+# Actor and time window are observed by the wrapper itself and cannot
+# be rewritten by the agent.
 #
-# Fallback: if BOT_LOGIN resolution failed at startup, fall back to
-# the legacy session-id binding so a transient API failure doesn't
-# remove all spoof protection.
+# Fallback: if `gh api user` returned empty at startup (BOT_LOGIN unset),
+# keep the body-text match against the wrapper's session_id so a
+# transient auth/API blip at the top of the wrapper doesn't strip all
+# spoof protection.
 #
 # Retry up to 6 times (30s total) to avoid race conditions.
 LATEST_COMMENT=""
 _VERDICT_RE='Review PASSED|Review APPROVED|APPROVED FOR MERGE|LGTM|Review PASS|Review findings:|Review FAILED|Review REJECTED|Changes requested'
-# Build the authenticity predicate once. Primary: actor + time window.
-# Fallback (BOT_LOGIN empty): legacy session-id trailer match.
+# Build the authenticity predicate once. Three layers, all required:
+#
+#   (a) actor (BOT_LOGIN) — when known, gates on the bot identity. In
+#       GH_AUTH_MODE=app this is the review-app's distinct login, so a
+#       concurrent dev wrapper can't spoof. In GH_AUTH_MODE=token dev
+#       and review share an identity, so this layer alone is insufficient.
+#
+#   (b) time window (WRAPPER_START_TS) — gates on createdAt, isolating
+#       the current review run from stale comments left by a prior tick.
+#
+#   (c) "Review Session" body trailer — a literal substring the review
+#       agent's prompt instructs it to emit. Does NOT bind to the
+#       wrapper's specific UUID (the prior brittleness this PR removes),
+#       only to the trailer's presence. This excludes the dev agent's status
+#       comments that happen to contain "Review findings" / "LGTM"
+#       inside a quoted prior verdict — those won't have the trailer.
+#
+# Fallback (BOT_LOGIN empty): drop (a), keep (b) and (c). The session-id
+# is included in (c)'s match for additional narrowing when actor is
+# unavailable.
 if [[ -n "$BOT_LOGIN" ]]; then
-  _AUTH_PREDICATE="(.author.login == \"${BOT_LOGIN}\") and (.createdAt >= \"${WRAPPER_START_TS}\")"
+  _AUTH_PREDICATE="(.author.login == \"${BOT_LOGIN}\") and (.createdAt >= \"${WRAPPER_START_TS}\") and (.body | test(\"Review Session\"))"
 else
-  _AUTH_PREDICATE="(.body | test(\"Review Session.*${SESSION_ID}\"))"
+  _AUTH_PREDICATE="(.createdAt >= \"${WRAPPER_START_TS}\") and (.body | test(\"Review Session.*${SESSION_ID}\"))"
 fi
 _VERDICT_JQ="[.comments[] | select(${_AUTH_PREDICATE} and (.body | test(\"${_VERDICT_RE}\"; \"i\")))] | last | .body"
 for _poll_attempt in $(seq 1 6); do

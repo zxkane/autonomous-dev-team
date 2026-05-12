@@ -273,7 +273,20 @@ for i in $(seq 0 $((pd_count - 1))); do
       # Truncate the log so the next tick sees an empty/missing log and
       # doesn't re-trigger this is_session_completed branch. The dev-new
       # dispatch below mints a new session_id and writes fresh result lines.
-      : > "/tmp/agent-${PROJECT_ID}-issue-${issue_num}.log" 2>/dev/null || true
+      #
+      # If truncation fails (perm drift across deploys, ENOSPC), DO NOT
+      # dispatch — otherwise the next tick would re-read the same stale
+      # PTL log, the idempotency marker would suppress a fresh notice
+      # (it's keyed on the old session_id), and we'd silently dispatch
+      # dev-new every tick forever. Stay in pending-dev so the operator
+      # sees the issue accumulating retries via mark_stalled instead.
+      _ptl_log="/tmp/agent-${PROJECT_ID}-issue-${issue_num}.log"
+      if ! : > "$_ptl_log" 2>/dev/null; then
+        log "  ERROR: failed to truncate ${_ptl_log} (perm/disk?). Skipping PTL dev-new dispatch to avoid re-detection loop."
+        gh issue comment "$issue_num" --repo "$REPO" \
+          --body "Could not reset prompt-too-long log at \`${_ptl_log}\` for fresh dispatch (permission or disk error). Operator: please clear the log file and retry. Skipping dispatch to prevent a silent retry loop." 2>/dev/null || true
+        continue
+      fi
       log "  dispatching dev-new for issue #${issue_num} (fresh after prompt_too_long)"
       label_swap "$issue_num" "pending-dev" "in-progress"
       post_dispatch_token "$issue_num" "dev-new"

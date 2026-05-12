@@ -85,7 +85,7 @@ fi
 # Ensure we're in the project directory (needed when called directly, not just via SSM)
 cd "$PROJECT_DIR" || { echo "Error: cannot cd to $PROJECT_DIR" >&2; exit 1; }
 
-# Bot identity for downstream telemetry / cost attribution (Fix 2).
+# Bot identity for downstream telemetry / cost attribution.
 # Picked up by AGENT_LAUNCHER (e.g. user's `cc` shell function) when set;
 # harmless extra env when AGENT_LAUNCHER is empty.
 export CC_USER="${CC_USER:-autonomous-dev-bot}"
@@ -355,15 +355,19 @@ EOF
     NEW_SESSION_ID=$(uuidgen)
     log "Resume failed (exit $AGENT_EXIT). Starting new session: ${NEW_SESSION_ID}"
 
-    # Post the explanatory comment AND a dispatcher-readable Dev Session ID
-    # marker. The latter ensures the next tick's extract_dev_session_id sees
-    # the fresh id even if this wrapper crashes after run_agent but before
-    # the trap-on-exit session report fires (Fix 3 — prompt_too_long path).
-    # Two separate posts so a single failure doesn't void the marker.
+    # Post TWO comments: a human-readable explanation AND a separately-
+    # posted "Dev Session ID:" marker matching the regex in
+    # extract_dev_session_id. Splitting them means a single failed `gh
+    # issue comment` can't orphan the new session_id from the dispatcher's
+    # view (which would otherwise leave the next tick chasing the dead
+    # session forever). On failure log a WARNING — silent failure here
+    # would mask a sustained GH outage that risks the orphan scenario.
     gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
-      --body "Resume failed (session \`${SESSION_ID}\`). Starting new session \`${NEW_SESSION_ID}\`." 2>/dev/null || true
+      --body "Resume failed (session \`${SESSION_ID}\`). Starting new session \`${NEW_SESSION_ID}\`." \
+      || log "WARNING: Failed to post resume-fallback explanation comment (non-fatal)"
     gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
-      --body "Dev Session ID: \`${NEW_SESSION_ID}\` (mode: resume-fallback)" 2>/dev/null || true
+      --body "Dev Session ID: \`${NEW_SESSION_ID}\` (mode: resume-fallback)" \
+      || log "WARNING: Failed to post Dev Session ID marker for resume-fallback. If the trap-side session report also fails, the next dispatcher tick may resume the dead session ${SESSION_ID} instead of the new ${NEW_SESSION_ID}."
 
     SESSION_ID="$NEW_SESSION_ID"
     SESSION_NAME="dev-issue-${ISSUE_NUMBER}-retry"

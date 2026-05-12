@@ -57,8 +57,20 @@ AGENT_LAUNCHER="${AGENT_LAUNCHER:-}"
 declare -a AGENT_LAUNCHER_ARGV=()
 if [[ -n "$AGENT_LAUNCHER" ]]; then
   if ! eval "AGENT_LAUNCHER_ARGV=($AGENT_LAUNCHER)" 2>/dev/null; then
+    # Explicit reset belt-and-suspenders: if a future caller sources this
+    # without `set -e`, the `return 1` is silently swallowed and we'd
+    # otherwise leave a half-tokenized array. Empty array = "no launcher",
+    # which is the safe degraded state.
+    AGENT_LAUNCHER=""
+    AGENT_LAUNCHER_ARGV=()
     echo "[lib-agent] ERROR: AGENT_LAUNCHER failed to parse as a shell argv list. Value: $AGENT_LAUNCHER" >&2
     return 1 2>/dev/null || exit 1
+  fi
+  # `eval` succeeded but produced an empty array — almost certainly an
+  # operator typo (stray `;`, leading whitespace + comment). Warn so it
+  # doesn't silently degrade to "launcher-less" without a breadcrumb.
+  if [[ ${#AGENT_LAUNCHER_ARGV[@]} -eq 0 ]]; then
+    echo "[lib-agent] WARN: AGENT_LAUNCHER non-empty but tokenized to zero argv elements. Treating as unset. Value: $AGENT_LAUNCHER" >&2
   fi
 fi
 
