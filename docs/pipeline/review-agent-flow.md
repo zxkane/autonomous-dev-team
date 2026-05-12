@@ -32,7 +32,7 @@ sequenceDiagram
     L->>A: claude --session-id ... --model sonnet -p PROMPT
     A->>GH: post verdict comment ('Review PASSED' or 'Review findings')
     A-->>L: agent exits
-    W->>GH: poll for verdict comment (6 attempts, 5s each, session-id filtered)
+    W->>GH: poll for verdict comment (6 attempts, 5s each, actor + window + trailer)
     W->>GH: post 'Reviewed HEAD' trailer (if verdict and SHA known)
     alt verdict PASS
         W->>GH: gh pr view --json state (re-check OPEN)
@@ -94,14 +94,17 @@ The session-id trailer is the wrapper's only way to identify which comment is it
 
 ## Verdict polling
 
-After the agent exits, the wrapper polls issue comments up to 6 times (5s interval = 30s window) looking for a comment that satisfies BOTH:
+After the agent exits, the wrapper polls issue comments up to 6 times (5s interval = 30s window) looking for a comment that satisfies all applicable predicates:
 
 - Body matches a verdict phrasing (case-insensitive). The supported set was broadened in #95 to handle agent phrasing drift:
   - **Pass-side**: `Review PASSED`, `Review APPROVED`, `APPROVED FOR MERGE`, `LGTM`, `Review PASS`.
   - **Fail-side**: `Review findings:`, `Review FAILED`, `Review REJECTED`, `Changes requested`.
-- Body matches `Review Session.*<SESSION_ID>` (the wrapper-generated session-id).
+- Authenticity binding — three layers, all required (primary path):
+  - **Actor**: `author.login == BOT_LOGIN`. The wrapper resolves `BOT_LOGIN` once at startup via `gh api user --jq .login`. In `GH_AUTH_MODE=app` the dev and review wrappers authenticate as distinct GitHub Apps, so the actor predicate alone separates them.
+  - **Time window**: `createdAt >= WRAPPER_START_TS`. Captured before `run_agent` in ISO-8601 UTC. Excludes stale verdict comments left by a prior tick.
+  - **Body trailer presence**: body matches `/Review Session/`. Note: the trailer's UUID is NOT bound to the wrapper's `SESSION_ID` — only the trailer's presence is checked. This eliminates a long-standing brittleness where the agent occasionally rewrote the UUID and broke the regex match. The trailer requirement is load-bearing in `GH_AUTH_MODE=token`, where dev and review wrappers share `BOT_LOGIN`: only the review agent's prompt instructs it to emit `Review Session:`, so the trailer excludes the dev agent's status comments that contain a verdict keyword as quoted history.
 
-The session-id filter is a **verdict-spoofing defense**: without it, any comment containing one of the verdict phrasings — including a maintainer's typed message, or a stray comment from another tool — could be picked up as the verdict.
+Fallback path: if `gh api user` fails at startup (returns empty, errors out, or returns the literal string `"null"` from a misconfigured GitHub App), `BOT_LOGIN` is treated as unset and the predicate becomes `createdAt >= WRAPPER_START_TS AND body matches Review Session.*<SESSION_ID>`. This restores the prior brittleness (agent must echo the wrapper's UUID) only on the rare path where actor binding is unavailable.
 
 If polling completes without finding a verdict comment, the wrapper proceeds to the FAIL branch (no false-positive PASS).
 

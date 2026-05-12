@@ -105,6 +105,16 @@ PR-6 closes this with two layers ([INV-12](invariants.md#inv-12-resume-only-agai
 1. **Dispatcher gate**: Step 4 calls `is_session_completed` before issuing a resume. If true, it posts a comment naming the session-id and asking the operator to manually decide between `pending-review` (PR exists) or close (work done). The issue stays in `pending-dev` rather than auto-recovering, so the symptom is visible.
 2. **Wall-clock safety net**: even if the gate is wrong (false negative), `lib-agent.sh::_run_with_timeout` caps the CLI at `AGENT_TIMEOUT` (default `4h`). The wrapper then exits with `124`, the trap routes to `pending-dev`, and the next tick decides whether to retry — instead of the wrapper sitting in `epoll_wait` for 8h+.
 
+### Resume-on-prompt-too-long (auto-recover with fresh session)
+
+A long-lived dev session whose JSONL transcript grows past the model's input window will exit with `terminal_reason=prompt_too_long`. Headless `claude -p` has no auto-compaction (the TUI's `/compact` is interactive-only), so resuming re-feeds the whole transcript and crashes the same way. The only recovery is a fresh session.
+
+Two layers:
+
+1. **Dispatcher gate** ([Step 4b.5 in `dispatcher-flow.md`](dispatcher-flow.md#step-4b5-terminal-state-gate-inv-12)): when `is_session_completed` reports `terminal_reason=prompt_too_long`, the dispatcher truncates the per-issue log, posts the `INV-12-prompt-too-long:<sid>` notice (idempotent), `label_swap pending-dev → in-progress`, and dispatches `dev-new`. The new wrapper mints a fresh `SESSION_ID` and seeds its prompt from issue body / PR / `## Requirements` checklist state — no JSONL transcript is replayed.
+
+2. **Wrapper-side fallback** in `autonomous-dev.sh` MODE=resume: if `resume_agent` exits non-zero (e.g. PTL hits the wrapper before the next dispatcher tick can route around it), the wrapper mints `NEW_SESSION_ID=$(uuidgen)`, **posts a standalone `Dev Session ID: \`<NEW_SESSION_ID>\` (mode: resume-fallback)` comment**, then runs `run_agent` with the new id. The standalone Dev-Session-ID post is a separate `gh issue comment` from the explanatory "Resume failed... Starting new session..." comment so a single failed post can't orphan the fresh session id from the dispatcher's view (`extract_dev_session_id` would otherwise read the dead session id and the next tick would resume into the same crash).
+
 ## Exit trap (`cleanup`)
 
 The trap is the wrapper's actual contract with the dispatcher — it runs on every exit path, including SIGTERM from the dispatcher's Step 5a. Its job is to (a) free the PID file, (b) post the Session Report, (c) update labels, (d) tear down auth.

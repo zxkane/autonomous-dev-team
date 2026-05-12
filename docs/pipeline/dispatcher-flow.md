@@ -191,17 +191,18 @@ Find the most recent comment matching `Dev Session ID: \`<id>\`` (note: `Review 
 
 If no session-id can be extracted, the resume cannot proceed. Today, the dispatcher dispatches a new dev session anyway (the wrapper's `--mode resume` path falls back to `--mode new` when `SESSION_ID` is empty — see [`dev-agent-flow.md`](dev-agent-flow.md#mode-normalization)).
 
-### Step 4b.5: terminal-state gate (PR-6, [INV-12](invariants.md#inv-12-resume-only-against-unfinished-sessions))
+### Step 4b.5: terminal-state gate ([INV-12](invariants.md#inv-12-resume-only-against-unfinished-sessions))
 
-Before dispatching a resume, call `is_session_completed <issue>` (in `lib-dispatch.sh`). The helper inspects the agent log at `/tmp/agent-${PROJECT_ID}-issue-<N>.log`, finds the last `{"type":"result", ...}` JSON object, and returns 0 if `stop_reason=end_turn` AND `terminal_reason=completed`.
+Before dispatching a resume, call `is_session_completed <issue> _reason` (in `lib-dispatch.sh`). The helper inspects the agent log at `/tmp/agent-${PROJECT_ID}-issue-<N>.log`, finds the last `{"type":"result", ...}` JSON object, and returns 0 in two cases. The optional second arg captures `terminal_reason` so the caller can branch on which case fired:
 
-If the gate fires:
+| `terminal_reason` | Meaning | Dispatcher action |
+|---|---|---|
+| `completed` | Normal end-of-turn (`stop_reason=end_turn` too). Resuming would attach to a closed SSE stream and hang. | Operator handoff: post `INV-12-completed:<sid>` notice, leave issue in `pending-dev`, do not auto-recover. |
+| `prompt_too_long` | JSONL transcript exceeded the model's input window. Headless `claude -p` has no auto-compaction, so resuming re-feeds the whole transcript and crashes again. | Auto-recover: post `INV-12-prompt-too-long:<sid>` notice, **truncate the per-issue log**, `label_swap pending-dev → in-progress`, `post_dispatch_token dev-new`, `dispatch dev-new`. The next tick mints a fresh session id with a smaller seed prompt that re-derives state from git/issue/PR. |
 
-1. Post a comment naming the session-id and inviting an operator to manually flip to `pending-review` (PR exists) or close the issue (work done).
-2. Append the issue to `JUST_DISPATCHED` so Step 5 doesn't reprobe it on the same tick.
-3. **Do not** transition the label automatically. The issue stays in `pending-dev`. Silent recovery would mask other failure modes — surface the symptom and let a human decide.
+The PTL branch hard-fails if the log truncate fails (perm drift, ENOSPC): post an operator-actionable comment and `continue` without dispatching. Without this guard, the next tick would re-read the same stale PTL log, the idempotency-marker check would suppress a fresh notice (it's keyed on the old session_id), and the dispatcher would silently dispatch dev-new every tick forever.
 
-This is a conservative gate: it only fires when the helper is certain the prior session ended cleanly. False negatives (claiming "not completed" when it was) just keep the prior behavior — Step 4c attempts the resume, and the wall-clock timeout from [INV-13](invariants.md#inv-13-wall-clock-cap-on-agent-invocations) bounds the damage to `AGENT_TIMEOUT` (default `4h`).
+This is a conservative gate: it only fires when the helper is certain the prior session reached one of the two terminal states. False negatives (claiming "not terminal" when it was) just keep the prior behavior — Step 4c attempts the resume, and the wall-clock timeout from [INV-13](invariants.md#inv-13-wall-clock-cap-on-agent-invocations) bounds the damage to `AGENT_TIMEOUT` (default `4h`).
 
 ### Step 4c: dispatch resume
 

@@ -156,14 +156,21 @@ The cutoff timestamp falls back to epoch (1970-01-01) for issues that have never
 
 ## INV-12: Resume only against unfinished sessions
 
-**Rule**: The dispatcher's Step 4 MUST query the agent session's terminal state before issuing a resume, and skip the resume if `terminal_reason == completed`.
+**Rule**: The dispatcher's Step 4 MUST query the agent session's terminal state before issuing a resume, and treat both `terminal_reason == completed` and `terminal_reason == prompt_too_long` as terminal (skip resume).
 
-**Why**: A `claude --resume` against a session whose final turn ended with `stop_reason=end_turn` connects to the SSE streaming endpoint and never returns — the model has no work to do, the server keeps the connection alive, and the wrapper hangs indefinitely (#59).
+**Why**:
+- `end_turn|completed`: a `claude --resume` against a session whose final turn ended cleanly connects to the SSE streaming endpoint and never returns (#59).
+- `*|prompt_too_long`: headless `claude -p` has no auto-compaction (the TUI's `/compact` is interactive-only). Resuming re-feeds the entire JSONL transcript, which is what blew the context window in the first place — guaranteed re-crash, infinite loop.
 
-**Producer**: dispatcher Step 4 (`lib-dispatch.sh::is_session_completed` invoked from `dispatcher-tick.sh` Step 4).
-**Consumer**: prevents the wrapper from being put in a hang state.
-**Status**: **ENFORCED** in PR-6 (closes #59). The dispatcher reads the agent log at `/tmp/agent-${PROJECT_ID}-issue-${N}.log`, finds the last `{"type":"result", ...}` object, and skips dispatch if `stop_reason=end_turn` AND `terminal_reason=completed`. Skip is conservative: the issue stays in `pending-dev` and a comment is posted asking an operator to manually decide between `pending-review` (PR exists) or close (work done) — the helper deliberately doesn't auto-recover, since silent recovery would mask other failure modes.
-**Test**: `tests/unit/test-is-session-completed.sh` (11 cases): clean exit returns true; non-end_turn / non-completed / non-claude / missing log / multiple-result / malformed JSON / missing fields all return false.
+**Producer**: dispatcher Step 4 (`lib-dispatch.sh::is_session_completed` invoked from `dispatcher-tick.sh` Step 4). The helper writes the matched `terminal_reason` to a caller-provided var via `printf -v` so the caller can branch on the case.
+
+**Consumer**: prevents the wrapper from being put in a hang state (completed) or a dispatch loop (prompt_too_long).
+
+**Status**: **ENFORCED**. Closed cases:
+- PR-6 (closes #59) — initial enforcement for `end_turn|completed`.
+- This PR — extends to `prompt_too_long`. The completed branch posts an `INV-12-completed:<sid>` notice and leaves the issue in `pending-dev` for operator decision; the prompt-too-long branch posts an `INV-12-prompt-too-long:<sid>` notice, truncates the per-issue log, and `dispatch dev-new` to auto-recover with a fresh session.
+
+**Test**: `tests/unit/test-is-session-completed.sh` (14 cases) and `tests/unit/test-autonomous-launcher-verdict-fresh.sh` TC-PTL-001..007d.
 
 ## INV-13: Wall-clock cap on agent invocations
 
@@ -276,6 +283,52 @@ The `Mode: startup-failure` exclusion matters: `autonomous-dev.sh`'s startup-fai
 **Test**: `tests/unit/test-dispatcher-reliability-99.sh` covers session-id-gate semantics (5 cases including stalled-cutoff interaction). `tests/unit/test-lib-dispatch.sh` regression cases updated to reflect the new gate.
 
 ---
+
+## INV-20: Verdict authenticity binding (actor + window + trailer presence)
+
+**Rule**: The review wrapper's verdict polling jq query MUST gate on three layered predicates when actor binding is available: (a) `author.login == BOT_LOGIN`, (b) `createdAt >= WRAPPER_START_TS`, (c) `body matches /Review Session/`. The trailer match MUST NOT bind to the wrapper-generated `SESSION_ID` — only the trailer's presence is checked.
+
+**Why**: The prior body-text predicate `Review Session.*${SESSION_ID}` depended on the agent echoing the wrapper's UUID verbatim. Agents under context pressure occasionally rewrote the UUID, causing the wrapper to miss valid verdicts and force the FAILED branch. Combined with a same-PR / same-issue dispatcher state machine, this produced infinite dev↔review ping-pong loops on the consumer side. Trailer-presence (without UUID binding) keeps spoof protection intact in `GH_AUTH_MODE=token` (where dev and review wrappers share BOT_LOGIN — the dev agent's prompts don't instruct it to emit `Review Session:`, so its status comments are excluded) without the brittleness.
+
+**Producer**: `autonomous-review.sh` polling loop. Captures `WRAPPER_START_TS` once before `run_agent` (ISO-8601 UTC) and `BOT_LOGIN` once via `gh api user --jq .login` (treats empty / errored / literal-`"null"` as unset).
+
+**Consumer**: prevents (a) verdict regressions when the agent rewrites the trailer UUID, (b) cross-wrapper spoofing in same-identity (token) mode, (c) stale verdicts from prior ticks being picked up.
+
+**Fallback**: when `BOT_LOGIN` is unset, the predicate becomes `(createdAt >= WRAPPER_START_TS) AND (body matches /Review Session.*<SESSION_ID>/)`. This re-introduces the brittleness only on the rare path where actor binding is unavailable, and time-window predicate still narrows out stale comments.
+
+**Status**: **ENFORCED** in this PR. Replaces the prior session-id-only binding (which closed #95 phrasing-drift but did not address the UUID-rewrite drift).
+
+**Test**: `tests/unit/test-autonomous-launcher-verdict-fresh.sh` TC-VRD-001..009a (12 cases including token-mode dev-agent quoted-verdict anti-spoof).
+
+## INV-21: Resume-fallback fresh session id is dispatcher-readable
+
+**Rule**: `autonomous-dev.sh` MODE=resume's non-zero-exit fallback path, immediately after assigning `SESSION_ID="$NEW_SESSION_ID"`, MUST post a standalone GitHub issue comment matching the regex `Dev Session ID: \`<id>\``.
+
+**Why**: Without this, the only place the new session id surfaces to GitHub before the agent runs is inside the explanatory "Resume failed... Starting new session..." comment — which does NOT match the dispatcher's `extract_dev_session_id` regex. If the wrapper crashes between the resume-fallback decision and the trap-on-exit `Agent Session Report (Dev)` post (e.g. a transient gh outage on the report post), the dispatcher's next tick reads the OLD session id from prior comments and resumes the dead session forever.
+
+**Producer**: `autonomous-dev.sh:362..366` — two separate `gh issue comment` calls (explanation + standalone marker) so a single failed post can't orphan the marker.
+
+**Consumer**: `lib-dispatch.sh::extract_dev_session_id` — picks up the new id on the next tick.
+
+**Status**: **ENFORCED** in this PR.
+
+**Test**: `tests/unit/test-autonomous-launcher-verdict-fresh.sh` TC-PTL-005.
+
+## INV-22: AGENT_LAUNCHER tokenization happens once at config load
+
+**Rule**: `lib-agent.sh` MUST tokenize `AGENT_LAUNCHER` (when non-empty) into `AGENT_LAUNCHER_ARGV[]` exactly once at source time via `eval "AGENT_LAUNCHER_ARGV=($AGENT_LAUNCHER)"`. The argv array is then prepended to every CLI invocation inside `_run_with_timeout`, so all CLI branches (claude / codex / kiro / opencode / generic) and both call sites (run_agent / resume_agent) get uniform launcher behavior.
+
+**Why**: The consumer-machine motivation is to bridge dispatcher-spawned wrappers (non-interactive `nohup` shell, no `~/.bashrc`) into the same env that powers the operator's interactive `claude` shell function (`cc`). Without `AGENT_LAUNCHER`, autonomous wrappers ran with `--model opus[1m]` but the alias resolved to whatever model claude defaults to (no `ANTHROPIC_DEFAULT_OPUS_MODEL` set), silently downgrading to a different model. A per-CLI-branch sprinkle of `${AGENT_LAUNCHER_ARGV[@]}` would invite drift; centralizing in `_run_with_timeout` makes the prefix invariant across branches.
+
+**Producer**: `lib-agent.sh` — the `eval` parses the launcher string once, with a hard-fail on parse error and a WARN when the parse succeeds but yields zero argv elements (almost always operator typo).
+
+**Consumer**: every `run_agent` / `resume_agent` invocation, uniform across CLIs.
+
+**Trust**: `AGENT_LAUNCHER` is read from `autonomous.conf`. Treating its contents as shell input is no worse than executing `AGENT_CMD` itself — both are operator-controlled config in the same file. The wrapper documents this trust assumption explicitly.
+
+**Status**: **ENFORCED** in this PR.
+
+**Test**: `tests/unit/test-autonomous-launcher-verdict-fresh.sh` TC-LCH-001..003, plus TC-LCH-007/008 for the `CC_USER` / `CC_ROLE_KIND` env exports the wrapper sets before invoking the launcher.
 
 ## Adding a new invariant
 
