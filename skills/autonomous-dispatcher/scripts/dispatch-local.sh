@@ -27,8 +27,13 @@ if [[ -n "$SESSION_ID" ]] && ! [[ "$SESSION_ID" =~ ^[a-zA-Z0-9_-]+$ ]]; then
   exit 1
 fi
 
-# Load config
-SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+# Load config.
+# [INV-14] Use BASH_SOURCE[0] (NOT readlink -f) so a project-side symlink
+# at <project>/scripts/dispatch-local.sh resolves SCRIPT_DIR to the
+# project's scripts/, where autonomous.conf lives. The legacy
+# `../../../scripts/autonomous.conf` fallback is preserved for callers
+# that still invoke the vendored copy directly (no project-side symlink).
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 if [[ -f "${SCRIPT_DIR}/autonomous.conf" ]]; then
   source "${SCRIPT_DIR}/autonomous.conf"
 elif [[ -f "${SCRIPT_DIR}/../../../scripts/autonomous.conf" ]]; then

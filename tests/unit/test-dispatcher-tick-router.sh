@@ -185,19 +185,12 @@ dispatch_calls=$(grep -cE '^\s*dispatch\s+(dev-new|dev-resume|review)\b' "$TICK"
   FAIL=$((FAIL + 1))
 }
 
-# ---------------------------------------------------------------------------
-echo ""
-echo "=== TC-EB-019: dispatch-local.sh unchanged from main ==="
-# ---------------------------------------------------------------------------
-DIFF=$(git -C "$PROJECT_ROOT" diff origin/main -- skills/autonomous-dispatcher/scripts/dispatch-local.sh 2>/dev/null)
-if [[ -z "$DIFF" ]]; then
-  echo -e "  ${GREEN}PASS${NC}: dispatch-local.sh byte-identical to origin/main"
-  PASS=$((PASS + 1))
-else
-  echo -e "  ${RED}FAIL${NC}: dispatch-local.sh has changes vs origin/main:"
-  echo "$DIFF" | head -20
-  FAIL=$((FAIL + 1))
-fi
+# TC-EB-019 (dispatch-local.sh byte-identical-to-main freeze) was a
+# PR-9-local guard ensuring the multi-project routing change didn't
+# accidentally modify dispatch-local.sh. It was retired in #104 once we
+# explicitly modified dispatch-local.sh's SCRIPT_DIR resolver to align
+# with [INV-14]. Behavioral coverage of dispatch-local.sh lives in
+# tests/unit/test-symlink-resolution.sh (TC-INV14-1..6).
 
 # ---------------------------------------------------------------------------
 echo ""

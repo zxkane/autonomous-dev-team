@@ -189,10 +189,37 @@ The cutoff timestamp falls back to epoch (1970-01-01) for issues that have never
 
 **Why**: When projects vendor scripts as symlinks, `readlink -f` resolves to the skill installation dir — but `autonomous.conf` lives in the project's `scripts/`, not in the skill installation. The lookup misses, the wrapper exits at `: "${REPO:?Set REPO in autonomous.conf}"`, the dispatcher sees crash → eventually marks stalled (#58).
 
-**Producer**: `lib-config.sh::load_autonomous_conf` (consolidated in PR-4 from three byte-identical inline blocks that previously lived in `lib-agent.sh`, `lib-auth.sh`, and `dispatcher-tick.sh`).
+### Supported deployment topologies (post-#104)
+
+The contract is satisfied across two distinct topologies because every script computes `SCRIPT_DIR` from `${BASH_SOURCE[0]:-$0}`:
+
+| Topology | Layout | conf-lookup tier that hits |
+|---|---|---|
+| **Vendored per-project** | `<project>/.agents/skills/.../scripts/dispatch-local.sh` (real file) ← `<project>/scripts/dispatch-local.sh` (symlink) | tier-2 — `SCRIPT_DIR` resolves to `<project>/scripts/`, conf is right there |
+| **Shared install** | `~/.claude/skills/.../scripts/dispatch-local.sh` (real file) ← `<project>/scripts/dispatch-local.sh` (symlink) | tier-2 — same — `BASH_SOURCE[0]` keeps the project-side path |
+
+Both topologies yield the same `SCRIPT_DIR` for symlinked invocations: the project's `scripts/`. Direct invocation of a vendored copy (no project-side symlink) still works via the legacy `${SCRIPT_DIR}/../../../scripts/autonomous.conf` fallback in `dispatch-local.sh`. That fallback only fires for the legacy 2-deep `<project>/skills/.../scripts/` layout (3 levels up from `<scripts>` lands at `<project>`); the modern 3-deep layouts under `.agents/skills/` or `.claude/skills/` rely on the project-side symlink + tier-2 path.
+
+#### Required symlink manifest (shared-install topology)
+
+Each entry-point script sources sibling lib files via `${SCRIPT_DIR}/<sibling>.sh`. With `BASH_SOURCE[0]`-based `SCRIPT_DIR`, those resolve to the project's `scripts/` — which means the operator MUST symlink every transitive sibling, not just the entry-points. Symlinking only `dispatch-local.sh` would break with `No such file or directory: lib-config.sh`. The minimum set:
+
+| File | Why it must be symlinked |
+|---|---|
+| `autonomous-dev.sh`, `autonomous-review.sh` | wrapper entry points |
+| `dispatch-local.sh` | dispatcher → wrapper bridge |
+| `lib-agent.sh`, `lib-auth.sh`, `lib-config.sh`, `lib-dispatch.sh`, `lib-review-bots.sh` | sourced transitively from the entry points |
+| `gh-app-token.sh`, `gh-with-token-refresh.sh`, `gh-token-refresh-daemon.sh` | sourced by lib-auth.sh; daemon spawned by token-refresh path |
+
+`autonomous.conf.example` documents this manifest in operator-facing form. A future helper script `install-shared-symlinks.sh` (out of scope per #104) could automate the symlink creation.
+
+**Producer**: `lib-config.sh::load_autonomous_conf` (consolidated in PR-4 from three byte-identical inline blocks). Six entry-point scripts (`dispatch-local.sh`, `autonomous-dev.sh`, `autonomous-review.sh`, `gh-token-refresh-daemon.sh`, `gh-with-token-refresh.sh`, `setup-labels.sh`) whose own `SCRIPT_DIR` feeds into the same lookup chain are aligned in #104.
 **Consumer**: every wrapper / dispatcher path that sources `lib-config.sh`.
-**Status**: **ENFORCED** in PR-4 (closes #58). The shared helper uses `${BASH_SOURCE[0]:-$0}` (no `readlink -f`) and falls back to `${PROJECT_DIR}/scripts/autonomous.conf` (NOT the broken `../../../scripts/`).
-**Test**: `tests/unit/test-bash-source-empty.sh` (TC-CONTENT-003) and `tests/unit/test-symlink-resolution.sh` (TC-CONTENT-006/007) assert no callsite uses `readlink -f` and that all three callsites delegate to `lib-config.sh::load_autonomous_conf`.
+**Status**: **ENFORCED**. Close history:
+- PR-4 (closes #58) — initial enforcement on the three lib paths via `lib-config.sh`.
+- #104 — extended enforcement to the six entry-point scripts that previously used `readlink -f "$0"`. Pre-#104 the contract worked for vendored topology only (via `dispatch-local.sh`'s legacy fallback); post-#104 the shared-install topology also works.
+
+**Test**: `tests/unit/test-bash-source-empty.sh` (TC-CONTENT-003) and `tests/unit/test-symlink-resolution.sh` (TC-CONTENT-006/007 + TC-INV14-1..6) assert no callsite uses `readlink -f`, all callsites delegate to `lib-config.sh::load_autonomous_conf`, and conf-loading works under both deployment topologies.
 
 ## INV-15: Step 5a SIGTERM race is non-deterministic
 

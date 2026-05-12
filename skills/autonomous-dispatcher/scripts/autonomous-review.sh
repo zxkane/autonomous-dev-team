@@ -14,7 +14,11 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+# [INV-14] Use BASH_SOURCE[0] (NOT readlink -f) so a project-side symlink
+# at <project>/scripts/autonomous-review.sh resolves SCRIPT_DIR to the
+# project's scripts/. lib-agent.sh's load_autonomous_conf then finds
+# autonomous.conf via tier-2 (same dir).
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 source "${SCRIPT_DIR}/lib-agent.sh"
 source "${SCRIPT_DIR}/lib-auth.sh"
 # shellcheck source=lib-review-bots.sh

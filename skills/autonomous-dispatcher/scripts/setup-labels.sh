@@ -9,7 +9,10 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+# [INV-14] Use BASH_SOURCE[0] (NOT readlink -f) so a project-side symlink
+# at <project>/scripts/setup-labels.sh resolves SCRIPT_DIR to the
+# project's scripts/, where autonomous.conf lives.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 
 # Load config for REPO default
 if [[ -f "${SCRIPT_DIR}/autonomous.conf" ]]; then

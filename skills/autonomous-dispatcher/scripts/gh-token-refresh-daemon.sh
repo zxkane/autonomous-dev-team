@@ -23,7 +23,10 @@ REPO_NAME="${5:?Missing repo_name}"
 # Refresh every 45 minutes (token TTL is 60 minutes)
 REFRESH_INTERVAL="${GH_TOKEN_REFRESH_INTERVAL:-2700}"
 
-SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+# [INV-14] Use BASH_SOURCE[0] (NOT readlink -f). Sibling-source still works
+# because gh-app-token.sh lives in the same dir as this daemon under both
+# vendored and shared-install topologies.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 source "${SCRIPT_DIR}/gh-app-token.sh"
 
 log() { echo "[token-refresh] $(date -u +%H:%M:%S) $*"; }

@@ -18,6 +18,20 @@
 # vendors scripts as symlinks into `.claude/skills/.../scripts/` resolves
 # SCRIPT_DIR to the project's `scripts/`, where autonomous.conf actually
 # lives — see issue #58 / [INV-14].
+#
+# The contract supports two deployment topologies (verified by
+# tests/unit/test-symlink-resolution.sh TC-INV14-1..6):
+#   1. Vendored per-project: each project has its own
+#      <project>/.agents/skills/.../scripts/ vendored copy of the lib,
+#      and <project>/scripts/<file>.sh symlinks point into the vendored
+#      copy. Upstream upgrade requires `npx skills update -p` per project.
+#   2. Shared install: a single <home>/.claude/skills/.../scripts/ install
+#      shared across all projects, and each <project>/scripts/<file>.sh
+#      symlinks into the shared install. Upstream upgrade is one
+#      `npx skills update -g`.
+# Direct invocation of a vendored copy (no project-side symlink) is also
+# supported via the legacy `../../../scripts/autonomous.conf` fallback in
+# dispatch-local.sh — kept for backward compat.
 
 # load_autonomous_conf <invoking_script_dir>
 #

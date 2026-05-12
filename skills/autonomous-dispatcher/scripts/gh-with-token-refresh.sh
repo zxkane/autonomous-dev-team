@@ -15,7 +15,12 @@
 #
 # This wrapper is placed earlier in PATH so Claude Code's Bash tool uses it.
 
-SELF_DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+# [INV-14] Use BASH_SOURCE[0] (NOT readlink -f). SELF_DIR is then used to
+# strip our own dir from PATH for self-recursion avoidance — the previously
+# resolved location and the symlink-source location are identical for that
+# purpose, but BASH_SOURCE keeps behavior consistent under shared-install
+# topology.
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 if [[ -n "${REAL_GH:-}" && -x "$REAL_GH" ]]; then
   : # explicit override — fall through to the exec at the bottom
 else

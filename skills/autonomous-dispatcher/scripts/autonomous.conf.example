@@ -2,6 +2,53 @@
 # autonomous.conf — Configuration for the Autonomous Dev Team pipeline.
 # Copy this file to autonomous.conf and fill in your project values.
 # Values can also be overridden via environment variables.
+#
+# === Deployment topologies (post-#104) ===
+#
+# Two supported layouts. Both work because every script computes
+# SCRIPT_DIR from ${BASH_SOURCE[0]:-$0} per [INV-14], so the project-side
+# symlink resolves to <project>/scripts/ where autonomous.conf lives.
+#
+# 1. Vendored per-project (the default after `npx skills add zxkane/...`):
+#      <project>/.agents/skills/.../scripts/dispatch-local.sh   (real)
+#      <project>/scripts/dispatch-local.sh -> ...               (symlink)
+#    Upstream skill upgrade requires `npx skills update -p` per project.
+#
+# 2. Shared install (one install across many projects):
+#      ~/.claude/skills/.../scripts/dispatch-local.sh           (real)
+#      <project>/scripts/dispatch-local.sh -> ...               (symlink)
+#    Upstream upgrade is a single `npx skills update -g` for all
+#    projects symlinked into the shared install. Useful if you run
+#    multiple project pipelines on the same host and want one upgrade
+#    point. Set up by running `npx skills add zxkane/... -g` once at
+#    user scope and creating per-project <project>/scripts/<file>.sh
+#    symlinks pointing into the user-scope install.
+#
+#    REQUIRED SYMLINK MANIFEST under shared install: at minimum, the
+#    project's <project>/scripts/ MUST contain symlinks for every file
+#    the dispatch chain transitively sources via ${SCRIPT_DIR}/<sibling>.
+#    Symlinking only dispatch-local.sh (or only the entry-points) breaks
+#    sibling-source statements with "No such file or directory":
+#
+#      autonomous-dev.sh        → sources lib-agent.sh, lib-auth.sh
+#      autonomous-review.sh     → sources lib-agent.sh, lib-auth.sh, lib-review-bots.sh
+#      dispatch-local.sh        → sources lib-config.sh
+#      gh-token-refresh-daemon.sh → sources gh-app-token.sh
+#      gh-with-token-refresh.sh → may invoke gh-app-token.sh / gh-token-refresh-daemon.sh
+#
+#    Plus lib-agent.sh transitively sources lib-config.sh, and lib-auth.sh
+#    sources lib-config.sh + gh-app-token.sh. The full minimum set:
+#
+#      autonomous-dev.sh, autonomous-review.sh, dispatch-local.sh,
+#      lib-agent.sh, lib-auth.sh, lib-config.sh, lib-dispatch.sh,
+#      lib-review-bots.sh,
+#      gh-app-token.sh, gh-with-token-refresh.sh, gh-token-refresh-daemon.sh
+#
+#    Verify with: `ls -la <project>/scripts/` — every entry should be
+#    a symlink whose target lives under your shared install dir.
+#
+# Either way, this autonomous.conf lives at <project>/scripts/ and is
+# discovered via SCRIPT_DIR's same-dir lookup (tier-2 in lib-config.sh).
 
 # === Project Identity ===
 PROJECT_ID="my-project"
