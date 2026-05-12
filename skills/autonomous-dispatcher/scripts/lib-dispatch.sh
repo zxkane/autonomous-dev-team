@@ -260,12 +260,36 @@ extract_dev_session_id() {
 # to decide; case (2) flips the label back to pending-dev so the next tick
 # auto-retries with a fresh session.
 #
-# Returns 1 (false) for: AGENT_CMD != claude (other CLIs don't emit the same
-# JSON shape), missing/unreadable log, no JSON object found, malformed JSON,
-# or any non-terminal stop reason (api_error, stop_sequence, etc.).
+# Returns 1 (false) for: AGENT_CMD != claude, missing/unreadable log, no JSON
+# object found, malformed JSON, or any non-terminal stop reason (api_error,
+# stop_sequence, etc.).
 # Conservative: a false negative just means we still try to resume (existing
 # behavior); a false positive (claiming terminal when it isn't) would
 # mistakenly skip a legitimate retry.
+#
+# Per-CLI scope (AGENT_CMD-gated by design — see follow-up TODO):
+#   claude   — fully covered. JSON shape `{"type":"result", stop_reason,
+#              terminal_reason}` is documented + tested.
+#   codex    — NOT covered. codex `exec --json` emits a different event
+#              schema (thread.started / task.completed / error). Resume is
+#              server-side, so the prompt_too_long failure mode may not even
+#              manifest the same way. Falls through to false → dispatcher
+#              attempts resume; relies on AGENT_TIMEOUT (INV-13) as the
+#              safety net for hangs. PTL recovery for codex is tracked as a
+#              follow-up — needs a real codex JSONL fixture to write the
+#              gate against, not guessed.
+#   kiro     — by design. Kiro has no session model (every invocation is a
+#              fresh conversation, see lib-agent.sh kiro branch), so PTL
+#              cannot occur and "completed" has no meaning. Returning false
+#              here lets the dispatcher run the next dev-resume which the
+#              wrapper transparently turns into dev-new.
+#   opencode — NOT covered, same reasoning as codex. Server-side sessions
+#              and unknown PTL event shape; needs a real fixture.
+#
+# Until coverage is extended, non-claude PTL crashes will surface via the
+# normal stale-detection path (Step 5b) instead of this gate. That's a
+# correct degradation — slower recovery (one full tick cycle) but no risk
+# of false-positive auto-recovery on a CLI whose JSON we haven't observed.
 is_session_completed() {
   local issue_num="$1"
   local reason_var="${2:-}"
