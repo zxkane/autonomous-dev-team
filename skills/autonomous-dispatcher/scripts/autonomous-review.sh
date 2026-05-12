@@ -231,13 +231,15 @@ SESSION_ID=$(uuidgen)
 # WRAPPER_START_TS — ISO-8601 UTC captured BEFORE run_agent. Verdict
 # comments older than this are stale (prior tick) and ignored.
 WRAPPER_START_TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-# BOT_LOGIN — the bot identity this wrapper authenticates as. Capture
-# stderr so a non-empty failure (token expired, GH App perms reduced,
-# rate limit) shows up actionably in the per-issue log. An empty login
-# from a successful call is treated the same as a failed call —
-# without an actor binding the predicate must fall back to legacy mode.
+# BOT_LOGIN — the bot identity this wrapper authenticates as. We need
+# the diagnostic on failure (token expired, GH App perms reduced, rate
+# limit, etc.) so the operator can debug, but we deliberately limit
+# what we log: a 200-char head of stderr only, no full body. `gh api`
+# stderr is a JSON error body which is generally safe to log, but
+# truncation is defense-in-depth against a future gh release that
+# might surface request-context headers.
 _bot_login_raw=$(gh api user --jq '.login' 2>&1) && BOT_LOGIN="$_bot_login_raw" || {
-  log "WARNING: gh api user failed; verdict detector falling back to session-id binding. stderr: ${_bot_login_raw}"
+  log "WARNING: gh api user failed; verdict detector falling back to session-id binding. stderr (truncated): ${_bot_login_raw:0:200}"
   BOT_LOGIN=""
 }
 # A literal "null" string can come back from `--jq '.login'` if /user
