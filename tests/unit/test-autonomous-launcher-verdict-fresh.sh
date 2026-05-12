@@ -206,24 +206,46 @@ run_agent_capture() {
   cat "$out" 2>/dev/null
 }
 
-# TC-LCH-001: launcher unset → claude shim is invoked directly with the
-# wrapper's standard argv (--session-id, --output-format json, etc).
+# Contract: when AGENT_LAUNCHER is set, the launcher script is
+# responsible for invoking claude itself (it ends with something like
+# `exec claude "$@"`, or the cc shell function's `$CLAUDE_CMD "$@"`).
+# The wrapper passes flags + prompt only — NOT the binary name and NOT
+# `env -u CLAUDECODE`. This lets cc's own `$CLAUDE_CMD "$@"` work
+# without args getting rewritten as `claude env -u CLAUDECODE claude
+# --resume ...` (the bug this PR fixes).
+
+# TC-LCH-001: launcher unset → wrapper drives claude directly with
+# `env -u CLAUDECODE claude args...`. Shim sees standard claude argv.
 OUT1=$(run_agent_capture "")
 ARGV1=$(echo "$OUT1" | grep '^argv:')
 assert_contains "TC-LCH-001 launcher unset: claude shim invoked (--session-id present)" "--session-id" "$ARGV1"
 # Sanity: launcher-injected env should be UNSET when no launcher is set.
 assert_contains "TC-LCH-001 launcher unset: LAUNCHER_FOO env is <unset>" "LAUNCHER_FOO=<unset>" "$OUT1"
 
-# TC-LCH-002: launcher = `env LAUNCHER_FOO=bar` → env reaches claude shim.
-OUT2=$(run_agent_capture "env LAUNCHER_FOO=bar")
+# TC-LCH-002: launcher injects env then invokes claude itself (mimics
+# the real cc shell function which ends with `$CLAUDE_CMD "$@"`).
+LAUNCHER2='bash -c '\''LAUNCHER_FOO=bar exec claude "$@"'\'' --'
+OUT2=$(run_agent_capture "$LAUNCHER2")
 ARGV2=$(echo "$OUT2" | grep '^argv:')
 assert_contains "TC-LCH-002 launcher set: LAUNCHER_FOO reaches claude env" "LAUNCHER_FOO=bar" "$OUT2"
 assert_contains "TC-LCH-002 launcher set: claude still receives --session-id" "--session-id" "$ARGV2"
+# Anti-regression: claude must NOT see `env -u` or `claude` as positional
+# args. Pre-fix the wrapper passed `env -u CLAUDECODE claude --session-id`
+# through to the launcher; cc's `$CLAUDE_CMD "$@"` then invoked
+# `claude env -u CLAUDECODE claude --session-id ...` and claude rejected
+# `-u` as unknown.
+if [[ "$ARGV2" == *"-u"* || "$ARGV2" == *"argv: claude"* ]]; then
+  echo -e "  ${RED}FAIL${NC}: TC-LCH-002 anti-regression — argv leaked binary name or -u: $ARGV2"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${NC}: TC-LCH-002 anti-regression — no leaked binary name / -u in argv"
+  PASS=$((PASS + 1))
+fi
 
-# TC-LCH-003: launcher with single-quoted bash -c form (the canonical cc shape).
-LAUNCHER='bash -c '\''LAUNCHER_FOO=quoted exec "$@"'\'' --'
-ARGV3=$(run_agent_capture "$LAUNCHER")
-assert_contains "TC-LCH-003 quoted launcher: env propagates through bash -c" "LAUNCHER_FOO=quoted" "$ARGV3"
+# TC-LCH-003: canonical "source rc + invoke binary" launcher form.
+LAUNCHER3='bash -c '\''LAUNCHER_FOO=quoted exec claude "$@"'\'' --'
+OUT3=$(run_agent_capture "$LAUNCHER3")
+assert_contains "TC-LCH-003 quoted launcher: env propagates through bash -c" "LAUNCHER_FOO=quoted" "$OUT3"
 
 # TC-LCH-007: autonomous-dev.sh exports CC_USER/CC_ROLE_KIND.
 DEV_LINE=$(grep -E '^export CC_USER=' "$SCRIPTS_DIR/autonomous-dev.sh" | head -1)

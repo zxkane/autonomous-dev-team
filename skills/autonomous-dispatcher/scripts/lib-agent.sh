@@ -79,6 +79,16 @@ if [[ -n "$AGENT_LAUNCHER" ]]; then
   unset _orig_launcher
 fi
 
+# AGENT_LAUNCHER is only supported with AGENT_CMD=claude today. The
+# canonical launcher (a `cc` shell function ending in `$CLAUDE_CMD "$@"`)
+# is hardcoded to invoke claude, so pointing it at codex/kiro/opencode
+# would produce `claude codex ...` and fail. Refuse the combination
+# rather than crashing 5 seconds into the next dispatch.
+if [[ ${#AGENT_LAUNCHER_ARGV[@]} -gt 0 && "$AGENT_CMD" != "claude" ]]; then
+  echo "[lib-agent] ERROR: AGENT_LAUNCHER is only supported with AGENT_CMD=claude (got AGENT_CMD=${AGENT_CMD}). Either unset AGENT_LAUNCHER or write a launcher tailored to your CLI." >&2
+  return 1 2>/dev/null || exit 1
+fi
+
 # Wall-clock cap on agent invocations (INV-13, closes #60).
 # Wraps run_agent / resume_agent in coreutils `timeout` so a hung CLI cannot
 # eat indefinite wall time (observed: claude --resume against a completed
@@ -289,13 +299,39 @@ run_agent() {
 
   case "$AGENT_CMD" in
     claude)
-      # Unset CLAUDECODE to allow launching from within an existing session.
-      _run_with_timeout env -u CLAUDECODE "$AGENT_CMD" --session-id "$session_id" \
-        ${session_name:+--name "$session_name"} \
-        --permission-mode "$AGENT_PERMISSION_MODE" \
-        ${model:+--model "$model"} \
-        -p "$prompt" \
+      # Flag list is identical across both invocation paths — only the
+      # command prefix differs (see below).
+      local claude_args=(
+        --session-id "$session_id"
+        ${session_name:+--name "$session_name"}
+        --permission-mode "$AGENT_PERMISSION_MODE"
+        ${model:+--model "$model"}
+        -p "$prompt"
         --output-format json
+      )
+      # Two invocation paths:
+      #
+      # (A) No AGENT_LAUNCHER → wrapper drives claude directly.
+      #     `env -u CLAUDECODE` strips a parent-process env var that
+      #     would otherwise make claude refuse to start (it treats
+      #     CLAUDECODE-set parents as "already inside a Claude session").
+      #     Only relevant when an operator runs the wrapper from inside
+      #     an interactive claude — dispatcher's nohup path doesn't have it.
+      #
+      # (B) AGENT_LAUNCHER set → launcher invokes claude itself.
+      #     The launcher (e.g. `cc` shell function) ends with
+      #     `$CLAUDE_CMD "$@"`, so we pass ONLY flags + prompt as "$@" —
+      #     NOT the binary name and NOT `env -u`. If we passed
+      #     `env -u CLAUDECODE claude --session-id ...`, the launcher
+      #     would invoke `claude env -u CLAUDECODE claude --session-id`
+      #     and claude rejects `-u` as an unknown option. CLAUDECODE
+      #     handling is delegated to the launcher (nohup-spawned bash -c
+      #     subshells generally don't inherit it anyway).
+      if [[ ${#AGENT_LAUNCHER_ARGV[@]} -gt 0 ]]; then
+        _run_with_timeout "${claude_args[@]}"
+      else
+        _run_with_timeout env -u CLAUDECODE "$AGENT_CMD" "${claude_args[@]}"
+      fi
       ;;
     codex)
       # Codex CLI: headless invocation is `codex exec [PROMPT]` (positional
@@ -361,13 +397,21 @@ resume_agent() {
 
   case "$AGENT_CMD" in
     claude)
-      # Unset CLAUDECODE to allow launching from within an existing session
-      # --name is omitted: the session retains the name set at creation.
-      _run_with_timeout env -u CLAUDECODE "$AGENT_CMD" --resume "$session_id" \
-        --permission-mode "$AGENT_PERMISSION_MODE" \
-        ${model:+--model "$model"} \
-        -p "$prompt" \
+      # See run_agent above for the (A) direct vs. (B) launcher rationale.
+      # --name is omitted on resume — the session retains the name set
+      # at creation.
+      local claude_args=(
+        --resume "$session_id"
+        --permission-mode "$AGENT_PERMISSION_MODE"
+        ${model:+--model "$model"}
+        -p "$prompt"
         --output-format json
+      )
+      if [[ ${#AGENT_LAUNCHER_ARGV[@]} -gt 0 ]]; then
+        _run_with_timeout "${claude_args[@]}"
+      else
+        _run_with_timeout env -u CLAUDECODE "$AGENT_CMD" "${claude_args[@]}"
+      fi
       ;;
     codex)
       # Codex `exec resume <thread_id> [PROMPT]` resumes the conversation.
