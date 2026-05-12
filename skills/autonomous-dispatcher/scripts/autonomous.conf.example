@@ -41,24 +41,48 @@ AGENT_PERMISSION_MODE="auto"
 # Closes #60 (INV-13).
 AGENT_TIMEOUT="4h"
 
-# Optional launcher prefix that wraps every agent CLI invocation in
-# run_agent / resume_agent. Use case: bridge dispatcher-spawned wrappers
-# into the same env you set up for interactive `claude` runs (Bedrock
-# auth, MCP servers, telemetry tags, etc.) without duplicating that env
-# in autonomous.conf.
+# Optional launcher prefix wrapped around every claude CLI invocation
+# in run_agent / resume_agent. Use case: bridge dispatcher-spawned
+# wrappers into the same env you set up for interactive `claude` runs
+# (Bedrock auth, MCP servers, telemetry tags, etc.) without duplicating
+# that env in autonomous.conf.
 #
-# The wrappers also export CC_USER=autonomous-{dev,review}-bot and
-# CC_ROLE_KIND={dev,review} before invoking the launcher, so a
-# launcher that consumes those env vars can attribute autonomous-pipeline
-# traffic separately from interactive sessions in cost / telemetry
-# pipelines.
+# Contract: the launcher script is responsible for invoking the claude
+# binary itself (typically ending with `exec claude "$@"` or a shell
+# function that ends with `$CLAUDE_CMD "$@"`). The wrapper passes only
+# claude flags + prompt as "$@" — NOT the binary name. Required for the
+# claude branch only; mixing AGENT_LAUNCHER with AGENT_CMD≠claude is
+# rejected at startup since the canonical launchers are claude-specific.
 #
-# Example — a `cc` shell function in ~/.bash_aliases that injects
-# Bedrock + telemetry env:
-#   AGENT_LAUNCHER='bash -c '\''source ~/.bash_aliases && exec cc "$@"'\'' --'
+# The dev / review wrappers also export
+#   CC_USER=autonomous-{dev,review}-bot
+#   CC_ROLE_KIND={dev,review}
+# before invoking the launcher, so a launcher that consumes these (e.g.
+# the cc shell function piping CC_USER through to AWS STS session tags
+# via cc-creds) can attribute autonomous-pipeline traffic separately
+# from interactive sessions in cost / telemetry pipelines.
 #
-# Empty (default): no wrapping; $AGENT_CMD is invoked directly.
-AGENT_LAUNCHER=""
+# Example — a `cc` shell function defined in ~/.bash_aliases that
+# injects Bedrock + telemetry env and then invokes claude:
+#
+#   AGENT_LAUNCHER='bash -c '\''source ~/.bash_aliases && cc "$@"'\'' --'
+#
+# Notes:
+#   * Use `cc "$@"` — NOT `exec cc "$@"`. `exec` only runs external
+#     binaries, so on most Linux distros it resolves `cc` to
+#     /usr/bin/cc (the GNU C compiler) and the dispatch crashes with
+#     `unrecognized command-line option '--model'`.
+#   * `cc` must be defined as a shell *function* (not an alias). bash
+#     non-interactive shells do not expand aliases by default, so a cc
+#     alias would be ignored and PATH lookup would again find the
+#     C compiler.
+#   * The launcher is sourced once by lib-agent.sh and tokenized via
+#     `eval`. Treat its contents as code, not data.
+#
+# Default: leave AGENT_LAUNCHER unset (commented out). Most operators
+# use the wrapper's direct claude invocation.
+#
+# AGENT_LAUNCHER=''
 
 # === GitHub Authentication ===
 GH_AUTH_MODE="token"
