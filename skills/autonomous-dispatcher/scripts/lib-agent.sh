@@ -115,13 +115,62 @@ fi
 # SIGTERM (some MCP children trap TERM and need the harder push).
 # --signal=TERM lets the agent flush any final SSE bytes before dying.
 # Exit codes: passthrough on normal exit; 124 on TERM-timeout; 137 on KILL.
+#
+# Process-group ownership (closes #109):
+# We launch the command under `setsid` so the agent and every descendant
+# share a new process group. The session-leader PID — which equals the
+# new PGID — is captured in `_AGENT_RUN_PID`. If `AGENT_PID_FILE` is
+# exported by the caller, we write `_AGENT_RUN_PID` to it before
+# wait'ing, so a subsequent dispatcher tick can `kill -TERM -- -<pgid>`
+# and reap the entire subtree atomically. Without this the wrapper
+# shell's `$$` ended up in PID_FILE while the timeout/agent subtree
+# outlived the shell — see #109 for the full failure narrative.
+_AGENT_RUN_PID=""
 _run_with_timeout() {
+  local cmd=()
   if [[ -n "$_AGENT_TIMEOUT_CMD" ]]; then
-    "$_AGENT_TIMEOUT_CMD" --kill-after=30s --signal=TERM "$AGENT_TIMEOUT" \
-      "${AGENT_LAUNCHER_ARGV[@]}" "$@"
-  else
-    "${AGENT_LAUNCHER_ARGV[@]}" "$@"
+    cmd+=("$_AGENT_TIMEOUT_CMD" --kill-after=30s --signal=TERM "$AGENT_TIMEOUT")
   fi
+  cmd+=("${AGENT_LAUNCHER_ARGV[@]}" "$@")
+
+  # Prepend setsid when available so the agent gets its own session+PGID.
+  # On the rare host without it (no util-linux), the agent runs in the
+  # wrapper's group; the dispatcher's `pgrep -f` fallback in
+  # kill_stale_wrapper still picks up orphans.
+  local launcher=()
+  command -v setsid >/dev/null 2>&1 && launcher=(setsid)
+  "${launcher[@]}" "${cmd[@]}" &
+  _AGENT_RUN_PID=$!
+
+  if [[ -n "${AGENT_PID_FILE:-}" && ! -L "$AGENT_PID_FILE" ]]; then
+    # Symlink-defence (CWE-59): refuse to follow a symlink. We don't
+    # remove it either — acquire_pid_guard rejects symlinks at entry, so
+    # we only get here if one was planted between guard and spawn
+    # (extremely narrow race). Skip the write rather than expand the
+    # attack surface.
+    printf '%s\n' "$_AGENT_RUN_PID" > "$AGENT_PID_FILE" 2>/dev/null || true
+  fi
+
+  wait "$_AGENT_RUN_PID"
+}
+
+# install_agent_sigterm_trap — install the standard SIGTERM-to-PGID trap
+# in the calling wrapper shell (closes #109). Used by autonomous-dev.sh
+# and autonomous-review.sh so the two share the contract: forward TERM
+# to the agent's process group (set by _run_with_timeout) plus a direct-
+# children fallback for the pre-spawn race window.
+#
+# Callers may set RECEIVED_SIGTERM=0 first if they need to read the flag
+# in their cleanup() trap (autonomous-dev.sh does for INV-15 / #67); the
+# trap installed here writes RECEIVED_SIGTERM=1 either way.
+install_agent_sigterm_trap() {
+  trap '
+    RECEIVED_SIGTERM=1
+    if [[ -n "${_AGENT_RUN_PID:-}" ]]; then
+      kill -TERM -- "-${_AGENT_RUN_PID}" 2>/dev/null || true
+    fi
+    pkill -TERM -P $$ 2>/dev/null || true
+  ' TERM
 }
 
 # Codex thread-id capture/recall.

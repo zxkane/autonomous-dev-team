@@ -101,23 +101,45 @@ echo "=== Source-of-truth check ==="
 # means classify_label() above no longer represents production behavior.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 WRAPPER="$SCRIPT_DIR/../../skills/autonomous-dispatcher/scripts/autonomous-dev.sh"
+LIB_AGENT="$SCRIPT_DIR/../../skills/autonomous-dispatcher/scripts/lib-agent.sh"
 
-if grep -q 'RECEIVED_SIGTERM=0' "$WRAPPER" \
-   && grep -q 'on_sigterm()' "$WRAPPER" \
-   && grep -q 'trap on_sigterm TERM' "$WRAPPER" \
+# The trap can be installed two ways:
+#   (A) Inline in autonomous-dev.sh: `on_sigterm()` + `trap on_sigterm TERM`.
+#   (B) Via the shared `install_agent_sigterm_trap` helper in lib-agent.sh
+#       (introduced for #109 — review wrapper now uses the same trap).
+# Both factorings must keep the same observable contract:
+#   RECEIVED_SIGTERM=0 lives in the wrapper (cleanup() reads it),
+#   the trap sets RECEIVED_SIGTERM=1, forwards TERM to descendants
+#   (pkill -TERM -P $$), and cleanup() does the exit_code=0 rewrite.
+trap_inline_ok=0
+if grep -q 'on_sigterm()' "$WRAPPER" \
+   && grep -q 'trap on_sigterm TERM' "$WRAPPER"; then
+  trap_inline_ok=1
+fi
+trap_helper_ok=0
+if grep -q 'install_agent_sigterm_trap' "$WRAPPER" \
+   && grep -q 'install_agent_sigterm_trap()' "$LIB_AGENT" \
+   && grep -q 'RECEIVED_SIGTERM=1' "$LIB_AGENT"; then
+  trap_helper_ok=1
+fi
+
+if [[ "$trap_inline_ok" -eq 1 || "$trap_helper_ok" -eq 1 ]] \
+   && grep -q 'RECEIVED_SIGTERM=0' "$WRAPPER" \
    && grep -q 'RECEIVED_SIGTERM" -eq 1' "$WRAPPER" \
    && grep -q 'exit_code=0' "$WRAPPER"; then
   echo -e "  ${GREEN}PASS${NC}: autonomous-dev.sh contains RECEIVED_SIGTERM trap + cleanup rewrite"
   PASS=$((PASS + 1))
 else
   echo -e "  ${RED}FAIL${NC}: autonomous-dev.sh missing one of:"
-  echo "         RECEIVED_SIGTERM=0 / on_sigterm() / trap on_sigterm TERM /"
+  echo "         RECEIVED_SIGTERM=0 / { inline on_sigterm OR install_agent_sigterm_trap } /"
   echo "         RECEIVED_SIGTERM check / exit_code=0 rewrite"
   FAIL=$((FAIL + 1))
 fi
 
-# Verify pkill descendant kill is present (forwards SIGTERM to the agent)
-if grep -q 'pkill -TERM -P \$\$' "$WRAPPER"; then
+# Verify pkill descendant kill is present (forwards SIGTERM to the agent).
+# Same factoring as above: the helper in lib-agent.sh counts.
+if grep -q 'pkill -TERM -P \$\$' "$WRAPPER" \
+   || grep -q 'pkill -TERM -P \$\$' "$LIB_AGENT"; then
   echo -e "  ${GREEN}PASS${NC}: trap forwards SIGTERM to descendants via pkill"
   PASS=$((PASS + 1))
 else

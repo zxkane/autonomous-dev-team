@@ -96,8 +96,20 @@ PID_FILE="${PID_DIR}/review-${ISSUE_NUMBER}.pid"
 # Note: log file is created by nohup redirect in dispatch-local.sh.
 # Do NOT truncate it here (install -m 600 /dev/null would destroy nohup output).
 
-# PID guard: prevent duplicate instances for the same issue
+# Forward dispatcher TERM to the agent's process group (#109).
+# Without this, the timeout/agent subtree gets reparented to PID 1 when
+# the wrapper exits and the next tick can't reach it through PID_FILE.
+# install_agent_sigterm_trap (lib-agent.sh) sets RECEIVED_SIGTERM=1 and
+# group-kills via _AGENT_RUN_PID. Review doesn't read RECEIVED_SIGTERM
+# anywhere (no INV-15 equivalent here), but the contract is shared with
+# autonomous-dev.sh so the trap is identical.
+install_agent_sigterm_trap
+
+# PID guard: prevent duplicate instances for the same issue.
+# acquire_pid_guard writes $$ as a placeholder; _run_with_timeout
+# rewrites the file with the agent's session-leader PID (== PGID).
 acquire_pid_guard "$PID_FILE" "autonomous-review" "$ISSUE_NUMBER"
+export AGENT_PID_FILE="$PID_FILE"
 
 # ---------------------------------------------------------------------------
 # Helpers

@@ -82,56 +82,106 @@ kill_stale_wrapper() {
     echo "ERROR: PID file is a symlink, refusing to operate on it: $pid_file" >&2
     return 1
   fi
-  if [[ ! -f "$pid_file" ]]; then
-    return 0
-  fi
 
-  # Distinguish empty content from "could not read". Deleting an unreadable
-  # PID file would leave a possibly-still-running wrapper untracked.
-  # Test readability first; only then capture content.
-  if ! [[ -r "$pid_file" ]]; then
-    echo "ERROR: cannot read PID file $pid_file (permission denied or removed)" >&2
-    return 1
-  fi
-  local old_pid
-  old_pid=$(cat "$pid_file" 2>/dev/null)
+  if [[ -f "$pid_file" ]]; then
+    # Distinguish empty content from "could not read". Deleting an unreadable
+    # PID file would leave a possibly-still-running wrapper untracked.
+    # Test readability first; only then capture content.
+    if ! [[ -r "$pid_file" ]]; then
+      echo "ERROR: cannot read PID file $pid_file (permission denied or removed)" >&2
+      return 1
+    fi
+    local old_pid
+    old_pid=$(cat "$pid_file" 2>/dev/null)
 
-  if [[ -n "$old_pid" ]] && kill -0 "$old_pid" 2>/dev/null; then
-    echo "Found existing wrapper for issue #${ISSUE_NUM} (PID ${old_pid}); sending SIGTERM..." >&2
-    local term_err
-    term_err=$(kill "$old_pid" 2>&1) || {
-      # ESRCH (no such process) is benign — the process exited between the
-      # liveness check and the kill. Anything else is a real problem.
-      if [[ "$term_err" != *"No such process"* && -n "$term_err" ]]; then
-        echo "WARNING: SIGTERM to PID ${old_pid} failed: ${term_err}" >&2
-      fi
-    }
-    local _i
-    for _i in 1 2 3 4 5; do
-      kill -0 "$old_pid" 2>/dev/null || break
-      sleep 1
-    done
-    if kill -0 "$old_pid" 2>/dev/null; then
-      echo "WARNING: PID ${old_pid} ignored SIGTERM after 5s; escalating to SIGKILL" >&2
-      local kill_err
-      kill_err=$(kill -9 "$old_pid" 2>&1) || {
-        if [[ "$kill_err" != *"No such process"* && -n "$kill_err" ]]; then
-          echo "WARNING: SIGKILL to PID ${old_pid} failed: ${kill_err}" >&2
+    if [[ -n "$old_pid" ]] && kill -0 "$old_pid" 2>/dev/null; then
+      echo "Found existing wrapper for issue #${ISSUE_NUM} (PID ${old_pid}); sending SIGTERM..." >&2
+      # Group-kill (closes #109): old_pid was written by _run_with_timeout
+      # under setsid, so it's the session-leader PID == PGID. `kill -- -<pid>`
+      # signals every member of that group atomically — the whole point of
+      # the fix. The wrapper shell's `$$` used to land here, but `$$` is
+      # NOT a process group leader, so the timeout/agent tree survived.
+      #
+      # `kill -- -<pid>` to a non-leader is a no-op (ESRCH), so we always
+      # follow up with a leader-only TERM as a best-effort. The pgrep
+      # fallback at the bottom of the function picks up any orphans that
+      # neither path reached.
+      kill -TERM -- "-${old_pid}" 2>/dev/null || true
+      local term_err
+      term_err=$(kill "$old_pid" 2>&1) || {
+        # ESRCH (no such process) is benign — the process exited between the
+        # liveness check and the kill. Anything else is a real problem.
+        if [[ "$term_err" != *"No such process"* && -n "$term_err" ]]; then
+          echo "WARNING: SIGTERM to PID ${old_pid} failed: ${term_err}" >&2
         fi
       }
-      sleep 1
-      # Final liveness check — if still alive, we cannot safely spawn.
+      local _i
+      for _i in 1 2 3 4 5; do
+        kill -0 "$old_pid" 2>/dev/null || break
+        sleep 1
+      done
       if kill -0 "$old_pid" 2>/dev/null; then
-        echo "ERROR: PID ${old_pid} survived SIGKILL+1s grace; refusing to spawn alongside it" >&2
-        return 1
+        echo "WARNING: PID ${old_pid} ignored SIGTERM after 5s; escalating to SIGKILL (group)" >&2
+        kill -9 -- "-${old_pid}" 2>/dev/null || true
+        local kill_err
+        kill_err=$(kill -9 "$old_pid" 2>&1) || {
+          if [[ "$kill_err" != *"No such process"* && -n "$kill_err" ]]; then
+            echo "WARNING: SIGKILL to PID ${old_pid} failed: ${kill_err}" >&2
+          fi
+        }
+        sleep 1
+        # Final liveness check — if still alive, we cannot safely spawn.
+        if kill -0 "$old_pid" 2>/dev/null; then
+          echo "ERROR: PID ${old_pid} survived SIGKILL+1s grace; refusing to spawn alongside it" >&2
+          return 1
+        fi
       fi
+    fi
+
+    # Remove PID file regardless. If `rm -f` fails (read-only mount, perm),
+    # acquire_pid_guard in the new wrapper re-validates liveness on whatever
+    # PID is in the file — and we just verified that PID is no longer alive.
+    rm -f "$pid_file"
+  fi
+
+  # Defensive pgrep fallback (closes #109 — option C).
+  #
+  # Catches escaped agent trees that PID_FILE never reaches:
+  #   - pre-fix wrappers whose PID_FILE held `$$` and got reparented to PID 1
+  #     when the wrapper exited before the agent subtree finished
+  #   - races where the wrapper died after acquire_pid_guard but before
+  #     _run_with_timeout overwrote PID_FILE with the real PGID
+  #   - rotational kills where a previous tick removed PID_FILE but the
+  #     subtree was still unwinding
+  #
+  # Match by `--issue <N>` argv (highly specific to the wrappers; the word
+  # boundary stops issue 9 from matching issue 99). Disabled via
+  # KILL_STALE_PGREP_FALLBACK=false for operators running their own kill
+  # choreography.
+  if [[ "${KILL_STALE_PGREP_FALLBACK:-true}" == "true" ]]; then
+    local orphan_pids
+    # `pgrep -f` matches against the full command line (argv[0] + args).
+    # The `[-]-` trick keeps the matcher itself off the result list.
+    orphan_pids=$(pgrep -f "[-]-issue ${ISSUE_NUM}\b" 2>/dev/null \
+      | grep -vw "$$" || true)
+    if [[ -n "$orphan_pids" ]]; then
+      echo "Found orphan agent process(es) for issue #${ISSUE_NUM}: $(tr '\n' ' ' <<<"$orphan_pids")— group-killing" >&2
+      local op
+      while IFS= read -r op; do
+        [[ -z "$op" ]] && continue
+        kill -TERM -- "-${op}" 2>/dev/null || kill -TERM "$op" 2>/dev/null || true
+      done <<<"$orphan_pids"
+      sleep 1
+      # Escalate any survivors
+      while IFS= read -r op; do
+        [[ -z "$op" ]] && continue
+        if kill -0 "$op" 2>/dev/null; then
+          kill -9 -- "-${op}" 2>/dev/null || kill -9 "$op" 2>/dev/null || true
+        fi
+      done <<<"$orphan_pids"
     fi
   fi
 
-  # Remove PID file regardless. If `rm -f` fails (read-only mount, perm),
-  # acquire_pid_guard in the new wrapper re-validates liveness on whatever
-  # PID is in the file — and we just verified that PID is no longer alive.
-  rm -f "$pid_file"
   return 0
 }
 

@@ -109,22 +109,26 @@ AGENT_RAN=false
 # Two writers, divergent targets → last-writer-wins (typically pending-dev).
 # Flipping this flag lets cleanup() rewrite exit_code=0 when a PR exists,
 # converging both writers on +pending-review.
+# Forward dispatcher TERM to the agent's process group (#109).
+# RECEIVED_SIGTERM is read by cleanup() for INV-15 / #67 (rewrites
+# exit_code → 0 when SIGTERM arrives with a PR ready, so we route to
+# pending-review instead of pending-dev). install_agent_sigterm_trap
+# installs the trap that sets it AND group-kills via _AGENT_RUN_PID.
 RECEIVED_SIGTERM=0
-on_sigterm() {
-  RECEIVED_SIGTERM=1
-  # Forward TERM to descendants so the agent CLI exits promptly. Without this,
-  # bash queues the signal until the foreground `run_agent` returns naturally
-  # (which is potentially hours away). pkill -P matches direct children only;
-  # the timeout/agent process tree exits cleanly via SIGTERM cascade.
-  pkill -TERM -P $$ 2>/dev/null || true
-}
-trap on_sigterm TERM
+install_agent_sigterm_trap
 
 # Note: log file is created by nohup redirect in dispatch-local.sh.
 # Do NOT truncate it here (install -m 600 /dev/null would destroy nohup output).
 
-# PID guard: prevent duplicate instances for the same issue
+# PID guard: prevent duplicate instances for the same issue.
+#
+# acquire_pid_guard writes $$ as a placeholder so the slot is reserved
+# during pre-spawn work (e.g. `gh issue view`). Once _run_with_timeout
+# spawns the agent, it rewrites this file with the session-leader PID
+# (== PGID under setsid). That's what lets the next dispatcher tick
+# group-kill the subtree (closes #109).
 acquire_pid_guard "$PID_FILE" "autonomous-dev" "$ISSUE_NUMBER"
+export AGENT_PID_FILE="$PID_FILE"
 
 # ---------------------------------------------------------------------------
 # Helpers
