@@ -173,6 +173,45 @@ install_agent_sigterm_trap() {
   ' TERM
 }
 
+# install_agent_heartbeat — spawn a background loop that touches
+# AGENT_PID_FILE every HEARTBEAT_INTERVAL_SECONDS (#111 Part B). The loop
+# is parent-pid-watched: when the wrapper shell exits, `kill -0 <parent>`
+# fails and the loop terminates. No orphan heartbeats after wrapper exit.
+#
+# Sets _AGENT_HEARTBEAT_PID so the wrapper's cleanup() trap can SIGTERM
+# the heartbeat at exit (defense in depth — the parent-pid watchdog is
+# the primary lifecycle gate, but explicit teardown is faster).
+#
+# HEARTBEAT_INTERVAL_SECONDS=0 disables heartbeat entirely (no spawn) —
+# the regression-safety knob for ops who hit edge cases.
+#
+# AGENT_PID_FILE must exist before calling this helper. The loop is
+# tolerant of a missing or symlinked file (skips touch silently); the
+# wrapper's acquire_pid_guard / spawn path remains the authoritative
+# writer.
+install_agent_heartbeat() {
+  local interval="${HEARTBEAT_INTERVAL_SECONDS:-120}"
+  # Defensive numeric guard: a typo'd config would otherwise raise an
+  # arithmetic error under set -e. Treat non-numeric as "disabled".
+  [[ "$interval" =~ ^[0-9]+$ ]] || return 0
+  [[ "$interval" -gt 0 ]] || return 0
+  [[ -n "${AGENT_PID_FILE:-}" ]] || return 0
+
+  local parent_pid=$$
+  local pid_file="$AGENT_PID_FILE"
+
+  (
+    while command kill -0 "$parent_pid" 2>/dev/null; do
+      if [[ -f "$pid_file" && ! -L "$pid_file" ]]; then
+        touch "$pid_file" 2>/dev/null || true
+      fi
+      sleep "$interval"
+    done
+  ) &
+  _AGENT_HEARTBEAT_PID=$!
+  disown "$_AGENT_HEARTBEAT_PID" 2>/dev/null || true
+}
+
 # Codex thread-id capture/recall.
 #
 # Codex `exec` mints its own thread (UUID) per invocation and does NOT accept

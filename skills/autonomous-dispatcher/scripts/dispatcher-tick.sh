@@ -450,7 +450,24 @@ for i in $(seq 0 $((cand_count - 1))); do
         label_swap "$issue_num" "in-progress" "pending-review"
       fi
     else
-      # DEAD + reviewing: review wrapper crashed without its own trap firing.
+      # DEAD + reviewing: review wrapper appears to have crashed.
+      #
+      # #111 Part A: cross-check PR-state signals before declaring
+      # crashed. Long-running review wrappers (15-30 min E2E + multi-bot
+      # rounds) routinely hit transient pid_alive races, and the
+      # near-success window covers the wrapper's post-verdict / merge
+      # tail. review_near_success returns 0 when ANY of these are true
+      # within REVIEW_NEAR_SUCCESS_WINDOW_SECONDS:
+      #   - PR.mergedAt within window
+      #   - most recent APPROVED review within window
+      #   - "Review PASSED|findings" comment within window
+      #   - defensive `kill -0 <pid>` re-check now succeeds (race)
+      # When any signal fires, leave `reviewing` alone and defer to next
+      # tick — the wrapper either already finished or is mid-merge.
+      if review_near_success "$issue_num"; then
+        echo "INFO: issue ${issue_num} review wrapper pid_alive miss but PR-state signal positive; deferring crash declaration (#111 INV-24)" >&2
+        continue
+      fi
       gh issue comment "$issue_num" --repo "$REPO" \
         --body "Review process appears to have crashed. Moving to pending-dev for retry."
       label_swap "$issue_num" "reviewing" "pending-dev"

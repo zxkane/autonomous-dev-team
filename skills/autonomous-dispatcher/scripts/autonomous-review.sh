@@ -111,6 +111,12 @@ install_agent_sigterm_trap
 acquire_pid_guard "$PID_FILE" "autonomous-review" "$ISSUE_NUMBER"
 export AGENT_PID_FILE="$PID_FILE"
 
+# Heartbeat: refresh PID-file mtime on a timer so the dispatcher's
+# pid_alive mtime fallback (#111 Part B) can distinguish a transient
+# `kill -0` race from a genuinely dead wrapper. Disabled when
+# HEARTBEAT_INTERVAL_SECONDS=0.
+install_agent_heartbeat
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -121,6 +127,14 @@ RESULT_PARSED=false
 
 cleanup() {
   local exit_code=$?
+
+  # Tear down the heartbeat loop fast (parent-pid watchdog would also
+  # take it down within HEARTBEAT_INTERVAL_SECONDS, but explicit is
+  # cheaper). The kill is allowed to fail — the loop may already have
+  # exited on its own.
+  if [[ -n "${_AGENT_HEARTBEAT_PID:-}" ]]; then
+    command kill "$_AGENT_HEARTBEAT_PID" 2>/dev/null || true
+  fi
 
   # Cleanup PID file always
   rm -f "$PID_FILE" 2>/dev/null || true

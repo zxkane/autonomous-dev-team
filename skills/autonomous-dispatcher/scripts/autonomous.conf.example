@@ -166,6 +166,30 @@ MAX_RETRIES=3
 # positive crash detection is the failure mode this knob exists to prevent).
 DISPATCH_GRACE_PERIOD_SECONDS=600
 
+# Wrapper heartbeat interval ([INV-24], #111 Part B).
+# autonomous-dev.sh / autonomous-review.sh spawn a background loop that
+# touches their PID file every HEARTBEAT_INTERVAL_SECONDS while they're
+# running. The dispatcher's pid_alive check then honors a mtime-based
+# fallback: a stale `kill -0` is upgraded to ALIVE if the PID-file mtime
+# is within HEARTBEAT_INTERVAL_SECONDS * 3 (default 360s).
+#
+# Why: long-running review wrappers (15-30 min E2E + multi-bot rounds)
+# routinely race with the dispatcher's pid_alive probe. A positive
+# heartbeat signal lets the dispatcher distinguish "wrapper still
+# working" from "wrapper truly hung". Set to 0 to disable both the
+# wrapper-side spawn and the dispatcher-side mtime fallback.
+HEARTBEAT_INTERVAL_SECONDS=120
+
+# Review near-success window ([INV-24], #111 Part A).
+# In Step 5b's review-DEAD branch, before declaring "crashed" the
+# dispatcher cross-checks four PR-state signals — recent merge, recent
+# APPROVED review, recent "Review PASSED|findings" comment, defensive
+# kill -0 retry. If any is positive within this window, the crash path
+# is skipped; the wrapper is either finishing or in its post-verdict
+# tail. Set to 0 to restore legacy strict behavior (every pid_alive
+# miss declares crashed).
+REVIEW_NEAR_SUCCESS_WINDOW_SECONDS=300
+
 # === Dev Agent ===
 DEV_SKILL_CMD="/autonomous-dev"
 

@@ -285,10 +285,14 @@ The wording in the "PR found" branches deliberately avoids the keywords `crashed
 
 #### DEAD + `reviewing`
 
+Before posting "crashed" or swapping labels, the dispatcher consults `review_near_success` ([INV-24](invariants.md#inv-24-review-wrapper-dead-detection-requires-both-pid_alive-miss-and-no-near-success-pr-signal)). If ANY of the four PR-state signals (recent merge, recent APPROVED review, recent verdict comment, defensive `kill -0` re-check) is positive within `REVIEW_NEAR_SUCCESS_WINDOW_SECONDS` (default 300s), the branch logs and short-circuits — the wrapper has either already finished successfully or is in its post-verdict / merge tail.
+
+Only when ALL four signals are negative does the crash path fire:
+
 Comment: "Review process appears to have crashed. Moving to pending-dev for retry."
 Labels: `−reviewing +pending-dev`.
 
-(No SHA-comparison shortcut here — the review wrapper's own trap should have already done this transition for genuine crashes; this 5b branch is the safety net for the case where the wrapper died so abruptly that even its trap didn't fire.)
+This branch is the safety net for the case where the wrapper died so abruptly that even its trap didn't fire. The `pid_alive` check that gates entry to this branch ALSO honors a heartbeat-based mtime fallback ([INV-24](invariants.md#inv-24-review-wrapper-dead-detection-requires-both-pid_alive-miss-and-no-near-success-pr-signal)): a fresh PID-file mtime (within `HEARTBEAT_INTERVAL_SECONDS * 3`) keeps the wrapper in the ALIVE bucket, eliminating false alarms from transient races.
 
 ## Failure modes by step
 

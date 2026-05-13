@@ -429,13 +429,42 @@ _pid_file_for() {
 
 # Returns 0 if the wrapper PID for this issue+kind is alive, 1 otherwise.
 # `kind` is "issue" (dev wrapper) or "review".
+#
+# Two-tier check (#111 Part B):
+#   1. `kill -0 <pid>` succeeds → ALIVE.
+#   2. `kill -0 <pid>` fails → check PID-file mtime. If it was touched
+#      within HEARTBEAT_INTERVAL_SECONDS * 3 (default 360s), still treat
+#      as ALIVE — the wrapper may be transitioning groups, exec'ing, or
+#      racing with us. The wrapper's install_agent_heartbeat helper
+#      (lib-agent.sh) keeps the mtime fresh while it's running, so a
+#      stale mtime is strong evidence the process is genuinely dead.
+#
+# HEARTBEAT_INTERVAL_SECONDS=0 disables the mtime fallback entirely
+# (legacy strict behavior).
 pid_alive() {
   local kind="$1" issue_num="$2"
   local pid_file pid
   pid_file=$(_pid_file_for "$kind" "$issue_num")
   [ -n "$pid_file" ] || return 1
   pid=$(cat "$pid_file" 2>/dev/null || echo "")
-  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+  [ -n "$pid" ] || return 1
+  if kill -0 "$pid" 2>/dev/null; then
+    return 0
+  fi
+
+  local hb_interval="${HEARTBEAT_INTERVAL_SECONDS:-120}"
+  # Defensive numeric guard: a typo here would silently flip ALIVE → DEAD,
+  # the exact failure mode #111 fixes. Treat non-numeric / negative as
+  # "fallback disabled" (legacy strict).
+  [[ "$hb_interval" =~ ^[0-9]+$ ]] || return 1
+  [ "$hb_interval" -gt 0 ] || return 1
+  [ -f "$pid_file" ] || return 1
+  local now mtime threshold
+  now=$(date -u +%s)
+  mtime=$(stat -c %Y "$pid_file" 2>/dev/null || stat -f %m "$pid_file" 2>/dev/null || echo "")
+  [ -n "$mtime" ] || return 1
+  threshold=$(( hb_interval * 3 ))
+  [ $(( now - mtime )) -lt "$threshold" ]
 }
 
 # Echoes the current PID for the issue+kind, or empty if none.
@@ -491,6 +520,86 @@ last_reviewed_head() {
   local issue_num="$1"
   gh issue view "$issue_num" --repo "$REPO" --json comments \
     -q '[.comments[].body | capture("Reviewed HEAD: `(?<sha>[0-9a-f]{7,40})`"; "g") | .sha] | last // empty'
+}
+
+# Step 5b: echoes seconds since the most recent review-agent verdict
+# comment on the issue. The verdict comment is matched on a leading
+# "Review PASSED" or "Review findings" — same prefix the wrapper writes
+# in autonomous-review.sh. Empty on parse failure / no match (caller
+# treats as "no recent verdict").
+latest_review_verdict_age_seconds() {
+  local issue_num="$1"
+  local latest_iso
+  latest_iso=$(gh issue view "$issue_num" --repo "$REPO" --json comments \
+    -q '[.comments[] | select(.body | test("^Review (PASSED|findings)"))] | last | .createdAt // empty')
+  [ -n "$latest_iso" ] || { echo ""; return; }
+  _iso_age_seconds "$latest_iso"
+}
+
+# Step 5b: review_near_success <issue_num>
+#
+# Returns 0 (skip the "crashed" path) if ANY of these PR-state signals are
+# positive within REVIEW_NEAR_SUCCESS_WINDOW_SECONDS (default 300s):
+#
+#   1. PR.mergedAt within window — wrapper finished merging.
+#   2. Most recent APPROVED review event within window — wrapper reached
+#      approve step.
+#   3. Most recent "Review PASSED|findings" comment within window —
+#      wrapper completed verdict.
+#   4. Defensive `kill -0 <pid>` against the current PID-file content
+#      now succeeds — the original pid_alive miss raced with the
+#      wrapper's normal scheduling.
+#
+# REVIEW_NEAR_SUCCESS_WINDOW_SECONDS=0 disables the short-circuit (legacy
+# strict behavior — every pid_alive miss declares crashed).
+#
+# Returns 1 if all four signals are negative — caller proceeds with the
+# existing crashed-comment + label-swap.
+review_near_success() {
+  local issue_num="$1"
+  local window="${REVIEW_NEAR_SUCCESS_WINDOW_SECONDS:-300}"
+  # Defensive numeric guard: non-numeric / negative falls back to legacy
+  # strict (every pid_alive miss declares crashed) instead of silently
+  # short-circuiting on a malformed config.
+  [[ "$window" =~ ^[0-9]+$ ]] || return 1
+  [ "$window" -gt 0 ] || return 1
+
+  # Signals 1 + 2: PR.mergedAt and reviews[].
+  local pr_info merged_at approved_at age
+  pr_info=$(fetch_pr_for_issue "$issue_num" "number,mergedAt,reviews")
+  if [ -n "$pr_info" ]; then
+    merged_at=$(jq -r '.mergedAt // empty' <<<"$pr_info" 2>/dev/null)
+    if [ -n "$merged_at" ] && [ "$merged_at" != "null" ]; then
+      age=$(_iso_age_seconds "$merged_at")
+      if [ -n "$age" ] && [ "$age" -lt "$window" ]; then
+        return 0
+      fi
+    fi
+
+    approved_at=$(jq -r '[.reviews[]? | select(.state == "APPROVED") | .submittedAt] | sort | last // empty' <<<"$pr_info" 2>/dev/null)
+    if [ -n "$approved_at" ] && [ "$approved_at" != "null" ]; then
+      age=$(_iso_age_seconds "$approved_at")
+      if [ -n "$age" ] && [ "$age" -lt "$window" ]; then
+        return 0
+      fi
+    fi
+  fi
+
+  # Signal 3: review-agent verdict comment.
+  local verdict_age
+  verdict_age=$(latest_review_verdict_age_seconds "$issue_num")
+  if [ -n "$verdict_age" ] && [ "$verdict_age" -lt "$window" ]; then
+    return 0
+  fi
+
+  # Signal 4: defensive PID re-check.
+  local pid
+  pid=$(get_pid review "$issue_num")
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    return 0
+  fi
+
+  return 1
 }
 
 # Step 4a.5: PR-exists short-circuit on the pending-dev scan. Mirrors
