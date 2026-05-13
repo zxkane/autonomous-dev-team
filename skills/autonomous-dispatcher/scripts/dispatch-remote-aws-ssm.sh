@@ -139,11 +139,17 @@ case "$TYPE" in
     COMMENT="${SSM_REMOTE_PROJECT_ID}: new dev task for issue #${ISSUE_NUM}"
     ;;
   dev-resume)
-    if [[ -z "$SESSION_ID" ]]; then
-      echo "ERROR: session_id required for dev-resume" >&2
-      exit 1
+    # Empty SESSION_ID is tolerated: dispatcher-tick.sh Step 4 dispatches
+    # dev-resume on every pending-dev pass, including first-time pickup
+    # with no prior `Dev Session ID:` comment. The remote dispatch-local.sh
+    # handles empty session by spawning the wrapper without --session,
+    # and autonomous-dev.sh:257-260 falls back to MODE=new. Mirrors the
+    # local-backend tolerance so SSM users see the same Step 4 fix. (#107)
+    if [[ -n "$SESSION_ID" ]]; then
+      INNER_CMD="${prefix}PROJECT_DIR=${SSM_REMOTE_PROJECT_DIR} PROJECT_ID=${SSM_REMOTE_PROJECT_ID} bash ${DISPATCH_LOCAL} dev-resume ${ISSUE_NUM} ${SESSION_ID}"
+    else
+      INNER_CMD="${prefix}PROJECT_DIR=${SSM_REMOTE_PROJECT_DIR} PROJECT_ID=${SSM_REMOTE_PROJECT_ID} bash ${DISPATCH_LOCAL} dev-resume ${ISSUE_NUM}"
     fi
-    INNER_CMD="${prefix}PROJECT_DIR=${SSM_REMOTE_PROJECT_DIR} PROJECT_ID=${SSM_REMOTE_PROJECT_ID} bash ${DISPATCH_LOCAL} dev-resume ${ISSUE_NUM} ${SESSION_ID}"
     COMMENT="${SSM_REMOTE_PROJECT_ID}: resume dev for issue #${ISSUE_NUM}"
     ;;
   review)

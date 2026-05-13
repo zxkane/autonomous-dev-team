@@ -239,11 +239,36 @@ assert_contains "stderr names instance ID" "$SSM_INSTANCE_ID" "$err"
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== TC-EB-007b: dev-resume requires session_id (run before PATH test) ==="
+echo "=== TC-EB-007b: dev-resume tolerates empty session_id (#107) ==="
 # ---------------------------------------------------------------------------
+# dispatcher-tick.sh Step 4 dispatches dev-resume on every pending-dev pass,
+# including first-time pickup with no prior `Dev Session ID:` comment. The
+# remote driver must forward the call (without --session) so the wrapper
+# can fall back to MODE=new — symmetric with the local backend's tolerance.
+: > "$TMPROOT/aws-record"
 err=$(run_driver dev-resume 99 2>&1 >/dev/null)
-assert_rc "dev-resume without session_id → rc=1" 1 "$?"
-assert_contains "stderr names session_id" "session_id" "$err"
+rc=$?
+assert_rc "dev-resume without session_id succeeds" 0 "$rc"
+[[ -s "$TMPROOT/aws-record" ]] && {
+  echo -e "  ${GREEN}PASS${NC}: aws send-command was invoked"
+  PASS=$((PASS + 1))
+} || {
+  echo -e "  ${RED}FAIL${NC}: aws send-command NOT invoked when session empty"
+  FAIL=$((FAIL + 1))
+}
+# The constructed inner command must include `dev-resume 99` (3-arg form,
+# no trailing session id).
+record=$(cat "$TMPROOT/aws-record")
+assert_contains "inner command contains dev-resume 99" "dev-resume 99" "$record"
+assert_not_contains "stderr does NOT say 'session_id required'" "session_id required" "$err"
+
+# Regression: real session_id still gets forwarded as the 4th arg.
+: > "$TMPROOT/aws-record"
+err=$(run_driver dev-resume 99 abc-session-id-123 2>&1 >/dev/null)
+rc=$?
+assert_rc "dev-resume with session_id succeeds" 0 "$rc"
+record=$(cat "$TMPROOT/aws-record")
+assert_contains "inner command contains session id" "abc-session-id-123" "$record"
 
 # ---------------------------------------------------------------------------
 echo ""

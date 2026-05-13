@@ -493,6 +493,60 @@ last_reviewed_head() {
     -q '[.comments[].body | capture("Reviewed HEAD: `(?<sha>[0-9a-f]{7,40})`"; "g") | .sha] | last // empty'
 }
 
+# Step 4a.5: PR-exists short-circuit on the pending-dev scan. Mirrors
+# Step 5b's `last_reviewed_head` check so a stale FAILED verdict against
+# an unchanged PR HEAD doesn't drive an infinite re-review loop (#106).
+#
+# Returns:
+#   0 — handled (caller should `continue` to next issue)
+#   1 — no PR for this issue (caller falls through to session/dispatch logic)
+#
+# Side effects (only when returning 0):
+#   - Same HEAD already reviewed → idempotent stale-verdict notice;
+#     label stays pending-dev.
+#   - HEAD differs OR no prior review → flips pending-dev → pending-review
+#     and posts the Bug 3 transition comment.
+handle_pending_dev_pr_exists() {
+  local issue_num="$1"
+  local pr_info pr_num current_head pr_ref last_head notice_marker
+  pr_info=$(fetch_pr_for_issue "$issue_num" "number,headRefOid")
+  if [ -z "$pr_info" ]; then
+    return 1
+  fi
+
+  pr_num=$(jq -r '.number // empty' <<<"$pr_info")
+  current_head=$(jq -r '.headRefOid // empty' <<<"$pr_info")
+  pr_ref="${pr_num:+#${pr_num}}"
+  pr_ref="${pr_ref:-(number unknown)}"
+  last_head=$(last_reviewed_head "$issue_num")
+
+  if [ -n "$last_head" ] && [ -n "$current_head" ] && [ "$current_head" = "$last_head" ]; then
+    # Same HEAD already reviewed — verdict was FAILED (otherwise the issue
+    # wouldn't be in pending-dev). Don't redo review; surface the stale
+    # verdict and keep pending-dev so the dev agent can act on feedback.
+    #
+    # Idempotency check uses `grep -q '^0$'` (fail-closed): a transient
+    # `gh issue view` error yields empty output, grep returns 1, and we
+    # skip the post — preventing duplicate notices on rate-limit / auth
+    # refresh blips. Mirrors the existing INV-12-completed marker pattern
+    # in dispatcher-tick.sh:267-269.
+    notice_marker="stale-verdict:${current_head}"
+    if gh issue view "$issue_num" --repo "$REPO" --json comments \
+        -q "[.comments[].body | select(contains(\"${notice_marker}\"))] | length" \
+        2>/dev/null | grep -q '^0$'; then
+      gh issue comment "$issue_num" --repo "$REPO" \
+        --body "PR ${pr_ref} HEAD \`${current_head}\` already reviewed with FAILED verdict; awaiting new commits before re-review. (\`${notice_marker}\`)"
+    fi
+    return 0
+  fi
+
+  # New HEAD or first review — keep existing Bug 3 (#99) behavior.
+  gh issue comment "$issue_num" --repo "$REPO" \
+    --body "PR ${pr_ref} exists for this issue; transitioning to pending-review instead of retrying dev (#99 Bug 3)."
+  label_swap "$issue_num" "pending-dev" "pending-review"
+  return 0
+}
+
 # ---------------------------------------------------------------------------
 # Label transitions (atomic per-edit, see [INV-08])
 # ---------------------------------------------------------------------------

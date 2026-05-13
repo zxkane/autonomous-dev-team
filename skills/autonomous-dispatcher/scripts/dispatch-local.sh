@@ -152,12 +152,14 @@ case "$TYPE" in
     CHILD_PID=$!
     ;;
   dev-resume)
-    if [[ -z "$SESSION_ID" ]]; then
-      echo "ERROR: session_id required for dev-resume" >&2
-      exit 1
-    fi
-    nohup "${PROJECT_DIR}/scripts/autonomous-dev.sh" \
-      --issue "$ISSUE_NUM" --mode resume --session "$SESSION_ID" \
+    # Empty SESSION_ID is tolerated: dispatcher-tick.sh Step 4 dispatches
+    # dev-resume on every pending-dev pass, including first-time pickup
+    # with no prior `Dev Session ID:` comment. autonomous-dev.sh:257-260
+    # falls back to MODE=new when --mode resume is invoked without
+    # --session, so omitting the flag here is the canonical handoff. (#107)
+    resume_args=(--issue "$ISSUE_NUM" --mode resume)
+    [[ -n "$SESSION_ID" ]] && resume_args+=(--session "$SESSION_ID")
+    nohup "${PROJECT_DIR}/scripts/autonomous-dev.sh" "${resume_args[@]}" \
       >> "/tmp/agent-${PROJECT_ID}-issue-${ISSUE_NUM}.log" 2>&1 &
     CHILD_PID=$!
     ;;
