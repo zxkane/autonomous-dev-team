@@ -173,23 +173,27 @@ if RETRY_COUNT >= MAX_RETRIES (default 3):
   skip
 ```
 
-### Step 4a.5: PR-exists short-circuit (#99 Bug 3)
+### Step 4a.5: PR-exists short-circuit (#99 Bug 3, #106)
 
-Before extracting the session-id and dispatching a resume, check `fetch_pr_for_issue`. If a PR is already open and references this issue, the agent had finished publishing — any subsequent crash that landed it in `pending-dev` (e.g. cleanup-trap fired with non-zero exit after `gh pr create` succeeded) does not warrant re-developing.
+Before extracting the session-id and dispatching a resume, the helper `handle_pending_dev_pr_exists` (in `lib-dispatch.sh`) checks `fetch_pr_for_issue` for a PR referencing this issue. If a PR is already open, the agent had finished publishing — any subsequent crash that landed it in `pending-dev` (e.g. cleanup-trap fired with non-zero exit after `gh pr create` succeeded) does not warrant re-developing.
 
-Action when a PR exists:
+The helper consults `last_reviewed_head` to distinguish "first review (or new commits)" from "stale verdict on unchanged HEAD" (#106):
 
-1. Comment: "PR #N exists for this issue; transitioning to pending-review instead of retrying dev (#99 Bug 3)."
-2. `gh issue edit --remove-label pending-dev --add-label pending-review`.
-3. Append the issue to `JUST_DISPATCHED` so Step 5 doesn't reprobe it on the same tick.
+| State | Action |
+|---|---|
+| PR exists, `current_head == last_reviewed_head` (FAILED verdict against unchanged HEAD) | Post idempotent `stale-verdict:<sha>` notice (fail-closed via `grep -q '^0$'`), keep `pending-dev`, append to `JUST_DISPATCHED`. |
+| PR exists, `current_head != last_reviewed_head` (new commits to assess) | Post Bug 3 transition comment, `label_swap pending-dev → pending-review`, append to `JUST_DISPATCHED`. |
+| PR exists, no prior `Reviewed HEAD:` trailer (first review) | Same as the new-commits branch. |
+| Empty `current_head` from PR JSON (schema drift / partial response) | Defensive: treat as new-commits branch, transition to `pending-review`. |
+| No PR | Helper returns 1; caller falls through to session-id extraction (Step 4b). |
 
-This is the Step 4 mirror of Step 5b's "DEAD + in-progress + PR exists" branch — it covers the case where the cleanup trap got there first and the issue is already on `pending-dev` when the next tick arrives.
+This is the Step 4 mirror of Step 5b's "DEAD + in-progress + PR exists" branch — it covers the case where the cleanup trap got there first and the issue is already on `pending-dev` when the next tick arrives. The `last_reviewed_head` check prevents the prior-review-FAILED-on-unchanged-HEAD loop where every tick would otherwise re-dispatch review against identical code.
 
 ### Step 4b: extract session-id
 
 Find the most recent comment matching `Dev Session ID: \`<id>\`` (note: `Review Session ID: ...` is a separate trailer and MUST NOT match — they share the word "Session" so the regex anchors on `Dev Session ID:` specifically, see [INV-03](invariants.md#inv-03-dev-session-report-comment-format)).
 
-If no session-id can be extracted, the resume cannot proceed. Today, the dispatcher dispatches a new dev session anyway (the wrapper's `--mode resume` path falls back to `--mode new` when `SESSION_ID` is empty — see [`dev-agent-flow.md`](dev-agent-flow.md#mode-normalization)).
+If no session-id can be extracted, the resume cannot proceed at the wrapper level — but the wrapper's `--mode resume` path falls back to `--mode new` when `SESSION_ID` is empty (see [`dev-agent-flow.md`](dev-agent-flow.md#mode-normalization)). Both transport drivers (`dispatch-local.sh` and `dispatch-remote-aws-ssm.sh`) tolerate empty `SESSION_ID` in the `dev-resume` branch and forward the call without `--session`, so the wrapper-side fallback is reachable for first-time `pending-dev` pickup (#107). Prior to this fix, both drivers rejected empty session with `exit 1`, leaving the issue stuck in `in-progress` until Step 5 stale-detection swapped it back one tick later.
 
 ### Step 4b.5: terminal-state gate ([INV-12](invariants.md#inv-12-resume-only-against-unfinished-sessions))
 
