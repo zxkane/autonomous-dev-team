@@ -233,15 +233,14 @@ for i in $(seq 0 $((pd_count - 1))); do
   # finished development — any subsequent crash (e.g. cleanup-time exit
   # non-zero after gh pr create) routed us to pending-dev, but re-developing
   # would just re-do work. Hand off to review instead.
-  pr_for_issue=$(fetch_pr_for_issue "$issue_num" "number")
-  if [ -n "$pr_for_issue" ]; then
-    pr_num=$(jq -r '.number // empty' <<<"$pr_for_issue")
-    pr_ref="${pr_num:+#${pr_num}}"
-    pr_ref="${pr_ref:-(number unknown)}"
-    log "  issue #${issue_num} has PR ${pr_ref} — transitioning to pending-review (Bug 3 fix)"
-    gh issue comment "$issue_num" --repo "$REPO" \
-      --body "PR ${pr_ref} exists for this issue; transitioning to pending-review instead of retrying dev (#99 Bug 3)."
-    label_swap "$issue_num" "pending-dev" "pending-review"
+  #
+  # #106: when the PR's HEAD already matches the most recent
+  # `Reviewed HEAD:` trailer, the prior verdict was FAILED and the dev
+  # agent hasn't pushed new commits yet. Re-routing to pending-review
+  # would loop the same review against the same code every tick. The
+  # helper keeps such issues in pending-dev with an idempotent
+  # stale-verdict notice; only NEW commits or first-review issues flip.
+  if handle_pending_dev_pr_exists "$issue_num"; then
     JUST_DISPATCHED+=("$issue_num")
     continue
   fi
