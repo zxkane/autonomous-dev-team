@@ -219,7 +219,7 @@ This is a conservative gate: it only fires when the helper is certain the prior 
 
 Implementation: `lib-dispatch.sh::list_stale_candidates`, `was_just_dispatched`, `pid_alive`, `get_pid`, `fetch_pr_for_issue`, `ci_is_green`, `pr_idle_seconds`, `last_reviewed_head`, `label_swap`.
 
-Find issues labeled `in-progress` OR `reviewing`.
+Find issues labeled `in-progress` OR `reviewing` **and not also `approved`**. The `approved` exclusion is critical: an issue in the `approved` terminal state that still carries a transitional label (residue from a wrapper crash between two label edits, or from the [INV-15](invariants.md#inv-15-step-5a-sigterm-race-is-non-deterministic) SIGTERM race) must not be treated as stale. Without the exclusion, Step 5 would swap the active label to `pending-dev`, which re-arms Step 4 on the next tick — an infinite loop burning tokens on a terminally-decided issue (issue #115 Bug A).
 
 For each match:
 

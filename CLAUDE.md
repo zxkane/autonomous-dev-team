@@ -33,6 +33,14 @@ This project enforces a strict TDD development workflow through agent hooks. The
 
 > Hooks are supported in Claude Code and Kiro CLI. For agents without hook support (Cursor, Windsurf, Gemini CLI), follow each step manually — the discipline is the same.
 
+### Pipeline Documentation Authority
+
+`docs/pipeline/*.md` (`state-machine.md`, `invariants.md`, `dispatcher-flow.md`, `dev-agent-flow.md`, `review-agent-flow.md`, `handoffs.md`) is the **spec** for the dispatcher / dev wrapper / review wrapper subsystem. Any code change to those wrappers MUST update the corresponding pipeline doc in the **same PR**.
+
+When code and docs disagree, the **docs are authoritative** — code that diverges from a documented invariant is a bug, not the doc. New invariants get a new `INV-NN` entry in `invariants.md`; new label transitions update the `state-machine.md` mermaid diagram and the "Invalid combinations" section. PR reviewers reject pipeline-touching PRs that ship without the matching doc update.
+
+This rule is scoped to the dispatcher/wrapper subsystem; the rest of the repo follows ordinary docs-keep-up-to-date hygiene.
+
 ### Workflow Summary
 
 ```
@@ -84,6 +92,7 @@ Before merging any PR, confirm:
 - [ ] E2E tests pass
 - [ ] Peer review complete
 - [ ] Worktree cleaned up after merge
+- [ ] If the PR touches dispatcher / dev / review wrappers, the corresponding `docs/pipeline/*.md` (state-machine, invariants, *-flow, handoffs) is updated in the same PR — see [Pipeline Documentation Authority](#pipeline-documentation-authority)
 
 ---
 

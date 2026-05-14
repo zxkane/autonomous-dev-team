@@ -77,10 +77,20 @@ list_pending_dev() {
 # Step 5: issues currently in active state (in-progress OR reviewing) — same
 # query as count_active but returning {number, labels} so callers can branch on
 # which active label is set.
+#
+# `approved` is subtracted: an issue in the `approved` terminal state that
+# still carries a transitional label (residue from a wrapper crash between
+# two label edits, or from the [INV-15] SIGTERM race) must NOT be treated
+# as stale. Issue #115 Bug A: without this exclusion, Step 5 swaps the
+# active label to `pending-dev`, which re-arms Step 4 on the next tick —
+# infinite loop burning tokens on a terminally-decided issue.
 list_stale_candidates() {
   gh issue list --repo "$REPO" --state open --limit 100 \
     --label "autonomous" --json number,labels \
-    -q '[.[] | select(.labels[].name | IN("in-progress","reviewing"))]'
+    -q '[.[] | select(
+      (.labels[].name | IN("in-progress","reviewing")) and
+      ([.labels[].name] | contains(["approved"]) | not)
+    )]'
 }
 
 # ---------------------------------------------------------------------------
