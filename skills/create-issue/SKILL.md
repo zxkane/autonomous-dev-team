@@ -131,7 +131,7 @@ Frame the question as:
 - **Acceptance criteria**: Must be objectively verifiable, not subjective
 - **Scope**: Prefer smaller, focused issues over large multi-part ones
 - **References**: Link to related issues, PRD sections, or code paths when relevant
-- **Dependencies**: When creating multiple related issues, populate the `## Dependencies` section with links to blocking issues. Create issues in dependency order so earlier issue numbers are available for later ones. The dispatcher will skip issues whose dependencies are still open.
+- **Dependencies**: The `## Dependencies` section must contain **only** issues that must be closed/merged before this issue can be started. Do NOT include: parent epics referenced for context, issues this one unblocks, or any `#NNN` reference that isn't a true blocker. The autonomous dispatcher parses this section literally — any open `#NNN` here causes the issue to be silently skipped forever. If there are no blockers, write exactly `None`. Create issues in dependency order so earlier issue numbers are known when writing later ones.
 - **Testing Requirements**: ALWAYS include the "Testing Requirements" section. The dev agent follows the project's TDD workflow but has been observed to skip E2E tests or test-case docs when the issue doesn't explicitly call them out. Be specific about:
   - Key scenarios each test type must cover (2-4 bullet points)
   - For bugs: the regression test must fail before the fix and pass after
@@ -141,7 +141,7 @@ Frame the question as:
 When breaking a large feature into multiple issues:
 
 1. **Create issues in dependency order** — issues with no dependencies first, then issues that depend on them. This ensures issue numbers are known when writing dependency references.
-2. **Populate the `## Dependencies` section** in each issue body with `#N` links to blocking issues.
+2. **Populate the `## Dependencies` section** in each issue body with `#N` links to **directly blocking** issues only. Do not reference parent epics, context issues, or issues this one unblocks — the dispatcher treats every `#NNN` in that section as a hard blocker.
 3. **Use a consistent naming scheme** — prefix titles with the project/feature name for easy filtering (e.g., "MyProject: Add DynamoDB infrastructure").
 4. **Cross-reference the plan** — if an implementation plan exists, link each issue to the relevant plan tasks/chunks.
 5. **The dispatcher skips blocked issues** — issues with open dependencies in the `## Dependencies` section are ignored by the autonomous dispatcher until all dependencies are resolved (closed/merged).

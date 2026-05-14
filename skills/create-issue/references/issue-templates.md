@@ -39,8 +39,17 @@
 - [ ] <Criterion 2>
 
 ## Dependencies
-<List issues that must be completed before this issue can begin. Use GitHub issue links.>
-- None | Depends on #N (<brief reason>)
+<!--
+  IMPORTANT: List ONLY issues that must be closed/merged before this issue can be started.
+  Do NOT list:
+    - Issues that this issue unblocks (i.e., issues that depend on THIS one)
+    - Parent epics or meta-trackers referenced for context
+    - Issues mentioned elsewhere in the body
+  The autonomous dispatcher parses this section literally — any #NNN here that is still
+  OPEN will cause this issue to be silently skipped until that issue is closed.
+  If there are no blocking prerequisites, write exactly: None
+-->
+- None | #N (must be merged first because <specific reason>)
 
 ## Design Considerations
 <Architecture notes, API changes, data model impact -- if applicable>
