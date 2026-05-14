@@ -155,7 +155,7 @@ The issue is now in `in-progress`; the dev wrapper is launching via `nohup`. Ste
 
 Implementation: `lib-dispatch.sh::list_pending_review`, `label_swap`.
 
-Find issues labeled `autonomous` AND `pending-review` AND NOT `reviewing`.
+Find issues labeled `autonomous` AND `pending-review` AND NOT (`reviewing` OR `approved` OR `stalled`). The `approved`/`stalled` exclusion is defense-in-depth on top of [INV-25](invariants.md#inv-25-terminal-labels-approved-stalled-are-sticky-transitional-residue-is-healed-at-tick-start) Step 0 hygiene — Step 0 strips `pending-review` from terminal issues at tick start, but if Step 0 fails (rate-limit, API outage), the inline filter still keeps the selector from spawning a review against an already-approved/stalled issue.
 
 For each match, in order:
 
@@ -168,7 +168,7 @@ For each match, in order:
 
 Implementation: `lib-dispatch.sh::list_pending_dev`, `count_retries`, `mark_stalled`, `extract_dev_session_id`, `label_swap`.
 
-Find issues labeled `autonomous` AND `pending-dev`.
+Find issues labeled `autonomous` AND `pending-dev` AND NOT (`approved` OR `stalled`). The terminal-label exclusion is defense-in-depth on top of [INV-25](invariants.md#inv-25-terminal-labels-approved-stalled-are-sticky-transitional-residue-is-healed-at-tick-start) Step 0 hygiene; without it, an `approved + pending-dev` residue would trigger Step 4's `pending-dev → in-progress` swap and spawn dev-resume against an approved issue (the actual mechanism behind the wedge that motivated #115).
 
 For each match, in order:
 
