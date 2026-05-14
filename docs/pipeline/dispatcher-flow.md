@@ -178,7 +178,7 @@ This is the most subtle gate in the dispatcher. Two failure events count toward 
 
 Failure events:
 
-- **`Agent Session Report (Dev)` comments with non-zero exit code.** Posted by the dev wrapper trap on agent failure ([INV-03](invariants.md#inv-03-dev-session-report-comment-format)). Always count.
+- **`Agent Session Report (Dev)` comments with non-zero exit code, EXCLUDING SIGTERM (143) and SIGKILL (137).** Posted by the dev wrapper trap on agent failure ([INV-03](invariants.md#inv-03-dev-session-report-comment-format)). Exits 143 / 137 are excluded ([INV-26](invariants.md#inv-26-stall-decision-excludes-dispatcher-induced-terminations-and-defers-on-live-wrappers)) because they are almost exclusively caused by `dispatch-local.sh::kill_stale_wrapper` — counting the dispatcher's own kill as an agent failure consumes retry budget the agent never spent. Wall-clock-timeout exit 124 still counts (catches genuine hangs).
 - **Dispatcher-detected crash comments matching the regex `Task appears to have crashed \(no PR found\)|process not found`.** This regex anchors only on Step 5b-DEAD-no-PR comments and explicit "process not found" wording. It MUST NOT match the forward-progress phrases — see [INV-06](invariants.md#inv-06-crashed--process-not-found-keyword-contract). **Only counts when the agent has confirmed startup** in this retry cycle (a `Dev Session ID:` comment exists post-cutoff) — see [INV-19](invariants.md#inv-19-retry-counter-requires-confirmed-agent-startup).
 
 Pseudocode:
@@ -191,10 +191,17 @@ SESSION_SEEN = count of "Dev Session ID: ..." comments AFTER LAST_STALLED_AT (IN
 RETRY_COUNT = AGENT_FAILURES + (SESSION_SEEN > 0 ? DISPATCHER_CRASHES : 0)
 
 if RETRY_COUNT >= MAX_RETRIES (default 3):
-  remove pending-dev, add stalled
-  comment "Marking as stalled. <counter breakdown including suppressed false positives> @owner please investigate manually."
-  skip
+  if pid_alive(issue, issue_num):                  # INV-26 liveness deferral
+    if no INV-26-stall-deferral marker for this PID:
+      comment "Stall decision deferred: dev wrapper PID <N> is still alive..."
+    skip                                            # let the live wrapper finish
+  else:
+    remove pending-dev, add stalled
+    comment "Marking as stalled. <counter breakdown including suppressed false positives> @owner please investigate manually."
+    skip
 ```
+
+Both gates ([INV-26](invariants.md#inv-26-stall-decision-excludes-dispatcher-induced-terminations-and-defers-on-live-wrappers)) protect the `stalled` signal: the counter only sees genuine failures, and the transition only fires when the wrapper has actually exited. Without (1), `kill_stale_wrapper`-induced SIGTERMs let the counter overcount; without (2), the transition lies about a wrapper that's still making progress and produces the `approved + stalled` co-existence wedge documented in #121's reproduction.
 
 ### Step 4a.5: PR-exists short-circuit (#99 Bug 3, #106)
 

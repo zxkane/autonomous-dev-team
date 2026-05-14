@@ -379,8 +379,26 @@ count_agent_failures() {
   local last_stalled_at
   last_stalled_at=$(gh issue view "$issue_num" --repo "$REPO" --json comments \
     -q '[.comments[] | select(.body | test("Marking as stalled"))] | last | .createdAt // "1970-01-01T00:00:00Z"')
+  # Exit code exclusions:
+  #   0   → success (pre-existing exclusion).
+  #   143 → SIGTERM. Almost always caused by `dispatch-local.sh::kill_stale_wrapper`
+  #         when the dispatcher decides to kick a stale wrapper to spawn a fresh
+  #         one. Counting the dispatcher's own kill as an "agent failure"
+  #         consumed retry budget the agent never spent (see #121 Fix A).
+  #   137 → SIGKILL. The escalation path when SIGTERM is ignored, again driven
+  #         by kill_stale_wrapper. Same reasoning as 143.
+  # Genuine hangs are still bounded by `lib-agent.sh::_run_with_timeout`'s
+  # exit code 124 (kept counting) and any non-listed non-zero exit (real
+  # agent crashes). The regex anchors on word boundaries (`Exit code:
+  # 143\b`-equivalent via `\\b`) so 144 / 1430 / etc. don't false-match.
   gh issue view "$issue_num" --repo "$REPO" --json comments \
-    -q "[.comments[] | select((.createdAt > \"${last_stalled_at}\") and (.body | test(\"Agent Session Report \\\\(Dev\\\\)\")) and (.body | test(\"Exit code: 0\") | not))] | length"
+    -q "[.comments[] | select(
+         (.createdAt > \"${last_stalled_at}\")
+         and (.body | test(\"Agent Session Report \\\\(Dev\\\\)\"))
+         and (.body | test(\"Exit code: 0\\\\b\") | not)
+         and (.body | test(\"Exit code: 143\\\\b\") | not)
+         and (.body | test(\"Exit code: 137\\\\b\") | not)
+       )] | length"
 }
 
 count_dispatcher_crashes() {
@@ -396,6 +414,33 @@ count_dispatcher_crashes() {
 # stalled" comment that the next stalled-cutoff calculation will key off.
 mark_stalled() {
   local issue_num="$1"
+
+  # Liveness defer (#121 Fix C): if a dev wrapper is still alive on this
+  # issue, the retry counter is almost certainly wrong (the wrapper is
+  # making real progress; the dispatcher's "crash" detection or its own
+  # kill_stale_wrapper SIGTERMs are scoring a healthy wrapper). Posting
+  # `+stalled` here would lie about a working wrapper — and worse, the
+  # wrapper trap will then write `pending-review` onto a stalled issue,
+  # producing the `approved + stalled` co-existence wedge documented in
+  # #121's reproduction (podcast-curation#204 / 2026-05-14).
+  #
+  # Defense: defer the decision when `pid_alive` reports ALIVE. Post a
+  # one-shot deferral comment (idempotency-keyed on the agent's current
+  # session id pulled from the wrapper PID file path, so re-ticks against
+  # the same alive wrapper don't fill the timeline).
+  if pid_alive issue "$issue_num"; then
+    local pid current_session_marker
+    pid=$(get_pid issue "$issue_num")
+    current_session_marker="INV-26-stall-deferral:pid=${pid}"
+    if gh issue view "$issue_num" --repo "$REPO" --json comments \
+        -q "[.comments[].body | select(contains(\"${current_session_marker}\"))] | length" \
+        2>/dev/null | grep -q '^0$'; then
+      gh issue comment "$issue_num" --repo "$REPO" \
+        --body "Stall decision deferred: dev wrapper PID ${pid} is still alive — counter says ${MAX_RETRIES} but a wrapper is making progress. Re-evaluating next tick. (\`${current_session_marker}\`)"
+    fi
+    return 0
+  fi
+
   local agent_failures dispatcher_crashes false_positives
   agent_failures=$(count_agent_failures "$issue_num")
   dispatcher_crashes=$(count_dispatcher_crashes "$issue_num")
