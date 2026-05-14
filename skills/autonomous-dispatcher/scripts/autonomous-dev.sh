@@ -318,9 +318,25 @@ EOF
   set -e
 
 elif [[ "$MODE" = "resume" ]]; then
-  # Fetch review feedback from issue comments
+  # Fetch review feedback from issue comments.
+  #
+  # The selector must match ONLY review-agent output, never dispatcher
+  # status comments. Pre-fix (#113) the second clause was
+  # `contains("review")`, which substring-matched literal `review`
+  # against every comment body — including dispatcher messages like
+  # `Dispatching autonomous review`, `Moving to pending-review for
+  # assessment`, and `no new commits since last review at <sha>`.
+  # When such a status landed AFTER a real `Review findings:` comment,
+  # `| last` returned the dispatcher chatter and the dev agent's
+  # resume prompt carried it as its "Review Feedback" — making real
+  # blocking findings invisible to the resumed session. See #113.
+  #
+  # Anchor on the literal prefixes the review wrapper writes: `Review
+  # findings` (verdict FAIL) and `Review PASSED` (verdict PASS). Both
+  # are wrapper-side strings; dispatcher status comments never start
+  # with either.
   REVIEW_COMMENTS=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json comments \
-    -q '[.comments[] | select(.body | contains("Review findings") or contains("review"))] | last // empty')
+    -q '[.comments[] | select(.body | startswith("Review findings") or startswith("Review PASSED"))] | last // empty')
 
   # Fetch PR number linked to this issue for inline review comments
   PR_NUM=$(gh pr list --repo "$REPO" --state open --json number,body \

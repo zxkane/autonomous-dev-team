@@ -86,7 +86,7 @@ The `AUTONOMOUS_CONF` env var bypass takes precedence over filesystem detection 
 
 ## Mode = resume
 
-1. **Fetch review feedback** from issue comments — most recent comment containing `Review findings` or `review`.
+1. **Fetch review feedback** from issue comments — most recent comment whose body **starts with** `Review findings` or `Review PASSED`. Both are wrapper-side prefixes the review agent emits; dispatcher status comments (e.g. `Dispatching autonomous review`, `Moving to pending-review for assessment`, `no new commits since last review at <sha>`) never start with either prefix and are correctly excluded. Pre-fix (#113) the second clause was a substring match on `review`, which let dispatcher chatter shadow real review findings whenever a status comment landed after the verdict — the resumed dev session would then see dispatcher noise as its `## Review Feedback` and make zero progress.
 2. **Fetch PR inline review comments** — find the PR linked to the issue, then `gh api repos/.../pulls/N/comments` for each line-anchored comment.
 3. Construct resume prompt with both feedback streams, again wrapped in `<user-issue-content>` tags.
 4. `resume_agent SESSION_ID PROMPT MODEL`. For claude: `claude --resume ID --permission-mode auto -p PROMPT --output-format json`. The `--name` flag is omitted on resume (claude doesn't update display name on resume).
