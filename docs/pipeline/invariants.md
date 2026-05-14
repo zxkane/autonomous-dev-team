@@ -434,7 +434,7 @@ Step 0 runs UNCONDITIONALLY — even when concurrency is saturated. Hygiene is p
 
 **Cross-references**:
 - [INV-15] documents the SIGTERM race that is one *producer* of the residue this invariant heals. The race itself is convergent (PR-6); the residue this heals is from earlier-or-different races and from manual reconciliation, not from the SIGTERM path under normal conditions.
-- The four existing `list_*` selectors in `lib-dispatch.sh` are NOT refactored to call `_has_terminal_label()`; they each inline their own `approved` subtraction. INV-25 makes that inline subtraction defense-in-depth rather than the only line of defense. Future selectors should call `_has_terminal_label()` for symmetry — but a missed call is no longer a Bug-A-class infinite-loop bug, just a wasted query.
+- All four `list_*` selectors in `lib-dispatch.sh` (`list_new_issues`, `list_pending_review`, `list_pending_dev`, `list_stale_candidates`) inline their own `approved` AND `stalled` subtraction. The first two were correct from inception; `list_stale_candidates` was fixed in PR #116 (Bug A); `list_pending_review` and `list_pending_dev` were fixed by the Bug C post-investigation PR. INV-25 makes those inline subtractions defense-in-depth rather than the only line of defense — Step 0 hygiene heals the residue at tick start regardless of which selector would have misclassified. Future selectors should call `_has_terminal_label()` for symmetry; a missed call is no longer a Bug-A-class infinite-loop bug, just a wasted query.
 
 **Status**: **ENFORCED** in this PR (closes #115 Bug B).
 

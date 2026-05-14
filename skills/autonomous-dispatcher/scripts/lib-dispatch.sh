@@ -61,17 +61,40 @@ list_new_issues() {
 
 # Step 3: issues with `autonomous` + `pending-review` AND NOT `reviewing`.
 # Echoes JSON array of {number, labels}.
+#
+# Terminal-state subtraction (`approved`, `stalled`) is defense-in-depth on
+# top of Step 0 hygiene ([INV-25], PR #117). Step 0 strips `pending-review`
+# from terminal issues at the top of every tick; if it fails for any reason
+# (rate-limit, API outage, future regression), this inline filter still
+# keeps the selector from picking the residue and spawning a review against
+# an already-approved or stalled issue. Issue #115 (Bug C re-scoped post-
+# investigation: original "dev wrapper flips back" hypothesis was wrong;
+# the actual third producer was this missing filter).
 list_pending_review() {
   gh issue list --repo "$REPO" --state open --limit 100 \
     --label "autonomous,pending-review" --json number,labels \
-    -q '[.[] | select([.labels[].name] | contains(["reviewing"]) | not)]'
+    -q '[.[] | select(
+      ([.labels[].name] | contains(["reviewing"]) | not) and
+      ([.labels[].name] | contains(["approved"]) | not) and
+      ([.labels[].name] | contains(["stalled"]) | not)
+    )]'
 }
 
 # Step 4: issues with `autonomous` + `pending-dev`.
 # Echoes JSON array of {number, labels, comments}.
+#
+# Terminal-state subtraction same as list_pending_review above. Issue
+# #115 (Bug C). Without this, an `approved + pending-dev` residue would
+# trigger Step 4's `pending-dev → in-progress` swap and spawn dev-resume
+# against an approved issue — the actual mechanism behind the wedge that
+# motivated this issue.
 list_pending_dev() {
   gh issue list --repo "$REPO" --state open --limit 100 \
-    --label "autonomous,pending-dev" --json number,labels,comments
+    --label "autonomous,pending-dev" --json number,labels,comments \
+    -q '[.[] | select(
+      ([.labels[].name] | contains(["approved"]) | not) and
+      ([.labels[].name] | contains(["stalled"]) | not)
+    )]'
 }
 
 # Step 5: issues currently in active state (in-progress OR reviewing) — same
