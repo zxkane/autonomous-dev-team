@@ -188,10 +188,16 @@ hygiene_post_audit_comment() {
     return 0
   fi
 
-  # Sort for stable marker.
+  # Sort for stable marker. The trailing `;` is a delimiter that makes the
+  # contains()-based probe equality-safe: without it, a marker for the
+  # wider residue set (`...:in-progress,reviewing`) would substring-match
+  # a probe for a narrower set (`...:in-progress`), suppressing
+  # legitimate audit comments when residue regresses from a wider to a
+  # narrower set on the same issue. Labels are kebab-case lowercase so
+  # `;` cannot collide.
   local sorted
   sorted=$(echo "$stripped_labels" | tr ' ' '\n' | sort | tr '\n' ',' | sed 's/,$//')
-  local marker="INV-25-hygiene:${sorted}"
+  local marker="INV-25-hygiene:${sorted};"
 
   local existing
   existing=$(gh issue view "$issue_num" --repo "$REPO" --json comments \

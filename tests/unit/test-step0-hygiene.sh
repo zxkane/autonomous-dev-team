@@ -245,6 +245,28 @@ hygiene_post_audit_comment 202 "approved" "pending-dev" >/dev/null
 comment_calls=$(printf '%s\n' "${_GH_CALLS[@]}" | grep -cE '^issue comment' || true)
 assert_eq "TC-COMMENT-003 different residue → fresh post" "1" "$comment_calls"
 
+# TC-COMMENT-004 — narrower-residue probe must NOT substring-collide with
+# a wider-residue marker already on the issue. Verified by inspecting the
+# marker the helper writes into the comment body (which is what the
+# probe also matches against). The marker MUST end with a delimiter
+# (semicolon) that bounds the set so `contains("...:in-progress;")`
+# does NOT match `...:in-progress,reviewing;`.
+#
+# We assert the body shape directly (the helper builds it and passes
+# it to `gh issue comment --body`), bypassing the existing-marker
+# branch which is already covered by TC-COMMENT-002.
+_GH_CALLS=()
+_MOCK_COMMENTS_JSON='0'
+hygiene_post_audit_comment 203 "approved" "in-progress reviewing" >/dev/null
+emitted_body=$(printf '%s\n' "${_GH_CALLS[@]}" | grep -E '^issue comment' || true)
+# Body should contain the wide marker with terminator
+assert_match "TC-COMMENT-004 wide marker carries terminator" 'INV-25-hygiene:in-progress,reviewing;' "$emitted_body"
+# And critically must NOT contain a substring that the narrower probe
+# `INV-25-hygiene:in-progress;` would equality-match (the narrower
+# probe MUST mismatch this body, even though it substring-matches
+# without the terminator).
+assert_no_match "TC-COMMENT-004 narrower probe with terminator does NOT match wide body" 'INV-25-hygiene:in-progress;' "$emitted_body"
+
 # ===================================================================
 # Step 0 structural placement
 # ===================================================================
