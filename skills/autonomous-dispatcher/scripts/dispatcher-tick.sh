@@ -141,6 +141,21 @@ dispatch() {
 JUST_DISPATCHED=()
 
 # ---------------------------------------------------------------------------
+# Step 0: label hygiene pass ([INV-25], issue #115 Bug B)
+# ---------------------------------------------------------------------------
+# Heal "approved + transitional" and "stalled + transitional" residues
+# before any selector reads labels. Without this, an issue in a sticky
+# terminal state but still carrying e.g. `pending-review` would be
+# re-picked by a future selector that forgets to subtract the terminal
+# (Bug A was one such selector — fixed in PR #116; Bug B closes the
+# class). Step 0 runs UNCONDITIONALLY: even when concurrency is
+# saturated we still want stale residue cleared so Step 5 doesn't
+# misclassify on the next tick. Pure label edits — no agent dispatch,
+# no retry counting.
+log "Step 0: scanning for terminal-label residue..."
+run_hygiene_pass
+
+# ---------------------------------------------------------------------------
 # Step 1: Concurrency gate
 # ---------------------------------------------------------------------------
 ACTIVE=$(count_active)

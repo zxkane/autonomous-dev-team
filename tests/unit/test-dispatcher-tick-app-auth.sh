@@ -113,6 +113,14 @@ post_dispatch_token() {
 }
 is_within_grace_period() { return 1; }
 latest_dispatch_token_age_seconds() { echo ""; }
+# Step 0 hygiene helpers ([INV-25], #115 Bug B). dispatcher-tick.sh calls
+# run_hygiene_pass at the very top; auth tests don't exercise the hygiene
+# path, so a no-op stub is sufficient.
+run_hygiene_pass() { :; }
+list_hygiene_residue() { echo '[]'; }
+hygiene_strip_residual_labels() { :; }
+hygiene_post_audit_comment() { :; }
+_has_terminal_label() { return 1; }
 EOF
 
 # Stub gh-app-token.sh: record the call, return a sentinel token. The token

@@ -94,6 +94,155 @@ list_stale_candidates() {
 }
 
 # ---------------------------------------------------------------------------
+# Step 0: label hygiene helpers ([INV-25], issue #115 Bug B)
+# ---------------------------------------------------------------------------
+
+# Terminal-label predicate. Pure function over a labels JSON
+# (`[{"name":"foo"},{"name":"bar"},...]`). Returns 0 if the label set
+# contains `approved` or `stalled` (i.e. the issue is in a sticky terminal
+# state); 1 otherwise. Future selectors can use this to subtract terminals
+# without each rewriting the contains([...]) algebra.
+#
+# The four existing list_* selectors already inline their own approved
+# subtraction; deliberately not refactored to keep this PR low-risk.
+_has_terminal_label() {
+  local labels_json="$1"
+  jq -e '[.[].name] | (contains(["approved"]) or contains(["stalled"]))' \
+    <<<"$labels_json" >/dev/null
+}
+
+# List autonomous issues whose label set is in violation of the
+# state-machine "Forbidden transitions" rules:
+#   - approved + (in-progress | reviewing | pending-review | pending-dev)
+#   - stalled  + (in-progress | reviewing | pending-review | pending-dev)
+# Returns a JSON array of {number, labels:[{name}]}. Empty array when no
+# residue exists (the steady state).
+list_hygiene_residue() {
+  gh issue list --repo "$REPO" --state open --limit 100 \
+    --label "autonomous" --json number,labels \
+    -q '[.[] | select(
+      ([.labels[].name] | (contains(["approved"]) or contains(["stalled"])))
+      and
+      ([.labels[].name] | (
+        contains(["in-progress"]) or
+        contains(["reviewing"]) or
+        contains(["pending-review"]) or
+        contains(["pending-dev"])
+      ))
+    )]'
+}
+
+# Strip transitional labels from an issue that also carries a terminal
+# label. Single bundled `gh issue edit` so the strip is atomic per
+# issue. Echoes the space-separated list of labels stripped (so the
+# caller can feed it to hygiene_post_audit_comment), or empty when the
+# issue is already clean.
+hygiene_strip_residual_labels() {
+  local issue_num="$1"
+  local labels_json="$2"
+
+  # Build the list of transitional labels actually present.
+  local stripped
+  stripped=$(jq -r '
+    [.[].name] as $names
+    | ["in-progress","reviewing","pending-review","pending-dev"]
+    | map(select(. as $t | $names | index($t)))
+    | join(" ")
+  ' <<<"$labels_json")
+
+  if [[ -z "$stripped" ]]; then
+    return 0
+  fi
+
+  # Bail if the issue isn't in a terminal state — defensive: caller
+  # should have prefiltered with list_hygiene_residue, but a stray
+  # invocation against a plain transitional issue (TC-HYG-006) must NOT
+  # strip anything.
+  if ! _has_terminal_label "$labels_json"; then
+    return 0
+  fi
+
+  local args=(issue edit "$issue_num" --repo "$REPO")
+  for t in $stripped; do
+    args+=(--remove-label "$t")
+  done
+  gh "${args[@]}" 2>/dev/null || true
+  echo "$stripped"
+}
+
+# Post a one-shot audit comment on an issue when residual labels were
+# stripped. Idempotency is keyed on `<sorted-stripped-labels>` so the
+# same issue+residue-set never gets two comments. Different residue sets
+# on the same issue (rare — implies a second drift) do post a fresh
+# comment.
+#
+# `terminal_label` is the sticky label (`approved` / `stalled`) used in
+# the comment body; `stripped_labels` is the space-separated list from
+# hygiene_strip_residual_labels.
+hygiene_post_audit_comment() {
+  local issue_num="$1"
+  local terminal_label="$2"
+  local stripped_labels="$3"
+
+  if [[ -z "$stripped_labels" ]]; then
+    return 0
+  fi
+
+  # Sort for stable marker.
+  local sorted
+  sorted=$(echo "$stripped_labels" | tr ' ' '\n' | sort | tr '\n' ',' | sed 's/,$//')
+  local marker="INV-25-hygiene:${sorted}"
+
+  local existing
+  existing=$(gh issue view "$issue_num" --repo "$REPO" --json comments \
+    -q "[.comments[].body | select(contains(\"${marker}\"))] | length" \
+    2>/dev/null || echo 0)
+
+  if [[ "$existing" != "0" ]]; then
+    return 0
+  fi
+
+  local pretty
+  pretty=$(echo "$stripped_labels" | tr ' ' '\n' | awk 'NF{printf "%s`%s`", (NR>1?", ":""), $1}')
+  gh issue comment "$issue_num" --repo "$REPO" \
+    --body "Label hygiene: stripped ${pretty} from \`${terminal_label}\` issue (INV-25). <!-- ${marker} -->" \
+    2>/dev/null || true
+}
+
+# Step 0 entry point. Iterates list_hygiene_residue and applies
+# hygiene_strip_residual_labels + hygiene_post_audit_comment. Always
+# safe to call — no-op when no residue exists.
+run_hygiene_pass() {
+  local residue
+  residue=$(list_hygiene_residue)
+  local count
+  count=$(jq 'length' <<<"$residue")
+  if [[ "$count" -eq 0 ]]; then
+    return 0
+  fi
+
+  local i
+  for i in $(seq 0 $((count - 1))); do
+    local issue_num labels_json terminal stripped
+    issue_num=$(jq -r ".[$i].number" <<<"$residue")
+    labels_json=$(jq -c ".[$i].labels" <<<"$residue")
+
+    # Determine which terminal label drove the residue (approved wins
+    # when both are present — caller can audit further from the comment).
+    if jq -e '[.[].name] | contains(["approved"])' <<<"$labels_json" >/dev/null; then
+      terminal="approved"
+    else
+      terminal="stalled"
+    fi
+
+    stripped=$(hygiene_strip_residual_labels "$issue_num" "$labels_json")
+    if [[ -n "$stripped" ]]; then
+      hygiene_post_audit_comment "$issue_num" "$terminal" "$stripped"
+    fi
+  done
+}
+
+# ---------------------------------------------------------------------------
 # Step 2: dependency check
 # ---------------------------------------------------------------------------
 

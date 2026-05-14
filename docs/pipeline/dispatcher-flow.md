@@ -43,7 +43,8 @@ This is acceptable for this PR's surface area. A real remote-alive check (per-ti
 ```mermaid
 flowchart TD
     start([cron fires]) --> init[Initialize JUST_DISPATCHED empty]
-    init --> step1{Step 1<br/>concurrency cap?}
+    init --> step0[Step 0 label hygiene]
+    step0 --> step1{Step 1<br/>concurrency cap?}
     step1 -- ACTIVE >= MAX --> exit_cap([abort tick])
     step1 -- room available --> step2[Step 2 scan-new]
     step2 --> step3[Step 3 scan-pending-review]
@@ -97,6 +98,28 @@ Failure modes — all exit 1 with `FATAL`, before any `gh` call:
 
 There is no silent fallback to user auth — silently impersonating the
 operator was the bug closed by #91.
+
+## Step 0: label hygiene pass ([INV-25], closes #115 Bug B)
+
+Implementation: `lib-dispatch.sh::run_hygiene_pass`, `list_hygiene_residue`, `hygiene_strip_residual_labels`, `hygiene_post_audit_comment`, `_has_terminal_label`.
+
+Find autonomous issues whose label set violates the state-machine "Forbidden transitions" rules — i.e. an issue carries a sticky terminal label (`approved` or `stalled`) AND any transitional label (`in-progress`, `reviewing`, `pending-review`, `pending-dev`).
+
+For each match:
+
+1. **Strip atomically**: a single `gh issue edit --repo --remove-label A --remove-label B ...` removes every transitional label in one API call. The terminal label is preserved.
+2. **Post a one-shot audit comment**: idempotency-keyed on the sorted set of labels stripped via marker `<!-- INV-25-hygiene:<sorted-labels> -->`. If a comment with the same marker already exists, the strip still happens but the comment is skipped — so a wedged residue cleans up on every tick without spamming the issue timeline.
+3. **Log to dispatcher stdout**: human-readable line for ops audit.
+
+Step 0 runs **unconditionally** — even when concurrency is saturated. Hygiene is pure label edits, no agent dispatch, no retry counting, so capacity is not the right gate. Deferring cleanup by a tick when the system is busy is exactly the wrong tradeoff: residue is most likely to land during high-traffic ticks, and the goal is to heal it before any selector reads labels.
+
+The four existing `list_*` selectors (Steps 2–5) already inline an `approved` subtraction (Bug A precedent in PR #116). INV-25 makes that defense-in-depth — a missed inline subtraction in a future selector is no longer a Bug-A-class infinite-loop bug, just a wasted `gh issue list` query that returns nothing actionable. Future selectors should still call `_has_terminal_label()` for symmetry.
+
+**Producers of residue this heals** (non-exhaustive):
+- [INV-15] SIGTERM race on Step 5a (convergent in PR-6 but historical residue can persist).
+- Wrapper crash between two `gh issue edit` calls (e.g. process-killed mid-cleanup).
+- Manual operator label edits during reconciliation.
+- Future bug producers we haven't found yet — Step 0 closes the class regardless of producer.
 
 ## Step 1: concurrency gate
 

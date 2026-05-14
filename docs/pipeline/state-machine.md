@@ -46,6 +46,19 @@ stateDiagram-v2
     stalled --> pending_dev: Maintainer removes stalled label (retry counter resets)
 
     approved --> [*]: PR merged (auto or manual)
+
+    note right of approved
+        Sticky terminal state (INV-25):
+        any transitional label co-residing
+        with `approved` is stripped by
+        Step 0 hygiene at the next tick.
+    end note
+
+    note right of stalled
+        Same hygiene rule applies (INV-25):
+        residual transitional labels are
+        stripped at tick start.
+    end note
 ```
 
 (Edges are condensed; see the transition table below for preconditions and side effects.)
@@ -87,8 +100,8 @@ These combinations must never happen. If you observe one, it's a bug:
 - **`in-progress` + `reviewing` simultaneously.** Both wrappers think they own the issue. Indicates either (a) a missed `−in-progress` on the dev wrapper exit path, (b) Step 3 dispatched review without first removing `pending-review`, or (c) external manual label edits.
 - **`pending-review` + `reviewing`.** Dispatcher Step 3 must atomically swap (`--remove-label pending-review --add-label reviewing` in one `gh issue edit` call).
 - **`pending-dev` + `in-progress`.** Same as above for Step 4 (`--remove-label pending-dev --add-label in-progress`).
-- **`approved` + any active state.** Once approved, the issue should be closed (auto-merge path) or stable (`no-auto-close` / approval-failure path). The dispatcher does not look at issues labeled `approved`.
-- **`stalled` + any other active state label.** When the dispatcher sets `stalled`, it removes the active state label in the same `gh issue edit` call.
+- **`approved` + any active state.** Once approved, the issue should be closed (auto-merge path) or stable (`no-auto-close` / approval-failure path). The dispatcher does not look at issues labeled `approved`. **Self-healed at Step 0** ([INV-25](invariants.md#inv-25-terminal-labels-approved-stalled-are-sticky-transitional-residue-is-healed-at-tick-start)) — if residue lands (wrapper crash between two label edits, [INV-15] SIGTERM race, manual reconciliation), the next tick's hygiene pass strips the transitional label and posts a one-shot audit comment.
+- **`stalled` + any other active state label.** When the dispatcher sets `stalled`, it removes the active state label in the same `gh issue edit` call. **Same Step 0 hygiene applies** ([INV-25](invariants.md#inv-25-terminal-labels-approved-stalled-are-sticky-transitional-residue-is-healed-at-tick-start)) — residue from a half-completed transition is healed at tick start.
 
 ## Concurrent-modification semantics
 

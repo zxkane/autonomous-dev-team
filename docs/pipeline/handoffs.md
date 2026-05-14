@@ -130,7 +130,7 @@ Two sub-handoffs depending on verdict:
 - Auto-close path: removes `autonomous` AND `reviewing`, adds `approved`, closes issue with reason `completed`, merges PR with `--squash --delete-branch`.
 - `no-auto-close` path: keeps `autonomous`, removes `reviewing`, adds `approved`, leaves PR open. Maintainer merges manually.
 
-**Consumer-side invariants**: the dispatcher does not look at issues labeled `approved` — it's a terminal state. No active consumer.
+**Consumer-side invariants**: the dispatcher does not look at issues labeled `approved` — it's a terminal state. No active consumer. If any transitional label co-resides with `approved` (residue from a wrapper crash between two label edits, [INV-15] SIGTERM race, or manual reconciliation), Step 0 hygiene strips it on the next tick — see [INV-25](invariants.md#inv-25-terminal-labels-approved-stalled-are-sticky-transitional-residue-is-healed-at-tick-start).
 
 **Failure modes**:
 
