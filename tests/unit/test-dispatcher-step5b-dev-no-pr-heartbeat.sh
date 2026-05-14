@@ -118,7 +118,12 @@ else
   # Step 5b's pid_alive gate is the outer `if pid_alive ... else` block.
   # The comment must appear AFTER an `else` AFTER an `if pid_alive`.
   preceding=$(awk -v stop="$crash_line" 'NR < stop' "$TICK")
-  last_if=$(printf '%s\n' "$preceding" | grep -nE "^[[:space:]]*if[[:space:]]+pid_alive\b|^[[:space:]]*if[[:space:]]+!\s*pid_alive\b" | tail -1 | cut -d: -f1)
+  # Use POSIX-portable bracket expressions only — `\s` and `\b` are GNU
+  # grep extensions that BSD/POSIX grep on macOS or Alpine will miss
+  # (per Q-bot review on PR #114). The trailing `[^[:alnum:]_]` plays
+  # the role of `\b` against the next character (call site is always
+  # followed by whitespace or a paren in this codebase).
+  last_if=$(printf '%s\n' "$preceding" | grep -nE "^[[:space:]]*if[[:space:]]+pid_alive[^[:alnum:]_]|^[[:space:]]*if[[:space:]]+![[:space:]]*pid_alive[^[:alnum:]_]" | tail -1 | cut -d: -f1)
   last_else=$(printf '%s\n' "$preceding" | grep -nE "^[[:space:]]*else[[:space:]]*$|^[[:space:]]*else[[:space:]]*#" | tail -1 | cut -d: -f1)
   if [ -n "$last_if" ] && [ -n "$last_else" ] && [ "$last_else" -gt "$last_if" ]; then
     assert_true "no-PR crash comment is gated behind 'if pid_alive ... else'" "1"
