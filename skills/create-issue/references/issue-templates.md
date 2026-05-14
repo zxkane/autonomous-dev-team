@@ -50,7 +50,7 @@
 
   Pick exactly ONE of the two shapes below (delete the other):
     - If there are no blocking prerequisites, write exactly: None
-    - Otherwise, list each blocker on its own line:           - #N (must be merged first because <specific reason>)
+    - Otherwise, list each blocker on its own line: - #N (must be merged first because <specific reason>)
 -->
 - None
 
