@@ -769,6 +769,91 @@ latest_review_verdict_age_seconds() {
   _iso_age_seconds "$latest_iso"
 }
 
+# Step 5b: echoes seconds since the most recent "Agent Session Report
+# (Dev) ... Exit code: 0" comment on the issue. Empty on parse failure
+# / no match (caller treats as "no recent success").
+latest_dev_success_age_seconds() {
+  local issue_num="$1"
+  local latest_iso
+  latest_iso=$(gh issue view "$issue_num" --repo "$REPO" --json comments \
+    -q '[.comments[] | select((.body | test("Agent Session Report \\(Dev\\)")) and (.body | test("Exit code: 0\\b")))] | last | .createdAt // empty')
+  [ -n "$latest_iso" ] || { echo ""; return; }
+  _iso_age_seconds "$latest_iso"
+}
+
+# Step 5b: echoes seconds since the most recent "Dev Session ID:"
+# comment on the issue. Empty on no match (caller treats as
+# "no recent startup confirmation"). The dev wrapper writes this
+# comment as part of its startup handshake ([INV-21]); a recent one
+# means the agent confirmed startup within the window — a `pid_alive`
+# miss in that window is overwhelmingly likely a transient probe race.
+latest_dev_session_id_age_seconds() {
+  local issue_num="$1"
+  local latest_iso
+  latest_iso=$(gh issue view "$issue_num" --repo "$REPO" --json comments \
+    -q '[.comments[] | select(.body | test("Dev Session ID:"))] | last | .createdAt // empty')
+  [ -n "$latest_iso" ] || { echo ""; return; }
+  _iso_age_seconds "$latest_iso"
+}
+
+# Step 5b: dev_near_success <issue_num>
+#
+# Dev-side analog of `review_near_success` (see [INV-24]). Returns 0
+# (skip the "Task appears to have crashed (no PR found)" path) if ANY
+# of these signals are positive within DEV_NEAR_SUCCESS_WINDOW_SECONDS
+# (default 300s):
+#
+#   1. Most recent `Agent Session Report (Dev) ... Exit code: 0`
+#      comment within window — agent already finished successfully (no
+#      PR yet, but operator may not have reviewed; PR detection failure
+#      on the dispatcher side is NOT an agent failure).
+#   2. Most recent `Dev Session ID:` comment within window — agent
+#      confirmed startup recently; the `pid_alive` miss is a transient
+#      probe race against a healthy wrapper.
+#   3. Defensive `kill -0 <pid>` against the current PID-file content
+#      now succeeds — the original `pid_alive` miss raced with normal
+#      wrapper scheduling.
+#
+# DEV_NEAR_SUCCESS_WINDOW_SECONDS=0 disables the short-circuit (legacy
+# strict — every pid_alive miss declares crashed). Non-numeric /
+# negative falls back to legacy strict (parity with [INV-24]).
+#
+# Returns 1 if all three signals are negative — caller proceeds with
+# the existing "Task appears to have crashed" comment + label swap.
+#
+# This invariant is [INV-27]; see also [INV-24] (review-side analog)
+# and [INV-26] (downstream gate that defers `mark_stalled` when the
+# wrapper is alive).
+dev_near_success() {
+  local issue_num="$1"
+  local window="${DEV_NEAR_SUCCESS_WINDOW_SECONDS:-300}"
+  [[ "$window" =~ ^[0-9]+$ ]] || return 1
+  [ "$window" -gt 0 ] || return 1
+
+  # Signal 1: recent successful Session Report.
+  local success_age
+  success_age=$(latest_dev_success_age_seconds "$issue_num")
+  if [ -n "$success_age" ] && [ "$success_age" -lt "$window" ]; then
+    return 0
+  fi
+
+  # Signal 2: recent Dev Session ID confirmation.
+  local startup_age
+  startup_age=$(latest_dev_session_id_age_seconds "$issue_num")
+  if [ -n "$startup_age" ] && [ "$startup_age" -lt "$window" ]; then
+    return 0
+  fi
+
+  # Signal 3: defensive PID re-check.
+  local pid
+  pid=$(get_pid issue "$issue_num")
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    return 0
+  fi
+
+  return 1
+}
+
 # Step 5b: review_near_success <issue_num>
 #
 # Returns 0 (skip the "crashed" path) if ANY of these PR-state signals are

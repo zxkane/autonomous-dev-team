@@ -440,7 +440,22 @@ for i in $(seq 0 $((cand_count - 1))); do
       pr_info=$(fetch_pr_for_issue "$issue_num" "number,body,headRefOid")
 
       if [ -z "$pr_info" ]; then
-        # No PR — dev didn't finish, retry.
+        # No PR. Before declaring crashed, cross-check in-flight signals
+        # — the dev-side analog of #111's review_near_success (INV-24).
+        # dev_near_success returns 0 when ANY of these is true within
+        # DEV_NEAR_SUCCESS_WINDOW_SECONDS:
+        #   - most recent "Agent Session Report (Dev) ... Exit code: 0"
+        #     within window (agent finished cleanly; PR not yet linked)
+        #   - most recent "Dev Session ID:" comment within window
+        #     (startup confirmed; pid_alive miss is a probe race)
+        #   - defensive `kill -0 <pid>` re-check now succeeds
+        # When any signal fires, leave `in-progress` alone and defer
+        # — the next tick will re-evaluate after either the wrapper
+        # exits naturally or the signals all expire ([INV-27]).
+        if dev_near_success "$issue_num"; then
+          echo "INFO: issue ${issue_num} dev wrapper pid_alive miss but in-flight signal positive; deferring crash declaration ([INV-27])" >&2
+          continue
+        fi
         gh issue comment "$issue_num" --repo "$REPO" \
           --body "Task appears to have crashed (no PR found). Moving to pending-dev for retry."
         label_swap "$issue_num" "in-progress" "pending-dev"
