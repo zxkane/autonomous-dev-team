@@ -47,9 +47,12 @@
     - Issues mentioned elsewhere in the body
   The autonomous dispatcher parses this section literally — any #NNN here that is still
   OPEN will cause this issue to be silently skipped until that issue is closed.
-  If there are no blocking prerequisites, write exactly: None
+
+  Pick exactly ONE of the two shapes below (delete the other):
+    - If there are no blocking prerequisites, write exactly: None
+    - Otherwise, list each blocker on its own line:           - #N (must be merged first because <specific reason>)
 -->
-- None | #N (must be merged first because <specific reason>)
+- None
 
 ## Design Considerations
 <Architecture notes, API changes, data model impact -- if applicable>
