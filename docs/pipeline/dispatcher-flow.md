@@ -322,7 +322,7 @@ Only when ALL four signals are negative does the crash path fire:
 Comment: "Review process appears to have crashed. Moving to pending-dev for retry."
 Labels: `−reviewing +pending-dev`.
 
-This branch is the safety net for the case where the wrapper died so abruptly that even its trap didn't fire. The `pid_alive` check that gates entry to this branch ALSO honors a heartbeat-based mtime fallback ([INV-24](invariants.md#inv-24-review-wrapper-dead-detection-requires-both-pid_alive-miss-and-no-near-success-pr-signal)): a fresh PID-file mtime (within `HEARTBEAT_INTERVAL_SECONDS * 3`) keeps the wrapper in the ALIVE bucket, eliminating false alarms from transient races.
+This branch is the safety net for the case where the wrapper died so abruptly that even its trap didn't fire. The `pid_alive` check that gates entry to this branch ALSO honors a heartbeat-based mtime fallback ([INV-24](invariants.md#inv-24-review-wrapper-dead-detection-requires-both-pid_alive-miss-and-no-near-success-pr-signal), extended by [INV-29](invariants.md#inv-29-pid_alive-heartbeat-is-owned-exclusively-by-the-wrapper-not-by-the-pid-file-alone)): a fresh mtime on EITHER the PID file OR the wrapper-owned `<base>.heartbeat` sibling (within `HEARTBEAT_INTERVAL_SECONDS * 3`) keeps the wrapper in the ALIVE bucket, eliminating false alarms from transient races AND from spurious PID-file deletions against still-alive long-running wrappers.
 
 ## Failure modes by step
 

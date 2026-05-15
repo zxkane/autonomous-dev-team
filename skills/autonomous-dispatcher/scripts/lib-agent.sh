@@ -174,8 +174,9 @@ install_agent_sigterm_trap() {
 }
 
 # install_agent_heartbeat — spawn a background loop that touches
-# AGENT_PID_FILE every HEARTBEAT_INTERVAL_SECONDS (#111 Part B). The loop
-# is parent-pid-watched: when the wrapper shell exits, `kill -0 <parent>`
+# AGENT_PID_FILE and a sibling `<base>.heartbeat` file every
+# HEARTBEAT_INTERVAL_SECONDS (#111 Part B + INV-29). The loop is
+# parent-pid-watched: when the wrapper shell exits, `kill -0 <parent>`
 # fails and the loop terminates. No orphan heartbeats after wrapper exit.
 #
 # Sets _AGENT_HEARTBEAT_PID so the wrapper's cleanup() trap can SIGTERM
@@ -189,6 +190,16 @@ install_agent_sigterm_trap() {
 # tolerant of a missing or symlinked file (skips touch silently); the
 # wrapper's acquire_pid_guard / spawn path remains the authoritative
 # writer.
+#
+# Sibling heartbeat file (INV-29, closes #129): we ALSO maintain
+# `${AGENT_PID_FILE%.pid}.heartbeat`. Its lifecycle is owned by the
+# wrapper alone — the cleanup trap removes it at exit; the dispatcher's
+# `kill_stale_wrapper` does NOT touch it. The dispatcher's `pid_alive`
+# mtime fallback consults EITHER file's mtime, so a spurious deletion of
+# the PID file (e.g. by a buggy stale-cleaner — see #129) cannot strand
+# the liveness probe. We continue to touch the PID file too so a mixed-
+# version dispatcher (older `pid_alive` that only knows about the PID
+# file) still gets accurate readings during a rolling upgrade.
 install_agent_heartbeat() {
   local interval="${HEARTBEAT_INTERVAL_SECONDS:-120}"
   # Defensive numeric guard: a typo'd config would otherwise raise an
@@ -199,11 +210,20 @@ install_agent_heartbeat() {
 
   local parent_pid=$$
   local pid_file="$AGENT_PID_FILE"
+  local hb_file="${pid_file%.pid}.heartbeat"
 
   (
     while command kill -0 "$parent_pid" 2>/dev/null; do
       if [[ -f "$pid_file" && ! -L "$pid_file" ]]; then
         touch "$pid_file" 2>/dev/null || true
+      fi
+      # Heartbeat sibling: create-on-demand and refresh. Same CWE-59
+      # symlink defence as the PID file — if a symlink is planted at the
+      # path, skip silently rather than follow it. `touch` creates the
+      # file when missing, so a single touch covers both first-call and
+      # post-deletion cases.
+      if [[ ! -L "$hb_file" ]]; then
+        touch "$hb_file" 2>/dev/null || true
       fi
       sleep "$interval"
     done
