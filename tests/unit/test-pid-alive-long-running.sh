@@ -265,6 +265,53 @@ else
   else
     assert_true "heartbeat sibling created when missing (still absent)" "0"
   fi
+
+  echo
+  echo "=== TC-PALR-005c: heartbeat does NOT resurrect files after parent exit ==="
+  # Race: cleanup trap deletes both files, then heartbeat loop wakes from
+  # sleep. Without the inner kill -0 re-check, the loop's `touch` would
+  # recreate the heartbeat sibling with a fresh mtime — leaving the
+  # dispatcher to see a fake-ALIVE wrapper for up to 6 minutes after
+  # the wrapper actually exited. This test reproduces that window.
+  HB_PIDFILE_R="$TMPDIR/hb-resurrect.pid"
+  HB_FILE_R="${HB_PIDFILE_R%.pid}.heartbeat"
+
+  # Run the parent in a subshell so we can synchronously wait for it to
+  # exit before checking. The parent installs heartbeat (interval=1),
+  # sleeps long enough for the loop to enter `sleep 1`, then exits.
+  bash -c "
+    set +u
+    source '$SCRIPTS_DIR/lib-agent.sh' 2>/dev/null || true
+    set -u
+    AGENT_PID_FILE='$HB_PIDFILE_R' HEARTBEAT_INTERVAL_SECONDS=1 install_agent_heartbeat
+    # Touch both files first so the loop has something to refresh.
+    echo \$\$ >'$HB_PIDFILE_R'
+    : >'$HB_FILE_R'
+    # Let the loop iterate at least once, then sleep partway into its
+    # next sleep so it's blocked when we exit.
+    sleep 1.5
+  " &
+  parent_pid=$!
+  wait "$parent_pid" 2>/dev/null || true
+
+  # Immediately delete both files (simulating the cleanup trap). The
+  # heartbeat subshell is still asleep at this point.
+  rm -f "$HB_PIDFILE_R" "$HB_FILE_R"
+
+  # Wait long enough for the heartbeat loop to wake from its sleep
+  # (interval=1) AND complete its parent-pid re-check. 3s gives margin.
+  sleep 3
+
+  # Neither file should have been resurrected.
+  if [ ! -e "$HB_PIDFILE_R" ] && [ ! -e "$HB_FILE_R" ]; then
+    assert_true "heartbeat did not resurrect files after parent exit" "1"
+  else
+    resurrected=""
+    [ -e "$HB_PIDFILE_R" ] && resurrected="$resurrected pid_file"
+    [ -e "$HB_FILE_R" ]    && resurrected="$resurrected hb_file"
+    assert_true "heartbeat did not resurrect files after parent exit (resurrected:$resurrected)" "0"
+    rm -f "$HB_PIDFILE_R" "$HB_FILE_R"
+  fi
 fi
 
 # ---------------------------------------------------------------------------

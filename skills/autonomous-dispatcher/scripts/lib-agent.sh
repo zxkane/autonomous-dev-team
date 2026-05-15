@@ -214,6 +214,15 @@ install_agent_heartbeat() {
 
   (
     while command kill -0 "$parent_pid" 2>/dev/null; do
+      # Re-check parent liveness immediately before each touch. The outer
+      # `while` test fires only once per iteration, but the wrapper can
+      # exit during the `sleep` below and its cleanup trap can delete
+      # both files before this loop wakes. Without the inner kill -0,
+      # the loop's `touch` would resurrect the heartbeat sibling with a
+      # fresh mtime, leaving the dispatcher seeing a fake-ALIVE wrapper
+      # for up to HEARTBEAT_INTERVAL_SECONDS * 3. The check is cheap and
+      # closes the resurrection race documented in #129's review pass.
+      command kill -0 "$parent_pid" 2>/dev/null || break
       if [[ -f "$pid_file" && ! -L "$pid_file" ]]; then
         touch "$pid_file" 2>/dev/null || true
       fi
