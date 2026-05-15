@@ -91,7 +91,7 @@ kill_stale_wrapper() {
       echo "ERROR: cannot read PID file $pid_file (permission denied or removed)" >&2
       return 1
     fi
-    local old_pid
+    local old_pid killed=0
     old_pid=$(cat "$pid_file" 2>/dev/null)
 
     if [[ -n "$old_pid" ]] && kill -0 "$old_pid" 2>/dev/null; then
@@ -136,12 +136,28 @@ kill_stale_wrapper() {
           return 1
         fi
       fi
+      killed=1
     fi
 
-    # Remove PID file regardless. If `rm -f` fails (read-only mount, perm),
-    # acquire_pid_guard in the new wrapper re-validates liveness on whatever
-    # PID is in the file — and we just verified that PID is no longer alive.
-    rm -f "$pid_file"
+    # PID-file deletion policy (INV-29, closes #129): only delete when we
+    # either (a) successfully signalled an alive holder (`killed=1`) — the
+    # PID we hold is now stale, leaving the file would leak into the next
+    # acquire_pid_guard, OR (b) the file content is empty / non-numeric —
+    # there's nothing useful to keep fresh.
+    #
+    # If we hit the `kill -0` miss path (PID is non-empty, numeric, but
+    # `kill -0` returned failure), do NOT delete the file. The agent's
+    # session-leader PID can drift out of `kill -0` reachability while the
+    # underlying process group is still ticking (observed under
+    # AGENT_LAUNCHER `bash -c "..."` indirection); the wrapper's
+    # `install_agent_heartbeat` loop relies on the file existing so its
+    # `touch` keeps the mtime fresh. Deleting it strands the dispatcher's
+    # `pid_alive` mtime fallback (#111 Part B) and re-creates the
+    # false-DEAD loop described in #129. The pgrep fallback below remains
+    # the safety net for genuinely-orphaned trees we cannot reach via PID.
+    if [[ "$killed" -eq 1 ]] || [[ -z "$old_pid" ]] || [[ ! "$old_pid" =~ ^[0-9]+$ ]]; then
+      rm -f "$pid_file"
+    fi
   fi
 
   # Defensive pgrep fallback (closes #109 — option C; INV-23, INV-28).

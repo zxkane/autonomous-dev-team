@@ -136,8 +136,8 @@ cleanup() {
     command kill "$_AGENT_HEARTBEAT_PID" 2>/dev/null || true
   fi
 
-  # Cleanup PID file always
-  rm -f "$PID_FILE" 2>/dev/null || true
+  # Cleanup PID file and heartbeat sibling (INV-29) always.
+  rm -f "$PID_FILE" "${PID_FILE%.pid}.heartbeat" 2>/dev/null || true
 
   # If result was already parsed by the main script, labels are handled there
   if [[ "$RESULT_PARSED" == "true" ]]; then

@@ -663,25 +663,37 @@ _pid_file_for() {
 # Returns 0 if the wrapper PID for this issue+kind is alive, 1 otherwise.
 # `kind` is "issue" (dev wrapper) or "review".
 #
-# Two-tier check (#111 Part B):
+# Three-tier check (#111 Part B + INV-29, closes #129):
 #   1. `kill -0 <pid>` succeeds → ALIVE.
-#   2. `kill -0 <pid>` fails → check PID-file mtime. If it was touched
-#      within HEARTBEAT_INTERVAL_SECONDS * 3 (default 360s), still treat
-#      as ALIVE — the wrapper may be transitioning groups, exec'ing, or
-#      racing with us. The wrapper's install_agent_heartbeat helper
-#      (lib-agent.sh) keeps the mtime fresh while it's running, so a
-#      stale mtime is strong evidence the process is genuinely dead.
+#   2. PID file mtime is fresh (within HEARTBEAT_INTERVAL_SECONDS * 3,
+#      default 360s) → ALIVE. Back-compat path for pre-INV-29 wrappers
+#      that only touch the PID file.
+#   3. Sibling `<base>.heartbeat` file mtime is fresh → ALIVE.
+#   Otherwise → DEAD.
 #
-# HEARTBEAT_INTERVAL_SECONDS=0 disables the mtime fallback entirely
+# Why two files (INV-29): the heartbeat sibling's lifecycle is owned
+# exclusively by the wrapper — created and cleaned up by the wrapper's
+# cleanup trap, NOT by the dispatcher. The dispatcher's
+# `kill_stale_wrapper` may legitimately delete the PID file (after
+# killing its holder); without the sibling, a spurious PID-file
+# deletion against a still-alive wrapper would strand `pid_alive` and
+# false-flag the agent as DEAD on subsequent ticks (the failure mode in
+# #129). The sibling survives such deletions, so the wrapper's
+# still-running heartbeat keeps the mtime fresh and the probe stays
+# accurate. The PID file content (holding the agent-tree session leader
+# PID) is not used here beyond tier 1 — its mtime is a back-compat
+# heartbeat carrier only.
+#
+# HEARTBEAT_INTERVAL_SECONDS=0 disables both mtime tiers entirely
 # (legacy strict behavior).
 pid_alive() {
   local kind="$1" issue_num="$2"
-  local pid_file pid
+  local pid_file pid hb_file
   pid_file=$(_pid_file_for "$kind" "$issue_num")
   [ -n "$pid_file" ] || return 1
+  hb_file="${pid_file%.pid}.heartbeat"
   pid=$(cat "$pid_file" 2>/dev/null || echo "")
-  [ -n "$pid" ] || return 1
-  if kill -0 "$pid" 2>/dev/null; then
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
     return 0
   fi
 
@@ -691,13 +703,30 @@ pid_alive() {
   # "fallback disabled" (legacy strict).
   [[ "$hb_interval" =~ ^[0-9]+$ ]] || return 1
   [ "$hb_interval" -gt 0 ] || return 1
-  [ -f "$pid_file" ] || return 1
-  local now mtime threshold
+
+  local now threshold mtime
   now=$(date -u +%s)
-  mtime=$(stat -c %Y "$pid_file" 2>/dev/null || stat -f %m "$pid_file" 2>/dev/null || echo "")
-  [ -n "$mtime" ] || return 1
   threshold=$(( hb_interval * 3 ))
-  [ $(( now - mtime )) -lt "$threshold" ]
+
+  # Tier 2: PID-file mtime (back-compat with pre-INV-29 wrappers that
+  # only touch the PID file). Symlink-defended (CWE-59).
+  if [ -f "$pid_file" ] && [ ! -L "$pid_file" ]; then
+    mtime=$(stat -c %Y "$pid_file" 2>/dev/null || stat -f %m "$pid_file" 2>/dev/null || echo "")
+    if [ -n "$mtime" ] && [ $(( now - mtime )) -lt "$threshold" ]; then
+      return 0
+    fi
+  fi
+
+  # Tier 3: heartbeat sibling mtime (INV-29). Owned exclusively by the
+  # wrapper — survives spurious PID-file deletion. Same symlink defence.
+  if [ -f "$hb_file" ] && [ ! -L "$hb_file" ]; then
+    mtime=$(stat -c %Y "$hb_file" 2>/dev/null || stat -f %m "$hb_file" 2>/dev/null || echo "")
+    if [ -n "$mtime" ] && [ $(( now - mtime )) -lt "$threshold" ]; then
+      return 0
+    fi
+  fi
+
+  return 1
 }
 
 # Echoes the current PID for the issue+kind, or empty if none.

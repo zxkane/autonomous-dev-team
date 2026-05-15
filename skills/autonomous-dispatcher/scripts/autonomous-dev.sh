@@ -153,8 +153,8 @@ cleanup() {
     command kill "$_AGENT_HEARTBEAT_PID" 2>/dev/null || true
   fi
 
-  # Cleanup PID file always
-  rm -f "$PID_FILE" 2>/dev/null || true
+  # Cleanup PID file and heartbeat sibling (INV-29) always.
+  rm -f "$PID_FILE" "${PID_FILE%.pid}.heartbeat" 2>/dev/null || true
 
   # Wrapper failed before invoking the agent (e.g. gh-with-token-refresh
   # couldn't find a real gh — issue #92, or any future startup-time

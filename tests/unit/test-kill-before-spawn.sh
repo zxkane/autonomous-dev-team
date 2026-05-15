@@ -231,10 +231,13 @@ else
 fi
 
 # ============================================================================
-# TC-DKBS-003: Dead PID is handled cleanly
+# TC-DKBS-003: Dead PID (numeric, kill -0 miss) preserves the PID file (INV-29).
+# Pre-#129 the file was deleted unconditionally; post-fix we keep it so
+# the live wrapper's heartbeat loop continues to refresh the mtime — see
+# the rationale in dispatch-local.sh::kill_stale_wrapper.
 # ============================================================================
 echo
-echo "=== TC-DKBS-003: dead PID handled cleanly ==="
+echo "=== TC-DKBS-003: dead-PID path preserves the PID file (INV-29) ==="
 echo
 
 PID_FILE="$TMPDIR/test-003.pid"
@@ -252,11 +255,11 @@ else
   FAIL=$((FAIL+1))
 fi
 if [[ -e "$PID_FILE" ]]; then
-  echo -e "  ${RED}FAIL${NC}: PID file still exists after dead-PID handling"
-  FAIL=$((FAIL+1))
-else
-  echo -e "  ${GREEN}PASS${NC}: PID file removed"
+  echo -e "  ${GREEN}PASS${NC}: PID file preserved on kill -0 miss (INV-29; #129)"
   PASS=$((PASS+1))
+else
+  echo -e "  ${RED}FAIL${NC}: PID file should be preserved on kill -0 miss (INV-29; #129) — got deleted"
+  FAIL=$((FAIL+1))
 fi
 
 # ============================================================================
