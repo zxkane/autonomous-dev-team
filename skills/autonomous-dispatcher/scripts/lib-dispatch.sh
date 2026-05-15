@@ -883,9 +883,50 @@ dev_near_success() {
   return 1
 }
 
+# _review_pgid_has_agent_process <pgid>
+#
+# Signal-5 helper for review_near_success (#132). Walks the review
+# wrapper's process group (PGID == content of review-${ISSUE}.pid;
+# setsid in lib-agent.sh::_run_with_timeout makes the session-leader
+# PID equal to the PGID) and returns 0 if any group member's `comm`
+# matches the configured AGENT_CMD.
+#
+# Returns 1 silently in three cases — never fail-closed:
+#   - PGID is not a positive integer (empty / unparseable PID file)
+#   - `pgrep` or `ps` not on PATH (mismatched host)
+#   - No member of the group has a comm matching AGENT_CMD
+#
+# Substring match (`*${AGENT_CMD}*`) is intentionally tolerant: Linux
+# truncates `comm` to 15 chars (so `claude-cli-with-extras` shows up as
+# `claude-cli-with`), and AGENT_CMD values are typically 5–10 chars.
+# Over-match is safe here — this signal only runs after pid_alive missed
+# AND signals 1–4 already failed, so a false positive defers a crash
+# declaration by one tick at most, while a false negative reproduces
+# the #209 false-crash that drove the addition of this signal.
+_review_pgid_has_agent_process() {
+  local pgid="$1"
+  [[ "$pgid" =~ ^[0-9]+$ ]] || return 1
+  [ "$pgid" -gt 0 ] || return 1
+  command -v pgrep >/dev/null 2>&1 || return 1
+  command -v ps >/dev/null 2>&1 || return 1
+
+  local agent_cmd="${AGENT_CMD:-claude}"
+  local pid comm
+  while read -r pid; do
+    [[ "$pid" =~ ^[0-9]+$ ]] || continue
+    comm=$(ps -o comm= -p "$pid" 2>/dev/null | tr -d '[:space:]')
+    [ -n "$comm" ] || continue
+    if [[ "$comm" == *"$agent_cmd"* ]]; then
+      return 0
+    fi
+  done < <(pgrep -g "$pgid" 2>/dev/null)
+
+  return 1
+}
+
 # Step 5b: review_near_success <issue_num>
 #
-# Returns 0 (skip the "crashed" path) if ANY of these PR-state signals are
+# Returns 0 (skip the "crashed" path) if ANY of these signals are
 # positive within REVIEW_NEAR_SUCCESS_WINDOW_SECONDS (default 300s):
 #
 #   1. PR.mergedAt within window — wrapper finished merging.
@@ -896,11 +937,24 @@ dev_near_success() {
 #   4. Defensive `kill -0 <pid>` against the current PID-file content
 #      now succeeds — the original pid_alive miss raced with the
 #      wrapper's normal scheduling.
+#   5. Process-group walk (#132): the review wrapper's PGID still has
+#      at least one descendant whose comm matches AGENT_CMD. Catches
+#      the "long-running review wrapper, pre-verdict window" case where
+#      signals 1–4 all trail the still-mid-flight wrapper. Reproduced
+#      on a downstream consumer's #209 (2026-05-15 UTC).
 #
-# REVIEW_NEAR_SUCCESS_WINDOW_SECONDS=0 disables the short-circuit (legacy
-# strict behavior — every pid_alive miss declares crashed).
+# Signal ordering is cost-driven, cheapest first: 1+2 share one
+# fetch_pr_for_issue call, 3 is one gh-api call, 4 is a single kill -0,
+# 5 hits the kernel proc table. Earlier signals short-circuit before
+# later ones run; TC-RNS-009 pins this ordering so a future refactor
+# can't silently reorder and double the per-tick cost.
 #
-# Returns 1 if all four signals are negative — caller proceeds with the
+# REVIEW_NEAR_SUCCESS_WINDOW_SECONDS=0 disables the entire short-circuit
+# (legacy strict behavior — every pid_alive miss declares crashed). The
+# strict knob fires at the early numeric guard, before any signal runs;
+# TC-RNS-010 pins that the new signal cannot override the strict knob.
+#
+# Returns 1 if all five signals are negative — caller proceeds with the
 # existing crashed-comment + label-swap.
 review_near_success() {
   local issue_num="$1"
@@ -943,6 +997,14 @@ review_near_success() {
   local pid
   pid=$(get_pid review "$issue_num")
   if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    return 0
+  fi
+
+  # Signal 5: process-group walk (#132). Skipped silently when PID is
+  # empty / unparseable (TC-RNS-011) — the helper's own integer guard
+  # would catch it, but checking here keeps the caller's contract
+  # explicit and avoids ever spawning the helper subshell on bad input.
+  if [ -n "$pid" ] && _review_pgid_has_agent_process "$pid"; then
     return 0
   fi
 
