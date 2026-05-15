@@ -611,8 +611,17 @@ if [[ -n "$LATEST_COMMENT" && -n "$PR_HEAD_SHA" ]]; then
   # If this post fails persistently the dispatcher cannot detect SHA-match,
   # so the WARNING is the only operator-visible breadcrumb (see SKILL.md
   # Step 5 empty-trailer fallthrough).
+  # Trailer carries `agent` / `model` for forensic attribution in
+  # multi-CLI deployments where AGENT_CMD is rotated between rounds
+  # (#128). Option A from the issue: write ${AGENT_REVIEW_MODEL}
+  # directly rather than `${...:-<default>}`. lib-agent.sh:43 already
+  # defaults the variable to `sonnet`, so a `:-<default>` here would
+  # render dead code — the trailer renders the live, current value.
+  # The dispatcher's last_reviewed_head parser anchors only on the
+  # leading `Reviewed HEAD: \`<sha>\`` (INV-04), so the trailing
+  # parenthesised metadata is purely human-attribution.
   _trailer_err=$(gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
-    --body "Reviewed HEAD: \`${PR_HEAD_SHA}\` (issue #${ISSUE_NUMBER}, session \`${SESSION_ID}\`)" \
+    --body "Reviewed HEAD: \`${PR_HEAD_SHA}\` (issue #${ISSUE_NUMBER}, session \`${SESSION_ID}\`, agent \`${AGENT_CMD:-claude}\`, model \`${AGENT_REVIEW_MODEL}\`)" \
     2>&1 >/dev/null) \
     || log "WARNING: Failed to post Reviewed HEAD trailer (non-fatal): ${_trailer_err}"
 fi

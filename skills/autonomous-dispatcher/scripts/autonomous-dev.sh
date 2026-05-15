@@ -174,6 +174,8 @@ cleanup() {
 - Dev Session ID: \`${SESSION_ID:-<none>}\`
 - Exit code: ${exit_code}
 - Mode: startup-failure
+- Agent: ${AGENT_CMD:-claude}
+- Model: ${AGENT_DEV_MODEL:-<default>}
 - Timestamp: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
 - Log: \`${LOG_FILE:-<unknown>}\`
 
@@ -224,12 +226,27 @@ EOF
     fi
   fi
 
-  # Post session report
+  # Post session report.
+  #
+  # `${AGENT_DEV_MODEL:-<default>}` uses the colon-minus operator so that
+  # both unset and set-but-empty render `<default>`. `lib-agent.sh:42`
+  # defaults `AGENT_DEV_MODEL=""` (empty), which is the dominant
+  # operator-side case — without the colon the trailer would print
+  # `Model:` with an empty value for every default-configured deployment.
+  # The companion run_cleanup harness in
+  # tests/unit/test-autonomous-dev-cleanup-startup-failure.sh uses the
+  # *non*-colon `${6-claude}` form for its positionals so a missing arg
+  # (test author's intent: "use the default") and an explicit `""` arg
+  # (test author's intent: "exercise the empty-string path") stay
+  # distinguishable. The two `-` vs `:-` choices are load-bearing in
+  # opposite directions; don't unify them. (#128, TC-CL-006)
   gh issue comment "$ISSUE_NUMBER" --repo "$REPO" --body "$(cat <<EOF
 **Agent Session Report (Dev)**
 - Dev Session ID: \`${SESSION_ID}\`
 - Exit code: ${exit_code}
 - Mode: ${MODE}
+- Agent: ${AGENT_CMD:-claude}
+- Model: ${AGENT_DEV_MODEL:-<default>}
 - Timestamp: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
 - Log: \`${LOG_FILE}\`
 EOF

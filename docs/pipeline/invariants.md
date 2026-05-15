@@ -51,32 +51,62 @@ The helper `mkdir -p`s the directory and `chmod 700`s it on first call.
 **Agent Session Report (Dev)**
 - Dev Session ID: `<uuid>`
 - Exit code: <int>
-- Mode: new|resume
+- Mode: new|resume|startup-failure
+- Agent: <agent-cli>
+- Model: <model-id-or-<default>>
 - Timestamp: <ISO-8601>
 - Log: `/tmp/agent-${PROJECT_ID}-issue-<N>.log`
 ```
 
 **Why**: Two consumers depend on parsing it. (a) The dispatcher's Step 4b session-id extraction anchors on `Dev Session ID:` (not just `Session ID:`) to avoid matching `Review Session:` trailers from the review wrapper. (b) The dispatcher's Step 4a retry counter counts comments matching both `Agent Session Report \(Dev\)` and `Exit code: 0` → not (i.e. non-zero exit).
 
+**Note on Agent / Model fields (added 2026-05-15, #128)**: `Agent:` and
+`Model:` are append-only, human-attribution metadata for multi-CLI
+deployments where `AGENT_CMD` is rotated between rounds (claude → gemini
+→ codex → opencode → kiro). They have **no** consumer parser today —
+neither the Step 4a retry-counter regex nor the Step 4b session-id
+extraction reads them. They live between the existing `- Mode:` and
+`- Timestamp:` lines. The wrapper renders them via:
+
+- `Agent: ${AGENT_CMD:-claude}` (colon-minus → renders `claude` for both
+  unset and set-but-empty `AGENT_CMD`, matching `lib-agent.sh:41`'s own
+  collapse-to-default).
+- `Model: ${AGENT_DEV_MODEL:-<default>}` (colon-minus → renders
+  `<default>` for both unset and set-but-empty `AGENT_DEV_MODEL`. This
+  is the dominant operator-side case because `lib-agent.sh:42` defaults
+  the variable to `""`).
+
 **Producer**: `autonomous-dev.sh::cleanup` trap.
 **Consumer**: dispatcher Step 4 (both 4a and 4b).
-**Test**: TODO: add test that the format hasn't drifted (`tests/unit/test-session-report-format.sh`).
+**Test**: `tests/unit/test-autonomous-dev-cleanup-startup-failure.sh` TC-CL-001 through TC-CL-008 + TC-CL-STATIC-001 (#128).
 
 ## INV-04: Reviewed-HEAD trailer format
 
 **Rule**: The review wrapper, after a verdict comment is found, posts a separate issue comment matching this format:
 
 ```
-Reviewed HEAD: `<sha>` (issue #<N>, session `<id>`)
+Reviewed HEAD: `<sha>` (issue #<N>, session `<id>`, agent `<agent-cli>`, model `<model-id>`)
 ```
 
 `<sha>` is the PR's `headRefOid` at prompt-build time. The trailer is a separate comment from the verdict (different gh issue comment call) so polling failures on the verdict don't suppress the trailer and vice versa.
 
 **Why**: The dispatcher's Step 5b uses the trailer to skip redundant reviews when a dev wrapper exits with no new commits since the last review (#53). Without the trailer, every dev exit with a PR would cycle back through review even if the dev did nothing new.
 
+**Note on agent / model fields (added 2026-05-15, #128)**: `agent` and
+`model` are append-only, human-attribution metadata for multi-CLI
+deployments. They have **no** consumer parser today. The dispatcher's
+`last_reviewed_head` regex anchors on the leading
+`Reviewed HEAD: \`<sha>\`` backtick-pair only — the trailing
+parenthesised metadata is unparsed and unaffected by this addition.
+The wrapper renders the model field via `${AGENT_REVIEW_MODEL}` directly
+(no `:-<default>` fallback) because `lib-agent.sh:43` already defaults
+the variable to `sonnet`; a wrapper-side fallback would render dead
+code. The agent field uses `${AGENT_CMD:-claude}`, matching the dev
+side and `lib-agent.sh:41`.
+
 **Producer**: `autonomous-review.sh` (after verdict polling, before exit).
 **Consumer**: dispatcher Step 5b DEAD-with-PR branch (regex: `Reviewed HEAD: \`(?<sha>[0-9a-f]{7,40})\``).
-**Test**: TODO: add test (`tests/unit/test-reviewed-head-trailer-format.sh`).
+**Test**: `tests/unit/test-autonomous-review-reviewed-head-annotation.sh` TC-RHA-001 through TC-RHA-003 (#128).
 
 ## INV-05: Retry counter cutoff rule
 
