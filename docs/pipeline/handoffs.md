@@ -35,7 +35,7 @@ flowchart LR
 
 - Atomic `+in-progress` label set BEFORE `nohup` spawn. Otherwise Step 5 in the same tick could probe a non-existent PID file and falsely diagnose DEAD ([INV-09](invariants.md#inv-09-just_dispatched-skip-rule) is the safety net for this; `JUST_DISPATCHED` only protects against the same-tick race, the label ordering protects against an immediately-following tick).
 - `JUST_DISPATCHED` includes the issue.
-- Dispatch goes through `dispatch-local.sh dev-new`, never directly invokes `autonomous-dev.sh`. The dispatch script is the only place that does `kill_stale_wrapper` (#57), input validation, and pre-creates the log file with 0600.
+- Dispatch goes through `dispatch-local.sh dev-new`, never directly invokes `autonomous-dev.sh`. The dispatch script is the only place that does `kill_stale_wrapper` (#57), input validation, and pre-creates the log file with 0600. The `kill_stale_wrapper` pgrep fallback is scoped to `${PROJECT_DIR}/scripts/autonomous-dev.sh` for `dev-*` dispatches (and the review variant for `review` dispatches) per [INV-28](invariants.md#inv-28-pgrep-fallback-must-be-scoped-by-project-and-wrapper-type) — without project + type scoping, multi-project boxes would cross-kill wrappers between projects, and same-project / different-type dispatches would kill each other (#126).
 
 **Consumer-side invariants** (dev wrapper must tolerate):
 

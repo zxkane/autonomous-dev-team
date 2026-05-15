@@ -144,7 +144,7 @@ kill_stale_wrapper() {
     rm -f "$pid_file"
   fi
 
-  # Defensive pgrep fallback (closes #109 — option C).
+  # Defensive pgrep fallback (closes #109 — option C; INV-23, INV-28).
   #
   # Catches escaped agent trees that PID_FILE never reaches:
   #   - pre-fix wrappers whose PID_FILE held `$$` and got reparented to PID 1
@@ -154,18 +154,42 @@ kill_stale_wrapper() {
   #   - rotational kills where a previous tick removed PID_FILE but the
   #     subtree was still unwinding
   #
-  # Match by `--issue <N>` argv (highly specific to the wrappers; the word
-  # boundary stops issue 9 from matching issue 99). Disabled via
-  # KILL_STALE_PGREP_FALLBACK=false for operators running their own kill
-  # choreography.
+  # The match must be scoped on three axes (INV-28):
+  #   1. project — anchor on `${PROJECT_DIR}/scripts/`. Multiple autonomous
+  #      projects can run on the same host with overlapping issue numbers
+  #      (e.g. project A issue 200, project B issue 200); a global match
+  #      would cross-kill across projects.
+  #   2. wrapper type — `dev-*` dispatches must only target
+  #      `autonomous-dev.sh` orphans, `review` only `autonomous-review.sh`
+  #      (closes #126). Pre-fix the matcher was type-agnostic and a
+  #      `dev-resume` for issue N would SIGTERM a live `autonomous-review.sh
+  #      --issue N` wrapper, killing the review in its verdict-posting
+  #      window.
+  #   3. issue — `--issue <N>` with a `\b` word boundary so issue 9 doesn't
+  #      match issue 99.
+  #
+  # Disabled via KILL_STALE_PGREP_FALLBACK=false for operators running
+  # their own kill choreography.
   if [[ "${KILL_STALE_PGREP_FALLBACK:-true}" == "true" ]]; then
-    local orphan_pids
+    local orphan_pids project_re script_re
+    # `:-` defaults so unit tests sourcing this function in isolation don't
+    # trip `set -u`. In production, both vars are validated at the top of
+    # dispatch-local.sh.
+    # Defensive *) branch: TYPE is validated up-top, so it's unreachable
+    # in normal flow; keeping the project anchor in the catch-all means a
+    # future refactor cannot silently widen the match across projects.
+    project_re=$(printf '%s' "${PROJECT_DIR:-}/scripts/" | sed 's|[][\\.*^$+?(){}|]|\\&|g')
+    case "${TYPE:-}" in
+      dev-new|dev-resume) script_re="${project_re}autonomous-dev\\.sh" ;;
+      review)             script_re="${project_re}autonomous-review\\.sh" ;;
+      *)                  script_re="${project_re}autonomous-(dev|review)\\.sh" ;;
+    esac
     # `pgrep -f` matches against the full command line (argv[0] + args).
     # The `[-]-` trick keeps the matcher itself off the result list.
-    orphan_pids=$(pgrep -f "[-]-issue ${ISSUE_NUM}\b" 2>/dev/null \
+    orphan_pids=$(pgrep -f "${script_re}.*[-]-issue ${ISSUE_NUM}\b" 2>/dev/null \
       | grep -vw "$$" || true)
     if [[ -n "$orphan_pids" ]]; then
-      echo "Found orphan agent process(es) for issue #${ISSUE_NUM}: $(tr '\n' ' ' <<<"$orphan_pids")— group-killing" >&2
+      echo "Found orphan ${TYPE:-?} agent process(es) for issue #${ISSUE_NUM} (project ${PROJECT_ID:-?}): $(tr '\n' ' ' <<<"$orphan_pids")— group-killing" >&2
       local op
       while IFS= read -r op; do
         [[ -z "$op" ]] && continue

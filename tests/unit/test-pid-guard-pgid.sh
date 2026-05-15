@@ -406,14 +406,20 @@ fi
 
 ISSUE_NUM=987654  # used by log messages and the pgrep pattern
 KILL_STALE_PGREP_FALLBACK=true
+# Per INV-28 the pgrep fallback is scoped to ${PROJECT_DIR}/scripts/ so
+# multi-project boxes don't cross-kill. Place the fake tree under a
+# fixture PROJECT_DIR/scripts/ and export it for the function. TYPE
+# selects the dev wrapper since the fake tree is named autonomous-dev.sh.
+PROJECT_DIR="$TMPDIR/proj"
+TYPE=dev-resume
+mkdir -p "$PROJECT_DIR/scripts"
 # shellcheck source=/dev/null
 source "$EXTRACT_FILE"
 
 # Spawn a fake "escaped tree" with `--issue <N>` in its argv so the
-# pgrep fallback can match it. We pass --issue as a real argument (not
-# argv[0] override) so it lands in /proc/PID/cmdline verbatim. The
-# script reads it via "$@" but ignores the value.
-FAKE_TREE_SCRIPT="$TMPDIR/fake-autonomous-dev.sh"
+# pgrep fallback can match it. The trampoline lives under
+# ${PROJECT_DIR}/scripts/ — the path anchor INV-28 requires.
+FAKE_TREE_SCRIPT="$PROJECT_DIR/scripts/autonomous-dev.sh"
 cat > "$FAKE_TREE_SCRIPT" <<'EOS'
 #!/bin/bash
 # Block on a sleep child so SIGTERM cleanup is responsive. Args are not
