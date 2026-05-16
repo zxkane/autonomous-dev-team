@@ -1,8 +1,8 @@
 #!/bin/bash
 # lib-agent.sh — Agent CLI abstraction layer.
 #
-# Supports: claude (default), codex, kiro, opencode, and generic fallback.
-# Source this file in autonomous-dev.sh and autonomous-review.sh.
+# Supports: claude (default), codex, gemini, kiro, opencode, and generic
+# fallback. Source this file in autonomous-dev.sh and autonomous-review.sh.
 #
 # Session-id semantics differ across CLIs:
 #   claude   — caller pre-mints `--session-id <UUID>`; same id used for
@@ -14,6 +14,15 @@
 #              pid_dir_for_project() keyed by the dispatcher's
 #              session_id, then feed it back to
 #              `codex exec resume <thread_id>` on resume.
+#   gemini   — caller pre-mints `--session-id <UUID>`; same id round-trips
+#              via the stream-json `init` event and is directly usable
+#              for `gemini --resume <UUID>`. Verified empirically against
+#              gemini CLI 0.42.0 (#134). claude-style replay model — no
+#              sidecar required, simpler than codex/opencode. The
+#              load-bearing `--approval-mode yolo` flag is mandatory:
+#              without it every shell/write tool defaults to ask_user
+#              which is treated as deny in headless mode (the silent
+#              fabrication failure mode reproduced in #102).
 #   kiro     — no session model; every invocation is a fresh conversation.
 #              resume_agent falls back to run_agent.
 #   opencode — same CLI-minted-session-id wrinkle as codex but with a
@@ -469,6 +478,41 @@ run_agent() {
         | _codex_capture_thread "$session_id"
       return "${PIPESTATUS[0]}"
       ;;
+    gemini)
+      # Gemini CLI: headless invocation per https://geminicli.com/docs/cli/headless/.
+      #
+      # --approval-mode yolo is LOAD-BEARING. Per
+      # https://geminicli.com/docs/reference/policy-engine/, every
+      # write/shell tool defaults to `ask_user` which is treated as
+      # `deny` in non-interactive environments. Without yolo, every
+      # `run_shell_command` / `write_file` is silently denied while the
+      # CLI still produces a fluent textual answer and exits 0 — the
+      # fabrication failure mode reproduced in #102 (zxkane/llm-wiki#6,
+      # 2026-05-15: 31-min run, exit 0, "I have completed the work…",
+      # zero commits, zero PR).
+      #
+      # --output-format stream-json emits JSONL events (init / message /
+      # tool_use / tool_result / error / result). The wrapper's
+      # regex-based observability matches this stream; --output-format
+      # json would emit a single end-of-run blob and defeat heartbeat
+      # liveness signals.
+      #
+      # --session-id <UUID> round-trips: the dispatcher's session_id
+      # appears in the `init` event verbatim and is directly usable
+      # for `gemini --resume <same-UUID>` later (verified empirically
+      # against CLI 0.42.0, #134). claude-style replay — no sidecar
+      # capture needed, unlike codex/opencode which mint their own ids.
+      #
+      # --allowed-tools is deprecated per `gemini --help`; do not reach
+      # for it. Admin-level policy in ~/.gemini/policy.json can override
+      # yolo for ops who want tighter gating; the wrapper doesn't care.
+      _run_with_timeout "$AGENT_CMD" \
+        --output-format stream-json \
+        --approval-mode yolo \
+        --session-id "$session_id" \
+        ${model:+--model "$model"} \
+        -p "$prompt"
+      ;;
     kiro)
       # Kiro CLI does not support named sessions (session_id is ignored).
       # Each invocation starts a new conversation in the current directory.
@@ -552,6 +596,25 @@ resume_agent() {
         echo "[lib-agent] no captured codex thread_id for session $session_id; starting a new codex session" >&2
         run_agent "$session_id" "$prompt" "$model" "$session_name"
       fi
+      ;;
+    gemini)
+      # Gemini `--resume <UUID>` reads back the conversation history that
+      # was created with `--session-id <UUID>` on the original run.
+      # Empirically verified against CLI 0.42.0 (#134) — no sidecar
+      # needed because gemini's --session-id round-trips. If the original
+      # run never happened (e.g. operator-initiated resume on a fresh
+      # issue), gemini still starts cleanly because there's simply no
+      # history to replay; safer than kiro's fresh-run fallback.
+      #
+      # Same load-bearing flags as run_agent: --approval-mode yolo and
+      # --output-format stream-json. Without yolo, even resume-mode
+      # tool calls hit the headless ask_user→deny path.
+      _run_with_timeout "$AGENT_CMD" \
+        --resume "$session_id" \
+        --output-format stream-json \
+        --approval-mode yolo \
+        ${model:+--model "$model"} \
+        -p "$prompt"
       ;;
     kiro)
       # Kiro CLI --resume cannot inject new review feedback effectively —

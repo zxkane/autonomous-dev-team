@@ -59,9 +59,9 @@ PROJECT_DIR="/path/to/project"
 
 # === Agent Configuration ===
 # AGENT_CMD: which coding-agent CLI to spawn for dev/review wrappers.
-# First-class support: claude, codex, kiro, opencode. Other CLIs work via
-# the generic `<cli> -p <prompt>` fallback. See README "Supported Agent
-# CLIs" for resume semantics per CLI.
+# First-class support: claude, codex, gemini, kiro, opencode. Other
+# CLIs work via the generic `<cli> -p <prompt>` fallback. See README
+# "Supported Agent CLIs" for resume semantics per CLI.
 #
 # opencode prerequisites (provider-agnostic CLI, no defaults):
 #   1. Run `opencode providers login` once on this box to set up
@@ -69,10 +69,21 @@ PROJECT_DIR="/path/to/project"
 #   2. Set AGENT_DEV_MODEL and AGENT_REVIEW_MODEL below to explicit
 #      `provider/model` strings (e.g. "anthropic/claude-sonnet-4-6").
 #      Leaving them empty leaves opencode without a model to call.
+#
+# gemini prerequisites:
+#   1. CLI 0.42.0+ (need the documented stream-json schema).
+#   2. The wrapper passes `--approval-mode yolo` automatically; without
+#      it, every shell/write tool defaults to ask_user→deny in headless
+#      mode (the silent fabrication failure mode from #102).
+#   3. Valid AGENT_DEV_MODEL / AGENT_REVIEW_MODEL ids per
+#      https://geminicli.com/docs/reference/configuration/:
+#        gemini-3-pro-preview, gemini-3-flash-preview,
+#        gemini-2.5-pro, gemini-2.5-flash, gemini-2.5-flash-lite
+#      `gemini-3-pro` (without -preview) is NOT a valid id.
 AGENT_CMD="claude"
 # AGENT_DEV_MODEL / AGENT_REVIEW_MODEL: model passed via the CLI's
-# --model flag. Empty = let the CLI pick its default (claude/codex
-# only — opencode has no default and will fail if both are empty when
+# --model flag. Empty = let the CLI pick its default (claude / codex /
+# gemini — opencode has no default and will fail if both are empty when
 # AGENT_CMD=opencode).
 AGENT_DEV_MODEL=""
 AGENT_REVIEW_MODEL="sonnet"
