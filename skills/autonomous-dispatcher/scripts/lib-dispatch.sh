@@ -992,7 +992,7 @@ dev_near_success() {
 
   # Signal 4: process-group walk (#137 parity with [INV-24] signal 5).
   # Skipped silently when PID is empty / unparseable (mirrors the
-  # caller-site contract used by review_near_success at line 1015).
+  # caller-site contract used by review_near_success in this same file).
   if [ -n "$pid" ] && _pgid_has_agent_process "$pid"; then
     return 0
   fi

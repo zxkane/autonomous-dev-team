@@ -104,13 +104,15 @@ Print `ALIVE` if any tier fires; print `DEAD` only when all four miss.
 ## `pid_alive` switching contract
 
 `lib-dispatch.sh::pid_alive` MUST consult the liveness transport BEFORE
-any local probe under non-local backends:
+any local probe under each supported non-local backend. The actual
+condition in code today opts in **only the backends with implementations
+that have been reviewed and tested**, not every non-local value:
 
 ```bash
 pid_alive() {
   local kind="$1" issue_num="$2"
 
-  if [ "${EXECUTION_BACKEND:-local}" != "local" ] \
+  if [ "${EXECUTION_BACKEND:-local}" = "remote-aws-ssm" ] \
      && [ "${REMOTE_LIVENESS_CHECK_DISABLE:-false}" != "true" ]; then
     case "$(_remote_pid_alive_query "$kind" "$issue_num")" in
       ALIVE) return 0 ;;
@@ -118,12 +120,20 @@ pid_alive() {
       *)     return 0 ;;  # indeterminate biases toward ALIVE
     esac
   fi
-  # ... legacy three-tier check for local-backend ...
+  # ... legacy three-tier check ...
 }
 ```
 
 Local-backend installations skip the remote path entirely; the legacy
 three-tier check runs as before.
+
+**Adding a new non-local backend**: extend the case-statement above to
+match the new backend's name, OR refactor the condition into a
+case-statement that whitelists every supported backend explicitly. Do
+NOT relax the condition to `!= "local"` blindly — a future backend
+without its own liveness transport would fall through to the legacy
+three-tier check and re-introduce the #182 false-DEAD bug under that
+backend. The whitelist is the safer default.
 
 ## Failure-mode policy: indeterminate biases toward ALIVE
 
