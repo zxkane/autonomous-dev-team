@@ -58,23 +58,16 @@ if ! [[ "$SSM_REMOTE_PROJECT_ID" =~ ^[a-zA-Z0-9_-]+$ ]]; then
   echo "ERROR: SSM_REMOTE_PROJECT_ID contains unsafe characters: '$SSM_REMOTE_PROJECT_ID'" >&2
   exit 1
 fi
-# Shell-metachar reject. Any of these in an operator-controlled value can
-# break out of the `sudo -u $USER $SHELL -l -c '<INNER_CMD>'` single-quote
-# wrap on the remote side and execute arbitrary code as $SSM_REMOTE_USER:
-#   $ ` ; & | ' " < > * ? newline carriage-return
-# Found via PR-9 code review (C1+C2): the prior validator missed `'`, `"`,
-# `<`, `>`, `\n`, which reach the remote shell verbatim.
-_has_shell_metachar() {
-  local val="$1"
-  case "$val" in
-    *['$`;&|<>*?'\'\"]*) return 0 ;;
-    *)                   ;;
-  esac
-  case "$val" in
-    *$'\n'*|*$'\r'*) return 0 ;;
-    *) return 1 ;;
-  esac
-}
+# `_has_shell_metachar` lives in the shared `lib-ssm.sh` (extracted in
+# #137 Finding 2.A). Source it before the first call. Use bash parameter
+# expansion (`${path%/*}`) instead of `dirname` so that the source line
+# works even on PATH-scrubbed test invocations (regression: TC-EB-008
+# in test-dispatch-remote-aws-ssm.sh sets PATH= to verify the missing-
+# aws code path; that test must keep passing after this refactor).
+_THIS_SCRIPT_PATH="${BASH_SOURCE[0]:-$0}"
+_THIS_SCRIPT_DIR="${_THIS_SCRIPT_PATH%/*}"
+# shellcheck source=lib-ssm.sh
+source "${_THIS_SCRIPT_DIR}/lib-ssm.sh"
 
 if [[ "$SSM_REMOTE_PROJECT_DIR" != /* ]] || _has_shell_metachar "$SSM_REMOTE_PROJECT_DIR"; then
   echo "ERROR: SSM_REMOTE_PROJECT_DIR must be an absolute path with no shell metachars: '$SSM_REMOTE_PROJECT_DIR'" >&2

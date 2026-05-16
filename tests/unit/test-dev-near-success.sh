@@ -45,6 +45,8 @@ _MOCK_LAST_SUCCESS_AGE=""
 _MOCK_LAST_STARTUP_AGE=""
 _MOCK_PID=""
 _MOCK_KILL0_RC="1"
+_MOCK_PGREP_AGENT_FOUND="0"  # signal 4 (#137): pgrep -g <pgid> finds AGENT_CMD child
+_MOCK_PGREP_CALLED="0"       # observability: incremented each call
 
 latest_dev_success_age_seconds() {
   printf '%s' "$_MOCK_LAST_SUCCESS_AGE"
@@ -60,6 +62,10 @@ kill() {
     return "$_MOCK_KILL0_RC"
   fi
   command kill "$@"
+}
+_pgid_has_agent_process() {
+  _MOCK_PGREP_CALLED=$((_MOCK_PGREP_CALLED + 1))
+  [ "$_MOCK_PGREP_AGENT_FOUND" = "1" ]
 }
 
 # shellcheck disable=SC1090
@@ -82,12 +88,18 @@ kill() {
   fi
   command kill "$@"
 }
+_pgid_has_agent_process() {
+  _MOCK_PGREP_CALLED=$((_MOCK_PGREP_CALLED + 1))
+  [ "$_MOCK_PGREP_AGENT_FOUND" = "1" ]
+}
 
 reset_mocks() {
   _MOCK_LAST_SUCCESS_AGE=""
   _MOCK_LAST_STARTUP_AGE=""
   _MOCK_PID=""
   _MOCK_KILL0_RC="1"
+  _MOCK_PGREP_AGENT_FOUND="0"
+  _MOCK_PGREP_CALLED="0"
   export DEV_NEAR_SUCCESS_WINDOW_SECONDS=300
 }
 
@@ -198,6 +210,43 @@ else
   echo -e "  ${RED}FAIL${NC}: TC-DNS-INT-003 No INV-27 reference in dispatcher-tick.sh"
   FAIL=$((FAIL + 1))
 fi
+
+# ===================================================================
+# TC-DNS-010..012 — signal 4 (process-group walk, #137 / INV-27 parity)
+# Mirrors review-side TC-RNS-007/008/009 from
+# test-dispatcher-review-near-success.sh.
+# ===================================================================
+
+echo
+echo "=== TC-DNS-010: process-group walk positive → skip crash ==="
+reset_mocks
+# All 3 legacy signals negative; only signal 4 fires.
+_MOCK_PID="12345"
+_MOCK_KILL0_RC="1"  # signal 3 negative
+_MOCK_PGREP_AGENT_FOUND="1"  # signal 4 positive
+dev_near_success 99
+assert_eq "TC-DNS-010 pgrep finds agent in PGID -> near-success" "0" "$?"
+assert_eq "TC-DNS-010 pgrep helper consulted exactly once" "1" "$_MOCK_PGREP_CALLED"
+
+echo
+echo "=== TC-DNS-011: all 4 signals negative → declare crashed ==="
+reset_mocks
+_MOCK_PID="12345"
+_MOCK_KILL0_RC="1"
+_MOCK_PGREP_AGENT_FOUND="0"
+dev_near_success 99
+assert_eq "TC-DNS-011 all four negative -> proceed" "1" "$?"
+
+echo
+echo "=== TC-DNS-012: legacy positive short-circuits before signal 4 (ordering pin) ==="
+# Cost / ordering invariant: pgrep is the most expensive signal (kernel
+# proc table). Earlier signals must short-circuit before it runs.
+reset_mocks
+_MOCK_LAST_STARTUP_AGE="60"  # signal 2 positive
+_MOCK_PGREP_AGENT_FOUND="0"  # signal 4 would say negative if asked
+dev_near_success 99
+assert_eq "TC-DNS-012 startup-age positive -> near-success" "0" "$?"
+assert_eq "TC-DNS-012 pgrep helper NOT consulted (legacy signal won)" "0" "$_MOCK_PGREP_CALLED"
 
 echo
 echo "=== Summary ==="

@@ -70,11 +70,12 @@ kill() {
   command kill "$@"
 }
 
-# Signal 5 helper (#132): mock the lib-dispatch.sh helper that walks the
-# review wrapper's process group looking for an AGENT_CMD child. Tests
-# control its return code via _MOCK_PGREP_AGENT_FOUND, and inspect
+# Signal 5 helper (#132; renamed to _pgid_has_agent_process in #137 once
+# the dev side gained a parity signal): mock the lib-dispatch.sh helper
+# that walks the wrapper's process group looking for an AGENT_CMD child.
+# Tests control its return code via _MOCK_PGREP_AGENT_FOUND, and inspect
 # _MOCK_PGREP_CALLED to assert ordering / defensive-guard behaviour.
-_review_pgid_has_agent_process() {
+_pgid_has_agent_process() {
   _MOCK_PGREP_CALLED=$((_MOCK_PGREP_CALLED + 1))
   [ "$_MOCK_PGREP_AGENT_FOUND" = "1" ]
 }
@@ -97,7 +98,7 @@ get_pid() {
 latest_review_verdict_age_seconds() {
   printf '%s' "$_MOCK_VERDICT_AGE"
 }
-_review_pgid_has_agent_process() {
+_pgid_has_agent_process() {
   _MOCK_PGREP_CALLED=$((_MOCK_PGREP_CALLED + 1))
   [ "$_MOCK_PGREP_AGENT_FOUND" = "1" ]
 }
