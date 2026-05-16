@@ -27,16 +27,36 @@ The outer loop intentionally does NOT carry shared state (no global concurrency 
 
 The rest of this document describes the per-project tick in isolation; everything below applies whether `dispatcher-tick.sh` is invoked directly (single-project), by the multi-tick wrapper (one of N projects), and whether the dispatch goes via `local` or `remote-aws-ssm`.
 
-### Caveat: remote backend + PID liveness
+### Local vs remote backend (#137, [INV-30])
 
-`lib-dispatch.sh::pid_alive` does `kill -0 $(cat $PID_FILE)` against `${XDG_RUNTIME_DIR}/autonomous-${PROJECT_ID}/issue-N.pid` ([INV-01]). For a remote project, the PID file is on the remote dev box, not on the dispatcher box. The dispatcher's `kill -0` always fails → all remote projects appear DEAD to the dispatcher.
+This section was previously documenting a known gap: `pid_alive` was
+blind under `EXECUTION_BACKEND=remote-aws-ssm` because the PID file
+lives on Box B but the dispatcher runs on Box A. **Closed in #137.**
 
-Effects on Step 5:
+Since #137, `pid_alive` consults a backend-specific liveness transport
+(today: `liveness-check-remote-aws-ssm.sh`) BEFORE any local probe
+when `EXECUTION_BACKEND != local`. The transport reaches the wrapper
+box via SSM, runs the equivalent of [INV-29]'s three-tier check there,
+and returns ALIVE / DEAD / indeterminate. Indeterminate biases toward
+ALIVE so transport faults never produce false crash declarations.
 
-- **Step 5a (ALIVE + PR ready) is unreachable for remote projects.** The proactive "SIGTERM-when-PR-ready" optimization doesn't fire; review delay grows from "next tick after CI passes" to "next tick after the wrapper exits naturally."
-- **Step 5b DEAD-branch is the only path.** Each tick treats every active remote issue as DEAD and routes via the PR-state machine ([INV-04], [INV-06], [INV-07]). The wall-clock timeout in `lib-agent.sh::run_agent` ([INV-13], default 4h) bounds the worst case.
+**Effects on Step 5 under remote backend (post-#137)**:
 
-This is acceptable for this PR's surface area. A real remote-alive check (per-tick `aws ssm send-command kill -0 $PID`) would 2-3x the SSM call volume; not worth doing speculatively.
+- **Step 5a (ALIVE + PR ready) IS now reachable for remote projects.**
+  The proactive "SIGTERM-when-PR-ready" optimization fires correctly;
+  review latency stays at "next tick after CI passes" (no growth to
+  "next tick after wrapper exits naturally").
+- **Step 5b DEAD-branch fires only on actual remote DEAD verdicts**
+  (or operator-disabled remote check via `REMOTE_LIVENESS_CHECK_DISABLE=true`).
+  No more per-tick false crash comments accumulating to a false stall.
+
+For the full backend interface, configuration knobs, failure-mode
+policy, and update-ordering guidance for split-box deployments, see
+[`remote-backend.md`](remote-backend.md).
+
+The rest of this document treats `dispatch()` and `pid_alive` as
+backend-agnostic; everything below applies regardless of which backend
+is in use.
 
 ## Tick lifecycle
 
@@ -309,7 +329,7 @@ Look for a PR linked to the issue (same query Step 5a uses):
 - **PR found, no prior trailer** (empty `LAST_REVIEWED_HEAD`) → routes to `pending-review`. Two distinct causes converge here ([INV-07](invariants.md#inv-07-empty-reviewed-head-trailer-routes-to-pending-review)):
   - Review never ran successfully against this PR yet (the safe first-review case).
   - Trailer post failed (token expiry, 403, rate limit). Operator sees `WARNING: Failed to post Reviewed HEAD trailer` in the review log; cycling pending-review without new commits is the symptom.
-- **No PR found** → before posting the crash comment, the dispatcher consults `dev_near_success` ([INV-27](invariants.md#inv-27-dev-wrapper-dead-detection-requires-both-pid_alive-miss-and-no-near-success-in-flight-signal)). If ANY of the three in-flight signals (recent successful Session Report, recent `Dev Session ID:` startup confirmation, defensive `kill -0` re-check) is positive within `DEV_NEAR_SUCCESS_WINDOW_SECONDS` (default 300s), the branch logs and short-circuits — the wrapper either already finished cleanly (PR not yet linked) or is racing the probe. Only when ALL three signals are negative does the comment "Task appears to have crashed (no PR found). Moving to pending-dev for retry." fire, with `−in-progress +pending-dev`. This is the dev-side parity gap to [INV-24]'s review-side cross-check, closed by [INV-27].
+- **No PR found** → before posting the crash comment, the dispatcher consults `dev_near_success` ([INV-27](invariants.md#inv-27-dev-wrapper-dead-detection-requires-both-pid_alive-miss-and-no-near-success-in-flight-signal)). If ANY of the four in-flight signals (recent successful Session Report, recent `Dev Session ID:` startup confirmation, defensive `kill -0` re-check, or process-group walk under the wrapper's PGID via `_pgid_has_agent_process` — added in #137 for parity with [INV-24]'s review-side signal 5) is positive within `DEV_NEAR_SUCCESS_WINDOW_SECONDS` (default 300s), the branch logs and short-circuits — the wrapper either already finished cleanly (PR not yet linked), is racing the probe, or has a live agent subtree under its PGID. Only when ALL four signals are negative does the comment "Task appears to have crashed (no PR found). Moving to pending-dev for retry." fire, with `−in-progress +pending-dev`. Under `EXECUTION_BACKEND=remote-aws-ssm`, [INV-30]'s remote `pid_alive` short-circuit runs upstream of this branch, so signals 3 and 4 here are local-backend defenses (and a defense-in-depth path when [INV-30]'s remote query is indeterminate). This is the dev-side parity gap to [INV-24]'s review-side cross-check, closed by [INV-27].
 
 The wording in the "PR found" branches deliberately avoids the keywords `crashed` and `process not found` so the Step 4a retry-counter regex does not count these as failures ([INV-06](invariants.md#inv-06-crashed--process-not-found-keyword-contract)).
 

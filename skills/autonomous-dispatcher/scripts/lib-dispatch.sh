@@ -684,11 +684,111 @@ _pid_file_for() {
 # PID) is not used here beyond tier 1 — its mtime is a back-compat
 # heartbeat carrier only.
 #
+# _remote_pid_alive_query <kind> <issue_num>
+#
+# Synchronous SSM query into the wrapper box's PID file + heartbeat
+# state. Used by `pid_alive` under `EXECUTION_BACKEND=remote-aws-ssm`
+# ([INV-30]). Prints exactly one of `ALIVE` / `DEAD` / empty on stdout
+# (the tri-state contract from `liveness-check-remote-aws-ssm.sh`).
+#
+# Resolves the driver path via parameter expansion (no `dirname`) so
+# PATH-scrubbed callers still work. Test override:
+# `_LIVENESS_CHECK_DRIVER_OVERRIDE` lets tests substitute a stub
+# driver without modifying PATH.
+#
+# IMPORTANT: this helper MUST NOT increment any per-process counter
+# itself, because callers consume its stdout via `$(...)` command
+# substitution which forks a subshell. Counter mutations inside that
+# subshell die with it. The counter + WARN cadence are owned by
+# `pid_alive` directly (see TC-RPA-008/009 regression).
+_remote_pid_alive_query() {
+  local kind="$1" issue_num="$2"
+  local driver
+  if [ -n "${_LIVENESS_CHECK_DRIVER_OVERRIDE:-}" ]; then
+    driver="$_LIVENESS_CHECK_DRIVER_OVERRIDE"
+  else
+    local _src="${BASH_SOURCE[0]:-$0}"
+    driver="${_src%/*}/liveness-check-remote-aws-ssm.sh"
+  fi
+
+  local out rc
+  out=$(bash "$driver" "$kind" "$issue_num" 2>/dev/null)
+  rc=$?
+
+  case "$rc:$out" in
+    0:ALIVE) printf 'ALIVE' ;;
+    0:DEAD)  printf 'DEAD'  ;;
+    *)       printf ''      ;;
+  esac
+  return 0
+}
+
 # HEARTBEAT_INTERVAL_SECONDS=0 disables both mtime tiers entirely
 # (legacy strict behavior).
+#
+# Under EXECUTION_BACKEND=remote-aws-ssm (#137, [INV-30]): the
+# dispatcher's box doesn't host the wrapper's filesystem, so all three
+# legacy tiers always miss. A remote-backend short-circuit consults
+# `liveness-check-remote-aws-ssm.sh` (which reaches the wrapper box via
+# SSM) and returns its tri-state verdict. Indeterminate verdicts
+# (transport fault, timeout, parse error) bias toward ALIVE — the
+# whole point of [INV-30] is that the dispatcher must never declare
+# crashed because it lacks information.
+#
+# `_REMOTE_LIVENESS_DEGRADED_COUNT` (per-process counter) records
+# consecutive indeterminate verdicts; `_remote_pid_alive_query` emits
+# a WARN to stderr on the 1st and every 10th indeterminate tick so
+# operators see the degraded state without per-tick log spam.
+_REMOTE_LIVENESS_DEGRADED_COUNT="${_REMOTE_LIVENESS_DEGRADED_COUNT:-0}"
+
 pid_alive() {
   local kind="$1" issue_num="$2"
   local pid_file pid hb_file
+
+  # Remote-backend short-circuit ([INV-30]). Runs first because under
+  # remote-aws-ssm the legacy three-tier below would all miss; running
+  # them anyway just wastes filesystem stat calls.
+  if [ "${EXECUTION_BACKEND:-local}" = "remote-aws-ssm" ] \
+     && [ "${REMOTE_LIVENESS_CHECK_DISABLE:-false}" != "true" ]; then
+    local _verdict
+    _verdict=$(_remote_pid_alive_query "$kind" "$issue_num")
+    case "$_verdict" in
+      ALIVE) return 0 ;;
+      DEAD)  return 1 ;;
+      *)
+        # Indeterminate (driver rc≠0 or stdout neither ALIVE nor
+        # DEAD). User-chosen policy ([INV-30]): bias toward ALIVE so
+        # a flaky transport never produces a false crash declaration.
+        # The legacy three-tier below would all miss under remote
+        # backend (filesystem on the wrong box), so falling through
+        # would always declare DEAD — exactly the failure mode this
+        # invariant closes. Treat indeterminate as ALIVE here so the
+        # caller defers crash declaration by one tick.
+        #
+        # Source-of-truth: TC-RPA-010 grep-asserts this `*) return 0`
+        # exact form. A reflexive cleanup PR that flips it to
+        # `return 1` re-introduces the #182 false-stall bug.
+        #
+        # Counter + WARN cadence MUST live here, NOT inside
+        # `_remote_pid_alive_query`, because that function's stdout
+        # is captured via `$(...)` (a subshell) — counter mutations
+        # there would die with the subshell. (TC-RPA-008/009)
+        _REMOTE_LIVENESS_DEGRADED_COUNT=$((_REMOTE_LIVENESS_DEGRADED_COUNT + 1))
+        # Emit WARN on the 1st indeterminate tick AND every 10th
+        # thereafter (counts 1, 10, 20, 30, ...). Frequent enough to
+        # surface a degraded transport quickly; sparse enough to not
+        # spam logs once the operator is aware. (TC-RPA-009)
+        if [ "$_REMOTE_LIVENESS_DEGRADED_COUNT" -eq 1 ] \
+           || [ $((_REMOTE_LIVENESS_DEGRADED_COUNT % 10)) -eq 0 ]; then
+          echo "[lib-dispatch] WARN: remote liveness check indeterminate" \
+               "(kind=$kind issue=$issue_num" \
+               "count=$_REMOTE_LIVENESS_DEGRADED_COUNT); biasing toward ALIVE per [INV-30]" >&2
+        fi
+        return 0
+        ;;
+    esac
+  fi
+
   pid_file=$(_pid_file_for "$kind" "$issue_num")
   [ -n "$pid_file" ] || return 1
   hb_file="${pid_file%.pid}.heartbeat"
@@ -842,17 +942,27 @@ latest_dev_session_id_age_seconds() {
 #   3. Defensive `kill -0 <pid>` against the current PID-file content
 #      now succeeds — the original `pid_alive` miss raced with normal
 #      wrapper scheduling.
+#   4. Process-group walk (#137; parity with [INV-24] signal 5):
+#      `_pgid_has_agent_process <pgid>` finds an AGENT_CMD descendant
+#      under the wrapper's PGID. Catches the gap reproduced on a
+#      downstream consumer's #182 (long-running TDD agent SIGTERMed
+#      before it could emit a `Dev Session ID:` comment): signals 1+2
+#      are timestamp-based and miss when the agent never produced an
+#      artifact, signal 3 misses when the session-leader PID drifts out
+#      of `kill -0` reachability under launcher indirection, but the
+#      PGID walk catches a live agent subtree.
 #
 # DEV_NEAR_SUCCESS_WINDOW_SECONDS=0 disables the short-circuit (legacy
 # strict — every pid_alive miss declares crashed). Non-numeric /
 # negative falls back to legacy strict (parity with [INV-24]).
 #
-# Returns 1 if all three signals are negative — caller proceeds with
+# Returns 1 if all four signals are negative — caller proceeds with
 # the existing "Task appears to have crashed" comment + label swap.
 #
-# This invariant is [INV-27]; see also [INV-24] (review-side analog)
-# and [INV-26] (downstream gate that defers `mark_stalled` when the
-# wrapper is alive).
+# This invariant is [INV-27]; see also [INV-24] (review-side analog),
+# [INV-26] (downstream gate that defers `mark_stalled` when the
+# wrapper is alive), and [INV-30] (remote-aws-ssm `pid_alive`
+# authoritative override that reaches the wrapper box directly).
 dev_near_success() {
   local issue_num="$1"
   local window="${DEV_NEAR_SUCCESS_WINDOW_SECONDS:-300}"
@@ -880,16 +990,24 @@ dev_near_success() {
     return 0
   fi
 
+  # Signal 4: process-group walk (#137 parity with [INV-24] signal 5).
+  # Skipped silently when PID is empty / unparseable (mirrors the
+  # caller-site contract used by review_near_success in this same file).
+  if [ -n "$pid" ] && _pgid_has_agent_process "$pid"; then
+    return 0
+  fi
+
   return 1
 }
 
-# _review_pgid_has_agent_process <pgid>
+# _pgid_has_agent_process <pgid>
 #
-# Signal-5 helper for review_near_success (#132). Walks the review
-# wrapper's process group (PGID == content of review-${ISSUE}.pid;
-# setsid in lib-agent.sh::_run_with_timeout makes the session-leader
-# PID equal to the PGID) and returns 0 if any group member's `comm`
-# matches the configured AGENT_CMD.
+# Process-group walk shared between dev_near_success (signal 4, #137)
+# and review_near_success (signal 5, #132). Walks the wrapper's process
+# group (PGID == content of `<kind>-${ISSUE}.pid`; setsid in
+# lib-agent.sh::_run_with_timeout makes the session-leader PID equal to
+# the PGID) and returns 0 if any group member's `comm` matches the
+# configured AGENT_CMD.
 #
 # Returns 1 silently in three cases — never fail-closed:
 #   - PGID is not a positive integer (empty / unparseable PID file)
@@ -900,10 +1018,17 @@ dev_near_success() {
 # truncates `comm` to 15 chars (so `claude-cli-with-extras` shows up as
 # `claude-cli-with`), and AGENT_CMD values are typically 5–10 chars.
 # Over-match is safe here — this signal only runs after pid_alive missed
-# AND signals 1–4 already failed, so a false positive defers a crash
-# declaration by one tick at most, while a false negative reproduces
-# the #209 false-crash that drove the addition of this signal.
-_review_pgid_has_agent_process() {
+# AND the cheaper signals already failed, so a false positive defers a
+# crash declaration by one tick at most, while a false negative
+# reproduces the #209 / #182 false-crash patterns that drove the
+# addition of this signal on each side.
+#
+# (Was originally named `_review_pgid_has_agent_process` in #132; renamed
+# in #137 once the dev side gained a parity signal. No backwards-compat
+# shim — the only out-of-lib consumer was the existing test mock at
+# tests/unit/test-dispatcher-review-near-success.sh, updated in the
+# same PR.)
+_pgid_has_agent_process() {
   local pgid="$1"
   [[ "$pgid" =~ ^[0-9]+$ ]] || return 1
   [ "$pgid" -gt 0 ] || return 1
@@ -1000,11 +1125,12 @@ review_near_success() {
     return 0
   fi
 
-  # Signal 5: process-group walk (#132). Skipped silently when PID is
-  # empty / unparseable (TC-RNS-011) — the helper's own integer guard
-  # would catch it, but checking here keeps the caller's contract
-  # explicit and avoids ever spawning the helper subshell on bad input.
-  if [ -n "$pid" ] && _review_pgid_has_agent_process "$pid"; then
+  # Signal 5: process-group walk (#132; renamed to shared helper in #137).
+  # Skipped silently when PID is empty / unparseable (TC-RNS-011) — the
+  # helper's own integer guard would catch it, but checking here keeps
+  # the caller's contract explicit and avoids ever spawning the helper
+  # subshell on bad input.
+  if [ -n "$pid" ] && _pgid_has_agent_process "$pid"; then
     return 0
   fi
 
