@@ -1,6 +1,6 @@
 # Dev-Agent Wrapper Flow
 
-The dev-agent wrapper is `skills/autonomous-dispatcher/scripts/autonomous-dev.sh`. The dispatcher launches it via `dispatch-local.sh dev-new <issue>` or `dispatch-local.sh dev-resume <issue> <session-id>`. The wrapper's job is to invoke the underlying coding agent (claude / codex / kiro) once with a constructed prompt, then update issue labels in an exit trap regardless of whether the agent succeeded.
+The dev-agent wrapper is `skills/autonomous-dispatcher/scripts/autonomous-dev.sh`. The dispatcher launches it via `dispatch-local.sh dev-new <issue>` or `dispatch-local.sh dev-resume <issue> <session-id>`. The wrapper's job is to invoke the underlying coding agent (claude / codex / gemini / kiro / opencode) once with a constructed prompt, then update issue labels in an exit trap regardless of whether the agent succeeded.
 
 The wrapper is the **producer** for two of the five [handoffs](handoffs.md) (dev → review, dev → pending-dev) and the **consumer** for two more (dispatcher → dev-new, dispatcher → dev-resume).
 
@@ -11,7 +11,7 @@ sequenceDiagram
     participant D as dispatch-local.sh
     participant W as autonomous-dev.sh
     participant L as lib-agent.sh
-    participant A as claude / codex / kiro
+    participant A as claude / codex / gemini / kiro / opencode
     participant GH as GitHub API
 
     D->>D: kill_stale_wrapper(PID_FILE)

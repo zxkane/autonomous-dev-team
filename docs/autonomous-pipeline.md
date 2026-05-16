@@ -59,7 +59,7 @@ The pipeline runs without human intervention, using AI coding agents (Claude Cod
 ## Prerequisites
 
 - **OpenClaw** — Agent orchestration platform (or use `dispatch-local.sh` for local dispatch)
-- **Coding agent CLI** — One of: `claude` (Claude Code), `codex`, or `kiro`
+- **Coding agent CLI** — One of: `claude` (Claude Code), `codex`, `gemini`, `kiro`, or `opencode`
 - **GitHub CLI** (`gh`) — Authenticated with appropriate permissions
 - **jq** — JSON processor for parsing GitHub API responses
 - **Git** — With worktree support
@@ -267,9 +267,11 @@ PID files follow the same pattern with `.pid` extension.
 
 | Agent | Command | Dev Support | Review Support | Resume Support |
 |-------|---------|-------------|----------------|----------------|
-| Claude Code | `claude` | Full | Full | Yes (session resume) |
-| Codex | `codex` | Basic | Basic | No (new session on resume) |
+| Claude Code | `claude` | Full | Full | Yes (UUID round-trip via `--session-id` / `--resume`) |
+| Codex | `codex` | Basic | Basic | Yes (CLI-minted thread_id captured to sidecar) |
+| Gemini | `gemini` | Basic | Basic | Yes (UUID round-trip — same model as claude, no sidecar). Requires `--approval-mode yolo` (load-bearing — set automatically by lib-agent.sh, see #134). |
 | Kiro | `kiro` | Basic | Basic | No (new session on resume) |
+| Opencode | `opencode` | Basic | Basic | Yes (CLI-minted sessionID captured to sidecar) |
 
 Set `AGENT_CMD` in `autonomous.conf` to switch agents. Claude Code is recommended for full pipeline support including session resume.
 
@@ -280,7 +282,7 @@ Set `AGENT_CMD` in `autonomous.conf` to switch agents. Claude Code is recommende
 | `scripts/autonomous-dev.sh` | Dev agent wrapper (handles label transitions) |
 | `scripts/autonomous-review.sh` | Review agent wrapper (handles approve/merge/fail) |
 | `scripts/autonomous.conf.example` | Configuration template |
-| `scripts/lib-agent.sh` | Agent CLI abstraction (claude/codex/kiro) |
+| `scripts/lib-agent.sh` | Agent CLI abstraction (claude/codex/gemini/kiro/opencode) |
 | `scripts/lib-auth.sh` | GitHub authentication abstraction (token/app) |
 | `scripts/gh-app-token.sh` | GitHub App JWT token generator |
 | `scripts/gh-token-refresh-daemon.sh` | Background token refresh for long-running sessions |

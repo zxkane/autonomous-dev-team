@@ -13,7 +13,7 @@ sequenceDiagram
     participant D as dispatch-local.sh
     participant W as autonomous-review.sh
     participant L as lib-agent.sh
-    participant A as claude / codex / kiro
+    participant A as claude / codex / gemini / kiro / opencode
     participant GH as GitHub API
 
     D->>D: kill_stale_wrapper(PID_FILE)
