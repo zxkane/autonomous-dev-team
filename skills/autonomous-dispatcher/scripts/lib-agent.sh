@@ -4,6 +4,15 @@
 # Supports: claude (default), codex, gemini, kiro, opencode, and generic
 # fallback. Source this file in autonomous-dev.sh and autonomous-review.sh.
 #
+# Operator-tunable per-CLI flags (closes #140):
+#   AGENT_DEV_EXTRA_ARGS / AGENT_REVIEW_EXTRA_ARGS — flat strings whose
+#   tokens are appended verbatim after the structural arguments of every
+#   case branch and before the prompt positional. Defaults are empty.
+#   Operators MUST migrate gemini/kiro deployments to set the
+#   load-bearing flags via these vars (see autonomous.conf.example
+#   migration callout). Tokenization uses `eval`, same trust level as
+#   AGENT_LAUNCHER (operator-controlled config).
+#
 # Session-id semantics differ across CLIs:
 #   claude   — caller pre-mints `--session-id <UUID>`; same id used for
 #              both run and resume. Cleanest fit for the dispatcher's
@@ -18,21 +27,14 @@
 #              via the stream-json `init` event and is directly usable
 #              for `gemini --resume <UUID>`. Verified empirically against
 #              gemini CLI 0.42.0 (#134). claude-style replay model — no
-#              sidecar required, simpler than codex/opencode. The
-#              load-bearing `--approval-mode yolo` flag is mandatory:
-#              without it every shell/write tool defaults to ask_user
-#              which is treated as deny in headless mode (the silent
-#              fabrication failure mode reproduced in #102).
+#              sidecar required, simpler than codex/opencode. Required
+#              EXTRA_ARGS in conf for headless tool execution
+#              (`--approval-mode yolo --output-format stream-json`); see
+#              autonomous.conf.example "gemini block".
 #   kiro     — no session model; every invocation is a fresh conversation.
-#              resume_agent falls back to run_agent. Tool trust is wired
-#              via `--trust-all-tools` when
-#              AGENT_PERMISSION_MODE=bypassPermissions; otherwise the
-#              agent file's allowedTools (in
-#              ~/.kiro/agents/<KIRO_AGENT_NAME>.json) is the authority.
-#              Precedence: CLI flag > agent file. Closes #136 — without
-#              this wiring, stock kiro installs deny every coding tool
-#              in --no-interactive mode and the wrapper observes a
-#              fluent fabricated success at exit 0 (#102 R5).
+#              resume_agent falls back to run_agent. Required EXTRA_ARGS
+#              in conf for headless tool trust (`--trust-all-tools`);
+#              see autonomous.conf.example "kiro block".
 #   opencode — same CLI-minted-session-id wrinkle as codex but with a
 #              `sessionID` field on every JSON event. Captured the same
 #              way (_opencode_capture_session) and fed back to
@@ -105,6 +107,40 @@ if [[ ${#AGENT_LAUNCHER_ARGV[@]} -gt 0 && "$AGENT_CMD" != "claude" ]]; then
   echo "[lib-agent] ERROR: AGENT_LAUNCHER is only supported with AGENT_CMD=claude (got AGENT_CMD=${AGENT_CMD}). Either unset AGENT_LAUNCHER or write a launcher tailored to your CLI." >&2
   return 1 2>/dev/null || exit 1
 fi
+
+# AGENT_DEV_EXTRA_ARGS / AGENT_REVIEW_EXTRA_ARGS (closes #140) — operator-
+# tunable per-CLI flags appended after each case branch's structural args.
+# Defaults to empty strings. Tokenized per call via _parse_extra_args:
+# we use `eval` (same trust model as AGENT_LAUNCHER) so quoted values
+# containing spaces survive intact, e.g.
+#   AGENT_DEV_EXTRA_ARGS='--policy "/path with spaces/policy.json"'
+# Bare `read -ra` cannot honor those quotes — the operator-facing example
+# in the conf would otherwise mis-tokenize.
+AGENT_DEV_EXTRA_ARGS="${AGENT_DEV_EXTRA_ARGS:-}"
+AGENT_REVIEW_EXTRA_ARGS="${AGENT_REVIEW_EXTRA_ARGS:-}"
+
+# _parse_extra_args <varname> <out_array_name>
+#
+# Tokenize $varname into the array named by $out_array_name. Empty/unset
+# input yields an empty array (no leftover empty-string elements). On
+# malformed input we log a WARN and degrade to empty so a single typo
+# doesn't crash the dispatcher tick.
+#
+# Bash 4.3+ `declare -n` for the out-param. The fleet ships bash 5.x
+# everywhere we run; macOS dev boxes use Homebrew bash 5.x via
+# `#!/bin/bash` plus PATH (autonomous.conf documents the requirement).
+_parse_extra_args() {
+  local var_name="$1"
+  local -n _out_array="$2"
+  _out_array=()
+  local raw="${!var_name:-}"
+  [[ -z "$raw" ]] && return 0
+  if ! eval "_out_array=($raw)" 2>/dev/null; then
+    echo "[lib-agent] WARN: $var_name failed to parse as a shell argv list. Value: ${raw}. Treating as empty." >&2
+    _out_array=()
+    return 0
+  fi
+}
 
 # Wall-clock cap on agent invocations (INV-13, closes #60).
 # Wraps run_agent / resume_agent in coreutils `timeout` so a hung CLI cannot
@@ -431,6 +467,9 @@ run_agent() {
   local model="${3:-}"
   local session_name="${4:-}"
 
+  local extra_args=()
+  _parse_extra_args AGENT_DEV_EXTRA_ARGS extra_args
+
   case "$AGENT_CMD" in
     claude)
       # Flag list is identical across both invocation paths — only the
@@ -440,6 +479,7 @@ run_agent() {
         ${session_name:+--name "$session_name"}
         --permission-mode "$AGENT_PERMISSION_MODE"
         ${model:+--model "$model"}
+        "${extra_args[@]}"
         -p "$prompt"
         --output-format json
       )
@@ -482,6 +522,7 @@ run_agent() {
       # of the pipeline is well-behaved and rc=0 on every input).
       _run_with_timeout "$AGENT_CMD" exec --json \
         ${model:+--model "$model"} \
+        "${extra_args[@]}" \
         "$prompt" \
         | _codex_capture_thread "$session_id"
       return "${PIPESTATUS[0]}"
@@ -489,36 +530,28 @@ run_agent() {
     gemini)
       # Gemini CLI: headless invocation per https://geminicli.com/docs/cli/headless/.
       #
-      # --approval-mode yolo is LOAD-BEARING. Per
-      # https://geminicli.com/docs/reference/policy-engine/, every
-      # write/shell tool defaults to `ask_user` which is treated as
-      # `deny` in non-interactive environments. Without yolo, every
-      # `run_shell_command` / `write_file` is silently denied while the
-      # CLI still produces a fluent textual answer and exits 0 — the
-      # fabrication failure mode reproduced in #102 (zxkane/llm-wiki#6,
-      # 2026-05-15: 31-min run, exit 0, "I have completed the work…",
-      # zero commits, zero PR).
+      # Operator-tunable flags (closes #140) live in
+      # AGENT_DEV_EXTRA_ARGS / AGENT_REVIEW_EXTRA_ARGS. The two
+      # load-bearing values from #102/#134:
+      #   --approval-mode yolo      — every write/shell tool defaults to
+      #                                ask_user→deny without it (silent
+      #                                fabrication failure mode #102 R2).
+      #   --output-format stream-json — single-blob `--output-format json`
+      #                                  defeats heartbeat liveness; we
+      #                                  need the per-event JSONL stream.
+      # See autonomous.conf.example "gemini block" for the canonical
+      # values; without them, gemini will reproduce the silent
+      # fabrication failure that #134 originally fixed.
       #
-      # --output-format stream-json emits JSONL events (init / message /
-      # tool_use / tool_result / error / result). The wrapper's
-      # regex-based observability matches this stream; --output-format
-      # json would emit a single end-of-run blob and defeat heartbeat
-      # liveness signals.
-      #
-      # --session-id <UUID> round-trips: the dispatcher's session_id
-      # appears in the `init` event verbatim and is directly usable
-      # for `gemini --resume <same-UUID>` later (verified empirically
-      # against CLI 0.42.0, #134). claude-style replay — no sidecar
-      # capture needed, unlike codex/opencode which mint their own ids.
-      #
-      # --allowed-tools is deprecated per `gemini --help`; do not reach
-      # for it. Admin-level policy in ~/.gemini/policy.json can override
-      # yolo for ops who want tighter gating; the wrapper doesn't care.
+      # --session-id <UUID> is structural and round-trips: the
+      # dispatcher's session_id appears in the `init` event verbatim and
+      # is directly usable for `gemini --resume <same-UUID>` later
+      # (verified empirically against CLI 0.42.0, #134). claude-style
+      # replay — no sidecar capture needed, unlike codex/opencode.
       _run_with_timeout "$AGENT_CMD" \
-        --output-format stream-json \
-        --approval-mode yolo \
         --session-id "$session_id" \
         ${model:+--model "$model"} \
+        "${extra_args[@]}" \
         -p "$prompt"
       ;;
     kiro)
@@ -526,26 +559,20 @@ run_agent() {
       # Each invocation starts a new conversation in the current directory.
       # --agent ensures the workspace agent (with TDD hooks) is used.
       #
-      # Tool trust:
-      #   * AGENT_PERMISSION_MODE=bypassPermissions  → pass --trust-all-tools
-      #     (matches the operator's daily-driver `kirocli()` shell function
-      #     and the claude branch's --permission-mode wiring).
-      #   * any other value (auto / plan / unset)    → rely on allowedTools
-      #     in ~/.kiro/agents/<KIRO_AGENT_NAME>.json.
-      # Precedence: CLI flag > agent file. Closes #136 — without
-      # --trust-all-tools, stock kiro installs deny every coding tool in
+      # Tool trust (closes #140): operator-tunable via AGENT_DEV_EXTRA_ARGS.
+      # The load-bearing flag from #102/#136 is `--trust-all-tools`;
+      # without it, stock kiro installs deny every coding tool in
       # --no-interactive mode and emit a fluent fabricated success at
-      # exit 0 (the #102 R5 silent-fabrication failure mode).
+      # exit 0 (the #102 R5 silent-fabrication failure mode). See
+      # autonomous.conf.example "kiro block" for the canonical value.
       local kiro_args=(
         chat
         --agent "$KIRO_AGENT_NAME"
         --no-interactive
         ${model:+--model "$model"}
+        "${extra_args[@]}"
+        "$prompt"
       )
-      if [[ "$AGENT_PERMISSION_MODE" == "bypassPermissions" ]]; then
-        kiro_args+=(--trust-all-tools)
-      fi
-      kiro_args+=("$prompt")
       _run_with_timeout kiro-cli "${kiro_args[@]}"
       ;;
     opencode)
@@ -559,12 +586,13 @@ run_agent() {
       _run_with_timeout "$AGENT_CMD" run --format json \
         ${model:+--model "$model"} \
         ${session_name:+--title "$session_name"} \
+        "${extra_args[@]}" \
         "$prompt" \
         | _opencode_capture_session "$session_id"
       return "${PIPESTATUS[0]}"
       ;;
     *)
-      _run_with_timeout "$AGENT_CMD" -p "$prompt"
+      _run_with_timeout "$AGENT_CMD" "${extra_args[@]}" -p "$prompt"
       ;;
   esac
 }
@@ -580,6 +608,9 @@ resume_agent() {
   local model="${3:-}"
   local session_name="${4:-}"
 
+  local extra_args=()
+  _parse_extra_args AGENT_REVIEW_EXTRA_ARGS extra_args
+
   case "$AGENT_CMD" in
     claude)
       # See run_agent above for the (A) direct vs. (B) launcher rationale.
@@ -589,6 +620,7 @@ resume_agent() {
         --resume "$session_id"
         --permission-mode "$AGENT_PERMISSION_MODE"
         ${model:+--model "$model"}
+        "${extra_args[@]}"
         -p "$prompt"
         --output-format json
       )
@@ -613,6 +645,7 @@ resume_agent() {
       if _codex_tid=$(_codex_thread_id "$session_id"); then
         _run_with_timeout "$AGENT_CMD" exec resume "$_codex_tid" --json \
           ${model:+--model "$model"} \
+          "${extra_args[@]}" \
           "$prompt" \
           | _codex_capture_thread "$session_id"
         return "${PIPESTATUS[0]}"
@@ -630,14 +663,14 @@ resume_agent() {
       # issue), gemini still starts cleanly because there's simply no
       # history to replay; safer than kiro's fresh-run fallback.
       #
-      # Same load-bearing flags as run_agent: --approval-mode yolo and
-      # --output-format stream-json. Without yolo, even resume-mode
-      # tool calls hit the headless ask_user→deny path.
+      # Operator-tunable flags via AGENT_REVIEW_EXTRA_ARGS (closes #140).
+      # The same load-bearing values as the dev side apply on resume:
+      # without `--approval-mode yolo` even resume-mode tool calls hit
+      # the headless ask_user→deny path. See autonomous.conf.example.
       _run_with_timeout "$AGENT_CMD" \
         --resume "$session_id" \
-        --output-format stream-json \
-        --approval-mode yolo \
         ${model:+--model "$model"} \
+        "${extra_args[@]}" \
         -p "$prompt"
       ;;
     kiro)
@@ -656,6 +689,7 @@ resume_agent() {
       if _opencode_sid=$(_opencode_session_id "$session_id"); then
         _run_with_timeout "$AGENT_CMD" run --format json --session "$_opencode_sid" \
           ${model:+--model "$model"} \
+          "${extra_args[@]}" \
           "$prompt" \
           | _opencode_capture_session "$session_id"
         return "${PIPESTATUS[0]}"

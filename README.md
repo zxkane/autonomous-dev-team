@@ -373,7 +373,7 @@ The dispatcher is an [OpenClaw](https://github.com/OpenClaw/OpenClaw) skill that
 | Codex CLI | `codex` | `exec --json "<prompt>"` | `exec resume <thread-id>` (captured from JSON stream) | Full support |
 | Kiro CLI | `kiro-cli` | `chat --no-interactive [--agent <name>]` | (falls back to new) | Basic support |
 | Cursor Agent | `agent` | `-p "<prompt>"` | `--resume=<chat-id>` | Generic fallback (untested explicit branch) |
-| Gemini CLI | `gemini` | `-p "<prompt>"` | (no documented resume flag) | Generic fallback (untested explicit branch) |
+| Gemini CLI | `gemini` | `--session-id <UUID> -p "<prompt>"` | `--resume <UUID>` | Full support |
 | opencode | `opencode` | `run --format json [PROMPT]` | `run --session <sessionID>` (captured from JSON stream) | Full support † |
 
 † **opencode prerequisites.** Unlike Claude Code (Anthropic-bound) or Codex CLI (OpenAI-bound), opencode is provider-agnostic — it has no default model, and no built-in credentials. Before setting `AGENT_CMD=opencode`:
@@ -386,7 +386,21 @@ The dispatcher is an [OpenClaw](https://github.com/OpenClaw/OpenClaw) skill that
    ```
 3. **`AGENT_PERMISSION_MODE=bypassPermissions` is not yet wired** to opencode's `--dangerously-skip-permissions` flag (same gap as the codex branch — tracked as a follow-up). For now, run opencode in a sandboxed environment where the missing permission flag is acceptable.
 
-Configure via `AGENT_CMD` in `scripts/autonomous.conf`. The `claude`, `codex`, `kiro`, and `opencode` rows have explicit branches in `scripts/lib-agent.sh`; the others run through the generic `<cli> -p <prompt>` fallback. Any CLI not listed should still work if it accepts a `-p <prompt>` non-interactive flag — the abstraction layer is intentionally permissive.
+Configure via `AGENT_CMD` in `scripts/autonomous.conf`. The `claude`, `codex`, `gemini`, `kiro`, and `opencode` rows have explicit branches in `scripts/lib-agent.sh`; the others run through the generic `<cli> -p <prompt>` fallback. Any CLI not listed should still work if it accepts a `-p <prompt>` non-interactive flag — the abstraction layer is intentionally permissive.
+
+### Multi-CLI support matrix (post-#102 / #140)
+
+The #102 multi-CLI test exercised every supported CLI end-to-end (R1–R5 + R2'' + R5'). #140 then collapsed the per-CLI safety flags out of `lib-agent.sh` into operator conf via `AGENT_DEV_EXTRA_ARGS` / `AGENT_REVIEW_EXTRA_ARGS`. The minimum conf snippet per CLI is below; see `scripts/autonomous.conf.example` for the full per-CLI block.
+
+| AGENT_CMD | E2E verified (#102) | Required EXTRA_ARGS | Why |
+|-----------|---------------------|---------------------|-----|
+| `claude` | R1 | (none — `--permission-mode` is structural) | claude's tool-trust knob is an existing structural flag |
+| `codex` | R3 | (none) | `exec --json` is structural; no operator-tunable trust default |
+| `gemini` | R2 / R2'' | `--approval-mode yolo --output-format stream-json` | Without yolo, every shell/write tool defaults to ask_user→deny in headless mode (silent fabrication failure mode #102 R2) |
+| `kiro` | R5 / R5' | `--trust-all-tools` | Stock kiro installs deny every coding tool in `--no-interactive` mode without the trust flag (silent fabrication failure mode #102 R5) |
+| `opencode` | R4 | (none) | `run --format json` is structural; provider/model selector handled via `AGENT_DEV_MODEL` |
+
+The `EXTRA_ARGS` mechanism is operator-tunable (reach for it to add `--debug`, alternate output formats, etc.). The values above are the empirically-validated minimum for each CLI to function in autonomous mode.
 
 ## Development Workflow (Hook System)
 

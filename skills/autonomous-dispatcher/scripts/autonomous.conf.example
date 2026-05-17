@@ -3,6 +3,30 @@
 # Copy this file to autonomous.conf and fill in your project values.
 # Values can also be overridden via environment variables.
 #
+# === Migration: 2026-05-17 — AGENT_*_EXTRA_ARGS introduced (closes #140) ===
+#
+# Existing gemini and kiro deployments depended on lib-agent.sh hardcoded
+# flags that this release demotes to conf-level passthrough. After
+# updating the user-scope skill (`npx skills update autonomous-dispatcher
+# -g -y`):
+#
+#   - gemini deployments MUST add:
+#       AGENT_DEV_EXTRA_ARGS="--approval-mode yolo --output-format stream-json"
+#       AGENT_REVIEW_EXTRA_ARGS="--approval-mode yolo --output-format stream-json"
+#   - kiro deployments MUST add:
+#       AGENT_DEV_EXTRA_ARGS="--trust-all-tools"
+#     (review-side falls through to run_agent for kiro and reads
+#     DEV_EXTRA_ARGS too, so the dev-side var alone suffices)
+#
+# Without these conf updates, the dispatcher will produce hallucinated
+# success / silent tool denial — the exact failure mode that #134 / #136
+# fixed at the wrapper level. The fix has not regressed; ownership of
+# the flag list moved to operator conf. claude / codex / opencode were
+# unaffected (no operator-tunable defaults to demote).
+#
+# See the per-CLI EXTRA_ARGS blocks below for canonical values and
+# operator-tunable additions (--debug, alternate output formats, etc.).
+#
 # === Deployment topologies (post-#104) ===
 #
 # Two supported layouts. Both work because every script computes
@@ -72,9 +96,12 @@ PROJECT_DIR="/path/to/project"
 #
 # gemini prerequisites:
 #   1. CLI 0.42.0+ (need the documented stream-json schema).
-#   2. The wrapper passes `--approval-mode yolo` automatically; without
-#      it, every shell/write tool defaults to ask_user→deny in headless
-#      mode (the silent fabrication failure mode from #102).
+#   2. AGENT_DEV_EXTRA_ARGS / AGENT_REVIEW_EXTRA_ARGS MUST be set to
+#      `--approval-mode yolo --output-format stream-json` (closes #140).
+#      Without --approval-mode yolo, every shell/write tool defaults to
+#      ask_user→deny in headless mode (the silent fabrication failure
+#      mode from #102). See the "gemini block" further below for
+#      canonical values.
 #   3. Valid AGENT_DEV_MODEL / AGENT_REVIEW_MODEL ids per
 #      https://geminicli.com/docs/reference/configuration/:
 #        gemini-3-pro-preview, gemini-3-flash-preview,
@@ -82,12 +109,15 @@ PROJECT_DIR="/path/to/project"
 #      `gemini-3-pro` (without -preview) is NOT a valid id.
 #
 # kiro prerequisites:
-#   1. AGENT_PERMISSION_MODE=bypassPermissions — required on stock kiro
-#      installs (no operator-customized ~/.kiro/agents/<name>.json).
-#      The wrapper translates this to `kiro-cli chat --trust-all-tools`;
-#      without it, headless --no-interactive mode denies every coding
-#      tool and kiro emits a fluent fabricated success at exit 0
-#      (the #102 R5 failure mode, fixed in #136).
+#   1. AGENT_DEV_EXTRA_ARGS MUST be set to `--trust-all-tools` on stock
+#      kiro installs (closes #140; replaces the pre-#140
+#      AGENT_PERMISSION_MODE=bypassPermissions wiring). Without the
+#      flag, headless --no-interactive mode denies every coding tool
+#      and kiro emits a fluent fabricated success at exit 0 (the #102
+#      R5 failure mode, originally fixed in #136). Operators with a
+#      customized ~/.kiro/agents/<name>.json that already permits
+#      coding tools can leave EXTRA_ARGS empty. See the "kiro block"
+#      further below for canonical values.
 #   2. KIRO_AGENT_NAME — defaults to `autonomous-dev`. Override below
 #      if your kiro install ships a different agent name (e.g. stock
 #      installs use `default`).
@@ -152,6 +182,89 @@ AGENT_TIMEOUT="4h"
 # use the wrapper's direct claude invocation.
 #
 # AGENT_LAUNCHER=''
+
+# === Per-CLI extra arguments (closes #140) ===
+#
+# AGENT_DEV_EXTRA_ARGS / AGENT_REVIEW_EXTRA_ARGS are flat strings whose
+# tokens are appended verbatim after the structural arguments of every
+# `run_agent` (dev) / `resume_agent` (review) call and before the prompt
+# positional. Defaults are empty. Tokenization uses `eval` (same trust
+# model as AGENT_LAUNCHER), so quoted values containing spaces survive
+# intact:
+#   AGENT_DEV_EXTRA_ARGS='--policy "/path with spaces/policy.json"'
+#
+# The five per-CLI blocks below show canonical values. UNCOMMENT only
+# the block matching your AGENT_CMD setting.
+AGENT_DEV_EXTRA_ARGS=""
+AGENT_REVIEW_EXTRA_ARGS=""
+
+# --- claude block ---
+# claude has NO required EXTRA_ARGS — the structural --permission-mode
+# flag handles tool trust via the existing AGENT_PERMISSION_MODE knob.
+# Common operator additions: --debug for verbose logging, alternate
+# --output-format if your downstream parser expects a different shape.
+#
+# AGENT_CMD="claude"
+# AGENT_DEV_EXTRA_ARGS=""
+# AGENT_REVIEW_EXTRA_ARGS=""
+# Example with debug logging:
+# AGENT_DEV_EXTRA_ARGS="--debug"
+
+# --- gemini block ---
+# Both flags are LOAD-BEARING (closes #134). Without --approval-mode
+# yolo, every write/shell tool defaults to ask_user→deny in headless
+# mode and gemini emits a fluent fabricated success at exit 0 — the
+# #102 R2 silent fabrication failure mode. --output-format stream-json
+# (vs the bare `json` end-of-run blob) is required for the wrapper's
+# heartbeat liveness signals to fire.
+#
+# AGENT_CMD="gemini"
+# AGENT_DEV_MODEL="gemini-2.5-pro"          # or gemini-3-pro-preview
+# AGENT_REVIEW_MODEL="gemini-2.5-pro"
+# AGENT_DEV_EXTRA_ARGS="--approval-mode yolo --output-format stream-json"
+# AGENT_REVIEW_EXTRA_ARGS="--approval-mode yolo --output-format stream-json"
+
+# --- kiro block ---
+# --trust-all-tools is LOAD-BEARING on stock kiro installs (closes #136):
+# the default kiro agent's allowedTools denies every coding tool in
+# --no-interactive mode and emits a fluent fabricated success at exit 0
+# — the #102 R5 silent fabrication failure mode. Operators with a
+# customized ~/.kiro/agents/<name>.json that already permits coding
+# tools can leave this empty.
+#
+# Note: kiro's resume_agent falls through to run_agent (no session model)
+# and reads AGENT_DEV_EXTRA_ARGS, so setting AGENT_REVIEW_EXTRA_ARGS is
+# generally unnecessary for kiro.
+#
+# AGENT_CMD="kiro"
+# AGENT_DEV_MODEL="claude-opus-4.7"
+# AGENT_REVIEW_MODEL="claude-sonnet-4.6"
+# AGENT_DEV_EXTRA_ARGS="--trust-all-tools"
+
+# --- codex block ---
+# codex has NO required EXTRA_ARGS — `exec --json` is structural and
+# codex's tool execution doesn't have an analogue to gemini's
+# ask_user→deny default. The model ID set below is valid for
+# ChatGPT-account auth; API-key auth has a different valid set.
+#
+# AGENT_CMD="codex"
+# AGENT_DEV_MODEL="gpt-5.4"
+# AGENT_REVIEW_MODEL="gpt-5.4"
+# AGENT_DEV_EXTRA_ARGS=""
+# AGENT_REVIEW_EXTRA_ARGS=""
+
+# --- opencode block ---
+# opencode has NO required EXTRA_ARGS — `run --format json` is
+# structural and the provider/model selector below is forwarded via
+# the standard --model flag. opencode is provider-agnostic; the model
+# id MUST be in `provider/model` form (e.g.
+# `amazon-bedrock/global.anthropic.claude-opus-4-7`).
+#
+# AGENT_CMD="opencode"
+# AGENT_DEV_MODEL="amazon-bedrock/global.anthropic.claude-opus-4-7"
+# AGENT_REVIEW_MODEL="anthropic/claude-sonnet-4-6"
+# AGENT_DEV_EXTRA_ARGS=""
+# AGENT_REVIEW_EXTRA_ARGS=""
 
 # === GitHub Authentication ===
 GH_AUTH_MODE="token"

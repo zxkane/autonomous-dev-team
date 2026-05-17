@@ -269,11 +269,34 @@ PID files follow the same pattern with `.pid` extension.
 |-------|---------|-------------|----------------|----------------|
 | Claude Code | `claude` | Full | Full | Yes (UUID round-trip via `--session-id` / `--resume`) |
 | Codex | `codex` | Basic | Basic | Yes (CLI-minted thread_id captured to sidecar) |
-| Gemini | `gemini` | Basic | Basic | Yes (UUID round-trip — same model as claude, no sidecar). Requires `--approval-mode yolo` (load-bearing — set automatically by lib-agent.sh, see #134). |
-| Kiro | `kiro` | Basic | Basic | No (new session on resume). Sets `--trust-all-tools` automatically when `AGENT_PERMISSION_MODE=bypassPermissions` (load-bearing — without it, stock kiro installs deny every coding tool in `--no-interactive` mode and the wrapper observes a fluent fabricated success at exit 0; see #136). |
+| Gemini | `gemini` | Basic | Basic | Yes (UUID round-trip — same model as claude, no sidecar). Operator MUST set `AGENT_DEV_EXTRA_ARGS="--approval-mode yolo --output-format stream-json"` (load-bearing — see #140 / #134). |
+| Kiro | `kiro` | Basic | Basic | No (new session on resume). Operator MUST set `AGENT_DEV_EXTRA_ARGS="--trust-all-tools"` on stock kiro installs (load-bearing — see #140 / #136). |
 | Opencode | `opencode` | Basic | Basic | Yes (CLI-minted sessionID captured to sidecar) |
 
 Set `AGENT_CMD` in `autonomous.conf` to switch agents. Claude Code is recommended for full pipeline support including session resume.
+
+### Operator-tunable per-CLI flags (closes #140)
+
+Two `autonomous.conf` variables append flags verbatim to every CLI invocation:
+
+| Variable | Used by | Appends to argv |
+|---|---|---|
+| `AGENT_DEV_EXTRA_ARGS` | `run_agent` (dev wrapper, fresh-session paths) | After structural args, before the prompt positional |
+| `AGENT_REVIEW_EXTRA_ARGS` | `resume_agent` (review wrapper, resume paths) | After structural args, before the prompt positional |
+
+Both default to empty. Tokenization uses `eval` so quoted multi-word values survive (`AGENT_DEV_EXTRA_ARGS='--policy "/path with spaces/policy.json"'`). Trust level matches `AGENT_LAUNCHER` — values come from operator-controlled `autonomous.conf`.
+
+**Use this mechanism when**:
+- Adding a new flag to an existing CLI (e.g. `--debug` for verbose logging)
+- Wiring an undocumented per-CLI safety flag without modifying `lib-agent.sh`
+- Onboarding a new CLI: set `AGENT_CMD=<cli>` to fall through the generic `<cli> -p <prompt>` branch and supply the trust/output flags via EXTRA_ARGS
+
+**Common pitfalls**:
+- **Quoting**: `eval` parses the string as shell argv. Single-token flags like `--debug` are simple; multi-token values with embedded spaces require shell-style quoting in conf, e.g. `AGENT_DEV_EXTRA_ARGS='--policy "/etc/foo bar/policy"'`.
+- **Dev vs review divergence**: `AGENT_DEV_EXTRA_ARGS` is NOT inherited by `resume_agent` — set both vars when the same flag is needed on both paths. Exception: kiro, whose `resume_agent` falls through to `run_agent` and reads `AGENT_DEV_EXTRA_ARGS`.
+- **Migration from pre-#140**: gemini and kiro deployments that pull this release without updating conf will silently regress to the #102 R2 / R5 fabrication failure mode (the conf.example header callout is the load-bearing operator-facing artifact for this).
+
+For canonical per-CLI values, see the per-CLI blocks at the bottom of `scripts/autonomous.conf.example`.
 
 ## Key Files
 
