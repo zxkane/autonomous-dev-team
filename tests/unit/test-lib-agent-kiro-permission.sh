@@ -1,21 +1,22 @@
 #!/bin/bash
-# test-lib-agent-kiro-permission.sh — Unit tests for the kiro
-# permission-mode wiring in lib-agent.sh (#136).
+# test-lib-agent-kiro-permission.sh — Unit tests for the kiro branch of
+# lib-agent.sh.
 #
-# Verifies:
+# Originally introduced in #136 to lock in `--trust-all-tools` as a
+# conditional flag keyed on AGENT_PERMISSION_MODE=bypassPermissions.
+# After #140 that conditional moved out of the wrapper and into operator
+# conf via `AGENT_DEV_EXTRA_ARGS` / `AGENT_REVIEW_EXTRA_ARGS`. This file
+# now verifies the structural-only contract:
+#
 #   - run_agent kiro branch invokes
 #       `kiro-cli chat --agent <name> --no-interactive [--model <m>]
-#        [--trust-all-tools] <prompt>`
-#     with --trust-all-tools appended IFF
-#     AGENT_PERMISSION_MODE=bypassPermissions.
-#   - resume_agent (which falls through to run_agent for kiro since
-#     kiro has no session model) honors the same wiring on the
-#     fresh-conversation invocation it spawns.
-#   - --trust-all-tools is NOT appended when AGENT_PERMISSION_MODE is
-#     left at the lib default (auto), preserving operators' restrictive
-#     allowedTools posture.
-#   - --model still threads correctly when both knobs are set
-#     (regression pin against argv-construction reorder).
+#        [<EXTRA_ARGS>...] <prompt>`
+#     (no AGENT_PERMISSION_MODE conditional in the wrapper anymore)
+#   - When the operator supplies AGENT_DEV_EXTRA_ARGS=--trust-all-tools,
+#     the flag is appended verbatim — the post-#140 migration path
+#   - resume_agent falls through to run_agent for kiro and honors the
+#     EXTRA_ARGS the same way
+#   - --model still threads correctly when EXTRA_ARGS is set
 #
 # Strategy: mirror test-lib-agent-gemini.sh — source lib-agent.sh in a
 # sandbox with a stub `kiro-cli` on PATH that records argv to a
@@ -97,15 +98,32 @@ kiro_case_count=$(grep -cE '^[[:space:]]*kiro\)[[:space:]]*$' "$LIB" || echo 0)
 assert_eq "lib-agent.sh has kiro case in both run_agent and resume_agent" \
   "2" "$kiro_case_count"
 
-# The conditional that gates --trust-all-tools must reference
-# AGENT_PERMISSION_MODE — pin against a refactor that hardcodes the flag
-# always-on (would silently override operators' allowedTools posture).
-if grep -q 'AGENT_PERMISSION_MODE.*bypassPermissions' "$LIB" \
-   && grep -q -- '--trust-all-tools' "$LIB"; then
-  echo -e "  ${GREEN}PASS${NC}: lib-agent.sh wires AGENT_PERMISSION_MODE=bypassPermissions to --trust-all-tools"
+# Post-#140: the kiro case body MUST NOT contain executable references
+# to `--trust-all-tools` — the flag has been demoted to operator conf
+# (AGENT_DEV_EXTRA_ARGS). Mentions inside `#` comments are allowed (and
+# expected, as the docstring documents the canonical EXTRA_ARGS value
+# for operators). Strip comments before grepping so we test code, not
+# narrative.
+#
+# Pin the demotion: a refactor that re-hardcodes the flag would silently
+# override operators' allowedTools posture, reproducing the #102 R5
+# fabrication failure mode for everyone who sets AGENT_PERMISSION_MODE
+# to anything other than bypassPermissions.
+kiro_executable=$(awk '
+  /^[[:space:]]*kiro\)[[:space:]]*$/ { flag=1 }
+  flag {
+    line = $0
+    sub(/[[:space:]]*#.*$/, "", line)
+    if (line ~ /^[[:space:]]*$/) next
+    if (line ~ /^[[:space:]]*;;[[:space:]]*$/) { flag=0; next }
+    print line
+  }
+' "$LIB")
+if [[ "$kiro_executable" != *"--trust-all-tools"* ]]; then
+  echo -e "  ${GREEN}PASS${NC}: kiro case body does not hardcode --trust-all-tools (demoted to AGENT_DEV_EXTRA_ARGS, #140)"
   PASS=$((PASS + 1))
 else
-  echo -e "  ${RED}FAIL${NC}: lib-agent.sh missing AGENT_PERMISSION_MODE→--trust-all-tools wiring"
+  echo -e "  ${RED}FAIL${NC}: kiro case body still hardcodes --trust-all-tools (should live in AGENT_DEV_EXTRA_ARGS, #140)"
   FAIL=$((FAIL + 1))
 fi
 
@@ -147,7 +165,7 @@ SESSION_ID="b2c3d4e5-1111-2222-3333-555555555555"
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== TC-KIR-001: run_agent + bypassPermissions → --trust-all-tools ==="
+echo "=== TC-KIR-001: run_agent + AGENT_DEV_EXTRA_ARGS=--trust-all-tools ==="
 # ---------------------------------------------------------------------------
 : > "$ARGS_FILE"
 
@@ -157,6 +175,7 @@ PROJECT_ID="testproj" \
 PROJECT_DIR="$TMPROOT" \
 AGENT_CMD=kiro \
 AGENT_PERMISSION_MODE=bypassPermissions \
+AGENT_DEV_EXTRA_ARGS="--trust-all-tools" \
 KIRO_ARGS_FILE="$ARGS_FILE" \
 bash -c '
   source "'"$LIB"'"
@@ -165,7 +184,7 @@ bash -c '
 
 bypass_argv=$(cat "$ARGS_FILE")
 
-assert_contains "TC-KIR-001 argv contains --trust-all-tools (load-bearing)" \
+assert_contains "TC-KIR-001 argv contains --trust-all-tools (load-bearing, via EXTRA_ARGS)" \
   "--trust-all-tools" "$bypass_argv"
 
 # Existing flags must survive.
@@ -180,8 +199,13 @@ assert_contains "TC-KIR-001 argv contains the prompt" \
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== TC-KIR-002: run_agent + auto → does NOT include --trust-all-tools ==="
+echo "=== TC-KIR-002: run_agent + empty AGENT_DEV_EXTRA_ARGS → no --trust-all-tools ==="
 # ---------------------------------------------------------------------------
+# Post-#140: AGENT_PERMISSION_MODE no longer drives the kiro trust flag.
+# An operator who leaves AGENT_DEV_EXTRA_ARGS empty (the migration
+# regression we expect for un-updated gemini/kiro deployments) gets a
+# wrapper invocation WITHOUT --trust-all-tools. This is intentional —
+# the conf.example callout makes the migration explicit.
 : > "$ARGS_FILE"
 
 PATH="$BIN:$PATH" \
@@ -198,7 +222,7 @@ bash -c '
 
 auto_argv=$(cat "$ARGS_FILE")
 
-assert_not_contains "TC-KIR-002 argv does NOT contain --trust-all-tools when AGENT_PERMISSION_MODE=auto" \
+assert_not_contains "TC-KIR-002 argv does NOT contain --trust-all-tools when AGENT_DEV_EXTRA_ARGS empty" \
   "--trust-all-tools" "$auto_argv"
 
 # Defensive: also rule out the short -a flag (which kiro-cli accepts as
@@ -219,10 +243,13 @@ assert_contains "TC-KIR-002 argv still contains --no-interactive (sanity)" \
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== TC-KIR-003: resume_agent + bypassPermissions → --trust-all-tools ==="
+echo "=== TC-KIR-003: resume_agent + AGENT_DEV_EXTRA_ARGS=--trust-all-tools ==="
 # ---------------------------------------------------------------------------
-# Kiro has no session model: resume_agent falls back to run_agent. The
-# trust flag must still ride along on the fresh-conversation invocation.
+# Kiro has no session model: resume_agent falls back to run_agent, which
+# reads AGENT_DEV_EXTRA_ARGS (not the review-side var). Operators wiring
+# kiro for a fresh-conversation resume must ensure both vars are set if
+# they need the trust flag on either path. We document the
+# fall-through here.
 : > "$ARGS_FILE"
 
 PATH="$BIN:$PATH" \
@@ -231,6 +258,7 @@ PROJECT_ID="testproj" \
 PROJECT_DIR="$TMPROOT" \
 AGENT_CMD=kiro \
 AGENT_PERMISSION_MODE=bypassPermissions \
+AGENT_DEV_EXTRA_ARGS="--trust-all-tools" \
 KIRO_ARGS_FILE="$ARGS_FILE" \
 bash -c '
   source "'"$LIB"'"
@@ -239,7 +267,7 @@ bash -c '
 
 resume_argv=$(cat "$ARGS_FILE")
 
-assert_contains "TC-KIR-003 resume argv contains --trust-all-tools" \
+assert_contains "TC-KIR-003 resume argv contains --trust-all-tools (via DEV_EXTRA_ARGS fall-through)" \
   "--trust-all-tools" "$resume_argv"
 assert_contains "TC-KIR-003 resume argv contains the follow-up prompt (sanity)" \
   "follow-up: address review feedback" "$resume_argv"
@@ -256,6 +284,7 @@ PROJECT_ID="testproj" \
 PROJECT_DIR="$TMPROOT" \
 AGENT_CMD=kiro \
 AGENT_PERMISSION_MODE=bypassPermissions \
+AGENT_DEV_EXTRA_ARGS="--trust-all-tools" \
 KIRO_ARGS_FILE="$ARGS_FILE" \
 bash -c '
   source "'"$LIB"'"

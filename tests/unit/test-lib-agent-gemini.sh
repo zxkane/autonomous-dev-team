@@ -1,19 +1,22 @@
 #!/bin/bash
 # test-lib-agent-gemini.sh — Unit tests for the gemini branches of
-# lib-agent.sh (#134).
+# lib-agent.sh.
 #
-# Verifies:
-#   - run_agent gemini branch invokes `gemini --output-format stream-json
-#     --approval-mode yolo --session-id <uuid> [--model <m>] -p <prompt>`
-#   - --approval-mode yolo is the load-bearing fix for the #102 silent
-#     fabrication failure mode (every shell/write tool defaults to
-#     ask_user→deny in headless mode without it)
-#   - resume_agent gemini branch invokes `gemini --resume <uuid> ...` —
-#     gemini's --session-id round-trips, no sidecar needed (verified
-#     empirically during issue triage; see PR description)
+# Originally introduced in #134 to lock in `--approval-mode yolo +
+# --output-format stream-json` as hardcoded gemini flags. After #140
+# those flags moved out of the wrapper and into operator conf via
+# `AGENT_DEV_EXTRA_ARGS` / `AGENT_REVIEW_EXTRA_ARGS`. This file now
+# verifies the structural-only contract:
+#
+#   - run_agent gemini branch invokes `gemini --session-id <uuid>
+#     [--model <m>] [<EXTRA_ARGS>...] -p <prompt>` (no hardcoded yolo
+#     or stream-json)
+#   - When the operator supplies AGENT_DEV_EXTRA_ARGS with the canonical
+#     gemini values, those flags ride along — confirming the migration
+#     path matches the pre-#140 argv shape end-to-end
+#   - resume_agent gemini branch invokes `gemini --resume <uuid> ...`
+#     and accepts AGENT_REVIEW_EXTRA_ARGS the same way
 #   - --model flag is conditional on AGENT_DEV_MODEL / AGENT_REVIEW_MODEL
-#   - capture/passthrough preserves stream-json event sequence including
-#     tool-denial error events (TC-GEM-008 hallucination defense)
 #
 # Strategy: mirror test-lib-agent-codex.sh — source lib-agent.sh in a
 # sandbox with a stub `gemini` on PATH that records argv to a recorder
@@ -143,6 +146,7 @@ run_agent_output=$(
   PROJECT_DIR="$TMPROOT" \
   AGENT_CMD=gemini \
   AGENT_PERMISSION_MODE=auto \
+  AGENT_DEV_EXTRA_ARGS="--approval-mode yolo --output-format stream-json" \
   GEMINI_ARGS_FILE="$ARGS_FILE" \
   bash -c '
     source "'"$LIB"'"
@@ -168,12 +172,13 @@ assert_contains "TC-GEM-008 stdout includes result event" \
 # Recover argv for the flag-composition assertions.
 gemini_argv=$(cat "$ARGS_FILE")
 
-# TC-GEM-001: --approval-mode yolo (load-bearing flag, must not regress).
-assert_contains "TC-GEM-001 argv contains --approval-mode yolo (load-bearing)" \
+# TC-GEM-001: --approval-mode yolo arrives via AGENT_DEV_EXTRA_ARGS
+# passthrough (post-#140 the wrapper no longer hardcodes it).
+assert_contains "TC-GEM-001 argv contains --approval-mode yolo (load-bearing, via EXTRA_ARGS)" \
   "--approval-mode yolo" "$gemini_argv"
 
-# TC-GEM-002: --output-format stream-json.
-assert_contains "TC-GEM-002 argv contains --output-format stream-json" \
+# TC-GEM-002: --output-format stream-json arrives via EXTRA_ARGS too.
+assert_contains "TC-GEM-002 argv contains --output-format stream-json (via EXTRA_ARGS)" \
   "--output-format stream-json" "$gemini_argv"
 
 # TC-GEM-003: --session-id passes the dispatcher's UUID exactly.
@@ -214,6 +219,7 @@ PROJECT_ID="testproj" \
 PROJECT_DIR="$TMPROOT" \
 AGENT_CMD=gemini \
 AGENT_PERMISSION_MODE=auto \
+AGENT_DEV_EXTRA_ARGS="--approval-mode yolo --output-format stream-json" \
 GEMINI_ARGS_FILE="$ARGS_FILE" \
 bash -c '
   source "'"$LIB"'"
@@ -238,6 +244,7 @@ PROJECT_ID="testproj" \
 PROJECT_DIR="$TMPROOT" \
 AGENT_CMD=gemini \
 AGENT_PERMISSION_MODE=auto \
+AGENT_REVIEW_EXTRA_ARGS="--approval-mode yolo --output-format stream-json" \
 GEMINI_ARGS_FILE="$ARGS_FILE" \
 bash -c '
   source "'"$LIB"'"
@@ -250,11 +257,11 @@ resume_argv=$(cat "$ARGS_FILE")
 assert_contains "TC-GEM-006 resume argv contains --resume + the dispatcher session UUID" \
   "--resume $SESSION_ID" "$resume_argv"
 
-# TC-GEM-006 (regression-pin load-bearing flags): yolo + stream-json must
-# survive on the resume path.
-assert_contains "TC-GEM-006 resume argv keeps --approval-mode yolo" \
+# TC-GEM-006 (load-bearing flags arrive via AGENT_REVIEW_EXTRA_ARGS):
+# yolo + stream-json must survive on the resume path.
+assert_contains "TC-GEM-006 resume argv keeps --approval-mode yolo (via REVIEW_EXTRA_ARGS)" \
   "--approval-mode yolo" "$resume_argv"
-assert_contains "TC-GEM-006 resume argv keeps --output-format stream-json" \
+assert_contains "TC-GEM-006 resume argv keeps --output-format stream-json (via REVIEW_EXTRA_ARGS)" \
   "--output-format stream-json" "$resume_argv"
 
 assert_contains "TC-GEM-006 resume argv contains follow-up prompt" \
