@@ -270,7 +270,7 @@ PID files follow the same pattern with `.pid` extension.
 | Claude Code | `claude` | Full | Full | Yes (UUID round-trip via `--session-id` / `--resume`) |
 | Codex | `codex` | Basic | Basic | Yes (CLI-minted thread_id captured to sidecar) |
 | Gemini | `gemini` | Basic | Basic | Yes (UUID round-trip — same model as claude, no sidecar). Requires `--approval-mode yolo` (load-bearing — set automatically by lib-agent.sh, see #134). |
-| Kiro | `kiro` | Basic | Basic | No (new session on resume) |
+| Kiro | `kiro` | Basic | Basic | No (new session on resume). Sets `--trust-all-tools` automatically when `AGENT_PERMISSION_MODE=bypassPermissions` (load-bearing — without it, stock kiro installs deny every coding tool in `--no-interactive` mode and the wrapper observes a fluent fabricated success at exit 0; see #136). |
 | Opencode | `opencode` | Basic | Basic | Yes (CLI-minted sessionID captured to sidecar) |
 
 Set `AGENT_CMD` in `autonomous.conf` to switch agents. Claude Code is recommended for full pipeline support including session resume.
