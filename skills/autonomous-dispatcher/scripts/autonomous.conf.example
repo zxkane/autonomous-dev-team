@@ -80,6 +80,17 @@ PROJECT_DIR="/path/to/project"
 #        gemini-3-pro-preview, gemini-3-flash-preview,
 #        gemini-2.5-pro, gemini-2.5-flash, gemini-2.5-flash-lite
 #      `gemini-3-pro` (without -preview) is NOT a valid id.
+#
+# kiro prerequisites:
+#   1. AGENT_PERMISSION_MODE=bypassPermissions — required on stock kiro
+#      installs (no operator-customized ~/.kiro/agents/<name>.json).
+#      The wrapper translates this to `kiro-cli chat --trust-all-tools`;
+#      without it, headless --no-interactive mode denies every coding
+#      tool and kiro emits a fluent fabricated success at exit 0
+#      (the #102 R5 failure mode, fixed in #136).
+#   2. KIRO_AGENT_NAME — defaults to `autonomous-dev`. Override below
+#      if your kiro install ships a different agent name (e.g. stock
+#      installs use `default`).
 AGENT_CMD="claude"
 # AGENT_DEV_MODEL / AGENT_REVIEW_MODEL: model passed via the CLI's
 # --model flag. Empty = let the CLI pick its default (claude / codex /

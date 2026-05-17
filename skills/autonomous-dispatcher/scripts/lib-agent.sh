@@ -24,7 +24,15 @@
 #              which is treated as deny in headless mode (the silent
 #              fabrication failure mode reproduced in #102).
 #   kiro     — no session model; every invocation is a fresh conversation.
-#              resume_agent falls back to run_agent.
+#              resume_agent falls back to run_agent. Tool trust is wired
+#              via `--trust-all-tools` when
+#              AGENT_PERMISSION_MODE=bypassPermissions; otherwise the
+#              agent file's allowedTools (in
+#              ~/.kiro/agents/<KIRO_AGENT_NAME>.json) is the authority.
+#              Precedence: CLI flag > agent file. Closes #136 — without
+#              this wiring, stock kiro installs deny every coding tool
+#              in --no-interactive mode and the wrapper observes a
+#              fluent fabricated success at exit 0 (#102 R5).
 #   opencode — same CLI-minted-session-id wrinkle as codex but with a
 #              `sessionID` field on every JSON event. Captured the same
 #              way (_opencode_capture_session) and fed back to
@@ -517,12 +525,28 @@ run_agent() {
       # Kiro CLI does not support named sessions (session_id is ignored).
       # Each invocation starts a new conversation in the current directory.
       # --agent ensures the workspace agent (with TDD hooks) is used.
-      # Tool trust is handled by allowedTools in .kiro/agents/default.json.
-      _run_with_timeout kiro-cli chat \
-        --agent "$KIRO_AGENT_NAME" \
-        --no-interactive \
-        ${model:+--model "$model"} \
-        "$prompt"
+      #
+      # Tool trust:
+      #   * AGENT_PERMISSION_MODE=bypassPermissions  → pass --trust-all-tools
+      #     (matches the operator's daily-driver `kirocli()` shell function
+      #     and the claude branch's --permission-mode wiring).
+      #   * any other value (auto / plan / unset)    → rely on allowedTools
+      #     in ~/.kiro/agents/<KIRO_AGENT_NAME>.json.
+      # Precedence: CLI flag > agent file. Closes #136 — without
+      # --trust-all-tools, stock kiro installs deny every coding tool in
+      # --no-interactive mode and emit a fluent fabricated success at
+      # exit 0 (the #102 R5 silent-fabrication failure mode).
+      local kiro_args=(
+        chat
+        --agent "$KIRO_AGENT_NAME"
+        --no-interactive
+        ${model:+--model "$model"}
+      )
+      if [[ "$AGENT_PERMISSION_MODE" == "bypassPermissions" ]]; then
+        kiro_args+=(--trust-all-tools)
+      fi
+      kiro_args+=("$prompt")
+      _run_with_timeout kiro-cli "${kiro_args[@]}"
       ;;
     opencode)
       # opencode `run [message..]` is the headless invocation. opencode
