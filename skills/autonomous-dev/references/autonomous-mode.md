@@ -16,6 +16,41 @@ When a decision would normally require user input:
 | Test coverage questions | Write tests for happy path + main error cases |
 | Performance vs simplicity | Choose simplicity unless performance is the issue's focus |
 
+## Posting Issue/PR Comments
+
+In autonomous mode there are **two** wrappers, and they are not interchangeable. Pick the right one or your comment is attributed to the wrong identity.
+
+| Comment purpose | Wrapper to use | Resulting identity |
+|---|---|---|
+| Status / summary / progress / error / Step-12 completion comment | `bash scripts/gh issue comment …` (or `bash scripts/gh pr comment …`) | App mode → bot; token mode → host user. Both are intentional per `GH_AUTH_MODE`. |
+| Review-bot trigger (`/q review`, `/codex review`, `@claude review`) | `bash scripts/gh-as-user.sh pr comment …` | Always host user (Q / Codex / Claude bots reject GitHub-App-attributed triggers). |
+
+> **Never use bare `gh issue comment` or bare `gh pr comment`.** The wrapper injects `gh-with-token-refresh.sh` onto `PATH`, but the agent's embedded Bash tool does not reliably honor that injection for `gh` resolution — bare calls fall through to the system `/usr/bin/gh` and post under the host operator's `gh auth login` user instead of the configured pipeline identity. The explicit `bash scripts/gh …` form forces resolution through the project-vendored wrapper symlink.
+
+**Examples**:
+
+```bash
+# Step-12 completion summary (status post — wrapper-routed):
+bash scripts/gh issue comment "$ISSUE_NUMBER" \
+  --body "Implementation complete. PR: #$PR_NUMBER. All CI checks passed."
+
+# Review-bot trigger (must be user-attributed):
+bash scripts/gh-as-user.sh pr comment "$PR_NUMBER" --body "/q review"
+
+# Error/recovery comment (status post — wrapper-routed):
+bash scripts/gh issue comment "$ISSUE_NUMBER" \
+  --body "Build failed after 3 retry attempts. See logs at <url>. Bailing out."
+```
+
+**Self-check before Step-12 summary post** (optional but recommended for app mode):
+
+```bash
+bash scripts/gh api user --jq .login
+# In app mode this should print the bot login (e.g. "<bot-name>[bot]").
+# If it prints a human username, the wrapper symlink is not being resolved
+# and the summary post will be misattributed.
+```
+
 ## Resume Awareness
 
 On resume (or new session for a previously started issue), perform these checks before writing code:

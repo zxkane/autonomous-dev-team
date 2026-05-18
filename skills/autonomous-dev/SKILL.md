@@ -381,7 +381,11 @@ For the full retrigger commands, reply patterns, and thread resolution semantics
    hooks/state-manager.sh mark e2e-tests
    ```
 3. Update PR checklist to show all items complete
-4. **STOP HERE**: report status to the user (interactive mode) or post a summary comment on the issue (autonomous mode)
+4. **STOP HERE**: report status to the user (interactive mode) or post a summary comment on the issue (autonomous mode). In autonomous mode, post via the project-vendored wrapper so the comment is attributed to the configured identity (bot in app mode, host user in token mode):
+   ```bash
+   bash scripts/gh issue comment <ISSUE_NUMBER> --body "<summary>"
+   ```
+   Do **not** call bare `gh issue comment` — the agent's Bash tool does not reliably resolve `gh` through the wrapper-injected PATH, so a bare call falls through to the system `gh` and posts under the host operator's identity. See [`references/autonomous-mode.md`](references/autonomous-mode.md#posting-issuepr-comments) for the full rule.
 5. User or review agent decides when to merge
 
 ---
