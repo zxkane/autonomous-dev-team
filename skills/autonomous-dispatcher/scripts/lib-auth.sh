@@ -60,11 +60,6 @@ setup_github_auth() {
 
     refresh_token_env
     export GH_TOKEN_FILE
-
-    if [[ -x "${_LIB_AUTH_DIR}/gh-with-token-refresh.sh" ]]; then
-      export PATH="${_LIB_AUTH_DIR}:${PATH}"
-      ln -sf "${_LIB_AUTH_DIR}/gh-with-token-refresh.sh" "${_LIB_AUTH_DIR}/gh" 2>/dev/null || true
-    fi
   else
     if [[ -z "${GH_TOKEN:-}" ]]; then
       if ! command -v gh &>/dev/null || ! gh auth status &>/dev/null 2>&1; then
@@ -72,6 +67,18 @@ setup_github_auth() {
         echo "Run 'export GH_TOKEN=<token>' or 'gh auth login'." >&2
       fi
     fi
+  fi
+
+  # [INV-32] Create the `gh` symlink in both modes. The wrapper itself
+  # (gh-with-token-refresh.sh) is mode-agnostic — it only reads from
+  # GH_TOKEN_FILE when that's set (app mode). In token mode the wrapper
+  # exec's the real gh and inherits the host's gh auth env, which IS the
+  # intended identity. Having the symlink in both modes lets agent-facing
+  # docs prescribe a single uniform rule (`bash scripts/gh issue comment …`)
+  # without mode-conditional branches. See issue #142.
+  if [[ -x "${_LIB_AUTH_DIR}/gh-with-token-refresh.sh" ]]; then
+    export PATH="${_LIB_AUTH_DIR}:${PATH}"
+    ln -sf "${_LIB_AUTH_DIR}/gh-with-token-refresh.sh" "${_LIB_AUTH_DIR}/gh" 2>/dev/null || true
   fi
 }
 

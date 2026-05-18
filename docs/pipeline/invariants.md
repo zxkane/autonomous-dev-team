@@ -677,6 +677,54 @@ The transport's stdout is one of `ALIVE` / `DEAD` / empty. Indeterminate verdict
 
 Plus the existing `test-lib-agent-gemini.sh` (22 assertions) and `test-lib-agent-kiro-permission.sh` (16 assertions) updated to assert the post-#140 structural-only contract on the gemini and kiro branches.
 
+## INV-32: `gh` wrapper symlink is created in both auth modes
+
+**Rule**: `setup_github_auth` in `lib-auth.sh` MUST create the
+`${_LIB_AUTH_DIR}/gh` symlink (pointing at `gh-with-token-refresh.sh`) and
+prepend `_LIB_AUTH_DIR` to `PATH` regardless of `GH_AUTH_MODE`. Both `app`
+and `token` modes must produce a working `scripts/gh` invocation path.
+
+**Why**: agent-facing skill docs (`skills/autonomous-dev/SKILL.md` Step 12,
+`skills/autonomous-dev/references/autonomous-mode.md` "Posting Issue/PR
+Comments") prescribe `bash scripts/gh issue comment …` as the uniform rule
+for status / summary / progress comments — the explicit path forces
+resolution through the project-vendored wrapper symlink, sidestepping the
+agent's Bash tool's unreliable PATH-resolution for `gh` (the bug fixed by
+issue #142). For that uniform rule to actually work, the symlink must
+exist in both modes. The wrapper itself (`gh-with-token-refresh.sh`) is
+mode-agnostic — it consults `GH_TOKEN_FILE` only when set (app mode) and
+otherwise exec's the real `gh` inheriting the host's auth env (which IS
+the intended identity in token mode). Lifting the symlink creation out of
+the app-mode branch is therefore safe and necessary.
+
+**Producer**: `skills/autonomous-dispatcher/scripts/lib-auth.sh::setup_github_auth`.
+
+**Consumer**: agent-facing docs that prescribe `bash scripts/gh …`; agent
+processes that follow that prescription; any operator script that invokes
+`bash scripts/gh` from the project's `scripts/` directory.
+
+**Status**: **ENFORCED** by this PR (closes #142). Pre-#142, the symlink
+creation lived inside the `if [[ "$GH_AUTH_MODE" == "app" ]]` branch of
+`setup_github_auth` (lib-auth.sh:64-67), so token-mode invocations of the
+prescribed command path fell through to a "no such file" error.
+
+**Test**:
+- `tests/unit/test-lib-auth-gh-symlink.sh` (2 cases) — TC-AUTH-SYM-001
+  drives `setup_github_auth` in token mode and asserts the `gh` symlink
+  exists; TC-AUTH-SYM-002 is a source-level regression guard that asserts
+  the symlink-creation line is OUTSIDE the `GH_AUTH_MODE=app` branch in
+  `lib-auth.sh`.
+
+**Cross-references**:
+- Agent-facing rule: `skills/autonomous-dev/references/autonomous-mode.md`
+  "Posting Issue/PR Comments" section — describes when to use
+  `bash scripts/gh issue comment …` vs `bash scripts/gh-as-user.sh pr
+  comment …`. INV-32 is what makes the former actually work in both modes.
+- Doc-lint guard: `tests/unit/test-dev-skill-bash-scripts-gh.sh` — fails
+  on regressions to bare `gh issue comment` in `skills/autonomous-dev/`
+  markdown.
+
+
 ## Adding a new invariant
 
 When fixing a pipeline bug, after locating the bug on the state machine + flow docs:
