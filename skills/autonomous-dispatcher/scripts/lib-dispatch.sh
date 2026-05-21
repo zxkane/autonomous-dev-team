@@ -843,8 +843,11 @@ get_pid() {
 # "number,body,updatedAt" or "number,body,headRefOid").
 fetch_pr_for_issue() {
   local issue_num="$1" fields="$2"
+  # `.body` is null when a PR has an empty description. Guard before
+  # `test()` — `null | test(...)` aborts the jq filter, drops to stderr, and
+  # silently hides any matching PR (issue #148).
   gh pr list --repo "$REPO" --state open --json "$fields" \
-    -q "[.[] | select(.body | test(\"#${issue_num}[^0-9]\") or test(\"#${issue_num}$\"))] | .[0] // empty"
+    -q "[.[] | select(.body != null and ((.body | test(\"#${issue_num}[^0-9]\")) or (.body | test(\"#${issue_num}$\"))))] | .[0] // empty"
 }
 
 # Step 5a: returns 0 if every CI check is SUCCESS (and at least one exists).
