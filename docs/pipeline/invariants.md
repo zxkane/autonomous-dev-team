@@ -724,6 +724,102 @@ prescribed command path fell through to a "no such file" error.
   on regressions to bare `gh issue comment` in `skills/autonomous-dev/`
   markdown.
 
+## INV-33: Review wrapper MUST NOT close the linked issue
+
+**Rule**: `autonomous-review.sh` (and any helper it sources) MUST NOT call
+`gh issue close` (nor any equivalent state-mutating call that transitions
+an issue from `OPEN` to `CLOSED`) on any code path. The only sanctioned
+issue-closure path is GitHub's own resolution of the `Closes #N` /
+`Fixes #N` / `Resolves #N` keyword in the PR body when the PR is merged
+into the default branch.
+
+When `gh pr merge` returns non-zero (auto-merge failure: merge conflict,
+branch protection blocking, transient API error, required check missing),
+the wrapper MUST:
+
+1. Capture the merge stderr (truncated to 500 chars).
+2. Post a comment on the **PR** with prefix `Auto-merge failed:` followed by
+   the captured excerpt and the directive `Re-dispatching dev agent to
+   rebase onto main.`
+3. Edit the issue: `−reviewing +pending-dev`. Do NOT remove `autonomous`
+   (the dispatcher's `list_pending_dev` selector gates on `autonomous`).
+4. NOT add `+approved`. NOT call `gh issue close`. NOT post a "please
+   merge manually" message that hands the work back to a human — auto-merge
+   failure is a dev-rebase task, not a human-handoff.
+
+The dev wrapper's resume branch detects the marker by querying PR-issue
+comments for `startswith("Auto-merge failed:")` and prepends a
+`## Pre-implementation: rebase` section to the resume prompt that
+instructs `git fetch origin && git rebase origin/main` before any other
+work. Once the rebase succeeds, the dev wrapper trap transitions back to
+`+pending-review`, the next dispatcher tick re-dispatches review, and the
+merge succeeds — GitHub then closes the issue via the PR's `Closes #N`
+keyword.
+
+**Why**: Reproduced live on a downstream consumer at
+2026-05-20T12:17:35–12:17:37Z: review wrapper PASSED, posted "Reviewed
+HEAD" trailer, attempted auto-merge, auto-merge failed, wrapper posted
+"please merge manually" — and within 2 seconds the issue closed with
+`stateReason=COMPLETED` and the PR still `OPEN`. Cause: the wrapper called
+`gh issue close --reason completed` unconditionally after the merge
+attempt, regardless of merge success/failure. The closed issue is then
+invisible to `list_pending_dev` (open-only filter), so any further
+automation against it stalls until manually reopened.
+
+GitHub's default behavior already closes the issue when the PR resolves
+`Closes #N` on merge. The explicit close call from the wrapper is
+redundant on success and actively wrong on failure — there is no path
+where it does the right thing, so the right design is to remove it
+entirely and rely on GitHub's link semantics.
+
+**Producer**: `skills/autonomous-dispatcher/scripts/autonomous-review.sh`
+verdict-PASS branch (the auto-merge sub-branch).
+
+**Consumer**:
+- The dispatcher's `list_pending_dev` selector (in `lib-dispatch.sh`) —
+  consumes the `+pending-dev` issue label set by the failure path and
+  re-dispatches dev.
+- `skills/autonomous-dispatcher/scripts/autonomous-dev.sh` resume branch
+  — consumes the `Auto-merge failed:` marker comment and prepends rebase
+  instructions to the resume prompt.
+
+**Status**: **ENFORCED** in this PR (closes #145).
+
+**Test**:
+- `tests/unit/test-autonomous-review-auto-merge-failure.sh` — source-of-truth
+  grep tests:
+  - TC-AMF-006: zero `gh issue close` calls in the wrapper (regression pin).
+  - TC-AMF-002: failure branch sets `+pending-dev` on the issue.
+  - TC-AMF-003: failure branch posts via `gh pr comment` with the
+    `Auto-merge failed:` marker prefix and `Re-dispatching dev`/`rebase
+    onto main` directive.
+  - Failure branch keeps `autonomous` (single `--remove-label autonomous`
+    occurrence: the success branch only).
+  - Old "Review passed but auto-merge failed. Please merge ... manually"
+    wording is removed.
+- `tests/unit/test-autonomous-dev-rebase-marker.sh` — verifies the dev
+  wrapper's resume branch detects the marker via `startswith("Auto-merge
+  failed:")` and conditionally injects rebase instructions.
+
+**Cross-references**:
+- [INV-32](#inv-32-gh-wrapper-symlink-is-created-in-both-auth-modes) —
+  the marker-posting `gh pr comment` call routes through the same
+  `${_LIB_AUTH_DIR}/gh` symlink, so token-mode and app-mode behave
+  identically.
+- [INV-04](#inv-04-reviewed-head-trailer-format) — the "Reviewed HEAD"
+  trailer is still posted in the auto-merge-failure path (the wrapper's
+  trailer write happens before the merge attempt) — the dispatcher's
+  Step 5b SHA-match logic continues to work as designed.
+- [INV-26](#inv-26-stall-decision-excludes-dispatcher-induced-terminations-and-defers-on-live-wrappers)
+  — caps the auto-merge-failure → dev-rebase → review-retry loop at
+  MAX_RETRIES; the issue transitions to `stalled` if the loop fails to
+  converge.
+- [`state-machine.md`](state-machine.md) — the `reviewing → pending-dev
+  (auto-merge failed)` transition is documented in the transition table
+  and mermaid diagram.
+- [`review-agent-flow.md`](review-agent-flow.md#auto-merge-failure--dev-re-dispatch-inv-33)
+  — full procedure walkthrough.
+
 
 ## Adding a new invariant
 

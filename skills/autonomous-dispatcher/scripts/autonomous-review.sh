@@ -697,22 +697,50 @@ if [[ "$PASSED_VERDICT" == "true" ]]; then
   else
     log "Merging PR #${PR_NUMBER}..."
 
-    # Merge PR (squash)
-    if gh pr merge "$PR_NUMBER" --repo "$REPO" --squash --delete-branch 2>&1; then
+    # Capture merge stdout+stderr so the failure-path PR comment can
+    # surface the merge error to the dev re-dispatch (#145).
+    set +e
+    MERGE_OUT=$(gh pr merge "$PR_NUMBER" --repo "$REPO" --squash --delete-branch 2>&1)
+    MERGE_RC=$?
+    set -e
+    [[ -n "$MERGE_OUT" ]] && log "gh pr merge output: ${MERGE_OUT}"
+
+    if [[ $MERGE_RC -eq 0 ]]; then
       log "PR #${PR_NUMBER} merged successfully."
+
+      # INV-33: do NOT call `gh issue close` from the wrapper. GitHub
+      # closes the issue automatically when the PR-merge resolves the
+      # `Closes #N` keyword in the PR body. Calling close from the
+      # wrapper is what closed the issue prematurely on auto-merge
+      # failure (#145) — and it's redundant on success.
+      gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
+        --remove-label "reviewing" --remove-label "autonomous" \
+        --add-label "approved" 2>/dev/null || true
+
+      log "Issue #${ISSUE_NUMBER} marked approved; auto-close handled by GitHub via 'Closes #N' resolution."
     else
-      log "WARNING: Auto-merge failed. PR may need manual merge."
-      gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
-        --body "Review passed but auto-merge failed. Please merge PR #${PR_NUMBER} manually." 2>/dev/null || true
+      # Auto-merge failed (#145). Three actions, in order:
+      #   1. Post the merge error as a comment on the PR (not the issue) —
+      #      dev re-dispatch reads PR comments and detects this marker to
+      #      trigger rebase before re-implementing.
+      #   2. Flip issue to pending-dev WITHOUT removing autonomous, so
+      #      dispatcher Step 4 picks it up next tick.
+      #   3. Do NOT close the issue, do NOT mark approved.
+      _err_excerpt="${MERGE_OUT:0:500}"
+      log "WARNING: Auto-merge failed (rc=${MERGE_RC}): ${_err_excerpt}"
+
+      _comment_err=$(gh pr comment "$PR_NUMBER" --repo "$REPO" \
+        --body "Auto-merge failed: ${_err_excerpt}
+
+Re-dispatching dev agent to rebase onto main." 2>&1 >/dev/null) || \
+        log "WARNING: Failed to post auto-merge-failure marker on PR #${PR_NUMBER} (non-fatal — label transition still proceeds): ${_comment_err}"
+
+      gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
+        --remove-label "reviewing" \
+        --add-label "pending-dev" 2>/dev/null || true
+
+      log "Issue #${ISSUE_NUMBER} flipped to pending-dev for rebase re-dispatch (autonomous label retained)."
     fi
-
-    # Close issue and update labels
-    gh issue close "$ISSUE_NUMBER" --repo "$REPO" --reason completed 2>/dev/null || true
-    gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
-      --remove-label "reviewing" --remove-label "autonomous" \
-      --add-label "approved" 2>/dev/null || true
-
-    log "Issue #${ISSUE_NUMBER} closed as completed."
   fi
 else
   log "Review FAILED or inconclusive. Sending back to dev."

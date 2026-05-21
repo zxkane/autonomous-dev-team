@@ -14,8 +14,9 @@ flowchart LR
     DevN -. H3 label pending-review<br/>+ open PR with #N .-> Dis2[Dispatcher]
     DevR -. H3 label pending-review<br/>+ open PR with #N .-> Dis2
     Dis2 -. H4 label reviewing .-> Rev[Review wrapper]
-    Rev -. H5a verdict PASS<br/>+ approved label .-> done([approved])
+    Rev -. H5a verdict PASS + merged<br/>+ approved label .-> done([approved])
     Rev -. H5b verdict FAIL<br/>+ label pending-dev .-> Dis3[Dispatcher]
+    Rev -. H5c PASS but auto-merge failed<br/>+ label pending-dev (INV-33) .-> Dis3
     Dis3 -. H2 .-> DevR
 ```
 
@@ -25,7 +26,7 @@ flowchart LR
 | **H2** | dispatcher → dev (resume) | Dispatcher Step 4 | Dev wrapper, mode=resume | `+in-progress` label, session-id extracted from issue comments |
 | **H3** | dev → review | Dev wrapper trap | Dispatcher Step 3 (then Step 3 → review wrapper via H4) | `+pending-review` label, open PR referencing the issue |
 | **H4** | dispatcher → review | Dispatcher Step 3 | Review wrapper | `+reviewing` label |
-| **H5** | review → dev (send-back) OR review → approved | Review wrapper | Dispatcher Step 4 (FAIL) or terminal (PASS) | `+pending-dev` or `+approved` label, "Review findings:" / "Review PASSED" comment with session-id, optional Reviewed-HEAD trailer |
+| **H5** | review → dev (send-back) OR review → approved | Review wrapper | Dispatcher Step 4 (FAIL or auto-merge-failed) or terminal (PASS+merged) | `+pending-dev` or `+approved` label, "Review findings:" / "Review PASSED" comment with session-id, optional Reviewed-HEAD trailer; on auto-merge failure also a PR comment with prefix `Auto-merge failed:` ([INV-33](invariants.md#inv-33-review-wrapper-must-not-close-the-linked-issue)) |
 
 ## H1: dispatcher → dev (new)
 
@@ -127,15 +128,15 @@ Two sub-handoffs depending on verdict:
 - Verdict comment posted on the **issue** (not PR), starts with "Review PASSED", contains the session-id trailer.
 - `gh pr review --approve` succeeded (else fall-back path: `+approved` label but manual notification).
 - Reviewed-HEAD trailer posted (best-effort) so future Step 5b SHA-comparison works.
-- Auto-close path: removes `autonomous` AND `reviewing`, adds `approved`, closes issue with reason `completed`, merges PR with `--squash --delete-branch`.
+- Auto-merge-success path: removes `autonomous` AND `reviewing`, adds `approved`, merges PR with `--squash --delete-branch`. The wrapper does NOT call `gh issue close` ([INV-33](invariants.md#inv-33-review-wrapper-must-not-close-the-linked-issue)) — GitHub auto-closes the issue when the merge resolves the PR's `Closes #N` keyword.
 - `no-auto-close` path: keeps `autonomous`, removes `reviewing`, adds `approved`, leaves PR open. Maintainer merges manually.
 
 **Consumer-side invariants**: the dispatcher does not look at issues labeled `approved` — it's a terminal state. No active consumer. If any transitional label co-resides with `approved` (residue from a wrapper crash between two label edits, [INV-15] SIGTERM race, or manual reconciliation), Step 0 hygiene strips it on the next tick — see [INV-25](invariants.md#inv-25-terminal-labels-approved-stalled-are-sticky-transitional-residue-is-healed-at-tick-start).
 
 **Failure modes**:
 
-- Auto-merge fails (CI red, branch protection) → wrapper logs WARNING and posts "auto-merge failed, please merge manually". Issue stays open in `approved`. Maintainer needs to act.
-- Approval succeeds but issue close fails → labels are correct (`+approved -reviewing -autonomous`) but issue is open. Cosmetic; no pipeline impact.
+- Auto-merge fails (CI red, branch protection, transient API error) → wrapper posts the `Auto-merge failed:` marker on the **PR** and transitions the issue to `+pending-dev` (autonomous retained), NOT to `+approved` ([INV-33](invariants.md#inv-33-review-wrapper-must-not-close-the-linked-issue)). The next dispatcher tick re-dispatches dev to rebase onto main; on success the merge happens at the next review pass and GitHub closes the issue via `Closes #N`. This is now H5c (separate handoff below).
+- Approval API call itself fails → labels are `+approved -reviewing` (autonomous kept) and the wrapper posts a "please approve and merge manually" comment. Maintainer intervention required — this is a permission/config bug, not an auto-merge failure.
 
 ### H5b: review → dev (verdict FAIL)
 
@@ -154,6 +155,31 @@ Two sub-handoffs depending on verdict:
 **Failure modes**:
 
 - Trailer post fails → empty-trailer fallthrough. Next-tick Step 5b can't compare SHAs. If dev pushes new commits, Step 5b goes to `pending-review` (correct). If dev pushes nothing and exits with no PR change, Step 5b sees PR exists, can't read trailer, routes to `pending-review` ([INV-07](invariants.md#inv-07-empty-reviewed-head-trailer-routes-to-pending-review)) — review re-runs on identical code, posts the same findings, and wastes Sonnet quota. This is the documented downside of the empty-trailer-fallthrough; operationally it surfaces as the same review verdict in repeated cycles.
+
+### H5c: review → dev (auto-merge failed) — INV-33
+
+Distinct from H5b: verdict was PASS and PR approval succeeded, but `gh pr merge` itself failed (merge conflict, branch protection, transient API error). Pre-#145 the wrapper called `gh issue close` and posted "please merge manually", terminating the autonomous flow. Post-#145 ([INV-33](invariants.md#inv-33-review-wrapper-must-not-close-the-linked-issue)) the wrapper re-dispatches dev for rebase.
+
+**Producer-side invariants**:
+
+- Verdict was PASS (`Review PASSED` comment with session-id trailer).
+- `gh pr review --approve` succeeded.
+- `gh pr merge --squash --delete-branch` returned non-zero. `MERGE_OUT` (combined stdout+stderr, truncated to 500 chars) is captured.
+- The wrapper posts a comment on the **PR** (not the issue) with prefix `Auto-merge failed:` followed by the captured excerpt and the directive `Re-dispatching dev agent to rebase onto main.`
+- The wrapper edits the issue: `−reviewing +pending-dev`. Does NOT remove `autonomous`. Does NOT call `gh issue close`. Does NOT add `+approved`.
+- Reviewed-HEAD trailer was already posted (before the merge attempt, in the earlier section of the wrapper).
+
+**Consumer-side invariants** (dev wrapper resume must tolerate):
+
+- The dev resume branch (`autonomous-dev.sh` MODE=resume) queries PR-issue comments via `gh api repos/.../issues/<PR>/comments` with selector `startswith("Auto-merge failed:")`.
+- When the marker is present, the resume prompt prepends a `## Pre-implementation: rebase onto main — MANDATORY FIRST STEP` section with `git fetch origin && git rebase origin/main && git push --force-with-lease`.
+- When the marker is absent, the resume prompt is unchanged — H5b semantics apply.
+
+**Failure modes**:
+
+- Marker post fails (token expiry, rate limit) → wrapper logs WARNING; label transition to `pending-dev` still proceeds. The dev agent's resume detects the absence of the marker and falls back to standard review-finding behavior; the agent's MANDATORY pre-review Step 0 (mergeability check in `autonomous-review.sh` prompt) catches the unmerged state on the next review pass.
+- Rebase encounters semantic conflicts the agent cannot resolve → dev agent posts a `needs human` comment, runs `git rebase --abort`, exits cleanly. The dispatcher's MAX_RETRIES gate caps the retry budget; `+stalled` is the eventual terminal state.
+- Auto-merge keeps failing for non-rebaseable reasons (e.g. branch protection requiring an external check that never runs) → MAX_RETRIES → `+stalled` → operator intervention.
 
 ## Cross-cutting concerns
 
