@@ -351,6 +351,12 @@ DEV_SKILL_CMD="/autonomous-dev"
 # (every 30s, timeout 3 min), and fails the review if any configured bot
 # doesn't respond in time.
 #
+# Default: "" (disabled). Bot reviews are opt-in because each external
+# bot is an availability dependency the operator takes on — when the bot
+# is slow or unreachable, the review fails for a non-substantive reason
+# and the issue bounces between pending-review and pending-dev (#149).
+# Enable only when you actively want a specific bot's findings on every PR.
+#
 # Built-in registry:
 #   q      → trigger "/q review",     login "amazon-q-developer[bot]"
 #   codex  → trigger "/codex review", login "codex[bot]"
@@ -366,7 +372,7 @@ DEV_SKILL_CMD="/autonomous-dev"
 #
 # All three built-in bots reject GitHub App bot triggers, so the wrapper
 # uses scripts/gh-as-user.sh to post as a real user.
-REVIEW_BOTS="q"
+REVIEW_BOTS=""
 
 # === E2E Verification (optional) ===
 E2E_ENABLED="false"

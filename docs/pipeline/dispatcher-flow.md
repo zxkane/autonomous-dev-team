@@ -251,10 +251,28 @@ Before dispatching a resume, call `is_session_completed <issue> _reason` (in `li
 
 | `terminal_reason` | Meaning | Dispatcher action |
 |---|---|---|
-| `completed` | Normal end-of-turn (`stop_reason=end_turn` too). Resuming would attach to a closed SSE stream and hang. | Operator handoff: post `INV-12-completed:<sid>` notice, leave issue in `pending-dev`, do not auto-recover. |
+| `completed` | Normal end-of-turn (`stop_reason=end_turn` too). Resuming would attach to a closed SSE stream and hang. | Branch on most recent post-completion review verdict — see Step 4b.5.1 below. |
 | `prompt_too_long` | JSONL transcript exceeded the model's input window. Headless `claude -p` has no auto-compaction, so resuming re-feeds the whole transcript and crashes again. | Auto-recover: post `INV-12-prompt-too-long:<sid>` notice, **truncate the per-issue log**, `label_swap pending-dev → in-progress`, `post_dispatch_token dev-new`, `dispatch dev-new`. The next tick mints a fresh session id with a smaller seed prompt that re-derives state from git/issue/PR. |
 
 The PTL branch hard-fails if the log truncate fails (perm drift, ENOSPC): post an operator-actionable comment and `continue` without dispatching. Without this guard, the next tick would re-read the same stale PTL log, the idempotency-marker check would suppress a fresh notice (it's keyed on the old session_id), and the dispatcher would silently dispatch dev-new every tick forever.
+
+#### Step 4b.5.1: review-aware routing for `completed` sessions ([INV-35](invariants.md#inv-35-review-aware-resume-routing-for-completed-sessions))
+
+When `is_session_completed` returns `completed`, call `classify_recent_review_verdict <issue> <session-end-ts>` (in `lib-dispatch.sh`). The helper reads issue comments, picks the newest comment that (a) is authored by `BOT_LOGIN` (or a comment matching the session-id-binding fallback when the bot identity is unavailable), (b) was created strictly after `<session-end-ts>`, and (c) contains an HTML-comment trailer of the form `<!-- review-verdict: ... -->`. It returns one of: `none`, `passed`, `failed-substantive`, `failed-non-substantive` (with cause token captured in an out-var). Comments missing the trailer are conservatively treated as `failed-substantive` (so pre-INV-35 in-flight verdicts route to the safe fresh-dev branch rather than silently no-op).
+
+| Verdict | Dispatcher action |
+|---|---|
+| `none` | Operator handoff (original INV-12 behavior): post `INV-12-completed:<sid>` notice (idempotent on the marker), leave in `pending-dev`. |
+| `passed` (race window) | No-op + log a WARN line. Step 0 hygiene ([INV-25](invariants.md#inv-25-terminal-labels-approved-stalled-are-sticky-transitional-residue-is-healed-at-tick-start)) reconciles next tick. |
+| `failed-non-substantive`, flip count for this session < `REVIEW_RETRY_LIMIT` (default 2) | `label_swap pending-dev → pending-review` + post `<!-- review-aware-flip:non-substantive cause=<x> --> Re-routing to review (last review failed for non-substantive reason: <x>).` Step 3 picks it up next tick. Does NOT consume `MAX_RETRIES`. |
+| `failed-non-substantive`, flip count ≥ `REVIEW_RETRY_LIMIT` | `mark_stalled` with operator @-mention citing the persistent non-substantive cause. |
+| `failed-substantive` | Same recovery as the PTL branch above: post `INV-35-fresh-dev:<sid>` notice (idempotent), **truncate the per-issue log** (fail-closed if truncate fails — same operator-actionable error pattern), `label_swap pending-dev → in-progress`, `post_dispatch_token dev-new`, `dispatch dev-new`. Consumes `MAX_RETRIES` via the existing retry-comment count. |
+
+The `REVIEW_RETRY_LIMIT` counter is per-session-id (counted by grepping `<!-- review-aware-flip:non-substantive -->` markers on the issue and intersecting with the current `Dev Session ID:` trailer). When the underlying dev session changes (PTL or substantive-fresh-dev mints a new session_id), the counter resets — that's intentional: a new dev session is also a new opportunity for the review side to succeed.
+
+The `failed-substantive` branch's truncate-fails-closed behavior preserves the [INV-12 PTL guard](#step-4b5-terminal-state-gate-inv-12) — without it, the next tick would re-read the same stale `end_turn|completed` log line, hit this same branch, the idempotency marker would suppress a fresh notice, and the dispatcher would silently dispatch dev-new every tick forever.
+
+This branch composes with the auto-merge-failure recovery from #146: the dev-resume prompt's "rebase onto main" prepend fires whenever the most recent PR comment matches `Auto-merge failed:`, regardless of whether the next dispatch is dev-resume or dev-new — so a substantive failure caused by an auto-merge-blocking rebase need still gets the rebase guidance via `resume_agent`'s prompt-prepend logic.
 
 This is a conservative gate: it only fires when the helper is certain the prior session reached one of the two terminal states. False negatives (claiming "not terminal" when it was) just keep the prior behavior — Step 4c attempts the resume, and the wall-clock timeout from [INV-13](invariants.md#inv-13-wall-clock-cap-on-agent-invocations) bounds the damage to `AGENT_TIMEOUT` (default `4h`).
 
@@ -353,7 +371,7 @@ This branch is the safety net for the case where the wrapper died so abruptly th
 | `date` parse fails on PR.updatedAt | Step 5a | WARN, leave alone (fail-closed — see above). |
 | Concurrent dispatcher instance | tick-tick | `mktemp` for CI-error capture file (CWE-377 mitigation). Concurrent ticks otherwise serialize on `gh issue edit` — the second one's edits race but converge. |
 | `JUST_DISPATCHED` not maintained | Step 5 | Step 5 evaluates a freshly-dispatched issue, sees no PID file yet, diagnoses DEAD-no-PR, increments crash counter, eventually marks stalled. **This was the root of #34, #41 — the array exists specifically to prevent this.** |
-| Resume against a completed session | Step 4b.5 | PR-6 added `is_session_completed` ([INV-12](invariants.md#inv-12-resume-only-against-unfinished-sessions)). Step 4b.5 inspects the agent log; if the prior turn ended with `stop_reason=end_turn` AND `terminal_reason=completed`, the dispatcher posts an explanatory comment and skips the resume — leaving the issue in `pending-dev` for an operator to flip manually. The wall-clock timeout ([INV-13](invariants.md#inv-13-wall-clock-cap-on-agent-invocations)) is the safety net for false negatives. |
+| Resume against a completed session | Step 4b.5 / 4b.5.1 | PR-6 added `is_session_completed` ([INV-12](invariants.md#inv-12-resume-only-against-unfinished-sessions)) — never resume into a closed SSE stream. Step 4b.5.1 ([INV-35](invariants.md#inv-35-review-aware-resume-routing-for-completed-sessions), #149) then routes the `completed` case based on the most recent post-completion review verdict: no verdict → operator handoff (original INV-12 notice); non-substantive failure → label-flip back to `pending-review`; substantive failure → `dev-new` (PTL pattern). Pre-INV-35, every completed-with-failed-review issue stuck indefinitely. The wall-clock timeout ([INV-13](invariants.md#inv-13-wall-clock-cap-on-agent-invocations)) remains the safety net for false negatives. |
 | Agent invocation hangs in CLI | wrapper, not dispatcher | Bounded by future wall-clock timeout ([#60](https://github.com/zxkane/autonomous-dev-team/issues/60), [INV-13](invariants.md#inv-13-wall-clock-cap-on-agent-invocations)). Until then the dispatcher's Step 5a is the only way to clear it. |
 
 ## Cross-references
