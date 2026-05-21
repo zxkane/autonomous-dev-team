@@ -868,15 +868,23 @@ documented in its branch comment:
 - `opencode run` (no positional message) — reads stdin.
 - `*` generic fallback — `<cli> -p` (no value) — best-effort.
 
-**Test**: `tests/unit/test-lib-agent-prompt-stdin.sh` — TC-EXEC-001..010
-exercise each CLI with a 256 KB prompt loaded from a sidecar file (env-
-var passing would itself hit MAX_ARG_STRLEN), assert that the CLI stub
-sees the full prompt on stdin AND that no argv token exceeds 64 KB.
-TC-EXEC-009 is a static grep that fails if any `_run_with_timeout ...
-"$prompt"` line returns. TC-EXEC-011..012 pin the codex / opencode
-PIPESTATUS[1] regression guard. The five existing per-CLI test files
-(`test-lib-agent-{codex,gemini,kiro-permission,opencode,extra-args}.sh`)
-were updated in the same PR to assert "prompt on stdin, not argv".
+**Test**: `tests/unit/test-lib-agent-prompt-stdin.sh` — 61 cases:
+TC-EXEC-001..006 exercise each `run_agent` CLI branch with a 256 KB
+prompt loaded from a sidecar file (env-var passing would itself hit
+MAX_ARG_STRLEN), assert that the CLI stub sees the full prompt on
+stdin AND that no argv token exceeds 64 KB. TC-EXEC-007/008 cover
+`resume_agent` for claude (single-stage) and codex (three-stage with
+PIPESTATUS[1]). TC-EXEC-013/014 cover `resume_agent` for gemini
+(single-stage) and opencode (three-stage). TC-EXEC-009 is a static
+grep, tightened to handle `\\`-line continuations, that fails if any
+`_run_with_timeout ... "$prompt"` invocation appears (incl. across
+continuation lines), and pins PIPESTATUS[0] absence + PIPESTATUS[1]
+presence. TC-EXEC-010 verifies small prompts still work via the new
+channel for all five CLIs. TC-EXEC-011/012 pin codex / opencode
+non-zero exit propagation through the new three-stage pipeline. The
+four existing per-CLI behavioral test files
+(`test-lib-agent-{codex,gemini,kiro-permission,opencode}.sh`) were
+updated in the same PR to assert "prompt on stdin, not argv".
 
 **Cross-references**:
 - [INV-13](#inv-13-wall-clock-cap-on-agent-invocations) — `_run_with_timeout`
