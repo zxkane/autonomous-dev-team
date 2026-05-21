@@ -730,11 +730,16 @@ Re-dispatching dev agent to rebase onto main." 2>&1 >/dev/null); then
         log "WARNING: Failed to post auto-merge-failure marker on PR #${PR_NUMBER} (non-fatal — label transition still proceeds): ${_comment_err}"
       fi
 
-      gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
+      # Capture stderr so a failed label transition is diagnosable from logs —
+      # otherwise the issue would silently stick in `reviewing` and the next
+      # dispatcher tick wouldn't re-dispatch dev.
+      if ! _edit_err=$(gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
         --remove-label "reviewing" \
-        --add-label "pending-dev" 2>/dev/null || true
-
-      log "Issue #${ISSUE_NUMBER} flipped to pending-dev for rebase re-dispatch (autonomous label retained)."
+        --add-label "pending-dev" 2>&1 >/dev/null); then
+        log "WARNING: Failed to flip issue #${ISSUE_NUMBER} to pending-dev (issue may stay stuck in reviewing): ${_edit_err}"
+      else
+        log "Issue #${ISSUE_NUMBER} flipped to pending-dev for rebase re-dispatch (autonomous label retained)."
+      fi
     fi
   fi
 else
