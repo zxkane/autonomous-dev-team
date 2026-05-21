@@ -29,7 +29,7 @@ sequenceDiagram
     W->>GH: extract preview URL (if E2E_ENABLED)
     W->>W: build review prompt (mergeability, drift, checklist, decision)
     W->>L: run_agent
-    L->>A: claude --session-id ... --model sonnet -p PROMPT
+    L->>A: printf '%s' PROMPT | claude --session-id ... --model sonnet -p
     A->>GH: post verdict comment ('Review PASSED' or 'Review findings')
     A-->>L: agent exits
     W->>GH: poll for verdict comment (6 attempts, 5s each, actor + window + trailer)
