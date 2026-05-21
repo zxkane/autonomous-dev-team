@@ -366,13 +366,10 @@ elif [[ "$MODE" = "resume" ]]; then
     PR_REVIEW_COMMENTS=$(gh api "repos/${REPO}/pulls/${PR_NUM}/comments" \
       --jq '[.[] | "- **\(.path):\(.line // .original_line // "N/A")** — \(.body)"] | join("\n")' 2>/dev/null || true)
 
-    # Detect the auto-merge-failure marker that the review wrapper posts
-    # on the PR when `gh pr merge` fails (#145). Anchor on startswith
-    # (deterministic) — substring match would fire on dev status comments
-    # that quote the marker as history. Issue-level PR comments live in
-    # /issues/<n>/comments (not /pulls/<n>/comments which holds inline
-    # review comments), so we use the issue-comments endpoint with the
-    # PR number.
+    # Detect the auto-merge-failure marker the review wrapper posts when
+    # `gh pr merge` fails (#145). Issue-level PR comments live under
+    # /issues/<n>/comments (not /pulls/<n>/comments, which is inline-review
+    # only). Anchor with startswith so quoted history can't false-positive.
     AUTO_MERGE_FAILURE_MARKER=$(gh api "repos/${REPO}/issues/${PR_NUM}/comments" \
       --jq '[.[] | select(.body | startswith("Auto-merge failed:"))] | last // empty | .body' 2>/dev/null || true)
   fi
