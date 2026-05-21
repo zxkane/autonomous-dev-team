@@ -109,11 +109,13 @@ chmod 700 "$PID_DIR"
 BIN="$TMPROOT/bin"
 mkdir -p "$BIN"
 
-# Stub opencode: record argv, emit a known JSONL stream that mirrors the
-# real opencode v1.14.46 output shape.
+# Stub opencode: record argv + drain stdin to recorders, emit a known
+# JSONL stream that mirrors the real opencode v1.14.46 output shape.
+# After #144 the prompt arrives via stdin (`printf '%s' "$prompt" |`).
 cat > "$BIN/opencode" <<'EOF'
 #!/bin/bash
 echo "$@" > "$OPENCODE_ARGS_FILE"
+cat > "${OPENCODE_STDIN_FILE:-/dev/null}"
 cat <<JSONL
 {"type":"step_start","timestamp":1778415469963,"sessionID":"ses_TESTabc123XYZ456","part":{"id":"prt_a","messageID":"msg_b","sessionID":"ses_TESTabc123XYZ456","type":"step-start"}}
 {"type":"text","timestamp":1778415470449,"sessionID":"ses_TESTabc123XYZ456","part":{"id":"prt_c","type":"text","text":"ok"}}
@@ -130,6 +132,7 @@ EOF
 chmod +x "$BIN/timeout"
 
 ARGS_FILE="$TMPROOT/opencode-args"
+STDIN_FILE="$TMPROOT/opencode-stdin"
 SESSION_ID="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 
 run_output=$(
@@ -140,7 +143,9 @@ run_output=$(
   AGENT_CMD=opencode \
   AGENT_PERMISSION_MODE=auto \
   OPENCODE_ARGS_FILE="$ARGS_FILE" \
+  OPENCODE_STDIN_FILE="$STDIN_FILE" \
   bash -c '
+    unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE
     source "'"$LIB"'"
     run_agent "'"$SESSION_ID"'" "implement feature X" "" "issue-42-dev"
   ' 2>&1
@@ -166,7 +171,12 @@ assert_eq "sidecar contains the captured sessionID" \
 opencode_argv=$(cat "$ARGS_FILE")
 assert_contains "argv contains 'run'"         "run"         "$opencode_argv"
 assert_contains "argv contains '--format json'" "--format json" "$opencode_argv"
-assert_contains "argv contains the prompt"    "implement feature X" "$opencode_argv"
+# After #144: prompt arrives via stdin, NOT argv.
+assert_not_contains "argv does NOT carry the prompt positionally" \
+  "implement feature X" "$opencode_argv"
+opencode_stdin=$(cat "$STDIN_FILE" 2>/dev/null || true)
+assert_eq "stdin contains the prompt (post-#144 channel)" \
+  "implement feature X" "$opencode_stdin"
 assert_contains "argv forwards --title from session_name" "--title issue-42-dev" "$opencode_argv"
 assert_not_contains "argv does NOT use legacy -p" "-p" "$opencode_argv"
 
@@ -174,7 +184,7 @@ assert_not_contains "argv does NOT use legacy -p" "-p" "$opencode_argv"
 echo ""
 echo "=== TC-LA-OC-03: resume_agent uses captured sessionID ==="
 # ---------------------------------------------------------------------------
-: > "$ARGS_FILE"
+: > "$ARGS_FILE"; : > "$STDIN_FILE"
 
 resume_output=$(
   PATH="$BIN:$PATH" \
@@ -184,7 +194,9 @@ resume_output=$(
   AGENT_CMD=opencode \
   AGENT_PERMISSION_MODE=auto \
   OPENCODE_ARGS_FILE="$ARGS_FILE" \
+  OPENCODE_STDIN_FILE="$STDIN_FILE" \
   bash -c '
+    unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE
     source "'"$LIB"'"
     resume_agent "'"$SESSION_ID"'" "address review feedback" "" ""
   ' 2>&1
@@ -197,8 +209,12 @@ resume_argv=$(cat "$ARGS_FILE")
 assert_contains "resume argv contains 'run'"             "run"         "$resume_argv"
 assert_contains "resume argv contains '--session'"       "--session"   "$resume_argv"
 assert_contains "resume argv contains the captured sid"  "ses_TESTabc123XYZ456" "$resume_argv"
-assert_contains "resume argv contains the follow-up prompt" \
+# After #144: resume prompt arrives via stdin.
+assert_not_contains "resume argv does NOT carry the follow-up prompt positionally" \
   "address review feedback" "$resume_argv"
+resume_stdin=$(cat "$STDIN_FILE" 2>/dev/null || true)
+assert_eq "resume stdin contains the follow-up prompt" \
+  "address review feedback" "$resume_stdin"
 assert_not_contains "resume argv does NOT use legacy -p" "-p" "$resume_argv"
 
 # ---------------------------------------------------------------------------
@@ -206,7 +222,7 @@ echo ""
 echo "=== TC-LA-OC-04: resume falls back when sidecar missing ==="
 # ---------------------------------------------------------------------------
 NEW_SESSION_ID="11111111-2222-3333-4444-555555555555"
-: > "$ARGS_FILE"
+: > "$ARGS_FILE"; : > "$STDIN_FILE"
 
 fallback_output=$(
   PATH="$BIN:$PATH" \
@@ -216,7 +232,9 @@ fallback_output=$(
   AGENT_CMD=opencode \
   AGENT_PERMISSION_MODE=auto \
   OPENCODE_ARGS_FILE="$ARGS_FILE" \
+  OPENCODE_STDIN_FILE="$STDIN_FILE" \
   bash -c '
+    unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE
     source "'"$LIB"'"
     resume_agent "'"$NEW_SESSION_ID"'" "fresh prompt" "" ""
   ' 2>&1
@@ -231,8 +249,12 @@ fallback_argv=$(cat "$ARGS_FILE")
 assert_contains "fallback argv contains 'run'" "run" "$fallback_argv"
 assert_not_contains "fallback argv does NOT contain '--session'" \
   "--session" "$fallback_argv"
-assert_contains "fallback argv contains the fresh prompt" \
+# After #144: prompt arrives via stdin in the fallback path too.
+assert_not_contains "fallback argv does NOT carry the fresh prompt positionally" \
   "fresh prompt" "$fallback_argv"
+fallback_stdin=$(cat "$STDIN_FILE" 2>/dev/null || true)
+assert_eq "fallback stdin contains the fresh prompt" \
+  "fresh prompt" "$fallback_stdin"
 
 new_sidecar="$PID_DIR/opencode-session-$NEW_SESSION_ID"
 if [[ -f "$new_sidecar" ]]; then
@@ -248,15 +270,18 @@ echo ""
 echo "=== TC-LA-OC-05: capture is robust to no JSON event ==="
 # ---------------------------------------------------------------------------
 # Replace stub: no JSONL output, just stderr + non-zero exit (e.g. auth fail).
+# Drain stdin so the leading printf stage doesn't get SIGPIPE (which
+# pipefail would surface as 141 instead of the intended 5).
 cat > "$BIN/opencode" <<'EOF'
 #!/bin/bash
 echo "$@" > "$OPENCODE_ARGS_FILE"
+cat > "${OPENCODE_STDIN_FILE:-/dev/null}"
 echo "ERROR: not authenticated" >&2
 exit 5
 EOF
 
 CRASH_SESSION_ID="22222222-aaaa-bbbb-cccc-333333333333"
-: > "$ARGS_FILE"
+: > "$ARGS_FILE"; : > "$STDIN_FILE"
 
 crash_output=$(
   PATH="$BIN:$PATH" \
@@ -266,7 +291,9 @@ crash_output=$(
   AGENT_CMD=opencode \
   AGENT_PERMISSION_MODE=auto \
   OPENCODE_ARGS_FILE="$ARGS_FILE" \
+  OPENCODE_STDIN_FILE="$STDIN_FILE" \
   bash -c '
+    unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE
     source "'"$LIB"'"
     run_agent "'"$CRASH_SESSION_ID"'" "crashy prompt" "" ""
   ' 2>&1
@@ -297,15 +324,17 @@ bad_sidecar="$PID_DIR/opencode-session-$BAD_SESSION_ID"
 echo 'ses_with;injection`hazard' > "$bad_sidecar"
 
 # Restore working stub for this test (resume_agent will fall back to run, so
-# we want the stub to succeed).
+# we want the stub to succeed). Drain stdin too so the leading printf
+# stage doesn't SIGPIPE.
 cat > "$BIN/opencode" <<'EOF'
 #!/bin/bash
 echo "$@" > "$OPENCODE_ARGS_FILE"
+cat > "${OPENCODE_STDIN_FILE:-/dev/null}"
 cat <<JSONL
 {"type":"step_start","sessionID":"ses_FRESHsessionID999"}
 JSONL
 EOF
-: > "$ARGS_FILE"
+: > "$ARGS_FILE"; : > "$STDIN_FILE"
 
 malformed_output=$(
   PATH="$BIN:$PATH" \
@@ -315,7 +344,9 @@ malformed_output=$(
   AGENT_CMD=opencode \
   AGENT_PERMISSION_MODE=auto \
   OPENCODE_ARGS_FILE="$ARGS_FILE" \
+  OPENCODE_STDIN_FILE="$STDIN_FILE" \
   bash -c '
+    unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE
     source "'"$LIB"'"
     resume_agent "'"$BAD_SESSION_ID"'" "after bad sidecar" "" ""
   ' 2>&1

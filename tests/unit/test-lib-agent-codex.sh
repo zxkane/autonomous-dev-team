@@ -129,11 +129,14 @@ chmod 700 "$PID_DIR"
 BIN="$TMPROOT/bin"
 mkdir -p "$BIN"
 
-# Stub codex: print argv to a recorder, emit thread.started + a simple
-# completion event. Honors --json by emitting JSONL only.
+# Stub codex: print argv + drain stdin to recorders, emit thread.started
+# + a simple completion event. Honors --json by emitting JSONL only.
+# After #144 the prompt arrives via stdin — the wrapper feeds it as a
+# leading `printf '%s' "$prompt" |` pipeline stage.
 cat > "$BIN/codex" <<'EOF'
 #!/bin/bash
 echo "$@" > "$CODEX_ARGS_FILE"
+cat > "${CODEX_STDIN_FILE:-/dev/null}"
 cat <<JSONL
 {"type":"thread.started","thread_id":"019e1234-aaaa-bbbb-cccc-deadbeefcafe"}
 {"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"ok"}}
@@ -154,6 +157,7 @@ chmod +x "$BIN/timeout"
 
 # Source lib-agent in a subshell with the sandbox set up.
 ARGS_FILE="$TMPROOT/codex-args"
+STDIN_FILE="$TMPROOT/codex-stdin"
 SESSION_ID="22222222-3333-4444-5555-666666666666"
 
 run_agent_output=$(
@@ -164,7 +168,9 @@ run_agent_output=$(
   AGENT_CMD=codex \
   AGENT_PERMISSION_MODE=auto \
   CODEX_ARGS_FILE="$ARGS_FILE" \
+  CODEX_STDIN_FILE="$STDIN_FILE" \
   bash -c '
+    unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE
     source "'"$LIB"'"
     run_agent "'"$SESSION_ID"'" "implement the thing" "" ""
   ' 2>&1
@@ -191,20 +197,28 @@ fi
 assert_eq "sidecar contains the thread_id from JSONL" \
   "019e1234-aaaa-bbbb-cccc-deadbeefcafe" "$(cat "$sidecar" 2>/dev/null)"
 
-# codex argv must use the new shape: `exec --json ... <prompt>` (no `-p`).
+# codex argv must use the new shape: `exec --json ... -` (stdin marker
+# in place of the old positional prompt). After #144 the prompt arrives
+# on stdin, not argv.
 codex_argv=$(cat "$ARGS_FILE")
 assert_contains "codex argv contains 'exec'"   "exec"        "$codex_argv"
 assert_contains "codex argv contains '--json'" "--json"      "$codex_argv"
-assert_contains "codex argv ends with the prompt as positional arg" \
+assert_contains "codex argv ends with the stdin marker '-'" \
+  "-" "$codex_argv"
+assert_not_contains "codex argv does NOT carry the prompt positionally" \
   "implement the thing" "$codex_argv"
-assert_not_contains "codex argv does NOT use legacy -p flag" "-p" "$codex_argv"
+
+# After #144: prompt arrives via stdin.
+codex_stdin=$(cat "$STDIN_FILE" 2>/dev/null || true)
+assert_eq "codex stdin contains the prompt" \
+  "implement the thing" "$codex_stdin"
 
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== TC-LA-CODEX-03: behavioral — resume_agent uses captured thread_id ==="
 # ---------------------------------------------------------------------------
 # Same sandbox; sidecar is already populated by TC-LA-CODEX-02.
-: > "$ARGS_FILE"
+: > "$ARGS_FILE"; : > "$STDIN_FILE"
 
 resume_output=$(
   PATH="$BIN:$PATH" \
@@ -214,7 +228,9 @@ resume_output=$(
   AGENT_CMD=codex \
   AGENT_PERMISSION_MODE=auto \
   CODEX_ARGS_FILE="$ARGS_FILE" \
+  CODEX_STDIN_FILE="$STDIN_FILE" \
   bash -c '
+    unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE
     source "'"$LIB"'"
     resume_agent "'"$SESSION_ID"'" "follow-up: address review feedback" "" ""
   ' 2>&1
@@ -229,9 +245,14 @@ assert_contains "resume argv contains 'exec resume'" \
 assert_contains "resume argv contains the captured thread_id" \
   "019e1234-aaaa-bbbb-cccc-deadbeefcafe" "$resume_argv"
 assert_contains "resume argv contains '--json'" "--json" "$resume_argv"
-assert_contains "resume argv contains the follow-up prompt" \
+assert_not_contains "resume argv does NOT carry the prompt positionally" \
   "follow-up: address review feedback" "$resume_argv"
 assert_not_contains "resume argv does NOT use legacy -p" "-p" "$resume_argv"
+
+# After #144: resume prompt arrives via stdin.
+resume_stdin=$(cat "$STDIN_FILE" 2>/dev/null || true)
+assert_eq "resume stdin contains the follow-up prompt" \
+  "follow-up: address review feedback" "$resume_stdin"
 
 # ---------------------------------------------------------------------------
 echo ""
@@ -239,7 +260,7 @@ echo "=== TC-LA-CODEX-04: resume falls back to new run when sidecar missing ==="
 # ---------------------------------------------------------------------------
 # Use a fresh session_id that has no sidecar.
 NEW_SESSION_ID="99999999-aaaa-bbbb-cccc-dddddddddddd"
-: > "$ARGS_FILE"
+: > "$ARGS_FILE"; : > "$STDIN_FILE"
 
 fallback_output=$(
   PATH="$BIN:$PATH" \
@@ -249,7 +270,9 @@ fallback_output=$(
   AGENT_CMD=codex \
   AGENT_PERMISSION_MODE=auto \
   CODEX_ARGS_FILE="$ARGS_FILE" \
+  CODEX_STDIN_FILE="$STDIN_FILE" \
   bash -c '
+    unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE
     source "'"$LIB"'"
     resume_agent "'"$NEW_SESSION_ID"'" "fresh prompt" "" ""
   ' 2>&1
@@ -260,13 +283,18 @@ assert_eq "fallback resume_agent returns 0" 0 "$fallback_rc"
 assert_contains "fallback writes diagnostic about missing thread_id" \
   "no captured codex thread_id" "$fallback_output"
 
-# Argv should be the run_agent shape, not exec resume.
+# Argv should be the run_agent shape (`exec --json -`), not `exec resume`.
 fallback_argv=$(cat "$ARGS_FILE")
 assert_contains "fallback argv contains 'exec'" "exec" "$fallback_argv"
 assert_not_contains "fallback argv does NOT contain 'resume'" \
   "resume" "$fallback_argv"
-assert_contains "fallback argv contains the fresh prompt" \
+assert_not_contains "fallback argv does NOT carry the prompt positionally" \
   "fresh prompt" "$fallback_argv"
+
+# After #144: prompt arrives via stdin in the fallback path too.
+fallback_stdin=$(cat "$STDIN_FILE" 2>/dev/null || true)
+assert_eq "fallback stdin contains the fresh prompt" \
+  "fresh prompt" "$fallback_stdin"
 
 # A new sidecar should now exist for the fresh session_id.
 new_sidecar="$PID_DIR/codex-thread-$NEW_SESSION_ID"
@@ -283,15 +311,18 @@ echo ""
 echo "=== TC-LA-CODEX-05: capture is robust to no thread.started event ==="
 # ---------------------------------------------------------------------------
 # Replace stub codex with one that crashes before emitting thread.started.
+# Drains stdin so the leading `printf '%s' "$prompt" |` stage doesn't get
+# SIGPIPE before producing — otherwise pipefail surfaces 141 instead of 7.
 cat > "$BIN/codex" <<'EOF'
 #!/bin/bash
 echo "$@" > "$CODEX_ARGS_FILE"
+cat > "${CODEX_STDIN_FILE:-/dev/null}"
 echo '{"type":"error","message":"auth failed"}'
 exit 7
 EOF
 
 CRASH_SESSION_ID="abcdef00-1111-2222-3333-444444444444"
-: > "$ARGS_FILE"
+: > "$ARGS_FILE"; : > "$STDIN_FILE"
 
 crash_output=$(
   PATH="$BIN:$PATH" \
@@ -301,7 +332,9 @@ crash_output=$(
   AGENT_CMD=codex \
   AGENT_PERMISSION_MODE=auto \
   CODEX_ARGS_FILE="$ARGS_FILE" \
+  CODEX_STDIN_FILE="$STDIN_FILE" \
   bash -c '
+    unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE
     source "'"$LIB"'"
     run_agent "'"$CRASH_SESSION_ID"'" "crashy prompt" "" ""
   ' 2>&1

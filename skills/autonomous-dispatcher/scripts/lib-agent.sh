@@ -461,6 +461,22 @@ acquire_pid_guard() {
 
 # Run agent with a new session.
 # Args: $1=session_id, $2=prompt, $3=model (optional), $4=session_name (optional)
+#
+# Prompt-channel contract (closes #144 / [INV-33]): the prompt is fed to the
+# agent CLI on stdin via a leading `printf '%s' "$prompt" | ...` stage,
+# never as a positional argv element. Linux execve(2) caps any single
+# argv element at MAX_ARG_STRLEN = 32 * PAGE_SIZE = 131072 bytes; once the
+# issue JSON crossed 128 KB the wrapper crashed with `setsid: Argument
+# list too long` on every dispatcher tick. stdin has no comparable
+# per-element limit. Each CLI's stdin-mode marker is documented in its
+# branch below. Pipeline-stage exit propagation:
+#   - claude / gemini / kiro / generic — single downstream stage
+#     (`_run_with_timeout`); pipefail is on in the wrapper, so the rc
+#     propagates correctly.
+#   - codex / opencode — two downstream stages (`_run_with_timeout` →
+#     capture awk filter); use PIPESTATUS[1] for the CLI rc, since the
+#     printf at PIPESTATUS[0] is always 0 and the awk at the tail is
+#     well-behaved.
 run_agent() {
   local session_id="$1"
   local prompt="$2"
@@ -473,14 +489,15 @@ run_agent() {
   case "$AGENT_CMD" in
     claude)
       # Flag list is identical across both invocation paths — only the
-      # command prefix differs (see below).
+      # command prefix differs (see below). `-p` is the headless flag;
+      # claude reads the prompt from stdin when -p has no value.
       local claude_args=(
         --session-id "$session_id"
         ${session_name:+--name "$session_name"}
         --permission-mode "$AGENT_PERMISSION_MODE"
         ${model:+--model "$model"}
         "${extra_args[@]}"
-        -p "$prompt"
+        -p
         --output-format json
       )
       # Two invocation paths:
@@ -494,17 +511,13 @@ run_agent() {
       #
       # (B) AGENT_LAUNCHER set → launcher invokes claude itself.
       #     The launcher (e.g. `cc` shell function) ends with
-      #     `$CLAUDE_CMD "$@"`, so we pass ONLY flags + prompt as "$@" —
-      #     NOT the binary name and NOT `env -u`. If we passed
-      #     `env -u CLAUDECODE claude --session-id ...`, the launcher
-      #     would invoke `claude env -u CLAUDECODE claude --session-id`
-      #     and claude rejects `-u` as an unknown option. CLAUDECODE
-      #     handling is delegated to the launcher (nohup-spawned bash -c
-      #     subshells generally don't inherit it anyway).
+      #     `$CLAUDE_CMD "$@"`, so we pass ONLY flags as "$@" —
+      #     NOT the binary name and NOT `env -u`. CLAUDECODE handling is
+      #     delegated to the launcher.
       if [[ ${#AGENT_LAUNCHER_ARGV[@]} -gt 0 ]]; then
-        _run_with_timeout "${claude_args[@]}"
+        printf '%s' "$prompt" | _run_with_timeout "${claude_args[@]}"
       else
-        _run_with_timeout env -u CLAUDECODE "$AGENT_CMD" "${claude_args[@]}"
+        printf '%s' "$prompt" | _run_with_timeout env -u CLAUDECODE "$AGENT_CMD" "${claude_args[@]}"
       fi
       ;;
     codex)
@@ -512,23 +525,28 @@ run_agent() {
       # prompt). The legacy `-p` flag now means `--profile` and would parse
       # the prompt as a TOML config profile name — silent breakage.
       #
-      # `--json` streams JSONL events to stdout, including the
-      # `thread.started` event from which we capture the thread_id for
-      # resume_agent. We pipe through _codex_capture_thread (pass-through
-      # filter) to keep the wrapper's stdout consumption untouched while
-      # writing the sidecar.
+      # Stdin marker: `codex exec -` reads the prompt from stdin instead
+      # of the positional. `--json` streams JSONL events to stdout,
+      # including the `thread.started` event from which we capture the
+      # thread_id for resume_agent. The capture filter is pass-through
+      # so the wrapper's stdout consumption is unchanged.
       #
-      # PIPESTATUS[0] surfaces codex's exit code (the awk filter at the end
-      # of the pipeline is well-behaved and rc=0 on every input).
-      _run_with_timeout "$AGENT_CMD" exec --json \
-        ${model:+--model "$model"} \
-        "${extra_args[@]}" \
-        "$prompt" \
+      # PIPESTATUS[1] surfaces codex's exit code: PIPESTATUS[0] is the
+      # leading printf (always 0); the trailing awk at PIPESTATUS[2] is
+      # well-behaved and rc=0 on every input. Pre-#144 the pipeline had
+      # only two stages and we read PIPESTATUS[0]; the off-argv rewrite
+      # adds the printf as a new leading stage.
+      printf '%s' "$prompt" \
+        | _run_with_timeout "$AGENT_CMD" exec --json \
+          ${model:+--model "$model"} \
+          "${extra_args[@]}" \
+          - \
         | _codex_capture_thread "$session_id"
-      return "${PIPESTATUS[0]}"
+      return "${PIPESTATUS[1]}"
       ;;
     gemini)
       # Gemini CLI: headless invocation per https://geminicli.com/docs/cli/headless/.
+      # `-p` with no value reads the prompt from stdin.
       #
       # Operator-tunable flags (closes #140) live in
       # AGENT_DEV_EXTRA_ARGS / AGENT_REVIEW_EXTRA_ARGS. The two
@@ -548,16 +566,19 @@ run_agent() {
       # is directly usable for `gemini --resume <same-UUID>` later
       # (verified empirically against CLI 0.42.0, #134). claude-style
       # replay — no sidecar capture needed, unlike codex/opencode.
-      _run_with_timeout "$AGENT_CMD" \
+      printf '%s' "$prompt" | _run_with_timeout "$AGENT_CMD" \
         --session-id "$session_id" \
         ${model:+--model "$model"} \
         "${extra_args[@]}" \
-        -p "$prompt"
+        -p
       ;;
     kiro)
       # Kiro CLI does not support named sessions (session_id is ignored).
       # Each invocation starts a new conversation in the current directory.
       # --agent ensures the workspace agent (with TDD hooks) is used.
+      #
+      # Stdin marker: `kiro chat --no-interactive` with no positional
+      # message reads the prompt from stdin.
       #
       # Tool trust (closes #140): operator-tunable via AGENT_DEV_EXTRA_ARGS.
       # The load-bearing flag from #102/#136 is `--trust-all-tools`;
@@ -571,28 +592,38 @@ run_agent() {
         --no-interactive
         ${model:+--model "$model"}
         "${extra_args[@]}"
-        "$prompt"
       )
-      _run_with_timeout kiro-cli "${kiro_args[@]}"
+      printf '%s' "$prompt" | _run_with_timeout kiro-cli "${kiro_args[@]}"
       ;;
     opencode)
       # opencode `run [message..]` is the headless invocation. opencode
       # mints its own session id and emits it on every event in the JSON
       # event stream, so we capture it the same way as codex.
       #
+      # Stdin marker: `opencode run` reads the prompt from stdin when no
+      # positional message is given.
+      #
       # The session_name we got from the dispatcher is passed to --title
       # so opencode's session list shows a human-readable handle alongside
       # the ses_<base62> id.
-      _run_with_timeout "$AGENT_CMD" run --format json \
-        ${model:+--model "$model"} \
-        ${session_name:+--title "$session_name"} \
-        "${extra_args[@]}" \
-        "$prompt" \
+      #
+      # PIPESTATUS[1] for the CLI rc — same shape as codex (printf →
+      # _run_with_timeout opencode → capture awk).
+      printf '%s' "$prompt" \
+        | _run_with_timeout "$AGENT_CMD" run --format json \
+          ${model:+--model "$model"} \
+          ${session_name:+--title "$session_name"} \
+          "${extra_args[@]}" \
         | _opencode_capture_session "$session_id"
-      return "${PIPESTATUS[0]}"
+      return "${PIPESTATUS[1]}"
       ;;
     *)
-      _run_with_timeout "$AGENT_CMD" "${extra_args[@]}" -p "$prompt"
+      # Generic fallback: assume `<cli> -p` (with no value) reads from
+      # stdin. The `-p` token is preserved so a downstream CLI that
+      # actually requires a flag still gets one; CLIs that don't need it
+      # will receive a stray flag, but the failure mode is loud (CLI
+      # rejects unknown flag) rather than silent (truncated prompt).
+      printf '%s' "$prompt" | _run_with_timeout "$AGENT_CMD" "${extra_args[@]}" -p
       ;;
   esac
 }
@@ -602,6 +633,9 @@ run_agent() {
 # Note: --name may not update the display name on resume (session was already
 # named at creation). It is still passed through for kiro/fallback paths that
 # start a new session instead of resuming.
+#
+# Same prompt-channel contract as run_agent (closes #144 / [INV-33]): the
+# prompt is fed via stdin, never as a positional argv element.
 resume_agent() {
   local session_id="$1"
   local prompt="$2"
@@ -613,21 +647,21 @@ resume_agent() {
 
   case "$AGENT_CMD" in
     claude)
-      # See run_agent above for the (A) direct vs. (B) launcher rationale.
-      # --name is omitted on resume — the session retains the name set
-      # at creation.
+      # See run_agent above for the (A) direct vs. (B) launcher rationale
+      # and the stdin contract. --name is omitted on resume — the session
+      # retains the name set at creation.
       local claude_args=(
         --resume "$session_id"
         --permission-mode "$AGENT_PERMISSION_MODE"
         ${model:+--model "$model"}
         "${extra_args[@]}"
-        -p "$prompt"
+        -p
         --output-format json
       )
       if [[ ${#AGENT_LAUNCHER_ARGV[@]} -gt 0 ]]; then
-        _run_with_timeout "${claude_args[@]}"
+        printf '%s' "$prompt" | _run_with_timeout "${claude_args[@]}"
       else
-        _run_with_timeout env -u CLAUDECODE "$AGENT_CMD" "${claude_args[@]}"
+        printf '%s' "$prompt" | _run_with_timeout env -u CLAUDECODE "$AGENT_CMD" "${claude_args[@]}"
       fi
       ;;
     codex)
@@ -636,6 +670,9 @@ resume_agent() {
       # codex mints its own UUID and we capture it during run_agent into a
       # sidecar keyed by our session_id. Read it back here.
       #
+      # Stdin marker `-` and PIPESTATUS[1] match the run_agent codex
+      # branch — see that branch's comment block for rationale.
+      #
       # If the sidecar is missing (run_agent crashed before thread.started,
       # or this resume_agent is being called without a prior run_agent),
       # fall back to a fresh new-session run — same defensive pattern as
@@ -643,12 +680,13 @@ resume_agent() {
       # than starting clean with the full prompt.
       local _codex_tid
       if _codex_tid=$(_codex_thread_id "$session_id"); then
-        _run_with_timeout "$AGENT_CMD" exec resume "$_codex_tid" --json \
-          ${model:+--model "$model"} \
-          "${extra_args[@]}" \
-          "$prompt" \
+        printf '%s' "$prompt" \
+          | _run_with_timeout "$AGENT_CMD" exec resume "$_codex_tid" --json \
+            ${model:+--model "$model"} \
+            "${extra_args[@]}" \
+            - \
           | _codex_capture_thread "$session_id"
-        return "${PIPESTATUS[0]}"
+        return "${PIPESTATUS[1]}"
       else
         echo "[lib-agent] no captured codex thread_id for session $session_id; starting a new codex session" >&2
         run_agent "$session_id" "$prompt" "$model" "$session_name"
@@ -663,15 +701,18 @@ resume_agent() {
       # issue), gemini still starts cleanly because there's simply no
       # history to replay; safer than kiro's fresh-run fallback.
       #
+      # `-p` (no value) reads the prompt from stdin — same channel
+      # contract as the run_agent gemini branch.
+      #
       # Operator-tunable flags via AGENT_REVIEW_EXTRA_ARGS (closes #140).
       # The same load-bearing values as the dev side apply on resume:
       # without `--approval-mode yolo` even resume-mode tool calls hit
       # the headless ask_user→deny path. See autonomous.conf.example.
-      _run_with_timeout "$AGENT_CMD" \
+      printf '%s' "$prompt" | _run_with_timeout "$AGENT_CMD" \
         --resume "$session_id" \
         ${model:+--model "$model"} \
         "${extra_args[@]}" \
-        -p "$prompt"
+        -p
       ;;
     kiro)
       # Kiro CLI --resume cannot inject new review feedback effectively —
@@ -681,18 +722,19 @@ resume_agent() {
       run_agent "$session_id" "$prompt" "$model" "$session_name"
       ;;
     opencode)
-      # `opencode run --session <id> [PROMPT]` resumes the conversation.
-      # Same pattern as the codex branch: read the captured opencode
-      # session id from the sidecar, fall back to a new run if missing
-      # (run_agent crashed before the first JSON event reached us).
+      # `opencode run --session <id>` (with stdin prompt) resumes the
+      # conversation. Same pattern as the codex branch: read the
+      # captured opencode session id from the sidecar, fall back to a
+      # new run if missing (run_agent crashed before the first JSON
+      # event reached us). PIPESTATUS[1] mirrors the run_agent branch.
       local _opencode_sid
       if _opencode_sid=$(_opencode_session_id "$session_id"); then
-        _run_with_timeout "$AGENT_CMD" run --format json --session "$_opencode_sid" \
-          ${model:+--model "$model"} \
-          "${extra_args[@]}" \
-          "$prompt" \
+        printf '%s' "$prompt" \
+          | _run_with_timeout "$AGENT_CMD" run --format json --session "$_opencode_sid" \
+            ${model:+--model "$model"} \
+            "${extra_args[@]}" \
           | _opencode_capture_session "$session_id"
-        return "${PIPESTATUS[0]}"
+        return "${PIPESTATUS[1]}"
       else
         echo "[lib-agent] no captured opencode sessionID for session $session_id; starting a new opencode session" >&2
         run_agent "$session_id" "$prompt" "$model" "$session_name"

@@ -725,6 +725,80 @@ prescribed command path fell through to a "no such file" error.
   markdown.
 
 
+## INV-33: agent prompt is fed via stdin, never as a single argv element
+
+**Rule**: `lib-agent.sh::run_agent` and `resume_agent` MUST feed the
+constructed prompt to the underlying agent CLI via stdin (a leading
+`printf '%s' "$prompt" | _run_with_timeout <cli> ...` pipeline stage).
+The prompt MUST NOT appear as a positional argv element to any
+exec'd binary in the chain (`setsid`, `timeout`, `env`, the agent CLI
+itself, or any operator-supplied `AGENT_LAUNCHER`).
+
+**Why**: Linux `execve(2)` rejects any single argv element larger than
+`MAX_ARG_STRLEN = 32 * PAGE_SIZE = 131072 bytes` (128 KB on every
+common page-size architecture), independent of the much larger total
+`ARG_MAX` limit. The autonomous-dev wrapper assembles the prompt from
+`gh issue view --json title,body,comments`, which on a normal
+multi-cycle dev → review → conflict → re-review lifecycle accumulates
+hundreds of machine-author comments (dispatcher tokens, Session Reports,
+review summaries) and routinely crosses 128 KB. Pre-#144 the wrapper
+crashed at `setsid: Argument list too long` (exit 126) on every
+dispatcher tick once the issue grew past that threshold — a
+size-based silent perma-stall, recoverable only by manually deleting
+machine comments to shrink the JSON. Reproduced downstream at 189 KB.
+
+**Pipeline-stage exit propagation**: with the new printf stage, the
+pipelines that already had an awk capture filter (`codex`, `opencode`)
+become three-stage:
+`printf | _run_with_timeout <cli> | _<cli>_capture_*`. PIPESTATUS[0]
+is the printf (always 0); PIPESTATUS[1] is the CLI's exit code (load-
+bearing for `count_agent_failures`); PIPESTATUS[2] is the awk filter
+(always 0). Pre-#144 the codex / opencode branches read PIPESTATUS[0]
+because the printf stage didn't exist; that path now reads
+PIPESTATUS[1]. The single-stage CLIs (`claude`, `gemini`, `kiro`,
+generic fallback) propagate the rc through the wrapper's normal
+`set -o pipefail` semantics — no PIPESTATUS read needed.
+
+**Producer**:
+`skills/autonomous-dispatcher/scripts/lib-agent.sh::{run_agent,resume_agent}`.
+
+**Consumer**: every agent CLI branch (`claude`, `codex`, `gemini`,
+`kiro`, `opencode`, `*` generic). Each CLI's stdin marker is
+documented in its branch comment:
+- `claude -p` (no value) — claude reads stdin when `-p` has no arg.
+- `codex exec -` — `-` tells codex to read the prompt from stdin.
+- `gemini -p` (no value) — gemini reads stdin when `-p` has no arg.
+- `kiro chat --no-interactive` (no positional message) — reads stdin.
+- `opencode run` (no positional message) — reads stdin.
+- `*` generic fallback — `<cli> -p` (no value) — best-effort.
+
+**Test**: `tests/unit/test-lib-agent-prompt-stdin.sh` — TC-EXEC-001..010
+exercise each CLI with a 256 KB prompt loaded from a sidecar file (env-
+var passing would itself hit MAX_ARG_STRLEN), assert that the CLI stub
+sees the full prompt on stdin AND that no argv token exceeds 64 KB.
+TC-EXEC-009 is a static grep that fails if any `_run_with_timeout ...
+"$prompt"` line returns. TC-EXEC-011..012 pin the codex / opencode
+PIPESTATUS[1] regression guard. The five existing per-CLI test files
+(`test-lib-agent-{codex,gemini,kiro-permission,opencode,extra-args}.sh`)
+were updated in the same PR to assert "prompt on stdin, not argv".
+
+**Cross-references**:
+- [INV-13](#inv-13-wall-clock-cap-on-agent-invocations) — `_run_with_timeout`
+  is unchanged; the printf stage is added before it. The wall-clock
+  cap, setsid PGID semantics, and `_AGENT_RUN_PID` capture all still
+  apply because they wrap the CLI stage, which is downstream of the
+  printf.
+- [INV-22](#inv-22-agent_launcher-tokenization--claude-only-invocation-contract)
+  — `AGENT_LAUNCHER_ARGV` is unchanged; the launcher still receives
+  the structural flags as `"$@"`, with the prompt arriving via stdin
+  inherited through the pipeline. Operator-defined launchers (e.g.
+  the canonical `cc` shell function) MUST forward stdin to the CLI
+  exec — `exec $CLAUDE_CMD "$@"` does this implicitly.
+- [INV-31](#inv-31-operator-tunable-per-cli-flags-live-in-conf-not-in-lib-agentsh)
+  — `AGENT_DEV_EXTRA_ARGS` / `AGENT_REVIEW_EXTRA_ARGS` are unchanged
+  (operator-supplied flags continue to ride on argv between the
+  structural flags and the now-absent prompt positional).
+
 ## Adding a new invariant
 
 When fixing a pipeline bug, after locating the bug on the state machine + flow docs:
