@@ -121,18 +121,34 @@ strip_comments() {
 executable=$(strip_comments "$LIB")
 
 # Pre-fix every CLI branch ended `_run_with_timeout <cli> ... "$prompt"`,
-# either on a single line or with a `\` continuation. After the fix
-# `"$prompt"` should never appear on a line that also contains
-# `_run_with_timeout`. (`run_agent <session> "$prompt"` is fine — it
-# recurses into the same case dispatch where the prompt eventually
-# enters the printf stage.)
-if grep -nE '_run_with_timeout.*"\$prompt"' <<<"$executable" >/dev/null; then
-  echo -e "  ${RED}FAIL${NC}: TC-EXEC-009 lib-agent.sh still has '_run_with_timeout ... \"\$prompt\"' — prompt still on argv"
+# either on a single line or split across `\`-continued lines. After
+# the fix `"$prompt"` should never appear in a `_run_with_timeout`
+# invocation, including across continuations. (`run_agent <session>
+# "$prompt"` is fine — it recurses into the same case dispatch where
+# the prompt eventually enters the printf stage.)
+#
+# Join continuations before grepping so a regression that splits the
+# offending arg across lines (e.g. `_run_with_timeout cli ... \\\n
+#   "$prompt"`) is still caught.
+joined=$(awk 'BEGIN{buf=""} {
+  line=$0
+  sub(/[[:space:]]*#.*$/, "", line)
+  if (line ~ /\\$/) {
+    sub(/[[:space:]]*\\$/, "", line)
+    buf = buf line " "
+  } else {
+    print buf line
+    buf = ""
+  }
+} END { if (buf != "") print buf }' "$LIB")
+
+if grep -nE '_run_with_timeout[^|]*"\$prompt"' <<<"$joined" >/dev/null; then
+  echo -e "  ${RED}FAIL${NC}: TC-EXEC-009 lib-agent.sh still has '_run_with_timeout ... \"\$prompt\"' — prompt still on argv (incl. continuation-line check)"
   echo "      offending lines:"
-  grep -nE '_run_with_timeout.*"\$prompt"' <<<"$executable" | head -5 | sed 's/^/        /'
+  grep -nE '_run_with_timeout[^|]*"\$prompt"' <<<"$joined" | head -5 | sed 's/^/        /'
   FAIL=$((FAIL + 1))
 else
-  echo -e "  ${GREEN}PASS${NC}: TC-EXEC-009 no '_run_with_timeout ... \"\$prompt\"' lines (prompt off argv)"
+  echo -e "  ${GREEN}PASS${NC}: TC-EXEC-009 no '_run_with_timeout ... \"\$prompt\"' (after \\-continuation join)"
   PASS=$((PASS + 1))
 fi
 
@@ -636,6 +652,98 @@ assert_contains "TC-EXEC-008 resume argv contains 'exec resume'" \
   "exec resume" "$codex_resume_argv"
 assert_contains "TC-EXEC-008 resume argv contains the captured thread_id" \
   "019e1234-aaaa-bbbb-cccc-deadbeefcafe" "$codex_resume_argv"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-EXEC-013: gemini resume_agent with 256 KB prompt ==="
+# ---------------------------------------------------------------------------
+# Closes the gap pr-review flagged: resume_agent gemini path uses the
+# new pipeline shape (printf | cli) but pre-#144 only TC-EXEC-007/008
+# exercised resume-side stdin delivery (claude/codex). gemini resume
+# rides single-stage (no awk capture) so its rc propagation differs
+# from codex's PIPESTATUS[1] case.
+: > "$ARGS_FILE"; : > "$TOKENS_FILE"; : > "$STDIN_FILE"
+
+PATH="$BIN:$PATH" \
+AUTONOMOUS_PID_DIR="$PID_DIR" \
+PROJECT_ID="testproj" \
+PROJECT_DIR="$TMPROOT" \
+AGENT_CMD=gemini \
+AGENT_PERMISSION_MODE=auto \
+CLI_ARGS_FILE="$ARGS_FILE" \
+CLI_ARGV_TOKENS_FILE="$TOKENS_FILE" \
+CLI_STDIN_FILE="$STDIN_FILE" \
+BIG_PROMPT_FILE="$BIG_PROMPT_FILE" \
+bash -c '
+  unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE
+  BIG=$(cat "$BIG_PROMPT_FILE")
+  source "'"$LIB"'"
+  resume_agent "'"$SESSION_ID"'" "$BIG" "" ""
+' >/dev/null 2>&1
+rc=$?
+
+assert_eq "TC-EXEC-013 resume_agent gemini returns 0 with large prompt" 0 "$rc"
+stdin_size=$(wc -c < "$STDIN_FILE")
+assert_eq "TC-EXEC-013 stdin recorder size matches BIG_PROMPT" \
+  "$BIG_PROMPT_SIZE" "$stdin_size"
+if all_tokens_below_size "$ARGV_SIZE_LIMIT" "$TOKENS_FILE"; then
+  echo -e "  ${GREEN}PASS${NC}: TC-EXEC-013 no argv token exceeds 64 KB"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-EXEC-013 argv contains a >64 KB token"
+  FAIL=$((FAIL + 1))
+fi
+
+gemini_resume_argv=$(cat "$ARGS_FILE")
+assert_contains "TC-EXEC-013 resume argv contains --resume" \
+  "--resume $SESSION_ID" "$gemini_resume_argv"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-EXEC-014: opencode resume_agent with 256 KB prompt ==="
+# ---------------------------------------------------------------------------
+# resume_agent opencode reads a sidecar ses_<base62> and uses the same
+# three-stage shape as codex resume — PIPESTATUS[1] is the rc-bearing
+# index. Plant a sidecar so we exercise the resume branch (not the
+# fallback to run_agent).
+oc_sidecar="$PID_DIR/opencode-session-$SESSION_ID"
+echo "ses_TEST123abc" > "$oc_sidecar"
+
+: > "$ARGS_FILE"; : > "$TOKENS_FILE"; : > "$STDIN_FILE"
+
+PATH="$BIN:$PATH" \
+AUTONOMOUS_PID_DIR="$PID_DIR" \
+PROJECT_ID="testproj" \
+PROJECT_DIR="$TMPROOT" \
+AGENT_CMD=opencode \
+AGENT_PERMISSION_MODE=auto \
+CLI_ARGS_FILE="$ARGS_FILE" \
+CLI_ARGV_TOKENS_FILE="$TOKENS_FILE" \
+CLI_STDIN_FILE="$STDIN_FILE" \
+BIG_PROMPT_FILE="$BIG_PROMPT_FILE" \
+bash -c '
+  unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE
+  BIG=$(cat "$BIG_PROMPT_FILE")
+  source "'"$LIB"'"
+  resume_agent "'"$SESSION_ID"'" "$BIG" "" ""
+' >/dev/null 2>&1
+rc=$?
+
+assert_eq "TC-EXEC-014 resume_agent opencode returns 0 with large prompt" 0 "$rc"
+stdin_size=$(wc -c < "$STDIN_FILE")
+assert_eq "TC-EXEC-014 stdin recorder size matches BIG_PROMPT" \
+  "$BIG_PROMPT_SIZE" "$stdin_size"
+if all_tokens_below_size "$ARGV_SIZE_LIMIT" "$TOKENS_FILE"; then
+  echo -e "  ${GREEN}PASS${NC}: TC-EXEC-014 no argv token exceeds 64 KB"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-EXEC-014 argv contains a >64 KB token"
+  FAIL=$((FAIL + 1))
+fi
+
+opencode_resume_argv=$(cat "$ARGS_FILE")
+assert_contains "TC-EXEC-014 resume argv contains --session" \
+  "--session ses_TEST123abc" "$opencode_resume_argv"
 
 # ---------------------------------------------------------------------------
 echo ""

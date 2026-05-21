@@ -190,6 +190,13 @@ _run_with_timeout() {
   # On the rare host without it (no util-linux), the agent runs in the
   # wrapper's group; the dispatcher's `pgrep -f` fallback in
   # kill_stale_wrapper still picks up orphans.
+  #
+  # stdin inheritance contract ([INV-33], #144): callers feed the prompt
+  # via a leading `printf '%s' "$prompt" |` pipeline stage. Bash inherits
+  # the function's stdin into the backgrounded `&` child here, and
+  # `setsid` does NOT close fd 0. Do NOT add `< /dev/null` on the spawn
+  # below — that would silently zero out the prompt for every CLI
+  # branch, breaking the off-argv channel.
   local launcher=()
   command -v setsid >/dev/null 2>&1 && launcher=(setsid)
   "${launcher[@]}" "${cmd[@]}" &
@@ -620,9 +627,16 @@ run_agent() {
     *)
       # Generic fallback: assume `<cli> -p` (with no value) reads from
       # stdin. The `-p` token is preserved so a downstream CLI that
-      # actually requires a flag still gets one; CLIs that don't need it
-      # will receive a stray flag, but the failure mode is loud (CLI
-      # rejects unknown flag) rather than silent (truncated prompt).
+      # actually requires a flag still gets one; if the unknown CLI
+      # rejects unknown flags, the failure is loud. If the unknown CLI
+      # silently ignores `-p` AND doesn't read stdin, the prompt is
+      # silently truncated to empty — emit a one-time warning so the
+      # operator knows to verify stdin support before relying on this
+      # branch. (`AGENT_CMD` matches none of the five known cases above.)
+      if [[ -z "${_LIB_AGENT_GENERIC_WARNED:-}" ]]; then
+        echo "[lib-agent] WARN: AGENT_CMD=${AGENT_CMD} hits the generic fallback. The wrapper feeds the prompt via stdin to '${AGENT_CMD} -p'. Verify your CLI accepts a stdin prompt under that flag — otherwise the prompt will be silently truncated. Suppress this warning by setting _LIB_AGENT_GENERIC_WARNED=1." >&2
+        export _LIB_AGENT_GENERIC_WARNED=1
+      fi
       printf '%s' "$prompt" | _run_with_timeout "$AGENT_CMD" "${extra_args[@]}" -p
       ;;
   esac
