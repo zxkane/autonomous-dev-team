@@ -37,6 +37,7 @@ stateDiagram-v2
 
     reviewing --> approved: Review wrapper verdict PASS (merged or manual)
     reviewing --> pending_dev: Review wrapper verdict FAIL
+    reviewing --> pending_dev: Review wrapper PASS but auto-merge failed (INV-33)
     reviewing --> pending_dev: Review wrapper trap (crash exit non-zero)
     reviewing --> pending_dev: Dispatcher Step 5b (DEAD reviewing)
 
@@ -79,7 +80,8 @@ Each row is one legal transition. "Actor" identifies who writes the labels. "Pre
 | `in-progress` | `−in-progress +pending-dev` | Step 5b: DEAD+PR with NO new commits | Dispatcher | Wrapper PID dead; PR exists; current `headRefOid` = last `Reviewed HEAD` trailer | "Dev process exited (no new commits since last review at \`<sha>\`). Moving to pending-dev for retry." ([INV-06](invariants.md#inv-06-crashed--process-not-found-keyword-contract)) |
 | `in-progress` | `−in-progress +pending-dev` | Step 5b: DEAD, NO PR | Dispatcher | Wrapper PID dead; no PR found | "Task appears to have crashed (no PR found). Moving to pending-dev for retry." |
 | `pending-review` | `−pending-review +reviewing` | Dispatcher Step 3 | Dispatcher | concurrency below cap | "Dispatching autonomous review..." |
-| `reviewing` | `−reviewing +approved` (PR merged, issue closed) | Review verdict PASS, no `no-auto-close` | Review wrapper | Verdict comment matches session-id; `gh pr review --approve` succeeded; `gh pr merge --squash` succeeded | (no extra issue comment; merge handles closing) |
+| `reviewing` | `−reviewing −autonomous +approved` (PR merged, issue auto-closes via `Closes #N`) | Review verdict PASS, no `no-auto-close`, `gh pr merge` succeeds | Review wrapper | Verdict comment matches session-id; `gh pr review --approve` succeeded; `gh pr merge --squash` succeeded | (no extra issue comment; the wrapper does NOT call `gh issue close` — GitHub closes the issue via `Closes #N` on merge — see [INV-33](invariants.md#inv-33-review-wrapper-must-not-close-the-linked-issue)) |
+| `reviewing` | `−reviewing +pending-dev` (PR stays open) | Review verdict PASS, no `no-auto-close`, `gh pr merge` **fails** ([INV-33](invariants.md#inv-33-review-wrapper-must-not-close-the-linked-issue)) | Review wrapper | Verdict + approval succeeded; `gh pr merge` returned non-zero (conflict, branch protection, transient API error) | PR comment "Auto-merge failed: <stderr>. Re-dispatching dev agent to rebase onto main." (`autonomous` retained so dispatcher Step 4 picks it up) |
 | `reviewing` | `−reviewing +approved` (PR open, awaiting manual) | Review verdict PASS, `no-auto-close` set | Review wrapper | Verdict + approval succeeded | "Review PASSED — this issue has the 'no-auto-close' label. @owner please review and merge..." |
 | `reviewing` | `−reviewing +approved` (manual approval needed) | PR-approval API call failed | Review wrapper | Verdict matched but `gh pr review --approve` returned non-zero | "Review PASSED but formal PR approval failed... please approve and merge manually." |
 | `reviewing` | `−reviewing` (no add) | Concurrent review already merged | Review wrapper | Verdict = PASS but `gh pr view --json state` ≠ OPEN | (none — silent skip; another review wrote `approved` first) |
@@ -91,7 +93,7 @@ Each row is one legal transition. "Actor" identifies who writes the labels. "Pre
 | `pending-dev` | `−pending-dev +stalled` | Dispatcher Step 4 (retry exhausted) | Dispatcher | retry count ≥ `MAX_RETRIES` (after stalled-cutoff filtering) | "Marking as stalled" comment with @owner mention |
 | `stalled` | `−stalled` (back to `pending-dev`) | Maintainer removes label | Maintainer | — | — |
 
-> **Note on `+approved`:** the auto-close path also removes `autonomous` so the issue is no longer eligible for re-dispatch. The `no-auto-close` and approval-failure paths keep `autonomous` (since the issue is not auto-closed). All three paths remove `reviewing` and add `approved`.
+> **Note on `+approved`:** the auto-merge-success path also removes `autonomous` so the issue is no longer eligible for re-dispatch (and GitHub auto-closes the issue via the PR's `Closes #N` keyword — the wrapper itself does not call `gh issue close`, see [INV-33](invariants.md#inv-33-review-wrapper-must-not-close-the-linked-issue)). The `no-auto-close` and approval-failure paths keep `autonomous` (the issue is not auto-closed; manual operator intervention completes the flow). The auto-merge-**failure** path is *not* in the `+approved` group: it transitions to `+pending-dev` with `autonomous` retained, and the dispatcher Step 4 re-dispatches dev to rebase onto main.
 
 ## Forbidden transitions
 

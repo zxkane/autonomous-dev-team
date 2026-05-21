@@ -361,14 +361,53 @@ elif [[ "$MODE" = "resume" ]]; then
 
   # Fetch PR inline review comments if PR exists
   PR_REVIEW_COMMENTS=""
+  AUTO_MERGE_FAILURE_MARKER=""
   if [[ -n "$PR_NUM" ]]; then
     PR_REVIEW_COMMENTS=$(gh api "repos/${REPO}/pulls/${PR_NUM}/comments" \
       --jq '[.[] | "- **\(.path):\(.line // .original_line // "N/A")** — \(.body)"] | join("\n")' 2>/dev/null || true)
+
+    # Detect the auto-merge-failure marker the review wrapper posts when
+    # `gh pr merge` fails (#145). Issue-level PR comments live under
+    # /issues/<n>/comments (not /pulls/<n>/comments, which is inline-review
+    # only). Anchor with startswith so quoted history can't false-positive.
+    AUTO_MERGE_FAILURE_MARKER=$(gh api "repos/${REPO}/issues/${PR_NUM}/comments" \
+      --jq '[.[] | select(.body | startswith("Auto-merge failed:"))] | last // empty | .body' 2>/dev/null || true)
   fi
 
   RESUME_PROMPT="$(cat <<EOF
 Resuming work on issue #${ISSUE_NUMBER}.
 
+$(if [[ -n "$AUTO_MERGE_FAILURE_MARKER" ]]; then cat <<REBASE_BLOCK
+## Pre-implementation: rebase onto main — MANDATORY FIRST STEP
+
+The review wrapper posted an auto-merge-failure marker on PR #${PR_NUM}. This
+means the review verdict was PASS but \`gh pr merge\` failed (likely a merge
+conflict against main, branch behind, or branch-protection check missing).
+Your **first** action this session is to rebase the PR branch onto the latest
+\`main\` and force-push the result, BEFORE touching any other review-finding work.
+
+Marker content:
+<user-issue-content>
+${AUTO_MERGE_FAILURE_MARKER}
+</user-issue-content>
+
+Rebase procedure (run from inside the PR's worktree):
+\`\`\`bash
+git fetch origin main
+git rebase origin/main
+# If clean: git push --force-with-lease
+# If conflicts: resolve, git rebase --continue, then force-push.
+# If conflicts are not auto-resolvable: git rebase --abort, post a clear
+# 'needs human' comment on the issue describing the conflicting files,
+# and exit cleanly (do NOT loop).
+\`\`\`
+
+After a successful rebase + push, continue with the rest of this prompt
+(if there are also review findings below, address them in the SAME push
+when feasible). The next dispatcher tick will re-dispatch review.
+
+REBASE_BLOCK
+fi)
 ## Review Feedback (from issue comments)
 
 <user-issue-content>
@@ -439,6 +478,20 @@ You are continuing work on GitHub issue #${ISSUE_NUMBER}. A previous session fai
 ${ISSUE_BODY}
 </user-issue-content>
 
+$(if [[ -n "$AUTO_MERGE_FAILURE_MARKER" ]]; then cat <<REBASE_BLOCK2
+## Pre-implementation: rebase onto main — MANDATORY FIRST STEP
+
+The review wrapper posted an auto-merge-failure marker on PR #${PR_NUM} (the
+verdict was PASS but \`gh pr merge\` failed). Rebase the PR branch onto
+\`origin/main\` and force-push BEFORE addressing other review findings.
+
+Marker content:
+<user-issue-content>
+${AUTO_MERGE_FAILURE_MARKER}
+</user-issue-content>
+
+REBASE_BLOCK2
+fi)
 ## Previous Review Feedback (from issue comments)
 
 <user-issue-content>

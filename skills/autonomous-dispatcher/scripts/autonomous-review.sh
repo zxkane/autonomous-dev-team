@@ -697,22 +697,50 @@ if [[ "$PASSED_VERDICT" == "true" ]]; then
   else
     log "Merging PR #${PR_NUMBER}..."
 
-    # Merge PR (squash)
-    if gh pr merge "$PR_NUMBER" --repo "$REPO" --squash --delete-branch 2>&1; then
+    # Capture merge stdout+stderr so the failure-path PR comment can
+    # surface the merge error to the dev re-dispatch (#145).
+    set +e
+    MERGE_OUT=$(gh pr merge "$PR_NUMBER" --repo "$REPO" --squash --delete-branch 2>&1)
+    MERGE_RC=$?
+    set -e
+    [[ -n "$MERGE_OUT" ]] && log "gh pr merge output: ${MERGE_OUT}"
+
+    if [[ $MERGE_RC -eq 0 ]]; then
       log "PR #${PR_NUMBER} merged successfully."
+
+      # INV-33: never close the issue directly — GitHub auto-closes it
+      # via the PR's `Closes #N` keyword on merge. See docs/pipeline/invariants.md.
+      gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
+        --remove-label "reviewing" --remove-label "autonomous" \
+        --add-label "approved" 2>/dev/null || true
+
+      log "Issue #${ISSUE_NUMBER} marked approved; auto-close handled by GitHub via 'Closes #N' resolution."
     else
-      log "WARNING: Auto-merge failed. PR may need manual merge."
-      gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
-        --body "Review passed but auto-merge failed. Please merge PR #${PR_NUMBER} manually." 2>/dev/null || true
+      # Auto-merge failed (#145). Post the marker on the PR (dev re-dispatch
+      # detects it via /issues/<n>/comments to trigger rebase), then flip the
+      # issue to pending-dev while keeping `autonomous` so the dispatcher's
+      # Step 4 selector picks it up next tick. Never close, never approve.
+      _err_excerpt="${MERGE_OUT:0:500}"
+      log "WARNING: Auto-merge failed (rc=${MERGE_RC}): ${_err_excerpt}"
+
+      if ! _comment_err=$(gh pr comment "$PR_NUMBER" --repo "$REPO" \
+        --body "Auto-merge failed: ${_err_excerpt}
+
+Re-dispatching dev agent to rebase onto main." 2>&1 >/dev/null); then
+        log "WARNING: Failed to post auto-merge-failure marker on PR #${PR_NUMBER} (non-fatal — label transition still proceeds): ${_comment_err}"
+      fi
+
+      # Capture stderr so a failed label transition is diagnosable from logs —
+      # otherwise the issue would silently stick in `reviewing` and the next
+      # dispatcher tick wouldn't re-dispatch dev.
+      if ! _edit_err=$(gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
+        --remove-label "reviewing" \
+        --add-label "pending-dev" 2>&1 >/dev/null); then
+        log "WARNING: Failed to flip issue #${ISSUE_NUMBER} to pending-dev (issue may stay stuck in reviewing): ${_edit_err}"
+      else
+        log "Issue #${ISSUE_NUMBER} flipped to pending-dev for rebase re-dispatch (autonomous label retained)."
+      fi
     fi
-
-    # Close issue and update labels
-    gh issue close "$ISSUE_NUMBER" --repo "$REPO" --reason completed 2>/dev/null || true
-    gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
-      --remove-label "reviewing" --remove-label "autonomous" \
-      --add-label "approved" 2>/dev/null || true
-
-    log "Issue #${ISSUE_NUMBER} closed as completed."
   fi
 else
   log "Review FAILED or inconclusive. Sending back to dev."

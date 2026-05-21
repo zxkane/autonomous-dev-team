@@ -39,8 +39,13 @@ sequenceDiagram
         W->>GH: gh pr review --approve
         opt no-auto-close NOT set
             W->>GH: gh pr merge --squash --delete-branch
-            W->>GH: gh issue close completed
-            W->>GH: remove autonomous and reviewing, add approved
+            alt merge succeeded
+                W->>GH: remove autonomous and reviewing, add approved
+                Note over W,GH: GitHub auto-closes issue via 'Closes #N' (INV-33; wrapper does NOT call gh issue close)
+            else merge failed (INV-33)
+                W->>GH: gh pr comment 'Auto-merge failed: ... Re-dispatching dev'
+                W->>GH: remove reviewing, add pending-dev (autonomous KEPT)
+            end
         end
         opt no-auto-close set
             W->>GH: remove reviewing, add approved (autonomous KEPT)
@@ -149,12 +154,29 @@ If the trailer post fails (token expiry, 403, rate limit), the wrapper logs `WAR
    if no-auto-close set:
      comment "Review PASSED — this issue has the 'no-auto-close' label..."
      −reviewing +approved (autonomous and no-auto-close kept)
-   else (auto-close path):
-     gh pr merge --squash --delete-branch
-       if merge fails: comment "auto-merge failed, please merge manually" (best effort)
-     gh issue close --reason completed
-     −autonomous −reviewing +approved
+   else (auto-merge path):
+     MERGE_OUT=$(gh pr merge --squash --delete-branch 2>&1); MERGE_RC=$?
+     if MERGE_RC == 0:
+       −autonomous −reviewing +approved
+       (issue auto-closes via GitHub's `Closes #N` resolution — wrapper does NOT call `gh issue close`, INV-33)
+     else (auto-merge failed — INV-33):
+       PR comment "Auto-merge failed: <stderr-excerpt>. Re-dispatching dev agent to rebase onto main."
+       −reviewing +pending-dev (autonomous retained)
+       (next dispatcher tick re-dispatches dev; dev resume detects the marker and rebases first)
 ```
+
+### Auto-merge failure → dev re-dispatch (INV-33)
+
+When `gh pr merge` returns non-zero, the wrapper:
+
+1. Captures `MERGE_OUT` (combined stdout+stderr, truncated to 500 chars for the comment).
+2. Posts a comment on the **PR** (not the issue) with prefix `Auto-merge failed:` followed by the captured excerpt and the directive `Re-dispatching dev agent to rebase onto main.`
+3. Does NOT call `gh issue close`. Does NOT add `+approved`. Does NOT remove `autonomous` (the dispatcher's `list_pending_dev` selector gates on `autonomous`).
+4. Edits the issue: `−reviewing +pending-dev`.
+
+The dev wrapper's resume branch detects the marker by querying PR-issue comments for one whose body starts with `Auto-merge failed:`, and prepends a `## Pre-implementation: rebase` section to the resume prompt instructing `git fetch origin && git rebase origin/main && git push --force-with-lease`. Once the rebase succeeds, the dev wrapper trap transitions back to `+pending-review`, the next dispatcher tick re-dispatches review, and the merge succeeds — at which point GitHub closes the issue via the PR's `Closes #N` keyword.
+
+If the rebase has unresolvable conflicts, the dev agent posts a `needs human` comment and exits cleanly. The dispatcher's MAX_RETRIES gate eventually transitions the issue to `stalled` if the loop fails to converge.
 
 ### Approval guard (`PR.state != OPEN`)
 
