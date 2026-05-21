@@ -140,13 +140,14 @@ chmod 700 "$PID_DIR"
 BIN="$TMPROOT/bin"
 mkdir -p "$BIN"
 
-# Stub kiro-cli: print argv to a recorder. No JSONL stream needed —
-# kiro-cli is invoked positionally (no --output-format flag), and the
-# only contract under test is the argv composition. Exit 0 unless the
-# stub explicitly opts into a denied-tool sequence.
+# Stub kiro-cli: print argv + drain stdin to recorders. No JSONL stream
+# needed — kiro-cli is invoked positionally (no --output-format flag),
+# and the only contract under test is the argv composition. After #144
+# the prompt arrives via stdin instead of as a positional message.
 cat > "$BIN/kiro-cli" <<'EOF'
 #!/bin/bash
 echo "$@" > "$KIRO_ARGS_FILE"
+cat > "${KIRO_STDIN_FILE:-/dev/null}"
 exit 0
 EOF
 chmod +x "$BIN/kiro-cli"
@@ -161,13 +162,14 @@ EOF
 chmod +x "$BIN/timeout"
 
 ARGS_FILE="$TMPROOT/kiro-args"
+STDIN_FILE="$TMPROOT/kiro-stdin"
 SESSION_ID="b2c3d4e5-1111-2222-3333-555555555555"
 
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== TC-KIR-001: run_agent + AGENT_DEV_EXTRA_ARGS=--trust-all-tools ==="
 # ---------------------------------------------------------------------------
-: > "$ARGS_FILE"
+: > "$ARGS_FILE"; : > "$STDIN_FILE"
 
 PATH="$BIN:$PATH" \
 AUTONOMOUS_PID_DIR="$PID_DIR" \
@@ -177,7 +179,9 @@ AGENT_CMD=kiro \
 AGENT_PERMISSION_MODE=bypassPermissions \
 AGENT_DEV_EXTRA_ARGS="--trust-all-tools" \
 KIRO_ARGS_FILE="$ARGS_FILE" \
+  KIRO_STDIN_FILE="$STDIN_FILE" \
 bash -c '
+  unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE
   source "'"$LIB"'"
   run_agent "'"$SESSION_ID"'" "implement the thing" "" ""
 ' >/dev/null 2>&1
@@ -194,8 +198,12 @@ assert_contains "TC-KIR-001 argv still contains --agent" \
   "--agent" "$bypass_argv"
 assert_contains "TC-KIR-001 argv contains the chat subcommand" \
   "chat" "$bypass_argv"
-assert_contains "TC-KIR-001 argv contains the prompt" \
+# After #144: prompt arrives via stdin, NOT argv.
+assert_not_contains "TC-KIR-001 argv does NOT carry the prompt positionally" \
   "implement the thing" "$bypass_argv"
+bypass_stdin=$(cat "$STDIN_FILE" 2>/dev/null || true)
+assert_eq "TC-KIR-001 stdin contains the prompt (post-#144 channel)" \
+  "implement the thing" "$bypass_stdin"
 
 # ---------------------------------------------------------------------------
 echo ""
@@ -206,7 +214,7 @@ echo "=== TC-KIR-002: run_agent + empty AGENT_DEV_EXTRA_ARGS → no --trust-all-
 # regression we expect for un-updated gemini/kiro deployments) gets a
 # wrapper invocation WITHOUT --trust-all-tools. This is intentional —
 # the conf.example callout makes the migration explicit.
-: > "$ARGS_FILE"
+: > "$ARGS_FILE"; : > "$STDIN_FILE"
 
 PATH="$BIN:$PATH" \
 AUTONOMOUS_PID_DIR="$PID_DIR" \
@@ -215,7 +223,9 @@ PROJECT_DIR="$TMPROOT" \
 AGENT_CMD=kiro \
 AGENT_PERMISSION_MODE=auto \
 KIRO_ARGS_FILE="$ARGS_FILE" \
+  KIRO_STDIN_FILE="$STDIN_FILE" \
 bash -c '
+  unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE
   source "'"$LIB"'"
   run_agent "'"$SESSION_ID"'" "restrictive default" "" ""
 ' >/dev/null 2>&1
@@ -250,7 +260,7 @@ echo "=== TC-KIR-003: resume_agent + AGENT_DEV_EXTRA_ARGS=--trust-all-tools ==="
 # kiro for a fresh-conversation resume must ensure both vars are set if
 # they need the trust flag on either path. We document the
 # fall-through here.
-: > "$ARGS_FILE"
+: > "$ARGS_FILE"; : > "$STDIN_FILE"
 
 PATH="$BIN:$PATH" \
 AUTONOMOUS_PID_DIR="$PID_DIR" \
@@ -260,7 +270,9 @@ AGENT_CMD=kiro \
 AGENT_PERMISSION_MODE=bypassPermissions \
 AGENT_DEV_EXTRA_ARGS="--trust-all-tools" \
 KIRO_ARGS_FILE="$ARGS_FILE" \
+  KIRO_STDIN_FILE="$STDIN_FILE" \
 bash -c '
+  unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE
   source "'"$LIB"'"
   resume_agent "'"$SESSION_ID"'" "follow-up: address review feedback" "" ""
 ' >/dev/null 2>&1
@@ -269,14 +281,19 @@ resume_argv=$(cat "$ARGS_FILE")
 
 assert_contains "TC-KIR-003 resume argv contains --trust-all-tools (via DEV_EXTRA_ARGS fall-through)" \
   "--trust-all-tools" "$resume_argv"
-assert_contains "TC-KIR-003 resume argv contains the follow-up prompt (sanity)" \
+# After #144: resume prompt also arrives via stdin (kiro resume is
+# fall-through to run_agent, so same stdin contract).
+assert_not_contains "TC-KIR-003 resume argv does NOT carry the follow-up prompt positionally" \
   "follow-up: address review feedback" "$resume_argv"
+resume_stdin=$(cat "$STDIN_FILE" 2>/dev/null || true)
+assert_eq "TC-KIR-003 resume stdin contains the follow-up prompt" \
+  "follow-up: address review feedback" "$resume_stdin"
 
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== TC-KIR-004: --model still threads when both knobs are set ==="
 # ---------------------------------------------------------------------------
-: > "$ARGS_FILE"
+: > "$ARGS_FILE"; : > "$STDIN_FILE"
 
 PATH="$BIN:$PATH" \
 AUTONOMOUS_PID_DIR="$PID_DIR" \
@@ -286,7 +303,9 @@ AGENT_CMD=kiro \
 AGENT_PERMISSION_MODE=bypassPermissions \
 AGENT_DEV_EXTRA_ARGS="--trust-all-tools" \
 KIRO_ARGS_FILE="$ARGS_FILE" \
+  KIRO_STDIN_FILE="$STDIN_FILE" \
 bash -c '
+  unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE
   source "'"$LIB"'"
   run_agent "'"$SESSION_ID"'" "with model" "claude-sonnet-4-6" ""
 ' >/dev/null 2>&1

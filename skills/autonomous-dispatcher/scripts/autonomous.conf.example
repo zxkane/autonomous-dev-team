@@ -27,6 +27,22 @@
 # See the per-CLI EXTRA_ARGS blocks below for canonical values and
 # operator-tunable additions (--debug, alternate output formats, etc.).
 #
+# === Prompt size: no longer bounded by MAX_ARG_STRLEN (closes #144) ===
+#
+# As of 2026-05-21, the wrapper feeds the constructed prompt to the agent
+# CLI via stdin (`printf '%s' "$PROMPT" | <cli> ...`) instead of a
+# positional argv element. Pre-#144, an issue whose `gh issue view --json
+# title,body,comments` output exceeded 128 KB (Linux MAX_ARG_STRLEN =
+# 32 * PAGE_SIZE) crashed the wrapper at `setsid: Argument list too long`
+# (exit 126) on every dispatcher tick — a size-based silent perma-stall.
+# Operator action required: none. The change is internal; perma-stalled
+# issues recover on their next dispatcher tick after the upgrade.
+# Operators authoring custom AGENT_LAUNCHER values must ensure the
+# launcher forwards stdin to the CLI exec — `exec $CLAUDE_CMD "$@"` does
+# this implicitly; a wrapper that captures stdin (e.g. for
+# instrumentation) and doesn't replay it would break the channel.
+# See [INV-34] in docs/pipeline/invariants.md for the full contract.
+#
 # === Deployment topologies (post-#104) ===
 #
 # Two supported layouts. Both work because every script computes

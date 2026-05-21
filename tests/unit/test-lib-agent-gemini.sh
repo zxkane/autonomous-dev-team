@@ -107,12 +107,14 @@ chmod 700 "$PID_DIR"
 BIN="$TMPROOT/bin"
 mkdir -p "$BIN"
 
-# Stub gemini: print argv to a recorder, emit a known JSONL stream
-# including a tool_use → error → result sequence so TC-GEM-008 can
-# assert the capture filter doesn't strip the denial event.
+# Stub gemini: print argv + drain stdin to recorders, emit a known
+# JSONL stream including a tool_use → error → result sequence so
+# TC-GEM-008 can assert the capture filter doesn't strip the denial
+# event. After #144 the prompt arrives via stdin.
 cat > "$BIN/gemini" <<'EOF'
 #!/bin/bash
 echo "$@" > "$GEMINI_ARGS_FILE"
+cat > "${GEMINI_STDIN_FILE:-/dev/null}"
 cat <<JSONL
 {"type":"init","timestamp":"2026-05-16T00:00:00Z","session_id":"replayed-by-stub","model":"gemini-2.5-pro"}
 {"type":"tool_use","name":"run_shell_command","args":{"command":"git commit -m test"}}
@@ -132,13 +134,14 @@ EOF
 chmod +x "$BIN/timeout"
 
 ARGS_FILE="$TMPROOT/gemini-args"
+STDIN_FILE="$TMPROOT/gemini-stdin"
 SESSION_ID="a1b2c3d4-1111-2222-3333-444444444444"
 
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== TC-GEM-001..003,005,008: run_agent default invocation ==="
 # ---------------------------------------------------------------------------
-: > "$ARGS_FILE"
+: > "$ARGS_FILE"; : > "$STDIN_FILE"
 run_agent_output=$(
   PATH="$BIN:$PATH" \
   AUTONOMOUS_PID_DIR="$PID_DIR" \
@@ -148,7 +151,9 @@ run_agent_output=$(
   AGENT_PERMISSION_MODE=auto \
   AGENT_DEV_EXTRA_ARGS="--approval-mode yolo --output-format stream-json" \
   GEMINI_ARGS_FILE="$ARGS_FILE" \
+  GEMINI_STDIN_FILE="$STDIN_FILE" \
   bash -c '
+    unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE
     source "'"$LIB"'"
     run_agent "'"$SESSION_ID"'" "implement the thing" "" ""
   ' 2>&1
@@ -202,9 +207,12 @@ case " $gemini_argv " in
     ;;
 esac
 
-# Prompt makes it through as a positional arg (or after -p — implementation
-# choice asserted only via substring presence).
-assert_contains "argv contains the prompt" \
+# After #144: prompt arrives via stdin, NOT argv. The wrapper feeds
+# `printf '%s' "$prompt" | gemini ... -p` (no positional value after -p).
+gemini_stdin=$(cat "$STDIN_FILE" 2>/dev/null || true)
+assert_eq "stdin contains the prompt (post-#144 channel)" \
+  "implement the thing" "$gemini_stdin"
+assert_not_contains "argv does NOT carry the prompt as a positional" \
   "implement the thing" "$gemini_argv"
 
 # ---------------------------------------------------------------------------
@@ -221,7 +229,9 @@ AGENT_CMD=gemini \
 AGENT_PERMISSION_MODE=auto \
 AGENT_DEV_EXTRA_ARGS="--approval-mode yolo --output-format stream-json" \
 GEMINI_ARGS_FILE="$ARGS_FILE" \
+GEMINI_STDIN_FILE="$STDIN_FILE" \
 bash -c '
+  unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE
   source "'"$LIB"'"
   run_agent "'"$SESSION_ID"'" "with model" "gemini-2.5-pro" ""
 ' >/dev/null 2>&1
@@ -236,7 +246,7 @@ assert_contains "TC-GEM-004 argv still has --approval-mode yolo with model set" 
 echo ""
 echo "=== TC-GEM-006,007: resume_agent uses --resume <session_id> ==="
 # ---------------------------------------------------------------------------
-: > "$ARGS_FILE"
+: > "$ARGS_FILE"; : > "$STDIN_FILE"
 
 PATH="$BIN:$PATH" \
 AUTONOMOUS_PID_DIR="$PID_DIR" \
@@ -246,12 +256,15 @@ AGENT_CMD=gemini \
 AGENT_PERMISSION_MODE=auto \
 AGENT_REVIEW_EXTRA_ARGS="--approval-mode yolo --output-format stream-json" \
 GEMINI_ARGS_FILE="$ARGS_FILE" \
+GEMINI_STDIN_FILE="$STDIN_FILE" \
 bash -c '
+  unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE
   source "'"$LIB"'"
   resume_agent "'"$SESSION_ID"'" "follow-up: address review feedback" "" ""
 ' >/dev/null 2>&1
 
 resume_argv=$(cat "$ARGS_FILE")
+resume_stdin=$(cat "$STDIN_FILE" 2>/dev/null || true)
 
 # TC-GEM-006: --resume <same-uuid>, no sidecar needed.
 assert_contains "TC-GEM-006 resume argv contains --resume + the dispatcher session UUID" \
@@ -264,7 +277,10 @@ assert_contains "TC-GEM-006 resume argv keeps --approval-mode yolo (via REVIEW_E
 assert_contains "TC-GEM-006 resume argv keeps --output-format stream-json (via REVIEW_EXTRA_ARGS)" \
   "--output-format stream-json" "$resume_argv"
 
-assert_contains "TC-GEM-006 resume argv contains follow-up prompt" \
+# After #144: resume prompt arrives via stdin, not argv.
+assert_eq "TC-GEM-006 resume stdin contains follow-up prompt" \
+  "follow-up: address review feedback" "$resume_stdin"
+assert_not_contains "TC-GEM-006 resume argv does NOT carry the prompt positionally" \
   "follow-up: address review feedback" "$resume_argv"
 
 # Resume must NOT also pass --session-id (would conflict with --resume).
