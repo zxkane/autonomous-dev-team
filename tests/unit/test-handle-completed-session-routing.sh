@@ -1,0 +1,362 @@
+#!/bin/bash
+# test-handle-completed-session-routing.sh — INV-35 / issue #149.
+#
+# Unit tests for lib-dispatch.sh::handle_completed_session_routing — the
+# extracted Step 4b.5.1 routing logic. Exercises every row of the routing
+# table in docs/designs/inv35-review-aware-resume.md § 3.
+#
+# Test IDs map to docs/test-cases/inv35-review-aware-resume.md § B–G.
+#
+# Run: bash tests/unit/test-handle-completed-session-routing.sh
+
+set -uo pipefail
+
+PASS=0
+FAIL=0
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+LIB="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-dispatch.sh"
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+NC='\033[0m'
+
+export REPO=zxkane/autonomous-dev-team
+export REPO_OWNER=zxkane
+export PROJECT_ID="test-inv35-routing-$$"
+export MAX_RETRIES=3
+export MAX_CONCURRENT=5
+
+# Routing-side mocks.
+_MOCK_VERDICT="none"
+_MOCK_CAUSE=""
+_MOCK_FLIP_COUNT=0
+_MOCK_NOTICE_PRESENT="0"
+_MOCK_LAST_COMMENT_BODY=""
+_MOCK_COMMENT_COUNT=0
+_MOCK_LABEL_SWAPS=""
+_MOCK_DISPATCH_CALLS=""
+_MOCK_POST_TOKEN_CALLS=""
+_MOCK_TRUNCATE_FAIL=0
+_MOCK_LOG_FILE=""
+_MOCK_MARK_STALLED_CALLS=""
+_MOCK_REVIEW_RETRY_LIMIT="${REVIEW_RETRY_LIMIT:-2}"
+
+log() { :; }
+
+classify_recent_review_verdict() {
+  local _issue="$1" _ts="$2" _v="$3" _c="$4"
+  printf -v "$_v" '%s' "$_MOCK_VERDICT"
+  printf -v "$_c" '%s' "$_MOCK_CAUSE"
+  return 0
+}
+
+count_review_aware_flips() {
+  printf '%s' "$_MOCK_FLIP_COUNT"
+}
+
+label_swap() {
+  local issue_num="$1" remove="$2" add="$3"
+  _MOCK_LABEL_SWAPS+="${issue_num}:${remove}:${add} "
+}
+
+mark_stalled() {
+  _MOCK_MARK_STALLED_CALLS+="${1} "
+}
+
+post_dispatch_token() {
+  _MOCK_POST_TOKEN_CALLS+="${1}:${2} "
+}
+
+dispatch() {
+  _MOCK_DISPATCH_CALLS+="${1}:${2} "
+}
+
+gh() {
+  local cmd="${1:-}"
+  local sub="${2:-}"
+  if [[ "$cmd" == "issue" && "$sub" == "comment" ]]; then
+    while [[ $# -gt 0 ]]; do
+      if [[ "$1" == "--body" ]]; then
+        _MOCK_LAST_COMMENT_BODY="$2"
+        _MOCK_COMMENT_COUNT=$((_MOCK_COMMENT_COUNT + 1))
+        return 0
+      fi
+      shift
+    done
+    return 0
+  fi
+  if [[ "$cmd" == "issue" && "$sub" == "view" ]]; then
+    printf '%s\n' "$_MOCK_NOTICE_PRESENT"
+    return 0
+  fi
+  return 0
+}
+
+# shellcheck source=../../skills/autonomous-dispatcher/scripts/lib-dispatch.sh
+source "$LIB"
+set +e
+
+# Re-define mocks AFTER sourcing.
+log() { :; }
+classify_recent_review_verdict() {
+  local _issue="$1" _ts="$2" _v="$3" _c="$4"
+  printf -v "$_v" '%s' "$_MOCK_VERDICT"
+  printf -v "$_c" '%s' "$_MOCK_CAUSE"
+  return 0
+}
+count_review_aware_flips() {
+  printf '%s' "$_MOCK_FLIP_COUNT"
+}
+label_swap() {
+  local issue_num="$1" remove="$2" add="$3"
+  _MOCK_LABEL_SWAPS+="${issue_num}:${remove}:${add} "
+}
+mark_stalled() {
+  _MOCK_MARK_STALLED_CALLS+="${1} "
+}
+post_dispatch_token() {
+  _MOCK_POST_TOKEN_CALLS+="${1}:${2} "
+}
+dispatch() {
+  _MOCK_DISPATCH_CALLS+="${1}:${2} "
+}
+gh() {
+  local cmd="${1:-}"
+  local sub="${2:-}"
+  if [[ "$cmd" == "issue" && "$sub" == "comment" ]]; then
+    while [[ $# -gt 0 ]]; do
+      if [[ "$1" == "--body" ]]; then
+        _MOCK_LAST_COMMENT_BODY="$2"
+        _MOCK_COMMENT_COUNT=$((_MOCK_COMMENT_COUNT + 1))
+        return 0
+      fi
+      shift
+    done
+    return 0
+  fi
+  if [[ "$cmd" == "issue" && "$sub" == "view" ]]; then
+    printf '%s\n' "$_MOCK_NOTICE_PRESENT"
+    return 0
+  fi
+  return 0
+}
+
+reset_mocks() {
+  _MOCK_VERDICT="none"
+  _MOCK_CAUSE=""
+  _MOCK_FLIP_COUNT=0
+  _MOCK_NOTICE_PRESENT="0"
+  _MOCK_LAST_COMMENT_BODY=""
+  _MOCK_COMMENT_COUNT=0
+  _MOCK_LABEL_SWAPS=""
+  _MOCK_DISPATCH_CALLS=""
+  _MOCK_POST_TOKEN_CALLS=""
+  _MOCK_TRUNCATE_FAIL=0
+  _MOCK_MARK_STALLED_CALLS=""
+  unset REVIEW_RETRY_LIMIT
+  if [[ -n "$_MOCK_LOG_FILE" ]]; then
+    chmod u+w "$_MOCK_LOG_FILE" 2>/dev/null || true
+    rm -f "$_MOCK_LOG_FILE"
+  fi
+  _MOCK_LOG_FILE=""
+}
+
+assert_eq() {
+  local desc="$1" expected="$2" actual="$3"
+  if [[ "$expected" == "$actual" ]]; then
+    echo -e "  ${GREEN}PASS${NC}: $desc"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${NC}: $desc"
+    echo "      expected=[$expected]"
+    echo "      actual=  [$actual]"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
+assert_contains() {
+  local desc="$1" needle="$2" haystack="$3"
+  if [[ "$haystack" == *"$needle"* ]]; then
+    echo -e "  ${GREEN}PASS${NC}: $desc"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${NC}: $desc"
+    echo "      needle=[$needle]"
+    echo "      haystack=[$haystack]"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
+assert_returns() {
+  local desc="$1" expected_rc="$2"; shift 2
+  "$@"
+  local actual_rc=$?
+  if [[ "$expected_rc" == "$actual_rc" ]]; then
+    echo -e "  ${GREEN}PASS${NC}: $desc"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${NC}: $desc rc=$actual_rc (expected $expected_rc)"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
+prepare_log() {
+  _MOCK_LOG_FILE="/tmp/agent-${PROJECT_ID}-issue-${1}.log"
+  printf 'something\n' > "$_MOCK_LOG_FILE"
+}
+prepare_readonly_log() {
+  prepare_log "$1"
+  chmod 444 "$_MOCK_LOG_FILE"
+}
+
+# ---------------------------------------------------------------------------
+echo "=== handle_completed_session_routing (INV-35) ==="
+# ---------------------------------------------------------------------------
+
+# TC-INV35-RT-001: completed + no verdict → INV-12 operator notice
+reset_mocks
+_MOCK_VERDICT="none"
+assert_returns "RT-001 returns 0 (handled, INV-12 fallthrough emit)" 0 \
+  handle_completed_session_routing 100 "sid-001" "2026-05-21T03:18:00Z"
+assert_eq "RT-001 emits one notice comment" "1" "$_MOCK_COMMENT_COUNT"
+assert_contains "RT-001 marker is INV-12-completed" "INV-12-completed:sid-001" "$_MOCK_LAST_COMMENT_BODY"
+assert_eq "RT-001 no label swap" "" "$_MOCK_LABEL_SWAPS"
+assert_eq "RT-001 no dispatch" "" "$_MOCK_DISPATCH_CALLS"
+
+# RT-001 idempotency: notice already present → no second post
+reset_mocks
+_MOCK_VERDICT="none"
+_MOCK_NOTICE_PRESENT="1"
+assert_returns "RT-001-idem returns 0 even when marker present" 0 \
+  handle_completed_session_routing 100 "sid-001" "2026-05-21T03:18:00Z"
+assert_eq "RT-001-idem suppresses duplicate" "0" "$_MOCK_COMMENT_COUNT"
+
+# TC-INV35-RT-010: First non-substantive failure → flip to pending-review
+reset_mocks
+_MOCK_VERDICT="failed-non-substantive"
+_MOCK_CAUSE="bot-timeout"
+_MOCK_FLIP_COUNT=0
+assert_returns "RT-010 returns 0" 0 \
+  handle_completed_session_routing 100 "sid-010" "2026-05-21T03:18:00Z"
+assert_eq "RT-010 flip label pending-dev → pending-review" "100:pending-dev:pending-review " "$_MOCK_LABEL_SWAPS"
+# Marker carries cause AND session-id (the per-session counter pivots on session=).
+assert_contains "RT-010 marker comment cause" "cause=bot-timeout" "$_MOCK_LAST_COMMENT_BODY"
+assert_contains "RT-010 marker comment session-binding" "session=sid-010" "$_MOCK_LAST_COMMENT_BODY"
+assert_contains "RT-010 marker prefix" "<!-- review-aware-flip:non-substantive" "$_MOCK_LAST_COMMENT_BODY"
+assert_contains "RT-010 human-readable line" "Re-routing to review" "$_MOCK_LAST_COMMENT_BODY"
+assert_eq "RT-010 no dispatch (Step 3 picks up)" "" "$_MOCK_DISPATCH_CALLS"
+# Should not also post the substantive marker
+if [[ "$_MOCK_LAST_COMMENT_BODY" != *"INV-35-fresh-dev"* ]]; then
+  echo -e "  ${GREEN}PASS${NC}: RT-010 no INV-35-fresh-dev marker"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: RT-010 INV-35-fresh-dev marker WAS posted"
+  FAIL=$((FAIL + 1))
+fi
+assert_eq "RT-010 no stalled mark" "" "$_MOCK_MARK_STALLED_CALLS"
+
+# TC-INV35-RT-011: Second flip → still under default cap (REVIEW_RETRY_LIMIT=2)
+reset_mocks
+_MOCK_VERDICT="failed-non-substantive"
+_MOCK_CAUSE="bot-timeout"
+_MOCK_FLIP_COUNT=1
+assert_returns "RT-011 returns 0" 0 \
+  handle_completed_session_routing 100 "sid-011" "2026-05-21T03:18:00Z"
+assert_eq "RT-011 flips again" "100:pending-dev:pending-review " "$_MOCK_LABEL_SWAPS"
+assert_eq "RT-011 no stall" "" "$_MOCK_MARK_STALLED_CALLS"
+
+# TC-INV35-RT-012: Third flip blocked → mark stalled
+reset_mocks
+_MOCK_VERDICT="failed-non-substantive"
+_MOCK_CAUSE="bot-timeout"
+_MOCK_FLIP_COUNT=2
+assert_returns "RT-012 returns 0" 0 \
+  handle_completed_session_routing 100 "sid-012" "2026-05-21T03:18:00Z"
+assert_eq "RT-012 stalled fired" "100 " "$_MOCK_MARK_STALLED_CALLS"
+assert_eq "RT-012 no flip" "" "$_MOCK_LABEL_SWAPS"
+assert_contains "RT-012 operator-actionable comment" "review-failure-non-substantive" "$_MOCK_LAST_COMMENT_BODY"
+assert_contains "RT-012 cause cited" "bot-timeout" "$_MOCK_LAST_COMMENT_BODY"
+
+# TC-INV35-RT-013: per-session counter — flip count is for current session
+# (handler reads count_review_aware_flips for THIS session-id only; mock
+# returns 0 simulating fresh session even though prior session had flips)
+reset_mocks
+_MOCK_VERDICT="failed-non-substantive"
+_MOCK_CAUSE="ci-transport"
+_MOCK_FLIP_COUNT=0
+assert_returns "RT-013 returns 0" 0 \
+  handle_completed_session_routing 100 "sid-NEW-013" "2026-05-21T03:18:00Z"
+assert_eq "RT-013 first flip allowed for fresh session" "100:pending-dev:pending-review " "$_MOCK_LABEL_SWAPS"
+
+# TC-INV35-RT-014: REVIEW_RETRY_LIMIT=0 disables cap
+reset_mocks
+_MOCK_VERDICT="failed-non-substantive"
+_MOCK_CAUSE="bot-timeout"
+_MOCK_FLIP_COUNT=5
+export REVIEW_RETRY_LIMIT=0
+assert_returns "RT-014 returns 0" 0 \
+  handle_completed_session_routing 100 "sid-014" "2026-05-21T03:18:00Z"
+assert_eq "RT-014 sixth flip allowed under cap=0" "100:pending-dev:pending-review " "$_MOCK_LABEL_SWAPS"
+assert_eq "RT-014 no stall" "" "$_MOCK_MARK_STALLED_CALLS"
+unset REVIEW_RETRY_LIMIT
+
+# TC-INV35-RT-020: Substantive → fresh dev-new (PTL pattern)
+reset_mocks
+_MOCK_VERDICT="failed-substantive"
+prepare_log 100
+assert_returns "RT-020 returns 0" 0 \
+  handle_completed_session_routing 100 "sid-020" "2026-05-21T03:18:00Z"
+assert_contains "RT-020 INV-35-fresh-dev marker comment" "INV-35-fresh-dev:sid-020" "$_MOCK_LAST_COMMENT_BODY"
+assert_eq "RT-020 label swap pending-dev → in-progress" "100:pending-dev:in-progress " "$_MOCK_LABEL_SWAPS"
+assert_eq "RT-020 dispatch token = dev-new" "100:dev-new " "$_MOCK_POST_TOKEN_CALLS"
+assert_eq "RT-020 dispatch dev-new fired" "dev-new:100 " "$_MOCK_DISPATCH_CALLS"
+log_size=$(stat -c '%s' "$_MOCK_LOG_FILE")
+assert_eq "RT-020 log truncated to 0 bytes" "0" "$log_size"
+
+# TC-INV35-RT-021: Substantive + truncate-fail → fail-closed
+reset_mocks
+_MOCK_VERDICT="failed-substantive"
+prepare_readonly_log 100
+assert_returns "RT-021 returns 0 (handled, fail-closed)" 0 \
+  handle_completed_session_routing 100 "sid-021" "2026-05-21T03:18:00Z"
+assert_contains "RT-021 operator-actionable comment posted" "permission" "$_MOCK_LAST_COMMENT_BODY"
+assert_eq "RT-021 NO label swap" "" "$_MOCK_LABEL_SWAPS"
+assert_eq "RT-021 NO dispatch" "" "$_MOCK_DISPATCH_CALLS"
+
+# TC-INV35-RT-022: Missing trailer treated as substantive (back-compat) —
+# classifier returns failed-substantive directly, behavior identical to RT-020
+reset_mocks
+_MOCK_VERDICT="failed-substantive"
+prepare_log 100
+assert_returns "RT-022 returns 0" 0 \
+  handle_completed_session_routing 100 "sid-022" "2026-05-21T03:18:00Z"
+assert_eq "RT-022 dispatch dev-new fired" "dev-new:100 " "$_MOCK_DISPATCH_CALLS"
+
+# TC-INV35-RT-030: passed verdict on pending-dev (race) → no-op
+reset_mocks
+_MOCK_VERDICT="passed"
+assert_returns "RT-030 returns 0 (handled, WARN no-op)" 0 \
+  handle_completed_session_routing 100 "sid-030" "2026-05-21T03:18:00Z"
+assert_eq "RT-030 no comment posted" "0" "$_MOCK_COMMENT_COUNT"
+assert_eq "RT-030 no label swap" "" "$_MOCK_LABEL_SWAPS"
+assert_eq "RT-030 no dispatch" "" "$_MOCK_DISPATCH_CALLS"
+
+# Idempotency on INV-35-fresh-dev marker
+reset_mocks
+_MOCK_VERDICT="failed-substantive"
+_MOCK_NOTICE_PRESENT="1"
+prepare_log 100
+assert_returns "INV-35-fresh-dev marker present → still dispatches but no duplicate comment" 0 \
+  handle_completed_session_routing 100 "sid-040" "2026-05-21T03:18:00Z"
+assert_eq "INV-35-fresh-dev idempotency: comment count = 0" "0" "$_MOCK_COMMENT_COUNT"
+
+# Cleanup
+reset_mocks
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Summary ==="
+echo "  PASS: $PASS"
+echo "  FAIL: $FAIL"
+[[ $FAIL -eq 0 ]] || exit 1

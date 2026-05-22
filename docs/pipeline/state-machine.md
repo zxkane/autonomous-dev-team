@@ -42,7 +42,10 @@ stateDiagram-v2
     reviewing --> pending_dev: Dispatcher Step 5b (DEAD reviewing)
 
     pending_dev --> in_progress: Dispatcher Step 4 scan-pending-dev (retries below MAX)
+    pending_dev --> in_progress: Step 4 review-aware (completed session + substantive review failure → dev-new) [INV-35]
+    pending_dev --> pending_review: Step 4 review-aware (completed session + non-substantive review failure, under retry cap) [INV-35]
     pending_dev --> stalled: Dispatcher Step 4 (retries at MAX)
+    pending_dev --> stalled: Step 4 review-aware (non-substantive review-retry cap reached) [INV-35]
 
     stalled --> pending_dev: Maintainer removes stalled label (retry counter resets)
 
@@ -89,8 +92,11 @@ Each row is one legal transition. "Actor" identifies who writes the labels. "Pre
 | `reviewing` | `−reviewing +pending-dev` | Review wrapper crash | Review wrapper trap | Wrapper exit ≠ 0 AND `RESULT_PARSED=false` | "Review process crashed (exit code: N). Moving back to development for retry." |
 | `reviewing` | `−reviewing +pending-dev` | Review found no PR | Review wrapper (early exit) | All 3 PR-discovery methods failed | "Review failed: no PR found linked to this issue. Please ensure the PR description contains 'Closes #N'." |
 | `reviewing` | `−reviewing +pending-dev` | Step 5b: DEAD reviewing | Dispatcher | Wrapper PID dead; issue still has `reviewing` | "Review process appears to have crashed. Moving to pending-dev for retry." |
-| `pending-dev` | `−pending-dev +in-progress` | Dispatcher Step 4 (resume) | Dispatcher | concurrency below cap; retry count < `MAX_RETRIES` ([INV-05](invariants.md#inv-05-retry-counter-cutoff-rule)); valid `Dev Session ID:` extractable from comments | "Resuming development (session: <id>)..." |
+| `pending-dev` | `−pending-dev +in-progress` | Dispatcher Step 4 (resume) | Dispatcher | concurrency below cap; retry count < `MAX_RETRIES` ([INV-05](invariants.md#inv-05-retry-counter-cutoff-rule)); prior session not terminal ([INV-12](invariants.md#inv-12-resume-only-against-unfinished-sessions)); valid `Dev Session ID:` extractable from comments | "Resuming development (session: <id>)..." |
+| `pending-dev` | `−pending-dev +in-progress` (dev-new) | Step 4 review-aware: prior session `end_turn\|completed` + substantive review-failure verdict newer than session end ([INV-35](invariants.md#inv-35-review-aware-resume-routing-for-completed-sessions)) | Dispatcher | concurrency below cap; retry count < `MAX_RETRIES`; per-issue log truncated successfully (fail-closed otherwise) | `INV-35-fresh-dev:<sid>` notice + "Resuming with a fresh session..." |
+| `pending-dev` | `−pending-dev +pending-review` | Step 4 review-aware: prior session `end_turn\|completed` + non-substantive review-failure verdict, under `REVIEW_RETRY_LIMIT` ([INV-35](invariants.md#inv-35-review-aware-resume-routing-for-completed-sessions)) | Dispatcher | concurrency below cap; non-substantive flip count for this session < `REVIEW_RETRY_LIMIT` (default 2) | `<!-- review-aware-flip:non-substantive cause=<x> -->` marker + "Re-routing to review (last review failed for non-substantive reason: <x>)." |
 | `pending-dev` | `−pending-dev +stalled` | Dispatcher Step 4 (retry exhausted) | Dispatcher | retry count ≥ `MAX_RETRIES` (after stalled-cutoff filtering) | "Marking as stalled" comment with @owner mention |
+| `pending-dev` | `−pending-dev +stalled` | Step 4 review-aware: non-substantive review-retry cap reached ([INV-35](invariants.md#inv-35-review-aware-resume-routing-for-completed-sessions)) | Dispatcher | non-substantive flip count for this session ≥ `REVIEW_RETRY_LIMIT` | "Marking as stalled — review failed N times for non-substantive reasons" with @owner mention |
 | `stalled` | `−stalled` (back to `pending-dev`) | Maintainer removes label | Maintainer | — | — |
 
 > **Note on `+approved`:** the auto-merge-success path also removes `autonomous` so the issue is no longer eligible for re-dispatch (and GitHub auto-closes the issue via the PR's `Closes #N` keyword — the wrapper itself does not call `gh issue close`, see [INV-33](invariants.md#inv-33-review-wrapper-must-not-close-the-linked-issue)). The `no-auto-close` and approval-failure paths keep `autonomous` (the issue is not auto-closed; manual operator intervention completes the flow). The auto-merge-**failure** path is *not* in the `+approved` group: it transitions to `+pending-dev` with `autonomous` retained, and the dispatcher Step 4 re-dispatches dev to rebase onto main.

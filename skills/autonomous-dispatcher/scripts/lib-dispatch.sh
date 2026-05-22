@@ -526,6 +526,7 @@ extract_dev_session_id() {
 is_session_completed() {
   local issue_num="$1"
   local reason_var="${2:-}"
+  local end_ts_var="${3:-}"
   [ "${AGENT_CMD:-claude}" = "claude" ] || return 1
 
   local log_file="/tmp/agent-${PROJECT_ID}-issue-${issue_num}.log"
@@ -550,10 +551,244 @@ is_session_completed() {
 
   if [ "$fields" = "end_turn|completed" ] || [ "$terminal_reason" = "prompt_too_long" ]; then
     [ -n "$reason_var" ] && printf -v "$reason_var" '%s' "$terminal_reason"
+    if [ -n "$end_ts_var" ]; then
+      # INV-35: derive session-end ISO-8601 timestamp from the log file's
+      # mtime. The wrapper writes the final "Agent exited" log line at
+      # session end so mtime is a reliable proxy across any agent CLI; the
+      # claude result-JSON itself does not carry a date. Empty on date(1)
+      # failure — the caller treats empty as "no time filter", which is
+      # safe (we surface ALL bot comments rather than miss a recent one).
+      local _mtime_iso
+      _mtime_iso=$(date -u -r "$log_file" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "")
+      printf -v "$end_ts_var" '%s' "$_mtime_iso"
+    fi
     return 0
   fi
   return 1
 }
+
+# ---------------------------------------------------------------------------
+# INV-35: review-verdict classification for completed dev sessions.
+# ---------------------------------------------------------------------------
+#
+# classify_recent_review_verdict <issue_num> <session_end_iso> <verdict_var> <cause_var>
+#
+# Reads issue comments, finds the newest comment that:
+#   (a) was authored by ${BOT_LOGIN} (or matches the session-id-binding
+#       fallback when BOT_LOGIN is empty per the gh-api-user-403 pattern),
+#   (b) was created strictly after <session_end_iso>,
+#   (c) has body containing a `<!-- review-verdict: ... -->` HTML-comment
+#       trailer — OR is a generic verdict comment without a trailer (legacy).
+#
+# Out-vars receive:
+#   verdict_var ∈ { none, passed, failed-substantive, failed-non-substantive }
+#   cause_var   — non-empty only when verdict is failed-non-substantive.
+#
+# Always returns 0. See docs/designs/inv35-review-aware-resume.md § 5.
+classify_recent_review_verdict() {
+  local issue_num="$1"
+  local session_end="$2"
+  local verdict_var="$3"
+  local cause_var="$4"
+
+  printf -v "$verdict_var" '%s' "none"
+  printf -v "$cause_var"   '%s' ""
+
+  # Build the actor predicate. When BOT_LOGIN is empty (the gh-api-user-403
+  # fallback), drop actor-binding and rely on FALLBACK_SESSION_ID embedded
+  # in the comment body (the same "Review Session: <sid>" trailer the
+  # review wrapper already emits per autonomous-review.sh:588-590).
+  local actor_predicate
+  if [ -n "${BOT_LOGIN:-}" ]; then
+    actor_predicate=".author.login == \"${BOT_LOGIN}\""
+  elif [ -n "${FALLBACK_SESSION_ID:-}" ]; then
+    actor_predicate="(.body | test(\"Review Session.*${FALLBACK_SESSION_ID}\"))"
+  else
+    # Without an actor signal AND without a session-id fallback, refuse to
+    # classify — surface no verdict so the caller falls back to the safe
+    # INV-12-completed branch (operator handoff). This is conservative:
+    # emitting a verdict without authenticity binding could route on a
+    # comment posted by an unrelated user.
+    return 0
+  fi
+
+  # Pull the newest qualifying comment body. Strict `>` on createdAt
+  # excludes a comment timestamped exactly at session end (rare, but the
+  # design pins this for determinism).
+  local newest_body
+  newest_body=$(gh issue view "$issue_num" --repo "$REPO" --json comments \
+    -q "[.comments[] | select(${actor_predicate} and (.createdAt > \"${session_end}\"))] | sort_by(.createdAt) | last | .body // empty" \
+    2>/dev/null)
+
+  [ -n "$newest_body" ] || return 0
+
+  # Match the trailer — first occurrence wins (TC-INV35-CL-007 pins this
+  # to "first" rather than "last" so a quoted prior verdict can't override
+  # the actual current verdict in pathological cases).
+  local trailer_line
+  trailer_line=$(printf '%s' "$newest_body" | grep -oE '<!--[[:space:]]*review-verdict:[[:space:]]*[a-z-]+([[:space:]]+cause=[a-zA-Z0-9_-]+)?[[:space:]]*-->' | head -1)
+
+  if [ -z "$trailer_line" ]; then
+    # Legacy: bot-authored comment with no trailer is conservatively
+    # treated as failed-substantive so a pre-INV-35 in-flight verdict
+    # routes to the safe fresh-dev branch (rather than silently no-op
+    # like 'passed' would). See design §4 backwards-compat note.
+    printf -v "$verdict_var" '%s' "failed-substantive"
+    return 0
+  fi
+
+  # Parse trailer fields.
+  # Avoid generic local names (v, c) — they would shadow the caller-supplied
+  # var names that printf -v resolves through, e.g. caller passes "v" as the
+  # out-var name and `local v` would mask it.
+  local _parsed_verdict _parsed_cause
+  _parsed_verdict=$(printf '%s' "$trailer_line" | sed -nE 's/<!--[[:space:]]*review-verdict:[[:space:]]*([a-z-]+).*-->/\1/p')
+  _parsed_cause=$(printf '%s' "$trailer_line" | sed -nE 's/.*cause=([a-zA-Z0-9_-]+).*/\1/p')
+
+  case "$_parsed_verdict" in
+    passed|failed-substantive|failed-non-substantive)
+      printf -v "$verdict_var" '%s' "$_parsed_verdict"
+      [ "$_parsed_verdict" = "failed-non-substantive" ] && printf -v "$cause_var" '%s' "$_parsed_cause"
+      ;;
+    *)
+      # Unknown verdict token — treat as missing-trailer (failed-substantive).
+      printf -v "$verdict_var" '%s' "failed-substantive"
+      ;;
+  esac
+  return 0
+}
+
+# Echo the count of review-aware-flip markers scoped to a given dev session.
+# Used by Step 4b.5.1 to enforce REVIEW_RETRY_LIMIT on a per-session basis
+# (a fresh dev_new resets the counter, by design).
+count_review_aware_flips() {
+  local issue_num="$1"
+  local session_id="$2"
+  [ -n "$session_id" ] || { printf '%s' "0"; return 0; }
+  gh issue view "$issue_num" --repo "$REPO" --json comments \
+    -q "[.comments[].body | select(contains(\"<!-- review-aware-flip:non-substantive\")) | select(contains(\"session=${session_id}\"))] | length" \
+    2>/dev/null || printf '%s' "0"
+}
+
+# ---------------------------------------------------------------------------
+# INV-35 Step 4b.5.1: review-aware routing for `completed` sessions.
+# ---------------------------------------------------------------------------
+#
+# handle_completed_session_routing <issue_num> <session_id> <session_end_iso>
+#
+# Returns 0 always (caller `continue`s after this branch).
+#
+# Routes a `pending-dev` issue whose prior dev session reached
+# `end_turn|completed` per the verdict-classification table in
+# docs/designs/inv35-review-aware-resume.md § 3:
+#
+#   verdict=none                          → INV-12-completed marker (idempotent)
+#   verdict=passed                        → no-op + WARN log (race window)
+#   verdict=failed-substantive            → INV-35-fresh-dev + truncate +
+#                                           label_swap → in-progress + dev-new
+#   verdict=failed-non-substantive,
+#     under cap                           → label_swap → pending-review +
+#                                           review-aware-flip marker
+#   verdict=failed-non-substantive,
+#     at/over cap (REVIEW_RETRY_LIMIT)    → mark_stalled + operator @-mention
+handle_completed_session_routing() {
+  local issue_num="$1"
+  local session_id="$2"
+  local session_end_iso="$3"
+
+  local _verdict="" _cause=""
+  classify_recent_review_verdict "$issue_num" "$session_end_iso" _verdict _cause
+
+  case "$_verdict" in
+    none)
+      # Original INV-12 operator handoff — preserved for back-compat.
+      log "  issue #${issue_num} session ${session_id} already completed (no post-session verdict) — operator handoff"
+      local _notice_marker="INV-12-completed:${session_id}"
+      if gh issue view "$issue_num" --repo "$REPO" --json comments \
+          -q "[.comments[].body | select(contains(\"${_notice_marker}\"))] | length" \
+          2>/dev/null | grep -q '^0$'; then
+        gh issue comment "$issue_num" --repo "$REPO" \
+          --body "Session \`${session_id}\` already ended (stop_reason=end_turn, terminal_reason=completed). Resume would hang on idle SSE — skipping. Manually transition to \`pending-review\` if a PR exists, or close the issue if work is done. (\`${_notice_marker}\`)"
+      fi
+      return 0
+      ;;
+
+    passed)
+      # Race: review wrapper posted `passed` and was about to flip to
+      # `approved`/`reviewing`-cleanup, but the issue is currently still
+      # `pending-dev` (operator manually flipped, or a label-edit raced).
+      # Don't post — Step 0 hygiene reconciles next tick.
+      log "  WARN: issue #${issue_num} pending-dev with passed verdict (race) — no-op, Step 0 will reconcile"
+      return 0
+      ;;
+
+    failed-non-substantive)
+      local _flip_count
+      _flip_count=$(count_review_aware_flips "$issue_num" "$session_id")
+      _flip_count="${_flip_count:-0}"
+      local _limit="${REVIEW_RETRY_LIMIT:-2}"
+      # cap=0 → unbounded (operator opt-in to bounce-forever).
+      if [ "$_limit" -gt 0 ] && [ "$_flip_count" -ge "$_limit" ]; then
+        log "  issue #${issue_num} non-substantive review failure (cause=${_cause}) reached REVIEW_RETRY_LIMIT=${_limit} — stalling"
+        gh issue comment "$issue_num" --repo "$REPO" \
+          --body "Persistent review-failure-non-substantive on session \`${session_id}\` (cause=\`${_cause}\`, flips=${_flip_count}/${_limit}). Marking stalled. @${REPO_OWNER} please investigate the upstream review dependency (bot/CI/transport)."
+        mark_stalled "$issue_num"
+        return 0
+      fi
+      log "  issue #${issue_num} non-substantive review failure (cause=${_cause}, flip ${_flip_count}/${_limit}) — flipping to pending-review"
+      gh issue comment "$issue_num" --repo "$REPO" \
+        --body "$(printf '%s\n%s' \
+          "<!-- review-aware-flip:non-substantive cause=${_cause} session=${session_id} -->" \
+          "Re-routing to review (last review failed for non-substantive reason: ${_cause}).")"
+      label_swap "$issue_num" "pending-dev" "pending-review"
+      return 0
+      ;;
+
+    failed-substantive)
+      log "  issue #${issue_num} substantive review failure on completed session ${session_id} — minting fresh dev session"
+      local _fresh_marker="INV-35-fresh-dev:${session_id}"
+      if gh issue view "$issue_num" --repo "$REPO" --json comments \
+          -q "[.comments[].body | select(contains(\"${_fresh_marker}\"))] | length" \
+          2>/dev/null | grep -q '^0$'; then
+        gh issue comment "$issue_num" --repo "$REPO" \
+          --body "Review failed substantively on completed session \`${session_id}\`. A completed session cannot be resumed; minting a fresh dev session via the INV-12 PTL recovery pattern. (\`${_fresh_marker}\`)"
+      fi
+      # Truncate per-issue log so the next tick sees an empty log and
+      # doesn't re-trigger this completed-detection branch. Fail-closed
+      # (mirrors the INV-12 PTL guard at dispatcher-tick.sh:298-303): if
+      # truncate fails, the next tick would re-read the same stale log
+      # line, the idempotency marker would suppress a fresh notice, and
+      # we'd silently dispatch dev-new every tick forever.
+      local _log_file="/tmp/agent-${PROJECT_ID}-issue-${issue_num}.log"
+      if ! : > "$_log_file" 2>/dev/null; then
+        log "  ERROR: failed to truncate ${_log_file} (perm/disk?). Skipping INV-35 dev-new dispatch to avoid re-detection loop."
+        gh issue comment "$issue_num" --repo "$REPO" \
+          --body "Could not reset agent log at \`${_log_file}\` for fresh INV-35 dispatch (permission or disk error). Operator: please clear the log file and retry. Skipping dispatch to prevent a silent retry loop." 2>/dev/null || true
+        return 0
+      fi
+      label_swap "$issue_num" "pending-dev" "in-progress"
+      post_dispatch_token "$issue_num" "dev-new"
+      dispatch dev-new "$issue_num"
+      return 0
+      ;;
+
+    *)
+      # Defensive — classifier should never return anything else, but if
+      # it does, fall through to the original INV-12-completed operator
+      # handoff (safest).
+      log "  WARN: classify_recent_review_verdict returned unknown verdict '${_verdict}' for issue #${issue_num} — falling back to operator handoff"
+      local _notice_marker_default="INV-12-completed:${session_id}"
+      if gh issue view "$issue_num" --repo "$REPO" --json comments \
+          -q "[.comments[].body | select(contains(\"${_notice_marker_default}\"))] | length" \
+          2>/dev/null | grep -q '^0$'; then
+        gh issue comment "$issue_num" --repo "$REPO" \
+          --body "Session \`${session_id}\` completed; verdict classifier returned unexpected value. Operator handoff. (\`${_notice_marker_default}\`)"
+      fi
+      return 0
+      ;;
+  esac
+}
+
 
 # ---------------------------------------------------------------------------
 # Dispatch-token marker (Bugs 1 + 2 in #99 — [INV-17])
