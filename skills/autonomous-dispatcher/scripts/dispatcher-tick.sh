@@ -274,7 +274,8 @@ for i in $(seq 0 $((pd_count - 1))); do
   # the COMPLETED case (pending-dev → pending-dev). For the PTL case we
   # flip the label so the comment fires at most once anyway.
   _session_terminal_reason=""
-  if [ -n "$session_id" ] && is_session_completed "$issue_num" _session_terminal_reason; then
+  _session_end_iso=""
+  if [ -n "$session_id" ] && is_session_completed "$issue_num" _session_terminal_reason _session_end_iso; then
     if [ "$_session_terminal_reason" = "prompt_too_long" ]; then
       log "  issue #${issue_num} session ${session_id} hit prompt_too_long — clearing for fresh dispatch"
       notice_marker="INV-12-prompt-too-long:${session_id}"
@@ -309,15 +310,14 @@ for i in $(seq 0 $((pd_count - 1))); do
       continue
     fi
 
-    # end_turn|completed — operator must decide.
-    log "  issue #${issue_num} session ${session_id} already completed — skipping resume"
-    notice_marker="INV-12-completed:${session_id}"
-    if gh issue view "$issue_num" --repo "$REPO" --json comments \
-        -q "[.comments[].body | select(contains(\"${notice_marker}\"))] | length" \
-        2>/dev/null | grep -q '^0$'; then
-      gh issue comment "$issue_num" --repo "$REPO" \
-        --body "Session \`${session_id}\` already ended (stop_reason=end_turn, terminal_reason=completed). Resume would hang on idle SSE — skipping. Manually transition to \`pending-review\` if a PR exists, or close the issue if work is done. (\`${notice_marker}\`)"
-    fi
+    # end_turn|completed — INV-35 review-aware routing (carve-out from
+    # INV-12). The handler classifies the most recent post-completion
+    # review verdict and either:
+    #   - emits the original INV-12-completed operator-handoff marker, OR
+    #   - flips back to pending-review (non-substantive review failure), OR
+    #   - mints a fresh dev-new session via PTL pattern (substantive failure).
+    # See docs/pipeline/dispatcher-flow.md § Step 4b.5.1 and INV-35.
+    handle_completed_session_routing "$issue_num" "$session_id" "$_session_end_iso"
     JUST_DISPATCHED+=("$issue_num")
     continue
   fi

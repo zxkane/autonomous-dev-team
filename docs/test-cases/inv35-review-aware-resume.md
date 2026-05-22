@@ -210,10 +210,10 @@ This is the gating regression test for the issue and must fail on `dispatcher-ti
 
 | #149 acceptance criterion | Covered by |
 |---|---|
-| Design canvas at `docs/designs/inv35-review-aware-resume.md` reviewed and decision recorded | (in this same PR) |
-| `docs/pipeline/invariants.md` updated: INV-12 paired with new INV-35 | (in this same PR) |
-| `docs/pipeline/dispatcher-flow.md` Step 4 updated to reflect new branching | (in this same PR) |
-| `dispatcher-tick.sh` Step 4 implements the chosen routing | follow-up PR; covered by section B–E above |
-| Test-case doc + unit tests written and passing | (this doc) + follow-up `tests/unit/` files cited above |
-| Regression test for the 2026-05-21 fixture | TC-INV35-REG-001 |
-| No silent retry loops introduced (preserve INV-12-PTL fail-closed pattern for new write-side behavior) | TC-INV35-RT-021 |
+| Design canvas at `docs/designs/inv35-review-aware-resume.md` reviewed and decision recorded | PR #151 (design-only) |
+| `docs/pipeline/invariants.md` updated: INV-12 paired with new INV-35 | PR #151 (design) — INV-35 status updated to ENFORCED in this PR |
+| `docs/pipeline/dispatcher-flow.md` Step 4 updated to reflect new branching | PR #151 (design) |
+| `dispatcher-tick.sh` Step 4 implements the chosen routing | This PR — `handle_completed_session_routing` in `lib-dispatch.sh` invoked from `dispatcher-tick.sh` Step 4b.5.1 |
+| Test-case doc + unit tests written and passing | This doc + `tests/unit/test-classify-recent-review-verdict.sh` (16 PASS) + `tests/unit/test-handle-completed-session-routing.sh` (47 PASS) + `tests/unit/test-is-session-completed-end-ts.sh` (8 PASS) + `tests/unit/test-autonomous-review-verdict-trailer.sh` (9 PASS) |
+| Regression test for the 2026-05-21 fixture | `tests/unit/test-inv35-regression-2026-05-21.sh` — TC-INV35-REG-001/002 (16 PASS) |
+| No silent retry loops introduced (preserve INV-12-PTL fail-closed pattern for new write-side behavior) | TC-INV35-RT-021 in `test-handle-completed-session-routing.sh` (truncate-fails-closed assertion) |

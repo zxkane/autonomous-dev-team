@@ -23,6 +23,8 @@ source "${SCRIPT_DIR}/lib-agent.sh"
 source "${SCRIPT_DIR}/lib-auth.sh"
 # shellcheck source=lib-review-bots.sh
 source "${SCRIPT_DIR}/lib-review-bots.sh"
+# shellcheck source=lib-review-verdict.sh
+source "${SCRIPT_DIR}/lib-review-verdict.sh"
 
 # Validate required config (loaded by lib-agent.sh from autonomous.conf)
 : "${PROJECT_ID:?Set PROJECT_ID in autonomous.conf}"
@@ -162,6 +164,11 @@ cleanup() {
 
     gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
       --body "Review process crashed (exit code: ${exit_code}). Moving back to development for retry." 2>/dev/null || true
+    # INV-35: emit verdict trailer so dispatcher Step 4b.5.1 routes a
+    # completed-session crash to the substantive recovery path (a wrapper
+    # crash isn't a transient bot/CI/transport blip — it requires a fresh
+    # dev session, not a re-review).
+    emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-substantive" "" 2>/dev/null || true
     gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
       --remove-label "reviewing" \
       --add-label "pending-dev" 2>/dev/null || true
@@ -198,6 +205,11 @@ if [[ -z "$PR_NUMBER" ]]; then
   log "ERROR: No PR found for issue #${ISSUE_NUMBER}"
   gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
     --body "Review failed: no PR found linked to this issue. Please ensure the PR description contains 'Closes #${ISSUE_NUMBER}'." 2>/dev/null || true
+  # INV-35: no-pr-found is a non-substantive failure — the prior dev session
+  # may have completed cleanly but its PR-create call failed (transport,
+  # token expiry). The dispatcher should re-route to review on the next tick
+  # rather than burning a dev retry.
+  emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-non-substantive" "no-pr-found" 2>/dev/null || true
   gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
     --remove-label "reviewing" \
     --add-label "pending-dev" 2>/dev/null || true
@@ -642,6 +654,10 @@ fi
 
 if [[ "$PASSED_VERDICT" == "true" ]]; then
   log "Review PASSED for PR #${PR_NUMBER}."
+  # INV-35: emit `passed` trailer; dispatcher's Step 4b.5.1 treats it as a
+  # race window if the issue subsequently reappears as `pending-dev`
+  # (no-op + WARN, Step 0 hygiene reconciles).
+  emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "passed" "" 2>/dev/null || true
 
   # ---------------------------------------------------------------------------
   # Guard: verify PR is still open before approving/merging.
@@ -729,6 +745,10 @@ if [[ "$PASSED_VERDICT" == "true" ]]; then
 Re-dispatching dev agent to rebase onto main." 2>&1 >/dev/null); then
         log "WARNING: Failed to post auto-merge-failure marker on PR #${PR_NUMBER} (non-fatal — label transition still proceeds): ${_comment_err}"
       fi
+      # INV-35: auto-merge-failure is a non-substantive cause; the dev
+      # session's code is fine, only the merge step couldn't complete.
+      # Routes back through review on the next tick once the rebase lands.
+      emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-non-substantive" "merge-conflict-unresolvable" 2>/dev/null || true
 
       # Capture stderr so a failed label transition is diagnosable from logs —
       # otherwise the issue would silently stick in `reviewing` and the next
@@ -749,6 +769,15 @@ else
   if [[ $AGENT_EXIT -ne 0 ]] && [[ -z "$LATEST_COMMENT" ]]; then
     gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
       --body "Review process encountered an error (agent exit code: ${AGENT_EXIT}). Moving back to development for investigation." 2>/dev/null || true
+    # INV-35: agent crash without verdict comment — non-substantive
+    # (transport / mid-stream failure, not a code issue identified by the
+    # agent). Cause `other` because we don't have a more specific signal.
+    emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-non-substantive" "other" 2>/dev/null || true
+  else
+    # INV-35: agent posted a verdict comment but the verdict was FAILED
+    # (or pattern-matched only fail keywords). This is a substantive
+    # finding — agent identified code issues to address.
+    emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-substantive" "" 2>/dev/null || true
   fi
 
   gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
