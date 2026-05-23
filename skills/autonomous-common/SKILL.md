@@ -36,17 +36,33 @@ Each installer wires up the workflow hooks at the **project scope**, so they fir
 
 For the per-agent schema mapping reference, see [`docs/cross-agent-hooks.md`](https://github.com/zxkane/autonomous-dev-team/blob/main/docs/cross-agent-hooks.md).
 
-### What if you can't run the installer
+### Project-side `scripts/` and `hooks/` symlinks
 
-If installing into your `.claude/settings.json` is undesirable (shared repo, you want hooks isolated to autonomous-* skills only), the legacy fallback is to symlink the hook directories so the skill-scoped hook commands resolve:
+The IDE installer above only writes the IDE config file (e.g. `.claude/settings.json`). The project-side `<project>/scripts/` symlinks (so `dispatcher-tick.sh` finds `autonomous-dev.sh`, `lib-agent.sh`, etc.) and the `<project>/hooks` directory symlink are managed by a separate, IDE-agnostic bootstrap script — **the canonical pattern for projects whose `scripts/` already contains project-local files**:
 
 ```bash
-# From your project root:
-ln -sf .claude/skills/autonomous-common/hooks hooks
-ln -sf .claude/skills/autonomous-dispatcher/scripts scripts
+# From your project root, after `npx skills add`:
+bash .agents/skills/autonomous-common/scripts/install-project-hooks.sh
 ```
 
-This keeps hooks scoped to the skills' frontmatter (Claude Code only fires them when a skill is active). If the push hook isn't blocking or the commit-outside-worktree check isn't running, check the symlinks — but prefer the installer for full coverage.
+What it does:
+
+- Symlinks every `*.sh` from the installed `autonomous-dispatcher/scripts/` into `<project>/scripts/`, **without overwriting** real (non-symlink) project-local files like `autonomous.conf` or per-project deploy helpers.
+- Prunes dangling symlinks if upstream removes a file.
+- Symlinks `<project>/hooks` → `autonomous-common/hooks` (refuses to shadow an existing real directory).
+- Installs the per-worktree git `pre-push` hook (#65). Skip with `--no-git-hook`.
+
+Idempotent — re-run after every `npx skills update` so newly-added upstream files (e.g. when this skill set adds a new `lib-*.sh`) are picked up automatically. Closes the silent-drift mode behind #153, where projects bootstrapped via per-file `ln -s` cargo-culted lists missed new files and `autonomous-review.sh` died on `source` of the missing file before any review work ran.
+
+### Legacy directory-level fallback (deprecated)
+
+The earlier docs suggested replacing the project's `scripts/` directory with a single symlink:
+
+```bash
+ln -sf .claude/skills/autonomous-dispatcher/scripts scripts   # DEPRECATED
+```
+
+This loses any project-local files in `scripts/`. Use `install-project-hooks.sh` instead — it does the right thing on a directory that already has project-local content, and re-running picks up upstream changes.
 
 ### Required Claude Code plugins
 
@@ -67,6 +83,7 @@ Claude Code only. The installer prompts for these; if installing manually, add t
 
 - **`hooks/`** — workflow-enforcement hooks (block-push-to-main, block-commit-outside-worktree, check-pr-review, check-shellcheck, verify-completion, …). See `hooks/README.md` for the canonical list and per-hook semantics.
 - **`scripts/`** — agent-callable utilities used by the dev/review skills:
+  - `install-project-hooks.sh` — IDE-agnostic project-side bootstrap: symlinks dispatcher `*.sh` into `<project>/scripts/` (without overwriting project-local files), symlinks `<project>/hooks`, prunes dangling links, installs the git pre-push hook. Re-run after every `npx skills update` (closes #153)
   - `lib-installer.sh` — shared merge/write helpers used by every per-agent installer
   - `lib-installer-translate.sh` — schema translation helpers for near-clone agents (event-name map, tool-name map, timeout-unit conversion)
   - `install-claude-hooks.sh` — Claude Code installer (writes `.claude/settings.json`)

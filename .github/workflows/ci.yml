@@ -53,4 +53,5 @@ jobs:
             skills/autonomous-dispatcher/scripts/gh-with-token-refresh.sh \
             skills/autonomous-common/hooks/lib-push.sh \
             skills/autonomous-common/hooks/install-git-pre-push.sh \
-            skills/autonomous-common/scripts/install-claude-hooks.sh
+            skills/autonomous-common/scripts/install-claude-hooks.sh \
+            skills/autonomous-common/scripts/install-project-hooks.sh
