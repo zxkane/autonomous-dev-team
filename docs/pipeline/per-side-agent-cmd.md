@@ -187,10 +187,23 @@ where someone accidentally drops or moves the override line.
    same position relative to `source "${SCRIPT_DIR}/lib-agent.sh"`.
    PSC-S10 asserts this placement structurally.
 4. autonomous.conf.example: add the operator-facing comment block.
-5. tests/unit/test-lib-agent-per-side-cmd.sh: ten test cases.
+5. tests/unit/test-lib-agent-per-side-cmd.sh: eleven test cases (PSC-S1..S11).
 6. invariants.md: INV-37 entry.
 
 (A cross-link in `agy-cli-support.md` was considered and dropped —
 the operator example in `autonomous.conf.example` already covers the
 "claude-dev / agy-review" deployment pattern; adding it to a separate
 spec would be duplication, not coverage.)
+
+## GSTACK REVIEW REPORT
+
+| Review | Trigger | Why | Runs | Status | Findings |
+|--------|---------|-----|------|--------|----------|
+| CEO Review | `/plan-ceo-review` | Scope & strategy | 0 | — | not applicable for config-knob refactor |
+| Codex Review | `/codex review` | Independent 2nd opinion | 0 | skipped | mechanical change, low signal-to-noise |
+| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 1 | CLEAR | 4 issues found, 4 resolved (A1, A3, Q1, Q3); 1 test gap fixed (T1 → PSC-S11) |
+| Design Review | `/plan-design-review` | UI/UX gaps | 0 | — | no UI scope |
+| DX Review | `/plan-devex-review` | Developer experience gaps | 0 | — | not applicable |
+
+- **UNRESOLVED:** 0 (all findings landed in spec inline)
+- **VERDICT:** ENG CLEARED — ready to implement
