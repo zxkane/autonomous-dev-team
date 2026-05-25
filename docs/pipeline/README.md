@@ -14,6 +14,8 @@ For the high-level overview and quick start, see [`docs/autonomous-pipeline.md`]
 | [`review-agent-flow.md`](review-agent-flow.md) | The review-agent wrapper lifecycle: PID guard, requirement-drift detection, decision gate, reviewed-HEAD trailer. |
 | [`handoffs.md`](handoffs.md) | The five handoff points between dispatcher / dev / review and the invariants each side is required to uphold. |
 | [`invariants.md`](invariants.md) | Cross-cutting invariants (PID file naming, retry-counter cutoff rule, SHA trailer format, "crashed"-keyword regex contract, etc.). |
+| [`remote-backend.md`](remote-backend.md) | The `EXECUTION_BACKEND` contract every dispatch transport (local, remote-aws-ssm, future) must satisfy. |
+| [`agy-cli-support.md`](agy-cli-support.md) | Per-CLI spec for the `AGENT_CMD=agy` (Antigravity 2.0) branch in `lib-agent.sh` — sidecar pattern, structural flags, INV-36 capture contract. |
 
 ## Reading order
 
