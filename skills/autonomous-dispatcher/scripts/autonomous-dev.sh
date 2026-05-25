@@ -20,7 +20,9 @@ set -euo pipefail
 # autonomous.conf via tier-2 (same dir).
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 source "${SCRIPT_DIR}/lib-agent.sh"
-# Per-side AGENT_CMD override (INV-37): rebind to dev-side CLI before lib-auth.sh.
+# Per-side AGENT_CMD override (INV-37). Empty-string fallback already
+# applied inside lib-agent.sh; this just rebinds AGENT_CMD so the case
+# statements in run_agent / resume_agent dispatch to the dev-side CLI.
 AGENT_CMD="$AGENT_DEV_CMD"
 source "${SCRIPT_DIR}/lib-auth.sh"
 

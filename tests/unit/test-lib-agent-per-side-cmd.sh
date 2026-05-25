@@ -173,7 +173,7 @@ hit=$(awk '
     found_source = NR
     next
   }
-  found_source && NR <= found_source + 2 {
+  found_source && NR <= found_source + 4 {
     if ($0 ~ /^AGENT_CMD="\$AGENT_DEV_CMD"/) {
       print "MATCH"
       exit
@@ -181,7 +181,7 @@ hit=$(awk '
   }
 ' "$DEV_WRAPPER")
 
-assert_eq "autonomous-dev.sh: AGENT_CMD=\$AGENT_DEV_CMD lands ≤2 lines after source lib-agent.sh" \
+assert_eq "autonomous-dev.sh: AGENT_CMD=\$AGENT_DEV_CMD lands ≤4 lines after source lib-agent.sh" \
   "MATCH" "$hit"
 
 echo ""
