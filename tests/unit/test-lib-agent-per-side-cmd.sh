@@ -20,7 +20,12 @@ FAIL=0
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 LIB="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-agent.sh"
+# DEV_WRAPPER / REVIEW_WRAPPER are used by PSC-S9 / PSC-S10 (structural
+# placement greps) which land in plan Tasks 2 and 3. Defined here so
+# the test scaffolding stays in one place across all three tasks.
+# shellcheck disable=SC2034
 DEV_WRAPPER="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/autonomous-dev.sh"
+# shellcheck disable=SC2034
 REVIEW_WRAPPER="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/autonomous-review.sh"
 
 RED='\033[0;31m'
