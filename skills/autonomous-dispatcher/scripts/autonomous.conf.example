@@ -214,6 +214,23 @@ AGENT_TIMEOUT="4h"
 AGENT_DEV_EXTRA_ARGS=""
 AGENT_REVIEW_EXTRA_ARGS=""
 
+# AGENT_DEV_CMD / AGENT_REVIEW_CMD: per-side override of AGENT_CMD.
+# Default to AGENT_CMD when unset/empty, so existing single-CLI
+# deployments are unaffected. Set them when you want dev and review
+# to run on different CLIs — for example, claude for the heavy dev
+# work and agy for the cheaper review pass:
+#
+#   AGENT_CMD="claude"           # also used by anything not split
+#   AGENT_REVIEW_CMD="agy"       # only review goes to agy
+#   AGENT_DEV_MODEL="opus[1m]"
+#   AGENT_REVIEW_MODEL=""        # ignored by agy (warns), see agy block
+#
+# AGENT_LAUNCHER (claude-only) is rejected when either side resolves
+# to a non-claude CLI. Either unset the launcher or keep both sides
+# on claude. See [INV-37] in docs/pipeline/invariants.md.
+# AGENT_DEV_CMD=""
+# AGENT_REVIEW_CMD=""
+
 # --- claude block ---
 # claude has NO required EXTRA_ARGS — the structural --permission-mode
 # flag handles tool trust via the existing AGENT_PERMISSION_MODE knob.
