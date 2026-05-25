@@ -270,7 +270,7 @@ echo "$@" > "$AGY_ARGS_FILE"
 cat > "${AGY_STDIN_FILE:-/dev/null}"
 # Find --log-file argument and write a fixture log there.
 log_file=""
-i=0
+prev=""
 for arg in "$@"; do
   if [[ "$prev" == "--log-file" ]]; then
     log_file="$arg"
@@ -301,8 +301,9 @@ STDIN_FILE="$TMPROOT/agy-stdin"
 SESSION_ID4="44444444-aaaa-bbbb-cccc-dddddddddddd"
 FAKE_UUID="dead-beef-cafe-0000-1111aaaa2222"
 
-run_output=$(
-  PATH="$BIN:$PATH" \
+# Capture stdout+stderr to keep them out of the test report; we only
+# assert on argv/stdin recorders and the exit code below.
+PATH="$BIN:$PATH" \
   AUTONOMOUS_PID_DIR="$PID_DIR" \
   PROJECT_ID="testproj" \
   PROJECT_DIR="$TMPROOT" \
@@ -316,8 +317,7 @@ run_output=$(
     unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE
     source "'"$LIB"'"
     run_agent "'"$SESSION_ID4"'" "implement the agy thing" "" ""
-  ' 2>&1
-)
+  ' >/dev/null 2>&1
 run_rc=$?
 
 assert_eq "run_agent agy returns 0 on success" 0 "$run_rc"
@@ -355,8 +355,7 @@ echo "=== AGY-04: resume_agent agy branch — uses captured conversation UUID ==
 : > "$ARGS_FILE"
 : > "$STDIN_FILE"
 
-resume_output=$(
-  PATH="$BIN:$PATH" \
+PATH="$BIN:$PATH" \
   AUTONOMOUS_PID_DIR="$PID_DIR" \
   PROJECT_ID="testproj" \
   PROJECT_DIR="$TMPROOT" \
@@ -370,8 +369,7 @@ resume_output=$(
     unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE
     source "'"$LIB"'"
     resume_agent "'"$SESSION_ID4"'" "address review feedback" "" ""
-  ' 2>&1
-)
+  ' >/dev/null 2>&1
 resume_rc=$?
 
 assert_eq "resume_agent agy returns 0 on success" 0 "$resume_rc"

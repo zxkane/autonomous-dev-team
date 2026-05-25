@@ -704,7 +704,10 @@ run_agent() {
       #   -p — headless print mode; reads prompt from stdin per INV-34.
       #   --dangerously-skip-permissions — load-bearing in headless mode;
       #     without it agy denies every tool call. Same role as kiro's
-      #     --trust-all-tools and gemini's --approval-mode yolo.
+      #     --trust-all-tools and gemini's --approval-mode yolo, but
+      #     hardcoded here (not in EXTRA_ARGS like those CLIs) because
+      #     every headless agy invocation requires it — there is no
+      #     valid agy config that runs headless without this flag.
       #   --print-timeout "$AGENT_TIMEOUT" — agy's internal cap defaults
       #     to 5m, far below AGENT_TIMEOUT (default 4h). Without override,
       #     every wrapper would die in 5m regardless of the outer cap.
