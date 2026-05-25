@@ -864,7 +864,7 @@ Adds two operator knobs in `lib-agent.sh` that let dev and review wrappers run o
 
 Each wrapper sets `AGENT_CMD` to its side's value immediately after sourcing `lib-agent.sh`. The `AGENT_LAUNCHER` guard generalizes to reject any non-claude side (strictly more permissive than the old single-side check — never rejects a config that previously passed).
 
-The motivating use case: `podcast-curation` wants `AGENT_CMD="claude"` for heavy dev and `AGENT_REVIEW_CMD="agy"` for cheaper review.
+The motivating use case: a downstream consumer project wants `AGENT_CMD="claude"` for heavy dev and `AGENT_REVIEW_CMD="agy"` for cheaper review.
 
 ## What's in the PR
 

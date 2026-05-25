@@ -63,9 +63,10 @@ required for any operator who does not want the per-side split.
 ## `AGENT_LAUNCHER` interaction
 
 `AGENT_LAUNCHER` is currently rejected unless `AGENT_CMD == claude`
-(lib-agent.sh:106-108). The launcher is a `cc` shell function that
-ends in `$CLAUDE_CMD "$@"` — pointing it at codex / kiro / opencode
-would silently produce `claude codex …` and fail.
+(see the AGENT_LAUNCHER guard block in `lib-agent.sh`). The launcher
+is a `cc` shell function that ends in `$CLAUDE_CMD "$@"` — pointing
+it at codex / kiro / opencode would silently produce `claude codex …`
+and fail.
 
 The new check generalizes that gate to both sides:
 
@@ -91,8 +92,8 @@ to failing.
 ## What is NOT covered
 
 - **`AGENT_PERMISSION_MODE`** stays shared. It's only consumed in
-  the `claude)` branch of `run_agent` / `resume_agent` (lib-agent.sh
-  ~lines 588, 800) — every other CLI's branch silently drops it.
+  the `claude)` branch of `run_agent` / `resume_agent` — every other
+  CLI's branch silently drops it.
   In the typical "claude for dev, agy for review" pattern this is
   fine: the shared value applies on the claude side (where it's
   consumed) and is harmlessly ignored on the agy side. The inverse
@@ -109,9 +110,9 @@ to failing.
 
 ## Operator-facing config
 
-`autonomous.conf.example` gets a new comment block above the per-CLI
-blocks (after the `AGENT_PERMISSION_MODE` line, before the per-CLI
-blocks):
+`autonomous.conf.example` gets a new comment block immediately after
+the `AGENT_DEV_EXTRA_ARGS` / `AGENT_REVIEW_EXTRA_ARGS` defaults and
+before the per-CLI blocks:
 
 ```bash
 # AGENT_DEV_CMD / AGENT_REVIEW_CMD: per-side override of AGENT_CMD.
@@ -137,7 +138,7 @@ blocks):
 | Failure | Behavior |
 |---|---|
 | Neither override set | Both wrappers use `$AGENT_CMD`. Pre-change behavior. |
-| Only `AGENT_REVIEW_CMD=agy` set | Dev uses `$AGENT_CMD` (unchanged), review uses `agy`. The podcast-curation use case. |
+| Only `AGENT_REVIEW_CMD=agy` set | Dev uses `$AGENT_CMD` (unchanged), review uses `agy`. The motivating use case (claude-for-dev / agy-for-review). |
 | Only `AGENT_DEV_CMD=codex` set | Dev uses `codex`, review uses `$AGENT_CMD`. Symmetric. |
 | Both set, both non-empty | Each side runs its declared CLI. `$AGENT_CMD` is effectively unused (the dispatcher script's `AGENT_CMD=…` line still resolves it for log breadcrumbs). |
 | `AGENT_DEV_CMD=""` (explicit empty) | Falls back to `$AGENT_CMD` via `:-`. Same as unset. |
@@ -164,8 +165,8 @@ New file `tests/unit/test-lib-agent-per-side-cmd.sh` covers eleven cases:
 | PSC-S6 | `AGENT_LAUNCHER` non-empty + both sides claude → source succeeds |
 | PSC-S7 | `AGENT_LAUNCHER` + dev=claude review=agy → source fails with error naming `AGENT_REVIEW_CMD=agy` |
 | PSC-S8 | `AGENT_LAUNCHER` + dev=codex review=claude → source fails naming `AGENT_DEV_CMD=codex` |
-| PSC-S9 | Structural — `autonomous-dev.sh` contains the line `AGENT_CMD="$AGENT_DEV_CMD"` immediately after `source ${SCRIPT_DIR}/lib-agent.sh` (with at most one blank line of separation) |
-| PSC-S10 | Structural — `autonomous-review.sh` contains the line `AGENT_CMD="$AGENT_REVIEW_CMD"` immediately after the lib-agent.sh source line |
+| PSC-S9 | Structural — `autonomous-dev.sh` contains `AGENT_CMD="$AGENT_DEV_CMD"` within 4 lines of `source ${SCRIPT_DIR}/lib-agent.sh` (allowing the 3-line WHY-rationale comment block) |
+| PSC-S10 | Structural — `autonomous-review.sh` contains `AGENT_CMD="$AGENT_REVIEW_CMD"` within 5 lines of the source statement (allowing the 4-line WHY-rationale comment block) |
 | PSC-S11 | `AGENT_LAUNCHER` + dev=codex review=agy (both sides non-claude) → source fails. Pins the guard's `||` so a refactor cannot silently collapse it into AND or drop one side. |
 
 PSC-S1..S8 are behavioral tests that source `lib-agent.sh` directly in
