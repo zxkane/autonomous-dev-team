@@ -184,6 +184,26 @@ hit=$(awk '
 assert_eq "autonomous-dev.sh: AGENT_CMD=\$AGENT_DEV_CMD lands ≤4 lines after source lib-agent.sh" \
   "MATCH" "$hit"
 
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== PSC-S10: autonomous-review.sh structural placement ==="
+# ---------------------------------------------------------------------------
+hit=$(awk '
+  /source "\$\{SCRIPT_DIR\}\/lib-agent\.sh"/ {
+    found_source = NR
+    next
+  }
+  found_source && NR <= found_source + 5 {
+    if ($0 ~ /^AGENT_CMD="\$AGENT_REVIEW_CMD"/) {
+      print "MATCH"
+      exit
+    }
+  }
+' "$REVIEW_WRAPPER")
+
+assert_eq "autonomous-review.sh: AGENT_CMD=\$AGENT_REVIEW_CMD lands ≤5 lines after source lib-agent.sh" \
+  "MATCH" "$hit"
+
 echo ""
 echo "PASS: $PASS    FAIL: $FAIL"
 [[ $FAIL -eq 0 ]]

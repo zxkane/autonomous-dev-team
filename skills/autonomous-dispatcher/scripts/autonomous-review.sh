@@ -20,6 +20,11 @@ set -euo pipefail
 # autonomous.conf via tier-2 (same dir).
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 source "${SCRIPT_DIR}/lib-agent.sh"
+# Per-side AGENT_CMD override (INV-37). See autonomous-dev.sh for the
+# matching dev-side override. Together they let one project run dev
+# and review on different agent CLIs (e.g. claude for dev, agy for
+# review). Default (no operator override) is byte-for-byte unchanged.
+AGENT_CMD="$AGENT_REVIEW_CMD"
 source "${SCRIPT_DIR}/lib-auth.sh"
 # shellcheck source=lib-review-bots.sh
 source "${SCRIPT_DIR}/lib-review-bots.sh"
