@@ -503,10 +503,18 @@ _agy_capture_conversation() {
 # Read the captured UUID. Missing sidecar returns rc 1 so resume_agent
 # can detect it and fall back to a fresh run_agent.
 _agy_conversation_id() {
-  local session_id="$1" conv_file
+  local session_id="$1" conv_file uuid
   conv_file=$(_agy_conversation_file "$session_id") || return 1
+  # Symlink-defense: refuse to read through a symlink (pid_dir is mode 0700,
+  # so this is defense-in-depth). Mirrors _codex_thread_id (CWE-59).
+  [[ -L "$conv_file" ]] && return 1
   [[ -f "$conv_file" ]] || return 1
-  cat "$conv_file"
+  uuid=$(cat "$conv_file")
+  # Format-validate: any non-hex/dash content means the sidecar was corrupted
+  # or written by something other than _agy_capture_conversation. Treat as
+  # missing — resume_agent (Task 2) will fall back to a fresh run_agent.
+  [[ "$uuid" =~ ^[a-f0-9-]+$ ]] || return 1
+  printf '%s\n' "$uuid"
 }
 
 # Acquire PID guard: prevent duplicate instances for the same issue.

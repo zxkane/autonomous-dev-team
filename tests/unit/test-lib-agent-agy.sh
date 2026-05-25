@@ -70,8 +70,7 @@ assert_not_contains() {
   fi
 }
 
-# Placeholder — test cases land in subsequent steps.
-echo "=== test-lib-agent-agy.sh — scaffolding only (test cases follow) ==="
+echo "=== test-lib-agent-agy.sh — agy sidecar helpers (S1-S4 + S5) ==="
 
 # ---------------------------------------------------------------------------
 echo "=== AGY-S1: source-of-truth — helper functions exist ==="
@@ -216,6 +215,44 @@ assert_contains "/etc/passwd not overwritten by symlink-following write" \
   "root:" "$target_first_line"
 assert_contains "WARN logged for symlink refusal" \
   "is a symlink; refusing to write" "$stderr_capture"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== AGY-S5: _agy_conversation_id refuses symlink + validates format ==="
+# ---------------------------------------------------------------------------
+# Reuse SESSION_ID3 — its sidecar is a symlink to /etc/passwd from AGY-S4.
+S5_OUT=$(
+  AUTONOMOUS_PID_DIR="$PID_DIR" \
+  PROJECT_ID="testproj" \
+  PROJECT_DIR="$TMPROOT" \
+  AGENT_CMD=agy \
+  bash -c '
+    unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE
+    source "'"$LIB"'"
+    _agy_conversation_id "'"$SESSION_ID3"'"
+    echo "rc=$?"
+  ' 2>/dev/null
+)
+assert_contains "_agy_conversation_id refuses symlink (rc=1)" "rc=1" "$S5_OUT"
+assert_not_contains "_agy_conversation_id does not leak symlink target content" "root:" "$S5_OUT"
+
+# Now: write a corrupted sidecar (not a UUID) and confirm format rejection.
+SESSION_ID5="55555555-aaaa-bbbb-cccc-ffffffffffff"
+echo "not a uuid; semicolons; rm -rf /" > "$PID_DIR/agy-conversation-$SESSION_ID5"
+S5B_OUT=$(
+  AUTONOMOUS_PID_DIR="$PID_DIR" \
+  PROJECT_ID="testproj" \
+  PROJECT_DIR="$TMPROOT" \
+  AGENT_CMD=agy \
+  bash -c '
+    unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE
+    source "'"$LIB"'"
+    _agy_conversation_id "'"$SESSION_ID5"'"
+    echo "rc=$?"
+  ' 2>/dev/null
+)
+assert_contains "_agy_conversation_id rejects non-UUID sidecar content (rc=1)" "rc=1" "$S5B_OUT"
+assert_not_contains "_agy_conversation_id does not echo corrupted content" "rm -rf" "$S5B_OUT"
 
 echo ""
 echo "PASS: $PASS    FAIL: $FAIL"
