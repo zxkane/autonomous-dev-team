@@ -449,6 +449,66 @@ _opencode_session_id() {
   printf '%s\n' "$sid"
 }
 
+# _agy_log_file <session_id>
+# _agy_conversation_file <session_id>
+#
+# Sidecar paths under pid_dir_for_project() for the agy branch
+# (Antigravity 2.0 CLI). agy mints conversation UUIDs internally and
+# exposes them only via the CLI log file (no JSON event stream on
+# stdout). We direct agy's log to a per-session path with --log-file,
+# then grep the UUID and persist it to a separate per-session file
+# for resume.
+#
+# Pattern mirrors _codex_thread_file / _opencode_session_file. Two
+# files instead of one because the log is mostly noise and is not
+# the canonical UUID store — only the sidecar is.
+_agy_log_file() {
+  local session_id="$1" pid_dir
+  pid_dir=$(pid_dir_for_project) || return 1
+  printf '%s/agy-log-%s.log\n' "$pid_dir" "$session_id"
+}
+
+_agy_conversation_file() {
+  local session_id="$1" pid_dir
+  pid_dir=$(pid_dir_for_project) || return 1
+  printf '%s/agy-conversation-%s\n' "$pid_dir" "$session_id"
+}
+
+# _agy_capture_conversation <session_id> <log_file>
+#
+# Best-effort capture per [INV-36]: grep the log_file for
+#   Print mode: conversation=<UUID>
+# and write the UUID to the sidecar. Missing log file, missing match,
+# unwritable sidecar all return 0 — capture failure must not gate
+# run_agent's exit code, because resume_agent falls back to a fresh
+# run when the sidecar is absent.
+#
+# CWE-59 defense via [[ -L ]] — same pattern as _codex_capture_thread.
+_agy_capture_conversation() {
+  local session_id="$1" log_file="$2" conv_file uuid
+  conv_file=$(_agy_conversation_file "$session_id") || return 0
+  [[ -f "$log_file" ]] || return 0
+  uuid=$(grep -oE 'Print mode: conversation=[a-f0-9-]+' "$log_file" \
+    | head -1 | sed 's/.*=//')
+  [[ -n "$uuid" ]] || return 0
+  if [[ -L "$conv_file" ]]; then
+    echo "[lib-agent] WARN: $conv_file is a symlink; refusing to write." >&2
+    return 0
+  fi
+  printf '%s\n' "$uuid" > "$conv_file"
+}
+
+# _agy_conversation_id <session_id>
+#
+# Read the captured UUID. Missing sidecar returns rc 1 so resume_agent
+# can detect it and fall back to a fresh run_agent.
+_agy_conversation_id() {
+  local session_id="$1" conv_file
+  conv_file=$(_agy_conversation_file "$session_id") || return 1
+  [[ -f "$conv_file" ]] || return 1
+  cat "$conv_file"
+}
+
 # Acquire PID guard: prevent duplicate instances for the same issue.
 # Checks for symlink attacks, running processes, then writes current PID.
 # Args: $1=pid_file, $2=label (e.g. "autonomous-dev"), $3=issue_number
