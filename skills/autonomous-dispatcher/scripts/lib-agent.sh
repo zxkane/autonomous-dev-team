@@ -58,6 +58,13 @@ PROJECT_DIR="${PROJECT_DIR:-$(cd "${_LIB_AGENT_DIR}/../../.." && pwd)}"
 
 # Agent configuration (overridable via env or autonomous.conf)
 AGENT_CMD="${AGENT_CMD:-claude}"
+# Per-side AGENT_CMD overrides (INV-37). Default to AGENT_CMD so existing
+# deployments are unchanged. autonomous-dev.sh and autonomous-review.sh
+# each set AGENT_CMD="$AGENT_{DEV,REVIEW}_CMD" right after sourcing this
+# file, so the run_agent / resume_agent case statements dispatch to the
+# right CLI for each side. See docs/pipeline/per-side-agent-cmd.md.
+AGENT_DEV_CMD="${AGENT_DEV_CMD:-$AGENT_CMD}"
+AGENT_REVIEW_CMD="${AGENT_REVIEW_CMD:-$AGENT_CMD}"
 AGENT_DEV_MODEL="${AGENT_DEV_MODEL:-}"
 AGENT_REVIEW_MODEL="${AGENT_REVIEW_MODEL:-sonnet}"
 AGENT_PERMISSION_MODE="${AGENT_PERMISSION_MODE:-auto}"
@@ -98,14 +105,19 @@ if [[ -n "$AGENT_LAUNCHER" ]]; then
   unset _orig_launcher
 fi
 
-# AGENT_LAUNCHER is only supported with AGENT_CMD=claude today. The
-# canonical launcher (a `cc` shell function ending in `$CLAUDE_CMD "$@"`)
-# is hardcoded to invoke claude, so pointing it at codex/kiro/opencode
-# would produce `claude codex ...` and fail. Refuse the combination
-# rather than crashing 5 seconds into the next dispatch.
-if [[ ${#AGENT_LAUNCHER_ARGV[@]} -gt 0 && "$AGENT_CMD" != "claude" ]]; then
-  echo "[lib-agent] ERROR: AGENT_LAUNCHER is only supported with AGENT_CMD=claude (got AGENT_CMD=${AGENT_CMD}). Either unset AGENT_LAUNCHER or write a launcher tailored to your CLI." >&2
-  return 1 2>/dev/null || exit 1
+# AGENT_LAUNCHER is only supported when both per-side CLIs are claude
+# (INV-37). The canonical launcher (a `cc` shell function ending in
+# `$CLAUDE_CMD "$@"`) is hardcoded to invoke claude, so pointing it at
+# codex/kiro/opencode/agy would produce `claude codex ...` and fail.
+# Refuse the combination rather than crashing 5 seconds into the next
+# dispatch. The check reads AGENT_DEV_CMD / AGENT_REVIEW_CMD directly
+# (not via AGENT_CMD) because the wrapper-level override fires AFTER
+# this guard — see docs/pipeline/per-side-agent-cmd.md §Resolution order.
+if [[ ${#AGENT_LAUNCHER_ARGV[@]} -gt 0 ]]; then
+  if [[ "$AGENT_DEV_CMD" != "claude" || "$AGENT_REVIEW_CMD" != "claude" ]]; then
+    echo "[lib-agent] ERROR: AGENT_LAUNCHER is only supported when both AGENT_DEV_CMD and AGENT_REVIEW_CMD are claude (got AGENT_DEV_CMD=${AGENT_DEV_CMD}, AGENT_REVIEW_CMD=${AGENT_REVIEW_CMD}). Either unset AGENT_LAUNCHER or write a launcher tailored to your CLI." >&2
+    return 1 2>/dev/null || exit 1
+  fi
 fi
 
 # AGENT_DEV_EXTRA_ARGS / AGENT_REVIEW_EXTRA_ARGS (closes #140) — operator-
