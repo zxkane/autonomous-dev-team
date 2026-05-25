@@ -271,7 +271,8 @@ an `agy` stub (a shell script that writes a fixed log file and exits
 | AGY-05 | `resume_agent` with sidecar absent falls back to `run_agent` (no `--conversation` flag in stub argv) |
 | AGY-06 | Non-empty `model` arg → WARN on stderr, execution continues, exit code from stub is propagated |
 | AGY-07 | Log file lacking the `Print mode:` line → sidecar not created, `run_agent` rc still propagates |
-| AGY-08 | Sidecar path is a pre-existing symlink → capture refuses to write and emits CWE-59 WARN |
+| AGY-S4 | Sidecar path is a pre-existing symlink → capture refuses to write and emits CWE-59 WARN. Write-side guard, helper-level test from Task 1; covers what the original spec called AGY-08. |
+| AGY-S5 | Sidecar path is a symlink OR sidecar contains non-UUID content → `_agy_conversation_id` returns rc 1 without echoing leaked content. Read-side guard. |
 
 ## New invariant (lands in `invariants.md`)
 
@@ -297,8 +298,10 @@ the agy branch:
 > failure to a hard error.
 >
 > **Enforcement.** `tests/unit/test-lib-agent-agy.sh` AGY-07 (log
-> lacks match) and AGY-08 (symlink sidecar) both assert
-> `run_agent` rc passes through and the wrapper does not raise.
+> lacks the Print-mode line) and AGY-S4 (symlink sidecar refused
+> at capture time) both assert `run_agent` rc passes through and
+> the wrapper does not raise. AGY-S5 covers the read-side symlink
+> + corrupted-content guard in `_agy_conversation_id`.
 
 ## Cross-references
 
