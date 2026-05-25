@@ -254,6 +254,305 @@ S5B_OUT=$(
 assert_contains "_agy_conversation_id rejects non-UUID sidecar content (rc=1)" "rc=1" "$S5B_OUT"
 assert_not_contains "_agy_conversation_id does not echo corrupted content" "rm -rf" "$S5B_OUT"
 
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== AGY-01/02: run_agent agy branch — stdin prompt + structural flags ==="
+# ---------------------------------------------------------------------------
+BIN="$TMPROOT/bin"
+mkdir -p "$BIN"
+
+# Stub agy: record argv + drain stdin to recorders, then write a fake
+# log file at the path requested via --log-file containing the
+# Print mode line. Exits 0.
+cat > "$BIN/agy" <<'STUB'
+#!/bin/bash
+echo "$@" > "$AGY_ARGS_FILE"
+cat > "${AGY_STDIN_FILE:-/dev/null}"
+# Find --log-file argument and write a fixture log there.
+log_file=""
+i=0
+for arg in "$@"; do
+  if [[ "$prev" == "--log-file" ]]; then
+    log_file="$arg"
+    break
+  fi
+  prev="$arg"
+done
+if [[ -n "$log_file" ]]; then
+  cat > "$log_file" <<EOF
+I0524 22:56:05.692112 1234 printmode.go:130] Print mode: conversation=${AGY_FAKE_UUID:-aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb}, sending message
+EOF
+fi
+exit 0
+STUB
+chmod +x "$BIN/agy"
+
+# Stub timeout: pass through, drop the leading 3 args (--kill-after,
+# --signal, DURATION).
+cat > "$BIN/timeout" <<'STUB'
+#!/bin/bash
+shift 3
+exec "$@"
+STUB
+chmod +x "$BIN/timeout"
+
+ARGS_FILE="$TMPROOT/agy-args"
+STDIN_FILE="$TMPROOT/agy-stdin"
+SESSION_ID4="44444444-aaaa-bbbb-cccc-dddddddddddd"
+FAKE_UUID="dead-beef-cafe-0000-1111aaaa2222"
+
+run_output=$(
+  PATH="$BIN:$PATH" \
+  AUTONOMOUS_PID_DIR="$PID_DIR" \
+  PROJECT_ID="testproj" \
+  PROJECT_DIR="$TMPROOT" \
+  AGENT_CMD=agy \
+  AGENT_PERMISSION_MODE=auto \
+  AGENT_TIMEOUT=4h \
+  AGY_ARGS_FILE="$ARGS_FILE" \
+  AGY_STDIN_FILE="$STDIN_FILE" \
+  AGY_FAKE_UUID="$FAKE_UUID" \
+  bash -c '
+    unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE
+    source "'"$LIB"'"
+    run_agent "'"$SESSION_ID4"'" "implement the agy thing" "" ""
+  ' 2>&1
+)
+run_rc=$?
+
+assert_eq "run_agent agy returns 0 on success" 0 "$run_rc"
+
+agy_argv=$(cat "$ARGS_FILE")
+assert_contains "agy argv contains -p"                          "-p"                              "$agy_argv"
+assert_contains "agy argv contains --dangerously-skip-permissions" "--dangerously-skip-permissions" "$agy_argv"
+assert_contains "agy argv contains --print-timeout 4h"          "--print-timeout 4h"              "$agy_argv"
+assert_contains "agy argv contains --log-file under PID_DIR"    "--log-file $PID_DIR/agy-log-$SESSION_ID4.log" "$agy_argv"
+assert_not_contains "agy argv does NOT carry the prompt positionally" \
+  "implement the agy thing" "$agy_argv"
+
+agy_stdin=$(cat "$STDIN_FILE" 2>/dev/null || true)
+assert_eq "agy stdin contains the prompt (INV-34)" \
+  "implement the agy thing" "$agy_stdin"
+
+# AGY-03: sidecar populated from the fake log line written by the stub.
+sidecar4="$PID_DIR/agy-conversation-$SESSION_ID4"
+if [[ -f "$sidecar4" ]]; then
+  echo -e "  ${GREEN}PASS${NC}: AGY-03 — sidecar populated post-run"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: AGY-03 — sidecar missing at $sidecar4"
+  FAIL=$((FAIL + 1))
+fi
+assert_eq "AGY-03 — sidecar contains UUID from stub-written log" \
+  "$FAKE_UUID" "$(cat "$sidecar4" 2>/dev/null)"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== AGY-04: resume_agent agy branch — uses captured conversation UUID ==="
+# ---------------------------------------------------------------------------
+# Reuse the sandbox from AGY-01/02/03 — sidecar4 is already populated
+# from the prior run_agent invocation.
+: > "$ARGS_FILE"
+: > "$STDIN_FILE"
+
+resume_output=$(
+  PATH="$BIN:$PATH" \
+  AUTONOMOUS_PID_DIR="$PID_DIR" \
+  PROJECT_ID="testproj" \
+  PROJECT_DIR="$TMPROOT" \
+  AGENT_CMD=agy \
+  AGENT_PERMISSION_MODE=auto \
+  AGENT_TIMEOUT=4h \
+  AGY_ARGS_FILE="$ARGS_FILE" \
+  AGY_STDIN_FILE="$STDIN_FILE" \
+  AGY_FAKE_UUID="$FAKE_UUID" \
+  bash -c '
+    unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE
+    source "'"$LIB"'"
+    resume_agent "'"$SESSION_ID4"'" "address review feedback" "" ""
+  ' 2>&1
+)
+resume_rc=$?
+
+assert_eq "resume_agent agy returns 0 on success" 0 "$resume_rc"
+
+agy_argv=$(cat "$ARGS_FILE")
+assert_contains "resume agy argv contains --conversation <UUID>" \
+  "--conversation $FAKE_UUID" "$agy_argv"
+assert_contains "resume agy argv still contains -p"                          "-p"                              "$agy_argv"
+assert_contains "resume agy argv still contains --dangerously-skip-permissions" "--dangerously-skip-permissions" "$agy_argv"
+assert_contains "resume agy argv still contains --log-file"                  "--log-file"                      "$agy_argv"
+
+agy_stdin=$(cat "$STDIN_FILE" 2>/dev/null || true)
+assert_eq "resume agy stdin contains the new prompt" \
+  "address review feedback" "$agy_stdin"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== AGY-05: resume_agent without sidecar — falls back to run_agent ==="
+# ---------------------------------------------------------------------------
+SESSION_ID5="55555555-eeee-ffff-aaaa-bbbbbbbbbbbb"  # No sidecar pre-populated.
+: > "$ARGS_FILE"
+: > "$STDIN_FILE"
+
+fallback_stderr=$(
+  (
+    PATH="$BIN:$PATH" \
+    AUTONOMOUS_PID_DIR="$PID_DIR" \
+    PROJECT_ID="testproj" \
+    PROJECT_DIR="$TMPROOT" \
+    AGENT_CMD=agy \
+    AGENT_PERMISSION_MODE=auto \
+    AGENT_TIMEOUT=4h \
+    AGY_ARGS_FILE="$ARGS_FILE" \
+    AGY_STDIN_FILE="$STDIN_FILE" \
+    AGY_FAKE_UUID="fallback-uuid-aaaa-bbbb-cccccccccccc" \
+    bash -c '
+      unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE
+      source "'"$LIB"'"
+      resume_agent "'"$SESSION_ID5"'" "fresh start" "" ""
+    '
+  ) 2>&1 1>/dev/null
+)
+
+agy_argv=$(cat "$ARGS_FILE")
+assert_contains "fallback stderr mentions 'no captured agy conversation_id'" \
+  "no captured agy conversation_id" "$fallback_stderr"
+assert_not_contains "fallback argv does NOT contain --conversation" \
+  "--conversation" "$agy_argv"
+# After fallback to run_agent, the new sidecar is created.
+sidecar5="$PID_DIR/agy-conversation-$SESSION_ID5"
+if [[ -f "$sidecar5" ]]; then
+  echo -e "  ${GREEN}PASS${NC}: fallback created a new sidecar"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: fallback did not create new sidecar"
+  FAIL=$((FAIL + 1))
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== AGY-06: model parameter — WARN once, execution continues ==="
+# ---------------------------------------------------------------------------
+SESSION_ID6="66666666-1234-1234-1234-123456789012"
+: > "$ARGS_FILE"
+: > "$STDIN_FILE"
+
+# Run with non-empty model; capture stderr separately from stdout.
+run_stderr=$(
+  (
+    PATH="$BIN:$PATH" \
+    AUTONOMOUS_PID_DIR="$PID_DIR" \
+    PROJECT_ID="testproj" \
+    PROJECT_DIR="$TMPROOT" \
+    AGENT_CMD=agy \
+    AGENT_PERMISSION_MODE=auto \
+    AGENT_TIMEOUT=4h \
+    AGY_ARGS_FILE="$ARGS_FILE" \
+    AGY_STDIN_FILE="$STDIN_FILE" \
+    AGY_FAKE_UUID="model-warn-uuid-aaaa-bbbb-cccccccccccc" \
+    bash -c '
+      unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE _LIB_AGENT_AGY_MODEL_WARNED
+      source "'"$LIB"'"
+      run_agent "'"$SESSION_ID6"'" "with model" "gemini-3-pro-preview" ""
+    '
+  ) 2>&1 1>/dev/null
+)
+# rc captured separately — re-run for it, since the subshell pattern above
+# is for stderr capture.
+(
+  PATH="$BIN:$PATH" \
+  AUTONOMOUS_PID_DIR="$PID_DIR" \
+  PROJECT_ID="testproj" \
+  PROJECT_DIR="$TMPROOT" \
+  AGENT_CMD=agy \
+  AGENT_PERMISSION_MODE=auto \
+  AGENT_TIMEOUT=4h \
+  AGY_ARGS_FILE="$ARGS_FILE" \
+  AGY_STDIN_FILE="$STDIN_FILE" \
+  AGY_FAKE_UUID="model-warn-uuid-aaaa-bbbb-cccccccccccc" \
+  bash -c '
+    unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE _LIB_AGENT_AGY_MODEL_WARNED
+    source "'"$LIB"'"
+    run_agent "'"$SESSION_ID6"'" "with model" "gemini-3-pro-preview" ""
+  ' >/dev/null 2>&1
+)
+model_rc=$?
+
+assert_contains "model WARN emitted to stderr" \
+  "AGENT_CMD=agy does not support --model" "$run_stderr"
+assert_eq "execution continues despite WARN — rc=0" 0 "$model_rc"
+agy_argv=$(cat "$ARGS_FILE")
+assert_not_contains "agy argv does NOT contain --model" "--model" "$agy_argv"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== AGY-07: log without Print-mode line — INV-36 best-effort ==="
+# ---------------------------------------------------------------------------
+SESSION_ID7="77777777-aaaa-bbbb-cccc-dddddddddddd"
+
+# Stub agy variant that writes a log file WITHOUT the Print-mode line.
+cat > "$BIN/agy-nomatch" <<'STUB'
+#!/bin/bash
+echo "$@" > "$AGY_ARGS_FILE"
+cat > "${AGY_STDIN_FILE:-/dev/null}"
+log_file=""
+prev=""
+for arg in "$@"; do
+  if [[ "$prev" == "--log-file" ]]; then
+    log_file="$arg"
+    break
+  fi
+  prev="$arg"
+done
+if [[ -n "$log_file" ]]; then
+  cat > "$log_file" <<EOF
+I0524 22:56:05.692100 1234 input.go:42] Starting print mode
+I0524 22:56:05.692500 1234 nomatch.go:99] Some unrelated line
+EOF
+fi
+exit 0
+STUB
+chmod +x "$BIN/agy-nomatch"
+
+# Symlink agy → agy-nomatch for this case.
+mv "$BIN/agy" "$BIN/agy.real"
+ln -sf "$BIN/agy-nomatch" "$BIN/agy"
+
+: > "$ARGS_FILE"; : > "$STDIN_FILE"
+
+(
+  PATH="$BIN:$PATH" \
+  AUTONOMOUS_PID_DIR="$PID_DIR" \
+  PROJECT_ID="testproj" \
+  PROJECT_DIR="$TMPROOT" \
+  AGENT_CMD=agy \
+  AGENT_PERMISSION_MODE=auto \
+  AGENT_TIMEOUT=4h \
+  AGY_ARGS_FILE="$ARGS_FILE" \
+  AGY_STDIN_FILE="$STDIN_FILE" \
+  bash -c '
+    unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE _LIB_AGENT_AGY_MODEL_WARNED
+    source "'"$LIB"'"
+    run_agent "'"$SESSION_ID7"'" "no-match prompt" "" ""
+  ' >/dev/null 2>&1
+)
+nomatch_rc=$?
+
+# Restore real stub for any later cases.
+rm -f "$BIN/agy"
+mv "$BIN/agy.real" "$BIN/agy"
+
+assert_eq "AGY-07 — rc still propagates from agy stub (0)" 0 "$nomatch_rc"
+sidecar7="$PID_DIR/agy-conversation-$SESSION_ID7"
+if [[ ! -e "$sidecar7" ]]; then
+  echo -e "  ${GREEN}PASS${NC}: AGY-07 — sidecar absent for log without Print-mode line"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: AGY-07 — sidecar should be absent"
+  FAIL=$((FAIL + 1))
+fi
+
 echo ""
 echo "PASS: $PASS    FAIL: $FAIL"
 [[ $FAIL -eq 0 ]]

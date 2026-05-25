@@ -692,6 +692,50 @@ run_agent() {
         | _opencode_capture_session "$session_id"
       return "${PIPESTATUS[1]}"
       ;;
+    agy)
+      # Antigravity 2.0 CLI (Google). agy mints conversation UUIDs
+      # internally and emits them only via the CLI log file (no JSON
+      # event stream). We direct the log to a per-session path with
+      # --log-file, then capture the UUID into a sidecar for resume.
+      # Pattern mirrors codex/opencode but with a grep-based capture
+      # channel. See docs/pipeline/agy-cli-support.md and INV-36.
+      #
+      # Structural flags (NOT operator-tunable, NOT in EXTRA_ARGS):
+      #   -p — headless print mode; reads prompt from stdin per INV-34.
+      #   --dangerously-skip-permissions — load-bearing in headless mode;
+      #     without it agy denies every tool call. Same role as kiro's
+      #     --trust-all-tools and gemini's --approval-mode yolo.
+      #   --print-timeout "$AGENT_TIMEOUT" — agy's internal cap defaults
+      #     to 5m, far below AGENT_TIMEOUT (default 4h). Without override,
+      #     every wrapper would die in 5m regardless of the outer cap.
+      #   --log-file — only programmatic channel for the conversation
+      #     UUID; per-session path so concurrent issues do not race.
+      #
+      # `model` parameter is ignored — agy doesn't accept --model on the
+      # CLI. Configure model selection via ~/.gemini/antigravity-cli/
+      # settings.json. WARN once per process so operators learn to stop
+      # passing AGENT_DEV_MODEL.
+      if [[ -n "$model" && -z "${_LIB_AGENT_AGY_MODEL_WARNED:-}" ]]; then
+        echo "[lib-agent] WARN: AGENT_CMD=agy does not support --model flag; ignoring AGENT_DEV_MODEL=${model}. Configure model via ~/.gemini/antigravity-cli/settings.json instead." >&2
+        export _LIB_AGENT_AGY_MODEL_WARNED=1
+      fi
+
+      local agy_log
+      agy_log=$(_agy_log_file "$session_id") || return 1
+
+      printf '%s' "$prompt" \
+        | _run_with_timeout "$AGENT_CMD" \
+            -p \
+            --dangerously-skip-permissions \
+            --print-timeout "$AGENT_TIMEOUT" \
+            --log-file "$agy_log" \
+            "${extra_args[@]}"
+      local rc=$?
+
+      _agy_capture_conversation "$session_id" "$agy_log"
+
+      return $rc
+      ;;
     *)
       # Generic fallback: assume `<cli> -p` (with no value) reads from
       # stdin. The `-p` token is preserved so a downstream CLI that
@@ -819,6 +863,37 @@ resume_agent() {
         return "${PIPESTATUS[1]}"
       else
         echo "[lib-agent] no captured opencode sessionID for session $session_id; starting a new opencode session" >&2
+        run_agent "$session_id" "$prompt" "$model" "$session_name"
+      fi
+      ;;
+    agy)
+      # See run_agent agy branch for structural-flag rationale and
+      # sidecar mechanics. resume reads the captured UUID from the
+      # sidecar and feeds it back via --conversation <UUID>. If the
+      # sidecar is missing (run_agent never ran for this session, or
+      # capture failed per INV-36), fall back to a fresh run_agent —
+      # same defensive pattern as the codex / opencode branches.
+      local _agy_cid
+      if _agy_cid=$(_agy_conversation_id "$session_id"); then
+        local agy_log
+        agy_log=$(_agy_log_file "$session_id") || return 1
+        printf '%s' "$prompt" \
+          | _run_with_timeout "$AGENT_CMD" \
+              --conversation "$_agy_cid" \
+              -p \
+              --dangerously-skip-permissions \
+              --print-timeout "$AGENT_TIMEOUT" \
+              --log-file "$agy_log" \
+              "${extra_args[@]}"
+        local rc=$?
+        # Self-healing re-capture: under normal operation the UUID
+        # equals _agy_cid (agy keeps the id on resume), so this is a
+        # no-op overwrite. If a future agy version rotates IDs on
+        # resume, the sidecar tracks the live one without code change.
+        _agy_capture_conversation "$session_id" "$agy_log"
+        return $rc
+      else
+        echo "[lib-agent] no captured agy conversation_id for session $session_id; starting a new agy session" >&2
         run_agent "$session_id" "$prompt" "$model" "$session_name"
       fi
       ;;
