@@ -178,7 +178,10 @@ _agy_capture_conversation() {
   local session_id="$1" log_file="$2" conv_file uuid
   conv_file=$(_agy_conversation_file "$session_id") || return 0
   [[ -f "$log_file" ]] || return 0
-  uuid=$(grep -oE 'Print mode: conversation=[a-f0-9-]+' "$log_file" \
+  # Anchor the capture to canonical RFC-4122 UUID shape (8-4-4-4-12)
+  # so a future agy log-format change cannot push pathological values
+  # like `---` into the sidecar.
+  uuid=$(grep -oE 'Print mode: conversation=[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}' "$log_file" \
     | head -1 | sed 's/.*=//')
   [[ -n "$uuid" ]] || return 0
   # CWE-59 defense — same pattern as _codex_capture_thread.
@@ -186,14 +189,25 @@ _agy_capture_conversation() {
     echo "[lib-agent] WARN: $conv_file is a symlink; refusing to write." >&2
     return 0
   }
-  printf '%s\n' "$uuid" > "$conv_file"
+  # Trailing `|| true` + `return 0`: printf may fail (read-only fs, full
+  # disk); INV-36 promises capture is best-effort, never gate run_agent.
+  printf '%s\n' "$uuid" > "$conv_file" || true
+  return 0
 }
 
 _agy_conversation_id() {
-  local session_id="$1" conv_file
+  local session_id="$1" conv_file uuid
   conv_file=$(_agy_conversation_file "$session_id") || return 1
+  # Symlink-defense: refuse to read through a symlink (CWE-59);
+  # mirrors _codex_thread_id.
+  [[ -L "$conv_file" ]] && return 1
   [[ -f "$conv_file" ]] || return 1
-  cat "$conv_file"
+  uuid=$(cat "$conv_file" 2>/dev/null)
+  # Format-validate against canonical UUID shape — anything else means
+  # corruption, partial write, or attacker-planted content; treat as
+  # missing and let resume_agent fall back to a fresh run_agent.
+  [[ "$uuid" =~ ^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$ ]] || return 1
+  printf '%s\n' "$uuid"
 }
 ```
 
@@ -217,7 +231,7 @@ formalizes the best-effort contract.
 | Sidecar pruned between run and resume | Same fallback. |
 | `agy --conversation <bad-uuid>` (corrupted sidecar) | agy fails loud → wrapper non-zero rc → retry → fresh `run_agent` overwrites sidecar. |
 | `model` parameter passed by caller | One-time WARN to stderr; execution continues. Non-fatal per design decision (operator-correctable, not pipeline-breaking). |
-| Concurrent dispatch to same session_id | Blocked upstream by [INV-09] PID-guard before reaching the sidecar layer. |
+| Concurrent dispatch to same session_id | Blocked upstream by [INV-23] PID-guard before reaching the sidecar layer. |
 
 ## Differences from peer CLIs
 
@@ -264,6 +278,9 @@ an `agy` stub (a shell script that writes a fixed log file and exits
 
 | Test | Asserts |
 |---|---|
+| AGY-S1 | Structural — all four sidecar helpers (`_agy_log_file`, `_agy_conversation_file`, `_agy_capture_conversation`, `_agy_conversation_id`) are defined |
+| AGY-S2 | `_agy_capture_conversation` writes the UUID from a fixture log into the sidecar at the expected path |
+| AGY-S3 | Log without `Print mode:` line leaves sidecar absent (best-effort capture, INV-36) |
 | AGY-01 | `run_agent` feeds prompt to stub via stdin (upholds [INV-34]) |
 | AGY-02 | `run_agent` passes `--dangerously-skip-permissions --print-timeout $AGENT_TIMEOUT --log-file <pid_dir>/agy-log-<sid>.log` to the stub |
 | AGY-03 | After stub writes fake log with `Print mode: conversation=<UUID>`, sidecar `agy-conversation-<sid>` exists with the UUID |
@@ -319,7 +336,7 @@ the agy branch:
   changes required; both use the abstract `run_agent` /
   `resume_agent` interface and remain CLI-agnostic.
 
-[INV-09]: invariants.md#inv-09-pid-file-naming
-[INV-13]: invariants.md#inv-13-agent-invocation-wall-clock-timeout
+[INV-13]: invariants.md#inv-13-wall-clock-cap-on-agent-invocations
+[INV-23]: invariants.md#inv-23-pid_file-points-at-a-process-whose-death-reaps-the-entire-agent-subtree
 [INV-31]: invariants.md#inv-31-operator-tunable-per-cli-flags-live-in-conf-not-in-lib-agentsh
 [INV-34]: invariants.md#inv-34-agent-prompt-is-fed-via-stdin-never-as-a-single-argv-element

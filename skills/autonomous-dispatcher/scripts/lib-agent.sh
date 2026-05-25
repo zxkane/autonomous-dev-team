@@ -478,24 +478,34 @@ _agy_conversation_file() {
 #
 # Best-effort capture per [INV-36]: grep the log_file for
 #   Print mode: conversation=<UUID>
-# and write the UUID to the sidecar. Missing log file, missing match,
-# unwritable sidecar all return 0 — capture failure must not gate
-# run_agent's exit code, because resume_agent falls back to a fresh
-# run when the sidecar is absent.
+# and write the UUID to the sidecar. Always returns 0 — capture failure
+# (missing log, no match, unwritable sidecar, content fails UUID-shape
+# check) must not gate run_agent's exit code, because resume_agent
+# falls back to a fresh run when the sidecar is absent.
 #
 # CWE-59 defense via [[ -L ]] — same pattern as _codex_capture_thread.
+#
+# UUID shape: agy's print-mode logger emits canonical RFC-4122 form
+# (8-4-4-4-12 lowercase hex). Anchoring the capture regex to that
+# shape — instead of `[a-f0-9-]+` — refuses pathological strings like
+# `---` or single-char matches that a future log-format change might
+# produce, so we never write garbage that would later survive
+# _agy_conversation_id's read-side regex.
 _agy_capture_conversation() {
   local session_id="$1" log_file="$2" conv_file uuid
   conv_file=$(_agy_conversation_file "$session_id") || return 0
   [[ -f "$log_file" ]] || return 0
-  uuid=$(grep -oE 'Print mode: conversation=[a-f0-9-]+' "$log_file" \
+  uuid=$(grep -oE 'Print mode: conversation=[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}' "$log_file" \
     | head -1 | sed 's/.*=//')
   [[ -n "$uuid" ]] || return 0
   if [[ -L "$conv_file" ]]; then
     echo "[lib-agent] WARN: $conv_file is a symlink; refusing to write." >&2
     return 0
   fi
-  printf '%s\n' "$uuid" > "$conv_file"
+  # Trailing return 0: the printf may fail (read-only fs, full disk, etc.);
+  # INV-36 promises capture is best-effort, so swallow the rc.
+  printf '%s\n' "$uuid" > "$conv_file" || true
+  return 0
 }
 
 # _agy_conversation_id <session_id>
@@ -509,11 +519,17 @@ _agy_conversation_id() {
   # so this is defense-in-depth). Mirrors _codex_thread_id (CWE-59).
   [[ -L "$conv_file" ]] && return 1
   [[ -f "$conv_file" ]] || return 1
-  uuid=$(cat "$conv_file")
-  # Format-validate: any non-hex/dash content means the sidecar was corrupted
-  # or written by something other than _agy_capture_conversation. Treat as
-  # missing — resume_agent (Task 2) will fall back to a fresh run_agent.
-  [[ "$uuid" =~ ^[a-f0-9-]+$ ]] || return 1
+  # `cat` (not `head -n1` like _codex_thread_id) is intentional: multi-line
+  # content fails the UUID-shape check below rather than silently passing
+  # line 1 — `head` would mask a partial-write corruption.
+  uuid=$(cat "$conv_file" 2>/dev/null)
+  # Format-validate against canonical RFC-4122 form (8-4-4-4-12 lowercase
+  # hex). Anything else (corrupted sidecar, partial write, attacker-planted
+  # content past the symlink check) returns missing — resume_agent falls
+  # back to a fresh run_agent. This is stricter than `[a-f0-9-]+` (which
+  # would accept "---" or "a") so a corrupted sidecar can't silently feed
+  # `agy --conversation <bogus>` and burn a dispatch cycle.
+  [[ "$uuid" =~ ^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$ ]] || return 1
   printf '%s\n' "$uuid"
 }
 

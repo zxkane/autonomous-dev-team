@@ -299,7 +299,7 @@ chmod +x "$BIN/timeout"
 ARGS_FILE="$TMPROOT/agy-args"
 STDIN_FILE="$TMPROOT/agy-stdin"
 SESSION_ID4="44444444-aaaa-bbbb-cccc-dddddddddddd"
-FAKE_UUID="dead-beef-cafe-0000-1111aaaa2222"
+FAKE_UUID="deadbeef-cafe-4000-8111-1111aaaa2222"
 
 # Capture stdout+stderr to keep them out of the test report; we only
 # assert on argv/stdin recorders and the exit code below.
@@ -404,7 +404,7 @@ fallback_stderr=$(
     AGENT_TIMEOUT=4h \
     AGY_ARGS_FILE="$ARGS_FILE" \
     AGY_STDIN_FILE="$STDIN_FILE" \
-    AGY_FAKE_UUID="fallback-uuid-aaaa-bbbb-cccccccccccc" \
+    AGY_FAKE_UUID="fa11bac4-aaaa-4bbb-8ccc-cccccccccccc" \
     bash -c '
       unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE
       source "'"$LIB"'"
@@ -448,7 +448,7 @@ run_stderr=$(
     AGENT_TIMEOUT=4h \
     AGY_ARGS_FILE="$ARGS_FILE" \
     AGY_STDIN_FILE="$STDIN_FILE" \
-    AGY_FAKE_UUID="model-warn-uuid-aaaa-bbbb-cccccccccccc" \
+    AGY_FAKE_UUID="20de1aaa-aaaa-4bbb-8ccc-cccccccccccc" \
     bash -c '
       unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE _LIB_AGENT_AGY_MODEL_WARNED
       source "'"$LIB"'"
@@ -468,7 +468,7 @@ run_stderr=$(
   AGENT_TIMEOUT=4h \
   AGY_ARGS_FILE="$ARGS_FILE" \
   AGY_STDIN_FILE="$STDIN_FILE" \
-  AGY_FAKE_UUID="model-warn-uuid-aaaa-bbbb-cccccccccccc" \
+  AGY_FAKE_UUID="20de1aaa-aaaa-4bbb-8ccc-cccccccccccc" \
   bash -c '
     unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE _LIB_AGENT_AGY_MODEL_WARNED
     source "'"$LIB"'"
