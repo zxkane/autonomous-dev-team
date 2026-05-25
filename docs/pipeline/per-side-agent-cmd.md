@@ -44,6 +44,15 @@ no signature changes, no caller changes, no per-CLI branch changes.
 back to `AGENT_CMD`. That matches the existing semantics of
 `AGENT_DEV_MODEL` / `AGENT_REVIEW_MODEL`.
 
+The `AGENT_LAUNCHER` guard (see next section) runs at `lib-agent.sh`
+source time, **before** the wrapper's `AGENT_CMD=$AGENT_DEV_CMD`
+override line fires. The guard reads `$AGENT_DEV_CMD` and
+`$AGENT_REVIEW_CMD` directly, not via `$AGENT_CMD`, so its decision
+is correct regardless of which wrapper does the subsequent override.
+The wrapper override exists only to make the case statements in
+`run_agent` / `resume_agent` dispatch to the right CLI; it does not
+re-trigger the guard.
+
 ## Backwards compatibility
 
 Existing deployments do not set `AGENT_DEV_CMD` or `AGENT_REVIEW_CMD`.
@@ -81,9 +90,15 @@ to failing.
 
 ## What is NOT covered
 
-- **`AGENT_PERMISSION_MODE`** (claude-only flag) stays shared. If an
-  operator runs review on a non-claude CLI they likely don't need
-  per-side `AGENT_PERMISSION_MODE` — every other CLI ignores it.
+- **`AGENT_PERMISSION_MODE`** stays shared. It's only consumed in
+  the `claude)` branch of `run_agent` / `resume_agent` (lib-agent.sh
+  ~lines 588, 800) — every other CLI's branch silently drops it.
+  In the typical "claude for dev, agy for review" pattern this is
+  fine: the shared value applies on the claude side (where it's
+  consumed) and is harmlessly ignored on the agy side. The inverse
+  pattern (agy for dev, claude for review with different permission
+  needs) WOULD benefit from a per-side `AGENT_PERMISSION_MODE`, but
+  is rare enough to defer.
 - **`KIRO_AGENT_NAME`** stays shared. Splitting it would only help an
   operator running both wrappers under kiro with different agent
   configs — vanishingly rare; out of scope.
@@ -137,7 +152,7 @@ blocks):
 
 ## Test coverage
 
-New file `tests/unit/test-lib-agent-per-side-cmd.sh` covers ten cases:
+New file `tests/unit/test-lib-agent-per-side-cmd.sh` covers eleven cases:
 
 | Test | Asserts |
 |---|---|
@@ -151,6 +166,7 @@ New file `tests/unit/test-lib-agent-per-side-cmd.sh` covers ten cases:
 | PSC-S8 | `AGENT_LAUNCHER` + dev=codex review=claude → source fails naming `AGENT_DEV_CMD=codex` |
 | PSC-S9 | Structural — `autonomous-dev.sh` contains the line `AGENT_CMD="$AGENT_DEV_CMD"` immediately after `source ${SCRIPT_DIR}/lib-agent.sh` (with at most one blank line of separation) |
 | PSC-S10 | Structural — `autonomous-review.sh` contains the line `AGENT_CMD="$AGENT_REVIEW_CMD"` immediately after the lib-agent.sh source line |
+| PSC-S11 | `AGENT_LAUNCHER` + dev=codex review=agy (both sides non-claude) → source fails. Pins the guard's `||` so a refactor cannot silently collapse it into AND or drop one side. |
 
 PSC-S1..S8 are behavioral tests that source `lib-agent.sh` directly in
 a sandbox and assert the resulting variable values. PSC-S9 and PSC-S10
@@ -164,13 +180,17 @@ where someone accidentally drops or moves the override line.
 1. Lib-agent.sh: add `AGENT_DEV_CMD` / `AGENT_REVIEW_CMD` after the
    existing `AGENT_CMD="${AGENT_CMD:-claude}"` line; rewrite the
    AGENT_LAUNCHER guard to check both sides.
-2. autonomous-dev.sh: one-line `AGENT_CMD="$AGENT_DEV_CMD"` after
-   `source lib-agent.sh`.
-3. autonomous-review.sh: one-line `AGENT_CMD="$AGENT_REVIEW_CMD"` after
-   `source lib-agent.sh`.
+2. autonomous-dev.sh: add `AGENT_CMD="$AGENT_DEV_CMD"` **immediately
+   after `source "${SCRIPT_DIR}/lib-agent.sh"`, before any other
+   `source` statement**. PSC-S9 asserts this placement structurally.
+3. autonomous-review.sh: add `AGENT_CMD="$AGENT_REVIEW_CMD"` in the
+   same position relative to `source "${SCRIPT_DIR}/lib-agent.sh"`.
+   PSC-S10 asserts this placement structurally.
 4. autonomous.conf.example: add the operator-facing comment block.
 5. tests/unit/test-lib-agent-per-side-cmd.sh: ten test cases.
 6. invariants.md: INV-37 entry.
-7. agy-cli-support.md: small note in §Operator-facing config that
-   the agy block can be combined with `AGENT_DEV_CMD=claude` for the
-   "claude-dev / agy-review" deployment pattern.
+
+(A cross-link in `agy-cli-support.md` was considered and dropped —
+the operator example in `autonomous.conf.example` already covers the
+"claude-dev / agy-review" deployment pattern; adding it to a separate
+spec would be duplication, not coverage.)
