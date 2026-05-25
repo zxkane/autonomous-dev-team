@@ -99,7 +99,7 @@ PROJECT_DIR="/path/to/project"
 
 # === Agent Configuration ===
 # AGENT_CMD: which coding-agent CLI to spawn for dev/review wrappers.
-# First-class support: claude, codex, gemini, kiro, opencode. Other
+# First-class support: claude, codex, gemini, kiro, opencode, agy. Other
 # CLIs work via the generic `<cli> -p <prompt>` fallback. See README
 # "Supported Agent CLIs" for resume semantics per CLI.
 #
@@ -279,6 +279,34 @@ AGENT_REVIEW_EXTRA_ARGS=""
 # AGENT_CMD="opencode"
 # AGENT_DEV_MODEL="amazon-bedrock/global.anthropic.claude-opus-4-7"
 # AGENT_REVIEW_MODEL="anthropic/claude-sonnet-4-6"
+# AGENT_DEV_EXTRA_ARGS=""
+# AGENT_REVIEW_EXTRA_ARGS=""
+
+# --- agy block ---
+# Antigravity 2.0 CLI (Google) — successor to gemini CLI.
+# Verified against agy 1.0.2.
+#
+# Structural flags managed by lib-agent.sh (NOT to add here):
+#   -p, --dangerously-skip-permissions, --print-timeout, --log-file
+#
+# Operator notes:
+#   1. agy does NOT accept --model on the CLI. AGENT_DEV_MODEL /
+#      AGENT_REVIEW_MODEL are ignored with a one-time WARN. Configure
+#      model selection via ~/.gemini/antigravity-cli/settings.json.
+#   2. --dangerously-skip-permissions is structural and load-bearing
+#      for headless tool execution; without it agy denies every tool
+#      call (silent fabrication failure, same shape as gemini's
+#      ask_user→deny default that --approval-mode yolo fixes).
+#   3. agy's internal --print-timeout default is 5 minutes. lib-agent
+#      passes AGENT_TIMEOUT through so the outer wall-clock cap is
+#      authoritative.
+#   4. Conversation IDs are minted by agy and captured from the CLI
+#      log file via grep — see [INV-36] in docs/pipeline/invariants.md
+#      for the best-effort contract.
+#
+# AGENT_CMD="agy"
+# AGENT_DEV_MODEL=""        # Ignored — see note 1.
+# AGENT_REVIEW_MODEL=""     # Ignored — see note 1.
 # AGENT_DEV_EXTRA_ARGS=""
 # AGENT_REVIEW_EXTRA_ARGS=""
 
