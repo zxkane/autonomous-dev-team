@@ -161,6 +161,29 @@ out=$(launcher_guard "codex" "agy")
 assert_contains "guard error mentions both non-claude values" "AGENT_DEV_CMD=codex" "$out"
 assert_contains "guard error mentions review side too" "AGENT_REVIEW_CMD=agy" "$out"
 
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== PSC-S9: autonomous-dev.sh structural placement ==="
+# ---------------------------------------------------------------------------
+# Match: source "${SCRIPT_DIR}/lib-agent.sh" followed (with at most ONE
+# blank line) by AGENT_CMD="$AGENT_DEV_CMD".
+# Use awk so we don't depend on `grep -A` quirks across platforms.
+hit=$(awk '
+  /source "\$\{SCRIPT_DIR\}\/lib-agent\.sh"/ {
+    found_source = NR
+    next
+  }
+  found_source && NR <= found_source + 2 {
+    if ($0 ~ /^AGENT_CMD="\$AGENT_DEV_CMD"/) {
+      print "MATCH"
+      exit
+    }
+  }
+' "$DEV_WRAPPER")
+
+assert_eq "autonomous-dev.sh: AGENT_CMD=\$AGENT_DEV_CMD lands ≤2 lines after source lib-agent.sh" \
+  "MATCH" "$hit"
+
 echo ""
 echo "PASS: $PASS    FAIL: $FAIL"
 [[ $FAIL -eq 0 ]]

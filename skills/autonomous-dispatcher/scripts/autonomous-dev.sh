@@ -20,6 +20,8 @@ set -euo pipefail
 # autonomous.conf via tier-2 (same dir).
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 source "${SCRIPT_DIR}/lib-agent.sh"
+# Per-side AGENT_CMD override (INV-37): rebind to dev-side CLI before lib-auth.sh.
+AGENT_CMD="$AGENT_DEV_CMD"
 source "${SCRIPT_DIR}/lib-auth.sh"
 
 # Validate required config (loaded by lib-agent.sh from autonomous.conf)
