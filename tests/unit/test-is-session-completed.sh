@@ -97,6 +97,38 @@ assert_returns "AGENT_CMD=kiro → false" 1 is_session_completed 1005
 export AGENT_CMD=claude
 cleanup_log 1005
 
+# TC-WH-005b: split-CLI config (per-side AGENT_DEV_CMD overrides shared
+# AGENT_CMD). is_session_completed parses the dev wrapper's log; it
+# MUST gate on the dev-side CLI, not the dispatcher-side AGENT_CMD.
+# Per agy review Finding 3 from PR #156 + INV-37.
+write_log 1005 '{"type":"result","stop_reason":"end_turn","terminal_reason":"completed"}'
+
+# Project default AGENT_CMD=claude, but dev wrapper runs codex via
+# AGENT_DEV_CMD override. The gate must see codex on the dev side and
+# refuse to parse — claude's JSON shape doesn't apply.
+export AGENT_CMD=claude
+export AGENT_DEV_CMD=codex
+assert_returns "AGENT_DEV_CMD=codex AGENT_CMD=claude → false (gate on dev-side)" \
+  1 is_session_completed 1005
+
+# Inverse: AGENT_CMD=codex but dev runs claude → gate sees claude on
+# dev side, proceeds, parses the valid claude JSON → true.
+export AGENT_CMD=codex
+export AGENT_DEV_CMD=claude
+assert_returns "AGENT_DEV_CMD=claude AGENT_CMD=codex → true (claude log parses)" \
+  0 is_session_completed 1005
+
+# Empty AGENT_DEV_CMD (explicit) falls back to AGENT_CMD per :- semantics.
+export AGENT_CMD=claude
+export AGENT_DEV_CMD=""
+assert_returns "AGENT_DEV_CMD='' falls back to AGENT_CMD=claude → true" \
+  0 is_session_completed 1005
+
+# Reset
+unset AGENT_DEV_CMD
+export AGENT_CMD=claude
+cleanup_log 1005
+
 # TC-WH-006: missing log returns false
 assert_returns "missing log file → false" 1 is_session_completed 9999
 
