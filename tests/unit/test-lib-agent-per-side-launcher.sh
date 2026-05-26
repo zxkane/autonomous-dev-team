@@ -160,6 +160,30 @@ out=$(launcher_guard "" "" "wrap" "claude" "agy")
 assert_contains "guard error names AGENT_REVIEW_LAUNCHER" "AGENT_REVIEW_LAUNCHER" "$out"
 assert_contains "guard error names AGENT_REVIEW_CMD=agy" "AGENT_REVIEW_CMD=agy" "$out"
 
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== PSL-S9: autonomous-dev.sh structural placement ==="
+# ---------------------------------------------------------------------------
+# Match: source "${SCRIPT_DIR}/lib-agent.sh" followed (within 9 lines —
+# allows the existing 3-line WHY comment + AGENT_CMD rebind from PR #156
+# + the new 4-line WHY comment + the new AGENT_LAUNCHER_ARGV rebind) by
+# AGENT_LAUNCHER_ARGV=("${AGENT_DEV_LAUNCHER_ARGV[@]}").
+hit=$(awk '
+  /source "\$\{SCRIPT_DIR\}\/lib-agent\.sh"/ {
+    found_source = NR
+    next
+  }
+  found_source && NR <= found_source + 9 {
+    if ($0 ~ /^AGENT_LAUNCHER_ARGV=\("\$\{AGENT_DEV_LAUNCHER_ARGV\[@\]\}"\)/) {
+      print "MATCH"
+      exit
+    }
+  }
+' "$DEV_WRAPPER")
+
+assert_eq "autonomous-dev.sh: AGENT_LAUNCHER_ARGV=(\${AGENT_DEV_LAUNCHER_ARGV[@]}) within 9 lines of source lib-agent.sh" \
+  "MATCH" "$hit"
+
 echo ""
 echo "PASS: $PASS    FAIL: $FAIL"
 [[ $FAIL -eq 0 ]]

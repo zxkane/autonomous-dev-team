@@ -24,6 +24,11 @@ source "${SCRIPT_DIR}/lib-agent.sh"
 # applied inside lib-agent.sh; this just rebinds AGENT_CMD so the case
 # statements in run_agent / resume_agent dispatch to the dev-side CLI.
 AGENT_CMD="$AGENT_DEV_CMD"
+# Per-side AGENT_LAUNCHER override (INV-38). Rebinds the active
+# AGENT_LAUNCHER_ARGV that _run_with_timeout reads to the dev-side
+# array. Default fallback (operator hasn't set AGENT_DEV_LAUNCHER) is
+# byte-identical to AGENT_LAUNCHER thanks to the :- in lib-agent.sh.
+AGENT_LAUNCHER_ARGV=("${AGENT_DEV_LAUNCHER_ARGV[@]}")
 source "${SCRIPT_DIR}/lib-auth.sh"
 
 # Validate required config (loaded by lib-agent.sh from autonomous.conf)
