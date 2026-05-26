@@ -144,7 +144,7 @@ echo "=== PSC-S7: AGENT_LAUNCHER + dev=claude review=agy → guard fails ==="
 # ---------------------------------------------------------------------------
 out=$(launcher_guard "claude" "agy")
 assert_contains "guard error mentions AGENT_REVIEW_CMD=agy" "AGENT_REVIEW_CMD=agy" "$out"
-assert_contains "guard error names both vars" "AGENT_DEV_CMD" "$out"
+assert_contains "guard error mentions AGENT_REVIEW_LAUNCHER (per-side, INV-38)" "AGENT_REVIEW_LAUNCHER" "$out"
 
 # ---------------------------------------------------------------------------
 echo ""
@@ -152,14 +152,20 @@ echo "=== PSC-S8: AGENT_LAUNCHER + dev=codex review=claude → guard fails ==="
 # ---------------------------------------------------------------------------
 out=$(launcher_guard "codex" "claude")
 assert_contains "guard error mentions AGENT_DEV_CMD=codex" "AGENT_DEV_CMD=codex" "$out"
+assert_contains "guard error mentions AGENT_DEV_LAUNCHER (per-side, INV-38)" "AGENT_DEV_LAUNCHER" "$out"
 
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== PSC-S11: AGENT_LAUNCHER + both sides non-claude → guard fails ==="
 # ---------------------------------------------------------------------------
 out=$(launcher_guard "codex" "agy")
-assert_contains "guard error mentions both non-claude values" "AGENT_DEV_CMD=codex" "$out"
-assert_contains "guard error mentions review side too" "AGENT_REVIEW_CMD=agy" "$out"
+# Post-INV-38: per-side guards fire independently. The dev-side guard
+# fires first and aborts source; we only see the dev-side error.
+# AGENT_REVIEW_LAUNCHER's guard never gets to run because of `return 1`.
+assert_contains "guard error mentions AGENT_DEV_CMD=codex (dev-side fires first)" \
+  "AGENT_DEV_CMD=codex" "$out"
+assert_contains "guard error names AGENT_DEV_LAUNCHER (per-side, INV-38)" \
+  "AGENT_DEV_LAUNCHER" "$out"
 
 # ---------------------------------------------------------------------------
 echo ""

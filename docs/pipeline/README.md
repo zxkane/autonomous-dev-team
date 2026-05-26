@@ -17,6 +17,7 @@ For the high-level overview and quick start, see [`docs/autonomous-pipeline.md`]
 | [`remote-backend.md`](remote-backend.md) | The `EXECUTION_BACKEND` contract every dispatch transport (local, remote-aws-ssm, future) must satisfy. |
 | [`agy-cli-support.md`](agy-cli-support.md) | Per-CLI spec for the `AGENT_CMD=agy` (Antigravity 2.0) branch in `lib-agent.sh` — sidecar pattern, structural flags, INV-36 capture contract. |
 | [`per-side-agent-cmd.md`](per-side-agent-cmd.md) | `AGENT_DEV_CMD` / `AGENT_REVIEW_CMD` — let dev and review run on different CLIs in the same project (INV-37). |
+| [`per-side-launcher.md`](per-side-launcher.md) | `AGENT_DEV_LAUNCHER` / `AGENT_REVIEW_LAUNCHER` — per-side launcher prefix; pairs with INV-37 to allow mixed-CLI deployments where only one side has a launcher (INV-38). |
 
 ## Reading order
 

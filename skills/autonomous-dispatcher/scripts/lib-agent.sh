@@ -105,19 +105,67 @@ if [[ -n "$AGENT_LAUNCHER" ]]; then
   unset _orig_launcher
 fi
 
-# AGENT_LAUNCHER is only supported when both per-side CLIs are claude
-# (INV-37). The canonical launcher (a `cc` shell function ending in
-# `$CLAUDE_CMD "$@"`) is hardcoded to invoke claude, so pointing it at
-# codex/kiro/opencode/agy would produce `claude codex ...` and fail.
+# Per-side AGENT_LAUNCHER overrides (INV-38). Default to AGENT_LAUNCHER
+# so existing single-launcher deployments are byte-for-byte unchanged.
+# autonomous-dev.sh and autonomous-review.sh each rebind
+# AGENT_LAUNCHER_ARGV to their side's array right after sourcing this
+# file, so run_agent / resume_agent continue reading AGENT_LAUNCHER_ARGV
+# without signature changes. See docs/pipeline/per-side-launcher.md.
+AGENT_DEV_LAUNCHER="${AGENT_DEV_LAUNCHER:-$AGENT_LAUNCHER}"
+AGENT_REVIEW_LAUNCHER="${AGENT_REVIEW_LAUNCHER:-$AGENT_LAUNCHER}"
+declare -a AGENT_DEV_LAUNCHER_ARGV=()
+declare -a AGENT_REVIEW_LAUNCHER_ARGV=()
+
+# Tokenize AGENT_DEV_LAUNCHER (mirrors the AGENT_LAUNCHER eval block above).
+if [[ -n "$AGENT_DEV_LAUNCHER" ]]; then
+  _orig_dev_launcher="$AGENT_DEV_LAUNCHER"
+  if ! eval "AGENT_DEV_LAUNCHER_ARGV=($AGENT_DEV_LAUNCHER)" 2>/dev/null; then
+    AGENT_DEV_LAUNCHER=""
+    AGENT_DEV_LAUNCHER_ARGV=()
+    echo "[lib-agent] ERROR: AGENT_DEV_LAUNCHER failed to parse as a shell argv list. Value: ${_orig_dev_launcher}" >&2
+    unset _orig_dev_launcher
+    return 1 2>/dev/null || exit 1
+  fi
+  if [[ ${#AGENT_DEV_LAUNCHER_ARGV[@]} -eq 0 ]]; then
+    echo "[lib-agent] WARN: AGENT_DEV_LAUNCHER non-empty but tokenized to zero argv elements. Treating as unset. Value: ${_orig_dev_launcher}" >&2
+  fi
+  unset _orig_dev_launcher
+fi
+
+# Tokenize AGENT_REVIEW_LAUNCHER (same shape as AGENT_DEV_LAUNCHER above).
+if [[ -n "$AGENT_REVIEW_LAUNCHER" ]]; then
+  _orig_review_launcher="$AGENT_REVIEW_LAUNCHER"
+  if ! eval "AGENT_REVIEW_LAUNCHER_ARGV=($AGENT_REVIEW_LAUNCHER)" 2>/dev/null; then
+    AGENT_REVIEW_LAUNCHER=""
+    AGENT_REVIEW_LAUNCHER_ARGV=()
+    echo "[lib-agent] ERROR: AGENT_REVIEW_LAUNCHER failed to parse as a shell argv list. Value: ${_orig_review_launcher}" >&2
+    unset _orig_review_launcher
+    return 1 2>/dev/null || exit 1
+  fi
+  if [[ ${#AGENT_REVIEW_LAUNCHER_ARGV[@]} -eq 0 ]]; then
+    echo "[lib-agent] WARN: AGENT_REVIEW_LAUNCHER non-empty but tokenized to zero argv elements. Treating as unset. Value: ${_orig_review_launcher}" >&2
+  fi
+  unset _orig_review_launcher
+fi
+
+# AGENT_LAUNCHER is gated per-side (INV-38). Each side's launcher is
+# checked against THAT side's AGENT_CMD: AGENT_DEV_LAUNCHER non-empty
+# requires AGENT_DEV_CMD=claude; AGENT_REVIEW_LAUNCHER non-empty
+# requires AGENT_REVIEW_CMD=claude. Side that has no launcher is
+# unconstrained. The canonical launcher (a `cc` shell function ending
+# in `$CLAUDE_CMD "$@"`) is hardcoded to invoke claude, so pointing it
+# at codex/kiro/opencode/agy would produce `claude codex ...` and fail.
 # Refuse the combination rather than crashing 5 seconds into the next
 # dispatch. The check reads AGENT_DEV_CMD / AGENT_REVIEW_CMD directly
 # (not via AGENT_CMD) because the wrapper-level override fires AFTER
-# this guard — see docs/pipeline/per-side-agent-cmd.md §Resolution order.
-if [[ ${#AGENT_LAUNCHER_ARGV[@]} -gt 0 ]]; then
-  if [[ "$AGENT_DEV_CMD" != "claude" || "$AGENT_REVIEW_CMD" != "claude" ]]; then
-    echo "[lib-agent] ERROR: AGENT_LAUNCHER is only supported when both AGENT_DEV_CMD and AGENT_REVIEW_CMD are claude (got AGENT_DEV_CMD=${AGENT_DEV_CMD}, AGENT_REVIEW_CMD=${AGENT_REVIEW_CMD}). Either unset AGENT_LAUNCHER or write a launcher tailored to your CLI." >&2
-    return 1 2>/dev/null || exit 1
-  fi
+# this guard — see docs/pipeline/per-side-launcher.md §Resolution order.
+if [[ ${#AGENT_DEV_LAUNCHER_ARGV[@]} -gt 0 && "$AGENT_DEV_CMD" != "claude" ]]; then
+  echo "[lib-agent] ERROR: AGENT_DEV_LAUNCHER is only supported with AGENT_DEV_CMD=claude (got AGENT_DEV_CMD=${AGENT_DEV_CMD}). Either unset AGENT_DEV_LAUNCHER (or AGENT_LAUNCHER if it's the source of the dev-side default) or write a launcher tailored to your CLI." >&2
+  return 1 2>/dev/null || exit 1
+fi
+if [[ ${#AGENT_REVIEW_LAUNCHER_ARGV[@]} -gt 0 && "$AGENT_REVIEW_CMD" != "claude" ]]; then
+  echo "[lib-agent] ERROR: AGENT_REVIEW_LAUNCHER is only supported with AGENT_REVIEW_CMD=claude (got AGENT_REVIEW_CMD=${AGENT_REVIEW_CMD}). Either unset AGENT_REVIEW_LAUNCHER (or AGENT_LAUNCHER if it's the source of the review-side default) or write a launcher tailored to your CLI." >&2
+  return 1 2>/dev/null || exit 1
 fi
 
 # AGENT_DEV_EXTRA_ARGS / AGENT_REVIEW_EXTRA_ARGS (closes #140) — operator-
