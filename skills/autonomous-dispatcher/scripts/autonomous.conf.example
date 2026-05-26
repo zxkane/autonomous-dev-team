@@ -214,6 +214,25 @@ AGENT_TIMEOUT="4h"
 AGENT_DEV_EXTRA_ARGS=""
 AGENT_REVIEW_EXTRA_ARGS=""
 
+# AGENT_DEV_LAUNCHER / AGENT_REVIEW_LAUNCHER: per-side override of
+# AGENT_LAUNCHER (INV-38). Default to AGENT_LAUNCHER when unset/empty
+# so existing single-launcher deployments are unaffected. Set them
+# when dev and review run on different CLIs and need different
+# launcher treatment — for example, claude for dev with a Bedrock-
+# bridge launcher (cc), kiro for review with no launcher:
+#
+#   AGENT_CMD="claude"
+#   AGENT_DEV_LAUNCHER='bash -c '\''source ~/.bash_aliases && cc "$@"'\'' --'
+#   AGENT_REVIEW_CMD="kiro"
+#   AGENT_DEV_EXTRA_ARGS="--trust-all-tools"   # see kiro block
+#
+# Per-side guard (INV-38): each side's launcher is gated against
+# THAT side's AGENT_CMD. AGENT_DEV_LAUNCHER non-empty requires
+# AGENT_DEV_CMD=claude; AGENT_REVIEW_LAUNCHER non-empty requires
+# AGENT_REVIEW_CMD=claude. Side that has no launcher is unconstrained.
+# AGENT_DEV_LAUNCHER=""
+# AGENT_REVIEW_LAUNCHER=""
+
 # AGENT_DEV_CMD / AGENT_REVIEW_CMD: per-side override of AGENT_CMD.
 # Default to AGENT_CMD when unset/empty, so existing single-CLI
 # deployments are unaffected. Set them when you want dev and review
@@ -225,9 +244,10 @@ AGENT_REVIEW_EXTRA_ARGS=""
 #   AGENT_DEV_MODEL="opus[1m]"
 #   AGENT_REVIEW_MODEL=""        # ignored by agy (warns), see agy block
 #
-# AGENT_LAUNCHER (claude-only) is rejected when either side resolves
-# to a non-claude CLI. Either unset the launcher or keep both sides
-# on claude. See [INV-37] in docs/pipeline/invariants.md.
+# AGENT_LAUNCHER (claude-only) is gated per-side by INV-38: each side's
+# launcher requires THAT side's CLI to be claude. The natural mixed-
+# CLI deployment (claude dev with cc + non-claude review without
+# launcher) works — see AGENT_DEV_LAUNCHER block above.
 # AGENT_DEV_CMD=""
 # AGENT_REVIEW_CMD=""
 
