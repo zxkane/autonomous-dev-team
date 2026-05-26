@@ -25,6 +25,10 @@ source "${SCRIPT_DIR}/lib-agent.sh"
 # and review on different agent CLIs (e.g. claude for dev, agy for
 # review). Default (no operator override) is byte-for-byte unchanged.
 AGENT_CMD="$AGENT_REVIEW_CMD"
+# Per-side AGENT_LAUNCHER override (INV-38). Mirrors the dev-side
+# rebind in autonomous-dev.sh. Default (operator hasn't set
+# AGENT_REVIEW_LAUNCHER) is byte-identical to AGENT_LAUNCHER.
+AGENT_LAUNCHER_ARGV=("${AGENT_REVIEW_LAUNCHER_ARGV[@]}")
 source "${SCRIPT_DIR}/lib-auth.sh"
 # shellcheck source=lib-review-bots.sh
 source "${SCRIPT_DIR}/lib-review-bots.sh"

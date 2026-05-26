@@ -184,6 +184,28 @@ hit=$(awk '
 assert_eq "autonomous-dev.sh: AGENT_LAUNCHER_ARGV=(\${AGENT_DEV_LAUNCHER_ARGV[@]}) within 9 lines of source lib-agent.sh" \
   "MATCH" "$hit"
 
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== PSL-S10: autonomous-review.sh structural placement ==="
+# ---------------------------------------------------------------------------
+# Match: within 9 lines of source — 4-line WHY comment from PR #156 +
+# AGENT_CMD rebind + new 3-line WHY + new AGENT_LAUNCHER_ARGV rebind.
+hit=$(awk '
+  /source "\$\{SCRIPT_DIR\}\/lib-agent\.sh"/ {
+    found_source = NR
+    next
+  }
+  found_source && NR <= found_source + 9 {
+    if ($0 ~ /^AGENT_LAUNCHER_ARGV=\("\$\{AGENT_REVIEW_LAUNCHER_ARGV\[@\]\}"\)/) {
+      print "MATCH"
+      exit
+    }
+  }
+' "$REVIEW_WRAPPER")
+
+assert_eq "autonomous-review.sh: AGENT_LAUNCHER_ARGV=(\${AGENT_REVIEW_LAUNCHER_ARGV[@]}) within 9 lines of source lib-agent.sh" \
+  "MATCH" "$hit"
+
 echo ""
 echo "PASS: $PASS    FAIL: $FAIL"
 [[ $FAIL -eq 0 ]]
