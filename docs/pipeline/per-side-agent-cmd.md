@@ -89,6 +89,38 @@ sides resolve to claude), and it correctly rejects every previously-
 rejected combination. No existing operator config goes from passing
 to failing.
 
+## Dispatcher-side coupling
+
+The dispatcher tick (`lib-dispatch.sh`) does NOT source `lib-agent.sh`
+and does NOT receive the wrapper-level `AGENT_CMD` override. It only
+sees the project-default `$AGENT_CMD` from `autonomous.conf`. Two
+helpers in the dispatcher therefore need explicit per-side awareness
+to handle split-CLI deployments correctly:
+
+1. **`_pgid_has_agent_process <pgid> [agent_cmd_override]`** — process-
+   group liveness probe shared by `dev_near_success` (Step 5b/Step 5
+   signal 4) and `review_near_success` (Step 5b signal 5). The 2nd
+   argument is a per-side CLI override; callers pass
+   `${AGENT_DEV_CMD:-${AGENT_CMD:-claude}}` and
+   `${AGENT_REVIEW_CMD:-${AGENT_CMD:-claude}}` respectively. Empty/
+   missing falls back to `$AGENT_CMD` for back-compat. Without this,
+   a project running `AGENT_REVIEW_CMD=agy` would have its live agy
+   review process classified as DEAD by the dispatcher (the `*claude*`
+   substring match against agy's `comm` would miss).
+
+2. **`is_session_completed`** — claude-only JSON log parser used by
+   the dispatcher's Step 4 terminal-state gate. Gates on the dev-side
+   CLI (`${AGENT_DEV_CMD:-${AGENT_CMD:-claude}}`) because it parses
+   the **dev** wrapper's log file (`/tmp/agent-${PROJECT_ID}-issue-N.log`).
+   Without the dev-side gate, a project with `AGENT_DEV_CMD=codex`
+   and the dispatcher's `AGENT_CMD=claude` default would attempt to
+   parse a codex JSONL log with claude rules, producing
+   misinterpretations of completion state.
+
+These are addressed in this PR alongside the wrapper-side override,
+so split-CLI deployments are correct end-to-end. Per agy review
+Finding 2 + Finding 3 of PR #156.
+
 ## What is NOT covered
 
 - **`AGENT_PERMISSION_MODE`** stays shared. It's only consumed in

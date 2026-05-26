@@ -527,7 +527,12 @@ is_session_completed() {
   local issue_num="$1"
   local reason_var="${2:-}"
   local end_ts_var="${3:-}"
-  [ "${AGENT_CMD:-claude}" = "claude" ] || return 1
+  # Gate on dev-side CLI per [INV-37] — this function parses the dev
+  # wrapper's log, so the dispatcher-side $AGENT_CMD (project default)
+  # is the wrong value to check under split-CLI deployments
+  # (e.g. AGENT_CMD=claude AGENT_DEV_CMD=codex).
+  local _dev_cmd="${AGENT_DEV_CMD:-${AGENT_CMD:-claude}}"
+  [ "$_dev_cmd" = "claude" ] || return 1
 
   local log_file="/tmp/agent-${PROJECT_ID}-issue-${issue_num}.log"
   [ -r "$log_file" ] || return 1
@@ -1231,30 +1236,44 @@ dev_near_success() {
   # Signal 4: process-group walk (#137 parity with [INV-24] signal 5).
   # Skipped silently when PID is empty / unparseable (mirrors the
   # caller-site contract used by review_near_success in this same file).
-  if [ -n "$pid" ] && _pgid_has_agent_process "$pid"; then
+  # Pass dev-side CLI per [INV-37] so a project running
+  # AGENT_DEV_CMD=codex still finds the codex process even when the
+  # dispatcher's $AGENT_CMD is the project default (e.g. claude).
+  if [ -n "$pid" ] && _pgid_has_agent_process "$pid" "${AGENT_DEV_CMD:-${AGENT_CMD:-claude}}"; then
     return 0
   fi
 
   return 1
 }
 
-# _pgid_has_agent_process <pgid>
+# _pgid_has_agent_process <pgid> [agent_cmd_override]
 #
 # Process-group walk shared between dev_near_success (signal 4, #137)
 # and review_near_success (signal 5, #132). Walks the wrapper's process
 # group (PGID == content of `<kind>-${ISSUE}.pid`; setsid in
 # lib-agent.sh::_run_with_timeout makes the session-leader PID equal to
 # the PGID) and returns 0 if any group member's `comm` matches the
-# configured AGENT_CMD.
+# expected agent CLI name.
+#
+# 2nd arg [INV-37, agy review Finding 2 from PR #156]: optional
+# per-side CLI override. Empty / missing falls back to $AGENT_CMD for
+# back-compat with existing call sites and tests. Required when the
+# project uses split per-side CLIs (e.g. AGENT_DEV_CMD=claude,
+# AGENT_REVIEW_CMD=agy): the dispatcher tick's $AGENT_CMD is the
+# project default, but each wrapper runs with its side's override —
+# matching against the dispatcher-side $AGENT_CMD would false-negative
+# the live wrapper. Callers MUST pass the correct per-side value
+# (dev_near_success → AGENT_DEV_CMD, review_near_success →
+# AGENT_REVIEW_CMD).
 #
 # Returns 1 silently in three cases — never fail-closed:
 #   - PGID is not a positive integer (empty / unparseable PID file)
 #   - `pgrep` or `ps` not on PATH (mismatched host)
-#   - No member of the group has a comm matching AGENT_CMD
+#   - No member of the group has a comm matching the resolved CLI name
 #
-# Substring match (`*${AGENT_CMD}*`) is intentionally tolerant: Linux
+# Substring match (`*${agent_cmd}*`) is intentionally tolerant: Linux
 # truncates `comm` to 15 chars (so `claude-cli-with-extras` shows up as
-# `claude-cli-with`), and AGENT_CMD values are typically 5–10 chars.
+# `claude-cli-with`), and CLI values are typically 5–10 chars.
 # Over-match is safe here — this signal only runs after pid_alive missed
 # AND the cheaper signals already failed, so a false positive defers a
 # crash declaration by one tick at most, while a false negative
@@ -1268,12 +1287,12 @@ dev_near_success() {
 # same PR.)
 _pgid_has_agent_process() {
   local pgid="$1"
+  local agent_cmd="${2:-${AGENT_CMD:-claude}}"
   [[ "$pgid" =~ ^[0-9]+$ ]] || return 1
   [ "$pgid" -gt 0 ] || return 1
   command -v pgrep >/dev/null 2>&1 || return 1
   command -v ps >/dev/null 2>&1 || return 1
 
-  local agent_cmd="${AGENT_CMD:-claude}"
   local pid comm
   while read -r pid; do
     [[ "$pid" =~ ^[0-9]+$ ]] || continue
@@ -1368,7 +1387,10 @@ review_near_success() {
   # helper's own integer guard would catch it, but checking here keeps
   # the caller's contract explicit and avoids ever spawning the helper
   # subshell on bad input.
-  if [ -n "$pid" ] && _pgid_has_agent_process "$pid"; then
+  # Pass review-side CLI per [INV-37] so a project running
+  # AGENT_REVIEW_CMD=agy still finds the agy process even when the
+  # dispatcher's $AGENT_CMD is the project default (e.g. claude).
+  if [ -n "$pid" ] && _pgid_has_agent_process "$pid" "${AGENT_REVIEW_CMD:-${AGENT_CMD:-claude}}"; then
     return 0
   fi
 
