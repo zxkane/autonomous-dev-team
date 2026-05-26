@@ -151,6 +151,7 @@ echo "=== PSL-S7: AGENT_DEV_LAUNCHER + AGENT_DEV_CMD=kiro → guard fails per-si
 out=$(launcher_guard "" "cc" "" "kiro" "claude")
 assert_contains "guard error names AGENT_DEV_LAUNCHER" "AGENT_DEV_LAUNCHER" "$out"
 assert_contains "guard error names AGENT_DEV_CMD=kiro" "AGENT_DEV_CMD=kiro" "$out"
+assert_contains "guard returns rc=1 (source aborted)" "RC=1" "$out"
 
 # ---------------------------------------------------------------------------
 echo ""
@@ -159,6 +160,7 @@ echo "=== PSL-S8: AGENT_REVIEW_LAUNCHER + AGENT_REVIEW_CMD=agy → guard fails p
 out=$(launcher_guard "" "" "wrap" "claude" "agy")
 assert_contains "guard error names AGENT_REVIEW_LAUNCHER" "AGENT_REVIEW_LAUNCHER" "$out"
 assert_contains "guard error names AGENT_REVIEW_CMD=agy" "AGENT_REVIEW_CMD=agy" "$out"
+assert_contains "guard returns rc=1 (source aborted)" "RC=1" "$out"
 
 # ---------------------------------------------------------------------------
 echo ""

@@ -130,8 +130,8 @@ place sees exactly which side broke the contract.
 ## Operator-facing config
 
 `autonomous.conf.example` gets a new comment block above the per-CLI
-blocks (after `AGENT_LAUNCHER`'s existing block, before
-`AGENT_DEV_EXTRA_ARGS`):
+blocks, between the per-side `AGENT_*_EXTRA_ARGS` defaults and the
+`AGENT_DEV_CMD` / `AGENT_REVIEW_CMD` block:
 
 ```bash
 # AGENT_DEV_LAUNCHER / AGENT_REVIEW_LAUNCHER: per-side override of
@@ -188,8 +188,8 @@ New file `tests/unit/test-lib-agent-per-side-launcher.sh` covers:
 | PSL-S6 | `AGENT_DEV_LAUNCHER` non-empty + `AGENT_DEV_CMD=claude` → source succeeds (per-side guard pass) |
 | PSL-S7 | `AGENT_DEV_LAUNCHER` non-empty + `AGENT_DEV_CMD=kiro` → source fails, error names `AGENT_DEV_LAUNCHER` and `AGENT_DEV_CMD=kiro` |
 | PSL-S8 | `AGENT_REVIEW_LAUNCHER` non-empty + `AGENT_REVIEW_CMD=agy` → source fails, error names `AGENT_REVIEW_LAUNCHER` and `AGENT_REVIEW_CMD=agy` |
-| PSL-S9 | Structural — `autonomous-dev.sh` rebinds `AGENT_LAUNCHER_ARGV=("${AGENT_DEV_LAUNCHER_ARGV[@]}")` within 5 lines of `source lib-agent.sh` (3-line WHY comment + AGENT_CMD rebind from PR #156 + the new 1-line LAUNCHER rebind) |
-| PSL-S10 | Structural — `autonomous-review.sh` rebinds `AGENT_LAUNCHER_ARGV=("${AGENT_REVIEW_LAUNCHER_ARGV[@]}")` within 6 lines of the source statement (4-line WHY comment + AGENT_CMD rebind + 1-line LAUNCHER rebind) |
+| PSL-S9 | Structural — `autonomous-dev.sh` rebinds `AGENT_LAUNCHER_ARGV=("${AGENT_DEV_LAUNCHER_ARGV[@]}")` within 9 lines of `source lib-agent.sh` (3-line WHY comment + AGENT_CMD rebind from PR #156 + new 4-line WHY comment + new LAUNCHER rebind = 9 lines) |
+| PSL-S10 | Structural — `autonomous-review.sh` rebinds `AGENT_LAUNCHER_ARGV=("${AGENT_REVIEW_LAUNCHER_ARGV[@]}")` within 9 lines of the source statement (4-line WHY comment + AGENT_CMD rebind + new 3-line WHY + new LAUNCHER rebind = 9 lines) |
 
 PSL-S9/S10 are structural greps — same approach as PSC-S9/S10
 ([INV-37]'s structural tests), with widened windows to accommodate
