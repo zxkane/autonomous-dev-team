@@ -307,9 +307,10 @@ check_deps_resolved() {
   while IFS= read -r line; do
     # Stage 2a: cross-repo `owner/repo#N`. Matched longest-first so that
     # `owner/repo#42` doesn't survive to be re-parsed as bare `#42`. The
-    # left boundary `(^|[[:space:]])` rules out URL fragments and inline
-    # punctuation.
-    while [[ "$line" =~ (^|[[:space:]])([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#([0-9]+) ]]; do
+    # left boundary `(^|[[:space:]\(])` rules out URL fragments and inline
+    # punctuation while still allowing parenthesized refs like
+    # `- (owner/repo#42)`.
+    while [[ "$line" =~ (^|[[:space:]\(])([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#([0-9]+) ]]; do
       matched="${BASH_REMATCH[0]}"
       dep_repo="${BASH_REMATCH[2]}"
       dep_num="${BASH_REMATCH[3]}"
@@ -327,7 +328,7 @@ check_deps_resolved() {
       line="${line/"$matched"/ }"
     done
     # Stage 2b: bare `#N` on the residue. Same-repo lookup against $REPO.
-    while [[ "$line" =~ (^|[[:space:]])#([0-9]+) ]]; do
+    while [[ "$line" =~ (^|[[:space:]\(])#([0-9]+) ]]; do
       matched="${BASH_REMATCH[0]}"
       dep_num="${BASH_REMATCH[2]}"
       state=$(gh issue view "$dep_num" --repo "$REPO" --json state -q '.state' 2>/dev/null || true)

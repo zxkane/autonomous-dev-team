@@ -338,6 +338,60 @@ assert_eq "URL fragment in prose → resolved (rc=0)" "0" "$?"
 
 # ---------------------------------------------------------------------------
 echo ""
+echo "=== check_deps_resolved: URL-form ref ON A LIST-ITEM does NOT block (#157, INV-39) ==="
+# ---------------------------------------------------------------------------
+# Even when a list-item line contains a GitHub URL with a numeric `#NNN`
+# fragment (e.g., `#456`), the left-boundary anchor must reject it: in
+# `repo/issues/123#456`, the `#` is preceded by digits, not whitespace
+# / `(` / start-of-line, AND `issues/123` is preceded by `/`, not a
+# left-boundary character. This test exercises Stage 2's boundary
+# logic directly — the prose-only test above is filtered out at Stage 1.
+# If `_MOCK_STATES` is unset and the regex did match, the lookup would
+# return default OPEN (or, here, the registered CLOSED) — so we register
+# CLOSED for the would-be-extracted numbers; if any of them were
+# extracted it would still resolve, but the better signal is to register
+# OPEN and confirm rc=0 anyway (proving they were filtered out).
+_MOCK_BODY="## Dependencies
+- See https://github.com/other-owner/other-repo/issues/123#456 for context
+"
+_reset_states
+# Pre-fix, the greedy old parser could have extracted 123 or 456 against
+# $REPO. Register both as OPEN so a regression that re-introduces
+# greedy extraction would block (rc=1). Post-fix, the line is filtered
+# at Stage 1 anyway (it's a list item, but the URL fragment fails Stage
+# 2's left-boundary check).
+_set_same_repo_state 123 OPEN
+_set_same_repo_state 456 OPEN
+_set_repo_state other-owner/other-repo 123 OPEN
+_set_repo_state other-owner/other-repo 456 OPEN
+check_deps_resolved 99
+assert_eq "URL fragment on list item → resolved (rc=0); fragment ignored, repo path ignored" "0" "$?"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== check_deps_resolved: parenthesized refs are recognized (INV-39) ==="
+# ---------------------------------------------------------------------------
+# `- (owner/repo#42)` and `- (#42)` should still match — the spec permits
+# `(` as a left boundary so common Markdown phrasings like
+# `- waiting on (owner/repo#42)` parse correctly.
+_MOCK_BODY="## Dependencies
+- waiting on (other-owner/other-repo#42)
+- and also (#7)
+"
+_reset_states
+_set_repo_state other-owner/other-repo 42 CLOSED
+_set_same_repo_state 7 CLOSED
+check_deps_resolved 99
+assert_eq "parenthesized cross-repo + same-repo, both CLOSED → resolved (rc=0)" "0" "$?"
+
+_reset_states
+_set_repo_state other-owner/other-repo 42 OPEN
+_set_same_repo_state 7 CLOSED
+check_deps_resolved 99
+assert_eq "parenthesized cross-repo OPEN → blocked (rc=1)" "1" "$?"
+
+# ---------------------------------------------------------------------------
+echo ""
 echo "=== check_deps_resolved: failed lookup blocks AND warns (INV-39) ==="
 # ---------------------------------------------------------------------------
 # Cross-repo ref to a non-existent / unauthorized repo: the real `gh issue
