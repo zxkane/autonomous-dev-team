@@ -45,12 +45,23 @@
     - Issues that this issue unblocks (i.e., issues that depend on THIS one)
     - Parent epics or meta-trackers referenced for context
     - Issues mentioned elsewhere in the body
-  The autonomous dispatcher parses this section literally — any #NNN here that is still
-  OPEN will cause this issue to be silently skipped until that issue is closed.
+
+  The autonomous dispatcher parses this section literally — any list-item ref
+  that is still OPEN will cause this issue to be silently skipped until that
+  ref is closed/merged. Parsing has two stages:
+    1. Only LIST-ITEM lines (lines starting with `-`, `*`, or `1.`) are scanned.
+       Prose, blockquotes (`> ...`), and headings between `## Dependencies` and
+       the next `## ` are ignored — they will NOT block dispatch.
+    2. On each list item, the dispatcher recognizes two ref shapes:
+         - `#N`             — same-repo issue/PR (this repo)
+         - `owner/repo#N`   — cross-repo issue/PR (resolved against owner/repo)
+       Any open ref of either shape blocks this issue.
 
   Pick exactly ONE of the two shapes below (delete the other):
     - If there are no blocking prerequisites, write exactly: None
-    - Otherwise, list each blocker on its own line: - #N (must be merged first because <specific reason>)
+    - Otherwise, list each blocker on its own line:
+        - #N (must be merged first because <specific reason>)
+        - owner/repo#N (cross-repo blocker because <specific reason>)
 -->
 - None
 
