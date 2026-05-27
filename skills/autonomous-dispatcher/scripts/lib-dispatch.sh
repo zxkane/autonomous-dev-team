@@ -280,28 +280,69 @@ run_hygiene_pass() {
 # Returns 1 (blocked) on the first unresolved dependency. Returns 0 if no
 # dependencies are listed.
 #
-# Closes #61 (MERGED PRs report `state: "MERGED"`, not `"CLOSED"`) and
-# #73 (replace GNU-only `grep -oP '#\K[0-9]+'` with portable extraction).
-# Both fixes are in the same function and ship together.
+# Parsing rules (see INV-11 in docs/pipeline/invariants.md):
+#   - Only list-item lines (`-`, `*`, or `1.` markers) inside the
+#     `## Dependencies` section are scanned. Prose, blockquotes, and
+#     headings are ignored — this is what stops false positives where a
+#     `#NNN` mentioned in passing got greedy-extracted (#157).
+#   - Two ref shapes are recognized, longest first per line:
+#       * `owner/repo#N` → resolved against the named repo
+#       * `#N`           → resolved against $REPO (same-repo)
+#   - Both shapes require a left boundary (start-of-line or whitespace) so
+#     URL fragments (`https://github.com/.../issues/123`) and inline
+#     punctuation aren't misparsed.
+#
+# Closes #61 (MERGED PRs report `state: "MERGED"`, not `"CLOSED"`),
+# #73 (replace GNU-only `grep -oP '#\K[0-9]+'` with portable extraction),
+# and #157 (cross-repo refs + list-only scope).
 check_deps_resolved() {
   local issue_num="$1"
-  local deps state
-  # Portable dep-number extraction: grep -oE matches `#NNN`, sed strips
-  # the leading `#`. Equivalent to the GNU-only `grep -oP '#\K[0-9]+'`
-  # but works on macOS / BSD grep too.
-  deps=$(gh issue view "$issue_num" --repo "$REPO" --json body -q '.body' \
-    | sed -n '/^## Dependencies/,/^## /p' \
-    | grep -oE '#[0-9]+' \
-    | sed 's/^#//' || true)
+  local body section line state dep_repo dep_num matched
+  body=$(gh issue view "$issue_num" --repo "$REPO" --json body -q '.body')
+  section=$(printf '%s\n' "$body" | sed -n '/^## Dependencies/,/^## /p')
 
-  for dep in $deps; do
-    state=$(gh issue view "$dep" --repo "$REPO" --json state -q '.state')
-    # Both CLOSED (issues, closed PRs) and MERGED (merged PRs) count as
-    # resolved. `gh issue view` on a merged PR returns state "MERGED".
-    if [ "$state" != "CLOSED" ] && [ "$state" != "MERGED" ]; then
-      return 1
-    fi
-  done
+  # Stage 1: restrict to list-item lines. `grep -E` exits non-zero when
+  # nothing matches; the trailing `|| true` keeps the pipeline alive so
+  # the while loop simply runs zero times and we fall through to rc=0.
+  while IFS= read -r line; do
+    # Stage 2a: cross-repo `owner/repo#N`. Matched longest-first so that
+    # `owner/repo#42` doesn't survive to be re-parsed as bare `#42`. The
+    # left boundary `(^|[[:space:]\(])` rules out URL fragments and inline
+    # punctuation while still allowing parenthesized refs like
+    # `- (owner/repo#42)`.
+    while [[ "$line" =~ (^|[[:space:]\(])([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#([0-9]+) ]]; do
+      matched="${BASH_REMATCH[0]}"
+      dep_repo="${BASH_REMATCH[2]}"
+      dep_num="${BASH_REMATCH[3]}"
+      state=$(gh issue view "$dep_num" --repo "$dep_repo" --json state -q '.state' 2>/dev/null || true)
+      # Empty state means the lookup failed (404, network error, private
+      # repo). [INV-39]: fail-safe blocks dispatch, but the failure must
+      # be observable — otherwise we silently recreate the #157 bug class.
+      if [ -z "$state" ]; then
+        echo "[check_deps_resolved] WARNING: lookup failed for ${dep_repo}#${dep_num} (issue ${issue_num}); blocking" >&2
+        return 1
+      fi
+      if [ "$state" != "CLOSED" ] && [ "$state" != "MERGED" ]; then
+        return 1
+      fi
+      line="${line/"$matched"/ }"
+    done
+    # Stage 2b: bare `#N` on the residue. Same-repo lookup against $REPO.
+    while [[ "$line" =~ (^|[[:space:]\(])#([0-9]+) ]]; do
+      matched="${BASH_REMATCH[0]}"
+      dep_num="${BASH_REMATCH[2]}"
+      state=$(gh issue view "$dep_num" --repo "$REPO" --json state -q '.state' 2>/dev/null || true)
+      if [ -z "$state" ]; then
+        echo "[check_deps_resolved] WARNING: lookup failed for ${REPO}#${dep_num} (issue ${issue_num}); blocking" >&2
+        return 1
+      fi
+      if [ "$state" != "CLOSED" ] && [ "$state" != "MERGED" ]; then
+        return 1
+      fi
+      line="${line/"$matched"/ }"
+    done
+  done < <(printf '%s\n' "$section" | grep -E '^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]' || true)
+
   return 0
 }
 

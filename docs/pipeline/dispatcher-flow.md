@@ -162,7 +162,7 @@ Find issues labeled `autonomous` with **no other active state label** (no `in-pr
 
 For each match, in order:
 
-1. **Dependency check.** Read the issue body for a `## Dependencies` section. Extract every `#N` reference. For each, call `gh issue view N --json state` and require state `CLOSED` or `MERGED` ([INV-11](invariants.md#inv-11-dependency-state-includes-merged) — PRs report `MERGED`, not `CLOSED`). If any dependency is still open, **skip silently** — no comment, no label change. The issue picks up next tick once dependencies clear.
+1. **Dependency check.** Read the issue body for a `## Dependencies` section. Extract refs from list-item lines only — `#N` and `owner/repo#N` are recognized; prose and blockquotes are ignored ([INV-39](invariants.md#inv-39-dependency-parsing-is-list-item-scoped-and-supports-cross-repo-refs)). For each ref, call `gh issue view N --repo <repo> --json state` and require state `CLOSED` or `MERGED` ([INV-11](invariants.md#inv-11-dependency-state-includes-merged) — PRs report `MERGED`, not `CLOSED`; the same rule applies to cross-repo refs). If any dependency is still open, **skip silently** — no comment, no label change. The issue picks up next tick once dependencies clear.
 2. **Add `in-progress` label.**
 3. **Post dispatch token** ([INV-18](invariants.md#inv-18-cold-start-grace-period-before-stale-detection)): write `<!-- dispatcher-token: <id> at <iso> mode=dev-new -->` followed by the human-readable "Dispatching autonomous development..." line. The HTML comment encodes the dispatch timestamp for Step 5's grace-period check.
 4. **Dispatch**: `bash $PROJECT_DIR/scripts/dispatch-local.sh dev-new <issue>`
