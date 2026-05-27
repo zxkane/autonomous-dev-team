@@ -20,16 +20,21 @@ set -euo pipefail
 # autonomous.conf via tier-2 (same dir).
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 source "${SCRIPT_DIR}/lib-agent.sh"
+source "${SCRIPT_DIR}/lib-auth.sh"
 # Per-side AGENT_CMD override (INV-37). Empty-string fallback already
 # applied inside lib-agent.sh; this just rebinds AGENT_CMD so the case
 # statements in run_agent / resume_agent dispatch to the dev-side CLI.
+#
+# MUST come AFTER `source lib-auth.sh` — lib-auth.sh transitively sources
+# lib-config.sh::load_autonomous_conf which re-sources autonomous.conf,
+# and conf's unconditional `AGENT_CMD="claude"` line would otherwise
+# overwrite this rebind. Same ordering is applied in autonomous-review.sh.
 AGENT_CMD="$AGENT_DEV_CMD"
 # Per-side AGENT_LAUNCHER override (INV-38). Rebinds the active
 # AGENT_LAUNCHER_ARGV that _run_with_timeout reads to the dev-side
 # array. Default fallback (operator hasn't set AGENT_DEV_LAUNCHER) is
 # byte-identical to AGENT_LAUNCHER thanks to the :- in lib-agent.sh.
 AGENT_LAUNCHER_ARGV=("${AGENT_DEV_LAUNCHER_ARGV[@]}")
-source "${SCRIPT_DIR}/lib-auth.sh"
 
 # Validate required config (loaded by lib-agent.sh from autonomous.conf)
 : "${PROJECT_ID:?Set PROJECT_ID in autonomous.conf}"

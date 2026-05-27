@@ -20,20 +20,25 @@ set -euo pipefail
 # autonomous.conf via tier-2 (same dir).
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 source "${SCRIPT_DIR}/lib-agent.sh"
-# Per-side AGENT_CMD override (INV-37). See autonomous-dev.sh for the
-# matching dev-side override. Together they let one project run dev
-# and review on different agent CLIs (e.g. claude for dev, agy for
-# review). Default (no operator override) is byte-for-byte unchanged.
-AGENT_CMD="$AGENT_REVIEW_CMD"
-# Per-side AGENT_LAUNCHER override (INV-38). Mirrors the dev-side
-# rebind in autonomous-dev.sh. Default (operator hasn't set
-# AGENT_REVIEW_LAUNCHER) is byte-identical to AGENT_LAUNCHER.
-AGENT_LAUNCHER_ARGV=("${AGENT_REVIEW_LAUNCHER_ARGV[@]}")
 source "${SCRIPT_DIR}/lib-auth.sh"
 # shellcheck source=lib-review-bots.sh
 source "${SCRIPT_DIR}/lib-review-bots.sh"
 # shellcheck source=lib-review-verdict.sh
 source "${SCRIPT_DIR}/lib-review-verdict.sh"
+# Per-side AGENT_CMD override (INV-37). See autonomous-dev.sh for the
+# matching dev-side override. Together they let one project run dev
+# and review on different agent CLIs (e.g. claude for dev, agy for
+# review). Default (no operator override) is byte-for-byte unchanged.
+#
+# MUST come AFTER `source lib-auth.sh` — lib-auth.sh transitively sources
+# lib-config.sh::load_autonomous_conf which re-sources autonomous.conf,
+# and conf's unconditional `AGENT_CMD="claude"` line would otherwise
+# overwrite this rebind. Same ordering is applied in autonomous-dev.sh.
+AGENT_CMD="$AGENT_REVIEW_CMD"
+# Per-side AGENT_LAUNCHER override (INV-38). Mirrors the dev-side
+# rebind in autonomous-dev.sh. Default (operator hasn't set
+# AGENT_REVIEW_LAUNCHER) is byte-identical to AGENT_LAUNCHER.
+AGENT_LAUNCHER_ARGV=("${AGENT_REVIEW_LAUNCHER_ARGV[@]}")
 
 # Validate required config (loaded by lib-agent.sh from autonomous.conf)
 : "${PROJECT_ID:?Set PROJECT_ID in autonomous.conf}"

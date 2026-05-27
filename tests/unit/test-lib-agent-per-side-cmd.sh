@@ -169,17 +169,20 @@ assert_contains "guard error names AGENT_DEV_LAUNCHER (per-side, INV-38)" \
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== PSC-S9: autonomous-dev.sh structural placement ==="
+echo "=== PSC-S9: autonomous-dev.sh — rebind AFTER source lib-auth.sh ==="
 # ---------------------------------------------------------------------------
-# Match: source "${SCRIPT_DIR}/lib-agent.sh" followed (with at most ONE
-# blank line) by AGENT_CMD="$AGENT_DEV_CMD".
-# Use awk so we don't depend on `grep -A` quirks across platforms.
+# The rebind MUST come AFTER `source lib-auth.sh`. lib-auth.sh transitively
+# sources lib-config.sh::load_autonomous_conf which re-sources
+# autonomous.conf, and conf's unconditional `AGENT_CMD="claude"` line
+# would otherwise overwrite this rebind. (Bug discovered 2026-05-26 when
+# podcast-curation review wrapper kept invoking claude despite
+# AGENT_REVIEW_CMD=kiro.)
 hit=$(awk '
-  /source "\$\{SCRIPT_DIR\}\/lib-agent\.sh"/ {
-    found_source = NR
+  /source "\$\{SCRIPT_DIR\}\/lib-auth\.sh"/ {
+    found_lib_auth = NR
     next
   }
-  found_source && NR <= found_source + 4 {
+  found_lib_auth && NR > found_lib_auth {
     if ($0 ~ /^AGENT_CMD="\$AGENT_DEV_CMD"/) {
       print "MATCH"
       exit
@@ -187,19 +190,34 @@ hit=$(awk '
   }
 ' "$DEV_WRAPPER")
 
-assert_eq "autonomous-dev.sh: AGENT_CMD=\$AGENT_DEV_CMD lands ≤4 lines after source lib-agent.sh" \
+assert_eq "autonomous-dev.sh: AGENT_CMD=\$AGENT_DEV_CMD lands AFTER source lib-auth.sh" \
   "MATCH" "$hit"
+
+# Also assert: rebind is NOT before lib-auth source (would be the bug shape).
+hit_pre=$(awk '
+  /source "\$\{SCRIPT_DIR\}\/lib-auth\.sh"/ {
+    print "REACHED_LIB_AUTH"
+    exit
+  }
+  /^AGENT_CMD="\$AGENT_DEV_CMD"/ {
+    print "REBIND_BEFORE_LIB_AUTH"
+    exit
+  }
+' "$DEV_WRAPPER")
+
+assert_eq "autonomous-dev.sh: rebind does NOT precede source lib-auth.sh" \
+  "REACHED_LIB_AUTH" "$hit_pre"
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== PSC-S10: autonomous-review.sh structural placement ==="
+echo "=== PSC-S10: autonomous-review.sh — rebind AFTER source lib-auth.sh ==="
 # ---------------------------------------------------------------------------
 hit=$(awk '
-  /source "\$\{SCRIPT_DIR\}\/lib-agent\.sh"/ {
-    found_source = NR
+  /source "\$\{SCRIPT_DIR\}\/lib-auth\.sh"/ {
+    found_lib_auth = NR
     next
   }
-  found_source && NR <= found_source + 5 {
+  found_lib_auth && NR > found_lib_auth {
     if ($0 ~ /^AGENT_CMD="\$AGENT_REVIEW_CMD"/) {
       print "MATCH"
       exit
@@ -207,8 +225,22 @@ hit=$(awk '
   }
 ' "$REVIEW_WRAPPER")
 
-assert_eq "autonomous-review.sh: AGENT_CMD=\$AGENT_REVIEW_CMD lands ≤5 lines after source lib-agent.sh" \
+assert_eq "autonomous-review.sh: AGENT_CMD=\$AGENT_REVIEW_CMD lands AFTER source lib-auth.sh" \
   "MATCH" "$hit"
+
+hit_pre=$(awk '
+  /source "\$\{SCRIPT_DIR\}\/lib-auth\.sh"/ {
+    print "REACHED_LIB_AUTH"
+    exit
+  }
+  /^AGENT_CMD="\$AGENT_REVIEW_CMD"/ {
+    print "REBIND_BEFORE_LIB_AUTH"
+    exit
+  }
+' "$REVIEW_WRAPPER")
+
+assert_eq "autonomous-review.sh: rebind does NOT precede source lib-auth.sh" \
+  "REACHED_LIB_AUTH" "$hit_pre"
 
 echo ""
 echo "PASS: $PASS    FAIL: $FAIL"

@@ -197,7 +197,9 @@ New file `tests/unit/test-lib-agent-per-side-cmd.sh` covers eleven cases:
 | PSC-S6 | `AGENT_LAUNCHER` non-empty + both sides claude → source succeeds |
 | PSC-S7 | `AGENT_LAUNCHER` + dev=claude review=agy → source fails with error naming `AGENT_REVIEW_CMD=agy` |
 | PSC-S8 | `AGENT_LAUNCHER` + dev=codex review=claude → source fails naming `AGENT_DEV_CMD=codex` |
-| PSC-S9 | Structural — `autonomous-dev.sh` contains `AGENT_CMD="$AGENT_DEV_CMD"` within 4 lines of `source ${SCRIPT_DIR}/lib-agent.sh` (allowing the 3-line WHY-rationale comment block) |
+| PSC-S9 | Structural — `autonomous-dev.sh` contains `AGENT_CMD="$AGENT_DEV_CMD"` AFTER `source ${SCRIPT_DIR}/lib-auth.sh` (asserts the rebind survives lib-auth's transitive conf re-source) |
+| PSC-S10 | Structural — `autonomous-review.sh` same pattern (rebind AFTER `source ${SCRIPT_DIR}/lib-auth.sh`) |
+| (test-wrapper-rebind-order T1/T2) | Behavioral regression — simulates the wrapper source order and asserts post-rebind `AGENT_CMD == AGENT_DEV_CMD` (T1) and `AGENT_CMD == AGENT_REVIEW_CMD` (T2). T2 is the direct repro of the podcast-curation #333/#334 misroute. |
 | PSC-S10 | Structural — `autonomous-review.sh` contains `AGENT_CMD="$AGENT_REVIEW_CMD"` within 5 lines of the source statement (allowing the 4-line WHY-rationale comment block) |
 | PSC-S11 | `AGENT_LAUNCHER` + dev=codex review=agy (both sides non-claude) → source fails. Pins the guard's `||` so a refactor cannot silently collapse it into AND or drop one side. |
 
@@ -213,12 +215,23 @@ where someone accidentally drops or moves the override line.
 1. Lib-agent.sh: add `AGENT_DEV_CMD` / `AGENT_REVIEW_CMD` after the
    existing `AGENT_CMD="${AGENT_CMD:-claude}"` line; rewrite the
    AGENT_LAUNCHER guard to check both sides.
-2. autonomous-dev.sh: add `AGENT_CMD="$AGENT_DEV_CMD"` **immediately
-   after `source "${SCRIPT_DIR}/lib-agent.sh"`, before any other
-   `source` statement**. PSC-S9 asserts this placement structurally.
+2. autonomous-dev.sh: add `AGENT_CMD="$AGENT_DEV_CMD"` **AFTER
+   `source "${SCRIPT_DIR}/lib-auth.sh"`** (and any other lib that
+   transitively re-sources `autonomous.conf`). PSC-S9 asserts this
+   placement structurally. The "after lib-auth" requirement is
+   load-bearing: lib-auth.sh transitively sources lib-config.sh's
+   `load_autonomous_conf`, which re-sources `autonomous.conf`, and
+   the conf's unconditional `AGENT_CMD="claude"` line would otherwise
+   silently overwrite this rebind. (Earlier wording said "immediately
+   after lib-agent.sh, before any other source" — that turned out to be
+   the bug shape; corrected on 2026-05-26 after a podcast-curation
+   review wrapper kept invoking claude with `AGENT_REVIEW_CMD=kiro`.)
 3. autonomous-review.sh: add `AGENT_CMD="$AGENT_REVIEW_CMD"` in the
-   same position relative to `source "${SCRIPT_DIR}/lib-agent.sh"`.
-   PSC-S10 asserts this placement structurally.
+   same position — after both `lib-auth.sh` and the review-specific
+   libs (`lib-review-bots.sh`, `lib-review-verdict.sh`), since none
+   of them read `AGENT_CMD` themselves but any of them could
+   plausibly re-source `autonomous.conf` in the future. PSC-S10
+   asserts this placement structurally.
 4. autonomous.conf.example: add the operator-facing comment block.
 5. tests/unit/test-lib-agent-per-side-cmd.sh: eleven test cases (PSC-S1..S11).
 6. invariants.md: INV-37 entry.

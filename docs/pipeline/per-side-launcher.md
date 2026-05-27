@@ -51,12 +51,22 @@ to its side's array:
 - `autonomous-dev.sh`     → `AGENT_LAUNCHER_ARGV=("${AGENT_DEV_LAUNCHER_ARGV[@]}")`
 - `autonomous-review.sh`  → `AGENT_LAUNCHER_ARGV=("${AGENT_REVIEW_LAUNCHER_ARGV[@]}")`
 
-This rebind happens immediately after `source lib-agent.sh`, paired
-with the existing `AGENT_CMD="$AGENT_DEV_CMD"` / `"$AGENT_REVIEW_CMD"`
-rebind from [INV-37]. After both rebinds, `run_agent` / `resume_agent`
-continue to read `$AGENT_CMD` and `AGENT_LAUNCHER_ARGV[@]` exactly as
-they do today — no signature change, no caller change, no per-CLI
-branch change.
+This rebind happens AFTER `source lib-auth.sh` (and any other
+conf-touching lib), paired with the existing `AGENT_CMD="$AGENT_DEV_CMD"` /
+`"$AGENT_REVIEW_CMD"` rebind from [INV-37]. After both rebinds,
+`run_agent` / `resume_agent` continue to read `$AGENT_CMD` and
+`AGENT_LAUNCHER_ARGV[@]` exactly as they do today — no signature
+change, no caller change, no per-CLI branch change.
+
+> **Why "after lib-auth.sh"**: `lib-auth.sh` transitively sources
+> `lib-config.sh::load_autonomous_conf` which re-sources
+> `autonomous.conf`. If the rebind happened earlier, the conf's
+> unconditional `AGENT_CMD="claude"` (and the per-side launcher
+> defaults inside `lib-agent.sh`'s `:-` resolution) would silently
+> overwrite the wrapper-level override. See INV-37 in
+> `invariants.md` for the full bug narrative (discovered 2026-05-26
+> via a podcast-curation review wrapper that kept invoking claude
+> despite `AGENT_REVIEW_CMD=kiro`).
 
 `:-` (not `:=`) means an explicit empty string in the conf falls
 back to `AGENT_LAUNCHER`. That matches the existing semantics of
@@ -188,8 +198,9 @@ New file `tests/unit/test-lib-agent-per-side-launcher.sh` covers:
 | PSL-S6 | `AGENT_DEV_LAUNCHER` non-empty + `AGENT_DEV_CMD=claude` → source succeeds (per-side guard pass) |
 | PSL-S7 | `AGENT_DEV_LAUNCHER` non-empty + `AGENT_DEV_CMD=kiro` → source fails, error names `AGENT_DEV_LAUNCHER` and `AGENT_DEV_CMD=kiro` |
 | PSL-S8 | `AGENT_REVIEW_LAUNCHER` non-empty + `AGENT_REVIEW_CMD=agy` → source fails, error names `AGENT_REVIEW_LAUNCHER` and `AGENT_REVIEW_CMD=agy` |
-| PSL-S9 | Structural — `autonomous-dev.sh` rebinds `AGENT_LAUNCHER_ARGV=("${AGENT_DEV_LAUNCHER_ARGV[@]}")` within 9 lines of `source lib-agent.sh` (3-line WHY comment + AGENT_CMD rebind from PR #156 + new 4-line WHY comment + new LAUNCHER rebind = 9 lines) |
-| PSL-S10 | Structural — `autonomous-review.sh` rebinds `AGENT_LAUNCHER_ARGV=("${AGENT_REVIEW_LAUNCHER_ARGV[@]}")` within 9 lines of the source statement (4-line WHY comment + AGENT_CMD rebind + new 3-line WHY + new LAUNCHER rebind = 9 lines) |
+| PSL-S9 | Structural — `autonomous-dev.sh` rebinds `AGENT_LAUNCHER_ARGV=("${AGENT_DEV_LAUNCHER_ARGV[@]}")` AFTER `source lib-auth.sh` (the position that survives the conf re-source, post-INV-37 fix on 2026-05-26) |
+| PSL-S10 | Structural — `autonomous-review.sh` rebinds `AGENT_LAUNCHER_ARGV=("${AGENT_REVIEW_LAUNCHER_ARGV[@]}")` AFTER `source lib-auth.sh` (same reason as PSL-S9) |
+| (test-wrapper-rebind-order) | Behavioral regression in `tests/unit/test-wrapper-rebind-order.sh` — simulates wrapper source order with a sandbox conf and asserts both `AGENT_CMD` and `AGENT_LAUNCHER_ARGV` survive lib-auth's conf re-source. T1 dev / T2 review. T2 is the direct repro of podcast-curation #333/#334. |
 
 PSL-S9/S10 are structural greps — same approach as PSC-S9/S10
 ([INV-37]'s structural tests), with widened windows to accommodate
@@ -218,9 +229,11 @@ Specifically:
    init + tokenization after the existing `AGENT_LAUNCHER` block;
    replace the [INV-37] guard with two per-side guards.
 2. autonomous-dev.sh: add `AGENT_LAUNCHER_ARGV=("${AGENT_DEV_LAUNCHER_ARGV[@]}")`
-   immediately after the existing `AGENT_CMD="$AGENT_DEV_CMD"` line.
-   PSL-S9 asserts placement structurally.
-3. autonomous-review.sh: symmetric, using `AGENT_REVIEW_LAUNCHER_ARGV`.
+   immediately after the existing `AGENT_CMD="$AGENT_DEV_CMD"` line —
+   which itself sits AFTER `source lib-auth.sh` (per the INV-37 fix
+   on 2026-05-26). PSL-S9 asserts placement structurally.
+3. autonomous-review.sh: symmetric, using `AGENT_REVIEW_LAUNCHER_ARGV`,
+   after `source lib-auth.sh` + `lib-review-bots.sh` + `lib-review-verdict.sh`.
    PSL-S10 asserts placement structurally.
 4. autonomous.conf.example: add the operator-facing comment block.
 5. tests/unit/test-lib-agent-per-side-launcher.sh: ten test cases.
