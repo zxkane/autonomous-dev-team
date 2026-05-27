@@ -53,20 +53,39 @@ assert_eq() {
 simulate_wrapper() {
   local wrapper="$1"
   local conf_dir="$2"
-  # Pull lines 22..40 — the source/rebind block in the wrappers as of
-  # this fix. Slightly over-greedy is fine; we just need everything from
-  # `source lib-agent.sh` through the last rebind.
-  local extract
-  extract=$(sed -n '22,40p' "$wrapper")
-
-  bash -c "
-    set -uo pipefail
-    SCRIPT_DIR='$conf_dir'
-    AUTONOMOUS_CONF='$conf_dir/autonomous.conf'
-    $extract
-    echo \"AGENT_CMD=\$AGENT_CMD\"
-    echo \"AGENT_LAUNCHER_ARGV_count=\${#AGENT_LAUNCHER_ARGV[@]}\"
-  " 2>&1
+  # Extract from `SCRIPT_DIR=` (the start of the source/rebind block) up
+  # to the line immediately before `: "${PROJECT_ID:?...}"` (the start of
+  # the post-init validation block). Range is content-anchored so test
+  # stays in lock-step even if wrappers gain/lose lines.
+  #
+  # An earlier version used a hardcoded `22,40p` range. agy review on
+  # PR #159 caught it: review wrapper's launcher rebind sits at line 41
+  # (post-fix), so the hardcoded range silently truncated the
+  # AGENT_LAUNCHER_ARGV rebind out of the simulation. The default-empty
+  # AGENT_REVIEW_LAUNCHER_ARGV array made the count assertion pass
+  # vacuously. Content anchors fix that class of regression.
+  #
+  # We feed the extracted block to bash via stdin (NOT via `bash -c "..."`
+  # interpolation). The extracted block contains markdown backticks
+  # around things like `AGENT_CMD="claude"` inside comments — backtick
+  # is command substitution under double-quoted bash -c, which would
+  # silently execute the comment. Stdin route bypasses that hazard.
+  local tmp_script
+  tmp_script=$(mktemp)
+  {
+    echo 'set -uo pipefail'
+    echo "SCRIPT_DIR='$conf_dir'"
+    echo "AUTONOMOUS_CONF='$conf_dir/autonomous.conf'"
+    awk '
+      /^SCRIPT_DIR=/ { capture = 1; next }
+      /^: "\$\{PROJECT_ID:\?/ { capture = 0 }
+      capture { print }
+    ' "$wrapper"
+    echo 'echo "AGENT_CMD=$AGENT_CMD"'
+    echo 'echo "AGENT_LAUNCHER_ARGV_count=${#AGENT_LAUNCHER_ARGV[@]}"'
+  } >"$tmp_script"
+  bash "$tmp_script" 2>&1
+  rm -f "$tmp_script"
 }
 
 # -----------------------------------------------------------------------
@@ -135,10 +154,46 @@ launcher_count=$(echo "$out" | grep '^AGENT_LAUNCHER_ARGV_count=' | cut -d= -f2)
 
 # THIS IS THE CORE REGRESSION: prior to the fix, `claude` was returned
 # here because the conf re-source overwrote the rebind to AGENT_REVIEW_CMD.
-assert_eq "review wrapper: AGENT_CMD == kiro (matches AGENT_REVIEW_CMD; regression for podcast-curation #333/#334)" \
+assert_eq "review wrapper: AGENT_CMD == kiro (matches AGENT_REVIEW_CMD; regression for downstream consumer review misroute)" \
   "kiro" "$agent_cmd"
 assert_eq "review wrapper: AGENT_LAUNCHER_ARGV is empty (no AGENT_REVIEW_LAUNCHER set)" \
   "0" "$launcher_count"
+
+# -----------------------------------------------------------------------
+echo ""
+echo "=== T3: review wrapper — AGENT_REVIEW_LAUNCHER rebind exercised ==="
+# -----------------------------------------------------------------------
+# T2 above doesn't actually exercise the launcher rebind line — the
+# default-empty AGENT_REVIEW_LAUNCHER_ARGV makes the count assertion
+# pass vacuously regardless of whether the rebind ran. T3 closes that
+# gap with a separate sandbox where AGENT_REVIEW_LAUNCHER is non-empty
+# (and AGENT_REVIEW_CMD=claude so the INV-38 per-side guard accepts
+# the launcher). This catches a regression where someone reorders the
+# wrapper such that the launcher rebind is dropped or precedes
+# `source lib-auth.sh`. agy review on PR #159 caught the original
+# version which had this gap.
+SANDBOX2=$(mktemp -d)
+build_sandbox "$SANDBOX2"
+# Override two fields: review CLI must be claude (INV-38 guard) and
+# AGENT_REVIEW_LAUNCHER must be non-empty so its argv count is
+# distinguishable from the default-empty array.
+cat >>"$SANDBOX2/autonomous.conf" <<'CONF'
+AGENT_REVIEW_CMD="claude"
+AGENT_REVIEW_LAUNCHER='bash -c '\''review-launcher "$@"'\'' --'
+CONF
+trap 'rm -rf "$SANDBOX" "$SANDBOX2"' EXIT
+
+out=$(simulate_wrapper "$REVIEW_WRAPPER" "$SANDBOX2" | grep -E '^AGENT_CMD=|^AGENT_LAUNCHER_ARGV_count=')
+agent_cmd=$(echo "$out" | grep '^AGENT_CMD=' | cut -d= -f2)
+launcher_count=$(echo "$out" | grep '^AGENT_LAUNCHER_ARGV_count=' | cut -d= -f2)
+
+assert_eq "review wrapper (T3): AGENT_CMD == claude (matches AGENT_REVIEW_CMD)" \
+  "claude" "$agent_cmd"
+# AGENT_REVIEW_LAUNCHER tokenizes to 4 argv elements (`bash`, `-c`,
+# `<cmd>`, `--`). A count of 0 here would mean the launcher rebind
+# line never executed.
+assert_eq "review wrapper (T3): AGENT_LAUNCHER_ARGV reflects AGENT_REVIEW_LAUNCHER (4 argv)" \
+  "4" "$launcher_count"
 
 echo ""
 echo "PASS: $PASS    FAIL: $FAIL"

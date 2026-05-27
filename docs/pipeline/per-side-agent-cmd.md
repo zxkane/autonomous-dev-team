@@ -199,8 +199,7 @@ New file `tests/unit/test-lib-agent-per-side-cmd.sh` covers eleven cases:
 | PSC-S8 | `AGENT_LAUNCHER` + dev=codex review=claude → source fails naming `AGENT_DEV_CMD=codex` |
 | PSC-S9 | Structural — `autonomous-dev.sh` contains `AGENT_CMD="$AGENT_DEV_CMD"` AFTER `source ${SCRIPT_DIR}/lib-auth.sh` (asserts the rebind survives lib-auth's transitive conf re-source) |
 | PSC-S10 | Structural — `autonomous-review.sh` same pattern (rebind AFTER `source ${SCRIPT_DIR}/lib-auth.sh`) |
-| (test-wrapper-rebind-order T1/T2) | Behavioral regression — simulates the wrapper source order and asserts post-rebind `AGENT_CMD == AGENT_DEV_CMD` (T1) and `AGENT_CMD == AGENT_REVIEW_CMD` (T2). T2 is the direct repro of the podcast-curation #333/#334 misroute. |
-| PSC-S10 | Structural — `autonomous-review.sh` contains `AGENT_CMD="$AGENT_REVIEW_CMD"` within 5 lines of the source statement (allowing the 4-line WHY-rationale comment block) |
+| (test-wrapper-rebind-order T1/T2/T3) | Behavioral regression — simulates the wrapper source order and asserts post-rebind `AGENT_CMD == AGENT_DEV_CMD` (T1) and `AGENT_CMD == AGENT_REVIEW_CMD` (T2). T2 is the direct repro of the downstream consumer review misroute. T3 exercises the review-side launcher rebind explicitly (T2 leaves it default-empty). |
 | PSC-S11 | `AGENT_LAUNCHER` + dev=codex review=agy (both sides non-claude) → source fails. Pins the guard's `||` so a refactor cannot silently collapse it into AND or drop one side. |
 
 PSC-S1..S8 are behavioral tests that source `lib-agent.sh` directly in
