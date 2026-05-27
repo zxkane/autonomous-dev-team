@@ -78,7 +78,11 @@ simulate_wrapper() {
     echo "AUTONOMOUS_CONF='$conf_dir/autonomous.conf'"
     awk '
       /^SCRIPT_DIR=/ { capture = 1; next }
-      /^: "\$\{PROJECT_ID:\?/ { capture = 0 }
+      # End-anchor: any `: "${VAR:?...}"` style validation. Generalized
+      # over a specific name so reordering or renaming the first
+      # validated config var does not silently extend the capture into
+      # the wrapper body. Per agy P3 follow-up review on PR #159.
+      /^: "\$\{[A-Z_]+:\?/ { capture = 0 }
       capture { print }
     ' "$wrapper"
     echo 'echo "AGENT_CMD=$AGENT_CMD"'
