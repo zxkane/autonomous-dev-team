@@ -126,8 +126,8 @@ assert_grep "command-mode prompt references E2E_COMMAND" \
   '\$\{?E2E_COMMAND[^_]' "$WRAPPER"
 assert_grep "command-mode prompt references E2E_COMMAND_EVIDENCE_PARSER" \
   'E2E_COMMAND_EVIDENCE_PARSER' "$WRAPPER"
-assert_grep "evidence marker literal present in wrapper" \
-  '<!-- e2e-evidence: complete -->' "$WRAPPER"
+assert_grep "SHA-bound evidence marker present in wrapper" \
+  'e2e-evidence: complete sha=' "$WRAPPER"
 assert_grep "command-mode declares MANDATORY" \
   "E2E Verification via project command — MANDATORY" "$WRAPPER"
 
@@ -269,6 +269,58 @@ assert_grep "wrapper exports PR_HEAD_SHA in command mode" \
   'export PR_HEAD_SHA' "$WRAPPER"
 assert_grep "wrapper exports PR_NUMBER in command mode" \
   'export PR_NUMBER' "$WRAPPER"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-E2E-MODE-017: F7 fix — Step 4b fetches full comment body via jq ==="
+# ---------------------------------------------------------------------------
+# Pre-fix: `gh pr view --jq '.comments[].body' | grep -F` returned only
+# the marker LINE; agent couldn't actually use prior evidence in Step 6.
+# Post-fix: jq filter returns the whole matching comment body.
+assert_grep "Step 4b uses jq select(.body | contains(...)) form" \
+  'comments\[\].*select.*\.body.*contains' "$WRAPPER"
+assert_grep "Step 4b assigns full body to EVIDENCE (not EXISTING)" \
+  'EVIDENCE=\\\$\(gh pr view' "$WRAPPER"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-E2E-MODE-018: marker format consistency across docs + wrapper ==="
+# ---------------------------------------------------------------------------
+# All references to the evidence marker MUST include the SHA binding
+# (F2 fix). Pre-fixup: SKILL.md and autonomous.conf.example used the
+# old non-SHA marker — would lead project owners to write parsers that
+# fail the SHA-matching idempotency guard.
+SKILL="$PROJECT_ROOT/skills/autonomous-review/SKILL.md"
+CONF="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/autonomous.conf.example"
+REF="$PROJECT_ROOT/skills/autonomous-review/references/e2e-command-mode.md"
+PIPELINE="$PROJECT_ROOT/docs/pipeline/review-agent-flow.md"
+
+# Wrapper, SKILL.md, conf.example, ref doc, pipeline doc all reference the
+# SHA-bound marker form. The non-SHA form should NOT appear except as
+# part of a SHA-bound longer string.
+for f in "$WRAPPER" "$SKILL" "$CONF" "$REF" "$PIPELINE"; do
+  if grep -qE 'e2e-evidence:[[:space:]]*complete[[:space:]]*-->' "$f"; then
+    echo -e "  ${RED}FAIL${NC}: $f contains pre-SHA marker form"
+    FAIL=$((FAIL + 1))
+  else
+    echo -e "  ${GREEN}PASS${NC}: $(basename "$f") uses SHA-bound marker"
+    PASS=$((PASS + 1))
+  fi
+done
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-E2E-MODE-019: F6 fix — pipeline doc documents Step 4b ==="
+# ---------------------------------------------------------------------------
+# CLAUDE.md "Pipeline Documentation Authority" requires wrapper changes
+# to update docs/pipeline/*.md in same PR. Step 4b was added in fixup
+# 6a5d210; this test pins that the pipeline doc references it.
+assert_grep "pipeline doc documents Step 4b stale-evidence guard" \
+  '(4b|[Ss]tale-evidence)' "$PIPELINE"
+assert_grep "pipeline doc explains parser-skip on hard failures" \
+  'skip the parser|skips the parser|parser would be malformed' "$PIPELINE"
+assert_grep "pipeline doc explains mode-aware decision FAIL message" \
+  'mode-aware|screenshot.*log tail|log tail.*screenshot' "$PIPELINE"
 
 # ---------------------------------------------------------------------------
 echo ""

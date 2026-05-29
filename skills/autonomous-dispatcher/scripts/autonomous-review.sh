@@ -717,12 +717,15 @@ plain marker matches do NOT count (would let stale evidence from a
 prior commit pass).
 
 \`\`\`bash
-EXISTING=\$(gh pr view ${PR_NUMBER} --repo ${REPO} --json comments \\
-  --jq '.comments[].body' | grep -F 'e2e-evidence: complete sha="${PR_HEAD_SHA}"' | head -1)
-if [[ -n "\$EXISTING" ]]; then
+# Use jq to fetch the FULL comment body (not just the marker line) so
+# Step 6 can evaluate AC coverage against the existing evidence's table.
+EVIDENCE=\$(gh pr view ${PR_NUMBER} --repo ${REPO} --json comments \\
+  --jq '.comments[] | select(.body | contains("e2e-evidence: complete sha=\\"${PR_HEAD_SHA}\\"")) | .body' \\
+  | head -1)
+if [[ -n "\$EVIDENCE" ]]; then
   echo "Evidence already exists for HEAD ${PR_HEAD_SHA}, skipping E2E re-run"
-  # Use the existing evidence; jump to Step 6 PASS/FAIL decision based
-  # on its contents.
+  # \$EVIDENCE now holds the full markdown comment body. Jump to Step 6
+  # PASS/FAIL decision based on its contents (AC table coverage).
 fi
 \`\`\`
 
@@ -759,7 +762,7 @@ EOF_FAIL
 PASS when **all** of:
 - Pre-hooks (if configured) exited 0
 - Verify command exited 0 (or 124 with the artifact-recovery exception above)
-- Evidence block ends with the marker \`<!-- e2e-evidence: complete -->\`
+- Evidence block ends with the SHA-bound marker \`<!-- e2e-evidence: complete sha="${PR_HEAD_SHA}" -->\`
 - Every issue-body acceptance criterion that names a verifiable artifact
   (file path, S3 key, DDB row state, log line, count) is satisfied by
   the evidence block

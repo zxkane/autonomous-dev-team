@@ -95,19 +95,22 @@ If browser-mode E2E is enabled but preview URL extraction yields nothing, the ag
 
 ### Command rendering (command mode only)
 
-In `command` mode the wrapper substitutes the literal `${PR_NUMBER}` placeholder in `E2E_COMMAND`, `E2E_COMMAND_PRE_HOOKS`, and `E2E_COMMAND_EVIDENCE_PARSER` with the resolved PR number before pasting them into the prompt. Operators MUST single-quote those assignments in `autonomous.conf` so the shell does not eagerly expand `${PR_NUMBER}` when sourcing the conf file.
+In `command` mode the wrapper substitutes the literal `${PR_NUMBER}` placeholder in `E2E_COMMAND`, `E2E_COMMAND_PRE_HOOKS`, and `E2E_COMMAND_EVIDENCE_PARSER` with the resolved PR number before pasting them into the prompt. Operators MUST single-quote those assignments in `autonomous.conf` so the shell does not eagerly expand `${PR_NUMBER}` when sourcing the conf file. Unbraced `$PR_NUMBER` is rejected at config-validation time (would silently render as empty since the var is exported only inside the command-mode block, after substitution).
+
+The wrapper exports `PR_NUMBER` and `PR_HEAD_SHA` into the agent process's environment when `E2E_MODE=command`. The project's evidence parser reads `PR_HEAD_SHA` from env to embed in the evidence-block marker.
 
 The agent's command-mode prompt block instructs it to:
 
 1. Run `E2E_COMMAND_PRE_HOOKS` if set (e.g. seed test data into the per-PR stage).
 2. Run `E2E_COMMAND` under `timeout(1)` with `E2E_COMMAND_TIMEOUT_SECONDS`.
-3. Interpret the exit code (0 = pass, 124 = timeout, other = fail).
-4. Run `E2E_COMMAND_EVIDENCE_PARSER` to extract a markdown evidence block from the log.
-5. Validate the block ends with the literal marker `<!-- e2e-evidence: complete -->`.
-6. Post the evidence block as a PR comment.
-7. Decide PASS/FAIL based on exit code + AC coverage in the evidence block.
+3. Interpret the exit code (0 = pass, 124 = timeout still parses for partial artifact, other = hard fail).
+4. **If exit ∈ {0, 124}**: run `E2E_COMMAND_EVIDENCE_PARSER` to extract a markdown evidence block from the log. Hard-failure exits skip the parser (its input log would be malformed) and post a `tail -50` of the log file as the failure comment.
+4b. **Stale-evidence guard** — before invoking the verify command, the agent checks the PR for an existing comment whose marker contains `sha="${PR_HEAD_SHA}"` (the current PR HEAD). If found, the agent reuses that comment's body as `$EVIDENCE` and jumps to Step 6 — no E2E re-run. The SHA binding is load-bearing: without it, a stale evidence comment from a prior commit would silently satisfy a re-review of newer code.
+5. Validate the block ends with the SHA-bound marker `<!-- e2e-evidence: complete sha="${PR_HEAD_SHA}" -->`.
+6. Post the evidence block (or log-tail failure comment) as a PR comment.
+7. Decide PASS/FAIL based on exit code + AC coverage in the evidence block. The decision-block FAIL message is mode-aware: `browser` requests "screenshot evidence", `command` requests "verify-command exit code + log tail" — branching prevents agent confusion in command-mode where there are no screenshots.
 
-For the project-side contract (`E2E_COMMAND` semantics, evidence-block format), see `skills/autonomous-review/references/e2e-command-mode.md`.
+For the project-side contract (`E2E_COMMAND` semantics, evidence-block format, parser PR_HEAD_SHA usage), see `skills/autonomous-review/references/e2e-command-mode.md`.
 
 ## Prompt construction
 
@@ -122,7 +125,7 @@ Major prompt sections:
 | **Review checklist** | Process compliance, code quality, testing, infra. The Kiro path skips `code-simplifier` / `pr-review` items since Kiro doesn't support those. |
 | **Acceptance criteria verification** | For each `## Acceptance Criteria` checkbox in the issue body, verify against PR code/tests/build then mark via `bash scripts/mark-issue-checkbox.sh`. ALL must be checked before approving. |
 | **Amazon Q Developer trigger** | Mandatory bot-review trigger. Q ignores `/q review` from bot accounts ⇒ wrapper instructs the agent to use `bash scripts/gh-as-user.sh pr comment N --body "/q review"`. Poll up to 3 min for the bot to respond. |
-| **E2E verification (if `E2E_MODE` ∈ {browser, command})** | Branch on `E2E_MODE`. `browser`: Chrome DevTools MCP procedure (navigate, login, execute happy-path + feature test cases, screenshot+upload each, post structured E2E report on PR). `command`: invoke project-supplied `E2E_COMMAND`, run `E2E_COMMAND_EVIDENCE_PARSER`, post evidence block ending with marker `<!-- e2e-evidence: complete -->` as PR comment. See **E2E mode dispatch** above. |
+| **E2E verification (if `E2E_MODE` ∈ {browser, command})** | Branch on `E2E_MODE`. `browser`: Chrome DevTools MCP procedure (navigate, login, execute happy-path + feature test cases, screenshot+upload each, post structured E2E report on PR). `command`: invoke project-supplied `E2E_COMMAND`, run `E2E_COMMAND_EVIDENCE_PARSER`, post evidence block ending with SHA-bound marker `<!-- e2e-evidence: complete sha="${PR_HEAD_SHA}" -->` as PR comment. See **E2E mode dispatch** above. |
 | **Decision** | Single line: PASS ⇒ post "Review PASSED ... Review Session: \`<id>\`" on the **issue** (not PR). FAIL ⇒ post "Review findings: ..." with numbered remediation list, ending with the same session-id trailer. |
 
 The session-id trailer is the wrapper's only way to identify which comment is its own verdict — see [Verdict polling](#verdict-polling) below.

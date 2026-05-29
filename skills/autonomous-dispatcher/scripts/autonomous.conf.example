@@ -503,10 +503,13 @@ E2E_COMMAND_TIMEOUT_SECONDS=3600
 
 # E2E_COMMAND_EVIDENCE_PARSER: REQUIRED when E2E_MODE=command. Reads the
 # verify command's log file as $1, emits a markdown evidence block to
-# stdout. The block MUST end with the literal marker:
-#   <!-- e2e-evidence: complete -->
-# The review agent (not the wrapper) checks for the marker before
-# posting the comment, per the command-mode prompt block in
-# autonomous-review.sh. See references/e2e-command-mode.md for the
-# full contract.
+# stdout. The block MUST end with a SHA-bound marker:
+#   <!-- e2e-evidence: complete sha="${PR_HEAD_SHA}" -->
+# The wrapper exports PR_HEAD_SHA into the parser's environment;
+# embedding it in the marker is load-bearing for idempotency (prevents
+# a stale evidence comment from a prior commit silently satisfying a
+# re-review of newer code). The review agent (not the wrapper) checks
+# for the SHA-matching marker before posting and before reusing prior
+# evidence, per the command-mode prompt block in autonomous-review.sh.
+# See references/e2e-command-mode.md for the full contract.
 E2E_COMMAND_EVIDENCE_PARSER=""

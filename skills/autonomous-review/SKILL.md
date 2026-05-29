@@ -120,7 +120,7 @@ Do NOT use the default `gh pr comment` for bot review triggers — it authentica
 **Command mode** (`E2E_MODE=command`, for backend pipelines / CLI / libraries):
 - [ ] Pre-hooks executed (if configured) — exit 0
 - [ ] Verify command executed within timeout — exit 0 (or recoverable timeout)
-- [ ] Evidence parser produced a markdown block ending with `<!-- e2e-evidence: complete -->`
+- [ ] Evidence parser produced a markdown block ending with `<!-- e2e-evidence: complete sha="${PR_HEAD_SHA}" -->`
 - [ ] Evidence block posted as a PR comment
 - [ ] Every issue-body acceptance criterion that names a verifiable artifact is covered by the evidence block
 
@@ -216,7 +216,7 @@ Key steps:
 2. Run the verify command with timeout
 3. Inspect exit code (0 = pass; 124 = timeout; other = fail)
 4. Run the evidence parser to extract a structured markdown block
-5. Validate the block ends with the marker `<!-- e2e-evidence: complete -->`
+5. Validate the block ends with the SHA-bound marker `<!-- e2e-evidence: complete sha="${PR_HEAD_SHA}" -->` (SHA is required to prevent stale evidence from a prior commit reusing the comment)
 6. Post the evidence block as a PR comment
 7. Decide PASS/FAIL based on exit code + evidence-vs-AC coverage
 
