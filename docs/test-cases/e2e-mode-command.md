@@ -69,6 +69,52 @@ Coverage for issue #161 — `E2E_MODE` dispatch in `autonomous-review.sh`. All c
 **Action:** render prompt.
 **Expectation:** prompt contains the literal substring `bash scripts/e2e.sh pr-344` (no unresolved `${PR_NUMBER}` in the rendered command).
 
+## Post-review hardening cases (added in fixup)
+
+### TC-E2E-MODE-009: case-sensitivity rejected
+
+**Setup:** `E2E_MODE=Browser` or `E2E_MODE=COMMAND` (capitalization variants).
+**Action:** invoke wrapper config-validation path.
+**Expectation:** wrapper exits non-zero. Mode comparison is exact-match (case-sensitive); capitalized variants hit the invalid-mode branch.
+
+### TC-E2E-MODE-010: command-mode fields without E2E_MODE=command
+
+**Setup:** `E2E_COMMAND` set, but `E2E_MODE=none` or `E2E_MODE=browser`.
+**Action:** invoke wrapper config-validation path.
+**Expectation:** wrapper exits non-zero. Catches the "operator filled in E2E_COMMAND but forgot E2E_MODE=command" footgun.
+
+### TC-E2E-MODE-011: substitution survives unset E2E_COMMAND_PRE_HOOKS
+
+**Setup:** `E2E_MODE=command`, `E2E_COMMAND` and `E2E_COMMAND_EVIDENCE_PARSER` set, `E2E_COMMAND_PRE_HOOKS` left unset.
+**Action:** wrapper substitution block (lines around 388-397) must use `:-` defaults.
+**Expectation:** substitution lines reference `${VAR:-}` form; an explicit PR_NUMBER empty-guard precedes substitution. Without `:-` defaults, `set -u` would crash the wrapper before the agent runs.
+
+### TC-E2E-MODE-012: F1 fix — decision FAIL message branches on E2E_MODE
+
+**Setup:** code inspection of the wrapper's "Decision" section.
+**Expectation:** the FAIL message uses a `case ${E2E_MODE}` branch — `browser` says "screenshot evidence", `command` says "log tail evidence". Pre-fix: both modes received the same screenshot-flavored language, confusing the agent in command mode.
+
+### TC-E2E-MODE-013: F2 fix — evidence marker requires SHA binding
+
+**Setup:** code inspection of the wrapper's prompt.
+**Expectation:** the marker spec is `<!-- e2e-evidence: complete sha="${PR_HEAD_SHA}" -->`, and the prompt contains a stale-evidence guard step that re-binds skip behavior to exact SHA match. Plain marker without SHA does NOT count.
+
+### TC-E2E-MODE-014: F3 fix — parser only on EXIT_CODE ∈ {0, 124}
+
+**Setup:** code inspection of the wrapper's command-mode Step 4.
+**Expectation:** parser invocation is gated on `EXIT_CODE -eq 0 || EXIT_CODE -eq 124`. Hard failures (other non-zero) skip the parser and post a `tail -50` of the log file as the failure comment instead.
+
+### TC-E2E-MODE-015: F4 fix — unbraced `$PR_NUMBER` rejected
+
+**Setup:** `E2E_COMMAND='bash scripts/x.sh $PR_NUMBER'` (unbraced).
+**Action:** invoke wrapper config-validation path.
+**Expectation:** wrapper exits non-zero. Stderr names the offending field. Without this guard, the unbraced form would silently render as empty and target the wrong stage. Braced form `${PR_NUMBER}` validates clean.
+
+### TC-E2E-MODE-016: command-mode exports PR_NUMBER + PR_HEAD_SHA
+
+**Setup:** code inspection of the wrapper's env-export block.
+**Expectation:** when `E2E_MODE=command`, the wrapper exports both `PR_NUMBER` and `PR_HEAD_SHA` so the project's evidence parser script can read `PR_HEAD_SHA` from env to embed in the marker.
+
 ## Backward-compatibility cases (existing tests must still pass)
 
 - `tests/unit/test-autonomous-review-prompt.sh` — full file, unchanged invariants.

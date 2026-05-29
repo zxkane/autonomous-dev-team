@@ -207,6 +207,71 @@ assert_grep "PR_NUMBER empty-guard before substitution" \
 
 # ---------------------------------------------------------------------------
 echo ""
+echo "=== TC-E2E-MODE-012: F1 fix — decision block branches on E2E_MODE ==="
+# ---------------------------------------------------------------------------
+# Before fixup: decision-block FAIL message said "screenshot evidence" for
+# both browser and command mode, which would confuse the agent in
+# command mode (no browser, no screenshots).
+assert_grep "decision FAIL branch differentiates browser vs command" \
+  'case "\$\{?E2E_MODE.*browser\)' "$WRAPPER"
+assert_grep "command-mode FAIL message references log tail (not screenshots)" \
+  'log tail.*evidence|tail of /tmp/e2e-' "$WRAPPER"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-E2E-MODE-013: F2 fix — evidence marker requires SHA binding ==="
+# ---------------------------------------------------------------------------
+# Without SHA in the marker, stale evidence from an old commit could
+# satisfy a re-review of new code. The wrapper instructs agent to
+# emit and check the SHA-bearing form.
+assert_grep "wrapper marker spec includes sha=\"...\"" \
+  'e2e-evidence: complete sha=' "$WRAPPER"
+assert_grep "wrapper instructs agent to bind to PR_HEAD_SHA" \
+  'PR_HEAD_SHA' "$WRAPPER"
+assert_grep "stale-evidence guard step present" \
+  'stale-evidence|Stale-evidence' "$WRAPPER"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-E2E-MODE-014: F3 fix — parser only on EXIT_CODE ∈ {0, 124} ==="
+# ---------------------------------------------------------------------------
+# Running the parser on a hard-failure log produces confusing crashes
+# that mask the real failure. The prompt now gates parser invocation.
+assert_grep "Step 4 gates parser on EXIT_CODE 0 or 124" \
+  'EXIT_CODE.*-eq 0.*-eq 124' "$WRAPPER"
+assert_grep "Step 5 has log-tail fallback for non-{0,124} exits" \
+  'tail -50.*e2e-' "$WRAPPER"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-E2E-MODE-015: F4 fix — unbraced \$PR_NUMBER rejected ==="
+# ---------------------------------------------------------------------------
+# Unbraced form silently renders empty (PR_NUMBER not exported until
+# command-mode block, and the wrapper substitution only handles
+# braced ${PR_NUMBER}). Catches the typo at validation time.
+assert_validate_fails "unbraced \$PR_NUMBER in E2E_COMMAND rejected" \
+  "unbraced.*PR_NUMBER" \
+  E2E_ENABLED=true E2E_MODE=command \
+  'E2E_COMMAND=bash scripts/x.sh $PR_NUMBER' \
+  'E2E_COMMAND_EVIDENCE_PARSER=bash scripts/p.sh ${PR_NUMBER}'
+# Braced form continues to validate clean
+assert_validate_succeeds "braced \${PR_NUMBER} in E2E_COMMAND validates clean" \
+  E2E_ENABLED=true E2E_MODE=command \
+  'E2E_COMMAND=bash scripts/x.sh ${PR_NUMBER}' \
+  'E2E_COMMAND_EVIDENCE_PARSER=bash scripts/p.sh ${PR_NUMBER}'
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-E2E-MODE-016: command-mode exports PR_NUMBER + PR_HEAD_SHA ==="
+# ---------------------------------------------------------------------------
+# Parser scripts need PR_HEAD_SHA at runtime to embed it in the marker.
+assert_grep "wrapper exports PR_HEAD_SHA in command mode" \
+  'export PR_HEAD_SHA' "$WRAPPER"
+assert_grep "wrapper exports PR_NUMBER in command mode" \
+  'export PR_NUMBER' "$WRAPPER"
+
+# ---------------------------------------------------------------------------
+echo ""
 echo "=== TC-E2E-MODE-back-compat: absent-config path validates clean ==="
 # ---------------------------------------------------------------------------
 # E2E_ENABLED unset, E2E_MODE unset, E2E_ENABLED=false — all must validate.

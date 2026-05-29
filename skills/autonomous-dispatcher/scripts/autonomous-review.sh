@@ -111,10 +111,26 @@ validate_e2e_config() {
       if [[ -z "${E2E_COMMAND_EVIDENCE_PARSER:-}" ]]; then
         echo "Error: E2E_MODE=command requires E2E_COMMAND_EVIDENCE_PARSER to be set." >&2
         echo "  The parser MUST output a markdown evidence block ending with the" >&2
-        echo "  literal marker: <!-- e2e-evidence: complete -->" >&2
+        echo "  literal marker: <!-- e2e-evidence: complete sha=\"<HEAD>\" -->" >&2
         echo "  See references/e2e-command-mode.md for the contract." >&2
         return 1
       fi
+      # Reject unbraced $PR_NUMBER in command-mode fields. The wrapper only
+      # substitutes the BRACED form ${PR_NUMBER}; a bare $PR_NUMBER would
+      # silently render as empty (PR_NUMBER is not exported), potentially
+      # targeting the wrong stage or the prod stage. This guard catches
+      # the typo at config-validation time. Match \$PR_NUMBER NOT followed
+      # by '{' or alphanum (so we don't false-fire on `${PR_NUMBER}` or
+      # `$PR_NUMBER_FOO`).
+      for _field in E2E_COMMAND E2E_COMMAND_PRE_HOOKS E2E_COMMAND_EVIDENCE_PARSER; do
+        local _value="${!_field:-}"
+        if [[ "$_value" =~ \$PR_NUMBER([^A-Za-z0-9_{]|$) ]]; then
+          echo "Error: ${_field} contains unbraced \$PR_NUMBER." >&2
+          echo "  Use \${PR_NUMBER} (with braces) so the wrapper can substitute it." >&2
+          echo "  Found in: ${_field}=${_value}" >&2
+          return 1
+        fi
+      done
       ;;
     *)
       echo "Error: invalid E2E_MODE='${mode}'." >&2
@@ -662,41 +678,81 @@ the deadline — treat as FAIL but still parse partial evidence below.
 
 ### Step 3: Inspect outcome
 
-- **EXIT_CODE=0** → PASS pending evidence validation.
-- **EXIT_CODE=124** → TIMEOUT → FAIL. Include log tail in your findings.
-- **EXIT_CODE!=0 and !=124** → FAIL. The command itself reports the error.
+- **EXIT_CODE=0** → PASS pending evidence validation. **Proceed to Step 4.**
+- **EXIT_CODE=124** → TIMEOUT. Some pipelines write artifacts BEFORE a
+  late-stage cleanup races and triggers timeout. **Proceed to Step 4** to
+  let the evidence parser inspect the authoritative artifact source
+  (S3 / DDB / file). The parser, not the exit code, is the source of
+  truth for whether the artifact is acceptable.
+- **EXIT_CODE!=0 and !=124** → FAIL. **SKIP Step 4 (do NOT run the
+  parser — its input log is malformed).** Jump directly to Step 5 with
+  a log tail as evidence.
 
-Some pipelines have late-stage tail-end errors that fire AFTER the
-artifact has actually landed (e.g. cleanup race). In that case you MAY
-re-validate by inspecting the authoritative artifact source (S3 / DDB /
-file) directly via the evidence parser before marking FAIL.
-
-### Step 4: Generate evidence block via parser
+### Step 4: Generate evidence block via parser (ONLY if EXIT_CODE ∈ {0, 124})
 
 \`\`\`bash
-EVIDENCE=\$(${E2E_COMMAND_EVIDENCE_PARSER_RENDERED} /tmp/e2e-${PR_NUMBER}.log)
+if [[ \$EXIT_CODE -eq 0 || \$EXIT_CODE -eq 124 ]]; then
+  EVIDENCE=\$(${E2E_COMMAND_EVIDENCE_PARSER_RENDERED} /tmp/e2e-${PR_NUMBER}.log)
+fi
 \`\`\`
 
 The parser MUST output a markdown evidence block ending with the literal
-marker:
+marker (note the embedded SHA — see Step 4b):
 
 \`\`\`
-<!-- e2e-evidence: complete -->
+<!-- e2e-evidence: complete sha="${PR_HEAD_SHA}" -->
 \`\`\`
 
 If the parser exits non-zero or the marker is missing, the evidence is
 malformed — post a "Review findings" comment naming
 \`E2E_COMMAND_EVIDENCE_PARSER\` as the subsystem at fault and exit.
 
+### Step 4b: Stale-evidence guard — REQUIRED on every tick
+
+**Before running the verify command at all**, check whether the PR
+already has a valid evidence comment for the current HEAD SHA. The
+current HEAD SHA is \`${PR_HEAD_SHA}\`. The marker is considered
+"matching" only if it contains exactly \`sha="${PR_HEAD_SHA}"\` —
+plain marker matches do NOT count (would let stale evidence from a
+prior commit pass).
+
+\`\`\`bash
+EXISTING=\$(gh pr view ${PR_NUMBER} --repo ${REPO} --json comments \\
+  --jq '.comments[].body' | grep -F 'e2e-evidence: complete sha="${PR_HEAD_SHA}"' | head -1)
+if [[ -n "\$EXISTING" ]]; then
+  echo "Evidence already exists for HEAD ${PR_HEAD_SHA}, skipping E2E re-run"
+  # Use the existing evidence; jump to Step 6 PASS/FAIL decision based
+  # on its contents.
+fi
+\`\`\`
+
+If the existing comment's marker SHA does NOT match \`${PR_HEAD_SHA}\`,
+the evidence is stale — re-run E2E from Step 1.
+
 ### Step 5: Post evidence as a PR comment
+
+For PASS or TIMEOUT (EXIT_CODE ∈ {0, 124}):
 
 \`\`\`bash
 gh pr comment ${PR_NUMBER} --body "\$EVIDENCE"
 \`\`\`
 
-The evidence block is the authoritative E2E artifact. Reviewers (and
-this same wrapper on subsequent ticks) can grep for the marker to
-detect prior evidence and skip re-running.
+For other failures (EXIT_CODE not in {0, 124}), post a log-tail comment
+instead — do NOT invoke the parser:
+
+\`\`\`bash
+gh pr comment ${PR_NUMBER} --body "\$(cat <<EOF_FAIL
+## E2E Failure (verify command exit code: \$EXIT_CODE)
+
+Command: \\\`${E2E_COMMAND_RENDERED}\\\`
+
+Last 50 lines of /tmp/e2e-${PR_NUMBER}.log:
+\\\`\\\`\\\`
+\$(tail -50 /tmp/e2e-${PR_NUMBER}.log)
+\\\`\\\`\\\`
+EOF_FAIL
+)"
+\`\`\`
 
 ### Step 6: Decide PASS / FAIL
 
@@ -736,11 +792,12 @@ also work, but stick to the canonical form when possible.
 
   Then exit.
 
-- If ANY item fails$(if [[ "${E2E_ACTIVE:-false}" == "true" ]]; then echo " OR any E2E test fails OR preview URL is unavailable"; fi) OR requirement drift is detected:
+- If ANY item fails$(case "${E2E_MODE:-none}" in browser) echo " OR any E2E test fails OR preview URL is unavailable" ;; command) echo " OR the verify command fails OR the evidence block is missing/malformed" ;; esac) OR requirement drift is detected:
   Post a comment on issue #${ISSUE_NUMBER} starting with the exact text
   **\`Review findings:\`** on the FIRST LINE, followed by a numbered list
-  of each failing item with specific remediation instructions.$(if [[ "${E2E_ACTIVE:-false}" == "true" ]]; then echo "
-  Include E2E failure details with screenshot evidence."; fi)
+  of each failing item with specific remediation instructions.$(case "${E2E_MODE:-none}" in browser) echo "
+  Include E2E failure details with screenshot evidence." ;; command) echo "
+  Include the verify-command exit code and a tail of /tmp/e2e-${PR_NUMBER}.log as evidence." ;; esac)
   End the comment with: \`Review Session: \\\`${SESSION_ID}\\\`\`
   Then exit.
 
@@ -759,6 +816,18 @@ log "Starting review session: ${SESSION_ID} (name: ${SESSION_NAME}, model: ${AGE
 if [[ "${E2E_ACTIVE:-false}" == "true" ]]; then
   export E2E_TEST_USER_EMAIL="${E2E_TEST_USER_EMAIL:-}"
   export E2E_TEST_USER_PASSWORD="${E2E_TEST_USER_PASSWORD:-}"
+fi
+
+# Command-mode: export PR_NUMBER and PR_HEAD_SHA so the project's
+# E2E_COMMAND / parser scripts can read them. This is required by the
+# evidence-block contract (parser must embed PR_HEAD_SHA in the marker
+# for stale-evidence guard) and convenient for verify commands that use
+# the unbraced shell form `$PR_NUMBER` after a future opt-in. Today
+# unbraced is rejected at config-validation time, but parsers commonly
+# read these.
+if [[ "${E2E_MODE:-none}" == "command" ]]; then
+  export PR_NUMBER="${PR_NUMBER}"
+  export PR_HEAD_SHA="${PR_HEAD_SHA:-}"
 fi
 
 set +e
