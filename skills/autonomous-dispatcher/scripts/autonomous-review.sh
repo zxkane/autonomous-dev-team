@@ -91,6 +91,16 @@ validate_e2e_config() {
 
   case "$mode" in
     none|browser)
+      # In the non-command modes the command-mode fields must NOT be
+      # set. Catches the "operator filled in E2E_COMMAND but forgot to
+      # set E2E_MODE=command" footgun — without this guard the fields
+      # would be silently ignored and the operator would think
+      # command-mode was wired up.
+      if [[ -n "${E2E_COMMAND:-}" || -n "${E2E_COMMAND_EVIDENCE_PARSER:-}" || -n "${E2E_COMMAND_PRE_HOOKS:-}" ]]; then
+        echo "Error: E2E_COMMAND* fields are set but E2E_MODE='${mode}', not 'command'." >&2
+        echo "  Either set E2E_MODE=command or unset E2E_COMMAND / E2E_COMMAND_PRE_HOOKS / E2E_COMMAND_EVIDENCE_PARSER." >&2
+        return 1
+      fi
       ;;
     command)
       if [[ -z "${E2E_COMMAND:-}" ]]; then
@@ -377,18 +387,31 @@ if [[ -n "$BOT_LOGIN" ]]; then
   log "Verdict will bind to actor=${BOT_LOGIN}, createdAt >= ${WRAPPER_START_TS}, body must contain 'Review Session'"
 fi
 
-# E2E_MODE=command: substitute ${PR_NUMBER} placeholder in command-mode
-# fields so the agent receives a fully-resolved command string. The
-# placeholder is the literal six-character sequence `${PR_NUMBER}` —
-# operators write it in autonomous.conf with single quotes to defer
-# expansion (e.g. E2E_COMMAND='bash scripts/e2e.sh pr-${PR_NUMBER}').
+# E2E_MODE=command: substitute the literal `${PR_NUMBER}` placeholder in
+# command-mode fields so the agent receives a fully-resolved command
+# string. Operators write the placeholder in autonomous.conf with single
+# quotes to defer expansion (e.g.
+# E2E_COMMAND='bash scripts/e2e.sh pr-${PR_NUMBER}').
+#
+# `:-` defaults are required: under `set -u`, `${VAR//pat/repl}` against
+# an unset VAR aborts the wrapper. E2E_COMMAND_PRE_HOOKS is documented
+# as optional; without the default an operator who simply omits the
+# line crashes the wrapper before the agent ever runs.
 E2E_COMMAND_RENDERED=""
 E2E_COMMAND_PRE_HOOKS_RENDERED=""
 E2E_COMMAND_EVIDENCE_PARSER_RENDERED=""
 if [[ "${E2E_MODE:-none}" == "command" ]]; then
-  E2E_COMMAND_RENDERED="${E2E_COMMAND//\$\{PR_NUMBER\}/${PR_NUMBER}}"
-  E2E_COMMAND_PRE_HOOKS_RENDERED="${E2E_COMMAND_PRE_HOOKS//\$\{PR_NUMBER\}/${PR_NUMBER}}"
-  E2E_COMMAND_EVIDENCE_PARSER_RENDERED="${E2E_COMMAND_EVIDENCE_PARSER//\$\{PR_NUMBER\}/${PR_NUMBER}}"
+  if [[ -z "$PR_NUMBER" ]]; then
+    log "ERROR: E2E_MODE=command but PR_NUMBER is empty — refusing to render"
+    log "       a placeholder-substituted command that would target the wrong PR."
+    exit 1
+  fi
+  E2E_COMMAND_RENDERED="${E2E_COMMAND:-}"
+  E2E_COMMAND_RENDERED="${E2E_COMMAND_RENDERED//\$\{PR_NUMBER\}/${PR_NUMBER}}"
+  E2E_COMMAND_PRE_HOOKS_RENDERED="${E2E_COMMAND_PRE_HOOKS:-}"
+  E2E_COMMAND_PRE_HOOKS_RENDERED="${E2E_COMMAND_PRE_HOOKS_RENDERED//\$\{PR_NUMBER\}/${PR_NUMBER}}"
+  E2E_COMMAND_EVIDENCE_PARSER_RENDERED="${E2E_COMMAND_EVIDENCE_PARSER:-}"
+  E2E_COMMAND_EVIDENCE_PARSER_RENDERED="${E2E_COMMAND_EVIDENCE_PARSER_RENDERED//\$\{PR_NUMBER\}/${PR_NUMBER}}"
 fi
 
 PROMPT="$(cat <<EOF

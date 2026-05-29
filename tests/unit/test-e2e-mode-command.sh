@@ -168,6 +168,45 @@ assert_grep "wrapper substitutes PR_NUMBER in E2E_COMMAND" \
 
 # ---------------------------------------------------------------------------
 echo ""
+echo "=== TC-E2E-MODE-009: case-sensitivity — capitalized values rejected ==="
+# ---------------------------------------------------------------------------
+assert_validate_fails "E2E_MODE=Browser (capitalized) hits invalid-mode branch" \
+  "invalid E2E_MODE" \
+  E2E_ENABLED=true E2E_MODE=Browser
+assert_validate_fails "E2E_MODE=COMMAND (uppercase) hits invalid-mode branch" \
+  "invalid E2E_MODE" \
+  E2E_ENABLED=true E2E_MODE=COMMAND
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-E2E-MODE-010: command-mode fields without E2E_MODE=command rejected ==="
+# ---------------------------------------------------------------------------
+# Catches the "operator filled in E2E_COMMAND but forgot E2E_MODE=command"
+# footgun. Without this guard the fields are silently ignored.
+assert_validate_fails "E2E_COMMAND set with E2E_MODE=none rejected" \
+  "E2E_COMMAND.*set.*E2E_MODE" \
+  E2E_MODE=none 'E2E_COMMAND=bash scripts/x.sh'
+assert_validate_fails "E2E_COMMAND set with E2E_MODE=browser rejected" \
+  "E2E_COMMAND.*set.*E2E_MODE" \
+  E2E_MODE=browser 'E2E_COMMAND=bash scripts/x.sh'
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-E2E-MODE-011: PRE_HOOKS-unset substitution does not crash ==="
+# ---------------------------------------------------------------------------
+# Regression for set -u + ${VAR//pat/repl} on unset E2E_COMMAND_PRE_HOOKS.
+# The substitution lines around line 388-394 must use :- defaults.
+assert_grep "E2E_COMMAND_PRE_HOOKS substitution uses :- default" \
+  'E2E_COMMAND_PRE_HOOKS:-' "$WRAPPER"
+assert_grep "E2E_COMMAND substitution uses :- default" \
+  'E2E_COMMAND:-' "$WRAPPER"
+assert_grep "E2E_COMMAND_EVIDENCE_PARSER substitution uses :- default" \
+  'E2E_COMMAND_EVIDENCE_PARSER:-' "$WRAPPER"
+assert_grep "PR_NUMBER empty-guard before substitution" \
+  '\[\[ -z "\$PR_NUMBER" \]\]' "$WRAPPER"
+
+# ---------------------------------------------------------------------------
+echo ""
 echo "=== TC-E2E-MODE-back-compat: absent-config path validates clean ==="
 # ---------------------------------------------------------------------------
 # E2E_ENABLED unset, E2E_MODE unset, E2E_ENABLED=false — all must validate.

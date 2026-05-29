@@ -47,7 +47,7 @@ The project supplies two scripts.
 - Reads its arguments, including any rendered `${PR_NUMBER}`.
 - Performs whatever real work the E2E entails (deploy a stage, submit a job, poll for completion, dump logs).
 - Streams informative output to stdout/stderr.
-- Exits 0 on success, non-zero on failure. The wrapper interprets exit code 124 (from `timeout`) as TIMEOUT.
+- Exits 0 on success, non-zero on failure. Exit code 124 (from `timeout(1)`) signals TIMEOUT; the review agent (per Step 3 of the command-mode prompt block) treats it as FAIL but still runs the evidence parser to capture partial results.
 - Has access to whatever credentials the wrapper has (GitHub App token via the wrapper's auth, plus whatever the project's per-stage IAM affords).
 - Should be idempotent against retries — the wrapper may re-dispatch on subsequent ticks.
 
@@ -55,8 +55,8 @@ The project supplies two scripts.
 
 - Takes the verify-command's log file as `$1`.
 - Reads the log + any artifact-of-truth (S3 objects, DDB rows, local files) the verify command produced.
-- Emits a markdown evidence block to stdout that the wrapper will paste verbatim into a PR comment.
-- The block MUST end with the literal marker `<!-- e2e-evidence: complete -->` so subsequent ticks can detect prior evidence and skip re-running.
+- Emits a markdown evidence block to stdout. The review agent (per the prompt instructions injected by `autonomous-review.sh`) pastes it verbatim into a PR comment via `gh pr comment`.
+- The block MUST end with the literal marker `<!-- e2e-evidence: complete -->` so subsequent ticks can detect prior evidence and skip re-running. The review agent — not the wrapper — checks for this marker before posting; see Step 4 of the command-mode prompt block in `skills/autonomous-dispatcher/scripts/autonomous-review.sh`.
 - Returns 0 on success, non-zero if the log is malformed or required artifacts are missing.
 
 ### Evidence block contract
