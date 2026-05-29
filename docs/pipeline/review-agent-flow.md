@@ -26,7 +26,7 @@ sequenceDiagram
         W->>GH: remove reviewing, add pending-dev
         W-->>D: exit 1
     end
-    W->>GH: extract preview URL (if E2E_ENABLED)
+    W->>GH: extract preview URL (if E2E_MODE=browser)
     W->>W: build review prompt (mergeability, drift, checklist, decision)
     W->>L: run_agent
     L->>A: printf '%s' PROMPT | claude --session-id ... --model sonnet -p
@@ -73,11 +73,41 @@ If all three fail → comment "Review failed: no PR found linked to this issue. 
 
 This is one of the five legitimate ways the wrapper can transition to `pending-dev` even though the agent never ran. The dispatcher's Step 4a retry counter does NOT count this as a dev-failure — only `Agent Session Report (Dev)` comments and the dispatcher's own crash regex feed the counter.
 
-## Preview URL extraction (E2E only)
+## E2E mode dispatch (issue #161)
 
-Only relevant when `E2E_ENABLED=true` AND `E2E_PREVIEW_URL_PATTERN` is configured. The wrapper builds a URL from the pattern (replacing `{N}` with the PR number) and also scans PR comments for the most recent comment containing "Preview" + an `https://` URL. Comment-extracted URL takes priority (it's specific to the actual deploy).
+The review wrapper supports three E2E modes via `E2E_MODE` in `autonomous.conf`:
 
-If E2E is enabled but preview URL extraction yields nothing, the agent's review prompt receives `Preview URL: NOT_FOUND`, and the agent is instructed to FAIL the review with "E2E verification failed: PR preview URL not found."
+| `E2E_MODE` | Activates when | Prompt block |
+|---|---|---|
+| `none` (default when unset) | always — no E2E section in the prompt | (none) |
+| `browser` | project explicitly opts in | Chrome DevTools MCP UI smoke test (existing) |
+| `command` | project explicitly opts in | Project-supplied verify command (new) |
+
+**Fail-loud at startup**: `E2E_ENABLED=true` with `E2E_MODE` unset exits the wrapper non-zero. Projects must opt into a specific mode rather than implicitly inheriting `browser`. This catches the most common upgrade footgun (existing projects had only `E2E_ENABLED`).
+
+The wrapper internally derives `E2E_ACTIVE` (true when mode is `browser` or `command`); downstream prompt language gates off this flag rather than `E2E_ENABLED`.
+
+### Preview URL extraction (browser mode only)
+
+Only relevant when `E2E_MODE=browser` AND `E2E_PREVIEW_URL_PATTERN` is configured. The wrapper builds a URL from the pattern (replacing `{N}` with the PR number) and also scans PR comments for the most recent comment containing "Preview" + an `https://` URL. Comment-extracted URL takes priority (it's specific to the actual deploy).
+
+If browser-mode E2E is enabled but preview URL extraction yields nothing, the agent's review prompt receives `Preview URL: NOT_FOUND`, and the agent is instructed to FAIL the review with "E2E verification failed: PR preview URL not found."
+
+### Command rendering (command mode only)
+
+In `command` mode the wrapper substitutes the literal `${PR_NUMBER}` placeholder in `E2E_COMMAND`, `E2E_COMMAND_PRE_HOOKS`, and `E2E_COMMAND_EVIDENCE_PARSER` with the resolved PR number before pasting them into the prompt. Operators MUST single-quote those assignments in `autonomous.conf` so the shell does not eagerly expand `${PR_NUMBER}` when sourcing the conf file.
+
+The agent's command-mode prompt block instructs it to:
+
+1. Run `E2E_COMMAND_PRE_HOOKS` if set (e.g. seed test data into the per-PR stage).
+2. Run `E2E_COMMAND` under `timeout(1)` with `E2E_COMMAND_TIMEOUT_SECONDS`.
+3. Interpret the exit code (0 = pass, 124 = timeout, other = fail).
+4. Run `E2E_COMMAND_EVIDENCE_PARSER` to extract a markdown evidence block from the log.
+5. Validate the block ends with the literal marker `<!-- e2e-evidence: complete -->`.
+6. Post the evidence block as a PR comment.
+7. Decide PASS/FAIL based on exit code + AC coverage in the evidence block.
+
+For the project-side contract (`E2E_COMMAND` semantics, evidence-block format), see `skills/autonomous-review/references/e2e-command-mode.md`.
 
 ## Prompt construction
 
@@ -92,7 +122,7 @@ Major prompt sections:
 | **Review checklist** | Process compliance, code quality, testing, infra. The Kiro path skips `code-simplifier` / `pr-review` items since Kiro doesn't support those. |
 | **Acceptance criteria verification** | For each `## Acceptance Criteria` checkbox in the issue body, verify against PR code/tests/build then mark via `bash scripts/mark-issue-checkbox.sh`. ALL must be checked before approving. |
 | **Amazon Q Developer trigger** | Mandatory bot-review trigger. Q ignores `/q review` from bot accounts ⇒ wrapper instructs the agent to use `bash scripts/gh-as-user.sh pr comment N --body "/q review"`. Poll up to 3 min for the bot to respond. |
-| **E2E verification (if enabled)** | Chrome DevTools MCP procedure: navigate, login, execute happy-path + feature test cases, screenshot+upload each, post structured E2E report on PR. |
+| **E2E verification (if `E2E_MODE` ∈ {browser, command})** | Branch on `E2E_MODE`. `browser`: Chrome DevTools MCP procedure (navigate, login, execute happy-path + feature test cases, screenshot+upload each, post structured E2E report on PR). `command`: invoke project-supplied `E2E_COMMAND`, run `E2E_COMMAND_EVIDENCE_PARSER`, post evidence block ending with marker `<!-- e2e-evidence: complete -->` as PR comment. See **E2E mode dispatch** above. |
 | **Decision** | Single line: PASS ⇒ post "Review PASSED ... Review Session: \`<id>\`" on the **issue** (not PR). FAIL ⇒ post "Review findings: ..." with numbered remediation list, ending with the same session-id trailer. |
 
 The session-id trailer is the wrapper's only way to identify which comment is its own verdict — see [Verdict polling](#verdict-polling) below.

@@ -103,10 +103,11 @@ For custom bots declared via `REVIEW_BOTS_<NAME>_TRIGGER`, use the configured tr
 
 Do NOT use the default `gh pr comment` for bot review triggers — it authenticates as a bot. If `scripts/gh-as-user.sh` is not available in your project, fall back to `gh pr comment` and accept that some bots may ignore the trigger.
 
-### 6. E2E Verification via Chrome DevTools MCP
+### 6. E2E Verification
 
-> **If E2E verification is configured (preview URL provided in the prompt), this section is MANDATORY. If no preview URL is configured, skip this section.**
+> **If E2E verification is configured, this section is MANDATORY.** The wrapper injects one of two procedures based on `E2E_MODE`. If neither appears in the prompt, skip this section.
 
+**Browser mode** (`E2E_MODE=browser`, for SaaS web apps):
 - [ ] Preview URL extracted from PR comments
 - [ ] Preview URL navigated successfully via Chrome DevTools MCP
 - [ ] Test user login verified on preview environment
@@ -115,6 +116,13 @@ Do NOT use the default `gh pr comment` for bot review triggers — it authentica
 - [ ] Regression tests executed (auth, navigation, console errors)
 - [ ] Screenshots captured, uploaded, and linked as evidence
 - [ ] E2E verification report posted as PR comment with screenshot links
+
+**Command mode** (`E2E_MODE=command`, for backend pipelines / CLI / libraries):
+- [ ] Pre-hooks executed (if configured) — exit 0
+- [ ] Verify command executed within timeout — exit 0 (or recoverable timeout)
+- [ ] Evidence parser produced a markdown block ending with `<!-- e2e-evidence: complete -->`
+- [ ] Evidence block posted as a PR comment
+- [ ] Every issue-body acceptance criterion that names a verifiable artifact is covered by the evidence block
 
 ## Merge Conflict Resolution — MANDATORY Pre-Review Step
 
@@ -180,9 +188,16 @@ If no test case documents exist, execute a basic smoke test:
 
 ## E2E Verification Procedure
 
-> **This section applies only when E2E verification is configured.** The review wrapper script (`autonomous-review.sh`) will indicate whether E2E is enabled and provide the necessary configuration in the prompt.
+> **This section applies only when E2E verification is configured.** The review wrapper script (`autonomous-review.sh`) will inject one of two E2E procedures into your prompt depending on the project's `E2E_MODE` setting in `autonomous.conf`:
+>
+> - **`E2E_MODE=browser`** — Chrome DevTools MCP UI smoke test (login, navigate, screenshot). For SaaS web apps with a per-PR preview URL.
+> - **`E2E_MODE=command`** — invoke a project-supplied verify command, validate its evidence output. For backend pipelines, CLI tools, libraries, infra-as-code, or ML pipelines.
 
-For the complete step-by-step E2E procedure (browser automation, screenshot upload, test execution, report format), consult **`references/e2e-verification.md`**.
+If neither block appears in your prompt, the project has E2E disabled (`E2E_MODE=none` or unset). Skip this section.
+
+### Browser mode
+
+For the complete step-by-step browser-mode procedure (browser automation, screenshot upload, test execution, report format), consult **`references/e2e-verification.md`**.
 
 Key steps:
 1. Verify preview URL is available
@@ -191,6 +206,19 @@ Key steps:
 4. Execute happy path and feature test cases
 5. Run regression checks (auth, navigation, console errors)
 6. Post structured E2E report on the PR with screenshot evidence
+
+### Command mode
+
+For the complete contract (project-side script requirements, evidence-block format, exit-code semantics, onboarding example), consult **`references/e2e-command-mode.md`**.
+
+Key steps:
+1. Run pre-hooks if configured (e.g. seed test data into the per-PR stage)
+2. Run the verify command with timeout
+3. Inspect exit code (0 = pass; 124 = timeout; other = fail)
+4. Run the evidence parser to extract a structured markdown block
+5. Validate the block ends with the marker `<!-- e2e-evidence: complete -->`
+6. Post the evidence block as a PR comment
+7. Decide PASS/FAIL based on exit code + evidence-vs-AC coverage
 
 ## Marking Acceptance Criteria
 
@@ -234,5 +262,6 @@ Post the review result as a comment on the **issue** (NOT the PR). Use "Review P
 
 For detailed procedures, consult:
 - **`references/merge-conflict-resolution.md`** -- Complete rebase procedure, conflict handling, and failure protocol
-- **`references/e2e-verification.md`** -- Browser automation steps, screenshot upload, test execution, E2E report format
+- **`references/e2e-verification.md`** -- Browser automation steps, screenshot upload, test execution, E2E report format (`E2E_MODE=browser`)
+- **`references/e2e-command-mode.md`** -- Project-supplied verify command contract, evidence-block format, onboarding example (`E2E_MODE=command`)
 - **`references/decision-gate.md`** -- Finding classification, blocking rules, decision criteria, and output format

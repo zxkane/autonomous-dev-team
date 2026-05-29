@@ -449,8 +449,62 @@ DEV_SKILL_CMD="/autonomous-dev"
 REVIEW_BOTS=""
 
 # === E2E Verification (optional) ===
+#
+# E2E has three modes (issue #161). The mode is selected by E2E_MODE.
+# E2E_ENABLED is the legacy back-compat toggle but the wrapper internally
+# drives off E2E_MODE.
+#
+#   E2E_MODE=none     — no E2E section in the review prompt (default
+#                       when unset; equivalent to E2E_ENABLED=false).
+#   E2E_MODE=browser  — Chrome DevTools MCP UI smoke test. For SaaS web
+#                       apps with a per-PR preview URL. Requires
+#                       E2E_PREVIEW_URL_PATTERN, E2E_TEST_USER_EMAIL,
+#                       E2E_TEST_USER_PASSWORD. See
+#                       skills/autonomous-review/references/e2e-verification.md
+#   E2E_MODE=command  — invoke a project-supplied verify command. For
+#                       backend pipelines, CLI tools, libraries,
+#                       infra-as-code, or ML pipelines. Requires
+#                       E2E_COMMAND, E2E_COMMAND_EVIDENCE_PARSER. See
+#                       skills/autonomous-review/references/e2e-command-mode.md
+#
+# E2E_ENABLED=true with E2E_MODE unset is a fail-loud condition — the
+# wrapper exits at startup. Projects must opt into a specific mode
+# rather than implicitly inheriting "browser".
 E2E_ENABLED="false"
+E2E_MODE=""
+
+# --- Browser mode fields (used when E2E_MODE=browser) -----------------------
 E2E_PREVIEW_URL_PATTERN=""
 E2E_TEST_USER_EMAIL=""
 E2E_TEST_USER_PASSWORD=""
 E2E_SCREENSHOT_UPLOAD="false"
+
+# --- Command mode fields (used when E2E_MODE=command) -----------------------
+#
+# E2E_COMMAND: the verify command. The literal `${PR_NUMBER}` placeholder
+# is substituted by the wrapper at render time. ALWAYS single-quote the
+# value so your shell does not eagerly expand the placeholder when
+# sourcing this file.
+#
+# Example for a backend-pipeline project:
+#   E2E_COMMAND='bash scripts/e2e-pr-stage.sh ${PR_NUMBER}'
+E2E_COMMAND=""
+
+# E2E_COMMAND_PRE_HOOKS: optional. Runs before E2E_COMMAND. Failure aborts
+# E2E. Same `${PR_NUMBER}` substitution. Example:
+#   E2E_COMMAND_PRE_HOOKS='bash scripts/e2e-seed-pr-stage.sh ${PR_NUMBER}'
+E2E_COMMAND_PRE_HOOKS=""
+
+# E2E_COMMAND_TIMEOUT_SECONDS: hard cap, enforced via timeout(1).
+# Default 3600 (60 min). MVP runs synchronously — values >3600 may
+# exceed the agent's stalled-detection threshold. For longer pipelines
+# wait for the background-mode follow-up.
+E2E_COMMAND_TIMEOUT_SECONDS=3600
+
+# E2E_COMMAND_EVIDENCE_PARSER: REQUIRED when E2E_MODE=command. Reads the
+# verify command's log file as $1, emits a markdown evidence block to
+# stdout. The block MUST end with the literal marker:
+#   <!-- e2e-evidence: complete -->
+# The wrapper validates the marker is present before posting the
+# comment. See references/e2e-command-mode.md for the full contract.
+E2E_COMMAND_EVIDENCE_PARSER=""
