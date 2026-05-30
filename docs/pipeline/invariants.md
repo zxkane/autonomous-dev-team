@@ -678,43 +678,125 @@ The transport's stdout is one of `ALIVE` / `DEAD` / empty. Indeterminate verdict
 
 Plus the existing `test-lib-agent-gemini.sh` (22 assertions) and `test-lib-agent-kiro-permission.sh` (16 assertions) updated to assert the post-#140 structural-only contract on the gemini and kiro branches.
 
-## INV-32: `gh` wrapper symlink is created in both auth modes
+## INV-32: gh wrapper is installed on two paths: shared scripts/gh for the agent, per-run PATH dir for the wrapper
 
-**Rule**: `setup_github_auth` in `lib-auth.sh` MUST create the
-`${_LIB_AUTH_DIR}/gh` symlink (pointing at `gh-with-token-refresh.sh`) and
-prepend `_LIB_AUTH_DIR` to `PATH` regardless of `GH_AUTH_MODE`. Both `app`
-and `token` modes must produce a working `scripts/gh` invocation path.
+**Rule**: `setup_github_auth` in `lib-auth.sh` MUST, regardless of
+`GH_AUTH_MODE`, install the `gh-with-token-refresh.sh` wrapper for **both** of
+its consumers, on **two distinct paths**:
 
-**Why**: agent-facing skill docs (`skills/autonomous-dev/SKILL.md` Step 12,
-`skills/autonomous-dev/references/autonomous-mode.md` "Posting Issue/PR
-Comments") prescribe `bash scripts/gh issue comment …` as the uniform rule
-for status / summary / progress comments — the explicit path forces
-resolution through the project-vendored wrapper symlink, sidestepping the
-agent's Bash tool's unreliable PATH-resolution for `gh` (the bug fixed by
-issue #142). For that uniform rule to actually work, the symlink must
-exist in both modes. The wrapper itself (`gh-with-token-refresh.sh`) is
-mode-agnostic — it consults `GH_TOKEN_FILE` only when set (app mode) and
-otherwise exec's the real `gh` inheriting the host's auth env (which IS
-the intended identity in token mode). Lifting the symlink creation out of
-the app-mode branch is therefore safe and necessary.
+1. **Agent path** — create the `${_LIB_AUTH_DIR}/gh` symlink (i.e.
+   `${PROJECT_DIR}/scripts/gh`) pointing at `gh-with-token-refresh.sh`. This
+   is a **stable, shared, project-level** artifact. It MUST be created
+   **idempotently AND atomically** — NOT a bare `ln -sf`, which unlinks the
+   existing symlink before recreating it, leaving a window where a concurrent
+   run's `bash scripts/gh …` observes no file. Build the symlink under a unique
+   temp name in `${_LIB_AUTH_DIR}` then `mv -f` it into place; `rename(2)` is
+   atomic, so the shared path is never momentarily absent for concurrent
+   readers. It MUST **NOT** be removed by `cleanup_github_auth` (a per-run
+   cleanup must never delete a shared artifact a concurrent run depends on).
+   `${_LIB_AUTH_DIR}` MUST be absolute (asserted at source time): the
+   `/tmp`-resident per-run `gh` symlink's target is `${_LIB_AUTH_DIR}/...`, so
+   a relative value would resolve relative to `/tmp` and dangle.
 
-**Producer**: `skills/autonomous-dispatcher/scripts/lib-auth.sh::setup_github_auth`.
+2. **Wrapper path** — create a **per-run** directory
+   `GH_WRAPPER_DIR=/tmp/agent-auth-XXXXXX` (mode 700), drop a `gh` symlink in
+   it (a bare `ln -sf` is fine here — the dir is private to this run), and
+   prepend `GH_WRAPPER_DIR` (NOT `_LIB_AUTH_DIR`) to `PATH`. App mode reuses
+   the token daemon's `mktemp -d` dir as `GH_WRAPPER_DIR`; token mode creates
+   it on demand. `cleanup_github_auth` removes `GH_WRAPPER_DIR` (guarded on the
+   `/tmp/agent-auth-*` prefix) together with the token file, then MUST **reset
+   the module state it tore down** — clear `GH_WRAPPER_DIR`, `GH_TOKEN_FILE`,
+   and `TOKEN_DAEMON_PID` to empty. Otherwise a second `setup_github_auth` in
+   the **same shell** (persistent test runners, consecutive tasks) sees
+   `GH_WRAPPER_DIR` still set, `_ensure_gh_wrapper_dir` skips the `mktemp`, and
+   the token file + per-run `gh` symlink point into the directory cleanup just
+   `rm -rf`'d. The reset makes `setup → cleanup → setup` idempotent within one
+   process.
 
-**Consumer**: agent-facing docs that prescribe `bash scripts/gh …`; agent
-processes that follow that prescription; any operator script that invokes
-`bash scripts/gh` from the project's `scripts/` directory.
+Both `app` and `token` modes must produce a working `scripts/gh` invocation
+(consumer 1) AND a working PATH-resolved `gh` (consumer 2).
 
-**Status**: **ENFORCED** by this PR (closes #142). Pre-#142, the symlink
-creation lived inside the `if [[ "$GH_AUTH_MODE" == "app" ]]` branch of
-`setup_github_auth` (lib-auth.sh:64-67), so token-mode invocations of the
-prescribed command path fell through to a "no such file" error.
+**Why**: there are two consumers of "the `gh` wrapper" and they resolve it by
+different mechanisms:
+
+- **The agent** invokes `bash scripts/gh issue comment …` — a uniform rule
+  prescribed by `skills/autonomous-dev/SKILL.md` Step 12 and
+  `skills/autonomous-dev/references/autonomous-mode.md` "Posting Issue/PR
+  Comments". This is a **relative-path** invocation from `$PROJECT_DIR` (the
+  wrapper does `cd "$PROJECT_DIR"`), NOT a PATH lookup — the explicit path
+  forces resolution through the project-vendored wrapper symlink, sidestepping
+  the agent's Bash tool's unreliable PATH-resolution for `gh` (the bug fixed
+  by #142). So the physical file `${PROJECT_DIR}/scripts/gh` must exist.
+
+- **The wrapper itself** (`autonomous-dev.sh` / `autonomous-review.sh`) issues
+  bare `gh issue edit`, `gh pr comment`, etc. that resolve through **`PATH`**.
+
+Pre-#163, BOTH consumers were served by the single shared `${_LIB_AUTH_DIR}/gh`
+symlink, which `setup` created and `cleanup` `rm -f`'d. Because that path is
+shared across concurrent runs on the same host, one run's `cleanup_github_auth`
+deleted the symlink another run was mid-using — the surviving run's next bare
+`gh` then failed with `scripts/gh: No such file or directory`, silently
+breaking its post-agent label update and session-report comment. #163 splits
+the two consumers onto two paths: the wrapper's PATH `gh` moves into a per-run
+`/tmp` dir (isolated, cleaned up per-run), while the agent's `scripts/gh` stays
+put, is created idempotently, and is never deleted by a per-run cleanup.
+
+The wrapper itself (`gh-with-token-refresh.sh`) is mode-agnostic — it consults
+`GH_TOKEN_FILE` (a per-process env var) only when set (app mode) and otherwise
+exec's the real `gh` inheriting the host's auth env (which IS the intended
+identity in token mode). Two runs pointing `scripts/gh` at the same fixed
+target is therefore harmless: each carries its own `GH_TOKEN_FILE`/`REAL_GH`.
+
+**Producer**: `skills/autonomous-dispatcher/scripts/lib-auth.sh::setup_github_auth`
+(installs both paths) and `::cleanup_github_auth` (removes only the per-run
+`GH_WRAPPER_DIR`; never touches `${_LIB_AUTH_DIR}/gh`).
+
+**Consumer**:
+- Agent-facing docs that prescribe `bash scripts/gh …`; agent processes that
+  follow that prescription; any operator script that invokes `bash scripts/gh`
+  from the project's `scripts/` directory (consumer 1 — `scripts/gh`).
+- The wrapper scripts' own bare `gh` calls (consumer 2 — PATH).
+
+**Status**: **ENFORCED** by this PR (closes #163; supersedes the #142 form).
+- Pre-#142: the symlink creation lived inside the `if [[ "$GH_AUTH_MODE" ==
+  "app" ]]` branch, so token-mode invocations of `scripts/gh` fell through to
+  a "no such file" error.
+- #142: lifted symlink creation out of the app branch (single shared
+  `${_LIB_AUTH_DIR}/gh` on PATH, removed in cleanup).
+- #163: split the two consumers — `scripts/gh` (shared, idempotent, never
+  deleted) for the agent; a per-run `GH_WRAPPER_DIR` on PATH for the wrapper.
+- #163 review follow-up (agy second-opinion): hardened the split — the shared
+  `scripts/gh` is now created **atomically** (temp + `mv -f`, not bare
+  `ln -sf`); `cleanup_github_auth` **resets** `GH_WRAPPER_DIR` /
+  `GH_TOKEN_FILE` / `TOKEN_DAEMON_PID` so reused-shell `setup → cleanup →
+  setup` doesn't point at a deleted dir; and `${_LIB_AUTH_DIR}` is asserted
+  absolute at source time.
 
 **Test**:
-- `tests/unit/test-lib-auth-gh-symlink.sh` (2 cases) — TC-AUTH-SYM-001
-  drives `setup_github_auth` in token mode and asserts the `gh` symlink
-  exists; TC-AUTH-SYM-002 is a source-level regression guard that asserts
-  the symlink-creation line is OUTSIDE the `GH_AUTH_MODE=app` branch in
-  `lib-auth.sh`.
+- `tests/unit/test-lib-auth-gh-symlink.sh` (11 cases):
+  - TC-AUTH-SYM-001 — token-mode `setup` creates `${_LIB_AUTH_DIR}/gh`
+    targeting `gh-with-token-refresh.sh`.
+  - TC-AUTH-SYM-002 — source-level guard: the `${_LIB_AUTH_DIR}/gh`
+    creation line (`mv -f … "${_LIB_AUTH_DIR}/gh"`) is OUTSIDE the
+    `GH_AUTH_MODE=app` branch.
+  - TC-AUTH-SYM-003 — `setup` exports a per-run `GH_WRAPPER_DIR` under
+    `/tmp/agent-auth-*`, drops a `gh` symlink in it, and prepends it to PATH.
+  - TC-AUTH-SYM-004 — two concurrent `setup` calls get **distinct**
+    `GH_WRAPPER_DIR` paths (no sharing).
+  - TC-AUTH-SYM-005 — `cleanup` removes the per-run `GH_WRAPPER_DIR`.
+  - TC-AUTH-SYM-006 — `cleanup` does NOT touch `${_LIB_AUTH_DIR}/gh`.
+  - TC-AUTH-SYM-007 — source-level guard: no `rm -f` of `${_LIB_AUTH_DIR}/gh`
+    anywhere in `lib-auth.sh` (the #163 footgun regression pin).
+  - TC-AUTH-SYM-008 — `setup` still creates `${_LIB_AUTH_DIR}/gh` (INV-32) and
+    is idempotent across two calls.
+  - TC-AUTH-SYM-009 — reused shell: `setup → cleanup → setup` lands on a
+    **fresh, existing** `GH_WRAPPER_DIR` distinct from the first (High review
+    finding — stale `GH_WRAPPER_DIR` after `rm -rf`).
+  - TC-AUTH-SYM-010 — source + behavioural: the shared `${_LIB_AUTH_DIR}/gh`
+    is created **atomically** (no bare `ln -sf` on the shared path; Medium
+    review finding).
+  - TC-AUTH-SYM-011 — `cleanup` clears `GH_TOKEN_FILE` / `TOKEN_DAEMON_PID` /
+    `GH_WRAPPER_DIR` (no stale state leaks into a reused shell).
 
 **Cross-references**:
 - Agent-facing rule: `skills/autonomous-dev/references/autonomous-mode.md`
@@ -803,10 +885,10 @@ verdict-PASS branch (the auto-merge sub-branch).
   failed:")` and conditionally injects rebase instructions.
 
 **Cross-references**:
-- [INV-32](#inv-32-gh-wrapper-symlink-is-created-in-both-auth-modes) —
-  the marker-posting `gh pr comment` call routes through the same
-  `${_LIB_AUTH_DIR}/gh` symlink, so token-mode and app-mode behave
-  identically.
+- [INV-32](#inv-32-gh-wrapper-is-installed-on-two-paths-shared-scriptsgh-for-the-agent-per-run-path-dir-for-the-wrapper) —
+  the marker-posting `gh pr comment` is one of the wrapper's own bare `gh`
+  calls, so it routes through the per-run `GH_WRAPPER_DIR` `gh` on PATH;
+  token-mode and app-mode behave identically.
 - [INV-04](#inv-04-reviewed-head-trailer-format) — the "Reviewed HEAD"
   trailer is still posted in the auto-merge-failure path (the wrapper's
   trailer write happens before the merge attempt) — the dispatcher's

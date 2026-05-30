@@ -97,7 +97,7 @@ The session-end timestamp is extracted from the same `{"type":"result"}` JSON li
 | `<!-- review-aware-flip:non-substantive cause=<x> -->` | issue comment | new — emitted with the label flip in the non-substantive branch. Counted on each tick to compute the per-session flip count. |
 | `<!-- review-verdict: ... -->` | review verdict comment (PR or issue, wherever the wrapper posts) | new — the trailer that drives the routing. |
 
-All comments go via `bash scripts/gh issue comment` per [INV-32](../pipeline/invariants.md#inv-32-gh-wrapper-symlink-is-created-in-both-auth-modes).
+All comments go via `bash scripts/gh issue comment` per [INV-32](../pipeline/invariants.md#inv-32-gh-wrapper-is-installed-on-two-paths-shared-scriptsgh-for-the-agent-per-run-path-dir-for-the-wrapper).
 
 ## 7. Failure modes considered
 
