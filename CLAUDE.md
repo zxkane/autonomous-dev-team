@@ -33,6 +33,13 @@ This project enforces a strict TDD development workflow through agent hooks. The
 
 > Hooks are supported in Claude Code and Kiro CLI. For agents without hook support (Cursor, Windsurf, Gemini CLI), follow each step manually — the discipline is the same.
 
+> ⚠️ **This repo is self-hosting — never edit files in the main workdir; always use a worktree.** This checkout of `zxkane/autonomous-dev-team` is consumed by the autonomous dispatcher running on the same box: its `scripts/` symlink resolves into this repo's own `skills/autonomous-dispatcher/scripts/` tree, so the dispatcher executes these exact files via `scripts/autonomous-{dev,review}.sh`. **Any uncommitted change in the main workdir becomes live for every dispatched dev/review wrapper.** A half-finished edit can crash a wrapper mid-run — e.g. an incomplete per-side `AGENT_REVIEW_CMD` rebind aborts the review wrapper with `AGENT_REVIEW_CMD: unbound variable`, leaving the issue stuck in `reviewing` with no verdict and no re-dispatch.
+>
+> Therefore:
+> - **All work MUST happen in a git worktree** — `git worktree add .worktrees/<branch> -b <branch>`, edit there, PR from there.
+> - **Never modify, stage, or leave dirty any tracked file in the main workdir.** The only writes ever made directly to the main workdir are syncs of committed state (`git pull` / `git reset --hard origin/main`).
+> - This is stricter than the generic "develop in a worktree" rule (#1 above): here it protects the **live dispatcher**, not just commit hygiene.
+
 ### Pipeline Documentation Authority
 
 `docs/pipeline/*.md` (`state-machine.md`, `invariants.md`, `dispatcher-flow.md`, `dev-agent-flow.md`, `review-agent-flow.md`, `handoffs.md`) is the **spec** for the dispatcher / dev wrapper / review wrapper subsystem. Any code change to those wrappers MUST update the corresponding pipeline doc in the **same PR**.
