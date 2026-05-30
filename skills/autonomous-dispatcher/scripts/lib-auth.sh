@@ -10,6 +10,14 @@
 # pattern resolves to the project's scripts/ rather than the skill
 # installation dir.
 _LIB_AUTH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# `pwd` (no -P needed for this) always yields an absolute path. Assert it: the
+# `gh` wrapper symlink is created in a /tmp dir with ${_LIB_AUTH_DIR}/... as its
+# target, so a relative _LIB_AUTH_DIR would produce a symlink that resolves
+# relative to /tmp (broken). Fail loud rather than ship a dangling wrapper.
+if [[ "$_LIB_AUTH_DIR" != /* ]]; then
+  echo "FATAL: lib-auth.sh expected an absolute _LIB_AUTH_DIR, got '${_LIB_AUTH_DIR}'" >&2
+  return 1 2>/dev/null || exit 1
+fi
 # shellcheck source=lib-config.sh
 source "${_LIB_AUTH_DIR}/lib-config.sh"
 load_autonomous_conf "${_LIB_AUTH_DIR}" || true
@@ -96,9 +104,10 @@ setup_github_auth() {
   #   2. The *agent* invokes `bash scripts/gh issue comment …` (a relative
   #      path from PROJECT_DIR, NOT a PATH lookup), so it needs the physical
   #      file ${_LIB_AUTH_DIR}/gh to exist. That is a stable, shared,
-  #      project-level artifact: created idempotently (`ln -sf` to a fixed
-  #      target is safe under concurrent creation) and NEVER deleted by a
-  #      per-run cleanup. Removing it per-run was the #163 root cause.
+  #      project-level artifact: created idempotently AND atomically (temp
+  #      symlink + `mv -f`, see below — a bare `ln -sf` would briefly unlink
+  #      it under a concurrent reader) and NEVER deleted by a per-run cleanup.
+  #      Removing it per-run was the #163 root cause.
   #
   # The wrapper itself (gh-with-token-refresh.sh) is mode-agnostic — it reads
   # GH_TOKEN_FILE only when set (app mode); in token mode it exec's the real
@@ -108,8 +117,18 @@ setup_github_auth() {
   if [[ -x "${_LIB_AUTH_DIR}/gh-with-token-refresh.sh" ]]; then
     _ensure_gh_wrapper_dir
     export PATH="${GH_WRAPPER_DIR}:${PATH}"
+    # Per-run dir is private to this run — a bare `ln -sf` is fine.
     ln -sf "${_LIB_AUTH_DIR}/gh-with-token-refresh.sh" "${GH_WRAPPER_DIR}/gh" 2>/dev/null || true
-    ln -sf "${_LIB_AUTH_DIR}/gh-with-token-refresh.sh" "${_LIB_AUTH_DIR}/gh" 2>/dev/null || true
+    # Shared, project-level ${_LIB_AUTH_DIR}/gh: created ATOMICALLY. A bare
+    # `ln -sf` unlinks the existing symlink before recreating it, leaving a
+    # brief window where a concurrent run's `bash scripts/gh …` sees no file
+    # ("No such file or directory"). Build the symlink under a unique temp name
+    # in the same dir, then `mv -f` it into place — rename(2) is atomic, so the
+    # path is never momentarily absent for concurrent readers.
+    local _gh_tmp="${_LIB_AUTH_DIR}/.gh.$$.$RANDOM"
+    if ln -s "${_LIB_AUTH_DIR}/gh-with-token-refresh.sh" "$_gh_tmp" 2>/dev/null; then
+      mv -f "$_gh_tmp" "${_LIB_AUTH_DIR}/gh" 2>/dev/null || rm -f "$_gh_tmp" 2>/dev/null || true
+    fi
   fi
 }
 
@@ -139,6 +158,14 @@ cleanup_github_auth() {
   if [[ "$GH_WRAPPER_DIR" == /tmp/agent-auth-* ]]; then
     rm -rf "$GH_WRAPPER_DIR" 2>/dev/null || true
   fi
+  # Reset the module-level state we just tore down. Without this, a second
+  # setup_github_auth in the SAME shell (persistent test runners, consecutive
+  # tasks) would see GH_WRAPPER_DIR still set, _ensure_gh_wrapper_dir would skip
+  # the mktemp, and GH_TOKEN_FILE / the per-run `gh` symlink would point into the
+  # directory we just rm -rf'd. Clearing here makes setup→cleanup→setup idempotent.
+  GH_WRAPPER_DIR=""
+  GH_TOKEN_FILE=""
+  TOKEN_DAEMON_PID=""
 }
 
 # Export GH_USER_PAT if available (for gh-as-user.sh bot workaround).

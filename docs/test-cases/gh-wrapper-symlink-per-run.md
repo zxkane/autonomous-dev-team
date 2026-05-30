@@ -23,6 +23,14 @@ Subsystem: `skills/autonomous-dispatcher/scripts/lib-auth.sh`
 | TC-AUTH-SYM-007 | source-level lockdown: no `rm -f` of `${_LIB_AUTH_DIR}/gh` anywhere in `lib-auth.sh` | `grep` for `rm -f .*_LIB_AUTH_DIR.*/gh` finds zero matches |
 | TC-AUTH-SYM-008 | `setup_github_auth` still creates the agent-facing `${_LIB_AUTH_DIR}/gh` (INV-32) and does so idempotently across two calls | symlink exists and targets the wrapper after one and after two calls (no error on the second) |
 
+## Review-finding fixes (agy second-opinion on PR #164)
+
+| ID | Scenario | Expected |
+|---|---|---|
+| TC-AUTH-SYM-009 | reused shell: `setup_github_auth` → `cleanup_github_auth` → `setup_github_auth` again (token mode) | the **second** setup lands on a per-run `GH_WRAPPER_DIR` that **exists** and is **distinct** from the first (cleanup must clear the variable so `_ensure_gh_wrapper_dir` re-`mktemp`s). Before the fix, the var kept the deleted path and the second setup pointed at a non-existent dir. |
+| TC-AUTH-SYM-010 | `${_LIB_AUTH_DIR}/gh` creation never leaves the path momentarily absent | source-level: creation does NOT use a bare `ln -sf` that unlinks-then-creates the shared `gh`; it is atomic (temp symlink + `mv -f`) or skip-if-already-correct. After setup, `${_LIB_AUTH_DIR}/gh` is a valid symlink to the wrapper. |
+| TC-AUTH-SYM-011 | `cleanup_github_auth` clears `GH_TOKEN_FILE` and `TOKEN_DAEMON_PID` | after cleanup both are empty — no stale daemon PID / token path carried into a reused shell (same root cause as 009). |
+
 ## Notes
 
 - TC-AUTH-SYM-001/002 (INV-32) and TC-AUTH-SYM-008 together pin BOTH consumers: the

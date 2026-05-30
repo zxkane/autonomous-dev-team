@@ -94,7 +94,10 @@ echo "=== TC-AUTH-SYM-002: symlink creation is NOT inside the GH_AUTH_MODE=app b
 # (`if [[ "$GH_AUTH_MODE" == "app" ]]; then` to its matching `else`),
 # then assert the symlink line is OUTSIDE that range.
 
-sym_line=$(grep -n 'ln -sf .*gh-with-token-refresh.sh.*"\${_LIB_AUTH_DIR}/gh"' "$LIB_AUTH" | head -1 | cut -d: -f1)
+# The shared ${_LIB_AUTH_DIR}/gh is now created atomically (temp symlink +
+# `mv -f … "${_LIB_AUTH_DIR}/gh"`), so locate the `mv -f` install line rather
+# than the old bare `ln -sf`. (#163 review fix, TC-AUTH-SYM-010.)
+sym_line=$(grep -n 'mv -f .*"\${_LIB_AUTH_DIR}/gh"' "$LIB_AUTH" | head -1 | cut -d: -f1)
 app_branch_start=$(grep -n 'if \[\[ "\$GH_AUTH_MODE" == "app" \]\]' "$LIB_AUTH" | head -1 | cut -d: -f1)
 
 if [[ -z "$sym_line" ]]; then
@@ -291,6 +294,117 @@ else
 fi
 [[ "$wdir8" == /tmp/agent-auth-* ]] && rm -rf "$wdir8"
 rm -rf "$SB8"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-AUTH-SYM-009: reused shell — cleanup then re-setup gets a FRESH existing GH_WRAPPER_DIR ==="
+# ---------------------------------------------------------------------------
+# Review finding (High): cleanup_github_auth rm -rf's GH_WRAPPER_DIR but did not
+# reset the variable, so a second setup in the same shell skipped the mktemp and
+# pointed GH_TOKEN_FILE / the gh symlink at a deleted dir. Assert the second
+# setup lands on a dir that EXISTS and DIFFERS from the first.
+SB9=$(new_sandbox)
+mapfile -t out9 < <(GH_TOKEN="dummy-token-for-test" bash -c "
+  source '$SB9/lib-auth.sh'
+  GH_AUTH_MODE='token'
+  setup_github_auth >/dev/null 2>&1
+  first=\"\${GH_WRAPPER_DIR:-}\"
+  cleanup_github_auth >/dev/null 2>&1
+  setup_github_auth >/dev/null 2>&1
+  second=\"\${GH_WRAPPER_DIR:-}\"
+  echo \"FIRST=\$first\"
+  echo \"SECOND=\$second\"
+  if [[ -n \"\$second\" && -d \"\$second\" ]]; then echo SECOND_EXISTS; else echo SECOND_MISSING; fi
+  if [[ -L \"\$second/gh\" ]]; then echo SECOND_GH_OK; else echo SECOND_GH_MISSING; fi
+  # clean up both /tmp dirs the test created
+  [[ \"\$first\"  == /tmp/agent-auth-* ]] && rm -rf \"\$first\"
+  [[ \"\$second\" == /tmp/agent-auth-* ]] && rm -rf \"\$second\"
+")
+first9=""; second9=""; exists9=""; gh9=""
+for kv in "${out9[@]}"; do
+  case "$kv" in
+    FIRST=*) first9="${kv#FIRST=}" ;;
+    SECOND=*) second9="${kv#SECOND=}" ;;
+    SECOND_EXISTS) exists9=1 ;;
+    SECOND_GH_OK) gh9=1 ;;
+  esac
+done
+if [[ -n "$exists9" && -n "$second9" && "$second9" != "$first9" ]]; then
+  assert_pass "re-setup after cleanup got a fresh existing GH_WRAPPER_DIR ($first9 -> $second9)"
+else
+  assert_fail "re-setup reused a stale/deleted GH_WRAPPER_DIR (first='$first9' second='$second9' exists='${exists9:-0}')"
+fi
+if [[ -n "$gh9" ]]; then
+  assert_pass "re-setup's \${GH_WRAPPER_DIR}/gh symlink resolves under the fresh dir"
+else
+  assert_fail "re-setup's \${GH_WRAPPER_DIR}/gh missing (pointed at deleted dir)"
+fi
+rm -rf "$SB9"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-AUTH-SYM-010: \${_LIB_AUTH_DIR}/gh creation is atomic (no unlink-then-create window) ==="
+# ---------------------------------------------------------------------------
+# Review finding (Medium): a bare `ln -sf … "${_LIB_AUTH_DIR}/gh"` unlinks the
+# existing symlink before recreating it; a concurrent `bash scripts/gh` can
+# observe the gap. Source-level lockdown: the shared-path creation must NOT be a
+# bare `ln -sf … "${_LIB_AUTH_DIR}/gh"`; it must be atomic (temp + mv -f) or
+# guarded skip-if-already-correct. (The per-run GH_WRAPPER_DIR/gh is exempt — it
+# is private to this run, so a bare ln -sf there is fine.)
+bare_shared_ln=$(grep -nE 'ln -sf[^|&]*"\$\{_LIB_AUTH_DIR\}/gh"' "$LIB_AUTH" | grep -v 'GH_WRAPPER_DIR' || true)
+if [[ -n "$bare_shared_ln" ]]; then
+  assert_fail "shared \${_LIB_AUTH_DIR}/gh is created with a non-atomic bare 'ln -sf' (line: ${bare_shared_ln%%:*})"
+else
+  assert_pass "shared \${_LIB_AUTH_DIR}/gh is not created with a bare 'ln -sf' (atomic create)"
+fi
+# Behavioural check: after setup the shared symlink is valid and targets the wrapper.
+SB10=$(new_sandbox)
+res10=$(GH_TOKEN="dummy-token-for-test" bash -c "
+  source '$SB10/lib-auth.sh'
+  GH_AUTH_MODE='token'
+  setup_github_auth >/dev/null 2>&1
+  wd=\"\${GH_WRAPPER_DIR:-}\"
+  [[ \"\$wd\" == /tmp/agent-auth-* ]] && rm -rf \"\$wd\"
+  if [[ -L '$SB10/gh' && \"\$(readlink '$SB10/gh')\" == *gh-with-token-refresh.sh ]]; then echo OK; else echo BAD; fi
+")
+if [[ "$res10" == OK ]]; then
+  assert_pass "after setup, \${_LIB_AUTH_DIR}/gh is a valid symlink to the wrapper"
+else
+  assert_fail "after setup, \${_LIB_AUTH_DIR}/gh missing or wrong target ($res10)"
+fi
+rm -rf "$SB10"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-AUTH-SYM-011: cleanup clears GH_TOKEN_FILE and TOKEN_DAEMON_PID ==="
+# ---------------------------------------------------------------------------
+# Same root cause as 009: stale state must not leak into a reused shell.
+SB11=$(new_sandbox)
+mapfile -t out11 < <(GH_TOKEN="dummy-token-for-test" bash -c "
+  source '$SB11/lib-auth.sh'
+  GH_AUTH_MODE='token'
+  setup_github_auth >/dev/null 2>&1
+  wd=\"\${GH_WRAPPER_DIR:-}\"
+  cleanup_github_auth >/dev/null 2>&1
+  echo \"TOKEN_FILE=[\${GH_TOKEN_FILE:-}]\"
+  echo \"DAEMON_PID=[\${TOKEN_DAEMON_PID:-}]\"
+  echo \"WRAPPER_DIR=[\${GH_WRAPPER_DIR:-}]\"
+  [[ \"\$wd\" == /tmp/agent-auth-* ]] && rm -rf \"\$wd\"
+")
+tf11=""; dp11=""; wd11=""
+for kv in "${out11[@]}"; do
+  case "$kv" in
+    TOKEN_FILE=*) tf11="${kv#TOKEN_FILE=}" ;;
+    DAEMON_PID=*) dp11="${kv#DAEMON_PID=}" ;;
+    WRAPPER_DIR=*) wd11="${kv#WRAPPER_DIR=}" ;;
+  esac
+done
+if [[ "$tf11" == "[]" && "$dp11" == "[]" && "$wd11" == "[]" ]]; then
+  assert_pass "cleanup cleared GH_TOKEN_FILE, TOKEN_DAEMON_PID, and GH_WRAPPER_DIR"
+else
+  assert_fail "cleanup left stale state (GH_TOKEN_FILE=$tf11 TOKEN_DAEMON_PID=$dp11 GH_WRAPPER_DIR=$wd11)"
+fi
+rm -rf "$SB11"
 
 # ---------------------------------------------------------------------------
 echo ""

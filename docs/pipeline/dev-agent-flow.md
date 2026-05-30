@@ -66,9 +66,9 @@ Two modes, set by `GH_AUTH_MODE`:
 
 Both modes then install the `gh-with-token-refresh.sh` wrapper on **two distinct paths** ([INV-32](invariants.md#inv-32-gh-wrapper-is-installed-on-two-paths-shared-scriptsgh-for-the-agent-per-run-path-dir-for-the-wrapper)):
 - A **per-run** `gh` symlink inside `GH_WRAPPER_DIR` (`/tmp/agent-auth-XXXXXX`, mode 0700; in app mode this is the same dir as the token file), prepended to `PATH`. This serves the wrapper's OWN bare `gh` calls. Per-run isolation means a concurrent run's cleanup can't delete the `gh` this run resolves (#163).
-- The shared `${_LIB_AUTH_DIR}/gh` (= `scripts/gh`) symlink, created idempotently, which the **agent** invokes via the relative-path rule `bash scripts/gh issue comment …`.
+- The shared `${_LIB_AUTH_DIR}/gh` (= `scripts/gh`) symlink, created idempotently **and atomically** (temp symlink + `mv -f`, never a bare `ln -sf`, so the path is never momentarily absent for a concurrent `bash scripts/gh`), which the **agent** invokes via the relative-path rule `bash scripts/gh issue comment …`.
 
-Cleanup (`cleanup_github_auth`, called from the wrapper trap) kills the daemon (if any) and removes the per-run `GH_WRAPPER_DIR` (token file + the per-run `gh`). It deliberately does **NOT** touch the shared `scripts/gh` — a per-run cleanup must never delete a shared artifact another run depends on (#163).
+Cleanup (`cleanup_github_auth`, called from the wrapper trap) kills the daemon (if any) and removes the per-run `GH_WRAPPER_DIR` (token file + the per-run `gh`), then resets `GH_WRAPPER_DIR`/`GH_TOKEN_FILE`/`TOKEN_DAEMON_PID` so a reused-shell `setup → cleanup → setup` doesn't point at the deleted dir. It deliberately does **NOT** touch the shared `scripts/gh` — a per-run cleanup must never delete a shared artifact another run depends on (#163).
 
 ## Path resolution lessons (#58)
 

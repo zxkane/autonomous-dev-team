@@ -687,16 +687,31 @@ its consumers, on **two distinct paths**:
 1. **Agent path** — create the `${_LIB_AUTH_DIR}/gh` symlink (i.e.
    `${PROJECT_DIR}/scripts/gh`) pointing at `gh-with-token-refresh.sh`. This
    is a **stable, shared, project-level** artifact. It MUST be created
-   **idempotently** (`ln -sf` to a fixed target is safe under concurrent
-   creation) and MUST **NOT** be removed by `cleanup_github_auth` (a per-run
+   **idempotently AND atomically** — NOT a bare `ln -sf`, which unlinks the
+   existing symlink before recreating it, leaving a window where a concurrent
+   run's `bash scripts/gh …` observes no file. Build the symlink under a unique
+   temp name in `${_LIB_AUTH_DIR}` then `mv -f` it into place; `rename(2)` is
+   atomic, so the shared path is never momentarily absent for concurrent
+   readers. It MUST **NOT** be removed by `cleanup_github_auth` (a per-run
    cleanup must never delete a shared artifact a concurrent run depends on).
+   `${_LIB_AUTH_DIR}` MUST be absolute (asserted at source time): the
+   `/tmp`-resident per-run `gh` symlink's target is `${_LIB_AUTH_DIR}/...`, so
+   a relative value would resolve relative to `/tmp` and dangle.
 
 2. **Wrapper path** — create a **per-run** directory
    `GH_WRAPPER_DIR=/tmp/agent-auth-XXXXXX` (mode 700), drop a `gh` symlink in
-   it, and prepend `GH_WRAPPER_DIR` (NOT `_LIB_AUTH_DIR`) to `PATH`. App mode
-   reuses the token daemon's `mktemp -d` dir as `GH_WRAPPER_DIR`; token mode
-   creates it on demand. `cleanup_github_auth` removes `GH_WRAPPER_DIR`
-   (guarded on the `/tmp/agent-auth-*` prefix) together with the token file.
+   it (a bare `ln -sf` is fine here — the dir is private to this run), and
+   prepend `GH_WRAPPER_DIR` (NOT `_LIB_AUTH_DIR`) to `PATH`. App mode reuses
+   the token daemon's `mktemp -d` dir as `GH_WRAPPER_DIR`; token mode creates
+   it on demand. `cleanup_github_auth` removes `GH_WRAPPER_DIR` (guarded on the
+   `/tmp/agent-auth-*` prefix) together with the token file, then MUST **reset
+   the module state it tore down** — clear `GH_WRAPPER_DIR`, `GH_TOKEN_FILE`,
+   and `TOKEN_DAEMON_PID` to empty. Otherwise a second `setup_github_auth` in
+   the **same shell** (persistent test runners, consecutive tasks) sees
+   `GH_WRAPPER_DIR` still set, `_ensure_gh_wrapper_dir` skips the `mktemp`, and
+   the token file + per-run `gh` symlink point into the directory cleanup just
+   `rm -rf`'d. The reset makes `setup → cleanup → setup` idempotent within one
+   process.
 
 Both `app` and `token` modes must produce a working `scripts/gh` invocation
 (consumer 1) AND a working PATH-resolved `gh` (consumer 2).
@@ -750,13 +765,20 @@ target is therefore harmless: each carries its own `GH_TOKEN_FILE`/`REAL_GH`.
   `${_LIB_AUTH_DIR}/gh` on PATH, removed in cleanup).
 - #163: split the two consumers — `scripts/gh` (shared, idempotent, never
   deleted) for the agent; a per-run `GH_WRAPPER_DIR` on PATH for the wrapper.
+- #163 review follow-up (agy second-opinion): hardened the split — the shared
+  `scripts/gh` is now created **atomically** (temp + `mv -f`, not bare
+  `ln -sf`); `cleanup_github_auth` **resets** `GH_WRAPPER_DIR` /
+  `GH_TOKEN_FILE` / `TOKEN_DAEMON_PID` so reused-shell `setup → cleanup →
+  setup` doesn't point at a deleted dir; and `${_LIB_AUTH_DIR}` is asserted
+  absolute at source time.
 
 **Test**:
-- `tests/unit/test-lib-auth-gh-symlink.sh` (8 cases):
+- `tests/unit/test-lib-auth-gh-symlink.sh` (11 cases):
   - TC-AUTH-SYM-001 — token-mode `setup` creates `${_LIB_AUTH_DIR}/gh`
     targeting `gh-with-token-refresh.sh`.
   - TC-AUTH-SYM-002 — source-level guard: the `${_LIB_AUTH_DIR}/gh`
-    symlink-creation line is OUTSIDE the `GH_AUTH_MODE=app` branch.
+    creation line (`mv -f … "${_LIB_AUTH_DIR}/gh"`) is OUTSIDE the
+    `GH_AUTH_MODE=app` branch.
   - TC-AUTH-SYM-003 — `setup` exports a per-run `GH_WRAPPER_DIR` under
     `/tmp/agent-auth-*`, drops a `gh` symlink in it, and prepends it to PATH.
   - TC-AUTH-SYM-004 — two concurrent `setup` calls get **distinct**
@@ -767,6 +789,14 @@ target is therefore harmless: each carries its own `GH_TOKEN_FILE`/`REAL_GH`.
     anywhere in `lib-auth.sh` (the #163 footgun regression pin).
   - TC-AUTH-SYM-008 — `setup` still creates `${_LIB_AUTH_DIR}/gh` (INV-32) and
     is idempotent across two calls.
+  - TC-AUTH-SYM-009 — reused shell: `setup → cleanup → setup` lands on a
+    **fresh, existing** `GH_WRAPPER_DIR` distinct from the first (High review
+    finding — stale `GH_WRAPPER_DIR` after `rm -rf`).
+  - TC-AUTH-SYM-010 — source + behavioural: the shared `${_LIB_AUTH_DIR}/gh`
+    is created **atomically** (no bare `ln -sf` on the shared path; Medium
+    review finding).
+  - TC-AUTH-SYM-011 — `cleanup` clears `GH_TOKEN_FILE` / `TOKEN_DAEMON_PID` /
+    `GH_WRAPPER_DIR` (no stale state leaks into a reused shell).
 
 **Cross-references**:
 - Agent-facing rule: `skills/autonomous-dev/references/autonomous-mode.md`
