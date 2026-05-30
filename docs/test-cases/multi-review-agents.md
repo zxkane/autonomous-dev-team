@@ -48,7 +48,9 @@ The helper takes a list of per-agent outcomes (`pass` / `fail` /
 | TC-MAR-SRC-08 | each subshell does `unset AGENT_PID_FILE` (no PID-file thrash) |
 | TC-MAR-SRC-09 | the wrapper `wait`s for the backgrounded agents |
 | TC-MAR-SRC-10 | the per-agent verdict jq predicate keys on `Review Agent: ` |
-| TC-MAR-SRC-11 | all-unavailable sets `AGENT_EXIT` non-zero so the crash fallback fires |
+| TC-MAR-SRC-11 | all-unavailable raises `AGENT_EXIT=1` on a genuine CLI crash (rc ≠ 0) |
+| TC-MAR-SRC-11b | per-agent rc captured under `set -e` (`run_agent ... \|\| _rc=$?`) so a failing launch's true code is recorded, not masked |
+| TC-MAR-SRC-11c | all-unavailable defaults `AGENT_EXIT=0` (clean-but-silent → `failed-substantive`, legacy N=1 parity) |
 | TC-MAR-SRC-12 | **no** `emit_verdict_trailer` call inside the per-agent collection loop (exactly one aggregated trailer downstream) |
 | TC-MAR-SRC-13 | a dropped-agent summary comment is posted on partial unavailability |
 | TC-MAR-SRC-14 | wrapper passes `bash -n` |

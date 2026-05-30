@@ -117,8 +117,22 @@ assert_grep "TC-MAR-SRC-09 wrapper waits for backgrounded agents" \
   '(^|[[:space:];&])wait\b' "$WRAPPER"
 assert_grep "TC-MAR-SRC-10 per-agent jq verdict predicate keys on Review Agent:" \
   'Review Agent: ' "$WRAPPER"
-assert_grep "TC-MAR-SRC-11 all-unavailable sets AGENT_EXIT non-zero (crash fallback)" \
+assert_grep "TC-MAR-SRC-11 all-unavailable sets AGENT_EXIT=1 on a genuine CLI crash" \
   'AGENT_EXIT=1' "$WRAPPER"
+# The per-agent subshell must capture run_agent's rc WITHOUT letting set -e
+# abort before recording it (review finding): the run_agent invocation ends
+# with `|| _rc=$?` (on its own continuation line), and the sidecar records
+# `$_rc`, not a bare `$?`. grep is line-oriented, so we assert the two
+# load-bearing tokens independently.
+assert_grep "TC-MAR-SRC-11b per-agent rc captured under set -e (|| _rc=\$?)" \
+  '\|\| _rc=\$\?' "$WRAPPER"
+assert_grep "TC-MAR-SRC-11b sidecar records the captured _rc (not a bare \$?)" \
+  "printf '%s.n' \"\\\$_rc\" > \"\\\$_agent_rc_file\"" "$WRAPPER"
+# all-unavailable preserves the legacy N=1 distinction: AGENT_EXIT defaults to
+# 0 (clean-but-silent → failed-substantive) and is only raised to 1 when an
+# agent's launch rc was non-zero (genuine crash).
+assert_grep "TC-MAR-SRC-11c all-unavailable defaults AGENT_EXIT=0 (legacy N=1 parity)" \
+  'AGENT_EXIT=0' "$WRAPPER"
 assert_grep "TC-MAR-SRC-13 dropped-agent summary comment on partial unavailability" \
   '[Dd]ropped' "$WRAPPER"
 

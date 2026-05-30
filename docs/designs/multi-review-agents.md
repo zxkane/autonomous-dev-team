@@ -149,9 +149,12 @@ post counts even if the CLI also exited non-zero (the verdict is authoritative).
   no deciding agent FAILED.
 - Any deciding FAIL → aggregated FAIL.
 - Zero deciding agents (all unavailable) → aggregated "all-unavailable":
-  set `LATEST_COMMENT=""` and `AGENT_EXIT=1` so the existing crash-fallback
-  branch fires verbatim (`failed-non-substantive other` trailer +
-  `−reviewing +pending-dev`).
+  set `LATEST_COMMENT=""` and fall back to today's single-agent FAIL path.
+  `AGENT_EXIT` preserves the legacy distinction so the N=1 path is
+  byte-for-byte: `AGENT_EXIT=1` when any agent's CLI actually crashed
+  (rc ≠ 0) → crash-fallback comment + `failed-non-substantive other`;
+  `AGENT_EXIT=0` when every agent exited cleanly but posted no verdict →
+  no crash comment + `failed-substantive`. Both route `−reviewing +pending-dev`.
 
 The aggregation writes the existing `PASSED_VERDICT` (true/false),
 `LATEST_COMMENT` (a synthesized human-readable aggregate used only for the

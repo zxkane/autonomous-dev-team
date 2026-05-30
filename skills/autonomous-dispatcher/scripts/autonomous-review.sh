@@ -56,10 +56,13 @@ AGENT_LAUNCHER_ARGV=("${AGENT_REVIEW_LAUNCHER_ARGV[@]}")
 # verdict agent(s); AGENT_REVIEW_AGENTS runs N independent verdict-reaching
 # agents and gates the merge on their unanimous agreement.
 declare -a REVIEW_AGENTS_LIST
-if [[ -n "${AGENT_REVIEW_AGENTS:-}" ]]; then
-  # shellcheck disable=SC2206 # intentional word-splitting of the space-separated list
-  REVIEW_AGENTS_LIST=(${AGENT_REVIEW_AGENTS})
-else
+# shellcheck disable=SC2206 # intentional word-splitting of the space-separated list
+REVIEW_AGENTS_LIST=(${AGENT_REVIEW_AGENTS:-})
+# Collapse empty OR whitespace-only AGENT_REVIEW_AGENTS to the N=1 default.
+# Word-splitting a value of only spaces yields a zero-length array, so guard
+# on the resolved element count (not just `-n`) — that keeps the N=1 path
+# byte-for-byte legacy even for a stray `AGENT_REVIEW_AGENTS=" "`.
+if [[ ${#REVIEW_AGENTS_LIST[@]} -eq 0 ]]; then
   REVIEW_AGENTS_LIST=("$AGENT_CMD")
 fi
 
@@ -927,9 +930,15 @@ for _agent in "${REVIEW_AGENTS_LIST[@]}"; do
     # the shared PID file out from under the dispatcher's liveness model.
     unset AGENT_PID_FILE
     _agent_session_name="review-pr-${PR_NUMBER}-issue-${ISSUE_NUMBER}-${_agent}"
+    # Capture the rc explicitly: the subshell inherits `set -e`, so a non-zero
+    # run_agent (the exact case the sidecar records — a CLI launch failure)
+    # would abort the subshell BEFORE the printf if we read `$?` on the next
+    # line. `|| _rc=$?` suppresses set -e and preserves the true exit code
+    # (124 timeout / 137 kill / real launch error) for forensic logging.
+    _rc=0
     run_agent "$_agent_session_id" "$_agent_prompt" "${AGENT_REVIEW_MODEL:-sonnet}" "$_agent_session_name" \
-      >>"$_agent_log" 2>&1
-    printf '%s\n' "$?" > "$_agent_rc_file"
+      >>"$_agent_log" 2>&1 || _rc=$?
+    printf '%s\n' "$_rc" > "$_agent_rc_file"
   ) &
 done
 
@@ -1085,13 +1094,27 @@ case "$AGGREGATE" in
     AGENT_EXIT=0  # the agent(s) ran and produced a verdict — not a crash
     ;;
   all-unavailable)
-    # No deciding agent. Fall back to today's single-agent crash path
-    # verbatim: empty LATEST_COMMENT + non-zero AGENT_EXIT → the FAIL branch's
-    # crash-fallback comment + `failed-non-substantive other` trailer.
+    # No deciding agent. Fall back to today's single-agent FAIL path verbatim.
+    # The legacy single-agent wrapper distinguished two no-verdict cases by
+    # AGENT_EXIT, and we preserve that distinction so the N=1 path stays
+    # byte-for-byte (the downstream FAIL branch reads `$AGENT_EXIT -ne 0`):
+    #   - any agent's CLI actually crashed (rc != 0) → AGENT_EXIT=1 → the
+    #     crash-fallback comment + `failed-non-substantive other` trailer
+    #     (genuine transport/mid-stream crash).
+    #   - every agent exited cleanly (rc == 0) but posted no verdict comment
+    #     → AGENT_EXIT=0 → no crash comment, `failed-substantive` trailer
+    #     (the agent ran fine but didn't reach a verdict — a code-side miss,
+    #     matching legacy single-agent semantics exactly).
     PASSED_VERDICT=false
     LATEST_COMMENT=""
-    AGENT_EXIT=1
-    log "All ${#REVIEW_AGENTS_LIST[@]} review agent(s) unavailable — falling back to single-agent crash path."
+    AGENT_EXIT=0
+    for _i in "${!AGENT_NAMES[@]}"; do
+      if [[ "${AGENT_LAUNCH_RC[${AGENT_SESSION_IDS[$_i]}]:-1}" -ne 0 ]]; then
+        AGENT_EXIT=1
+        break
+      fi
+    done
+    log "All ${#REVIEW_AGENTS_LIST[@]} review agent(s) unavailable — falling back to single-agent FAIL path (AGENT_EXIT=${AGENT_EXIT})."
     ;;
 esac
 
