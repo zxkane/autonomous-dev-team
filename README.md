@@ -170,6 +170,7 @@ The file is a bash script that's `source`d at every dispatcher tick and wrapper 
 | `PROJECT_DIR` | Yes | Absolute path to the project root on the dispatcher box | Where the agent runs. |
 | `AGENT_CMD` | No (default `claude`) | `claude`, `codex`, `kiro`, or `opencode` | The CLI used to spawn dev/review agents. Other CLIs work via the generic `<cli> -p <prompt>` fallback. See the Supported Agent CLIs table for resume semantics per CLI. **`opencode` requires `opencode providers login` and explicit `AGENT_DEV_MODEL`/`AGENT_REVIEW_MODEL` values** — see the table footnote. |
 | `AGENT_DEV_MODEL`, `AGENT_REVIEW_MODEL` | No (default empty / `sonnet`) | Model name passed to the agent CLI | Empty = let the CLI pick. The review model defaults to `sonnet` to keep review costs predictable. |
+| `AGENT_REVIEW_AGENTS` | No (default empty) | Space-separated CLI list (e.g. `agy kiro`) | Run **multiple** independent review agents in parallel against the same PR and gate the merge on their **unanimous** agreement (INV-40). Empty = single-agent review via `AGENT_REVIEW_CMD` (legacy behavior). Distinct from `REVIEW_BOTS` — see the [Review Agent](#review-agent) section. |
 | `AGENT_PERMISSION_MODE` | No (default `auto`) | `auto`, `plan`, or `bypassPermissions` | `bypassPermissions` grants the agent unrestricted shell access — only use in a trusted sandbox. |
 | `AGENT_TIMEOUT` | No (default `4h`) | coreutils `timeout` units (e.g. `30m`, `2h`, `1d`) | Wall-clock cap on each agent invocation. Prevents hung CLI processes (stale `--resume`, MCP stdio deadlock) from monopolizing wrapper PID slots. |
 | `GH_AUTH_MODE` | No (default `token`) | `token` or `app` | `token` uses `GH_TOKEN`/`gh auth`. `app` uses GitHub App private keys (see `docs/github-app-setup.md`). |
@@ -344,12 +345,31 @@ The review agent finds the PR linked to an issue, performs code review, optional
 | **Merge conflict resolution** | Automatically rebases if the PR conflicts with main |
 | **Code review checklist** | Verifies design docs, tests, CI status, and PR conventions |
 | **Configurable bot reviewers** | Triggers and monitors PR review bots per `REVIEW_BOTS` setting (built-in: Amazon Q `/q`, Codex `/codex`, Claude `@claude`; custom bots via env vars) |
+| **Multiple review agents** | Optionally run several independent verdict-reaching CLIs in parallel per `AGENT_REVIEW_AGENTS` and gate the merge on their **unanimous** agreement (INV-40) |
 | **E2E verification** | Optional Chrome DevTools MCP testing with screenshot evidence |
 | **Acceptance criteria tracking** | Marks `## Acceptance Criteria` checkboxes as verified |
 | **Auto-merge** | Squash-merges and closes the issue on review pass |
 
 **Wrapper**: `scripts/autonomous-review.sh`
 **Skill**: `skills/autonomous-review/SKILL.md`
+
+#### Multiple review agents (`AGENT_REVIEW_AGENTS`)
+
+By default the wrapper runs one verdict-reaching review agent (`AGENT_REVIEW_CMD`, default `claude`). Set `AGENT_REVIEW_AGENTS` to a space-separated CLI list to run several **independent** review agents in parallel against the same PR and require their agreement before merging:
+
+```bash
+AGENT_REVIEW_AGENTS="agy kiro"   # both must PASS for an auto-merge
+```
+
+The single review wrapper fans out internally — one parallel subshell per agent, each with its own session id and log, each ending its verdict comment with a `Review Agent: <name>` discriminator the wrapper uses to attribute verdicts. Aggregation rules ([INV-40](docs/pipeline/invariants.md)):
+
+- **Unanimous PASS** — the PR is approved/merged only if **every available agent** passed; any single FAIL sends the issue back to `pending-dev`.
+- **Warn on partial unavailability** — an agent that produces no verdict comment within the poll window (because its CLI failed to launch, or launched but stayed silent) is dropped from the vote with a WARN; a FAIL it *did* post still counts. The decision is made on the remaining agents.
+- **All unavailable → legacy fallback** — if no agent produces a verdict, the wrapper falls back to today's single-agent FAIL path (`−reviewing +pending-dev`), preserving the legacy crash-vs-clean-but-silent distinction.
+
+The fan-out is internal to the wrapper: the dispatcher, the `review-<N>.pid` file, and the `reviewing` label are unchanged, so the rest of the pipeline sees one review per issue exactly as before.
+
+> **Distinct from `REVIEW_BOTS`.** `REVIEW_BOTS` triggers *external* GitHub review bots (`/q review`, `/codex review`, `@claude review`) whose comments the verdict agent reads as **input**. `AGENT_REVIEW_AGENTS` runs N **independent verdict-reaching** agents that each reach their own approve/pushback decision. The two are orthogonal and can be combined.
 
 ### Dispatcher ([OpenClaw](https://github.com/OpenClaw/OpenClaw))
 
