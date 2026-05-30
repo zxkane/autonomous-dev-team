@@ -9,7 +9,7 @@ The autonomous pipeline is a state machine over GitHub issue labels. An issue mo
 | `autonomous` | Maintainer | Issue should be processed by the autonomous pipeline. Required precondition for *any* dispatcher action. Removed when the issue is auto-closed by a successful review. |
 | `in-progress` | Dispatcher (set), dev wrapper trap (clears) | A dev-agent wrapper is actively running for this issue. |
 | `pending-review` | Dev wrapper trap (set), dispatcher (clears) | Development complete, PR open, awaiting review. |
-| `reviewing` | Dispatcher (set), review wrapper trap (clears) | A review-agent wrapper is actively running for this issue. |
+| `reviewing` | Dispatcher (set), review wrapper trap (clears) | A review-agent wrapper is actively running for this issue. Stays a **single** label even when the wrapper fans out to multiple verdict-reaching agents ([INV-40](invariants.md#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback)) — the fan-out is internal to the wrapper, so the dispatcher and the state machine see one `reviewing` issue, one `review-${N}.pid`, and one aggregated verdict. |
 | `pending-dev` | Review wrapper / dispatcher / dev trap (set), dispatcher (clears) | Review failed, dev agent is wanted to take another pass. |
 | `approved` | Review wrapper (set) | Review passed. PR merged (or awaiting manual merge if `no-auto-close` is also present). Terminal state for the autonomous pipeline. |
 | `no-auto-close` | Maintainer | Companion to `autonomous` — review still runs and approves, but auto-merge is skipped. PR awaits manual merge. |

@@ -92,6 +92,19 @@ assert_not_grep "no '### Amazon Q Developer Review' report header" \
 
 # ---------------------------------------------------------------------------
 echo ""
+echo "=== TC-ARP-06: per-agent 'Review Agent:' discriminator (issue #166 / INV-40) ==="
+# ---------------------------------------------------------------------------
+# Each review agent must end its verdict comment with a `Review Agent: <name>`
+# discriminator line so the wrapper can attribute N verdict comments posted
+# under the SAME GitHub identity. This complements the retained
+# `Review Session: <uuid>` trailer (INV-20).
+assert_grep "prompt instructs agent to emit a 'Review Agent:' discriminator line" \
+  "Review Agent: " "$WRAPPER"
+assert_grep "per-agent verdict jq predicate keys on 'Review Agent:'" \
+  "Review Agent: " "$WRAPPER"
+
+# ---------------------------------------------------------------------------
+echo ""
 echo "=== TC-ARP-05: bash syntax valid ==="
 # ---------------------------------------------------------------------------
 if bash -n "$WRAPPER" 2>/dev/null; then

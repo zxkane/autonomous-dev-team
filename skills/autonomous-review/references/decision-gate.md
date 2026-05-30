@@ -47,6 +47,10 @@ In a previous review, the review agent posted multiple blocking findings (missin
 
 In another incident, the repo owner posted a requirement change ("remove PDF support") as an issue comment after the PR was already implemented. The review agent approved the PR without reading the comment, because it only checked the issue body and PR diff — not the comment thread. The "requirement drift" category was added to catch this class of bugs.
 
+## Multi-agent review (INV-40)
+
+When the project runs more than one verdict-reaching review agent against the same PR (`AGENT_REVIEW_AGENTS` lists ≥2 CLIs), **each agent runs this gate independently** and posts its own verdict comment. You reach your own PASS/FAIL from your own findings — you cannot see the other agents' verdicts and must not try to coordinate. The wrapper then aggregates all agents' verdicts under a **unanimous-PASS** rule: the PR merges only if every available agent passed; any single FAIL sends it back to dev. End your verdict with the `Review Session: \`<id>\`` trailer AND the `Review Agent: <name>` discriminator line from your prompt — the discriminator is how the wrapper attributes your verdict among N agents posting under the same identity. The unanimous rule is the cross-agent expression of this gate's own "any blocking finding → FAIL" philosophy.
+
 ## Decision Criteria
 
 ### PASS (post "Review PASSED" + submit APPROVE review on PR)

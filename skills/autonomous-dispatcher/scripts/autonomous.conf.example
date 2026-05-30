@@ -260,6 +260,35 @@ AGENT_REVIEW_EXTRA_ARGS=""
 # AGENT_DEV_CMD=""
 # AGENT_REVIEW_CMD=""
 
+# AGENT_REVIEW_AGENTS: space-separated list of verdict-reaching review CLIs
+# to run IN PARALLEL against the same PR, gating the merge on their UNANIMOUS
+# agreement (INV-40, #166). Empty/unset (the default) = single-agent review
+# using AGENT_REVIEW_CMD — byte-for-byte the legacy behavior.
+#
+#   AGENT_REVIEW_AGENTS="agy kiro"   # both must PASS for auto-merge
+#
+# How it works: the review wrapper spawns one parallel subshell per listed
+# agent, each with its own session id, its own log, and (INV-38) the launcher
+# neutralized for non-claude members. Each agent reaches an independent
+# approve/pushback verdict and ends its comment with a `Review Agent: <name>`
+# discriminator; the wrapper attributes each verdict per agent and aggregates:
+#   - PASS iff every AVAILABLE agent passed; any single FAIL → aggregated FAIL
+#     (→ −reviewing +pending-dev);
+#   - an agent is "unavailable" (dropped, with a WARN) if its CLI fails to
+#     launch OR posts no verdict within the poll window; a FAIL it did post
+#     still counts;
+#   - if ALL agents are unavailable → today's single-agent crash fallback.
+#
+# DISTINCT from REVIEW_BOTS (below): REVIEW_BOTS triggers external GitHub bots
+# whose comments are read as INPUT by the verdict agent(s); AGENT_REVIEW_AGENTS
+# runs N independent verdict-reaching agents. All listed agents currently share
+# AGENT_REVIEW_MODEL (per-agent model/extra-args is a documented follow-up).
+#
+# The fan-out is internal to the wrapper: the dispatcher, the review-N.pid
+# file, and the `reviewing` label are unchanged. The dispatcher Step 5b
+# liveness model still sees one review wrapper per issue.
+# AGENT_REVIEW_AGENTS=""
+
 # --- claude block ---
 # claude has NO required EXTRA_ARGS — the structural --permission-mode
 # flag handles tool trust via the existing AGENT_PERMISSION_MODE knob.

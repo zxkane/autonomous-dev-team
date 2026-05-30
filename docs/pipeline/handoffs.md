@@ -110,6 +110,7 @@ flowchart LR
 
 - Review wrapper must run PR discovery (3 fallback methods) — the issue may have multiple PRs, or the PR body may not yet say `Closes #N`. If discovery fails, the wrapper exits with `−reviewing +pending-dev` and a clear comment.
 - Review wrapper must filter verdict comments by session-id ([anti-spoofing defense](review-agent-flow.md#verdict-polling)): another commenter could write "Review PASSED" verbatim.
+- The wrapper MAY fan out to multiple verdict-reaching agents internally ([INV-40](invariants.md#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback)) when `AGENT_REVIEW_AGENTS` lists more than one CLI. This does NOT change the handoff carrier: the dispatcher still sets one `+reviewing` label and hands off one issue; the wrapper aggregates the N verdicts under the unanimous-PASS rule and emits exactly one carrier label transition (H5) plus one verdict trailer. The fan-out is invisible to the dispatcher.
 
 **Race window**: Step 5b's DEAD-reviewing path can race with the wrapper's trap. Wrapper trap clears `reviewing`; if dispatcher's probe ran before that, dispatcher also clears `reviewing` and adds `pending-dev`. Both writes converge.
 

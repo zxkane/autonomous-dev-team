@@ -25,6 +25,11 @@ source "${SCRIPT_DIR}/lib-auth.sh"
 source "${SCRIPT_DIR}/lib-review-bots.sh"
 # shellcheck source=lib-review-verdict.sh
 source "${SCRIPT_DIR}/lib-review-verdict.sh"
+# shellcheck source=lib-review-aggregate.sh
+# INV-40 (#166): unanimous-PASS aggregation over multiple verdict-reaching
+# agents. Inert for the single-agent default; only consumed when
+# AGENT_REVIEW_AGENTS lists more than one CLI.
+source "${SCRIPT_DIR}/lib-review-aggregate.sh"
 # Per-side AGENT_CMD override (INV-37). See autonomous-dev.sh for the
 # matching dev-side override. Together they let one project run dev
 # and review on different agent CLIs (e.g. claude for dev, agy for
@@ -39,6 +44,24 @@ AGENT_CMD="$AGENT_REVIEW_CMD"
 # rebind in autonomous-dev.sh. Default (operator hasn't set
 # AGENT_REVIEW_LAUNCHER) is byte-identical to AGENT_LAUNCHER.
 AGENT_LAUNCHER_ARGV=("${AGENT_REVIEW_LAUNCHER_ARGV[@]}")
+
+# Multi-agent review fan-out list (INV-40, #166). AGENT_REVIEW_AGENTS is a
+# space-separated list of verdict-reaching CLIs (e.g. "agy kiro"). When
+# empty/unset, REVIEW_AGENTS_LIST collapses to ("$AGENT_CMD") — exactly one
+# element equal to the already-rebound per-side review CLI ($AGENT_REVIEW_CMD)
+# — so the N=1 path is byte-for-byte the legacy single-agent behavior.
+#
+# This is DISTINCT from REVIEW_BOTS: REVIEW_BOTS triggers external GitHub
+# bots (/q review, /codex review) whose comments are read as INPUT by the
+# verdict agent(s); AGENT_REVIEW_AGENTS runs N independent verdict-reaching
+# agents and gates the merge on their unanimous agreement.
+declare -a REVIEW_AGENTS_LIST
+if [[ -n "${AGENT_REVIEW_AGENTS:-}" ]]; then
+  # shellcheck disable=SC2206 # intentional word-splitting of the space-separated list
+  REVIEW_AGENTS_LIST=(${AGENT_REVIEW_AGENTS})
+else
+  REVIEW_AGENTS_LIST=("$AGENT_CMD")
+fi
 
 # Validate required config (loaded by lib-agent.sh from autonomous.conf)
 : "${PROJECT_ID:?Set PROJECT_ID in autonomous.conf}"
@@ -373,8 +396,6 @@ PR_BRANCH=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefName -q '.headR
 PR_HEAD_SHA=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefOid -q '.headRefOid' 2>/dev/null || true)
 log "PR branch: ${PR_BRANCH:-UNKNOWN} (HEAD: ${PR_HEAD_SHA:0:7})"
 
-SESSION_ID=$(uuidgen)
-
 # Verdict-detection bindings: actor + time window + body-trailer
 # presence. Replaces the prior session-id-only binding (which depended
 # on the agent echoing the wrapper's UUID verbatim).
@@ -430,7 +451,27 @@ if [[ "${E2E_MODE:-none}" == "command" ]]; then
   E2E_COMMAND_EVIDENCE_PARSER_RENDERED="${E2E_COMMAND_EVIDENCE_PARSER_RENDERED//\$\{PR_NUMBER\}/${PR_NUMBER}}"
 fi
 
-PROMPT="$(cat <<EOF
+# build_review_prompt <agent_name> <agent_session_id>
+#
+# Renders the full review prompt for ONE review agent. Echoes the prompt on
+# stdout. Parameterized (INV-40, #166) so each agent in a multi-agent fan-out
+# gets:
+#   - its OWN Review Session UUID (the second arg) — distinct per agent so
+#     verdict comments don't collapse under a shared GitHub identity;
+#   - a `Review Agent: <agent_name>` discriminator instruction so the wrapper
+#     can attribute that agent's verdict comment via a per-agent jq query
+#     (INV-40 / amended INV-20);
+#   - the correct checklist branch for ITS CLI (the kiro branch keys on the
+#     per-agent name, not the global $AGENT_CMD, so a mixed "agy kiro" list
+#     gives kiro the kiro checklist and agy the full checklist).
+#
+# For the single-agent default (REVIEW_AGENTS_LIST=("$AGENT_CMD")), this is
+# called once with the wrapper's lone agent + session id, byte-for-byte
+# preserving the legacy prompt.
+build_review_prompt() {
+  local _agent_name="$1"
+  local _agent_session_id="$2"
+  cat <<EOF
 You are reviewing PR #${PR_NUMBER} for issue #${ISSUE_NUMBER} in the ${REPO} project.
 PR branch: ${PR_BRANCH:-UNKNOWN}
 
@@ -487,7 +528,7 @@ Verify ALL of the following were completed:
 4. [ ] Unit tests written and passing
 5. [ ] E2E tests written/updated if UI changes
 6. [ ] CI checks all passing
-$(if [[ "${AGENT_CMD:-claude}" != "kiro" ]]; then cat <<'CHECKLIST_EXTRA'
+$(if [[ "${_agent_name:-claude}" != "kiro" ]]; then cat <<'CHECKLIST_EXTRA'
 7. [ ] code-simplifier review passed
 8. [ ] PR review agent review passed
 9. [ ] Reviewer bot findings addressed
@@ -786,12 +827,25 @@ the FAILED branch and the dispatcher will eventually mark the issue
 shown below — alternative phrasings like "APPROVED FOR MERGE" or "LGTM"
 also work, but stick to the canonical form when possible.
 
+**CRITICAL — verdict attribution**: your verdict comment MUST end with
+BOTH of these trailer lines, each on its OWN line:
+
+  > Review Session: \`${_agent_session_id}\`
+  > Review Agent: ${_agent_name}
+
+The \`Review Agent: ${_agent_name}\` line is load-bearing — when more than
+one review agent runs against this same PR under the same GitHub identity,
+the wrapper attributes each verdict to its agent by matching the
+\`Review Agent: <name>\` discriminator (INV-40). Do NOT omit it, do NOT
+rename it, do NOT change \`${_agent_name}\`.
+
 - If ALL checklist items pass AND code quality is good$(if [[ "${E2E_ACTIVE:-false}" == "true" ]]; then echo " AND all E2E tests pass"; fi) AND no requirement drift detected:
   Post a comment on issue #${ISSUE_NUMBER} starting with the exact text
   **\`Review PASSED\`** on the FIRST LINE, like:
 
   > Review PASSED - All checklist items verified, code quality good.$(if [[ "${E2E_ACTIVE:-false}" == "true" ]]; then echo " E2E verification completed."; fi) No requirement drift.
-  > Review Session: \`${SESSION_ID}\`
+  > Review Session: \`${_agent_session_id}\`
+  > Review Agent: ${_agent_name}
 
   Then exit.
 
@@ -801,20 +855,27 @@ also work, but stick to the canonical form when possible.
   of each failing item with specific remediation instructions.$(case "${E2E_MODE:-none}" in browser) echo "
   Include E2E failure details with screenshot evidence." ;; command) echo "
   Include the verify-command exit code and a tail of /tmp/e2e-${PR_NUMBER}.log as evidence." ;; esac)
-  End the comment with: \`Review Session: \\\`${SESSION_ID}\\\`\`
+  End the comment with these two lines:
+  \`Review Session: \\\`${_agent_session_id}\\\`\`
+  \`Review Agent: ${_agent_name}\`
   Then exit.
 
 IMPORTANT: Work autonomously. Be thorough but fair. Focus on correctness and compliance.
 $(if [[ "${E2E_ACTIVE:-false}" == "true" ]]; then echo "E2E verification is MANDATORY — do NOT skip it, do NOT treat it as optional."; fi)
 EOF
-)"
+}
 
 # ---------------------------------------------------------------------------
-# Run review agent
+# Run review agent(s) — multi-agent fan-out (INV-40, #166)
 # ---------------------------------------------------------------------------
-SESSION_NAME="review-pr-${PR_NUMBER}-issue-${ISSUE_NUMBER}"
-log "Starting review session: ${SESSION_ID} (name: ${SESSION_NAME}, model: ${AGENT_REVIEW_MODEL:-sonnet})"
-
+# REVIEW_AGENTS_LIST is ("$AGENT_CMD") in the single-agent default (N=1) and
+# the full list (e.g. agy kiro) when AGENT_REVIEW_AGENTS is set. We fan out
+# one parallel subshell per agent, each with its OWN minted SESSION_ID, its
+# OWN per-agent AGENT_CMD override, its OWN log, and (INV-38) the launcher
+# neutralized for non-claude members. The single shared review-N.pid file and
+# the `reviewing` label are NOT touched by the fan-out — they remain the
+# wrapper's, so the dispatcher's PID model and the state machine are unchanged.
+#
 # Export E2E credentials as env vars (not in prompt) for agent to read at runtime
 if [[ "${E2E_ACTIVE:-false}" == "true" ]]; then
   export E2E_TEST_USER_EMAIL="${E2E_TEST_USER_EMAIL:-}"
@@ -833,80 +894,215 @@ if [[ "${E2E_MODE:-none}" == "command" ]]; then
   export PR_HEAD_SHA="${PR_HEAD_SHA:-}"
 fi
 
-set +e
-run_agent "$SESSION_ID" "$PROMPT" "${AGENT_REVIEW_MODEL:-sonnet}" "$SESSION_NAME" 2>&1
-AGENT_EXIT=$?
-set -e
+# Per-agent state captured for the collection step.
+declare -a AGENT_NAMES=()        # CLI name per index (parallel arrays)
+declare -a AGENT_SESSION_IDS=()  # minted SESSION_ID per index
+declare -A AGENT_LAUNCH_RC=()    # CLI exit code per session id (sidecar-read)
+# A per-run temp dir holds each subshell's launch-rc sidecar (the subshell
+# cannot mutate the parent's variables). Mode 700; cleaned up after collection.
+_FANOUT_DIR=$(mktemp -d "/tmp/agent-review-fanout-${ISSUE_NUMBER}-XXXXXX")
 
-log "Review agent exited with code: $AGENT_EXIT"
+log "Fanning out ${#REVIEW_AGENTS_LIST[@]} review agent(s): ${REVIEW_AGENTS_LIST[*]} (model: ${AGENT_REVIEW_MODEL:-sonnet})"
+
+for _agent in "${REVIEW_AGENTS_LIST[@]}"; do
+  _agent_session_id=$(uuidgen)
+  AGENT_NAMES+=("$_agent")
+  AGENT_SESSION_IDS+=("$_agent_session_id")
+  _agent_log="/tmp/agent-${PROJECT_ID}-review-${ISSUE_NUMBER}-${_agent}.log"
+  _agent_prompt=$(build_review_prompt "$_agent" "$_agent_session_id")
+  _agent_rc_file="${_FANOUT_DIR}/${_agent_session_id}.rc"
+
+  (
+    # Per-subshell AGENT_CMD override so run_agent dispatches to THIS CLI.
+    AGENT_CMD="$_agent"
+    # INV-38: a claude-only launcher (cc bridge etc.) must not wrap a
+    # non-claude CLI. Neutralize the launcher for non-claude members; a
+    # single-agent claude run keeps its rebound AGENT_LAUNCHER_ARGV.
+    if [[ "$_agent" != "claude" ]]; then
+      AGENT_LAUNCHER_ARGV=()
+    fi
+    # The wrapper owns the single review-N.pid; per-agent run_agent must NOT
+    # rewrite it (the _run_with_timeout PID-file write is keyed on
+    # AGENT_PID_FILE). Unset it inside the subshell so N agents don't thrash
+    # the shared PID file out from under the dispatcher's liveness model.
+    unset AGENT_PID_FILE
+    _agent_session_name="review-pr-${PR_NUMBER}-issue-${ISSUE_NUMBER}-${_agent}"
+    run_agent "$_agent_session_id" "$_agent_prompt" "${AGENT_REVIEW_MODEL:-sonnet}" "$_agent_session_name" \
+      >>"$_agent_log" 2>&1
+    printf '%s\n' "$?" > "$_agent_rc_file"
+  ) &
+done
+
+# Wait for all fanned-out review agents to finish.
+wait
+
+# Read each agent's launch exit code from its sidecar.
+for _i in "${!AGENT_NAMES[@]}"; do
+  _sid="${AGENT_SESSION_IDS[$_i]}"
+  _rc_file="${_FANOUT_DIR}/${_sid}.rc"
+  if [[ -f "$_rc_file" ]]; then
+    AGENT_LAUNCH_RC["$_sid"]=$(head -n1 "$_rc_file" 2>/dev/null || echo 1)
+  else
+    # Subshell never wrote a sidecar (crashed before the printf) — treat as
+    # a launch failure.
+    AGENT_LAUNCH_RC["$_sid"]=1
+  fi
+  log "Review agent '${AGENT_NAMES[$_i]}' (session ${_sid}) exited with code: ${AGENT_LAUNCH_RC[$_sid]}"
+done
+rm -rf "$_FANOUT_DIR" 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
-# Parse result and update issue/PR state
+# Collect per-agent verdicts and aggregate (INV-40)
 # ---------------------------------------------------------------------------
-log "Parsing review result from issue comments..."
+log "Parsing review results from issue comments (per agent)..."
 
-# Poll for the agent's review comment.
-#
-# Pattern (closes #95): the verdict-keyword regex accepts canonical
-# phrasings ("Review PASSED" / "Review findings:") plus common drift
-# variants (APPROVED FOR MERGE, Review APPROVED, LGTM, Review FAILED,
-# Review REJECTED, Changes requested). The pass-vs-fail decision is
-# made below by the classification grep — this polling step only
-# narrows down to "this looks like a verdict comment".
-#
-# Authenticity binding: see the predicate construction below for the
-# three-layer rationale (actor + time window + body trailer).
-#
-# Why we no longer bind to the wrapper's specific session UUID: the
-# agent occasionally rewrites the Review Session UUID in its comment
-# body, so a strict body-text match would miss valid verdicts and the
-# wrapper would fall through to the no-verdict-found FAILED branch.
-# Actor and time window are observed by the wrapper itself and cannot
-# be rewritten by the agent.
-#
-# Fallback: if `gh api user` returned empty at startup (BOT_LOGIN unset),
-# keep the body-text match against the wrapper's session_id so a
-# transient auth/API blip at the top of the wrapper doesn't strip all
-# spoof protection.
-#
-# Retry up to 6 times (30s total) to avoid race conditions.
-LATEST_COMMENT=""
+# Verdict-keyword regex (closes #95): canonical phrasings plus drift variants.
+# Keep in sync with _classify_verdict_body below — this is the UNION of its
+# fail-bucket and pass-bucket patterns (the finder must match anything the
+# classifier can bucket).
 _VERDICT_RE='Review PASSED|Review APPROVED|APPROVED FOR MERGE|LGTM|Review PASS|Review findings:|Review FAILED|Review REJECTED|Changes requested'
-# Build the authenticity predicate once. Three layers, all required:
+
+# _classify_verdict_body <body> — echoes pass | fail (FAIL-first, #95).
+# Conservative: a body containing both pass and fail phrasing classifies FAIL.
+_classify_verdict_body() {
+  local body="$1"
+  if echo "$body" | grep -qiE 'Review (FAILED|REJECTED)|Review findings:|Changes requested'; then
+    echo "fail"
+  elif echo "$body" | grep -qiE 'Review PASSED|Review APPROVED|APPROVED FOR MERGE|LGTM|Review PASS'; then
+    echo "pass"
+  else
+    echo "fail"
+  fi
+}
+
+# Per-agent verdict polling. The authenticity binding (INV-20) is unchanged —
+# actor (BOT_LOGIN) + time window (WRAPPER_START_TS) + the `Review Session`
+# trailer presence — EXCEPT we add a per-agent discriminator so N verdict
+# comments posted under the SAME GitHub identity don't collapse to one
+# (INV-40). The discriminator is the `Review Agent: <name>` line each agent's
+# prompt instructs it to emit; the wrapper takes `last` per agent.
 #
-#   (a) actor (BOT_LOGIN) — when known, gates on the bot identity. In
-#       GH_AUTH_MODE=app this is the review-app's distinct login, so a
-#       concurrent dev wrapper can't spoof. In GH_AUTH_MODE=token dev
-#       and review share an identity, so this layer alone is insufficient.
+# Fallback (BOT_LOGIN empty): drop the actor layer, keep the time window, and
+# narrow on that agent's own `Review Session.*<session-id>` UUID.
 #
-#   (b) time window (WRAPPER_START_TS) — gates on createdAt, isolating
-#       the current review run from stale comments left by a prior tick.
-#
-#   (c) "Review Session" body trailer — a literal substring the review
-#       agent's prompt instructs it to emit. Does NOT bind to the
-#       wrapper's specific UUID (the prior brittleness this PR removes),
-#       only to the trailer's presence. This excludes the dev agent's status
-#       comments that happen to contain "Review findings" / "LGTM"
-#       inside a quoted prior verdict — those won't have the trailer.
-#
-# Fallback (BOT_LOGIN empty): drop (a), keep (b) and (c). The session-id
-# is included in (c)'s match for additional narrowing when actor is
-# unavailable.
-if [[ -n "$BOT_LOGIN" ]]; then
-  _AUTH_PREDICATE="(.author.login == \"${BOT_LOGIN}\") and (.createdAt >= \"${WRAPPER_START_TS}\") and (.body | test(\"Review Session\"))"
-else
-  _AUTH_PREDICATE="(.createdAt >= \"${WRAPPER_START_TS}\") and (.body | test(\"Review Session.*${SESSION_ID}\"))"
-fi
-_VERDICT_JQ="[.comments[] | select(${_AUTH_PREDICATE} and (.body | test(\"${_VERDICT_RE}\"; \"i\")))] | last | .body"
+# Poll up to 6 times (30s total) for ALL agents' verdicts to settle. We re-run
+# every agent's query each round and stop early once every agent has either a
+# verdict comment or a known launch failure.
+declare -a AGENT_VERDICTS=()        # pass | fail | unavailable, per index
+declare -a AGENT_VERDICT_BODIES=()  # the matched comment body (or empty)
+for _i in "${!AGENT_NAMES[@]}"; do
+  AGENT_VERDICTS+=("")        # filled in below
+  AGENT_VERDICT_BODIES+=("")
+done
+
 for _poll_attempt in $(seq 1 6); do
   sleep 5
-  LATEST_COMMENT=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json comments \
-    -q "$_VERDICT_JQ" 2>/dev/null || true)
-  if [[ -n "$LATEST_COMMENT" ]]; then
-    break
-  fi
-  log "Waiting for review comment to appear (attempt ${_poll_attempt}/6)..."
+  _all_resolved=1
+  for _i in "${!AGENT_NAMES[@]}"; do
+    # Already resolved (verdict found on a prior round) — skip re-query.
+    [[ -n "${AGENT_VERDICTS[$_i]}" ]] && continue
+
+    _agent="${AGENT_NAMES[$_i]}"
+    _sid="${AGENT_SESSION_IDS[$_i]}"
+
+    if [[ -n "$BOT_LOGIN" ]]; then
+      _auth_predicate="(.author.login == \"${BOT_LOGIN}\") and (.createdAt >= \"${WRAPPER_START_TS}\") and (.body | test(\"Review Session\"))"
+    else
+      _auth_predicate="(.createdAt >= \"${WRAPPER_START_TS}\") and (.body | test(\"Review Session.*${_sid}\"))"
+    fi
+    # Per-agent discriminator (INV-40): the `Review Agent: <name>` line.
+    _agent_predicate="(.body | test(\"Review Agent: ${_agent}\"))"
+    _verdict_jq="[.comments[] | select(${_auth_predicate} and ${_agent_predicate} and (.body | test(\"${_VERDICT_RE}\"; \"i\")))] | last | .body"
+
+    _body=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json comments \
+      -q "$_verdict_jq" 2>/dev/null || true)
+    if [[ -n "$_body" ]]; then
+      AGENT_VERDICT_BODIES[$_i]="$_body"
+      AGENT_VERDICTS[$_i]=$(_classify_verdict_body "$_body")
+    else
+      # No verdict yet. If the agent's CLI already exited, it won't post one,
+      # so we can resolve it as unavailable now; otherwise keep polling.
+      if [[ "${AGENT_LAUNCH_RC[$_sid]:-1}" -ne 0 ]]; then
+        AGENT_VERDICTS[$_i]="unavailable"
+      else
+        _all_resolved=0
+      fi
+    fi
+  done
+  [[ "$_all_resolved" -eq 1 ]] && break
+  log "Waiting for review verdict comment(s) to appear (attempt ${_poll_attempt}/6)..."
 done
+
+# Any agent still unresolved after the poll window is unavailable (no verdict
+# comment within the window) — INV-40's "unavailable" definition.
+for _i in "${!AGENT_NAMES[@]}"; do
+  [[ -z "${AGENT_VERDICTS[$_i]}" ]] && AGENT_VERDICTS[$_i]="unavailable"
+done
+
+# Aggregate under the unanimous-PASS rule (INV-40). Map the aggregate onto the
+# existing PASSED_VERDICT / LATEST_COMMENT / AGENT_EXIT variables so the
+# downstream PASS / FAIL / crash branches and the six emit_verdict_trailer
+# call sites run UNCHANGED — exactly ONE aggregated INV-35 trailer and ONE
+# INV-04 Reviewed-HEAD trailer per review run.
+AGGREGATE=$(_aggregate_review_verdicts "${AGENT_VERDICTS[@]}")
+log "Per-agent verdicts: ${AGENT_VERDICTS[*]} → aggregate: ${AGGREGATE}"
+
+# A representative SESSION_ID for the Reviewed-HEAD trailer (INV-04) and the
+# BOT_LOGIN-empty fallback predicate downstream. Use the first agent's id; in
+# the N=1 case this IS the lone agent's session.
+SESSION_ID="${AGENT_SESSION_IDS[0]}"
+
+# Identify deciding (verdict-producing) vs dropped (unavailable) agents for the
+# human-visible summary on partial unavailability.
+_dropped_agents=""
+_deciding_agents=""
+for _i in "${!AGENT_NAMES[@]}"; do
+  if [[ "${AGENT_VERDICTS[$_i]}" == "unavailable" ]]; then
+    _dropped_agents+="${AGENT_NAMES[$_i]} "
+  else
+    _deciding_agents+="${AGENT_NAMES[$_i]}(${AGENT_VERDICTS[$_i]}) "
+  fi
+done
+
+# LATEST_COMMENT drives (a) the Reviewed-HEAD trailer gate (post only when a
+# verdict exists) and (b) the FAIL-vs-crash branch below. Synthesize it from
+# the deciding agents' bodies so multi-agent FAIL findings flow to dev. For
+# all-unavailable, LATEST_COMMENT stays empty.
+LATEST_COMMENT=""
+for _i in "${!AGENT_NAMES[@]}"; do
+  if [[ -n "${AGENT_VERDICT_BODIES[$_i]}" ]]; then
+    LATEST_COMMENT+="${AGENT_VERDICT_BODIES[$_i]}"$'\n\n'
+  fi
+done
+
+case "$AGGREGATE" in
+  pass)
+    PASSED_VERDICT=true
+    AGENT_EXIT=0
+    ;;
+  fail)
+    PASSED_VERDICT=false
+    AGENT_EXIT=0  # the agent(s) ran and produced a verdict — not a crash
+    ;;
+  all-unavailable)
+    # No deciding agent. Fall back to today's single-agent crash path
+    # verbatim: empty LATEST_COMMENT + non-zero AGENT_EXIT → the FAIL branch's
+    # crash-fallback comment + `failed-non-substantive other` trailer.
+    PASSED_VERDICT=false
+    LATEST_COMMENT=""
+    AGENT_EXIT=1
+    log "All ${#REVIEW_AGENTS_LIST[@]} review agent(s) unavailable — falling back to single-agent crash path."
+    ;;
+esac
+
+# Partial unavailability (some but not all dropped): post ONE human-visible
+# summary comment listing dropped vs deciding agents and log a WARN. The
+# decision was made on the deciding agents under the unanimous-PASS rule.
+if [[ -n "$_dropped_agents" && "$AGGREGATE" != "all-unavailable" ]]; then
+  log "WARNING: review agent(s) dropped (unavailable): ${_dropped_agents%% }; decided on: ${_deciding_agents%% }"
+  gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
+    --body "Multi-agent review: dropped (unavailable) agent(s): \`${_dropped_agents%% }\`. Decision made on: \`${_deciding_agents%% }\`. (INV-40: unavailable = CLI launch failure or no verdict within the poll window.)" 2>/dev/null || true
+fi
 
 # Post a "Reviewed HEAD" trailer comment so the dispatcher can detect whether
 # new commits have landed since the last review. The dispatcher uses this to
@@ -934,20 +1130,11 @@ if [[ -n "$LATEST_COMMENT" && -n "$PR_HEAD_SHA" ]]; then
     || log "WARNING: Failed to post Reviewed HEAD trailer (non-fatal): ${_trailer_err}"
 fi
 
-# Classify the verdict (closes #95). Conservative ambiguity rule:
-# if BOTH a pass-pattern and a fail-pattern appear in the body, treat
-# the comment as FAIL — the agent flagged at least one issue.
-# Drop the `head -1` constraint that the previous code used: some agents
-# put a heading on line 1 and the verdict on line 2. The session-id
-# binding above provides authenticity; line position doesn't add safety.
-if echo "$LATEST_COMMENT" | grep -qiE 'Review (FAILED|REJECTED)|Review findings:|Changes requested'; then
-  PASSED_VERDICT=false
-elif echo "$LATEST_COMMENT" | grep -qiE 'Review PASSED|Review APPROVED|APPROVED FOR MERGE|LGTM|Review PASS'; then
-  PASSED_VERDICT=true
-else
-  PASSED_VERDICT=false
-fi
-
+# PASSED_VERDICT was set by the unanimous-PASS aggregation above (INV-40).
+# Per-agent FAIL-first classification (#95) lives in _classify_verdict_body,
+# and the aggregate (`_aggregate_review_verdicts`) collapses the per-agent
+# verdicts under the unanimous rule. The downstream PASS / FAIL / crash
+# branches below are byte-for-byte the single-agent paths.
 if [[ "$PASSED_VERDICT" == "true" ]]; then
   log "Review PASSED for PR #${PR_NUMBER}."
   # INV-35: emit `passed` trailer; dispatcher's Step 4b.5.1 treats it as a

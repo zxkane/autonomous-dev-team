@@ -254,7 +254,15 @@ Summary of the hard rule:
 - **ZERO blocking findings -> verdict is PASS** (approve + merge)
 - **There is NO middle ground** — blocking findings and APPROVE are mutually exclusive
 
-Post the review result as a comment on the **issue** (NOT the PR). Use "Review PASSED" for pass, "Review findings:" for fail.
+Post the review result as a comment on the **issue** (NOT the PR). Use "Review PASSED" for pass, "Review findings:" for fail. End the comment with BOTH a `Review Session: \`<id>\`` trailer and a `Review Agent: <name>` discriminator line — the wrapper supplies both `<id>` and `<name>` in your prompt.
+
+### Multi-agent review (when configured)
+
+When the project sets `AGENT_REVIEW_AGENTS` to more than one CLI, several review agents run **in parallel against the same PR**, each as a fully independent reviewer. If you are one of them:
+
+- Run the Findings -> Decision Gate **independently** — reach your own PASS/FAIL based on your own findings. Do NOT try to coordinate with or defer to the other agents; you cannot see their verdicts.
+- Post your own verdict comment ending with your assigned `Review Session: \`<id>\`` and `Review Agent: <name>` lines (both are in your prompt). The `Review Agent: <name>` line is how the wrapper attributes your verdict — do not omit or rename it ([INV-40](../../docs/pipeline/invariants.md)).
+- The wrapper aggregates all agents' verdicts under a **unanimous-PASS** rule: the PR is approved+merged only if **every** available agent passed; any single FAIL sends the PR back to dev. This mirrors the gate's own "any blocking finding → FAIL" philosophy, applied across agents.
 
 ---
 

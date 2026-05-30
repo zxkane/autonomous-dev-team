@@ -112,9 +112,46 @@ The agent's command-mode prompt block instructs it to:
 
 For the project-side contract (`E2E_COMMAND` semantics, evidence-block format, parser PR_HEAD_SHA usage), see `skills/autonomous-review/references/e2e-command-mode.md`.
 
+## Multi-agent fan-out (INV-40)
+
+By default the wrapper runs exactly ONE verdict-reaching agent (`AGENT_REVIEW_CMD`, the per-side review CLI). Setting `AGENT_REVIEW_AGENTS` to a space-separated list (e.g. `"agy kiro"`) makes the wrapper run all listed agents **in parallel against the same PR** and gate the merge on their **unanimous agreement** ([INV-40](invariants.md#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback)). The fan-out is entirely internal to the wrapper: the dispatcher, the single `review-${N}.pid` file, and the `reviewing` label are unchanged.
+
+> **Distinct from `REVIEW_BOTS`.** `REVIEW_BOTS` (`/q review`, `/codex review`) triggers *external GitHub bots* whose review comments are read as **input** by the verdict agent(s). `AGENT_REVIEW_AGENTS` runs N *independent verdict-reaching* agents — each reaches its own approve/pushback decision, and the wrapper aggregates them.
+
+### Agent-list resolution
+
+`REVIEW_AGENTS_LIST` resolves once at startup:
+- `AGENT_REVIEW_AGENTS` non-empty → the word-split list (`agy kiro` → `(agy kiro)`).
+- empty/unset → `("$AGENT_CMD")` — exactly one element equal to the already-rebound `$AGENT_REVIEW_CMD` ([INV-37](invariants.md#inv-37-per-side-agent_cmd-precedence)). This is the N=1 backward-compatible default; everything below collapses to the legacy single-agent behavior.
+
+### Fan-out
+
+One backgrounded subshell per agent. Each subshell:
+- overrides `AGENT_CMD="$agent"` locally so `run_agent` dispatches to THAT CLI;
+- mints its OWN `SESSION_ID` (`uuidgen`) — distinct per agent so verdict comments don't collapse under a shared GitHub identity;
+- neutralizes the launcher (`AGENT_LAUNCHER_ARGV=()`) for non-`claude` members ([INV-38](invariants.md#inv-38-per-side-agent_launcher-precedence): a claude-only `cc` bridge must not wrap a non-claude CLI);
+- `unset AGENT_PID_FILE` so the per-agent `run_agent` does NOT rewrite the wrapper's single `review-${N}.pid` (the wrapper owns that file; the dispatcher's liveness model depends on it);
+- writes to its OWN log `/tmp/agent-${PROJECT_ID}-review-${N}-${agent}.log`;
+- builds its prompt via `build_review_prompt "$agent" "$SESSION_ID"` and records its CLI exit code to a per-run sidecar (a subshell can't mutate the parent's variables).
+
+The wrapper `wait`s for all subshells.
+
+### Per-agent verdict collection
+
+For each agent, the wrapper runs ONE verdict jq query with the [INV-20](invariants.md#inv-20-verdict-authenticity-binding-actor--window--trailer-presence) authenticity binding PLUS a per-agent `Review Agent: <name>` discriminator predicate, taking `last` per agent. Each matched comment is classified with the existing two-step FAIL-first rule (`_classify_verdict_body`). An agent is **unavailable** when its CLI launch failed AND it produced no classifiable verdict comment within the poll window; a FAIL it *did* post still counts.
+
+### Aggregation (unanimous PASS)
+
+`lib-review-aggregate.sh::_aggregate_review_verdicts` collapses the per-agent outcomes:
+- PASS iff ≥1 deciding agent AND every deciding agent passed;
+- any deciding FAIL → FAIL;
+- zero deciding agents (all unavailable) → `all-unavailable`.
+
+The aggregate maps onto the existing `PASSED_VERDICT` / `LATEST_COMMENT` / `AGENT_EXIT` variables, so the downstream PASS / FAIL / crash branches run UNCHANGED — exactly one aggregated INV-35 verdict trailer and one INV-04 Reviewed-HEAD trailer per run. `all-unavailable` sets `LATEST_COMMENT=""` + `AGENT_EXIT=1`, driving the single-agent crash fallback verbatim (`failed-non-substantive other` + `−reviewing +pending-dev`). On *partial* unavailability the wrapper posts one human-visible summary comment (dropped vs. deciding agents) and logs a WARN, then decides on the deciding agents.
+
 ## Prompt construction
 
-The prompt encodes the entire review procedure as numbered steps. The wrapper does NOT execute any of those steps itself — they're all instructions to the underlying agent. The wrapper's job is to construct the prompt, kick off the agent, and parse the verdict.
+The prompt encodes the entire review procedure as numbered steps. The wrapper does NOT execute any of those steps itself — they're all instructions to the underlying agent. The wrapper's job is to construct the prompt (per agent via `build_review_prompt <name> <session-id>`), kick off the agent(s), and parse the verdict(s).
 
 Major prompt sections:
 
@@ -126,9 +163,9 @@ Major prompt sections:
 | **Acceptance criteria verification** | For each `## Acceptance Criteria` checkbox in the issue body, verify against PR code/tests/build then mark via `bash scripts/mark-issue-checkbox.sh`. ALL must be checked before approving. |
 | **Amazon Q Developer trigger** | Mandatory bot-review trigger. Q ignores `/q review` from bot accounts ⇒ wrapper instructs the agent to use `bash scripts/gh-as-user.sh pr comment N --body "/q review"`. Poll up to 3 min for the bot to respond. |
 | **E2E verification (if `E2E_MODE` ∈ {browser, command})** | Branch on `E2E_MODE`. `browser`: Chrome DevTools MCP procedure (navigate, login, execute happy-path + feature test cases, screenshot+upload each, post structured E2E report on PR). `command`: invoke project-supplied `E2E_COMMAND`, run `E2E_COMMAND_EVIDENCE_PARSER`, post evidence block ending with SHA-bound marker `<!-- e2e-evidence: complete sha="${PR_HEAD_SHA}" -->` as PR comment. See **E2E mode dispatch** above. |
-| **Decision** | Single line: PASS ⇒ post "Review PASSED ... Review Session: \`<id>\`" on the **issue** (not PR). FAIL ⇒ post "Review findings: ..." with numbered remediation list, ending with the same session-id trailer. |
+| **Decision** | PASS ⇒ post "Review PASSED ..." on the **issue** (not PR). FAIL ⇒ post "Review findings: ..." with numbered remediation list. Either way the comment ends with BOTH a `Review Session: \`<id>\`` trailer AND a `Review Agent: <name>` discriminator line ([INV-40](invariants.md#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback)) — the latter lets the wrapper attribute N verdicts posted under one GitHub identity. |
 
-The session-id trailer is the wrapper's only way to identify which comment is its own verdict — see [Verdict polling](#verdict-polling) below.
+The `Review Session:` trailer (presence) + the `Review Agent: <name>` discriminator (per-agent) are how the wrapper identifies which comment is each agent's verdict — see [Verdict polling](#verdict-polling) below.
 
 ## Verdict polling
 
@@ -144,7 +181,9 @@ After the agent exits, the wrapper polls issue comments up to 6 times (5s interv
 
 Fallback path: if `gh api user` fails at startup (returns empty, errors out, or returns the literal string `"null"` from a misconfigured GitHub App), `BOT_LOGIN` is treated as unset and the predicate becomes `createdAt >= WRAPPER_START_TS AND body matches Review Session.*<SESSION_ID>`. This restores the prior brittleness (agent must echo the wrapper's UUID) only on the rare path where actor binding is unavailable.
 
-If polling completes without finding a verdict comment, the wrapper proceeds to the FAIL branch (no false-positive PASS).
+**Per-agent discriminator ([INV-40](invariants.md#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback), #166)**: with multi-agent fan-out, all N agents post under the same identity, so the three predicates above match all N verdicts and `last` would pick one arbitrarily. The wrapper therefore runs ONE query **per agent**, adding a fourth predicate `body matches /Review Agent: <name>/` and taking `last` per agent. In the `BOT_LOGIN`-empty fallback the per-agent UUID (`Review Session.*<that-agent's-session-id>`) is the narrowing key. For N=1 this is the lone agent's discriminator — identical routing to the pre-#166 single query. See [Multi-agent fan-out](#multi-agent-fan-out-inv-40) above.
+
+If polling completes without finding a verdict comment for an agent, that agent is treated as **unavailable** (dropped from the vote). If NO agent yields a verdict, the wrapper proceeds to the FAIL branch via the all-unavailable crash fallback (no false-positive PASS).
 
 ### Pass-vs-fail classification
 
