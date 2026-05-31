@@ -281,13 +281,43 @@ AGENT_REVIEW_EXTRA_ARGS=""
 #
 # DISTINCT from REVIEW_BOTS (below): REVIEW_BOTS triggers external GitHub bots
 # whose comments are read as INPUT by the verdict agent(s); AGENT_REVIEW_AGENTS
-# runs N independent verdict-reaching agents. All listed agents currently share
-# AGENT_REVIEW_MODEL (per-agent model/extra-args is a documented follow-up).
+# runs N independent verdict-reaching agents.
 #
 # The fan-out is internal to the wrapper: the dispatcher, the review-N.pid
 # file, and the `reviewing` label are unchanged. The dispatcher Step 5b
 # liveness model still sees one review wrapper per issue.
 # AGENT_REVIEW_AGENTS=""
+
+# Per-agent model / extra-args overrides (INV-41, #168) -----------------------
+# By default every agent in AGENT_REVIEW_AGENTS shares AGENT_REVIEW_MODEL and
+# AGENT_REVIEW_EXTRA_ARGS. To give a specific agent its OWN model or flags, set
+# a per-agent key: the agent name uppercased with every non-alphanumeric char
+# mapped to `_` (agy → AGY, kiro → KIRO, claude-code → CLAUDE_CODE):
+#
+#   AGENT_REVIEW_MODEL_<AGENT>="..."        # per-agent model
+#   AGENT_REVIEW_EXTRA_ARGS_<AGENT>="..."   # per-agent extra CLI args
+#
+# Precedence: per-agent key (if set AND non-empty) → shared AGENT_REVIEW_MODEL /
+# AGENT_REVIEW_EXTRA_ARGS → lib default (sonnet for model, empty for args). An
+# all-unset config is byte-for-byte the shared-value behavior.
+#
+# Worked example — a mixed "kiro <claude-fam>" fleet where the two CLIs use
+# INCOMPATIBLE model namespaces (kiro rejects `sonnet[1m]`; claude rejects
+# `claude-sonnet-4.6`):
+#
+#   AGENT_REVIEW_AGENTS="kiro agy"
+#   AGENT_REVIEW_MODEL="sonnet[1m]"             # shared default (agy keeps this)
+#   AGENT_REVIEW_MODEL_KIRO="claude-sonnet-4.6" # kiro gets its own id
+#   AGENT_REVIEW_EXTRA_ARGS_KIRO="--trust-all-tools"  # kiro-only flag
+#   # agy has no per-agent key → uses the shared AGENT_REVIEW_MODEL ("sonnet[1m]")
+#   # and shared AGENT_REVIEW_EXTRA_ARGS. (agy ignores --model and warns once —
+#   # see the agy block; per-agent model still makes the value correct for the
+#   # CLIs that DO consume it.)
+#
+# Note: the review fan-out runs a FRESH run_agent (not resume_agent), so on the
+# review side the resolved extra-args is threaded through AGENT_DEV_EXTRA_ARGS
+# internally (the var run_agent's _parse_extra_args reads). You configure only
+# the review knobs above; the wrapper handles the plumbing per-subshell.
 
 # --- claude block ---
 # claude has NO required EXTRA_ARGS — the structural --permission-mode
