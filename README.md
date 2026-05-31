@@ -369,6 +369,17 @@ The single review wrapper fans out internally — one parallel subshell per agen
 
 The fan-out is internal to the wrapper: the dispatcher, the `review-<N>.pid` file, and the `reviewing` label are unchanged, so the rest of the pipeline sees one review per issue exactly as before.
 
+**Per-agent model / extra-args overrides ([INV-41](docs/pipeline/invariants.md)).** By default every fanned-out agent shares `AGENT_REVIEW_MODEL` / `AGENT_REVIEW_EXTRA_ARGS`. When the listed CLIs use **incompatible model namespaces** (e.g. kiro wants `claude-sonnet-4.6` while a claude-family agent wants `sonnet[1m]` — each CLI rejects the other's id), give an agent its own value via a per-agent key: the agent name uppercased, every non-alphanumeric char mapped to `_` (`agy`→`AGY`, `kiro`→`KIRO`, `claude-code`→`CLAUDE_CODE`):
+
+```bash
+AGENT_REVIEW_AGENTS="kiro agy"
+AGENT_REVIEW_MODEL="sonnet[1m]"               # shared default (agy keeps this)
+AGENT_REVIEW_MODEL_KIRO="claude-sonnet-4.6"   # kiro gets its own id
+AGENT_REVIEW_EXTRA_ARGS_KIRO="--trust-all-tools"   # kiro-only flag
+```
+
+Precedence is per-agent key → shared `AGENT_REVIEW_MODEL` / `AGENT_REVIEW_EXTRA_ARGS` → lib default. With no per-agent key set the behavior is byte-for-byte the shared-value default. See `autonomous.conf.example` for the worked example.
+
 > **Distinct from `REVIEW_BOTS`.** `REVIEW_BOTS` triggers *external* GitHub review bots (`/q review`, `/codex review`, `@claude review`) whose comments the verdict agent reads as **input**. `AGENT_REVIEW_AGENTS` runs N **independent verdict-reaching** agents that each reach their own approve/pushback decision. The two are orthogonal and can be combined.
 
 ### Dispatcher ([OpenClaw](https://github.com/OpenClaw/OpenClaw))

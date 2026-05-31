@@ -30,6 +30,12 @@ source "${SCRIPT_DIR}/lib-review-verdict.sh"
 # agents. Inert for the single-agent default; only consumed when
 # AGENT_REVIEW_AGENTS lists more than one CLI.
 source "${SCRIPT_DIR}/lib-review-aggregate.sh"
+# shellcheck source=lib-review-resolve.sh
+# INV-41 (#168): per-agent model / extra-args resolution for the fan-out.
+# Inert for the all-unset default (resolves to the shared AGENT_REVIEW_MODEL /
+# AGENT_REVIEW_EXTRA_ARGS); only diverges when a per-agent
+# AGENT_REVIEW_MODEL_<AGENT> / AGENT_REVIEW_EXTRA_ARGS_<AGENT> key is set.
+source "${SCRIPT_DIR}/lib-review-resolve.sh"
 # Per-side AGENT_CMD override (INV-37). See autonomous-dev.sh for the
 # matching dev-side override. Together they let one project run dev
 # and review on different agent CLIs (e.g. claude for dev, agy for
@@ -905,7 +911,10 @@ declare -A AGENT_LAUNCH_RC=()    # CLI exit code per session id (sidecar-read)
 # cannot mutate the parent's variables). Mode 700; cleaned up after collection.
 _FANOUT_DIR=$(mktemp -d "/tmp/agent-review-fanout-${ISSUE_NUMBER}-XXXXXX")
 
-log "Fanning out ${#REVIEW_AGENTS_LIST[@]} review agent(s): ${REVIEW_AGENTS_LIST[*]} (model: ${AGENT_REVIEW_MODEL:-sonnet})"
+# Reports the SHARED model default; a per-agent AGENT_REVIEW_MODEL_<AGENT>
+# override (INV-41) may diverge per agent — each agent's effective model is
+# visible in its own log (/tmp/agent-${PROJECT_ID}-review-${N}-${agent}.log).
+log "Fanning out ${#REVIEW_AGENTS_LIST[@]} review agent(s): ${REVIEW_AGENTS_LIST[*]} (shared model: ${AGENT_REVIEW_MODEL:-sonnet})"
 
 for _agent in "${REVIEW_AGENTS_LIST[@]}"; do
   _agent_session_id=$(uuidgen)
@@ -929,6 +938,23 @@ for _agent in "${REVIEW_AGENTS_LIST[@]}"; do
     # AGENT_PID_FILE). Unset it inside the subshell so N agents don't thrash
     # the shared PID file out from under the dispatcher's liveness model.
     unset AGENT_PID_FILE
+    # INV-41 (#168): per-agent model + extra-args resolution. Each resolves
+    # the per-agent override key (AGENT_REVIEW_MODEL_<AGENT> /
+    # AGENT_REVIEW_EXTRA_ARGS_<AGENT>, suffix = uppercased name with
+    # non-alphanumeric→`_`) else the shared AGENT_REVIEW_MODEL /
+    # AGENT_REVIEW_EXTRA_ARGS. Scope is THIS subshell only — never leaks to
+    # the dev side or to a sibling agent's subshell. With no per-agent key
+    # set, _agent_model == AGENT_REVIEW_MODEL so the run_agent model arg below
+    # is identical to the legacy `${AGENT_REVIEW_MODEL:-sonnet}`.
+    _agent_model=$(_resolve_review_agent_model "$_agent")
+    # run_agent (a fresh session) tokenizes AGENT_DEV_EXTRA_ARGS, NOT
+    # AGENT_REVIEW_EXTRA_ARGS (only resume_agent reads the latter, and the
+    # review wrapper never resumes). So assign the RESOLVED review extra-args
+    # to AGENT_DEV_EXTRA_ARGS inside this subshell — that's the var
+    # lib-agent.sh::_parse_extra_args actually consumes on the review path.
+    # The resolver reads the operator-facing review knobs, so operators still
+    # configure AGENT_REVIEW_EXTRA_ARGS[_<AGENT>].
+    AGENT_DEV_EXTRA_ARGS=$(_resolve_review_agent_extra_args "$_agent")
     _agent_session_name="review-pr-${PR_NUMBER}-issue-${ISSUE_NUMBER}-${_agent}"
     # Capture the rc explicitly: the subshell inherits `set -e`, so a non-zero
     # run_agent (the exact case the sidecar records — a CLI launch failure)
@@ -936,7 +962,7 @@ for _agent in "${REVIEW_AGENTS_LIST[@]}"; do
     # line. `|| _rc=$?` suppresses set -e and preserves the true exit code
     # (124 timeout / 137 kill / real launch error) for forensic logging.
     _rc=0
-    run_agent "$_agent_session_id" "$_agent_prompt" "${AGENT_REVIEW_MODEL:-sonnet}" "$_agent_session_name" \
+    run_agent "$_agent_session_id" "$_agent_prompt" "${_agent_model:-sonnet}" "$_agent_session_name" \
       >>"$_agent_log" 2>&1 || _rc=$?
     printf '%s\n' "$_rc" > "$_agent_rc_file"
   ) &
