@@ -135,7 +135,7 @@ One backgrounded subshell per agent. Each subshell:
 - writes to its OWN log `/tmp/agent-${PROJECT_ID}-review-${N}-${agent}.log`;
 - builds its prompt via `build_review_prompt "$agent" "$SESSION_ID"` and records its CLI exit code to a per-run sidecar (a subshell can't mutate the parent's variables).
 
-The wrapper `wait`s for all subshells.
+The fan-out loop appends each subshell's PID (`$!`) to a `_fanout_pids` array and the wrapper joins with `wait "${_fanout_pids[@]}"` — the **collected PIDs only**. A bare `wait` is forbidden here: it would also block on the long-lived `gh-token-refresh-daemon` and the heartbeat `sleep` loop (neither exits), hanging the wrapper forever after the agents finish and stranding the issue in `reviewing`. See [INV-40](invariants.md#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback) sub-rule 1.
 
 ### Per-agent verdict collection
 

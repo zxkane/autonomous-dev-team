@@ -907,6 +907,14 @@ fi
 declare -a AGENT_NAMES=()        # CLI name per index (parallel arrays)
 declare -a AGENT_SESSION_IDS=()  # minted SESSION_ID per index
 declare -A AGENT_LAUNCH_RC=()    # CLI exit code per session id (sidecar-read)
+# PIDs of the backgrounded per-agent subshells. We MUST `wait` these specific
+# PIDs — never a bare `wait`. A bare `wait` blocks on ALL background jobs of
+# this shell, which includes the long-lived gh-token-refresh-daemon (started
+# by lib-auth.sh) and the heartbeat sleep loop (_AGENT_HEARTBEAT_PID); neither
+# ever exits, so a bare `wait` would hang the wrapper FOREVER after the agents
+# finish — stranding the issue in `reviewing` with no aggregation, no verdict
+# trailer, and no label transition. See INV-40.
+declare -a _fanout_pids=()
 # A per-run temp dir holds each subshell's launch-rc sidecar (the subshell
 # cannot mutate the parent's variables). Mode 700; cleaned up after collection.
 _FANOUT_DIR=$(mktemp -d "/tmp/agent-review-fanout-${ISSUE_NUMBER}-XXXXXX")
@@ -966,10 +974,25 @@ for _agent in "${REVIEW_AGENTS_LIST[@]}"; do
       >>"$_agent_log" 2>&1 || _rc=$?
     printf '%s\n' "$_rc" > "$_agent_rc_file"
   ) &
+  # Collect THIS subshell's PID so we wait only the fan-out agents below —
+  # not the token-refresh daemon / heartbeat (which never exit). See the
+  # _fanout_pids declaration above and INV-40.
+  _fanout_pids+=("$!")
 done
 
-# Wait for all fanned-out review agents to finish.
-wait
+# Wait for the fanned-out review agents to finish — by their COLLECTED PIDs
+# only. A bare `wait` here would also block on the gh-token-refresh-daemon and
+# the heartbeat loop and hang forever (the bug this guards against).
+#
+# `|| true`: bash's single-PID `wait` (the N=1 fan-out) propagates the
+# subshell's exit code, which under `set -e` would abort the wrapper BEFORE
+# aggregation if that subshell exited non-zero (only reachable if the
+# sidecar `printf` itself failed — e.g. a full tmpfs; run_agent's own rc is
+# already captured into the sidecar via `|| _rc=$?`). We suppress that so the
+# wrapper always proceeds to read the sidecars and aggregate; a missing/
+# unwritten sidecar is then handled as a launch failure (rc=1) below. The
+# multi-PID `wait` already returns 0 regardless of child rc.
+wait "${_fanout_pids[@]}" || true
 
 # Read each agent's launch exit code from its sidecar.
 for _i in "${!AGENT_NAMES[@]}"; do

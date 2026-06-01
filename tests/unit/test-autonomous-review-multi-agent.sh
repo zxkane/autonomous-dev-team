@@ -113,8 +113,20 @@ assert_grep "TC-MAR-SRC-07 launcher neutralized for non-claude member (INV-38)" 
   'AGENT_LAUNCHER_ARGV=\(\)' "$WRAPPER"
 assert_grep "TC-MAR-SRC-08 unset AGENT_PID_FILE inside subshell (no PID thrash)" \
   'unset AGENT_PID_FILE' "$WRAPPER"
-assert_grep "TC-MAR-SRC-09 wrapper waits for backgrounded agents" \
-  '(^|[[:space:];&])wait\b' "$WRAPPER"
+# TC-MAR-SRC-09 (regression for the fan-out hang): the wrapper MUST wait only
+# the backgrounded fan-out subshells by their COLLECTED PIDs — never a bare
+# `wait`. A bare `wait` blocks on ALL background jobs, including the long-lived
+# gh-token-refresh-daemon and the heartbeat sleep loop, which never exit — so
+# the wrapper would hang forever after the agents finish, stranding the issue
+# in `reviewing`. Therefore: (a) each `) &` subshell's PID is appended to a
+# fan-out PID array, and (b) the wait targets that array, and (c) there is NO
+# bare `wait` line anywhere in the wrapper.
+assert_grep "TC-MAR-SRC-09a fan-out collects each subshell PID (\$!)" \
+  '_fanout_pids\+=\("?\$!"?\)' "$WRAPPER"
+assert_grep "TC-MAR-SRC-09b wrapper waits the COLLECTED fan-out PIDs (not bare wait)" \
+  'wait "\$\{_fanout_pids\[@\]\}"' "$WRAPPER"
+assert_not_grep "TC-MAR-SRC-09c no bare \`wait\` (would also wait the token-refresh daemon + heartbeat → hang)" \
+  '^[[:space:]]*wait[[:space:]]*(#.*)?$|^[[:space:]]*wait[[:space:]]*;' "$WRAPPER"
 assert_grep "TC-MAR-SRC-10 per-agent jq verdict predicate keys on Review Agent:" \
   'Review Agent: ' "$WRAPPER"
 assert_grep "TC-MAR-SRC-11 all-unavailable sets AGENT_EXIT=1 on a genuine CLI crash" \
