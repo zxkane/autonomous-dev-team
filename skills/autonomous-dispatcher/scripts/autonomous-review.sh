@@ -935,10 +935,39 @@ for _agent in "${REVIEW_AGENTS_LIST[@]}"; do
   (
     # Per-subshell AGENT_CMD override so run_agent dispatches to THIS CLI.
     AGENT_CMD="$_agent"
-    # INV-38: a claude-only launcher (cc bridge etc.) must not wrap a
-    # non-claude CLI. Neutralize the launcher for non-claude members; a
-    # single-agent claude run keeps its rebound AGENT_LAUNCHER_ARGV.
-    if [[ "$_agent" != "claude" ]]; then
+    # INV-42 (#173): per-agent launcher resolution. If the operator set an
+    # AGENT_REVIEW_LAUNCHER_<AGENT> key (suffix = uppercased name with every
+    # non-alphanumeric char → `_`, same transform as the model/extra-args
+    # keys), apply it as THIS agent's launcher — tokenized with `eval` (the
+    # same trust model lib-agent.sh uses for AGENT_LAUNCHER). Setting the key
+    # is the operator asserting "this launcher fits THIS CLI", so it bypasses
+    # the INV-38 claude-only guard for this agent specifically (the guard
+    # still governs the SHARED AGENT_REVIEW_LAUNCHER default at startup — see
+    # lib-agent.sh). A tokenize failure logs a clear line and falls back to
+    # naked rather than crashing the subshell.
+    #
+    # When no per-agent key is set, _resolve_review_agent_launcher returns
+    # empty and we fall through to the INV-38 behavior: a claude-only launcher
+    # (cc bridge etc.) must not wrap a non-claude CLI, so neutralize the
+    # launcher for non-claude members; a claude member keeps its rebound
+    # AGENT_LAUNCHER_ARGV. Scope is THIS subshell only — never leaks across
+    # fan-out members or to the dev side.
+    _per_agent_launcher=$(_resolve_review_agent_launcher "$_agent")
+    if [[ -n "$_per_agent_launcher" ]]; then
+      # Validate the array assignment PARSES before eval'ing it. A syntax
+      # error inside `eval` (e.g. an unbalanced quote from an operator typo)
+      # is NOT caught by `if ! eval ... 2>/dev/null` — a parse error aborts the
+      # current shell context, which here is THIS fan-out subshell, so the
+      # agent would silently die before run_agent with no log and no sidecar.
+      # `bash -n -c` parses without executing, so a malformed value is caught
+      # cleanly and we degrade to naked + a clear log line.
+      if bash -n -c "AGENT_LAUNCHER_ARGV=($_per_agent_launcher)" 2>/dev/null; then
+        eval "AGENT_LAUNCHER_ARGV=($_per_agent_launcher)"
+      else
+        log "ERROR: AGENT_REVIEW_LAUNCHER_<$_agent> failed to tokenize as a shell argv list; running naked. Value: $_per_agent_launcher"
+        AGENT_LAUNCHER_ARGV=()
+      fi
+    elif [[ "$_agent" != "claude" ]]; then
       AGENT_LAUNCHER_ARGV=()
     fi
     # The wrapper owns the single review-N.pid; per-agent run_agent must NOT

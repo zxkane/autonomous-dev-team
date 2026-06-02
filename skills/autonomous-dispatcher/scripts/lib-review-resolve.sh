@@ -82,3 +82,37 @@ _resolve_review_agent_extra_args() {
   per_agent_var="AGENT_REVIEW_EXTRA_ARGS_${suffix}"
   printf '%s' "${!per_agent_var:-${AGENT_REVIEW_EXTRA_ARGS:-}}"
 }
+
+# _resolve_review_agent_launcher <name>   (INV-42, issue #173)
+#
+# Resolve the effective per-agent launcher for one fan-out agent:
+#   AGENT_REVIEW_LAUNCHER_<SUFFIX>  (per-agent key, if set and non-empty)
+#   → "" (empty)
+#
+# Unlike _resolve_review_agent_model / _resolve_review_agent_extra_args, there
+# is DELIBERATELY no fallback to the shared AGENT_REVIEW_LAUNCHER. The shared
+# launcher is claude-only (gated by INV-38's startup guard in lib-agent.sh);
+# auto-applying it to a non-claude per-agent slot would re-introduce exactly the
+# "claude-only `cc` bridge wraps a non-claude CLI" breakage INV-38 prevents (a
+# `cc` launcher ending in `claude "$@"` would produce `claude codex ...`). A
+# shared model id is merely namespace-specific (agy just warns and ignores
+# `--model`), but a shared launcher PREFIX is actively harmful to the wrong CLI.
+# So the safe resolution for an un-keyed agent is "no per-agent launcher" —
+# empty — and the fan-out subshell then keeps the current INV-38 behavior
+# (non-claude → zeroed; claude → keeps the shared launcher via the wrapper's
+# rebind). The per-agent key is a targeted opt-in: when an operator sets it they
+# are asserting "this launcher is correct for THIS CLI", which the fan-out
+# honors by tokenizing the value and bypassing the claude-only guard for that
+# agent specifically.
+#
+# Echoes the resolved launcher string (possibly empty). The string is tokenized
+# downstream by the fan-out subshell's `eval` (same trust model as
+# AGENT_LAUNCHER), so quoted multi-token values survive intact. An explicit-empty
+# per-agent key resolves to empty (empty == unset for this knob).
+_resolve_review_agent_launcher() {
+  local name="$1"
+  local suffix per_agent_var
+  suffix=$(_review_agent_key_suffix "$name")
+  per_agent_var="AGENT_REVIEW_LAUNCHER_${suffix}"
+  printf '%s' "${!per_agent_var:-}"
+}
