@@ -179,6 +179,45 @@ The MVP wrapper does NOT enforce this skip — it's the agent's responsibility p
 
 ---
 
+## Interaction with the multi-agent review wait/stall windows (INV-43, #172)
+
+When a project runs **multi-agent review** (`AGENT_REVIEW_AGENTS` with ≥2 entries) and `E2E_MODE=command` with a slow `E2E_COMMAND_PRE_HOOKS` + a raised `E2E_COMMAND_TIMEOUT_SECONDS`, the review agent that *faithfully* runs the full command-mode E2E used to be dropped as `unavailable` from the unanimous-PASS vote — while a faster agent that did less real verification became the sole decider. Two windows are involved, and both must be sized for the E2E you dispatched.
+
+### 1. Verdict-poll budget — auto-scaled (handled by the wrapper)
+
+After the fan-out join, `autonomous-review.sh` polls issue comments for each agent's verdict. That poll budget used to be a fixed 30 s (`6 × 5 s`). It is now **derived from `E2E_COMMAND_TIMEOUT_SECONDS`** when `E2E_MODE=command`:
+
+```
+poll attempts = max(6, ceil(E2E_COMMAND_TIMEOUT_SECONDS / 5))
+```
+
+So the wrapper is willing to wait at least as long as the E2E it asked the agent to run, and the early-exit short-circuit still settles the happy path in one round (~5 s) once every agent has posted a verdict. You do **not** need to tune this — it follows `E2E_COMMAND_TIMEOUT_SECONDS` automatically. A non-numeric / zero / unset timeout falls back to the legacy 30 s floor.
+
+### 2. `REVIEW_NEAR_SUCCESS_WINDOW_SECONDS` — operator must raise it
+
+The **dispatcher-side** crash-detection short-circuit (`REVIEW_NEAR_SUCCESS_WINDOW_SECONDS`, default 300 s — see [INV-24](../../../docs/pipeline/invariants.md)) is what stops the dispatcher from declaring a still-working review wrapper "crashed" and SIGTERMing it mid-E2E on the next tick. A command-mode E2E that runs a pre-hook build + verify can easily outlast 300 s.
+
+**Set `REVIEW_NEAR_SUCCESS_WINDOW_SECONDS` ≥ `E2E_COMMAND_TIMEOUT_SECONDS`** (plus a tick of headroom). Otherwise the dispatcher SIGTERMs the review wrapper before the diligent agent finishes its E2E, the killed CLI exits non-zero with no verdict, and that agent is dropped — exactly the bug #172 reports. The wrapper's auto-scaled poll budget (1) is necessary but not sufficient on its own; the dispatcher window (2) is the operator's responsibility because it lives in the dispatcher's `autonomous.conf` / `dispatcher.conf`, not the review wrapper.
+
+```bash
+# Example: a 45-min container build + verify
+E2E_COMMAND_TIMEOUT_SECONDS=2700
+REVIEW_NEAR_SUCCESS_WINDOW_SECONDS=3000   # >= E2E timeout + headroom
+HEARTBEAT_INTERVAL_SECONDS=120            # keep the wrapper's pid_alive fresh
+```
+
+### 3. Duplicated pre-hook across fan-out agents
+
+Each fanned-out agent runs `E2E_COMMAND_PRE_HOOKS` independently, so a slow pre-hook (e.g. a container image build) could be dispatched once per agent per round — wasted CI minutes and registry churn. The command-mode prompt's **Step 4b stale-evidence guard** already lets an agent reuse a fresh, SHA-matching `<!-- e2e-evidence: complete sha="..." -->` comment instead of re-running the E2E. In multi-agent mode the wrapper additionally instructs each agent to **re-check for a sibling's SHA-matching evidence immediately before invoking the pre-hooks**, so once the first sibling posts evidence the rest skip their pre-hook + verify and reuse it.
+
+> **Honest limitation (no silent cap):** because all N agents start simultaneously, in the worst case they all reach the pre-hook re-check inside the same sub-second window before any sibling has posted evidence — so the pre-hook can still run more than once on a given round. The re-check shrinks the duplicated window but does not provably eliminate it. A wrapper-level "run the pre-hook once before fan-out and feed all agents the result" would be the strong guarantee; it changes the command-mode contract (the wrapper, not the agent, would run the E2E) and is deferred. For pre-hooks whose cost matters, make them **idempotent and cache-aware** (e.g. skip the image build if the SHA-tagged image already exists in the registry) so concurrent runs converge cheaply.
+
+### 4. Orphaned agent processes are reaped
+
+A dropped agent's CLI (launched under `timeout <AGENT_TIMEOUT>`, default 4 h) is reaped when the wrapper resolves verdicts — `autonomous-review.sh` group-kills any still-running fan-out agent process group ([INV-23](../../../docs/pipeline/invariants.md) setsid PGID semantics) so a dropped agent does not keep running (and spending tokens) after its verdict can no longer count.
+
+---
+
 ## When NOT to use command-mode
 
 - **Your project is a SaaS web app with a preview URL.** Use `browser` mode — that's what it's for.
