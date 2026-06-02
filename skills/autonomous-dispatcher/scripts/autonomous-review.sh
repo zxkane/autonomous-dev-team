@@ -36,6 +36,13 @@ source "${SCRIPT_DIR}/lib-review-aggregate.sh"
 # AGENT_REVIEW_EXTRA_ARGS); only diverges when a per-agent
 # AGENT_REVIEW_MODEL_<AGENT> / AGENT_REVIEW_EXTRA_ARGS_<AGENT> key is set.
 source "${SCRIPT_DIR}/lib-review-resolve.sh"
+# shellcheck source=lib-review-poll.sh
+# INV-43 (#172): command-mode-aware verdict-poll budget. The verdict poll loop
+# below scales its attempt count with E2E_COMMAND_TIMEOUT_SECONDS when
+# E2E_MODE=command, so a review agent that faithfully runs the (slow)
+# command-mode E2E is not dropped as `unavailable` for taking as long as the
+# E2E it was asked to run. Inert (legacy 30 s window) for every non-command mode.
+source "${SCRIPT_DIR}/lib-review-poll.sh"
 # Per-side AGENT_CMD override (INV-37). See autonomous-dev.sh for the
 # matching dev-side override. Together they let one project run dev
 # and review on different agent CLIs (e.g. claude for dev, agy for
@@ -480,6 +487,13 @@ fi
 build_review_prompt() {
   local _agent_name="$1"
   local _agent_session_id="$2"
+  # INV-43 (#172): true when this PR is reviewed by more than one verdict-reaching
+  # agent in parallel (AGENT_REVIEW_AGENTS lists ≥2 CLIs). The command-mode E2E
+  # block uses it to inject a sibling-evidence re-check immediately before the
+  # (expensive) pre-hooks, so concurrent fan-out agents reuse the first sibling's
+  # SHA-bound evidence comment instead of each independently re-running the build.
+  # Empty/false for the single-agent default → the prompt is byte-for-byte legacy.
+  local _multi_agent="${3:-false}"
   cat <<EOF
 You are reviewing PR #${PR_NUMBER} for issue #${ISSUE_NUMBER} in the ${REPO} project.
 PR branch: ${PR_BRANCH:-UNKNOWN}
@@ -702,6 +716,19 @@ and post the evidence as a PR comment.
 - Timeout (seconds): ${E2E_COMMAND_TIMEOUT_SECONDS:-3600}
 
 ### Step 1: Run pre-hooks (if configured)
+$(if [[ "${_multi_agent:-false}" == "true" ]]; then cat <<'MULTI_AGENT_PREHOOK'
+
+**MULTI-AGENT NOTE (INV-43): another review agent is reviewing this SAME PR in
+parallel.** The pre-hooks below (e.g. a container image build) are expensive and
+do not need to run once per agent. **Immediately before running the pre-hooks**,
+re-check (per Step 4b) whether a sibling review agent has already posted a
+SHA-matching e2e-evidence comment for the current HEAD. If one exists, SKIP the
+pre-hooks AND the verify command entirely and reuse that sibling's evidence
+(jump to Step 6). Only run the pre-hooks if no sibling evidence is present yet.
+This makes the heavy pre-hook run at most once per review round across the
+fan-out instead of once per agent.
+MULTI_AGENT_PREHOOK
+fi)
 
 If "Pre-hooks" above is not "(none)", run that command first. A non-zero
 exit code from pre-hooks aborts the E2E with status FAIL.
@@ -915,21 +942,46 @@ declare -A AGENT_LAUNCH_RC=()    # CLI exit code per session id (sidecar-read)
 # finish — stranding the issue in `reviewing` with no aggregation, no verdict
 # trailer, and no label transition. See INV-40.
 declare -a _fanout_pids=()
-# A per-run temp dir holds each subshell's launch-rc sidecar (the subshell
-# cannot mutate the parent's variables). Mode 700; cleaned up after collection.
+# PGIDs of each agent's setsid process group (INV-43, #172) — the value
+# _run_with_timeout writes to the per-agent PGID sidecar. Read out of the
+# sidecars before _FANOUT_DIR is removed, then consumed by
+# _reap_fanout_processes to group-kill any agent still running after its
+# verdict can no longer count. Empty when no sidecar was written (agent died
+# pre-spawn).
+declare -a _AGENT_PGIDS=()
+# A per-run temp dir holds each subshell's launch-rc sidecar AND its PGID
+# sidecar (the subshell cannot mutate the parent's variables). Mode 700;
+# cleaned up after collection.
 _FANOUT_DIR=$(mktemp -d "/tmp/agent-review-fanout-${ISSUE_NUMBER}-XXXXXX")
+
+# _reap_fanout_processes is defined in lib-review-poll.sh (INV-43, #172) so it
+# can be unit-tested in isolation against real setsid process groups. It takes
+# the agents' setsid PGIDs as positional args and group-kills any still alive.
+# We pass the collected _AGENT_PGIDS — see the call site after verdict
+# resolution and the array's declaration above.
 
 # Reports the SHARED model default; a per-agent AGENT_REVIEW_MODEL_<AGENT>
 # override (INV-41) may diverge per agent — each agent's effective model is
 # visible in its own log (/tmp/agent-${PROJECT_ID}-review-${N}-${agent}.log).
 log "Fanning out ${#REVIEW_AGENTS_LIST[@]} review agent(s): ${REVIEW_AGENTS_LIST[*]} (shared model: ${AGENT_REVIEW_MODEL:-sonnet})"
 
+# INV-43 (#172): true when ≥2 agents review this PR in parallel. Fed to
+# build_review_prompt so the command-mode E2E block tells each agent a sibling
+# may be running the same (heavy) E2E concurrently → reuse the first sibling's
+# SHA-bound evidence comment rather than each independently re-running the
+# pre-hook build. false for the N=1 default → prompt is byte-for-byte legacy.
+if [[ "${#REVIEW_AGENTS_LIST[@]}" -gt 1 ]]; then
+  _MULTI_AGENT_REVIEW="true"
+else
+  _MULTI_AGENT_REVIEW="false"
+fi
+
 for _agent in "${REVIEW_AGENTS_LIST[@]}"; do
   _agent_session_id=$(uuidgen)
   AGENT_NAMES+=("$_agent")
   AGENT_SESSION_IDS+=("$_agent_session_id")
   _agent_log="/tmp/agent-${PROJECT_ID}-review-${ISSUE_NUMBER}-${_agent}.log"
-  _agent_prompt=$(build_review_prompt "$_agent" "$_agent_session_id")
+  _agent_prompt=$(build_review_prompt "$_agent" "$_agent_session_id" "$_MULTI_AGENT_REVIEW")
   _agent_rc_file="${_FANOUT_DIR}/${_agent_session_id}.rc"
 
   (
@@ -972,9 +1024,13 @@ for _agent in "${REVIEW_AGENTS_LIST[@]}"; do
     fi
     # The wrapper owns the single review-N.pid; per-agent run_agent must NOT
     # rewrite it (the _run_with_timeout PID-file write is keyed on
-    # AGENT_PID_FILE). Unset it inside the subshell so N agents don't thrash
-    # the shared PID file out from under the dispatcher's liveness model.
-    unset AGENT_PID_FILE
+    # AGENT_PID_FILE). Point AGENT_PID_FILE at a PRIVATE per-agent PGID sidecar
+    # (NOT the shared review-N.pid) so each agent's setsid PGID — the
+    # _AGENT_RUN_PID captured in _run_with_timeout — is recorded for
+    # _reap_fanout_processes (INV-43, #172) WITHOUT thrashing the dispatcher's
+    # liveness model. The subshell PID is NOT a process-group leader (no `set
+    # -m` here), so the reaper must group-kill THIS PGID, not the subshell PID.
+    AGENT_PID_FILE="${_FANOUT_DIR}/${_agent_session_id}.pgid"
     # INV-41 (#168): per-agent model + extra-args resolution. Each resolves
     # the per-agent override key (AGENT_REVIEW_MODEL_<AGENT> /
     # AGENT_REVIEW_EXTRA_ARGS_<AGENT>, suffix = uppercased name with
@@ -1023,7 +1079,9 @@ done
 # multi-PID `wait` already returns 0 regardless of child rc.
 wait "${_fanout_pids[@]}" || true
 
-# Read each agent's launch exit code from its sidecar.
+# Read each agent's launch exit code AND its setsid PGID from the sidecars
+# (INV-43: the PGID must be captured before _FANOUT_DIR is removed below — the
+# reaper runs later, after verdict resolution).
 for _i in "${!AGENT_NAMES[@]}"; do
   _sid="${AGENT_SESSION_IDS[$_i]}"
   _rc_file="${_FANOUT_DIR}/${_sid}.rc"
@@ -1033,6 +1091,14 @@ for _i in "${!AGENT_NAMES[@]}"; do
     # Subshell never wrote a sidecar (crashed before the printf) — treat as
     # a launch failure.
     AGENT_LAUNCH_RC["$_sid"]=1
+  fi
+  # PGID sidecar (written by run_agent → _run_with_timeout via AGENT_PID_FILE).
+  # Missing/empty/non-numeric → no PGID to reap for this agent (it may have
+  # died before the setsid spawn).
+  _pgid_file="${_FANOUT_DIR}/${_sid}.pgid"
+  if [[ -f "$_pgid_file" ]]; then
+    _pgid_val=$(head -n1 "$_pgid_file" 2>/dev/null || true)
+    [[ "$_pgid_val" =~ ^[0-9]+$ ]] && [[ "$_pgid_val" -gt 0 ]] && _AGENT_PGIDS+=("$_pgid_val")
   fi
   log "Review agent '${AGENT_NAMES[$_i]}' (session ${_sid}) exited with code: ${AGENT_LAUNCH_RC[$_sid]}"
 done
@@ -1072,9 +1138,15 @@ _classify_verdict_body() {
 # Fallback (BOT_LOGIN empty): drop the actor layer, keep the time window, and
 # narrow on that agent's own `Review Session.*<session-id>` UUID.
 #
-# Poll up to 6 times (30s total) for ALL agents' verdicts to settle. We re-run
-# every agent's query each round and stop early once every agent has either a
-# verdict comment or a known launch failure.
+# Poll budget (INV-43, #172): the attempt count is resolved from
+# _resolve_verdict_poll_attempts — the legacy 6 (30s) for every non-command
+# mode, and max(6, ceil(E2E_COMMAND_TIMEOUT_SECONDS/5)) when E2E_MODE=command,
+# so a review agent that faithfully runs the (slow) command-mode E2E is not
+# dropped as `unavailable` for taking as long as the E2E it was asked to run.
+# The loop still stops EARLY once every agent has a verdict OR a known non-zero
+# launch rc, so the happy path settles in one round (~5s) regardless of budget.
+_VERDICT_POLL_ATTEMPTS=$(_resolve_verdict_poll_attempts)
+log "Verdict-poll budget: ${_VERDICT_POLL_ATTEMPTS} attempt(s) × 5s (E2E_MODE=${E2E_MODE:-none}, command-timeout=${E2E_COMMAND_TIMEOUT_SECONDS:-n/a})"
 declare -a AGENT_VERDICTS=()        # pass | fail | unavailable, per index
 declare -a AGENT_VERDICT_BODIES=()  # the matched comment body (or empty)
 for _i in "${!AGENT_NAMES[@]}"; do
@@ -1082,7 +1154,7 @@ for _i in "${!AGENT_NAMES[@]}"; do
   AGENT_VERDICT_BODIES+=("")
 done
 
-for _poll_attempt in $(seq 1 6); do
+for _poll_attempt in $(seq 1 "$_VERDICT_POLL_ATTEMPTS"); do
   sleep 5
   _all_resolved=1
   for _i in "${!AGENT_NAMES[@]}"; do
@@ -1117,7 +1189,7 @@ for _poll_attempt in $(seq 1 6); do
     fi
   done
   [[ "$_all_resolved" -eq 1 ]] && break
-  log "Waiting for review verdict comment(s) to appear (attempt ${_poll_attempt}/6)..."
+  log "Waiting for review verdict comment(s) to appear (attempt ${_poll_attempt}/${_VERDICT_POLL_ATTEMPTS})..."
 done
 
 # Any agent still unresolved after the poll window is unavailable (no verdict
@@ -1125,6 +1197,14 @@ done
 for _i in "${!AGENT_NAMES[@]}"; do
   [[ -z "${AGENT_VERDICTS[$_i]}" ]] && AGENT_VERDICTS[$_i]="unavailable"
 done
+
+# INV-43 (#172): reap any fan-out agent process group that is still alive now
+# that verdicts are resolved — a dropped/undecided agent's CLI must not outlive
+# its review round (orphaned-process side effect). No-op when every agent
+# already exited (the common case, since the fan-out `wait` returned above).
+# Pass the collected setsid PGIDs (NOT the subshell PIDs — those are not group
+# leaders without job control; see _reap_fanout_processes in lib-review-poll.sh).
+_reap_fanout_processes "${_AGENT_PGIDS[@]:-}"
 
 # Aggregate under the unanimous-PASS rule (INV-40). Map the aggregate onto the
 # existing PASSED_VERDICT / LATEST_COMMENT / AGENT_EXIT variables so the

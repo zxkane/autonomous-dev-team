@@ -506,6 +506,11 @@ HEARTBEAT_INTERVAL_SECONDS=120
 # is skipped; the wrapper is either finishing or in its post-verdict
 # tail. Set to 0 to restore legacy strict behavior (every pid_alive
 # miss declares crashed).
+#
+# [INV-43, #172] If you run E2E_MODE=command with multi-agent review
+# (AGENT_REVIEW_AGENTS), raise this to >= E2E_COMMAND_TIMEOUT_SECONDS
+# (plus a tick of headroom) so a still-working command-mode review wrapper
+# is not declared crashed and SIGTERMed mid-E2E.
 REVIEW_NEAR_SUCCESS_WINDOW_SECONDS=300
 
 # === Dev Agent ===
@@ -592,6 +597,16 @@ E2E_COMMAND_PRE_HOOKS=""
 # Default 3600 (60 min). MVP runs synchronously — values >3600 may
 # exceed the agent's stalled-detection threshold. For longer pipelines
 # wait for the background-mode follow-up.
+#
+# [INV-43, #172] Multi-agent review + command mode: the review wrapper's
+# verdict-poll budget AUTO-SCALES from this value (no extra tuning needed),
+# but you MUST also set REVIEW_NEAR_SUCCESS_WINDOW_SECONDS (above) to be
+# >= E2E_COMMAND_TIMEOUT_SECONDS so the dispatcher does not declare a
+# still-working command-mode review wrapper "crashed" and SIGTERM it
+# mid-E2E. Otherwise a review agent that faithfully runs the slow E2E is
+# dropped as `unavailable` from the unanimous-PASS vote. See
+# skills/autonomous-review/references/e2e-command-mode.md ("Interaction with
+# the multi-agent review wait/stall windows").
 E2E_COMMAND_TIMEOUT_SECONDS=3600
 
 # E2E_COMMAND_EVIDENCE_PARSER: REQUIRED when E2E_MODE=command. Reads the

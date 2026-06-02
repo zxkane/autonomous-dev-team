@@ -112,6 +112,8 @@ The agent's command-mode prompt block instructs it to:
 
 For the project-side contract (`E2E_COMMAND` semantics, evidence-block format, parser PR_HEAD_SHA usage), see `skills/autonomous-review/references/e2e-command-mode.md`.
 
+> **Wait/stall budgets must fit the E2E ([INV-43](invariants.md#inv-43-command-mode-e2e-review-wait-budgets-must-not-be-smaller-than-the-e2e-they-dispatched), #172).** A command-mode E2E can take far longer than the legacy 30 s verdict-poll window or the 300 s dispatcher stall window, so a review agent that faithfully runs it used to be dropped as `unavailable`. Two budgets are involved: (1) the verdict-poll budget auto-scales — `lib-review-poll.sh::_resolve_verdict_poll_attempts` returns `max(6, ceil(E2E_COMMAND_TIMEOUT_SECONDS/5))` for `command` mode and `6` otherwise (see [Verdict polling](#verdict-polling)); (2) the operator MUST set `REVIEW_NEAR_SUCCESS_WINDOW_SECONDS` ≥ `E2E_COMMAND_TIMEOUT_SECONDS` so the dispatcher's [INV-24](invariants.md#inv-24-review-wrapper-dead-detection-requires-both-pid_alive-miss-and-no-near-success-pr-signal) crash check doesn't SIGTERM the still-working wrapper mid-E2E. In multi-agent mode the prompt also tells each agent a sibling may be running the same E2E concurrently → reuse the first sibling's SHA-bound evidence before running the (heavy) pre-hooks. After verdict resolution the wrapper reaps any lingering fan-out agent process group so a dropped agent's CLI does not outlive its round.
+
 ## Multi-agent fan-out (INV-40)
 
 By default the wrapper runs exactly ONE verdict-reaching agent (`AGENT_REVIEW_CMD`, the per-side review CLI). Setting `AGENT_REVIEW_AGENTS` to a space-separated list (e.g. `"agy kiro"`) makes the wrapper run all listed agents **in parallel against the same PR** and gate the merge on their **unanimous agreement** ([INV-40](invariants.md#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback)). The fan-out is entirely internal to the wrapper: the dispatcher, the single `review-${N}.pid` file, and the `reviewing` label are unchanged.
@@ -170,7 +172,7 @@ The `Review Session:` trailer (presence) + the `Review Agent: <name>` discrimina
 
 ## Verdict polling
 
-After the agent exits, the wrapper polls issue comments up to 6 times (5s interval = 30s window) looking for a comment that satisfies all applicable predicates:
+After the agent exits, the wrapper polls issue comments looking for a comment that satisfies all applicable predicates. The poll budget is **command-mode-aware ([INV-43](invariants.md#inv-43-command-mode-e2e-review-wait-budgets-must-not-be-smaller-than-the-e2e-they-dispatched), #172)**: `lib-review-poll.sh::_resolve_verdict_poll_attempts` returns the legacy `6` attempts (5s interval = 30s window) for every non-`command` mode, and `max(6, ceil(E2E_COMMAND_TIMEOUT_SECONDS/5))` when `E2E_MODE=command` — so a review agent that faithfully runs a slow command-mode E2E (and posts its verdict only after it finishes) is not dropped as `unavailable` for taking as long as the E2E it was asked to run. The loop still **early-exits** once every agent has a verdict OR a known non-zero launch rc, so the happy path settles in one round (~5s) regardless of budget. The candidate comment must satisfy all applicable predicates:
 
 - Body matches a verdict phrasing (case-insensitive). The supported set was broadened in #95 to handle agent phrasing drift:
   - **Pass-side**: `Review PASSED`, `Review APPROVED`, `APPROVED FOR MERGE`, `LGTM`, `Review PASS`.

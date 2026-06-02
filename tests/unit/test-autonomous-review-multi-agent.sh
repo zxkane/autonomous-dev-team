@@ -111,8 +111,14 @@ assert_grep "TC-MAR-SRC-06 per-subshell AGENT_CMD override" \
   'AGENT_CMD="\$' "$WRAPPER"
 assert_grep "TC-MAR-SRC-07 launcher neutralized for non-claude member (INV-38)" \
   'AGENT_LAUNCHER_ARGV=\(\)' "$WRAPPER"
-assert_grep "TC-MAR-SRC-08 unset AGENT_PID_FILE inside subshell (no PID thrash)" \
-  'unset AGENT_PID_FILE' "$WRAPPER"
+# TC-MAR-SRC-08: the per-agent subshell must NOT let run_agent rewrite the
+# SHARED review-N.pid. Originally this was an `unset AGENT_PID_FILE`; INV-43
+# (#172) changed it to point AGENT_PID_FILE at a PRIVATE per-agent PGID sidecar
+# under _FANOUT_DIR (so the agent's setsid PGID is captured for the reaper)
+# WITHOUT touching the shared review-N.pid. Either way the contract is: the
+# subshell's AGENT_PID_FILE is reassigned away from the wrapper's $PID_FILE.
+assert_grep "TC-MAR-SRC-08 per-agent subshell reassigns AGENT_PID_FILE to a private sidecar (no shared-PID thrash)" \
+  'AGENT_PID_FILE="\$\{_FANOUT_DIR\}/\$\{?_agent_session_id\}?\.pgid"|unset AGENT_PID_FILE' "$WRAPPER"
 # TC-MAR-SRC-09 (regression for the fan-out hang): the wrapper MUST wait only
 # the backgrounded fan-out subshells by their COLLECTED PIDs — never a bare
 # `wait`. A bare `wait` blocks on ALL background jobs, including the long-lived
