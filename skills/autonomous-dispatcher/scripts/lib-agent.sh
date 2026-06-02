@@ -159,6 +159,13 @@ fi
 # dispatch. The check reads AGENT_DEV_CMD / AGENT_REVIEW_CMD directly
 # (not via AGENT_CMD) because the wrapper-level override fires AFTER
 # this guard — see docs/pipeline/per-side-launcher.md §Resolution order.
+#
+# Scope note (INV-42, #173): this guard governs the SHARED, blanket
+# AGENT_REVIEW_LAUNCHER default only. The per-agent opt-in
+# AGENT_REVIEW_LAUNCHER_<AGENT> is resolved later, inside each fan-out
+# subshell in autonomous-review.sh (via _resolve_review_agent_launcher),
+# AFTER this startup guard has already run — so a per-agent launcher for a
+# non-claude CLI is intentionally NOT subject to this claude-only check.
 if [[ ${#AGENT_DEV_LAUNCHER_ARGV[@]} -gt 0 && "$AGENT_DEV_CMD" != "claude" ]]; then
   echo "[lib-agent] ERROR: AGENT_DEV_LAUNCHER is only supported with AGENT_DEV_CMD=claude (got AGENT_DEV_CMD=${AGENT_DEV_CMD}). Either unset AGENT_DEV_LAUNCHER (or AGENT_LAUNCHER if it's the source of the dev-side default) or write a launcher tailored to your CLI." >&2
   return 1 2>/dev/null || exit 1

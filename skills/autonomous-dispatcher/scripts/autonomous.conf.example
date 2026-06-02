@@ -319,6 +319,40 @@ AGENT_REVIEW_EXTRA_ARGS=""
 # internally (the var run_agent's _parse_extra_args reads). You configure only
 # the review knobs above; the wrapper handles the plumbing per-subshell.
 
+# Per-agent launcher overrides (INV-42, #173) --------------------------------
+# Same per-agent suffix convention as the model/extra-args keys above, but for
+# the LAUNCHER. Use this when one fan-out member is a non-claude CLI that needs
+# its own launcher wrapper to run headless from the dispatcher's nohup shell —
+# e.g. `codex` (like `cc` for claude) is a ~/.bash_aliases function that starts
+# a per-machine bedrock proxy and exports OPENAI_BASE_URL + a dummy
+# OPENAI_API_KEY before exec'ing the real CLI:
+#
+#   AGENT_REVIEW_LAUNCHER_<AGENT>="..."   # per-agent launcher argv (eval-tokenized)
+#
+# Precedence (mirrors AGENT_REVIEW_MODEL_<AGENT> EXCEPT for the fallback):
+#   - per-agent key set AND non-empty → applied as THIS agent's launcher;
+#   - else → the agent keeps the current INV-38 behavior (non-claude member's
+#     launcher zeroed; a claude member keeps the shared AGENT_REVIEW_LAUNCHER).
+# There is DELIBERATELY no fallback to the shared AGENT_REVIEW_LAUNCHER: that
+# shared launcher is claude-only (INV-38) and must not auto-apply to a
+# non-claude per-agent slot. Setting AGENT_REVIEW_LAUNCHER_<AGENT> is you
+# asserting "this launcher fits THIS CLI", so it bypasses the INV-38 claude-only
+# guard for that agent specifically (the SHARED AGENT_REVIEW_LAUNCHER keeps its
+# claude-only restriction). A tokenize failure logs an ERROR and runs naked.
+#
+# Worked example — a three-agent fleet adding codex via the bash-aliases bridge,
+# the SAME `bash -c 'source ~/.bash_aliases && <fn> "$@"' --` shape used for the
+# `cc` claude launcher in AGENT_DEV_LAUNCHER above:
+#
+#   AGENT_REVIEW_AGENTS="kiro agy codex"
+#   AGENT_REVIEW_MODEL_CODEX="gpt-5.5"          # codex's own model id (INV-41)
+#   AGENT_REVIEW_LAUNCHER_CODEX=$'bash -c \'source ~/.bash_aliases && codex "$@"\' --'
+#   # kiro / agy have no per-agent launcher key → kiro and agy run with the
+#   # launcher zeroed (INV-38), exactly as before.
+#
+# Scope is per-subshell — the per-agent launcher never leaks to the dev side or
+# to a sibling fan-out member.
+
 # --- claude block ---
 # claude has NO required EXTRA_ARGS — the structural --permission-mode
 # flag handles tool trust via the existing AGENT_PERMISSION_MODE knob.
