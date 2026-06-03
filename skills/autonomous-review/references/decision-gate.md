@@ -24,6 +24,7 @@ After completing steps 1-11, all findings across checklist categories will have 
    | E2E test failure | BLOCKING | Any happy path or feature test fails |
    | Acceptance criteria not verified | BLOCKING | Any AC checkbox left unchecked |
    | Security vulnerability | BLOCKING | Credentials, injection, etc. |
+   | Merge conflict with base | BLOCKING | PR `mergeable` is `CONFLICTING` — also wrapper-enforced ([INV-44](../../../docs/pipeline/invariants.md)) |
    | PR checklist item unchecked | BLOCKING | Required items not marked |
    | Requirement drift | BLOCKING | Issue comments show requirement changes (e.g. scope reduction, feature removal, new constraints) not reflected in PR code |
    | Minor style suggestion | NON-BLOCKING | Naming preference, optional refactor |
@@ -37,6 +38,7 @@ After completing steps 1-11, all findings across checklist categories will have 
 4. **Self-check questions** — answer each before proceeding:
    - "Did I list any missing documents, tests, or CI failures above?" -> If YES -> FAIL
    - "Are all CI checks in 'pass' state (not 'pending', not 'fail')?" -> If NO -> FAIL
+   - "Is the PR `mergeable`? (`gh pr view <PR> --json mergeable -q .mergeable`)" -> If `CONFLICTING` -> that is a blocking finding -> FAIL (and the wrapper enforces this independently — INV-44 — so approving a CONFLICTING PR is impossible regardless)
    - "Did I successfully mark ALL Acceptance Criteria checkboxes?" -> If NO -> FAIL
    - "Did I write the phrase 'must be resolved before this PR can be approved' or similar in my findings?" -> If YES -> that means I found blocking issues -> FAIL
    - "Did I find any requirement changes in issue comments that are NOT reflected in the PR code?" -> If YES -> FAIL
@@ -62,6 +64,7 @@ When the project runs more than one verdict-reaching review agent against the sa
 - Code quality is acceptable
 - No security concerns
 - **All CI checks are in "pass" state** (not "pending", not "queued", not "fail")
+- **The PR is `mergeable`** (not `CONFLICTING`; also wrapper-enforced — INV-44)
 - E2E verification passes (if configured)
 - **All Acceptance Criteria checkboxes marked as checked in the issue body**
 - **No requirement drift detected** (issue comments don't contain unaddressed requirement changes)
@@ -75,6 +78,7 @@ When the project runs more than one verdict-reaching review agent against the sa
 - Security vulnerability found
 - Significant code quality issues
 - **Any CI check is not in "pass" state** (pending counts as not passing)
+- **The PR is `CONFLICTING`** (merge conflict with base — the wrapper's mergeable gate forces FAIL here even if you miss it, INV-44)
 - **Any E2E test case fails** (if E2E configured)
 - **Any happy path test case fails** (if E2E configured)
 - **Preview URL is not available** (if E2E configured)

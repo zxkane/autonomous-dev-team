@@ -214,6 +214,32 @@ The dispatcher's Step 5b reads the most recent trailer matching `Reviewed HEAD: 
 
 If the trailer post fails (token expiry, 403, rate limit), the wrapper logs `WARNING: Failed to post Reviewed HEAD trailer` and continues — the failed trailer means the dispatcher cannot detect SHA-match, but the empty-trailer fallthrough routes to `pending-review` ([INV-07](invariants.md#inv-07-empty-reviewed-head-trailer-routes-to-pending-review)) which is the safe default.
 
+## Mergeable hard gate (INV-44)
+
+After aggregation sets `PASSED_VERDICT=true`, and **before** the wrapper acts on that PASS, a wrapper-enforced gate re-checks the PR's `mergeable` status — so a CONFLICTING PR can never reach `approved`, regardless of whether the review agent ran its Step-0 pre-review rebase prompt ([INV-44](invariants.md#inv-44-mergeable-hard-gate--a-conflicting-pr-can-never-reach-approved)). This is the mechanical counterpart to the agent's best-effort Step 0; the prompt step still rebases clean conflicts up-front, the gate is the safety net for when it is skipped.
+
+```
+if PASSED_VERDICT == true:
+  MERGEABLE_STATUS = poll `gh pr view --json mergeable` while UNKNOWN/empty,
+                     up to MERGEABLE_RETRIES (default 3, 10s apart)
+  gate = _classify_mergeable_gate "$MERGEABLE_STATUS"   # lib-review-mergeable.sh
+    MERGEABLE   → proceed → fall through to the PASS path below (UNCHANGED)
+    CONFLICTING → block-substantive:
+        issue comment "Review findings: ... [BLOCKING] Merge conflict with main ... rebase steps"
+        PR    comment "Auto-merge failed: PR is CONFLICTING ... Re-dispatching dev agent to rebase onto main."
+        emit_verdict_trailer failed-substantive
+        −reviewing +pending-dev ; exit 0
+    UNKNOWN/empty/other → block-nonsubstantive:
+        issue comment "Review held: mergeable is UNKNOWN ... will be re-reviewed next tick"
+        emit_verdict_trailer failed-non-substantive cause=mergeable-unknown
+        −reviewing +pending-dev ; exit 0
+```
+
+- The ONLY value that proceeds is a case-insensitive `MERGEABLE`. An empty string (failed `gh` call), a literal `UNKNOWN` that survived the retry budget, or any unexpected token all **block** — fail-closed. This closes the stale-`UNKNOWN` pass-through (the prior prompt-side "after 3 retries treat as MERGEABLE" shortcut).
+- **CONFLICTING** reuses the `Auto-merge failed:` PR marker so the dev-resume branch ([§ Auto-merge failure → dev re-dispatch](#auto-merge-failure--dev-re-dispatch-inv-33)) prepends its mandatory rebase pre-step — giving the conflict a deterministic owner.
+- **UNKNOWN** posts no PR marker (no confirmed conflict ⇒ no forced rebase); the `failed-non-substantive` trailer makes the dispatcher flip the issue back to `pending-review` (re-review) under the `REVIEW_RETRY_LIMIT` cap ([INV-35](invariants.md#inv-35-review-aware-resume-routing-for-completed-sessions)).
+- Happy path (`MERGEABLE`) is byte-for-byte today's behavior plus one `gh pr view --json mergeable` call.
+
 ## Verdict = PASS path
 
 ```

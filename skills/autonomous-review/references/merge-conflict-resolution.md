@@ -2,6 +2,8 @@
 
 Before starting the review, check whether the PR branch has merge conflicts with main. If it does, rebase the branch so the PR is mergeable.
 
+> **This pre-review rebase is best-effort prompt guidance — the wrapper enforces the same rule mechanically.** Even if you skip this step, the review wrapper re-checks `mergeable` after aggregating verdicts and before approving: a `CONFLICTING` PR can never reach `approved` ([INV-44](../../../docs/pipeline/invariants.md)). Running this step proactively still helps — a clean rebase here gets the PR merged this round instead of bouncing back to dev — but a missed step is no longer a way for a conflicting PR to slip through.
+
 ## Procedure
 
 1. **Check mergeable status**:
@@ -75,7 +77,7 @@ Before starting the review, check whether the PR branch has merge conflicts with
    sleep 10
    MERGEABLE=$(gh pr view <PR_NUMBER> --repo <REPO> --json mergeable -q '.mergeable')
    ```
-   If still UNKNOWN after 3 retries, treat as MERGEABLE and proceed (GitHub will block the merge later if there are actual conflicts).
+   If still UNKNOWN after 3 retries, **do NOT treat it as MERGEABLE and proceed to approve.** An UNKNOWN that GitHub hasn't resolved may be hiding a real conflict; treating it as mergeable is the stale-`UNKNOWN` pass-through that [INV-44](../../../docs/pipeline/invariants.md) closes. Instead, leave the review un-finalized — post a brief note that mergeability is still being computed and let the next review tick re-check it. (The wrapper enforces the same rule: a persistently-UNKNOWN PR is routed back as a non-substantive re-queue, never auto-approved.)
 
 ## Important Notes
 

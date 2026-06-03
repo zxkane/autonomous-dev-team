@@ -43,6 +43,14 @@ source "${SCRIPT_DIR}/lib-review-resolve.sh"
 # command-mode E2E is not dropped as `unavailable` for taking as long as the
 # E2E it was asked to run. Inert (legacy 30 s window) for every non-command mode.
 source "${SCRIPT_DIR}/lib-review-poll.sh"
+# shellcheck source=lib-review-mergeable.sh
+# INV-44 (#176): wrapper-enforced mergeable hard gate. After verdict
+# aggregation and before acting on a PASS, the wrapper re-checks the PR's
+# `mergeable` status; a CONFLICTING (or persistently-UNKNOWN) PR can never reach
+# `approved`, regardless of whether the review agent ran its Step-0 pre-review
+# rebase prompt. _classify_mergeable_gate is the pure decision half (the gh
+# query + UNKNOWN-retry loop stays in the wrapper). Inert on the FAIL path.
+source "${SCRIPT_DIR}/lib-review-mergeable.sh"
 # Per-side AGENT_CMD override (INV-37). See autonomous-dev.sh for the
 # matching dev-side override. Together they let one project run dev
 # and review on different agent CLIs (e.g. claude for dev, agy for
@@ -1309,6 +1317,107 @@ if [[ -n "$LATEST_COMMENT" && -n "$PR_HEAD_SHA" ]]; then
     --body "Reviewed HEAD: \`${PR_HEAD_SHA}\` (issue #${ISSUE_NUMBER}, session \`${SESSION_ID}\`, agent \`${AGENT_CMD:-claude}\`, model \`${AGENT_REVIEW_MODEL}\`)" \
     2>&1 >/dev/null) \
     || log "WARNING: Failed to post Reviewed HEAD trailer (non-fatal): ${_trailer_err}"
+fi
+
+# ---------------------------------------------------------------------------
+# Mergeable hard gate (INV-44, #176)
+# ---------------------------------------------------------------------------
+# A CONFLICTING PR can never reach `approved`, regardless of whether the review
+# agent ran its Step-0 pre-review rebase prompt. This is the WRAPPER-level
+# enforcement of "mergeable != MERGEABLE → blocking finding → FAIL"; the agent's
+# Step-0 prompt is best-effort, this gate is mechanical.
+#
+# Runs ONLY when the aggregate was PASS — a FAIL / all-unavailable aggregate
+# already routes to pending-dev below, so re-checking mergeable there would be
+# redundant work and an extra gh call on the failure path.
+#
+# The gate queries `mergeable` (retrying while GitHub reports UNKNOWN, since the
+# field is computed asynchronously), then calls the pure
+# _classify_mergeable_gate helper (lib-review-mergeable.sh). On a block it is
+# self-contained — posts its own finding/marker, emits its own INV-35 trailer,
+# flips the label, and exits — so every existing PASS/FAIL/crash branch stays
+# byte-for-byte unchanged.
+if [[ "$PASSED_VERDICT" == "true" ]]; then
+  # Poll mergeable while UNKNOWN (GitHub computes it asynchronously). The
+  # tightened UNKNOWN handling (#176): a value that never settles out of
+  # UNKNOWN is NOT treated as MERGEABLE — it routes to pending-dev as a
+  # non-substantive re-queue, closing the stale-UNKNOWN pass-through.
+  MERGEABLE_RETRIES="${MERGEABLE_RETRIES:-3}"
+  MERGEABLE_STATUS=""
+  for _mg_attempt in $(seq 1 "$MERGEABLE_RETRIES"); do
+    MERGEABLE_STATUS=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json mergeable -q '.mergeable' 2>/dev/null || echo "")
+    [[ "${MERGEABLE_STATUS^^}" != "UNKNOWN" && -n "$MERGEABLE_STATUS" ]] && break
+    # Only sleep when another attempt will follow — no point waiting after the
+    # final probe (the loop is about to exit and classify the settled value).
+    if [[ "$_mg_attempt" -lt "$MERGEABLE_RETRIES" ]]; then
+      log "PR #${PR_NUMBER} mergeable status is '${MERGEABLE_STATUS:-<empty>}' (attempt ${_mg_attempt}/${MERGEABLE_RETRIES}); waiting for GitHub to settle..."
+      sleep 10
+    fi
+  done
+
+  MERGEABLE_GATE=$(_classify_mergeable_gate "$MERGEABLE_STATUS")
+  log "Mergeable hard gate: PR #${PR_NUMBER} mergeable='${MERGEABLE_STATUS:-<empty>}' → gate=${MERGEABLE_GATE}"
+
+  if [[ "$MERGEABLE_GATE" == "block-substantive" ]]; then
+    # Real conflict — the unanimous-PASS verdict is overridden. Dev must rebase.
+    log "BLOCKING: PR #${PR_NUMBER} is CONFLICTING — overriding PASS verdict, routing to pending-dev for rebase."
+
+    # [BLOCKING] finding on the ISSUE with dev-actionable rebase instructions
+    # (mirrors references/merge-conflict-resolution.md).
+    gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
+      --body "Review findings:
+
+Findings->Decision Gate: 1 blocking finding(s) -- FAIL.
+
+1. **[BLOCKING] Merge conflict with main** — PR #${PR_NUMBER} (\`${PR_BRANCH:-the PR branch}\`) is \`CONFLICTING\` with the base branch and cannot be merged. The review agent's PASS verdict is overridden by the wrapper-enforced mergeable gate (INV-44).
+   - Dev agent must rebase before re-review:
+     1. \`git fetch origin main\`
+     2. \`git rebase origin/main\`
+     3. Resolve conflicts, then \`git rebase --continue\`
+     4. \`git push --force-with-lease origin ${PR_BRANCH:-<PR_BRANCH>}\`" 2>/dev/null || true
+
+    # Reuse the dev-resume rebase hook: autonomous-dev.sh greps issue-level PR
+    # comments for a body starting "Auto-merge failed:" and prepends a
+    # mandatory rebase pre-step to the resume prompt. Posting the marker here
+    # gives the conflict a deterministic owner (the next dev session) instead
+    # of letting it fall through the cracks.
+    gh pr comment "$PR_NUMBER" --repo "$REPO" \
+      --body "Auto-merge failed: PR is CONFLICTING with main (mergeable gate, INV-44). Re-dispatching dev agent to rebase onto main." 2>/dev/null || true
+
+    # INV-35: a merge conflict is a real, dev-actionable finding — substantive.
+    emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-substantive" "" 2>/dev/null || true
+
+    gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
+      --remove-label "reviewing" \
+      --add-label "pending-dev" 2>/dev/null || true
+
+    log "Issue #${ISSUE_NUMBER} moved to pending-dev (merge conflict — dev must rebase)."
+    RESULT_PARSED=true
+    exit 0
+  elif [[ "$MERGEABLE_GATE" == "block-nonsubstantive" ]]; then
+    # mergeable never settled out of UNKNOWN (or the gh query failed). Do NOT
+    # auto-approve — GitHub may still be computing, and an actual conflict that
+    # is still being computed must not be silently treated as mergeable. Route
+    # back as a non-substantive re-queue so the next dispatcher tick re-reviews
+    # once the status settles. No PR rebase marker: there may be no real
+    # conflict, so we must not trigger an unnecessary rebase.
+    log "BLOCKING: PR #${PR_NUMBER} mergeable is UNKNOWN past the retry budget — re-queuing (not auto-approving)."
+
+    gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
+      --body "Review held: PR #${PR_NUMBER} mergeable status is \`${MERGEABLE_STATUS:-UNKNOWN}\` (GitHub has not finished computing mergeability after ${MERGEABLE_RETRIES} attempts). Per the mergeable hard gate (INV-44) the PR is NOT auto-approved while mergeability is unresolved; it will be re-reviewed on the next dispatch tick." 2>/dev/null || true
+
+    # INV-35: not a code issue — GitHub-side transient. Re-route through review.
+    emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-non-substantive" "mergeable-unknown" 2>/dev/null || true
+
+    gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
+      --remove-label "reviewing" \
+      --add-label "pending-dev" 2>/dev/null || true
+
+    log "Issue #${ISSUE_NUMBER} moved to pending-dev (mergeable UNKNOWN — re-queue)."
+    RESULT_PARSED=true
+    exit 0
+  fi
+  # gate == proceed → fall through to the existing PASS branch unchanged.
 fi
 
 # PASSED_VERDICT was set by the unanimous-PASS aggregation above (INV-40).
