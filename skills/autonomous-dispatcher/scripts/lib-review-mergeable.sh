@@ -1,0 +1,55 @@
+#!/bin/bash
+# lib-review-mergeable.sh — INV-44 wrapper-enforced mergeable hard gate
+# (issue #176).
+#
+# A PR that is CONFLICTING with its base branch can still receive a PASS verdict
+# from the review agent — the mergeable check lives only in the agent's Step-0
+# prompt, which the agent is trusted (but not forced) to run. This helper is the
+# pure decision half of a wrapper-level gate that re-checks `mergeable` AFTER the
+# per-agent verdicts are aggregated and BEFORE the wrapper acts on a PASS, so a
+# CONFLICTING PR can never reach `approved` regardless of whether the agent ran
+# Step 0.
+#
+# The split mirrors lib-review-aggregate.sh: the `gh pr view --json mergeable`
+# query + UNKNOWN-retry loop stays in the wrapper (it does I/O); the
+# mergeable-string → action mapping lives here so it can be unit-tested in
+# isolation without a live PR.
+
+# _classify_mergeable_gate <mergeable>
+#
+# Maps a GitHub PR `mergeable` field value to one of three gate actions:
+#
+#   proceed              — the PR is mergeable; the wrapper's existing PASS
+#                          branch (approve + merge) runs unchanged.
+#   block-substantive    — the PR CONFLICTs with base; a real, dev-actionable
+#                          finding. The wrapper posts a [BLOCKING] merge-conflict
+#                          finding + an `Auto-merge failed:` marker (reusing the
+#                          dev-resume rebase hook) and routes to pending-dev.
+#   block-nonsubstantive — mergeable is UNKNOWN (GitHub still computing), empty
+#                          (the `gh` query failed), or any unrecognized token.
+#                          The wrapper re-queues (routes to pending-dev with a
+#                          non-substantive trailer) rather than auto-approving.
+#
+# Conservative by construction: the ONLY input that yields `proceed` is a
+# case-insensitive `MERGEABLE`. Every other value blocks — this is what closes
+# the stale-UNKNOWN pass-through (a status GitHub hasn't resolved can never be
+# silently treated as mergeable). Returns 0 always; the decision is on stdout.
+_classify_mergeable_gate() {
+  # Uppercase for a case-insensitive compare against GitHub's documented enum
+  # values (MERGEABLE / CONFLICTING / UNKNOWN).
+  local mergeable="${1:-}"
+  local upper="${mergeable^^}"
+
+  case "$upper" in
+    MERGEABLE)
+      printf 'proceed\n'
+      ;;
+    CONFLICTING)
+      printf 'block-substantive\n'
+      ;;
+    *)
+      # UNKNOWN, empty, or anything unexpected → never proceed.
+      printf 'block-nonsubstantive\n'
+      ;;
+  esac
+}

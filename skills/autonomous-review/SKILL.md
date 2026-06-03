@@ -133,8 +133,10 @@ Quick check:
 MERGEABLE=$(gh pr view <PR_NUMBER> --repo <REPO> --json mergeable -q '.mergeable')
 ```
 - **MERGEABLE** — proceed to Review Process
-- **CONFLICTING** — follow rebase procedure in references
-- **UNKNOWN** — wait and retry (up to 3 times)
+- **CONFLICTING** — follow rebase procedure in references; this is a **blocking finding** (FAIL)
+- **UNKNOWN** — wait and retry (up to 3 times); if still UNKNOWN, do NOT treat as MERGEABLE — leave the review un-finalized for the next tick
+
+> This step is best-effort prompt guidance; the review **wrapper enforces the same rule mechanically** after aggregating verdicts (the mergeable hard gate, INV-44). A `CONFLICTING` PR can never be approved even if you skip this step, and a persistently-`UNKNOWN` PR is re-queued rather than auto-approved.
 
 ## Review Process
 

@@ -160,13 +160,14 @@ echo "=== TC-MAR-SRC-12: exactly one aggregated verdict trailer (none in collect
 # ---------------------------------------------------------------------------
 # The aggregation must funnel through the SAME downstream PASS/FAIL/crash
 # branches as the single-agent path. There must be NO emit_verdict_trailer
-# call inside the per-agent verdict-collection loop — only the existing four
-# downstream call sites remain. We assert the total emit_verdict_trailer call
-# count did not grow (still the historical six: crash trap, no-pr, pass,
-# auto-merge-fail, fail-substantive, fail-non-substantive).
+# call inside the per-agent verdict-collection loop. We assert the total
+# emit_verdict_trailer call count: the historical six (crash trap, no-pr, pass,
+# auto-merge-fail, fail-substantive, fail-non-substantive) PLUS the two
+# INV-44 mergeable-gate block paths (CONFLICTING substantive + UNKNOWN
+# non-substantive), both of which sit OUTSIDE the collection loop = 8.
 EMIT_COUNT=$(grep -cE '^\s*emit_verdict_trailer ' "$WRAPPER")
-assert_eq "TC-MAR-SRC-12 emit_verdict_trailer call count unchanged (6)" \
-  "6" "$EMIT_COUNT"
+assert_eq "TC-MAR-SRC-12 emit_verdict_trailer call count is 8 (6 legacy + 2 INV-44 gate, none in collection loop)" \
+  "8" "$EMIT_COUNT"
 
 # ---------------------------------------------------------------------------
 echo ""

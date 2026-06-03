@@ -216,9 +216,12 @@ assert_grep "TC-RPB-REG-02 _VERDICT_POLL_ATTEMPTS resolved via the resolver" \
   '_VERDICT_POLL_ATTEMPTS=\$\(_resolve_verdict_poll_attempts' "$WRAPPER"
 assert_grep "TC-RPB-REG-03 _aggregate_review_verdicts call unchanged (no INV-40 regression)" \
   'AGGREGATE=\$\(_aggregate_review_verdicts' "$WRAPPER"
+# 8 = the historical six call sites + the two INV-44 mergeable-gate block
+# paths (#176). INV-43 itself adds none; this pin guards against an
+# accidental trailer added by the poll-budget change.
 EMIT_COUNT=$(grep -cE '^\s*emit_verdict_trailer ' "$WRAPPER")
-assert_eq "TC-RPB-REG-04 emit_verdict_trailer call count unchanged (6)" \
-  "6" "$EMIT_COUNT"
+assert_eq "TC-RPB-REG-04 emit_verdict_trailer call count is 8 (6 legacy + 2 INV-44 gate)" \
+  "8" "$EMIT_COUNT"
 
 # ---------------------------------------------------------------------------
 echo ""
