@@ -97,6 +97,19 @@ The `AUTONOMOUS_CONF` env var bypass takes precedence over filesystem detection 
 5. `resume_agent SESSION_ID PROMPT MODEL`. PROMPT is fed via stdin ([INV-34](invariants.md#inv-34-agent-prompt-is-fed-via-stdin-never-as-a-single-argv-element)). For claude: `printf '%s' "$PROMPT" | claude --resume ID --permission-mode auto -p --output-format json`. The `--name` flag is omitted on resume (claude doesn't update display name on resume).
 6. **If resume fails (exit ≠ 0)**: the wrapper falls back to a *new* session — generates a new uuid, reconstructs a full prompt with both issue body AND review feedback (and the rebase block, if the marker is present), posts a comment on the issue announcing the new session-id, and runs `run_agent` once more. This protects against e.g. a session that the CLI no longer recognizes.
 
+### Open-PR-only fast path ([INV-45])
+
+After mode normalization and BEFORE building any prompt, the wrapper computes `OPEN_PR_FAST_PATH=$(emit_open_pr_fast_path_block "$ISSUE_NUMBER")` — empty unless the **pushed-but-PR-not-created** intermediate state holds ([INV-45](invariants.md#inv-45-pushed-branch-with-commits-ahead--no-pr--resume-to-open-pr-only-never-full-re-dev), closes [#178](https://github.com/zxkane/autonomous-dev-team/issues/178)).
+
+`autonomous-dev/SKILL.md` Step 7 runs `git push -u origin <branch>` immediately before `gh pr create`, so a session that dies between those two commands leaves a head branch pushed to origin with commits ahead of base but no PR. The dispatcher then routes the issue back to `pending-dev` (via Step 5b's DEAD-no-PR branch once [INV-27](invariants.md#inv-27-dev-wrapper-dead-detection-requires-both-pid_alive-miss-and-no-near-success-in-flight-signal)'s `dev_near_success` expires, or Step 4's `handle_pending_dev_pr_exists` returning 1 on "no PR"). Without this fast path, the next tick re-runs the **entire** dev wrapper (re-fetch, re-test, re-implement) only to reach `gh pr create` again — producing the `in-progress ↔ pending-dev` oscillation reported in #178.
+
+`needs_open_pr_only <issue_num>` returns 0 (engage) only when BOTH:
+
+1. **No open PR** is linked to the issue (same `#<N>` body-reference selector the cleanup trap uses) — a PR existing means `handle_pending_dev_pr_exists` (Bug-3/#99) owns the routing.
+2. **A head branch is pushed to origin and ahead of base.** The branch name is agent-chosen, so detection **globs** `git ls-remote origin 'refs/heads/*issue-${N}*'` — it does NOT assume `feat/issue-N` or `fix/issue-N`. "Ahead" is `git rev-list --count origin/<base>..<sha> > 0`, with a head-SHA-≠-base-SHA fallback for remote-only objects. Each ref is regex-anchored on `issue-<N>` + non-digit/end so `issue-1789` doesn't satisfy issue `178`.
+
+The detector **fails closed** on any error (a false fast path that skipped real work is strictly worse than a redundant full re-dev). When it fires, the `## Open-PR-only fast path` block is interpolated into **all three** prompt builders (`new`, `resume`, resume-fallback) and tells the agent to check out the pushed branch, **skip design/test/implement**, and go straight to `gh pr create` (with `Closes #<N>`). It posts **no** issue/PR comment and contains none of the [INV-06](invariants.md#inv-06-crashed--process-not-found-keyword-contract) crash keywords, so it never miscounts the recovery as a crash. The detection MUST live wrapper-side: under `EXECUTION_BACKEND=remote-aws-ssm` the dispatcher has no worktree and runs on a different box, so it cannot call `gh pr create` itself.
+
 ### Mode normalization
 
 `autonomous-dev.sh` accepts `--mode resume` with no `--session`. In that case it logs a WARN and falls back to `--mode new`. This handles the dispatcher edge case where Step 4b couldn't extract a session-id from comments — the wrapper still does *something* useful (start fresh) instead of erroring out.
