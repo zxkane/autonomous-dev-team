@@ -23,6 +23,11 @@ FAIL=0
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 WRAPPER="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/autonomous-review.sh"
+# _classify_verdict_body (the FAIL/PASS classification grep -qiE patterns) moved
+# to lib-review-poll.sh in #180 so the single verdict-classification rule is
+# shared and unit-testable. _VERDICT_RE (the jq finder) still lives in the
+# wrapper. Extract each from its current home.
+POLL_LIB="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-review-poll.sh"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -52,18 +57,19 @@ assert_eq() {
 POLL_PATTERN=$(grep -E "^_VERDICT_RE=" "$WRAPPER" | head -1 \
   | sed -E "s/^_VERDICT_RE='//; s/'$//")
 
-# Extract the FAIL and PASS classification regex patterns.
-# The post-fix wrapper has two `grep -qiE '...'` checks: FAIL first
-# (conservative on ambiguity), then PASS. Extract both.
-FAIL_PATTERN=$(grep -oE "grep -qiE '[^']*Review \(FAILED\|REJECTED\)[^']*'" "$WRAPPER" | head -1 | sed -E "s/^grep -qiE '//; s/'$//")
-PASS_PATTERN=$(grep -oE "grep -qiE '[^']*Review PASSED[^']*'" "$WRAPPER" | head -1 | sed -E "s/^grep -qiE '//; s/'$//")
+# Extract the FAIL and PASS classification regex patterns from
+# _classify_verdict_body, which now lives in lib-review-poll.sh (#180). It has
+# two `grep -qiE '...'` checks: FAIL first (conservative on ambiguity), then
+# PASS. Extract both.
+FAIL_PATTERN=$(grep -oE "grep -qiE '[^']*Review \(FAILED\|REJECTED\)[^']*'" "$POLL_LIB" | head -1 | sed -E "s/^grep -qiE '//; s/'$//")
+PASS_PATTERN=$(grep -oE "grep -qiE '[^']*Review PASSED[^']*'" "$POLL_LIB" | head -1 | sed -E "s/^grep -qiE '//; s/'$//")
 
 if [[ -z "$POLL_PATTERN" ]]; then
   echo -e "${RED}FAIL${NC}: could not extract verdict-poll pattern from $WRAPPER" >&2
   exit 1
 fi
 if [[ -z "$PASS_PATTERN" || -z "$FAIL_PATTERN" ]]; then
-  echo -e "${RED}FAIL${NC}: could not extract pass/fail classification patterns from $WRAPPER" >&2
+  echo -e "${RED}FAIL${NC}: could not extract pass/fail classification patterns from $POLL_LIB" >&2
   echo "  PASS_PATTERN='$PASS_PATTERN'  FAIL_PATTERN='$FAIL_PATTERN'" >&2
   exit 1
 fi
