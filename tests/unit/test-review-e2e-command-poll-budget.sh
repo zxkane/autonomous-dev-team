@@ -125,8 +125,14 @@ echo "=== TC-RPB-SRC: wrapper structure (source-of-truth greps) ==="
 # ---------------------------------------------------------------------------
 assert_grep "TC-RPB-SRC-01 wrapper sources lib-review-poll.sh" \
   'lib-review-poll\.sh' "$WRAPPER"
-assert_grep "TC-RPB-SRC-02 poll loop uses the resolved attempts var (not hardcoded 6)" \
-  'seq 1 "\$_?VERDICT_POLL_ATTEMPTS"|seq 1 "\$\{_?VERDICT_POLL_ATTEMPTS\}"' "$WRAPPER"
+# The poll loop body moved into lib-review-poll.sh (_run_verdict_poll_loop, #180)
+# so it is unit-testable round-by-round; the wrapper resolves the budget and
+# calls the loop. Assert both halves: the wrapper wires the resolved var, and the
+# loop (now in the lib) drives `seq 1 "$_VERDICT_POLL_ATTEMPTS"` (not hardcoded 6).
+assert_grep "TC-RPB-SRC-02 wrapper wires the resolved attempts var (_VERDICT_POLL_ATTEMPTS=resolver)" \
+  '_VERDICT_POLL_ATTEMPTS=\$\(_resolve_verdict_poll_attempts' "$WRAPPER"
+assert_grep "TC-RPB-SRC-02b poll loop uses the resolved attempts var (not hardcoded 6)" \
+  'seq 1 "\$_?VERDICT_POLL_ATTEMPTS"|seq 1 "\$\{_?VERDICT_POLL_ATTEMPTS\}"' "$POLL_LIB"
 assert_grep "TC-RPB-SRC-03 resolver references E2E_COMMAND_TIMEOUT_SECONDS" \
   'E2E_COMMAND_TIMEOUT_SECONDS' "$POLL_LIB"
 # The reaper lives in the lib (unit-testable in isolation against real setsid

@@ -25,8 +25,10 @@
 # _verdict_poll_floor_attempts — the legacy floor (6 attempts = 30 s). Kept as a
 # named constant so the back-compat contract is explicit and greppable.
 _VERDICT_POLL_FLOOR_ATTEMPTS=6
-# Poll cadence in seconds — must match the `sleep` inside the wrapper's poll
-# loop. Used to convert a seconds-budget into an attempt count.
+# Poll cadence in seconds. Single source of truth for the loop cadence: it is
+# both the divisor that converts a seconds-budget into an attempt count
+# (_resolve_verdict_poll_attempts) and the `sleep` interval inside the loop
+# (_run_verdict_poll_loop), so the two can never silently diverge.
 _VERDICT_POLL_INTERVAL_SECONDS=5
 
 # _resolve_verdict_poll_attempts
@@ -43,11 +45,13 @@ _VERDICT_POLL_INTERVAL_SECONDS=5
 # Reads E2E_MODE and E2E_COMMAND_TIMEOUT_SECONDS from the environment (both are
 # set by autonomous.conf). Pure: no side effects, no I/O.
 #
-# Note: the wrapper's poll loop short-circuits as soon as every agent has either
-# a verdict comment OR a known non-zero launch rc (an exited CLI won't post a
-# verdict). So the extended budget only EXTENDS the wait for an agent that is
-# launched-clean-but-verdict-not-yet — exactly the diligent agent this fixes.
-# The happy path (all verdicts already posted) still settles in one round.
+# Note: the wrapper's poll loop short-circuits as soon as every agent has a
+# verdict comment. A non-zero launch rc no longer short-circuits an agent to
+# `unavailable` (issue #180) — the verdict comment can land seconds after the
+# CLI exits (propagation lag, or a verdict flushed right before the shell exits
+# non-zero), so the loop keeps polling a no-verdict agent regardless of rc until
+# this budget is exhausted. The extended budget therefore IS the propagation
+# grace. The happy path (all verdicts already posted) still settles in one round.
 _resolve_verdict_poll_attempts() {
   local mode="${E2E_MODE:-none}"
   local floor="${_VERDICT_POLL_FLOOR_ATTEMPTS:-6}"
@@ -73,6 +77,151 @@ _resolve_verdict_poll_attempts() {
     attempts="$floor"
   fi
   printf '%s\n' "$attempts"
+}
+
+# _classify_unresolved_agent <verdict_body> <rc>
+#
+# The per-round, per-agent decision for the verdict-poll loop (issue #180). It
+# is the SINGLE decision point so the wrapper loop stays a thin driver and the
+# logic is unit-testable in isolation. Echoes exactly one of:
+#
+#   pass | fail  — a verdict comment was matched for this agent; it is
+#                  classified FAIL-first (see _classify_verdict_body). A verdict
+#                  the agent DID post WINS over its launch rc (INV-40: "the
+#                  matched verdict comment takes precedence over the launch rc").
+#                  This is the #180 fix: a passing verdict from a non-zero-rc
+#                  agent is counted, not dropped.
+#   keep         — no verdict yet; keep polling. This is returned regardless of
+#                  the launch rc. Pre-#180, a non-zero rc short-circuited the
+#                  agent straight to `unavailable` on poll round 1, before its
+#                  verdict comment had a chance to propagate to the comments API
+#                  (the verify command can exit non-zero on a soft path, or the
+#                  CLI can exit non-zero just AFTER posting `Review PASSED`, or
+#                  the comment is still propagating). The #180 fix removes that
+#                  short-circuit: a no-verdict agent keeps being polled — whether
+#                  rc is zero or non-zero — for the full INV-43-scaled budget.
+#                  The window IS the propagation grace (issue #180 Fix 2: no
+#                  separate post-exit grace timer). An agent that still has no
+#                  verdict when the window expires is resolved `unavailable` by
+#                  the wrapper's post-window sweep — NOT here.
+#
+# Args:
+#   $1 verdict_body — the matched verdict comment body, or empty if none yet.
+#   $2 rc           — the agent's CLI launch exit code (AGENT_LAUNCH_RC).
+#                     Accepted for symmetry / documentation; it no longer changes
+#                     the decision (that is precisely the #180 fix).
+#
+# Pure: no side effects, no I/O.
+_classify_unresolved_agent() {
+  local body="$1"
+
+  # A matched verdict always wins — including over a non-zero launch rc.
+  if [[ -n "$body" ]]; then
+    _classify_verdict_body "$body"
+    return 0
+  fi
+
+  # No verdict yet → keep polling, regardless of rc (#180). The wrapper's
+  # post-window sweep resolves `unavailable` only once the (INV-43-scaled)
+  # budget is exhausted with still no verdict.
+  printf 'keep\n'
+}
+
+# _classify_verdict_body <body> — echoes pass | fail (FAIL-first, #95).
+# Conservative: a body containing both pass and fail phrasing classifies FAIL.
+# Co-located with the poll helpers so the single verdict-classification rule is
+# unit-testable and shared by both the loop's verdict-found path and
+# _classify_unresolved_agent. (Moved here from autonomous-review.sh in #180.)
+_classify_verdict_body() {
+  local body="$1"
+  if echo "$body" | grep -qiE 'Review (FAILED|REJECTED)|Review findings:|Changes requested'; then
+    echo "fail"
+  elif echo "$body" | grep -qiE 'Review PASSED|Review APPROVED|APPROVED FOR MERGE|LGTM|Review PASS'; then
+    echo "pass"
+  else
+    echo "fail"
+  fi
+}
+
+# _fetch_agent_verdict_body <agent_name> <session_id> — query the issue comments
+# for THIS agent's verdict comment and echo the matched body (empty if none yet).
+#
+# Encapsulates the single `gh issue view … -q <jq>` call so the verdict-poll loop
+# can be driven in unit tests by overriding this one function (the test injects a
+# round-dependent body without a live GitHub). The authenticity binding (INV-20)
+# + per-agent discriminator (INV-40) is built here:
+#   - actor: author == BOT_LOGIN (when set), else the BOT_LOGIN-empty fallback
+#     narrows on this agent's own `Review Session.*<session-id>` UUID;
+#   - time window: createdAt >= WRAPPER_START_TS;
+#   - per-agent discriminator: the `Review Agent: <name>` line (INV-40);
+#   - verdict keyword: _VERDICT_RE.
+# Takes `last` so a re-posted verdict wins. Reads ISSUE_NUMBER / REPO / BOT_LOGIN
+# / WRAPPER_START_TS / _VERDICT_RE from the environment (set by the wrapper).
+_fetch_agent_verdict_body() {
+  local _agent="$1" _sid="$2"
+  local _auth_predicate _agent_predicate _verdict_jq
+  if [[ -n "${BOT_LOGIN:-}" ]]; then
+    _auth_predicate="(.author.login == \"${BOT_LOGIN}\") and (.createdAt >= \"${WRAPPER_START_TS}\") and (.body | test(\"Review Session\"))"
+  else
+    _auth_predicate="(.createdAt >= \"${WRAPPER_START_TS}\") and (.body | test(\"Review Session.*${_sid}\"))"
+  fi
+  _agent_predicate="(.body | test(\"Review Agent: ${_agent}\"))"
+  _verdict_jq="[.comments[] | select(${_auth_predicate} and ${_agent_predicate} and (.body | test(\"${_VERDICT_RE}\"; \"i\")))] | last | .body"
+  gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json comments \
+    -q "$_verdict_jq" 2>/dev/null || true
+}
+
+# _run_verdict_poll_loop — the per-agent verdict-poll loop (INV-40 / INV-43 /
+# issue #180). Extracted from autonomous-review.sh so the loop itself — not just
+# its per-round decision — is unit-testable (the #180 regression test stubs
+# _fetch_agent_verdict_body to return a passing verdict only on round ≥2 and
+# asserts a non-zero-rc agent is still counted `pass`, not dropped).
+#
+# Polls up to _VERDICT_POLL_ATTEMPTS rounds (× 5 s; INV-43 scales this with the
+# command-mode E2E timeout). Each round, for every still-unresolved agent it
+# fetches the verdict body and feeds (body, rc) to _classify_unresolved_agent:
+#   - pass | fail → record the verdict (a verdict the agent posted WINS over its
+#                   launch rc — INV-40);
+#   - keep        → no verdict yet; keep polling REGARDLESS of rc (#180: a
+#                   non-zero CLI exit no longer short-circuits the agent to
+#                   `unavailable` while the window is open).
+# The loop stops early once every agent has a verdict. Any agent still without a
+# verdict when the budget is exhausted is left unresolved here and resolved
+# `unavailable` by the caller's post-window sweep — the window IS the
+# propagation grace (#180 Fix 2). Reads/writes the wrapper's globals:
+#   in:  AGENT_NAMES, AGENT_SESSION_IDS, AGENT_LAUNCH_RC, _VERDICT_POLL_ATTEMPTS
+#   out: AGENT_VERDICTS, AGENT_VERDICT_BODIES (parallel-indexed to AGENT_NAMES)
+# Uses `sleep`, `log`, `_fetch_agent_verdict_body`, `_classify_unresolved_agent`
+# (all overridable by tests).
+_run_verdict_poll_loop() {
+  local _poll_attempt _i _agent _sid _body _decision _all_resolved
+  for _poll_attempt in $(seq 1 "${_VERDICT_POLL_ATTEMPTS}"); do
+    sleep "${_VERDICT_POLL_INTERVAL_SECONDS:-5}"
+    _all_resolved=1
+    for _i in "${!AGENT_NAMES[@]}"; do
+      # Already resolved (verdict found on a prior round) — skip re-query.
+      [[ -n "${AGENT_VERDICTS[$_i]}" ]] && continue
+
+      _agent="${AGENT_NAMES[$_i]}"
+      _sid="${AGENT_SESSION_IDS[$_i]}"
+      _body=$(_fetch_agent_verdict_body "$_agent" "$_sid")
+
+      # Single per-round decision (#180): a matched verdict wins over the launch
+      # rc; otherwise keep polling regardless of rc (no early non-zero-rc drop).
+      _decision=$(_classify_unresolved_agent "$_body" "${AGENT_LAUNCH_RC[$_sid]:-1}")
+      case "$_decision" in
+        pass|fail)
+          AGENT_VERDICT_BODIES[$_i]="$_body"
+          AGENT_VERDICTS[$_i]="$_decision"
+          ;;
+        keep)
+          _all_resolved=0
+          ;;
+      esac
+    done
+    [[ "$_all_resolved" -eq 1 ]] && break
+    log "Waiting for review verdict comment(s) to appear (attempt ${_poll_attempt}/${_VERDICT_POLL_ATTEMPTS})..."
+  done
 }
 
 # _reap_fanout_processes <pgid...> — INV-43 (#172): group-kill any still-running

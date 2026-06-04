@@ -1118,23 +1118,18 @@ rm -rf "$_FANOUT_DIR" 2>/dev/null || true
 log "Parsing review results from issue comments (per agent)..."
 
 # Verdict-keyword regex (closes #95): canonical phrasings plus drift variants.
-# Keep in sync with _classify_verdict_body below — this is the UNION of its
+# Read by _fetch_agent_verdict_body (lib-review-poll.sh) when building the jq
+# finder. Keep in sync with _classify_verdict_body — this is the UNION of its
 # fail-bucket and pass-bucket patterns (the finder must match anything the
 # classifier can bucket).
 _VERDICT_RE='Review PASSED|Review APPROVED|APPROVED FOR MERGE|LGTM|Review PASS|Review findings:|Review FAILED|Review REJECTED|Changes requested'
 
-# _classify_verdict_body <body> — echoes pass | fail (FAIL-first, #95).
-# Conservative: a body containing both pass and fail phrasing classifies FAIL.
-_classify_verdict_body() {
-  local body="$1"
-  if echo "$body" | grep -qiE 'Review (FAILED|REJECTED)|Review findings:|Changes requested'; then
-    echo "fail"
-  elif echo "$body" | grep -qiE 'Review PASSED|Review APPROVED|APPROVED FOR MERGE|LGTM|Review PASS'; then
-    echo "pass"
-  else
-    echo "fail"
-  fi
-}
+# The verdict classifier (_classify_verdict_body, pass|fail FAIL-first, #95), the
+# per-round decision (_classify_unresolved_agent, #180), the per-agent verdict
+# fetch (_fetch_agent_verdict_body), and the poll loop itself
+# (_run_verdict_poll_loop) all live in lib-review-poll.sh (sourced above) so the
+# single verdict-classification + polling rule is shared and unit-testable in
+# isolation.
 
 # Per-agent verdict polling. The authenticity binding (INV-20) is unchanged —
 # actor (BOT_LOGIN) + time window (WRAPPER_START_TS) + the `Review Session`
@@ -1151,8 +1146,22 @@ _classify_verdict_body() {
 # mode, and max(6, ceil(E2E_COMMAND_TIMEOUT_SECONDS/5)) when E2E_MODE=command,
 # so a review agent that faithfully runs the (slow) command-mode E2E is not
 # dropped as `unavailable` for taking as long as the E2E it was asked to run.
-# The loop still stops EARLY once every agent has a verdict OR a known non-zero
-# launch rc, so the happy path settles in one round (~5s) regardless of budget.
+# The loop still stops EARLY once every agent has a verdict, so the happy path
+# settles in one round (~5s) regardless of budget.
+#
+# No early non-zero-rc drop (INV-43 sibling clarification, #180): this loop runs
+# AFTER the fan-out `wait`, so every agent CLI has already exited and
+# AGENT_LAUNCH_RC is fully populated before round 1. A non-zero CLI exit must
+# NOT, by itself, drop an agent while the poll window is still open — the verify
+# command can exit non-zero on a soft path, the CLI can exit non-zero just after
+# the agent posted its `Review PASSED` verdict, or the verdict comment is still
+# propagating to the comments API. So a no-verdict agent keeps being polled
+# REGARDLESS of rc (_classify_unresolved_agent returns `keep`) for the full
+# INV-43-scaled window — the window IS the propagation grace (#180 Fix 2: no
+# separate post-exit grace timer). A verdict the agent DID post wins over the rc
+# (INV-40). An agent with no verdict when the window expires is resolved
+# `unavailable` by the post-window sweep below — same terminal outcome as before
+# #180, just no longer pre-empted on round 1.
 _VERDICT_POLL_ATTEMPTS=$(_resolve_verdict_poll_attempts)
 log "Verdict-poll budget: ${_VERDICT_POLL_ATTEMPTS} attempt(s) × 5s (E2E_MODE=${E2E_MODE:-none}, command-timeout=${E2E_COMMAND_TIMEOUT_SECONDS:-n/a})"
 declare -a AGENT_VERDICTS=()        # pass | fail | unavailable, per index
@@ -1162,46 +1171,19 @@ for _i in "${!AGENT_NAMES[@]}"; do
   AGENT_VERDICT_BODIES+=("")
 done
 
-for _poll_attempt in $(seq 1 "$_VERDICT_POLL_ATTEMPTS"); do
-  sleep 5
-  _all_resolved=1
-  for _i in "${!AGENT_NAMES[@]}"; do
-    # Already resolved (verdict found on a prior round) — skip re-query.
-    [[ -n "${AGENT_VERDICTS[$_i]}" ]] && continue
-
-    _agent="${AGENT_NAMES[$_i]}"
-    _sid="${AGENT_SESSION_IDS[$_i]}"
-
-    if [[ -n "$BOT_LOGIN" ]]; then
-      _auth_predicate="(.author.login == \"${BOT_LOGIN}\") and (.createdAt >= \"${WRAPPER_START_TS}\") and (.body | test(\"Review Session\"))"
-    else
-      _auth_predicate="(.createdAt >= \"${WRAPPER_START_TS}\") and (.body | test(\"Review Session.*${_sid}\"))"
-    fi
-    # Per-agent discriminator (INV-40): the `Review Agent: <name>` line.
-    _agent_predicate="(.body | test(\"Review Agent: ${_agent}\"))"
-    _verdict_jq="[.comments[] | select(${_auth_predicate} and ${_agent_predicate} and (.body | test(\"${_VERDICT_RE}\"; \"i\")))] | last | .body"
-
-    _body=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json comments \
-      -q "$_verdict_jq" 2>/dev/null || true)
-    if [[ -n "$_body" ]]; then
-      AGENT_VERDICT_BODIES[$_i]="$_body"
-      AGENT_VERDICTS[$_i]=$(_classify_verdict_body "$_body")
-    else
-      # No verdict yet. If the agent's CLI already exited, it won't post one,
-      # so we can resolve it as unavailable now; otherwise keep polling.
-      if [[ "${AGENT_LAUNCH_RC[$_sid]:-1}" -ne 0 ]]; then
-        AGENT_VERDICTS[$_i]="unavailable"
-      else
-        _all_resolved=0
-      fi
-    fi
-  done
-  [[ "$_all_resolved" -eq 1 ]] && break
-  log "Waiting for review verdict comment(s) to appear (attempt ${_poll_attempt}/${_VERDICT_POLL_ATTEMPTS})..."
-done
+# The loop body lives in lib-review-poll.sh (_run_verdict_poll_loop) so the
+# round-by-round behavior — not just the per-round decision — is unit-testable
+# (#180 regression test stubs the per-agent verdict fetch to return a passing
+# verdict only on round ≥2 and asserts a non-zero-rc agent is still counted
+# `pass`). It reads AGENT_NAMES / AGENT_SESSION_IDS / AGENT_LAUNCH_RC /
+# _VERDICT_POLL_ATTEMPTS and fills AGENT_VERDICTS / AGENT_VERDICT_BODIES.
+_run_verdict_poll_loop
 
 # Any agent still unresolved after the poll window is unavailable (no verdict
-# comment within the window) — INV-40's "unavailable" definition.
+# comment within the window) — INV-40's "unavailable" definition. This is the
+# SINGLE terminal resolution point for a no-verdict agent (#180): whether the
+# CLI exited clean (rc 0) or non-zero, the loop kept polling it for the full
+# budget; only here, at window expiry, is it dropped to `unavailable`.
 for _i in "${!AGENT_NAMES[@]}"; do
   [[ -z "${AGENT_VERDICTS[$_i]}" ]] && AGENT_VERDICTS[$_i]="unavailable"
 done
