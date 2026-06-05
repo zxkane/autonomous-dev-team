@@ -97,22 +97,47 @@ If browser-mode E2E is enabled but preview URL extraction yields nothing, the ag
 
 In `command` mode the wrapper substitutes the literal `${PR_NUMBER}` placeholder in `E2E_COMMAND`, `E2E_COMMAND_PRE_HOOKS`, and `E2E_COMMAND_EVIDENCE_PARSER` with the resolved PR number before pasting them into the prompt. Operators MUST single-quote those assignments in `autonomous.conf` so the shell does not eagerly expand `${PR_NUMBER}` when sourcing the conf file. Unbraced `$PR_NUMBER` is rejected at config-validation time (would silently render as empty since the var is exported only inside the command-mode block, after substitution).
 
-The wrapper exports `PR_NUMBER` and `PR_HEAD_SHA` into the agent process's environment when `E2E_MODE=command`. The project's evidence parser reads `PR_HEAD_SHA` from env to embed in the evidence-block marker.
+The wrapper exports `PR_NUMBER` and `PR_HEAD_SHA` into the lane process's environment when `E2E_MODE=command`. The project's evidence parser reads `PR_HEAD_SHA` from env to embed in the evidence-block marker.
 
-The agent's command-mode prompt block instructs it to:
-
-1. Run `E2E_COMMAND_PRE_HOOKS` if set (e.g. seed test data into the per-PR stage).
-2. Run `E2E_COMMAND` under `timeout(1)` with `E2E_COMMAND_TIMEOUT_SECONDS`.
-3. Interpret the exit code (0 = pass, 124 = timeout still parses for partial artifact, other = hard fail).
-4. **If exit ∈ {0, 124}**: run `E2E_COMMAND_EVIDENCE_PARSER` to extract a markdown evidence block from the log. Hard-failure exits skip the parser (its input log would be malformed) and post a `tail -50` of the log file as the failure comment.
-4b. **Stale-evidence guard** — before invoking the verify command, the agent checks the PR for an existing comment whose marker contains `sha="${PR_HEAD_SHA}"` (the current PR HEAD). If found, the agent reuses that comment's body as `$EVIDENCE` and jumps to Step 6 — no E2E re-run. The SHA binding is load-bearing: without it, a stale evidence comment from a prior commit would silently satisfy a re-review of newer code.
-5. Validate the block ends with the SHA-bound marker `<!-- e2e-evidence: complete sha="${PR_HEAD_SHA}" -->`.
-6. Post the evidence block (or log-tail failure comment) as a PR comment.
-7. Decide PASS/FAIL based on exit code + AC coverage in the evidence block. The decision-block FAIL message is mode-aware: `browser` requests "screenshot evidence", `command` requests "verify-command exit code + log tail" — branching prevents agent confusion in command-mode where there are no screenshots.
+**Since #182 ([INV-46](invariants.md#inv-46-e2e-runs-once-in-a-dedicated-lane-before-the-review-fan-out--gated-not-per-agent)) the E2E runs in a dedicated WRAPPER lane, ONCE, before the review fan-out — NOT in each review agent's prompt.** The exit-code semantics (0 → parser; 124 → parser on partial, recover-or-fail; other → skip parser + log-tail), the SHA-bound evidence marker, and the stale-evidence skip are unchanged, but they now execute in `lib-review-e2e.sh::_run_command_e2e_lane` (shell) / the one browser lane (LLM), not in N review-agent prompts. See [Sequential E2E lane (INV-46)](#sequential-e2e-lane-inv-46) below for the full lane + gate flow.
 
 For the project-side contract (`E2E_COMMAND` semantics, evidence-block format, parser PR_HEAD_SHA usage), see `skills/autonomous-review/references/e2e-command-mode.md`.
 
-> **Wait/stall budgets must fit the E2E ([INV-43](invariants.md#inv-43-command-mode-e2e-review-wait-budgets-must-not-be-smaller-than-the-e2e-they-dispatched), #172).** A command-mode E2E can take far longer than the legacy 30 s verdict-poll window or the 300 s dispatcher stall window, so a review agent that faithfully runs it used to be dropped as `unavailable`. Two budgets are involved: (1) the verdict-poll budget auto-scales — `lib-review-poll.sh::_resolve_verdict_poll_attempts` returns `max(6, ceil(E2E_COMMAND_TIMEOUT_SECONDS/5))` for `command` mode and `6` otherwise (see [Verdict polling](#verdict-polling)); (2) the operator MUST set `REVIEW_NEAR_SUCCESS_WINDOW_SECONDS` ≥ `E2E_COMMAND_TIMEOUT_SECONDS` so the dispatcher's [INV-24](invariants.md#inv-24-review-wrapper-dead-detection-requires-both-pid_alive-miss-and-no-near-success-pr-signal) crash check doesn't SIGTERM the still-working wrapper mid-E2E. In multi-agent mode the prompt also tells each agent a sibling may be running the same E2E concurrently → reuse the first sibling's SHA-bound evidence before running the (heavy) pre-hooks. After verdict resolution the wrapper reaps any lingering fan-out agent process group so a dropped agent's CLI does not outlive its round.
+> **Wait/stall budgets must fit the E2E ([INV-43](invariants.md#inv-43-command-mode-e2e-review-wait-budgets-must-not-be-smaller-than-the-e2e-they-dispatched), #172).** A command-mode E2E can take far longer than the legacy 30 s verdict-poll window or the 300 s dispatcher stall window. Post-#182 the E2E runs once in the wrapper lane (not per agent), so the per-agent verdict-poll window now only spans the residual code-review verdict wait — but the operator MUST still set `REVIEW_NEAR_SUCCESS_WINDOW_SECONDS` ≥ `E2E_COMMAND_TIMEOUT_SECONDS` because the lane runs **synchronously inside the wrapper** before the fan-out, so the dispatcher's [INV-24](invariants.md#inv-24-review-wrapper-dead-detection-requires-both-pid_alive-miss-and-no-near-success-pr-signal) crash check must not SIGTERM the still-working wrapper mid-E2E. The verdict-poll budget still auto-scales (`lib-review-poll.sh::_resolve_verdict_poll_attempts`) as belt-and-suspenders. After verdict resolution the wrapper reaps any lingering fan-out agent process group AND the E2E lane's process group so neither outlives the round.
+
+## Sequential E2E lane (INV-46)
+
+When `E2E_MODE` is active (`browser` or `command`), the wrapper runs the project E2E **exactly once per review round** in a dedicated lane that completes **before** the review fan-out, then gates on the result. This replaces the pre-#182 design where the E2E execution block was injected into every review agent's prompt — so `AGENT_REVIEW_AGENTS` with N CLIs ran the full E2E N times (N× `E2E_COMMAND_PRE_HOOKS` container builds, N× verify, N× evidence, racing on shared stage state). See [INV-46](invariants.md#inv-46-e2e-runs-once-in-a-dedicated-lane-before-the-review-fan-out--gated-not-per-agent).
+
+```
+E2E_ACTIVE == true:
+  PHASE A — run the E2E lane ONCE, to completion:
+    command mode → _run_command_e2e_lane (lib-review-e2e.sh): a PURE SHELL subshell
+        (no run_agent, token-free). Idempotency: reuse a SHA-matching evidence
+        comment if present. Else pre-hooks → verify (under setsid + timeout
+        --kill-after, PGID captured in _E2E_LANE_PGID) → parser → post evidence.
+        Each step guarded `|| rc=$?` so set -e can't skip the .rc sidecar.
+    browser mode → ONE LLM lane (run_agent against build_browser_e2e_prompt). The
+        LLM posts the report; the WRAPPER stamps the SHA marker after a clean exit.
+  E2E HARD GATE — _classify_e2e_gate <lane_rc> <evidence_present>:
+    (a) lane .rc == 0  AND
+    (b) re-fetch (_fetch_sha_evidence, bounded retry) finds a SHA-matching
+        evidence comment for the captured PR_HEAD_SHA
+    → pass | fail | block-nonsubstantive
+  gate == fail                 → [BLOCKING] E2E finding + failed-substantive
+                                 + −reviewing +pending-dev ; exit 0  (NO fan-out)
+  gate == block-nonsubstantive → "Review held" + failed-non-substantive
+                                 cause=e2e-evidence-missing + −reviewing
+                                 +pending-dev ; exit 0  (re-queue, NO fan-out)
+  gate == pass                 → PHASE B (review fan-out below)
+E2E_ACTIVE == false → no lane, no gate (E2E_GATE=inactive); straight to fan-out.
+```
+
+- **command-mode lane is shell, not an LLM.** `_run_command_e2e_lane` runs entirely in the wrapper shell — no `run_agent`, no tokens. The verify command runs under `setsid` + `timeout --kill-after=30s --signal=TERM ${E2E_COMMAND_TIMEOUT_SECONDS}` so its subtree is reapable ([INV-23](invariants.md#inv-23-pid_file-points-at-a-process-whose-death-reaps-the-entire-agent-subtree)); the lane's PGID is added to `_reap_fanout_processes`'s arg list alongside the fan-out agents'.
+- **browser-mode is ONE LLM lane**, not replicated across review agents. The wrapper stamps `<!-- e2e-evidence: complete sha="${PR_HEAD_SHA}" -->` so the gate anchor is deterministic without the LLM transcribing the SHA.
+- **The gate is a mechanical dual-signal**, fail-closed: a crash between parser-ok and comment-post (`rc=0` but no SHA-matching evidence) routes `block-nonsubstantive` (transient re-queue), not a dev bounce; a real verify failure (`rc≠0`) routes `fail` (substantive). A `rc≠0`-with-stale-present-evidence does NOT pass.
+- **Review agents are PURE code reviewers.** `build_review_prompt` no longer contains any E2E execution block; the prompt tells each agent to READ the wrapper-posted evidence comment as input and cross-check it against the acceptance criteria. They do not run E2E.
+- **Composition**: `final PASS ≡ (E2E_ACTIVE==false OR gate==pass) AND review-unanimity-pass`. Because a gate fail/block exits before the fan-out, only `gate ∈ {pass, inactive}` ever reaches the review aggregation — the AND is enforced by the short-circuit. The E2E gate runs before the [INV-44](invariants.md#inv-44-mergeable-hard-gate--a-conflicting-pr-can-never-reach-approved) mergeable block.
 
 ## Multi-agent fan-out (INV-40)
 

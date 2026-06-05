@@ -51,6 +51,14 @@ source "${SCRIPT_DIR}/lib-review-poll.sh"
 # rebase prompt. _classify_mergeable_gate is the pure decision half (the gh
 # query + UNKNOWN-retry loop stays in the wrapper). Inert on the FAIL path.
 source "${SCRIPT_DIR}/lib-review-mergeable.sh"
+# shellcheck source=lib-review-e2e.sh
+# INV-46 (#182): run E2E ONCE in a dedicated lane, sequentially, BEFORE the
+# review fan-out — not once per fan-out review agent. The command-mode lane is a
+# pure shell subshell (setsid+timeout, token-free); browser-mode stays ONE
+# LLM-driven lane. _classify_e2e_gate is the pure dual-signal decision; the lane
+# helpers (_run_command_e2e_lane / _fetch_sha_evidence) live there so they are
+# unit-testable in isolation. Inert when E2E_MODE=none.
+source "${SCRIPT_DIR}/lib-review-e2e.sh"
 # Per-side AGENT_CMD override (INV-37). See autonomous-dev.sh for the
 # matching dev-side override. Together they let one project run dev
 # and review on different agent CLIs (e.g. claude for dev, agy for
@@ -490,18 +498,16 @@ fi
 #     gives kiro the kiro checklist and agy the full checklist).
 #
 # For the single-agent default (REVIEW_AGENTS_LIST=("$AGENT_CMD")), this is
-# called once with the wrapper's lone agent + session id, byte-for-byte
-# preserving the legacy prompt.
+# called once with the wrapper's lone agent + session id.
+#
+# INV-46 (#182): the prompt NO LONGER contains any E2E EXECUTION block. The
+# wrapper runs E2E ONCE in a dedicated lane before the fan-out (Phase A) and
+# posts the evidence as a PR comment; this prompt instead tells the agent to READ
+# that posted evidence as input. Review agents are PURE code reviewers — they do
+# not run, and are not told to run, E2E.
 build_review_prompt() {
   local _agent_name="$1"
   local _agent_session_id="$2"
-  # INV-43 (#172): true when this PR is reviewed by more than one verdict-reaching
-  # agent in parallel (AGENT_REVIEW_AGENTS lists ≥2 CLIs). The command-mode E2E
-  # block uses it to inject a sibling-evidence re-check immediately before the
-  # (expensive) pre-hooks, so concurrent fan-out agents reuse the first sibling's
-  # SHA-bound evidence comment instead of each independently re-running the build.
-  # Empty/false for the single-agent default → the prompt is byte-for-byte legacy.
-  local _multi_agent="${3:-false}"
   cat <<EOF
 You are reviewing PR #${PR_NUMBER} for issue #${ISSUE_NUMBER} in the ${REPO} project.
 PR branch: ${PR_BRANCH:-UNKNOWN}
@@ -592,273 +598,32 @@ Read the issue body for an \`## Acceptance Criteria\` section. For EACH criterio
 
 $(render_bot_review_section "$REVIEW_BOTS_VALIDATED" "$PR_NUMBER" "$REPO")
 
-$(case "${E2E_MODE:-none}" in
-  none)
-    : # no E2E section
-    ;;
-  browser)
-    cat <<E2E_BLOCK
-## E2E Verification via Chrome DevTools MCP — MANDATORY
+$(if [[ "${E2E_ACTIVE:-false}" == "true" ]]; then cat <<'E2E_EVIDENCE_INPUT'
+## E2E Evidence — READ AS INPUT (the wrapper already ran E2E once, INV-46)
 
-**This section is NON-NEGOTIABLE. You MUST perform E2E verification using Chrome DevTools MCP.**
+**You do NOT run E2E.** The wrapper ran the project's E2E verification ONCE in a
+dedicated lane BEFORE this review and posted the evidence as a PR comment. Your
+job is to READ that posted evidence and double-check it against the issue's
+acceptance criteria — not to re-run any build, deploy, verify command, or
+browser flow.
 
-Preview URL: ${PREVIEW_URL:-NOT_FOUND}
-Test user email: available via \\\$E2E_TEST_USER_EMAIL environment variable
-Test user password: available via \\\$E2E_TEST_USER_PASSWORD environment variable
-Screenshot upload available: ${SCREENSHOT_UPLOAD_AVAILABLE}
-
-NOTE: E2E credentials are passed as environment variables for security.
-Read them at runtime: \\\$(printenv E2E_TEST_USER_EMAIL) and \\\$(printenv E2E_TEST_USER_PASSWORD)
-
-### Step 1: Verify preview URL availability
-- If the preview URL above is "NOT_FOUND" or empty, the review MUST FAIL immediately.
-  Post "Review findings:" with: "E2E verification failed: PR preview URL not found. Deploy-preview job must post a comment with the preview URL before review can proceed."
-
-### Step 2: Navigate to preview URL
-- Use Chrome DevTools MCP \`new_page\` to open a new browser page
-- Use \`navigate_page\` to go to the preview URL
-- Use \`wait_for\` to confirm the page loads successfully
-- Use \`take_screenshot\` to capture the landing page as evidence
-
-### Step 3: Login with test user
-- Navigate to the login page or click the sign-in button
-- Use \`fill\` to enter the test user email and password
-- Submit the login form
-- Use \`wait_for\` to confirm successful authentication (e.g., dashboard loads)
-- Use \`take_screenshot\` to capture the authenticated state
-
-### Screenshot upload — MANDATORY after every take_screenshot
-**Every time you use \`take_screenshot\`, you MUST immediately upload it using the Bash tool:**
-
-\`\`\`bash
-SCREENSHOT_URL=\$(bash scripts/upload-screenshot.sh "<screenshot-file-path>" ${PR_NUMBER} "<TC-ID>")
-echo "Uploaded: \$SCREENSHOT_URL"
-\`\`\`
-
-- If the upload succeeds, \`SCREENSHOT_URL\` will be a GitHub blob URL viewable by repo members
-- Use this URL as a clickable link in the E2E report: \`[TC-ID](\$SCREENSHOT_URL)\`
-- If the upload returns "UPLOAD_FAILED", describe the visual state in text instead
-- Do NOT skip the upload step — screenshots must be linked in PR comments
-
-### Step 4: Select and execute happy path test cases
-- Analyze the PR diff to select relevant happy path cases
-- Execute at least ONE happy path case using Chrome DevTools MCP
-- For each happy path case:
-  a. Follow the test steps
-  b. Use \`take_screenshot\` at key verification points
-  c. **Immediately** upload each screenshot: \`bash scripts/upload-screenshot.sh "<path>" ${PR_NUMBER} "<TC-ID>"\`
-  d. Record PASS or FAIL with clickable link evidence
-
-### Step 5: Execute feature-specific test cases
-- Read the test case document from \`docs/test-cases/\` for the feature being reviewed
-- Skip any scenarios already covered by happy path cases (no duplication)
-- For each test case:
-  a. Follow the test steps using Chrome DevTools MCP tools
-  b. Verify expected outcomes by inspecting page content
-  c. Use \`take_screenshot\` then **immediately** upload: \`bash scripts/upload-screenshot.sh "<path>" ${PR_NUMBER} "<TC-ID>"\`
-  d. Record PASS or FAIL with clickable link evidence
-
-### Step 6: Regression checks
-- Verify basic auth flow works (login/logout)
-- Verify main navigation works (sidebar links, page transitions)
-- Verify no console errors using \`list_console_messages\`
-
-### Step 7: Post E2E results as PR comment
-Post a structured comment on PR #${PR_NUMBER} (NOT the issue) with this format:
-
-\`\`\`markdown
-## E2E Verification Report
-
-### Summary
-| Total | Passed | Failed | Skipped |
-|-------|--------|--------|--------|
-| N     | X      | Y      | Z       |
-
-### Happy Path Results
-| Test Case | Description | Status | Evidence |
-|-----------|-------------|--------|----------|
-| TC-HP-001 | ... | PASS/FAIL | [TC-HP-001](url) or description |
-
-### Feature Test Results
-| Test Case | Description | Status | Evidence |
-|-----------|-------------|--------|----------|
-| TC-XXX-001 | Description | PASS/FAIL | [TC-XXX-001](url) or description |
-
-### Regression Tests
-| Test | Status |
-|------|--------|
-| Auth login/logout | PASS/FAIL |
-| Navigation | PASS/FAIL |
-| Console errors | PASS/FAIL |
-
-### Configured Review Bots ($(if [[ -n "$REVIEW_BOTS_VALIDATED" ]]; then echo "$REVIEW_BOTS_VALIDATED"; else echo "none configured"; fi))
-| Bot | Triggered | Review received | All threads resolved |
-|-----|-----------|-----------------|----------------------|
-$(if [[ -n "$REVIEW_BOTS_VALIDATED" ]]; then
-  for _bot in $REVIEW_BOTS_VALIDATED; do
-    echo "| ${_bot} | PASS/FAIL | PASS/FAIL | PASS/FAIL |"
-  done
-else
-  echo "| (none) | n/a | n/a | n/a |"
+1. Fetch the posted E2E evidence comment from the PR:
+   \`\`\`bash
+   gh pr view ${PR_NUMBER} --repo ${REPO} --json comments \\
+     -q '[.comments[].body | select(test("e2e-evidence: complete"))] | last'
+   \`\`\`
+2. Cross-check the evidence's results table against EACH \`## Acceptance Criteria\`
+   item in the issue body. If a criterion that names a verifiable artifact
+   (file path, S3 key, DDB row state, log line, count, screenshot) is NOT
+   covered by — or is contradicted by — the evidence, that is a review finding.
+3. Do NOT FAIL the review merely because you cannot re-run E2E yourself — the
+   wrapper's E2E hard gate (INV-46) already decided pass/fail on the lane's exit
+   code + the posted evidence, and a gate FAIL would have prevented this review
+   from running at all. Treat the evidence as authoritative input; raise
+   findings only for genuine gaps between the evidence and the acceptance
+   criteria, or for code-quality / requirement-drift issues.
+E2E_EVIDENCE_INPUT
 fi)
-\`\`\`
-E2E_BLOCK
-    ;;
-  command)
-    cat <<COMMAND_E2E_BLOCK
-## E2E Verification via project command — MANDATORY
-
-**This section is NON-NEGOTIABLE. You MUST run the project-supplied verify command and validate its evidence output.**
-
-This project does not have a browser-driven UI E2E. Instead the project
-defines its own verify command (typical for backend pipelines, CLI tools,
-infra-as-code, or ML pipelines). Your job is: invoke the command, wait
-for it to finish (or timeout), validate the evidence block it produces,
-and post the evidence as a PR comment.
-
-### Configuration (resolved by the wrapper)
-
-- Verify command: \`${E2E_COMMAND_RENDERED}\`
-- Pre-hooks: \`${E2E_COMMAND_PRE_HOOKS_RENDERED:-(none)}\`
-- Evidence parser: \`${E2E_COMMAND_EVIDENCE_PARSER_RENDERED}\`
-- Timeout (seconds): ${E2E_COMMAND_TIMEOUT_SECONDS:-3600}
-
-### Step 1: Run pre-hooks (if configured)
-$(if [[ "${_multi_agent:-false}" == "true" ]]; then cat <<'MULTI_AGENT_PREHOOK'
-
-**MULTI-AGENT NOTE (INV-43): another review agent is reviewing this SAME PR in
-parallel.** The pre-hooks below (e.g. a container image build) are expensive and
-do not need to run once per agent. **Immediately before running the pre-hooks**,
-re-check (per Step 4b) whether a sibling review agent has already posted a
-SHA-matching e2e-evidence comment for the current HEAD. If one exists, SKIP the
-pre-hooks AND the verify command entirely and reuse that sibling's evidence
-(jump to Step 6). Only run the pre-hooks if no sibling evidence is present yet.
-This makes the heavy pre-hook run at most once per review round across the
-fan-out instead of once per agent.
-MULTI_AGENT_PREHOOK
-fi)
-
-If "Pre-hooks" above is not "(none)", run that command first. A non-zero
-exit code from pre-hooks aborts the E2E with status FAIL.
-
-\`\`\`bash
-${E2E_COMMAND_PRE_HOOKS_RENDERED:-:}
-\`\`\`
-
-Pre-hooks typically prepare per-PR test data (e.g. seed a DDB row,
-provision a sandbox project, deploy a preview stack).
-
-### Step 2: Run the verify command
-
-\`\`\`bash
-timeout ${E2E_COMMAND_TIMEOUT_SECONDS:-3600} \
-  ${E2E_COMMAND_RENDERED} \
-  > /tmp/e2e-${PR_NUMBER}.log 2>&1
-EXIT_CODE=\$?
-\`\`\`
-
-Stream output to a log file so you can analyze partial results on timeout.
-\`EXIT_CODE=124\` from \`timeout\` means the command was killed for exceeding
-the deadline — treat as FAIL but still parse partial evidence below.
-
-### Step 3: Inspect outcome
-
-- **EXIT_CODE=0** → PASS pending evidence validation. **Proceed to Step 4.**
-- **EXIT_CODE=124** → TIMEOUT. Some pipelines write artifacts BEFORE a
-  late-stage cleanup races and triggers timeout. **Proceed to Step 4** to
-  let the evidence parser inspect the authoritative artifact source
-  (S3 / DDB / file). The parser, not the exit code, is the source of
-  truth for whether the artifact is acceptable.
-- **EXIT_CODE!=0 and !=124** → FAIL. **SKIP Step 4 (do NOT run the
-  parser — its input log is malformed).** Jump directly to Step 5 with
-  a log tail as evidence.
-
-### Step 4: Generate evidence block via parser (ONLY if EXIT_CODE ∈ {0, 124})
-
-\`\`\`bash
-if [[ \$EXIT_CODE -eq 0 || \$EXIT_CODE -eq 124 ]]; then
-  EVIDENCE=\$(${E2E_COMMAND_EVIDENCE_PARSER_RENDERED} /tmp/e2e-${PR_NUMBER}.log)
-fi
-\`\`\`
-
-The parser MUST output a markdown evidence block ending with the literal
-marker (note the embedded SHA — see Step 4b):
-
-\`\`\`
-<!-- e2e-evidence: complete sha="${PR_HEAD_SHA}" -->
-\`\`\`
-
-If the parser exits non-zero or the marker is missing, the evidence is
-malformed — post a "Review findings" comment naming
-\`E2E_COMMAND_EVIDENCE_PARSER\` as the subsystem at fault and exit.
-
-### Step 4b: Stale-evidence guard — REQUIRED on every tick
-
-**Before running the verify command at all**, check whether the PR
-already has a valid evidence comment for the current HEAD SHA. The
-current HEAD SHA is \`${PR_HEAD_SHA}\`. The marker is considered
-"matching" only if it contains exactly \`sha="${PR_HEAD_SHA}"\` —
-plain marker matches do NOT count (would let stale evidence from a
-prior commit pass).
-
-\`\`\`bash
-# Use jq to fetch the FULL comment body (not just the marker line) so
-# Step 6 can evaluate AC coverage against the existing evidence's table.
-EVIDENCE=\$(gh pr view ${PR_NUMBER} --repo ${REPO} --json comments \\
-  --jq '.comments[] | select(.body | contains("e2e-evidence: complete sha=\\"${PR_HEAD_SHA}\\"")) | .body' \\
-  | head -1)
-if [[ -n "\$EVIDENCE" ]]; then
-  echo "Evidence already exists for HEAD ${PR_HEAD_SHA}, skipping E2E re-run"
-  # \$EVIDENCE now holds the full markdown comment body. Jump to Step 6
-  # PASS/FAIL decision based on its contents (AC table coverage).
-fi
-\`\`\`
-
-If the existing comment's marker SHA does NOT match \`${PR_HEAD_SHA}\`,
-the evidence is stale — re-run E2E from Step 1.
-
-### Step 5: Post evidence as a PR comment
-
-For PASS or TIMEOUT (EXIT_CODE ∈ {0, 124}):
-
-\`\`\`bash
-gh pr comment ${PR_NUMBER} --body "\$EVIDENCE"
-\`\`\`
-
-For other failures (EXIT_CODE not in {0, 124}), post a log-tail comment
-instead — do NOT invoke the parser:
-
-\`\`\`bash
-gh pr comment ${PR_NUMBER} --body "\$(cat <<EOF_FAIL
-## E2E Failure (verify command exit code: \$EXIT_CODE)
-
-Command: \\\`${E2E_COMMAND_RENDERED}\\\`
-
-Last 50 lines of /tmp/e2e-${PR_NUMBER}.log:
-\\\`\\\`\\\`
-\$(tail -50 /tmp/e2e-${PR_NUMBER}.log)
-\\\`\\\`\\\`
-EOF_FAIL
-)"
-\`\`\`
-
-### Step 6: Decide PASS / FAIL
-
-PASS when **all** of:
-- Pre-hooks (if configured) exited 0
-- Verify command exited 0 (or 124 with the artifact-recovery exception above)
-- Evidence block ends with the SHA-bound marker \`<!-- e2e-evidence: complete sha="${PR_HEAD_SHA}" -->\`
-- Every issue-body acceptance criterion that names a verifiable artifact
-  (file path, S3 key, DDB row state, log line, count) is satisfied by
-  the evidence block
-
-FAIL when any of those conditions is not met. Include the relevant log
-tail in your findings.
-
-For the full contract, consult \`references/e2e-command-mode.md\`.
-COMMAND_E2E_BLOCK
-    ;;
-esac)
 
 ## Decision
 After thorough review:
@@ -883,29 +648,28 @@ the wrapper attributes each verdict to its agent by matching the
 \`Review Agent: <name>\` discriminator (INV-40). Do NOT omit it, do NOT
 rename it, do NOT change \`${_agent_name}\`.
 
-- If ALL checklist items pass AND code quality is good$(if [[ "${E2E_ACTIVE:-false}" == "true" ]]; then echo " AND all E2E tests pass"; fi) AND no requirement drift detected:
+- If ALL checklist items pass AND code quality is good$(if [[ "${E2E_ACTIVE:-false}" == "true" ]]; then echo " AND the wrapper-posted E2E evidence covers the acceptance criteria"; fi) AND no requirement drift detected:
   Post a comment on issue #${ISSUE_NUMBER} starting with the exact text
   **\`Review PASSED\`** on the FIRST LINE, like:
 
-  > Review PASSED - All checklist items verified, code quality good.$(if [[ "${E2E_ACTIVE:-false}" == "true" ]]; then echo " E2E verification completed."; fi) No requirement drift.
+  > Review PASSED - All checklist items verified, code quality good.$(if [[ "${E2E_ACTIVE:-false}" == "true" ]]; then echo " E2E evidence reviewed (run once by the wrapper, INV-46)."; fi) No requirement drift.
   > Review Session: \`${_agent_session_id}\`
   > Review Agent: ${_agent_name}
 
   Then exit.
 
-- If ANY item fails$(case "${E2E_MODE:-none}" in browser) echo " OR any E2E test fails OR preview URL is unavailable" ;; command) echo " OR the verify command fails OR the evidence block is missing/malformed" ;; esac) OR requirement drift is detected:
+- If ANY item fails$(if [[ "${E2E_ACTIVE:-false}" == "true" ]]; then echo " OR the posted E2E evidence does NOT cover an acceptance criterion"; fi) OR requirement drift is detected:
   Post a comment on issue #${ISSUE_NUMBER} starting with the exact text
   **\`Review findings:\`** on the FIRST LINE, followed by a numbered list
-  of each failing item with specific remediation instructions.$(case "${E2E_MODE:-none}" in browser) echo "
-  Include E2E failure details with screenshot evidence." ;; command) echo "
-  Include the verify-command exit code and a tail of /tmp/e2e-${PR_NUMBER}.log as evidence." ;; esac)
+  of each failing item with specific remediation instructions.$(if [[ "${E2E_ACTIVE:-false}" == "true" ]]; then echo "
+  For any E2E gap, quote the relevant row of the posted evidence comment (the wrapper ran E2E once — do NOT re-run it)."; fi)
   End the comment with these two lines:
   \`Review Session: \\\`${_agent_session_id}\\\`\`
   \`Review Agent: ${_agent_name}\`
   Then exit.
 
 IMPORTANT: Work autonomously. Be thorough but fair. Focus on correctness and compliance.
-$(if [[ "${E2E_ACTIVE:-false}" == "true" ]]; then echo "E2E verification is MANDATORY — do NOT skip it, do NOT treat it as optional."; fi)
+$(if [[ "${E2E_ACTIVE:-false}" == "true" ]]; then echo "Reviewing the wrapper-posted E2E evidence against the acceptance criteria is MANDATORY — do NOT skip it, do NOT treat it as optional. You do NOT re-run E2E (the wrapper ran it once, INV-46)."; fi)
 EOF
 }
 
@@ -936,6 +700,120 @@ fi
 if [[ "${E2E_MODE:-none}" == "command" ]]; then
   export PR_NUMBER="${PR_NUMBER}"
   export PR_HEAD_SHA="${PR_HEAD_SHA:-}"
+fi
+
+# ---------------------------------------------------------------------------
+# PHASE A: run E2E ONCE, sequentially, before the review fan-out (INV-46, #182)
+# ---------------------------------------------------------------------------
+# Pre-#182 the E2E execution block lived in EVERY review agent's prompt, so an
+# AGENT_REVIEW_AGENTS fan-out of N CLIs ran the full E2E N times (N× pre-hooks,
+# N× verify, N× evidence) racing each other on shared stage state. Now the
+# WRAPPER runs the E2E lane once — the command-mode lane is a pure shell subshell
+# (token-free, setsid+timeout), browser-mode is ONE LLM lane — computes a hard
+# gate from the result, and only fans out the PURE code-review agents on a gate
+# pass. A gate FAIL short-circuits to the FAIL route WITHOUT spawning the N
+# review agents (saves N review runs on a known-bad PR).
+#
+# The lane runs synchronously here, before the fan-out below. Its setsid PGID
+# (_E2E_LANE_PGID, set by the lane) is added to the _reap_fanout_processes arg
+# list so a lingering verify subtree is group-killed when verdicts resolve,
+# exactly like a fan-out agent's PGID. During Phase A itself the SIGTERM trap
+# (install_agent_sigterm_trap) also reaches the lane's setsid child via its
+# `pkill -TERM -P $$` fallback (the lane's `setsid … &` is a direct child of the
+# wrapper shell), so a dispatcher SIGTERM mid-E2E is forwarded promptly.
+#
+# E2E_GATE ∈ { pass | fail | block-nonsubstantive | inactive }:
+#   inactive             — E2E_ACTIVE=false (E2E_MODE=none); no lane, no gate.
+#   pass                 — fan out the review agents (Phase B).
+#   fail                 — substantive E2E failure; route −reviewing +pending-dev
+#                          WITHOUT fan-out.
+#   block-nonsubstantive — rc==0 but no SHA-matching evidence visible after the
+#                          bounded re-fetch (crash-after-parser / transient
+#                          GitHub); re-queue non-substantive (NOT a dev bounce).
+E2E_GATE="inactive"
+# Set to the E2E lane's setsid PGID (command-mode verify subtree, or the browser
+# lane's run_agent group) so the post-fan-out reaper and SIGTERM trap can group-
+# kill a lingering verify subtree. Empty when E2E is inactive or no PGID was set.
+_AGENT_PGIDS_E2E=""
+if [[ "${E2E_ACTIVE:-false}" == "true" ]]; then
+  _E2E_LANE_DIR=$(mktemp -d "/tmp/agent-review-e2e-${ISSUE_NUMBER}-XXXXXX")
+  _E2E_RC_FILE="${_E2E_LANE_DIR}/e2e.rc"
+  log "INV-46: running the E2E lane ONCE before the review fan-out (mode=${E2E_MODE})."
+  case "${E2E_MODE:-none}" in
+    command)
+      _run_command_e2e_lane "$_E2E_RC_FILE"
+      ;;
+    browser)
+      # ONE LLM-driven browser lane (NOT replicated across review agents). The
+      # wrapper stamps the SHA marker after the lane posts its report.
+      _e2e_session_id=$(uuidgen)
+      _e2e_log="/tmp/agent-${PROJECT_ID}-review-${ISSUE_NUMBER}-e2e-browser.log"
+      _e2e_prompt=$(build_browser_e2e_prompt)
+      _e2e_rc=0
+      # Browser lane runs under run_agent; its setsid PGID lands in
+      # _AGENT_RUN_PID. Point AGENT_PID_FILE at a private sidecar so it does NOT
+      # rewrite the shared review-N.pid, then capture the PGID for the reaper.
+      (
+        AGENT_PID_FILE="${_E2E_LANE_DIR}/e2e.pgid"
+        run_agent "$_e2e_session_id" "$_e2e_prompt" "${AGENT_REVIEW_MODEL:-sonnet}" \
+          "review-e2e-pr-${PR_NUMBER}-issue-${ISSUE_NUMBER}" >>"$_e2e_log" 2>&1
+      ) || _e2e_rc=$?
+      # Wrapper-stamp the SHA marker onto the lane's posted report so the gate
+      # anchor is deterministic (the LLM never transcribes the SHA). Stamp ONLY
+      # when the lane exited clean — a failed browser lane should not get a
+      # passing evidence marker.
+      if [[ "$_e2e_rc" -eq 0 && -n "${PR_HEAD_SHA:-}" ]]; then
+        gh pr comment "$PR_NUMBER" --repo "$REPO" \
+          --body "<!-- e2e-evidence: complete sha=\"${PR_HEAD_SHA}\" -->" 2>/dev/null || true
+      fi
+      printf '%s\n' "$_e2e_rc" > "$_E2E_RC_FILE"
+      [[ -f "${_E2E_LANE_DIR}/e2e.pgid" ]] && _E2E_LANE_PGID=$(head -n1 "${_E2E_LANE_DIR}/e2e.pgid" 2>/dev/null || true)
+      ;;
+  esac
+
+  # Read the lane's composite rc, then re-fetch the SHA-matching evidence comment
+  # (bounded retry — the post may still be propagating) for the dual-signal gate.
+  _e2e_lane_rc=$(head -n1 "$_E2E_RC_FILE" 2>/dev/null || echo 1)
+  [[ "$_e2e_lane_rc" =~ ^[0-9]+$ ]] || _e2e_lane_rc=1
+  _e2e_evidence=$(_fetch_sha_evidence 3 5)
+  _e2e_evidence_present=0
+  [[ -n "$_e2e_evidence" ]] && _e2e_evidence_present=1
+  E2E_GATE=$(_classify_e2e_gate "$_e2e_lane_rc" "$_e2e_evidence_present")
+  log "INV-46: E2E hard gate: lane_rc=${_e2e_lane_rc}, evidence_present=${_e2e_evidence_present} → gate=${E2E_GATE}"
+
+  # Capture the lane PGID for the reaper / SIGTERM trap (alongside fan-out PGIDs).
+  if [[ "${_E2E_LANE_PGID:-}" =~ ^[0-9]+$ ]] && [[ "${_E2E_LANE_PGID}" -gt 0 ]]; then
+    _AGENT_PGIDS_E2E="${_E2E_LANE_PGID}"
+  fi
+  rm -rf "$_E2E_LANE_DIR" 2>/dev/null || true
+
+  # E2E gate fail / block → route WITHOUT fanning out the review agents.
+  if [[ "$E2E_GATE" == "fail" ]]; then
+    log "INV-46: E2E hard gate FAIL — overriding to FAIL WITHOUT review fan-out (saves ${#REVIEW_AGENTS_LIST[@]} review run(s))."
+    gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
+      --body "Review findings:
+
+Findings->Decision Gate: 1 blocking finding(s) -- FAIL.
+
+1. **[BLOCKING] E2E verification failed** — the wrapper ran the project E2E once before review (INV-46) and it did NOT pass (lane exit code ${_e2e_lane_rc}). See the E2E failure comment on PR #${PR_NUMBER}. The review agents were NOT run because a failing E2E is a hard gate. Fix the failure and push; the next review round re-runs E2E." 2>/dev/null || true
+    emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-substantive" "" 2>/dev/null || true
+    gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
+      --remove-label "reviewing" --add-label "pending-dev" 2>/dev/null || true
+    log "Issue #${ISSUE_NUMBER} moved to pending-dev (E2E hard gate fail — no fan-out)."
+    RESULT_PARSED=true
+    exit 0
+  elif [[ "$E2E_GATE" == "block-nonsubstantive" ]]; then
+    log "INV-46: E2E lane exited clean but no SHA-matching evidence visible after re-fetch — re-queuing (non-substantive), NO fan-out."
+    gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
+      --body "Review held: the wrapper ran E2E once (INV-46) and it exited clean, but no SHA-matching e2e-evidence comment for HEAD \`${PR_HEAD_SHA:0:7}\` is visible (likely transient — comment-post or GitHub propagation). The PR is NOT auto-reviewed while the evidence is missing; it will be re-reviewed on the next dispatch tick." 2>/dev/null || true
+    emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-non-substantive" "e2e-evidence-missing" 2>/dev/null || true
+    gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
+      --remove-label "reviewing" --add-label "pending-dev" 2>/dev/null || true
+    log "Issue #${ISSUE_NUMBER} moved to pending-dev (E2E evidence missing — re-queue, no fan-out)."
+    RESULT_PARSED=true
+    exit 0
+  fi
+  # gate == pass → fall through to Phase B (review fan-out) below.
 fi
 
 # Per-agent state captured for the collection step.
@@ -973,23 +851,19 @@ _FANOUT_DIR=$(mktemp -d "/tmp/agent-review-fanout-${ISSUE_NUMBER}-XXXXXX")
 # visible in its own log (/tmp/agent-${PROJECT_ID}-review-${N}-${agent}.log).
 log "Fanning out ${#REVIEW_AGENTS_LIST[@]} review agent(s): ${REVIEW_AGENTS_LIST[*]} (shared model: ${AGENT_REVIEW_MODEL:-sonnet})"
 
-# INV-43 (#172): true when ≥2 agents review this PR in parallel. Fed to
-# build_review_prompt so the command-mode E2E block tells each agent a sibling
-# may be running the same (heavy) E2E concurrently → reuse the first sibling's
-# SHA-bound evidence comment rather than each independently re-running the
-# pre-hook build. false for the N=1 default → prompt is byte-for-byte legacy.
-if [[ "${#REVIEW_AGENTS_LIST[@]}" -gt 1 ]]; then
-  _MULTI_AGENT_REVIEW="true"
-else
-  _MULTI_AGENT_REVIEW="false"
-fi
+# INV-46 (#182): these are PURE code-review agents. The E2E ran ONCE in Phase A
+# above and its evidence is already posted as a PR comment; the review prompt
+# tells each agent to READ that posted evidence as input (it no longer contains
+# any E2E execution instructions). The old multi-agent sibling-evidence re-check
+# (INV-43 "duplicated pre-hook shrink") is therefore gone — the wrapper's
+# single-run E2E lane is the strong guarantee that supersedes it.
 
 for _agent in "${REVIEW_AGENTS_LIST[@]}"; do
   _agent_session_id=$(uuidgen)
   AGENT_NAMES+=("$_agent")
   AGENT_SESSION_IDS+=("$_agent_session_id")
   _agent_log="/tmp/agent-${PROJECT_ID}-review-${ISSUE_NUMBER}-${_agent}.log"
-  _agent_prompt=$(build_review_prompt "$_agent" "$_agent_session_id" "$_MULTI_AGENT_REVIEW")
+  _agent_prompt=$(build_review_prompt "$_agent" "$_agent_session_id")
   _agent_rc_file="${_FANOUT_DIR}/${_agent_session_id}.rc"
 
   (
@@ -1194,7 +1068,11 @@ done
 # already exited (the common case, since the fan-out `wait` returned above).
 # Pass the collected setsid PGIDs (NOT the subshell PIDs — those are not group
 # leaders without job control; see _reap_fanout_processes in lib-review-poll.sh).
-_reap_fanout_processes "${_AGENT_PGIDS[@]:-}"
+# INV-46 (#182): also pass the E2E lane's PGID so a lingering command-mode
+# verify subtree (e.g. a long `--watch`) is group-killed here too — the lane ran
+# synchronously in Phase A, so it has normally already exited (no-op), but a
+# subtree the lane backgrounded and orphaned is reaped on this pass.
+_reap_fanout_processes "${_AGENT_PGIDS[@]:-}" "${_AGENT_PGIDS_E2E:-}"
 
 # Aggregate under the unanimous-PASS rule (INV-40). Map the aggregate onto the
 # existing PASSED_VERDICT / LATEST_COMMENT / AGENT_EXIT variables so the

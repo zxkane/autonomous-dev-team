@@ -164,10 +164,12 @@ echo "=== TC-MAR-SRC-12: exactly one aggregated verdict trailer (none in collect
 # emit_verdict_trailer call count: the historical six (crash trap, no-pr, pass,
 # auto-merge-fail, fail-substantive, fail-non-substantive) PLUS the two
 # INV-44 mergeable-gate block paths (CONFLICTING substantive + UNKNOWN
-# non-substantive), both of which sit OUTSIDE the collection loop = 8.
+# non-substantive) PLUS the two INV-46 E2E-gate block paths (#182: E2E-fail
+# substantive + E2E-evidence-missing non-substantive), all of which sit OUTSIDE
+# the collection loop = 10.
 EMIT_COUNT=$(grep -cE '^\s*emit_verdict_trailer ' "$WRAPPER")
-assert_eq "TC-MAR-SRC-12 emit_verdict_trailer call count is 8 (6 legacy + 2 INV-44 gate, none in collection loop)" \
-  "8" "$EMIT_COUNT"
+assert_eq "TC-MAR-SRC-12 emit_verdict_trailer call count is 10 (6 legacy + 2 INV-44 gate + 2 INV-46 E2E gate, none in collection loop)" \
+  "10" "$EMIT_COUNT"
 
 # ---------------------------------------------------------------------------
 echo ""

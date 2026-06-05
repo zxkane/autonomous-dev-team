@@ -164,7 +164,7 @@ EVIDENCE
 
 ## Idempotency
 
-Subsequent review-tick wrappers re-render the prompt with the same `E2E_COMMAND`. To avoid burning compute on already-validated commits, the agent checks for an existing evidence comment on the PR whose marker SHA matches the current HEAD before invoking `E2E_COMMAND`.
+Subsequent review-tick wrappers re-run the lane with the same `E2E_COMMAND`. To avoid burning compute on already-validated commits, the lane checks for an existing evidence comment on the PR whose marker SHA matches the current HEAD before invoking `E2E_COMMAND`.
 
 **Match criterion:** the comment must contain the exact substring
 ```
@@ -173,15 +173,17 @@ e2e-evidence: complete sha="<current-PR-HEAD-SHA>"
 
 A plain marker (without `sha="..."`) does NOT match — that would let stale evidence from a prior commit silently satisfy a re-review of newer code, which was a real footgun in the pre-SHA design.
 
-If the comment SHA does not match the current HEAD SHA, the evidence is stale; the agent re-runs E2E from Step 1.
+If the comment SHA does not match the current HEAD SHA, the evidence is stale; the lane re-runs E2E from Step 1.
 
-The MVP wrapper does NOT enforce this skip — it's the agent's responsibility per the prompt instructions in `autonomous-review.sh` (Step 4b of the command-mode prompt block). A future PR may move the skip into the wrapper itself (via a comment-grep + label combination similar to `reviewing` / `pending-review`).
+**Since #182 ([INV-46](../../../docs/pipeline/invariants.md)) the WRAPPER enforces this skip.** The command-mode E2E now runs **once per review round, in the wrapper, in a dedicated SHELL lane** (`lib-review-e2e.sh::_run_command_e2e_lane`) **before** the review fan-out — not in each review agent's prompt. The lane re-fetches a SHA-matching evidence comment (`_fetch_sha_evidence`) before running anything and reuses it (`rc=0`, no pre-hook, no verify) when present. So the skip is no longer the agent's best-effort responsibility, and the pre-hook + verify run a single time regardless of `AGENT_REVIEW_AGENTS` count.
 
 ---
 
-## Interaction with the multi-agent review wait/stall windows (INV-43, #172)
+## Interaction with the multi-agent review wait/stall windows (INV-43, #172; INV-46, #182)
 
-When a project runs **multi-agent review** (`AGENT_REVIEW_AGENTS` with ≥2 entries) and `E2E_MODE=command` with a slow `E2E_COMMAND_PRE_HOOKS` + a raised `E2E_COMMAND_TIMEOUT_SECONDS`, the review agent that *faithfully* runs the full command-mode E2E used to be dropped as `unavailable` from the unanimous-PASS vote — while a faster agent that did less real verification became the sole decider. Two windows are involved, and both must be sized for the E2E you dispatched.
+> **Post-#182 ([INV-46](../../../docs/pipeline/invariants.md)):** the E2E runs ONCE in a wrapper lane before the review fan-out, so the review agents no longer run E2E at all — the original #172 failure mode (the diligent agent that ran the slow E2E being dropped as `unavailable`) cannot occur, because no review agent runs the E2E. The windows below still matter for the residual review-verdict wait and, critically, for the dispatcher not SIGTERMing the wrapper while its lane runs the E2E synchronously.
+
+When a project runs `E2E_MODE=command` with a slow `E2E_COMMAND_PRE_HOOKS` + a raised `E2E_COMMAND_TIMEOUT_SECONDS`, the wrapper's E2E lane can run for tens of minutes before the review fan-out even starts. Two windows are involved, and both must be sized for the E2E you dispatched.
 
 ### 1. Verdict-poll budget — auto-scaled (handled by the wrapper)
 
@@ -206,11 +208,11 @@ REVIEW_NEAR_SUCCESS_WINDOW_SECONDS=3000   # >= E2E timeout + headroom
 HEARTBEAT_INTERVAL_SECONDS=120            # keep the wrapper's pid_alive fresh
 ```
 
-### 3. Duplicated pre-hook across fan-out agents
+### 3. Duplicated pre-hook across fan-out agents — RESOLVED in #182 (INV-46)
 
-Each fanned-out agent runs `E2E_COMMAND_PRE_HOOKS` independently, so a slow pre-hook (e.g. a container image build) could be dispatched once per agent per round — wasted CI minutes and registry churn. The command-mode prompt's **Step 4b stale-evidence guard** already lets an agent reuse a fresh, SHA-matching `<!-- e2e-evidence: complete sha="..." -->` comment instead of re-running the E2E. In multi-agent mode the wrapper additionally instructs each agent to **re-check for a sibling's SHA-matching evidence immediately before invoking the pre-hooks**, so once the first sibling posts evidence the rest skip their pre-hook + verify and reuse it.
+Pre-#182, each fanned-out agent ran `E2E_COMMAND_PRE_HOOKS` independently, so a slow pre-hook (e.g. a container image build) was dispatched once per agent per round — wasted CI minutes and registry churn, plus per-agent races on shared stage state. The interim mitigation was a prompt-side sibling-evidence re-check immediately before the pre-hooks; it shrank the duplicated window but, because all N agents started simultaneously, could not provably eliminate it (the prior "honest limitation, no silent cap" note).
 
-> **Honest limitation (no silent cap):** because all N agents start simultaneously, in the worst case they all reach the pre-hook re-check inside the same sub-second window before any sibling has posted evidence — so the pre-hook can still run more than once on a given round. The re-check shrinks the duplicated window but does not provably eliminate it. A wrapper-level "run the pre-hook once before fan-out and feed all agents the result" would be the strong guarantee; it changes the command-mode contract (the wrapper, not the agent, would run the E2E) and is deferred. For pre-hooks whose cost matters, make them **idempotent and cache-aware** (e.g. skip the image build if the SHA-tagged image already exists in the registry) so concurrent runs converge cheaply.
+**#182 ([INV-46](../../../docs/pipeline/invariants.md)) lands the deferred strong guarantee.** The wrapper now runs the E2E in a dedicated SHELL lane (`lib-review-e2e.sh::_run_command_e2e_lane`) **once, before the review fan-out**. Because the fan-out has not started when the lane runs, the pre-hook **structurally cannot** run N times — it runs exactly once per review round regardless of `AGENT_REVIEW_AGENTS` count. The review agents are then pure code reviewers that READ the wrapper-posted evidence comment as input; they do not run E2E. Making pre-hooks idempotent and cache-aware is still good hygiene, but it is no longer load-bearing for de-duplication.
 
 ### 4. Orphaned agent processes are reaped
 

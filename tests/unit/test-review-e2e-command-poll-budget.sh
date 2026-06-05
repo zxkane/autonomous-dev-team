@@ -153,10 +153,15 @@ assert_grep "TC-RPB-SRC-06c subshell points AGENT_PID_FILE at a private per-agen
   'AGENT_PID_FILE="\$\{_FANOUT_DIR\}/\$\{?_agent_session_id\}?\.pgid"' "$WRAPPER"
 assert_not_grep "TC-RPB-SRC-06d reaper call does NOT pass the subshell PIDs (_fanout_pids)" \
   '_reap_fanout_processes "\$\{_fanout_pids' "$WRAPPER"
-assert_grep "TC-RPB-SRC-07 build_review_prompt receives a multi-agent signal arg" \
-  'build_review_prompt "\$_agent" "\$_agent_session_id" "\$' "$WRAPPER"
-assert_grep "TC-RPB-SRC-08 command-mode prompt re-checks sibling SHA evidence before pre-hooks (multi-agent)" \
-  'sibling|concurrent.*review agent|another review agent' "$WRAPPER"
+# INV-46 (#182) SUPERSEDED the per-agent E2E entirely: the E2E now runs ONCE in
+# a wrapper lane before the fan-out, so build_review_prompt no longer receives a
+# multi-agent E2E signal arg (it is 2-arg now) and the prompt no longer carries
+# the sibling-evidence re-check (the single lane is the strong guarantee). These
+# two assertions flip to the post-#182 contract.
+assert_grep "TC-RPB-SRC-07 build_review_prompt is 2-arg (INV-46 dropped the multi-agent E2E signal)" \
+  'build_review_prompt "\$_agent" "\$_agent_session_id"\)' "$WRAPPER"
+assert_not_grep "TC-RPB-SRC-08 prompt no longer carries the per-agent sibling-evidence re-check (INV-46 single lane)" \
+  'MULTI-AGENT NOTE \(INV-43\)|re-check .* sibling review agent has already posted' "$WRAPPER"
 assert_grep "TC-RPB-SRC-09 wrapper references INV-43" \
   'INV-43' "$WRAPPER"
 
@@ -222,12 +227,13 @@ assert_grep "TC-RPB-REG-02 _VERDICT_POLL_ATTEMPTS resolved via the resolver" \
   '_VERDICT_POLL_ATTEMPTS=\$\(_resolve_verdict_poll_attempts' "$WRAPPER"
 assert_grep "TC-RPB-REG-03 _aggregate_review_verdicts call unchanged (no INV-40 regression)" \
   'AGGREGATE=\$\(_aggregate_review_verdicts' "$WRAPPER"
-# 8 = the historical six call sites + the two INV-44 mergeable-gate block
-# paths (#176). INV-43 itself adds none; this pin guards against an
-# accidental trailer added by the poll-budget change.
+# 10 = the historical six call sites + the two INV-44 mergeable-gate block
+# paths (#176) + the two INV-46 E2E-gate block paths (#182). INV-43 itself adds
+# none; this pin guards against an accidental trailer added by the poll-budget
+# change.
 EMIT_COUNT=$(grep -cE '^\s*emit_verdict_trailer ' "$WRAPPER")
-assert_eq "TC-RPB-REG-04 emit_verdict_trailer call count is 8 (6 legacy + 2 INV-44 gate)" \
-  "8" "$EMIT_COUNT"
+assert_eq "TC-RPB-REG-04 emit_verdict_trailer call count is 10 (6 legacy + 2 INV-44 gate + 2 INV-46 E2E gate)" \
+  "10" "$EMIT_COUNT"
 
 # ---------------------------------------------------------------------------
 echo ""

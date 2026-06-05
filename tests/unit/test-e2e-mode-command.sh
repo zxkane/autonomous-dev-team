@@ -15,6 +15,13 @@ FAIL=0
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 WRAPPER="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/autonomous-review.sh"
+# INV-46 (#182) moved the E2E EXECUTION out of build_review_prompt into a
+# dedicated wrapper lane: command-mode is now a SHELL lane in lib-review-e2e.sh
+# (_run_command_e2e_lane), browser-mode is one LLM lane (build_browser_e2e_prompt
+# in the same lib). The config-validation assertions below still target the
+# wrapper (validate_e2e_config is unchanged); the execution-semantics assertions
+# now target the lib.
+E2E_LIB="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-review-e2e.sh"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -95,41 +102,41 @@ assert_validate_fails "wrapper exits non-zero with helpful E2E_MODE error" \
 echo ""
 echo "=== TC-E2E-MODE-002: E2E_MODE=none silences E2E section ==="
 # ---------------------------------------------------------------------------
-# The wrapper renders the E2E block conditionally. With E2E_MODE=none (or
-# unset entirely), neither block should appear in the wrapper's heredoc.
-# Verified by checking the wrapper has explicit `case` branches that gate
-# the block rendering on E2E_MODE.
-assert_grep "wrapper has E2E_MODE case dispatch (the gate)" \
+# INV-46 (#182): the wrapper runs the E2E lane conditionally on E2E_ACTIVE
+# (true only for browser|command). E2E_MODE=none → E2E_ACTIVE=false → no lane,
+# no gate. The lane dispatch is a `case "${E2E_MODE}" in command) browser)`
+# guarded by the E2E_ACTIVE check.
+assert_grep "wrapper has E2E_MODE case dispatch in the lane (the gate)" \
   'case[[:space:]]+"\$\{?E2E_MODE' "$WRAPPER"
-assert_grep "wrapper has explicit 'none' branch in case" \
-  '[[:space:]]+none\)' "$WRAPPER"
+assert_grep "wrapper gates the E2E lane on E2E_ACTIVE (none → no lane)" \
+  'if \[\[ "\$\{E2E_ACTIVE:-false\}" == "true" \]\]; then' "$WRAPPER"
 
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== TC-E2E-MODE-003: E2E_MODE=browser preserves existing block ==="
 # ---------------------------------------------------------------------------
-# Existing block header must remain reachable when E2E_MODE=browser.
-assert_grep "browser-mode prompt header present" \
-  "E2E Verification via Chrome DevTools MCP" "$WRAPPER"
-assert_grep "browser branch in case statement" \
+# INV-46: the browser block is now the ONE browser lane prompt in the lib
+# (build_browser_e2e_prompt). Its header must remain present there.
+assert_grep "browser-mode lane prompt header present (lib)" \
+  "E2E Verification via Chrome DevTools MCP" "$E2E_LIB"
+assert_grep "browser branch in the wrapper lane dispatch" \
   '[[:space:]]+browser\)' "$WRAPPER"
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== TC-E2E-MODE-004: E2E_MODE=command injects command-mode block ==="
+echo "=== TC-E2E-MODE-004: E2E_MODE=command runs the shell lane (INV-46) ==="
 # ---------------------------------------------------------------------------
-assert_grep "command-mode prompt header present" \
-  "E2E Verification via project command" "$WRAPPER"
-assert_grep "command branch in case statement" \
+# Command-mode is no longer a prompt block — it's a pure shell lane in the lib.
+assert_grep "command branch in the wrapper lane dispatch" \
   '[[:space:]]+command\)' "$WRAPPER"
-assert_grep "command-mode prompt references E2E_COMMAND" \
-  '\$\{?E2E_COMMAND[^_]' "$WRAPPER"
-assert_grep "command-mode prompt references E2E_COMMAND_EVIDENCE_PARSER" \
-  'E2E_COMMAND_EVIDENCE_PARSER' "$WRAPPER"
-assert_grep "SHA-bound evidence marker present in wrapper" \
-  'e2e-evidence: complete sha=' "$WRAPPER"
-assert_grep "command-mode declares MANDATORY" \
-  "E2E Verification via project command — MANDATORY" "$WRAPPER"
+assert_grep "command lane runs the rendered verify command (lib)" \
+  'E2E_COMMAND_RENDERED' "$E2E_LIB"
+assert_grep "command lane references E2E_COMMAND_EVIDENCE_PARSER_RENDERED (lib)" \
+  'E2E_COMMAND_EVIDENCE_PARSER_RENDERED' "$E2E_LIB"
+assert_grep "SHA-bound evidence marker referenced in lib" \
+  'e2e-evidence: complete sha=' "$E2E_LIB"
+assert_grep "command lane is shell — runs the verify command under bash -c, not run_agent (lib)" \
+  'bash -c "\$\{E2E_COMMAND_RENDERED\}"' "$E2E_LIB"
 
 # ---------------------------------------------------------------------------
 echo ""
@@ -207,15 +214,17 @@ assert_grep "PR_NUMBER empty-guard before substitution" \
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== TC-E2E-MODE-012: F1 fix — decision block branches on E2E_MODE ==="
+echo "=== TC-E2E-MODE-012: INV-46 — decision block is E2E-active aware; log tail in lib ==="
 # ---------------------------------------------------------------------------
-# Before fixup: decision-block FAIL message said "screenshot evidence" for
-# both browser and command mode, which would confuse the agent in
-# command mode (no browser, no screenshots).
-assert_grep "decision FAIL branch differentiates browser vs command" \
-  'case "\$\{?E2E_MODE.*browser\)' "$WRAPPER"
-assert_grep "command-mode FAIL message references log tail (not screenshots)" \
-  'log tail.*evidence|tail of /tmp/e2e-' "$WRAPPER"
+# Pre-#182 the decision block branched on E2E_MODE (browser vs command) to pick
+# "screenshot evidence" vs "log tail". Post-#182 the review agent no longer runs
+# E2E (the wrapper lane does), so the decision block only branches on E2E_ACTIVE
+# (review the posted evidence). The verify-fail log tail now lives in the
+# command-mode shell lane in the lib.
+assert_grep "decision block gates E2E language on E2E_ACTIVE" \
+  'if \[\[ "\$\{E2E_ACTIVE:-false\}" == "true" \]\]; then echo' "$WRAPPER"
+assert_grep "command lane posts a log tail on verify failure (lib)" \
+  'Last 50 lines of' "$E2E_LIB"
 
 # ---------------------------------------------------------------------------
 echo ""
@@ -233,14 +242,14 @@ assert_grep "stale-evidence guard step present" \
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== TC-E2E-MODE-014: F3 fix — parser only on EXIT_CODE ∈ {0, 124} ==="
+echo "=== TC-E2E-MODE-014: parser only on verify exit ∈ {0, 124} (lib, INV-46) ==="
 # ---------------------------------------------------------------------------
-# Running the parser on a hard-failure log produces confusing crashes
-# that mask the real failure. The prompt now gates parser invocation.
-assert_grep "Step 4 gates parser on EXIT_CODE 0 or 124" \
-  'EXIT_CODE.*-eq 0.*-eq 124' "$WRAPPER"
-assert_grep "Step 5 has log-tail fallback for non-{0,124} exits" \
-  'tail -50.*e2e-' "$WRAPPER"
+# Running the parser on a hard-failure log produces confusing crashes that mask
+# the real failure. The shell lane gates parser invocation on the verify rc.
+assert_grep "lane gates parser on verify_rc 0 or 124" \
+  'verify_rc" -eq 0 \|\| .*verify_rc" -eq 124' "$E2E_LIB"
+assert_grep "lane has log-tail fallback for non-{0,124} verify exits" \
+  'tail -50 "\$log"' "$E2E_LIB"
 
 # ---------------------------------------------------------------------------
 echo ""
@@ -272,15 +281,16 @@ assert_grep "wrapper exports PR_NUMBER in command mode" \
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== TC-E2E-MODE-017: F7 fix — Step 4b fetches full comment body via jq ==="
+echo "=== TC-E2E-MODE-017: SHA-evidence re-fetch via jq (lib, INV-46) ==="
 # ---------------------------------------------------------------------------
-# Pre-fix: `gh pr view --jq '.comments[].body' | grep -F` returned only
-# the marker LINE; agent couldn't actually use prior evidence in Step 6.
-# Post-fix: jq filter returns the whole matching comment body.
-assert_grep "Step 4b uses jq select(.body | contains(...)) form" \
-  'comments\[\].*select.*\.body.*contains' "$WRAPPER"
-assert_grep "Step 4b assigns full body to EVIDENCE (not EXISTING)" \
-  'EVIDENCE=\\\$\(gh pr view' "$WRAPPER"
+# The SHA-matching evidence re-fetch (idempotency reuse + the gate's signal-b)
+# is _fetch_sha_evidence in the lib. It selects the matching comment body via
+# jq contains() and takes the full body via `last` (NOT head -1, which would
+# truncate a multi-line evidence block).
+assert_grep "_fetch_sha_evidence uses jq select(.body | contains(...)) form" \
+  'comments\[\].*select.*\.body.*contains' "$E2E_LIB"
+assert_grep "_fetch_sha_evidence takes the full body via last (no head -1 truncation)" \
+  '\] \| last' "$E2E_LIB"
 
 # ---------------------------------------------------------------------------
 echo ""
@@ -315,12 +325,16 @@ echo "=== TC-E2E-MODE-019: F6 fix — pipeline doc documents Step 4b ==="
 # CLAUDE.md "Pipeline Documentation Authority" requires wrapper changes
 # to update docs/pipeline/*.md in same PR. Step 4b was added in fixup
 # 6a5d210; this test pins that the pipeline doc references it.
-assert_grep "pipeline doc documents Step 4b stale-evidence guard" \
-  '(4b|[Ss]tale-evidence)' "$PIPELINE"
-assert_grep "pipeline doc explains parser-skip on hard failures" \
-  'skip the parser|skips the parser|parser would be malformed' "$PIPELINE"
-assert_grep "pipeline doc explains mode-aware decision FAIL message" \
-  'mode-aware|screenshot.*log tail|log tail.*screenshot' "$PIPELINE"
+# INV-46 (#182): the pipeline doc now documents the wrapper E2E lane + gate
+# (Sequential E2E lane section) rather than per-agent prompt steps. It must
+# still explain the stale-evidence skip and the parser-skip-on-hard-failure
+# exit-code semantics that moved into the lane.
+assert_grep "pipeline doc documents the stale-evidence skip / SHA-matching reuse" \
+  '([Ss]tale-evidence|SHA-matching evidence|reuse a SHA-matching)' "$PIPELINE"
+assert_grep "pipeline doc explains parser-skip on hard failures (exit-code semantics)" \
+  'skip parser|skip the parser|other .*skip' "$PIPELINE"
+assert_grep "pipeline doc documents the sequential E2E lane (INV-46)" \
+  'Sequential E2E lane|INV-46' "$PIPELINE"
 
 # ---------------------------------------------------------------------------
 echo ""

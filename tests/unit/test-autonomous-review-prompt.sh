@@ -81,13 +81,19 @@ assert_grep "render_bot_review_section called in PROMPT heredoc" \
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== TC-ARP-04: report-table section uses REVIEW_BOTS_VALIDATED ==="
+echo "=== TC-ARP-04: bot-review section drives off REVIEW_BOTS_VALIDATED, no hardcoded Amazon Q ==="
 # ---------------------------------------------------------------------------
-# The report table at the bottom of the prompt should also drive off the
-# validated list rather than naming Amazon Q specifically.
-assert_grep "report table mentions Configured Review Bots" \
-  "Configured Review Bots" "$WRAPPER"
-assert_not_grep "no '### Amazon Q Developer Review' report header" \
+# The review prompt's bot-review enforcement must drive off the validated list
+# (via render_bot_review_section, asserted above) rather than naming Amazon Q
+# specifically. INV-46 (#182) moved the browser E2E *report table* (which used to
+# carry a "Configured Review Bots" sub-table) out of build_review_prompt into the
+# single browser lane prompt (lib-review-e2e.sh::build_browser_e2e_prompt), so
+# the report-table assertion now targets the lib; the wrapper must NOT carry a
+# hardcoded Amazon Q report header anywhere.
+E2E_LIB="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-review-e2e.sh"
+assert_grep "browser lane prompt has the E2E Verification Report table (moved to lib, INV-46)" \
+  "E2E Verification Report" "$E2E_LIB"
+assert_not_grep "no '### Amazon Q Developer Review' report header in wrapper" \
   "^### Amazon Q Developer Review" "$WRAPPER"
 
 # ---------------------------------------------------------------------------
