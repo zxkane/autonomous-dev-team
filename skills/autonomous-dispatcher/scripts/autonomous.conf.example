@@ -154,7 +154,27 @@ AGENT_PERMISSION_MODE="auto"
 # Prevents hung CLI processes (e.g. claude --resume against a completed
 # session, MCP stdio deadlock) from monopolizing wrapper PID slots.
 # Closes #60 (INV-13).
+#
+# This is the DEV-side cap; the review side has its own (smaller) default —
+# see AGENT_REVIEW_TIMEOUT below.
 AGENT_TIMEOUT="4h"
+
+# AGENT_REVIEW_TIMEOUT: per-side wall-clock cap for REVIEW-agent CLIs only
+# (INV-48, #185). The shared AGENT_TIMEOUT above is generous (4h) because a dev
+# run can legitimately take hours; a code REVIEW is ~1-2 min, so a review CLI
+# that runs for hours is almost always hung. Capping review at 1h by default
+# reaps a silently-hung review CLI ~3h sooner (observed: a review CLI hung for
+# ~3h, holding a wrapper PID slot until the 4h AGENT_TIMEOUT would have fired).
+#
+# Accepts the same coreutils `timeout` units as AGENT_TIMEOUT (s/m/h/d) or a
+# bare integer (seconds). Default 1h. The DEV side is UNAFFECTED — it always
+# uses AGENT_TIMEOUT. A review agent killed BY this cap (CLI exit 124/137) with
+# no posted verdict VETOES the merge (deciding FAIL), it is NOT silently dropped
+# from the multi-agent unanimous-PASS vote.
+#
+# Invalid (non-`timeout`-unit) or `0` values fail loud at review startup
+# (`timeout 0` would DISABLE the cap). Leave unset for the 1h default.
+# AGENT_REVIEW_TIMEOUT="1h"
 
 # Optional launcher prefix wrapped around every claude CLI invocation
 # in run_agent / resume_agent. Use case: bridge dispatcher-spawned
@@ -576,6 +596,16 @@ E2E_PREVIEW_URL_PATTERN=""
 E2E_TEST_USER_EMAIL=""
 E2E_TEST_USER_PASSWORD=""
 E2E_SCREENSHOT_UPLOAD="false"
+
+# E2E_BROWSER_TIMEOUT_SECONDS: wall-clock cap for the browser-mode E2E lane
+# (INV-48, #185). The browser E2E lane is an LLM run_agent lane (INV-46 Phase A),
+# so it would otherwise inherit the aggressive 1h review cap (AGENT_REVIEW_TIMEOUT)
+# and a slow preview deploy / cold start could be killed at 1h. This gives the
+# browser lane its OWN cap, defaulting to the ORIGINAL AGENT_TIMEOUT (4h) so the
+# review-cap shrink does NOT shrink browser E2E. Symmetric with command mode's
+# E2E_COMMAND_TIMEOUT_SECONDS. Accepts `timeout` units (s/m/h/d) or bare seconds;
+# `0` / invalid values fail loud at startup. Leave unset for the 4h default.
+# E2E_BROWSER_TIMEOUT_SECONDS="4h"
 
 # --- Command mode fields (used when E2E_MODE=command) -----------------------
 #

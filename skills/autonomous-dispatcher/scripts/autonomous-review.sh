@@ -74,6 +74,38 @@ AGENT_CMD="$AGENT_REVIEW_CMD"
 # AGENT_REVIEW_LAUNCHER) is byte-identical to AGENT_LAUNCHER.
 AGENT_LAUNCHER_ARGV=("${AGENT_REVIEW_LAUNCHER_ARGV[@]}")
 
+# Per-side review wall-clock timeout (INV-48, #185). AGENT_TIMEOUT (INV-13,
+# default 4h) is shared by dev and review; a silently-hung review CLI holds a
+# wrapper PID slot for the full 4h. Cap the REVIEW side at 1h by default
+# (operator-overridable via AGENT_REVIEW_TIMEOUT) so a hung review CLI is reaped
+# ~3h sooner. The dev side (autonomous-dev.sh) is untouched and keeps 4h.
+#
+# MUST come AFTER `source lib-auth.sh` (same reason as the AGENT_CMD rebind
+# above): lib-auth.sh re-sources the conf, whose unconditional `AGENT_TIMEOUT="4h"`
+# would otherwise clobber this rebind. _run_with_timeout reads the LIVE
+# AGENT_TIMEOUT at call time (lib-agent.sh), and agy reads it via
+# `--print-timeout "$AGENT_TIMEOUT"`, so rebinding here applies to every review
+# fan-out agent with no change to lib-agent.sh's invocation sites.
+#
+# Capture the original (conf) value FIRST — it is the default for the browser-E2E
+# cap below (a slow preview deploy must not be killed at the aggressive 1h review
+# cap). E2E_BROWSER_TIMEOUT_SECONDS is symmetric with command-mode's
+# E2E_COMMAND_TIMEOUT_SECONDS; the browser lane (one run_agent LLM lane, INV-46
+# Phase A) rebinds AGENT_TIMEOUT to it locally and restores afterward.
+#
+# Capture the RAW operator-supplied E2E_BROWSER_TIMEOUT_SECONDS before folding in
+# the default — startup validation below validates the RAW value, NOT the resolved
+# default. The default is `_ORIG_AGENT_TIMEOUT` (the conf's AGENT_TIMEOUT), which
+# the dev side accepts UNVALIDATED; GNU `timeout` also accepts fractional /
+# `infinity` durations that _is_positive_timeout_value rejects, so validating the
+# resolved default would crash the review wrapper on a conf the dev side runs fine
+# (e.g. AGENT_TIMEOUT="1.5h"). Validate only what the operator opted into.
+# AGENT_REVIEW_TIMEOUT needs no raw-capture: line below leaves it unmodified.
+_ORIG_AGENT_TIMEOUT="$AGENT_TIMEOUT"
+_E2E_BROWSER_TIMEOUT_RAW="${E2E_BROWSER_TIMEOUT_SECONDS:-}"
+AGENT_TIMEOUT="${AGENT_REVIEW_TIMEOUT:-1h}"
+E2E_BROWSER_TIMEOUT_SECONDS="${E2E_BROWSER_TIMEOUT_SECONDS:-$_ORIG_AGENT_TIMEOUT}"
+
 # Multi-agent review fan-out list (INV-40, #166). AGENT_REVIEW_AGENTS is a
 # space-separated list of verdict-reaching CLIs (e.g. "agy kiro"). When
 # empty/unset, REVIEW_AGENTS_LIST collapses to ("$AGENT_CMD") — exactly one
@@ -197,6 +229,46 @@ validate_e2e_config() {
 }
 
 validate_e2e_config || exit 1
+
+# ---------------------------------------------------------------------------
+# Review-timeout config validation (INV-48, #185)
+#
+# Fail loud at startup (mirrors validate_e2e_config) if AGENT_REVIEW_TIMEOUT or
+# E2E_BROWSER_TIMEOUT_SECONDS is not a positive coreutils-`timeout` value. The
+# zero case is called out explicitly: GNU `timeout 0` DISABLES the wall-clock
+# bound, so a stray `AGENT_REVIEW_TIMEOUT=0` would silently un-cap the review
+# side — the exact opposite of this feature's intent.
+#
+# Both are validated ONLY for the value the OPERATOR supplied — never the resolved
+# default. AGENT_REVIEW_TIMEOUT is its own raw var (the rebind left it untouched);
+# the browser cap uses the raw-captured _E2E_BROWSER_TIMEOUT_RAW. The resolved
+# defaults are trusted-by-construction: the review default is the literal `1h`,
+# and the browser default is `_ORIG_AGENT_TIMEOUT` (the conf's AGENT_TIMEOUT) —
+# which the dev side honors UNVALIDATED and which GNU `timeout` may legitimately
+# accept in forms this stricter predicate rejects (fractional, `infinity`).
+# Validating the resolved browser default would hard-fail the review wrapper on a
+# conf the dev side runs fine — a back-compat regression. So validate intent only.
+validate_review_timeout_config() {
+  if [[ -n "${AGENT_REVIEW_TIMEOUT:-}" ]] && ! _is_positive_timeout_value "$AGENT_REVIEW_TIMEOUT"; then
+    echo "Error: AGENT_REVIEW_TIMEOUT='${AGENT_REVIEW_TIMEOUT}' is not a positive coreutils-timeout value." >&2
+    echo "  Accepted: a positive integer optionally suffixed s/m/h/d (e.g. 3600, 90m, 2h, 1d)." >&2
+    echo "  Rejected: 0 (GNU 'timeout 0' DISABLES the cap), fractions, negatives, other units." >&2
+    return 1
+  fi
+  if [[ -n "${_E2E_BROWSER_TIMEOUT_RAW:-}" ]] && ! _is_positive_timeout_value "$_E2E_BROWSER_TIMEOUT_RAW"; then
+    echo "Error: E2E_BROWSER_TIMEOUT_SECONDS='${_E2E_BROWSER_TIMEOUT_RAW}' is not a positive coreutils-timeout value." >&2
+    echo "  Accepted: a positive integer optionally suffixed s/m/h/d (e.g. 3600, 90m, 2h, 4h)." >&2
+    echo "  Rejected: 0 (GNU 'timeout 0' DISABLES the cap), fractions, negatives, other units." >&2
+    return 1
+  fi
+  return 0
+}
+
+# Validate the OPERATOR-SUPPLIED values (the raw vars captured BEFORE the rebind
+# block folded in defaults), so an invalid value never reaches a fan-out agent
+# (or the browser lane) because we exit — while a previously-valid conf whose
+# AGENT_TIMEOUT only flows through to the browser DEFAULT is never re-validated.
+validate_review_timeout_config || exit 1
 
 # Derived flag: true when E2E_MODE is one of {browser, command}. Used by
 # downstream blocks that need to know whether E2E is producing output
@@ -347,6 +419,20 @@ trap cleanup EXIT
 # ---------------------------------------------------------------------------
 # Find PR linked to this issue
 # ---------------------------------------------------------------------------
+# Resolved review wall-clock cap (INV-48): the rebound AGENT_TIMEOUT applies to
+# every review fan-out agent; the browser-E2E lane runs under its own
+# (typically larger) cap so a slow preview deploy is not killed at the review
+# cap. Logged once at startup for operator visibility.
+# Source of the resolved review cap, for the operator-facing log only: an
+# explicit AGENT_REVIEW_TIMEOUT, or the 1h default when unset/empty. Computed
+# separately (not inline `:+`/`:-`, which both fire when the var is set and
+# double-print the value).
+if [[ -n "${AGENT_REVIEW_TIMEOUT:-}" ]]; then
+  _review_cap_source="AGENT_REVIEW_TIMEOUT=${AGENT_REVIEW_TIMEOUT}"
+else
+  _review_cap_source="AGENT_REVIEW_TIMEOUT unset → 1h default"
+fi
+log "Review CLI wall-clock cap: ${AGENT_TIMEOUT} (${_review_cap_source}); browser-E2E cap: ${E2E_BROWSER_TIMEOUT_SECONDS}; dev side unaffected (${_ORIG_AGENT_TIMEOUT})."
 log "Finding PR for issue #${ISSUE_NUMBER}..."
 
 # Method 1: Search PRs that reference the issue
@@ -753,7 +839,17 @@ if [[ "${E2E_ACTIVE:-false}" == "true" ]]; then
       # Browser lane runs under run_agent; its setsid PGID lands in
       # _AGENT_RUN_PID. Point AGENT_PID_FILE at a private sidecar so it does NOT
       # rewrite the shared review-N.pid, then capture the PGID for the reaper.
+      #
+      # INV-48 (#185): the browser lane is an LLM run_agent lane, so it would
+      # inherit the (aggressive 1h) review AGENT_TIMEOUT. A real browser smoke
+      # test against a freshly-deployed preview can legitimately exceed 1h (slow
+      # preview build / cold start), so rebind AGENT_TIMEOUT to the browser cap
+      # for THIS lane only. The rebind is inside the lane's subshell, so it is
+      # naturally scoped — the parent's review cap is unchanged for the fan-out
+      # below (no manual restore needed). Symmetric with command-mode, whose
+      # verify already runs under timeout ${E2E_COMMAND_TIMEOUT_SECONDS}.
       (
+        AGENT_TIMEOUT="$E2E_BROWSER_TIMEOUT_SECONDS"
         AGENT_PID_FILE="${_E2E_LANE_DIR}/e2e.pgid"
         run_agent "$_e2e_session_id" "$_e2e_prompt" "${AGENT_REVIEW_MODEL:-sonnet}" \
           "review-e2e-pr-${PR_NUMBER}-issue-${ISSUE_NUMBER}" >>"$_e2e_log" 2>&1
@@ -1059,13 +1155,24 @@ done
 # _VERDICT_POLL_ATTEMPTS and fills AGENT_VERDICTS / AGENT_VERDICT_BODIES.
 _run_verdict_poll_loop
 
-# Any agent still unresolved after the poll window is unavailable (no verdict
-# comment within the window) — INV-40's "unavailable" definition. This is the
-# SINGLE terminal resolution point for a no-verdict agent (#180): whether the
-# CLI exited clean (rc 0) or non-zero, the loop kept polling it for the full
-# budget; only here, at window expiry, is it dropped to `unavailable`.
+# Any agent still unresolved after the poll window is terminally resolved here
+# (no verdict comment within the window). This is the SINGLE terminal resolution
+# point for a no-verdict agent (#180): whether the CLI exited clean (rc 0) or
+# non-zero, the loop kept polling it for the full budget; only here, at window
+# expiry, is it resolved.
+#
+# INV-48 (#185) splits that resolution by launch rc via _classify_noverdict_agent:
+#   - rc 124 (timeout) / 137 (kill-after KILL) → `timed-out` → a DECIDING FAIL
+#     in _aggregate_review_verdicts (the merge is VETOED). A review agent reaped
+#     by the 1h review cap must be loud, not silently dropped — otherwise a 1h
+#     cap could turn a slow-but-legit review (e.g. a >1h CI queue) into a pass.
+#   - any other no-verdict rc (0 clean-but-silent, 1 launch failure, …) →
+#     `unavailable` → dropped from the vote, exactly as before #185.
+# A verdict the agent DID post already won in the poll loop (INV-40 precedence),
+# so this sweep only ever runs for genuinely no-verdict agents.
 for _i in "${!AGENT_NAMES[@]}"; do
-  [[ -z "${AGENT_VERDICTS[$_i]}" ]] && AGENT_VERDICTS[$_i]="unavailable"
+  [[ -n "${AGENT_VERDICTS[$_i]}" ]] && continue
+  AGENT_VERDICTS[$_i]=$(_classify_noverdict_agent "${AGENT_LAUNCH_RC[${AGENT_SESSION_IDS[$_i]}]:-1}")
 done
 
 # INV-43 (#172): reap any fan-out agent process group that is still alive now
@@ -1093,17 +1200,44 @@ log "Per-agent verdicts: ${AGENT_VERDICTS[*]} → aggregate: ${AGGREGATE}"
 # the N=1 case this IS the lone agent's session.
 SESSION_ID="${AGENT_SESSION_IDS[0]}"
 
-# Identify deciding (verdict-producing) vs dropped (unavailable) agents for the
-# human-visible summary on partial unavailability.
+# Identify deciding (verdict-producing OR timed-out-veto) vs dropped
+# (unavailable) agents for the human-visible summary on partial unavailability.
+# A `timed-out` agent (INV-48) is DECIDING — it cast a veto — so it lands in
+# _deciding_agents, NOT _dropped_agents, and is also tracked separately for the
+# loud veto breadcrumb below.
 _dropped_agents=""
 _deciding_agents=""
+_timed_out_agents=""
 for _i in "${!AGENT_NAMES[@]}"; do
-  if [[ "${AGENT_VERDICTS[$_i]}" == "unavailable" ]]; then
-    _dropped_agents+="${AGENT_NAMES[$_i]} "
-  else
-    _deciding_agents+="${AGENT_NAMES[$_i]}(${AGENT_VERDICTS[$_i]}) "
-  fi
+  case "${AGENT_VERDICTS[$_i]}" in
+    unavailable)
+      _dropped_agents+="${AGENT_NAMES[$_i]} "
+      ;;
+    timed-out)
+      _deciding_agents+="${AGENT_NAMES[$_i]}(timed-out) "
+      _timed_out_agents+="${AGENT_NAMES[$_i]} "
+      ;;
+    *)
+      _deciding_agents+="${AGENT_NAMES[$_i]}(${AGENT_VERDICTS[$_i]}) "
+      ;;
+  esac
 done
+
+# Loud timeout-veto breadcrumb (INV-48): a review agent reaped by its wall-clock
+# cap (rc 124/137) with no verdict VETOES the merge. Post ONE human-visible
+# finding so the FAIL is attributable to the timeout (not a silent drop) — this
+# also guarantees LATEST_COMMENT is non-empty below even when EVERY deciding
+# agent was a timeout (no posted bodies), so the run routes as a substantive
+# FAIL with an explanatory comment rather than the empty-comment crash branch.
+if [[ -n "$_timed_out_agents" ]]; then
+  log "INV-48: review agent(s) timed out (rc 124/137, no verdict) — VETO (deciding FAIL): ${_timed_out_agents%% }"
+  gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
+    --body "Review findings:
+
+Findings->Decision Gate: 1 blocking finding(s) -- FAIL.
+
+1. **[BLOCKING] Review agent timed out** — agent(s) \`${_timed_out_agents%% }\` were killed by the review wall-clock cap (\`${AGENT_TIMEOUT}\`, INV-48) before posting a verdict (CLI exit 124/137). A timed-out reviewer VETOES the merge rather than being dropped from the vote. Raise \`AGENT_REVIEW_TIMEOUT\` if reviews legitimately need longer, or investigate why the agent hung (e.g. a >1h CI queue the agent watched). The PR was NOT approved." 2>/dev/null || true
+fi
 
 # LATEST_COMMENT drives (a) the Reviewed-HEAD trailer gate (post only when a
 # verdict exists) and (b) the FAIL-vs-crash branch below. Synthesize it from
@@ -1115,6 +1249,14 @@ for _i in "${!AGENT_NAMES[@]}"; do
     LATEST_COMMENT+="${AGENT_VERDICT_BODIES[$_i]}"$'\n\n'
   fi
 done
+# INV-48: a timed-out agent posts no body, but its veto is a deciding FAIL. Mark
+# LATEST_COMMENT non-empty so this run is treated as a verdict-reaching FAIL (the
+# Reviewed-HEAD trailer is posted, and the downstream FAIL branch takes the
+# substantive path, not the empty-comment crash path). Only matters when there
+# are NO other deciding bodies (e.g. every deciding agent timed out).
+if [[ -z "$LATEST_COMMENT" && -n "$_timed_out_agents" ]]; then
+  LATEST_COMMENT="Review FAILED: agent(s) timed out (review wall-clock cap, INV-48): ${_timed_out_agents%% }"$'\n\n'
+fi
 
 case "$AGGREGATE" in
   pass)
