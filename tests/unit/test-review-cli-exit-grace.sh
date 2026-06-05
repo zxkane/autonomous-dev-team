@@ -316,8 +316,16 @@ assert_not_grep "TC-CXG-SRC-04 per-agent grace array AGENT_EXIT_GRACE_LEFT GONE"
   'AGENT_EXIT_GRACE_LEFT' "$WRAPPER"
 assert_grep "TC-CXG-SRC-05 wrapper references #180 / INV-43 in the verdict-poll section" \
   '#180|INV-43' "$WRAPPER"
-assert_grep "TC-CXG-SRC-06 post-window sweep still defaults unresolved → unavailable" \
-  'AGENT_VERDICTS\[\$_i\]="unavailable"' "$WRAPPER"
+# TC-CXG-SRC-06: the post-window sweep is still the SINGLE terminal resolution
+# point for a no-verdict agent (#180 — no early drop). Since #185 (INV-48) the
+# sweep no longer hard-codes `="unavailable"`; it routes the no-verdict agent
+# through `_classify_noverdict_agent <rc>`, which returns `unavailable` for every
+# rc EXCEPT 124/137 (those become the `timed-out` deciding-FAIL veto). The #180
+# contract — resolution happens ONLY at window-expiry, never mid-loop — is
+# unchanged; only the terminal label is now rc-aware. Assert the sweep delegates
+# to the classifier (the per-rc behavior is covered by test-review-agent-timeout.sh).
+assert_grep "TC-CXG-SRC-06 post-window sweep resolves a no-verdict agent via _classify_noverdict_agent (single terminal point, #180; rc-aware since INV-48)" \
+  'AGENT_VERDICTS\[\$_i\]=\$\(_classify_noverdict_agent' "$WRAPPER"
 # The all-unavailable crash-vs-no-verdict discriminator (~line 1257) must stay
 # byte-for-byte: it indexes AGENT_LAUNCH_RC via AGENT_SESSION_IDS[$_i] and maps
 # a crashed agent (rc != 0) to AGENT_EXIT=1. #180 explicitly says leave it.

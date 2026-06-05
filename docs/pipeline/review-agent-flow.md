@@ -141,6 +141,22 @@ E2E_ACTIVE == false → no lane, no gate (E2E_GATE=inactive); straight to fan-ou
 - **Review agents are PURE code reviewers.** `build_review_prompt` no longer contains any E2E execution block; the prompt tells each agent to READ the wrapper-posted evidence comment as input and cross-check it against the acceptance criteria. They do not run E2E.
 - **Composition**: `final PASS ≡ (E2E_ACTIVE==false OR gate==pass) AND review-unanimity-pass`. Because a gate fail/block exits before the fan-out, only `gate ∈ {pass, inactive}` ever reaches the review aggregation — the AND is enforced by the short-circuit. The E2E gate runs before the [INV-44](invariants.md#inv-44-mergeable-hard-gate--a-conflicting-pr-can-never-reach-approved) mergeable block.
 
+## Per-side review timeout (INV-48)
+
+The review side has its OWN wall-clock cap, separate from the shared 4h `AGENT_TIMEOUT` ([INV-13](invariants.md#inv-13-wall-clock-cap-on-agent-invocations)). In the per-side override block (next to the [INV-37](invariants.md#inv-37-per-side-agent_cmd-precedence) `AGENT_CMD` and [INV-38](invariants.md#inv-38-per-side-agent_launcher-precedence) `AGENT_LAUNCHER_ARGV` rebinds, AFTER `source lib-auth.sh`), the wrapper:
+
+```bash
+_ORIG_AGENT_TIMEOUT="$AGENT_TIMEOUT"                          # the conf 4h (INV-13)
+AGENT_TIMEOUT="${AGENT_REVIEW_TIMEOUT:-1h}"                   # review cap, 1h literal default
+E2E_BROWSER_TIMEOUT_SECONDS="${E2E_BROWSER_TIMEOUT_SECONDS:-$_ORIG_AGENT_TIMEOUT}"  # browser-E2E keeps 4h
+```
+
+Because `_run_with_timeout` reads the LIVE `AGENT_TIMEOUT` at call time, this rebind caps every review fan-out agent at the review timeout — with no change to `lib-agent.sh`. The **dev wrapper is untouched** (keeps 4h); it never reads `AGENT_REVIEW_TIMEOUT`. See [INV-48](invariants.md#inv-48-per-side-review-wall-clock-timeout-agent_review_timeout-1h-default-with-browser-e2e-exclusion-and-timeout-veto). Three safety rails make the aggressive 1h cap safe:
+
+- **Browser-E2E exclusion.** The browser-mode E2E lane ([INV-46](invariants.md#inv-46-e2e-runs-once-in-a-dedicated-lane-before-the-review-fan-out--gated-not-per-agent) Phase A) is an LLM `run_agent` lane that would otherwise inherit the 1h cap; it runs under a LOCAL `AGENT_TIMEOUT="$E2E_BROWSER_TIMEOUT_SECONDS"` rebind inside its existing subshell (naturally scoped; the parent's review cap is unchanged for the fan-out), defaulting to the original 4h so a slow preview deploy is not killed at 1h. Command-mode E2E already runs its verify under `timeout … ${E2E_COMMAND_TIMEOUT_SECONDS}` and is unaffected.
+- **Timeout-veto.** A fan-out agent killed BY the cap (CLI exit `124`/`137`) with no posted verdict is classified `timed-out` and counted as a deciding FAIL ([INV-40](invariants.md#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback) amendment) — it VETOES the merge instead of being silently dropped as `unavailable`. See [Aggregation](#aggregation-unanimous-pass) below.
+- **Startup validation.** `validate_review_timeout_config` rejects non-`timeout`-unit and `0` values for `AGENT_REVIEW_TIMEOUT` / `E2E_BROWSER_TIMEOUT_SECONDS` (fail-loud, mirrors `validate_e2e_config`); a startup `log` line reports the resolved review cap, browser-E2E cap, and the unaffected dev cap.
+
 ## Multi-agent fan-out (INV-40)
 
 By default the wrapper runs exactly ONE verdict-reaching agent (`AGENT_REVIEW_CMD`, the per-side review CLI). Setting `AGENT_REVIEW_AGENTS` to a space-separated list (e.g. `"agy kiro"`) makes the wrapper run all listed agents **in parallel against the same PR** and gate the merge on their **unanimous agreement** ([INV-40](invariants.md#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback)). The fan-out is entirely internal to the wrapper: the dispatcher, the single `review-${N}.pid` file, and the `reviewing` label are unchanged.
@@ -168,14 +184,14 @@ The fan-out loop appends each subshell's PID (`$!`) to a `_fanout_pids` array an
 
 ### Per-agent verdict collection
 
-For each agent, the wrapper runs ONE verdict jq query with the [INV-20](invariants.md#inv-20-verdict-authenticity-binding-actor--window--trailer-presence) authenticity binding PLUS a per-agent `Review Agent: <name>` discriminator predicate, taking `last` per agent. Each matched comment is classified with the existing two-step FAIL-first rule (`_classify_verdict_body`, in `lib-review-poll.sh`). An agent is **unavailable** when it produced no classifiable verdict comment within the full (INV-43-scaled) poll window — regardless of whether its CLI exited clean or non-zero; a non-zero exit does **not** drop it early (see [Verdict polling](#verdict-polling), #180). A verdict (PASS or FAIL) it *did* post always counts, even if the CLI also exited non-zero.
+For each agent, the wrapper runs ONE verdict jq query with the [INV-20](invariants.md#inv-20-verdict-authenticity-binding-actor--window--trailer-presence) authenticity binding PLUS a per-agent `Review Agent: <name>` discriminator predicate, taking `last` per agent. Each matched comment is classified with the existing two-step FAIL-first rule (`_classify_verdict_body`, in `lib-review-poll.sh`). A no-verdict agent is resolved at window-expiry by `lib-review-aggregate.sh::_classify_noverdict_agent <rc>` ([INV-48](invariants.md#inv-48-per-side-review-wall-clock-timeout-agent_review_timeout-1h-default-with-browser-e2e-exclusion-and-timeout-veto)): CLI exit `124`/`137` (killed by the review wall-clock cap) → **`timed-out`** (a deciding FAIL veto), any other rc → **`unavailable`** (dropped). The window is the full (INV-43-scaled) poll window — a non-zero exit does **not** drop it early (see [Verdict polling](#verdict-polling), #180), and a verdict (PASS or FAIL) it *did* post always counts, even if the CLI also exited non-zero.
 
 ### Aggregation (unanimous PASS)
 
 `lib-review-aggregate.sh::_aggregate_review_verdicts` collapses the per-agent outcomes:
 - PASS iff ≥1 deciding agent AND every deciding agent passed;
-- any deciding FAIL → FAIL;
-- zero deciding agents (all unavailable) → `all-unavailable`.
+- any deciding FAIL → FAIL — including a `timed-out` veto ([INV-48](invariants.md#inv-48-per-side-review-wall-clock-timeout-agent_review_timeout-1h-default-with-browser-e2e-exclusion-and-timeout-veto): an agent killed by the review cap with no verdict is deciding, not dropped);
+- zero deciding agents (all `unavailable`) → `all-unavailable` (a `timed-out` agent is deciding, so a round with any `timed-out` agent is `fail`, never `all-unavailable`).
 
 The aggregate maps onto the existing `PASSED_VERDICT` / `LATEST_COMMENT` / `AGENT_EXIT` variables, so the downstream PASS / FAIL / crash branches run UNCHANGED — exactly one aggregated INV-35 verdict trailer and one INV-04 Reviewed-HEAD trailer per run. `all-unavailable` sets `LATEST_COMMENT=""` and falls back to the single-agent FAIL path, preserving the legacy `AGENT_EXIT` distinction so N=1 is byte-for-byte: `AGENT_EXIT=1` when any agent's CLI actually crashed (rc ≠ 0) → crash-fallback comment + `failed-non-substantive other`; `AGENT_EXIT=0` when every agent exited cleanly but posted no verdict → no crash comment + `failed-substantive`. On *partial* unavailability the wrapper posts one human-visible summary comment (dropped vs. deciding agents) and logs a WARN, then decides on the deciding agents.
 

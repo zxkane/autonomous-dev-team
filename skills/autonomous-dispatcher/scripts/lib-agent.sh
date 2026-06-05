@@ -228,6 +228,21 @@ if [[ -z "$_AGENT_TIMEOUT_CMD" ]]; then
   echo "[lib-agent] WARN: neither 'timeout' nor 'gtimeout' found on PATH; agent invocations will run without a wall-clock bound. Install coreutils to enable INV-13." >&2
 fi
 
+# _is_positive_timeout_value <value> — true (rc 0) iff <value> is a positive
+# coreutils-`timeout` duration: a positive integer optionally suffixed with one
+# of s/m/h/d (e.g. 3600, 30s, 90m, 2h, 1d). Rejects the empty string, a bare or
+# suffixed zero (GNU `timeout 0` DISABLES the cap — exactly the silent-no-bound
+# footgun this validates against), fractions, negatives, and any other unit.
+# Pure (no side effects); lives here next to AGENT_TIMEOUT / INV-13 so review
+# (AGENT_REVIEW_TIMEOUT) and browser-E2E (E2E_BROWSER_TIMEOUT_SECONDS) caps —
+# both `timeout`-unit values — can be validated by the same predicate and
+# unit-tested in isolation (INV-48).
+_is_positive_timeout_value() {
+  local v="${1:-}"
+  # Anchored: 1+ digits with a non-zero leading digit, optional single unit.
+  [[ "$v" =~ ^[1-9][0-9]*[smhd]?$ ]]
+}
+
 # _run_with_timeout — invoke "$@" under timeout if available, otherwise run
 # directly. AGENT_LAUNCHER_ARGV (if set) is prepended to the command inside
 # the timeout boundary so a hung launcher is still killed.
