@@ -80,6 +80,46 @@ Optional but recommended:
 
 The wrapper does NOT validate the structure beyond checking for the marker. The PR reviewer (human) and the review agent (LLM) are the structural reviewers — keep the format readable.
 
+### Optional structured AC-coverage artifact (INV-47, #183)
+
+The parser MAY **additionally** emit a machine-readable AC-coverage map so the review fan-out double-checks acceptance-criteria coverage **deterministically** instead of LLM-parsing the free-form markdown table (a re-worded header, merged cell, or truncated row can otherwise make the double-check miss a *failing* criterion). The parser already computes the per-criterion pass/fail when it builds the markdown table; this just exposes it.
+
+**The artifact is OPTIONAL — a parser that omits it keeps the exact pre-#183 behavior** (the review agents LLM-parse the free-form evidence comment, as since #182).
+
+**Emission contract.** Embed the JSON inside an HTML-comment fence anywhere in the evidence block. HTML comments render invisibly, so the posted comment stays readable, and the fence travels into the SHA-bound comment so it's recoverable on the idempotent reuse path:
+
+```
+<!-- ac-coverage:begin
+{ "<criterion-id-or-text>": "pass" | "fail", ... }
+ac-coverage:end -->
+```
+
+- A flat JSON object: keys are criterion ids/text, every value is exactly the string `"pass"` or `"fail"`.
+- The wrapper's command-mode E2E lane (`lib-review-e2e.sh::_extract_ac_coverage_artifact`) extracts the bytes between the fence lines and validates them with `jq`.
+
+**Fail-safe, not fail-open.** If the fence is absent, the JSON is unparseable, it isn't an object, or a value is outside `{pass, fail}`, the wrapper logs a warning and falls back to the free-form double-check (`E2E_AC_COVERAGE_FILE` is written empty). A malformed artifact **never** silently passes the gate and **never** crashes the lane. When `jq` is unavailable, the artifact is ignored (the structured check is an optimization, not a hard dependency).
+
+**Flow.** On a gate pass the lane writes the validated JSON (or empty) to the per-round sidecar `E2E_AC_COVERAGE_FILE` (`/tmp/e2e-ac-coverage-${PR_NUMBER}.json`). When that sidecar is non-empty, each review agent's prompt prefers the structured map: it verifies each `## Acceptance Criteria` item from the map and only falls back to the free-form comment for a criterion absent from the map. The artifact is a **review double-check aid only** — it does NOT change the E2E hard gate (`_classify_e2e_gate` stays the INV-46 dual-signal rc + evidence decision).
+
+Example evidence block that emits the artifact:
+
+```markdown
+## E2E Evidence (auto)
+
+| Acceptance criterion | Result |
+|---|---|
+| raw.json has ≥3 distinct clusters | ✅ (4) |
+| verified.json has ≥3 named speakers | ❌ (2) |
+
+<!-- ac-coverage:begin
+{ "raw.json has >= 3 distinct clusters": "pass", "verified.json has >= 3 named speakers": "fail" }
+ac-coverage:end -->
+
+<!-- e2e-evidence: complete sha="<HEAD-SHA>" -->
+```
+
+> Scope is **command-mode only**. Browser-mode evidence is free-form by nature; there is no browser-mode structured equivalent.
+
 ---
 
 ## Exit-code semantics
