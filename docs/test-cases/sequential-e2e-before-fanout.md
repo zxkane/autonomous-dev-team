@@ -49,6 +49,18 @@ The review wrapper is too heavy to run end-to-end, so coverage is three-pronged
 | TC-SE2E-FETCH-02 | only stale-SHA comment | echoes empty |
 | TC-SE2E-FETCH-03 | bounded retry then still empty | returns empty after the retry budget (no hang) |
 
+## TC-SE2E-STAMP: `_stamp_browser_evidence_marker` (codex review fix — browser mode stamps the REPORT, fails closed otherwise)
+
+| ID | scenario | expected |
+|---|---|---|
+| TC-SE2E-STAMP-01 | a `## E2E Verification Report` comment present | helper PATCHes it (marker appended onto the report), returns 0 |
+| TC-SE2E-STAMP-02 | **no report comment (the marker-only regression)** | helper returns non-zero (gate fails closed), no PATCH attempted |
+| TC-SE2E-STAMP-03 | report already carries the SHA marker | returns 0, no redundant PATCH (idempotent) |
+| TC-SE2E-STAMP-04 | wrapper source-of-truth | wrapper posts NO standalone marker-only `gh pr comment` for the browser marker |
+| TC-SE2E-STAMP-05 | wrapper source-of-truth | wrapper calls `_stamp_browser_evidence_marker` in the browser lane |
+| TC-SE2E-STAMP-06 | wrapper source-of-truth | a stamp failure forces E2E FAIL (`if ! _stamp_browser_evidence_marker; then … rc=1`) |
+| TC-SE2E-STAMP-07 | lib source-of-truth | helper PATCHes the report comment in place (`gh api -X PATCH … issues/comments`) |
+
 ## TC-SE2E-SRC: source-of-truth greps (autonomous-review.sh / build_review_prompt)
 
 | ID | assertion |

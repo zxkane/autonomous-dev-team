@@ -246,6 +246,111 @@ if [[ -f "$E2E_LIB" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
+echo "=== TC-SE2E-STAMP: _stamp_browser_evidence_marker stamps the REPORT, fails closed otherwise (codex review, #182) ==="
+# ---------------------------------------------------------------------------
+# The browser lane must stamp the SHA marker ONTO the LLM-posted
+# '## E2E Verification Report' comment — NOT post a standalone marker-only
+# comment. A marker-only comment would (a) let the gate pass with no real
+# evidence and (b) hand reviewers a comment with no tables/screenshots/AC. The
+# helper edits the report comment via REST PATCH, or returns 1 (gate fails
+# closed) when no report exists.
+if [[ -f "$E2E_LIB" ]]; then
+  # Harness: stub `gh api` to model the REST endpoints the helper hits:
+  #   GET  issues/<pr>/comments            → the comment list (jq filtered)
+  #   GET  issues/comments/<id>            → a single comment body
+  #   PATCH issues/comments/<id> -f body=… → records the new body
+  # The stub records whether a PATCH happened and whether a standalone
+  # marker-only `gh pr comment` was ever posted (it must NOT be).
+  _stamp_harness() {
+    local setup="$1"
+    env -i PATH="$PATH" bash -c "
+      set -uo pipefail
+      source '$E2E_LIB'
+      log() { :; }
+      TMPD=\$(mktemp -d)
+      export PR_NUMBER=42 REPO=owner/repo REPO_OWNER=owner REPO_NAME=repo \\
+        PR_HEAD_SHA=deadbeefcafe BOT_LOGIN=bot WRAPPER_START_TS=2026-01-01T00:00:00Z
+      export PATCH_FLAG=\"\$TMPD/patched\"; : > \"\$PATCH_FLAG\"
+      $setup
+      if _stamp_browser_evidence_marker; then echo 'STAMP_RC=0'; else echo \"STAMP_RC=\$?\"; fi
+      echo \"PATCHED=\$([[ -s \"\$PATCH_FLAG\" ]] && echo yes || echo no)\"
+    "
+  }
+
+  # TC-SE2E-STAMP-01: a real report comment present → helper PATCHes it, returns 0.
+  # The stub models the two GET queries the helper issues (the comment-list query,
+  # which the helper --jq-reduces to the report comment's .id, and the
+  # single-comment body fetch) plus the PATCH edit. Because the helper passes its
+  # own --jq, the stub returns the already-reduced value (the .id / the body).
+  out=$(_stamp_harness '
+    gh() {
+      local is_patch=0; for a in "$@"; do [[ "$a" == "PATCH" ]] && is_patch=1; done
+      if [[ "$is_patch" == 1 ]]; then echo edited > "$PATCH_FLAG"; return 0; fi
+      case "$*" in
+        *"issues/42/comments"*) echo 99 ;;                 # list query → .id of the report
+        *"issues/comments/99"*) printf "## E2E Verification Report\n| Total | 1 |" ;;  # body
+      esac
+    }
+  ')
+  assert_grep "TC-SE2E-STAMP-01 report present → stamp returns 0" \
+    "STAMP_RC=0" <(printf '%s\n' "$out")
+  assert_grep "TC-SE2E-STAMP-01b report present → PATCH happened (marker stamped onto report)" \
+    "PATCHED=yes" <(printf '%s\n' "$out")
+
+  # TC-SE2E-STAMP-02 (CORE REGRESSION): NO report comment → helper returns 1
+  # (gate fails closed) and does NOT PATCH anything.
+  out=$(_stamp_harness '
+    gh() {
+      local is_patch=0; for a in "$@"; do [[ "$a" == "PATCH" ]] && is_patch=1; done
+      if [[ "$is_patch" == 1 ]]; then echo edited > "$PATCH_FLAG"; return 0; fi
+      case "$*" in
+        *"issues/42/comments"*) printf "" ;;   # list query → no report comment found (empty .id)
+      esac
+    }
+  ')
+  assert_grep "TC-SE2E-STAMP-02 no report comment → stamp returns non-zero (fail closed)" \
+    "STAMP_RC=1" <(printf '%s\n' "$out")
+  assert_grep "TC-SE2E-STAMP-02b no report comment → no PATCH attempted" \
+    "PATCHED=no" <(printf '%s\n' "$out")
+
+  # TC-SE2E-STAMP-03 (idempotent): report ALREADY carries the SHA marker → 0, no PATCH.
+  out=$(_stamp_harness '
+    gh() {
+      local is_patch=0; for a in "$@"; do [[ "$a" == "PATCH" ]] && is_patch=1; done
+      if [[ "$is_patch" == 1 ]]; then echo edited > "$PATCH_FLAG"; return 0; fi
+      case "$*" in
+        *"issues/42/comments"*) echo 99 ;;
+        *"issues/comments/99"*) printf "## E2E Verification Report\n<!-- e2e-evidence: complete sha=\"deadbeefcafe\" -->" ;;
+      esac
+    }
+  ')
+  assert_grep "TC-SE2E-STAMP-03 already-stamped report → returns 0 (idempotent)" \
+    "STAMP_RC=0" <(printf '%s\n' "$out")
+  assert_grep "TC-SE2E-STAMP-03b already-stamped report → no redundant PATCH" \
+    "PATCHED=no" <(printf '%s\n' "$out")
+
+  # TC-SE2E-STAMP-04 (source-of-truth, the codex finding): the wrapper must NOT
+  # post a standalone marker-only `gh pr comment … <!-- e2e-evidence: complete
+  # sha=… -->` for the browser SHA marker — it routes the stamp through
+  # _stamp_browser_evidence_marker (which edits the report) instead. Check that
+  # no `gh pr comment` body line in the wrapper is a bare e2e-evidence marker.
+  if grep -nE 'gh pr comment .*--body "<!-- e2e-evidence: complete sha=' "$WRAPPER" >/dev/null 2>&1 \
+     || grep -nE '^\s*--body "<!-- e2e-evidence: complete sha=' "$WRAPPER" >/dev/null 2>&1; then
+    echo -e "  ${RED}FAIL${NC}: TC-SE2E-STAMP-04 wrapper still posts a marker-only e2e-evidence comment"
+    FAIL=$((FAIL + 1))
+  else
+    echo -e "  ${GREEN}PASS${NC}: TC-SE2E-STAMP-04 wrapper does not post a marker-only e2e-evidence comment"
+    PASS=$((PASS + 1))
+  fi
+  assert_grep "TC-SE2E-STAMP-05 wrapper calls _stamp_browser_evidence_marker in the browser lane" \
+    '_stamp_browser_evidence_marker' "$WRAPPER"
+  assert_grep "TC-SE2E-STAMP-06 stamp failure forces E2E FAIL (no marker-only pass)" \
+    'if ! _stamp_browser_evidence_marker; then' "$WRAPPER"
+  assert_grep "TC-SE2E-STAMP-07 helper PATCHes the report comment in place (REST edit)" \
+    'gh api -X PATCH .*issues/comments' "$E2E_LIB"
+fi
+
+# ---------------------------------------------------------------------------
 echo "=== TC-SE2E-REG: pre-hook invoked EXACTLY ONCE per N=3 round (CRITICAL) ==="
 # ---------------------------------------------------------------------------
 # The N×-build regression this design exists to kill. The lane runs in Phase A

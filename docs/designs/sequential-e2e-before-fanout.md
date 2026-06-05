@@ -121,12 +121,25 @@ contract but now wrapper-side.
 ### 3. browser-mode E2E stays an LLM lane, but only ONE
 
 `E2E_MODE=browser` needs an LLM to drive Chrome DevTools MCP, so it remains a
-single LLM-driven lane (`_run_browser_e2e_lane`) — not replicated across the N
-review agents. The LLM judges and posts the report; the **wrapper** (not the
-LLM) mechanically appends the `<!-- e2e-evidence: complete sha="${PR_HEAD_SHA}" -->`
-marker once the lane's verdict is PASS, so the gate anchor is deterministic in
-both modes (the LLM never has to transcribe the SHA). The browser lane reuses
-`run_agent` with a dedicated browser-only prompt (`build_browser_e2e_prompt`).
+single LLM-driven lane — not replicated across the N review agents. The browser
+lane reuses `run_agent` with a dedicated browser-only prompt
+(`build_browser_e2e_prompt`). The LLM judges and posts a `## E2E Verification
+Report` PR comment (tables, screenshots, AC results); the **wrapper** (not the
+LLM) then mechanically stamps the `<!-- e2e-evidence: complete sha="${PR_HEAD_SHA}" -->`
+marker **onto that report comment** via `_stamp_browser_evidence_marker` (REST
+`PATCH issues/comments/<id>`, idempotent) once the lane exits clean, so the gate
+anchor is deterministic in both modes (the LLM never has to transcribe the SHA).
+
+**Stamp the report, not a separate comment (codex review fix).** The marker MUST
+land on the report comment, never as a standalone marker-only comment:
+`_fetch_sha_evidence` selects the latest comment containing the marker, so a
+marker-only comment would let the gate pass with no real evidence AND hand the
+review agents an empty comment. If the lane exits clean but no `## E2E
+Verification Report` comment exists to stamp, `_stamp_browser_evidence_marker`
+returns non-zero and the wrapper forces the lane rc non-zero → the gate **fails
+closed**. The report comment is matched by the INV-20 binding (latest by
+`BOT_LOGIN`, `created_at >= WRAPPER_START_TS`, body contains `## E2E Verification
+Report`; actor predicate dropped on the `BOT_LOGIN`-empty fallback).
 
 ### 4. Review-agent prompts drop the E2E execution block
 

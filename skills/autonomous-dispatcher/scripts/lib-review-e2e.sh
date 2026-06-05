@@ -256,6 +256,86 @@ _run_command_e2e_verify() {
 }
 
 # ---------------------------------------------------------------------------
+# _stamp_browser_evidence_marker — stamp the SHA marker ONTO the browser lane's
+# posted E2E report comment (issue #182, codex review fix).
+#
+# The browser lane LLM posts a `## E2E Verification Report` PR comment (tables,
+# screenshots, AC results). This helper finds THAT report comment and edits it
+# in place to append the SHA-bound marker
+# `<!-- e2e-evidence: complete sha="${PR_HEAD_SHA}" -->`. It MUST NOT post a
+# standalone marker-only comment: `_fetch_sha_evidence` selects the latest
+# comment containing the marker, so a marker-only comment would let the gate pass
+# AND would hand the review agents a comment with NO actual evidence (no tables,
+# no screenshots, no AC coverage). Stamping the marker onto the report keeps the
+# report + marker in ONE comment, so the gate's evidence-present signal and the
+# review agents' evidence-read both resolve to the real report.
+#
+# Report-comment match (mirrors the INV-20 verdict binding): the LATEST PR
+# comment authored by BOT_LOGIN (when set), created at/after WRAPPER_START_TS,
+# whose body contains `## E2E Verification Report`. When BOT_LOGIN is unset
+# (gh api user 403 in app mode — the documented fallback), the actor predicate is
+# dropped and the time-window + report-header predicates narrow it.
+#
+# Returns 0 on a successful stamp (or when the report is ALREADY stamped —
+# idempotent). Returns 1 when NO report comment is found or the edit fails — the
+# caller (wrapper) treats a non-zero return as "no usable evidence" so the gate
+# fails closed instead of passing on a fabricated marker.
+#
+# Reads PR_NUMBER / REPO_OWNER / REPO_NAME / PR_HEAD_SHA / BOT_LOGIN /
+# WRAPPER_START_TS from the environment (all set by the wrapper before the lane).
+_stamp_browser_evidence_marker() {
+  local marker="<!-- e2e-evidence: complete sha=\"${PR_HEAD_SHA}\" -->"
+  # Author predicate: bind to BOT_LOGIN when available, else drop it (the same
+  # fallback INV-20 uses when `gh api user` can't introspect the bot identity).
+  local _author_jq=""
+  if [[ -n "${BOT_LOGIN:-}" ]]; then
+    _author_jq="(.user.login == \"${BOT_LOGIN}\") and "
+  fi
+  # Find the latest report comment's numeric REST id. PR comments are issue
+  # comments for this endpoint. `last` → most recent matching report.
+  #
+  # `gh api --paginate` applies --jq PER PAGE and concatenates, so on a PR with
+  # >100 comments spread across pages this can emit one id per page. `tail -n1`
+  # collapses that to the single most-recent id (pages arrive in ascending order,
+  # so the last line is the newest) — the numeric guard below would otherwise
+  # reject a multi-line value and fail closed, harmlessly but with a spurious
+  # re-queue on very long PRs.
+  local _comment_id
+  _comment_id=$(gh api "repos/${REPO_OWNER}/${REPO_NAME}/issues/${PR_NUMBER}/comments" --paginate \
+    --jq "[.[] | select(${_author_jq}(.created_at >= \"${WRAPPER_START_TS}\") and (.body | contains(\"## E2E Verification Report\")))] | last | .id" \
+    2>/dev/null | tail -n1 || true)
+
+  if ! [[ "$_comment_id" =~ ^[0-9]+$ ]]; then
+    log "INV-46: browser lane posted NO '## E2E Verification Report' comment to stamp — gate fails closed (no marker-only fabrication)."
+    return 1
+  fi
+
+  # Fetch the current body so we can append the marker (idempotent: skip if the
+  # SHA marker is already present, e.g. a re-run against the same comment).
+  local _body
+  _body=$(gh api "repos/${REPO_OWNER}/${REPO_NAME}/issues/comments/${_comment_id}" \
+    --jq '.body' 2>/dev/null || true)
+  if [[ -z "$_body" ]]; then
+    log "INV-46: could not read the report comment body (id=${_comment_id}) — gate fails closed."
+    return 1
+  fi
+  if printf '%s' "$_body" | grep -qF "e2e-evidence: complete sha=\"${PR_HEAD_SHA}\""; then
+    log "INV-46: report comment (id=${_comment_id}) already carries the SHA marker — idempotent skip."
+    return 0
+  fi
+
+  # PATCH the report comment, appending the marker on its own line. -f body=…
+  # sends the field as a string; the literal newline is embedded via $'...'.
+  if gh api -X PATCH "repos/${REPO_OWNER}/${REPO_NAME}/issues/comments/${_comment_id}" \
+      -f body="${_body}"$'\n\n'"${marker}" >/dev/null 2>&1; then
+    log "INV-46: stamped SHA marker onto the browser E2E report comment (id=${_comment_id})."
+    return 0
+  fi
+  log "INV-46: failed to stamp the SHA marker onto the report comment (id=${_comment_id}) — gate fails closed."
+  return 1
+}
+
+# ---------------------------------------------------------------------------
 # build_browser_e2e_prompt — the ONE browser-mode E2E lane prompt (issue #182).
 #
 # E2E_MODE=browser needs an LLM to drive Chrome DevTools MCP, so it stays an

@@ -758,13 +758,19 @@ if [[ "${E2E_ACTIVE:-false}" == "true" ]]; then
         run_agent "$_e2e_session_id" "$_e2e_prompt" "${AGENT_REVIEW_MODEL:-sonnet}" \
           "review-e2e-pr-${PR_NUMBER}-issue-${ISSUE_NUMBER}" >>"$_e2e_log" 2>&1
       ) || _e2e_rc=$?
-      # Wrapper-stamp the SHA marker onto the lane's posted report so the gate
-      # anchor is deterministic (the LLM never transcribes the SHA). Stamp ONLY
-      # when the lane exited clean — a failed browser lane should not get a
-      # passing evidence marker.
+      # Wrapper-stamp the SHA marker ONTO the lane's posted '## E2E Verification
+      # Report' comment so the gate anchor is deterministic (the LLM never
+      # transcribes the SHA) AND the gate's evidence-present signal resolves to
+      # the REAL report (tables/screenshots/AC), not a marker-only comment. Stamp
+      # ONLY when the lane exited clean. If the lane exited 0 but posted no
+      # report comment to stamp (_stamp_browser_evidence_marker returns 1), force
+      # _e2e_rc non-zero so the gate fails closed — a clean exit with no evidence
+      # report must NOT pass on a fabricated marker (codex review, #182).
       if [[ "$_e2e_rc" -eq 0 && -n "${PR_HEAD_SHA:-}" ]]; then
-        gh pr comment "$PR_NUMBER" --repo "$REPO" \
-          --body "<!-- e2e-evidence: complete sha=\"${PR_HEAD_SHA}\" -->" 2>/dev/null || true
+        if ! _stamp_browser_evidence_marker; then
+          log "INV-46: browser lane exited 0 but had no stampable E2E report comment — forcing E2E FAIL (no marker-only pass)."
+          _e2e_rc=1
+        fi
       fi
       printf '%s\n' "$_e2e_rc" > "$_E2E_RC_FILE"
       [[ -f "${_E2E_LANE_DIR}/e2e.pgid" ]] && _E2E_LANE_PGID=$(head -n1 "${_E2E_LANE_DIR}/e2e.pgid" 2>/dev/null || true)
