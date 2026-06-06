@@ -59,6 +59,16 @@ source "${SCRIPT_DIR}/lib-review-mergeable.sh"
 # helpers (_run_command_e2e_lane / _fetch_sha_evidence) live there so they are
 # unit-testable in isolation. Inert when E2E_MODE=none.
 source "${SCRIPT_DIR}/lib-review-e2e.sh"
+# shellcheck source=lib-review-codex.sh
+# INV-51 (#189): codex-specific review auto-resume loop. `codex exec` runs ONE
+# agentic turn that on a large diff is consumed by context-gathering (git diff,
+# file reads) before posting a verdict, so codex was dropped as `unavailable`.
+# _run_codex_review_with_resume watches codex's JSONL event stream and resumes
+# the same thread while turns end gather-only (bounded by CODEX_REVIEW_MAX_RESUMES
+# + the AGENT_REVIEW_TIMEOUT wall-clock). Only the codex fan-out branch calls it;
+# every other CLI keeps the bare run_agent path. Inert unless a fan-out agent is
+# codex.
+source "${SCRIPT_DIR}/lib-review-codex.sh"
 # Per-side AGENT_CMD override (INV-37). See autonomous-dev.sh for the
 # matching dev-side override. Together they let one project run dev
 # and review on different agent CLIs (e.g. claude for dev, agy for
@@ -1095,8 +1105,25 @@ for _agent in "${REVIEW_AGENTS_LIST[@]}"; do
     # line. `|| _rc=$?` suppresses set -e and preserves the true exit code
     # (124 timeout / 137 kill / real launch error) for forensic logging.
     _rc=0
-    run_agent "$_agent_session_id" "$_agent_prompt" "${_agent_model:-sonnet}" "$_agent_session_name" \
-      >>"$_agent_log" 2>&1 || _rc=$?
+    if [[ "$AGENT_CMD" == "codex" ]]; then
+      # INV-51 (#189): codex's single `codex exec` turn is often consumed by
+      # context-gathering on a large diff, ending gather-only with no verdict —
+      # so route codex through the auto-resume controller, which watches codex's
+      # JSONL event stream (the same $_agent_log this invocation writes) and
+      # resumes the thread while turns are gather-only, bounded by
+      # CODEX_REVIEW_MAX_RESUMES + the AGENT_REVIEW_TIMEOUT wall-clock. The
+      # controller's internal run_agent/resume_agent calls inherit this
+      # redirect, so CODEX_REVIEW_LOG points at the very file they append to.
+      # On bound exhaustion (no verdict) codex falls back to today's behavior:
+      # the comment poller below resolves it `unavailable` (INV-40). Every other
+      # CLI keeps the bare run_agent path (else branch) — byte-for-byte unchanged.
+      CODEX_REVIEW_LOG="$_agent_log" \
+        _run_codex_review_with_resume "$_agent_session_id" "$_agent_prompt" "${_agent_model:-sonnet}" "$_agent_session_name" \
+        >>"$_agent_log" 2>&1 || _rc=$?
+    else
+      run_agent "$_agent_session_id" "$_agent_prompt" "${_agent_model:-sonnet}" "$_agent_session_name" \
+        >>"$_agent_log" 2>&1 || _rc=$?
+    fi
     printf '%s\n' "$_rc" > "$_agent_rc_file"
   ) &
   # Collect THIS subshell's PID so we wait only the fan-out agents below —

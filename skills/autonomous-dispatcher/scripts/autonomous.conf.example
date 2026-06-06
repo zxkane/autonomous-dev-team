@@ -374,6 +374,19 @@ AGENT_REVIEW_EXTRA_ARGS=""
 # Scope is per-subshell — the per-agent launcher never leaks to the dev side or
 # to a sibling fan-out member.
 
+# CODEX_REVIEW_MAX_RESUMES: codex review thread auto-resume bound (INV-51, #189).
+# `codex exec` runs ONE agentic turn; on a large review diff codex can spend that
+# whole turn on context-gathering (git diff, file reads) and emit no verdict, so
+# it would be dropped as `unavailable` (INV-40). When a fan-out review agent is
+# codex, the wrapper auto-resumes the SAME codex thread (`codex exec resume`)
+# while turns end gather-only — up to this many resumes AND within the
+# AGENT_REVIEW_TIMEOUT wall-clock cap — so codex actually posts its vote. On
+# exhaustion it falls back to today's `unavailable` behavior (no regression).
+# Default 3. Set to 0 to DISABLE the loop (codex behaves exactly as pre-#189).
+# Only affects the codex review path; claude/agy/kiro/gemini are untouched.
+#
+# CODEX_REVIEW_MAX_RESUMES=3
+
 # --- claude block ---
 # claude has NO required EXTRA_ARGS — the structural --permission-mode
 # flag handles tool trust via the existing AGENT_PERMISSION_MODE knob.

@@ -1517,6 +1517,113 @@ The original #190 spec assumed an invalid `--model` makes agy fail with non-zero
 - [INV-41](#inv-41-per-agent-review-model--extra-args-resolution) — `AGENT_REVIEW_MODEL_AGY` is the per-agent key that gives agy a valid agy-namespace model in a multi-CLI fleet.
 - [INV-36](#inv-36-agy-conversation-id-capture-is-best-effort) — same best-effort degrade-don't-crash philosophy applied to the enumeration-failure path.
 
+## INV-51: codex review thread auto-resumes until a verdict-posting turn
+
+**Rule**: when a review fan-out member's CLI is `codex`, `autonomous-review.sh`
+MUST dispatch it through `lib-review-codex.sh::_run_codex_review_with_resume`
+instead of a bare `run_agent`. The controller runs codex once
+(`run_agent` → `codex exec --json`, capturing the `thread_id` from the
+`thread.started` event into the existing sidecar), then **auto-resumes the SAME
+thread** (`resume_agent` → `codex exec resume <thread_id>`) while turns end
+**gather-only**, bounded by `CODEX_REVIEW_MAX_RESUMES` (default 3) **AND** a
+wall-clock deadline derived from `AGENT_REVIEW_TIMEOUT`. Every other CLI
+(claude / agy / kiro / gemini / opencode) keeps the single-invocation
+`run_agent` path **byte-for-byte unchanged**.
+
+Sub-rules:
+
+1. **Gather-only detection is from the JSONL stream, not GitHub.**
+   `_codex_log_has_verdict_message <log>` scans codex's own `--json` event log
+   (the same per-agent log the invocation writes) and returns true iff the LAST
+   **completed** turn (segment ending at the final `turn.completed`) contains an
+   `item.completed` whose item type is `agent_message`. A turn whose items are
+   all `tool_call`/`reasoning` (a `git diff` + file reads turn) is gather-only →
+   the resume trigger. An `agent_message` with no trailing `turn.completed` (turn
+   still in flight / killed) does NOT count. Empty/missing log → no verdict (rc 1,
+   never crashes). Awk-based (jq is not a hard dep — mirrors `_codex_capture_thread`).
+2. **The loop NEVER queries the GitHub comments API.** That is the wrapper's
+   verdict poller's job ([INV-20](#inv-20-verdict-authenticity-binding-actor--window--trailer-presence)/[INV-40](#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback)),
+   which stays the **authoritative** verdict gate AFTER the controller returns.
+   The JSONL loop only gets codex to FINISH a turn; the comment poller confirms
+   the verdict comment landed (`Review Agent: codex` discriminator). Querying
+   GitHub mid-loop would be the wrong layer and add per-turn latency.
+3. **Bounded; falls back to today's behavior on exhaustion.** The loop stops at
+   the FIRST of: a verdict-posting turn; `CODEX_REVIEW_MAX_RESUMES` resumes; or
+   `now >= base + _codex_review_deadline_seconds` (the max-resume bound is checked
+   BEFORE the wall-clock bound, so a `max=N` config does exactly N resumes when
+   time allows). On exhaustion with no verdict, the controller returns and the
+   post-window sweep resolves codex `unavailable` ([INV-40](#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback)) — **exactly the
+   pre-#189 fallback**. `CODEX_REVIEW_MAX_RESUMES=0` disables the loop.
+   `_codex_review_deadline_seconds` parses the `AGENT_REVIEW_TIMEOUT` coreutils
+   duration (`s`/`m`/`h`/`d` or bare seconds) to seconds; an empty / unset /
+   unparseable value degrades to **3600 (1h), never unbounded**.
+4. **Per-turn cap is separate.** Each individual turn is still wrapped by
+   `_run_with_timeout` (`AGENT_TIMEOUT`, rebound to the review cap, [INV-48](#inv-48-per-side-review-wall-clock-timeout-agent_review_timeout-1h-default-with-browser-e2e-exclusion-and-timeout-veto)).
+   The loop's own deadline is a SECOND guard so N turns × per-turn-cap cannot blow
+   far past the review window. A turn killed by the per-turn cap (rc 124/137) that
+   never posts a verdict still feeds the [INV-48](#inv-48-per-side-review-wall-clock-timeout-agent_review_timeout-1h-default-with-browser-e2e-exclusion-and-timeout-veto) timeout-veto on the wrapper side.
+5. **Layer.** The loop lives in the review layer (`lib-review-codex.sh`), NOT in
+   the generic `run_agent`/`resume_agent` of `lib-agent.sh` — putting
+   verdict/GitHub knowledge there would violate that file's CLI-agnostic layering.
+   The codex `run_agent`/`resume_agent` branches are reused unmodified.
+
+**Why**: `codex exec` runs ONE agentic turn. On a ~4,300-line diff codex
+non-deterministically consumed the whole turn reading the diff (`git diff
+master...HEAD` → `turn.completed`, ~55k tokens) and emitted **no findings and no
+verdict comment**; the same fleet posted a full codex review on a smaller diff —
+so it is diff-size-sensitive and non-deterministic, not a config/auth/region
+problem (the region-collision confounder — `BEDROCK_AWS_REGION` pollution — was
+ruled out in the #189 eng review: the launcher exports `CODEX_AWS_REGION=us-east-2`
+and a live probe returned a clean `turn.completed`). A longer verdict-poll window
+does NOT help — codex's turn already ENDED; the fix must issue another turn.
+`codex exec --help` has no `--max-turns`/`--max-steps`, so raising codex's step
+budget is not an option — the resume loop is the only avenue. Net effect before
+#189: on large diffs the fleet silently degraded to the non-codex agent(s), losing
+the independent second opinion (which in the observed case caught real BLOCKING
+findings the other agent missed) exactly when the diff was large enough to need
+it. (#189.)
+
+**Rejected alternatives** (recorded so they are not re-attempted): pre-stuffing
+the full diff into the prompt (bloats unboundedly on large diffs, loses codex's
+file navigation, diverges the codex prompt shape from other CLIs); a longer
+verdict-poll window only (codex's turn ENDED — polling waits for a verdict that
+will never come without another turn); raising codex's step budget (no native
+flag exists).
+
+**Producer**: `lib-review-codex.sh` — `_run_codex_review_with_resume` (the bounded
+controller), `_codex_log_has_verdict_message` (gather-only detection),
+`_codex_review_deadline_seconds` (wall-clock budget), `_codex_resume_prompt` (the
+continue-and-emit-verdict prompt), `_codex_now_seconds` (clock seam). The fan-out
+`codex` branch in `autonomous-review.sh` that routes to it.
+
+**Consumer**: the wrapper's per-agent verdict poll loop (the authoritative gate)
+and the [INV-40](#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback) aggregation — both UNCHANGED. The codex `run_agent`/`resume_agent`
+branches in `lib-agent.sh` are reused, not modified.
+
+**Status**: **ENFORCED** in this PR (closes #189).
+
+**Test**: `tests/unit/test-lib-review-codex.sh` — TC-CXR-DET-01..07
+(`_codex_log_has_verdict_message`: last-turn-decides, gather-only, empty/missing,
+mid-flight turn, and the cross-turn killed-mid-message leak), TC-CXR-DL-01..06
+(`_codex_review_deadline_seconds`: units + garbage→1h default), TC-CXR-CTL-01..09
+(controller: one-resume-then-verdict, immediate-verdict-no-resume,
+never-converges-bounded-at-max, wall-clock guard, resume prompt content,
+same-session-id reuse, rc propagation, max=0 disables, and a non-numeric max
+degrading without an `unbound variable` crash under `set -u`), TC-CXR-ISO-02..06
+(wrapper routes codex through the controller guarded on `AGENT_CMD == codex`,
+non-codex keeps bare `run_agent`, wrapper sources the lib, CI shellcheck lists it).
+Backward-compat gate: `test-lib-agent-codex.sh` (generic codex branch unchanged),
+`test-autonomous-review-multi-agent.sh`, `test-autonomous-review-per-agent-model.sh`,
+`test-autonomous-review-per-agent-launcher.sh`, `test-review-cli-exit-grace.sh`
+stay green. Test plan: `docs/test-cases/codex-review-resume-loop.md`.
+
+**Cross-references**:
+- [INV-40](#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback) — the unanimous-PASS fan-out + the `unavailable` fallback this loop is trying to avoid (and falls back to on exhaustion). The verdict poller is unchanged.
+- [INV-48](#inv-48-per-side-review-wall-clock-timeout-agent_review_timeout-1h-default-with-browser-e2e-exclusion-and-timeout-veto) — the `AGENT_REVIEW_TIMEOUT` review wall-clock cap the loop derives its deadline from, and the per-turn timeout-veto.
+- [INV-34](#inv-34-agent-prompt-is-fed-via-stdin-never-as-a-single-argv-element) — the stdin prompt channel the reused codex `run_agent`/`resume_agent` branches uphold.
+- [`review-agent-flow.md` § Codex auto-resume (INV-51)](review-agent-flow.md#codex-auto-resume-inv-51) — runtime walkthrough.
+- [`docs/designs/codex-review-resume-loop.md`](../designs/codex-review-resume-loop.md) — design canvas.
+
 ## Adding a new invariant
 
 When fixing a pipeline bug, after locating the bug on the state machine + flow docs:

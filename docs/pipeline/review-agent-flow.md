@@ -182,9 +182,27 @@ One backgrounded subshell per agent. Each subshell:
 - `unset AGENT_PID_FILE` so the per-agent `run_agent` does NOT rewrite the wrapper's single `review-${N}.pid` (the wrapper owns that file; the dispatcher's liveness model depends on it);
 - **resolves its OWN model + extra-args** ([INV-41](invariants.md#inv-41-per-agent-review-model--extra-args-resolution), #168) via `lib-review-resolve.sh`: `_resolve_review_agent_model "$agent"` looks up `AGENT_REVIEW_MODEL_<SUFFIX>` (suffix = uppercased name, every char outside `[A-Z0-9]`→`_`) else the shared `AGENT_REVIEW_MODEL`, and the resolved value is passed to `run_agent` as `"${_agent_model:-sonnet}"`; `_resolve_review_agent_extra_args "$agent"` looks up `AGENT_REVIEW_EXTRA_ARGS_<SUFFIX>` else the shared `AGENT_REVIEW_EXTRA_ARGS`, and is assigned to `AGENT_DEV_EXTRA_ARGS` — the var `run_agent`'s `_parse_extra_args` actually reads, since the fan-out runs a *fresh* `run_agent` (not `resume_agent`). Both lookups are scoped to this subshell. With no per-agent key set, both resolve to the shared values, so the model arg is identical to the legacy `${AGENT_REVIEW_MODEL:-sonnet}` and the N=1 path is byte-for-byte legacy. This lets a mixed `"kiro <claude-fam>"` fleet give kiro `claude-sonnet-4.6` and the claude-family agent `sonnet[1m]` — two model ids each CLI would reject if forced to share one;
 - writes to its OWN log `/tmp/agent-${PROJECT_ID}-review-${N}-${agent}.log`;
-- builds its prompt via `build_review_prompt "$agent" "$SESSION_ID"` and records its CLI exit code to a per-run sidecar (a subshell can't mutate the parent's variables).
+- builds its prompt via `build_review_prompt "$agent" "$SESSION_ID"` and records its CLI exit code to a per-run sidecar (a subshell can't mutate the parent's variables);
+- **dispatches via the right agent-launch path for its CLI**: a `codex` agent goes through `lib-review-codex.sh::_run_codex_review_with_resume` (the auto-resume loop, [INV-51](invariants.md#inv-51-codex-review-thread-auto-resumes-until-a-verdict-posting-turn)); every other CLI calls `run_agent` directly — byte-for-byte the pre-#189 invocation. See [Codex auto-resume (INV-51)](#codex-auto-resume-inv-51) below.
 
 The fan-out loop appends each subshell's PID (`$!`) to a `_fanout_pids` array and the wrapper joins with `wait "${_fanout_pids[@]}"` — the **collected PIDs only**. A bare `wait` is forbidden here: it would also block on the long-lived `gh-token-refresh-daemon` and the heartbeat `sleep` loop (neither exits), hanging the wrapper forever after the agents finish and stranding the issue in `reviewing`. See [INV-40](invariants.md#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback) sub-rule 1.
+
+### Codex auto-resume (INV-51)
+
+`codex exec` runs exactly ONE agentic turn. On a large review diff codex
+non-deterministically spends that whole turn on context-gathering (`git diff`,
+file reads — 55k–120k input tokens) and then emits `turn.completed` with no
+findings and **no verdict comment**; the verdict poller below sees nothing within
+its window and the agent is dropped as `unavailable` ([INV-40](invariants.md#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback)) — losing codex's independent second opinion exactly on the diffs that need it. Waiting longer does NOT help: codex's turn already **ENDED**. The fix is to issue **another turn**.
+
+So a `codex` fan-out member is dispatched through `lib-review-codex.sh::_run_codex_review_with_resume` instead of a bare `run_agent` ([INV-51](invariants.md#inv-51-codex-review-thread-auto-resumes-until-a-verdict-posting-turn)). The controller:
+
+1. runs codex once via `run_agent` (its codex branch captures the `thread_id` from the `thread.started` JSONL event into the existing sidecar, keyed by the dispatcher session id);
+2. inspects codex's own JSONL event stream — the **same** `$_agent_log` the invocation writes — for whether the LAST completed turn produced a verdict-posting `agent_message` (`_codex_log_has_verdict_message`: a `turn.completed` whose items are all `tool_call`/`reasoning` = gather-only);
+3. while the last turn is gather-only, resumes the SAME thread via `resume_agent` (`codex exec resume <thread_id>`) with an explicit "continue — do NOT re-run `git diff` — produce findings and post the verdict now" prompt;
+4. stops at the FIRST of: a verdict-posting turn, `CODEX_REVIEW_MAX_RESUMES` (default 3) resumes, or the `AGENT_REVIEW_TIMEOUT`-derived wall-clock deadline (`_codex_review_deadline_seconds`; an unparseable cap degrades to the 1h default, never unbounded).
+
+The loop NEVER queries the GitHub comments API — that is the verdict poller's job below, and it stays the **authoritative** verdict gate after the controller returns. The JSONL loop only gets codex to FINISH a turn; the poller confirms the verdict comment landed. On bound exhaustion with no verdict, codex is resolved `unavailable` by the post-window sweep — exactly the pre-#189 fallback (no regression). Scope is strictly `AGENT_CMD == codex`; `CODEX_REVIEW_MAX_RESUMES=0` disables the loop (codex behaves as before #189). The generic `run_agent`/`resume_agent` in `lib-agent.sh` are **not** modified — the loop lives in the review layer so verdict/GitHub semantics never leak into the CLI-agnostic plumbing.
 
 ### Per-agent verdict collection
 
