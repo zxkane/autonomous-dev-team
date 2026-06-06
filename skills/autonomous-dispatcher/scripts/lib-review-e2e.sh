@@ -77,6 +77,140 @@ _classify_e2e_gate() {
 }
 
 # ---------------------------------------------------------------------------
+# _validate_ac_coverage_json — read a candidate JSON on stdin, echo the
+# canonical compact form (jq -c) iff it is a non-empty flat object whose every
+# value is exactly "pass" or "fail"; else echo EMPTY. Returns 0 always (fail-
+# SAFE). When `jq` is unavailable, echoes EMPTY (the structured double-check is
+# an optimization, never a hard dependency). This is the SINGLE source of truth
+# for the artifact contract — shared by _extract_ac_coverage_artifact (parse-time)
+# and _revalidate_ac_coverage_file (prompt-read TOCTOU re-check, INV-49 sub-rule
+# 5) so both apply byte-identical validation + canonicalization.
+_validate_ac_coverage_json() {
+  command -v jq >/dev/null 2>&1 || return 0
+  local compact
+  # jq -ce: parse (bad JSON → non-zero, caught by `||`), then require a non-empty
+  # object whose every value is "pass"/"fail"; emit compact single-line JSON.
+  compact=$(jq -ce '
+    if type=="object" and (length > 0)
+       and (all(.[]; . == "pass" or . == "fail"))
+    then . else empty end
+  ' 2>/dev/null) || return 0
+  [[ -n "$compact" ]] || return 0
+  printf '%s\n' "$compact"
+}
+
+# _extract_ac_coverage_artifact <text>
+#
+# INV-49 (issue #183): extract the OPTIONAL structured AC-coverage artifact a
+# command-mode evidence parser MAY embed in its evidence block. Echoes the
+# validated, compact JSON object on stdout, or EMPTY when absent/malformed. Pure:
+# no I/O beyond a `jq` subprocess. fail-SAFE — any deviation from the contract
+# (no fence / not parseable / not an object / a value outside {pass,fail}) yields
+# EMPTY so the caller falls back to the #182 free-form double-check. It NEVER
+# fails open (a bad artifact never becomes a passing structured map) and NEVER
+# aborts the lane (returns 0 in all cases; jq's stderr is swallowed).
+#
+# Emission contract (parser-side, opt-in): the parser embeds the JSON between an
+# HTML-comment fence in its evidence stdout, so the artifact (a) renders
+# invisibly in the posted comment and (b) travels into the SHA-bound comment for
+# the idempotent reuse path:
+#
+#   <!-- ac-coverage:begin
+#   { "<criterion-id-or-text>": "pass" | "fail", ... }
+#   ac-coverage:end -->
+#
+# Shape: a flat JSON object; every value MUST be exactly "pass" or "fail".
+#
+# When `jq` is unavailable the function returns EMPTY (fall back) — the structured
+# double-check is an optimization, never a hard dependency.
+_extract_ac_coverage_artifact() {
+  local text="$1"
+  # No fence → no artifact (the #182 parser path). Cheap pre-check before awk/jq.
+  case "$text" in
+    *"ac-coverage:begin"*) : ;;
+    *) return 0 ;;
+  esac
+
+  # Slice the bytes strictly BETWEEN the FIRST begin/end fence pair (exclusive).
+  # `done` latches after the first end so a parser that (incorrectly) emits more
+  # than one fence canonicalizes to the first object, never a multi-object stream
+  # — the contract is a single flat object. Single-fence output is unchanged.
+  local raw
+  raw=$(printf '%s\n' "$text" | awk '
+    done                { next }
+    /ac-coverage:end/   { if (inblk) { done=1 }; inblk=0; next }
+    inblk               { print }
+    /ac-coverage:begin/ { if (!done) inblk=1 }
+  ')
+  [[ -n "${raw//[$' \t\n']/}" ]] || return 0   # empty fence body → fail-safe
+
+  printf '%s' "$raw" | _validate_ac_coverage_json
+}
+
+# _revalidate_ac_coverage_file
+#
+# INV-49 (issue #183) sub-rule 5 — TOCTOU defense. Re-validates the sidecar file
+# E2E_AC_COVERAGE_FILE at prompt-read time and echoes the canonical compact JSON
+# (or EMPTY). The sidecar lives at a predictable, exported /tmp path, and
+# PR-controlled command-mode E2E / parser code runs between _write_ac_coverage_
+# sidecar's validation and prompt construction, so it could overwrite the file
+# AFTER validation — a prompt-injection / fail-open path if the wrapper trusted
+# the bytes. By re-running the SAME _validate_ac_coverage_json the wrapper only
+# ever interpolates a freshly-re-validated, canonicalized object into the prompt;
+# a now-malformed/replaced sidecar falls back to the free-form block. Echoes EMPTY
+# when the var is unset/empty, the file is missing/empty, or it fails validation.
+# Returns 0 ALWAYS (honors its own contract regardless of call form): the read is
+# routed through a brace group with its own stderr discarded — that suppresses a
+# redirect-open error on a vanished/unreadable file AND keeps a `cat`/pipefail
+# failure from aborting a bare top-level `_ac_map=$(_revalidate_ac_coverage_file)`
+# under `set -e` (the trailing `|| true` is the always-0 guarantee).
+_revalidate_ac_coverage_file() {
+  [[ -n "${E2E_AC_COVERAGE_FILE:-}" ]] || return 0
+  [[ -s "${E2E_AC_COVERAGE_FILE}" ]] || return 0
+  # Read the CURRENT bytes (not a cached copy) and re-validate; any read failure
+  # (file vanished / unreadable between the -s test and the read) → EMPTY.
+  { cat "${E2E_AC_COVERAGE_FILE}" | _validate_ac_coverage_json; } 2>/dev/null || true
+}
+
+# _write_ac_coverage_sidecar <evidence_text>
+#
+# INV-49 (issue #183): extract the structured AC-coverage artifact from the given
+# evidence text and write the validated compact JSON to E2E_AC_COVERAGE_FILE (the
+# sidecar the review fan-out reads). ALWAYS (re)writes the sidecar — truncating it
+# to empty when no valid artifact is present — so a prior round's artifact can
+# never leak into a round whose parser stopped emitting it (or emitted a malformed
+# one). No-op when E2E_AC_COVERAGE_FILE is unset (e.g. browser mode). Logs a
+# warning when a fence was present but failed validation (the fail-safe fallback
+# path) so an operator can see the parser shipped a bad artifact.
+#
+# Write-failure = no map (INV-49 sub-rule 3): if the file cannot be made to hold
+# EXACTLY this round's validated artifact (non-writable / chmodded / not
+# truncatable), `unset E2E_AC_COVERAGE_FILE` for the rest of the run and log —
+# so the fan-out reads NO structured map (free-form fallback) rather than a
+# possibly-stale prior-round file. The write is no longer swallowed with `|| true`.
+_write_ac_coverage_sidecar() {
+  local evidence_text="$1"
+  [[ -n "${E2E_AC_COVERAGE_FILE:-}" ]] || return 0
+  local artifact
+  artifact=$(_extract_ac_coverage_artifact "$evidence_text")
+  # Same pure-bash fence detection as _extract_ac_coverage_artifact (no forked
+  # grep): a present-but-rejected fence means the parser shipped a bad artifact.
+  if [[ -z "$artifact" && "$evidence_text" == *"ac-coverage:begin"* ]]; then
+    log "INV-49: command-mode evidence carried an ac-coverage fence but it was malformed (invalid JSON / not an object / value not in {pass,fail}) — falling back to the free-form AC double-check (fail-safe)."
+  fi
+  # Write-or-disarm: an empty artifact writes an empty file (no stale leak); a
+  # write failure DISARMS the sidecar (unset) so the fan-out cannot read a
+  # possibly-stale prior-round file. The write rc IS checked (no `|| true`). The
+  # brace group's `2>/dev/null` also swallows the shell's redirect-OPEN error
+  # (`> file` on a non-writable target prints to stderr before a command-level
+  # redirect applies) so the INV-49 log line is the single operator-facing signal.
+  if ! { printf '%s' "$artifact" > "$E2E_AC_COVERAGE_FILE"; } 2>/dev/null; then
+    log "INV-49: could not write the AC-coverage sidecar (${E2E_AC_COVERAGE_FILE}) — disarming it so the review fan-out reads NO structured map (free-form fallback), never a stale prior-round file."
+    unset E2E_AC_COVERAGE_FILE
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # _fetch_sha_evidence — echo the full body of a PR comment whose marker contains
 # exactly `e2e-evidence: complete sha="${PR_HEAD_SHA}"` for the CURRENT HEAD, or
 # empty if none. Bounded retry (transient GitHub) controlled by the two optional
@@ -150,11 +284,28 @@ _run_command_e2e_lane() {
   local rc=0
   local log="/tmp/e2e-${PR_NUMBER}.log"
 
+  # INV-49: start each round with an empty AC-coverage sidecar so a prior round's
+  # artifact can never leak into a path that never reaches the parser (pre-hook /
+  # hard-fail). The reuse + fresh-success paths re-populate it from this round's
+  # evidence via _write_ac_coverage_sidecar. No-op when the var is unset. If the
+  # truncate FAILS (non-writable / chmodded), DISARM the sidecar (unset) so no
+  # early-return path (pre-hook/hard-fail) can leave stale prior-round content
+  # readable — same write-failure = no-map rule as _write_ac_coverage_sidecar.
+  # The brace group's `2>/dev/null` swallows the shell's redirect-open error so
+  # the INV-49 log line is the single operator-facing signal.
+  if [[ -n "${E2E_AC_COVERAGE_FILE:-}" ]] && ! { : > "$E2E_AC_COVERAGE_FILE"; } 2>/dev/null; then
+    log "INV-49: could not truncate the AC-coverage sidecar (${E2E_AC_COVERAGE_FILE}) at lane entry — disarming it (no structured map this round, free-form fallback)."
+    unset E2E_AC_COVERAGE_FILE
+  fi
+
   # Idempotency: a SHA-matching evidence comment for THIS HEAD already exists.
   local existing
   existing=$(_fetch_sha_evidence 1 0)
   if [[ -n "$existing" ]]; then
     log "INV-46: SHA-matching E2E evidence already present for HEAD ${PR_HEAD_SHA:0:7} — reusing, skipping pre-hook + verify."
+    # INV-49: the reused comment carries any structured AC-coverage fence too —
+    # re-extract it for THIS round's fan-out (the sidecar is per-round, not posted).
+    _write_ac_coverage_sidecar "$existing"
     printf '0\n' > "$rc_file"
     return 0
   fi
@@ -189,6 +340,12 @@ $(tail -50 "$log" 2>/dev/null)
     # Run the parser on the (possibly partial) log.
     local evidence=""
     evidence=$(bash -c "${E2E_COMMAND_EVIDENCE_PARSER_RENDERED} '${log}'" 2>/dev/null) || true
+    # INV-49: extract the OPTIONAL structured AC-coverage artifact from the
+    # parser output and (re)write the per-round sidecar — fail-safe, truncates on
+    # absent/malformed so a prior round's artifact never leaks. Done before the
+    # SHA-marker branch so the sidecar is in lock-step with the evidence the
+    # fan-out will read; the helper no-ops on empty/no-fence evidence.
+    _write_ac_coverage_sidecar "$evidence"
     if [[ -n "$evidence" ]] && printf '%s' "$evidence" | grep -qF "e2e-evidence: complete sha=\"${PR_HEAD_SHA}\""; then
       # Step 5: post the evidence block as a PR comment.
       # rc stays at its initialized 0 here — it is NEVER set to verify_rc on this

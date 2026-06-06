@@ -684,7 +684,55 @@ Read the issue body for an \`## Acceptance Criteria\` section. For EACH criterio
 
 $(render_bot_review_section "$REVIEW_BOTS_VALIDATED" "$PR_NUMBER" "$REPO")
 
-$(if [[ "${E2E_ACTIVE:-false}" == "true" ]]; then cat <<'E2E_EVIDENCE_INPUT'
+$(if [[ "${E2E_ACTIVE:-false}" == "true" ]]; then
+  # INV-49 (#183): when the command-mode E2E lane produced a VALIDATED structured
+  # AC-coverage artifact, prefer the DETERMINISTIC map over LLM-parsing the
+  # free-form markdown table — the latter is the weak link (re-worded header /
+  # merged cell / truncated row → a missed failing criterion). An empty/absent/
+  # rejected sidecar (parser didn't emit one, or it was malformed, or the lane
+  # disarmed it) yields the exact #182 free-form double-check below — no change.
+  #
+  # TOCTOU defense (INV-49 sub-rule 5): the sidecar is a predictable, exported
+  # /tmp path that PR-controlled E2E/parser code could overwrite AFTER the lane
+  # validated it. So DO NOT trust its bytes with a plain `cat` — re-run the SAME
+  # jq validation here, at prompt-read time, and interpolate only the freshly
+  # re-validated, canonicalized object. _revalidate_ac_coverage_file echoes EMPTY
+  # for an unset var / missing-empty file / now-malformed-or-replaced content.
+  _ac_map=$(_revalidate_ac_coverage_file)
+  if [[ -n "$_ac_map" ]]; then cat <<E2E_AC_STRUCTURED
+## E2E Evidence — READ AS INPUT (the wrapper already ran E2E once, INV-46)
+
+**You do NOT run E2E.** The wrapper ran the project's E2E verification ONCE in a
+dedicated lane BEFORE this review and posted the evidence as a PR comment. Your
+job is to double-check acceptance-criteria coverage — not to re-run any build,
+deploy, verify command, or browser flow.
+
+### Structured AC-coverage map (INV-49) — PREFER THIS over the markdown table
+
+The wrapper's evidence parser emitted a machine-readable AC-coverage map. Verify
+each acceptance criterion from THIS map (deterministic) — do NOT LLM-parse the
+free-form markdown table for criteria the map already covers:
+
+\`\`\`json
+${_ac_map}
+\`\`\`
+
+1. For EACH \`## Acceptance Criteria\` item in the issue body, find its entry in
+   the map (match by criterion id or text). A value of \`"fail"\` is a review
+   finding; \`"pass"\` is covered.
+2. If an acceptance criterion is NOT present as a key in the map, fall back to
+   cross-checking it against the posted free-form evidence comment:
+   \`\`\`bash
+   gh pr view ${PR_NUMBER} --repo ${REPO} --json comments \\
+     -q '[.comments[].body | select(test("e2e-evidence: complete"))] | last'
+   \`\`\`
+3. Do NOT FAIL the review merely because you cannot re-run E2E yourself — the
+   wrapper's E2E hard gate (INV-46) already decided pass/fail, and a gate FAIL
+   would have prevented this review from running. Treat the map + evidence as
+   authoritative input; raise findings only for a \`"fail"\` entry, an
+   uncovered-and-contradicted criterion, or code-quality / requirement-drift.
+E2E_AC_STRUCTURED
+  else cat <<'E2E_EVIDENCE_INPUT'
 ## E2E Evidence — READ AS INPUT (the wrapper already ran E2E once, INV-46)
 
 **You do NOT run E2E.** The wrapper ran the project's E2E verification ONCE in a
@@ -709,6 +757,7 @@ browser flow.
    findings only for genuine gaps between the evidence and the acceptance
    criteria, or for code-quality / requirement-drift issues.
 E2E_EVIDENCE_INPUT
+  fi
 fi)
 
 ## Decision
@@ -786,6 +835,13 @@ fi
 if [[ "${E2E_MODE:-none}" == "command" ]]; then
   export PR_NUMBER="${PR_NUMBER}"
   export PR_HEAD_SHA="${PR_HEAD_SHA:-}"
+  # INV-49 (#183): the command-mode E2E lane writes the OPTIONAL structured
+  # AC-coverage artifact (validated JSON, or empty when the parser doesn't emit
+  # one / it's malformed) to this per-round sidecar. The review fan-out reads it
+  # to verify acceptance criteria DETERMINISTICALLY instead of LLM-parsing the
+  # free-form evidence comment; an empty/absent sidecar falls back to the #182
+  # free-form double-check. Browser mode does not set this (free-form by nature).
+  export E2E_AC_COVERAGE_FILE="/tmp/e2e-ac-coverage-${PR_NUMBER}.json"
 fi
 
 # ---------------------------------------------------------------------------

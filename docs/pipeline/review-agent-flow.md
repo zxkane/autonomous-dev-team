@@ -117,6 +117,9 @@ E2E_ACTIVE == true:
         comment if present. Else pre-hooks → verify (under setsid + timeout
         --kill-after, PGID captured in _E2E_LANE_PGID) → parser → post evidence.
         Each step guarded `|| rc=$?` so set -e can't skip the .rc sidecar.
+        INV-49: also extracts the OPTIONAL structured AC-coverage artifact from the
+        evidence (fence ac-coverage:begin/end, jq-validated, fail-safe) → the
+        per-round sidecar E2E_AC_COVERAGE_FILE for the fan-out's deterministic check.
     browser mode → ONE LLM lane (run_agent against build_browser_e2e_prompt). The
         LLM posts a `## E2E Verification Report` comment; the WRAPPER stamps the SHA
         marker ONTO that report (_stamp_browser_evidence_marker, REST PATCH) after a
@@ -139,6 +142,7 @@ E2E_ACTIVE == false → no lane, no gate (E2E_GATE=inactive); straight to fan-ou
 - **browser-mode is ONE LLM lane**, not replicated across review agents. The wrapper stamps `<!-- e2e-evidence: complete sha="${PR_HEAD_SHA}" -->` **onto the LLM-posted `## E2E Verification Report` comment** (`_stamp_browser_evidence_marker`, REST `PATCH`, idempotent) so the gate anchor is deterministic without the LLM transcribing the SHA — and so the gate's evidence-present signal + the review agents' evidence-read both resolve to the REAL report, not a marker-only comment. A clean exit with NO stampable report comment fails the gate closed (rc forced non-zero) — a marker-only comment can never satisfy the gate.
 - **The gate is a mechanical dual-signal**, fail-closed: a crash between parser-ok and comment-post (`rc=0` but no SHA-matching evidence) routes `block-nonsubstantive` (transient re-queue), not a dev bounce; a real verify failure (`rc≠0`) routes `fail` (substantive). A `rc≠0`-with-stale-present-evidence does NOT pass.
 - **Review agents are PURE code reviewers.** `build_review_prompt` no longer contains any E2E execution block; the prompt tells each agent to READ the wrapper-posted evidence comment as input and cross-check it against the acceptance criteria. They do not run E2E.
+- **Structured AC-coverage double-check ([INV-49](invariants.md#inv-49-command-mode-e2e-may-feed-the-review-fan-out-a-structured-ac-coverage-artifact--optional-fail-safe), #183).** Command-mode only: when the evidence parser emits the optional `ac-coverage:begin … ac-coverage:end` JSON fence, the lane jq-validates it (fail-safe — malformed → empty, fall back to free-form; never fail-open) and writes it to `E2E_AC_COVERAGE_FILE`. When that per-round sidecar is non-empty, `build_review_prompt` PREFERS the deterministic map over LLM-parsing the free-form markdown table; an empty/absent sidecar yields the exact post-#182 free-form double-check. The artifact is a review aid only — the E2E hard gate is unchanged.
 - **Composition**: `final PASS ≡ (E2E_ACTIVE==false OR gate==pass) AND review-unanimity-pass`. Because a gate fail/block exits before the fan-out, only `gate ∈ {pass, inactive}` ever reaches the review aggregation — the AND is enforced by the short-circuit. The E2E gate runs before the [INV-44](invariants.md#inv-44-mergeable-hard-gate--a-conflicting-pr-can-never-reach-approved) mergeable block.
 
 ## Per-side review timeout (INV-48)
