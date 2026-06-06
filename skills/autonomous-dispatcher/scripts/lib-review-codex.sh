@@ -44,11 +44,7 @@
 # unit-testable with a deterministic stub. Uses bash's EPOCHSECONDS when present
 # (bash ≥ 5.0, the box's shell) and falls back to `date +%s`.
 _codex_now_seconds() {
-  if [[ -n "${EPOCHSECONDS:-}" ]]; then
-    printf '%s\n' "$EPOCHSECONDS"
-  else
-    date +%s
-  fi
+  printf '%s\n' "${EPOCHSECONDS:-$(date +%s)}"
 }
 
 # _codex_review_deadline_seconds — the resume loop's total wall-clock budget in
@@ -59,10 +55,10 @@ _codex_now_seconds() {
 # value degrades to the 1h default (3600s) — NEVER unbounded (a 0 or garbage
 # value must not silently un-cap the loop).
 _codex_review_deadline_seconds() {
-  local v="${AGENT_REVIEW_TIMEOUT:-1h}" num unit
+  local v="${AGENT_REVIEW_TIMEOUT:-1h}"
   if [[ "$v" =~ ^([1-9][0-9]*)([smhd]?)$ ]]; then
-    num="${BASH_REMATCH[1]}"
-    unit="${BASH_REMATCH[2]}"
+    local num="${BASH_REMATCH[1]}"
+    local unit="${BASH_REMATCH[2]}"
     case "$unit" in
       ""|s) printf '%s\n' "$num" ;;
       m)    printf '%s\n' "$((num * 60))" ;;
@@ -185,13 +181,12 @@ _run_codex_review_with_resume() {
 
   # Turn 1: a fresh codex session. run_agent's codex branch captures the
   # thread_id into the sidecar; resume_agent reads it back below.
-  local rc=0
-  run_agent "$session_id" "$prompt" "$model" "$session_name" || rc=$?
-  local final_rc="$rc"
+  local final_rc=0
+  run_agent "$session_id" "$prompt" "$model" "$session_name" || final_rc=$?
 
   # Return early on a non-timeout launch failure (rc is non-zero and not 124/137)
-  if [[ "$rc" -ne 0 && "$rc" -ne 124 && "$rc" -ne 137 ]]; then
-    return "$rc"
+  if [[ "$final_rc" -ne 0 && "$final_rc" -ne 124 && "$final_rc" -ne 137 ]]; then
+    return "$final_rc"
   fi
 
   # Without a readable log we cannot detect gather-only turns — degrade to the
@@ -201,9 +196,7 @@ _run_codex_review_with_resume() {
   # Only resume when the thread sidecar exists (if the helper is available).
   # If we have no captured thread_id, we cannot resume the same conversation.
   if declare -f _codex_thread_id >/dev/null; then
-    if ! _codex_thread_id "$session_id" >/dev/null; then
-      return "$final_rc"
-    fi
+    _codex_thread_id "$session_id" >/dev/null || return "$final_rc"
   fi
 
   local deadline budget now resumes=0
@@ -236,10 +229,9 @@ _run_codex_review_with_resume() {
     local turn_rc=0
     resume_agent "$session_id" "$(_codex_resume_prompt "$session_id")" "$model" "$session_name" || turn_rc=$?
 
-    # Preserve 124/137 (timeout/SIGKILL) as sticky. Otherwise, we propagate the last turn's rc.
-    if [[ "$turn_rc" -eq 124 || "$turn_rc" -eq 137 ]]; then
-      final_rc="$turn_rc"
-    elif [[ "$final_rc" -ne 124 && "$final_rc" -ne 137 ]]; then
+    # Preserve 124/137 (timeout/SIGKILL) as sticky. Otherwise, propagate the last turn's rc.
+    if [[ "$turn_rc" -eq 124 || "$turn_rc" -eq 137 ]] || \
+       [[ "$final_rc" -ne 124 && "$final_rc" -ne 137 ]]; then
       final_rc="$turn_rc"
     fi
   done

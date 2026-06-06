@@ -49,11 +49,6 @@ assert_eq() {
   fi
 }
 
-assert_rc() {
-  local desc="$1" expected="$2" actual="$3"
-  assert_eq "$desc" "$expected" "$actual"
-}
-
 assert_grep() {
   local desc="$1" pattern="$2" file="$3"
   if grep -qE "$pattern" "$file"; then
@@ -107,30 +102,30 @@ trap 'rm -f "$TMPLOG"' EXIT
 
 # TC-CXR-DET-01 — last turn has an agent_message
 { echo '{"type":"thread.started","thread_id":"aaaa"}'; echo "$VERDICT_TURN"; } > "$TMPLOG"
-_codex_log_has_verdict_message "$TMPLOG"; assert_rc "TC-CXR-DET-01 verdict message in only turn → rc 0" 0 "$?"
+_codex_log_has_verdict_message "$TMPLOG"; assert_eq "TC-CXR-DET-01 verdict message in only turn → rc 0" 0 "$?"
 
 # TC-CXR-DET-02 — only turn is gather-only
 { echo '{"type":"thread.started","thread_id":"aaaa"}'; echo "$GATHER_TURN"; } > "$TMPLOG"
-_codex_log_has_verdict_message "$TMPLOG"; assert_rc "TC-CXR-DET-02 gather-only turn → rc 1" 1 "$?"
+_codex_log_has_verdict_message "$TMPLOG"; assert_eq "TC-CXR-DET-02 gather-only turn → rc 1" 1 "$?"
 
 # TC-CXR-DET-03 — turn 1 gather-only, turn 2 has agent_message (last turn decides)
 { echo '{"type":"thread.started","thread_id":"aaaa"}'; echo "$GATHER_TURN"; echo "$VERDICT_TURN"; } > "$TMPLOG"
-_codex_log_has_verdict_message "$TMPLOG"; assert_rc "TC-CXR-DET-03 last turn has verdict msg → rc 0" 0 "$?"
+_codex_log_has_verdict_message "$TMPLOG"; assert_eq "TC-CXR-DET-03 last turn has verdict msg → rc 0" 0 "$?"
 
 # TC-CXR-DET-04 — turn 1 had agent_message, turn 2 gather-only (last turn decides)
 { echo '{"type":"thread.started","thread_id":"aaaa"}'; echo "$VERDICT_TURN"; echo "$GATHER_TURN"; } > "$TMPLOG"
-_codex_log_has_verdict_message "$TMPLOG"; assert_rc "TC-CXR-DET-04 last turn gather-only → rc 1" 1 "$?"
+_codex_log_has_verdict_message "$TMPLOG"; assert_eq "TC-CXR-DET-04 last turn gather-only → rc 1" 1 "$?"
 
 # TC-CXR-DET-05 — empty / missing log never crashes
 : > "$TMPLOG"
-_codex_log_has_verdict_message "$TMPLOG"; assert_rc "TC-CXR-DET-05 empty log → rc 1" 1 "$?"
-_codex_log_has_verdict_message "/nonexistent/path/$$"; assert_rc "TC-CXR-DET-05b missing log → rc 1" 1 "$?"
+_codex_log_has_verdict_message "$TMPLOG"; assert_eq "TC-CXR-DET-05 empty log → rc 1" 1 "$?"
+_codex_log_has_verdict_message "/nonexistent/path/$$"; assert_eq "TC-CXR-DET-05b missing log → rc 1" 1 "$?"
 
 # TC-CXR-DET-06 — agent_message present but NO trailing turn.completed (turn mid-flight)
 { echo '{"type":"thread.started","thread_id":"aaaa"}'
   echo '{"type":"turn.started"}'
   echo '{"type":"item.completed","item":{"type":"agent_message","text":"partial"}}'; } > "$TMPLOG"
-_codex_log_has_verdict_message "$TMPLOG"; assert_rc "TC-CXR-DET-06 no completed turn yet → rc 1" 1 "$?"
+_codex_log_has_verdict_message "$TMPLOG"; assert_eq "TC-CXR-DET-06 no completed turn yet → rc 1" 1 "$?"
 
 # TC-CXR-DET-07 — a turn emits agent_message but is KILLED before turn.completed
 # (per-turn cap fired mid-stream), then a later GATHER-ONLY turn completes. The
@@ -142,7 +137,7 @@ _codex_log_has_verdict_message "$TMPLOG"; assert_rc "TC-CXR-DET-06 no completed 
   echo '{"type":"turn.started"}'
   echo '{"type":"item.completed","item":{"type":"tool_call","name":"shell"}}'
   echo '{"type":"turn.completed","usage":{"input_tokens":50000}}'; } > "$TMPLOG"
-_codex_log_has_verdict_message "$TMPLOG"; assert_rc "TC-CXR-DET-07 killed-mid-msg then gather-only completed → rc 1" 1 "$?"
+_codex_log_has_verdict_message "$TMPLOG"; assert_eq "TC-CXR-DET-07 killed-mid-msg then gather-only completed → rc 1" 1 "$?"
 
 # ---------------------------------------------------------------------------
 echo ""
@@ -185,8 +180,7 @@ run_codex_controller_case() {
     source "$LIB"
 
     _feed_next() {
-      local tok
-      tok=$(head -n1 "$sandbox/feed")
+      local tok; tok=$(head -n1 "$sandbox/feed")
       sed -i '1d' "$sandbox/feed" 2>/dev/null || true
       if [[ "$tok" == "verdict" ]]; then
         printf '%s\n' "$VERDICT_TURN" >> "$log"
@@ -201,31 +195,26 @@ run_codex_controller_case() {
     run_agent() {
       echo "run sid=$1" >> "$sandbox/run_calls"
       _feed_next
-      return 0
     }
     resume_agent() {
       echo "resume sid=$1" >> "$sandbox/resume_calls"
       printf '%s\n---END---\n' "$2" >> "$sandbox/resume_argv"   # $2 == prompt
       _feed_next
-      return 0
     }
     # Deterministic clock: pop one integer per call; reuse last when exhausted.
     _codex_now_seconds() {
-      local n
-      n=$(head -n1 "$sandbox/now")
-      if [[ $(wc -l < "$sandbox/now") -gt 1 ]]; then sed -i '1d' "$sandbox/now"; fi
+      local n; n=$(head -n1 "$sandbox/now")
+      [[ $(wc -l < "$sandbox/now") -gt 1 ]] && sed -i '1d' "$sandbox/now"
       printf '%s\n' "$n"
     }
 
-    CODEX_REVIEW_MAX_RESUMES="$max" \
-    CODEX_REVIEW_LOG="$log" \
-    AGENT_REVIEW_TIMEOUT=1h \
+    CODEX_REVIEW_MAX_RESUMES="$max" CODEX_REVIEW_LOG="$log" AGENT_REVIEW_TIMEOUT=1h \
       _run_codex_review_with_resume "sid-123" "review prompt" "model-x" "sess-name"
     rc=$?
-    # Count marker lines only ('run sid=' / 'resume sid='). grep -c prints 0 and
-    # exits 1 on no match, so DO NOT chain `|| echo 0` (that double-prints).
-    runs=$(grep -c '^run sid=' "$sandbox/run_calls" 2>/dev/null)
-    resumes=$(grep -c '^resume sid=' "$sandbox/resume_calls" 2>/dev/null)
+    # Count marker lines only ('run sid=' / 'resume sid='). grep -c exits 1 on
+    # no match (returns 0), so avoid bare grep which breaks under set -e.
+    runs=$(grep -c '^run sid=' "$sandbox/run_calls" 2>/dev/null) || runs=0
+    resumes=$(grep -c '^resume sid=' "$sandbox/resume_calls" 2>/dev/null) || resumes=0
     cp "$sandbox/resume_argv" "$REC_RESUME_ARGV" 2>/dev/null || true
     cp "$sandbox/resume_calls" "$REC_RESUME_CALLS" 2>/dev/null || true
     echo "${rc}|${runs}|${resumes}"
