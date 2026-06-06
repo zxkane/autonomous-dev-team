@@ -156,7 +156,7 @@ before the per-CLI blocks:
 #   AGENT_CMD="claude"           # also used by anything not split
 #   AGENT_REVIEW_CMD="agy"       # only review goes to agy
 #   AGENT_DEV_MODEL="opus[1m]"
-#   AGENT_REVIEW_MODEL=""        # ignored by agy (warns), see agy block
+#   AGENT_REVIEW_MODEL="Gemini 3.5 Flash (High)"  # an agy-namespace model (validated vs `agy models`, INV-50)
 #
 # AGENT_LAUNCHER (claude-only) is rejected when either side resolves
 # to a non-claude CLI. Either unset the launcher or keep both sides

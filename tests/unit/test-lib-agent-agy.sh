@@ -10,7 +10,10 @@
 #   - resume_agent agy branch reads the sidecar and invokes
 #     `agy --conversation <uuid> -p ...`
 #   - resume_agent falls back to run_agent when the sidecar is missing
-#   - Non-empty `model` arg emits one-time WARN, execution continues
+#   - `--model` is forwarded ONLY for a known agy model (validated via
+#     `_agy_known_model` against `agy models`, INV-50): unknown → omitted
+#     + one-time WARN; enumeration failure → best-effort pass-through;
+#     empty → no --model (AGY-06a/06b/06b2/06b3, TC-AGYM-KM, AGY-06c/06d)
 #   - Capture is best-effort (INV-36): missing log line / symlink sidecar
 #     do not fail run_agent
 #
@@ -264,8 +267,29 @@ mkdir -p "$BIN"
 # Stub agy: record argv + drain stdin to recorders, then write a fake
 # log file at the path requested via --log-file containing the
 # Print mode line. Exits 0.
+#
+# The `models` subcommand (`agy models`) prints a fixed listing so the
+# wrapper's _agy_known_model can enumerate. Set AGY_MODELS_FAIL=1 (in the
+# stub's environment) to make `agy models` exit non-zero — exercises the
+# enumeration-failure best-effort-passthrough path (AGY-06b3).
 cat > "$BIN/agy" <<'STUB'
 #!/bin/bash
+if [[ "${1:-}" == "models" ]]; then
+  if [[ -n "${AGY_MODELS_FAIL:-}" ]]; then
+    exit 1
+  fi
+  cat <<'MODELS'
+Gemini 3.5 Flash (Medium)
+Gemini 3.5 Flash (High)
+Gemini 3.5 Flash (Low)
+Gemini 3.1 Pro (Low)
+Gemini 3.1 Pro (High)
+Claude Sonnet 4.6 (Thinking)
+Claude Opus 4.6 (Thinking)
+GPT-OSS 120B (Medium)
+MODELS
+  exit 0
+fi
 echo "$@" > "$AGY_ARGS_FILE"
 cat > "${AGY_STDIN_FILE:-/dev/null}"
 # Find --log-file argument and write a fixture log there.
@@ -430,35 +454,16 @@ fi
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== AGY-06: model parameter — WARN once, execution continues ==="
+echo "=== AGY-06a: known agy model → forwarded via --model (single argv elem) ==="
 # ---------------------------------------------------------------------------
+# Issue #190: agy now honors --model. A model that `agy models` lists is
+# forwarded; a multi-word name reaches the CLI as ONE argv element.
 SESSION_ID6="66666666-1234-1234-1234-123456789012"
+KNOWN_MODEL="Gemini 3.5 Flash (High)"
 : > "$ARGS_FILE"
 : > "$STDIN_FILE"
 
-# Run with non-empty model; capture stderr separately from stdout.
-run_stderr=$(
-  (
-    PATH="$BIN:$PATH" \
-    AUTONOMOUS_PID_DIR="$PID_DIR" \
-    PROJECT_ID="testproj" \
-    PROJECT_DIR="$TMPROOT" \
-    AGENT_CMD=agy \
-    AGENT_PERMISSION_MODE=auto \
-    AGENT_TIMEOUT=4h \
-    AGY_ARGS_FILE="$ARGS_FILE" \
-    AGY_STDIN_FILE="$STDIN_FILE" \
-    AGY_FAKE_UUID="20de1aaa-aaaa-4bbb-8ccc-cccccccccccc" \
-    bash -c '
-      unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE _LIB_AGENT_AGY_MODEL_WARNED
-      source "'"$LIB"'"
-      run_agent "'"$SESSION_ID6"'" "with model" "gemini-3-pro-preview" ""
-    '
-  ) 2>&1 1>/dev/null
-)
-# rc captured separately — re-run for it, since the subshell pattern above
-# is for stderr capture.
-(
+run_06a() {
   PATH="$BIN:$PATH" \
   AUTONOMOUS_PID_DIR="$PID_DIR" \
   PROJECT_ID="testproj" \
@@ -470,18 +475,322 @@ run_stderr=$(
   AGY_STDIN_FILE="$STDIN_FILE" \
   AGY_FAKE_UUID="20de1aaa-aaaa-4bbb-8ccc-cccccccccccc" \
   bash -c '
-    unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE _LIB_AGENT_AGY_MODEL_WARNED
+    unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE \
+          _LIB_AGENT_AGY_MODEL_WARNED _LIB_AGENT_AGY_MODELS_CACHE
     source "'"$LIB"'"
-    run_agent "'"$SESSION_ID6"'" "with model" "gemini-3-pro-preview" ""
+    run_agent "'"$SESSION_ID6"'" "with known model" "'"$KNOWN_MODEL"'" ""
+  '
+}
+run_06a >/dev/null 2>&1
+agy06a_rc=$?
+assert_eq "AGY-06a — run_agent rc 0 with known model" 0 "$agy06a_rc"
+agy_argv=$(cat "$ARGS_FILE")
+assert_contains "AGY-06a — argv contains --model" "--model" "$agy_argv"
+assert_contains "AGY-06a — argv contains the known model name" "$KNOWN_MODEL" "$agy_argv"
+
+# Single-argv-element check: a wordsplit of the recorded argv must keep
+# "Gemini 3.5 Flash (High)" intact AS THE TOKEN AFTER --model. We re-run
+# with the `agy` stub temporarily swapped for a NUL-delimited recorder
+# (renaming the command would miss the agy case branch, which matches the
+# literal `agy`). Restore the real stub afterwards.
+NUL_ARGS="$TMPROOT/agy-args-nul"
+cat > "$BIN/agy-nul" <<'STUB'
+#!/bin/bash
+if [[ "${1:-}" == "models" ]]; then
+  cat <<'MODELS'
+Gemini 3.5 Flash (High)
+MODELS
+  exit 0
+fi
+printf '%s\0' "$@" > "$AGY_NUL_ARGS_FILE"
+cat > /dev/null
+exit 0
+STUB
+chmod +x "$BIN/agy-nul"
+mv "$BIN/agy" "$BIN/agy.real-06a"
+ln -sf "$BIN/agy-nul" "$BIN/agy"
+: > "$NUL_ARGS"
+PATH="$BIN:$PATH" \
+  AUTONOMOUS_PID_DIR="$PID_DIR" \
+  PROJECT_ID="testproj" \
+  PROJECT_DIR="$TMPROOT" \
+  AGENT_CMD=agy \
+  AGENT_PERMISSION_MODE=auto \
+  AGENT_TIMEOUT=4h \
+  AGY_NUL_ARGS_FILE="$NUL_ARGS" \
+  bash -c '
+    unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE \
+          _LIB_AGENT_AGY_MODEL_WARNED _LIB_AGENT_AGY_MODELS_CACHE
+    source "'"$LIB"'"
+    run_agent "'"$SESSION_ID6"'" "with known model" "'"$KNOWN_MODEL"'" ""
+  ' >/dev/null 2>&1
+# Restore the real stub for later cases.
+rm -f "$BIN/agy"
+mv "$BIN/agy.real-06a" "$BIN/agy"
+# Walk the NUL-delimited elements: the element after "--model" must equal
+# the full model name (proves spaces/parens stayed in one argv slot).
+mapfile -d '' -t _nul_elems < "$NUL_ARGS" 2>/dev/null || {
+  # zsh / no-mapfile fallback: read into an array via a NUL loop.
+  _nul_elems=(); while IFS= read -r -d '' _e; do _nul_elems+=("$_e"); done < "$NUL_ARGS"
+}
+_model_elem=""
+for ((_i = 0; _i < ${#_nul_elems[@]}; _i++)); do
+  if [[ "${_nul_elems[$_i]}" == "--model" ]]; then
+    _model_elem="${_nul_elems[$((_i + 1))]}"
+    break
+  fi
+done
+assert_eq "AGY-06a — model is a single argv element (quoting preserved)" \
+  "$KNOWN_MODEL" "$_model_elem"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== AGY-06b: empty model → no --model, no WARN ==="
+# ---------------------------------------------------------------------------
+SESSION_ID6B="66666666-bbbb-2222-3333-123456789012"
+: > "$ARGS_FILE"; : > "$STDIN_FILE"
+run06b_stderr=$(
+  (
+    PATH="$BIN:$PATH" \
+    AUTONOMOUS_PID_DIR="$PID_DIR" \
+    PROJECT_ID="testproj" \
+    PROJECT_DIR="$TMPROOT" \
+    AGENT_CMD=agy \
+    AGENT_PERMISSION_MODE=auto \
+    AGENT_TIMEOUT=4h \
+    AGY_ARGS_FILE="$ARGS_FILE" \
+    AGY_STDIN_FILE="$STDIN_FILE" \
+    AGY_FAKE_UUID="20de1bbb-aaaa-4bbb-8ccc-cccccccccccc" \
+    bash -c '
+      unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE \
+            _LIB_AGENT_AGY_MODEL_WARNED _LIB_AGENT_AGY_MODELS_CACHE
+      source "'"$LIB"'"
+      run_agent "'"$SESSION_ID6B"'" "no model" "" ""
+    '
+  ) 2>&1 1>/dev/null
+)
+agy_argv=$(cat "$ARGS_FILE")
+assert_not_contains "AGY-06b — empty model: argv has no --model" "--model" "$agy_argv"
+assert_not_contains "AGY-06b — empty model: no WARN to stderr" "agy" "$run06b_stderr"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== AGY-06b2: enumerated-but-unknown model → omitted + one-time WARN ==="
+# ---------------------------------------------------------------------------
+# agy accepts ANY --model string at rc 0 and silently runs its default, so the
+# wrapper must drop a cross-namespace id (e.g. kiro's "claude-sonnet-4.6") and
+# WARN instead of forwarding it into the INV-40 merge gate.
+SESSION_ID6B2="66666666-b2b2-2222-3333-123456789012"
+UNKNOWN_MODEL="claude-sonnet-4.6"
+: > "$ARGS_FILE"; : > "$STDIN_FILE"
+run06b2_stderr=$(
+  (
+    PATH="$BIN:$PATH" \
+    AUTONOMOUS_PID_DIR="$PID_DIR" \
+    PROJECT_ID="testproj" \
+    PROJECT_DIR="$TMPROOT" \
+    AGENT_CMD=agy \
+    AGENT_PERMISSION_MODE=auto \
+    AGENT_TIMEOUT=4h \
+    AGY_ARGS_FILE="$ARGS_FILE" \
+    AGY_STDIN_FILE="$STDIN_FILE" \
+    AGY_FAKE_UUID="20de1b22-aaaa-4bbb-8ccc-cccccccccccc" \
+    bash -c '
+      unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE \
+            _LIB_AGENT_AGY_MODEL_WARNED _LIB_AGENT_AGY_MODELS_CACHE
+      source "'"$LIB"'"
+      run_agent "'"$SESSION_ID6B2"'" "unknown model" "'"$UNKNOWN_MODEL"'" ""
+    '
+  ) 2>&1 1>/dev/null
+)
+# rc captured separately.
+(
+  PATH="$BIN:$PATH" \
+  AUTONOMOUS_PID_DIR="$PID_DIR" \
+  PROJECT_ID="testproj" \
+  PROJECT_DIR="$TMPROOT" \
+  AGENT_CMD=agy \
+  AGENT_PERMISSION_MODE=auto \
+  AGENT_TIMEOUT=4h \
+  AGY_ARGS_FILE="$ARGS_FILE" \
+  AGY_STDIN_FILE="$STDIN_FILE" \
+  AGY_FAKE_UUID="20de1b22-aaaa-4bbb-8ccc-cccccccccccc" \
+  bash -c '
+    unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE \
+          _LIB_AGENT_AGY_MODEL_WARNED _LIB_AGENT_AGY_MODELS_CACHE
+    source "'"$LIB"'"
+    run_agent "'"$SESSION_ID6B2"'" "unknown model" "'"$UNKNOWN_MODEL"'" ""
   ' >/dev/null 2>&1
 )
-model_rc=$?
-
-assert_contains "model WARN emitted to stderr" \
-  "AGENT_CMD=agy does not support --model" "$run_stderr"
-assert_eq "execution continues despite WARN — rc=0" 0 "$model_rc"
+agy06b2_rc=$?
+assert_eq "AGY-06b2 — rc 0 (agy default, not a drop)" 0 "$agy06b2_rc"
 agy_argv=$(cat "$ARGS_FILE")
-assert_not_contains "agy argv does NOT contain --model" "--model" "$agy_argv"
+assert_not_contains "AGY-06b2 — unknown model NOT forwarded" "--model" "$agy_argv"
+assert_contains "AGY-06b2 — WARN names the bad value" "$UNKNOWN_MODEL" "$run06b2_stderr"
+assert_contains "AGY-06b2 — WARN points at AGENT_REVIEW_MODEL_AGY" \
+  "AGENT_REVIEW_MODEL_AGY" "$run06b2_stderr"
+assert_contains "AGY-06b2 — WARN says not a known agy model" \
+  "not a known agy model" "$run06b2_stderr"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== AGY-06b3: agy models enumeration failure → best-effort pass-through ==="
+# ---------------------------------------------------------------------------
+# If `agy models` can't be enumerated we cannot prove the value invalid, so we
+# forward it (mirrors INV-36 best-effort) rather than silently drop a maybe-valid id.
+SESSION_ID6B3="66666666-b3b3-2222-3333-123456789012"
+ENUMFAIL_MODEL="some-model"
+: > "$ARGS_FILE"; : > "$STDIN_FILE"
+(
+  PATH="$BIN:$PATH" \
+  AUTONOMOUS_PID_DIR="$PID_DIR" \
+  PROJECT_ID="testproj" \
+  PROJECT_DIR="$TMPROOT" \
+  AGENT_CMD=agy \
+  AGENT_PERMISSION_MODE=auto \
+  AGENT_TIMEOUT=4h \
+  AGY_ARGS_FILE="$ARGS_FILE" \
+  AGY_STDIN_FILE="$STDIN_FILE" \
+  AGY_MODELS_FAIL=1 \
+  AGY_FAKE_UUID="20de1b33-aaaa-4bbb-8ccc-cccccccccccc" \
+  bash -c '
+    unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE \
+          _LIB_AGENT_AGY_MODEL_WARNED _LIB_AGENT_AGY_MODELS_CACHE
+    source "'"$LIB"'"
+    run_agent "'"$SESSION_ID6B3"'" "enum fail model" "'"$ENUMFAIL_MODEL"'" ""
+  ' >/dev/null 2>&1
+)
+agy06b3_rc=$?
+assert_eq "AGY-06b3 — rc 0 on enumeration failure" 0 "$agy06b3_rc"
+agy_argv=$(cat "$ARGS_FILE")
+assert_contains "AGY-06b3 — model forwarded best-effort when enum fails" \
+  "--model $ENUMFAIL_MODEL" "$agy_argv"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-AGYM-KM: _agy_known_model unit ==="
+# ---------------------------------------------------------------------------
+# known → rc 0; unknown → rc 1; prefix of a listed name → rc 1 (whole-line);
+# regex-metachar arg treated literally → rc 1; empty → rc 1.
+km_out=$(
+  PATH="$BIN:$PATH" \
+  AGENT_CMD=agy \
+  bash -c '
+    unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE \
+          _LIB_AGENT_AGY_MODEL_WARNED _LIB_AGENT_AGY_MODELS_CACHE
+    source "'"$LIB"'"
+    _agy_known_model "Gemini 3.5 Flash (High)";  echo "known=$?"
+    _agy_known_model "claude-sonnet-4.6";        echo "unknown=$?"
+    _agy_known_model "Gemini 3.5 Flash";         echo "prefix=$?"
+    _agy_known_model "Gemini.*";                 echo "regex=$?"
+    _agy_known_model "";                         echo "empty=$?"
+  ' 2>/dev/null
+)
+assert_contains "TC-AGYM-KM — known name → rc 0"            "known=0"   "$km_out"
+assert_contains "TC-AGYM-KM — unknown name → rc 1"          "unknown=1" "$km_out"
+assert_contains "TC-AGYM-KM — prefix of listed name → rc 1" "prefix=1"  "$km_out"
+assert_contains "TC-AGYM-KM — regex metachars literal → rc 1" "regex=1" "$km_out"
+assert_contains "TC-AGYM-KM — empty arg → rc 1"             "empty=1"   "$km_out"
+
+# Caching: _agy_known_model must enumerate `agy models` at most ONCE per
+# process. Use a counting stub that bumps a counter file on each `models` call.
+COUNT_FILE="$TMPROOT/agy-models-count"
+cat > "$BIN/agy-count" <<'STUB'
+#!/bin/bash
+if [[ "${1:-}" == "models" ]]; then
+  c=$(cat "$AGY_COUNT_FILE" 2>/dev/null || echo 0)
+  echo $((c + 1)) > "$AGY_COUNT_FILE"
+  echo "Gemini 3.5 Flash (High)"
+  exit 0
+fi
+exit 0
+STUB
+chmod +x "$BIN/agy-count"
+echo 0 > "$COUNT_FILE"
+PATH="$BIN:$PATH" \
+  AGENT_CMD=agy-count \
+  AGY_COUNT_FILE="$COUNT_FILE" \
+  bash -c '
+    unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE \
+          _LIB_AGENT_AGY_MODEL_WARNED _LIB_AGENT_AGY_MODELS_CACHE
+    source "'"$LIB"'"
+    _agy_known_model "Gemini 3.5 Flash (High)" || true
+    _agy_known_model "claude-sonnet-4.6"       || true
+    _agy_known_model "Gemini 3.5 Flash (Low)"  || true
+  ' >/dev/null 2>&1
+assert_eq "TC-AGYM-KM — agy models enumerated once per process (cached)" \
+  "1" "$(cat "$COUNT_FILE")"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== AGY-06c: resume_agent --conversation path forwards --model ==="
+# ---------------------------------------------------------------------------
+# Reuse sidecar4 from AGY-04 (populated). resume with a known model.
+: > "$ARGS_FILE"; : > "$STDIN_FILE"
+PATH="$BIN:$PATH" \
+  AUTONOMOUS_PID_DIR="$PID_DIR" \
+  PROJECT_ID="testproj" \
+  PROJECT_DIR="$TMPROOT" \
+  AGENT_CMD=agy \
+  AGENT_PERMISSION_MODE=auto \
+  AGENT_TIMEOUT=4h \
+  AGY_ARGS_FILE="$ARGS_FILE" \
+  AGY_STDIN_FILE="$STDIN_FILE" \
+  AGY_FAKE_UUID="$FAKE_UUID" \
+  bash -c '
+    unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE \
+          _LIB_AGENT_AGY_MODEL_WARNED _LIB_AGENT_AGY_MODELS_CACHE
+    source "'"$LIB"'"
+    resume_agent "'"$SESSION_ID4"'" "resume with model" "'"$KNOWN_MODEL"'" ""
+  ' >/dev/null 2>&1
+agy06c_rc=$?
+assert_eq "AGY-06c — resume rc 0 with known model" 0 "$agy06c_rc"
+agy_argv=$(cat "$ARGS_FILE")
+assert_contains "AGY-06c — resume argv contains --conversation <UUID>" \
+  "--conversation $FAKE_UUID" "$agy_argv"
+assert_contains "AGY-06c — resume argv contains --model" "--model" "$agy_argv"
+assert_contains "AGY-06c — resume argv contains the model name" "$KNOWN_MODEL" "$agy_argv"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== AGY-06d: resume_agent no sidecar → run_agent fallback threads --model ==="
+# ---------------------------------------------------------------------------
+SESSION_ID6D="6666666d-eeee-ffff-aaaa-bbbbbbbbbbbb"  # no sidecar pre-populated
+: > "$ARGS_FILE"; : > "$STDIN_FILE"
+PATH="$BIN:$PATH" \
+  AUTONOMOUS_PID_DIR="$PID_DIR" \
+  PROJECT_ID="testproj" \
+  PROJECT_DIR="$TMPROOT" \
+  AGENT_CMD=agy \
+  AGENT_PERMISSION_MODE=auto \
+  AGENT_TIMEOUT=4h \
+  AGY_ARGS_FILE="$ARGS_FILE" \
+  AGY_STDIN_FILE="$STDIN_FILE" \
+  AGY_FAKE_UUID="6dde1aaa-aaaa-4bbb-8ccc-cccccccccccc" \
+  bash -c '
+    unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE \
+          _LIB_AGENT_AGY_MODEL_WARNED _LIB_AGENT_AGY_MODELS_CACHE
+    source "'"$LIB"'"
+    resume_agent "'"$SESSION_ID6D"'" "fallback with model" "'"$KNOWN_MODEL"'" ""
+  ' >/dev/null 2>&1
+agy06d_rc=$?
+assert_eq "AGY-06d — resume-fallback rc 0" 0 "$agy06d_rc"
+agy_argv=$(cat "$ARGS_FILE")
+assert_not_contains "AGY-06d — fallback argv has no --conversation" "--conversation" "$agy_argv"
+assert_contains "AGY-06d — fallback argv contains --model (threaded through)" "--model" "$agy_argv"
+assert_contains "AGY-06d — fallback argv contains the model name" "$KNOWN_MODEL" "$agy_argv"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== AGY-WARN-GONE: old warn-and-ignore string removed from lib-agent.sh ==="
+# ---------------------------------------------------------------------------
+if grep -q "does not support --model" "$LIB"; then
+  echo -e "  ${RED}FAIL${NC}: AGY-WARN-GONE — stale 'does not support --model' WARN still present in lib-agent.sh"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${NC}: AGY-WARN-GONE — warn-and-ignore string removed"
+  PASS=$((PASS + 1))
+fi
 
 # ---------------------------------------------------------------------------
 echo ""

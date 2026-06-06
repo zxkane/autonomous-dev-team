@@ -271,7 +271,7 @@ AGENT_REVIEW_EXTRA_ARGS=""
 #   AGENT_CMD="claude"           # also used by anything not split
 #   AGENT_REVIEW_CMD="agy"       # only review goes to agy
 #   AGENT_DEV_MODEL="opus[1m]"
-#   AGENT_REVIEW_MODEL=""        # ignored by agy (warns), see agy block
+#   AGENT_REVIEW_MODEL="Gemini 3.5 Flash (High)"  # an agy-namespace model — see agy block
 #
 # AGENT_LAUNCHER (claude-only) is gated per-side by INV-38: each side's
 # launcher requires THAT side's CLI to be claude. The natural mixed-
@@ -326,13 +326,14 @@ AGENT_REVIEW_EXTRA_ARGS=""
 # `claude-sonnet-4.6`):
 #
 #   AGENT_REVIEW_AGENTS="kiro agy"
-#   AGENT_REVIEW_MODEL="sonnet[1m]"             # shared default (agy keeps this)
-#   AGENT_REVIEW_MODEL_KIRO="claude-sonnet-4.6" # kiro gets its own id
+#   AGENT_REVIEW_MODEL="claude-sonnet-4.6"            # kiro-namespace shared default
+#   AGENT_REVIEW_MODEL_AGY="Gemini 3.5 Flash (High)"  # agy gets a real agy-namespace model
 #   AGENT_REVIEW_EXTRA_ARGS_KIRO="--trust-all-tools"  # kiro-only flag
-#   # agy has no per-agent key → uses the shared AGENT_REVIEW_MODEL ("sonnet[1m]")
-#   # and shared AGENT_REVIEW_EXTRA_ARGS. (agy ignores --model and warns once —
-#   # see the agy block; per-agent model still makes the value correct for the
-#   # CLIs that DO consume it.)
+#   # kiro has no per-agent model key → uses the shared "claude-sonnet-4.6".
+#   # agy DOES consume --model now but validates against `agy models` (INV-50):
+#   # giving it the shared kiro id would make agy WARN and run its default, so
+#   # set AGENT_REVIEW_MODEL_AGY to a valid agy-namespace name. agy still uses
+#   # the shared AGENT_REVIEW_EXTRA_ARGS.
 #
 # Note: the review fan-out runs a FRESH run_agent (not resume_agent), so on the
 # review side the resolved extra-args is threaded through AGENT_DEV_EXTRA_ARGS
@@ -443,15 +444,20 @@ AGENT_REVIEW_EXTRA_ARGS=""
 
 # --- agy block ---
 # Antigravity 2.0 CLI (Google) — successor to gemini CLI.
-# Verified against agy 1.0.2.
 #
 # Structural flags managed by lib-agent.sh (NOT to add here):
 #   -p, --dangerously-skip-permissions, --print-timeout, --log-file
 #
 # Operator notes:
-#   1. agy does NOT accept --model on the CLI. AGENT_DEV_MODEL /
-#      AGENT_REVIEW_MODEL are ignored with a one-time WARN. Configure
-#      model selection via ~/.gemini/antigravity-cli/settings.json.
+#   1. agy accepts --model. The value MUST be a name from `agy models`
+#      (spaces/parens included — quote them); the wrapper validates the
+#      resolved AGENT_DEV_MODEL / AGENT_REVIEW_MODEL against that list and
+#      OMITS --model with a WARN if the value is not a known agy model.
+#      (agy would otherwise silently run its DEFAULT model — it returns
+#      rc 0 for any --model string and does NOT reject invalid ids, so the
+#      wrapper is the gate. See [INV-50] and docs/pipeline/agy-cli-support.md.)
+#      AGENT_DEV_MODEL / AGENT_REVIEW_MODEL are honored when they name a
+#      real agy model.
 #   2. --dangerously-skip-permissions is structural and load-bearing
 #      for headless tool execution; without it agy denies every tool
 #      call (silent fabrication failure, same shape as gemini's
@@ -464,8 +470,8 @@ AGENT_REVIEW_EXTRA_ARGS=""
 #      for the best-effort contract.
 #
 # AGENT_CMD="agy"
-# AGENT_DEV_MODEL=""        # Ignored — see note 1.
-# AGENT_REVIEW_MODEL=""     # Ignored — see note 1.
+# AGENT_DEV_MODEL="Gemini 3.5 Flash (High)"     # must be a name from `agy models`
+# AGENT_REVIEW_MODEL="Gemini 3.5 Flash (High)"  # must be a name from `agy models`
 # AGENT_DEV_EXTRA_ARGS=""
 # AGENT_REVIEW_EXTRA_ARGS=""
 

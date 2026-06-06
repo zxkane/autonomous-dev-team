@@ -6,13 +6,17 @@ pipeline) as a supported value of `AGENT_CMD` in
 `skills/autonomous-dispatcher/scripts/lib-agent.sh`.
 
 This doc is the authoritative contract for the `agy` branch in
-`run_agent` / `resume_agent`. Verified against **agy 1.0.2** (May 2026).
+`run_agent` / `resume_agent`. Originally verified against **agy 1.0.2**
+(May 2026), which had no `--model` flag. **A current agy build adds
+`--model`** (issue #190); the wrapper now forwards it after validating
+against `agy models` — see [`--model` support](#--model-support-issue-190-inv-50)
+and [INV-50](invariants.md#inv-50-agy---model-is-validated-against-agy-models-before-forwarding).
 
 Related: [`dev-agent-flow.md`](dev-agent-flow.md) (consumer of
 `run_agent` / `resume_agent`), [`invariants.md`](invariants.md)
 ([INV-13], [INV-34]) for the cross-cutting rules this branch upholds.
 
-## CLI shape (verified, agy 1.0.2)
+## CLI shape (verified)
 
 `agy` ships a small surface area compared to the other supported CLIs.
 Probed via `agy --help` and a live `-p` invocation:
@@ -21,21 +25,57 @@ Probed via `agy --help` and a live `-p` invocation:
 |------|------|
 | `-p` / `--print` / `--prompt` | Headless single-prompt mode. With no positional, reads prompt from **stdin**. |
 | `--print-timeout <duration>` | Internal cap on print-mode wait. **Default 5m** — far below our `AGENT_TIMEOUT` (default 4h), so we MUST override. |
+| `--model <name>` | Select the model for the session. **Present and used** (issue #190). The value MUST be a name from `agy models` (spaces/parens included, e.g. `"Gemini 3.5 Flash (High)"`). agy accepts *any* string at rc 0 and silently falls back to its default for an unknown id, so the wrapper validates against `agy models` before forwarding — see [`--model` support](#--model-support-issue-190-inv-50). |
 | `--continue` / `-c` | Resume the **most recent** conversation. Not concurrency-safe — discarded. |
 | `--conversation <UUID>` | Resume a specific conversation by ID. The deterministic resume primitive. |
 | `--dangerously-skip-permissions` | Auto-approve all tool permission requests. **Load-bearing** for headless tool execution; without it, every tool call denies and the agent silently fabricates results (same failure mode that gemini's `--approval-mode yolo` and kiro's `--trust-all-tools` fix). |
 | `--log-file <path>` | Override CLI log file path. **The only programmatic channel for the conversation UUID** — agy does not emit a JSON event stream and does not print the UUID on stdout. |
+| `agy models` (subcommand) | Print the model names agy accepts, one per line (spaces/parens in names). Used by the wrapper to validate `--model` before forwarding. |
 | `--add-dir`, `--sandbox`, `--prompt-interactive` (`-i`) | Not used by the wrapper. |
 
 **Crucial absences** (vs. peer CLIs):
 
 - No `--session-id <UUID>` for caller-minted IDs (vs. claude / gemini).
-- No `--model` flag — model selection is configured in
-  `~/.gemini/antigravity-cli/settings.json`. `AGENT_DEV_MODEL` /
-  `AGENT_REVIEW_MODEL` cannot be honored on the CLI side.
 - No JSON event stream output (vs. codex `--json`, opencode `--format
   json`, gemini `--output-format stream-json`). The conversation UUID
   is emitted only to the log file.
+
+## `--model` support (issue #190, [INV-50])
+
+A current agy build honors `--model`, so the wrapper forwards it like the
+other CLIs — **but with a validation gate the others do not need.** The
+empirically-verified fact that forces this:
+
+```
+$ printf 'say OK' | agy -p --model "claude-sonnet-4.6"        → OK   rc=0   (ran as agy's DEFAULT model)
+$ printf 'say OK' | agy -p --model "totally-not-a-model-xyz"  → OK   rc=0   (ran as agy's DEFAULT model)
+$ agy -p --model "Gemini 3.1 Pro (Low)"  → "I am based on the Gemini 3.1 Pro model."
+```
+
+`agy -p --model "<x>"` returns **rc 0 for any string** and silently falls
+back to its default model — it does **not** fail on an invalid id. So
+"pass `--model` verbatim and let agy self-error" would make an un-keyed
+agy review member that inherits a non-agy shared `AGENT_REVIEW_MODEL`
+(e.g. kiro's `claude-sonnet-4.6`) **silently review with the wrong
+model**, and that verdict still counts toward the [INV-40] unanimous-PASS
+merge gate. Silent wrong-model in the merge path is worse than the old
+documented no-op. Validation is the only way to make a misconfiguration
+observable.
+
+The wrapper therefore validates the resolved model against `agy models`
+(via `_agy_known_model`, cached once per process, fixed-string whole-line
+match) and resolves the `--model` argv as:
+
+| Resolved model | `--model` forwarded? | Side effect |
+|---|---|---|
+| Known agy model (in `agy models`) | **yes** — `--model "<name>"` (single argv element) | — |
+| Enumerated, but not in the list | **no** — omitted; agy runs its configured default | one-time WARN naming the value + `AGENT_REVIEW_MODEL_AGY` |
+| `agy models` enumeration failed | **yes** — `--model "<value>"` (best-effort; can't prove invalid) | — |
+| Empty / unset | **no** | — |
+
+The per-agent key `AGENT_REVIEW_MODEL_AGY` ([INV-41]) is the way to give
+agy a valid agy-namespace model when the shared `AGENT_REVIEW_MODEL`
+belongs to another CLI's namespace.
 
 ## Session model — sidecar pattern (mirrors codex / opencode)
 
@@ -73,11 +113,11 @@ non-fatal — the next `run_agent` re-establishes a sidecar.
 
 ```bash
 agy)
-  # WARN once if model passed (agy doesn't accept --model). Continue.
-  if [[ -n "$model" && -z "${_LIB_AGENT_AGY_MODEL_WARNED:-}" ]]; then
-    echo "[lib-agent] WARN: AGENT_CMD=agy does not support --model flag; ignoring AGENT_DEV_MODEL=${model}. Configure model via ~/.gemini/antigravity-cli/settings.json instead." >&2
-    export _LIB_AGENT_AGY_MODEL_WARNED=1
-  fi
+  # Validated --model (issue #190, INV-50): forward only a known agy model;
+  # omit + WARN for an unknown id; best-effort pass-through if `agy models`
+  # can't be enumerated. Policy lives in _agy_build_model_args.
+  local agy_model_args
+  _agy_build_model_args "$model" agy_model_args
 
   local agy_log
   agy_log=$(_agy_log_file "$session_id") || return 1
@@ -88,6 +128,7 @@ agy)
         --dangerously-skip-permissions \
         --print-timeout "$AGENT_TIMEOUT" \
         --log-file "$agy_log" \
+        "${agy_model_args[@]}" \
         "${extra_args[@]}"
   local rc=$?
 
@@ -116,6 +157,10 @@ Why each flag is structural (not operator-tunable, not in
   concurrent issues) or to a discarded path (would lose resume
   capability).
 
+`agy_model_args` is **not** structural — it carries the validated
+`--model` (or nothing) resolved from the caller's `model` arg per
+[INV-50]. See [`--model` support](#--model-support-issue-190-inv-50).
+
 Operator-tunable additions go in `AGENT_DEV_EXTRA_ARGS` /
 `AGENT_REVIEW_EXTRA_ARGS` per [INV-31], appended via `extra_args[@]`.
 
@@ -127,6 +172,12 @@ agy)
   if _agy_cid=$(_agy_conversation_id "$session_id"); then
     local agy_log
     agy_log=$(_agy_log_file "$session_id") || return 1
+    # Validated --model on resume too (INV-50), via the shared helper.
+    # agy may bind the model from the original conversation and ignore a
+    # late --model — worst case a harmless no-op (confirmed non-fatal in
+    # the AGY-06c test).
+    local agy_model_args
+    _agy_build_model_args "$model" agy_model_args
     printf '%s' "$prompt" \
       | _run_with_timeout "$AGENT_CMD" \
           --conversation "$_agy_cid" \
@@ -134,6 +185,7 @@ agy)
           --dangerously-skip-permissions \
           --print-timeout "$AGENT_TIMEOUT" \
           --log-file "$agy_log" \
+          "${agy_model_args[@]}" \
           "${extra_args[@]}"
     local rc=$?
     _agy_capture_conversation "$session_id" "$agy_log"
@@ -145,6 +197,11 @@ agy)
   ;;
 ```
 
+The sidecar-absent fallback calls `run_agent "$session_id" "$prompt"
+"$model" …`, which forwards the validated `--model` itself — so the
+model is threaded through the fallback path without extra code here
+(pinned by the AGY-06d test).
+
 `_agy_capture_conversation` re-runs after resume as a self-healing
 step: under normal operation the captured UUID equals `_agy_cid` (agy
 keeps the conversation id on `--conversation <id>` resume), so the
@@ -154,12 +211,16 @@ id on resume, the sidecar tracks the live one without a code change.
 The fallback branch reuses `run_agent` (not `_LIB_AGENT_GENERIC_WARNED`
 or a separate code path) so the new-session policy stays in one place.
 
-## Helper trio
+## Helpers
 
-Drop-in mirrors of `_codex_thread_file` / `_codex_capture_thread` /
-`_codex_thread_id`, with two differences: (1) two paths instead of
-one (log file + conversation sidecar), (2) capture channel is `grep
-log_file` instead of `awk JSON stream`.
+The sidecar trio (`_agy_log_file` / `_agy_conversation_file` /
+`_agy_capture_conversation` / `_agy_conversation_id`) are drop-in mirrors
+of `_codex_thread_file` / `_codex_capture_thread` / `_codex_thread_id`,
+with two differences: (1) two paths instead of one (log file +
+conversation sidecar), (2) capture channel is `grep log_file` instead of
+`awk JSON stream`. The model-validation pair (`_agy_known_model` /
+`_agy_build_model_args`) is agy-specific (issue #190, [INV-50]) and shown
+after the trio.
 
 ```bash
 _agy_log_file() {
@@ -211,6 +272,52 @@ _agy_conversation_id() {
 }
 ```
 
+Model validation (issue #190, [INV-50]) — enumerate `agy models` once
+per process and answer "is `<model>` a name agy accepts?" via a
+fixed-string, whole-line match, then build the `--model` argv:
+
+```bash
+_agy_known_model() {
+  local model="$1"
+  [[ -n "$model" ]] || return 1
+  if [[ -z "${_LIB_AGENT_AGY_MODELS_CACHE:-}" ]]; then
+    local listing
+    if listing=$("${AGENT_CMD:-agy}" models 2>/dev/null) && [[ -n "$listing" ]]; then
+      _LIB_AGENT_AGY_MODELS_CACHE="$listing"
+    else
+      _LIB_AGENT_AGY_MODELS_CACHE=$'\x01enum-failed\x01'   # sentinel
+    fi
+    export _LIB_AGENT_AGY_MODELS_CACHE
+  fi
+  [[ "$_LIB_AGENT_AGY_MODELS_CACHE" == $'\x01enum-failed\x01' ]] && return 2  # can't validate
+  printf '%s\n' "$_LIB_AGENT_AGY_MODELS_CACHE" | grep -Fxq -- "$model"
+}
+
+_agy_build_model_args() {
+  local model="$1" out_name="$2"
+  eval "$out_name=()"
+  [[ -n "$model" ]] || return 0
+  _agy_known_model "$model"
+  case $? in
+    0|2) eval "$out_name=(--model \"\$model\")" ;;   # known OR enum-failed → forward
+    *)   # enumerated, model not in the list → skip + warn once.
+      if [[ -z "${_LIB_AGENT_AGY_MODEL_WARNED:-}" ]]; then
+        echo "[lib-agent] WARN: '${model}' is not a known agy model (see \`agy models\`); omitting --model so agy uses its configured default. Set an agy-namespace model (e.g. AGENT_REVIEW_MODEL_AGY=\"Gemini 3.5 Flash (High)\") to pin one." >&2
+        export _LIB_AGENT_AGY_MODEL_WARNED=1
+      fi ;;
+  esac
+}
+```
+
+`grep -Fxq` is load-bearing: model names contain spaces and parens, so a
+fixed-string (`-F`) whole-line (`-x`) match keeps `"Gemini 3.5 Flash
+(High)"` literal and ensures a prefix (`"Gemini 3.5 Flash"`) or a string
+with regex metachars never matches. The return-code 2 sentinel keeps
+"can't validate" distinct from "validated as unknown" so the two collapse
+to *forward* vs. *omit+WARN* respectively. `_LIB_AGENT_AGY_MODEL_WARNED`
+is repurposed from the old warn-and-ignore guard to the new
+omitted-unknown-model one-time WARN guard.
+
 Capture is **best-effort**: missing log, missing match, write-failure
 all return 0. The sidecar's job is to enable resume optimization, not
 to gate run_agent's success — gating on capture would convert a
@@ -230,8 +337,17 @@ formalizes the best-effort contract.
 | Log line format changes (agy upgrade renames "Print mode") | grep miss → sidecar absent → next `resume_agent` falls back to fresh `run_agent`. Conversation continuity lost; pipeline still progresses. |
 | Sidecar pruned between run and resume | Same fallback. |
 | `agy --conversation <bad-uuid>` (corrupted sidecar) | agy fails loud → wrapper non-zero rc → retry → fresh `run_agent` overwrites sidecar. |
-| `model` parameter passed by caller | One-time WARN to stderr; execution continues. Non-fatal per design decision (operator-correctable, not pipeline-breaking). |
+| `model` is a known agy model | Forwarded via `--model "<name>"` (single argv element); agy runs that model. |
+| `model` is invalid / cross-namespace (e.g. `claude-sonnet-4.6`) | **NOT forwarded** — omitted; agy runs its configured default. One-time WARN to stderr naming the value + `AGENT_REVIEW_MODEL_AGY`. |
+| `agy models` enumeration fails | Best-effort pass-through: `--model "<value>"` forwarded (can't prove it invalid). Mirrors the INV-36 best-effort philosophy. |
 | Concurrent dispatch to same session_id | Blocked upstream by [INV-23] PID-guard before reaching the sidecar layer. |
+
+> **agy does NOT fail on an invalid `--model`** — `agy -p --model "<x>"`
+> returns rc 0 for any string and silently falls back to its default
+> model. That is precisely why the wrapper validates against `agy models`
+> rather than relying on agy to self-error: a non-agy id forwarded
+> verbatim would put a wrong-model verdict into the [INV-40]
+> unanimous-PASS merge gate undetected.
 
 ## Differences from peer CLIs
 
@@ -243,7 +359,7 @@ formalizes the best-effort contract.
 | Resume primitive | `--resume <id>` | `exec resume <id>` | `--resume <id>` | n/a (new session) | `run --session <id>` | **`--conversation <id>`** |
 | Headless trust flag | (none required) | (none required) | `--approval-mode yolo` (operator) | `--trust-all-tools` (operator) | (none required) | **`--dangerously-skip-permissions` (structural)** |
 | JSON event stream | `--output-format json` | `--json` | `--output-format stream-json` (operator) | n/a | `--format json` | **none** |
-| `--model` honored? | yes | yes | yes | yes | yes | **no — WARN** |
+| `--model` honored? | yes | yes | yes | yes | yes | **yes — validated vs `agy models` (INV-50)** |
 
 ## Operator-facing config (`autonomous.conf` snippet)
 
@@ -253,9 +369,14 @@ formalizes the best-effort contract.
 ```bash
 # AGENT_CMD="agy"                          # Antigravity 2.0 CLI (Google)
 #
-# agy does not accept --model on the CLI; configure model selection
-# via ~/.gemini/antigravity-cli/settings.json. AGENT_DEV_MODEL /
-# AGENT_REVIEW_MODEL are ignored with a one-time WARN.
+# agy accepts --model. The value MUST be a name from `agy models`
+# (spaces/parens included — quote them); the wrapper validates against
+# that list and OMITS --model with a WARN if the value is not a known
+# agy model (agy would otherwise silently run its default — it does not
+# reject invalid ids). AGENT_DEV_MODEL / AGENT_REVIEW_MODEL are honored
+# when they name a real agy model.
+# AGENT_DEV_MODEL="Gemini 3.5 Flash (High)"
+# AGENT_REVIEW_MODEL="Gemini 3.5 Flash (High)"
 #
 # Structural flags managed by lib-agent.sh and NOT to be added here:
 #   -p, --dangerously-skip-permissions, --print-timeout, --log-file
@@ -271,10 +392,11 @@ prevents operators from "helpfully" duplicating them in EXTRA_ARGS.
 
 ## Test coverage
 
-New file `tests/unit/test-lib-agent-agy.sh`, mirroring
-`test-lib-agent-codex.sh` / `test-lib-agent-opencode.sh`. All tests use
-an `agy` stub (a shell script that writes a fixed log file and exits
-0); no live agy invocation.
+`tests/unit/test-lib-agent-agy.sh`, mirroring `test-lib-agent-codex.sh` /
+`test-lib-agent-opencode.sh`. All tests use an `agy` stub (a shell script
+that answers `agy models` with a fixed listing, writes a fixed log file,
+and exits 0); no live agy invocation. The model cases (`AGY-06*`,
+`TC-AGYM-KM`) are pinned by `docs/test-cases/agy-model-support.md`.
 
 | Test | Asserts |
 |---|---|
@@ -286,7 +408,14 @@ an `agy` stub (a shell script that writes a fixed log file and exits
 | AGY-03 | After stub writes fake log with `Print mode: conversation=<UUID>`, sidecar `agy-conversation-<sid>` exists with the UUID |
 | AGY-04 | `resume_agent` with sidecar present invokes stub with `--conversation <UUID>` |
 | AGY-05 | `resume_agent` with sidecar absent falls back to `run_agent` (no `--conversation` flag in stub argv) |
-| AGY-06 | Non-empty `model` arg → WARN on stderr, execution continues, exit code from stub is propagated |
+| AGY-06a | Known agy model → `--model "<name>"` in argv as a **single argv element** (multi-word name keeps its quoting); rc 0 |
+| AGY-06b | Empty/unset model → no `--model`; rc 0; no WARN |
+| AGY-06b2 | Enumerated-but-unknown model → `--model` **omitted** + one-time WARN naming the value and `AGENT_REVIEW_MODEL_AGY`; rc 0 (agy default, not a drop — agy accepts invalid ids silently, so the wrapper is the gate) |
+| AGY-06b3 | `agy models` enumeration failure → best-effort pass-through (`--model <value>` forwarded); rc 0 |
+| TC-AGYM-KM | `_agy_known_model` unit: known → rc 0; unknown → rc 1; prefix of a listed name → rc 1 (whole-line); regex-metachar arg literal → rc 1; empty → rc 1; `agy models` enumerated once per process (cached) |
+| AGY-06c | `resume_agent` `--conversation` path forwards `--model <name>` when a model is passed |
+| AGY-06d | `resume_agent` with no sidecar falls back to `run_agent` and the forwarded argv still contains `--model <name>` (model threaded through fallback) |
+| AGY-WARN-GONE | Old `does not support --model` WARN string is absent from `lib-agent.sh` (source grep) so the warn-and-ignore can't silently return |
 | AGY-07 | Log file lacking the `Print mode:` line → sidecar not created, `run_agent` rc still propagates |
 | AGY-S4 | Sidecar path is a pre-existing symlink → capture refuses to write and emits CWE-59 WARN. Write-side guard, helper-level test from Task 1; covers what the original spec called AGY-08. |
 | AGY-S5 | Sidecar path is a symlink OR sidecar contains non-UUID content → `_agy_conversation_id` returns rc 1 without echoing leaked content. Read-side guard. |
@@ -332,6 +461,14 @@ the agy branch:
 - [INV-34] — agent prompt is fed via stdin, never as a single argv
   element. agy's `-p` (no value) reads from stdin, same as
   claude/gemini/kiro.
+- [INV-40] — multi-agent review unanimous-PASS merge gate. A wrong-model
+  agy verdict forwarded verbatim would enter this gate undetected, which
+  is why [INV-50] validates wrapper-side.
+- [INV-41] — per-agent review model resolution. `AGENT_REVIEW_MODEL_AGY`
+  is the per-agent key that gives agy a valid agy-namespace model when the
+  shared `AGENT_REVIEW_MODEL` belongs to another CLI's namespace.
+- [INV-50] — agy `--model` is validated against `agy models` before
+  forwarding (the invariant this PR adds).
 - `dev-agent-flow.md` and `review-agent-flow.md` are consumers — no
   changes required; both use the abstract `run_agent` /
   `resume_agent` interface and remain CLI-agnostic.
@@ -340,3 +477,6 @@ the agy branch:
 [INV-23]: invariants.md#inv-23-pid_file-points-at-a-process-whose-death-reaps-the-entire-agent-subtree
 [INV-31]: invariants.md#inv-31-operator-tunable-per-cli-flags-live-in-conf-not-in-lib-agentsh
 [INV-34]: invariants.md#inv-34-agent-prompt-is-fed-via-stdin-never-as-a-single-argv-element
+[INV-40]: invariants.md#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback
+[INV-41]: invariants.md#inv-41-per-agent-review-model--extra-args-resolution
+[INV-50]: invariants.md#inv-50-agy---model-is-validated-against-agy-models-before-forwarding

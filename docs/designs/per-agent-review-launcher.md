@@ -65,10 +65,13 @@ the one place the launcher resolver diverges from the model resolver
   inherit the claude-only `cc` bridge and produce `claude codex ...` — the exact
   breakage INV-38 prevents.
 - A shared model id is namespace-specific but not *dangerous* to pass to the
-  wrong CLI (agy just warns and ignores `--model`). A shared launcher prefix IS
-  dangerous to the wrong CLI. So the safe default for an un-keyed agent is "no
-  launcher" (the INV-38 zeroing for non-claude; the shared launcher for claude
-  via the rebind), never the shared launcher auto-applied to a non-claude slot.
+  wrong CLI (a wrong model id just makes that CLI fail to launch — or, for agy
+  post-[INV-50] (#190), get validated against `agy models` and omitted with a
+  WARN, degrading to agy's default rather than a wrong invocation). A shared
+  launcher prefix IS dangerous to the wrong CLI. So the safe default for an
+  un-keyed agent is "no launcher" (the INV-38 zeroing for non-claude; the
+  shared launcher for claude via the rebind), never the shared launcher
+  auto-applied to a non-claude slot.
 
 So the resolver's job is narrow: return the per-agent value if present, else
 empty. The fan-out subshell then decides: per-agent value present → apply it

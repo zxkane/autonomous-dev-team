@@ -42,6 +42,12 @@ This is the follow-up explicitly deferred in #166
    "agy ignores `--model` (warns once)" behavior. Per-agent model simply makes
    the resolved value correct for the CLIs that DO consume it.
 
+   > **Superseded by [INV-50] (#190):** agy now honors `--model`, validated
+   > against `agy models`. `AGENT_REVIEW_MODEL_AGY` is the per-agent key that
+   > gives agy a valid *agy-namespace* model; an unknown id is omitted with a
+   > WARN (agy would otherwise silently run its default). See
+   > [`docs/pipeline/invariants.md` INV-50](../pipeline/invariants.md#inv-50-agy---model-is-validated-against-agy-models-before-forwarding).
+
 ## The extra-args plumbing reality (key implementation note)
 
 The review fan-out calls **`run_agent`** (a fresh session), and `run_agent`

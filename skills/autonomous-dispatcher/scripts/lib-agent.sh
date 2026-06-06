@@ -615,6 +615,71 @@ _agy_conversation_id() {
   printf '%s\n' "$uuid"
 }
 
+# _agy_known_model <model>
+#
+# Answer "is <model> a name `agy models` lists?" — the validation gate for
+# the agy --model pass-through (issue #190, [INV-50]).
+#
+# WHY this exists (the load-bearing fact): `agy -p --model "<anything>"`
+# returns rc 0 for ANY string and silently falls back to its default model
+# (Gemini 3.5 Flash) — it does NOT reject an invalid id. So the wrapper
+# cannot rely on agy to self-error on a cross-namespace id (e.g. kiro's
+# "claude-sonnet-4.6" inherited via a shared AGENT_REVIEW_MODEL); forwarding
+# it verbatim would put a wrong-model review verdict into the [INV-40]
+# unanimous-PASS merge gate undetected. Validating wrapper-side is the only
+# way to make a misconfiguration observable.
+#
+# Enumerates `agy models` ONCE per process (cached in the exported global
+# _LIB_AGENT_AGY_MODELS_CACHE) and matches FIXED-STRING, WHOLE-LINE
+# (`grep -Fxq`) so model names with spaces/parens ("Gemini 3.5 Flash (High)")
+# are literal and a prefix ("Gemini 3.5 Flash") never matches.
+#
+# Returns:
+#   0 — <model> is a known agy model (forward it)
+#   1 — enumerated, but <model> is NOT in the list (omit + WARN)
+#   2 — `agy models` could not be enumerated (best-effort: forward anyway)
+_agy_known_model() {
+  local model="$1"
+  [[ -n "$model" ]] || return 1
+  if [[ -z "${_LIB_AGENT_AGY_MODELS_CACHE:-}" ]]; then
+    local listing
+    if listing=$("${AGENT_CMD:-agy}" models 2>/dev/null) && [[ -n "$listing" ]]; then
+      _LIB_AGENT_AGY_MODELS_CACHE="$listing"
+    else
+      _LIB_AGENT_AGY_MODELS_CACHE=$'\x01enum-failed\x01'   # sentinel
+    fi
+    export _LIB_AGENT_AGY_MODELS_CACHE
+  fi
+  [[ "$_LIB_AGENT_AGY_MODELS_CACHE" == $'\x01enum-failed\x01' ]] && return 2  # can't validate
+  printf '%s\n' "$_LIB_AGENT_AGY_MODELS_CACHE" | grep -Fxq -- "$model"
+}
+
+# _agy_build_model_args <model> <out_array_name>
+#
+# Populate the named array with the agy `--model` argv (or leave it empty),
+# applying [INV-50] validation via _agy_known_model. Shared by the run_agent
+# and resume_agent agy branches so the validate-or-WARN policy lives in one
+# place. Resolution:
+#   known model           → (--model "$model")
+#   enumeration failed     → (--model "$model")   # best-effort pass-through
+#   enumerated-but-unknown → ()  + one-time WARN   # omit; agy uses its default
+#   empty/unset model      → ()                    # no --model
+_agy_build_model_args() {
+  local model="$1" out_name="$2"
+  # Reset the caller's array, then append only when a model should be forwarded.
+  eval "$out_name=()"
+  [[ -n "$model" ]] || return 0
+  _agy_known_model "$model"
+  case $? in
+    0|2) eval "$out_name=(--model \"\$model\")" ;;
+    *)   # enumerated, model not in the list → skip + warn once.
+      if [[ -z "${_LIB_AGENT_AGY_MODEL_WARNED:-}" ]]; then
+        echo "[lib-agent] WARN: '${model}' is not a known agy model (see \`agy models\`); omitting --model so agy uses its configured default. Set an agy-namespace model (e.g. AGENT_REVIEW_MODEL_AGY=\"Gemini 3.5 Flash (High)\") to pin one." >&2
+        export _LIB_AGENT_AGY_MODEL_WARNED=1
+      fi ;;
+  esac
+}
+
 # Acquire PID guard: prevent duplicate instances for the same issue.
 # Checks for symlink attacks, running processes, then writes current PID.
 # Args: $1=pid_file, $2=label (e.g. "autonomous-dev"), $3=issue_number
@@ -812,14 +877,17 @@ run_agent() {
       #   --log-file — only programmatic channel for the conversation
       #     UUID; per-session path so concurrent issues do not race.
       #
-      # `model` parameter is ignored — agy doesn't accept --model on the
-      # CLI. Configure model selection via ~/.gemini/antigravity-cli/
-      # settings.json. WARN once per process so operators learn to stop
-      # passing AGENT_DEV_MODEL.
-      if [[ -n "$model" && -z "${_LIB_AGENT_AGY_MODEL_WARNED:-}" ]]; then
-        echo "[lib-agent] WARN: AGENT_CMD=agy does not support --model flag; ignoring AGENT_DEV_MODEL=${model}. Configure model via ~/.gemini/antigravity-cli/settings.json instead." >&2
-        export _LIB_AGENT_AGY_MODEL_WARNED=1
-      fi
+      # `--model` (issue #190, [INV-50]): agy now honors --model, but it
+      # accepts ANY string at rc 0 and silently falls back to its default
+      # — so we VALIDATE the resolved id against `agy models` wrapper-side
+      # (_agy_build_model_args → _agy_known_model) and forward it only when
+      # known; an unknown/cross-namespace id is OMITTED with a one-time WARN
+      # (forwarding it verbatim would smuggle a wrong-model verdict into the
+      # INV-40 merge gate). Enumeration failure degrades to best-effort
+      # pass-through. This is the one CLI that does NOT forward --model
+      # verbatim — see [INV-50] for why.
+      local agy_model_args
+      _agy_build_model_args "$model" agy_model_args
 
       local agy_log
       agy_log=$(_agy_log_file "$session_id") || return 1
@@ -830,6 +898,7 @@ run_agent() {
             --dangerously-skip-permissions \
             --print-timeout "$AGENT_TIMEOUT" \
             --log-file "$agy_log" \
+            "${agy_model_args[@]}" \
             "${extra_args[@]}"
       local rc=$?
 
@@ -978,6 +1047,13 @@ resume_agent() {
       if _agy_cid=$(_agy_conversation_id "$session_id"); then
         local agy_log
         agy_log=$(_agy_log_file "$session_id") || return 1
+        # Validated --model on resume too (issue #190, [INV-50]). agy may
+        # bind the model from the original conversation and ignore a late
+        # --model — worst case this is a harmless no-op; verified non-fatal
+        # in the test plan (AGY-06c). Same validate-or-WARN policy as
+        # run_agent via the shared helper.
+        local agy_model_args
+        _agy_build_model_args "$model" agy_model_args
         printf '%s' "$prompt" \
           | _run_with_timeout "$AGENT_CMD" \
               --conversation "$_agy_cid" \
@@ -985,6 +1061,7 @@ resume_agent() {
               --dangerously-skip-permissions \
               --print-timeout "$AGENT_TIMEOUT" \
               --log-file "$agy_log" \
+              "${agy_model_args[@]}" \
               "${extra_args[@]}"
         local rc=$?
         # Self-healing re-capture: under normal operation the UUID
