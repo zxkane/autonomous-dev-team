@@ -104,7 +104,8 @@ _codex_log_has_verdict_message() {
       # An item.completed carrying an agent_message marks the CURRENT turn as
       # having produced an assistant message. Match both event type and the
       # item type on the same JSONL line (codex emits one event per line).
-      if ($0 ~ /"type":"item\.completed"/ && $0 ~ /"type":"agent_message"/) {
+      # Use a narrow regex pattern to avoid false-positives from tool output.
+      if ($0 ~ /"type":"item\.completed"/ && $0 ~ /"item":\{[^{}]*"type":"agent_message"/) {
         cur_msg = 1
       }
       # turn.started opens a NEW turn — reset the per-turn flag so an
@@ -186,10 +187,24 @@ _run_codex_review_with_resume() {
   # thread_id into the sidecar; resume_agent reads it back below.
   local rc=0
   run_agent "$session_id" "$prompt" "$model" "$session_name" || rc=$?
+  local final_rc="$rc"
+
+  # Return early on a non-timeout launch failure (rc is non-zero and not 124/137)
+  if [[ "$rc" -ne 0 && "$rc" -ne 124 && "$rc" -ne 137 ]]; then
+    return "$rc"
+  fi
 
   # Without a readable log we cannot detect gather-only turns — degrade to the
   # single-run behavior (never worse than pre-#189).
-  [[ -n "$log" ]] || return "$rc"
+  [[ -n "$log" && -f "$log" && -r "$log" ]] || return "$final_rc"
+
+  # Only resume when the thread sidecar exists (if the helper is available).
+  # If we have no captured thread_id, we cannot resume the same conversation.
+  if declare -f _codex_thread_id >/dev/null; then
+    if ! _codex_thread_id "$session_id" >/dev/null; then
+      return "$final_rc"
+    fi
+  fi
 
   local deadline budget now resumes=0
   budget=$(_codex_review_deadline_seconds)
@@ -218,9 +233,16 @@ _run_codex_review_with_resume() {
 
     resumes=$((resumes + 1))
     echo "[lib-review-codex] codex turn was gather-only (no verdict message); resuming thread (resume ${resumes}/${max})." >&2
-    rc=0
-    resume_agent "$session_id" "$(_codex_resume_prompt "$session_id")" "$model" "$session_name" || rc=$?
+    local turn_rc=0
+    resume_agent "$session_id" "$(_codex_resume_prompt "$session_id")" "$model" "$session_name" || turn_rc=$?
+
+    # Preserve 124/137 (timeout/SIGKILL) as sticky. Otherwise, we propagate the last turn's rc.
+    if [[ "$turn_rc" -eq 124 || "$turn_rc" -eq 137 ]]; then
+      final_rc="$turn_rc"
+    elif [[ "$final_rc" -ne 124 && "$final_rc" -ne 137 ]]; then
+      final_rc="$turn_rc"
+    fi
   done
 
-  return "$rc"
+  return "$final_rc"
 }

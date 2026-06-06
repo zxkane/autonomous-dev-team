@@ -307,6 +307,36 @@ ctl09=$(
 ) 2>/dev/null
 assert_eq "TC-CXR-CTL-09 non-numeric max degrades (bound reached), no crash" "rc=0" "$ctl09"
 
+# TC-CXR-CTL-10 — turn-1 rc 124 + clean resume + bound-exhaustion → controller returns 124
+# (regression test for timeout rc lost across resumes).
+ctl10=$(
+  set -uo pipefail
+  source "$LIB"
+  sandbox=$(mktemp -d); log="$sandbox/agent.log"
+  run_agent()    { printf '%s\n' "$GATHER_TURN" >> "$log"; return 124; }
+  resume_agent() { printf '%s\n' "$GATHER_TURN" >> "$log"; return 0; }
+  CODEX_REVIEW_LOG="$log" CODEX_REVIEW_MAX_RESUMES=2 AGENT_REVIEW_TIMEOUT=1h \
+    _run_codex_review_with_resume sid p m n
+  echo "$?"
+  rm -rf "$sandbox"
+)
+assert_eq "TC-CXR-CTL-10 turn-1 rc 124 + clean resume + bound-exhaustion → returns 124" 124 "$ctl10"
+
+# TC-CXR-CTL-11 — non-timeout launch failure (rc=1) → returns 1 immediately, no resumes
+ctl11=$(
+  set -uo pipefail
+  source "$LIB"
+  sandbox=$(mktemp -d); log="$sandbox/agent.log"
+  run_calls=0; resume_calls=0
+  run_agent()    { run_calls=$((run_calls + 1)); return 1; }
+  resume_agent() { resume_calls=$((resume_calls + 1)); return 0; }
+  CODEX_REVIEW_LOG="$log" CODEX_REVIEW_MAX_RESUMES=3 AGENT_REVIEW_TIMEOUT=1h \
+    _run_codex_review_with_resume sid p m n
+  echo "$?|${run_calls}|${resume_calls}"
+  rm -rf "$sandbox"
+)
+assert_eq "TC-CXR-CTL-11 non-timeout launch failure returns early with no resumes" "1|1|0" "$ctl11"
+
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== TC-CXR-ISO: isolation + wrapper wiring (source-of-truth) ==="
