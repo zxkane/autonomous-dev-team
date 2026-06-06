@@ -692,6 +692,19 @@ assert_contains "TC-AGYM-KM — prefix of listed name → rc 1" "prefix=1"  "$km
 assert_contains "TC-AGYM-KM — regex metachars literal → rc 1" "regex=1" "$km_out"
 assert_contains "TC-AGYM-KM — empty arg → rc 1"             "empty=1"   "$km_out"
 
+# Newline injection regression test (CVE fix: sanitize input before grep -Fxq).
+# A model with embedded newlines must be rejected, not split across multiple grep lines.
+km_newline=$(
+  bash -c '
+    unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE \
+          _LIB_AGENT_AGY_MODEL_WARNED _LIB_AGENT_AGY_MODELS_CACHE
+    source "'"$LIB"'"
+    _agy_known_model "Gemini 3.5 Flash (High)
+Gemini 3.5 Flash (Low)";  echo "injection=$?"
+  ' 2>/dev/null
+)
+assert_contains "TC-AGYM-KM — newline injection rejected → rc 1" "injection=1" "$km_newline"
+
 # Caching: _agy_known_model must enumerate `agy models` at most ONCE per
 # process. Use a counting stub that bumps a counter file on each `models` call.
 COUNT_FILE="$TMPROOT/agy-models-count"
