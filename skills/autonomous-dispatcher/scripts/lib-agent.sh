@@ -659,11 +659,11 @@ _agy_known_model() {
     if listing=$("${AGENT_CMD:-agy}" models 2>/dev/null) && [[ -n "$listing" ]]; then
       _LIB_AGENT_AGY_MODELS_CACHE="$listing"
     else
-      _LIB_AGENT_AGY_MODELS_CACHE=$'\x01enum-failed\x01'   # sentinel
+      _LIB_AGENT_AGY_MODELS_CACHE="__ENUM_FAILED__"   # explicit sentinel (self-documenting for logs/debugging)
     fi
     export _LIB_AGENT_AGY_MODELS_CACHE
   fi
-  [[ "$_LIB_AGENT_AGY_MODELS_CACHE" == $'\x01enum-failed\x01' ]] && return 2  # can't validate
+  [[ "$_LIB_AGENT_AGY_MODELS_CACHE" == "__ENUM_FAILED__" ]] && return 2  # can't validate
   # Strip newlines from model to prevent injection bypass of grep -Fxq.
   model="${model//$'\n'/}"
   printf '%s\n' "$_LIB_AGENT_AGY_MODELS_CACHE" | grep -Fxq -- "$model"
@@ -686,7 +686,10 @@ _agy_build_model_args() {
   [[ -n "$model" ]] || return 0
   _agy_known_model "$model"
   case $? in
-    0|2) eval "$out_name=(--model \"\$model\")" ;;
+    0|2) # Known model or enumeration failed → forward. The eval uses 3-level quoting:
+         # outer quotes for eval, \\\\ for inner shell, \" for nested quotes. This ensures
+         # model names with spaces/parens (e.g. "Gemini 3.5 Flash (High)") expand as a single argv.
+      eval "$out_name=(--model \"\$model\")" ;;
     *)   # enumerated, model not in the list → skip + warn once.
       if [[ -z "${_LIB_AGENT_AGY_MODEL_WARNED:-}" ]]; then
         echo "[lib-agent] WARN: '${model}' is not a known agy model (see \`agy models\`); omitting --model so agy uses its configured default. Set an agy-namespace model (e.g. AGENT_REVIEW_MODEL_AGY=\"Gemini 3.5 Flash (High)\") to pin one." >&2
