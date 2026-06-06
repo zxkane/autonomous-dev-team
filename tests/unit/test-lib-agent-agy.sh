@@ -122,6 +122,12 @@ PID_DIR="$TMPROOT/pid"
 mkdir -p "$PID_DIR"
 chmod 700 "$PID_DIR"
 
+# Empty autonomous.conf to prevent test invocations from loading the
+# developer local config in the skills/ directory.
+touch "$TMPROOT/autonomous.conf"
+AUTONOMOUS_CONF="$TMPROOT/autonomous.conf"
+export AUTONOMOUS_CONF
+
 # Fixture log line copied from a real `agy -p` run.
 cat > "$TMPROOT/agy.log" <<'EOF'
 I0524 22:56:05.692100 1234 input.go:42] Starting print mode
@@ -138,7 +144,7 @@ SESSION_ID="11111111-2222-3333-4444-555555555555"
   PROJECT_DIR="$TMPROOT" \
   AGENT_CMD=agy \
   bash -c '
-    unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE
+    unset AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE
     source "'"$LIB"'"
     _agy_capture_conversation "'"$SESSION_ID"'" "'"$TMPROOT"'/agy.log"
   '
@@ -172,7 +178,7 @@ EOF
   PROJECT_DIR="$TMPROOT" \
   AGENT_CMD=agy \
   bash -c '
-    unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE
+    unset AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE
     source "'"$LIB"'"
     _agy_capture_conversation "'"$SESSION_ID2"'" "'"$TMPROOT"'/agy-nomatch.log"
   '
@@ -202,7 +208,7 @@ stderr_capture=$(
     PROJECT_DIR="$TMPROOT" \
     AGENT_CMD=agy \
     bash -c '
-      unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE
+      unset AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE
       source "'"$LIB"'"
       _agy_capture_conversation "'"$SESSION_ID3"'" "'"$TMPROOT"'/agy.log"
     '
@@ -230,7 +236,7 @@ S5_OUT=$(
   PROJECT_DIR="$TMPROOT" \
   AGENT_CMD=agy \
   bash -c '
-    unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE
+    unset AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE
     source "'"$LIB"'"
     _agy_conversation_id "'"$SESSION_ID3"'"
     echo "rc=$?"
@@ -248,7 +254,7 @@ S5B_OUT=$(
   PROJECT_DIR="$TMPROOT" \
   AGENT_CMD=agy \
   bash -c '
-    unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE
+    unset AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE
     source "'"$LIB"'"
     _agy_conversation_id "'"$SESSION_ID5"'"
     echo "rc=$?"
@@ -338,7 +344,7 @@ PATH="$BIN:$PATH" \
   AGY_STDIN_FILE="$STDIN_FILE" \
   AGY_FAKE_UUID="$FAKE_UUID" \
   bash -c '
-    unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE
+    unset AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE
     source "'"$LIB"'"
     run_agent "'"$SESSION_ID4"'" "implement the agy thing" "" ""
   ' >/dev/null 2>&1
@@ -390,7 +396,7 @@ PATH="$BIN:$PATH" \
   AGY_STDIN_FILE="$STDIN_FILE" \
   AGY_FAKE_UUID="$FAKE_UUID" \
   bash -c '
-    unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE
+    unset AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE
     source "'"$LIB"'"
     resume_agent "'"$SESSION_ID4"'" "address review feedback" "" ""
   ' >/dev/null 2>&1
@@ -430,7 +436,7 @@ fallback_stderr=$(
     AGY_STDIN_FILE="$STDIN_FILE" \
     AGY_FAKE_UUID="fa11bac4-aaaa-4bbb-8ccc-cccccccccccc" \
     bash -c '
-      unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE
+      unset AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE
       source "'"$LIB"'"
       resume_agent "'"$SESSION_ID5"'" "fresh start" "" ""
     '
@@ -475,7 +481,7 @@ run_06a() {
   AGY_STDIN_FILE="$STDIN_FILE" \
   AGY_FAKE_UUID="20de1aaa-aaaa-4bbb-8ccc-cccccccccccc" \
   bash -c '
-    unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE \
+    unset AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE \
           _LIB_AGENT_AGY_MODEL_WARNED _LIB_AGENT_AGY_MODELS_CACHE
     source "'"$LIB"'"
     run_agent "'"$SESSION_ID6"'" "with known model" "'"$KNOWN_MODEL"'" ""
@@ -519,7 +525,7 @@ PATH="$BIN:$PATH" \
   AGENT_TIMEOUT=4h \
   AGY_NUL_ARGS_FILE="$NUL_ARGS" \
   bash -c '
-    unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE \
+    unset AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE \
           _LIB_AGENT_AGY_MODEL_WARNED _LIB_AGENT_AGY_MODELS_CACHE
     source "'"$LIB"'"
     run_agent "'"$SESSION_ID6"'" "with known model" "'"$KNOWN_MODEL"'" ""
@@ -562,7 +568,7 @@ run06b_stderr=$(
     AGY_STDIN_FILE="$STDIN_FILE" \
     AGY_FAKE_UUID="20de1bbb-aaaa-4bbb-8ccc-cccccccccccc" \
     bash -c '
-      unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE \
+      unset AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE \
             _LIB_AGENT_AGY_MODEL_WARNED _LIB_AGENT_AGY_MODELS_CACHE
       source "'"$LIB"'"
       run_agent "'"$SESSION_ID6B"'" "no model" "" ""
@@ -596,7 +602,7 @@ run06b2_stderr=$(
     AGY_STDIN_FILE="$STDIN_FILE" \
     AGY_FAKE_UUID="20de1b22-aaaa-4bbb-8ccc-cccccccccccc" \
     bash -c '
-      unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE \
+      unset AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE \
             _LIB_AGENT_AGY_MODEL_WARNED _LIB_AGENT_AGY_MODELS_CACHE
       source "'"$LIB"'"
       run_agent "'"$SESSION_ID6B2"'" "unknown model" "'"$UNKNOWN_MODEL"'" ""
@@ -616,7 +622,7 @@ run06b2_stderr=$(
   AGY_STDIN_FILE="$STDIN_FILE" \
   AGY_FAKE_UUID="20de1b22-aaaa-4bbb-8ccc-cccccccccccc" \
   bash -c '
-    unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE \
+    unset AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE \
           _LIB_AGENT_AGY_MODEL_WARNED _LIB_AGENT_AGY_MODELS_CACHE
     source "'"$LIB"'"
     run_agent "'"$SESSION_ID6B2"'" "unknown model" "'"$UNKNOWN_MODEL"'" ""
@@ -654,7 +660,7 @@ ENUMFAIL_MODEL="some-model"
   AGY_MODELS_FAIL=1 \
   AGY_FAKE_UUID="20de1b33-aaaa-4bbb-8ccc-cccccccccccc" \
   bash -c '
-    unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE \
+    unset AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE \
           _LIB_AGENT_AGY_MODEL_WARNED _LIB_AGENT_AGY_MODELS_CACHE
     source "'"$LIB"'"
     run_agent "'"$SESSION_ID6B3"'" "enum fail model" "'"$ENUMFAIL_MODEL"'" ""
@@ -676,7 +682,7 @@ km_out=$(
   PATH="$BIN:$PATH" \
   AGENT_CMD=agy \
   bash -c '
-    unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE \
+    unset AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE \
           _LIB_AGENT_AGY_MODEL_WARNED _LIB_AGENT_AGY_MODELS_CACHE
     source "'"$LIB"'"
     _agy_known_model "Gemini 3.5 Flash (High)";  echo "known=$?"
@@ -711,7 +717,7 @@ PATH="$BIN:$PATH" \
   AGENT_CMD=agy-count \
   AGY_COUNT_FILE="$COUNT_FILE" \
   bash -c '
-    unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE \
+    unset AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE \
           _LIB_AGENT_AGY_MODEL_WARNED _LIB_AGENT_AGY_MODELS_CACHE
     source "'"$LIB"'"
     _agy_known_model "Gemini 3.5 Flash (High)" || true
@@ -738,7 +744,7 @@ PATH="$BIN:$PATH" \
   AGY_STDIN_FILE="$STDIN_FILE" \
   AGY_FAKE_UUID="$FAKE_UUID" \
   bash -c '
-    unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE \
+    unset AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE \
           _LIB_AGENT_AGY_MODEL_WARNED _LIB_AGENT_AGY_MODELS_CACHE
     source "'"$LIB"'"
     resume_agent "'"$SESSION_ID4"'" "resume with model" "'"$KNOWN_MODEL"'" ""
@@ -768,7 +774,7 @@ PATH="$BIN:$PATH" \
   AGY_STDIN_FILE="$STDIN_FILE" \
   AGY_FAKE_UUID="6dde1aaa-aaaa-4bbb-8ccc-cccccccccccc" \
   bash -c '
-    unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE \
+    unset AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE \
           _LIB_AGENT_AGY_MODEL_WARNED _LIB_AGENT_AGY_MODELS_CACHE
     source "'"$LIB"'"
     resume_agent "'"$SESSION_ID6D"'" "fallback with model" "'"$KNOWN_MODEL"'" ""
@@ -839,7 +845,7 @@ ln -sf "$BIN/agy-nomatch" "$BIN/agy"
   AGY_ARGS_FILE="$ARGS_FILE" \
   AGY_STDIN_FILE="$STDIN_FILE" \
   bash -c '
-    unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE _LIB_AGENT_AGY_MODEL_WARNED
+    unset AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE _LIB_AGENT_AGY_MODEL_WARNED
     source "'"$LIB"'"
     run_agent "'"$SESSION_ID7"'" "no-match prompt" "" ""
   ' >/dev/null 2>&1
