@@ -1557,11 +1557,21 @@ Sub-rules:
    `_codex_review_deadline_seconds` parses the `AGENT_REVIEW_TIMEOUT` coreutils
    duration (`s`/`m`/`h`/`d` or bare seconds) to seconds; an empty / unset /
    unparseable value degrades to **3600 (1h), never unbounded**.
-4. **Per-turn cap is separate.** Each individual turn is still wrapped by
-   `_run_with_timeout` (`AGENT_TIMEOUT`, rebound to the review cap, [INV-48](#inv-48-per-side-review-wall-clock-timeout-agent_review_timeout-1h-default-with-browser-e2e-exclusion-and-timeout-veto)).
+4. **Per-turn cap is separate, and a timeout rc is STICKY across resumes.** Each
+   individual turn is still wrapped by `_run_with_timeout` (`AGENT_TIMEOUT`,
+   rebound to the review cap, [INV-48](#inv-48-per-side-review-wall-clock-timeout-agent_review_timeout-1h-default-with-browser-e2e-exclusion-and-timeout-veto)).
    The loop's own deadline is a SECOND guard so N turns × per-turn-cap cannot blow
-   far past the review window. A turn killed by the per-turn cap (rc 124/137) that
-   never posts a verdict still feeds the [INV-48](#inv-48-per-side-review-wall-clock-timeout-agent_review_timeout-1h-default-with-browser-e2e-exclusion-and-timeout-veto) timeout-veto on the wrapper side.
+   far past the review window. The controller normally returns the LAST turn's
+   exit code, **EXCEPT** a `124` (coreutils `timeout` TERM-expiry) or `137`
+   (`--kill-after` SIGKILL) from ANY turn is **sticky** — once a turn was killed by
+   the per-turn cap, that rc is preserved even if a later resume turn exits `0`.
+   This is load-bearing for the [INV-48](#inv-48-per-side-review-wall-clock-timeout-agent_review_timeout-1h-default-with-browser-e2e-exclusion-and-timeout-veto)
+   timeout-veto: the wrapper's post-window sweep maps a no-verdict rc `124`/`137`
+   to `timed-out` (a deciding FAIL that VETOES the merge); if the loop reset rc to
+   `0` on a subsequent clean-but-still-no-verdict turn, the agent would be silently
+   dropped as `unavailable` instead of vetoing — defeating the cap (#189 review
+   finding 1). So a timed-out turn followed by clean-but-no-verdict resumes still
+   returns `124`/`137`, feeding the wrapper-side veto.
 5. **Layer.** The loop lives in the review layer (`lib-review-codex.sh`), NOT in
    the generic `run_agent`/`resume_agent` of `lib-agent.sh` — putting
    verdict/GitHub knowledge there would violate that file's CLI-agnostic layering.
@@ -1602,14 +1612,19 @@ branches in `lib-agent.sh` are reused, not modified.
 
 **Status**: **ENFORCED** in this PR (closes #189).
 
-**Test**: `tests/unit/test-lib-review-codex.sh` — TC-CXR-DET-01..07
+**Test**: `tests/unit/test-lib-review-codex.sh` — TC-CXR-DET-01..08
 (`_codex_log_has_verdict_message`: last-turn-decides, gather-only, empty/missing,
-mid-flight turn, and the cross-turn killed-mid-message leak), TC-CXR-DL-01..06
-(`_codex_review_deadline_seconds`: units + garbage→1h default), TC-CXR-CTL-01..09
+mid-flight turn, the cross-turn killed-mid-message leak, and the tool-output
+`agent_message` substring false-positive — #189 review finding 2), TC-CXR-DL-01..06
+(`_codex_review_deadline_seconds`: units + garbage→1h default), TC-CXR-CTL-01..12
 (controller: one-resume-then-verdict, immediate-verdict-no-resume,
 never-converges-bounded-at-max, wall-clock guard, resume prompt content,
-same-session-id reuse, rc propagation, max=0 disables, and a non-numeric max
-degrading without an `unbound variable` crash under `set -u`), TC-CXR-ISO-02..06
+same-session-id reuse, rc propagation, max=0 disables, a non-numeric max
+degrading without an `unbound variable` crash under `set -u`, the **sticky 124
+across a clean resume + bound-exhaustion → returns 124** timeout-veto regression
+on turn 1 AND on a mid-loop resume turn (#189 review finding 1), and an early
+return on a non-timeout launch failure with no resumes — #189 review finding 3),
+TC-CXR-ISO-02..06
 (wrapper routes codex through the controller guarded on `AGENT_CMD == codex`,
 non-codex keeps bare `run_agent`, wrapper sources the lib, CI shellcheck lists it).
 Backward-compat gate: `test-lib-agent-codex.sh` (generic codex branch unchanged),

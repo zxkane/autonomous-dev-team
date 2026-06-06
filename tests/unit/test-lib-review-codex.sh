@@ -139,6 +139,17 @@ _codex_log_has_verdict_message "$TMPLOG"; assert_eq "TC-CXR-DET-06 no completed 
   echo '{"type":"turn.completed","usage":{"input_tokens":50000}}'; } > "$TMPLOG"
 _codex_log_has_verdict_message "$TMPLOG"; assert_eq "TC-CXR-DET-07 killed-mid-msg then gather-only completed → rc 1" 1 "$?"
 
+# TC-CXR-DET-08 — a tool_call turn whose OUTPUT text contains the literal
+# substring "type":"agent_message" (e.g. codex grepping its own JSONL log) must
+# NOT be mis-detected as a verdict turn. The narrowed regex requires the
+# agent_message type INSIDE the item object (`"item":{...}`), not anywhere on
+# the line. Regression for the substring false-positive (#189 review finding 2).
+{ echo '{"type":"thread.started","thread_id":"aaaa"}'
+  echo '{"type":"turn.started"}'
+  echo '{"type":"item.completed","item":{"type":"tool_call","name":"shell","output":"grep hit: \"type\":\"agent_message\" in transcript"}}'
+  echo '{"type":"turn.completed","usage":{"input_tokens":5000}}'; } > "$TMPLOG"
+_codex_log_has_verdict_message "$TMPLOG"; assert_eq "TC-CXR-DET-08 tool-output substring not a false verdict → rc 1" 1 "$?"
+
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== TC-CXR-DL: _codex_review_deadline_seconds ==="
@@ -325,6 +336,29 @@ ctl11=$(
   rm -rf "$sandbox"
 )
 assert_eq "TC-CXR-CTL-11 non-timeout launch failure returns early with no resumes" "1|1|0" "$ctl11"
+
+# TC-CXR-CTL-12 — a timeout on a RESUME turn (not just turn 1) is sticky through a
+# later clean resume + bound-exhaustion: turn-1 rc 0, resume-1 rc 124, resume-2
+# rc 0, max=2 → controller returns 124. Pins the sticky rule for a mid-loop
+# timeout, the stronger half of #189 review finding 1 (the INV-48 veto must not be
+# reset by a subsequent clean-but-no-verdict resume).
+ctl12=$(
+  set -uo pipefail
+  source "$LIB"
+  sandbox=$(mktemp -d); log="$sandbox/agent.log"
+  ri=0
+  run_agent()    { printf '%s\n' "$GATHER_TURN" >> "$log"; return 0; }
+  resume_agent() {
+    ri=$((ri + 1))
+    printf '%s\n' "$GATHER_TURN" >> "$log"
+    [[ $ri -eq 1 ]] && return 124 || return 0
+  }
+  CODEX_REVIEW_LOG="$log" CODEX_REVIEW_MAX_RESUMES=2 AGENT_REVIEW_TIMEOUT=1h \
+    _run_codex_review_with_resume sid p m n
+  echo "$?"
+  rm -rf "$sandbox"
+)
+assert_eq "TC-CXR-CTL-12 mid-loop resume timeout sticky through clean resume → returns 124" 124 "$ctl12"
 
 # ---------------------------------------------------------------------------
 echo ""

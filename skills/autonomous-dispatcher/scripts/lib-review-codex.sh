@@ -100,7 +100,15 @@ _codex_log_has_verdict_message() {
       # An item.completed carrying an agent_message marks the CURRENT turn as
       # having produced an assistant message. Match both event type and the
       # item type on the same JSONL line (codex emits one event per line).
-      # Use a narrow regex pattern to avoid false-positives from tool output.
+      # The narrowed item-scoped match (vs a bare type match anywhere on the
+      # line) requires the agent_message type to live INSIDE the item object, so
+      # a tool_call whose OUTPUT text contains the literal substring (e.g. codex
+      # grepping its own JSONL log) is NOT a false verdict (#189 review finding
+      # 2). The bracket window assumes type is a leading flat key of item (the
+      # documented codex event shape). If a future codex schema nested an object
+      # BEFORE type inside item, this would false-NEGATIVE -- but that only
+      # wastes one extra resume (fail-safe), never misses a real verdict.
+      # (Comment kept apostrophe-free: this awk body is inside single quotes.)
       if ($0 ~ /"type":"item\.completed"/ && $0 ~ /"item":\{[^{}]*"type":"agent_message"/) {
         cur_msg = 1
       }
@@ -156,10 +164,20 @@ EOF
 # The bounded resume-loop controller. Runs codex once via run_agent (its codex
 # branch captures the thread_id to a sidecar keyed by <session_id>), then resumes
 # the SAME thread while turns end gather-only — up to CODEX_REVIEW_MAX_RESUMES
-# turns AND within the AGENT_REVIEW_TIMEOUT-derived wall-clock deadline. Returns
-# the exit code of the LAST agent invocation. The wrapper's comment poller is the
-# authoritative verdict gate after this returns; on bound exhaustion with no
-# verdict message, codex is resolved `unavailable` exactly as before #189.
+# turns AND within the AGENT_REVIEW_TIMEOUT-derived wall-clock deadline.
+#
+# Return code: normally the exit code of the LAST agent invocation, EXCEPT a
+# 124 (coreutils timeout TERM-expiry) or 137 (--kill-after SIGKILL) from ANY
+# turn is STICKY — once a turn was killed by the per-turn wall-clock cap, that
+# rc is preserved even if a later resume turn exits 0. This is load-bearing for
+# the INV-48 timeout-veto: the wrapper's post-window sweep maps a no-verdict
+# rc 124/137 to `timed-out` (a deciding FAIL that VETOES the merge); if the loop
+# reset rc to 0 on a subsequent clean-but-still-no-verdict turn, the agent would
+# be silently dropped as `unavailable` instead of vetoing — defeating the cap
+# (#189 review finding 1). The wrapper's comment poller is the authoritative
+# verdict gate after this returns; on bound exhaustion with no verdict message,
+# codex is resolved `unavailable` (or `timed-out` if the sticky rc is 124/137)
+# exactly as before #189.
 #
 # CODEX_REVIEW_LOG must point at the per-agent JSONL log (the fan-out subshell
 # sets it to $_agent_log, the same file run_agent's stdout is redirected to).
@@ -229,9 +247,17 @@ _run_codex_review_with_resume() {
     local turn_rc=0
     resume_agent "$session_id" "$(_codex_resume_prompt "$session_id")" "$model" "$session_name" || turn_rc=$?
 
-    # Preserve 124/137 (timeout/SIGKILL) as sticky. Otherwise, propagate the last turn's rc.
-    if [[ "$turn_rc" -eq 124 || "$turn_rc" -eq 137 ]] || \
-       [[ "$final_rc" -ne 124 && "$final_rc" -ne 137 ]]; then
+    # Sticky timeout rc: once ANY turn was killed by the per-turn wall-clock cap
+    # (124 = coreutils timeout TERM, 137 = --kill-after SIGKILL), preserve that rc
+    # even if a later resume exits cleanly — the INV-48 veto must not be reset by a
+    # subsequent clean-but-still-no-verdict turn (#189 review finding 1). The ONLY
+    # case where we KEEP the existing rc is: final_rc is already a sticky timeout
+    # AND this turn is not a timeout. Otherwise propagate this turn's rc (which may
+    # itself be a fresh 124/137 that STARTS the stickiness).
+    local final_is_sticky_timeout=false turn_is_timeout=false
+    [[ "$final_rc" -eq 124 || "$final_rc" -eq 137 ]] && final_is_sticky_timeout=true
+    [[ "$turn_rc"  -eq 124 || "$turn_rc"  -eq 137 ]] && turn_is_timeout=true
+    if [[ "$turn_is_timeout" == true || "$final_is_sticky_timeout" == false ]]; then
       final_rc="$turn_rc"
     fi
   done

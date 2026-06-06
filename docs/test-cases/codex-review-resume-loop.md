@@ -16,6 +16,7 @@ per-agent / cli-exit-grace tests (which must stay green).
 | TC-CXR-DET-05 | Empty/missing log file | rc 1 (no verdict) — never crashes |
 | TC-CXR-DET-06 | Log with `agent_message` but NO trailing `turn.completed` (turn still mid-flight / killed) | rc 1 — only a COMPLETED turn with a message counts |
 | TC-CXR-DET-07 | Turn killed mid-`agent_message` (no `turn.completed`), then a later gather-only turn DOES complete | rc 1 — the stale message flag must not leak across the `turn.started` boundary; the last COMPLETED turn is gather-only |
+| TC-CXR-DET-08 | A `tool_call` turn whose OUTPUT text contains the literal substring `"type":"agent_message"` (e.g. codex grepping its own log) | rc 1 — the narrowed regex requires `agent_message` INSIDE the `item` object, not anywhere on the line (#189 review finding 2) |
 
 ## Unit — deadline parsing (`_codex_review_deadline_seconds`)
 
@@ -45,6 +46,9 @@ clock so wall-clock tests are deterministic.
 | TC-CXR-CTL-07 | `run_agent` rc propagation | the controller returns the rc of the LAST invocation (run_agent if no resume; here run_agent returns 9 on an immediate verdict → controller returns 9) |
 | TC-CXR-CTL-08 | `CODEX_REVIEW_MAX_RESUMES=0` | zero resumes even when gather-only (knob can disable the loop) |
 | TC-CXR-CTL-09 | non-numeric `CODEX_REVIEW_MAX_RESUMES` (operator typo) under `set -euo pipefail`, gather-only turn so the bound check is reached | degrades to the default, no `unbound variable` crash (regression for the stranded-`reviewing` failure mode) |
+| TC-CXR-CTL-10 | turn-1 rc **124** (timeout) + a clean (rc 0) resume + bound-exhaustion | controller returns **124** — a per-turn timeout rc is STICKY across resumes so the INV-48 timeout-veto is not silently reset to a drop (#189 review finding 1) |
+| TC-CXR-CTL-11 | turn-1 is a non-timeout launch failure (rc 1) | controller returns **1 immediately**, **zero** resumes — no point resuming a thread that never started (#189 review finding 3) |
+| TC-CXR-CTL-12 | turn-1 rc 0, **resume-1 rc 124**, resume-2 rc 0, bound-exhaustion | controller returns **124** — a timeout on a *resume* turn (not just turn 1) is also sticky through a later clean resume (the stronger half of #189 review finding 1) |
 
 ## Unit / source-of-truth — wrapper isolation
 
