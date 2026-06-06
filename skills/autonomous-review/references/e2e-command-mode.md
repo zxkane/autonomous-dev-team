@@ -80,7 +80,7 @@ Optional but recommended:
 
 The wrapper does NOT validate the structure beyond checking for the marker. The PR reviewer (human) and the review agent (LLM) are the structural reviewers — keep the format readable.
 
-### Optional structured AC-coverage artifact (INV-47, #183)
+### Optional structured AC-coverage artifact (INV-49, #183)
 
 The parser MAY **additionally** emit a machine-readable AC-coverage map so the review fan-out double-checks acceptance-criteria coverage **deterministically** instead of LLM-parsing the free-form markdown table (a re-worded header, merged cell, or truncated row can otherwise make the double-check miss a *failing* criterion). The parser already computes the per-criterion pass/fail when it builds the markdown table; this just exposes it.
 
