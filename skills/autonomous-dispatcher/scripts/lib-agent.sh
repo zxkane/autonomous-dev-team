@@ -651,6 +651,8 @@ _agy_known_model() {
     export _LIB_AGENT_AGY_MODELS_CACHE
   fi
   [[ "$_LIB_AGENT_AGY_MODELS_CACHE" == $'\x01enum-failed\x01' ]] && return 2  # can't validate
+  # Strip newlines from model to prevent injection bypass of grep -Fxq (CVE: newline in model value).
+  model="${model//$'\n'/}"
   printf '%s\n' "$_LIB_AGENT_AGY_MODELS_CACHE" | grep -Fxq -- "$model"
 }
 
