@@ -31,6 +31,7 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 LIB="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-review-codex.sh"
 WRAPPER="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/autonomous-review.sh"
 CI="$PROJECT_ROOT/.github/workflows/ci.yml"
+FIXTURES="$SCRIPT_DIR/fixtures"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -94,6 +95,29 @@ VERDICT_TURN='{"type":"turn.started"}
 {"type":"item.completed","item":{"id":"i3","type":"agent_message","text":"Review PASSED"}}
 {"type":"turn.completed","usage":{"input_tokens":1000,"output_tokens":900}}'
 
+# A turn that emits agent_message items that are PROGRESS NARRATION only — no
+# verdict trailer (`Review PASSED` / `Review findings:` / `Review Agent: codex`).
+# This is the #198 root-cause-2 shape: the pre-fix detector (which matched ANY
+# agent_message) false-converged on this; the verdict-trailer detector must treat
+# it as gather-only (rc 1) so the loop RESUMES.
+NARRATION_TURN='{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"n0","type":"command_execution","command":"gh pr view 197 --json mergeable","aggregated_output":"MERGEABLE"}}
+{"type":"item.completed","item":{"id":"n1","type":"agent_message","text":"Next I'\''m reading the workflow instructions to understand the checklist."}}
+{"type":"item.completed","item":{"id":"n2","type":"agent_message","text":"I'\''ll verify the PR reflects both changes."}}
+{"type":"turn.completed","usage":{"input_tokens":138668,"output_tokens":746}}'
+
+# A FAIL verdict turn: agent_message text begins with the fail-side trailer.
+FAIL_VERDICT_TURN='{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"f0","type":"tool_call","name":"shell"}}
+{"type":"item.completed","item":{"id":"f1","type":"agent_message","text":"Review findings:\n1. [BLOCKING] missing test coverage.\nReview Agent: codex"}}
+{"type":"turn.completed","usage":{"input_tokens":2000,"output_tokens":400}}'
+
+# A turn whose only verdict signal is the `Review Agent: codex` discriminator
+# trailer (the resume prompt forces codex to emit this) — must converge.
+AGENT_TRAILER_TURN='{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"a0","type":"agent_message","text":"Review PASS - looks good.\nReview Session: `sid`\nReview Agent: codex"}}
+{"type":"turn.completed","usage":{"input_tokens":3000,"output_tokens":120}}'
+
 # ---------------------------------------------------------------------------
 echo "=== TC-CXR-DET: _codex_log_has_verdict_message ==="
 # ---------------------------------------------------------------------------
@@ -149,6 +173,54 @@ _codex_log_has_verdict_message "$TMPLOG"; assert_eq "TC-CXR-DET-07 killed-mid-ms
   echo '{"type":"item.completed","item":{"type":"tool_call","name":"shell","output":"grep hit: \"type\":\"agent_message\" in transcript"}}'
   echo '{"type":"turn.completed","usage":{"input_tokens":5000}}'; } > "$TMPLOG"
 _codex_log_has_verdict_message "$TMPLOG"; assert_eq "TC-CXR-DET-08 tool-output substring not a false verdict → rc 1" 1 "$?"
+
+# TC-CXR-DET-09 — #198 ROOT CAUSE 2: the last completed turn emits agent_message
+# items that are PURE PROGRESS NARRATION (no verdict trailer). Convergence must
+# mean "codex posted the VERDICT", NOT "codex emitted any assistant message" —
+# so this is gather-only (rc 1) and the loop RESUMES. The pre-fix detector
+# (any-agent_message) returned rc 0 here and false-converged → no resume → the
+# poller found no verdict → codex dropped `unavailable`.
+{ echo '{"type":"thread.started","thread_id":"aaaa"}'; echo "$NARRATION_TURN"; } > "$TMPLOG"
+_codex_log_has_verdict_message "$TMPLOG"; assert_eq "TC-CXR-DET-09 narration-only turn (no verdict trailer) → rc 1 (resumes)" 1 "$?"
+
+# TC-CXR-DET-09b — the SAME shape from a captured real-world review-193 fixture
+# (sanitized; the issue mandates a committed fixture, not a /tmp log).
+_codex_log_has_verdict_message "$FIXTURES/codex-gather-only-turn.jsonl"
+assert_eq "TC-CXR-DET-09b review-193 gather-only fixture → rc 1 (resumes)" 1 "$?"
+
+# TC-CXR-DET-10 — a PASS verdict trailer in the last turn → converged (rc 0).
+{ echo '{"type":"thread.started","thread_id":"aaaa"}'; echo "$VERDICT_TURN"; } > "$TMPLOG"
+_codex_log_has_verdict_message "$TMPLOG"; assert_eq "TC-CXR-DET-10 Review PASSED trailer → rc 0 (converged)" 0 "$?"
+
+# TC-CXR-DET-10b — a committed PASS-verdict fixture (Review PASSED + Review Agent: codex).
+_codex_log_has_verdict_message "$FIXTURES/codex-verdict-turn.jsonl"
+assert_eq "TC-CXR-DET-10b verdict fixture → rc 0 (converged)" 0 "$?"
+
+# TC-CXR-DET-11 — a FAIL verdict trailer (`Review findings:`) → converged (rc 0).
+# A failing verdict is still a verdict — codex posted its decision, do not resume.
+{ echo '{"type":"thread.started","thread_id":"aaaa"}'; echo "$FAIL_VERDICT_TURN"; } > "$TMPLOG"
+_codex_log_has_verdict_message "$TMPLOG"; assert_eq "TC-CXR-DET-11 Review findings: (FAIL verdict) → rc 0 (converged)" 0 "$?"
+
+# TC-CXR-DET-12 — the `Review Agent: codex` discriminator trailer alone → converged.
+{ echo '{"type":"thread.started","thread_id":"aaaa"}'; echo "$AGENT_TRAILER_TURN"; } > "$TMPLOG"
+_codex_log_has_verdict_message "$TMPLOG"; assert_eq "TC-CXR-DET-12 Review Agent: codex trailer → rc 0 (converged)" 0 "$?"
+
+# TC-CXR-DET-13 — last-turn-decides for the verdict-trailer rule: a verdict in an
+# EARLIER turn followed by a narration-only LAST turn must NOT count (rc 1). Pins
+# that the per-turn reset still applies to the new trailer match.
+{ echo '{"type":"thread.started","thread_id":"aaaa"}'; echo "$VERDICT_TURN"; echo "$NARRATION_TURN"; } > "$TMPLOG"
+_codex_log_has_verdict_message "$TMPLOG"; assert_eq "TC-CXR-DET-13 verdict then narration-only last turn → rc 1" 1 "$?"
+
+# TC-CXR-DET-14 — tool-output containing a verdict PHRASE (e.g. codex catting
+# SKILL.md / the prompt, whose text literally contains "Review PASSED") must NOT
+# be a false verdict — the phrase must be inside an agent_message item, not a
+# command_execution aggregated_output. Strengthens TC-CXR-DET-08 for the new
+# text-based match.
+{ echo '{"type":"thread.started","thread_id":"aaaa"}'
+  echo '{"type":"turn.started"}'
+  echo '{"type":"item.completed","item":{"type":"command_execution","command":"cat SKILL.md","aggregated_output":"... post a comment with Review PASSED on the first line ..."}}'
+  echo '{"type":"turn.completed","usage":{"input_tokens":5000}}'; } > "$TMPLOG"
+_codex_log_has_verdict_message "$TMPLOG"; assert_eq "TC-CXR-DET-14 verdict phrase in tool output not a false verdict → rc 1" 1 "$?"
 
 # ---------------------------------------------------------------------------
 echo ""
