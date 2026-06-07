@@ -53,3 +53,36 @@ _classify_mergeable_gate() {
       ;;
   esac
 }
+
+# _pr_open_gate <state> (INV-54, issue #196)
+#
+# Maps a GitHub PR `state` field value to a gate decision used at the TOP of the
+# `PASSED_VERDICT == true` chain — BEFORE the mergeable hard gate and the PASS
+# approve/merge branch:
+#
+#   proceed — the PR is OPEN; run the mergeable gate + PASS branch as before.
+#   skip    — the PR is no longer open (merged/closed out-of-band, or its state
+#             could not be determined). The wrapper cleans `-reviewing` and exits
+#             WITHOUT adding `pending-dev`, so an already-merged/closed issue is
+#             never flipped back into the dev queue.
+#
+# This is the exact inverse of the existing PASS-branch guard's `!= OPEN` test,
+# hoisted so it covers ALL three PASS-chain exits (block-substantive,
+# block-nonsubstantive, PASS) with a single check. Before this gate, the
+# open-check lived only in the PASS branch, so a PR merged out-of-band that then
+# took an INV-44 block branch flipped its closed issue to `pending-dev` (the
+# #191 self-merge incident; carved out of #193).
+#
+# Conservative by construction: the ONLY input that yields `proceed` is a
+# case-insensitive `OPEN`. UNKNOWN (the wrapper's failed-`gh`-query sentinel),
+# empty, CLOSED, MERGED, and any unexpected token all → `skip`, matching the
+# PASS-branch guard which treated a failed query as non-OPEN. Returns 0 always;
+# the decision is on stdout.
+_pr_open_gate() {
+  local state="${1:-}"
+  if [[ "${state^^}" == "OPEN" ]]; then
+    printf 'proceed\n'
+  else
+    printf 'skip\n'
+  fi
+}
