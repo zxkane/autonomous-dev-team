@@ -25,13 +25,13 @@ hooks:
 
 # Autonomous Review Mode
 
-Review PRs created by autonomous development sessions thoroughly and objectively, then reach a verdict (approve + merge, or request changes).
+Review PRs created by autonomous development sessions thoroughly and objectively, then **post a verdict comment** (`Review PASSED` or `Review findings:`). The review **wrapper** owns the GitHub-native action: it submits `--approve` and merges on a PASS (after its mergeable + `no-auto-close` gates) and submits `--request-changes` on a blocking FAIL. You never run `gh pr review` or `gh pr merge` yourself — see [Who submits the GitHub-native PR action (INV-52)](#who-submits-the-github-native-pr-action-inv-52).
 
 ## When to Use
 
 | Use this skill | Use a different skill |
 |---|---|
-| Final verdict on a completed PR (approve + merge, or send back for fixes) | In-flight dev-side self-review during implementation → use `autonomous-dev` Step 8 (pr-review) |
+| Final verdict on a completed PR (post the verdict comment; the wrapper approves+merges or requests changes) | In-flight dev-side self-review during implementation → use `autonomous-dev` Step 8 (pr-review) |
 | Dispatcher handed off a PR labeled `pending-review` or `reviewing` | Manual partial review of a draft PR → use the `pr-review-toolkit` agents directly |
 | Run E2E verification + check acceptance criteria + resolve merge conflicts | Just check CI status → use `gh pr checks` directly |
 
@@ -252,11 +252,19 @@ During E2E verification, mark each acceptance criterion checkbox in the issue bo
 For the complete gate procedure (finding classification, blocking vs non-blocking rules, self-check questions, decision criteria, and output format), consult **`references/decision-gate.md`**.
 
 Summary of the hard rule:
-- **ANY blocking finding -> verdict MUST be FAIL** (do NOT approve)
-- **ZERO blocking findings -> verdict is PASS** (approve + merge)
-- **There is NO middle ground** — blocking findings and APPROVE are mutually exclusive
+- **ANY blocking finding -> verdict MUST be FAIL** — post `Review findings:` (the wrapper then submits `--request-changes`).
+- **ZERO blocking findings -> verdict is PASS** — post `Review PASSED` (the wrapper then submits `--approve` and merges, after its gates).
+- **There is NO middle ground** — a `Review findings:` comment with blocking items and a `Review PASSED` comment are mutually exclusive.
 
-Post the review result as a comment on the **issue** (NOT the PR). Use "Review PASSED" for pass, "Review findings:" for fail. End the comment with BOTH a `Review Session: \`<id>\`` trailer and a `Review Agent: <name>` discriminator line — the wrapper supplies both `<id>` and `<name>` in your prompt.
+Post the review result as a comment on the **issue** (NOT the PR). Use "Review PASSED" for pass, "Review findings:" for fail. End the comment with BOTH a `Review Session: \`<id>\`` trailer and a `Review Agent: <name>` discriminator line — the wrapper supplies both `<id>` and `<name>` in your prompt. **Your only output is the verdict comment** — the wrapper performs the GitHub-native PR action (see below).
+
+### Who submits the GitHub-native PR action (INV-52)
+
+> **The review WRAPPER — not you — owns the GitHub-native PR review/merge action.** You post a verdict **comment**; the wrapper reads it and acts.
+
+- On **PASS**, the wrapper submits `gh pr review --approve` and (unless the issue has `no-auto-close`) `gh pr merge`, **after** its mechanical mergeable hard gate ([INV-44](../../docs/pipeline/invariants.md)) and the `no-auto-close` skip-merge check.
+- On a blocking **FAIL**, the wrapper submits `gh pr review --request-changes` so the PR's `reviewDecision` becomes `CHANGES_REQUESTED` — authoritative for humans, branch protection, and the dev-resume agent ([INV-52](../../docs/pipeline/invariants.md)).
+- **You MUST NEVER run `gh pr review --approve`, `gh pr review --request-changes`, `gh pr merge`, or the MCP merge tools yourself.** Doing so RACES the wrapper's gates: a self-approve+merge can merge a PR whose mergeability is still `UNKNOWN` ([INV-44](../../docs/pipeline/invariants.md)) or a PR on a `no-auto-close` issue — exactly the PR #191 incident that motivated INV-52. The agent issuing any GitHub PR review or merge is a **defect**, not a shortcut.
 
 ### Multi-agent review (when configured)
 
@@ -264,7 +272,7 @@ When the project sets `AGENT_REVIEW_AGENTS` to more than one CLI, several review
 
 - Run the Findings -> Decision Gate **independently** — reach your own PASS/FAIL based on your own findings. Do NOT try to coordinate with or defer to the other agents; you cannot see their verdicts.
 - Post your own verdict comment ending with your assigned `Review Session: \`<id>\`` and `Review Agent: <name>` lines (both are in your prompt). The `Review Agent: <name>` line is how the wrapper attributes your verdict — do not omit or rename it ([INV-40](../../docs/pipeline/invariants.md)).
-- The wrapper aggregates all agents' verdicts under a **unanimous-PASS** rule: the PR is approved+merged only if **every** available agent passed; any single FAIL sends the PR back to dev. This mirrors the gate's own "any blocking finding → FAIL" philosophy, applied across agents.
+- The wrapper aggregates all agents' verdicts under a **unanimous-PASS** rule: the wrapper approves+merges only if **every** available agent passed; any single FAIL makes the wrapper submit `--request-changes` and send the PR back to dev. This mirrors the gate's own "any blocking finding → FAIL" philosophy, applied across agents. As above, **no agent submits the GitHub-native action** — the wrapper does, once, after aggregating.
 
 ---
 

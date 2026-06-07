@@ -1654,6 +1654,56 @@ stay green. Test plan: `docs/test-cases/codex-review-resume-loop.md`.
 - [`docs/designs/codex-review-resume-loop.md`](../designs/codex-review-resume-loop.md) — design canvas.
 - [INV-53](#inv-53-codex-review-convergence-keys-on-the-verdict-trailer-not-any-agent_message) — the corrected convergence contract (#198).
 
+## INV-52: the review WRAPPER owns the GitHub-native PR review/merge action; the agent posts verdicts only
+
+**Rule**: the review **wrapper** (`autonomous-review.sh`) is the SOLE actor that submits a GitHub-native PR review or merge. It submits `gh pr review --approve` (+ `gh pr merge`, unless `no-auto-close`) on a PASS — **after** the [INV-44](#inv-44-mergeable-hard-gate--a-conflicting-pr-can-never-reach-approved) mergeable hard gate and the `no-auto-close` skip-merge check — and `gh pr review --request-changes` on a **substantive** FAIL, so the PR's GitHub-native `reviewDecision` always reflects the verdict (`CHANGES_REQUESTED` on a blocking FAIL). The review **agent** posts a verdict **comment** only (`Review PASSED` / `Review findings:` + the trailers) and MUST NEVER run `gh pr review --approve`, `gh pr review --request-changes`, `gh pr merge`, or the MCP merge tools.
+
+Two halves of one invariant:
+
+### Half A — FAIL ⇒ REQUEST_CHANGES (the durable GitHub-native state)
+
+On a **substantive** FAIL the wrapper submits `gh pr review --request-changes` via `lib-review-request-changes.sh::submit_request_changes <pr> <body>`, so `reviewDecision` becomes `CHANGES_REQUESTED` — authoritative for humans browsing the PR, branch protection, the dispatcher, and the dev-resume agent. Which routes request changes:
+
+| FAIL route | Substantive? | Submit `--request-changes`? |
+|---|---|---|
+| Agent posted blocking findings (`failed-substantive`, the `Review findings:` FAIL branch) | yes | **YES** |
+| Merge conflict (`block-substantive`, the [INV-44](#inv-44-mergeable-hard-gate--a-conflicting-pr-can-never-reach-approved) `CONFLICTING` gate) | yes | **YES** |
+| Mergeable `UNKNOWN` re-queue (`block-nonsubstantive`, INV-44) | no — transient GitHub-side hold | **NO** |
+| Agent crash with no verdict (`failed-non-substantive other`) | no — transport/mid-stream failure | **NO** |
+
+Sub-rules:
+
+1. **Best-effort under `set -e`.** `submit_request_changes` always returns 0; a 403 / permission / transient `gh` failure is logged and swallowed, and the call site adds a belt-and-suspenders `|| log`. A failed submission must NOT abort the wrapper and strand the issue in `reviewing` — the FAIL route still flips the label to `pending-dev`. Mirrors the PASS-side approval-failure fallback and the dev-resume `|| log` discipline.
+2. **Substantive-only.** REQUEST_CHANGES is submitted ONLY on the two substantive routes above. A non-substantive route (mergeable-`UNKNOWN` re-queue, or an agent crash with no verdict) is NOT a dev-actionable blocking finding; a standing `CHANGES_REQUESTED` there would falsely accuse the dev and linger on the PR.
+3. **Mutual exclusion with PASS.** PASS submits `--approve`; substantive FAIL submits `--request-changes`. They are different branches of the `if [[ "$PASSED_VERDICT" == "true" ]]` split — never both in one run.
+4. **Next-PASS supersedes a standing CHANGES_REQUESTED.** The PASS path already submits `gh pr review --approve` against the new HEAD; a fresh APPROVE from the same reviewer supersedes the prior `CHANGES_REQUESTED` (and `dismiss-stale-reviews-on-push` branch protection, if configured, dismisses it on the dev's force-push). No permanently-stuck `CHANGES_REQUESTED`.
+
+### Half B — the agent never approves/merges (the incident)
+
+`SKILL.md` previously framed the agent's job as "approve + merge" (e.g. "verdict is PASS (approve + merge)") and `decision-gate.md`'s action-pairing table told the agent to "Submit APPROVE review on PR", while the wrapper assumed only the wrapper approves/merges. On PR #191 the kiro review **agent** ran `gh pr review --approve` itself and the PR merged 8 s later — ~18 min BEFORE the wrapper's gates ran — so the [INV-44](#inv-44-mergeable-hard-gate--a-conflicting-pr-can-never-reach-approved) mergeable hard gate (the PR was `UNKNOWN`-mergeable) and the `no-auto-close` skip-merge were both bypassed, and the wrapper later wrote a stale `pending-dev` onto the now-closed issue. The fix re-scopes the agent-side docs to "post your verdict comment; the wrapper approves/merges/requests-changes after its gates" and makes the agent issuing any GitHub PR review/merge an explicit defect.
+
+**Mechanical backstop (rejected, recorded so it is not re-attempted)**: the issue suggested tool-denying `gh pr merge`/`gh pr review --approve` in the review agent's permission set. The review agent runs headless under `--dangerously-skip-permissions` (`lib-agent.sh`), so a per-tool deny-list is not reliably enforceable there. The robust enforcement is the prompt rule (Half B) backed by the wrapper owning the action (Half A) — the wrapper's gates ([INV-44](#inv-44-mergeable-hard-gate--a-conflicting-pr-can-never-reach-approved), `no-auto-close`) are the real safety net, and an agent that nonetheless self-merges is a defect to be caught in review, not silently tolerated.
+
+**Why**: a PR with known blocking findings whose GitHub-native `reviewDecision` stays `APPROVED`/`REVIEW_REQUIRED` looks mergeable to anyone not parsing the issue comment thread (the root cause behind #188). And an agent that self-approves/merges races the wrapper's INV-44 + `no-auto-close` gates and can merge an `UNKNOWN`-mergeable or `no-auto-close` PR (PR #191). Both are the same thesis from two sides: **the GitHub-native PR review/merge action is wrapper-owned; the agent posts verdicts only.** (#193.)
+
+**Producer**: `autonomous-review.sh` — `submit_request_changes` calls on the `failed-substantive` FAIL branch and the `block-substantive` (CONFLICTING) branch; `lib-review-request-changes.sh::submit_request_changes` (the best-effort helper). The existing `--approve`/`gh pr merge` PASS branch is the PASS-side half (unchanged). The agent-side docs (`SKILL.md`, `references/decision-gate.md`) constrain the agent.
+
+**Consumer**: humans browsing the PR, branch protection, the dispatcher's routing, and the dev-resume agent — all of which read `reviewDecision`. The review agent consumes the re-scoped prompt/docs.
+
+**Status**: **ENFORCED** in this PR (closes #193).
+
+**Test**: `tests/unit/test-autonomous-review-request-changes.sh` — TC-RC-FN-01..05 (executable `submit_request_changes`: requests-changes-not-approve, passes pr+`--body`, non-zero `gh` → returns 0 + warns, success → 0, continues past the helper under `set -e`), TC-RC-SRC-00..11 (source-of-truth: wrapper sources the lib, helper defined, called on EXACTLY the 2 substantive routes (UNKNOWN/crash excluded), every call best-effort `|| log`, PASS still `--approve`, no line mixes approve+request-changes, body references findings/blocking, `bash -n`), TC-RC-DOC-01..05 (agent-side framing: SKILL.md no longer says "PASS (approve + merge)", prohibits the agent running `gh pr review`/`merge`, says the wrapper owns the action; decision-gate.md no longer instructs the agent to "Submit APPROVE review on PR"; INV-52 exists + referenced from the flow doc). Backward-compat gate: `test-autonomous-review-auto-merge-failure.sh`, `…-mergeable-gate.sh`, `…-multi-agent.sh`, `…-verdict-trailer.sh`, `…-prompt.sh` stay green (the helper adds a PR-review call on FAIL but changes no label transition, posts no `gh issue close`, and does not touch `−autonomous` — the #145 / INV-44 pins hold). Test plan: `docs/test-cases/request-changes-on-fail.md`.
+
+**Cross-references**:
+- [INV-44](#inv-44-mergeable-hard-gate--a-conflicting-pr-can-never-reach-approved) — the mergeable hard gate the agent's self-merge bypassed; the wrapper's `--request-changes` on the CONFLICTING block path is this invariant's Half-A action for that gate's `block-substantive` route.
+- [INV-40](#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback) — the unanimous aggregation that produces the single PASS/FAIL the wrapper acts on; with N agents the wrapper still submits the native action exactly once.
+- [INV-33](#inv-33-review-wrapper-must-not-close-the-linked-issue) — the wrapper never closes the issue; INV-52 likewise keeps the GitHub-native PR action wrapper-side.
+- [INV-35](#inv-35-review-aware-resume-routing-for-completed-sessions) — the substantive-vs-non-substantive verdict-trailer classification this invariant reuses to decide whether to request changes.
+- [INV-54](#inv-54-the-pr-still-open-guard-gates-all-pass-chain-exits-not-just-pass) — the hoisted PR-open guard at the top of the `PASSED_VERDICT=true` chain runs **before** this invariant's `block-substantive` (CONFLICTING) `--request-changes` call, so a PR merged/closed out-of-band exits silently and never has changes requested on it (correct — you cannot request changes on a closed PR). The substantive **agent-findings** FAIL branch is outside the PASS chain, so it requests changes whenever the agent posted a FAIL verdict; a `--request-changes` against an already-closed PR there is harmless (best-effort, logged, returns 0).
+- [`review-agent-flow.md` § Verdict = FAIL path (INV-52)](review-agent-flow.md#verdict--fail-or-missing-path) — runtime walkthrough.
+- [`skills/autonomous-review/references/decision-gate.md` § Who submits the GitHub-native PR action](../../skills/autonomous-review/references/decision-gate.md) / [`SKILL.md`](../../skills/autonomous-review/SKILL.md) — agent-side reinforcement.
+- [`docs/designs/request-changes-on-fail.md`](../designs/request-changes-on-fail.md) — design canvas.
+
 ## INV-53: codex review convergence keys on the VERDICT TRAILER, not any `agent_message`
 
 **Rule**: the [INV-51](#inv-51-codex-review-thread-auto-resumes-until-a-verdict-posting-turn)

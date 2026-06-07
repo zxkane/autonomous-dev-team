@@ -69,6 +69,15 @@ source "${SCRIPT_DIR}/lib-review-e2e.sh"
 # every other CLI keeps the bare run_agent path. Inert unless a fan-out agent is
 # codex.
 source "${SCRIPT_DIR}/lib-review-codex.sh"
+# shellcheck source=lib-review-request-changes.sh
+# INV-52 (#193): the wrapper OWNS the GitHub-native PR review action — `--approve`
+# on a PASS and `--request-changes` on a SUBSTANTIVE FAIL — so the PR's
+# `reviewDecision` reflects the blocking verdict (CHANGES_REQUESTED) for humans,
+# branch protection, the dispatcher, and the dev-resume agent. submit_request_changes
+# is the FAIL-side helper (best-effort, always returns 0 so a 403/transient can't
+# strand the issue). The review AGENT posts verdict comments only and never runs
+# `gh pr review`/`gh pr merge` itself. Inert on the PASS path.
+source "${SCRIPT_DIR}/lib-review-request-changes.sh"
 # Per-side AGENT_CMD override (INV-37). See autonomous-dev.sh for the
 # matching dev-side override. Together they let one project run dev
 # and review on different agent CLIs (e.g. claude for dev, agy for
@@ -1562,6 +1571,13 @@ Findings->Decision Gate: 1 blocking finding(s) -- FAIL.
     # INV-35: a merge conflict is a real, dev-actionable finding — substantive.
     emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-substantive" "" 2>/dev/null || true
 
+    # INV-52: a CONFLICTING PR is a blocking finding — assert it on the PR's
+    # GitHub-native state too (reviewDecision → CHANGES_REQUESTED) so the
+    # blocking state is authoritative, not just an issue comment. Best-effort.
+    submit_request_changes "$PR_NUMBER" \
+      "Merge conflict with main: PR \`${PR_BRANCH:-the PR branch}\` is CONFLICTING with the base branch and cannot be merged (mergeable hard gate, INV-44). Rebase onto main before re-review — see the \`Review findings:\` comment on issue #${ISSUE_NUMBER} for the step-by-step rebase instructions (INV-52)." \
+      || log "WARNING: submit_request_changes returned non-zero (unexpected — helper is best-effort); continuing the FAIL route."
+
     gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
       --remove-label "reviewing" \
       --add-label "pending-dev" 2>/dev/null || true
@@ -1717,6 +1733,19 @@ else
     # (or pattern-matched only fail keywords). This is a substantive
     # finding — agent identified code issues to address.
     emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-substantive" "" 2>/dev/null || true
+
+    # INV-52: assert the blocking verdict on the PR's GitHub-native state so
+    # `reviewDecision` becomes CHANGES_REQUESTED — authoritative for humans,
+    # branch protection, the dispatcher, and the dev-resume agent. The helper
+    # is best-effort (always returns 0); `|| log` is belt-and-suspenders so a
+    # future non-zero return can never trip `set -e` and strand the issue.
+    # Only the SUBSTANTIVE sub-path requests changes; the crash-without-verdict
+    # sub-path above is a transport failure, not a dev-actionable finding.
+    if [[ -n "${PR_NUMBER:-}" ]]; then
+      submit_request_changes "$PR_NUMBER" \
+        "Review reached a blocking FAIL verdict — see the \`Review findings:\` comment on issue #${ISSUE_NUMBER} for the full list of blocking findings and remediation steps. This PR is sent back to development; reviewDecision is set to CHANGES_REQUESTED until the findings are addressed and a new review passes (INV-52)." \
+        || log "WARNING: submit_request_changes returned non-zero (unexpected — helper is best-effort); continuing the FAIL route."
+    fi
   fi
 
   gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \

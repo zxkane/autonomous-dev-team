@@ -1,6 +1,6 @@
 # Review-Agent Wrapper Flow
 
-The review-agent wrapper is `skills/autonomous-dispatcher/scripts/autonomous-review.sh`. The dispatcher launches it via `dispatch-local.sh review <issue>`. The wrapper finds the PR linked to the issue, runs the underlying agent against it, parses the agent's verdict from issue comments, and either approves+merges (PASS) or sends the issue back to dev (FAIL).
+The review-agent wrapper is `skills/autonomous-dispatcher/scripts/autonomous-review.sh`. The dispatcher launches it via `dispatch-local.sh review <issue>`. The wrapper finds the PR linked to the issue, runs the underlying agent against it, parses the agent's verdict from issue comments, and either approves+merges (PASS) or submits `--request-changes` and sends the issue back to dev (FAIL). The **wrapper** owns the GitHub-native PR review/merge action on BOTH sides — `--approve`/`gh pr merge` on PASS and `--request-changes` on a substantive FAIL — while the review **agent** posts a verdict comment only and never runs `gh pr review`/`gh pr merge` itself ([INV-52](invariants.md#inv-52-the-review-wrapper-owns-the-github-native-pr-reviewmerge-action-the-agent-posts-verdicts-only)).
 
 The wrapper is the **producer** for two of the five [handoffs](handoffs.md) (review → approved/merged, review → pending-dev) and the **consumer** for one (dispatcher → review).
 
@@ -51,6 +51,9 @@ sequenceDiagram
             W->>GH: remove reviewing, add approved (autonomous KEPT)
         end
     else verdict FAIL or missing
+        opt substantive FAIL (agent posted findings, or CONFLICTING gate)
+            W->>GH: gh pr review --request-changes (INV-52; reviewDecision=CHANGES_REQUESTED; best-effort)
+        end
         W->>GH: remove reviewing, add pending-dev
     end
     W->>W: rm -f PID_FILE and cleanup_github_auth
@@ -316,6 +319,7 @@ if PASSED_VERDICT == true:
         issue comment "Review findings: ... [BLOCKING] Merge conflict with main ... rebase steps"
         PR    comment "Auto-merge failed: PR is CONFLICTING ... Re-dispatching dev agent to rebase onto main."
         emit_verdict_trailer failed-substantive
+        submit_request_changes <PR> "<merge-conflict body>"  # INV-52, best-effort (CONFLICTING is substantive)
         −reviewing +pending-dev ; exit 0
     UNKNOWN/empty/other → block-nonsubstantive:
         issue comment "Review held: mergeable is UNKNOWN ... will be re-reviewed next tick"
@@ -324,8 +328,8 @@ if PASSED_VERDICT == true:
 ```
 
 - The ONLY value that proceeds is a case-insensitive `MERGEABLE`. An empty string (failed `gh` call), a literal `UNKNOWN` that survived the retry budget, or any unexpected token all **block** — fail-closed. This closes the stale-`UNKNOWN` pass-through (the prior prompt-side "after 3 retries treat as MERGEABLE" shortcut).
-- **CONFLICTING** reuses the `Auto-merge failed:` PR marker so the dev-resume branch ([§ Auto-merge failure → dev re-dispatch](#auto-merge-failure--dev-re-dispatch-inv-33)) prepends its mandatory rebase pre-step — giving the conflict a deterministic owner.
-- **UNKNOWN** posts no PR marker (no confirmed conflict ⇒ no forced rebase); the `failed-non-substantive` trailer makes the dispatcher flip the issue back to `pending-review` (re-review) under the `REVIEW_RETRY_LIMIT` cap ([INV-35](invariants.md#inv-35-review-aware-resume-routing-for-completed-sessions)).
+- **CONFLICTING** reuses the `Auto-merge failed:` PR marker so the dev-resume branch ([§ Auto-merge failure → dev re-dispatch](#auto-merge-failure--dev-re-dispatch-inv-33)) prepends its mandatory rebase pre-step — giving the conflict a deterministic owner. It is a substantive blocking finding, so the wrapper also submits `--request-changes` ([INV-52](invariants.md#inv-52-the-review-wrapper-owns-the-github-native-pr-reviewmerge-action-the-agent-posts-verdicts-only); `reviewDecision=CHANGES_REQUESTED`).
+- **UNKNOWN** posts no PR marker (no confirmed conflict ⇒ no forced rebase) and does NOT submit `--request-changes` ([INV-52](invariants.md#inv-52-the-review-wrapper-owns-the-github-native-pr-reviewmerge-action-the-agent-posts-verdicts-only): a transient re-queue is not a dev-actionable blocking finding); the `failed-non-substantive` trailer makes the dispatcher flip the issue back to `pending-review` (re-review) under the `REVIEW_RETRY_LIMIT` cap ([INV-35](invariants.md#inv-35-review-aware-resume-routing-for-completed-sessions)).
 - Happy path (`MERGEABLE`) is byte-for-byte today's behavior plus one `gh pr view --json mergeable` call.
 
 ## Verdict = PASS path
@@ -335,6 +339,8 @@ if PASSED_VERDICT == true:
     The PR is guaranteed OPEN here; no re-query.)
 2. refresh_token_env (token may have expired during the review)
 3. gh pr review --approve --body "All acceptance criteria verified. ..."
+   (INV-52: a fresh APPROVE on the current HEAD supersedes any prior
+    CHANGES_REQUESTED this reviewer left on an earlier round.)
    if approve fails (permission issue):
      comment "Review PASSED but formal PR approval failed... please approve and merge manually"
      −reviewing +approved
@@ -376,11 +382,19 @@ Since [INV-54](invariants.md#inv-54-the-pr-still-open-guard-gates-all-pass-chain
 ## Verdict = FAIL or missing path
 
 ```
-1. If agent exit ≠ 0 AND no verdict comment was found:
+1. If agent exit ≠ 0 AND no verdict comment was found (NON-substantive crash):
      post "Review process encountered an error (agent exit code: N). Moving back to development for investigation."
+     emit_verdict_trailer failed-non-substantive other
    (This is the only fallback comment; if a verdict was posted but agent exited non-zero, the verdict already says everything.)
+   else (SUBSTANTIVE — agent posted a FAIL verdict comment):
+     emit_verdict_trailer failed-substantive
+     submit_request_changes <PR> "<body linking the Review findings: comment>"   # INV-52, best-effort
 2. −reviewing +pending-dev
 ```
+
+**REQUEST_CHANGES on a substantive FAIL ([INV-52](invariants.md#inv-52-the-review-wrapper-owns-the-github-native-pr-reviewmerge-action-the-agent-posts-verdicts-only))**: when the agent posted a blocking FAIL verdict, the wrapper additionally submits `gh pr review --request-changes` (via `lib-review-request-changes.sh::submit_request_changes`) so the PR's GitHub-native `reviewDecision` becomes `CHANGES_REQUESTED` — authoritative for humans browsing the PR, branch protection, and the dev-resume agent (closing the false-green-PR gap behind #188). The call is **best-effort**: `submit_request_changes` always returns 0, a 403/transient `gh` failure is logged and swallowed, and the call site adds a belt-and-suspenders `|| log` — a failed submit MUST NOT abort the FAIL route and strand the issue in `reviewing`. The **non-substantive** sub-path (agent crash, no verdict) does NOT request changes: a transport failure is not a dev-actionable blocking finding, and a standing `CHANGES_REQUESTED` would falsely accuse the dev. The mergeable-gate's `block-substantive` (CONFLICTING) path likewise submits REQUEST_CHANGES; its `block-nonsubstantive` (UNKNOWN re-queue) path does NOT — see [Mergeable hard gate](#mergeable-hard-gate-inv-44).
+
+A subsequent PASS re-approves the new HEAD: the [PASS path](#verdict--pass-path) submits `gh pr review --approve` against the post-fix HEAD, which supersedes the prior `CHANGES_REQUESTED` from the same reviewer (and `dismiss-stale-reviews-on-push` branch protection, if configured, dismisses it on the dev's force-push) — so there is no permanently-stuck `CHANGES_REQUESTED`.
 
 The next dispatcher tick's Step 4 will pick the issue up. Crucially, this `pending-dev` does NOT count toward the dispatcher's retry counter — only `Agent Session Report (Dev)` failures and the dispatcher's own crash-regex matches do ([INV-05](invariants.md#inv-05-retry-counter-cutoff-rule), [INV-06](invariants.md#inv-06-crashed--process-not-found-keyword-contract)).
 

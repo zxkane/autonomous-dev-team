@@ -49,6 +49,7 @@ jobs:
             skills/autonomous-dispatcher/scripts/lib-config.sh \
             skills/autonomous-dispatcher/scripts/lib-dispatch.sh \
             skills/autonomous-dispatcher/scripts/lib-review-codex.sh \
+            skills/autonomous-dispatcher/scripts/lib-review-request-changes.sh \
             skills/autonomous-dispatcher/scripts/setup-labels.sh \
             skills/autonomous-dispatcher/scripts/gh-token-refresh-daemon.sh \
             skills/autonomous-dispatcher/scripts/gh-with-token-refresh.sh \
