@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # lib-review-request-changes.sh — INV-52 (#193).
 #
 # The review WRAPPER owns the GitHub-native PR review action: `--approve` on a
