@@ -1429,6 +1429,29 @@ fi
 # flips the label, and exits — so every existing PASS/FAIL/crash branch stays
 # byte-for-byte unchanged.
 if [[ "$PASSED_VERDICT" == "true" ]]; then
+  # -------------------------------------------------------------------------
+  # PR-still-open guard (INV-54, #196) — HOISTED to the top of the gate chain.
+  # -------------------------------------------------------------------------
+  # A concurrent review (e.g. manual `/q review` + dispatcher), an out-of-band
+  # manual merge, or an agent self-merge (the #191 incident) may have already
+  # merged/closed the PR while this review ran. The open-check used to live ONLY
+  # in the PASS branch below, AFTER the mergeable gate — so a merged-out-of-band
+  # PR that reached the INV-44 block-substantive / block-nonsubstantive branch
+  # flipped its already-closed issue to `pending-dev`, which the dispatcher could
+  # then re-dispatch dev against. Hoisting the check here makes ALL three exits
+  # (block-substantive, block-nonsubstantive, PASS) honor it with one query.
+  # Best-effort / non-fatal: a failed `gh` query → "UNKNOWN" → skip (conservative;
+  # we never add pending-dev when PR state is in doubt — matches the prior PASS
+  # guard which treated a failed query as non-OPEN).
+  PR_STATE=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json state -q '.state' 2>/dev/null || echo "UNKNOWN")
+  if [[ "$(_pr_open_gate "$PR_STATE")" == "skip" ]]; then
+    log "PR #${PR_NUMBER} is no longer open (state: ${PR_STATE}). Skipping mergeable gate + approve/merge — another review/merge likely completed first."
+    gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
+      --remove-label "reviewing" 2>/dev/null || true
+    RESULT_PARSED=true
+    exit 0
+  fi
+
   # Poll mergeable while UNKNOWN (GitHub computes it asynchronously). The
   # tightened UNKNOWN handling (#176): a value that never settles out of
   # UNKNOWN is NOT treated as MERGEABLE — it routes to pending-dev as a
@@ -1523,19 +1546,10 @@ if [[ "$PASSED_VERDICT" == "true" ]]; then
   # (no-op + WARN, Step 0 hygiene reconciles).
   emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "passed" "" 2>/dev/null || true
 
-  # ---------------------------------------------------------------------------
-  # Guard: verify PR is still open before approving/merging.
-  # A concurrent review (e.g. manual `/q review` + dispatcher) may have already
-  # approved and merged the PR while this review was running.
-  # ---------------------------------------------------------------------------
-  PR_STATE=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json state -q '.state' 2>/dev/null || echo "UNKNOWN")
-  if [[ "$PR_STATE" != "OPEN" ]]; then
-    log "PR #${PR_NUMBER} is no longer open (state: ${PR_STATE}). Skipping approve/merge — another review likely completed first."
-    gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
-      --remove-label "reviewing" 2>/dev/null || true
-    RESULT_PARSED=true
-    exit 0
-  fi
+  # PR-still-open guard already ran at the top of the gate chain (INV-54, #196):
+  # the hoisted `_pr_open_gate` check above exited cleanly (`-reviewing`, no
+  # `pending-dev`) if the PR was no longer OPEN, so by here it is guaranteed
+  # open. No re-query needed — the old duplicate guard was removed for DRY.
 
   # Formal PR approval from review agent
   if ! refresh_token_env; then

@@ -283,12 +283,29 @@ The dispatcher's Step 5b reads the most recent trailer matching `Reviewed HEAD: 
 
 If the trailer post fails (token expiry, 403, rate limit), the wrapper logs `WARNING: Failed to post Reviewed HEAD trailer` and continues — the failed trailer means the dispatcher cannot detect SHA-match, but the empty-trailer fallthrough routes to `pending-review` ([INV-07](invariants.md#inv-07-empty-reviewed-head-trailer-routes-to-pending-review)) which is the safe default.
 
-## Mergeable hard gate (INV-44)
+## PR-open guard (INV-54)
 
-After aggregation sets `PASSED_VERDICT=true`, and **before** the wrapper acts on that PASS, a wrapper-enforced gate re-checks the PR's `mergeable` status — so a CONFLICTING PR can never reach `approved`, regardless of whether the review agent ran its Step-0 pre-review rebase prompt ([INV-44](invariants.md#inv-44-mergeable-hard-gate--a-conflicting-pr-can-never-reach-approved)). This is the mechanical counterpart to the agent's best-effort Step 0; the prompt step still rebases clean conflicts up-front, the gate is the safety net for when it is skipped.
+The **first** thing the `PASSED_VERDICT == true` chain does — before the mergeable gate, before any FAIL-branch label flip — is a single PR-still-open check ([INV-54](invariants.md#inv-54-the-pr-still-open-guard-gates-all-pass-chain-exits-not-just-pass)). The check used to live only in the PASS path (step 1 below), AFTER the mergeable gate, so a PR merged out-of-band (manual merge, or the #191 agent self-merge) that then took an INV-44 block branch flipped its already-closed issue to `pending-dev`. Hoisting it makes all three PASS-chain exits (block-substantive, block-nonsubstantive, PASS) honor it with one query.
 
 ```
 if PASSED_VERDICT == true:
+  PR_STATE = gh pr view --json state  (failed query → "UNKNOWN" sentinel)
+  if _pr_open_gate "$PR_STATE" == "skip":     # lib-review-mergeable.sh
+      # PR no longer OPEN — merged/closed out-of-band, or state in doubt
+      −reviewing  (NO +pending-dev) ; exit 0
+  # else proceed → mergeable gate + PASS path below
+```
+
+- The ONLY value that proceeds is a case-insensitive `OPEN` — the exact inverse of the old PASS-branch `!= OPEN` test. `MERGED`/`CLOSED`/`UNKNOWN`/empty/any other token → `skip` → clean `−reviewing` exit, never `+pending-dev`. Fail-closed toward "do not re-queue dev on a merged PR".
+- DRY: the hoisted check **replaces** the old PASS-branch duplicate (step 1 below is now a no-op — by the time the PASS path runs, the PR is guaranteed open). Exactly one `gh pr view --json state` call remains; net `gh` calls on the PASS path are unchanged.
+
+## Mergeable hard gate (INV-44)
+
+After the PR-open guard ([INV-54](invariants.md#inv-54-the-pr-still-open-guard-gates-all-pass-chain-exits-not-just-pass)) confirms the PR is OPEN, and **before** the wrapper acts on the PASS, a wrapper-enforced gate re-checks the PR's `mergeable` status — so a CONFLICTING PR can never reach `approved`, regardless of whether the review agent ran its Step-0 pre-review rebase prompt ([INV-44](invariants.md#inv-44-mergeable-hard-gate--a-conflicting-pr-can-never-reach-approved)). This is the mechanical counterpart to the agent's best-effort Step 0; the prompt step still rebases clean conflicts up-front, the gate is the safety net for when it is skipped.
+
+```
+if PASSED_VERDICT == true:
+  # (PR-open guard already ran here — see § PR-open guard (INV-54))
   MERGEABLE_STATUS = poll `gh pr view --json mergeable` while UNKNOWN/empty,
                      up to MERGEABLE_RETRIES (default 3, 10s apart)
   gate = _classify_mergeable_gate "$MERGEABLE_STATUS"   # lib-review-mergeable.sh
@@ -312,8 +329,8 @@ if PASSED_VERDICT == true:
 ## Verdict = PASS path
 
 ```
-1. Re-check PR state: gh pr view --json state
-   if state != "OPEN": skip approve+merge silently, just remove `reviewing` and exit 0
+1. (PR-open guard already ran at the top of the gate chain — INV-54.
+    The PR is guaranteed OPEN here; no re-query.)
 2. refresh_token_env (token may have expired during the review)
 3. gh pr review --approve --body "All acceptance criteria verified. ..."
    if approve fails (permission issue):
@@ -348,9 +365,11 @@ The dev wrapper's resume branch detects the marker by querying PR-issue comments
 
 If the rebase has unresolvable conflicts, the dev agent posts a `needs human` comment and exits cleanly. The dispatcher's MAX_RETRIES gate eventually transitions the issue to `stalled` if the loop fails to converge.
 
-### Approval guard (`PR.state != OPEN`)
+### Approval guard (`PR.state != OPEN`) — now the hoisted PR-open guard (INV-54)
 
-A maintainer running `/q review` plus a manual `gh pr merge` while the autonomous review wrapper is in flight can cause the PR to be merged before the wrapper reaches step 3. Without the guard, `gh pr review --approve` against a closed PR would fail noisily and the wrapper would fall into the approval-failure branch — incorrect, since the PR was already approved+merged by the human. The guard short-circuits to a silent `−reviewing` (no add) and exit 0. See [`state-machine.md` § Concurrent reviews on the same PR](state-machine.md#concurrent-reviews-on-the-same-pr) and [#31](https://github.com/zxkane/autonomous-dev-team/issues/31).
+A maintainer running `/q review` plus a manual `gh pr merge` while the autonomous review wrapper is in flight can cause the PR to be merged before the wrapper reaches the approve step. Without the guard, `gh pr review --approve` against a closed PR would fail noisily and the wrapper would fall into the approval-failure branch — incorrect, since the PR was already approved+merged by the human. The guard short-circuits to a silent `−reviewing` (no add) and exit 0.
+
+Since [INV-54](invariants.md#inv-54-the-pr-still-open-guard-gates-all-pass-chain-exits-not-just-pass) (#196) this guard is **hoisted to the top of the `PASSED_VERDICT == true` chain** (see [§ PR-open guard (INV-54)](#pr-open-guard-inv-54)) so it also protects the INV-44 block-substantive / block-nonsubstantive branches — not just the approve/merge path. The old in-PASS-branch copy was removed (DRY). The original concurrent-merge motivation is unchanged. See [`state-machine.md` § Concurrent reviews on the same PR](state-machine.md#concurrent-reviews-on-the-same-pr) and [#31](https://github.com/zxkane/autonomous-dev-team/issues/31).
 
 ## Verdict = FAIL or missing path
 
