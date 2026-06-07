@@ -326,11 +326,11 @@ assert_eq "TC-CXR-CTL-03 never converges, max=3 → 1 run, 3 resume (bounded)" "
 out=$(run_codex_controller_case $'gather\ngather' 3 $'0\n999999')
 assert_eq "TC-CXR-CTL-04 wall-clock exceeded → 1 run, 0 resume (deadline guard)" "0|1|0" "$out"
 
-# TC-CXR-CTL-05 — resume prompt content
+# TC-CXR-CTL-05 — resume prompt content (via the controller)
 run_codex_controller_case $'gather\nverdict' 3 $'0\n10\n20\n30' >/dev/null
 resume_prompt=$(cat "$REC_RESUME_ARGV")
-assert_contains "TC-CXR-CTL-05a resume prompt says NOT to re-run git diff" \
-  "NOT re-run \`git diff\`" "$resume_prompt"
+assert_contains "TC-CXR-CTL-05a resume prompt tells codex to reuse already-loaded context" \
+  "ALREADY loaded" "$resume_prompt"
 assert_contains "TC-CXR-CTL-05b resume prompt tells codex to post the verdict" \
   "verdict" "$resume_prompt"
 
@@ -431,6 +431,53 @@ ctl12=$(
   rm -rf "$sandbox"
 )
 assert_eq "TC-CXR-CTL-12 mid-loop resume timeout sticky through clean resume → returns 124" 124 "$ctl12"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-CXR-RP: _codex_resume_prompt content (context-compaction safety) ==="
+# ---------------------------------------------------------------------------
+# #198 follow-up: the original resume prompt said "do NOT re-run git diff and do
+# NOT re-read files you already read" — an ABSOLUTE instruction. When codex's own
+# context is compacted between turns (the diff is no longer in its working
+# context), that absolute bar left codex unable to substantiate a verdict, so it
+# defensively posted a [BLOCKING] "review context unavailable" FAIL instead of a
+# real verdict (observed on the codex lane reviewing PR #199 itself). The prompt
+# must instead PREFER reusing already-loaded context but ALLOW re-reading the
+# minimum needed when that context is gone — and must NEVER tell codex to refuse a
+# verdict for lack of context.
+rp=$(_codex_resume_prompt "sess-uuid-xyz")
+
+# TC-CXR-RP-01 — the prompt no longer contains the ABSOLUTE "do NOT re-read files"
+# bar (the instruction that stranded a compacted turn).
+if [[ "$rp" == *"do NOT re-read"* || "$rp" == *"do not re-read"* ]]; then
+  echo -e "  ${RED}FAIL${NC}: TC-CXR-RP-01 prompt must not contain an absolute 'do NOT re-read' bar"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${NC}: TC-CXR-RP-01 no absolute 'do NOT re-read' bar"
+  PASS=$((PASS + 1))
+fi
+
+# TC-CXR-RP-02 — the prompt explicitly ALLOWS re-reading when context is gone.
+assert_contains "TC-CXR-RP-02 prompt allows re-reading when context is unavailable" \
+  "re-read" "$rp"
+
+# TC-CXR-RP-03 — the prompt still prefers reusing already-loaded context (avoid
+# gratuitous re-gather on the common path).
+assert_contains "TC-CXR-RP-03 prompt prefers already-loaded context" \
+  "ALREADY loaded" "$rp"
+
+# TC-CXR-RP-04 — the prompt instructs codex to ISSUE a verdict, not to refuse one
+# for lack of context (the defensive-bail the codex lane produced).
+assert_contains "TC-CXR-RP-04a prompt tells codex to post a verdict" \
+  "post your verdict" "$rp"
+assert_contains "TC-CXR-RP-04b prompt names the never-refuse rule" \
+  "do NOT refuse" "$rp"
+
+# TC-CXR-RP-05 — the attribution trailers (INV-40/INV-20) are still present.
+assert_contains "TC-CXR-RP-05a prompt carries the Review Agent discriminator" \
+  "Review Agent: codex" "$rp"
+assert_contains "TC-CXR-RP-05b prompt carries the session uuid" \
+  "sess-uuid-xyz" "$rp"
 
 # ---------------------------------------------------------------------------
 echo ""

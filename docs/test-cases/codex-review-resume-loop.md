@@ -67,7 +67,7 @@ clock so wall-clock tests are deterministic.
 | TC-CXR-CTL-02 | turn 1 already has `agent_message` (small diff happy path) | **zero** `resume_agent` calls; loop stops immediately |
 | TC-CXR-CTL-03 | every turn gather-only, `CODEX_REVIEW_MAX_RESUMES=3` | exactly **3** `resume_agent` calls then stop (no infinite loop); returns last rc |
 | TC-CXR-CTL-04 | every turn gather-only, wall-clock deadline already passed before round 1 | **zero** resumes (deadline guard fires before first resume) |
-| TC-CXR-CTL-05 | resume prompt content | the `resume_agent` prompt contains "do NOT re-run git diff" and "post the verdict" instructions |
+| TC-CXR-CTL-05 | resume prompt content (via controller) | the `resume_agent` prompt tells codex to reuse already-loaded context and to post the verdict |
 | TC-CXR-CTL-06 | resume reuses the same dispatcher session_id | `resume_agent` is called with the SAME `session_id` as `run_agent` (so the codex thread_id sidecar is reused) |
 | TC-CXR-CTL-07 | `run_agent` rc propagation | the controller returns the rc of the LAST invocation (run_agent if no resume; here run_agent returns 9 on an immediate verdict → controller returns 9) |
 | TC-CXR-CTL-08 | `CODEX_REVIEW_MAX_RESUMES=0` | zero resumes even when gather-only (knob can disable the loop) |
@@ -75,6 +75,23 @@ clock so wall-clock tests are deterministic.
 | TC-CXR-CTL-10 | turn-1 rc **124** (timeout) + a clean (rc 0) resume + bound-exhaustion | controller returns **124** — a per-turn timeout rc is STICKY across resumes so the INV-48 timeout-veto is not silently reset to a drop (#189 review finding 1) |
 | TC-CXR-CTL-11 | turn-1 is a non-timeout launch failure (rc 1) | controller returns **1 immediately**, **zero** resumes — no point resuming a thread that never started (#189 review finding 3) |
 | TC-CXR-CTL-12 | turn-1 rc 0, **resume-1 rc 124**, resume-2 rc 0, bound-exhaustion | controller returns **124** — a timeout on a *resume* turn (not just turn 1) is also sticky through a later clean resume (the stronger half of #189 review finding 1) |
+
+## Unit — resume prompt context-compaction safety (`_codex_resume_prompt`, #198 follow-up)
+
+The original resume prompt forbade re-reading the diff/files absolutely. When
+codex compacts its OWN context between turns, the diff is gone from its working
+context, so the absolute bar left codex unable to substantiate a verdict and it
+defensively posted a "[BLOCKING] review context unavailable" FAIL (observed on the
+codex lane reviewing PR #199). The prompt now prefers reuse but allows minimal
+re-reading when context is lost, and forbids refusing a verdict for missing context.
+
+| ID | Scenario | Expected |
+|----|----------|----------|
+| TC-CXR-RP-01 | prompt no longer contains an ABSOLUTE "do NOT re-read" bar | substring absent |
+| TC-CXR-RP-02 | prompt allows re-reading when context is unavailable | contains a `re-read … minimum` allowance |
+| TC-CXR-RP-03 | prompt still prefers reusing already-loaded context (no gratuitous re-gather on the common path) | contains "ALREADY loaded" |
+| TC-CXR-RP-04 | prompt instructs codex to ISSUE a verdict and NEVER refuse one for lack of context | contains "post your verdict" AND "do NOT refuse" |
+| TC-CXR-RP-05 | the INV-40/INV-20 attribution trailers survive | contains `Review Agent: codex` and the session uuid |
 
 ## Unit / source-of-truth — wrapper isolation
 

@@ -174,20 +174,40 @@ _codex_log_has_verdict_message() {
 }
 
 # _codex_resume_prompt — the explicit continue-and-emit-verdict prompt fed to
-# each resume turn. Tells codex to stop re-gathering and produce the verdict NOW,
-# carrying the same discriminator/session lines the wrapper's verdict poller
-# binds on (INV-40 / INV-20). $1 = the agent's Review Session UUID.
+# each resume turn. Tells codex to PREFER the context it already loaded and
+# produce the verdict NOW, carrying the same discriminator/session lines the
+# wrapper's verdict poller binds on (INV-40 / INV-20). $1 = the agent's Review
+# Session UUID.
+#
+# #198 follow-up: the original prompt was ABSOLUTE — "do NOT re-run git diff and
+# do NOT re-read files you already read". But codex compacts its OWN context on a
+# long turn, so on resume the diff may no longer be in its working context. The
+# absolute bar then left codex unable to substantiate a verdict, and it
+# defensively posted a "[BLOCKING] review context unavailable" FAIL instead of a
+# real verdict (observed on the codex lane reviewing PR #199 itself). So the
+# prompt now PREFERS reuse to avoid gratuitous re-gather on the common path but
+# EXPLICITLY allows re-reading the minimum needed when that context is gone, and
+# instructs codex to NEVER refuse a verdict for lack of context. This keeps the
+# INV-51 goal (don't burn the turn re-gathering everything) while removing the
+# strand-on-compaction failure mode.
 _codex_resume_prompt() {
   local session_uuid="${1:-}"
   cat <<EOF
 Continue the review of the PR diff you ALREADY loaded in the previous turn(s).
-Do NOT re-run \`git diff\` and do NOT re-read files you already read — that work
-is done and re-doing it wastes the turn. Produce your review findings NOW and
-post your verdict comment on the issue:
+Prefer the context you already have — do not gratuitously re-run \`git diff\` or
+re-read files that are still in your context, since re-doing finished work wastes
+the turn. BUT if your context was compacted and the diff or a file you need is no
+longer available to you, re-read the minimum you need to reach a substantiated
+verdict — do NOT refuse to issue a verdict merely because context is missing.
+Produce your review findings NOW and post your verdict comment on the issue:
 
 - A passing verdict: a comment whose body contains "Review PASSED".
 - A failing verdict: a comment whose body starts with "Review findings:" and
   lists each blocking finding.
+
+A finding must be about the PR's CODE (correctness, tests, requirements, CI,
+security). "I cannot verify because my context is unavailable" is NOT a valid
+finding — re-read what you need and decide.
 
 Your verdict comment MUST include these two lines verbatim so the wrapper can
 attribute it:

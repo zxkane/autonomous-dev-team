@@ -1699,6 +1699,20 @@ Sub-rules:
    only changes the *gather-only DETECTION*; the controller's rc handling — a
    per-turn `124`/`137` stays sticky so a timed-out codex turn vetoes via the
    wrapper sweep ([INV-48](#inv-48-per-side-review-wall-clock-timeout-agent_review_timeout-1h-default-with-browser-e2e-exclusion-and-timeout-veto)) — is byte-for-byte the #194 code.
+5. **The resume prompt must not strand a context-compacted turn.**
+   `_codex_resume_prompt` PREFERS the context codex already loaded (avoid
+   gratuitous re-gather on the common path, the INV-51 goal) but **explicitly
+   allows re-reading the minimum needed when codex's own context was compacted**
+   and the diff/files are no longer in its working context, and instructs codex to
+   **NEVER refuse a verdict for lack of context** ("I cannot verify because my
+   context is unavailable" is not a valid finding). The original #189 prompt was
+   ABSOLUTE ("do NOT re-run `git diff` and do NOT re-read files you already read"),
+   which left a compacted codex turn unable to substantiate a verdict — it
+   defensively posted a `[BLOCKING] review context unavailable` FAIL (a
+   non-substantive deciding FAIL that blocked the merge), observed on the codex
+   lane reviewing the very PR that added INV-53. Softening the prompt removes that
+   strand-on-compaction failure mode without re-opening the gather-the-whole-turn
+   problem INV-51 solved.
 
 **Investigation finding (recorded so it is not re-litigated)**: #198 hypothesised
 that `codex exec resume <tid>` is a **no-op on the amazon-bedrock provider** (each
@@ -1731,7 +1745,7 @@ navigation, diverges the codex prompt shape; and now moot because resume DOES ca
 session); use the GitHub comment poller as the in-loop break signal (wrong layer —
 adds per-turn GitHub latency and violates [INV-51](#inv-51-codex-review-thread-auto-resumes-until-a-verdict-posting-turn) sub-rule 2; the JSONL trailer is a cheap local proxy and the poller remains the authoritative post-loop gate).
 
-**Producer**: `lib-review-codex.sh::_codex_log_has_verdict_message` (the verdict-trailer match). The controller, deadline parser, resume prompt, and rc-stickiness are unchanged from [INV-51](#inv-51-codex-review-thread-auto-resumes-until-a-verdict-posting-turn).
+**Producer**: `lib-review-codex.sh::_codex_log_has_verdict_message` (the verdict-trailer match, sub-rules 1–4) and `_codex_resume_prompt` (the context-compaction-safe prompt, sub-rule 5). The controller, deadline parser, and rc-stickiness are unchanged from [INV-51](#inv-51-codex-review-thread-auto-resumes-until-a-verdict-posting-turn).
 
 **Consumer**: the [INV-51](#inv-51-codex-review-thread-auto-resumes-until-a-verdict-posting-turn) resume controller (the break condition), and downstream the wrapper's authoritative comment poller ([INV-40](#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback)) — unchanged.
 
@@ -1740,7 +1754,11 @@ adds per-turn GitHub latency and violates [INV-51](#inv-51-codex-review-thread-a
 **Test**: `tests/unit/test-lib-review-codex.sh` — TC-CXR-DET-09..14
 (narration-only → rc 1 / resumes, incl. the committed `fixtures/codex-gather-only-turn.jsonl`;
 pass/fail/discriminator trailers → rc 0; last-turn-decides for the trailer; a
-verdict phrase in a tool output is not a false verdict). Investigation artifact:
+verdict phrase in a tool output is not a false verdict) and TC-CXR-RP-01..05
+(sub-rule 5: the resume prompt drops the absolute "do NOT re-read" bar, allows
+minimal re-reading on context compaction, prefers already-loaded context, instructs
+codex to never refuse a verdict for missing context, and keeps the INV-40/INV-20
+attribution trailers). Investigation artifact:
 `tests/unit/fixtures/codex-resume-carry-session-repro.txt`. Test plan:
 `docs/test-cases/codex-review-resume-loop.md`.
 
