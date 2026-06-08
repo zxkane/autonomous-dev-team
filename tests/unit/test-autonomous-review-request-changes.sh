@@ -166,15 +166,17 @@ assert_grep "TC-RC-SRC-00 wrapper sources lib-review-request-changes.sh" \
 assert_grep "TC-RC-SRC-01 submit_request_changes defined in lib" \
   '^submit_request_changes\(\)' "$RC_LIB"
 
-# TC-RC-SRC-02: the wrapper invokes the helper at least twice (the two
-# substantive FAIL routes: agent-findings FAIL + merge-conflict block).
-# Count INVOCATIONS only — the call form is `submit_request_changes "<pr>"`; a
-# `|| log "... submit_request_changes returned ..."` mention is NOT a call.
+# TC-RC-SRC-02: the wrapper invokes the helper on every substantive FAIL route —
+# the three are: agent-posted findings FAIL, the CONFLICTING mergeable block, and
+# the E2E hard-gate failure ([INV-46], a dev-actionable blocking FAIL produced
+# before the review fan-out — #197 codex finding). Count INVOCATIONS only — the
+# call form is `submit_request_changes "<pr>"`; a `|| log "... submit_request_changes
+# returned ..."` mention is NOT a call.
 _calls=$(grep -cE 'submit_request_changes "' "$WRAPPER_CODE" || true)
-if [[ "$_calls" -ge 2 ]]; then
-  echo -e "  ${GREEN}PASS${NC}: TC-RC-SRC-02 wrapper calls submit_request_changes on ≥2 substantive FAIL routes (found $_calls)"; PASS=$((PASS + 1))
+if [[ "$_calls" -ge 3 ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-RC-SRC-02 wrapper calls submit_request_changes on ≥3 substantive FAIL routes (found $_calls)"; PASS=$((PASS + 1))
 else
-  echo -e "  ${RED}FAIL${NC}: TC-RC-SRC-02 expected ≥2 helper calls, found $_calls"; FAIL=$((FAIL + 1))
+  echo -e "  ${RED}FAIL${NC}: TC-RC-SRC-02 expected ≥3 helper calls, found $_calls"; FAIL=$((FAIL + 1))
 fi
 
 # TC-RC-SRC-06: every helper invocation statement is best-effort — its 3-line
@@ -210,14 +212,34 @@ else
   echo -e "  ${RED}FAIL${NC}: TC-RC-SRC-08 a line mixes approve + request-changes:"; echo "$_both"; FAIL=$((FAIL + 1))
 fi
 
-# TC-RC-SRC-04: the mergeable-UNKNOWN (block-nonsubstantive) route must NOT
-# submit REQUEST_CHANGES — it is a transient re-queue, not a code defect. Pin
-# that the helper call count stays bounded (exactly 2: substantive-FAIL +
-# merge-conflict). A 3rd call would mean the UNKNOWN/crash path wired it in.
-if [[ "$_calls" -eq 2 ]]; then
-  echo -e "  ${GREEN}PASS${NC}: TC-RC-SRC-04 helper called on EXACTLY the 2 substantive routes (UNKNOWN/crash excluded)"; PASS=$((PASS + 1))
+# TC-RC-SRC-04: the NON-substantive routes must NOT submit REQUEST_CHANGES —
+# they are transient re-queues / transport failures, not dev-actionable code
+# defects. Pin the helper call count at EXACTLY 3 (the three substantive routes:
+# agent-findings FAIL, CONFLICTING mergeable block, E2E hard-gate fail). A 4th
+# call would mean a non-substantive route (mergeable-UNKNOWN, E2E-evidence-missing,
+# or the agent-crash-no-verdict path) wrongly wired it in.
+if [[ "$_calls" -eq 3 ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-RC-SRC-04 helper called on EXACTLY the 3 substantive routes (non-substantive routes excluded)"; PASS=$((PASS + 1))
 else
-  echo -e "  ${RED}FAIL${NC}: TC-RC-SRC-04 expected exactly 2 helper calls (UNKNOWN/crash must NOT request changes), found $_calls"; FAIL=$((FAIL + 1))
+  echo -e "  ${RED}FAIL${NC}: TC-RC-SRC-04 expected exactly 3 helper calls (non-substantive routes must NOT request changes), found $_calls"; FAIL=$((FAIL + 1))
+fi
+
+# TC-RC-SRC-04b: the E2E hard-gate FAIL route (the `failed-substantive` +
+# `E2E verification failed` branch, INV-46) submits REQUEST_CHANGES, while the
+# E2E `block-nonsubstantive` (evidence-missing re-queue) route does NOT. Verify
+# by checking the 25-line window after each `[BLOCKING] E2E verification failed`
+# / `e2e-evidence-missing` marker contains / lacks a helper invocation.
+_e2e_fail_ln=$(grep -nE '\[BLOCKING\] E2E verification failed' "$WRAPPER_CODE" | head -1 | cut -d: -f1)
+_e2e_block_ln=$(grep -nE 'e2e-evidence-missing' "$WRAPPER_CODE" | head -1 | cut -d: -f1)
+if [[ -n "$_e2e_fail_ln" ]] && sed -n "${_e2e_fail_ln},$((_e2e_fail_ln + 25))p" "$WRAPPER_CODE" | grep -qE 'submit_request_changes "'; then
+  echo -e "  ${GREEN}PASS${NC}: TC-RC-SRC-04b E2E hard-gate FAIL route requests changes"; PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-RC-SRC-04b E2E hard-gate FAIL route does NOT request changes (should)"; FAIL=$((FAIL + 1))
+fi
+if [[ -n "$_e2e_block_ln" ]] && ! sed -n "$((_e2e_block_ln - 12)),$((_e2e_block_ln + 12))p" "$WRAPPER_CODE" | grep -qE 'submit_request_changes "'; then
+  echo -e "  ${GREEN}PASS${NC}: TC-RC-SRC-04c E2E evidence-missing (non-substantive) route does NOT request changes"; PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-RC-SRC-04c E2E evidence-missing route wrongly requests changes (should NOT)"; FAIL=$((FAIL + 1))
 fi
 
 # TC-RC-SRC-09: each helper invocation's body (its 3-line window) references the

@@ -36,12 +36,18 @@ Add a small best-effort helper `submit_request_changes <pr> <body>` next to the
 existing `--approve` call, and call it on the **substantive** FAIL routes so
 `reviewDecision == CHANGES_REQUESTED`:
 
-| FAIL route | Source line (pre-change) | Submit REQUEST_CHANGES? | Why |
-|---|---|---|---|
-| Agent posted blocking findings (`failed-substantive`) | `:1644` main FAIL branch | **YES** | dev-actionable blocking findings — assert the blocking state on the PR |
-| Merge conflict (`block-substantive`, INV-44) | `:1452` | **YES** | a `CONFLICTING` PR is a real blocking finding the dev must rebase |
-| Mergeable UNKNOWN (`block-nonsubstantive`, INV-44) | `:1488` | **NO** | transient GitHub-side hold, re-queued for re-review — not a code defect; a standing CHANGES_REQUESTED would falsely accuse the dev |
-| Agent crash, no verdict (`failed-non-substantive other`) | `:1633` | **NO** | transport/mid-stream crash, not a finding — REQUEST_CHANGES would be misleading |
+| FAIL route | Submit REQUEST_CHANGES? | Why |
+|---|---|---|
+| Agent posted blocking findings (`failed-substantive`, main FAIL branch) | **YES** | dev-actionable blocking findings — assert the blocking state on the PR |
+| Merge conflict (`block-substantive`, INV-44) | **YES** | a `CONFLICTING` PR is a real blocking finding the dev must rebase |
+| E2E hard-gate failure (`E2E_GATE == fail`, INV-46, runs before fan-out) | **YES** | a failed E2E is a dev-actionable blocking FAIL — added in response to the #197 codex review finding; the AC ("a blocking FAIL verdict must result in `reviewDecision == CHANGES_REQUESTED`") is route-agnostic |
+| Mergeable UNKNOWN (`block-nonsubstantive`, INV-44) | **NO** | transient GitHub-side hold, re-queued for re-review — not a code defect; a standing CHANGES_REQUESTED would falsely accuse the dev |
+| E2E evidence missing (`block-nonsubstantive` cause `e2e-evidence-missing`, INV-46) | **NO** | transient comment-propagation hold, re-queued — not a code defect |
+| Agent crash, no verdict (`failed-non-substantive other`) | **NO** | transport/mid-stream crash, not a finding — REQUEST_CHANGES would be misleading |
+
+> The substantive set is defined by "the verdict is a real, dev-actionable
+> blocking FAIL", NOT by which gate produced it — so any future gate that emits
+> `failed-substantive` should also request changes.
 
 Discipline (matches the dev-resume side and the existing approve fallback):
 

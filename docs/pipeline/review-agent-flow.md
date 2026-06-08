@@ -133,10 +133,12 @@ E2E_ACTIVE == true:
         evidence comment for the captured PR_HEAD_SHA
     → pass | fail | block-nonsubstantive
   gate == fail                 → [BLOCKING] E2E finding + failed-substantive
+                                 + submit_request_changes (INV-52, best-effort)
                                  + −reviewing +pending-dev ; exit 0  (NO fan-out)
   gate == block-nonsubstantive → "Review held" + failed-non-substantive
                                  cause=e2e-evidence-missing + −reviewing
-                                 +pending-dev ; exit 0  (re-queue, NO fan-out)
+                                 +pending-dev ; exit 0  (re-queue, NO fan-out,
+                                 NO request-changes — transient)
   gate == pass                 → PHASE B (review fan-out below)
 E2E_ACTIVE == false → no lane, no gate (E2E_GATE=inactive); straight to fan-out.
 ```
@@ -392,7 +394,7 @@ Since [INV-54](invariants.md#inv-54-the-pr-still-open-guard-gates-all-pass-chain
 2. −reviewing +pending-dev
 ```
 
-**REQUEST_CHANGES on a substantive FAIL ([INV-52](invariants.md#inv-52-the-review-wrapper-owns-the-github-native-pr-reviewmerge-action-the-agent-posts-verdicts-only))**: when the agent posted a blocking FAIL verdict, the wrapper additionally submits `gh pr review --request-changes` (via `lib-review-request-changes.sh::submit_request_changes`) so the PR's GitHub-native `reviewDecision` becomes `CHANGES_REQUESTED` — authoritative for humans browsing the PR, branch protection, and the dev-resume agent (closing the false-green-PR gap behind #188). The call is **best-effort**: `submit_request_changes` always returns 0, a 403/transient `gh` failure is logged and swallowed, and the call site adds a belt-and-suspenders `|| log` — a failed submit MUST NOT abort the FAIL route and strand the issue in `reviewing`. The **non-substantive** sub-path (agent crash, no verdict) does NOT request changes: a transport failure is not a dev-actionable blocking finding, and a standing `CHANGES_REQUESTED` would falsely accuse the dev. The mergeable-gate's `block-substantive` (CONFLICTING) path likewise submits REQUEST_CHANGES; its `block-nonsubstantive` (UNKNOWN re-queue) path does NOT — see [Mergeable hard gate](#mergeable-hard-gate-inv-44).
+**REQUEST_CHANGES on a substantive FAIL ([INV-52](invariants.md#inv-52-the-review-wrapper-owns-the-github-native-pr-reviewmerge-action-the-agent-posts-verdicts-only))**: when the agent posted a blocking FAIL verdict, the wrapper additionally submits `gh pr review --request-changes` (via `lib-review-request-changes.sh::submit_request_changes`) so the PR's GitHub-native `reviewDecision` becomes `CHANGES_REQUESTED` — authoritative for humans browsing the PR, branch protection, and the dev-resume agent (closing the false-green-PR gap behind #188). The call is **best-effort**: `submit_request_changes` always returns 0, a 403/transient `gh` failure is logged and swallowed, and the call site adds a belt-and-suspenders `|| log` — a failed submit MUST NOT abort the FAIL route and strand the issue in `reviewing`. The **non-substantive** sub-path (agent crash, no verdict) does NOT request changes: a transport failure is not a dev-actionable blocking finding, and a standing `CHANGES_REQUESTED` would falsely accuse the dev. There are **three** substantive routes that request changes, each a real dev-actionable blocking FAIL: (1) the agent-posted `Review findings:` FAIL here, (2) the mergeable-gate's `block-substantive` (CONFLICTING) path, and (3) the [INV-46](invariants.md#inv-46-e2e-runs-once-in-a-dedicated-lane-before-the-review-fan-out--gated-not-per-agent) E2E hard-gate `fail` path (which runs before the fan-out). Their non-substantive siblings — `block-nonsubstantive` (mergeable UNKNOWN re-queue) and the E2E `block-nonsubstantive` (evidence-missing re-queue) — do NOT — see [Mergeable hard gate](#mergeable-hard-gate-inv-44) and [Sequential E2E lane (INV-46)](#sequential-e2e-lane-inv-46).
 
 A subsequent PASS re-approves the new HEAD: the [PASS path](#verdict--pass-path) submits `gh pr review --approve` against the post-fix HEAD, which supersedes the prior `CHANGES_REQUESTED` from the same reviewer (and `dismiss-stale-reviews-on-push` branch protection, if configured, dismisses it on the dev's force-push) — so there is no permanently-stuck `CHANGES_REQUESTED`.
 
