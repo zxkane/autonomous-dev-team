@@ -63,12 +63,20 @@ token without the exact prefix:
 The added clause matches a comment containing a BLOCKING/`[P1]` token — broad enough
 to catch `## Codex review findings` and `[P1] BLOCKING: …` operator notes. To keep it
 from over-matching (issue #188 review finding 2), the token clause carries two guards:
-a negative look-behind `(?<![A-Za-z-])BLOCKING\b` rejects `NON-BLOCKING`, and a
-first-line exclusion list rejects PASS/APPROVED verdicts, `## ✅` status headings,
-`**Agent Session Report`, the `Multi-agent review:`/`Reviewed HEAD:`/`<!-- … -->`
+the `BLOCKING` token is anchored `(^|[^A-Za-z-])BLOCKING\b` so `NON-BLOCKING` does not
+match, and a first-line exclusion list rejects PASS/APPROVED verdicts, `## ✅` status
+headings, `**Agent Session Report`, the `Multi-agent review:`/`Reviewed HEAD:`/`<!-- … -->`
 review-wrapper markers, and `Dispatching`/`Resuming`/`Moving to` dispatcher chatter.
 The existing #113 dispatcher-chatter exclusion is preserved (those bodies carry no
 token anyway, and are now also on the exclusion list).
+
+> **RE2 engine constraint (review round 2):** the `BLOCKING` anchor MUST be a
+> *consuming* leading group `(^|[^A-Za-z-])`, NOT a look-behind `(?<![A-Za-z-])`.
+> `gh --jq` uses Go's RE2 (no look-behind); a look-behind is rejected at runtime
+> (`invalid named capture`), which disables the override and aborts the wrapper under
+> `set -e`. The unit tests stub `gh` via the system `jq` (Oniguruma, which supports
+> look-behind) so they CANNOT catch this — `tests/unit/test-resume-selector-re2-compat.sh`
+> exercises the real RE2 engine (static guard + best-effort `gh --jq` round-trip).
 
 ### 2. Post-approval findings override block (gap 1)
 

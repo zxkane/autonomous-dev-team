@@ -66,6 +66,27 @@ that returns scenario-specific JSON for `gh pr view --json reviews` and
 | TC-PAF-D02 | `autonomous-mode.md` documents broadened findings recognition (BLOCKING/`[P1]`, not only the exact `Review findings:` prefix) |
 | TC-PAF-D03 | INV-57 exists in `invariants.md` and is referenced from `dev-agent-flow.md` |
 
+## Part D — RE2 engine compatibility (`test-resume-selector-re2-compat.sh`, review round 2)
+
+`gh --jq` runs Go's RE2 engine (no look-behind/look-ahead); the unit tests above stub `gh`
+via the system `jq` (Oniguruma, which DOES support look-behind), so a look-behind in the
+selector passes the stubbed tests but fails at runtime. Round 2 (kiro) caught a
+`(?<![A-Za-z-])BLOCKING` look-behind that RE2 rejected — disabling the override and
+aborting the wrapper under `set -e`. These cases guard the engine boundary directly.
+
+| ID | Assertion | Layer |
+|----|---|---|
+| TC-RE2-01 | The resume `-q` findings selector line(s) are locatable in `autonomous-dev.sh` | static |
+| TC-RE2-02 | Neither resume selector contains an RE2-incompatible look-behind/look-ahead (`(?<`, `(?=`, `(?!`) | static (CI-enforced) |
+| TC-RE2-03 | The RE2-compatible consuming anchor `(^\|[^A-Za-z-])BLOCKING` IS present (NON-BLOCKING guard intact) | static |
+| TC-RE2-04 | Real `gh --jq` (Go RE2) COMPILES the token regex (no `invalid regular expression`) | real-engine (best-effort) |
+| TC-RE2-05 | `[P1] BLOCKING` matches under real RE2 | real-engine |
+| TC-RE2-06 | `[BLOCKING] …` (bracketed review format) matches under real RE2 | real-engine |
+| TC-RE2-07 | `NON-BLOCKING` does NOT match under real RE2 | real-engine |
+
+Real-engine cases (04..07) skip (not fail) when the `gh` binary or a token/network is
+unavailable, so a tokenless CI run still enforces the static guard (01..03).
+
 ## Acceptance
 
 - TC-RFB-009, 010, 005-by-broadening pass only after the selector is broadened;

@@ -2067,9 +2067,16 @@ Two layers enforce this:
    by the `Review findings` prefix OR a `BLOCKING` / `[P1]` token — NOT the exact `Review findings:` prefix
    alone, so a late/independent findings comment (a heading `## Codex review findings`, or a bare operator note
    `[P1] BLOCKING: …`) is actionable. Two guards keep the token clause from over-matching:
-   - The `BLOCKING` token uses a negative look-behind `(?<![A-Za-z-])BLOCKING\b` so the review vocabulary's
-     `NON-BLOCKING` token (the hyphen is a `\b` boundary) does NOT false-match — otherwise a "remaining items
-     are NON-BLOCKING, safe to merge" note would falsely trigger the override.
+   - The `BLOCKING` token is anchored `(^|[^A-Za-z-])BLOCKING\b` so the review vocabulary's `NON-BLOCKING`
+     token (the hyphen is a `\b` boundary) does NOT false-match — otherwise a "remaining items are
+     NON-BLOCKING, safe to merge" note would falsely trigger the override. **This MUST be a *consuming*
+     leading group, NOT a look-behind** (`(?<![A-Za-z-])`): `gh --jq` runs Go's RE2 engine, which has no
+     look-behind and **rejects** `(?<!` at runtime (`invalid regular expression … invalid named capture`).
+     A look-behind form makes the findings query exit non-zero — the override silently never fires, and the
+     unprotected `REVIEW_COMMENTS=$(gh …)` assignment aborts the wrapper under `set -euo pipefail` before the
+     agent runs (issue #188 review round 2: kiro). Tests that stub `gh` via the system `jq` binary (jq
+     1.6+/Oniguruma, which DOES support look-behind) cannot catch this engine mismatch — see the dedicated
+     RE2-compatibility test below.
    - The token-bearing comment is matched ONLY when its first line is NOT a known **non-findings shape**:
      `Review PASSED` / `Review APPROVED` verdicts, a `## ✅` status heading, `**Agent Session Report`, the
      `Multi-agent review:` / `Reviewed HEAD:` / `<!-- … -->` review-wrapper markers, and the
@@ -2117,7 +2124,14 @@ builder, block content names post-approval findings + do-not-exit + stale-APPROV
 TC-PAF-D01..D03 (doc contract). Selector regression: `tests/unit/test-resume-review-comments-filter.sh`
 TC-RFB-009..016 (the token clause recognizes non-prefix findings, rejects `NON-BLOCKING`, excludes PASS
 verdicts + dev status/session comments that mention the tokens, and does not re-introduce the #113
-dispatcher-chatter false positives); TC-RFB-001..008 stay green. Test plan:
+dispatcher-chatter false positives) + TC-RFB-017 (the exclusion alternation stays byte-identical across the
+two single-line selectors); TC-RFB-001..008 stay green. **Engine-compatibility regression**:
+`tests/unit/test-resume-selector-re2-compat.sh` — TC-RE2-01..03 (STATIC, network-free, CI-enforced: the
+resume `-q` selectors contain NO RE2-incompatible look-behind/look-ahead and DO carry the consuming
+`(^|[^A-Za-z-])BLOCKING` anchor) + TC-RE2-04..07 (best-effort: feed the actual token regex through the REAL
+`gh --jq` Go RE2 engine — compiles, `[P1] BLOCKING`/`[BLOCKING]` match, `NON-BLOCKING` does not — skipped when
+`gh`/token/network is absent). This guards the stub-vs-runtime engine gap that hid review round 2's
+look-behind bug. Test plan:
 `docs/test-cases/dev-resume-post-approval-findings.md`.
 
 **Cross-references**:

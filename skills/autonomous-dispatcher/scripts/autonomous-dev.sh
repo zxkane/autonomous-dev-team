@@ -306,15 +306,20 @@ FASTPATH
 # post-date the approval (or positively prove there is no approval).
 #
 # Findings recognition mirrors the broadened `REVIEW_COMMENTS` selector: the
-# exact `Review findings` prefix OR a `BLOCKING`/`[P1]` token (the look-behind
-# rejects `NON-BLOCKING`), BUT NOT a comment whose first line is a known
-# non-findings shape — a `Review PASSED`/`Review APPROVED` verdict, a `## ✅`
-# status heading, an `**Agent Session Report**`, a `Multi-agent review:` /
-# `Reviewed HEAD:` / `<!-- … -->` review-wrapper marker, or a dispatcher status
-# (`Dispatching`/`Resuming`/`Moving to`). Without that exclusion the token clause
-# false-matched a PASS verdict that says "No BLOCKING issues remain" and a dev
-# status comment that mentions `BLOCKING`/`[P1]` in prose (issue #188 review
-# finding 2), which would falsely re-open a genuinely-done approved PR.
+# exact `Review findings` prefix OR a `BLOCKING`/`[P1]` token. The `BLOCKING`
+# alternative is anchored `(^|[^A-Za-z-])BLOCKING\b` so `NON-BLOCKING` (the
+# hyphen would be a `\b` boundary) does NOT match. NOTE: `gh --jq` uses Go's
+# RE2 engine, which has NO look-behind — a `(?<![A-Za-z-])` form is REJECTED at
+# runtime (`invalid named capture`), so the equivalent must be a *consuming*
+# leading group, not a look-behind (issue #188 review: kiro). BUT NOT a comment
+# whose first line is a known non-findings shape — a `Review PASSED`/`Review
+# APPROVED` verdict, a `## ✅` status heading, an `**Agent Session Report**`, a
+# `Multi-agent review:` / `Reviewed HEAD:` / `<!-- … -->` review-wrapper marker,
+# or a dispatcher status (`Dispatching`/`Resuming`/`Moving to`). Without that
+# exclusion the token clause false-matched a PASS verdict that says "No BLOCKING
+# issues remain" and a dev status comment that mentions `BLOCKING`/`[P1]` in
+# prose (issue #188 review finding 2), which would falsely re-open a
+# genuinely-done approved PR.
 #
 # Networked, worktree-free (`gh pr view` + `gh issue view`), so it works from
 # the wrapper box regardless of EXECUTION_BACKEND.
@@ -341,7 +346,7 @@ emit_post_approval_findings_block() {
   # narrowed recognition as the REVIEW_COMMENTS selector. FAIL-CLOSED likewise:
   # a failed query → emit nothing, return 0.
   if ! findings_at=$(gh issue view "$issue_num" --repo "$REPO" --json comments \
-    -q '[.comments[] | select((.body | startswith("Review findings")) or ((.body | test("(?i)(?<![A-Za-z-])BLOCKING\\b|\\[P1\\]")) and ((.body | test("(?i)^\\s*(Review PASSED|Review APPROVED|#+\\s*✅|\\*\\*Agent Session Report|Agent Session Report|Multi-agent review|Reviewed HEAD|<!--|Dispatching|Resuming|Moving to|Implementation complete)")) | not))) | .createdAt] | sort | last // empty' 2>/dev/null); then
+    -q '[.comments[] | select((.body | startswith("Review findings")) or ((.body | test("(?i)(^|[^A-Za-z-])BLOCKING\\b|\\[P1\\]")) and ((.body | test("(?i)^\\s*(Review PASSED|Review APPROVED|#+\\s*✅|\\*\\*Agent Session Report|Agent Session Report|Multi-agent review|Reviewed HEAD|<!--|Dispatching|Resuming|Moving to|Implementation complete)")) | not))) | .createdAt] | sort | last // empty' 2>/dev/null); then
     return 0
   fi
 
@@ -611,10 +616,13 @@ elif [[ "$MODE" = "resume" ]]; then
   # bare operator note `[P1] BLOCKING: …`) was invisible to the resume
   # prompt, so blocking findings posted after an approval were silently
   # dropped. We broaden recognition with a THIRD clause: a comment body
-  # carrying a `BLOCKING` or `[P1]` token (case-insensitive; the negative
-  # look-behind `(?<![A-Za-z-])` rejects the review vocabulary's
-  # `NON-BLOCKING`) is treated as actionable change-request feedback —
-  # BUT ONLY when its first line is NOT a known non-findings shape.
+  # carrying a `BLOCKING` or `[P1]` token (case-insensitive) is treated as
+  # actionable change-request feedback — BUT ONLY when its first line is NOT a
+  # known non-findings shape. The `BLOCKING` alternative is anchored
+  # `(^|[^A-Za-z-])BLOCKING\b` so `NON-BLOCKING` does not match. This MUST be a
+  # *consuming* leading group, NOT a look-behind: `gh --jq` runs Go's RE2 engine
+  # which has no look-behind and REJECTS `(?<![A-Za-z-])` at runtime (`invalid
+  # named capture`), aborting the wrapper under `set -e` (issue #188 review: kiro).
   #
   # That exclusion (issue #188 review finding 2) is load-bearing: a pure
   # token match also fires on a `Review PASSED - No BLOCKING issues remain`
@@ -628,7 +636,7 @@ elif [[ "$MODE" = "resume" ]]; then
   # PASSED` is also matched by its own dedicated clause so the resume still
   # sees the latest PASS verdict as feedback context.
   REVIEW_COMMENTS=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json comments \
-    -q '[.comments[] | select((.body | startswith("Review findings")) or (.body | startswith("Review PASSED")) or ((.body | test("(?i)(?<![A-Za-z-])BLOCKING\\b|\\[P1\\]")) and ((.body | test("(?i)^\\s*(Review PASSED|Review APPROVED|#+\\s*✅|\\*\\*Agent Session Report|Agent Session Report|Multi-agent review|Reviewed HEAD|<!--|Dispatching|Resuming|Moving to|Implementation complete)")) | not)))] | last // empty')
+    -q '[.comments[] | select((.body | startswith("Review findings")) or (.body | startswith("Review PASSED")) or ((.body | test("(?i)(^|[^A-Za-z-])BLOCKING\\b|\\[P1\\]")) and ((.body | test("(?i)^\\s*(Review PASSED|Review APPROVED|#+\\s*✅|\\*\\*Agent Session Report|Agent Session Report|Multi-agent review|Reviewed HEAD|<!--|Dispatching|Resuming|Moving to|Implementation complete)")) | not)))] | last // empty')
 
   # Fetch PR number linked to this issue for inline review comments
   PR_NUM=$(gh pr list --repo "$REPO" --state open --json number,body \

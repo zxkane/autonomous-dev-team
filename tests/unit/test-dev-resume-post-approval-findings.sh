@@ -231,13 +231,13 @@ out=$(run_helper 188 50 \
 assert_emitted "TC-PAF-008 operator [P1] BLOCKING note newer than approval → emit" "$out"
 
 # TC-PAF-009 — APPROVED@07:00, a NEWER "remaining items NON-BLOCKING" note (no real
-# findings token) → NO emit. The look-behind must reject NON-BLOCKING so a
+# findings token) → NO emit. The consuming anchor must reject NON-BLOCKING so a
 # genuinely-done agent isn't sent back into a fix loop by a reassurance note.
 NON_BLOCKING_NOTE='Remaining items are NON-BLOCKING — safe to merge once CI is green.'
 out=$(run_helper 188 50 \
   GH_PR_REVIEWS_JSON="$(write_reviews APPROVED 2026-06-08T07:00:00Z)" \
   GH_ISSUE_COMMENTS_JSON="$(write_comments "2026-06-08T08:00:00Z::$NON_BLOCKING_NOTE")")
-assert_not_emitted "TC-PAF-009 newer 'NON-BLOCKING' note → no emit (look-behind rejects hyphen)" "$out"
+assert_not_emitted "TC-PAF-009 newer 'NON-BLOCKING' note → no emit (consuming anchor rejects hyphen)" "$out"
 
 # ── Issue #188 review round 1 (codex findings) ────────────────────────────────
 

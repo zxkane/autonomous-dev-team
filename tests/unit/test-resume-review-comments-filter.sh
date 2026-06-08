@@ -233,7 +233,7 @@ fixture=$(jq -n \
   --argjson c2 "$(mk_comment '2026-06-08T07:30:00Z' "$NON_BLOCKING_NOTE")" \
   '{comments: [$c1, $c2]}')
 out=$(run_filter "$fixture")
-assert_body_match "TC-RFB-012 'NON-BLOCKING' note does not match (look-behind rejects hyphen)" "[BLOCKING] Missing input validation" "$out"
+assert_body_match "TC-RFB-012 'NON-BLOCKING' note does not match (consuming anchor rejects hyphen)" "[BLOCKING] Missing input validation" "$out"
 
 # TC-RFB-013 — a sole NON-BLOCKING note (no real findings) yields empty, NOT a match
 fixture=$(jq -n --argjson c1 "$(mk_comment '2026-06-08T08:00:00Z' "$NON_BLOCKING_NOTE")" \
