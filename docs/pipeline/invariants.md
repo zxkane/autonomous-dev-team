@@ -1809,6 +1809,76 @@ Sub-rules:
 - [`state-machine.md` § Transition table](state-machine.md#transition-table) — the open-gate `reviewing → (−reviewing)` clean-exit row shared by all three PASS-chain exits.
 - [`docs/designs/review-fail-branch-open-guard.md`](../designs/review-fail-branch-open-guard.md) — design canvas.
 
+## INV-55: the codex review lane receives the PR diff INLINE in its prompt
+
+**Rule**: when `autonomous-review.sh::build_review_prompt` renders for the **codex**
+agent (`_agent_name == codex`), it MUST embed the full PR diff INLINE in the prompt
+— fetched once via `gh pr diff "${PR_NUMBER}" --repo "${REPO}"`, placed between
+`DIFF_START` / `DIFF_END` markers — and instruct codex NOT to run `git diff` /
+`gh pr diff` itself. The other CLIs (claude/agy/kiro/gemini/opencode) keep the
+byte-for-byte unchanged prompt that tells the agent to read the diff itself.
+
+**Why**: codex runs ONE agentic turn (`codex exec`). On a non-trivial PR the
+CLI-agnostic prompt's "read the PR diff" step makes codex re-run `git diff` at
+several `--unified` sizes, consuming the whole turn on context-gathering (observed:
+**320k input tokens, `output_tokens:1945`, no verdict**) and exhausting
+`CODEX_REVIEW_MAX_RESUMES` before producing findings — so it is dropped
+`unavailable` and the fleet decides without it (#198 re-review of #193, run under
+the INV-53 code: `[lib-review-codex] ... hit CODEX_REVIEW_MAX_RESUMES=3 with no
+verdict turn`). [INV-53](#inv-53-codex-review-convergence-keys-on-the-verdict-trailer-not-any-agent_message)
+stopped the detector **false-converging**; INV-55 removes the reason the **real**
+turn can't converge. The verified pattern: a manual `/codex review` that inlines the
+diff and forbids self-fetch produced 7 findings (incl. 2 P1) on a 4318-line diff in
+ONE turn. The diff is fenced between **nonce'd** markers `DIFF_START_<sid>` /
+`DIFF_END_<sid>` (suffixed with the agent's per-render session UUID) so the
+data/instruction boundary cannot be forged by a PR diff that itself contains a
+literal `DIFF_END` line — a static sentinel would let attacker-controlled text after
+a bare `DIFF_END` land in instruction position. The prompt also explicitly tells
+codex to treat everything between the markers as untrusted DATA and disregard any
+directive-shaped text inside it. Belt-and-suspenders: if the fetched diff somehow
+contains the exact nonce'd end marker, the lane does NOT inline and falls back to the
+self-fetch note.
+
+**Producer**: `build_review_prompt` (the codex-gated inline block).
+**Consumer**: the codex review agent's single `codex exec` turn (it produces findings
++ posts the verdict from the inlined diff without re-gathering).
+
+**Bound**: `CODEX_REVIEW_INLINE_DIFF_MAX_BYTES` (default 600000). Above the cap — or
+when the diff can't be fetched, or contains the nonce'd end marker — the lane does NOT
+inline (a megadiff would blow the prompt the other way) and falls back to a "read it
+with a SINGLE `gh pr diff`" instruction. The byte count is computed into a plain
+integer (`wc -c | tr -dc 0-9`, default 0) so a `set -euo pipefail` arithmetic
+comparison can never abort the **wrapper process** (this block renders in the main
+wrapper, inside the per-agent loop but BEFORE the `( … ) &` fan-out subshell, so an
+abort here would strand the issue in `reviewing` — hence the defensive guards).
+
+**Scope**: codex lane only. `agy` exhibits the same gather-burn (its log is
+wall-to-wall "I will check… I will view…" narration that cuts off with no verdict),
+but the robust agy fix is a separate question (agy's CLI diff-injection / multi-turn
+surface differs) and is intentionally NOT bundled here — captured as a follow-up so
+this change stays small and the blast radius contained.
+
+**Status**: **ENFORCED** (closes #198 follow-up). Complements
+[INV-53](#inv-53-codex-review-convergence-keys-on-the-verdict-trailer-not-any-agent_message)
+— INV-53 fixes detection; INV-55 makes turn-1 self-sufficient so detection has a real
+verdict to detect.
+
+**Test**: `tests/unit/test-codex-inline-diff-prompt.sh` — TC-CXIN-SRC-01..06
+(codex-gated branch; `gh pr diff` fetch; `DIFF_START`/`DIFF_END` markers; no-git-diff
+instruction; `CODEX_REVIEW_INLINE_DIFF_MAX_BYTES` guard) and TC-CXIN-BEHAVE-01..03
+(rendered codex prompt INLINES the fetched diff body; non-codex/claude prompt does
+NOT; codex prompt carries the no-git-diff instruction). Backward-compat:
+`test-autonomous-review-prompt.sh`, `test-autonomous-review-multi-agent.sh`,
+`test-autonomous-review-structured-ac.sh`, `test-autonomous-review-sequential-e2e.sh`
+stay green. Test plan: `docs/test-cases/codex-inline-diff-review-prompt.md`.
+
+**Cross-references**:
+- [INV-53](#inv-53-codex-review-convergence-keys-on-the-verdict-trailer-not-any-agent_message) — the convergence-detection fix INV-55 complements.
+- [INV-51](#inv-51-codex-review-thread-auto-resumes-until-a-verdict-posting-turn) — the resume loop INV-55 lets converge in turn-1 (resume becomes a thin fallback).
+- [INV-40](#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback) — the `unavailable` drop this avoids.
+- [`review-agent-flow.md` § Codex auto-resume (INV-51)](review-agent-flow.md#codex-auto-resume-inv-51) — runtime walkthrough.
+- [`docs/designs/codex-inline-diff-review-prompt.md`](../designs/codex-inline-diff-review-prompt.md) — design canvas.
+
 ## Adding a new invariant
 
 When fixing a pipeline bug, after locating the bug on the state machine + flow docs:

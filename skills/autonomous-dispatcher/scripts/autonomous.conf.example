@@ -387,6 +387,17 @@ AGENT_REVIEW_EXTRA_ARGS=""
 #
 # CODEX_REVIEW_MAX_RESUMES=3
 
+# CODEX_REVIEW_INLINE_DIFF_MAX_BYTES: cap (bytes) for inlining the PR diff into
+# the codex review prompt (INV-55). The codex review lane fetches the diff once
+# (`gh pr diff`) and embeds it between DIFF_START/DIFF_END so codex's single turn
+# produces a verdict instead of burning the turn re-running `git diff` (the real
+# reason codex was still dropped `unavailable` even after the INV-53 detector fix).
+# Above this cap (or if the diff can't be fetched) the lane does NOT inline and
+# tells codex to read it with a SINGLE `gh pr diff` instead. Default 600000.
+# Only affects the codex review path; other CLIs self-fetch the diff unchanged.
+#
+# CODEX_REVIEW_INLINE_DIFF_MAX_BYTES=600000
+
 # --- claude block ---
 # claude has NO required EXTRA_ARGS — the structural --permission-mode
 # flag handles tool trust via the existing AGENT_PERMISSION_MODE knob.
