@@ -240,9 +240,31 @@ Major prompt sections:
 | **Acceptance criteria verification** | For each `## Acceptance Criteria` checkbox in the issue body, verify against PR code/tests/build then mark via `bash scripts/mark-issue-checkbox.sh`. ALL must be checked before approving. |
 | **Amazon Q Developer trigger** | Mandatory bot-review trigger. Q ignores `/q review` from bot accounts ⇒ wrapper instructs the agent to use `bash scripts/gh-as-user.sh pr comment N --body "/q review"`. Poll up to 3 min for the bot to respond. |
 | **E2E verification (if `E2E_MODE` ∈ {browser, command})** | Branch on `E2E_MODE`. `browser`: Chrome DevTools MCP procedure (navigate, login, execute happy-path + feature test cases, screenshot+upload each, post structured E2E report on PR). `command`: invoke project-supplied `E2E_COMMAND`, run `E2E_COMMAND_EVIDENCE_PARSER`, post evidence block ending with SHA-bound marker `<!-- e2e-evidence: complete sha="${PR_HEAD_SHA}" -->` as PR comment. See **E2E mode dispatch** above. |
-| **Decision** | PASS ⇒ post "Review PASSED ..." on the **issue** (not PR). FAIL ⇒ post "Review findings: ..." with numbered remediation list. Either way the comment ends with BOTH a `Review Session: \`<id>\`` trailer AND a `Review Agent: <name>` discriminator line ([INV-40](invariants.md#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback)) — the latter lets the wrapper attribute N verdicts posted under one GitHub identity. |
+| **Decision** | PASS ⇒ post a "Review PASSED ..." verdict on the **issue** (not PR). FAIL ⇒ post a "Review findings: ..." verdict with a numbered remediation list. **The verdict is posted ONLY via `bash scripts/post-verdict.sh` — never a bare `gh issue comment`** ([INV-56](invariants.md#inv-56-review-verdict-is-posted-via-the-deterministic-post-verdict-helper-not-the-agents-bare-gh)); the helper guarantees the first-line phrasing and appends the `Review Session:` / `Review Agent:` trailer itself. See [Verdict posting (INV-56)](#verdict-posting-inv-56) below. |
 
 The `Review Session:` trailer (presence) + the `Review Agent: <name>` discriminator (per-agent) are how the wrapper identifies which comment is each agent's verdict — see [Verdict polling](#verdict-polling) below.
+
+## Verdict posting (INV-56)
+
+Each review agent posts its verdict comment through the deterministic, wrapper-provided helper `scripts/post-verdict.sh` — **not** a hand-rolled bare `gh issue comment`. `build_review_prompt` routes ALL THREE verdict-post spots through the helper (the Decision PASS branch, the Decision FAIL branch, and the [INV-55](invariants.md#inv-55-the-codex-review-lane-receives-the-pr-diff-inline-in-its-prompt) codex-inline-diff block) and explicitly forbids bare `gh issue comment` for the verdict. The instruction is identical for every CLI — there is no per-CLI branch for the verdict post.
+
+The agent writes its body to a FILE and calls:
+
+```bash
+bash scripts/post-verdict.sh <issue-number> <pass|fail> <body-file|-> <agent-name> <session-id>
+```
+
+The helper:
+
+- reads the body from a **FILE** (or stdin via `-`), so a multi-line findings body with backticks/quotes/`$()` can't be mangled by the agent's shell quoting — the suspected `agy` failure mode;
+- **guarantees the first-line phrasing the poller matches** (`Review PASSED` for `pass`, `Review findings:` for `fail`, `lib-review-poll.sh::_classify_verdict_body`), prepending the canonical prefix when the agent's body omits it;
+- **composes the AGENT verdict trailer itself** — `` Review Session: `<session-id>` `` + `Review Agent: <agent-name>` ([INV-40](invariants.md#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback) / [INV-20](invariants.md#inv-20-verdict-authenticity-binding-actor--window--trailer-presence)) — so the agent never hand-writes it (closing the session-id-rebind hazard). This is the AGENT verdict trailer, distinct from `lib-review-verdict.sh::emit_verdict_trailer` (the wrapper's `<!-- review-verdict: … -->` machine marker);
+- **posts via the token-refresh proxy `gh`** co-located in the dispatcher `scripts/` dir (the same wrapper `mark-issue-checkbox.sh` uses) — guaranteeing the correct bot identity + real-gh resolution;
+- **fails loudly**: non-zero exit on a failed `gh` post (exit `2` on invalid args), and echoes the created comment URL on success.
+
+**Why**: review agents previously hand-rolled their own bare `gh issue comment`. `agy` exited `0` claiming it posted the verdict, but its multi-line `--body` call never landed, so the verdict poller ([INV-40](invariants.md#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback)) found nothing and dropped agy `unavailable` on every fleet review. In the SAME run, agy's `mark-issue-checkbox.sh` calls (a deterministic helper) landed fine — so routing the verdict through the same kind of helper makes the post reliable. **The fix is reliable posting, not the exit code**: `unavailable` is decided on comment-absence, not the agent's exit code (`lib-review-aggregate.sh::_classify_noverdict_agent` only consults rc to split `124`/`137` `timed-out` from everything-else `unavailable`, and only for an agent that already posted no verdict). The helper's non-zero-on-failure exit is hygiene + a future hook a follow-up wrapper-side change would consume.
+
+> **Post-install / upgrade**: this added `scripts/post-verdict.sh`. After `npx skills update -g`, re-run `install-project-hooks.sh` on every onboarded project or the review wrappers will instruct agents to call a `scripts/post-verdict.sh` symlink that doesn't exist yet.
 
 ## Verdict polling
 

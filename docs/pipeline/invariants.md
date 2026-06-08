@@ -1932,6 +1932,105 @@ stay green. Test plan: `docs/test-cases/codex-inline-diff-review-prompt.md`.
 - [`review-agent-flow.md` § Codex auto-resume (INV-51)](review-agent-flow.md#codex-auto-resume-inv-51) — runtime walkthrough.
 - [`docs/designs/codex-inline-diff-review-prompt.md`](../designs/codex-inline-diff-review-prompt.md) — design canvas.
 
+## INV-56: review verdict is posted via the deterministic post-verdict helper, not the agent's bare gh
+
+**Rule**: a review agent's verdict comment MUST be posted through the deterministic,
+wrapper-provided helper `scripts/post-verdict.sh`, NOT through a hand-rolled bare
+`gh issue comment`. `autonomous-review.sh::build_review_prompt` instructs **every**
+review agent (claude/codex/agy/kiro/gemini/opencode — no per-CLI branch for the
+verdict post) to post via `bash scripts/post-verdict.sh <issue> <pass|fail>
+<body-file> <agent-name> <session-id>`, and explicitly forbids a bare
+`gh issue comment` for the verdict. The instruction appears at all THREE verdict-post
+spots in the prompt: the Decision block PASS branch, the Decision block FAIL branch,
+and the [INV-55](#inv-55-the-codex-review-lane-receives-the-pr-diff-inline-in-its-prompt)
+codex-inline-diff block (whose "post your verdict in THIS turn" / "post the verdict in
+as few turns as possible" language defers to the same helper).
+
+The helper:
+- takes the body from a **FILE** (or stdin via `-`), not an argv string, so a
+  multi-line findings body with backticks/quotes/`$()` cannot be mangled by the
+  agent's shell quoting;
+- guarantees the first-line phrasing the comment poller matches — `Review PASSED`
+  for `pass`, `Review findings:` for `fail` (`lib-review-poll.sh::_classify_verdict_body`)
+  — prepending the canonical prefix when the agent's body omits it;
+- composes the **AGENT verdict trailer** itself — the two load-bearing lines
+  `` Review Session: `<session-id>` `` and `Review Agent: <agent-name>`
+  ([INV-40](#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback) /
+  [INV-20](#inv-20-verdict-authenticity-binding-actor--window--trailer-presence)) — so the agent
+  never hand-writes the trailer (this also closes the session-id-rebind hazard where a
+  stale session id could be carried). **This is the AGENT verdict trailer, NOT
+  `lib-review-verdict.sh::emit_verdict_trailer`** (the wrapper's machine-readable
+  `<!-- review-verdict: … -->` marker — a different trailer; the two are not
+  interchangeable);
+- posts via the token-refresh proxy `gh` co-located in the dispatcher `scripts/` dir
+  (the same `gh-with-token-refresh.sh` symlink `mark-issue-checkbox.sh` uses), NOT bare
+  gh — this guarantees the correct bot identity + real-gh resolution;
+- **fails loudly**: non-zero exit when the post fails (`gh` non-zero), exit `2` on
+  invalid args, and echoes the created comment URL on success.
+
+**Why**: each CLI previously hand-rolled its own bare `gh issue comment` for the
+verdict. This is unreliable across CLIs: the `agy` review agent **exited 0 claiming it
+posted the verdict, but the comment never landed** — so the wrapper's verdict poller
+([INV-40](#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback))
+found nothing and dropped agy `unavailable` on **every** multi-agent review. Verified
+on the #193 review: in the SAME agy run that was dropped `unavailable`, agy's
+`bash scripts/mark-issue-checkbox.sh` calls (a deterministic helper using `gh api` via
+the token-refresh wrapper) **landed** (12/12 acceptance-criteria checkboxes checked),
+while agy's OWN multi-line `gh issue comment --body "…"` for the verdict **never
+landed** — same agent, same token, same PATH, same run. So when agy goes through a
+deterministic project helper the gh op succeeds; only its hand-rolled
+`gh issue comment` (a multi-line `--body` it mis-forms / mis-escapes) fails. Routing
+the verdict through a helper that takes structured args + a body file and forms the
+`gh` call itself sidesteps exactly that — the same proven pattern that already makes
+agy's `mark-issue-checkbox.sh` calls land.
+
+**The fix is RELIABLE POSTING, not an exit-code signal.** `unavailable` is decided by
+the wrapper's verdict poller on comment-absence
+(`lib-review-poll.sh` / `lib-review-aggregate.sh::_classify_noverdict_agent`); the
+agent's exit code is NOT consulted for that decision (`_classify_noverdict_agent` only
+splits rc `124`/`137` → `timed-out` vs everything-else → `unavailable`, and only for an
+agent that already posted no verdict). The helper's non-zero-on-failure exit is good
+hygiene and the future hook a follow-up wrapper-side change would consume, but it does
+NOT, by itself, change today's verdict — reliable posting does.
+
+**Producer**: `scripts/post-verdict.sh` (composes the body + trailer, posts via the
+proxy `gh`) and `build_review_prompt` (routes all three verdict-post spots through it).
+**Consumer**: the wrapper's authoritative verdict comment poller
+([INV-40](#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback) /
+[INV-20](#inv-20-verdict-authenticity-binding-actor--window--trailer-presence)) — unchanged; it
+now finds a reliably-posted, correctly-trailered comment.
+
+**Scope**: the verdict comment ONLY. Other gh calls the prompt mentions (mergeability
+`gh pr view --json`, `gh pr checks`, the Step-0 rebase) are out of scope and keep using
+bare/wrapper gh. `mark-issue-checkbox.sh` is already a helper and is unchanged. The
+wrapper-side "agent exited 0 but posted no verdict → re-runnable vs unavailable"
+detection is a deliberate FOLLOW-UP, not part of this invariant.
+
+**Status**: **ENFORCED** (closes #202).
+
+**Test**: `tests/unit/test-post-verdict.sh` — TC-PV-01..15 (trailer composition;
+first-line `Review PASSED`/`Review findings:` guarantee incl. no-double-prefix;
+non-zero exit on `gh` failure + URL echo on success; FILE and stdin bodies; multi-line
+body with backticks/quotes/`$()` preserved verbatim; arg validation exit `2`;
+case-insensitive verdict; posts via the proxy `gh issue comment … --repo …`).
+`tests/unit/test-autonomous-review-verdict-via-helper.sh` — TC-PVP-01..06 (all three
+verdict-post spots reference `scripts/post-verdict.sh`; bare `gh issue comment`
+forbidden for the verdict; first-line phrasing preserved; no per-CLI branch — rendered
+identically for codex and a non-codex agent). Test plan:
+`docs/test-cases/post-verdict-helper.md`.
+
+**Post-install / upgrade**: this PR **adds** `scripts/post-verdict.sh`. After merge +
+`npx skills update -g`, re-run `install-project-hooks.sh` on every onboarded project
+(CLAUDE.local.md → Post-merge Step 2) or their review wrappers will instruct agents to
+call a `scripts/post-verdict.sh` symlink that doesn't exist yet.
+
+**Cross-references**:
+- [INV-40](#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback) — the verdict poller / `unavailable` fallback this un-drops agy from, and the `Review Agent:` discriminator the helper writes.
+- [INV-20](#inv-20-verdict-authenticity-binding-actor--window--trailer-presence) — the actor+window+`Review Session` trailer-presence binding the helper's trailer satisfies.
+- [INV-55](#inv-55-the-codex-review-lane-receives-the-pr-diff-inline-in-its-prompt) — the codex-inline-diff block whose verdict-post language now defers to this helper.
+- [`review-agent-flow.md` § Verdict posting (INV-56)](review-agent-flow.md#verdict-posting-inv-56) — runtime walkthrough.
+- [`docs/designs/post-verdict-helper.md`](../designs/post-verdict-helper.md) — design canvas.
+
 ## Adding a new invariant
 
 When fixing a pipeline bug, after locating the bug on the state machine + flow docs:

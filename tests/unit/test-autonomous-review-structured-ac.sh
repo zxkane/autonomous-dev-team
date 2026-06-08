@@ -341,7 +341,7 @@ if [[ -f "$WRAPPER" && -f "$E2E_LIB" ]]; then
   # TC-AC-SRC-02: build_review_prompt re-validates the sidecar at prompt-read time
   # via _revalidate_ac_coverage_file (codex finding 1) and references the map.
   PROMPT_FN=$(awk '/^build_review_prompt\(\) \{/,/^\}/' "$WRAPPER")
-  if printf '%s' "$PROMPT_FN" | grep -qE '_revalidate_ac_coverage_file'; then
+  if grep -qE '_revalidate_ac_coverage_file' <<<"$PROMPT_FN"; then
     echo -e "  ${GREEN}PASS${NC}: TC-AC-SRC-02 build_review_prompt re-validates the sidecar via _revalidate_ac_coverage_file"
     PASS=$((PASS + 1))
   else
@@ -350,7 +350,7 @@ if [[ -f "$WRAPPER" && -f "$E2E_LIB" ]]; then
   fi
   # TC-AC-SRC-02b (codex finding 1): the prompt must NOT read the sidecar with a
   # plain `cat "${E2E_AC_COVERAGE_FILE}"` (the TOCTOU-vulnerable path it replaced).
-  if printf '%s' "$PROMPT_FN" | grep -qE 'cat "?\$\{?E2E_AC_COVERAGE_FILE'; then
+  if grep -qE 'cat "?\$\{?E2E_AC_COVERAGE_FILE' <<<"$PROMPT_FN"; then
     echo -e "  ${RED}FAIL${NC}: TC-AC-SRC-02b build_review_prompt still cats the sidecar raw (TOCTOU path not removed)"
     FAIL=$((FAIL + 1))
   else
@@ -362,7 +362,7 @@ if [[ -f "$WRAPPER" && -f "$E2E_LIB" ]]; then
     '_revalidate_ac_coverage_file\(\)' "$E2E_LIB"
 
   # TC-AC-SRC-03: the free-form '## E2E Evidence' block is still reachable (back-compat).
-  if printf '%s' "$PROMPT_FN" | grep -qE 'E2E Evidence|posted evidence|e2e-evidence: complete'; then
+  if grep -qE 'E2E Evidence|posted evidence|e2e-evidence: complete' <<<"$PROMPT_FN"; then
     echo -e "  ${GREEN}PASS${NC}: TC-AC-SRC-03 free-form evidence block still present (back-compat fallback)"
     PASS=$((PASS + 1))
   else

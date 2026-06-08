@@ -32,7 +32,15 @@ PROMPT_FN=$(awk '/^build_review_prompt\(\) \{/,/^\}/' "$WRAPPER")
 
 assert_fn_grep() {
   local desc="$1" pattern="$2"
-  if printf '%s' "$PROMPT_FN" | grep -qE "$pattern"; then
+  # NOTE: feed the haystack via a here-string, NOT `printf | grep -q`. With
+  # `set -o pipefail`, `grep -q` closes the pipe on its first match and the
+  # upstream `printf` dies with SIGPIPE → the pipeline status becomes 141 even
+  # though grep matched, so the `if` wrongly takes the FAIL branch. The flake is
+  # position-dependent (it depends where in the 16 KB function body the first
+  # match lands), so it surfaced only after the verdict-helper edit (#202) grew
+  # build_review_prompt and shifted the DIFF_START match earlier. A here-string
+  # has no pipe and no SIGPIPE.
+  if grep -qE "$pattern" <<<"$PROMPT_FN"; then
     echo -e "  ${GREEN}PASS${NC}: $desc"
     PASS=$((PASS + 1))
   else

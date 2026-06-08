@@ -256,11 +256,11 @@ Summary of the hard rule:
 - **ZERO blocking findings -> verdict is PASS** — post `Review PASSED` (the wrapper then submits `--approve` and merges, after its gates).
 - **There is NO middle ground** — a `Review findings:` comment with blocking items and a `Review PASSED` comment are mutually exclusive.
 
-Post the review result as a comment on the **issue** (NOT the PR). Use "Review PASSED" for pass, "Review findings:" for fail. End the comment with BOTH a `Review Session: \`<id>\`` trailer and a `Review Agent: <name>` discriminator line — the wrapper supplies both `<id>` and `<name>` in your prompt. **Your only output is the verdict comment** — the wrapper performs the GitHub-native PR action (see below).
+Post the review result as a comment on the **issue** (NOT the PR), **only** via the deterministic helper `bash scripts/post-verdict.sh <issue> <pass|fail> <body-file> <agent-name> <session-id>` — do NOT use a bare `gh issue comment` for the verdict ([INV-56](../../docs/pipeline/invariants.md)). The helper guarantees the "Review PASSED" / "Review findings:" first line the wrapper polls for and appends the `Review Session: \`<id>\`` + `Review Agent: <name>` trailer itself, so you never hand-write it. Pass a body **file** (not an argv string) so a multi-line findings body with backticks/quotes can't be mangled; the wrapper supplies both `<id>` and `<name>` in your prompt. **Your only output is the verdict comment** — the wrapper performs the GitHub-native PR action (see below).
 
 ### Who submits the GitHub-native PR action (INV-52)
 
-> **The review WRAPPER — not you — owns the GitHub-native PR review/merge action.** You post a verdict **comment**; the wrapper reads it and acts.
+> **The review WRAPPER — not you — owns the GitHub-native PR review/merge action.** You post a verdict **comment** (via `post-verdict.sh`); the wrapper reads it and acts.
 
 - On **PASS**, the wrapper submits `gh pr review --approve` and (unless the issue has `no-auto-close`) `gh pr merge`, **after** its mechanical mergeable hard gate ([INV-44](../../docs/pipeline/invariants.md)) and the `no-auto-close` skip-merge check.
 - On a blocking **FAIL**, the wrapper submits `gh pr review --request-changes` so the PR's `reviewDecision` becomes `CHANGES_REQUESTED` — authoritative for humans, branch protection, and the dev-resume agent ([INV-52](../../docs/pipeline/invariants.md)).
@@ -271,7 +271,7 @@ Post the review result as a comment on the **issue** (NOT the PR). Use "Review P
 When the project sets `AGENT_REVIEW_AGENTS` to more than one CLI, several review agents run **in parallel against the same PR**, each as a fully independent reviewer. If you are one of them:
 
 - Run the Findings -> Decision Gate **independently** — reach your own PASS/FAIL based on your own findings. Do NOT try to coordinate with or defer to the other agents; you cannot see their verdicts.
-- Post your own verdict comment ending with your assigned `Review Session: \`<id>\`` and `Review Agent: <name>` lines (both are in your prompt). The `Review Agent: <name>` line is how the wrapper attributes your verdict — do not omit or rename it ([INV-40](../../docs/pipeline/invariants.md)).
+- Post your own verdict via `bash scripts/post-verdict.sh` with your assigned agent name + session id (both are in your prompt) — never a bare `gh issue comment` ([INV-56](../../docs/pipeline/invariants.md)). The helper writes your `Review Agent: <name>` discriminator line from the argument you pass, so it is always correct; that line is how the wrapper attributes your verdict among the parallel reviewers ([INV-40](../../docs/pipeline/invariants.md)).
 - The wrapper aggregates all agents' verdicts under a **unanimous-PASS** rule: the wrapper approves+merges only if **every** available agent passed; any single FAIL makes the wrapper submit `--request-changes` and send the PR back to dev. This mirrors the gate's own "any blocking finding → FAIL" philosophy, applied across agents. As above, **no agent submits the GitHub-native action** — the wrapper does, once, after aggregating.
 
 ---
