@@ -69,6 +69,17 @@ source "${SCRIPT_DIR}/lib-review-e2e.sh"
 # every other CLI keeps the bare run_agent path. Inert unless a fan-out agent is
 # codex.
 source "${SCRIPT_DIR}/lib-review-codex.sh"
+# shellcheck source=lib-review-agy.sh
+# INV-58 (#205): agy (Antigravity CLI) quota/auth drop-reason detector. When an
+# agy fan-out member hits the consumer quota wall (429 RESOURCE_EXHAUSTED,
+# "Individual quota reached") or an auth failure, agy exits rc 0 with empty
+# stdout and posts no verdict, so the wrapper drops it as an opaque `unavailable`
+# (INV-40). _classify_agy_drop_reason scrapes agy's own --log-file for the 429 /
+# auth signal so the wrapper can surface a distinct, actionable reason (with the
+# "Resets in <dur>" recovery window) in the WARN log + the dropped-agent comment.
+# Observability only — does NOT change the INV-40 vote (a quota agy stays dropped,
+# not a deciding FAIL). Inert unless a fan-out agent is agy AND it was dropped.
+source "${SCRIPT_DIR}/lib-review-agy.sh"
 # shellcheck source=lib-review-request-changes.sh
 # INV-52 (#193): the wrapper OWNS the GitHub-native PR review action — `--approve`
 # on a PASS and `--request-changes` on a SUBSTANTIVE FAIL — so the PR's
@@ -1125,6 +1136,13 @@ fi
 declare -a AGENT_NAMES=()        # CLI name per index (parallel arrays)
 declare -a AGENT_SESSION_IDS=()  # minted SESSION_ID per index
 declare -A AGENT_LAUNCH_RC=()    # CLI exit code per session id (sidecar-read)
+# INV-58 (#205): for an `agy` fan-out member, the path of agy's own --log-file
+# (pid_dir_for_project()/agy-log-<session_id>.log), keyed by index. Empty for a
+# non-agy agent. Read AFTER verdict resolution by _classify_agy_drop_reason when
+# an agy agent was dropped `unavailable`, to scrape the 429/quota or auth signal.
+# Captured here in the parent (NOT the subshell) — the path is deterministic from
+# the agent's session id + project, so no sidecar plumbing is needed.
+declare -a AGENT_AGY_LOGS=()
 # PIDs of the backgrounded per-agent subshells. We MUST `wait` these specific
 # PIDs — never a bare `wait`. A bare `wait` blocks on ALL background jobs of
 # this shell, which includes the long-lived gh-token-refresh-daemon (started
@@ -1151,10 +1169,15 @@ _FANOUT_DIR=$(mktemp -d "/tmp/agent-review-fanout-${ISSUE_NUMBER}-XXXXXX")
 # We pass the collected _AGENT_PGIDS — see the call site after verdict
 # resolution and the array's declaration above.
 
-# Reports the SHARED model default; a per-agent AGENT_REVIEW_MODEL_<AGENT>
-# override (INV-41) may diverge per agent — each agent's effective model is
-# visible in its own log (/tmp/agent-${PROJECT_ID}-review-${N}-${agent}.log).
-log "Fanning out ${#REVIEW_AGENTS_LIST[@]} review agent(s): ${REVIEW_AGENTS_LIST[*]} (shared model: ${AGENT_REVIEW_MODEL:-sonnet})"
+# INV-58 (#205): report each agent's PER-AGENT RESOLVED model, not the shared
+# AGENT_REVIEW_MODEL default. A fleet with per-agent overrides (e.g.
+# AGENT_REVIEW_MODEL_AGY="Gemini 3.5 Flash (High)") previously printed
+# `(shared model: sonnet)` here, which actively misled the operator into
+# suspecting a model-pin bug when the per-agent model was in fact resolved
+# correctly. _review_fanout_model_label (lib-review-resolve.sh) renders
+# `model: <id>` when all agents resolve to the same id, else
+# `models: <agent>=<id>, …` so every member's effective model is visible.
+log "Fanning out ${#REVIEW_AGENTS_LIST[@]} review agent(s): ${REVIEW_AGENTS_LIST[*]} ($(_review_fanout_model_label "${REVIEW_AGENTS_LIST[@]}"))"
 
 # INV-46 (#182): these are PURE code-review agents. The E2E ran ONCE in Phase A
 # above and its evidence is already posted as a PR comment; the review prompt
@@ -1168,6 +1191,16 @@ for _agent in "${REVIEW_AGENTS_LIST[@]}"; do
   AGENT_NAMES+=("$_agent")
   AGENT_SESSION_IDS+=("$_agent_session_id")
   _agent_log="/tmp/agent-${PROJECT_ID}-review-${ISSUE_NUMBER}-${_agent}.log"
+  # INV-58 (#205): capture agy's OWN --log-file path for an `agy` member so the
+  # post-resolution drop-reason scrape can read it. The path is deterministic
+  # from the session id (`_agy_log_file` in lib-agent.sh writes there). Guard the
+  # call so a pid-dir failure (rc 1) cannot abort the loop under `set -e`; an
+  # empty entry just means "no agy log to scrape" (the bare `unavailable` path).
+  _agent_agy_log=""
+  if [[ "$_agent" == "agy" ]]; then
+    _agent_agy_log=$(_agy_log_file "$_agent_session_id" 2>/dev/null || true)
+  fi
+  AGENT_AGY_LOGS+=("$_agent_agy_log")
   _agent_prompt=$(build_review_prompt "$_agent" "$_agent_session_id")
   _agent_rc_file="${_FANOUT_DIR}/${_agent_session_id}.rc"
 
@@ -1428,10 +1461,29 @@ SESSION_ID="${AGENT_SESSION_IDS[0]}"
 _dropped_agents=""
 _deciding_agents=""
 _timed_out_agents=""
+# INV-58 (#205): per-dropped-agent reason breadcrumbs (e.g.
+# "agy: quota-exhausted (Antigravity 429: …; resets in 33h48m45s)"). Built only
+# for `agy` members dropped `unavailable` whose own --log-file shows a 429/auth
+# signal; non-agy and signal-free drops add nothing here, keeping the bare
+# `unavailable` wording. Surfaced in the WARN log line + the dropped-agent comment
+# so an operator reading only the wrapper log can tell agy ran out of quota and
+# roughly when it recovers — without digging into agy's separate --log-file.
+_dropped_reasons=""
 for _i in "${!AGENT_NAMES[@]}"; do
   case "${AGENT_VERDICTS[$_i]}" in
     unavailable)
       _dropped_agents+="${AGENT_NAMES[$_i]} "
+      # Scrape the agy log for a quota/auth signal when this dropped agent is agy.
+      # Both helpers ALWAYS `return 0` (lib-review-agy.sh) — load-bearing here: an
+      # append-assignment whose embedded `$(…)` returns non-zero aborts under
+      # `set -e`, so a non-zero phrase helper would crash the wrapper mid-loop and
+      # strand the issue in `reviewing`. Keep them rc-0-always.
+      if [[ "${AGENT_NAMES[$_i]}" == "agy" ]]; then
+        _agy_reason_token=$(_classify_agy_drop_reason "${AGENT_AGY_LOGS[$_i]:-}")
+        if [[ -n "$_agy_reason_token" ]]; then
+          _dropped_reasons+="${AGENT_NAMES[$_i]}: $(_agy_drop_reason_phrase "$_agy_reason_token"); "
+        fi
+      fi
       ;;
     timed-out)
       _deciding_agents+="${AGENT_NAMES[$_i]}(timed-out) "
@@ -1509,6 +1561,10 @@ case "$AGGREGATE" in
       fi
     done
     log "All ${#REVIEW_AGENTS_LIST[@]} review agent(s) unavailable — falling back to single-agent FAIL path (AGENT_EXIT=${AGENT_EXIT})."
+    # INV-58 (#205): surface any agy quota/auth drop reason even on the
+    # all-unavailable path, so a single-agy fleet that hit the quota wall is
+    # diagnosable from the wrapper log alone (not just agy's separate --log-file).
+    [[ -n "$_dropped_reasons" ]] && log "Drop reason(s): ${_dropped_reasons%; }"
     ;;
 esac
 
@@ -1516,9 +1572,16 @@ esac
 # summary comment listing dropped vs deciding agents and log a WARN. The
 # decision was made on the deciding agents under the unanimous-PASS rule.
 if [[ -n "$_dropped_agents" && "$AGGREGATE" != "all-unavailable" ]]; then
-  log "WARNING: review agent(s) dropped (unavailable): ${_dropped_agents%% }; decided on: ${_deciding_agents%% }"
+  # INV-58 (#205): append any agy quota/auth drop reason to the WARN line and the
+  # posted comment so an opaque `unavailable` is no longer the only signal. A
+  # signal-free drop leaves `_dropped_reasons` empty → the wording is unchanged.
+  _reason_suffix=""
+  [[ -n "$_dropped_reasons" ]] && _reason_suffix=" — reason(s): ${_dropped_reasons%; }"
+  log "WARNING: review agent(s) dropped (unavailable): ${_dropped_agents%% }; decided on: ${_deciding_agents%% }${_reason_suffix}"
+  _comment_reason=""
+  [[ -n "$_dropped_reasons" ]] && _comment_reason=" Drop reason(s): ${_dropped_reasons%; }."
   gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
-    --body "Multi-agent review: dropped (unavailable) agent(s): \`${_dropped_agents%% }\`. Decision made on: \`${_deciding_agents%% }\`. (INV-40: unavailable = CLI launch failure or no verdict within the poll window.)" 2>/dev/null || true
+    --body "Multi-agent review: dropped (unavailable) agent(s): \`${_dropped_agents%% }\`. Decision made on: \`${_deciding_agents%% }\`. (INV-40: unavailable = CLI launch failure or no verdict within the poll window.)${_comment_reason}" 2>/dev/null || true
 fi
 
 # Post a "Reviewed HEAD" trailer comment so the dispatcher can detect whether
@@ -1534,15 +1597,23 @@ if [[ -n "$LATEST_COMMENT" && -n "$PR_HEAD_SHA" ]]; then
   # Step 5 empty-trailer fallthrough).
   # Trailer carries `agent` / `model` for forensic attribution in
   # multi-CLI deployments where AGENT_CMD is rotated between rounds
-  # (#128). Option A from the issue: write ${AGENT_REVIEW_MODEL}
-  # directly rather than `${...:-<default>}`. lib-agent.sh:43 already
-  # defaults the variable to `sonnet`, so a `:-<default>` here would
-  # render dead code — the trailer renders the live, current value.
-  # The dispatcher's last_reviewed_head parser anchors only on the
+  # (#128). The dispatcher's last_reviewed_head parser anchors only on the
   # leading `Reviewed HEAD: \`<sha>\`` (INV-04), so the trailing
   # parenthesised metadata is purely human-attribution.
+  #
+  # INV-58 (#205): render the REPRESENTATIVE (first) fan-out agent's RESOLVED
+  # model + CLI name, not the shared ${AGENT_REVIEW_MODEL} / ${AGENT_CMD}. For a
+  # per-agent-overridden fleet (e.g. AGENT_REVIEW_MODEL_AGY) the shared default
+  # misattributed the model in the forensic trailer — `_resolve_review_agent_model`
+  # gives the value the representative agent actually reviewed with (defaulting to
+  # `sonnet` exactly as the run_agent call does). SESSION_ID is already the first
+  # agent's session, so the trailer's session/agent/model now describe ONE agent
+  # consistently.
+  _REVIEW_HEAD_AGENT="${AGENT_NAMES[0]:-${AGENT_CMD:-claude}}"
+  _REVIEW_HEAD_MODEL="$(_resolve_review_agent_model "$_REVIEW_HEAD_AGENT")"
+  _REVIEW_HEAD_MODEL="${_REVIEW_HEAD_MODEL:-${AGENT_REVIEW_MODEL:-sonnet}}"
   _trailer_err=$(gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
-    --body "Reviewed HEAD: \`${PR_HEAD_SHA}\` (issue #${ISSUE_NUMBER}, session \`${SESSION_ID}\`, agent \`${AGENT_CMD:-claude}\`, model \`${AGENT_REVIEW_MODEL}\`)" \
+    --body "Reviewed HEAD: \`${PR_HEAD_SHA}\` (issue #${ISSUE_NUMBER}, session \`${SESSION_ID}\`, agent \`${_REVIEW_HEAD_AGENT}\`, model \`${_REVIEW_HEAD_MODEL}\`)" \
     2>&1 >/dev/null) \
     || log "WARNING: Failed to post Reviewed HEAD trailer (non-fatal): ${_trailer_err}"
 fi

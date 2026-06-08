@@ -339,6 +339,20 @@ AGENT_REVIEW_EXTRA_ARGS=""
 # review side the resolved extra-args is threaded through AGENT_DEV_EXTRA_ARGS
 # internally (the var run_agent's _parse_extra_args reads). You configure only
 # the review knobs above; the wrapper handles the plumbing per-subshell.
+#
+# Diagnostics (INV-58, #205): when an `agy` fan-out member is dropped
+# `unavailable` because it hit the Antigravity quota wall (HTTP 429
+# RESOURCE_EXHAUSTED, "Individual quota reached") or an auth failure, agy exits
+# rc 0 with no verdict. The wrapper now scrapes agy's own --log-file and surfaces
+# a distinct reason — `quota-exhausted (… resets in <dur>)` or `auth-failed` — in
+# the "dropped (unavailable) agent(s)" log line + issue comment, so you can tell
+# agy ran out of quota (and roughly when it recovers) without digging into agy's
+# separate log. This is observability only: a quota-walled agy is still dropped
+# from the unanimous-PASS vote, NOT a deciding FAIL, so the fleet degrades to the
+# surviving members rather than blocking every merge until agy's quota resets.
+# The `Fanning out …` log line and the Reviewed-HEAD trailer also report each
+# agent's PER-AGENT resolved model (e.g. the AGENT_REVIEW_MODEL_AGY above), not
+# the shared AGENT_REVIEW_MODEL default.
 
 # Per-agent launcher overrides (INV-42, #173) --------------------------------
 # Same per-agent suffix convention as the model/extra-args keys above, but for
