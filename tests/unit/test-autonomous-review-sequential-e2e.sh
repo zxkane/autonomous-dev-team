@@ -464,7 +464,7 @@ if [[ -f "$WRAPPER" ]]; then
   # Extract the build_review_prompt function body and assert the execution-block
   # markers are gone.
   PROMPT_FN=$(awk '/^build_review_prompt\(\) \{/,/^\}/' "$WRAPPER")
-  if printf '%s' "$PROMPT_FN" | grep -qE 'Run pre-hooks|timeout \$\{E2E_COMMAND_TIMEOUT|E2E_COMMAND_RENDERED'; then
+  if grep -qE 'Run pre-hooks|timeout \$\{E2E_COMMAND_TIMEOUT|E2E_COMMAND_RENDERED' <<<"$PROMPT_FN"; then
     echo -e "  ${RED}FAIL${NC}: TC-SE2E-SRC-06 build_review_prompt still contains the E2E execution block"
     FAIL=$((FAIL + 1))
   else
@@ -473,7 +473,7 @@ if [[ -f "$WRAPPER" ]]; then
   fi
 
   # TC-SE2E-SRC-07: the review prompt tells agents to READ the posted evidence.
-  if printf '%s' "$PROMPT_FN" | grep -qiE 'e2e.evidence|evidence comment|posted evidence'; then
+  if grep -qiE 'e2e.evidence|evidence comment|posted evidence' <<<"$PROMPT_FN"; then
     echo -e "  ${GREEN}PASS${NC}: TC-SE2E-SRC-07 review prompt instructs reading the posted evidence"
     PASS=$((PASS + 1))
   else
