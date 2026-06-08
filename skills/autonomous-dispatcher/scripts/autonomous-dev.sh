@@ -281,6 +281,111 @@ work (e.g. an incomplete commit), fall back to the normal full workflow.
 FASTPATH
 }
 
+# emit_post_approval_findings_block <issue_num> <pr_num> — echo a prompt block
+# that forces the resume to address review findings posted AFTER the PR was
+# approved, or nothing otherwise. Captured into a variable and interpolated
+# into the resume prompt builders below ([INV-57], closes #188).
+#
+# The bug this guards against: on resume the dev agent treats a standing
+# `reviewDecision == APPROVED` + green CI + mergeable PR as terminal and posts
+# "Resume check — nothing outstanding to address", exiting with no code changes
+# — even when a NEWER `Review findings:` (or BLOCKING/[P1] change-request)
+# comment was posted to the issue after the approval. The late blocking
+# findings are then silently dropped while the PR sits in `approved` looking
+# clean. The done/not-done decision MUST be governed by approval-timestamp vs
+# findings-timestamp ordering, not by the standing approval alone.
+#
+# Fires (emits the block) iff a findings/change-request comment exists AND
+# (no APPROVED review exists OR the findings comment is NEWER than the latest
+# approval). FAIL-CLOSED on any error: if EITHER `gh` query fails (or its jq
+# filter errors), the helper emits NOTHING and returns 0. Critically, a FAILED
+# approval query is NOT mistaken for "no approval" — the two are tracked
+# separately (issue #188 review finding 1). The always-present `REVIEW_COMMENTS`
+# still carries the feedback into the prompt; we never fabricate work, we only
+# ADD a do-not-short-circuit signal when we can POSITIVELY prove findings
+# post-date the approval (or positively prove there is no approval).
+#
+# Findings recognition mirrors the broadened `REVIEW_COMMENTS` selector: the
+# exact `Review findings` prefix OR a `BLOCKING`/`[P1]` token. The `BLOCKING`
+# alternative is anchored `(^|[^A-Za-z-])BLOCKING\b` so `NON-BLOCKING` (the
+# hyphen would be a `\b` boundary) does NOT match. NOTE: `gh --jq` uses Go's
+# RE2 engine, which has NO look-behind — a `(?<![A-Za-z-])` form is REJECTED at
+# runtime (`invalid named capture`), so the equivalent must be a *consuming*
+# leading group, not a look-behind (issue #188 review: kiro). BUT NOT a comment
+# whose first line is a known non-findings shape — a `Review PASSED`/`Review
+# APPROVED` verdict, a `## ✅` status heading, an `**Agent Session Report**`, a
+# `Multi-agent review:` / `Reviewed HEAD:` / `<!-- … -->` review-wrapper marker,
+# or a dispatcher status (`Dispatching`/`Resuming`/`Moving to`). Without that
+# exclusion the token clause false-matched a PASS verdict that says "No BLOCKING
+# issues remain" and a dev status comment that mentions `BLOCKING`/`[P1]` in
+# prose (issue #188 review finding 2), which would falsely re-open a
+# genuinely-done approved PR.
+#
+# Networked, worktree-free (`gh pr view` + `gh issue view`), so it works from
+# the wrapper box regardless of EXECUTION_BACKEND.
+#
+# [INV-06] keyword contract: this block is forward-progress prompt text, NOT a
+# status comment, and contains none of the crash keywords Step 4a's retry
+# counter keys on.
+emit_post_approval_findings_block() {
+  local issue_num="$1" pr_num="$2"
+
+  # No PR ⇒ no approval to be stale ⇒ nothing to override here.
+  [ -n "$pr_num" ] || return 0
+
+  # Latest APPROVED review timestamp. FAIL-CLOSED: capture the query's exit
+  # status separately so a transient/permission/API failure is NOT mistaken for
+  # "no approval" (review finding 1). On failure: emit nothing, return 0.
+  local approved_at findings_at
+  if ! approved_at=$(gh pr view "$pr_num" --repo "$REPO" --json reviews \
+    -q '[.reviews[]? | select(.state == "APPROVED") | .submittedAt] | sort | last // empty' 2>/dev/null); then
+    return 0
+  fi
+
+  # Newest findings/change-request comment timestamp (empty when none). Same
+  # narrowed recognition as the REVIEW_COMMENTS selector. FAIL-CLOSED likewise:
+  # a failed query → emit nothing, return 0.
+  if ! findings_at=$(gh issue view "$issue_num" --repo "$REPO" --json comments \
+    -q '[.comments[] | select((.body | startswith("Review findings")) or ((.body | test("(?i)(^|[^A-Za-z-])BLOCKING\\b|\\[P1\\]")) and ((.body | test("(?i)^\\s*(Review PASSED|Review APPROVED|#+\\s*✅|\\*\\*Agent Session Report|Agent Session Report|Multi-agent review|Reviewed HEAD|<!--|Dispatching|Resuming|Moving to|Implementation complete)")) | not))) | .createdAt] | sort | last // empty' 2>/dev/null); then
+    return 0
+  fi
+
+  # No findings at all ⇒ nothing outstanding from this signal.
+  [ -n "$findings_at" ] || return 0
+
+  # Findings must be NEWER than the latest approval (or there is no approval).
+  # ISO-8601 UTC timestamps compare correctly as strings. When approved_at is
+  # empty (query SUCCEEDED and found no approval) the `>` is vacuously satisfied
+  # (findings with no approval ⇒ emit). Skip (no emit) when an approval exists
+  # and the findings are NOT newer than it (older or same timestamp).
+  if [ -n "$approved_at" ] && ! [[ "$findings_at" > "$approved_at" ]]; then
+    return 0
+  fi
+
+  log "Detected review findings (${findings_at}) newer than the latest approval (${approved_at:-none}) for issue #${issue_num} — injecting post-approval-findings override ([INV-57])."
+  cat <<POSTAPPROVAL
+## Outstanding post-approval review findings — do NOT exit "nothing outstanding"
+
+A review-findings / change-request comment was posted to issue #${issue_num} AFTER
+the PR was approved (findings at ${findings_at}; latest approval at ${approved_at:-none}).
+The PR's standing \`reviewDecision == APPROVED\`, green CI, and mergeable state are
+therefore **STALE** — they predate these findings and MUST NOT be treated as
+"nothing outstanding to address".
+
+This session you MUST:
+1. Read the findings in the \`## Review Feedback\` section below (and any PR inline
+   comments) — these are the authoritative outstanding work.
+2. Address every BLOCKING / [P1] item with code changes, then commit and push.
+3. Do **NOT** post a "Resume check — nothing outstanding" comment and exit. The
+   approval is stale; exiting now would silently drop blocking findings on an
+   approved PR.
+
+Only after the findings are addressed and pushed does the normal workflow resume
+(tests → push → wait CI). The next review pass will re-evaluate the PR.
+
+POSTAPPROVAL
+}
+
 # Ensure labels are updated on exit (trap)
 cleanup() {
   local exit_code=$?
@@ -504,8 +609,34 @@ elif [[ "$MODE" = "resume" ]]; then
   # findings` (verdict FAIL) and `Review PASSED` (verdict PASS). Both
   # are wrapper-side strings; dispatcher status comments never start
   # with either.
+  #
+  # Issue #188 (INV-57): the exact-prefix-only match was BRITTLE — a
+  # late or independent findings comment that does NOT start with
+  # `Review findings` (e.g. a heading `## Codex review findings`, or a
+  # bare operator note `[P1] BLOCKING: …`) was invisible to the resume
+  # prompt, so blocking findings posted after an approval were silently
+  # dropped. We broaden recognition with a THIRD clause: a comment body
+  # carrying a `BLOCKING` or `[P1]` token (case-insensitive) is treated as
+  # actionable change-request feedback — BUT ONLY when its first line is NOT a
+  # known non-findings shape. The `BLOCKING` alternative is anchored
+  # `(^|[^A-Za-z-])BLOCKING\b` so `NON-BLOCKING` does not match. This MUST be a
+  # *consuming* leading group, NOT a look-behind: `gh --jq` runs Go's RE2 engine
+  # which has no look-behind and REJECTS `(?<![A-Za-z-])` at runtime (`invalid
+  # named capture`), aborting the wrapper under `set -e` (issue #188 review: kiro).
+  #
+  # That exclusion (issue #188 review finding 2) is load-bearing: a pure
+  # token match also fires on a `Review PASSED - No BLOCKING issues remain`
+  # verdict and on dev status/session comments that mention `BLOCKING`/`[P1]`
+  # in prose (this issue's own `## ✅ Implementation complete` comment does),
+  # which would misclassify a status report as a review change-request. The
+  # `^\s*(...)` anchor list excludes PASS/APPROVED verdicts, `## ✅` status
+  # headings, `**Agent Session Report`, the `Multi-agent review:` /
+  # `Reviewed HEAD:` / `<!-- … -->` review-wrapper markers, and the
+  # `Dispatching`/`Resuming`/`Moving to` dispatcher chatter (#113). `Review
+  # PASSED` is also matched by its own dedicated clause so the resume still
+  # sees the latest PASS verdict as feedback context.
   REVIEW_COMMENTS=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json comments \
-    -q '[.comments[] | select(.body | startswith("Review findings") or startswith("Review PASSED"))] | last // empty')
+    -q '[.comments[] | select((.body | startswith("Review findings")) or (.body | startswith("Review PASSED")) or ((.body | test("(?i)(^|[^A-Za-z-])BLOCKING\\b|\\[P1\\]")) and ((.body | test("(?i)^\\s*(Review PASSED|Review APPROVED|#+\\s*✅|\\*\\*Agent Session Report|Agent Session Report|Multi-agent review|Reviewed HEAD|<!--|Dispatching|Resuming|Moving to|Implementation complete)")) | not)))] | last // empty')
 
   # Fetch PR number linked to this issue for inline review comments
   PR_NUM=$(gh pr list --repo "$REPO" --state open --json number,body \
@@ -526,10 +657,17 @@ elif [[ "$MODE" = "resume" ]]; then
       --jq '[.[] | select(.body | startswith("Auto-merge failed:"))] | last // empty | .body' 2>/dev/null || true)
   fi
 
+  # Post-approval-findings override ([INV-57], closes #188). Non-empty only when
+  # a findings/change-request comment post-dates the latest PR approval — it
+  # forces the resume to address late blocking findings instead of exiting
+  # "nothing outstanding" on the strength of a stale standing APPROVAL.
+  POST_APPROVAL_FINDINGS="$(emit_post_approval_findings_block "$ISSUE_NUMBER" "$PR_NUM")"
+
   RESUME_PROMPT="$(cat <<EOF
 Resuming work on issue #${ISSUE_NUMBER}.
 
 ${OPEN_PR_FAST_PATH}
+${POST_APPROVAL_FINDINGS}
 $(if [[ -n "$AUTO_MERGE_FAILURE_MARKER" ]]; then cat <<REBASE_BLOCK
 ## Pre-implementation: rebase onto main — MANDATORY FIRST STEP
 
@@ -632,6 +770,7 @@ ${ISSUE_BODY}
 </user-issue-content>
 
 ${OPEN_PR_FAST_PATH}
+${POST_APPROVAL_FINDINGS}
 $(if [[ -n "$AUTO_MERGE_FAILURE_MARKER" ]]; then cat <<REBASE_BLOCK2
 ## Pre-implementation: rebase onto main — MANDATORY FIRST STEP
 

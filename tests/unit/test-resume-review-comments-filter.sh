@@ -186,6 +186,136 @@ fixture=$(jq -n \
 out=$(run_filter "$fixture")
 assert_body_match "TC-RFB-008 mid-sentence 'review' mention does not shadow real findings" "[BLOCKING] Missing input validation" "$out"
 
+# ===================================================================
+# Issue #188 (INV-57) — broadened findings recognition. The selector must
+# also catch change-request comments that DON'T start with the exact
+# `Review findings` prefix but carry a BLOCKING / [P1] token, so a late
+# operator/secondary findings comment posted after an approval isn't
+# silently dropped. The broadened clause must NOT regress the #113
+# dispatcher-chatter exclusion (those bodies carry no BLOCKING/[P1]).
+echo
+echo "=== TC-RFB-009..011: broadened findings recognition (issue #188) ==="
+
+# Non-prefix findings: a heading like "## Codex review findings" + [P1].
+NONPREFIX_FINDINGS='## Codex review findings
+
+[P1] BLOCKING: the new artifacts table has no TTL configured.'
+# Bare operator note carrying [P1] BLOCKING, no `findings`/`review` heading.
+OPERATOR_NOTE='[P1] BLOCKING: data race in submitFeed — please fix before merge'
+
+# TC-RFB-009 — non-prefix "## Codex review findings" + [P1] is recognized
+fixture=$(jq -n --argjson c1 "$(mk_comment '2026-06-08T08:00:00Z' "$NONPREFIX_FINDINGS")" \
+  '{comments: [$c1]}')
+out=$(run_filter "$fixture")
+assert_body_match "TC-RFB-009 non-prefix '## Codex review findings' + [P1] recognized" "no TTL configured" "$out"
+
+# TC-RFB-010 — bare operator [P1] BLOCKING note is recognized
+fixture=$(jq -n --argjson c1 "$(mk_comment '2026-06-08T08:00:00Z' "$OPERATOR_NOTE")" \
+  '{comments: [$c1]}')
+out=$(run_filter "$fixture")
+assert_body_match "TC-RFB-010 bare '[P1] BLOCKING' operator note recognized" "data race in submitFeed" "$out"
+
+# TC-RFB-011 — broadened clause must NOT pull a plain dispatcher status (no token)
+fixture=$(jq -n \
+  --argjson c1 "$(mk_comment '2026-06-08T07:00:00Z' "$REAL_FINDINGS_R1")" \
+  --argjson c2 "$(mk_comment '2026-06-08T07:30:00Z' "$MOVING_PENDING_REVIEW")" \
+  '{comments: [$c1, $c2]}')
+out=$(run_filter "$fixture")
+assert_body_match "TC-RFB-011 broadened clause does not pull token-free dispatcher status" "[BLOCKING] Missing input validation" "$out"
+
+# TC-RFB-012 — a NON-BLOCKING note must NOT match (the \b boundary on the hyphen
+# would make a naive \bBLOCKING\b false-match `NON-BLOCKING`). Here a real
+# findings comment is followed by a later "remaining items NON-BLOCKING" note:
+# the note must NOT shadow the real findings.
+NON_BLOCKING_NOTE='Remaining items are NON-BLOCKING — safe to merge once CI is green.'
+fixture=$(jq -n \
+  --argjson c1 "$(mk_comment '2026-06-08T07:00:00Z' "$REAL_FINDINGS_R1")" \
+  --argjson c2 "$(mk_comment '2026-06-08T07:30:00Z' "$NON_BLOCKING_NOTE")" \
+  '{comments: [$c1, $c2]}')
+out=$(run_filter "$fixture")
+assert_body_match "TC-RFB-012 'NON-BLOCKING' note does not match (consuming anchor rejects hyphen)" "[BLOCKING] Missing input validation" "$out"
+
+# TC-RFB-013 — a sole NON-BLOCKING note (no real findings) yields empty, NOT a match
+fixture=$(jq -n --argjson c1 "$(mk_comment '2026-06-08T08:00:00Z' "$NON_BLOCKING_NOTE")" \
+  '{comments: [$c1]}')
+out=$(run_filter "$fixture")
+assert_body_match "TC-RFB-013 sole 'NON-BLOCKING' note → empty (not a finding)" "<EMPTY>" "$out"
+
+# ===================================================================
+# Issue #188 review round 1 (codex finding 2) — the token fallback must NOT
+# classify a `Review PASSED` verdict or a dev status/session comment as a
+# finding just because the body contains a BLOCKING / [P1] token in prose.
+echo
+echo "=== TC-RFB-014..016: token fallback excludes PASS + status comments (issue #188 review) ==="
+
+# A PASS verdict that happens to contain the BLOCKING token.
+PASSED_WITH_TOKEN='Review PASSED - No BLOCKING issues remain. LGTM.
+
+session: 44444444-4444-4444-4444-444444444444'
+# A dev implementation/status comment mentioning the tokens in prose.
+IMPL_STATUS='## ✅ Implementation complete — PR #204
+
+Fixed the short-circuit. Addresses [P1] BLOCKING data-correctness items.'
+# An Agent Session Report mentioning the tokens.
+SESSION_REPORT='**Agent Session Report (Dev)**
+
+Exit code: 0. Resolved [P1] BLOCKING items per review.'
+
+# TC-RFB-014 — real findings, then a later `Review PASSED - No BLOCKING issues remain`.
+# `Review PASSED` is still recognized (PASS prefix clause), so it legitimately wins
+# as the latest verdict — but it must be the PASS body, NOT misclassified, and the
+# real findings must not be lost when the PASS does NOT post-date them.
+fixture=$(jq -n \
+  --argjson c1 "$(mk_comment '2026-06-08T07:00:00Z' "$REAL_FINDINGS_R1")" \
+  --argjson c2 "$(mk_comment '2026-06-08T08:00:00Z' "$PASSED_WITH_TOKEN")" \
+  '{comments: [$c1, $c2]}')
+out=$(run_filter "$fixture")
+assert_body_match "TC-RFB-014 'Review PASSED - No BLOCKING' is the PASS verdict (latest), not a finding" "No BLOCKING issues remain" "$out"
+
+# TC-RFB-015 — real findings, then a dev impl/status comment with tokens in prose.
+# The status comment must NOT shadow the real findings.
+fixture=$(jq -n \
+  --argjson c1 "$(mk_comment '2026-06-08T07:00:00Z' "$REAL_FINDINGS_R1")" \
+  --argjson c2 "$(mk_comment '2026-06-08T07:30:00Z' "$IMPL_STATUS")" \
+  '{comments: [$c1, $c2]}')
+out=$(run_filter "$fixture")
+assert_body_match "TC-RFB-015 dev impl/status comment with tokens does not shadow real findings" "[BLOCKING] Missing input validation" "$out"
+
+# TC-RFB-016 — sole Agent Session Report with tokens → empty (not a finding).
+fixture=$(jq -n --argjson c1 "$(mk_comment '2026-06-08T08:00:00Z' "$SESSION_REPORT")" \
+  '{comments: [$c1]}')
+out=$(run_filter "$fixture")
+assert_body_match "TC-RFB-016 sole Agent Session Report with tokens → empty (status, not finding)" "<EMPTY>" "$out"
+
+# ===================================================================
+# TC-RFB-017 — drift guard: the non-findings EXCLUSION alternation appears in
+# BOTH the `REVIEW_COMMENTS` selector AND `emit_post_approval_findings_block`'s
+# findings query. They MUST stay byte-identical — a token added to one list but
+# not the other would silently desync the prompt's recognition from the
+# override's recognition, reintroducing the issue-#188 finding-2 false-match on
+# one path. The single-line-on-`-q` constraint blocks DRY-ing them into a shared
+# var, so this test mechanically asserts they match.
+echo
+echo "=== TC-RFB-017: exclusion alternation is identical across both selectors ==="
+# Pull every `^\s*( … )` exclusion alternation literal from the wrapper's -q
+# lines. `sort -u` collapses identical occurrences; the count of DISTINCT
+# variants must be exactly 1 (both call sites byte-identical), and the raw
+# count must be >= 2 (the literal really appears at both sites — guard not
+# vacuous). Uses wc/grep only (no `mapfile`) so it is shell-agnostic.
+_distinct=$(grep -oE '\^\\\\s\*\([^)]*\)' "$DEV_WRAPPER" | sort -u | wc -l | tr -dc '0-9')
+_total=$(grep -cE '\^\\\\s\*\(Review PASSED' "$DEV_WRAPPER")
+if [[ "$_distinct" -eq 1 && "$_total" -ge 2 ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-RFB-017 exclusion alternation identical at both call sites (distinct=$_distinct, occurrences=$_total)"
+  PASS=$((PASS + 1))
+elif [[ "$_distinct" -ne 1 ]]; then
+  echo -e "  ${RED}FAIL${NC}: TC-RFB-017 exclusion alternation DRIFTED — $_distinct distinct variants (expected 1):"
+  grep -oE '\^\\\\s\*\([^)]*\)' "$DEV_WRAPPER" | sort -u | sed 's/^/      /'
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-RFB-017 exclusion alternation found <2 times (occurrences=$_total) — wiring changed?"
+  FAIL=$((FAIL + 1))
+fi
+
 echo
 echo "=== Summary ==="
 echo "Passed: $PASS"
