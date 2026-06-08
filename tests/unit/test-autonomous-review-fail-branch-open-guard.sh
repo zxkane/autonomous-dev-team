@@ -122,12 +122,20 @@ else
   FAIL=$((FAIL + 1))
 fi
 
-# TC-OG-SRC-03: exactly ONE `gh pr view ... --json state` call remains — the
-# hoisted guard replaces the redundant PASS-branch duplicate (DRY: one guard,
-# three exits).
+# TC-OG-SRC-03: the wrapper holds exactly TWO `gh pr view ... --json state`
+# queries — the hoisted PASS-chain guard (this issue, #196) PLUS the E2E hard-gate
+# guard added by the INV-54 extension (#195). Before #195 this count was 1; the
+# extension legitimately adds a second, distinct query at the E2E gate.
 _state_count=$(grep -cE 'gh pr view "\$PR_NUMBER" --repo "\$REPO" --json state' "$WRAPPER")
-assert_eq "TC-OG-SRC-03 exactly one --json state query (PASS-branch duplicate removed)" \
-  "1" "$_state_count"
+assert_eq "TC-OG-SRC-03 exactly two --json state queries (PASS-chain hoisted + E2E gate, #195)" \
+  "2" "$_state_count"
+# TC-OG-SRC-03b: the PASS-chain guard stays DRY — exactly ONE query assigns the
+# PASS-chain `PR_STATE=` (the redundant PASS-branch duplicate is still gone). The
+# `\b` word boundary excludes the E2E gate's `E2E_PR_STATE=` (preceded by `_`,
+# which is a word char → no boundary), so this counts only the PASS-chain query.
+_passchain_state_count=$(grep -cE '\bPR_STATE=\$\(gh pr view "\$PR_NUMBER" --repo "\$REPO" --json state' "$WRAPPER")
+assert_eq "TC-OG-SRC-03b PASS-chain guard stays DRY (exactly one PR_STATE= query)" \
+  "1" "$_passchain_state_count"
 
 # TC-OG-SRC-04: the hoisted open-gate skip path removes `reviewing` and does NOT
 # add `pending-dev`. Extract the lines from the state query to its `exit 0` and

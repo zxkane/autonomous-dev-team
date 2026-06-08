@@ -1824,11 +1824,19 @@ attribution trailers). Investigation artifact:
 
 ## INV-54: the PR-still-open guard gates ALL PASS-chain exits, not just PASS
 
-**Rule**: the PR-still-open check in `autonomous-review.sh` MUST run **once at the top of the `PASSED_VERDICT == true` gate chain** — BEFORE the [INV-44](#inv-44-mergeable-hard-gate--a-conflicting-pr-can-never-reach-approved) mergeable poll and BEFORE any FAIL-branch label flip — so that all three PASS-chain exits honor it identically:
+> **Extended (#195):** the guard now also gates the INV-46 E2E hard-gate block branches (a second application point — see Rule (b) below). The heading is kept for anchor stability; the guard's reach is no longer limited to the PASS chain.
 
-1. `block-substantive` (PR `CONFLICTING`),
-2. `block-nonsubstantive` (mergeable `UNKNOWN`/empty past the retry budget),
-3. PASS (approve / merge / `no-auto-close`).
+**Rule**: `autonomous-review.sh` MUST re-check PR state before writing a
+`reviewing → pending-dev` transition from any wrapper-level block gate, and skip
+the `pending-dev` add when the PR is no longer `OPEN`. The check is applied at
+**two** points, each delegating to the single pure
+`lib-review-mergeable.sh::_pr_open_gate <state>` helper:
+
+- **(a) the `PASSED_VERDICT == true` gate chain** — one hoisted check at the top of the chain, BEFORE the [INV-44](#inv-44-mergeable-hard-gate--a-conflicting-pr-can-never-reach-approved) mergeable poll and BEFORE any block-branch label flip, covering all three PASS-chain exits:
+  1. `block-substantive` (PR `CONFLICTING`),
+  2. `block-nonsubstantive` (mergeable `UNKNOWN`/empty past the retry budget),
+  3. PASS (approve / merge / `no-auto-close`).
+- **(b) the [INV-46](#inv-46-e2e-runs-once-in-a-dedicated-lane-before-the-review-fan-out--gated-not-per-agent) E2E hard gate** — one check after `_classify_e2e_gate`, BEFORE the `fail` / `block-nonsubstantive` cascade, covering both E2E block exits. The E2E gate runs *before* the fan-out and is never reached by the `PASSED_VERDICT` chain, so the hoisted check (a) cannot cover it; a second check (b) is required at the gate (#195).
 
 When the PR is no longer `OPEN`, every one of those exits MUST route to a **clean `−reviewing` and `exit 0` with NO `pending-dev` add**. The decision is computed by the pure `lib-review-mergeable.sh::_pr_open_gate <state>` helper:
 
@@ -1841,26 +1849,34 @@ Sub-rules:
 
 1. **Conservative classification.** The ONLY value that yields `proceed` is a case-insensitive `OPEN` — the exact inverse of the prior PASS-branch guard's `[[ "$PR_STATE" != "OPEN" ]]` test. A failed `gh pr view --json state` query (the wrapper substitutes the `UNKNOWN` sentinel) → `skip`, matching the prior PASS guard which also treated a failed query as non-OPEN. Fail-closed toward "do not re-queue dev" — when PR state is in doubt we never flip a possibly-merged issue to `pending-dev`.
 
-2. **One query, three exits (DRY).** The hoisted check replaces — does not duplicate — the old PASS-branch guard. Exactly one `gh pr view --json state` call exists in the wrapper; the redundant second query in the PASS branch was removed. The hoist adds **zero** net `gh` calls on the PASS path (the one query simply moved earlier) and runs before the mergeable poll on the block paths.
+2. **One query per gate, no duplicate within a gate (DRY).** Check (a) replaces — does not duplicate — the old PASS-branch guard: exactly **one** `gh pr view --json state` call covers all three PASS-chain exits (the redundant second query in the PASS branch was removed). Check (b) adds exactly **one more** `gh pr view --json state` call covering both E2E block exits with a single query (placing it inside each block branch would duplicate the query + skip-exit block — the DRY anti-pattern (a) removed). So the wrapper holds **exactly two** `--json state` queries total — one per gate — and neither gate's block branches re-query.
 
-**Why**: the open-check was originally added only to the PASS branch, AFTER the INV-44 mergeable gate. The INV-44 block branches were added later ([#176](https://github.com/zxkane/autonomous-dev-team/issues/176)) and did not inherit it. So a PR merged **out-of-band** while a review run was in flight — a manual merge, or the agent self-merge of the #191 incident — that then took a `block-substantive` / `block-nonsubstantive` path had its **already-merged, already-closed** issue flipped to `pending-dev`, which the dispatcher could then try to re-dispatch dev against (degraded: wrong label + needless dev re-dispatch on a merged PR). This is the wrapper-side guard-gap half carved out of [#193](https://github.com/zxkane/autonomous-dev-team/issues/193) (which fixed the agent-self-merge root cause). Hoisting the single check to the top of the gate chain makes the three exits share one open-check semantics.
+3. **The E2E-gate check (b) gates the block exits ONLY.** It is wedged after `_classify_e2e_gate` and before the `if [[ "$E2E_GATE" == "fail" ]] … elif … block-nonsubstantive` cascade, and itself runs only when `E2E_GATE ∈ {fail, block-nonsubstantive}`. The gate's `pass`/`inactive` outcomes fall through to the review fan-out before the check is reached, so a merged-mid-E2E PR that nevertheless **passed** E2E is not affected here — it continues to the fan-out and then to the PASS-chain check (a), which guards the approve/merge path. The check costs one `gh` call only on the block paths (an E2E failure or evidence-miss), never on the happy path.
 
-**Scope**: deliberately limited to the three `PASSED_VERDICT == true` exits (the issue carve-out). The [INV-46](#inv-46-e2e-runs-once-in-a-dedicated-lane-before-the-review-fan-out--gated-not-per-agent) E2E hard gate (runs before the fan-out) and the verdict-`FAILED` `else` branch are NOT covered — a FAILED verdict on a merged PR is a far rarer race and out of scope for #196. A follow-up can extend the same `_pr_open_gate` helper to those paths.
+**Why**: the open-check was originally added only to the PASS branch, AFTER the INV-44 mergeable gate. The INV-44 block branches were added later ([#176](https://github.com/zxkane/autonomous-dev-team/issues/176)) and did not inherit it; the INV-46 E2E hard gate ([#182](https://github.com/zxkane/autonomous-dev-team/issues/182)) was added with its own block branches and also did not inherit it. So a PR merged **out-of-band** while a review run was in flight — a manual merge, or the agent self-merge of the #191 incident — that then took a mergeable `block-substantive` / `block-nonsubstantive` path (the #196 half) **or** an E2E `fail` / `block-nonsubstantive` path (the #195 half) had its **already-merged, already-closed** issue flipped to `pending-dev`, which the dispatcher could then try to re-dispatch dev against (degraded: wrong label + needless dev re-dispatch on a merged PR). This is the wrapper-side guard-gap carved out of [#193](https://github.com/zxkane/autonomous-dev-team/issues/193) (which fixed the agent-self-merge root cause). One `_pr_open_gate` helper, applied at both block gates, gives all the `reviewing → pending-dev` block exits identical open-check semantics.
 
-**Producer**: `autonomous-review.sh` — the hoisted open-gate block at the top of the `PASSED_VERDICT == true` chain (the `gh pr view --json state` query + `_pr_open_gate` call) and `lib-review-mergeable.sh::_pr_open_gate` (the pure decision helper).
+**Scope**: covers the three `PASSED_VERDICT == true` exits (check a, #196) and the two INV-46 E2E hard-gate block exits (check b, #195). The verdict-`FAILED` `else` branch and the auto-merge-failure sub-branch are NOT covered — a FAILED verdict implies the fan-out already ran (the PR was open when the review agents started) and the auto-merge-failure branch only runs after a successful approval on an open PR, so both are far rarer races. A follow-up can extend the same `_pr_open_gate` helper to those paths if a real incident surfaces.
 
-**Consumer**: the INV-44 mergeable gate's two block branches and the PASS approve/merge branch — all three reached only when the open-gate is `proceed`; the dispatcher (no longer sees a merged issue re-flagged `pending-dev`).
+**Producer**: `autonomous-review.sh` — the hoisted open-gate block at the top of the `PASSED_VERDICT == true` chain (check a) AND the E2E-gate open-check wedged between `_classify_e2e_gate` and the block cascade (check b); both call `lib-review-mergeable.sh::_pr_open_gate` (the pure decision helper, defined for #196 and reused for #195).
 
-**Status**: **ENFORCED** in this PR (closes #196).
+**Consumer**: the INV-44 mergeable gate's two block branches + the PASS approve/merge branch (reached only when check a is `proceed`), and the INV-46 E2E gate's two block branches (reached only when check b is `proceed`); the dispatcher (no longer sees a merged issue re-flagged `pending-dev` from either gate).
 
-**Test**: `tests/unit/test-autonomous-review-fail-branch-open-guard.sh` — TC-OG-CLS-01..08 (pure decision logic over `_pr_open_gate`: OPEN→proceed, MERGED/CLOSED/UNKNOWN/empty/garbage→skip, case-insensitivity, and the "only OPEN proceeds" inverse-of-`!= OPEN` property) and TC-OG-SRC-01..06 (source-of-truth greps: wrapper calls `_pr_open_gate`, the `--json state` query precedes both `_classify_mergeable_gate` and the `MERGEABLE_RETRIES` poll loop, exactly one `--json state` query remains, the skip path removes `reviewing` and never adds `pending-dev`, `bash -n`). The mergeable-gate pins (`test-autonomous-review-mergeable-gate.sh`) stay green — the hoist sits ahead of the gate and leaves the block branches byte-for-byte unchanged.
+**Status**: **ENFORCED** — check (a) closed #196; check (b) closes #195.
+
+**Test**:
+- `tests/unit/test-autonomous-review-fail-branch-open-guard.sh` — check (a): TC-OG-CLS-01..08 (pure decision logic over `_pr_open_gate`: OPEN→proceed, MERGED/CLOSED/UNKNOWN/empty/garbage→skip, case-insensitivity, the "only OPEN proceeds" inverse-of-`!= OPEN` property) and TC-OG-SRC-01..06 (source-of-truth greps: wrapper calls `_pr_open_gate`, the `--json state` query precedes both `_classify_mergeable_gate` and the `MERGEABLE_RETRIES` poll loop, the skip path removes `reviewing` and never adds `pending-dev`, `bash -n`).
+- `tests/unit/test-autonomous-review-e2e-gate-open-guard.sh` — check (b): TC-EOG-CLS-01..05 (re-pin `_pr_open_gate` over the merged-mid-E2E states), TC-EOG-SRC-01..07 (the E2E-gate `--json state` query feeds `_pr_open_gate`, sits after `_classify_e2e_gate` and before the cascade, the skip path removes `reviewing` without `pending-dev`, **exactly two** `--json state` queries exist total, `bash -n`), and TC-EOG-REG-01..04 (OPEN-path regression pins: both E2E block branches still write `−reviewing +pending-dev`, the `fail` branch keeps `submit_request_changes` + `failed-substantive`, the `block-nonsubstantive` branch keeps `e2e-evidence-missing` + no request-changes, `emit_verdict_trailer` count unchanged at 10).
+
+The mergeable-gate (`test-autonomous-review-mergeable-gate.sh`) and sequential-E2E (`test-autonomous-review-sequential-e2e.sh`) pins stay green — both checks sit ahead of / outside the existing branches and leave them byte-for-byte unchanged on the OPEN path.
 
 **Cross-references**:
-- [INV-44](#inv-44-mergeable-hard-gate--a-conflicting-pr-can-never-reach-approved) — the mergeable gate whose two block branches now sit downstream of the hoisted open-check.
-- [INV-33](#inv-33-review-wrapper-must-not-close-the-linked-issue) — the wrapper never closes the issue; the open-gate skip path likewise only removes `reviewing`.
-- [`review-agent-flow.md` § PR-open guard (INV-54)](review-agent-flow.md#pr-open-guard-inv-54) — runtime walkthrough.
-- [`state-machine.md` § Transition table](state-machine.md#transition-table) — the open-gate `reviewing → (−reviewing)` clean-exit row shared by all three PASS-chain exits.
-- [`docs/designs/review-fail-branch-open-guard.md`](../designs/review-fail-branch-open-guard.md) — design canvas.
+- [INV-44](#inv-44-mergeable-hard-gate--a-conflicting-pr-can-never-reach-approved) — the mergeable gate whose two block branches sit downstream of the hoisted open-check (a).
+- [INV-46](#inv-46-e2e-runs-once-in-a-dedicated-lane-before-the-review-fan-out--gated-not-per-agent) — the E2E hard gate whose two block branches sit downstream of the E2E-gate open-check (b).
+- [INV-33](#inv-33-review-wrapper-must-not-close-the-linked-issue) — the wrapper never closes the issue; both open-gate skip paths likewise only remove `reviewing`.
+- [`review-agent-flow.md` § PR-open guard (INV-54)](review-agent-flow.md#pr-open-guard-inv-54) — runtime walkthrough (both checks).
+- [`state-machine.md` § Transition table](state-machine.md#transition-table) — the open-gate `reviewing → (−reviewing)` clean-exit rows for the PASS-chain (a) and the E2E gate (b).
+- [`docs/designs/review-fail-branch-open-guard.md`](../designs/review-fail-branch-open-guard.md) — design canvas for check (a, #196).
+- [`docs/designs/e2e-gate-open-guard.md`](../designs/e2e-gate-open-guard.md) — design canvas for check (b, #195).
 
 ## INV-55: the codex review lane receives the PR diff INLINE in its prompt
 

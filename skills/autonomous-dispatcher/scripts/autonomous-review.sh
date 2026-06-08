@@ -1056,6 +1056,32 @@ if [[ "${E2E_ACTIVE:-false}" == "true" ]]; then
   fi
   rm -rf "$_E2E_LANE_DIR" 2>/dev/null || true
 
+  # -------------------------------------------------------------------------
+  # PR-still-open guard (INV-54 extension, #195) — gates the E2E block exits.
+  # -------------------------------------------------------------------------
+  # Both E2E block branches below (`fail`, `block-nonsubstantive`) end in
+  # `−reviewing +pending-dev; exit 0`. The INV-54 hoisted guard only covers the
+  # `PASSED_VERDICT == true` chain, which is DOWNSTREAM of (and never reached by)
+  # this gate — so a PR merged/closed out-of-band while the E2E lane ran (a
+  # concurrent review, a manual merge, or the #191 agent self-merge) would flip
+  # its already-closed issue to `pending-dev` here. Re-check PR state ONCE before
+  # the cascade, reusing the same `_pr_open_gate` helper (lib-review-mergeable.sh).
+  # Only the block exits write `pending-dev`; `pass`/`inactive` fall through to
+  # the fan-out below before this point is reached, so the check is wedged here —
+  # after `_classify_e2e_gate`, before the cascade — to gate the block exits only.
+  # Best-effort / non-fatal: a failed `gh` query → "UNKNOWN" → skip (conservative;
+  # we never add pending-dev when PR state is in doubt, matching the INV-54 guard).
+  if [[ "$E2E_GATE" == "fail" || "$E2E_GATE" == "block-nonsubstantive" ]]; then
+    E2E_PR_STATE=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json state -q '.state' 2>/dev/null || echo "UNKNOWN")
+    if [[ "$(_pr_open_gate "$E2E_PR_STATE")" == "skip" ]]; then
+      log "PR #${PR_NUMBER} is no longer open (state: ${E2E_PR_STATE}) at the E2E hard gate. Skipping the pending-dev flip — another review/merge likely completed first."
+      gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
+        --remove-label "reviewing" 2>/dev/null || true
+      RESULT_PARSED=true
+      exit 0
+    fi
+  fi
+
   # E2E gate fail / block → route WITHOUT fanning out the review agents.
   if [[ "$E2E_GATE" == "fail" ]]; then
     log "INV-46: E2E hard gate FAIL — overriding to FAIL WITHOUT review fan-out (saves ${#REVIEW_AGENTS_LIST[@]} review run(s))."

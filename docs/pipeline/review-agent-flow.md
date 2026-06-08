@@ -132,6 +132,11 @@ E2E_ACTIVE == true:
     (b) re-fetch (_fetch_sha_evidence, bounded retry) finds a SHA-matching
         evidence comment for the captured PR_HEAD_SHA
     → pass | fail | block-nonsubstantive
+  gate in {fail, block-nonsubstantive} → PR-OPEN GUARD FIRST (INV-54 ext, #195):
+                                 E2E_PR_STATE = gh pr view --json state
+                                 if _pr_open_gate "$E2E_PR_STATE" == "skip":
+                                   # merged/closed WHILE the E2E lane ran
+                                   −reviewing (NO +pending-dev) ; exit 0
   gate == fail                 → [BLOCKING] E2E finding + failed-substantive
                                  + submit_request_changes (INV-52, best-effort)
                                  + −reviewing +pending-dev ; exit 0  (NO fan-out)
@@ -149,6 +154,7 @@ E2E_ACTIVE == false → no lane, no gate (E2E_GATE=inactive); straight to fan-ou
 - **Review agents are PURE code reviewers.** `build_review_prompt` no longer contains any E2E execution block; the prompt tells each agent to READ the wrapper-posted evidence comment as input and cross-check it against the acceptance criteria. They do not run E2E.
 - **Structured AC-coverage double-check ([INV-49](invariants.md#inv-49-command-mode-e2e-may-feed-the-review-fan-out-a-structured-ac-coverage-artifact--optional-fail-safe), #183).** Command-mode only: when the evidence parser emits the optional `ac-coverage:begin … ac-coverage:end` JSON fence, the lane jq-validates it (fail-safe — malformed → empty, fall back to free-form; never fail-open) and writes it to `E2E_AC_COVERAGE_FILE`. When that per-round sidecar is non-empty, `build_review_prompt` PREFERS the deterministic map over LLM-parsing the free-form markdown table; an empty/absent sidecar yields the exact post-#182 free-form double-check. The artifact is a review aid only — the E2E hard gate is unchanged.
 - **Composition**: `final PASS ≡ (E2E_ACTIVE==false OR gate==pass) AND review-unanimity-pass`. Because a gate fail/block exits before the fan-out, only `gate ∈ {pass, inactive}` ever reaches the review aggregation — the AND is enforced by the short-circuit. The E2E gate runs before the [INV-44](invariants.md#inv-44-mergeable-hard-gate--a-conflicting-pr-can-never-reach-approved) mergeable block.
+- **PR-open guard on the block exits ([INV-54](invariants.md#inv-54-the-pr-still-open-guard-gates-all-pass-chain-exits-not-just-pass) extension, #195).** A `fail`/`block-nonsubstantive` gate re-checks `gh pr view --json state` (via the reused `_pr_open_gate` helper) before writing `−reviewing +pending-dev`; if the PR was merged/closed WHILE the lane ran, it removes `reviewing` only and exits — never re-queues a merged PR's issue to `pending-dev`. The check is wedged after `_classify_e2e_gate` and before the block cascade, so the `pass`/`inactive` fall-through is unaffected. See [§ PR-open guard (INV-54)](#pr-open-guard-inv-54).
 
 ## Per-side review timeout (INV-48)
 
@@ -314,7 +320,9 @@ If the trailer post fails (token expiry, 403, rate limit), the wrapper logs `WAR
 
 ## PR-open guard (INV-54)
 
-The **first** thing the `PASSED_VERDICT == true` chain does — before the mergeable gate, before any FAIL-branch label flip — is a single PR-still-open check ([INV-54](invariants.md#inv-54-the-pr-still-open-guard-gates-all-pass-chain-exits-not-just-pass)). The check used to live only in the PASS path (step 1 below), AFTER the mergeable gate, so a PR merged out-of-band (manual merge, or the #191 agent self-merge) that then took an INV-44 block branch flipped its already-closed issue to `pending-dev`. Hoisting it makes all three PASS-chain exits (block-substantive, block-nonsubstantive, PASS) honor it with one query.
+The PR-still-open check ([INV-54](invariants.md#inv-54-the-pr-still-open-guard-gates-all-pass-chain-exits-not-just-pass)) runs before any wrapper-level block gate writes a `reviewing → pending-dev` transition, and skips the `pending-dev` add when the PR is no longer OPEN. It is applied at **two** points, each delegating to the same `lib-review-mergeable.sh::_pr_open_gate` helper.
+
+**(a) Top of the `PASSED_VERDICT == true` chain** — before the mergeable gate, before any block-branch label flip. The check used to live only in the PASS path (step 1 below), AFTER the mergeable gate, so a PR merged out-of-band (manual merge, or the #191 agent self-merge) that then took an INV-44 block branch flipped its already-closed issue to `pending-dev`. Hoisting it makes all three PASS-chain exits (block-substantive, block-nonsubstantive, PASS) honor it with one query.
 
 ```
 if PASSED_VERDICT == true:
@@ -325,8 +333,22 @@ if PASSED_VERDICT == true:
   # else proceed → mergeable gate + PASS path below
 ```
 
+**(b) The INV-46 E2E hard gate** (#195) — after `_classify_e2e_gate`, before the `fail`/`block-nonsubstantive` block cascade. The E2E gate runs *before* the fan-out and *before* any verdict, so the hoisted check (a) — which only runs inside the `PASSED_VERDICT == true` chain — never reaches it. A PR merged WHILE the E2E lane ran (a concurrent review / manual merge / #191 self-merge) would otherwise flip its already-closed issue to `pending-dev` from the E2E block branch. The same helper guards it with one query, gating both E2E block exits:
+
+```
+if E2E_ACTIVE:
+  E2E_GATE = _classify_e2e_gate "$rc" "$evidence_present"     # lib-review-e2e.sh
+  if E2E_GATE in {fail, block-nonsubstantive}:
+    E2E_PR_STATE = gh pr view --json state  (failed query → "UNKNOWN" sentinel)
+    if _pr_open_gate "$E2E_PR_STATE" == "skip":   # lib-review-mergeable.sh (reused)
+        # PR merged/closed while the E2E lane ran, or state in doubt
+        −reviewing  (NO +pending-dev) ; exit 0
+  # else (pass/inactive) → fall through to the review fan-out (UNCHANGED)
+```
+
 - The ONLY value that proceeds is a case-insensitive `OPEN` — the exact inverse of the old PASS-branch `!= OPEN` test. `MERGED`/`CLOSED`/`UNKNOWN`/empty/any other token → `skip` → clean `−reviewing` exit, never `+pending-dev`. Fail-closed toward "do not re-queue dev on a merged PR".
-- DRY: the hoisted check **replaces** the old PASS-branch duplicate (step 1 below is now a no-op — by the time the PASS path runs, the PR is guaranteed open). Exactly one `gh pr view --json state` call remains; net `gh` calls on the PASS path are unchanged.
+- DRY: check (a) **replaces** the old PASS-branch duplicate (step 1 below is now a no-op — by the time the PASS path runs, the PR is guaranteed open); check (b) guards both E2E block exits with a single pre-cascade query. The wrapper holds **exactly two** `gh pr view --json state` calls — one per gate — and neither gate's block branches re-query.
+- The E2E check (b) runs only on the block paths (`fail`/`block-nonsubstantive`); the gate's `pass`/`inactive` outcomes fall through to the fan-out before the check is reached, so the happy path costs no extra `gh` call.
 
 ## Mergeable hard gate (INV-44)
 
