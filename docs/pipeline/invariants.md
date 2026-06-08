@@ -1964,9 +1964,14 @@ The helper:
   interchangeable);
 - posts via the token-refresh proxy `gh` co-located in the dispatcher `scripts/` dir
   (the same `gh-with-token-refresh.sh` symlink `mark-issue-checkbox.sh` uses), NOT bare
-  gh — this guarantees the correct bot identity + real-gh resolution;
-- **fails loudly**: non-zero exit when the post fails (`gh` non-zero), exit `2` on
-  invalid args, and echoes the created comment URL on success.
+  gh — this guarantees the correct bot identity + real-gh resolution. **The proxy's
+  absence is a LOUD failure, never a fallback to bare PATH `gh`**: bare `gh` would
+  resolve to the host operator's `gh auth` session and mis-attribute the verdict to the
+  wrong identity (the exact path this helper forbids), so a missing/non-executable
+  `${SCRIPT_DIR}/gh` exits non-zero with a "re-run install-project-hooks.sh" message
+  instead of posting;
+- **fails loudly**: non-zero exit when the post fails (`gh` non-zero) or the proxy is
+  absent, exit `2` on invalid args, and echoes the created comment URL on success.
 
 **Why**: each CLI previously hand-rolled its own bare `gh issue comment` for the
 verdict. This is unreliable across CLIs: the `agy` review agent **exited 0 claiming it
@@ -2008,11 +2013,13 @@ detection is a deliberate FOLLOW-UP, not part of this invariant.
 
 **Status**: **ENFORCED** (closes #202).
 
-**Test**: `tests/unit/test-post-verdict.sh` — TC-PV-01..15 (trailer composition;
+**Test**: `tests/unit/test-post-verdict.sh` — TC-PV-01..16 (trailer composition;
 first-line `Review PASSED`/`Review findings:` guarantee incl. no-double-prefix;
 non-zero exit on `gh` failure + URL echo on success; FILE and stdin bodies; multi-line
 body with backticks/quotes/`$()` preserved verbatim; arg validation exit `2`;
-case-insensitive verdict; posts via the proxy `gh issue comment … --repo …`).
+case-insensitive verdict; posts via the proxy `gh issue comment … --repo …`;
+**TC-PV-16: missing co-located proxy → loud non-zero failure with NO bare-PATH-`gh`
+fallback** — codex review finding on PR #203).
 `tests/unit/test-autonomous-review-verdict-via-helper.sh` — TC-PVP-01..06 (all three
 verdict-post spots reference `scripts/post-verdict.sh`; bare `gh issue comment`
 forbidden for the verdict; first-line phrasing preserved; no per-CLI branch — rendered

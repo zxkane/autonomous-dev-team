@@ -172,11 +172,17 @@ Review Agent: ${AGENT_NAME}"
 # symlink → gh-with-token-refresh.sh). Invoking it by absolute path forces
 # resolution through the wrapper (correct bot identity + real-gh discovery),
 # the same guarantee the SKILL.md "bash scripts/gh …" rule provides.
+#
+# [INV-56] Absence of the co-located proxy is a LOUD failure — we do NOT fall
+# back to bare PATH `gh`. Bare `gh` would resolve to the host operator's
+# `gh auth` session, mis-attributing the verdict to the wrong identity — the
+# exact path this helper exists to forbid. A missing proxy means a broken
+# install (install-project-hooks.sh materializes `gh` alongside this helper);
+# failing here surfaces that instead of silently posting under the wrong user.
 GH="${SCRIPT_DIR}/gh"
 if [[ ! -x "$GH" ]]; then
-  # Fall back to PATH `gh` if the co-located proxy is absent (e.g. running the
-  # helper from an unusual layout). The wrapper is still preferred.
-  GH="gh"
+  echo "Error: token-refresh gh proxy not found/executable at '${GH}'. Refusing to post the verdict via bare PATH gh (it would mis-attribute the comment). Re-run install-project-hooks.sh to restore the scripts/gh symlink (INV-56)." >&2
+  exit 1
 fi
 
 set +e

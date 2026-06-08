@@ -26,6 +26,7 @@ Test scripts:
 | TC-PV-13 | Trailer uses the EXACT phrasing the poller + wrapper attribution expect | `` Review Session: `<sid>` `` (backtick-wrapped sid) and `Review Agent: <name>` literal lines |
 | TC-PV-14 | `verdict` arg is case-insensitive (`PASS` / `Fail`) | Treated as pass/fail |
 | TC-PV-15 | Posts via the token-refresh proxy `gh` (NOT bare gh) | The helper invokes `gh issue comment <n> --repo <REPO>` (script-dir gh, resolved through the wrapper) |
+| TC-PV-16 | Co-located proxy `${SCRIPT_DIR}/gh` is missing/non-executable | Helper exits **non-zero** and does **NOT** fall back to bare PATH `gh` (a planted PATH `gh` is never invoked); error names INV-56 / install-project-hooks. (codex review finding on PR #203) |
 
 ## Prompt source-of-truth — `tests/unit/test-autonomous-review-verdict-via-helper.sh`
 

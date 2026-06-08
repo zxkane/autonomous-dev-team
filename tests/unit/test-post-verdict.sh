@@ -269,6 +269,41 @@ assert_contains "TC-PV-15c gh invoked against issue 202" "202" "$ARGV"
 assert_contains "TC-PV-15d gh invoked with --repo owner/repo" "owner/repo" "$ARGV"
 rm -rf "$SB"
 
+# TC-PV-16: missing co-located proxy → LOUD failure, NO bare-gh post (INV-56).
+# Codex review finding on PR #203: the helper must NOT silently fall back to
+# PATH `gh` when ${SCRIPT_DIR}/gh is absent (bare gh resolves to the host
+# operator's identity → misattributed verdict). Build a sandbox, delete the
+# proxy stub, and plant a PATH `gh` that, if ever invoked, records a marker —
+# the helper must exit non-zero WITHOUT touching it.
+SB=$(make_sandbox 0)
+printf 'good' > "$SB/body.md"
+rm -f "$SB/gh"                         # remove the co-located proxy
+BARE_DIR="$(mktemp -d)"                # a PATH dir holding a bare `gh`
+cat > "$BARE_DIR/gh" <<STUB
+#!/bin/bash
+printf 'BARE_GH_WAS_CALLED' > "$SB/bare-gh-called.txt"
+echo "https://github.com/owner/repo/issues/202#issuecomment-bare"
+exit 0
+STUB
+chmod +x "$BARE_DIR/gh"
+OUT=$(PATH="$BARE_DIR:$PATH" bash "$SB/post-verdict.sh" 202 pass "$SB/body.md" agy "sid-PPPP" 2>&1); RC=$?
+if [[ "$RC" -ne 0 ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-PV-16a missing proxy → non-zero exit (rc=$RC)"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-PV-16a missing proxy did NOT fail (rc=$RC)"
+  FAIL=$((FAIL + 1))
+fi
+if [[ ! -f "$SB/bare-gh-called.txt" ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-PV-16b helper did NOT fall back to bare PATH gh"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-PV-16b helper posted via bare PATH gh (forbidden)"
+  FAIL=$((FAIL + 1))
+fi
+assert_contains "TC-PV-16c error names the missing proxy / INV-56" "INV-56" "$OUT"
+rm -rf "$SB" "$BARE_DIR"
+
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== Summary ==="

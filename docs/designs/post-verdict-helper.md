@@ -71,8 +71,13 @@ Behavior:
 3. **Posting.** Posts via the token-refresh proxy `"${SCRIPT_DIR}/gh" issue comment
    <issue> --repo <REPO> --body <composed>` — NOT bare gh. `REPO` is read from the
    co-located/dispatcher/project `autonomous.conf` exactly like `mark-issue-checkbox.sh`.
-4. **Fail loudly.** Non-zero exit if the post fails (gh non-zero). On success, echo
-   the created comment URL.
+   If `${SCRIPT_DIR}/gh` is missing/non-executable the helper **exits non-zero** — it
+   does NOT fall back to bare PATH `gh` (which would resolve to the host operator's
+   identity and mis-attribute the verdict). A missing proxy means a broken install
+   (`install-project-hooks.sh` materializes it); failing loud surfaces that. (codex
+   review finding on PR #203.)
+4. **Fail loudly.** Non-zero exit if the post fails (gh non-zero) or the proxy is
+   absent. On success, echo the created comment URL.
 
 ### Exit codes
 
