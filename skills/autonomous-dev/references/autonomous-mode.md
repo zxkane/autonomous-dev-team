@@ -59,7 +59,10 @@ On resume (or new session for a previously started issue), perform these checks 
 2. **Parse the `## Requirements` section** for checkbox states
 3. Items marked `- [x]` are already implemented -- **skip them**
 4. Items marked `- [ ]` are remaining work -- implement these
-5. **Read review feedback from issue comments** -- look for "Review findings:" comments
+5. **Read review feedback from issue comments** -- look for `Review findings:` comments **and** any
+   change-request comment carrying a `BLOCKING` or `[P1]` token. The exact `Review findings:` prefix is
+   NOT the sole contract: a heading like `## Codex review findings` or a bare operator note
+   `[P1] BLOCKING: …` is equally actionable. Treat any such comment as outstanding work.
 6. **Read PR inline review comments** -- these contain file-specific feedback from the review agent:
    ```bash
    # Find the PR linked to this issue
@@ -79,6 +82,25 @@ On resume (or new session for a previously started issue), perform these checks 
 9. Verify the existing code in the worktree matches the checked items (quick sanity check)
 
 This prevents duplicate work and ensures review feedback is fully addressed on resume.
+
+### A standing approval does NOT mean "nothing outstanding" ([INV-57](../../../docs/pipeline/invariants.md))
+
+**The done/not-done decision is governed by approval-timestamp vs findings-timestamp ordering — NOT by the
+standing `reviewDecision` alone.** A PR whose current state is `reviewDecision == APPROVED` + green CI +
+mergeable is **only** "nothing outstanding" if there is **no** review-findings / change-request comment
+**newer than** the latest approval.
+
+- If the newest `Review findings:` (or BLOCKING / `[P1]` change-request) comment on the issue has a
+  `createdAt` **later than** the latest APPROVED review's `submittedAt`, the approval is **STALE**. You
+  MUST read those findings, address every BLOCKING / `[P1]` item with code changes, and re-push. Do **NOT**
+  post a "Resume check — nothing outstanding to address" comment and exit — doing so silently drops blocking
+  findings on an approved PR.
+- The dev wrapper detects this case and injects an explicit
+  `## Outstanding post-approval review findings` block into your resume prompt; when that block is present,
+  it overrides any apparent "the PR is already approved/mergeable, so I'm done" reasoning.
+- Conversely, an approval that is the **newest** review signal (no later findings) IS terminal — resume to
+  "nothing outstanding" without re-doing work. (See step 5 for the broadened recognition that decides what
+  counts as a findings comment.)
 
 ## Marking Requirements Progress
 

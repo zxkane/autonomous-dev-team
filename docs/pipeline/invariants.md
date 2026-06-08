@@ -2038,6 +2038,94 @@ call a `scripts/post-verdict.sh` symlink that doesn't exist yet.
 - [`review-agent-flow.md` § Verdict posting (INV-56)](review-agent-flow.md#verdict-posting-inv-56) — runtime walkthrough.
 - [`docs/designs/post-verdict-helper.md`](../designs/post-verdict-helper.md) — design canvas.
 
+## INV-57: dev-resume must not short-circuit on a standing APPROVAL when newer review findings exist
+
+**Rule**: on `dev-resume`, the done/not-done decision is governed by **approval-timestamp vs
+findings-timestamp ordering**, NOT by the standing `reviewDecision` alone. A PR whose current state is
+`reviewDecision == APPROVED` + green CI + mergeable is "nothing outstanding" **only** when there is no
+review-findings / change-request comment on the issue *newer than* the latest APPROVED review's
+`submittedAt`. When a findings comment post-dates the approval (or there is no approval at all), the resume
+MUST address it and MUST NOT post a "Resume check — nothing outstanding to address" comment and exit.
+
+Two layers enforce this:
+
+1. **Wrapper-side override** (`autonomous-dev.sh::emit_post_approval_findings_block <issue> <pr>`): reads the
+   latest APPROVED review `submittedAt` (`gh pr view --json reviews`) and the newest findings comment
+   `createdAt` (`gh issue view --json comments`), and emits an `## Outstanding post-approval review findings`
+   prompt block iff a findings comment exists AND (no approval OR findings newer than approval). The block is
+   interpolated into the resume and resume-fallback prompt builders (alongside `OPEN_PR_FAST_PATH` and the
+   auto-merge-failure rebase block). It is **FAIL-CLOSED — and a query FAILURE is distinguished from a
+   successful "no approval" result**: each `gh` query's exit status is checked separately (`if ! var=$(gh …)`),
+   so a transient/permission/API failure of the **approval** query returns 0 with no block rather than being
+   mistaken for "no approval" (which would emit). Only an empty result from a query that *succeeded* is treated
+   as "no approval". The always-present `## Review Feedback` section still carries the findings — the override
+   never *fabricates* work, it only ADDS a do-not-short-circuit signal when it can POSITIVELY prove findings
+   post-date the approval (or positively prove there is no approval).
+   [INV-06](#inv-06-crashed--process-not-found-keyword-contract) keyword contract: the block is
+   forward-progress prompt text, not a status comment, and contains none of the crash keywords.
+2. **Narrowed findings recognition** (the `REVIEW_COMMENTS` selector AND the helper): findings are matched
+   by the `Review findings` prefix OR a `BLOCKING` / `[P1]` token — NOT the exact `Review findings:` prefix
+   alone, so a late/independent findings comment (a heading `## Codex review findings`, or a bare operator note
+   `[P1] BLOCKING: …`) is actionable. Two guards keep the token clause from over-matching:
+   - The `BLOCKING` token uses a negative look-behind `(?<![A-Za-z-])BLOCKING\b` so the review vocabulary's
+     `NON-BLOCKING` token (the hyphen is a `\b` boundary) does NOT false-match — otherwise a "remaining items
+     are NON-BLOCKING, safe to merge" note would falsely trigger the override.
+   - The token-bearing comment is matched ONLY when its first line is NOT a known **non-findings shape**:
+     `Review PASSED` / `Review APPROVED` verdicts, a `## ✅` status heading, `**Agent Session Report`, the
+     `Multi-agent review:` / `Reviewed HEAD:` / `<!-- … -->` review-wrapper markers, and the
+     `Dispatching`/`Resuming`/`Moving to` dispatcher chatter. Without that exclusion the token clause
+     false-matched a `Review PASSED - No BLOCKING issues remain` verdict and dev status/session comments that
+     mention `BLOCKING`/`[P1]` in prose (this issue's own `## ✅ Implementation complete` comment does) —
+     misclassifying a status report as a change-request and re-opening a genuinely-done approved PR, violating
+     the no-regression criterion (issue #188 review finding 2). A `Review PASSED` comment is therefore NEVER a
+     finding; the selector still matches it via its own dedicated prefix clause so the resume keeps the latest
+     PASS as feedback context.
+
+**Why**: observed on a feature issue whose review fleet approved the PR (APPROVED + mergeable, stopped before
+merge under `no-auto-close`); an operator then posted a new `Review findings:` comment with BLOCKING (P1)
+items and moved the issue back to `pending-dev`. The resumed dev agent posted "Resume check — nothing
+outstanding to address" citing review = APPROVED, CI = green, PR = MERGEABLE, and exited with no code
+changes — the standing APPROVED `reviewDecision` short-circuited the resume before the late findings were
+acted on, so data-correctness P1s reached the awaiting-merge state looking clean. The exact-`Review findings:`
+match compounded it: a findings comment without that literal prefix was invisible to the resume prompt.
+
+**Relationship to [INV-52](#inv-52-the-review-wrapper-owns-the-github-native-pr-reviewmerge-action-the-agent-posts-verdicts-only)**:
+INV-52 makes the review **wrapper** submit `--request-changes` on a substantive FAIL, so a wrapper-driven
+FAIL flips `reviewDecision` to `CHANGES_REQUESTED` and the standing-APPROVAL trap does not arise. INV-57
+covers the **human-in-the-loop / out-of-band** path: a findings comment posted *after* an approval by an
+operator or an independent review, with no accompanying wrapper `--request-changes`, leaving a stale
+`APPROVED` `reviewDecision`. INV-57 keys on the **comment timestamp**, not on `reviewDecision`, so it is robust
+to that gap. Auto-dismissing the stale GitHub approval is intentionally **out of scope** (the issue listed it
+as optional) — the override block + broadened recognition already satisfy the acceptance criteria, and the
+review wrapper remains the sole owner of the GitHub-native PR action (INV-52).
+
+**Producer**: `emit_post_approval_findings_block` (the override) and the `REVIEW_COMMENTS` selector (both share
+the same prefix-or-narrowed-token findings predicate).
+**Consumer**: the resumed dev agent's done/not-done decision, governed by
+[`autonomous-mode.md` § Resume Awareness](../../skills/autonomous-dev/references/autonomous-mode.md).
+
+**Status**: **ENFORCED** (closes #188).
+
+**Test**: `tests/unit/test-dev-resume-post-approval-findings.sh` — TC-PAF-001..013 (helper: findings newer
+than approval → emit; approval newer → no emit; no findings → no emit; no approval + findings → emit;
+non-prefix `[P1]` findings → emit; all-`gh`-fail → fail-closed + returns 0; newer `Review PASSED` → no emit;
+operator `[P1] BLOCKING` note → emit; newer `NON-BLOCKING` note → no emit; **approval-query-only failure →
+fail-closed, NOT treated as no-approval (review finding 1)**; **`Review PASSED - No BLOCKING issues remain`
+verdict → no emit**, **dev impl/status comment with tokens in prose → no emit**, **Agent Session Report with
+tokens → no emit (review finding 2)**), TC-PAF-W01..W04 (helper defined, output interpolated into a prompt
+builder, block content names post-approval findings + do-not-exit + stale-APPROVED, `bash -n`),
+TC-PAF-D01..D03 (doc contract). Selector regression: `tests/unit/test-resume-review-comments-filter.sh`
+TC-RFB-009..016 (the token clause recognizes non-prefix findings, rejects `NON-BLOCKING`, excludes PASS
+verdicts + dev status/session comments that mention the tokens, and does not re-introduce the #113
+dispatcher-chatter false positives); TC-RFB-001..008 stay green. Test plan:
+`docs/test-cases/dev-resume-post-approval-findings.md`.
+
+**Cross-references**:
+- [INV-52](#inv-52-the-review-wrapper-owns-the-github-native-pr-reviewmerge-action-the-agent-posts-verdicts-only) — the wrapper-driven FAIL path that does flip `reviewDecision`; INV-57 covers the out-of-band path it doesn't.
+- [INV-45](#inv-45-pushed-branch-with-commits-ahead--no-pr--resume-to-open-pr-only-never-full-re-dev) — a sibling wrapper-side resume prompt block (`emit_open_pr_fast_path_block`), same fail-closed + [INV-06] discipline.
+- The #113 fix (`tests/unit/test-resume-review-comments-filter.sh`) — the dispatcher-chatter exclusion the broadened selector preserves.
+- [`dev-agent-flow.md` § Mode = resume](dev-agent-flow.md#mode--resume) — runtime walkthrough.
+
 ## Adding a new invariant
 
 When fixing a pipeline bug, after locating the bug on the state machine + flow docs:
