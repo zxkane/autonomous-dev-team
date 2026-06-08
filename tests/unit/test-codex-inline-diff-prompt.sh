@@ -179,6 +179,22 @@ else
   FAIL=$((FAIL + 1))
 fi
 
+# TC-CXIN-BEHAVE-06: the codex Review-Process step 3 must NOT contradict the
+# too-big FALLBACK. The fallback note tells codex to run a SINGLE `gh pr diff`,
+# so step 3 must be conditional (inlined → don't fetch; fallback → fetch once),
+# not an unconditional "do NOT run gh pr diff" for ALL codex runs. Regression for
+# the contradiction codex flagged when reviewing PR #201 (it FAILed the PR because
+# the fallback path was self-contradictory). The step-3 line must reference the
+# inlined-vs-fallback condition (the word "INLINED" + a conditional cue).
+_step3=$(printf '%s' "$codex_block" | grep -E '^3\. ')
+if printf '%s' "$_step3" | grep -qiE 'if it was INLINED|too large to inline|if .*inlined'; then
+  echo -e "  ${GREEN}PASS${NC}: TC-CXIN-BEHAVE-06 codex step-3 reconciles inline vs too-big fallback (no contradiction)"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-CXIN-BEHAVE-06 codex step-3 unconditionally forbids gh pr diff — contradicts the too-big fallback"
+  FAIL=$((FAIL + 1))
+fi
+
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== Summary ==="

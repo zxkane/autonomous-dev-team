@@ -746,7 +746,7 @@ Read the issue body for an \`## Acceptance Criteria\` section. For EACH criterio
 ## Review Process
 1. Read the issue body to understand requirements
 2. Read ALL issue comments to detect requirement changes (Step 0.5 above)
-3. $(if [[ "${_agent_name}" == "codex" ]]; then echo "Review the diff INLINED above (between DIFF_START/DIFF_END) — do NOT run \`git diff\`/\`gh pr diff\` (INV-55)"; else echo "Read the PR diff to verify implementation"; fi)
+3. $(if [[ "${_agent_name}" == "codex" ]]; then echo "Review the PR diff: if it was INLINED above (between the DIFF_START_/DIFF_END_ markers) use that directly and do NOT run \`git diff\`/\`gh pr diff\`; if instead the \"Diff note\" above said the diff was too large to inline, run a SINGLE \`gh pr diff\` to fetch it (INV-55)"; else echo "Read the PR diff to verify implementation"; fi)
 4. Verify acceptance criteria (see above)
 5. Check that CI checks are passing: gh pr checks ${PR_NUMBER}
 6. Verify test coverage and quality
