@@ -52,11 +52,11 @@ In another incident, the repo owner posted a requirement change ("remove PDF sup
 
 ## Multi-agent review (INV-40)
 
-When the project runs more than one verdict-reaching review agent against the same PR (`AGENT_REVIEW_AGENTS` lists ≥2 CLIs), **each agent runs this gate independently** and posts its own verdict comment. You reach your own PASS/FAIL from your own findings — you cannot see the other agents' verdicts and must not try to coordinate. The wrapper then aggregates all agents' verdicts under a **unanimous-PASS** rule: the wrapper approves+merges only if every available agent passed; any single FAIL makes the wrapper submit `--request-changes` and send it back to dev. End your verdict with the `Review Session: \`<id>\`` trailer AND the `Review Agent: <name>` discriminator line from your prompt — the discriminator is how the wrapper attributes your verdict among N agents posting under the same identity. The unanimous rule is the cross-agent expression of this gate's own "any blocking finding → FAIL" philosophy.
+When the project runs more than one verdict-reaching review agent against the same PR (`AGENT_REVIEW_AGENTS` lists ≥2 CLIs), **each agent runs this gate independently** and posts its own verdict comment. You reach your own PASS/FAIL from your own findings — you cannot see the other agents' verdicts and must not try to coordinate. The wrapper then aggregates all agents' verdicts under a **unanimous-PASS** rule: the wrapper approves+merges only if every available agent passed; any single FAIL makes the wrapper submit `--request-changes` and send it back to dev. Post your verdict via `bash scripts/post-verdict.sh` ([INV-56](../../../docs/pipeline/invariants.md)); the helper appends the `Review Session: \`<id>\`` trailer AND the `Review Agent: <name>` discriminator line from the args you pass (do NOT hand-write them) — the discriminator is how the wrapper attributes your verdict among N agents posting under the same identity. The unanimous rule is the cross-agent expression of this gate's own "any blocking finding → FAIL" philosophy.
 
 ## Who submits the GitHub-native PR action (INV-52)
 
-> **The review WRAPPER — not the agent — owns the GitHub-native PR review/merge action.** The agent's only output is the verdict **comment** on the issue. The wrapper reads it and acts:
+> **The review WRAPPER — not the agent — owns the GitHub-native PR review/merge action.** The agent's only output is the verdict **comment** on the issue (posted via `post-verdict.sh`, [INV-56](../../../docs/pipeline/invariants.md)). The wrapper reads it and acts:
 >
 > | Agent posts (issue comment) | Wrapper submits (GitHub-native, after its gates) |
 > |---|---|
@@ -109,19 +109,29 @@ When failing, provide SPECIFIC and ACTIONABLE feedback:
 
 > **The Findings->Decision Gate MUST be executed before posting any output. If it has not yet been run, STOP and run it now.**
 
-Post the review result as a comment on the issue (NOT the PR). **The comment is your ONLY output** — the wrapper performs the GitHub-native PR action (see [Who submits the GitHub-native PR action](#who-submits-the-github-native-pr-action-inv-52)).
+Post the review result as a comment on the issue (NOT the PR), **only** via the deterministic helper — never a bare `gh issue comment` for the verdict ([INV-56](../../../docs/pipeline/invariants.md)). **The comment is your ONLY output** — the wrapper performs the GitHub-native PR action (see [Who submits the GitHub-native PR action](#who-submits-the-github-native-pr-action-inv-52)).
+
+```bash
+# Write your verdict BODY to a file (a FILE avoids shell-quoting mangling of a
+# multi-line body with backticks/quotes), then post it. The helper prepends the
+# canonical "Review PASSED" / "Review findings:" first line and appends the
+# `Review Session:` / `Review Agent:` trailer for you (both ids are in your prompt):
+bash scripts/post-verdict.sh <issue-number> <pass|fail> <body-file> <agent-name> <session-id>
+```
 
 **Action pairing — these MUST match:**
-| Verdict | Your action (the agent) | The wrapper's action (GitHub-native, after its gates) |
+| Verdict | Your action (the agent, via `post-verdict.sh`) | The wrapper's action (GitHub-native, after its gates) |
 |---------|--------------|------------------|
-| PASS | Post "Review PASSED" on the issue | Submit `--approve` + `gh pr merge` (unless `no-auto-close`) |
-| FAIL | Post "Review findings:" on the issue | Submit `--request-changes` → `reviewDecision = CHANGES_REQUESTED` |
+| PASS | `post-verdict.sh … pass …` on the issue | Submit `--approve` + `gh pr merge` (unless `no-auto-close`) |
+| FAIL | `post-verdict.sh … fail …` on the issue | Submit `--request-changes` → `reviewDecision = CHANGES_REQUESTED` |
 
-**It is FORBIDDEN to post "Review findings:" with blocking items AND "Review PASSED". These are mutually exclusive.** It is also FORBIDDEN for the agent to submit ANY GitHub PR review (`gh pr review --approve` / `--request-changes`) or `gh pr merge` — that is the wrapper's job ([INV-52](../../../docs/pipeline/invariants.md)).
+**It is FORBIDDEN to produce a "Review findings:" verdict with blocking items AND treat it as a pass. These are mutually exclusive.** It is also FORBIDDEN for the agent to submit ANY GitHub PR review (`gh pr review --approve` / `--request-changes`) or `gh pr merge` — that is the wrapper's job ([INV-52](../../../docs/pipeline/invariants.md)).
+
+The body you write to the file (the helper guarantees the first line + trailer around it):
 
 For PASS:
 ```
-Review PASSED - All checklist items verified, code quality good. E2E verification completed.
+All checklist items verified, code quality good. E2E verification completed.
 
 Findings->Decision Gate: 0 blocking findings.
 
@@ -137,8 +147,6 @@ Summary:
 
 For FAIL:
 ```
-Review findings:
-
 Findings->Decision Gate: N blocking finding(s) — FAIL.
 
 1. **[BLOCKING] E2E test failure** - TC-HP-001 failed

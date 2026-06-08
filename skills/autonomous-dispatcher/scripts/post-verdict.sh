@@ -102,7 +102,12 @@ fi
 
 # --- Read the body (file or stdin) ----------------------------------------
 
-MAX_BODY_BYTES=65536
+# Cap on the agent-supplied body. GitHub's hard comment limit is 65536 bytes;
+# we gate the RAW body well under that (the prepended first line + the ~60-char
+# trailer the helper adds are negligible overhead). ${#var} counts characters,
+# so this is a character cap — the small slack vs. a strict byte cap is
+# intentional headroom, not an off-by-one.
+MAX_BODY_CHARS=60000
 read_body() {
   if [[ "$BODY_FILE" == "-" ]]; then
     cat
@@ -123,8 +128,8 @@ if [[ $READ_RC -ne 0 ]]; then
   exit 2
 fi
 
-if [[ ${#BODY_TEXT} -gt $MAX_BODY_BYTES ]]; then
-  echo "Error: body too long (${#BODY_TEXT} bytes, max ${MAX_BODY_BYTES})" >&2
+if [[ ${#BODY_TEXT} -gt $MAX_BODY_CHARS ]]; then
+  echo "Error: body too long (${#BODY_TEXT} chars, max ${MAX_BODY_CHARS})" >&2
   exit 2
 fi
 
