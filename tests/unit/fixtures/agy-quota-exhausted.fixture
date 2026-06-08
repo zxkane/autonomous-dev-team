@@ -1,0 +1,7 @@
+I Antigravity 2.0 CLI (print mode)
+I Print mode: conversation=11111111-2222-3333-4444-555555555555
+I Model ID Gemini 3.5 Flash (High) not in local config, defaulting to CCPA
+I Starting review turn
+E agent executor error: RESOURCE_EXHAUSTED (code 429): Individual quota reached. Contact your administrator to enable overages. Resets in 33h48m45s.
+E Failed to get OAuth token: oauth: cannot fetch token: 401 Unauthorized. You are not logged into Antigravity.
+I print mode terminated

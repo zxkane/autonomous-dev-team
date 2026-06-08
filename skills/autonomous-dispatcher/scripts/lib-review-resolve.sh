@@ -116,3 +116,48 @@ _resolve_review_agent_launcher() {
   per_agent_var="AGENT_REVIEW_LAUNCHER_${suffix}"
   printf '%s' "${!per_agent_var:-}"
 }
+
+# _review_fanout_model_label <agent...>   (INV-58, issue #205)
+#
+# Render a human-facing summary of the model EACH fan-out agent will actually
+# review with — the per-agent RESOLVED model (`_resolve_review_agent_model`),
+# NOT the shared `AGENT_REVIEW_MODEL` default. For the `Fanning out …` log line.
+#
+# Before #205 the fan-out line printed `(shared model: ${AGENT_REVIEW_MODEL})` —
+# which, for a fleet with per-agent overrides (e.g. `AGENT_REVIEW_MODEL_AGY=
+# "Gemini 3.5 Flash (High)"`), actively MISLED the operator into suspecting a
+# model-pin bug when the per-agent model was in fact resolved correctly. This
+# label reflects the real per-agent resolution.
+#
+# Output shape:
+#   - all agents resolve to the SAME id → `model: <id>` (the common case;
+#     equivalent to the old shared-model line but rendering the RESOLVED value).
+#   - any divergence → `models: <agent>=<id>, <agent>=<id>, …` so each member's
+#     effective model is visible at a glance.
+# A resolved-empty model is rendered as the lib's `sonnet` default (the same
+# `${...:-sonnet}` the run_agent call applies), so the label matches the value
+# the agent is actually launched with.
+_review_fanout_model_label() {
+  local agent resolved
+  local -a pairs=()
+  local first="" uniform=1
+  for agent in "$@"; do
+    resolved="$(_resolve_review_agent_model "$agent")"
+    resolved="${resolved:-sonnet}"
+    pairs+=("${agent}=${resolved}")
+    if [[ -z "$first" ]]; then
+      first="$resolved"
+    elif [[ "$resolved" != "$first" ]]; then
+      uniform=0
+    fi
+  done
+  if [[ "${#pairs[@]}" -eq 0 ]]; then
+    printf 'model: %s' "${AGENT_REVIEW_MODEL:-sonnet}"
+  elif [[ "$uniform" -eq 1 ]]; then
+    printf 'model: %s' "$first"
+  else
+    local joined
+    joined=$(printf '%s, ' "${pairs[@]}")
+    printf 'models: %s' "${joined%, }"
+  fi
+}
