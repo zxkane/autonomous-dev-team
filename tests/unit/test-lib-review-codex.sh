@@ -74,6 +74,19 @@ assert_contains() {
   fi
 }
 
+assert_not_contains() {
+  local desc="$1" needle="$2" haystack="$3"
+  if [[ "$haystack" != *"$needle"* ]]; then
+    echo -e "  ${GREEN}PASS${NC}: $desc"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${NC}: $desc"
+    echo "      should NOT contain='$needle'"
+    echo "      haystack='${haystack:0:300}'"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
 [[ -f "$LIB" ]] || {
   echo -e "  ${RED}FAIL${NC}: $LIB not found — implementation step required first"
   echo "  PASS: $PASS"
@@ -497,6 +510,320 @@ assert_grep "TC-CXR-ISO-04 wrapper sources lib-review-codex.sh" \
 # TC-CXR-ISO-06 — CI shellcheck job lists the new lib.
 assert_grep "TC-CXR-ISO-06 CI shellcheck includes lib-review-codex.sh" \
   'lib-review-codex.sh' "$CI"
+
+# ===========================================================================
+# INV-59 (#209): codex transient stream-error retry + drop reason
+# ===========================================================================
+# A codex review member whose model stream dies with an upstream 5xx exhausts
+# its 5/5 SSE reconnects and emits turn.failed. Pre-#209 the wrapper dropped it
+# as an opaque `unavailable` with no reason, and a launch-level turn.failed
+# early-returned from the resume loop so a brief blip was never ridden out.
+# These tests pin the codex-shaped drop-reason classifier (mirroring agy's
+# INV-58) + the resume-loop's transient-stream-error retry.
+
+# Scripted JSONL turn fragments for the stream-error path -----------------
+# A turn.failed preceded by the full Reconnecting... N/5 ladder (the live
+# repro: codex's CLI retries the SSE stream 5 times then fails the turn).
+STREAM_ERROR_TURN='{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"s0","type":"command_execution","command":"gh pr view 209 --json mergeable","aggregated_output":"MERGEABLE"}}
+{"type":"error","message":"Reconnecting... 1/5 (stream disconnected before completion: The server had an error while processing your request. Sorry about that!)"}
+{"type":"error","message":"Reconnecting... 5/5 (stream disconnected before completion: The server had an error while processing your request. Sorry about that!)"}
+{"type":"turn.failed","error":{"message":"stream disconnected before completion: The server had an error while processing your request. Sorry about that!"}}'
+
+# A turn.failed with the stream-error message but NO Reconnecting ladder
+# visible (e.g. the ladder rolled off / a single-shot failure).
+STREAM_FAIL_NO_LADDER='{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"sf0","type":"reasoning","text":"loading diff"}}
+{"type":"turn.failed","error":{"message":"stream disconnected before completion: The server had an error while processing your request."}}'
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-CODEX-DROP-DET: _codex_log_has_stream_error ==="
+# ---------------------------------------------------------------------------
+DLOG=$(mktemp)
+trap 'rm -f "$TMPLOG" "$REC_RESUME_ARGV" "$REC_RESUME_CALLS" "$DLOG"' EXIT
+
+# TC-CODEX-DROP-DET-01 — full Reconnecting ladder + turn.failed → stream error
+{ echo '{"type":"thread.started","thread_id":"aaaa"}'; echo "$STREAM_ERROR_TURN"; } > "$DLOG"
+_codex_log_has_stream_error "$DLOG"; assert_eq "TC-CODEX-DROP-DET-01 ladder + turn.failed → rc 0 (stream error)" 0 "$?"
+
+# TC-CODEX-DROP-DET-02 — a clean gather/narration turn (#198 case) → NO stream error
+{ echo '{"type":"thread.started","thread_id":"aaaa"}'; echo "$NARRATION_TURN"; } > "$DLOG"
+_codex_log_has_stream_error "$DLOG"; assert_eq "TC-CODEX-DROP-DET-02 clean no-verdict turn → rc 1 (no over-claim)" 1 "$?"
+
+# TC-CODEX-DROP-DET-03 — a clean verdict turn → NO stream error
+{ echo '{"type":"thread.started","thread_id":"aaaa"}'; echo "$VERDICT_TURN"; } > "$DLOG"
+_codex_log_has_stream_error "$DLOG"; assert_eq "TC-CODEX-DROP-DET-03 verdict turn → rc 1 (no stream error)" 1 "$?"
+
+# TC-CODEX-DROP-DET-04 — turn.failed stream error, no ladder → stream error
+{ echo '{"type":"thread.started","thread_id":"aaaa"}'; echo "$STREAM_FAIL_NO_LADDER"; } > "$DLOG"
+_codex_log_has_stream_error "$DLOG"; assert_eq "TC-CODEX-DROP-DET-04 turn.failed (no ladder) → rc 0" 0 "$?"
+
+# TC-CODEX-DROP-DET-05 — empty / missing / empty-arg log → rc 1, no crash
+: > "$DLOG"
+_codex_log_has_stream_error "$DLOG"; assert_eq "TC-CODEX-DROP-DET-05a empty log → rc 1" 1 "$?"
+_codex_log_has_stream_error "/nonexistent/path/$$"; assert_eq "TC-CODEX-DROP-DET-05b missing log → rc 1" 1 "$?"
+_codex_log_has_stream_error ""; assert_eq "TC-CODEX-DROP-DET-05c empty arg → rc 1" 1 "$?"
+
+# TC-CODEX-DROP-DET-06 — a tool-output line whose text merely contains the
+# literal substring "turn.failed" (codex grepping its own JSONL log) must NOT be
+# mis-detected. The detector keys on the EVENT type, not any substring on the
+# line. Mirrors TC-CXR-DET-08 for the verdict detector.
+{ echo '{"type":"thread.started","thread_id":"aaaa"}'
+  echo '{"type":"turn.started"}'
+  echo '{"type":"item.completed","item":{"type":"tool_call","name":"shell","output":"grep hit: \"type\":\"turn.failed\" in transcript"}}'
+  echo '{"type":"turn.completed","usage":{"input_tokens":5000}}'; } > "$DLOG"
+_codex_log_has_stream_error "$DLOG"; assert_eq "TC-CODEX-DROP-DET-06 tool-output substring not a false stream error → rc 1" 1 "$?"
+
+# TC-CODEX-DROP-DET-07 — committed fixture (sanitized real codex stream-error log).
+_codex_log_has_stream_error "$FIXTURES/codex-stream-error-turn.jsonl"
+assert_eq "TC-CODEX-DROP-DET-07 committed stream-error fixture → rc 0" 0 "$?"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-CODEX-DROP-CLS: _classify_codex_drop_reason ==="
+# ---------------------------------------------------------------------------
+# TC-CODEX-DROP-CLS-01 — ladder + turn.failed → stream-error:5/5 (ladder depth)
+{ echo '{"type":"thread.started","thread_id":"aaaa"}'; echo "$STREAM_ERROR_TURN"; } > "$DLOG"
+assert_eq "TC-CODEX-DROP-CLS-01 ladder + turn.failed → stream-error:5/5" \
+  "stream-error:5/5" "$(_classify_codex_drop_reason "$DLOG")"
+
+# TC-CODEX-DROP-CLS-02 — turn.failed, no ladder → bare stream-error
+{ echo '{"type":"thread.started","thread_id":"aaaa"}'; echo "$STREAM_FAIL_NO_LADDER"; } > "$DLOG"
+assert_eq "TC-CODEX-DROP-CLS-02 turn.failed no ladder → stream-error" \
+  "stream-error" "$(_classify_codex_drop_reason "$DLOG")"
+
+# TC-CODEX-DROP-CLS-03 — clean no-verdict turn (#198) → empty (no over-claim)
+{ echo '{"type":"thread.started","thread_id":"aaaa"}'; echo "$NARRATION_TURN"; } > "$DLOG"
+assert_eq "TC-CODEX-DROP-CLS-03 clean no-verdict turn → empty (caller keeps bare unavailable)" \
+  "" "$(_classify_codex_drop_reason "$DLOG")"
+
+# TC-CODEX-DROP-CLS-04 — verdict turn → empty
+{ echo '{"type":"thread.started","thread_id":"aaaa"}'; echo "$VERDICT_TURN"; } > "$DLOG"
+assert_eq "TC-CODEX-DROP-CLS-04 verdict turn → empty" \
+  "" "$(_classify_codex_drop_reason "$DLOG")"
+
+# TC-CODEX-DROP-CLS-05 — empty / missing / empty-arg → empty, no crash
+: > "$DLOG"
+assert_eq "TC-CODEX-DROP-CLS-05a empty log → empty" "" "$(_classify_codex_drop_reason "$DLOG")"
+assert_eq "TC-CODEX-DROP-CLS-05b missing log → empty" "" "$(_classify_codex_drop_reason "/nonexistent/path/$$")"
+assert_eq "TC-CODEX-DROP-CLS-05c empty arg → empty" "" "$(_classify_codex_drop_reason "")"
+
+# TC-CODEX-DROP-CLS-06 — runs cleanly under set -euo pipefail (no abort)
+cls06=$(
+  set -euo pipefail
+  source "$LIB"
+  printf '%s\n' "$STREAM_ERROR_TURN" > "$DLOG"
+  out=$(_classify_codex_drop_reason "$DLOG")
+  echo "rc=$?|$out"
+)
+assert_eq "TC-CODEX-DROP-CLS-06 no crash under set -euo pipefail" \
+  "rc=0|stream-error:5/5" "$cls06"
+
+# TC-CODEX-DROP-CLS-07 — committed fixture → stream-error:5/5
+assert_eq "TC-CODEX-DROP-CLS-07 committed fixture → stream-error:5/5" \
+  "stream-error:5/5" "$(_classify_codex_drop_reason "$FIXTURES/codex-stream-error-turn.jsonl")"
+
+# TC-CODEX-DROP-CLS-08 — fail-safe contract holds for a BARE call (not in a
+# command substitution) under `set -euo pipefail` with a turn.failed stream
+# error that carries NO reconnect ladder. This is the path CLS-06 cannot cover:
+# CLS-06 calls the classifier inside `out=$(…)`, which suppresses errexit for the
+# function body, AND it uses a log WITH a ladder so the inner ladder pipeline
+# matches and exits 0 anyway. Only a BARE call + a NO-LADDER log exercises the
+# ladder-extraction pipeline's grep-no-match rc 1 under pipefail at the function's
+# own errexit scope — the function MUST still reach its `return 0`. A regression
+# guard: the helper's docstring promises "rc 0 ALWAYS — fail-safe under
+# `set -euo pipefail`", so an unprotected pipeline that aborts before `return 0`
+# is a contract violation (codex review finding on PR #211).
+cls08=$(
+  set -euo pipefail
+  source "$LIB"
+  printf '%s\n' "$STREAM_FAIL_NO_LADDER" > "$DLOG"
+  _classify_codex_drop_reason "$DLOG"   # BARE call — errexit applies to the body
+  echo "REACHED_RETURN_0"               # only prints if the function did not abort
+)
+assert_eq "TC-CODEX-DROP-CLS-08 bare call, no-ladder stream error → no errexit abort" \
+  $'stream-error\nREACHED_RETURN_0' "$cls08"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-CODEX-DROP-PHR: _codex_drop_reason_phrase ==="
+# ---------------------------------------------------------------------------
+cphr01=$(_codex_drop_reason_phrase "stream-error:5/5")
+assert_contains "TC-CODEX-DROP-PHR-01a phrase names stream-error" "stream-error" "$cphr01"
+assert_contains "TC-CODEX-DROP-PHR-01b phrase carries the reconnect ladder depth" "5/5" "$cphr01"
+assert_contains "TC-CODEX-DROP-PHR-01c phrase mentions reconnects" "reconnect" "$cphr01"
+
+cphr02=$(_codex_drop_reason_phrase "stream-error")
+assert_contains "TC-CODEX-DROP-PHR-02a phrase names stream-error (no depth)" "stream-error" "$cphr02"
+assert_not_contains "TC-CODEX-DROP-PHR-02b no spurious '5/5' when no ladder depth" "5/5" "$cphr02"
+
+assert_eq "TC-CODEX-DROP-PHR-03 empty token → empty phrase" "" "$(_codex_drop_reason_phrase "")"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-CODEX-DROP-RETRY: resume loop rides out a transient stream error ==="
+# ---------------------------------------------------------------------------
+# The pre-#209 controller early-returns when turn 1's rc is non-zero AND not
+# 124/137 — so a launch-level turn.failed stream error never entered the resume
+# loop. The fix: a non-zero/non-timeout rc WITH a fresh stream-error signal in
+# the log must NOT early-return; it falls through to the bounded resume loop so a
+# brief blip is ridden out. A genuine non-stream launch failure still
+# early-returns (unchanged). A sustained outage exhausts the bound (graceful).
+
+# TC-CODEX-DROP-RETRY-01 — turn 1 rc 1 WITH a stream error, resume posts verdict
+# → enters the loop, ≥1 resume fires, converges to rc 0. run_agent appends a
+# stream-error turn and returns 1; resume_agent appends a verdict turn.
+retry01=$(
+  set -uo pipefail
+  source "$LIB"
+  sandbox=$(mktemp -d); log="$sandbox/agent.log"
+  rc1=0; res=0
+  run_agent()    { printf '%s\n' "$STREAM_ERROR_TURN" >> "$log"; return 1; }
+  resume_agent() { res=$((res+1)); printf '%s\n' "$VERDICT_TURN" >> "$log"; return 0; }
+  CODEX_REVIEW_LOG="$log" CODEX_REVIEW_MAX_RESUMES=3 AGENT_REVIEW_TIMEOUT=1h \
+    _run_codex_review_with_resume sid p m n
+  rc=$?
+  echo "$rc|$res"
+  rm -rf "$sandbox"
+)
+assert_eq "TC-CODEX-DROP-RETRY-01 turn-1 stream-error rc1 + verdict resume → enters loop, converges (rc 0, ≥1 resume)" "0|1" "$retry01"
+
+# TC-CODEX-DROP-RETRY-02 — turn 1 rc 1 WITHOUT a stream error (genuine launch
+# failure) → early-returns rc 1 with 0 resumes (unchanged behavior). run_agent
+# writes NOTHING to the log (no stream error) and returns 1.
+retry02=$(
+  set -uo pipefail
+  source "$LIB"
+  sandbox=$(mktemp -d); log="$sandbox/agent.log"; : > "$log"
+  run_calls=0; resume_calls=0
+  run_agent()    { run_calls=$((run_calls+1)); return 1; }
+  resume_agent() { resume_calls=$((resume_calls+1)); return 0; }
+  CODEX_REVIEW_LOG="$log" CODEX_REVIEW_MAX_RESUMES=3 AGENT_REVIEW_TIMEOUT=1h \
+    _run_codex_review_with_resume sid p m n
+  echo "$?|${run_calls}|${resume_calls}"
+  rm -rf "$sandbox"
+)
+assert_eq "TC-CODEX-DROP-RETRY-02 genuine launch failure (no stream error) early-returns, 0 resumes" "1|1|0" "$retry02"
+
+# TC-CODEX-DROP-RETRY-03 — sustained: turn 1 rc 1 with a stream error, EVERY
+# resume also fails with a stream error, max=2 → enters the loop, exhausts the
+# bound (exactly 2 resumes), then degrades — no infinite retry.
+retry03=$(
+  set -uo pipefail
+  source "$LIB"
+  sandbox=$(mktemp -d); log="$sandbox/agent.log"
+  res=0
+  run_agent()    { printf '%s\n' "$STREAM_ERROR_TURN" >> "$log"; return 1; }
+  resume_agent() { res=$((res+1)); printf '%s\n' "$STREAM_ERROR_TURN" >> "$log"; return 1; }
+  CODEX_REVIEW_LOG="$log" CODEX_REVIEW_MAX_RESUMES=2 AGENT_REVIEW_TIMEOUT=1h \
+    _run_codex_review_with_resume sid p m n
+  rc=$?
+  echo "$res"
+  rm -rf "$sandbox"
+)
+assert_eq "TC-CODEX-DROP-RETRY-03 sustained stream error, max=2 → bounded (exactly 2 resumes)" "2" "$retry03"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-CODEX-DROP-LOOP: drop-reason augmentation loop (behavioral) ==="
+# ---------------------------------------------------------------------------
+# Mirror the wrapper's per-agent _dropped_reasons loop body verbatim against the
+# real libs (agy + codex). This is the issue's mandatory regression: it FAILS
+# before the fix (no codex branch → a stream-error codex reads identically to a
+# launch failure; a fan-out dropping BOTH agy and codex lists a reason only for
+# agy). Sources lib-review-agy.sh so the both-dropped case exercises both libs.
+AGY_LIB="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-review-agy.sh"
+# shellcheck source=../../skills/autonomous-dispatcher/scripts/lib-review-agy.sh
+source "$AGY_LIB"
+
+# build_dropped_reasons <agent>:<verdict>:<logfixture> ...
+#   Mirrors the wrapper's per-agent loop body verbatim against the real libs:
+#   for an `unavailable` agy → agy classifier; for an `unavailable` codex →
+#   codex classifier. Echoes the assembled `_dropped_reasons` (trailing `; `
+#   trimmed).
+build_dropped_reasons() {
+  local spec agent verdict logf reasons="" tok
+  for spec in "$@"; do
+    agent="${spec%%:*}"; spec="${spec#*:}"
+    verdict="${spec%%:*}"; logf="${spec#*:}"
+    [[ "$verdict" == "unavailable" ]] || continue
+    if [[ "$agent" == "agy" ]]; then
+      tok=$(_classify_agy_drop_reason "$logf")
+      [[ -n "$tok" ]] && reasons+="${agent}: $(_agy_drop_reason_phrase "$tok"); "
+    elif [[ "$agent" == "codex" ]]; then
+      tok=$(_classify_codex_drop_reason "$logf")
+      [[ -n "$tok" ]] && reasons+="${agent}: $(_codex_drop_reason_phrase "$tok"); "
+    fi
+  done
+  printf '%s' "${reasons%; }"
+}
+
+# TC-CODEX-DROP-LOOP-01 — codex dropped on a stream-error log → reason names codex + stream-error
+loop01=$(build_dropped_reasons "codex:unavailable:$FIXTURES/codex-stream-error-turn.jsonl")
+assert_contains "TC-CODEX-DROP-LOOP-01 stream-error loop reason names codex + stream-error" \
+  "codex: stream-error" "$loop01"
+
+# TC-CODEX-DROP-LOOP-02 — codex dropped on a generic/no-signal log → empty reason
+{ echo '{"type":"thread.started","thread_id":"aaaa"}'; echo "$NARRATION_TURN"; } > "$DLOG"
+loop02=$(build_dropped_reasons "codex:unavailable:$DLOG")
+assert_eq "TC-CODEX-DROP-LOOP-02 generic codex drop → empty reason (bare unavailable)" "" "$loop02"
+
+# TC-CODEX-DROP-LOOP-03 — BOTH agy (quota) AND codex (stream-error) dropped in the
+# SAME fan-out → reasons list a DISTINCT clause for each (the AC #2 regression
+# guard on the assembly loop only handling agy).
+loop03=$(build_dropped_reasons \
+  "agy:unavailable:$FIXTURES/agy-quota-exhausted.fixture" \
+  "codex:unavailable:$FIXTURES/codex-stream-error-turn.jsonl")
+assert_contains "TC-CODEX-DROP-LOOP-03a both-dropped lists the agy quota reason" "agy: quota-exhausted" "$loop03"
+assert_contains "TC-CODEX-DROP-LOOP-03b both-dropped lists the codex stream-error reason" "codex: stream-error" "$loop03"
+
+# TC-CODEX-DROP-LOOP-04 — a non-codex/non-agy unavailable agent adds no reason
+loop04=$(build_dropped_reasons "kiro:unavailable:$FIXTURES/codex-stream-error-turn.jsonl")
+assert_eq "TC-CODEX-DROP-LOOP-04 non-agy/non-codex unavailable agent adds no reason" "" "$loop04"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-CODEX-DROP-SRC: wrapper wiring (source-of-truth) ==="
+# ---------------------------------------------------------------------------
+assert_grep "TC-CODEX-DROP-SRC-01 wrapper captures the per-agent codex log path (AGENT_CODEX_LOGS)" \
+  'AGENT_CODEX_LOGS' "$WRAPPER"
+assert_grep "TC-CODEX-DROP-SRC-02 wrapper calls _classify_codex_drop_reason" \
+  '_classify_codex_drop_reason' "$WRAPPER"
+assert_grep "TC-CODEX-DROP-SRC-03 dropped-agent reason assembly interpolates the codex reason phrase" \
+  '_codex_drop_reason_phrase' "$WRAPPER"
+# TC-CODEX-DROP-SRC-04 — bash -n parses both files
+if bash -n "$LIB" 2>/dev/null; then
+  echo -e "  ${GREEN}PASS${NC}: TC-CODEX-DROP-SRC-04a lib-review-codex.sh parses (bash -n)"; PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-CODEX-DROP-SRC-04a lib-review-codex.sh fails bash -n"; FAIL=$((FAIL + 1))
+fi
+if bash -n "$WRAPPER" 2>/dev/null; then
+  echo -e "  ${GREEN}PASS${NC}: TC-CODEX-DROP-SRC-04b autonomous-review.sh parses (bash -n)"; PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-CODEX-DROP-SRC-04b autonomous-review.sh fails bash -n"; FAIL=$((FAIL + 1))
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-CODEX-DROP-REG: regression ==="
+# ---------------------------------------------------------------------------
+# TC-CODEX-DROP-REG-01 — a stream-error codex drop classifies DISTINCTLY from a
+# generic/no-verdict drop (the core regression: pre-fix both produce no reason).
+{ echo '{"type":"thread.started","thread_id":"aaaa"}'; echo "$STREAM_ERROR_TURN"; } > "$DLOG"
+reg_stream=$(_classify_codex_drop_reason "$DLOG")
+{ echo '{"type":"thread.started","thread_id":"aaaa"}'; echo "$NARRATION_TURN"; } > "$DLOG"
+reg_generic=$(_classify_codex_drop_reason "$DLOG")
+if [[ "$reg_stream" != "$reg_generic" && -n "$reg_stream" ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-CODEX-DROP-REG-01 stream-error drop classified distinctly from a no-verdict drop"; PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-CODEX-DROP-REG-01 not distinguished (stream='$reg_stream' generic='$reg_generic')"; FAIL=$((FAIL + 1))
+fi
+
+# TC-CODEX-DROP-REG-02 — a clean no-verdict turn (#198) is NOT misreported as a
+# stream error (no over-claim).
+assert_eq "TC-CODEX-DROP-REG-02 clean no-verdict turn not misreported as stream-error" \
+  "" "$reg_generic"
 
 # ---------------------------------------------------------------------------
 echo ""
