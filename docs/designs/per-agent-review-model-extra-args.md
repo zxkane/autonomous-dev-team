@@ -142,3 +142,43 @@ review side, and the all-unset / N=1 byte-for-byte carve-out.
   changes. (Note "no change".)
 - `state-machine.md` — no label transition changes. (Note "no change".)
 - Dev side, dispatcher, `review-<N>.pid`, `reviewing` label.
+
+---
+
+## #212 addendum: the resolved extra-args must reach `resume_agent` too
+
+**Bug found after #168 shipped.** `run_agent` (turn 1) tokenizes
+`AGENT_DEV_EXTRA_ARGS`; `resume_agent` (subsequent turns) tokenizes
+`AGENT_REVIEW_EXTRA_ARGS` — two different vars for the same concept. The #168
+wiring aliased the resolved per-agent value onto **only** `AGENT_DEV_EXTRA_ARGS`,
+justified by "the review wrapper never resumes". That justification is **false
+for codex**: the codex lane's gather-only turns route through
+`lib-review-codex.sh::_run_codex_review_with_resume`, which calls `resume_agent`
+(INV-51). On resume, `resume_agent` read the **shared** `AGENT_REVIEW_EXTRA_ARGS`,
+dropping the per-agent `AGENT_REVIEW_EXTRA_ARGS_CODEX` override. A "dev=kiro,
+review fleet includes codex" project sets a shared
+`AGENT_REVIEW_EXTRA_ARGS="--trust-all-tools"` (kiro's flag); `codex exec resume`
+rejects it with exit 2, every resume fails, and codex is dropped `unavailable` on
+every review. A claude-dev project sets no shared review var, so its codex resume
+read an empty shared value and ran clean — hence "flaky on host X, fine on host Y".
+
+**Fix (Option 1, wrapper layer).** Resolve the per-agent review extra-args ONCE
+(`_resolved_review_extra_args`) inside the per-agent subshell and assign it to
+**both** `AGENT_DEV_EXTRA_ARGS` and `AGENT_REVIEW_EXTRA_ARGS`. Wrapper-local,
+zero dev-side blast radius, keeps per-agent resolution where the model/launcher
+overrides already live.
+
+**Subshell scoping (the one real correctness risk).** The fix writes
+`AGENT_REVIEW_EXTRA_ARGS`, a var the parent fan-out loop also reads. The
+assignment happens inside the per-agent `( … )` subshell, so it cannot mutate the
+parent or a sibling. TC-CXR-XA-ISO-01 pins this.
+
+**Out of scope (deferred follow-up).** The deeper smell — `run_agent` and
+`resume_agent` reading two different vars — should be unified in `lib-agent.sh`,
+but that lib change has a second caller (`autonomous-dev.sh` dev-resume) and
+carries dev-side blast radius this fix deliberately avoids. Captured as a separate
+issue.
+
+**Invariant.** This is a fix to the existing **INV-41** (no new INV-NN); the
+INV-41 plumbing note + `review-agent-flow.md` per-agent paragraph are updated to
+state the dual-var alias.

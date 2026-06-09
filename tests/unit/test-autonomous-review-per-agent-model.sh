@@ -114,8 +114,17 @@ assert_grep "TC-PAM-SRC-03 run_agent uses resolved per-agent model var" \
   'run_agent .*"\$\{_agent_model:-sonnet\}"' "$WRAPPER"
 assert_grep "TC-PAM-SRC-04 fan-out resolves per-agent extra-args" \
   '_resolve_review_agent_extra_args' "$WRAPPER"
+# #212: the fan-out resolves the per-agent review extra-args ONCE into
+# _resolved_review_extra_args, then aliases it onto BOTH the var run_agent reads
+# (AGENT_DEV_EXTRA_ARGS, turn 1) AND the var resume_agent reads
+# (AGENT_REVIEW_EXTRA_ARGS, codex's gather-only resume path — INV-51). Aliasing
+# onto AGENT_DEV alone dropped the per-agent _CODEX override on resume.
+assert_grep "TC-PAM-SRC-05pre resolver result captured once into _resolved_review_extra_args" \
+  '_resolved_review_extra_args=.*_resolve_review_agent_extra_args' "$WRAPPER"
 assert_grep "TC-PAM-SRC-05 resolved extra-args assigned to AGENT_DEV_EXTRA_ARGS (run_agent's var)" \
-  'AGENT_DEV_EXTRA_ARGS=.*_resolve_review_agent_extra_args' "$WRAPPER"
+  'AGENT_DEV_EXTRA_ARGS="\$_resolved_review_extra_args"' "$WRAPPER"
+assert_grep "TC-PAM-SRC-05b resolved extra-args ALSO assigned to AGENT_REVIEW_EXTRA_ARGS (resume_agent's var, #212)" \
+  'AGENT_REVIEW_EXTRA_ARGS="\$_resolved_review_extra_args"' "$WRAPPER"
 assert_grep "TC-PAM-SRC-06 _review_agent_key_suffix defined in lib-review-resolve.sh" \
   '_review_agent_key_suffix\(\)' "$RESOLVE_LIB"
 

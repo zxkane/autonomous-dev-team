@@ -825,6 +825,199 @@ fi
 assert_eq "TC-CODEX-DROP-REG-02 clean no-verdict turn not misreported as stream-error" \
   "" "$reg_generic"
 
+# ===========================================================================
+# Issue #212: codex resume honors the per-agent AGENT_REVIEW_EXTRA_ARGS override
+# ===========================================================================
+# `run_agent` (turn 1) reads AGENT_DEV_EXTRA_ARGS; `resume_agent` (subsequent
+# turns) reads AGENT_REVIEW_EXTRA_ARGS — two DIFFERENT vars. The codex review
+# lane is the one CLI that RESUMES (gather-only turn 1 → resume_agent). Before
+# the fix the fan-out subshell aliased the resolved per-agent extra-args onto
+# ONLY AGENT_DEV_EXTRA_ARGS, so codex's `exec resume` read the SHARED
+# AGENT_REVIEW_EXTRA_ARGS and dropped the per-agent _CODEX override — a shared
+# `--trust-all-tools` (set for kiro) crashed `codex exec resume` with exit 2 and
+# codex was dropped `unavailable` on every review. The fix aliases the resolved
+# value onto BOTH vars inside the subshell.
+#
+# Strategy: drive the REAL resume_agent codex branch (lib-agent.sh) with a
+# stubbed `codex` on PATH that records argv, a pre-seeded thread-id sidecar so
+# resume_agent resumes (instead of falling back to a fresh run), and the
+# wrapper's per-agent subshell logic (resolve via lib-review-resolve.sh, assign
+# both vars) replicated faithfully. We assert the codex `exec resume` argv.
+echo ""
+echo "=== TC-CXR-XA: codex resume honors per-agent review extra-args (#212) ==="
+RESOLVE_LIB="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-review-resolve.sh"
+AGENT_LIB="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-agent.sh"
+
+# Build a sandbox once: a stub `codex` (records argv), a stub `timeout`/`env`,
+# a PID dir for the codex thread sidecar.
+XA_ROOT=$(mktemp -d)
+trap 'rm -f "$TMPLOG" "$REC_RESUME_ARGV" "$REC_RESUME_CALLS" "$DLOG"; rm -rf "$XA_ROOT"' EXIT
+XA_BIN="$XA_ROOT/bin"; mkdir -p "$XA_BIN"
+XA_PID="$XA_ROOT/pid"; mkdir -p "$XA_PID"; chmod 700 "$XA_PID"
+
+# `codex` stub: record argv, then act as _codex_capture_thread's upstream by
+# emitting one thread.started line so the capture filter is happy (its output is
+# discarded by the test). The recorder file is given via CODEX_ARGV_FILE.
+cat > "$XA_BIN/codex" <<'EOF'
+#!/bin/bash
+printf '%s\n' "$*" > "${CODEX_ARGV_FILE}"
+echo '{"type":"thread.started","thread_id":"deadbeefdeadbeef"}'
+EOF
+chmod +x "$XA_BIN/codex"
+# `timeout` stub: drop its 3 leading args, exec the rest.
+cat > "$XA_BIN/timeout" <<'EOF'
+#!/bin/bash
+shift 3
+exec "$@"
+EOF
+chmod +x "$XA_BIN/timeout"
+
+XA_SID="abc12345-1111-2222-3333-444444444444"
+XA_ARGV="$XA_ROOT/codex-argv"
+
+# run_codex_resume_argv <shared_extra> <per_agent_codex_extra>
+#   Replicate the wrapper's per-agent codex subshell: source the resolver,
+#   resolve the per-agent extra-args, assign BOTH AGENT_DEV_EXTRA_ARGS and
+#   AGENT_REVIEW_EXTRA_ARGS (the fix), seed the thread sidecar so resume fires,
+#   then call resume_agent. Echo the recorded `codex exec resume` argv.
+run_codex_resume_argv() {
+  local shared="$1" per_codex="$2"
+  : > "$XA_ARGV"
+  PATH="$XA_BIN:$PATH" \
+  AUTONOMOUS_PID_DIR="$XA_PID" \
+  PROJECT_ID="testproj" \
+  PROJECT_DIR="$XA_ROOT" \
+  AGENT_PERMISSION_MODE=auto \
+  CODEX_ARGV_FILE="$XA_ARGV" \
+  AGENT_REVIEW_EXTRA_ARGS="$shared" \
+  AGENT_REVIEW_EXTRA_ARGS_CODEX="$per_codex" \
+  bash -c '
+    source "'"$RESOLVE_LIB"'"
+    source "'"$AGENT_LIB"'"
+    # Seed the codex thread-id sidecar so resume_agent resumes (not fresh).
+    tf=$(AGENT_CMD=codex _codex_thread_file "'"$XA_SID"'")
+    printf "%s\n" "deadbeefdeadbeef" > "$tf"
+    # --- the wrapper per-agent subshell, replicated for codex ---
+    (
+      AGENT_CMD=codex
+      _resolved=$(_resolve_review_agent_extra_args codex)
+      AGENT_DEV_EXTRA_ARGS="$_resolved"
+      AGENT_REVIEW_EXTRA_ARGS="$_resolved"
+      resume_agent "'"$XA_SID"'" "verdict prompt" "model-x" "sess"
+    )
+  ' >/dev/null 2>&1
+  cat "$XA_ARGV"
+}
+
+# TC-CXR-XA-01 — per-agent _CODEX value present, shared value absent.
+xa01=$(run_codex_resume_argv "--trust-all-tools" "-s danger-full-access")
+assert_contains "TC-CXR-XA-01a codex resume argv carries the per-agent -s danger-full-access" \
+  "-s danger-full-access" "$xa01"
+assert_not_contains "TC-CXR-XA-01b codex resume argv does NOT carry the shared --trust-all-tools" \
+  "--trust-all-tools" "$xa01"
+assert_contains "TC-CXR-XA-01c codex resume argv keeps structural 'exec resume'" \
+  "exec resume" "$xa01"
+
+# TC-CXR-XA-02 — shared only (no per-agent key): the shared value reaches resume.
+xa02=$(run_codex_resume_argv "--shared-flag" "")
+assert_contains "TC-CXR-XA-02 shared-only: codex resume argv carries --shared-flag (no regression)" \
+  "--shared-flag" "$xa02"
+
+# TC-CXR-XA-03 — the #212 regression, exercising the REAL resume_agent codex
+# branch (not a replica). This pins the ROOT CAUSE: resume_agent reads
+# AGENT_REVIEW_EXTRA_ARGS, NOT AGENT_DEV_EXTRA_ARGS. The pre-fix wrapper aliased
+# the resolved per-agent value onto ONLY AGENT_DEV_EXTRA_ARGS — so we drive
+# resume_agent with the resolved value on AGENT_DEV only (pre-fix shape) and
+# show the per-agent `-s danger-full-access` does NOT reach codex resume, while
+# the shared `--trust-all-tools` (set on AGENT_REVIEW) DOES → exactly the exit-2
+# drop. Then with the fix's dual assignment the per-agent value reaches resume.
+# If anyone reverts resume_agent to read AGENT_DEV_EXTRA_ARGS, the dual-assign
+# would be unnecessary — but that is a SEPARATE lib change deliberately out of
+# scope; this test documents the contract the wrapper fix depends on.
+run_codex_resume_argv_devonly() {
+  # Replicate the PRE-FIX wrapper subshell: resolved value on AGENT_DEV only.
+  local shared="$1" per_codex="$2"
+  : > "$XA_ARGV"
+  PATH="$XA_BIN:$PATH" \
+  AUTONOMOUS_PID_DIR="$XA_PID" \
+  PROJECT_ID="testproj" \
+  PROJECT_DIR="$XA_ROOT" \
+  AGENT_PERMISSION_MODE=auto \
+  CODEX_ARGV_FILE="$XA_ARGV" \
+  AGENT_REVIEW_EXTRA_ARGS="$shared" \
+  AGENT_REVIEW_EXTRA_ARGS_CODEX="$per_codex" \
+  bash -c '
+    source "'"$RESOLVE_LIB"'"
+    source "'"$AGENT_LIB"'"
+    tf=$(AGENT_CMD=codex _codex_thread_file "'"$XA_SID"'")
+    printf "%s\n" "deadbeefdeadbeef" > "$tf"
+    (
+      AGENT_CMD=codex
+      _resolved=$(_resolve_review_agent_extra_args codex)
+      AGENT_DEV_EXTRA_ARGS="$_resolved"   # PRE-FIX: only the dev var
+      resume_agent "'"$XA_SID"'" "verdict prompt" "model-x" "sess"
+    )
+  ' >/dev/null 2>&1
+  cat "$XA_ARGV"
+}
+xa03_prefix=$(run_codex_resume_argv_devonly "--trust-all-tools" "-s danger-full-access")
+assert_not_contains "TC-CXR-XA-03a pre-fix shape: per-agent -s danger-full-access does NOT reach codex resume (root cause)" \
+  "-s danger-full-access" "$xa03_prefix"
+assert_contains "TC-CXR-XA-03b pre-fix shape: codex resume instead carries the rejected shared --trust-all-tools (→ exit 2 drop)" \
+  "--trust-all-tools" "$xa03_prefix"
+xa03_fixed=$(run_codex_resume_argv "--trust-all-tools" "-s danger-full-access")
+assert_not_contains "TC-CXR-XA-03c with the dual-var fix: codex resume no longer inherits the rejected shared --trust-all-tools" \
+  "--trust-all-tools" "$xa03_fixed"
+
+# TC-CXR-XA-ISO-01 — sibling isolation. The fix writes AGENT_REVIEW_EXTRA_ARGS,
+# a var the PARENT fan-out loop also reads. Assert a codex subshell's assignment
+# does NOT leak back into the parent, and a sibling (kiro) subshell resolves only
+# its own value. Pure-resolver level (no CLI launch needed).
+iso01=$(
+  set -uo pipefail
+  source "$RESOLVE_LIB"
+  AGENT_REVIEW_EXTRA_ARGS="--shared-flag"
+  AGENT_REVIEW_EXTRA_ARGS_CODEX="-s danger-full-access"
+  unset AGENT_REVIEW_EXTRA_ARGS_KIRO 2>/dev/null || true
+  parent_before="$AGENT_REVIEW_EXTRA_ARGS"
+  # codex fan-out subshell mutates AGENT_REVIEW_EXTRA_ARGS (the fix).
+  ( AGENT_CMD=codex
+    _r=$(_resolve_review_agent_extra_args codex)
+    AGENT_DEV_EXTRA_ARGS="$_r"; AGENT_REVIEW_EXTRA_ARGS="$_r"
+    : )
+  parent_after="$AGENT_REVIEW_EXTRA_ARGS"
+  # sibling kiro subshell resolves only its own value (falls back to shared).
+  kiro_seen=$( AGENT_CMD=kiro
+    _r=$(_resolve_review_agent_extra_args kiro)
+    AGENT_DEV_EXTRA_ARGS="$_r"; AGENT_REVIEW_EXTRA_ARGS="$_r"
+    printf '%s' "$AGENT_REVIEW_EXTRA_ARGS" )
+  echo "before=[$parent_before] after=[$parent_after] kiro=[$kiro_seen]"
+)
+assert_contains "TC-CXR-XA-ISO-01a parent AGENT_REVIEW_EXTRA_ARGS unchanged after codex subshell" \
+  "before=[--shared-flag] after=[--shared-flag]" "$iso01"
+assert_contains "TC-CXR-XA-ISO-01b sibling kiro subshell sees only its own (shared fallback) value, not codex's _CODEX override" \
+  "kiro=[--shared-flag]" "$iso01"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-CXR-XA-SRC: wrapper aliases resolved extra-args onto BOTH vars (#212) ==="
+# ---------------------------------------------------------------------------
+# Source-of-truth: the per-agent subshell must assign the resolved review
+# extra-args to AGENT_REVIEW_EXTRA_ARGS (read by resume_agent) in ADDITION to
+# AGENT_DEV_EXTRA_ARGS (read by run_agent). The TC-PAM-SRC-05 grep in
+# test-autonomous-review-per-agent-model.sh covers the AGENT_DEV alias; this
+# pins the AGENT_REVIEW alias here too.
+assert_grep "TC-CXR-XA-SRC-01 wrapper assigns AGENT_REVIEW_EXTRA_ARGS the resolved per-agent value (resume_agent's var)" \
+  'AGENT_REVIEW_EXTRA_ARGS="\$_resolved_review_extra_args"' "$WRAPPER"
+# The misleading "the review wrapper never resumes" claim must be gone (codex does).
+if grep -qE 'review wrapper never resumes' "$WRAPPER"; then
+  echo -e "  ${RED}FAIL${NC}: TC-CXR-XA-SRC-02 stale 'review wrapper never resumes' claim still present in wrapper comment"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${NC}: TC-CXR-XA-SRC-02 stale 'review wrapper never resumes' claim removed"
+  PASS=$((PASS + 1))
+fi
+
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== Summary ==="

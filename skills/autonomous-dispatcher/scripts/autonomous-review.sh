@@ -1288,14 +1288,26 @@ for _agent in "${REVIEW_AGENTS_LIST[@]}"; do
     # set, _agent_model == AGENT_REVIEW_MODEL so the run_agent model arg below
     # is identical to the legacy `${AGENT_REVIEW_MODEL:-sonnet}`.
     _agent_model=$(_resolve_review_agent_model "$_agent")
-    # run_agent (a fresh session) tokenizes AGENT_DEV_EXTRA_ARGS, NOT
-    # AGENT_REVIEW_EXTRA_ARGS (only resume_agent reads the latter, and the
-    # review wrapper never resumes). So assign the RESOLVED review extra-args
-    # to AGENT_DEV_EXTRA_ARGS inside this subshell — that's the var
-    # lib-agent.sh::_parse_extra_args actually consumes on the review path.
+    # Plumb the RESOLVED per-agent review extra-args to BOTH vars the agent
+    # primitives read, so the per-agent override survives every turn (#212):
+    #   - run_agent (turn 1, a fresh session) tokenizes AGENT_DEV_EXTRA_ARGS
+    #     (lib-agent.sh::run_agent → _parse_extra_args AGENT_DEV_EXTRA_ARGS);
+    #   - resume_agent (subsequent turns) tokenizes AGENT_REVIEW_EXTRA_ARGS
+    #     (lib-agent.sh::resume_agent → _parse_extra_args AGENT_REVIEW_EXTRA_ARGS).
+    # The review fan-out DOES resume in one case: the codex lane's gather-only
+    # turns route through lib-review-codex.sh::_run_codex_review_with_resume,
+    # which calls resume_agent (INV-51). Aliasing onto AGENT_DEV_EXTRA_ARGS
+    # alone dropped the per-agent override on that resume — codex inherited the
+    # shared AGENT_REVIEW_EXTRA_ARGS (e.g. kiro's `--trust-all-tools`), which
+    # `codex exec resume` rejects with exit 2, dropping codex `unavailable`.
+    # Resolving ONCE and assigning both keeps turn 1 and every resume on the
+    # same per-agent value. Scope is THIS subshell only — the AGENT_REVIEW_EXTRA_ARGS
+    # write does not leak to the parent fan-out loop or a sibling agent's subshell.
     # The resolver reads the operator-facing review knobs, so operators still
     # configure AGENT_REVIEW_EXTRA_ARGS[_<AGENT>].
-    AGENT_DEV_EXTRA_ARGS=$(_resolve_review_agent_extra_args "$_agent")
+    _resolved_review_extra_args=$(_resolve_review_agent_extra_args "$_agent")
+    AGENT_DEV_EXTRA_ARGS="$_resolved_review_extra_args"
+    AGENT_REVIEW_EXTRA_ARGS="$_resolved_review_extra_args"
     _agent_session_name="review-pr-${PR_NUMBER}-issue-${ISSUE_NUMBER}-${_agent}"
     # Capture the rc explicitly: the subshell inherits `set -e`, so a non-zero
     # run_agent (the exact case the sidecar records — a CLI launch failure)
