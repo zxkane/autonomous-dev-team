@@ -262,8 +262,23 @@ _run_codex_review_with_resume() {
   run_agent "$session_id" "$prompt" "$model" "$session_name" || final_rc=$?
 
   # Return early on a non-timeout launch failure (rc is non-zero and not 124/137)
+  # — EXCEPT a TRANSIENT STREAM ERROR (INV-59, #209). codex's CLI can exhaust its
+  # 5/5 SSE reconnects against a brief upstream 5xx and emit `turn.failed` with a
+  # non-zero rc; that is a RECOVERABLE blip, not a genuine launch misconfig. So
+  # when the log shows a fresh stream error, do NOT early-return — fall through to
+  # the bounded resume loop so the controller issues ANOTHER turn. A brief blip is
+  # ridden out (the next turn succeeds → verdict); a SUSTAINED outage still exits
+  # gracefully when the loop exhausts CODEX_REVIEW_MAX_RESUMES (it does not
+  # converge), and codex is then resolved `unavailable` by the post-window sweep
+  # exactly as before — but now with a `stream-error` drop reason surfaced. A
+  # genuine non-stream launch failure (rc != 0, no stream-error signal) still
+  # early-returns here, unchanged. The stream-error check needs a readable log;
+  # if the log is unreadable we cannot tell, so keep the conservative early-return.
   if [[ "$final_rc" -ne 0 && "$final_rc" -ne 124 && "$final_rc" -ne 137 ]]; then
-    return "$final_rc"
+    if ! { [[ -n "$log" && -f "$log" && -r "$log" ]] && _codex_log_has_stream_error "$log"; }; then
+      return "$final_rc"
+    fi
+    echo "[lib-review-codex] codex turn 1 exited rc ${final_rc} with a transient stream error (upstream 5xx; exhausted SSE reconnects); riding it out via the bounded resume loop (INV-59)." >&2
   fi
 
   # Without a readable log we cannot detect gather-only turns — degrade to the
@@ -322,4 +337,134 @@ _run_codex_review_with_resume() {
   done
 
   return "$final_rc"
+}
+
+# ===========================================================================
+# INV-59 (#209): codex transient stream-error drop-reason detector
+# ===========================================================================
+# WHY this exists
+# ---------------
+# When a codex review member's model stream dies with an upstream server error,
+# codex's CLI retries the SSE stream up to `Reconnecting... 5/5` and then emits
+# `{"type":"turn.failed","error":{"message":"stream disconnected before
+# completion: ..."}}`. The CLI exits non-zero with no verdict comment, so the
+# wrapper's post-window sweep resolves it `unavailable` ([INV-40]) and, before
+# #209, the drop-reason assembly enriched the reason only for `agy` — codex got a
+# bare, opaque `unavailable` indistinguishable from a launch misconfig.
+#
+# This is the codex-shaped sibling of lib-review-agy.sh's quota/auth detector
+# (INV-58): a CLI-specific review-side classifier that reads codex's OWN JSONL
+# event stream (the per-agent log run_agent already writes) and never queries
+# GitHub. It is OBSERVABILITY ONLY — it does NOT change the [INV-40] vote (a
+# server-side 5xx is an infra condition, not a code rejection; promoting it to a
+# deciding FAIL would block merges whenever the provider blips). The retry half
+# of INV-59 lives in _run_codex_review_with_resume above (the early-return now
+# falls through to the bounded resume loop on a fresh stream error).
+
+# _codex_log_has_stream_error <log_file>
+#
+# rc 0 iff codex's JSONL log shows a STREAM/SERVER error signal — a `turn.failed`
+# event whose `error.message` carries `stream disconnected before completion`
+# (the upstream-5xx shape), OR a `Reconnecting... N/5 (stream disconnected ...)`
+# reconnect-ladder error line. rc 1 otherwise — including a clean `turn.completed`
+# with no verdict (the #198 gather/narration case: NOT a stream error, so this
+# never over-claims), a verdict turn, or an empty/missing/unreadable log
+# (fail-safe — the wrapper runs under `set -euo pipefail`, so this MUST NOT abort).
+#
+# Like _codex_log_has_verdict_message, the match keys on the EVENT TYPE scoped to
+# the line shape, not a bare substring anywhere on the line: a `turn.failed`
+# detection requires `"type":"turn.failed"` (the event itself), so a tool_call
+# whose OUTPUT text merely contains the literal substring `turn.failed` (codex
+# grepping its own JSONL log) is NOT a false positive. Single-pass awk, no jq
+# (mirrors _codex_log_has_verdict_message / _codex_capture_thread).
+_codex_log_has_stream_error() {
+  local log_file="${1:-}"
+  [[ -n "$log_file" && -f "$log_file" && -r "$log_file" ]] || return 1
+  local result
+  result=$(awk '
+    {
+      # (1) a turn.failed EVENT carrying the stream-disconnect message. Both
+      #     conjuncts must hold on the SAME JSONL line (codex emits one event per
+      #     line), so a tool_call OUTPUT line containing the literal substring
+      #     "turn.failed" cannot trip it (it would not also be the turn.failed
+      #     event type at the line head).
+      if ($0 ~ /"type":"turn\.failed"/ && $0 ~ /stream disconnected before completion/) {
+        found = 1
+      }
+      # (2) the Reconnecting... N/5 reconnect ladder (an "error" event the CLI
+      #     emits per SSE retry). The "stream disconnected before completion"
+      #     phrase is required so an unrelated "Reconnecting..." log line cannot
+      #     match.
+      if ($0 ~ /"type":"error"/ && $0 ~ /Reconnecting\.\.\./ && $0 ~ /stream disconnected before completion/) {
+        found = 1
+      }
+    }
+    END { if (found) print "yes"; else print "no" }' "$log_file" 2>/dev/null)
+  [[ "$result" == "yes" ]]
+}
+
+# _classify_codex_drop_reason <log_file>
+#
+# Scrape a codex JSONL log for a stream/server error signal. Echoes ONE token on
+# stdout (rc 0 ALWAYS — fail-safe under `set -euo pipefail`, mirrors
+# _classify_agy_drop_reason):
+#
+#   stream-error[:N/5]
+#       — the log shows a turn.failed stream error. The ":N/5" suffix is the
+#         HIGHEST reconnect-ladder depth seen (`Reconnecting... N/5`) — the
+#         operator's "codex retried the stream N times before giving up". Appended
+#         only when the ladder is present in the log.
+#   "" (empty)
+#       — no stream-error signal (the caller keeps the bare `unavailable`). A
+#         clean no-verdict turn (#198) or a verdict turn yields empty — NO
+#         over-claim.
+_classify_codex_drop_reason() {
+  local log_file="${1:-}"
+  [[ -n "$log_file" && -f "$log_file" && -r "$log_file" ]] || return 0
+
+  _codex_log_has_stream_error "$log_file" || return 0
+
+  # Stream error present. Extract the highest reconnect-ladder depth (the `N` in
+  # `Reconnecting... N/5`) when the log shows the ladder. The ERE is anchored on
+  # the "Reconnecting... " literal so unrelated digits never match; `/5` is the
+  # CLI's fixed reconnect cap. grep rc 1 (no ladder line) is expected and consumed
+  # by the `if`, so it never aborts under set -e.
+  local ladder
+  ladder=$(grep -oE 'Reconnecting\.\.\. [0-9]+/5' "$log_file" 2>/dev/null \
+    | grep -oE '[0-9]+/5' | sort -t/ -k1 -n | tail -1)
+
+  if [[ -n "$ladder" ]]; then
+    printf 'stream-error:%s\n' "$ladder"
+  else
+    printf 'stream-error\n'
+  fi
+  return 0
+}
+
+# _codex_drop_reason_phrase <reason-token>
+#
+# Render a token from _classify_codex_drop_reason into a single human-facing
+# clause for the WARN log line + the posted dropped-agent comment. Echoes empty
+# for an empty/unknown token (the caller then keeps the bare `unavailable`
+# wording). rc 0 always.
+#
+#   stream-error:5/5
+#       → "stream-error (upstream 5xx; exhausted 5/5 SSE reconnects, turn.failed)"
+#   stream-error
+#       → "stream-error (upstream 5xx; SSE stream disconnected, turn.failed)"
+_codex_drop_reason_phrase() {
+  local token="${1:-}"
+  case "$token" in
+    stream-error:*)
+      local depth="${token#stream-error:}"
+      printf 'stream-error (upstream 5xx; exhausted %s SSE reconnects, turn.failed)\n' "$depth"
+      ;;
+    stream-error)
+      printf 'stream-error (upstream 5xx; SSE stream disconnected, turn.failed)\n'
+      ;;
+    *)
+      # Empty or unknown token → empty phrase.
+      ;;
+  esac
+  return 0
 }

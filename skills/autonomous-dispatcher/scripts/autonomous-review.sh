@@ -1143,6 +1143,13 @@ declare -A AGENT_LAUNCH_RC=()    # CLI exit code per session id (sidecar-read)
 # Captured here in the parent (NOT the subshell) — the path is deterministic from
 # the agent's session id + project, so no sidecar plumbing is needed.
 declare -a AGENT_AGY_LOGS=()
+# INV-59 (#209): for a `codex` fan-out member, the path of codex's per-agent JSONL
+# event-stream log ($_agent_log — the same file CODEX_REVIEW_LOG points the resume
+# controller at), keyed by index. Empty for a non-codex agent. Read AFTER verdict
+# resolution by _classify_codex_drop_reason when a codex agent was dropped
+# `unavailable`, to scrape the turn.failed stream-error signal. Deterministic
+# path, captured in the parent (no sidecar plumbing) — mirrors AGENT_AGY_LOGS.
+declare -a AGENT_CODEX_LOGS=()
 # PIDs of the backgrounded per-agent subshells. We MUST `wait` these specific
 # PIDs — never a bare `wait`. A bare `wait` blocks on ALL background jobs of
 # this shell, which includes the long-lived gh-token-refresh-daemon (started
@@ -1201,6 +1208,13 @@ for _agent in "${REVIEW_AGENTS_LIST[@]}"; do
     _agent_agy_log=$(_agy_log_file "$_agent_session_id" 2>/dev/null || true)
   fi
   AGENT_AGY_LOGS+=("$_agent_agy_log")
+  # INV-59 (#209): for a `codex` member, record its per-agent JSONL log path so
+  # the post-resolution drop-reason scrape can read the turn.failed stream-error
+  # signal. This is the SAME $_agent_log the codex invocation (and its resume
+  # controller via CODEX_REVIEW_LOG) writes to — deterministic, no sidecar needed.
+  _agent_codex_log=""
+  [[ "$_agent" == "codex" ]] && _agent_codex_log="$_agent_log"
+  AGENT_CODEX_LOGS+=("$_agent_codex_log")
   _agent_prompt=$(build_review_prompt "$_agent" "$_agent_session_id")
   _agent_rc_file="${_FANOUT_DIR}/${_agent_session_id}.rc"
 
@@ -1461,13 +1475,15 @@ SESSION_ID="${AGENT_SESSION_IDS[0]}"
 _dropped_agents=""
 _deciding_agents=""
 _timed_out_agents=""
-# INV-58 (#205): per-dropped-agent reason breadcrumbs (e.g.
-# "agy: quota-exhausted (Antigravity 429: …; resets in 33h48m45s)"). Built only
-# for `agy` members dropped `unavailable` whose own --log-file shows a 429/auth
-# signal; non-agy and signal-free drops add nothing here, keeping the bare
+# INV-58 (#205) / INV-59 (#209): per-dropped-agent reason breadcrumbs (e.g.
+# "agy: quota-exhausted (Antigravity 429: …; resets in 33h48m45s)" or
+# "codex: stream-error (upstream 5xx; exhausted 5/5 SSE reconnects, turn.failed)").
+# Built for `agy` members whose own --log-file shows a 429/auth signal (INV-58)
+# and `codex` members whose JSONL log shows a turn.failed stream error (INV-59);
+# other agents and signal-free drops add nothing here, keeping the bare
 # `unavailable` wording. Surfaced in the WARN log line + the dropped-agent comment
-# so an operator reading only the wrapper log can tell agy ran out of quota and
-# roughly when it recovers — without digging into agy's separate --log-file.
+# so an operator reading only the wrapper log can tell WHY the agent was dropped
+# — without digging into the CLI's separate per-agent log.
 _dropped_reasons=""
 for _i in "${!AGENT_NAMES[@]}"; do
   case "${AGENT_VERDICTS[$_i]}" in
@@ -1482,6 +1498,21 @@ for _i in "${!AGENT_NAMES[@]}"; do
         _agy_reason_token=$(_classify_agy_drop_reason "${AGENT_AGY_LOGS[$_i]:-}")
         if [[ -n "$_agy_reason_token" ]]; then
           _dropped_reasons+="${AGENT_NAMES[$_i]}: $(_agy_drop_reason_phrase "$_agy_reason_token"); "
+        fi
+      # INV-59 (#209): codex-shaped drop reason. A codex member whose model stream
+      # died with an upstream 5xx (turn.failed after exhausting 5/5 SSE reconnects)
+      # is dropped `unavailable` here too — scrape its JSONL log for the
+      # stream-error signal so the dropped-agent line names a SPECIFIC reason
+      # rather than a bare opaque `unavailable`. Both helpers ALWAYS `return 0`
+      # (lib-review-codex.sh) — same load-bearing rc-0-always contract as the agy
+      # branch: a non-zero `$(…)` in this append would abort under `set -e` and
+      # strand the issue in `reviewing`. A clean no-verdict codex turn (#198) /
+      # signal-free log yields an empty token → the bare `unavailable` wording is
+      # unchanged (no over-claim).
+      elif [[ "${AGENT_NAMES[$_i]}" == "codex" ]]; then
+        _codex_reason_token=$(_classify_codex_drop_reason "${AGENT_CODEX_LOGS[$_i]:-}")
+        if [[ -n "$_codex_reason_token" ]]; then
+          _dropped_reasons+="${AGENT_NAMES[$_i]}: $(_codex_drop_reason_phrase "$_codex_reason_token"); "
         fi
       fi
       ;;
