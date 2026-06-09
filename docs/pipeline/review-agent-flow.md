@@ -286,7 +286,7 @@ Each review agent posts its verdict comment through the deterministic, wrapper-p
 The agent writes its body to a FILE and calls:
 
 ```bash
-bash scripts/post-verdict.sh <issue-number> <pass|fail> <body-file|-> <agent-name> <session-id>
+bash scripts/post-verdict.sh <issue-number> <pass|fail> <body-file|-> <agent-name> <session-id> [<model>]
 ```
 
 The helper:
@@ -294,8 +294,9 @@ The helper:
 - reads the body from a **FILE** (or stdin via `-`), so a multi-line findings body with backticks/quotes/`$()` can't be mangled by the agent's shell quoting — the suspected `agy` failure mode;
 - **guarantees the first-line phrasing the poller matches** (`Review PASSED` for `pass`, `Review findings:` for `fail`, `lib-review-poll.sh::_classify_verdict_body`), prepending the canonical prefix when the agent's body omits it;
 - **composes the AGENT verdict trailer itself** — `` Review Session: `<session-id>` `` + `Review Agent: <agent-name>` ([INV-40](invariants.md#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback) / [INV-20](invariants.md#inv-20-verdict-authenticity-binding-actor--window--trailer-presence)) — so the agent never hand-writes it (closing the session-id-rebind hazard). This is the AGENT verdict trailer, distinct from `lib-review-verdict.sh::emit_verdict_trailer` (the wrapper's `<!-- review-verdict: … -->` machine marker);
+- **folds the review model into the `Review Agent:` line** when the optional 6th `<model>` arg is supplied ([INV-60](invariants.md#inv-60-the-review-model-is-shown-inline-on-every-verdict-comments-review-agent-line)): the line becomes `Review Agent: <agent-name> (model: <model>)` so the verdict comment records which model produced it — consistent with the [INV-04](invariants.md#inv-04-reviewed-head-trailer-format) `Reviewed HEAD: … model` trailer. `build_review_prompt` resolves the per-agent model (`_resolve_review_agent_model` → `${…:-sonnet}`, identical to the `Reviewed HEAD:` trailer and the `run_agent` launch arg) and passes it as the 6th arg in all three verdict-post examples. The `Review Agent: <agent-name>` substring at the START of the line is preserved byte-for-byte, so the INV-40 discriminator (`test("Review Agent: <name>")`, a substring test) and the INV-20 trailer binding keep matching. A 5-arg (no-model) call renders the legacy two-line trailer unchanged;
 - **posts via the token-refresh proxy `gh`** co-located in the dispatcher `scripts/` dir (the same wrapper `mark-issue-checkbox.sh` uses) — guaranteeing the correct bot identity + real-gh resolution;
-- **fails loudly**: non-zero exit on a failed `gh` post (exit `2` on invalid args), and echoes the created comment URL on success.
+- **fails loudly**: non-zero exit on a failed `gh` post (exit `2` on invalid args, including a `<model>` arg that contains a newline or exceeds the length cap), and echoes the created comment URL on success.
 
 **Why**: review agents previously hand-rolled their own bare `gh issue comment`. `agy` exited `0` claiming it posted the verdict, but its multi-line `--body` call never landed, so the verdict poller ([INV-40](invariants.md#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback)) found nothing and dropped agy `unavailable` on every fleet review. In the SAME run, agy's `mark-issue-checkbox.sh` calls (a deterministic helper) landed fine — so routing the verdict through the same kind of helper makes the post reliable. **The fix is reliable posting, not the exit code**: `unavailable` is decided on comment-absence, not the agent's exit code (`lib-review-aggregate.sh::_classify_noverdict_agent` only consults rc to split `124`/`137` `timed-out` from everything-else `unavailable`, and only for an agent that already posted no verdict). The helper's non-zero-on-failure exit is hygiene + a future hook a follow-up wrapper-side change would consume.
 

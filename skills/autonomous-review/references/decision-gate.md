@@ -52,7 +52,7 @@ In another incident, the repo owner posted a requirement change ("remove PDF sup
 
 ## Multi-agent review (INV-40)
 
-When the project runs more than one verdict-reaching review agent against the same PR (`AGENT_REVIEW_AGENTS` lists ≥2 CLIs), **each agent runs this gate independently** and posts its own verdict comment. You reach your own PASS/FAIL from your own findings — you cannot see the other agents' verdicts and must not try to coordinate. The wrapper then aggregates all agents' verdicts under a **unanimous-PASS** rule: the wrapper approves+merges only if every available agent passed; any single FAIL makes the wrapper submit `--request-changes` and send it back to dev. Post your verdict via `bash scripts/post-verdict.sh` ([INV-56](../../../docs/pipeline/invariants.md)); the helper appends the `Review Session: \`<id>\`` trailer AND the `Review Agent: <name>` discriminator line from the args you pass (do NOT hand-write them) — the discriminator is how the wrapper attributes your verdict among N agents posting under the same identity. The unanimous rule is the cross-agent expression of this gate's own "any blocking finding → FAIL" philosophy.
+When the project runs more than one verdict-reaching review agent against the same PR (`AGENT_REVIEW_AGENTS` lists ≥2 CLIs), **each agent runs this gate independently** and posts its own verdict comment. You reach your own PASS/FAIL from your own findings — you cannot see the other agents' verdicts and must not try to coordinate. The wrapper then aggregates all agents' verdicts under a **unanimous-PASS** rule: the wrapper approves+merges only if every available agent passed; any single FAIL makes the wrapper submit `--request-changes` and send it back to dev. Post your verdict via `bash scripts/post-verdict.sh` ([INV-56](../../../docs/pipeline/invariants.md)); the helper appends the `Review Session: \`<id>\`` trailer AND the `Review Agent: <name>` discriminator line from the args you pass (do NOT hand-write them) — the discriminator is how the wrapper attributes your verdict among N agents posting under the same identity. With the optional 6th `<model>` arg the helper folds your model into that line as `Review Agent: <name> (model: <model>)` so the operator can tell which model each parallel reviewer used ([INV-60](../../../docs/pipeline/invariants.md)) — the `Review Agent: <name>` prefix is unchanged, so attribution still works. The unanimous rule is the cross-agent expression of this gate's own "any blocking finding → FAIL" philosophy.
 
 ## Who submits the GitHub-native PR action (INV-52)
 
@@ -115,8 +115,11 @@ Post the review result as a comment on the issue (NOT the PR), **only** via the 
 # Write your verdict BODY to a file (a FILE avoids shell-quoting mangling of a
 # multi-line body with backticks/quotes), then post it. The helper prepends the
 # canonical "Review PASSED" / "Review findings:" first line and appends the
-# `Review Session:` / `Review Agent:` trailer for you (both ids are in your prompt):
-bash scripts/post-verdict.sh <issue-number> <pass|fail> <body-file> <agent-name> <session-id>
+# `Review Session:` / `Review Agent:` trailer for you (the ids + model are in
+# your prompt). The optional 6th <model> arg is folded into the agent line as
+# `Review Agent: <name> (model: <model>)` so the verdict records the model that
+# produced it ([INV-60](../../../docs/pipeline/invariants.md)):
+bash scripts/post-verdict.sh <issue-number> <pass|fail> <body-file> <agent-name> <session-id> [<model>]
 ```
 
 **Action pairing — these MUST match:**

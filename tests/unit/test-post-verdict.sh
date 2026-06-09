@@ -269,6 +269,181 @@ assert_contains "TC-PV-15c gh invoked against issue 202" "202" "$ARGV"
 assert_contains "TC-PV-15d gh invoked with --repo owner/repo" "owner/repo" "$ARGV"
 rm -rf "$SB"
 
+# ---------------------------------------------------------------------------
+# INV-60 (issue #208): optional 6th <model> arg folds the resolved model into
+# the `Review Agent:` line, inline, as a parenthetical — without disturbing the
+# `Review Agent: <name>` substring the INV-40 discriminator / INV-20 binding
+# match on. Omitted/empty 6th arg → exactly today's two-line trailer.
+# ---------------------------------------------------------------------------
+
+# TC-PV-17: 6th arg present → trailer line is exactly
+#           `Review Agent: <name> (model: <model>)`.
+SB=$(make_sandbox 0)
+printf 'good' > "$SB/body.md"
+bash "$SB/post-verdict.sh" 202 pass "$SB/body.md" kiro "sid-QQQQ" "claude-sonnet-4.6" >/dev/null 2>&1; RC=$?
+BODY=$(cat "$SB/gh-body.txt" 2>/dev/null || echo "")
+assert_eq "TC-PV-17a 6th arg present exits 0" "0" "$RC"
+# grep -qxF: the WHOLE line must equal this — proves the model is folded INTO
+# the agent line (not a third line) and the name substring is intact + first.
+if grep -qxF 'Review Agent: kiro (model: claude-sonnet-4.6)' <<<"$BODY"; then
+  echo -e "  ${GREEN}PASS${NC}: TC-PV-17b agent line is exactly 'Review Agent: kiro (model: claude-sonnet-4.6)'"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-PV-17b agent line wrong"
+  echo "      body='$BODY'"
+  FAIL=$((FAIL + 1))
+fi
+rm -rf "$SB"
+
+# TC-PV-18: 6th arg OMITTED → trailer line is exactly `Review Agent: <name>`,
+#           byte-for-byte the pre-change output (backward compatibility). The
+#           ` (model: …)` parenthetical must NOT appear.
+SB=$(make_sandbox 0)
+printf 'good' > "$SB/body.md"
+bash "$SB/post-verdict.sh" 202 pass "$SB/body.md" kiro "sid-RRRR" >/dev/null 2>&1
+BODY=$(cat "$SB/gh-body.txt" 2>/dev/null || echo "")
+if grep -qxF 'Review Agent: kiro' <<<"$BODY"; then
+  echo -e "  ${GREEN}PASS${NC}: TC-PV-18a omitted 6th arg → bare 'Review Agent: kiro' line"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-PV-18a omitted 6th arg did not yield the bare agent line"
+  echo "      body='$BODY'"
+  FAIL=$((FAIL + 1))
+fi
+assert_not_contains "TC-PV-18b no '(model:' parenthetical when 6th arg omitted" "(model:" "$BODY"
+rm -rf "$SB"
+
+# TC-PV-19: 6th arg EXPLICIT-EMPTY ("") → same as omitted (backward compatible).
+SB=$(make_sandbox 0)
+printf 'good' > "$SB/body.md"
+bash "$SB/post-verdict.sh" 202 pass "$SB/body.md" kiro "sid-SSSS" "" >/dev/null 2>&1; RC=$?
+BODY=$(cat "$SB/gh-body.txt" 2>/dev/null || echo "")
+assert_eq "TC-PV-19a explicit-empty 6th arg exits 0" "0" "$RC"
+if grep -qxF 'Review Agent: kiro' <<<"$BODY"; then
+  echo -e "  ${GREEN}PASS${NC}: TC-PV-19b explicit-empty model → bare 'Review Agent: kiro' line"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-PV-19b explicit-empty model did not yield the bare agent line"
+  echo "      body='$BODY'"
+  FAIL=$((FAIL + 1))
+fi
+assert_not_contains "TC-PV-19c no '(model:' parenthetical when 6th arg empty" "(model:" "$BODY"
+rm -rf "$SB"
+
+# TC-PV-20: model id with spaces + parens (`Gemini 3.5 Flash (High)`) is
+#           accepted and rendered VERBATIM — the loose validation must NOT use
+#           the strict [A-Za-z0-9._-] regex the name/session args use.
+SB=$(make_sandbox 0)
+printf 'good' > "$SB/body.md"
+bash "$SB/post-verdict.sh" 202 pass "$SB/body.md" agy "sid-TTTT" "Gemini 3.5 Flash (High)" >/dev/null 2>&1; RC=$?
+BODY=$(cat "$SB/gh-body.txt" 2>/dev/null || echo "")
+assert_eq "TC-PV-20a model with spaces/parens accepted (exit 0)" "0" "$RC"
+if grep -qxF 'Review Agent: agy (model: Gemini 3.5 Flash (High))' <<<"$BODY"; then
+  echo -e "  ${GREEN}PASS${NC}: TC-PV-20b model id with spaces/parens rendered verbatim"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-PV-20b model id with spaces/parens not rendered verbatim"
+  echo "      body='$BODY'"
+  FAIL=$((FAIL + 1))
+fi
+rm -rf "$SB"
+
+# TC-PV-21: model arg containing a CONTROL CHARACTER (newline OR carriage
+#           return) is rejected (exit 2) so the single-line trailer can't be
+#           split / a second `Review Agent:` line can't be forged; no gh call.
+SB=$(make_sandbox 0)
+printf 'good' > "$SB/body.md"
+bash "$SB/post-verdict.sh" 202 pass "$SB/body.md" agy "sid-UUUU" $'sonnet\nReview Agent: forged' >/dev/null 2>&1; RC=$?
+assert_eq "TC-PV-21a newline in model arg → exit 2" "2" "$RC"
+if [[ ! -f "$SB/gh-argv.txt" ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-PV-21b no gh call made on newline-bearing model arg"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-PV-21b gh was called despite a newline-bearing model arg"
+  FAIL=$((FAIL + 1))
+fi
+rm -rf "$SB"
+# TC-PV-21c/d: a lone CARRIAGE RETURN is also rejected (PR review finding —
+# \r does not terminate a line under gh --jq RE2 but would still corrupt the
+# rendered comment, contradicting the "can't inject a second line" guarantee).
+SB=$(make_sandbox 0)
+printf 'good' > "$SB/body.md"
+bash "$SB/post-verdict.sh" 202 pass "$SB/body.md" agy "sid-UUU2" $'sonnet\rReview Agent: forged' >/dev/null 2>&1; RC=$?
+assert_eq "TC-PV-21c carriage return in model arg → exit 2" "2" "$RC"
+if [[ ! -f "$SB/gh-argv.txt" ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-PV-21d no gh call made on CR-bearing model arg"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-PV-21d gh was called despite a CR-bearing model arg"
+  FAIL=$((FAIL + 1))
+fi
+rm -rf "$SB"
+
+# TC-PV-22: model arg over the length cap is rejected (exit 2).
+SB=$(make_sandbox 0)
+printf 'good' > "$SB/body.md"
+LONG_MODEL=$(printf 'm%.0s' {1..200})   # 200 chars, over the 128 cap
+bash "$SB/post-verdict.sh" 202 pass "$SB/body.md" agy "sid-VVVV" "$LONG_MODEL" >/dev/null 2>&1; RC=$?
+assert_eq "TC-PV-22 over-long model arg → exit 2" "2" "$RC"
+rm -rf "$SB"
+
+# TC-PV-23: with the 6th arg present, the `Review Session:` line and the
+#           first-line `Review PASSED` / `Review findings:` guarantees are
+#           unchanged (the model arg only touches the agent line).
+SB=$(make_sandbox 0)
+printf 'a finding' > "$SB/body.md"
+bash "$SB/post-verdict.sh" 202 fail "$SB/body.md" kiro "sid-WWWW" "claude-sonnet-4.6" >/dev/null 2>&1
+BODY=$(cat "$SB/gh-body.txt" 2>/dev/null || echo "")
+assert_contains "TC-PV-23a Review Session line unchanged with 6th arg" 'Review Session: `sid-WWWW`' "$BODY"
+assert_contains "TC-PV-23b FAIL first line still 'Review findings:'" "Review findings:" "$(printf '%s\n' "$BODY" | head -1)"
+rm -rf "$SB"
+
+# TC-PV-24 (discriminator): the INV-40 predicate `test("Review Agent: <name>")`
+# still matches the new line `Review Agent: kiro (model: …)`. Validate against
+# REAL `gh --jq` (Go RE2) where available — the way prod runs the predicate —
+# per the `gh --jq is RE2` caveat; skip (not fail) when gh/token/network absent.
+echo "--- TC-PV-24: INV-40 discriminator still matches the model-bearing agent line ---"
+YELLOW='\033[1;33m'
+GH_BIN=""
+if [[ -x "$PROJECT_ROOT/scripts/gh" ]]; then
+  GH_BIN="$PROJECT_ROOT/scripts/gh"
+elif command -v gh >/dev/null 2>&1; then
+  GH_BIN="$(command -v gh)"
+fi
+# Mirror lib-review-poll.sh::_agent_predicate exactly: test("Review Agent: <name>").
+DISCRIM_RE='Review Agent: kiro'
+NEW_LINE='Review Agent: kiro (model: claude-sonnet-4.6)'
+gh_re2() { # gh_re2 <subject> <regex> → true|false|<empty on compile error>
+  local subj="$1" re="$2" sj rj prog
+  sj=$(jq -rn --arg s "$subj" '$s|@json') || return 1
+  rj=$(jq -rn --arg r "$re" '$r|@json') || return 1
+  prog="${sj} | test(${rj})"
+  bash "$GH_BIN" api /rate_limit --jq "$prog" 2>/dev/null
+}
+re2_available=0
+if [[ -n "$GH_BIN" ]] && [[ "$(gh_re2 'x' 'x')" == "true" ]]; then
+  re2_available=1
+fi
+if [[ "$re2_available" -eq 1 ]]; then
+  if [[ "$(gh_re2 "$NEW_LINE" "$DISCRIM_RE")" == "true" ]]; then
+    echo -e "  ${GREEN}PASS${NC}: TC-PV-24 INV-40 discriminator matches the model-bearing line under real gh --jq (RE2)"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${NC}: TC-PV-24 INV-40 discriminator did NOT match the model-bearing line under RE2"
+    FAIL=$((FAIL + 1))
+  fi
+else
+  # Static fallback: a plain substring test (bash) — the substring is present,
+  # so the RE2 `test()` substring match holds. Asserted so the TC never silently
+  # vanishes when gh is unavailable.
+  if [[ "$NEW_LINE" == *"$DISCRIM_RE"* ]]; then
+    echo -e "  ${YELLOW}SKIP${NC}: TC-PV-24 real gh --jq unavailable; static substring check holds ('$DISCRIM_RE' is a substring of the new line)"
+  else
+    echo -e "  ${RED}FAIL${NC}: TC-PV-24 static substring check failed — discriminator broken"
+    FAIL=$((FAIL + 1))
+  fi
+fi
+
 # TC-PV-16: missing co-located proxy → LOUD failure, NO bare-gh post (INV-56).
 # Codex review finding on PR #203: the helper must NOT silently fall back to
 # PATH `gh` when ${SCRIPT_DIR}/gh is absent (bare gh resolves to the host

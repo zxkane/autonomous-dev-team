@@ -27,21 +27,41 @@
 #     success.
 #
 # Usage:
-#   post-verdict.sh <issue-number> <pass|fail> <body-file|-> <agent-name> <session-id>
+#   post-verdict.sh <issue-number> <pass|fail> <body-file|-> <agent-name> <session-id> [<model>]
 #
 #   <body-file>  Path to a file holding the findings/summary body, or `-` to
 #                read the body from stdin. A FILE (not an argv string) is used
 #                so a multi-line body with backticks/quotes/$() can't be mangled
 #                by the agent's shell quoting (the suspected agy failure mode).
 #
+#   <model>      OPTIONAL 6th arg ([INV-60], issue #208): the per-agent RESOLVED
+#                review model the wrapper launched this agent with. When present
+#                and non-empty, the `Review Agent:` trailer line becomes
+#                `Review Agent: <name> (model: <model>)` so an operator reading
+#                the verdict comment can attribute it to the model that produced
+#                it — consistent with the [INV-04] `Reviewed HEAD: … model` line.
+#                When omitted/empty the trailer is exactly the legacy
+#                `Review Agent: <name>` (backward compatible). The `Review Agent:
+#                <name>` substring at the START of the line is preserved
+#                byte-for-byte either way, so the [INV-40] discriminator
+#                (`test("Review Agent: <name>")`, a substring test) and the
+#                [INV-20] trailer-presence binding keep matching.
+#                Validation is intentionally LOOSE — a model id legitimately
+#                contains spaces / parens / dots (e.g. `Gemini 3.5 Flash (High)`,
+#                `claude-sonnet-4.6`) — so the strict `[A-Za-z0-9._-]` rule the
+#                name/session args use does NOT apply; only a control character
+#                (newline or carriage return, which would split the single-line
+#                trailer) and an over-long value are rejected.
+#
 # Exit codes:
 #   0 — Comment posted; comment URL echoed on stdout.
 #   1 — gh post failed, or a config/runtime error.
-#   2 — Invalid arguments (bad issue number / verdict / unreadable body / name).
+#   2 — Invalid arguments (bad issue number / verdict / unreadable body / name /
+#       model containing a control character (newline/CR) or over the length cap).
 #
 # Example:
 #   printf '%s' "$findings" > /tmp/verdict.md
-#   bash scripts/post-verdict.sh 202 fail /tmp/verdict.md codex "$SESSION_ID"
+#   bash scripts/post-verdict.sh 202 fail /tmp/verdict.md codex "$SESSION_ID" sonnet
 
 set -euo pipefail
 
@@ -66,9 +86,12 @@ VERDICT_RAW="${2:-}"
 BODY_FILE="${3:-}"
 AGENT_NAME="${4:-}"
 SESSION_ID="${5:-}"
+# Optional 6th arg ([INV-60]): the per-agent resolved review model. Absent/empty
+# → legacy two-line trailer. Defaulted to empty so a 5-arg caller is unchanged.
+MODEL="${6:-}"
 
 usage() {
-  echo "Usage: $0 <issue-number> <pass|fail> <body-file|-> <agent-name> <session-id>" >&2
+  echo "Usage: $0 <issue-number> <pass|fail> <body-file|-> <agent-name> <session-id> [<model>]" >&2
 }
 
 if [[ -z "$ISSUE_NUMBER" || -z "$VERDICT_RAW" || -z "$BODY_FILE" || -z "$AGENT_NAME" || -z "$SESSION_ID" ]]; then
@@ -98,6 +121,26 @@ fi
 if ! [[ "$SESSION_ID" =~ ^[A-Za-z0-9._-]{1,64}$ ]]; then
   echo "Error: session id must be [A-Za-z0-9._-], 1-64 chars, got '$SESSION_ID'" >&2
   exit 2
+fi
+
+# Model ([INV-60]) is also interpolated into the trailer, but a model id can
+# legitimately contain spaces / parens / dots (e.g. `Gemini 3.5 Flash (High)`),
+# so the strict name/session regex does NOT apply. The only hazards are a
+# CONTROL CHARACTER — a newline OR a carriage return (either would split the
+# single-line `Review Agent:` trailer and could forge a second trailer line) —
+# and an absurd length. Reject any control char (covers \n and \r), then cap
+# length; everything else (spaces/parens/dots) passes verbatim. An empty/absent
+# model skips this check entirely (the legacy two-line trailer path).
+MAX_MODEL_CHARS=128
+if [[ -n "$MODEL" ]]; then
+  if [[ "$MODEL" =~ [[:cntrl:]] ]]; then
+    echo "Error: model must be a single line with no control characters (newline/CR), got a value containing one" >&2
+    exit 2
+  fi
+  if [[ ${#MODEL} -gt $MAX_MODEL_CHARS ]]; then
+    echo "Error: model too long (${#MODEL} chars, max ${MAX_MODEL_CHARS})" >&2
+    exit 2
+  fi
 fi
 
 # --- Read the body (file or stdin) ----------------------------------------
@@ -162,10 +205,21 @@ fi
 # --- Append the load-bearing AGENT verdict trailer (INV-40 / INV-20) ------
 # Each line on its own line; the session id is backtick-wrapped to match the
 # `Review Session: \`<id>\`` phrasing the prompt + INV-20 expect.
+#
+# [INV-60] When a model was supplied, fold it INTO the `Review Agent:` line as a
+# parenthetical AFTER the agent name — the `Review Agent: <name>` substring at
+# the start of the line stays byte-for-byte intact so the INV-40 discriminator
+# (`test("Review Agent: <name>")`) and the INV-20 trailer binding keep matching.
+# When no model was supplied, the line is exactly the legacy `Review Agent:
+# <name>` (backward compatible).
+AGENT_LINE="Review Agent: ${AGENT_NAME}"
+if [[ -n "$MODEL" ]]; then
+  AGENT_LINE="${AGENT_LINE} (model: ${MODEL})"
+fi
 COMPOSED="${COMPOSED}
 
 Review Session: \`${SESSION_ID}\`
-Review Agent: ${AGENT_NAME}"
+${AGENT_LINE}"
 
 # --- Post via the token-refresh proxy `gh` (NOT bare gh) ------------------
 # The proxy lives next to this helper in the dispatcher scripts/ dir (a `gh`

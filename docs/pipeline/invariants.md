@@ -2228,6 +2228,51 @@ look-behind bug. Test plan:
 - [INV-58](#inv-58-agy-quotaauth-unavailable-drops-surface-a-distinct-reason-fan-out--reviewed-head-model-labels-are-per-agent) — the agy-shaped sibling for a DIFFERENT failure mode (quota wall); same drop-reason assembly loop, same CLI-specific review-side-lib layering, same observability-only posture.
 - [`review-agent-flow.md` § codex stream-error drop reason + retry (INV-59)](review-agent-flow.md#codex-stream-error-drop-reason--retry-inv-59) — runtime walkthrough.
 
+## INV-60: the review model is shown inline on every verdict comment's `Review Agent:` line
+
+**Rule**: the AGENT verdict trailer that `scripts/post-verdict.sh` appends folds the per-agent **resolved review model** into the existing `Review Agent:` line, inline, as a parenthetical — NOT a new third trailer line:
+
+```
+Review Session: `<session-id>`
+Review Agent: <name> (model: <model>)
+```
+
+The trailer stays **two lines**. The `Review Agent: <name>` substring at the START of the line is preserved **byte-for-byte** (the `(model: …)` parenthetical is appended after it), so the [INV-40](#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback) discriminator (`lib-review-poll.sh::_agent_predicate` → `test("Review Agent: <name>")`, a substring test under `gh --jq`'s Go RE2) and the [INV-20](#inv-20-verdict-authenticity-binding-actor--window--trailer-presence) trailer-presence binding keep matching the model-bearing line.
+
+**Model resolution + fallback** is identical to the [INV-04](#inv-04-reviewed-head-trailer-format) `Reviewed HEAD: … model` trailer and the `run_agent` launch arg:
+
+1. `AGENT_REVIEW_MODEL_<AGENT>` (per-agent override, if set & non-empty) — via [INV-41](#inv-41-per-agent-review-model--extra-args-resolution)'s `lib-review-resolve.sh::_resolve_review_agent_model`;
+2. else shared `AGENT_REVIEW_MODEL`;
+3. else the effective launch default **`sonnet`** (`${resolved:-sonnet}`).
+
+The displayed value is the model the wrapper **launched** the agent with — so the verdict comment is consistent with the `Reviewed HEAD:` line. (`agy` ignores an unknown `--model` per [INV-50](#inv-50-agy---model-is-validated-against-agy-models-before-forwarding) and uses its own default, so for agy `sonnet` is the *launch arg*, not necessarily its runtime model — but matching `Reviewed HEAD:` is the chosen, consistent behavior; agy is not special-cased.)
+
+**The model comes from the WRAPPER's deterministic resolution, never the agent CLI.** The CLI doesn't reliably know its own resolved model id — the whole point of [INV-56](#inv-56-review-verdict-is-posted-via-the-deterministic-post-verdict-helper-not-the-agents-bare-gh) is that the wrapper supplies trailer facts and the agent doesn't hand-write them. `build_review_prompt` resolves the model itself and interpolates it **single-quoted** (`'${_agent_model}'`) as the 6th `post-verdict.sh` arg in all three verdict-post examples (the generic Helper-usage example, the Decision PASS branch, the Decision FAIL branch). The single-quoting is load-bearing: the agent copies the example "exactly", and a multi-word model id (e.g. `Gemini 3.5 Flash (High)`) rendered unquoted would split into args 6/7/8 (truncating to `(model: Gemini)`) or hit a bash syntax error on the literal `(` (so the agent posts no verdict and the poller drops it `unavailable`). It is safe because the model is wrapper-resolved from operator config and the control-char validation rejects newlines/CR.
+
+**Why**: a verdict comment is the operator-facing record of a review. Without the model, a passing/failing verdict can't be attributed to the model that produced it — which matters for a mixed fleet (`AGENT_REVIEW_AGENTS` lists ≥2 CLIs) where each agent may resolve a DIFFERENT model via [INV-41](#inv-41-per-agent-review-model--extra-args-resolution)'s per-agent override keys. [INV-58](#inv-58-agy-quotaauth-unavailable-drops-surface-a-distinct-reason-fan-out--reviewed-head-model-labels-are-per-agent) (#205) recently made the `Fanning out …` log line and the `Reviewed HEAD:` trailer report the per-agent resolved model; this extends that same "show the real per-agent model" principle to the verdict comment itself. Filed as #208.
+
+**Producer**: `scripts/post-verdict.sh` — accepts an optional 6th `<model>` arg and folds it into the `Review Agent:` line when present/non-empty. `autonomous-review.sh::build_review_prompt` — resolves the per-agent model (`_resolve_review_agent_model` → `${…:-sonnet}`) and passes it as the 6th arg in all three verdict-post examples.
+
+**Consumer**: the operator reading a verdict comment (the model attribution). The [INV-40](#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback) discriminator / [INV-20](#inv-20-verdict-authenticity-binding-actor--window--trailer-presence) binding are NOT new consumers — they keep matching unchanged because the `Review Agent: <name>` prefix is preserved.
+
+**Validation (model arg)**: deliberately LOOSE — a model id legitimately contains spaces / parens / dots (e.g. `Gemini 3.5 Flash (High)`, `claude-sonnet-4.6`), so the strict `[A-Za-z0-9._-]` regex the name/session args use does NOT apply. Only a **control character** — a newline OR a carriage return (either would split the single-line trailer, and could forge a second `Review Agent:` line; matched with `[[ "$MODEL" =~ [[:cntrl:]] ]]`) — and an **over-long** value (>128 chars) are rejected (exit `2`); everything else passes verbatim.
+
+**Backward compatibility**: a 5-arg (no-model) call renders exactly the legacy `Review Agent: <name>` two-line trailer — byte-for-byte unchanged. An explicit-empty 6th arg behaves the same (empty == unset). So an all-unset fleet whose agents resolve to `sonnet` still gets a model line (`(model: sonnet)`); only a caller that omits the arg entirely gets the legacy form.
+
+**Out of scope**: the [INV-04](#inv-04-reviewed-head-trailer-format) `Reviewed HEAD:` forensic trailer (already shows the model, unchanged), the `<!-- review-verdict: … -->` machine marker (`lib-review-verdict.sh::emit_verdict_trailer`, unchanged), and the codex resume-prompt fallback trailer in `lib-review-codex.sh` (a fallback instruction, not the authoritative path; codex routes its verdict through `post-verdict.sh` per [INV-56](#inv-56-review-verdict-is-posted-via-the-deterministic-post-verdict-helper-not-the-agents-bare-gh), so it gets the model line for free).
+
+**Status**: **ENFORCED** (closes #208).
+
+**Test**: `tests/unit/test-post-verdict.sh` — TC-PV-17 (6th arg → exact `Review Agent: <name> (model: <model>)` line), TC-PV-18 (omitted → byte-for-byte legacy `Review Agent: <name>`, no parenthetical), TC-PV-19 (explicit-empty → legacy), TC-PV-20 (`Gemini 3.5 Flash (High)` accepted + rendered verbatim), TC-PV-21 (control-char-bearing model — newline OR carriage return → exit 2, no gh call), TC-PV-22 (over-long model → exit 2), TC-PV-23 (`Review Session:` + first-line `Review PASSED`/`Review findings:` guarantees unchanged with the 6th arg), TC-PV-24 (the [INV-40] `test("Review Agent: <name>")` predicate still matches the model-bearing line — validated against **real `gh --jq`** Go RE2 where available, per the `gh --jq is RE2` caveat). `tests/unit/test-autonomous-review-verdict-via-helper.sh` — TC-PVP-07 (all three rendered verdict-post invocations carry a 6th arg), TC-PVP-08/10 (the value equals the per-agent resolved model; rendered identically for a codex and a non-codex agent — no per-CLI branch), TC-PVP-09 (a per-agent override surfaces the distinct id, not the shared default), TC-PVP-11 (no model configured → the launch default `sonnet`), TC-PVP-12/12b (a multi-word model id is rendered single-quoted as one token and the rendered example parses to a single `$6`). Test plan: `docs/test-cases/verdict-model-line.md`. **No E2E** (pure wrapper/helper/prompt + doc change; no deployed-resource behavior). Backward-compat gate: `test-post-verdict.sh` TC-PV-01..16, `test-autonomous-review-verdict-via-helper.sh` TC-PVP-01..06, `test-autonomous-review-per-agent-model`, `test-autonomous-review-multi-agent` stay green.
+
+**Cross-references**:
+- [INV-56](#inv-56-review-verdict-is-posted-via-the-deterministic-post-verdict-helper-not-the-agents-bare-gh) — the deterministic verdict-post chokepoint this extends; the model is supplied by the wrapper, not hand-written by the agent, for the same reason.
+- [INV-41](#inv-41-per-agent-review-model--extra-args-resolution) — the per-agent model resolution (`_resolve_review_agent_model`) reused verbatim as the source of truth.
+- [INV-40](#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback) / [INV-20](#inv-20-verdict-authenticity-binding-actor--window--trailer-presence) — the discriminator / trailer binding that keep matching because the `Review Agent: <name>` prefix is preserved.
+- [INV-04](#inv-04-reviewed-head-trailer-format) — the `Reviewed HEAD: … model` trailer the verdict-comment model is kept consistent with.
+- [INV-58](#inv-58-agy-quotaauth-unavailable-drops-surface-a-distinct-reason-fan-out--reviewed-head-model-labels-are-per-agent) — the immediately-prior "show the real per-agent model" fix (fan-out + Reviewed-HEAD labels) this extends to the verdict comment.
+- [`review-agent-flow.md` § Verdict posting (INV-56)](review-agent-flow.md#verdict-posting-inv-56) — runtime walkthrough (the model-line bullet).
+
 ## Adding a new invariant
 
 When fixing a pipeline bug, after locating the bug on the state machine + flow docs:

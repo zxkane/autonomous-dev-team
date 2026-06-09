@@ -624,6 +624,17 @@ fi
 build_review_prompt() {
   local _agent_name="$1"
   local _agent_session_id="$2"
+  # [INV-60] (#208): resolve THIS agent's review model exactly as the
+  # `Reviewed HEAD:` trailer (~`_REVIEW_HEAD_MODEL` below) and the `run_agent`
+  # launch arg do — per-agent override → shared AGENT_REVIEW_MODEL → the launch
+  # default `sonnet` — and interpolate it as the 6th `post-verdict.sh` arg in
+  # every verdict-post example so the verdict comment shows the model that
+  # produced it. Resolving HERE (rather than threading a 3rd param from the
+  # fan-out) keeps the call-site signature unchanged; `_resolve_review_agent_model`
+  # is a pure env lookup so it is safe to call in the prompt-render context.
+  local _agent_model
+  _agent_model=$(_resolve_review_agent_model "${_agent_name}")
+  _agent_model="${_agent_model:-sonnet}"
   cat <<EOF
 You are reviewing PR #${PR_NUMBER} for issue #${ISSUE_NUMBER} in the ${REPO} project.
 PR branch: ${PR_BRANCH:-UNKNOWN}
@@ -875,14 +886,17 @@ backticks/quotes can't be mangled. The helper also APPENDS the two
 load-bearing trailer lines for you — so you do NOT hand-write them:
 
   > Review Session: \`${_agent_session_id}\`
-  > Review Agent: ${_agent_name}
+  > Review Agent: ${_agent_name} (model: ${_agent_model})
 
 The \`Review Agent: ${_agent_name}\` line is load-bearing — when more than
 one review agent runs against this same PR under the same GitHub identity,
 the wrapper attributes each verdict to its agent by matching the
 \`Review Agent: <name>\` discriminator (INV-40). The helper writes it from
 the arguments you pass, so it is always correct — pass the agent name
-\`${_agent_name}\` and the session id \`${_agent_session_id}\` exactly.
+\`${_agent_name}\`, the session id \`${_agent_session_id}\`, and the model
+\`${_agent_model}\` exactly (the model is the 6th arg; the helper folds it into
+the \`Review Agent:\` line as \`(model: …)\` so the verdict comment records which
+model produced it — INV-60).
 
 Helper usage (verdict comment ONLY — keep using bare \`gh\` for reads like
 \`gh pr view\` / \`gh pr checks\`):
@@ -892,7 +906,7 @@ cat > /tmp/verdict-${_agent_name}.md <<'VERDICT'
 <your one-line PASS summary, or the numbered findings list>
 VERDICT
 # Then post it (the helper prepends the canonical first line + appends the trailer):
-bash scripts/post-verdict.sh ${ISSUE_NUMBER} <pass|fail> /tmp/verdict-${_agent_name}.md ${_agent_name} ${_agent_session_id}
+bash scripts/post-verdict.sh ${ISSUE_NUMBER} <pass|fail> /tmp/verdict-${_agent_name}.md ${_agent_name} ${_agent_session_id} '${_agent_model}'
 \`\`\`
 
 - If ALL checklist items pass AND code quality is good$(if [[ "${E2E_ACTIVE:-false}" == "true" ]]; then echo " AND the wrapper-posted E2E evidence covers the acceptance criteria"; fi) AND no requirement drift detected:
@@ -903,7 +917,7 @@ bash scripts/post-verdict.sh ${ISSUE_NUMBER} <pass|fail> /tmp/verdict-${_agent_n
   prefix prepended by the helper). Concretely:
   \`\`\`bash
   printf '%s' "All checklist items verified, code quality good. No requirement drift." > /tmp/verdict-${_agent_name}.md
-  bash scripts/post-verdict.sh ${ISSUE_NUMBER} pass /tmp/verdict-${_agent_name}.md ${_agent_name} ${_agent_session_id}
+  bash scripts/post-verdict.sh ${ISSUE_NUMBER} pass /tmp/verdict-${_agent_name}.md ${_agent_name} ${_agent_session_id} '${_agent_model}'
   \`\`\`
   Then exit.
 
@@ -918,7 +932,7 @@ bash scripts/post-verdict.sh ${ISSUE_NUMBER} <pass|fail> /tmp/verdict-${_agent_n
   1. <first finding + remediation>
   2. <second finding + remediation>
   VERDICT
-  bash scripts/post-verdict.sh ${ISSUE_NUMBER} fail /tmp/verdict-${_agent_name}.md ${_agent_name} ${_agent_session_id}
+  bash scripts/post-verdict.sh ${ISSUE_NUMBER} fail /tmp/verdict-${_agent_name}.md ${_agent_name} ${_agent_session_id} '${_agent_model}'
   \`\`\`
   Then exit.
 
