@@ -427,11 +427,22 @@ _classify_codex_drop_reason() {
   # Stream error present. Extract the highest reconnect-ladder depth (the `N` in
   # `Reconnecting... N/5`) when the log shows the ladder. The ERE is anchored on
   # the "Reconnecting... " literal so unrelated digits never match; `/5` is the
-  # CLI's fixed reconnect cap. grep rc 1 (no ladder line) is expected and consumed
-  # by the `if`, so it never aborts under set -e.
+  # CLI's fixed reconnect cap.
+  #
+  # A no-ladder log (e.g. a `turn.failed` stream error with no `Reconnecting...`
+  # lines) makes the first grep exit 1; under `set -o pipefail` the whole pipeline
+  # then returns non-zero. This is a BARE assignment on its own line (not
+  # `local ladder=$(…)`, where the `local` builtin's rc would mask it), so without
+  # the trailing `|| true` the failing pipeline aborts the function under `set -e`
+  # before it reaches `return 0` — violating this helper's "rc 0 ALWAYS" fail-safe
+  # contract. The sole production caller invokes us via command substitution
+  # (`autonomous-review.sh` `_codex_reason_token=$(…)`), which happens to suppress
+  # errexit for the body, so this is latent there — but a future bare call would
+  # crash. `|| true` makes the no-match an empty `ladder`, which the `if` below
+  # already handles. (codex review finding on PR #211.)
   local ladder
   ladder=$(grep -oE 'Reconnecting\.\.\. [0-9]+/5' "$log_file" 2>/dev/null \
-    | grep -oE '[0-9]+/5' | sort -t/ -k1 -n | tail -1)
+    | grep -oE '[0-9]+/5' | sort -t/ -k1 -n | tail -1) || true
 
   if [[ -n "$ladder" ]]; then
     printf 'stream-error:%s\n' "$ladder"

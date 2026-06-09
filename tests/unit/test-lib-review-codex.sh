@@ -624,6 +624,27 @@ assert_eq "TC-CODEX-DROP-CLS-06 no crash under set -euo pipefail" \
 assert_eq "TC-CODEX-DROP-CLS-07 committed fixture → stream-error:5/5" \
   "stream-error:5/5" "$(_classify_codex_drop_reason "$FIXTURES/codex-stream-error-turn.jsonl")"
 
+# TC-CODEX-DROP-CLS-08 — fail-safe contract holds for a BARE call (not in a
+# command substitution) under `set -euo pipefail` with a turn.failed stream
+# error that carries NO reconnect ladder. This is the path CLS-06 cannot cover:
+# CLS-06 calls the classifier inside `out=$(…)`, which suppresses errexit for the
+# function body, AND it uses a log WITH a ladder so the inner ladder pipeline
+# matches and exits 0 anyway. Only a BARE call + a NO-LADDER log exercises the
+# ladder-extraction pipeline's grep-no-match rc 1 under pipefail at the function's
+# own errexit scope — the function MUST still reach its `return 0`. A regression
+# guard: the helper's docstring promises "rc 0 ALWAYS — fail-safe under
+# `set -euo pipefail`", so an unprotected pipeline that aborts before `return 0`
+# is a contract violation (codex review finding on PR #211).
+cls08=$(
+  set -euo pipefail
+  source "$LIB"
+  printf '%s\n' "$STREAM_FAIL_NO_LADDER" > "$DLOG"
+  _classify_codex_drop_reason "$DLOG"   # BARE call — errexit applies to the body
+  echo "REACHED_RETURN_0"               # only prints if the function did not abort
+)
+assert_eq "TC-CODEX-DROP-CLS-08 bare call, no-ladder stream error → no errexit abort" \
+  $'stream-error\nREACHED_RETURN_0' "$cls08"
+
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== TC-CODEX-DROP-PHR: _codex_drop_reason_phrase ==="

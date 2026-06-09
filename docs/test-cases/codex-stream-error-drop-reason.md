@@ -31,8 +31,9 @@ out. INV-59 mirrors INV-58's agy approach in the codex CLI-specific lib.
 | TC-CODEX-DROP-CLS-03 | clean no-verdict turn (#198) | `` (empty — caller keeps bare `unavailable`) |
 | TC-CODEX-DROP-CLS-04 | verdict turn | `` (empty) |
 | TC-CODEX-DROP-CLS-05 | empty / missing / empty-arg log | `` (empty, no crash) |
-| TC-CODEX-DROP-CLS-06 | runs cleanly under `set -euo pipefail` | rc 0 |
+| TC-CODEX-DROP-CLS-06 | runs cleanly under `set -euo pipefail` (command-subst call, ladder log) | rc 0 |
 | TC-CODEX-DROP-CLS-07 | committed stream-error fixture | `stream-error:5/5` |
+| TC-CODEX-DROP-CLS-08 | **bare** call under `set -euo pipefail` with a `turn.failed` no-ladder log (the ladder-extraction pipeline's grep-no-match rc 1 must not abort the body before `return 0`) | `stream-error` + reaches `return 0` (no errexit abort) |
 
 ## TC-CODEX-DROP-PHR: `_codex_drop_reason_phrase`
 
