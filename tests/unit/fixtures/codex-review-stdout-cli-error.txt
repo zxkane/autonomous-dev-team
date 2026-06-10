@@ -1,0 +1,5 @@
+error: unexpected argument '## Step 0: Merge Conflict Resolution' found
+
+Usage: codex review [OPTIONS] [PROMPT]
+
+For more information, try '--help'.

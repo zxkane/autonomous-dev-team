@@ -197,42 +197,72 @@ assert_contains "TC-CXRS-BODY-04b truncation marker present" "truncated" "$body0
 echo ""
 echo "=== TC-CXRS-LAUNCH: _codex_review_argv (the codex review invocation shape) ==="
 # ---------------------------------------------------------------------------
-# Render argv ONE PER LINE so flags with spaces don't split the assertion.
-argv_basic=$(AGENT_DEV_EXTRA_ARGS="" _codex_review_argv "my review prompt" "")
+# _codex_review_argv populates a nameref OUT-ARRAY (no stdout): `_codex_review_argv
+# <out> <prompt> <model>`. We assert on the resulting bash array directly so a
+# multi-line prompt is verified to stay ONE element (the #218 finding-1 regression).
+# A per-element dump (NUL-joined → one line per element via tr) lets us count
+# elements and inspect each.
+argv_dump() { local -n _d="$1"; printf '%s\0' "${_d[@]}"; }   # NUL-delimited elements
+
+AGENT_DEV_EXTRA_ARGS="" _codex_review_argv argv_basic "my review prompt" ""
 # TC-CXRS-LAUNCH-01 — `review` is the subcommand and the prompt is the positional
-assert_contains "TC-CXRS-LAUNCH-01a argv starts with the review subcommand" $'review\n' "$argv_basic"$'\n'
-assert_contains "TC-CXRS-LAUNCH-01b prompt is the positional argument" "my review prompt" "$argv_basic"
+assert_eq "TC-CXRS-LAUNCH-01a argv[0] is the review subcommand" "review" "${argv_basic[0]}"
+assert_eq "TC-CXRS-LAUNCH-01b argv[1] is the prompt (one element)" "my review prompt" "${argv_basic[1]}"
+assert_eq "TC-CXRS-LAUNCH-01c no model/extra-args → exactly 2 elements" "2" "${#argv_basic[@]}"
 
 # TC-CXRS-LAUNCH-02/03 — model via -c model="...", NOT -m
-argv_model=$(AGENT_DEV_EXTRA_ARGS="" _codex_review_argv "p" "openai.gpt-5.5")
-assert_contains "TC-CXRS-LAUNCH-02 model passed via -c model=\"...\"" 'model="openai.gpt-5.5"' "$argv_model"
-assert_contains "TC-CXRS-LAUNCH-02b the -c flag precedes the model config" $'-c\nmodel="openai.gpt-5.5"' "$argv_model"
-# TC-CXRS-LAUNCH-03 — NO -m (codex review rejects it)
-# (assert on a per-line basis: no line is exactly `-m`)
-if printf '%s\n' "$argv_model" | grep -qxF -- '-m'; then
-  echo -e "  ${RED}FAIL${NC}: TC-CXRS-LAUNCH-03 argv must NOT contain a bare -m flag"; FAIL=$((FAIL + 1))
+AGENT_DEV_EXTRA_ARGS="" _codex_review_argv argv_model "p" "openai.gpt-5.5"
+# join elements with a sentinel for substring/flag assertions
+argv_model_joined=$(IFS='|'; echo "${argv_model[*]}")
+assert_contains "TC-CXRS-LAUNCH-02 model passed via -c model=\"...\"" 'model="openai.gpt-5.5"' "$argv_model_joined"
+# the -c flag is its own element immediately before the model config element
+_mi=-1; for _k in "${!argv_model[@]}"; do [[ "${argv_model[$_k]}" == 'model="openai.gpt-5.5"' ]] && _mi=$_k; done
+if [[ "$_mi" -gt 0 && "${argv_model[$((_mi-1))]}" == "-c" ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-CXRS-LAUNCH-02b the -c flag element precedes the model config element"; PASS=$((PASS + 1))
 else
-  echo -e "  ${GREEN}PASS${NC}: TC-CXRS-LAUNCH-03 argv has no -m flag"; PASS=$((PASS + 1))
+  echo -e "  ${RED}FAIL${NC}: TC-CXRS-LAUNCH-02b -c does not precede model config (idx=$_mi)"; FAIL=$((FAIL + 1))
 fi
+# TC-CXRS-LAUNCH-03 — NO -m element (codex review rejects it)
+_has_m=0; for _e in "${argv_model[@]}"; do [[ "$_e" == "-m" ]] && _has_m=1; done
+assert_eq "TC-CXRS-LAUNCH-03 argv has no bare -m element" "0" "$_has_m"
 # TC-CXRS-LAUNCH-04 — NO --base
-assert_not_contains "TC-CXRS-LAUNCH-04 argv has no --base" "--base" "$argv_model"
+assert_not_contains "TC-CXRS-LAUNCH-04 argv has no --base" "--base" "$argv_model_joined"
 # TC-CXRS-LAUNCH-05 — NO --json
-assert_not_contains "TC-CXRS-LAUNCH-05 argv has no --json" "--json" "$argv_model"
-# also no `exec` (that is the DEV path)
-if printf '%s\n' "$argv_model" | grep -qxF -- 'exec'; then
-  echo -e "  ${RED}FAIL${NC}: TC-CXRS-LAUNCH-05b review argv must NOT contain 'exec' (that is the dev path)"; FAIL=$((FAIL + 1))
-else
-  echo -e "  ${GREEN}PASS${NC}: TC-CXRS-LAUNCH-05b review argv has no 'exec'"; PASS=$((PASS + 1))
-fi
+assert_not_contains "TC-CXRS-LAUNCH-05 argv has no --json" "--json" "$argv_model_joined"
+# also no `exec` element (that is the DEV path)
+_has_exec=0; for _e in "${argv_model[@]}"; do [[ "$_e" == "exec" ]] && _has_exec=1; done
+assert_eq "TC-CXRS-LAUNCH-05b review argv has no 'exec' element" "0" "$_has_exec"
 
-# TC-CXRS-LAUNCH-06 — extra-args appended (uses the real _parse_extra_args via lib-agent.sh)
-argv_xa=$(
+# TC-CXRS-LAUNCH-06 — extra-args appended as DISTINCT elements (uses the real
+# _parse_extra_args via lib-agent.sh). `-s danger-full-access` → two elements.
+(
   source "$AGENT_LIB" 2>/dev/null
   source "$LIB"
-  AGENT_DEV_EXTRA_ARGS="-s danger-full-access" _codex_review_argv "p" "m"
-)
-assert_contains "TC-CXRS-LAUNCH-06a extra-arg flag appended" "-s" "$argv_xa"
-assert_contains "TC-CXRS-LAUNCH-06b extra-arg value appended" "danger-full-access" "$argv_xa"
+  AGENT_DEV_EXTRA_ARGS="-s danger-full-access" _codex_review_argv argv_xa "p" "m"
+  printf '%s\0' "${argv_xa[@]}"
+) > "$TMP/argv_xa.nul"
+# count elements + assert -s and its value are SEPARATE elements
+argv_xa_count=$(tr -cd '\0' < "$TMP/argv_xa.nul" | wc -c | tr -d ' ')
+if grep -qzF -- '-s' "$TMP/argv_xa.nul" && grep -qzF -- 'danger-full-access' "$TMP/argv_xa.nul"; then
+  echo -e "  ${GREEN}PASS${NC}: TC-CXRS-LAUNCH-06 extra-args appended as distinct elements (-s + value)"; PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-CXRS-LAUNCH-06 extra-args not present as distinct elements"; FAIL=$((FAIL + 1))
+fi
+
+# TC-CXRS-LAUNCH-08 — #218 FINDING 1 REGRESSION: a MULTI-LINE prompt (the real
+# build_review_prompt heredoc shape) must remain a SINGLE argv element. The pre-fix
+# newline-serialized round-trip split it at every `\n` into many positionals →
+# codex review got bogus args and failed before reviewing. The nameref array MUST
+# keep it intact: argv[1] equals the full multi-line prompt, and the total element
+# count is unaffected by how many lines the prompt has.
+multiline_prompt=$'You are reviewing PR #219.\n\n## Step 0\nCheck mergeable.\n\n## Decision\nPost via post-verdict.sh.\nLine with "quotes" and $(subshell) and `backtick`.'
+AGENT_DEV_EXTRA_ARGS="" _codex_review_argv argv_ml "$multiline_prompt" "sonnet"
+assert_eq "TC-CXRS-LAUNCH-08a multi-line prompt stays ONE argv element" "$multiline_prompt" "${argv_ml[1]}"
+# review + prompt + (-c + model) = exactly 4 elements regardless of prompt newlines
+assert_eq "TC-CXRS-LAUNCH-08b multi-line prompt does not inflate the element count" "4" "${#argv_ml[@]}"
+# and argv[0] is still exactly `review`, argv[2]/[3] the model flag (prompt did not bleed)
+assert_eq "TC-CXRS-LAUNCH-08c argv[0] still 'review' after a multi-line prompt" "review" "${argv_ml[0]}"
+assert_eq "TC-CXRS-LAUNCH-08d argv[2] is '-c' (prompt did not split into positionals)" "-c" "${argv_ml[2]}"
 
 # ---------------------------------------------------------------------------
 echo ""
@@ -473,6 +503,22 @@ assert_grep "TC-CXRS-WIRE-08 CI shellcheck includes lib-review-codex.sh" \
 # TC-CXRS-WIRE-09 — drop-reason loop still wires the codex classifier
 assert_grep "TC-CXRS-WIRE-09 wrapper calls _classify_codex_drop_reason" \
   '_classify_codex_drop_reason' "$WRAPPER"
+# TC-CXRS-WIRE-10 — #218 finding 2 source-of-truth: the REAL wrapper's stdout
+# fallback gates on a clean (rc 0) codex review exit. The INT-07..09 behavioral
+# tests exercise a COPY of the fallback block; these greps pin the gate in the
+# actual autonomous-review.sh so it can't silently regress (a non-zero exit must
+# never post a fabricated verdict). The gate reads the launch rc from
+# AGENT_LAUNCH_RC and admits ONLY rc 0 (a completed review).
+assert_grep "TC-CXRS-WIRE-10a wrapper reads the codex launch rc from AGENT_LAUNCH_RC (#218 finding 2)" \
+  '_cx_launch_rc="\$\{AGENT_LAUNCH_RC\[' "$WRAPPER"
+assert_grep "TC-CXRS-WIRE-10b wrapper stdout-fallback admits ONLY rc 0 (#218 finding 2)" \
+  '\[\[ "\$_cx_launch_rc" -eq 0 \]\]' "$WRAPPER"
+# TC-CXRS-WIRE-11 — the wrapper builds the codex review argv via the nameref
+# OUT-ARRAY (#218 finding 1: _run_codex_review must NOT serialize/parse the prompt
+# through newlines). Pin that _codex_review_argv is called with an out-array first
+# arg in the lib (the production caller).
+assert_grep "TC-CXRS-WIRE-11 _run_codex_review builds argv via the nameref out-array (#218 finding 1)" \
+  '_codex_review_argv _argv ' "$LIB"
 
 # ===========================================================================
 echo ""
@@ -483,7 +529,7 @@ echo "=== TC-CXRS-INT: integration — stdout fallback verdict path (behavioral)
 # proving: [P1] → FAIL composed + posted; clean → PASS posted; self-posted → no
 # double-post; stream-error capture → NOT fabricated into a verdict.
 
-# fallback_case <stdout-fixture> <already-resolved-verdict> <already-self-posted> [fb_lag]
+# fallback_case <stdout-fixture> <already-resolved-verdict> <already-self-posted> [fb_lag] [launch_rc]
 #   Echoes "<posted?>|<verdict-arg>|<resolved-verdict>"
 #   - posted?        : "POST" if the stub post-verdict.sh was invoked, else "NOPOST"
 #   - verdict-arg    : the pass/fail arg passed to post-verdict.sh (or "-")
@@ -494,8 +540,13 @@ echo "=== TC-CXRS-INT: integration — stdout fallback verdict path (behavioral)
 #                      Exercises the M1 race — a successfully-posted verdict must
 #                      NOT be left unresolved (→ dropped `unavailable`) just because
 #                      the immediate re-fetch hasn't caught up.
+#   - launch_rc      : the codex member's _run_codex_review exit code (default 0).
+#                      A non-zero rc means codex review did NOT complete cleanly, so
+#                      the rc-0 gate (#218 finding 2) must SKIP the stdout fallback —
+#                      a CLI usage/auth error printing `error: …` with no `[P1]` must
+#                      NOT be posted as a false PASS.
 fallback_case() {
-  local fixture="$1" pre_verdict="$2" pre_body="$3" fb_lag="${4:-}"
+  local fixture="$1" pre_verdict="$2" pre_body="$3" fb_lag="${4:-}" launch_rc="${5:-0}"
   local sandbox; sandbox=$(mktemp -d)
   local cap="$sandbox/cap.txt"
   [[ -n "$fixture" ]] && cp "$fixture" "$cap" || : > "$cap"
@@ -536,12 +587,17 @@ PV
     AGENT_CODEX_LOGS=("$cap")
     AGENT_VERDICTS=("$pre_verdict")
     AGENT_VERDICT_BODIES=("$pre_body")
+    declare -A AGENT_LAUNCH_RC=([sid-codex]="$launch_rc")
 
     # --- the wrapper's INV-62 fallback block, replicated verbatim ---
     for _i in "${!AGENT_NAMES[@]}"; do
       [[ "${AGENT_NAMES[$_i]}" == "codex" ]] || continue
       [[ -n "${AGENT_VERDICTS[$_i]}" ]] && continue
       [[ -n "${AGENT_VERDICT_BODIES[$_i]}" ]] && continue
+      # #218 finding 2: ONLY a clean rc-0 (completed) review is eligible for the
+      # stdout fallback. Any non-zero rc (124/137 cap, or a usage/auth/config error)
+      # is left UNRESOLVED for the terminal sweep — never fabricated into a verdict.
+      [[ "${AGENT_LAUNCH_RC[${AGENT_SESSION_IDS[$_i]}]:-1}" -eq 0 ]] || continue
       _cx_stdout="${AGENT_CODEX_LOGS[$_i]:-}"
       [[ -n "$_cx_stdout" && -s "$_cx_stdout" ]] || continue
       if _codex_review_has_stream_error "$_cx_stdout" \
@@ -604,6 +660,58 @@ assert_eq "TC-CXRS-INT-05 PASS with lagging re-fetch → still resolves pass (no
 # wrapper's own composed body (a passing-merge veto must survive the lag too).
 assert_eq "TC-CXRS-INT-06 FAIL with lagging re-fetch → still resolves fail (not dropped unavailable)" \
   "POST|fail|fail" "$(fallback_case "$FIXTURES/codex-review-stdout-p1.txt" "" "" lag)"
+
+# TC-CXRS-INT-07 — #218 FINDING 2 REGRESSION: a codex review that exited NON-ZERO
+# (a CLI usage/auth/config error — here a broken invocation printing `error: …` to
+# the capture with NO `[P1]`) must NOT be classified PASS and posted by the wrapper.
+# The pre-fix fallback gated only on 124/137, so this `error:` capture (rc 1) would
+# read as PASS (no `[P1]`) → a FALSE PASS for a review that never ran. The rc-0 gate
+# leaves it UNRESOLVED for the terminal sweep (→ `unavailable`). NOPOST + empty
+# resolution. This is the dangerous interaction with finding 1 the reviewer flagged.
+assert_eq "TC-CXRS-INT-07 non-zero exit (CLI error, no [P1]) → NOT posted as false PASS (rc-0 gate)" \
+  "NOPOST|-|" "$(fallback_case "$FIXTURES/codex-review-stdout-cli-error.txt" "" "" "" 1)"
+
+# TC-CXRS-INT-08 — a non-zero exit even with a [P1] in the capture is still left
+# unresolved: a non-completed review is not a trustworthy verdict source regardless
+# of what partial text it streamed. (rc 1, stdout has [P1] → still NOPOST.)
+assert_eq "TC-CXRS-INT-08 non-zero exit with [P1] in partial stdout → still unresolved (rc-0 gate)" \
+  "NOPOST|-|" "$(fallback_case "$FIXTURES/codex-review-stdout-p1.txt" "" "" "" 1)"
+
+# TC-CXRS-INT-09 — the rc-0 happy path is unaffected: an explicit rc 0 with a clean
+# review still posts PASS (the gate admits a completed review).
+assert_eq "TC-CXRS-INT-09 rc 0 clean review → posts PASS (gate admits completed review)" \
+  "POST|pass|pass" "$(fallback_case "$FIXTURES/codex-review-stdout-clean.txt" "" "" "" 0)"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-CXRS-MLP: _run_codex_review passes a MULTI-LINE prompt as ONE arg (#218 finding 1) ==="
+# ---------------------------------------------------------------------------
+# End-to-end argv guard: drive _run_codex_review with a stub _run_with_timeout that
+# records its argv (NUL-delimited) and assert the multi-line prompt arrives as a
+# SINGLE positional argument — not split at newlines into many positionals (which
+# would make `codex review` fail before reviewing).
+mlp_argv=$(
+  set -uo pipefail
+  source "$LIB"
+  sandbox=$(mktemp -d)
+  # Record argv NUL-delimited so a multi-line element is preserved intact.
+  _run_with_timeout() { shift; printf '%s\0' "$@" > "$sandbox/argv.nul"; echo "review output"; return 0; }
+  _codex_now_seconds() { printf '%s\n' 0; }
+  prompt=$'You are reviewing PR #219.\n\n## Decision\nPost via post-verdict.sh.'
+  CODEX_REVIEW_MAX_RERUNS=3 AGENT_REVIEW_TIMEOUT=1h AGENT_CMD=codex \
+    _run_codex_review "$prompt" "sonnet" "$sandbox/cap.txt" >/dev/null 2>&1
+  # element count + the prompt element verbatim
+  cnt=$(tr -cd '\0' < "$sandbox/argv.nul" | wc -c | tr -d ' ')
+  # The prompt is argv element index 1 (after `review`); extract it (2nd NUL field).
+  prompt_arg=$(awk 'BEGIN{RS="\0"} NR==2{print; exit}' "$sandbox/argv.nul")
+  first_arg=$(awk 'BEGIN{RS="\0"} NR==1{print; exit}' "$sandbox/argv.nul")
+  printf 'cnt=%s|first=%s|match=%s' "$cnt" "$first_arg" "$([[ "$prompt_arg" == "$prompt" ]] && echo yes || echo no)"
+  rm -rf "$sandbox"
+)
+# review + prompt + -c + model = 4 elements; first arg is `review`; the multi-line
+# prompt element matches verbatim (NOT split into multiple positionals).
+assert_eq "TC-CXRS-MLP-01 multi-line prompt reaches codex review as ONE arg" \
+  "cnt=4|first=review|match=yes" "$mlp_argv"
 
 # ---------------------------------------------------------------------------
 echo ""

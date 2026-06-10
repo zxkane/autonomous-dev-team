@@ -55,8 +55,10 @@ prints scripted stdout, and a stubbed `_run_with_timeout` seam.
 | TC-CXRS-LAUNCH-03 | model supplied | argv does NOT carry `-m` |
 | TC-CXRS-LAUNCH-04 | any launch | argv does NOT carry `--base` |
 | TC-CXRS-LAUNCH-05 | any launch | argv does NOT carry `--json` |
-| TC-CXRS-LAUNCH-06 | extra-args supplied | the per-agent extra-args are appended to argv |
+| TC-CXRS-LAUNCH-06 | extra-args supplied | the per-agent extra-args are appended to argv as DISTINCT elements |
 | TC-CXRS-LAUNCH-07 | launch writes the clean review stdout to the caller's stdout-capture file | the capture file holds codex review's stdout |
+| TC-CXRS-LAUNCH-08 | **#218 finding 1**: a MULTI-LINE prompt (the real `build_review_prompt` heredoc) | stays a SINGLE argv element; element count is unaffected by prompt newlines (NOT split into positionals) |
+| TC-CXRS-MLP-01 | end-to-end: `_run_codex_review` with a multi-line prompt + a recording stub | the stubbed binary receives the prompt as ONE arg (4 elements total, `argv[0]==review`) |
 
 ## Unit — bounded re-run (`_run_codex_review`, subsumes #209)
 
@@ -108,6 +110,9 @@ exit is re-run, bounded by `CODEX_REVIEW_MAX_RERUNS` (default 3) + the
 | TC-CXRS-INT-04 | stubbed transient-then-recovering codex review (non-zero then clean) | bounded re-run yields a verdict (closes #209 for the review path) |
 | TC-CXRS-INT-05 | wrapper posted the PASS fallback, but the immediate re-fetch LAGS (comments API hasn't surfaced it) | resolves `pass` from the wrapper's composed body — NOT left unresolved → dropped `unavailable` (re-fetch-lag guard) |
 | TC-CXRS-INT-06 | wrapper posted the FAIL fallback, re-fetch LAGS | resolves `fail` from the wrapper's composed body (a merge veto survives the lag) |
+| TC-CXRS-INT-07 | **#218 finding 2**: `_run_codex_review` exited non-zero (CLI usage/auth error stdout, no `[P1]`) | NOT posted as a false PASS; left unresolved for the sweep → `unavailable` (rc-0 gate) |
+| TC-CXRS-INT-08 | non-zero exit even with `[P1]` in the partial stdout | still left unresolved (a non-completed review is not a verdict source) |
+| TC-CXRS-INT-09 | rc-0 clean review | still posts PASS (the gate admits a completed review) |
 
 ## Regression / superseded
 

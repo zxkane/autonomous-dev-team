@@ -1469,16 +1469,26 @@ for _i in "${!AGENT_NAMES[@]}"; do
   [[ "${AGENT_NAMES[$_i]}" == "codex" ]] || continue
   [[ -n "${AGENT_VERDICTS[$_i]}" ]] && continue   # poll loop already classified it pass/fail
   [[ -n "${AGENT_VERDICT_BODIES[$_i]}" ]] && continue
-  # INV-48/INV-62: a codex run reaped by the per-run wall-clock cap returns a
-  # STICKY 124 (timeout TERM) / 137 (--kill-after KILL) from _run_codex_review and
-  # arrives here UNRESOLVED (the poll loop only ever sets pass/fail — `timed-out` is
-  # assigned exclusively by the terminal sweep below via _classify_noverdict_agent).
-  # Such a run may have streamed PARTIAL review text before the cap killed it; if the
-  # wrapper classified that truncated stdout and posted a verdict, it would convert
-  # the INV-48 `timed-out` deciding-FAIL (merge VETO) into a pass/fail vote — silently
-  # letting a cap-truncated review merge. So leave a 124/137 agent for the sweep to
-  # resolve `timed-out`; never fabricate a verdict from a wall-clock-capped run.
-  case "${AGENT_LAUNCH_RC[${AGENT_SESSION_IDS[$_i]}]:-1}" in 124|137) continue ;; esac
+  # INV-62 (#218 review finding 2): the stdout fallback may ONLY derive a verdict
+  # from a codex review that EXITED CLEANLY (rc 0 — a COMPLETED review). A non-zero
+  # exit from _run_codex_review is NOT a review verdict; it is a CLI failure:
+  #   - 124/137 → the per-run wall-clock cap killed it (a STICKY rc). Such a run may
+  #     have streamed PARTIAL review text before the cap; classifying that truncated
+  #     stdout would convert the INV-48 `timed-out` deciding-FAIL (merge VETO) into a
+  #     pass/fail vote — silently letting a cap-truncated review merge.
+  #   - any OTHER non-zero rc (a usage/auth/config error, a broken invocation that
+  #     exhausted CODEX_REVIEW_MAX_RERUNS, …) → codex printed `error: …` to the
+  #     capture with NO `[P1]`, so _codex_review_classify_stdout would read it as
+  #     PASS and the wrapper would post a FALSE PASS for a review that never ran.
+  # In BOTH cases leave the agent UNRESOLVED for the terminal sweep below: a 124/137
+  # resolves `timed-out` (veto), any other non-zero resolves `unavailable` (dropped,
+  # with the stream-error drop-reason path naming a transient 5xx). Only a clean rc 0
+  # run — codex actually completed a review — is eligible for the stdout fallback.
+  _cx_launch_rc="${AGENT_LAUNCH_RC[${AGENT_SESSION_IDS[$_i]}]:-1}"
+  [[ "$_cx_launch_rc" -eq 0 ]] || {
+    log "INV-62: codex review exited non-zero (rc ${_cx_launch_rc}) — NOT a completed review; leaving unresolved for the terminal sweep (timed-out / unavailable), no stdout-fallback verdict."
+    continue
+  }
   _cx_stdout="${AGENT_CODEX_LOGS[$_i]:-}"
   # No stdout capture, or it is a pure stream error → leave unresolved (the sweep
   # below resolves `unavailable`, and the drop-reason path names stream-error).

@@ -160,11 +160,20 @@ ${text}"
   return 0
 }
 
-# _codex_review_argv <prompt> <model> — emit, ONE PER LINE, the argv that
-# `codex review` is launched with (the part AFTER the `codex` binary). Factored
-# out so the exact invocation shape is unit-testable without spawning codex.
+# _codex_review_argv <out-array-name> <prompt> <model> — populate the named bash
+# ARRAY with the argv that `codex review` is launched with (the part AFTER the
+# `codex` binary). Uses a nameref OUT-ARRAY (mirroring lib-agent.sh::_parse_extra_args)
+# so the prompt is carried as ONE array element no matter what it contains.
 #
 #   codex review "<prompt>" [-c model="<model>"] <extra-args>
+#
+# CRITICAL (#218 review finding 1): the PROMPT built by build_review_prompt is a
+# large MULTI-LINE heredoc. An earlier draft emitted the argv one-element-per-line
+# (`printf '%s\n' …`) and the caller rebuilt it with `while read -r`, which SPLIT
+# the multi-line prompt at every `\n` into many positional args — `codex review`
+# would then receive dozens of bogus positionals instead of one prompt and fail
+# before reviewing. A nameref out-array keeps every element intact (newlines and
+# all) with no serialize/parse round-trip, so the prompt is exactly one argv slot.
 #
 # - The PROMPT is the positional `[PROMPT]` (carries the decision-gate rules).
 # - The MODEL is passed via `-c 'model="..."'` because `codex review` REJECTS
@@ -176,7 +185,8 @@ ${text}"
 # - NO `--base` ([PROMPT] is mutually exclusive with it; auto-scope is the
 #   intended path), NO `-m`, NO `--json`.
 _codex_review_argv() {
-  local prompt="${1:-}" model="${2:-}"
+  local -n _cra_out="$1"
+  local prompt="${2:-}" model="${3:-}"
   local -a extra_args=()
   # Tokenize operator extra-args the same way the agent primitives do. Prefer the
   # shared helper when available (lib-agent.sh::_parse_extra_args), else a plain
@@ -187,14 +197,12 @@ _codex_review_argv() {
     # shellcheck disable=SC2206
     [[ -n "${AGENT_DEV_EXTRA_ARGS:-}" ]] && extra_args=(${AGENT_DEV_EXTRA_ARGS})
   fi
-  printf '%s\n' review "$prompt"
-  if [[ -n "$model" ]]; then
-    printf '%s\n' -c "model=\"${model}\""
-  fi
-  local a
-  for a in "${extra_args[@]}"; do
-    printf '%s\n' "$a"
-  done
+  _cra_out=(review "$prompt")
+  [[ -n "$model" ]] && _cra_out+=(-c "model=\"${model}\"")
+  # Append each extra-arg as its own element (no word-splitting — already
+  # tokenized). An empty array appends nothing (bash 4.4+, the box's 5.x shell),
+  # matching how run_agent splices its own "${extra_args[@]}" inline.
+  _cra_out+=("${extra_args[@]}")
 }
 
 # _run_codex_review <prompt> <model> <stdout-file>
@@ -230,9 +238,10 @@ _run_codex_review() {
   [[ "$max" =~ ^[0-9]+$ ]] || max=3
 
   # Build the argv once (prompt + model + extra-args are stable across re-runs).
+  # Populate a real array via the nameref builder — NO newline serialize/parse
+  # round-trip, so a multi-line prompt stays ONE argv element (#218 finding 1).
   local -a _argv=()
-  local _line
-  while IFS= read -r _line; do _argv+=("$_line"); done < <(_codex_review_argv "$prompt" "$model")
+  _codex_review_argv _argv "$prompt" "$model"
 
   # _one_codex_review_run — a single `codex review` invocation under the shared
   # timeout. Writes codex's clean stdout to $stdout_file (overwrite, not append —
