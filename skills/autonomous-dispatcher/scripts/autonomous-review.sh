@@ -80,6 +80,19 @@ source "${SCRIPT_DIR}/lib-review-codex.sh"
 # Observability only — does NOT change the INV-40 vote (a quota agy stays dropped,
 # not a deciding FAIL). Inert unless a fan-out agent is agy AND it was dropped.
 source "${SCRIPT_DIR}/lib-review-agy.sh"
+# shellcheck source=lib-review-kiro.sh
+# INV-61 (#215): kiro (Kiro CLI) auth/login-failure drop-reason detector. When a
+# kiro fan-out member has an expired OAuth/login token on the execution host, the
+# CLI tries to open a browser for device-flow re-auth — impossible in the headless
+# SSM-spawned shell — so it exits at launch with no verdict and the wrapper drops
+# it as an opaque `unavailable` (INV-40). _classify_kiro_drop_reason scrapes kiro's
+# OWN generic per-agent log for the browser/login signal so the wrapper can surface
+# a distinct, actionable reason (naming `kiro-cli login --use-device-flow`) in the
+# WARN log + the dropped-agent comment. The kiro-shaped sibling of INV-58 (agy
+# quota) / INV-59 (codex stream-error). Observability only — does NOT change the
+# INV-40 vote (an auth-failed kiro stays dropped, not a deciding FAIL). Inert
+# unless a fan-out agent is kiro AND it was dropped.
+source "${SCRIPT_DIR}/lib-review-kiro.sh"
 # shellcheck source=lib-review-request-changes.sh
 # INV-52 (#193): the wrapper OWNS the GitHub-native PR review action — `--approve`
 # on a PASS and `--request-changes` on a SUBSTANTIVE FAIL — so the PR's
@@ -1164,6 +1177,14 @@ declare -a AGENT_AGY_LOGS=()
 # `unavailable`, to scrape the turn.failed stream-error signal. Deterministic
 # path, captured in the parent (no sidecar plumbing) — mirrors AGENT_AGY_LOGS.
 declare -a AGENT_CODEX_LOGS=()
+# INV-61 (#215): for a `kiro` fan-out member, the path of kiro's GENERIC per-agent
+# log ($_agent_log — the same file the kiro invocation writes to; kiro has no
+# separate --log-file like agy), keyed by index. Empty for a non-kiro agent. Read
+# AFTER verdict resolution by _classify_kiro_drop_reason when a kiro agent was
+# dropped `unavailable`, to scrape the browser/device-flow auth-failure signal.
+# Deterministic path, captured in the parent (no sidecar plumbing) — mirrors
+# AGENT_CODEX_LOGS.
+declare -a AGENT_KIRO_LOGS=()
 # PIDs of the backgrounded per-agent subshells. We MUST `wait` these specific
 # PIDs — never a bare `wait`. A bare `wait` blocks on ALL background jobs of
 # this shell, which includes the long-lived gh-token-refresh-daemon (started
@@ -1229,6 +1250,14 @@ for _agent in "${REVIEW_AGENTS_LIST[@]}"; do
   _agent_codex_log=""
   [[ "$_agent" == "codex" ]] && _agent_codex_log="$_agent_log"
   AGENT_CODEX_LOGS+=("$_agent_codex_log")
+  # INV-61 (#215): for a `kiro` member, record its generic per-agent log path so
+  # the post-resolution drop-reason scrape can read the browser/device-flow
+  # auth-failure signal. This is the SAME $_agent_log the kiro invocation writes
+  # to — deterministic, no sidecar needed (mirrors the codex capture above; kiro
+  # has no separate --log-file like agy).
+  _agent_kiro_log=""
+  [[ "$_agent" == "kiro" ]] && _agent_kiro_log="$_agent_log"
+  AGENT_KIRO_LOGS+=("$_agent_kiro_log")
   _agent_prompt=$(build_review_prompt "$_agent" "$_agent_session_id")
   _agent_rc_file="${_FANOUT_DIR}/${_agent_session_id}.rc"
 
@@ -1501,15 +1530,17 @@ SESSION_ID="${AGENT_SESSION_IDS[0]}"
 _dropped_agents=""
 _deciding_agents=""
 _timed_out_agents=""
-# INV-58 (#205) / INV-59 (#209): per-dropped-agent reason breadcrumbs (e.g.
-# "agy: quota-exhausted (Antigravity 429: …; resets in 33h48m45s)" or
-# "codex: stream-error (upstream 5xx; exhausted 5/5 SSE reconnects, turn.failed)").
-# Built for `agy` members whose own --log-file shows a 429/auth signal (INV-58)
-# and `codex` members whose JSONL log shows a turn.failed stream error (INV-59);
-# other agents and signal-free drops add nothing here, keeping the bare
-# `unavailable` wording. Surfaced in the WARN log line + the dropped-agent comment
-# so an operator reading only the wrapper log can tell WHY the agent was dropped
-# — without digging into the CLI's separate per-agent log.
+# INV-58 (#205) / INV-59 (#209) / INV-61 (#215): per-dropped-agent reason
+# breadcrumbs (e.g. "agy: quota-exhausted (Antigravity 429: …; resets in
+# 33h48m45s)", "codex: stream-error (upstream 5xx; exhausted 5/5 SSE reconnects,
+# turn.failed)", or "kiro: auth-failed (browser/device-flow login required …)").
+# Built for `agy` members whose own --log-file shows a 429/auth signal (INV-58),
+# `codex` members whose JSONL log shows a turn.failed stream error (INV-59), and
+# `kiro` members whose generic per-agent log shows a browser/device-flow login
+# failure (INV-61); other agents and signal-free drops add nothing here, keeping
+# the bare `unavailable` wording. Surfaced in the WARN log line + the dropped-agent
+# comment so an operator reading only the wrapper log can tell WHY the agent was
+# dropped — without digging into the CLI's separate per-agent log.
 _dropped_reasons=""
 for _i in "${!AGENT_NAMES[@]}"; do
   case "${AGENT_VERDICTS[$_i]}" in
@@ -1539,6 +1570,22 @@ for _i in "${!AGENT_NAMES[@]}"; do
         _codex_reason_token=$(_classify_codex_drop_reason "${AGENT_CODEX_LOGS[$_i]:-}")
         if [[ -n "$_codex_reason_token" ]]; then
           _dropped_reasons+="${AGENT_NAMES[$_i]}: $(_codex_drop_reason_phrase "$_codex_reason_token"); "
+        fi
+      # INV-61 (#215): kiro-shaped drop reason. A kiro member whose stored
+      # OAuth/login token expired tries to open a browser for device-flow re-auth
+      # — impossible in the headless SSM-spawned shell — and exits at launch with
+      # no verdict, dropped `unavailable` here too. Scrape its generic per-agent
+      # log for the browser/login signal so the dropped-agent line names a SPECIFIC
+      # reason (the `kiro-cli login --use-device-flow` remedy) rather than a bare
+      # opaque `unavailable`. Both helpers ALWAYS `return 0` (lib-review-kiro.sh) —
+      # same load-bearing rc-0-always contract as the agy/codex branches: a
+      # non-zero `$(…)` in this append would abort under `set -e` and strand the
+      # issue in `reviewing`. A signal-free / clean no-verdict kiro turn yields an
+      # empty token → the bare `unavailable` wording is unchanged (no over-claim).
+      elif [[ "${AGENT_NAMES[$_i]}" == "kiro" ]]; then
+        _kiro_reason_token=$(_classify_kiro_drop_reason "${AGENT_KIRO_LOGS[$_i]:-}")
+        if [[ -n "$_kiro_reason_token" ]]; then
+          _dropped_reasons+="${AGENT_NAMES[$_i]}: $(_kiro_drop_reason_phrase "$_kiro_reason_token"); "
         fi
       fi
       ;;

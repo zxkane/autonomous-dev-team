@@ -185,6 +185,24 @@ fi
 
 # ---------------------------------------------------------------------------
 echo ""
+echo "=== TC-MAR-SRC-15: kiro drop-reason classifier wired into the drop loop (INV-61, #215) ==="
+# ---------------------------------------------------------------------------
+# The drop-reason assembly loop must enrich a dropped `kiro` member's reason in
+# addition to agy (INV-58) and codex (INV-59): the wrapper sources the kiro lib,
+# captures the kiro per-agent log into AGENT_KIRO_LOGS during fan-out, classifies
+# via _classify_kiro_drop_reason, and interpolates _kiro_drop_reason_phrase — so a
+# fan-out dropping any of {agy, codex, kiro} lists a distinct reason for each.
+assert_grep "TC-MAR-SRC-15a wrapper sources lib-review-kiro.sh" \
+  'source "\$\{SCRIPT_DIR\}/lib-review-kiro.sh"' "$WRAPPER"
+assert_grep "TC-MAR-SRC-15b wrapper captures the per-agent kiro log (AGENT_KIRO_LOGS)" \
+  'AGENT_KIRO_LOGS' "$WRAPPER"
+assert_grep "TC-MAR-SRC-15c drop loop classifies a dropped kiro (_classify_kiro_drop_reason)" \
+  '_classify_kiro_drop_reason' "$WRAPPER"
+assert_grep "TC-MAR-SRC-15d drop loop interpolates the kiro reason phrase (_kiro_drop_reason_phrase)" \
+  '_kiro_drop_reason_phrase' "$WRAPPER"
+
+# ---------------------------------------------------------------------------
+echo ""
 echo "=== Summary ==="
 echo "  PASS: $PASS"
 echo "  FAIL: $FAIL"
