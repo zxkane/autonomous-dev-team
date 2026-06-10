@@ -661,8 +661,11 @@ PV
       # is left UNRESOLVED for the terminal sweep — never fabricated into a verdict.
       [[ "${AGENT_LAUNCH_RC[${AGENT_SESSION_IDS[$_i]}]:-1}" -eq 0 ]] || continue
       _cx_stdout="${AGENT_CODEX_LOGS[$_i]:-}"
-      [[ -n "$_cx_stdout" && -s "$_cx_stdout" ]] || continue
-      if _codex_review_has_stream_error "$_cx_stdout" \
+      # #218 finding 2: do NOT drop an rc-0 review with an empty/missing capture —
+      # it is a valid clean review (classifier → PASS, body composer → default PASS).
+      # Only a NON-EMPTY capture that is a pure stream error (no [P1]) is skipped.
+      if [[ -n "$_cx_stdout" && -s "$_cx_stdout" ]] \
+         && _codex_review_has_stream_error "$_cx_stdout" \
          && ! grep -qF '[P1]' "$_cx_stdout" 2>/dev/null; then
         continue
       fi
@@ -743,6 +746,15 @@ assert_eq "TC-CXRS-INT-08 non-zero exit with [P1] in partial stdout → still un
 # review still posts PASS (the gate admits a completed review).
 assert_eq "TC-CXRS-INT-09 rc 0 clean review → posts PASS (gate admits completed review)" \
   "POST|pass|pass" "$(fallback_case "$FIXTURES/codex-review-stdout-clean.txt" "" "" "" 0)"
+
+# TC-CXRS-INT-10 — #218 review finding 2: an rc-0 review that did NOT self-post and
+# produced an EMPTY capture (the diff had nothing blocking; codex emitted little/no
+# text) must STILL post the default PASS — NOT be dropped `unavailable`. An empty
+# fixture ("") makes fallback_case write an empty capture (`: > "$cap"`). The pre-fix
+# `[[ -n && -s ]] || continue` guard dropped it; the fix posts the composed default
+# PASS, upholding INV-62's "exactly one verdict". POST|pass|pass.
+assert_eq "TC-CXRS-INT-10 rc 0, empty capture, no self-post → posts default PASS (not dropped unavailable)" \
+  "POST|pass|pass" "$(fallback_case "" "" "" "" 0)"
 
 # ---------------------------------------------------------------------------
 echo ""
@@ -901,6 +913,47 @@ assert_grep "TC-CXRS-WT-SRC-02 wrapper passes the prepared workdir to _run_codex
   '_run_codex_review "\$_agent_prompt".*"\$_cx_pr_workdir"' "$WRAPPER"
 assert_grep "TC-CXRS-WT-SRC-03 wrapper tears the codex worktree down" \
   '_codex_review_cleanup_worktree "\$_cx_pr_workdir"' "$WRAPPER"
+
+# TC-CXRS-WT-SRC-04..06 — #218 review finding 1: the wrapper FAILS CLOSED when the
+# PR-branch worktree cannot be prepared. It MUST guard the `_run_codex_review` call
+# behind a `_cx_wt_ready == true` gate (never run a vote-producing review without a
+# PR-scoped worktree), and on the failure branch set the non-zero sentinel rc
+# (CODEX_REVIEW_NO_WORKTREE_RC, default 70) so the agent resolves `unavailable`
+# rather than voting on PROJECT_DIR's wrong/empty diff. Pin all three.
+assert_grep "TC-CXRS-WT-SRC-04 wrapper gates _run_codex_review behind a worktree-ready flag (fail-closed, finding 1)" \
+  '_cx_wt_ready' "$WRAPPER"
+assert_grep "TC-CXRS-WT-SRC-05 wrapper runs codex review ONLY when the worktree is ready" \
+  '\[\[ "\$_cx_wt_ready" == true \]\]' "$WRAPPER"
+assert_grep "TC-CXRS-WT-SRC-06 wrapper sets the non-zero fail-closed sentinel rc on prepare failure (→ unavailable, no vote)" \
+  '_rc="\$\{CODEX_REVIEW_NO_WORKTREE_RC:-70\}"' "$WRAPPER"
+# And the stale "fails open" wording must be GONE — the prepare-failure path no
+# longer runs from PROJECT_DIR.
+if grep -qF 'running from PROJECT_DIR (the auto-scoped diff may be wrong)' "$WRAPPER"; then
+  echo -e "  ${RED}FAIL${NC}: TC-CXRS-WT-SRC-07 stale fail-open 'running from PROJECT_DIR' path still present in wrapper"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${NC}: TC-CXRS-WT-SRC-07 stale fail-open 'running from PROJECT_DIR' path removed (fails closed now)"
+  PASS=$((PASS + 1))
+fi
+
+# TC-CXRS-WT-SRC-08 — #218 finding 2 (2nd part) source-of-truth: the LIVE wrapper's
+# stdout-fallback empty-capture guard is FOLDED into the stream-error skip (so an
+# rc-0 empty capture is NOT dropped). The INT-10 behavioral test exercises an inline
+# COPY of the fallback block; this grep pins the live wrapper so a regression to the
+# pre-fix `[[ -n "$_cx_stdout" && -s "$_cx_stdout" ]] || continue` (which dropped a
+# clean rc-0 empty review `unavailable`) cannot return silently. The fixed form has
+# the `-s` test AND'd with the stream-error check on the same `if`, never as a bare
+# `|| continue`.
+if grep -qE '\[\[ -n "\$_cx_stdout" && -s "\$_cx_stdout" \]\][[:space:]]*\|\|[[:space:]]*continue' "$WRAPPER"; then
+  echo -e "  ${RED}FAIL${NC}: TC-CXRS-WT-SRC-08 stale '[[ -n && -s ]] || continue' empty-capture drop still present (would drop rc-0 empty review)"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${NC}: TC-CXRS-WT-SRC-08 empty-capture drop removed — rc-0 empty capture is no longer dropped (finding 2)"
+  PASS=$((PASS + 1))
+fi
+# And the folded guard IS present: `-s` AND'd with the stream-error check.
+assert_grep "TC-CXRS-WT-SRC-09 wrapper folds the empty-capture test into the stream-error skip (finding 2)" \
+  '\[\[ -n "\$_cx_stdout" && -s "\$_cx_stdout" \]\][[:space:]]*\\$' "$WRAPPER"
 
 # ---------------------------------------------------------------------------
 echo ""

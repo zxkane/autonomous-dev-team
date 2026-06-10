@@ -1340,22 +1340,38 @@ for _agent in "${REVIEW_AGENTS_LIST[@]}"; do
       # worktree and run `codex review` FROM it, so the auto-scope resolves to the
       # PR's real diff. The worktree is per-agent (session-id-keyed → no collision
       # across a multi-codex fleet) and torn down right after, regardless of rc.
-      # If preparation fails (no PR_BRANCH, fetch/add error), _run_codex_review is
-      # called with an empty workdir and degrades to cwd with a loud warning — never
-      # crashes the fan-out subshell.
-      _cx_pr_workdir=""
-      if [[ -n "${PR_BRANCH:-}" ]]; then
-        _cx_pr_workdir="/tmp/codex-review-wt-${ISSUE_NUMBER}-${_agent_session_id}"
-        if ! _codex_review_prepare_worktree "$PR_BRANCH" "$_cx_pr_workdir"; then
-          log "WARNING: INV-62/#218 could not prepare a PR-branch worktree for codex review (branch '${PR_BRANCH}'); running from PROJECT_DIR (the auto-scoped diff may be wrong)."
-          _cx_pr_workdir=""
-        fi
+      #
+      # #218 review finding 1 — FAIL CLOSED: if the PR-branch worktree cannot be
+      # prepared (no PR_BRANCH, or fetch/add failure), codex MUST NOT cast a vote.
+      # An earlier draft "failed open" — it ran `codex review` from PROJECT_DIR with
+      # only a warning, but that review can still exit 0 and self-post / wrapper-post
+      # a PASS for `main`'s wrong/empty diff, reintroducing the exact safety hole the
+      # worktree fix closed (a vote for a non-PR diff). Instead we SKIP the
+      # vote-producing review entirely and set a non-(0/124/137) sentinel rc
+      # (CODEX_REVIEW_NO_WORKTREE_RC=70) so the post-window sweep resolves codex
+      # `unavailable` (dropped from the vote — NOT a deciding FAIL; an infra
+      # inability to scope the diff is not a code rejection). The stdout fallback's
+      # rc-0 gate also refuses a non-zero rc, so no fabricated verdict can leak.
+      _cx_pr_workdir="/tmp/codex-review-wt-${ISSUE_NUMBER}-${_agent_session_id}"
+      _cx_wt_ready=false
+      if [[ -z "${PR_BRANCH:-}" ]]; then
+        log "ERROR: INV-62/#218 PR_BRANCH is empty — cannot scope codex review to the PR. FAILING CLOSED: skipping the codex review (resolves \`unavailable\`, not a vote on the wrong diff)."
+      elif _codex_review_prepare_worktree "$PR_BRANCH" "$_cx_pr_workdir"; then
+        _cx_wt_ready=true
       else
-        log "WARNING: INV-62/#218 PR_BRANCH is empty; codex review runs from PROJECT_DIR (the auto-scoped diff may be wrong)."
+        log "ERROR: INV-62/#218 could not prepare a PR-branch worktree for codex review (branch '${PR_BRANCH}'). FAILING CLOSED: skipping the codex review (resolves \`unavailable\`) rather than voting on PROJECT_DIR's wrong/empty diff."
       fi
-      _run_codex_review "$_agent_prompt" "${_agent_model:-sonnet}" "$_agent_codex_stdout" "$_cx_pr_workdir" \
-        >>"$_agent_log" 2>&1 || _rc=$?
-      _codex_review_cleanup_worktree "$_cx_pr_workdir"
+      if [[ "$_cx_wt_ready" == true ]]; then
+        _run_codex_review "$_agent_prompt" "${_agent_model:-sonnet}" "$_agent_codex_stdout" "$_cx_pr_workdir" \
+          >>"$_agent_log" 2>&1 || _rc=$?
+        _codex_review_cleanup_worktree "$_cx_pr_workdir"
+      else
+        # Fail-closed sentinel: a non-zero, non-timeout rc → `unavailable` (dropped),
+        # never a vote. 70 (EX_SOFTWARE) is distinct from a CLI launch failure (1),
+        # a timeout (124/137), and a stream error, so the drop-reason path can name
+        # it. No `codex review` is launched, so there is no stdout capture to post.
+        _rc="${CODEX_REVIEW_NO_WORKTREE_RC:-70}"
+      fi
     else
       run_agent "$_agent_session_id" "$_agent_prompt" "${_agent_model:-sonnet}" "$_agent_session_name" \
         >>"$_agent_log" 2>&1 || _rc=$?
@@ -1513,10 +1529,20 @@ for _i in "${!AGENT_NAMES[@]}"; do
     continue
   }
   _cx_stdout="${AGENT_CODEX_LOGS[$_i]:-}"
-  # No stdout capture, or it is a pure stream error → leave unresolved (the sweep
-  # below resolves `unavailable`, and the drop-reason path names stream-error).
-  [[ -n "$_cx_stdout" && -s "$_cx_stdout" ]] || continue
-  if _codex_review_has_stream_error "$_cx_stdout" \
+  # #218 review finding 2: we reach here ONLY for a COMPLETED review (rc 0, the gate
+  # above). An empty / missing capture from an rc-0 run is a VALID clean review (the
+  # diff had nothing blocking and codex emitted little/no text), NOT a reason to
+  # drop codex. The classifier treats empty as PASS and the body composer has a
+  # default PASS body, so we MUST still compose + post the default PASS — otherwise
+  # an rc-0 no-self-post empty-capture review is dropped `unavailable`, violating
+  # INV-62's "exactly one verdict" guarantee. So do NOT `continue` on an empty
+  # capture. The ONLY skip is a capture that is a pure stream error with no findings
+  # — but a stream error implies a non-zero exit (already filtered by the rc-0 gate
+  # above), so this branch is effectively unreachable on rc 0; it is kept as
+  # belt-and-suspenders for the (theoretical) rc-0-with-stream-error-text case, and
+  # it requires a NON-EMPTY capture (an empty capture is never a stream error).
+  if [[ -n "$_cx_stdout" && -s "$_cx_stdout" ]] \
+     && _codex_review_has_stream_error "$_cx_stdout" \
      && ! grep -qF '[P1]' "$_cx_stdout" 2>/dev/null; then
     log "INV-62: codex review stdout is a pure stream error (no findings) — leaving unresolved for the stream-error drop-reason path."
     continue

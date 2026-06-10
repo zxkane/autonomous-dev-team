@@ -76,6 +76,7 @@ against a throwaway git repo with a diverging `pr-branch`.
 | TC-CXRS-WT-05 | `_run_codex_review` with a prepared worktree | runs `codex review` FROM the worktree; the wrapper's own cwd is unchanged (subshell `cd`) |
 | TC-CXRS-WT-06 | `_run_codex_review` with an EMPTY workdir | runs from cwd + logs a loud warning (degraded, never crashes) |
 | TC-CXRS-WT-SRC-01..03 | wrapper source-of-truth | the codex branch prepares the PR-branch worktree, passes it to `_run_codex_review` (4th arg), and tears it down |
+| TC-CXRS-WT-SRC-04..07 | **#218 finding 1 fail-closed** | the wrapper gates `_run_codex_review` behind a `_cx_wt_ready` flag, sets the `CODEX_REVIEW_NO_WORKTREE_RC` (70) sentinel → `unavailable` on prepare failure, and the stale fail-open "running from PROJECT_DIR" path is removed |
 
 ## Unit — bounded re-run (`_run_codex_review`, subsumes #209)
 
@@ -133,6 +134,7 @@ exit is re-run, bounded by `CODEX_REVIEW_MAX_RERUNS` (default 3) + the
 | TC-CXRS-INT-07 | **#218 finding 2**: `_run_codex_review` exited non-zero (CLI usage/auth error stdout, no `[P1]`) | NOT posted as a false PASS; left unresolved for the sweep → `unavailable` (rc-0 gate) |
 | TC-CXRS-INT-08 | non-zero exit even with `[P1]` in the partial stdout | still left unresolved (a non-completed review is not a verdict source) |
 | TC-CXRS-INT-09 | rc-0 clean review | still posts PASS (the gate admits a completed review) |
+| TC-CXRS-INT-10 | **#218 finding 2 (2nd part)**: rc-0 review, EMPTY capture, no self-post | still posts the default PASS — NOT dropped `unavailable` (clean review with no blocking findings; upholds "exactly one verdict") |
 
 ## Regression / superseded
 
