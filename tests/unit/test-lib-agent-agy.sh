@@ -692,9 +692,13 @@ assert_contains "TC-AGYM-KM — prefix of listed name → rc 1" "prefix=1"  "$km
 assert_contains "TC-AGYM-KM — regex metachars literal → rc 1" "regex=1" "$km_out"
 assert_contains "TC-AGYM-KM — empty arg → rc 1"             "empty=1"   "$km_out"
 
-# Newline injection regression test (CVE fix: sanitize input before grep -Fxq).
-# A model with embedded newlines must be rejected, not split across multiple grep lines.
+# Newline injection regression test: sanitize input before grep -Fxq.
+# A model with embedded newlines must be rejected (rc 1), not bypass validation
+# by splitting across multiple grep -Fxq lines. Requires the agy stub on PATH so
+# enumeration succeeds (rc 2 from enum-failure would mask this fix in CI).
 km_newline=$(
+  PATH="$BIN:$PATH" \
+  AGENT_CMD=agy \
   bash -c '
     unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE \
           _LIB_AGENT_AGY_MODEL_WARNED _LIB_AGENT_AGY_MODELS_CACHE
