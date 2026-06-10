@@ -6,13 +6,16 @@
 # `gh issue comment` for the verdict. There are THREE spots:
 #   1. Decision block — PASS branch
 #   2. Decision block — FAIL branch
-#   3. INV-55 codex-inline-diff block ("post your verdict comment in THIS turn"
-#      / "post the verdict in as few turns as possible")
+#   3. The codex-specific prompt block. Pre-#218 this was the INV-55 inline-diff
+#      block; as of INV-62 (#218) it is the `codex review` CODEX_REVIEW_NOTE
+#      block, which still carries a "post your verdict via post-verdict.sh"
+#      instruction (the codex review lane self-posts, with a wrapper stdout
+#      fallback).
 # The instruction must apply to ALL agents (no per-CLI branch for the verdict
 # post), and the first-line phrasing the poller matches (`Review PASSED` /
 # `Review findings:`) must be preserved.
 #
-# Strategy (mirrors test-codex-inline-diff-prompt.sh / test-autonomous-review-prompt.sh):
+# Strategy (mirrors test-autonomous-review-prompt.sh):
 #   1. Source-of-truth greps against the build_review_prompt function body.
 #   2. Behavioral: render the prompt for codex and a non-codex agent in a
 #      sandbox and assert the helper instruction appears identically for both.
@@ -110,7 +113,6 @@ SANDBOX_OUT=$(
   }
   PR_NUMBER=210; ISSUE_NUMBER=202; REPO="owner/repo"; REPO_OWNER="owner"
   REPO_NAME="repo"; PR_BRANCH="feat/x"; REVIEW_BOTS_VALIDATED=""; E2E_ACTIVE="false"
-  CODEX_REVIEW_INLINE_DIFF_MAX_BYTES=600000
   # INV-60: per-agent model resolution. Set an override for kiro so the
   # per-agent-override path (TC-PVP-09) renders a distinct id; an agy override
   # with SPACES + PARENS (TC-PVP-12, the multi-word-model quoting regression);
@@ -152,16 +154,16 @@ check_block() {
 check_block "codex" "$codex_block"
 check_block "claude" "$claude_block"
 
-# TC-PVP-03: the codex block (which contains the INV-55 inline-diff language)
+# TC-PVP-03: the codex-specific prompt block (the INV-62 CODEX_REVIEW_NOTE)
 # must defer the verdict post to the helper, not leave a loose bare-gh post.
-# The codex block carries the "in THIS turn" inline-diff verdict language AND
-# the helper reference; assert the helper reference is present in the codex block.
+# The codex block carries the codex-review verdict language AND the helper
+# reference; assert the helper reference is present in the codex block.
 if grep -qi 'post.*verdict' <<<"$codex_block" \
    && grep -q 'scripts/post-verdict.sh' <<<"$codex_block"; then
-  echo -e "  ${GREEN}PASS${NC}: TC-PVP-03 codex inline-diff verdict language defers to post-verdict.sh"
+  echo -e "  ${GREEN}PASS${NC}: TC-PVP-03 codex review verdict language defers to post-verdict.sh"
   PASS=$((PASS + 1))
 else
-  echo -e "  ${RED}FAIL${NC}: TC-PVP-03 codex inline-diff block does not route verdict via post-verdict.sh"
+  echo -e "  ${RED}FAIL${NC}: TC-PVP-03 codex review block does not route verdict via post-verdict.sh"
   FAIL=$((FAIL + 1))
 fi
 

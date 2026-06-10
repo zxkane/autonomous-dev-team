@@ -1188,7 +1188,7 @@ The suffix is computed by `lib-review-resolve.sh::_review_agent_key_suffix <name
 1. **Model** — `_resolve_review_agent_model <name>`: `AGENT_REVIEW_MODEL_<SUFFIX>` (if set AND non-empty) → `AGENT_REVIEW_MODEL` (shared) → the wrapper applies the `sonnet` lib default at the `run_agent` call site (`"${_agent_model:-sonnet}"`). An explicit-empty per-agent key collapses to the shared value (empty == unset, matching `:-` semantics).
 2. **Extra-args** — `_resolve_review_agent_extra_args <name>`: `AGENT_REVIEW_EXTRA_ARGS_<SUFFIX>` (if set AND non-empty) → `AGENT_REVIEW_EXTRA_ARGS` (shared) → empty. Tokenized downstream by `lib-agent.sh::_parse_extra_args` (the same `eval` trust model as `AGENT_LAUNCHER`, so quoted multi-token values survive).
 
-**Plumbing note (the resolved value is aliased onto BOTH extra-args vars, #212)**: the agent primitives read *two different* variables for the same concept — `run_agent` (turn 1, a *fresh* session) tokenizes `AGENT_DEV_EXTRA_ARGS`, while `resume_agent` (subsequent turns) tokenizes `AGENT_REVIEW_EXTRA_ARGS`. So the wrapper resolves the per-agent review extra-args ONCE (into `_resolved_review_extra_args`) and assigns it to **both** `AGENT_DEV_EXTRA_ARGS` **and** `AGENT_REVIEW_EXTRA_ARGS` **inside the subshell**, so the per-agent override survives every turn. The review fan-out *does* resume in one case: the **codex** lane's gather-only turns route through `lib-review-codex.sh::_run_codex_review_with_resume`, which calls `resume_agent` (`codex exec resume`, [INV-51](#inv-51-codex-review-thread-auto-resumes-until-a-verdict-posting-turn)). Aliasing onto `AGENT_DEV_EXTRA_ARGS` *alone* (the pre-#212 behavior) dropped the per-agent override on that resume — codex inherited the shared `AGENT_REVIEW_EXTRA_ARGS` (e.g. kiro's `--trust-all-tools`), which `codex exec resume` rejects with exit 2, so every resume failed and codex was dropped `unavailable` on every review. (This is scoped to the **review fan-out**; the dev-resume caller `autonomous-dev.sh` is a separate path.) The operator-facing surface is still the review knobs (`AGENT_REVIEW_EXTRA_ARGS[_<AGENT>]`); both assignments are internal implementation details scoped to the subshell and never leak to the dev side or to a sibling agent (the `AGENT_REVIEW_EXTRA_ARGS` write happens inside the per-agent `( … )` subshell, so the parent fan-out loop's value is untouched).
+**Plumbing note (the resolved value is aliased onto BOTH extra-args vars, #212)**: the agent primitives read *two different* variables for the same concept — `run_agent` (a *fresh* session) tokenizes `AGENT_DEV_EXTRA_ARGS`, while `resume_agent` tokenizes `AGENT_REVIEW_EXTRA_ARGS`. So the wrapper resolves the per-agent review extra-args ONCE (into `_resolved_review_extra_args`) and assigns it to **both** `AGENT_DEV_EXTRA_ARGS` **and** `AGENT_REVIEW_EXTRA_ARGS` **inside the subshell**, so the per-agent override reaches whichever launch path the CLI takes. The codex review lane reads `AGENT_DEV_EXTRA_ARGS` via `lib-review-codex.sh::_codex_review_argv` ([INV-62](#inv-62-the-codex-review-lane-runs-the-codex-review-subcommand-auto-scoped-prompt-carried-gate-with-a-stdout-verdict-fallback)) — so the per-agent `AGENT_REVIEW_EXTRA_ARGS_CODEX` override reaches `codex review`'s argv and #212 stays fixed. **As of [INV-62](#inv-62-the-codex-review-lane-runs-the-codex-review-subcommand-auto-scoped-prompt-carried-gate-with-a-stdout-verdict-fallback) no review CLI resumes** (the codex lane moved from `codex exec` + resume to the natively-multi-step `codex review` subcommand, which has no resume), so the `AGENT_REVIEW_EXTRA_ARGS` alias is no longer load-bearing for any current path — it is kept as belt-and-suspenders for any future `resume_agent` caller. Historically (pre-#218) the review fan-out resumed in exactly one case — the codex lane's gather-only turns routed through the now-deleted `_run_codex_review_with_resume` → `resume_agent` (`codex exec resume`, [INV-51](#inv-51-codex-review-thread-auto-resumes-until-a-verdict-posting-turn)) — and aliasing onto `AGENT_DEV_EXTRA_ARGS` *alone* (the pre-#212 behavior) dropped the override on that resume (codex inherited e.g. kiro's `--trust-all-tools`, which `codex exec resume` rejects with exit 2, dropping codex `unavailable` every review); #218 makes that failure mode structurally impossible by removing the resume. (This is scoped to the **review fan-out**; the dev-resume caller `autonomous-dev.sh` is a separate path.) The operator-facing surface is still the review knobs (`AGENT_REVIEW_EXTRA_ARGS[_<AGENT>]`); both assignments are internal implementation details scoped to the subshell and never leak to the dev side or to a sibling agent (the `AGENT_REVIEW_EXTRA_ARGS` write happens inside the per-agent `( … )` subshell, so the parent fan-out loop's value is untouched).
 
 **Scope**: per-subshell only. The resolution happens inside the existing fan-out subshell (which already overrides `AGENT_CMD="$agent"` per [INV-37](#inv-37-per-side-agent_cmd-precedence) and neutralizes the launcher per [INV-38](#inv-38-per-side-agent_launcher-precedence)). No change to the dev side, the dispatcher, the `reviewing` label, the single `review-<N>.pid`, or the verdict-attribution / aggregation logic of [INV-40](#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback). The INV-04 Reviewed-HEAD trailer's `model` field continues to render the shared `AGENT_REVIEW_MODEL` (it is a single aggregate forensic trailer per run, not per-agent).
 
@@ -1522,6 +1522,8 @@ The original #190 spec assumed an invalid `--model` makes agy fail with non-zero
 
 ## INV-51: codex review thread auto-resumes until a verdict-posting turn
 
+> ⚠️ **SUPERSEDED for the review path by [INV-62](#inv-62-the-codex-review-lane-runs-the-codex-review-subcommand-auto-scoped-prompt-carried-gate-with-a-stdout-verdict-fallback) (#218).** The codex review lane no longer runs `codex exec` + a resume loop; it runs the purpose-built `codex review "<prompt>"` subcommand, which is natively multi-step and never strands mid-review. `_run_codex_review_with_resume`, `_codex_log_has_verdict_message`, and `_codex_resume_prompt` are DELETED. This entry is kept for historical context only.
+
 **Rule**: when a review fan-out member's CLI is `codex`, `autonomous-review.sh`
 MUST dispatch it through `lib-review-codex.sh::_run_codex_review_with_resume`
 instead of a bare `run_agent`. The controller runs codex once
@@ -1538,27 +1540,17 @@ Sub-rules:
 1. **Gather-only detection is from the JSONL stream, not GitHub.**
    `_codex_log_has_verdict_message <log>` scans codex's own `--json` event log
    (the same per-agent log the invocation writes) and returns true iff the LAST
-   **completed** turn (segment ending at the final `turn.completed`) **posted the
-   verdict** by EITHER signal: **(A)** an `item.completed` `agent_message` **whose
-   text carries a VERDICT TRAILER**
+   **completed** turn (segment ending at the final `turn.completed`) contains an
+   `item.completed` `agent_message` **whose text carries a VERDICT TRAILER**
    ([INV-53](#inv-53-codex-review-convergence-keys-on-the-verdict-trailer-not-any-agent_message); amended here from the original
-   #189 "any `agent_message`" rule), **OR (B)** an `item.completed`
-   `command_execution` **whose command runs the [INV-56](#inv-56-review-verdict-is-posted-via-the-deterministic-post-verdict-helper-not-the-agents-bare-gh)
-   helper `post-verdict.sh` with a `pass`/`fail` verdict argument** (the #214
-   amendment — since INV-56 the verdict is POSTED by running `post-verdict.sh`, so
-   the verdict signal lands in a `command_execution`, not an `agent_message`; signal
-   (A) alone missed it and the loop fired a redundant resume → codex double-posted
-   the verdict). A turn whose items are all `tool_call`/`reasoning`/**non-verdict**
-   `command_execution` (a `git diff` + file reads turn) is gather-only → the resume
-   trigger; **and so is a turn whose only `agent_message`s are PROGRESS NARRATION**
-   (no verdict trailer) — the #198 correction. Both signals are item-scoped on the
-   same physical line (a `post-verdict.sh` string in a separate `aggregated_output`,
-   or a narration `agent_message` that merely MENTIONS the helper, does NOT count —
-   it fails the `command_execution` item-scope conjunct). An `agent_message`/command
-   with no trailing `turn.completed` (turn still in flight / killed) does NOT count.
-   Empty/missing log → no verdict (rc 1, never crashes). Awk-based (jq is not a hard
-   dep — mirrors `_codex_capture_thread`). See
-   [INV-53](#inv-53-codex-review-convergence-keys-on-the-verdict-trailer-not-any-agent_message) for the verdict-trailer phrasing set, the `post-verdict.sh` signal, and the resume-carries-session finding.
+   #189 "any `agent_message`" rule). A turn whose items are all
+   `tool_call`/`reasoning`/`command_execution` (a `git diff` + file reads turn) is
+   gather-only → the resume trigger; **and so is a turn whose only `agent_message`s
+   are PROGRESS NARRATION** (no verdict trailer) — the #198 correction. An
+   `agent_message` with no trailing `turn.completed` (turn still in flight /
+   killed) does NOT count. Empty/missing log → no verdict (rc 1, never crashes).
+   Awk-based (jq is not a hard dep — mirrors `_codex_capture_thread`). See
+   [INV-53](#inv-53-codex-review-convergence-keys-on-the-verdict-trailer-not-any-agent_message) for the verdict-trailer phrasing set and the resume-carries-session finding.
 2. **The loop NEVER queries the GitHub comments API.** That is the wrapper's
    verdict poller's job ([INV-20](#inv-20-verdict-authenticity-binding-actor--window--trailer-presence)/[INV-40](#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback)),
    which stays the **authoritative** verdict gate AFTER the controller returns.
@@ -1628,7 +1620,9 @@ continue-and-emit-verdict prompt), `_codex_now_seconds` (clock seam). The fan-ou
 and the [INV-40](#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback) aggregation — both UNCHANGED. The codex `run_agent`/`resume_agent`
 branches in `lib-agent.sh` are reused, not modified.
 
-**Status**: **ENFORCED** (closes #189). **Amended by [INV-53](#inv-53-codex-review-convergence-keys-on-the-verdict-trailer-not-any-agent_message) (#198)**: the
+**Status**: **SUPERSEDED for the review path by [INV-62](#inv-62-the-codex-review-lane-runs-the-codex-review-subcommand-auto-scoped-prompt-carried-gate-with-a-stdout-verdict-fallback) (#218).** The whole `codex exec` + auto-resume machinery this invariant describes — `_run_codex_review_with_resume`, the `_codex_log_has_verdict_message` JSONL verdict parser, the `_codex_resume_prompt` fallback, and `CODEX_REVIEW_MAX_RESUMES` — was DELETED when the codex review lane moved to the purpose-built `codex review "<prompt>"` subcommand (natively multi-step, no single-turn budget, so no resume loop is needed). The recurring bug class this loop tried to patch (#198 / #209 / #212) is moot for the review path because the machinery is gone. The text below is retained for historical context only; no code path references it.
+
+Historical record (pre-#218): **ENFORCED** (closed #189). **Amended by [INV-53](#inv-53-codex-review-convergence-keys-on-the-verdict-trailer-not-any-agent_message) (#198)**: the
 convergence signal in sub-rule 1 now keys on the **verdict trailer** in the
 `agent_message` text, not on the mere presence of an `agent_message` — the
 original any-message rule false-converged on codex's progress narration and the
@@ -1663,7 +1657,7 @@ stay green. Test plan: `docs/test-cases/codex-review-resume-loop.md`.
 - [INV-40](#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback) — the unanimous-PASS fan-out + the `unavailable` fallback this loop is trying to avoid (and falls back to on exhaustion). The verdict poller is unchanged.
 - [INV-48](#inv-48-per-side-review-wall-clock-timeout-agent_review_timeout-1h-default-with-browser-e2e-exclusion-and-timeout-veto) — the `AGENT_REVIEW_TIMEOUT` review wall-clock cap the loop derives its deadline from, and the per-turn timeout-veto.
 - [INV-34](#inv-34-agent-prompt-is-fed-via-stdin-never-as-a-single-argv-element) — the stdin prompt channel the reused codex `run_agent`/`resume_agent` branches uphold.
-- [`review-agent-flow.md` § Codex auto-resume (INV-51)](review-agent-flow.md#codex-auto-resume-inv-51) — runtime walkthrough.
+- [`review-agent-flow.md` § codex review subcommand (INV-62)](review-agent-flow.md#codex-review-subcommand-inv-62) — runtime walkthrough (the `codex review` lane that REPLACED this resume loop; the original auto-resume walkthrough was retired with the machinery).
 - [`docs/designs/codex-review-resume-loop.md`](../designs/codex-review-resume-loop.md) — design canvas.
 - [INV-53](#inv-53-codex-review-convergence-keys-on-the-verdict-trailer-not-any-agent_message) — the corrected convergence contract (#198).
 
@@ -1722,74 +1716,36 @@ Sub-rules:
 
 ## INV-53: codex review convergence keys on the VERDICT TRAILER, not any `agent_message`
 
+> ⚠️ **SUPERSEDED for the review path by [INV-62](#inv-62-the-codex-review-lane-runs-the-codex-review-subcommand-auto-scoped-prompt-carried-gate-with-a-stdout-verdict-fallback) (#218).** This invariant fixed the [INV-51](#inv-51-codex-review-thread-auto-resumes-until-a-verdict-posting-turn) JSONL convergence detector (`_codex_log_has_verdict_message`). `codex review` emits no JSONL event stream and needs no convergence loop, so that detector is DELETED. The convergence problem it solved no longer exists — `codex review` is natively multi-step and finishes its own review. The verdict-trailer *concept* lives on as INV-62's stdout classifier (`_codex_review_classify_stdout`) + the authoritative comment poller, not a JSONL parser. This entry is kept for historical context only.
+
 **Rule**: the [INV-51](#inv-51-codex-review-thread-auto-resumes-until-a-verdict-posting-turn)
 convergence detector `lib-review-codex.sh::_codex_log_has_verdict_message` MUST
-treat codex's last completed turn as **converged only when it posted the VERDICT**,
-by EITHER of two item-scoped signals in that turn:
-
-- **(A) a verdict-trailer `agent_message`** — an `item.completed` `agent_message`
-  whose text carries a **verdict trailer**: one of the pass/fail phrasings the
-  wrapper poller itself matches (`lib-review-poll.sh::_classify_verdict_body`) **or**
-  the `Review Agent: codex` attribution discriminator; OR
-- **(B) a `post-verdict.sh` `command_execution`** (the #214 amendment) — an
-  `item.completed` `command_execution` whose **command** runs the
-  [INV-56](#inv-56-review-verdict-is-posted-via-the-deterministic-post-verdict-helper-not-the-agents-bare-gh)
-  helper `post-verdict.sh` with a `pass`/`fail` verdict argument.
-
-A turn whose `agent_message`s are pure **progress narration** ("Next I'm reading the
-instructions…", "I'll verify the PR…") AND whose `command_execution`s are all
-non-verdict (no `post-verdict.sh pass|fail`) is **gather-only** → the loop RESUMES
+treat codex's last completed turn as **converged only when it posted the VERDICT**
+— i.e. when an `item.completed` `agent_message` in that turn carries a **verdict
+trailer**: one of the pass/fail phrasings the wrapper poller itself matches
+(`lib-review-poll.sh::_classify_verdict_body`) **or** the `Review Agent: codex`
+attribution discriminator the resume prompt forces codex to emit. A turn whose
+`agent_message`s are pure **progress narration** ("Next I'm reading the
+instructions…", "I'll verify the PR…") is **gather-only** → the loop RESUMES
 (bounded by `CODEX_REVIEW_MAX_RESUMES` + the wall-clock deadline, unchanged).
 
-Recognised verdict-trailer phrases for signal (A) (case-insensitive substring, kept
-in sync with the poller so the two ALWAYS agree): pass-side `Review PASSED` /
-`Review APPROVED` / `APPROVED FOR MERGE` / `LGTM` / `Review PASS`; fail-side
-`Review FAILED` / `Review REJECTED` / `Review findings:` / `Changes requested`; plus
+Recognised verdict-trailer phrases (case-insensitive substring, kept in sync with
+the poller so the two ALWAYS agree): pass-side `Review PASSED` / `Review APPROVED`
+/ `APPROVED FOR MERGE` / `LGTM` / `Review PASS`; fail-side `Review FAILED` /
+`Review REJECTED` / `Review findings:` / `Changes requested`; plus
 `Review Agent: codex`.
-
-**#214 amendment — why signal (B) was added.** [INV-56](#inv-56-review-verdict-is-posted-via-the-deterministic-post-verdict-helper-not-the-agents-bare-gh)
-moved verdict posting from a hand-rolled `gh issue comment` into running
-`bash scripts/post-verdict.sh … pass|fail …`. On the common turn-1 path codex
-reaches a verdict and posts it via the helper, so the verdict phrasing appears in
-the JSONL log as a `command_execution` (the argv / the helper's stdout comment
-URL), **NOT** as an `agent_message`. Signal (A) alone never saw it → the detector
-judged the turn "not converged" → the resume loop fired a resume → codex posted the
-verdict a **second** time (the duplicate carrying a doubled trailer: a hand-written
-block from the stale resume prompt stacked on the helper's own). Adding signal (B)
-makes the detector agree with the comment poller for helper-posted verdicts, the
-mirror of what the original INV-53 did for `agent_message`-posted verdicts. The
-verdict outcome was always benign (the poller reads one PASS; the INV-40 vote is not
-double-counted; `no-auto-close` still gates merge) — the defect was the wasted
-resume and the operator-confusing doubled-trailer comment. This is **not a new
-invariant**; it closes the gap INV-56 opened in the INV-53 detector.
 
 Sub-rules:
 
-1. **Each signal is item-scoped, on the same JSONL line.** Signal (A)'s match
-   conjoins (a) `item.completed`, (b) item-scoped `agent_message`
+1. **The trailer must be inside an `agent_message` item, on the same JSONL line.**
+   The match conjoins (a) `item.completed`, (b) item-scoped `agent_message`
    (`"item":{…,"type":"agent_message"…}`), and (c) a verdict-trailer phrase — all
    on one physical line (codex emits one event per line; newlines inside the text
    are escaped as `\n`). So a verdict PHRASE appearing in a separate
    `command_execution` `aggregated_output` line within the same turn (codex catting
    `SKILL.md` / the review prompt, both of which contain the literal phrasings)
-   does NOT count — it fails conjunct (b). Signal (B)'s match conjoins (a)
-   `item.completed`, (b') item-scoped `command_execution`
-   (`"item":{…,"type":"command_execution"…}`), and (c') a `post-verdict.sh …
-   pass|fail` invocation matched against the **`command`** field, with the verdict
-   `pass`/`fail` token anchored to its ARGUMENT POSITION (`post-verdict.sh` →
-   issue-number positional → `pass`/`fail`, the token bounded by a trailing
-   non-alphanumeric or end-of-string, since POSIX awk has no `\<`/`\>`). The
-   `command` field value is isolated **escape-awarely** — its closing `"` is the
-   first UNESCAPED quote, so an escaped `\"` *inside* the command (a chained
-   `printf '%s' \"text\" > f && bash scripts/post-verdict.sh …` prelude) does NOT
-   truncate it before the helper invocation (#217 codex review finding — a naive
-   truncate-at-first-`"` re-introduced the false-negative-then-duplicate bug). So a
-   `post-verdict.sh pass` string sitting only in an `aggregated_output` (codex
-   catting the prompt) fails (c'); a narration `agent_message` that merely MENTIONS
-   the helper fails (b'); and a `pass`/`fail`-named body-file PATH segment (after the
-   verdict positional) fails (c') (fail-safe toward resuming). This subsumes the
-   #189 review-finding-2 substring guard and extends it to both the text match (A)
-   and the command match (B).
+   does NOT count — it fails conjunct (b). This subsumes the #189 review-finding-2
+   substring guard and extends it to the text match.
 2. **Plain substrings, no word boundaries.** The phrases are matched as plain
    case-insensitive substrings — IDENTICAL to the poller's `grep -qiE` — so the
    detector and the authoritative comment poller never disagree, AND the awk stays
@@ -1819,22 +1775,6 @@ Sub-rules:
    lane reviewing the very PR that added INV-53. Softening the prompt removes that
    strand-on-compaction failure mode without re-opening the gather-the-whole-turn
    problem INV-51 solved.
-6. **The resume prompt routes the verdict through `post-verdict.sh`, not a
-   hand-written trailer (#214).** `_codex_resume_prompt` instructs codex to post the
-   verdict **only** via `bash scripts/post-verdict.sh` (the
-   [INV-56](#inv-56-review-verdict-is-posted-via-the-deterministic-post-verdict-helper-not-the-agents-bare-gh)
-   helper) and **must NOT** tell codex to hand-write the
-   `Review Agent:` / `Review Session:` trailer — the helper composes that trailer
-   itself from the arguments codex passes. The pre-#214 prompt (a pre-INV-56
-   relic) told codex the verdict comment "MUST include these two lines verbatim",
-   so whenever a resume turn legitimately posted, the hand-written block stacked on
-   the helper's own trailer → a DOUBLED trailer. The session uuid is still supplied
-   in the prompt — codex passes it as the helper's session-id argument — and the
-   pass/fail body phrasing (`Review PASSED` / `Review findings:`) is kept so codex
-   produces a classifiable body. This aligns the resume prompt with the main review
-   prompt (`autonomous-review.sh::build_review_prompt`, which already routes all
-   verdict posts through the helper). The signal-(B) detector amendment (sub-rule 1)
-   and this prompt change are the two halves of the #214 fix.
 
 **Investigation finding (recorded so it is not re-litigated)**: #198 hypothesised
 that `codex exec resume <tid>` is a **no-op on the amazon-bedrock provider** (each
@@ -1867,42 +1807,20 @@ navigation, diverges the codex prompt shape; and now moot because resume DOES ca
 session); use the GitHub comment poller as the in-loop break signal (wrong layer —
 adds per-turn GitHub latency and violates [INV-51](#inv-51-codex-review-thread-auto-resumes-until-a-verdict-posting-turn) sub-rule 2; the JSONL trailer is a cheap local proxy and the poller remains the authoritative post-loop gate).
 
-**Producer**: `lib-review-codex.sh::_codex_log_has_verdict_message` (signal (A) the
-verdict-trailer match + signal (B) the `post-verdict.sh` command match, sub-rules
-1–4) and `_codex_resume_prompt` (the context-compaction-safe prompt, sub-rule 5; the
-`post-verdict.sh` routing + no-hand-written-trailer, sub-rule 6). The controller,
-deadline parser, and rc-stickiness are unchanged from [INV-51](#inv-51-codex-review-thread-auto-resumes-until-a-verdict-posting-turn).
+**Producer**: `lib-review-codex.sh::_codex_log_has_verdict_message` (the verdict-trailer match, sub-rules 1–4) and `_codex_resume_prompt` (the context-compaction-safe prompt, sub-rule 5). The controller, deadline parser, and rc-stickiness are unchanged from [INV-51](#inv-51-codex-review-thread-auto-resumes-until-a-verdict-posting-turn).
 
 **Consumer**: the [INV-51](#inv-51-codex-review-thread-auto-resumes-until-a-verdict-posting-turn) resume controller (the break condition), and downstream the wrapper's authoritative comment poller ([INV-40](#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback)) — unchanged.
 
-**Status**: **ENFORCED** (closes #198). **Amended (#214)**: the convergence signal
-now ALSO recognizes a verdict posted via the [INV-56](#inv-56-review-verdict-is-posted-via-the-deterministic-post-verdict-helper-not-the-agents-bare-gh)
-helper `post-verdict.sh` (a `command_execution`), not only a verdict-trailer
-`agent_message` (signal (B), sub-rules 1 + the amendment box above); and
-`_codex_resume_prompt` no longer instructs codex to hand-write the trailer
-(sub-rule 6). This closes the gap INV-56 opened — since INV-56 the verdict signal
-moved from `agent_message` into `command_execution` and the detector had not
-followed it, so codex fired a redundant resume and double-posted the verdict.
+**Status**: **SUPERSEDED for the review path by [INV-62](#inv-62-the-codex-review-lane-runs-the-codex-review-subcommand-auto-scoped-prompt-carried-gate-with-a-stdout-verdict-fallback) (#218)** — the `_codex_log_has_verdict_message` JSONL convergence detector is deleted with the resume loop; `codex review` is natively multi-step and needs no convergence detection, so the convergence problem this invariant solved no longer exists for the review path. Historical record (pre-#218): **ENFORCED** (closed #198). **Amended (#214)**: the convergence signal also recognized a verdict posted via the [INV-56](#inv-56-review-verdict-is-posted-via-the-deterministic-post-verdict-helper-not-the-agents-bare-gh) helper `post-verdict.sh` (a `command_execution` — signal (B)), not only a verdict-trailer `agent_message`, and `_codex_resume_prompt` stopped instructing codex to hand-write the trailer; that closed an INV-56 gap where codex fired a redundant resume and double-posted the verdict. #218 makes that double-post structurally impossible for the review path by deleting the resume loop entirely.
 
 **Test**: `tests/unit/test-lib-review-codex.sh` — TC-CXR-DET-09..14
 (narration-only → rc 1 / resumes, incl. the committed `fixtures/codex-gather-only-turn.jsonl`;
 pass/fail/discriminator trailers → rc 0; last-turn-decides for the trailer; a
-verdict phrase in a tool output is not a false verdict), TC-CXR-DET-15..21 (#214
-signal (B): a `post-verdict.sh pass|fail` command → rc 0 / converged, incl. the
-committed `fixtures/codex-post-verdict-turn.jsonl` and the escaped-quote-prelude
-`fixtures/codex-post-verdict-escaped-quote-turn.jsonl` (#217 review finding: the
-command-field isolation is escape-aware, DET-21/21b); a narration `agent_message`
-mentioning the helper, a non-verdict command, a `post-verdict.sh` substring in a
-tool OUTPUT, and a `pass`/`fail`-named body-file path with no verdict positional all
-→ rc 1 / no over-claim, DET-17..20), TC-CXR-CTL-13..14 (controller: a turn-1
-helper-posted verdict converges with ZERO resumes — the dup-prevention assertion —
-and gather-then-helper-verdict fires exactly one resume), TC-CXR-RP-01..05 (sub-rule
-5: the resume prompt drops the absolute "do NOT re-read" bar, allows minimal
-re-reading on context compaction, prefers already-loaded context, instructs codex to
-never refuse a verdict for missing context, keeps the session uuid) and TC-CXR-RP-06..08
-(sub-rule 6: routes the verdict through `post-verdict.sh`, drops the hand-written
-`Review Agent:` / `Review Session:` trailer directive, keeps the pass/fail body
-phrasing). Investigation artifact:
+verdict phrase in a tool output is not a false verdict) and TC-CXR-RP-01..05
+(sub-rule 5: the resume prompt drops the absolute "do NOT re-read" bar, allows
+minimal re-reading on context compaction, prefers already-loaded context, instructs
+codex to never refuse a verdict for missing context, and keeps the INV-40/INV-20
+attribution trailers). Investigation artifact:
 `tests/unit/fixtures/codex-resume-carry-session-repro.txt`. Test plan:
 `docs/test-cases/codex-review-resume-loop.md`.
 
@@ -1910,10 +1828,10 @@ phrasing). Investigation artifact:
 - [INV-51](#inv-51-codex-review-thread-auto-resumes-until-a-verdict-posting-turn) — the resume loop this corrects the convergence signal of (and which this confirms is sound).
 - [INV-40](#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback) — the authoritative comment poller / `unavailable` fallback whose phrasings this match mirrors.
 - [INV-48](#inv-48-per-side-review-wall-clock-timeout-agent_review_timeout-1h-default-with-browser-e2e-exclusion-and-timeout-veto) — the timeout rc-stickiness preserved unchanged.
-- [INV-56](#inv-56-review-verdict-is-posted-via-the-deterministic-post-verdict-helper-not-the-agents-bare-gh) — the deterministic verdict helper whose `command_execution` signal the #214 amendment teaches this detector to recognize.
-- [`review-agent-flow.md` § Codex auto-resume (INV-51)](review-agent-flow.md#codex-auto-resume-inv-51) — runtime walkthrough (updated for the verdict-trailer + `post-verdict.sh` signals).
+- [INV-56](#inv-56-review-verdict-is-posted-via-the-deterministic-post-verdict-helper-not-the-agents-bare-gh) — the deterministic verdict helper whose `command_execution` signal the #214 amendment taught this detector to recognize (moot for the review path once the detector is deleted by #218).
+- [INV-62](#inv-62-the-codex-review-lane-runs-the-codex-review-subcommand-auto-scoped-prompt-carried-gate-with-a-stdout-verdict-fallback) — the `codex review` lane that REPLACED this resume loop + its convergence detector for the review path.
+- [`review-agent-flow.md` § codex review subcommand (INV-62)](review-agent-flow.md#codex-review-subcommand-inv-62) — runtime walkthrough.
 - [`docs/designs/codex-convergence-verdict-detection.md`](../designs/codex-convergence-verdict-detection.md) — design canvas.
-- [`docs/designs/codex-verdict-converge-helper-posted.md`](../designs/codex-verdict-converge-helper-posted.md) — the #214 design canvas.
 
 ## INV-54: the PR-still-open guard gates ALL PASS-chain exits, not just PASS
 
@@ -1973,6 +1891,8 @@ The mergeable-gate (`test-autonomous-review-mergeable-gate.sh`) and sequential-E
 
 ## INV-55: the codex review lane receives the PR diff INLINE in its prompt
 
+> ⚠️ **SUPERSEDED by [INV-62](#inv-62-the-codex-review-lane-runs-the-codex-review-subcommand-auto-scoped-prompt-carried-gate-with-a-stdout-verdict-fallback) (#218).** The inline-diff was a workaround for `codex exec`'s single-turn budget. `codex review` fetches and re-reads its own auto-scoped diff across multiple steps, so there is nothing to inline — and `[PROMPT]` is mutually exclusive with `--base`/`--commit` anyway. The inline-diff prompt block (`gh pr diff` fetch, nonce'd `DIFF_START`/`DIFF_END` markers, the `CODEX_REVIEW_INLINE_DIFF_MAX_BYTES` cap, the self-fetch fallback) is DELETED from the codex branch of `build_review_prompt`; no other agent used it (it was codex-only), so INV-55 is fully retired. This entry is kept for historical context only.
+
 **Rule**: when `autonomous-review.sh::build_review_prompt` renders for the **codex**
 agent (`_agent_name == codex`), it MUST embed the full PR diff INLINE in the prompt
 — fetched once via `gh pr diff "${PR_NUMBER}" --repo "${REPO}"`, placed between
@@ -2020,7 +1940,7 @@ but the robust agy fix is a separate question (agy's CLI diff-injection / multi-
 surface differs) and is intentionally NOT bundled here — captured as a follow-up so
 this change stays small and the blast radius contained.
 
-**Status**: **ENFORCED** (closes #198 follow-up). Complements
+**Status**: **SUPERSEDED by [INV-62](#inv-62-the-codex-review-lane-runs-the-codex-review-subcommand-auto-scoped-prompt-carried-gate-with-a-stdout-verdict-fallback) (#218)** — the inline-diff block is deleted; `codex review` fetches its own auto-scoped diff. Historical record (pre-#218): **ENFORCED** (closed #198 follow-up). Complemented
 [INV-53](#inv-53-codex-review-convergence-keys-on-the-verdict-trailer-not-any-agent_message)
 — INV-53 fixes detection; INV-55 makes turn-1 self-sufficient so detection has a real
 verdict to detect.
@@ -2038,7 +1958,7 @@ stay green. Test plan: `docs/test-cases/codex-inline-diff-review-prompt.md`.
 - [INV-53](#inv-53-codex-review-convergence-keys-on-the-verdict-trailer-not-any-agent_message) — the convergence-detection fix INV-55 complements.
 - [INV-51](#inv-51-codex-review-thread-auto-resumes-until-a-verdict-posting-turn) — the resume loop INV-55 lets converge in turn-1 (resume becomes a thin fallback).
 - [INV-40](#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback) — the `unavailable` drop this avoids.
-- [`review-agent-flow.md` § Codex auto-resume (INV-51)](review-agent-flow.md#codex-auto-resume-inv-51) — runtime walkthrough.
+- [`review-agent-flow.md` § codex review subcommand (INV-62)](review-agent-flow.md#codex-review-subcommand-inv-62) — runtime walkthrough (the `codex review` lane that REPLACED this resume loop; the original auto-resume walkthrough was retired with the machinery).
 - [`docs/designs/codex-inline-diff-review-prompt.md`](../designs/codex-inline-diff-review-prompt.md) — design canvas.
 
 ## INV-56: review verdict is posted via the deterministic post-verdict helper, not the agent's bare gh
@@ -2288,6 +2208,8 @@ look-behind bug. Test plan:
 
 ## INV-59: codex transient stream-error drops surface a distinct reason and are ridden out by the resume loop, not opaquely dropped
 
+> ⚠️ **RE-SCOPED by [INV-62](#inv-62-the-codex-review-lane-runs-the-codex-review-subcommand-auto-scoped-prompt-carried-gate-with-a-stdout-verdict-fallback) (#218).** Both halves below are preserved in spirit but re-implemented for the `codex review` subcommand: **(half 1, drop-reason detector)** survives but now scans codex review's human-readable **stdout/stderr capture** for the stream-disconnect / reconnect-ladder signal instead of the `codex exec` JSONL `turn.failed` event (`codex review` emits no JSONL stream). The function names (`_classify_codex_drop_reason`, `_codex_drop_reason_phrase`) and the rc-0-always fail-safe contract are unchanged; `_codex_log_has_stream_error` is renamed `_codex_review_has_stream_error`. **(half 2, transient-retry)** is subsumed by INV-62's bounded **re-run** of `codex review` (a non-zero exit re-runs a fresh review, bounded by `CODEX_REVIEW_MAX_RERUNS` + the `AGENT_REVIEW_TIMEOUT` wall-clock deadline) — there is no resume loop left to "fall through into". The text below describes the pre-#218 `codex exec` implementation; read it as historical.
+
 **Rule**: two related fixes to the [INV-51](#inv-51-codex-review-thread-auto-resumes-until-a-verdict-posting-turn) codex review path for a codex model stream that dies with an upstream server error (the CLI exhausts its `5/5` SSE reconnects and emits `{"type":"turn.failed","error":{"message":"stream disconnected before completion: ..."}}`):
 
 1. **codex stream-error drop-reason detector (observability).** When a fan-out member whose CLI is `codex` is resolved `unavailable`, the wrapper scrapes that agent's OWN JSONL event-stream log (`$_agent_log` — the same file `CODEX_REVIEW_LOG` points the resume controller at, captured per-agent into `AGENT_CODEX_LOGS` during fan-out) via `lib-review-codex.sh::_classify_codex_drop_reason <log>` and, if a stream-error signal is present, attaches a distinct, actionable reason to the `WARNING: review agent(s) dropped (unavailable)` log line AND the posted "dropped (unavailable) agent(s)" issue comment (and the all-unavailable `log` line). Classification:
@@ -2309,7 +2231,7 @@ look-behind bug. Test plan:
 
 **N=1 / non-codex / signal-free carve-out (backward compatibility)**: a non-codex member dropped `unavailable` triggers no codex lookup; a codex member whose log shows no stream error (a clean no-verdict miss, or a genuine launch failure) yields an empty token → the bare `unavailable` wording, unchanged. A genuine non-stream launch failure still early-returns from the resume controller exactly as before. `CODEX_REVIEW_MAX_RESUMES=0` still disables the loop entirely (codex behaves as pre-#189, and a stream-error turn 1 then falls through to a loop that immediately hits the `0` bound — a single run, no resumes).
 
-**Status**: **ENFORCED** (closes #209).
+**Status**: **RE-SCOPED by [INV-62](#inv-62-the-codex-review-lane-runs-the-codex-review-subcommand-auto-scoped-prompt-carried-gate-with-a-stdout-verdict-fallback) (#218)** — the drop-reason detector now scans the `codex review` stdout capture (not the JSONL log) and the transient-retry half is subsumed by INV-62's bounded re-run. Historical record (pre-#218): **ENFORCED** (closed #209).
 
 **Test**: `tests/unit/test-lib-review-codex.sh` — TC-CODEX-DROP-DET-01..07 (`_codex_log_has_stream_error`: ladder+`turn.failed` → rc 0, clean no-verdict/verdict turn → rc 1, `turn.failed` no-ladder → rc 0, empty/missing/empty-arg → rc 1, tool-output substring not a false positive, committed fixture), TC-CODEX-DROP-CLS-01..08 (`_classify_codex_drop_reason`: ladder → `stream-error:5/5`, no-ladder → bare `stream-error`, no-verdict/verdict → empty, empty/missing/empty-arg → empty, no crash under `set -euo pipefail` (command-subst call), committed fixture, **and TC-CODEX-DROP-CLS-08: a BARE call (not command-subst) under `set -euo pipefail` with a `turn.failed` no-ladder log reaches `return 0` without an errexit abort** — the ladder-extraction pipeline is `|| true`-guarded so its grep-no-match rc 1 under `pipefail` cannot abort the body before the function's load-bearing `return 0`; the sole production caller invokes via command substitution where errexit is suppressed, so the unguarded form was latent, but a future bare call would have crashed. codex review finding on PR #211), TC-CODEX-DROP-PHR-01..03 (`_codex_drop_reason_phrase` rendering + empty passthrough), TC-CODEX-DROP-RETRY-01..03 (resume loop rides out a transient stream error: turn-1 stream-error rc + verdict resume → enters loop & converges; genuine launch failure → early-return, 0 resumes; sustained stream error → bounded), TC-CODEX-DROP-LOOP-01..04 (behavioral: the drop-reason loop yields a distinct reason for a codex stream-error log vs. empty for a generic log; **BOTH agy + codex dropped in one fan-out lists a distinct reason for each**; non-agy/non-codex adds nothing), TC-CODEX-DROP-SRC-01..04 (source-of-truth: wrapper captures `AGENT_CODEX_LOGS`, calls `_classify_codex_drop_reason`, interpolates `_codex_drop_reason_phrase`, `bash -n`), TC-CODEX-DROP-REG-01..02 (a stream-error drop classifies distinctly from a no-verdict drop; a clean no-verdict turn is NOT misreported). Fixture: `tests/unit/fixtures/codex-stream-error-turn.jsonl`. Test plan: `docs/test-cases/codex-stream-error-drop-reason.md`. Backward-compat gate: `test-autonomous-review-multi-agent`, `test-review-agent-timeout`, `test-review-cli-exit-grace` stay green.
 
@@ -2321,7 +2243,7 @@ look-behind bug. Test plan:
 - [INV-53](#inv-53-codex-review-convergence-keys-on-the-verdict-trailer-not-any-agent_message) — the verdict-trailer convergence signal; a clean no-verdict turn under INV-53 must NOT be misreported as a stream error (the over-claim guard).
 - [INV-58](#inv-58-agy-quotaauth-unavailable-drops-surface-a-distinct-reason-fan-out--reviewed-head-model-labels-are-per-agent) — the agy-shaped sibling for a DIFFERENT failure mode (quota wall); same drop-reason assembly loop, same CLI-specific review-side-lib layering, same observability-only posture.
 - [INV-61](#inv-61-kiro-authlogin-failure-unavailable-drops-surface-a-distinct-reason-not-a-bare-opaque-unavailable) — the kiro-shaped sibling for an auth/login token expiry; same drop-reason assembly loop. (INV-61 has no retry half — kiro fails at launch, not mid-stream.)
-- [`review-agent-flow.md` § codex stream-error drop reason + retry (INV-59)](review-agent-flow.md#codex-stream-error-drop-reason--retry-inv-59) — runtime walkthrough.
+- [`review-agent-flow.md` § codex stream-error drop reason + retry (INV-59, re-scoped by INV-62)](review-agent-flow.md#codex-stream-error-drop-reason--retry-inv-59-re-scoped-by-inv-62) — runtime walkthrough.
 
 ## INV-60: the review model is shown inline on every verdict comment's `Review Agent:` line
 
@@ -2400,6 +2322,48 @@ The displayed value is the model the wrapper **launched** the agent with — so 
 - [INV-58](#inv-58-agy-quotaauth-unavailable-drops-surface-a-distinct-reason-fan-out--reviewed-head-model-labels-are-per-agent) — the agy-shaped sibling for a DIFFERENT failure mode (quota wall); same drop-reason assembly loop, same CLI-specific review-side-lib layering, same observability-only posture. INV-61 borrows agy's `auth-failed` token shape but reads kiro's generic per-agent log (not a `--log-file`).
 - [INV-59](#inv-59-codex-transient-stream-error-drops-surface-a-distinct-reason-and-are-ridden-out-by-the-resume-loop-not-opaquely-dropped) — the codex-shaped sibling for a transient stream 5xx; same layering. (Unlike INV-59, INV-61 has NO retry half — kiro fails at launch, not mid-stream, so there is no transient blip to ride out.)
 - [`review-agent-flow.md` § kiro auth/login drop reason (INV-61)](review-agent-flow.md#kiro-authlogin-drop-reason-inv-61) — runtime walkthrough.
+
+## INV-62: the codex review lane runs the `codex review` subcommand (auto-scoped, prompt-carried gate) with a stdout verdict fallback
+
+**Rule**: when a review fan-out member's CLI is `codex`, `autonomous-review.sh` MUST dispatch it through `lib-review-codex.sh::_run_codex_review`, which runs the purpose-built **`codex review "<prompt>"`** subcommand — NOT `codex exec` and NOT a resume loop. `codex review` is natively multi-step (it fetches and re-reads the diff across turns without a single-turn budget) and **auto-scopes the diff to the PR's merge target** (the exact review range), so no `--base` is passed. The codex **dev** path (`autonomous-dev.sh` → `run_agent`/`resume_agent` codex branch in `lib-agent.sh`) stays on `codex exec --json` **byte-for-byte unchanged** — codex-review knowledge stays OUT of the CLI-agnostic primitives and lives only in `lib-review-codex.sh`. Every other review CLI (claude / agy / kiro / gemini / opencode) keeps its single-invocation `run_agent` path unchanged.
+
+Sub-rules:
+
+1. **Invocation shape.** `_codex_review_argv` builds `review "<prompt>" -c 'model="<resolved-model>"' <extra-args>`. The model is passed via `-c 'model="..."'` because **`codex review` rejects `-m`** (verified, CLI 0.137.0). The argv carries **no `--base`** (`[PROMPT]` is mutually exclusive with `--base`/`--commit`; auto-scope is the intended path), **no `-m`**, and **no `--json`** (`codex review` emits human-readable text, not a JSONL event stream). The per-agent extra-args are the [INV-41](#inv-41-per-agent-review-model--extra-args-resolution)-resolved value aliased onto `AGENT_DEV_EXTRA_ARGS` (the var `_codex_review_argv` reads via `_parse_extra_args`), so the per-agent `AGENT_REVIEW_EXTRA_ARGS_<AGENT>` override reaches `codex review`'s argv too — #212 stays fixed.
+
+2. **"Resume" is a bounded re-run, not a thread resume.** `codex review` has no resume/thread/session flag, and each invocation re-reads the diff fresh. So a non-zero exit (a transient `turn.failed` / SSE stream blip — #209) is ridden out by **re-running a fresh `codex review`**, bounded by `CODEX_REVIEW_MAX_RERUNS` (default 3) **AND** the `AGENT_REVIEW_TIMEOUT`-derived wall-clock deadline (`_codex_review_deadline_seconds`, clock-stubbable via `_codex_now_seconds`). The max-rerun bound is checked BEFORE the deadline so a `max=N` config does exactly N re-runs when time allows. A non-numeric `CODEX_REVIEW_MAX_RERUNS` degrades to the default (no `set -euo pipefail` abort). This subsumes [INV-59](#inv-59-codex-transient-stream-error-drops-surface-a-distinct-reason-and-are-ridden-out-by-the-resume-loop-not-opaquely-dropped)'s retry half.
+
+3. **INV-48 timeout-veto rc-stickiness is preserved.** A `124` (coreutils `timeout` TERM-expiry) or `137` (`--kill-after` SIGKILL) from ANY run is **sticky** — once a run was killed by the per-run wall-clock cap, `_run_codex_review` returns that rc even if a later re-run exits 0, so the post-window sweep can map a no-verdict 124/137 to `timed-out` (a deciding FAIL that VETOES the merge per [INV-48](#inv-48-per-side-review-wall-clock-timeout-agent_review_timeout-1h-default-with-browser-e2e-exclusion-and-timeout-veto)). A non-timeout exhaustion returns the last rc and the poller resolves `unavailable`.
+
+4. **Verdict capture is double-insured.** (a) The prompt instructs codex to self-post its verdict via `bash scripts/post-verdict.sh` (the [INV-56](#inv-56-review-verdict-is-posted-via-the-deterministic-post-verdict-helper-not-the-agents-bare-gh) deterministic chokepoint), preserving the full verdict contract. (b) `_run_codex_review` captures codex review's **clean stdout** (only codex's review text, stderr folded in, to a per-agent file keyed by session id). After the poll window, if a codex member produced stdout but **no** self-posted verdict comment landed (still `unavailable`), the wrapper classifies the stdout (`_codex_review_classify_stdout`: any `[P1]` blocking-priority marker → `fail`, else `pass` — the same gate the manual `/codex review` skill uses), composes the canonical body (`_codex_review_compose_body`), and posts it via `post-verdict.sh` as agent `codex`, then re-polls. (c) The comment poller (`lib-review-poll.sh::_classify_verdict_body`) stays the **authoritative gate** — unchanged. **Re-fetch-lag guard**: when the wrapper's own fallback post succeeds (rc 0) but the immediate `_fetch_agent_verdict_body` re-fetch returns empty because the GitHub comments API has not yet surfaced the just-posted comment (the same propagation lag the multi-round poll loop absorbs), the wrapper resolves the verdict from **its own composed body + classification** rather than leaving the agent unresolved — otherwise the post-window sweep would drop a verdict comment that DID land as `unavailable` (silently removing a passing/failing codex from the unanimous vote). The poller would classify the posted comment identically (post-verdict.sh prepends the canonical `Review PASSED` / `Review findings:` first line keyed off the same pass/fail arg), so resolving locally on lag is sound. The result: **exactly one** verdict comment lands per codex review — codex self-posted, OR the wrapper posted from parsed stdout — never zero (even under re-fetch lag), never two.
+
+5. **The double-insurance is load-bearing, not redundancy.** `codex review` has its own review-output orchestration and may not honor a "call post-verdict.sh" instruction as reliably as `codex exec` (a pure prompt executor) did. A pure stream-error stdout (no findings) is NOT fabricated into a verdict — it is left unresolved so the stream-error drop-reason path ([INV-59](#inv-59-codex-transient-stream-error-drops-surface-a-distinct-reason-and-are-ridden-out-by-the-resume-loop-not-opaquely-dropped) re-scoped) names a distinct `stream-error` reason rather than posting a fabricated PASS.
+
+**Why**: the codex review path was shoehorned onto single-turn `codex exec`, which on a large diff burned its one turn on context-gathering and ended with no verdict. Three pieces of accidental complexity were layered on to compensate — `_run_codex_review_with_resume` (the resume loop), `_codex_log_has_verdict_message` (a JSONL parser mirroring the comment poller's classifier, drift-prone), and the [INV-55](#inv-55-the-codex-review-lane-receives-the-pr-diff-inline-in-its-prompt) inline-diff prompt block. That machinery was the root cause of a recurring bug class: **#198** (resume loop ineffective), **#209** (`turn.failed` not retried → opaque `unavailable`), **#212** (resume dropped per-agent extra-args). All three existed ONLY because review was on `codex exec`. `codex review` is purpose-built for exactly this job; moving to it removes the machinery and the bug class together — a net deletion of code.
+
+**Deletions** (no code path references these after #218): `_run_codex_review_with_resume`, `_codex_log_has_verdict_message`, `_codex_resume_prompt`, the `CODEX_REVIEW_MAX_RESUMES` / `CODEX_REVIEW_INLINE_DIFF_MAX_BYTES` knobs, and the [INV-55](#inv-55-the-codex-review-lane-receives-the-pr-diff-inline-in-its-prompt) inline-diff prompt block in `build_review_prompt`'s codex branch (the `gh pr diff` fetch, the nonce'd `DIFF_START`/`DIFF_END` markers, the byte cap, the self-fetch fallback). **Kept + reused**: `_codex_review_deadline_seconds` and `_codex_now_seconds` (already clock-stubbable + unit-tested).
+
+**Producer**: `lib-review-codex.sh` — `_codex_review_argv` (argv builder), `_run_codex_review` (launch + bounded re-run + sticky-timeout rc), `_codex_review_classify_stdout` (stdout→verdict), `_codex_review_compose_body` (canonical body), `_codex_review_has_stream_error` / `_classify_codex_drop_reason` / `_codex_drop_reason_phrase` (re-scoped INV-59 drop reason, now scanning the stdout capture). `autonomous-review.sh` — the fan-out codex branch calls `_run_codex_review`; the codex branch of `build_review_prompt` carries the gate rules + verdict format + post-verdict instruction WITHOUT the inline diff; the post-window stdout fallback composes + posts when codex did not self-post.
+
+**Consumer**: the comment poller (authoritative verdict gate, unchanged), the [INV-40](#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback) unanimous aggregation (unchanged — a `stream-error` codex stays a dropped `unavailable`, never a deciding FAIL, exactly as INV-59), and the operator reading the distinct drop reason.
+
+**Scope guards**: the codex **dev** path stays on `codex exec` (byte-for-byte); `lib-agent.sh` contains no `codex review` token (no review-knowledge leak into the CLI-agnostic primitives). Other review CLIs keep their `run_agent` path. The upstream Bedrock `openai.gpt-5.5` 5xx condition is an infra matter, out of scope.
+
+**Status**: **ENFORCED** (closes #218; supersedes [INV-51](#inv-51-codex-review-thread-auto-resumes-until-a-verdict-posting-turn) and [INV-55](#inv-55-the-codex-review-lane-receives-the-pr-diff-inline-in-its-prompt), re-scopes [INV-59](#inv-59-codex-transient-stream-error-drops-surface-a-distinct-reason-and-are-ridden-out-by-the-resume-loop-not-opaquely-dropped), for the review path. Makes #198 / #209 / #212 moot for the review path by removing the machinery they patch).
+
+**Test**: `tests/unit/test-lib-review-codex.sh` — TC-CXRS-CLS-01..07 (`_codex_review_classify_stdout`: `[P1]` → fail, only `[P2]`/`[P3]` or none → pass, empty → pass, mid-line/multiple `[P1]` → fail, fenced `[P1]` counted, no `set -euo pipefail` abort), TC-CXRS-BODY-01..04 (`_codex_review_compose_body`: pass/fail summary, empty-stdout default, large-stdout truncation under the post-verdict body cap), TC-CXRS-LAUNCH-01..07 (`_run_codex_review` argv: positional prompt, `-c model=`, no `-m`, no `--base`, no `--json`, extra-args appended, clean stdout to the capture file), TC-CXRS-RUN-01..07 (bounded re-run: clean → 0 re-runs, transient-then-clean → 1 re-run rc 0 [closes #209], sustained → N re-runs then stop, `MAX_RERUNS=0` → 0 re-runs, non-numeric → default, deadline guard, sticky 124/137 preserved [INV-48]), TC-CXRS-DROP-* (re-scoped INV-59 stdout stream-error detector + phrase), TC-CXRS-WIRE-01..09 (source-of-truth: wrapper calls `_run_codex_review`; `_run_codex_review_with_resume` / `_codex_log_has_verdict_message` GONE from lib + wrapper; `DIFF_START_`/`DIFF_END_` / the codex `gh pr diff` inline-fetch GONE; bare `run_agent` retained for non-codex; wrapper composes + classifies + posts the fallback; `bash -n` clean; CI shellcheck lists the lib; drop-reason wired), TC-CXRS-INT-01..06 (behavioral: `[P1]` not self-posted → wrapper FAIL post; clean not self-posted → wrapper PASS post; codex self-posted → NO double-post; pure stream-error → NOT fabricated, left for the drop-reason path; re-fetch lag on PASS / on FAIL → still resolves the posted verdict from the wrapper's composed body, NOT dropped `unavailable` — sub-rule 4 re-fetch-lag guard), TC-CXRS-DEV-01..02 (dev-path guard: the codex dev `run_agent` branch still emits `codex exec --json`; `lib-agent.sh` has no `codex review` / review-lib leak). The pre-existing `tests/unit/test-lib-agent-codex.sh` (`TC-LA-CODEX-*`) independently pins the `codex exec` dev branch shape and stays untouched + green. Fixtures: `tests/unit/fixtures/codex-review-stdout-{clean,p1,stream-error}.txt`. Test plan: `docs/test-cases/codex-review-subcommand.md`. Design: `docs/designs/codex-review-subcommand.md`. Backward-compat gate: `test-autonomous-review-prompt`, `test-autonomous-review-multi-agent`, `test-autonomous-review-per-agent-model`, `test-autonomous-review-verdict-via-helper`, `test-review-cli-exit-grace`, `test-review-agent-timeout` stay green.
+
+> **Post-install / upgrade**: this PR does NOT add or remove a dispatcher script / `lib-*.sh` — it EDITS the existing `lib-review-codex.sh` and `autonomous-review.sh` and DELETES a test fixture/test (`tests/unit/test-codex-inline-diff-prompt.sh` + the old `codex exec` JSONL fixtures). No new `source` target is introduced, so the per-project `install-project-hooks.sh` re-run is NOT required after merge; `npx skills update -g` alone refreshes the user-scope copy (the existing per-file symlinks already resolve to the updated content). Only ADDED/REMOVED dispatcher *source* files (not tests/fixtures) need the installer re-run.
+
+**Cross-references**:
+- [INV-51](#inv-51-codex-review-thread-auto-resumes-until-a-verdict-posting-turn) — the `codex exec` resume loop this REPLACES (superseded for the review path).
+- [INV-55](#inv-55-the-codex-review-lane-receives-the-pr-diff-inline-in-its-prompt) — the inline-diff prompt this REPLACES (superseded; `codex review` fetches its own auto-scoped diff).
+- [INV-59](#inv-59-codex-transient-stream-error-drops-surface-a-distinct-reason-and-are-ridden-out-by-the-resume-loop-not-opaquely-dropped) — re-scoped: its drop-reason detector now scans the stdout capture, its retry half is subsumed by sub-rule 2's bounded re-run.
+- [INV-40](#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback) — the fan-out + `unavailable` aggregation (unchanged; a stream-error codex stays dropped, not a deciding FAIL).
+- [INV-48](#inv-48-per-side-review-wall-clock-timeout-agent_review_timeout-1h-default-with-browser-e2e-exclusion-and-timeout-veto) — the timeout-veto whose 124/137 rc-stickiness sub-rule 3 preserves.
+- [INV-56](#inv-56-review-verdict-is-posted-via-the-deterministic-post-verdict-helper-not-the-agents-bare-gh) — the deterministic verdict-post chokepoint both the self-post and the wrapper fallback route through.
+- [INV-41](#inv-41-per-agent-review-model--extra-args-resolution) — the per-agent model / extra-args resolution `_codex_review_argv` consumes (`-c model=`, extra-args).
+- [`review-agent-flow.md` § codex review subcommand (INV-62)](review-agent-flow.md#codex-review-subcommand-inv-62) — runtime walkthrough.
 
 ## Adding a new invariant
 

@@ -1,0 +1,7 @@
+Codex review of PR #999 (origin/main...feat/example)
+
+Reading the scoped diff...
+stream error: Reconnecting... 1/5 (stream disconnected before completion: The server had an error while processing your request. Sorry about that!)
+stream error: Reconnecting... 2/5 (stream disconnected before completion: The server had an error while processing your request. Sorry about that!)
+stream error: Reconnecting... 5/5 (stream disconnected before completion: The server had an error while processing your request. Sorry about that!)
+error: stream disconnected before completion: The server had an error while processing your request. Sorry about that!

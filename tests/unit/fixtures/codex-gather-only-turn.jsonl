@@ -1,9 +1,0 @@
-{"type":"thread.started","thread_id":"019ea300-aaaa-bbbb-cccc-111111111111"}
-{"type":"turn.started"}
-{"type":"item.completed","item":{"id":"i0","type":"reasoning","text":"Let me start by reading the workflow instructions and checking PR mergeability."}}
-{"type":"item.completed","item":{"id":"i1","type":"command_execution","command":"gh pr view 197 --repo OWNER/REPO --json mergeable -q '.mergeable'","aggregated_output":"MERGEABLE"}}
-{"type":"item.completed","item":{"id":"i2","type":"agent_message","text":"Next I'm reading the workflow instructions to understand the review checklist before I look at the diff."}}
-{"type":"item.completed","item":{"id":"i3","type":"command_execution","command":"cat skills/autonomous-dev/SKILL.md","aggregated_output":"[REDACTED skill text — sanitized; no private content]"}}
-{"type":"item.completed","item":{"id":"i4","type":"command_execution","command":"gh issue view 193 --repo OWNER/REPO --json comments","aggregated_output":"[REDACTED issue-comment thread — sanitized; no private repo bodies]"}}
-{"type":"item.completed","item":{"id":"i5","type":"agent_message","text":"I'll verify the PR reflects both the wrapper-owns-merge change and the block-branch PR-open guard."}}
-{"type":"turn.completed","usage":{"input_tokens":138668,"cached_input_tokens":0,"output_tokens":746,"reasoning_output_tokens":512}}

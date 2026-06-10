@@ -1,0 +1,18 @@
+Codex review of PR #999 (origin/main...feat/example)
+
+I reviewed the scoped diff (the PR's merge-target range).
+
+Findings:
+
+[P1] src/handler.ts:42 — the error path swallows the exception and returns a
+fabricated success object, so a downstream caller cannot distinguish a real
+result from a silent failure. Propagate the error or return a typed failure.
+
+[P2] src/handler.ts:88 — minor: this helper could reuse the existing
+`normalizePath` util instead of re-implementing the trim.
+
+[P3] tests/handler.test.ts:10 — consider adding an assertion for the empty-input
+case.
+
+Summary: 1 blocking finding (P1). This PR should not merge until the silent
+failure on the error path is fixed.
