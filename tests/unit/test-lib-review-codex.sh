@@ -656,19 +656,17 @@ PV
       [[ "${AGENT_NAMES[$_i]}" == "codex" ]] || continue
       [[ -n "${AGENT_VERDICTS[$_i]}" ]] && continue
       [[ -n "${AGENT_VERDICT_BODIES[$_i]}" ]] && continue
-      # #218 finding 2: ONLY a clean rc-0 (completed) review is eligible for the
-      # stdout fallback. Any non-zero rc (124/137 cap, or a usage/auth/config error)
-      # is left UNRESOLVED for the terminal sweep — never fabricated into a verdict.
+      # #218 findings 2 + 5: ONLY a clean rc-0 (completed) review is eligible for the
+      # stdout fallback. Any non-zero rc (124/137 cap, a usage/auth/config error, or
+      # a genuine stream failure which exits non-zero) is left UNRESOLVED for the
+      # terminal sweep — never fabricated into a verdict. The rc-0 gate is the SOLE
+      # gate: there is NO stream-error skip on the rc-0 path (a real stream failure is
+      # non-zero, already filtered; and `_codex_review_has_stream_error` is a broad
+      # substring scan that would false-positive on a clean review merely MENTIONING
+      # the phrase — #218 finding 5). So an rc-0 review (empty, clean, or text that
+      # mentions stream-error strings) always classifies + posts exactly one verdict.
       [[ "${AGENT_LAUNCH_RC[${AGENT_SESSION_IDS[$_i]}]:-1}" -eq 0 ]] || continue
       _cx_stdout="${AGENT_CODEX_LOGS[$_i]:-}"
-      # #218 finding 2: do NOT drop an rc-0 review with an empty/missing capture —
-      # it is a valid clean review (classifier → PASS, body composer → default PASS).
-      # Only a NON-EMPTY capture that is a pure stream error (no [P1]) is skipped.
-      if [[ -n "$_cx_stdout" && -s "$_cx_stdout" ]] \
-         && _codex_review_has_stream_error "$_cx_stdout" \
-         && ! grep -qF '[P1]' "$_cx_stdout" 2>/dev/null; then
-        continue
-      fi
       _cx_verdict=$(_codex_review_classify_stdout "$_cx_stdout")
       _cx_body_file=$(mktemp "$sandbox/body-XXXXXX.md")
       _codex_review_compose_body "$_cx_verdict" "$_cx_stdout" > "$_cx_body_file" 2>/dev/null || true
@@ -706,10 +704,25 @@ assert_eq "TC-CXRS-INT-02 clean not self-posted → wrapper posts PASS → resol
 assert_eq "TC-CXRS-INT-03 codex self-posted → wrapper does NOT double-post" \
   "NOPOST|-|pass" "$(fallback_case "$FIXTURES/codex-review-stdout-clean.txt" "pass" "Review PASSED ...")"
 
-# TC-CXRS-INT-04 — pure stream-error capture, not self-posted → NOT fabricated
-# (left unresolved; the sweep + drop-reason path handle it).
-assert_eq "TC-CXRS-INT-04 pure stream-error → not fabricated into a verdict (left unresolved)" \
-  "NOPOST|-|" "$(fallback_case "$FIXTURES/codex-review-stdout-stream-error.txt" "" "")"
+# TC-CXRS-INT-04 — a GENUINE pure stream failure exits NON-ZERO (the CLI exhausts
+# its SSE reconnects and `turn.failed`s). With a non-zero launch rc it is dropped by
+# the rc-0 gate (→ unresolved → `unavailable` via the sweep + the stream-error
+# drop-reason path) — NOT fabricated into a verdict. (#218 finding 5: the realistic
+# stream-error case is non-zero rc; the old test used rc 0, which conflated a real
+# failure with an rc-0 review that merely MENTIONS the phrase — see INT-04b.)
+assert_eq "TC-CXRS-INT-04 genuine stream failure (non-zero rc) → dropped by the rc-0 gate (unresolved)" \
+  "NOPOST|-|" "$(fallback_case "$FIXTURES/codex-review-stdout-stream-error.txt" "" "" "" 1)"
+
+# TC-CXRS-INT-04b — #218 finding 5 REGRESSION: an rc-0 COMPLETED review whose capture
+# MENTIONS the stream-error phrases (e.g. a clean review of THIS PR's stream-error
+# fixtures / the detector) but has no `[P1]` MUST still post the default PASS — NOT
+# be dropped by a broad-substring stream-error skip. The fix removed the stream-error
+# skip from the rc-0 path; the rc-0 gate is the sole gate. The stream-error fixture
+# at rc 0 (a review that talks ABOUT a stream error, not one that suffered it) →
+# classifies PASS (no `[P1]`) and posts. Proven to fail against the pre-fix skip
+# (which would `continue` → NOPOST → dropped `unavailable`).
+assert_eq "TC-CXRS-INT-04b rc-0 review MENTIONING stream-error phrase (no [P1]) → posts PASS (finding 5)" \
+  "POST|pass|pass" "$(fallback_case "$FIXTURES/codex-review-stdout-stream-error.txt" "" "" "" 0)"
 
 # TC-CXRS-INT-05 — re-fetch LAGS (comments API hasn't surfaced the just-posted
 # verdict yet) on a clean PASS → the agent MUST still resolve `pass` from the
@@ -936,14 +949,10 @@ else
   PASS=$((PASS + 1))
 fi
 
-# TC-CXRS-WT-SRC-08 — #218 finding 2 (2nd part) source-of-truth: the LIVE wrapper's
-# stdout-fallback empty-capture guard is FOLDED into the stream-error skip (so an
-# rc-0 empty capture is NOT dropped). The INT-10 behavioral test exercises an inline
-# COPY of the fallback block; this grep pins the live wrapper so a regression to the
-# pre-fix `[[ -n "$_cx_stdout" && -s "$_cx_stdout" ]] || continue` (which dropped a
-# clean rc-0 empty review `unavailable`) cannot return silently. The fixed form has
-# the `-s` test AND'd with the stream-error check on the same `if`, never as a bare
-# `|| continue`.
+# TC-CXRS-WT-SRC-08 — #218 finding 2 source-of-truth: the LIVE wrapper does NOT drop
+# an rc-0 review on a bare `[[ -n "$_cx_stdout" && -s "$_cx_stdout" ]] || continue`
+# (which dropped a clean rc-0 empty review `unavailable`). Pin its absence so a
+# regression cannot return silently.
 if grep -qE '\[\[ -n "\$_cx_stdout" && -s "\$_cx_stdout" \]\][[:space:]]*\|\|[[:space:]]*continue' "$WRAPPER"; then
   echo -e "  ${RED}FAIL${NC}: TC-CXRS-WT-SRC-08 stale '[[ -n && -s ]] || continue' empty-capture drop still present (would drop rc-0 empty review)"
   FAIL=$((FAIL + 1))
@@ -951,9 +960,21 @@ else
   echo -e "  ${GREEN}PASS${NC}: TC-CXRS-WT-SRC-08 empty-capture drop removed — rc-0 empty capture is no longer dropped (finding 2)"
   PASS=$((PASS + 1))
 fi
-# And the folded guard IS present: `-s` AND'd with the stream-error check.
-assert_grep "TC-CXRS-WT-SRC-09 wrapper folds the empty-capture test into the stream-error skip (finding 2)" \
-  '\[\[ -n "\$_cx_stdout" && -s "\$_cx_stdout" \]\][[:space:]]*\\$' "$WRAPPER"
+# TC-CXRS-WT-SRC-09 — #218 finding 5 source-of-truth: the rc-0 gate is the SOLE gate
+# on the stdout fallback path — the broad-substring `_codex_review_has_stream_error`
+# skip is GONE from the wrapper's fallback (it false-positived on a clean rc-0 review
+# that merely MENTIONS the stream-error phrase, dropping it `unavailable`). The
+# helper still EXISTS (used by _classify_codex_drop_reason in the lib), and the
+# wrapper may still REFERENCE it in an explanatory comment, but it must not CALL it
+# (an invocation is `_codex_review_has_stream_error "<arg>`). Assert no invocation —
+# a NON-comment line where the helper name is immediately followed by a quoted arg.
+if grep -nE '_codex_review_has_stream_error[[:space:]]+"' "$WRAPPER" | grep -vE '^[0-9]+:[[:space:]]*#'; then
+  echo -e "  ${RED}FAIL${NC}: TC-CXRS-WT-SRC-09 wrapper still CALLS _codex_review_has_stream_error to gate the rc-0 fallback (false-negative risk, finding 5)"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${NC}: TC-CXRS-WT-SRC-09 stream-error skip removed from the wrapper rc-0 fallback — rc-0 gate is the sole gate (finding 5)"
+  PASS=$((PASS + 1))
+fi
 
 # ---------------------------------------------------------------------------
 echo ""

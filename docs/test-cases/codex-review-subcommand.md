@@ -135,6 +135,8 @@ exit is re-run, bounded by `CODEX_REVIEW_MAX_RERUNS` (default 3) + the
 | TC-CXRS-INT-08 | non-zero exit even with `[P1]` in the partial stdout | still left unresolved (a non-completed review is not a verdict source) |
 | TC-CXRS-INT-09 | rc-0 clean review | still posts PASS (the gate admits a completed review) |
 | TC-CXRS-INT-10 | **#218 finding 2 (2nd part)**: rc-0 review, EMPTY capture, no self-post | still posts the default PASS — NOT dropped `unavailable` (clean review with no blocking findings; upholds "exactly one verdict") |
+| TC-CXRS-INT-04b | **#218 finding 5**: an rc-0 review whose capture MENTIONS the stream-error phrase (e.g. reviewing this PR's stream-error fixtures/detector) but has no `[P1]` | still posts the default PASS — NOT dropped by a broad-substring stream-error skip (the rc-0 gate is the sole gate; the skip is removed) |
+| TC-CXRS-WT-SRC-09 | **#218 finding 5** source-of-truth | the wrapper no longer CALLS `_codex_review_has_stream_error` to gate the rc-0 fallback (the helper survives only for `_classify_codex_drop_reason`) |
 
 ## Regression / superseded
 

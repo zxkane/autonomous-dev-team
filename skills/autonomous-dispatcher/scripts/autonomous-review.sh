@@ -1500,10 +1500,16 @@ _run_verdict_poll_loop
 # verdict so the comment poller (still the AUTHORITATIVE gate) classifies it. This
 # guarantees EXACTLY ONE verdict per codex review: codex self-posted (then this is
 # a no-op — the agent already has a verdict and is skipped) OR the wrapper posts
-# from parsed stdout — never zero, never two. A capture that is a pure stream
-# error (no review findings, just `stream disconnected`/`Reconnecting...`) is NOT
-# fabricated into a verdict — it is left `unavailable` for the drop-reason path
-# below (a transient 5xx is an infra condition, not a code verdict).
+# from parsed stdout — never zero, never two. The SOLE eligibility gate for the
+# stdout fallback is a clean exit (rc 0 — a COMPLETED review); see the rc-0 gate
+# inside the loop. A genuine stream failure exits NON-ZERO (the CLI exhausts its
+# SSE reconnects and `turn.failed`s), so it is filtered by that gate and left
+# `unavailable` for the drop-reason path below (a transient 5xx is an infra
+# condition, not a code verdict) — it never reaches the stdout fallback. There is
+# NO stream-error skip on the rc-0 path: a completed review whose text merely
+# MENTIONS `stream disconnected`/`Reconnecting...` (e.g. reviewing this PR's own
+# stream-error detector) is a valid clean review and posts a verdict like any
+# other (#218 review finding 5).
 for _i in "${!AGENT_NAMES[@]}"; do
   [[ "${AGENT_NAMES[$_i]}" == "codex" ]] || continue
   [[ -n "${AGENT_VERDICTS[$_i]}" ]] && continue   # poll loop already classified it pass/fail
@@ -1529,24 +1535,26 @@ for _i in "${!AGENT_NAMES[@]}"; do
     continue
   }
   _cx_stdout="${AGENT_CODEX_LOGS[$_i]:-}"
-  # #218 review finding 2: we reach here ONLY for a COMPLETED review (rc 0, the gate
-  # above). An empty / missing capture from an rc-0 run is a VALID clean review (the
-  # diff had nothing blocking and codex emitted little/no text), NOT a reason to
-  # drop codex. The classifier treats empty as PASS and the body composer has a
-  # default PASS body, so we MUST still compose + post the default PASS — otherwise
-  # an rc-0 no-self-post empty-capture review is dropped `unavailable`, violating
-  # INV-62's "exactly one verdict" guarantee. So do NOT `continue` on an empty
-  # capture. The ONLY skip is a capture that is a pure stream error with no findings
-  # — but a stream error implies a non-zero exit (already filtered by the rc-0 gate
-  # above), so this branch is effectively unreachable on rc 0; it is kept as
-  # belt-and-suspenders for the (theoretical) rc-0-with-stream-error-text case, and
-  # it requires a NON-EMPTY capture (an empty capture is never a stream error).
-  if [[ -n "$_cx_stdout" && -s "$_cx_stdout" ]] \
-     && _codex_review_has_stream_error "$_cx_stdout" \
-     && ! grep -qF '[P1]' "$_cx_stdout" 2>/dev/null; then
-    log "INV-62: codex review stdout is a pure stream error (no findings) — leaving unresolved for the stream-error drop-reason path."
-    continue
-  fi
+  # #218 review findings 2 + 5: we reach here ONLY for a COMPLETED review (rc 0,
+  # the gate above). A COMPLETED review is ALWAYS eligible for the stdout fallback —
+  # the wrapper classifies its capture (`_codex_review_classify_stdout`: `[P1]` →
+  # fail, else pass; empty → pass) and posts. There is NO stream-error skip on this
+  # path:
+  #   - A genuine stream failure exits NON-ZERO (the CLI exhausts its SSE reconnects
+  #     and `turn.failed`s) and is therefore already filtered by the rc-0 gate above
+  #     → it resolves `unavailable` via the terminal sweep + the stream-error
+  #     drop-reason path, never reaching here.
+  #   - On an rc-0 capture, `_codex_review_has_stream_error` is a BROAD substring
+  #     scan (`stream disconnected before completion` / `Reconnecting... N/M`) — a
+  #     LEGITIMATE completed review that merely MENTIONS those phrases (e.g. reviewing
+  #     this PR's stream-error fixtures / the stream-error detector itself) with no
+  #     `[P1]` would falsely match a "pure stream error" skip and get dropped
+  #     `unavailable` instead of posting the default PASS — a false negative that
+  #     violates INV-62's "exactly one verdict" guarantee (#218 review finding 5).
+  # So the rc-0 gate is the SOLE gate: every completed review (empty capture, clean
+  # text, or text that happens to mention stream-error strings) posts exactly one
+  # verdict. An empty/missing capture is a valid clean review (classifier → pass,
+  # body composer → default pass body) and is NOT dropped.
   _cx_verdict=$(_codex_review_classify_stdout "$_cx_stdout")
   log "INV-62: codex did not self-post a verdict — wrapper deriving '${_cx_verdict}' from codex review stdout and posting on its behalf."
   _cx_body_file=$(mktemp "/tmp/codex-review-fallback-${ISSUE_NUMBER}-XXXXXX.md")
