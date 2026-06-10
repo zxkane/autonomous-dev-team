@@ -1331,8 +1331,31 @@ for _agent in "${REVIEW_AGENTS_LIST[@]}"; do
       # below). The codex DEV path (run_agent/resume_agent) stays on `codex exec` —
       # unchanged. Every other CLI keeps the bare run_agent path (else branch) —
       # byte-for-byte unchanged.
-      _run_codex_review "$_agent_prompt" "${_agent_model:-sonnet}" "$_agent_codex_stdout" \
+      #
+      # #218 finding 3 (PR-branch context): `codex review` auto-scopes its diff
+      # against the CURRENT checkout's merge-base, but this wrapper runs from
+      # PROJECT_DIR (kept on `main` by the dispatcher). Running `codex review` there
+      # would review main's (empty) diff, not the PR's — a regression from the
+      # deleted INV-55 `gh pr diff <PR_NUMBER>`. So prepare a throwaway PR-branch
+      # worktree and run `codex review` FROM it, so the auto-scope resolves to the
+      # PR's real diff. The worktree is per-agent (session-id-keyed → no collision
+      # across a multi-codex fleet) and torn down right after, regardless of rc.
+      # If preparation fails (no PR_BRANCH, fetch/add error), _run_codex_review is
+      # called with an empty workdir and degrades to cwd with a loud warning — never
+      # crashes the fan-out subshell.
+      _cx_pr_workdir=""
+      if [[ -n "${PR_BRANCH:-}" ]]; then
+        _cx_pr_workdir="/tmp/codex-review-wt-${ISSUE_NUMBER}-${_agent_session_id}"
+        if ! _codex_review_prepare_worktree "$PR_BRANCH" "$_cx_pr_workdir"; then
+          log "WARNING: INV-62/#218 could not prepare a PR-branch worktree for codex review (branch '${PR_BRANCH}'); running from PROJECT_DIR (the auto-scoped diff may be wrong)."
+          _cx_pr_workdir=""
+        fi
+      else
+        log "WARNING: INV-62/#218 PR_BRANCH is empty; codex review runs from PROJECT_DIR (the auto-scoped diff may be wrong)."
+      fi
+      _run_codex_review "$_agent_prompt" "${_agent_model:-sonnet}" "$_agent_codex_stdout" "$_cx_pr_workdir" \
         >>"$_agent_log" 2>&1 || _rc=$?
+      _codex_review_cleanup_worktree "$_cx_pr_workdir"
     else
       run_agent "$_agent_session_id" "$_agent_prompt" "${_agent_model:-sonnet}" "$_agent_session_name" \
         >>"$_agent_log" 2>&1 || _rc=$?

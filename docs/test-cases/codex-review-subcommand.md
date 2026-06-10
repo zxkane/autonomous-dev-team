@@ -60,6 +60,23 @@ prints scripted stdout, and a stubbed `_run_with_timeout` seam.
 | TC-CXRS-LAUNCH-08 | **#218 finding 1**: a MULTI-LINE prompt (the real `build_review_prompt` heredoc) | stays a SINGLE argv element; element count is unaffected by prompt newlines (NOT split into positionals) |
 | TC-CXRS-MLP-01 | end-to-end: `_run_codex_review` with a multi-line prompt + a recording stub | the stubbed binary receives the prompt as ONE arg (4 elements total, `argv[0]==review`) |
 
+## Unit — PR-branch worktree for codex review (#218 finding 3)
+
+`codex review` auto-scopes its diff against the CURRENT checkout, so the wrapper
+must run it from a worktree checked out to the PR branch — NOT `PROJECT_DIR`
+(which the dispatcher keeps on `main`, where the PR diff would be empty). Tested
+against a throwaway git repo with a diverging `pr-branch`.
+
+| ID | Scenario | Expected |
+|----|----------|----------|
+| TC-CXRS-WT-01 | `_codex_review_prepare_worktree pr-branch <dest>` then cleanup | rc 0; `<dest>` HEAD is the PR-branch tip (the PR change is present); cleanup removes it |
+| TC-CXRS-WT-02 | prepare with empty branch / empty dest / non-git-repo cwd | rc 1 (cannot scope → caller degrades) |
+| TC-CXRS-WT-03 | prepare for a non-existent branch (no ref resolves) | rc 1 |
+| TC-CXRS-WT-04 | cleanup on a missing / empty dest | rc 0 always (no `set -e` abort) |
+| TC-CXRS-WT-05 | `_run_codex_review` with a prepared worktree | runs `codex review` FROM the worktree; the wrapper's own cwd is unchanged (subshell `cd`) |
+| TC-CXRS-WT-06 | `_run_codex_review` with an EMPTY workdir | runs from cwd + logs a loud warning (degraded, never crashes) |
+| TC-CXRS-WT-SRC-01..03 | wrapper source-of-truth | the codex branch prepares the PR-branch worktree, passes it to `_run_codex_review` (4th arg), and tears it down |
+
 ## Unit — bounded re-run (`_run_codex_review`, subsumes #209)
 
 `codex review` has no resume; "resume" is a fresh re-run. A non-zero / stream

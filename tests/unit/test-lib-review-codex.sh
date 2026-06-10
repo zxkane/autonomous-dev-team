@@ -715,6 +715,133 @@ assert_eq "TC-CXRS-MLP-01 multi-line prompt reaches codex review as ONE arg" \
 
 # ---------------------------------------------------------------------------
 echo ""
+echo "=== TC-CXRS-WT: PR-branch worktree for codex review (#218 finding 3) ==="
+# ---------------------------------------------------------------------------
+# `codex review` auto-scopes its diff against the CURRENT checkout, so the wrapper
+# must run it from a PR-branch worktree (not PROJECT_DIR, which is on `main`).
+# Build a throwaway git repo with a `main` and a `pr-branch` that diverges, then
+# exercise _codex_review_prepare_worktree / _codex_review_cleanup_worktree and the
+# _run_codex_review cwd behavior against it.
+
+# Build the fixture repo once.
+WT_REPO=$(mktemp -d)
+(
+  cd "$WT_REPO"
+  git init -q -b main
+  git config user.email t@t; git config user.name t
+  echo base > f.txt; git add f.txt; git commit -qm base
+  git checkout -q -b pr-branch
+  echo pr-change >> f.txt; git add f.txt; git commit -qm pr-change
+  git checkout -q main
+) >/dev/null 2>&1
+
+# TC-CXRS-WT-01 — prepare returns rc 0 and the dest is a checkout AT the PR-branch
+# tip (the pr-change commit), proving codex review there would diff the PR.
+wt01=$(
+  set -uo pipefail
+  source "$LIB"
+  cd "$WT_REPO"
+  dest="$WT_REPO/wt-01"
+  _codex_review_prepare_worktree "pr-branch" "$dest"; rc=$?
+  # HEAD of the worktree must be the pr-branch tip commit (the one that added pr-change).
+  head_subj=$(git -C "$dest" log -1 --format=%s 2>/dev/null || echo NONE)
+  has_change=$(grep -qF pr-change "$dest/f.txt" 2>/dev/null && echo yes || echo no)
+  _codex_review_cleanup_worktree "$dest"
+  exists_after=$([[ -d "$dest" ]] && echo yes || echo no)
+  echo "rc=${rc}|subj=${head_subj}|change=${has_change}|after=${exists_after}"
+)
+assert_eq "TC-CXRS-WT-01 prepare checks out the PR-branch tip; cleanup removes it" \
+  "rc=0|subj=pr-change|change=yes|after=no" "$wt01"
+
+# TC-CXRS-WT-02 — prepare fails (rc 1) on an empty branch arg / empty dest / not a repo.
+wt02=$(
+  set -uo pipefail
+  source "$LIB"
+  cd "$WT_REPO"
+  _codex_review_prepare_worktree "" "$WT_REPO/x";    a=$?
+  _codex_review_prepare_worktree "pr-branch" "";     b=$?
+  nonrepo=$(mktemp -d)
+  ( cd "$nonrepo"; source "$LIB"; _codex_review_prepare_worktree "pr-branch" "$nonrepo/y" ); c=$?
+  rm -rf "$nonrepo"
+  echo "${a}|${b}|${c}"
+)
+assert_eq "TC-CXRS-WT-02 prepare fails rc1 on empty-branch / empty-dest / non-repo" "1|1|1" "$wt02"
+
+# TC-CXRS-WT-03 — prepare fails (rc 1) for a non-existent branch (no ref resolves).
+wt03=$(
+  set -uo pipefail
+  source "$LIB"
+  cd "$WT_REPO"
+  _codex_review_prepare_worktree "no-such-branch" "$WT_REPO/wt-03"; echo "rc=$?"
+)
+assert_eq "TC-CXRS-WT-03 prepare fails rc1 for a non-existent branch" "rc=1" "$wt03"
+
+# TC-CXRS-WT-04 — cleanup is rc-0-always (no crash) on a missing / empty dest.
+wt04=$(
+  set -euo pipefail
+  source "$LIB"
+  cd "$WT_REPO"
+  _codex_review_cleanup_worktree "/nonexistent/$$"; a=$?
+  _codex_review_cleanup_worktree ""; b=$?
+  echo "${a}|${b}"
+)
+assert_eq "TC-CXRS-WT-04 cleanup rc-0-always on missing/empty dest (no errexit abort)" "0|0" "$wt04"
+
+# TC-CXRS-WT-05 — _run_codex_review runs `codex review` FROM the passed PR-workdir
+# (the stub records its cwd, physical path); the wrapper's own cwd is unchanged
+# afterward (the cd is in a subshell).
+wt05=$(
+  set -uo pipefail
+  source "$LIB"
+  cd "$WT_REPO"
+  dest="$WT_REPO/wt-05"; _codex_review_prepare_worktree "pr-branch" "$dest" >/dev/null 2>&1
+  dest_p=$(cd "$dest" && pwd -P)
+  caller_before=$(pwd -P)
+  # Stub records the PHYSICAL cwd `codex review` ran in.
+  _run_with_timeout() { pwd -P > "$WT_REPO/ran_cwd.txt"; echo "review output"; return 0; }
+  _codex_now_seconds() { printf '%s\n' 0; }
+  CODEX_REVIEW_MAX_RERUNS=0 AGENT_REVIEW_TIMEOUT=1h AGENT_CMD=codex \
+    _run_codex_review "p" "sonnet" "$WT_REPO/cap.txt" "$dest" >/dev/null 2>&1
+  ran_cwd=$(cat "$WT_REPO/ran_cwd.txt" 2>/dev/null)
+  caller_after=$(pwd -P)
+  _codex_review_cleanup_worktree "$dest"
+  ran_in_wt=no; [[ "$ran_cwd" == "$dest_p" ]] && ran_in_wt=yes
+  cwd_stable=no; [[ "$caller_before" == "$caller_after" ]] && cwd_stable=yes
+  echo "ran_in_wt=${ran_in_wt}|cwd_stable=${cwd_stable}"
+)
+assert_eq "TC-CXRS-WT-05 codex review runs FROM the PR-branch worktree; wrapper cwd stable" \
+  "ran_in_wt=yes|cwd_stable=yes" "$wt05"
+
+# TC-CXRS-WT-06 — with NO pr_workdir, _run_codex_review warns + runs from cwd
+# (degraded path, never crashes). The stub records cwd == the caller's cwd.
+wt06=$(
+  set -uo pipefail
+  source "$LIB"
+  cd "$WT_REPO"
+  _run_with_timeout() { pwd > "$WT_REPO/ran_cwd6.txt"; echo "review output"; return 0; }
+  _codex_now_seconds() { printf '%s\n' 0; }
+  CODEX_REVIEW_MAX_RERUNS=0 AGENT_REVIEW_TIMEOUT=1h AGENT_CMD=codex \
+    _run_codex_review "p" "sonnet" "$WT_REPO/cap6.txt" "" 2> "$WT_REPO/warn6.txt" >/dev/null
+  ran_cwd=$(cat "$WT_REPO/ran_cwd6.txt" 2>/dev/null)
+  warned=$(grep -qi 'no PR-branch worktree' "$WT_REPO/warn6.txt" && echo yes || echo no)
+  echo "ran_in_cwd=$([[ "$(cd "$ran_cwd" && pwd -P)" == "$(cd "$WT_REPO" && pwd -P)" ]] && echo yes || echo no)|warned=${warned}"
+)
+assert_eq "TC-CXRS-WT-06 empty pr_workdir → runs from cwd + warns (degraded, no crash)" \
+  "ran_in_cwd=yes|warned=yes" "$wt06"
+
+rm -rf "$WT_REPO"
+
+# TC-CXRS-WT-SRC — wrapper source-of-truth: the codex branch prepares a PR-branch
+# worktree, passes it to _run_codex_review, and cleans it up.
+assert_grep "TC-CXRS-WT-SRC-01 wrapper prepares a PR-branch worktree for codex review" \
+  '_codex_review_prepare_worktree "\$PR_BRANCH"' "$WRAPPER"
+assert_grep "TC-CXRS-WT-SRC-02 wrapper passes the prepared workdir to _run_codex_review (4th arg)" \
+  '_run_codex_review "\$_agent_prompt".*"\$_cx_pr_workdir"' "$WRAPPER"
+assert_grep "TC-CXRS-WT-SRC-03 wrapper tears the codex worktree down" \
+  '_codex_review_cleanup_worktree "\$_cx_pr_workdir"' "$WRAPPER"
+
+# ---------------------------------------------------------------------------
+echo ""
 echo "=== Summary ==="
 echo "  PASS: $PASS"
 echo "  FAIL: $FAIL"

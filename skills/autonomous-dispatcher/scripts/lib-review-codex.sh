@@ -205,7 +205,55 @@ _codex_review_argv() {
   _cra_out+=("${extra_args[@]}")
 }
 
-# _run_codex_review <prompt> <model> <stdout-file>
+# _codex_review_prepare_worktree <pr_branch> <dest_dir> — establish the PR-branch
+# CHECKOUT that `codex review` auto-scopes its diff against (#218 review finding 3).
+#
+# WHY (load-bearing): `codex review` has no `--base`/PR-number flag — it diffs the
+# CURRENT working tree's HEAD against its merge-base. The review wrapper runs from
+# `PROJECT_DIR`, which the dispatcher keeps synced to `main`. So if `codex review`
+# ran from `PROJECT_DIR` it would review `main`'s (empty) diff, NOT the PR's — a
+# regression from the deleted INV-55 path, which fetched `gh pr diff <PR_NUMBER>`
+# (PR-scoped regardless of cwd). The fix: check the PR branch out into a throwaway
+# worktree and run `codex review` from THERE, so its auto-scope resolves to the
+# PR's real diff (origin/main…<pr_branch>).
+#
+# Fetches the PR branch from origin (so a freshly-synced PROJECT_DIR that doesn't
+# yet have the ref can still add the worktree), then `git worktree add --detach`
+# at the fetched commit. rc 0 on success (the dest_dir is a usable PR-branch
+# checkout); rc 1 on any failure (no pr_branch, not a git repo, fetch/add failed)
+# — the caller then degrades to running from cwd with a loud log, never crashing.
+# `--detach` (not a branch checkout) avoids "branch already checked out" collisions
+# with the dev worktree / a sibling codex agent.
+_codex_review_prepare_worktree() {
+  local pr_branch="${1:-}" dest_dir="${2:-}"
+  [[ -n "$pr_branch" && -n "$dest_dir" ]] || return 1
+  git rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
+  # Fetch the PR branch tip into FETCH_HEAD (best-effort: it may already be local).
+  git fetch --quiet origin "$pr_branch" 2>/dev/null || true
+  # Resolve the commit to check out: prefer the just-fetched origin tip, then a
+  # local ref, then FETCH_HEAD. If none resolves we cannot scope to the PR — fail.
+  local _ref
+  for _ref in "origin/${pr_branch}" "refs/remotes/origin/${pr_branch}" "$pr_branch" FETCH_HEAD; do
+    if git rev-parse --verify --quiet "${_ref}^{commit}" >/dev/null 2>&1; then
+      git worktree add --detach --quiet "$dest_dir" "$_ref" 2>/dev/null && return 0
+    fi
+  done
+  return 1
+}
+
+# _codex_review_cleanup_worktree <dest_dir> — remove a worktree created by
+# _codex_review_prepare_worktree. Best-effort, rc 0 always (a cleanup failure must
+# never abort the wrapper); `--force` because `codex review` may have left
+# scratch files in the tree, and a final `git worktree prune` clears the admin ref.
+_codex_review_cleanup_worktree() {
+  local dest_dir="${1:-}"
+  [[ -n "$dest_dir" ]] || return 0
+  git worktree remove --force "$dest_dir" 2>/dev/null || rm -rf "$dest_dir" 2>/dev/null || true
+  git worktree prune 2>/dev/null || true
+  return 0
+}
+
+# _run_codex_review <prompt> <model> <stdout-file> [<pr-workdir>]
 #
 # The review-codex launch + bounded re-run controller. Runs `codex review
 # "<prompt>"` once under the shared _run_with_timeout (so PGID/timeout/PID-file
@@ -214,6 +262,14 @@ _codex_review_argv() {
 # transient turn.failed / stream blip — #209) it RE-RUNS a fresh review, bounded
 # by CODEX_REVIEW_MAX_RERUNS AND the AGENT_REVIEW_TIMEOUT-derived wall-clock
 # deadline.
+#
+# <pr-workdir> (#218 finding 3): the directory `codex review` runs IN — a PR-branch
+# checkout (a worktree the caller prepared via _codex_review_prepare_worktree) so
+# `codex review`'s auto-scoped diff resolves to the PR, not the wrapper's `main`
+# checkout. When non-empty + a directory, the invocation `cd`s there (in a subshell,
+# so the wrapper's own cwd is untouched); when empty/missing, it runs from the
+# current cwd and logs a loud warning (degraded — the diff may be wrong/empty, but
+# the wrapper does not crash).
 #
 # Return code: the exit code of the LAST `codex review` invocation, EXCEPT a 124
 # (coreutils timeout TERM-expiry) or 137 (--kill-after SIGKILL) from ANY run is
@@ -228,8 +284,19 @@ _codex_review_argv() {
 # written to <stdout-file> so the wrapper's stdout→verdict fallback and the
 # stream-error drop-reason scan read codex's actual review text.
 _run_codex_review() {
-  local prompt="$1" model="$2" stdout_file="$3"
+  local prompt="$1" model="$2" stdout_file="$3" pr_workdir="${4:-}"
   local max="${CODEX_REVIEW_MAX_RERUNS:-3}"
+  # #218 finding 3: `codex review` must run from a PR-branch checkout so its
+  # auto-scoped diff is the PR's, not the wrapper's `main` PROJECT_DIR. The caller
+  # passes a prepared worktree dir; if it is missing/not-a-dir we run from cwd and
+  # warn LOUDLY (degraded — the verdict may be for the wrong/empty diff, but the
+  # wrapper does not crash; the rc-0 gate + comment poller still apply downstream).
+  local _cwd_ok=false
+  if [[ -n "$pr_workdir" && -d "$pr_workdir" ]]; then
+    _cwd_ok=true
+  else
+    echo "[lib-review-codex] WARNING: no PR-branch worktree for codex review (pr_workdir='${pr_workdir}') — running from the current checkout; the auto-scoped diff may not be the PR's (INV-62/#218)." >&2
+  fi
   # Degrade-don't-crash (mirrors _codex_review_deadline_seconds): a NON-NUMERIC
   # operator typo (e.g. CODEX_REVIEW_MAX_RERUNS="three") reaching the
   # `(( reruns >= max ))` arithmetic under `set -euo pipefail` would abort the
@@ -258,7 +325,15 @@ _run_codex_review() {
   # stream-error line the scan needs.
   _one_codex_review_run() {
     : > "$stdout_file" 2>/dev/null || true
-    _run_with_timeout "$AGENT_CMD" "${_argv[@]}" > "$stdout_file" 2>&1
+    # Run `codex review` from the PR-branch worktree (in a SUBSHELL so the `cd`
+    # never leaks to the wrapper's cwd) when one was prepared; else from cwd
+    # (degraded path, already warned above). The stdout-capture path is absolute
+    # (the wrapper builds it under /tmp), so the cd does not misplace it.
+    if [[ "$_cwd_ok" == true ]]; then
+      ( cd "$pr_workdir" && _run_with_timeout "$AGENT_CMD" "${_argv[@]}" ) > "$stdout_file" 2>&1
+    else
+      _run_with_timeout "$AGENT_CMD" "${_argv[@]}" > "$stdout_file" 2>&1
+    fi
   }
 
   local final_rc=0 reruns=0 deadline budget now
