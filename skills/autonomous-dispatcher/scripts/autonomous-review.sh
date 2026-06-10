@@ -638,16 +638,20 @@ fi
 build_review_prompt() {
   local _agent_name="$1"
   local _agent_session_id="$2"
-  # [INV-60] (#208): resolve THIS agent's review model exactly as the
-  # `Reviewed HEAD:` trailer (~`_REVIEW_HEAD_MODEL` below) and the `run_agent`
-  # launch arg do — per-agent override → shared AGENT_REVIEW_MODEL → the launch
-  # default `sonnet` — and interpolate it as the 6th `post-verdict.sh` arg in
-  # every verdict-post example so the verdict comment shows the model that
-  # produced it. Resolving HERE (rather than threading a 3rd param from the
-  # fan-out) keeps the call-site signature unchanged; `_resolve_review_agent_model`
-  # is a pure env lookup so it is safe to call in the prompt-render context.
+  # [INV-60] (#208): resolve THIS agent's review model for the verdict trailer
+  # exactly as the `Reviewed HEAD:` trailer (~`_REVIEW_HEAD_MODEL` below) and the
+  # INV-58 fan-out label do — and interpolate it as the 6th `post-verdict.sh` arg
+  # in every verdict-post example so the verdict comment shows the model that
+  # produced it. Use the HONESTY-aware label resolver (`_resolve_review_agent_model_label`,
+  # issue #220), NOT the bare launch resolver: for an `agy` member whose resolved
+  # id is dropped by INV-50 (agy validates `--model` against `agy models` and
+  # silently runs its default), the label renders the agy default rather than the
+  # dropped id — so the verdict comment doesn't assert a model agy never ran.
+  # claude/kiro/codex (which honor `--model`) are unaffected — their resolved id
+  # is shown verbatim. The helper is a pure env+`agy models`-cache lookup, fail-safe
+  # under `set -euo pipefail`, so it is safe in the prompt-render context.
   local _agent_model
-  _agent_model=$(_resolve_review_agent_model "${_agent_name}")
+  _agent_model=$(_resolve_review_agent_model_label "${_agent_name}")
   _agent_model="${_agent_model:-sonnet}"
   cat <<EOF
 You are reviewing PR #${PR_NUMBER} for issue #${ISSUE_NUMBER} in the ${REPO} project.
@@ -1823,13 +1827,19 @@ if [[ -n "$LATEST_COMMENT" && -n "$PR_HEAD_SHA" ]]; then
   # INV-58 (#205): render the REPRESENTATIVE (first) fan-out agent's RESOLVED
   # model + CLI name, not the shared ${AGENT_REVIEW_MODEL} / ${AGENT_CMD}. For a
   # per-agent-overridden fleet (e.g. AGENT_REVIEW_MODEL_AGY) the shared default
-  # misattributed the model in the forensic trailer — `_resolve_review_agent_model`
-  # gives the value the representative agent actually reviewed with (defaulting to
-  # `sonnet` exactly as the run_agent call does). SESSION_ID is already the first
-  # agent's session, so the trailer's session/agent/model now describe ONE agent
-  # consistently.
+  # misattributed the model in the forensic trailer. SESSION_ID is already the
+  # first agent's session, so the trailer's session/agent/model now describe ONE
+  # agent consistently.
+  #
+  # issue #220: use the HONESTY-aware label resolver (`_resolve_review_agent_model_label`)
+  # so that when the representative agent is `agy` and its resolved id is dropped
+  # by INV-50 (agy runs its settings.json default instead), the trailer renders
+  # the agy default rather than the dropped id — it never asserts a model agy
+  # never ran. The helper already applies the `:-sonnet` launch default and is
+  # never empty; the `:-${AGENT_REVIEW_MODEL:-sonnet}` below stays as a defensive
+  # belt-and-suspenders fallback.
   _REVIEW_HEAD_AGENT="${AGENT_NAMES[0]:-${AGENT_CMD:-claude}}"
-  _REVIEW_HEAD_MODEL="$(_resolve_review_agent_model "$_REVIEW_HEAD_AGENT")"
+  _REVIEW_HEAD_MODEL="$(_resolve_review_agent_model_label "$_REVIEW_HEAD_AGENT")"
   _REVIEW_HEAD_MODEL="${_REVIEW_HEAD_MODEL:-${AGENT_REVIEW_MODEL:-sonnet}}"
   _trailer_err=$(gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
     --body "Reviewed HEAD: \`${PR_HEAD_SHA}\` (issue #${ISSUE_NUMBER}, session \`${SESSION_ID}\`, agent \`${_REVIEW_HEAD_AGENT}\`, model \`${_REVIEW_HEAD_MODEL}\`)" \
