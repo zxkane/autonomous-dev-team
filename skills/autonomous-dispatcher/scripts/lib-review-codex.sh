@@ -73,15 +73,19 @@ _codex_review_deadline_seconds() {
 # _codex_log_has_verdict_message <log_file>
 #
 # rc 0 iff codex's LAST COMPLETED turn (the segment ending at the final
-# `turn.completed` event) contained an `item.completed` `agent_message` whose
-# TEXT carries a VERDICT TRAILER — one of the verdict phrasings the wrapper's
-# comment poller itself recognises (`lib-review-poll.sh::_classify_verdict_body`)
-# or the `Review Agent: codex` attribution trailer the resume prompt forces codex
-# to emit. rc 1 otherwise — including an empty/missing log, a gather-only last
-# turn (only `tool_call`/`reasoning`/`command_execution` items), a last turn whose
-# only `agent_message`s are PROGRESS NARRATION (no verdict trailer), or a log
-# whose final turn has NOT completed yet (a message with no trailing
-# `turn.completed` does not count — the turn is still in flight).
+# `turn.completed` event) posted the VERDICT, by EITHER of two signals:
+#   (A) an `item.completed` `agent_message` whose TEXT carries a VERDICT TRAILER —
+#       one of the verdict phrasings the wrapper's comment poller recognises
+#       (`lib-review-poll.sh::_classify_verdict_body`) or the `Review Agent: codex`
+#       attribution trailer; OR
+#   (B) an `item.completed` `command_execution` whose COMMAND runs the INV-56
+#       helper `post-verdict.sh` with a `pass`/`fail` verdict argument (the #214
+#       fix — see below).
+# rc 1 otherwise — including an empty/missing log, a gather-only last turn (only
+# `tool_call`/`reasoning`/non-verdict `command_execution` items), a last turn whose
+# only `agent_message`s are PROGRESS NARRATION (no verdict trailer), or a log whose
+# final turn has NOT completed yet (a message with no trailing `turn.completed`
+# does not count — the turn is still in flight).
 #
 # #198 / INV-53: this used to converge on ANY `agent_message` in the last turn.
 # But codex emits `agent_message` for narration ("Next I'm reading the
@@ -89,24 +93,34 @@ _codex_review_deadline_seconds() {
 # gather-heavy turn that narrates then dies before posting the verdict tripped the
 # old heuristic as "converged" → no resume → the poller found no verdict comment →
 # codex was dropped `unavailable`. Convergence MUST mean "codex posted the
-# VERDICT", not "codex emitted any assistant message". So we now require the
+# VERDICT", not "codex emitted any assistant message". So we require the
 # verdict-trailer text inside an `agent_message` item.
+#
+# #214 / INV-56 follow-up — signal (B): since INV-56 the verdict is posted by
+# RUNNING `bash scripts/post-verdict.sh <issue> pass|fail <body-file> …`, so on the
+# common turn-1 path the verdict signal lands in a `command_execution` event (the
+# argv codex ran), NOT in an `agent_message`. Signal (A) alone misses it → the loop
+# fired a redundant resume and codex DOUBLE-POSTED the verdict (the second comment
+# carrying a doubled trailer). So we ALSO converge on a `command_execution` whose
+# COMMAND invokes `post-verdict.sh` with a `pass`/`fail` arg. Signal (A) is kept (a
+# CLI that posts a verdict as a plain assistant message still converges — no
+# regression of the INV-53 path); a turn converges iff EITHER signal fires.
 #
 # This is the "did codex's last turn produce the verdict?" signal, NOT a
 # GitHub-comment check (that is the wrapper poller's job — see LAYER above): the
-# poller stays the AUTHORITATIVE gate. Keying on the SAME phrasings the poller
-# matches makes the two agree — "the JSONL stream shows a verdict-shaped message"
-# ⇒ "the poller will find the comment". It is fail-safe toward RESUMING: an
-# ambiguous turn resumes (bounded), it never false-stops; worst case wastes one
-# bounded resume, never silently drops codex.
+# poller stays the AUTHORITATIVE gate. Keying on the SAME phrasings/helper the
+# poller and INV-56 use makes the two agree — "the JSONL stream shows the verdict
+# being posted" ⇒ "the poller will find the comment". It is fail-safe toward
+# RESUMING: an ambiguous turn resumes (bounded), it never false-stops; worst case
+# wastes one bounded resume, never silently drops codex.
 #
 # Why awk: jq is not a hard dependency of this subsystem (mirrors
 # lib-agent.sh::_codex_capture_thread). Codex `--json` emits one event per line
-# (JSONL; newlines inside an agent_message text are escaped as \n, so the whole
-# item — type AND text — is on ONE physical line). We do a single pass tracking,
-# per turn, whether a verdict-trailer agent_message was seen (`cur_msg`);
-# `turn.started` resets it at each turn boundary and `turn.completed` snapshots it
-# into `last`, then resets it. The final `last` snapshot is the answer.
+# (JSONL; newlines inside an agent_message text are escaped as \n, AND the whole
+# command_execution item — type AND command — is on ONE physical line). We do a
+# single pass tracking, per turn, whether a verdict signal (A or B) was seen
+# (`cur_msg`); `turn.started` resets it at each turn boundary and `turn.completed`
+# snapshots it into `last`, then resets it. The final `last` snapshot is the answer.
 _codex_log_has_verdict_message() {
   local log_file="${1:-}"
   [[ -n "$log_file" && -f "$log_file" ]] || return 1
@@ -151,6 +165,59 @@ _codex_log_has_verdict_message() {
           cur_msg = 1
         }
       }
+      # #214 signal (B): an item.completed command_execution that RUNS the INV-56
+      # verdict helper marks the current turn as having posted the verdict. Same
+      # item-scope discipline as the agent_message path — three conjuncts on the
+      # same JSONL line (codex emits one event per line; the command field is part
+      # of the item object, so type AND command are on ONE physical line):
+      #   (1) the event is an item.completed;
+      #   (2) the item type is command_execution, scoped INSIDE the item object
+      #       (`"item":{...,"type":"command_execution"...}`) — NOT a bare match
+      #       anywhere on the line, so an agent_message whose TEXT merely narrates
+      #       "I will run post-verdict.sh" does NOT count (it fails this conjunct);
+      #   (3) the COMMAND invokes post-verdict.sh with the verdict POSITIONAL arg.
+      #       Conjunct (3) is matched against `cmd` — the substring of the line
+      #       INSIDE the item-object braces from `"command":"` onward — NOT the
+      #       whole line, so a post-verdict.sh string sitting only in a separate
+      #       `aggregated_output` (codex catting SKILL.md / the prompt, which
+      #       document the helper) does NOT trip it. The argv shape is
+      #       `post-verdict.sh <issue-number> <pass|fail> <body-file> …`, so we
+      #       anchor the verdict token to ITS ARGUMENT POSITION: `post-verdict.sh`,
+      #       then the issue-number positional (one or more digits), then the
+      #       `pass`/`fail` token. Anchoring to the position (rather than ANY
+      #       boundaried `pass`/`fail` occurrence) is what keeps it fail-safe toward
+      #       RESUMING: a body-file PATH that merely contains a `pass`/`fail` path
+      #       segment (e.g. `/tmp/pass-notes.md`, `/var/fail/x.md`) must NOT
+      #       false-converge — that path appears AFTER the verdict positional, never
+      #       in its slot, so the anchored match rejects it. The token is bounded by
+      #       a trailing non-alphanumeric OR end-of-string (so `pass`/`passphrase`
+      #       stay distinct) — POSIX awk has no \< / \> word boundaries (a GNU
+      #       extension this subsystem avoids, mirroring _codex_capture_thread).
+      if ($0 ~ /"type":"item\.completed"/ && $0 ~ /"item":\{[^{}]*"type":"command_execution"/) {
+        # Isolate the command field value: drop everything up to `"command":"`,
+        # then keep up to the closing `"` of the command string. We only populate
+        # `cmd` when the `"command":"` field is present on the line; some
+        # command_execution events carry only aggregated_output on a later line, so
+        # `cmd` stays empty for those and an aggregated_output substring cannot match
+        # the post-verdict shape below.
+        cmd = ""
+        if ($0 ~ /"command":"/) {
+          cmd = $0
+          sub(/^.*"command":"/, "", cmd)
+          sub(/".*$/, "", cmd)
+        }
+        cmdl = tolower(cmd)
+        # post-verdict.sh <issue-number> <pass|fail> — the verdict token in ITS
+        # POSITIONAL slot (after the issue-number positional). `[^a-z0-9]+`
+        # absorbs the whitespace (and any leading `bash`/path noise stays before
+        # `post-verdict.sh`); `[0-9]+` is the issue number; the trailing
+        # `([^a-z0-9]|$)` makes `pass`/`fail` a standalone token. This rejects a
+        # `pass`/`fail`-named body-file path segment, which appears only AFTER the
+        # verdict positional (fail-safe toward resuming).
+        if (cmdl ~ /post-verdict\.sh[^a-z0-9]+[0-9]+[^a-z0-9]+(pass|fail)([^a-z0-9]|$)/) {
+          cur_msg = 1
+        }
+      }
       # turn.started opens a NEW turn — reset the per-turn flag so a verdict
       # message from a PRIOR turn that was killed before its own turn.completed
       # (the per-turn cap firing mid-stream, rc 124/137) does NOT leak across the
@@ -175,9 +242,9 @@ _codex_log_has_verdict_message() {
 
 # _codex_resume_prompt — the explicit continue-and-emit-verdict prompt fed to
 # each resume turn. Tells codex to PREFER the context it already loaded and
-# produce the verdict NOW, carrying the same discriminator/session lines the
-# wrapper's verdict poller binds on (INV-40 / INV-20). $1 = the agent's Review
-# Session UUID.
+# produce the verdict NOW, posting it through the INV-56 deterministic helper
+# `post-verdict.sh`. $1 = the agent's Review Session UUID (passed as the helper's
+# session-id argument).
 #
 # #198 follow-up: the original prompt was ABSOLUTE — "do NOT re-run git diff and
 # do NOT re-read files you already read". But codex compacts its OWN context on a
@@ -190,6 +257,17 @@ _codex_log_has_verdict_message() {
 # instructs codex to NEVER refuse a verdict for lack of context. This keeps the
 # INV-51 goal (don't burn the turn re-gathering everything) while removing the
 # strand-on-compaction failure mode.
+#
+# #214 / INV-56: the prompt previously told codex to post the verdict and to
+# HAND-WRITE the `Review Agent: codex` / `Review Session: <uuid>` trailer
+# "verbatim". Since INV-56 the verdict is posted via `bash scripts/post-verdict.sh`,
+# which composes that trailer itself — so the hand-written lines are redundant and
+# produced a DOUBLED trailer whenever a resume turn legitimately posted (the
+# hand-written block stacked on the helper's own). The prompt now routes the
+# verdict through `post-verdict.sh` ONLY and does NOT instruct codex to hand-write
+# the trailer. The session uuid is still supplied — codex passes it as the helper's
+# session-id argument (the helper writes the `Review Session:` line from it). This
+# matches the main review prompt (see autonomous-review.sh build_review_prompt).
 _codex_resume_prompt() {
   local session_uuid="${1:-}"
   cat <<EOF
@@ -199,22 +277,31 @@ re-read files that are still in your context, since re-doing finished work waste
 the turn. BUT if your context was compacted and the diff or a file you need is no
 longer available to you, re-read the minimum you need to reach a substantiated
 verdict — do NOT refuse to issue a verdict merely because context is missing.
-Produce your review findings NOW and post your verdict comment on the issue:
+Produce your review findings NOW and post your verdict comment on the issue.
 
-- A passing verdict: a comment whose body contains "Review PASSED".
-- A failing verdict: a comment whose body starts with "Review findings:" and
-  lists each blocking finding.
+Post the verdict ONLY by running the deterministic helper:
+
+  bash scripts/post-verdict.sh <issue-number> <pass|fail> <body-file> codex ${session_uuid} '<model>'
+
+- A passing verdict: pass \`pass\` as the verdict and a body that reads
+  "Review PASSED - <one-line summary>".
+- A failing verdict: pass \`fail\` as the verdict and a body that starts with
+  "Review findings:" and lists each blocking finding.
+
+Write the body to a FILE and pass the file path (so a multi-line body with
+backticks/quotes cannot be mangled). Do NOT hand-write the
+\`Review Agent:\` / \`Review Session:\` trailer and do NOT use a bare
+\`gh issue comment\` for the verdict — the helper appends the attribution trailer
+itself from the arguments you pass, so writing it yourself would duplicate it.
+The <issue-number> and <model> values are in your original review prompt; pass
+them exactly. Use your agent name \`codex\` and the session id ${session_uuid}
+shown above.
 
 A finding must be about the PR's CODE (correctness, tests, requirements, CI,
 security). "I cannot verify because my context is unavailable" is NOT a valid
 finding — re-read what you need and decide.
 
-Your verdict comment MUST include these two lines verbatim so the wrapper can
-attribute it:
-  Review Agent: codex
-  Review Session: ${session_uuid}
-
-Post the comment now and then stop.
+Post the verdict now and then stop.
 EOF
 }
 
