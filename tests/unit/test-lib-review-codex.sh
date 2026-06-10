@@ -347,23 +347,85 @@ assert_eq "TC-CXRS-RUN-05 non-numeric max degrades (bound reached), no crash" "r
 # now-script: base 0, then a huge value so now >= deadline on the first bound check.
 assert_eq "TC-CXRS-RUN-06 wall-clock exceeded → 1 run, no re-run" "1|1" "$(run_codex_review_case $'1\n0' 3 $'0\n999999')"
 
-# TC-CXRS-RUN-07 — sticky timeout rc: run 1 rc 124, re-run clean (rc 0), bound
-# exhaustion → returns 124 (INV-48 veto, never reset to 0).
+# TC-CXRS-RUN-07 — #218 review finding 4: a wall-clock-cap kill (124/137) STOPS the
+# loop IMMEDIATELY and returns the sticky veto rc with ZERO re-runs. The re-run loop
+# exists for transient stream errors, NOT for the per-run timeout cap — re-running a
+# capped run is pointless (the cap refires) and risks the duplicate-verdict /
+# partial-review hazard (each clean re-run is a fresh `codex review` that may
+# self-post). So a turn-1 124 → 1 run, 0 re-runs, returns 124 (INV-48 veto).
+# The pre-fix code keyed the loop break on the STICKY final_rc, so a 124 then a clean
+# re-run kept final_rc==124, never broke, and looped to MAX_RERUNS — exactly the
+# bug. This test now asserts the RUN COUNT (not just the return value) so the
+# loop-until-bound regression cannot return.
 run07=$(
   set -uo pipefail
   source "$LIB"
-  sandbox=$(mktemp -d)
-  ri=0
-  _run_with_timeout() { ri=$((ri+1)); echo x; [[ $ri -eq 1 ]] && return 124 || return 0; }
+  sandbox=$(mktemp -d); : > "$sandbox/runs"
+  _run_with_timeout() { echo run >> "$sandbox/runs"; echo x; return 124; }
   _codex_now_seconds() { printf '%s\n' 0; }
-  CODEX_REVIEW_MAX_RERUNS=2 AGENT_REVIEW_TIMEOUT=1h AGENT_CMD=codex \
-    _run_codex_review p m "$sandbox/cap.txt"
-  echo "$?"
+  CODEX_REVIEW_MAX_RERUNS=3 AGENT_REVIEW_TIMEOUT=1h AGENT_CMD=codex \
+    _run_codex_review p m "$sandbox/cap.txt"; rc=$?
+  runs=$(grep -c '^run$' "$sandbox/runs" 2>/dev/null) || runs=0
+  echo "rc=${rc}|runs=${runs}"
   rm -rf "$sandbox"
 )
-# run 1 rc 124 → loop: not 0, rerun 1 (rc 0) → final stays 124 (sticky), loop: rc
-# is 124 (not 0) → rerun 2 (rc 0) → still 124 → bound exhausted → returns 124.
-assert_eq "TC-CXRS-RUN-07 sticky timeout 124 preserved through clean re-runs" "124" "$run07"
+assert_eq "TC-CXRS-RUN-07 turn-1 timeout (124) → breaks immediately, 1 run, returns 124 (INV-48 veto)" \
+  "rc=124|runs=1" "$run07"
+
+# TC-CXRS-RUN-07b — the bug scenario directly: turn-1 124, then (had the loop
+# continued) a CLEAN run. The loop MUST NOT issue that clean re-run — a 124
+# terminates the loop. Stub: run 1 → 124, any subsequent run → 0. Correct behavior
+# is exactly ONE run (the 124), so the clean rc-0 path is never reached → no extra
+# `codex review` invocation that could self-post a duplicate verdict.
+run07b=$(
+  set -uo pipefail
+  source "$LIB"
+  sandbox=$(mktemp -d); ri=0; : > "$sandbox/runs"
+  _run_with_timeout() { ri=$((ri+1)); echo run >> "$sandbox/runs"; echo x; [[ $ri -eq 1 ]] && return 124 || return 0; }
+  _codex_now_seconds() { printf '%s\n' 0; }
+  CODEX_REVIEW_MAX_RERUNS=3 AGENT_REVIEW_TIMEOUT=1h AGENT_CMD=codex \
+    _run_codex_review p m "$sandbox/cap.txt"; rc=$?
+  runs=$(grep -c '^run$' "$sandbox/runs" 2>/dev/null) || runs=0
+  echo "rc=${rc}|runs=${runs}"
+  rm -rf "$sandbox"
+)
+assert_eq "TC-CXRS-RUN-07b timeout-then-(would-be-clean) → NO extra re-run; 1 run, rc 124 (no duplicate-verdict path)" \
+  "rc=124|runs=1" "$run07b"
+
+# TC-CXRS-RUN-07c — a 137 (--kill-after SIGKILL) timeout also breaks immediately.
+run07c=$(
+  set -uo pipefail
+  source "$LIB"
+  sandbox=$(mktemp -d); : > "$sandbox/runs"
+  _run_with_timeout() { echo run >> "$sandbox/runs"; echo x; return 137; }
+  _codex_now_seconds() { printf '%s\n' 0; }
+  CODEX_REVIEW_MAX_RERUNS=3 AGENT_REVIEW_TIMEOUT=1h AGENT_CMD=codex \
+    _run_codex_review p m "$sandbox/cap.txt"; rc=$?
+  runs=$(grep -c '^run$' "$sandbox/runs" 2>/dev/null) || runs=0
+  echo "rc=${rc}|runs=${runs}"
+  rm -rf "$sandbox"
+)
+assert_eq "TC-CXRS-RUN-07c turn-1 137 → breaks immediately, 1 run, returns 137 (INV-48 veto)" \
+  "rc=137|runs=1" "$run07c"
+
+# TC-CXRS-RUN-07d — a re-run that ITSELF times out still stops + returns the veto:
+# turn-1 rc 1 (stream error) → re-run 1 rc 124 → break (timeout), 2 runs, rc 124.
+# Confirms a timeout occurring DURING the re-run loop terminates it (not only a
+# turn-1 timeout) and feeds the veto.
+run07d=$(
+  set -uo pipefail
+  source "$LIB"
+  sandbox=$(mktemp -d); ri=0; : > "$sandbox/runs"
+  _run_with_timeout() { ri=$((ri+1)); echo run >> "$sandbox/runs"; echo x; [[ $ri -eq 1 ]] && return 1 || return 124; }
+  _codex_now_seconds() { printf '%s\n' 0; }
+  CODEX_REVIEW_MAX_RERUNS=3 AGENT_REVIEW_TIMEOUT=1h AGENT_CMD=codex \
+    _run_codex_review p m "$sandbox/cap.txt"; rc=$?
+  runs=$(grep -c '^run$' "$sandbox/runs" 2>/dev/null) || runs=0
+  echo "rc=${rc}|runs=${runs}"
+  rm -rf "$sandbox"
+)
+assert_eq "TC-CXRS-RUN-07d stream-error then re-run TIMES OUT → stops at the timeout, 2 runs, rc 124" \
+  "rc=124|runs=2" "$run07d"
 
 # TC-CXRS-RUN-08 — the capture file holds codex review's clean stdout
 run08=$(

@@ -91,7 +91,10 @@ exit is re-run, bounded by `CODEX_REVIEW_MAX_RERUNS` (default 3) + the
 | TC-CXRS-RUN-04 | `CODEX_REVIEW_MAX_RERUNS=0` | 1 run, 0 re-runs |
 | TC-CXRS-RUN-05 | non-numeric `CODEX_REVIEW_MAX_RERUNS` under `set -euo pipefail` | degrades to default, no `unbound variable` crash |
 | TC-CXRS-RUN-06 | wall-clock deadline already passed before a re-run | no further re-run (deadline guard) |
-| TC-CXRS-RUN-07 | a per-run timeout rc (124/137) is preserved on bound exhaustion | returns 124/137 (INV-48 veto, never reset to 0) |
+| TC-CXRS-RUN-07 | **#218 finding 4**: turn-1 timeout (124) | STOPS the loop immediately — 1 run, 0 re-runs, returns 124 (INV-48 veto) |
+| TC-CXRS-RUN-07b | turn-1 timeout then a would-be-clean re-run | NO extra re-run issued (1 run, rc 124) — no duplicate-verdict path |
+| TC-CXRS-RUN-07c | turn-1 timeout 137 (`--kill-after` SIGKILL) | breaks immediately — 1 run, returns 137 |
+| TC-CXRS-RUN-07d | stream-error then a re-run that ITSELF times out | stops at the timeout — 2 runs, rc 124 (mid-loop timeout veto) |
 
 ## Unit — dev-path byte-for-byte guard (`test-lib-review-codex.sh`)
 

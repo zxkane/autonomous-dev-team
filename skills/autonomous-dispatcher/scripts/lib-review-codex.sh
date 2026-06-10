@@ -271,14 +271,17 @@ _codex_review_cleanup_worktree() {
 # current cwd and logs a loud warning (degraded — the diff may be wrong/empty, but
 # the wrapper does not crash).
 #
-# Return code: the exit code of the LAST `codex review` invocation, EXCEPT a 124
-# (coreutils timeout TERM-expiry) or 137 (--kill-after SIGKILL) from ANY run is
-# STICKY — once a run was killed by the per-run wall-clock cap, that rc is
-# preserved even if a later re-run exits 0. This is load-bearing for the INV-48
+# Return code: the exit code of the LAST `codex review` invocation. A 124
+# (coreutils timeout TERM-expiry) or 137 (--kill-after SIGKILL) from ANY run STOPS
+# the re-run loop IMMEDIATELY and is returned — the loop is for transient stream
+# errors, not the per-run timeout cap, so a wall-clock-capped run never triggers a
+# re-run (#218 review finding 4; see the loop comment below). Because a timeout
+# terminates the loop, no later run can overwrite the veto rc, so the 124/137 is
+# returned without any further re-runs. This is load-bearing for the INV-48
 # timeout-veto: the wrapper's post-window sweep maps a no-verdict rc 124/137 to
 # `timed-out` (a deciding FAIL that VETOES the merge). The comment poller is the
-# authoritative verdict gate after this returns; on exhaustion with no verdict,
-# codex is resolved `unavailable` (or `timed-out` for a sticky 124/137).
+# authoritative verdict gate after this returns; on non-timeout exhaustion with no
+# verdict, codex is resolved `unavailable` (or `timed-out` for a 124/137 return).
 #
 # The CLEAN stdout (only codex review's output, NOT the wrapper's log noise) is
 # written to <stdout-file> so the wrapper's stdout→verdict fallback and the
@@ -336,22 +339,46 @@ _run_codex_review() {
     fi
   }
 
-  local final_rc=0 reruns=0 deadline budget now
+  # The loop tracks the LAST invocation's rc (`last_run_rc`) — that, NOT the return
+  # value, drives the continue/break decision: the loop re-runs ONLY while the most
+  # recent run failed with a NON-timeout error (a transient stream blip, #209) and
+  # stops the instant a run exits 0 OR was wall-clock-capped (124/137). `final_rc`
+  # mirrors `last_run_rc` and is the RETURN value — the rc of the run that
+  # TERMINATED the loop, which feeds the INV-48 veto when that run was a timeout.
+  #
+  # #218 review finding 4 — why the loop must key on `last_run_rc`, not the return
+  # value: an earlier draft made the return value sticky on 124/137 AND used it as
+  # the loop's success break (`[[ $final_rc -eq 0 ]]`). A turn-1 timeout (124, then
+  # held sticky) followed by a CLEAN re-run kept that value at 124, so the loop never
+  # broke and kept re-running to CODEX_REVIEW_MAX_RERUNS — each clean re-run a FRESH
+  # `codex review` that could self-post a verdict, breaking INV-62's "exactly one
+  # verdict" (duplicate comments); and AGENT_LAUNCH_RC stayed 124 so the rc-0 stdout
+  # fallback was also refused. Breaking the loop on the LAST run's rc fixes it: a
+  # timeout terminates the loop immediately, so no later run can ever overwrite the
+  # veto rc — the stickiness is now structural (loop exit), not a reconciliation step.
+  #
+  # A wall-clock-cap kill (124/137) STOPS the loop immediately: the re-run loop
+  # exists for TRANSIENT stream errors, not for the per-run timeout cap — re-running
+  # a capped run is pointless (the cap will refire) and risks the partial-review /
+  # duplicate-verdict hazard above. A timeout is a deciding veto (INV-48), not a
+  # blip, so it returns 124/137 with ZERO further re-runs.
+  local final_rc=0 last_run_rc=0 reruns=0 deadline budget now
   budget=$(_codex_review_deadline_seconds)
   now=$(_codex_now_seconds)
   deadline=$((now + budget))
 
-  _one_codex_review_run || final_rc=$?
+  _one_codex_review_run || last_run_rc=$?
+  final_rc="$last_run_rc"
 
   while true; do
-    # A clean exit (rc 0) → done; hand off to the wrapper's comment poller +
-    # the stdout fallback.
-    [[ "$final_rc" -eq 0 ]] && break
-    # Bound 1: re-run budget exhausted → fall back (poller resolves unavailable,
-    # or timed-out if the sticky rc is 124/137).
+    # Stop on a clean run (verdict produced — hand off to the poller + the stdout
+    # fallback) OR on a wall-clock-cap kill (a deciding INV-48 veto, not a blip).
+    [[ "$last_run_rc" -eq 0 ]] && break
+    [[ "$last_run_rc" -eq 124 || "$last_run_rc" -eq 137 ]] && break
+    # Bound 1: re-run budget exhausted → fall back (poller resolves unavailable).
     if (( reruns >= max )); then
       [[ "$max" -gt 0 ]] && \
-        echo "[lib-review-codex] codex review hit CODEX_REVIEW_MAX_RERUNS=${max} with a non-zero exit (rc ${final_rc}); falling back to the wrapper poller." >&2
+        echo "[lib-review-codex] codex review hit CODEX_REVIEW_MAX_RERUNS=${max} with a non-zero exit (rc ${last_run_rc}); falling back to the wrapper poller." >&2
       break
     fi
     # Bound 2: wall-clock deadline reached → fall back. Checked AFTER the
@@ -363,21 +390,10 @@ _run_codex_review() {
     fi
 
     reruns=$((reruns + 1))
-    echo "[lib-review-codex] codex review exited rc ${final_rc} (likely a transient stream error / turn.failed); re-running a fresh review (re-run ${reruns}/${max}) — INV-62/#209." >&2
-    local run_rc=0
-    _one_codex_review_run || run_rc=$?
-
-    # Sticky timeout rc: once ANY run was killed by the per-run wall-clock cap
-    # (124 = coreutils timeout TERM, 137 = --kill-after SIGKILL), preserve that rc
-    # even if a later re-run exits cleanly — the INV-48 veto must not be reset by a
-    # subsequent clean-but-still-no-verdict run. KEEP the existing rc only when:
-    # final_rc is already a sticky timeout AND this run is not a timeout.
-    local final_is_sticky_timeout=false run_is_timeout=false
-    [[ "$final_rc" -eq 124 || "$final_rc" -eq 137 ]] && final_is_sticky_timeout=true
-    [[ "$run_rc"  -eq 124 || "$run_rc"  -eq 137 ]] && run_is_timeout=true
-    if [[ "$run_is_timeout" == true || "$final_is_sticky_timeout" == false ]]; then
-      final_rc="$run_rc"
-    fi
+    echo "[lib-review-codex] codex review exited rc ${last_run_rc} (likely a transient stream error / turn.failed); re-running a fresh review (re-run ${reruns}/${max}) — INV-62/#209." >&2
+    last_run_rc=0
+    _one_codex_review_run || last_run_rc=$?
+    final_rc="$last_run_rc"
   done
 
   return "$final_rc"
