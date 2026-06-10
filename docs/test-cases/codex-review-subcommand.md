@@ -72,6 +72,8 @@ against a throwaway git repo with a diverging `pr-branch`.
 | TC-CXRS-WT-01 | `_codex_review_prepare_worktree pr-branch <dest>` then cleanup | rc 0; `<dest>` HEAD is the PR-branch tip (the PR change is present); cleanup removes it |
 | TC-CXRS-WT-02 | prepare with empty branch / empty dest / non-git-repo cwd | rc 1 (cannot scope → caller degrades) |
 | TC-CXRS-WT-03 | prepare for a non-existent branch (no ref resolves) | rc 1 |
+| TC-CXRS-WT-03b | **#218 stale-ref**: a clone whose `origin/<branch>` is STALE (no fetch refspec) while the remote advanced | prepare checks out the FRESH tip via `FETCH_HEAD`, NOT the stale `origin/<branch>` (proven to fail against the pre-fix `origin/<branch>`-first resolver) |
+| TC-CXRS-WT-03c | **#218 stale-ref**: `origin` present but the `git fetch` FAILS | HARD prepare failure (rc 1) — no fall-through to a stale local/`FETCH_HEAD` ref → caller fails closed |
 | TC-CXRS-WT-04 | cleanup on a missing / empty dest | rc 0 always (no `set -e` abort) |
 | TC-CXRS-WT-05 | `_run_codex_review` with a prepared worktree | runs `codex review` FROM the worktree; the wrapper's own cwd is unchanged (subshell `cd`) |
 | TC-CXRS-WT-06 | `_run_codex_review` with an EMPTY workdir | runs from cwd + logs a loud warning (degraded, never crashes) |

@@ -863,6 +863,71 @@ wt03=$(
 )
 assert_eq "TC-CXRS-WT-03 prepare fails rc1 for a non-existent branch" "rc=1" "$wt03"
 
+# --- #218 finding (stale-ref hazard): a clone with a REAL origin -------------
+# `git fetch origin <branch>` updates FETCH_HEAD reliably, but it updates the
+# remote-tracking ref `origin/<branch>` only when a fetch REFSPEC maps it. With the
+# refspec absent (a config the dispatcher box / certain CI checkouts can present),
+# `origin/<branch>` stays STALE while FETCH_HEAD is the fresh tip. The pre-fix
+# resolver preferred `origin/<branch>` over FETCH_HEAD, so it would check out the
+# STALE commit and let `codex review` vote on the wrong diff. Build a bare remote +
+# a clone, ADVANCE the remote, and REMOVE the fetch refspec so `origin/pr-branch`
+# cannot self-update on fetch — exactly the stale condition.
+WT_BARE=$(mktemp -d); WT_CLONE=$(mktemp -d)
+(
+  src=$(mktemp -d)
+  cd "$src"; git init -q -b main; git config user.email t@t; git config user.name t
+  echo base > f.txt; git add f.txt; git commit -qm base
+  git checkout -q -b pr-branch; echo v1 >> f.txt; git add f.txt; git commit -qm pr-v1
+  git checkout -q main
+  git clone -q --bare "$src" "$WT_BARE" >/dev/null 2>&1
+  # Clone the bare remote → origin/pr-branch == pr-v1.
+  git clone -q "$WT_BARE" "$WT_CLONE" >/dev/null 2>&1
+  ( cd "$WT_CLONE" && git fetch -q origin pr-branch:refs/remotes/origin/pr-branch 2>/dev/null || true )
+  # ADVANCE the remote's pr-branch to pr-v2.
+  cd "$src"; git checkout -q pr-branch; echo v2 >> f.txt; git add f.txt; git commit -qm pr-v2
+  git push -q "$WT_BARE" pr-branch >/dev/null 2>&1
+  # REMOVE the fetch refspec so a subsequent `git fetch origin pr-branch` updates
+  # FETCH_HEAD but leaves origin/pr-branch STALE at pr-v1.
+  ( cd "$WT_CLONE" && git config --unset-all remote.origin.fetch 2>/dev/null || true )
+  rm -rf "$src"
+) >/dev/null 2>&1
+# Fresh tip = "pr-v2"; the now-unupdatable origin/pr-branch stays "pr-v1".
+
+# TC-CXRS-WT-03b — STALE-REF REGRESSION: with origin/pr-branch pinned stale at pr-v1
+# (no refspec) and the remote advanced to pr-v2, prepare MUST check out the FRESH
+# tip (pr-v2, via FETCH_HEAD), NOT the stale origin/pr-branch (pr-v1). Pre-fix this
+# checked out pr-v1 (it preferred origin/pr-branch) → a vote on the wrong diff.
+wt03b=$(
+  set -uo pipefail
+  source "$LIB"
+  cd "$WT_CLONE"
+  stale_subj=$(git log -1 --format=%s origin/pr-branch 2>/dev/null || echo NONE)
+  dest="$WT_CLONE/wt-03b"
+  _codex_review_prepare_worktree "pr-branch" "$dest"; rc=$?
+  checked_subj=$(git -C "$dest" log -1 --format=%s 2>/dev/null || echo NONE)
+  # Confirm origin/pr-branch STAYED stale at pr-v1 (the fetch did not self-update it).
+  after_subj=$(git log -1 --format=%s origin/pr-branch 2>/dev/null || echo NONE)
+  _codex_review_cleanup_worktree "$dest"
+  echo "rc=${rc}|stale=${stale_subj}|after=${after_subj}|checked=${checked_subj}"
+)
+assert_eq "TC-CXRS-WT-03b prepare checks out the FRESH tip (pr-v2 via FETCH_HEAD), not the stale origin/pr-branch (pr-v1)" \
+  "rc=0|stale=pr-v1|after=pr-v1|checked=pr-v2" "$wt03b"
+
+# TC-CXRS-WT-03c — a FETCH FAILURE with a real origin is a HARD prepare failure
+# (rc 1), NOT a fall-through to a possibly-stale local/FETCH_HEAD ref. Simulate by
+# pointing origin at a non-existent path so the fetch cannot succeed; even though
+# the clone has a (stale) origin/pr-branch + a local FETCH_HEAD, prepare must FAIL.
+wt03c=$(
+  set -uo pipefail
+  source "$LIB"
+  cd "$WT_CLONE"
+  git remote set-url origin /nonexistent/bare-$$.git 2>/dev/null
+  _codex_review_prepare_worktree "pr-branch" "$WT_CLONE/wt-03c"; echo "rc=$?"
+)
+assert_eq "TC-CXRS-WT-03c origin present but fetch FAILS → hard prepare failure rc1 (no stale fall-through)" \
+  "rc=1" "$wt03c"
+rm -rf "$WT_BARE" "$WT_CLONE"
+
 # TC-CXRS-WT-04 — cleanup is rc-0-always (no crash) on a missing / empty dest.
 wt04=$(
   set -euo pipefail

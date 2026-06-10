@@ -217,28 +217,54 @@ _codex_review_argv() {
 # worktree and run `codex review` from THERE, so its auto-scope resolves to the
 # PR's real diff (origin/main…<pr_branch>).
 #
-# Fetches the PR branch from origin (so a freshly-synced PROJECT_DIR that doesn't
-# yet have the ref can still add the worktree), then `git worktree add --detach`
-# at the fetched commit. rc 0 on success (the dest_dir is a usable PR-branch
-# checkout); rc 1 on any failure (no pr_branch, not a git repo, fetch/add failed)
-# — the caller then degrades to running from cwd with a loud log, never crashing.
+# Checks the PR branch out into a throwaway worktree at the AUTHORITATIVE current
+# tip, then `git worktree add --detach` at exactly that commit. rc 0 on success (the
+# dest_dir is a usable PR-branch checkout AT THE RIGHT COMMIT); rc 1 on any failure
+# (no pr_branch, not a git repo, fetch failed when a remote exists, no resolvable
+# ref, add failed) — the caller then FAILS CLOSED (no vote), never crashing.
 # `--detach` (not a branch checkout) avoids "branch already checked out" collisions
 # with the dev worktree / a sibling codex agent.
+#
+# #218 review finding (stale-ref hazard): `git fetch origin <branch>` updates
+# FETCH_HEAD but does NOT necessarily update the remote-tracking ref
+# `origin/<branch>` (that requires a configured refspec / a bare `git fetch origin`).
+# An earlier draft preferred `origin/<branch>` over FETCH_HEAD and fell through to a
+# (possibly leftover) FETCH_HEAD even when the fetch FAILED — so it could check out
+# a STALE tip and let `codex review` vote on the wrong diff, defeating the
+# fail-closed PR-scoping invariant. The fix:
+#   - When the repo HAS an `origin` remote (the production path): the fetch is
+#     MANDATORY — a fetch FAILURE is a HARD prepare failure (return 1, → fail closed),
+#     never a fall-through to a stale ref. On success, check out exactly the
+#     just-fetched commit via FETCH_HEAD (authoritative for "the tip I fetched
+#     NOW") — NOT `origin/<branch>`, which the targeted fetch may have left stale.
+#   - When there is NO `origin` (a local-only repo, e.g. the unit-test fixture):
+#     resolve the branch from a LOCAL ref (no remote to be stale against).
 _codex_review_prepare_worktree() {
   local pr_branch="${1:-}" dest_dir="${2:-}"
   [[ -n "$pr_branch" && -n "$dest_dir" ]] || return 1
   git rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 1
-  # Fetch the PR branch tip into FETCH_HEAD (best-effort: it may already be local).
-  git fetch --quiet origin "$pr_branch" 2>/dev/null || true
-  # Resolve the commit to check out: prefer the just-fetched origin tip, then a
-  # local ref, then FETCH_HEAD. If none resolves we cannot scope to the PR — fail.
-  local _ref
-  for _ref in "origin/${pr_branch}" "refs/remotes/origin/${pr_branch}" "$pr_branch" FETCH_HEAD; do
-    if git rev-parse --verify --quiet "${_ref}^{commit}" >/dev/null 2>&1; then
-      git worktree add --detach --quiet "$dest_dir" "$_ref" 2>/dev/null && return 0
-    fi
-  done
-  return 1
+
+  local _commit=""
+  if git remote get-url origin >/dev/null 2>&1; then
+    # Production path: a remote exists, so the PR tip lives on origin. The fetch is
+    # MANDATORY — a failure means we cannot trust ANY local ref to be the current
+    # PR tip, so fail closed (do NOT fall through to a possibly-stale ref). On
+    # success, FETCH_HEAD is exactly the commit we just fetched for THIS branch.
+    git fetch --quiet origin "$pr_branch" 2>/dev/null || return 1
+    _commit=$(git rev-parse --verify --quiet 'FETCH_HEAD^{commit}' 2>/dev/null) || return 1
+  else
+    # No remote (local-only repo / test fixture): resolve a LOCAL ref. There is no
+    # remote-tracking ref to be stale against, so a local/branch ref is authoritative.
+    local _ref
+    for _ref in "refs/heads/${pr_branch}" "$pr_branch"; do
+      _commit=$(git rev-parse --verify --quiet "${_ref}^{commit}" 2>/dev/null) && break
+      _commit=""
+    done
+  fi
+  [[ -n "$_commit" ]] || return 1
+  # `--detach` at exactly the resolved commit (not a branch ref) — avoids "branch
+  # already checked out" collisions with the dev worktree / a sibling codex agent.
+  git worktree add --detach --quiet "$dest_dir" "$_commit" 2>/dev/null || return 1
 }
 
 # _codex_review_cleanup_worktree <dest_dir> — remove a worktree created by
