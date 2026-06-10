@@ -1538,17 +1538,27 @@ Sub-rules:
 1. **Gather-only detection is from the JSONL stream, not GitHub.**
    `_codex_log_has_verdict_message <log>` scans codex's own `--json` event log
    (the same per-agent log the invocation writes) and returns true iff the LAST
-   **completed** turn (segment ending at the final `turn.completed`) contains an
-   `item.completed` `agent_message` **whose text carries a VERDICT TRAILER**
+   **completed** turn (segment ending at the final `turn.completed`) **posted the
+   verdict** by EITHER signal: **(A)** an `item.completed` `agent_message` **whose
+   text carries a VERDICT TRAILER**
    ([INV-53](#inv-53-codex-review-convergence-keys-on-the-verdict-trailer-not-any-agent_message); amended here from the original
-   #189 "any `agent_message`" rule). A turn whose items are all
-   `tool_call`/`reasoning`/`command_execution` (a `git diff` + file reads turn) is
-   gather-only → the resume trigger; **and so is a turn whose only `agent_message`s
-   are PROGRESS NARRATION** (no verdict trailer) — the #198 correction. An
-   `agent_message` with no trailing `turn.completed` (turn still in flight /
-   killed) does NOT count. Empty/missing log → no verdict (rc 1, never crashes).
-   Awk-based (jq is not a hard dep — mirrors `_codex_capture_thread`). See
-   [INV-53](#inv-53-codex-review-convergence-keys-on-the-verdict-trailer-not-any-agent_message) for the verdict-trailer phrasing set and the resume-carries-session finding.
+   #189 "any `agent_message`" rule), **OR (B)** an `item.completed`
+   `command_execution` **whose command runs the [INV-56](#inv-56-review-verdict-is-posted-via-the-deterministic-post-verdict-helper-not-the-agents-bare-gh)
+   helper `post-verdict.sh` with a `pass`/`fail` verdict argument** (the #214
+   amendment — since INV-56 the verdict is POSTED by running `post-verdict.sh`, so
+   the verdict signal lands in a `command_execution`, not an `agent_message`; signal
+   (A) alone missed it and the loop fired a redundant resume → codex double-posted
+   the verdict). A turn whose items are all `tool_call`/`reasoning`/**non-verdict**
+   `command_execution` (a `git diff` + file reads turn) is gather-only → the resume
+   trigger; **and so is a turn whose only `agent_message`s are PROGRESS NARRATION**
+   (no verdict trailer) — the #198 correction. Both signals are item-scoped on the
+   same physical line (a `post-verdict.sh` string in a separate `aggregated_output`,
+   or a narration `agent_message` that merely MENTIONS the helper, does NOT count —
+   it fails the `command_execution` item-scope conjunct). An `agent_message`/command
+   with no trailing `turn.completed` (turn still in flight / killed) does NOT count.
+   Empty/missing log → no verdict (rc 1, never crashes). Awk-based (jq is not a hard
+   dep — mirrors `_codex_capture_thread`). See
+   [INV-53](#inv-53-codex-review-convergence-keys-on-the-verdict-trailer-not-any-agent_message) for the verdict-trailer phrasing set, the `post-verdict.sh` signal, and the resume-carries-session finding.
 2. **The loop NEVER queries the GitHub comments API.** That is the wrapper's
    verdict poller's job ([INV-20](#inv-20-verdict-authenticity-binding-actor--window--trailer-presence)/[INV-40](#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback)),
    which stays the **authoritative** verdict gate AFTER the controller returns.
@@ -1714,32 +1724,72 @@ Sub-rules:
 
 **Rule**: the [INV-51](#inv-51-codex-review-thread-auto-resumes-until-a-verdict-posting-turn)
 convergence detector `lib-review-codex.sh::_codex_log_has_verdict_message` MUST
-treat codex's last completed turn as **converged only when it posted the VERDICT**
-— i.e. when an `item.completed` `agent_message` in that turn carries a **verdict
-trailer**: one of the pass/fail phrasings the wrapper poller itself matches
-(`lib-review-poll.sh::_classify_verdict_body`) **or** the `Review Agent: codex`
-attribution discriminator the resume prompt forces codex to emit. A turn whose
-`agent_message`s are pure **progress narration** ("Next I'm reading the
-instructions…", "I'll verify the PR…") is **gather-only** → the loop RESUMES
+treat codex's last completed turn as **converged only when it posted the VERDICT**,
+by EITHER of two item-scoped signals in that turn:
+
+- **(A) a verdict-trailer `agent_message`** — an `item.completed` `agent_message`
+  whose text carries a **verdict trailer**: one of the pass/fail phrasings the
+  wrapper poller itself matches (`lib-review-poll.sh::_classify_verdict_body`) **or**
+  the `Review Agent: codex` attribution discriminator; OR
+- **(B) a `post-verdict.sh` `command_execution`** (the #214 amendment) — an
+  `item.completed` `command_execution` whose **command** runs the
+  [INV-56](#inv-56-review-verdict-is-posted-via-the-deterministic-post-verdict-helper-not-the-agents-bare-gh)
+  helper `post-verdict.sh` with a `pass`/`fail` verdict argument.
+
+A turn whose `agent_message`s are pure **progress narration** ("Next I'm reading the
+instructions…", "I'll verify the PR…") AND whose `command_execution`s are all
+non-verdict (no `post-verdict.sh pass|fail`) is **gather-only** → the loop RESUMES
 (bounded by `CODEX_REVIEW_MAX_RESUMES` + the wall-clock deadline, unchanged).
 
-Recognised verdict-trailer phrases (case-insensitive substring, kept in sync with
-the poller so the two ALWAYS agree): pass-side `Review PASSED` / `Review APPROVED`
-/ `APPROVED FOR MERGE` / `LGTM` / `Review PASS`; fail-side `Review FAILED` /
-`Review REJECTED` / `Review findings:` / `Changes requested`; plus
+Recognised verdict-trailer phrases for signal (A) (case-insensitive substring, kept
+in sync with the poller so the two ALWAYS agree): pass-side `Review PASSED` /
+`Review APPROVED` / `APPROVED FOR MERGE` / `LGTM` / `Review PASS`; fail-side
+`Review FAILED` / `Review REJECTED` / `Review findings:` / `Changes requested`; plus
 `Review Agent: codex`.
+
+**#214 amendment — why signal (B) was added.** [INV-56](#inv-56-review-verdict-is-posted-via-the-deterministic-post-verdict-helper-not-the-agents-bare-gh)
+moved verdict posting from a hand-rolled `gh issue comment` into running
+`bash scripts/post-verdict.sh … pass|fail …`. On the common turn-1 path codex
+reaches a verdict and posts it via the helper, so the verdict phrasing appears in
+the JSONL log as a `command_execution` (the argv / the helper's stdout comment
+URL), **NOT** as an `agent_message`. Signal (A) alone never saw it → the detector
+judged the turn "not converged" → the resume loop fired a resume → codex posted the
+verdict a **second** time (the duplicate carrying a doubled trailer: a hand-written
+block from the stale resume prompt stacked on the helper's own). Adding signal (B)
+makes the detector agree with the comment poller for helper-posted verdicts, the
+mirror of what the original INV-53 did for `agent_message`-posted verdicts. The
+verdict outcome was always benign (the poller reads one PASS; the INV-40 vote is not
+double-counted; `no-auto-close` still gates merge) — the defect was the wasted
+resume and the operator-confusing doubled-trailer comment. This is **not a new
+invariant**; it closes the gap INV-56 opened in the INV-53 detector.
 
 Sub-rules:
 
-1. **The trailer must be inside an `agent_message` item, on the same JSONL line.**
-   The match conjoins (a) `item.completed`, (b) item-scoped `agent_message`
+1. **Each signal is item-scoped, on the same JSONL line.** Signal (A)'s match
+   conjoins (a) `item.completed`, (b) item-scoped `agent_message`
    (`"item":{…,"type":"agent_message"…}`), and (c) a verdict-trailer phrase — all
    on one physical line (codex emits one event per line; newlines inside the text
    are escaped as `\n`). So a verdict PHRASE appearing in a separate
    `command_execution` `aggregated_output` line within the same turn (codex catting
    `SKILL.md` / the review prompt, both of which contain the literal phrasings)
-   does NOT count — it fails conjunct (b). This subsumes the #189 review-finding-2
-   substring guard and extends it to the text match.
+   does NOT count — it fails conjunct (b). Signal (B)'s match conjoins (a)
+   `item.completed`, (b') item-scoped `command_execution`
+   (`"item":{…,"type":"command_execution"…}`), and (c') a `post-verdict.sh …
+   pass|fail` invocation matched against the **`command`** field, with the verdict
+   `pass`/`fail` token anchored to its ARGUMENT POSITION (`post-verdict.sh` →
+   issue-number positional → `pass`/`fail`, the token bounded by a trailing
+   non-alphanumeric or end-of-string, since POSIX awk has no `\<`/`\>`). The
+   `command` field value is isolated **escape-awarely** — its closing `"` is the
+   first UNESCAPED quote, so an escaped `\"` *inside* the command (a chained
+   `printf '%s' \"text\" > f && bash scripts/post-verdict.sh …` prelude) does NOT
+   truncate it before the helper invocation (#217 codex review finding — a naive
+   truncate-at-first-`"` re-introduced the false-negative-then-duplicate bug). So a
+   `post-verdict.sh pass` string sitting only in an `aggregated_output` (codex
+   catting the prompt) fails (c'); a narration `agent_message` that merely MENTIONS
+   the helper fails (b'); and a `pass`/`fail`-named body-file PATH segment (after the
+   verdict positional) fails (c') (fail-safe toward resuming). This subsumes the
+   #189 review-finding-2 substring guard and extends it to both the text match (A)
+   and the command match (B).
 2. **Plain substrings, no word boundaries.** The phrases are matched as plain
    case-insensitive substrings — IDENTICAL to the poller's `grep -qiE` — so the
    detector and the authoritative comment poller never disagree, AND the awk stays
@@ -1769,6 +1819,22 @@ Sub-rules:
    lane reviewing the very PR that added INV-53. Softening the prompt removes that
    strand-on-compaction failure mode without re-opening the gather-the-whole-turn
    problem INV-51 solved.
+6. **The resume prompt routes the verdict through `post-verdict.sh`, not a
+   hand-written trailer (#214).** `_codex_resume_prompt` instructs codex to post the
+   verdict **only** via `bash scripts/post-verdict.sh` (the
+   [INV-56](#inv-56-review-verdict-is-posted-via-the-deterministic-post-verdict-helper-not-the-agents-bare-gh)
+   helper) and **must NOT** tell codex to hand-write the
+   `Review Agent:` / `Review Session:` trailer — the helper composes that trailer
+   itself from the arguments codex passes. The pre-#214 prompt (a pre-INV-56
+   relic) told codex the verdict comment "MUST include these two lines verbatim",
+   so whenever a resume turn legitimately posted, the hand-written block stacked on
+   the helper's own trailer → a DOUBLED trailer. The session uuid is still supplied
+   in the prompt — codex passes it as the helper's session-id argument — and the
+   pass/fail body phrasing (`Review PASSED` / `Review findings:`) is kept so codex
+   produces a classifiable body. This aligns the resume prompt with the main review
+   prompt (`autonomous-review.sh::build_review_prompt`, which already routes all
+   verdict posts through the helper). The signal-(B) detector amendment (sub-rule 1)
+   and this prompt change are the two halves of the #214 fix.
 
 **Investigation finding (recorded so it is not re-litigated)**: #198 hypothesised
 that `codex exec resume <tid>` is a **no-op on the amazon-bedrock provider** (each
@@ -1801,20 +1867,42 @@ navigation, diverges the codex prompt shape; and now moot because resume DOES ca
 session); use the GitHub comment poller as the in-loop break signal (wrong layer —
 adds per-turn GitHub latency and violates [INV-51](#inv-51-codex-review-thread-auto-resumes-until-a-verdict-posting-turn) sub-rule 2; the JSONL trailer is a cheap local proxy and the poller remains the authoritative post-loop gate).
 
-**Producer**: `lib-review-codex.sh::_codex_log_has_verdict_message` (the verdict-trailer match, sub-rules 1–4) and `_codex_resume_prompt` (the context-compaction-safe prompt, sub-rule 5). The controller, deadline parser, and rc-stickiness are unchanged from [INV-51](#inv-51-codex-review-thread-auto-resumes-until-a-verdict-posting-turn).
+**Producer**: `lib-review-codex.sh::_codex_log_has_verdict_message` (signal (A) the
+verdict-trailer match + signal (B) the `post-verdict.sh` command match, sub-rules
+1–4) and `_codex_resume_prompt` (the context-compaction-safe prompt, sub-rule 5; the
+`post-verdict.sh` routing + no-hand-written-trailer, sub-rule 6). The controller,
+deadline parser, and rc-stickiness are unchanged from [INV-51](#inv-51-codex-review-thread-auto-resumes-until-a-verdict-posting-turn).
 
 **Consumer**: the [INV-51](#inv-51-codex-review-thread-auto-resumes-until-a-verdict-posting-turn) resume controller (the break condition), and downstream the wrapper's authoritative comment poller ([INV-40](#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback)) — unchanged.
 
-**Status**: **ENFORCED** in this PR (closes #198).
+**Status**: **ENFORCED** (closes #198). **Amended (#214)**: the convergence signal
+now ALSO recognizes a verdict posted via the [INV-56](#inv-56-review-verdict-is-posted-via-the-deterministic-post-verdict-helper-not-the-agents-bare-gh)
+helper `post-verdict.sh` (a `command_execution`), not only a verdict-trailer
+`agent_message` (signal (B), sub-rules 1 + the amendment box above); and
+`_codex_resume_prompt` no longer instructs codex to hand-write the trailer
+(sub-rule 6). This closes the gap INV-56 opened — since INV-56 the verdict signal
+moved from `agent_message` into `command_execution` and the detector had not
+followed it, so codex fired a redundant resume and double-posted the verdict.
 
 **Test**: `tests/unit/test-lib-review-codex.sh` — TC-CXR-DET-09..14
 (narration-only → rc 1 / resumes, incl. the committed `fixtures/codex-gather-only-turn.jsonl`;
 pass/fail/discriminator trailers → rc 0; last-turn-decides for the trailer; a
-verdict phrase in a tool output is not a false verdict) and TC-CXR-RP-01..05
-(sub-rule 5: the resume prompt drops the absolute "do NOT re-read" bar, allows
-minimal re-reading on context compaction, prefers already-loaded context, instructs
-codex to never refuse a verdict for missing context, and keeps the INV-40/INV-20
-attribution trailers). Investigation artifact:
+verdict phrase in a tool output is not a false verdict), TC-CXR-DET-15..21 (#214
+signal (B): a `post-verdict.sh pass|fail` command → rc 0 / converged, incl. the
+committed `fixtures/codex-post-verdict-turn.jsonl` and the escaped-quote-prelude
+`fixtures/codex-post-verdict-escaped-quote-turn.jsonl` (#217 review finding: the
+command-field isolation is escape-aware, DET-21/21b); a narration `agent_message`
+mentioning the helper, a non-verdict command, a `post-verdict.sh` substring in a
+tool OUTPUT, and a `pass`/`fail`-named body-file path with no verdict positional all
+→ rc 1 / no over-claim, DET-17..20), TC-CXR-CTL-13..14 (controller: a turn-1
+helper-posted verdict converges with ZERO resumes — the dup-prevention assertion —
+and gather-then-helper-verdict fires exactly one resume), TC-CXR-RP-01..05 (sub-rule
+5: the resume prompt drops the absolute "do NOT re-read" bar, allows minimal
+re-reading on context compaction, prefers already-loaded context, instructs codex to
+never refuse a verdict for missing context, keeps the session uuid) and TC-CXR-RP-06..08
+(sub-rule 6: routes the verdict through `post-verdict.sh`, drops the hand-written
+`Review Agent:` / `Review Session:` trailer directive, keeps the pass/fail body
+phrasing). Investigation artifact:
 `tests/unit/fixtures/codex-resume-carry-session-repro.txt`. Test plan:
 `docs/test-cases/codex-review-resume-loop.md`.
 
@@ -1822,8 +1910,10 @@ attribution trailers). Investigation artifact:
 - [INV-51](#inv-51-codex-review-thread-auto-resumes-until-a-verdict-posting-turn) — the resume loop this corrects the convergence signal of (and which this confirms is sound).
 - [INV-40](#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback) — the authoritative comment poller / `unavailable` fallback whose phrasings this match mirrors.
 - [INV-48](#inv-48-per-side-review-wall-clock-timeout-agent_review_timeout-1h-default-with-browser-e2e-exclusion-and-timeout-veto) — the timeout rc-stickiness preserved unchanged.
-- [`review-agent-flow.md` § Codex auto-resume (INV-51)](review-agent-flow.md#codex-auto-resume-inv-51) — runtime walkthrough (updated for the verdict-trailer signal).
+- [INV-56](#inv-56-review-verdict-is-posted-via-the-deterministic-post-verdict-helper-not-the-agents-bare-gh) — the deterministic verdict helper whose `command_execution` signal the #214 amendment teaches this detector to recognize.
+- [`review-agent-flow.md` § Codex auto-resume (INV-51)](review-agent-flow.md#codex-auto-resume-inv-51) — runtime walkthrough (updated for the verdict-trailer + `post-verdict.sh` signals).
 - [`docs/designs/codex-convergence-verdict-detection.md`](../designs/codex-convergence-verdict-detection.md) — design canvas.
+- [`docs/designs/codex-verdict-converge-helper-posted.md`](../designs/codex-verdict-converge-helper-posted.md) — the #214 design canvas.
 
 ## INV-54: the PR-still-open guard gates ALL PASS-chain exits, not just PASS
 

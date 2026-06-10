@@ -131,6 +131,70 @@ AGENT_TRAILER_TURN='{"type":"turn.started"}
 {"type":"item.completed","item":{"id":"a0","type":"agent_message","text":"Review PASS - looks good.\nReview Session: `sid`\nReview Agent: codex"}}
 {"type":"turn.completed","usage":{"input_tokens":3000,"output_tokens":120}}'
 
+# #214 — a turn whose verdict is posted by RUNNING the INV-56 helper
+# `bash scripts/post-verdict.sh <issue> pass …` (a command_execution), with NO
+# verdict-trailer agent_message. Since INV-56 the verdict lands in a
+# command_execution, not an agent_message — the detector must converge on it
+# (else the resume loop fires a redundant resume → double-posted verdict).
+POST_VERDICT_PASS_TURN='{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"p0","type":"reasoning","text":"diff reviewed; posting verdict via helper"}}
+{"type":"item.completed","item":{"id":"p1","type":"command_execution","command":"bash scripts/post-verdict.sh 212 pass /tmp/verdict-codex.md codex 8cc4c347-aaaa-bbbb-cccc-444444444444 '\''openai.gpt-5.5'\''","aggregated_output":"https://github.com/OWNER/REPO/issues/212#issuecomment-REDACTED"}}
+{"type":"turn.completed","usage":{"input_tokens":54210,"cached_input_tokens":48000,"output_tokens":210}}'
+
+# #214 — the same but a FAILING verdict via the helper (`… fail …`). A failing
+# verdict posted through the helper is still a verdict; the loop must converge.
+POST_VERDICT_FAIL_TURN='{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"pf0","type":"command_execution","command":"bash scripts/post-verdict.sh 212 fail /tmp/verdict-codex.md codex 8cc4c347-aaaa-bbbb-cccc-444444444444 '\''openai.gpt-5.5'\''","aggregated_output":"https://github.com/OWNER/REPO/issues/212#issuecomment-REDACTED"}}
+{"type":"turn.completed","usage":{"input_tokens":2000,"output_tokens":300}}'
+
+# #214 — a NARRATION turn that merely MENTIONS post-verdict.sh in an agent_message
+# (no command_execution invoking it, no verdict trailer). Must NOT converge — the
+# helper signal must be inside a command_execution item, not narration text
+# (mirrors the DET-08/14 item-scope guard for the command path).
+POST_VERDICT_NARRATION_TURN='{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"pn0","type":"agent_message","text":"Next I will run bash scripts/post-verdict.sh 212 pass to post the verdict."}}
+{"type":"turn.completed","usage":{"input_tokens":40000,"output_tokens":80}}'
+
+# #214 — a gather-only turn whose ONLY command_execution is a non-verdict command
+# (gh pr view). Must NOT converge (no over-claim; the INV-53 narration guard holds).
+NON_VERDICT_CMD_TURN='{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"nc0","type":"command_execution","command":"gh pr view 212 --repo OWNER/REPO --json mergeable -q .mergeable","aggregated_output":"MERGEABLE"}}
+{"type":"turn.completed","usage":{"input_tokens":5000,"output_tokens":10}}'
+
+# #214 — a command_execution whose OUTPUT (aggregated_output) merely contains the
+# literal substring "post-verdict.sh pass" (e.g. codex catting the prompt/SKILL.md
+# that documents the helper) but whose `command` is NOT a post-verdict invocation.
+# Must NOT converge — the match keys on the command shape, not any substring.
+POST_VERDICT_IN_OUTPUT_TURN='{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"po0","type":"command_execution","command":"cat skills/autonomous-dev/SKILL.md","aggregated_output":"... post the verdict via: bash scripts/post-verdict.sh <issue> pass <file> ..."}}
+{"type":"turn.completed","usage":{"input_tokens":6000,"output_tokens":5}}'
+
+# #214 — a REAL post-verdict.sh invocation whose body-file PATH contains a `pass`/
+# `fail` PATH SEGMENT but with NO verdict positional arg (a malformed/aborted
+# invocation the agent could construct if it deviated from the suggested
+# /tmp/verdict-<agent>.md path). Must NOT converge — the verdict token is anchored
+# to its argument POSITION (after the issue-number positional), so a pass/fail
+# path segment appearing only in the body-file slot does not false-converge. This
+# is the fail-safe-toward-resuming guard (a `[^a-z0-9](pass|fail)[^a-z0-9]`
+# any-occurrence match would wrongly converge here and strand codex unavailable).
+POST_VERDICT_PASS_IN_PATH_TURN='{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"pp0","type":"command_execution","command":"bash scripts/post-verdict.sh 212 /tmp/pass-notes.md codex sid","aggregated_output":""}}
+{"type":"turn.completed","usage":{"input_tokens":3000,"output_tokens":5}}'
+
+# #214 (#217 review finding) — a REAL post-verdict.sh invocation whose `command`
+# field contains an ESCAPED quote (`\"`) BEFORE the helper call, e.g. a chained
+# `printf '%s' \"text\" > file && bash scripts/post-verdict.sh 214 pass …`. JSON
+# escapes embedded quotes as `\"`; a naive truncate-at-first-`"` would cut the
+# command string at the escaped quote and DROP the helper invocation → the detector
+# false-NEGATIVES and the resume loop fires a DUPLICATE verdict (the very bug #214
+# fixes). The escape-aware command-field isolation must still see the helper call →
+# converge (rc 0). Note: the JSONL fragment uses \\\" so that after the shell
+# single-quote string and the awk read, the physical line carries a literal `\"`
+# (a backslash followed by a quote) inside the JSON command value, matching codex.
+POST_VERDICT_ESCAPED_QUOTE_TURN='{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"eq0","type":"command_execution","command":"printf '\''%s'\'' \\"All checklist items verified\\" > /tmp/verdict-codex.md && bash scripts/post-verdict.sh 214 pass /tmp/verdict-codex.md codex sid","aggregated_output":"https://github.com/OWNER/REPO/issues/214#issuecomment-X"}}
+{"type":"turn.completed","usage":{"input_tokens":1000,"output_tokens":50}}'
+
 # ---------------------------------------------------------------------------
 echo "=== TC-CXR-DET: _codex_log_has_verdict_message ==="
 # ---------------------------------------------------------------------------
@@ -235,6 +299,68 @@ _codex_log_has_verdict_message "$TMPLOG"; assert_eq "TC-CXR-DET-13 verdict then 
   echo '{"type":"turn.completed","usage":{"input_tokens":5000}}'; } > "$TMPLOG"
 _codex_log_has_verdict_message "$TMPLOG"; assert_eq "TC-CXR-DET-14 verdict phrase in tool output not a false verdict → rc 1" 1 "$?"
 
+# TC-CXR-DET-15 — #214 CORE FIX: the last completed turn posts the verdict by
+# RUNNING `bash scripts/post-verdict.sh <issue> pass …` (a command_execution),
+# with NO verdict-trailer agent_message. Since INV-56 the verdict lands in a
+# command_execution, not an agent_message; the detector MUST converge (rc 0).
+# Pre-fix this returned rc 1 → the loop fired a redundant resume → codex
+# double-posted the verdict with a doubled trailer.
+{ echo '{"type":"thread.started","thread_id":"aaaa"}'; echo "$POST_VERDICT_PASS_TURN"; } > "$TMPLOG"
+_codex_log_has_verdict_message "$TMPLOG"; assert_eq "TC-CXR-DET-15 post-verdict.sh pass command → rc 0 (converged)" 0 "$?"
+
+# TC-CXR-DET-15b — the same shape from the committed fixture.
+_codex_log_has_verdict_message "$FIXTURES/codex-post-verdict-turn.jsonl"
+assert_eq "TC-CXR-DET-15b committed post-verdict fixture → rc 0 (converged)" 0 "$?"
+
+# TC-CXR-DET-16 — a `post-verdict.sh … fail …` command_execution (a failing
+# verdict via the helper) → converged (rc 0). A FAIL posted through the helper is
+# still a verdict; do not resume.
+{ echo '{"type":"thread.started","thread_id":"aaaa"}'; echo "$POST_VERDICT_FAIL_TURN"; } > "$TMPLOG"
+_codex_log_has_verdict_message "$TMPLOG"; assert_eq "TC-CXR-DET-16 post-verdict.sh fail command → rc 0 (converged)" 0 "$?"
+
+# TC-CXR-DET-17 — a narration agent_message that merely MENTIONS post-verdict.sh
+# ("Next I will run bash scripts/post-verdict.sh 212 pass …") with NO
+# command_execution invoking it and NO verdict trailer → NOT converged (rc 1).
+# The helper signal must be inside a command_execution item, not narration text.
+{ echo '{"type":"thread.started","thread_id":"aaaa"}'; echo "$POST_VERDICT_NARRATION_TURN"; } > "$TMPLOG"
+_codex_log_has_verdict_message "$TMPLOG"; assert_eq "TC-CXR-DET-17 post-verdict.sh mentioned in narration (not run) → rc 1" 1 "$?"
+
+# TC-CXR-DET-18 — a gather-only turn whose only command_execution is a non-verdict
+# command (`gh pr view … mergeable`) → NOT converged (rc 1). A non-post-verdict
+# command must never converge — the INV-53 narration/no-over-claim guard preserved.
+{ echo '{"type":"thread.started","thread_id":"aaaa"}'; echo "$NON_VERDICT_CMD_TURN"; } > "$TMPLOG"
+_codex_log_has_verdict_message "$TMPLOG"; assert_eq "TC-CXR-DET-18 non-verdict command_execution → rc 1 (no over-claim)" 1 "$?"
+
+# TC-CXR-DET-19 — a command_execution whose OUTPUT (aggregated_output) merely
+# contains the literal substring "post-verdict.sh pass" (codex catting the
+# prompt/SKILL.md that documents the helper) but whose `command` is NOT a
+# post-verdict invocation → NOT converged (rc 1). The match keys on the COMMAND
+# shape, not any substring on the line (false-positive guard, mirrors DET-08/14).
+{ echo '{"type":"thread.started","thread_id":"aaaa"}'; echo "$POST_VERDICT_IN_OUTPUT_TURN"; } > "$TMPLOG"
+_codex_log_has_verdict_message "$TMPLOG"; assert_eq "TC-CXR-DET-19 post-verdict.sh substring in tool OUTPUT (not the command) → rc 1" 1 "$?"
+
+# TC-CXR-DET-20 — a REAL post-verdict.sh command whose body-file PATH has a
+# `pass`/`fail` path segment but NO verdict positional → NOT converged (rc 1). The
+# verdict token is anchored to its argument position (after the issue-number
+# positional), so a pass/fail-named path in the body-file slot must not
+# false-converge. Fail-safe-toward-resuming guard (codex review finding on #214).
+{ echo '{"type":"thread.started","thread_id":"aaaa"}'; echo "$POST_VERDICT_PASS_IN_PATH_TURN"; } > "$TMPLOG"
+_codex_log_has_verdict_message "$TMPLOG"; assert_eq "TC-CXR-DET-20 pass/fail in body-file path, no verdict positional → rc 1" 1 "$?"
+
+# TC-CXR-DET-21 — #217 review finding: a REAL post-verdict.sh command whose `command`
+# field contains an ESCAPED quote (`\"`) BEFORE the helper call (a quoted prelude
+# chained with `&&`). The escape-aware command-field isolation must NOT truncate at
+# the escaped quote → still sees `post-verdict.sh 214 pass` → converged (rc 0). The
+# pre-fix `sub(/".*$/, "", cmd)` cut at the escaped quote and dropped the helper
+# invocation → rc 1 → would fire a DUPLICATE verdict (the very bug #214 fixes).
+{ echo '{"type":"thread.started","thread_id":"aaaa"}'; echo "$POST_VERDICT_ESCAPED_QUOTE_TURN"; } > "$TMPLOG"
+_codex_log_has_verdict_message "$TMPLOG"; assert_eq "TC-CXR-DET-21 escaped-quote prelude before post-verdict.sh → rc 0 (converged)" 0 "$?"
+
+# TC-CXR-DET-21b — the same shape from a committed fixture (sanitized; the issue
+# mandates a committed fixture, not only an inline string).
+_codex_log_has_verdict_message "$FIXTURES/codex-post-verdict-escaped-quote-turn.jsonl"
+assert_eq "TC-CXR-DET-21b committed escaped-quote fixture → rc 0 (converged)" 0 "$?"
+
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== TC-CXR-DL: _codex_review_deadline_seconds ==="
@@ -280,6 +406,8 @@ run_codex_controller_case() {
       sed -i '1d' "$sandbox/feed" 2>/dev/null || true
       if [[ "$tok" == "verdict" ]]; then
         printf '%s\n' "$VERDICT_TURN" >> "$log"
+      elif [[ "$tok" == "postverdict" ]]; then
+        printf '%s\n' "$POST_VERDICT_PASS_TURN" >> "$log"
       else
         printf '%s\n' "$GATHER_TURN" >> "$log"
       fi
@@ -445,6 +573,19 @@ ctl12=$(
 )
 assert_eq "TC-CXR-CTL-12 mid-loop resume timeout sticky through clean resume → returns 124" 124 "$ctl12"
 
+# TC-CXR-CTL-13 — #214 CORE FIX (controller level): turn 1 posts the verdict via
+# `post-verdict.sh` (a command_execution, no verdict-trailer agent_message) → the
+# controller converges with ZERO resumes. This is the dup-prevention assertion:
+# pre-fix the detector missed the command_execution verdict, so ≥1 resume fired
+# (→ a second verdict comment). Must flip to 0 resumes after the fix.
+out=$(run_codex_controller_case $'postverdict' 3 $'0\n10')
+assert_eq "TC-CXR-CTL-13 turn-1 helper-posted verdict → 1 run, 0 resume, rc 0 (no dup)" "0|1|0" "$out"
+
+# TC-CXR-CTL-14 — turn 1 gather-only, turn 2 (resume) posts the verdict via the
+# helper → exactly one resume then converge (no SECOND, redundant resume).
+out=$(run_codex_controller_case $'gather\npostverdict' 3 $'0\n10\n20\n30')
+assert_eq "TC-CXR-CTL-14 gather then helper-posted verdict → 1 run, 1 resume, rc 0" "0|1|1" "$out"
+
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== TC-CXR-RP: _codex_resume_prompt content (context-compaction safety) ==="
@@ -486,11 +627,44 @@ assert_contains "TC-CXR-RP-04a prompt tells codex to post a verdict" \
 assert_contains "TC-CXR-RP-04b prompt names the never-refuse rule" \
   "do NOT refuse" "$rp"
 
-# TC-CXR-RP-05 — the attribution trailers (INV-40/INV-20) are still present.
-assert_contains "TC-CXR-RP-05a prompt carries the Review Agent discriminator" \
-  "Review Agent: codex" "$rp"
-assert_contains "TC-CXR-RP-05b prompt carries the session uuid" \
+# TC-CXR-RP-05 — the session uuid is still present (codex interpolates it as the
+# post-verdict.sh session arg). The HAND-WRITTEN `Review Agent: codex` trailer
+# directive is dropped in #214 (see RP-07) — the helper writes that line now — so
+# the only place the uuid appears is the post-verdict.sh argument guidance.
+assert_contains "TC-CXR-RP-05 prompt carries the session uuid" \
   "sess-uuid-xyz" "$rp"
+
+# --- #214: resume prompt routes the verdict through post-verdict.sh, no hand-
+# written trailer (so a legitimately-posted resume verdict can't double-trailer) -
+# TC-CXR-RP-06 — the prompt instructs posting via the INV-56 helper.
+assert_contains "TC-CXR-RP-06 resume prompt instructs posting via post-verdict.sh" \
+  "post-verdict.sh" "$rp"
+
+# TC-CXR-RP-07 — the prompt no longer tells codex to hand-write the
+# `Review Agent:` / `Review Session:` trailer. The pre-INV-56 prompt said the
+# verdict comment "MUST include these two lines verbatim" followed by a literal
+# `Review Agent: codex` directive line for codex to copy; that produced the
+# DOUBLED trailer when stacked on the helper's own trailer. Assert BOTH the
+# "include these two lines verbatim" directive AND a standalone hand-write
+# `Review Agent: codex` instruction line are gone. (The string `post-verdict.sh`
+# may legitimately mention the agent name as an argument; we only forbid the
+# verbatim-trailer DIRECTIVE.)
+if [[ "$rp" == *"verbatim"* ]]; then
+  echo -e "  ${RED}FAIL${NC}: TC-CXR-RP-07a prompt must not tell codex to include the trailer verbatim (the helper writes it)"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${NC}: TC-CXR-RP-07a no 'verbatim' hand-write-trailer directive"
+  PASS=$((PASS + 1))
+fi
+assert_not_contains "TC-CXR-RP-07b prompt does NOT carry a hand-written 'Review Session:' trailer directive" \
+  "Review Session: \${session_uuid}" "$rp"
+
+# TC-CXR-RP-08 — the body phrasing guidance (Review PASSED / Review findings:)
+# survives so codex still produces a classifiable body for the helper.
+assert_contains "TC-CXR-RP-08a prompt keeps the PASS body phrasing" \
+  "Review PASSED" "$rp"
+assert_contains "TC-CXR-RP-08b prompt keeps the FAIL body phrasing" \
+  "Review findings:" "$rp"
 
 # ---------------------------------------------------------------------------
 echo ""

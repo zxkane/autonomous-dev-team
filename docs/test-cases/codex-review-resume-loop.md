@@ -43,6 +43,15 @@ narration.
 | TC-CXR-DET-12 | Last turn `agent_message` carries only the `Review Agent: codex` discriminator trailer | rc 0 (converged) |
 | TC-CXR-DET-13 | Multi-turn: turn 1 posts a verdict trailer, turn 2 is narration-only | rc 1 — last-turn-decides still applies to the trailer match |
 | TC-CXR-DET-14 | A `command_execution` turn whose OUTPUT text contains a verdict PHRASE (e.g. codex catting SKILL.md, whose text literally says "Review PASSED") | rc 1 — the trailer must be inside an `agent_message` item, not a tool output (strengthens DET-08 for the text match) |
+| TC-CXR-DET-15 | **#214 core fix**: last completed turn posts the verdict by running `bash scripts/post-verdict.sh <issue> pass …` (a `command_execution`, NO verdict-trailer `agent_message`) | rc 0 — converged. Since INV-56 the verdict lands in a `command_execution`, not an `agent_message`; the detector must recognize it (else the loop fires a redundant resume → double-posted verdict) |
+| TC-CXR-DET-15b | The same shape from the committed `fixtures/codex-post-verdict-turn.jsonl` (helper-posted verdict, command_execution only) | rc 0 (converged) |
+| TC-CXR-DET-16 | A `post-verdict.sh … fail …` `command_execution` (failing verdict via the helper) | rc 0 — a failing verdict posted via the helper is still a verdict; do not resume |
+| TC-CXR-DET-17 | A narration `agent_message` that merely MENTIONS `post-verdict.sh` ("Next I'll run post-verdict.sh") with NO `command_execution` invoking it and NO verdict trailer | rc 1 — the `post-verdict.sh` signal must be inside a `command_execution` item, not narration text (mirrors the DET-08/14 item-scope guard for the command path) |
+| TC-CXR-DET-18 | A `command_execution` that is NOT post-verdict (e.g. `gh pr view … --json mergeable`) in an otherwise gather-only turn | rc 1 — a non-verdict command must not converge (no over-claim; the INV-53 narration guard preserved) |
+| TC-CXR-DET-19 | A `command_execution` whose OUTPUT (`aggregated_output`) merely contains the literal substring `post-verdict.sh pass` (e.g. codex grepping the prompt/SKILL.md) but whose `command` is NOT a post-verdict invocation | rc 1 — the match keys on the `command` field shape, not any substring on the line (false-positive guard) |
+| TC-CXR-DET-20 | A REAL `post-verdict.sh` command whose body-file PATH contains a `pass`/`fail` path segment (e.g. `… 212 /tmp/pass-notes.md …`) but NO verdict positional arg | rc 1 — the verdict token is anchored to its argument position (after the issue-number positional), so a pass/fail-named path in the body-file slot does NOT false-converge (fail-safe toward resuming; codex review finding on #214) |
+| TC-CXR-DET-21 | A REAL `post-verdict.sh` command whose `command` field contains an ESCAPED quote `\"` BEFORE the helper call (e.g. `printf '%s' \"text\" > f && bash scripts/post-verdict.sh 214 pass …`) | rc 0 — converged. The command-field isolation is escape-aware (truncates at the first UNESCAPED `"`), so a quoted prelude does NOT cut the string before the helper. Pre-fix `sub(/".*$/,"",cmd)` cut at the escaped quote → rc 1 → would fire a DUPLICATE verdict (the very bug #214 fixes; #217 codex review finding) |
+| TC-CXR-DET-21b | The same shape from the committed `fixtures/codex-post-verdict-escaped-quote-turn.jsonl` | rc 0 (converged) |
 
 ## Unit — deadline parsing (`_codex_review_deadline_seconds`)
 
@@ -91,7 +100,22 @@ re-reading when context is lost, and forbids refusing a verdict for missing cont
 | TC-CXR-RP-02 | prompt allows re-reading when context is unavailable | contains a `re-read … minimum` allowance |
 | TC-CXR-RP-03 | prompt still prefers reusing already-loaded context (no gratuitous re-gather on the common path) | contains "ALREADY loaded" |
 | TC-CXR-RP-04 | prompt instructs codex to ISSUE a verdict and NEVER refuse one for lack of context | contains "post your verdict" AND "do NOT refuse" |
-| TC-CXR-RP-05 | the INV-40/INV-20 attribution trailers survive | contains `Review Agent: codex` and the session uuid |
+| TC-CXR-RP-05 | the session id is still passed (codex interpolates it as the `post-verdict.sh` session arg) | contains the session uuid (the hand-written `Review Agent: codex` directive is dropped in #214 — see TC-CXR-RP-07) |
+
+### #214 — resume prompt routes the verdict through `post-verdict.sh`, no hand-written trailer
+
+Since INV-56 the verdict is posted via `bash scripts/post-verdict.sh` (which writes
+the `Review Agent:` / `Review Session:` trailer itself). The resume prompt's
+pre-INV-56 instruction to hand-write those two lines is now redundant and produces
+a DOUBLED trailer whenever a resume turn legitimately posts. The prompt must
+instruct codex to post **only** via `post-verdict.sh` and to NOT hand-write the
+trailer.
+
+| ID | Scenario | Expected |
+|----|----------|----------|
+| TC-CXR-RP-06 | the resume prompt instructs posting via `post-verdict.sh` | contains `post-verdict.sh` |
+| TC-CXR-RP-07 | the resume prompt does NOT instruct codex to hand-write the `Review Agent:` / `Review Session:` trailer (the helper writes it) | does NOT contain a "MUST include these two lines verbatim" hand-write directive; does NOT contain a literal `Review Agent: codex` directive line for codex to copy |
+| TC-CXR-RP-08 | the session id is still passed (codex interpolates it as the `post-verdict.sh` session arg) | contains the session uuid |
 
 ## Unit / source-of-truth — wrapper isolation
 
