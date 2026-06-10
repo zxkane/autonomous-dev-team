@@ -261,11 +261,18 @@ assert_grep "TC-AGYQ-MODEL-01 fan-out model label derives from _resolve_review_a
 
 # TC-AGYQ-MODEL-02 — a label helper exists and reflects the per-agent override.
 # Source the resolve lib + the label helper and exercise it directly if present.
+# issue #220: the label now routes through _resolve_review_agent_model_label,
+# which mirrors INV-50 by validating an agy id against `agy models`. Stub
+# _agy_known_model so the test is deterministic (no `agy models` shell-out) and
+# treats the valid per-agent override `Gemini 3.5 Flash (High)` as a KNOWN agy id
+# (rc 0) — so it is shown verbatim, not collapsed to the agy default.
 RESOLVE_LIB="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-review-resolve.sh"
 if declare -f _review_fanout_model_label >/dev/null 2>&1 || grep -q '_review_fanout_model_label' "$WRAPPER" "$RESOLVE_LIB" 2>/dev/null; then
   model02=$(
     set -uo pipefail
     source "$RESOLVE_LIB"
+    # Deterministic stub: only the configured agy id is "known".
+    _agy_known_model() { [[ "$1" == "Gemini 3.5 Flash (High)" ]] && return 0 || return 1; }
     # The label helper lives in lib-review-resolve.sh (testable in isolation).
     if declare -f _review_fanout_model_label >/dev/null 2>&1; then
       AGENT_REVIEW_MODEL="sonnet" AGENT_REVIEW_MODEL_AGY="Gemini 3.5 Flash (High)" \

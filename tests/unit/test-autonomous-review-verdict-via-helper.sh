@@ -122,6 +122,14 @@ SANDBOX_OUT=$(
   AGENT_REVIEW_MODEL_AGY="Gemini 3.5 Flash (High)"
   unset AGENT_REVIEW_MODEL AGENT_REVIEW_MODEL_CLAUDE AGENT_REVIEW_MODEL_CODEX
   source "$_RESOLVE_LIB"
+  # issue #220: build_review_prompt's verdict-trailer model now routes through
+  # _resolve_review_agent_model_label, which mirrors INV-50 by validating an agy
+  # id against `agy models`. Stub _agy_known_model (deterministic — no shell-out)
+  # so the configured agy override `Gemini 3.5 Flash (High)` is treated as a KNOWN
+  # agy id (rc 0) → rendered verbatim, exercising the multi-word-model quoting
+  # regression (TC-PVP-12). lib-agent.sh is not sourced in this sandbox, so the
+  # stub is the validator the label helper sees.
+  _agy_known_model() { [[ "$1" == "Gemini 3.5 Flash (High)" ]] && return 0 || return 1; }
   source "$_FN_SLICE"
   echo "===CODEX==="
   build_review_prompt "codex" "sid-codex"
