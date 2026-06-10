@@ -176,11 +176,15 @@ _codex_log_has_verdict_message() {
       #       anywhere on the line, so an agent_message whose TEXT merely narrates
       #       "I will run post-verdict.sh" does NOT count (it fails this conjunct);
       #   (3) the COMMAND invokes post-verdict.sh with the verdict POSITIONAL arg.
-      #       Conjunct (3) is matched against `cmd` — the substring of the line
-      #       INSIDE the item-object braces from `"command":"` onward — NOT the
-      #       whole line, so a post-verdict.sh string sitting only in a separate
-      #       `aggregated_output` (codex catting SKILL.md / the prompt, which
-      #       document the helper) does NOT trip it. The argv shape is
+      #       Conjunct (3) is matched against `cmd` — the JSON-string value of the
+      #       command field for THIS item, isolated escape-awarely (the closing
+      #       quote is the first UNESCAPED one; an escaped backslash-quote inside the
+      #       command, e.g. a printf-quoted prelude chained with && before
+      #       post-verdict.sh, does NOT terminate it) — NOT the whole line, so a
+      #       post-verdict.sh string sitting only in a separate `aggregated_output`
+      #       (codex catting SKILL.md / the prompt, which document the helper) does
+      #       NOT trip it. (Comment kept apostrophe- and single-quote-free: this awk
+      #       body is inside single quotes.) The argv shape is
       #       `post-verdict.sh <issue-number> <pass|fail> <body-file> …`, so we
       #       anchor the verdict token to ITS ARGUMENT POSITION: `post-verdict.sh`,
       #       then the issue-number positional (one or more digits), then the
@@ -204,7 +208,24 @@ _codex_log_has_verdict_message() {
         if ($0 ~ /"command":"/) {
           cmd = $0
           sub(/^.*"command":"/, "", cmd)
-          sub(/".*$/, "", cmd)
+          # Truncate at the JSON string TERMINATOR — the first UNESCAPED `"`. A
+          # command field can legitimately contain escaped quotes (`\"`) before
+          # post-verdict.sh — e.g. a chained
+          # `printf '%s' \"verified\" > f && bash scripts/post-verdict.sh 214 pass …`
+          # turn. A naive `sub(/".*$/, "", cmd)` cuts at the FIRST `"`, i.e. at the
+          # escaped quote, dropping the real helper invocation → the detector
+          # false-NEGATIVES and the resume loop fires a duplicate verdict (the very
+          # bug #214 fixes; #217 codex review finding). So we neutralize escaped
+          # quotes BEFORE truncating: replace every `\"` with a sentinel (ESC, the
+          # POSIX octal escape \033 for a control char that never appears in a
+          # command), truncate at the first remaining (genuine, unescaped) `"`, then
+          # restore.
+          # The restore keeps the literal text intact for the substring match below;
+          # the match itself does not depend on quote chars, but restoring avoids any
+          # surprise from a sentinel landing inside the matched span.
+          gsub(/\\"/, "\033", cmd)   # \" (escaped quote) → ESC sentinel
+          sub(/".*$/, "", cmd)        # cut at the first UNescaped " (field end)
+          gsub(/\033/, "\"", cmd)     # restore the escaped quotes as literal "
         }
         cmdl = tolower(cmd)
         # post-verdict.sh <issue-number> <pass|fail> — the verdict token in ITS

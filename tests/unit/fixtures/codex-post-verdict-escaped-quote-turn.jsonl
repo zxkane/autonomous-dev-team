@@ -1,0 +1,5 @@
+{"type":"thread.started","thread_id":"019ea3f1-eqeq-eqeq-eqeq-555555555555"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"i0","type":"reasoning","text":"Writing the verdict body then posting via the helper in one chained command."}}
+{"type":"item.completed","item":{"id":"i1","type":"command_execution","command":"printf '%s' \"Review PASSED - all checklist items verified\" > /tmp/verdict-codex.md && bash scripts/post-verdict.sh 214 pass /tmp/verdict-codex.md codex 8cc4c347-aaaa-bbbb-cccc-444444444444 'openai.gpt-5.5'","aggregated_output":"https://github.com/OWNER/REPO/issues/214#issuecomment-REDACTED"}}
+{"type":"turn.completed","usage":{"input_tokens":54210,"cached_input_tokens":48000,"output_tokens":210}}

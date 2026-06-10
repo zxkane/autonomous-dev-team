@@ -181,6 +181,20 @@ POST_VERDICT_PASS_IN_PATH_TURN='{"type":"turn.started"}
 {"type":"item.completed","item":{"id":"pp0","type":"command_execution","command":"bash scripts/post-verdict.sh 212 /tmp/pass-notes.md codex sid","aggregated_output":""}}
 {"type":"turn.completed","usage":{"input_tokens":3000,"output_tokens":5}}'
 
+# #214 (#217 review finding) — a REAL post-verdict.sh invocation whose `command`
+# field contains an ESCAPED quote (`\"`) BEFORE the helper call, e.g. a chained
+# `printf '%s' \"text\" > file && bash scripts/post-verdict.sh 214 pass …`. JSON
+# escapes embedded quotes as `\"`; a naive truncate-at-first-`"` would cut the
+# command string at the escaped quote and DROP the helper invocation → the detector
+# false-NEGATIVES and the resume loop fires a DUPLICATE verdict (the very bug #214
+# fixes). The escape-aware command-field isolation must still see the helper call →
+# converge (rc 0). Note: the JSONL fragment uses \\\" so that after the shell
+# single-quote string and the awk read, the physical line carries a literal `\"`
+# (a backslash followed by a quote) inside the JSON command value, matching codex.
+POST_VERDICT_ESCAPED_QUOTE_TURN='{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"eq0","type":"command_execution","command":"printf '\''%s'\'' \\"All checklist items verified\\" > /tmp/verdict-codex.md && bash scripts/post-verdict.sh 214 pass /tmp/verdict-codex.md codex sid","aggregated_output":"https://github.com/OWNER/REPO/issues/214#issuecomment-X"}}
+{"type":"turn.completed","usage":{"input_tokens":1000,"output_tokens":50}}'
+
 # ---------------------------------------------------------------------------
 echo "=== TC-CXR-DET: _codex_log_has_verdict_message ==="
 # ---------------------------------------------------------------------------
@@ -332,6 +346,20 @@ _codex_log_has_verdict_message "$TMPLOG"; assert_eq "TC-CXR-DET-19 post-verdict.
 # false-converge. Fail-safe-toward-resuming guard (codex review finding on #214).
 { echo '{"type":"thread.started","thread_id":"aaaa"}'; echo "$POST_VERDICT_PASS_IN_PATH_TURN"; } > "$TMPLOG"
 _codex_log_has_verdict_message "$TMPLOG"; assert_eq "TC-CXR-DET-20 pass/fail in body-file path, no verdict positional → rc 1" 1 "$?"
+
+# TC-CXR-DET-21 — #217 review finding: a REAL post-verdict.sh command whose `command`
+# field contains an ESCAPED quote (`\"`) BEFORE the helper call (a quoted prelude
+# chained with `&&`). The escape-aware command-field isolation must NOT truncate at
+# the escaped quote → still sees `post-verdict.sh 214 pass` → converged (rc 0). The
+# pre-fix `sub(/".*$/, "", cmd)` cut at the escaped quote and dropped the helper
+# invocation → rc 1 → would fire a DUPLICATE verdict (the very bug #214 fixes).
+{ echo '{"type":"thread.started","thread_id":"aaaa"}'; echo "$POST_VERDICT_ESCAPED_QUOTE_TURN"; } > "$TMPLOG"
+_codex_log_has_verdict_message "$TMPLOG"; assert_eq "TC-CXR-DET-21 escaped-quote prelude before post-verdict.sh → rc 0 (converged)" 0 "$?"
+
+# TC-CXR-DET-21b — the same shape from a committed fixture (sanitized; the issue
+# mandates a committed fixture, not only an inline string).
+_codex_log_has_verdict_message "$FIXTURES/codex-post-verdict-escaped-quote-turn.jsonl"
+assert_eq "TC-CXR-DET-21b committed escaped-quote fixture → rc 0 (converged)" 0 "$?"
 
 # ---------------------------------------------------------------------------
 echo ""

@@ -1775,13 +1775,21 @@ Sub-rules:
    does NOT count — it fails conjunct (b). Signal (B)'s match conjoins (a)
    `item.completed`, (b') item-scoped `command_execution`
    (`"item":{…,"type":"command_execution"…}`), and (c') a `post-verdict.sh …
-   pass|fail` invocation matched against the **`command`** field (isolated from
-   `"command":"…"` on the line), with `pass`/`fail` required as a standalone token
-   (surrounding non-alphanumerics, since POSIX awk has no `\<`/`\>`). So a
+   pass|fail` invocation matched against the **`command`** field, with the verdict
+   `pass`/`fail` token anchored to its ARGUMENT POSITION (`post-verdict.sh` →
+   issue-number positional → `pass`/`fail`, the token bounded by a trailing
+   non-alphanumeric or end-of-string, since POSIX awk has no `\<`/`\>`). The
+   `command` field value is isolated **escape-awarely** — its closing `"` is the
+   first UNESCAPED quote, so an escaped `\"` *inside* the command (a chained
+   `printf '%s' \"text\" > f && bash scripts/post-verdict.sh …` prelude) does NOT
+   truncate it before the helper invocation (#217 codex review finding — a naive
+   truncate-at-first-`"` re-introduced the false-negative-then-duplicate bug). So a
    `post-verdict.sh pass` string sitting only in an `aggregated_output` (codex
-   catting the prompt) fails (c'), and a narration `agent_message` that merely
-   MENTIONS the helper fails (b'). This subsumes the #189 review-finding-2 substring
-   guard and extends it to both the text match (A) and the command match (B).
+   catting the prompt) fails (c'); a narration `agent_message` that merely MENTIONS
+   the helper fails (b'); and a `pass`/`fail`-named body-file PATH segment (after the
+   verdict positional) fails (c') (fail-safe toward resuming). This subsumes the
+   #189 review-finding-2 substring guard and extends it to both the text match (A)
+   and the command match (B).
 2. **Plain substrings, no word boundaries.** The phrases are matched as plain
    case-insensitive substrings — IDENTICAL to the poller's `grep -qiE` — so the
    detector and the authoritative comment poller never disagree, AND the awk stays
@@ -1879,11 +1887,14 @@ followed it, so codex fired a redundant resume and double-posted the verdict.
 **Test**: `tests/unit/test-lib-review-codex.sh` — TC-CXR-DET-09..14
 (narration-only → rc 1 / resumes, incl. the committed `fixtures/codex-gather-only-turn.jsonl`;
 pass/fail/discriminator trailers → rc 0; last-turn-decides for the trailer; a
-verdict phrase in a tool output is not a false verdict), TC-CXR-DET-15..19 (#214
+verdict phrase in a tool output is not a false verdict), TC-CXR-DET-15..21 (#214
 signal (B): a `post-verdict.sh pass|fail` command → rc 0 / converged, incl. the
-committed `fixtures/codex-post-verdict-turn.jsonl`; a narration `agent_message`
-mentioning the helper, a non-verdict command, and a `post-verdict.sh` substring in a
-tool OUTPUT all → rc 1 / no over-claim), TC-CXR-CTL-13..14 (controller: a turn-1
+committed `fixtures/codex-post-verdict-turn.jsonl` and the escaped-quote-prelude
+`fixtures/codex-post-verdict-escaped-quote-turn.jsonl` (#217 review finding: the
+command-field isolation is escape-aware, DET-21/21b); a narration `agent_message`
+mentioning the helper, a non-verdict command, a `post-verdict.sh` substring in a
+tool OUTPUT, and a `pass`/`fail`-named body-file path with no verdict positional all
+→ rc 1 / no over-claim, DET-17..20), TC-CXR-CTL-13..14 (controller: a turn-1
 helper-posted verdict converges with ZERO resumes — the dup-prevention assertion —
 and gather-then-helper-verdict fires exactly one resume), TC-CXR-RP-01..05 (sub-rule
 5: the resume prompt drops the absolute "do NOT re-read" bar, allows minimal

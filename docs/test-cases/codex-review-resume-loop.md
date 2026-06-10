@@ -50,6 +50,8 @@ narration.
 | TC-CXR-DET-18 | A `command_execution` that is NOT post-verdict (e.g. `gh pr view … --json mergeable`) in an otherwise gather-only turn | rc 1 — a non-verdict command must not converge (no over-claim; the INV-53 narration guard preserved) |
 | TC-CXR-DET-19 | A `command_execution` whose OUTPUT (`aggregated_output`) merely contains the literal substring `post-verdict.sh pass` (e.g. codex grepping the prompt/SKILL.md) but whose `command` is NOT a post-verdict invocation | rc 1 — the match keys on the `command` field shape, not any substring on the line (false-positive guard) |
 | TC-CXR-DET-20 | A REAL `post-verdict.sh` command whose body-file PATH contains a `pass`/`fail` path segment (e.g. `… 212 /tmp/pass-notes.md …`) but NO verdict positional arg | rc 1 — the verdict token is anchored to its argument position (after the issue-number positional), so a pass/fail-named path in the body-file slot does NOT false-converge (fail-safe toward resuming; codex review finding on #214) |
+| TC-CXR-DET-21 | A REAL `post-verdict.sh` command whose `command` field contains an ESCAPED quote `\"` BEFORE the helper call (e.g. `printf '%s' \"text\" > f && bash scripts/post-verdict.sh 214 pass …`) | rc 0 — converged. The command-field isolation is escape-aware (truncates at the first UNESCAPED `"`), so a quoted prelude does NOT cut the string before the helper. Pre-fix `sub(/".*$/,"",cmd)` cut at the escaped quote → rc 1 → would fire a DUPLICATE verdict (the very bug #214 fixes; #217 codex review finding) |
+| TC-CXR-DET-21b | The same shape from the committed `fixtures/codex-post-verdict-escaped-quote-turn.jsonl` | rc 0 (converged) |
 
 ## Unit — deadline parsing (`_codex_review_deadline_seconds`)
 
