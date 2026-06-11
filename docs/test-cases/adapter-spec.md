@@ -32,7 +32,7 @@ Example fixtures follow `<schema-prefix>.{golden|negative}.<label>.json`:
 
 | Schema | Golden examples |
 |---|---|
-| `adapter-result` | `golden.pass` (review + verdict valid → vote pass), `golden.timeout-veto` (rc 124 + verdict absent → timeout-veto), `golden.quota-drop` (rc 0 + quota + verdict absent → drop), `golden.dev-new` (dev-new → not-applicable) |
+| `adapter-result` | `golden.pass` (review + verdict valid → vote pass), `golden.timeout-veto` (review + rc 124 + verdict absent → timeout-veto), `golden.quota-drop` (rc 0 + quota + verdict absent → drop), `golden.dev-new` (dev-new → not-applicable), `golden.dev-resume-timeout` (dev-resume + rc 124 timeout → not-applicable; non-review timeout-veto gate) |
 | `verdict-artifact` | `golden.pass` (PASS + AC-coverage map + E2E report), `golden.fail` (FAIL + blocking finding) |
 | `fixture-manifest` | `golden.codex-review` (codex review mode), `golden.agy-quota` (agy quota drop) |
 | `error-envelope` | `golden.kiro-auth` (issue-comment surface), `golden.codex-no-worktree` (dispatcher-alert surface), `golden.transient-log-only` (the only log-only case — `class: transient`) |

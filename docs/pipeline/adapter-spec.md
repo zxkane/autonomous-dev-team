@@ -171,11 +171,16 @@ How the CLI process exited.
 - **Clause P1.** `rc` is the raw exit code. The adapter **MUST** set `timedOut =
   true` iff the process was killed by the wall-clock cap — i.e. `rc ∈ {124,
   137}` (`timeout` TERM-expiry / `--kill-after` SIGKILL). (INV-48.) **The schema
-  enforces the no-verdict case** with a conditional: when `rc ∈ {124, 137}` AND
-  `verdict.state ∈ {absent, malformed}`, `process.timedOut` MUST be `true` AND
-  `voteEligibility.state` MUST be `timeout-veto` — so a timed-out no-verdict
-  result cannot validate as `drop`/`unavailable` (negative fixture
+  enforces the review-mode no-verdict case** with a conditional: when `mode =
+  review` AND `rc ∈ {124, 137}` AND `verdict.state ∈ {absent, malformed}`,
+  `process.timedOut` MUST be `true` AND `voteEligibility.state` MUST be
+  `timeout-veto` — so a timed-out review no-verdict result cannot validate as
+  `drop`/`unavailable` (negative fixture
   [`adapter-result.negative.timeout-not-veto.json`](schemas/examples/adapter-result.negative.timeout-not-veto.json)).
+  The conditional is **gated on `mode = review`**: a non-review
+  (`dev-new`/`dev-resume`/`e2e-browser`) timeout result is `not-applicable` (it
+  does not vote — §4.4) and is a valid AdapterResult (golden
+  [`adapter-result.golden.dev-resume-timeout.json`](schemas/examples/adapter-result.golden.dev-resume-timeout.json)).
   A timed-out run that *did* post a verdict (`verdict.state = valid`) is exempt —
   the matched verdict wins ([INV-40](invariants.md#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback)) — so the conditional is gated on the
   no-verdict case only.
