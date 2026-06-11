@@ -194,7 +194,7 @@ echo "=== TC-MAR-SRC-15: kiro drop-reason classifier wired into the drop loop (I
 # via _classify_kiro_drop_reason, and interpolates _kiro_drop_reason_phrase — so a
 # fan-out dropping any of {agy, codex, kiro} lists a distinct reason for each.
 assert_grep "TC-MAR-SRC-15a wrapper sources lib-review-kiro.sh" \
-  'source "\$\{SCRIPT_DIR\}/lib-review-kiro.sh"' "$WRAPPER"
+  'source "\$\{LIB_DIR\}/lib-review-kiro.sh"' "$WRAPPER"
 assert_grep "TC-MAR-SRC-15b wrapper captures the per-agent kiro log (AGENT_KIRO_LOGS)" \
   'AGENT_KIRO_LOGS' "$WRAPPER"
 assert_grep "TC-MAR-SRC-15c drop loop classifies a dropped kiro (_classify_kiro_drop_reason)" \

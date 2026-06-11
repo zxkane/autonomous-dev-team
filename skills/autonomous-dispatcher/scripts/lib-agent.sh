@@ -43,18 +43,31 @@
 #              a fresh run.
 
 # Load project config via the shared helper (closes #58).
-# Note: ${BASH_SOURCE[0]:-$0} (NOT readlink -f) so the symlink-vendor
-# pattern resolves to the project's scripts/ rather than the skill
-# installation dir.
-_LIB_AGENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# [INV-65] Two-dir resolution. _LIB_AGENT_REAL_DIR is the REAL path (readlink
+# -f of this lib's own BASH_SOURCE) used to source the sibling lib-config.sh
+# from the skill tree, so the project no longer needs a per-lib symlink for it
+# (#227). For CONF lookup we MUST use the entry's project-side dir, NOT this
+# lib's own dir: once an entry sources us via its LIB_DIR (the skill tree),
+# ${BASH_SOURCE[0]} here IS the skill-tree path, so _LIB_AGENT_DIR would point
+# away from the project's scripts/ where autonomous.conf lives. The entry
+# therefore exports AUTONOMOUS_CONF_DIR (its UNRESOLVED dir) for us to use;
+# we fall back to our own unresolved dir when it's unset (direct/legacy
+# sourcing) — preserving [INV-14] across both paths.
+_LIB_AGENT_SELF="${BASH_SOURCE[0]:-$0}"
+_LIB_AGENT_DIR="$(cd "$(dirname "$_LIB_AGENT_SELF")" && pwd)"
+_LIB_AGENT_REAL_DIR="$(cd "$(dirname "$(readlink -f "$_LIB_AGENT_SELF")")" && pwd)"
 # shellcheck source=lib-config.sh
-source "${_LIB_AGENT_DIR}/lib-config.sh"
-load_autonomous_conf "${_LIB_AGENT_DIR}" || true
+source "${_LIB_AGENT_REAL_DIR}/lib-config.sh"
+load_autonomous_conf "${AUTONOMOUS_CONF_DIR:-$_LIB_AGENT_DIR}" || true
 
 # Ensure PROJECT_DIR is an absolute path to the repo root.
 # autonomous.conf may use a relative BASH_SOURCE trick that can resolve
-# incorrectly when sourced indirectly. Fall back to _LIB_AGENT_DIR/../../..
-PROJECT_DIR="${PROJECT_DIR:-$(cd "${_LIB_AGENT_DIR}/../../.." && pwd)}"
+# incorrectly when sourced indirectly. Fall back to <conf-dir>/../../.. —
+# anchored on the entry's project-side conf dir (AUTONOMOUS_CONF_DIR), not this
+# lib's skill-tree dir, so the fallback still lands at the project root under
+# [INV-65] LIB_DIR sourcing. (This only fires when PROJECT_DIR is unset in conf.)
+_LIB_AGENT_CONF_DIR="${AUTONOMOUS_CONF_DIR:-$_LIB_AGENT_DIR}"
+PROJECT_DIR="${PROJECT_DIR:-$(cd "${_LIB_AGENT_CONF_DIR}/../../.." && pwd)}"
 
 # Agent configuration (overridable via env or autonomous.conf)
 AGENT_CMD="${AGENT_CMD:-claude}"

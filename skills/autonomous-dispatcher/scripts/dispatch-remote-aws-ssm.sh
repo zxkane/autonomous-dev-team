@@ -64,6 +64,15 @@ fi
 # works even on PATH-scrubbed test invocations (regression: TC-EB-008
 # in test-dispatch-remote-aws-ssm.sh sets PATH= to verify the missing-
 # aws code path; that test must keep passing after this refactor).
+# [INV-65] This entry sources lib-ssm.sh from its OWN unresolved dir
+# (${BASH_SOURCE[0]%/*}, readlink-free — TC-EB-008 runs it under a scrubbed
+# PATH with no coreutil reachable). For that to resolve, the CALLER must invoke
+# this script from the REAL skill tree, NOT a consumer project-side symlink —
+# because the installer no longer symlinks lib-*.sh into <project>/scripts/.
+# dispatcher-tick.sh's dispatch() honors this by invoking us via its LIB_DIR
+# (the skill tree), where lib-ssm.sh is a real adjacent file. Same rationale as
+# liveness-check-remote-aws-ssm.sh (reached via lib-dispatch.sh's skill-tree
+# BASH_SOURCE).
 _THIS_SCRIPT_PATH="${BASH_SOURCE[0]:-$0}"
 _THIS_SCRIPT_DIR="${_THIS_SCRIPT_PATH%/*}"
 # shellcheck source=lib-ssm.sh

@@ -43,11 +43,11 @@
 # instrumentation) and doesn't replay it would break the channel.
 # See [INV-34] in docs/pipeline/invariants.md for the full contract.
 #
-# === Deployment topologies (post-#104) ===
+# === Deployment topologies (post-#104; lib-resolution post-#227) ===
 #
-# Two supported layouts. Both work because every script computes
-# SCRIPT_DIR from ${BASH_SOURCE[0]:-$0} per [INV-14], so the project-side
-# symlink resolves to <project>/scripts/ where autonomous.conf lives.
+# Two supported layouts. Both work because every entry script computes its
+# CONF dir from ${BASH_SOURCE[0]:-$0} per [INV-14], so the project-side symlink
+# resolves to <project>/scripts/ where autonomous.conf lives.
 #
 # 1. Vendored per-project (the default after `npx skills add zxkane/...`):
 #      <project>/.agents/skills/.../scripts/dispatch-local.sh   (real)
@@ -64,31 +64,40 @@
 #    user scope and creating per-project <project>/scripts/<file>.sh
 #    symlinks pointing into the user-scope install.
 #
-#    REQUIRED SYMLINK MANIFEST under shared install: at minimum, the
-#    project's <project>/scripts/ MUST contain symlinks for every file
-#    the dispatch chain transitively sources via ${SCRIPT_DIR}/<sibling>.
-#    Symlinking only dispatch-local.sh (or only the entry-points) breaks
-#    sibling-source statements with "No such file or directory":
-#
-#      autonomous-dev.sh        → sources lib-agent.sh, lib-auth.sh
-#      autonomous-review.sh     → sources lib-agent.sh, lib-auth.sh, lib-review-bots.sh
-#      dispatch-local.sh        → sources lib-config.sh
-#      gh-token-refresh-daemon.sh → sources gh-app-token.sh
-#      gh-with-token-refresh.sh → may invoke gh-app-token.sh / gh-token-refresh-daemon.sh
-#
-#    Plus lib-agent.sh transitively sources lib-config.sh, and lib-auth.sh
-#    sources lib-config.sh + gh-app-token.sh. The full minimum set:
+#    SYMLINK MANIFEST (post-#227, [INV-65]): the project's <project>/scripts/
+#    needs symlinks ONLY for the STABLE ENTRY scripts + agent-callable
+#    utilities — i.e. EVERYTHING THAT IS NOT `lib-*.sh`, MINUS the two
+#    `*-aws-ssm.sh` helpers. Entry scripts source their sibling lib-*.sh from
+#    the REAL skill tree (resolved via `readlink -f` → LIB_DIR), so a NEW
+#    upstream lib-*.sh needs NO new project symlink and CANNOT crash the wrapper
+#    on a missing `source`. The entry set:
 #
 #      autonomous-dev.sh, autonomous-review.sh, dispatch-local.sh,
-#      lib-agent.sh, lib-auth.sh, lib-config.sh, lib-dispatch.sh,
-#      lib-review-bots.sh,
-#      gh-app-token.sh, gh-with-token-refresh.sh, gh-token-refresh-daemon.sh
+#      dispatcher-tick.sh, dispatcher-multi-tick.sh,
+#      setup-labels.sh, post-verdict.sh,
+#      gh-app-token.sh, gh-with-token-refresh.sh, gh-token-refresh-daemon.sh,
+#      gh-as-user.sh, mark-issue-checkbox.sh, reply-to-comments.sh,
+#      resolve-threads.sh, upload-screenshot.sh
 #
-#    Verify with: `ls -la <project>/scripts/` — every entry should be
-#    a symlink whose target lives under your shared install dir.
+#    `lib-*.sh` are intentionally NOT symlinked (resolved from the skill tree).
+#    The two `*-aws-ssm.sh` helpers are ALSO NOT symlinked (#227 P1): they
+#    source lib-ssm.sh from their own dir and are invoked by the dispatcher
+#    from the skill tree (never via a project-side symlink), so a project-side
+#    symlink to them would crash on the now-absent lib-ssm.sh.
+#    Let `install-project-hooks.sh` manage this — it symlinks exactly this set,
+#    prunes any stale per-lib / `*-aws-ssm.sh` symlinks a pre-#227 install left
+#    behind, and offers `--doctor` (health report) and `--dry-run` (plan only).
+#    Re-running it after an upstream upgrade is only needed when an ENTRY point
+#    is added or removed — never for lib-*.sh changes.
+#
+#    Verify with: `<project>/scripts/install-project-hooks.sh --doctor` or
+#    `ls -la <project>/scripts/`.
 #
 # Either way, this autonomous.conf lives at <project>/scripts/ and is
-# discovered via SCRIPT_DIR's same-dir lookup (tier-2 in lib-config.sh).
+# discovered via the entry's CONF dir (tier-2 in lib-config.sh). Entries hand
+# that CONF dir to the sourced libs via the exported AUTONOMOUS_CONF_DIR
+# ([INV-65]) so conf lookup stays project-anchored even though the libs
+# themselves are sourced from the skill tree.
 
 # === Project Identity ===
 PROJECT_ID="my-project"

@@ -80,6 +80,21 @@ flowchart TD
 
 `JUST_DISPATCHED` is the only piece of state the tick maintains in memory — and it dies when the tick ends.
 
+## Consumer install topology — stable entry points ([INV-65], #227)
+
+A consumer project bootstraps against this skill set by symlinking the dispatcher's **STABLE ENTRY scripts** into `<project>/scripts/`. As of #227 the rule is *"everything that is NOT `lib-*.sh`, MINUS the `*-aws-ssm.sh` helpers"*: wrapper entry points (`autonomous-dev.sh`, `autonomous-review.sh`), dispatcher entry points (`dispatch-local.sh`, `dispatcher-tick.sh`, `dispatcher-multi-tick.sh`, `setup-labels.sh`), the `gh-*` auth scripts, and the agent-callable utilities (`post-verdict.sh`, `mark-issue-checkbox.sh`, `reply-to-comments.sh`, `resolve-threads.sh`, `gh-as-user.sh`, `upload-screenshot.sh`, and the `gh` wrapper symlink). `install-project-hooks.sh` materializes these symlinks. The two `*-aws-ssm.sh` helpers are **excluded** (see the resolution caveat below) — they are dispatcher-host-internal and the dispatcher invokes them from the skill tree, never via a project-side symlink.
+
+`lib-*.sh` are **NOT** symlinked. Each entry script computes two dirs from its own `${BASH_SOURCE[0]:-$0}` ([INV-65]): the **CONF dir** (unresolved → the project's `scripts/`, where `autonomous.conf` lives) and the **LIB dir** (`readlink -f` → the real skill tree). All `source "${LIB_DIR}/lib-*.sh"` resolve from the skill tree, so an upstream PR can add or remove a `lib-*.sh` and **no consumer re-run is required** for lib sourcing to keep working — this structurally removes the missing-lib-symlink crash class (the drift sibling of #153, where a new lib with no project symlink killed the wrapper on its first `source`).
+
+> **`*-aws-ssm.sh` resolution caveat.** `dispatch-remote-aws-ssm.sh` and `liveness-check-remote-aws-ssm.sh` source their shared `lib-ssm.sh` from their OWN unresolved dir (`${BASH_SOURCE[0]%/*}` — `readlink -f` is deliberately avoided so the PATH-scrubbed `TC-EB-008` keeps passing). Since `lib-ssm.sh` is no longer symlinked project-side, these two MUST be invoked **from the skill tree**, not via a project-side symlink. They are: `dispatch()` calls `dispatch-remote-aws-ssm.sh` via `$LIB_DIR`, and `liveness-check-remote-aws-ssm.sh` is reached through `lib-dispatch.sh`'s own skill-tree `BASH_SOURCE`. Therefore `install-project-hooks.sh` **excludes** the two `*-aws-ssm.sh` helpers from the project-side manifest and **prunes** any pre-#227 symlink to them — otherwise a direct `bash scripts/dispatch-remote-aws-ssm.sh` (through the project-side symlink) would resolve `lib-ssm.sh` in `<project>/scripts/`, which is now absent, and crash with `lib-ssm.sh: No such file or directory` (#227 P1). The exclusion is mechanically tied to the symlink-creation rule (`is_entry_script` rejects `*-aws-ssm.sh`), so the prune set and the create set can never diverge.
+
+`install-project-hooks.sh` gains two operator affordances:
+
+- `--doctor` — read-only health report: broken/missing entry symlinks, stale per-lib symlinks (which it suggests pruning), `autonomous.conf` presence + 0600 permissions, and entry-resolution sanity (does the real skill tree hold `lib-config.sh`?). Exits 0 clean / 1 on problems.
+- `--dry-run` — prints the planned create/repoint/prune set and touches nothing.
+
+It also **prunes stale per-lib symlinks** a pre-#227 install left behind (harmless dead weight, since lib sourcing no longer reads `<project>/scripts/`).
+
 ## Pre-step: wrapper exec-bit self-heal (closes #97)
 
 Before sourcing config, `dispatcher-tick.sh` self-heals the execute bit on the two scripts that `dispatch-local.sh` invokes directly via `nohup`:

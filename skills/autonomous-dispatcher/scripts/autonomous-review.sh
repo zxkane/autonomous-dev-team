@@ -14,35 +14,47 @@
 
 set -euo pipefail
 
-# [INV-14] Use BASH_SOURCE[0] (NOT readlink -f) so a project-side symlink
-# at <project>/scripts/autonomous-review.sh resolves SCRIPT_DIR to the
-# project's scripts/. lib-agent.sh's load_autonomous_conf then finds
-# autonomous.conf via tier-2 (same dir).
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
-source "${SCRIPT_DIR}/lib-agent.sh"
-source "${SCRIPT_DIR}/lib-auth.sh"
+# [INV-65] Two-dir resolution. SCRIPT_DIR (the conf dir) is the dirname of the
+# UNRESOLVED ${BASH_SOURCE[0]:-$0} so a project-side symlink at
+# <project>/scripts/autonomous-review.sh keeps it pointed at the project's
+# scripts/ — lib-agent.sh's load_autonomous_conf then finds autonomous.conf
+# via tier-2 (same dir) [INV-14]. LIB_DIR is the dirname of the REAL path
+# (readlink -f) so the dozen sibling lib-review-*.sh source from the skill
+# tree regardless of whether the project symlinks each one — kills the
+# missing-lib-symlink crash class (#227, the drift sibling of #153). On a real
+# (non-symlink) invocation the two are identical.
+_SELF="${BASH_SOURCE[0]:-$0}"
+SCRIPT_DIR="$(cd "$(dirname "$_SELF")" && pwd)"
+LIB_DIR="$(cd "$(dirname "$(readlink -f "$_SELF")")" && pwd)"
+# Hand the project-side conf dir to the sourced libs: their own BASH_SOURCE now
+# points into the skill tree (we source via LIB_DIR), so they cannot recover the
+# project's scripts/ on their own. AUTONOMOUS_CONF_DIR keeps their conf lookup
+# (and lib-auth's project-side `gh` wrapper) anchored on the project [INV-65].
+export AUTONOMOUS_CONF_DIR="$SCRIPT_DIR"
+source "${LIB_DIR}/lib-agent.sh"
+source "${LIB_DIR}/lib-auth.sh"
 # shellcheck source=lib-review-bots.sh
-source "${SCRIPT_DIR}/lib-review-bots.sh"
+source "${LIB_DIR}/lib-review-bots.sh"
 # shellcheck source=lib-review-verdict.sh
-source "${SCRIPT_DIR}/lib-review-verdict.sh"
+source "${LIB_DIR}/lib-review-verdict.sh"
 # shellcheck source=lib-review-aggregate.sh
 # INV-40 (#166): unanimous-PASS aggregation over multiple verdict-reaching
 # agents. Inert for the single-agent default; only consumed when
 # AGENT_REVIEW_AGENTS lists more than one CLI.
-source "${SCRIPT_DIR}/lib-review-aggregate.sh"
+source "${LIB_DIR}/lib-review-aggregate.sh"
 # shellcheck source=lib-review-resolve.sh
 # INV-41 (#168): per-agent model / extra-args resolution for the fan-out.
 # Inert for the all-unset default (resolves to the shared AGENT_REVIEW_MODEL /
 # AGENT_REVIEW_EXTRA_ARGS); only diverges when a per-agent
 # AGENT_REVIEW_MODEL_<AGENT> / AGENT_REVIEW_EXTRA_ARGS_<AGENT> key is set.
-source "${SCRIPT_DIR}/lib-review-resolve.sh"
+source "${LIB_DIR}/lib-review-resolve.sh"
 # shellcheck source=lib-review-poll.sh
 # INV-43 (#172): command-mode-aware verdict-poll budget. The verdict poll loop
 # below scales its attempt count with E2E_COMMAND_TIMEOUT_SECONDS when
 # E2E_MODE=command, so a review agent that faithfully runs the (slow)
 # command-mode E2E is not dropped as `unavailable` for taking as long as the
 # E2E it was asked to run. Inert (legacy 30 s window) for every non-command mode.
-source "${SCRIPT_DIR}/lib-review-poll.sh"
+source "${LIB_DIR}/lib-review-poll.sh"
 # shellcheck source=lib-review-mergeable.sh
 # INV-44 (#176): wrapper-enforced mergeable hard gate. After verdict
 # aggregation and before acting on a PASS, the wrapper re-checks the PR's
@@ -50,7 +62,7 @@ source "${SCRIPT_DIR}/lib-review-poll.sh"
 # `approved`, regardless of whether the review agent ran its Step-0 pre-review
 # rebase prompt. _classify_mergeable_gate is the pure decision half (the gh
 # query + UNKNOWN-retry loop stays in the wrapper). Inert on the FAIL path.
-source "${SCRIPT_DIR}/lib-review-mergeable.sh"
+source "${LIB_DIR}/lib-review-mergeable.sh"
 # shellcheck source=lib-review-e2e.sh
 # INV-46 (#182): run E2E ONCE in a dedicated lane, sequentially, BEFORE the
 # review fan-out — not once per fan-out review agent. The command-mode lane is a
@@ -58,7 +70,7 @@ source "${SCRIPT_DIR}/lib-review-mergeable.sh"
 # LLM-driven lane. _classify_e2e_gate is the pure dual-signal decision; the lane
 # helpers (_run_command_e2e_lane / _fetch_sha_evidence) live there so they are
 # unit-testable in isolation. Inert when E2E_MODE=none.
-source "${SCRIPT_DIR}/lib-review-e2e.sh"
+source "${LIB_DIR}/lib-review-e2e.sh"
 # shellcheck source=lib-review-codex.sh
 # INV-62 (#218): codex-specific review path. The codex review member runs the
 # purpose-built `codex review "<prompt>"` subcommand (_run_codex_review) — natively
@@ -69,7 +81,7 @@ source "${SCRIPT_DIR}/lib-review-e2e.sh"
 # verdict fallback and posts on codex's behalf if codex did not self-post. Only the
 # codex fan-out branch calls these; every other CLI keeps the bare run_agent path.
 # The codex DEV path (run_agent/resume_agent) stays on `codex exec`, unchanged.
-source "${SCRIPT_DIR}/lib-review-codex.sh"
+source "${LIB_DIR}/lib-review-codex.sh"
 # shellcheck source=lib-review-agy.sh
 # INV-58 (#205): agy (Antigravity CLI) quota/auth drop-reason detector. When an
 # agy fan-out member hits the consumer quota wall (429 RESOURCE_EXHAUSTED,
@@ -80,7 +92,7 @@ source "${SCRIPT_DIR}/lib-review-codex.sh"
 # "Resets in <dur>" recovery window) in the WARN log + the dropped-agent comment.
 # Observability only — does NOT change the INV-40 vote (a quota agy stays dropped,
 # not a deciding FAIL). Inert unless a fan-out agent is agy AND it was dropped.
-source "${SCRIPT_DIR}/lib-review-agy.sh"
+source "${LIB_DIR}/lib-review-agy.sh"
 # shellcheck source=lib-review-smoke.sh
 # INV-64 (#224): pre-fan-out agent-smoke gate (Phase A.5). After the INV-46 E2E
 # lane and before the fan-out, smoke every REVIEW_AGENTS_LIST member via
@@ -92,7 +104,8 @@ source "${SCRIPT_DIR}/lib-review-agy.sh"
 # _classify_smoke_state / _smoke_evidence_reason are the pure decision halves;
 # the parallel-subshell orchestration stays in the wrapper (it owns
 # REVIEW_AGENTS_LIST + the resolvers). Inert when REVIEW_SMOKE_ENABLED!=true.
-source "${SCRIPT_DIR}/lib-review-smoke.sh"
+# [INV-65] sourced from the real skill tree via LIB_DIR (no project symlink).
+source "${LIB_DIR}/lib-review-smoke.sh"
 # shellcheck source=lib-review-kiro.sh
 # INV-61 (#215): kiro (Kiro CLI) auth/login-failure drop-reason detector. When a
 # kiro fan-out member has an expired OAuth/login token on the execution host, the
@@ -105,7 +118,7 @@ source "${SCRIPT_DIR}/lib-review-smoke.sh"
 # quota) / INV-59 (codex stream-error). Observability only — does NOT change the
 # INV-40 vote (an auth-failed kiro stays dropped, not a deciding FAIL). Inert
 # unless a fan-out agent is kiro AND it was dropped.
-source "${SCRIPT_DIR}/lib-review-kiro.sh"
+source "${LIB_DIR}/lib-review-kiro.sh"
 # shellcheck source=lib-review-request-changes.sh
 # INV-52 (#193): the wrapper OWNS the GitHub-native PR review action — `--approve`
 # on a PASS and `--request-changes` on a SUBSTANTIVE FAIL — so the PR's
@@ -114,7 +127,7 @@ source "${SCRIPT_DIR}/lib-review-kiro.sh"
 # is the FAIL-side helper (best-effort, always returns 0 so a 403/transient can't
 # strand the issue). The review AGENT posts verdict comments only and never runs
 # `gh pr review`/`gh pr merge` itself. Inert on the PASS path.
-source "${SCRIPT_DIR}/lib-review-request-changes.sh"
+source "${LIB_DIR}/lib-review-request-changes.sh"
 # Per-side AGENT_CMD override (INV-37). See autonomous-dev.sh for the
 # matching dev-side override. Together they let one project run dev
 # and review on different agent CLIs (e.g. claude for dev, agy for

@@ -157,10 +157,17 @@ simulate_review_timeout() {
   tmp_script=$(mktemp)
   {
     echo 'set -uo pipefail'
+    # [INV-65] inject both resolved dirs + the exported conf-dir var; skip the
+    # wrapper's own _SELF/SCRIPT_DIR/LIB_DIR/export preamble (the harness
+    # provides the sandbox dirs so its symlinks resolve).
     echo "SCRIPT_DIR='$conf_dir'"
+    echo "LIB_DIR='$conf_dir'"
+    echo "AUTONOMOUS_CONF_DIR='$conf_dir'"
     echo "AUTONOMOUS_CONF='$conf_dir/autonomous.conf'"
     awk '
       /^SCRIPT_DIR=/ { capture = 1; next }
+      capture && /^LIB_DIR=/ { next }
+      capture && /^export AUTONOMOUS_CONF_DIR=/ { next }
       /^: "\$\{[A-Z_]+:\?/ { capture = 0 }
       capture { print }
     ' "$WRAPPER"

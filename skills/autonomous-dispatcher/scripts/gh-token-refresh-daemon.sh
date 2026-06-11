@@ -23,11 +23,14 @@ REPO_NAME="${5:?Missing repo_name}"
 # Refresh every 45 minutes (token TTL is 60 minutes)
 REFRESH_INTERVAL="${GH_TOKEN_REFRESH_INTERVAL:-2700}"
 
-# [INV-14] Use BASH_SOURCE[0] (NOT readlink -f). Sibling-source still works
-# because gh-app-token.sh lives in the same dir as this daemon under both
-# vendored and shared-install topologies.
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
-source "${SCRIPT_DIR}/gh-app-token.sh"
+# [INV-65] Resolve LIB_DIR from the REAL path (readlink -f) so the sibling
+# gh-app-token.sh sources from the skill tree even if the project doesn't
+# symlink it (#227). This daemon reads no autonomous.conf, so it needs no
+# separate unresolved CONF_DIR. On a real (non-symlink) invocation readlink -f
+# is identity, so LIB_DIR equals the daemon's own dir.
+_SELF="${BASH_SOURCE[0]:-$0}"
+LIB_DIR="$(cd "$(dirname "$(readlink -f "$_SELF")")" && pwd)"
+source "${LIB_DIR}/gh-app-token.sh"
 
 log() { echo "[token-refresh] $(date -u +%H:%M:%S) $*"; }
 

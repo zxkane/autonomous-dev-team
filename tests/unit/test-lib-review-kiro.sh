@@ -255,7 +255,7 @@ echo ""
 echo "=== TC-KIRO-DROP-SRC: wrapper wiring (source-of-truth) ==="
 # ---------------------------------------------------------------------------
 assert_grep "TC-KIRO-DROP-SRC-01 wrapper sources lib-review-kiro.sh" \
-  'source "\$\{SCRIPT_DIR\}/lib-review-kiro.sh"' "$WRAPPER"
+  'source "\$\{LIB_DIR\}/lib-review-kiro.sh"' "$WRAPPER"
 assert_grep "TC-KIRO-DROP-SRC-02 wrapper captures the per-agent kiro log path (AGENT_KIRO_LOGS)" \
   'AGENT_KIRO_LOGS' "$WRAPPER"
 assert_grep "TC-KIRO-DROP-SRC-03 wrapper calls _classify_kiro_drop_reason" \

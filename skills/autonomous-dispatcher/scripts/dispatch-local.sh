@@ -28,12 +28,17 @@ if [[ -n "$SESSION_ID" ]] && ! [[ "$SESSION_ID" =~ ^[a-zA-Z0-9_-]+$ ]]; then
 fi
 
 # Load config.
-# [INV-14] Use BASH_SOURCE[0] (NOT readlink -f) so a project-side symlink
-# at <project>/scripts/dispatch-local.sh resolves SCRIPT_DIR to the
-# project's scripts/, where autonomous.conf lives. The legacy
-# `../../../scripts/autonomous.conf` fallback is preserved for callers
-# that still invoke the vendored copy directly (no project-side symlink).
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# [INV-65] Two-dir resolution. SCRIPT_DIR (the conf dir) is the dirname of the
+# UNRESOLVED ${BASH_SOURCE[0]:-$0} so a project-side symlink at
+# <project>/scripts/dispatch-local.sh keeps it pointed at the project's
+# scripts/, where autonomous.conf lives [INV-14]. The legacy
+# `../../../scripts/autonomous.conf` fallback is preserved for callers that
+# still invoke the vendored copy directly (no project-side symlink). LIB_DIR
+# is the REAL path (readlink -f) used for sourcing siblings (lib-config.sh)
+# from the skill tree — no per-project lib symlink needed (#227).
+_SELF="${BASH_SOURCE[0]:-$0}"
+SCRIPT_DIR="$(cd "$(dirname "$_SELF")" && pwd)"
+LIB_DIR="$(cd "$(dirname "$(readlink -f "$_SELF")")" && pwd)"
 if [[ -f "${SCRIPT_DIR}/autonomous.conf" ]]; then
   source "${SCRIPT_DIR}/autonomous.conf"
 elif [[ -f "${SCRIPT_DIR}/../../../scripts/autonomous.conf" ]]; then
@@ -46,7 +51,7 @@ PROJECT_DIR="${PROJECT_DIR:?Set PROJECT_DIR in autonomous.conf}"
 # Pull in pid_dir_for_project (closes #72). Must be sourced AFTER PROJECT_ID
 # is in scope — the helper enforces it via : "${PROJECT_ID:?...}".
 # shellcheck source=lib-config.sh
-source "${SCRIPT_DIR}/lib-config.sh"
+source "${LIB_DIR}/lib-config.sh"
 
 PID_DIR=$(pid_dir_for_project) || { echo "ERROR: cannot resolve PID dir" >&2; exit 1; }
 

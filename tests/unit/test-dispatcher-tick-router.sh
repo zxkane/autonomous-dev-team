@@ -71,8 +71,12 @@ else
   run_case() {
     local backend="$1"; shift
     : > "$RECORD"
+    # [INV-65] dispatch() invokes the remote driver via LIB_DIR (skill tree),
+    # the local driver via PROJECT_DIR. Inject both; the remote stub lives in
+    # SCRIPT_DIR_FAKE, which is the sandbox's skill-tree dir here.
     PROJECT_DIR="$PROJECT_DIR_FAKE" \
     SCRIPT_DIR="$SCRIPT_DIR_FAKE" \
+    LIB_DIR="$SCRIPT_DIR_FAKE" \
     EXECUTION_BACKEND="$backend" \
     DISPATCH_RECORD="$RECORD" \
     bash -c '
@@ -88,6 +92,7 @@ else
   : > "$RECORD"
   PROJECT_DIR="$PROJECT_DIR_FAKE" \
   SCRIPT_DIR="$SCRIPT_DIR_FAKE" \
+  LIB_DIR="$SCRIPT_DIR_FAKE" \
   DISPATCH_RECORD="$RECORD" \
   bash -c '
     set +e

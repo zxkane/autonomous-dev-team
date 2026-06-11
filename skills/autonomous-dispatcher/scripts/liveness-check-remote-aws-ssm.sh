@@ -75,6 +75,15 @@ fi
 # ---------------------------------------------------------------------------
 # Use parameter expansion `${path%/*}` instead of `dirname` so PATH-scrubbed
 # test invocations keep working (parity with dispatch-remote-aws-ssm.sh).
+# [INV-65] This entry sources lib-ssm.sh from its OWN unresolved dir
+# (${BASH_SOURCE[0]%/*}, readlink-free — TC-EB-008 runs it under a scrubbed
+# PATH). It is reached via lib-dispatch.sh::_remote_pid_alive_query, which
+# invokes `${BASH_SOURCE[0]%/*}/liveness-check-remote-aws-ssm.sh` — and
+# lib-dispatch.sh is itself sourced from the skill tree (the dispatcher's
+# LIB_DIR), so that path lands in the skill tree where lib-ssm.sh is a real
+# adjacent file. The installer no longer symlinks lib-*.sh project-side, so a
+# project-side invocation would NOT resolve lib-ssm.sh — but no caller does
+# that. Same rationale as dispatch-remote-aws-ssm.sh.
 _THIS_SCRIPT_PATH="${BASH_SOURCE[0]:-$0}"
 SCRIPT_DIR="${_THIS_SCRIPT_PATH%/*}"
 # shellcheck source=lib-ssm.sh

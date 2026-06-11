@@ -296,6 +296,47 @@ esac
 
 # ---------------------------------------------------------------------------
 echo ""
+echo "=== TC-ENTRY-SHIM-031: remote driver sources lib-ssm.sh from its own"
+echo "    dir even with NO project-side lib-ssm.sh symlink (#227 INV-65) ==="
+# ---------------------------------------------------------------------------
+# Post-#227 the installer no longer symlinks lib-*.sh into <project>/scripts/.
+# dispatcher-tick.sh's dispatch() therefore invokes the remote driver via its
+# LIB_DIR (the real skill tree), where lib-ssm.sh is a real adjacent file —
+# NOT via the project-side symlink dir, which has no lib-ssm.sh. This test
+# reproduces that: copy the real driver + lib-ssm.sh into a fresh skill-tree
+# dir (no project-side symlink at all) and confirm the driver sources lib-ssm.sh
+# and reaches its first config gate WITHOUT a `No such file or directory` crash.
+SKILLTREE="$TMPROOT/skilltree"
+mkdir -p "$SKILLTREE"
+cp "$DRIVER" "$SKILLTREE/dispatch-remote-aws-ssm.sh"
+cp "$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-ssm.sh" "$SKILLTREE/lib-ssm.sh"
+chmod +x "$SKILLTREE/dispatch-remote-aws-ssm.sh"
+# Invoke from the skill-tree copy with NO env so it sources lib-ssm.sh then
+# stops at the first required-var gate (SSM_INSTANCE_ID). Reaching that gate
+# proves lib-ssm.sh sourced.
+( unset SSM_INSTANCE_ID SSM_REMOTE_PROJECT_DIR SSM_REMOTE_PROJECT_ID
+  out=$(AWS_RECORD_FILE="$TMPROOT/aws-record-031" bash "$SKILLTREE/dispatch-remote-aws-ssm.sh" dev-new 99 2>&1); rc=$?
+  if [[ "$out" == *"No such file or directory"* ]] || [[ "$out" == *"lib-ssm.sh"* ]]; then
+    echo -e "  ${RED}FAIL${NC}: driver failed to source lib-ssm.sh from its own skill-tree dir: $out" >&2
+    exit 1
+  fi
+  # It should reach a config gate (e.g. SSM_INSTANCE_ID / SSM_REMOTE_PROJECT_DIR
+  # required) — proving execution got PAST the source line.
+  if [[ "$out" == *"SSM_"*"required"* ]] || [[ "$rc" -ne 0 && "$out" != *"No such file"* ]]; then
+    exit 0
+  fi
+  echo -e "  ${RED}FAIL${NC}: unexpected output (rc=$rc): $out" >&2
+  exit 1
+)
+if [[ $? -eq 0 ]]; then
+  echo -e "  ${GREEN}PASS${NC}: remote driver sources lib-ssm.sh from skill tree, no missing-lib crash"
+  PASS=$((PASS + 1))
+else
+  FAIL=$((FAIL + 1))
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
 echo "=== Summary ==="
 echo "  PASS: $PASS"
 echo "  FAIL: $FAIL"

@@ -172,7 +172,7 @@ echo "=== PSL-S9: autonomous-dev.sh — launcher rebind AFTER source lib-auth.sh
 # transitively AGENT_LAUNCHER_ARGV via lib-agent.sh's :- defaults if
 # the wrapper rebind happened before this re-source).
 hit=$(awk '
-  /source "\$\{SCRIPT_DIR\}\/lib-auth\.sh"/ {
+  /source "\$\{LIB_DIR\}\/lib-auth\.sh"/ {
     found_lib_auth = NR
     next
   }
@@ -191,7 +191,7 @@ assert_eq "autonomous-dev.sh: launcher rebind lands AFTER source lib-auth.sh" \
 # source lib-auth.sh. Mirrors the dual check in PSC-S9. agy review on
 # PR #159 caught the missing pre-source assertion.
 hit_pre=$(awk '
-  /source "\$\{SCRIPT_DIR\}\/lib-auth\.sh"/ {
+  /source "\$\{LIB_DIR\}\/lib-auth\.sh"/ {
     print "REACHED_LIB_AUTH"
     exit
   }
@@ -209,7 +209,7 @@ echo ""
 echo "=== PSL-S10: autonomous-review.sh — launcher rebind AFTER source lib-auth.sh ==="
 # ---------------------------------------------------------------------------
 hit=$(awk '
-  /source "\$\{SCRIPT_DIR\}\/lib-auth\.sh"/ {
+  /source "\$\{LIB_DIR\}\/lib-auth\.sh"/ {
     found_lib_auth = NR
     next
   }
@@ -225,7 +225,7 @@ assert_eq "autonomous-review.sh: launcher rebind lands AFTER source lib-auth.sh"
   "MATCH" "$hit"
 
 hit_pre=$(awk '
-  /source "\$\{SCRIPT_DIR\}\/lib-auth\.sh"/ {
+  /source "\$\{LIB_DIR\}\/lib-auth\.sh"/ {
     print "REACHED_LIB_AUTH"
     exit
   }

@@ -96,7 +96,7 @@ echo ""
 echo "=== TC-MG-SRC: wrapper structure (source-of-truth greps) ==="
 # ---------------------------------------------------------------------------
 assert_grep "TC-MG-SRC-01 wrapper sources lib-review-mergeable.sh" \
-  'source "\$\{SCRIPT_DIR\}/lib-review-mergeable.sh"' "$WRAPPER"
+  'source "\$\{LIB_DIR\}/lib-review-mergeable.sh"' "$WRAPPER"
 assert_grep "TC-MG-SRC-02 gate queries gh pr view --json mergeable" \
   'gh pr view "\$PR_NUMBER" --repo "\$REPO" --json mergeable' "$WRAPPER"
 assert_grep "TC-MG-SRC-03 gate calls _classify_mergeable_gate" \

@@ -178,7 +178,7 @@ echo "=== PSC-S9: autonomous-dev.sh — rebind AFTER source lib-auth.sh ==="
 # podcast-curation review wrapper kept invoking claude despite
 # AGENT_REVIEW_CMD=kiro.)
 hit=$(awk '
-  /source "\$\{SCRIPT_DIR\}\/lib-auth\.sh"/ {
+  /source "\$\{LIB_DIR\}\/lib-auth\.sh"/ {
     found_lib_auth = NR
     next
   }
@@ -195,7 +195,7 @@ assert_eq "autonomous-dev.sh: AGENT_CMD=\$AGENT_DEV_CMD lands AFTER source lib-a
 
 # Also assert: rebind is NOT before lib-auth source (would be the bug shape).
 hit_pre=$(awk '
-  /source "\$\{SCRIPT_DIR\}\/lib-auth\.sh"/ {
+  /source "\$\{LIB_DIR\}\/lib-auth\.sh"/ {
     print "REACHED_LIB_AUTH"
     exit
   }
@@ -213,7 +213,7 @@ echo ""
 echo "=== PSC-S10: autonomous-review.sh — rebind AFTER source lib-auth.sh ==="
 # ---------------------------------------------------------------------------
 hit=$(awk '
-  /source "\$\{SCRIPT_DIR\}\/lib-auth\.sh"/ {
+  /source "\$\{LIB_DIR\}\/lib-auth\.sh"/ {
     found_lib_auth = NR
     next
   }
@@ -229,7 +229,7 @@ assert_eq "autonomous-review.sh: AGENT_CMD=\$AGENT_REVIEW_CMD lands AFTER source
   "MATCH" "$hit"
 
 hit_pre=$(awk '
-  /source "\$\{SCRIPT_DIR\}\/lib-auth\.sh"/ {
+  /source "\$\{LIB_DIR\}\/lib-auth\.sh"/ {
     print "REACHED_LIB_AUTH"
     exit
   }

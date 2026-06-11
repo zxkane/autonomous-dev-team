@@ -6,10 +6,25 @@
 # Source this file in autonomous-dev.sh and autonomous-review.sh.
 
 # Load project config via the shared helper (closes #58).
-# Note: ${BASH_SOURCE[0]:-$0} (NOT readlink -f) so the symlink-vendor
-# pattern resolves to the project's scripts/ rather than the skill
-# installation dir.
-_LIB_AUTH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# [INV-65] Two-dir resolution. _LIB_AUTH_DIR is the PROJECT-SIDE dir. It is
+# load-bearing for THREE things that MUST stay project-side:
+#   (1) load_autonomous_conf [INV-14],
+#   (2) the shared project-level `${_LIB_AUTH_DIR}/gh` wrapper symlink the
+#       *agent* invokes via `bash scripts/gh` (resolving it to the skill tree
+#       would put `gh` where the agent can't find it), and
+#   (3) spawning the project-side gh-token-refresh-daemon.sh / pointing the
+#       `gh` wrapper at the project-side gh-with-token-refresh.sh (both are
+#       entry points the installer symlinks into <project>/scripts/).
+# Once an entry sources us via its LIB_DIR (the skill tree), ${BASH_SOURCE[0]}
+# here IS the skill-tree path — so we take the project-side dir from the entry's
+# exported AUTONOMOUS_CONF_DIR, falling back to our own unresolved BASH_SOURCE
+# dir for direct/legacy sourcing. _LIB_AUTH_REAL_DIR is the REAL path (readlink
+# -f) used ONLY to source siblings (lib-config.sh, gh-app-token.sh) from the
+# skill tree so the project needs no per-lib symlink for them (#227).
+_LIB_AUTH_SELF="${BASH_SOURCE[0]:-$0}"
+_LIB_AUTH_OWN_DIR="$(cd "$(dirname "$_LIB_AUTH_SELF")" && pwd)"
+_LIB_AUTH_DIR="${AUTONOMOUS_CONF_DIR:-$_LIB_AUTH_OWN_DIR}"
+_LIB_AUTH_REAL_DIR="$(cd "$(dirname "$(readlink -f "$_LIB_AUTH_SELF")")" && pwd)"
 # `pwd` (no -P needed for this) always yields an absolute path. Assert it: the
 # `gh` wrapper symlink is created in a /tmp dir with ${_LIB_AUTH_DIR}/... as its
 # target, so a relative _LIB_AUTH_DIR would produce a symlink that resolves
@@ -19,7 +34,7 @@ if [[ "$_LIB_AUTH_DIR" != /* ]]; then
   return 1 2>/dev/null || exit 1
 fi
 # shellcheck source=lib-config.sh
-source "${_LIB_AUTH_DIR}/lib-config.sh"
+source "${_LIB_AUTH_REAL_DIR}/lib-config.sh"
 load_autonomous_conf "${_LIB_AUTH_DIR}" || true
 
 GH_AUTH_MODE="${GH_AUTH_MODE:-token}"
@@ -54,7 +69,10 @@ setup_github_auth() {
       return 1
     fi
 
-    source "${_LIB_AUTH_DIR}/gh-app-token.sh"
+    # [INV-65] sibling lib sourced from the REAL skill tree (no project symlink
+    # needed); the `gh` wrapper symlinks below stay on the project-side
+    # _LIB_AUTH_DIR (the agent invokes them via `bash scripts/gh`).
+    source "${_LIB_AUTH_REAL_DIR}/gh-app-token.sh"
 
     # Use a private directory for token files (not predictable /tmp paths).
     # This same per-run dir doubles as GH_WRAPPER_DIR below (the `gh` wrapper

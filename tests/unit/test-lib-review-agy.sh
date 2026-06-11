@@ -228,7 +228,7 @@ echo ""
 echo "=== TC-AGYQ-SRC: wrapper wiring (source-of-truth) ==="
 # ---------------------------------------------------------------------------
 assert_grep "TC-AGYQ-SRC-01 wrapper sources lib-review-agy.sh" \
-  'source "\$\{SCRIPT_DIR\}/lib-review-agy.sh"' "$WRAPPER"
+  'source "\$\{LIB_DIR\}/lib-review-agy.sh"' "$WRAPPER"
 assert_grep "TC-AGYQ-SRC-02 wrapper captures the per-agent agy log path (_agy_log_file)" \
   '_agy_log_file' "$WRAPPER"
 assert_grep "TC-AGYQ-SRC-03 wrapper calls _classify_agy_drop_reason" \

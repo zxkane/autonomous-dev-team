@@ -14,7 +14,16 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# [INV-65] Two-dir resolution. SCRIPT_DIR (the conf dir) is the dirname of the
+# UNRESOLVED ${BASH_SOURCE[0]:-$0} so a project-side symlink keeps it pointed at
+# the project's scripts/ where autonomous.conf lives [INV-14]; it also resolves
+# the project-side STABLE ENTRY scripts dispatch() invokes (dispatch-local.sh,
+# dispatch-remote-aws-ssm.sh). LIB_DIR is the REAL path (readlink -f) used for
+# sourcing sibling lib-*.sh (lib-config / lib-dispatch / lib-review-bots) and
+# gh-app-token.sh from the skill tree — no per-project lib symlink needed (#227).
+_SELF="${BASH_SOURCE[0]:-$0}"
+SCRIPT_DIR="$(cd "$(dirname "$_SELF")" && pwd)"
+LIB_DIR="$(cd "$(dirname "$(readlink -f "$_SELF")")" && pwd)"
 
 # Self-heal exec bits on the directly-invoked sibling scripts (closes #97).
 # Some installs strip +x — git mode 100644 propagated through the skills CLI
@@ -38,11 +47,12 @@ unset _need_exec
 # Must run before sourcing lib-dispatch.sh — lib-dispatch.sh enforces
 # REPO/REPO_OWNER/PROJECT_ID via `: "${VAR:?...}"`.
 # shellcheck source=lib-config.sh
-source "${SCRIPT_DIR}/lib-config.sh"
+source "${LIB_DIR}/lib-config.sh"
+# conf lookup stays on the UNRESOLVED SCRIPT_DIR (project's scripts/) — INV-14.
 load_autonomous_conf "${SCRIPT_DIR}" || true
 
 # shellcheck source=lib-dispatch.sh
-source "${SCRIPT_DIR}/lib-dispatch.sh"
+source "${LIB_DIR}/lib-dispatch.sh"
 
 : "${PROJECT_DIR:?PROJECT_DIR must be set in autonomous.conf}"
 
@@ -68,7 +78,7 @@ esac
 # typo here aborts the entire tick before any side-effect, with no retry
 # counted. Empty REVIEW_BOTS is allowed (bot enforcement disabled).
 # shellcheck source=lib-review-bots.sh
-source "${SCRIPT_DIR}/lib-review-bots.sh"
+source "${LIB_DIR}/lib-review-bots.sh"
 if ! parse_review_bots "${REVIEW_BOTS:-}" >/dev/null; then
   echo "[dispatcher-tick] FATAL: REVIEW_BOTS validation failed (see error above). Fix autonomous.conf before the next tick." >&2
   exit 1
@@ -95,7 +105,7 @@ if [[ "${GH_AUTH_MODE:-token}" == "app" ]]; then
   # mirror it here so set -u doesn't trip on `"$REPO_NAME"` below.
   : "${REPO_NAME:=${REPO##*/}}"
   # shellcheck source=gh-app-token.sh
-  source "${SCRIPT_DIR}/gh-app-token.sh"
+  source "${LIB_DIR}/gh-app-token.sh"
   _dispatcher_token=$(get_gh_app_token \
     "$DISPATCHER_APP_ID" "$DISPATCHER_APP_PEM" \
     "$REPO_OWNER" "$REPO_NAME") || {
@@ -125,7 +135,16 @@ dispatch() {
       bash "$PROJECT_DIR/scripts/dispatch-local.sh" "$@"
       ;;
     remote-aws-ssm)
-      bash "$SCRIPT_DIR/dispatch-remote-aws-ssm.sh" "$@"
+      # [INV-65] Invoke the remote driver via LIB_DIR (the real skill tree),
+      # NOT the project-side SCRIPT_DIR. dispatch-remote-aws-ssm.sh sources its
+      # sibling lib-ssm.sh from its OWN unresolved dir (${BASH_SOURCE[0]%/*},
+      # readlink-free for TC-EB-008's scrubbed PATH); invoking it project-side
+      # would set that dir to <project>/scripts/, where the installer no longer
+      # symlinks lib-ssm.sh — reintroducing the missing-lib crash. Running it
+      # from LIB_DIR keeps its BASH_SOURCE in the skill tree, where lib-ssm.sh
+      # is a real adjacent file. (dispatch-local.sh stays project-side: it
+      # sources its own libs from its own LIB_DIR, so the path is moot there.)
+      bash "$LIB_DIR/dispatch-remote-aws-ssm.sh" "$@"
       ;;
     *)
       # Should never reach here because of the upfront check, but be loud

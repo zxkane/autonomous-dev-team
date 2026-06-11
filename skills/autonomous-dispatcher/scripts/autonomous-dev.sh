@@ -14,13 +14,24 @@
 
 set -euo pipefail
 
-# [INV-14] Use BASH_SOURCE[0] (NOT readlink -f) so a project-side symlink
-# at <project>/scripts/autonomous-dev.sh resolves SCRIPT_DIR to the
-# project's scripts/. lib-agent.sh's load_autonomous_conf then finds
-# autonomous.conf via tier-2 (same dir).
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
-source "${SCRIPT_DIR}/lib-agent.sh"
-source "${SCRIPT_DIR}/lib-auth.sh"
+# [INV-65] Two-dir resolution. SCRIPT_DIR (the conf dir) is the dirname of the
+# UNRESOLVED ${BASH_SOURCE[0]:-$0} so a project-side symlink at
+# <project>/scripts/autonomous-dev.sh keeps it pointed at the project's
+# scripts/ — lib-agent.sh's load_autonomous_conf then finds autonomous.conf
+# via tier-2 (same dir) [INV-14]. LIB_DIR is the dirname of the REAL path
+# (readlink -f) so sibling libs source from the skill tree regardless of
+# whether the project symlinks each lib — kills the missing-lib-symlink crash
+# class (#227). On a real (non-symlink) invocation the two are identical.
+_SELF="${BASH_SOURCE[0]:-$0}"
+SCRIPT_DIR="$(cd "$(dirname "$_SELF")" && pwd)"
+LIB_DIR="$(cd "$(dirname "$(readlink -f "$_SELF")")" && pwd)"
+# Hand the project-side conf dir to the sourced libs: their own BASH_SOURCE now
+# points into the skill tree (we source via LIB_DIR), so they cannot recover the
+# project's scripts/ on their own. AUTONOMOUS_CONF_DIR keeps their conf lookup
+# (and lib-auth's project-side `gh` wrapper) anchored on the project [INV-65].
+export AUTONOMOUS_CONF_DIR="$SCRIPT_DIR"
+source "${LIB_DIR}/lib-agent.sh"
+source "${LIB_DIR}/lib-auth.sh"
 # Per-side AGENT_CMD override (INV-37). Empty-string fallback already
 # applied inside lib-agent.sh; this just rebinds AGENT_CMD so the case
 # statements in run_agent / resume_agent dispatch to the dev-side CLI.

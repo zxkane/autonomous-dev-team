@@ -67,7 +67,7 @@ echo "=== TC-REVIEW-SMOKE wrapper wiring (source-of-truth) ==="
 # ---------------------------------------------------------------------------
 # TC-REVIEW-SMOKE-040: the wrapper sources lib-review-smoke.sh.
 assert_grep "TC-REVIEW-SMOKE-040 wrapper sources lib-review-smoke.sh" \
-  'source "\$\{SCRIPT_DIR\}/lib-review-smoke\.sh"' "$WRAPPER"
+  'source "\$\{LIB_DIR\}/lib-review-smoke\.sh"' "$WRAPPER"
 
 # TC-REVIEW-SMOKE-041: Phase A.5 sits AFTER the INV-46 E2E command-lane call and
 # BEFORE the fan-out `for _agent in "${REVIEW_AGENTS_LIST` loop. Anchor on the

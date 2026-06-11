@@ -74,10 +74,21 @@ simulate_wrapper() {
   tmp_script=$(mktemp)
   {
     echo 'set -uo pipefail'
+    # [INV-65] the wrapper now resolves TWO dirs: SCRIPT_DIR (conf, project-side)
+    # and LIB_DIR (real-path, sibling sourcing). In this sandbox both point at
+    # the symlink dir, so injecting both is faithful. AUTONOMOUS_CONF_DIR is the
+    # var the wrapper exports for the libs' conf lookup; set it to the conf dir.
     echo "SCRIPT_DIR='$conf_dir'"
+    echo "LIB_DIR='$conf_dir'"
+    echo "AUTONOMOUS_CONF_DIR='$conf_dir'"
     echo "AUTONOMOUS_CONF='$conf_dir/autonomous.conf'"
     awk '
+      # Capture the source/rebind block. Skip the resolution preamble (the
+      # _SELF= / SCRIPT_DIR= / LIB_DIR= / export AUTONOMOUS_CONF_DIR= lines) —
+      # the harness injects those dirs itself so the sandbox symlinks resolve.
       /^SCRIPT_DIR=/ { capture = 1; next }
+      capture && /^LIB_DIR=/ { next }
+      capture && /^export AUTONOMOUS_CONF_DIR=/ { next }
       # End-anchor: any `: "${VAR:?...}"` style validation. Generalized
       # over a specific name so reordering or renaming the first
       # validated config var does not silently extend the capture into

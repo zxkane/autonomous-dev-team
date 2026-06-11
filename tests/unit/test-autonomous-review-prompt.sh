@@ -64,7 +64,7 @@ echo ""
 echo "=== TC-ARP-02: lib-review-bots.sh is sourced + validated ==="
 # ---------------------------------------------------------------------------
 assert_grep "sources lib-review-bots.sh" \
-  'source "\$\{SCRIPT_DIR\}/lib-review-bots\.sh"' "$WRAPPER"
+  'source "\$\{LIB_DIR\}/lib-review-bots\.sh"' "$WRAPPER"
 assert_grep "calls parse_review_bots at startup" \
   'parse_review_bots' "$WRAPPER"
 assert_grep "validation failure exits the wrapper (fail-fast)" \

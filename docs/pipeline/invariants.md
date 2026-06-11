@@ -233,7 +233,9 @@ Both topologies yield the same `SCRIPT_DIR` for symlinked invocations: the proje
 
 #### Required symlink manifest (shared-install topology)
 
-Each entry-point script sources sibling lib files via `${SCRIPT_DIR}/<sibling>.sh`. With `BASH_SOURCE[0]`-based `SCRIPT_DIR`, those resolve to the project's `scripts/` — which means the operator MUST symlink every transitive sibling, not just the entry-points. Symlinking only `dispatch-local.sh` would break with `No such file or directory: lib-config.sh`. The minimum set:
+> **Superseded for `lib-*.sh` by [INV-65] (#227).** As of #227, entry scripts source siblings from the REAL skill-tree path (`readlink -f`), so `lib-*.sh` no longer need a per-project symlink — `install-project-hooks.sh` symlinks ONLY the STABLE ENTRY manifest (everything that is NOT `lib-*.sh`) and prunes stale per-lib symlinks. The conf-lookup half of INV-14 below is unchanged: entries still resolve `autonomous.conf` from the UNRESOLVED project-side dir. The table below is retained for historical context (pre-#227 behavior) and still describes which files the installer manages — minus the `lib-*.sh` rows, which are now skill-tree-resolved.
+
+Each entry-point script sources sibling lib files via `${SCRIPT_DIR}/<sibling>.sh`. With `BASH_SOURCE[0]`-based `SCRIPT_DIR`, those resolve to the project's `scripts/` — which means the operator MUST symlink every transitive sibling, not just the entry-points. Symlinking only `dispatch-local.sh` would break with `No such file or directory: lib-config.sh`. The minimum set (pre-#227; `lib-*.sh` rows now superseded by [INV-65]):
 
 | File | Why it must be symlinked |
 |---|---|
@@ -2478,6 +2480,32 @@ This mirrors the production wrapper's [INV-38](#inv-38-per-side-agent_launcher-p
 - [INV-46](#inv-46-e2e-runs-once-in-a-dedicated-lane-before-the-review-fan-out--gated-not-per-agent) — Phase A (E2E lane), which runs immediately before Phase A.5.
 - [INV-41](#inv-41-per-agent-review-model--extra-args-resolution) / [INV-38](#inv-38-per-side-agent_launcher-precedence) / [INV-42](#inv-42-per-agent-review-launcher-resolution) — the per-agent model/launcher resolution the smoke mirrors.
 - [INV-24](#inv-24-review-wrapper-dead-detection-requires-both-pid_alive-miss-and-no-near-success-pr-signal) — the dead-detection / re-dispatch contract the FAIL-abort's stay-`reviewing` self-heal relies on.
+
+## INV-65: entry scripts resolve conf from the unresolved path and libs from the real skill-tree path (two-dir resolution)
+
+**Rule**: Every dispatcher / wrapper **entry script** MUST compute TWO directories from its own `${BASH_SOURCE[0]:-$0}` and use each for a distinct purpose:
+
+| Dir | Computed from | Used for |
+|---|---|---|
+| **CONF dir** (`SCRIPT_DIR`, or `_LIB_*_DIR`) | `dirname` of the **UNRESOLVED** `${BASH_SOURCE[0]:-$0}` (NOT `readlink -f`) | `load_autonomous_conf` / direct `autonomous.conf` lookup ([INV-14]); invoking the project-side `$PROJECT_DIR/scripts/dispatch-local.sh` the dispatcher hands the wrapper spawn to; and lib-auth's project-side `gh` wrapper symlink the agent calls via `bash scripts/gh` |
+| **LIB dir** (`LIB_DIR`, or `_LIB_*_REAL_DIR`) | `dirname` of `readlink -f "${BASH_SOURCE[0]:-$0}"` (the REAL skill-tree path) | every `source "${LIB_DIR}/lib-*.sh"` of a sibling lib; AND invoking sibling **entry executables that themselves source a lib from their own dir** — `dispatcher-tick.sh`'s `dispatch()` runs `dispatch-remote-aws-ssm.sh` via `LIB_DIR` so that driver's `${BASH_SOURCE[0]%/*}/lib-ssm.sh` resolves in the skill tree (the installer no longer symlinks `lib-ssm.sh` project-side) |
+
+`readlink -f` on a non-symlink is identity, so under direct invocation the two dirs coincide and behavior is unchanged. Under a project-side symlink, the CONF dir stays at `<project>/scripts/` (where `autonomous.conf` lives) while the LIB dir resolves into the skill tree (where the real `lib-*.sh` live). **Lib sourcing therefore stops consulting `<project>/scripts/` entirely — no per-project lib symlink is needed.**
+
+**A sourced lib cannot recover the project's `scripts/` on its own.** Once an entry sources `lib-agent.sh` / `lib-auth.sh` via its `LIB_DIR`, those libs' own `${BASH_SOURCE[0]}` is the skill-tree path — so their conf lookup would miss the project's `scripts/`. The entry therefore **exports `AUTONOMOUS_CONF_DIR`** (its own UNRESOLVED `SCRIPT_DIR`) before sourcing them; the libs use `${AUTONOMOUS_CONF_DIR:-<own-unresolved-dir>}` for `load_autonomous_conf` (and, in lib-auth, for the project-side `gh` wrapper + project-side daemon spawn). When `AUTONOMOUS_CONF_DIR` is unset (direct/legacy sourcing) the libs fall back to their own unresolved dir, so [INV-14] holds on both paths.
+
+**Why**: surfaced by #227. Pre-#227 every `lib-*.sh` required its own per-project symlink because entries sourced siblings via the project-side `SCRIPT_DIR`. When an upstream PR added a new lib (`lib-review-e2e.sh`, `lib-review-poll.sh`, `lib-review-mergeable.sh`, …), every consumer project's wrapper died on the first `source` of the missing file (`No such file or directory` → `set -e` exit), stranding the issue in `reviewing`/`in-progress` for hours until the operator re-ran `install-project-hooks.sh`. That was a documented operational hazard (the drift sibling of #153). [INV-65] removes the class **structurally**: lib sourcing no longer depends on per-project symlinks. The upcoming adapter refactor (which churns lib files) is the forcing function — it must land on this foundation.
+
+**Backward compatible**: a project still holding pre-#227 per-lib symlinks keeps working unchanged — `readlink -f` follows each symlink to the same real lib, so `LIB_DIR` lands in the skill tree either way; the stale per-lib symlinks are simply never read (and `install-project-hooks.sh` prunes them).
+
+**Producer**: the entry scripts (`autonomous-dev.sh`, `autonomous-review.sh`, `dispatch-local.sh`, `dispatcher-tick.sh`, `gh-token-refresh-daemon.sh`) and the two sibling-sourcing libs (`lib-agent.sh`, `lib-auth.sh`). `lib-config.sh` is unchanged — it never sources a sibling and never calls `readlink` (the #58 / [INV-14] contract is preserved verbatim; it consumes the CONF dir its caller passes).
+**Consumer**: every wrapper/dispatcher invocation, and `install-project-hooks.sh`, which now symlinks ONLY the STABLE ENTRY manifest (everything that is NOT `lib-*.sh`, MINUS the two `*-aws-ssm.sh` helpers — those source `lib-ssm.sh` from their own dir and are invoked from the skill tree, so a project-side symlink to them would crash on the pruned `lib-ssm.sh`; #227 P1) and prunes stale non-manifest symlinks (`lib-*.sh` and `*-aws-ssm.sh`).
+**Status**: **ENFORCED** in #227.
+**Test**: `tests/unit/test-entry-point-resolution.sh` (TC-ENTRY-SHIM-001..012) drives the two-dir snippet under direct / symlinked / nested-symlink / `bash -c` invocation, pins the missing-lib-symlink regression (a new lib with NO project symlink still sources), and locks the source-level contract on the production scripts. `tests/unit/test-entry-point-startup-e2e.sh` (TC-ENTRY-SHIM-030) drives the real `autonomous-dev.sh` startup with NO project lib symlinks. `tests/unit/test-install-project-hooks.sh` covers the manifest-only symlink + prune + `--doctor` + `--dry-run`. `tests/unit/test-symlink-resolution.sh` TC-CONTENT-006/007 are updated to the two-dir contract (conf lookup uses the unresolved dir; `readlink -f` is allowed for the LIB dir but `readlink -f "$0"` conf-dir form stays banned).
+
+**Cross-references**:
+- [INV-14](#inv-14-config-lookup-honors-symlink-vendor-pattern) — the conf-lookup half this extends. INV-14's "Required symlink manifest" is superseded for `lib-*.sh`: only STABLE ENTRY scripts need symlinking now.
+- [`dispatcher-flow.md` § install/topology](dispatcher-flow.md#pre-step-wrapper-exec-bit-self-heal-closes-97) — the consumer install topology updated for the manifest-only model.
 
 ## Adding a new invariant
 

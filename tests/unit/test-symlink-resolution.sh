@@ -235,19 +235,32 @@ DISPATCH_SCRIPT="$DISPATCHER_SCRIPTS/dispatch-local.sh"
 LIB_AGENT="$DISPATCHER_SCRIPTS/lib-agent.sh"
 LIB_AUTH="$DISPATCHER_SCRIPTS/lib-auth.sh"
 
-echo "TC-CONTENT-006: lib-agent.sh delegates config-loading to lib-config.sh (#58)"
-# Was: assert presence of '../../../scripts/autonomous.conf' fallback inline.
-# After PR-4 / #58: that broken-depth fallback is replaced by lib-config.sh's
-# correct PROJECT_DIR-based fallback. Assert lib-agent.sh just delegates.
+echo "TC-CONTENT-006: lib-agent.sh delegates config-loading to lib-config.sh (#58, INV-65 two-dir)"
+# Was (#58): assert lib-agent.sh has NO readlink -f at all. After #227 / [INV-65]
+# that ban is too broad: lib-agent.sh now legitimately uses `readlink -f` to
+# compute the REAL-path dir (_LIB_AGENT_REAL_DIR) it sources lib-config.sh from,
+# so the sibling no longer needs a per-project symlink. The #58 invariant that
+# MUST still hold is narrower: the CONF lookup (load_autonomous_conf) must
+# receive the UNRESOLVED dir, never the realpath dir, and no `readlink -f "$0"`
+# conf-dir pattern may reappear.
 if [[ -f "$LIB_AGENT" ]]; then
   LIB_CONTENT=$(cat "$LIB_AGENT")
   assert_contains "lib-agent.sh sources lib-config.sh" 'lib-config.sh' "$LIB_CONTENT"
   assert_contains "lib-agent.sh calls load_autonomous_conf" 'load_autonomous_conf' "$LIB_CONTENT"
-  if grep -v '^[[:space:]]*#' "$LIB_AGENT" | grep -q 'readlink -f'; then
-    echo -e "  ${RED}FAIL${NC}: lib-agent.sh has a readlink -f call outside comments (#58 regression)"
+  # INV-14 preserved: conf lookup must use the UNRESOLVED dir, not the realpath one.
+  if grep -nE 'load_autonomous_conf[[:space:]]+"\$\{?_LIB_AGENT_REAL_DIR' "$LIB_AGENT" >/dev/null; then
+    echo -e "  ${RED}FAIL${NC}: lib-agent.sh passes the realpath dir to load_autonomous_conf (INV-14 regression)"
     ((FAIL++))
   else
-    echo -e "  ${GREEN}PASS${NC}: lib-agent.sh has no readlink -f call (#58 fix in place)"
+    echo -e "  ${GREEN}PASS${NC}: lib-agent.sh conf lookup uses the unresolved dir (INV-14 preserved)"
+    ((PASS++))
+  fi
+  # The #58 ban that still applies: no `readlink -f "$0"` conf-dir pattern.
+  if grep -qE 'readlink -f "\$0"' "$LIB_AGENT"; then
+    echo -e "  ${RED}FAIL${NC}: lib-agent.sh uses readlink -f \"\$0\" (#58 conf-dir regression)"
+    ((FAIL++))
+  else
+    echo -e "  ${GREEN}PASS${NC}: lib-agent.sh has no readlink -f \"\$0\" conf-dir call (#58 mitigation intact)"
     ((PASS++))
   fi
 else
@@ -255,16 +268,34 @@ else
   ((FAIL++))
 fi
 
-echo "TC-CONTENT-007: lib-auth.sh delegates config-loading to lib-config.sh (#58)"
+echo "TC-CONTENT-007: lib-auth.sh delegates config-loading to lib-config.sh (#58, INV-65 two-dir)"
 if [[ -f "$LIB_AUTH" ]]; then
   LIB_AUTH_CONTENT=$(cat "$LIB_AUTH")
   assert_contains "lib-auth.sh sources lib-config.sh" 'lib-config.sh' "$LIB_AUTH_CONTENT"
   assert_contains "lib-auth.sh calls load_autonomous_conf" 'load_autonomous_conf' "$LIB_AUTH_CONTENT"
-  if grep -qE '^[^#]*readlink -f' "$LIB_AUTH"; then
-    echo -e "  ${RED}FAIL${NC}: lib-auth.sh has a readlink -f call (#58 regression)"
+  # INV-14 preserved: conf lookup + the `gh` wrapper symlink stay on the
+  # UNRESOLVED _LIB_AUTH_DIR; only sibling sourcing uses _LIB_AUTH_REAL_DIR.
+  if grep -nE 'load_autonomous_conf[[:space:]]+"\$\{?_LIB_AUTH_REAL_DIR' "$LIB_AUTH" >/dev/null; then
+    echo -e "  ${RED}FAIL${NC}: lib-auth.sh passes the realpath dir to load_autonomous_conf (INV-14 regression)"
     ((FAIL++))
   else
-    echo -e "  ${GREEN}PASS${NC}: lib-auth.sh has no readlink -f call (#58 fix in place)"
+    echo -e "  ${GREEN}PASS${NC}: lib-auth.sh conf lookup uses the unresolved dir (INV-14 preserved)"
+    ((PASS++))
+  fi
+  # The `gh` wrapper symlink target must stay on the UNRESOLVED _LIB_AUTH_DIR
+  # (the agent invokes it via `bash scripts/gh` from the project side).
+  if grep -qE 'ln -s.*_LIB_AUTH_REAL_DIR.*/gh' "$LIB_AUTH"; then
+    echo -e "  ${RED}FAIL${NC}: lib-auth.sh creates the gh wrapper via the realpath dir (breaks bash scripts/gh)"
+    ((FAIL++))
+  else
+    echo -e "  ${GREEN}PASS${NC}: lib-auth.sh gh wrapper symlink stays project-side"
+    ((PASS++))
+  fi
+  if grep -qE 'readlink -f "\$0"' "$LIB_AUTH"; then
+    echo -e "  ${RED}FAIL${NC}: lib-auth.sh uses readlink -f \"\$0\" (#58 conf-dir regression)"
+    ((FAIL++))
+  else
+    echo -e "  ${GREEN}PASS${NC}: lib-auth.sh has no readlink -f \"\$0\" conf-dir call (#58 mitigation intact)"
     ((PASS++))
   fi
 else

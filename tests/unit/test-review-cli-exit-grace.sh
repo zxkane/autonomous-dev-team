@@ -301,7 +301,7 @@ echo ""
 echo "=== TC-CXG-SRC: wrapper loop wiring (source-of-truth greps) ==="
 # ---------------------------------------------------------------------------
 assert_grep "TC-CXG-SRC-01 wrapper sources lib-review-poll.sh" \
-  'source "\$\{SCRIPT_DIR\}/lib-review-poll\.sh"' "$WRAPPER"
+  'source "\$\{LIB_DIR\}/lib-review-poll\.sh"' "$WRAPPER"
 assert_grep "TC-CXG-SRC-02 wrapper calls _run_verdict_poll_loop (loop delegated to lib)" \
   '^_run_verdict_poll_loop$' "$WRAPPER"
 # Regression: the immediate `rc -ne 0 → unavailable` short-circuit inside the
