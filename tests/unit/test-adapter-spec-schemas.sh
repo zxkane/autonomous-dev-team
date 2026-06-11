@@ -309,6 +309,27 @@ run_jq_suite() {
   else
     bad "valid-verdict-drop negative does not carry the forbidden review+valid+non-deciding combo"
   fi
+
+  # 12. adapter-result: a review no-verdict result with timedOut=true MUST be
+  #     timeout-veto regardless of rc (§4.4; #229 review finding — the conditional
+  #     keys off timedOut, not rc). jq confirms the negative is review+timedOut+
+  #     no-verdict with a non-veto vote.
+  local f12="$EXAMPLE_DIR/adapter-result.negative.timeout-vote-wrong.json"
+  if jq -e '(.mode == "review") and (.process.timedOut == true) and (.verdict.state | IN("absent","malformed")) and (.voteEligibility.state != "timeout-veto")' "$f12" >/dev/null 2>&1; then
+    ok "timeout-vote-wrong negative is review+timedOut+no-verdict with a non-veto vote (correctly non-conformant)"
+  else
+    bad "timeout-vote-wrong negative does not carry the forbidden review+timedOut+non-veto combo"
+  fi
+
+  # 13. adapter-result: Clause P1 consistency — timedOut=true requires rc in
+  #     {124,137} (#229 review finding). jq confirms the negative is timedOut=true
+  #     with a non-124/137 rc.
+  local f13="$EXAMPLE_DIR/adapter-result.negative.timedout-rc-inconsistent.json"
+  if jq -e '(.process.timedOut == true) and ((.process.rc | IN(124,137)) | not)' "$f13" >/dev/null 2>&1; then
+    ok "timedout-rc-inconsistent negative is timedOut=true with a non-124/137 rc (correctly non-conformant)"
+  else
+    bad "timedout-rc-inconsistent negative does not carry the forbidden timedOut+inconsistent-rc combo"
+  fi
 }
 
 # ---------------------------------------------------------------------------

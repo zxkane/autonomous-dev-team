@@ -169,14 +169,20 @@ all four orthogonal axes. Schema:
 How the CLI process exited.
 
 - **Clause P1.** `rc` is the raw exit code. The adapter **MUST** set `timedOut =
-  true` iff the process was killed by the wall-clock cap — i.e. `rc ∈ {124,
-  137}` (`timeout` TERM-expiry / `--kill-after` SIGKILL). (INV-48.) **The schema
-  enforces the review-mode no-verdict case** with a conditional: when `mode =
-  review` AND `rc ∈ {124, 137}` AND `verdict.state ∈ {absent, malformed}`,
-  `process.timedOut` MUST be `true` AND `voteEligibility.state` MUST be
-  `timeout-veto` — so a timed-out review no-verdict result cannot validate as
-  `drop`/`unavailable` (negative fixture
-  [`adapter-result.negative.timeout-not-veto.json`](schemas/examples/adapter-result.negative.timeout-not-veto.json)).
+  true` **iff** the process was killed by the wall-clock cap — i.e. `rc ∈ {124,
+  137}` (`timeout` TERM-expiry / `--kill-after` SIGKILL). (INV-48.) This is a
+  **biconditional**, and the schema enforces it as an rc↔timedOut consistency
+  rule: `timedOut = true` with a non-`{124,137}` rc, **and** `timedOut = false`
+  with `rc ∈ {124, 137}`, are both rejected (negative fixture
+  [`adapter-result.negative.timedout-rc-inconsistent.json`](schemas/examples/adapter-result.negative.timedout-rc-inconsistent.json)).
+- **Clause P1 (timeout-veto derivation).** **The schema enforces the review-mode
+  no-verdict timeout case** with a conditional keyed off **`timedOut`** (not the
+  raw rc, so every timed-out result is covered): when `mode = review` AND
+  `process.timedOut = true` AND `verdict.state ∈ {absent, malformed}`,
+  `voteEligibility.state` MUST be `timeout-veto` — so a timed-out review
+  no-verdict result cannot validate as `pass`/`fail`/`drop` (negative fixtures
+  [`adapter-result.negative.timeout-vote-wrong.json`](schemas/examples/adapter-result.negative.timeout-vote-wrong.json)
+  and [`adapter-result.negative.timeout-not-veto.json`](schemas/examples/adapter-result.negative.timeout-not-veto.json)).
   The conditional is **gated on `mode = review`**: a non-review
   (`dev-new`/`dev-resume`/`e2e-browser`) timeout result is `not-applicable` (it
   does not vote — §4.4) and is a valid AdapterResult (golden

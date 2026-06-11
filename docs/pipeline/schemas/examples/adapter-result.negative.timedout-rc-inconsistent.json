@@ -1,0 +1,9 @@
+{
+  "spec_version": 1,
+  "adapter": "codex",
+  "mode": "review",
+  "process": { "rc": 1, "signal": "SIGTERM", "timedOut": true },
+  "provider": { "class": "none" },
+  "verdict": { "state": "absent", "payloadRef": null },
+  "voteEligibility": { "state": "pass" }
+}

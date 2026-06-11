@@ -44,7 +44,9 @@ Example fixtures follow `<schema-prefix>.{golden|negative}.<label>.json`:
 | `adapter-result` | `negative.flat-enum` | **flat failure enum, missing the four axes** (issue-mandated) |
 | `adapter-result` | `negative.bad-provider-class` | `provider.class` not in enum (and evidence missing) |
 | `adapter-result` | `negative.provider-evidence-missing` | `provider.class != none` without `evidence` |
-| `adapter-result` | `negative.timeout-not-veto` | rc 124 + no verdict + `timedOut:false` + `vote:drop` — Clause P1 timeout-veto conditional (review finding) |
+| `adapter-result` | `negative.timeout-not-veto` | review + rc 124 + `timedOut:false` — Clause P1 rc↔timedOut consistency (review finding) |
+| `adapter-result` | `negative.timeout-vote-wrong` | review + `timedOut:true` + no verdict + `vote:drop` — timeout-veto keyed off `timedOut` (review finding) |
+| `adapter-result` | `negative.timedout-rc-inconsistent` | `timedOut:true` + rc 1 (non-124/137) — Clause P1 biconditional (review finding) |
 | `adapter-result` | `negative.valid-no-payloadref` | `verdict.state:valid` with null `payloadRef` — Clause V0 conditional (review finding) |
 | `adapter-result` | `negative.noverdict-not-drop` | review + rc 0 + no verdict + `timedOut:false` + `vote:pass` — §4.4 drop conditional (review finding) |
 | `adapter-result` | `negative.empty-evidence` | `provider.class:quota` with empty `evidence` — Clause PR1 `minLength` (review finding) |
