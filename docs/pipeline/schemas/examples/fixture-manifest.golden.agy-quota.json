@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "adapter": "agy",
+  "mode": "review",
+  "input": {
+    "promptBytes": 3500,
+    "model": "sonnet[1m]",
+    "env": {
+      "AGENT_REVIEW_MODEL_AGY": "claude-sonnet-4.6"
+    }
+  },
+  "command": {
+    "argv": ["agy", "--model", "claude-sonnet-4.6", "--log-file", "<logfile>", "-p", "-"],
+    "stdinSha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+    "rc": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "files": {
+    "agyLog": {
+      "path": "fixtures/agy-quota/agy.log",
+      "role": "log"
+    }
+  },
+  "expect": {
+    "providerClass": "quota",
+    "verdictState": "absent",
+    "vote": "drop",
+    "retryable": false
+  }
+}

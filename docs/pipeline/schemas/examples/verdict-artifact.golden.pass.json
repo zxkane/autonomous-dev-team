@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "verdict": "PASS",
+  "blockingFindings": [],
+  "nonBlockingFindings": [
+    { "title": "Consider extracting the poll loop into a helper", "file": "skills/autonomous-dispatcher/scripts/autonomous-review.sh", "line": 1440 }
+  ],
+  "evidence": {
+    "acCoverage": {
+      "AC-1 reader can answer 429 question from spec": "pass",
+      "AC-2 all four schemas have passing tests": "pass"
+    },
+    "e2eReport": {
+      "gate": "not-run",
+      "mode": "command",
+      "summary": "Spec-only PR; CI runs the schema validation suite."
+    }
+  },
+  "runId": "01c9c077-febc-4cf3-a716-ee66ae584135",
+  "agent": "claude",
+  "model": "claude-sonnet-4.6"
+}

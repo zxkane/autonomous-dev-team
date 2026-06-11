@@ -1,0 +1,43 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/zxkane/autonomous-dev-team/docs/pipeline/schemas/error-envelope.schema.json",
+  "title": "ErrorEnvelope",
+  "description": "The operator-facing error format an adapter emits for a failure that needs human attention. The spec REQUIRES config-class failures (provider.class=config: codex no-worktree, bad model id, missing trust flag, kiro/agy auth) to surface on the GitHub issue or as a dispatcher alert — NEVER log-only. `remediation` is mandatory: an error an operator cannot act on is NON-conformant.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "code", "problem", "cause", "remediation"],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "code": {
+      "description": "Stable, machine-readable error code (UPPER_SNAKE). e.g. CODEX_NO_WORKTREE, KIRO_AUTH_FAILED, AGY_QUOTA_EXHAUSTED, MODEL_UNKNOWN.",
+      "type": "string",
+      "pattern": "^[A-Z][A-Z0-9_]*$"
+    },
+    "problem": {
+      "description": "One-line statement of what went wrong, operator-facing.",
+      "type": "string",
+      "minLength": 1
+    },
+    "cause": {
+      "description": "The underlying cause / evidence (the sanitized reason string, e.g. \"Antigravity 429: daily quota reached; resets in 33h48m45s\").",
+      "type": "string",
+      "minLength": 1
+    },
+    "remediation": {
+      "description": "The concrete action the operator MUST take (e.g. \"run `kiro-cli login --use-device-flow` on the execution host\"). MUST be present — an error envelope without remediation is NON-conformant.",
+      "type": "string",
+      "minLength": 1
+    },
+    "doc": {
+      "description": "Optional pointer to the authoritative doc (an INV anchor or a docs/pipeline path).",
+      "type": "string"
+    },
+    "surface": {
+      "description": "Where this envelope was surfaced. Config-class failures MUST use issue-comment or dispatcher-alert, never log-only.",
+      "type": "string",
+      "enum": ["issue-comment", "dispatcher-alert", "log-only"]
+    }
+  }
+}

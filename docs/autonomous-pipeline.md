@@ -302,6 +302,15 @@ Both default to empty. Tokenization uses `eval` so quoted multi-word values surv
 
 For canonical per-CLI values, see the per-CLI blocks at the bottom of `scripts/autonomous.conf.example`.
 
+> **The normative adapter contract** — what each CLI's adapter MUST return across
+> the `dev-new` / `dev-resume` / `review` / `e2e-browser` modes (the four-axis
+> `AdapterResult`, the verdict-artifact / fixture-manifest / error-envelope JSON
+> Schemas, and the per-CLI mapping appendix) — lives in
+> [`docs/pipeline/adapter-spec.md`](pipeline/adapter-spec.md) (`spec_version: 1`,
+> [INV-63](pipeline/invariants.md#inv-63-adapter-conformance-is-spec-defined)).
+> Today's `lib-agent.sh` + `lib-review-*.sh` behavior maps onto it as described
+> there; later adapter work implements it.
+
 ## Key Files
 
 | File | Description |

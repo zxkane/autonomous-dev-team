@@ -1,0 +1,108 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/zxkane/autonomous-dev-team/docs/pipeline/schemas/verdict-artifact.schema.json",
+  "title": "VerdictArtifact",
+  "description": "The verdict a review-mode adapter produces. This is the verdict-as-data target the redesign converges on: it folds the INV-49 AC-coverage map and the INV-46 E2E report into typed sub-objects under `evidence`, replacing today's parallel ad-hoc fences (the `Review Session:`/`Review Agent:` comment trailer, the `ac-coverage:begin…end` HTML fence, the free-form E2E evidence comment). Written atomically (tmp + rename); readers MUST ignore writes that land after the artifact is first read.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "verdict", "runId", "agent"],
+  "properties": {
+    "schema_version": {
+      "description": "Artifact schema version. MUST be present (a verdict artifact without schema_version is NON-conformant) and MUST be 1 for this revision.",
+      "const": 1
+    },
+    "verdict": {
+      "description": "The decision. PASS=zero blocking findings (the wrapper then submits --approve + merge after its gates); FAIL=>=1 blocking finding (the wrapper submits --request-changes). There is no middle ground (INV-40 / decision gate).",
+      "type": "string",
+      "enum": ["PASS", "FAIL"]
+    },
+    "blockingFindings": {
+      "description": "Findings that block the merge. A non-empty array REQUIRES verdict=FAIL.",
+      "type": "array",
+      "items": { "$ref": "#/definitions/finding" },
+      "default": []
+    },
+    "nonBlockingFindings": {
+      "description": "Advisory findings that do not block the merge.",
+      "type": "array",
+      "items": { "$ref": "#/definitions/finding" },
+      "default": []
+    },
+    "evidence": {
+      "description": "Typed evidence the verdict rests on. Both sub-objects are optional; when present they MUST match their typed shape rather than being smuggled in as a free-form string.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "acCoverage": {
+          "description": "INV-49 acceptance-criteria coverage map: a flat object keyed by criterion id/text with values exactly \"pass\" or \"fail\". An empty or absent map means the free-form double-check was used (so {} is accepted).",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "enum": ["pass", "fail"]
+          }
+        },
+        "e2eReport": {
+          "description": "INV-46 E2E lane report (run once per review, not per-agent). gate=the dual-signal hard-gate outcome.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["gate"],
+          "properties": {
+            "gate": {
+              "type": "string",
+              "enum": ["pass", "fail", "skipped", "not-run"]
+            },
+            "mode": {
+              "type": "string",
+              "enum": ["command", "browser"]
+            },
+            "summary": {
+              "description": "Human-readable evidence summary (the free-form markdown table the review agents read).",
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "runId": {
+      "description": "The minted session UUID for this review agent (the `Review Session:` trailer value, INV-20).",
+      "type": "string",
+      "minLength": 1
+    },
+    "agent": {
+      "description": "The agent identity that produced this verdict (the `Review Agent:` discriminator, INV-40). The AGENT_CMD short name (e.g. \"codex\", \"agy\").",
+      "type": "string",
+      "minLength": 1
+    },
+    "model": {
+      "description": "The resolved model id this verdict was produced with (INV-60 — shown inline on the `Review Agent:` line). May contain spaces/parens/dots (e.g. \"Gemini 3.5 Flash (High)\", \"claude-sonnet-4.6\").",
+      "type": "string"
+    }
+  },
+  "allOf": [
+    {
+      "description": "A non-empty blockingFindings array forces verdict=FAIL.",
+      "if": {
+        "properties": {
+          "blockingFindings": { "type": "array", "minItems": 1 }
+        },
+        "required": ["blockingFindings"]
+      },
+      "then": {
+        "properties": { "verdict": { "const": "FAIL" } }
+      }
+    }
+  ],
+  "definitions": {
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title"],
+      "properties": {
+        "title": { "type": "string", "minLength": 1 },
+        "detail": { "type": "string" },
+        "file": { "type": "string" },
+        "line": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

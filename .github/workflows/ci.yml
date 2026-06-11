@@ -13,6 +13,13 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
+      # Lets test-adapter-spec-schemas.sh (#229 / INV-63) run the full Draft-07
+      # path instead of the weaker jq structural fallback. The test passes
+      # either way; installing jsonschema makes CI exercise the strong path so
+      # the conditional/negative coverage is actually enforced in CI.
+      - name: Install python jsonschema (for adapter-spec schema validation)
+        run: python3 -m pip install --quiet jsonschema || pip3 install --quiet jsonschema || true
+
       - name: Run all unit tests
         run: |
           failed=0

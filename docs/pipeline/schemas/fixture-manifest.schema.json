@@ -1,0 +1,107 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/zxkane/autonomous-dev-team/docs/pipeline/schemas/fixture-manifest.schema.json",
+  "title": "FixtureManifest",
+  "description": "A per-adapter x per-mode conformance fixture. The (future) standalone conformance runner replays `command` against a stubbed CLI, feeds `input`, and asserts the adapter's AdapterResult matches `expect`. This schema is the contract that runner consumes; the runner itself is a follow-up issue and is out of scope here.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "adapter", "mode", "input", "command", "expect"],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "adapter": {
+      "description": "The agent-CLI under test.",
+      "type": "string",
+      "enum": ["claude", "codex", "kiro", "agy", "gemini", "opencode"]
+    },
+    "mode": {
+      "type": "string",
+      "enum": ["dev-new", "dev-resume", "review", "e2e-browser"]
+    },
+    "input": {
+      "description": "The invoke() inputs (prompt is referenced by byte-length rather than inlined so the manifest stays small and the prompt body can be a separate fixture file).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["promptBytes", "model", "env"],
+      "properties": {
+        "promptBytes": {
+          "description": "Length in bytes of the prompt fed on stdin (INV-34).",
+          "type": "integer",
+          "minimum": 0
+        },
+        "model": {
+          "description": "The model id passed to invoke() (the resolved per-agent review/dev model).",
+          "type": "string"
+        },
+        "env": {
+          "description": "Environment variables the adapter reads (e.g. AGENT_REVIEW_EXTRA_ARGS_CODEX, CODEX_REVIEW_NO_WORKTREE_RC). Values are recorded verbatim.",
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        }
+      }
+    },
+    "command": {
+      "description": "The CLI invocation the stub records: the exact argv, the stdin hash, and the canned process result.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["argv", "stdinSha256", "rc", "stdout", "stderr"],
+      "properties": {
+        "argv": {
+          "description": "The full argv the adapter assembled (e.g. [\"codex\", \"review\", \"<prompt>\"] for codex review, INV-62).",
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "stdinSha256": {
+          "description": "SHA-256 (hex) of the bytes the adapter wrote to the CLI's stdin. Pins the INV-34 stdin-fed-prompt contract.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "rc": { "type": "integer" },
+        "stdout": { "type": "string" },
+        "stderr": { "type": "string" }
+      }
+    },
+    "files": {
+      "description": "Sidecar / log / artifact files the stub stages or the adapter is expected to write (e.g. the codex thread-id sidecar, the agy --log-file, the E2E AC-coverage sidecar). Keyed by logical name; value is the file path (relative to the fixture root) and an optional expected-content hash.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path"],
+        "properties": {
+          "path": { "type": "string" },
+          "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "role": {
+            "type": "string",
+            "enum": ["sidecar", "log", "artifact", "input"]
+          }
+        }
+      }
+    },
+    "expect": {
+      "description": "The AdapterResult axes the adapter MUST produce for this fixture. The runner asserts these against the real adapter's output.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["providerClass", "verdictState", "vote", "retryable"],
+      "properties": {
+        "providerClass": {
+          "type": "string",
+          "enum": ["none", "quota", "auth", "config", "transient"]
+        },
+        "verdictState": {
+          "type": "string",
+          "enum": ["valid", "absent", "malformed"]
+        },
+        "vote": {
+          "type": "string",
+          "enum": ["pass", "fail", "drop", "timeout-veto", "not-applicable"]
+        },
+        "retryable": {
+          "description": "Whether the dispatcher MAY re-dispatch this adapter for the same work (true for transient; false for quota/auth/config until the operator acts).",
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

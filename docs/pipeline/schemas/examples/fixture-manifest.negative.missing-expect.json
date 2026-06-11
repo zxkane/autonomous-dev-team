@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "adapter": "kiro",
+  "mode": "dev-new",
+  "input": {
+    "promptBytes": 2048,
+    "model": "claude-sonnet-4.6",
+    "env": {}
+  },
+  "command": {
+    "argv": ["kiro-cli", "chat", "--trust-all-tools"],
+    "stdinSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "rc": 0,
+    "stdout": "",
+    "stderr": ""
+  }
+}

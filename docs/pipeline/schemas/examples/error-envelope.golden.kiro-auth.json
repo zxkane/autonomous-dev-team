@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "code": "KIRO_AUTH_FAILED",
+  "problem": "kiro review agent could not authenticate on the execution host",
+  "cause": "auth-failed (browser/device-flow login required on the execution host)",
+  "remediation": "Run `kiro-cli login --use-device-flow` on the execution host, then re-dispatch the review.",
+  "doc": "docs/pipeline/invariants.md#inv-61",
+  "surface": "issue-comment"
+}

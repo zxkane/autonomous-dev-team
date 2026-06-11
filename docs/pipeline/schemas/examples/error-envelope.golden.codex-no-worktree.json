@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "code": "CODEX_NO_WORKTREE",
+  "problem": "codex review lane could not prepare a PR-branch worktree to scope the diff",
+  "cause": "PR-branch checkout failed before `codex review` could run (fail-closed sentinel rc 70)",
+  "remediation": "Check the PR branch exists and the execution host can fetch it; inspect the review log for the git error, then re-dispatch.",
+  "doc": "docs/pipeline/invariants.md#inv-62",
+  "surface": "dispatcher-alert"
+}
