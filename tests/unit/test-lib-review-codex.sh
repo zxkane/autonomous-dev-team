@@ -235,6 +235,17 @@ assert_eq "TC-CXRS-LAUNCH-05b review argv has no 'exec' element" "0" "$_has_exec
 
 # TC-CXRS-LAUNCH-06 — extra-args appended as DISTINCT elements (uses the real
 # _parse_extra_args via lib-agent.sh). `-s danger-full-access` → two elements.
+#
+# #223 NOTE — passthrough-but-classified (NOT pre-filtered): `codex review`
+# REJECTS `-s` with an exit-2 clap error (`-s` is a `codex exec`-only sandbox flag;
+# #218 itself verified this). This row still asserts `-s danger-full-access` lands
+# in the argv AS DISTINCT ELEMENTS because the #223 fix keeps `_codex_review_argv`
+# a FAITHFUL PASSTHROUGH — it catches the deterministic rejection at RUNTIME
+# (`_codex_review_argv_rejection_flag` in the re-run loop) and surfaces a
+# `config-error:<flag>` drop reason, rather than silently mutating an
+# operator-supplied argv (flag-filtering was rejected as too magical — see the
+# design doc). The runtime classification is pinned by the TC-CXRS-CFG-* block
+# below; this row only pins that the argv builder does not drop/rewrite the flags.
 (
   source "$AGENT_LIB" 2>/dev/null
   source "$LIB"
@@ -244,7 +255,7 @@ assert_eq "TC-CXRS-LAUNCH-05b review argv has no 'exec' element" "0" "$_has_exec
 # count elements + assert -s and its value are SEPARATE elements
 argv_xa_count=$(tr -cd '\0' < "$TMP/argv_xa.nul" | wc -c | tr -d ' ')
 if grep -qzF -- '-s' "$TMP/argv_xa.nul" && grep -qzF -- 'danger-full-access' "$TMP/argv_xa.nul"; then
-  echo -e "  ${GREEN}PASS${NC}: TC-CXRS-LAUNCH-06 extra-args appended as distinct elements (-s + value)"; PASS=$((PASS + 1))
+  echo -e "  ${GREEN}PASS${NC}: TC-CXRS-LAUNCH-06 extra-args appended as distinct elements (-s + value; passthrough, runtime-classified per #223)"; PASS=$((PASS + 1))
 else
   echo -e "  ${RED}FAIL${NC}: TC-CXRS-LAUNCH-06 extra-args not present as distinct elements"; FAIL=$((FAIL + 1))
 fi
@@ -506,6 +517,207 @@ assert_eq "TC-CXRS-DROP-13 empty token → empty phrase" "" "$(_codex_drop_reaso
 
 # ---------------------------------------------------------------------------
 echo ""
+echo "=== TC-CXRS-CFG: deterministic argv rejection → config-error, no re-runs (#223) ==="
+# ---------------------------------------------------------------------------
+# A `codex exec`-era flag (e.g. `-s danger-full-access`) left in the per-agent
+# review extra-args is spliced verbatim into the `codex review` argv and rejected
+# with an exit-2 clap parse error. The pre-#223 re-run controller misread this
+# deterministic failure as a transient stream blip, re-ran the identical argv to
+# CODEX_REVIEW_MAX_RERUNS exhaustion, and dropped codex `unavailable` with no
+# reason naming the flag. The fix: recognize the clap signature on the FIRST run
+# (skip remaining re-runs), and surface a distinct `config-error:<flag>` drop
+# reason. The argv builder is UNCHANGED (faithful passthrough — see TC-CXRS-LAUNCH-06).
+CF="$TMP/cfg.txt"
+
+# --- _codex_review_argv_rejection_flag (the clap-signature detector) ---
+# TC-CXRS-CFG-DET-01 — unexpected-argument clap error → echoes the rejected flag
+cp "$FIXTURES/codex-review-stdout-config-error.txt" "$CF"
+assert_eq "TC-CXRS-CFG-DET-01 unexpected argument '-s' → flag '-s'" \
+  "-s" "$(_codex_review_argv_rejection_flag "$CF")"
+# TC-CXRS-CFG-DET-02 — invalid-value clap error → echoes the option name
+printf '%s\n' "error: invalid value 'x' for '--enable <CHECK>'" 'Usage: codex review [OPTIONS] [PROMPT]' > "$CF"
+assert_eq "TC-CXRS-CFG-DET-02 invalid value for '--enable' → flag '--enable'" \
+  "--enable" "$(_codex_review_argv_rejection_flag "$CF")"
+# TC-CXRS-CFG-DET-03 — prose mention WITHOUT a leading `error:` clap line → no match
+printf '%s\n' 'The review found no unexpected argument handling issues.' 'Looks good to merge.' > "$CF"
+assert_eq "TC-CXRS-CFG-DET-03 prose 'unexpected argument' (no error: line) → empty (no false match)" \
+  "" "$(_codex_review_argv_rejection_flag "$CF")"
+# TC-CXRS-CFG-DET-04 — a stream-error capture is NOT a clap rejection
+cp "$FIXTURES/codex-review-stdout-stream-error.txt" "$CF"
+assert_eq "TC-CXRS-CFG-DET-04 stream-error capture → empty (not a clap rejection)" \
+  "" "$(_codex_review_argv_rejection_flag "$CF")"
+# TC-CXRS-CFG-DET-05 — empty / missing / empty-arg → empty, rc 0 (fail-safe)
+: > "$CF"
+assert_eq "TC-CXRS-CFG-DET-05a empty file → empty" "" "$(_codex_review_argv_rejection_flag "$CF")"
+assert_eq "TC-CXRS-CFG-DET-05b missing file → empty" "" "$(_codex_review_argv_rejection_flag "/nonexistent/$$")"
+assert_eq "TC-CXRS-CFG-DET-05c empty arg → empty" "" "$(_codex_review_argv_rejection_flag "")"
+# TC-CXRS-CFG-DET-06 — bare call under set -euo pipefail with a no-match capture → no abort
+cfgdet06=$(
+  set -euo pipefail
+  source "$LIB"
+  printf '%s\n' 'clean review, nothing blocking' > "$CF"
+  out=$(_codex_review_argv_rejection_flag "$CF")
+  echo "rc=$?|[$out]"
+)
+assert_eq "TC-CXRS-CFG-DET-06 no abort under set -euo pipefail (no-match capture)" "rc=0|[]" "$cfgdet06"
+
+# --- _run_codex_review skips re-runs on a deterministic rejection ---
+# Reuse run_codex_review_case's sandbox shape, but feed a CLAP-error stdout so the
+# detector fires. The existing run_codex_review_case writes a fixed token; we need a
+# clap capture, so use a dedicated local runner that writes the config-error fixture.
+run_codex_cfg_case() {
+  local feed="$1" max="$2" nowscript="$3"
+  local sandbox; sandbox=$(mktemp -d)
+  printf '%s\n' "$feed"      > "$sandbox/feed"
+  printf '%s\n' "$nowscript" > "$sandbox/now"
+  : > "$sandbox/runs"
+  (
+    source "$LIB"
+    _run_with_timeout() {
+      echo "run" >> "$sandbox/runs"
+      # Emit a clap parse error to the capture (our stdout IS the capture file).
+      printf '%s\n' "error: unexpected argument '-s' found" 'Usage: codex review [OPTIONS] [PROMPT]'
+      local rc; rc=$(head -n1 "$sandbox/feed"); sed -i '1d' "$sandbox/feed" 2>/dev/null || true
+      return "${rc:-0}"
+    }
+    _codex_now_seconds() {
+      local n; n=$(head -n1 "$sandbox/now")
+      [[ $(wc -l < "$sandbox/now") -gt 1 ]] && sed -i '1d' "$sandbox/now"
+      printf '%s\n' "$n"
+    }
+    CODEX_REVIEW_MAX_RERUNS="$max" AGENT_REVIEW_TIMEOUT=1h AGENT_CMD=codex \
+      _run_codex_review "prompt" "model-x" "$sandbox/cap.txt"
+    rc=$?
+    runs=$(grep -c '^run$' "$sandbox/runs" 2>/dev/null) || runs=0
+    echo "${rc}|${runs}"
+  )
+  rm -rf "$sandbox"
+}
+
+# TC-CXRS-CFG-RUN-01 — run 1 rc 2 + clap capture, MAX_RERUNS=3 → 1 run, NO re-runs, rc 2.
+# (Pre-fix: the rc-2 deterministic rejection was misread as transient → 1 + 3 = 4 runs.)
+assert_eq "TC-CXRS-CFG-RUN-01 clap rejection rc2 → 1 run, NO re-runs (deterministic), rc 2" \
+  "2|1" "$(run_codex_cfg_case $'2\n2\n2\n2' 3 $'0\n5\n10\n15\n20')"
+
+# TC-CXRS-CFG-RUN-02 — REGRESSION (#209 unchanged): a genuine transient stream error
+# (rc 1, stream-disconnect capture) followed by a clean run STILL re-runs. Uses the
+# original run_codex_review_case (stream token) so the detector does NOT fire.
+assert_eq "TC-CXRS-CFG-RUN-02 transient stream-error then clean → 2 runs, rc 0 (#209 NOT regressed)" \
+  "0|2" "$(run_codex_review_case $'1\n0' 3 $'0\n10\n20\n30' stream)"
+
+# TC-CXRS-CFG-RUN-03 — clap rejection with MAX_RERUNS=0 → 1 run, rc 2 (matches the
+# disabled-rerun path; the early-skip does not change the count when re-runs are off).
+assert_eq "TC-CXRS-CFG-RUN-03 clap rejection rc2, max=0 → 1 run, rc 2" \
+  "2|1" "$(run_codex_cfg_case $'2\n0' 0 $'0\n5')"
+
+# TC-CXRS-CFG-RUN-04 — [P1] REGRESSION (PR #225 review finding): the config-error
+# early-break MUST be gated on the clap exit code (rc 2), NOT on "any non-zero run
+# whose capture contains the clap string". A GENUINE TRANSIENT failure (rc 1) whose
+# capture happens to PRINT / QUOTE `error: unexpected argument '-s' found` (e.g.
+# codex echoed a reviewed-diff hunk, or a transport blip after partial output) must
+# STILL take the re-run path — not be misread as a deterministic config-error and
+# dropped. run_codex_cfg_case writes the clap-quoting capture on EVERY run; feed
+# rc 1 then rc 0 → with the rc-2 gate the rc-1 run re-runs and the rc-0 run breaks
+# clean → 2 runs, rc 0. Pre-fix (gate = "any non-zero"): the rc-1 clap-quoting run
+# broke immediately → 1 run, rc 1 (the bug). This test asserts 2 runs / rc 0.
+assert_eq "TC-CXRS-CFG-RUN-04 transient rc1 with a clap-QUOTING capture → STILL re-runs (gate is rc 2, not any-non-zero), 2 runs rc 0" \
+  "0|2" "$(run_codex_cfg_case $'1\n0' 3 $'0\n10\n20\n30')"
+
+# TC-CXRS-CFG-RUN-05 — the rc-2 gate does not over-fire on OTHER non-2 deterministic
+# rc either: a sustained rc-1 transport failure with a clap-QUOTING capture exhausts
+# the re-run budget exactly like #209 (1 + 3 = 4 runs), it is NOT short-circuited to
+# 1 run. Feed four rc-1 runs, max=3 → 4 runs, rc 1.
+assert_eq "TC-CXRS-CFG-RUN-05 sustained rc1 with clap-quoting capture → exhausts re-runs (4 runs, rc 1), not config-error short-circuit" \
+  "1|4" "$(run_codex_cfg_case $'1\n1\n1\n1' 3 $'0\n5\n10\n15\n20')"
+
+# --- _classify_codex_drop_reason gains a config-error bucket ---
+# TC-CXRS-CFG-DROP-01 — clap unexpected-argument capture → config-error:-s
+cp "$FIXTURES/codex-review-stdout-config-error.txt" "$CF"
+assert_eq "TC-CXRS-CFG-DROP-01 clap '-s' rejection → config-error:-s" \
+  "config-error:-s" "$(_classify_codex_drop_reason "$CF")"
+# TC-CXRS-CFG-DROP-02 — invalid-value clap capture → config-error:--enable
+printf '%s\n' "error: invalid value 'x' for '--enable <CHECK>'" 'Usage: codex review [OPTIONS] [PROMPT]' > "$CF"
+assert_eq "TC-CXRS-CFG-DROP-02 invalid value '--enable' → config-error:--enable" \
+  "config-error:--enable" "$(_classify_codex_drop_reason "$CF")"
+# TC-CXRS-CFG-DROP-03 — a stream-error capture (no clap signature) still → stream-error
+# (config-error must NOT shadow a genuine stream error).
+cp "$FIXTURES/codex-review-stdout-stream-error.txt" "$CF"
+assert_eq "TC-CXRS-CFG-DROP-03 stream-error capture (no clap) → stream-error:5/5 (config-error does not shadow it)" \
+  "stream-error:5/5" "$(_classify_codex_drop_reason "$CF")"
+# TC-CXRS-CFG-DROP-04 — a clean / [P1] review → empty (no over-claim)
+cp "$FIXTURES/codex-review-stdout-clean.txt" "$CF"
+assert_eq "TC-CXRS-CFG-DROP-04a clean review → empty token" "" "$(_classify_codex_drop_reason "$CF")"
+cp "$FIXTURES/codex-review-stdout-p1.txt" "$CF"
+assert_eq "TC-CXRS-CFG-DROP-04b [P1] review → empty token" "" "$(_classify_codex_drop_reason "$CF")"
+# TC-CXRS-CFG-DROP-05 — fixture-backed config-error → config-error:-s
+assert_eq "TC-CXRS-CFG-DROP-05 config-error fixture → config-error:-s" \
+  "config-error:-s" "$(_classify_codex_drop_reason "$FIXTURES/codex-review-stdout-config-error.txt")"
+# fail-safe under set -euo pipefail (bare call, clap capture)
+cfgdrop06=$(
+  set -euo pipefail
+  source "$LIB"
+  _classify_codex_drop_reason "$FIXTURES/codex-review-stdout-config-error.txt"
+  echo "REACHED_RETURN_0"
+)
+assert_eq "TC-CXRS-CFG-DROP-06 bare call, clap capture → no errexit abort" \
+  $'config-error:-s\nREACHED_RETURN_0' "$cfgdrop06"
+
+# --- rc-2 gate on the drop-reason classifier (PR #225 review finding) ---
+# _classify_codex_drop_reason takes an OPTIONAL second arg <launch-rc>: config-error
+# is emitted ONLY when the rc is 2 (clap's parse-error exit code). A non-2 rc means
+# the clap-looking text in the capture is NOT a clap parse rejection (e.g. a transient
+# rc-1 transport failure that echoed a reviewed-diff hunk quoting the string), so the
+# classifier falls through to the stream-error scan / empty — it must NOT mislabel a
+# transient drop as config-error.
+CF2="$TMP/cfg-rc.txt"
+cp "$FIXTURES/codex-review-stdout-config-error.txt" "$CF2"
+# TC-CXRS-CFG-DROP-07 — rc 2 + clap capture → config-error:-s (the real rejection)
+assert_eq "TC-CXRS-CFG-DROP-07 rc 2 + clap capture → config-error:-s" \
+  "config-error:-s" "$(_classify_codex_drop_reason "$CF2" 2)"
+# TC-CXRS-CFG-DROP-08 — rc 1 + clap-QUOTING capture → NOT config-error (no stream signal → empty)
+assert_eq "TC-CXRS-CFG-DROP-08 rc 1 + clap-quoting capture → empty (NOT config-error; gate is rc 2)" \
+  "" "$(_classify_codex_drop_reason "$CF2" 1)"
+# TC-CXRS-CFG-DROP-09 — rc 1 + capture with BOTH a clap-quote AND a real stream error
+# → stream-error wins (the transient signal is the true cause at rc 1, not config-error).
+printf '%s\n' "error: unexpected argument '-s' found" \
+  'stream error: Reconnecting... 3/5 (stream disconnected before completion)' \
+  'error: stream disconnected before completion: server error' > "$CF2"
+assert_eq "TC-CXRS-CFG-DROP-09 rc 1 + clap-quote AND stream-error → stream-error (transient wins at rc 1, not config-error)" \
+  "stream-error:3/5" "$(_classify_codex_drop_reason "$CF2" 1)"
+# TC-CXRS-CFG-DROP-10 — rc arg OMITTED → backward-compatible: config-error still emitted
+# on a clap capture (callers that do not yet pass the rc keep today's behavior; the
+# wrapper passes the rc so its drop-loop is gated). Also a bare call must not abort.
+cp "$FIXTURES/codex-review-stdout-config-error.txt" "$CF2"
+assert_eq "TC-CXRS-CFG-DROP-10 rc arg omitted + clap capture → config-error:-s (backward-compatible)" \
+  "config-error:-s" "$(_classify_codex_drop_reason "$CF2")"
+# TC-CXRS-CFG-DROP-11 — rc 2 but NO clap signature (a clap exit code without the
+# recognizable usage line — defensive) → falls through; a stream-error capture at rc 2
+# still classifies stream-error (the rc gate only ADMITS config-error, it does not
+# suppress other signals).
+cp "$FIXTURES/codex-review-stdout-stream-error.txt" "$CF2"
+assert_eq "TC-CXRS-CFG-DROP-11 rc 2 + stream-error capture (no clap line) → stream-error:5/5 (rc gate admits config-error only when the clap signature is present)" \
+  "stream-error:5/5" "$(_classify_codex_drop_reason "$CF2" 2)"
+# fail-safe: rc 1 + clap capture under set -euo pipefail (bare call) → no abort, empty
+cfgdrop12=$(
+  set -euo pipefail
+  source "$LIB"
+  _classify_codex_drop_reason "$FIXTURES/codex-review-stdout-config-error.txt" 1
+  echo "REACHED_RETURN_0"
+)
+assert_eq "TC-CXRS-CFG-DROP-12 rc 1 bare call, clap capture → no errexit abort, empty token" \
+  $'REACHED_RETURN_0' "$cfgdrop12"
+
+# --- _codex_drop_reason_phrase renders the config-error token ---
+cfgphr1=$(_codex_drop_reason_phrase "config-error:-s")
+assert_contains "TC-CXRS-CFG-PHR-01a phrase names config-error" "config-error" "$cfgphr1"
+assert_contains "TC-CXRS-CFG-PHR-01b phrase names the rejected flag" "-s" "$cfgphr1"
+assert_contains "TC-CXRS-CFG-PHR-01c phrase explains exec-only extra-args" "extra-args" "$cfgphr1"
+cfgphr2=$(_codex_drop_reason_phrase "config-error:")
+assert_contains "TC-CXRS-CFG-PHR-02a no-flag config-error still names config-error" "config-error" "$cfgphr2"
+assert_not_contains "TC-CXRS-CFG-PHR-02b no spurious flag when token carries none" "rejected '" "$cfgphr2"
+
+# ---------------------------------------------------------------------------
+echo ""
 echo "=== TC-CXRS-DEV: codex DEV path stays on 'codex exec' (byte-for-byte) ==="
 # ---------------------------------------------------------------------------
 # The dev primitives live in lib-agent.sh and must NOT learn about `codex review`.
@@ -565,6 +777,12 @@ assert_grep "TC-CXRS-WIRE-08 CI shellcheck includes lib-review-codex.sh" \
 # TC-CXRS-WIRE-09 — drop-reason loop still wires the codex classifier
 assert_grep "TC-CXRS-WIRE-09 wrapper calls _classify_codex_drop_reason" \
   '_classify_codex_drop_reason' "$WRAPPER"
+# TC-CXRS-WIRE-09b — PR #225 review finding: the wrapper passes the agent's launch rc
+# as the 2nd arg to _classify_codex_drop_reason so config-error is gated on rc 2 (a
+# transient rc-1 drop whose capture quotes the clap string is NOT mislabeled). Pin
+# that the call site threads AGENT_LAUNCH_RC into the classifier.
+assert_grep "TC-CXRS-WIRE-09b wrapper passes the launch rc to _classify_codex_drop_reason (rc-2 gate)" \
+  '_classify_codex_drop_reason "\$\{AGENT_CODEX_LOGS\[\$_i\]:-\}" "\$\{AGENT_LAUNCH_RC\[' "$WRAPPER"
 # TC-CXRS-WIRE-10 — #218 finding 2 source-of-truth: the REAL wrapper's stdout
 # fallback gates on a clean (rc 0) codex review exit. The INT-07..09 behavioral
 # tests exercise a COPY of the fallback block; these greps pin the gate in the

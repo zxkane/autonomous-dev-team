@@ -401,6 +401,32 @@ _run_codex_review() {
     # fallback) OR on a wall-clock-cap kill (a deciding INV-48 veto, not a blip).
     [[ "$last_run_rc" -eq 0 ]] && break
     [[ "$last_run_rc" -eq 124 || "$last_run_rc" -eq 137 ]] && break
+    # #223: a DETERMINISTIC clap argv rejection (an exec-only flag like `-s` left in
+    # the per-agent review extra-args → exit 2) STOPS the loop immediately. Unlike a
+    # transient stream blip (#209), re-running the IDENTICAL argv can never succeed,
+    # so re-running is pure waste AND emits a misleading "transient stream error"
+    # line that sends the operator chasing upstream/network issues instead of their
+    # conf. The non-zero rc still propagates → the post-window sweep resolves codex
+    # `unavailable`, and _classify_codex_drop_reason names the rejected flag as a
+    # `config-error:<flag>` drop reason (NOT a deciding FAIL — a conf error is an
+    # operator condition, like stream-error/auth-failed, never a code rejection).
+    #
+    # PR #225 review finding [P1]: gate this ONLY on the clap exit code (rc 2 — clap's
+    # standard parse-error exit). The capture scan alone is not a sufficient
+    # discriminator: a GENUINE transient failure (e.g. rc 1) whose stdout happens to
+    # PRINT / QUOTE `error: unexpected argument '<flag>' found` — codex echoing a
+    # reviewed-diff hunk, or a transport blip after partial output — must STILL take
+    # the re-run path (#209), not be short-circuited as deterministic config-error.
+    # The rc-2 gate + the capture scan together mean: only a real clap parse rejection
+    # (rc 2 AND the usage signature) breaks early; every other non-zero rc re-runs.
+    if [[ "$last_run_rc" -eq 2 ]]; then
+      local _cfg_flag
+      _cfg_flag=$(_codex_review_argv_rejection_flag "$stdout_file")
+      if [[ -n "$_cfg_flag" ]]; then
+        echo "[lib-review-codex] codex review rejected '${_cfg_flag}' (clap parse error, rc ${last_run_rc}) — a DETERMINISTIC config error, NOT a transient stream blip; NOT re-running (identical argv can never succeed). Clear the exec-only flag via AGENT_REVIEW_EXTRA_ARGS_CODEX=\" \". Resolving \`config-error\` — INV-62/#223." >&2
+        break
+      fi
+    fi
     # Bound 1: re-run budget exhausted → fall back (poller resolves unavailable).
     if (( reruns >= max )); then
       [[ "$max" -gt 0 ]] && \
@@ -458,22 +484,110 @@ _codex_review_has_stream_error() {
   grep -qiE 'stream disconnected before completion|Reconnecting\.\.\. [0-9]+/[0-9]+' "$f" 2>/dev/null
 }
 
-# _classify_codex_drop_reason <stdout-file>
+# ===========================================================================
+# #223: codex review DETERMINISTIC argv-rejection (clap parse error, exit 2)
+# ===========================================================================
+# `codex review` accepts only -c/--config, --base, --commit, --uncommitted,
+# --title, --enable, --disable (verified 0.137.0). A `codex exec`-era flag left in
+# the per-agent review extra-args (e.g. `-s danger-full-access` — valid+needed on
+# the deleted `codex exec` lane, which defaulted to a read-only sandbox) is spliced
+# verbatim into the `codex review` argv by _codex_review_argv and rejected with an
+# exit-2 clap parse error. That failure is DETERMINISTIC — re-running the identical
+# argv can never succeed — so it must NOT be ridden out as a transient stream blip:
+# _run_codex_review consults this detector to STOP re-running on a clap rejection,
+# and _classify_codex_drop_reason renders it as a distinct `config-error:<flag>`
+# drop reason (naming the rejected flag) rather than a bare opaque `unavailable`.
+
+# _codex_review_argv_rejection_flag <stdout-file>
 #
-# Scrape a `codex review` stdout capture for a stream/server error signal. Echoes
-# ONE token on stdout (rc 0 ALWAYS — fail-safe under `set -euo pipefail`, mirrors
+# Echo the flag/option `codex review`'s clap parser rejected, or empty if the
+# capture is not a clap argv-rejection. rc 0 ALWAYS (fail-safe under
+# `set -euo pipefail`; mirrors the rc-0-always drop-reason helpers — a bare call
+# must never abort the wrapper). Recognizes the two clap rejection shapes:
+#
+#   error: unexpected argument '-s' found         → echoes `-s`
+#   error: invalid value 'x' for '--enable <...>'  → echoes `--enable`
+#
+# The leading `error:` + the clap grammar is the discriminator: a clean review
+# that merely MENTIONS "unexpected argument" in prose (no `error:` clap line) does
+# NOT match (no false positive). An empty/missing/unreadable file → empty.
+#
+# Caller-side safety: this is a broad substring match (no line anchor), so a review
+# whose body QUOTES the exact clap string `error: unexpected argument '<x>' found`
+# (e.g. a finding about CLI ergonomics, or codex echoing a reviewed-diff hunk) WOULD
+# match. So both production callers gate on the clap EXIT CODE (rc 2) — NOT just the
+# capture text — before trusting this detector (PR #225 finding): _run_codex_review
+# only consults it when `last_run_rc -eq 2`, and _classify_codex_drop_reason only
+# emits config-error when its <launch-rc> arg is 2 (or omitted, for back-compat). An
+# rc-0 clean review never reaches it (the rc-0 break precedes the check), and a
+# transient rc-1 that merely quotes the string still re-runs / classifies as the
+# transient it is. Keep the rc-2 gate if this helper is reused elsewhere.
+_codex_review_argv_rejection_flag() {
+  local f="${1:-}"
+  [[ -n "$f" && -f "$f" && -r "$f" ]] || return 0
+  local flag=""
+  # Shape 1: `error: unexpected argument '<flag>' found`. The flag is the first
+  # single-quoted token after `unexpected argument`. `|| true` guards the no-match
+  # case (grep rc 1 under `set -o pipefail` would otherwise abort before return 0).
+  flag=$(grep -oiE "error: unexpected argument '[^']+' found" "$f" 2>/dev/null \
+    | head -1 | grep -oE "'[^']+'" | head -1 | tr -d "'") || true
+  if [[ -z "$flag" ]]; then
+    # Shape 2: `error: invalid value '<val>' for '<option> <...>'`. The option is
+    # the quoted token after `for`; strip any ` <METAVAR>` clap appends to it.
+    flag=$(grep -oiE "error: invalid value '[^']*' for '[^']+'" "$f" 2>/dev/null \
+      | head -1 | grep -oE "for '[^']+'" | head -1 | sed -E "s/^for '//; s/'$//; s/ .*$//") || true
+  fi
+  printf '%s\n' "$flag"
+  return 0
+}
+
+# _classify_codex_drop_reason <stdout-file> [<launch-rc>]
+#
+# Scrape a `codex review` stdout capture for a drop signal. Echoes ONE token on
+# stdout (rc 0 ALWAYS — fail-safe under `set -euo pipefail`, mirrors
 # _classify_agy_drop_reason / _classify_kiro_drop_reason):
 #
+#   config-error[:<flag>]   (#223)
+#       — a DETERMINISTIC clap argv rejection (an exec-only flag like `-s` left in
+#         the per-agent review extra-args; exit 2). The ":<flag>" suffix names the
+#         rejected flag. Checked FIRST: a clap parse error fails before any model
+#         stream opens, so it never co-occurs with stream-error; ordering it first
+#         is defensive (a deterministic rejection is the more actionable signal).
+#         GATED on <launch-rc> == 2 (clap's parse-error exit code) — see below.
 #   stream-error[:N/M]
 #       — the capture shows a stream-disconnect error. The ":N/M" suffix is the
 #         HIGHEST reconnect-ladder depth seen (`Reconnecting... N/M`). Appended
 #         only when the ladder is present.
 #   "" (empty)
-#       — no stream-error signal (the caller keeps the bare `unavailable`). A
-#         clean review or a genuine `[P1]` review yields empty — NO over-claim.
+#       — no drop signal (the caller keeps the bare `unavailable`). A clean review
+#         or a genuine `[P1]` review yields empty — NO over-claim.
+#
+# PR #225 review finding [P1]: the optional <launch-rc> arg gates the config-error
+# bucket on the clap exit code (rc 2). The capture scan alone is not a sufficient
+# discriminator — a GENUINE transient failure (e.g. rc 1) whose capture merely
+# QUOTES the clap usage string (codex echoed a reviewed-diff hunk, or a transport
+# blip after partial output) must NOT be mislabeled config-error; at a non-2 rc the
+# classifier falls through to the stream-error scan (so the real transient cause is
+# still named) / empty. When <launch-rc> is OMITTED the gate is skipped — preserving
+# the pre-finding behavior for any caller that does not thread the rc; the wrapper's
+# drop-loop passes it, so its classification is correctly gated.
 _classify_codex_drop_reason() {
-  local f="${1:-}"
+  local f="${1:-}" launch_rc="${2:-}"
   [[ -n "$f" && -f "$f" && -r "$f" ]] || return 0
+
+  # #223 + PR #225 finding: a deterministic argv rejection (clap exit 2) is the more
+  # actionable signal — name the rejected flag. Checked before the stream-error scan,
+  # but ONLY when the rc is the clap parse-error code (rc 2), or when no rc was passed
+  # (backward-compat). A non-2 rc (a transient that merely quoted the clap string)
+  # skips this branch and falls through to the stream-error scan.
+  if [[ -z "$launch_rc" || "$launch_rc" == "2" ]]; then
+    local _cfg_flag
+    _cfg_flag=$(_codex_review_argv_rejection_flag "$f")
+    if [[ -n "$_cfg_flag" ]]; then
+      printf 'config-error:%s\n' "$_cfg_flag"
+      return 0
+    fi
+  fi
 
   _codex_review_has_stream_error "$f" || return 0
 
@@ -501,6 +615,12 @@ _classify_codex_drop_reason() {
 # for an empty/unknown token (the caller then keeps the bare `unavailable`
 # wording). rc 0 always.
 #
+#   config-error:-s
+#       → "config-error: codex review rejected '-s' (exec-only flag in extra-args;
+#          clear it via AGENT_REVIEW_EXTRA_ARGS_CODEX=\" \")"
+#   config-error  (no flag)
+#       → "config-error: codex review rejected an extra-args flag (exec-only flag
+#          in extra-args; …)"
 #   stream-error:5/5
 #       → "stream-error (upstream 5xx; exhausted 5/5 stream reconnects)"
 #   stream-error
@@ -508,6 +628,15 @@ _classify_codex_drop_reason() {
 _codex_drop_reason_phrase() {
   local token="${1:-}"
   case "$token" in
+    config-error:?*)
+      # #223: name the rejected flag + the operator remedy (the INV-41 single-space
+      # idiom clears a poison exec-era value out of the codex review extra-args).
+      local flag="${token#config-error:}"
+      printf "config-error: codex review rejected '%s' (exec-only flag in extra-args; clear it via AGENT_REVIEW_EXTRA_ARGS_CODEX=\" \")\n" "$flag"
+      ;;
+    config-error|config-error:)
+      printf 'config-error: codex review rejected an extra-args flag (exec-only flag in extra-args; clear it via AGENT_REVIEW_EXTRA_ARGS_CODEX=" ")\n'
+      ;;
     stream-error:*)
       local depth="${token#stream-error:}"
       printf 'stream-error (upstream 5xx; exhausted %s stream reconnects)\n' "$depth"
