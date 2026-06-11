@@ -2522,8 +2522,12 @@ check maps 1:1 to a clause:
    review, e2e-browser }`. Modes differ **structurally** (codex dev = `codex exec
    --json` + thread-sidecar resume; codex review = `codex review` from a PR
    worktree, no resume, fail-closed `no-worktree` rc 70) — the spec states
-   per-mode requirements, not one uniform invoke. (`prompt` is stdin-fed,
-   [INV-34](#inv-34-agent-prompt-is-fed-via-stdin-never-as-a-single-argv-element).)
+   per-mode requirements, not one uniform invoke. (`prompt` is stdin-fed
+   [INV-34](#inv-34-agent-prompt-is-fed-via-stdin-never-as-a-single-argv-element)
+   on every dev mode and every CLI's review mode **except** `codex review`, which
+   has no stdin-prompt mode and takes the short gate prompt as its positional
+   `[PROMPT]` argument — the one explicit Clause A2 carve-out, consistent with
+   [INV-62](#inv-62-the-codex-review-lane-runs-the-codex-review-subcommand-auto-scoped-prompt-carried-gate-with-a-stdout-verdict-fallback).)
 2. **The four-axis AdapterResult** — `process` (rc, signal, timedOut), `provider`
    (quota/auth/config/transient + evidence), `verdict` (valid/absent/malformed),
    `voteEligibility` (pass/fail/drop/timeout-veto/not-applicable). A flat failure
@@ -2540,9 +2544,13 @@ check maps 1:1 to a clause:
 4. **The conformance fixture manifest** (`schemas/fixture-manifest.schema.json`)
    — per-adapter × per-mode `{ adapter, mode, input, command, files, expect }`.
 5. **The operator error envelope** (`schemas/error-envelope.schema.json`) —
-   `{ code, problem, cause, remediation, doc }`; config-class failures MUST
-   surface on the GitHub issue or as a dispatcher alert, never log-only (making
-   [INV-58](#inv-58-agy-quotaauth-unavailable-drops-surface-a-distinct-reason-fan-out--reviewed-head-model-labels-are-per-agent) / [INV-61](#inv-61-kiro-authlogin-failure-unavailable-drops-surface-a-distinct-reason-not-a-bare-opaque-unavailable) drop-reason surfacing normative).
+   `{ class, code, problem, cause, remediation, doc, surface }`; an
+   operator-actionable `class` (`config`/`auth`/`quota`, with `config` the
+   omitted-default) MUST surface on the GitHub issue or as a dispatcher alert,
+   never log-only. **The schema enforces this** via a conditional — a
+   config-class envelope with `surface: "log-only"` is rejected at validation
+   time; only `class: "transient"` may be `log-only` (making
+   [INV-58](#inv-58-agy-quotaauth-unavailable-drops-surface-a-distinct-reason-fan-out--reviewed-head-model-labels-are-per-agent) / [INV-61](#inv-61-kiro-authlogin-failure-unavailable-drops-surface-a-distinct-reason-not-a-bare-opaque-unavailable) drop-reason surfacing normative **and** machine-checkable).
 
 **Why**: per-CLI handling is scattered across `case "$AGENT_CMD"` branches in
 `lib-agent.sh` and the `lib-review-*.sh` special cases, and every contract exists
@@ -2570,9 +2578,11 @@ implement this spec.
   each schema has ≥2 golden examples; every golden validates and every
   documented negative is rejected (the three issue-mandated negatives: a flat
   failure enum missing the four axes, a verdict artifact without `schema_version`,
-  an error envelope without `remediation`). Runs under `python3 -m jsonschema`
-  (full Draft-07) when available, else a `jq` structural fallback (required-keys
-  + enum membership) so it passes in plain CI either way.
+  an error envelope without `remediation`; plus the #229-review negative: a
+  config-class error envelope surfaced `log-only`). Runs under `python3 -m
+  jsonschema` (full Draft-07) when available, else a `jq` structural fallback
+  (required-keys + enum membership + the four named negatives) so it passes in
+  plain CI either way.
 - `docs/test-cases/adapter-spec.md` — TC-ADAPTER-SPEC-NNN enumeration.
 
 **Cross-references**:

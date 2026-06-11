@@ -2,13 +2,19 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://github.com/zxkane/autonomous-dev-team/docs/pipeline/schemas/error-envelope.schema.json",
   "title": "ErrorEnvelope",
-  "description": "The operator-facing error format an adapter emits for a failure that needs human attention. The spec REQUIRES config-class failures (provider.class=config: codex no-worktree, bad model id, missing trust flag, kiro/agy auth) to surface on the GitHub issue or as a dispatcher alert — NEVER log-only. `remediation` is mandatory: an error an operator cannot act on is NON-conformant.",
+  "description": "The operator-facing error format an adapter emits for a failure that needs human attention. The spec REQUIRES config-class failures (provider.class=config: codex no-worktree, bad model id, missing trust flag) to surface on the GitHub issue or as a dispatcher alert — NEVER log-only. `remediation` is mandatory: an error an operator cannot act on is NON-conformant. The `class` field mirrors the AdapterResult provider axis so the log-only prohibition (Clause E2) is machine-enforced rather than prose-only.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "code", "problem", "cause", "remediation"],
+  "required": ["schema_version", "code", "problem", "cause", "remediation", "surface"],
   "properties": {
     "schema_version": {
       "const": 1
+    },
+    "class": {
+      "description": "The provider-class this envelope reports, mirroring AdapterResult.provider.class. config/auth/quota all require operator action; transient is a logged-only blip. Defaults to config when omitted (the common envelope case is a config failure).",
+      "type": "string",
+      "enum": ["config", "auth", "quota", "transient"],
+      "default": "config"
     },
     "code": {
       "description": "Stable, machine-readable error code (UPPER_SNAKE). e.g. CODEX_NO_WORKTREE, KIRO_AUTH_FAILED, AGY_QUOTA_EXHAUSTED, MODEL_UNKNOWN.",
@@ -35,9 +41,25 @@
       "type": "string"
     },
     "surface": {
-      "description": "Where this envelope was surfaced. Config-class failures MUST use issue-comment or dispatcher-alert, never log-only.",
+      "description": "Where this envelope was surfaced. MUST be present. Clause E2: an operator-actionable class (config/auth/quota) MUST use issue-comment or dispatcher-alert, never log-only — the conditional below enforces this. log-only is permitted only for a transient class.",
       "type": "string",
       "enum": ["issue-comment", "dispatcher-alert", "log-only"]
     }
-  }
+  },
+  "allOf": [
+    {
+      "description": "Clause E2: an operator-actionable class (config — the default when class is omitted — or auth/quota) MUST NOT be surfaced log-only. Only an explicit class=transient may be log-only.",
+      "if": {
+        "anyOf": [
+          { "not": { "required": ["class"] } },
+          { "properties": { "class": { "enum": ["config", "auth", "quota"] } }, "required": ["class"] }
+        ]
+      },
+      "then": {
+        "properties": {
+          "surface": { "enum": ["issue-comment", "dispatcher-alert"] }
+        }
+      }
+    }
+  ]
 }

@@ -35,7 +35,7 @@ Example fixtures follow `<schema-prefix>.{golden|negative}.<label>.json`:
 | `adapter-result` | `golden.pass` (rc 0 + verdict valid → vote pass), `golden.timeout-veto` (rc 124 + verdict absent → timeout-veto), `golden.quota-drop` (rc 0 + quota + verdict absent → drop) |
 | `verdict-artifact` | `golden.pass` (PASS + AC-coverage map + E2E report), `golden.fail` (FAIL + blocking finding) |
 | `fixture-manifest` | `golden.codex-review` (codex review mode), `golden.agy-quota` (agy quota drop) |
-| `error-envelope` | `golden.kiro-auth` (issue-comment surface), `golden.codex-no-worktree` (dispatcher-alert surface) |
+| `error-envelope` | `golden.kiro-auth` (issue-comment surface), `golden.codex-no-worktree` (dispatcher-alert surface), `golden.transient-log-only` (the only log-only case — `class: transient`) |
 
 ### Per-schema negative examples (each MUST be rejected)
 
@@ -51,6 +51,7 @@ Example fixtures follow `<schema-prefix>.{golden|negative}.<label>.json`:
 | `fixture-manifest` | `negative.bad-stdin-hash` | `stdinSha256` not a 64-hex string |
 | `error-envelope` | `negative.no-remediation` | **missing `remediation`** (issue-mandated) |
 | `error-envelope` | `negative.bad-code` | `code` not `UPPER_SNAKE` |
+| `error-envelope` | `negative.config-log-only` | config-class envelope with `surface: log-only` — Clause E2 conditional (review finding) |
 
 ## Acceptance criteria coverage
 

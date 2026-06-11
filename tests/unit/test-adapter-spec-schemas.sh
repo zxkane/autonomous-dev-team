@@ -231,6 +231,17 @@ run_jq_suite() {
   if jq -e 'has("remediation")' "$f3" >/dev/null 2>&1; then
     bad "no-remediation negative unexpectedly has remediation"
   else ok "error-envelope negative is missing remediation (correctly non-conformant)"; fi
+
+  # 4. error envelope: a config-class envelope surfaced log-only is forbidden
+  #    (Clause E2; #229 review finding). jq can structurally confirm the
+  #    forbidden combination is present in the negative fixture (the full
+  #    conditional is enforced by the python Draft-07 path).
+  local f4="$EXAMPLE_DIR/error-envelope.negative.config-log-only.json"
+  if jq -e '((.class // "config") | IN("config","auth","quota")) and (.surface == "log-only")' "$f4" >/dev/null 2>&1; then
+    ok "config-log-only negative carries the forbidden class+log-only combo (correctly non-conformant)"
+  else
+    bad "config-log-only negative does not carry the forbidden config+log-only combo"
+  fi
 }
 
 # ---------------------------------------------------------------------------

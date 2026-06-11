@@ -54,7 +54,7 @@ invoke(mode, prompt, model, session, timeout, env) → AdapterResult
 | Param | Meaning |
 |---|---|
 | `mode` | One of `dev-new`, `dev-resume`, `review`, `e2e-browser`. The **mode axis** — see §3. |
-| `prompt` | The instruction text. **MUST** be delivered on the CLI's stdin, not as an argv string ([INV-34](invariants.md#inv-34-agent-prompt-is-fed-via-stdin-never-as-a-single-argv-element)) — a multi-kilobyte prompt as argv risks `E2BIG`/`execve` arg-length limits. |
+| `prompt` | The instruction text. The default channel is the CLI's stdin, not an argv string ([INV-34](invariants.md#inv-34-agent-prompt-is-fed-via-stdin-never-as-a-single-argv-element)) — a multi-kilobyte prompt as argv risks `E2BIG`/`execve` arg-length limits. The one carve-out is a review-mode CLI with **no** stdin-prompt mode (`codex review`), which takes the prompt as its positional `[PROMPT]` argument by design — see Clause A2 and Clause M4. |
 | `model` | The resolved model id (per-agent resolution per [INV-41](invariants.md#inv-41-per-agent-review-model--extra-args-resolution); `agy` is validated against `agy models` per [INV-50](invariants.md#inv-50-agy---model-is-validated-against-agy-models-before-forwarding)). MAY be empty (adapter applies its launch default). |
 | `session` | The session identity. For `dev-new`/`review` the wrapper mints a UUID; for `dev-resume` it is the prior session handle the adapter persisted. Some CLIs mint their own (see §3.5). |
 | `timeout` | The per-side wall-clock cap (dev timeout / `AGENT_REVIEW_TIMEOUT`, default 1h, [INV-48](invariants.md#inv-48-per-side-review-wall-clock-timeout-agent_review_timeout-1h-default-with-browser-e2e-exclusion-and-timeout-veto)). The adapter **MUST** run under it and surface a timeout distinctly (§4.1). |
@@ -64,8 +64,20 @@ invoke(mode, prompt, model, session, timeout, env) → AdapterResult
 `AdapterResult` per `invoke`, conforming to
 [`schemas/adapter-result.schema.json`](schemas/adapter-result.schema.json).
 
-**Clause A2 (stdin prompt).** The adapter **MUST** feed `prompt` on the CLI's
-stdin and **MUST NOT** pass it as an argv element. (INV-34.)
+**Clause A2 (stdin prompt — default channel, with an explicit review carve-out).**
+The adapter **MUST** feed `prompt` on the CLI's stdin and **MUST NOT** pass it as
+an argv element ([INV-34](invariants.md#inv-34-agent-prompt-is-fed-via-stdin-never-as-a-single-argv-element)), **except** for a review-mode adapter whose CLI
+exposes **no** stdin-prompt mode. The sole such case today is `codex review`,
+which takes the prompt as its positional `[PROMPT]` argument (Clause M4 /
+[INV-62](invariants.md#inv-62-the-codex-review-lane-runs-the-codex-review-subcommand-auto-scoped-prompt-carried-gate-with-a-stdout-verdict-fallback)). A review adapter MAY use the positional `[PROMPT]` channel **only when**
+(a) the CLI offers no stdin-prompt mode for that subcommand AND (b) the prompt is
+small enough that argv length limits are not a concern (a `codex review` gate
+prompt is short — it does not carry the diff, which `codex review` fetches
+itself). Every dev-mode (`dev-new` / `dev-resume`) and every other CLI's review
+adapter **MUST** still use stdin. A conformance fixture's `command.argv` records
+which channel the adapter actually used, so the carve-out is auditable (the codex
+review fixture's `argv` includes `<prompt>`; a stdin adapter's does not, and pins
+the prompt via `command.stdinSha256`).
 
 **Clause A3 (no uniform invoke fiction).** The spec **MUST NOT** be read as
 asserting one CLI invocation shape covers all modes. Modes differ
@@ -115,6 +127,12 @@ unanimous-PASS vote.
   **MUST NOT** resume, and **MUST** fail closed with the `no-worktree` sentinel
   (`rc 70`, `provider.class = "config"`) when worktree prep fails, rather than
   reviewing the wrong tree. ([INV-62](invariants.md#inv-62-the-codex-review-lane-runs-the-codex-review-subcommand-auto-scoped-prompt-carried-gate-with-a-stdout-verdict-fallback).)
+  `codex review` has **no** stdin-prompt mode — it takes the gate prompt as its
+  positional `[PROMPT]` argument. This is the explicit Clause A2 carve-out: the
+  prompt is the short gate instruction (not the diff, which the subcommand
+  fetches itself), so argv length is not a concern. A future codex review adapter
+  therefore satisfies the contract by carrying the prompt positionally; it does
+  **not** violate A2.
 
 ### 3.4 `e2e-browser`
 
@@ -288,28 +306,38 @@ Goldens: [`verdict-artifact.golden.pass.json`](schemas/examples/verdict-artifact
 
 ## 6. The operator error envelope
 
-When a failure needs human attention (notably every `provider.class = config`,
-and SHOULD-cases for `quota`/`auth`), the adapter emits an **error envelope**
-conforming to [`schemas/error-envelope.schema.json`](schemas/error-envelope.schema.json):
+When a failure needs human attention (every operator-actionable
+`provider.class` — `config`, `auth`, `quota`), the adapter emits an **error
+envelope** conforming to
+[`schemas/error-envelope.schema.json`](schemas/error-envelope.schema.json):
 
 ```json
-{ "code": "KIRO_AUTH_FAILED", "problem": "…", "cause": "…", "remediation": "…", "doc": "…", "surface": "issue-comment" }
+{ "class": "config", "code": "KIRO_AUTH_FAILED", "problem": "…", "cause": "…", "remediation": "…", "doc": "…", "surface": "issue-comment" }
 ```
 
 - **Clause E1 (remediation REQUIRED).** `remediation` **MUST** be present and
   non-empty. An error an operator cannot act on is NON-conformant (schema
   rejects it).
-- **Clause E2 (config surfaces, never log-only).** A `config`-class failure
-  (codex `no-worktree`, kiro/agy `auth`, unknown model) **MUST** surface on the
-  GitHub issue (`surface: "issue-comment"`) or as a dispatcher alert
-  (`surface: "dispatcher-alert"`). It **MUST NOT** be `log-only`. This makes the
-  existing INV-58 / INV-61 drop-reason surfacing normative and extends it to all
-  config-class failures.
+- **Clause E2 (operator-actionable classes surface, never log-only).** An
+  operator-actionable `class` — `config` (codex `no-worktree`, unknown model),
+  `auth` (kiro/agy login), or `quota` — **MUST** surface on the GitHub issue
+  (`surface: "issue-comment"`) or as a dispatcher alert
+  (`surface: "dispatcher-alert"`) and **MUST NOT** be `log-only`. **The schema
+  enforces this** with a conditional: when `class` is omitted (it defaults to
+  `config`) or is one of `config` / `auth` / `quota`, `surface` is constrained to
+  `issue-comment` / `dispatcher-alert`, so a `config`-class envelope with
+  `surface: "log-only"` is rejected at validation time (see negative fixture
+  [`error-envelope.negative.config-log-only.json`](schemas/examples/error-envelope.negative.config-log-only.json)).
+  `log-only` is permitted **only** for an explicit `class: "transient"` (a
+  retryable blip the dispatcher re-dispatches automatically — no operator
+  action). This makes the existing INV-58 / INV-61 drop-reason surfacing
+  normative and machine-checkable.
 - **Clause E3 (stable code).** `code` **MUST** be a stable `UPPER_SNAKE`
   identifier so an operator/alerting rule can key on it.
 
 Goldens: [`error-envelope.golden.kiro-auth.json`](schemas/examples/error-envelope.golden.kiro-auth.json),
-[`error-envelope.golden.codex-no-worktree.json`](schemas/examples/error-envelope.golden.codex-no-worktree.json).
+[`error-envelope.golden.codex-no-worktree.json`](schemas/examples/error-envelope.golden.codex-no-worktree.json),
+[`error-envelope.golden.transient-log-only.json`](schemas/examples/error-envelope.golden.transient-log-only.json) (the only log-only case — `class: transient`).
 
 ---
 
