@@ -28,6 +28,20 @@ jobs:
           done
           exit $failed
 
+      # agent-smoke harness E2E self-test (INV-63, #222): run the FULL matrix
+      # harness against stub CLIs so CI exercises it end-to-end without real
+      # CLIs/credentials. The stub matrix contains a deliberate FAIL entry, so
+      # the harness exits 1 by design — we assert on the SMOKE-SUMMARY tally
+      # rather than the exit code.
+      - name: agent-smoke harness stub-mode self-test
+        run: |
+          out=$(SMOKE_STUB=1 bash tests/e2e/run-agent-smoke.sh) || true
+          echo "$out"
+          echo "$out" | grep -q 'SMOKE-SUMMARY pass=1 fail=1 unavailable=1 skip=1' || {
+            echo "::error::agent-smoke stub self-test did not produce the expected SMOKE-SUMMARY"
+            exit 1
+          }
+
   shellcheck:
     name: ShellCheck
     runs-on: ubuntu-latest
@@ -53,6 +67,8 @@ jobs:
             skills/autonomous-dispatcher/scripts/lib-review-kiro.sh \
             skills/autonomous-dispatcher/scripts/lib-review-resolve.sh \
             skills/autonomous-dispatcher/scripts/lib-review-request-changes.sh \
+            skills/autonomous-dispatcher/scripts/lib-agent-smoke.sh \
+            tests/e2e/run-agent-smoke.sh \
             skills/autonomous-dispatcher/scripts/post-verdict.sh \
             skills/autonomous-dispatcher/scripts/setup-labels.sh \
             skills/autonomous-dispatcher/scripts/gh-token-refresh-daemon.sh \

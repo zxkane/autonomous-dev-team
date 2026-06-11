@@ -275,6 +275,10 @@ PID files follow the same pattern with `.pid` extension.
 
 Set `AGENT_CMD` in `autonomous.conf` to switch agents. Claude Code is recommended for full pipeline support including session resume.
 
+### Agent smoke — does the CLI actually launch, auth, and respond? (INV-63)
+
+Unit tests stub the CLIs, so the launch → auth → model chain is never exercised before merge. The **agent smoke** closes that gap. `lib-agent-smoke.sh::smoke_agent <agent-cmd> <model>` runs a one-token round-trip through the **production `run_agent`** and classifies the outcome into three states: **PASS** (the model echoed the nonce), **UNAVAILABLE** (quota/capacity/transient backend — environmental, non-blocking), or **FAIL** (launch/auth/config breakage, including region drift — gate-worthy). The matrix harness `tests/e2e/run-agent-smoke.sh` runs an operator-configured matrix in parallel and aggregates to `SMOKE-SUMMARY pass=N fail=N unavailable=N skip=N` (any FAIL → rc 1). See [`docs/pipeline/agent-smoke.md`](pipeline/agent-smoke.md) for the full contract, the matrix config (`tests/e2e/e2e.conf.example`), and the `SMOKE_STUB=1` CI self-test.
+
 ### Operator-tunable per-CLI flags (closes #140)
 
 Two `autonomous.conf` variables append flags verbatim to every CLI invocation:
@@ -306,6 +310,8 @@ For canonical per-CLI values, see the per-CLI blocks at the bottom of `scripts/a
 | `scripts/autonomous-review.sh` | Review agent wrapper (handles approve/merge/fail) |
 | `scripts/autonomous.conf.example` | Configuration template |
 | `scripts/lib-agent.sh` | Agent CLI abstraction (claude/codex/gemini/kiro/opencode) |
+| `scripts/lib-agent-smoke.sh` | Three-state agent-CLI smoke (`smoke_agent`) — PASS/UNAVAILABLE/FAIL launch-auth-model probe via the production `run_agent`. See [`docs/pipeline/agent-smoke.md`](pipeline/agent-smoke.md) (INV-63). |
+| `tests/e2e/run-agent-smoke.sh` | agent-smoke matrix harness — parallel three-state run + `SMOKE-SUMMARY`; `SMOKE_STUB=1` for the CI stub self-test. |
 | `scripts/lib-auth.sh` | GitHub authentication abstraction (token/app) |
 | `scripts/gh-app-token.sh` | GitHub App JWT token generator |
 | `scripts/gh-token-refresh-daemon.sh` | Background token refresh for long-running sessions |

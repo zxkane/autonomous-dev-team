@@ -1,0 +1,68 @@
+# agent-smoke matrix — example (INV-63, issue #222)
+#
+# Copy to tests/e2e/e2e.conf (gitignored, machine-local) and edit for THIS box's
+# installed CLIs + credentials. Then:  bash tests/e2e/run-agent-smoke.sh
+#
+# Format, one entry per line:
+#   name | agent_cmd | model | env-setup
+#
+#   name       — human label for the entry (logs only).
+#   agent_cmd  — the AGENT_CMD value (claude / codex / kiro / agy / gemini /
+#                opencode / generic) handed to run_agent.
+#   model      — the model id passed to run_agent (may be empty → CLI default).
+#   env-setup  — shell, eval'd in the entry's OWN subshell BEFORE the smoke runs.
+#                Operator-trusted config (same trust model as AGENT_LAUNCHER).
+#                Use it to export per-entry env (Bedrock region, API base URL,
+#                etc.) and to blank vars that would otherwise leak from the
+#                outer shell.
+#
+# `require:VAR; ` — a leading directive in env-setup. If VAR is unset/empty
+#                after env-setup runs, the entry is recorded SKIP (NOT FAIL) and
+#                does not block the run. Use it for entries whose creds live in a
+#                local secrets file that may be absent on some boxes.
+#
+# NEVER put real keys/tokens in this file or in tests/e2e/e2e.conf — source them
+# from a gitignored local secrets file inside env-setup instead.
+#
+# Blank lines and `#` comment lines are ignored. A malformed entry (not exactly
+# 4 |-fields) fails the whole run loudly.
+
+# --- claude via Bedrock IAM role -------------------------------------------
+# Uses the box's instance/role credentials; no API key needed.
+claude-bedrock|claude|sonnet|export CLAUDE_CODE_USE_BEDROCK=1; export AWS_REGION=us-east-1
+
+# --- codex via Bedrock IAM role --------------------------------------------
+# MUST pin the codex Bedrock region explicitly — region pollution from the outer
+# shell (a stray BEDROCK_AWS_REGION=us-west-2 while the model lives in us-east-2)
+# was the #180 root cause. Set it here so the smoke reproduces the production
+# region exactly.
+codex-bedrock|codex|claude-sonnet-4-6|export CLAUDE_CODE_USE_BEDROCK=1; export BEDROCK_AWS_REGION=us-east-2
+
+# --- kiro (workspace agent) ------------------------------------------------
+# Kiro reads its stored OAuth/login token from the host. An expired token makes
+# kiro try a browser device-flow it cannot complete headless → smoke FAIL
+# (auth-failed). This is the #215 shape.
+#
+# AGENT NAME DEPENDENCY: run_agent's kiro branch passes `--agent "$KIRO_AGENT_NAME"`
+# (default `autonomous-dev`). On a box whose workspace defines only the `default`
+# agent, an `autonomous-dev` default makes the smoke fail for an INVISIBLE config
+# reason. Set KIRO_AGENT_NAME to an agent your workspace actually defines — this
+# example uses `default`, which most kiro workspaces ship.
+kiro-default|kiro||export KIRO_AGENT_NAME=default
+
+# --- agy (default model) ---------------------------------------------------
+# A quota wall (HTTP 429 RESOURCE_EXHAUSTED) classifies UNAVAILABLE, NOT FAIL —
+# environmental, self-healing. Leave model empty to use agy's configured default.
+agy-default|agy||true
+
+# --- claude via custom Anthropic-compatible endpoint (e.g. MiniMax) --------
+# Expresses the endpoint via per-entry env (NOT a shell alias — aliases do not
+# expand in non-interactive shells). The API key lives in a gitignored local
+# secrets file; `require:ANTHROPIC_API_KEY` makes the entry SKIP (not FAIL) when
+# that file/key is absent on this box. Bedrock vars are blanked so claude routes
+# to the custom endpoint, not Bedrock. `AGENT_LAUNCHER=` clears any inherited
+# shared Bedrock-claude launcher (a `cc` launcher would reintroduce Bedrock /
+# fail before the custom endpoint is exercised). The harness ALSO neutralizes an
+# inherited launcher for a custom-endpoint entry automatically (INV-63 sub-rule
+# 7), but blanking it here is explicit + portable.
+claude-minimax|claude|MiniMax-M2|require:ANTHROPIC_API_KEY; [ -f "$HOME/.config/agent-smoke/secrets.env" ] && . "$HOME/.config/agent-smoke/secrets.env"; export ANTHROPIC_BASE_URL="${MINIMAX_BASE_URL:-https://api.minimax.io/anthropic}"; export AGENT_LAUNCHER=; unset CLAUDE_CODE_USE_BEDROCK AWS_REGION BEDROCK_AWS_REGION
