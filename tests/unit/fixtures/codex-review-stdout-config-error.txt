@@ -1,0 +1,7 @@
+error: unexpected argument '-s' found
+
+  tip: to pass '-s' as a value, use '-- -s'
+
+Usage: codex review [OPTIONS] [PROMPT]
+
+For more information, try '--help'.
