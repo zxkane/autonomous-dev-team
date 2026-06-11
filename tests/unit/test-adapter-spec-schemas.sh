@@ -242,6 +242,25 @@ run_jq_suite() {
   else
     bad "config-log-only negative does not carry the forbidden config+log-only combo"
   fi
+
+  # 5. adapter-result: a timed-out (rc 124/137) no-verdict result MUST be
+  #    timeout-veto, not drop (Clause P1 + INV-48; #229 review finding). jq
+  #    confirms the forbidden combo is present (full conditional → python path).
+  local f5="$EXAMPLE_DIR/adapter-result.negative.timeout-not-veto.json"
+  if jq -e '(.process.rc | IN(124,137)) and (.verdict.state | IN("absent","malformed")) and ((.process.timedOut != true) or (.voteEligibility.state != "timeout-veto"))' "$f5" >/dev/null 2>&1; then
+    ok "timeout-not-veto negative carries the forbidden rc124/137+no-verdict+non-veto combo (correctly non-conformant)"
+  else
+    bad "timeout-not-veto negative does not carry the forbidden timeout+non-veto combo"
+  fi
+
+  # 6. adapter-result: a verdict.state=valid MUST carry a non-empty payloadRef
+  #    (#229 review finding). jq confirms the negative is valid-without-payloadRef.
+  local f6="$EXAMPLE_DIR/adapter-result.negative.valid-no-payloadref.json"
+  if jq -e '(.verdict.state == "valid") and ((.verdict.payloadRef == null) or (.verdict.payloadRef == ""))' "$f6" >/dev/null 2>&1; then
+    ok "valid-no-payloadref negative is verdict=valid with empty/null payloadRef (correctly non-conformant)"
+  else
+    bad "valid-no-payloadref negative does not carry the forbidden valid+empty-payloadRef combo"
+  fi
 }
 
 # ---------------------------------------------------------------------------

@@ -44,6 +44,8 @@ Example fixtures follow `<schema-prefix>.{golden|negative}.<label>.json`:
 | `adapter-result` | `negative.flat-enum` | **flat failure enum, missing the four axes** (issue-mandated) |
 | `adapter-result` | `negative.bad-provider-class` | `provider.class` not in enum (and evidence missing) |
 | `adapter-result` | `negative.provider-evidence-missing` | `provider.class != none` without `evidence` |
+| `adapter-result` | `negative.timeout-not-veto` | rc 124 + no verdict + `timedOut:false` + `vote:drop` — Clause P1 timeout-veto conditional (review finding) |
+| `adapter-result` | `negative.valid-no-payloadref` | `verdict.state:valid` with null `payloadRef` — Clause V0 conditional (review finding) |
 | `verdict-artifact` | `negative.no-schema-version` | **missing `schema_version`** (issue-mandated) |
 | `verdict-artifact` | `negative.blocking-but-pass` | non-empty `blockingFindings` with `verdict: PASS` |
 | `verdict-artifact` | `negative.bad-ac-value` | AC-coverage value not `pass`/`fail` |

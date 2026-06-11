@@ -2532,9 +2532,13 @@ check maps 1:1 to a clause:
    (quota/auth/config/transient + evidence), `verdict` (valid/absent/malformed),
    `voteEligibility` (pass/fail/drop/timeout-veto/not-applicable). A flat failure
    enum is documented as **NON-conformant**. The two load-bearing rc mappings are
-   worked examples in the spec: rc 124/137 + no verdict ⇒ `timeout-veto`
-   (deciding FAIL, [INV-48](#inv-48-per-side-review-wall-clock-timeout-agent_review_timeout-1h-default-with-browser-e2e-exclusion-and-timeout-veto)); rc 0 + no verdict ⇒ `drop`
-   (`unavailable`, [INV-40](#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback)).
+   worked examples in the spec **and machine-enforced by Draft-07 conditionals**:
+   rc 124/137 + no verdict ⇒ `timedOut:true` + `timeout-veto` (a result with
+   `timedOut:false`/`vote:drop` is rejected — deciding FAIL,
+   [INV-48](#inv-48-per-side-review-wall-clock-timeout-agent_review_timeout-1h-default-with-browser-e2e-exclusion-and-timeout-veto)); rc 0 + no verdict ⇒ `drop`
+   (`unavailable`, [INV-40](#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback)). The schema also requires a non-empty
+   `verdict.payloadRef` when `verdict.state = valid` (a `valid` verdict the
+   wrapper/aggregator cannot locate is rejected).
 3. **The verdict artifact contract** (`schemas/verdict-artifact.schema.json`) —
    `schema_version`, PASS/FAIL, blocking/non-blocking findings, an `evidence`
    object that folds the [INV-49](#inv-49-command-mode-e2e-may-feed-the-review-fan-out-a-structured-ac-coverage-artifact--optional-fail-safe) AC-coverage map and the
@@ -2578,10 +2582,12 @@ implement this spec.
   each schema has ≥2 golden examples; every golden validates and every
   documented negative is rejected (the three issue-mandated negatives: a flat
   failure enum missing the four axes, a verdict artifact without `schema_version`,
-  an error envelope without `remediation`; plus the #229-review negative: a
-  config-class error envelope surfaced `log-only`). Runs under `python3 -m
+  an error envelope without `remediation`; plus the #229-review negatives: a
+  config-class error envelope surfaced `log-only`, a timed-out rc-124/137
+  no-verdict result mapped to `drop` instead of `timeout-veto`, and a
+  `verdict.state=valid` result with no `payloadRef`). Runs under `python3 -m
   jsonschema` (full Draft-07) when available, else a `jq` structural fallback
-  (required-keys + enum membership + the four named negatives) so it passes in
+  (required-keys + enum membership + the six named negatives) so it passes in
   plain CI either way.
 - `docs/test-cases/adapter-spec.md` — TC-ADAPTER-SPEC-NNN enumeration.
 

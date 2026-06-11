@@ -170,7 +170,15 @@ How the CLI process exited.
 
 - **Clause P1.** `rc` is the raw exit code. The adapter **MUST** set `timedOut =
   true` iff the process was killed by the wall-clock cap — i.e. `rc ∈ {124,
-  137}` (`timeout` TERM-expiry / `--kill-after` SIGKILL). (INV-48.)
+  137}` (`timeout` TERM-expiry / `--kill-after` SIGKILL). (INV-48.) **The schema
+  enforces the no-verdict case** with a conditional: when `rc ∈ {124, 137}` AND
+  `verdict.state ∈ {absent, malformed}`, `process.timedOut` MUST be `true` AND
+  `voteEligibility.state` MUST be `timeout-veto` — so a timed-out no-verdict
+  result cannot validate as `drop`/`unavailable` (negative fixture
+  [`adapter-result.negative.timeout-not-veto.json`](schemas/examples/adapter-result.negative.timeout-not-veto.json)).
+  A timed-out run that *did* post a verdict (`verdict.state = valid`) is exempt —
+  the matched verdict wins ([INV-40](invariants.md#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback)) — so the conditional is gated on the
+  no-verdict case only.
 - A dispatcher-induced `SIGTERM` (`rc 143`) **MUST NOT** be counted as a
   crash by the retry counter ([INV-26](invariants.md#inv-26-stall-decision-excludes-dispatcher-induced-terminations-and-defers-on-live-wrappers)).
 
@@ -194,13 +202,18 @@ Why the model backend failed, with evidence, when it did.
   [error envelope](#6-the-operator-error-envelope) (§6) and surface it to the
   operator — never log-only.
 
-### 4.3 `verdict` — `{ state, payloadRef? }`
+### 4.3 `verdict` — `{ state, payloadRef }` (`payloadRef` REQUIRED when `state = valid`)
 
 Whether the adapter produced a classifiable verdict artifact within the poll
 window.
 
 - `valid` — a well-formed verdict artifact (§5) was produced; `payloadRef`
-  points at it.
+  points at it. **Clause V0:** when `verdict.state = valid`, `payloadRef`
+  **MUST** be a non-empty string — a `valid` verdict the wrapper/aggregator
+  cannot locate is non-conformant. **The schema enforces this** with a
+  conditional (`required` non-empty `payloadRef` for `state = valid`); negative
+  fixture [`adapter-result.negative.valid-no-payloadref.json`](schemas/examples/adapter-result.negative.valid-no-payloadref.json).
+  `payloadRef` stays optional/nullable for `absent` / `malformed`.
 - `absent` — no artifact within the window. Drives `drop` / `timeout-veto`
   (§4.4).
 - `malformed` — an artifact was produced but failed schema validation.

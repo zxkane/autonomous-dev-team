@@ -73,18 +73,18 @@
       ]
     },
     "verdict": {
-      "description": "Verdict-presence axis: whether the adapter produced a classifiable verdict artifact within the poll window.",
+      "description": "Verdict-presence axis: whether the adapter produced a classifiable verdict artifact within the poll window. When state=valid, payloadRef MUST be a non-empty string (enforced by the top-level allOf): a 'valid' verdict the wrapper/aggregator cannot locate is non-conformant.",
       "type": "object",
       "additionalProperties": false,
       "required": ["state"],
       "properties": {
         "state": {
-          "description": "valid=a well-formed verdict artifact was produced; absent=no verdict artifact within the window (drives drop/timeout-veto on the voteEligibility axis); malformed=an artifact was produced but failed schema validation (fail-safe: treated as absent, never as a silent PASS).",
+          "description": "valid=a well-formed verdict artifact was produced (payloadRef REQUIRED, non-empty); absent=no verdict artifact within the window (drives drop/timeout-veto on the voteEligibility axis); malformed=an artifact was produced but failed schema validation (fail-safe: treated as absent, never as a silent PASS).",
           "type": "string",
           "enum": ["valid", "absent", "malformed"]
         },
         "payloadRef": {
-          "description": "Path/URL/comment-id of the verdict artifact (which MUST satisfy verdict-artifact.schema.json) when state=valid, else null.",
+          "description": "Path/URL/comment-id of the verdict artifact (which MUST satisfy verdict-artifact.schema.json). REQUIRED and non-empty when state=valid; null/absent otherwise.",
           "type": ["string", "null"]
         }
       }
@@ -106,5 +106,55 @@
         }
       }
     }
-  }
+  },
+  "allOf": [
+    {
+      "description": "Clause P1 + the timeout-veto worked example: a process killed by the wall-clock cap (rc 124 = `timeout` TERM-expiry, or 137 = `--kill-after` SIGKILL) that produced NO verdict (verdict.state absent|malformed) MUST set process.timedOut=true AND resolve voteEligibility.state=timeout-veto (a deciding FAIL, INV-48) — it MUST NOT validate as drop/unavailable. A timed-out run that DID post a verdict (verdict.state=valid) is exempt: the matched verdict wins (INV-40), so this conditional is gated on the no-verdict case only.",
+      "if": {
+        "properties": {
+          "process": {
+            "properties": { "rc": { "enum": [124, 137] } },
+            "required": ["rc"]
+          },
+          "verdict": {
+            "properties": { "state": { "enum": ["absent", "malformed"] } },
+            "required": ["state"]
+          }
+        },
+        "required": ["process", "verdict"]
+      },
+      "then": {
+        "properties": {
+          "process": {
+            "properties": { "timedOut": { "const": true } },
+            "required": ["timedOut"]
+          },
+          "voteEligibility": {
+            "properties": { "state": { "const": "timeout-veto" } },
+            "required": ["state"]
+          }
+        }
+      }
+    },
+    {
+      "description": "A verdict.state=valid MUST carry a non-empty payloadRef (a string >=1 char): a 'valid' verdict the wrapper/aggregator cannot locate is non-conformant. payloadRef stays optional/nullable for absent|malformed.",
+      "if": {
+        "properties": {
+          "verdict": {
+            "properties": { "state": { "const": "valid" } },
+            "required": ["state"]
+          }
+        },
+        "required": ["verdict"]
+      },
+      "then": {
+        "properties": {
+          "verdict": {
+            "properties": { "payloadRef": { "type": "string", "minLength": 1 } },
+            "required": ["payloadRef"]
+          }
+        }
+      }
+    }
+  ]
 }
