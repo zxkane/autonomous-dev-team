@@ -225,15 +225,26 @@ window.
 
 How this result participates in the INV-40 vote. This axis is **derived** from
 the other three; the spec fixes the derivation so every adapter computes it
-identically.
+identically. The two no-verdict rows (`drop`, `timeout-veto`) are
+**machine-enforced for review mode by Draft-07 conditionals** — see §4.1 Clause
+P1 and the negative fixtures
+[`adapter-result.negative.timeout-not-veto.json`](schemas/examples/adapter-result.negative.timeout-not-veto.json)
+and [`adapter-result.negative.noverdict-not-drop.json`](schemas/examples/adapter-result.negative.noverdict-not-drop.json).
 
 | `state` | Derivation | Effect on the merge |
 |---|---|---|
 | `pass` | `verdict.state = valid` ∧ artifact verdict = `PASS` | deciding PASS |
 | `fail` | `verdict.state = valid` ∧ artifact verdict = `FAIL` | deciding FAIL |
-| `drop` | `verdict.state ∈ {absent, malformed}` ∧ `process.timedOut = false` | removed from the vote (`unavailable`) |
-| `timeout-veto` | `verdict.state ∈ {absent, malformed}` ∧ `process.timedOut = true` | **deciding FAIL that vetoes the merge** |
+| `drop` | `mode = review` ∧ `verdict.state ∈ {absent, malformed}` ∧ `process.timedOut = false` | removed from the vote (`unavailable`) |
+| `timeout-veto` | `mode = review` ∧ `verdict.state ∈ {absent, malformed}` ∧ `process.timedOut = true` | **deciding FAIL that vetoes the merge** |
 | `not-applicable` | `mode ∈ {dev-new, dev-resume, e2e-browser}` | does not vote |
+
+> **Schema enforcement (review mode).** For `mode = review`, a no-verdict result
+> (`verdict.state ∈ {absent, malformed}`) MUST resolve to `drop` when
+> `process.timedOut = false` and to `timeout-veto` when `process.timedOut = true`
+> — it cannot validate as `pass` / `fail` / `not-applicable`. (The dev/e2e modes
+> are `not-applicable` and legitimately have no verdict, so the conditional is
+> gated on `mode = review`.)
 
 #### Worked example 1 — provider 429s mid-run (the AC question)
 
@@ -291,9 +302,15 @@ information as **typed data**.
 - **Clause VA1 (schema_version).** The artifact **MUST** carry `schema_version`
   (value `1` this revision). An artifact without `schema_version` is
   NON-conformant (the schema rejects it).
-- **Clause VA2 (verdict ∈ {PASS, FAIL}).** There is no middle ground (INV-40 /
-  decision gate). A non-empty `blockingFindings` array **MUST** force `verdict =
-  FAIL` (schema-enforced conditional).
+- **Clause VA2 (verdict ∈ {PASS, FAIL}; FAIL ⇔ ≥1 blocking finding).** There is
+  no middle ground (INV-40 / decision gate). The schema enforces **both
+  directions** with conditionals: a non-empty `blockingFindings` array **MUST**
+  force `verdict = FAIL`, **and** `verdict = FAIL` **MUST** carry ≥1 blocking
+  finding (`blockingFindings` present, `minItems: 1`). A FAIL with empty/absent
+  `blockingFindings` is non-conformant — it would block a merge with nothing
+  actionable for the dev side to fix (negative fixture
+  [`verdict-artifact.negative.fail-no-blocking.json`](schemas/examples/verdict-artifact.negative.fail-no-blocking.json)).
+  PASS keeps `blockingFindings` empty/absent.
 - **Clause VA3 (folded evidence, not parallel fences).** The artifact folds in,
   as **typed sub-objects** under `evidence`:
   - `acCoverage` — the [INV-49](invariants.md#inv-49-command-mode-e2e-may-feed-the-review-fan-out-a-structured-ac-coverage-artifact--optional-fail-safe)

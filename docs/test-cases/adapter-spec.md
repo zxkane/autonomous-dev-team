@@ -46,9 +46,11 @@ Example fixtures follow `<schema-prefix>.{golden|negative}.<label>.json`:
 | `adapter-result` | `negative.provider-evidence-missing` | `provider.class != none` without `evidence` |
 | `adapter-result` | `negative.timeout-not-veto` | rc 124 + no verdict + `timedOut:false` + `vote:drop` — Clause P1 timeout-veto conditional (review finding) |
 | `adapter-result` | `negative.valid-no-payloadref` | `verdict.state:valid` with null `payloadRef` — Clause V0 conditional (review finding) |
+| `adapter-result` | `negative.noverdict-not-drop` | review + rc 0 + no verdict + `timedOut:false` + `vote:pass` — §4.4 drop conditional (review finding) |
 | `verdict-artifact` | `negative.no-schema-version` | **missing `schema_version`** (issue-mandated) |
 | `verdict-artifact` | `negative.blocking-but-pass` | non-empty `blockingFindings` with `verdict: PASS` |
 | `verdict-artifact` | `negative.bad-ac-value` | AC-coverage value not `pass`/`fail` |
+| `verdict-artifact` | `negative.fail-no-blocking` | `verdict:FAIL` with empty `blockingFindings` — Clause VA2 reverse conditional (review finding) |
 | `fixture-manifest` | `negative.missing-expect` | missing `expect` block |
 | `fixture-manifest` | `negative.bad-stdin-hash` | `stdinSha256` not a 64-hex string |
 | `error-envelope` | `negative.no-remediation` | **missing `remediation`** (issue-mandated) |

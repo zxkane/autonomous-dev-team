@@ -155,6 +155,31 @@
           }
         }
       }
+    },
+    {
+      "description": "Clause 4.4 + the rc 0 + no verdict ⇒ drop worked example: a REVIEW-mode result that produced NO verdict (verdict.state absent|malformed) and was NOT killed by the wall-clock cap (process.timedOut=false) MUST resolve voteEligibility.state=drop (unavailable, INV-40). It MUST NOT validate as pass/fail/not-applicable. The timeout case (timedOut=true ⇒ timeout-veto) is handled by the first allOf branch, so gating on timedOut=false isolates the non-timeout drop path (covering rc 0 clean-but-silent AND any other non-124/137 no-verdict rc). Gated on mode=review because dev-new/dev-resume/e2e-browser modes are not-applicable (they do not vote) and legitimately have no verdict.",
+      "if": {
+        "properties": {
+          "mode": { "const": "review" },
+          "process": {
+            "properties": { "timedOut": { "const": false } },
+            "required": ["timedOut"]
+          },
+          "verdict": {
+            "properties": { "state": { "enum": ["absent", "malformed"] } },
+            "required": ["state"]
+          }
+        },
+        "required": ["mode", "process", "verdict"]
+      },
+      "then": {
+        "properties": {
+          "voteEligibility": {
+            "properties": { "state": { "const": "drop" } },
+            "required": ["state"]
+          }
+        }
+      }
     }
   ]
 }

@@ -90,6 +90,19 @@
       "then": {
         "properties": { "verdict": { "const": "FAIL" } }
       }
+    },
+    {
+      "description": "The reverse rule: verdict=FAIL MUST carry >=1 blocking finding. The schema text says FAIL = >=1 blocking finding, and the wrapper needs actionable remediation, so a FAIL with an empty/absent blockingFindings is non-conformant (it would block a merge with nothing for the dev side to fix). PASS keeps blockingFindings empty/absent (the one-way rule above already forbids PASS + non-empty blocking).",
+      "if": {
+        "properties": { "verdict": { "const": "FAIL" } },
+        "required": ["verdict"]
+      },
+      "then": {
+        "properties": {
+          "blockingFindings": { "type": "array", "minItems": 1 }
+        },
+        "required": ["blockingFindings"]
+      }
     }
   ],
   "definitions": {

@@ -261,6 +261,25 @@ run_jq_suite() {
   else
     bad "valid-no-payloadref negative does not carry the forbidden valid+empty-payloadRef combo"
   fi
+
+  # 7. adapter-result: a review-mode, non-timeout (timedOut=false) no-verdict
+  #    result MUST be drop, not pass/fail/not-applicable (Clause 4.4 + INV-40;
+  #    #229 review finding). jq confirms the forbidden combo is present.
+  local f7="$EXAMPLE_DIR/adapter-result.negative.noverdict-not-drop.json"
+  if jq -e '(.mode == "review") and (.process.timedOut == false) and (.verdict.state | IN("absent","malformed")) and (.voteEligibility.state != "drop")' "$f7" >/dev/null 2>&1; then
+    ok "noverdict-not-drop negative carries the forbidden review+no-verdict+non-drop combo (correctly non-conformant)"
+  else
+    bad "noverdict-not-drop negative does not carry the forbidden review+no-verdict+non-drop combo"
+  fi
+
+  # 8. verdict-artifact: verdict=FAIL MUST carry >=1 blocking finding (#229
+  #    review finding). jq confirms the negative is FAIL with empty/absent blocking.
+  local f8="$EXAMPLE_DIR/verdict-artifact.negative.fail-no-blocking.json"
+  if jq -e '(.verdict == "FAIL") and (((.blockingFindings // []) | length) == 0)' "$f8" >/dev/null 2>&1; then
+    ok "fail-no-blocking negative is FAIL with empty/absent blockingFindings (correctly non-conformant)"
+  else
+    bad "fail-no-blocking negative does not carry the forbidden FAIL+no-blocking combo"
+  fi
 }
 
 # ---------------------------------------------------------------------------
