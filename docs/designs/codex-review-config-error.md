@@ -41,21 +41,35 @@ someone reads the raw stdout capture (`error: unexpected argument '-s' found`).
 
 A deterministic argv rejection must be recognized on the **first** run:
 
-1. **Classify before retrying** (`_run_codex_review`). On a non-zero exit, scan
-   the stdout capture for the clap usage signature
-   (`error: unexpected argument '<flag>' found` / `error: invalid value … for`)
-   **before** deciding to re-run. On a match: skip the remaining re-runs
-   (re-running identical argv can never succeed) and break the loop. The rc still
-   propagates (a non-zero, non-timeout rc → `unavailable` via the sweep), so the
-   INV-40 vote is unchanged — this is **observability + retry-economy**, not a
-   vote change.
+1. **Classify before retrying — gated on rc 2** (`_run_codex_review`). On a run
+   that exits **rc 2** (clap's parse-error exit code), scan the stdout capture for
+   the clap usage signature (`error: unexpected argument '<flag>' found` /
+   `error: invalid value … for`) **before** deciding to re-run. On a match: skip
+   the remaining re-runs (re-running identical argv can never succeed) and break
+   the loop. The rc still propagates (a non-zero, non-timeout rc → `unavailable`
+   via the sweep), so the INV-40 vote is unchanged — this is **observability +
+   retry-economy**, not a vote change.
 
-2. **`config-error` drop-reason bucket** (`_classify_codex_drop_reason` /
-   `_codex_drop_reason_phrase`). A clap-rejection capture now classifies to a
-   distinct `config-error:<flag>` token, rendered as
+   > **rc-2 gate (PR #225 review finding [P1]).** The capture scan alone is not a
+   > sufficient discriminator. A genuine transient failure (e.g. rc 1) whose stdout
+   > merely **prints or quotes** `error: unexpected argument '-s' found` — codex
+   > echoing a reviewed-diff hunk, or a transport blip after partial output — would
+   > otherwise be misread as a deterministic config-error and skip the configured
+   > re-runs. So the early-break (and the drop-reason classification in step 2)
+   > requires the clap **exit code rc 2** in addition to the capture signature.
+   > Every other non-zero rc takes the bounded re-run path (#209) and, if it stays
+   > dropped, is classified as the transient it is (`stream-error` / bare).
+
+2. **`config-error` drop-reason bucket — gated on rc 2** (`_classify_codex_drop_reason`
+   / `_codex_drop_reason_phrase`). `_classify_codex_drop_reason` takes the agent's
+   launch rc as an optional 2nd arg; a clap-rejection capture classifies to a
+   distinct `config-error:<flag>` token **only when that rc is 2** (a non-2 rc falls
+   through to the stream-error scan, so a transient drop that merely quoted the clap
+   string is named for its true cause). The token is rendered as
    `config-error: codex review rejected '-s' (exec-only flag in extra-args)` in
    the WARN line and the posted dropped-agent comment — so the operator sees the
-   rejected flag, not a bare opaque `unavailable`.
+   rejected flag, not a bare opaque `unavailable`. The wrapper threads
+   `AGENT_LAUNCH_RC[<sid>]` into the call.
 
 The two changes share one helper (`_codex_review_argv_rejection_flag`) so the
 loop and the drop-reason path agree on what "a clap rejection" is and which flag
@@ -113,12 +127,21 @@ the first quoted token after `unexpected argument` (or the option name after
 prints the words "unexpected argument" in prose does not match (the leading
 `error:` + clap grammar is the discriminator).
 
+`codex review`'s clap parser exits **rc 2** on a parse error (clap's standard
+usage-error exit code). The detector's match is only TRUSTED when the run also
+exited rc 2 (see the rc-2 gate above): the text signature + the exit code
+together identify a real parse rejection, so a non-rc-2 run whose capture merely
+quotes the string is never short-circuited.
+
 ### Precedence vs `stream-error`
 
-A capture is checked for `config-error` **before** `stream-error`. A clap parse
-error fails *before* any model stream opens, so the two never co-occur in a real
-capture; ordering config-error first is defensive (a deterministic argv rejection
-is the more actionable signal, and re-running it is always pointless).
+A capture is checked for `config-error` **before** `stream-error`, and only when
+the run exited rc 2. A clap parse error fails *before* any model stream opens, so
+the two never co-occur in a real capture; ordering config-error first is
+defensive (a deterministic argv rejection is the more actionable signal, and
+re-running it is always pointless). At a non-2 rc the config-error branch is
+skipped entirely, so a transient rc-1 failure that streamed a reconnect ladder
+AND happened to quote the clap string is correctly classified `stream-error`.
 
 ## Files touched
 
@@ -136,6 +159,6 @@ is the more actionable signal, and re-running it is always pointless).
 
 | Risk | Mitigation |
 |---|---|
-| The detector false-matches a clean review that quotes a clap-style error | Require the leading `error:` + the clap grammar (`unexpected argument '…' found` / `invalid value … for`); a prose mention without the `error:` line does not match. And the loop only consults it on a **non-zero** exit — a clean (rc 0) review never reaches the detector. |
+| The detector false-matches a clean review that quotes a clap-style error | Require the leading `error:` + the clap grammar (`unexpected argument '…' found` / `invalid value … for`); a prose mention without the `error:` line does not match. And both callers gate on **rc 2** (clap's parse-error exit) — a clean (rc 0) review never reaches it, and a transient rc-1 run that quotes the string still re-runs / is classified as the transient it is (PR #225 review finding [P1]). |
 | `set -euo pipefail` abort from a non-zero `grep` in the rc-0-always helpers | Same contract as the existing drop-reason helpers: every helper `return 0`-always, pipelines `|| true`-guarded. Tested with a bare call under `set -euo pipefail`. |
 | Breaking #209's transient-retry behavior | A genuine transient signature (`stream disconnected before completion`, `Reconnecting... N/M`) does NOT match the clap signature, so it still takes the re-run path and still classifies `stream-error[:N/M]`. Pinned by a regression test. |

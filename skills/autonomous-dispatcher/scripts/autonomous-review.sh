@@ -1685,8 +1685,19 @@ for _i in "${!AGENT_NAMES[@]}"; do
       # branch: a non-zero `$(…)` in this append would abort under `set -e` and
       # strand the issue in `reviewing`. A clean review / signal-free capture yields
       # an empty token → the bare `unavailable` wording is unchanged (no over-claim).
+      #
+      # #223 + PR #225 finding: pass the agent's LAUNCH RC as the 2nd arg so the
+      # `config-error` bucket is gated on the clap parse-error exit code (rc 2). A
+      # transient rc-1 drop whose capture merely QUOTES the clap usage string (codex
+      # echoed a reviewed-diff hunk) must NOT be mislabeled config-error — at a non-2
+      # rc the classifier falls through to the stream-error scan, so the real
+      # transient cause is named instead. The `:-1` default matches the sibling
+      # AGENT_LAUNCH_RC reads + the fan-out loop's "missing sidecar → 1" convention
+      # (the entry is always populated before this loop, so the default is a belt-and-
+      # suspenders fallback): an unknown rc reads as a launch failure (non-2 → falls
+      # through to stream-error), NOT the classifier's omitted-rc config-error path.
       elif [[ "${AGENT_NAMES[$_i]}" == "codex" ]]; then
-        _codex_reason_token=$(_classify_codex_drop_reason "${AGENT_CODEX_LOGS[$_i]:-}")
+        _codex_reason_token=$(_classify_codex_drop_reason "${AGENT_CODEX_LOGS[$_i]:-}" "${AGENT_LAUNCH_RC[${AGENT_SESSION_IDS[$_i]}]:-1}")
         if [[ -n "$_codex_reason_token" ]]; then
           _dropped_reasons+="${AGENT_NAMES[$_i]}: $(_codex_drop_reason_phrase "$_codex_reason_token"); "
         fi

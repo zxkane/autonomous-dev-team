@@ -410,11 +410,22 @@ _run_codex_review() {
     # `unavailable`, and _classify_codex_drop_reason names the rejected flag as a
     # `config-error:<flag>` drop reason (NOT a deciding FAIL — a conf error is an
     # operator condition, like stream-error/auth-failed, never a code rejection).
-    local _cfg_flag
-    _cfg_flag=$(_codex_review_argv_rejection_flag "$stdout_file")
-    if [[ -n "$_cfg_flag" ]]; then
-      echo "[lib-review-codex] codex review rejected '${_cfg_flag}' (clap parse error, rc ${last_run_rc}) — a DETERMINISTIC config error, NOT a transient stream blip; NOT re-running (identical argv can never succeed). Clear the exec-only flag via AGENT_REVIEW_EXTRA_ARGS_CODEX=\" \". Resolving \`config-error\` — INV-62/#223." >&2
-      break
+    #
+    # PR #225 review finding [P1]: gate this ONLY on the clap exit code (rc 2 — clap's
+    # standard parse-error exit). The capture scan alone is not a sufficient
+    # discriminator: a GENUINE transient failure (e.g. rc 1) whose stdout happens to
+    # PRINT / QUOTE `error: unexpected argument '<flag>' found` — codex echoing a
+    # reviewed-diff hunk, or a transport blip after partial output — must STILL take
+    # the re-run path (#209), not be short-circuited as deterministic config-error.
+    # The rc-2 gate + the capture scan together mean: only a real clap parse rejection
+    # (rc 2 AND the usage signature) breaks early; every other non-zero rc re-runs.
+    if [[ "$last_run_rc" -eq 2 ]]; then
+      local _cfg_flag
+      _cfg_flag=$(_codex_review_argv_rejection_flag "$stdout_file")
+      if [[ -n "$_cfg_flag" ]]; then
+        echo "[lib-review-codex] codex review rejected '${_cfg_flag}' (clap parse error, rc ${last_run_rc}) — a DETERMINISTIC config error, NOT a transient stream blip; NOT re-running (identical argv can never succeed). Clear the exec-only flag via AGENT_REVIEW_EXTRA_ARGS_CODEX=\" \". Resolving \`config-error\` — INV-62/#223." >&2
+        break
+      fi
     fi
     # Bound 1: re-run budget exhausted → fall back (poller resolves unavailable).
     if (( reruns >= max )); then
@@ -501,13 +512,16 @@ _codex_review_has_stream_error() {
 # that merely MENTIONS "unexpected argument" in prose (no `error:` clap line) does
 # NOT match (no false positive). An empty/missing/unreadable file → empty.
 #
-# Caller-side safety: this is a broad substring match (no line anchor), so a rc-0
-# review whose body QUOTES the exact clap string `error: unexpected argument '<x>'
-# found` (e.g. a finding about CLI ergonomics) WOULD match. Both production callers
-# guard against that by only consulting it on a NON-zero exit — _run_codex_review
-# checks it after its `last_run_rc -eq 0 && break`, and _classify_codex_drop_reason
-# runs only for an agent already resolved `unavailable` (non-zero rc, no verdict).
-# A clean (rc 0) review never reaches it. Keep that rc-gate if reused elsewhere.
+# Caller-side safety: this is a broad substring match (no line anchor), so a review
+# whose body QUOTES the exact clap string `error: unexpected argument '<x>' found`
+# (e.g. a finding about CLI ergonomics, or codex echoing a reviewed-diff hunk) WOULD
+# match. So both production callers gate on the clap EXIT CODE (rc 2) — NOT just the
+# capture text — before trusting this detector (PR #225 finding): _run_codex_review
+# only consults it when `last_run_rc -eq 2`, and _classify_codex_drop_reason only
+# emits config-error when its <launch-rc> arg is 2 (or omitted, for back-compat). An
+# rc-0 clean review never reaches it (the rc-0 break precedes the check), and a
+# transient rc-1 that merely quotes the string still re-runs / classifies as the
+# transient it is. Keep the rc-2 gate if this helper is reused elsewhere.
 _codex_review_argv_rejection_flag() {
   local f="${1:-}"
   [[ -n "$f" && -f "$f" && -r "$f" ]] || return 0
@@ -527,7 +541,7 @@ _codex_review_argv_rejection_flag() {
   return 0
 }
 
-# _classify_codex_drop_reason <stdout-file>
+# _classify_codex_drop_reason <stdout-file> [<launch-rc>]
 #
 # Scrape a `codex review` stdout capture for a drop signal. Echoes ONE token on
 # stdout (rc 0 ALWAYS — fail-safe under `set -euo pipefail`, mirrors
@@ -539,6 +553,7 @@ _codex_review_argv_rejection_flag() {
 #         rejected flag. Checked FIRST: a clap parse error fails before any model
 #         stream opens, so it never co-occurs with stream-error; ordering it first
 #         is defensive (a deterministic rejection is the more actionable signal).
+#         GATED on <launch-rc> == 2 (clap's parse-error exit code) — see below.
 #   stream-error[:N/M]
 #       — the capture shows a stream-disconnect error. The ":N/M" suffix is the
 #         HIGHEST reconnect-ladder depth seen (`Reconnecting... N/M`). Appended
@@ -546,17 +561,32 @@ _codex_review_argv_rejection_flag() {
 #   "" (empty)
 #       — no drop signal (the caller keeps the bare `unavailable`). A clean review
 #         or a genuine `[P1]` review yields empty — NO over-claim.
+#
+# PR #225 review finding [P1]: the optional <launch-rc> arg gates the config-error
+# bucket on the clap exit code (rc 2). The capture scan alone is not a sufficient
+# discriminator — a GENUINE transient failure (e.g. rc 1) whose capture merely
+# QUOTES the clap usage string (codex echoed a reviewed-diff hunk, or a transport
+# blip after partial output) must NOT be mislabeled config-error; at a non-2 rc the
+# classifier falls through to the stream-error scan (so the real transient cause is
+# still named) / empty. When <launch-rc> is OMITTED the gate is skipped — preserving
+# the pre-finding behavior for any caller that does not thread the rc; the wrapper's
+# drop-loop passes it, so its classification is correctly gated.
 _classify_codex_drop_reason() {
-  local f="${1:-}"
+  local f="${1:-}" launch_rc="${2:-}"
   [[ -n "$f" && -f "$f" && -r "$f" ]] || return 0
 
-  # #223: a deterministic argv rejection (clap exit 2) is the more actionable
-  # signal — name the rejected flag. Checked before the stream-error scan.
-  local _cfg_flag
-  _cfg_flag=$(_codex_review_argv_rejection_flag "$f")
-  if [[ -n "$_cfg_flag" ]]; then
-    printf 'config-error:%s\n' "$_cfg_flag"
-    return 0
+  # #223 + PR #225 finding: a deterministic argv rejection (clap exit 2) is the more
+  # actionable signal — name the rejected flag. Checked before the stream-error scan,
+  # but ONLY when the rc is the clap parse-error code (rc 2), or when no rc was passed
+  # (backward-compat). A non-2 rc (a transient that merely quoted the clap string)
+  # skips this branch and falls through to the stream-error scan.
+  if [[ -z "$launch_rc" || "$launch_rc" == "2" ]]; then
+    local _cfg_flag
+    _cfg_flag=$(_codex_review_argv_rejection_flag "$f")
+    if [[ -n "$_cfg_flag" ]]; then
+      printf 'config-error:%s\n' "$_cfg_flag"
+      return 0
+    fi
   fi
 
   _codex_review_has_stream_error "$f" || return 0
