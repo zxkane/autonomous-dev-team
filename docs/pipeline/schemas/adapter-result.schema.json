@@ -53,8 +53,9 @@
           "enum": ["none", "quota", "auth", "config", "transient"]
         },
         "evidence": {
-          "description": "Human-readable, sanitized reason string surfaced to the operator (e.g. \"quota-exhausted (Antigravity 429: daily quota reached; resets in 33h48m45s)\"). REQUIRED when class != none.",
-          "type": "string"
+          "description": "Human-readable, sanitized reason string surfaced to the operator (e.g. \"quota-exhausted (Antigravity 429: daily quota reached; resets in 33h48m45s)\"). REQUIRED and non-empty when class != none (Clause PR1); an empty string is non-conformant — there is no useful empty evidence.",
+          "type": "string",
+          "minLength": 1
         },
         "resetHint": {
           "description": "Recovery window when the provider published one (e.g. \"Resets in 33h48m45s\"), else null. Only meaningful for class=quota.",
@@ -176,6 +177,44 @@
         "properties": {
           "voteEligibility": {
             "properties": { "state": { "const": "drop" } },
+            "required": ["state"]
+          }
+        }
+      }
+    },
+    {
+      "description": "§4.4 derivation: a NON-review mode (dev-new, dev-resume, e2e-browser) does NOT vote, so voteEligibility.state MUST be not-applicable. A dev/e2e result with pass/fail/drop/timeout-veto is non-conformant. (The complement — review mode MUST NOT be not-applicable — is enforced by the no-verdict drop/timeout-veto branches above for the no-verdict case and by the valid-verdict branch below for the with-verdict case.)",
+      "if": {
+        "properties": {
+          "mode": { "enum": ["dev-new", "dev-resume", "e2e-browser"] }
+        },
+        "required": ["mode"]
+      },
+      "then": {
+        "properties": {
+          "voteEligibility": {
+            "properties": { "state": { "const": "not-applicable" } },
+            "required": ["state"]
+          }
+        }
+      }
+    },
+    {
+      "description": "§4.4 derivation: a REVIEW-mode result with a valid verdict (verdict.state=valid) is a deciding vote — voteEligibility.state MUST be pass or fail (the PASS/FAIL artifact decides which). It MUST NOT be drop, timeout-veto, or not-applicable (those are the no-verdict / non-review cases). Combined with the no-verdict branches above, this fixes the full review-mode derivation: valid ⇒ pass|fail; no-verdict+timedOut ⇒ timeout-veto; no-verdict+¬timedOut ⇒ drop.",
+      "if": {
+        "properties": {
+          "mode": { "const": "review" },
+          "verdict": {
+            "properties": { "state": { "const": "valid" } },
+            "required": ["state"]
+          }
+        },
+        "required": ["mode", "verdict"]
+      },
+      "then": {
+        "properties": {
+          "voteEligibility": {
+            "properties": { "state": { "enum": ["pass", "fail"] } },
             "required": ["state"]
           }
         }

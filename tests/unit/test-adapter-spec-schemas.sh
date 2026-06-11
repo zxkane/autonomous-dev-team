@@ -280,6 +280,35 @@ run_jq_suite() {
   else
     bad "fail-no-blocking negative does not carry the forbidden FAIL+no-blocking combo"
   fi
+
+  # 9. adapter-result: provider.evidence MUST be non-empty when class!=none
+  #    (Clause PR1; #229 review finding). jq confirms the negative is a non-none
+  #    class with an empty evidence string.
+  local f9="$EXAMPLE_DIR/adapter-result.negative.empty-evidence.json"
+  if jq -e '(.provider.class != "none") and (.provider.evidence == "")' "$f9" >/dev/null 2>&1; then
+    ok "empty-evidence negative is non-none class with empty evidence (correctly non-conformant)"
+  else
+    bad "empty-evidence negative does not carry the forbidden non-none+empty-evidence combo"
+  fi
+
+  # 10. adapter-result: a non-review mode MUST vote not-applicable (§4.4; #229
+  #     review finding). jq confirms the negative is dev/e2e with a deciding vote.
+  local f10="$EXAMPLE_DIR/adapter-result.negative.devmode-votes.json"
+  if jq -e '(.mode | IN("dev-new","dev-resume","e2e-browser")) and (.voteEligibility.state != "not-applicable")' "$f10" >/dev/null 2>&1; then
+    ok "devmode-votes negative is a non-review mode with a deciding vote (correctly non-conformant)"
+  else
+    bad "devmode-votes negative does not carry the forbidden non-review+voting combo"
+  fi
+
+  # 11. adapter-result: a review result with a valid verdict MUST be pass|fail,
+  #     not drop/timeout-veto/not-applicable (§4.4; #229 review finding). jq
+  #     confirms the negative is review+valid with a non-pass/fail vote.
+  local f11="$EXAMPLE_DIR/adapter-result.negative.valid-verdict-drop.json"
+  if jq -e '(.mode == "review") and (.verdict.state == "valid") and (.voteEligibility.state | (IN("pass","fail") | not))' "$f11" >/dev/null 2>&1; then
+    ok "valid-verdict-drop negative is review+valid with a non-pass/fail vote (correctly non-conformant)"
+  else
+    bad "valid-verdict-drop negative does not carry the forbidden review+valid+non-deciding combo"
+  fi
 }
 
 # ---------------------------------------------------------------------------

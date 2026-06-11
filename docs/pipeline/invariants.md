@@ -2532,14 +2532,15 @@ check maps 1:1 to a clause:
    (quota/auth/config/transient + evidence), `verdict` (valid/absent/malformed),
    `voteEligibility` (pass/fail/drop/timeout-veto/not-applicable). A flat failure
    enum is documented as **NON-conformant**. The two load-bearing rc mappings are
-   worked examples in the spec **and machine-enforced by Draft-07 conditionals**
-   for review mode: a no-verdict result (`verdict.state ∈ {absent, malformed}`)
-   with rc 124/137 ⇒ `timedOut:true` + `timeout-veto` (deciding FAIL,
-   [INV-48](#inv-48-per-side-review-wall-clock-timeout-agent_review_timeout-1h-default-with-browser-e2e-exclusion-and-timeout-veto)), and a no-verdict result with `timedOut:false` ⇒ `drop`
-   (`unavailable`, [INV-40](#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback)) — a no-verdict review result that validates as
-   `pass`/`fail`/`not-applicable` is rejected. The schema also requires a
-   non-empty `verdict.payloadRef` when `verdict.state = valid` (a `valid` verdict
-   the wrapper/aggregator cannot locate is rejected).
+   worked examples in the spec **and the full §4.4 derivation is machine-enforced
+   by Draft-07 conditionals**: (a) a non-review mode ⇒ `not-applicable`; (b)
+   review + valid verdict ⇒ `pass`/`fail`; (c) review + no verdict
+   (`absent`/`malformed`) + rc 124/137 ⇒ `timedOut:true` + `timeout-veto`
+   (deciding FAIL, [INV-48](#inv-48-per-side-review-wall-clock-timeout-agent_review_timeout-1h-default-with-browser-e2e-exclusion-and-timeout-veto)); (d) review + no verdict + `timedOut:false` ⇒
+   `drop` (`unavailable`, [INV-40](#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback)). The schema also requires a non-empty
+   `verdict.payloadRef` when `verdict.state = valid` (a `valid` verdict the
+   wrapper/aggregator cannot locate is rejected) and a non-empty
+   `provider.evidence` when `provider.class != none` (Clause PR1).
 3. **The verdict artifact contract** (`schemas/verdict-artifact.schema.json`) —
    `schema_version`, PASS/FAIL (the schema enforces FAIL ⇔ ≥1 blocking finding
    **both directions** — non-empty `blockingFindings` forces FAIL, and FAIL
@@ -2589,10 +2590,12 @@ implement this spec.
   config-class error envelope surfaced `log-only`, a timed-out rc-124/137
   no-verdict result mapped to `drop` instead of `timeout-veto`, a
   `verdict.state=valid` result with no `payloadRef`, a review-mode non-timeout
-  no-verdict result mapped to `pass` instead of `drop`, and a `verdict=FAIL`
-  artifact with no blocking findings). Runs under `python3 -m jsonschema` (full
-  Draft-07) when available, else a `jq` structural fallback (required-keys + enum
-  membership + the eight named negatives) so it passes in plain CI either way.
+  no-verdict result mapped to `pass` instead of `drop`, a `verdict=FAIL` artifact
+  with no blocking findings, a non-`none` provider class with empty `evidence`, a
+  non-review mode that votes, and a review+valid-verdict result mapped to `drop`).
+  Runs under `python3 -m jsonschema` (full Draft-07) when available, else a `jq`
+  structural fallback (required-keys + enum membership + the eleven named
+  negatives) so it passes in plain CI either way.
 - `docs/test-cases/adapter-spec.md` — TC-ADAPTER-SPEC-NNN enumeration.
 
 **Cross-references**:

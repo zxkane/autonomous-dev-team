@@ -32,7 +32,7 @@ Example fixtures follow `<schema-prefix>.{golden|negative}.<label>.json`:
 
 | Schema | Golden examples |
 |---|---|
-| `adapter-result` | `golden.pass` (rc 0 + verdict valid → vote pass), `golden.timeout-veto` (rc 124 + verdict absent → timeout-veto), `golden.quota-drop` (rc 0 + quota + verdict absent → drop) |
+| `adapter-result` | `golden.pass` (review + verdict valid → vote pass), `golden.timeout-veto` (rc 124 + verdict absent → timeout-veto), `golden.quota-drop` (rc 0 + quota + verdict absent → drop), `golden.dev-new` (dev-new → not-applicable) |
 | `verdict-artifact` | `golden.pass` (PASS + AC-coverage map + E2E report), `golden.fail` (FAIL + blocking finding) |
 | `fixture-manifest` | `golden.codex-review` (codex review mode), `golden.agy-quota` (agy quota drop) |
 | `error-envelope` | `golden.kiro-auth` (issue-comment surface), `golden.codex-no-worktree` (dispatcher-alert surface), `golden.transient-log-only` (the only log-only case — `class: transient`) |
@@ -47,6 +47,9 @@ Example fixtures follow `<schema-prefix>.{golden|negative}.<label>.json`:
 | `adapter-result` | `negative.timeout-not-veto` | rc 124 + no verdict + `timedOut:false` + `vote:drop` — Clause P1 timeout-veto conditional (review finding) |
 | `adapter-result` | `negative.valid-no-payloadref` | `verdict.state:valid` with null `payloadRef` — Clause V0 conditional (review finding) |
 | `adapter-result` | `negative.noverdict-not-drop` | review + rc 0 + no verdict + `timedOut:false` + `vote:pass` — §4.4 drop conditional (review finding) |
+| `adapter-result` | `negative.empty-evidence` | `provider.class:quota` with empty `evidence` — Clause PR1 `minLength` (review finding) |
+| `adapter-result` | `negative.devmode-votes` | `mode:dev-new` with `vote:pass` — §4.4 non-review ⇒ not-applicable (review finding) |
+| `adapter-result` | `negative.valid-verdict-drop` | review + `verdict.state:valid` with `vote:drop` — §4.4 valid ⇒ pass/fail (review finding) |
 | `verdict-artifact` | `negative.no-schema-version` | **missing `schema_version`** (issue-mandated) |
 | `verdict-artifact` | `negative.blocking-but-pass` | non-empty `blockingFindings` with `verdict: PASS` |
 | `verdict-artifact` | `negative.bad-ac-value` | AC-coverage value not `pass`/`fail` |

@@ -195,9 +195,13 @@ Why the model backend failed, with evidence, when it did.
 | `transient` | retryable upstream blip (codex `stream-error`, INV-59/INV-62 5xx reconnect). | yes |
 
 - **Clause PR1.** When `class != none` the adapter **MUST** populate `evidence`
-  with the sanitized operator-facing reason (e.g. `"quota-exhausted (Antigravity
-  429: daily quota reached; resets in 33h48m45s)"`). Schema enforces this with a
-  conditional `required`.
+  with a **non-empty** sanitized operator-facing reason (e.g.
+  `"quota-exhausted (Antigravity 429: daily quota reached; resets in
+  33h48m45s)"`). The schema enforces this with a conditional `required` **plus**
+  `minLength: 1` on `evidence`, so a non-`none` class with an empty `evidence`
+  string is rejected (negative fixture
+  [`adapter-result.negative.empty-evidence.json`](schemas/examples/adapter-result.negative.empty-evidence.json)) —
+  there is no useful empty evidence.
 - **Clause PR2.** For `class = config` the adapter **MUST** also emit an
   [error envelope](#6-the-operator-error-envelope) (§6) and surface it to the
   operator — never log-only.
@@ -225,26 +229,28 @@ window.
 
 How this result participates in the INV-40 vote. This axis is **derived** from
 the other three; the spec fixes the derivation so every adapter computes it
-identically. The two no-verdict rows (`drop`, `timeout-veto`) are
-**machine-enforced for review mode by Draft-07 conditionals** — see §4.1 Clause
-P1 and the negative fixtures
-[`adapter-result.negative.timeout-not-veto.json`](schemas/examples/adapter-result.negative.timeout-not-veto.json)
-and [`adapter-result.negative.noverdict-not-drop.json`](schemas/examples/adapter-result.negative.noverdict-not-drop.json).
+identically. **Every row is machine-enforced by Draft-07 conditionals** — see
+§4.1 Clause P1 and the negative fixtures
+[`adapter-result.negative.timeout-not-veto.json`](schemas/examples/adapter-result.negative.timeout-not-veto.json),
+[`adapter-result.negative.noverdict-not-drop.json`](schemas/examples/adapter-result.negative.noverdict-not-drop.json),
+[`adapter-result.negative.valid-verdict-drop.json`](schemas/examples/adapter-result.negative.valid-verdict-drop.json),
+and [`adapter-result.negative.devmode-votes.json`](schemas/examples/adapter-result.negative.devmode-votes.json).
 
 | `state` | Derivation | Effect on the merge |
 |---|---|---|
-| `pass` | `verdict.state = valid` ∧ artifact verdict = `PASS` | deciding PASS |
-| `fail` | `verdict.state = valid` ∧ artifact verdict = `FAIL` | deciding FAIL |
+| `pass` | `mode = review` ∧ `verdict.state = valid` ∧ artifact verdict = `PASS` | deciding PASS |
+| `fail` | `mode = review` ∧ `verdict.state = valid` ∧ artifact verdict = `FAIL` | deciding FAIL |
 | `drop` | `mode = review` ∧ `verdict.state ∈ {absent, malformed}` ∧ `process.timedOut = false` | removed from the vote (`unavailable`) |
 | `timeout-veto` | `mode = review` ∧ `verdict.state ∈ {absent, malformed}` ∧ `process.timedOut = true` | **deciding FAIL that vetoes the merge** |
 | `not-applicable` | `mode ∈ {dev-new, dev-resume, e2e-browser}` | does not vote |
 
-> **Schema enforcement (review mode).** For `mode = review`, a no-verdict result
-> (`verdict.state ∈ {absent, malformed}`) MUST resolve to `drop` when
-> `process.timedOut = false` and to `timeout-veto` when `process.timedOut = true`
-> — it cannot validate as `pass` / `fail` / `not-applicable`. (The dev/e2e modes
-> are `not-applicable` and legitimately have no verdict, so the conditional is
-> gated on `mode = review`.)
+> **Schema enforcement (full derivation).** The conditionals cover every row:
+> - A **non-review** mode (`dev-new`/`dev-resume`/`e2e-browser`) MUST be
+>   `not-applicable` — it cannot validate as `pass`/`fail`/`drop`/`timeout-veto`.
+> - For `mode = review` with a **valid** verdict, the vote MUST be `pass` or
+>   `fail` (the PASS/FAIL artifact decides which) — not `drop`/`timeout-veto`/`not-applicable`.
+> - For `mode = review` with **no** verdict (`absent`/`malformed`): `timeout-veto`
+>   when `process.timedOut = true`, else `drop`.
 
 #### Worked example 1 — provider 429s mid-run (the AC question)
 
