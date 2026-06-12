@@ -14,6 +14,7 @@ For the high-level overview and quick start, see [`docs/autonomous-pipeline.md`]
 | [`review-agent-flow.md`](review-agent-flow.md) | The review-agent wrapper lifecycle: PID guard, requirement-drift detection, decision gate, reviewed-HEAD trailer. |
 | [`handoffs.md`](handoffs.md) | The five handoff points between dispatcher / dev / review and the invariants each side is required to uphold. |
 | [`invariants.md`](invariants.md) | Cross-cutting invariants (PID file naming, retry-counter cutoff rule, SHA trailer format, "crashed"-keyword regex contract, etc.). |
+| [`adapter-spec.md`](adapter-spec.md) | **Normative** agent-CLI adapter contract (`spec_version: 1`): the `invoke(mode, …) → AdapterResult` interface with a mode axis, the four-axis result, the verdict-artifact / fixture-manifest / error-envelope JSON Schemas under [`schemas/`](schemas/), and the per-CLI mapping appendix (INV-66). Later adapter work implements it. |
 | [`remote-backend.md`](remote-backend.md) | The `EXECUTION_BACKEND` contract every dispatch transport (local, remote-aws-ssm, future) must satisfy. |
 | [`agy-cli-support.md`](agy-cli-support.md) | Per-CLI spec for the `AGENT_CMD=agy` (Antigravity 2.0) branch in `lib-agent.sh` — sidecar pattern, structural flags, INV-36 capture contract. |
 | [`per-side-agent-cmd.md`](per-side-agent-cmd.md) | `AGENT_DEV_CMD` / `AGENT_REVIEW_CMD` — let dev and review run on different CLIs in the same project (INV-37). |

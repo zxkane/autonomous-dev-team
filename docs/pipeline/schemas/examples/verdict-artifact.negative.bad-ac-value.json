@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "verdict": "PASS",
+  "blockingFindings": [],
+  "evidence": {
+    "acCoverage": {
+      "AC-1": "maybe"
+    }
+  },
+  "runId": "01c9c077-febc-4cf3-a716-ee66ae584135",
+  "agent": "claude"
+}

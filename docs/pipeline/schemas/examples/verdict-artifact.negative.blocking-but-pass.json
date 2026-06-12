@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "verdict": "PASS",
+  "blockingFindings": [
+    { "title": "Blocking finding present but verdict says PASS — contradiction" }
+  ],
+  "runId": "01c9c077-febc-4cf3-a716-ee66ae584135",
+  "agent": "agy"
+}

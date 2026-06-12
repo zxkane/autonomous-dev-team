@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "code": "AGY_QUOTA_EXHAUSTED",
+  "problem": "agy hit its daily quota wall",
+  "cause": "Antigravity 429: daily quota reached; resets in 33h48m45s",
+  "doc": "docs/pipeline/invariants.md#inv-58"
+}

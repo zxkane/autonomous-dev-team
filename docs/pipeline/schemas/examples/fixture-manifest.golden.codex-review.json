@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "adapter": "codex",
+  "mode": "review",
+  "input": {
+    "promptBytes": 4096,
+    "model": "gpt-5-codex",
+    "env": {
+      "AGENT_REVIEW_EXTRA_ARGS_CODEX": "",
+      "CODEX_REVIEW_NO_WORKTREE_RC": "70"
+    }
+  },
+  "command": {
+    "argv": ["codex", "review", "<prompt>"],
+    "stdinSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "rc": 0,
+    "stdout": "Review PASSED - All checklist items verified.\n",
+    "stderr": ""
+  },
+  "files": {
+    "verdictArtifact": {
+      "path": "fixtures/codex-review/verdict.json",
+      "role": "artifact"
+    }
+  },
+  "expect": {
+    "providerClass": "none",
+    "verdictState": "valid",
+    "vote": "pass",
+    "retryable": false
+  }
+}

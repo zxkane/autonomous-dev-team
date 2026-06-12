@@ -1,0 +1,9 @@
+{
+  "spec_version": 1,
+  "adapter": "claude",
+  "mode": "dev-resume",
+  "process": { "rc": 124, "signal": "SIGTERM", "timedOut": true },
+  "provider": { "class": "none" },
+  "verdict": { "state": "absent", "payloadRef": null },
+  "voteEligibility": { "state": "not-applicable" }
+}

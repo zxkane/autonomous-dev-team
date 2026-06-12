@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "verdict": "FAIL",
+  "blockingFindings": [],
+  "nonBlockingFindings": [],
+  "runId": "61c25d17-cbd6-4507-8021-2ff3428e3a7a",
+  "agent": "codex"
+}

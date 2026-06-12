@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "adapter": "claude",
+  "mode": "dev-new",
+  "input": {
+    "promptBytes": 2048,
+    "model": "claude-sonnet-4.6",
+    "env": {}
+  },
+  "command": {
+    "argv": ["claude", "--session-id", "<uuid>", "-p", "-"],
+    "stdinSha256": "not-a-real-sha256",
+    "rc": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "expect": {
+    "providerClass": "none",
+    "verdictState": "absent",
+    "vote": "not-applicable",
+    "retryable": false
+  }
+}

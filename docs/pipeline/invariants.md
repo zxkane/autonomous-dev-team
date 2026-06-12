@@ -2507,6 +2507,109 @@ This mirrors the production wrapper's [INV-38](#inv-38-per-side-agent_launcher-p
 - [INV-14](#inv-14-config-lookup-honors-symlink-vendor-pattern) — the conf-lookup half this extends. INV-14's "Required symlink manifest" is superseded for `lib-*.sh`: only STABLE ENTRY scripts need symlinking now.
 - [`dispatcher-flow.md` § install/topology](dispatcher-flow.md#pre-step-wrapper-exec-bit-self-heal-closes-97) — the consumer install topology updated for the manifest-only model.
 
+## INV-66: adapter conformance is spec-defined
+
+**Rule**: the agent-CLI adapter boundary (dev + review + e2e) has a single
+**normative** contract — [`adapter-spec.md`](adapter-spec.md) (`spec_version: 1`)
++ the four JSON Schemas under [`schemas/`](schemas/) — and any later adapter work
+(adapter extraction, verdict-as-data channel, conformance fixture runner, env
+scrubbing) **MUST implement that spec and MUST NOT redefine it**. The contract is
+five artifacts, each written as RFC-2119 MUST/MUST-NOT clauses so a conformance
+check maps 1:1 to a clause:
+
+1. **The adapter interface with a mode axis** — `invoke(mode, prompt, model,
+   session, timeout, env) → AdapterResult`, `mode ∈ { dev-new, dev-resume,
+   review, e2e-browser }`. Modes differ **structurally** (codex dev = `codex exec
+   --json` + thread-sidecar resume; codex review = `codex review` from a PR
+   worktree, no resume, fail-closed `no-worktree` rc 70) — the spec states
+   per-mode requirements, not one uniform invoke. (`prompt` is stdin-fed
+   [INV-34](#inv-34-agent-prompt-is-fed-via-stdin-never-as-a-single-argv-element)
+   on every dev mode and every CLI's review mode **except** `codex review`, which
+   has no stdin-prompt mode and takes the short gate prompt as its positional
+   `[PROMPT]` argument — the one explicit Clause A2 carve-out, consistent with
+   [INV-62](#inv-62-the-codex-review-lane-runs-the-codex-review-subcommand-auto-scoped-prompt-carried-gate-with-a-stdout-verdict-fallback).)
+2. **The four-axis AdapterResult** — `process` (rc, signal, timedOut), `provider`
+   (quota/auth/config/transient + evidence), `verdict` (valid/absent/malformed),
+   `voteEligibility` (pass/fail/drop/timeout-veto/not-applicable). A flat failure
+   enum is documented as **NON-conformant**. The two load-bearing rc mappings are
+   worked examples in the spec **and the full §4.4 derivation is machine-enforced
+   by Draft-07 conditionals**: (a) a non-review mode ⇒ `not-applicable`; (b)
+   review + valid verdict ⇒ `pass`/`fail`; (c) review + no verdict
+   (`absent`/`malformed`) + `timedOut:true` ⇒ `timeout-veto` (deciding FAIL,
+   [INV-48](#inv-48-per-side-review-wall-clock-timeout-agent_review_timeout-1h-default-with-browser-e2e-exclusion-and-timeout-veto)) — keyed off `timedOut` (not the rc), so EVERY timed-out review
+   no-verdict result is covered; (d) review + no verdict + `timedOut:false` ⇒
+   `drop` (`unavailable`, [INV-40](#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback)). A separate Clause P1 consistency rule
+   enforces the `timedOut = true` **iff** `rc ∈ {124,137}` biconditional (both an
+   inconsistent `timedOut:true`+non-124/137-rc and a `timedOut:false`+rc-124/137
+   are rejected). The schema also requires a non-empty `verdict.payloadRef` when
+   `verdict.state = valid` (a `valid` verdict the wrapper/aggregator cannot locate
+   is rejected) and a non-empty `provider.evidence` when `provider.class != none`
+   (Clause PR1).
+3. **The verdict artifact contract** (`schemas/verdict-artifact.schema.json`) —
+   `schema_version`, PASS/FAIL (the schema enforces FAIL ⇔ ≥1 blocking finding
+   **both directions** — non-empty `blockingFindings` forces FAIL, and FAIL
+   requires `blockingFindings` `minItems:1`), blocking/non-blocking findings, an
+   `evidence` object that folds the [INV-49](#inv-49-command-mode-e2e-may-feed-the-review-fan-out-a-structured-ac-coverage-artifact--optional-fail-safe) AC-coverage map and the
+   [INV-46](#inv-46-e2e-runs-once-in-a-dedicated-lane-before-the-review-fan-out--gated-not-per-agent) E2E report in as typed sub-objects (not parallel ad-hoc
+   fences), plus run-id / agent / model. Atomic write (tmp + rename; readers
+   ignore post-land writes).
+4. **The conformance fixture manifest** (`schemas/fixture-manifest.schema.json`)
+   — per-adapter × per-mode `{ adapter, mode, input, command, files, expect }`.
+5. **The operator error envelope** (`schemas/error-envelope.schema.json`) —
+   `{ class, code, problem, cause, remediation, doc, surface }`; an
+   operator-actionable `class` (`config`/`auth`/`quota`, with `config` the
+   omitted-default) MUST surface on the GitHub issue or as a dispatcher alert,
+   never log-only. **The schema enforces this** via a conditional — a
+   config-class envelope with `surface: "log-only"` is rejected at validation
+   time; only `class: "transient"` may be `log-only` (making
+   [INV-58](#inv-58-agy-quotaauth-unavailable-drops-surface-a-distinct-reason-fan-out--reviewed-head-model-labels-are-per-agent) / [INV-61](#inv-61-kiro-authlogin-failure-unavailable-drops-surface-a-distinct-reason-not-a-bare-opaque-unavailable) drop-reason surfacing normative **and** machine-checkable).
+
+**Why**: per-CLI handling is scattered across `case "$AGENT_CMD"` branches in
+`lib-agent.sh` and the `lib-review-*.sh` special cases, and every contract exists
+only as folklore + invariant prose. The redesign's later phases all assume this
+spec exists — it is the single document they implement (#229). Writing it first,
+as testable MUST clauses with golden/negative-validated schemas, prevents each
+later phase from re-inventing (and subtly diverging on) the contract.
+
+**Producer**: this PR (#229) authors the spec + schemas. Later adapter-extraction
+PRs are the producers of *conformant adapters*; this invariant binds them to the
+spec.
+**Consumer**: a new CLI vendor / the next refactor builds against the spec; the
+(follow-up) conformance runner consumes the fixture-manifest schema; the
+aggregator's vote semantics ([INV-40](#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback)) are the `voteEligibility` axis the spec fixes.
+**Status**: **SPEC ONLY — NOT YET ENFORCED in code.** This revision adds the
+normative document + machine-checkable schemas + validation tests; it changes no
+wrapper / `lib-agent.sh` behavior. Enforcement (a single adapter entry point that
+returns a typed `AdapterResult`) is the explicit work of later phases that
+implement this spec.
+
+**Test**:
+- `tests/unit/test-adapter-spec-schemas.sh` — TC-ADAPTER-SPEC-001..008: all four
+  `*.schema.json` present + valid Draft-07; `adapter-spec.md` declares
+  `spec_version: 1`; this INV-66 entry present; every example well-formed JSON;
+  each schema has ≥2 golden examples; every golden validates and every
+  documented negative is rejected (the three issue-mandated negatives: a flat
+  failure enum missing the four axes, a verdict artifact without `schema_version`,
+  an error envelope without `remediation`; plus the #229-review negatives: a
+  config-class error envelope surfaced `log-only`, a timed-out rc-124/137
+  no-verdict result mapped to `drop` instead of `timeout-veto`, a
+  `verdict.state=valid` result with no `payloadRef`, a review-mode non-timeout
+  no-verdict result mapped to `pass` instead of `drop`, a `verdict=FAIL` artifact
+  with no blocking findings, a non-`none` provider class with empty `evidence`, a
+  non-review mode that votes, a review+valid-verdict result mapped to `drop`, a
+  review `timedOut:true` no-verdict result mapped to `drop` instead of
+  `timeout-veto`, and an inconsistent `timedOut:true`+non-124/137-rc result).
+  Runs under `python3 -m jsonschema` (full Draft-07) when available, else a `jq`
+  structural fallback (required-keys + enum membership + the thirteen named
+  negatives) so it passes in plain CI either way.
+- `docs/test-cases/adapter-spec.md` — TC-ADAPTER-SPEC-NNN enumeration.
+
+**Cross-references**:
+- [`adapter-spec.md`](adapter-spec.md) — the normative spec this invariant points at.
+- [INV-40](#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback) / [INV-48](#inv-48-per-side-review-wall-clock-timeout-agent_review_timeout-1h-default-with-browser-e2e-exclusion-and-timeout-veto) — the vote / timeout-veto the `voteEligibility` axis encodes.
+- [INV-46](#inv-46-e2e-runs-once-in-a-dedicated-lane-before-the-review-fan-out--gated-not-per-agent) / [INV-49](#inv-49-command-mode-e2e-may-feed-the-review-fan-out-a-structured-ac-coverage-artifact--optional-fail-safe) — the E2E report + AC-coverage sub-objects folded into the verdict artifact.
+- [INV-58](#inv-58-agy-quotaauth-unavailable-drops-surface-a-distinct-reason-fan-out--reviewed-head-model-labels-are-per-agent) / [INV-61](#inv-61-kiro-authlogin-failure-unavailable-drops-surface-a-distinct-reason-not-a-bare-opaque-unavailable) / [INV-62](#inv-62-the-codex-review-lane-runs-the-codex-review-subcommand-auto-scoped-prompt-carried-gate-with-a-stdout-verdict-fallback) — the per-CLI provider classifications + codex-review structural mode the spec's mapping appendix records.
+
 ## Adding a new invariant
 
 When fixing a pipeline bug, after locating the bug on the state machine + flow docs:

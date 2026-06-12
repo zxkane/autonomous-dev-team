@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "class": "transient",
+  "code": "CODEX_STREAM_ERROR",
+  "problem": "codex review stream disconnected mid-run (transient upstream blip)",
+  "cause": "stream-error (upstream 5xx; exhausted 5/5 stream reconnects)",
+  "remediation": "No operator action required; the dispatcher re-dispatches transient failures automatically.",
+  "doc": "docs/pipeline/invariants.md#inv-62",
+  "surface": "log-only"
+}

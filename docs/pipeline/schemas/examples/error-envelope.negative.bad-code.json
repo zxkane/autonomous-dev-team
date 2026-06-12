@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "code": "codex no worktree",
+  "problem": "codex review lane could not prepare a PR-branch worktree",
+  "cause": "PR-branch checkout failed (fail-closed sentinel rc 70)",
+  "remediation": "Check the PR branch exists and re-dispatch.",
+  "surface": "issue-comment"
+}

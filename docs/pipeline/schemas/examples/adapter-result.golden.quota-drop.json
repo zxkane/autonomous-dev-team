@@ -1,0 +1,13 @@
+{
+  "spec_version": 1,
+  "adapter": "agy",
+  "mode": "review",
+  "process": { "rc": 0, "signal": null, "timedOut": false },
+  "provider": {
+    "class": "quota",
+    "evidence": "quota-exhausted (Antigravity 429: daily quota reached; resets in 33h48m45s)",
+    "resetHint": "Resets in 33h48m45s"
+  },
+  "verdict": { "state": "absent", "payloadRef": null },
+  "voteEligibility": { "state": "drop", "reason": "unavailable" }
+}

@@ -1,0 +1,248 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/zxkane/autonomous-dev-team/docs/pipeline/schemas/adapter-result.schema.json",
+  "title": "AdapterResult",
+  "description": "The four-axis result an agent-CLI adapter MUST return from invoke(mode, prompt, model, session, timeout, env). See docs/pipeline/adapter-spec.md (spec_version 1). A flat failure enum is explicitly NON-conformant: every result MUST carry all four orthogonal axes (process, provider, verdict, voteEligibility) so no information the aggregator depends on (INV-40 / INV-48) is lost.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["spec_version", "adapter", "mode", "process", "provider", "verdict", "voteEligibility"],
+  "properties": {
+    "spec_version": {
+      "description": "The adapter-spec version this result conforms to. MUST be 1 for this revision.",
+      "const": 1
+    },
+    "adapter": {
+      "description": "The agent-CLI this adapter wraps (the AGENT_CMD value).",
+      "type": "string",
+      "enum": ["claude", "codex", "kiro", "agy", "gemini", "opencode"]
+    },
+    "mode": {
+      "description": "The structural invocation mode. Modes differ structurally, not cosmetically (e.g. codex dev = `codex exec --json` + resume; codex review = `codex review` from a PR worktree, no resume).",
+      "type": "string",
+      "enum": ["dev-new", "dev-resume", "review", "e2e-browser"]
+    },
+    "process": {
+      "description": "Process-liveness axis: how the CLI process exited.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rc", "timedOut"],
+      "properties": {
+        "rc": {
+          "description": "The CLI exit code. 0=clean, 124=coreutils `timeout` TERM expiry, 137=SIGKILL (--kill-after escalation), 143=SIGTERM (dispatcher-induced), 70=fail-closed no-worktree sentinel (codex review, INV-62).",
+          "type": "integer"
+        },
+        "signal": {
+          "description": "The terminating signal name if the process was signalled (e.g. SIGTERM, SIGKILL), else null.",
+          "type": ["string", "null"]
+        },
+        "timedOut": {
+          "description": "true iff the process was killed by the per-side wall-clock cap (AGENT_REVIEW_TIMEOUT / dev timeout). Maps from rc 124/137 (INV-48).",
+          "type": "boolean"
+        }
+      }
+    },
+    "provider": {
+      "description": "Provider-classification axis: why the model backend failed, with evidence, when it did. `none` means the provider did not fail (the CLI ran the model successfully regardless of verdict outcome).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["class"],
+      "properties": {
+        "class": {
+          "description": "none=provider OK; quota=429/RESOURCE_EXHAUSTED (INV-58); auth=login/OAuth/device-flow failure (INV-58 agy, INV-61 kiro); config=structural prep failure that an operator must fix (codex no-worktree INV-62, bad model id, missing trust flag); transient=retryable upstream blip (codex stream-error INV-59/INV-62 5xx reconnect).",
+          "type": "string",
+          "enum": ["none", "quota", "auth", "config", "transient"]
+        },
+        "evidence": {
+          "description": "Human-readable, sanitized reason string surfaced to the operator (e.g. \"quota-exhausted (Antigravity 429: daily quota reached; resets in 33h48m45s)\"). REQUIRED and non-empty when class != none (Clause PR1); an empty string is non-conformant — there is no useful empty evidence.",
+          "type": "string",
+          "minLength": 1
+        },
+        "resetHint": {
+          "description": "Recovery window when the provider published one (e.g. \"Resets in 33h48m45s\"), else null. Only meaningful for class=quota.",
+          "type": ["string", "null"]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "class": { "not": { "const": "none" } } }
+          },
+          "then": {
+            "required": ["evidence"]
+          }
+        }
+      ]
+    },
+    "verdict": {
+      "description": "Verdict-presence axis: whether the adapter produced a classifiable verdict artifact within the poll window. When state=valid, payloadRef MUST be a non-empty string (enforced by the top-level allOf): a 'valid' verdict the wrapper/aggregator cannot locate is non-conformant.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state"],
+      "properties": {
+        "state": {
+          "description": "valid=a well-formed verdict artifact was produced (payloadRef REQUIRED, non-empty); absent=no verdict artifact within the window (drives drop/timeout-veto on the voteEligibility axis); malformed=an artifact was produced but failed schema validation (fail-safe: treated as absent, never as a silent PASS).",
+          "type": "string",
+          "enum": ["valid", "absent", "malformed"]
+        },
+        "payloadRef": {
+          "description": "Path/URL/comment-id of the verdict artifact (which MUST satisfy verdict-artifact.schema.json). REQUIRED and non-empty when state=valid; null/absent otherwise.",
+          "type": ["string", "null"]
+        }
+      }
+    },
+    "voteEligibility": {
+      "description": "Aggregation axis: how this result participates in the INV-40 unanimous-PASS vote.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state"],
+      "properties": {
+        "state": {
+          "description": "pass=deciding PASS; fail=deciding FAIL (substantive); drop=removed from the vote (unavailable, e.g. rc 0 + no verdict); timeout-veto=deciding FAIL that vetoes the merge (rc 124/137 + no verdict, INV-48); not-applicable=this mode does not vote (dev-new/dev-resume/e2e-browser).",
+          "type": "string",
+          "enum": ["pass", "fail", "drop", "timeout-veto", "not-applicable"]
+        },
+        "reason": {
+          "description": "Optional short token explaining a non-pass eligibility (e.g. \"unavailable\", \"timed-out\", \"substantive\").",
+          "type": "string"
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "description": "§4.4 timeout-veto derivation: a REVIEW-mode result that produced NO verdict (verdict.state absent|malformed) and was killed by the wall-clock cap (process.timedOut=true) MUST resolve voteEligibility.state=timeout-veto (a deciding FAIL, INV-48) — it MUST NOT validate as pass/fail/drop. This conditional keys off process.timedOut=true (NOT the rc), so EVERY timed-out review no-verdict result is covered regardless of the raw exit code (124, 137, or any other rc the CLI returned after the cap fired); the separate rc↔timedOut consistency conditional below enforces Clause P1's timedOut=true iff rc in {124,137}, so a timedOut=true with a non-124/137 rc is rejected there. Gated on mode=review: a non-review (dev-new/dev-resume/e2e-browser) timeout result is not-applicable (it does not vote, §4.4) and is handled by the not-applicable rule. A timed-out run that DID post a verdict (verdict.state=valid) is exempt: the matched verdict wins (INV-40), so this conditional is gated on the no-verdict case only.",
+      "if": {
+        "properties": {
+          "mode": { "const": "review" },
+          "process": {
+            "properties": { "timedOut": { "const": true } },
+            "required": ["timedOut"]
+          },
+          "verdict": {
+            "properties": { "state": { "enum": ["absent", "malformed"] } },
+            "required": ["state"]
+          }
+        },
+        "required": ["mode", "process", "verdict"]
+      },
+      "then": {
+        "properties": {
+          "voteEligibility": {
+            "properties": { "state": { "const": "timeout-veto" } },
+            "required": ["state"]
+          }
+        }
+      }
+    },
+    {
+      "description": "Clause P1 consistency: process.timedOut is true IFF the process was killed by the wall-clock cap, i.e. rc in {124,137} (124 = `timeout` TERM-expiry, 137 = `--kill-after` SIGKILL). The schema enforces BOTH directions so an inconsistent (rc, timedOut) pair is rejected: timedOut=true with a non-124/137 rc, AND timedOut=false (or absent) with rc 124/137, are both non-conformant. This complements the timeout-veto branch (which keys off timedOut) by tying timedOut back to the rc.",
+      "if": {
+        "properties": {
+          "process": {
+            "properties": { "rc": { "enum": [124, 137] } },
+            "required": ["rc"]
+          }
+        },
+        "required": ["process"]
+      },
+      "then": {
+        "properties": {
+          "process": {
+            "properties": { "timedOut": { "const": true } },
+            "required": ["timedOut"]
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "process": {
+            "properties": { "timedOut": { "enum": [false] } }
+          }
+        }
+      }
+    },
+    {
+      "description": "A verdict.state=valid MUST carry a non-empty payloadRef (a string >=1 char): a 'valid' verdict the wrapper/aggregator cannot locate is non-conformant. payloadRef stays optional/nullable for absent|malformed.",
+      "if": {
+        "properties": {
+          "verdict": {
+            "properties": { "state": { "const": "valid" } },
+            "required": ["state"]
+          }
+        },
+        "required": ["verdict"]
+      },
+      "then": {
+        "properties": {
+          "verdict": {
+            "properties": { "payloadRef": { "type": "string", "minLength": 1 } },
+            "required": ["payloadRef"]
+          }
+        }
+      }
+    },
+    {
+      "description": "Clause 4.4 + the rc 0 + no verdict ⇒ drop worked example: a REVIEW-mode result that produced NO verdict (verdict.state absent|malformed) and was NOT killed by the wall-clock cap (process.timedOut=false) MUST resolve voteEligibility.state=drop (unavailable, INV-40). It MUST NOT validate as pass/fail/not-applicable. The timeout case (timedOut=true ⇒ timeout-veto) is handled by the first allOf branch, so gating on timedOut=false isolates the non-timeout drop path (covering rc 0 clean-but-silent AND any other non-124/137 no-verdict rc). Gated on mode=review because dev-new/dev-resume/e2e-browser modes are not-applicable (they do not vote) and legitimately have no verdict.",
+      "if": {
+        "properties": {
+          "mode": { "const": "review" },
+          "process": {
+            "properties": { "timedOut": { "const": false } },
+            "required": ["timedOut"]
+          },
+          "verdict": {
+            "properties": { "state": { "enum": ["absent", "malformed"] } },
+            "required": ["state"]
+          }
+        },
+        "required": ["mode", "process", "verdict"]
+      },
+      "then": {
+        "properties": {
+          "voteEligibility": {
+            "properties": { "state": { "const": "drop" } },
+            "required": ["state"]
+          }
+        }
+      }
+    },
+    {
+      "description": "§4.4 derivation: a NON-review mode (dev-new, dev-resume, e2e-browser) does NOT vote, so voteEligibility.state MUST be not-applicable. A dev/e2e result with pass/fail/drop/timeout-veto is non-conformant. (The complement — review mode MUST NOT be not-applicable — is enforced by the no-verdict drop/timeout-veto branches above for the no-verdict case and by the valid-verdict branch below for the with-verdict case.)",
+      "if": {
+        "properties": {
+          "mode": { "enum": ["dev-new", "dev-resume", "e2e-browser"] }
+        },
+        "required": ["mode"]
+      },
+      "then": {
+        "properties": {
+          "voteEligibility": {
+            "properties": { "state": { "const": "not-applicable" } },
+            "required": ["state"]
+          }
+        }
+      }
+    },
+    {
+      "description": "§4.4 derivation: a REVIEW-mode result with a valid verdict (verdict.state=valid) is a deciding vote — voteEligibility.state MUST be pass or fail (the PASS/FAIL artifact decides which). It MUST NOT be drop, timeout-veto, or not-applicable (those are the no-verdict / non-review cases). Combined with the no-verdict branches above, this fixes the full review-mode derivation: valid ⇒ pass|fail; no-verdict+timedOut ⇒ timeout-veto; no-verdict+¬timedOut ⇒ drop.",
+      "if": {
+        "properties": {
+          "mode": { "const": "review" },
+          "verdict": {
+            "properties": { "state": { "const": "valid" } },
+            "required": ["state"]
+          }
+        },
+        "required": ["mode", "verdict"]
+      },
+      "then": {
+        "properties": {
+          "voteEligibility": {
+            "properties": { "state": { "enum": ["pass", "fail"] } },
+            "required": ["state"]
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "spec_version": 1,
+  "adapter": "kiro",
+  "mode": "review",
+  "process": { "rc": 1, "signal": null, "timedOut": false },
+  "provider": { "class": "rate-limited" },
+  "verdict": { "state": "absent", "payloadRef": null },
+  "voteEligibility": { "state": "drop" }
+}
