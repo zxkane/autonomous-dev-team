@@ -15,7 +15,7 @@ scope: the agent-CLI adapter boundary (dev + review + e2e)
 >
 > This revision is **spec + schemas only — no wrapper / `lib-agent.sh` behavior
 > change.** It describes what an adapter MUST do; it does not yet refactor the
-> code to a single adapter entry point. See [INV-65](invariants.md#inv-65-adapter-conformance-is-spec-defined).
+> code to a single adapter entry point. See [INV-66](invariants.md#inv-66-adapter-conformance-is-spec-defined).
 
 The key words **MUST**, **MUST NOT**, **REQUIRED**, **SHALL**, **SHALL NOT**,
 **SHOULD**, **SHOULD NOT**, **MAY**, and **OPTIONAL** are to be interpreted as
@@ -457,7 +457,7 @@ transient stream-error → `provider.class = config` vs `transient` (INV-59/62);
 
 ## Cross-references
 
-- [`invariants.md` § INV-65](invariants.md#inv-65-adapter-conformance-is-spec-defined) — adapter conformance is spec-defined (this document).
+- [`invariants.md` § INV-66](invariants.md#inv-66-adapter-conformance-is-spec-defined) — adapter conformance is spec-defined (this document).
 - [`invariants.md` § INV-40](invariants.md#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback) — the vote this `voteEligibility` axis feeds.
 - [`invariants.md` § INV-48](invariants.md#inv-48-per-side-review-wall-clock-timeout-agent_review_timeout-1h-default-with-browser-e2e-exclusion-and-timeout-veto) — the timeout-veto worked example.
 - [`invariants.md` § INV-46](invariants.md#inv-46-e2e-runs-once-in-a-dedicated-lane-before-the-review-fan-out--gated-not-per-agent) / [INV-49](invariants.md#inv-49-command-mode-e2e-may-feed-the-review-fan-out-a-structured-ac-coverage-artifact--optional-fail-safe) — the E2E report + AC-coverage sub-objects.

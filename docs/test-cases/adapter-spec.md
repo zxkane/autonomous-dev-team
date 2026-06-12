@@ -21,7 +21,7 @@ Example fixtures follow `<schema-prefix>.{golden|negative}.<label>.json`:
 |---|---|---|
 | TC-ADAPTER-SPEC-001 | All four `*.schema.json` files present | present |
 | TC-ADAPTER-SPEC-002 | `adapter-spec.md` declares `spec_version: 1` | present |
-| TC-ADAPTER-SPEC-003 | `invariants.md` has `INV-65` | present |
+| TC-ADAPTER-SPEC-003 | `invariants.md` has `INV-66` | present |
 | TC-ADAPTER-SPEC-004 | Every example is well-formed JSON | parses |
 | TC-ADAPTER-SPEC-005 | Each schema has ≥2 golden examples | count ≥ 2 |
 | TC-ADAPTER-SPEC-006 | Each schema is a valid Draft-07 schema (py backend) | meta-valid |
@@ -72,5 +72,5 @@ Example fixtures follow `<schema-prefix>.{golden|negative}.<label>.json`:
   satisfy?" — see adapter-spec.md § Verdict artifact + `verdict-artifact.schema.json`. ✔
 - All four schemas ship with passing golden/negative validation in CI. ✔
   (TC-ADAPTER-SPEC-007/008)
-- Existing pipeline docs cross-linked; no wrapper code changed. ✔ (INV-65 +
+- Existing pipeline docs cross-linked; no wrapper code changed. ✔ (INV-66 +
   autonomous-pipeline.md + pipeline/README.md links; diff is docs/tests only)
