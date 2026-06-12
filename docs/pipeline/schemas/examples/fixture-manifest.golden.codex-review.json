@@ -18,9 +18,9 @@
     "stderr": ""
   },
   "files": {
-    "threadSidecar": {
-      "path": "fixtures/codex-review/thread.json",
-      "role": "sidecar"
+    "verdictArtifact": {
+      "path": "fixtures/codex-review/verdict.json",
+      "role": "artifact"
     }
   },
   "expect": {
