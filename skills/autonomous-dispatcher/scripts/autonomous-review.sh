@@ -1219,6 +1219,22 @@ if [[ "${REVIEW_SMOKE_ENABLED:-false}" == "true" ]]; then
       elif [[ "$_smoke_agent" != "claude" ]]; then
         AGENT_LAUNCHER_ARGV=()
       fi
+      # INV-41 (#224 review): resolve THIS member's per-agent review EXTRA-ARGS and
+      # apply them BEFORE the smoke, exactly as the fan-out subshell does below
+      # (AGENT_REVIEW_EXTRA_ARGS_<AGENT> override → shared AGENT_REVIEW_EXTRA_ARGS).
+      # smoke_agent drives run_agent, which tokenizes AGENT_DEV_EXTRA_ARGS
+      # (lib-agent.sh::run_agent → _parse_extra_args AGENT_DEV_EXTRA_ARGS); without
+      # this rebind the smoke would run with the STALE dev args (or the conf-default
+      # review args), NOT the resolved per-agent review args the fan-out will use —
+      # so the smoke could abort a healthy review agent (the dev args carry a flag
+      # the review CLI rejects) or PASS a member whose review-specific flags later
+      # fail the real review. Assign BOTH vars (run_agent reads AGENT_DEV_EXTRA_ARGS;
+      # the AGENT_REVIEW_EXTRA_ARGS alias is belt-and-suspenders for any
+      # resume-bearing path), matching the fan-out's extra-args handling. Scope is
+      # THIS subshell only — never leaks to a sibling smoke or to the fan-out.
+      _smoke_extra_args=$(_resolve_review_agent_extra_args "$_smoke_agent")
+      AGENT_DEV_EXTRA_ARGS="$_smoke_extra_args"
+      AGENT_REVIEW_EXTRA_ARGS="$_smoke_extra_args"
       # No PID file for a smoke — it is a transient probe, not a dispatched
       # wrapper. AGENT_PID_FILE stays unset so smoke_agent's run_agent skips the
       # PID write and the shared review-N.pid is untouched.

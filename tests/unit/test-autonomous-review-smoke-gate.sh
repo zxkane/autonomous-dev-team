@@ -106,6 +106,31 @@ assert_grep "TC-REVIEW-SMOKE-044b smoke applies the per-agent launcher resolver 
   '_resolve_review_agent_launcher "\$_smoke_agent"' "$WRAPPER"
 assert_grep "TC-REVIEW-SMOKE-044c smoke neutralizes the launcher for a non-claude member (INV-38)" \
   'elif \[\[ "\$_smoke_agent" != "claude" \]\]; then' "$WRAPPER"
+# TC-REVIEW-SMOKE-044d (#224 review [P1]): the smoke MUST resolve THIS member's
+# per-agent review EXTRA-ARGS and apply them before the smoke — exactly as the
+# fan-out does — else smoke_agent's run_agent tokenizes the STALE dev args (or the
+# conf-default review args), not the resolved per-agent review args the fan-out
+# uses. Assert the smoke subshell calls the resolver AND assigns BOTH vars
+# run_agent / the codex lane read (AGENT_DEV_EXTRA_ARGS + the AGENT_REVIEW_EXTRA_ARGS
+# alias), mirroring the fan-out's extra-args handling.
+assert_grep "TC-REVIEW-SMOKE-044d smoke resolves the per-agent review extra-args (_resolve_review_agent_extra_args)" \
+  '_smoke_extra_args=\$\(_resolve_review_agent_extra_args "\$_smoke_agent"\)' "$WRAPPER"
+assert_grep "TC-REVIEW-SMOKE-044e smoke assigns AGENT_DEV_EXTRA_ARGS from the resolved review extra-args" \
+  'AGENT_DEV_EXTRA_ARGS="\$_smoke_extra_args"' "$WRAPPER"
+assert_grep "TC-REVIEW-SMOKE-044f smoke assigns the AGENT_REVIEW_EXTRA_ARGS alias too (belt-and-suspenders)" \
+  'AGENT_REVIEW_EXTRA_ARGS="\$_smoke_extra_args"' "$WRAPPER"
+# The resolution must happen INSIDE the smoke subshell, BEFORE _classify_smoke_state
+# (which invokes smoke_agent → run_agent → tokenizes AGENT_DEV_EXTRA_ARGS). Assert
+# the extra-args assignment line precedes the _classify_smoke_state call.
+extra_args_line=$(grep -nE 'AGENT_DEV_EXTRA_ARGS="\$_smoke_extra_args"' "$WRAPPER" | head -1 | cut -d: -f1)
+classify_call_line=$(grep -nE '_classify_smoke_state "\$_smoke_agent"' "$WRAPPER" | head -1 | cut -d: -f1)
+if [[ -n "$extra_args_line" && "$extra_args_line" -gt 0 && -n "$classify_call_line" && "$classify_call_line" -gt 0 ]]; then
+  assert_lt "TC-REVIEW-SMOKE-044g smoke extra-args applied BEFORE _classify_smoke_state (so run_agent reads them)" \
+    "$extra_args_line" "$classify_call_line"
+else
+  echo -e "  ${RED}FAIL${NC}: TC-REVIEW-SMOKE-044g could not locate the extra-args / classify anchors"
+  FAIL=$((FAIL + 1))
+fi
 
 # TC-REVIEW-SMOKE-045: the FAIL-abort path posts a naming comment, emits a
 # trailer, sets RESULT_PARSED=true (so the crash trap does not override the
