@@ -1,0 +1,458 @@
+#!/bin/bash
+# lib-agent-smoke.sh — three-state agent-CLI smoke check (INV-63, issue #222).
+#
+# WHY this exists
+# ---------------
+# This repo's PRs routinely change lib-agent.sh and the per-CLI invocation
+# branches, but nothing executes the REAL CLIs end-to-end before merge. Unit
+# tests stub the CLIs, so the launch → auth → model chain is never exercised.
+# Past incidents an agent smoke would have caught AT PR TIME:
+#   - codex fan-out members dropped `unavailable` on every review due to a
+#     BEDROCK_AWS_REGION env pollution (#180 root cause);
+#   - agy silent exit-0 with no model call on a quota wall (#205);
+#   - kiro auth/login token expiry (#215).
+# "Can it run" is the bar: CLI starts → auth works → model TRULY responds.
+#
+# THE THREE-STATE CONTRACT (the load-bearing design decision)
+# -----------------------------------------------------------
+# smoke_agent <agent-cmd> <model> [timeout-seconds]  → one of three rcs:
+#
+#   rc 0  PASS         — stdout contains the nonce; the model truly responded.
+#   rc 2  UNAVAILABLE  — quota exhausted / backend model capacity / transient
+#                        backend failure. ENVIRONMENTAL, self-healing — NOT a
+#                        failure. A follow-up gate records but does NOT block on
+#                        this (promoting a quota wall to a deciding FAIL would
+#                        block every PR whenever an agent's daily quota is spent).
+#   rc 1  FAIL         — EVERYTHING ELSE: the CLI fails to launch, an auth/config
+#                        error, region drift, or a timeout with no response.
+#                        Operator-side configuration breakage — this is what the
+#                        gate exists to catch.
+#
+# The split mirrors [INV-40]'s review-side treatment of `unavailable`:
+# FAIL = operator-side config/launch breakage (gate-worthy), UNAVAILABLE =
+# environmental quota/capacity (ignorable).
+#
+# MECHANISM — reuse the production chain, NO parallel invocation path
+# ------------------------------------------------------------------
+# smoke_agent generates a random nonce, builds a "reply with exactly this token,
+# use no tools" prompt, sets AGENT_CMD=<agent-cmd> + a short AGENT_TIMEOUT
+# override, and calls the EXISTING run_agent (lib-agent.sh). So the smoke
+# exercises the exact production chain — [INV-34] stdin channel, [INV-50] agy
+# model validation, launcher handling, EXTRA_ARGS parsing — with zero duplicated
+# invocation code.
+#
+# CLASSIFICATION reuses the existing per-CLI drop-reason scrapers:
+#   agy   — _classify_agy_drop_reason   (INV-58): quota/auth from --log-file
+#   kiro  — _classify_kiro_drop_reason  (INV-61): browser/device-flow auth
+#   codex — _classify_codex_drop_reason (INV-62): upstream-5xx stream error
+# Quota/capacity/transient-backend signal → UNAVAILABLE; auth/config signal or
+# NO signal at all → FAIL (no signal = the model never answered and there is no
+# environmental excuse → conservative, gate-worthy default).
+#
+# LAYER: wrapper-free. A follow-up issue will consume smoke_agent from the review
+# wrapper as a pre-fan-out gate (Phase A.5); this lib deliberately carries NO
+# wrapper-specific assumptions — it needs only lib-agent.sh + the three
+# drop-reason libs, sourced by BASH_SOURCE-relative path ([INV-14] symlink-vendor
+# pattern), and never touches GitHub.
+
+# ---------------------------------------------------------------------------
+# Source dependencies via the [INV-14] symlink-vendor pattern: ${BASH_SOURCE[0]}
+# (NOT readlink -f) so the per-project scripts/ symlink resolves to the project's
+# vendored copy rather than the skill installation dir.
+# ---------------------------------------------------------------------------
+_LIB_AGENT_SMOKE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+
+# lib-agent.sh sources lib-config.sh and may `return 1` on a launcher-parse
+# error; we source it once. Guard against double-source (the harness may source
+# this lib and lib-agent.sh independently) by checking for run_agent.
+if ! declare -F run_agent >/dev/null 2>&1; then
+  # shellcheck source=lib-agent.sh
+  source "${_LIB_AGENT_SMOKE_DIR}/lib-agent.sh"
+fi
+# shellcheck source=lib-review-agy.sh
+source "${_LIB_AGENT_SMOKE_DIR}/lib-review-agy.sh"
+# shellcheck source=lib-review-kiro.sh
+source "${_LIB_AGENT_SMOKE_DIR}/lib-review-kiro.sh"
+# shellcheck source=lib-review-codex.sh
+source "${_LIB_AGENT_SMOKE_DIR}/lib-review-codex.sh"
+
+# Default smoke timeout (seconds). A smoke is a one-token round-trip; 120s is
+# generous headroom for cold-start auth + first-token latency on a slow backend.
+SMOKE_DEFAULT_TIMEOUT_SECONDS="${SMOKE_DEFAULT_TIMEOUT_SECONDS:-120}"
+
+# smoke_retokenize_launcher — re-tokenize the CURRENT $AGENT_LAUNCHER into
+# AGENT_LAUNCHER_ARGV[]. rc 0 always (best-effort).
+#
+# WHY: lib-agent.sh tokenizes AGENT_LAUNCHER → AGENT_LAUNCHER_ARGV ONCE at source
+# time, and run_agent reads the pre-tokenized ARRAY (not the live string). The
+# matrix harness sources this lib and only THEN applies the per-entry env-setup
+# (so env-setup can override conf values that lib-agent.sh's `load_autonomous_conf`
+# assigns at source time — see run-agent-smoke.sh::_run_entry / [INV-63]). An AGENT_LAUNCHER set
+# in env-setup would therefore be silently ignored unless we re-tokenize after
+# env-setup. This helper does exactly that, mirroring lib-agent.sh's own eval +
+# empty-array WARN, so an env-setup launcher is honored without re-sourcing the
+# lib. A malformed value degrades to an empty (launcher-less) argv with a WARN —
+# never aborts (a single entry's typo must not crash the harness).
+smoke_retokenize_launcher() {
+  AGENT_LAUNCHER="${AGENT_LAUNCHER:-}"
+  # Hard reset: unset then re-declare global so a pre-existing array (populated
+  # by lib-agent.sh's source-time tokenization, or a sibling caller) cannot leave
+  # stale leading elements behind.
+  unset AGENT_LAUNCHER_ARGV
+  declare -ga AGENT_LAUNCHER_ARGV=()
+  [[ -n "$AGENT_LAUNCHER" ]] || return 0
+  if ! eval "AGENT_LAUNCHER_ARGV=($AGENT_LAUNCHER)" 2>/dev/null; then
+    echo "[lib-agent-smoke] WARN: AGENT_LAUNCHER from env-setup failed to parse as a shell argv list; treating as unset. Value: ${AGENT_LAUNCHER}" >&2
+    AGENT_LAUNCHER=""
+    AGENT_LAUNCHER_ARGV=()
+    return 0
+  fi
+  if [[ ${#AGENT_LAUNCHER_ARGV[@]} -eq 0 ]]; then
+    echo "[lib-agent-smoke] WARN: AGENT_LAUNCHER from env-setup tokenized to zero argv elements; treating as unset. Value: ${AGENT_LAUNCHER}" >&2
+  fi
+  return 0
+}
+
+# _smoke_nonce — emit a fresh per-call nonce: `SMOKE-<16 lowercase hex>`.
+#
+# Uniqueness is load-bearing (a stale-stdout false-PASS would defeat the smoke),
+# so we prefer a CSPRNG and fall back through three sources:
+#   1. openssl rand -hex 8                 (best — true randomness)
+#   2. /dev/urandom via od                 (kernel CSPRNG)
+#   3. PID + a monotonic per-process counter (worst — but still collision-free
+#      WITHIN a process, which is all the tests and the parallel harness need;
+#      each entry runs in its own subshell ⇒ distinct PID).
+# `$RANDOM` alone is deliberately NOT the primary source — a tight loop in one
+# shell reseeds slowly and can repeat (TC-AGENT-SMOKE-009).
+_SMOKE_NONCE_COUNTER=0
+_smoke_nonce() {
+  local hex
+  if hex=$(openssl rand -hex 8 2>/dev/null) && [[ "$hex" =~ ^[0-9a-f]{16}$ ]]; then
+    printf 'SMOKE-%s\n' "$hex"
+    return 0
+  fi
+  if hex=$(od -An -N8 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n') && [[ "$hex" =~ ^[0-9a-f]{16}$ ]]; then
+    printf 'SMOKE-%s\n' "$hex"
+    return 0
+  fi
+  # Deterministic-but-unique fallback: PID + counter, zero-padded to keep the
+  # 16-hex shape. Increment first so two calls in the same process never collide.
+  _SMOKE_NONCE_COUNTER=$((_SMOKE_NONCE_COUNTER + 1))
+  printf 'SMOKE-%016x\n' $(( ($$ << 20) ^ _SMOKE_NONCE_COUNTER ))
+}
+
+# _smoke_session_id — emit a fresh, VALID RFC-4122 UUID for the smoke session.
+#
+# WHY a UUID (not the old `smoke-<agent>-<pid>-…` string): the Claude Code CLI
+# REJECTS `--session-id` unless it is a valid UUID, so every real claude /
+# claude-custom-endpoint smoke entry would fail at LAUNCH — before any model
+# call — even with healthy auth/config (#222 [P1] review). run_agent's claude
+# branch passes the smoke's session_id straight to `--session-id`, so it must be
+# UUID-shaped. (codex/opencode mint their own ids and ignore ours; kiro/agy/
+# gemini tolerate any string — but claude is the gate, so we always emit a UUID.)
+#
+# Source ladder (each validated against the canonical 8-4-4-4-12 lowercase-hex
+# shape before use):
+#   1. /proc/sys/kernel/random/uuid   (Linux kernel UUID — the prod box)
+#   2. uuidgen                        (macOS / portable; lowercased)
+#   3. /dev/urandom via od            (construct a v4-shaped UUID from 16 bytes)
+#   4. PID + RANDOM + counter          (last-resort; still UUID-SHAPED so claude
+#                                       accepts it — uniqueness within a process
+#                                       is all the parallel harness needs)
+_smoke_session_id() {
+  local u
+  if u=$(cat /proc/sys/kernel/random/uuid 2>/dev/null) \
+     && [[ "$u" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+    printf '%s\n' "$u"; return 0
+  fi
+  if u=$(uuidgen 2>/dev/null | tr '[:upper:]' '[:lower:]') \
+     && [[ "$u" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+    printf '%s\n' "$u"; return 0
+  fi
+  # Construct a v4-shaped UUID from 16 random bytes (set version nibble to 4 and
+  # variant bits to 10xx, matching RFC-4122 so it is a well-formed v4 UUID).
+  local h
+  if h=$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n') && [[ ${#h} -eq 32 ]]; then
+    printf '%s-%s-4%s-%x%s-%s\n' \
+      "${h:0:8}" "${h:8:4}" "${h:13:3}" \
+      "$(( 0x8 + (0x${h:16:1} & 0x3) ))" "${h:17:3}" "${h:20:12}"
+    return 0
+  fi
+  # Last resort: deterministic-but-unique, still 8-4-4-4-12 hex. Increment the
+  # shared nonce counter so two calls in the same process differ. Pad/truncate to
+  # the canonical widths.
+  _SMOKE_NONCE_COUNTER=$((_SMOKE_NONCE_COUNTER + 1))
+  local seed
+  seed=$(printf '%08x%08x%08x%08x' "$$" "${RANDOM}" "${RANDOM}" "$_SMOKE_NONCE_COUNTER")
+  printf '%s-%s-4%s-8%s-%s\n' \
+    "${seed:0:8}" "${seed:8:4}" "${seed:13:3}" "${seed:17:3}" "${seed:20:12}"
+}
+
+# _smoke_prompt <nonce> — the minimal model round-trip prompt. Asks for the
+# exact token and nothing else, explicitly forbids tool use (a smoke must not
+# touch the workspace). Kept terse so even a small/cheap model complies.
+_smoke_prompt() {
+  local nonce="$1"
+  printf 'Reply with EXACTLY this token and nothing else: %s\nDo not use any tools. Do not explain. Output only the token.\n' "$nonce"
+}
+
+# _smoke_stdout_has_nonce <stdout_file> <nonce>
+#
+# rc 0 iff <stdout_file> contains <nonce> after TTY sanitization. rc 1 otherwise
+# (incl. empty/missing/unreadable file). Fail-safe — never aborts under set -e.
+#
+# WHY sanitize (the #222 operator live-matrix [BLOCKING]): kiro `--no-interactive`
+# stdout wraps the model response in terminal decoration AND injects a BEL (0x07)
+# byte INSIDE the echoed token — captured stdout literally contains
+# `SMOKE-<0x07><hex>`, so a raw `grep -qF "$nonce"` never matches a verified-healthy
+# kiro and it is misclassified `no-response` FAIL. On a healthy box that would rc-1
+# every PR (this repo's own command-mode E2E) and smoke-fail every healthy kiro
+# fleet member under the future Phase A.5 gate (#224).
+#
+# The sanitization:
+#   tr -d '\000-\010\013-\037\177'  — strip C0 control bytes (NUL..BS, VT..US) and
+#       DEL, which covers the injected BEL (0x07). Deliberately KEEPS \n (012) and
+#       \t (011) so multi-line / tab-decorated output is unchanged structurally.
+#   sed 's/\x1b\[[0-9;]*[a-zA-Z]//g'  — strip ANSI CSI escape sequences (cursor
+#       moves, colors) that kiro/other CLIs wrap the token in.
+# then grep -qF the nonce. This only ever RECOVERS a hidden real match — it cannot
+# widen the false-PASS surface: the caller still gates on rc==0 and reads stdout
+# only, and the nonce's 16-hex uniqueness still enforces an exact token match.
+_smoke_stdout_has_nonce() {
+  local stdout_file="$1" nonce="$2"
+  [[ -n "$stdout_file" && -f "$stdout_file" ]] || return 1
+  # CAPTURE the sanitized text, then glob-substring-match — do NOT pipe into
+  # `grep -q`. A trailing `grep -q` early-exits on the first match and closes its
+  # stdin, so the upstream `tr`/`sed` die with SIGPIPE; under the wrappers'
+  # `set -o pipefail` the pipeline rc becomes 141 (128+13) DESPITE a successful
+  # match, which the caller's `&& _smoke_stdout_has_nonce` reads as false → a
+  # false `no-response` FAIL whenever the nonce lands early in >~64 KB of stdout
+  # (a CLI that streams the token then emits a large banner/narration). Capturing
+  # into a var and using a bash `[[ == *…* ]]` glob has no pipe and no early-exit,
+  # so it is SIGPIPE-immune (#222 operator-review follow-up). The capture is a
+  # one-token smoke (output is small in the healthy case; a pathological multi-MB
+  # stdout is bounded by the wrapper's own capture, not re-read here).
+  local cleaned
+  cleaned=$(tr -d '\000-\010\013-\037\177' < "$stdout_file" 2>/dev/null \
+            | sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' 2>/dev/null) || return 1
+  [[ "$cleaned" == *"$nonce"* ]]
+}
+
+# _smoke_classify <agent> <rc> <stdout_file> <nonce> <agy_log> [stderr_file]
+#
+# Pure decision function: maps (agent, run_agent rc, captured stdout, nonce, agy
+# log path, captured stderr) to a smoke state. Echoes ONE line `STATE|reason` on
+# stdout, where STATE ∈ {PASS,UNAVAILABLE,FAIL}. rc of THIS function is always 0
+# — the STATE is carried on stdout, not in $?, so the caller never trips `set -e`
+# on a FAIL. The `STATE|reason` single-line shape is command-substitution-safe (a
+# nameref out-var would not survive `$(...)`).
+#
+# STREAM SEPARATION (#222 [P1] review): the nonce PASS check reads **only
+# stdout**, never stderr. A broken CLI/wrapper that echoes the stdin prompt (which
+# CONTAINS the nonce) onto STDERR and exits non-zero must NOT be reported PASS —
+# no model response occurred. The per-CLI drop-reason scrapers (kiro/codex) DO
+# scan stderr too, since a CLI's auth / stream-error text legitimately lands on
+# either stream; they receive a combined stdout+stderr view. The agy scraper reads
+# its own separate `--log-file`, unaffected by stream merging.
+#
+# Decision order (first match wins):
+#   1. nonce present in STDOUT ONLY         → PASS         reason=nonce-ok
+#   2. environmental signal (per-CLI scraper, quota/capacity/transient) → UNAVAILABLE
+#   3. auth/config signal (per-CLI scraper) → FAIL         reason=<scraper phrase>
+#   4. run_agent rc 124/137 (timeout/kill)  → FAIL         reason=timeout
+#   5. otherwise (no nonce, no signal)      → FAIL         reason=no-response
+#
+# Note step 2 is checked BEFORE the timeout step: an agy whose --log-file shows a
+# quota wall but whose CLI then hung to the timeout is still fundamentally an
+# environmental drop (TC-AGENT-SMOKE-008), so the environmental signal wins.
+_smoke_classify() {
+  local agent="$1" rc="$2" stdout_file="$3" nonce="$4" agy_log="$5" stderr_file="${6:-}"
+
+  # 1. PASS — the model echoed the exact nonce ON STDOUT *and* run_agent exited 0.
+  #    The nonce is a unique 16-hex blob, so the match is exact (a truncated/garbled
+  #    echo will not match). STDOUT ONLY — a prompt echoed onto stderr is NOT a
+  #    model response (#222 [P1] r1).
+  #    The `rc == 0` gate is the SECOND half of that [P1] (#222 [P1] r2): a broken
+  #    CLI/wrapper can echo the stdin prompt (which CONTAINS the nonce) to STDOUT
+  #    and THEN exit non-zero (launch/config failure after the echo). Without the
+  #    rc gate that reads as PASS despite no real model response. Requiring a
+  #    successful underlying run closes it — a healthy model round-trip exits 0,
+  #    and a non-zero exit falls through to the drop-reason scrapers / timeout /
+  #    no-response classification below.
+  #    The nonce check runs over a TTY-SANITIZED view of stdout (_smoke_stdout_has_nonce):
+  #    kiro `--no-interactive` wraps its response in terminal decoration AND injects
+  #    a BEL (0x07) INSIDE the echoed token (captured stdout literally contains
+  #    `SMOKE-^G<hex>`), so a raw `grep -qF "$nonce"` never matches a verified-healthy
+  #    kiro → false `no-response` FAIL (#222 operator live-matrix review). Stripping
+  #    C0 control bytes + ANSI CSI before the match fixes it WITHOUT widening the
+  #    false-PASS surface: the strip can only RECOVER a hidden real match, the rc==0
+  #    gate and stdout-only separation are unchanged, and the nonce's uniqueness still
+  #    enforces exactness.
+  if [[ "$rc" == "0" ]] && _smoke_stdout_has_nonce "$stdout_file" "$nonce"; then
+    printf 'PASS|nonce-ok\n'
+    return 0
+  fi
+
+  # 2/3. Per-CLI drop-reason scraper. The kiro/codex scrapers scan a COMBINED
+  #      stdout+stderr view (auth / stream-error text can land on either stream);
+  #      build it into a temp and clean it up. agy uses its own --log-file. Each
+  #      scraper echoes a token (or empty) and is rc-0-always (fail-safe under
+  #      set -euo pipefail).
+  local tok="" phrase="" combined="" scan_file="$stdout_file"
+  if [[ "$agent" == "kiro" || "$agent" == "codex" ]]; then
+    combined=$(mktemp "${TMPDIR:-/tmp}/smoke-combined-XXXXXX" 2>/dev/null) || combined=""
+    if [[ -n "$combined" ]]; then
+      # Concatenate stdout then stderr (order does not matter to the substring
+      # scrapers). Missing files contribute nothing.
+      { [[ -f "$stdout_file" ]] && cat "$stdout_file"; [[ -n "$stderr_file" && -f "$stderr_file" ]] && cat "$stderr_file"; } > "$combined" 2>/dev/null
+      scan_file="$combined"
+    fi
+  fi
+  case "$agent" in
+    agy)
+      tok=$(_classify_agy_drop_reason "$agy_log")
+      phrase=$(_agy_drop_reason_phrase "$tok")
+      ;;
+    kiro)
+      tok=$(_classify_kiro_drop_reason "$scan_file")
+      phrase=$(_kiro_drop_reason_phrase "$tok")
+      ;;
+    codex)
+      tok=$(_classify_codex_drop_reason "$scan_file")
+      phrase=$(_codex_drop_reason_phrase "$tok")
+      ;;
+  esac
+  # The scrapers have read scan_file synchronously; drop the combined temp now so
+  # every downstream return path is leak-free without per-branch cleanup.
+  [[ -n "$combined" ]] && rm -f "$combined" 2>/dev/null
+  case "$tok" in
+    # quota/capacity/transient-backend signal → environmental (UNAVAILABLE).
+    quota-exhausted*|stream-error*)   printf 'UNAVAILABLE|%s\n' "$phrase"; return 0 ;;
+    # auth / config breakage → operator-side (FAIL). `config-error[:<flag>]` is the
+    # codex INV-62 token (an exec-only flag rejected by `codex review`'s clap
+    # parser); like auth-failed it is operator-side config breakage, so FAIL — and
+    # surfacing the specific rejected flag is the observability win the per-CLI
+    # scraper exists for (otherwise it would fall through to a generic no-response).
+    auth-failed|config-error*)        printf 'FAIL|%s\n' "$phrase";        return 0 ;;
+  esac
+
+  # 4. Timeout / kill with no nonce and no environmental signal. A smoke is a
+  #    one-token round-trip; a timeout here is a launch/auth/config hang, not a
+  #    legitimately-slow model — classify FAIL (gate-worthy).
+  if [[ "$rc" == "124" || "$rc" == "137" ]]; then
+    # SMOKE_TIMEOUT_USED already carries its unit (e.g. `5s`/`2h`), so no trailing
+    # `s` in the format — otherwise the reason would read `5ss` (#222 [P2]).
+    printf 'FAIL|timeout (no model response within %s)\n' "${SMOKE_TIMEOUT_USED:-?}"
+    return 0
+  fi
+
+  # 5. No nonce, no recognizable signal. The model never answered and we have no
+  #    environmental excuse → operator-side breakage. Conservative default.
+  printf 'FAIL|no-response (rc=%s; nonce absent from CLI output)\n' "$rc"
+  return 0
+}
+
+# smoke_agent <agent-cmd> <model> [timeout-seconds]
+#
+# Run a real one-token round-trip against <agent-cmd>/<model> via the production
+# run_agent chain and classify the outcome into the three-state contract.
+#
+# Returns:  0 PASS   2 UNAVAILABLE   1 FAIL
+# Emits ONE machine-readable evidence line on stdout (consumed by the INV-46
+# command-mode evidence parser):
+#   SMOKE <agent> <PASS|FAIL|UNAVAILABLE> <elapsed>s reason=<...>
+#
+# A missing/empty <agent-cmd> is a caller bug → FAIL with reason=bad-args (the
+# evidence line still prints so the harness records it deterministically).
+smoke_agent() {
+  local agent="${1:-}" model="${2:-}" timeout_s="${3:-$SMOKE_DEFAULT_TIMEOUT_SECONDS}"
+
+  if [[ -z "$agent" ]]; then
+    printf 'SMOKE <none> FAIL 0s reason=bad-args (empty agent-cmd)\n'
+    return 1
+  fi
+  # Validate the timeout; a non-positive/garbage value falls back to the default
+  # so a typo can never DISABLE the bound (GNU `timeout 0` disables — INV-13).
+  if ! _is_positive_timeout_value "$timeout_s"; then
+    timeout_s="$SMOKE_DEFAULT_TIMEOUT_SECONDS"
+  fi
+  # Normalize to a `timeout(1)`-ready duration (#222 [P2] review): the validator
+  # accepts BOTH bare seconds (`5`) and suffixed durations (`5s`/`2h`). A suffixed
+  # value must NOT get another `s` appended — `5ss` makes coreutils `timeout` fail
+  # immediately ("invalid time interval") on an otherwise healthy CLI. So append
+  # `s` ONLY when the value is bare digits; a value that already carries a unit is
+  # passed through verbatim.
+  local agent_timeout="$timeout_s"
+  [[ "$agent_timeout" =~ ^[0-9]+$ ]] && agent_timeout="${agent_timeout}s"
+
+  local nonce stdout_file stderr_file agy_log session_id
+  nonce=$(_smoke_nonce)
+  stdout_file=$(mktemp "${TMPDIR:-/tmp}/smoke-${agent}-out-XXXXXX") || {
+    printf 'SMOKE %s FAIL 0s reason=mktemp-failed\n' "$agent"
+    return 1
+  }
+  # Separate stderr capture (#222 [P1] review): the nonce PASS check must read
+  # ONLY stdout, so a CLI/wrapper that echoes the prompt (which contains the
+  # nonce) onto stderr and dies cannot be misreported PASS. stderr stays available
+  # to the kiro/codex drop-reason scrapers (they get a combined view).
+  stderr_file=$(mktemp "${TMPDIR:-/tmp}/smoke-${agent}-err-XXXXXX") || {
+    rm -f "$stdout_file" 2>/dev/null || true
+    printf 'SMOKE %s FAIL 0s reason=mktemp-failed\n' "$agent"
+    return 1
+  }
+  # A per-call session id — a VALID UUID (claude's --session-id rejects non-UUIDs;
+  # #222 [P1]). Also keeps the agy --log-file sidecar (run_agent's agy branch
+  # writes it, keyed by session_id) unique across concurrent harness entries.
+  session_id=$(_smoke_session_id)
+
+  # Drive run_agent with the smoke's AGENT_CMD + a SHORT AGENT_TIMEOUT override,
+  # in a SUBSHELL so the override (and any per-CLI env the caller set) never
+  # leaks back to a sibling/the parent. PROJECT_ID is required by
+  # pid_dir_for_project() (the agy sidecar path) — default it if unset so a bare
+  # invocation outside a configured project still works.
+  local prompt rc
+  prompt=$(_smoke_prompt "$nonce")
+  # SMOKE_TIMEOUT_USED feeds the timeout-reason evidence text; use the NORMALIZED
+  # duration so the message reads `…within 5s` not `…within 5ss` (#222 [P2]).
+  SMOKE_TIMEOUT_USED="$agent_timeout"
+
+  local start end elapsed
+  start=$(date +%s)
+  (
+    export AGENT_CMD="$agent"
+    # Normalized duration (#222 [P2]): a suffixed input like `5s` is passed through
+    # verbatim — appending `s` here would make `5ss` and `timeout(1)` fail at once.
+    export AGENT_TIMEOUT="$agent_timeout"
+    export PROJECT_ID="${PROJECT_ID:-agent-smoke}"
+    # No PID file / heartbeat for a smoke — it is a transient probe, not a
+    # dispatched wrapper. AGENT_PID_FILE stays unset so _run_with_timeout skips
+    # the PID write.
+    run_agent "$session_id" "$prompt" "$model" "smoke"
+  ) >"$stdout_file" 2>"$stderr_file"
+  rc=$?
+  end=$(date +%s)
+  elapsed=$((end - start))
+
+  # The agy branch of run_agent writes its log to _agy_log_file <session_id>
+  # under pid_dir_for_project(). Recover the path with the same PROJECT_ID the
+  # subshell used so the agy classifier can scrape it.
+  agy_log=""
+  if [[ "$agent" == "agy" ]]; then
+    agy_log=$(PROJECT_ID="${PROJECT_ID:-agent-smoke}" _agy_log_file "$session_id" 2>/dev/null || true)
+  fi
+
+  local classified state reason
+  classified=$(_smoke_classify "$agent" "$rc" "$stdout_file" "$nonce" "$agy_log" "$stderr_file")
+  state="${classified%%|*}"
+  reason="${classified#*|}"
+
+  rm -f "$stdout_file" "$stderr_file" 2>/dev/null || true
+
+  printf 'SMOKE %s %s %ss reason=%s\n' "$agent" "$state" "$elapsed" "$reason"
+
+  case "$state" in
+    PASS)        return 0 ;;
+    UNAVAILABLE) return 2 ;;
+    *)           return 1 ;;
+  esac
+}

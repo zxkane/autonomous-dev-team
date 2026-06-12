@@ -1,0 +1,5 @@
+# Smoke / drop-reason fixtures are captured CLI output that can contain raw
+# control bytes (e.g. the BEL 0x07 inside kiro-tty-decoration.fixture) and must
+# survive byte-for-byte. Mark them binary so a future `* text=auto` cannot
+# normalize line endings or otherwise rewrite the bytes (#222 operator review).
+*.fixture binary
