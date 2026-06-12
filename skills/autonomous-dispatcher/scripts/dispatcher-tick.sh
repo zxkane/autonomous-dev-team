@@ -54,6 +54,11 @@ load_autonomous_conf "${SCRIPT_DIR}" || true
 # shellcheck source=lib-dispatch.sh
 source "${LIB_DIR}/lib-dispatch.sh"
 
+# [INV-67] Observe-only metrics emitter. Guarded so a load failure never aborts
+# the tick. Provides metrics_emit.
+# shellcheck source=lib-metrics.sh
+source "${LIB_DIR}/lib-metrics.sh" 2>/dev/null || true
+
 : "${PROJECT_DIR:?PROJECT_DIR must be set in autonomous.conf}"
 
 log() { echo "[dispatcher-tick] $(date -u +%H:%M:%S) $*"; }
@@ -207,6 +212,13 @@ for i in $(seq 0 $((new_count - 1))); do
 
   log "  dispatching dev-new for issue #${issue_num}"
   label_swap "$issue_num" "" "in-progress"
+  # [INV-67] Metrics: the issue is first picked up for autonomous work — the
+  # TTHW "labeled" endpoint. Emitted only on the first (dev-new) dispatch, not
+  # on resumes/re-dispatches, so the aggregator's earliest-per-issue reduction
+  # is anchored here. Best-effort, observe-only.
+  if declare -F metrics_emit >/dev/null 2>&1; then
+    metrics_emit issue_labeled "issue=${issue_num}" || true
+  fi
   # Bug 1+2 (#99): write a dispatcher-controlled marker that records the
   # dispatch timestamp ([INV-17]). Step 5 uses this to honor a cold-start
   # grace window before classifying the wrapper as crashed.
@@ -259,6 +271,10 @@ for i in $(seq 0 $((pd_count - 1))); do
   retry_count=$(count_retries "$issue_num")
   if [ "$retry_count" -ge "$MAX_RETRIES" ]; then
     log "  issue #${issue_num} retry exhausted ($retry_count/$MAX_RETRIES) — marking stalled"
+    # [INV-67] Metrics: retry exhausted → stalled. Best-effort, observe-only.
+    if declare -F metrics_emit >/dev/null 2>&1; then
+      metrics_emit dispatch_retry "issue=${issue_num}" "retry_count=${retry_count}" stalled=true || true
+    fi
     mark_stalled "$issue_num"
     continue
   fi
@@ -475,6 +491,12 @@ for i in $(seq 0 $((cand_count - 1))); do
           echo "INFO: issue ${issue_num} dev wrapper pid_alive miss but in-flight signal positive; deferring crash declaration ([INV-27])" >&2
           continue
         fi
+        # [INV-67] Metrics: dispatcher declared a dev wrapper DEAD with no PR.
+        # Class false-stall (the near-success cross-check above already cleared,
+        # so this is a real crash declaration, not a probe race). Best-effort.
+        if declare -F metrics_emit >/dev/null 2>&1; then
+          metrics_emit dispatch_stale "issue=${issue_num}" kind=in-progress failure_class=false-stall || true
+        fi
         gh issue comment "$issue_num" --repo "$REPO" \
           --body "Task appears to have crashed (no PR found). Moving to pending-dev for retry."
         label_swap "$issue_num" "in-progress" "pending-dev"
@@ -516,6 +538,11 @@ for i in $(seq 0 $((cand_count - 1))); do
       if review_near_success "$issue_num"; then
         echo "INFO: issue ${issue_num} review wrapper pid_alive miss but PR-state signal positive; deferring crash declaration (#111 INV-24)" >&2
         continue
+      fi
+      # [INV-67] Metrics: dispatcher declared a review wrapper DEAD. Class
+      # false-stall (the review_near_success cross-check above already cleared).
+      if declare -F metrics_emit >/dev/null 2>&1; then
+        metrics_emit dispatch_stale "issue=${issue_num}" kind=reviewing failure_class=false-stall || true
       fi
       gh issue comment "$issue_num" --repo "$REPO" \
         --body "Review process appears to have crashed. Moving to pending-dev for retry."

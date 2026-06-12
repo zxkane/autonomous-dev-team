@@ -579,6 +579,19 @@ flowchart TD
 
 This means if the script exits 0 (normal completion) but `RESULT_PARSED` was never set (logic bug), the trap silently leaves labels alone — defense-in-depth against a future refactor that forgets to set the flag would manifest as "issue stuck in `reviewing`" rather than "issue corrupted to `pending-dev` for no reason".
 
+### Observe-only metrics emission ([INV-67](invariants.md#inv-67-metrics-emission-is-observe-only--silent-to-pipeline-loud-to-report))
+
+The review wrapper emits (all `metrics_emit … || true`, guarded on `declare -F`):
+`wrapper_start` (before the agent fan-out); `verdict` (the aggregated INV-40
+pass/fail/all-unavailable, right after `_aggregate_review_verdicts`); one
+`agent_drop` per dropped/timed-out fan-out member, carrying the failure-class
+taxonomy reason (`metrics_map_drop_reason` maps each CLI's native drop token —
+agy quota/auth, codex config/stream, kiro auth — onto `agent-unavailable:*`);
+`merge` (success/failure, the TTHW merged endpoint + the `infra` failure class);
+and `wrapper_end` (in `cleanup()`, fired once for both the normal and crash
+paths). A metrics failure can never change the verdict, the merge decision, or the
+trap's label transitions. See [`metrics.md`](metrics.md).
+
 ## Cross-references
 
 - [`dispatcher-flow.md`](dispatcher-flow.md) — Step 3 is the producer side of the dispatcher → review handoff.

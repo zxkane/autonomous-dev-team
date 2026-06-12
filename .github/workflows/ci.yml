@@ -49,6 +49,18 @@ jobs:
             exit 1
           }
 
+      # metrics-report E2E self-test (INV-67, #228): synthesize 3 months of
+      # events into a fixture and assert the four baseline numbers exactly. The
+      # harness exits 0 on success and prints METRICS-E2E-SUMMARY.
+      - name: metrics-report E2E fixture self-test
+        run: |
+          out=$(bash tests/e2e/run-metrics-report.sh)
+          echo "$out"
+          echo "$out" | grep -q 'METRICS-E2E-SUMMARY pass=10 fail=0' || {
+            echo "::error::metrics-report E2E self-test did not produce the expected summary"
+            exit 1
+          }
+
   shellcheck:
     name: ShellCheck
     runs-on: ubuntu-latest
@@ -77,7 +89,10 @@ jobs:
             skills/autonomous-dispatcher/scripts/lib-review-request-changes.sh \
             skills/autonomous-dispatcher/scripts/lib-review-smoke.sh \
             skills/autonomous-dispatcher/scripts/lib-agent-smoke.sh \
+            skills/autonomous-dispatcher/scripts/lib-metrics.sh \
+            skills/autonomous-dispatcher/scripts/metrics-report.sh \
             tests/e2e/run-agent-smoke.sh \
+            tests/e2e/run-metrics-report.sh \
             skills/autonomous-dispatcher/scripts/post-verdict.sh \
             skills/autonomous-dispatcher/scripts/setup-labels.sh \
             skills/autonomous-dispatcher/scripts/gh-token-refresh-daemon.sh \

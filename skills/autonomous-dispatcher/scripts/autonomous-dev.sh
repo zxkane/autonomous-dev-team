@@ -32,6 +32,11 @@ LIB_DIR="$(cd "$(dirname "$(readlink -f "$_SELF")")" && pwd)"
 export AUTONOMOUS_CONF_DIR="$SCRIPT_DIR"
 source "${LIB_DIR}/lib-agent.sh"
 source "${LIB_DIR}/lib-auth.sh"
+# [INV-67] Observe-only metrics emitter. Sourced from LIB_DIR (skill tree) like
+# the other libs; provides metrics_emit/metrics_dir. A failure here must never
+# abort the wrapper, so the source itself is guarded.
+# shellcheck source=lib-metrics.sh
+source "${LIB_DIR}/lib-metrics.sh" 2>/dev/null || true
 # Per-side AGENT_CMD override (INV-37). Empty-string fallback already
 # applied inside lib-agent.sh; this just rebinds AGENT_CMD so the case
 # statements in run_agent / resume_agent dispatch to the dev-side CLI.
@@ -126,6 +131,13 @@ LOG_FILE="/tmp/agent-${PROJECT_ID}-issue-${ISSUE_NUMBER}.log"
 PID_DIR=$(pid_dir_for_project) || { echo "ERROR: cannot resolve PID dir" >&2; exit 1; }
 PID_FILE="${PID_DIR}/issue-${ISSUE_NUMBER}.pid"
 AGENT_RAN=false
+
+# [INV-67] Metrics: wrapper start. Best-effort, observe-only — never affects
+# wrapper behavior. METRICS_START_TS feeds the wrapper_end duration in cleanup().
+METRICS_START_TS=$(date +%s 2>/dev/null || echo 0)
+if declare -F metrics_emit >/dev/null 2>&1; then
+  metrics_emit wrapper_start side=dev "mode=${MODE}" "issue=${ISSUE_NUMBER}" "agent=${AGENT_CMD:-claude}" || true
+fi
 
 # SIGTERM-aware exit routing (INV-15, closes #67).
 # Dispatcher Step 5a SIGTERMs us when "ALIVE + PR ready". Bash exits with
@@ -401,6 +413,27 @@ POSTAPPROVAL
 cleanup() {
   local exit_code=$?
 
+  # [INV-67] Metrics: wrapper_end. Defined as a closure so both the early-return
+  # (agent-never-ran) path and the normal path emit it with the FINAL exit_code
+  # (after the SIGTERM rewrite below). Best-effort, observe-only.
+  _emit_dev_end() {
+    declare -F metrics_emit >/dev/null 2>&1 || return 0
+    local _rc="$1" _dur=0 _now
+    _now=$(date +%s 2>/dev/null || echo 0)
+    [[ "$METRICS_START_TS" -gt 0 && "$_now" -ge "$METRICS_START_TS" ]] 2>/dev/null \
+      && _dur=$((_now - METRICS_START_TS))
+    metrics_emit wrapper_end side=dev "rc=${_rc}" "duration_s=${_dur}" \
+      "issue=${ISSUE_NUMBER:-}" "agent=${AGENT_CMD:-claude}" || true
+    # Token usage from the agent log, if the CLI emitted any (claude JSON /
+    # codex line). Splice the parsed `input=.. output=.. total=..` words in.
+    local _tok
+    _tok="$(metrics_parse_tokens "${LOG_FILE:-}" 2>/dev/null)" || true
+    if [[ -n "$_tok" ]]; then
+      # shellcheck disable=SC2086  # intentional word-split of the k=v fields
+      metrics_emit token_usage side=dev "issue=${ISSUE_NUMBER:-}" "agent=${AGENT_CMD:-claude}" $_tok || true
+    fi
+  }
+
   # Tear down the heartbeat loop fast (parent-pid watchdog would also
   # take it down within HEARTBEAT_INTERVAL_SECONDS, but explicit is
   # cheaper). The kill is allowed to fail — the loop may already have
@@ -447,6 +480,7 @@ EOF
     else
       log "Exiting with code $exit_code (agent never ran, no ISSUE_NUMBER or gh — silent)."
     fi
+    _emit_dev_end "$exit_code"
     cleanup_github_auth
     return
   fi
@@ -530,6 +564,13 @@ EOF
       --remove-label "in-progress" \
       --add-label "pending-dev" || log "WARNING: Failed to update issue labels"
     log "Agent failed (exit $exit_code). Issue remains in pending-dev for retry."
+  fi
+
+  # [INV-67] Metrics: emit wrapper_end with the FINAL exit_code (post SIGTERM
+  # rewrite). Also emit pr_opened for TTHW when this run handed off a PR.
+  _emit_dev_end "$exit_code"
+  if declare -F metrics_emit >/dev/null 2>&1 && [[ "${PR_EXISTS:-0}" -gt 0 ]]; then
+    metrics_emit pr_opened side=dev "issue=${ISSUE_NUMBER:-}" || true
   fi
 
   cleanup_github_auth

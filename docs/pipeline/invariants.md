@@ -2695,6 +2695,31 @@ Because every CLI posts through the SAME `post-verdict.sh`, this detector is **C
 - [INV-58](#inv-58-agy-quotaauth-unavailable-drops-surface-a-distinct-reason-fan-out--reviewed-head-model-labels-are-per-agent) / [INV-59](#inv-59-codex-transient-stream-error-drops-surface-a-distinct-reason-and-are-ridden-out-by-the-resume-loop-not-opaquely-dropped) / [INV-61](#inv-61-kiro-authlogin-failure-unavailable-drops-surface-a-distinct-reason-not-a-bare-opaque-unavailable) — the per-CLI drop-reason scrapers this CLI-agnostic detector runs AHEAD of (post-failure takes precedence); same `set -e`-safe rc-0-always contract, same `_dropped_reasons` assembly loop.
 - [`review-agent-flow.md` § post-failed drop reason (INV-69)](review-agent-flow.md#post-failed-drop-reason-inv-70) — runtime walkthrough.
 
+## INV-70: metrics emission is observe-only — silent-to-pipeline, loud-to-report
+
+**Rule**: The metrics lane (`lib-metrics.sh::metrics_emit` and the events it appends to `metrics.jsonl`) is **purely observational**. A metrics-emission failure of ANY kind — unwritable state dir, missing `jq`, full disk, malformed input — MUST NOT change a wrapper/dispatcher **exit code**, **label transition**, **verdict**, or **merge decision**. Concretely:
+
+- `metrics_emit` swallows every internal error and ALWAYS `return`s 0. It never aborts the caller, even under `set -e`.
+- Every call site additionally appends `|| true` (belt-and-suspenders) and guards on `declare -F metrics_emit` so a wrapper whose `lib-metrics.sh` source failed simply skips emission.
+- No pipeline control-flow decision (dispatch, retry, stale/DEAD declaration, verdict aggregation, auto-merge) may EVER read back a metrics value. Emission happens strictly AFTER the decision it records is made. This is the inverse of the redesign's later phases — for THIS subsystem, metrics are write-only from the pipeline's perspective ("observe-only forever", issue #228 out-of-scope).
+
+The **report** half (`metrics-report.sh`) is the opposite: it is **loud** about gaps. Missing token data, a CLI with zero runs, a PR that never merged, an empty log — each is surfaced as an explicit `n/a` / count, never silently coerced to a zero that would hide a broken emitter.
+
+**Event schema**: every line is a flat JSON object built exclusively with `jq -nc` (never hand-rolled `echo`), carrying a `schema_version` (currently `1`) so later redesign phases can add fields without breaking the aggregator (which ignores unknown event types and unknown fields). Storage is `<metrics_dir>/metrics.jsonl`, append-only (`>>`, O_APPEND — atomic for single-line records, no lock). `metrics_dir` resolves `${AUTONOMOUS_METRICS_DIR}` → `${XDG_STATE_HOME}/autonomous-<project>` → `pid_dir_for_project` (co-located with `issue-N.pid`). The full event-type catalogue + failure-class taxonomy lives in [`metrics.md`](metrics.md).
+
+**Failure-class taxonomy** (one enum, aligned with the redesign's factory classification): `verdict-absent`, `verdict-malformed`, `agent-unavailable(:quota|:auth|:config|:transient)`, `false-stall`, `label-race`, `infra`.
+
+**Why**: the stability redesign gates its expensive phases on a measured incident-rate threshold ("if P1+P3 hold the rate under N/month for 8 weeks, later phases are cancelled"). Without a baseline measured BEFORE the first redesign phase ships, the stop-rule is unfalsifiable. But a measurement substrate that could itself crash the pipeline would be worse than none — so the observe-only contract is load-bearing: instrumenting the live dev/review wrappers + dispatcher is only safe because a metrics bug can never strand an issue. (#228)
+
+**Producer**: `lib-metrics.sh::metrics_emit`, called from `autonomous-dev.sh` (wrapper_start/end, token_usage, pr_opened), `autonomous-review.sh` (wrapper_start/end, verdict, agent_drop, merge), and `dispatcher-tick.sh` (issue_labeled, dispatch_stale, dispatch_retry). Each call site is guarded + `|| true`.
+**Consumer**: `metrics-report.sh` (the only reader); downstream, the redesign's stop-rule / obsolescence checkpoint / per-CLI value-accounting. NOTHING in the pipeline control flow consumes a metrics value.
+**Status**: **ENFORCED** in #228.
+**Test**: `tests/unit/test-lib-metrics.sh` (TC-METRICS-001..023, 060..062) covers JSON validity incl. quotes/newlines/shell-metachars, numeric coercion, the unwritable-dir + jq-absent observe-only guarantee under `set -e`, the all-call-sites-`|| true` grep, token parsing (claude JSON + codex line), drop-reason→class mapping, and prune retention. `tests/unit/test-metrics-report.sh` (TC-METRICS-040..051) covers the aggregation math (month-boundary bucketing, cost p50/p90 with missing-token exclusion, per-CLI quota rate with zero-run div-by-zero guard, TTHW with missing endpoints, `--since`/`--project` filters, empty file). `tests/e2e/run-metrics-report.sh` (TC-METRICS-080, run by `tests/unit/test-metrics-report-e2e.sh`) synthesizes three months of events and asserts the four headline numbers exactly.
+
+**Cross-references**:
+- [`metrics.md`](metrics.md) — the event-type catalogue, field definitions, failure-class taxonomy, and `metrics-report.sh` output blocks.
+- [INV-01](#inv-01-pid-file-naming) — the per-project state dir (`pid_dir_for_project`) the metrics file co-locates with.
+
 ## Adding a new invariant
 
 When fixing a pipeline bug, after locating the bug on the state machine + flow docs:

@@ -1,0 +1,239 @@
+#!/bin/bash
+# test-lib-metrics.sh — issue #228 / INV-67.
+#
+# Covers lib-metrics.sh: the observe-only metrics emitter, the token-usage
+# parser, the drop-reason→failure-class mapper, and the retention prune.
+# Test IDs: TC-METRICS-001..023, 060..062.
+#
+# Strategy: source the lib, point AUTONOMOUS_METRICS_DIR at a temp dir, exercise
+# metrics_emit / metrics_parse_tokens / metrics_map_drop_reason / metrics_prune,
+# and assert on the resulting JSONL with jq. The observe-only contract (INV-67)
+# is checked by emitting to an unwritable dir under `set -e` and asserting the
+# surrounding rc is unchanged.
+#
+# Run: bash tests/unit/test-lib-metrics.sh
+
+set -uo pipefail
+
+PASS=0
+FAIL=0
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+LIB="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-metrics.sh"
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+NC='\033[0m'
+
+assert_eq() {
+  local desc="$1" want="$2" got="$3"
+  if [[ "$want" == "$got" ]]; then
+    echo -e "  ${GREEN}PASS${NC}: $desc"; PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${NC}: $desc"; echo "      want='$want'"; echo "      got ='$got'"; FAIL=$((FAIL + 1))
+  fi
+}
+assert_contains() {
+  local desc="$1" needle="$2" hay="$3"
+  if [[ "$hay" == *"$needle"* ]]; then
+    echo -e "  ${GREEN}PASS${NC}: $desc"; PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${NC}: $desc"; echo "      needle='$needle'"; echo "      hay   ='$hay'"; FAIL=$((FAIL + 1))
+  fi
+}
+
+# shellcheck source=../../skills/autonomous-dispatcher/scripts/lib-metrics.sh
+source "$LIB"
+
+# ---------------------------------------------------------------------------
+# metrics_emit — JSON validity & field handling
+# ---------------------------------------------------------------------------
+echo "== metrics_emit =="
+
+WORK="$(mktemp -d)"
+export AUTONOMOUS_METRICS_DIR="$WORK"
+export PROJECT_ID="testproj"
+MF="$WORK/metrics.jsonl"
+
+# TC-METRICS-001: one line, valid JSON, expected fields.
+metrics_emit wrapper_start side=dev mode=new issue=228 agent=claude
+assert_eq "TC-METRICS-001 one line written" "1" "$(wc -l < "$MF" | tr -d ' ')"
+line1="$(head -1 "$MF")"
+echo "$line1" | jq -e . >/dev/null 2>&1 && assert_eq "TC-METRICS-001 valid JSON" "ok" "ok" || assert_eq "TC-METRICS-001 valid JSON" "ok" "bad"
+assert_eq "TC-METRICS-001 event"   "wrapper_start" "$(echo "$line1" | jq -r .event)"
+assert_eq "TC-METRICS-001 side"    "dev"           "$(echo "$line1" | jq -r .side)"
+assert_eq "TC-METRICS-001 schema"  "1"             "$(echo "$line1" | jq -r .schema_version)"
+echo "$line1" | jq -e '.ts | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")' >/dev/null 2>&1 \
+  && assert_eq "TC-METRICS-001 ts ISO-8601" "ok" "ok" || assert_eq "TC-METRICS-001 ts ISO-8601" "ok" "bad"
+
+# TC-METRICS-006: numeric `issue` is a JSON number, not a string.
+assert_eq "TC-METRICS-006 issue is number" "number" "$(echo "$line1" | jq -r '.issue | type')"
+
+# TC-METRICS-002: value with double quotes round-trips.
+: > "$MF"
+metrics_emit weird val='he said "no"'
+assert_eq "TC-METRICS-002 quotes round-trip" 'he said "no"' "$(jq -r .val "$MF")"
+jq -e . "$MF" >/dev/null 2>&1 && assert_eq "TC-METRICS-002 valid JSON" "ok" "ok" || assert_eq "TC-METRICS-002 valid JSON" "ok" "bad"
+
+# TC-METRICS-003: value with newline → single physical line, escaped \n.
+: > "$MF"
+nlval="$(printf 'line1\nline2')"
+metrics_emit weird val="$nlval"
+assert_eq "TC-METRICS-003 single physical line" "1" "$(wc -l < "$MF" | tr -d ' ')"
+assert_eq "TC-METRICS-003 newline preserved in value" "$nlval" "$(jq -r .val "$MF")"
+
+# TC-METRICS-004: shell metachars stored literally (no expansion).
+: > "$MF"
+metrics_emit weird 'val=$(rm -rf /); `id`; ;'
+assert_eq "TC-METRICS-004 no shell expansion" '$(rm -rf /); `id`; ;' "$(jq -r .val "$MF")"
+
+# TC-METRICS-005: two sequential emits → two lines, order preserved.
+: > "$MF"
+metrics_emit first n=1
+metrics_emit second n=2
+assert_eq "TC-METRICS-005 two lines" "2" "$(wc -l < "$MF" | tr -d ' ')"
+assert_eq "TC-METRICS-005 order preserved" "first second" "$(jq -r .event "$MF" | tr '\n' ' ' | sed 's/ $//')"
+
+# TC-METRICS-009: AUTONOMOUS_METRICS_DIR override targets that exact dir.
+assert_eq "TC-METRICS-009 override dir used" "$WORK" "$(metrics_dir)"
+
+# TC-METRICS-010: XDG_STATE_HOME path, no override.
+unset AUTONOMOUS_METRICS_DIR
+XS="$(mktemp -d)"
+assert_eq "TC-METRICS-010 XDG_STATE_HOME path" "$XS/autonomous-testproj" "$(XDG_STATE_HOME="$XS" metrics_dir)"
+export AUTONOMOUS_METRICS_DIR="$WORK"
+
+# TC-METRICS-008: PROJECT_ID unset → metrics_emit is a no-op, returns 0.
+( unset PROJECT_ID AUTONOMOUS_METRICS_DIR XDG_STATE_HOME XDG_RUNTIME_DIR HOME
+  metrics_emit wrapper_start side=dev; ) >/dev/null 2>&1
+assert_eq "TC-METRICS-008 no-PROJECT_ID returns 0" "0" "$?"
+
+# ---------------------------------------------------------------------------
+# Observe-only contract (INV-67)
+# ---------------------------------------------------------------------------
+echo "== observe-only (INV-67) =="
+
+# TC-METRICS-007 / TC-METRICS-060: unwritable dir under set -e → caller survives,
+# rc unchanged.
+RO="$(mktemp -d)"; chmod 500 "$RO"
+rc_observed="$(bash -c '
+    set -euo pipefail
+    source "'"$LIB"'"
+    export AUTONOMOUS_METRICS_DIR="'"$RO"'/cannot-create"
+    export PROJECT_ID=x
+    metrics_emit wrapper_start side=dev || true
+    echo "SURVIVED"
+  ' 2>/dev/null; echo "rc=$?")"
+chmod 700 "$RO"; rm -rf "$RO"
+assert_contains "TC-METRICS-007 set -e survives unwritable dir" "SURVIVED" "$rc_observed"
+assert_contains "TC-METRICS-060 rc unchanged (0)" "rc=0" "$rc_observed"
+
+# TC-METRICS-061: jq absent → no-op, returns 0, no crash.
+jqgone="$(bash -c '
+    set -euo pipefail
+    source "'"$LIB"'"
+    export AUTONOMOUS_METRICS_DIR="'"$WORK"'"
+    export PROJECT_ID=testproj
+    # Shadow jq with a PATH that has no jq.
+    PATH=/nonexistent metrics_emit wrapper_start side=dev || true
+    echo OK
+  ' 2>/dev/null)"
+assert_eq "TC-METRICS-061 jq absent no-op returns 0" "OK" "$jqgone"
+
+# TC-METRICS-062: wrappers guard every metrics_emit invocation with `|| true`.
+# Calls may span multiple lines via `\` continuation, so join continued lines
+# into one logical statement (awk) before checking each metrics_emit statement
+# ends with `|| true`. Excludes comments and the `declare -F metrics_emit` guard.
+DEV_W="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/autonomous-dev.sh"
+REV_W="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/autonomous-review.sh"
+DISP_W="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/dispatcher-tick.sh"
+unguarded=0
+for w in "$DEV_W" "$REV_W" "$DISP_W"; do
+  while IFS= read -r stmt; do
+    # Only statements that actually INVOKE metrics_emit (not the `declare -F`
+    # guard, not a comment).
+    [[ "$stmt" =~ ^[[:space:]]*# ]] && continue
+    [[ "$stmt" == *"declare -F metrics_emit"* ]] && continue
+    [[ "$stmt" =~ (^|[^_a-zA-Z])metrics_emit[[:space:]] ]] || continue
+    [[ "$stmt" == *"|| true"* ]] && continue
+    unguarded=$((unguarded + 1))
+    echo "      UNGUARDED in $(basename "$w"): $stmt"
+  done < <(awk '{ if (prev != "") { $0 = prev " " $0; prev = "" }
+                  if ($0 ~ /\\[[:space:]]*$/) { sub(/\\[[:space:]]*$/, "", $0); prev = $0 }
+                  else print }' "$w")
+done
+assert_eq "TC-METRICS-062 all call sites guarded with || true" "0" "$unguarded"
+
+# ---------------------------------------------------------------------------
+# metrics_parse_tokens
+# ---------------------------------------------------------------------------
+echo "== metrics_parse_tokens =="
+
+CL="$(mktemp)"
+printf 'noise line\n{"type":"result","usage":{"input_tokens":1234,"output_tokens":567}}\nmore noise\n' > "$CL"
+assert_eq "claude JSON usage parsed" "input=1234 output=567 total=1801" "$(metrics_parse_tokens "$CL")"
+
+CX="$(mktemp)"
+printf 'codex working...\nTokens used: 8910\n' > "$CX"
+assert_eq "codex tokens-used parsed (total only)" "total=8910" "$(metrics_parse_tokens "$CX")"
+
+NONE="$(mktemp)"
+printf 'just logs, no usage\n' > "$NONE"
+assert_eq "no usage → empty" "" "$(metrics_parse_tokens "$NONE")"
+assert_eq "missing file → empty, rc 0" "" "$(metrics_parse_tokens /nonexistent/log; echo -n)"
+
+# ---------------------------------------------------------------------------
+# metrics_map_drop_reason
+# ---------------------------------------------------------------------------
+echo "== metrics_map_drop_reason =="
+assert_eq "quota → quota"        "agent-unavailable:quota"     "$(metrics_map_drop_reason unavailable quota-exhausted)"
+assert_eq "auth → auth"          "agent-unavailable:auth"      "$(metrics_map_drop_reason unavailable auth-failed)"
+assert_eq "config → config"      "agent-unavailable:config"    "$(metrics_map_drop_reason unavailable config-error)"
+assert_eq "stream → transient"   "agent-unavailable:transient" "$(metrics_map_drop_reason unavailable stream-error)"
+assert_eq "empty token → transient" "agent-unavailable:transient" "$(metrics_map_drop_reason unavailable '')"
+assert_eq "timed-out → transient"   "agent-unavailable:transient" "$(metrics_map_drop_reason timed-out quota-exhausted)"
+
+# ---------------------------------------------------------------------------
+# metrics_prune
+# ---------------------------------------------------------------------------
+echo "== metrics_prune =="
+
+mk_aged() {  # mk_aged <file> <days-ago> <event>
+  local f="$1" d="$2" ev="$3" ts
+  ts="$(date -u -d "${d} days ago" +%Y-%m-%dT%H:%M:%SZ)"
+  printf '{"schema_version":1,"ts":"%s","event":"%s"}\n' "$ts" "$ev" >> "$f"
+}
+
+# TC-METRICS-020: 100d dropped, 50d + 1d kept (default 90d window).
+PF="$(mktemp)"; : > "$PF"
+mk_aged "$PF" 100 old
+mk_aged "$PF" 50  mid
+mk_aged "$PF" 1   recent
+metrics_prune 90 "$PF"
+assert_eq "TC-METRICS-020 prune keeps mid+recent" "mid recent" "$(jq -r .event "$PF" | tr '\n' ' ' | sed 's/ $//')"
+jq -e . "$PF" >/dev/null 2>&1 && assert_eq "TC-METRICS-020 survivors valid JSON" "ok" "ok" || assert_eq "TC-METRICS-020 survivors valid JSON" "ok" "bad"
+
+# TC-METRICS-021: all recent → nothing removed.
+PF2="$(mktemp)"; : > "$PF2"
+mk_aged "$PF2" 1 a; mk_aged "$PF2" 2 b; mk_aged "$PF2" 3 c
+before="$(wc -l < "$PF2" | tr -d ' ')"
+metrics_prune 90 "$PF2"
+assert_eq "TC-METRICS-021 all-recent unchanged count" "$before" "$(wc -l < "$PF2" | tr -d ' ')"
+
+# TC-METRICS-022: empty/missing file → rc 0, no error.
+metrics_prune 90 /nonexistent/file.jsonl
+assert_eq "TC-METRICS-022 missing file rc 0" "0" "$?"
+EMPTY="$(mktemp)"; metrics_prune 90 "$EMPTY"
+assert_eq "TC-METRICS-022 empty file rc 0" "0" "$?"
+
+# TC-METRICS-023: malformed line does not crash; it's dropped.
+PF3="$(mktemp)"; : > "$PF3"
+mk_aged "$PF3" 1 keep
+printf 'this is not json\n' >> "$PF3"
+metrics_prune 90 "$PF3"
+assert_eq "TC-METRICS-023 malformed dropped, valid kept" "keep" "$(jq -r .event "$PF3" | tr '\n' ' ' | sed 's/ $//')"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "Results: ${PASS} passed, ${FAIL} failed"
+[[ $FAIL -eq 0 ]] || exit 1

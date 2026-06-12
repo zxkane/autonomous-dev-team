@@ -145,6 +145,11 @@ source "${LIB_DIR}/lib-review-postfail.sh"
 # strand the issue). The review AGENT posts verdict comments only and never runs
 # `gh pr review`/`gh pr merge` itself. Inert on the PASS path.
 source "${LIB_DIR}/lib-review-request-changes.sh"
+# [INV-67] Observe-only metrics emitter. Sourced from LIB_DIR (skill tree);
+# provides metrics_emit/metrics_dir. Guarded so a load failure never aborts the
+# review wrapper.
+# shellcheck source=lib-metrics.sh
+source "${LIB_DIR}/lib-metrics.sh" 2>/dev/null || true
 # Per-side AGENT_CMD override (INV-37). See autonomous-dev.sh for the
 # matching dev-side override. Together they let one project run dev
 # and review on different agent CLIs (e.g. claude for dev, agy for
@@ -476,6 +481,17 @@ cleanup() {
   # Cleanup PID file and heartbeat sibling (INV-29) always.
   rm -f "$PID_FILE" "${PID_FILE%.pid}.heartbeat" 2>/dev/null || true
 
+  # [INV-67] Metrics: wrapper_end. Fires once for BOTH the normal (RESULT_PARSED)
+  # and crash paths — placed before the early return. Best-effort, observe-only.
+  if declare -F metrics_emit >/dev/null 2>&1; then
+    local _now _dur=0
+    _now=$(date +%s 2>/dev/null || echo 0)
+    [[ "${METRICS_START_TS:-0}" -gt 0 && "$_now" -ge "${METRICS_START_TS:-0}" ]] 2>/dev/null \
+      && _dur=$((_now - METRICS_START_TS))
+    metrics_emit wrapper_end side=review "rc=${exit_code}" "duration_s=${_dur}" \
+      "issue=${ISSUE_NUMBER:-}" "agent=${AGENT_CMD:-claude}" || true
+  fi
+
   # If result was already parsed by the main script, labels are handled there
   if [[ "$RESULT_PARSED" == "true" ]]; then
     cleanup_github_auth
@@ -620,6 +636,12 @@ log "PR branch: ${PR_BRANCH:-UNKNOWN} (HEAD: ${PR_HEAD_SHA:0:7})"
 # WRAPPER_START_TS — ISO-8601 UTC captured BEFORE run_agent. Verdict
 # comments older than this are stale (prior tick) and ignored.
 WRAPPER_START_TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+# [INV-67] Metrics: epoch start (for wrapper_end duration) + wrapper_start event.
+# Best-effort, observe-only — never affects review behavior.
+METRICS_START_TS=$(date +%s 2>/dev/null || echo 0)
+if declare -F metrics_emit >/dev/null 2>&1; then
+  metrics_emit wrapper_start side=review "issue=${ISSUE_NUMBER}" "agent=${AGENT_CMD:-claude}" || true
+fi
 # BOT_LOGIN — the bot identity this wrapper authenticates as. We need
 # the diagnostic on failure (token expired, GH App perms reduced, rate
 # limit, etc.) so the operator can debug, but we deliberately limit
@@ -1919,6 +1941,12 @@ _reap_fanout_processes "${_AGENT_PGIDS[@]:-}" "${_AGENT_PGIDS_E2E:-}"
 AGGREGATE=$(_aggregate_review_verdicts "${AGENT_VERDICTS[@]}")
 log "Per-agent verdicts: ${AGENT_VERDICTS[*]} → aggregate: ${AGGREGATE}"
 
+# [INV-67] Metrics: aggregated verdict. Best-effort, observe-only — emitted
+# AFTER the decision is made, never gating it.
+if declare -F metrics_emit >/dev/null 2>&1; then
+  metrics_emit verdict side=review "verdict=${AGGREGATE}" "issue=${ISSUE_NUMBER:-}" "pr=${PR_NUMBER:-}" || true
+fi
+
 # A representative SESSION_ID for the Reviewed-HEAD trailer (INV-04) and the
 # BOT_LOGIN-empty fallback predicate downstream. Use the first agent's id; in
 # the N=1 case this IS the lone agent's session.
@@ -2024,6 +2052,28 @@ for _i in "${!AGENT_NAMES[@]}"; do
       ;;
   esac
 done
+
+# [INV-67] Metrics: one agent_drop event per dropped/timed-out fan-out member,
+# carrying the failure-class taxonomy reason. Best-effort, observe-only — a
+# separate loop so it cannot perturb the load-bearing set -e append logic above.
+# Re-derive the per-CLI token via the same rc-0-always classifiers.
+if declare -F metrics_emit >/dev/null 2>&1; then
+  for _mi in "${!AGENT_NAMES[@]}"; do
+    _mstate="${AGENT_VERDICTS[$_mi]}"
+    [[ "$_mstate" == "unavailable" || "$_mstate" == "timed-out" ]] || continue
+    _mtoken=""
+    if [[ "$_mstate" == "unavailable" ]]; then
+      case "${AGENT_NAMES[$_mi]}" in
+        agy)   _mtoken=$(_classify_agy_drop_reason "${AGENT_AGY_LOGS[$_mi]:-}" 2>/dev/null) || _mtoken="" ;;
+        codex) _mtoken=$(_classify_codex_drop_reason "${AGENT_CODEX_LOGS[$_mi]:-}" "${AGENT_LAUNCH_RC[${AGENT_SESSION_IDS[$_mi]}]:-1}" 2>/dev/null) || _mtoken="" ;;
+        kiro)  _mtoken=$(_classify_kiro_drop_reason "${AGENT_KIRO_LOGS[$_mi]:-}" 2>/dev/null) || _mtoken="" ;;
+      esac
+    fi
+    _mreason=$(metrics_map_drop_reason "$_mstate" "$_mtoken")
+    metrics_emit agent_drop side=review "agent_name=${AGENT_NAMES[$_mi]}" \
+      "reason=${_mreason}" "issue=${ISSUE_NUMBER:-}" "pr=${PR_NUMBER:-}" || true
+  done
+fi
 
 # Loud timeout-veto breadcrumb (INV-48): a review agent reaped by its wall-clock
 # cap (rc 124/137) with no verdict VETOES the merge. Post ONE human-visible
@@ -2353,6 +2403,12 @@ if [[ "$PASSED_VERDICT" == "true" ]]; then
     if [[ $MERGE_RC -eq 0 ]]; then
       log "PR #${PR_NUMBER} merged successfully."
 
+      # [INV-67] Metrics: successful auto-merge. Also the TTHW labeled→merged
+      # endpoint. Best-effort, observe-only.
+      if declare -F metrics_emit >/dev/null 2>&1; then
+        metrics_emit merge "result=success" "pr=${PR_NUMBER:-}" "issue=${ISSUE_NUMBER:-}" || true
+      fi
+
       # INV-33: never close the issue directly — GitHub auto-closes it
       # via the PR's `Closes #N` keyword on merge. See docs/pipeline/invariants.md.
       gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
@@ -2367,6 +2423,11 @@ if [[ "$PASSED_VERDICT" == "true" ]]; then
       # Step 4 selector picks it up next tick. Never close, never approve.
       _err_excerpt="${MERGE_OUT:0:500}"
       log "WARNING: Auto-merge failed (rc=${MERGE_RC}): ${_err_excerpt}"
+
+      # [INV-67] Metrics: failed auto-merge — failure class `infra`. Best-effort.
+      if declare -F metrics_emit >/dev/null 2>&1; then
+        metrics_emit merge "result=failure" failure_class=infra "pr=${PR_NUMBER:-}" "issue=${ISSUE_NUMBER:-}" || true
+      fi
 
       if ! _comment_err=$(gh pr comment "$PR_NUMBER" --repo "$REPO" \
         --body "Auto-merge failed: ${_err_excerpt}
