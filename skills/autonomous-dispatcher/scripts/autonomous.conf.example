@@ -402,6 +402,47 @@ AGENT_REVIEW_EXTRA_ARGS=""
 #
 # CODEX_REVIEW_MAX_RERUNS=3
 
+# Pre-fan-out agent-smoke gate (INV-64, #224) ------------------------------
+# REVIEW_SMOKE_ENABLED: when "true", the review wrapper runs a cheap one-token
+# smoke against EVERY AGENT_REVIEW_AGENTS member BEFORE the review fan-out
+# (Phase A.5 — after the INV-46 E2E lane, before the fan-out loop). It uses the
+# SAME launch path the fan-out will (the INV-41 per-agent model + INV-38/INV-42
+# launcher) via lib-agent-smoke.sh::smoke_agent (INV-63, #222), and applies
+# three-state semantics:
+#   - PASS        → the member proceeds to the fan-out;
+#   - UNAVAILABLE → the member is dropped from the vote (quota/capacity — the same
+#                   INV-40 `unavailable` tolerance; drop reason `smoke: <reason>`);
+#                   the remaining members vote normally, and ALL-unavailable falls
+#                   to the existing all-unavailable terminal path;
+#   - FAIL        → the WHOLE review is ABORTED loudly: no fan-out, no verdict, the
+#                   issue stays `reviewing`, and a comment names the failed agent(s)
+#                   + the SMOKE evidence. A smoke FAIL is operator-side config
+#                   breakage (wrong model id / expired auth / region drift / a
+#                   launcher that does not fit the CLI), NOT a PR defect — bouncing
+#                   to dev would chase a non-existent PR problem, so it stays
+#                   `reviewing` and self-heals on the next tick once you fix the
+#                   config.
+# Why a misconfigured member matters: without the smoke it burns a full review run
+# (E2E + N review agents + the poll window) before surfacing as an opaque
+# `unavailable`, indistinguishable from a quota wall. The smoke separates the two
+# cheaply, up front.
+#
+# Default OFF — opt in per project (rollout is per-project and individually
+# revertible). With it off, the wrapper behavior is byte-for-byte unchanged.
+# Single-agent projects benefit too: a smoke FAIL aborts (stays `reviewing`); a
+# smoke UNAVAILABLE falls to the all-unavailable path (same terminal state as a
+# review crash).
+#
+# REVIEW_SMOKE_ENABLED="false"
+#
+# REVIEW_SMOKE_TIMEOUT_SECONDS: per-member smoke wall-clock cap. A smoke is a
+# one-token round-trip; 120s is generous headroom for cold-start auth + first
+# token on a slow backend. Accepts the same coreutils `timeout` units as
+# AGENT_TIMEOUT (s/m/h/d) or bare seconds. Rejected at startup: 0 (GNU
+# `timeout 0` DISABLES the cap), fractions, negatives, other units.
+#
+# REVIEW_SMOKE_TIMEOUT_SECONDS="120"
+
 # --- claude block ---
 # claude has NO required EXTRA_ARGS — the structural --permission-mode
 # flag handles tool trust via the existing AGENT_PERMISSION_MODE knob.

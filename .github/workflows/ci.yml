@@ -67,6 +67,7 @@ jobs:
             skills/autonomous-dispatcher/scripts/lib-review-kiro.sh \
             skills/autonomous-dispatcher/scripts/lib-review-resolve.sh \
             skills/autonomous-dispatcher/scripts/lib-review-request-changes.sh \
+            skills/autonomous-dispatcher/scripts/lib-review-smoke.sh \
             skills/autonomous-dispatcher/scripts/lib-agent-smoke.sh \
             tests/e2e/run-agent-smoke.sh \
             skills/autonomous-dispatcher/scripts/post-verdict.sh \

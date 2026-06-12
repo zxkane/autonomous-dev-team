@@ -81,6 +81,18 @@ source "${SCRIPT_DIR}/lib-review-codex.sh"
 # Observability only — does NOT change the INV-40 vote (a quota agy stays dropped,
 # not a deciding FAIL). Inert unless a fan-out agent is agy AND it was dropped.
 source "${SCRIPT_DIR}/lib-review-agy.sh"
+# shellcheck source=lib-review-smoke.sh
+# INV-64 (#224): pre-fan-out agent-smoke gate (Phase A.5). After the INV-46 E2E
+# lane and before the fan-out, smoke every REVIEW_AGENTS_LIST member via
+# smoke_agent (INV-63, #222) and apply three-state semantics: PASS proceeds,
+# UNAVAILABLE drops the member from the vote (existing INV-40 machinery), FAIL
+# aborts the whole review loudly (operator-side config breakage, not a PR defect).
+# Default-off (REVIEW_SMOKE_ENABLED=false) → the Phase A.5 block is not entered
+# and the wrapper is byte-for-byte unchanged. _classify_smoke_gate /
+# _classify_smoke_state / _smoke_evidence_reason are the pure decision halves;
+# the parallel-subshell orchestration stays in the wrapper (it owns
+# REVIEW_AGENTS_LIST + the resolvers). Inert when REVIEW_SMOKE_ENABLED!=true.
+source "${SCRIPT_DIR}/lib-review-smoke.sh"
 # shellcheck source=lib-review-kiro.sh
 # INV-61 (#215): kiro (Kiro CLI) auth/login-failure drop-reason detector. When a
 # kiro fan-out member has an expired OAuth/login token on the execution host, the
@@ -302,6 +314,19 @@ validate_review_timeout_config() {
   if [[ -n "${_E2E_BROWSER_TIMEOUT_RAW:-}" ]] && ! _is_positive_timeout_value "$_E2E_BROWSER_TIMEOUT_RAW"; then
     echo "Error: E2E_BROWSER_TIMEOUT_SECONDS='${_E2E_BROWSER_TIMEOUT_RAW}' is not a positive coreutils-timeout value." >&2
     echo "  Accepted: a positive integer optionally suffixed s/m/h/d (e.g. 3600, 90m, 2h, 4h)." >&2
+    echo "  Rejected: 0 (GNU 'timeout 0' DISABLES the cap), fractions, negatives, other units." >&2
+    return 1
+  fi
+  # INV-64 (#224): the per-member Phase-A.5 smoke cap. Validated ONLY when the
+  # operator set it (the resolved default 120 is trusted-by-construction). A
+  # garbage value would otherwise reach smoke_agent's 3rd arg; smoke_agent
+  # re-validates and falls back to its own default, but failing loud here mirrors
+  # the sibling timeout knobs so a typo is surfaced at startup, not silently
+  # ignored. Inert unless the smoke gate is enabled, but validated unconditionally
+  # so a misconfigured value is caught regardless of the enable flag.
+  if [[ -n "${REVIEW_SMOKE_TIMEOUT_SECONDS:-}" ]] && ! _is_positive_timeout_value "$REVIEW_SMOKE_TIMEOUT_SECONDS"; then
+    echo "Error: REVIEW_SMOKE_TIMEOUT_SECONDS='${REVIEW_SMOKE_TIMEOUT_SECONDS}' is not a positive coreutils-timeout value." >&2
+    echo "  Accepted: a positive integer optionally suffixed s/m/h/d (e.g. 120, 90, 2m)." >&2
     echo "  Rejected: 0 (GNU 'timeout 0' DISABLES the cap), fractions, negatives, other units." >&2
     return 1
   fi
@@ -1124,6 +1149,219 @@ Findings->Decision Gate: 1 blocking finding(s) -- FAIL.
     exit 0
   fi
   # gate == pass → fall through to Phase B (review fan-out) below.
+fi
+
+# ---------------------------------------------------------------------------
+# PHASE A.5: pre-fan-out agent-smoke gate (INV-64, #224)
+# ---------------------------------------------------------------------------
+# After the INV-46 E2E lane (Phase A) and BEFORE the INV-40 review fan-out
+# (Phase B), smoke every REVIEW_AGENTS_LIST member via smoke_agent (INV-63, #222)
+# and apply three-state semantics. This separates "operator broke the config"
+# (FAIL → abort) from "quota wall" (UNAVAILABLE → drop) BEFORE any expensive
+# review run starts, instead of after a misconfigured member burns a full round
+# and surfaces as an opaque `unavailable`.
+#
+#   PASS        → the member proceeds to the fan-out.
+#   UNAVAILABLE → the member is removed from REVIEW_AGENTS_LIST (the surviving set
+#                 fans out and votes); the drop is surfaced with a `smoke: <reason>`
+#                 breadcrumb. ALL members unavailable → the surviving set is empty,
+#                 so we DO NOT spawn an empty fan-out — we leave a 1-element
+#                 sentinel list and let the existing all-unavailable fallback fire
+#                 (same terminal state as a review crash).
+#   FAIL        → ABORT the whole review loudly: no fan-out, no verdict, issue
+#                 stays `reviewing`; post a comment naming the failed agent(s) +
+#                 the SMOKE evidence; emit a heartbeat-consistent verdict trailer;
+#                 set RESULT_PARSED=true so the crash EXIT trap does NOT override
+#                 the deliberate stay-`reviewing` decision; exit non-zero.
+#
+# Default-off: REVIEW_SMOKE_ENABLED must be exactly `true` to enter the block, so
+# the wrapper is byte-for-byte unchanged for every project that has not opted in.
+# The smoke runs strictly before the fan-out clock and posts NO verdict comment,
+# so it counts toward neither the INV-40 verdict-attribution window nor the poll
+# window.
+if [[ "${REVIEW_SMOKE_ENABLED:-false}" == "true" ]]; then
+  _SMOKE_TIMEOUT="${REVIEW_SMOKE_TIMEOUT_SECONDS:-120}"
+  log "INV-64: smoking ${#REVIEW_AGENTS_LIST[@]} review agent(s) before the fan-out (timeout=${_SMOKE_TIMEOUT}/member): ${REVIEW_AGENTS_LIST[*]}"
+
+  # Per-run temp dir for the parallel smoke sidecars (state + evidence per
+  # member). Mode 700; cleaned up after collection. Keyed by issue so concurrent
+  # review wrappers for different issues never collide.
+  _SMOKE_DIR=$(mktemp -d "/tmp/agent-review-smoke-${ISSUE_NUMBER}-XXXXXX")
+
+  declare -a _smoke_pids=()        # collected subshell PIDs — wait on THESE only
+  declare -a _smoke_state_files=() # rc sidecar per member index (parallel to LIST)
+  declare -a _smoke_evidence_files=()
+
+  for _si in "${!REVIEW_AGENTS_LIST[@]}"; do
+    _smoke_agent="${REVIEW_AGENTS_LIST[$_si]}"
+    _smoke_state_file="${_SMOKE_DIR}/${_si}.state"
+    _smoke_evidence_file="${_SMOKE_DIR}/${_si}.evidence"
+    _smoke_state_files+=("$_smoke_state_file")
+    _smoke_evidence_files+=("$_smoke_evidence_file")
+    # Resolve THIS member's model + launcher EXACTLY as the fan-out will (so the
+    # smoke exercises the same launch path the real review run uses): the INV-41
+    # per-agent model, and the INV-38/INV-42 launcher treatment — a per-agent
+    # AGENT_REVIEW_LAUNCHER_<AGENT> opt-in, else the INV-38 rule (non-claude →
+    # neutralized; claude → keeps the rebound AGENT_LAUNCHER_ARGV).
+    _smoke_model=$(_resolve_review_agent_model "$_smoke_agent")
+    (
+      # Scope ALL of this member's env to the subshell — never leaks to a sibling
+      # smoke or to the fan-out below (mirrors the fan-out subshell).
+      AGENT_CMD="$_smoke_agent"
+      _per_agent_launcher=$(_resolve_review_agent_launcher "$_smoke_agent")
+      if [[ -n "$_per_agent_launcher" ]]; then
+        if bash -n -c "AGENT_LAUNCHER_ARGV=($_per_agent_launcher)" 2>/dev/null; then
+          eval "AGENT_LAUNCHER_ARGV=($_per_agent_launcher)"
+        else
+          log "ERROR: INV-64 AGENT_REVIEW_LAUNCHER_<$_smoke_agent> failed to tokenize for the smoke; running naked. Value: $_per_agent_launcher"
+          AGENT_LAUNCHER_ARGV=()
+        fi
+      elif [[ "$_smoke_agent" != "claude" ]]; then
+        AGENT_LAUNCHER_ARGV=()
+      fi
+      # No PID file for a smoke — it is a transient probe, not a dispatched
+      # wrapper. AGENT_PID_FILE stays unset so smoke_agent's run_agent skips the
+      # PID write and the shared review-N.pid is untouched.
+      unset AGENT_PID_FILE
+      _classify_smoke_state "$_smoke_agent" "$_smoke_model" "$_SMOKE_TIMEOUT" \
+        "$_smoke_state_file" "$_smoke_evidence_file"
+    ) &
+    # Collect THIS subshell's PID. We MUST `wait` these specific PIDs — NEVER a
+    # bare `wait`, which also blocks on the gh-token-refresh-daemon and the
+    # heartbeat loop (neither exits) and would hang the wrapper forever (the
+    # #167-class hang; INV-40 sub-rule 1).
+    _smoke_pids+=("$!")
+  done
+
+  # Wait for the parallel smokes by their COLLECTED PIDs only. `|| true`: a
+  # single-PID `wait` propagates the subshell rc, which under `set -e` would abort
+  # before collection if the subshell exited non-zero — but _classify_smoke_state
+  # always returns 0 and writes the state to a sidecar, so suppress and read the
+  # sidecars (a missing sidecar → treated as FAIL below).
+  wait "${_smoke_pids[@]}" || true
+
+  # Collect per-member states + evidence from the sidecars (the subshells cannot
+  # mutate the parent's arrays).
+  declare -a _smoke_states=()
+  declare -a _smoke_evidence=()
+  for _si in "${!REVIEW_AGENTS_LIST[@]}"; do
+    _sf="${_smoke_state_files[$_si]}"
+    _ef="${_smoke_evidence_files[$_si]}"
+    if [[ -f "$_sf" ]]; then
+      _smoke_states+=("$(head -n1 "$_sf" 2>/dev/null || echo fail)")
+    else
+      # Subshell never wrote a sidecar (crashed before _classify_smoke_state's
+      # write) — conservatively treat as FAIL (a smoke that can't even record its
+      # state is gate-worthy, not a silent drop).
+      _smoke_states+=("fail")
+    fi
+    if [[ -f "$_ef" ]]; then
+      _smoke_evidence+=("$(head -n1 "$_ef" 2>/dev/null || true)")
+    else
+      _smoke_evidence+=("")
+    fi
+    log "INV-64: smoke '${REVIEW_AGENTS_LIST[$_si]}' → ${_smoke_states[$_si]} (${_smoke_evidence[$_si]:-no evidence})"
+  done
+  rm -rf "$_SMOKE_DIR" 2>/dev/null || true
+
+  # TODO(#228): when lib-metrics lands, emit one `smoke` event per member here
+  # with its three-state outcome (agent, state, reason). Until then the per-member
+  # state is only in the wrapper log line above.
+
+  _SMOKE_GATE=$(_classify_smoke_gate "${_smoke_states[@]}")
+  log "INV-64: smoke gate over [${_smoke_states[*]}] → ${_SMOKE_GATE}"
+
+  case "$_SMOKE_GATE" in
+    fail)
+      # Operator-side config breakage — ABORT the review loudly. Build the
+      # naming clause from each FAILed member + its SMOKE evidence line.
+      _smoke_failed_agents=""
+      _smoke_fail_clause=""
+      for _si in "${!REVIEW_AGENTS_LIST[@]}"; do
+        if [[ "${_smoke_states[$_si]}" == "fail" ]]; then
+          _smoke_failed_agents+="${REVIEW_AGENTS_LIST[$_si]} "
+          # The full SMOKE evidence line names the actionable reason (e.g.
+          # `reason=config-error:--bad-flag` / `reason=auth-failed`), so the
+          # naming clause quotes it verbatim rather than re-extracting a reason.
+          _smoke_fail_clause+="- \`${REVIEW_AGENTS_LIST[$_si]}\`: ${_smoke_evidence[$_si]:-(no evidence line)}"$'\n'
+        fi
+      done
+      log "INV-64: smoke FAIL — aborting the review WITHOUT fan-out. Failed agent(s): ${_smoke_failed_agents%% }"
+      gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
+        --body "Review aborted: pre-fan-out agent smoke FAILED (INV-64).
+
+The following review agent(s) failed a one-token smoke before the review fan-out — this is an operator-side **configuration/launch error** (wrong model id, expired auth, region drift, or a launcher that does not fit the CLI), **not a PR defect**:
+
+${_smoke_fail_clause}
+The review was NOT run and the PR was NOT evaluated. The issue stays \`reviewing\` (it is NOT bounced to development — there is no PR problem for the dev agent to fix). Fix the agent configuration in \`autonomous.conf\`; the next dispatch tick re-runs the review once the smoke passes." 2>/dev/null || true
+      # Heartbeat-consistent verdict trailer (INV-24): a config-error abort is
+      # operator-side and non-substantive (no code change will fix it), so the
+      # dispatcher re-routes to review, not a dev retry. The cause token matches
+      # the trailer cause whitelist (^[a-z0-9-]+$).
+      emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-non-substantive" "smoke-config-error" 2>/dev/null || true
+      # Stay `reviewing` — do NOT add pending-dev. RESULT_PARSED=true so the crash
+      # EXIT trap (which would flip reviewing→pending-dev on a non-zero exit) does
+      # NOT override this deliberate decision.
+      RESULT_PARSED=true
+      log "Issue #${ISSUE_NUMBER} stays reviewing (INV-64 smoke config-error abort); self-heals on the next tick once the operator fixes the config."
+      exit 1
+      ;;
+    all-unavailable)
+      # Every member smoked UNAVAILABLE (quota/capacity). Rather than shrinking
+      # REVIEW_AGENTS_LIST to empty (which would skip the fan-out entirely and
+      # leave the downstream all-unavailable path's parallel arrays unpopulated),
+      # leave the list UNCHANGED and fall through: each member runs the fan-out,
+      # posts no verdict (it is genuinely unavailable), the poller resolves every
+      # one `unavailable`, and the existing INV-40 all-unavailable aggregate fires
+      # — the legacy review-crash terminal state, unchanged. Surface the smoke
+      # reasons in the log + a single issue comment so the cause isn't opaque.
+      _smoke_reasons=""
+      for _si in "${!REVIEW_AGENTS_LIST[@]}"; do
+        _sm_reason=$(_smoke_evidence_reason "${_smoke_evidence[$_si]:-}")
+        [[ -n "$_sm_reason" ]] && _smoke_reasons+="${REVIEW_AGENTS_LIST[$_si]}: smoke: ${_sm_reason}; "
+      done
+      log "INV-64: ALL ${#REVIEW_AGENTS_LIST[@]} review agent(s) smoked UNAVAILABLE — driving the existing all-unavailable fallback (no fan-out shrink needed).${_smoke_reasons:+ Reason(s): ${_smoke_reasons%; }}"
+      # This comment is ADVISORY: it reflects the smoke outcome, not the final
+      # verdict. We still run the full fan-out below (see the fall-through note),
+      # so in the rare case capacity recovers between the smoke and the fan-out a
+      # member could post a real verdict and the aggregate could become PASS/FAIL
+      # — a more-correct outcome than this comment claims. The comment never
+      # over-blocks (it changes no label and casts no verdict); it only narrates
+      # why the round looked unavailable at smoke time.
+      gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
+        --body "Multi-agent review: all review agent(s) \`${REVIEW_AGENTS_LIST[*]}\` were UNAVAILABLE at the pre-fan-out smoke (INV-64) — quota/capacity, not a config error. The PR was not evaluated this round; it will be re-reviewed on the next dispatch tick once capacity recovers.${_smoke_reasons:+ Reason(s): ${_smoke_reasons%; }}" 2>/dev/null || true
+      # Fall through to the fan-out with the list unchanged; every member will
+      # smoke-free run and post no verdict (already known unavailable), so the
+      # aggregate is all-unavailable. (We keep the list rather than emptying it so
+      # the downstream all-unavailable path — which reads AGENT_LAUNCH_RC etc. —
+      # has its parallel arrays populated exactly as today.)
+      ;;
+    pass)
+      # At least one PASS; drop any UNAVAILABLE members from the fan-out set so a
+      # quota-walled member does not burn a review run. Rebuild REVIEW_AGENTS_LIST
+      # to the PASSed members only. The dropped members are surfaced with a
+      # `smoke:` breadcrumb (consistent with the INV-58/61/62 drop-reason wording).
+      _smoke_survivors=()
+      _smoke_dropped=""
+      _smoke_drop_reasons=""
+      for _si in "${!REVIEW_AGENTS_LIST[@]}"; do
+        if [[ "${_smoke_states[$_si]}" == "unavailable" ]]; then
+          _smoke_dropped+="${REVIEW_AGENTS_LIST[$_si]} "
+          _sm_reason=$(_smoke_evidence_reason "${_smoke_evidence[$_si]:-}")
+          [[ -n "$_sm_reason" ]] || _sm_reason="unavailable"
+          _smoke_drop_reasons+="${REVIEW_AGENTS_LIST[$_si]}: smoke: ${_sm_reason}; "
+        else
+          _smoke_survivors+=("${REVIEW_AGENTS_LIST[$_si]}")
+        fi
+      done
+      if [[ -n "$_smoke_dropped" ]]; then
+        log "INV-64: dropping smoke-UNAVAILABLE review agent(s) before the fan-out: ${_smoke_dropped%% } — reason(s): ${_smoke_drop_reasons%; }; fanning out: ${_smoke_survivors[*]}"
+        gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
+          --body "Multi-agent review: dropped (unavailable) at the pre-fan-out smoke (INV-64): \`${_smoke_dropped%% }\`. Fanning out the rest: \`${_smoke_survivors[*]}\`. (UNAVAILABLE = quota/capacity, not a config error — the dropped agent does not block the vote.) Drop reason(s): ${_smoke_drop_reasons%; }." 2>/dev/null || true
+        REVIEW_AGENTS_LIST=("${_smoke_survivors[@]}")
+      fi
+      ;;
+  esac
 fi
 
 # Per-agent state captured for the collection step.

@@ -209,11 +209,12 @@ else
   FAIL=$((FAIL + 1))
 fi
 
-# TC-EOG-REG-04: emit_verdict_trailer call count is unchanged (the guard adds no
-# new trailer). INV-46 pinned this at 10; the guard must not change it.
+# TC-EOG-REG-04: emit_verdict_trailer call count (the open-guard adds no new
+# trailer). INV-46 pinned this at 10; INV-64 (#224) added the one Phase-A.5
+# smoke-FAIL abort site → 11. The open-guard itself must not change it.
 _trailer_count=$(grep -cE 'emit_verdict_trailer ' "$WRAPPER")
-assert_eq "TC-EOG-REG-04 emit_verdict_trailer call count unchanged (10)" \
-  "10" "$_trailer_count"
+assert_eq "TC-EOG-REG-04 emit_verdict_trailer call count is 11 (10 + INV-64 smoke abort; open-guard adds none)" \
+  "11" "$_trailer_count"
 
 # ---------------------------------------------------------------------------
 echo ""

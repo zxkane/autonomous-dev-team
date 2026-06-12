@@ -27,6 +27,15 @@ sequenceDiagram
         W-->>D: exit 1
     end
     W->>GH: extract preview URL (if E2E_MODE=browser)
+    opt REVIEW_SMOKE_ENABLED (Phase A.5, INV-64)
+        W->>L: smoke_agent per REVIEW_AGENTS_LIST member (parallel)
+        alt any member FAIL
+            W->>GH: comment 'Review aborted: smoke FAILED' + emit trailer
+            Note over W,GH: stays reviewing; RESULT_PARSED=true; exit 1 (self-heals next tick)
+        else some/all UNAVAILABLE
+            W->>W: drop UNAVAILABLE members (smoke: reason); all → all-unavailable
+        end
+    end
     W->>W: build review prompt (mergeability, drift, checklist, decision)
     W->>L: run_agent
     L->>A: printf '%s' PROMPT | claude --session-id ... --model sonnet -p
@@ -155,6 +164,38 @@ E2E_ACTIVE == false → no lane, no gate (E2E_GATE=inactive); straight to fan-ou
 - **Structured AC-coverage double-check ([INV-49](invariants.md#inv-49-command-mode-e2e-may-feed-the-review-fan-out-a-structured-ac-coverage-artifact--optional-fail-safe), #183).** Command-mode only: when the evidence parser emits the optional `ac-coverage:begin … ac-coverage:end` JSON fence, the lane jq-validates it (fail-safe — malformed → empty, fall back to free-form; never fail-open) and writes it to `E2E_AC_COVERAGE_FILE`. When that per-round sidecar is non-empty, `build_review_prompt` PREFERS the deterministic map over LLM-parsing the free-form markdown table; an empty/absent sidecar yields the exact post-#182 free-form double-check. The artifact is a review aid only — the E2E hard gate is unchanged.
 - **Composition**: `final PASS ≡ (E2E_ACTIVE==false OR gate==pass) AND review-unanimity-pass`. Because a gate fail/block exits before the fan-out, only `gate ∈ {pass, inactive}` ever reaches the review aggregation — the AND is enforced by the short-circuit. The E2E gate runs before the [INV-44](invariants.md#inv-44-mergeable-hard-gate--a-conflicting-pr-can-never-reach-approved) mergeable block.
 - **PR-open guard on the block exits ([INV-54](invariants.md#inv-54-the-pr-still-open-guard-gates-all-pass-chain-exits-not-just-pass) extension, #195).** A `fail`/`block-nonsubstantive` gate re-checks `gh pr view --json state` (via the reused `_pr_open_gate` helper) before writing `−reviewing +pending-dev`; if the PR was merged/closed WHILE the lane ran, it removes `reviewing` only and exits — never re-queues a merged PR's issue to `pending-dev`. The check is wedged after `_classify_e2e_gate` and before the block cascade, so the `pass`/`inactive` fall-through is unaffected. See [§ PR-open guard (INV-54)](#pr-open-guard-inv-54).
+
+## Pre-fan-out agent-smoke gate (Phase A.5, INV-64)
+
+When `REVIEW_SMOKE_ENABLED=true`, the wrapper runs a **pre-fan-out agent-smoke gate** in a dedicated Phase A.5 — AFTER the [INV-46](invariants.md#inv-46-e2e-runs-once-in-a-dedicated-lane-before-the-review-fan-out--gated-not-per-agent) E2E lane (Phase A) and BEFORE the review fan-out (Phase B). It smokes EVERY `REVIEW_AGENTS_LIST` member via [INV-63](invariants.md#inv-63-agent-smoke-is-a-three-state-probe-pass--unavailable--fail-run-through-the-production-run_agent-never-a-parallel-invocation-path)'s `lib-agent-smoke.sh::smoke_agent` and applies three-state semantics. Default OFF — opt in per project; with it off the wrapper is byte-for-byte unchanged. See [INV-64](invariants.md#inv-64-the-review-wrapper-smokes-every-fan-out-member-before-the-fan-out-phase-a5-fail-aborts-the-review-unavailable-drops-the-member-pass-proceeds).
+
+```
+        E2E gate == pass (Phase A) ──┐
+                                     ▼
+   Phase A.5: smoke each REVIEW_AGENTS_LIST member IN PARALLEL
+   (resolved per-agent model [INV-41] + INV-38/INV-42 launcher;
+    collected-PID wait, never bare wait — #167-class hang)
+                                     │
+   ┌─────────────────────┬──────────┴───────────────┬───────────────────────┐
+   │ any member FAIL      │ some/all UNAVAILABLE       │ all PASS              │
+   │ (smoke rc 1)         │ (smoke rc 2)               │ (smoke rc 0)          │
+   ▼                      ▼                            ▼                       │
+ ABORT review:          drop UNAVAILABLE members      fan out all members     │
+ post naming comment    (drop reason `smoke: …`,                              │
+ + SMOKE evidence;      INV-40 unavailable tolerance);                        │
+ emit failed-non-       remaining members fan out;                            │
+ substantive trailer    ALL unavailable → list                               │
+ (cause smoke-config-   UNCHANGED, falls through to                          │
+ error); RESULT_PARSED  the INV-40 all-unavailable                            │
+ =true (crash trap not  terminal state                                       │
+ overriding); stays                                                          │
+ `reviewing`; exit 1                                                         │
+```
+
+- **FAIL = config error, not a PR defect.** A smoke FAIL (wrong model id / expired auth / region drift / a launcher that does not fit the CLI) aborts the whole review: no fan-out, no verdict, the issue stays `reviewing`, and the wrapper exits non-zero after posting a comment naming the failed agent(s) + their `SMOKE …` evidence. It does NOT flip to `pending-dev` (that would send dev chasing a non-existent PR problem) and does NOT shrink the vote (that would disguise the config error as a quota wall). It sets `RESULT_PARSED=true` so the crash EXIT trap does not override the stay-`reviewing` decision, and emits a `failed-non-substantive` trailer (cause `smoke-config-error`) — a heartbeat-consistent exit so [INV-24](invariants.md#inv-24-review-wrapper-dead-detection-requires-both-pid_alive-miss-and-no-near-success-pr-signal) does not false-DEAD mid-abort. The dispatcher re-runs the review on the next tick → self-heals once the operator fixes the config.
+- **UNAVAILABLE = quota/capacity, fine to drop.** An UNAVAILABLE member is removed from the fan-out set with a `smoke: <reason>` breadcrumb (the same INV-40 `unavailable` tolerance); the rest fan out and vote. ALL members UNAVAILABLE → the list is left UNCHANGED and falls through to the existing INV-40 all-unavailable terminal state (no empty fan-out spawned). A single-agent project whose one member is UNAVAILABLE reaches this same state; a single-agent FAIL aborts as above.
+- **Same launch path as the fan-out.** The smoke resolves each member's model (`_resolve_review_agent_model`, INV-41) and applies the INV-38/INV-42 launcher treatment — identical to the fan-out subshell — so a smoke PASS certifies the same `(CLI, model, launcher)` tuple the fan-out runs.
+- **Strictly before the fan-out clock.** Phase A.5 posts no verdict comment, so it counts toward neither the INV-40 verdict-attribution window nor the verdict-poll window. Cost when enabled: N small LLM calls + up to ~`REVIEW_SMOKE_TIMEOUT_SECONDS` wall-clock (parallel, slowest member).
 
 ## Per-side review timeout (INV-48)
 
