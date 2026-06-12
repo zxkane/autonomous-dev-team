@@ -177,6 +177,33 @@ assert_grep "TC-REVIEW-SMOKE-047a pass branch rebuilds REVIEW_AGENTS_LIST to sur
   'REVIEW_AGENTS_LIST=\("\$\{_smoke_survivors\[@\]\}"\)' "$WRAPPER"
 assert_grep "TC-REVIEW-SMOKE-047b drop reason carries the smoke: prefix" \
   'smoke: ' "$WRAPPER"
+# TC-REVIEW-SMOKE-047c (#228 INV-67): smoke-dropped members are emitted to the
+# metrics stream BEFORE REVIEW_AGENTS_LIST shrinks — otherwise the post-fan-out
+# metrics loop (iterating the surviving AGENT_NAMES) would never record their
+# quota/auth drop. Assert the pass-branch emits both review_agent_run and
+# agent_drop with phase=smoke, guarded observe-only.
+# The emits are `\`-continued, so match the distinctive tokens (which land on the
+# continuation line) rather than the whole statement on one line.
+assert_grep "TC-REVIEW-SMOKE-047c smoke-drop emits review_agent_run" \
+  'metrics_emit review_agent_run side=review "agent_name=\$\{REVIEW_AGENTS_LIST\[\$_si\]\}"' "$WRAPPER"
+assert_grep "TC-REVIEW-SMOKE-047c2 smoke-drop run carries state=unavailable phase=smoke" \
+  'state=unavailable phase=smoke' "$WRAPPER"
+assert_grep "TC-REVIEW-SMOKE-047d smoke-drop emits agent_drop (smoke)" \
+  'metrics_emit agent_drop side=review "agent_name=\$\{REVIEW_AGENTS_LIST\[\$_si\]\}"' "$WRAPPER"
+assert_grep "TC-REVIEW-SMOKE-047d2 smoke-drop agent_drop carries taxonomy reason + phase=smoke" \
+  'reason=\$\{_sm_class\}" phase=smoke' "$WRAPPER"
+# The smoke-drop metrics emit must precede the list-shrink so it sees the dropped
+# members (line order: the for-loop emit, then REVIEW_AGENTS_LIST=survivors). The
+# `state=unavailable phase=smoke` token is unique to the smoke-drop run emit.
+# Fixed-string greps (`-F`) so the lookup is grep-implementation-agnostic
+# (ugrep chokes on the bracket/brace regex the assert_grep ERE path tolerates).
+_emit_ln=$(grep -nF 'state=unavailable phase=smoke' "$WRAPPER" | head -1 | cut -d: -f1)
+_shrink_ln=$(grep -nF 'REVIEW_AGENTS_LIST=("${_smoke_survivors[@]}")' "$WRAPPER" | head -1 | cut -d: -f1)
+if [[ -n "$_emit_ln" && -n "$_shrink_ln" && "$_emit_ln" -lt "$_shrink_ln" ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-REVIEW-SMOKE-047e smoke-drop metrics emit precedes the list-shrink"; PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-REVIEW-SMOKE-047e smoke-drop emit (${_emit_ln}) must precede list-shrink (${_shrink_ln})"; FAIL=$((FAIL + 1))
+fi
 
 # TC-REVIEW-SMOKE-048: all-unavailable falls through with the list UNCHANGED (no
 # empty fan-out) so the existing all-unavailable fallback fires.

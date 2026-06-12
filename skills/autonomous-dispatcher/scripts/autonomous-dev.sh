@@ -135,6 +135,25 @@ AGENT_RAN=false
 # [INV-67] Metrics: wrapper start. Best-effort, observe-only — never affects
 # wrapper behavior. METRICS_START_TS feeds the wrapper_end duration in cleanup().
 METRICS_START_TS=$(date +%s 2>/dev/null || echo 0)
+# Byte size of the shared per-issue agent log at START. dispatch-local.sh appends
+# every dev/resume attempt for the SAME issue to one /tmp/agent-…-issue-N.log, so
+# parsing the whole file would re-read a PRIOR run's token line and emit a
+# duplicate token_usage (inflating cost-per-merged-PR; #228 review finding 2).
+# _emit_dev_end passes this offset to metrics_parse_tokens so only THIS run's
+# appended bytes are scanned. Missing/empty file → 0 (scan from the start, which
+# is correct for a first run). Best-effort; never affects behavior.
+#
+# The `-f` guard is load-bearing under `set -euo pipefail`: a bare
+# `$(wc -c < "$LOG_FILE")` on a MISSING file fails the redirection, pipefail
+# propagates the non-zero, and `set -e` would ABORT the wrapper before the agent
+# runs. In production dispatch-local.sh pre-creates the log, but a direct
+# `bash autonomous-dev.sh` invocation has no such file — so guard here rather
+# than depend on the caller (#228 round-6 review).
+METRICS_LOG_OFFSET=0
+if [[ -f "$LOG_FILE" ]]; then
+  METRICS_LOG_OFFSET=$(wc -c < "$LOG_FILE" 2>/dev/null | tr -d '[:space:]') || METRICS_LOG_OFFSET=0
+  [[ "$METRICS_LOG_OFFSET" =~ ^[0-9]+$ ]] || METRICS_LOG_OFFSET=0
+fi
 if declare -F metrics_emit >/dev/null 2>&1; then
   metrics_emit wrapper_start side=dev "mode=${MODE}" "issue=${ISSUE_NUMBER}" "agent=${AGENT_CMD:-claude}" || true
 fi
@@ -427,8 +446,11 @@ cleanup() {
     # Token usage from the agent log, if the CLI emitted any (claude JSON /
     # codex line). Splice the parsed `input_tokens=.. output_tokens=..
     # total_tokens=..` words in (the schema key names the aggregator reads).
+    # Pass METRICS_LOG_OFFSET so ONLY this run's appended bytes are scanned — the
+    # log is shared across every dev/resume attempt for the issue, so scanning the
+    # whole file would re-read a prior run's token line (#228 review finding 2).
     local _tok
-    _tok="$(metrics_parse_tokens "${LOG_FILE:-}" 2>/dev/null)" || true
+    _tok="$(metrics_parse_tokens "${LOG_FILE:-}" "${METRICS_LOG_OFFSET:-0}" 2>/dev/null)" || true
     if [[ -n "$_tok" ]]; then
       # shellcheck disable=SC2086  # intentional word-split of the k=v fields
       metrics_emit token_usage side=dev "issue=${ISSUE_NUMBER:-}" "agent=${AGENT_CMD:-claude}" $_tok || true

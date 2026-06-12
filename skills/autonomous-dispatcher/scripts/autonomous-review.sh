@@ -1332,9 +1332,13 @@ if [[ "${REVIEW_SMOKE_ENABLED:-false}" == "true" ]]; then
   done
   rm -rf "$_SMOKE_DIR" 2>/dev/null || true
 
-  # TODO(#228): when lib-metrics lands, emit one `smoke` event per member here
-  # with its three-state outcome (agent, state, reason). Until then the per-member
-  # state is only in the wrapper log line above.
+  # [INV-67] Metrics for smoke outcomes: members that smoke UNAVAILABLE and are
+  # then DROPPED in the `pass` gate branch below are recorded there (a
+  # review_agent_run + agent_drop, before REVIEW_AGENTS_LIST shrinks). Members that
+  # survive the smoke, or the all-unavailable branch (which leaves the list
+  # unchanged and falls through to the fan-out), are recorded by the post-fan-out
+  # per-member metrics loop. So every member reaches the metrics stream exactly
+  # once regardless of smoke outcome — no separate emit is needed here.
 
   _SMOKE_GATE=$(_classify_smoke_gate "${_smoke_states[@]}")
   log "INV-64: smoke gate over [${_smoke_states[*]}] → ${_SMOKE_GATE}"
@@ -1426,6 +1430,24 @@ The review was NOT run and the PR was NOT evaluated. The issue stays \`reviewing
         log "INV-64: dropping smoke-UNAVAILABLE review agent(s) before the fan-out: ${_smoke_dropped%% } — reason(s): ${_smoke_drop_reasons%; }; fanning out: ${_smoke_survivors[*]}"
         gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
           --body "Multi-agent review: dropped (unavailable) at the pre-fan-out smoke (INV-64): \`${_smoke_dropped%% }\`. Fanning out the rest: \`${_smoke_survivors[*]}\`. (UNAVAILABLE = quota/capacity, not a config error — the dropped agent does not block the vote.) Drop reason(s): ${_smoke_drop_reasons%; }." 2>/dev/null || true
+        # [INV-67] Metrics: a smoke-dropped member is removed from REVIEW_AGENTS_LIST
+        # BELOW, so the post-fan-out review_agent_run/agent_drop loop (which iterates
+        # AGENT_NAMES = the SURVIVING set) never records it — its quota/auth drop
+        # would be invisible to the quota-failure rate + incident counts (#228 review
+        # finding 1). Emit the per-member run + drop HERE, before the list shrinks,
+        # mapping the smoke reason token onto the failure-class taxonomy. Best-effort,
+        # observe-only — guarded on declare -F, every call `|| true`.
+        if declare -F metrics_emit >/dev/null 2>&1; then
+          for _si in "${!REVIEW_AGENTS_LIST[@]}"; do
+            [[ "${_smoke_states[$_si]}" == "unavailable" ]] || continue
+            _sm_tok=$(_smoke_evidence_reason "${_smoke_evidence[$_si]:-}")
+            _sm_class=$(metrics_map_drop_reason "unavailable" "$_sm_tok")
+            metrics_emit review_agent_run side=review "agent_name=${REVIEW_AGENTS_LIST[$_si]}" \
+              state=unavailable phase=smoke "issue=${ISSUE_NUMBER:-}" "pr=${PR_NUMBER:-}" || true
+            metrics_emit agent_drop side=review "agent_name=${REVIEW_AGENTS_LIST[$_si]}" \
+              "reason=${_sm_class}" phase=smoke "issue=${ISSUE_NUMBER:-}" "pr=${PR_NUMBER:-}" || true
+          done
+        fi
         REVIEW_AGENTS_LIST=("${_smoke_survivors[@]}")
       fi
       ;;

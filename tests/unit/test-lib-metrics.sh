@@ -212,6 +212,51 @@ assert_eq "TC-METRICS-071 emitted token_usage has numeric total_tokens" "1801" "
 _rep="$(bash "$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/metrics-report.sh" --file "$INTG/metrics.jsonl" 2>&1)"
 assert_contains "TC-METRICS-071 report costs the merged issue (not n/a)" "with token data: 1" "$_rep"
 
+# TC-METRICS-072: per-run offset parse (#228 finding 2). The dev log is shared
+# across every dev/resume attempt for an issue, so parsing the whole file would
+# re-read a prior run's token line and emit a DUPLICATE token_usage. The wrapper
+# captures the log's byte-size at start and passes it as the offset so only the
+# CURRENT run's appended bytes are scanned.
+OFFLOG="$(mktemp)"
+printf 'run1 noise\n{"type":"result","usage":{"input_tokens":100,"output_tokens":50}}\n' > "$OFFLOG"
+_off1="$(wc -c < "$OFFLOG" | tr -d '[:space:]')"
+assert_eq "TC-METRICS-072 run1 whole-file parse" "input_tokens=100 output_tokens=50 total_tokens=150" "$(metrics_parse_tokens "$OFFLOG")"
+# Run 2 appends narration with NO token line.
+printf 'run2 narration only, no usage block\n' >> "$OFFLOG"
+assert_eq "TC-METRICS-072 whole-file re-reads run1 (the bug)" "input_tokens=100 output_tokens=50 total_tokens=150" "$(metrics_parse_tokens "$OFFLOG")"
+assert_eq "TC-METRICS-072 offset from run1-end → run2 has no tokens → empty (no dup)" "" "$(metrics_parse_tokens "$OFFLOG" "$_off1")"
+# Run 3 appends its own usage; offset from run2-end isolates it.
+_off2="$(wc -c < "$OFFLOG" | tr -d '[:space:]')"
+printf '{"type":"result","usage":{"input_tokens":7,"output_tokens":3}}\n' >> "$OFFLOG"
+assert_eq "TC-METRICS-072 offset isolates run3 only" "input_tokens=7 output_tokens=3 total_tokens=10" "$(metrics_parse_tokens "$OFFLOG" "$_off2")"
+# Offset 0 == whole file → the LAST usage line wins (run3, since run3 was just
+# appended above), proving offset 0 degrades to whole-file scan.
+assert_eq "TC-METRICS-072 offset 0 == whole file (last usage = run3)" "input_tokens=7 output_tokens=3 total_tokens=10" "$(metrics_parse_tokens "$OFFLOG" 0)"
+# Past-EOF offset → nothing to scan → empty, rc 0.
+assert_eq "TC-METRICS-072 past-EOF offset → empty, rc 0" "" "$(metrics_parse_tokens "$OFFLOG" 999999)"
+
+# TC-METRICS-074 (#228 round-6 review): the dev wrapper's METRICS_LOG_OFFSET
+# capture must NOT abort under `set -euo pipefail` when the log file is missing
+# (direct invocation has no dispatch-local pre-create). Assert the guarded
+# construct survives a missing file and yields 0. The exact construct lives in
+# autonomous-dev.sh; replicate it here so a regression on the wrapper line trips.
+_missing_off="$(bash -c '
+    set -euo pipefail
+    LOG_FILE="/nonexistent/issue-000.log"
+    METRICS_LOG_OFFSET=0
+    if [[ -f "$LOG_FILE" ]]; then
+      METRICS_LOG_OFFSET=$(wc -c < "$LOG_FILE" 2>/dev/null | tr -d "[:space:]") || METRICS_LOG_OFFSET=0
+      [[ "$METRICS_LOG_OFFSET" =~ ^[0-9]+$ ]] || METRICS_LOG_OFFSET=0
+    fi
+    echo "SURVIVED:${METRICS_LOG_OFFSET}"
+  ' 2>/dev/null)"
+assert_eq "TC-METRICS-074 offset capture survives missing file under set -e" "SURVIVED:0" "$_missing_off"
+# The wrapper line itself uses the `-f` guard (not the bare unguarded form that
+# aborts) — source-assert it so the guard can't silently regress.
+assert_contains "TC-METRICS-074 wrapper guards the offset capture with [[ -f ]]" \
+  'if [[ -f "$LOG_FILE" ]]; then' \
+  "$(grep -A1 'METRICS_LOG_OFFSET=0' "$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/autonomous-dev.sh" | head -2 | tr '\n' ' ')"
+
 # ---------------------------------------------------------------------------
 # metrics_map_drop_reason
 # ---------------------------------------------------------------------------
@@ -222,6 +267,20 @@ assert_eq "config → config"      "agent-unavailable:config"    "$(metrics_map_
 assert_eq "stream → transient"   "agent-unavailable:transient" "$(metrics_map_drop_reason unavailable stream-error)"
 assert_eq "empty token → transient" "agent-unavailable:transient" "$(metrics_map_drop_reason unavailable '')"
 assert_eq "timed-out → transient"   "agent-unavailable:transient" "$(metrics_map_drop_reason timed-out quota-exhausted)"
+# TC-METRICS-073 (#228 round-6 review): PREFIX-match the reason, not exact — the
+# reason arrives as a suffixed token (INV-58 reset-window) OR a rendered phrase
+# (from _smoke_evidence_reason / *_drop_reason_phrase). Exact-match dropped these
+# to `transient`, deflating the quota/auth rate. All forms LEAD with the token.
+assert_eq "TC-METRICS-073 quota reset-window token → quota" \
+  "agent-unavailable:quota" "$(metrics_map_drop_reason unavailable 'quota-exhausted:Resets in 33h48m45s')"
+assert_eq "TC-METRICS-073 quota rendered phrase → quota" \
+  "agent-unavailable:quota" "$(metrics_map_drop_reason unavailable 'quota-exhausted (Antigravity 429: daily quota reached; resets in 33h48m45s)')"
+assert_eq "TC-METRICS-073 auth rendered phrase → auth" \
+  "agent-unavailable:auth" "$(metrics_map_drop_reason unavailable 'auth-failed (browser/device-flow login required)')"
+assert_eq "TC-METRICS-073 config:flag token → config" \
+  "agent-unavailable:config" "$(metrics_map_drop_reason unavailable 'config-error:--bad-flag')"
+assert_eq "TC-METRICS-073 stream phrase → transient" \
+  "agent-unavailable:transient" "$(metrics_map_drop_reason unavailable 'stream-error (upstream 5xx)')"
 
 # ---------------------------------------------------------------------------
 # metrics_prune

@@ -161,23 +161,31 @@ metrics_emit() {
 # onto the INV-67 failure-class taxonomy. Pure function (echoes the class).
 #
 #   verdict state `timed-out`               → agent-unavailable:transient
-#   verdict state `unavailable` + token:
-#     quota-exhausted                        → agent-unavailable:quota
-#     auth-failed                            → agent-unavailable:auth
-#     config-error                           → agent-unavailable:config
+#   verdict state `unavailable` + reason:
+#     quota-exhausted*                       → agent-unavailable:quota
+#     auth-failed*                           → agent-unavailable:auth
+#     config-error*                          → agent-unavailable:config
 #     stream-error / (empty) / anything else → agent-unavailable:transient
 #
-# Always returns 0.
+# PREFIX-matched, NOT exact: the reason can arrive as the bare token
+# (`quota-exhausted`), a suffixed token (`quota-exhausted:Resets in 2h`, the
+# INV-58 reset-window form), OR a rendered phrase (`quota-exhausted (Antigravity
+# 429: …)` from _smoke_evidence_reason / the *_drop_reason_phrase helpers). All
+# of these LEAD with the canonical token, so anchoring the match to the start
+# (`quota-exhausted*`) classifies every form correctly — an exact `case` dropped
+# the suffixed/phrase forms to `transient`, deflating the quota/auth rate
+# (#228 round-6 review: smoke-drop phrase + the latent post-fan-out reset-window
+# token). Always returns 0.
 metrics_map_drop_reason() {
   local state="${1:-}" token="${2:-}"
   case "$state" in
     timed-out) printf 'agent-unavailable:transient\n'; return 0 ;;
   esac
   case "$token" in
-    quota-exhausted) printf 'agent-unavailable:quota\n' ;;
-    auth-failed)     printf 'agent-unavailable:auth\n' ;;
-    config-error)    printf 'agent-unavailable:config\n' ;;
-    *)               printf 'agent-unavailable:transient\n' ;;
+    quota-exhausted*) printf 'agent-unavailable:quota\n' ;;
+    auth-failed*)     printf 'agent-unavailable:auth\n' ;;
+    config-error*)    printf 'agent-unavailable:config\n' ;;
+    *)                printf 'agent-unavailable:transient\n' ;;
   esac
   return 0
 }
@@ -196,10 +204,32 @@ metrics_map_drop_reason() {
 # aggregator reads (`*_tokens`) or the cost-per-merged-PR join silently drops
 # every run (#228 review finding 1). Echoes nothing when the log has no
 # recognizable usage. ALWAYS returns 0 (observe-only).
+#
+# Optional arg 2 <byte-offset>: scan ONLY the bytes appended after this offset.
+# The dev wrapper shares one append-only log across every dev/resume attempt for
+# an issue (dispatch-local.sh), so without an offset a later run with no token
+# line would re-read the PRIOR run's record and emit a duplicate token_usage
+# (#228 review finding 2). The wrapper captures the log's byte-size at start and
+# passes it here so only the CURRENT run's appended output is parsed. Omitted /
+# 0 / past-EOF → scan the whole file (correct for a first run / fresh log).
 metrics_parse_tokens() {
   local log="${1:-}"
+  local offset="${2:-0}"
   [[ -n "$log" && -r "$log" ]] || return 0
   command -v jq >/dev/null 2>&1 || return 0
+  [[ "$offset" =~ ^[0-9]+$ ]] || offset=0
+
+  # Slice the post-offset tail into a temp when an offset is given; otherwise scan
+  # the file directly. `tail -c +N` is 1-indexed, so +$((offset+1)) starts just
+  # after the offset-th byte. A best-effort temp; on any failure fall back to the
+  # whole file (never worse than the pre-offset behavior).
+  local scan="$log" _tmp=""
+  if [[ "$offset" -gt 0 ]]; then
+    _tmp="$(mktemp 2>/dev/null)" || _tmp=""
+    if [[ -n "$_tmp" ]] && tail -c "+$((offset + 1))" "$log" > "$_tmp" 2>/dev/null; then
+      scan="$_tmp"
+    fi
+  fi
 
   local input="" output="" total=""
 
@@ -210,7 +240,7 @@ metrics_parse_tokens() {
         (try fromjson catch null) as $o
         | select($o != null and ($o.usage != null))
         | "\($o.usage.input_tokens // "")\t\($o.usage.output_tokens // "")"
-      ' "$log" 2>/dev/null | tail -1)"
+      ' "$scan" 2>/dev/null | tail -1)"
   if [[ -n "$usage" ]]; then
     input="${usage%%$'\t'*}"
     output="${usage##*$'\t'}"
@@ -223,9 +253,10 @@ metrics_parse_tokens() {
   # claude-style total yet.
   if [[ -z "$total" ]]; then
     local cx
-    cx="$(grep -ioE 'tokens used:[[:space:]]*[0-9]+' "$log" 2>/dev/null | tail -1 | grep -oE '[0-9]+$')"
+    cx="$(grep -ioE 'tokens used:[[:space:]]*[0-9]+' "$scan" 2>/dev/null | tail -1 | grep -oE '[0-9]+$')"
     [[ "$cx" =~ ^[0-9]+$ ]] && total="$cx"
   fi
+  [[ -n "$_tmp" ]] && rm -f "$_tmp" 2>/dev/null
 
   # Key names MUST be the schema's `*_tokens` (NOT bare input/output/total) so the
   # words splice straight into metrics_emit and the aggregator's `.total_tokens`

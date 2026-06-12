@@ -589,7 +589,14 @@ quota-failure rate — emitted for EVERY member so multi-agent fan-out counts
 non-default CLIs that `wrapper_end side=review` would miss); one `agent_drop` per
 dropped/timed-out fan-out member, carrying the failure-class taxonomy reason
 (`metrics_map_drop_reason` maps each CLI's native drop token — agy quota/auth,
-codex config/stream, kiro auth — onto `agent-unavailable:*`); `merge`
+codex config/stream, kiro auth — onto `agent-unavailable:*`). **Members dropped at
+the pre-fan-out smoke gate (INV-64, `REVIEW_SMOKE_ENABLED=true`) are emitted with
+`phase=smoke` in the `pass` branch BEFORE `REVIEW_AGENTS_LIST` shrinks** — the
+post-fan-out loop iterates only the surviving set, so without this the smoke
+drop's quota/capacity reason would never reach metrics (a smoke that hits an
+auth/config error is a FAIL that aborts the whole gate, not a per-member drop, so
+only UNAVAILABLE-class smoke outcomes flow through `phase=smoke`). Each member
+therefore reaches the metrics stream exactly once. Then `merge`
 (success/failure, the TTHW merged endpoint + the `infra` failure class); and
 `wrapper_end` (in `cleanup()`, fired once for both the normal and crash paths). A
 metrics failure can never change the verdict, the merge decision, or the trap's
