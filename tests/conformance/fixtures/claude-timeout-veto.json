@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "adapter": "claude",
+  "mode": "review",
+  "input": {
+    "promptBytes": 3500,
+    "model": "sonnet",
+    "env": {}
+  },
+  "command": {
+    "argv": [
+      "claude",
+      "--session-id",
+      "<uuid>",
+      "-p",
+      "-"
+    ],
+    "stdinSha256": "8d5f160c37601126891ca948763644da51003a074e073ed69458744398235155",
+    "rc": 124,
+    "stdout": "",
+    "stderr": ""
+  },
+  "expect": {
+    "providerClass": "none",
+    "verdictState": "absent",
+    "vote": "timeout-veto",
+    "retryable": false
+  }
+}

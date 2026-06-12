@@ -1,0 +1,6 @@
+I Antigravity 2.0 CLI (print mode)
+I Print mode: conversation=99999999-8888-7777-6666-555555555555
+I Model ID Gemini 3.5 Flash (High) not in local config, defaulting to CCPA
+I Starting review turn
+E Failed to get OAuth token: oauth: cannot fetch token: 401 Unauthorized. You are not logged into Antigravity.
+I print mode terminated

@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "adapter": "codex",
+  "mode": "review",
+  "input": {
+    "promptBytes": 4096,
+    "model": "gpt-5-codex",
+    "env": {}
+  },
+  "command": {
+    "argv": [
+      "codex",
+      "review",
+      "<prompt>",
+      "-s",
+      "danger-full-access"
+    ],
+    "stdinSha256": "8d5f160c37601126891ca948763644da51003a074e073ed69458744398235155",
+    "rc": 2,
+    "stdout": "",
+    "stderr": "error: unexpected argument '## Step 0: Merge Conflict Resolution' found\n\nUsage: codex review [OPTIONS] [PROMPT]\n\nFor more information, try '--help'."
+  },
+  "expect": {
+    "providerClass": "config",
+    "verdictState": "absent",
+    "vote": "drop",
+    "retryable": false
+  }
+}

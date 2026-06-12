@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "adapter": "kiro",
+  "mode": "review",
+  "input": {
+    "promptBytes": 3500,
+    "model": "claude-sonnet-4.6",
+    "env": {}
+  },
+  "command": {
+    "argv": [
+      "kiro-cli",
+      "chat",
+      "--trust-all-tools",
+      "--no-interactive"
+    ],
+    "stdinSha256": "8d5f160c37601126891ca948763644da51003a074e073ed69458744398235155",
+    "rc": 1,
+    "stdout": "",
+    "stderr": "Loading Kiro CLI...\nStarting review session...\nAuthenticating...\n▰▱▱ Opening browser... | Press (^) + C to cancel\nFailed to open browser for authentication.\nPlease try again with: kiro-cli login --use-device-flow\nerror: Failed to open URL"
+  },
+  "expect": {
+    "providerClass": "auth",
+    "verdictState": "absent",
+    "vote": "drop",
+    "retryable": false
+  }
+}

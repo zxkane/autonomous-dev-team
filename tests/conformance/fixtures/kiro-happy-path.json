@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "adapter": "kiro",
+  "mode": "review",
+  "input": {
+    "promptBytes": 3500,
+    "model": "claude-sonnet-4.6",
+    "env": {}
+  },
+  "command": {
+    "argv": [
+      "kiro-cli",
+      "chat",
+      "--trust-all-tools",
+      "--no-interactive"
+    ],
+    "stdinSha256": "8d5f160c37601126891ca948763644da51003a074e073ed69458744398235155",
+    "rc": 0,
+    "stdout": "<NONCE>",
+    "stderr": ""
+  },
+  "expect": {
+    "providerClass": "none",
+    "verdictState": "valid",
+    "vote": "pass",
+    "retryable": false
+  }
+}

@@ -2909,6 +2909,93 @@ Sub-rules:
 - [INV-67](#inv-67-a-bare-smoke-timeout-rc-124137-with-no-authconfig-signal-classifies-unavailable-not-fail) — the drop-don't-veto smoke tolerance the `malformed-output` → UNAVAILABLE mapping (sub-rule 6) extends.
 - [`review-agent-flow.md` § codex malformed-output (prompt-echo) drop reason (INV-73)](review-agent-flow.md#codex-malformed-output-prompt-echo-drop-reason-inv-73) — runtime walkthrough.
 
+## INV-73: adapter conformance is regression-pinned by a hermetic fixture-manifest runner
+
+> **Note**: landed as **INV-73**, not INV-68 — several stability-redesign PRs
+> merged ahead of this one against the same `main` (INV-67 smoke-timeout #246,
+> INV-68 log-retention #245, INV-69 post-failed #247, INV-70 metrics #228,
+> INV-71 run-event-channel #237, INV-72 operator error-envelope #231/#242). The
+> number was assigned at rebase to avoid a duplicate-heading / broken-anchor
+> collision (the original PR draft authored it as INV-68, then INV-72, before
+> those siblings landed).
+
+**Rule**: the per-CLI classification contract ([INV-66](#inv-66-adapter-conformance-is-spec-defined)'s
+four-axis `AdapterResult`) is **regression-pinned** by a standalone, **hermetic**
+conformance runner — `tests/conformance/run-conformance.sh` — that replays
+per-adapter × per-mode fixture manifests
+(`docs/pipeline/schemas/fixture-manifest.schema.json`, INV-66) against the
+**CURRENT** classification logic and asserts the four `expect{}` axes
+(`providerClass`, `verdictState`, `vote`, `retryable`). The runner:
+
+1. **Is hermetic** — no network, no credentials, no real agent CLIs. Each fixture
+   is classified with `PATH` reset to a stub-only sandbox (plus the coreutils
+   dir); the real `claude`/`codex`/`kiro`/`agy` are **never** on it. A fixture
+   whose stub binary is missing, or whose `<adapter>` resolves to anything other
+   than the stub, fails **loud** (`FAIL stub-missing` / `hermeticity-breach`) —
+   it MUST NOT fall through to a real CLI. This is the always-on tier; the
+   live-CLI smoke ([INV-63](#inv-63-agent-smoke-is-a-three-state-probe-pass--unavailable--fail-run-through-the-production-run_agent-never-a-parallel-invocation-path) / `tests/e2e/run-agent-smoke.sh`) is the separate
+   self-hosted tier.
+2. **Drives TODAY's monolithic classifier** — `lib-agent-smoke.sh::_smoke_classify`
+   plus the per-CLI `_classify_<cli>_drop_reason` scrapers (INV-58/61/62), NOT a
+   re-implemented copy. This is **intentional**: pin current behavior so the later
+   adapter extraction (a single `invoke() → AdapterResult` entry point) MUST keep
+   conformance green BEFORE and AFTER the refactor (green → refactor → still
+   green). When that entry point lands, the runner re-points at it with **zero
+   fixture changes** — the fixtures are the contract.
+3. **Materializes** each fixture: stages `files{}` (logs/sidecars — e.g. the agy
+   `--log-file` quota log) and installs a stub CLI emitting the recorded
+   `command.{rc,stdout,stderr}` and recording the bytes it received on stdin (the
+   [INV-34](#inv-34-agent-prompt-is-fed-via-stdin-never-as-a-single-argv-element)
+   prompt channel — the prompt MUST reach the stub or the fixture fails loud).
+4. **Validates** each manifest against the schema (loud reject on malformed —
+   python jsonschema when available, else a jq structural fallback, so it passes
+   in plain CI either way).
+5. Emits one line per fixture `CONFORMANCE <adapter>/<mode>/<name> PASS|FAIL
+   <axis-diff>` and exits non-zero on ANY fail (incl. a malformed manifest or an
+   unmaterializable stub — a fixture that cannot run is a FAIL, never a silent
+   skip; a filter matching zero fixtures is also loud).
+
+The promoted fixture set carries ≥2 manifests per currently-fan-out-capable CLI
+(claude, codex, kiro, agy) and pins the two **load-bearing rc mappings**: rc
+124/137 + no verdict ⇒ `vote = timeout-veto` (deciding FAIL, INV-48), and rc 0 +
+no verdict ⇒ `vote = drop` (`unavailable`, INV-40).
+
+**Why**: per-CLI quirk handling is the largest historical bug factory in this
+repo (~14 issues — every CLI lies differently at the exit-code level: `agy` rc-0
+silent quota, `kiro` headless-auth exit-0, `codex` rc-2 clap vs transient
+stream-error). Its only tests were scattered per-bug unit tests. A
+manifest-driven conformance suite makes each CLI's contract explicit and
+regression-pinned, gives new-CLI admission an objective bar (author a manifest,
+run the suite), and is the safety net under the later adapter extraction — that
+refactor cannot land unless conformance stays green. (#230.)
+
+**Producer**: this PR (#230) authors the runner + the promoted fixtures. Every
+later adapter PR is a producer of *conformant behavior*; this invariant binds it
+to keep the suite green. A new-CLI PR is the producer of *its* manifests.
+**Consumer**: the runner consumes the INV-66 `fixture-manifest.schema.json`; the
+later adapter extraction (the `invoke()` entry point) is the consumer that the
+green-before-and-after gate protects.
+**Status**: **ENFORCED** — the runner is an always-on CI step
+(`.github/workflows/ci.yml` → `unit-tests`), credential-free, runs on any fork.
+
+**Test**:
+- `tests/conformance/run-conformance.sh` — the runner itself; the promoted
+  fixture set passing IS the E2E (CI job green = pass).
+- `tests/unit/test-conformance-runner.sh` — TC-CONFORMANCE-001..053: the pure
+  projection/diff/field helpers (`lib-conformance.sh`), runner happy path,
+  `--adapter`/`--mode` filtering, expect-mismatch FAIL with axis diff,
+  malformed-manifest loud reject, hermeticity (PATH isolation, stdin-fed
+  contract, stub-missing/breach guards), the ≥2-per-CLI count, the two
+  load-bearing rc mappings, and the CI/cross-link wiring.
+- `docs/test-cases/conformance-runner.md` — TC-CONFORMANCE-NNN enumeration.
+
+**Cross-references**:
+- [`adapter-spec.md` § 8](adapter-spec.md#8-the-conformance-fixture-manifest) — the fixture-manifest the runner consumes.
+- [INV-66](#inv-66-adapter-conformance-is-spec-defined) — the spec + the four-axis `AdapterResult` this runner pins.
+- [INV-63](#inv-63-agent-smoke-is-a-three-state-probe-pass--unavailable--fail-run-through-the-production-run_agent-never-a-parallel-invocation-path) — the `_smoke_classify` classifier the runner drives; the live-CLI smoke is the separate self-hosted tier.
+- [INV-40](#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback) / [INV-48](#inv-48-per-side-review-wall-clock-timeout-agent_review_timeout-1h-default-with-browser-e2e-exclusion-and-timeout-veto) — the `drop` / `timeout-veto` vote mappings the load-bearing fixtures pin.
+- [INV-58](#inv-58-agy-quotaauth-unavailable-drops-surface-a-distinct-reason-fan-out--reviewed-head-model-labels-are-per-agent) / [INV-61](#inv-61-kiro-authlogin-failure-unavailable-drops-surface-a-distinct-reason-not-a-bare-opaque-unavailable) / [INV-62](#inv-62-the-codex-review-lane-runs-the-codex-review-subcommand-auto-scoped-prompt-carried-gate-with-a-stdout-verdict-fallback) — the per-CLI scrapers the fixtures exercise.
+
 ## Adding a new invariant
 
 When fixing a pipeline bug, after locating the bug on the state machine + flow docs:

@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "adapter": "codex",
+  "mode": "review",
+  "input": {
+    "promptBytes": 4096,
+    "model": "gpt-5-codex",
+    "env": {}
+  },
+  "command": {
+    "argv": [
+      "codex",
+      "review",
+      "<prompt>"
+    ],
+    "stdinSha256": "8d5f160c37601126891ca948763644da51003a074e073ed69458744398235155",
+    "rc": 0,
+    "stdout": "<NONCE>",
+    "stderr": ""
+  },
+  "expect": {
+    "providerClass": "none",
+    "verdictState": "valid",
+    "vote": "pass",
+    "retryable": false
+  }
+}
