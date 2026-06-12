@@ -101,6 +101,18 @@ assert_eq "TC-METRICS-009 override dir used" "$WORK" "$(metrics_dir)"
 unset AUTONOMOUS_METRICS_DIR
 XS="$(mktemp -d)"
 assert_eq "TC-METRICS-010 XDG_STATE_HOME path" "$XS/autonomous-testproj" "$(XDG_STATE_HOME="$XS" metrics_dir)"
+
+# TC-METRICS-011: durable fallback (#228 finding 2). With XDG_STATE_HOME UNSET
+# but XDG_RUNTIME_DIR SET, metrics MUST resolve to the DURABLE
+# $HOME/.local/state/autonomous-<project> — NOT the volatile XDG_RUNTIME_DIR
+# (where pid_dir_for_project would have put it, losing retention on reboot).
+FAKE_HOME="$(mktemp -d)"
+FAKE_RUNTIME="$(mktemp -d)"
+_md="$(env -u AUTONOMOUS_METRICS_DIR -u XDG_STATE_HOME HOME="$FAKE_HOME" XDG_RUNTIME_DIR="$FAKE_RUNTIME" PROJECT_ID=testproj \
+        bash -c 'source "'"$LIB"'"; metrics_dir')"
+assert_eq "TC-METRICS-011 durable fallback uses HOME/.local/state" "$FAKE_HOME/.local/state/autonomous-testproj" "$_md"
+assert_eq "TC-METRICS-011 fallback does NOT use volatile XDG_RUNTIME_DIR" "" "$(printf '%s' "$_md" | grep -F "$FAKE_RUNTIME" || true)"
+
 export AUTONOMOUS_METRICS_DIR="$WORK"
 
 # TC-METRICS-008: PROJECT_ID unset → metrics_emit is a no-op, returns 0.
@@ -169,18 +181,36 @@ assert_eq "TC-METRICS-062 all call sites guarded with || true" "0" "$unguarded"
 # ---------------------------------------------------------------------------
 echo "== metrics_parse_tokens =="
 
+# TC-METRICS-070: parser output keys MUST be the schema's `*_tokens` (NOT bare
+# input/output/total) so the words splice straight into metrics_emit and the
+# aggregator's `.total_tokens` read matches (#228 finding 1 regression).
 CL="$(mktemp)"
 printf 'noise line\n{"type":"result","usage":{"input_tokens":1234,"output_tokens":567}}\nmore noise\n' > "$CL"
-assert_eq "claude JSON usage parsed" "input=1234 output=567 total=1801" "$(metrics_parse_tokens "$CL")"
+assert_eq "TC-METRICS-070 claude JSON usage parsed (schema keys)" "input_tokens=1234 output_tokens=567 total_tokens=1801" "$(metrics_parse_tokens "$CL")"
 
 CX="$(mktemp)"
 printf 'codex working...\nTokens used: 8910\n' > "$CX"
-assert_eq "codex tokens-used parsed (total only)" "total=8910" "$(metrics_parse_tokens "$CX")"
+assert_eq "TC-METRICS-070 codex tokens-used parsed (total only)" "total_tokens=8910" "$(metrics_parse_tokens "$CX")"
 
 NONE="$(mktemp)"
 printf 'just logs, no usage\n' > "$NONE"
 assert_eq "no usage → empty" "" "$(metrics_parse_tokens "$NONE")"
 assert_eq "missing file → empty, rc 0" "" "$(metrics_parse_tokens /nonexistent/log; echo -n)"
+
+# TC-METRICS-071: INTEGRATION — parser output spliced into metrics_emit produces
+# a token_usage event the cost aggregator actually counts. This is the
+# end-to-end gap finding 1 exposed: the parser, emit, and report must agree on
+# the key names. Splice exactly as autonomous-dev.sh does (`$_tok` word-split).
+INTG="$(mktemp -d)"
+( export AUTONOMOUS_METRICS_DIR="$INTG" PROJECT_ID=intg
+  _tok="$(metrics_parse_tokens "$CL")"   # input_tokens=1234 output_tokens=567 total_tokens=1801
+  # shellcheck disable=SC2086
+  metrics_emit token_usage side=dev issue=70 $_tok
+  metrics_emit merge result=success pr=700 issue=70 ) >/dev/null 2>&1
+_emitted_total="$(jq -r 'select(.event=="token_usage") | .total_tokens' "$INTG/metrics.jsonl" 2>/dev/null)"
+assert_eq "TC-METRICS-071 emitted token_usage has numeric total_tokens" "1801" "$_emitted_total"
+_rep="$(bash "$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/metrics-report.sh" --file "$INTG/metrics.jsonl" 2>&1)"
+assert_contains "TC-METRICS-071 report costs the merged issue (not n/a)" "with token data: 1" "$_rep"
 
 # ---------------------------------------------------------------------------
 # metrics_map_drop_reason

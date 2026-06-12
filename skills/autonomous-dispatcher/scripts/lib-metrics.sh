@@ -28,16 +28,10 @@
 #
 # Schema: every line carries a `schema_version` (currently 1) so later redesign
 # phases can extend the schema without breaking the aggregator.
-
-# Source lib-config.sh for pid_dir_for_project when the caller hasn't already
-# (the wrappers source lib-agent.sh which sources lib-config.sh, so in-wrapper
-# this is a no-op; the standalone report tool relies on this).
-if ! declare -F pid_dir_for_project >/dev/null 2>&1; then
-  _LIB_METRICS_SELF="${BASH_SOURCE[0]:-$0}"
-  _LIB_METRICS_REAL_DIR="$(cd "$(dirname "$(readlink -f "$_LIB_METRICS_SELF")")" && pwd)"
-  # shellcheck source=lib-config.sh
-  source "${_LIB_METRICS_REAL_DIR}/lib-config.sh" 2>/dev/null || true
-fi
+#
+# This lib is fully self-contained: metrics_dir resolves the storage path from
+# ${XDG_STATE_HOME:-$HOME/.local/state} directly (no lib-config / pid_dir
+# dependency), so the standalone metrics-report.sh can source ONLY this file.
 
 # The schema version stamped on every emitted event. Bump only when a field's
 # meaning changes incompatibly; additive fields do not require a bump (the
@@ -50,17 +44,24 @@ METRICS_RETENTION_DAYS="${METRICS_RETENTION_DAYS:-90}"
 # metrics_dir [project_id]
 #
 # Echoes the directory that holds metrics.jsonl for the project, resolving in
-# priority order:
-#   1. ${AUTONOMOUS_METRICS_DIR}                  — test/override hook
-#   2. ${XDG_STATE_HOME}/autonomous-<project>     — issue #228's stated convention
-#   3. pid_dir_for_project()                       — co-locate with issue-N.pid
-#      (XDG_RUNTIME_DIR → ${HOME}/.local/state fallback), the dominant
-#      SSM-spawned-shell case where XDG_STATE_HOME is unset.
+# priority order — the issue's `${XDG_STATE_HOME:-$HOME/.local/state}` contract:
+#   1. ${AUTONOMOUS_METRICS_DIR}                   — test/override hook
+#   2. ${XDG_STATE_HOME}/autonomous-<project>      — when XDG_STATE_HOME is set
+#   3. ${HOME}/.local/state/autonomous-<project>   — DURABLE fallback
+#
+# NOTE the fallback resolves DIRECTLY to ${HOME}/.local/state and deliberately
+# does NOT defer to pid_dir_for_project: that helper prefers ${XDG_RUNTIME_DIR}
+# (a tmpfs under /run/user/<uid> wiped on logout/reboot), which would silently
+# put the metrics log — whose whole point is durable retention + later reporting
+# — in a volatile directory. On the production SSM box XDG_RUNTIME_DIR IS set,
+# so the old pid_dir deferral lost metrics across reboots (#228 review finding 2).
+# Metrics need durability over co-location; PID files need the opposite, so they
+# correctly resolve differently.
 #
 # Returns 0 and echoes the path on success; returns 1 (echoes nothing) if no
-# path can be resolved (e.g. PROJECT_ID unset and no override). Creates the dir
-# (mode 0700) when it has to fall through to XDG_STATE_HOME; the
-# pid_dir_for_project path already mkdir/chmods itself.
+# path can be resolved (PROJECT_ID unset and no override, or HOME unset). Creates
+# the dir (mode 0700) and refuses a pre-existing symlink (CWE-59 defense, mirrors
+# pid_dir_for_project).
 # shellcheck disable=SC2120  # callable with or without an explicit project arg
 metrics_dir() {
   local project_id="${1:-${PROJECT_ID:-}}"
@@ -68,20 +69,16 @@ metrics_dir() {
 
   if [[ -n "${AUTONOMOUS_METRICS_DIR:-}" ]]; then
     dir="${AUTONOMOUS_METRICS_DIR}"
-  elif [[ -n "${XDG_STATE_HOME:-}" && -n "$project_id" ]]; then
+  elif [[ -z "$project_id" ]]; then
+    return 1
+  elif [[ -n "${XDG_STATE_HOME:-}" ]]; then
     dir="${XDG_STATE_HOME}/autonomous-${project_id}"
-  elif declare -F pid_dir_for_project >/dev/null 2>&1 && [[ -n "$project_id" ]]; then
-    # pid_dir_for_project reads PROJECT_ID from the env; honor an explicit arg.
-    PROJECT_ID="$project_id" dir="$(pid_dir_for_project 2>/dev/null)" || return 1
-    [[ -n "$dir" ]] || return 1
-    printf '%s\n' "$dir"
-    return 0
+  elif [[ -n "${HOME:-}" ]]; then
+    dir="${HOME}/.local/state/autonomous-${project_id}"
   else
     return 1
   fi
 
-  # AUTONOMOUS_METRICS_DIR / XDG_STATE_HOME branches: ensure the dir exists.
-  # Refuse a symlinked path (CWE-59 defense in depth, mirrors pid_dir_for_project).
   if [[ -L "$dir" ]]; then
     return 1
   fi
@@ -193,10 +190,12 @@ metrics_map_drop_reason() {
 #     with a top-level `usage` block carrying input_tokens / output_tokens.
 #   - codex: a plain line `tokens used: <N>` (total only).
 #
-# Echoes `input=<i> output=<o> total=<t>` for any field it could determine
-# (omitting fields it couldn't), suitable for splicing into a metrics_emit
-# token_usage call. Echoes nothing when the log has no recognizable usage.
-# ALWAYS returns 0 (observe-only).
+# Echoes `input_tokens=<i> output_tokens=<o> total_tokens=<t>` for any field it
+# could determine (omitting fields it couldn't), suitable for splicing DIRECTLY
+# into a metrics_emit token_usage call — the key names MUST match the schema the
+# aggregator reads (`*_tokens`) or the cost-per-merged-PR join silently drops
+# every run (#228 review finding 1). Echoes nothing when the log has no
+# recognizable usage. ALWAYS returns 0 (observe-only).
 metrics_parse_tokens() {
   local log="${1:-}"
   [[ -n "$log" && -r "$log" ]] || return 0
@@ -228,10 +227,13 @@ metrics_parse_tokens() {
     [[ "$cx" =~ ^[0-9]+$ ]] && total="$cx"
   fi
 
+  # Key names MUST be the schema's `*_tokens` (NOT bare input/output/total) so the
+  # words splice straight into metrics_emit and the aggregator's `.total_tokens`
+  # read matches — see the function header (#228 finding 1).
   local out=""
-  [[ "$input" =~ ^[0-9]+$ ]]  && out+="input=${input} "
-  [[ "$output" =~ ^[0-9]+$ ]] && out+="output=${output} "
-  [[ "$total" =~ ^[0-9]+$ ]]  && out+="total=${total}"
+  [[ "$input" =~ ^[0-9]+$ ]]  && out+="input_tokens=${input} "
+  [[ "$output" =~ ^[0-9]+$ ]] && out+="output_tokens=${output} "
+  [[ "$total" =~ ^[0-9]+$ ]]  && out+="total_tokens=${total}"
   out="${out% }"
   [[ -n "$out" ]] && printf '%s\n' "$out"
   return 0

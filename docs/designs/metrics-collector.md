@@ -29,9 +29,12 @@ resolution (in `metrics_dir`):
 1. `${AUTONOMOUS_METRICS_DIR}` — test/override hook (mirrors `AUTONOMOUS_PID_DIR`).
 2. `${XDG_STATE_HOME}/autonomous-${PROJECT_ID}` — honors the issue's stated
    `XDG_STATE_HOME` convention when set.
-3. `pid_dir_for_project` fallback (`${XDG_RUNTIME_DIR}` → `${HOME}/.local/state`)
-   — co-locates with `issue-N.pid` when `XDG_STATE_HOME` is unset, which is the
-   dominant SSM-spawned-shell case (per CLAUDE.local.md).
+3. `${HOME}/.local/state/autonomous-${PROJECT_ID}` — the **durable** fallback
+   (the issue's `${XDG_STATE_HOME:-$HOME/.local/state}` contract). It resolves
+   directly, NOT via `pid_dir_for_project`: that helper prefers the volatile
+   `${XDG_RUNTIME_DIR}` tmpfs (wiped on logout/reboot), which would silently lose
+   the retention/reporting log on the production SSM box where `XDG_RUNTIME_DIR`
+   is set (#228 review finding 2). Metrics need durability; PID files don't.
 
 File: `${metrics_dir}/metrics.jsonl`. Append-only, one JSON object per line.
 O_APPEND (`>>`) gives atomic line appends for the small records we write; no lock

@@ -190,6 +190,40 @@ OUT_EMPTY="$(bash "$REPORT" --file "$EMPTY" 2>&1)"; rc_empty=$?
 assert_eq "TC-METRICS-051 empty exits 0" "0" "$rc_empty"
 assert_contains "TC-METRICS-051 empty → n/a" "n/a" "$OUT_EMPTY"
 
+# TC-METRICS-053: per-CLI denominator from review_agent_run, not wrapper_end
+# (#228 finding 3). Multi-agent fan-out where the wrapper's default AGENT_CMD is
+# claude: each review emits review_agent_run for BOTH codex and claude, but
+# wrapper_end side=review carries only claude. codex must get a real denominator.
+MFIX="$(mktemp -d)/metrics.jsonl"; mkdir -p "$(dirname "$MFIX")"; : > "$MFIX"
+for r in 1 2 3 4; do
+  emit "$MFIX" "2026-06-0${r}T10:00:00Z" event=wrapper_end side=review agent=claude rc=0
+  emit "$MFIX" "2026-06-0${r}T10:00:00Z" event=review_agent_run agent_name=claude state=pass
+  emit "$MFIX" "2026-06-0${r}T10:00:00Z" event=review_agent_run agent_name=codex state=pass
+done
+# codex hit quota once (1 quota / 4 runs = 25%); claude 0/4 = 0%.
+emit "$MFIX" "2026-06-05T10:00:00Z" event=review_agent_run agent_name=codex state=unavailable
+emit "$MFIX" "2026-06-05T10:00:00Z" event=agent_drop agent_name=codex reason=agent-unavailable:quota
+OUT_MULTI="$(bash "$REPORT" --file "$MFIX" 2>&1 | sed -E 's/[[:space:]]+/ /g')"
+assert_contains "TC-METRICS-053 codex denominator from review_agent_run (5 runs)" "codex quota=1 runs=5 → 20%" "$OUT_MULTI"
+assert_contains "TC-METRICS-053 claude 0% over its 4 runs" "claude quota=0 runs=4 → 0%" "$OUT_MULTI"
+
+# TC-METRICS-054: TTHW prefers labeled_at over ts (#228 finding 4). The
+# issue_labeled event's `ts` is the dispatch instant (here 3h after the real
+# label); `labeled_at` is the true autonomous-label time. labeled→first-PR must
+# be measured from labeled_at (4h), not from ts (1h).
+LFIX="$(mktemp -d)/metrics.jsonl"; mkdir -p "$(dirname "$LFIX")"; : > "$LFIX"
+# real label at 00:00, dispatched (ts) at 03:00, PR at 04:00.
+emit "$LFIX" "2026-06-01T03:00:00Z" event=issue_labeled issue=1 labeled_at=2026-06-01T00:00:00Z
+emit "$LFIX" "2026-06-01T04:00:00Z" event=pr_opened issue=1
+OUT_LBL="$(bash "$REPORT" --file "$LFIX" 2>&1 | sed -E 's/[[:space:]]+/ /g')"
+assert_contains "TC-METRICS-054 TTHW uses labeled_at (4h) not ts (1h)" "labeled→first-PR: n=1 avg=4h0m p50=4h0m p90=4h0m" "$OUT_LBL"
+# Without labeled_at, falls back to ts (1h).
+LFIX2="$(mktemp -d)/metrics.jsonl"; mkdir -p "$(dirname "$LFIX2")"; : > "$LFIX2"
+emit "$LFIX2" "2026-06-01T03:00:00Z" event=issue_labeled issue=2
+emit "$LFIX2" "2026-06-01T04:00:00Z" event=pr_opened issue=2
+OUT_LBL2="$(bash "$REPORT" --file "$LFIX2" 2>&1 | sed -E 's/[[:space:]]+/ /g')"
+assert_contains "TC-METRICS-054 falls back to ts when no labeled_at (1h)" "labeled→first-PR: n=1 avg=1h0m p50=1h0m p90=1h0m" "$OUT_LBL2"
+
 echo ""
 echo "Results: ${PASS} passed, ${FAIL} failed"
 [[ $FAIL -eq 0 ]] || { echo "---- report output for debugging ----"; echo "$OUT"; exit 1; }

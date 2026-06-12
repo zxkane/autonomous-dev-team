@@ -16,7 +16,7 @@ metrics value back.
 | **File** | `<metrics_dir>/metrics.jsonl` |
 | **Format** | one JSON object per line (JSONL), append-only (`>>` / O_APPEND) |
 | **Writer** | `lib-metrics.sh::metrics_emit` (one writer per wrapper run; no lock) |
-| **`metrics_dir`** | `${AUTONOMOUS_METRICS_DIR}` → `${XDG_STATE_HOME}/autonomous-<project>` → `pid_dir_for_project` (co-located with `issue-N.pid`, the dominant case) |
+| **`metrics_dir`** | `${AUTONOMOUS_METRICS_DIR}` → `${XDG_STATE_HOME}/autonomous-<project>` → `${HOME}/.local/state/autonomous-<project>`. The fallback resolves **directly** to `$HOME/.local/state` (the issue's `${XDG_STATE_HOME:-$HOME/.local/state}` contract) and deliberately does NOT defer to `pid_dir_for_project`, which prefers the volatile `${XDG_RUNTIME_DIR}` tmpfs — metrics need **durable** retention, PID files don't, so they resolve differently. |
 | **Construction** | `jq -nc` only — never hand-rolled `echo` (values with quotes/newlines/`$()` stay valid JSON) |
 | **Retention** | `metrics_prune [days]` (default 90) drops lines older than N days; built into `metrics-report.sh --prune-days` |
 
@@ -45,9 +45,10 @@ Every line carries this common envelope plus event-specific fields:
 | `token_usage` | dev wrapper (cleanup) | `side`, `issue`, `agent`, `input_tokens`?, `output_tokens`?, `total_tokens`? | tokens the CLI reported (claude JSON `usage` / codex `tokens used`); absent fields omitted. Keyed by `issue` (the dev wrapper knows the issue, not the PR number) — `issue` is the join key for cost-per-merged-PR |
 | `pr_opened` | dev wrapper (cleanup, PR present) | `side` | a PR exists for the issue — TTHW first-PR endpoint (earliest per issue wins) |
 | `verdict` | review wrapper (post-aggregation) | `side`, `verdict` (pass\|fail\|all-unavailable), `pr` | the aggregated INV-40 review verdict |
+| `review_agent_run` | review wrapper (per fan-out member) | `side`, `agent_name`, `state` (pass\|fail\|unavailable\|timed-out), `pr` | one fan-out member ran — the **per-CLI denominator** for quota-failure rate. Emitted for EVERY member, so multi-agent fan-out (`AGENT_REVIEW_AGENTS`) counts non-default CLIs that `wrapper_end side=review` (default `AGENT_CMD` only) would miss |
 | `agent_drop` | review wrapper (per dropped member) | `side`, `agent_name`, `reason` (failure-class), `pr` | one fan-out agent dropped/timed-out, with its mapped failure class |
 | `merge` | review wrapper (auto-merge) | `result` (success\|failure), `failure_class` (failure only: `infra`), `pr` | auto-merge outcome — TTHW merged endpoint on success |
-| `issue_labeled` | dispatcher (Step 2 dev-new) | — | issue first picked up for autonomous work — TTHW "labeled" endpoint (first dispatch only) |
+| `issue_labeled` | dispatcher (Step 2 dev-new) | `labeled_at`? (ISO-8601, the real `autonomous`-label time from the GitHub timeline) | issue first picked up — TTHW "labeled" endpoint (first dispatch only). The event `ts` is the dispatch instant (can lag the label by ticks); the aggregator prefers `labeled_at` when present so queued wait is counted |
 | `dispatch_stale` | dispatcher (Step 5b DEAD) | `kind` (in-progress\|reviewing), `failure_class` (`false-stall`) | dispatcher declared a wrapper DEAD after the near-success cross-check cleared |
 | `dispatch_retry` | dispatcher (Step 4 mark_stalled) | `retry_count`, `stalled` (bool) | retry counter hit MAX_RETRIES → issue marked stalled |
 
@@ -98,12 +99,16 @@ Prints four blocks (the redesign's baseline numbers):
    **excluded** (never counted as 0) and the "merged PRs: N; with token data: M"
    line surfaces the gap.
 3. **Quota-failure rate per CLI** — `agent_drop(agent-unavailable:quota)` count ÷
-   `wrapper_end(side=review)` runs, per CLI. A CLI with zero runs prints `n/a` (no
-   division by zero).
+   **`review_agent_run` runs per `agent_name`** (NOT `wrapper_end side=review`,
+   which carries only the wrapper's default `AGENT_CMD` and so under-counts
+   non-default fan-out CLIs). Falls back to `wrapper_end side=review` only for
+   pre-`review_agent_run` logs. A CLI with zero runs prints `n/a` (no division by
+   zero).
 4. **TTHW** — labeled→first-PR and labeled→merged, avg / p50 / p90 (nearest-rank
-   percentile). Derived per issue from `issue_labeled` (earliest), `pr_opened`
-   (earliest), `merge`(success) (earliest). An issue missing an endpoint (PR never
-   opened / never merged) is excluded from the affected statistic only.
+   percentile). Derived per issue from `issue_labeled` (earliest, using
+   `labeled_at` when present else `ts`), `pr_opened` (earliest), `merge`(success)
+   (earliest). An issue missing an endpoint (PR never opened / never merged) is
+   excluded from the affected statistic only.
 
 The report is the **loud** half of INV-67: gaps are `n/a` / explicit counts, never
 a silent zero — so a broken emitter shows up at report time.

@@ -425,7 +425,8 @@ cleanup() {
     metrics_emit wrapper_end side=dev "rc=${_rc}" "duration_s=${_dur}" \
       "issue=${ISSUE_NUMBER:-}" "agent=${AGENT_CMD:-claude}" || true
     # Token usage from the agent log, if the CLI emitted any (claude JSON /
-    # codex line). Splice the parsed `input=.. output=.. total=..` words in.
+    # codex line). Splice the parsed `input_tokens=.. output_tokens=..
+    # total_tokens=..` words in (the schema key names the aggregator reads).
     local _tok
     _tok="$(metrics_parse_tokens "${LOG_FILE:-}" 2>/dev/null)" || true
     if [[ -n "$_tok" ]]; then

@@ -38,8 +38,13 @@ _SELF="${BASH_SOURCE[0]:-$0}"
 SCRIPT_DIR="$(cd "$(dirname "$_SELF")" && pwd)"
 LIB_DIR="$(cd "$(dirname "$(readlink -f "$_SELF")")" && pwd)"
 export AUTONOMOUS_CONF_DIR="${AUTONOMOUS_CONF_DIR:-$SCRIPT_DIR}"
+# Load autonomous.conf (best-effort) so the no-arg invocation can resolve the
+# default project's PROJECT_ID from the project's scripts/ dir [INV-14]. The
+# storage-path math itself lives entirely in lib-metrics.sh (no pid_dir dep).
 # shellcheck source=lib-config.sh
-source "${LIB_DIR}/lib-config.sh" 2>/dev/null || true
+if source "${LIB_DIR}/lib-config.sh" 2>/dev/null; then
+  load_autonomous_conf "${AUTONOMOUS_CONF_DIR}" 2>/dev/null || true
+fi
 # shellcheck source=lib-metrics.sh
 source "${LIB_DIR}/lib-metrics.sh"
 
@@ -244,12 +249,20 @@ echo
 # 3. Quota-failure rate per agent CLI
 # ===========================================================================
 # numerator   = agent_drop events with reason agent-unavailable:quota, per CLI
-# denominator = review wrapper runs (wrapper_end side==review) per CLI
+# denominator = PER-FAN-OUT-MEMBER review runs (review_agent_run, per agent_name)
+#               — NOT wrapper_end side=review, which carries only the wrapper's
+#               default AGENT_CMD and so under-counts non-default CLIs in a
+#               multi-agent fan-out (#228 finding 3). A pre-finding-3 log with no
+#               review_agent_run events falls back to wrapper_end so old data
+#               still reports rather than showing every CLI as n/a.
 # A CLI with zero runs prints n/a (no div-by-zero).
 echo "== 3. Quota-failure rate per CLI =="
-# All CLIs that appear in either numerator or denominator.
+# Whether the (newer) per-agent run events are present at all.
+_HAS_AGENT_RUN="$(printf '%s\n' "$EVENTS" | jq -r 'select(.event == "review_agent_run") | "x"' | grep -c . || true)"
+# All CLIs that appear in any run signal or as a drop.
 CLIS="$(printf '%s\n' "$EVENTS" | jq -r '
-    if .event == "wrapper_end" and .side == "review" then (.agent // "")
+    if .event == "review_agent_run" then (.agent_name // "")
+    elif .event == "wrapper_end" and .side == "review" then (.agent // "")
     elif .event == "agent_drop" then (.agent_name // "")
     else empty end | select(. != "")' | sort -u)"
 
@@ -258,8 +271,13 @@ if [[ -z "$CLIS" ]]; then
 else
   while IFS= read -r _cli; do
     [[ -n "$_cli" ]] || continue
-    _runs="$(printf '%s\n' "$EVENTS" | jq -r --arg c "$_cli" '
-        select(.event == "wrapper_end" and .side == "review" and (.agent // "") == $c) | "x"' | grep -c .)"
+    if [[ "${_HAS_AGENT_RUN:-0}" -gt 0 ]]; then
+      _runs="$(printf '%s\n' "$EVENTS" | jq -r --arg c "$_cli" '
+          select(.event == "review_agent_run" and (.agent_name // "") == $c) | "x"' | grep -c .)"
+    else
+      _runs="$(printf '%s\n' "$EVENTS" | jq -r --arg c "$_cli" '
+          select(.event == "wrapper_end" and .side == "review" and (.agent // "") == $c) | "x"' | grep -c .)"
+    fi
     _quota="$(printf '%s\n' "$EVENTS" | jq -r --arg c "$_cli" '
         select(.event == "agent_drop" and (.agent_name // "") == $c and (.reason // "") == "agent-unavailable:quota") | "x"' | grep -c .)"
     if [[ "$_runs" -eq 0 ]]; then
@@ -275,14 +293,16 @@ echo
 # ===========================================================================
 # 4. TTHW — issue labeled → first PR, issue labeled → merged
 # ===========================================================================
-# Endpoints come from events: issue_labeled (ts), pr_opened (first per issue),
-# merge result==success (ts). Missing endpoint → that issue is excluded from
-# the affected statistic (no synthetic zero).
+# Endpoints come from events: issue_labeled (prefers labeled_at — the real
+# autonomous-label time from the GitHub timeline — over ts, the dispatch instant,
+# so queued wait is counted; #228 finding 4), pr_opened (first per issue), merge
+# result==success (ts). Missing endpoint → that issue is excluded from the
+# affected statistic (no synthetic zero).
 echo "== 4. TTHW =="
 # Per-issue earliest labeled, earliest pr_opened, earliest successful merge.
 ISSUE_TS="$(printf '%s\n' "$EVENTS" | jq -r '
     select((.issue // "") != "") |
-    if .event == "issue_labeled" then [(.issue|tostring), "labeled", (.ts|fromdateiso8601)]
+    if .event == "issue_labeled" then [(.issue|tostring), "labeled", (((.labeled_at // .ts))|fromdateiso8601)]
     elif .event == "pr_opened" then [(.issue|tostring), "pr", (.ts|fromdateiso8601)]
     elif .event == "merge" and .result == "success" then [(.issue|tostring), "merged", (.ts|fromdateiso8601)]
     else empty end | @tsv' \

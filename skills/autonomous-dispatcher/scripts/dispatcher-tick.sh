@@ -216,8 +216,23 @@ for i in $(seq 0 $((new_count - 1))); do
   # TTHW "labeled" endpoint. Emitted only on the first (dev-new) dispatch, not
   # on resumes/re-dispatches, so the aggregator's earliest-per-issue reduction
   # is anchored here. Best-effort, observe-only.
+  #
+  # The event `ts` is THIS dispatch instant, which can lag the real `autonomous`
+  # label time by ticks (concurrency cap, unresolved deps). For accurate TTHW we
+  # also fetch the actual `autonomous`-label timeline timestamp and emit it as
+  # `labeled_at`; the aggregator prefers it over `ts`, so labeled→PR/merge counts
+  # the queue wait (#228 review finding 4). The timeline call is best-effort: on
+  # any failure `labeled_at` is omitted and the aggregator falls back to `ts`.
   if declare -F metrics_emit >/dev/null 2>&1; then
-    metrics_emit issue_labeled "issue=${issue_num}" || true
+    _labeled_at="$(gh api "repos/${REPO}/issues/${issue_num}/timeline" \
+      --jq 'map(select(.event == "labeled" and .label.name == "autonomous")) | (.[0].created_at // empty)' \
+      2>/dev/null || true)"
+    if [[ -n "${_labeled_at:-}" ]]; then
+      metrics_emit issue_labeled "issue=${issue_num}" "labeled_at=${_labeled_at}" || true
+    else
+      metrics_emit issue_labeled "issue=${issue_num}" || true
+    fi
+    unset _labeled_at
   fi
   # Bug 1+2 (#99): write a dispatcher-controlled marker that records the
   # dispatch timestamp ([INV-17]). Step 5 uses this to honor a cold-start

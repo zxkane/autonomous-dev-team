@@ -44,6 +44,16 @@ ID format: `TC-METRICS-NNN`. Covers `lib-metrics.sh` (emitter + prune) and
 | TC-METRICS-050 | `--project` filter with two projects' files present | only the named project's events counted |
 | TC-METRICS-051 | Empty metrics.jsonl | report prints all four blocks with `n/a` / zero, exit 0, no crash |
 
+## Post-review regression (#228 findings 1-4)
+
+| ID | Scenario | Expected |
+|---|---|---|
+| TC-METRICS-070 | `metrics_parse_tokens` output key names | emits `input_tokens=`/`output_tokens=`/`total_tokens=` (the schema keys), NOT bare `input=`/`output=`/`total=` — finding 1 |
+| TC-METRICS-071 | Integration: parser → `metrics_emit token_usage` → `metrics-report.sh` | the spliced `$_tok` produces a `token_usage` with numeric `total_tokens`; the report costs the merged issue ("with token data: 1"), not `n/a` — finding 1 end-to-end |
+| TC-METRICS-011 | `metrics_dir` durable fallback: `XDG_STATE_HOME` unset, `XDG_RUNTIME_DIR` set | resolves to `$HOME/.local/state/autonomous-<project>` (durable), never the volatile `XDG_RUNTIME_DIR` — finding 2 |
+| TC-METRICS-053 | Per-CLI quota denominator from `review_agent_run` | multi-agent fan-out: codex denominator counts its `review_agent_run` events (not the claude-only `wrapper_end`); rate correct — finding 3 |
+| TC-METRICS-054 | TTHW prefers `labeled_at` over `ts` | labeled→first-PR measured from the real label time (`labeled_at`) not the dispatch instant; falls back to `ts` when `labeled_at` absent — finding 4 |
+
 ## Regression — observe-only (INV-67)
 
 | ID | Scenario | Expected |

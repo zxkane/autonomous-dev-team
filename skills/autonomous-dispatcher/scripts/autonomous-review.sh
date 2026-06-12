@@ -2053,13 +2053,21 @@ for _i in "${!AGENT_NAMES[@]}"; do
   esac
 done
 
-# [INV-67] Metrics: one agent_drop event per dropped/timed-out fan-out member,
-# carrying the failure-class taxonomy reason. Best-effort, observe-only — a
+# [INV-67] Metrics: per-fan-out-member events. Best-effort, observe-only — a
 # separate loop so it cannot perturb the load-bearing set -e append logic above.
-# Re-derive the per-CLI token via the same rc-0-always classifiers.
+# For EVERY member emit a `review_agent_run` (state = pass|fail|unavailable|
+# timed-out) — this is the PER-CLI denominator the quota-rate report needs.
+# `wrapper_end side=review` carries only the wrapper's default AGENT_CMD, so in a
+# multi-agent fan-out (AGENT_REVIEW_AGENTS="codex claude") it under-counts the
+# non-default CLIs and inflates/voids their quota rate (#228 review finding 3).
+# For dropped/timed-out members ALSO emit an `agent_drop` with the failure-class
+# reason (re-derived via the same rc-0-always classifiers).
 if declare -F metrics_emit >/dev/null 2>&1; then
   for _mi in "${!AGENT_NAMES[@]}"; do
     _mstate="${AGENT_VERDICTS[$_mi]}"
+    metrics_emit review_agent_run side=review "agent_name=${AGENT_NAMES[$_mi]}" \
+      "state=${_mstate}" "issue=${ISSUE_NUMBER:-}" "pr=${PR_NUMBER:-}" || true
+
     [[ "$_mstate" == "unavailable" || "$_mstate" == "timed-out" ]] || continue
     _mtoken=""
     if [[ "$_mstate" == "unavailable" ]]; then
