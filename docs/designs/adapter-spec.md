@@ -29,7 +29,7 @@ RFC-2119 spec + machine-checkable JSON Schemas.
 | `docs/pipeline/schemas/examples/*.json` | ≥2 golden + negative examples per schema |
 | `docs/test-cases/adapter-spec.md` | TC-ADAPTER-SPEC-NNN |
 | `tests/unit/test-adapter-spec-schemas.sh` | Schema validation suite |
-| `docs/pipeline/invariants.md` (INV-63) | "adapter conformance is spec-defined" |
+| `docs/pipeline/invariants.md` (INV-65) | "adapter conformance is spec-defined" |
 
 ## Key design decisions
 

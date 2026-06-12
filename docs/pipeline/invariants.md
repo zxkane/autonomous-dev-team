@@ -2586,7 +2586,7 @@ implement this spec.
 **Test**:
 - `tests/unit/test-adapter-spec-schemas.sh` — TC-ADAPTER-SPEC-001..008: all four
   `*.schema.json` present + valid Draft-07; `adapter-spec.md` declares
-  `spec_version: 1`; this INV-63 entry present; every example well-formed JSON;
+  `spec_version: 1`; this INV-65 entry present; every example well-formed JSON;
   each schema has ≥2 golden examples; every golden validates and every
   documented negative is rejected (the three issue-mandated negatives: a flat
   failure enum missing the four axes, a verdict artifact without `schema_version`,

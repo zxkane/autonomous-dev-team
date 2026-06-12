@@ -13,7 +13,7 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      # Lets test-adapter-spec-schemas.sh (#229 / INV-63) run the full Draft-07
+      # Lets test-adapter-spec-schemas.sh (#229 / INV-65) run the full Draft-07
       # path instead of the weaker jq structural fallback. The test passes
       # either way; installing jsonschema makes CI exercise the strong path so
       # the conditional/negative coverage is actually enforced in CI.

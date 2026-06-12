@@ -1,5 +1,5 @@
 #!/bin/bash
-# test-adapter-spec-schemas.sh — issue #229 / INV-63.
+# test-adapter-spec-schemas.sh — issue #229 / INV-65.
 #
 # Validates the adapter-spec v1 JSON Schemas (docs/pipeline/schemas/*.json) and
 # their committed example fixtures (docs/pipeline/schemas/examples/*.json). This
@@ -92,7 +92,7 @@ done
 
 if [[ -f "$SPEC" ]]; then ok "adapter-spec.md present"; else bad "adapter-spec.md MISSING"; fi
 assert_grep "adapter-spec.md declares spec_version: 1" 'spec_version[`:]* *1' "$SPEC"
-assert_grep "invariants.md has INV-63 (adapter conformance is spec-defined)" '^## INV-63:' "$INVARIANTS"
+assert_grep "invariants.md has INV-65 (adapter conformance is spec-defined)" '^## INV-65:' "$INVARIANTS"
 
 # Every example is well-formed JSON (jq or python).
 if [[ "$HAVE_JQ" -eq 1 ]]; then
