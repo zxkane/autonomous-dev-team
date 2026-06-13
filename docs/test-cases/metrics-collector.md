@@ -64,6 +64,15 @@ ID format: `TC-METRICS-NNN`. Covers `lib-metrics.sh` (emitter + prune) and
 | TC-METRICS-025 | Prune wired into all production paths | `metrics_prune ${METRICS_RETENTION_DAYS:-90}` is present in the dev wrapper_end, review wrapper_end, AND dispatcher tick (not just the opt-in report) — round-7 finding 1 |
 | TC-METRICS-055 | TTHW prefers `pr_opened_at` over `ts` | labeled→first-PR measured from the real PR `createdAt` (`pr_opened_at`) not the wrapper-cleanup instant; falls back to `ts` when `pr_opened_at` absent — round-7 finding 2 |
 
+## Post-review regression (#228 round 8)
+
+| ID | Scenario | Expected |
+|---|---|---|
+| TC-METRICS-026 | prune↔emit lock (concurrency) | 100 concurrent `metrics_emit` appends all survive a concurrent `metrics_prune` loop (the per-file `flock` serializes prune's read+rewrite against the append); old seed pruned. flock-gated (skip if absent) — round-8 finding 1 |
+| TC-METRICS-027 | `dispatch_retry` per-retry + exhaustion | dispatcher-tick emits both `stalled=false` (every below-limit retry) AND `stalled=true` (at `MAX_RETRIES`) — round-8 finding 3 |
+| TC-METRICS-056 | review-side token_usage costed | cost-per-merged-PR sums dev-side AND review-side `token_usage` per issue (1000 dev + 250 review = 1250); a review-only issue (500) is still costed — round-8 finding 2 |
+| TC-MAR-SRC-METRICS-01..03 | review token_usage wiring | the review wrapper captures `AGENT_GENERIC_LOGS` per member and emits `token_usage side=review` parsed from it via `metrics_parse_tokens` — round-8 finding 2 |
+
 ## Regression — observe-only (INV-67)
 
 | ID | Scenario | Expected |

@@ -18,8 +18,10 @@
 # JSON is built EXCLUSIVELY with `jq -nc` (never hand-rolled echo) so values
 # containing quotes / newlines / `$()` / `;` are stored literally and the line
 # stays valid JSON. Records are appended with `>>` (O_APPEND) — atomic for the
-# small single-line records we write, so no lock is needed (one writer per
-# wrapper run).
+# small single-line records we write. A best-effort per-file `flock`
+# (`<metrics.jsonl>.lock`) additionally serializes metrics_emit's append against
+# metrics_prune's read→rewrite→mv so a concurrent emit can't be dropped by a
+# prune in flight (#228 review); flock-absent falls back to an unlocked append.
 #
 # Public API:
 #   metrics_dir                       — echoes the per-project metrics dir path
@@ -150,9 +152,55 @@ metrics_emit() {
   line="$(jq "${jq_args[@]}" "$body" 2>/dev/null)" || return 0
   [[ -n "$line" ]] || return 0
 
-  # O_APPEND single-line write. Failure (unwritable dir) is swallowed.
-  printf '%s\n' "$line" >> "$file" 2>/dev/null || return 0
+  # O_APPEND single-line write, serialized against metrics_prune via a shared
+  # per-file lock (#228 review: prune's read→temp→mv could otherwise drop a line
+  # appended concurrently). The lock is BEST-EFFORT — if flock is unavailable the
+  # append still happens (only the prune-vs-append window is unprotected, and
+  # prune is itself best-effort). The write failure (unwritable dir) is swallowed
+  # (INV-67 observe-only).
+  _metrics_locked_append "$file" "$line" || return 0
   return 0
+}
+
+# _metrics_locked_append <metrics-file> <line>
+#
+# Append "<line>\n" to <metrics-file> while holding an exclusive flock on
+# `<metrics-file>.lock`, so it serializes against metrics_prune's read+rewrite
+# (#228 review). BEST-EFFORT: if flock is absent the append runs unlocked (the
+# pre-review behavior — never worse). The append + flock both happen inside one
+# subshell so the lock covers the actual write and is released on subshell exit.
+# ALWAYS returns 0 on a swallowed write failure; callers also `|| return 0`.
+_metrics_locked_append() {
+  local file="$1" line="$2"
+  if command -v flock >/dev/null 2>&1; then
+    ( exec 9>"${file}.lock" 2>/dev/null || exit 0
+      # `flock -w` bounds the wait so a stuck holder can never hang a wrapper.
+      flock -w 5 9 2>/dev/null || true
+      printf '%s\n' "$line" >> "$file" 2>/dev/null || true ) 2>/dev/null
+    return 0
+  fi
+  printf '%s\n' "$line" >> "$file" 2>/dev/null || true
+  return 0
+}
+
+# _metrics_prune_locked <metrics-file> <prune-fn...>
+#
+# Run the prune read+rewrite (<prune-fn...>) while holding the same per-file lock
+# as _metrics_locked_append, so a concurrent emit cannot append between prune's
+# read and its `mv` (which would drop the appended line). BEST-EFFORT: unlocked
+# fallback when flock is absent. Returns 0 on the locked path (the subshell's rc
+# is intentionally not propagated — the lone caller, metrics_prune, returns 0
+# regardless, and the prune-fn itself always returns 0); the unlocked fallback
+# returns the prune-fn's rc directly.
+_metrics_prune_locked() {
+  local file="$1"; shift
+  if command -v flock >/dev/null 2>&1; then
+    ( exec 9>"${file}.lock" 2>/dev/null || exit 0
+      flock -w 5 9 2>/dev/null || true
+      "$@" )
+    return 0
+  fi
+  "$@"
 }
 
 # metrics_map_drop_reason <agent-verdict-state> [cli-reason-token]
@@ -296,12 +344,24 @@ metrics_prune() {
   cutoff="$(date -u -d "${days} days ago" +%s 2>/dev/null)" || return 0
   [[ -n "$cutoff" ]] || return 0
 
-  local tmp
-  tmp="$(mktemp "${file}.prune.XXXXXX" 2>/dev/null)" || return 0
+  # Run the read+rewrite under the shared per-file lock so a concurrent
+  # metrics_emit append can't land between the read and the `mv` and be dropped
+  # (#228 review). _metrics_prune_lines does the actual work; _metrics_prune_locked
+  # holds the lock around it (best-effort — unlocked fallback when flock absent).
+  _metrics_prune_locked "$file" _metrics_prune_lines "$file" "$cutoff"
+  return 0
+}
 
-  # jq reads each line raw (`-R`); -r echoes the surviving line verbatim (NOT
-  # re-encoded as a JSON string). Non-parseable lines and lines whose ts is
-  # older than cutoff are dropped. `fromdateiso8601` converts the ts to epoch.
+# _metrics_prune_lines <file> <cutoff-epoch>
+#
+# The prune read+rewrite, factored out so _metrics_prune_locked can wrap it under
+# the lock. jq reads each line raw (`-R`); -r echoes the surviving line verbatim
+# (NOT re-encoded as a JSON string). Non-parseable lines and lines whose ts is
+# older than cutoff are dropped. `fromdateiso8601` converts the ts to epoch.
+# Atomic temp-then-rename. Best-effort: leaves the original untouched on error.
+_metrics_prune_lines() {
+  local file="$1" cutoff="$2" tmp
+  tmp="$(mktemp "${file}.prune.XXXXXX" 2>/dev/null)" || return 0
   if jq -R -r '
         . as $raw
         | (try (fromjson) catch null) as $o

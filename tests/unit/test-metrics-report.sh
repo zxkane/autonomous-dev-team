@@ -146,6 +146,22 @@ assert_contains "TC-METRICS-052 issue-keyed token_usage (no pr) IS costed" "merg
 # 2 costed issues [1000,3000]: avg=2000; nearest-rank p50(rank=1)=1000, p90(rank=2)=3000.
 assert_contains "TC-METRICS-052 cost avg over the 2 costed (1000,3000)" "avg=2000 tokens  p50=1000  p90=3000" "$OUT_PROD"
 
+# TC-METRICS-056 (#228 round-8 finding 2): review-side token_usage is summed into
+# cost-per-merged-PR alongside dev-side, so fleet cost isn't undercounted. One
+# merged issue with a dev token_usage (1000) AND a review token_usage (250) must
+# cost 1250 total (both join on `issue`). A second merged issue with ONLY a
+# review token_usage (500) must still be costed (review-only is valid).
+RVFIX="$(mktemp -d)/metrics.jsonl"; mkdir -p "$(dirname "$RVFIX")"; : > "$RVFIX"
+emit "$RVFIX" "2026-07-01T02:00:00Z" event=merge result=success pr=401 issue=21
+emit "$RVFIX" "2026-07-01T02:00:00Z" event=token_usage side=dev    issue=21 agent=claude total_tokens=1000
+emit "$RVFIX" "2026-07-01T02:00:00Z" event=token_usage side=review issue=21 agent=codex  total_tokens=250
+emit "$RVFIX" "2026-07-02T02:00:00Z" event=merge result=success pr=402 issue=22
+emit "$RVFIX" "2026-07-02T02:00:00Z" event=token_usage side=review issue=22 agent=claude total_tokens=500
+OUT_RV="$(bash "$REPORT" --file "$RVFIX" 2>&1)"
+assert_contains "TC-METRICS-056 review-side token_usage costed (2 issues)" "merged PRs: 2; with token data: 2" "$OUT_RV"
+# costs: issue21=1000+250=1250, issue22=500 → sorted [500,1250]: avg=875, p50(rank=1)=500, p90(rank=2)=1250.
+assert_contains "TC-METRICS-056 dev+review summed per issue (1250) + review-only (500)" "avg=875 tokens  p50=500  p90=1250" "$OUT_RV"
+
 # ---------------------------------------------------------------------------
 # 3. Quota-failure rate per CLI
 # ---------------------------------------------------------------------------

@@ -357,6 +357,47 @@ for _w in "$DEV_W" "$REV_W" "$DISP_W"; do
   fi
 done
 
+# TC-METRICS-027 (#228 round-8 finding 3): the dispatcher emits dispatch_retry on
+# EACH below-limit retry increment (stalled=false), not only at MAX_RETRIES
+# exhaustion (stalled=true). Source-assert BOTH emits exist in dispatcher-tick.sh.
+if grep -qF 'metrics_emit dispatch_retry "issue=${issue_num}" "retry_count=${retry_count}" stalled=false' "$DISP_W"; then
+  echo -e "  ${GREEN}PASS${NC}: TC-METRICS-027 per-retry dispatch_retry (stalled=false) emitted"; PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-METRICS-027 per-retry dispatch_retry (stalled=false) MISSING"; FAIL=$((FAIL + 1))
+fi
+if grep -qF 'metrics_emit dispatch_retry "issue=${issue_num}" "retry_count=${retry_count}" stalled=true' "$DISP_W"; then
+  echo -e "  ${GREEN}PASS${NC}: TC-METRICS-027 exhaustion dispatch_retry (stalled=true) retained"; PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-METRICS-027 exhaustion dispatch_retry (stalled=true) MISSING"; FAIL=$((FAIL + 1))
+fi
+
+# TC-METRICS-026 (#228 round-8 finding 1): metrics_prune and metrics_emit are
+# serialized by a per-file lock, so a prune running concurrently with appends does
+# NOT drop a freshly-appended line (prune's read→temp→mv would otherwise clobber
+# an emit that landed between the read and the mv). Stress: seed one OLD line
+# (forces the prune read→mv path every iteration), then append N recent lines
+# while a prune loop runs concurrently; assert ALL N recent lines survive and the
+# old seed is gone. (flock-gated — if flock is absent on the box this degrades to
+# the unlocked path, which CAN lose a line; guard the assertion on flock presence.)
+RACE_WORK="$(mktemp -d)"
+RMF="$RACE_WORK/metrics.jsonl"
+_old="$(date -u -d '200 days ago' +%Y-%m-%dT%H:%M:%SZ)"
+printf '{"schema_version":1,"ts":"%s","event":"old_seed"}\n' "$_old" > "$RMF"
+if command -v flock >/dev/null 2>&1; then
+  ( for _ in $(seq 1 120); do metrics_prune 90 "$RMF" 2>/dev/null; done ) &
+  _race_prune_pid=$!
+  ( export AUTONOMOUS_METRICS_DIR="$RACE_WORK" PROJECT_ID=race
+    for _ri in $(seq 1 100); do metrics_emit token_usage side=dev "issue=${_ri}" "total_tokens=${_ri}" 2>/dev/null; done )
+  wait "$_race_prune_pid" 2>/dev/null
+  _race_survived="$(jq -r 'select(.event=="token_usage") | .issue' "$RMF" 2>/dev/null | sort -n | uniq | wc -l | tr -d ' ')"
+  assert_eq "TC-METRICS-026 all 100 concurrent emits survive prune (lock serializes)" "100" "$_race_survived"
+  _race_oldseed="$(jq -r 'select(.event=="old_seed") | "y"' "$RMF" 2>/dev/null | head -1)"
+  assert_eq "TC-METRICS-026 old seed pruned" "" "$_race_oldseed"
+else
+  echo -e "  ${GREEN}PASS${NC}: TC-METRICS-026 SKIPPED (flock absent — unlocked fallback path)"; PASS=$((PASS + 1))
+fi
+rm -rf "$RACE_WORK"
+
 # ---------------------------------------------------------------------------
 echo ""
 echo "Results: ${PASS} passed, ${FAIL} failed"

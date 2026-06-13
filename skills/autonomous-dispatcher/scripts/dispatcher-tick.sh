@@ -294,6 +294,17 @@ for i in $(seq 0 $((pd_count - 1))); do
     continue
   fi
 
+  # [INV-67] Metrics: a below-limit retry increment. Emitted ONCE here, after the
+  # exhaustion gate and before ANY of the downstream pending-dev re-dispatch
+  # branches (PR-exists handoff, PTL fresh dev-new, completed-session routing,
+  # normal dev-resume), so every retry attempt — not just the final stall — lands
+  # in the event trail with `stalled=false` (#228 review: retry history was only
+  # recorded at exhaustion). The `stalled=true` event above stays for the
+  # exhaustion case. Best-effort, observe-only.
+  if declare -F metrics_emit >/dev/null 2>&1; then
+    metrics_emit dispatch_retry "issue=${issue_num}" "retry_count=${retry_count}" stalled=false || true
+  fi
+
   # Bug 3 (#99): if a PR already exists for this issue, the agent already
   # finished development — any subsequent crash (e.g. cleanup-time exit
   # non-zero after gh pr create) routed us to pending-dev, but re-developing

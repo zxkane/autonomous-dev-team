@@ -586,7 +586,10 @@ The review wrapper emits (all `metrics_emit … || true`, guarded on `declare -F
 pass/fail/all-unavailable, right after `_aggregate_review_verdicts`); one
 `review_agent_run` per fan-out member (the **per-CLI denominator** for the
 quota-failure rate — emitted for EVERY member so multi-agent fan-out counts
-non-default CLIs that `wrapper_end side=review` would miss); one `agent_drop` per
+non-default CLIs that `wrapper_end side=review` would miss); a `token_usage`
+`side=review` per member that ran (parsed from that member's generic per-agent
+log — claude JSON usage / codex tokens line — so cost-per-merged-PR counts review
+tokens, not just dev-side); one `agent_drop` per
 dropped/timed-out fan-out member, carrying the failure-class taxonomy reason
 (`metrics_map_drop_reason` maps each CLI's native drop token — agy quota/auth,
 codex config/stream, kiro auth — onto `agent-unavailable:*`). **Members dropped at

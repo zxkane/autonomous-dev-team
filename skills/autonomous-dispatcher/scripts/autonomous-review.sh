@@ -1487,6 +1487,12 @@ declare -a AGENT_CODEX_LOGS=()
 # Deterministic path, captured in the parent (no sidecar plumbing) — mirrors
 # AGENT_CODEX_LOGS.
 declare -a AGENT_KIRO_LOGS=()
+# [INV-67] (#228 round-8): the GENERIC per-agent log path ($_agent_log) for EVERY
+# member, regardless of CLI — this is where the agent's stdout (claude
+# `--output-format json` usage block, codex `tokens used` line) is captured. The
+# post-fan-out metrics loop passes it to metrics_parse_tokens to emit review-side
+# token_usage (review cost was previously dev-side-only, undercounting fleet cost).
+declare -a AGENT_GENERIC_LOGS=()
 # PIDs of the backgrounded per-agent subshells. We MUST `wait` these specific
 # PIDs — never a bare `wait`. A bare `wait` blocks on ALL background jobs of
 # this shell, which includes the long-lived gh-token-refresh-daemon (started
@@ -1564,6 +1570,15 @@ for _agent in "${REVIEW_AGENTS_LIST[@]}"; do
   _agent_kiro_log=""
   [[ "$_agent" == "kiro" ]] && _agent_kiro_log="$_agent_log"
   AGENT_KIRO_LOGS+=("$_agent_kiro_log")
+  # [INV-67] (#228 round-8): record the generic per-agent log for token parsing.
+  # For codex the token line is in its CLEAN stdout capture (AGENT_CODEX_LOGS),
+  # not the noisy generic log, so prefer that; every other CLI writes its usage
+  # block to $_agent_log.
+  if [[ "$_agent" == "codex" && -n "$_agent_codex_stdout" ]]; then
+    AGENT_GENERIC_LOGS+=("$_agent_codex_stdout")
+  else
+    AGENT_GENERIC_LOGS+=("$_agent_log")
+  fi
   _agent_prompt=$(build_review_prompt "$_agent" "$_agent_session_id")
   _agent_rc_file="${_FANOUT_DIR}/${_agent_session_id}.rc"
 
@@ -2093,6 +2108,21 @@ if declare -F metrics_emit >/dev/null 2>&1; then
     _mstate="${AGENT_VERDICTS[$_mi]}"
     metrics_emit review_agent_run side=review "agent_name=${AGENT_NAMES[$_mi]}" \
       "state=${_mstate}" "issue=${ISSUE_NUMBER:-}" "pr=${PR_NUMBER:-}" || true
+
+    # [INV-67] (#228 round-8): review-side token usage. Parse THIS member's
+    # generic per-agent log (claude `--output-format json` usage / codex `tokens
+    # used` line) and emit token_usage side=review keyed by issue/pr/agent_name —
+    # cost-per-merged-PR was previously dev-side only, undercounting fleet cost.
+    # Only for members that actually ran (a dropped/timed-out member produced no
+    # usable token output). Best-effort: parse failure → no emit.
+    if [[ "$_mstate" == "pass" || "$_mstate" == "fail" ]]; then
+      _mtok="$(metrics_parse_tokens "${AGENT_GENERIC_LOGS[$_mi]:-}" 2>/dev/null)" || _mtok=""
+      if [[ -n "$_mtok" ]]; then
+        # shellcheck disable=SC2086  # intentional word-split of the k=v fields
+        metrics_emit token_usage side=review "agent=${AGENT_NAMES[$_mi]}" \
+          "issue=${ISSUE_NUMBER:-}" "pr=${PR_NUMBER:-}" $_mtok || true
+      fi
+    fi
 
     [[ "$_mstate" == "unavailable" || "$_mstate" == "timed-out" ]] || continue
     _mtoken=""

@@ -418,8 +418,10 @@ The tick emits (all `metrics_emit … || true`, guarded on `declare -F`):
 `issue_labeled` at Step 2 when an issue is first picked up for dev-new (the TTHW
 "labeled" endpoint — first dispatch only, not resumes; carries a best-effort
 `labeled_at` fetched from the GitHub timeline so TTHW counts queued wait rather
-than measuring from the dispatch instant); `dispatch_retry` at Step 4
-when an issue hits `MAX_RETRIES` and is marked stalled; and `dispatch_stale` at
+than measuring from the dispatch instant); `dispatch_retry` at Step 4 — on EVERY
+below-limit pending-dev re-evaluation (`stalled=false`, so the full retry history
+is recorded, not just the final stall) AND once at `MAX_RETRIES` when the issue is
+marked stalled (`stalled=true`); and `dispatch_stale` at
 Step 5b when the dispatcher declares a dev or review wrapper DEAD *after* the
 INV-24 near-success cross-check has already cleared (so the declaration is a real
 crash, not a probe race). At the **end of each tick** it also prunes the metrics

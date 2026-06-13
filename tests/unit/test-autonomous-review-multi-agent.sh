@@ -173,6 +173,20 @@ assert_eq "TC-MAR-SRC-12 emit_verdict_trailer call count is 11 (6 legacy + 2 INV
   "11" "$EMIT_COUNT"
 
 # ---------------------------------------------------------------------------
+# TC-MAR-SRC-METRICS (#228 round-8 finding 2): review-side token_usage. The
+# fan-out records a GENERIC per-agent log for EVERY member, and the post-fan-out
+# metrics loop parses it (metrics_parse_tokens) to emit token_usage side=review
+# keyed by issue/pr/agent_name — so cost-per-merged-PR counts review tokens too,
+# not just dev-side.
+# ---------------------------------------------------------------------------
+assert_grep "TC-MAR-SRC-METRICS-01 captures AGENT_GENERIC_LOGS per member" \
+  'AGENT_GENERIC_LOGS\+=' "$WRAPPER"
+assert_grep "TC-MAR-SRC-METRICS-02 emits review-side token_usage" \
+  'metrics_emit token_usage side=review' "$WRAPPER"
+assert_grep "TC-MAR-SRC-METRICS-03 parses the generic log via metrics_parse_tokens" \
+  'metrics_parse_tokens "\$\{AGENT_GENERIC_LOGS' "$WRAPPER"
+
+# ---------------------------------------------------------------------------
 echo ""
 echo "=== TC-MAR-SRC-14: wrapper passes bash -n ==="
 # ---------------------------------------------------------------------------
