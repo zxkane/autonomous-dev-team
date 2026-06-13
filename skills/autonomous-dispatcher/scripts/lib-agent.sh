@@ -692,9 +692,9 @@ _agy_build_model_args() {
   [[ -n "$model" ]] || return 0
   _agy_known_model "$model"
   case $? in
-    0|2) # Known model or enumeration failed → forward. The eval uses 3-level quoting:
-         # outer quotes for eval, \\\\ for inner shell, \" for nested quotes. This ensures
-         # model names with spaces/parens (e.g. "Gemini 3.5 Flash (High)") expand as a single argv.
+    0|2) # Known model or enumeration failed → forward. eval is needed to assign
+         # to the dynamically-named caller array; the inner \"\$model\" keeps a
+         # multi-word name (e.g. "Gemini 3.5 Flash (High)") as ONE argv element.
       eval "$out_name=(--model \"\$model\")" ;;
     *)   # enumerated, model not in the list → skip + warn once.
       if [[ -z "${_LIB_AGENT_AGY_MODEL_WARNED:-}" ]]; then
