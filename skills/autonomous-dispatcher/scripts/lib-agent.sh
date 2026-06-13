@@ -681,6 +681,12 @@ _agy_known_model() {
 #   empty/unset model      → ()                    # no --model
 _agy_build_model_args() {
   local model="$1" out_name="$2"
+  # Strip newlines up-front so the SAME sanitized value is both validated and
+  # forwarded. _agy_known_model also strips for the grep check, but it operates
+  # on its own local copy — without this, a value that validates (e.g. a known
+  # name with a trailing newline) would still forward the raw newline as the
+  # --model arg. Sanitizing here closes that gap at the single forward point.
+  model="${model//$'\n'/}"
   # Reset the caller's array, then append only when a model should be forwarded.
   eval "$out_name=()"
   [[ -n "$model" ]] || return 0
