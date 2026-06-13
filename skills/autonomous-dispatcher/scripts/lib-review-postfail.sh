@@ -80,10 +80,17 @@ _classify_postfail_drop_reason() {
   [[ -n "$bc" && -f "$bc" && -r "$bc" ]] || return 0
 
   # Pull the recorded gh rc when present. A `gh_rc=<digits>` line is the only
-  # rc source; anything else yields the bare token. grep rc 1 (no match) is
-  # expected and consumed by the `if`, so this never aborts under set -e.
+  # rc source; anything else yields the bare token. When the breadcrumb has NO
+  # `gh_rc` line the `grep` exits 1, and under `set -o pipefail` the whole
+  # pipeline exits 1 too — which under `set -e` would abort THIS assignment.
+  # The `if` below tests `$rc_val`, NOT the pipeline rc, so it canNOT rescue a
+  # failed assignment (the failure happens at the assignment, before the `if`).
+  # The trailing `|| true` consumes the rc INSIDE the command substitution so
+  # the assignment always succeeds and the bare-`post-failed` path (a breadcrumb
+  # with no parseable rc — the documented partial-breadcrumb case) is reached
+  # instead of aborting the `set -euo pipefail` review wrapper. (#247 finding.)
   local rc_val
-  rc_val=$(grep -oE '^gh_rc=[0-9]+' "$bc" 2>/dev/null | head -1 | cut -d= -f2)
+  rc_val=$(grep -oE '^gh_rc=[0-9]+' "$bc" 2>/dev/null | head -1 | cut -d= -f2 || true)
   if [[ -n "$rc_val" ]]; then
     printf 'post-failed:gh-rc %s\n' "$rc_val"
   else

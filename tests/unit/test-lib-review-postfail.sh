@@ -155,6 +155,23 @@ assert_eq "TC-PF-DET-05 empty session id → empty" \
 ( set -euo pipefail; _classify_postfail_drop_reason "sid-DET06-absent" >/dev/null ); RC=$?
 assert_eq "TC-PF-DET-06 classifier returns 0 under set -euo pipefail" "0" "$RC"
 
+# TC-PF-DET-07 (#247 review finding): an EXISTING breadcrumb with NO `gh_rc` line,
+# classified under `set -euo pipefail` WITH `inherit_errexit`, must NOT abort and
+# must echo `post-failed`. The `grep` for `gh_rc` exits 1, so under `pipefail` the
+# whole pipeline exits 1; WITHOUT the `|| true` inside the command substitution
+# the failed assignment aborts the function before the bare-token path — but ONLY
+# when errexit propagates into the `$(...)`, i.e. under `shopt -s inherit_errexit`.
+# `inherit_errexit` is the condition that turns this latent defect active (a future
+# wrapper hardening could enable it), so the regression MUST set it — without it
+# bash 5.x suppresses errexit inside the substitution and even the buggy code
+# passes (DET-02/DET-06 each miss this). Verified red↔green: this fails against the
+# pre-`|| true` helper and passes after. Assert BOTH rc 0 (no abort) and the token.
+write_breadcrumb "sid-DET07"
+( set -euo pipefail; shopt -s inherit_errexit; _classify_postfail_drop_reason "sid-DET07" >/dev/null ); RC=$?
+assert_eq "TC-PF-DET-07a existing breadcrumb w/o gh_rc returns 0 under set -e + inherit_errexit (no abort)" "0" "$RC"
+assert_eq "TC-PF-DET-07b existing breadcrumb w/o gh_rc → post-failed under set -e + inherit_errexit" \
+  "post-failed" "$( set -euo pipefail; shopt -s inherit_errexit; _classify_postfail_drop_reason "sid-DET07" )"
+
 # ---------------------------------------------------------------------------
 echo "=== TC-PF-PHR: _postfail_drop_reason_phrase ==="
 # ---------------------------------------------------------------------------

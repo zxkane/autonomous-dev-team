@@ -28,7 +28,8 @@ pin `AUTONOMOUS_PID_DIR` (and `PROJECT_ID`) to a temp dir so the path is hermeti
 | TC-PF-DET-03 | no breadcrumb for the session | `` (empty) |
 | TC-PF-DET-04 | breadcrumb path is a dir / unreadable | `` (empty, no crash) |
 | TC-PF-DET-05 | empty session id arg | `` (empty, no crash) |
-| TC-PF-DET-06 | runs under `set -euo pipefail` | rc 0 (always) |
+| TC-PF-DET-06 | runs under `set -euo pipefail` (absent breadcrumb) | rc 0 (always) |
+| TC-PF-DET-07 | existing breadcrumb with **no** `gh_rc`, under `set -euo pipefail` + `inherit_errexit` (#247 finding) | rc 0 (no abort) AND `post-failed` — the `gh_rc` grep exits 1, so without `\|\| true` inside the `$(…)` the failed assignment aborts the wrapper once errexit propagates into the substitution |
 
 ## TC-PF-PHR: `_postfail_drop_reason_phrase <reason-token>`
 
