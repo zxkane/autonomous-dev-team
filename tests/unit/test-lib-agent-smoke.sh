@@ -366,26 +366,70 @@ out=$(_smoke_classify claude 3 "$STDOUT" "$NONCE" "")
 assert_eq "TC-AGENT-SMOKE-006a no nonce/no signal → FAIL" "FAIL" "${out%%|*}"
 assert_contains "TC-AGENT-SMOKE-006b reason=no-response" "no-response" "$out"
 
-# TC-AGENT-SMOKE-007 — timeout rc (124/137), no nonce, no signal → FAIL timeout
+# TC-AGENT-SMOKE-007 — timeout rc (124/137), no nonce, no signal → UNAVAILABLE timeout
+#   (#246, INV-63 amendment): a bare timeout with NO auth/config scraper signal is
+#   a transient backend slow-start / capacity blip on a Bedrock-backed CLI, NOT an
+#   operator config hang — so it classifies UNAVAILABLE (drop the member, let the
+#   review proceed), mirroring the INV-40 / INV-58 quota tolerance. Pre-#246 this
+#   returned FAIL, which aborted the entire Phase A.5 gate.
 : > "$STDOUT"
 out124=$(_smoke_classify claude 124 "$STDOUT" "$NONCE" "")
-assert_eq "TC-AGENT-SMOKE-007a rc 124 → FAIL" "FAIL" "${out124%%|*}"
+assert_eq "TC-AGENT-SMOKE-007a rc 124 (no signal) → UNAVAILABLE (#246)" "UNAVAILABLE" "${out124%%|*}"
 assert_contains "TC-AGENT-SMOKE-007b reason=timeout" "timeout" "$out124"
 out137=$(_smoke_classify claude 137 "$STDOUT" "$NONCE" "")
-assert_eq "TC-AGENT-SMOKE-007c rc 137 → FAIL timeout" "FAIL" "${out137%%|*}"
+assert_eq "TC-AGENT-SMOKE-007c rc 137 (no signal) → UNAVAILABLE timeout (#246)" "UNAVAILABLE" "${out137%%|*}"
+
+# TC-AGENT-SMOKE-007g — codex, rc 124, EMPTY capture (no stream-error/config-error):
+#   the #246 motivating shape (a one-off Bedrock slow-start of a healthy codex) →
+#   UNAVAILABLE, dropped, NOT a review-aborting FAIL.
+: > "$STDOUT"
+out=$(_smoke_classify codex 124 "$STDOUT" "$NONCE" "")
+assert_eq "TC-AGENT-SMOKE-007g codex rc 124 empty capture → UNAVAILABLE (#246 Bedrock slow-start)" \
+  "UNAVAILABLE" "${out%%|*}"
+
+# TC-AGENT-SMOKE-007h — kiro, rc 137, EMPTY capture (no auth signal) → UNAVAILABLE.
+: > "$STDOUT"
+out=$(_smoke_classify kiro 137 "$STDOUT" "$NONCE" "")
+assert_eq "TC-AGENT-SMOKE-007h kiro rc 137 empty capture → UNAVAILABLE (#246)" \
+  "UNAVAILABLE" "${out%%|*}"
 
 # TC-AGENT-SMOKE-008 — agy timed out (rc 124) BUT quota signal in log → UNAVAILABLE
-#   (environmental signal wins over the bare timeout)
+#   (environmental signal wins over the bare timeout; unchanged)
 : > "$STDOUT"
 cp "$FIXTURES/agy-quota-exhausted.fixture" "$AGYLOG"
 out=$(_smoke_classify agy 124 "$STDOUT" "$NONCE" "$AGYLOG")
 assert_eq "TC-AGENT-SMOKE-008 agy timeout+quota-in-log → UNAVAILABLE (env wins)" \
   "UNAVAILABLE" "${out%%|*}"
 
-# Negative: a CLEAN no-verdict agy log (no signal) at timeout → FAIL (timeout)
+# TC-AGENT-SMOKE-008b — a CLEAN no-verdict agy log (no signal) at timeout →
+#   UNAVAILABLE (#246: a bare timeout is environmental, not FAIL). Pre-#246 FAIL.
 printf 'I Antigravity 2.0 CLI (print mode)\nI Starting review turn\n' > "$AGYLOG"
 out=$(_smoke_classify agy 124 "$STDOUT" "$NONCE" "$AGYLOG")
-assert_eq "TC-AGENT-SMOKE-008b agy timeout, clean log → FAIL timeout" "FAIL" "${out%%|*}"
+assert_eq "TC-AGENT-SMOKE-008b agy timeout, clean log → UNAVAILABLE timeout (#246)" \
+  "UNAVAILABLE" "${out%%|*}"
+
+# TC-AGENT-SMOKE-008c — ORDERING PRESERVED (#246): a kiro that times out (rc 124)
+#   but whose capture carries an `auth-failed` signal STILL classifies FAIL — the
+#   per-CLI auth/config scraper (step 3) wins over the bare-timeout rule (step 4).
+#   Guards the "genuine config/launch FAIL is preserved" requirement.
+cp "$FIXTURES/kiro-auth-failed.fixture" "$STDOUT"
+out=$(_smoke_classify kiro 124 "$STDOUT" "$NONCE" "" "$STDOUT")
+assert_eq "TC-AGENT-SMOKE-008c kiro timeout+auth-failed → FAIL (auth signal beats bare timeout)" \
+  "FAIL" "${out%%|*}"
+assert_contains "TC-AGENT-SMOKE-008c-r reason names auth-failed" "auth-failed" "$out"
+
+# TC-AGENT-SMOKE-008d — ORDERING PRESERVED (#246): a codex that times out (rc 137)
+#   but whose capture carries a `config-error` clap-rejection STILL classifies FAIL.
+if [[ -f "$FIXTURES/codex-review-stdout-config-error.txt" ]]; then
+  cp "$FIXTURES/codex-review-stdout-config-error.txt" "$STDOUT"
+  out=$(_smoke_classify codex 137 "$STDOUT" "$NONCE" "" "$STDOUT")
+  assert_eq "TC-AGENT-SMOKE-008d codex timeout+config-error → FAIL (config signal beats bare timeout)" \
+    "FAIL" "${out%%|*}"
+  assert_contains "TC-AGENT-SMOKE-008d-r reason names config-error" "config-error" "$out"
+else
+  echo -e "  ${GREEN}PASS${NC}: TC-AGENT-SMOKE-008d SKIP (no codex config-error fixture)"; PASS=$((PASS + 1))
+  echo -e "  ${GREEN}PASS${NC}: TC-AGENT-SMOKE-008d-r SKIP (no codex config-error fixture)"; PASS=$((PASS + 1))
+fi
 
 rm -f "$STDOUT" "$AGYLOG"
 
@@ -477,13 +521,16 @@ out=$(PATH="$STUB_DIR:$ORIG_PATH" smoke_agent agy "" 5); rc=$?
 assert_rc "TC-AGENT-SMOKE-003c smoke_agent agy (quota log) → rc 2 UNAVAILABLE" 2 "$rc"
 assert_contains "TC-AGENT-SMOKE-003d evidence is UNAVAILABLE + quota reason" "SMOKE agy UNAVAILABLE" "$out"
 
-# TC-AGENT-SMOKE-007d — a hanging stub past the smoke timeout → rc 1 FAIL timeout.
+# TC-AGENT-SMOKE-007d — a hanging stub past the smoke timeout → rc 2 UNAVAILABLE
+#   timeout (#246): an unknown CLI (no per-CLI scraper) that hangs to the timeout
+#   with no signal is now an environmental drop, not a review-aborting FAIL.
 make_stub slowcli 'cat >/dev/null; sleep 30; exit 0'
 start=$(date +%s)
 out=$(PATH="$STUB_DIR:$ORIG_PATH" smoke_agent slowcli "" 1); rc=$?
 end=$(date +%s); el=$((end - start))
-assert_rc "TC-AGENT-SMOKE-007d hanging CLI past 1s timeout → rc 1 FAIL" 1 "$rc"
-assert_contains "TC-AGENT-SMOKE-007e evidence reason=timeout" "reason=timeout" "$out"
+assert_rc "TC-AGENT-SMOKE-007d hanging CLI past 1s timeout → rc 2 UNAVAILABLE (#246)" 2 "$rc"
+assert_contains "TC-AGENT-SMOKE-007e evidence is UNAVAILABLE + reason=timeout" "SMOKE slowcli UNAVAILABLE" "$out"
+assert_contains "TC-AGENT-SMOKE-007e2 evidence reason=timeout" "reason=timeout" "$out"
 if [[ "$el" -le 5 ]]; then
   echo -e "  ${GREEN}PASS${NC}: TC-AGENT-SMOKE-007f timeout fired within budget (${el}s)"; PASS=$((PASS + 1))
 else

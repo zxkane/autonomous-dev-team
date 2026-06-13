@@ -19,14 +19,21 @@
 #
 #   rc 0  PASS         — stdout contains the nonce; the model truly responded.
 #   rc 2  UNAVAILABLE  — quota exhausted / backend model capacity / transient
-#                        backend failure. ENVIRONMENTAL, self-healing — NOT a
-#                        failure. A follow-up gate records but does NOT block on
-#                        this (promoting a quota wall to a deciding FAIL would
-#                        block every PR whenever an agent's daily quota is spent).
+#                        backend failure, OR a BARE timeout with no auth/config
+#                        signal (#246: a Bedrock slow-start / capacity blip — see
+#                        _smoke_classify step 4). ENVIRONMENTAL, self-healing — NOT
+#                        a failure. A follow-up gate records but does NOT block on
+#                        this (promoting it to a deciding FAIL would block every PR
+#                        whenever an agent's daily quota is spent or its backend
+#                        has a one-off slow tick).
 #   rc 1  FAIL         — EVERYTHING ELSE: the CLI fails to launch, an auth/config
-#                        error, region drift, or a timeout with no response.
+#                        error, region drift, or a non-timeout no-response (a
+#                        prompt non-zero exit with no nonce and no signal).
 #                        Operator-side configuration breakage — this is what the
-#                        gate exists to catch.
+#                        gate exists to catch. (A timeout that DOES carry an
+#                        auth/config scraper signal is still FAIL — the signal wins
+#                        before the bare-timeout rule; only the bare timeout moved
+#                        to UNAVAILABLE in #246.)
 #
 # The split mirrors [INV-40]'s review-side treatment of `unavailable`:
 # FAIL = operator-side config/launch breakage (gate-worthy), UNAVAILABLE =
@@ -45,9 +52,12 @@
 #   agy   — _classify_agy_drop_reason   (INV-58): quota/auth from --log-file
 #   kiro  — _classify_kiro_drop_reason  (INV-61): browser/device-flow auth
 #   codex — _classify_codex_drop_reason (INV-62): upstream-5xx stream error
-# Quota/capacity/transient-backend signal → UNAVAILABLE; auth/config signal or
-# NO signal at all → FAIL (no signal = the model never answered and there is no
-# environmental excuse → conservative, gate-worthy default).
+# Quota/capacity/transient-backend signal → UNAVAILABLE; auth/config signal → FAIL.
+# A BARE timeout (rc 124/137) with NO scraper signal → UNAVAILABLE (#246: a
+# Bedrock slow-start / capacity blip, environmental). Any OTHER no-signal outcome
+# (a non-timeout prompt non-zero exit with no nonce) → FAIL — the model never
+# answered and there is no environmental excuse → conservative, gate-worthy
+# default.
 #
 # LAYER: wrapper-free. A follow-up issue will consume smoke_agent from the review
 # wrapper as a pre-fan-out gate (Phase A.5); this lib deliberately carries NO
@@ -259,12 +269,19 @@ _smoke_stdout_has_nonce() {
 #   1. nonce present in STDOUT ONLY         → PASS         reason=nonce-ok
 #   2. environmental signal (per-CLI scraper, quota/capacity/transient) → UNAVAILABLE
 #   3. auth/config signal (per-CLI scraper) → FAIL         reason=<scraper phrase>
-#   4. run_agent rc 124/137 (timeout/kill)  → FAIL         reason=timeout
-#   5. otherwise (no nonce, no signal)      → FAIL         reason=no-response
+#   4. run_agent rc 124/137 (timeout/kill)  → UNAVAILABLE  reason=timeout   (#246)
+#   5. otherwise (non-timeout, no nonce, no signal) → FAIL  reason=no-response
 #
-# Note step 2 is checked BEFORE the timeout step: an agy whose --log-file shows a
-# quota wall but whose CLI then hung to the timeout is still fundamentally an
-# environmental drop (TC-AGENT-SMOKE-008), so the environmental signal wins.
+# Note step 2/3 (the per-CLI scrapers) are checked BEFORE the timeout step: an agy
+# whose --log-file shows a quota wall, or a kiro whose capture shows auth-failed,
+# but whose CLI then hung to the timeout, resolves by the scraper signal — quota →
+# UNAVAILABLE (TC-AGENT-SMOKE-008), auth/config → FAIL (TC-AGENT-SMOKE-008c/d) —
+# NOT by the bare-timeout rule below. The step-4 reclassification (#246) only
+# changes the BARE timeout (no scraper signal) from FAIL to UNAVAILABLE: a bare
+# 124/137 on a Bedrock-backed CLI is a transient slow-start / capacity blip, the
+# same environmental tolerance as a quota wall — so the member is dropped, not the
+# whole [INV-64] review aborted. A non-timeout prompt non-zero exit (step 5) stays
+# FAIL (launch/config failure, not a capacity blip).
 _smoke_classify() {
   local agent="$1" rc="$2" stdout_file="$3" nonce="$4" agy_log="$5" stderr_file="${6:-}"
 
@@ -336,18 +353,38 @@ _smoke_classify() {
     auth-failed|config-error*)        printf 'FAIL|%s\n' "$phrase";        return 0 ;;
   esac
 
-  # 4. Timeout / kill with no nonce and no environmental signal. A smoke is a
-  #    one-token round-trip; a timeout here is a launch/auth/config hang, not a
-  #    legitimately-slow model — classify FAIL (gate-worthy).
+  # 4. Timeout / kill with no nonce and NO auth/config signal → UNAVAILABLE (#246).
+  #    A smoke is a one-token round-trip, and this branch is reached ONLY after the
+  #    per-CLI auth/config scrapers (steps 2/3) have already had their say — so a
+  #    `124`/`137` here is a BARE timeout with no operator-side evidence. On a
+  #    Bedrock-backed CLI (codex via IAM-role→Bedrock, or any model whose
+  #    first-token latency is backend-capacity dependent) a bare timeout is far
+  #    more likely a transient backend slow-start / capacity blip than a config
+  #    hang — i.e. ENVIRONMENTAL. Classifying it FAIL made one slow member abort an
+  #    entire Phase A.5 review fan-out ([INV-64]), stranding the issue in
+  #    `reviewing` for hours (a healthy codex that smoked PASS in 9s on another
+  #    dispatch the same day). So a bare timeout is UNAVAILABLE — the member is
+  #    dropped and the review proceeds on the survivors, the same tolerance
+  #    [INV-40] / [INV-58] (agy quota) / [INV-61] (kiro auth) apply: environmental
+  #    → drop, never a deciding veto. A timeout that DID carry an auth/config
+  #    signal already returned FAIL above (step 3), so genuine config breakage is
+  #    unaffected. (The fan-out's own post-window timeout-veto, [INV-48], is a
+  #    DIFFERENT path — a real review run that hit its 1h budget after producing no
+  #    verdict — and stays a deciding FAIL; this changes only the pre-fan-out
+  #    smoke probe.)
   if [[ "$rc" == "124" || "$rc" == "137" ]]; then
     # SMOKE_TIMEOUT_USED already carries its unit (e.g. `5s`/`2h`), so no trailing
     # `s` in the format — otherwise the reason would read `5ss` (#222 [P2]).
-    printf 'FAIL|timeout (no model response within %s)\n' "${SMOKE_TIMEOUT_USED:-?}"
+    printf 'UNAVAILABLE|timeout (no model response within %s)\n' "${SMOKE_TIMEOUT_USED:-?}"
     return 0
   fi
 
-  # 5. No nonce, no recognizable signal. The model never answered and we have no
-  #    environmental excuse → operator-side breakage. Conservative default.
+  # 5. No nonce, no recognizable signal, and NOT a timeout (a prompt non-zero exit
+  #    — the CLI launched and exited without producing the nonce). This shape is a
+  #    launch/config failure, not a capacity blip (a slow-start manifests as the
+  #    timeout branch above, not a prompt exit), so it stays the conservative,
+  #    gate-worthy FAIL (#246 keeps this branch FAIL — the change is scoped to the
+  #    124/137 timeout branch only).
   printf 'FAIL|no-response (rc=%s; nonce absent from CLI output)\n' "$rc"
   return 0
 }
