@@ -143,9 +143,15 @@ Faster `T_renew` buys lower `L_dead` linearly but raises the renewal-event rate
 | **120 s** (today) | 2 | 240 s | 30 | 750 |
 | 300 s | 2 | 600 s | 12 | 300 |
 
-> **The renewal column is the load-bearing number.** §6 shows that **only the
-> two slowest cadences keep C2 (comments) inside the secondary content-creation
-> limit at `N=25`**; C3 has no such ceiling.
+> **The renewal column is the load-bearing number.** Against the 500/hr GitHub
+> secondary content-creation limit (§6.4), at `N=25` **every cadence at or
+> faster than 120 s already exceeds it on renewals alone** (30 s→3000/hr,
+> 60 s→1500/hr, 120 s→750/hr — all over 500/hr). **Only the 300 s cadence
+> (300/hr renewals) is below 500/hr** — and even there, §6.5 shows the *lifecycle*
+> traffic (start/verdict/merge/end ×N runs) stacks on top and can still push C2
+> over the limit. So **no C2 (comment) renewal cadence at this fleet size is
+> comfortably safe**; 60 s and 120 s are outright rate-limit-unsafe, 300 s is
+> only renewal-safe. C3 (local) has no such ceiling at any cadence.
 
 ---
 
