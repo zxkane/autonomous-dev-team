@@ -86,8 +86,14 @@ concurrent runs**. Each cell: ✅ works · ⚠️ works with a caveat · ❌ fai
 remote-SSM read cell cleanly** (it works, but every read is a command
 round-trip, so it cannot be the cross-node ledger a reconciler polls). C1 is
 **hard-blocked in PAT mode**. C2 is the only candidate that is ✅ in **every
-auth/execution cell** and degrades only under rate-limit pressure (which §6
-quantifies and shows is survivable at the documented cadence).
+auth/execution cell** — but under fleet-scale rate-limit pressure it is viable
+**only for sparse lifecycle events, not for renewals**: §5.3 and §6.5 show that
+at `N=25` the lease/heartbeat *renewal* stream blows the 500/hr secondary
+content-creation limit at every cadence at or faster than 120 s (60 s→1500/hr,
+120 s→750/hr) and is not comfortably safe even at 300 s once lifecycle traffic
+stacks on top. So **comment renewals are rate-limit-unsafe at fleet scale**;
+C2 is viable only for the **sparse lifecycle events (start/verdict/merge/end)**
+and only when the per-run lifecycle count stays small (§6.5, §9.1).
 
 ---
 
