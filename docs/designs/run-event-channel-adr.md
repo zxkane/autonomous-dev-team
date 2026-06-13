@@ -284,12 +284,19 @@ fleet-wide R          = 25 × 42                               = 1050 /hr
 runs exceed the hourly content-creation ceiling if *every* renewal is a comment.
 
 **C2 with renewals NOT on the comment channel (lifecycle-only comments):**
+Review lifecycle is `4 + 3A` events/run (§6.1), so the count — and the budget —
+scales with the fan-out size `A`:
 ```
-events per run        = lifecycle ≈ 10  (NO renewal comments)
-fleet-wide R          = 25 × (10 / 0.33)                      = 25 × 30 = 750 /hr
+A=2 (10 events/run): R = 25 × (10 / 0.33)  = 25 × 30   = 750 /hr   ❌ over 500/hr
+A=1 ( 7 events/run): R = 25 × ( 7 / 0.33)  = 25 × 21.2 ≈ 530 /hr   ❌ still over 500/hr
+~4 events/run      : R = 25 × ( 4 / 0.33)  = 25 × 12.1 ≈ 300 /hr   ✅ under 500/hr
 ```
-→ **750/hr — still over 500/hr at A=2 fan-out.** Dropping to lifecycle-only
-(start/verdict/end, ≈4 events) gives `25 × 12 = 300/hr` → **✅ under 500/hr.**
+→ **Trimming the fan-out is NOT enough on its own**: even `A=1` (7 events/run)
+is ~530/hr, still over the limit. C2 stays under 500/hr only if the **per-run
+lifecycle comment count is capped at ~4** (the break-even is ~6 events/run:
+`25 × 6 / 0.33 ≈ 455/hr`, so ≤~6/run is safe, ~4/run leaves headroom). That
+means collapsing the per-reviewer lifecycle comments into a single aggregated
+set (start / aggregated-verdict / merge / end), not merely reducing `A`.
 
 **C1 (check-runs):** identical secondary-limit arithmetic (check-run create is
 also content-generating), **plus** it is ❌ in PAT mode regardless of rate.
@@ -309,7 +316,7 @@ AWS SSM quotas (generous; per-region `SendCommand` is hundreds/sec), not GitHub.
 |---|---|---|
 | **C1 check-runs** | ❌ 2250/hr ≫ 500/hr secondary limit | ❌ **doubly out** — also no `checks:write` for a PAT |
 | **C2 comments** (renewals as comments) | ❌ 2250/hr ≫ 500/hr | ❌ 2250/hr ≫ 500/hr (same shared identity) |
-| **C2 comments** (lifecycle-only, renewals NOT on comments) | ⚠️ ~750/hr at A=2 — over 500/hr; ✅ only if fan-out trimmed or A=1 (~300/hr) | ⚠️ same |
+| **C2 comments** (lifecycle-only, renewals NOT on comments) | ⚠️ ~750/hr at A=2 (10 events/run) and ~530/hr at A=1 (7 events/run) — both over 500/hr; ✅ only if lifecycle comments are **capped at ~4/run** (~300/hr) | ⚠️ same |
 | **C3 state-dir + SSM** | ✅ R_github = 0 — renewals never touch GitHub | ✅ R_github = 0 |
 
 **Conclusion of the math:** **no GitHub-backed channel can carry the 60 s
@@ -421,9 +428,11 @@ baseline will show this).
 2. **Sparse lifecycle events (start / verdict / merge / end) → C2 (create-only
    comments)** as the durable, auth-robust, cross-node ledger. C2 is the **only
    candidate ✅ in every auth × execution cell** (§3), needs only scopes the
-   pipeline already holds (§4), and stays inside the secondary limit *if* the
-   per-run lifecycle count is kept small (trim review fan-out duplication or cap
-   at ~4 lifecycle comments/run → ~300/hr at N=25).
+   pipeline already holds (§4), and stays inside the secondary limit *only if*
+   the per-run lifecycle comment count is **capped at ~4/run** (~300/hr at
+   N=25) — note trimming the fan-out alone is **not** enough (`A=1` is still
+   ~530/hr, §6.5), so the per-reviewer lifecycle comments must be collapsed into
+   a single aggregated set, not merely reduced.
 
 ### 9.2 Second choice
 
