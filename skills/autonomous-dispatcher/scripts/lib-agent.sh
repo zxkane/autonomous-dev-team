@@ -659,13 +659,19 @@ _agy_known_model() {
     if listing=$("${AGENT_CMD:-agy}" models 2>/dev/null) && [[ -n "$listing" ]]; then
       _LIB_AGENT_AGY_MODELS_CACHE="$listing"
     else
-      _LIB_AGENT_AGY_MODELS_CACHE="__ENUM_FAILED__"   # explicit sentinel (self-documenting for logs/debugging)
+      # \x01-wrapped sentinel: readable in logs yet un-typeable, so no real
+      # `agy models` line can ever collide with it (a plaintext sentinel could).
+      _LIB_AGENT_AGY_MODELS_CACHE=$'\x01__ENUM_FAILED__\x01'
     fi
     export _LIB_AGENT_AGY_MODELS_CACHE
   fi
-  [[ "$_LIB_AGENT_AGY_MODELS_CACHE" == "__ENUM_FAILED__" ]] && return 2  # can't validate
-  # Strip newlines from model to prevent injection bypass of grep -Fxq.
-  model="${model//$'\n'/}"
+  [[ "$_LIB_AGENT_AGY_MODELS_CACHE" == $'\x01__ENUM_FAILED__\x01' ]] && return 2  # can't validate
+  # Strip the whole control-char class (notably newline AND carriage return)
+  # before the grep -Fxq check: a newline would split into separate fixed-string
+  # patterns and an \r could whole-line-match a CRLF listing — both bypass
+  # validation. Mirrors the INV-60 [[:cntrl:]] guard in post-verdict.sh so the
+  # two model sites agree.
+  model="${model//[[:cntrl:]]/}"
   printf '%s\n' "$_LIB_AGENT_AGY_MODELS_CACHE" | grep -Fxq -- "$model"
 }
 
@@ -681,12 +687,15 @@ _agy_known_model() {
 #   empty/unset model      → ()                    # no --model
 _agy_build_model_args() {
   local model="$1" out_name="$2"
-  # Strip newlines up-front so the SAME sanitized value is both validated and
-  # forwarded. _agy_known_model also strips for the grep check, but it operates
-  # on its own local copy — without this, a value that validates (e.g. a known
-  # name with a trailing newline) would still forward the raw newline as the
-  # --model arg. Sanitizing here closes that gap at the single forward point.
-  model="${model//$'\n'/}"
+  # Strip the whole control-char class (notably newline AND carriage return)
+  # up-front so the SAME sanitized value is both validated and forwarded.
+  # _agy_known_model also strips for the grep check, but it operates on its own
+  # local copy — without this, a value that validates (e.g. a known name with a
+  # trailing newline OR \r) would still forward the raw control char as the
+  # --model arg. Must use the SAME [[:cntrl:]] class as _agy_known_model (and the
+  # INV-60 guard in post-verdict.sh), or a \r would validate yet leak to agy's
+  # --model.
+  model="${model//[[:cntrl:]]/}"
   # Reset the caller's array, then append only when a model should be forwarded.
   eval "$out_name=()"
   [[ -n "$model" ]] || return 0
