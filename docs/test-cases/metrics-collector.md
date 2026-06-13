@@ -73,7 +73,7 @@ ID format: `TC-METRICS-NNN`. Covers `lib-metrics.sh` (emitter + prune) and
 | TC-METRICS-056 | review-side token_usage costed | cost-per-merged-PR sums dev-side AND review-side `token_usage` per issue (1000 dev + 250 review = 1250); a review-only issue (500) is still costed — round-8 finding 2 |
 | TC-MAR-SRC-METRICS-01..03 | review token_usage wiring | the review wrapper captures `AGENT_GENERIC_LOGS` per member and emits `token_usage side=review` parsed from it via `metrics_parse_tokens` — round-8 finding 2 |
 
-## Regression — observe-only (INV-67)
+## Regression — observe-only (INV-70)
 
 | ID | Scenario | Expected |
 |---|---|---|

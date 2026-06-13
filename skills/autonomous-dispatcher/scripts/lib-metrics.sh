@@ -1,5 +1,5 @@
 #!/bin/bash
-# lib-metrics.sh — INV-67 observe-only metrics emitter for the autonomous
+# lib-metrics.sh — INV-70 observe-only metrics emitter for the autonomous
 # pipeline (issue #228).
 #
 # This is the redesign's measurement substrate: the stop-rule, the obsolescence
@@ -8,7 +8,7 @@
 # dispatcher; it is NOT executed standalone (no `set -e` at top — that would
 # leak into the caller's shell).
 #
-# Contract (INV-67): emission is **observe-only — silent-to-pipeline,
+# Contract (INV-70): emission is **observe-only — silent-to-pipeline,
 # loud-to-report**. Every `metrics_emit` call swallows all internal errors and
 # returns 0, so a metrics write failure (unwritable dir, missing jq, full disk)
 # can NEVER change a wrapper/dispatcher exit code, label transition, or verdict.
@@ -92,7 +92,7 @@ metrics_dir() {
 # metrics_emit <event-type> [key=value ...]
 #
 # Append a single JSON event line to <metrics_dir>/metrics.jsonl. Best-effort:
-# ALWAYS returns 0, swallows every internal error (INV-67). Values are passed to
+# ALWAYS returns 0, swallows every internal error (INV-70). Values are passed to
 # jq via --arg (string) so any character is safe; keys named `issue`,
 # `retry_count`, `rc`, `duration_s`, `input_tokens`, `output_tokens`,
 # `total_tokens` that look like integers are coerced to JSON numbers.
@@ -106,7 +106,7 @@ metrics_emit() {
   [[ -n "$event" ]] || return 0
   shift
 
-  # jq is mandatory for safe construction; absence is a silent no-op (INV-67).
+  # jq is mandatory for safe construction; absence is a silent no-op (INV-70).
   command -v jq >/dev/null 2>&1 || return 0
 
   local dir file
@@ -157,7 +157,7 @@ metrics_emit() {
   # appended concurrently). The lock is BEST-EFFORT — if flock is unavailable the
   # append still happens (only the prune-vs-append window is unprotected, and
   # prune is itself best-effort). The write failure (unwritable dir) is swallowed
-  # (INV-67 observe-only).
+  # (INV-70 observe-only).
   _metrics_locked_append "$file" "$line" || return 0
   return 0
 }
@@ -206,7 +206,7 @@ _metrics_prune_locked() {
 # metrics_map_drop_reason <agent-verdict-state> [cli-reason-token]
 #
 # Map a review fan-out agent's terminal state + optional per-CLI reason token
-# onto the INV-67 failure-class taxonomy. Pure function (echoes the class).
+# onto the INV-70 failure-class taxonomy. Pure function (echoes the class).
 #
 #   verdict state `timed-out`               → agent-unavailable:transient
 #   verdict state `unavailable` + reason:

@@ -579,7 +579,7 @@ flowchart TD
 
 This means if the script exits 0 (normal completion) but `RESULT_PARSED` was never set (logic bug), the trap silently leaves labels alone — defense-in-depth against a future refactor that forgets to set the flag would manifest as "issue stuck in `reviewing`" rather than "issue corrupted to `pending-dev` for no reason".
 
-### Observe-only metrics emission ([INV-67](invariants.md#inv-67-metrics-emission-is-observe-only--silent-to-pipeline-loud-to-report))
+### Observe-only metrics emission ([INV-70](invariants.md#inv-70-metrics-emission-is-observe-only--silent-to-pipeline-loud-to-report))
 
 The review wrapper emits (all `metrics_emit … || true`, guarded on `declare -F`):
 `wrapper_start` (before the agent fan-out); `verdict` (the aggregated INV-40

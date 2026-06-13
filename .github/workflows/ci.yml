@@ -49,7 +49,7 @@ jobs:
             exit 1
           }
 
-      # metrics-report E2E self-test (INV-67, #228): synthesize 3 months of
+      # metrics-report E2E self-test (INV-70, #228): synthesize 3 months of
       # events into a fixture and assert the four baseline numbers exactly. The
       # harness exits 0 on success and prints METRICS-E2E-SUMMARY.
       - name: metrics-report E2E fixture self-test

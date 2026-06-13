@@ -1,5 +1,5 @@
 #!/bin/bash
-# test-lib-metrics.sh — issue #228 / INV-67.
+# test-lib-metrics.sh — issue #228 / INV-70.
 #
 # Covers lib-metrics.sh: the observe-only metrics emitter, the token-usage
 # parser, the drop-reason→failure-class mapper, and the retention prune.
@@ -7,7 +7,7 @@
 #
 # Strategy: source the lib, point AUTONOMOUS_METRICS_DIR at a temp dir, exercise
 # metrics_emit / metrics_parse_tokens / metrics_map_drop_reason / metrics_prune,
-# and assert on the resulting JSONL with jq. The observe-only contract (INV-67)
+# and assert on the resulting JSONL with jq. The observe-only contract (INV-70)
 # is checked by emitting to an unwritable dir under `set -e` and asserting the
 # surrounding rc is unchanged.
 #
@@ -121,9 +121,9 @@ export AUTONOMOUS_METRICS_DIR="$WORK"
 assert_eq "TC-METRICS-008 no-PROJECT_ID returns 0" "0" "$?"
 
 # ---------------------------------------------------------------------------
-# Observe-only contract (INV-67)
+# Observe-only contract (INV-70)
 # ---------------------------------------------------------------------------
-echo "== observe-only (INV-67) =="
+echo "== observe-only (INV-70) =="
 
 # TC-METRICS-007 / TC-METRICS-060: unwritable dir under set -e → caller survives,
 # rc unchanged.

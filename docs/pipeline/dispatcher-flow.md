@@ -412,7 +412,7 @@ This branch is the safety net for the case where the wrapper died so abruptly th
 | Resume against a completed session | Step 4b.5 / 4b.5.1 | PR-6 added `is_session_completed` ([INV-12](invariants.md#inv-12-resume-only-against-unfinished-sessions)) — never resume into a closed SSE stream. Step 4b.5.1 ([INV-35](invariants.md#inv-35-review-aware-resume-routing-for-completed-sessions), #149) then routes the `completed` case based on the most recent post-completion review verdict: no verdict → operator handoff (original INV-12 notice); non-substantive failure → label-flip back to `pending-review`; substantive failure → `dev-new` (PTL pattern). Pre-INV-35, every completed-with-failed-review issue stuck indefinitely. The wall-clock timeout ([INV-13](invariants.md#inv-13-wall-clock-cap-on-agent-invocations)) remains the safety net for false negatives. |
 | Agent invocation hangs in CLI | wrapper, not dispatcher | Bounded by future wall-clock timeout ([#60](https://github.com/zxkane/autonomous-dev-team/issues/60), [INV-13](invariants.md#inv-13-wall-clock-cap-on-agent-invocations)). Until then the dispatcher's Step 5a is the only way to clear it. |
 
-## Observe-only metrics emission ([INV-67](invariants.md#inv-67-metrics-emission-is-observe-only--silent-to-pipeline-loud-to-report))
+## Observe-only metrics emission ([INV-70](invariants.md#inv-70-metrics-emission-is-observe-only--silent-to-pipeline-loud-to-report))
 
 The tick emits (all `metrics_emit … || true`, guarded on `declare -F`):
 `issue_labeled` at Step 2 when an issue is first picked up for dev-new (the TTHW
@@ -437,4 +437,4 @@ count, or a stale/DEAD declaration. See [`metrics.md`](metrics.md).
 - [`dev-agent-flow.md`](dev-agent-flow.md), [`review-agent-flow.md`](review-agent-flow.md) — what the dispatched wrapper does next.
 - [`handoffs.md`](handoffs.md) — Step 5 is the most race-prone handoff.
 - [`invariants.md`](invariants.md) — INV-01 through INV-11 are all referenced from this file.
-- [`metrics.md`](metrics.md) — the observe-only event log the tick appends to (INV-67).
+- [`metrics.md`](metrics.md) — the observe-only event log the tick appends to (INV-70).

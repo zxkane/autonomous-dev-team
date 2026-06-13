@@ -177,7 +177,7 @@ assert_grep "TC-REVIEW-SMOKE-047a pass branch rebuilds REVIEW_AGENTS_LIST to sur
   'REVIEW_AGENTS_LIST=\("\$\{_smoke_survivors\[@\]\}"\)' "$WRAPPER"
 assert_grep "TC-REVIEW-SMOKE-047b drop reason carries the smoke: prefix" \
   'smoke: ' "$WRAPPER"
-# TC-REVIEW-SMOKE-047c (#228 INV-67): smoke-dropped members are emitted to the
+# TC-REVIEW-SMOKE-047c (#228 INV-70): smoke-dropped members are emitted to the
 # metrics stream BEFORE REVIEW_AGENTS_LIST shrinks — otherwise the post-fan-out
 # metrics loop (iterating the surviving AGENT_NAMES) would never record their
 # quota/auth drop. Assert the pass-branch emits both review_agent_run and

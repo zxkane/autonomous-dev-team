@@ -1,10 +1,10 @@
-# Pipeline Metrics — event log + baseline aggregator (INV-67)
+# Pipeline Metrics — event log + baseline aggregator (INV-70)
 
 The metrics lane is the stability redesign's **measurement substrate**. It writes
 an append-only JSONL event log (`lib-metrics.sh`) and reads it back into the four
 baseline numbers the stop-rule and checkpoints consume (`metrics-report.sh`).
 
-It is **observe-only** — see [INV-67](invariants.md#inv-67-metrics-emission-is-observe-only--silent-to-pipeline-loud-to-report). A metrics
+It is **observe-only** — see [INV-70](invariants.md#inv-70-metrics-emission-is-observe-only--silent-to-pipeline-loud-to-report). A metrics
 failure can never change a wrapper/dispatcher exit code, label transition,
 verdict, or merge decision. Nothing in the pipeline control flow ever reads a
 metrics value back.
@@ -111,7 +111,7 @@ Prints four blocks (the redesign's baseline numbers):
    `merge`(success) (earliest). An issue missing an endpoint (PR never opened /
    never merged) is excluded from the affected statistic only.
 
-The report is the **loud** half of INV-67: gaps are `n/a` / explicit counts, never
+The report is the **loud** half of INV-70: gaps are `n/a` / explicit counts, never
 a silent zero — so a broken emitter shows up at report time.
 
 ## Extending the schema

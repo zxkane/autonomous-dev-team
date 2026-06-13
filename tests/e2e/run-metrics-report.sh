@@ -1,6 +1,6 @@
 #!/bin/bash
 # run-metrics-report.sh — E2E for the baseline metrics collector (issue #228,
-# INV-67). Test ID: TC-METRICS-080.
+# INV-70). Test ID: TC-METRICS-080.
 #
 # Synthesizes a deterministic THREE-MONTH metrics.jsonl event log (the kind
 # lib-metrics.sh writes across a fleet of dev→review→merge cycles), runs the

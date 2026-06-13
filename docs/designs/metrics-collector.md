@@ -125,7 +125,7 @@ Math is pure shell + `jq` + `awk` percentile (no float div-by-zero: guarded).
 `metrics.jsonl` in place (atomic temp-file rewrite). Retention is built into the
 collector per the issue.
 
-## INV-67 (new)
+## INV-70 (new)
 
 **Metrics emission is observe-only: silent-to-pipeline, loud-to-report.** A
 `metrics_emit` failure (unwritable dir, jq missing, disk full) MUST NOT change

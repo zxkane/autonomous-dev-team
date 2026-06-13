@@ -1,5 +1,5 @@
 #!/bin/bash
-# metrics-report.sh — INV-67 baseline metrics aggregator for the autonomous
+# metrics-report.sh — INV-70 baseline metrics aggregator for the autonomous
 # pipeline (issue #228).
 #
 # Reads the append-only metrics.jsonl event log(s) written by lib-metrics.sh and
@@ -12,7 +12,7 @@
 #   4. TTHW — issue labeled → first PR, and issue labeled → merged
 #      (avg / p50 / p90).
 #
-# This is the LOUD-to-report half of INV-67: gaps in the data (no token usage, a
+# This is the LOUD-to-report half of INV-70: gaps in the data (no token usage, a
 # CLI with zero runs, a PR that never merged) are surfaced as `n/a` / explicit
 # counts rather than silently coerced to zero, so a broken emitter is visible.
 #

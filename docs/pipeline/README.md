@@ -20,7 +20,7 @@ For the high-level overview and quick start, see [`docs/autonomous-pipeline.md`]
 | [`per-side-agent-cmd.md`](per-side-agent-cmd.md) | `AGENT_DEV_CMD` / `AGENT_REVIEW_CMD` — let dev and review run on different CLIs in the same project (INV-37). |
 | [`per-side-launcher.md`](per-side-launcher.md) | `AGENT_DEV_LAUNCHER` / `AGENT_REVIEW_LAUNCHER` — per-side launcher prefix; pairs with INV-37 to allow mixed-CLI deployments where only one side has a launcher (INV-38). |
 | [`agent-smoke.md`](agent-smoke.md) | The three-state agent-CLI smoke (`lib-agent-smoke.sh::smoke_agent`) + matrix harness — PASS / UNAVAILABLE / FAIL launch-auth-model probe through the production `run_agent` (INV-63). |
-| [`metrics.md`](metrics.md) | The observe-only metrics lane (`lib-metrics.sh` event log + `metrics-report.sh` aggregator) — event types, fields, failure-class taxonomy, and the four baseline numbers (incidents/month, cost-per-merged-PR, quota-failure rate, TTHW). Observe-only per INV-67. |
+| [`metrics.md`](metrics.md) | The observe-only metrics lane (`lib-metrics.sh` event log + `metrics-report.sh` aggregator) — event types, fields, failure-class taxonomy, and the four baseline numbers (incidents/month, cost-per-merged-PR, quota-failure rate, TTHW). Observe-only per INV-70. |
 
 ## Reading order
 

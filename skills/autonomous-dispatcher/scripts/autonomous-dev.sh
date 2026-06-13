@@ -32,7 +32,7 @@ LIB_DIR="$(cd "$(dirname "$(readlink -f "$_SELF")")" && pwd)"
 export AUTONOMOUS_CONF_DIR="$SCRIPT_DIR"
 source "${LIB_DIR}/lib-agent.sh"
 source "${LIB_DIR}/lib-auth.sh"
-# [INV-67] Observe-only metrics emitter. Sourced from LIB_DIR (skill tree) like
+# [INV-70] Observe-only metrics emitter. Sourced from LIB_DIR (skill tree) like
 # the other libs; provides metrics_emit/metrics_dir. A failure here must never
 # abort the wrapper, so the source itself is guarded.
 # shellcheck source=lib-metrics.sh
@@ -132,7 +132,7 @@ PID_DIR=$(pid_dir_for_project) || { echo "ERROR: cannot resolve PID dir" >&2; ex
 PID_FILE="${PID_DIR}/issue-${ISSUE_NUMBER}.pid"
 AGENT_RAN=false
 
-# [INV-67] Metrics: wrapper start. Best-effort, observe-only — never affects
+# [INV-70] Metrics: wrapper start. Best-effort, observe-only — never affects
 # wrapper behavior. METRICS_START_TS feeds the wrapper_end duration in cleanup().
 METRICS_START_TS=$(date +%s 2>/dev/null || echo 0)
 # Byte size of the shared per-issue agent log at START. dispatch-local.sh appends
@@ -432,7 +432,7 @@ POSTAPPROVAL
 cleanup() {
   local exit_code=$?
 
-  # [INV-67] Metrics: wrapper_end. Defined as a closure so both the early-return
+  # [INV-70] Metrics: wrapper_end. Defined as a closure so both the early-return
   # (agent-never-ran) path and the normal path emit it with the FINAL exit_code
   # (after the SIGTERM rewrite below). Best-effort, observe-only.
   _emit_dev_end() {
@@ -455,7 +455,7 @@ cleanup() {
       # shellcheck disable=SC2086  # intentional word-split of the k=v fields
       metrics_emit token_usage side=dev "issue=${ISSUE_NUMBER:-}" "agent=${AGENT_CMD:-claude}" $_tok || true
     fi
-    # [INV-67] Retention is built INTO the collector: prune the metrics log once
+    # [INV-70] Retention is built INTO the collector: prune the metrics log once
     # per wrapper run (here, at wrapper_end — not per emit, which would rewrite
     # the file on every line). Default METRICS_RETENTION_DAYS (90). Best-effort:
     # metrics_prune swallows all errors and returns 0, so a prune failure can
@@ -596,7 +596,7 @@ EOF
     log "Agent failed (exit $exit_code). Issue remains in pending-dev for retry."
   fi
 
-  # [INV-67] Metrics: emit wrapper_end with the FINAL exit_code (post SIGTERM
+  # [INV-70] Metrics: emit wrapper_end with the FINAL exit_code (post SIGTERM
   # rewrite). Also emit pr_opened for TTHW when this run handed off a PR.
   _emit_dev_end "$exit_code"
   if declare -F metrics_emit >/dev/null 2>&1 && [[ "${PR_EXISTS:-0}" -gt 0 ]]; then

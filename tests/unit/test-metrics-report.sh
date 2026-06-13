@@ -1,5 +1,5 @@
 #!/bin/bash
-# test-metrics-report.sh — issue #228 / INV-67.
+# test-metrics-report.sh — issue #228 / INV-70.
 #
 # Covers metrics-report.sh aggregation math on deterministic fixtures.
 # Test IDs: TC-METRICS-040..051.

@@ -602,13 +602,13 @@ DISPATCH_GRACE_PERIOD_SECONDS=600
 # wrapper-side spawn and the dispatcher-side mtime fallback.
 HEARTBEAT_INTERVAL_SECONDS=120
 
-# Metrics retention window ([INV-67], #228).
+# Metrics retention window ([INV-70], #228).
 # The observe-only metrics lane (lib-metrics.sh) appends one JSON event per
 # wrapper run / dispatcher decision to <state-dir>/metrics.jsonl. The aggregator
 # `metrics-report.sh --prune-days N` drops lines older than N days (atomic
 # rewrite); default 90. This var is the default N when --prune-days is omitted
 # and a prune is requested. Emission itself is observe-only: a metrics failure
-# NEVER affects wrapper/dispatcher behavior (INV-67), so leaving this default is
+# NEVER affects wrapper/dispatcher behavior (INV-70), so leaving this default is
 # always safe. See docs/pipeline/metrics.md.
 METRICS_RETENTION_DAYS=90
 

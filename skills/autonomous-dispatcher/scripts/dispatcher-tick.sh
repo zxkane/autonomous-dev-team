@@ -54,7 +54,7 @@ load_autonomous_conf "${SCRIPT_DIR}" || true
 # shellcheck source=lib-dispatch.sh
 source "${LIB_DIR}/lib-dispatch.sh"
 
-# [INV-67] Observe-only metrics emitter. Guarded so a load failure never aborts
+# [INV-70] Observe-only metrics emitter. Guarded so a load failure never aborts
 # the tick. Provides metrics_emit.
 # shellcheck source=lib-metrics.sh
 source "${LIB_DIR}/lib-metrics.sh" 2>/dev/null || true
@@ -212,7 +212,7 @@ for i in $(seq 0 $((new_count - 1))); do
 
   log "  dispatching dev-new for issue #${issue_num}"
   label_swap "$issue_num" "" "in-progress"
-  # [INV-67] Metrics: the issue is first picked up for autonomous work — the
+  # [INV-70] Metrics: the issue is first picked up for autonomous work — the
   # TTHW "labeled" endpoint. Emitted only on the first (dev-new) dispatch, not
   # on resumes/re-dispatches, so the aggregator's earliest-per-issue reduction
   # is anchored here. Best-effort, observe-only.
@@ -286,7 +286,7 @@ for i in $(seq 0 $((pd_count - 1))); do
   retry_count=$(count_retries "$issue_num")
   if [ "$retry_count" -ge "$MAX_RETRIES" ]; then
     log "  issue #${issue_num} retry exhausted ($retry_count/$MAX_RETRIES) — marking stalled"
-    # [INV-67] Metrics: retry exhausted → stalled. Best-effort, observe-only.
+    # [INV-70] Metrics: retry exhausted → stalled. Best-effort, observe-only.
     if declare -F metrics_emit >/dev/null 2>&1; then
       metrics_emit dispatch_retry "issue=${issue_num}" "retry_count=${retry_count}" stalled=true || true
     fi
@@ -294,7 +294,7 @@ for i in $(seq 0 $((pd_count - 1))); do
     continue
   fi
 
-  # [INV-67] Metrics: a below-limit retry increment. Emitted ONCE here, after the
+  # [INV-70] Metrics: a below-limit retry increment. Emitted ONCE here, after the
   # exhaustion gate and before ANY of the downstream pending-dev re-dispatch
   # branches (PR-exists handoff, PTL fresh dev-new, completed-session routing,
   # normal dev-resume), so every retry attempt — not just the final stall — lands
@@ -517,7 +517,7 @@ for i in $(seq 0 $((cand_count - 1))); do
           echo "INFO: issue ${issue_num} dev wrapper pid_alive miss but in-flight signal positive; deferring crash declaration ([INV-27])" >&2
           continue
         fi
-        # [INV-67] Metrics: dispatcher declared a dev wrapper DEAD with no PR.
+        # [INV-70] Metrics: dispatcher declared a dev wrapper DEAD with no PR.
         # Class false-stall (the near-success cross-check above already cleared,
         # so this is a real crash declaration, not a probe race). Best-effort.
         if declare -F metrics_emit >/dev/null 2>&1; then
@@ -565,7 +565,7 @@ for i in $(seq 0 $((cand_count - 1))); do
         echo "INFO: issue ${issue_num} review wrapper pid_alive miss but PR-state signal positive; deferring crash declaration (#111 INV-24)" >&2
         continue
       fi
-      # [INV-67] Metrics: dispatcher declared a review wrapper DEAD. Class
+      # [INV-70] Metrics: dispatcher declared a review wrapper DEAD. Class
       # false-stall (the review_near_success cross-check above already cleared).
       if declare -F metrics_emit >/dev/null 2>&1; then
         metrics_emit dispatch_stale "issue=${issue_num}" kind=reviewing failure_class=false-stall || true
@@ -577,7 +577,7 @@ for i in $(seq 0 $((cand_count - 1))); do
   fi
 done
 
-# [INV-67] Retention built into the collector: prune the metrics log once per
+# [INV-70] Retention built into the collector: prune the metrics log once per
 # tick (default 90d). The dispatcher runs on a cron cadence, so this is the
 # steady drumbeat that bounds the log even for a project whose wrappers rarely
 # run. Best-effort — metrics_prune always returns 0, so a prune failure can

@@ -1,5 +1,5 @@
 #!/bin/bash
-# test-metrics-report-e2e.sh — issue #228 / INV-67 / TC-METRICS-080.
+# test-metrics-report-e2e.sh — issue #228 / INV-70 / TC-METRICS-080.
 #
 # Thin wrapper so the CI `tests/unit/test-*.sh` loop runs the fixture-driven
 # three-month E2E (tests/e2e/run-metrics-report.sh) end-to-end. The real work +
