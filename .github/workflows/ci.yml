@@ -72,6 +72,7 @@ jobs:
             skills/autonomous-dispatcher/scripts/lib-review-codex.sh \
             skills/autonomous-dispatcher/scripts/lib-review-agy.sh \
             skills/autonomous-dispatcher/scripts/lib-review-kiro.sh \
+            skills/autonomous-dispatcher/scripts/lib-review-postfail.sh \
             skills/autonomous-dispatcher/scripts/lib-review-resolve.sh \
             skills/autonomous-dispatcher/scripts/lib-review-request-changes.sh \
             skills/autonomous-dispatcher/scripts/lib-review-smoke.sh \
