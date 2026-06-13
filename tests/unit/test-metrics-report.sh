@@ -224,6 +224,23 @@ emit "$LFIX2" "2026-06-01T04:00:00Z" event=pr_opened issue=2
 OUT_LBL2="$(bash "$REPORT" --file "$LFIX2" 2>&1 | sed -E 's/[[:space:]]+/ /g')"
 assert_contains "TC-METRICS-054 falls back to ts when no labeled_at (1h)" "labeled→first-PR: n=1 avg=1h0m p50=1h0m p90=1h0m" "$OUT_LBL2"
 
+# TC-METRICS-055: TTHW prefers pr_opened_at over ts (#228 round-7 finding 2). The
+# pr_opened event's `ts` is the wrapper-cleanup instant (here 3h after label);
+# `pr_opened_at` is the REAL PR createdAt (1h after label, e.g. PR opened before
+# tests finished). labeled→first-PR must be measured from pr_opened_at (1h), not
+# the cleanup ts (3h).
+PFIX="$(mktemp -d)/metrics.jsonl"; mkdir -p "$(dirname "$PFIX")"; : > "$PFIX"
+emit "$PFIX" "2026-06-01T00:00:00Z" event=issue_labeled issue=1 labeled_at=2026-06-01T00:00:00Z
+emit "$PFIX" "2026-06-01T03:00:00Z" event=pr_opened issue=1 pr_opened_at=2026-06-01T01:00:00Z
+OUT_PRA="$(bash "$REPORT" --file "$PFIX" 2>&1 | sed -E 's/[[:space:]]+/ /g')"
+assert_contains "TC-METRICS-055 TTHW uses pr_opened_at (1h) not cleanup ts (3h)" "labeled→first-PR: n=1 avg=1h0m p50=1h0m p90=1h0m" "$OUT_PRA"
+# Without pr_opened_at, falls back to the cleanup ts (3h).
+PFIX2="$(mktemp -d)/metrics.jsonl"; mkdir -p "$(dirname "$PFIX2")"; : > "$PFIX2"
+emit "$PFIX2" "2026-06-01T00:00:00Z" event=issue_labeled issue=2 labeled_at=2026-06-01T00:00:00Z
+emit "$PFIX2" "2026-06-01T03:00:00Z" event=pr_opened issue=2
+OUT_PRA2="$(bash "$REPORT" --file "$PFIX2" 2>&1 | sed -E 's/[[:space:]]+/ /g')"
+assert_contains "TC-METRICS-055 falls back to ts when no pr_opened_at (3h)" "labeled→first-PR: n=1 avg=3h0m p50=3h0m p90=3h0m" "$OUT_PRA2"
+
 echo ""
 echo "Results: ${PASS} passed, ${FAIL} failed"
 [[ $FAIL -eq 0 ]] || { echo "---- report output for debugging ----"; echo "$OUT"; exit 1; }

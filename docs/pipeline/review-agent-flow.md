@@ -598,9 +598,11 @@ auth/config error is a FAIL that aborts the whole gate, not a per-member drop, s
 only UNAVAILABLE-class smoke outcomes flow through `phase=smoke`). Each member
 therefore reaches the metrics stream exactly once. Then `merge`
 (success/failure, the TTHW merged endpoint + the `infra` failure class); and
-`wrapper_end` (in `cleanup()`, fired once for both the normal and crash paths). A
-metrics failure can never change the verdict, the merge decision, or the trap's
-label transitions. See [`metrics.md`](metrics.md).
+`wrapper_end` (in `cleanup()`, fired once for both the normal and crash paths).
+At `wrapper_end` it also **prunes the metrics log once per run**
+(`metrics_prune ${METRICS_RETENTION_DAYS:-90}`) so retention is enforced by normal
+collection. A metrics failure (emit or prune) can never change the verdict, the
+merge decision, or the trap's label transitions. See [`metrics.md`](metrics.md).
 
 ## Cross-references
 

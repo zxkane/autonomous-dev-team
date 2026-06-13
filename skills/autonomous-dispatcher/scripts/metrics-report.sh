@@ -295,15 +295,17 @@ echo
 # ===========================================================================
 # Endpoints come from events: issue_labeled (prefers labeled_at — the real
 # autonomous-label time from the GitHub timeline — over ts, the dispatch instant,
-# so queued wait is counted; #228 finding 4), pr_opened (first per issue), merge
-# result==success (ts). Missing endpoint → that issue is excluded from the
-# affected statistic (no synthetic zero).
+# so queued wait is counted; #228 finding 4), pr_opened (prefers pr_opened_at —
+# the real PR createdAt — over ts, the wrapper-cleanup instant, so a PR opened
+# before cleanup isn't overstated; #228 round-7 finding 2), merge result==success
+# (ts). Missing endpoint → that issue is excluded from the affected statistic
+# (no synthetic zero).
 echo "== 4. TTHW =="
 # Per-issue earliest labeled, earliest pr_opened, earliest successful merge.
 ISSUE_TS="$(printf '%s\n' "$EVENTS" | jq -r '
     select((.issue // "") != "") |
     if .event == "issue_labeled" then [(.issue|tostring), "labeled", (((.labeled_at // .ts))|fromdateiso8601)]
-    elif .event == "pr_opened" then [(.issue|tostring), "pr", (.ts|fromdateiso8601)]
+    elif .event == "pr_opened" then [(.issue|tostring), "pr", (((.pr_opened_at // .ts))|fromdateiso8601)]
     elif .event == "merge" and .result == "success" then [(.issue|tostring), "merged", (.ts|fromdateiso8601)]
     else empty end | @tsv' \
   | awk '

@@ -322,6 +322,41 @@ printf 'this is not json\n' >> "$PF3"
 metrics_prune 90 "$PF3"
 assert_eq "TC-METRICS-023 malformed dropped, valid kept" "keep" "$(jq -r .event "$PF3" | tr '\n' ' ' | sed 's/ $//')"
 
+# TC-METRICS-024 (#228 round-7 finding 1): retention is built INTO the collector,
+# not opt-in. A prune triggered during normal collection (default 90d) removes old
+# records and MUST NOT change the surrounding rc, even under `set -e`. Use the
+# default-file path (no explicit file arg) to mirror the wrapper call sites.
+PRUNE_WORK="$(mktemp -d)"
+_pe="$(date -u -d '100 days ago' +%Y-%m-%dT%H:%M:%SZ)"
+_pn="$(date -u -d '1 day ago'    +%Y-%m-%dT%H:%M:%SZ)"
+printf '{"schema_version":1,"ts":"%s","event":"old"}\n'    "$_pe" >  "$PRUNE_WORK/metrics.jsonl"
+printf '{"schema_version":1,"ts":"%s","event":"recent"}\n' "$_pn" >> "$PRUNE_WORK/metrics.jsonl"
+_prune_rc="$(bash -c '
+    set -euo pipefail
+    source "'"$LIB"'"
+    export AUTONOMOUS_METRICS_DIR="'"$PRUNE_WORK"'" PROJECT_ID=collprune
+    metrics_prune "${METRICS_RETENTION_DAYS:-90}" 2>/dev/null || true
+    echo "RC=$?"
+  ' 2>/dev/null)"
+assert_eq "TC-METRICS-024 collector prune under set -e keeps rc 0" "RC=0" "$_prune_rc"
+assert_eq "TC-METRICS-024 collector prune drops old, keeps recent (default-file path)" \
+  "recent" "$(jq -r .event "$PRUNE_WORK/metrics.jsonl" | tr '\n' ' ' | sed 's/ $//')"
+rm -rf "$PRUNE_WORK"
+
+# TC-METRICS-025 (#228 round-7 finding 1): the prune is WIRED into all three
+# production emission paths (dev wrapper_end, review wrapper_end, dispatcher tick)
+# — not just the opt-in report. Source-assert each, guarded best-effort.
+DEV_W="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/autonomous-dev.sh"
+REV_W="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/autonomous-review.sh"
+DISP_W="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/dispatcher-tick.sh"
+for _w in "$DEV_W" "$REV_W" "$DISP_W"; do
+  if grep -qF 'metrics_prune "${METRICS_RETENTION_DAYS:-90}"' "$_w"; then
+    echo -e "  ${GREEN}PASS${NC}: TC-METRICS-025 prune wired into $(basename "$_w")"; PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${NC}: TC-METRICS-025 prune NOT wired into $(basename "$_w")"; FAIL=$((FAIL + 1))
+  fi
+done
+
 # ---------------------------------------------------------------------------
 echo ""
 echo "Results: ${PASS} passed, ${FAIL} failed"

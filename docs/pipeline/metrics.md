@@ -18,7 +18,7 @@ metrics value back.
 | **Writer** | `lib-metrics.sh::metrics_emit` (one writer per wrapper run; no lock) |
 | **`metrics_dir`** | `${AUTONOMOUS_METRICS_DIR}` → `${XDG_STATE_HOME}/autonomous-<project>` → `${HOME}/.local/state/autonomous-<project>`. The fallback resolves **directly** to `$HOME/.local/state` (the issue's `${XDG_STATE_HOME:-$HOME/.local/state}` contract) and deliberately does NOT defer to `pid_dir_for_project`, which prefers the volatile `${XDG_RUNTIME_DIR}` tmpfs — metrics need **durable** retention, PID files don't, so they resolve differently. |
 | **Construction** | `jq -nc` only — never hand-rolled `echo` (values with quotes/newlines/`$()` stay valid JSON) |
-| **Retention** | `metrics_prune [days]` (default 90) drops lines older than N days; built into `metrics-report.sh --prune-days` |
+| **Retention** | `metrics_prune [days]` (default `METRICS_RETENTION_DAYS`, 90) drops lines older than N days. **Built into the collector**: the dev + review wrappers prune once per run at `wrapper_end`, and the dispatcher prunes once per tick — all best-effort (`\|\| true`, never affects rc). `metrics-report.sh --prune-days` is an additional opt-in path for ad-hoc/report-time pruning. |
 
 ## Event envelope
 
@@ -43,7 +43,7 @@ Every line carries this common envelope plus event-specific fields:
 | `wrapper_start` | dev + review wrappers | `side` (dev\|review), `mode` (dev only: new\|resume), `agent` | a wrapper began its run |
 | `wrapper_end` | dev + review cleanup trap | `side`, `rc`, `duration_s`, `agent` | a wrapper finished (FINAL rc, post SIGTERM-rewrite); duration in seconds |
 | `token_usage` | dev wrapper (cleanup) | `side`, `issue`, `agent`, `input_tokens`?, `output_tokens`?, `total_tokens`? | tokens the CLI reported (claude JSON `usage` / codex `tokens used`); absent fields omitted. Keyed by `issue` (the dev wrapper knows the issue, not the PR number) — `issue` is the join key for cost-per-merged-PR. Parsed from ONLY the current run's appended bytes (the wrapper records the shared per-issue log's byte-size at start and passes it as a parse offset) so a later run with no token line cannot re-emit a prior run's record |
-| `pr_opened` | dev wrapper (cleanup, PR present) | `side` | a PR exists for the issue — TTHW first-PR endpoint (earliest per issue wins) |
+| `pr_opened` | dev wrapper (cleanup, PR present) | `side`, `pr_opened_at`? (the real PR `createdAt` from GitHub) | a PR exists for the issue — TTHW first-PR endpoint (earliest per issue wins). The event `ts` is the wrapper-cleanup instant, which OVERSTATES TTHW when the PR was opened earlier in the run (before tests finished) or on a prior run; the aggregator prefers `pr_opened_at` (best-effort fetched) when present so the endpoint is the real PR-creation time |
 | `verdict` | review wrapper (post-aggregation) | `side`, `verdict` (pass\|fail\|all-unavailable), `pr` | the aggregated INV-40 review verdict |
 | `review_agent_run` | review wrapper (per fan-out member) | `side`, `agent_name`, `state` (pass\|fail\|unavailable\|timed-out), `phase`? (`smoke` when dropped pre-fan-out), `pr` | one fan-out member ran — the **per-CLI denominator** for quota-failure rate. Emitted for EVERY member, so multi-agent fan-out (`AGENT_REVIEW_AGENTS`) counts non-default CLIs that `wrapper_end side=review` (default `AGENT_CMD` only) would miss. A member dropped at the pre-fan-out smoke (INV-64, `REVIEW_SMOKE_ENABLED=true`) is recorded here with `phase=smoke` BEFORE it leaves the fan-out set, so pre-fan-out drops still reach metrics |
 | `agent_drop` | review wrapper (per dropped member) | `side`, `agent_name`, `reason` (failure-class), `phase`? (`smoke` when dropped pre-fan-out), `pr` | one fan-out agent dropped/timed-out, with its mapped failure class. Includes pre-fan-out smoke drops (`phase=smoke`) so quota/capacity drops removed before the fan-out are counted in the quota-failure rate + incidents. (An *auth/config* smoke is a FAIL that ABORTS the whole gate, not a per-member drop, so it has no `phase=smoke` agent_drop — only UNAVAILABLE-class smoke outcomes reach this path.) |
@@ -106,9 +106,10 @@ Prints four blocks (the redesign's baseline numbers):
    zero).
 4. **TTHW** — labeled→first-PR and labeled→merged, avg / p50 / p90 (nearest-rank
    percentile). Derived per issue from `issue_labeled` (earliest, using
-   `labeled_at` when present else `ts`), `pr_opened` (earliest), `merge`(success)
-   (earliest). An issue missing an endpoint (PR never opened / never merged) is
-   excluded from the affected statistic only.
+   `labeled_at` when present else `ts`), `pr_opened` (earliest, using
+   `pr_opened_at` — the real PR `createdAt` — when present else `ts`),
+   `merge`(success) (earliest). An issue missing an endpoint (PR never opened /
+   never merged) is excluded from the affected statistic only.
 
 The report is the **loud** half of INV-67: gaps are `n/a` / explicit counts, never
 a silent zero — so a broken emitter shows up at report time.

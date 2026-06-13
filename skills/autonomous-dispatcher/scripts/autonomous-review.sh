@@ -490,6 +490,10 @@ cleanup() {
       && _dur=$((_now - METRICS_START_TS))
     metrics_emit wrapper_end side=review "rc=${exit_code}" "duration_s=${_dur}" \
       "issue=${ISSUE_NUMBER:-}" "agent=${AGENT_CMD:-claude}" || true
+    # [INV-67] Retention built into the collector: prune once per review run
+    # (default 90d). Best-effort — metrics_prune always returns 0, so it can
+    # never affect the wrapper rc or the crash-path label transitions below.
+    metrics_prune "${METRICS_RETENTION_DAYS:-90}" 2>/dev/null || true
   fi
 
   # If result was already parsed by the main script, labels are handled there

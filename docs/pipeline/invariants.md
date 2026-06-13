@@ -2705,7 +2705,7 @@ Because every CLI posts through the SAME `post-verdict.sh`, this detector is **C
 
 The **report** half (`metrics-report.sh`) is the opposite: it is **loud** about gaps. Missing token data, a CLI with zero runs, a PR that never merged, an empty log — each is surfaced as an explicit `n/a` / count, never silently coerced to a zero that would hide a broken emitter.
 
-**Event schema**: every line is a flat JSON object built exclusively with `jq -nc` (never hand-rolled `echo`), carrying a `schema_version` (currently `1`) so later redesign phases can add fields without breaking the aggregator (which ignores unknown event types and unknown fields). Storage is `<metrics_dir>/metrics.jsonl`, append-only (`>>`, O_APPEND — atomic for single-line records, no lock). `metrics_dir` resolves `${AUTONOMOUS_METRICS_DIR}` → `${XDG_STATE_HOME}/autonomous-<project>` → `pid_dir_for_project` (co-located with `issue-N.pid`). The full event-type catalogue + failure-class taxonomy lives in [`metrics.md`](metrics.md).
+**Event schema**: every line is a flat JSON object built exclusively with `jq -nc` (never hand-rolled `echo`), carrying a `schema_version` (currently `1`) so later redesign phases can add fields without breaking the aggregator (which ignores unknown event types and unknown fields). Storage is `<metrics_dir>/metrics.jsonl`, append-only (`>>`, O_APPEND — atomic for single-line records, no lock). `metrics_dir` resolves `${AUTONOMOUS_METRICS_DIR}` → `${XDG_STATE_HOME}/autonomous-<project>` → `${HOME}/.local/state/autonomous-<project>` (the `${XDG_STATE_HOME:-$HOME/.local/state}` contract). The fallback resolves **directly** to `$HOME/.local/state` and deliberately does NOT defer to `pid_dir_for_project`, which prefers the volatile `${XDG_RUNTIME_DIR}` tmpfs — metrics need **durable** retention, PID files don't, so they resolve differently. Retention is built into the collector: the dev + review wrappers prune once per run at `wrapper_end` and the dispatcher prunes once per tick (`metrics_prune ${METRICS_RETENTION_DAYS:-90}`, best-effort). The full event-type catalogue + failure-class taxonomy lives in [`metrics.md`](metrics.md).
 
 **Failure-class taxonomy** (one enum, aligned with the redesign's factory classification): `verdict-absent`, `verdict-malformed`, `agent-unavailable(:quota|:auth|:config|:transient)`, `false-stall`, `label-race`, `infra`.
 
@@ -2718,7 +2718,7 @@ The **report** half (`metrics-report.sh`) is the opposite: it is **loud** about 
 
 **Cross-references**:
 - [`metrics.md`](metrics.md) — the event-type catalogue, field definitions, failure-class taxonomy, and `metrics-report.sh` output blocks.
-- [INV-01](#inv-01-pid-file-naming) — the per-project state dir (`pid_dir_for_project`) the metrics file co-locates with.
+- [INV-01](#inv-01-pid-file-naming) — the per-project PID dir (`pid_dir_for_project`). The metrics file does NOT co-locate with it: PID files prefer the volatile `${XDG_RUNTIME_DIR}`, metrics resolve to the durable `${XDG_STATE_HOME:-$HOME/.local/state}` instead.
 
 ## Adding a new invariant
 

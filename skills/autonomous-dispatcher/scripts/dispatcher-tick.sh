@@ -566,4 +566,13 @@ for i in $(seq 0 $((cand_count - 1))); do
   fi
 done
 
+# [INV-67] Retention built into the collector: prune the metrics log once per
+# tick (default 90d). The dispatcher runs on a cron cadence, so this is the
+# steady drumbeat that bounds the log even for a project whose wrappers rarely
+# run. Best-effort — metrics_prune always returns 0, so a prune failure can
+# never affect the tick. (#228 review: prune was opt-in via the report only.)
+if declare -F metrics_prune >/dev/null 2>&1; then
+  metrics_prune "${METRICS_RETENTION_DAYS:-90}" 2>/dev/null || true
+fi
+
 log "Tick complete. Dispatched: ${JUST_DISPATCHED[*]:-<none>}"

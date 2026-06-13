@@ -422,8 +422,12 @@ than measuring from the dispatch instant); `dispatch_retry` at Step 4
 when an issue hits `MAX_RETRIES` and is marked stalled; and `dispatch_stale` at
 Step 5b when the dispatcher declares a dev or review wrapper DEAD *after* the
 INV-24 near-success cross-check has already cleared (so the declaration is a real
-crash, not a probe race). A metrics failure can never change a label transition,
-a retry count, or a stale/DEAD declaration. See [`metrics.md`](metrics.md).
+crash, not a probe race). At the **end of each tick** it also prunes the metrics
+log (`metrics_prune ${METRICS_RETENTION_DAYS:-90}`) — the cron cadence is the
+steady drumbeat that bounds the log even for a project whose wrappers rarely run,
+so retention is enforced by normal collection rather than the opt-in report. A
+metrics failure (emit or prune) can never change a label transition, a retry
+count, or a stale/DEAD declaration. See [`metrics.md`](metrics.md).
 
 ## Cross-references
 

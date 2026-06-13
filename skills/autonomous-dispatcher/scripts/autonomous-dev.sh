@@ -455,6 +455,13 @@ cleanup() {
       # shellcheck disable=SC2086  # intentional word-split of the k=v fields
       metrics_emit token_usage side=dev "issue=${ISSUE_NUMBER:-}" "agent=${AGENT_CMD:-claude}" $_tok || true
     fi
+    # [INV-67] Retention is built INTO the collector: prune the metrics log once
+    # per wrapper run (here, at wrapper_end — not per emit, which would rewrite
+    # the file on every line). Default METRICS_RETENTION_DAYS (90). Best-effort:
+    # metrics_prune swallows all errors and returns 0, so a prune failure can
+    # never affect the wrapper's rc or label transitions (#228 review: prune was
+    # opt-in via the report only; normal collection never enforced retention).
+    metrics_prune "${METRICS_RETENTION_DAYS:-90}" 2>/dev/null || true
   }
 
   # Tear down the heartbeat loop fast (parent-pid watchdog would also
@@ -593,7 +600,22 @@ EOF
   # rewrite). Also emit pr_opened for TTHW when this run handed off a PR.
   _emit_dev_end "$exit_code"
   if declare -F metrics_emit >/dev/null 2>&1 && [[ "${PR_EXISTS:-0}" -gt 0 ]]; then
-    metrics_emit pr_opened side=dev "issue=${ISSUE_NUMBER:-}" || true
+    # The event `ts` is THIS cleanup instant, but the PR may have been opened
+    # earlier in the run (agent creates the PR before finishing tests) or on a
+    # prior run (resume hands off an already-open PR) — so `ts` OVERSTATES TTHW
+    # labeled→first-PR. Best-effort fetch the EARLIEST matching PR's real
+    # `createdAt` and emit it as `pr_opened_at`; the aggregator prefers it over
+    # `ts` (mirrors the issue_labeled→labeled_at fix). On any gh failure the
+    # field is omitted and the aggregator falls back to `ts` (#228 review).
+    _pr_created_at="$(gh pr list --repo "$REPO" --state all --json createdAt,body \
+      -q "[.[] | select(.body != null and ((.body | test(\"#${ISSUE_NUMBER}[^0-9]\")) or (.body | test(\"#${ISSUE_NUMBER}\$\"))))] | sort_by(.createdAt) | (.[0].createdAt // empty)" \
+      2>/dev/null || true)"
+    if [[ -n "${_pr_created_at:-}" ]]; then
+      metrics_emit pr_opened side=dev "issue=${ISSUE_NUMBER:-}" "pr_opened_at=${_pr_created_at}" || true
+    else
+      metrics_emit pr_opened side=dev "issue=${ISSUE_NUMBER:-}" || true
+    fi
+    unset _pr_created_at
   fi
 
   cleanup_github_auth

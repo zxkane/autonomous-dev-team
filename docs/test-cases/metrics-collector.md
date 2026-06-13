@@ -53,6 +53,16 @@ ID format: `TC-METRICS-NNN`. Covers `lib-metrics.sh` (emitter + prune) and
 | TC-METRICS-011 | `metrics_dir` durable fallback: `XDG_STATE_HOME` unset, `XDG_RUNTIME_DIR` set | resolves to `$HOME/.local/state/autonomous-<project>` (durable), never the volatile `XDG_RUNTIME_DIR` — finding 2 |
 | TC-METRICS-053 | Per-CLI quota denominator from `review_agent_run` | multi-agent fan-out: codex denominator counts its `review_agent_run` events (not the claude-only `wrapper_end`); rate correct — finding 3 |
 | TC-METRICS-054 | TTHW prefers `labeled_at` over `ts` | labeled→first-PR measured from the real label time (`labeled_at`) not the dispatch instant; falls back to `ts` when `labeled_at` absent — finding 4 |
+| TC-METRICS-073 | `metrics_map_drop_reason` prefix-match | suffixed token (`quota-exhausted:Resets in 2h`) + rendered phrase (`quota-exhausted (…)`) classify by canonical-token prefix, not exact — round-6 follow-up |
+| TC-METRICS-074 | `METRICS_LOG_OFFSET` capture under `set -e` | the `[[ -f ]]`-guarded `wc -c` survives a missing log (yields 0), does not abort the wrapper — round-6 follow-up |
+
+## Post-review regression (#228 round 7)
+
+| ID | Scenario | Expected |
+|---|---|---|
+| TC-METRICS-024 | Retention built into the collector | a `metrics_prune` triggered during normal collection (default 90d, default-file path) drops old records, keeps recent, and keeps rc 0 under `set -e` — round-7 finding 1 |
+| TC-METRICS-025 | Prune wired into all production paths | `metrics_prune ${METRICS_RETENTION_DAYS:-90}` is present in the dev wrapper_end, review wrapper_end, AND dispatcher tick (not just the opt-in report) — round-7 finding 1 |
+| TC-METRICS-055 | TTHW prefers `pr_opened_at` over `ts` | labeled→first-PR measured from the real PR `createdAt` (`pr_opened_at`) not the wrapper-cleanup instant; falls back to `ts` when `pr_opened_at` absent — round-7 finding 2 |
 
 ## Regression — observe-only (INV-67)
 
