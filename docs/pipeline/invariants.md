@@ -2642,6 +2642,27 @@ Sub-rules:
 - [INV-40](#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback) / [INV-58](#inv-58-agy-quotaauth-unavailable-drops-surface-a-distinct-reason-fan-out--reviewed-head-model-labels-are-per-agent) / [INV-61](#inv-61-kiro-authlogin-failure-unavailable-drops-surface-a-distinct-reason-not-a-bare-opaque-unavailable) — the same environmental → drop tolerance this extends to a bare timeout.
 - [INV-48](#inv-48-per-side-review-wall-clock-timeout-agent_review_timeout-1h-default-with-browser-e2e-exclusion-and-timeout-veto) — the DISTINCT fan-out timeout-veto (a deciding FAIL) this invariant does NOT touch.
 
+## INV-68: a routine re-dispatch preserves the prior run's per-issue log (single-generation rotation); only the INV-12 / INV-35 recovery branches truncate it deliberately
+
+**Rule**: when `dispatch-local.sh` prepares the per-issue agent log for a `dev-new` / `dev-resume` / `review` spawn, it MUST **preserve the prior run's log content** rather than zeroing it. The mechanism is **single-generation rotation**: if `…-${ISSUE}.log` already exists, `mv -f` it to `…-${ISSUE}.log.1` (overwriting any older `.1` — bounded to one extra generation per `(issue, type)`), then create the fresh current log `0600`. The rotated `.1` is forced to `0600` too, so the prior run's (possibly secret-bearing) output never becomes world-readable across rotation. A first dispatch (no existing log) creates only the fresh `0600` current log — no `.1`.
+
+The **only** code that may truncate the per-issue log is the deliberate recovery path:
+- [INV-12](#inv-12-resume-only-against-unfinished-sessions) `prompt_too_long` — `dispatcher-tick.sh` does `: > "$_ptl_log"` so the next tick's terminal-state gate doesn't re-read a stale `result` line and dispatch dev-new forever.
+- [INV-35](#inv-35-review-aware-resume-routing-for-completed-sessions) `failed-substantive` — `lib-dispatch.sh` does `: > "$_log_file"` for the same fail-closed reason.
+
+Those recovery-truncates clear the **current** log only; they never touch `…-${ISSUE}.log.1`, so even on the recovery path the immediately-prior run's log survives in the rotated generation. INV-68 MUST NOT disable or weaken them.
+
+**Why**: surfaced by #245. Pre-#245 `dispatch-local.sh` unconditionally zeroed the log via `install -m 600 /dev/null …log` on **every** dispatch (the `0600` hardening dates to #22; the truncate was a pure side effect — the wrapper redirects with `>>`). On a routine re-dispatch of the same issue (retry / resume / operator label flip) this destroyed the PRIOR run's stdout/stderr before the new run started. Observed in production: a review run on a consumer project aborted, the issue was re-dispatched ~4h later, and the second dispatch had already zeroed the log — the abort left **no recoverable evidence** and the stall had to be reconstructed from label timelines + comment archaeology. This is the **cheap tactical** mitigation; the strategic/durable fix is a per-run artifact directory (tracked separately, NOT a blocker, and explicitly out of scope here — this issue only changes how the existing `/tmp/agent-*.log` is (not) wiped on re-dispatch). (Landed as INV-68, after the smoke-timeout INV-67 (#246): several sibling PRs were in flight against the same `main`, so the final number was assigned at merge to avoid a duplicate-heading / broken-anchor collision.)
+
+**Producer**: `dispatch-local.sh` — the `prepare_agent_log()` helper (rotate-then-create) in the log-prep block, applied to both the `dev-new|dev-resume` and `review` arms.
+**Consumer**: any operator triaging a crashed/aborted run after a re-dispatch reads `…-${ISSUE}.log.1` for the prior run's evidence; the INV-12 / INV-35 recovery branches continue to truncate the current log only.
+**Status**: **ENFORCED** in #245.
+**Test**: `tests/unit/test-dispatch-local-log-retention.sh` (TC-LOGRET-1..8) drives the real `dispatch-local.sh` against a stub wrapper: seeds a sentinel in `…-{issue,review}-N.log`, re-dispatches, and asserts the sentinel survives in `…-N.log.1` (regression — fails before the fix); asserts the fresh current log AND the rotated `.1` are `0600`; asserts a first dispatch creates no spurious `.1`; asserts single-generation bound (no `.log.2`, `.1` holds the immediately-preceding run); asserts a symlinked current log does NOT let the rotation `chmod` follow through to the link target (CWE-59 guard — TC-LOGRET-8); and grep-asserts the INV-12 / INV-35 `: > "$log"` recovery-truncates survive (guard against an over-broad fix). Covers both the dev and review arms.
+
+**Cross-references**:
+- [INV-12](#inv-12-resume-only-against-unfinished-sessions) / [INV-35](#inv-35-review-aware-resume-routing-for-completed-sessions) — the deliberate recovery-truncates INV-68 preserves.
+- [`dispatcher-flow.md` § per-issue agent log retention (INV-68)](dispatcher-flow.md#per-issue-agent-log-retention-inv-69) — runtime walkthrough.
+
 ## Adding a new invariant
 
 When fixing a pipeline bug, after locating the bug on the state machine + flow docs:

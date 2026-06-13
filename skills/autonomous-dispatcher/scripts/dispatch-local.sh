@@ -55,11 +55,57 @@ source "${LIB_DIR}/lib-config.sh"
 
 PID_DIR=$(pid_dir_for_project) || { echo "ERROR: cannot resolve PID dir" >&2; exit 1; }
 
-# Pre-create log files with restrictive permissions (agent output may contain secrets)
+# Prepare the per-issue agent log with restrictive permissions (agent output
+# may contain secrets — the 0600 hardening dates to #22).
+#
+# [INV-68] Re-dispatch log retention. Pre-#245 this block unconditionally
+# zeroed the log (`install -m 600 /dev/null …log`). The wrapper then redirects
+# with `>>` (append), so the truncate was pure side effect — and on a routine
+# re-dispatch of the same issue (retry / resume / operator label flip) it
+# destroyed the PRIOR (often crashed) run's stdout/stderr before the new run
+# started, leaving no forensic trail to triage the failure.
+#
+# Now we ROTATE: move the existing log to a single `…-N.log.1` generation
+# before creating the fresh 0600 current log. `mv -f` overwrites any older
+# `.1`, so disk is bounded to one extra generation per (issue, type) — no
+# unbounded `.log.1 .log.2 …` accumulation. The rotated `.1` is forced to
+# 0600 too, so the prior run's (possibly secret-bearing) output never becomes
+# world-readable across rotation.
+#
+# This does NOT touch the deliberate INV-12 (`prompt_too_long`,
+# dispatcher-tick.sh) / INV-35 (`failed-substantive`, lib-dispatch.sh)
+# recovery-truncates: those `: > "$log"` the CURRENT log on purpose so the
+# next tick's terminal-state gate doesn't re-read a stale `result` line and
+# loop forever. Rotation here leaves a fresh empty current log per dispatch,
+# which preserves that invariant; the recovery branches remain the explicit
+# fail-closed guard for the mid-cycle fresh-dev mint (where no dispatch-local
+# rotation has happened yet). The recovery-truncate clears `…-N.log` only — it
+# never touches `…-N.log.1`, so even on that path the immediately-prior run's
+# log survives.
+prepare_agent_log() {
+  local log="$1"
+  if [[ -f "$log" ]]; then
+    # Single-generation rotation; overwrite any older .1 (bounded disk).
+    # `mv` moves the path entry itself (it does NOT follow a symlinked
+    # current log through to its target), so a symlinked $log becomes a
+    # symlinked ${log}.1.
+    mv -f "$log" "${log}.1" 2>/dev/null || true
+    # Force 0600 on the rotated generation — `mv` preserves the source mode,
+    # so a prior log left at a looser mode (pre-#22 file / external writer)
+    # would otherwise carry it over. Skip if ${log}.1 is a symlink: `chmod`
+    # FOLLOWS symlinks, so a planted `…log -> /victim` would let us flip the
+    # victim's perms (CWE-59). Same symlink-refusal posture as
+    # kill_stale_wrapper's PID-file handling above. A symlinked log is never
+    # something we wrote, so declining to chmod it is correct, not a gap.
+    [[ -L "${log}.1" ]] || chmod 600 "${log}.1" 2>/dev/null || true
+  fi
+  install -m 600 /dev/null "$log" 2>/dev/null || true
+}
+
 LOG_PREFIX="/tmp/agent-${PROJECT_ID}"
 case "$TYPE" in
-  dev-new|dev-resume) install -m 600 /dev/null "${LOG_PREFIX}-issue-${ISSUE_NUM}.log" 2>/dev/null || true ;;
-  review)             install -m 600 /dev/null "${LOG_PREFIX}-review-${ISSUE_NUM}.log" 2>/dev/null || true ;;
+  dev-new|dev-resume) prepare_agent_log "${LOG_PREFIX}-issue-${ISSUE_NUM}.log" ;;
+  review)             prepare_agent_log "${LOG_PREFIX}-review-${ISSUE_NUM}.log" ;;
 esac
 
 # Kill any stale wrapper that still holds the PID file for this issue+type.

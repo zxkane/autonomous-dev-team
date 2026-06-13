@@ -58,6 +58,29 @@ The rest of this document treats `dispatch()` and `pid_alive` as
 backend-agnostic; everything below applies regardless of which backend
 is in use.
 
+## Per-issue agent log retention ([INV-68](invariants.md#inv-68-a-routine-re-dispatch-preserves-the-prior-runs-per-issue-log-single-generation-rotation-only-the-inv-12--inv-35-recovery-branches-truncate-it-deliberately))
+
+Every wrapper spawn writes stdout+stderr to a per-issue log on the box that runs `dispatch-local.sh`:
+
+| Type | Log path |
+|---|---|
+| `dev-new` / `dev-resume` | `/tmp/agent-${PROJECT_ID}-issue-${ISSUE}.log` |
+| `review` | `/tmp/agent-${PROJECT_ID}-review-${ISSUE}.log` |
+
+Before spawning, `dispatch-local.sh` prepares this log via `prepare_agent_log()`. The log is created `0600` because agent output may contain secrets (hardening from #22). The wrapper itself redirects with `>>` (append) for the duration of one run.
+
+**Retention on re-dispatch (single-generation rotation).** Because a wrapper crash/abort + re-dispatch (retry, resume, operator label flip) is routine, `prepare_agent_log()` MUST NOT zero an existing log — that would destroy the prior (often crashed) run's forensic evidence before the new run starts. Instead it **rotates**:
+
+1. If `…-${ISSUE}.log` already exists, `mv -f` it to `…-${ISSUE}.log.1` (overwriting any older `.1`).
+2. `chmod 600 "…-${ISSUE}.log.1"` — the rotated generation is also `0600`, so prior-run output never becomes world-readable across rotation.
+3. `install -m 600 /dev/null "…-${ISSUE}.log"` — fresh `0600` current log for the new run.
+
+Disk is bounded to one extra generation per `(issue, type)` — `mv -f` discards run *N-2* when it rotates run *N-1*, so only the current log and the single immediately-preceding run's log ever exist. A first dispatch (no existing log) creates only the fresh `0600` current log; no `.1` is produced.
+
+To triage a crashed run after it has been re-dispatched, read `…-${ISSUE}.log.1` (the immediately-preceding run); `…-${ISSUE}.log` holds the latest run.
+
+**The only deliberate truncates are the recovery branches.** [INV-12](invariants.md#inv-12-resume-only-against-unfinished-sessions) (`prompt_too_long`, `dispatcher-tick.sh`) and [INV-35](invariants.md#inv-35-review-aware-resume-routing-for-completed-sessions) (`failed-substantive`, `lib-dispatch.sh`) intentionally `: > "$log"` the **current** per-issue log mid-cycle so the next tick's terminal-state gate doesn't re-read a stale `{"type":"result"}` line and dispatch dev-new forever. INV-68 does not change them — and because they clear `…-${ISSUE}.log` only (never `…-${ISSUE}.log.1`), even on the recovery path the immediately-prior run's log survives in the rotated generation.
+
 ## Tick lifecycle
 
 ```mermaid
