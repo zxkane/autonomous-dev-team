@@ -119,6 +119,23 @@ source "${LIB_DIR}/lib-review-smoke.sh"
 # INV-40 vote (an auth-failed kiro stays dropped, not a deciding FAIL). Inert
 # unless a fan-out agent is kiro AND it was dropped.
 source "${LIB_DIR}/lib-review-kiro.sh"
+# shellcheck source=lib-review-postfail.sh
+# INV-69 (#247): CLI-AGNOSTIC post-failed verdict drop-reason detector. Every
+# review CLI posts its verdict through the SAME deterministic helper post-verdict.sh
+# (INV-56). When that helper's `gh issue comment` returns non-zero it exits 1 — but
+# it runs INSIDE the agent's session, so the wrapper never sees that exit; a verdict
+# whose post failed at `gh` time collapses into the same opaque `unavailable`
+# (INV-40) as an agent that never reviewed. post-verdict.sh now drops a session-keyed
+# breadcrumb (verdict-postfail-<session_id> under pid_dir_for_project()) on a failed
+# post; _classify_postfail_drop_reason reconstructs that path from the agent's own
+# session id so the wrapper can surface a distinct, actionable `post-failed` reason.
+# CLI-agnostic — keys on a session id, not a per-CLI log — so it is evaluated FIRST,
+# before the per-CLI agy/codex/kiro scrapers (a confirmed post failure is the most
+# specific cause). Both helpers ALWAYS `return 0` (lib-review-postfail.sh). Observability
+# only — does NOT change the INV-40 vote (a post-failed agent stays dropped, not a
+# deciding FAIL). [INV-65] sourced from the real skill tree via LIB_DIR (no project
+# symlink).
+source "${LIB_DIR}/lib-review-postfail.sh"
 # shellcheck source=lib-review-request-changes.sh
 # INV-52 (#193): the wrapper OWNS the GitHub-native PR review action — `--approve`
 # on a PASS and `--request-changes` on a SUBSTANTIVE FAIL — so the PR's
@@ -1931,12 +1948,24 @@ for _i in "${!AGENT_NAMES[@]}"; do
   case "${AGENT_VERDICTS[$_i]}" in
     unavailable)
       _dropped_agents+="${AGENT_NAMES[$_i]} "
+      # INV-69 (#247): CLI-AGNOSTIC post-failed check, evaluated FIRST. If this
+      # dropped agent left a post-failed breadcrumb (its verdict post failed at `gh`
+      # time, INV-56 helper exited 1), that is the most specific reason — surface it
+      # and SKIP the per-CLI scrapers (no double-attribution). _classify_postfail_drop_reason
+      # ALWAYS `return 0` (lib-review-postfail.sh) and is fail-safe on a missing /
+      # unreadable breadcrumb (empty token) — load-bearing under `set -e`: a non-zero
+      # `$(…)` in this append would abort the wrapper mid-loop and strand the issue
+      # in `reviewing`. With no breadcrumb the token is empty → fall through to the
+      # per-CLI agy/codex/kiro branches unchanged.
+      _postfail_reason_token=$(_classify_postfail_drop_reason "${AGENT_SESSION_IDS[$_i]:-}")
+      if [[ -n "$_postfail_reason_token" ]]; then
+        _dropped_reasons+="${AGENT_NAMES[$_i]}: $(_postfail_drop_reason_phrase "$_postfail_reason_token"); "
       # Scrape the agy log for a quota/auth signal when this dropped agent is agy.
       # Both helpers ALWAYS `return 0` (lib-review-agy.sh) — load-bearing here: an
       # append-assignment whose embedded `$(…)` returns non-zero aborts under
       # `set -e`, so a non-zero phrase helper would crash the wrapper mid-loop and
       # strand the issue in `reviewing`. Keep them rc-0-always.
-      if [[ "${AGENT_NAMES[$_i]}" == "agy" ]]; then
+      elif [[ "${AGENT_NAMES[$_i]}" == "agy" ]]; then
         _agy_reason_token=$(_classify_agy_drop_reason "${AGENT_AGY_LOGS[$_i]:-}")
         if [[ -n "$_agy_reason_token" ]]; then
           _dropped_reasons+="${AGENT_NAMES[$_i]}: $(_agy_drop_reason_phrase "$_agy_reason_token"); "

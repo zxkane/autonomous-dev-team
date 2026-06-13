@@ -81,6 +81,16 @@ for _conf_candidate in \
 done
 REPO="${GITHUB_REPO:-${REPO:-owner/repo}}"
 
+# [INV-69] Source lib-config.sh for pid_dir_for_project() — the deterministic dir
+# under which a failed-post breadcrumb is written (the wrapper reconstructs the
+# same path from the agent's session id). Co-located in the dispatcher scripts/
+# dir (a sibling of this helper). Best-effort: if it's absent, the breadcrumb is
+# simply skipped — it is a diagnostic, never load-bearing for the exit code.
+if [[ -f "${SCRIPT_DIR}/lib-config.sh" ]]; then
+  # shellcheck source=lib-config.sh
+  source "${SCRIPT_DIR}/lib-config.sh"
+fi
+
 ISSUE_NUMBER="${1:-}"
 VERDICT_RAW="${2:-}"
 BODY_FILE="${3:-}"
@@ -247,6 +257,40 @@ set -e
 if [[ $POST_RC -ne 0 ]]; then
   echo "Error: failed to post verdict comment on issue #${ISSUE_NUMBER} (gh rc=${POST_RC})" >&2
   echo "$URL" >&2
+  # [INV-69] Drop a session-keyed breadcrumb so the review wrapper can surface a
+  # distinct `post-failed` drop reason (vs. the bare opaque `unavailable` a
+  # never-reviewed agent produces). The wrapper reconstructs this exact path from
+  # the agent's own session id. BEST-EFFORT: any failure to write it (lib-config
+  # absent, pid dir unresolvable / unwritable) is swallowed — the breadcrumb is a
+  # diagnostic and MUST NOT change this helper's exit code, which stays 1 on the
+  # underlying post failure. Written only here (on a failed post); a successful
+  # post leaves no breadcrumb.
+  if declare -F pid_dir_for_project >/dev/null 2>&1; then
+    _bc_dir=$(pid_dir_for_project 2>/dev/null || true)
+    if [[ -n "${_bc_dir:-}" && -d "$_bc_dir" ]]; then
+      _bc="${_bc_dir}/verdict-postfail-${SESSION_ID}"
+      # The actual confidentiality guarantee is the parent pid dir (0700,
+      # owner-only — enforced by lib-config.sh::pid_dir_for_project). Belt-and-
+      # suspenders, we ALSO make the breadcrumb itself 0600: a `umask 077` in the
+      # subshell means the create (`: > "$_bc"`) lands at 0600 with NO window in
+      # which it is group/world-readable, and a final `chmod 600` self-heals if the
+      # file pre-existed at a looser mode. The whole block runs in a
+      # `( set +e … ) || true` subshell so a write race / permission issue can never
+      # abort the helper under `set -e` — the breadcrumb is best-effort and MUST NOT
+      # change the exit code (stays 1 below).
+      ( set +e
+        umask 077
+        : > "$_bc" 2>/dev/null
+        {
+          printf 'issue=%s\n' "$ISSUE_NUMBER"
+          printf 'agent=%s\n' "$AGENT_NAME"
+          printf 'session=%s\n' "$SESSION_ID"
+          printf 'gh_rc=%s\n' "$POST_RC"
+        } >> "$_bc" 2>/dev/null
+        chmod 600 "$_bc" 2>/dev/null
+      ) || true
+    fi
+  fi
   exit 1
 fi
 

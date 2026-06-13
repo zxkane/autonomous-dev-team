@@ -28,6 +28,7 @@ FAIL=0
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 HELPER_SRC="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/post-verdict.sh"
+LIBCONFIG_SRC="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-config.sh"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -107,8 +108,18 @@ STUB
   # the stub.
   cp "$HELPER_SRC" "$sb/post-verdict.sh"
   chmod +x "$sb/post-verdict.sh"
+  # INV-69: the helper sources its sibling lib-config.sh for pid_dir_for_project
+  # (the breadcrumb path). Copy it alongside so the SCRIPT_DIR-relative source
+  # resolves in the sandbox (mirrors the `gh` proxy colocated above).
+  [[ -f "$LIBCONFIG_SRC" ]] && cp "$LIBCONFIG_SRC" "$sb/lib-config.sh"
   printf '%s' "$sb"
 }
+
+# breadcrumb_path <sandbox> <session_id> — the deterministic INV-69 path. Tests
+# pin AUTONOMOUS_PID_DIR to "<sandbox>/piddir" so the path is hermetic and the
+# wrapper-side reconstruction (pid_dir_for_project()/verdict-postfail-<sid>) is
+# exercised end-to-end.
+breadcrumb_path() { printf '%s/piddir/verdict-postfail-%s' "$1" "$2"; }
 
 # ---------------------------------------------------------------------------
 echo "=== TC-PV: post-verdict.sh helper behavior ==="
@@ -478,6 +489,93 @@ else
 fi
 assert_contains "TC-PV-16c error names the missing proxy / INV-56" "INV-56" "$OUT"
 rm -rf "$SB" "$BARE_DIR"
+
+# ---------------------------------------------------------------------------
+# INV-69 (issue #247): on a FAILED `gh issue comment` post, post-verdict.sh
+# writes a deterministic, session-keyed breadcrumb the review wrapper reads to
+# surface a distinct `post-failed` drop reason (vs. the bare opaque
+# `unavailable` a never-reviewed agent produces). The breadcrumb is best-effort:
+# it never changes the helper's exit code (still 1 on a failed post). Tests pin
+# AUTONOMOUS_PID_DIR + PROJECT_ID so pid_dir_for_project() resolves hermetically.
+# ---------------------------------------------------------------------------
+echo "--- TC-PF-BC: post-failed breadcrumb (INV-69) ---"
+
+# TC-PF-BC-01: failed post → helper exits 1 AND a breadcrumb file exists.
+SB=$(make_sandbox 1)
+printf 'body' > "$SB/body.md"
+PID="$SB/piddir"
+BC=$(breadcrumb_path "$SB" "sid-BC01")
+PROJECT_ID=tproj AUTONOMOUS_PID_DIR="$PID" \
+  bash "$SB/post-verdict.sh" 247 pass "$SB/body.md" agy "sid-BC01" >/dev/null 2>&1; RC=$?
+assert_eq "TC-PF-BC-01a failed post still exits 1" "1" "$RC"
+if [[ -f "$BC" ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-PF-BC-01b breadcrumb written at verdict-postfail-<sid>"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-PF-BC-01b no breadcrumb at '$BC'"
+  FAIL=$((FAIL + 1))
+fi
+
+# TC-PF-BC-02: breadcrumb records issue / agent / session / gh rc.
+BC_CONTENT=$(cat "$BC" 2>/dev/null || echo "")
+assert_contains "TC-PF-BC-02a breadcrumb records issue" "issue=247" "$BC_CONTENT"
+assert_contains "TC-PF-BC-02b breadcrumb records agent" "agent=agy" "$BC_CONTENT"
+assert_contains "TC-PF-BC-02c breadcrumb records session" "session=sid-BC01" "$BC_CONTENT"
+assert_contains "TC-PF-BC-02d breadcrumb records gh rc" "gh_rc=1" "$BC_CONTENT"
+
+# TC-PF-BC-03: breadcrumb file mode is 0600.
+MODE=$(stat -c '%a' "$BC" 2>/dev/null || stat -f '%Lp' "$BC" 2>/dev/null || echo "")
+assert_eq "TC-PF-BC-03 breadcrumb mode is 0600" "600" "$MODE"
+rm -rf "$SB"
+
+# TC-PF-BC-04: successful post → NO breadcrumb; exit 0 + URL echoed.
+SB=$(make_sandbox 0)
+printf 'body' > "$SB/body.md"
+PID="$SB/piddir"
+BC=$(breadcrumb_path "$SB" "sid-BC04")
+OUT=$(PROJECT_ID=tproj AUTONOMOUS_PID_DIR="$PID" \
+  bash "$SB/post-verdict.sh" 247 pass "$SB/body.md" agy "sid-BC04" 2>/dev/null); RC=$?
+assert_eq "TC-PF-BC-04a success exits 0" "0" "$RC"
+assert_contains "TC-PF-BC-04b success echoes URL" "issuecomment-999" "$OUT"
+if [[ ! -f "$BC" ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-PF-BC-04c no breadcrumb written on a successful post"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-PF-BC-04c breadcrumb written despite a successful post"
+  FAIL=$((FAIL + 1))
+fi
+rm -rf "$SB"
+
+# TC-PF-BC-05: pid dir cannot resolve (PROJECT_ID unset) on a failed post →
+# the helper STILL exits 1 (breadcrumb skipped silently, never aborts).
+SB=$(make_sandbox 1)
+printf 'body' > "$SB/body.md"
+# Unset PROJECT_ID; pid_dir_for_project requires it and returns non-zero → the
+# breadcrumb is skipped, but the underlying post failure must still exit 1.
+OUT=$(env -u PROJECT_ID -u AUTONOMOUS_PID_DIR \
+  bash "$SB/post-verdict.sh" 247 pass "$SB/body.md" agy "sid-BC05" 2>&1); RC=$?
+assert_eq "TC-PF-BC-05 pid-dir-unresolvable failed post still exits 1" "1" "$RC"
+rm -rf "$SB"
+
+# TC-PF-BC-06: breadcrumb write fails (pid dir is a non-writable path) on a
+# failed post → exit code is still 1 (breadcrumb best-effort, not load-bearing).
+SB=$(make_sandbox 1)
+printf 'body' > "$SB/body.md"
+# Point AUTONOMOUS_PID_DIR at a path under a file (so mkdir -p fails).
+touch "$SB/notadir"
+OUT=$(PROJECT_ID=tproj AUTONOMOUS_PID_DIR="$SB/notadir/sub" \
+  bash "$SB/post-verdict.sh" 247 pass "$SB/body.md" agy "sid-BC06" 2>&1); RC=$?
+assert_eq "TC-PF-BC-06 breadcrumb-write-failure failed post still exits 1" "1" "$RC"
+rm -rf "$SB"
+
+# TC-PF-BC-07: helper parses under bash -n (set -euo pipefail safe).
+if bash -n "$HELPER_SRC" 2>/dev/null; then
+  echo -e "  ${GREEN}PASS${NC}: TC-PF-BC-07 post-verdict.sh parses (bash -n)"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-PF-BC-07 post-verdict.sh has a syntax error"
+  FAIL=$((FAIL + 1))
+fi
 
 # ---------------------------------------------------------------------------
 echo ""
