@@ -295,6 +295,62 @@ assert_eq "TC-REVIEW-SMOKE-060d single-agent UNAVAILABLE → all-unavailable" \
 rm -rf "$TEST_HOME" 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
+echo "=== TC-REVIEW-SMOKE-070 #246 timeout→UNAVAILABLE propagates through the gate ==="
+# ---------------------------------------------------------------------------
+# The #246 win: a smoke TIMEOUT (smoke_agent rc 2, reason=timeout) is now an
+# UNAVAILABLE state at the gate (NOT a FAIL), so a single slow Bedrock member is
+# DROPPED and the review PROCEEDS on the survivors — instead of the pre-#246 FAIL
+# that aborted the whole review. These cases stub smoke_agent to emit exactly the
+# timeout-UNAVAILABLE shape lib-agent-smoke.sh now produces, and exercise the real
+# `_classify_smoke_state` → `_classify_smoke_gate` propagation.
+TEST_HOME=$(mktemp -d "${TMPDIR:-/tmp}/review-smoke-to-home-XXXXXX")
+# Stub: codex → timeout-UNAVAILABLE (rc 2), every other agent → PASS. This is the
+# motivating shape (a healthy codex with a one-off Bedrock slow-start in a fleet
+# alongside a fast agy/claude).
+STUB_TIMEOUT='smoke_agent() {
+  case "$1" in
+    codex) echo "SMOKE codex UNAVAILABLE 121s reason=timeout (no model response within 120s)"; return 2 ;;
+    *)     echo "SMOKE $1 PASS 9s reason=nonce-ok"; return 0 ;;
+  esac
+}'
+# TC-REVIEW-SMOKE-070: the timed-out member resolves to `unavailable` state (not
+# `fail`) — the gate input is correct.
+out=$(_cascade "$STUB_TIMEOUT" claude codex)
+assert_eq "TC-REVIEW-SMOKE-070 codex smoke-timeout → unavailable state (not fail)" \
+  "STATES=pass unavailable" "$(printf '%s\n' "$out" | grep '^STATES=')"
+
+# TC-REVIEW-SMOKE-071: one member times out (→ unavailable) while another PASSes →
+# gate PROCEEDS (pass), the timed-out member is dropped, the survivor fans out.
+assert_eq "TC-REVIEW-SMOKE-071a one timed-out + one PASS → gate pass (review proceeds, no abort)" \
+  "GATE=pass" "$(printf '%s\n' "$out" | grep '^GATE=')"
+assert_eq "TC-REVIEW-SMOKE-071b timed-out codex dropped, survivor fans out" \
+  "SURVIVORS=claude" "$(printf '%s\n' "$out" | grep '^SURVIVORS=')"
+
+# TC-REVIEW-SMOKE-072: ALL members time out → all-unavailable terminal path (the
+# INV-40 fallback), NOT an empty fan-out and NOT a FAIL abort.
+STUB_ALL_TIMEOUT='smoke_agent() { echo "SMOKE $1 UNAVAILABLE 121s reason=timeout (no model response within 120s)"; return 2; }'
+out=$(_cascade "$STUB_ALL_TIMEOUT" claude codex agy)
+assert_eq "TC-REVIEW-SMOKE-072a all members timed out → all-unavailable (no empty fan-out)" \
+  "GATE=all-unavailable" "$(printf '%s\n' "$out" | grep '^GATE=')"
+assert_eq "TC-REVIEW-SMOKE-072b all-timeout states are all unavailable" \
+  "STATES=unavailable unavailable unavailable" "$(printf '%s\n' "$out" | grep '^STATES=')"
+
+# TC-REVIEW-SMOKE-073: a GENUINE config FAIL alongside a timed-out member still
+# aborts — the timeout reclassification does NOT weaken the FAIL→abort path for a
+# real config break (config-error wins; the bare timeout is the only thing relaxed).
+STUB_FAIL_PLUS_TIMEOUT='smoke_agent() {
+  case "$1" in
+    codex)  echo "SMOKE codex UNAVAILABLE 121s reason=timeout (no model response within 120s)"; return 2 ;;
+    kiro)   echo "SMOKE kiro FAIL 2s reason=auth-failed"; return 1 ;;
+    *)      echo "SMOKE $1 PASS 9s reason=nonce-ok"; return 0 ;;
+  esac
+}'
+out=$(_cascade "$STUB_FAIL_PLUS_TIMEOUT" claude codex kiro)
+assert_eq "TC-REVIEW-SMOKE-073 genuine FAIL + timed-out member → gate fail (abort preserved)" \
+  "GATE=fail" "$(printf '%s\n' "$out" | grep '^GATE=')"
+rm -rf "$TEST_HOME" 2>/dev/null || true
+
+# ---------------------------------------------------------------------------
 echo "=== TC-REVIEW-SMOKE docs (INV-64 + flow + design + test-cases) ==="
 # ---------------------------------------------------------------------------
 assert_grep "TC-REVIEW-SMOKE-061a INV-64 entry in invariants.md" \
