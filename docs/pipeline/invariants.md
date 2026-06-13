@@ -2720,6 +2720,21 @@ The **report** half (`metrics-report.sh`) is the opposite: it is **loud** about 
 - [`metrics.md`](metrics.md) — the event-type catalogue, field definitions, failure-class taxonomy, and `metrics-report.sh` output blocks.
 - [INV-01](#inv-01-pid-file-naming) — the per-project PID dir (`pid_dir_for_project`). The metrics file does NOT co-locate with it: PID files prefer the volatile `${XDG_RUNTIME_DIR}`, metrics resolve to the durable `${XDG_STATE_HOME:-$HOME/.local/state}` instead.
 
+## INV-71: run-event channel decision recorded, implementation gated
+
+**Rule**: The durable run-event channel that a *future* reconciler/lease design would consume is **decided** in [`docs/designs/run-event-channel-adr.md`](../designs/run-event-channel-adr.md), but is **NOT implemented**. The decision: lease/heartbeat **renewals stay local** (state dir, never a shared-quota GitHub channel — proven rate-limit-unsafe at fleet scale); sparse **lifecycle events** (start/verdict/merge/end) use **create-only issue/PR comments** (the only candidate viable in every auth × execution topology cell), with **GitHub check-runs rejected as a sole channel** (App-mode-only — a PAT cannot create check-runs). Labels stay **canonical** (a canonical run-ledger was evaluated and declined — review T1). No code in any wrapper, dispatcher, hook, label transition, verdict path, or merge decision changes on account of this ADR.
+
+**Why**: Review consensus flagged the event channel as the load-bearing unknown of the gated reconciler phase. Committing reconciler design before measuring the channel would bake in a substrate that fails part of the fleet (check-runs need `checks:write`, comment-editing races itself, a local dir is invisible to a remote SSM dispatcher without a round-trip). The ADR settles the channel choice — with a measured comment-propagation lag (~3–5 s), measured check-run latency (~1.6 s), the step-by-step secondary-rate-limit arithmetic at N=25 concurrent runs, an idempotency-key scheme (§7.1) and a `(run_id, seq)` ordering contract (§7.2) — so that *if* the stop-rule gate opens, the decision is already made. It records the decision; it does not open the gate. (#237)
+
+**Producer**: this ADR (documentation only). No runtime producer — the channel is unimplemented.
+**Consumer**: the gated reconciler/lease phase (future). NOTHING in the current pipeline control flow consumes an event-channel value; the current durable signals remain [INV-03] (dev report comment), [INV-40] (verdict comment), and GitHub labels.
+**Status**: **DECISION RECORDED, NOT YET IMPLEMENTED** (gated on the #228 metrics-baseline stop-rule; the phase — and this channel — is cancelled if the baseline shows sufficient stability).
+**Test**: N/A (no behavior). The ADR's empirical grounding is the throwaway `docs/designs/measure-event-channels.sh` (ShellCheck-green, `--dry-run` offline test) and the doc-quality gates in `docs/test-cases/run-event-channel-adr.md` (TC-EVCH-001..022).
+
+**Cross-references**:
+- [`docs/designs/run-event-channel-adr.md`](../designs/run-event-channel-adr.md) — the full ADR (candidate analysis, topology matrix, auth matrix, rate-limit math, run-ledger verdict, flip conditions, stop-rule).
+- [INV-29] heartbeat (local file touch — the renewal signal stays here), [INV-70] metrics observe-only (the local JSONL the ADR's C3 candidate generalizes; also the `label-race` failure class the run-ledger question weighs), [INV-24] DEAD cross-check (the dead-detection latency `L_dead` the cadence table tunes).
+
 ## Adding a new invariant
 
 When fixing a pipeline bug, after locating the bug on the state machine + flow docs:
