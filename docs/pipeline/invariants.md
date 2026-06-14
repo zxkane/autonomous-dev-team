@@ -2797,15 +2797,18 @@ before the envelope helper ran — so a missing dispatcher key produces
 
 **The resolved agent CLI binary is preflighted before launch/resume.**
 `lib-agent.sh::preflight_agent_binary` (called at the top of both `run_agent`
-and `resume_agent`) confirms the binary the wrapper will actually exec is on
-`PATH` *before* `_run_with_timeout` launches it, so a missing CLI surfaces an
-`ADT_CFG_AGENT_BINARY_MISSING` envelope via `error_surface "$ISSUE_NUMBER"`
-instead of failing through as an opaque rc 127 / generic session failure. The
-launch binary is `AGENT_CMD` itself for most CLIs, but `kiro-cli` when
-`AGENT_CMD=kiro` (the wrapper's one alias). When a launcher is configured
-(`AGENT_LAUNCHER_ARGV` non-empty) the preflight **stands down** — the launcher
-owns binary resolution and a misconfigured launcher is already its own
-config-class abort (INV-38 / `ADT_CFG_LAUNCHER_*`).
+and `resume_agent` — **and** at the top of the codex review lane
+`lib-review-codex.sh::_run_codex_review`, which launches `codex review`
+*directly* via `_run_with_timeout`, bypassing run_agent/resume_agent) confirms
+the binary the wrapper will actually exec is on `PATH` *before* it launches it,
+so a missing CLI surfaces an `ADT_CFG_AGENT_BINARY_MISSING` envelope via
+`error_surface "$ISSUE_NUMBER"` instead of failing through as an opaque rc 127 /
+generic session failure (or, in the codex review fan-out, a dropped-`unavailable`
+review agent with no operator envelope). The launch binary is `AGENT_CMD` itself
+for most CLIs, but `kiro-cli` when `AGENT_CMD=kiro` (the wrapper's one alias).
+When a launcher is configured (`AGENT_LAUNCHER_ARGV` non-empty) the preflight
+**stands down** — the launcher owns binary resolution and a misconfigured
+launcher is already its own config-class abort (INV-38 / `ADT_CFG_LAUNCHER_*`).
 
 Each config-class abort path carries a **stable `UPPER_SNAKE` code** documented
 in the append-only registry [`errors.md`](errors.md) (codes never renumber). The
@@ -2853,7 +2856,12 @@ for config-class failures only.
   surfaces the envelope and returns 1, a present binary returns 0 with no post,
   `AGENT_CMD=kiro` resolves `kiro-cli` (not `kiro`), a configured launcher skips
   the preflight, and an empty `ISSUE_NUMBER` degrades to a dispatcher-alert
-  (log-only, no `gh` post).
+  (log-only, no `gh` post). TC-BINPF-CODEX pins the codex REVIEW lane: a static
+  check that `_run_codex_review` (`lib-review-codex.sh`) wires
+  `preflight_agent_binary || return`, plus a behavioral case that with
+  `AGENT_CMD=codex` and no `codex` on `PATH`, `_run_codex_review` surfaces the
+  envelope on the issue and returns non-zero WITHOUT launching codex (the
+  review-lane bypass the run_agent/resume_agent preflight alone did not cover).
 
 **Cross-references**:
 - [INV-66](#inv-66-adapter-conformance-is-spec-defined) — the spec (Clause E1/E2/E3) this enforces at the wrapper boundary.

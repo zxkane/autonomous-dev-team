@@ -167,6 +167,43 @@ map_of() {
 [[ "$(map_of agy)" == "agy" ]] && ok "006 agy → agy" || bad "006 agy mapping"
 [[ -z "$(map_of claude cc-launcher --role dev)" ]] && ok "006 launcher set → empty (skip)" || bad "006 launcher should map to empty"
 
+# ---------------------------------------------------------------------------
+echo "=== TC-BINPF-CODEX: codex REVIEW lane preflights its binary too (#231 review P1) ==="
+# Regression for the finding that the codex review lane (_run_codex_review)
+# launches `codex review …` directly via _run_with_timeout, bypassing the
+# run_agent/resume_agent preflight. Static + behavioral.
+LIB_REVIEW_CODEX="$SCRIPTS_DIR/lib-review-codex.sh"
+# Static: _run_codex_review calls preflight_agent_binary and returns its rc.
+if grep -qE 'preflight_agent_binary \|\| return' "$LIB_REVIEW_CODEX"; then
+  ok "CODEX _run_codex_review wires 'preflight_agent_binary || return'"
+else
+  bad "CODEX _run_codex_review does NOT wire the preflight (P1 regression)"
+fi
+# Behavioral: with AGENT_CMD=codex and NO codex on the hermetic PATH,
+# _run_codex_review must surface ADT_CFG_AGENT_BINARY_MISSING on the issue and
+# return non-zero BEFORE launching codex. We source lib-error + lib-agent +
+# lib-review-codex (the review wrapper's source set) and call _run_codex_review
+# directly; the preflight short-circuits at the top, so no real codex launch.
+: > "$GH_CALLS"
+codex_out=$(
+  ( set -uo pipefail
+    export AUTONOMOUS_CONF_DIR="$TMPROOT/scripts" REPO="o/r" ISSUE_NUMBER=231
+    export AGENT_CMD=codex
+    export PATH="$TMPROOT/bin:$TMPROOT/cu"   # no `codex` here
+    # shellcheck disable=SC1090
+    source "$LIB_ERROR"; source "$LIB_AGENT" 2>/dev/null; source "$LIB_REVIEW_CODEX" 2>/dev/null
+    AGENT_CMD=codex
+    _run_codex_review "review prompt" "sonnet" "$TMPROOT/codex-stdout.txt" ""
+    echo "RC=$?"
+  ) 2>/dev/null
+)
+codex_rc=$(rc_of "$codex_out")
+assert_rc "CODEX _run_codex_review returns non-zero on missing codex binary" 1 "${codex_rc:-99}"
+if grep -q 'ADT_CFG_AGENT_BINARY_MISSING' "$GH_CALLS"; then ok "CODEX envelope posted on the issue from the review lane"; else bad "CODEX no envelope posted from the review lane (P1 regression)"; fi
+[[ "$(cat "$GH_CALLS")" == *"codex"* ]] && ok "CODEX envelope names the missing 'codex' binary" || bad "CODEX envelope omits binary name"
+# Sanity: codex was never actually launched (no stdout capture written).
+[[ ! -s "$TMPROOT/codex-stdout.txt" ]] && ok "CODEX no codex launch (aborted at preflight)" || bad "CODEX codex appears to have launched despite missing binary"
+
 echo ""
 echo "============================================"
 echo -e "Results: ${GREEN}${PASS} passed${NC}, ${RED}${FAIL} failed${NC}"

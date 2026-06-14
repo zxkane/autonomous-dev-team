@@ -315,6 +315,23 @@ _codex_review_cleanup_worktree() {
 _run_codex_review() {
   local prompt="$1" model="$2" stdout_file="$3" pr_workdir="${4:-}"
   local max="${CODEX_REVIEW_MAX_RERUNS:-3}"
+
+  # [INV-72] Preflight the codex review binary BEFORE launching it. The codex
+  # review lane launches `"$AGENT_CMD" review …` directly via _run_with_timeout
+  # below — it does NOT go through run_agent/resume_agent, so it would otherwise
+  # bypass their preflight_agent_binary check. Without this, a project whose
+  # review CLI is codex but whose `codex` executable is absent / off-PATH would
+  # fall through here as a generic rc-127 failure and be dropped as an opaque
+  # `unavailable` review agent with NO operator envelope. preflight_agent_binary
+  # (lib-agent.sh) resolves the launch binary for the active AGENT_CMD (== codex
+  # in this fan-out subshell), surfaces ADT_CFG_AGENT_BINARY_MISSING via
+  # error_surface "$ISSUE_NUMBER" on a miss, and returns non-zero. We return that
+  # rc as the run's exit (the caller treats a non-zero _run_codex_review as a CLI
+  # failure, not a verdict). command -v guards the rare case where this lib is
+  # sourced without lib-agent.sh (the review wrapper always sources both).
+  if command -v preflight_agent_binary >/dev/null 2>&1; then
+    preflight_agent_binary || return $?
+  fi
   # #218 finding 3: `codex review` must run from a PR-branch checkout so its
   # auto-scoped diff is the PR's, not the wrapper's `main` PROJECT_DIR. The caller
   # passes a prepared worktree dir; if it is missing/not-a-dir we run from cwd and
