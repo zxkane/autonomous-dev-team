@@ -242,6 +242,14 @@ jqfb_reject "TC-CONFORMANCE-025k jq fallback rejects bad files.<k>.role enum"   
 # `.files == null` jq check could not tell key-absent (valid) from present-null
 # (invalid), so the validator uses `has("files")`. Pins the agreement.
 jqfb_reject "TC-CONFORMANCE-025n jq fallback rejects an explicit files:null"     '.files = null'
+# files.<k>.role / .sha256 are OPTIONAL but, WHEN PRESENT, must be strings — the
+# Draft-07 schema has no "null" in their type. A bare `(.value.role == null) or …`
+# check wrongly ACCEPTED an explicit `role: null` / `sha256: null` (PR #244 [P1]
+# #2); the validator now uses `has("role")` / `has("sha256")` to distinguish
+# absent (valid) from explicit-null (invalid). These pin that agreement.
+jqfb_reject "TC-CONFORMANCE-025o jq fallback rejects explicit files.<k>.role:null"   '.files.agyLog.role = null'
+jqfb_reject "TC-CONFORMANCE-025p jq fallback rejects explicit files.<k>.sha256:null" '.files.agyLog.sha256 = null'
+jqfb_reject "TC-CONFORMANCE-025q jq fallback rejects non-string files.<k>.sha256"    '.files.agyLog.sha256 = 5'
 
 # TC-CONFORMANCE-025l — the SAME valid fixture that the fallback rejects-when-broken
 # must still PASS the fallback when well-formed (no false-positive reject from the
@@ -366,6 +374,36 @@ assert_grep "TC-CONFORMANCE-034d runner asserts command.argv (load-bearing)" \
   'argv-mismatch' "$RUNNER"
 assert_grep "TC-CONFORMANCE-034e runner asserts command.stdinSha256 (load-bearing)" \
   'stdin-sha-mismatch' "$RUNNER"
+
+# TC-CONFORMANCE-035 — ENV HERMETICITY (PR #244 [P1] #1): the classification must
+# depend ONLY on the fixture's input.env, never on the operator's inherited
+# environment. With operator-facing vars set in the CALLER's env
+# (AGENT_DEV_EXTRA_ARGS / AGENT_REVIEW_EXTRA_ARGS / AGENT_LAUNCHER / *_LAUNCHER /
+# AUTONOMOUS_CONF), an empty-env fixture must STILL pass — the runner scrubs them
+# to a baseline before sourcing lib-agent.sh. Before the fix, an inherited
+# AGENT_DEV_EXTRA_ARGS appended extra argv → argv-mismatch (and a launcher routed
+# the dispatch off the isolated PATH → stdin-not-fed). These run the REAL promoted
+# set with the leak vars exported, so they exercise the scrub end-to-end.
+env_leak_out="$(AGENT_DEV_EXTRA_ARGS='--bogus' env -u PROJECT_DIR bash "$RUNNER" --adapter claude --mode dev-new 2>/dev/null)"
+assert_contains "TC-CONFORMANCE-035a inherited AGENT_DEV_EXTRA_ARGS does NOT leak (claude dev-new still PASS)" \
+  "CONFORMANCE claude/dev-new/claude-dev-new PASS" "$env_leak_out"
+launcher_leak_out="$(AGENT_LAUNCHER='cc' env -u PROJECT_DIR bash "$RUNNER" --adapter kiro 2>/dev/null)"
+assert_contains "TC-CONFORMANCE-035b inherited AGENT_LAUNCHER does NOT route off the stub PATH (kiro still PASS)" \
+  "CONFORMANCE kiro/review/kiro-happy-path PASS" "$launcher_leak_out"
+# The heaviest case: ALL operator vars set at once → the full 14-fixture run must
+# stay all-PASS (exit 0), identical to a clean environment.
+heavy_leak_rc=0
+AGENT_DEV_EXTRA_ARGS='--x' AGENT_REVIEW_EXTRA_ARGS='--y' AGENT_LAUNCHER='cc' \
+  AGENT_DEV_LAUNCHER='cc' AGENT_REVIEW_LAUNCHER='cc' AUTONOMOUS_CONF='/tmp/nonexistent-conformance.conf' \
+  env -u PROJECT_DIR bash "$RUNNER" >/dev/null 2>&1 || heavy_leak_rc=$?
+assert_eq "TC-CONFORMANCE-035c full run is env-hermetic under a heavy operator-var leak (exit 0)" "0" "$heavy_leak_rc"
+# A fixture that GENUINELY wants an operator var still gets it via input.env (the
+# scrub runs BEFORE the input.env apply), so codex-cli-error's -s flag survives.
+assert_contains "TC-CONFORMANCE-035d input.env still re-enables a var after the scrub (codex-cli-error PASS)" \
+  "CONFORMANCE codex/review/codex-cli-error PASS" "$full_out"
+# Source-of-truth: the runner scrubs the operator surface BEFORE sourcing the lib.
+assert_grep "TC-CONFORMANCE-035e runner zeroes operator AGENT_*_EXTRA_ARGS/LAUNCHER to a baseline" \
+  'AGENT_DEV_EXTRA_ARGS=""' "$RUNNER"
 
 # ---------------------------------------------------------------------------
 echo ""

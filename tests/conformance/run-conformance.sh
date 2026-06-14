@@ -181,8 +181,12 @@ PY
         (.value | type == "object")
         and (.value | has("path")) and (.value.path | type == "string")
         and ((.value | keys) - ["path","sha256","role"] | length == 0)
-        and ((.value.sha256 == null) or (.value.sha256 | test("^[0-9a-f]{64}$")))
-        and ((.value.role == null) or (.value.role | IN("sidecar","log","artifact","input")))
+        # sha256/role are OPTIONAL but, WHEN PRESENT, must be a string (the schema
+        # has no "null" in their type) — `has(...)` distinguishes absent (valid)
+        # from an explicit null (invalid). A bare `== null` check wrongly accepts
+        # `sha256: null` / `role: null`, which Draft-07 rejects (#244 [P1] #2).
+        and ((.value | has("sha256") | not) or (.value.sha256 | type == "string" and test("^[0-9a-f]{64}$")))
+        and ((.value | has("role") | not) or (.value.role | IN("sidecar","log","artifact","input")))
       ))
     ))
   ' "$file" >/dev/null 2>&1
@@ -385,20 +389,44 @@ _classify_fixture() {
   (
     export PATH="$stub_dir:$_COREUTILS_DIR"
     export PROJECT_ID="conformance"
+
+    # --- HERMETIC ENV BASELINE (PR #244 [P1] #1) ---
+    # The classification must depend ONLY on the fixture's input.env, never on the
+    # operator's inherited environment. lib-agent.sh reads operator-facing vars the
+    # argv builders splice in (AGENT_DEV_EXTRA_ARGS / AGENT_REVIEW_EXTRA_ARGS) and,
+    # at SOURCE time, tokenizes any inherited AGENT_LAUNCHER / AGENT_*_LAUNCHER into
+    # the launcher *_ARGV arrays run_agent reads AND validates them (a launcher set
+    # with a non-claude per-side CMD makes lib-agent.sh emit an ERROR + `return 1`
+    # at source time). A caller with `AGENT_DEV_EXTRA_ARGS=--bogus` would otherwise
+    # append `--bogus` to an empty-env fixture's argv (argv-mismatch); a caller with
+    # `AGENT_LAUNCHER=cc` would route the dispatch through a launcher not on the
+    # isolated PATH (stdin-not-fed). Neutralize the operator surface to an empty
+    # baseline BEFORE the source, so the source-time tokenization/validation sees a
+    # clean slate and no inherited launcher/extra-args survives. (Empty string, not
+    # `unset`: lib-agent.sh expands these UNGUARDED at source time — an `unset`
+    # under the runner's `set -u` would abort the subshell on the first reference.)
+    # AUTONOMOUS_CONF is pointed at an empty path so load_autonomous_conf finds no
+    # operator conf (it also runs with PROJECT_DIR unset — see the caller's
+    # `env -u PROJECT_DIR` — so neither conf-discovery branch fires).
+    export AGENT_DEV_EXTRA_ARGS="" AGENT_REVIEW_EXTRA_ARGS=""
+    export AGENT_LAUNCHER="" AGENT_DEV_LAUNCHER="" AGENT_REVIEW_LAUNCHER=""
+    export AGENT_DEV_CMD="" AGENT_REVIEW_CMD=""
+    export AUTONOMOUS_CONF=""
+
     # shellcheck source=../../skills/autonomous-dispatcher/scripts/lib-agent-smoke.sh
     source "$LIB_SMOKE" 2>/dev/null || { printf '__ERR__:lib-source-failed\n'; exit 0; }
 
     # AGENT_CMD MUST be set AFTER sourcing: lib-agent.sh's load_autonomous_conf
-    # runs at source time and would CLOBBER an AGENT_CMD exported beforehand with
-    # the box's own conf value (env contamination — see the smoke matrix harness's
-    # same ordering, lib-agent-smoke.sh "WHY"). With it set after, run_agent
-    # dispatches to the fixture's adapter, not the operator's configured CLI.
+    # runs at source time and (when a conf is present) would CLOBBER an AGENT_CMD
+    # exported beforehand with the operator's configured CLI. With it set after,
+    # run_agent dispatches to the fixture's adapter. (The conf is neutralized above,
+    # but keep this ordering as defense in depth — it mirrors the smoke matrix
+    # harness's documented source-then-set ordering, lib-agent-smoke.sh "WHY".)
     export AGENT_CMD="$adapter"
 
-    # Apply the manifest's input.env AFTER AGENT_CMD (same reason: it carries the
-    # operator-facing vars the adapter reads when assembling argv — e.g.
-    # AGENT_DEV_EXTRA_ARGS, which the codex argv builder splices in — and must win
-    # over the box conf load_autonomous_conf applied at source time).
+    # Apply the manifest's input.env AFTER the scrub: it is the ONLY channel by
+    # which a fixture opts into an operator var (e.g. codex-cli-error sets
+    # AGENT_DEV_EXTRA_ARGS so the offending flag is spliced into the recorded argv).
     local env_keys ek ev
     env_keys="$(jq -r '(.input.env // {}) | keys[]?' "$manifest" 2>/dev/null)"
     while IFS= read -r ek; do

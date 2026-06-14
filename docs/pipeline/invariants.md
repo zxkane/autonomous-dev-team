@@ -2927,14 +2927,25 @@ per-adapter × per-mode fixture manifests
 **CURRENT** classification logic and asserts the four `expect{}` axes
 (`providerClass`, `verdictState`, `vote`, `retryable`). The runner:
 
-1. **Is hermetic** — no network, no credentials, no real agent CLIs. Each fixture
-   is classified with `PATH` reset to a stub-only sandbox (plus the coreutils
-   dir); the real `claude`/`codex`/`kiro`/`agy` are **never** on it. A fixture
-   whose stub binary is missing, or whose `<adapter>` resolves to anything other
-   than the stub, fails **loud** (`FAIL stub-missing` / `hermeticity-breach`) —
-   it MUST NOT fall through to a real CLI. This is the always-on tier; the
-   live-CLI smoke ([INV-63](#inv-63-agent-smoke-is-a-three-state-probe-pass--unavailable--fail-run-through-the-production-run_agent-never-a-parallel-invocation-path) / `tests/e2e/run-agent-smoke.sh`) is the separate
-   self-hosted tier.
+1. **Is hermetic — in PATH *and* ENV.** No network, no credentials, no real
+   agent CLIs. Each fixture is classified with `PATH` reset to a stub-only
+   sandbox (plus the coreutils dir); the real `claude`/`codex`/`kiro`/`agy` are
+   **never** on it. A fixture whose stub binary is missing, or whose `<adapter>`
+   resolves to anything other than the stub, fails **loud** (`FAIL stub-missing` /
+   `hermeticity-breach`) — it MUST NOT fall through to a real CLI. **The ENV is
+   equally scrubbed** (PR #244 [P1] #1): the operator-facing surface
+   lib-agent.sh reads — `AGENT_DEV_EXTRA_ARGS` / `AGENT_REVIEW_EXTRA_ARGS` (the
+   argv builders splice these in), `AGENT_LAUNCHER` / `AGENT_DEV_LAUNCHER` /
+   `AGENT_REVIEW_LAUNCHER` (tokenized into the launcher argv arrays at source
+   time), `AGENT_DEV_CMD` / `AGENT_REVIEW_CMD`, and `AUTONOMOUS_CONF` — is reset
+   to an empty baseline **before** the lib is sourced, so an inherited
+   `AGENT_DEV_EXTRA_ARGS=--bogus` cannot append stray argv (→ argv-mismatch) and
+   an inherited `AGENT_LAUNCHER` cannot route the dispatch off the isolated PATH
+   (→ stdin-not-fed). The classification depends ONLY on the fixture's
+   `input.env`, which is applied AFTER the scrub (so a fixture that genuinely
+   wants a var — e.g. `codex-cli-error`'s `AGENT_DEV_EXTRA_ARGS` — re-enables it).
+   This is the always-on tier; the live-CLI smoke
+   ([INV-63](#inv-63-agent-smoke-is-a-three-state-probe-pass--unavailable--fail-run-through-the-production-run_agent-never-a-parallel-invocation-path) / `tests/e2e/run-agent-smoke.sh`) is the separate self-hosted tier.
 2. **Drives TODAY's monolithic classifier via the REAL dispatch path** — it
    launches the stub through the production invocation primitives
    (`lib-agent.sh::run_agent` / `resume_agent`, or `lib-review-codex.sh::_run_codex_review`
@@ -2969,7 +2980,10 @@ per-adapter × per-mode fixture manifests
    `additionalProperties:false` at every object level (top-level, `input`,
    `command`, `expect`, each `files` entry) — so a manifest that python jsonschema
    would reject (missing `input.promptBytes`, a non-string `input.env` value, a
-   negative `promptBytes`, an unknown nested key, a bad `files.<k>.role`) ALSO
+   negative `promptBytes`, an unknown nested key, a bad `files.<k>.role`, OR an
+   explicit `files.<k>.role: null` / `sha256: null` — the optional string fields
+   have no `null` in their schema type, so `has(...)` distinguishes absent (valid)
+   from present-null (invalid), PR #244 [P1] #2) ALSO
    fails `schema-invalid` here. **It fails closed**: a malformed manifest is
    rejected on a fork with NO `jsonschema` installed exactly as it is on a
    jsonschema-equipped CI — the fallback and python jsonschema are cross-checked
@@ -3021,8 +3035,13 @@ green-before-and-after gate protects.
   strictness (TC-CONFORMANCE-025e..k: the fallback rejects a manifest missing
   `input.promptBytes` / `input.model`, a non-string `env` value, a negative
   `promptBytes`, an unknown nested key, a non-string argv element, a bad
-  `files.role` — fails closed exactly as python jsonschema; 025l/m: it still
-  ACCEPTS the full valid set — PR #244 [P1] #1)**, hermeticity (PATH isolation,
+  `files.role`, AND an explicit `files.<k>.role:null` / `sha256:null` /
+  non-string `sha256` (TC-CONFORMANCE-025o..q — PR #244 [P1] #2) — fails closed
+  exactly as python jsonschema; 025l/m: it still ACCEPTS the full valid set —
+  PR #244 [P1] #1)**, **ENV hermeticity (TC-CONFORMANCE-035a..e: an inherited
+  `AGENT_DEV_EXTRA_ARGS` / `AGENT_LAUNCHER` / heavy multi-var leak does NOT
+  contaminate the run — it stays all-PASS — while `input.env` still re-enables a
+  var after the scrub — PR #244 [P1] #1)**, hermeticity (PATH isolation,
   stdin-fed contract, stub-missing/breach guards), **the load-bearing
   `command.argv` / `command.stdinSha256` assertions (TC-CONFORMANCE-030..034:
   garbage argv and all-zero hash must FAIL, not silently PASS — PR #244 [P1])**,

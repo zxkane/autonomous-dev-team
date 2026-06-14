@@ -115,7 +115,12 @@ It records one `adapter × mode` behavior:
    or `lib-review-codex.sh::_run_codex_review` for codex review), feeding a
    deterministic-nonce smoke prompt over the
    [INV-34](../../docs/pipeline/invariants.md#inv-34-agent-prompt-is-fed-via-stdin-never-as-a-single-argv-element)
-   stdin channel.
+   stdin channel. The classification is **env-hermetic**: the operator-facing
+   surface lib-agent.sh reads (`AGENT_DEV_EXTRA_ARGS` / `AGENT_REVIEW_EXTRA_ARGS`,
+   `AGENT_LAUNCHER` / `AGENT_*_LAUNCHER`, `AGENT_*_CMD`, `AUTONOMOUS_CONF`) is
+   reset to an empty baseline before the lib is sourced, so an inherited operator
+   env can't leak extra argv or route through a launcher — only the fixture's
+   `input.env` (applied after the scrub) influences the run.
 4. **Asserts the manifest's `command.argv` and `command.stdinSha256` are
    correct** — the stub-recorded argv MUST match `command.argv` (placeholder-aware)
    and `sha256(stdin)` MUST match `command.stdinSha256`. A regression in how the
