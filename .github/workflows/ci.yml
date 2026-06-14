@@ -61,6 +61,13 @@ jobs:
             exit 1
           }
 
+      # Operator error-envelope E2E (INV-72, #231): a config-class abort surfaces
+      # a comment (code + remediation + marker) through the real lib-error.sh
+      # proxy-resolution path against a stub `gh`, and never mutates label state.
+      # No network / credentials — runs on bare ubuntu.
+      - name: error-envelope E2E (stub gh proxy)
+        run: bash tests/e2e/run-error-envelope-e2e.sh
+
   shellcheck:
     name: ShellCheck
     runs-on: ubuntu-latest
@@ -91,8 +98,10 @@ jobs:
             skills/autonomous-dispatcher/scripts/lib-agent-smoke.sh \
             skills/autonomous-dispatcher/scripts/lib-metrics.sh \
             skills/autonomous-dispatcher/scripts/metrics-report.sh \
+            skills/autonomous-dispatcher/scripts/lib-error.sh \
             tests/e2e/run-agent-smoke.sh \
             tests/e2e/run-metrics-report.sh \
+            tests/e2e/run-error-envelope-e2e.sh \
             skills/autonomous-dispatcher/scripts/post-verdict.sh \
             skills/autonomous-dispatcher/scripts/setup-labels.sh \
             skills/autonomous-dispatcher/scripts/gh-token-refresh-daemon.sh \

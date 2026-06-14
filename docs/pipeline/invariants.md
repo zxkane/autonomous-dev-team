@@ -2735,6 +2735,132 @@ The **report** half (`metrics-report.sh`) is the opposite: it is **loud** about 
 - [`docs/designs/run-event-channel-adr.md`](../designs/run-event-channel-adr.md) — the full ADR (candidate analysis, topology matrix, auth matrix, rate-limit math, run-ledger verdict, flip conditions, stop-rule).
 - [INV-29] heartbeat (local file touch — the renewal signal stays here), [INV-70] metrics observe-only (the local JSONL the ADR's C3 candidate generalizes; also the `label-race` failure class the run-ledger question weighs), [INV-24] DEAD cross-check (the dead-detection latency `L_dead` the cadence table tunes).
 
+## INV-72: config-class failures MUST surface on the issue, never log-only
+
+**Rule**: a **config-class** wrapper/dispatcher failure (every
+operator-actionable `provider.class` — `config`, `auth`, `quota`) **MUST**
+surface an [error envelope](schemas/error-envelope.schema.json) on the GitHub
+issue (`surface: issue-comment`) or — when there is no per-issue context (a
+tick-global dispatcher abort) — as a dispatcher alert (`surface:
+dispatcher-alert`). It **MUST NOT** be log-only. Only an explicit
+`class: transient` (a retryable blip the dispatcher re-dispatches automatically)
+may be `surface: log-only`. This makes [INV-66](#inv-66-adapter-conformance-is-spec-defined)
+Clause E2 enforced at the wrapper boundary, not just in the schema.
+
+The envelope is rendered + surfaced by `lib-error.sh`:
+- `error_envelope <code> <problem> <cause> <remediation> [doc] [class]` renders
+  the single canonical format used for BOTH the log line and the comment body —
+  a human block plus an embedded machine-readable
+  `<!-- adt-error-envelope: {json} -->` marker. The JSON conforms to
+  `error-envelope.schema.json` (built with `jq -nc`, so special characters in
+  `cause`/`remediation` are safe). It rejects (rc 1, emits nothing) a
+  non-`UPPER_SNAKE` `code` (Clause E3) or an empty `remediation` (Clause E1).
+- `error_surface <issue|-> <code> <problem> <cause> <remediation> [doc] [class]`
+  renders AND posts the envelope via the **token-refresh `gh` proxy** — it
+  prefers the project-side `${AUTONOMOUS_CONF_DIR}/gh` symlink (the identity-
+  correct path [`post-verdict.sh`](../../skills/autonomous-dispatcher/scripts/post-verdict.sh)
+  uses, [INV-56](#inv-56-review-agents-post-their-verdict-through-post-verdictsh-not-a-hand-rolled-gh-comment))
+  and **falls back to the co-located `gh-with-token-refresh.sh`** in its own
+  skill-tree dir so a validation that aborts *before* `setup_github_auth` has
+  materialized the symlink (a fresh install; a source-time launcher guard) still
+  POSTS rather than degrading to log-only. It never falls back to bare PATH `gh`
+  (that would mis-attribute the comment). The target repo is `REPO` /
+  `GITHUB_REPO`, **falling back to `${REPO_OWNER}/${REPO_NAME}`** so an
+  `ADT_CFG_MISSING_KEY` envelope for a missing `REPO` still resolves a `--repo`
+  and posts (the wrappers call `error_surface` before `cd "$PROJECT_DIR"`, so a
+  `gh --repo ""` could not infer the repo from a checkout). It **decides the
+  effective surface before rendering** and pins it into the marker JSON, so a
+  `dispatcher-alert` envelope reads `"surface":"dispatcher-alert"` (not the
+  class-default `issue-comment`). It writes the full envelope to the wrapper log
+  on **every** path — including the success path — so "the same envelope to the
+  log AND the issue" holds whether or not the post landed. It is
+  **best-effort**: if the post fails (or the proxy is unresolvable, or
+  `class=transient`, or the issue is empty/`-`) it degrades to log-only and
+  **returns 0 regardless** — surfacing failure MUST NOT change the caller's exit
+  code. A `class=transient` envelope is never posted.
+
+**Both wrappers run their config validations BEFORE the authoritative arg-parse
+loop, yet still surface on the issue.** An early, non-destructive
+`error_peek_issue_arg "$@"` scan (in `lib-error.sh`) populates `ISSUE_NUMBER` up
+front, so every wrapper startup validation — the required-key / app-creds /
+token-mint / `E2E_MODE` / timeout / `REVIEW_BOTS` checks AND the `lib-agent.sh`
+launcher guards (which fire at source-time, with the wrapper's `"$@"` in scope)
+— calls `error_surface "$ISSUE_NUMBER" …` and targets the issue when one was
+passed, falling back to `dispatcher-alert` only on manual misinvocation with no
+`--issue`. (A *source-time* launcher envelope may still degrade to log-only in
+GitHub-App mode because the token is not minted until `setup_github_auth`; token
+mode posts.) The **dispatcher** preflights its required keys (`REPO` /
+`REPO_OWNER` / `PROJECT_ID` / `PROJECT_DIR`) *before* sourcing `lib-dispatch.sh`
+— that library has top-level `${VAR:?}` guards that would raw-abort the tick
+before the envelope helper ran — so a missing dispatcher key produces
+`ADT_CFG_MISSING_KEY`, not an opaque `: REPO: parameter null or not set`.
+
+**The resolved agent CLI binary is preflighted before launch/resume.**
+`lib-agent.sh::preflight_agent_binary` (called at the top of both `run_agent`
+and `resume_agent`) confirms the binary the wrapper will actually exec is on
+`PATH` *before* `_run_with_timeout` launches it, so a missing CLI surfaces an
+`ADT_CFG_AGENT_BINARY_MISSING` envelope via `error_surface "$ISSUE_NUMBER"`
+instead of failing through as an opaque rc 127 / generic session failure. The
+launch binary is `AGENT_CMD` itself for most CLIs, but `kiro-cli` when
+`AGENT_CMD=kiro` (the wrapper's one alias). When a launcher is configured
+(`AGENT_LAUNCHER_ARGV` non-empty) the preflight **stands down** — the launcher
+owns binary resolution and a misconfigured launcher is already its own
+config-class abort (INV-38 / `ADT_CFG_LAUNCHER_*`).
+
+Each config-class abort path carries a **stable `UPPER_SNAKE` code** documented
+in the append-only registry [`errors.md`](errors.md) (codes never renumber). The
+**dispatcher Step-5 stale handler** ([`dispatcher-flow.md`](dispatcher-flow.md))
+checks the issue for a recent `<!-- adt-error-envelope: … -->` marker before
+posting its generic "Task appears to have crashed" message; when one is present
+it links the surfaced `code` + `remediation` instead, so a config crash is not
+misreported as a transient crash that burns retries.
+
+**Why**: today's fail-loud is log-only in every config-class startup abort path
+(#231). A wrapper that aborts at startup (bad conf, missing app creds,
+token-mint failure, invalid `E2E_MODE`, launcher/CLI mismatch per
+[INV-38](#inv-38-per-side-agent_dev_launcher--agent_review_launcher-only-with-claude))
+leaves the issue stuck in `reviewing`/`in-progress` with **zero GitHub-visible
+signal** — the operator discovers it hours later by log spelunking, the exact
+silent-stall UX the project exists to kill. The crux is **trap timing**: these
+validations abort *before* `trap cleanup EXIT` is installed, so the wrappers'
+existing crash-recovery comment path never runs for them.
+
+**Producer**: every config-class abort path in `autonomous-dev.sh`,
+`autonomous-review.sh`, `dispatcher-tick.sh`, and the shared libs
+(`lib-agent.sh` launcher guards + the `preflight_agent_binary` missing-binary
+check in `run_agent`/`resume_agent`) — each calls `error_surface "$ISSUE_NUMBER"`
+(issue context from the early `error_peek_issue_arg` scan, or `-` → dispatcher
+alert) before its existing `exit 1`.
+**Consumer**: the operator reading the issue; the dispatcher Step-5 stale handler
+reading the `adt-error-envelope` marker.
+**Status**: ENFORCED. Transient-class failures (agent-exit retries, fan-out
+drops, idle gates, SIGTERM handoff) are explicitly NOT changed — envelopes are
+for config-class failures only.
+
+**Test**:
+- `tests/unit/test-lib-error-envelope.sh` — TC-ERR-ENVELOPE-001..022: envelope
+  rendering (defaults, classes, doc, special chars), Clause E1/E3 rejection,
+  schema conformance of the rendered marker (python3 jsonschema / jq fallback),
+  `error_surface` posting via a stubbed proxy, post-failure / missing-proxy /
+  dispatcher-alert / transient degradation (rc unchanged, no post for
+  transient — the regression pin), the code-registry drift guard (every emitted
+  code exists in `errors.md`), and this INV-72 entry's presence.
+- `tests/unit/test-lib-agent-binary-preflight.sh` — TC-BINPF-STATIC +
+  TC-BINPF-001..006: the `lib-agent.sh` missing-binary preflight. A static pin
+  that `preflight_agent_binary || return` is wired into BOTH `run_agent` and
+  `resume_agent` and that `ADT_CFG_AGENT_BINARY_MISSING` is emitted + documented;
+  behavioral cases (stubbed proxy + controlled `PATH`) that a missing binary
+  surfaces the envelope and returns 1, a present binary returns 0 with no post,
+  `AGENT_CMD=kiro` resolves `kiro-cli` (not `kiro`), a configured launcher skips
+  the preflight, and an empty `ISSUE_NUMBER` degrades to a dispatcher-alert
+  (log-only, no `gh` post).
+
+**Cross-references**:
+- [INV-66](#inv-66-adapter-conformance-is-spec-defined) — the spec (Clause E1/E2/E3) this enforces at the wrapper boundary.
+- [`errors.md`](errors.md) — the append-only error-code registry.
+- [INV-56](#inv-56-review-agents-post-their-verdict-through-post-verdictsh-not-a-hand-rolled-gh-comment) — the token-refresh `gh` proxy resolution `error_surface` reuses.
+- [INV-58](#inv-58-agy-quotaauth-unavailable-drops-surface-a-distinct-reason-fan-out--reviewed-head-model-labels-are-per-agent) / [INV-61](#inv-61-kiro-authlogin-failure-unavailable-drops-surface-a-distinct-reason-not-a-bare-opaque-unavailable) — the existing distinct-reason drop surfacing this generalizes.
+
 ## Adding a new invariant
 
 When fixing a pipeline bug, after locating the bug on the state machine + flow docs:

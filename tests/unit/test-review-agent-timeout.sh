@@ -168,7 +168,12 @@ simulate_review_timeout() {
       /^SCRIPT_DIR=/ { capture = 1; next }
       capture && /^LIB_DIR=/ { next }
       capture && /^export AUTONOMOUS_CONF_DIR=/ { next }
+      # End-anchor: the start of required-config validation. Matches the legacy
+      # `: "${VAR:?...}"` one-liners AND the [INV-72] `for _req in …` loop that
+      # surfaces an error envelope before exiting (capturing past it would run
+      # the validation/exit in the sandbox and drop the RESOLVED_* echoes).
       /^: "\$\{[A-Z_]+:\?/ { capture = 0 }
+      /^for _req in / { capture = 0 }
       capture { print }
     ' "$WRAPPER"
     echo 'echo "RESOLVED_AGENT_TIMEOUT=$AGENT_TIMEOUT"'
@@ -182,7 +187,7 @@ simulate_review_timeout() {
 build_review_sandbox() {
   local sandbox="$1"; shift
   mkdir -p "$sandbox"
-  for f in lib-agent.sh lib-auth.sh lib-config.sh lib-review-bots.sh \
+  for f in lib-error.sh lib-agent.sh lib-auth.sh lib-config.sh lib-review-bots.sh \
            lib-review-verdict.sh lib-review-aggregate.sh lib-review-resolve.sh \
            lib-review-poll.sh lib-review-mergeable.sh lib-review-e2e.sh \
            gh-app-token.sh gh-with-token-refresh.sh; do
