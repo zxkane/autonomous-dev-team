@@ -63,11 +63,20 @@ It records one `adapter × mode` behavior:
     "env": {}                  // env the adapter reads (extra-args, sentinels)
   },
   "command": {                 // the recorded process result the stub replays
-    "argv": ["agy","-p","--dangerously-skip-permissions","--log-file","<logfile>"],
-    "stdinSha256": "8d5f…",    // SHA-256 of the recorded prompt bytes (manifest
-                               //   identity / well-formedness; schema-validated as
-                               //   64-hex — NOT byte-compared at runtime, since the
-                               //   runner feeds a live-nonce smoke prompt)
+    "argv": ["agy","-p","--dangerously-skip-permissions",
+             "--print-timeout","<timeout>","--log-file","<logfile>",
+             "--model","Gemini 3.5 Flash (High)"],
+                               //   LOAD-BEARING: the full argv the adapter
+                               //   assembles. The runner asserts the argv the
+                               //   dispatch path ACTUALLY launches the stub with
+                               //   against this (placeholder-aware — see below);
+                               //   a dropped/reordered flag FAILs argv-mismatch.
+    "stdinSha256": "d5c930c8…",// LOAD-BEARING: SHA-256 of the bytes fed on stdin.
+                               //   The runner feeds a DETERMINISTIC-nonce smoke
+                               //   prompt and asserts sha256(stub stdin) == this.
+                               //   codex review carries the prompt as an argv
+                               //   positional → empty stdin → empty-string hash
+                               //   (e3b0c442…). A wrong hash FAILs stdin-sha-mismatch.
     "rc": 0,                   // the CLI exit code
     "stdout": "",              // recorded stdout (use the literal <NONCE> for a
                                //   clean-verdict fixture — see below)
@@ -92,34 +101,69 @@ It records one `adapter × mode` behavior:
 2. Stages any `files{}` content and installs a **stub CLI** (named after the
    binary the adapter invokes — `kiro` ⇒ `kiro-cli`) on an isolated `PATH`. The
    stub emits the recorded `rc`/`stdout`/`stderr`, copies a staged `--log-file`
-   into place (the agy quota/auth sidecar contract), and records its stdin.
-3. Feeds the prompt to the stub over the [INV-34](../../docs/pipeline/invariants.md#inv-34-agent-prompt-is-fed-via-stdin-never-as-a-single-argv-element)
-   stdin channel and asserts it arrived (hermeticity proof).
-4. Runs the recorded process result through the **real** classification path —
+   into place (the agy quota/auth sidecar contract), and records BOTH the argv it
+   was launched with and the bytes it read on stdin.
+3. **Drives the REAL dispatch path** — it launches the stub through the
+   production invocation primitives (`lib-agent.sh::run_agent` / `resume_agent`,
+   or `lib-review-codex.sh::_run_codex_review` for codex review), feeding a
+   deterministic-nonce smoke prompt over the
+   [INV-34](../../docs/pipeline/invariants.md#inv-34-agent-prompt-is-fed-via-stdin-never-as-a-single-argv-element)
+   stdin channel.
+4. **Asserts the manifest's `command.argv` and `command.stdinSha256` are
+   correct** — the stub-recorded argv MUST match `command.argv` (placeholder-aware)
+   and `sha256(stdin)` MUST match `command.stdinSha256`. A regression in how the
+   adapter assembles argv or feeds the prompt FAILs the fixture
+   (`argv-mismatch` / `stdin-sha-mismatch`) — these fields are load-bearing, not
+   documentary.
+5. Runs the captured process result through the **real** classification path —
    `lib-agent-smoke.sh::_smoke_classify` + the per-CLI
    `_classify_<cli>_drop_reason` scrapers — then projects the result onto the
    four axes and diffs against `expect{}`.
+
+### argv placeholders
+
+`command.argv` records the FULL argv the adapter assembles. Per-run values the
+adapter fills in are written as placeholders the runner matches structurally
+(not as fixed literals):
+
+| Placeholder         | Matches                                              |
+|---------------------|------------------------------------------------------|
+| `<uuid>`            | a v4 UUID (claude `--session-id`)                    |
+| `<prompt>`          | the positional prompt (codex `review "<prompt>"`)    |
+| `<logfile>`         | a `*.log` path (agy `--log-file`)                    |
+| `<permission-mode>` | the runtime `AGENT_PERMISSION_MODE` (claude)         |
+| `<timeout>`         | a coreutils-`timeout` duration, e.g. `4h` (agy)      |
+
+Every other element is matched literally. The codex `config`-error fixture
+sets `input.env.AGENT_DEV_EXTRA_ARGS` so the adapter splices the offending flag
+(`-s danger-full-access`) into the argv exactly as the recorded `command.argv`.
 
 ### The `<NONCE>` placeholder
 
 A "clean verdict" (PASS) fixture must round-trip the model nonce just as a
 healthy CLI would. Put the literal token `<NONCE>` in `command.stdout`; the
-runner substitutes the live per-call nonce before staging, so the classifier
-sees the model "echo the token" and classifies PASS. A failure fixture leaves
-`stdout` empty (or carries the error text) and does **not** include `<NONCE>`.
+runner substitutes its **deterministic** nonce before the stub emits it, so the
+classifier sees the model "echo the token" and classifies PASS. A failure
+fixture leaves `stdout` empty (or carries the error text) and does **not**
+include `<NONCE>`. The nonce is deterministic precisely so the stdin hash is
+reproducible and `command.stdinSha256` can be pinned.
 
 ## Authoring a manifest (CLI vendors)
 
 To add your CLI to the suite (or pin a new behavior of an existing one):
 
 1. **Capture the real shapes.** Run your CLI under each mode and record the
-   exact `rc`, `stdout`, `stderr`, and any sidecar/log file for: a clean verdict,
-   a quota/auth/config/transient failure, and a timeout. Sanitize anything
-   sensitive (tokens, account ids, real domains).
+   exact `argv`, `rc`, `stdout`, `stderr`, and any sidecar/log file for: a clean
+   verdict, a quota/auth/config/transient failure, and a timeout. Sanitize
+   anything sensitive (tokens, account ids, real domains).
 2. **Write one manifest per behavior** under `tests/conformance/fixtures/` (name
-   them `<adapter>-<behavior>.json`). Use `<NONCE>` in `command.stdout` for the
-   clean-verdict fixture; stage any log under `fixtures/files/` and reference it
-   from `files{}`.
+   them `<adapter>-<behavior>.json`). Record the FULL `command.argv` (use the
+   placeholders above for per-run values) and the `command.stdinSha256` — both are
+   asserted, so an easy way to get them right is to run the suite once with a
+   placeholder hash, read the `argv-mismatch` / `stdin-sha-mismatch` FAIL lines
+   (they print the recorded argv and the actual hash), and paste those in. Use
+   `<NONCE>` in `command.stdout` for the clean-verdict fixture; stage any log under
+   `fixtures/files/` and reference it from `files{}`.
 3. **Fill `expect{}`** from the [adapter-spec §4.4 derivation](../../docs/pipeline/adapter-spec.md#44-voteeligibility--state-reason):
    a clean verdict ⇒ `none/valid/pass`; a 429 ⇒ `quota/absent/drop` (`retryable:false`);
    a login failure ⇒ `auth/absent/drop`; a structural prep/arg error ⇒

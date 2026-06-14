@@ -11,10 +11,13 @@
     "argv": [
       "kiro-cli",
       "chat",
-      "--trust-all-tools",
-      "--no-interactive"
+      "--agent",
+      "autonomous-dev",
+      "--no-interactive",
+      "--model",
+      "claude-sonnet-4.6"
     ],
-    "stdinSha256": "8d5f160c37601126891ca948763644da51003a074e073ed69458744398235155",
+    "stdinSha256": "d5c930c8f8082ce538446ac727a28c19d83bbdb927fae14e2a72af7444cfd25e",
     "rc": 1,
     "stdout": "",
     "stderr": "Loading Kiro CLI...\nStarting review session...\nAuthenticating...\n▰▱▱ Opening browser... | Press (^) + C to cancel\nFailed to open browser for authentication.\nPlease try again with: kiro-cli login --use-device-flow\nerror: Failed to open URL"

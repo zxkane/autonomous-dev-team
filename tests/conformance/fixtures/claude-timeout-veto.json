@@ -12,10 +12,17 @@
       "claude",
       "--session-id",
       "<uuid>",
+      "--name",
+      "conformance",
+      "--permission-mode",
+      "<permission-mode>",
+      "--model",
+      "sonnet",
       "-p",
-      "-"
+      "--output-format",
+      "json"
     ],
-    "stdinSha256": "8d5f160c37601126891ca948763644da51003a074e073ed69458744398235155",
+    "stdinSha256": "d5c930c8f8082ce538446ac727a28c19d83bbdb927fae14e2a72af7444cfd25e",
     "rc": 124,
     "stdout": "",
     "stderr": ""

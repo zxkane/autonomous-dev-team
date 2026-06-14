@@ -2935,18 +2935,33 @@ per-adapter × per-mode fixture manifests
    it MUST NOT fall through to a real CLI. This is the always-on tier; the
    live-CLI smoke ([INV-63](#inv-63-agent-smoke-is-a-three-state-probe-pass--unavailable--fail-run-through-the-production-run_agent-never-a-parallel-invocation-path) / `tests/e2e/run-agent-smoke.sh`) is the separate
    self-hosted tier.
-2. **Drives TODAY's monolithic classifier** — `lib-agent-smoke.sh::_smoke_classify`
-   plus the per-CLI `_classify_<cli>_drop_reason` scrapers (INV-58/61/62), NOT a
-   re-implemented copy. This is **intentional**: pin current behavior so the later
-   adapter extraction (a single `invoke() → AdapterResult` entry point) MUST keep
+2. **Drives TODAY's monolithic classifier via the REAL dispatch path** — it
+   launches the stub through the production invocation primitives
+   (`lib-agent.sh::run_agent` / `resume_agent`, or `lib-review-codex.sh::_run_codex_review`
+   for codex review) on the isolated PATH, then classifies the captured result
+   with `lib-agent-smoke.sh::_smoke_classify` plus the per-CLI
+   `_classify_<cli>_drop_reason` scrapers (INV-58/61/62), NOT a re-implemented
+   copy. This is **intentional**: pin current behavior so the later adapter
+   extraction (a single `invoke() → AdapterResult` entry point) MUST keep
    conformance green BEFORE and AFTER the refactor (green → refactor → still
    green). When that entry point lands, the runner re-points at it with **zero
    fixture changes** — the fixtures are the contract.
 3. **Materializes** each fixture: stages `files{}` (logs/sidecars — e.g. the agy
-   `--log-file` quota log) and installs a stub CLI emitting the recorded
-   `command.{rc,stdout,stderr}` and recording the bytes it received on stdin (the
+   `--log-file` quota log) and installs a stub CLI that emits the recorded
+   `command.{rc,stdout,stderr}` and records both the **argv it was launched with**
+   and the **stdin bytes** it received. Because the dispatch path launches the
+   stub, the manifest's `command.argv` and `command.stdinSha256` are
+   **LOAD-BEARING**: the runner asserts the stub-recorded argv against
+   `command.argv` (placeholder-aware — `<uuid>` / `<prompt>` / `<logfile>` /
+   `<permission-mode>` / `<timeout>` stand for per-run values) and `sha256(stdin)`
+   against `command.stdinSha256` (the
    [INV-34](#inv-34-agent-prompt-is-fed-via-stdin-never-as-a-single-argv-element)
-   prompt channel — the prompt MUST reach the stub or the fixture fails loud).
+   prompt channel; codex review carries the prompt as an argv positional, so its
+   stdin hash is the empty-string hash) **before** classifying. A regression in
+   how an adapter assembles argv or feeds the prompt fails the fixture loud
+   (`FAIL argv-mismatch` / `FAIL stdin-sha-mismatch`) — it is NOT a
+   canned-stdout replay that ignores invocation. The prompt is fed with a
+   **deterministic nonce** so the stdin hash is reproducible and pinnable.
 4. **Validates** each manifest against the schema (loud reject on malformed —
    python jsonschema when available, else a jq structural fallback, so it passes
    in plain CI either way).
@@ -2985,8 +3000,10 @@ green-before-and-after gate protects.
   projection/diff/field helpers (`lib-conformance.sh`), runner happy path,
   `--adapter`/`--mode` filtering, expect-mismatch FAIL with axis diff,
   malformed-manifest loud reject, hermeticity (PATH isolation, stdin-fed
-  contract, stub-missing/breach guards), the ≥2-per-CLI count, the two
-  load-bearing rc mappings, and the CI/cross-link wiring.
+  contract, stub-missing/breach guards), **the load-bearing `command.argv` /
+  `command.stdinSha256` assertions (TC-CONFORMANCE-030..034: garbage argv and
+  all-zero hash must FAIL, not silently PASS — PR #244 [P1])**, the ≥2-per-CLI
+  count, the two load-bearing rc mappings, and the CI/cross-link wiring.
 - `docs/test-cases/conformance-runner.md` — TC-CONFORMANCE-NNN enumeration.
 
 **Cross-references**:

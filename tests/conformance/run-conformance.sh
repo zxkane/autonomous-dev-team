@@ -148,25 +148,94 @@ PY
 }
 
 # ---------------------------------------------------------------------------
-# Stub materialization. Writes a stub binary named <adapter> into <stub_dir>
-# that:
-#   - records the bytes it reads on stdin to <stub_dir>/.stdin (to assert the
-#     prompt reached the stub over the INV-34 channel — non-empty stdin; not a
-#     stdinSha256 byte-compare),
-#   - if handed `--log-file <path>` (the agy contract) OR an env-named log path,
-#     copies the staged log content there so the per-CLI scraper can read it,
-#   - emits the recorded stdout/stderr and exits with the recorded rc.
-# The recorded stdout/stderr/rc and the staged agy log are passed via files in
-# <stub_dir> so the stub stays a tiny argv-agnostic emitter.
+# DETERMINISTIC smoke nonce. The runner MUST feed a deterministic prompt so the
+# stub-recorded stdin hash is stable and CAN be pinned by `command.stdinSha256`
+# (the [P1] requirement — a random per-call nonce makes the hash unreproducible
+# and the field non-load-bearing). The nonce keeps the `SMOKE-<16hex>` shape
+# _smoke_classify's PASS criterion expects; an all-zero hex is a valid value.
+# Exported so the EXIT-trap-safe subshell and the stub both see the same value.
+# ---------------------------------------------------------------------------
+_CONF_NONCE="SMOKE-0000000000000000"
+
+# ---------------------------------------------------------------------------
+# _compare_argv <manifest> <recorded-argv-json> <uuid> <perm_mode> <prompt>
+#
+# The argv assertion that makes `command.argv` LOAD-BEARING (the PR #244 [P1]
+# finding). <recorded-argv-json> is the JSON array the STUB recorded for the
+# bytes the REAL dispatch path (run_agent / resume_agent / _run_codex_review)
+# actually launched it with — NOT a value the runner synthesized. A regression in
+# how an adapter assembles its argv (a dropped flag, a reordered positional, a
+# wrong subcommand) makes the recorded argv diverge from the manifest's
+# `command.argv` and the fixture FAILs.
+#
+# Placeholders in the manifest stand for per-run values the adapter fills in:
+#   <uuid>            — claude --session-id (a v4 UUID minted per run)
+#   <logfile>         — agy --log-file (a per-session path under the pid dir)
+#   <prompt>          — the positional prompt (codex review); matched by the
+#                       deterministic smoke-prompt signature, not a fixed literal
+#   <permission-mode> — claude --permission-mode (AGENT_PERMISSION_MODE)
+#   <timeout>         — agy --print-timeout (a coreutils-`timeout` duration)
+# rc 0 iff the recorded argv matches (length + per-element), 1 otherwise.
+# ---------------------------------------------------------------------------
+_compare_argv() {
+  local manifest="$1" act_file="$2" uuid="$3" perm_mode="$4" prompt="$5"
+  [[ -f "$manifest" && -f "$act_file" ]] || return 1
+
+  jq -n -e \
+    --argjson exp "$(jq '.command.argv' "$manifest")" \
+    --argjson act "$(cat "$act_file")" \
+    --arg uuid "$uuid" \
+    --arg prompt "$prompt" \
+    --arg perm "$perm_mode" \
+    '
+    def elem_match(e; a):
+      if   e == "<uuid>"            then a | test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+      elif e == "<logfile>"         then a | test("\\.log$")
+      elif e == "<prompt>"          then (a == $prompt) or (a | test("Reply with EXACTLY this token"))
+      elif e == "<permission-mode>" then a == $perm
+      elif e == "<timeout>"         then a | test("^[0-9]+[smhd]?$")
+      else e == a end;
+    ($exp | length) == ($act | length)
+    and all(range(0; $exp | length); elem_match($exp[.]; $act[.]))
+    ' >/dev/null 2>&1
+}
+
+# ---------------------------------------------------------------------------
+# Stub materialization. Writes a stub binary named <bin> into <stub_dir> that the
+# REAL dispatch path launches on the isolated PATH. The stub:
+#   - records the EXACT argv it was launched with to <stub_dir>/.argv.json (so the
+#     runner pins it against `command.argv` — making that field load-bearing),
+#   - records the EXACT bytes it read on stdin to <stub_dir>/.stdin (so the runner
+#     pins sha256(stdin) against `command.stdinSha256` — making THAT field
+#     load-bearing; this IS the INV-34 prompt channel),
+#   - if handed `--log-file <path>` (the agy contract), copies the staged
+#     quota/auth log there so the per-CLI scraper finds it where run_agent expects,
+#   - for the bare agy `models` subcommand only, emits CONFORMANCE_AGY_MODELS so
+#     the adapter's [INV-50] `agy models` validation passes and `--model` is
+#     forwarded (mirrors agy's real dual behavior: `agy models` lists; `agy -p …`
+#     runs a turn) — without it the adapter omits --model and the argv diverges,
+#   - otherwise emits the recorded command.{stdout,stderr} and exits command.rc.
+# The recorded streams/rc and staged log are passed via files so the stub stays a
+# tiny emitter; because its OUTPUT *is* the recorded process result, classifying
+# the stub's captured output == classifying the recorded result over the real path.
 # ---------------------------------------------------------------------------
 _materialize_stub() {
-  local stub_dir="$1" adapter="$2" rc="$3" out_file="$4" err_file="$5" agy_log_src="$6"
-  local stub="$stub_dir/$adapter"
+  local stub_dir="$1" bin="$2" rc="$3" out_file="$4" err_file="$5" agy_log_src="$6"
+  local stub="$stub_dir/$bin"
+  local jq_cmd; jq_cmd="$(command -v jq)"
   cat > "$stub" <<STUB
 #!/bin/bash
-# Hermetic stub for adapter '$adapter' (conformance fixture replay).
-# Record stdin (the [INV-34] prompt channel) so the runner can assert the prompt
-# reached the stub (non-empty .stdin), not a stdinSha256 byte-compare.
+# Hermetic stub for binary '$bin' (conformance fixture replay).
+# Record the EXACT argv (argv[0]=basename, then the launched args) for the
+# command.argv assertion.
+"$jq_cmd" -n '\$ARGS.positional' --args -- "\$(basename "\$0")" "\$@" > "$stub_dir/.argv.json"
+# agy [INV-50] model-validation channel: \`agy models\` must list models so the
+# adapter forwards a known --model. ONLY the bare \`models\` subcommand triggers it.
+if [[ \$# -eq 1 && "\$1" == "models" ]]; then
+  printf '%s\n' "\${CONFORMANCE_AGY_MODELS:-}"
+  exit 0
+fi
+# Record stdin (the [INV-34] prompt channel) for the command.stdinSha256 assertion.
 cat > "$stub_dir/.stdin"
 # Honor an --log-file <path> argument (agy contract): stage the recorded log so
 # the per-CLI scraper finds the quota/auth signal where run_agent expects it.
@@ -188,16 +257,25 @@ STUB
 # ---------------------------------------------------------------------------
 # _classify_fixture <manifest> <work_dir>  → echoes the four-axis tuple the
 # classifier produced (`provider|verdict|vote|retryable`), or `__ERR__:<reason>`
-# on a materialization/hermeticity failure. rc 0 always (the tuple/err is on
+# on a materialization/hermeticity/contract failure. rc 0 always (tuple/err on
 # stdout).
 #
-# Invokes the stub over the production [INV-34] stdin channel, then classifies the
-# recorded process result with the REAL _smoke_classify. _smoke_classify's PASS
-# criterion is a model that echoes the smoke nonce on stdout; a fixture's recorded
-# `command.stdout` that should classify PASS embeds the literal placeholder
-# `<NONCE>`, which the runner substitutes with the live per-call nonce before
-# staging — so a "clean verdict" fixture round-trips the nonce exactly as a
-# healthy CLI would, and a failure fixture (empty/quota/error stdout) does not.
+# Drives the REAL dispatch path (run_agent / resume_agent / _run_codex_review)
+# with the stub on an isolated PATH — so the manifest's `command.argv` and
+# `command.stdinSha256` are LOAD-BEARING (PR #244 [P1]): the stub records the
+# exact argv it was launched with and the exact stdin bytes it received, and the
+# runner asserts both against the manifest before classifying. A regression in
+# how an adapter assembles argv or feeds the prompt diverges from the manifest and
+# FAILs the fixture (no longer a canned-stdout-only replay).
+#
+# Then classifies the stub's ACTUAL captured output (which equals the recorded
+# command.{stdout,stderr,rc}, since the stub emits them) with the REAL
+# _smoke_classify + per-CLI scrapers — TODAY's monolithic logic, by design.
+#
+# The smoke prompt is fed with a DETERMINISTIC nonce (_CONF_NONCE) so the stdin
+# hash is reproducible and pinnable. A PASS fixture's `command.stdout` embeds the
+# `<NONCE>` placeholder, substituted with _CONF_NONCE before staging, so a "clean
+# verdict" fixture round-trips the nonce exactly as a healthy CLI would.
 # ---------------------------------------------------------------------------
 _classify_fixture() {
   local manifest="$1" work="$2"
@@ -241,19 +319,22 @@ _classify_fixture() {
     fi
   done <<<"$fkeys"
 
-  # Recorded streams. The PASS placeholder <NONCE> is substituted with the live
-  # per-call nonce so a "clean verdict" fixture round-trips it exactly as a
-  # healthy CLI would; a failure fixture (empty/quota/error stdout) does not.
-  local out_file="$stub_dir/.stdout" err_file="$stub_dir/.stderr"
-  _conf_field "$manifest" command.stdout > "$out_file"
-  _conf_field "$manifest" command.stderr > "$err_file"
+  # CANNED streams — the recorded command.{stdout,stderr} the stub EMITS. Kept in
+  # dedicated files distinct from the capture targets below so the dispatch path's
+  # `>` redirect cannot truncate the stub's own source before it `cat`s it. The
+  # PASS placeholder <NONCE> is substituted (in the subshell, after the
+  # deterministic nonce is known) so a "clean verdict" fixture round-trips the
+  # nonce exactly as a healthy CLI would; a failure fixture does not.
+  local canned_out="$stub_dir/.canned_stdout" canned_err="$stub_dir/.canned_stderr"
+  _conf_field "$manifest" command.stdout > "$canned_out"
+  _conf_field "$manifest" command.stderr > "$canned_err"
 
   # The CLI BINARY name run_agent invokes differs from the adapter id for kiro
   # (`kiro-cli`). Materialize the stub under the real binary name so PATH
   # resolution lands on it; the classifier still keys on the adapter id.
   local bin="$adapter"
   [[ "$adapter" == "kiro" ]] && bin="kiro-cli"
-  _materialize_stub "$stub_dir" "$bin" "$rc" "$out_file" "$err_file" "$agy_log_src"
+  _materialize_stub "$stub_dir" "$bin" "$rc" "$canned_out" "$canned_err" "$agy_log_src"
 
   # Hermeticity: the stub MUST exist and be the ONLY resolution for the binary.
   [[ -x "$stub_dir/$bin" ]] || { printf '__ERR__:stub-missing\n'; return 0; }
@@ -263,9 +344,27 @@ _classify_fixture() {
   (
     export PATH="$stub_dir:$_COREUTILS_DIR"
     export PROJECT_ID="conformance"
-    export AGENT_CMD="$adapter"
     # shellcheck source=../../skills/autonomous-dispatcher/scripts/lib-agent-smoke.sh
     source "$LIB_SMOKE" 2>/dev/null || { printf '__ERR__:lib-source-failed\n'; exit 0; }
+
+    # AGENT_CMD MUST be set AFTER sourcing: lib-agent.sh's load_autonomous_conf
+    # runs at source time and would CLOBBER an AGENT_CMD exported beforehand with
+    # the box's own conf value (env contamination — see the smoke matrix harness's
+    # same ordering, lib-agent-smoke.sh "WHY"). With it set after, run_agent
+    # dispatches to the fixture's adapter, not the operator's configured CLI.
+    export AGENT_CMD="$adapter"
+
+    # Apply the manifest's input.env AFTER AGENT_CMD (same reason: it carries the
+    # operator-facing vars the adapter reads when assembling argv — e.g.
+    # AGENT_DEV_EXTRA_ARGS, which the codex argv builder splices in — and must win
+    # over the box conf load_autonomous_conf applied at source time).
+    local env_keys ek ev
+    env_keys="$(jq -r '(.input.env // {}) | keys[]?' "$manifest" 2>/dev/null)"
+    while IFS= read -r ek; do
+      [[ -n "$ek" ]] || continue
+      ev="$(jq -r --arg k "$ek" '.input.env[$k]' "$manifest")"
+      export "$ek=$ev"
+    done <<<"$env_keys"
 
     # Hermeticity guard: the binary MUST resolve into the stub dir, never a real
     # CLI. A breach (a system claude/codex/… shadowing the stub) is loud.
@@ -274,42 +373,102 @@ _classify_fixture() {
       printf '__ERR__:hermeticity-breach:%s\n' "$resolved"; exit 0
     fi
 
-    local nonce; nonce="$(_smoke_nonce)"
-    # Substitute the PASS placeholder in the staged stdout with the live nonce.
-    if grep -q '<NONCE>' "$out_file" 2>/dev/null; then
-      sed -i "s/<NONCE>/$nonce/g" "$out_file" 2>/dev/null || true
+    # DETERMINISTIC nonce + prompt — the stdin hash must be reproducible so
+    # command.stdinSha256 is pinnable (PR #244 [P1]).
+    local nonce="$_CONF_NONCE"
+    # Substitute the PASS placeholder in the CANNED stdout (the stub's source) with
+    # the nonce, so a PASS fixture's stub emits the nonce a healthy model would.
+    if grep -q '<NONCE>' "$canned_out" 2>/dev/null; then
+      sed -i "s/<NONCE>/$nonce/g" "$canned_out" 2>/dev/null || true
     fi
     local prompt; prompt="$(_smoke_prompt "$nonce")"
+    local model; model="$(_conf_field "$manifest" input.model)"
 
-    # --- INV-34 stdin contract proof (hermeticity): feed the prompt to the stub
-    #     over stdin exactly as run_agent does, and assert the stub received it.
-    #     This exercises the [INV-34] stdin channel against the real stub without
-    #     coupling to each CLI's invocation quirks (codex thread-capture consuming
-    #     stdout, opencode/codex PIPESTATUS, kiro binary rename) — those are
-    #     invocation properties, not CLASSIFICATION properties, and are covered by
-    #     test-lib-agent-prompt-stdin.sh. ---
-    printf '%s' "$prompt" | "$stub_dir/$bin" >/dev/null 2>&1 || true
-    if [[ ! -s "$stub_dir/.stdin" ]]; then
+    # The agy adapter validates --model against `agy models` ([INV-50]); the stub
+    # answers that probe from CONFORMANCE_AGY_MODELS so a known model is forwarded
+    # (else the adapter omits --model and the argv diverges). Feed it the fixture's
+    # own model so a known-model fixture round-trips its --model argv.
+    export CONFORMANCE_AGY_MODELS="$model"
+    # A fresh process must NOT inherit a stale models cache from a prior fixture.
+    unset _LIB_AGENT_AGY_MODELS_CACHE
+
+    # claude mints a real v4 session id; the others ignore it. Use a deterministic
+    # UUID-shaped id for claude so the <uuid> argv placeholder has a value to match
+    # AND the agy --log-file path is stable.
+    local session_id="00000000-0000-4000-8000-000000000000"
+
+    # --- Drive the REAL dispatch path with the stub on PATH. The stub records the
+    #     argv it was launched with (.argv.json) and the stdin it received
+    #     (.stdin); we assert both below. The stub EMITS the canned streams, which
+    #     we capture into .actual_{stdout,stderr} (distinct from the .canned_*
+    #     source files so the `>` redirect cannot truncate the stub's own input).
+    #     The classifier then reads the captured streams — the recorded result as
+    #     produced over the live path. ---
+    local out_file="$stub_dir/.actual_stdout" err_file="$stub_dir/.actual_stderr"
+    : >"$out_file"; : >"$err_file"
+    if [[ "$mode" == "dev-resume" ]]; then
+      resume_agent "$session_id" "$prompt" "$model" "conformance" >"$out_file" 2>"$err_file" || true
+    elif [[ "$mode" == "review" && "$adapter" == "codex" ]]; then
+      # codex review has its own launch controller (no run_agent path, INV-62). It
+      # writes codex's CLEAN review stdout to the file arg; stderr is not captured
+      # by the controller, so the canned stderr (a stream-error blip) is folded in.
+      # shellcheck source=../../skills/autonomous-dispatcher/scripts/lib-review-codex.sh
+      source "$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-review-codex.sh" 2>/dev/null \
+        || { printf '__ERR__:lib-review-codex-source-failed\n'; exit 0; }
+      _run_codex_review "$prompt" "$model" "$out_file" "$PWD" >/dev/null 2>&1 || true
+      cp "$canned_err" "$err_file" 2>/dev/null || true
+    else
+      # dev-new / review (non-codex) / e2e-browser all launch via run_agent.
+      run_agent "$session_id" "$prompt" "$model" "conformance" >"$out_file" 2>"$err_file" || true
+    fi
+
+    # --- stdin assertion: the prompt MUST have reached the stub. codex review
+    #     carries the prompt as an argv POSITIONAL (empty stdin → empty-string
+    #     hash), so a missing .stdin is only a failure for the stdin-fed adapters. ---
+    local empty_sha="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    local actual_sha="$empty_sha"
+    if [[ -f "$stub_dir/.stdin" ]]; then
+      actual_sha="$(sha256sum "$stub_dir/.stdin" 2>/dev/null | cut -d' ' -f1)"
+    fi
+    local expected_sha; expected_sha="$(_conf_field "$manifest" command.stdinSha256)"
+    if [[ "$expected_sha" != "$empty_sha" && ! -f "$stub_dir/.stdin" ]]; then
       printf '__ERR__:stdin-not-fed (prompt did not reach the stub over the INV-34 channel)\n'
       exit 0
     fi
 
-    # Recover the agy --log-file path the stub wrote into (the agy scraper reads
-    # the CLI's own --log-file sidecar, derived from PROJECT_ID + session id).
+    # --- command.argv assertion (LOAD-BEARING): the argv the dispatch path
+    #     actually launched the stub with MUST match the manifest. ---
+    local recorded_argv="$stub_dir/.argv.json"
+    if ! _compare_argv "$manifest" "$recorded_argv" "$session_id" "$AGENT_PERMISSION_MODE" "$prompt"; then
+      printf '__ERR__:argv-mismatch (recorded: %s)\n' "$(cat "$recorded_argv" 2>/dev/null || printf '<none>')"
+      exit 0
+    fi
+
+    # --- command.stdinSha256 assertion (LOAD-BEARING): the bytes the dispatch
+    #     path fed the stub on stdin MUST hash to the manifest's recorded value. ---
+    if [[ "$actual_sha" != "$expected_sha" ]]; then
+      printf '__ERR__:stdin-sha-mismatch (recorded: %s expected: %s)\n' "$actual_sha" "$expected_sha"
+      exit 0
+    fi
+
+    # Recover the agy --log-file path the dispatch path passed the stub (the agy
+    # scraper reads the CLI's own --log-file sidecar, derived from PROJECT_ID +
+    # session id). run_agent already handed the stub `--log-file <agy_log>` and the
+    # stub copied the staged quota/auth log there, so it is in place for the scraper.
     local agy_log=""
     if [[ "$adapter" == "agy" ]]; then
-      agy_log="$(_agy_log_file "$nonce" 2>/dev/null || true)"
-      # The above stub invocation passed no --log-file, so stage the recorded
-      # quota/auth log at the derived path the agy scraper will read.
-      if [[ -n "$agy_log" && -n "$agy_log_src" && -f "$agy_log_src" ]]; then
+      agy_log="$(_agy_log_file "$session_id" 2>/dev/null || true)"
+      # Defensive: if the stub did not stage the log (e.g. an argv without
+      # --log-file), stage it at the derived path so the scraper still reads it.
+      if [[ -n "$agy_log" && ! -f "$agy_log" && -n "$agy_log_src" && -f "$agy_log_src" ]]; then
         mkdir -p "$(dirname "$agy_log")" 2>/dev/null || true
         cp "$agy_log_src" "$agy_log" 2>/dev/null || true
       fi
     fi
 
-    # --- Classify the RECORDED process result via the REAL production classifier.
-    #     _smoke_classify (lib-agent-smoke.sh) dispatches to the per-CLI
-    #     _classify_<cli>_drop_reason scrapers — this is TODAY's monolithic
+    # --- Classify the ACTUAL captured process result via the REAL production
+    #     classifier. _smoke_classify (lib-agent-smoke.sh) dispatches to the
+    #     per-CLI _classify_<cli>_drop_reason scrapers — TODAY's monolithic
     #     drop-reason / verdict-state / vote logic, the contract being pinned. ---
     local classified state tok
     classified="$(_smoke_classify "$adapter" "$rc" "$out_file" "$nonce" "$agy_log" "$err_file")"

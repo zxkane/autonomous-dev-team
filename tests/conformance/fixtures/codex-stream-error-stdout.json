@@ -11,9 +11,11 @@
     "argv": [
       "codex",
       "review",
-      "<prompt>"
+      "<prompt>",
+      "-c",
+      "model=\"gpt-5-codex\""
     ],
-    "stdinSha256": "8d5f160c37601126891ca948763644da51003a074e073ed69458744398235155",
+    "stdinSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "rc": 1,
     "stdout": "Codex review of PR #999 (origin/main...feat/example)\n\nReading the scoped diff...\nstream error: Reconnecting... 1/5 (stream disconnected before completion: The server had an error while processing your request. Sorry about that!)\nstream error: Reconnecting... 2/5 (stream disconnected before completion: The server had an error while processing your request. Sorry about that!)\nstream error: Reconnecting... 5/5 (stream disconnected before completion: The server had an error while processing your request. Sorry about that!)\nerror: stream disconnected before completion: The server had an error while processing your request. Sorry about that!",
     "stderr": ""

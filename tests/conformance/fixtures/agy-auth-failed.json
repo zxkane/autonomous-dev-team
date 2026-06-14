@@ -13,11 +13,13 @@
       "-p",
       "--dangerously-skip-permissions",
       "--print-timeout",
-      "30s",
+      "<timeout>",
       "--log-file",
-      "<logfile>"
+      "<logfile>",
+      "--model",
+      "Gemini 3.5 Flash (High)"
     ],
-    "stdinSha256": "8d5f160c37601126891ca948763644da51003a074e073ed69458744398235155",
+    "stdinSha256": "d5c930c8f8082ce538446ac727a28c19d83bbdb927fae14e2a72af7444cfd25e",
     "rc": 0,
     "stdout": "",
     "stderr": ""

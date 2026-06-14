@@ -253,6 +253,86 @@ rm -rf "$EMPTY"
 
 # ---------------------------------------------------------------------------
 echo ""
+echo "=== TC-CONFORMANCE-03x: command.argv / command.stdinSha256 are LOAD-BEARING (PR #244 [P1]) ==="
+# ---------------------------------------------------------------------------
+# The PR #244 [P1] finding: the runner used to invoke the stub argv-less and only
+# check non-empty stdin, then classify canned stdout — so a fixture's
+# `command.argv` set to garbage and `command.stdinSha256` set to an all-zero hash
+# STILL reported PASS (the manifest fields were not load-bearing). The fix drives
+# the REAL dispatch path (run_agent / resume_agent / _run_codex_review) with the
+# stub on PATH; the stub records the argv it was launched with and the stdin it
+# received, and the runner asserts BOTH against the manifest before classifying.
+# These tests pin that the two fields now FAIL the fixture when corrupted — the
+# exact regression scenario the reviewer described.
+
+# TC-CONFORMANCE-030 — garbage command.argv → loud FAIL argv-mismatch (NOT a PASS).
+LB=$(mktemp -d)
+jq '.command.argv=["claude","GARBAGE","--nonsense"]' "$FIXTURES/claude-dev-new.json" > "$LB/argv-garbage.json"
+argv_out="$(CONFORMANCE_FIXTURE_DIR="$LB" env -u PROJECT_DIR bash "$RUNNER" 2>/dev/null)"; argv_rc=$?
+assert_contains "TC-CONFORMANCE-030a garbage argv → FAIL argv-mismatch" \
+  "FAIL argv-mismatch" "$argv_out"
+assert_eq "TC-CONFORMANCE-030b garbage argv → nonzero exit (not a silent PASS)" "1" "$argv_rc"
+if [[ "$argv_out" == *"PASS"* ]]; then
+  echo -e "  ${RED}FAIL${NC}: TC-CONFORMANCE-030c garbage argv must NOT report PASS"; FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${NC}: TC-CONFORMANCE-030c garbage argv reports no PASS"; PASS=$((PASS + 1))
+fi
+rm -rf "$LB"
+
+# TC-CONFORMANCE-031 — a single dropped/altered flag in command.argv FAILs too
+# (the assertion is per-element + length, not a coarse "is the binary right").
+LB=$(mktemp -d)
+# Drop the trailing `--output-format json` pair → length mismatch with the real argv.
+jq '.command.argv=["claude","--session-id","<uuid>","--name","conformance","--permission-mode","<permission-mode>","--model","sonnet","-p"]' \
+  "$FIXTURES/claude-dev-new.json" > "$LB/argv-short.json"
+short_out="$(CONFORMANCE_FIXTURE_DIR="$LB" env -u PROJECT_DIR bash "$RUNNER" 2>/dev/null)"
+assert_contains "TC-CONFORMANCE-031 dropped argv flag → FAIL argv-mismatch" \
+  "FAIL argv-mismatch" "$short_out"
+rm -rf "$LB"
+
+# TC-CONFORMANCE-032 — corrupted command.stdinSha256 → loud FAIL stdin-sha-mismatch.
+LB=$(mktemp -d)
+jq '.command.stdinSha256="0000000000000000000000000000000000000000000000000000000000000000"' \
+  "$FIXTURES/claude-dev-new.json" > "$LB/sha-zero.json"
+sha_out="$(CONFORMANCE_FIXTURE_DIR="$LB" env -u PROJECT_DIR bash "$RUNNER" 2>/dev/null)"; sha_rc=$?
+assert_contains "TC-CONFORMANCE-032a all-zero stdinSha256 → FAIL stdin-sha-mismatch" \
+  "FAIL stdin-sha-mismatch" "$sha_out"
+assert_eq "TC-CONFORMANCE-032b all-zero stdinSha256 → nonzero exit (not a silent PASS)" "1" "$sha_rc"
+if [[ "$sha_out" == *"PASS"* ]]; then
+  echo -e "  ${RED}FAIL${NC}: TC-CONFORMANCE-032c all-zero stdinSha256 must NOT report PASS"; FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${NC}: TC-CONFORMANCE-032c all-zero stdinSha256 reports no PASS"; PASS=$((PASS + 1))
+fi
+rm -rf "$LB"
+
+# TC-CONFORMANCE-033 — a codex review fixture (prompt-in-argv) whose stdinSha256
+# is flipped to a NON-empty hash FAILs: codex review carries the prompt as an argv
+# positional, so the stub reads NO stdin → empty-string hash; a fixture claiming a
+# stdin-fed hash there is a regression the assertion must catch.
+LB=$(mktemp -d)
+jq '.command.stdinSha256="d5c930c8f8082ce538446ac727a28c19d83bbdb927fae14e2a72af7444cfd25e"' \
+  "$FIXTURES/codex-review-clean.json" > "$LB/codex-wrong-sha.json"
+codex_sha_out="$(CONFORMANCE_FIXTURE_DIR="$LB" env -u PROJECT_DIR bash "$RUNNER" 2>/dev/null)"
+assert_contains "TC-CONFORMANCE-033 codex review with a non-empty stdinSha256 → FAIL stdin-sha-mismatch" \
+  "FAIL stdin-sha-mismatch" "$codex_sha_out"
+rm -rf "$LB"
+
+# TC-CONFORMANCE-034 — the runner drives the REAL invocation primitives (the
+# structural guarantee behind argv/stdin being load-bearing): it calls run_agent
+# and _run_codex_review, not a synthesized stub invocation.
+assert_grep "TC-CONFORMANCE-034a runner drives run_agent (real dispatch path)" \
+  'run_agent ' "$RUNNER"
+assert_grep "TC-CONFORMANCE-034b runner drives _run_codex_review for codex review" \
+  '_run_codex_review ' "$RUNNER"
+assert_grep "TC-CONFORMANCE-034c stub records launched argv to .argv.json" \
+  '\.argv\.json' "$RUNNER"
+assert_grep "TC-CONFORMANCE-034d runner asserts command.argv (load-bearing)" \
+  'argv-mismatch' "$RUNNER"
+assert_grep "TC-CONFORMANCE-034e runner asserts command.stdinSha256 (load-bearing)" \
+  'stdin-sha-mismatch' "$RUNNER"
+
+# ---------------------------------------------------------------------------
+echo ""
 echo "=== TC-CONFORMANCE-04x: promoted-fixture coverage (the E2E tier) ==="
 # ---------------------------------------------------------------------------
 # TC-CONFORMANCE-041 — the two load-bearing rc mappings are pinned as fixtures.
