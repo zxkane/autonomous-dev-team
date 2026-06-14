@@ -2937,14 +2937,29 @@ per-adapter × per-mode fixture manifests
    lib-agent.sh reads — `AGENT_DEV_EXTRA_ARGS` / `AGENT_REVIEW_EXTRA_ARGS` (the
    argv builders splice these in), `AGENT_LAUNCHER` / `AGENT_DEV_LAUNCHER` /
    `AGENT_REVIEW_LAUNCHER` (tokenized into the launcher argv arrays at source
-   time), `AGENT_DEV_CMD` / `AGENT_REVIEW_CMD`, and `AUTONOMOUS_CONF` — is reset
-   to an empty baseline **before** the lib is sourced, so an inherited
+   time), and `AGENT_DEV_CMD` / `AGENT_REVIEW_CMD` — is reset to an empty
+   baseline **before** the lib is sourced, so an inherited
    `AGENT_DEV_EXTRA_ARGS=--bogus` cannot append stray argv (→ argv-mismatch) and
    an inherited `AGENT_LAUNCHER` cannot route the dispatch off the isolated PATH
-   (→ stdin-not-fed). The classification depends ONLY on the fixture's
-   `input.env`, which is applied AFTER the scrub (so a fixture that genuinely
-   wants a var — e.g. `codex-cli-error`'s `AGENT_DEV_EXTRA_ARGS` — re-enables it).
-   This is the always-on tier; the live-CLI smoke
+   (→ stdin-not-fed). **The conf-discovery surface is equally neutralized**
+   (PR #244 [P1], codex review `dc696d40`): `load_autonomous_conf` reads THREE
+   inputs at source time — `AUTONOMOUS_CONF` (a file), `AUTONOMOUS_CONF_DIR`
+   (called as `${AUTONOMOUS_CONF_DIR:-$_LIB_AGENT_DIR}/autonomous.conf`), and
+   `PROJECT_DIR/scripts/autonomous.conf` — so scrubbing `AUTONOMOUS_CONF` alone is
+   insufficient: an inherited `AUTONOMOUS_CONF_DIR` (or `PROJECT_DIR`) pointing at
+   a real operator conf would still splice its `AGENT_*_EXTRA_ARGS` into the argv.
+   Setting these to `""` does **not** help — `${AUTONOMOUS_CONF_DIR:-$_LIB_AGENT_DIR}`
+   treats empty as unset and falls back to `$_LIB_AGENT_DIR`, which on a
+   self-hosting checkout resolves into a `scripts/` tree carrying a live
+   `autonomous.conf`. So all three are pointed at **concrete conf-free paths** (a
+   `mkdir`'d empty dir under the per-fixture work dir, with a `.nonexistent.conf`
+   for `AUTONOMOUS_CONF`); all three discovery branches miss and
+   `load_autonomous_conf` returns 1. The runner is therefore **self-defending** —
+   it no longer relies on the caller passing `env -u PROJECT_DIR`. The
+   classification depends ONLY on the fixture's `input.env`, which is applied
+   AFTER the scrub (so a fixture that genuinely wants a var — e.g.
+   `codex-cli-error`'s `AGENT_DEV_EXTRA_ARGS` — re-enables it). This is the
+   always-on tier; the live-CLI smoke
    ([INV-63](#inv-63-agent-smoke-is-a-three-state-probe-pass--unavailable--fail-run-through-the-production-run_agent-never-a-parallel-invocation-path) / `tests/e2e/run-agent-smoke.sh`) is the separate self-hosted tier.
 2. **Drives TODAY's monolithic classifier via the REAL dispatch path** — it
    launches the stub through the production invocation primitives
@@ -3041,7 +3056,11 @@ green-before-and-after gate protects.
   PR #244 [P1] #1)**, **ENV hermeticity (TC-CONFORMANCE-035a..e: an inherited
   `AGENT_DEV_EXTRA_ARGS` / `AGENT_LAUNCHER` / heavy multi-var leak does NOT
   contaminate the run — it stays all-PASS — while `input.env` still re-enables a
-  var after the scrub — PR #244 [P1] #1)**, hermeticity (PATH isolation,
+  var after the scrub — PR #244 [P1] #1; TC-CONFORMANCE-035f..i: a poisoned
+  `AUTONOMOUS_CONF_DIR` / `PROJECT_DIR` conf — supplied WITHOUT `env -u PROJECT_DIR`
+  — does NOT leak its `AGENT_*_EXTRA_ARGS` into the argv, proving the in-runner
+  conf-discovery scrub is self-defending — PR #244 [P1], codex review `dc696d40`)**,
+  hermeticity (PATH isolation,
   stdin-fed contract, stub-missing/breach guards), **the load-bearing
   `command.argv` / `command.stdinSha256` assertions (TC-CONFORMANCE-030..034:
   garbage argv and all-zero hash must FAIL, not silently PASS — PR #244 [P1])**,

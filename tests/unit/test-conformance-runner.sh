@@ -405,6 +405,58 @@ assert_contains "TC-CONFORMANCE-035d input.env still re-enables a var after the 
 assert_grep "TC-CONFORMANCE-035e runner zeroes operator AGENT_*_EXTRA_ARGS/LAUNCHER to a baseline" \
   'AGENT_DEV_EXTRA_ARGS=""' "$RUNNER"
 
+# TC-CONFORMANCE-035f..h — CONF-DISCOVERY HERMETICITY (PR #244 [P1], codex review
+# dc696d40): scrubbing AUTONOMOUS_CONF alone is NOT enough. lib-agent.sh's
+# load_autonomous_conf has THREE discovery branches — AUTONOMOUS_CONF (file),
+# then AUTONOMOUS_CONF_DIR/autonomous.conf, then PROJECT_DIR/scripts/autonomous.conf
+# — all read at SOURCE time. A caller with AUTONOMOUS_CONF_DIR (or PROJECT_DIR)
+# pointing at a real project conf containing AGENT_DEV_EXTRA_ARGS='--bogus' would
+# still splice --bogus into an empty-env fixture's argv → argv-mismatch. The runner
+# must scrub BOTH AUTONOMOUS_CONF_DIR and PROJECT_DIR inside the classification
+# subshell (NOT rely on the caller's `env -u PROJECT_DIR`). These deliberately do
+# NOT pass `env -u PROJECT_DIR` and DO point the conf-discovery vars at a poisoned
+# conf, so they exercise the in-runner scrub end-to-end (they FAIL pre-fix).
+POISON_CONF_DIR="$(mktemp -d)"
+# A PROJECT_DIR-shaped tree: <root>/scripts/autonomous.conf (branch 3).
+POISON_PROJECT_DIR="$(mktemp -d)"
+# Re-register the EXIT trap to clean ALL temp dirs. `trap … EXIT` REPLACES (not
+# appends), so this must restate the line-72 `$TMP` cleanup or it would leak.
+trap 'rm -rf "$TMP" "$POISON_CONF_DIR" "$POISON_PROJECT_DIR"' EXIT
+cat > "$POISON_CONF_DIR/autonomous.conf" <<'CONF'
+# Poisoned operator conf — must NEVER influence a conformance run.
+AGENT_DEV_EXTRA_ARGS='--bogus'
+AGENT_REVIEW_EXTRA_ARGS='--bogus'
+CONF
+mkdir -p "$POISON_PROJECT_DIR/scripts"
+cp "$POISON_CONF_DIR/autonomous.conf" "$POISON_PROJECT_DIR/scripts/autonomous.conf"
+
+# 035f — AUTONOMOUS_CONF_DIR leak (branch 2). NOTE: no `env -u PROJECT_DIR`.
+confdir_leak_out="$(AUTONOMOUS_CONF_DIR="$POISON_CONF_DIR" bash "$RUNNER" --adapter claude --mode dev-new 2>/dev/null)"
+assert_contains "TC-CONFORMANCE-035f inherited AUTONOMOUS_CONF_DIR conf does NOT leak (claude dev-new still PASS)" \
+  "CONFORMANCE claude/dev-new/claude-dev-new PASS" "$confdir_leak_out"
+# 035g — PROJECT_DIR leak (branch 3). NOTE: no `env -u PROJECT_DIR` — the runner
+# itself must neutralize it.
+projdir_leak_out="$(PROJECT_DIR="$POISON_PROJECT_DIR" bash "$RUNNER" --adapter claude --mode dev-new 2>/dev/null)"
+assert_contains "TC-CONFORMANCE-035g inherited PROJECT_DIR conf does NOT leak (claude dev-new still PASS)" \
+  "CONFORMANCE claude/dev-new/claude-dev-new PASS" "$projdir_leak_out"
+# 035h — the heaviest conf-discovery leak: BOTH conf-discovery vars poisoned, no
+# `env -u PROJECT_DIR` → the full 14-fixture run must stay all-PASS (exit 0).
+confdisc_heavy_rc=0
+AUTONOMOUS_CONF_DIR="$POISON_CONF_DIR" PROJECT_DIR="$POISON_PROJECT_DIR" \
+  bash "$RUNNER" >/dev/null 2>&1 || confdisc_heavy_rc=$?
+assert_eq "TC-CONFORMANCE-035h full run is conf-discovery-hermetic under poisoned CONF_DIR+PROJECT_DIR (exit 0)" "0" "$confdisc_heavy_rc"
+# Source-of-truth: the runner points ALL THREE conf-discovery vars at the
+# conf-free $no_conf_dir (NOT empty string — `""` would let the
+# `${AUTONOMOUS_CONF_DIR:-$_LIB_AGENT_DIR}` default leak; see the runner comment).
+# Grep the actual export lines (435-437), not the explanatory comment, so the
+# assertion fails if any of the three scrubs is removed.
+assert_grep "TC-CONFORMANCE-035i runner points AUTONOMOUS_CONF at a conf-free path" \
+  'export AUTONOMOUS_CONF="\$no_conf_dir/' "$RUNNER"
+assert_grep "TC-CONFORMANCE-035j runner points AUTONOMOUS_CONF_DIR at the conf-free dir" \
+  'export AUTONOMOUS_CONF_DIR="\$no_conf_dir"' "$RUNNER"
+assert_grep "TC-CONFORMANCE-035k runner points PROJECT_DIR at the conf-free dir" \
+  'export PROJECT_DIR="\$no_conf_dir"' "$RUNNER"
+
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== TC-CONFORMANCE-04x: promoted-fixture coverage (the E2E tier) ==="

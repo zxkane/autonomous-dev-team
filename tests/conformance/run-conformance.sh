@@ -330,7 +330,12 @@ _classify_fixture() {
   rc="$(_conf_field "$manifest" command.rc)"
 
   local stub_dir="$work/stub" stage="$work/stage"
-  mkdir -p "$stub_dir" "$stage"
+  # A guaranteed conf-FREE directory used to neutralize lib-agent.sh's
+  # conf-discovery (see the HERMETIC ENV BASELINE block below). It MUST contain no
+  # `autonomous.conf` so `load_autonomous_conf` finds nothing via the
+  # AUTONOMOUS_CONF_DIR branch.
+  local no_conf_dir="$work/no-conf"
+  mkdir -p "$stub_dir" "$stage" "$no_conf_dir"
 
   # Stage files{} (logs/sidecars). Each entry: files.<name>.path (relative to the
   # fixture root) → staged under <stage>/<basename>. We track an agy log source
@@ -405,13 +410,31 @@ _classify_fixture() {
     # clean slate and no inherited launcher/extra-args survives. (Empty string, not
     # `unset`: lib-agent.sh expands these UNGUARDED at source time — an `unset`
     # under the runner's `set -u` would abort the subshell on the first reference.)
-    # AUTONOMOUS_CONF is pointed at an empty path so load_autonomous_conf finds no
-    # operator conf (it also runs with PROJECT_DIR unset — see the caller's
-    # `env -u PROJECT_DIR` — so neither conf-discovery branch fires).
     export AGENT_DEV_EXTRA_ARGS="" AGENT_REVIEW_EXTRA_ARGS=""
     export AGENT_LAUNCHER="" AGENT_DEV_LAUNCHER="" AGENT_REVIEW_LAUNCHER=""
     export AGENT_DEV_CMD="" AGENT_REVIEW_CMD=""
-    export AUTONOMOUS_CONF=""
+
+    # --- NEUTRALIZE CONF DISCOVERY (PR #244 [P1], codex review dc696d40) ---
+    # lib-agent.sh::load_autonomous_conf has THREE discovery branches, ALL read at
+    # source time: (1) AUTONOMOUS_CONF (a file), (2) AUTONOMOUS_CONF_DIR/autonomous.conf
+    # — called as `load_autonomous_conf "${AUTONOMOUS_CONF_DIR:-$_LIB_AGENT_DIR}"`,
+    # (3) PROJECT_DIR/scripts/autonomous.conf. Scrubbing only AUTONOMOUS_CONF is NOT
+    # enough: an inherited AUTONOMOUS_CONF_DIR pointing at a real project conf (e.g.
+    # one with AGENT_DEV_EXTRA_ARGS='--bogus') would splice extra argv into an
+    # empty-env fixture (argv-mismatch), and an inherited PROJECT_DIR would do the
+    # same via branch 3. CRUCIALLY, setting AUTONOMOUS_CONF_DIR="" does NOT help —
+    # the `${AUTONOMOUS_CONF_DIR:-$_LIB_AGENT_DIR}` default treats empty as unset and
+    # falls back to $_LIB_AGENT_DIR, which on a self-hosting checkout resolves into a
+    # real scripts/ tree that DOES carry a live autonomous.conf. So point the
+    # conf-discovery vars at CONCRETE conf-free paths: AUTONOMOUS_CONF at a file that
+    # cannot exist, AUTONOMOUS_CONF_DIR + PROJECT_DIR at an empty dir (no
+    # autonomous.conf, no scripts/autonomous.conf). All three branches then miss and
+    # `load_autonomous_conf` returns 1 — the classification depends ONLY on input.env.
+    # This makes the runner self-defending: it no longer relies on the caller passing
+    # `env -u PROJECT_DIR`.
+    export AUTONOMOUS_CONF="$no_conf_dir/.nonexistent.conf"
+    export AUTONOMOUS_CONF_DIR="$no_conf_dir"
+    export PROJECT_DIR="$no_conf_dir"
 
     # shellcheck source=../../skills/autonomous-dispatcher/scripts/lib-agent-smoke.sh
     source "$LIB_SMOKE" 2>/dev/null || { printf '__ERR__:lib-source-failed\n'; exit 0; }
