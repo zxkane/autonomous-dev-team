@@ -1438,6 +1438,54 @@ review_near_success() {
   return 1
 }
 
+# recent_error_envelope <issue_num> — [INV-72] Step-5 stale-handling helper.
+#
+# When a wrapper aborts on a config-class failure it surfaces an
+# `<!-- adt-error-envelope: {json} -->` marker on the issue (lib-error.sh).
+# Before the Step-5b DEAD branch posts its generic "appears to have crashed"
+# comment, it calls this to find the MOST RECENT such marker within
+# ERROR_ENVELOPE_WINDOW_SECONDS (default 1800 = 30m, the typical re-dispatch
+# horizon). When found, it echoes a one-line `<code> — <remediation>` summary so
+# the dispatcher links the surfaced config error instead of the opaque generic
+# crash text (which would otherwise misreport a config crash as a transient one
+# and burn retries). Echoes empty + returns 1 when no recent envelope exists.
+#
+# Robust against gh's RE2 --jq (no look-behind): the marker is matched with a
+# plain `test("adt-error-envelope:")` and the JSON parsed by piping the comment
+# body through jq, NOT by an in-`--jq` regex capture.
+recent_error_envelope() {
+  local issue_num="$1"
+  local window="${ERROR_ENVELOPE_WINDOW_SECONDS:-1800}"
+  [[ "$window" =~ ^[0-9]+$ ]] || { echo ""; return 1; }
+  [ "$window" -gt 0 ] || { echo ""; return 1; }
+
+  # Newest comment whose body carries the envelope marker, with its createdAt.
+  local latest_json
+  latest_json=$(gh issue view "$issue_num" --repo "$REPO" --json comments \
+    -q '[.comments[] | select(.body | test("adt-error-envelope:"))] | last | {body, createdAt} // empty' 2>/dev/null)
+  [ -n "$latest_json" ] || { echo ""; return 1; }
+
+  local created_iso age
+  created_iso=$(jq -r '.createdAt // empty' <<<"$latest_json" 2>/dev/null)
+  [ -n "$created_iso" ] || { echo ""; return 1; }
+  age=$(_iso_age_seconds "$created_iso")
+  [ -n "$age" ] || { echo ""; return 1; }
+  [ "$age" -lt "$window" ] || { echo ""; return 1; }
+
+  # Extract the embedded JSON object from the marker and pull code+remediation.
+  # sed strips the `<!-- adt-error-envelope: ... -->` wrapper without any PCRE
+  # look-behind (portable + gh-RE2-safe).
+  local marker_json code remediation
+  marker_json=$(jq -r '.body' <<<"$latest_json" 2>/dev/null \
+    | sed -n 's/.*<!-- adt-error-envelope: \(.*\) -->.*/\1/p' | head -1)
+  [ -n "$marker_json" ] || { echo ""; return 1; }
+  code=$(jq -r '.code // empty' <<<"$marker_json" 2>/dev/null)
+  remediation=$(jq -r '.remediation // empty' <<<"$marker_json" 2>/dev/null)
+  [ -n "$code" ] || { echo ""; return 1; }
+  echo "${code} — ${remediation}"
+  return 0
+}
+
 # Step 4a.5: PR-exists short-circuit on the pending-dev scan. Mirrors
 # Step 5b's `last_reviewed_head` check so a stale FAILED verdict against
 # an unchanged PR HEAD doesn't drive an infinite re-review loop (#106).

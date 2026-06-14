@@ -105,6 +105,16 @@ if [[ -n "$AGENT_LAUNCHER" ]]; then
     # half-tokenized array. Empty = safe degraded state.
     AGENT_LAUNCHER=""
     AGENT_LAUNCHER_ARGV=()
+    # [INV-72] config-class abort at source time. Peek `--issue` from the
+    # wrapper's "$@" (in scope in this sourced file) and SURFACE on the issue
+    # when known, else dispatcher-alert. The wrappers source lib-error.sh first.
+    if command -v error_surface >/dev/null 2>&1; then
+      error_surface "$(error_peek_issue_arg "$@")" ADT_CFG_LAUNCHER_PARSE \
+        "AGENT_LAUNCHER does not tokenize as a shell argv list" \
+        "AGENT_LAUNCHER='${_orig_launcher}' has unbalanced quotes / invalid shell words" \
+        "Fix AGENT_LAUNCHER in scripts/autonomous.conf to a valid shell argv (e.g. 'cc --role dev'), then re-dispatch" \
+        "docs/pipeline/errors.md#configuration-class-class-config" || true
+    fi
     echo "[lib-agent] ERROR: AGENT_LAUNCHER failed to parse as a shell argv list. Value: ${_orig_launcher}" >&2
     unset _orig_launcher
     return 1 2>/dev/null || exit 1
@@ -135,6 +145,13 @@ if [[ -n "$AGENT_DEV_LAUNCHER" ]]; then
   if ! eval "AGENT_DEV_LAUNCHER_ARGV=($AGENT_DEV_LAUNCHER)" 2>/dev/null; then
     AGENT_DEV_LAUNCHER=""
     AGENT_DEV_LAUNCHER_ARGV=()
+    if command -v error_surface >/dev/null 2>&1; then
+      error_surface "$(error_peek_issue_arg "$@")" ADT_CFG_LAUNCHER_PARSE \
+        "AGENT_DEV_LAUNCHER does not tokenize as a shell argv list" \
+        "AGENT_DEV_LAUNCHER='${_orig_dev_launcher}' has unbalanced quotes / invalid shell words" \
+        "Fix AGENT_DEV_LAUNCHER in scripts/autonomous.conf to a valid shell argv (e.g. 'cc --role dev'), then re-dispatch" \
+        "docs/pipeline/errors.md#configuration-class-class-config" || true
+    fi
     echo "[lib-agent] ERROR: AGENT_DEV_LAUNCHER failed to parse as a shell argv list. Value: ${_orig_dev_launcher}" >&2
     unset _orig_dev_launcher
     return 1 2>/dev/null || exit 1
@@ -151,6 +168,13 @@ if [[ -n "$AGENT_REVIEW_LAUNCHER" ]]; then
   if ! eval "AGENT_REVIEW_LAUNCHER_ARGV=($AGENT_REVIEW_LAUNCHER)" 2>/dev/null; then
     AGENT_REVIEW_LAUNCHER=""
     AGENT_REVIEW_LAUNCHER_ARGV=()
+    if command -v error_surface >/dev/null 2>&1; then
+      error_surface "$(error_peek_issue_arg "$@")" ADT_CFG_LAUNCHER_PARSE \
+        "AGENT_REVIEW_LAUNCHER does not tokenize as a shell argv list" \
+        "AGENT_REVIEW_LAUNCHER='${_orig_review_launcher}' has unbalanced quotes / invalid shell words" \
+        "Fix AGENT_REVIEW_LAUNCHER in scripts/autonomous.conf to a valid shell argv (e.g. 'cc --role review'), then re-dispatch" \
+        "docs/pipeline/errors.md#configuration-class-class-config" || true
+    fi
     echo "[lib-agent] ERROR: AGENT_REVIEW_LAUNCHER failed to parse as a shell argv list. Value: ${_orig_review_launcher}" >&2
     unset _orig_review_launcher
     return 1 2>/dev/null || exit 1
@@ -180,10 +204,29 @@ fi
 # AFTER this startup guard has already run — so a per-agent launcher for a
 # non-claude CLI is intentionally NOT subject to this claude-only check.
 if [[ ${#AGENT_DEV_LAUNCHER_ARGV[@]} -gt 0 && "$AGENT_DEV_CMD" != "claude" ]]; then
+  # [INV-72] config-class failure. This guard runs at source time; lib-agent.sh
+  # is sourced with the wrapper's positional params in scope, so peek `--issue`
+  # from "$@" and SURFACE on the issue when known (else dispatcher-alert). The
+  # wrappers source lib-error.sh before lib-agent.sh; command -v keeps any other
+  # sourcing path (e.g. the dispatcher) safe.
+  if command -v error_surface >/dev/null 2>&1; then
+    error_surface "$(error_peek_issue_arg "$@")" ADT_CFG_LAUNCHER_CLI_MISMATCH \
+      "AGENT_DEV_LAUNCHER is set with a non-claude dev CLI (INV-38)" \
+      "AGENT_DEV_LAUNCHER is non-empty but AGENT_DEV_CMD=${AGENT_DEV_CMD}" \
+      "Unset AGENT_DEV_LAUNCHER (or AGENT_LAUNCHER if it sources the dev-side default), or set AGENT_DEV_CMD=claude, then re-dispatch" \
+      "docs/pipeline/errors.md#configuration-class-class-config" || true
+  fi
   echo "[lib-agent] ERROR: AGENT_DEV_LAUNCHER is only supported with AGENT_DEV_CMD=claude (got AGENT_DEV_CMD=${AGENT_DEV_CMD}). Either unset AGENT_DEV_LAUNCHER (or AGENT_LAUNCHER if it's the source of the dev-side default) or write a launcher tailored to your CLI." >&2
   return 1 2>/dev/null || exit 1
 fi
 if [[ ${#AGENT_REVIEW_LAUNCHER_ARGV[@]} -gt 0 && "$AGENT_REVIEW_CMD" != "claude" ]]; then
+  if command -v error_surface >/dev/null 2>&1; then
+    error_surface "$(error_peek_issue_arg "$@")" ADT_CFG_LAUNCHER_CLI_MISMATCH \
+      "AGENT_REVIEW_LAUNCHER is set with a non-claude review CLI (INV-38)" \
+      "AGENT_REVIEW_LAUNCHER is non-empty but AGENT_REVIEW_CMD=${AGENT_REVIEW_CMD}" \
+      "Unset AGENT_REVIEW_LAUNCHER (or AGENT_LAUNCHER if it sources the review-side default), or set AGENT_REVIEW_CMD=claude, then re-dispatch" \
+      "docs/pipeline/errors.md#configuration-class-class-config" || true
+  fi
   echo "[lib-agent] ERROR: AGENT_REVIEW_LAUNCHER is only supported with AGENT_REVIEW_CMD=claude (got AGENT_REVIEW_CMD=${AGENT_REVIEW_CMD}). Either unset AGENT_REVIEW_LAUNCHER (or AGENT_LAUNCHER if it's the source of the review-side default) or write a launcher tailored to your CLI." >&2
   return 1 2>/dev/null || exit 1
 fi
@@ -307,6 +350,54 @@ _run_with_timeout() {
   fi
 
   wait "$_AGENT_RUN_PID"
+}
+
+# _agent_launch_binary — the binary that run_agent/resume_agent will actually
+# exec for the active AGENT_CMD. For most CLIs that is AGENT_CMD itself; kiro is
+# the one alias (the wrapper invokes `kiro-cli`, not `kiro`). Echoes the binary
+# name on stdout. Echoes empty when a launcher is configured — in that case the
+# launcher (a `cc` shell function / `bash -c …`) owns binary resolution and a
+# misconfigured launcher is already a separate config-class abort (INV-38 /
+# ADT_CFG_LAUNCHER_*), so this preflight stands down rather than uselessly
+# checking `bash`.
+_agent_launch_binary() {
+  # A launcher wraps the real CLI — don't preflight here (see above).
+  if [[ ${#AGENT_LAUNCHER_ARGV[@]} -gt 0 ]]; then
+    echo ""
+    return 0
+  fi
+  case "$AGENT_CMD" in
+    kiro) echo "kiro-cli" ;;
+    *)    echo "$AGENT_CMD" ;;
+  esac
+}
+
+# preflight_agent_binary — [INV-72] config-class preflight: confirm the resolved
+# agent CLI binary is actually on PATH BEFORE launching/resuming, so a missing
+# binary surfaces an operator error envelope instead of failing through
+# _run_with_timeout as an opaque rc 127 / generic session failure (the issue
+# #231 "missing binary / node-resolution" config-class path). On a miss it posts
+# ADT_CFG_AGENT_BINARY_MISSING via error_surface "$ISSUE_NUMBER" (issue context
+# from the wrapper's global; `-` → dispatcher-alert) and returns 1; the caller
+# (run_agent / resume_agent) returns that as a config failure rather than
+# launching a non-existent command. Returns 0 (proceed) when the binary resolves
+# OR when a launcher is configured (binary resolution delegated to the launcher).
+preflight_agent_binary() {
+  local bin; bin="$(_agent_launch_binary)"
+  # Launcher configured (empty bin) → skip; nothing to preflight here.
+  [[ -z "$bin" ]] && return 0
+  if command -v "$bin" >/dev/null 2>&1; then
+    return 0
+  fi
+  if command -v error_surface >/dev/null 2>&1; then
+    error_surface "${ISSUE_NUMBER:--}" ADT_CFG_AGENT_BINARY_MISSING \
+      "The configured agent CLI binary '${bin}' is not on PATH" \
+      "AGENT_CMD=${AGENT_CMD} resolves to the launch binary '${bin}', which 'command -v' cannot find on the execution host's PATH" \
+      "Install '${bin}' on the execution host (or fix PATH / AGENT_CMD in scripts/autonomous.conf), then re-dispatch" \
+      "docs/pipeline/errors.md#configuration-class-class-config" || true
+  fi
+  echo "[lib-agent] ERROR: agent CLI binary '${bin}' (AGENT_CMD=${AGENT_CMD}) not found on PATH; aborting before launch (ADT_CFG_AGENT_BINARY_MISSING)." >&2
+  return 1
 }
 
 # install_agent_sigterm_trap — install the standard SIGTERM-to-PGID trap
@@ -734,6 +825,11 @@ run_agent() {
   local model="${3:-}"
   local session_name="${4:-}"
 
+  # [INV-72] Preflight the resolved agent CLI binary so a missing binary
+  # surfaces an envelope instead of an opaque rc 127. Returns non-zero (config
+  # failure) without launching when the binary is absent.
+  preflight_agent_binary || return $?
+
   local extra_args=()
   _parse_extra_args AGENT_DEV_EXTRA_ARGS extra_args
 
@@ -950,6 +1046,11 @@ resume_agent() {
   local prompt="$2"
   local model="${3:-}"
   local session_name="${4:-}"
+
+  # [INV-72] Preflight the resolved agent CLI binary (same rationale as
+  # run_agent). The codex/kiro fresh-session fallbacks below re-enter run_agent,
+  # which preflights again — harmless (command -v is cheap, idempotent).
+  preflight_agent_binary || return $?
 
   local extra_args=()
   _parse_extra_args AGENT_REVIEW_EXTRA_ARGS extra_args

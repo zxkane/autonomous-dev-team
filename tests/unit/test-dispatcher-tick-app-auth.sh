@@ -21,6 +21,9 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 TICK_SRC="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/dispatcher-tick.sh"
 LIB_CONFIG_SRC="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-config.sh"
 LIB_REVIEW_BOTS_SRC="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-review-bots.sh"
+# [INV-72] dispatcher-tick.sh now sources lib-error.sh (real, not stubbed) for
+# the config-class abort envelopes; stage it into the sandbox.
+LIB_ERROR_SRC="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-error.sh"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -74,6 +77,7 @@ mkdir -p "$SANDBOX"
 cp "$TICK_SRC" "$SANDBOX/dispatcher-tick.sh"
 cp "$LIB_CONFIG_SRC" "$SANDBOX/lib-config.sh"
 cp "$LIB_REVIEW_BOTS_SRC" "$SANDBOX/lib-review-bots.sh"
+cp "$LIB_ERROR_SRC" "$SANDBOX/lib-error.sh"
 
 # Stub lib-dispatch.sh: provide every helper dispatcher-tick.sh expects, but
 # return empty/no-op so the tick exercises only the upfront validation +

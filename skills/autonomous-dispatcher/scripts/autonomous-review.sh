@@ -31,6 +31,9 @@ LIB_DIR="$(cd "$(dirname "$(readlink -f "$_SELF")")" && pwd)"
 # project's scripts/ on their own. AUTONOMOUS_CONF_DIR keeps their conf lookup
 # (and lib-auth's project-side `gh` wrapper) anchored on the project [INV-65].
 export AUTONOMOUS_CONF_DIR="$SCRIPT_DIR"
+# [INV-72] Operator error envelope. Sourced FIRST (self-contained, only needs
+# jq) so lib-agent.sh's own startup config guards (INV-38) can call it.
+source "${LIB_DIR}/lib-error.sh"
 source "${LIB_DIR}/lib-agent.sh"
 source "${LIB_DIR}/lib-auth.sh"
 # shellcheck source=lib-review-bots.sh
@@ -218,29 +221,71 @@ if [[ ${#REVIEW_AGENTS_LIST[@]} -eq 0 ]]; then
   REVIEW_AGENTS_LIST=("$AGENT_CMD")
 fi
 
-# Validate required config (loaded by lib-agent.sh from autonomous.conf)
-: "${PROJECT_ID:?Set PROJECT_ID in autonomous.conf}"
-: "${REPO:?Set REPO in autonomous.conf}"
-: "${REPO_OWNER:?Set REPO_OWNER in autonomous.conf}"
-: "${REPO_NAME:?Set REPO_NAME in autonomous.conf}"
-: "${PROJECT_DIR:?Set PROJECT_DIR in autonomous.conf}"
+# [INV-72] Early, non-destructive scan for `--issue <N>` so the config
+# validations below can surface their envelope ON THE ISSUE (not just a
+# dispatcher-alert) when the wrapper was launched for one. The authoritative
+# arg-parse loop further down stays the single source of truth for usage errors
+# / --validate-config-only / unknown options; this only pre-populates the issue
+# context for surfacing. `-` (dispatcher-alert sentinel) when no valid --issue.
+ISSUE_NUMBER="$(error_peek_issue_arg "$@")"
+
+# Validate required config (loaded by lib-agent.sh from autonomous.conf).
+# [INV-72] config-class failure → surface on the issue when known, else
+# dispatcher-alert. NOTE: this runs before setup_github_auth, so the gh proxy
+# may not be ready yet — error_surface degrades to log-only in that case.
+for _req in PROJECT_ID REPO REPO_OWNER REPO_NAME PROJECT_DIR; do
+  if [[ -z "${!_req:-}" ]]; then
+    error_surface "$ISSUE_NUMBER" ADT_CFG_MISSING_KEY \
+      "Required autonomous.conf key '${_req}' is unset (review wrapper)" \
+      "${_req} is empty/unset in the project's scripts/autonomous.conf" \
+      "Set ${_req} in scripts/autonomous.conf (see autonomous.conf.example), then re-dispatch" \
+      "docs/pipeline/errors.md#configuration-class-class-config"
+    echo "Error: Set ${_req} in autonomous.conf" >&2
+    exit 1
+  fi
+done
 
 # Validate REVIEW_BOTS at startup so a typo (e.g. REVIEW_BOTS="q codx")
 # fails fast with a clear error instead of silently dropping the bot.
 # Empty REVIEW_BOTS is allowed — the bot-review section is omitted from
 # the prompt entirely and the review agent proceeds without bot
 # enforcement.
-REVIEW_BOTS_VALIDATED=$(parse_review_bots "${REVIEW_BOTS:-}") || exit 1
+if ! REVIEW_BOTS_VALIDATED=$(parse_review_bots "${REVIEW_BOTS:-}"); then
+  # [INV-72] config-class failure → surface on the issue when known (runs before
+  # setup_github_auth, so may degrade to log-only if the proxy isn't ready).
+  error_surface "$ISSUE_NUMBER" ADT_CFG_REVIEW_BOTS_INVALID \
+    "REVIEW_BOTS contains an unrecognized bot short-name (review wrapper)" \
+    "A REVIEW_BOTS token is not a known bot short-name (q / codex / claude / a configured custom bot)" \
+    "Fix REVIEW_BOTS in scripts/autonomous.conf to a space-separated list of known bot short-names (or empty), then re-dispatch" \
+    "docs/pipeline/errors.md#configuration-class-class-config"
+  exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # GitHub authentication
 # ---------------------------------------------------------------------------
 if [[ "$GH_AUTH_MODE" == "app" ]]; then
   if [[ -z "${REVIEW_AGENT_APP_ID:-}" || -z "${REVIEW_AGENT_APP_PEM:-}" ]]; then
+    # [INV-72] auth-class config failure → surface on the issue when known.
+    error_surface "$ISSUE_NUMBER" ADT_AUTH_APP_CREDS_MISSING \
+      "GH_AUTH_MODE=app but the review agent's App credentials are unset" \
+      "REVIEW_AGENT_APP_ID and/or REVIEW_AGENT_APP_PEM is empty in autonomous.conf" \
+      "Set REVIEW_AGENT_APP_ID and REVIEW_AGENT_APP_PEM (see docs/github-app-setup.md), then re-dispatch" \
+      "docs/pipeline/errors.md#authentication-class-class-auth" auth
     echo "Error: GH_AUTH_MODE=app requires REVIEW_AGENT_APP_ID and REVIEW_AGENT_APP_PEM" >&2
     exit 1
   fi
-  setup_github_auth "${REVIEW_AGENT_APP_ID}" "${REVIEW_AGENT_APP_PEM}"
+  if ! setup_github_auth "${REVIEW_AGENT_APP_ID}" "${REVIEW_AGENT_APP_PEM}"; then
+    # [INV-72] token-mint failure (auth-class) → surface on the issue when known
+    # (the proxy may have no valid token, so this likely degrades to log-only —
+    # the correct best-effort behavior).
+    error_surface "$ISSUE_NUMBER" ADT_AUTH_TOKEN_MINT_FAILED \
+      "The review agent's GitHub App installation token could not be minted" \
+      "The token-refresh daemon never wrote an initial token (see lib-auth.sh FATAL above)" \
+      "Verify REVIEW_AGENT_APP_ID, the installation id, and REVIEW_AGENT_APP_PEM on the execution host and that the App has the required repo permissions; check the token-daemon log, then re-dispatch" \
+      "docs/pipeline/errors.md#authentication-class-class-auth" auth
+    exit 1
+  fi
 else
   setup_github_auth
 fi
@@ -259,6 +304,11 @@ validate_e2e_config() {
   # projects that were on the old wrapper had only E2E_ENABLED. Fail loud
   # with the three accepted values listed.
   if [[ "${E2E_ENABLED:-false}" == "true" ]] && [[ -z "${E2E_MODE:-}" ]]; then
+    error_surface "$ISSUE_NUMBER" ADT_CFG_E2E_MODE_REQUIRED \
+      "E2E_ENABLED=true but E2E_MODE is unset" \
+      "E2E is enabled without an explicit E2E_MODE" \
+      "Set E2E_MODE to none, browser, or command in scripts/autonomous.conf, then re-dispatch" \
+      "docs/pipeline/errors.md#configuration-class-class-config"
     echo "Error: E2E_ENABLED=true requires E2E_MODE to be set explicitly." >&2
     echo "  Accepted values for E2E_MODE: none, browser, command" >&2
     echo "  - none:    no E2E section in review prompt (equivalent to E2E_ENABLED=false)" >&2
@@ -275,6 +325,11 @@ validate_e2e_config() {
       # would be silently ignored and the operator would think
       # command-mode was wired up.
       if [[ -n "${E2E_COMMAND:-}" || -n "${E2E_COMMAND_EVIDENCE_PARSER:-}" || -n "${E2E_COMMAND_PRE_HOOKS:-}" ]]; then
+        error_surface "$ISSUE_NUMBER" ADT_CFG_E2E_MODE_MISMATCH \
+          "E2E_COMMAND* fields are set but E2E_MODE is not 'command'" \
+          "Command-mode E2E config is present under E2E_MODE='${mode}'" \
+          "Set E2E_MODE=command (or clear the E2E_COMMAND* fields) in scripts/autonomous.conf, then re-dispatch" \
+          "docs/pipeline/errors.md#configuration-class-class-config"
         echo "Error: E2E_COMMAND* fields are set but E2E_MODE='${mode}', not 'command'." >&2
         echo "  Either set E2E_MODE=command or unset E2E_COMMAND / E2E_COMMAND_PRE_HOOKS / E2E_COMMAND_EVIDENCE_PARSER." >&2
         return 1
@@ -282,11 +337,21 @@ validate_e2e_config() {
       ;;
     command)
       if [[ -z "${E2E_COMMAND:-}" ]]; then
+        error_surface "$ISSUE_NUMBER" ADT_CFG_E2E_COMMAND_MISSING \
+          "E2E_MODE=command but E2E_COMMAND is unset" \
+          "Command-mode E2E selected without a command" \
+          "Set E2E_COMMAND in scripts/autonomous.conf (e.g. 'bash scripts/e2e-pr-stage.sh \${PR_NUMBER}'), then re-dispatch" \
+          "docs/pipeline/errors.md#configuration-class-class-config"
         echo "Error: E2E_MODE=command requires E2E_COMMAND to be set." >&2
         echo "  Example: E2E_COMMAND='bash scripts/e2e-pr-stage.sh \${PR_NUMBER}'" >&2
         return 1
       fi
       if [[ -z "${E2E_COMMAND_EVIDENCE_PARSER:-}" ]]; then
+        error_surface "$ISSUE_NUMBER" ADT_CFG_E2E_PARSER_MISSING \
+          "E2E_MODE=command but E2E_COMMAND_EVIDENCE_PARSER is unset" \
+          "Command-mode E2E selected without an evidence parser" \
+          "Set E2E_COMMAND_EVIDENCE_PARSER in scripts/autonomous.conf (see references/e2e-command-mode.md), then re-dispatch" \
+          "docs/pipeline/errors.md#configuration-class-class-config"
         echo "Error: E2E_MODE=command requires E2E_COMMAND_EVIDENCE_PARSER to be set." >&2
         echo "  The parser MUST output a markdown evidence block ending with the" >&2
         echo "  literal marker: <!-- e2e-evidence: complete sha=\"<HEAD>\" -->" >&2
@@ -303,6 +368,11 @@ validate_e2e_config() {
       for _field in E2E_COMMAND E2E_COMMAND_PRE_HOOKS E2E_COMMAND_EVIDENCE_PARSER; do
         local _value="${!_field:-}"
         if [[ "$_value" =~ \$PR_NUMBER([^A-Za-z0-9_{]|$) ]]; then
+          error_surface "$ISSUE_NUMBER" ADT_CFG_E2E_PR_NUMBER_UNBRACED \
+            "An E2E_COMMAND* field contains an unbraced \$PR_NUMBER" \
+            "${_field} uses \$PR_NUMBER instead of \${PR_NUMBER} (ambiguous expansion)" \
+            "Use \${PR_NUMBER} (with braces) in ${_field} in scripts/autonomous.conf, then re-dispatch" \
+            "docs/pipeline/errors.md#configuration-class-class-config"
           echo "Error: ${_field} contains unbraced \$PR_NUMBER." >&2
           echo "  Use \${PR_NUMBER} (with braces) so the wrapper can substitute it." >&2
           echo "  Found in: ${_field}=${_value}" >&2
@@ -311,6 +381,11 @@ validate_e2e_config() {
       done
       ;;
     *)
+      error_surface "$ISSUE_NUMBER" ADT_CFG_E2E_MODE_INVALID \
+        "E2E_MODE has an unrecognized value" \
+        "E2E_MODE='${mode}' is not one of none / browser / command" \
+        "Set E2E_MODE to none, browser, or command in scripts/autonomous.conf, then re-dispatch" \
+        "docs/pipeline/errors.md#configuration-class-class-config"
       echo "Error: invalid E2E_MODE='${mode}'." >&2
       echo "  Accepted values for E2E_MODE: none, browser, command" >&2
       return 1
@@ -341,12 +416,22 @@ validate_e2e_config || exit 1
 # conf the dev side runs fine — a back-compat regression. So validate intent only.
 validate_review_timeout_config() {
   if [[ -n "${AGENT_REVIEW_TIMEOUT:-}" ]] && ! _is_positive_timeout_value "$AGENT_REVIEW_TIMEOUT"; then
+    error_surface "$ISSUE_NUMBER" ADT_CFG_REVIEW_TIMEOUT_INVALID \
+      "AGENT_REVIEW_TIMEOUT is not a valid positive timeout (INV-48)" \
+      "AGENT_REVIEW_TIMEOUT='${AGENT_REVIEW_TIMEOUT}' is not a positive coreutils-timeout value" \
+      "Set AGENT_REVIEW_TIMEOUT to a positive coreutils-timeout value (e.g. 3600, 90m, 2h) in scripts/autonomous.conf, then re-dispatch" \
+      "docs/pipeline/errors.md#configuration-class-class-config"
     echo "Error: AGENT_REVIEW_TIMEOUT='${AGENT_REVIEW_TIMEOUT}' is not a positive coreutils-timeout value." >&2
     echo "  Accepted: a positive integer optionally suffixed s/m/h/d (e.g. 3600, 90m, 2h, 1d)." >&2
     echo "  Rejected: 0 (GNU 'timeout 0' DISABLES the cap), fractions, negatives, other units." >&2
     return 1
   fi
   if [[ -n "${_E2E_BROWSER_TIMEOUT_RAW:-}" ]] && ! _is_positive_timeout_value "$_E2E_BROWSER_TIMEOUT_RAW"; then
+    error_surface "$ISSUE_NUMBER" ADT_CFG_E2E_BROWSER_TIMEOUT_INVALID \
+      "E2E_BROWSER_TIMEOUT_SECONDS is not a valid positive timeout" \
+      "E2E_BROWSER_TIMEOUT_SECONDS='${_E2E_BROWSER_TIMEOUT_RAW}' is not a positive coreutils-timeout value" \
+      "Set E2E_BROWSER_TIMEOUT_SECONDS to a positive value (e.g. 900) in scripts/autonomous.conf, then re-dispatch" \
+      "docs/pipeline/errors.md#configuration-class-class-config"
     echo "Error: E2E_BROWSER_TIMEOUT_SECONDS='${_E2E_BROWSER_TIMEOUT_RAW}' is not a positive coreutils-timeout value." >&2
     echo "  Accepted: a positive integer optionally suffixed s/m/h/d (e.g. 3600, 90m, 2h, 4h)." >&2
     echo "  Rejected: 0 (GNU 'timeout 0' DISABLES the cap), fractions, negatives, other units." >&2
@@ -360,6 +445,11 @@ validate_review_timeout_config() {
   # ignored. Inert unless the smoke gate is enabled, but validated unconditionally
   # so a misconfigured value is caught regardless of the enable flag.
   if [[ -n "${REVIEW_SMOKE_TIMEOUT_SECONDS:-}" ]] && ! _is_positive_timeout_value "$REVIEW_SMOKE_TIMEOUT_SECONDS"; then
+    error_surface "$ISSUE_NUMBER" ADT_CFG_SMOKE_TIMEOUT_INVALID \
+      "REVIEW_SMOKE_TIMEOUT_SECONDS is not a valid positive timeout (INV-64)" \
+      "REVIEW_SMOKE_TIMEOUT_SECONDS='${REVIEW_SMOKE_TIMEOUT_SECONDS}' is not a positive coreutils-timeout value" \
+      "Set REVIEW_SMOKE_TIMEOUT_SECONDS to a positive value in scripts/autonomous.conf, then re-dispatch" \
+      "docs/pipeline/errors.md#configuration-class-class-config"
     echo "Error: REVIEW_SMOKE_TIMEOUT_SECONDS='${REVIEW_SMOKE_TIMEOUT_SECONDS}' is not a positive coreutils-timeout value." >&2
     echo "  Accepted: a positive integer optionally suffixed s/m/h/d (e.g. 120, 90, 2m)." >&2
     echo "  Rejected: 0 (GNU 'timeout 0' DISABLES the cap), fractions, negatives, other units." >&2
@@ -420,7 +510,16 @@ if ! [[ "$ISSUE_NUMBER" =~ ^[0-9]+$ ]]; then
 fi
 
 # Ensure we're in the project directory (needed when called directly, not just via SSM)
-cd "$PROJECT_DIR" || { echo "Error: cannot cd to $PROJECT_DIR" >&2; exit 1; }
+# [INV-72] config-class failure; ISSUE_NUMBER is known → surface on the issue.
+if ! cd "$PROJECT_DIR"; then
+  error_surface "$ISSUE_NUMBER" ADT_CFG_PROJECT_DIR_INVALID \
+    "The review wrapper cannot enter PROJECT_DIR" \
+    "cd '$PROJECT_DIR' failed (path missing or not a directory on the execution host)" \
+    "Fix PROJECT_DIR in scripts/autonomous.conf so it points at the project checkout on the execution host, then re-dispatch" \
+    "docs/pipeline/errors.md#configuration-class-class-config"
+  echo "Error: cannot cd to $PROJECT_DIR" >&2
+  exit 1
+fi
 
 # Bot identity for downstream telemetry / cost attribution.
 # Picked up by AGENT_LAUNCHER (e.g. user's `cc` shell function) when set;
@@ -431,7 +530,16 @@ export CC_ROLE_KIND="${CC_ROLE_KIND:-review}"
 LOG_FILE="/tmp/agent-${PROJECT_ID}-review-${ISSUE_NUMBER}.log"
 # PID file lives in the per-user PID dir (closes #72). pid_dir_for_project
 # is in lib-config.sh, sourced transitively via lib-agent.sh.
-PID_DIR=$(pid_dir_for_project) || { echo "ERROR: cannot resolve PID dir" >&2; exit 1; }
+PID_DIR=$(pid_dir_for_project) || {
+  # [INV-72] config-class failure; ISSUE_NUMBER is known → surface on the issue.
+  error_surface "$ISSUE_NUMBER" ADT_CFG_PID_DIR_UNWRITABLE \
+    "The review wrapper cannot resolve its per-user PID directory" \
+    "pid_dir_for_project could not create/chmod the run-state dir (XDG_RUNTIME_DIR / ~/.local/state unwritable)" \
+    "Ensure the execution user can write its XDG runtime dir (or ~/.local/state); inspect the pid_dir_for_project diagnostics in the log, then re-dispatch" \
+    "docs/pipeline/errors.md#configuration-class-class-config"
+  echo "ERROR: cannot resolve PID dir" >&2
+  exit 1
+}
 PID_FILE="${PID_DIR}/review-${ISSUE_NUMBER}.pid"
 
 # Create log file with restrictive permissions (sensitive agent output)

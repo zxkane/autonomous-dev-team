@@ -89,11 +89,14 @@ simulate_wrapper() {
       /^SCRIPT_DIR=/ { capture = 1; next }
       capture && /^LIB_DIR=/ { next }
       capture && /^export AUTONOMOUS_CONF_DIR=/ { next }
-      # End-anchor: any `: "${VAR:?...}"` style validation. Generalized
-      # over a specific name so reordering or renaming the first
-      # validated config var does not silently extend the capture into
-      # the wrapper body. Per agy P3 follow-up review on PR #159.
+      # End-anchor: the start of required-config validation. Matches BOTH the
+      # legacy `: "${VAR:?...}"` one-liners AND the [INV-72] `for _req in …`
+      # loop that surfaces an error envelope before `exit 1` (capturing past it
+      # would run the validation/exit in the sandbox and drop the AGENT_CMD echo).
+      # Generalized so reordering/renaming the first validated var does not
+      # silently extend the capture into the wrapper body (agy P3, PR #159).
       /^: "\$\{[A-Z_]+:\?/ { capture = 0 }
+      /^for _req in / { capture = 0 }
       capture { print }
     ' "$wrapper"
     echo 'echo "AGENT_CMD=$AGENT_CMD"'
@@ -114,7 +117,7 @@ build_sandbox() {
   # Symlink the lib-* and gh-* files so the sandbox's source statements
   # resolve relative to SCRIPT_DIR=$sandbox. Mimics the per-project
   # symlink-vendor topology that real deployments use.
-  for f in lib-agent.sh lib-auth.sh lib-config.sh lib-review-bots.sh \
+  for f in lib-error.sh lib-agent.sh lib-auth.sh lib-config.sh lib-review-bots.sh \
            lib-review-verdict.sh gh-app-token.sh gh-with-token-refresh.sh; do
     ln -sf "$SCRIPTS_DIR/$f" "$sandbox/$f"
   done

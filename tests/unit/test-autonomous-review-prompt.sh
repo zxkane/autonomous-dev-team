@@ -67,8 +67,11 @@ assert_grep "sources lib-review-bots.sh" \
   'source "\$\{LIB_DIR\}/lib-review-bots\.sh"' "$WRAPPER"
 assert_grep "calls parse_review_bots at startup" \
   'parse_review_bots' "$WRAPPER"
+# Fail-fast on REVIEW_BOTS validation failure. Accept either the legacy
+# `parse_review_bots … || exit 1` one-liner OR the [INV-72] `if ! parse_review_bots`
+# block that surfaces an error envelope before `exit 1` — both exit the wrapper.
 assert_grep "validation failure exits the wrapper (fail-fast)" \
-  'parse_review_bots .*\|\| exit 1' "$WRAPPER"
+  'parse_review_bots .*\|\| exit 1|if ! REVIEW_BOTS_VALIDATED=\$\(parse_review_bots' "$WRAPPER"
 assert_grep "REVIEW_BOTS_VALIDATED variable defined" \
   'REVIEW_BOTS_VALIDATED=' "$WRAPPER"
 

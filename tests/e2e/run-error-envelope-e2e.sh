@@ -1,0 +1,192 @@
+#!/bin/bash
+# run-error-envelope-e2e.sh — E2E for the operator error envelope (issue #231,
+# INV-72). TC-ERR-ENVELOPE-040.
+#
+# WHAT IT DOES
+# ------------
+# Simulates a wrapper aborting on a deliberately-broken config and asserts the
+# end-to-end surfacing contract through the REAL token-refresh `gh` proxy
+# resolution path lib-error.sh uses (${AUTONOMOUS_CONF_DIR}/gh):
+#
+#   1. A config-class abort (here: an invalid E2E_MODE-style failure, surfaced
+#      with a known issue number) posts an ISSUE COMMENT whose body carries the
+#      stable `code` AND the `remediation` AND the machine-readable
+#      `<!-- adt-error-envelope: {json} -->` marker.
+#   2. The embedded marker JSON validates against
+#      docs/pipeline/schemas/error-envelope.schema.json.
+#   3. The post does NOT mutate the issue's label state — error_surface only
+#      ever runs `gh issue comment`, never `gh issue edit --add-label` /
+#      `--remove-label`. The stub proxy records EVERY `gh` invocation; we assert
+#      no label-editing subcommand was called.
+#
+# This is the #231 E2E artifact: it runs the real lib-error.sh against a stub
+# `gh` proxy (no network, no credentials), so CI runs it on bare ubuntu.
+#
+# Run: bash tests/e2e/run-error-envelope-e2e.sh
+
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+LIB_ERROR="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-error.sh"
+SCHEMA="$PROJECT_ROOT/docs/pipeline/schemas/error-envelope.schema.json"
+
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; NC='\033[0m'
+PASS=0; FAIL=0
+ok()   { echo -e "  ${GREEN}PASS${NC}: $1"; PASS=$((PASS + 1)); }
+bad()  { echo -e "  ${RED}FAIL${NC}: $1"; FAIL=$((FAIL + 1)); }
+note() { echo -e "  ${YELLOW}NOTE${NC}: $1"; }
+
+[[ -f "$LIB_ERROR" ]] || { echo -e "${RED}FATAL${NC}: lib-error.sh missing"; exit 1; }
+
+echo "=== TC-ERR-ENVELOPE-040: broken-conf abort surfaces a comment, label state unchanged ==="
+
+SANDBOX=$(mktemp -d)
+trap 'rm -rf "$SANDBOX"' EXIT
+mkdir -p "$SANDBOX/scripts"
+CALLS="$SANDBOX/gh-calls.log"; : > "$CALLS"
+
+# Stub token-refresh `gh` proxy: record EVERY invocation (one arg per line,
+# blank-line separated), echo a fake comment URL, succeed. This stands in for
+# the real ${AUTONOMOUS_CONF_DIR}/gh → gh-with-token-refresh.sh symlink.
+cat > "$SANDBOX/scripts/gh" <<EOF
+#!/bin/bash
+{ echo "GH-INVOCATION"; printf '%s\n' "\$@"; echo "---"; } >> "$CALLS"
+echo "https://github.com/zxkane/autonomous-dev-team/issues/231#issuecomment-9999"
+exit 0
+EOF
+chmod +x "$SANDBOX/scripts/gh"
+
+# Drive the surfacing exactly as the wrapper call sites do: a config-class abort
+# on a known issue number. We run it in a clean subshell under `set -euo
+# pipefail` (the wrapper's mode) to prove error_surface never aborts the caller.
+ISSUE=231
+SURFACE_ERR="$SANDBOX/surface.err"
+(
+  set -euo pipefail
+  export AUTONOMOUS_CONF_DIR="$SANDBOX/scripts"
+  export REPO="zxkane/autonomous-dev-team"
+  # shellcheck disable=SC1090
+  source "$LIB_ERROR"
+  # Representative broken-conf abort (an invalid E2E_MODE), surfaced on the issue.
+  error_surface "$ISSUE" ADT_CFG_E2E_MODE_INVALID \
+    "E2E_MODE has an unrecognized value" \
+    "E2E_MODE='foo' is not one of none / browser / command" \
+    "Set E2E_MODE to none, browser, or command in scripts/autonomous.conf, then re-dispatch" \
+    "docs/pipeline/errors.md#configuration-class-class-config"
+) 2>"$SURFACE_ERR"
+SURFACE_RC=$?
+
+[[ "$SURFACE_RC" -eq 0 ]] && ok "error_surface returned 0 (best-effort, did not abort the set -e caller)" \
+  || bad "error_surface returned $SURFACE_RC (must be 0)"
+
+CALLBODY=$(cat "$CALLS")
+
+# 1. A comment was posted.
+if grep -q "issue" "$CALLS" && grep -q "comment" "$CALLS"; then
+  ok "gh issue comment was invoked"
+else
+  bad "no gh issue comment invocation recorded"
+fi
+
+# 1a. The comment body carries the code + remediation + marker.
+if [[ "$CALLBODY" == *"ADT_CFG_E2E_MODE_INVALID"* ]]; then ok "comment carries the stable code"; else bad "comment missing the code"; fi
+if [[ "$CALLBODY" == *"Set E2E_MODE to none, browser, or command"* ]]; then ok "comment carries the remediation"; else bad "comment missing the remediation"; fi
+if [[ "$CALLBODY" == *"adt-error-envelope:"* ]]; then ok "comment carries the machine-readable marker"; else bad "comment missing the marker"; fi
+
+# 2. The embedded marker JSON validates against the schema.
+MARKER_JSON=$(printf '%s\n' "$CALLBODY" | sed -n 's/.*<!-- adt-error-envelope: \(.*\) -->.*/\1/p' | head -1)
+if [[ -n "$MARKER_JSON" ]]; then
+  if command -v python3 >/dev/null 2>&1 && python3 -c 'import jsonschema' >/dev/null 2>&1 && [[ -f "$SCHEMA" ]]; then
+    _inst="$SANDBOX/inst.json"; printf '%s' "$MARKER_JSON" > "$_inst"
+    if python3 - "$SCHEMA" "$_inst" <<'PY'
+import json, sys
+from jsonschema import Draft7Validator
+sys.exit(1 if list(Draft7Validator(json.load(open(sys.argv[1]))).iter_errors(json.load(open(sys.argv[2])))) else 0)
+PY
+    then ok "marker JSON validates against error-envelope.schema.json (python3 jsonschema)"
+    else bad "marker JSON REJECTED by schema"; fi
+  else
+    note "python3 jsonschema unavailable — jq structural check"
+    if printf '%s' "$MARKER_JSON" | jq -e '.schema_version==1 and (.code|test("^[A-Z][A-Z0-9_]*$")) and (.remediation|length>0) and .surface=="issue-comment"' >/dev/null 2>&1; then
+      ok "marker JSON structurally valid (jq)"
+    else bad "marker JSON structurally invalid (jq)"; fi
+  fi
+else
+  bad "could not extract marker JSON from the posted comment"
+fi
+
+# 3. Label state unchanged: no label-editing subcommand was invoked.
+if grep -qE -- '--add-label|--remove-label' "$CALLS"; then
+  bad "a label-editing gh subcommand was invoked (error_surface must NOT mutate labels)"
+else
+  ok "no label mutation — issue label state unchanged by the surfacing post"
+fi
+# Stronger: the ONLY gh subcommand seen is `issue comment` (not `issue edit`).
+if grep -qE '^edit$' "$CALLS"; then
+  bad "gh issue edit was invoked (label mutation risk)"
+else
+  ok "no gh issue edit invoked"
+fi
+
+# ===========================================================================
+echo ""
+echo "=== TC-ERR-ENVELOPE-041: review-wrapper startup validations target the issue (P1-1 pin) ==="
+# Regression pin for the P1-1 finding: the review wrapper's startup validations
+# run BEFORE the authoritative arg-parse loop. Pre-fix they called
+# `error_surface -` (dispatcher-alert / log-only), so a broken E2E_MODE /
+# missing parser / invalid timeout / bad REVIEW_BOTS never posted to the issue.
+# The fix adds an early non-destructive `error_peek_issue_arg "$@"` scan that
+# populates ISSUE_NUMBER, and switches every validation to
+# `error_surface "$ISSUE_NUMBER" …`. A full-wrapper run is too heavy/fragile for
+# a deterministic E2E (token-mode setup_github_auth probes the host), so we
+# statically assert the wired behavior instead — the dynamic surfacing path
+# itself is covered by TC-040 + the unit suite.
+REVIEW_WRAPPER="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/autonomous-review.sh"
+DEV_WRAPPER="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/autonomous-dev.sh"
+DISPATCH_TICK="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/dispatcher-tick.sh"
+
+# 1. The early issue-peek runs before any validation in BOTH wrappers.
+for w in "$REVIEW_WRAPPER" "$DEV_WRAPPER"; do
+  peek_line=$(grep -n 'ISSUE_NUMBER="$(error_peek_issue_arg "$@")"' "$w" | head -1 | cut -d: -f1)
+  # Match an actual error_surface CALL (followed by an arg), not a comment that
+  # merely mentions the function name.
+  first_surface=$(grep -nE '^[[:space:]]*error_surface +("\$ISSUE_NUMBER"|-) ' "$w" | head -1 | cut -d: -f1)
+  if [[ -n "$peek_line" && -n "$first_surface" && "$peek_line" -lt "$first_surface" ]]; then
+    ok "041 $(basename "$w"): early issue-peek (line $peek_line) precedes first error_surface (line $first_surface)"
+  else
+    bad "041 $(basename "$w"): issue-peek must precede the first error_surface (peek=$peek_line surface=$first_surface)"
+  fi
+done
+
+# 2. NO review/dev wrapper startup validation still uses the `-` dispatcher-alert
+#    sentinel — they must all target "$ISSUE_NUMBER" now (P1-1).
+if grep -qE 'error_surface +- ' "$REVIEW_WRAPPER" "$DEV_WRAPPER"; then
+  bad "041 a wrapper validation still uses 'error_surface -' (dispatcher-alert) instead of \$ISSUE_NUMBER"
+else
+  ok "041 no wrapper validation uses the '-' dispatcher-alert sentinel (all target \$ISSUE_NUMBER)"
+fi
+
+# 3. P1-2: dispatcher preflights the required keys BEFORE sourcing lib-dispatch.sh
+#    (which has top-level \${VAR:?} guards that would raw-abort otherwise).
+preflight_line=$(grep -n 'for _req in REPO REPO_OWNER PROJECT_ID PROJECT_DIR' "$DISPATCH_TICK" | head -1 | cut -d: -f1)
+source_line=$(grep -n 'source "\${LIB_DIR}/lib-dispatch.sh"' "$DISPATCH_TICK" | head -1 | cut -d: -f1)
+if [[ -n "$preflight_line" && -n "$source_line" && "$preflight_line" -lt "$source_line" ]]; then
+  ok "041 dispatcher preflights required keys (line $preflight_line) before sourcing lib-dispatch.sh (line $source_line)"
+else
+  bad "041 dispatcher required-key preflight must precede the lib-dispatch.sh source (preflight=$preflight_line source=$source_line)"
+fi
+
+# 4. P1-3: lib-agent.sh launcher guards surface (error_surface), not log-only.
+LIB_AGENT="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-agent.sh"
+if grep -qE 'error_envelope ADT_CFG_LAUNCHER_(PARSE|CLI_MISMATCH)' "$LIB_AGENT"; then
+  bad "041 a launcher guard still renders via error_envelope (log-only) instead of error_surface (P1-3)"
+else
+  ok "041 launcher guards use error_surface (GitHub-visible), not error_envelope-to-stderr"
+fi
+
+echo ""
+echo "============================================"
+echo -e "Results: ${GREEN}${PASS} passed${NC}, ${RED}${FAIL} failed${NC}"
+echo "============================================"
+[[ "$FAIL" -eq 0 ]]

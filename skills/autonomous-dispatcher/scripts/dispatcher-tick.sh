@@ -48,8 +48,33 @@ unset _need_exec
 # REPO/REPO_OWNER/PROJECT_ID via `: "${VAR:?...}"`.
 # shellcheck source=lib-config.sh
 source "${LIB_DIR}/lib-config.sh"
+# [INV-72] Operator error envelope: tick-global config aborts surface as a
+# dispatcher-alert (no per-issue context). Self-contained (only needs jq).
+# shellcheck source=lib-error.sh
+source "${LIB_DIR}/lib-error.sh"
 # conf lookup stays on the UNRESOLVED SCRIPT_DIR (project's scripts/) — INV-14.
 load_autonomous_conf "${SCRIPT_DIR}" || true
+
+# [INV-72] Preflight ALL required keys BEFORE sourcing lib-dispatch.sh — that
+# library has top-level `: "${REPO:?}"` / `${REPO_OWNER:?}` / `${PROJECT_ID:?}`
+# guards that would raw-abort the tick (a bare bash error, NOT the documented
+# envelope) the instant it is sourced with a missing key. Surfacing here (a
+# dispatcher-alert — a tick has no per-issue context) and aborting first means a
+# missing key produces the ADT_CFG_MISSING_KEY envelope, not an opaque
+# `: REPO: parameter null or not set`. PROJECT_DIR is checked too (lib-dispatch
+# does not guard it, but the tick needs it for dispatch()).
+for _req in REPO REPO_OWNER PROJECT_ID PROJECT_DIR; do
+  if [[ -z "${!_req:-}" ]]; then
+    error_surface - ADT_CFG_MISSING_KEY \
+      "Required autonomous.conf key '${_req}' is unset (dispatcher tick)" \
+      "${_req} is empty/unset in the project's scripts/autonomous.conf" \
+      "Set ${_req} in scripts/autonomous.conf (see autonomous.conf.example), then the next tick proceeds" \
+      "docs/pipeline/errors.md#configuration-class-class-config"
+    echo "[dispatcher-tick] FATAL: ${_req} must be set in autonomous.conf" >&2
+    exit 1
+  fi
+done
+unset _req
 
 # shellcheck source=lib-dispatch.sh
 source "${LIB_DIR}/lib-dispatch.sh"
@@ -59,7 +84,10 @@ source "${LIB_DIR}/lib-dispatch.sh"
 # shellcheck source=lib-metrics.sh
 source "${LIB_DIR}/lib-metrics.sh" 2>/dev/null || true
 
-: "${PROJECT_DIR:?PROJECT_DIR must be set in autonomous.conf}"
+# [INV-72] PROJECT_DIR (+ REPO/REPO_OWNER/PROJECT_ID) are already validated by
+# the required-key preflight ABOVE (before sourcing lib-dispatch.sh), which
+# surfaces ADT_CFG_MISSING_KEY instead of a raw `: "${VAR:?}"` abort — so no
+# post-source `: "${PROJECT_DIR:?}"` guard is needed here.
 
 log() { echo "[dispatcher-tick] $(date -u +%H:%M:%S) $*"; }
 
@@ -71,6 +99,11 @@ log() { echo "[dispatcher-tick] $(date -u +%H:%M:%S) $*"; }
 case "${EXECUTION_BACKEND:-local}" in
   local|remote-aws-ssm) ;;
   *)
+    error_surface - ADT_CFG_EXECUTION_BACKEND_INVALID \
+      "EXECUTION_BACKEND has an unrecognized value (dispatcher tick)" \
+      "EXECUTION_BACKEND='${EXECUTION_BACKEND}' is not 'local' or 'remote-aws-ssm'" \
+      "Set EXECUTION_BACKEND to local or remote-aws-ssm in dispatcher.conf/autonomous.conf, then the next tick proceeds" \
+      "docs/pipeline/errors.md#configuration-class-class-config"
     echo "[dispatcher-tick] FATAL: unknown EXECUTION_BACKEND='${EXECUTION_BACKEND}'. Allowed: local, remote-aws-ssm." >&2
     exit 1
     ;;
@@ -85,6 +118,11 @@ esac
 # shellcheck source=lib-review-bots.sh
 source "${LIB_DIR}/lib-review-bots.sh"
 if ! parse_review_bots "${REVIEW_BOTS:-}" >/dev/null; then
+  error_surface - ADT_CFG_REVIEW_BOTS_INVALID \
+    "REVIEW_BOTS contains an unrecognized bot short-name (dispatcher tick)" \
+    "A REVIEW_BOTS token is not a known bot short-name (q / codex / claude / a configured custom bot)" \
+    "Fix REVIEW_BOTS in scripts/autonomous.conf to a space-separated list of known bot short-names (or empty), then the next tick proceeds" \
+    "docs/pipeline/errors.md#configuration-class-class-config"
   echo "[dispatcher-tick] FATAL: REVIEW_BOTS validation failed (see error above). Fix autonomous.conf before the next tick." >&2
   exit 1
 fi
@@ -102,6 +140,11 @@ fi
 # silently falling back to user auth is precisely the bug being closed.
 if [[ "${GH_AUTH_MODE:-token}" == "app" ]]; then
   if [[ -z "${DISPATCHER_APP_ID:-}" || -z "${DISPATCHER_APP_PEM:-}" ]]; then
+    error_surface - ADT_AUTH_APP_CREDS_MISSING \
+      "GH_AUTH_MODE=app but the dispatcher's App credentials are unset (dispatcher tick)" \
+      "DISPATCHER_APP_ID and/or DISPATCHER_APP_PEM is empty in dispatcher.conf/autonomous.conf" \
+      "Set DISPATCHER_APP_ID and DISPATCHER_APP_PEM (see docs/github-app-setup.md), then the next tick proceeds" \
+      "docs/pipeline/errors.md#authentication-class-class-auth" auth
     echo "[dispatcher-tick] FATAL: GH_AUTH_MODE=app requires DISPATCHER_APP_ID and DISPATCHER_APP_PEM (one or both are empty)." >&2
     exit 1
   fi
@@ -114,10 +157,20 @@ if [[ "${GH_AUTH_MODE:-token}" == "app" ]]; then
   _dispatcher_token=$(get_gh_app_token \
     "$DISPATCHER_APP_ID" "$DISPATCHER_APP_PEM" \
     "$REPO_OWNER" "$REPO_NAME") || {
+    error_surface - ADT_AUTH_TOKEN_MINT_FAILED \
+      "The dispatcher's GitHub App installation token could not be minted (dispatcher tick)" \
+      "get_gh_app_token failed for ${REPO_OWNER}/${REPO_NAME}" \
+      "Verify DISPATCHER_APP_ID, the installation id, and DISPATCHER_APP_PEM on the dispatcher host and that the App has the required repo permissions, then the next tick proceeds" \
+      "docs/pipeline/errors.md#authentication-class-class-auth" auth
     echo "[dispatcher-tick] FATAL: failed to generate GitHub App token for ${REPO_OWNER}/${REPO_NAME}." >&2
     exit 1
   }
   if [[ -z "$_dispatcher_token" ]]; then
+    error_surface - ADT_AUTH_TOKEN_MINT_FAILED \
+      "The dispatcher's GitHub App token came back empty (dispatcher tick)" \
+      "gh-app-token returned an empty token for ${REPO_OWNER}/${REPO_NAME}" \
+      "Verify DISPATCHER_APP_ID, the installation id, and DISPATCHER_APP_PEM on the dispatcher host and that the App has the required repo permissions, then the next tick proceeds" \
+      "docs/pipeline/errors.md#authentication-class-class-auth" auth
     echo "[dispatcher-tick] FATAL: gh-app-token returned an empty token for ${REPO_OWNER}/${REPO_NAME}." >&2
     exit 1
   fi
@@ -523,8 +576,19 @@ for i in $(seq 0 $((cand_count - 1))); do
         if declare -F metrics_emit >/dev/null 2>&1; then
           metrics_emit dispatch_stale "issue=${issue_num}" kind=in-progress failure_class=false-stall || true
         fi
-        gh issue comment "$issue_num" --repo "$REPO" \
-          --body "Task appears to have crashed (no PR found). Moving to pending-dev for retry."
+        # [INV-72] If the dev wrapper surfaced a config-class error envelope,
+        # link it instead of the opaque generic crash text so a config crash is
+        # not misreported as a transient one. Still move to pending-dev — the
+        # operator fixes the conf, then the retry succeeds.
+        _env_summary=$(recent_error_envelope "$issue_num" || true)
+        if [ -n "$_env_summary" ]; then
+          gh issue comment "$issue_num" --repo "$REPO" \
+            --body "Dev wrapper aborted on a configuration error (no PR found): ${_env_summary}. See the surfaced error envelope above. Moving to pending-dev — fix the configuration before the retry."
+        else
+          gh issue comment "$issue_num" --repo "$REPO" \
+            --body "Task appears to have crashed (no PR found). Moving to pending-dev for retry."
+        fi
+        unset _env_summary
         label_swap "$issue_num" "in-progress" "pending-dev"
         continue
       fi
@@ -570,8 +634,19 @@ for i in $(seq 0 $((cand_count - 1))); do
       if declare -F metrics_emit >/dev/null 2>&1; then
         metrics_emit dispatch_stale "issue=${issue_num}" kind=reviewing failure_class=false-stall || true
       fi
-      gh issue comment "$issue_num" --repo "$REPO" \
-        --body "Review process appears to have crashed. Moving to pending-dev for retry."
+      # [INV-72] Link a surfaced config-class error envelope instead of the
+      # opaque generic crash text. The review wrapper aborts at startup before
+      # its EXIT trap is installed, so a config crash would otherwise read as a
+      # transient one.
+      _env_summary=$(recent_error_envelope "$issue_num" || true)
+      if [ -n "$_env_summary" ]; then
+        gh issue comment "$issue_num" --repo "$REPO" \
+          --body "Review wrapper aborted on a configuration error: ${_env_summary}. See the surfaced error envelope above. Moving to pending-dev — fix the configuration before the retry."
+      else
+        gh issue comment "$issue_num" --repo "$REPO" \
+          --body "Review process appears to have crashed. Moving to pending-dev for retry."
+      fi
+      unset _env_summary
       label_swap "$issue_num" "reviewing" "pending-dev"
     fi
   fi

@@ -30,6 +30,11 @@ LIB_DIR="$(cd "$(dirname "$(readlink -f "$_SELF")")" && pwd)"
 # project's scripts/ on their own. AUTONOMOUS_CONF_DIR keeps their conf lookup
 # (and lib-auth's project-side `gh` wrapper) anchored on the project [INV-65].
 export AUTONOMOUS_CONF_DIR="$SCRIPT_DIR"
+# [INV-72] Operator error envelope: config-class aborts surface on the issue.
+# Sourced FIRST (it is self-contained, only needs jq) so lib-agent.sh's own
+# startup config guards (INV-38 launcher/CLI mismatch, launcher-parse) can call
+# error_surface (with the issue peeked from "$@") rather than just logging.
+source "${LIB_DIR}/lib-error.sh"
 source "${LIB_DIR}/lib-agent.sh"
 source "${LIB_DIR}/lib-auth.sh"
 # [INV-70] Observe-only metrics emitter. Sourced from LIB_DIR (skill tree) like
@@ -52,22 +57,56 @@ AGENT_CMD="$AGENT_DEV_CMD"
 # byte-identical to AGENT_LAUNCHER thanks to the :- in lib-agent.sh.
 AGENT_LAUNCHER_ARGV=("${AGENT_DEV_LAUNCHER_ARGV[@]}")
 
-# Validate required config (loaded by lib-agent.sh from autonomous.conf)
-: "${PROJECT_ID:?Set PROJECT_ID in autonomous.conf}"
-: "${REPO:?Set REPO in autonomous.conf}"
-: "${REPO_OWNER:?Set REPO_OWNER in autonomous.conf}"
-: "${REPO_NAME:?Set REPO_NAME in autonomous.conf}"
-: "${PROJECT_DIR:?Set PROJECT_DIR in autonomous.conf}"
+# [INV-72] Early, non-destructive scan for `--issue <N>` so the config
+# validations below can surface their envelope ON THE ISSUE (not just a
+# dispatcher-alert) when the wrapper was launched for one. The authoritative
+# arg-parse loop further down stays the single source of truth for usage errors
+# / --mode / --session / unknown options; this only pre-populates the issue
+# context for surfacing. `-` (dispatcher-alert sentinel) when no valid --issue.
+ISSUE_NUMBER="$(error_peek_issue_arg "$@")"
+
+# Validate required config (loaded by lib-agent.sh from autonomous.conf).
+# [INV-72] A missing key is a config-class failure: surface on the issue when
+# known, else dispatcher-alert. REPO may itself be the missing key, so
+# error_surface reads it best-effort. Runs before setup_github_auth, so the gh
+# proxy may not be ready — error_surface degrades to log-only in that case.
+for _req in PROJECT_ID REPO REPO_OWNER REPO_NAME PROJECT_DIR; do
+  if [[ -z "${!_req:-}" ]]; then
+    error_surface "$ISSUE_NUMBER" ADT_CFG_MISSING_KEY \
+      "Required autonomous.conf key '${_req}' is unset (dev wrapper)" \
+      "${_req} is empty/unset in the project's scripts/autonomous.conf" \
+      "Set ${_req} in scripts/autonomous.conf (see autonomous.conf.example), then re-dispatch" \
+      "docs/pipeline/errors.md#configuration-class-class-config"
+    echo "Error: Set ${_req} in autonomous.conf" >&2
+    exit 1
+  fi
+done
 
 # ---------------------------------------------------------------------------
 # GitHub authentication
 # ---------------------------------------------------------------------------
 if [[ "$GH_AUTH_MODE" == "app" ]]; then
   if [[ -z "${DEV_AGENT_APP_ID:-}" || -z "${DEV_AGENT_APP_PEM:-}" ]]; then
+    # [INV-72] auth-class config failure → surface on the issue when known.
+    error_surface "$ISSUE_NUMBER" ADT_AUTH_APP_CREDS_MISSING \
+      "GH_AUTH_MODE=app but the dev agent's App credentials are unset" \
+      "DEV_AGENT_APP_ID and/or DEV_AGENT_APP_PEM is empty in autonomous.conf" \
+      "Set DEV_AGENT_APP_ID and DEV_AGENT_APP_PEM (see docs/github-app-setup.md), then re-dispatch" \
+      "docs/pipeline/errors.md#authentication-class-class-auth" auth
     echo "Error: GH_AUTH_MODE=app requires DEV_AGENT_APP_ID and DEV_AGENT_APP_PEM" >&2
     exit 1
   fi
-  setup_github_auth "${DEV_AGENT_APP_ID}" "${DEV_AGENT_APP_PEM}"
+  if ! setup_github_auth "${DEV_AGENT_APP_ID}" "${DEV_AGENT_APP_PEM}"; then
+    # [INV-72] token-mint failure (auth-class) → surface on the issue when known.
+    # The proxy may have no valid token, so error_surface likely degrades to
+    # log-only — that's the correct best-effort behavior.
+    error_surface "$ISSUE_NUMBER" ADT_AUTH_TOKEN_MINT_FAILED \
+      "The dev agent's GitHub App installation token could not be minted" \
+      "The token-refresh daemon never wrote an initial token (see lib-auth.sh FATAL above)" \
+      "Verify DEV_AGENT_APP_ID, the installation id, and DEV_AGENT_APP_PEM on the execution host and that the App has the required repo permissions; check the token-daemon log, then re-dispatch" \
+      "docs/pipeline/errors.md#authentication-class-class-auth" auth
+    exit 1
+  fi
 else
   setup_github_auth
 fi
@@ -117,7 +156,16 @@ if ! [[ "$ISSUE_NUMBER" =~ ^[0-9]+$ ]]; then
 fi
 
 # Ensure we're in the project directory (needed when called directly, not just via SSM)
-cd "$PROJECT_DIR" || { echo "Error: cannot cd to $PROJECT_DIR" >&2; exit 1; }
+# [INV-72] config-class failure; ISSUE_NUMBER is known → surface on the issue.
+if ! cd "$PROJECT_DIR"; then
+  error_surface "$ISSUE_NUMBER" ADT_CFG_PROJECT_DIR_INVALID \
+    "The dev wrapper cannot enter PROJECT_DIR" \
+    "cd '$PROJECT_DIR' failed (path missing or not a directory on the execution host)" \
+    "Fix PROJECT_DIR in scripts/autonomous.conf so it points at the project checkout on the execution host, then re-dispatch" \
+    "docs/pipeline/errors.md#configuration-class-class-config"
+  echo "Error: cannot cd to $PROJECT_DIR" >&2
+  exit 1
+fi
 
 # Bot identity for downstream telemetry / cost attribution.
 # Picked up by AGENT_LAUNCHER (e.g. user's `cc` shell function) when set;
@@ -128,7 +176,16 @@ export CC_ROLE_KIND="${CC_ROLE_KIND:-dev}"
 LOG_FILE="/tmp/agent-${PROJECT_ID}-issue-${ISSUE_NUMBER}.log"
 # PID file lives in the per-user PID dir (closes #72). pid_dir_for_project
 # is in lib-config.sh, sourced transitively via lib-agent.sh.
-PID_DIR=$(pid_dir_for_project) || { echo "ERROR: cannot resolve PID dir" >&2; exit 1; }
+PID_DIR=$(pid_dir_for_project) || {
+  # [INV-72] config-class failure; ISSUE_NUMBER is known → surface on the issue.
+  error_surface "$ISSUE_NUMBER" ADT_CFG_PID_DIR_UNWRITABLE \
+    "The dev wrapper cannot resolve its per-user PID directory" \
+    "pid_dir_for_project could not create/chmod the run-state dir (XDG_RUNTIME_DIR / ~/.local/state unwritable)" \
+    "Ensure the execution user can write its XDG runtime dir (or ~/.local/state); inspect the pid_dir_for_project diagnostics in the log, then re-dispatch" \
+    "docs/pipeline/errors.md#configuration-class-class-config"
+  echo "ERROR: cannot resolve PID dir" >&2
+  exit 1
+}
 PID_FILE="${PID_DIR}/issue-${ISSUE_NUMBER}.pid"
 AGENT_RAN=false
 
