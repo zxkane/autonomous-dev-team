@@ -344,7 +344,12 @@ _smoke_classify() {
   [[ -n "$combined" ]] && rm -f "$combined" 2>/dev/null
   case "$tok" in
     # quota/capacity/transient-backend signal → environmental (UNAVAILABLE).
-    quota-exhausted*|stream-error*)   printf 'UNAVAILABLE|%s\n' "$phrase"; return 0 ;;
+    # `malformed-output` (codex INV-73: a prompt-echo / startup-trace instead of a
+    # response) is also environmental, NOT operator-side breakage — the CLI ran but
+    # emitted garbage, the same "drop the member, don't FAIL the whole Phase A.5
+    # fan-out" tolerance a bare timeout (INV-67) / stream-error gets. FAILing on it
+    # would let one misbehaving codex strand the issue in `reviewing` (INV-64).
+    quota-exhausted*|stream-error*|malformed-output)   printf 'UNAVAILABLE|%s\n' "$phrase"; return 0 ;;
     # auth / config breakage → operator-side (FAIL). `config-error[:<flag>]` is the
     # codex INV-62 token (an exec-only flag rejected by `codex review`'s clap
     # parser); like auth-failed it is operator-side config breakage, so FAIL — and

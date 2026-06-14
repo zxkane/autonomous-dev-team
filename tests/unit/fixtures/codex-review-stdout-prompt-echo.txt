@@ -1,0 +1,58 @@
+OpenAI Codex v0.139.0
+--------
+workdir: /tmp/codex-review-wt-999-abc123
+model: openai.gpt-5.4
+provider: amazon-bedrock
+approval: never
+sandbox: read-only
+--------
+
+You are an autonomous PR reviewer for PR #999. You are running inside `codex
+review`, so the diff is already scoped to the PR's merge target — do NOT re-run
+`git diff` or `gh pr diff`.
+
+## Step 0: Merge Conflict Resolution — MANDATORY PRE-REVIEW
+
+Before doing anything else, check the PR mergeable status and rebase if needed.
+
+## Step 0.5: Requirement Drift Detection — MANDATORY PRE-REVIEW
+
+Before reading the PR diff, read ALL comments on issue #999 to detect
+requirement changes posted after implementation:
+
+```bash
+gh issue view 999 --repo owner/example-repo --json comments
+```
+
+Prior review comments (from `gh issue view`):
+- kane-review-agent (2026-06-13): Review findings:
+  1. [P1] src/handler.ts:42 — the error path swallows the exception. (resolved
+     in a later commit)
+- kane-coding-agent (2026-06-13): Fixed the swallowed-exception path; re-review
+  please.
+
+## Decision Gate
+
+Apply the review checklist below and reach a verdict. Prefix EACH blocking
+finding with `[P1]` (priority 1). Use `[P2]` for should-fix and `[P3]` for nits.
+If there are no `[P1]` findings, the PR PASSES.
+
+When you have a verdict, post it via `bash scripts/post-verdict.sh` with the
+canonical first line (`Review PASSED` or `Review findings:`).
+
+## Issue body
+
+## Summary
+
+Add a retry wrapper around the upstream fetch so a transient 5xx does not abort
+the whole ingest run.
+
+## Requirements
+- [x] Wrap the fetch in a bounded retry
+- [x] Surface the final failure with a typed error
+
+## Acceptance Criteria
+- [ ] A transient 5xx is retried up to the configured bound
+- [ ] A persistent failure surfaces a typed error, not a fabricated success
+
+You should now review the scoped diff and rea

@@ -89,23 +89,235 @@ _codex_review_deadline_seconds() {
   fi
 }
 
+# ===========================================================================
+# INV-73 (#252): codex review prompt-echo / startup-trace malformed-output guard
+# ===========================================================================
+# `codex review` sometimes exits rc 0 but writes its OWN prompt + CLI startup
+# trace to stdout instead of a review — the startup banner (`OpenAI Codex vX.Y.Z`
+# / a `workdir:`+`model:`+`provider:` header) followed by the verbatim review
+# prompt (the inlined decision-gate rules, the `gh issue view` comment-history
+# dump, the issue body), truncated at the wrapper's char cap, with NO analysis and
+# NO verdict. Because the prompt text itself contains the literal `[P1]` (the
+# instruction "Prefix EACH blocking finding with `[P1]`" + quoted prior-round
+# findings), the bare `_codex_review_classify_stdout` `[P1]` scan matched the echo
+# and posted a phantom blocking FAIL — vetoing an otherwise-clean PR on every round
+# (a non-self-terminating dev↔review loop). This is a DISTINCT fourth failure mode
+# from #209 (non-zero/stream → retry), #246 (timeout 124/137 → UNAVAILABLE), and
+# #247 (post-failed): clean exit (rc 0), well-formed-LOOKING but bogus stdout.
+
+# _codex_review_stdout_is_malformed <stdout-file>
+#
+# rc 0 iff the capture is codex's prompt-echo / startup-trace rather than a real
+# review; rc 1 otherwise (a genuine review — with or without `[P1]` — an empty /
+# missing / unreadable / short capture, or any text that is plausibly a review).
+# rc 1 is the FAIL-SAFE direction: a normal review must NEVER be mis-flagged
+# malformed (that would drop a real verdict), so the signals key on the echo/trace
+# STRUCTURE, not on a bare keyword that a genuine review could legitimately mention.
+# rc 0/1 only — never aborts under `set -euo pipefail` (a bare call is fail-safe).
+#
+# Three cheap, robust signals (ANY one is sufficient — defense in depth):
+#   1. Banner/header — the codex startup banner is the capture's FIRST non-empty
+#      line (`^OpenAI Codex v`), OR a `workdir:`+`model:`+`provider:` triple appears
+#      in the CONTIGUOUS LEADING HEADER REGION (the run of lines from the top up to
+#      the first blank / ``` fence / `## ` heading / `[P1]` finding line). Keyed on
+#      the ACTUAL launch-trace STRUCTURE, NOT on the strings appearing anywhere near
+#      the top: a real review writes review TEXT first, so a banner/header it QUOTES
+#      in a fenced block sits AFTER review prose (outside the leading region) and is
+#      NOT a first non-empty line — so it does not match (2nd-round review finding
+#      [P1] / #252: a `head -n 12` scan dropped a genuine `[P1]` review that quoted
+#      the banner/header fixture near the top).
+#   2. Prompt-echo — the capture reproduces the wrapper's own prompt SCAFFOLDING in
+#      the ECHO REGION: ≥2 DISTINCT prompt markers that are UNFENCED and in the
+#      LEADING prefix (before any genuine finding). An ECHO reproduces the WHOLE
+#      prompt VERBATIM at the TOP as bare structure; a real review writes findings
+#      and at most QUOTES prompt text inside ``` fences or AFTER its findings. So the
+#      markers are counted only after (a) stripping fenced code blocks and (b)
+#      truncating at the first `[P1]`/`[P2]`/`[P3]` finding line — see `_echo_region`.
+#      The markers: the `## Step 0:` / `## Step 0.5:` MANDATORY-PRE-REVIEW headings,
+#      the `## You are running inside codex review` header, the `## Review Checklist`
+#      / `## Acceptance Criteria Verification` / `## Review Process` headings, the
+#      `Prefix EACH blocking finding` instruction, or the `You are reviewing PR #…
+#      for issue #…` opener. Three review findings ([P1]) drove this from a bare
+#      substring to here: 1st (#253) — a single quoted marker dropped a review →
+#      require ≥2; 3rd (#252, session fdc9ff60) — ≥2 markers ANYWHERE still dropped a
+#      review that QUOTED two prompt headings in a fenced block → restrict to the
+#      unfenced leading echo region.
+#   3. Truncated-no-verdict — the capture is at/near the char cap AND shows no
+#      recognizable verdict / conclusion structure (`Review PASSED`/`Review
+#      findings:`/a `Summary:`/`Findings` heading) — cut mid-dump with no conclusion.
+_codex_review_stdout_is_malformed() {
+  local f="${1:-}"
+  [[ -n "$f" && -f "$f" && -r "$f" ]] || return 1
+
+  # Banner/header signals 1a/1b match ONLY the ACTUAL startup header — the codex
+  # launch trace at the very top of the capture — NOT arbitrary lines that merely
+  # appear near the top. 2nd-round review finding [P1] (#252, session 5705a2d7): an
+  # earlier draft scanned the first 12 lines (`head -n 12`) for the banner / the
+  # workdir+model+provider triple, so a GENUINE review whose finding QUOTES the
+  # banner/header fixture in a fenced code block near the top (banner lines land
+  # within the first 12, but AFTER review prose) was mis-flagged `malformed` before
+  # the `[P1]` scan — dropping a real blocking review. The fix keys on STRUCTURE:
+  # the real trace's banner is the capture's FIRST non-empty line, and its
+  # workdir/model/provider lines form a CONTIGUOUS leading header block; a quoted
+  # block is always preceded by review prose (a heading, a `[P1]`/finding line, a
+  # fence). So we extract the LEADING HEADER REGION — the run of lines from the top
+  # up to (not including) the first blank line, fence, or markdown heading — and
+  # match the banner/header ONLY within it.
+  #
+  # _leading_region: lines [1..) until the first terminator (blank / ``` fence /
+  # `## ` heading / a `[P1]`/`[P2]`/`[P3]` finding line). The real launch header is
+  # an unbroken run of `key: value` (and `----` separator) lines right at the start,
+  # so it survives intact; a review whose first lines are prose terminates the region
+  # before any quoted banner block is reached.
+  # FINDING-BOUNDARY patterns — a line that BEGINS a genuine review FINDING (so the
+  # prompt-echo region ends there). 4th-round review finding [P1] (#252, session
+  # 6000c69c): the wrapper's own posted finding format is NUMBERED + BOLD
+  # (`1. **[P1] …`), not a bare leading `[P1]`, so a boundary that only matched
+  # `^[[:space:]]*\[P[123]\]` let a numbered/bullet/JSON finding's later quoted prompt
+  # markers stay in the region → false `malformed`. The three boundary alternations
+  # (inlined IDENTICALLY in the _leading_region and _echo_region awks below) recognize
+  # the finding forms the wrapper documents/posts and a review emits:
+  #   (a) direct / numbered / bulleted / bold: `[P1]`, `1. [P1]`, `1) **[P1]`, `- [P1]`,
+  #       `* **[P1]`, `> [P1]` — a `[P1/2/3]` token after ONLY list/number/bold/quote
+  #       scaffolding. NOT the prompt's `Prefix EACH blocking finding with [P1]`
+  #       instruction (prose before the token, so the `^…\[P[123]\]` anchor misses it —
+  #       DET-24), and NOT a `## Step…` heading.
+  #   (b) JSON key:   a `"severity"`/`"priority"` key line.
+  #   (c) JSON value: a quoted `P1`/`P2`/`P3` value (`"P1"`, `'P1'`).
+  # NB: the boundary is inlined as LITERAL awk regexes, NOT passed via `awk -v` — `-v`
+  # applies C-style escape processing to the value, which strips the `\[`/`\]`/`\*`
+  # backslashes and breaks the literal-bracket `\[P[123]\]` match (observed: every
+  # finding line then silently fails to bound the region).
+  local _leading_region
+  _leading_region=$(awk '
+    NR==1 && $0=="" { next }                              # skip a single leading blank
+    /^[[:space:]]*$/ { exit }                             # blank line → end of header region
+    /^[[:space:]]*```/ { exit }                           # code fence → review body starts
+    /^[[:space:]]*#/ { exit }                             # markdown heading → review body
+    /^[[:space:]]*([0-9]+[.)][[:space:]]*)?([-*>][[:space:]]*)*(\*\*[[:space:]]*)?\[P[123]\]/ { exit }  # finding (a)
+    /"(severity|priority)"[[:space:]]*:/ { exit }         # finding (b) JSON key
+    /["'"'"'[:space:]]P[123]["'"'"']/ { exit }            # finding (c) JSON value
+    { print }
+  ' "$f" 2>/dev/null) || _leading_region=""
+
+  # Signal 1a: the codex startup banner is the FIRST non-empty line (the launch
+  # trace always opens with it). A review that merely quotes `OpenAI Codex v…`
+  # later (in a fenced block) never has it as the first non-empty line.
+  local _first_nonempty
+  _first_nonempty=$(awk 'NF{print; exit}' "$f" 2>/dev/null) || _first_nonempty=""
+  if [[ "$_first_nonempty" =~ ^OpenAI\ Codex\ v[0-9] ]]; then
+    return 0
+  fi
+  # Signal 1b: the `workdir:`+`model:`+`provider:` triple appears in the CONTIGUOUS
+  # LEADING HEADER REGION (all three, as the launch trace emits them), NOT merely
+  # somewhere in the first N lines. A quoted header block inside a review body sits
+  # AFTER the prose that terminated the leading region, so it is not in it.
+  if [[ -n "$_leading_region" ]] \
+     && grep -qiE '^workdir:' <<<"$_leading_region" 2>/dev/null \
+     && grep -qiE '^model:' <<<"$_leading_region" 2>/dev/null \
+     && grep -qiE '^provider:' <<<"$_leading_region" 2>/dev/null; then
+    return 0
+  fi
+  # Signal 2: the prompt's SCAFFOLDING reproduced — structural prompt artifacts a
+  # review never emits. An ECHO reproduces the WHOLE prompt VERBATIM at the TOP, so
+  # MANY distinct standalone markers co-occur as bare document structure; a real
+  # review writes its findings, and at most QUOTES prompt text (inside ``` fences or
+  # after its findings). We require ≥2 distinct markers, but counted ONLY in the
+  # ECHO REGION — NOT anywhere in stdout.
+  #
+  # Three review findings ([P1]) walked this signal from a bare substring to here:
+  #   - 1st (#253): a bare single-marker substring match dropped a review quoting ONE
+  #     marker → require ≥2 distinct markers.
+  #   - 2nd (#253, session 5705a2d7): the banner/header (signal 1) matched quoted
+  #     lines → keyed signal 1 to the first-non-empty-line / contiguous-leading region.
+  #   - 3rd (#252, session fdc9ff60): ≥2 markers ANYWHERE still false-positived on a
+  #     review that QUOTES two prompt headings in a fenced code block (natural when
+  #     reviewing THIS PR's detector/fixture/tests) → the markers must be in the
+  #     ECHO region: UNFENCED and in the LEADING prompt prefix (before any finding).
+  #
+  # _echo_region: the capture with (a) fenced code blocks STRIPPED (a review quotes
+  # prompt text inside ``` fences — an echo emits it bare, unfenced), and (b)
+  # truncated at the FIRST genuine `[P1]`/`[P2]`/`[P3]` finding line (an echo
+  # reproduces the prompt BEFORE any finding; a review's findings come first, so its
+  # later prompt-quotes fall outside this region). What remains is the unfenced
+  # leading prefix — where a real echo's prompt structure lives and a review's quotes
+  # do not. The awk toggles `infence` on ``` lines (dropping them and their contents)
+  # and exits at the first finding line.
+  # The finding boundary here is the SAME set inlined in _leading_region above
+  # (direct/numbered/bullet/bold, JSON key, JSON value) — gated on `!infence` so a
+  # `[P1]` inside a fenced quote does NOT prematurely end the region (a fenced
+  # finding-quote is stripped, not treated as the boundary).
+  local _echo_region
+  _echo_region=$(awk '
+    !infence && /^[[:space:]]*([0-9]+[.)][[:space:]]*)?([-*>][[:space:]]*)*(\*\*[[:space:]]*)?\[P[123]\]/ { exit }  # finding (a)
+    !infence && /"(severity|priority)"[[:space:]]*:/ { exit }    # finding (b) JSON key
+    !infence && /["'"'"'[:space:]]P[123]["'"'"']/ { exit }       # finding (c) JSON value
+    /^[[:space:]]*```/ { infence = !infence; next }       # toggle fence; drop the ``` line itself
+    infence { next }                                       # inside a fenced quote → skip
+    { print }
+  ' "$f" 2>/dev/null) || _echo_region=""
+
+  # Count distinct prompt-scaffolding markers in the echo region only. Each marker is
+  # a standalone (line-anchored) artifact build_review_prompt emits; `## Step 0:` and
+  # `## Step 0.5:` are DISTINCT sections, counted separately, so the two headings of a
+  # real echo alone reach ≥2. A per-marker presence test summed is fail-safe (each
+  # `grep -q … && …` is non-fatal on a no-match). An EMPTY echo region (a review whose
+  # very first line is a `[P1]` finding, or whose markers are all fenced) yields 0.
+  local _echo_markers=0
+  if [[ -n "$_echo_region" ]]; then
+    grep -qiE '^## Step 0:.*MANDATORY PRE-REVIEW' <<<"$_echo_region" 2>/dev/null && _echo_markers=$((_echo_markers + 1))
+    grep -qiE '^## Step 0\.5:.*MANDATORY PRE-REVIEW' <<<"$_echo_region" 2>/dev/null && _echo_markers=$((_echo_markers + 1))
+    grep -qiE '^## You are running inside .*codex review' <<<"$_echo_region" 2>/dev/null && _echo_markers=$((_echo_markers + 1))
+    grep -qiE '^## (Review Checklist|Review Process)' <<<"$_echo_region" 2>/dev/null && _echo_markers=$((_echo_markers + 1))
+    grep -qiE '^## Acceptance Criteria Verification' <<<"$_echo_region" 2>/dev/null && _echo_markers=$((_echo_markers + 1))
+    grep -qiE '^Prefix EACH blocking finding' <<<"$_echo_region" 2>/dev/null && _echo_markers=$((_echo_markers + 1))
+    grep -qiE '^You are reviewing PR #[0-9]+ for issue #[0-9]+' <<<"$_echo_region" 2>/dev/null && _echo_markers=$((_echo_markers + 1))
+  fi
+  if [[ "$_echo_markers" -ge 2 ]]; then
+    return 0
+  fi
+  # Signal 3: a large capture at/near the wrapper's char cap with NO recognizable
+  # verdict / conclusion structure — a dump cut mid-text with nothing that looks
+  # like a review's conclusion. (45000 is below _codex_review_compose_body's 50000
+  # cap; a genuine review this long would still carry a Summary/Findings/verdict.)
+  # The size floor guards ONLY this signal: signals 1+2 are unambiguous structural
+  # artifacts at any size, but "no verdict structure" is only suspicious in a LARGE
+  # dump — a short, plausibly-complete review with no `Summary:` heading is NOT
+  # malformed (a review need not carry one). So a tiny capture skips signal 3 and
+  # returns NOT malformed (the fail-safe direction — never drop a real verdict).
+  local nchars
+  nchars=$(wc -c < "$f" 2>/dev/null | tr -d ' ') || nchars=0
+  [[ "$nchars" =~ ^[0-9]+$ ]] || nchars=0
+  if [[ "$nchars" -ge 45000 ]] \
+     && ! grep -qiE 'Review PASSED|Review findings:|^Summary:|^Findings|no blocking' "$f" 2>/dev/null; then
+    return 0
+  fi
+  return 1
+}
+
 # _codex_review_classify_stdout <stdout-file>
 #
-# Echoes ONE token (`pass` | `fail`) classifying a `codex review` stdout capture.
-# Gate logic the manual `/codex review` skill uses: ANY `[P1]` (a codex
-# priority-1 / blocking finding marker) anywhere in the output → `fail`; otherwise
-# → `pass`. An empty / missing / unreadable file → `pass` (no `[P1]` ⇒ no blocking
+# Echoes ONE token (`pass` | `fail` | `malformed`) classifying a `codex review`
+# stdout capture. The `malformed` check (INV-73, #252) runs FIRST — a prompt-echo /
+# startup-trace stdout is NOT a real review, so the `[P1]` scan must NOT run over it
+# (its `[P1]` is only quoted instruction text → a phantom FAIL). Then the gate logic
+# the manual `/codex review` skill uses: ANY `[P1]` (a codex priority-1 / blocking
+# finding marker) anywhere in the (non-malformed) output → `fail`; otherwise →
+# `pass`. An empty / missing / unreadable file → `pass` (no `[P1]` ⇒ no blocking
 # finding; the wrapper still posts a `Review PASSED` verdict so a comment always
 # lands). rc 0 ALWAYS — fail-safe under `set -euo pipefail` (a bare call must not
 # abort the wrapper).
 #
-# Conservative on `[P1]`: a blocking finding wins even if the `[P1]` appears
-# inside a quoted code block — a false FAIL only re-queues the PR to dev, whereas
-# a missed `[P1]` would let a blocking finding through to merge. So the cheap
-# substring match is the safe direction.
+# Conservative on `[P1]` (AFTER the malformed gate): a blocking finding wins even if
+# the `[P1]` appears inside a quoted code block of a REAL review — a false FAIL only
+# re-queues the PR to dev, whereas a missed `[P1]` would let a blocking finding
+# through to merge. So the cheap substring match is the safe direction — but ONLY
+# once the capture is confirmed to be a review, not the prompt echoed back (#252).
 _codex_review_classify_stdout() {
   local f="${1:-}"
-  if [[ -n "$f" && -f "$f" && -r "$f" ]] && grep -qF '[P1]' "$f" 2>/dev/null; then
+  if _codex_review_stdout_is_malformed "$f"; then
+    printf 'malformed\n'
+  elif [[ -n "$f" && -f "$f" && -r "$f" ]] && grep -qF '[P1]' "$f" 2>/dev/null; then
     printf 'fail\n'
   else
     printf 'pass\n'
@@ -405,19 +617,47 @@ _run_codex_review() {
   # a capped run is pointless (the cap will refire) and risks the partial-review /
   # duplicate-verdict hazard above. A timeout is a deciding veto (INV-48), not a
   # blip, so it returns 124/137 with ZERO further re-runs.
-  local final_rc=0 last_run_rc=0 reruns=0 deadline budget now
+  #
+  # INV-73 (#252) — a malformed rc-0 capture (codex echoed its prompt / startup
+  # trace instead of a review) is ALSO re-run, exactly like a transient: `codex
+  # review` is stateless (re-reads the diff each invocation), so a fresh run may
+  # produce a real review. It is NOT a non-zero failure (a prompt-echo exits rc 0),
+  # so it cannot key off `last_run_rc` — `_run_malformed_rc0` carries it. A clean
+  # rc-0 run whose capture is a REAL review (not malformed) still breaks at once;
+  # only an rc-0 capture the malformed detector fires on continues into the re-run.
+  # If the budget is exhausted while still malformed, the loop breaks with rc 0 and
+  # a malformed capture — the wrapper's rc-0 stdout fallback then sees the `malformed`
+  # classifier token and leaves codex unresolved (→ `unavailable`, no phantom FAIL).
+  local final_rc=0 last_run_rc=0 reruns=0 deadline budget now _run_malformed_rc0=false
   budget=$(_codex_review_deadline_seconds)
   now=$(_codex_now_seconds)
   deadline=$((now + budget))
 
+  # _recompute_malformed_rc0 — set the outer `_run_malformed_rc0` from the LATEST
+  # run's `last_run_rc` + capture: true iff the run exited clean (rc 0) but its
+  # stdout is a prompt-echo / startup-trace (INV-73 / #252). Recomputed after EVERY
+  # `_one_codex_review_run` so the loop's break/continue decision and the bound log
+  # wording reflect the current capture; a non-zero run is never malformed-rc0 (the
+  # malformed path is the rc-0 channel — non-zero takes the #209 transient path).
+  _recompute_malformed_rc0() {
+    _run_malformed_rc0=false
+    if [[ "$last_run_rc" -eq 0 ]] && _codex_review_stdout_is_malformed "$stdout_file"; then
+      _run_malformed_rc0=true
+    fi
+  }
+
   _one_codex_review_run || last_run_rc=$?
   final_rc="$last_run_rc"
+  _recompute_malformed_rc0
 
   while true; do
-    # Stop on a clean run (verdict produced — hand off to the poller + the stdout
-    # fallback) OR on a wall-clock-cap kill (a deciding INV-48 veto, not a blip).
-    [[ "$last_run_rc" -eq 0 ]] && break
+    # Stop on a wall-clock-cap kill (a deciding INV-48 veto, not a blip).
     [[ "$last_run_rc" -eq 124 || "$last_run_rc" -eq 137 ]] && break
+    # Stop on a clean run that produced a REAL review (verdict produced — hand off
+    # to the poller + the stdout fallback). A clean run whose capture is a malformed
+    # prompt-echo (INV-73 / #252) does NOT break here — it falls through to the
+    # bounded re-run below, exactly like a transient non-zero failure.
+    [[ "$last_run_rc" -eq 0 && "$_run_malformed_rc0" != true ]] && break
     # #223: a DETERMINISTIC clap argv rejection (an exec-only flag like `-s` left in
     # the per-agent review extra-args → exit 2) STOPS the loop immediately. Unlike a
     # transient stream blip (#209), re-running the IDENTICAL argv can never succeed,
@@ -446,23 +686,35 @@ _run_codex_review() {
     fi
     # Bound 1: re-run budget exhausted → fall back (poller resolves unavailable).
     if (( reruns >= max )); then
-      [[ "$max" -gt 0 ]] && \
-        echo "[lib-review-codex] codex review hit CODEX_REVIEW_MAX_RERUNS=${max} with a non-zero exit (rc ${last_run_rc}); falling back to the wrapper poller." >&2
+      if [[ "$_run_malformed_rc0" == true ]]; then
+        [[ "$max" -gt 0 ]] && \
+          echo "[lib-review-codex] codex review hit CODEX_REVIEW_MAX_RERUNS=${max} still emitting a malformed prompt-echo/startup-trace stdout (rc 0, no verdict); falling back to the wrapper poller (resolves \`unavailable\` — INV-73/#252)." >&2
+      else
+        [[ "$max" -gt 0 ]] && \
+          echo "[lib-review-codex] codex review hit CODEX_REVIEW_MAX_RERUNS=${max} with a non-zero exit (rc ${last_run_rc}); falling back to the wrapper poller." >&2
+      fi
       break
     fi
     # Bound 2: wall-clock deadline reached → fall back. Checked AFTER the
     # max-rerun bound so a max=N config does exactly N re-runs when time allows.
     now=$(_codex_now_seconds)
     if (( now >= deadline )); then
-      echo "[lib-review-codex] codex review hit the ${budget}s wall-clock deadline (AGENT_REVIEW_TIMEOUT) after ${reruns} re-run(s) with a non-zero exit; falling back to the wrapper poller." >&2
+      echo "[lib-review-codex] codex review hit the ${budget}s wall-clock deadline (AGENT_REVIEW_TIMEOUT) after ${reruns} re-run(s) with a non-zero/malformed result; falling back to the wrapper poller." >&2
       break
     fi
 
     reruns=$((reruns + 1))
-    echo "[lib-review-codex] codex review exited rc ${last_run_rc} (likely a transient stream error / turn.failed); re-running a fresh review (re-run ${reruns}/${max}) — INV-62/#209." >&2
+    if [[ "$_run_malformed_rc0" == true ]]; then
+      echo "[lib-review-codex] codex review exited rc 0 but emitted a malformed prompt-echo/startup-trace stdout (no verdict); re-running a fresh review (re-run ${reruns}/${max}) — INV-73/#252." >&2
+    else
+      echo "[lib-review-codex] codex review exited rc ${last_run_rc} (likely a transient stream error / turn.failed); re-running a fresh review (re-run ${reruns}/${max}) — INV-62/#209." >&2
+    fi
     last_run_rc=0
     _one_codex_review_run || last_run_rc=$?
     final_rc="$last_run_rc"
+    # Recompute the malformed-rc0 flag for THIS re-run so the loop's break/continue
+    # decision (and the next bound's log wording) reflects the latest capture.
+    _recompute_malformed_rc0
   done
 
   return "$final_rc"
@@ -575,6 +827,13 @@ _codex_review_argv_rejection_flag() {
 #       — the capture shows a stream-disconnect error. The ":N/M" suffix is the
 #         HIGHEST reconnect-ladder depth seen (`Reconnecting... N/M`). Appended
 #         only when the ladder is present.
+#   malformed-output   (INV-73 / #252)
+#       — the capture is codex's prompt-echo / startup-trace (the banner + the
+#         echoed prompt + the comment-history dump) rather than a review — a clean
+#         rc-0 run that produced no verdict. Checked LAST among the codex buckets:
+#         config-error (rc 2) and stream-error (5xx disconnect) are MORE specific
+#         causes with their own signatures, so a malformed prompt-echo is the
+#         residual bucket and never shadows them.
 #   "" (empty)
 #       — no drop signal (the caller keeps the bare `unavailable`). A clean review
 #         or a genuine `[P1]` review yields empty — NO over-claim.
@@ -606,21 +865,33 @@ _classify_codex_drop_reason() {
     fi
   fi
 
-  _codex_review_has_stream_error "$f" || return 0
+  if _codex_review_has_stream_error "$f"; then
+    # Stream error present. Extract the highest reconnect-ladder depth (the `N` in
+    # `Reconnecting... N/M`) when the capture shows the ladder. A no-ladder capture
+    # makes the first grep exit 1; under `set -o pipefail` the pipeline returns
+    # non-zero, so `|| true` guards the bare assignment from aborting the function
+    # before its `return 0` (the rc-0-always contract).
+    local ladder
+    ladder=$(grep -oiE 'Reconnecting\.\.\. [0-9]+/[0-9]+' "$f" 2>/dev/null \
+      | grep -oE '[0-9]+/[0-9]+' | sort -t/ -k1 -n | tail -1) || true
 
-  # Stream error present. Extract the highest reconnect-ladder depth (the `N` in
-  # `Reconnecting... N/M`) when the capture shows the ladder. A no-ladder capture
-  # makes the first grep exit 1; under `set -o pipefail` the pipeline returns
-  # non-zero, so `|| true` guards the bare assignment from aborting the function
-  # before its `return 0` (the rc-0-always contract).
-  local ladder
-  ladder=$(grep -oiE 'Reconnecting\.\.\. [0-9]+/[0-9]+' "$f" 2>/dev/null \
-    | grep -oE '[0-9]+/[0-9]+' | sort -t/ -k1 -n | tail -1) || true
+    if [[ -n "$ladder" ]]; then
+      printf 'stream-error:%s\n' "$ladder"
+    else
+      printf 'stream-error\n'
+    fi
+    return 0
+  fi
 
-  if [[ -n "$ladder" ]]; then
-    printf 'stream-error:%s\n' "$ladder"
-  else
-    printf 'stream-error\n'
+  # INV-73 (#252): no clap rejection and no stream error — check the residual codex
+  # bucket. A clean rc-0 run whose capture is codex's prompt-echo / startup-trace
+  # (no verdict) was retried to exhaustion and dropped `unavailable`; name it
+  # `malformed-output` so the operator sees WHY (codex echoed its prompt instead of
+  # reviewing) rather than a bare opaque `unavailable`. A genuine review (clean or
+  # `[P1]`) is NOT malformed → falls through to empty (no over-claim).
+  if _codex_review_stdout_is_malformed "$f"; then
+    printf 'malformed-output\n'
+    return 0
   fi
   return 0
 }
@@ -642,6 +913,9 @@ _classify_codex_drop_reason() {
 #       → "stream-error (upstream 5xx; exhausted 5/5 stream reconnects)"
 #   stream-error
 #       → "stream-error (upstream 5xx; codex review stream disconnected)"
+#   malformed-output   (INV-73 / #252)
+#       → "malformed-output (codex review echoed its prompt/startup trace instead
+#          of a review — no verdict; retried, still malformed)"
 _codex_drop_reason_phrase() {
   local token="${1:-}"
   case "$token" in
@@ -660,6 +934,10 @@ _codex_drop_reason_phrase() {
       ;;
     stream-error)
       printf 'stream-error (upstream 5xx; codex review stream disconnected)\n'
+      ;;
+    malformed-output)
+      # INV-73 (#252): codex echoed its prompt + startup trace instead of a review.
+      printf 'malformed-output (codex review echoed its prompt/startup trace instead of a review — no verdict; retried, still malformed)\n'
       ;;
     *)
       # Empty or unknown token → empty phrase.
