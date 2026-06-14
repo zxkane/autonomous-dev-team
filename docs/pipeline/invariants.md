@@ -2963,17 +2963,35 @@ per-adapter × per-mode fixture manifests
    canned-stdout replay that ignores invocation. The prompt is fed with a
    **deterministic nonce** so the stdin hash is reproducible and pinnable.
 4. **Validates** each manifest against the schema (loud reject on malformed —
-   python jsonschema when available, else a jq structural fallback, so it passes
-   in plain CI either way).
+   python jsonschema when available, else a jq structural fallback). The fallback
+   is a **faithful mirror** of `fixture-manifest.schema.json`, NOT a loose subset:
+   it enforces the SAME required nested fields/types and the SAME
+   `additionalProperties:false` at every object level (top-level, `input`,
+   `command`, `expect`, each `files` entry) — so a manifest that python jsonschema
+   would reject (missing `input.promptBytes`, a non-string `input.env` value, a
+   negative `promptBytes`, an unknown nested key, a bad `files.<k>.role`) ALSO
+   fails `schema-invalid` here. **It fails closed**: a malformed manifest is
+   rejected on a fork with NO `jsonschema` installed exactly as it is on a
+   jsonschema-equipped CI — the fallback and python jsonschema are cross-checked
+   agreeing on the full valid promoted set and on every malformed variant the
+   suite drives (TC-CONFORMANCE-025/025e..m — PR #244 [P1] #1).
 5. Emits one line per fixture `CONFORMANCE <adapter>/<mode>/<name> PASS|FAIL
    <axis-diff>` and exits non-zero on ANY fail (incl. a malformed manifest or an
    unmaterializable stub — a fixture that cannot run is a FAIL, never a silent
    skip; a filter matching zero fixtures is also loud).
 
 The promoted fixture set carries ≥2 manifests per currently-fan-out-capable CLI
-(claude, codex, kiro, agy) and pins the two **load-bearing rc mappings**: rc
-124/137 + no verdict ⇒ `vote = timeout-veto` (deciding FAIL, INV-48), and rc 0 +
-no verdict ⇒ `vote = drop` (`unavailable`, INV-40).
+(claude, codex, kiro, agy) and pins **both** halves of **each** load-bearing rc
+mapping as actual promoted fixtures the full run exercises (PR #244 [P1] #2):
+- `124 + no verdict ⇒ timeout-veto` — `claude-timeout-veto.json` (rc 124);
+- `137 + no verdict ⇒ timeout-veto` — `claude-timeout-veto-sigkill.json` (rc 137,
+  the `--kill-after` SIGKILL half — deciding FAIL, INV-48);
+- `0 + no provider + no verdict ⇒ drop` — `claude-rc0-noverdict-drop.json`
+  (rc 0, stdout that does NOT echo the nonce, no provider signal → `unavailable`
+  drop, INV-40).
+
+A regression in EITHER mapping (rc 124, rc 137, or the rc-0 drop) flips the
+corresponding fixture's projected `vote` axis and FAILs the run.
 
 **Why**: per-CLI quirk handling is the largest historical bug factory in this
 repo (~14 issues — every CLI lies differently at the exit-code level: `agy` rc-0
@@ -2999,11 +3017,19 @@ green-before-and-after gate protects.
 - `tests/unit/test-conformance-runner.sh` — TC-CONFORMANCE-001..053: the pure
   projection/diff/field helpers (`lib-conformance.sh`), runner happy path,
   `--adapter`/`--mode` filtering, expect-mismatch FAIL with axis diff,
-  malformed-manifest loud reject, hermeticity (PATH isolation, stdin-fed
-  contract, stub-missing/breach guards), **the load-bearing `command.argv` /
-  `command.stdinSha256` assertions (TC-CONFORMANCE-030..034: garbage argv and
-  all-zero hash must FAIL, not silently PASS — PR #244 [P1])**, the ≥2-per-CLI
-  count, the two load-bearing rc mappings, and the CI/cross-link wiring.
+  malformed-manifest loud reject, **the jq-fallback nested-required-field
+  strictness (TC-CONFORMANCE-025e..k: the fallback rejects a manifest missing
+  `input.promptBytes` / `input.model`, a non-string `env` value, a negative
+  `promptBytes`, an unknown nested key, a non-string argv element, a bad
+  `files.role` — fails closed exactly as python jsonschema; 025l/m: it still
+  ACCEPTS the full valid set — PR #244 [P1] #1)**, hermeticity (PATH isolation,
+  stdin-fed contract, stub-missing/breach guards), **the load-bearing
+  `command.argv` / `command.stdinSha256` assertions (TC-CONFORMANCE-030..034:
+  garbage argv and all-zero hash must FAIL, not silently PASS — PR #244 [P1])**,
+  the ≥2-per-CLI count, **both halves of each load-bearing rc mapping as promoted
+  fixtures the full run exercises (TC-CONFORMANCE-041a..i: rc 124 + rc 137 ⇒
+  timeout-veto, rc 0 + no-verdict ⇒ drop — PR #244 [P1] #2)**, and the
+  CI/cross-link wiring.
 - `docs/test-cases/conformance-runner.md` — TC-CONFORMANCE-NNN enumeration.
 
 **Cross-references**:

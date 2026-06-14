@@ -123,27 +123,68 @@ sys.exit(1 if list(Draft7Validator(schema).iter_errors(inst)) else 0)
 PY
     return $?
   fi
-  # jq fallback: well-formed JSON + required keys + enum membership + the
-  # stdinSha256 64-hex pattern + the four expect axes present. Also enforces the
-  # schema's top-level `additionalProperties:false` so the fallback and python
-  # jsonschema agree on an unknown-key reject (a manifest with a stray top-level
-  # key must FAIL under both validators, not just on a jsonschema-equipped CI).
+  # jq fallback: a FAITHFUL structural mirror of fixture-manifest.schema.json —
+  # NOT a loose subset. It enforces the SAME required nested fields/types and the
+  # SAME `additionalProperties:false` at every object level the schema declares
+  # (top-level, input, command, expect, each files entry), so a manifest that
+  # python jsonschema would reject (e.g. missing `input.promptBytes`, a non-string
+  # `input.env` value, an unknown nested key, a bad `files.<k>.role`) ALSO fails
+  # here. This closes the PR #244 [P1]: the fallback must fail-closed on the same
+  # malformed manifests, not pass them through when `jsonschema` is unavailable.
+  # An integer in JSON parses as jq `number`; `promptBytes` additionally requires
+  # the value be an integer ≥ 0 (schema `"type":"integer","minimum":0`).
   jq -e '
-    ((keys - ["schema_version","adapter","mode","input","command","expect","files"]) | length == 0)
+    def is_uint: (type == "number") and (. == floor) and (. >= 0);
+    # top-level: required keys present, no unknown keys (additionalProperties:false)
+    (["schema_version","adapter","mode","input","command","expect"] - keys | length == 0)
+    and ((keys - ["schema_version","adapter","mode","input","command","expect","files"]) | length == 0)
     and (.schema_version == 1)
     and (.adapter | IN("claude","codex","kiro","agy","gemini","opencode"))
     and (.mode     | IN("dev-new","dev-resume","review","e2e-browser"))
-    and (.input    | type == "object")
-    and (.command  | type == "object")
+    # input: object, required {promptBytes:uint, model:string, env:object<string>},
+    # additionalProperties:false
+    and (.input | type == "object")
+    and (["promptBytes","model","env"] - (.input | keys) | length == 0)
+    and ((.input | keys) - ["promptBytes","model","env"] | length == 0)
+    and (.input.promptBytes | is_uint)
+    and (.input.model | type == "string")
+    and (.input.env | type == "object")
+    and (.input.env | to_entries | all(.value | type == "string"))
+    # command: object, required {argv:[string], stdinSha256:64hex, rc:int,
+    # stdout:string, stderr:string}, additionalProperties:false
+    and (.command | type == "object")
+    and (["argv","stdinSha256","rc","stdout","stderr"] - (.command | keys) | length == 0)
+    and ((.command | keys) - ["argv","stdinSha256","rc","stdout","stderr"] | length == 0)
     and (.command.argv | type == "array")
+    and (.command.argv | all(type == "string"))
+    and (.command.stdinSha256 | type == "string")
     and (.command.stdinSha256 | test("^[0-9a-f]{64}$"))
-    and (.command.rc | type == "number")
+    and (.command.rc | (type == "number") and (. == floor))
     and (.command.stdout | type == "string")
     and (.command.stderr | type == "string")
+    # expect: object, required four axes, additionalProperties:false
+    and (.expect | type == "object")
+    and (["providerClass","verdictState","vote","retryable"] - (.expect | keys) | length == 0)
+    and ((.expect | keys) - ["providerClass","verdictState","vote","retryable"] | length == 0)
     and (.expect.providerClass | IN("none","quota","auth","config","transient"))
     and (.expect.verdictState  | IN("valid","absent","malformed"))
     and (.expect.vote          | IN("pass","fail","drop","timeout-veto","not-applicable"))
     and (.expect.retryable     | type == "boolean")
+    # files (OPTIONAL): the KEY may be absent, but if PRESENT it MUST be an object
+    # (a literal files:null is rejected, matching the schema type:object). Using
+    # has("files") distinguishes key-absent from key-present-null, which a bare
+    # .files == null cannot. Each entry: path:string (required), sha256?:64hex,
+    # role?:enum, additionalProperties:false per entry.
+    and ((has("files") | not) or (
+      (.files | type == "object")
+      and (.files | to_entries | all(
+        (.value | type == "object")
+        and (.value | has("path")) and (.value.path | type == "string")
+        and ((.value | keys) - ["path","sha256","role"] | length == 0)
+        and ((.value.sha256 == null) or (.value.sha256 | test("^[0-9a-f]{64}$")))
+        and ((.value.role == null) or (.value.role | IN("sidecar","log","artifact","input")))
+      ))
+    ))
   ' "$file" >/dev/null 2>&1
 }
 

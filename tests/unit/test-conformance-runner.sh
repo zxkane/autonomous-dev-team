@@ -214,6 +214,42 @@ PYSTUB
 chmod +x "$NOPY/python3"
 jqfb_out="$(CONFORMANCE_FIXTURE_DIR="$BAD" PATH="$NOPY:$PATH" env -u PROJECT_DIR bash "$RUNNER" 2>/dev/null)"
 assert_contains "TC-CONFORMANCE-025d jq fallback also rejects unknown key" "FAIL schema-invalid" "$jqfb_out"
+
+# TC-CONFORMANCE-025e..k — the jq fallback enforces the SAME nested required
+# fields/types as fixture-manifest.schema.json (PR #244 [P1] #1). Before the fix
+# the fallback only checked top-level objects + a few command/expect fields, so a
+# manifest missing a schema-required NESTED field (e.g. input.promptBytes) PASSed
+# under the fallback while python jsonschema would reject it. Each case below is
+# run through the jq-fallback path (python3 shadowed → import fails) and MUST
+# `FAIL schema-invalid`. These pin the fail-closed-on-the-same-malformed-manifest
+# guarantee the finding requires.
+jqfb_reject() { # <desc> <jq-mutation>
+  local desc="$1" mut="$2" d out
+  d=$(mktemp -d)
+  jq "$mut" "$FIXTURES/agy-quota-exhausted.json" > "$d/x.json"   # has a files{} entry
+  out="$(CONFORMANCE_FIXTURE_DIR="$d" PATH="$NOPY:$PATH" env -u PROJECT_DIR bash "$RUNNER" 2>/dev/null)"
+  assert_contains "$desc" "FAIL schema-invalid" "$out"
+  rm -rf "$d"
+}
+jqfb_reject "TC-CONFORMANCE-025e jq fallback rejects missing input.promptBytes" 'del(.input.promptBytes)'
+jqfb_reject "TC-CONFORMANCE-025f jq fallback rejects missing input.model"       'del(.input.model)'
+jqfb_reject "TC-CONFORMANCE-025g jq fallback rejects non-string input.env value" '.input.env.X = 5'
+jqfb_reject "TC-CONFORMANCE-025h jq fallback rejects negative promptBytes"       '.input.promptBytes = -1'
+jqfb_reject "TC-CONFORMANCE-025i jq fallback rejects unknown nested key (input.bogus)" '.input.bogus = "x"'
+jqfb_reject "TC-CONFORMANCE-025j jq fallback rejects non-string argv element"    '.command.argv = ["agy",5]'
+jqfb_reject "TC-CONFORMANCE-025k jq fallback rejects bad files.<k>.role enum"    '.files.agyLog.role = "bogus"'
+# files:null — the schema's `type:object` rejects an explicit null; a bare
+# `.files == null` jq check could not tell key-absent (valid) from present-null
+# (invalid), so the validator uses `has("files")`. Pins the agreement.
+jqfb_reject "TC-CONFORMANCE-025n jq fallback rejects an explicit files:null"     '.files = null'
+
+# TC-CONFORMANCE-025l — the SAME valid fixture that the fallback rejects-when-broken
+# must still PASS the fallback when well-formed (no false-positive reject from the
+# tightened validator). Run the full promoted set through the jq fallback path.
+fallback_full="$(PATH="$NOPY:$PATH" env -u PROJECT_DIR bash "$RUNNER" 2>/dev/null)"; fallback_rc=$?
+assert_eq "TC-CONFORMANCE-025l jq fallback ACCEPTS the full valid promoted set (exit 0)" "0" "$fallback_rc"
+assert_contains "TC-CONFORMANCE-025m jq fallback path still PASSes a valid fixture" \
+  "CONFORMANCE agy/review/agy-quota-exhausted PASS" "$fallback_full"
 rm -rf "$NOPY"
 rm -rf "$BAD"
 
@@ -335,11 +371,50 @@ assert_grep "TC-CONFORMANCE-034e runner asserts command.stdinSha256 (load-bearin
 echo ""
 echo "=== TC-CONFORMANCE-04x: promoted-fixture coverage (the E2E tier) ==="
 # ---------------------------------------------------------------------------
-# TC-CONFORMANCE-041 — the two load-bearing rc mappings are pinned as fixtures.
+# TC-CONFORMANCE-041 — the two load-bearing rc mappings are pinned as PROMOTED
+# fixtures (PR #244 [P1] #2): BOTH `124/137 + no verdict ⇒ timeout-veto` AND
+# `0 + no provider + no verdict ⇒ drop` must exist as fixtures the full
+# conformance run exercises, so a regression in EITHER mapping is caught — not
+# just an assertion on a single rc-124 fixture's JSON.
+
+# rc 124 ⇒ timeout-veto (the original).
 assert_grep "TC-CONFORMANCE-041a timeout-veto fixture (rc 124 ⇒ timeout-veto)" \
   '"vote": *"timeout-veto"' "$FIXTURES/claude-timeout-veto.json"
 assert_grep "TC-CONFORMANCE-041b timeout-veto fixture has rc 124" \
   '"rc": *124' "$FIXTURES/claude-timeout-veto.json"
+assert_contains "TC-CONFORMANCE-041c rc124 timeout-veto fixture passes the full run" \
+  "CONFORMANCE claude/review/claude-timeout-veto PASS" "$full_out"
+
+# rc 137 ⇒ timeout-veto (the SIGKILL half — was unpinned before #244 [P1] #2).
+assert_grep "TC-CONFORMANCE-041d rc137 timeout-veto fixture exists" \
+  '"rc": *137' "$FIXTURES/claude-timeout-veto-sigkill.json"
+if [[ "$(jq -r '.command.rc' "$FIXTURES/claude-timeout-veto-sigkill.json")" == "137" \
+   && "$(jq -r '.expect.vote' "$FIXTURES/claude-timeout-veto-sigkill.json")" == "timeout-veto" ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-CONFORMANCE-041e rc137 fixture maps to timeout-veto"; PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-CONFORMANCE-041e rc137 fixture must map rc 137 → timeout-veto"; FAIL=$((FAIL + 1))
+fi
+assert_contains "TC-CONFORMANCE-041f rc137 timeout-veto fixture passes the full run" \
+  "CONFORMANCE claude/review/claude-timeout-veto-sigkill PASS" "$full_out"
+
+# rc 0 + no provider + no verdict ⇒ drop (was unpinned before #244 [P1] #2).
+if [[ "$(jq -r '.command.rc' "$FIXTURES/claude-rc0-noverdict-drop.json")" == "0" \
+   && "$(jq -r '.expect.providerClass' "$FIXTURES/claude-rc0-noverdict-drop.json")" == "none" \
+   && "$(jq -r '.expect.verdictState' "$FIXTURES/claude-rc0-noverdict-drop.json")" == "absent" \
+   && "$(jq -r '.expect.vote' "$FIXTURES/claude-rc0-noverdict-drop.json")" == "drop" ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-CONFORMANCE-041g rc0 fixture maps to none/absent/drop (no-verdict drop)"; PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-CONFORMANCE-041g rc0 fixture must map rc 0 + no provider + no verdict → drop"; FAIL=$((FAIL + 1))
+fi
+# The rc0-drop fixture's stdout must NOT echo the nonce placeholder (else it would
+# classify PASS instead of exercising the no-verdict drop path).
+if [[ "$(jq -r '.command.stdout' "$FIXTURES/claude-rc0-noverdict-drop.json")" != *"<NONCE>"* ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-CONFORMANCE-041h rc0-drop fixture stdout carries no <NONCE> (verdict genuinely absent)"; PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-CONFORMANCE-041h rc0-drop fixture must not echo the nonce"; FAIL=$((FAIL + 1))
+fi
+assert_contains "TC-CONFORMANCE-041i rc0 no-verdict drop fixture passes the full run" \
+  "CONFORMANCE claude/review/claude-rc0-noverdict-drop PASS" "$full_out"
 
 # TC-CONFORMANCE-042 — ≥2 manifests per fan-out CLI.
 for a in claude codex kiro agy; do

@@ -41,10 +41,17 @@ The runner exits **non-zero** on any `FAIL` (incl. a malformed manifest, an
 unmaterializable stub, or a filter that matched zero fixtures — a fixture that
 cannot run is a FAIL, never a silent skip).
 
-`jq` is required. `python3` + `jsonschema` is optional but recommended — it
-makes manifest validation use the full JSON-Schema Draft-07 semantics; without
-it the runner falls back to a `jq` structural check (required keys + enum
-membership + the `stdinSha256` 64-hex pattern), so it still passes in plain CI.
+`jq` is required. `python3` + `jsonschema` is optional — it makes manifest
+validation use the full JSON-Schema Draft-07 semantics. Without it the runner
+falls back to a `jq` validator that is a **faithful structural mirror** of
+`fixture-manifest.schema.json`: it enforces the SAME required nested fields/types
+(`input.promptBytes`/`model`/`env`, `command.argv`/`stdinSha256`/`rc`/`stdout`/
+`stderr`, the four `expect` axes, each `files` entry's `path`/`sha256`/`role`) and
+the SAME `additionalProperties:false` at every object level. It **fails closed** —
+a malformed manifest is rejected on a fork with no `jsonschema` exactly as on a
+jsonschema-equipped CI (the two are cross-checked agreeing on the valid set plus
+every malformed variant the unit suite drives — see `TC-CONFORMANCE-025e..m`), so
+the suite is equally strict in plain CI either way.
 
 ## What a fixture is
 
