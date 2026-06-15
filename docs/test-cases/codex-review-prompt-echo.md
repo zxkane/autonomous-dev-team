@@ -49,6 +49,9 @@ CI-green, mergeable PR on every round. Distinct from #209 (non-zero/stream),
 | TC-CXRS-MAL-DET-23 | A JSON `[P1]` finding (`"severity": "P1"`) then quoting markers | NOT malformed (rc 1) |
 | TC-CXRS-MAL-DET-24 | The prompt's `[P1]` INSTRUCTION line (`Prefix EACH blocking finding with [P1]`) followed by markers | malformed (rc 0) — guard: instruction is NOT a finding boundary |
 | TC-CXRS-MAL-DET-25 | A direct `[P1]` finding line then quoting markers | NOT malformed (rc 1) — guard: direct finding still bounds |
+| TC-CXRS-MAL-DET-26 | A LONG (≥45000) genuine review with a numbered `[P1]` finding, no verdict heading | NOT malformed (rc 1) — #252 5th-round finding-2 [P1] regression |
+| TC-CXRS-MAL-DET-27 | A LONG review with a bare `[P1]` finding, no heading | NOT malformed (rc 1) |
+| TC-CXRS-MAL-DET-28 | A LONG truncated dump with NO finding structure + no heading | malformed (rc 0) — signal-3 guard |
 
 ## Classifier — `_codex_review_classify_stdout` (malformed checked FIRST)
 
@@ -63,7 +66,15 @@ CI-green, mergeable PR on every round. Distinct from #209 (non-zero/stream),
 | TC-CXRS-MAL-CLS-02c | A genuine `[P1]` review quoting the banner/header fixture in a code block | `fail` (NOT `malformed`) — PR #253 2nd-round [P1] |
 | TC-CXRS-MAL-CLS-02d | A genuine `[P1]` review quoting two prompt headings in a fenced code block | `fail` (NOT `malformed`) — #252 3rd-round [P1] |
 | TC-CXRS-MAL-CLS-02e | A genuine `[P1]` review in numbered+bold format then quoting two column-0 markers | `fail` (NOT `malformed`) — #252 4th-round [P1] |
+| TC-CXRS-MAL-CLS-02f | A LONG (≥45000) genuine `[P1]` review with no verdict heading | `fail` (NOT `malformed`) — #252 5th-round finding-2 [P1] |
 | TC-CXRS-MAL-CLS-06 | Bare call under `set -euo pipefail` on a malformed capture | rc 0, `malformed`, no abort |
+
+## Terminal routing — all-unavailable path (`test-autonomous-review-multi-agent.sh`)
+
+| ID | Scenario | Expected |
+|----|----------|----------|
+| TC-MAR-MALEXIT-01 | A single-agent codex fleet, malformed-output (rc 0, unavailable), all-unavailable | `AGENT_EXIT=1` → `failed-non-substantive` (NOT `failed-substantive`) — #252 5th-round finding-1 [P1] |
+| TC-MAR-MALEXIT-02 | Source-of-truth: the wrapper flags `_any_nonsubstantive_drop` on `malformed-output` and raises `AGENT_EXIT` on it | grep pins both wiring points |
 
 ## Re-run state machine — `_run_codex_review` (malformed rc-0 retry)
 

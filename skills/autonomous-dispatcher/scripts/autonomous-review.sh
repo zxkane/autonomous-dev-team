@@ -2123,6 +2123,12 @@ SESSION_ID="${AGENT_SESSION_IDS[0]}"
 _dropped_agents=""
 _deciding_agents=""
 _timed_out_agents=""
+# INV-73 (#252 5th-round [P1] #1): set true when a dropped agent's reason is an
+# rc-0 NON-substantive infra drop (codex `malformed-output`) that the all-unavailable
+# AGENT_EXIT scan would otherwise miss (it keys on launch rc, and a malformed
+# prompt-echo exits rc 0). Routes the all-unavailable terminal path to
+# `failed-non-substantive` instead of the rc-0 `failed-substantive` legacy branch.
+_any_nonsubstantive_drop=false
 # INV-58 (#205) / INV-59 (#209) / INV-61 (#215): per-dropped-agent reason
 # breadcrumbs (e.g. "agy: quota-exhausted (Antigravity 429: …; resets in
 # 33h48m45s)", "codex: stream-error (upstream 5xx; exhausted 5/5 SSE reconnects,
@@ -2188,6 +2194,15 @@ for _i in "${!AGENT_NAMES[@]}"; do
         if [[ -n "$_codex_reason_token" ]]; then
           _dropped_reasons+="${AGENT_NAMES[$_i]}: $(_codex_drop_reason_phrase "$_codex_reason_token"); "
         fi
+        # INV-73 (#252 5th-round [P1] #1): a `malformed-output` codex (prompt-echo,
+        # rc 0, no verdict) is a NON-substantive infra drop, NOT a code finding. But
+        # because it exits rc 0, the all-unavailable terminal path (which keys
+        # `AGENT_EXIT` on launch rc) would route a single-agent-codex fleet through
+        # the rc-0 `failed-substantive` legacy branch — turning the dropped malformed
+        # output back into a blocking request-changes FAIL. Flag it here so the
+        # all-unavailable branch routes it `failed-non-substantive` (re-dispatchable),
+        # the same terminal class as a non-zero stream-error drop.
+        [[ "$_codex_reason_token" == "malformed-output" ]] && _any_nonsubstantive_drop=true
       # INV-61 (#215): kiro-shaped drop reason. A kiro member whose stored
       # OAuth/login token expired tries to open a browser for device-flow re-auth
       # — impossible in the headless SSM-spawned shell — and exits at launch with
@@ -2326,6 +2341,16 @@ case "$AGGREGATE" in
         break
       fi
     done
+    # INV-73 (#252 5th-round [P1] #1): a codex `malformed-output` drop is a
+    # NON-substantive infra condition (a prompt-echo, not a code finding) but exits
+    # rc 0, so the rc scan above leaves AGENT_EXIT=0 → the rc-0 `failed-substantive`
+    # legacy branch would turn the dropped malformed output back into a blocking
+    # request-changes FAIL (the exact loop the single-agent codex fleet hit). Raise
+    # AGENT_EXIT=1 so it routes `failed-non-substantive` (re-dispatchable) — the same
+    # terminal class as a non-zero stream-error drop. `_any_nonsubstantive_drop` was
+    # set in the drop-classification loop above when any dropped agent's reason token
+    # was `malformed-output`.
+    [[ "$_any_nonsubstantive_drop" == true ]] && AGENT_EXIT=1
     log "All ${#REVIEW_AGENTS_LIST[@]} review agent(s) unavailable — falling back to single-agent FAIL path (AGENT_EXIT=${AGENT_EXIT})."
     # INV-58 (#205): surface any agy quota/auth drop reason even on the
     # all-unavailable path, so a single-agy fleet that hit the quota wall is

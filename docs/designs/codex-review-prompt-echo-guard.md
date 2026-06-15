@@ -78,7 +78,10 @@ Returns rc 0 iff the capture is prompt-echo / startup-trace, NOT a real review. 
   mangles the `\[`/`\]` backslashes.
 - **Truncated-no-verdict signal.** The capture is at/near the wrapper's char cap AND contains no recognizable
   verdict structure (no `Review PASSED` / `Review findings:` / a `Summary:` / `Findings` heading the gate
-  rules ask for) — i.e. it was cut mid-dump with nothing that looks like a conclusion.
+  rules ask for) **AND no genuine finding boundary** (a real `[P1]`/numbered/bullet/JSON finding) — i.e. it
+  was cut mid-dump with neither a conclusion nor a finding. The finding-boundary exemption is the **#252
+  5th-round finding-2 [P1]** fix: a genuine LONG review carrying numbered/bold `[P1]` findings but none of
+  those exact headings is a real review (it falls through to the `[P1]` scan and FAILs), not a truncated dump.
 
 Fail-safe: empty / missing / unreadable / short capture → NOT malformed (rc 1), so a normal review is never
 mis-flagged. rc 0/1 only; never aborts under `set -euo pipefail`. The signal helpers are individually
@@ -132,6 +135,18 @@ disconnect is a different cause). `_codex_drop_reason_phrase` renders it as
 Observability only — a `malformed-output` codex stays a dropped `unavailable`, NEVER a deciding FAIL (exactly
 the INV-40 "absent ⇒ not a deciding vote" semantics the issue calls for). `_classify_noverdict_agent` /
 `_aggregate_review_verdicts` untouched.
+
+### 5. The all-unavailable terminal path routes a `malformed-output` drop NON-substantive (#252 5th-round [P1] #1)
+
+A malformed prompt-echo exits **rc 0**. The terminal all-unavailable branch keys `AGENT_EXIT` on launch rc
+(rc 0 → `failed-substantive`, rc ≠ 0 → `failed-non-substantive`). So in a single-agent codex fleet, a
+malformed codex left unresolved at rc 0 would route through the rc-0 `failed-substantive` branch — turning
+the no-vote infra drop back into a blocking request-changes FAIL (the exact non-self-terminating loop a
+single-agent-codex repo hit). Fix: the drop-classification loop sets `_any_nonsubstantive_drop=true` when a
+dropped agent's reason is `malformed-output`, and the all-unavailable branch raises `AGENT_EXIT=1` on that
+flag → `failed-non-substantive` (re-dispatchable), the same terminal class as a non-zero `stream-error` drop.
+`stream-error`/`config-error`/`auth-failed`/`quota-exhausted` already exit non-zero (the rc scan routes them
+non-substantive); only the rc-0 `malformed-output` case needed the explicit flag.
 
 ## Decision Gate ordering rationale
 

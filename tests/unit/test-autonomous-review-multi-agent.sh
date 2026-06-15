@@ -162,6 +162,57 @@ fi
 
 # ---------------------------------------------------------------------------
 echo ""
+echo "=== TC-MAR-MALEXIT: malformed-output on the all-unavailable path routes NON-substantive (INV-73, #252 5th-round [P1] #1) ==="
+# ---------------------------------------------------------------------------
+# 5th-round review finding [P1] #1: when a codex prompt-echo stays malformed after
+# retries it is left unresolved with launch rc 0. In a SINGLE-agent codex fleet, the
+# terminal all-unavailable path routed rc0 + no-comment through the `failed-substantive`
+# legacy branch (AGENT_EXIT=0 → request-changes), so the malformed output STILL became a
+# blocking review FAIL instead of a non-substantive `unavailable`/no-vote drop. The fix:
+# the all-unavailable AGENT_EXIT scan ALSO raises AGENT_EXIT=1 (→ failed-non-substantive,
+# re-dispatchable infra drop) when a dropped agent's reason is `malformed-output`, even at
+# rc 0. Replicate the wrapper's routing loop and assert the malformed-output case → 1.
+CODEX_LIB="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-review-codex.sh"
+FIXTURES="$SCRIPT_DIR/fixtures"
+if [[ -f "$CODEX_LIB" ]]; then
+  (
+    set -uo pipefail
+    source "$CODEX_LIB"
+    # Single-agent codex fleet, malformed-output (rc 0, no verdict, unavailable).
+    AGENT_NAMES=(codex)
+    AGENT_SESSION_IDS=(sid-cx)
+    AGENT_CODEX_LOGS=("$FIXTURES/codex-review-stdout-prompt-echo.txt")
+    declare -A AGENT_LAUNCH_RC=([sid-cx]=0)            # malformed prompt-echo exits rc 0
+    AGENT_VERDICTS=(unavailable)                        # left unresolved → swept to unavailable
+
+    # --- the wrapper's all-unavailable AGENT_EXIT routing, replicated with the fix ---
+    AGENT_EXIT=0
+    for _i in "${!AGENT_NAMES[@]}"; do
+      # genuine CLI crash (rc != 0) → non-substantive
+      if [[ "${AGENT_LAUNCH_RC[${AGENT_SESSION_IDS[$_i]}]:-1}" -ne 0 ]]; then AGENT_EXIT=1; break; fi
+      # INV-73 5th-round: a malformed-output drop (rc 0) is ALSO non-substantive.
+      if [[ "${AGENT_VERDICTS[$_i]}" == "unavailable" && "${AGENT_NAMES[$_i]}" == "codex" ]]; then
+        _tok=$(_classify_codex_drop_reason "${AGENT_CODEX_LOGS[$_i]:-}" "${AGENT_LAUNCH_RC[${AGENT_SESSION_IDS[$_i]}]:-1}")
+        if [[ "$_tok" == "malformed-output" ]]; then AGENT_EXIT=1; break; fi
+      fi
+    done
+    echo "AGENT_EXIT=$AGENT_EXIT" > "$SCRIPT_DIR/.mar_malexit.$$"
+  )
+  if [[ -f "$SCRIPT_DIR/.mar_malexit.$$" ]]; then
+    _ae=$(sed -E 's/AGENT_EXIT=//' "$SCRIPT_DIR/.mar_malexit.$$"); rm -f "$SCRIPT_DIR/.mar_malexit.$$"
+    assert_eq "TC-MAR-MALEXIT-01 single-agent malformed-output (rc 0, unavailable) → AGENT_EXIT=1 (non-substantive, not failed-substantive)" "1" "$_ae"
+  fi
+fi
+# Source-of-truth: the wrapper's drop loop flags a malformed-output codex, and the
+# all-unavailable branch raises AGENT_EXIT on that flag (the fix must be wired into
+# the REAL wrapper, not just the replicated logic above).
+assert_grep "TC-MAR-MALEXIT-02a wrapper flags a malformed-output drop as non-substantive" \
+  '"\$_codex_reason_token" == "malformed-output" \]\] && _any_nonsubstantive_drop=true' "$WRAPPER"
+assert_grep "TC-MAR-MALEXIT-02b all-unavailable branch raises AGENT_EXIT=1 on the non-substantive-drop flag" \
+  '\[\[ "\$_any_nonsubstantive_drop" == true \]\] && AGENT_EXIT=1' "$WRAPPER"
+
+# ---------------------------------------------------------------------------
+echo ""
 echo "=== TC-MAR-SRC: wrapper structure (source-of-truth greps) ==="
 # ---------------------------------------------------------------------------
 assert_grep "TC-MAR-SRC-01 reads AGENT_REVIEW_AGENTS" \
