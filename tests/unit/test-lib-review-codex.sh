@@ -886,6 +886,10 @@ PV
       [[ "${AGENT_LAUNCH_RC[${AGENT_SESSION_IDS[$_i]}]:-1}" -eq 0 ]] || continue
       _cx_stdout="${AGENT_CODEX_LOGS[$_i]:-}"
       _cx_verdict=$(_codex_review_classify_stdout "$_cx_stdout")
+      # INV-73 (#252): a `malformed` classification (prompt-echo / startup-trace, no
+      # verdict) must NOT be posted as a pass/fail — leave the agent unresolved for
+      # the terminal sweep (→ unavailable). Mirrors the real wrapper's guard.
+      [[ "$_cx_verdict" == "malformed" ]] && continue
       _cx_body_file=$(mktemp "$sandbox/body-XXXXXX.md")
       _codex_review_compose_body "$_cx_verdict" "$_cx_stdout" > "$_cx_body_file" 2>/dev/null || true
       _cx_fb_model=$(_resolve_review_agent_model "codex"); _cx_fb_model="${_cx_fb_model:-sonnet}"
@@ -1257,6 +1261,517 @@ if grep -nE '_codex_review_has_stream_error[[:space:]]+"' "$WRAPPER" | grep -vE 
 else
   echo -e "  ${GREEN}PASS${NC}: TC-CXRS-WT-SRC-09 stream-error skip removed from the wrapper rc-0 fallback — rc-0 gate is the sole gate (finding 5)"
   PASS=$((PASS + 1))
+fi
+
+# ===========================================================================
+echo ""
+echo "=== TC-CXRS-MAL: prompt-echo / startup-trace malformed stdout guard (INV-73, #252) ==="
+# ===========================================================================
+# `codex review` sometimes exits rc 0 but writes its OWN prompt + CLI startup
+# trace to stdout instead of a review. The prompt text contains the literal
+# `[P1]` (the "Prefix EACH blocking finding with [P1]" instruction + quoted
+# prior-round findings), so the pre-fix `[P1]` scan posted a phantom blocking
+# FAIL. The fix: detect the echo/trace shape as `malformed`, scanned BEFORE the
+# `[P1]` scan; re-run a malformed rc-0 capture (bounded, stateless re-read); and
+# drop it `unavailable` with a `malformed-output` reason — never a deciding FAIL.
+MF="$TMP/malformed.txt"
+
+# --- _codex_review_stdout_is_malformed (the detector) ---
+# TC-CXRS-MAL-DET-01 — capture begins with the codex startup banner → malformed
+printf '%s\n' 'OpenAI Codex v0.139.0' '--------' 'workdir: /tmp/x' 'model: openai.gpt-5.4' > "$MF"
+_codex_review_stdout_is_malformed "$MF"; assert_eq "TC-CXRS-MAL-DET-01 startup banner → malformed (rc 0)" 0 "$?"
+
+# TC-CXRS-MAL-DET-02 — workdir:+model:+provider: header block near the top → malformed
+printf '%s\n' 'workdir: /tmp/codex-review-wt-999' 'model: openai.gpt-5.4' 'provider: amazon-bedrock' 'approval: never' > "$MF"
+_codex_review_stdout_is_malformed "$MF"; assert_eq "TC-CXRS-MAL-DET-02 workdir/model/provider header → malformed (rc 0)" 0 "$?"
+
+# TC-CXRS-MAL-DET-03 — signal 2 requires ≥2 DISTINCT co-occurring prompt-scaffolding
+# markers (the echo reproduces the WHOLE prompt). A SINGLE marker is NOT sufficient
+# (PR #253 review finding [P1]: a bare-substring match on one marker dropped a real
+# [P1] review that quoted it). The single-marker NOT-malformed cases are pinned by
+# DET-10/DET-11; here we pin the ≥2-marker echo IS malformed.
+# TC-CXRS-MAL-DET-03a — the [P1] instruction line + a `## Step 0…: MANDATORY
+# PRE-REVIEW` heading (two distinct markers) → malformed.
+printf '%s\n' 'You are an autonomous PR reviewer.' '## Step 0: Merge Conflict Resolution — MANDATORY PRE-REVIEW' 'Prefix EACH blocking finding with [P1].' 'Post via post-verdict.sh.' > "$MF"
+_codex_review_stdout_is_malformed "$MF"; assert_eq "TC-CXRS-MAL-DET-03a [P1]-instruction + Step-0 heading (2 markers) → malformed (rc 0)" 0 "$?"
+# TC-CXRS-MAL-DET-03b — the two MANDATORY-PRE-REVIEW headings (## Step 0 + ## Step
+# 0.5) co-occurring → malformed (build_review_prompt emits both).
+printf '%s\n' 'You are an autonomous PR reviewer for PR #999.' '## Step 0: Merge Conflict Resolution — MANDATORY PRE-REVIEW' 'Check mergeable.' '## Step 0.5: Requirement Drift Detection — MANDATORY PRE-REVIEW' 'Read ALL comments.' > "$MF"
+_codex_review_stdout_is_malformed "$MF"; assert_eq "TC-CXRS-MAL-DET-03b two MANDATORY-PRE-REVIEW headings (## Step 0 + ## Step 0.5) → malformed (rc 0)" 0 "$?"
+# TC-CXRS-MAL-DET-03c — the codex-review header + the review-process heading → malformed.
+printf '%s\n' 'reviewer prompt' '## You are running inside `codex review` (INV-62)' 'The diff is already scoped.' '## Review Process' 'Work through the checklist.' > "$MF"
+_codex_review_stdout_is_malformed "$MF"; assert_eq "TC-CXRS-MAL-DET-03c codex-review header + Review Process heading (2 markers) → malformed (rc 0)" 0 "$?"
+
+# TC-CXRS-MAL-DET-04 — near the char cap with NO verdict/Summary/Findings structure → malformed
+{ printf '%s\n' 'You are reviewing PR #999.'; head -c 60000 /dev/zero | tr '\0' 'x'; } > "$MF"
+_codex_review_stdout_is_malformed "$MF"; assert_eq "TC-CXRS-MAL-DET-04 truncated dump, no verdict structure → malformed (rc 0)" 0 "$?"
+
+# TC-CXRS-MAL-DET-05 — a genuine review with a real [P1] is NOT malformed
+cp "$FIXTURES/codex-review-stdout-p1.txt" "$MF"
+_codex_review_stdout_is_malformed "$MF"; assert_eq "TC-CXRS-MAL-DET-05 genuine [P1] review → NOT malformed (rc 1)" 1 "$?"
+
+# TC-CXRS-MAL-DET-06 — a genuine clean review (only [P2]/[P3]) is NOT malformed
+cp "$FIXTURES/codex-review-stdout-clean.txt" "$MF"
+_codex_review_stdout_is_malformed "$MF"; assert_eq "TC-CXRS-MAL-DET-06 genuine clean review → NOT malformed (rc 1)" 1 "$?"
+
+# TC-CXRS-MAL-DET-07 — empty / missing / empty-arg / short → NOT malformed, no abort
+: > "$MF"
+_codex_review_stdout_is_malformed "$MF"; assert_eq "TC-CXRS-MAL-DET-07a empty → NOT malformed (rc 1)" 1 "$?"
+_codex_review_stdout_is_malformed "/nonexistent/$$"; assert_eq "TC-CXRS-MAL-DET-07b missing → NOT malformed (rc 1)" 1 "$?"
+_codex_review_stdout_is_malformed ""; assert_eq "TC-CXRS-MAL-DET-07c empty arg → NOT malformed (rc 1)" 1 "$?"
+printf '%s\n' 'LGTM' > "$MF"
+_codex_review_stdout_is_malformed "$MF"; assert_eq "TC-CXRS-MAL-DET-07d short clean review → NOT malformed (rc 1)" 1 "$?"
+mal07e=$(
+  set -euo pipefail
+  source "$LIB"
+  printf '%s\n' 'a normal short review with no blocking findings' > "$MF"
+  _codex_review_stdout_is_malformed "$MF" && echo "rc=0" || echo "rc=$?"
+  echo "REACHED_RETURN"
+)
+assert_eq "TC-CXRS-MAL-DET-07e bare call under set -euo pipefail → no abort" $'rc=1\nREACHED_RETURN' "$mal07e"
+
+# TC-CXRS-MAL-DET-08 — a real review that merely MENTIONS a banner word / quotes a
+# short instruction snippet (no structural echo) → NOT malformed (no false positive).
+printf '%s\n' \
+  'I reviewed the scoped diff for PR #999.' \
+  'The handler now propagates the error instead of fabricating a success object.' \
+  'Note: the provider is amazon-bedrock, which the retry wrapper correctly tolerates.' \
+  '' \
+  'Summary: no blocking findings. Looks good to merge.' > "$MF"
+_codex_review_stdout_is_malformed "$MF"; assert_eq "TC-CXRS-MAL-DET-08 real review mentioning a banner word + a verdict structure → NOT malformed (rc 1)" 1 "$?"
+
+# TC-CXRS-MAL-DET-09 — fixture-backed prompt-echo → malformed
+_codex_review_stdout_is_malformed "$FIXTURES/codex-review-stdout-prompt-echo.txt"
+assert_eq "TC-CXRS-MAL-DET-09 prompt-echo fixture → malformed (rc 0)" 0 "$?"
+
+# --- PR #253 review finding [P1] (#252): a genuine review that QUOTES a single
+#     prompt-scaffolding marker (e.g. reviewing THIS PR, whose diff/docs contain
+#     `Prefix EACH blocking finding`) while reporting a real `[P1]` must NOT be
+#     mis-flagged malformed. A bare global substring match on a single marker
+#     false-positives here; the fix requires STRONGER echo structure (≥2 distinct
+#     co-occurring prompt markers, or a banner/header), so a single quoted marker
+#     inside an otherwise-real review is NOT malformed. ---
+
+# TC-CXRS-MAL-DET-10 — a REAL review of THIS PR that quotes `Prefix EACH blocking
+# finding` in a finding (and reports a real [P1]) → NOT malformed. This is the
+# exact regression the PR #253 reviewer flagged: a single quoted marker must not
+# drop a genuine [P1] review.
+printf '%s\n' \
+  'I reviewed the scoped diff for PR #253 (the INV-73 codex prompt-echo guard).' \
+  '' \
+  'Findings:' \
+  '' \
+  '[P1] lib-review-codex.sh:162 — `_codex_review_stdout_is_malformed` matches the' \
+  'string `Prefix EACH blocking finding` anywhere in stdout. A genuine review that' \
+  'quotes that marker (like THIS review) would be mis-classified malformed, dropping' \
+  'a real verdict. Require stronger echo structure.' \
+  '' \
+  'Summary: 1 blocking finding (P1). This PR should not merge until fixed.' > "$MF"
+_codex_review_stdout_is_malformed "$MF"; assert_eq "TC-CXRS-MAL-DET-10 real [P1] review QUOTING a single prompt marker → NOT malformed (rc 1) [PR #253 [P1] regression]" 1 "$?"
+
+# TC-CXRS-MAL-DET-11 — a real review that quotes the `## Step 0:` heading text in
+# prose (a single marker, inline) while passing → NOT malformed.
+printf '%s\n' \
+  'I reviewed PR #253. The new `## Step 0: Merge Conflict Resolution` heading in the' \
+  'prompt is unchanged by this PR.' \
+  '' \
+  'Summary: no blocking findings. Looks good to merge.' > "$MF"
+_codex_review_stdout_is_malformed "$MF"; assert_eq "TC-CXRS-MAL-DET-11 real review quoting ONE '## Step 0:' heading inline → NOT malformed (rc 1)" 1 "$?"
+
+# TC-CXRS-MAL-DET-12 — TWO distinct co-occurring prompt-scaffolding markers (the
+# echo reproduces the WHOLE prompt) → malformed. A review quotes ONE marker; an
+# echo reproduces several. This is the stronger-structure discriminator.
+printf '%s\n' \
+  'You are reviewing PR #999.' \
+  '' \
+  '## Step 0: Merge Conflict Resolution — MANDATORY PRE-REVIEW' \
+  'Check the PR mergeable status.' \
+  '' \
+  '## Step 0.5: Requirement Drift Detection — MANDATORY PRE-REVIEW' \
+  'Read ALL comments on the issue.' \
+  '' \
+  'Prefix EACH blocking finding with [P1].' > "$MF"
+_codex_review_stdout_is_malformed "$MF"; assert_eq "TC-CXRS-MAL-DET-12 ≥2 distinct co-occurring prompt markers → malformed (rc 0)" 0 "$?"
+
+# --- 2nd review-round finding [P1] (#252, session 5705a2d7): the BANNER/HEADER
+#     signal (1a/1b) must match ONLY the actual startup header (the banner as the
+#     first non-empty line / a CONTIGUOUS launch header at the very top), NOT
+#     arbitrary quoted lines in a review body. A genuine `[P1]` review whose finding
+#     quotes the banner/header fixture in a code block NEAR the top (but AFTER review
+#     prose) must NOT be mis-flagged malformed. ---
+
+# TC-CXRS-MAL-DET-13 — a real [P1] review that QUOTES the banner fixture in a fenced
+# code block (the quoted banner lines fall within the first ~12 lines, but they are
+# NOT the capture's first non-empty line and the header is NOT a contiguous top
+# block — review prose precedes it) → NOT malformed. THE 2nd-round [P1] regression.
+printf '%s\n' \
+  'I reviewed PR #253 (the INV-73 prompt-echo guard).' \
+  '' \
+  '[P1] lib-review-codex.sh — the banner signal over-matches. Example echo capture:' \
+  '' \
+  '```' \
+  'OpenAI Codex v0.139.0' \
+  'workdir: /tmp/x' \
+  'model: openai.gpt-5.4' \
+  'provider: amazon-bedrock' \
+  '```' \
+  '' \
+  'A genuine review quoting that block (like THIS one) is mis-flagged. Fix it.' \
+  '' \
+  'Summary: 1 blocking finding (P1). Should not merge until fixed.' > "$MF"
+_codex_review_stdout_is_malformed "$MF"; assert_eq "TC-CXRS-MAL-DET-13 real [P1] review QUOTING the banner/header fixture in a code block (not the top header) → NOT malformed (rc 1) [2nd-round [P1] regression]" 1 "$?"
+
+# TC-CXRS-MAL-DET-14 — a real review whose VERY FIRST line is review prose, with the
+# workdir/model/provider triple quoted later in a code block → NOT malformed (the
+# header is not a contiguous launch block at the top).
+printf '%s\n' \
+  '## Review Verdict: needs changes' \
+  '' \
+  'The detector keys on this launch header:' \
+  '```' \
+  'workdir: /tmp/codex-review-wt-999' \
+  'model: openai.gpt-5.4' \
+  'provider: amazon-bedrock' \
+  '```' \
+  'but a review can quote it. [P1] tighten the match.' > "$MF"
+_codex_review_stdout_is_malformed "$MF"; assert_eq "TC-CXRS-MAL-DET-14 review prose first, header triple quoted later → NOT malformed (rc 1)" 1 "$?"
+
+# TC-CXRS-MAL-DET-15 — REGRESSION GUARD: a REAL startup trace (banner is the first
+# non-empty line, header is the contiguous top block) IS still malformed — the
+# tightening must not break the genuine-echo detection.
+printf '%s\n' '' '   ' 'OpenAI Codex v0.139.0' 'workdir: /tmp/x' 'model: openai.gpt-5.4' 'provider: amazon-bedrock' 'You are reviewing PR #999.' > "$MF"
+_codex_review_stdout_is_malformed "$MF"; assert_eq "TC-CXRS-MAL-DET-15 real startup trace (banner first non-empty line, leading blanks) → STILL malformed (rc 0)" 0 "$?"
+
+# TC-CXRS-MAL-DET-16 — REGRESSION GUARD: the contiguous launch header at the very top
+# (no banner line, but workdir/model/provider as the leading block) IS still malformed.
+printf '%s\n' 'workdir: /tmp/codex-review-wt-999' 'model: openai.gpt-5.4' 'provider: amazon-bedrock' 'approval: never' 'sandbox: read-only' 'You are reviewing PR #999.' > "$MF"
+_codex_review_stdout_is_malformed "$MF"; assert_eq "TC-CXRS-MAL-DET-16 contiguous launch header at the top (no banner) → STILL malformed (rc 0)" 0 "$?"
+
+# --- 3rd review-round finding [P1] (#252, session fdc9ff60): signal 2 counted
+#     prompt-scaffolding markers ANYWHERE in stdout (≥2 → malformed). A genuine
+#     review reporting a real `[P1]` while QUOTING two prompt headings in a fenced
+#     code block (`## Step 0:` + `## Step 0.5:` — natural when reviewing THIS PR's
+#     detector/fixture/tests) hit the ≥2 threshold → mis-flagged malformed. The fix
+#     keys signal 2 on ACTUAL echo structure: markers must be UNFENCED (a review
+#     quotes prompt text inside ``` fences; an echo emits it as bare structure) AND
+#     in the LEADING prompt region (before the first genuine `[P1]`/`[P2]`/`[P3]`
+#     finding line — an echo reproduces the prompt at the TOP, before any finding). ---
+
+# TC-CXRS-MAL-DET-17 — a real [P1] review QUOTING two prompt headings in a FENCED
+# code block → NOT malformed. THE 3rd-round [P1] regression (the reviewer's exact case).
+printf '%s\n' \
+  'I reviewed PR #253 (the INV-73 detector). The signal-2 marker count over-matches.' \
+  '' \
+  '[P1] lib-review-codex.sh — a review that quotes two prompt headings, e.g.:' \
+  '' \
+  '```' \
+  '## Step 0: Merge Conflict Resolution — MANDATORY PRE-REVIEW' \
+  '## Step 0.5: Requirement Drift Detection — MANDATORY PRE-REVIEW' \
+  '```' \
+  '' \
+  'is mis-flagged malformed and the real [P1] is dropped. Ignore fenced quotes.' \
+  '' \
+  'Summary: 1 blocking finding (P1). Should not merge until fixed.' > "$MF"
+_codex_review_stdout_is_malformed "$MF"; assert_eq "TC-CXRS-MAL-DET-17 real [P1] review QUOTING 2 prompt headings in a FENCED block → NOT malformed (rc 1) [3rd-round [P1] regression]" 1 "$?"
+
+# TC-CXRS-MAL-DET-18 — a real review quoting two prompt markers UNFENCED but AFTER
+# its findings (the markers trail the [P1], not lead it) → NOT malformed. The echo
+# reproduces the prompt at the TOP; a review's quotes come after the finding.
+printf '%s\n' \
+  '[P1] The detector counts markers anywhere. Consider this prompt structure:' \
+  'You are reviewing PR #999 for issue #999 in the repo.' \
+  'Prefix EACH blocking finding with [P1].' \
+  'Those two lines appear in the prompt; a review quoting them should still FAIL.' \
+  '' \
+  'Summary: 1 blocking finding (P1).' > "$MF"
+_codex_review_stdout_is_malformed "$MF"; assert_eq "TC-CXRS-MAL-DET-18 real [P1] review, 2 markers quoted AFTER the finding → NOT malformed (rc 1)" 1 "$?"
+
+# TC-CXRS-MAL-DET-19 — REGRESSION GUARD: a genuine UNFENCED echo (≥2 prompt markers
+# in the leading region, no preceding finding) IS still malformed. The fix must not
+# break detection of a real prompt-echo.
+printf '%s\n' \
+  'You are reviewing PR #999 for issue #999 in the repo.' \
+  '' \
+  '## Step 0: Merge Conflict Resolution — MANDATORY PRE-REVIEW' \
+  'Check the PR mergeable status.' \
+  '' \
+  '## Step 0.5: Requirement Drift Detection — MANDATORY PRE-REVIEW' \
+  'Read ALL comments on the issue.' > "$MF"
+_codex_review_stdout_is_malformed "$MF"; assert_eq "TC-CXRS-MAL-DET-19 unfenced echo, ≥2 leading markers, no finding → STILL malformed (rc 0)" 0 "$?"
+
+# TC-CXRS-MAL-DET-20 — REGRESSION GUARD: the fixture (banner + unfenced ## Step
+# headings in the leading region) is STILL malformed (signal 1 banner OR signal 2
+# leading-unfenced markers).
+_codex_review_stdout_is_malformed "$FIXTURES/codex-review-stdout-prompt-echo.txt"
+assert_eq "TC-CXRS-MAL-DET-20 prompt-echo fixture → STILL malformed (rc 0)" 0 "$?"
+
+# --- 4th review-round finding [P1] (#252, session 6000c69c): the finding-boundary
+#     in _echo_region / _leading_region only stopped on a line BEGINNING DIRECTLY
+#     with `[P1]`. But the wrapper's own posted finding format is NUMBERED+BOLD
+#     (`1. **[P1] ...`). A genuine review using that format, then QUOTING two prompt
+#     markers as evidence, kept the markers in the echo region → ≥2 → malformed →
+#     dropped. The fix WIDENS the boundary to numbered / markdown-list / bold / JSON
+#     finding forms (a `[P1]` token preceded by only finding-list scaffolding). ---
+
+# TC-CXRS-MAL-DET-21 — a real review using the wrapper's NUMBERED+BOLD finding format
+# (`1. **[P1] ...`) then QUOTING two prompt markers as evidence → NOT malformed. THE
+# 4th-round [P1] regression (the reviewer's exact case; the finding itself used this
+# format). The numbered finding line must terminate the echo region BEFORE the markers.
+printf '%s\n' \
+  'Review findings:' \
+  'Findings->Decision Gate: 1 blocking finding(s) — FAIL.' \
+  '' \
+  '1. **[P1] The detector over-matches** — a review quoting two prompt markers as evidence:' \
+  '## Step 0: Merge Conflict Resolution — MANDATORY PRE-REVIEW' \
+  '## Step 0.5: Requirement Drift Detection — MANDATORY PRE-REVIEW' \
+  'is mis-classified malformed. Widen the finding boundary.' > "$MF"
+_codex_review_stdout_is_malformed "$MF"; assert_eq "TC-CXRS-MAL-DET-21 real review with numbered+bold finding then column-0 quoted markers → NOT malformed (rc 1) [4th-round [P1] regression]" 1 "$?"
+
+# TC-CXRS-MAL-DET-22 — markdown-bullet finding form (`- [P1] ...` / `* **[P1] ...`)
+# followed by quoted prompt markers → NOT malformed.
+printf '%s\n' \
+  'Review findings:' \
+  '' \
+  '- **[P1]** the markers below are quoted as evidence, not echoed:' \
+  '## Step 0: Merge Conflict Resolution — MANDATORY PRE-REVIEW' \
+  '## Step 0.5: Requirement Drift Detection — MANDATORY PRE-REVIEW' > "$MF"
+_codex_review_stdout_is_malformed "$MF"; assert_eq "TC-CXRS-MAL-DET-22 markdown-bullet [P1] finding then quoted markers → NOT malformed (rc 1)" 1 "$?"
+
+# TC-CXRS-MAL-DET-23 — JSON finding form (a quoted P1 severity/priority value)
+# followed by quoted prompt markers → NOT malformed.
+printf '%s\n' \
+  '{"verdict": "fail", "findings": [' \
+  '  {"severity": "P1", "note": "markers quoted as evidence below"}' \
+  ']}' \
+  '## Step 0: Merge Conflict Resolution — MANDATORY PRE-REVIEW' \
+  '## Step 0.5: Requirement Drift Detection — MANDATORY PRE-REVIEW' > "$MF"
+_codex_review_stdout_is_malformed "$MF"; assert_eq "TC-CXRS-MAL-DET-23 JSON [P1] finding then quoted markers → NOT malformed (rc 1)" 1 "$?"
+
+# TC-CXRS-MAL-DET-24 — REGRESSION GUARD: the prompt's `[P1]` INSTRUCTION line
+# (`Prefix EACH blocking finding with [P1]`) is NOT a finding boundary — it is part of
+# the echoed prompt, so a real echo whose markers FOLLOW that instruction line is
+# STILL detected. The widened boundary must distinguish a finding (leading `[P1]`
+# token) from the instruction (`[P1]` mid-sentence after "finding with").
+printf '%s\n' \
+  'You are reviewing PR #999 for issue #999 in the repo.' \
+  'Prefix EACH blocking finding with [P1] (priority 1).' \
+  '## Step 0: Merge Conflict Resolution — MANDATORY PRE-REVIEW' \
+  '## Step 0.5: Requirement Drift Detection — MANDATORY PRE-REVIEW' > "$MF"
+_codex_review_stdout_is_malformed "$MF"; assert_eq "TC-CXRS-MAL-DET-24 echo: prompt [P1] INSTRUCTION line is NOT a boundary → markers after it STILL counted → malformed (rc 0)" 0 "$?"
+
+# TC-CXRS-MAL-DET-25 — REGRESSION GUARD: a direct `[P1]` finding line still bounds the
+# region (the original DET-18 case is unchanged by the widening).
+printf '%s\n' \
+  '[P1] direct finding line. Evidence:' \
+  '## Step 0: Merge Conflict Resolution — MANDATORY PRE-REVIEW' \
+  '## Step 0.5: Requirement Drift Detection — MANDATORY PRE-REVIEW' > "$MF"
+_codex_review_stdout_is_malformed "$MF"; assert_eq "TC-CXRS-MAL-DET-25 direct [P1] finding line still bounds the region → NOT malformed (rc 1)" 1 "$?"
+
+# --- _codex_review_classify_stdout gains the `malformed` token (checked FIRST) ---
+# TC-CXRS-MAL-CLS-01 — prompt-echo capture ([P1] present ONLY as quoted instruction
+# text) → `malformed`, NOT `fail`. THE #252 REGRESSION.
+cp "$FIXTURES/codex-review-stdout-prompt-echo.txt" "$MF"
+assert_eq "TC-CXRS-MAL-CLS-01 prompt-echo with quoted [P1] → malformed (NOT fail) [#252 regression]" \
+  "malformed" "$(_codex_review_classify_stdout "$MF")"
+# TC-CXRS-MAL-CLS-02 — a genuine [P1] review still FAILs (no over-suppression)
+assert_eq "TC-CXRS-MAL-CLS-02 genuine [P1] review → still fail (no over-suppression)" \
+  "fail" "$(_codex_review_classify_stdout "$FIXTURES/codex-review-stdout-p1.txt")"
+# TC-CXRS-MAL-CLS-02b — PR #253 review finding [P1]: a genuine [P1] review that
+# QUOTES a single prompt marker (reviewing THIS PR) → `fail`, NOT `malformed`. The
+# acceptance criterion "a genuine [P1] review still FAILs" must hold even when the
+# review text quotes `Prefix EACH blocking finding`. Pre-fix (bare substring): this
+# returned `malformed` → the wrapper skipped the FAIL → codex dropped unavailable.
+printf '%s\n' \
+  'I reviewed PR #253 (the INV-73 codex prompt-echo guard).' \
+  '' \
+  '[P1] lib-review-codex.sh:162 — the detector matches `Prefix EACH blocking finding`' \
+  'anywhere, so a real review quoting that marker is mis-flagged malformed.' \
+  '' \
+  'Summary: 1 blocking finding (P1). Should not merge until fixed.' > "$MF"
+assert_eq "TC-CXRS-MAL-CLS-02b genuine [P1] review quoting one prompt marker → fail (NOT malformed) [PR #253 [P1]]" \
+  "fail" "$(_codex_review_classify_stdout "$MF")"
+# TC-CXRS-MAL-CLS-02c — 2nd-round review finding [P1] (#252, session 5705a2d7): a
+# genuine [P1] review that QUOTES the banner/header fixture in a code block near the
+# top → `fail`, NOT `malformed`. Pre-fix (head-block scan): the quoted banner/header
+# matched signal 1 before the [P1] scan → the wrapper dropped a real blocking review.
+printf '%s\n' \
+  'I reviewed PR #253.' \
+  '' \
+  '[P1] the banner signal over-matches. Observed echo capture:' \
+  '```' \
+  'OpenAI Codex v0.139.0' \
+  'workdir: /tmp/x' \
+  'model: openai.gpt-5.4' \
+  'provider: amazon-bedrock' \
+  '```' \
+  'A genuine review quoting it is mis-flagged.' \
+  '' \
+  'Summary: 1 blocking finding (P1).' > "$MF"
+assert_eq "TC-CXRS-MAL-CLS-02c genuine [P1] review quoting the banner/header fixture → fail (NOT malformed) [2nd-round [P1]]" \
+  "fail" "$(_codex_review_classify_stdout "$MF")"
+# TC-CXRS-MAL-CLS-02d — 3rd-round review finding [P1] (#252, session fdc9ff60): a
+# genuine [P1] review that QUOTES two prompt headings in a fenced code block → `fail`,
+# NOT `malformed`. Pre-fix (≥2 markers anywhere): the two fenced headings hit the
+# threshold → the wrapper skipped the FAIL → codex dropped unavailable.
+printf '%s\n' \
+  'I reviewed PR #253 (the INV-73 detector). Signal 2 over-matches.' \
+  '' \
+  '[P1] a review quoting two prompt headings, e.g.:' \
+  '```' \
+  '## Step 0: Merge Conflict Resolution — MANDATORY PRE-REVIEW' \
+  '## Step 0.5: Requirement Drift Detection — MANDATORY PRE-REVIEW' \
+  '```' \
+  'is mis-flagged malformed. Ignore fenced quotes.' \
+  '' \
+  'Summary: 1 blocking finding (P1).' > "$MF"
+assert_eq "TC-CXRS-MAL-CLS-02d genuine [P1] review quoting 2 prompt headings in a fenced block → fail (NOT malformed) [3rd-round [P1]]" \
+  "fail" "$(_codex_review_classify_stdout "$MF")"
+# TC-CXRS-MAL-CLS-02e — 4th-round review finding [P1] (#252, session 6000c69c): a
+# genuine [P1] review in the wrapper's NUMBERED+BOLD finding format (`1. **[P1] ...`)
+# that then quotes two prompt markers as evidence → `fail`, NOT `malformed`. Pre-fix
+# (boundary only on a line beginning directly with `[P1]`): the numbered finding did
+# not bound the region → the quoted markers stayed in → ≥2 → malformed → dropped.
+printf '%s\n' \
+  'Review findings:' \
+  'Findings->Decision Gate: 1 blocking finding(s) — FAIL.' \
+  '' \
+  '1. **[P1] The detector over-matches** — evidence (two prompt markers):' \
+  '## Step 0: Merge Conflict Resolution — MANDATORY PRE-REVIEW' \
+  '## Step 0.5: Requirement Drift Detection — MANDATORY PRE-REVIEW' > "$MF"
+assert_eq "TC-CXRS-MAL-CLS-02e genuine [P1] review in numbered+bold format quoting 2 column-0 markers → fail (NOT malformed) [4th-round [P1]]" \
+  "fail" "$(_codex_review_classify_stdout "$MF")"
+# TC-CXRS-MAL-CLS-03 — a genuine clean review still PASSes
+assert_eq "TC-CXRS-MAL-CLS-03 genuine clean review → still pass" \
+  "pass" "$(_codex_review_classify_stdout "$FIXTURES/codex-review-stdout-clean.txt")"
+# TC-CXRS-MAL-CLS-04 — empty capture still PASSes (unchanged — a valid clean review)
+: > "$MF"
+assert_eq "TC-CXRS-MAL-CLS-04 empty capture → pass (unchanged)" "pass" "$(_codex_review_classify_stdout "$MF")"
+# TC-CXRS-MAL-CLS-05 — fixture-backed prompt-echo → malformed
+assert_eq "TC-CXRS-MAL-CLS-05 prompt-echo fixture → malformed" \
+  "malformed" "$(_codex_review_classify_stdout "$FIXTURES/codex-review-stdout-prompt-echo.txt")"
+# TC-CXRS-MAL-CLS-06 — bare call under set -euo pipefail on a malformed capture → no abort
+malcls06=$(
+  set -euo pipefail
+  source "$LIB"
+  out=$(_codex_review_classify_stdout "$FIXTURES/codex-review-stdout-prompt-echo.txt")
+  echo "rc=$?|$out"
+)
+assert_eq "TC-CXRS-MAL-CLS-06 no abort under set -euo pipefail (malformed)" "rc=0|malformed" "$malcls06"
+
+# --- _run_codex_review re-runs a malformed rc-0 capture (bounded) ---
+# Sandbox: stub _run_with_timeout to consume a scripted feed of stdout TOKENS (one
+# per run): "malformed" writes the prompt-echo fixture, "verdict" a clean review,
+# "p1" a genuine [P1] review. Every run exits rc 0 (the whole point: a malformed
+# prompt-echo exits cleanly). Echoes "<rc>|<run_count>|<final-classify>".
+run_codex_mal_case() {
+  local toks="$1" max="$2" nowscript="$3"
+  local sandbox; sandbox=$(mktemp -d)
+  printf '%s\n' "$toks"      > "$sandbox/toks"
+  printf '%s\n' "$nowscript" > "$sandbox/now"
+  : > "$sandbox/runs"
+  cp "$FIXTURES/codex-review-stdout-prompt-echo.txt" "$sandbox/echo.txt"
+  cp "$FIXTURES/codex-review-stdout-clean.txt"       "$sandbox/clean.txt"
+  cp "$FIXTURES/codex-review-stdout-p1.txt"          "$sandbox/p1.txt"
+  (
+    source "$LIB"
+    _run_with_timeout() {
+      echo "run" >> "$sandbox/runs"
+      local tok; tok=$(head -n1 "$sandbox/toks"); sed -i '1d' "$sandbox/toks" 2>/dev/null || true
+      case "${tok:-verdict}" in
+        malformed) cat "$sandbox/echo.txt" ;;
+        p1)        cat "$sandbox/p1.txt" ;;
+        *)         cat "$sandbox/clean.txt" ;;
+      esac
+      return 0   # rc 0 ALWAYS — a malformed prompt-echo exits cleanly
+    }
+    _codex_now_seconds() {
+      local n; n=$(head -n1 "$sandbox/now")
+      [[ $(wc -l < "$sandbox/now") -gt 1 ]] && sed -i '1d' "$sandbox/now"
+      printf '%s\n' "$n"
+    }
+    CODEX_REVIEW_MAX_RERUNS="$max" AGENT_REVIEW_TIMEOUT=1h AGENT_CMD=codex \
+      _run_codex_review "prompt" "model-x" "$sandbox/cap.txt"
+    rc=$?
+    runs=$(grep -c '^run$' "$sandbox/runs" 2>/dev/null) || runs=0
+    final=$(_codex_review_classify_stdout "$sandbox/cap.txt")
+    echo "${rc}|${runs}|${final}"
+  )
+  rm -rf "$sandbox"
+}
+
+# TC-CXRS-MAL-RUN-01 — malformed turn 1, clean re-run → 2 runs, rc 0, final pass
+assert_eq "TC-CXRS-MAL-RUN-01 malformed rc-0 then clean re-run → 2 runs, rc 0, final pass" \
+  "0|2|pass" "$(run_codex_mal_case $'malformed\nverdict' 3 $'0\n10\n20\n30')"
+# TC-CXRS-MAL-RUN-02 — malformed on every run, max=3 → 4 runs, rc 0, final still malformed
+assert_eq "TC-CXRS-MAL-RUN-02 malformed throughout, max=3 → 4 runs, rc 0, final malformed" \
+  "0|4|malformed" "$(run_codex_mal_case $'malformed\nmalformed\nmalformed\nmalformed' 3 $'0\n5\n10\n15\n20')"
+# TC-CXRS-MAL-RUN-03 — MAX_RERUNS=0 disables the malformed re-run → 1 run only
+assert_eq "TC-CXRS-MAL-RUN-03 max=0 → 1 run, no malformed re-run, final malformed" \
+  "0|1|malformed" "$(run_codex_mal_case $'malformed\nverdict' 0 $'0\n5')"
+# TC-CXRS-MAL-RUN-04 — malformed then a genuine [P1] review → 2 runs, final fail (no over-retry past a real verdict)
+assert_eq "TC-CXRS-MAL-RUN-04 malformed then genuine [P1] → 2 runs, rc 0, final fail" \
+  "0|2|fail" "$(run_codex_mal_case $'malformed\np1' 3 $'0\n10\n20\n30')"
+# TC-CXRS-MAL-RUN-05 — a clean rc-0 run on turn 1 → NO malformed re-run (happy path unaffected)
+assert_eq "TC-CXRS-MAL-RUN-05 clean turn 1 → 1 run (no malformed re-run), final pass" \
+  "0|1|pass" "$(run_codex_mal_case $'verdict\nverdict' 3 $'0\n5')"
+
+# --- _classify_codex_drop_reason gains a `malformed-output` bucket ---
+DM="$TMP/dropmal.txt"
+# TC-CXRS-MAL-DROP-01 — prompt-echo rc-0 capture (no clap, no stream) → malformed-output
+cp "$FIXTURES/codex-review-stdout-prompt-echo.txt" "$DM"
+assert_eq "TC-CXRS-MAL-DROP-01 prompt-echo capture → malformed-output" \
+  "malformed-output" "$(_classify_codex_drop_reason "$DM")"
+# TC-CXRS-MAL-DROP-02 — a clap config-error (rc 2) still wins (malformed does not shadow it)
+assert_eq "TC-CXRS-MAL-DROP-02 clap config-error rc2 → config-error:-s (not shadowed by malformed)" \
+  "config-error:-s" "$(_classify_codex_drop_reason "$FIXTURES/codex-review-stdout-config-error.txt" 2)"
+# TC-CXRS-MAL-DROP-03 — a stream-error capture still wins (malformed does not shadow it)
+assert_eq "TC-CXRS-MAL-DROP-03 stream-error capture → stream-error:5/5 (not shadowed by malformed)" \
+  "stream-error:5/5" "$(_classify_codex_drop_reason "$FIXTURES/codex-review-stdout-stream-error.txt")"
+# TC-CXRS-MAL-DROP-04 — a clean / [P1] review → empty (no over-claim)
+assert_eq "TC-CXRS-MAL-DROP-04a clean review → empty token" "" "$(_classify_codex_drop_reason "$FIXTURES/codex-review-stdout-clean.txt")"
+assert_eq "TC-CXRS-MAL-DROP-04b [P1] review → empty token" "" "$(_classify_codex_drop_reason "$FIXTURES/codex-review-stdout-p1.txt")"
+# TC-CXRS-MAL-DROP-05 — phrase renders malformed-output
+malphr=$(_codex_drop_reason_phrase "malformed-output")
+assert_contains "TC-CXRS-MAL-DROP-05a phrase names malformed-output" "malformed-output" "$malphr"
+assert_contains "TC-CXRS-MAL-DROP-05b phrase explains prompt/trace echo" "prompt" "$malphr"
+# TC-CXRS-MAL-DROP-06 — fail-safe bare call under set -euo pipefail on a malformed capture
+maldrop06=$(
+  set -euo pipefail
+  source "$LIB"
+  _classify_codex_drop_reason "$FIXTURES/codex-review-stdout-prompt-echo.txt"
+  echo "REACHED_RETURN_0"
+)
+assert_eq "TC-CXRS-MAL-DROP-06 bare call, malformed capture → no errexit abort" \
+  $'malformed-output\nREACHED_RETURN_0' "$maldrop06"
+
+# --- behavioral: the wrapper fallback treats `malformed` as no-verdict ---
+# Reuse the fallback_case harness defined in the TC-CXRS-INT block above (the real
+# lib + a stub post-verdict.sh). A malformed rc-0 capture must NOT post a verdict
+# and must leave the agent UNRESOLVED (→ unavailable via the terminal sweep).
+# TC-CXRS-MAL-INT-01 — rc-0 prompt-echo, not self-posted → NOPOST, unresolved
+assert_eq "TC-CXRS-MAL-INT-01 rc-0 prompt-echo → NOT posted as FAIL, left unresolved" \
+  "NOPOST|-|" "$(fallback_case "$FIXTURES/codex-review-stdout-prompt-echo.txt" "" "" "" 0)"
+# TC-CXRS-MAL-INT-02 — rc-0 genuine [P1] review → wrapper still posts FAIL (regression guard)
+assert_eq "TC-CXRS-MAL-INT-02 rc-0 genuine [P1] → still posts FAIL" \
+  "POST|fail|fail" "$(fallback_case "$FIXTURES/codex-review-stdout-p1.txt" "" "" "" 0)"
+# TC-CXRS-MAL-INT-03 — rc-0 clean review → wrapper still posts PASS (regression guard)
+assert_eq "TC-CXRS-MAL-INT-03 rc-0 clean review → still posts PASS" \
+  "POST|pass|pass" "$(fallback_case "$FIXTURES/codex-review-stdout-clean.txt" "" "" "" 0)"
+
+# --- wrapper wiring (source-of-truth) ---
+# TC-CXRS-MAL-WIRE-01 — the wrapper fallback gates on the `malformed` classifier
+# token and `continue`s (leaves the agent unresolved → no phantom verdict posted).
+assert_grep "TC-CXRS-MAL-WIRE-01 wrapper fallback gates on the malformed classifier token" \
+  '\[\[ "\$_cx_verdict" == "malformed" \]\]' "$WRAPPER"
+# TC-CXRS-MAL-WIRE-02 — the gate runs BEFORE the body composer (so no Review
+# findings: body is composed/posted from a malformed prompt-echo). Assert the
+# `malformed` branch's line number precedes the _codex_review_compose_body call.
+_mal_line=$(grep -n '\[\[ "\$_cx_verdict" == "malformed" \]\]' "$WRAPPER" | head -1 | cut -d: -f1)
+_compose_line=$(grep -n '_codex_review_compose_body "\$_cx_verdict"' "$WRAPPER" | head -1 | cut -d: -f1)
+if [[ -n "$_mal_line" && -n "$_compose_line" && "$_mal_line" -lt "$_compose_line" ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-CXRS-MAL-WIRE-02 malformed gate precedes the fallback body composer (no phantom body)"; PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-CXRS-MAL-WIRE-02 malformed gate does NOT precede the body composer (mal=$_mal_line compose=$_compose_line)"; FAIL=$((FAIL + 1))
 fi
 
 # ---------------------------------------------------------------------------

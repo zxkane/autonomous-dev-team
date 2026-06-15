@@ -89,6 +89,79 @@ fi
 
 # ---------------------------------------------------------------------------
 echo ""
+echo "=== TC-MAR-MAL-E2E: malformed codex prompt-echo contributes no vote; surviving agent decides (INV-73, #252) ==="
+# ---------------------------------------------------------------------------
+# Stub-fleet E2E: a 2-agent fan-out (codex + claude) where codex's `codex review`
+# exits rc 0 but emits a prompt-echo / startup-trace (no verdict). Drive the FULL
+# chain against the real libs:
+#   - codex stdout → _codex_review_classify_stdout → `malformed` (NOT a phantom
+#     [P1] FAIL) → leaves codex with NO vote → the post-window sweep resolves it
+#     `unavailable` (`_classify_noverdict_agent` on a clean rc-0 no-verdict);
+#   - the drop-reason loop names it `malformed-output` (rendered phrase);
+#   - claude posts a real PASS;
+#   - _aggregate_review_verdicts(unavailable pass) → `pass` — the surviving agent
+#     decides, the phantom FAIL is gone. This is the end-to-end #252 regression.
+CODEX_LIB="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-review-codex.sh"
+FIXTURES="$SCRIPT_DIR/fixtures"
+if [[ -f "$AGG_LIB" && -f "$CODEX_LIB" ]]; then
+  (
+    set -uo pipefail
+    # _aggregate_review_verdicts AND _classify_noverdict_agent both live in
+    # lib-review-aggregate.sh (the rc → pass|fail|unavailable|timed-out mapping the
+    # post-window sweep uses); the codex lib supplies the classifier + drop reason.
+    source "$AGG_LIB"
+    source "$CODEX_LIB"
+
+    # 1. codex emitted a prompt-echo at rc 0 → classifier says `malformed`.
+    cx_verdict=$(_codex_review_classify_stdout "$FIXTURES/codex-review-stdout-prompt-echo.txt")
+    assert_eq "TC-MAR-MAL-E2E-01 codex prompt-echo → classified malformed (no phantom FAIL)" \
+      "malformed" "$cx_verdict"
+
+    # 2. the wrapper does NOT post a verdict for a `malformed` classification, so
+    #    codex stays no-verdict and the terminal sweep resolves it via the REAL
+    #    _classify_noverdict_agent (clean rc 0 no-verdict → unavailable).
+    cx_resolved=$(_classify_noverdict_agent 0)
+    assert_eq "TC-MAR-MAL-E2E-02 malformed codex (rc 0, no verdict) → resolves unavailable (no vote)" \
+      "unavailable" "$cx_resolved"
+
+    # 3. the drop-reason loop names it `malformed-output`.
+    cx_token=$(_classify_codex_drop_reason "$FIXTURES/codex-review-stdout-prompt-echo.txt" 0)
+    assert_eq "TC-MAR-MAL-E2E-03 dropped codex → malformed-output token" \
+      "malformed-output" "$cx_token"
+    cx_phrase=$(_codex_drop_reason_phrase "$cx_token")
+    case "$cx_phrase" in
+      *malformed-output*prompt*) echo -e "  ${GREEN}PASS${NC}: TC-MAR-MAL-E2E-04 drop reason phrase names the malformed-output cause"; PASS=$((PASS + 1)) ;;
+      *) echo -e "  ${RED}FAIL${NC}: TC-MAR-MAL-E2E-04 drop reason phrase missing (got: $cx_phrase)"; FAIL=$((FAIL + 1)) ;;
+    esac
+
+    # 4. a surviving claude posts a real PASS, and the aggregate is decided by it —
+    #    NOT vetoed by a phantom codex FAIL.
+    agg=$(_aggregate_review_verdicts "$cx_resolved" pass)
+    assert_eq "TC-MAR-MAL-E2E-05 aggregate(unavailable codex, pass claude) → pass (surviving agent decides)" \
+      "pass" "$agg"
+
+    # 5. CONTRAST — the pre-fix behavior would have classified the SAME stdout as a
+    #    blocking FAIL (the prompt's quoted `[P1]`), vetoing the clean PR. Prove the
+    #    fix changed it: a malformed classification is NEITHER pass NOR fail.
+    if [[ "$cx_verdict" != "fail" && "$cx_verdict" != "pass" ]]; then
+      echo -e "  ${GREEN}PASS${NC}: TC-MAR-MAL-E2E-06 malformed is neither pass nor fail (no phantom verdict, #252)"; PASS=$((PASS + 1))
+    else
+      echo -e "  ${RED}FAIL${NC}: TC-MAR-MAL-E2E-06 malformed leaked into a pass/fail verdict ($cx_verdict)"; FAIL=$((FAIL + 1))
+    fi
+
+    echo "PASS=$PASS FAIL=$FAIL" > "$SCRIPT_DIR/.mar_mal_counts.$$"
+  )
+  # The subshell can't mutate PASS/FAIL in the parent; fold its counts back.
+  if [[ -f "$SCRIPT_DIR/.mar_mal_counts.$$" ]]; then
+    # shellcheck disable=SC1090
+    _mc=$(cat "$SCRIPT_DIR/.mar_mal_counts.$$"); rm -f "$SCRIPT_DIR/.mar_mal_counts.$$"
+    PASS=$(sed -E 's/^PASS=([0-9]+).*/\1/' <<<"$_mc")
+    FAIL=$(sed -E 's/.*FAIL=([0-9]+)$/\1/' <<<"$_mc")
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
 echo "=== TC-MAR-SRC: wrapper structure (source-of-truth greps) ==="
 # ---------------------------------------------------------------------------
 assert_grep "TC-MAR-SRC-01 reads AGENT_REVIEW_AGENTS" \

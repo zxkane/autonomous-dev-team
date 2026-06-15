@@ -2015,6 +2015,20 @@ for _i in "${!AGENT_NAMES[@]}"; do
   # verdict. An empty/missing capture is a valid clean review (classifier → pass,
   # body composer → default pass body) and is NOT dropped.
   _cx_verdict=$(_codex_review_classify_stdout "$_cx_stdout")
+  # INV-73 (#252): a `malformed` classification means codex echoed its prompt /
+  # startup trace instead of a review (an rc-0 run with NO verdict — re-run to
+  # exhaustion by _run_codex_review, still malformed). The prompt text contains the
+  # literal `[P1]` (the "Prefix EACH blocking finding" instruction + quoted prior
+  # findings), so deriving a verdict from it would post a PHANTOM blocking FAIL that
+  # vetoes an otherwise-clean PR. So do NOT classify it pass/fail and do NOT compose
+  # a `Review findings:` body from it: leave the agent UNRESOLVED for the terminal
+  # sweep, which resolves it `unavailable` (dropped — contributes no INV-40 vote,
+  # the "absent ⇒ not a deciding vote" semantics) with a `malformed-output` drop
+  # reason (the same per-CLI drop-reason path as stream-error / config-error).
+  if [[ "$_cx_verdict" == "malformed" ]]; then
+    log "INV-73: codex review stdout is a prompt-echo / startup-trace (no verdict) — NOT deriving a phantom verdict; leaving codex unresolved for the terminal sweep (→ unavailable, malformed-output drop reason)."
+    continue
+  fi
   log "INV-62: codex did not self-post a verdict — wrapper deriving '${_cx_verdict}' from codex review stdout and posting on its behalf."
   _cx_body_file=$(mktemp "/tmp/codex-review-fallback-${ISSUE_NUMBER}-XXXXXX.md")
   _codex_review_compose_body "$_cx_verdict" "$_cx_stdout" > "$_cx_body_file" 2>/dev/null || true
