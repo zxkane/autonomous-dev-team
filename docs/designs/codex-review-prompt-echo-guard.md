@@ -143,10 +143,24 @@ A malformed prompt-echo exits **rc 0**. The terminal all-unavailable branch keys
 malformed codex left unresolved at rc 0 would route through the rc-0 `failed-substantive` branch — turning
 the no-vote infra drop back into a blocking request-changes FAIL (the exact non-self-terminating loop a
 single-agent-codex repo hit). Fix: the drop-classification loop sets `_any_nonsubstantive_drop=true` when a
-dropped agent's reason is `malformed-output`, and the all-unavailable branch raises `AGENT_EXIT=1` on that
-flag → `failed-non-substantive` (re-dispatchable), the same terminal class as a non-zero `stream-error` drop.
-`stream-error`/`config-error`/`auth-failed`/`quota-exhausted` already exit non-zero (the rc scan routes them
-non-substantive); only the rc-0 `malformed-output` case needed the explicit flag.
+dropped codex agent has ANY non-empty infra-drop reason token at launch **rc 0**, and the all-unavailable
+branch raises `AGENT_EXIT=1` on that flag → `failed-non-substantive` (re-dispatchable), the same terminal
+class as a non-zero `stream-error` drop. The CLI-crash variants of `stream-error`/`config-error`/`auth-failed`/
+`quota-exhausted` already exit non-zero (the rc scan routes them non-substantive); only the rc-0 infra-drop
+case needed the explicit flag.
+
+**Broadened (#254 6th-round review finding [P1], session 5732e287).** The flag originally keyed on the EXACT
+token string `malformed-output`. But `_classify_codex_drop_reason` scans for **stream-error before** the
+malformed check, so a malformed rc-0 prompt-echo whose echoed issue/comment text contains `Reconnecting... N/M`
+or `stream disconnected before completion` is tokenized `stream-error:*` — and the exact-match check MISSED it,
+so `_any_nonsubstantive_drop` stayed `false` and a single-agent codex fleet routed to `failed-substantive`
+again (the same loop the 5th-round fix was meant to close). The fix keys on **any non-empty token at launch
+rc 0** (`_codex_launch_rc == "0" && -n "$_codex_reason_token"`): the classifier emits a token ONLY for a
+genuine codex infra drop (`config-error` / `stream-error` / `malformed-output`), and a substantive "ran clean
+but no verdict" drop yields an EMPTY token, so a non-empty token at rc 0 is unambiguously non-substantive
+regardless of which infra bucket the classifier matched first. (Reordering the classifier to check malformed
+BEFORE stream-error was rejected: it would mislabel a genuine non-zero-rc stream-error that also looks
+malformed, losing the more-specific `stream-error:N/M` observability the operator needs.)
 
 ## Decision Gate ordering rationale
 

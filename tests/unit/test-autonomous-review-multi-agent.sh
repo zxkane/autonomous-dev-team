@@ -203,13 +203,73 @@ if [[ -f "$CODEX_LIB" ]]; then
     assert_eq "TC-MAR-MALEXIT-01 single-agent malformed-output (rc 0, unavailable) → AGENT_EXIT=1 (non-substantive, not failed-substantive)" "1" "$_ae"
   fi
 fi
-# Source-of-truth: the wrapper's drop loop flags a malformed-output codex, and the
+# Source-of-truth: the wrapper's drop loop flags an rc-0 codex infra drop, and the
 # all-unavailable branch raises AGENT_EXIT on that flag (the fix must be wired into
 # the REAL wrapper, not just the replicated logic above).
-assert_grep "TC-MAR-MALEXIT-02a wrapper flags a malformed-output drop as non-substantive" \
-  '"\$_codex_reason_token" == "malformed-output" \]\] && _any_nonsubstantive_drop=true' "$WRAPPER"
+# 6th-round finding ([P1], session 5732e287): the flag must fire for ANY non-empty
+# rc-0 codex infra-drop token, NOT only the exact `malformed-output` string — the
+# classifier checks stream-error BEFORE malformed-output, so an rc-0 prompt-echo that
+# echoes `Reconnecting... N/M` / `stream disconnected` text tokenizes `stream-error:*`
+# and the old `== "malformed-output"` check missed it (re-routing to failed-substantive).
+assert_grep "TC-MAR-MALEXIT-02a wrapper flags any rc-0 codex infra drop as non-substantive (not only malformed-output)" \
+  '"\$_codex_launch_rc" == "0" && -n "\$_codex_reason_token" \]\] && _any_nonsubstantive_drop=true' "$WRAPPER"
 assert_grep "TC-MAR-MALEXIT-02b all-unavailable branch raises AGENT_EXIT=1 on the non-substantive-drop flag" \
   '\[\[ "\$_any_nonsubstantive_drop" == true \]\] && AGENT_EXIT=1' "$WRAPPER"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-MAR-MALEXIT-03: rc-0 prompt-echo that ALSO echoes stream-error text routes NON-substantive (INV-73, #254 6th-round [P1]) ==="
+# ---------------------------------------------------------------------------
+# 6th-round review finding [P1] (session 5732e287): the all-unavailable fix only set
+# `_any_nonsubstantive_drop` when the drop token was EXACTLY `malformed-output`. But
+# `_classify_codex_drop_reason` scans for stream-error BEFORE the malformed check, so a
+# malformed rc-0 prompt-echo whose echoed issue/comment text happens to contain
+# `Reconnecting... N/M` or `stream disconnected before completion` tokenizes as
+# `stream-error:*`. Because launch rc is still 0, the all-unavailable rc scan left
+# AGENT_EXIT=0 and a single-agent codex fleet routed to `failed-substantive` AGAIN —
+# the exact loop the 5th-round fix was meant to close. The fix: raise the flag for ANY
+# NON-EMPTY codex drop token at launch rc 0 (the classifier only emits a token for a
+# genuine infra drop — config-error / stream-error / malformed-output; a substantive
+# no-verdict drop yields EMPTY). Replicate the wrapper's FIXED routing and assert → 1.
+if [[ -f "$CODEX_LIB" ]]; then
+  (
+    set -uo pipefail
+    source "$CODEX_LIB"
+    # Single-agent codex fleet: malformed prompt-echo (rc 0) whose echoed text ALSO
+    # contains stream-error phrases → classifier returns `stream-error:5/5`, NOT
+    # `malformed-output`. The old exact-match check would miss this.
+    AGENT_NAMES=(codex)
+    AGENT_SESSION_IDS=(sid-cx)
+    AGENT_CODEX_LOGS=("$FIXTURES/codex-review-stdout-prompt-echo-streamtext.txt")
+    declare -A AGENT_LAUNCH_RC=([sid-cx]=0)            # malformed prompt-echo exits rc 0
+    AGENT_VERDICTS=(unavailable)                        # left unresolved → swept to unavailable
+
+    # --- the wrapper's all-unavailable AGENT_EXIT routing, replicated with the FIXED rule ---
+    AGENT_EXIT=0
+    for _i in "${!AGENT_NAMES[@]}"; do
+      _lrc="${AGENT_LAUNCH_RC[${AGENT_SESSION_IDS[$_i]}]:-1}"
+      # genuine CLI crash (rc != 0) → non-substantive
+      if [[ "$_lrc" -ne 0 ]]; then AGENT_EXIT=1; break; fi
+      # INV-73 6th-round: ANY rc-0 codex infra-drop token (malformed-output OR
+      # stream-error:* OR config-error:*) is non-substantive, not just the exact
+      # `malformed-output` string.
+      if [[ "${AGENT_VERDICTS[$_i]}" == "unavailable" && "${AGENT_NAMES[$_i]}" == "codex" ]]; then
+        _tok=$(_classify_codex_drop_reason "${AGENT_CODEX_LOGS[$_i]:-}" "$_lrc")
+        if [[ "$_lrc" == "0" && -n "$_tok" ]]; then AGENT_EXIT=1; break; fi
+      fi
+    done
+    echo "AGENT_EXIT=$AGENT_EXIT token=$(_classify_codex_drop_reason "${AGENT_CODEX_LOGS[0]}" 0)" > "$SCRIPT_DIR/.mar_malexit3.$$"
+  )
+  if [[ -f "$SCRIPT_DIR/.mar_malexit3.$$" ]]; then
+    _line=$(cat "$SCRIPT_DIR/.mar_malexit3.$$"); rm -f "$SCRIPT_DIR/.mar_malexit3.$$"
+    _ae=$(printf '%s\n' "$_line" | sed -E 's/^AGENT_EXIT=([0-9]+).*/\1/')
+    _tok=$(printf '%s\n' "$_line" | sed -E 's/.* token=//')
+    assert_eq "TC-MAR-MALEXIT-03a the overlap capture classifies stream-error (NOT malformed-output) — pins the bug's premise" \
+      "stream-error:5/5" "$_tok"
+    assert_eq "TC-MAR-MALEXIT-03b rc-0 prompt-echo with echoed stream-error text → AGENT_EXIT=1 (non-substantive, not failed-substantive)" \
+      "1" "$_ae"
+  fi
+fi
 
 # ---------------------------------------------------------------------------
 echo ""

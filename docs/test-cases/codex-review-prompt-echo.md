@@ -74,7 +74,9 @@ CI-green, mergeable PR on every round. Distinct from #209 (non-zero/stream),
 | ID | Scenario | Expected |
 |----|----------|----------|
 | TC-MAR-MALEXIT-01 | A single-agent codex fleet, malformed-output (rc 0, unavailable), all-unavailable | `AGENT_EXIT=1` → `failed-non-substantive` (NOT `failed-substantive`) — #252 5th-round finding-1 [P1] |
-| TC-MAR-MALEXIT-02 | Source-of-truth: the wrapper flags `_any_nonsubstantive_drop` on `malformed-output` and raises `AGENT_EXIT` on it | grep pins both wiring points |
+| TC-MAR-MALEXIT-02 | Source-of-truth: the wrapper flags `_any_nonsubstantive_drop` on ANY non-empty rc-0 codex infra token and raises `AGENT_EXIT` on it | grep pins both wiring points (02a flag, 02b exit) |
+| TC-MAR-MALEXIT-03a | A malformed rc-0 prompt-echo whose echoed text contains `Reconnecting... 5/5` classifies `stream-error:5/5` (NOT `malformed-output`) | pins the bug's premise — #254 6th-round [P1] |
+| TC-MAR-MALEXIT-03b | That same rc-0 prompt-echo with echoed stream-error text, all-unavailable | `AGENT_EXIT=1` → `failed-non-substantive` (NOT `failed-substantive`) — the overlap the exact-match check missed |
 
 ## Re-run state machine — `_run_codex_review` (malformed rc-0 retry)
 

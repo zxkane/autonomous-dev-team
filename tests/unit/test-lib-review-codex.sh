@@ -780,9 +780,14 @@ assert_grep "TC-CXRS-WIRE-09 wrapper calls _classify_codex_drop_reason" \
 # TC-CXRS-WIRE-09b — PR #225 review finding: the wrapper passes the agent's launch rc
 # as the 2nd arg to _classify_codex_drop_reason so config-error is gated on rc 2 (a
 # transient rc-1 drop whose capture quotes the clap string is NOT mislabeled). Pin
-# that the call site threads AGENT_LAUNCH_RC into the classifier.
-assert_grep "TC-CXRS-WIRE-09b wrapper passes the launch rc to _classify_codex_drop_reason (rc-2 gate)" \
-  '_classify_codex_drop_reason "\$\{AGENT_CODEX_LOGS\[\$_i\]:-\}" "\$\{AGENT_LAUNCH_RC\[' "$WRAPPER"
+# that the call site threads the launch rc into the classifier. #254 6th-round: the
+# launch rc is now captured into a `_codex_launch_rc` local (read from AGENT_LAUNCH_RC)
+# and BOTH passed to the classifier AND reused to gate the rc-0 non-substantive flag, so
+# pin the assignment AND the threaded call independently.
+assert_grep "TC-CXRS-WIRE-09b1 wrapper captures the launch rc from AGENT_LAUNCH_RC into _codex_launch_rc" \
+  '_codex_launch_rc="\$\{AGENT_LAUNCH_RC\[' "$WRAPPER"
+assert_grep "TC-CXRS-WIRE-09b2 wrapper passes that launch rc to _classify_codex_drop_reason (rc-2 gate)" \
+  '_classify_codex_drop_reason "\$\{AGENT_CODEX_LOGS\[\$_i\]:-\}" "\$_codex_launch_rc"' "$WRAPPER"
 # TC-CXRS-WIRE-10 — #218 finding 2 source-of-truth: the REAL wrapper's stdout
 # fallback gates on a clean (rc 0) codex review exit. The INT-07..09 behavioral
 # tests exercise a COPY of the fallback block; these greps pin the gate in the
