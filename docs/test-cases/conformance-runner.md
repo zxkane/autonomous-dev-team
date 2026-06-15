@@ -50,7 +50,7 @@ E2E artifact / CI job).
 | TC-CONFORMANCE-042 | ≥2 manifests per fan-out CLI (claude, codex, kiro, agy). | fixture count per adapter ≥2 |
 | TC-CONFORMANCE-043 | Deliberately flipping one `expect` field in a temp copy produces a loud, readable FAIL. | FAIL with a one-line axis diff |
 | TC-CONFORMANCE-044 | agy auth-only log (401 / not-logged-in, NO quota marker) classifies `auth/absent/drop/false`, distinct from the quota fixture whose log carries both 429 and 401 yet classifies `quota` (quota precedence). Pins the auth-vs-quota boundary. | `CONFORMANCE agy/review/agy-auth-failed PASS`; auth-only log asserted free of any quota marker |
-| TC-CONFORMANCE-045 | Combined-stream fidelity: a codex stream-error recorded on **stdout** with empty stderr classifies `transient/absent/drop/true` — the runner recovers the provider token off the same combined stdout+stderr view `_smoke_classify` uses, not stderr only. Pins INV-73's "drives TODAY's classifier, not a narrower copy". | `CONFORMANCE codex/review/codex-stream-error-stdout PASS`; fixture asserted to carry the ladder on stdout |
+| TC-CONFORMANCE-045 | Combined-stream fidelity: a codex stream-error recorded on **stdout** with empty stderr classifies `transient/absent/drop/true` — the runner recovers the provider token off the same combined stdout+stderr view `_smoke_classify` uses, not stderr only. Pins INV-74's "drives TODAY's classifier, not a narrower copy". | `CONFORMANCE codex/review/codex-stream-error-stdout PASS`; fixture asserted to carry the ladder on stdout |
 
 ## Wiring / regression
 
@@ -59,4 +59,4 @@ E2E artifact / CI job).
 | TC-CONFORMANCE-050 | `run-conformance.sh` + `lib-conformance.sh` pass `bash -n` and ShellCheck `-S error`. | clean |
 | TC-CONFORMANCE-051 | CI `unit-tests` job invokes `run-conformance.sh` as an always-on step. | grep the workflow for the conformance invocation |
 | TC-CONFORMANCE-052 | The classification path the runner drives is the REAL `_smoke_classify` + per-CLI scrapers (no re-implemented copy). | runner sources `lib-agent-smoke.sh`; asserted by grep |
-| TC-CONFORMANCE-053 | `invariants.md` gains INV-73 in the same PR; `README.md`/adapter-spec cross-link the runner. | grep |
+| TC-CONFORMANCE-053 | `invariants.md` gains INV-74 in the same PR; `README.md`/adapter-spec cross-link the runner. | grep |

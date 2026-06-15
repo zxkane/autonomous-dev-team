@@ -1,6 +1,6 @@
 #!/bin/bash
 # lib-conformance.sh — pure helpers for the standalone conformance runner
-# (issue #230, INV-73). Carries the manifest field extraction, the four-axis
+# (issue #230, INV-74). Carries the manifest field extraction, the four-axis
 # PROJECTION (classifier output → AdapterResult axes), and the axis-diff so the
 # runner (run-conformance.sh) is a thin orchestrator and these decisions are
 # unit-testable in isolation — mirroring the lib-review-*.sh split.

@@ -6,7 +6,7 @@ classification contract — the four-axis `AdapterResult`
 [INV-66](../../docs/pipeline/invariants.md#inv-66-adapter-conformance-is-spec-defined)) —
 with **fixture manifests** replayed against the current classification logic
 using **stub CLIs**. No network, no credentials, no real agent CLIs. Runs on any
-fork's plain GitHub-hosted CI. ([INV-73](../../docs/pipeline/invariants.md#inv-73-adapter-conformance-is-regression-pinned-by-a-hermetic-fixture-manifest-runner).)
+fork's plain GitHub-hosted CI. ([INV-74](../../docs/pipeline/invariants.md#inv-74-adapter-conformance-is-regression-pinned-by-a-hermetic-fixture-manifest-runner).)
 
 ```
 tests/conformance/

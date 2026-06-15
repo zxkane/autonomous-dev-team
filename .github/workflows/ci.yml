@@ -68,7 +68,7 @@ jobs:
       - name: error-envelope E2E (stub gh proxy)
         run: bash tests/e2e/run-error-envelope-e2e.sh
 
-      # Adapter conformance suite (INV-73, #230): replay the promoted fixture
+      # Adapter conformance suite (INV-74, #230): replay the promoted fixture
       # manifests against TODAY's per-CLI classification path using STUB CLIs.
       # This IS the always-on HERMETIC tier (#222's live smoke is the separate
       # self-hosted tier). Fully credential-free — runs on any fork. Non-zero

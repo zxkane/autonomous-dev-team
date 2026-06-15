@@ -2909,15 +2909,16 @@ Sub-rules:
 - [INV-67](#inv-67-a-bare-smoke-timeout-rc-124137-with-no-authconfig-signal-classifies-unavailable-not-fail) — the drop-don't-veto smoke tolerance the `malformed-output` → UNAVAILABLE mapping (sub-rule 6) extends.
 - [`review-agent-flow.md` § codex malformed-output (prompt-echo) drop reason (INV-73)](review-agent-flow.md#codex-malformed-output-prompt-echo-drop-reason-inv-73) — runtime walkthrough.
 
-## INV-73: adapter conformance is regression-pinned by a hermetic fixture-manifest runner
+## INV-74: adapter conformance is regression-pinned by a hermetic fixture-manifest runner
 
-> **Note**: landed as **INV-73**, not INV-68 — several stability-redesign PRs
+> **Note**: landed as **INV-74**, not INV-68 — several stability-redesign PRs
 > merged ahead of this one against the same `main` (INV-67 smoke-timeout #246,
 > INV-68 log-retention #245, INV-69 post-failed #247, INV-70 metrics #228,
-> INV-71 run-event-channel #237, INV-72 operator error-envelope #231/#242). The
-> number was assigned at rebase to avoid a duplicate-heading / broken-anchor
-> collision (the original PR draft authored it as INV-68, then INV-72, before
-> those siblings landed).
+> INV-71 run-event-channel #237, INV-72 operator error-envelope #231/#242,
+> INV-73 codex prompt-echo malformed-output #252/#253). The number was reassigned
+> at rebase to avoid a duplicate-heading / broken-anchor collision (the original
+> PR draft authored it as INV-68, then INV-72, then INV-73, before those siblings
+> landed — #253 took INV-73 first).
 
 **Rule**: the per-CLI classification contract ([INV-66](#inv-66-adapter-conformance-is-spec-defined)'s
 four-axis `AdapterResult`) is **regression-pinned** by a standalone, **hermetic**

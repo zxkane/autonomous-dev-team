@@ -3,7 +3,7 @@
 ```
 status: autonomous-mode design (no interactive gate)
 implements: docs/pipeline/adapter-spec.md §8 (fixture manifest) + INV-66
-adds: INV-73 (conformance suite pins TODAY's per-CLI classification)
+adds: INV-74 (conformance suite pins TODAY's per-CLI classification)
 ```
 
 ## Problem
@@ -120,7 +120,7 @@ false until the operator acts).
 | `tests/conformance/README.md` | How a CLI vendor authors a manifest + runs the suite standalone. |
 | `tests/unit/test-conformance-runner.sh` | Unit tests for the runner/lib (loading, filtering, diff, hermeticity, malformed reject). |
 | `.github/workflows/ci.yml` | New always-on `conformance` step in the existing `unit-tests` job. |
-| `docs/pipeline/invariants.md` | New **INV-73**. |
+| `docs/pipeline/invariants.md` | New **INV-74**. |
 
 ## Promoted fixtures (≥2 per fan-out CLI: claude, codex, kiro, agy)
 

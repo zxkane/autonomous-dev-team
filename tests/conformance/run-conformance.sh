@@ -1,6 +1,6 @@
 #!/bin/bash
 # run-conformance.sh — standalone, HERMETIC conformance runner for the agent-CLI
-# adapter contract (issue #230, INV-73). Replays per-adapter × per-mode fixture
+# adapter contract (issue #230, INV-74). Replays per-adapter × per-mode fixture
 # manifests (docs/pipeline/schemas/fixture-manifest.schema.json, #229) against
 # the CURRENT classification logic using STUB CLIs — no network, no credentials,
 # no real agent CLIs. Runs on any fork's plain GitHub-hosted CI.
@@ -622,7 +622,7 @@ _classify_fixture() {
     # Recover the per-CLI scraper token (the provider-class signal) the EXACT way
     # _smoke_classify did, so the projection names the provider axis off the same
     # input the production classifier saw — no re-implemented or narrower copy
-    # (INV-73: pin TODAY's logic, not an approximation). Two fidelity points the
+    # (INV-74: pin TODAY's logic, not an approximation). Two fidelity points the
     # earlier err-only recovery got wrong:
     #   - kiro/codex scan a COMBINED stdout+stderr view (auth / stream-error text
     #     lands on EITHER stream; lib-agent-smoke.sh:296-310). Scanning err only

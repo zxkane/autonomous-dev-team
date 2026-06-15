@@ -425,7 +425,7 @@ AdapterResult axes (`providerClass`, `verdictState`, `vote`, `retryable`).
 The standalone conformance runner that *replays* these manifests against the
 current classification path is implemented in
 [`tests/conformance/run-conformance.sh`](../../tests/conformance/) (issue #230,
-[INV-73](invariants.md#inv-73-adapter-conformance-is-regression-pinned-by-a-hermetic-fixture-manifest-runner)).
+[INV-74](invariants.md#inv-74-adapter-conformance-is-regression-pinned-by-a-hermetic-fixture-manifest-runner)).
 It is **hermetic** — stub CLIs on an isolated `PATH`, no network, no
 credentials — and drives TODAY's monolithic classifier
 (`lib-agent-smoke.sh::_smoke_classify` + the per-CLI scrapers), so the later

@@ -1,6 +1,6 @@
 #!/bin/bash
 # test-conformance-runner.sh — unit tests for the standalone conformance runner
-# (issue #230, INV-73).
+# (issue #230, INV-74).
 #
 # Covers:
 #   - lib-conformance.sh pure helpers: _conf_field / _conf_expect_field,
@@ -619,7 +619,7 @@ assert_contains "TC-CONFORMANCE-040 codex stream-error fixture passes (transient
 # _smoke_classify uses (lib-agent-smoke.sh:296-310), not stderr only. This fixture
 # carries the codex stream-error ladder on STDOUT with EMPTY stderr; an err-only
 # recovery would yield provider=none/retryable=false and FAIL it, while the
-# production classifier (combined view) yields transient/true. Pins INV-73's
+# production classifier (combined view) yields transient/true. Pins INV-74's
 # "drives TODAY's classifier, not a narrower copy" promise.
 assert_contains "TC-CONFORMANCE-045 codex stream-error-on-stdout passes (combined-stream fidelity)" \
   "CONFORMANCE codex/review/codex-stream-error-stdout PASS" "$full_out"
@@ -666,9 +666,9 @@ assert_grep "TC-CONFORMANCE-052a runner sources lib-agent-smoke.sh" \
 assert_grep "TC-CONFORMANCE-052b runner calls _smoke_classify" \
   '_smoke_classify' "$RUNNER"
 
-# TC-CONFORMANCE-053 — INV-73 exists; adapter-spec cross-links the runner.
-assert_grep "TC-CONFORMANCE-053a INV-73 added to invariants.md" \
-  '^## INV-73' "$INVARIANTS"
+# TC-CONFORMANCE-053 — INV-74 exists; adapter-spec cross-links the runner.
+assert_grep "TC-CONFORMANCE-053a INV-74 added to invariants.md" \
+  '^## INV-74' "$INVARIANTS"
 assert_grep "TC-CONFORMANCE-053b ShellCheck job includes the runner" \
   'run-conformance\.sh' "$CI"
 
