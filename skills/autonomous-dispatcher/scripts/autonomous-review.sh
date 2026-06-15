@@ -2123,6 +2123,12 @@ SESSION_ID="${AGENT_SESSION_IDS[0]}"
 _dropped_agents=""
 _deciding_agents=""
 _timed_out_agents=""
+# INV-73 (#252 5th-round [P1] #1): set true when a dropped agent's reason is an
+# rc-0 NON-substantive infra drop (codex `malformed-output`) that the all-unavailable
+# AGENT_EXIT scan would otherwise miss (it keys on launch rc, and a malformed
+# prompt-echo exits rc 0). Routes the all-unavailable terminal path to
+# `failed-non-substantive` instead of the rc-0 `failed-substantive` legacy branch.
+_any_nonsubstantive_drop=false
 # INV-58 (#205) / INV-59 (#209) / INV-61 (#215): per-dropped-agent reason
 # breadcrumbs (e.g. "agy: quota-exhausted (Antigravity 429: …; resets in
 # 33h48m45s)", "codex: stream-error (upstream 5xx; exhausted 5/5 SSE reconnects,
@@ -2184,10 +2190,32 @@ for _i in "${!AGENT_NAMES[@]}"; do
       # suspenders fallback): an unknown rc reads as a launch failure (non-2 → falls
       # through to stream-error), NOT the classifier's omitted-rc config-error path.
       elif [[ "${AGENT_NAMES[$_i]}" == "codex" ]]; then
-        _codex_reason_token=$(_classify_codex_drop_reason "${AGENT_CODEX_LOGS[$_i]:-}" "${AGENT_LAUNCH_RC[${AGENT_SESSION_IDS[$_i]}]:-1}")
+        _codex_launch_rc="${AGENT_LAUNCH_RC[${AGENT_SESSION_IDS[$_i]}]:-1}"
+        _codex_reason_token=$(_classify_codex_drop_reason "${AGENT_CODEX_LOGS[$_i]:-}" "$_codex_launch_rc")
         if [[ -n "$_codex_reason_token" ]]; then
           _dropped_reasons+="${AGENT_NAMES[$_i]}: $(_codex_drop_reason_phrase "$_codex_reason_token"); "
         fi
+        # INV-73 (#252 5th-round [P1] #1; broadened #254 6th-round [P1]): an rc-0 codex
+        # infra drop (a prompt-echo / startup-trace, no verdict) is NON-substantive, NOT
+        # a code finding. But because it exits rc 0, the all-unavailable terminal path
+        # (which keys `AGENT_EXIT` on launch rc) would route a single-agent-codex fleet
+        # through the rc-0 `failed-substantive` legacy branch — turning the dropped infra
+        # output back into a blocking request-changes FAIL. Flag it here so the
+        # all-unavailable branch routes it `failed-non-substantive` (re-dispatchable), the
+        # same terminal class as a non-zero stream-error drop.
+        #
+        # 6th-round [P1] (#254, session 5732e287): the original check was the EXACT string
+        # `malformed-output`, but `_classify_codex_drop_reason` scans for stream-error
+        # BEFORE the malformed check, so a malformed rc-0 prompt-echo whose echoed
+        # issue/comment text contains `Reconnecting... N/M` / `stream disconnected`
+        # tokenizes `stream-error:*` and the exact-match check MISSED it → re-routed to
+        # `failed-substantive` again. The fix keys on ANY non-empty token at launch rc 0:
+        # the classifier emits a token ONLY for a genuine codex infra drop (config-error /
+        # stream-error / malformed-output); a substantive "ran clean but no verdict" drop
+        # yields an EMPTY token, so a non-empty token at rc 0 is unambiguously a
+        # non-substantive infra drop. (A non-zero launch rc is already handled by the rc
+        # scan in the all-unavailable branch, so this only needs to cover rc 0.)
+        [[ "$_codex_launch_rc" == "0" && -n "$_codex_reason_token" ]] && _any_nonsubstantive_drop=true
       # INV-61 (#215): kiro-shaped drop reason. A kiro member whose stored
       # OAuth/login token expired tries to open a browser for device-flow re-auth
       # — impossible in the headless SSM-spawned shell — and exits at launch with
@@ -2326,6 +2354,19 @@ case "$AGGREGATE" in
         break
       fi
     done
+    # INV-73 (#252 5th-round [P1] #1; broadened #254 6th-round [P1]): an rc-0 codex
+    # infra drop (a prompt-echo / startup-trace, not a code finding) is NON-substantive
+    # but exits rc 0, so the rc scan above leaves AGENT_EXIT=0 → the rc-0
+    # `failed-substantive` legacy branch would turn the dropped infra output back into a
+    # blocking request-changes FAIL (the exact loop the single-agent codex fleet hit).
+    # Raise AGENT_EXIT=1 so it routes `failed-non-substantive` (re-dispatchable) — the
+    # same terminal class as a non-zero stream-error drop. `_any_nonsubstantive_drop`
+    # was set in the drop-classification loop above when a dropped codex agent had ANY
+    # non-empty infra-drop reason token at launch rc 0 (malformed-output OR a
+    # stream-error:* the classifier matched first from echoed text — the classifier
+    # only emits a token for a genuine infra drop; a substantive no-verdict drop is
+    # EMPTY). A non-zero-rc drop is already caught by the rc scan just above.
+    [[ "$_any_nonsubstantive_drop" == true ]] && AGENT_EXIT=1
     log "All ${#REVIEW_AGENTS_LIST[@]} review agent(s) unavailable — falling back to single-agent FAIL path (AGENT_EXIT=${AGENT_EXIT})."
     # INV-58 (#205): surface any agy quota/auth drop reason even on the
     # all-unavailable path, so a single-agy fleet that hit the quota wall is

@@ -277,19 +277,31 @@ _codex_review_stdout_is_malformed() {
     return 0
   fi
   # Signal 3: a large capture at/near the wrapper's char cap with NO recognizable
-  # verdict / conclusion structure — a dump cut mid-text with nothing that looks
-  # like a review's conclusion. (45000 is below _codex_review_compose_body's 50000
-  # cap; a genuine review this long would still carry a Summary/Findings/verdict.)
+  # verdict / conclusion structure AND no genuine finding structure — a dump cut
+  # mid-text with nothing that looks like a review's conclusion OR a finding.
+  # (45000 is below _codex_review_compose_body's 50000 cap; a genuine review this
+  # long would carry a Summary/Findings/verdict heading OR at least one real finding.)
   # The size floor guards ONLY this signal: signals 1+2 are unambiguous structural
   # artifacts at any size, but "no verdict structure" is only suspicious in a LARGE
   # dump — a short, plausibly-complete review with no `Summary:` heading is NOT
   # malformed (a review need not carry one). So a tiny capture skips signal 3 and
   # returns NOT malformed (the fail-safe direction — never drop a real verdict).
+  #
+  # 5th-round review finding [P1] #2 (#252, session 5e569783): keying signal 3 on
+  # the verdict-HEADING keywords ALONE marked a genuine LONG review carrying
+  # numbered/bold `[P1]` findings (but none of those exact headings) as malformed —
+  # dropping a real blocking review before the `[P1]` scan. So signal 3 ALSO requires
+  # the ABSENCE of a genuine FINDING BOUNDARY (a real `[P1]`/numbered/bullet/JSON
+  # finding — the same boundary set signals 1b/2 use): a long capture WITH finding
+  # structure is a real review, not a truncated dump, so it is NOT malformed (it then
+  # falls through to the `[P1]` scan and FAILs / PASSes correctly).
   local nchars
   nchars=$(wc -c < "$f" 2>/dev/null | tr -d ' ') || nchars=0
   [[ "$nchars" =~ ^[0-9]+$ ]] || nchars=0
   if [[ "$nchars" -ge 45000 ]] \
-     && ! grep -qiE 'Review PASSED|Review findings:|^Summary:|^Findings|no blocking' "$f" 2>/dev/null; then
+     && ! grep -qiE 'Review PASSED|Review findings:|^Summary:|^Findings|no blocking' "$f" 2>/dev/null \
+     && ! grep -qE '^[[:space:]]*([0-9]+[.)][[:space:]]*)?([-*>][[:space:]]*)*(\*\*[[:space:]]*)?\[P[123]\]' "$f" 2>/dev/null \
+     && ! grep -qE '"(severity|priority)"[[:space:]]*:|["'"'"'[:space:]]P[123]["'"'"']' "$f" 2>/dev/null; then
     return 0
   fi
   return 1

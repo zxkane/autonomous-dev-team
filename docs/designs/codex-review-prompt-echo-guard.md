@@ -78,7 +78,10 @@ Returns rc 0 iff the capture is prompt-echo / startup-trace, NOT a real review. 
   mangles the `\[`/`\]` backslashes.
 - **Truncated-no-verdict signal.** The capture is at/near the wrapper's char cap AND contains no recognizable
   verdict structure (no `Review PASSED` / `Review findings:` / a `Summary:` / `Findings` heading the gate
-  rules ask for) — i.e. it was cut mid-dump with nothing that looks like a conclusion.
+  rules ask for) **AND no genuine finding boundary** (a real `[P1]`/numbered/bullet/JSON finding) — i.e. it
+  was cut mid-dump with neither a conclusion nor a finding. The finding-boundary exemption is the **#252
+  5th-round finding-2 [P1]** fix: a genuine LONG review carrying numbered/bold `[P1]` findings but none of
+  those exact headings is a real review (it falls through to the `[P1]` scan and FAILs), not a truncated dump.
 
 Fail-safe: empty / missing / unreadable / short capture → NOT malformed (rc 1), so a normal review is never
 mis-flagged. rc 0/1 only; never aborts under `set -euo pipefail`. The signal helpers are individually
@@ -132,6 +135,32 @@ disconnect is a different cause). `_codex_drop_reason_phrase` renders it as
 Observability only — a `malformed-output` codex stays a dropped `unavailable`, NEVER a deciding FAIL (exactly
 the INV-40 "absent ⇒ not a deciding vote" semantics the issue calls for). `_classify_noverdict_agent` /
 `_aggregate_review_verdicts` untouched.
+
+### 5. The all-unavailable terminal path routes a `malformed-output` drop NON-substantive (#252 5th-round [P1] #1)
+
+A malformed prompt-echo exits **rc 0**. The terminal all-unavailable branch keys `AGENT_EXIT` on launch rc
+(rc 0 → `failed-substantive`, rc ≠ 0 → `failed-non-substantive`). So in a single-agent codex fleet, a
+malformed codex left unresolved at rc 0 would route through the rc-0 `failed-substantive` branch — turning
+the no-vote infra drop back into a blocking request-changes FAIL (the exact non-self-terminating loop a
+single-agent-codex repo hit). Fix: the drop-classification loop sets `_any_nonsubstantive_drop=true` when a
+dropped codex agent has ANY non-empty infra-drop reason token at launch **rc 0**, and the all-unavailable
+branch raises `AGENT_EXIT=1` on that flag → `failed-non-substantive` (re-dispatchable), the same terminal
+class as a non-zero `stream-error` drop. The CLI-crash variants of `stream-error`/`config-error`/`auth-failed`/
+`quota-exhausted` already exit non-zero (the rc scan routes them non-substantive); only the rc-0 infra-drop
+case needed the explicit flag.
+
+**Broadened (#254 6th-round review finding [P1], session 5732e287).** The flag originally keyed on the EXACT
+token string `malformed-output`. But `_classify_codex_drop_reason` scans for **stream-error before** the
+malformed check, so a malformed rc-0 prompt-echo whose echoed issue/comment text contains `Reconnecting... N/M`
+or `stream disconnected before completion` is tokenized `stream-error:*` — and the exact-match check MISSED it,
+so `_any_nonsubstantive_drop` stayed `false` and a single-agent codex fleet routed to `failed-substantive`
+again (the same loop the 5th-round fix was meant to close). The fix keys on **any non-empty token at launch
+rc 0** (`_codex_launch_rc == "0" && -n "$_codex_reason_token"`): the classifier emits a token ONLY for a
+genuine codex infra drop (`config-error` / `stream-error` / `malformed-output`), and a substantive "ran clean
+but no verdict" drop yields an EMPTY token, so a non-empty token at rc 0 is unambiguously non-substantive
+regardless of which infra bucket the classifier matched first. (Reordering the classifier to check malformed
+BEFORE stream-error was rejected: it would mislabel a genuine non-zero-rc stream-error that also looks
+malformed, losing the more-specific `stream-error:N/M` observability the operator needs.)
 
 ## Decision Gate ordering rationale
 

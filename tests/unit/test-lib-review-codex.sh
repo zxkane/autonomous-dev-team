@@ -780,9 +780,14 @@ assert_grep "TC-CXRS-WIRE-09 wrapper calls _classify_codex_drop_reason" \
 # TC-CXRS-WIRE-09b — PR #225 review finding: the wrapper passes the agent's launch rc
 # as the 2nd arg to _classify_codex_drop_reason so config-error is gated on rc 2 (a
 # transient rc-1 drop whose capture quotes the clap string is NOT mislabeled). Pin
-# that the call site threads AGENT_LAUNCH_RC into the classifier.
-assert_grep "TC-CXRS-WIRE-09b wrapper passes the launch rc to _classify_codex_drop_reason (rc-2 gate)" \
-  '_classify_codex_drop_reason "\$\{AGENT_CODEX_LOGS\[\$_i\]:-\}" "\$\{AGENT_LAUNCH_RC\[' "$WRAPPER"
+# that the call site threads the launch rc into the classifier. #254 6th-round: the
+# launch rc is now captured into a `_codex_launch_rc` local (read from AGENT_LAUNCH_RC)
+# and BOTH passed to the classifier AND reused to gate the rc-0 non-substantive flag, so
+# pin the assignment AND the threaded call independently.
+assert_grep "TC-CXRS-WIRE-09b1 wrapper captures the launch rc from AGENT_LAUNCH_RC into _codex_launch_rc" \
+  '_codex_launch_rc="\$\{AGENT_LAUNCH_RC\[' "$WRAPPER"
+assert_grep "TC-CXRS-WIRE-09b2 wrapper passes that launch rc to _classify_codex_drop_reason (rc-2 gate)" \
+  '_classify_codex_drop_reason "\$\{AGENT_CODEX_LOGS\[\$_i\]:-\}" "\$_codex_launch_rc"' "$WRAPPER"
 # TC-CXRS-WIRE-10 — #218 finding 2 source-of-truth: the REAL wrapper's stdout
 # fallback gates on a clean (rc 0) codex review exit. The INT-07..09 behavioral
 # tests exercise a COPY of the fallback block; these greps pin the gate in the
@@ -1567,6 +1572,29 @@ printf '%s\n' \
   '## Step 0.5: Requirement Drift Detection — MANDATORY PRE-REVIEW' > "$MF"
 _codex_review_stdout_is_malformed "$MF"; assert_eq "TC-CXRS-MAL-DET-25 direct [P1] finding line still bounds the region → NOT malformed (rc 1)" 1 "$?"
 
+# --- 5th review-round finding [P1] #2 (#252, session 5e569783): the TRUNCATED-NO-VERDICT
+#     signal (signal 3) marked ANY ≥45000-char capture WITHOUT `Review PASSED`/`Review
+#     findings:`/`Summary:`/`Findings`/`no blocking` as malformed — BEFORE the [P1] scan.
+#     A genuine LONG codex review with numbered/bold `[P1]` findings but none of those
+#     exact headings was dropped as malformed and never FAILed. The fix: signal 3 also
+#     requires the ABSENCE of a genuine finding boundary (a real `[P1]`/numbered/JSON
+#     finding) — a long capture WITH finding structure is a real review, not a dump. ---
+
+# TC-CXRS-MAL-DET-26 — a LONG (≥45000-char) genuine review with numbered+bold `[P1]`
+# findings but NO `Summary:`/`Review findings:` heading → NOT malformed (rc 1). THE
+# 5th-round finding-2 regression: signal 3 must exempt captures with real finding structure.
+{ printf '%s\n' '1. **[P1] The handler swallows the error** — propagate it.'; head -c 60000 /dev/zero | tr '\0' 'x'; } > "$MF"
+_codex_review_stdout_is_malformed "$MF"; assert_eq "TC-CXRS-MAL-DET-26 long review (≥45000) with a numbered [P1] finding, no heading → NOT malformed (rc 1) [5th-round finding-2]" 1 "$?"
+
+# TC-CXRS-MAL-DET-27 — a LONG review whose finding uses a bare `[P1]` line, no heading → NOT malformed.
+{ printf '%s\n' '[P1] silent failure on the error path.'; head -c 60000 /dev/zero | tr '\0' 'y'; } > "$MF"
+_codex_review_stdout_is_malformed "$MF"; assert_eq "TC-CXRS-MAL-DET-27 long review with a bare [P1] finding, no heading → NOT malformed (rc 1)" 1 "$?"
+
+# TC-CXRS-MAL-DET-28 — REGRESSION GUARD: a LONG truncated dump with NO finding structure
+# AND no verdict heading is STILL malformed (signal 3 still fires on a genuine dump).
+{ printf '%s\n' 'You are reviewing PR #999.'; head -c 60000 /dev/zero | tr '\0' 'z'; } > "$MF"
+_codex_review_stdout_is_malformed "$MF"; assert_eq "TC-CXRS-MAL-DET-28 long dump, NO finding structure, no heading → STILL malformed (rc 0)" 0 "$?"
+
 # --- _codex_review_classify_stdout gains the `malformed` token (checked FIRST) ---
 # TC-CXRS-MAL-CLS-01 — prompt-echo capture ([P1] present ONLY as quoted instruction
 # text) → `malformed`, NOT `fail`. THE #252 REGRESSION.
@@ -1639,6 +1667,13 @@ printf '%s\n' \
   '## Step 0: Merge Conflict Resolution — MANDATORY PRE-REVIEW' \
   '## Step 0.5: Requirement Drift Detection — MANDATORY PRE-REVIEW' > "$MF"
 assert_eq "TC-CXRS-MAL-CLS-02e genuine [P1] review in numbered+bold format quoting 2 column-0 markers → fail (NOT malformed) [4th-round [P1]]" \
+  "fail" "$(_codex_review_classify_stdout "$MF")"
+# TC-CXRS-MAL-CLS-02f — 5th-round finding-2 (#252, session 5e569783): a LONG (≥45000)
+# genuine review with a numbered+bold `[P1]` finding but NO `Summary:`/`Review findings:`
+# heading → `fail`, NOT `malformed`. Pre-fix: signal 3 marked it malformed before the
+# [P1] scan → the wrapper dropped a real blocking review instead of FAILing.
+{ printf '%s\n' '1. **[P1] The handler swallows the error** — propagate it.'; head -c 60000 /dev/zero | tr '\0' 'x'; } > "$MF"
+assert_eq "TC-CXRS-MAL-CLS-02f long genuine [P1] review (no heading) → fail (NOT malformed) [5th-round finding-2]" \
   "fail" "$(_codex_review_classify_stdout "$MF")"
 # TC-CXRS-MAL-CLS-03 — a genuine clean review still PASSes
 assert_eq "TC-CXRS-MAL-CLS-03 genuine clean review → still pass" \
