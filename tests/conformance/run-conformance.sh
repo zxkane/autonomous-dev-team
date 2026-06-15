@@ -465,6 +465,22 @@ _classify_fixture() {
     export AGENT_TIMEOUT="4h"
     export AGENT_PERMISSION_MODE="auto"
 
+    # The codex review lane (`_run_codex_review`, INV-62) has its OWN runtime
+    # controls, read at call time — NOT at lib source time — so they live outside
+    # the lib-agent surface above but still change a codex fixture's behavior when
+    # inherited (PR #244 [P1], codex review 1c29ba19):
+    #   • CODEX_REVIEW_MAX_RERUNS — the bounded re-run count on a non-zero codex
+    #     exit (default 3). An inherited `CODEX_REVIEW_MAX_RERUNS=100000` makes a
+    #     transient (rc≠0) fixture re-run 100000× → the run hangs / times out,
+    #     despite the value being absent from input.env.
+    #   • AGENT_REVIEW_TIMEOUT — the review wall-clock cap (default 1h) that bounds
+    #     the re-run loop. An inherited value changes how long the lane runs.
+    # Reset both to the lib defaults so a codex fixture's runtime depends ONLY on
+    # the manifest. input.env is still applied AFTER (a fixture that genuinely
+    # wants a non-default re-enables it).
+    export CODEX_REVIEW_MAX_RERUNS="3"
+    export AGENT_REVIEW_TIMEOUT="1h"
+
     # shellcheck source=../../skills/autonomous-dispatcher/scripts/lib-agent-smoke.sh
     source "$LIB_SMOKE" 2>/dev/null || { printf '__ERR__:lib-source-failed\n'; exit 0; }
 
@@ -536,7 +552,15 @@ _classify_fixture() {
       # shellcheck source=../../skills/autonomous-dispatcher/scripts/lib-review-codex.sh
       source "$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-review-codex.sh" 2>/dev/null \
         || { printf '__ERR__:lib-review-codex-source-failed\n'; exit 0; }
-      _run_codex_review "$prompt" "$model" "$out_file" "$PWD" >/dev/null 2>&1 || true
+      # Feed /dev/null on stdin (PR #244 [P1], codex review 1c29ba19): the codex
+      # review path carries the prompt as an argv positional and does NOT pipe a
+      # prompt, but the hermetic stub unconditionally runs `cat > .stdin` to record
+      # the [INV-34] channel. On a CI runner stdin is already EOF so `cat` returns
+      # instantly; on a LOCAL standalone run from a terminal the stub would block
+      # on the TTY forever (rc 124). Redirect /dev/null so the stub reads immediate
+      # EOF on every host — recording empty stdin, which matches the codex fixtures'
+      # empty-string `command.stdinSha256` (the argv-positional prompt).
+      _run_codex_review "$prompt" "$model" "$out_file" "$PWD" </dev/null >/dev/null 2>&1 || true
       cp "$canned_err" "$err_file" 2>/dev/null || true
     else
       # dev-new / review (non-codex) / e2e-browser all launch via run_agent.

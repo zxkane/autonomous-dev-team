@@ -132,7 +132,12 @@ It records one `adapter × mode` behavior:
    does not require the caller to pre-scrub the environment. For a codex review
    fixture the runner also threads the fixture's launch rc into the drop-reason
    classifier, so a transient (rc≠2) capture that merely quotes a clap usage line
-   is not mislabeled `config` — faithfully replaying the production review wrapper.
+   is not mislabeled `config` — faithfully replaying the production review wrapper;
+   it feeds the codex dispatch `</dev/null` (the codex review path carries the
+   prompt as an argv positional, so the stub must not block on stdin — a local TTY
+   run would otherwise hang); and it resets the codex review controls
+   (`CODEX_REVIEW_MAX_RERUNS`, `AGENT_REVIEW_TIMEOUT`) to defaults, so an inherited
+   value can't change a codex fixture's runtime.
 4. **Asserts the manifest's `command.argv` and `command.stdinSha256` are
    correct** — the stub-recorded argv MUST match `command.argv` (placeholder-aware)
    and `sha256(stdin)` MUST match `command.stdinSha256`. A regression in how the

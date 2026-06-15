@@ -505,6 +505,50 @@ assert_contains "TC-CONFORMANCE-036d classifier WITH rc 1 falls through to strea
   "stream-error" "$(_classify_codex_drop_reason "$qclap_scan" 1)"
 rm -f "$qclap_scan"
 
+# TC-CONFORMANCE-037 — CODEX STUB DOES NOT HANG ON A NON-EOF STDIN (PR #244 [P1],
+# codex review 1c29ba19): the hermetic stub unconditionally `cat > .stdin` to
+# record the [INV-34] channel, but the codex review path carries the prompt as an
+# argv positional and pipes no stdin. On a CI runner stdin is already EOF so `cat`
+# returns instantly; from a local TTY the codex stub would block forever (rc 124).
+# The runner now feeds the codex dispatch `</dev/null`. Drive the REAL codex run
+# with a NON-EOF stdin (a fifo with an open writer feeding no data — a TTY proxy):
+# pre-fix this hangs to the `timeout`; post-fix it returns rc 0 because the codex
+# dispatch's own `</dev/null` shields the stub regardless of the runner's stdin.
+# Scope to a SINGLE transient codex fixture (rc 1 → exercises the re-run loop, the
+# exact path where the stub-stdin block manifests) so the test is fast + has a wide
+# timeout margin — running the full --adapter codex set (5 fixtures, 3 with re-run
+# loops) risked a flaky 124 under CI load (reviewer note).
+CDX1=$(mktemp -d)
+cp "$FIXTURES/codex-stream-error.json" "$CDX1/codex-stream-error.json"
+hang_fifo="$(mktemp -u)"; mkfifo "$hang_fifo"
+sleep 60 > "$hang_fifo" &  # open writer, no data → readers block (TTY proxy)
+hang_writer=$!
+hang_rc=0
+timeout 60s env -u PROJECT_DIR CONFORMANCE_FIXTURE_DIR="$CDX1" bash "$RUNNER" --adapter codex < "$hang_fifo" >/dev/null 2>&1 || hang_rc=$?
+kill "$hang_writer" 2>/dev/null || true
+rm -f "$hang_fifo"
+assert_eq "TC-CONFORMANCE-037a codex stub does NOT hang on a non-EOF (TTY-proxy) stdin (exit 0, not 124)" "0" "$hang_rc"
+# Source-of-truth: the codex review dispatch redirects /dev/null on stdin.
+assert_grep "TC-CONFORMANCE-037b runner feeds /dev/null to the codex review dispatch" \
+  '_run_codex_review .* </dev/null' "$RUNNER"
+
+# TC-CONFORMANCE-038 — CODEX REVIEW CONTROL ENV IS RESET (PR #244 [P1], codex
+# review 1c29ba19): `_run_codex_review` reads CODEX_REVIEW_MAX_RERUNS (default 3)
+# and AGENT_REVIEW_TIMEOUT (default 1h) at CALL time, so an inherited value
+# changes a codex fixture's runtime despite being absent from input.env. An
+# inherited `CODEX_REVIEW_MAX_RERUNS=100000` makes a transient (rc≠0) fixture
+# re-run 100000× → hang. The runner resets both to lib defaults before input.env.
+# Supply the poisoned value WITHOUT putting it in any fixture → the run must stay
+# deterministic (exit 0), not blow the timeout. Proven to time out (124) pre-fix.
+# Same single-fixture scoping as 037 for a wide timeout margin under CI load.
+maxreruns_rc=0
+timeout 60s env -u PROJECT_DIR CONFORMANCE_FIXTURE_DIR="$CDX1" CODEX_REVIEW_MAX_RERUNS=100000 bash "$RUNNER" --adapter codex </dev/null >/dev/null 2>&1 || maxreruns_rc=$?
+rm -rf "$CDX1"
+assert_eq "TC-CONFORMANCE-038a inherited CODEX_REVIEW_MAX_RERUNS does NOT leak into the codex run (exit 0, not 124)" "0" "$maxreruns_rc"
+# Source-of-truth: the runner resets the codex review controls.
+assert_grep "TC-CONFORMANCE-038b runner resets CODEX_REVIEW_MAX_RERUNS + AGENT_REVIEW_TIMEOUT to defaults" \
+  'export CODEX_REVIEW_MAX_RERUNS="3"' "$RUNNER"
+
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== TC-CONFORMANCE-04x: promoted-fixture coverage (the E2E tier) ==="

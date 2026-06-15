@@ -2975,7 +2975,19 @@ per-adapter × per-mode fixture manifests
    `_classify_codex_drop_reason`, which gates the `config-error` bucket on rc == 2
    (clap's parse-error exit). The runner now threads `$rc` too, so a transient
    codex fixture (rc 1) whose capture merely QUOTES a clap usage line classifies
-   `stream-error`/transient (not `config`), faithfully replaying production. This is the
+   `stream-error`/transient (not `config`), faithfully replaying production. **The
+   codex review lane is stdin- and control-env-hermetic too** (PR #244 [P1], codex
+   review `1c29ba19`): (a) the stub unconditionally `cat > .stdin` to record the
+   [INV-34] channel, but the codex review path carries the prompt as an argv
+   positional and pipes no stdin — on a CI runner stdin is already EOF, but a local
+   standalone run from a TTY would block the codex stub forever (rc 124), so the
+   runner feeds the codex dispatch `</dev/null` (the stub reads immediate EOF on
+   every host, recording empty stdin — matching the codex fixtures' empty-string
+   `command.stdinSha256`); (b) `_run_codex_review` reads `CODEX_REVIEW_MAX_RERUNS`
+   (default 3) and `AGENT_REVIEW_TIMEOUT` (default 1h) at CALL time (not lib-source
+   time), so an inherited `CODEX_REVIEW_MAX_RERUNS=100000` would make a transient
+   fixture re-run 100000× → hang; both are reset to the lib defaults before
+   `input.env`, so a codex fixture's runtime depends ONLY on the manifest. This is the
    always-on tier; the live-CLI smoke
    ([INV-63](#inv-63-agent-smoke-is-a-three-state-probe-pass--unavailable--fail-run-through-the-production-run_agent-never-a-parallel-invocation-path) / `tests/e2e/run-agent-smoke.sh`) is the separate self-hosted tier.
 2. **Drives TODAY's monolithic classifier via the REAL dispatch path** — it
@@ -3096,7 +3108,12 @@ green-before-and-after gate protects.
   /transient — NOT `config` — matching production; the promoted
   `codex-quoted-clap-nonconfig` fixture + the WITHOUT-rc→`config-error` /
   WITH-rc-1→`stream-error` gate proof pin it — PR #244 [P1], codex review
-  `fff5f671`)**, hermeticity (PATH isolation,
+  `fff5f671`)**, **codex stdin + control-env hermeticity (TC-CONFORMANCE-037a/b:
+  the codex stub does NOT hang on a non-EOF (TTY-proxy) stdin — proven via a fifo
+  with an open writer — because the dispatch feeds `</dev/null`; 038a/b: an
+  inherited `CODEX_REVIEW_MAX_RERUNS=100000` does NOT leak into the codex run (stays
+  exit 0, proven to time out 124 pre-fix) because the runner resets the codex
+  review controls — PR #244 [P1], codex review `1c29ba19`)**, hermeticity (PATH isolation,
   stdin-fed contract, stub-missing/breach guards), **the load-bearing
   `command.argv` / `command.stdinSha256` assertions (TC-CONFORMANCE-030..034:
   garbage argv and all-zero hash must FAIL, not silently PASS — PR #244 [P1])**,
