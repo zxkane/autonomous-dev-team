@@ -390,7 +390,7 @@ assert_contains "TC-CONFORMANCE-035a inherited AGENT_DEV_EXTRA_ARGS does NOT lea
 launcher_leak_out="$(AGENT_LAUNCHER='cc' env -u PROJECT_DIR bash "$RUNNER" --adapter kiro 2>/dev/null)"
 assert_contains "TC-CONFORMANCE-035b inherited AGENT_LAUNCHER does NOT route off the stub PATH (kiro still PASS)" \
   "CONFORMANCE kiro/review/kiro-happy-path PASS" "$launcher_leak_out"
-# The heaviest case: ALL operator vars set at once → the full 14-fixture run must
+# The heaviest case: ALL operator vars set at once → the full promoted run must
 # stay all-PASS (exit 0), identical to a clean environment.
 heavy_leak_rc=0
 AGENT_DEV_EXTRA_ARGS='--x' AGENT_REVIEW_EXTRA_ARGS='--y' AGENT_LAUNCHER='cc' \
@@ -440,7 +440,7 @@ projdir_leak_out="$(PROJECT_DIR="$POISON_PROJECT_DIR" bash "$RUNNER" --adapter c
 assert_contains "TC-CONFORMANCE-035g inherited PROJECT_DIR conf does NOT leak (claude dev-new still PASS)" \
   "CONFORMANCE claude/dev-new/claude-dev-new PASS" "$projdir_leak_out"
 # 035h — the heaviest conf-discovery leak: BOTH conf-discovery vars poisoned, no
-# `env -u PROJECT_DIR` → the full 14-fixture run must stay all-PASS (exit 0).
+# `env -u PROJECT_DIR` → the full promoted run must stay all-PASS (exit 0).
 confdisc_heavy_rc=0
 AUTONOMOUS_CONF_DIR="$POISON_CONF_DIR" PROJECT_DIR="$POISON_PROJECT_DIR" \
   bash "$RUNNER" >/dev/null 2>&1 || confdisc_heavy_rc=$?
@@ -456,6 +456,54 @@ assert_grep "TC-CONFORMANCE-035j runner points AUTONOMOUS_CONF_DIR at the conf-f
   'export AUTONOMOUS_CONF_DIR="\$no_conf_dir"' "$RUNNER"
 assert_grep "TC-CONFORMANCE-035k runner points PROJECT_DIR at the conf-free dir" \
   'export PROJECT_DIR="\$no_conf_dir"' "$RUNNER"
+
+# TC-CONFORMANCE-035l..o — REMAINING argv/LAUNCH KNOBS (PR #244 [P1], codex review
+# fff5f671): lib-agent.sh reads more operator knobs at source time than the
+# EXTRA_ARGS / launcher / conf surface. Two reach argv/launch and break an
+# empty-env fixture when inherited: KIRO_AGENT_NAME (spliced into kiro argv as
+# `--agent <name>` → argv-mismatch) and AGENT_TIMEOUT (the `timeout(1)` duration;
+# a bogus value makes the launch never run → stdin-not-fed). The runner now resets
+# both (+ AGENT_PERMISSION_MODE, defense-in-depth) to the lib defaults BEFORE
+# sourcing. These supply a poisoned value WITHOUT `env -u`-ing it, so they exercise
+# the in-runner reset end-to-end (035l/m proven to FAIL pre-fix).
+kironame_leak_out="$(KIRO_AGENT_NAME='other' env -u PROJECT_DIR bash "$RUNNER" --adapter kiro 2>/dev/null)"
+assert_contains "TC-CONFORMANCE-035l inherited KIRO_AGENT_NAME does NOT leak into kiro argv (still PASS)" \
+  "CONFORMANCE kiro/review/kiro-happy-path PASS" "$kironame_leak_out"
+timeout_leak_rc=0
+AGENT_TIMEOUT='bogus' env -u PROJECT_DIR bash "$RUNNER" --adapter agy >/dev/null 2>&1 || timeout_leak_rc=$?
+assert_eq "TC-CONFORMANCE-035m inherited AGENT_TIMEOUT=bogus does NOT break the launch (agy still exit 0)" "0" "$timeout_leak_rc"
+# Heaviest: all the newly-reset knobs poisoned at once → full run stays all-PASS.
+knob_heavy_rc=0
+KIRO_AGENT_NAME='other' AGENT_TIMEOUT='bogus' AGENT_PERMISSION_MODE='plan' \
+  env -u PROJECT_DIR bash "$RUNNER" >/dev/null 2>&1 || knob_heavy_rc=$?
+assert_eq "TC-CONFORMANCE-035n full run is hermetic under a heavy argv/launch-knob leak (exit 0)" "0" "$knob_heavy_rc"
+# Source-of-truth: the runner resets the knobs to the lib defaults.
+assert_grep "TC-CONFORMANCE-035o runner resets KIRO_AGENT_NAME + AGENT_TIMEOUT to lib defaults" \
+  'export KIRO_AGENT_NAME="autonomous-dev"' "$RUNNER"
+
+# TC-CONFORMANCE-036 — CODEX DROP-REASON IS rc-GATED (PR #244 [P1], codex review
+# fff5f671): the runner must pass the fixture's launch rc into
+# _classify_codex_drop_reason, which gates the config-error bucket on rc == 2
+# (clap's parse-error exit). A transient codex fixture (rc 1) whose capture merely
+# QUOTES a clap line must fall through to stream-error (transient), NOT be
+# mislabeled config — matching production (autonomous-review.sh passes the rc).
+assert_grep "TC-CONFORMANCE-036a runner passes \$rc into _classify_codex_drop_reason" \
+  '_classify_codex_drop_reason "\$scan_file" "\$rc"' "$RUNNER"
+# The promoted regression fixture: rc 1 + quoted clap line ⇒ transient (NOT config).
+qclap_out="$(env -u PROJECT_DIR bash "$RUNNER" --adapter codex 2>/dev/null)"
+assert_contains "TC-CONFORMANCE-036b codex rc1 quoted-clap fixture classifies transient (PASS, not config)" \
+  "CONFORMANCE codex/review/codex-quoted-clap-nonconfig PASS" "$qclap_out"
+# Load-bearing proof: WITHOUT the rc the classifier returns config-error; WITH rc 1
+# it returns stream-error. Source the classifier and assert the gate directly.
+qclap_scan="$(mktemp)"
+jq -r '.command.stderr' "$FIXTURES/codex-quoted-clap-nonconfig.json" > "$qclap_scan"
+# shellcheck source=../../skills/autonomous-dispatcher/scripts/lib-review-codex.sh
+source "$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-review-codex.sh" 2>/dev/null
+assert_eq "TC-CONFORMANCE-036c classifier WITHOUT rc mislabels config (pre-fix behavior)" \
+  "config-error:-s" "$(_classify_codex_drop_reason "$qclap_scan")"
+assert_contains "TC-CONFORMANCE-036d classifier WITH rc 1 falls through to stream-error (the fix)" \
+  "stream-error" "$(_classify_codex_drop_reason "$qclap_scan" 1)"
+rm -f "$qclap_scan"
 
 # ---------------------------------------------------------------------------
 echo ""

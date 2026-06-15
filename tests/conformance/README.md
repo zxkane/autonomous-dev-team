@@ -118,14 +118,21 @@ It records one `adapter × mode` behavior:
    stdin channel. The classification is **env-hermetic**: the operator-facing
    surface lib-agent.sh reads (`AGENT_DEV_EXTRA_ARGS` / `AGENT_REVIEW_EXTRA_ARGS`,
    `AGENT_LAUNCHER` / `AGENT_*_LAUNCHER`, `AGENT_*_CMD`) is reset to an empty
-   baseline before the lib is sourced, and the conf-discovery surface
+   baseline before the lib is sourced; the conf-discovery surface
    (`AUTONOMOUS_CONF`, `AUTONOMOUS_CONF_DIR`, `PROJECT_DIR`) is pointed at
    conf-free paths so `load_autonomous_conf` finds no operator conf on any of its
-   three branches. An inherited operator env — including a project's real
-   `autonomous.conf` reachable via `AUTONOMOUS_CONF_DIR` or `PROJECT_DIR` — can't
-   leak extra argv or route through a launcher; only the fixture's `input.env`
+   three branches; and the remaining argv/launch knobs (`KIRO_AGENT_NAME`,
+   `AGENT_TIMEOUT`, `AGENT_PERMISSION_MODE`) are reset to the lib's documented
+   defaults (so an inherited `KIRO_AGENT_NAME` can't reshape the kiro `--agent`
+   argv and an inherited `AGENT_TIMEOUT=bogus` can't break the launch). An
+   inherited operator env — including a project's real `autonomous.conf` reachable
+   via `AUTONOMOUS_CONF_DIR` or `PROJECT_DIR` — can't leak extra argv, route
+   through a launcher, or alter the timeout; only the fixture's `input.env`
    (applied after the scrub) influences the run. The runner is self-defending and
-   does not require the caller to pre-scrub the environment.
+   does not require the caller to pre-scrub the environment. For a codex review
+   fixture the runner also threads the fixture's launch rc into the drop-reason
+   classifier, so a transient (rc≠2) capture that merely quotes a clap usage line
+   is not mislabeled `config` — faithfully replaying the production review wrapper.
 4. **Asserts the manifest's `command.argv` and `command.stdinSha256` are
    correct** — the stub-recorded argv MUST match `command.argv` (placeholder-aware)
    and `sha256(stdin)` MUST match `command.stdinSha256`. A regression in how the

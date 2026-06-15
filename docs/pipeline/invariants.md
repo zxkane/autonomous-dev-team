@@ -2955,10 +2955,27 @@ per-adapter × per-mode fixture manifests
    `mkdir`'d empty dir under the per-fixture work dir, with a `.nonexistent.conf`
    for `AUTONOMOUS_CONF`); all three discovery branches miss and
    `load_autonomous_conf` returns 1. The runner is therefore **self-defending** —
-   it no longer relies on the caller passing `env -u PROJECT_DIR`. The
+   it no longer relies on the caller passing `env -u PROJECT_DIR`. **The remaining
+   argv/launch knobs are reset to deterministic defaults** (PR #244 [P1], codex
+   review `fff5f671`): lib-agent.sh reads more operator knobs at source time, two
+   of which reach argv/launch — `KIRO_AGENT_NAME` (spliced into the kiro argv as
+   `--agent <name>`; an inherited `KIRO_AGENT_NAME=other` ⇒ argv-mismatch) and
+   `AGENT_TIMEOUT` (the `timeout(1)` duration; an inherited `AGENT_TIMEOUT=bogus`
+   makes the launch never run ⇒ stdin-not-fed). Both (plus `AGENT_PERMISSION_MODE`,
+   defense-in-depth) are reset to the lib's own documented defaults
+   (`autonomous-dev` / `4h` / `auto` — the values the fixtures were recorded
+   against) before the source. (`AGENT_DEV_MODEL` / `AGENT_REVIEW_MODEL` need no
+   reset: `run_agent`/`resume_agent` take the model as an explicit positional arg
+   from `input.model`, so those knobs never reach the argv.) The
    classification depends ONLY on the fixture's `input.env`, which is applied
    AFTER the scrub (so a fixture that genuinely wants a var — e.g.
-   `codex-cli-error`'s `AGENT_DEV_EXTRA_ARGS` — re-enables it). This is the
+   `codex-cli-error`'s `AGENT_DEV_EXTRA_ARGS` — re-enables it). **The codex
+   drop-reason classifier is called with the fixture's launch rc** (PR #244 [P1],
+   codex review `fff5f671`): production passes the rc into
+   `_classify_codex_drop_reason`, which gates the `config-error` bucket on rc == 2
+   (clap's parse-error exit). The runner now threads `$rc` too, so a transient
+   codex fixture (rc 1) whose capture merely QUOTES a clap usage line classifies
+   `stream-error`/transient (not `config`), faithfully replaying production. This is the
    always-on tier; the live-CLI smoke
    ([INV-63](#inv-63-agent-smoke-is-a-three-state-probe-pass--unavailable--fail-run-through-the-production-run_agent-never-a-parallel-invocation-path) / `tests/e2e/run-agent-smoke.sh`) is the separate self-hosted tier.
 2. **Drives TODAY's monolithic classifier via the REAL dispatch path** — it
@@ -3019,6 +3036,15 @@ mapping as actual promoted fixtures the full run exercises (PR #244 [P1] #2):
   (rc 0, stdout that does NOT echo the nonce, no provider signal → `unavailable`
   drop, INV-40).
 
+It also pins the codex drop-reason **rc gate** (PR #244 [P1], codex review
+`fff5f671`): `codex-quoted-clap-nonconfig.json` (rc 1, a capture that QUOTES a
+clap usage line — `error: unexpected argument '-s' found` — alongside a
+stream-error ladder) must classify `transient`/`stream-error`, NOT `config`. The
+runner threads the fixture rc into `_classify_codex_drop_reason`, which gates the
+`config-error` bucket on rc == 2; absent the rc the same capture mislabels
+`config` (the regression this fixture guards), diverging from the production
+review wrapper.
+
 A regression in EITHER mapping (rc 124, rc 137, or the rc-0 drop) flips the
 corresponding fixture's projected `vote` axis and FAILs the run.
 
@@ -3059,8 +3085,18 @@ green-before-and-after gate protects.
   var after the scrub — PR #244 [P1] #1; TC-CONFORMANCE-035f..i: a poisoned
   `AUTONOMOUS_CONF_DIR` / `PROJECT_DIR` conf — supplied WITHOUT `env -u PROJECT_DIR`
   — does NOT leak its `AGENT_*_EXTRA_ARGS` into the argv, proving the in-runner
-  conf-discovery scrub is self-defending — PR #244 [P1], codex review `dc696d40`)**,
-  hermeticity (PATH isolation,
+  conf-discovery scrub is self-defending — PR #244 [P1], codex review `dc696d40`;
+  TC-CONFORMANCE-035l..o: an inherited `KIRO_AGENT_NAME` (→ kiro `--agent` argv)
+  or `AGENT_TIMEOUT=bogus` (→ the launch never runs → stdin-not-fed) does NOT
+  contaminate the run — the runner resets those argv/launch knobs to the lib
+  defaults before sourcing — PR #244 [P1], codex review `fff5f671`)**,
+  **codex drop-reason is rc-gated (TC-CONFORMANCE-036a..d: the runner passes the
+  fixture's launch rc into `_classify_codex_drop_reason`, so a transient codex
+  fixture (rc 1) whose capture merely QUOTES a clap line classifies `stream-error`
+  /transient — NOT `config` — matching production; the promoted
+  `codex-quoted-clap-nonconfig` fixture + the WITHOUT-rc→`config-error` /
+  WITH-rc-1→`stream-error` gate proof pin it — PR #244 [P1], codex review
+  `fff5f671`)**, hermeticity (PATH isolation,
   stdin-fed contract, stub-missing/breach guards), **the load-bearing
   `command.argv` / `command.stdinSha256` assertions (TC-CONFORMANCE-030..034:
   garbage argv and all-zero hash must FAIL, not silently PASS — PR #244 [P1])**,

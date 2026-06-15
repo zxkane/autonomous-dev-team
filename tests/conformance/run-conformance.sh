@@ -436,6 +436,35 @@ _classify_fixture() {
     export AUTONOMOUS_CONF_DIR="$no_conf_dir"
     export PROJECT_DIR="$no_conf_dir"
 
+    # --- RESET THE REMAINING argv/LAUNCH KNOBS TO DETERMINISTIC DEFAULTS ---
+    # (PR #244 [P1], codex review fff5f671). lib-agent.sh reads MORE operator knobs
+    # at source time than the EXTRA_ARGS / launcher / conf surface above — and some
+    # are spliced into argv or drive the launch, so an inherited value breaks an
+    # empty-env fixture even though it is absent from input.env:
+    #   • KIRO_AGENT_NAME — spliced verbatim into the kiro argv as `--agent <name>`
+    #     (run_agent). An inherited `KIRO_AGENT_NAME=other` ⇒ both kiro fixtures
+    #     FAIL argv-mismatch. The fixtures encode the lib default `autonomous-dev`.
+    #   • AGENT_TIMEOUT — the `timeout(1)` duration wrapped around every launch AND
+    #     (for agy) forwarded into the argv as `--print-timeout`. An inherited
+    #     `AGENT_TIMEOUT=bogus` makes `timeout` reject the duration so the stub
+    #     never runs and the prompt never reaches it ⇒ stdin-not-fed, and would
+    #     also reshape the agy `--print-timeout` argv ⇒ argv-mismatch. The fixtures
+    #     expect the lib default `4h`.
+    #   • AGENT_PERMISSION_MODE — claude `--permission-mode`. The `<permission-mode>`
+    #     argv placeholder compares against this var so it currently self-absorbs,
+    #     but pin the default `auto` as defense-in-depth (so the baseline is explicit
+    #     and a future placeholder change can't silently leak it).
+    # Reset to the lib's OWN documented defaults (the values the fixtures were
+    # recorded against), BEFORE the source so the `${VAR:-default}` reads resolve
+    # identically with or without an operator value. input.env is still applied
+    # AFTER (a fixture that genuinely wants a non-default re-enables it there).
+    # (AGENT_DEV_MODEL / AGENT_REVIEW_MODEL are NOT reset here: run_agent /
+    # resume_agent take the model as an explicit positional arg sourced from
+    # input.model, so those knobs never reach the argv — verified.)
+    export KIRO_AGENT_NAME="autonomous-dev"
+    export AGENT_TIMEOUT="4h"
+    export AGENT_PERMISSION_MODE="auto"
+
     # shellcheck source=../../skills/autonomous-dispatcher/scripts/lib-agent-smoke.sh
     source "$LIB_SMOKE" 2>/dev/null || { printf '__ERR__:lib-source-failed\n'; exit 0; }
 
@@ -574,9 +603,12 @@ _classify_fixture() {
     #   - kiro/codex scan a COMBINED stdout+stderr view (auth / stream-error text
     #     lands on EITHER stream; lib-agent-smoke.sh:296-310). Scanning err only
     #     misses a signal recorded on stdout.
-    #   - codex is called with NO rc (one arg), matching _smoke_classify's call
-    #     site: the INV-62 config-error (clap argv rejection) branch then fires on
-    #     the rc-less backward-compat path, not gated on rc==2.
+    #   - codex is called WITH the fixture rc as the 2nd arg, matching the
+    #     production review wrapper (autonomous-review.sh's drop-loop), so the
+    #     INV-62 config-error (clap argv rejection) branch is gated on rc == 2 —
+    #     a transient codex (rc 1) whose capture merely quotes a clap line falls
+    #     through to stream-error, not config (PR #244 [P1], review fff5f671). See
+    #     the call site below.
     tok=""
     case "$adapter" in
       agy)
@@ -598,7 +630,15 @@ _classify_fixture() {
         if [[ "$adapter" == "kiro" ]]; then
           tok="$(_classify_kiro_drop_reason "$scan_file")"
         else
-          tok="$(_classify_codex_drop_reason "$scan_file")"
+          # Pass the fixture's launch rc as the 2nd arg — production passes it
+          # (autonomous-review.sh's drop-loop: `_classify_codex_drop_reason <log>
+          # <launch-rc>`), and the classifier GATES the config-error bucket on
+          # rc == 2 (clap's parse-error exit). Omitting the rc skipped the gate
+          # (backward-compat), so a transient codex fixture (rc 1) whose capture
+          # merely QUOTES a clap line ("error: unexpected argument '-s' found")
+          # was mislabeled `config` instead of falling through to stream-error /
+          # empty as production does. (PR #244 [P1], codex review fff5f671.)
+          tok="$(_classify_codex_drop_reason "$scan_file" "$rc")"
         fi
         # Only drop the combined temp we created; never the recorded out/err files
         # (the mktemp-failure fallback aliases scan_file to one of them).
