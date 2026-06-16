@@ -30,6 +30,10 @@ FAIL=0
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 LIB="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-agent.sh"
+# [INV-75] #232: the agy per-CLI helpers (sidecar capture/recall, model
+# validation) moved out of lib-agent.sh into this adapter; the source-of-truth
+# greps below assert against it. Behavioral tests still source lib-agent.sh.
+ADAPTER="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/adapters/agy.sh"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -79,7 +83,7 @@ echo "=== test-lib-agent-agy.sh — agy sidecar helpers (S1-S4 + S5) ==="
 echo "=== AGY-S1: source-of-truth — helper functions exist ==="
 # ---------------------------------------------------------------------------
 
-if grep -qE '^_agy_log_file\(\)' "$LIB"; then
+if grep -qE '^_agy_log_file\(\)' "$ADAPTER"; then
   echo -e "  ${GREEN}PASS${NC}: _agy_log_file defined"
   PASS=$((PASS + 1))
 else
@@ -87,7 +91,7 @@ else
   FAIL=$((FAIL + 1))
 fi
 
-if grep -qE '^_agy_conversation_file\(\)' "$LIB"; then
+if grep -qE '^_agy_conversation_file\(\)' "$ADAPTER"; then
   echo -e "  ${GREEN}PASS${NC}: _agy_conversation_file defined"
   PASS=$((PASS + 1))
 else
@@ -95,7 +99,7 @@ else
   FAIL=$((FAIL + 1))
 fi
 
-if grep -qE '^_agy_capture_conversation\(\)' "$LIB"; then
+if grep -qE '^_agy_capture_conversation\(\)' "$ADAPTER"; then
   echo -e "  ${GREEN}PASS${NC}: _agy_capture_conversation defined"
   PASS=$((PASS + 1))
 else
@@ -103,7 +107,7 @@ else
   FAIL=$((FAIL + 1))
 fi
 
-if grep -qE '^_agy_conversation_id\(\)' "$LIB"; then
+if grep -qE '^_agy_conversation_id\(\)' "$ADAPTER"; then
   echo -e "  ${GREEN}PASS${NC}: _agy_conversation_id defined"
   PASS=$((PASS + 1))
 else

@@ -910,6 +910,8 @@ verdict-PASS branch (the auto-merge sub-branch).
 
 ## INV-34: agent prompt is fed via stdin, never as a single argv element
 
+> **Implemented in `adapters/<cli>.sh`** ([INV-75](#inv-75-all-per-cli-behavior-lives-in-that-clis-adapter--inline-cli-conditionals-in-orchestration-code-are-a-defect), #232): each `adapter_invoke_<cli>` feeds the prompt on stdin. The one carve-out — codex `review`'s positional `[PROMPT]` (Clause A2) — lives in `adapters/codex.sh::_run_codex_review`.
+
 **Rule**: `lib-agent.sh::run_agent` and `resume_agent` MUST feed the
 constructed prompt to the underlying agent CLI via stdin (a leading
 `printf '%s' "$prompt" | _run_with_timeout <cli> ...` pipeline stage).
@@ -1087,6 +1089,8 @@ Where `<short-token>` is one of `bot-timeout`, `ci-transport`, `no-pr-found`, `m
 - [INV-38](#inv-38-per-side-agent_launcher-precedence) — per-side `AGENT_LAUNCHER` (the launcher-side analogue, replaces this invariant's single guard with two per-side guards).
 
 ## INV-38: per-side AGENT_LAUNCHER precedence
+
+> **Launcher tokenization/gating stays CLI-agnostic in `lib-agent.sh`** ([INV-75](#inv-75-all-per-cli-behavior-lives-in-that-clis-adapter--inline-cli-conditionals-in-orchestration-code-are-a-defect), #232): the per-side `*_LAUNCHER` → `AGENT_LAUNCHER_ARGV` tokenization + the claude-only guard remain in `lib-agent.sh` (they are config, not per-CLI argv). The claude adapter (`adapters/claude.sh`) reads `AGENT_LAUNCHER_ARGV` to choose its direct-vs-launcher invocation path; `_agent_launch_binary` consults `adapter_binary_<cli>` (the kiro → kiro-cli alias) instead of an inline case.
 
 **Rule**: `lib-agent.sh` exposes `AGENT_DEV_LAUNCHER` and `AGENT_REVIEW_LAUNCHER` as side-specific overrides of `AGENT_LAUNCHER`. Both default to `${AGENT_LAUNCHER:-}` so existing deployments are byte-for-byte unchanged. Each side's tokenized argv array is gated independently: `AGENT_DEV_LAUNCHER` non-empty requires `AGENT_DEV_CMD=claude`; `AGENT_REVIEW_LAUNCHER` non-empty requires `AGENT_REVIEW_CMD=claude`. The two guards replace the single `[INV-37]` guard. Each wrapper rebinds the existing `AGENT_LAUNCHER_ARGV` (the array `_run_with_timeout` reads) to its side's array immediately after sourcing `lib-agent.sh` — paired with the existing `AGENT_CMD` rebind from `[INV-37]`. After both rebinds, `run_agent` / `resume_agent` continue reading `AGENT_LAUNCHER_ARGV[@]` without signature changes.
 
@@ -1493,6 +1497,8 @@ Five sub-rules:
 - [`skills/autonomous-review/references/e2e-command-mode.md`](../../skills/autonomous-review/references/e2e-command-mode.md) § "Optional structured AC-coverage artifact" — the project-side emission contract.
 
 ## INV-50: agy `--model` is validated against `agy models` before forwarding
+
+> **Implemented in `adapters/agy.sh`** ([INV-75](#inv-75-all-per-cli-behavior-lives-in-that-clis-adapter--inline-cli-conditionals-in-orchestration-code-are-a-defect), #232): `_agy_known_model` / `_agy_build_model_args` moved into the agy adapter (with the rest of agy's per-CLI behavior). The validation stays wrapper-side — never forwarded blindly.
 
 **Rule**: the `agy` branch of `run_agent` / `resume_agent` (in `lib-agent.sh`) forwards `--model` to the agy CLI **only after validating** the resolved model id against `agy models`. Resolution (in `_agy_build_model_args` → `_agy_known_model`):
 
@@ -2176,6 +2182,8 @@ look-behind bug. Test plan:
 
 ## INV-58: agy quota/auth `unavailable` drops surface a distinct reason; fan-out + Reviewed-HEAD model labels are per-agent
 
+> **Implemented in `adapters/agy.sh`** ([INV-75](#inv-75-all-per-cli-behavior-lives-in-that-clis-adapter--inline-cli-conditionals-in-orchestration-code-are-a-defect), #232): the `_classify_agy_drop_reason` / `_agy_drop_reason_phrase` scrapers moved from `lib-review-agy.sh` (now a thin compat shim) into the agy adapter.
+
 **Rule**: two related observability fixes to the [INV-40](#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback) review fan-out, neither of which changes the vote:
 
 1. **agy quota/auth drop-reason detector.** When a fan-out member whose CLI is `agy` is resolved `unavailable` (no verdict within the poll window), the wrapper scrapes that agent's OWN `--log-file` (`pid_dir_for_project()/agy-log-<session_id>.log`, captured per-agent into `AGENT_AGY_LOGS` during fan-out) via `lib-review-agy.sh::_classify_agy_drop_reason <log>` and, if a quota/auth signal is present, attaches a distinct, actionable reason to the `WARNING: review agent(s) dropped (unavailable)` log line AND the posted "dropped agent(s)" issue comment (and the all-unavailable `log` line). Classification:
@@ -2214,6 +2222,8 @@ look-behind bug. Test plan:
 - [`review-agent-flow.md` § agy quota/auth drop reason (INV-58)](review-agent-flow.md#agy-quotaauth-drop-reason-inv-58) — runtime walkthrough.
 
 ## INV-59: codex transient stream-error drops surface a distinct reason and are ridden out by the resume loop, not opaquely dropped
+
+> **Implemented in `adapters/codex.sh`** ([INV-75](#inv-75-all-per-cli-behavior-lives-in-that-clis-adapter--inline-cli-conditionals-in-orchestration-code-are-a-defect), #232): the `_codex_review_has_stream_error` / `_classify_codex_drop_reason` / `_codex_drop_reason_phrase` scrapers moved from `lib-review-codex.sh` (now a thin compat shim) into the codex adapter.
 
 > ⚠️ **RE-SCOPED by [INV-62](#inv-62-the-codex-review-lane-runs-the-codex-review-subcommand-auto-scoped-prompt-carried-gate-with-a-stdout-verdict-fallback) (#218).** Both halves below are preserved in spirit but re-implemented for the `codex review` subcommand: **(half 1, drop-reason detector)** survives but now scans codex review's human-readable **stdout/stderr capture** for the stream-disconnect / reconnect-ladder signal instead of the `codex exec` JSONL `turn.failed` event (`codex review` emits no JSONL stream). The function names (`_classify_codex_drop_reason`, `_codex_drop_reason_phrase`) and the rc-0-always fail-safe contract are unchanged; `_codex_log_has_stream_error` is renamed `_codex_review_has_stream_error`. **(half 2, transient-retry)** is subsumed by INV-62's bounded **re-run** of `codex review` (a non-zero exit re-runs a fresh review, bounded by `CODEX_REVIEW_MAX_RERUNS` + the `AGENT_REVIEW_TIMEOUT` wall-clock deadline) — there is no resume loop left to "fall through into". The text below describes the pre-#218 `codex exec` implementation; read it as historical.
 
@@ -2300,6 +2310,8 @@ The displayed value is the model the wrapper **launched** the agent with — so 
 
 ## INV-61: kiro auth/login-failure `unavailable` drops surface a distinct reason, not a bare opaque `unavailable`
 
+> **Implemented in `adapters/kiro.sh`** ([INV-75](#inv-75-all-per-cli-behavior-lives-in-that-clis-adapter--inline-cli-conditionals-in-orchestration-code-are-a-defect), #232): the `_classify_kiro_drop_reason` / `_kiro_drop_reason_phrase` scrapers moved from `lib-review-kiro.sh` (now a thin compat shim) into the kiro adapter.
+
 **Rule**: when a fan-out member whose CLI is `kiro` is resolved `unavailable`, the wrapper scrapes that agent's OWN generic per-agent log (`$_agent_log` = `/tmp/agent-${PROJECT_ID}-review-${ISSUE_NUMBER}-kiro.log`, captured per-agent into `AGENT_KIRO_LOGS` during fan-out — kiro has NO separate `--log-file` like agy) via `lib-review-kiro.sh::_classify_kiro_drop_reason <log>` and, if an auth/login-failure signal is present, attaches a distinct, actionable reason (naming the operator remedy `kiro-cli login --use-device-flow`) to the `WARNING: review agent(s) dropped (unavailable)` log line AND the posted "dropped (unavailable) agent(s)" issue comment (and the all-unavailable `log` line). Classification:
 
 - ANY of the fixed substrings `Failed to open browser for authentication`, `kiro-cli login`, `--use-device-flow`, or `Failed to open URL` (the lines the Kiro CLI prints when its stored OAuth/login token has expired and it cannot open a browser for device-flow re-auth in the headless SSM-spawned shell) → **`auth-failed`**;
@@ -2332,6 +2344,8 @@ The displayed value is the model the wrapper **launched** the agent with — so 
 - [`review-agent-flow.md` § kiro auth/login drop reason (INV-61)](review-agent-flow.md#kiro-authlogin-drop-reason-inv-61) — runtime walkthrough.
 
 ## INV-62: the codex review lane runs the `codex review` subcommand (auto-scoped, prompt-carried gate) with a stdout verdict fallback
+
+> **Implemented in `adapters/codex.sh`** ([INV-75](#inv-75-all-per-cli-behavior-lives-in-that-clis-adapter--inline-cli-conditionals-in-orchestration-code-are-a-defect), #232): the entire review lane — `_run_codex_review`, the worktree prep/cleanup, the prompt-echo malformed guard, the stdout classifier, and the re-run controller — moved from `lib-review-codex.sh` (now a thin compat shim) into the codex adapter. `codex review`'s positional `[PROMPT]` is the [INV-34](#inv-34-agent-prompt-is-fed-via-stdin-never-as-a-single-argv-element) Clause A2 carve-out.
 
 **Rule**: when a review fan-out member's CLI is `codex`, `autonomous-review.sh` MUST dispatch it through `lib-review-codex.sh::_run_codex_review`, which runs the purpose-built **`codex review "<prompt>"`** subcommand — NOT `codex exec` and NOT a resume loop. `codex review` is natively multi-step (it fetches and re-reads the diff across turns without a single-turn budget) and **auto-scopes the diff to the PR's merge target** (the exact review range), so no `--base` is passed. The codex **dev** path (`autonomous-dev.sh` → `run_agent`/`resume_agent` codex branch in `lib-agent.sh`) stays on `codex exec --json` **byte-for-byte unchanged** — codex-review knowledge stays OUT of the CLI-agnostic primitives and lives only in `lib-review-codex.sh`. Every other review CLI (claude / agy / kiro / gemini / opencode) keeps its single-invocation `run_agent` path unchanged.
 
@@ -3130,6 +3144,59 @@ green-before-and-after gate protects.
 - [INV-63](#inv-63-agent-smoke-is-a-three-state-probe-pass--unavailable--fail-run-through-the-production-run_agent-never-a-parallel-invocation-path) — the `_smoke_classify` classifier the runner drives; the live-CLI smoke is the separate self-hosted tier.
 - [INV-40](#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback) / [INV-48](#inv-48-per-side-review-wall-clock-timeout-agent_review_timeout-1h-default-with-browser-e2e-exclusion-and-timeout-veto) — the `drop` / `timeout-veto` vote mappings the load-bearing fixtures pin.
 - [INV-58](#inv-58-agy-quotaauth-unavailable-drops-surface-a-distinct-reason-fan-out--reviewed-head-model-labels-are-per-agent) / [INV-61](#inv-61-kiro-authlogin-failure-unavailable-drops-surface-a-distinct-reason-not-a-bare-opaque-unavailable) / [INV-62](#inv-62-the-codex-review-lane-runs-the-codex-review-subcommand-auto-scoped-prompt-carried-gate-with-a-stdout-verdict-fallback) — the per-CLI scrapers the fixtures exercise.
+
+## INV-75: all per-CLI behavior lives in that CLI's adapter — inline CLI conditionals in orchestration code are a defect
+
+**Rule**: every per-CLI special case — argv assembly, the stdin-vs-positional
+prompt channel ([INV-34](#inv-34-agent-prompt-is-fed-via-stdin-never-as-a-single-argv-element)),
+session-handle capture/recall (codex thread-id, opencode `ses_`, agy `--log-file`
+UUID), `--model` validation ([INV-50](#inv-50-agy---model-is-validated-against-agy-models-before-forwarding)),
+the per-CLI review lane ([INV-62](#inv-62-the-codex-review-lane-runs-the-codex-review-subcommand-auto-scoped-prompt-carried-gate-with-a-stdout-verdict-fallback)),
+and the drop-reason scrapers ([INV-58](#inv-58-agy-quotaauth-unavailable-drops-surface-a-distinct-reason-fan-out--reviewed-head-model-labels-are-per-agent) /
+[INV-59](#inv-59-codex-transient-stream-error-drops-surface-a-distinct-reason-and-are-ridden-out-by-the-resume-loop-not-opaquely-dropped) /
+[INV-61](#inv-61-kiro-authlogin-failure-unavailable-drops-surface-a-distinct-reason-not-a-bare-opaque-unavailable)) —
+**lives in `skills/autonomous-dispatcher/scripts/adapters/<cli>.sh`**, behind the
+`adapter_invoke_<cli> <mode> …` mode-axis entry point. The orchestration core
+(`lib-agent.sh`'s `run_agent` / `resume_agent`, `autonomous-review.sh`,
+`lib-agent-smoke.sh`) is **CLI-agnostic**: the ONLY permitted CLI conditional in
+it is the **thin dispatch** (`case "$AGENT_CMD" in claude|codex|gemini|kiro|opencode|agy) adapter_invoke_"$AGENT_CMD" …`)
+plus the **generic-fallback `*)` branch** for an unknown CLI. An inline
+`case "$AGENT_CMD"` (or `$cli`) carrying per-CLI flag / argv / classification
+**logic** in orchestration code is a **defect**.
+
+- **Producer**: each `adapters/<cli>.sh` (defines `adapter_invoke_<cli>`, the
+  CLI's session/capture helpers, model validation, review lane, and
+  `_classify_<cli>_drop_reason` / `_<cli>_drop_reason_phrase`; declares its launch
+  binary via `adapter_binary_<cli>` when it differs from the id — only `kiro` →
+  `kiro-cli`).
+- **Consumer**: `lib-agent.sh` sources every adapter and dispatches; the
+  `lib-review-{codex,agy,kiro}.sh` files are **thin compat shims** that
+  `source adapters/<cli>.sh` to preserve the historical source-by-path contract
+  (the conformance runner + `lib-agent-smoke.sh` source those paths; the CI
+  shellcheck list names them).
+- **Mode axis** ([adapter-spec.md § 3](adapter-spec.md#3-the-mode-axis-modes-differ-structurally)):
+  `adapter_invoke_<cli>` takes `dev-new` / `dev-resume`; the codex `review` lane
+  is `_run_codex_review` (also in the codex adapter); `e2e-browser` is
+  CLI-agnostic (no adapter mode).
+- **Why** (#232): Factory D exists because CLI quirks were scattered across
+  `lib-agent.sh` `case` branches plus three `lib-review-*.sh` patch files — every
+  new quirk landed as another scattered patch. With the spec
+  ([INV-66](#inv-66-adapter-conformance-is-spec-defined)) and the conformance pin
+  ([INV-74](#inv-74-adapter-conformance-is-regression-pinned-by-a-hermetic-fixture-manifest-runner))
+  in place, the quirks move behind one boundary per CLI, making new-CLI admission
+  a self-contained file + manifest set. This was a **behavior-preserving**
+  relocation: the conformance suite + full unit suite were green before AND after,
+  and the per-CLI run_agent/resume_agent argv is byte-identical (golden-argv
+  parity, documented in PR #232's body).
+- **Test**: `tests/unit/test-cli-adapters.sh` (TC-ADAPTER-EXTRACT-NNN) — dispatch
+  (known CLI → adapter; unknown → generic fallback), mode routing, source-by-path
+  shim compat, the INV-75 no-inline-literal guard, and INV-50 still wrapper-side;
+  plus the conformance suite as the behavior-parity E2E gate.
+
+**Cross-references**:
+- [`adapter-spec.md`](adapter-spec.md) — the NORMATIVE adapter interface this implements.
+- [INV-66](#inv-66-adapter-conformance-is-spec-defined) / [INV-74](#inv-74-adapter-conformance-is-regression-pinned-by-a-hermetic-fixture-manifest-runner) — the spec + conformance pin the relocation preserved.
+- [INV-14](#inv-14-vendored-scripts-resolve-siblings-via-bash_source-not-cwd) / [INV-65](#inv-65-stable-entry-points-libs-resolve-from-the-skill-tree-conf-from-the-projects-scripts) — the BASH_SOURCE / skill-tree resolution the shims and adapter sourcing use.
 
 ## Adding a new invariant
 

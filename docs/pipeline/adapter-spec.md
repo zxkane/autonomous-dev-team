@@ -462,9 +462,46 @@ transient stream-error → `provider.class = config` vs `transient` (INV-59/62);
 
 ---
 
+## Authoring a new CLI adapter
+
+The per-CLI behavior is extracted into one file per CLI under
+[`skills/autonomous-dispatcher/scripts/adapters/<cli>.sh`](../../skills/autonomous-dispatcher/scripts/adapters/)
+([INV-75](invariants.md#inv-75-all-per-cli-behavior-lives-in-that-clis-adapter--inline-cli-conditionals-in-orchestration-code-are-a-defect)).
+`run_agent` / `resume_agent` are thin dispatchers. To add a new CLI:
+
+1. **Copy the closest template.** `adapters/claude.sh` is the minimal shape (no
+   sidecar, no scraper); `adapters/agy.sh` is the full shape (model validation +
+   session capture + drop-reason scrapers). Define:
+   - `adapter_invoke_<cli> <mode> <session_id> <prompt> <model> <session_name>` —
+     the mode-axis entry. Handle `dev-new` and `dev-resume` (§3); feed the prompt
+     on **stdin** (Clause A2 / INV-34) unless your review subcommand has no stdin
+     mode (the codex carve-out). Parse `AGENT_DEV_EXTRA_ARGS` for `dev-new`,
+     `AGENT_REVIEW_EXTRA_ARGS` for `dev-resume` (a no-resume CLI uses
+     `AGENT_DEV_EXTRA_ARGS` for both, like kiro).
+   - `adapter_binary_<cli>` — ONLY if the exec binary differs from the adapter id
+     (e.g. kiro → `kiro-cli`); otherwise omit (the default is the id).
+   - a `_classify_<cli>_drop_reason` + `_<cli>_drop_reason_phrase` pair if your
+     CLI has a "lying mode" (§7) the `provider` axis must absorb.
+   - session capture/recall helpers if your CLI mints its own session id (§3.5).
+2. **Register it** in `lib-agent.sh`'s `for _adapter in …` source loop and the
+   two thin-dispatch `case "$AGENT_CMD" in claude|codex|…)` arms. Add the file to
+   the CI shellcheck list (`.github/workflows/ci.yml`).
+3. **Write ≥2 conformance manifests** under `tests/conformance/fixtures/` (a clean
+   verdict + at least one failure mode) per §8 and the
+   [conformance README](../../tests/conformance/README.md#authoring-a-manifest-cli-vendors).
+4. **Pass conformance**: `bash tests/conformance/run-conformance.sh --adapter <cli>`
+   green. A new CLI is admitted to the fan-out only once it carries ≥2 manifests
+   and the suite stays green (INV-74).
+
+No orchestration-core change is needed beyond the dispatch arms + source loop —
+that is the whole point of [INV-75](invariants.md#inv-75-all-per-cli-behavior-lives-in-that-clis-adapter--inline-cli-conditionals-in-orchestration-code-are-a-defect).
+
+---
+
 ## Cross-references
 
 - [`invariants.md` § INV-66](invariants.md#inv-66-adapter-conformance-is-spec-defined) — adapter conformance is spec-defined (this document).
+- [`invariants.md` § INV-75](invariants.md#inv-75-all-per-cli-behavior-lives-in-that-clis-adapter--inline-cli-conditionals-in-orchestration-code-are-a-defect) — the implementation: all per-CLI behavior lives in `adapters/<cli>.sh` (#232).
 - [`invariants.md` § INV-40](invariants.md#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback) — the vote this `voteEligibility` axis feeds.
 - [`invariants.md` § INV-48](invariants.md#inv-48-per-side-review-wall-clock-timeout-agent_review_timeout-1h-default-with-browser-e2e-exclusion-and-timeout-veto) — the timeout-veto worked example.
 - [`invariants.md` § INV-46](invariants.md#inv-46-e2e-runs-once-in-a-dedicated-lane-before-the-review-fan-out--gated-not-per-agent) / [INV-49](invariants.md#inv-49-command-mode-e2e-may-feed-the-review-fan-out-a-structured-ac-coverage-artifact--optional-fail-safe) — the E2E report + AC-coverage sub-objects.

@@ -41,6 +41,13 @@ mkdir -p "$SKILL"
 # gh-app-token, …) resolves from the real tree.
 cp "$DISPATCHER_SCRIPTS"/*.sh "$SKILL/"
 chmod +x "$SKILL"/*.sh
+# [INV-75] #232: lib-agent.sh sources adapters/<cli>.sh from its OWN (real) dir,
+# so the skill tree MUST carry the adapters/ subdir — npx skills packages the
+# whole skill dir, so a real install always has it. Mirror that here (the bare
+# `*.sh` glob above does not descend into subdirs).
+if [[ -d "$DISPATCHER_SCRIPTS/adapters" ]]; then
+  cp -r "$DISPATCHER_SCRIPTS/adapters" "$SKILL/adapters"
+fi
 
 # Temp project: scripts/ holds ONLY a project-side symlink to the entry + a
 # real autonomous.conf. NO lib symlinks at all — that's the whole point.

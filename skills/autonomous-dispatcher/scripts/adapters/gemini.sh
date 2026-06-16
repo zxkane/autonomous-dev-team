@@ -1,0 +1,45 @@
+#!/bin/bash
+# adapters/gemini.sh — Gemini CLI adapter ([INV-75]).
+#
+# Session model: caller pre-mints --session-id <UUID>; the SAME id round-trips
+# via the stream-json `init` event and is reused for --resume (claude-style
+# replay, no sidecar). Empirically verified against gemini CLI 0.42.0 (#134).
+#
+# The load-bearing `--approval-mode yolo --output-format stream-json` flags are
+# operator-tunable via AGENT_DEV_EXTRA_ARGS / AGENT_REVIEW_EXTRA_ARGS (NOT
+# hardcoded here) — see autonomous.conf.example "gemini block". Without them
+# gemini silently fabricates success (#102/#134). Lying mode is absorbed by the
+# env precondition (spec §7), so gemini carries no drop-reason scraper.
+#
+# PRECONDITION: sourced by lib-agent.sh AFTER its shared primitives.
+
+# adapter_invoke_gemini <mode> <session_id> <prompt> <model> <session_name>
+#   mode ∈ { dev-new, dev-resume }
+adapter_invoke_gemini() {
+  local mode="$1" session_id="$2" prompt="$3" model="${4:-}" session_name="${5:-}"
+  local extra_args=()
+  if [[ "$mode" == "dev-resume" ]]; then
+    _parse_extra_args AGENT_REVIEW_EXTRA_ARGS extra_args
+  else
+    _parse_extra_args AGENT_DEV_EXTRA_ARGS extra_args
+  fi
+
+  # Gemini CLI: headless invocation per https://geminicli.com/docs/cli/headless/.
+  # `-p` with no value reads the prompt from stdin.
+  #
+  # dev-new uses `--session-id <UUID>` (round-trips); dev-resume uses
+  # `--resume <UUID>` to replay the conversation history. If the original run
+  # never happened (operator-initiated resume on a fresh issue), gemini still
+  # starts cleanly — safer than kiro's fresh-run fallback.
+  local sid_flag
+  if [[ "$mode" == "dev-resume" ]]; then
+    sid_flag=(--resume "$session_id")
+  else
+    sid_flag=(--session-id "$session_id")
+  fi
+  printf '%s' "$prompt" | _run_with_timeout "$AGENT_CMD" \
+    "${sid_flag[@]}" \
+    ${model:+--model "$model"} \
+    "${extra_args[@]}" \
+    -p
+}
