@@ -1,14 +1,42 @@
 name: CI
 
+# Two-tier CI (issue #238, INV-77):
+#
+#   Tier 1 — HERMETIC (jobs prefixed `hermetic-`): unit tests, ShellCheck,
+#     adapter conformance, and the stub-mode self-tests. Runs on every PR/push
+#     on `ubuntu-latest` with ZERO credentials, so a fork PR or external
+#     contributor gets a fully green, fully meaningful CI. These are the
+#     merge-required checks.
+#
+#   Tier 2 — LIVE (`live-smoke`): the #222 agent-CLI smoke matrix that needs
+#     authenticated CLIs (claude/codex/kiro/agy via IAM/quota). It runs ONLY on
+#     the self-hosted runner and ONLY when a maintainer applies the
+#     `run-live-smoke` label (pull_request `labeled`) OR on push to main. It is
+#     ADVISORY (non-required) — never block a fork PR on hardware/credentials
+#     only maintainers have.
+#
+# THREAT MODEL (why the label gate, not an unconditional self-hosted job):
+#   self-hosted runner + untrusted PR code = host compromise. A fork PR must NOT
+#   be able to schedule the live tier on its own. Applying the `run-live-smoke`
+#   label is the authorization act and requires write access (maintainer-only).
+#   We use plain `pull_request` (NOT `pull_request_target`): `pull_request_target`
+#   would run with the base repo's token/secrets against untrusted head code —
+#   the classic foot-gun. The `labeled` event still runs in the base-repo context
+#   but checks out the PR head, so the live tier must treat head code as
+#   untrusted (it runs only agent-CLI smokes, no head-controlled build steps).
+
 on:
   pull_request:
     branches: [main]
+    # `labeled` is required so applying `run-live-smoke` delivers the event that
+    # gates the live-smoke job (github.event.label.name).
+    types: [opened, synchronize, reopened, labeled]
   push:
     branches: [main]
 
 jobs:
-  unit-tests:
-    name: Unit Tests
+  hermetic-unit:
+    name: Hermetic / Unit + conformance
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -39,7 +67,8 @@ jobs:
       # harness against stub CLIs so CI exercises it end-to-end without real
       # CLIs/credentials. The stub matrix contains a deliberate FAIL entry, so
       # the harness exits 1 by design — we assert on the SMOKE-SUMMARY tally
-      # rather than the exit code.
+      # rather than the exit code. This is the HERMETIC self-test of the harness;
+      # the LIVE matrix (real CLIs) is the separate label-gated live-smoke job.
       - name: agent-smoke harness stub-mode self-test
         run: |
           out=$(SMOKE_STUB=1 bash tests/e2e/run-agent-smoke.sh) || true
@@ -75,8 +104,9 @@ jobs:
       # exit on ANY fixture FAIL, so the step gates the build directly.
       - name: adapter conformance suite (hermetic)
         run: bash tests/conformance/run-conformance.sh
-  shellcheck:
-    name: ShellCheck
+
+  hermetic-shellcheck:
+    name: Hermetic / ShellCheck + workflow lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -125,3 +155,59 @@ jobs:
             skills/autonomous-common/hooks/install-git-pre-push.sh \
             skills/autonomous-common/scripts/install-claude-hooks.sh \
             skills/autonomous-common/scripts/install-project-hooks.sh
+
+      # actionlint over the workflows — catches a `pull_request_target` foot-gun,
+      # expression typos, and shellcheck issues inside `run:` blocks. Pinned by
+      # commit SHA. This is the deeper syntax lint; the always-runnable
+      # gate-logic truth-table assertions live in
+      # tests/unit/test-ci-two-tier-lanes.sh (#238, INV-77) and run in the
+      # unit-test step above.
+      - name: actionlint (workflow syntax + foot-gun lint)
+        uses: raven-actions/actionlint@205b530c5d9fa8f44ae9ed59f341a0db994aa6f8 # v2.1.2
+        with:
+          files: ".github/workflows/*.yml"
+
+  live-smoke:
+    name: Live agent-smoke (self-hosted, label-gated)
+    # Gate: a maintainer applying the `run-live-smoke` label to a PR (the
+    # authorization act — label application needs write access), OR a push to
+    # main. A fork PR with no label NEVER reaches this job. There is no
+    # unconditional branch, so the live tier cannot self-trigger from untrusted
+    # PR code. See the THREAT MODEL note in the `on:` header above.
+    if: >-
+      (github.event_name == 'pull_request' && github.event.label.name == 'run-live-smoke')
+      || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    # Target the shared self-hosted pool via the operator's RUNNER_LABEL ternary
+    # (lazy &&/|| so an unset var falls back without an eager fromJSON crash).
+    # Default to bare `self-hosted` when the var is unset — a GitHub-hosted
+    # fallback would have no authenticated CLIs, defeating the live tier.
+    runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'self-hosted' }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      # Run the #222 live matrix against the box's real CLIs + credentials
+      # (tests/e2e/e2e.conf, gitignored, machine-local). rc contract (#222):
+      #   any FAIL → rc 1 (operator-side config/launch breakage — fails the job)
+      #   UNAVAILABLE (quota) / SKIP → non-blocking (rc 0).
+      # So a quota-walled agy yields UNAVAILABLE without failing the job. Because
+      # live-smoke is advisory (non-required), even a FAIL never blocks a PR's
+      # merge — it is a maintainer signal, surfaced in the job summary below.
+      - name: Run live agent-smoke matrix
+        run: |
+          set -o pipefail
+          out_file="$(mktemp)"
+          # Clean up on any exit path — live-smoke runs on a persistent
+          # self-hosted box, so a cancelled run must not leak the temp file.
+          trap 'rm -f "$out_file"' EXIT
+          rc=0
+          bash tests/e2e/run-agent-smoke.sh | tee "$out_file" || rc=$?
+          {
+            echo "## Live agent-smoke matrix (#222)"
+            echo ""
+            echo "Exit code: \`${rc}\` (FAIL → 1; UNAVAILABLE/SKIP non-blocking)"
+            echo ""
+            echo '```'
+            grep -E '^SMOKE' "$out_file" || echo '(no SMOKE evidence lines captured)'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"

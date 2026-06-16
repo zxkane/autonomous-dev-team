@@ -215,3 +215,12 @@ manifests and the suite stays green.
   [INV-63](../../docs/pipeline/invariants.md#inv-63-agent-smoke-is-a-three-state-probe-pass--unavailable--fail-run-through-the-production-run_agent-never-a-parallel-invocation-path),
   the separate self-hosted tier); the adapter extraction itself (a later issue);
   gemini/opencode manifests (addable later — not fan-out members today).
+
+## CI placement — the hermetic tier
+
+This suite is the anchor of CI's **hermetic tier** ([INV-77](../../docs/pipeline/invariants.md#inv-77-ci-is-two-tiers--hermetic-always-on--credential-free-live-agent-smoke-is-self-hosted-label-gated-and-advisory)):
+it runs in the `hermetic-unit` job of [`ci.yml`](../../.github/workflows/ci.yml)
+on every PR/push on GitHub-hosted `ubuntu-latest` with no credentials, so it is
+green on any fork. The live agent-CLI smoke is the separate **live tier**
+(`live-smoke`, self-hosted, maintainer-gated by the `run-live-smoke` label,
+advisory). See [CONTRIBUTING.md → "What CI runs on your PR"](../../CONTRIBUTING.md#what-ci-runs-on-your-pr).

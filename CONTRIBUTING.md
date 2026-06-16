@@ -117,6 +117,45 @@ This repo's TDD + worktree + review-bot discipline is documented in [`CLAUDE.md`
 
 Don't bypass with `--no-verify`. If a hook fires, fix the underlying issue.
 
+## What CI runs on your PR
+
+CI is split into two tiers ([`ci.yml`](.github/workflows/ci.yml),
+[INV-77](docs/pipeline/invariants.md#inv-77-ci-is-two-tiers--hermetic-always-on--credential-free-live-agent-smoke-is-self-hosted-label-gated-and-advisory)):
+
+### Tier 1 — hermetic (always on, no credentials)
+
+Every PR and push runs the `hermetic-*` jobs on GitHub-hosted `ubuntu-latest`
+with **zero credentials**:
+
+- `hermetic-unit` — all `tests/unit/*.sh`, the adapter
+  [conformance suite](tests/conformance/README.md), and the stub-mode self-tests
+  of the smoke / metrics / error-envelope harnesses.
+- `hermetic-shellcheck` — ShellCheck over the dispatcher scripts + `actionlint`
+  over the workflows.
+
+Because the hermetic tier needs no secrets, **a fork PR or external contribution
+gets a fully green, fully meaningful CI** — you do not need any agent CLI auth to
+pass CI. These are the checks that gate merge (branch-protection required).
+
+### Tier 2 — live agent-smoke (self-hosted, maintainer-gated, advisory)
+
+The `live-smoke` job runs the [#222 live agent-CLI smoke matrix](docs/pipeline/agent-smoke.md)
+against **real** CLIs (claude/codex/kiro/agy) on the self-hosted runner. It runs
+**only** when:
+
+- a **maintainer applies the `run-live-smoke` label** to the PR (label
+  application requires write access — that IS the authorization), **or**
+- the change is pushed to `main`.
+
+A fork PR cannot trigger the live tier on its own (no label = not scheduled),
+because a self-hosted runner must never execute untrusted PR code unconditionally.
+The live tier is **advisory (non-required)** — a quota-walled CLI reports
+`UNAVAILABLE` without failing the job, and the live result never blocks merge. Its
+SMOKE evidence is posted to the run's job summary.
+
+**As an external contributor you never need to do anything for the live tier** —
+a maintainer will label your PR if a live run is warranted.
+
 ## PR checklist
 
 Before opening a PR, confirm:

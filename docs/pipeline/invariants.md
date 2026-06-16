@@ -3335,6 +3335,82 @@ Design: `docs/designs/smoke-no-response-retry.md`. Test plan:
 - [INV-73](#inv-73-a-codex-review-prompt-echo--startup-trace-stdout-is-malformed-never-a-blocking-p1-fail--retry-or-drop-not-a-phantom-veto) — the review-stage codex transient fix (#252 / #254) this is the smoke-stage sibling of.
 - [INV-40](#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback) / [INV-58](#inv-58-agy-quotaauth-unavailable-drops-surface-a-distinct-reason-fan-out--reviewed-head-model-labels-are-per-agent) / [INV-61](#inv-61-kiro-authlogin-failure-unavailable-drops-surface-a-distinct-reason-not-a-bare-opaque-unavailable) — the environmental → drop tolerance this aligns with.
 
+## INV-77: CI is two tiers — hermetic always-on + credential-free; live agent-smoke is self-hosted, label-gated, and advisory
+
+> **Note**: authored as INV-75 (next free number when `main` was at INV-74), then
+> renumbered to **INV-77** across two rebases: PR #259 (per-CLI adapters, issue #232)
+> landed INV-75 on `main` first, then PR #258 (smoke no-response retry, issue #257)
+> landed INV-76 — so this section took the next free number per the standard
+> duplicate-heading / broken-anchor avoidance (see "Adding a new invariant"). The
+> number is disambiguated by issue #238.
+
+**Rule**: `.github/workflows/ci.yml` is split into two explicit tiers, and the
+split is a hard contract:
+
+1. **Tier 1 — HERMETIC.** Every job whose name starts with `hermetic-`
+   (`hermetic-unit`, `hermetic-shellcheck`) runs on `ubuntu-latest` and is
+   **credential-free** — no `secrets.*`, no `AWS_*` / `BEDROCK` / `ANTHROPIC_API_KEY`
+   / `GH_APP_PRIVATE_KEY`. These are the unit tests, ShellCheck, the adapter
+   conformance suite ([INV-74](#inv-74-adapter-conformance-is-regression-pinned-by-a-hermetic-fixture-manifest-runner)),
+   and the stub-mode self-tests of the smoke/metrics/error-envelope harnesses.
+   Because they need no credentials, a **fork PR** (or any external contributor)
+   gets a fully green, fully meaningful CI. These are the **merge-required**
+   checks.
+
+2. **Tier 2 — LIVE.** The single `live-smoke` job runs the #222 live agent-CLI
+   smoke matrix (`tests/e2e/run-agent-smoke.sh`,
+   [INV-63](#inv-63-agent-smoke-is-a-three-state-probe-pass--unavailable--fail-run-through-the-production-run_agent-never-a-parallel-invocation-path))
+   against the box's **real** CLIs + credentials. It is gated by
+   `if: (github.event_name == 'pull_request' && github.event.label.name == 'run-live-smoke') || (github.event_name == 'push' && github.ref == 'refs/heads/main')`
+   and targets the self-hosted pool
+   (`runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'self-hosted' }}`).
+   It is **advisory (non-required)** — never block a fork PR's merge on hardware /
+   credentials only maintainers have. The rc contract is #222's: any FAIL → the
+   job fails; UNAVAILABLE (quota) / SKIP → non-blocking. The SMOKE evidence lines
+   are written to `$GITHUB_STEP_SUMMARY`.
+
+3. **The gate is the security boundary.** A fork PR with **no** label NEVER
+   schedules `live-smoke` — the `if:` has no unconditional branch, so untrusted PR
+   code cannot self-trigger the self-hosted tier. Applying the `run-live-smoke`
+   label is the **authorization act**; label application requires write access, so
+   only a maintainer can authorize a live run. The workflow uses plain
+   `pull_request` (with the `labeled` type so the event is delivered), **never**
+   `pull_request_target` — `pull_request_target` would run with the base repo's
+   token/secrets against untrusted head code (the classic injection foot-gun).
+
+**Why**: the #222 live smoke needs authenticated CLIs (claude/codex/kiro/agy via
+IAM/quota) that only the self-hosted box has. If it landed as an unconditional
+job, every fork PR would go permanently red (auth-less GitHub-hosted runners),
+training everyone to ignore CI; and exposing a self-hosted runner to untrusted PR
+code unconditionally is a host-compromise vector that the operator's public-repo
+CI guidance forbids. Splitting hermetic (always-on, fork-green) from live
+(maintainer-gated, self-hosted, advisory) is the minimal compliant design. (#238,
+gates #222 + anchors on [INV-74](#inv-74-adapter-conformance-is-regression-pinned-by-a-hermetic-fixture-manifest-runner).)
+
+**Producer**: `.github/workflows/ci.yml` (the job structure + `if:` gate +
+`runs-on`); `setup-labels.sh` (defines the `run-live-smoke` gate label so it
+exists on day one).
+
+**Consumer**: GitHub Actions (schedules jobs per the `on:` triggers + `if:`
+gate); maintainers (apply `run-live-smoke` to authorize a live run); branch
+protection (marks the two `hermetic-*` jobs required, `live-smoke` not).
+
+**Tested by**:
+- `tests/unit/test-ci-two-tier-lanes.sh` (TC-CI-TIERS-010..051) — structural
+  truth-table assertions over `ci.yml` (pyyaml): hermetic jobs are
+  `ubuntu-latest` + credential-free; `live-smoke.if` matches the label-OR-push
+  gate; no `pull_request_target`; `pull_request` declares `labeled`; `live-smoke`
+  invokes `run-agent-smoke.sh`, targets self-hosted, writes a job summary; and
+  `setup-labels.sh` defines `run-live-smoke`.
+- `hermetic-shellcheck`'s `actionlint` step — deeper workflow syntax +
+  `pull_request_target` foot-gun lint (belt-and-suspenders to the gate-logic test).
+- `docs/test-cases/ci-two-tier-lanes.md` — TC-CI-TIERS-NNN enumeration + the
+  gate truth table.
+
+**Cross-references**:
+- [INV-63](#inv-63-agent-smoke-is-a-three-state-probe-pass--unavailable--fail-run-through-the-production-run_agent-never-a-parallel-invocation-path) — the live matrix harness this tier runs; its three-state rc contract is why UNAVAILABLE does not fail the job.
+- [INV-74](#inv-74-adapter-conformance-is-regression-pinned-by-a-hermetic-fixture-manifest-runner) — the hermetic conformance suite that anchors Tier 1.
+
 ## Adding a new invariant
 
 When fixing a pipeline bug, after locating the bug on the state machine + flow docs:

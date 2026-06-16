@@ -33,6 +33,7 @@ LABELS=(
   "approved|0E8A16|Review passed, PR merged or awaiting manual merge"
   "no-auto-close|d4c5f9|Skip auto-merge after review passes, requires manual approval"
   "stalled|B60205|Issue exceeded max retry attempts, requires manual investigation"
+  "run-live-smoke|006B75|Maintainer gate — run the live agent-smoke CI tier on the self-hosted runner (issue #238, INV-77)"
 )
 
 echo "Setting up labels for ${REPO}..."
