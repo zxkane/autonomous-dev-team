@@ -480,30 +480,53 @@ else
   echo -e "  ${RED}FAIL${NC}: TC-AGENT-SMOKE-011a evidence line: [$out]"; FAIL=$((FAIL + 1))
 fi
 
-# TC-AGENT-SMOKE-SMOKEFN-FAIL — codex stub exits non-zero, no token → rc 1
+# TC-AGENT-SMOKE-SMOKEFN-FAIL — a codex stub that emits a GENUINE config-error
+# (the clap argv rejection, copied from the committed fixture) → rc 1 FAIL.
+# Operator-side breakage is NOT a transient, so it is NOT retried/downgraded under
+# [INV-75] — it stays the gate-worthy FAIL. (Pre-#257 this entry used a
+# bare-no-response stub; that shape now retries → UNAVAILABLE — see TC-006c-NR
+# below — so the genuine-FAIL coverage moves to a real config-error. The stub
+# `cat`s the fixture to avoid brittle inline clap-string quoting.)
+make_stub codex 'cat >/dev/null; cat "'"$FIXTURES"'/codex-review-stdout-config-error.txt"; exit 2'
 out=$(PATH="$STUB_DIR:$ORIG_PATH" smoke_agent codex gpt 5); rc=$?
-assert_rc "TC-AGENT-SMOKE-006c smoke_agent codex (no token) → rc 1 FAIL" 1 "$rc"
+assert_rc "TC-AGENT-SMOKE-006c smoke_agent codex (config-error) → rc 1 FAIL (not retried)" 1 "$rc"
 assert_contains "TC-AGENT-SMOKE-011b evidence line is a FAIL" "SMOKE codex FAIL" "$out"
 
-# TC-AGENT-SMOKE-039d — the #222 [P1] end-to-end: a broken CLI that echoes the
-# prompt (which CONTAINS the nonce) onto STDERR and exits non-zero, with EMPTY
-# stdout, must be FAIL — not a false PASS from stderr leaking into the nonce
-# check. The claude branch feeds the prompt on stdin; this stub copies stdin
-# (the prompt, nonce included) to stderr and exits 3 with nothing on stdout.
+# TC-AGENT-SMOKE-006c-NR ([INV-75] end-to-end) — a codex stub that exits non-zero
+# with NO token and NO recognizable signal (the bare `no-response` shape, codex
+# being the Bedrock-backed CLI the issue motivates) is now RETRIED ONCE and, when
+# the retry stays no-response, classified UNAVAILABLE (rc 2) — NOT a FAIL. This is
+# the production-shape end-to-end of the #257 fix through the real run_agent chain.
+make_stub codex 'cat >/dev/null; echo "boom (no model response, no signal)" >&2; exit 4'
+out=$(PATH="$STUB_DIR:$ORIG_PATH" smoke_agent codex gpt 5); rc=$?
+assert_rc "TC-AGENT-SMOKE-006c-NR codex bare no-response (×2) → rc 2 UNAVAILABLE ([INV-75])" 2 "$rc"
+assert_contains "TC-AGENT-SMOKE-006c-NR2 evidence is UNAVAILABLE + after-retry reason" "SMOKE codex UNAVAILABLE" "$out"
+assert_contains "TC-AGENT-SMOKE-006c-NR3 reason names the post-retry transient" "after retry" "$out"
+
+# TC-AGENT-SMOKE-039d — the #222 [P1] security property end-to-end: a broken CLI
+# that echoes the prompt (which CONTAINS the nonce) onto STDERR and exits non-zero,
+# with EMPTY stdout, must NOT be a false PASS (no model response occurred). The
+# claude branch feeds the prompt on stdin; this stub copies stdin (the prompt,
+# nonce included) to stderr and exits 3 with nothing on stdout. Under [INV-75] this
+# bare no-response (no scraper signal) is retried once and, staying no-response,
+# classifies UNAVAILABLE (rc 2) — STILL NOT a PASS, so the no-false-PASS property is
+# preserved; only the rc moved from 1 (FAIL) to 2 (UNAVAILABLE, the transient drop).
 make_stub claude 'cat >&2; exit 3'
 out=$(PATH="$STUB_DIR:$ORIG_PATH" smoke_agent claude sonnet 5); rc=$?
-assert_rc "TC-AGENT-SMOKE-039d prompt echoed to STDERR + non-zero exit → rc 1 FAIL (no false PASS)" 1 "$rc"
-assert_contains "TC-AGENT-SMOKE-039e evidence line is a FAIL (not PASS)" "SMOKE claude FAIL" "$out"
+assert_rc "TC-AGENT-SMOKE-039d prompt echoed to STDERR + non-zero exit → rc 2 (UNAVAILABLE, NOT a false PASS)" 2 "$rc"
+assert_contains "TC-AGENT-SMOKE-039e evidence is NOT a PASS" "SMOKE claude UNAVAILABLE" "$out"
 
-# TC-AGENT-SMOKE-045d — the #222 [P1] r2 end-to-end: a broken CLI that echoes the
-# prompt (nonce included) to STDOUT and THEN exits non-zero must be FAIL — the
-# rc-0 PASS gate rejects the nonce from a failed run. This is the stdout sibling
-# of TC-039d (which covered the stderr case). The stub copies stdin to STDOUT
-# (so the nonce IS present on stdout) then exits 3.
+# TC-AGENT-SMOKE-045d — the #222 [P1] r2 security property end-to-end: a broken CLI
+# that echoes the prompt (nonce included) to STDOUT and THEN exits non-zero must NOT
+# be a false PASS — the rc-0 PASS gate rejects the nonce from a failed run. This is
+# the stdout sibling of TC-039d. The stub copies stdin to STDOUT (so the nonce IS
+# present on stdout) then exits 3. Under [INV-75] this bare no-response is retried
+# once and stays no-response (the retry re-runs the same stub) → UNAVAILABLE (rc 2),
+# STILL NOT a PASS — the no-false-PASS property holds across the retry.
 make_stub claude 'cat; exit 3'
 out=$(PATH="$STUB_DIR:$ORIG_PATH" smoke_agent claude sonnet 5); rc=$?
-assert_rc "TC-AGENT-SMOKE-045d nonce on STDOUT + non-zero exit → rc 1 FAIL (no false PASS)" 1 "$rc"
-assert_contains "TC-AGENT-SMOKE-045e evidence line is a FAIL (not PASS)" "SMOKE claude FAIL" "$out"
+assert_rc "TC-AGENT-SMOKE-045d nonce on STDOUT + non-zero exit → rc 2 (UNAVAILABLE, NOT a false PASS)" 2 "$rc"
+assert_contains "TC-AGENT-SMOKE-045e evidence is NOT a PASS" "SMOKE claude UNAVAILABLE" "$out"
 # Restore the plain PASS claude stub for any later cases.
 make_stub claude 'in=$(cat); printf "%s\n" "$(printf "%s" "$in" | grep -oE "SMOKE-[0-9a-f]{16}" | head -1)"; exit 0'
 
@@ -559,6 +582,143 @@ assert_rc "TC-AGENT-SMOKE-046d unit timeout '2m' → rc 0 PASS (passed through v
 out=$(smoke_agent "" "" 2>/dev/null); rc=$?
 assert_rc "TC-AGENT-SMOKE-013a empty agent-cmd → rc 1" 1 "$rc"
 assert_contains "TC-AGENT-SMOKE-013b bad-args evidence line printed" "FAIL" "$out"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-AGENT-SMOKE-075: smoke_agent no-response RETRY-ONCE (issue #257, INV-75) ==="
+# ---------------------------------------------------------------------------
+# A bare `no-response` (rc≠0, nonce absent, no per-CLI scraper signal — the
+# step-5 fallthrough) is a TRANSIENT infra hiccup, not operator-side breakage.
+# smoke_agent must RETRY it ONCE: a retry that PASSes → PASS; a retry that is
+# STILL no-response → UNAVAILABLE (the member is dropped, the review proceeds),
+# NOT a single-shot gate-aborting FAIL.
+#
+# Stub mechanism: a per-call counter FILE in STUB_DIR. The stub increments it on
+# every invocation and branches on the count, so a single `smoke_agent` call
+# (which internally drives `run_agent` once, then again on retry) sees probe #1
+# and probe #2 behave differently. Reset the counter before each test.
+SMOKE_RETRY_CTR="$STUB_DIR/retry-counter"
+
+# A `claude` stub: ALWAYS no-response (exit 4, empty stdout, no scraper signal —
+# claude has no per-CLI smoke scraper, so the capture yields no token → step-5).
+# It bumps the counter so the bound check can read how many probes ran.
+make_stub claude '
+cat >/dev/null
+n=$(cat "'"$SMOKE_RETRY_CTR"'" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "'"$SMOKE_RETRY_CTR"'"
+exit 4'
+
+# TC-AGENT-SMOKE-075a (REGRESSION — MUST fail before the fix) — probe #1 AND the
+# retry are both bare no-response → final state UNAVAILABLE (rc 2), with the
+# distinct "after retry — transient infra" reason. Before the fix the first probe
+# is a single-shot FAIL (rc 1).
+: > "$SMOKE_RETRY_CTR"
+out=$(PATH="$STUB_DIR:$ORIG_PATH" smoke_agent claude sonnet 5); rc=$?
+assert_rc "TC-AGENT-SMOKE-075a no-response then no-response → rc 2 UNAVAILABLE (not FAIL)" 2 "$rc"
+assert_contains "TC-AGENT-SMOKE-075a2 evidence is UNAVAILABLE" "SMOKE claude UNAVAILABLE" "$out"
+assert_contains "TC-AGENT-SMOKE-075a3 reason names the post-retry transient" "after retry" "$out"
+
+# TC-AGENT-SMOKE-075f (BOUND) — the retry fired EXACTLY ONCE: the stub ran twice
+# (probe + one retry), never a third time. Read the counter the 075a run left.
+n=$(cat "$SMOKE_RETRY_CTR" 2>/dev/null || echo 0)
+assert_eq "TC-AGENT-SMOKE-075f retry is bounded to one extra probe (stub ran exactly 2x)" "2" "$n"
+
+# TC-AGENT-SMOKE-075b — probe #1 no-response, probe #2 ECHOES the nonce (rc 0) →
+# final state PASS (rc 0). The retry recovered a transient.
+make_stub claude '
+in=$(cat)
+n=$(cat "'"$SMOKE_RETRY_CTR"'" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "'"$SMOKE_RETRY_CTR"'"
+if [[ "$n" -ge 2 ]]; then
+  printf "%s\n" "$(printf "%s" "$in" | grep -oE "SMOKE-[0-9a-f]{16}" | head -1)"; exit 0
+fi
+exit 4'
+: > "$SMOKE_RETRY_CTR"
+out=$(PATH="$STUB_DIR:$ORIG_PATH" smoke_agent claude sonnet 5); rc=$?
+assert_rc "TC-AGENT-SMOKE-075b no-response then PASS on retry → rc 0 PASS" 0 "$rc"
+assert_contains "TC-AGENT-SMOKE-075b2 evidence is PASS" "SMOKE claude PASS" "$out"
+
+# TC-AGENT-SMOKE-075c — a codex stub that emits the clap `config-error` signal on
+# probe #1 → FAIL on the FIRST probe, NO retry. Genuine operator-side breakage
+# stays gate-worthy and is NOT retried/downgraded. The codex branch feeds the
+# prompt on stdin via `-` and the scraper recognizes the clap usage string.
+CFG_ERR="$(cat "$FIXTURES/codex-review-stdout-config-error.txt")"
+make_stub codex '
+cat >/dev/null
+n=$(cat "'"$SMOKE_RETRY_CTR"'" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "'"$SMOKE_RETRY_CTR"'"
+cat <<'"'"'CFGEOF'"'"'
+'"$CFG_ERR"'
+CFGEOF
+exit 2'
+: > "$SMOKE_RETRY_CTR"
+out=$(PATH="$STUB_DIR:$ORIG_PATH" smoke_agent codex gpt 5); rc=$?
+assert_rc "TC-AGENT-SMOKE-075c config-error on probe 1 → rc 1 FAIL (no retry)" 1 "$rc"
+assert_contains "TC-AGENT-SMOKE-075c2 evidence is FAIL (config-error, not no-response)" "SMOKE codex FAIL" "$out"
+n=$(cat "$SMOKE_RETRY_CTR" 2>/dev/null || echo 0)
+assert_eq "TC-AGENT-SMOKE-075c3 config-error FAIL is NOT retried (stub ran exactly 1x)" "1" "$n"
+
+# TC-AGENT-SMOKE-075d — a bare timeout (rc 124/137) is INV-67 UNAVAILABLE on the
+# FIRST probe, NO retry (this issue only changes the step-5 no-response branch).
+make_stub slowcli '
+cat >/dev/null
+n=$(cat "'"$SMOKE_RETRY_CTR"'" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "'"$SMOKE_RETRY_CTR"'"
+sleep 30; exit 0'
+: > "$SMOKE_RETRY_CTR"
+out=$(PATH="$STUB_DIR:$ORIG_PATH" smoke_agent slowcli "" 1); rc=$?
+assert_rc "TC-AGENT-SMOKE-075d bare timeout → rc 2 UNAVAILABLE (INV-67, no retry)" 2 "$rc"
+assert_contains "TC-AGENT-SMOKE-075d2 reason=timeout (not no-response)" "reason=timeout" "$out"
+n=$(cat "$SMOKE_RETRY_CTR" 2>/dev/null || echo 0)
+assert_eq "TC-AGENT-SMOKE-075d3 bare-timeout UNAVAILABLE is NOT retried (stub ran exactly 1x)" "1" "$n"
+
+# TC-AGENT-SMOKE-075e — an agy quota signal on probe #1 → UNAVAILABLE on the
+# FIRST probe, NO retry (env signal wins; unchanged).
+make_stub agy '
+cat >/dev/null
+n=$(cat "'"$SMOKE_RETRY_CTR"'" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "'"$SMOKE_RETRY_CTR"'"
+logf=""
+while [[ $# -gt 0 ]]; do case "$1" in --log-file) logf="$2"; shift 2 ;; *) shift ;; esac; done
+[[ -n "$logf" ]] && cp "'"$FIXTURES"'/agy-quota-exhausted.fixture" "$logf"
+exit 0'
+: > "$SMOKE_RETRY_CTR"
+out=$(PATH="$STUB_DIR:$ORIG_PATH" smoke_agent agy "" 5); rc=$?
+assert_rc "TC-AGENT-SMOKE-075e agy quota on probe 1 → rc 2 UNAVAILABLE (no retry)" 2 "$rc"
+n=$(cat "$SMOKE_RETRY_CTR" 2>/dev/null || echo 0)
+assert_eq "TC-AGENT-SMOKE-075e2 quota UNAVAILABLE is NOT retried (stub ran exactly 1x)" "1" "$n"
+
+# TC-AGENT-SMOKE-075g — probe #1 no-response, probe #2 surfaces a genuine codex
+# config-error → FAIL. The retry EXPOSED real operator-side breakage; it must NOT
+# be masked as UNAVAILABLE.
+make_stub codex '
+cat >/dev/null
+n=$(cat "'"$SMOKE_RETRY_CTR"'" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "'"$SMOKE_RETRY_CTR"'"
+if [[ "$n" -ge 2 ]]; then
+cat <<'"'"'CFGEOF2'"'"'
+'"$CFG_ERR"'
+CFGEOF2
+  exit 2
+fi
+exit 4'
+: > "$SMOKE_RETRY_CTR"
+out=$(PATH="$STUB_DIR:$ORIG_PATH" smoke_agent codex gpt 5); rc=$?
+assert_rc "TC-AGENT-SMOKE-075g no-response then config-error on retry → rc 1 FAIL (not masked)" 1 "$rc"
+assert_contains "TC-AGENT-SMOKE-075g2 evidence is FAIL" "SMOKE codex FAIL" "$out"
+
+# TC-AGENT-SMOKE-075h/075i — _smoke_classify PURITY guards: the fix must NOT alter
+# the pure per-probe decision function. The step-5 reason string the driver keys
+# on (`no-response`) and the auth/config discriminator are intact.
+NONCE="SMOKE-0123456789abcdef"
+EMPTY=$(mktemp "${TMPDIR:-/tmp}/smoke-empty-XXXXXX"); : > "$EMPTY"
+assert_eq "TC-AGENT-SMOKE-075h _smoke_classify single probe rc3 no signal → FAIL|no-response" \
+  "FAIL|no-response (rc=3; nonce absent from CLI output)" \
+  "$(_smoke_classify claude 3 "$EMPTY" "$NONCE" "")"
+CFGCAP=$(mktemp "${TMPDIR:-/tmp}/smoke-cfg-XXXXXX"); cp "$FIXTURES/codex-review-stdout-config-error.txt" "$CFGCAP"
+cls=$(_smoke_classify codex 2 "$CFGCAP" "$NONCE" "" "$CFGCAP")
+if [[ "$cls" == FAIL\|* && "$cls" != *no-response* ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-AGENT-SMOKE-075i _smoke_classify config-error → FAIL (not no-response)"; PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-AGENT-SMOKE-075i unexpected classify=[$cls]"; FAIL=$((FAIL + 1))
+fi
+rm -f "$EMPTY" "$CFGCAP" "$SMOKE_RETRY_CTR" 2>/dev/null || true
+# Restore the plain PASS claude stub for any later cases.
+make_stub claude 'in=$(cat); printf "%s\n" "$(printf "%s" "$in" | grep -oE "SMOKE-[0-9a-f]{16}" | head -1)"; exit 0'
 
 # ---------------------------------------------------------------------------
 echo ""

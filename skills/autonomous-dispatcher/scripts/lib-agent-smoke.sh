@@ -394,44 +394,37 @@ _smoke_classify() {
   return 0
 }
 
-# smoke_agent <agent-cmd> <model> [timeout-seconds]
+# _smoke_probe_once <agent> <model> <agent_timeout> — run ONE real one-token
+# round-trip against <agent>/<model> via the production run_agent chain and
+# classify it. Echoes ONE line `STATE|reason|elapsed` on stdout (STATE ∈
+# {PASS,UNAVAILABLE,FAIL}); rc of THIS function is always 0 — the STATE is carried
+# on stdout, never in $?, so the caller never trips `set -e` on a FAIL probe. The
+# 3-field `STATE|reason|elapsed` shape is command-substitution-safe: elapsed is the
+# LAST field, so the caller splits it off the tail and the reason (which contains
+# spaces/parens but no `|`) survives intact.
 #
-# Run a real one-token round-trip against <agent-cmd>/<model> via the production
-# run_agent chain and classify the outcome into the three-state contract.
+# WHY this is its own function ([INV-75] / issue #257): the retry-once of a bare
+# `no-response` needs a FRESH run_agent round-trip — a new nonce, a new session id,
+# a new stdout/stderr capture — and `_smoke_classify` is a PURE decision function
+# that cannot drive run_agent. Factoring the single-probe body here lets smoke_agent
+# invoke it twice (probe + at most one retry) with zero duplicated invocation code,
+# and keeps `_smoke_classify` a single-probe pure function ([INV-63]).
 #
-# Returns:  0 PASS   2 UNAVAILABLE   1 FAIL
-# Emits ONE machine-readable evidence line on stdout (consumed by the INV-46
-# command-mode evidence parser):
-#   SMOKE <agent> <PASS|FAIL|UNAVAILABLE> <elapsed>s reason=<...>
+# <agent_timeout> is the already-normalized `timeout(1)` duration (e.g. `5s`/`2m`)
+# the caller built; this function sets SMOKE_TIMEOUT_USED from it so the timeout
+# reason text reads `…within 5s` not `…within 5ss` (#222 [P2]).
 #
-# A missing/empty <agent-cmd> is a caller bug → FAIL with reason=bad-args (the
-# evidence line still prints so the harness records it deterministically).
-smoke_agent() {
-  local agent="${1:-}" model="${2:-}" timeout_s="${3:-$SMOKE_DEFAULT_TIMEOUT_SECONDS}"
-
-  if [[ -z "$agent" ]]; then
-    printf 'SMOKE <none> FAIL 0s reason=bad-args (empty agent-cmd)\n'
-    return 1
-  fi
-  # Validate the timeout; a non-positive/garbage value falls back to the default
-  # so a typo can never DISABLE the bound (GNU `timeout 0` disables — INV-13).
-  if ! _is_positive_timeout_value "$timeout_s"; then
-    timeout_s="$SMOKE_DEFAULT_TIMEOUT_SECONDS"
-  fi
-  # Normalize to a `timeout(1)`-ready duration (#222 [P2] review): the validator
-  # accepts BOTH bare seconds (`5`) and suffixed durations (`5s`/`2h`). A suffixed
-  # value must NOT get another `s` appended — `5ss` makes coreutils `timeout` fail
-  # immediately ("invalid time interval") on an otherwise healthy CLI. So append
-  # `s` ONLY when the value is bare digits; a value that already carries a unit is
-  # passed through verbatim.
-  local agent_timeout="$timeout_s"
-  [[ "$agent_timeout" =~ ^[0-9]+$ ]] && agent_timeout="${agent_timeout}s"
+# A mktemp failure echoes `FAIL|mktemp-failed|0` (the caller renders the evidence
+# line). Each probe mints its OWN nonce/session-id so a retry cannot stale-PASS off
+# the first probe's stdout, and so the agy --log-file sidecar stays unique.
+_smoke_probe_once() {
+  local agent="$1" model="$2" agent_timeout="$3"
 
   local nonce stdout_file stderr_file agy_log session_id
   nonce=$(_smoke_nonce)
   stdout_file=$(mktemp "${TMPDIR:-/tmp}/smoke-${agent}-out-XXXXXX") || {
-    printf 'SMOKE %s FAIL 0s reason=mktemp-failed\n' "$agent"
-    return 1
+    printf 'FAIL|mktemp-failed|0\n'
+    return 0
   }
   # Separate stderr capture (#222 [P1] review): the nonce PASS check must read
   # ONLY stdout, so a CLI/wrapper that echoes the prompt (which contains the
@@ -439,8 +432,8 @@ smoke_agent() {
   # to the kiro/codex drop-reason scrapers (they get a combined view).
   stderr_file=$(mktemp "${TMPDIR:-/tmp}/smoke-${agent}-err-XXXXXX") || {
     rm -f "$stdout_file" 2>/dev/null || true
-    printf 'SMOKE %s FAIL 0s reason=mktemp-failed\n' "$agent"
-    return 1
+    printf 'FAIL|mktemp-failed|0\n'
+    return 0
   }
   # A per-call session id — a VALID UUID (claude's --session-id rejects non-UUIDs;
   # #222 [P1]). Also keeps the agy --log-file sidecar (run_agent's agy branch
@@ -489,6 +482,127 @@ smoke_agent() {
   reason="${classified#*|}"
 
   rm -f "$stdout_file" "$stderr_file" 2>/dev/null || true
+
+  printf '%s|%s|%s\n' "$state" "$reason" "$elapsed"
+  return 0
+}
+
+# _smoke_is_transient_no_response <state> <reason> — rc 0 iff the probe outcome is
+# the step-5 generic `no-response` FAIL (the retry-eligible TRANSIENT case), rc 1
+# otherwise. This is the discriminator smoke_agent uses to decide whether to retry:
+#
+#   - `_smoke_classify`'s step-5 fallthrough is the ONLY path that emits
+#     `FAIL|no-response (…)`. The genuine operator-side FAILs (`auth-failed`,
+#     `config-error[:<flag>]`) carry their own scraper phrase, never `no-response`,
+#     so they do NOT match → no retry, gate-worthy on the first probe (preserved).
+#   - The pre-flight FAILs (`bad-args`, `mktemp-failed`) also do NOT start with
+#     `no-response`.
+#
+# Keying on STATE==FAIL && reason-prefix `no-response` is the structural contract
+# (mirrors [INV-67]'s note that only the bare branch is relaxed); a future reword of
+# the human reason text MUST keep the `no-response` prefix or update this guard.
+_smoke_is_transient_no_response() {
+  local state="$1" reason="$2"
+  [[ "$state" == "FAIL" && "$reason" == no-response* ]]
+}
+
+# smoke_agent <agent-cmd> <model> [timeout-seconds]
+#
+# Run a real one-token round-trip against <agent-cmd>/<model> via the production
+# run_agent chain and classify the outcome into the three-state contract.
+#
+# Returns:  0 PASS   2 UNAVAILABLE   1 FAIL
+# Emits ONE machine-readable evidence line on stdout (consumed by the INV-46
+# command-mode evidence parser):
+#   SMOKE <agent> <PASS|FAIL|UNAVAILABLE> <elapsed>s reason=<...>
+#
+# A missing/empty <agent-cmd> is a caller bug → FAIL with reason=bad-args (the
+# evidence line still prints so the harness records it deterministically).
+#
+# RETRY-ONCE on a bare `no-response` ([INV-75] / issue #257): a step-5 generic
+# `no-response` FAIL (rc≠0, nonce absent, NO per-CLI scraper signal, NOT a
+# timeout) is a TRANSIENT infra hiccup on a Bedrock-backed CLI — the CLI died
+# before emitting any recognizable signal — not operator-side config breakage. So
+# smoke_agent RETRIES it EXACTLY ONCE (one fresh probe — a cheap one-token
+# round-trip):
+#   - retry PASSes (nonce present)            → PASS (the transient cleared);
+#   - retry surfaces a real auth/config FAIL  → FAIL (the retry exposed genuine
+#                                               breakage — surface it, don't mask);
+#   - retry STILL bare no-response / any      → UNAVAILABLE, reason
+#     other non-FAIL transient                  `no-response (rc=<n>; no nonce after
+#                                               retry — transient infra)`.
+# An UNAVAILABLE member casts NO Phase A.5 vote ([INV-64]) — the review proceeds on
+# the survivors instead of aborting. Genuine config breakage (`auth-failed` /
+# `config-error`) and the already-environmental UNAVAILABLE cases (quota /
+# stream-error / malformed-output / bare timeout [INV-67]) are returned on the FIRST
+# probe with NO retry — unchanged.
+smoke_agent() {
+  local agent="${1:-}" model="${2:-}" timeout_s="${3:-$SMOKE_DEFAULT_TIMEOUT_SECONDS}"
+
+  if [[ -z "$agent" ]]; then
+    printf 'SMOKE <none> FAIL 0s reason=bad-args (empty agent-cmd)\n'
+    return 1
+  fi
+  # Validate the timeout; a non-positive/garbage value falls back to the default
+  # so a typo can never DISABLE the bound (GNU `timeout 0` disables — INV-13).
+  if ! _is_positive_timeout_value "$timeout_s"; then
+    timeout_s="$SMOKE_DEFAULT_TIMEOUT_SECONDS"
+  fi
+  # Normalize to a `timeout(1)`-ready duration (#222 [P2] review): the validator
+  # accepts BOTH bare seconds (`5`) and suffixed durations (`5s`/`2h`). A suffixed
+  # value must NOT get another `s` appended — `5ss` makes coreutils `timeout` fail
+  # immediately ("invalid time interval") on an otherwise healthy CLI. So append
+  # `s` ONLY when the value is bare digits; a value that already carries a unit is
+  # passed through verbatim.
+  local agent_timeout="$timeout_s"
+  [[ "$agent_timeout" =~ ^[0-9]+$ ]] && agent_timeout="${agent_timeout}s"
+
+  # Probe #1. _smoke_probe_once echoes `STATE|reason|elapsed`; split elapsed off the
+  # TAIL (it is the last `|`-field) so the reason (which contains spaces/parens but
+  # no `|`) stays intact.
+  local probe state reason elapsed rest
+  probe=$(_smoke_probe_once "$agent" "$model" "$agent_timeout")
+  state="${probe%%|*}"
+  rest="${probe#*|}"           # reason|elapsed
+  reason="${rest%|*}"          # reason
+  elapsed="${rest##*|}"        # elapsed
+
+  # [INV-75] retry-once: ONLY the step-5 bare `no-response` FAIL is retried.
+  # Anything else (PASS, an environmental UNAVAILABLE, a genuine auth/config FAIL,
+  # or a pre-flight bad-args/mktemp FAIL) is returned as-is — no retry.
+  if _smoke_is_transient_no_response "$state" "$reason"; then
+    local probe2 state2 reason2 elapsed2 rest2
+    probe2=$(_smoke_probe_once "$agent" "$model" "$agent_timeout")
+    state2="${probe2%%|*}"
+    rest2="${probe2#*|}"
+    reason2="${rest2%|*}"
+    elapsed2="${rest2##*|}"
+    # Report the TOTAL elapsed across both probes so the evidence reflects the real
+    # wall-clock cost of the retried smoke.
+    [[ "$elapsed" =~ ^[0-9]+$ && "$elapsed2" =~ ^[0-9]+$ ]] && elapsed=$((elapsed + elapsed2))
+    case "$state2" in
+      PASS)
+        # The transient cleared on the retry — the member is healthy.
+        state="PASS"; reason="$reason2" ;;
+      FAIL)
+        if _smoke_is_transient_no_response "$state2" "$reason2"; then
+          # Failed twice with a bare no-response → drop UNAVAILABLE (transient
+          # infra), naming the retry probe's rc. The retry reason is
+          # `no-response (rc=<n>; nonce absent from CLI output)`; pull out <n> and
+          # render the explicit after-retry message.
+          local rc2="${reason2#*rc=}"; rc2="${rc2%%;*}"
+          state="UNAVAILABLE"
+          reason="no-response (rc=${rc2}; no nonce after retry — transient infra)"
+        else
+          # The retry exposed a GENUINE auth/config FAIL → keep it gate-worthy.
+          state="FAIL"; reason="$reason2"
+        fi ;;
+      *)
+        # Any other non-FAIL transient on the retry (an UNAVAILABLE scraper signal
+        # or a timeout) — drop the member UNAVAILABLE with that probe's reason.
+        state="UNAVAILABLE"; reason="$reason2" ;;
+    esac
+  fi
 
   printf 'SMOKE %s %s %ss reason=%s\n' "$agent" "$state" "$elapsed" "$reason"
 

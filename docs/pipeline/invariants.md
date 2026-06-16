@@ -3204,6 +3204,125 @@ plus the **generic-fallback `*)` branch** for an unknown CLI. An inline
 - [INV-66](#inv-66-adapter-conformance-is-spec-defined) / [INV-74](#inv-74-adapter-conformance-is-regression-pinned-by-a-hermetic-fixture-manifest-runner) — the spec + conformance pin the relocation preserved.
 - [INV-14](#inv-14-vendored-scripts-resolve-siblings-via-bash_source-not-cwd) / [INV-65](#inv-65-entry-scripts-resolve-conf-from-the-unresolved-path-and-libs-from-the-real-skill-tree-path-two-dir-resolution) — the BASH_SOURCE / skill-tree resolution the shims and adapter sourcing use.
 
+## INV-75: a transient smoke `no-response` (rc≠0, no signal) retries once, then drops UNAVAILABLE — never a single-shot gate FAIL
+
+> **Note**: authored as **INV-75** (next free number; `main` was at INV-74). A
+> concurrent in-flight PR (#238 / two-tier CI lanes) also drafted INV-75 against the
+> same `main`; whichever lands second renumbers to the next free number at rebase
+> (per the standard duplicate-heading / broken-anchor avoidance — see "Adding a new
+> invariant"). The number is disambiguated here by issue #257.
+
+**Rule**: in `lib-agent-smoke.sh`, the **driver** `smoke_agent` retries a bare
+`no-response` smoke **exactly once** before deciding. A "bare `no-response`" is the
+`_smoke_classify` **step-5** fallthrough: the CLI exited **non-zero**, the nonce is
+**absent** from stdout, there is **no** per-CLI scraper signal (not quota /
+stream-error / malformed-output / auth-failed / config-error), and it is **not** a
+`124`/`137` timeout. On a Bedrock-backed CLI (codex via IAM-role→Bedrock) that shape
+is far more likely a **transient infra hiccup** — the CLI died before emitting any
+recognizable signal — than operator-side config breakage, so it is treated as a
+TRANSIENT (the same tolerance [INV-67](#inv-67-a-bare-smoke-timeout-rc-124137-with-no-authconfig-signal-classifies-unavailable-not-fail) gives a bare timeout and [INV-73](#inv-73-a-codex-review-prompt-echo--startup-trace-stdout-is-malformed-never-a-blocking-p1-fail--retry-or-drop-not-a-phantom-veto) gives a codex malformed-output):
+
+- The first probe classifies as the step-5 bare `no-response` FAIL → run **one
+  additional fresh `smoke_agent` probe** of the same member (a one-token round-trip).
+- Retry **PASSes** (nonce present) → **PASS** (the transient cleared); the member
+  fans out.
+- Retry is **still** a bare `no-response` (or any other **non-FAIL** transient on the
+  retry) → **UNAVAILABLE**, reason `no-response (rc=<n>; no nonce after retry —
+  transient infra)`. The member casts **no** [INV-64](#inv-64-the-review-wrapper-smokes-every-fan-out-member-before-the-fan-out-phase-a5-fail-aborts-the-review-unavailable-drops-the-member-pass-proceeds) Phase A.5 vote — the review proceeds on the survivors instead of aborting.
+- Retry surfaces a **genuine `auth-failed` / `config-error`** signal → **FAIL** (the
+  retry exposed real operator-side breakage — surface it, do not mask it).
+
+Sub-rules:
+
+1. **ONLY the step-5 bare `no-response` is retried.** The discriminator is structural
+   (`_smoke_is_transient_no_response`): STATE==`FAIL` **and** the reason begins with
+   `no-response`. `_smoke_classify`'s step-5 fallthrough is the ONLY path that emits
+   `FAIL|no-response (…)`; the genuine operator-side FAILs (`auth-failed`,
+   `config-error[:<flag>]`) carry their own scraper phrase, never `no-response`, and
+   the pre-flight FAILs (`bad-args`, `mktemp-failed`) likewise. So a genuine config
+   break is **FAIL on the first probe, no retry** — unchanged, gate-worthy.
+
+2. **The already-environmental UNAVAILABLE cases are untouched.** `quota-exhausted` /
+   `stream-error` / `malformed-output` (the `*|*|*` UNAVAILABLE branch) and the bare
+   `124`/`137` timeout ([INV-67](#inv-67-a-bare-smoke-timeout-rc-124137-with-no-authconfig-signal-classifies-unavailable-not-fail)) classify UNAVAILABLE on the **first** probe with **no
+   retry**. This invariant changes only the step-5 generic `no-response` fallthrough.
+
+3. **`_smoke_classify` stays a pure single-probe decision function ([INV-63](#inv-63-agent-smoke-is-a-three-state-probe-pass--unavailable--fail-run-through-the-production-run_agent-never-a-parallel-invocation-path)).** It
+   cannot drive a fresh `run_agent`, so the retry lives in the driver. The single
+   probe is factored into `_smoke_probe_once` (a new helper that mints a fresh
+   nonce/session-id per probe so a retry cannot stale-PASS off the first probe's
+   stdout), invoked at most twice by `smoke_agent`.
+
+4. **Bounded to one extra probe.** The retry fires exactly once — no loop, no
+   runaway counter. A second `no-response` resolves to UNAVAILABLE deterministically.
+   The wall-clock cost is one extra one-token round-trip in the (rare) transient case
+   only; the reported `elapsed` is the sum across both probes.
+
+5. **No gate code change — the propagation is automatic.**
+   `lib-review-smoke.sh::_classify_smoke_state` already maps `smoke_agent` rc 2 →
+   `unavailable`, and `_classify_smoke_gate` already treats `unavailable` as a dropped
+   member (`fail` > `all-unavailable` > `pass` precedence, [INV-64](#inv-64-the-review-wrapper-smokes-every-fan-out-member-before-the-fan-out-phase-a5-fail-aborts-the-review-unavailable-drops-the-member-pass-proceeds)). So this
+   `smoke_agent` change flows through unchanged: one no-response member → dropped +
+   review proceeds; ALL members no-response → `all-unavailable` (the existing
+   [INV-40](#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback) terminal path, **no empty fan-out spawned**).
+
+6. **Fail-safe / non-Bedrock care.** The retry-then-UNAVAILABLE applies regardless of
+   CLI (a transient no-response is environmental for any CLI). It does NOT mask a
+   *consistently* broken CLI: a genuinely misconfigured member typically surfaces an
+   `auth-failed` / `config-error` scraper signal (→ FAIL, unaffected, sub-rule 1) or
+   fails both the probe and its retry (→ UNAVAILABLE drop, the same terminal class as
+   a crashed reviewer — it abstains rather than vetoing every PR).
+
+**Why**: observed in this repo's own self-review pipeline (#257). During a
+multi-issue backlog drain on a single-agent codex fleet (the only other member
+quota-/auth-unavailable), a review **wedged ~7 times**, every wedge keyed on
+`reason=no-response` (`SMOKE codex FAIL <N>s reason=no-response (rc=1; nonce absent
+from CLI output)` → `smoke gate over [fail] → fail` → `aborting the review WITHOUT
+fan-out`). Each required a manual `reviewing → pending-review` label flip; codex
+itself was healthy (~88% smoke-pass on the same config), confirming the
+`no-response` was transient, not a misconfiguration. This is the **smoke-stage
+sibling** of the review-stage codex transient fixes (#252 / #254, [INV-73](#inv-73-a-codex-review-prompt-echo--startup-trace-stdout-is-malformed-never-a-blocking-p1-fail--retry-or-drop-not-a-phantom-veto)) — the one
+transient path that was still single-shot-FAILing.
+
+**Producer**: `lib-agent-smoke.sh` — `smoke_agent` (the retry-once driver), the new
+`_smoke_probe_once` (single-probe body) and `_smoke_is_transient_no_response` (the
+retry discriminator). `_smoke_classify` is unchanged (still emits `FAIL|no-response`
+for a single step-5 probe).
+
+**Consumer**: the [INV-64](#inv-64-the-review-wrapper-smokes-every-fan-out-member-before-the-fan-out-phase-a5-fail-aborts-the-review-unavailable-drops-the-member-pass-proceeds) Phase A.5 gate (`lib-review-smoke.sh::_classify_smoke_state`
+→ `_classify_smoke_gate`), which drops the UNAVAILABLE member and proceeds; the
+[INV-46](#inv-46-e2e-runs-once-in-a-dedicated-lane-before-the-review-fan-out--gated-not-per-agent) command-mode evidence parser when this repo runs the matrix as its own PR E2E
+(the `SMOKE … UNAVAILABLE … reason=no-response (… after retry — transient infra)`
+line is non-blocking).
+
+**Status**: **ENFORCED** (closes #257).
+
+**Test**: `tests/unit/test-lib-agent-smoke.sh` — TC-AGENT-SMOKE-075a (regression:
+first probe rc≠0 / nonce absent / no signal AND a retry that is also no-response →
+**UNAVAILABLE**, **proven to FAIL against the pre-#257 single-shot-FAIL**), 075b
+(retry PASSes → PASS), 075c (config-error on probe 1 → FAIL, no retry), 075d (bare
+timeout → UNAVAILABLE, no retry — INV-67 unchanged), 075e (agy quota → UNAVAILABLE,
+no retry), 075f (bound: stub invoked exactly twice), 075g (no-response then
+config-error on retry → FAIL, not masked), 075h/075i (`_smoke_classify` purity:
+single-probe step-5 reason + auth/config discriminator intact), 006c-NR (codex bare
+no-response end-to-end through real `run_agent` → UNAVAILABLE), 039d/045d (the #222
+no-false-PASS security property preserved across the retry — rc 2 UNAVAILABLE, never
+a PASS). `tests/unit/test-autonomous-review-smoke-gate.sh` — TC-REVIEW-SMOKE-075a..d
+(gate propagation: retried-UNAVAILABLE → `unavailable` state, one retried-UNAVAILABLE
++ one PASS → gate `pass` + survivor fans out, all retried-UNAVAILABLE →
+`all-unavailable` no empty fan-out, genuine FAIL + retried-UNAVAILABLE → gate `fail`
+abort preserved). E2E: `tests/e2e/run-agent-smoke.sh` stub matrix's FAIL entry now
+uses a genuine config-error stub (a bare no-response would retry → UNAVAILABLE).
+Design: `docs/designs/smoke-no-response-retry.md`. Test plan:
+`docs/test-cases/smoke-no-response-retry.md`.
+
+**Cross-references**:
+- [INV-63](#inv-63-agent-smoke-is-a-three-state-probe-pass--unavailable--fail-run-through-the-production-run_agent-never-a-parallel-invocation-path) — the three-state contract this refines; `_smoke_classify` stays a pure single-probe function and the retry lives in the driver.
+- [INV-64](#inv-64-the-review-wrapper-smokes-every-fan-out-member-before-the-fan-out-phase-a5-fail-aborts-the-review-unavailable-drops-the-member-pass-proceeds) — the Phase A.5 gate whose abort this prevents for a transient no-response (UNAVAILABLE drop instead of FAIL abort).
+- [INV-67](#inv-67-a-bare-smoke-timeout-rc-124137-with-no-authconfig-signal-classifies-unavailable-not-fail) — the sibling tolerance for a bare timeout; this extends the same "environmental → drop" treatment to a bare no-response (with a retry first, since a no-response is cheaper to re-probe than a timeout).
+- [INV-73](#inv-73-a-codex-review-prompt-echo--startup-trace-stdout-is-malformed-never-a-blocking-p1-fail--retry-or-drop-not-a-phantom-veto) — the review-stage codex transient fix (#252 / #254) this is the smoke-stage sibling of.
+- [INV-40](#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback) / [INV-58](#inv-58-agy-quotaauth-unavailable-drops-surface-a-distinct-reason-fan-out--reviewed-head-model-labels-are-per-agent) / [INV-61](#inv-61-kiro-authlogin-failure-unavailable-drops-surface-a-distinct-reason-not-a-bare-opaque-unavailable) — the environmental → drop tolerance this aligns with.
+
 ## Adding a new invariant
 
 When fixing a pipeline bug, after locating the bug on the state machine + flow docs:
