@@ -3378,6 +3378,20 @@ split is a hard contract:
    `pull_request_target` — `pull_request_target` would run with the base repo's
    token/secrets against untrusted head code (the classic injection foot-gun).
 
+4. **The live matrix config lives OUTSIDE the checkout.** The machine-local
+   smoke matrix (`name|agent_cmd|model|env-setup` entries, credentials sourced in
+   `env-setup`) is gitignored and must NOT sit inside the repo tree, because
+   `actions/checkout` defaults to `clean: true` (`git clean -ffdx`) and would
+   delete a gitignored `tests/e2e/e2e.conf` on the **persistent self-hosted
+   workspace** before the run step — the job would then die on
+   `FATAL: matrix not found/readable` instead of proving the matrix (PR #256
+   review [P1]). The `live-smoke` job therefore resolves the matrix path from the
+   `RUNNER_SMOKE_CONF` repo variable, or a stable per-box default
+   (`$HOME/.config/autonomous-dev-team/e2e.conf`), exports it as `SMOKE_CONF` to
+   `$GITHUB_ENV` (the harness honors the `SMOKE_CONF` override), and **preflights
+   its readability** — emitting a `::error::` with a provisioning pointer rather
+   than the opaque harness FATAL when the operator has not yet provisioned it.
+
 **Why**: the #222 live smoke needs authenticated CLIs (claude/codex/kiro/agy via
 IAM/quota) that only the self-hosted box has. If it landed as an unconditional
 job, every fork PR would go permanently red (auth-less GitHub-hosted runners),
@@ -3400,8 +3414,11 @@ protection (marks the two `hermetic-*` jobs required, `live-smoke` not).
   truth-table assertions over `ci.yml` (pyyaml): hermetic jobs are
   `ubuntu-latest` + credential-free; `live-smoke.if` matches the label-OR-push
   gate; no `pull_request_target`; `pull_request` declares `labeled`; `live-smoke`
-  invokes `run-agent-smoke.sh`, targets self-hosted, writes a job summary; and
-  `setup-labels.sh` defines `run-live-smoke`.
+  invokes `run-agent-smoke.sh`, targets self-hosted, writes a job summary;
+  resolves the matrix config OUTSIDE the checkout (TC-CI-TIERS-021: `RUNNER_SMOKE_CONF`
+  + `$HOME`-based default), exports it via `$GITHUB_ENV` (022), and preflights its
+  readability with a loud `::error::` (023); and `setup-labels.sh` defines
+  `run-live-smoke`.
 - `hermetic-shellcheck`'s `actionlint` step — deeper workflow syntax +
   `pull_request_target` foot-gun lint (belt-and-suspenders to the gate-logic test).
 - `docs/test-cases/ci-two-tier-lanes.md` — TC-CI-TIERS-NNN enumeration + the

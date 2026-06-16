@@ -34,6 +34,9 @@ the disjunction `(pull_request && label.name == 'run-live-smoke') || (push && re
 | TC-CI-TIERS-018 | `live-smoke` runs `tests/e2e/run-agent-smoke.sh`. |
 | TC-CI-TIERS-019 | `live-smoke` does NOT pin `runs-on: ubuntu-latest` (it targets the self-hosted pool). |
 | TC-CI-TIERS-020 | `live-smoke` writes the SMOKE evidence to `$GITHUB_STEP_SUMMARY` (job summary upload). |
+| TC-CI-TIERS-021 | `live-smoke` resolves the matrix config OUTSIDE the checkout — references the `RUNNER_SMOKE_CONF` override and a `$HOME`-based default (so `git clean -ffdx` from `actions/checkout` can't delete it). PR #256 [P1]. |
+| TC-CI-TIERS-022 | `live-smoke` exports the resolved `SMOKE_CONF` path to `$GITHUB_ENV` so `run-agent-smoke.sh` reads the out-of-checkout matrix. |
+| TC-CI-TIERS-023 | `live-smoke` preflights the matrix readability (`[[ ! -r "$SMOKE_CONF" ]]`) and fails loud with `::error::` + a provisioning pointer instead of the opaque harness `FATAL: matrix not found/readable`. |
 
 ## setup-labels assertions
 

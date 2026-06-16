@@ -172,6 +172,40 @@ blob = yaml.safe_dump(jobs.get("live-smoke") or {})
 print("OK" if "GITHUB_STEP_SUMMARY" in blob else "FAIL:no-step-summary-write")
 '
 
+# PR #256 [P1]: actions/checkout defaults to clean:true (git clean -ffdx), which
+# would delete a gitignored tests/e2e/e2e.conf inside the persistent self-hosted
+# checkout. The matrix config MUST therefore be read from OUTSIDE the checkout.
+echo "=== TC-CI-TIERS-021: live-smoke matrix config lives outside the checkout ==="
+assert_py "TC-CI-TIERS-021 live-smoke resolves SMOKE_CONF outside the checkout" '
+blob = yaml.safe_dump(jobs.get("live-smoke") or {})
+# The job must NOT default the matrix to a checkout-internal path and must wire
+# an out-of-tree source: the RUNNER_SMOKE_CONF override and a $HOME-based default.
+ok = "RUNNER_SMOKE_CONF" in blob and "HOME/.config" in blob
+print("OK" if ok else "FAIL:smoke-conf-not-resolved-outside-checkout")
+'
+
+echo "=== TC-CI-TIERS-022: live-smoke exports SMOKE_CONF to the harness ==="
+assert_py "TC-CI-TIERS-022 live-smoke exports SMOKE_CONF via GITHUB_ENV" '
+blob = yaml.safe_dump(jobs.get("live-smoke") or {})
+ok = "SMOKE_CONF=" in blob and "GITHUB_ENV" in blob
+print("OK" if ok else "FAIL:smoke-conf-not-exported-to-github-env")
+'
+
+echo "=== TC-CI-TIERS-023: live-smoke preflights the matrix readability ==="
+assert_py "TC-CI-TIERS-023 live-smoke fails loud if SMOKE_CONF is missing" '
+# Match the RAW workflow source (yaml.safe_dump re-escapes the quotes in the
+# run-block scalar, so the dumped blob mangles `-r "$SMOKE_CONF"`), but SCOPE the
+# match to the live-smoke job region so an unrelated future job carrying its own
+# `::error::` / `! -r` cannot mask a regression here. The region runs from the
+# `live-smoke:` job key to the next top-level (2-space-indented) job key or EOF.
+m = re.search(r"\n  live-smoke:\n(?:.*\n)*?(?=\n  [A-Za-z0-9_-]+:\n|\Z)", raw)
+region = m.group(0) if m else ""
+# A readability guard plus a loud ::error:: ensures the job does not fall through
+# to the opaque harness FATAL when the operator has not provisioned the matrix.
+ok = ("! -r" in region and "SMOKE_CONF" in region and "::error::" in region)
+print("OK" if ok else "FAIL:no-preflight-readability-guard-in-live-smoke")
+'
+
 echo "=== TC-CI-TIERS-030: setup-labels.sh defines run-live-smoke ==="
 if grep -qE '"run-live-smoke\|[0-9A-Fa-f]{6}\|[^"]+"' "$SETUP_LABELS"; then
   pass "TC-CI-TIERS-030 setup-labels.sh LABELS has run-live-smoke|color|description"

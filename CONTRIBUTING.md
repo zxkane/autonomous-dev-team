@@ -156,6 +156,15 @@ SMOKE evidence is posted to the run's job summary.
 **As an external contributor you never need to do anything for the live tier** —
 a maintainer will label your PR if a live run is warranted.
 
+> **Maintainer one-time setup:** the live matrix config is machine-local +
+> gitignored and must live **outside** the repo checkout (because
+> `actions/checkout` runs `git clean -ffdx` and would delete a checkout-internal
+> `tests/e2e/e2e.conf`). Provision it once per self-hosted box —
+> `cp tests/e2e/e2e.conf.example "$HOME/.config/autonomous-dev-team/e2e.conf"` and
+> edit for that box — or point the `RUNNER_SMOKE_CONF` repo variable at a custom
+> path. The `live-smoke` job preflights this and fails with a provisioning pointer
+> if it is missing.
+
 ## PR checklist
 
 Before opening a PR, confirm:

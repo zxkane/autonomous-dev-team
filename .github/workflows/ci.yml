@@ -182,11 +182,58 @@ jobs:
     # Default to bare `self-hosted` when the var is unset — a GitHub-hosted
     # fallback would have no authenticated CLIs, defeating the live tier.
     runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'self-hosted' }}
+    env:
+      # Operator override for the machine-local matrix path. Empty when the
+      # `RUNNER_SMOKE_CONF` repo variable is unset; the steps below then fall
+      # back to a stable per-box default ($HOME/.config/autonomous-dev-team/
+      # e2e.conf), resolved in shell where $HOME actually expands.
+      RUNNER_SMOKE_CONF: ${{ vars.RUNNER_SMOKE_CONF }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      # Run the #222 live matrix against the box's real CLIs + credentials
-      # (tests/e2e/e2e.conf, gitignored, machine-local). rc contract (#222):
+      # Preflight: the live matrix config is machine-local + gitignored, so it
+      # CANNOT live inside the checkout — `actions/checkout` defaults to
+      # `clean: true` (`git clean -ffdx`), which would wipe a gitignored
+      # `tests/e2e/e2e.conf` on the persistent self-hosted workspace before this
+      # step runs (the [P1] from PR #256's review). We instead read the matrix
+      # from a path OUTSIDE the checkout: `$RUNNER_SMOKE_CONF` if the operator
+      # set it, else a stable per-box default. The resolved path is exported to
+      # `$GITHUB_ENV` as `SMOKE_CONF` so the run step (and run-agent-smoke.sh,
+      # which honors the SMOKE_CONF override) read the same file. If it is not
+      # provisioned, FAIL LOUD with a remediation pointer rather than letting
+      # run-agent-smoke.sh emit the opaque `FATAL: matrix not found/readable`.
+      - name: Preflight — live smoke matrix config present (outside checkout)
+        run: |
+          SMOKE_CONF="${RUNNER_SMOKE_CONF:-$HOME/.config/autonomous-dev-team/e2e.conf}"
+          echo "SMOKE_CONF=$SMOKE_CONF" >> "$GITHUB_ENV"
+          if [[ ! -r "$SMOKE_CONF" ]]; then
+            echo "::error::Live smoke matrix not found at SMOKE_CONF=$SMOKE_CONF"
+            {
+              echo "## Live agent-smoke matrix (#222) — NOT RUN"
+              echo ""
+              echo "The machine-local matrix config was not found at:"
+              echo ""
+              echo "    $SMOKE_CONF"
+              echo ""
+              echo "It must live OUTSIDE the repo checkout (a persistent self-hosted"
+              echo "path), because \`actions/checkout\` runs \`git clean -ffdx\` and would"
+              echo "delete a gitignored \`tests/e2e/e2e.conf\` inside the checkout."
+              echo ""
+              echo "Provision it once on the runner (or set the \`RUNNER_SMOKE_CONF\`"
+              echo "repo variable to its path):"
+              echo ""
+              echo '```'
+              echo "    mkdir -p \"\$(dirname \"$SMOKE_CONF\")\""
+              echo "    cp tests/e2e/e2e.conf.example \"$SMOKE_CONF\"   # then edit for this box"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          echo "Using live smoke matrix: $SMOKE_CONF"
+
+      # Run the #222 live matrix against the box's real CLIs + credentials, with
+      # the matrix read from $SMOKE_CONF (outside the checkout — the harness
+      # honors the SMOKE_CONF env override). rc contract (#222):
       #   any FAIL → rc 1 (operator-side config/launch breakage — fails the job)
       #   UNAVAILABLE (quota) / SKIP → non-blocking (rc 0).
       # So a quota-walled agy yields UNAVAILABLE without failing the job. Because
@@ -203,6 +250,8 @@ jobs:
           bash tests/e2e/run-agent-smoke.sh | tee "$out_file" || rc=$?
           {
             echo "## Live agent-smoke matrix (#222)"
+            echo ""
+            echo "Matrix: \`$SMOKE_CONF\` (outside the checkout — survives git clean)"
             echo ""
             echo "Exit code: \`${rc}\` (FAIL → 1; UNAVAILABLE/SKIP non-blocking)"
             echo ""
