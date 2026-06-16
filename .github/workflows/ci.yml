@@ -68,6 +68,13 @@ jobs:
       - name: error-envelope E2E (stub gh proxy)
         run: bash tests/e2e/run-error-envelope-e2e.sh
 
+      # Adapter conformance suite (INV-74, #230): replay the promoted fixture
+      # manifests against TODAY's per-CLI classification path using STUB CLIs.
+      # This IS the always-on HERMETIC tier (#222's live smoke is the separate
+      # self-hosted tier). Fully credential-free — runs on any fork. Non-zero
+      # exit on ANY fixture FAIL, so the step gates the build directly.
+      - name: adapter conformance suite (hermetic)
+        run: bash tests/conformance/run-conformance.sh
   shellcheck:
     name: ShellCheck
     runs-on: ubuntu-latest
@@ -102,6 +109,8 @@ jobs:
             tests/e2e/run-agent-smoke.sh \
             tests/e2e/run-metrics-report.sh \
             tests/e2e/run-error-envelope-e2e.sh \
+            tests/conformance/run-conformance.sh \
+            tests/conformance/lib-conformance.sh \
             skills/autonomous-dispatcher/scripts/post-verdict.sh \
             skills/autonomous-dispatcher/scripts/setup-labels.sh \
             skills/autonomous-dispatcher/scripts/gh-token-refresh-daemon.sh \

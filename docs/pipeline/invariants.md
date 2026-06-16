@@ -2909,6 +2909,228 @@ Sub-rules:
 - [INV-67](#inv-67-a-bare-smoke-timeout-rc-124137-with-no-authconfig-signal-classifies-unavailable-not-fail) — the drop-don't-veto smoke tolerance the `malformed-output` → UNAVAILABLE mapping (sub-rule 6) extends.
 - [`review-agent-flow.md` § codex malformed-output (prompt-echo) drop reason (INV-73)](review-agent-flow.md#codex-malformed-output-prompt-echo-drop-reason-inv-73) — runtime walkthrough.
 
+## INV-74: adapter conformance is regression-pinned by a hermetic fixture-manifest runner
+
+> **Note**: landed as **INV-74**, not INV-68 — several stability-redesign PRs
+> merged ahead of this one against the same `main` (INV-67 smoke-timeout #246,
+> INV-68 log-retention #245, INV-69 post-failed #247, INV-70 metrics #228,
+> INV-71 run-event-channel #237, INV-72 operator error-envelope #231/#242,
+> INV-73 codex prompt-echo malformed-output #252/#253). The number was reassigned
+> at rebase to avoid a duplicate-heading / broken-anchor collision (the original
+> PR draft authored it as INV-68, then INV-72, then INV-73, before those siblings
+> landed — #253 took INV-73 first).
+
+**Rule**: the per-CLI classification contract ([INV-66](#inv-66-adapter-conformance-is-spec-defined)'s
+four-axis `AdapterResult`) is **regression-pinned** by a standalone, **hermetic**
+conformance runner — `tests/conformance/run-conformance.sh` — that replays
+per-adapter × per-mode fixture manifests
+(`docs/pipeline/schemas/fixture-manifest.schema.json`, INV-66) against the
+**CURRENT** classification logic and asserts the four `expect{}` axes
+(`providerClass`, `verdictState`, `vote`, `retryable`). The runner:
+
+1. **Is hermetic — in PATH *and* ENV.** No network, no credentials, no real
+   agent CLIs. Each fixture is classified with `PATH` reset to a stub-only
+   sandbox (plus the coreutils dir); the real `claude`/`codex`/`kiro`/`agy` are
+   **never** on it. A fixture whose stub binary is missing, or whose `<adapter>`
+   resolves to anything other than the stub, fails **loud** (`FAIL stub-missing` /
+   `hermeticity-breach`) — it MUST NOT fall through to a real CLI. **The ENV is
+   equally scrubbed** (PR #244 [P1] #1): the operator-facing surface
+   lib-agent.sh reads — `AGENT_DEV_EXTRA_ARGS` / `AGENT_REVIEW_EXTRA_ARGS` (the
+   argv builders splice these in), `AGENT_LAUNCHER` / `AGENT_DEV_LAUNCHER` /
+   `AGENT_REVIEW_LAUNCHER` (tokenized into the launcher argv arrays at source
+   time), and `AGENT_DEV_CMD` / `AGENT_REVIEW_CMD` — is reset to an empty
+   baseline **before** the lib is sourced, so an inherited
+   `AGENT_DEV_EXTRA_ARGS=--bogus` cannot append stray argv (→ argv-mismatch) and
+   an inherited `AGENT_LAUNCHER` cannot route the dispatch off the isolated PATH
+   (→ stdin-not-fed). **The conf-discovery surface is equally neutralized**
+   (PR #244 [P1], codex review `dc696d40`): `load_autonomous_conf` reads THREE
+   inputs at source time — `AUTONOMOUS_CONF` (a file), `AUTONOMOUS_CONF_DIR`
+   (called as `${AUTONOMOUS_CONF_DIR:-$_LIB_AGENT_DIR}/autonomous.conf`), and
+   `PROJECT_DIR/scripts/autonomous.conf` — so scrubbing `AUTONOMOUS_CONF` alone is
+   insufficient: an inherited `AUTONOMOUS_CONF_DIR` (or `PROJECT_DIR`) pointing at
+   a real operator conf would still splice its `AGENT_*_EXTRA_ARGS` into the argv.
+   Setting these to `""` does **not** help — `${AUTONOMOUS_CONF_DIR:-$_LIB_AGENT_DIR}`
+   treats empty as unset and falls back to `$_LIB_AGENT_DIR`, which on a
+   self-hosting checkout resolves into a `scripts/` tree carrying a live
+   `autonomous.conf`. So all three are pointed at **concrete conf-free paths** (a
+   `mkdir`'d empty dir under the per-fixture work dir, with a `.nonexistent.conf`
+   for `AUTONOMOUS_CONF`); all three discovery branches miss and
+   `load_autonomous_conf` returns 1. The runner is therefore **self-defending** —
+   it no longer relies on the caller passing `env -u PROJECT_DIR`. **The remaining
+   argv/launch knobs are reset to deterministic defaults** (PR #244 [P1], codex
+   review `fff5f671`): lib-agent.sh reads more operator knobs at source time, two
+   of which reach argv/launch — `KIRO_AGENT_NAME` (spliced into the kiro argv as
+   `--agent <name>`; an inherited `KIRO_AGENT_NAME=other` ⇒ argv-mismatch) and
+   `AGENT_TIMEOUT` (the `timeout(1)` duration; an inherited `AGENT_TIMEOUT=bogus`
+   makes the launch never run ⇒ stdin-not-fed). Both (plus `AGENT_PERMISSION_MODE`,
+   defense-in-depth) are reset to the lib's own documented defaults
+   (`autonomous-dev` / `4h` / `auto` — the values the fixtures were recorded
+   against) before the source. (`AGENT_DEV_MODEL` / `AGENT_REVIEW_MODEL` need no
+   reset: `run_agent`/`resume_agent` take the model as an explicit positional arg
+   from `input.model`, so those knobs never reach the argv.) The
+   classification depends ONLY on the fixture's `input.env`, which is applied
+   AFTER the scrub (so a fixture that genuinely wants a var — e.g.
+   `codex-cli-error`'s `AGENT_DEV_EXTRA_ARGS` — re-enables it). **The codex
+   drop-reason classifier is called with the fixture's launch rc** (PR #244 [P1],
+   codex review `fff5f671`): production passes the rc into
+   `_classify_codex_drop_reason`, which gates the `config-error` bucket on rc == 2
+   (clap's parse-error exit). The runner now threads `$rc` too, so a transient
+   codex fixture (rc 1) whose capture merely QUOTES a clap usage line classifies
+   `stream-error`/transient (not `config`), faithfully replaying production. **The
+   codex review lane is stdin- and control-env-hermetic too** (PR #244 [P1], codex
+   review `1c29ba19`): (a) the stub unconditionally `cat > .stdin` to record the
+   [INV-34] channel, but the codex review path carries the prompt as an argv
+   positional and pipes no stdin — on a CI runner stdin is already EOF, but a local
+   standalone run from a TTY would block the codex stub forever (rc 124), so the
+   runner feeds the codex dispatch `</dev/null` (the stub reads immediate EOF on
+   every host, recording empty stdin — matching the codex fixtures' empty-string
+   `command.stdinSha256`); (b) `_run_codex_review` reads `CODEX_REVIEW_MAX_RERUNS`
+   (default 3) and `AGENT_REVIEW_TIMEOUT` (default 1h) at CALL time (not lib-source
+   time), so an inherited `CODEX_REVIEW_MAX_RERUNS=100000` would make a transient
+   fixture re-run 100000× → hang; both are reset to the lib defaults before
+   `input.env`, so a codex fixture's runtime depends ONLY on the manifest. This is the
+   always-on tier; the live-CLI smoke
+   ([INV-63](#inv-63-agent-smoke-is-a-three-state-probe-pass--unavailable--fail-run-through-the-production-run_agent-never-a-parallel-invocation-path) / `tests/e2e/run-agent-smoke.sh`) is the separate self-hosted tier.
+2. **Drives TODAY's monolithic classifier via the REAL dispatch path** — it
+   launches the stub through the production invocation primitives
+   (`lib-agent.sh::run_agent` / `resume_agent`, or `lib-review-codex.sh::_run_codex_review`
+   for codex review) on the isolated PATH, then classifies the captured result
+   with `lib-agent-smoke.sh::_smoke_classify` plus the per-CLI
+   `_classify_<cli>_drop_reason` scrapers (INV-58/61/62), NOT a re-implemented
+   copy. This is **intentional**: pin current behavior so the later adapter
+   extraction (a single `invoke() → AdapterResult` entry point) MUST keep
+   conformance green BEFORE and AFTER the refactor (green → refactor → still
+   green). When that entry point lands, the runner re-points at it with **zero
+   fixture changes** — the fixtures are the contract.
+3. **Materializes** each fixture: stages `files{}` (logs/sidecars — e.g. the agy
+   `--log-file` quota log) and installs a stub CLI that emits the recorded
+   `command.{rc,stdout,stderr}` and records both the **argv it was launched with**
+   and the **stdin bytes** it received. Because the dispatch path launches the
+   stub, the manifest's `command.argv` and `command.stdinSha256` are
+   **LOAD-BEARING**: the runner asserts the stub-recorded argv against
+   `command.argv` (placeholder-aware — `<uuid>` / `<prompt>` / `<logfile>` /
+   `<permission-mode>` / `<timeout>` stand for per-run values) and `sha256(stdin)`
+   against `command.stdinSha256` (the
+   [INV-34](#inv-34-agent-prompt-is-fed-via-stdin-never-as-a-single-argv-element)
+   prompt channel; codex review carries the prompt as an argv positional, so its
+   stdin hash is the empty-string hash) **before** classifying. A regression in
+   how an adapter assembles argv or feeds the prompt fails the fixture loud
+   (`FAIL argv-mismatch` / `FAIL stdin-sha-mismatch`) — it is NOT a
+   canned-stdout replay that ignores invocation. The prompt is fed with a
+   **deterministic nonce** so the stdin hash is reproducible and pinnable.
+4. **Validates** each manifest against the schema (loud reject on malformed —
+   python jsonschema when available, else a jq structural fallback). The fallback
+   is a **faithful mirror** of `fixture-manifest.schema.json`, NOT a loose subset:
+   it enforces the SAME required nested fields/types and the SAME
+   `additionalProperties:false` at every object level (top-level, `input`,
+   `command`, `expect`, each `files` entry) — so a manifest that python jsonschema
+   would reject (missing `input.promptBytes`, a non-string `input.env` value, a
+   negative `promptBytes`, an unknown nested key, a bad `files.<k>.role`, OR an
+   explicit `files.<k>.role: null` / `sha256: null` — the optional string fields
+   have no `null` in their schema type, so `has(...)` distinguishes absent (valid)
+   from present-null (invalid), PR #244 [P1] #2) ALSO
+   fails `schema-invalid` here. **It fails closed**: a malformed manifest is
+   rejected on a fork with NO `jsonschema` installed exactly as it is on a
+   jsonschema-equipped CI — the fallback and python jsonschema are cross-checked
+   agreeing on the full valid promoted set and on every malformed variant the
+   suite drives (TC-CONFORMANCE-025/025e..m — PR #244 [P1] #1).
+5. Emits one line per fixture `CONFORMANCE <adapter>/<mode>/<name> PASS|FAIL
+   <axis-diff>` and exits non-zero on ANY fail (incl. a malformed manifest or an
+   unmaterializable stub — a fixture that cannot run is a FAIL, never a silent
+   skip; a filter matching zero fixtures is also loud).
+
+The promoted fixture set carries ≥2 manifests per currently-fan-out-capable CLI
+(claude, codex, kiro, agy) and pins **both** halves of **each** load-bearing rc
+mapping as actual promoted fixtures the full run exercises (PR #244 [P1] #2):
+- `124 + no verdict ⇒ timeout-veto` — `claude-timeout-veto.json` (rc 124);
+- `137 + no verdict ⇒ timeout-veto` — `claude-timeout-veto-sigkill.json` (rc 137,
+  the `--kill-after` SIGKILL half — deciding FAIL, INV-48);
+- `0 + no provider + no verdict ⇒ drop` — `claude-rc0-noverdict-drop.json`
+  (rc 0, stdout that does NOT echo the nonce, no provider signal → `unavailable`
+  drop, INV-40).
+
+It also pins the codex drop-reason **rc gate** (PR #244 [P1], codex review
+`fff5f671`): `codex-quoted-clap-nonconfig.json` (rc 1, a capture that QUOTES a
+clap usage line — `error: unexpected argument '-s' found` — alongside a
+stream-error ladder) must classify `transient`/`stream-error`, NOT `config`. The
+runner threads the fixture rc into `_classify_codex_drop_reason`, which gates the
+`config-error` bucket on rc == 2; absent the rc the same capture mislabels
+`config` (the regression this fixture guards), diverging from the production
+review wrapper.
+
+A regression in EITHER mapping (rc 124, rc 137, or the rc-0 drop) flips the
+corresponding fixture's projected `vote` axis and FAILs the run.
+
+**Why**: per-CLI quirk handling is the largest historical bug factory in this
+repo (~14 issues — every CLI lies differently at the exit-code level: `agy` rc-0
+silent quota, `kiro` headless-auth exit-0, `codex` rc-2 clap vs transient
+stream-error). Its only tests were scattered per-bug unit tests. A
+manifest-driven conformance suite makes each CLI's contract explicit and
+regression-pinned, gives new-CLI admission an objective bar (author a manifest,
+run the suite), and is the safety net under the later adapter extraction — that
+refactor cannot land unless conformance stays green. (#230.)
+
+**Producer**: this PR (#230) authors the runner + the promoted fixtures. Every
+later adapter PR is a producer of *conformant behavior*; this invariant binds it
+to keep the suite green. A new-CLI PR is the producer of *its* manifests.
+**Consumer**: the runner consumes the INV-66 `fixture-manifest.schema.json`; the
+later adapter extraction (the `invoke()` entry point) is the consumer that the
+green-before-and-after gate protects.
+**Status**: **ENFORCED** — the runner is an always-on CI step
+(`.github/workflows/ci.yml` → `unit-tests`), credential-free, runs on any fork.
+
+**Test**:
+- `tests/conformance/run-conformance.sh` — the runner itself; the promoted
+  fixture set passing IS the E2E (CI job green = pass).
+- `tests/unit/test-conformance-runner.sh` — TC-CONFORMANCE-001..053: the pure
+  projection/diff/field helpers (`lib-conformance.sh`), runner happy path,
+  `--adapter`/`--mode` filtering, expect-mismatch FAIL with axis diff,
+  malformed-manifest loud reject, **the jq-fallback nested-required-field
+  strictness (TC-CONFORMANCE-025e..k: the fallback rejects a manifest missing
+  `input.promptBytes` / `input.model`, a non-string `env` value, a negative
+  `promptBytes`, an unknown nested key, a non-string argv element, a bad
+  `files.role`, AND an explicit `files.<k>.role:null` / `sha256:null` /
+  non-string `sha256` (TC-CONFORMANCE-025o..q — PR #244 [P1] #2) — fails closed
+  exactly as python jsonschema; 025l/m: it still ACCEPTS the full valid set —
+  PR #244 [P1] #1)**, **ENV hermeticity (TC-CONFORMANCE-035a..e: an inherited
+  `AGENT_DEV_EXTRA_ARGS` / `AGENT_LAUNCHER` / heavy multi-var leak does NOT
+  contaminate the run — it stays all-PASS — while `input.env` still re-enables a
+  var after the scrub — PR #244 [P1] #1; TC-CONFORMANCE-035f..i: a poisoned
+  `AUTONOMOUS_CONF_DIR` / `PROJECT_DIR` conf — supplied WITHOUT `env -u PROJECT_DIR`
+  — does NOT leak its `AGENT_*_EXTRA_ARGS` into the argv, proving the in-runner
+  conf-discovery scrub is self-defending — PR #244 [P1], codex review `dc696d40`;
+  TC-CONFORMANCE-035l..o: an inherited `KIRO_AGENT_NAME` (→ kiro `--agent` argv)
+  or `AGENT_TIMEOUT=bogus` (→ the launch never runs → stdin-not-fed) does NOT
+  contaminate the run — the runner resets those argv/launch knobs to the lib
+  defaults before sourcing — PR #244 [P1], codex review `fff5f671`)**,
+  **codex drop-reason is rc-gated (TC-CONFORMANCE-036a..d: the runner passes the
+  fixture's launch rc into `_classify_codex_drop_reason`, so a transient codex
+  fixture (rc 1) whose capture merely QUOTES a clap line classifies `stream-error`
+  /transient — NOT `config` — matching production; the promoted
+  `codex-quoted-clap-nonconfig` fixture + the WITHOUT-rc→`config-error` /
+  WITH-rc-1→`stream-error` gate proof pin it — PR #244 [P1], codex review
+  `fff5f671`)**, **codex stdin + control-env hermeticity (TC-CONFORMANCE-037a/b:
+  the codex stub does NOT hang on a non-EOF (TTY-proxy) stdin — proven via a fifo
+  with an open writer — because the dispatch feeds `</dev/null`; 038a/b: an
+  inherited `CODEX_REVIEW_MAX_RERUNS=100000` does NOT leak into the codex run (stays
+  exit 0, proven to time out 124 pre-fix) because the runner resets the codex
+  review controls — PR #244 [P1], codex review `1c29ba19`)**, hermeticity (PATH isolation,
+  stdin-fed contract, stub-missing/breach guards), **the load-bearing
+  `command.argv` / `command.stdinSha256` assertions (TC-CONFORMANCE-030..034:
+  garbage argv and all-zero hash must FAIL, not silently PASS — PR #244 [P1])**,
+  the ≥2-per-CLI count, **both halves of each load-bearing rc mapping as promoted
+  fixtures the full run exercises (TC-CONFORMANCE-041a..i: rc 124 + rc 137 ⇒
+  timeout-veto, rc 0 + no-verdict ⇒ drop — PR #244 [P1] #2)**, and the
+  CI/cross-link wiring.
+- `docs/test-cases/conformance-runner.md` — TC-CONFORMANCE-NNN enumeration.
+
+**Cross-references**:
+- [`adapter-spec.md` § 8](adapter-spec.md#8-the-conformance-fixture-manifest) — the fixture-manifest the runner consumes.
+- [INV-66](#inv-66-adapter-conformance-is-spec-defined) — the spec + the four-axis `AdapterResult` this runner pins.
+- [INV-63](#inv-63-agent-smoke-is-a-three-state-probe-pass--unavailable--fail-run-through-the-production-run_agent-never-a-parallel-invocation-path) — the `_smoke_classify` classifier the runner drives; the live-CLI smoke is the separate self-hosted tier.
+- [INV-40](#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback) / [INV-48](#inv-48-per-side-review-wall-clock-timeout-agent_review_timeout-1h-default-with-browser-e2e-exclusion-and-timeout-veto) — the `drop` / `timeout-veto` vote mappings the load-bearing fixtures pin.
+- [INV-58](#inv-58-agy-quotaauth-unavailable-drops-surface-a-distinct-reason-fan-out--reviewed-head-model-labels-are-per-agent) / [INV-61](#inv-61-kiro-authlogin-failure-unavailable-drops-surface-a-distinct-reason-not-a-bare-opaque-unavailable) / [INV-62](#inv-62-the-codex-review-lane-runs-the-codex-review-subcommand-auto-scoped-prompt-carried-gate-with-a-stdout-verdict-fallback) — the per-CLI scrapers the fixtures exercise.
+
 ## Adding a new invariant
 
 When fixing a pipeline bug, after locating the bug on the state machine + flow docs:

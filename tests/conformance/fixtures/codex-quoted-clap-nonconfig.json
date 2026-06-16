@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "adapter": "codex",
+  "mode": "review",
+  "input": {
+    "promptBytes": 4096,
+    "model": "gpt-5-codex",
+    "env": {}
+  },
+  "command": {
+    "argv": [
+      "codex",
+      "review",
+      "<prompt>",
+      "-c",
+      "model=\"gpt-5-codex\""
+    ],
+    "stdinSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "rc": 1,
+    "stdout": "",
+    "stderr": "Codex review of PR #999 (origin/main...feat/example)\n\nReading the scoped diff... the diff quotes a usage line: error: unexpected argument '-s' found\n\nUsage: codex review [OPTIONS] [PROMPT]\n\nstream error: Reconnecting... 1/5 (stream disconnected before completion: The server had an error while processing your request. Sorry about that!)\nstream error: Reconnecting... 3/5 (stream disconnected before completion)\nerror: stream disconnected before completion: The server had an error while processing your request. Sorry about that!"
+  },
+  "expect": {
+    "providerClass": "transient",
+    "verdictState": "absent",
+    "vote": "drop",
+    "retryable": true
+  }
+}

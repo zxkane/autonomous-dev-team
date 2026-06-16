@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "adapter": "agy",
+  "mode": "review",
+  "input": {
+    "promptBytes": 3500,
+    "model": "Gemini 3.5 Flash (High)",
+    "env": {}
+  },
+  "command": {
+    "argv": [
+      "agy",
+      "-p",
+      "--dangerously-skip-permissions",
+      "--print-timeout",
+      "<timeout>",
+      "--log-file",
+      "<logfile>",
+      "--model",
+      "Gemini 3.5 Flash (High)"
+    ],
+    "stdinSha256": "d5c930c8f8082ce538446ac727a28c19d83bbdb927fae14e2a72af7444cfd25e",
+    "rc": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "files": {
+    "agyLog": {
+      "path": "fixtures/files/agy-quota-log.fixture",
+      "role": "log"
+    }
+  },
+  "expect": {
+    "providerClass": "quota",
+    "verdictState": "absent",
+    "vote": "drop",
+    "retryable": false
+  }
+}

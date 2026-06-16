@@ -423,8 +423,15 @@ stdout / stderr), any `files` (sidecars / logs / artifacts), and the `expect`ed
 AdapterResult axes (`providerClass`, `verdictState`, `vote`, `retryable`).
 
 The standalone conformance runner that *replays* these manifests against the
-real adapters is a **follow-up issue** and is out of scope here; this schema is
-the contract that runner consumes.
+current classification path is implemented in
+[`tests/conformance/run-conformance.sh`](../../tests/conformance/) (issue #230,
+[INV-74](invariants.md#inv-74-adapter-conformance-is-regression-pinned-by-a-hermetic-fixture-manifest-runner)).
+It is **hermetic** — stub CLIs on an isolated `PATH`, no network, no
+credentials — and drives TODAY's monolithic classifier
+(`lib-agent-smoke.sh::_smoke_classify` + the per-CLI scrapers), so the later
+adapter extraction must keep conformance green before AND after the refactor.
+See [`tests/conformance/README.md`](../../tests/conformance/README.md) for how a
+CLI vendor authors a manifest and runs the suite standalone.
 
 Goldens: [`fixture-manifest.golden.codex-review.json`](schemas/examples/fixture-manifest.golden.codex-review.json),
 [`fixture-manifest.golden.agy-quota.json`](schemas/examples/fixture-manifest.golden.agy-quota.json).
