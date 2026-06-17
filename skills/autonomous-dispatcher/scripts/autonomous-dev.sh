@@ -377,6 +377,27 @@ emit_open_pr_fast_path_block() {
   local issue_num="$1"
   needs_open_pr_only "$issue_num" || return 0
   log "Detected pushed head branch with commits ahead of base but no PR for issue #${issue_num} — injecting open-PR-only fast path ([INV-45])."
+
+  # [INV-77] When the scoped agent token is armed, the agent CANNOT run
+  # `gh pr create` (pull_requests:read → 403). The fast-path's open-PR step MUST
+  # route through the same wrapper broker as the normal scoped-token path (#234
+  # review [P1] #2): write the head branch + title + body to AGENT_PR_CREATE_FILE
+  # and let the wrapper open the PR. Empty when scoping is off → the agent runs
+  # `gh pr create` directly (unchanged for PAT mode / app-mode-without-scoping).
+  local open_pr_step
+  if [[ -n "${AGENT_GH_TOKEN_FILE:-}" ]]; then
+    open_pr_step="3. Go STRAIGHT to the open-PR step. Your token is SCOPED and CANNOT run
+   \`gh pr create\` — instead WRITE the PR to \`\$(printenv AGENT_PR_CREATE_FILE)\`
+   with EXACTLY this layout (the WRAPPER opens the PR for you, see [INV-77]):
+     - line 1: \`branch: <the-pushed-branch-you-checked-out>\`
+     - line 2: the PR title
+     - line 3 onward: the PR body (include \"Closes #${issue_num}\")"
+  else
+    open_pr_step="3. Go STRAIGHT to the open-PR step: run \`gh pr create\` with a generated
+   PR body (Step 7 of /autonomous-dev), ensuring the body contains
+   \"Closes #${issue_num}\"."
+  fi
+
   cat <<FASTPATH
 ## Open-PR-only fast path — a prior session already pushed the branch
 
@@ -392,9 +413,7 @@ Therefore, on this session:
 2. **SKIP design, test-authoring, and re-implementation.** Do NOT re-run the
    full test suite from scratch just to reach the open-PR step — that is the
    exact loop this fast path exists to avoid.
-3. Go STRAIGHT to the open-PR step: run \`gh pr create\` with a generated
-   PR body (Step 7 of /autonomous-dev), ensuring the body contains
-   "Closes #${issue_num}".
+${open_pr_step}
 4. After the PR exists, continue normally from Step 8 (PR review) onward.
 
 If, and only if, you discover the pushed branch is actually missing required

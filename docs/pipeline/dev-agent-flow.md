@@ -77,8 +77,14 @@ SECOND, **scoped** installation token (`contents:write`, `issues:write`,
 `pull_requests:read`) into `AGENT_GH_TOKEN_FILE` with its own refresh daemon
 (reaped by `cleanup_github_auth` alongside the full-write daemon). When that
 scoped token is armed, `lib-agent.sh::_run_with_timeout` prepends a CLI-agnostic
-`env`-scrub prefix (`build_agent_env_argv`) to EVERY adapter launch, so the agent
-subtree's environment differs from the wrapper's:
+`env`-scrub prefix (`build_agent_env_argv`) to EVERY adapter launch — **before**
+the launcher (`AGENT_LAUNCHER_ARGV`), so `env …` runs the launcher (and the agent
+it execs) under the scrubbed environment. The order is load-bearing: a launcher is
+an argv prefix that execs the real CLI with its trailing args (`cc "$@"`), so an
+`env …` placed AFTER the launcher would be passed to it as positional `$@` and
+forwarded to the CLI as literal args — the scrub would silently no-op and the
+full-write credential would leak (#234 review [P1] #1). The agent subtree's
+environment differs from the wrapper's:
 
 | Var | Wrapper shell | Agent subtree (app mode, scoped) | Agent subtree (PAT / no-scope) |
 |-----|---------------|----------------------------------|-------------------------------|
@@ -143,7 +149,7 @@ After mode normalization and BEFORE building any prompt, the wrapper computes `O
 1. **No open PR** is linked to the issue (same `#<N>` body-reference selector the cleanup trap uses) — a PR existing means `handle_pending_dev_pr_exists` (Bug-3/#99) owns the routing.
 2. **A head branch is pushed to origin and ahead of base.** The branch name is agent-chosen, so detection **globs** `git ls-remote origin 'refs/heads/*issue-${N}*'` — it does NOT assume `feat/issue-N` or `fix/issue-N`. "Ahead" is `git rev-list --count origin/<base>..<sha> > 0`, with a head-SHA-≠-base-SHA fallback for remote-only objects. Each ref is regex-anchored on `issue-<N>` + non-digit/end so `issue-1789` doesn't satisfy issue `178`.
 
-The detector **fails closed** on any error (a false fast path that skipped real work is strictly worse than a redundant full re-dev). When it fires, the `## Open-PR-only fast path` block is interpolated into **all three** prompt builders (`new`, `resume`, resume-fallback) and tells the agent to check out the pushed branch, **skip design/test/implement**, and go straight to `gh pr create` (with `Closes #<N>`). It posts **no** issue/PR comment and contains none of the [INV-06](invariants.md#inv-06-crashed--process-not-found-keyword-contract) crash keywords, so it never miscounts the recovery as a crash. The detection MUST live wrapper-side: under `EXECUTION_BACKEND=remote-aws-ssm` the dispatcher has no worktree and runs on a different box, so it cannot call `gh pr create` itself.
+The detector **fails closed** on any error (a false fast path that skipped real work is strictly worse than a redundant full re-dev). When it fires, the `## Open-PR-only fast path` block is interpolated into **all three** prompt builders (`new`, `resume`, resume-fallback) and tells the agent to check out the pushed branch, **skip design/test/implement**, and open the PR (with `Closes #<N>`). The open-PR step is scoped-token-aware ([INV-77], #234 review [P1] #2): when `AGENT_GH_TOKEN_FILE` is set (app-mode scoping), the block routes PR creation through the `AGENT_PR_CREATE_FILE` broker (agent writes `branch:`+title+body, wrapper opens the PR) — exactly like the normal scoped-token path — because the agent's `pull_requests:read` token would 403 on a direct `gh pr create`; in PAT mode / no-scope the block keeps the direct `gh pr create`. It posts **no** issue/PR comment and contains none of the [INV-06](invariants.md#inv-06-crashed--process-not-found-keyword-contract) crash keywords, so it never miscounts the recovery as a crash. The detection MUST live wrapper-side: under `EXECUTION_BACKEND=remote-aws-ssm` the dispatcher has no worktree and runs on a different box, so it cannot call `gh pr create` itself.
 
 ### Post-approval findings override ([INV-57])
 

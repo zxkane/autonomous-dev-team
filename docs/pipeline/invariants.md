@@ -3713,10 +3713,15 @@ an agent that runs `gh pr review --approve` / `gh pr merge` gets a deterministic
   `cleanup_github_auth` reaps the second daemon.
 - **Consumer**: `lib-agent.sh::_run_with_timeout` prepends the scrub prefix to
   EVERY adapter invocation (CLI-agnostic — claude/codex/gemini/kiro/opencode/agy/
-  generic all route through it); `autonomous-dev.sh` / `autonomous-review.sh` call
-  `setup_agent_token` after `setup_github_auth`; the dev wrapper drains the
-  PR-create broker; the review wrapper posts the brokered E2E report
-  (`lib-review-e2e.sh::_post_brokered_e2e_report`).
+  generic all route through it), **before** `AGENT_LAUNCHER_ARGV` so the launcher
+  runs under the scrubbed env (a scrub placed AFTER the launcher would be passed
+  to it as positional `$@` and never applied — #234 review [P1] #1);
+  `autonomous-dev.sh` / `autonomous-review.sh` call `setup_agent_token` after
+  `setup_github_auth`; the dev wrapper drains the PR-create broker, and BOTH its
+  normal prompt and the [INV-45] open-PR fast-path block route `gh pr create`
+  through that broker when scoping is armed (the fast path would otherwise 403 on
+  a direct create — #234 review [P1] #2); the review wrapper posts the brokered
+  E2E report (`lib-review-e2e.sh::_post_brokered_e2e_report`).
 - **Degraded mode (PAT)**: `GH_AUTH_MODE=token` — a PAT cannot be down-scoped at
   mint, so there is NO second token. `setup_agent_token` logs a ONE-TIME WARN
   ("enforcement degraded to convention in PAT mode"), `build_agent_env_argv`

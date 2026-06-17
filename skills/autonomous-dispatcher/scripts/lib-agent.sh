@@ -339,10 +339,20 @@ _run_with_timeout() {
     build_agent_env_argv _agent_env_prefix
   fi
 
-  # Order: [timeout] <launcher> <env-scrub> <agent argv>. The scrub prefix sits
-  # AFTER the launcher so the launcher process is scrubbed too, and BEFORE the
-  # agent argv so the agent and its whole subtree run under the scoped token.
-  cmd+=("${AGENT_LAUNCHER_ARGV[@]}" "${_agent_env_prefix[@]}" "$@")
+  # Order: [timeout] <env-scrub> <launcher> <agent argv>. The scrub `env …`
+  # prefix MUST come BEFORE the launcher (#234 review [P1]): the launcher form
+  # is an argv prefix that EXECs the real CLI with its trailing args verbatim
+  # (`cc "$@"` / `bash -c '… claude "$@"' --`), so a scrub placed AFTER the
+  # launcher is passed to the launcher as positional `$@` and forwarded to
+  # `claude` as LITERAL arguments — `env` never runs, the scrub silently no-ops
+  # (the agent keeps the full-write credential) AND the bogus `env …` args can
+  # make claude fail before it starts. Placing `env …` first runs the LAUNCHER
+  # (and thus the agent it execs, and the whole subtree) under the scrubbed
+  # environment, which is the intent. With no launcher the order is unchanged in
+  # effect (`<env-scrub> <agent argv>`); the claude adapter's own
+  # `env -u CLAUDECODE` (launcher-less path A) simply chains after our `env …`,
+  # which is valid (the second env inherits the first's modified environment).
+  cmd+=("${_agent_env_prefix[@]}" "${AGENT_LAUNCHER_ARGV[@]}" "$@")
 
   # Prepend setsid when available so the agent gets its own session+PGID.
   # On the rare host without it (no util-linux), the agent runs in the

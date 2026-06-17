@@ -349,6 +349,108 @@ fi
 
 # ---------------------------------------------------------------------------
 echo ""
+echo "=== TC-TOKEN-SPLIT-090: scrub runs the LAUNCHER under the scrubbed env (env prefix BEFORE launcher) ==="
+# ---------------------------------------------------------------------------
+# #234 review [P1] #1: the env-scrub `env …` prefix MUST come BEFORE
+# AGENT_LAUNCHER_ARGV. A launcher is an argv prefix that EXECs the real CLI with
+# its trailing args (`cc "$@"`), so a scrub placed AFTER the launcher is handed
+# to the launcher as positional `$@` and forwarded to the CLI as LITERAL args —
+# `env` never runs and the scrub no-ops. We model the launcher with a real stub
+# script that EXECs "$@", set it as AGENT_LAUNCHER_ARGV, run a stub "agent" (env)
+# through _run_with_timeout with a scoped token armed, and assert the dumped env
+# is SCRUBBED (scoped GH_TOKEN, no full-write creds). If the prefix were after
+# the launcher, the launcher would receive `env -u … env` as args, exec the inner
+# `env` (the agent) WITHOUT applying the scrub, and the dump would still carry the
+# full-write credential — the exact regression this pins.
+ENVDUMP3="$TMPROOT/envdump3.txt"
+LAUNCHSB="$TMPROOT/launcher-stub"; mkdir -p "$LAUNCHSB"
+# Model the REAL launcher contract: `cc` ends in `$CLAUDE_CMD "$@"` — it execs a
+# FIXED command (here: the agent stub `dump-env`) with the trailing argv APPENDED,
+# it does NOT `exec "$@"`. This is what makes the ordering bug observable: with the
+# BUGGY order (`cc env -u … GH_TOKEN=… dump-env`), the launcher receives
+# `env -u … GH_TOKEN=… dump-env` as `$@` and runs `dump-env env -u … GH_TOKEN=… dump-env`
+# → the agent (dump-env) runs WITHOUT the scrub applied (env is a literal arg, not
+# the command). With the FIXED order (`env -u … GH_TOKEN=… cc dump-env`), `env`
+# runs `cc`, which execs `dump-env` under the scrubbed environment. The agent stub
+# `dump-env` writes its OWN environment so we can assert the scrub took effect.
+cat > "$LAUNCHSB/dump-env" <<DUMP
+#!/bin/bash
+env > '$ENVDUMP3'
+DUMP
+chmod +x "$LAUNCHSB/dump-env"
+cat > "$LAUNCHSB/cc-stub" <<LAUNCH
+#!/bin/bash
+# Fixed command + appended args — the real \`cc\`/\`claude "\$@"\` shape.
+exec '$LAUNCHSB/dump-env' "\$@"
+LAUNCH
+chmod +x "$LAUNCHSB/cc-stub"
+: > "$ENVDUMP3"
+env -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR -u GH_TOKEN_FILE -u GITHUB_PERSONAL_ACCESS_TOKEN -u GH_USER_PAT \
+  PATH="/usr/bin:/bin" \
+  bash -c "
+  source '$SBA/lib-auth.sh'
+  # AGENT_CMD is a no-op placeholder here — the launcher execs the fixed dump-env,
+  # ignoring its trailing args; we only care WHICH env dump-env runs under.
+  AGENT_CMD=true; AGENT_TIMEOUT=10; AGENT_PERMISSION_MODE=auto
+  source '$SCRIPTS/lib-agent.sh' >/dev/null 2>&1 || true
+  # Set AGENT_LAUNCHER_ARGV AFTER sourcing — lib-agent.sh resets it at source time
+  # (it derives the per-side arrays from AGENT_LAUNCHER), and the wrappers rebind
+  # AGENT_LAUNCHER_ARGV post-source. We mirror that rebind here.
+  declare -a AGENT_LAUNCHER_ARGV=('$LAUNCHSB/cc-stub')
+  wdir=\$(mktemp -d /tmp/agent-auth-XXXXXX)
+  export PATH=\"\$wdir:\$PATH\"
+  export GH_WRAPPER_DIR=\"\$wdir\"
+  export GH_TOKEN_FILE='/tmp/full-token-file'
+  export GITHUB_PERSONAL_ACCESS_TOKEN='fulltoken'
+  AGENT_GH_TOKEN_FILE=\"\$wdir/agent-token\"
+  echo 'SCOPED-TOKEN-launcher' > \"\$AGENT_GH_TOKEN_FILE\"
+  _run_with_timeout true >/dev/null 2>&1
+  rm -rf \"\$wdir\"
+" >/dev/null 2>&1
+if grep -qE '^GH_TOKEN=SCOPED-TOKEN-launcher' "$ENVDUMP3" 2>/dev/null \
+   && ! grep -qE '^GH_TOKEN_FILE=' "$ENVDUMP3" 2>/dev/null \
+   && ! grep -qE '^GITHUB_PERSONAL_ACCESS_TOKEN=' "$ENVDUMP3" 2>/dev/null; then
+  assert_pass "launcher present: scrub APPLIED (scoped GH_TOKEN, no full-write creds) — env prefix runs the launcher, not passed through"
+else
+  assert_fail "launcher present: scrub NOT applied (env prefix passed to launcher as args — the #234 [P1] #1 regression). Dump GH_TOKEN=$(grep -E '^GH_TOKEN=' "$ENVDUMP3" 2>/dev/null), GH_TOKEN_FILE present=$(grep -cE '^GH_TOKEN_FILE=' "$ENVDUMP3" 2>/dev/null)"
+fi
+# Source-level lockdown: the env prefix MUST precede AGENT_LAUNCHER_ARGV in the
+# cmd assembly (guards against a future reorder reintroducing the bug).
+if grep -qE '_agent_env_prefix\[@\]\}".*\$\{AGENT_LAUNCHER_ARGV\[@\]\}' "$SCRIPTS/lib-agent.sh"; then
+  assert_pass "source: _agent_env_prefix is assembled BEFORE AGENT_LAUNCHER_ARGV in _run_with_timeout"
+else
+  assert_fail "source: env-scrub prefix is NOT before the launcher in the cmd+= assembly (regression risk)"
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-TOKEN-SPLIT-091: open-PR fast path routes through the broker when scoping is armed ==="
+# ---------------------------------------------------------------------------
+# #234 review [P1] #2: emit_open_pr_fast_path_block must NOT tell the agent to run
+# `gh pr create` directly when the scoped token is armed (pull_requests:read →
+# 403); it must route through the AGENT_PR_CREATE_FILE broker. We source
+# autonomous-dev.sh's function in isolation is impractical (it has a heavy top),
+# so assert at the SOURCE level: the scoped branch emits the broker file
+# instruction and NOT a bare `gh pr create`, and the unscoped branch keeps
+# `gh pr create`.
+DEV_SH="$SCRIPTS/autonomous-dev.sh"
+# The scoped open_pr_step branch references AGENT_PR_CREATE_FILE and is gated on
+# AGENT_GH_TOKEN_FILE.
+if grep -q 'if \[\[ -n "\${AGENT_GH_TOKEN_FILE:-}" \]\]; then' "$DEV_SH" \
+   && awk '/emit_open_pr_fast_path_block\(\)/,/^}/' "$DEV_SH" | grep -q 'AGENT_PR_CREATE_FILE'; then
+  assert_pass "fast path: scoped branch routes open-PR through AGENT_PR_CREATE_FILE broker"
+else
+  assert_fail "fast path: scoped branch does NOT route through the broker (still bare gh pr create — [P1] #2)"
+fi
+# The unscoped branch still instructs a direct `gh pr create` (PAT / no-scope).
+if awk '/emit_open_pr_fast_path_block\(\)/,/^}/' "$DEV_SH" | grep -q 'run .*gh pr create'; then
+  assert_pass "fast path: unscoped branch keeps direct gh pr create (PAT/no-scope unchanged)"
+else
+  assert_fail "fast path: unscoped branch lost its direct gh pr create"
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
 echo "=== TC-TOKEN-SPLIT-060: scoped permissions are pull_requests:read (cannot approve/merge) ==="
 # ---------------------------------------------------------------------------
 # The default scoped permissions string the lib ships must request pull_requests
