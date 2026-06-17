@@ -80,19 +80,28 @@ echo "=== TC-GEM-STATIC-001: source-of-truth grep — gemini branch shape ==="
 # Cheap structural assertions before exercising behavior. Catches the
 # refactor-drops-the-branch failure mode immediately.
 
-# run_agent gemini case
-if grep -qE '^[[:space:]]*gemini\)[[:space:]]*$' "$LIB"; then
-  echo -e "  ${GREEN}PASS${NC}: gemini case label present in lib-agent.sh"
+# [INV-75] #232: the gemini per-CLI argv moved into adapters/gemini.sh; the
+# structural greps assert against it. lib-agent.sh now only dispatches.
+ADAPTER="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/adapters/gemini.sh"
+
+# The gemini adapter defines its mode-axis entry point.
+if grep -qE '^adapter_invoke_gemini\(\)' "$ADAPTER"; then
+  echo -e "  ${GREEN}PASS${NC}: adapter_invoke_gemini present"
   PASS=$((PASS + 1))
 else
-  echo -e "  ${RED}FAIL${NC}: gemini case label missing in lib-agent.sh"
+  echo -e "  ${RED}FAIL${NC}: adapter_invoke_gemini missing"
   FAIL=$((FAIL + 1))
 fi
 
-# Both run_agent and resume_agent must have a gemini case (count 2).
-gemini_case_count=$(grep -cE '^[[:space:]]*gemini\)[[:space:]]*$' "$LIB" || echo 0)
-assert_eq "lib-agent.sh has gemini case in both run_agent and resume_agent" \
-  "2" "$gemini_case_count"
+# The adapter must carry BOTH the dev-new (--session-id) and dev-resume (--resume)
+# argv shapes — the two paths formerly split across run_agent/resume_agent.
+if grep -qE -- '--session-id' "$ADAPTER" && grep -qE -- '--resume' "$ADAPTER"; then
+  echo -e "  ${GREEN}PASS${NC}: gemini adapter carries both --session-id and --resume paths"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: gemini adapter missing a --session-id / --resume path"
+  FAIL=$((FAIL + 1))
+fi
 
 # ---------------------------------------------------------------------------
 # Behavioral test sandbox setup

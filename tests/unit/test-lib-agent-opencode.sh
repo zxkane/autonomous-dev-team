@@ -71,15 +71,19 @@ assert_not_contains() {
 # ---------------------------------------------------------------------------
 echo "=== TC-LA-OC-01: source-of-truth grep — opencode branch shape ==="
 # ---------------------------------------------------------------------------
-if grep -qE '^\s*opencode\)\s*$' "$LIB"; then
-  echo -e "  ${GREEN}PASS${NC}: opencode case present"
+# [INV-75] #232: the opencode per-CLI argv moved into adapters/opencode.sh; the
+# structural greps assert against it. lib-agent.sh now only dispatches.
+ADAPTER="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/adapters/opencode.sh"
+
+if grep -qE '^adapter_invoke_opencode\(\)' "$ADAPTER"; then
+  echo -e "  ${GREEN}PASS${NC}: adapter_invoke_opencode present"
   PASS=$((PASS + 1))
 else
-  echo -e "  ${RED}FAIL${NC}: opencode case missing"
+  echo -e "  ${RED}FAIL${NC}: adapter_invoke_opencode missing"
   FAIL=$((FAIL + 1))
 fi
 
-if grep -q '"\$AGENT_CMD" run --format json' "$LIB"; then
+if grep -q '"\$AGENT_CMD" run --format json' "$ADAPTER"; then
   echo -e "  ${GREEN}PASS${NC}: opencode invocation uses 'run --format json'"
   PASS=$((PASS + 1))
 else
@@ -87,11 +91,11 @@ else
   FAIL=$((FAIL + 1))
 fi
 
-if grep -q '"\$AGENT_CMD" run --format json --session' "$LIB"; then
-  echo -e "  ${GREEN}PASS${NC}: resume_agent opencode case calls 'run --session'"
+if grep -q '"\$AGENT_CMD" run --format json --session' "$ADAPTER"; then
+  echo -e "  ${GREEN}PASS${NC}: opencode adapter dev-resume calls 'run --session'"
   PASS=$((PASS + 1))
 else
-  echo -e "  ${RED}FAIL${NC}: resume_agent opencode case missing 'run --session'"
+  echo -e "  ${RED}FAIL${NC}: opencode adapter dev-resume missing 'run --session'"
   FAIL=$((FAIL + 1))
 fi
 

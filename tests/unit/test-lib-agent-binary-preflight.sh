@@ -173,8 +173,12 @@ echo "=== TC-BINPF-CODEX: codex REVIEW lane preflights its binary too (#231 revi
 # launches `codex review …` directly via _run_with_timeout, bypassing the
 # run_agent/resume_agent preflight. Static + behavioral.
 LIB_REVIEW_CODEX="$SCRIPTS_DIR/lib-review-codex.sh"
+# [INV-75] #232: _run_codex_review moved into adapters/codex.sh (lib-review-codex.sh
+# is now a thin shim that sources it). Static check greps the adapter; behavioral
+# check below still sources lib-review-codex.sh (the shim → adapter), unchanged.
+CODEX_ADAPTER="$SCRIPTS_DIR/adapters/codex.sh"
 # Static: _run_codex_review calls preflight_agent_binary and returns its rc.
-if grep -qE 'preflight_agent_binary \|\| return' "$LIB_REVIEW_CODEX"; then
+if grep -qE 'preflight_agent_binary \|\| return' "$CODEX_ADAPTER"; then
   ok "CODEX _run_codex_review wires 'preflight_agent_binary || return'"
 else
   bad "CODEX _run_codex_review does NOT wire the preflight (P1 regression)"

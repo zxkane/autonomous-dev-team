@@ -115,10 +115,16 @@ strip_comments() {
     line = $0
     sub(/[[:space:]]*#.*$/, "", line)
     print line
-  }' "$1"
+  }' "$@"
 }
 
-executable=$(strip_comments "$LIB")
+# [INV-75] #232: per-CLI invocation pipelines moved out of lib-agent.sh into
+# adapters/<cli>.sh. The INV-34 stdin contract + PIPESTATUS discipline now live
+# there, so scan lib-agent.sh AND every adapter — the surface that assembles a
+# `_run_with_timeout` invocation.
+ADAPTER_DIR="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/adapters"
+INVOKE_SRCS=("$LIB" "$ADAPTER_DIR"/*.sh)
+executable=$(strip_comments "${INVOKE_SRCS[@]}")
 
 # Pre-fix every CLI branch ended `_run_with_timeout <cli> ... "$prompt"`,
 # either on a single line or split across `\`-continued lines. After
@@ -140,7 +146,7 @@ joined=$(awk 'BEGIN{buf=""} {
     print buf line
     buf = ""
   }
-} END { if (buf != "") print buf }' "$LIB")
+} END { if (buf != "") print buf }' "${INVOKE_SRCS[@]}")
 
 if grep -nE '_run_with_timeout[^|]*"\$prompt"' <<<"$joined" >/dev/null; then
   echo -e "  ${RED}FAIL${NC}: TC-EXEC-009 lib-agent.sh still has '_run_with_timeout ... \"\$prompt\"' — prompt still on argv (incl. continuation-line check)"

@@ -24,6 +24,10 @@ FAIL=0
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 LIB="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-agent.sh"
+# [INV-75] #232: the codex per-CLI argv assembly moved out of lib-agent.sh into
+# this adapter; the structural greps below assert against it. The behavioral
+# tests still source lib-agent.sh and drive run_agent (dispatch is unchanged).
+ADAPTER="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/adapters/codex.sh"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -72,31 +76,26 @@ echo "=== TC-LA-CODEX-01: source-of-truth grep — codex branch shape ==="
 # ---------------------------------------------------------------------------
 # Cheap structural assertions before exercising behavior.
 
-if grep -qE '^\s*codex\)\s*$' "$LIB"; then
-  echo -e "  ${GREEN}PASS${NC}: codex case still present"
+# The codex adapter defines its mode-axis entry point.
+if grep -qE '^adapter_invoke_codex\(\)' "$ADAPTER"; then
+  echo -e "  ${GREEN}PASS${NC}: adapter_invoke_codex present"
   PASS=$((PASS + 1))
 else
-  echo -e "  ${RED}FAIL${NC}: codex case missing"
+  echo -e "  ${RED}FAIL${NC}: adapter_invoke_codex missing"
   FAIL=$((FAIL + 1))
 fi
 
-# The legacy `codex ... -p "$prompt"` form is what we're removing. The
-# generic `*)` fallback below the codex case still uses `<cli> -p <prompt>`
-# correctly for non-codex CLIs, so a whole-file grep would false-positive.
-# Scope the check to just the run_agent codex case body.
-codex_case_body=$(awk '
-  /^[[:space:]]*codex\)[[:space:]]*$/,/^[[:space:]]*;;[[:space:]]*$/
-' "$LIB" | head -40)
-if [[ "$codex_case_body" != *'-p "$prompt"'* ]]; then
-  echo -e "  ${GREEN}PASS${NC}: codex case does not invoke 'codex -p \"\$prompt\"'"
+# The legacy `codex ... -p "$prompt"` form must NOT appear in the adapter.
+if [[ "$(cat "$ADAPTER")" != *'-p "$prompt"'* ]]; then
+  echo -e "  ${GREEN}PASS${NC}: codex adapter does not invoke 'codex -p \"\$prompt\"'"
   PASS=$((PASS + 1))
 else
-  echo -e "  ${RED}FAIL${NC}: codex case still uses legacy '-p \$prompt'"
+  echo -e "  ${RED}FAIL${NC}: codex adapter still uses legacy '-p \$prompt'"
   FAIL=$((FAIL + 1))
 fi
 
-# The new exec invocation must be there and use --json.
-if grep -q '"\$AGENT_CMD" exec --json' "$LIB"; then
+# The new exec invocation must be there and use --json (in the adapter now).
+if grep -q '"\$AGENT_CMD" exec --json' "$ADAPTER"; then
   echo -e "  ${GREEN}PASS${NC}: new 'codex exec --json' invocation present"
   PASS=$((PASS + 1))
 else
@@ -104,12 +103,12 @@ else
   FAIL=$((FAIL + 1))
 fi
 
-# resume_agent codex case must call `exec resume`.
-if grep -q '"\$AGENT_CMD" exec resume' "$LIB"; then
-  echo -e "  ${GREEN}PASS${NC}: resume_agent codex case calls 'codex exec resume'"
+# resume (dev-resume) codex must call `exec resume` (in the adapter now).
+if grep -q '"\$AGENT_CMD" exec resume' "$ADAPTER"; then
+  echo -e "  ${GREEN}PASS${NC}: codex adapter dev-resume calls 'codex exec resume'"
   PASS=$((PASS + 1))
 else
-  echo -e "  ${RED}FAIL${NC}: resume_agent codex case missing 'codex exec resume'"
+  echo -e "  ${RED}FAIL${NC}: codex adapter dev-resume missing 'codex exec resume'"
   FAIL=$((FAIL + 1))
 fi
 

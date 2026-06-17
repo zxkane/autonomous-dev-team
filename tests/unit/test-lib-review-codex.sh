@@ -29,6 +29,12 @@ FAIL=0
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 LIB="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-review-codex.sh"
+# [INV-75] #232: the codex review lane + scrapers moved into adapters/codex.sh.
+# lib-review-codex.sh ($LIB) is now a thin compat shim that sources the adapter —
+# so `source "$LIB"` still defines every codex review fn (behavioral tests are
+# unchanged), but source-of-truth greps for the codex CODE assert against the
+# adapter ($CODEX_ADAPTER).
+CODEX_ADAPTER="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/adapters/codex.sh"
 WRAPPER="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/autonomous-review.sh"
 AGENT_LIB="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-agent.sh"
 CI="$PROJECT_ROOT/.github/workflows/ci.yml"
@@ -720,10 +726,11 @@ assert_not_contains "TC-CXRS-CFG-PHR-02b no spurious flag when token carries non
 echo ""
 echo "=== TC-CXRS-DEV: codex DEV path stays on 'codex exec' (byte-for-byte) ==="
 # ---------------------------------------------------------------------------
-# The dev primitives live in lib-agent.sh and must NOT learn about `codex review`.
-assert_grep "TC-CXRS-DEV-01 dev codex branch still emits 'codex exec --json'" \
-  '"\$AGENT_CMD" exec --json' "$AGENT_LIB"
-assert_no_grep "TC-CXRS-DEV-02 lib-agent.sh has no 'codex review' / review-lib leak" \
+# [INV-75] #232: the codex DEV argv lives in adapters/codex.sh (dev-mode) and the
+# CLI-agnostic plumbing (lib-agent.sh) must NOT carry codex-review CODE.
+assert_grep "TC-CXRS-DEV-01 codex adapter dev mode still emits 'codex exec --json'" \
+  '"\$AGENT_CMD" exec --json' "$CODEX_ADAPTER"
+assert_no_grep "TC-CXRS-DEV-02 lib-agent.sh has no 'codex review' / review-lib leak (plumbing is CLI-agnostic)" \
   'codex review|_run_codex_review|_codex_review_' "$AGENT_LIB"
 
 # ---------------------------------------------------------------------------
@@ -736,11 +743,11 @@ assert_grep "TC-CXRS-WIRE-01 wrapper calls _run_codex_review" \
 # TC-CXRS-WIRE-02 — the old resume controller is GONE (lib + wrapper)
 assert_no_grep "TC-CXRS-WIRE-02a _run_codex_review_with_resume removed from wrapper" \
   '_run_codex_review_with_resume' "$WRAPPER"
-assert_no_grep "TC-CXRS-WIRE-02b _run_codex_review_with_resume removed from lib" \
-  '_run_codex_review_with_resume' "$LIB"
+assert_no_grep "TC-CXRS-WIRE-02b _run_codex_review_with_resume removed from codex adapter" \
+  '_run_codex_review_with_resume' "$CODEX_ADAPTER"
 # TC-CXRS-WIRE-03 — the JSONL verdict parser is GONE
-assert_no_grep "TC-CXRS-WIRE-03a _codex_log_has_verdict_message removed from lib" \
-  '_codex_log_has_verdict_message' "$LIB"
+assert_no_grep "TC-CXRS-WIRE-03a _codex_log_has_verdict_message removed from codex adapter" \
+  '_codex_log_has_verdict_message' "$CODEX_ADAPTER"
 assert_no_grep "TC-CXRS-WIRE-03b _codex_log_has_verdict_message removed from wrapper" \
   '_codex_log_has_verdict_message' "$WRAPPER"
 # TC-CXRS-WIRE-04 — the INV-55 inline-diff block is GONE from the codex prompt
@@ -803,7 +810,7 @@ assert_grep "TC-CXRS-WIRE-10b wrapper stdout-fallback admits ONLY rc 0 (#218 fin
 # through newlines). Pin that _codex_review_argv is called with an out-array first
 # arg in the lib (the production caller).
 assert_grep "TC-CXRS-WIRE-11 _run_codex_review builds argv via the nameref out-array (#218 finding 1)" \
-  '_codex_review_argv _argv ' "$LIB"
+  '_codex_review_argv _argv ' "$CODEX_ADAPTER"
 
 # ===========================================================================
 echo ""

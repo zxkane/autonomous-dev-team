@@ -92,6 +92,12 @@ jobs:
             skills/autonomous-dispatcher/scripts/dispatch-local.sh \
             skills/autonomous-dispatcher/scripts/dispatcher-tick.sh \
             skills/autonomous-dispatcher/scripts/lib-agent.sh \
+            skills/autonomous-dispatcher/scripts/adapters/claude.sh \
+            skills/autonomous-dispatcher/scripts/adapters/codex.sh \
+            skills/autonomous-dispatcher/scripts/adapters/gemini.sh \
+            skills/autonomous-dispatcher/scripts/adapters/kiro.sh \
+            skills/autonomous-dispatcher/scripts/adapters/opencode.sh \
+            skills/autonomous-dispatcher/scripts/adapters/agy.sh \
             skills/autonomous-dispatcher/scripts/lib-auth.sh \
             skills/autonomous-dispatcher/scripts/lib-config.sh \
             skills/autonomous-dispatcher/scripts/lib-dispatch.sh \

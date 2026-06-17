@@ -93,37 +93,43 @@ echo "=== TC-KIR-STATIC-001: source-of-truth grep — kiro branch shape ==="
 # Cheap structural assertions before exercising behavior. Catches the
 # refactor-drops-the-branch failure mode immediately.
 
-# Both run_agent and resume_agent must have a kiro case (count 2).
-kiro_case_count=$(grep -cE '^[[:space:]]*kiro\)[[:space:]]*$' "$LIB" || echo 0)
-assert_eq "lib-agent.sh has kiro case in both run_agent and resume_agent" \
-  "2" "$kiro_case_count"
+# [INV-75] #232: the kiro per-CLI argv moved into adapters/kiro.sh; the
+# structural greps assert against it. lib-agent.sh now only dispatches.
+ADAPTER="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/adapters/kiro.sh"
 
-# Post-#140: the kiro case body MUST NOT contain executable references
-# to `--trust-all-tools` — the flag has been demoted to operator conf
-# (AGENT_DEV_EXTRA_ARGS). Mentions inside `#` comments are allowed (and
-# expected, as the docstring documents the canonical EXTRA_ARGS value
-# for operators). Strip comments before grepping so we test code, not
-# narrative.
+# The kiro adapter defines its single mode-axis entry (dev-resume == dev-new for
+# kiro, so ONE adapter_invoke_kiro covers both, unlike the old two-case split).
+if grep -qE '^adapter_invoke_kiro\(\)' "$ADAPTER"; then
+  echo -e "  ${GREEN}PASS${NC}: adapter_invoke_kiro present"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: adapter_invoke_kiro missing"
+  FAIL=$((FAIL + 1))
+fi
+
+# Post-#140: the kiro adapter MUST NOT contain executable references to
+# `--trust-all-tools` — the flag has been demoted to operator conf
+# (AGENT_DEV_EXTRA_ARGS). Mentions inside `#` comments are allowed (the docstring
+# documents the canonical EXTRA_ARGS value for operators). Strip comments before
+# grepping so we test code, not narrative.
 #
-# Pin the demotion: a refactor that re-hardcodes the flag would silently
-# override operators' allowedTools posture, reproducing the #102 R5
-# fabrication failure mode for everyone who sets AGENT_PERMISSION_MODE
-# to anything other than bypassPermissions.
+# Pin the demotion: a refactor that re-hardcodes the flag would silently override
+# operators' allowedTools posture, reproducing the #102 R5 fabrication failure
+# mode for everyone who sets AGENT_PERMISSION_MODE to anything other than
+# bypassPermissions.
 kiro_executable=$(awk '
-  /^[[:space:]]*kiro\)[[:space:]]*$/ { flag=1 }
-  flag {
+  {
     line = $0
     sub(/[[:space:]]*#.*$/, "", line)
     if (line ~ /^[[:space:]]*$/) next
-    if (line ~ /^[[:space:]]*;;[[:space:]]*$/) { flag=0; next }
     print line
   }
-' "$LIB")
+' "$ADAPTER")
 if [[ "$kiro_executable" != *"--trust-all-tools"* ]]; then
-  echo -e "  ${GREEN}PASS${NC}: kiro case body does not hardcode --trust-all-tools (demoted to AGENT_DEV_EXTRA_ARGS, #140)"
+  echo -e "  ${GREEN}PASS${NC}: kiro adapter does not hardcode --trust-all-tools (demoted to AGENT_DEV_EXTRA_ARGS, #140)"
   PASS=$((PASS + 1))
 else
-  echo -e "  ${RED}FAIL${NC}: kiro case body still hardcodes --trust-all-tools (should live in AGENT_DEV_EXTRA_ARGS, #140)"
+  echo -e "  ${RED}FAIL${NC}: kiro adapter still hardcodes --trust-all-tools (should live in AGENT_DEV_EXTRA_ARGS, #140)"
   FAIL=$((FAIL + 1))
 fi
 
