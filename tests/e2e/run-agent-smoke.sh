@@ -72,13 +72,32 @@ exit 0
 PASS_CLI
 
   # A stub that NEVER echoes the nonce and exits non-zero with no recognizable
-  # signal (FAIL — the no-response path).
-  cat > "$stub_dir/smoke-fail-cli" <<'FAIL_CLI'
+  # signal — the bare `no-response` path. Under [INV-76] this is a TRANSIENT (the
+  # CLI died before emitting any signal), so smoke_agent retries it once and, if it
+  # stays no-response, classifies UNAVAILABLE — NOT a FAIL. Kept for documentation /
+  # potential reuse, but no longer the matrix's FAIL entry (a bare no-response can
+  # no longer be the gate-worthy FAIL case).
+  cat > "$stub_dir/smoke-noresponse-cli" <<'NORESP_CLI'
 #!/bin/bash
 cat >/dev/null
-echo "stub: simulated launch/config failure (no model response)" >&2
+echo "stub: simulated transient infra hiccup (no model response, no signal)" >&2
 exit 3
-FAIL_CLI
+NORESP_CLI
+
+  # A stub that emits a GENUINE operator-side config error: the codex `codex review`
+  # clap argv rejection (`error: unexpected argument '<flag>' found`) + clap exit 2.
+  # _classify_codex_drop_reason recognizes this as `config-error:<flag>` → a FAIL
+  # that survives [INV-76] (operator-side breakage is NOT a transient, NOT retried).
+  # This is the matrix's FAIL entry post-INV-76 — exercising the still-live
+  # "any FAIL → overall rc 1" gate branch with a real config break.
+  cat > "$stub_dir/smoke-config-error-cli" <<'CFG_CLI'
+#!/bin/bash
+cat >/dev/null
+echo "error: unexpected argument '--stub-bad-flag' found" >&2
+echo "" >&2
+echo "Usage: codex review [OPTIONS] [PROMPT]" >&2
+exit 2
+CFG_CLI
 
   # A stub `agy`: reads --log-file from argv, writes the committed quota fixture
   # into it, then exits empty (UNAVAILABLE via the agy scraper). This is the
@@ -97,10 +116,14 @@ done
 exit 0
 AGY_CLI
 
-  chmod +x "$stub_dir"/smoke-pass-cli "$stub_dir"/smoke-fail-cli "$stub_dir"/smoke-agy-quota
-  # Symlink the agent-cmd names the stub matrix uses onto the stub binaries.
+  chmod +x "$stub_dir"/smoke-pass-cli "$stub_dir"/smoke-noresponse-cli \
+    "$stub_dir"/smoke-config-error-cli "$stub_dir"/smoke-agy-quota
+  # Symlink the agent-cmd names the stub matrix uses onto the stub binaries. codex
+  # is the FAIL entry → point it at the GENUINE config-error stub (a bare
+  # no-response would now retry → UNAVAILABLE under [INV-76], so it can no longer
+  # be the matrix's gate-worthy FAIL case).
   ln -sf "$stub_dir/smoke-pass-cli" "$stub_dir/claude"
-  ln -sf "$stub_dir/smoke-fail-cli" "$stub_dir/codex"
+  ln -sf "$stub_dir/smoke-config-error-cli" "$stub_dir/codex"
   ln -sf "$stub_dir/smoke-agy-quota" "$stub_dir/agy"
   export PATH="$stub_dir:$PATH"
 

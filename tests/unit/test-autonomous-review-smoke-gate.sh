@@ -378,6 +378,60 @@ assert_eq "TC-REVIEW-SMOKE-073 genuine FAIL + timed-out member → gate fail (ab
 rm -rf "$TEST_HOME" 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
+echo "=== TC-REVIEW-SMOKE-075 #257 no-response retry→UNAVAILABLE propagates through the gate ==="
+# ---------------------------------------------------------------------------
+# The #257 win: a transient smoke `no-response` (rc≠0, no signal) that stays
+# no-response after one retry is now an UNAVAILABLE state at the gate (smoke_agent
+# rc 2, reason `…after retry — transient infra`), NOT a single-shot FAIL. So a
+# single-agent codex fleet hitting a one-off Bedrock infra hiccup no longer aborts
+# the whole review and wedges the issue in `reviewing`. These cases stub
+# smoke_agent to emit exactly the retried-then-UNAVAILABLE shape lib-agent-smoke.sh
+# now produces, and exercise the real `_classify_smoke_state` → `_classify_smoke_gate`
+# propagation (no gate-side code change is needed; this proves the propagation).
+TEST_HOME=$(mktemp -d "${TMPDIR:-/tmp}/review-smoke-nr-home-XXXXXX")
+# Stub: codex → retried-then-UNAVAILABLE (rc 2), every other agent → PASS.
+STUB_NR='smoke_agent() {
+  case "$1" in
+    codex) echo "SMOKE codex UNAVAILABLE 7s reason=no-response (rc=1; no nonce after retry — transient infra)"; return 2 ;;
+    *)     echo "SMOKE $1 PASS 3s reason=nonce-ok"; return 0 ;;
+  esac
+}'
+# TC-REVIEW-SMOKE-075a: the retried-then-no-response member resolves to `unavailable`.
+out=$(_cascade "$STUB_NR" claude codex)
+assert_eq "TC-REVIEW-SMOKE-075a codex no-response-after-retry → unavailable state (not fail)" \
+  "STATES=pass unavailable" "$(printf '%s\n' "$out" | grep '^STATES=')"
+
+# TC-REVIEW-SMOKE-075b: one member retried-then-UNAVAILABLE + one PASS → gate
+# PROCEEDS (pass), the unavailable member dropped, survivor fans out.
+assert_eq "TC-REVIEW-SMOKE-075b one retried-UNAVAILABLE + one PASS → gate pass (review proceeds)" \
+  "GATE=pass" "$(printf '%s\n' "$out" | grep '^GATE=')"
+assert_eq "TC-REVIEW-SMOKE-075b2 no-response codex dropped, survivor fans out" \
+  "SURVIVORS=claude" "$(printf '%s\n' "$out" | grep '^SURVIVORS=')"
+
+# TC-REVIEW-SMOKE-075c: ALL members no-response-then-UNAVAILABLE (the single-agent
+# codex backlog-drain shape) → all-unavailable terminal path, NOT an empty fan-out
+# and NOT a FAIL abort.
+STUB_ALL_NR='smoke_agent() { echo "SMOKE $1 UNAVAILABLE 7s reason=no-response (rc=1; no nonce after retry — transient infra)"; return 2; }'
+out=$(_cascade "$STUB_ALL_NR" codex)
+assert_eq "TC-REVIEW-SMOKE-075c single-agent codex no-response-after-retry → all-unavailable (no empty fan-out)" \
+  "GATE=all-unavailable" "$(printf '%s\n' "$out" | grep '^GATE=')"
+
+# TC-REVIEW-SMOKE-075d: a GENUINE config FAIL alongside a retried-UNAVAILABLE member
+# still aborts — the no-response relaxation does NOT weaken the FAIL→abort path for
+# a real config break.
+STUB_FAIL_PLUS_NR='smoke_agent() {
+  case "$1" in
+    codex) echo "SMOKE codex UNAVAILABLE 7s reason=no-response (rc=1; no nonce after retry — transient infra)"; return 2 ;;
+    kiro)  echo "SMOKE kiro FAIL 2s reason=auth-failed"; return 1 ;;
+    *)     echo "SMOKE $1 PASS 3s reason=nonce-ok"; return 0 ;;
+  esac
+}'
+out=$(_cascade "$STUB_FAIL_PLUS_NR" claude codex kiro)
+assert_eq "TC-REVIEW-SMOKE-075d genuine FAIL + retried-UNAVAILABLE member → gate fail (abort preserved)" \
+  "GATE=fail" "$(printf '%s\n' "$out" | grep '^GATE=')"
+rm -rf "$TEST_HOME" 2>/dev/null || true
+
+# ---------------------------------------------------------------------------
 echo "=== TC-REVIEW-SMOKE docs (INV-64 + flow + design + test-cases) ==="
 # ---------------------------------------------------------------------------
 assert_grep "TC-REVIEW-SMOKE-061a INV-64 entry in invariants.md" \
