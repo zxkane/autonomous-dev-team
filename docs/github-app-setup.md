@@ -132,9 +132,11 @@ launching it: the agent process gets `GH_TOKEN_FILE` pointed at the **scoped** t
 file (kept fresh by the scoped daemon — so the agent's `gh` stays valid past the 1h
 App-token TTL), `GH_TOKEN` = the scoped token as a snapshot fallback, and
 `GITHUB_PERSONAL_ACCESS_TOKEN` / `GH_USER_PAT` unset (the wrapper's full-write token
-file is a different path and is never exposed). `PATH` is left intact so the agent's
-bare `gh` keeps resolving the `gh-with-token-refresh.sh` shim (the only resolvable
-`gh` on `REAL_GH`/non-interactive-PATH hosts); that shim reads the scoped
+file is a different path and is never exposed). `PATH` is rewritten: the wrapper's
+per-run shim dir is stripped and the agent's OWN per-run shim dir is prepended, so
+the agent env carries no wrapper `gh` shim while the agent's bare `gh` still
+resolves (the agent-own `gh-with-token-refresh.sh` shim — the only resolvable `gh`
+on `REAL_GH`/non-interactive-PATH hosts); that shim reads the scoped
 `GH_TOKEN_FILE` and execs real `gh` with the fresh scoped token, so the agent's `gh`
 works, stays fresh, AND is scoped. The scoped token is refreshed by its own
 background daemon (same 45-min cadence as the full-write token).

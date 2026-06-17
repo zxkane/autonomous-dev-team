@@ -239,27 +239,51 @@ fi
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== TC-TOKEN-SPLIT-032: scrub prefix does NOT rewrite PATH (#234 review [P1] — keep the gh shim resolvable) ==="
+echo "=== TC-TOKEN-SPLIT-032: scrub PATH= swaps the WRAPPER shim dir for the AGENT-own shim dir (#234 AC#1) ==="
 # ---------------------------------------------------------------------------
-# The scrub must leave PATH intact so the agent's bare `gh` keeps resolving the
-# per-run gh-with-token-refresh.sh shim. A `PATH=` element in the prefix would
-# strip the shim dir and break bare `gh` on REAL_GH/non-interactive-PATH hosts.
-if ! printf '%s\n' "$pfx" | grep -qE '(^| )PATH='; then
-  assert_pass "scrub prefix carries NO PATH= override (PATH left intact, shim stays resolvable)"
+# The prefix MUST carry a PATH= element that (a) does NOT contain the wrapper's
+# GH_WRAPPER_DIR (AC#1 — no wrapper shim), (b) prepends the AGENT's own shim dir
+# (so bare `gh` still resolves), preserving the other PATH segments.
+mapfile -t out32 < <(env -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR -u GH_TOKEN_FILE -u GH_TOKEN -u GITHUB_PERSONAL_ACCESS_TOKEN -u GH_USER_PAT \
+  PATH="/usr/bin:/bin" bash -c "
+  source '$SBA/lib-auth.sh'
+  wdir=\$(mktemp -d /tmp/agent-auth-XXXXXX); export GH_WRAPPER_DIR=\"\$wdir\"; export PATH=\"\$wdir:\$PATH\"
+  AGENT_GH_TOKEN_FILE=\"\$wdir/agent-token\"; echo 'tok' > \"\$AGENT_GH_TOKEN_FILE\"
+  AGENT_GH_SHIM_DIR=\$(mktemp -d /tmp/agent-shim-XXXXXX)
+  declare -a p=(); build_agent_env_argv p
+  echo \"WDIR=\$wdir\"; echo \"SHIM=\$AGENT_GH_SHIM_DIR\"
+  printf 'PATHEL=%s\n' \"\$(printf '%s\n' \"\${p[@]}\" | grep '^PATH=')\"
+  rm -rf \"\$wdir\" \"\$AGENT_GH_SHIM_DIR\"
+")
+w32=""; s32=""; pathel32=""
+for kv in "${out32[@]}"; do
+  case "$kv" in
+    WDIR=*) w32="${kv#WDIR=}" ;;
+    SHIM=*) s32="${kv#SHIM=}" ;;
+    PATHEL=*) pathel32="${kv#PATHEL=}" ;;
+  esac
+done
+if [[ -n "$pathel32" ]] && ! printf '%s' "$pathel32" | grep -qF "$w32"; then
+  assert_pass "scrub PATH= excludes the wrapper's GH_WRAPPER_DIR ($w32) — AC#1 no-wrapper-shim"
 else
-  assert_fail "scrub prefix rewrites PATH (the #234 [P1] regression — would strip the gh shim): $pfx"
+  assert_fail "scrub PATH= still contains the wrapper dir ($w32): $pathel32"
 fi
-# Source-level lockdown: the dead _strip_path_entry helper must be gone, and
-# build_agent_env_argv must not emit a PATH= element.
-if ! grep -q '_strip_path_entry' "$SCRIPTS/lib-auth.sh"; then
-  assert_pass "source: _strip_path_entry removed (no longer used)"
+if printf '%s' "$pathel32" | grep -qF "PATH=${s32}:"; then
+  assert_pass "scrub PATH= PREPENDS the agent-own shim dir ($s32) — bare gh resolves"
 else
-  assert_fail "source: _strip_path_entry still present in lib-auth.sh (dead code / PATH-strip risk)"
+  assert_fail "scrub PATH= does not prepend the agent-own shim dir ($s32): $pathel32"
 fi
-if ! awk '/^build_agent_env_argv\(\)/,/^}/' "$SCRIPTS/lib-auth.sh" | grep -q 'PATH='; then
-  assert_pass "source: build_agent_env_argv emits no PATH= element"
+# Source-level lockdown: build_agent_env_argv MUST emit a PATH= element (the swap),
+# and _strip_path_entry MUST exist (used for the swap).
+if grep -q '_strip_path_entry' "$SCRIPTS/lib-auth.sh"; then
+  assert_pass "source: _strip_path_entry present (used to strip the wrapper dir)"
 else
-  assert_fail "source: build_agent_env_argv still emits a PATH= element (#234 [P1] regression)"
+  assert_fail "source: _strip_path_entry missing — the PATH swap cannot strip the wrapper dir"
+fi
+if awk '/^build_agent_env_argv\(\)/,/^}/' "$SCRIPTS/lib-auth.sh" | grep -q 'PATH=\${AGENT_GH_SHIM_DIR}'; then
+  assert_pass "source: build_agent_env_argv emits the agent-shim PATH= swap"
+else
+  assert_fail "source: build_agent_env_argv does not emit the agent-shim PATH= swap"
 fi
 
 # ---------------------------------------------------------------------------
@@ -272,6 +296,7 @@ echo "=== TC-TOKEN-SPLIT-040: scrub completeness via _run_with_timeout (env-dump
 # _run_with_timeout and assert the dump.
 ENVDUMP="$TMPROOT/envdump.txt"
 WDIR_SENTINEL="$TMPROOT/wdir-used.txt"
+SHIM_SENTINEL="$TMPROOT/shim-used.txt"
 # Scrub the live-wrapper env contamination (AUTONOMOUS_CONF_DIR / inherited PATH
 # GH_WRAPPER_DIR / credential vars) so the dump reflects only what THIS test sets
 # — mirrors the CI-equivalent clean env (see feedback_unit_test_env_contamination).
@@ -296,11 +321,16 @@ env -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR -u GH_TOKEN_FILE -u GITHUB_PERSONAL_AC
   export GH_USER_PAT='fullpat'
   AGENT_GH_TOKEN_FILE=\"\$wdir/agent-token\"
   echo 'SCOPED-TOKEN-zzz' > \"\$AGENT_GH_TOKEN_FILE\"
+  # Create the AGENT's OWN shim dir (mirror setup_agent_token's tail) so the PATH
+  # rewrite swaps the wrapper dir for the agent-shim dir.
+  AGENT_GH_SHIM_DIR=\$(mktemp -d /tmp/agent-shim-XXXXXX)
+  printf '%s' \"\$AGENT_GH_SHIM_DIR\" > '$SHIM_SENTINEL'
   # Run the stub agent (env) under the timeout wrapper; capture its env dump.
   _run_with_timeout env > '$ENVDUMP' 2>/dev/null
-  rm -rf \"\$wdir\"
+  rm -rf \"\$wdir\" \"\$AGENT_GH_SHIM_DIR\"
 " >/dev/null 2>&1
 WDIR_USED=$(cat "$WDIR_SENTINEL" 2>/dev/null || echo "/tmp/agent-auth-NONE")
+SHIM_USED=$(cat "$SHIM_SENTINEL" 2>/dev/null || echo "/tmp/agent-shim-NONE")
 gh_token_line=$(grep -E '^GH_TOKEN=' "$ENVDUMP" 2>/dev/null || true)
 if [[ "$gh_token_line" == "GH_TOKEN=SCOPED-TOKEN-zzz" ]]; then
   assert_pass "agent env GH_TOKEN is the SCOPED token"
@@ -327,13 +357,19 @@ if ! grep -qE '^GH_USER_PAT=' "$ENVDUMP" 2>/dev/null; then
 else
   assert_fail "agent env still carries GH_USER_PAT — scrub incomplete"
 fi
-# #234 review [P1]: PATH is now KEPT INTACT — the agent's bare `gh` must keep
-# resolving the GH_WRAPPER_DIR shim. Assert the shim dir is STILL on the agent PATH.
+# #234 review [P1] (AC #1 — "no wrapper gh shim"): the agent PATH must NOT carry the
+# WRAPPER's GH_WRAPPER_DIR; it must carry the AGENT's OWN shim dir instead, so bare
+# `gh` still resolves WITHOUT the wrapper shim being exposed.
 path_line=$(grep -E '^PATH=' "$ENVDUMP" 2>/dev/null || true)
-if printf '%s' "$path_line" | grep -qF "$WDIR_USED"; then
-  assert_pass "agent PATH KEEPS the GH_WRAPPER_DIR shim dir ($WDIR_USED) — bare gh stays resolvable"
+if ! printf '%s' "$path_line" | grep -qF "$WDIR_USED"; then
+  assert_pass "agent PATH does NOT carry the wrapper's GH_WRAPPER_DIR ($WDIR_USED) — AC#1 no-wrapper-shim met"
 else
-  assert_fail "agent PATH lost the GH_WRAPPER_DIR shim ($WDIR_USED) — bare gh would break on REAL_GH hosts ([P1] regression): $path_line"
+  assert_fail "agent PATH still carries the WRAPPER shim dir ($WDIR_USED) — AC#1 violated: $path_line"
+fi
+if printf '%s' "$path_line" | grep -qF "$SHIM_USED"; then
+  assert_pass "agent PATH carries the AGENT's OWN shim dir ($SHIM_USED) — bare gh stays resolvable"
+else
+  assert_fail "agent PATH lost the agent-own shim dir ($SHIM_USED) — bare gh would break on REAL_GH hosts: $path_line"
 fi
 
 # ---------------------------------------------------------------------------
@@ -479,16 +515,16 @@ fi
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== TC-TOKEN-SPLIT-092: under the scrub, the agent's BARE gh resolves the shim → real gh with the SCOPED token (#234 [P1]) ==="
+echo "=== TC-TOKEN-SPLIT-092: bare gh resolves the AGENT-OWN shim → real gh with the SCOPED token; wrapper shim NOT used (#234 [P1] / AC#1) ==="
 # ---------------------------------------------------------------------------
-# The functional proof of the PATH-keep fix: with the scrub applied (GH_TOKEN=scoped,
-# GH_TOKEN_FILE pointed at the SCOPED file) and the GH_WRAPPER_DIR shim on PATH, a
-# BARE `gh` invocation from the agent must resolve the gh-with-token-refresh.sh shim
-# and exec the real gh under the SCOPED token. We model the #92 REAL_GH host: a fake
-# "real gh" prints the token it sees + which file the shim read it from, REAL_GH
-# points at it, and PATH has the shim dir + only system bins (no real gh dir), so the
-# shim is the ONLY resolvable `gh`. Run the bare `gh` under the EXACT env prefix
-# build_agent_env_argv produces.
+# The functional proof: with the scrub applied, the agent runs under the PATH=
+# build_agent_env_argv emits (wrapper dir stripped, agent-own shim dir prepended).
+# A BARE `gh` must resolve the AGENT-OWN shim (gh-with-token-refresh.sh) and exec
+# real gh under the SCOPED token, reading the scoped file. We model the #92 REAL_GH
+# host: a fake "real gh" prints the token + the file the shim read it from, REAL_GH
+# points at it, the system bins provide bash/env, and the agent's effective PATH is
+# WHATEVER build_agent_env_argv put in the PATH= element (we extract + use it). The
+# wrapper shim dir must be absent from that PATH.
 GHFAKE="$TMPROOT/ghfake"; mkdir -p "$GHFAKE"
 cat > "$GHFAKE/fake-gh" <<'FG'
 #!/bin/bash
@@ -501,23 +537,29 @@ mapfile -t out92 < <(env -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR -u GH_TOKEN_FILE 
   source '$SBA/lib-auth.sh'
   wdir=\$(mktemp -d /tmp/agent-auth-XXXXXX)
   printf '%s' \"\$wdir\" > '$WDIR92_SENT'
-  export GH_WRAPPER_DIR=\"\$wdir\"
+  export GH_WRAPPER_DIR=\"\$wdir\"; export PATH=\"\$wdir:\$PATH\"
   ln -sf '$SCRIPTS/gh-with-token-refresh.sh' \"\$wdir/gh\"
   export GH_TOKEN_FILE='/tmp/full-token-file'   # wrapper-side full-write file
   AGENT_GH_TOKEN_FILE=\"\$wdir/agent-token\"; echo 'SCOPED-92' > \"\$AGENT_GH_TOKEN_FILE\"
+  # Create the AGENT-own shim (mirror setup_agent_token) so build_agent_env_argv
+  # emits the PATH swap; install the shim symlink so bare gh resolves through it.
+  AGENT_GH_SHIM_DIR=\$(mktemp -d /tmp/agent-shim-XXXXXX)
+  ln -sf '$SCRIPTS/gh-with-token-refresh.sh' \"\$AGENT_GH_SHIM_DIR/gh\"
+  echo \"SHIM92=\$AGENT_GH_SHIM_DIR\"
   declare -a p=(); build_agent_env_argv p
-  # Build the agent PATH the way the wrapper does (shim dir prepended), and run a
-  # bare \`gh\` under the scrub prefix + REAL_GH (the #92 host). The scrub keeps PATH
-  # from the CALLER env, so we set the agent PATH explicitly to shim-dir + system.
-  REAL_GH='$GHFAKE/fake-gh' PATH=\"\$wdir:/usr/bin:/bin\" \"\${p[@]}\" gh whoami 2>&1
-  rm -rf \"\$wdir\"
+  # Use the PATH that build_agent_env_argv put in the prefix (the real agent PATH) —
+  # but ensure the fake-gh dir is NOT on it (so the shim's REAL_GH path is exercised).
+  # The prefix's env sets PATH; run a bare gh under it with REAL_GH pointing at fake-gh.
+  REAL_GH='$GHFAKE/fake-gh' \"\${p[@]}\" gh whoami 2>&1
+  rm -rf \"\$wdir\" \"\$AGENT_GH_SHIM_DIR\"
 ")
 WDIR92=$(cat "$WDIR92_SENT" 2>/dev/null || echo "/tmp/none")
+shim92=$(printf '%s\n' "${out92[@]}" | sed -n 's/^SHIM92=//p')
 out92_str="${out92[*]}"
 if printf '%s' "$out92_str" | grep -qF 'REALGH token=SCOPED-92' \
    && printf '%s' "$out92_str" | grep -qF "file=${WDIR92}/agent-token" \
    && ! printf '%s' "$out92_str" | grep -qF 'file=/tmp/full-token-file'; then
-  assert_pass "bare gh under the scrub → real gh with the SCOPED token, reading the SCOPED file (not the wrapper's full-write file)"
+  assert_pass "bare gh (via the agent-own shim, shim92=$shim92) → real gh with the SCOPED token, reading the SCOPED file (not the wrapper's full-write file)"
 else
   assert_fail "bare gh under the scrub did NOT reach real gh with the scoped token/file: $out92_str"
 fi
@@ -535,14 +577,17 @@ mapfile -t out93 < <(env -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR -u GH_TOKEN_FILE 
   PATH="/usr/bin:/bin" bash -c "
   source '$SBA/lib-auth.sh'
   wdir=\$(mktemp -d /tmp/agent-auth-XXXXXX)
-  export GH_WRAPPER_DIR=\"\$wdir\"
+  export GH_WRAPPER_DIR=\"\$wdir\"; export PATH=\"\$wdir:\$PATH\"
   ln -sf '$SCRIPTS/gh-with-token-refresh.sh' \"\$wdir/gh\"
   AGENT_GH_TOKEN_FILE=\"\$wdir/agent-token\"; echo 'tok-INITIAL' > \"\$AGENT_GH_TOKEN_FILE\"
+  AGENT_GH_SHIM_DIR=\$(mktemp -d /tmp/agent-shim-XXXXXX)
+  ln -sf '$SCRIPTS/gh-with-token-refresh.sh' \"\$AGENT_GH_SHIM_DIR/gh\"
   declare -a p=(); build_agent_env_argv p
-  REAL_GH='$GHFAKE/fake-gh' PATH=\"\$wdir:/usr/bin:/bin\" \"\${p[@]}\" gh a 2>&1
+  # Run under the PATH= the prefix emits (agent-own shim swapped in for the wrapper).
+  REAL_GH='$GHFAKE/fake-gh' \"\${p[@]}\" gh a 2>&1
   echo 'tok-REFRESHED' > \"\$AGENT_GH_TOKEN_FILE\"   # simulate the scoped daemon refresh
-  REAL_GH='$GHFAKE/fake-gh' PATH=\"\$wdir:/usr/bin:/bin\" \"\${p[@]}\" gh b 2>&1
-  rm -rf \"\$wdir\"
+  REAL_GH='$GHFAKE/fake-gh' \"\${p[@]}\" gh b 2>&1
+  rm -rf \"\$wdir\" \"\$AGENT_GH_SHIM_DIR\"
 ")
 out93_str="${out93[*]}"
 if printf '%s' "$out93_str" | grep -qF 'token=tok-INITIAL' \

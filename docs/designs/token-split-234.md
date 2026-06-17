@@ -94,11 +94,15 @@ agy/generic the agent subtree gets:
 - `GH_TOKEN` = the scoped token as a snapshot fallback (the shim re-reads the file
   and overrides it, so the fresh file wins).
 - `GITHUB_PERSONAL_ACCESS_TOKEN` / `GH_USER_PAT` **unset** (no full-write/PAT leak)
-- `PATH` **kept intact** (#234 review [P1]): the agent's bare `gh` (review prompt,
-  vendored helpers like `mark-issue-checkbox.sh`) must keep resolving the per-run
-  `gh-with-token-refresh.sh` shim — its only resolvable `gh` on `REAL_GH` hosts
-  (#92). The shim reads the scoped `GH_TOKEN_FILE` and execs real `gh` with the
-  fresh scoped token, so bare `gh` works, stays fresh, AND authenticates scoped.
+- `PATH` **rewritten** (#234 review [P1] / AC #1): the wrapper's `GH_WRAPPER_DIR`
+  shim entry is **stripped** (AC #1 — agent env shows no wrapper gh shim) and the
+  agent's OWN per-run shim dir (`AGENT_GH_SHIM_DIR`, with its own
+  `gh → gh-with-token-refresh.sh`) is **prepended**. The agent's bare `gh` (review
+  prompt, vendored helpers like `mark-issue-checkbox.sh`) thus still resolves a
+  `gh` on `REAL_GH` hosts (#92) — the AGENT-own shim, not the wrapper's. The agent
+  shim reads the scoped `GH_TOKEN_FILE` and execs real `gh` with the fresh scoped
+  token, so bare `gh` works, stays fresh, AND authenticates scoped — without the
+  wrapper shim dir on the agent PATH.
 
 Scrub fires ONLY when a scoped token is armed (`AGENT_GH_TOKEN_FILE` non-empty +
 readable). PAT mode / app-mode-without-scoping → empty prefix → no behavior change.
@@ -124,10 +128,12 @@ with ONLY a scoped installation token (`contents:write`, `issues:write`,
 `pull_requests:read`): its `GH_TOKEN_FILE` points at the SCOPED token file (kept
 fresh by the scoped daemon — refresh-aware, not a stale one-time snapshot), and
 `GITHUB_PERSONAL_ACCESS_TOKEN` / `GH_USER_PAT` are unset. The wrapper's full-write
-token file (a different path) is never exposed. PATH is kept intact so the agent's
-bare `gh` still resolves the per-run shim, which reads the scoped `GH_TOKEN_FILE`
-and execs real `gh` with the fresh scoped token. The wrapper retains the full-write
-token and is the SOLE approve/merge/label/PR-create path
+token file (a different path) is never exposed. PATH is rewritten: the wrapper's
+`GH_WRAPPER_DIR` shim is stripped (AC #1 — no wrapper gh shim in the agent env) and
+the agent's OWN shim dir (`AGENT_GH_SHIM_DIR`) is prepended, so the agent's bare
+`gh` still resolves (the agent-own shim, reading the scoped `GH_TOKEN_FILE` →
+fresh scoped token). The wrapper retains the full-write token and is the SOLE
+approve/merge/label/PR-create path
 (complements INV-44 / INV-52). In PAT mode this degrades to convention with a
 one-time WARN. Verify-by-construction: a conformance fixture dumps the agent env
 and asserts no full-write credential is present.

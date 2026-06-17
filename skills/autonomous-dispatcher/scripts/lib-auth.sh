@@ -56,6 +56,14 @@ GH_WRAPPER_DIR=""
 # wrapper's daemon.
 AGENT_GH_TOKEN_FILE=""
 AGENT_TOKEN_DAEMON_PID=""
+# [INV-77] The AGENT's OWN per-run `gh` shim dir (mode 700), distinct from the
+# wrapper's GH_WRAPPER_DIR. It holds a `gh` → gh-with-token-refresh.sh symlink that
+# the agent's BARE `gh` resolves through. build_agent_env_argv rewrites the agent
+# PATH to STRIP the wrapper's GH_WRAPPER_DIR (issue #234 AC #1: "env dump shows …
+# no wrapper gh shim") and PREPEND this agent-owned dir instead — so bare `gh`
+# stays resolvable on REAL_GH/non-interactive-PATH hosts (#92) WITHOUT exposing the
+# wrapper's shim dir to the agent subtree. Empty when no scoped token is armed.
+AGENT_GH_SHIM_DIR=""
 # The scoped permissions set the agent token is minted with. contents:write is
 # REQUIRED (push branches — a read-only token is factually impossible for dev,
 # #234). pull_requests:read is the containment lever: `gh pr review --approve`
@@ -248,6 +256,26 @@ setup_agent_token() {
     AGENT_GH_TOKEN_FILE=""
     return 0
   fi
+
+  # [INV-77] Create the AGENT's OWN `gh` shim dir (mode 700) holding a `gh` symlink
+  # to the same gh-with-token-refresh.sh the wrapper uses. build_agent_env_argv
+  # swaps this in for the wrapper's GH_WRAPPER_DIR on the agent PATH, so the agent's
+  # bare `gh` resolves WITHOUT the wrapper shim dir being exposed (issue #234 AC #1).
+  # Best-effort: a mkdir/symlink failure leaves AGENT_GH_SHIM_DIR empty, and
+  # build_agent_env_argv then keeps the wrapper dir on PATH (availability over the
+  # AC nicety — bare `gh` must still resolve) and logs the degraded state.
+  AGENT_GH_SHIM_DIR=$(mktemp -d "/tmp/agent-shim-XXXXXX" 2>/dev/null) || AGENT_GH_SHIM_DIR=""
+  if [[ -n "$AGENT_GH_SHIM_DIR" ]]; then
+    chmod 700 "$AGENT_GH_SHIM_DIR" 2>/dev/null || true
+    if [[ -x "${_LIB_AUTH_DIR}/gh-with-token-refresh.sh" ]] \
+       && ln -sf "${_LIB_AUTH_DIR}/gh-with-token-refresh.sh" "${AGENT_GH_SHIM_DIR}/gh" 2>/dev/null; then
+      :
+    else
+      echo "WARN: [INV-77] could not create the agent-owned gh shim — falling back to the wrapper shim dir on the agent PATH (bare gh still resolves; AC#1 no-wrapper-shim not met this run)." >&2
+      rm -rf "$AGENT_GH_SHIM_DIR" 2>/dev/null || true
+      AGENT_GH_SHIM_DIR=""
+    fi
+  fi
   return 0
 }
 
@@ -265,16 +293,22 @@ setup_agent_token() {
 #     the file and overrides this snapshot — so the file always wins when fresh).
 #   - unsets GITHUB_PERSONAL_ACCESS_TOKEN and GH_USER_PAT (no full-write/PAT leak)
 #
-# PATH is DELIBERATELY left unchanged. The per-run GH_WRAPPER_DIR holds the
-# `gh-with-token-refresh.sh` shim that the agent's BARE `gh` resolves through (the
-# review prompt's `gh issue view` / `gh pr checks`, and vendored helpers like
-# mark-issue-checkbox.sh, all call bare `gh`). On `REAL_GH` / non-interactive-PATH
-# hosts (#92) that shim is the agent's ONLY resolvable `gh` — stripping it would
-# break checkbox-ticking and E2E evidence with `gh: command not found` (#234 review
-# [P1]). With GH_TOKEN_FILE pointed at the SCOPED file, the shim reads the fresh
-# scoped token each call: the bare-`gh` path authenticates with the SCOPED token
-# (`gh pr review --approve` / `gh pr merge` still 403) AND stays fresh on long runs.
-# (`bash scripts/gh` — a relative path, not a PATH lookup — resolves the same shim.)
+# PATH is REWRITTEN, not left unchanged: the wrapper's per-run GH_WRAPPER_DIR shim
+# entry is STRIPPED (issue #234 AC #1: the agent env dump must show "no wrapper gh
+# shim"), and the AGENT's OWN shim dir (AGENT_GH_SHIM_DIR) is PREPENDED in its place.
+# The agent's BARE `gh` (review prompt's `gh issue view`/`gh pr checks`, vendored
+# helpers like mark-issue-checkbox.sh) thus still resolves a `gh` on
+# `REAL_GH`/non-interactive-PATH hosts (#92) — it resolves the AGENT-owned shim, NOT
+# the wrapper's shim dir. The agent shim is the same gh-with-token-refresh.sh; with
+# GH_TOKEN_FILE pointed at the SCOPED file it reads the fresh scoped token each call,
+# so bare `gh` authenticates with the SCOPED token (`gh pr review --approve` /
+# `gh pr merge` still 403) AND stays fresh on long runs. (`bash scripts/gh` — a
+# relative path, not a PATH lookup — resolves the shared project shim independently.)
+#
+# Degraded shim fallback: if AGENT_GH_SHIM_DIR could not be created (mkdir/symlink
+# failure in setup_agent_token), PATH is left intact (the wrapper dir stays) so bare
+# `gh` still resolves — availability over the AC nicety; setup_agent_token logged it.
+#
 # SECURITY: GH_TOKEN_FILE is set to the SCOPED file only; the wrapper's full-write
 # token file (a DIFFERENT path, held in the wrapper shell's GH_TOKEN_FILE) is never
 # exposed to the agent subtree.
@@ -301,6 +335,32 @@ build_agent_env_argv() {
     "GH_TOKEN_FILE=${AGENT_GH_TOKEN_FILE}"
     "GH_TOKEN=${scoped}"
   )
+
+  # [INV-77] Rewrite PATH: strip the wrapper's GH_WRAPPER_DIR (AC #1 — no wrapper
+  # shim in the agent env) and prepend the AGENT-owned shim dir so bare `gh` still
+  # resolves. Only when the agent shim was created; otherwise leave PATH intact
+  # (degraded fallback — bare `gh` must still resolve).
+  if [[ -n "$AGENT_GH_SHIM_DIR" ]]; then
+    local _agent_path
+    _agent_path=$(_strip_path_entry "$PATH" "$GH_WRAPPER_DIR")
+    _env_out+=( "PATH=${AGENT_GH_SHIM_DIR}:${_agent_path}" )
+  fi
+}
+
+# _strip_path_entry <path> <entry> — echo <path> with any exact-match <entry>
+# colon-segment removed, order + remaining segments preserved. Empty <entry>
+# returns <path> unchanged. Pure string op (no PATH lookups). Used by
+# build_agent_env_argv to remove the wrapper's GH_WRAPPER_DIR from the agent PATH.
+_strip_path_entry() {
+  local path="$1" entry="$2"
+  [[ -n "$entry" ]] || { printf '%s' "$path"; return 0; }
+  local out="" seg
+  local IFS=':'
+  for seg in $path; do
+    [[ "$seg" == "$entry" ]] && continue
+    if [[ -z "$out" ]]; then out="$seg"; else out="${out}:${seg}"; fi
+  done
+  printf '%s' "$out"
 }
 
 # [INV-77] drain_agent_pr_create — the narrow PR-CREATE broker. `gh pr create`
@@ -412,6 +472,11 @@ cleanup_github_auth() {
   if [[ "$GH_WRAPPER_DIR" == /tmp/agent-auth-* ]]; then
     rm -rf "$GH_WRAPPER_DIR" 2>/dev/null || true
   fi
+  # [INV-77] Remove the agent's OWN per-run shim dir (holds only the `gh` symlink).
+  # Guarded on the /tmp/agent-shim-* shape so we never rm -rf an unexpected path.
+  if [[ "$AGENT_GH_SHIM_DIR" == /tmp/agent-shim-* ]]; then
+    rm -rf "$AGENT_GH_SHIM_DIR" 2>/dev/null || true
+  fi
   # Reset the module-level state we just tore down. Without this, a second
   # setup_github_auth in the SAME shell (persistent test runners, consecutive
   # tasks) would see GH_WRAPPER_DIR still set, _ensure_gh_wrapper_dir would skip
@@ -423,6 +488,7 @@ cleanup_github_auth() {
   # [INV-77] Clear the scoped-token state too (same reused-shell idempotency).
   AGENT_GH_TOKEN_FILE=""
   AGENT_TOKEN_DAEMON_PID=""
+  AGENT_GH_SHIM_DIR=""
 }
 
 # Export GH_USER_PAT if available (for gh-as-user.sh bot workaround).

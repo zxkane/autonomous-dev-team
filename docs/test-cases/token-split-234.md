@@ -32,9 +32,9 @@ ID format: `TC-TOKEN-SPLIT-NNN`. INV-77.
 |----|----------|----------|
 | TC-TOKEN-SPLIT-030 | scoped token armed → prefix sets `GH_TOKEN=<scoped>` (snapshot fallback) | `GH_TOKEN=` element present with the scoped token value |
 | TC-TOKEN-SPLIT-031 | prefix points `GH_TOKEN_FILE` at the SCOPED file (refresh-aware, not unset) + unsets `GITHUB_PERSONAL_ACCESS_TOKEN`/`GH_USER_PAT` | `GH_TOKEN_FILE=<AGENT_GH_TOKEN_FILE>` present, no `-u GH_TOKEN_FILE`; `-u GITHUB_PERSONAL_ACCESS_TOKEN -u GH_USER_PAT` present |
-| TC-TOKEN-SPLIT-032 | prefix does NOT rewrite PATH (keep the shim resolvable) | no `PATH=` element; `_strip_path_entry` removed |
+| TC-TOKEN-SPLIT-032 | prefix `PATH=` strips the WRAPPER `GH_WRAPPER_DIR` and prepends the AGENT-own shim dir (AC #1) | `PATH=` excludes the wrapper dir, prepends `AGENT_GH_SHIM_DIR`; `_strip_path_entry` present |
 | TC-TOKEN-SPLIT-033 | no scoped token (PAT / app-no-scope) → empty prefix | length 0 |
-| TC-TOKEN-SPLIT-092 | bare `gh` under the scrub (REAL_GH host) → real `gh` with the scoped token, reading the scoped file | dump shows scoped token + scoped `GH_TOKEN_FILE`, not the wrapper's full-write file |
+| TC-TOKEN-SPLIT-092 | bare `gh` resolves the AGENT-own shim (REAL_GH host) → real `gh` with the scoped token, reading the scoped file | scoped token + scoped `GH_TOKEN_FILE`, wrapper shim dir NOT on the agent PATH |
 | TC-TOKEN-SPLIT-093 | agent `gh` is refresh-aware — a scoped-file refresh between calls is picked up | call 1 sees initial token, call 2 sees the refreshed token |
 
 ## Unit — scrub completeness (env-dump assertion, the verify-by-construction gate)

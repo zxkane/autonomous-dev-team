@@ -3698,14 +3698,19 @@ agent subtree. Concretely the agent launch env (assembled CLI-agnostically in
 stale on long runs — #234 review [P1]); `GH_TOKEN`=the scoped token as a snapshot
 fallback (the shim re-reads the file and overrides it, so the fresh file wins);
 `GITHUB_PERSONAL_ACCESS_TOKEN` and `GH_USER_PAT` **unset**. The wrapper's full-write
-token file (a DIFFERENT path) is NEVER exposed. `PATH` is left **intact** — the
-agent's bare `gh` (review-prompt `gh issue view`/`gh pr checks`, vendored helpers
-like `mark-issue-checkbox.sh`) must keep resolving the per-run
-`gh-with-token-refresh.sh` shim, which is its ONLY resolvable `gh` on
-`REAL_GH`/non-interactive-PATH hosts (#92); the shim reads the SCOPED `GH_TOKEN_FILE`
-and `exec gh` with the fresh scoped token, so bare `gh` keeps working, stays fresh,
-AND authenticates scoped (stripping the shim from PATH, or snapshotting the token
-once, both broke this — #234 review [P1]s). The wrapper retains the
+token file (a DIFFERENT path) is NEVER exposed. `PATH` is **rewritten**: the
+wrapper's per-run `GH_WRAPPER_DIR` shim entry is **stripped** (AC #1 — the agent env
+dump shows "no wrapper gh shim") and the agent's OWN per-run shim dir
+(`AGENT_GH_SHIM_DIR`, with its own `gh → gh-with-token-refresh.sh` symlink) is
+**prepended** in its place — so the agent's bare `gh` (review-prompt
+`gh issue view`/`gh pr checks`, vendored helpers like `mark-issue-checkbox.sh`)
+still resolves a `gh` on `REAL_GH`/non-interactive-PATH hosts (#92), resolving the
+AGENT-own shim rather than the wrapper's. The agent shim reads the SCOPED
+`GH_TOKEN_FILE` and `exec gh` with the fresh scoped token, so bare `gh` keeps
+working, stays fresh, AND authenticates scoped (keeping the WRAPPER shim on PATH
+violated AC #1; stripping all shims broke bare `gh`; snapshotting the token once
+went stale — all three were #234 review [P1]s, reconciled by the agent-own shim).
+The wrapper retains the
 full-write token in its OWN shell and is the SOLE actor that flips labels,
 approves, merges, posts the verdict, brokers `gh pr create` (the scoped token
 cannot create a PR — `pull_requests:read`), and brokers the browser-E2E report.
