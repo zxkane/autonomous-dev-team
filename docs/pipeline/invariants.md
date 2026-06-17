@@ -348,6 +348,8 @@ The `Mode: startup-failure` exclusion matters: `autonomous-dev.sh`'s startup-fai
 
 ## INV-20: Verdict authenticity binding (actor + window + trailer presence)
 
+> **Demoted to a fallback by [INV-78](#inv-78-review-verdicts-resolve-from-a-typed-artifact-file-first-comment-scraping-is-an-explicitly-logged-fallback-a-malformed-artifact-is-loud-never-a-silent-absent) (#233).** The review wrapper now resolves each agent's verdict from a typed artifact FILE FIRST; this comment-authenticity binding runs ONLY for an agent that produced no artifact (logged `verdict-source=comment-fallback`). It remains fully load-bearing on that fallback path and is unchanged.
+
 **Rule**: The review wrapper's verdict polling jq query MUST gate on three layered predicates when actor binding is available: (a) `author.login == BOT_LOGIN`, (b) `createdAt >= WRAPPER_START_TS`, (c) `body matches /Review Session/`. The trailer match MUST NOT bind to the wrapper-generated `SESSION_ID` — only the trailer's presence is checked.
 
 **Per-agent amendment ([INV-40](#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback), #166)**: when the wrapper fans out to more than one verdict-reaching agent (`AGENT_REVIEW_AGENTS` lists ≥2 CLIs), all N agents post under the SAME GitHub identity (token mode, or app mode sharing `REVIEW_AGENT_APP_ID`), so layers (a)+(b)+(c) match ALL N verdict comments and `last` would collapse them to one. The authenticity layer therefore becomes **per-agent**: each agent's prompt instructs it to emit a `Review Agent: <name>` discriminator line, and the wrapper runs ONE verdict query per agent adding a fourth predicate `body matches /Review Agent: <name>/`, taking `last` per agent. The `Review Session: <uuid>` trailer is still required (presence-only, per the rule above) and remains the `BOT_LOGIN`-empty fallback's narrowing key (now the *per-agent* session UUID). **N=1 carve-out**: when `AGENT_REVIEW_AGENTS` is empty/unset, there is exactly one agent and one query; the added `Review Agent:` predicate is satisfied by the lone agent's discriminator and does not change routing — the single-agent verdict binding is byte-for-byte the pre-#166 behavior.
@@ -1140,6 +1142,8 @@ List-item-only scope eliminates the prose false positives. Explicit `owner/repo#
 
 ## INV-40: Multi-agent review attribution, unanimous aggregation, and all-unavailable fallback
 
+> **Verdict CHANNEL changed by [INV-78](#inv-78-review-verdicts-resolve-from-a-typed-artifact-file-first-comment-scraping-is-an-explicitly-logged-fallback-a-malformed-artifact-is-loud-never-a-silent-absent) (#233), aggregation UNCHANGED.** The per-agent verdict now resolves from a typed artifact FILE first (PASS→pass / FAIL→fail), with comment attribution (sub-rule 1) as a logged fallback. A malformed artifact is treated as `absent` for the vote (adapter-spec Clause V1) — it feeds the SAME unanimous-PASS / timed-out-veto aggregation (sub-rules 2-3) below, which is byte-for-byte unchanged.
+
 **Rule**: `autonomous-review.sh` MAY run more than one verdict-reaching review agent against the same PR, driven by the space-separated `AGENT_REVIEW_AGENTS` config var (e.g. `"agy kiro"`). When it does, three sub-rules hold:
 
 1. **Per-agent attribution.** Each agent runs in its own parallel subshell with its OWN minted `SESSION_ID`, its OWN per-subshell `AGENT_CMD` override, its OWN log (`/tmp/agent-${PROJECT_ID}-review-${N}-${agent}.log`), the launcher neutralized (`AGENT_LAUNCHER_ARGV=()`) for non-`claude` members ([INV-38](#inv-38-per-side-agent_launcher-precedence)), and `AGENT_PID_FILE` unset inside the subshell (so per-agent `run_agent` does NOT rewrite the wrapper's single `review-${N}.pid`). Each agent's prompt (built by `build_review_prompt <name> <session-id>`) instructs it to end its verdict comment with a `Review Agent: <name>` discriminator line in addition to the retained `Review Session: <uuid>` trailer. The wrapper attributes verdicts by running one verdict jq query per agent keyed on `Review Agent: <name>` and taking `last` per agent — see the amended [INV-20](#inv-20-verdict-authenticity-binding-actor--window--trailer-presence).
@@ -1726,6 +1730,8 @@ Sub-rules:
 - [`docs/designs/request-changes-on-fail.md`](../designs/request-changes-on-fail.md) — design canvas.
 
 ## INV-53: codex review convergence keys on the VERDICT TRAILER, not any `agent_message`
+
+> **Further demoted by [INV-78](#inv-78-review-verdicts-resolve-from-a-typed-artifact-file-first-comment-scraping-is-an-explicitly-logged-fallback-a-malformed-artifact-is-loud-never-a-silent-absent) (#233).** The verdict-trailer convergence concept (and the INV-62 codex stdout classifier it became) now runs only on the comment-fallback path — when a codex review produced no verdict artifact. With an artifact present, the typed file is the verdict; no trailer/stdout parsing is consulted.
 
 > ⚠️ **SUPERSEDED for the review path by [INV-62](#inv-62-the-codex-review-lane-runs-the-codex-review-subcommand-auto-scoped-prompt-carried-gate-with-a-stdout-verdict-fallback) (#218).** This invariant fixed the [INV-51](#inv-51-codex-review-thread-auto-resumes-until-a-verdict-posting-turn) JSONL convergence detector (`_codex_log_has_verdict_message`). `codex review` emits no JSONL event stream and needs no convergence loop, so that detector is DELETED. The convergence problem it solved no longer exists — `codex review` is natively multi-step and finishes its own review. The verdict-trailer *concept* lives on as INV-62's stdout classifier (`_codex_review_classify_stdout`) + the authoritative comment poller, not a JSONL parser. This entry is kept for historical context only.
 
@@ -3469,6 +3475,102 @@ not).
 **Cross-references**:
 - [INV-63](#inv-63-agent-smoke-is-a-three-state-probe-pass--unavailable--fail-run-through-the-production-run_agent-never-a-parallel-invocation-path) — the live matrix harness this tier runs; its three-state rc contract is why UNAVAILABLE does not fail the job.
 - [INV-74](#inv-74-adapter-conformance-is-regression-pinned-by-a-hermetic-fixture-manifest-runner) — the hermetic conformance suite that anchors Tier 1.
+
+## INV-78: review verdicts resolve from a typed artifact FILE first; comment scraping is an explicitly-logged fallback; a malformed artifact is loud, never a silent absent
+
+> **Note**: authored as INV-76 (next free number when `main` was at INV-75), then
+> renumbered to **INV-78** across two rebases: PR #258 (smoke no-response retry,
+> issue #257) landed INV-76 on `main`, then PR #256 (two-tier CI lanes, issue #238)
+> landed INV-77 — so this section took the next free number per the standard
+> duplicate-heading / broken-anchor avoidance (see "Adding a new invariant"). The
+> number is disambiguated by issue #233.
+
+**Rule**: the review wrapper resolves each fan-out agent's PASS/FAIL verdict from
+a typed **verdict artifact FILE** the agent wrote — the adapter-spec v1 artifact
+([adapter-spec.md § 5](adapter-spec.md#5-the-verdict-artifact-contract), schema
+[`verdict-artifact.schema.json`](schemas/verdict-artifact.schema.json), #229 /
+[INV-66](#inv-66-adapter-conformance-is-spec-defined)) — **before** any comment
+scraping. Comment detection ([INV-20](#inv-20-the-review-wrapper-must-only-act-on-its-own-verdict-comment) /
+[INV-40](#inv-40-multi-agent-review-aggregates-under-unanimous-pass-each-agents-verdict-is-attributed-by-a-review-agent-discriminator) /
+[INV-53](#inv-53-the-codex-review-convergence-detector-keys-on-the-verdict-trailer-not-any-agent_message))
+survives **only** as a fallback for an agent that produced **no** artifact, and
+that fallback is **explicitly logged** (`verdict-source=comment-fallback`) so the
+per-CLI fallback rate is measurable ([#228](#)) — the signal that gates eventual
+fallback removal.
+
+The artifact's `verdict.state` (adapter-spec § 4.3) drives resolution:
+
+- `valid` (schema-pass) → seed the agent's verdict from the artifact
+  (`PASS`→pass / `FAIL`→fail); **no comment poll for that agent**. When EVERY
+  agent produces a valid artifact the wrapper resolves the whole fleet with
+  **ZERO** comment-list API calls.
+- `malformed` (file present, schema-fail) → **LOUD** handling: surface an operator
+  [error envelope](#inv-72-config-class-failures-must-surface-on-the-issue-never-log-only)
+  (#231, `code=VERDICT_ARTIFACT_MALFORMED`, `class=config`,
+  `surface=issue-comment`) naming the agent + the schema error, AND treat the
+  artifact as **absent for the vote** (adapter-spec § 4.3 Clause V1 —
+  fail-safe-not-fail-open: a malformed artifact is **NEVER** coerced into a silent
+  PASS, and the agent's own comment is **NOT** consulted to override it). The
+  agent then resolves via the terminal sweep (rc 124/137 → `timed-out` veto, else
+  `unavailable` drop), exactly as an absent verdict.
+- `absent` (no file within the window) → today's bounded-retry/drop semantics,
+  resolved by the comment fallback + the post-window sweep — **unchanged**. This
+  invariant moves the verdict **CHANNEL**, not the absence model
+  ([INV-43](#inv-43-the-verdict-poll-budget-scales-with-the-command-mode-e2e-timeout) /
+  [INV-48](#inv-48-a-timed-out-review-agent-is-a-deciding-fail-veto-not-a-silent-drop)
+  still govern absence).
+
+**Atomic write (Clause VA5)**: the agent writes `<path>.tmp.$$` then `mv`
+(rename) into place; the wrapper reads only the final path ONCE. A half-written
+`.tmp` is never the read target (no torn read), and a duplicate/late write that
+lands after the read is ignored.
+
+**post-verdict.sh stays the ONLY comment poster** ([INV-56](#inv-56-review-agents-post-their-verdict-comment-only-through-post-verdictsh)):
+agents still post their human-facing verdict comment through it, and the wrapper
+still renders ONE aggregate verdict comment + the `<!-- review-verdict: … -->`
+trailer ([INV-35](#inv-35-the-review-wrapper-emits-a-machine-readable-verdict-trailer-comment)) —
+the rendered comment format is **unchanged**, so every machine consumer of the
+comment channel keeps working: the dispatcher's `classify_recent_review_verdict`
+(INV-03/06/07) and the dev-resume `Review findings:` parser
+([INV-57](#inv-57-a-standing-approval-is-not-terminal-if-a-newer-findings-comment-exists)).
+The artifact is the wrapper's **own aggregation** parsing surface; the comment is
+the **human record + the fallback channel**.
+
+- **Path**: `${XDG_STATE_HOME:-$HOME/.local/state}/autonomous-<project>/runs/<run-id>/verdict-<agent>.json`,
+  where `<run-id>` is the per-agent minted session UUID (the `Review Session:`
+  trailer, INV-20). One run-dir per agent run → no collision across a
+  multi-codex fleet. Provisioned (mkdir 0700) + injected into the prompt + exported
+  as `VERDICT_ARTIFACT_PATH` by `autonomous-review.sh`.
+- **Producer**: each review agent (instructed by `build_review_prompt`); the
+  wrapper itself for the codex stdout fallback (a no-artifact path).
+- **Consumer**: `autonomous-review.sh` (the artifact-first resolution loop),
+  `lib-review-artifact.sh` (`_verdict_artifact_path` / `_classify_verdict_artifact`
+  / `_verdict_from_artifact_json` / `_artifact_schema_error`), and
+  `lib-review-poll.sh::_run_verdict_poll_loop` (skips already-resolved + malformed
+  agents).
+- **Scope**: review side only. The dev side keeps comment parsing; comment
+  fallback is NOT removed (only after #228 metrics show fallback rate ~0 across the
+  fleet). Token scoping / env scrubbing is a separate issue.
+- **Why** (#233): the verdict-attribution machinery (INV-20/40/53 — actor
+  matching, time windows, trailer discriminators, comment polling) exists ONLY
+  because verdicts travel through comments, and it produced a long incident tail —
+  double-posts, silent non-posts (the agy [INV-56](#inv-56-review-agents-post-their-verdict-comment-only-through-post-verdictsh)
+  bug), narration false-convergence (codex INV-51/53), propagation lag (INV-43). A
+  file has no actor ambiguity and no propagation delay, and schema validation makes
+  a malformed verdict a loud, distinct state. This is the redesign's highest-payoff
+  change (it kills factory A).
+- **Test**: `tests/unit/test-verdict-artifact.sh` (TC-VERDICT-ARTIFACT-NNN) —
+  valid/malformed/absent classification, atomic-rename / duplicate / late-write,
+  path provisioning, aggregation precedence (artifact > comment; conflict logged),
+  the zero-comment-poll AC, malformed → loud envelope + treated-absent, comment-
+  fallback parity, and the timeout-veto regression pin; plus the conformance
+  manifests asserting `verdict.state` from artifact files.
+
+**Cross-references**:
+- [`adapter-spec.md` § 4.3 / § 5](adapter-spec.md#43-verdict--state-payloadref-payloadref-required-when-state--valid) — the NORMATIVE verdict axis + artifact contract this implements.
+- [INV-20](#inv-20-the-review-wrapper-must-only-act-on-its-own-verdict-comment) / [INV-40](#inv-40-multi-agent-review-aggregates-under-unanimous-pass-each-agents-verdict-is-attributed-by-a-review-agent-discriminator) / [INV-53](#inv-53-the-codex-review-convergence-detector-keys-on-the-verdict-trailer-not-any-agent_message) — the comment-attribution machinery this demotes to a fallback.
+- [INV-56](#inv-56-review-agents-post-their-verdict-comment-only-through-post-verdictsh) — post-verdict.sh stays the sole comment poster.
+- [INV-35](#inv-35-the-review-wrapper-emits-a-machine-readable-verdict-trailer-comment) — the rendered aggregate trailer (the dispatcher's machine channel) is unchanged.
 
 ## Adding a new invariant
 

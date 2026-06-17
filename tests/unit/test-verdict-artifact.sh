@@ -1,0 +1,378 @@
+#!/bin/bash
+# test-verdict-artifact.sh — issue #233 / INV-78.
+#
+# The verdict-artifact channel: review agents write a schema-validated verdict
+# JSON file (the #229 verdict-artifact.schema.json) to a per-agent path the
+# wrapper provisions; the wrapper reads + validates the artifact FIRST and only
+# falls back to comment scraping (with a logged verdict-source=comment-fallback
+# marker) when no artifact landed.
+#
+# Two pronged (the wrapper is too heavy to run end-to-end):
+#   1. Pure-lib harness: source lib-review-artifact.sh and drive the classifier /
+#      path provisioner / verdict mapper / schema-error helper over fixtures.
+#   2. Source-of-truth greps against autonomous-review.sh: assert the wiring the
+#      design requires (provision the path, inject it into the prompt, consume
+#      artifacts first with the logged fallback marker, malformed → loud envelope,
+#      treated-as-absent for the vote) without executing the wrapper.
+#
+# Backend: _classify_verdict_artifact mirrors test-adapter-spec-schemas.sh —
+# prefer `python3 -m jsonschema` (full Draft-07), fall back to a jq structural
+# check — so this suite runs on bare CI either way.
+#
+# Run: bash tests/unit/test-verdict-artifact.sh
+
+set -uo pipefail
+
+PASS=0
+FAIL=0
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+DISP="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts"
+WRAPPER="$DISP/autonomous-review.sh"
+ART_LIB="$DISP/lib-review-artifact.sh"
+SCHEMA="$PROJECT_ROOT/docs/pipeline/schemas/verdict-artifact.schema.json"
+EXAMPLES="$PROJECT_ROOT/docs/pipeline/schemas/examples"
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+NC='\033[0m'
+
+assert_eq() {
+  local desc="$1" expected="$2" actual="$3"
+  if [[ "$expected" == "$actual" ]]; then
+    echo -e "  ${GREEN}PASS${NC}: $desc"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${NC}: $desc"
+    echo "      expected=[$expected]"
+    echo "      actual=  [$actual]"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
+assert_nonempty() {
+  local desc="$1" actual="$2"
+  if [[ -n "$actual" ]]; then
+    echo -e "  ${GREEN}PASS${NC}: $desc"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${NC}: $desc (empty)"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
+assert_grep() {
+  local desc="$1" pattern="$2" file="$3"
+  if grep -qE "$pattern" "$file"; then
+    echo -e "  ${GREEN}PASS${NC}: $desc"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${NC}: $desc (pattern: $pattern)"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Part 1: pure-lib classification / path / mapping
+# ---------------------------------------------------------------------------
+if [[ ! -f "$ART_LIB" ]]; then
+  echo -e "  ${RED}FAIL${NC}: lib-review-artifact.sh not found at $ART_LIB"
+  echo "=== Summary ==="; echo "  PASS: $PASS"; echo "  FAIL: $((FAIL + 1))"
+  exit 1
+fi
+# shellcheck source=/dev/null
+VERDICT_ARTIFACT_SCHEMA="$SCHEMA"
+export VERDICT_ARTIFACT_SCHEMA
+source "$ART_LIB"
+
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
+
+# state = first line of _classify_verdict_artifact output
+state_of() { _classify_verdict_artifact "$1" | head -n1; }
+
+# TC-001 / TC-002 — valid PASS / FAIL goldens
+assert_eq "TC-VERDICT-ARTIFACT-001 valid PASS golden → state valid" \
+  "valid" "$(state_of "$EXAMPLES/verdict-artifact.golden.pass.json")"
+assert_eq "TC-VERDICT-ARTIFACT-002 valid FAIL golden → state valid" \
+  "valid" "$(state_of "$EXAMPLES/verdict-artifact.golden.fail.json")"
+
+# TC-003 — absent file
+assert_eq "TC-VERDICT-ARTIFACT-003 nonexistent path → state absent" \
+  "absent" "$(state_of "$TMP/does-not-exist.json")"
+
+# TC-004/005/006 — malformed negative fixtures
+assert_eq "TC-VERDICT-ARTIFACT-004 no schema_version → malformed" \
+  "malformed" "$(state_of "$EXAMPLES/verdict-artifact.negative.no-schema-version.json")"
+assert_eq "TC-VERDICT-ARTIFACT-005 FAIL with empty blockingFindings → malformed" \
+  "malformed" "$(state_of "$EXAMPLES/verdict-artifact.negative.fail-no-blocking.json")"
+assert_eq "TC-VERDICT-ARTIFACT-006 blocking findings but verdict PASS → malformed" \
+  "malformed" "$(state_of "$EXAMPLES/verdict-artifact.negative.blocking-but-pass.json")"
+
+# TC-007 — non-JSON garbage
+printf 'this is not json {{{' > "$TMP/garbage.json"
+assert_eq "TC-VERDICT-ARTIFACT-007 garbage bytes → malformed" \
+  "malformed" "$(state_of "$TMP/garbage.json")"
+
+# TC-008 — empty file
+: > "$TMP/empty.json"
+assert_eq "TC-VERDICT-ARTIFACT-008 empty file → malformed" \
+  "malformed" "$(state_of "$TMP/empty.json")"
+
+# TC-009 — verdict mapping PASS→pass, FAIL→fail
+assert_eq "TC-VERDICT-ARTIFACT-009a _verdict_from_artifact_json PASS→pass" \
+  "pass" "$(_verdict_from_artifact_json "$(cat "$EXAMPLES/verdict-artifact.golden.pass.json")")"
+assert_eq "TC-VERDICT-ARTIFACT-009b _verdict_from_artifact_json FAIL→fail" \
+  "fail" "$(_verdict_from_artifact_json "$(cat "$EXAMPLES/verdict-artifact.golden.fail.json")")"
+
+# TC-010 — schema-error helper echoes a non-empty one-line reason for malformed
+assert_nonempty "TC-VERDICT-ARTIFACT-010 _artifact_schema_error non-empty for malformed" \
+  "$(_artifact_schema_error "$EXAMPLES/verdict-artifact.negative.no-schema-version.json")"
+
+# TC-011/012/013 — path provisioning
+assert_eq "TC-VERDICT-ARTIFACT-011 path honors XDG_STATE_HOME" \
+  "/xdg/state/autonomous-proj/runs/RID-1/verdict-codex.json" \
+  "$(XDG_STATE_HOME=/xdg/state _verdict_artifact_path proj RID-1 codex)"
+assert_eq "TC-VERDICT-ARTIFACT-012 path falls back to HOME/.local/state" \
+  "/home/u/.local/state/autonomous-proj/runs/RID-1/verdict-agy.json" \
+  "$(unset XDG_STATE_HOME; HOME=/home/u _verdict_artifact_path proj RID-1 agy)"
+# Provisioner + reader agree: the same helper is the single source of truth.
+P1="$(XDG_STATE_HOME=/x _verdict_artifact_path p r claude)"
+P2="$(XDG_STATE_HOME=/x _verdict_artifact_path p r claude)"
+assert_eq "TC-VERDICT-ARTIFACT-013 path helper is deterministic (no divergence)" "$P1" "$P2"
+
+# TC-014 — only .tmp exists (rename not done) → final absent
+cp "$EXAMPLES/verdict-artifact.golden.pass.json" "$TMP/verdict-x.json.tmp.123"
+assert_eq "TC-VERDICT-ARTIFACT-014 only .tmp present, final missing → absent" \
+  "absent" "$(state_of "$TMP/verdict-x.json")"
+
+# TC-015 — read once: late write with a different verdict is ignored by a held snapshot.
+# The classifier reads once and emits the snapshot; a caller that captured the
+# state does not re-read. Model the contract: classify, capture, then mutate, and
+# assert the captured value is stable (the lib does not re-stat).
+cp "$EXAMPLES/verdict-artifact.golden.pass.json" "$TMP/verdict-late.json"
+FIRST="$(state_of "$TMP/verdict-late.json")"
+FIRST_V="$(_verdict_from_artifact_json "$(_classify_verdict_artifact "$TMP/verdict-late.json" | tail -n +2)")"
+cp "$EXAMPLES/verdict-artifact.golden.fail.json" "$TMP/verdict-late.json"  # late write flips it
+assert_eq "TC-VERDICT-ARTIFACT-015a first read state captured (valid)" "valid" "$FIRST"
+assert_eq "TC-VERDICT-ARTIFACT-015b first read verdict captured (pass) — late write not retroactively applied" \
+  "pass" "$FIRST_V"
+
+# ---------------------------------------------------------------------------
+# Part 2: source-of-truth wiring in the wrapper
+# ---------------------------------------------------------------------------
+assert_grep "TC-VERDICT-ARTIFACT-W1 wrapper sources lib-review-artifact.sh" \
+  'source "\$\{LIB_DIR\}/lib-review-artifact.sh"' "$WRAPPER"
+assert_grep "TC-VERDICT-ARTIFACT-W2 wrapper provisions the per-agent artifact path (_verdict_artifact_path)" \
+  '_verdict_artifact_path' "$WRAPPER"
+assert_grep "TC-VERDICT-ARTIFACT-W3 wrapper exports VERDICT_ARTIFACT_PATH to the agent" \
+  'VERDICT_ARTIFACT_PATH' "$WRAPPER"
+assert_grep "TC-VERDICT-ARTIFACT-W4 prompt injects the artifact path + atomic-write (tmp+rename) instruction" \
+  'rename|atomic|\.tmp' "$WRAPPER"
+assert_grep "TC-VERDICT-ARTIFACT-W5 wrapper classifies the artifact first (_classify_verdict_artifact)" \
+  '_classify_verdict_artifact' "$WRAPPER"
+assert_grep "TC-VERDICT-ARTIFACT-W6 logged verdict-source=artifact marker" \
+  'verdict-source=artifact' "$WRAPPER"
+assert_grep "TC-VERDICT-ARTIFACT-W7 logged verdict-source=comment-fallback marker" \
+  'verdict-source=comment-fallback' "$WRAPPER"
+assert_grep "TC-VERDICT-ARTIFACT-W8 malformed artifact surfaces a loud error envelope (emit_error_envelope/lib-error)" \
+  'emit_error_envelope|lib-error\.sh|VERDICT_ARTIFACT_MALFORMED' "$WRAPPER"
+assert_grep "TC-VERDICT-ARTIFACT-W9 prompt references the verdict artifact for the agent" \
+  'verdict artifact|verdict-<agent>\.json|VERDICT_ARTIFACT_PATH' "$WRAPPER"
+
+# Malformed artifact routes the all-unavailable terminal path to
+# failed-non-substantive (re-dispatchable), NOT the rc-0 failed-substantive
+# blocking branch. The durable signal is AGENT_VERDICT_SOURCES=artifact-malformed
+# (a malformed prompt-echo exits rc 0, so the launch-rc scan misses it). The
+# _any_nonsubstantive_drop initializer must OR-in that source.
+assert_grep "TC-VERDICT-ARTIFACT-W12 malformed branch records the durable artifact-malformed source" \
+  'AGENT_VERDICT_SOURCES\[\$_i\]="artifact-malformed"' "$WRAPPER"
+assert_grep "TC-VERDICT-ARTIFACT-W13 _any_nonsubstantive_drop scans AGENT_VERDICT_SOURCES for artifact-malformed" \
+  'AGENT_VERDICT_SOURCES\[\$_i\]:-\}" == "artifact-malformed"' "$WRAPPER"
+# The codex stdout fallback is a SEPARATE resolution path from the comment poll
+# loop; it must ALSO skip an artifact-malformed agent (Clause V1), else a codex
+# member with a malformed artifact but clean stdout would be rescued to a
+# pass/fail vote — a silent-PASS path the artifact channel forbids.
+assert_grep "TC-VERDICT-ARTIFACT-W14 codex stdout fallback skips an artifact-malformed agent (Clause V1)" \
+  'INV-78: codex member .* malformed verdict artifact' "$WRAPPER"
+
+# Render-format pins (machine consumers unchanged — these greps must still hold).
+assert_grep "TC-VERDICT-ARTIFACT-W10 dispatcher trailer still emitted (emit_verdict_trailer passed)" \
+  'emit_verdict_trailer "\$ISSUE_NUMBER" "\$REPO" "passed"' "$WRAPPER"
+assert_grep "TC-VERDICT-ARTIFACT-W11 wrapper-rendered FAIL aggregate still starts 'Review findings:'" \
+  'Review findings:' "$WRAPPER"
+
+# ---------------------------------------------------------------------------
+# Part 3: behavioral integration — artifact-first resolution + comment fallback +
+# aggregation. The wrapper's resolution block is inline, so we reproduce its
+# EXACT control flow here against the real libs (lib-review-artifact.sh seeds
+# AGENT_VERDICTS from valid artifacts; lib-review-poll.sh skips already-resolved
+# and artifact-malformed agents; lib-review-aggregate.sh collapses the vote). The
+# "comment poll" is stubbed via _fetch_agent_verdict_body so no live GitHub is
+# needed — and a COUNTER on it pins the zero-comment-poll AC.
+# shellcheck source=/dev/null
+source "$DISP/lib-review-aggregate.sh"
+# shellcheck source=/dev/null
+source "$DISP/lib-review-poll.sh"
+
+# Stubs the harness controls. The fetcher runs inside the poll loop's `$(…)`
+# command substitution (a subshell), so a shell-var counter would NOT propagate —
+# record each fetch to a FILE and count its lines (COMMENT_FETCH_COUNT is derived
+# from it in run_fleet). This pins the zero-poll AC correctly.
+COMMENT_FETCH_LOG="$TMP/comment-fetches.log"
+COMMENT_FETCH_COUNT=0
+declare -A STUB_COMMENT_BODY=()    # agent → comment body the fallback would find
+_fetch_agent_verdict_body() {
+  printf '%s\n' "$1" >> "$COMMENT_FETCH_LOG"
+  printf '%s' "${STUB_COMMENT_BODY[$1]:-}"
+}
+log() { :; }                        # silence wrapper log() the poll loop calls
+error_surface() { ENVELOPE_EMITTED=1; ENVELOPE_AGENT="$2"; return 0; }  # capture malformed envelope
+
+# run_fleet "<agent:artifact-fixture-or-none:comment-body>..." → echoes the
+# aggregate; sets COMMENT_FETCH_COUNT + ENVELOPE_* as side effects. Mirrors the
+# wrapper: provision artifact files, seed from valid artifacts, run the (stubbed)
+# poll loop, terminal-sweep, aggregate.
+run_fleet() {
+  local spec rid agent fixture comment
+  : > "$COMMENT_FETCH_LOG"
+  ENVELOPE_EMITTED=0
+  ENVELOPE_AGENT=""
+  STUB_COMMENT_BODY=()
+  AGENT_NAMES=(); AGENT_SESSION_IDS=(); AGENT_ARTIFACT_PATHS=()
+  AGENT_VERDICTS=(); AGENT_VERDICT_BODIES=(); AGENT_VERDICT_SOURCES=()
+  declare -gA AGENT_LAUNCH_RC=()
+  local _run=$((++FLEET_RUN))
+  local i=0
+  for spec in "$@"; do
+    agent="${spec%%:*}"; rest="${spec#*:}"
+    fixture="${rest%%:*}"; comment="${rest#*:}"
+    [[ "$comment" == "$rest" ]] && comment=""   # no comment field
+    rid="run-${_run}-${i}"
+    local dir="$TMP/state/autonomous-proj/runs/$rid"
+    mkdir -p "$dir"
+    local path="$dir/verdict-$agent.json"
+    if [[ "$fixture" != "none" ]]; then cp "$EXAMPLES/$fixture" "$path"; fi
+    AGENT_NAMES+=("$agent"); AGENT_SESSION_IDS+=("$rid"); AGENT_ARTIFACT_PATHS+=("$path")
+    AGENT_VERDICTS+=(""); AGENT_VERDICT_BODIES+=(""); AGENT_VERDICT_SOURCES+=("")
+    AGENT_LAUNCH_RC["$rid"]=0
+    [[ -n "$comment" ]] && STUB_COMMENT_BODY["$agent"]="$comment"
+    i=$((i + 1))
+  done
+
+  # --- artifact-first resolution (mirrors the wrapper block) ---
+  local _i _art_out _art_state _art_json _art_verdict
+  for _i in "${!AGENT_NAMES[@]}"; do
+    _art_out=$(_classify_verdict_artifact "${AGENT_ARTIFACT_PATHS[$_i]}")
+    _art_state="${_art_out%%$'\n'*}"
+    case "$_art_state" in
+      valid)
+        _art_json="${_art_out#*$'\n'}"
+        _art_verdict=$(_verdict_from_artifact_json "$_art_json")
+        AGENT_VERDICTS[$_i]="$_art_verdict"; AGENT_VERDICT_SOURCES[$_i]="artifact" ;;
+      malformed)
+        AGENT_VERDICT_SOURCES[$_i]="artifact-malformed"
+        error_surface "x" "${AGENT_NAMES[$_i]}" "p" "c" "r" "d" "config" ;;
+    esac
+  done
+  # --- comment poll (stubbed) ---
+  _VERDICT_POLL_ATTEMPTS=1; _VERDICT_POLL_INTERVAL_SECONDS=0
+  _run_verdict_poll_loop
+  # --- tag comment-fallback ---
+  for _i in "${!AGENT_NAMES[@]}"; do
+    [[ -n "${AGENT_VERDICTS[$_i]}" && -z "${AGENT_VERDICT_SOURCES[$_i]}" ]] && AGENT_VERDICT_SOURCES[$_i]="comment-fallback"
+  done
+  # --- terminal sweep ---
+  for _i in "${!AGENT_NAMES[@]}"; do
+    [[ -n "${AGENT_VERDICTS[$_i]}" ]] && continue
+    AGENT_VERDICTS[$_i]=$(_classify_noverdict_agent "${AGENT_LAUNCH_RC[${AGENT_SESSION_IDS[$_i]}]:-1}")
+  done
+  # Derive the comment-fetch count from the log (the fetcher ran in a subshell).
+  COMMENT_FETCH_COUNT=$(wc -l < "$COMMENT_FETCH_LOG" | tr -d ' ')
+  # Set the aggregate as a GLOBAL (not echoed) so callers run run_fleet in the
+  # current shell and can inspect AGENT_VERDICT_SOURCES / COMMENT_FETCH_COUNT
+  # afterward — a `$(run_fleet …)` subshell would discard those arrays.
+  FLEET_AGG=$(_aggregate_review_verdicts "${AGENT_VERDICTS[@]}")
+}
+FLEET_RUN=0
+PASS_BODY="Review PASSED - looks good
+Review Agent: x"
+FAIL_BODY="Review findings:
+1. bad
+Review Agent: x"
+
+echo ""
+echo "=== Part 3: artifact-first resolution + fallback + aggregation ==="
+
+# TC-020 / AC — all valid artifacts ⇒ ZERO comment-list calls.
+run_fleet "claude:verdict-artifact.golden.pass.json:" "agy:verdict-artifact.golden.pass.json:"
+assert_eq "TC-VERDICT-ARTIFACT-020a all-artifact fleet aggregate pass" "pass" "$FLEET_AGG"
+assert_eq "TC-VERDICT-ARTIFACT-020b all-artifact fleet did ZERO comment polls" "0" "$COMMENT_FETCH_COUNT"
+assert_eq "TC-VERDICT-ARTIFACT-020c source is artifact" "artifact" "${AGENT_VERDICT_SOURCES[0]}"
+
+# TC-017 — artifact wins over a conflicting comment.
+run_fleet "claude:verdict-artifact.golden.pass.json:$FAIL_BODY"
+assert_eq "TC-VERDICT-ARTIFACT-017a artifact PASS beats conflicting comment FAIL" "pass" "$FLEET_AGG"
+assert_eq "TC-VERDICT-ARTIFACT-017b no comment poll when artifact valid" "0" "$COMMENT_FETCH_COUNT"
+
+# TC-018 — no artifact, comment present ⇒ comment-fallback (and the comment WAS polled).
+run_fleet "claude:none:$PASS_BODY"
+assert_eq "TC-VERDICT-ARTIFACT-018a no-artifact + PASS comment → pass" "pass" "$FLEET_AGG"
+assert_eq "TC-VERDICT-ARTIFACT-018b source is comment-fallback" "comment-fallback" "${AGENT_VERDICT_SOURCES[0]}"
+assert_eq "TC-VERDICT-ARTIFACT-018c the no-artifact agent WAS comment-polled (≥1 fetch)" "1" "$COMMENT_FETCH_COUNT"
+
+# TC-019 / TC-023 — malformed artifact, no comment ⇒ loud envelope + treated absent.
+run_fleet "claude:verdict-artifact.negative.no-schema-version.json:"
+assert_eq "TC-VERDICT-ARTIFACT-019a malformed-only fleet → all-unavailable (absent semantics)" "all-unavailable" "$FLEET_AGG"
+assert_eq "TC-VERDICT-ARTIFACT-019b malformed emitted a loud envelope" "1" "$ENVELOPE_EMITTED"
+assert_eq "TC-VERDICT-ARTIFACT-019c source recorded artifact-malformed" "artifact-malformed" "${AGENT_VERDICT_SOURCES[0]}"
+
+# Malformed agent's comment is NOT consulted (Clause V1) even if it posted a PASS.
+run_fleet "claude:verdict-artifact.negative.no-schema-version.json:$PASS_BODY"
+assert_eq "TC-VERDICT-ARTIFACT-019d malformed artifact NOT overridden by a PASS comment" "all-unavailable" "$FLEET_AGG"
+assert_eq "TC-VERDICT-ARTIFACT-019e malformed agent not comment-polled" "0" "$COMMENT_FETCH_COUNT"
+
+# TC-021/022 — single-agent valid pass / fail.
+run_fleet "claude:verdict-artifact.golden.pass.json:"
+assert_eq "TC-VERDICT-ARTIFACT-021 single valid PASS → pass" "pass" "$FLEET_AGG"
+run_fleet "codex:verdict-artifact.golden.fail.json:"
+assert_eq "TC-VERDICT-ARTIFACT-022 single valid FAIL → fail" "fail" "$FLEET_AGG"
+
+# TC-024/025 — multi valid combinations.
+run_fleet "claude:verdict-artifact.golden.pass.json:" "agy:verdict-artifact.golden.pass.json:"
+assert_eq "TC-VERDICT-ARTIFACT-024 valid PASS + valid PASS → pass" "pass" "$FLEET_AGG"
+run_fleet "claude:verdict-artifact.golden.pass.json:" "codex:verdict-artifact.golden.fail.json:"
+assert_eq "TC-VERDICT-ARTIFACT-025 valid PASS + valid FAIL → fail" "fail" "$FLEET_AGG"
+
+# TC-026 — valid PASS + absent-with-comment-PASS (mixed channel) → pass.
+run_fleet "claude:verdict-artifact.golden.pass.json:" "agy:none:$PASS_BODY"
+assert_eq "TC-VERDICT-ARTIFACT-026a mixed artifact+comment → pass" "pass" "$FLEET_AGG"
+assert_eq "TC-VERDICT-ARTIFACT-026b agy resolved via comment-fallback" "comment-fallback" "${AGENT_VERDICT_SOURCES[1]}"
+assert_eq "TC-VERDICT-ARTIFACT-026c claude resolved via artifact" "artifact" "${AGENT_VERDICT_SOURCES[0]}"
+
+# TC-027 — valid PASS + malformed (drop) → pass (1 deciding).
+run_fleet "claude:verdict-artifact.golden.pass.json:" "agy:verdict-artifact.negative.no-schema-version.json:"
+assert_eq "TC-VERDICT-ARTIFACT-027 valid PASS + malformed-drop → pass (1 deciding)" "pass" "$FLEET_AGG"
+
+# TC-028 — malformed + absent-no-comment → all-unavailable.
+run_fleet "claude:verdict-artifact.negative.no-schema-version.json:" "agy:none:"
+assert_eq "TC-VERDICT-ARTIFACT-028 malformed + absent-no-comment → all-unavailable" "all-unavailable" "$FLEET_AGG"
+
+# TC-029 — timeout-veto preserved: rc124 + no artifact ⇒ deciding FAIL (via the
+# terminal sweep classifier, unchanged by #233).
+assert_eq "TC-VERDICT-ARTIFACT-029 rc124 no-verdict → timed-out (deciding FAIL preserved)" \
+  "timed-out" "$(_classify_noverdict_agent 124)"
+
+# TC-031 — comment-fallback parity: a no-artifact fleet reaches the SAME aggregate
+# as the legacy comment-only path would (pass+fail → fail; pass+pass → pass).
+run_fleet "claude:none:$PASS_BODY" "agy:none:$FAIL_BODY"
+assert_eq "TC-VERDICT-ARTIFACT-031a fallback parity pass+fail → fail" "fail" "$FLEET_AGG"
+run_fleet "claude:none:$PASS_BODY" "agy:none:$PASS_BODY"
+assert_eq "TC-VERDICT-ARTIFACT-031b fallback parity pass+pass → pass" "pass" "$FLEET_AGG"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Summary ==="
+echo "  PASS: $PASS"
+echo "  FAIL: $FAIL"
+[[ $FAIL -eq 0 ]] || exit 1

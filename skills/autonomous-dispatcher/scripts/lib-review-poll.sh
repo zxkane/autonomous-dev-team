@@ -199,8 +199,24 @@ _run_verdict_poll_loop() {
     sleep "${_VERDICT_POLL_INTERVAL_SECONDS:-5}"
     _all_resolved=1
     for _i in "${!AGENT_NAMES[@]}"; do
-      # Already resolved (verdict found on a prior round) — skip re-query.
+      # Already resolved (verdict found on a prior round, OR seeded from a valid
+      # verdict artifact INV-78) — skip re-query. The artifact-first resolution
+      # (#233) sets AGENT_VERDICTS[i] before this loop runs, so a `valid` artifact
+      # gives artifact>comment precedence for free and the all-artifact path
+      # breaks round 1 with ZERO comment-list API calls.
       [[ -n "${AGENT_VERDICTS[$_i]}" ]] && continue
+
+      # INV-78 (#233): an agent whose artifact was MALFORMED is deliberately NOT
+      # resolved by its comment — the loud envelope + the terminal `unavailable`/
+      # `timed-out` sweep is the contract (Clause V1: a malformed artifact means
+      # the agent's machine output is untrustworthy; we never let its comment
+      # override it). Skip polling it so it stays unresolved for the terminal
+      # sweep. Guarded so a caller that never declared the array (unit tests of
+      # the legacy comment-only flow) is unaffected.
+      if declare -p AGENT_VERDICT_SOURCES >/dev/null 2>&1 \
+         && [[ "${AGENT_VERDICT_SOURCES[$_i]:-}" == "artifact-malformed" ]]; then
+        continue
+      fi
 
       _agent="${AGENT_NAMES[$_i]}"
       _sid="${AGENT_SESSION_IDS[$_i]}"

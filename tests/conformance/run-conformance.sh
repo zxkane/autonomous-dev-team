@@ -344,6 +344,11 @@ _classify_fixture() {
   # fallback. This assumes a SINGLE log-role file per fixture (true for every
   # promoted manifest today); a multi-log fixture would need an explicit pick.
   local agy_log_src="" agy_log_is_role=0
+  # INV-78 (#233): a role:"artifact" verdict file staged for a review fixture is
+  # the verdict CHANNEL the wrapper reads FIRST. Capture its staged path so the
+  # classify step below derives verdictState from _classify_verdict_artifact (the
+  # production artifact-first behavior) rather than from stdout.
+  local artifact_src=""
   local fkeys
   fkeys="$(jq -r '(.files // {}) | keys[]?' "$manifest" 2>/dev/null)"
   local k path role src base staged
@@ -362,6 +367,9 @@ _classify_fixture() {
       if [[ "$role" == "log" ]]; then
         # A role:"log" file is authoritative and order-independent.
         agy_log_src="$staged"; agy_log_is_role=1
+      elif [[ "$role" == "artifact" ]]; then
+        # The verdict artifact (INV-78). One per review fixture.
+        artifact_src="$staged"
       elif [[ "$agy_log_is_role" -eq 0 && -z "$agy_log_src" && "$adapter" == "agy" ]]; then
         # Fallback only when no role:"log" file has been (or will be) chosen.
         agy_log_src="$staged"
@@ -669,6 +677,49 @@ _classify_fixture() {
         [[ "$scan_file" != "$out_file" && "$scan_file" != "$err_file" ]] && rm -f "$scan_file" 2>/dev/null
         ;;
     esac
+
+    # --- INV-78 (#233): verdict-artifact channel. For a review fixture that
+    #     staged a role:"artifact" verdict file, the verdict CHANNEL is the FILE,
+    #     not stdout — so derive the verdict-present + vote axes from the REAL
+    #     _classify_verdict_artifact (production artifact-first behavior). This is
+    #     a channel the SMOKE classifier (_smoke_classify) cannot express: a
+    #     substantive review FAIL is a `[P1]` finding the smoke probe never sees,
+    #     so we emit the artifact tuple DIRECTLY rather than routing through
+    #     _conf_project's smoke-state→verdict mapping (which only yields
+    #     valid/PASS):
+    #       valid PASS  → none / valid / pass / false
+    #       valid FAIL  → none / valid / fail / false
+    #       malformed   → none / malformed / drop / false   (Clause V1: drop, never PASS)
+    #       absent      → fall through to today's stdout/comment-fallback projection
+    #     The provider axis stays `none` here — a provider failure (quota/auth/
+    #     stream/config) is orthogonal and would itself leave NO valid artifact
+    #     (it lands on the absent path + the existing log scrapers). -}
+    if [[ "$mode" == "review" && -n "$artifact_src" ]]; then
+      # shellcheck source=../../skills/autonomous-dispatcher/scripts/lib-review-artifact.sh
+      source "$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-review-artifact.sh" 2>/dev/null || true
+      if declare -F _classify_verdict_artifact >/dev/null 2>&1; then
+        local _art_out _art_state _art_json _art_v
+        _art_out="$(_classify_verdict_artifact "$artifact_src")"
+        _art_state="${_art_out%%$'\n'*}"
+        case "$_art_state" in
+          valid)
+            _art_json="${_art_out#*$'\n'}"
+            _art_v="$(_verdict_from_artifact_json "$_art_json")"
+            if [[ "$_art_v" == "pass" || "$_art_v" == "fail" ]]; then
+              printf 'none|valid|%s|false\n' "$_art_v"
+              exit 0
+            fi
+            ;;
+          malformed)
+            # Clause V1: a malformed artifact is treated as absent for the vote
+            # (never a silent PASS) — but verdictState IS the distinct `malformed`.
+            printf 'none|malformed|drop|false\n'
+            exit 0
+            ;;
+          # absent → fall through to the stdout/comment-fallback projection below.
+        esac
+      fi
+    fi
 
     # Emit the four-axis tuple the classifier produced.
     _conf_project "$adapter" "$mode" "$state" "$tok" "$rc"

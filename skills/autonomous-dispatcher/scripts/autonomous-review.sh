@@ -139,6 +139,19 @@ source "${LIB_DIR}/lib-review-kiro.sh"
 # deciding FAIL). [INV-65] sourced from the real skill tree via LIB_DIR (no project
 # symlink).
 source "${LIB_DIR}/lib-review-postfail.sh"
+# shellcheck source=lib-review-artifact.sh
+# INV-78 (#233): the verdict-artifact channel. Each review agent writes its
+# verdict as a schema-validated JSON file (the #229 verdict-artifact.schema.json)
+# to the per-agent path the wrapper provisions (_verdict_artifact_path); the
+# wrapper reads + validates it FIRST (_classify_verdict_artifact → valid /
+# malformed / absent, §4.3) and only falls back to comment scraping — with a
+# logged `verdict-source=comment-fallback` marker — when no artifact landed. An
+# artifact has no actor ambiguity and no propagation lag, and a malformed artifact
+# is a LOUD, distinct state (an error envelope, never a silent absent — Clause V1).
+# This moves the verdict CHANNEL, not the absence model: a no-artifact agent keeps
+# today's bounded-retry/drop semantics via the comment fallback + post-window
+# sweep. [INV-65] sourced from the real skill tree via LIB_DIR (no project symlink).
+source "${LIB_DIR}/lib-review-artifact.sh"
 # shellcheck source=lib-review-request-changes.sh
 # INV-52 (#193): the wrapper OWNS the GitHub-native PR review action — `--approve`
 # on a PASS and `--request-changes` on a SUBSTANTIVE FAIL — so the PR's
@@ -827,6 +840,11 @@ fi
 build_review_prompt() {
   local _agent_name="$1"
   local _agent_session_id="$2"
+  # INV-78 (#233): the per-agent verdict-artifact path the wrapper provisioned.
+  # Optional 3rd arg so the existing 2-arg test callers (build_review_prompt
+  # <name> <sid>) keep working — when empty the artifact section is omitted and
+  # the prompt is byte-for-byte the legacy comment-only flow.
+  local _verdict_artifact_path="${3:-}"
   # [INV-60] (#208): resolve THIS agent's review model for the verdict trailer
   # exactly as the `Reviewed HEAD:` trailer (~`_REVIEW_HEAD_MODEL` below) and the
   # INV-58 fan-out label do — and interpolate it as the 6th `post-verdict.sh` arg
@@ -1036,6 +1054,44 @@ fi)
 
 ## Decision
 After thorough review:
+$(if [[ -n "${_verdict_artifact_path}" ]]; then cat <<VERDICT_ARTIFACT_INSTRUCTION
+
+**PRIMARY — write the verdict artifact (INV-78, #233)**: the wrapper now reads
+your verdict from a typed JSON FILE, not from your comment. Write a
+schema-validated verdict artifact (conforming to
+\`docs/pipeline/schemas/verdict-artifact.schema.json\`) to:
+
+  ${_verdict_artifact_path}
+
+Write it ATOMICALLY — write to a temp file in the same directory, then
+\`mv\` (rename) it into place so the wrapper never sees a torn half-written file:
+
+\`\`\`bash
+cat > "${_verdict_artifact_path}.tmp.\$\$" <<VERDICT_JSON
+  {
+    "schema_version": 1,
+    "verdict": "<PASS|FAIL>",
+    "blockingFindings": [ { "title": "...", "detail": "...", "file": "...", "line": 0 } ],
+    "nonBlockingFindings": [],
+    "runId": "${_agent_session_id}",
+    "agent": "${_agent_name}",
+    "model": "${_agent_model}"
+  }
+VERDICT_JSON
+mv -f "${_verdict_artifact_path}.tmp.\$\$" "${_verdict_artifact_path}"
+\`\`\`
+
+Schema rules the wrapper ENFORCES (a malformed artifact is surfaced LOUDLY on the
+issue, NOT silently ignored):
+- \`schema_version\` MUST be \`1\`; \`verdict\` MUST be \`"PASS"\` or \`"FAIL"\`.
+- \`verdict: "FAIL"\` MUST carry at least one entry in \`blockingFindings\`; a PASS
+  MUST have \`blockingFindings\` empty/absent. (FAIL ⇔ ≥1 blocking finding.)
+- \`runId\` MUST be \`${_agent_session_id}\` and \`agent\` MUST be \`${_agent_name}\`.
+
+Write the artifact FIRST, then ALSO post the human-facing verdict comment via
+\`post-verdict.sh\` below (the comment stays for humans + as a fallback channel).
+VERDICT_ARTIFACT_INSTRUCTION
+fi)
 
 **CRITICAL — verdict phrasing**: the wrapper script polls for your
 verdict comment by matching specific keywords. If your comment doesn't
@@ -1601,6 +1657,13 @@ declare -a AGENT_KIRO_LOGS=()
 # post-fan-out metrics loop passes it to metrics_parse_tokens to emit review-side
 # token_usage (review cost was previously dev-side-only, undercounting fleet cost).
 declare -a AGENT_GENERIC_LOGS=()
+# INV-78 (#233): the per-agent verdict-artifact FILE path, keyed by index. The
+# wrapper provisions it (_verdict_artifact_path under the per-run state dir),
+# exports it into the agent's subshell as VERDICT_ARTIFACT_PATH, and reads it back
+# after the fan-out join — artifact FIRST, comment scraping only as a logged
+# fallback. Deterministic from PROJECT_ID + the agent's session id + name, so the
+# provisioner and the post-join reader can never diverge.
+declare -a AGENT_ARTIFACT_PATHS=()
 # PIDs of the backgrounded per-agent subshells. We MUST `wait` these specific
 # PIDs — never a bare `wait`. A bare `wait` blocks on ALL background jobs of
 # this shell, which includes the long-lived gh-token-refresh-daemon (started
@@ -1648,6 +1711,18 @@ for _agent in "${REVIEW_AGENTS_LIST[@]}"; do
   _agent_session_id=$(uuidgen)
   AGENT_NAMES+=("$_agent")
   AGENT_SESSION_IDS+=("$_agent_session_id")
+  # INV-78 (#233): provision THIS agent's verdict-artifact path + run dir. The
+  # path is deterministic from PROJECT_ID + the session id (the `Review Session:`
+  # UUID, INV-20 — one run-dir per agent run, no collision across a multi-codex
+  # fleet) + the agent name. mkdir the run dir mode 0700 (it can hold a findings
+  # body) BEFORE launch so the agent's atomic write (tmp + rename) has a target;
+  # the path is exported into the subshell as VERDICT_ARTIFACT_PATH and read back
+  # after the join. Best-effort dir create — a mkdir failure (full disk, perms)
+  # just means the artifact never lands → `absent` → comment fallback, never a
+  # crash (the `|| true` keeps the loop alive under `set -e`).
+  _agent_artifact_path=$(_verdict_artifact_path "$PROJECT_ID" "$_agent_session_id" "$_agent")
+  ( umask 077; mkdir -p "$(dirname "$_agent_artifact_path")" ) 2>/dev/null || true
+  AGENT_ARTIFACT_PATHS+=("$_agent_artifact_path")
   _agent_log="/tmp/agent-${PROJECT_ID}-review-${ISSUE_NUMBER}-${_agent}.log"
   # INV-58 (#205): capture agy's OWN --log-file path for an `agy` member so the
   # post-resolution drop-reason scrape can read it. The path is deterministic
@@ -1687,12 +1762,17 @@ for _agent in "${REVIEW_AGENTS_LIST[@]}"; do
   else
     AGENT_GENERIC_LOGS+=("$_agent_log")
   fi
-  _agent_prompt=$(build_review_prompt "$_agent" "$_agent_session_id")
+  _agent_prompt=$(build_review_prompt "$_agent" "$_agent_session_id" "$_agent_artifact_path")
   _agent_rc_file="${_FANOUT_DIR}/${_agent_session_id}.rc"
 
   (
     # Per-subshell AGENT_CMD override so run_agent dispatches to THIS CLI.
     AGENT_CMD="$_agent"
+    # INV-78 (#233): export this agent's verdict-artifact path into its
+    # environment so a CLI (or a future adapter) can read it from the env in
+    # addition to the prompt. Scope is THIS subshell only — never leaks to a
+    # sibling agent's subshell or the dev side.
+    export VERDICT_ARTIFACT_PATH="$_agent_artifact_path"
     # INV-42 (#173): per-agent launcher resolution. If the operator set an
     # AGENT_REVIEW_LAUNCHER_<AGENT> key (suffix = uppercased name with every
     # non-alphanumeric char → `_`, same transform as the model/extra-args
@@ -1936,9 +2016,86 @@ _VERDICT_POLL_ATTEMPTS=$(_resolve_verdict_poll_attempts)
 log "Verdict-poll budget: ${_VERDICT_POLL_ATTEMPTS} attempt(s) × 5s (E2E_MODE=${E2E_MODE:-none}, command-timeout=${E2E_COMMAND_TIMEOUT_SECONDS:-n/a})"
 declare -a AGENT_VERDICTS=()        # pass | fail | unavailable, per index
 declare -a AGENT_VERDICT_BODIES=()  # the matched comment body (or empty)
+# INV-78 (#233): per-agent verdict SOURCE — `artifact` (resolved from the typed
+# JSON file), `artifact-malformed` (file present but schema-fail → treated as
+# absent for the vote, surfaced loudly), or `comment-fallback` (no artifact →
+# the legacy comment poll / codex stdout path resolved it). Empty until resolved.
+# Logged so #228 metrics can measure fallback frequency per CLI.
+declare -a AGENT_VERDICT_SOURCES=()
 for _i in "${!AGENT_NAMES[@]}"; do
   AGENT_VERDICTS+=("")        # filled in below
   AGENT_VERDICT_BODIES+=("")
+  AGENT_VERDICT_SOURCES+=("")
+done
+
+# INV-78 (#233): the verdict-artifact channel — resolve verdicts from the typed
+# artifact FILE the agent wrote, BEFORE any comment scraping. For each agent we
+# classify its provisioned artifact path (§4.3 verdict.state):
+#   - valid     → seed AGENT_VERDICTS from the artifact (PASS→pass / FAIL→fail).
+#                 The poll loop below skips agents whose verdict is already set
+#                 (`[[ -n … ]] && continue`), so a `valid` seed both gives
+#                 artifact>comment precedence AND — when EVERY agent produced an
+#                 artifact — makes the loop's first round find everything resolved
+#                 and break with ZERO `gh issue view --json comments` calls (the
+#                 AC: no comment polling on the all-artifact path).
+#   - malformed → surface a LOUD operator error envelope (#231) naming the agent +
+#                 the schema error, and leave the agent UNRESOLVED so it flows into
+#                 the comment fallback / terminal sweep as `absent` (Clause V1 —
+#                 a malformed artifact is NEVER coerced into a silent PASS). We do
+#                 NOT read the agent's comment to override a malformed artifact:
+#                 the loud envelope + the terminal `unavailable`/`timed-out`
+#                 resolution is the contract. (A malformed artifact means the
+#                 agent's own machine output is untrustworthy.)
+#   - absent    → leave UNRESOLVED; the comment poll loop below resolves it and we
+#                 mark its source `comment-fallback` afterward.
+# Reading is fail-safe: _classify_verdict_artifact only stats/cats the final
+# path (a half-written `.tmp` is never the target → no torn read, Clause VA5) and
+# reads ONCE, so a duplicate/late write that lands after this read is ignored.
+for _i in "${!AGENT_NAMES[@]}"; do
+  _art_path="${AGENT_ARTIFACT_PATHS[$_i]:-}"
+  [[ -n "$_art_path" ]] || continue
+  _art_out=$(_classify_verdict_artifact "$_art_path")
+  _art_state="${_art_out%%$'\n'*}"
+  case "$_art_state" in
+    valid)
+      _art_json="${_art_out#*$'\n'}"
+      _art_verdict=$(_verdict_from_artifact_json "$_art_json")
+      if [[ "$_art_verdict" == "pass" || "$_art_verdict" == "fail" ]]; then
+        AGENT_VERDICTS[$_i]="$_art_verdict"
+        AGENT_VERDICT_SOURCES[$_i]="artifact"
+        log "INV-78: resolved review agent '${AGENT_NAMES[$_i]}' verdict-source=artifact verdict=${_art_verdict} (path ${_art_path})"
+      else
+        # A `valid`-classified artifact whose verdict field is neither PASS nor
+        # FAIL is impossible under the schema, but never silently approve — leave
+        # unresolved for the comment fallback / terminal sweep.
+        log "WARNING: INV-78: artifact for '${AGENT_NAMES[$_i]}' classified valid but verdict field unmappable; leaving unresolved (will fall back to comment / terminal sweep)."
+      fi
+      ;;
+    malformed)
+      # Loud, distinct state (#231 envelope) — NEVER a silent absent (Clause V1).
+      # AGENT_VERDICT_SOURCES[$_i]="artifact-malformed" is the DURABLE record the
+      # terminal AGENT_EXIT scan keys on (a malformed prompt-echo exits rc 0, so
+      # the launch-rc scan would miss it — same hazard INV-73 documents). We set
+      # the source here, NOT an `_any_nonsubstantive_drop=true` flag: that flag is
+      # (re-)initialized to false LATER (after this loop), so an early set here
+      # would be clobbered. The terminal scan ORs-in any `artifact-malformed`
+      # source instead.
+      AGENT_VERDICT_SOURCES[$_i]="artifact-malformed"
+      _art_err=$(_artifact_schema_error "$_art_path")
+      log "INV-78: review agent '${AGENT_NAMES[$_i]}' wrote a MALFORMED verdict artifact (verdict-source=artifact-malformed; schema error: ${_art_err}); treating as absent for the vote (Clause V1) and surfacing a loud envelope. Path ${_art_path}"
+      error_surface "${ISSUE_NUMBER:-}" "VERDICT_ARTIFACT_MALFORMED" \
+        "Review agent '${AGENT_NAMES[$_i]}' produced a malformed verdict artifact" \
+        "The verdict artifact at ${_art_path} failed schema validation (verdict-artifact.schema.json, INV-78): ${_art_err}" \
+        "The agent's verdict was dropped from the vote (treated as absent — never a silent PASS, Clause V1). Re-run the review; if the agent repeatedly emits a malformed artifact, inspect its verdict-writing path against docs/pipeline/schemas/verdict-artifact.schema.json." \
+        "docs/pipeline/invariants.md#inv-78" "config" 2>/dev/null || true
+      # Left UNRESOLVED: flows into the terminal no-verdict sweep below
+      # (rc 124/137 → timed-out veto, else unavailable drop). We deliberately do
+      # NOT consult the comment for a malformed-artifact agent.
+      ;;
+    absent|*)
+      : # leave unresolved; comment fallback resolves it and tags the source below
+      ;;
+  esac
 done
 
 # The loop body lives in lib-review-poll.sh (_run_verdict_poll_loop) so the
@@ -1973,6 +2130,19 @@ for _i in "${!AGENT_NAMES[@]}"; do
   [[ "${AGENT_NAMES[$_i]}" == "codex" ]] || continue
   [[ -n "${AGENT_VERDICTS[$_i]}" ]] && continue   # poll loop already classified it pass/fail
   [[ -n "${AGENT_VERDICT_BODIES[$_i]}" ]] && continue
+  # INV-78 (#233): a codex member whose verdict ARTIFACT was MALFORMED must NOT be
+  # rescued by its stdout — the loud envelope + the terminal `unavailable`/
+  # `timed-out` sweep is the contract (Clause V1: a malformed artifact means the
+  # agent's machine output is untrustworthy; deriving a vote from its stdout would
+  # re-introduce exactly the silent-PASS path the artifact channel forbids). The
+  # comment poll loop already skips an `artifact-malformed` agent; this is the
+  # SAME guard for the codex stdout fallback (which the poll-loop guard does not
+  # cover — it is a separate resolution path). Leave it unresolved for the
+  # terminal sweep → dropped `unavailable`.
+  if [[ "${AGENT_VERDICT_SOURCES[$_i]:-}" == "artifact-malformed" ]]; then
+    log "INV-78: codex member '${AGENT_NAMES[$_i]}' wrote a malformed verdict artifact — NOT deriving a stdout-fallback verdict (Clause V1); leaving unresolved for the terminal sweep (→ unavailable)."
+    continue
+  fi
   # INV-62 (#218 review finding 2): the stdout fallback may ONLY derive a verdict
   # from a codex review that EXITED CLEANLY (rc 0 — a COMPLETED review). A non-zero
   # exit from _run_codex_review is NOT a review verdict; it is a CLI failure:
@@ -2064,6 +2234,24 @@ for _i in "${!AGENT_NAMES[@]}"; do
   rm -f "$_cx_body_file" 2>/dev/null || true
 done
 
+# INV-78 (#233): tag the verdict SOURCE for every agent the artifact-first pass
+# did NOT already resolve. Any agent that now has a verdict but an empty source
+# was resolved by the comment poll loop or the codex stdout fallback — i.e. it
+# produced NO artifact and we fell back to today's comment channel. Logging
+# `verdict-source=comment-fallback agent=<a>` makes the per-CLI fallback frequency
+# measurable by #228 metrics (the signal that gates eventual comment-fallback
+# removal). Agents resolved from a `valid` artifact already carry source=artifact;
+# `artifact-malformed` agents are still unresolved here (they fall through to the
+# terminal sweep). A still-unresolved agent (absent artifact, no comment) is
+# tagged `none` by the post-terminal-sweep loop further below (it gets no verdict
+# from EITHER channel) — so #228 metrics see a complete per-CLI denominator.
+for _i in "${!AGENT_NAMES[@]}"; do
+  if [[ -n "${AGENT_VERDICTS[$_i]}" && -z "${AGENT_VERDICT_SOURCES[$_i]}" ]]; then
+    AGENT_VERDICT_SOURCES[$_i]="comment-fallback"
+    log "INV-78: resolved review agent '${AGENT_NAMES[$_i]}' verdict-source=comment-fallback verdict=${AGENT_VERDICTS[$_i]} (no artifact; comment channel)"
+  fi
+done
+
 # Any agent still unresolved after the poll window is terminally resolved here
 # (no verdict comment within the window). This is the SINGLE terminal resolution
 # point for a no-verdict agent (#180): whether the CLI exited clean (rc 0) or
@@ -2082,6 +2270,21 @@ done
 for _i in "${!AGENT_NAMES[@]}"; do
   [[ -n "${AGENT_VERDICTS[$_i]}" ]] && continue
   AGENT_VERDICTS[$_i]=$(_classify_noverdict_agent "${AGENT_LAUNCH_RC[${AGENT_SESSION_IDS[$_i]}]:-1}")
+done
+
+# INV-78 (#233): tag the verdict SOURCE for every agent STILL without one after
+# the terminal sweep — an `absent` artifact with no comment either (the genuine
+# no-verdict drop, resolved `unavailable`/`timed-out` above). It produced no
+# verdict via EITHER channel, so it is `none` (distinct from `comment-fallback`,
+# which means a verdict WAS resolved off the comment). This gives #228 metrics a
+# complete per-CLI denominator — a dropped no-artifact agent is no longer source-
+# less. `artifact-malformed` agents keep that source (set in the artifact-first
+# pass); only a truly empty source is filled here.
+for _i in "${!AGENT_NAMES[@]}"; do
+  if [[ -z "${AGENT_VERDICT_SOURCES[$_i]}" ]]; then
+    AGENT_VERDICT_SOURCES[$_i]="none"
+    log "INV-78: review agent '${AGENT_NAMES[$_i]}' produced no verdict via either channel (verdict-source=none; resolved ${AGENT_VERDICTS[$_i]})"
+  fi
 done
 
 # INV-43 (#172): reap any fan-out agent process group that is still alive now
@@ -2128,7 +2331,20 @@ _timed_out_agents=""
 # AGENT_EXIT scan would otherwise miss (it keys on launch rc, and a malformed
 # prompt-echo exits rc 0). Routes the all-unavailable terminal path to
 # `failed-non-substantive` instead of the rc-0 `failed-substantive` legacy branch.
+# INV-78 (#233): a MALFORMED verdict ARTIFACT is the same shape of rc-0
+# non-substantive infra drop — the agent exited cleanly but its machine output is
+# unparseable (Clause V1). OR-in any `artifact-malformed` source recorded by the
+# artifact-first resolution loop above so an all-malformed-artifact fleet routes
+# to `failed-non-substantive` too (re-dispatchable), not the rc-0
+# `failed-substantive` blocking branch. Initialized HERE (after the artifact loop)
+# so the source array is fully populated.
 _any_nonsubstantive_drop=false
+for _i in "${!AGENT_NAMES[@]}"; do
+  if [[ "${AGENT_VERDICT_SOURCES[$_i]:-}" == "artifact-malformed" ]]; then
+    _any_nonsubstantive_drop=true
+    break
+  fi
+done
 # INV-58 (#205) / INV-59 (#209) / INV-61 (#215): per-dropped-agent reason
 # breadcrumbs (e.g. "agy: quota-exhausted (Antigravity 429: …; resets in
 # 33h48m45s)", "codex: stream-error (upstream 5xx; exhausted 5/5 SSE reconnects,

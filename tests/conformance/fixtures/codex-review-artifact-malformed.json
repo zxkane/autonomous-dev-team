@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "adapter": "codex",
+  "mode": "review",
+  "input": {
+    "promptBytes": 4096,
+    "model": "gpt-5-codex",
+    "env": {}
+  },
+  "command": {
+    "argv": [
+      "codex",
+      "review",
+      "<prompt>",
+      "-c",
+      "model=\"gpt-5-codex\""
+    ],
+    "stdinSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "rc": 0,
+    "stdout": "<NONCE>",
+    "stderr": ""
+  },
+  "files": {
+    "verdictArtifact": {
+      "path": "fixtures/files/verdict-artifact-malformed.fixture",
+      "role": "artifact"
+    }
+  },
+  "expect": {
+    "providerClass": "none",
+    "verdictState": "malformed",
+    "vote": "drop",
+    "retryable": false
+  }
+}
