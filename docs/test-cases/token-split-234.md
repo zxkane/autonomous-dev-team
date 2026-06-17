@@ -1,6 +1,6 @@
 # Test Cases: Two-token split + agent env scrubbing (issue #234)
 
-ID format: `TC-TOKEN-SPLIT-NNN`. INV-77.
+ID format: `TC-TOKEN-SPLIT-NNN`. INV-78.
 
 ## Unit — scoped-token mint / refresh (`get_gh_app_scoped_token`)
 

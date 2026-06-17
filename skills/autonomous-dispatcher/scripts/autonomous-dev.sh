@@ -107,13 +107,13 @@ if [[ "$GH_AUTH_MODE" == "app" ]]; then
       "docs/pipeline/errors.md#authentication-class-class-auth" auth
     exit 1
   fi
-  # [INV-77] Mint the SECOND, scoped token for the agent subtree (reuses the dev
+  # [INV-78] Mint the SECOND, scoped token for the agent subtree (reuses the dev
   # App credentials). Best-effort: a mint failure WARNs and leaves the agent on
   # the full-write credential (no scrub) rather than blocking the run.
   setup_agent_token "${DEV_AGENT_APP_ID}" "${DEV_AGENT_APP_PEM}"
 else
   setup_github_auth
-  # [INV-77] PAT mode: no second token possible — logs a one-time WARN.
+  # [INV-78] PAT mode: no second token possible — logs a one-time WARN.
   setup_agent_token
 fi
 
@@ -249,7 +249,7 @@ install_agent_sigterm_trap
 acquire_pid_guard "$PID_FILE" "autonomous-dev" "$ISSUE_NUMBER"
 export AGENT_PID_FILE="$PID_FILE"
 
-# [INV-77] PR-create broker file. When the scoped agent token is armed
+# [INV-78] PR-create broker file. When the scoped agent token is armed
 # (AGENT_GH_TOKEN_FILE set by setup_agent_token), `gh pr create` (which needs
 # pull_requests:write) is brokered: the agent writes the PR title+body here and
 # the wrapper opens the PR in cleanup (drain_agent_pr_create). Exported so it
@@ -378,7 +378,7 @@ emit_open_pr_fast_path_block() {
   needs_open_pr_only "$issue_num" || return 0
   log "Detected pushed head branch with commits ahead of base but no PR for issue #${issue_num} — injecting open-PR-only fast path ([INV-45])."
 
-  # [INV-77] When the scoped agent token is armed, the agent CANNOT run
+  # [INV-78] When the scoped agent token is armed, the agent CANNOT run
   # `gh pr create` (pull_requests:read → 403). The fast-path's open-PR step MUST
   # route through the same wrapper broker as the normal scoped-token path (#234
   # review [P1] #2): write the head branch + title + body to AGENT_PR_CREATE_FILE
@@ -388,7 +388,7 @@ emit_open_pr_fast_path_block() {
   if [[ -n "${AGENT_GH_TOKEN_FILE:-}" ]]; then
     open_pr_step="3. Go STRAIGHT to the open-PR step. Your token is SCOPED and CANNOT run
    \`gh pr create\` — instead WRITE the PR to \`\$(printenv AGENT_PR_CREATE_FILE)\`
-   with EXACTLY this layout (the WRAPPER opens the PR for you, see [INV-77]):
+   with EXACTLY this layout (the WRAPPER opens the PR for you, see [INV-78]):
      - line 1: \`branch: <the-pushed-branch-you-checked-out>\`
      - line 2: the PR title
      - line 3 onward: the PR body (include \"Closes #${issue_num}\")"
@@ -627,7 +627,7 @@ EOF
     fi
   fi
 
-  # [INV-77] PR-create broker: if the scoped agent token is armed and the agent
+  # [INV-78] PR-create broker: if the scoped agent token is armed and the agent
   # wrote a PR title+body (it cannot `gh pr create` with pull_requests:read),
   # open the PR now with the wrapper's full-write token — BEFORE the PR_EXISTS
   # lookup below so a brokered create routes the success path to pending-review.
@@ -753,7 +753,7 @@ fi
 # so the fast path engages regardless of which mode the dispatcher routed.
 OPEN_PR_FAST_PATH="$(emit_open_pr_fast_path_block "$ISSUE_NUMBER")"
 
-# [INV-77] PR-create broker instruction. Non-empty ONLY when the scoped agent
+# [INV-78] PR-create broker instruction. Non-empty ONLY when the scoped agent
 # token is armed (AGENT_GH_TOKEN_FILE set by setup_agent_token in app mode). The
 # scoped token has pull_requests:read, so `gh pr create` would 403 — instead the
 # agent writes the PR title+body to $AGENT_PR_CREATE_FILE and the wrapper opens
@@ -762,7 +762,7 @@ OPEN_PR_FAST_PATH="$(emit_open_pr_fast_path_block "$ISSUE_NUMBER")"
 PR_CREATE_BROKER_BLOCK=""
 if [[ -n "${AGENT_GH_TOKEN_FILE:-}" ]]; then
   PR_CREATE_BROKER_BLOCK="$(cat <<'BROKER_BLOCK'
-## Credential note ([INV-77]) — opening the PR
+## Credential note ([INV-78]) — opening the PR
 Your GitHub token is SCOPED (it can push branches and comment, but it CANNOT
 approve or merge PRs, and it cannot run `gh pr create`). To open the PR, do NOT
 run `gh pr create`. Instead, AFTER you have pushed your feature branch with

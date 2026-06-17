@@ -10,11 +10,11 @@
 # The daemon writes the token to <token_file> every REFRESH_INTERVAL seconds.
 # The wrapper script should set GH_TOKEN to read from this file before each gh call.
 #
-# [INV-77] Optional 6th arg <permissions_json>: when non-empty, every mint
+# [INV-78] Optional 6th arg <permissions_json>: when non-empty, every mint
 # (initial + each refresh) down-scopes the token to that permissions object —
 # this is how the SCOPED agent-token daemon keeps the agent's narrower token
 # fresh. Omitted/empty → full-grant token (the existing wrapper-token daemon,
-# byte-identical to the pre-[INV-77] 5-arg form).
+# byte-identical to the pre-[INV-78] 5-arg form).
 #
 # Kill the daemon when the session ends (e.g., in a trap handler).
 
@@ -42,7 +42,7 @@ source "${LIB_DIR}/gh-app-token.sh"
 log() { echo "[token-refresh] $(date -u +%H:%M:%S) $*"; }
 
 # Write initial token atomically with restrictive permissions.
-# [INV-77] PERMISSIONS_JSON (when set) is forwarded as get_gh_app_token's 5th
+# [INV-78] PERMISSIONS_JSON (when set) is forwarded as get_gh_app_token's 5th
 # arg so the minted token is down-scoped; empty → full-grant (5-arg behavior).
 TOKEN=$(get_gh_app_token "$APP_ID" "$PEM_FILE" "$REPO_OWNER" "$REPO_NAME" "$PERMISSIONS_JSON") || {
   log "ERROR: Failed to generate initial token"

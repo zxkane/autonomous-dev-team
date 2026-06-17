@@ -493,7 +493,7 @@ _stamp_browser_evidence_marker() {
 }
 
 # ---------------------------------------------------------------------------
-# _post_brokered_e2e_report — [INV-77] E2E report broker. The browser lane agent
+# _post_brokered_e2e_report — [INV-78] E2E report broker. The browser lane agent
 # WRITES its `## E2E Verification Report` to E2E_REPORT_FILE (a wrapper-set path);
 # the WRAPPER (full-write token) posts it on the PR. This matches the verdict-
 # artifact broker direction so the report path does not DEPEND on the agent's own
@@ -526,15 +526,15 @@ _post_brokered_e2e_report() {
       --jq "[.[] | select((.created_at >= \"${WRAPPER_START_TS}\") and (.body | contains(\"## E2E Verification Report\")))] | length" \
       2>/dev/null | tail -n1 || true)
     if [[ "$_existing" =~ ^[0-9]+$ ]] && [[ "$_existing" -gt 0 ]]; then
-      log "INV-77: an E2E report comment already exists in this review window (agent posted directly) — skipping the brokered post to avoid a duplicate."
+      log "INV-78: an E2E report comment already exists in this review window (agent posted directly) — skipping the brokered post to avoid a duplicate."
       return 0
     fi
   fi
 
   if gh pr comment "$PR_NUMBER" --repo "$REPO" --body "$body" >/dev/null 2>&1; then
-    log "INV-77: wrapper brokered the browser E2E report comment onto PR #${PR_NUMBER} (agent wrote ${E2E_REPORT_FILE})."
+    log "INV-78: wrapper brokered the browser E2E report comment onto PR #${PR_NUMBER} (agent wrote ${E2E_REPORT_FILE})."
   else
-    log "INV-77: brokered E2E report post failed (non-fatal) — the agent's direct issues:write fallback may already have posted; the SHA-marker stamp + gate remain authoritative."
+    log "INV-78: brokered E2E report post failed (non-fatal) — the agent's direct issues:write fallback may already have posted; the SHA-marker stamp + gate remain authoritative."
   fi
   return 0
 }
@@ -601,7 +601,7 @@ echo "Uploaded: \$SCREENSHOT_URL"
   (\`list_console_messages\`).
 - \`take_screenshot\` at each verification point and upload immediately.
 
-### Step 7: Deliver the E2E report (broker — [INV-77])
+### Step 7: Deliver the E2E report (broker — [INV-78])
 WRITE your structured report to the file path in the \`E2E_REPORT_FILE\`
 environment variable (\`\$(printenv E2E_REPORT_FILE)\`); the WRAPPER reads that
 file and posts it on PR #${PR_NUMBER} for you (the brokered, credential-split

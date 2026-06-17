@@ -47,7 +47,7 @@ GH_TOKEN_FILE=""
 # can never delete the `gh` this run resolves (issue #163).
 GH_WRAPPER_DIR=""
 
-# [INV-77] Two-token split. The wrapper keeps GH_TOKEN_FILE (full-write); the
+# [INV-78] Two-token split. The wrapper keeps GH_TOKEN_FILE (full-write); the
 # AGENT process gets a SECOND, narrower installation token written here by
 # setup_agent_token (app mode only). Empty in PAT mode / app-mode-mint-failure —
 # build_agent_env_argv then emits NO scrub prefix (agent inherits the unchanged
@@ -56,7 +56,7 @@ GH_WRAPPER_DIR=""
 # wrapper's daemon.
 AGENT_GH_TOKEN_FILE=""
 AGENT_TOKEN_DAEMON_PID=""
-# [INV-77] The AGENT's OWN per-run `gh` shim dir (mode 700), distinct from the
+# [INV-78] The AGENT's OWN per-run `gh` shim dir (mode 700), distinct from the
 # wrapper's GH_WRAPPER_DIR. It holds a `gh` → gh-with-token-refresh.sh symlink that
 # the agent's BARE `gh` resolves through. build_agent_env_argv rewrites the agent
 # PATH to STRIP the wrapper's GH_WRAPPER_DIR (issue #234 AC #1: "env dump shows …
@@ -72,7 +72,7 @@ AGENT_GH_SHIM_DIR=""
 # merge path (INV-44/52). issues:write covers progress comments, checkbox ticks,
 # and the E2E report fallback. Operator-overridable but documented as the default.
 AGENT_TOKEN_PERMISSIONS="${AGENT_TOKEN_PERMISSIONS:-{\"contents\":\"write\",\"issues\":\"write\",\"pull_requests\":\"read\"}}"
-# One-time PAT-mode WARN latch (INV-77): the degraded-enforcement warning is
+# One-time PAT-mode WARN latch (INV-78): the degraded-enforcement warning is
 # logged at most once per process, even across repeated setup_agent_token calls.
 _AGENT_TOKEN_PAT_WARNED=""
 
@@ -189,7 +189,7 @@ refresh_token_env() {
   fi
 }
 
-# [INV-77] setup_agent_token — mint the SECOND, scoped installation token for the
+# [INV-78] setup_agent_token — mint the SECOND, scoped installation token for the
 # agent subprocess and keep it fresh. MUST be called by the wrapper AFTER
 # setup_github_auth (it reuses GH_WRAPPER_DIR, created there).
 #
@@ -202,7 +202,7 @@ refresh_token_env() {
 #
 # PAT mode: a PAT cannot be down-scoped at mint, so there is no second token.
 # Logs ONE WARN (enforcement degraded to convention) and returns 0 — the agent
-# keeps the shared PAT (byte-identical to pre-INV-77 behavior).
+# keeps the shared PAT (byte-identical to pre-INV-78 behavior).
 #
 # Args (app mode): $1=app_id, $2=app_pem. Ignored in PAT mode.
 # Returns 0 even on a scoped-mint failure (availability over the defense-in-depth
@@ -214,14 +214,14 @@ setup_agent_token() {
 
   if [[ "$GH_AUTH_MODE" != "app" ]]; then
     if [[ -z "$_AGENT_TOKEN_PAT_WARNED" ]]; then
-      echo "WARN: [INV-77] GH_AUTH_MODE=token — a PAT cannot be down-scoped, so agent credential enforcement degraded to convention in PAT mode (agents share the wrapper's token; the PreToolUse hook layer + wrapper gates remain the only approve/merge containment)." >&2
+      echo "WARN: [INV-78] GH_AUTH_MODE=token — a PAT cannot be down-scoped, so agent credential enforcement degraded to convention in PAT mode (agents share the wrapper's token; the PreToolUse hook layer + wrapper gates remain the only approve/merge containment)." >&2
       _AGENT_TOKEN_PAT_WARNED=1
     fi
     return 0
   fi
 
   if [[ -z "$app_id" || -z "$app_pem" ]]; then
-    echo "WARN: [INV-77] setup_agent_token called in app mode without app_id/app_pem — skipping scoped token; the agent will inherit the full-write credential (no env scrub this run)." >&2
+    echo "WARN: [INV-78] setup_agent_token called in app mode without app_id/app_pem — skipping scoped token; the agent will inherit the full-write credential (no env scrub this run)." >&2
     return 0
   fi
 
@@ -249,7 +249,7 @@ setup_agent_token() {
   done
 
   if [[ ! -s "$AGENT_GH_TOKEN_FILE" ]]; then
-    echo "WARN: [INV-77] scoped agent-token daemon failed to write an initial token after ${_wait_max}s — the agent will inherit the full-write credential (no env scrub this run)." >&2
+    echo "WARN: [INV-78] scoped agent-token daemon failed to write an initial token after ${_wait_max}s — the agent will inherit the full-write credential (no env scrub this run)." >&2
     kill "$AGENT_TOKEN_DAEMON_PID" 2>/dev/null || true
     wait "$AGENT_TOKEN_DAEMON_PID" 2>/dev/null || true
     AGENT_TOKEN_DAEMON_PID=""
@@ -257,7 +257,7 @@ setup_agent_token() {
     return 0
   fi
 
-  # [INV-77] Create the AGENT's OWN `gh` shim dir (mode 700) holding a `gh` symlink
+  # [INV-78] Create the AGENT's OWN `gh` shim dir (mode 700) holding a `gh` symlink
   # to the same gh-with-token-refresh.sh the wrapper uses. build_agent_env_argv
   # swaps this in for the wrapper's GH_WRAPPER_DIR on the agent PATH, so the agent's
   # bare `gh` resolves WITHOUT the wrapper shim dir being exposed (issue #234 AC #1).
@@ -271,7 +271,7 @@ setup_agent_token() {
        && ln -sf "${_LIB_AUTH_DIR}/gh-with-token-refresh.sh" "${AGENT_GH_SHIM_DIR}/gh" 2>/dev/null; then
       :
     else
-      echo "WARN: [INV-77] could not create the agent-owned gh shim — falling back to the wrapper shim dir on the agent PATH (bare gh still resolves; AC#1 no-wrapper-shim not met this run)." >&2
+      echo "WARN: [INV-78] could not create the agent-owned gh shim — falling back to the wrapper shim dir on the agent PATH (bare gh still resolves; AC#1 no-wrapper-shim not met this run)." >&2
       rm -rf "$AGENT_GH_SHIM_DIR" 2>/dev/null || true
       AGENT_GH_SHIM_DIR=""
     fi
@@ -279,7 +279,7 @@ setup_agent_token() {
   return 0
 }
 
-# [INV-77] build_agent_env_argv — emit, into the array named by $1, the `env`
+# [INV-78] build_agent_env_argv — emit, into the array named by $1, the `env`
 # argv-prefix that scopes the agent subtree's GitHub credential. Prepended by
 # lib-agent.sh::_run_with_timeout to every agent invocation (CLI-agnostic, so it
 # applies uniformly across all adapters). The prefix:
@@ -336,7 +336,7 @@ build_agent_env_argv() {
     "GH_TOKEN=${scoped}"
   )
 
-  # [INV-77] Rewrite PATH: strip the wrapper's GH_WRAPPER_DIR (AC #1 — no wrapper
+  # [INV-78] Rewrite PATH: strip the wrapper's GH_WRAPPER_DIR (AC #1 — no wrapper
   # shim in the agent env) and prepend the AGENT-owned shim dir so bare `gh` still
   # resolves. Only when the agent shim was created; otherwise leave PATH intact
   # (degraded fallback — bare `gh` must still resolve).
@@ -363,7 +363,7 @@ _strip_path_entry() {
   printf '%s' "$out"
 }
 
-# [INV-77] drain_agent_pr_create — the narrow PR-CREATE broker. `gh pr create`
+# [INV-78] drain_agent_pr_create — the narrow PR-CREATE broker. `gh pr create`
 # requires pull_requests:write, which the scoped agent token (pull_requests:read)
 # does NOT have — but the agent must still be able to open its PR. So when the
 # scoped token is armed, the dev prompt tells the agent to WRITE the PR head
@@ -425,7 +425,7 @@ drain_agent_pr_create() {
     title="$first"
     body=$(tail -n +2 "${AGENT_PR_CREATE_FILE}" 2>/dev/null || true)
   fi
-  [[ -n "$title" ]] || { echo "WARN: [INV-77] AGENT_PR_CREATE_FILE present but empty title — skipping brokered PR create." >&2; return 0; }
+  [[ -n "$title" ]] || { echo "WARN: [INV-78] AGENT_PR_CREATE_FILE present but empty title — skipping brokered PR create." >&2; return 0; }
 
   # No explicit branch → derive the pushed feature branch from origin (the same
   # `*issue-<N>*` glob [INV-45] uses). Take the first match; strip the refs/heads/
@@ -435,16 +435,16 @@ drain_agent_pr_create() {
       "*issue-${issue_number}*" 2>/dev/null | head -n1 | sed -E 's#^[0-9a-f]+[[:space:]]+refs/heads/##' || true)
   fi
   if [[ -z "$branch" ]]; then
-    echo "WARN: [INV-77] brokered PR create: no head branch (no \`branch:\` line and no pushed *issue-${issue_number}* branch on origin) — skipping; the no-PR retry re-queues to pending-dev." >&2
+    echo "WARN: [INV-78] brokered PR create: no head branch (no \`branch:\` line and no pushed *issue-${issue_number}* branch on origin) — skipping; the no-PR retry re-queues to pending-dev." >&2
     return 0
   fi
 
   # Explicit --head: the wrapper's cwd (PROJECT_DIR) is on the base branch, so a
   # bare create would infer the wrong head (#234 [P1]).
   if gh pr create --repo "$repo" --head "$branch" --title "$title" --body "$body" >/dev/null 2>&1; then
-    echo "[INV-77] wrapper brokered the PR create for issue #${issue_number} (head=${branch}, agent wrote ${AGENT_PR_CREATE_FILE})." >&2
+    echo "[INV-78] wrapper brokered the PR create for issue #${issue_number} (head=${branch}, agent wrote ${AGENT_PR_CREATE_FILE})." >&2
   else
-    echo "WARN: [INV-77] brokered 'gh pr create' (head=${branch}) failed — the success path's no-PR retry will re-queue the issue to pending-dev." >&2
+    echo "WARN: [INV-78] brokered 'gh pr create' (head=${branch}) failed — the success path's no-PR retry will re-queue the issue to pending-dev." >&2
   fi
   return 0
 }
@@ -455,7 +455,7 @@ cleanup_github_auth() {
     kill "$TOKEN_DAEMON_PID" 2>/dev/null || true
     wait "$TOKEN_DAEMON_PID" 2>/dev/null || true
   fi
-  # [INV-77] Reap the scoped agent-token daemon too. Its token file lives inside
+  # [INV-78] Reap the scoped agent-token daemon too. Its token file lives inside
   # GH_WRAPPER_DIR and is removed with the dir below.
   if [[ -n "$AGENT_TOKEN_DAEMON_PID" ]]; then
     kill "$AGENT_TOKEN_DAEMON_PID" 2>/dev/null || true
@@ -472,7 +472,7 @@ cleanup_github_auth() {
   if [[ "$GH_WRAPPER_DIR" == /tmp/agent-auth-* ]]; then
     rm -rf "$GH_WRAPPER_DIR" 2>/dev/null || true
   fi
-  # [INV-77] Remove the agent's OWN per-run shim dir (holds only the `gh` symlink).
+  # [INV-78] Remove the agent's OWN per-run shim dir (holds only the `gh` symlink).
   # Guarded on the /tmp/agent-shim-* shape so we never rm -rf an unexpected path.
   if [[ "$AGENT_GH_SHIM_DIR" == /tmp/agent-shim-* ]]; then
     rm -rf "$AGENT_GH_SHIM_DIR" 2>/dev/null || true
@@ -485,7 +485,7 @@ cleanup_github_auth() {
   GH_WRAPPER_DIR=""
   GH_TOKEN_FILE=""
   TOKEN_DAEMON_PID=""
-  # [INV-77] Clear the scoped-token state too (same reused-shell idempotency).
+  # [INV-78] Clear the scoped-token state too (same reused-shell idempotency).
   AGENT_GH_TOKEN_FILE=""
   AGENT_TOKEN_DAEMON_PID=""
   AGENT_GH_SHIM_DIR=""

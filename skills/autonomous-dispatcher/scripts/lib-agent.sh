@@ -323,7 +323,7 @@ _run_with_timeout() {
     cmd+=("$_AGENT_TIMEOUT_CMD" --kill-after=30s --signal=TERM "$AGENT_TIMEOUT")
   fi
 
-  # [INV-77] Agent env scrub. build_agent_env_argv (lib-auth.sh) emits an `env`
+  # [INV-78] Agent env scrub. build_agent_env_argv (lib-auth.sh) emits an `env`
   # argv-prefix that gives the agent subtree ONLY the scoped installation token
   # (GH_TOKEN=<scoped>) and strips the wrapper's full-write credential
   # (GH_TOKEN_FILE / GITHUB_PERSONAL_ACCESS_TOKEN / GH_USER_PAT). PATH is left

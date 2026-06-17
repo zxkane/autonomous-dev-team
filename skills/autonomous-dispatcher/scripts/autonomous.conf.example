@@ -562,7 +562,7 @@ REVIEW_AGENT_APP_PEM=""
 DISPATCHER_APP_ID=""
 DISPATCHER_APP_PEM=""
 
-# --- Scoped agent token ([INV-77], app mode only) ---
+# --- Scoped agent token ([INV-78], app mode only) ---
 # In GH_AUTH_MODE=app the wrapper mints a SECOND, down-scoped installation token
 # for the AGENT subprocess (the wrapper keeps the full-write token for label
 # flips / approve / merge / verdict). The agent's token is scrubbed of the

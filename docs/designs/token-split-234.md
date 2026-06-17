@@ -123,7 +123,7 @@ is byte-identical to today.
 
 ## Invariant
 
-**INV-77 — credential split contract.** In app mode the agent process is launched
+**INV-78 — credential split contract.** In app mode the agent process is launched
 with ONLY a scoped installation token (`contents:write`, `issues:write`,
 `pull_requests:read`): its `GH_TOKEN_FILE` points at the SCOPED token file (kept
 fresh by the scoped daemon — refresh-aware, not a stale one-time snapshot), and
@@ -150,7 +150,7 @@ and asserts no full-write credential is present.
 - `autonomous-review.sh` — call `setup_agent_token`; E2E broker post.
 - `lib-review-e2e.sh` — broker instruction in `build_browser_e2e_prompt`.
 - docs: `github-app-setup.md` (scope set + attack-surface note),
-  `invariants.md` (INV-77), `dev-agent-flow.md` + `review-agent-flow.md` env tables.
+  `invariants.md` (INV-78), `dev-agent-flow.md` + `review-agent-flow.md` env tables.
 
 ## Test plan
 

@@ -110,7 +110,7 @@ print(val)
 
 # Get a GitHub App installation token for a specific repository.
 # Args: $1=app_id, $2=pem_file, $3=repo_owner, $4=repo_name,
-#       $5=permissions_json (OPTIONAL, [INV-77]) — a JSON object scoping the
+#       $5=permissions_json (OPTIONAL, [INV-78]) — a JSON object scoping the
 #          minted token to a SUBSET of the installation's granted permissions,
 #          e.g. '{"contents":"write","issues":"write","pull_requests":"read"}'.
 #          When omitted/empty the token carries the installation's FULL grant
@@ -167,7 +167,7 @@ get_gh_app_token() {
   }
 
   # Build the access-token request body. Always scope to the single repo; when a
-  # permissions object is provided ([INV-77] scoped agent token), embed it so the
+  # permissions object is provided ([INV-78] scoped agent token), embed it so the
   # minted token carries ONLY that subset (e.g. pull_requests:read → cannot
   # approve/merge). _build_access_token_body keeps the JSON well-formed for both
   # the full-grant (no permissions) and scoped cases.
@@ -209,12 +209,12 @@ get_gh_app_token() {
   echo "$token"
 }
 
-# Build the JSON body for the access-token exchange ([INV-77]).
+# Build the JSON body for the access-token exchange ([INV-78]).
 # Args: $1=repo_name, $2=permissions_json (optional)
 # Always includes the single-repo `repositories` array. When a non-empty
 # permissions object is given, embeds it as `permissions` AFTER validating it as
 # a flat object of "read"/"write"/"admin" values (rejecting injection / malformed
-# input). On a missing permissions arg the body is exactly the pre-[INV-77]
+# input). On a missing permissions arg the body is exactly the pre-[INV-78]
 # full-grant body. Echoes the JSON body on stdout; returns non-zero on a
 # malformed permissions object.
 _build_access_token_body() {
@@ -252,7 +252,7 @@ print(json.dumps(obj, separators=(",", ":"), sort_keys=True))
   printf '{"repositories":["%s"],"permissions":%s}' "$repo_name" "$canonical"
 }
 
-# Convenience wrapper: mint a SCOPED installation token ([INV-77]). Identical to
+# Convenience wrapper: mint a SCOPED installation token ([INV-78]). Identical to
 # get_gh_app_token but REQUIRES the permissions object (the agent token must
 # always be down-scoped — a bare scoped mint with no permissions would be a bug).
 # Args: $1=app_id, $2=pem_file, $3=repo_owner, $4=repo_name, $5=permissions_json

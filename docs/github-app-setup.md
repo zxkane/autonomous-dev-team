@@ -117,7 +117,7 @@ DISPATCHER_APP_ID="345678"
 DISPATCHER_APP_PEM="/path/to/project/.github-apps/dispatcher.pem"
 ```
 
-## Two-token split — scoped agent token ([INV-77])
+## Two-token split — scoped agent token ([INV-78])
 
 In **app mode** the pipeline mints **two** installation tokens per run from the
 SAME App credentials:
@@ -159,7 +159,7 @@ The scoped agent token requests exactly:
   `gh pr merge` BOTH require `pull_requests:write`, so the agent's token gets a
   deterministic **403** on either. `gh pr create` ALSO requires
   `pull_requests:write`, so the dev agent does NOT run it directly — it writes the
-  PR title+body to a broker file and the wrapper opens the PR (see [INV-77] in
+  PR title+body to a broker file and the wrapper opens the PR (see [INV-78] in
   `docs/pipeline/invariants.md`).
 
 > The App **installation** must still grant `pull_requests: write` (the wrapper's
@@ -184,7 +184,7 @@ there is **no** second token. The agent keeps the shared PAT; the wrapper logs a
 one-time WARN:
 
 ```
-WARN: [INV-77] GH_AUTH_MODE=token — a PAT cannot be down-scoped, so agent
+WARN: [INV-78] GH_AUTH_MODE=token — a PAT cannot be down-scoped, so agent
 credential enforcement degraded to convention in PAT mode ...
 ```
 

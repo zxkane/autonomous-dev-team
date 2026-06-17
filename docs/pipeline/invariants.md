@@ -3679,13 +3679,13 @@ agent DID deliver output, it was just unparseable.)
 - [INV-56](#inv-56-review-agents-post-their-verdict-comment-only-through-post-verdictsh) — post-verdict.sh stays the sole comment poster.
 - [INV-35](#inv-35-the-review-wrapper-emits-a-machine-readable-verdict-trailer-comment) — the rendered aggregate trailer (the dispatcher's machine channel) is unchanged.
 
-## INV-77: in app mode the agent process gets ONLY a scoped token; the wrapper keeps full-write and is the sole approve/merge/PR-create path
+## INV-79: in app mode the agent process gets ONLY a scoped token; the wrapper keeps full-write and is the sole approve/merge/PR-create path
 
-> **Note**: authored as INV-76 (next free number when `main` was at INV-75), then
-> renumbered to **INV-77** at rebase: PR #258 (smoke `no-response` retry, issue
-> #257) landed INV-76 on `main` first, so this section took the next free number
-> per the standard duplicate-heading / broken-anchor avoidance (see "Adding a new
-> invariant"). The number is disambiguated by issue #234.
+> **Note**: authored as INV-76, renumbered to **INV-78** across two rebases —
+> PR #258 (smoke `no-response`, #257) took INV-76, then PR #256 (two-tier CI, #238)
+> took INV-77 on `main` before this PR merged, so this section took the next free
+> number per the standard duplicate-heading / broken-anchor avoidance (see "Adding
+> a new invariant"). The number is disambiguated by issue #234.
 
 **Rule**: in `GH_AUTH_MODE=app`, the autonomous **agent** subprocess is launched
 with ONLY a SCOPED GitHub-App installation token (`contents:write`,
@@ -3741,7 +3741,7 @@ an agent that runs `gh pr review --approve` / `gh pr merge` gets a deterministic
 - **Degraded mode (PAT)**: `GH_AUTH_MODE=token` — a PAT cannot be down-scoped at
   mint, so there is NO second token. `setup_agent_token` logs a ONE-TIME WARN
   ("enforcement degraded to convention in PAT mode"), `build_agent_env_argv`
-  emits an EMPTY prefix (no scrub), and behavior is byte-identical to pre-INV-77.
+  emits an EMPTY prefix (no scrub), and behavior is byte-identical to pre-INV-78.
   An app-mode scoped-mint failure degrades the same way (WARN + no scrub) —
   availability over the defense-in-depth bonus.
 - **Containment boundary (NOT isolation)**: same OS user, so the agent could read
