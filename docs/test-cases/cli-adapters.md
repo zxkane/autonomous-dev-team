@@ -66,6 +66,12 @@ the per-CLI dispatch argv is byte-identical.
 - **TC-ADAPTER-EXTRACT-043** sourcing `adapters/<cli>.sh` directly (after
   lib-agent.sh primitives present) defines the CLI's `adapter_invoke_<cli>` and
   its drop-reason fns (codex/agy/kiro).
+- **TC-ADAPTER-EXTRACT-044** (#232 review) sourcing each shim via a DIRECT
+  per-lib symlink placed in a dir with NO sibling `adapters/` still defines the
+  adapter API — the shim resolves `adapters/<cli>.sh` from its own realpath
+  (`readlink -f` of `BASH_SOURCE`, like `lib-agent.sh` per [INV-65]), not the
+  symlink's dir. Pins the legacy-install source-by-path contract: a direct
+  symlink to `lib-review-codex.sh` alone must not exit 127 on the adapter source.
 
 ### INV-75 enforcement (the new invariant, machine-checkable)
 

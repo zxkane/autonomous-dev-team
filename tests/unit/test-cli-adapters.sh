@@ -92,6 +92,34 @@ done
 
 # ---------------------------------------------------------------------------
 echo ""
+echo "=== TC-ADAPTER-EXTRACT-044: compat shims resolve adapters/ from realpath, not symlink dir ==="
+# ---------------------------------------------------------------------------
+# Legacy installs may carry a DIRECT per-lib symlink to a shim (e.g. only
+# scripts/lib-review-codex.sh) without adapters/ alongside it. The shim MUST
+# resolve adapters/<cli>.sh from its OWN real location (readlink -f of its
+# BASH_SOURCE, like lib-agent.sh per [INV-65]) — not from the symlink's dir,
+# which would point at the caller's adapter-less scripts/. Repro the finding:
+# symlink each shim into an empty dir (no adapters/) and source it.
+TMPSYM=$(mktemp -d)
+for shim in lib-review-codex.sh lib-review-agy.sh lib-review-kiro.sh; do
+  ln -s "$SCRIPTS/$shim" "$TMPSYM/$shim"
+done
+# codex shim via symlink → must still define the review API.
+codex_sym_fns=$(bash -c 'source "'"$TMPSYM"'/lib-review-codex.sh" 2>/dev/null
+  for f in _run_codex_review _classify_codex_drop_reason; do declare -F "$f" >/dev/null 2>&1 && echo "$f"; done')
+for f in _run_codex_review _classify_codex_drop_reason; do
+  if grep -qx "$f" <<<"$codex_sym_fns"; then ok "TC-044 lib-review-codex.sh via direct symlink (no sibling adapters/) defines $f"; else bad "TC-044 lib-review-codex.sh via symlink missing $f (adapters/ resolved from symlink dir, not realpath)"; fi
+done
+agy_sym_fns=$(bash -c 'source "'"$TMPSYM"'/lib-review-agy.sh" 2>/dev/null
+  declare -F _classify_agy_drop_reason >/dev/null 2>&1 && echo ok')
+if [[ "$agy_sym_fns" == ok ]]; then ok "TC-044 lib-review-agy.sh via direct symlink defines _classify_agy_drop_reason"; else bad "TC-044 lib-review-agy.sh via symlink missing _classify_agy_drop_reason"; fi
+kiro_sym_fns=$(bash -c 'source "'"$TMPSYM"'/lib-review-kiro.sh" 2>/dev/null
+  declare -F _classify_kiro_drop_reason >/dev/null 2>&1 && echo ok')
+if [[ "$kiro_sym_fns" == ok ]]; then ok "TC-044 lib-review-kiro.sh via direct symlink defines _classify_kiro_drop_reason"; else bad "TC-044 lib-review-kiro.sh via symlink missing _classify_kiro_drop_reason"; fi
+rm -rf "$TMPSYM"
+
+# ---------------------------------------------------------------------------
+echo ""
 echo "=== TC-ADAPTER-EXTRACT-010/011/020..025: dispatch + golden argv parity ==="
 # ---------------------------------------------------------------------------
 # A recording stub per CLI; assert run_agent/resume_agent route to the adapter

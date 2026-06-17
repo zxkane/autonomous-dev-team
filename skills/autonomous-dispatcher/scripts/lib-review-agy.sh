@@ -10,7 +10,9 @@
 # The adapter is normally already sourced by lib-agent.sh; re-sourcing here is an
 # idempotent function redefinition.
 #
-# [INV-14] BASH_SOURCE-relative source (per-project symlink → vendored adapters/).
-_LIB_REVIEW_AGY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# [INV-14]/[INV-65] Resolve adapters/ from this shim's REAL location (readlink -f
+# of its own BASH_SOURCE), exactly like lib-agent.sh — so a direct per-lib symlink
+# to this shim (no sibling adapters/) still finds adapters/agy.sh in the skill tree.
+_LIB_REVIEW_AGY_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]:-$0}")")" && pwd)"
 # shellcheck source=adapters/agy.sh
 source "${_LIB_REVIEW_AGY_DIR}/adapters/agy.sh"

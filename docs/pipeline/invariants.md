@@ -3173,7 +3173,13 @@ plus the **generic-fallback `*)` branch** for an unknown CLI. An inline
   `lib-review-{codex,agy,kiro}.sh` files are **thin compat shims** that
   `source adapters/<cli>.sh` to preserve the historical source-by-path contract
   (the conformance runner + `lib-agent-smoke.sh` source those paths; the CI
-  shellcheck list names them).
+  shellcheck list names them). Each shim resolves `adapters/<cli>.sh` from its
+  OWN real location (`readlink -f` of its `BASH_SOURCE`, like `lib-agent.sh` per
+  [INV-65](#inv-65-entry-scripts-resolve-conf-from-the-unresolved-path-and-libs-from-the-real-skill-tree-path-two-dir-resolution)),
+  NOT the symlink's dir — so a legacy install carrying a DIRECT per-lib symlink
+  to a shim (no sibling `adapters/`) still finds the adapter in the skill tree
+  instead of dying with `adapters/<cli>.sh: No such file or directory` (#232
+  review). A shim resolving siblings via the bare symlink dir is a defect.
 - **Mode axis** ([adapter-spec.md § 3](adapter-spec.md#3-the-mode-axis-modes-differ-structurally)):
   `adapter_invoke_<cli>` takes `dev-new` / `dev-resume`; the codex `review` lane
   is `_run_codex_review` (also in the codex adapter); `e2e-browser` is
@@ -3196,7 +3202,7 @@ plus the **generic-fallback `*)` branch** for an unknown CLI. An inline
 **Cross-references**:
 - [`adapter-spec.md`](adapter-spec.md) — the NORMATIVE adapter interface this implements.
 - [INV-66](#inv-66-adapter-conformance-is-spec-defined) / [INV-74](#inv-74-adapter-conformance-is-regression-pinned-by-a-hermetic-fixture-manifest-runner) — the spec + conformance pin the relocation preserved.
-- [INV-14](#inv-14-vendored-scripts-resolve-siblings-via-bash_source-not-cwd) / [INV-65](#inv-65-stable-entry-points-libs-resolve-from-the-skill-tree-conf-from-the-projects-scripts) — the BASH_SOURCE / skill-tree resolution the shims and adapter sourcing use.
+- [INV-14](#inv-14-vendored-scripts-resolve-siblings-via-bash_source-not-cwd) / [INV-65](#inv-65-entry-scripts-resolve-conf-from-the-unresolved-path-and-libs-from-the-real-skill-tree-path-two-dir-resolution) — the BASH_SOURCE / skill-tree resolution the shims and adapter sourcing use.
 
 ## Adding a new invariant
 
