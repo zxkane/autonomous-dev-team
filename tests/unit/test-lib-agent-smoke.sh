@@ -483,7 +483,7 @@ fi
 # TC-AGENT-SMOKE-SMOKEFN-FAIL — a codex stub that emits a GENUINE config-error
 # (the clap argv rejection, copied from the committed fixture) → rc 1 FAIL.
 # Operator-side breakage is NOT a transient, so it is NOT retried/downgraded under
-# [INV-75] — it stays the gate-worthy FAIL. (Pre-#257 this entry used a
+# [INV-76] — it stays the gate-worthy FAIL. (Pre-#257 this entry used a
 # bare-no-response stub; that shape now retries → UNAVAILABLE — see TC-006c-NR
 # below — so the genuine-FAIL coverage moves to a real config-error. The stub
 # `cat`s the fixture to avoid brittle inline clap-string quoting.)
@@ -492,14 +492,14 @@ out=$(PATH="$STUB_DIR:$ORIG_PATH" smoke_agent codex gpt 5); rc=$?
 assert_rc "TC-AGENT-SMOKE-006c smoke_agent codex (config-error) → rc 1 FAIL (not retried)" 1 "$rc"
 assert_contains "TC-AGENT-SMOKE-011b evidence line is a FAIL" "SMOKE codex FAIL" "$out"
 
-# TC-AGENT-SMOKE-006c-NR ([INV-75] end-to-end) — a codex stub that exits non-zero
+# TC-AGENT-SMOKE-006c-NR ([INV-76] end-to-end) — a codex stub that exits non-zero
 # with NO token and NO recognizable signal (the bare `no-response` shape, codex
 # being the Bedrock-backed CLI the issue motivates) is now RETRIED ONCE and, when
 # the retry stays no-response, classified UNAVAILABLE (rc 2) — NOT a FAIL. This is
 # the production-shape end-to-end of the #257 fix through the real run_agent chain.
 make_stub codex 'cat >/dev/null; echo "boom (no model response, no signal)" >&2; exit 4'
 out=$(PATH="$STUB_DIR:$ORIG_PATH" smoke_agent codex gpt 5); rc=$?
-assert_rc "TC-AGENT-SMOKE-006c-NR codex bare no-response (×2) → rc 2 UNAVAILABLE ([INV-75])" 2 "$rc"
+assert_rc "TC-AGENT-SMOKE-006c-NR codex bare no-response (×2) → rc 2 UNAVAILABLE ([INV-76])" 2 "$rc"
 assert_contains "TC-AGENT-SMOKE-006c-NR2 evidence is UNAVAILABLE + after-retry reason" "SMOKE codex UNAVAILABLE" "$out"
 assert_contains "TC-AGENT-SMOKE-006c-NR3 reason names the post-retry transient" "after retry" "$out"
 
@@ -507,7 +507,7 @@ assert_contains "TC-AGENT-SMOKE-006c-NR3 reason names the post-retry transient" 
 # that echoes the prompt (which CONTAINS the nonce) onto STDERR and exits non-zero,
 # with EMPTY stdout, must NOT be a false PASS (no model response occurred). The
 # claude branch feeds the prompt on stdin; this stub copies stdin (the prompt,
-# nonce included) to stderr and exits 3 with nothing on stdout. Under [INV-75] this
+# nonce included) to stderr and exits 3 with nothing on stdout. Under [INV-76] this
 # bare no-response (no scraper signal) is retried once and, staying no-response,
 # classifies UNAVAILABLE (rc 2) — STILL NOT a PASS, so the no-false-PASS property is
 # preserved; only the rc moved from 1 (FAIL) to 2 (UNAVAILABLE, the transient drop).
@@ -520,7 +520,7 @@ assert_contains "TC-AGENT-SMOKE-039e evidence is NOT a PASS" "SMOKE claude UNAVA
 # that echoes the prompt (nonce included) to STDOUT and THEN exits non-zero must NOT
 # be a false PASS — the rc-0 PASS gate rejects the nonce from a failed run. This is
 # the stdout sibling of TC-039d. The stub copies stdin to STDOUT (so the nonce IS
-# present on stdout) then exits 3. Under [INV-75] this bare no-response is retried
+# present on stdout) then exits 3. Under [INV-76] this bare no-response is retried
 # once and stays no-response (the retry re-runs the same stub) → UNAVAILABLE (rc 2),
 # STILL NOT a PASS — the no-false-PASS property holds across the retry.
 make_stub claude 'cat; exit 3'
@@ -585,7 +585,7 @@ assert_contains "TC-AGENT-SMOKE-013b bad-args evidence line printed" "FAIL" "$ou
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== TC-AGENT-SMOKE-075: smoke_agent no-response RETRY-ONCE (issue #257, INV-75) ==="
+echo "=== TC-AGENT-SMOKE-075: smoke_agent no-response RETRY-ONCE (issue #257, INV-76) ==="
 # ---------------------------------------------------------------------------
 # A bare `no-response` (rc≠0, nonce absent, no per-CLI scraper signal — the
 # step-5 fallthrough) is a TRANSIENT infra hiccup, not operator-side breakage.
@@ -824,7 +824,7 @@ assert_contains "TC-AGENT-SMOKE-028b present entry PASSes (not skipped)" "SMOKE 
 # entries each running a 2s-sleeping stub; total must be well under 6s (the sum).
 #
 # The stub echoes the nonce and exits 0 — a clean PASS that runs EXACTLY ONCE. It
-# must NOT be a bare `no-response` FAIL (rc≠0, no nonce): under [INV-75] that path
+# must NOT be a bare `no-response` FAIL (rc≠0, no nonce): under [INV-76] that path
 # is now retried once (a second 2s probe), doubling each entry's wall-clock to ~4s
 # and pushing this parallelism bound to its flaky edge under box load. A PASS stub
 # isolates the property under test (parallel scheduling, not the retry).

@@ -403,7 +403,7 @@ _smoke_classify() {
 # LAST field, so the caller splits it off the tail and the reason (which contains
 # spaces/parens but no `|`) survives intact.
 #
-# WHY this is its own function ([INV-75] / issue #257): the retry-once of a bare
+# WHY this is its own function ([INV-76] / issue #257): the retry-once of a bare
 # `no-response` needs a FRESH run_agent round-trip — a new nonce, a new session id,
 # a new stdout/stderr capture — and `_smoke_classify` is a PURE decision function
 # that cannot drive run_agent. Factoring the single-probe body here lets smoke_agent
@@ -535,7 +535,7 @@ _smoke_is_transient_no_response() {
 # A missing/empty <agent-cmd> is a caller bug → FAIL with reason=bad-args (the
 # evidence line still prints so the harness records it deterministically).
 #
-# RETRY-ONCE on a bare `no-response` ([INV-75] / issue #257): a step-5 generic
+# RETRY-ONCE on a bare `no-response` ([INV-76] / issue #257): a step-5 generic
 # `no-response` FAIL (rc≠0, nonce absent, NO per-CLI scraper signal, NOT a
 # timeout) is a TRANSIENT infra hiccup on a Bedrock-backed CLI — the CLI died
 # before emitting any recognizable signal — not operator-side config breakage. So
@@ -583,7 +583,7 @@ smoke_agent() {
   reason="${rest%|*}"          # reason
   elapsed="${rest##*|}"        # elapsed
 
-  # [INV-75] retry-once: ONLY the step-5 bare `no-response` FAIL is retried.
+  # [INV-76] retry-once: ONLY the step-5 bare `no-response` FAIL is retried.
   # Anything else (PASS, an environmental UNAVAILABLE, a genuine auth/config FAIL,
   # or a pre-flight bad-args/mktemp FAIL) is returned as-is — no retry.
   if _smoke_is_transient_no_response "$state" "$reason"; then

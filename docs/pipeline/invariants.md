@@ -3204,13 +3204,13 @@ plus the **generic-fallback `*)` branch** for an unknown CLI. An inline
 - [INV-66](#inv-66-adapter-conformance-is-spec-defined) / [INV-74](#inv-74-adapter-conformance-is-regression-pinned-by-a-hermetic-fixture-manifest-runner) — the spec + conformance pin the relocation preserved.
 - [INV-14](#inv-14-vendored-scripts-resolve-siblings-via-bash_source-not-cwd) / [INV-65](#inv-65-entry-scripts-resolve-conf-from-the-unresolved-path-and-libs-from-the-real-skill-tree-path-two-dir-resolution) — the BASH_SOURCE / skill-tree resolution the shims and adapter sourcing use.
 
-## INV-75: a transient smoke `no-response` (rc≠0, no signal) retries once, then drops UNAVAILABLE — never a single-shot gate FAIL
+## INV-76: a transient smoke `no-response` (rc≠0, no signal) retries once, then drops UNAVAILABLE — never a single-shot gate FAIL
 
-> **Note**: authored as **INV-75** (next free number; `main` was at INV-74). A
-> concurrent in-flight PR (#238 / two-tier CI lanes) also drafted INV-75 against the
-> same `main`; whichever lands second renumbers to the next free number at rebase
-> (per the standard duplicate-heading / broken-anchor avoidance — see "Adding a new
-> invariant"). The number is disambiguated here by issue #257.
+> **Note**: authored as INV-75 (next free number when `main` was at INV-74), then
+> renumbered to **INV-76** at rebase: PR #259 (per-CLI adapters, issue #232) landed
+> INV-75 on `main` first, so this section took the next free number per the standard
+> duplicate-heading / broken-anchor avoidance (see "Adding a new invariant"). The
+> number is disambiguated by issue #257.
 
 **Rule**: in `lib-agent-smoke.sh`, the **driver** `smoke_agent` retries a bare
 `no-response` smoke **exactly once** before deciding. A "bare `no-response`" is the

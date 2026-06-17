@@ -1,4 +1,4 @@
-# Test Cases: smoke `no-response` retry-once → UNAVAILABLE (issue #257, INV-75)
+# Test Cases: smoke `no-response` retry-once → UNAVAILABLE (issue #257, INV-76)
 
 Scope: the `smoke_agent` driver-level **retry-once** of a step-5 bare `no-response`
 FAIL (rc≠0, nonce absent, no per-CLI scraper signal) and its propagation through the

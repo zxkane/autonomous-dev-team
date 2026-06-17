@@ -1,4 +1,4 @@
-# Design: smoke `no-response` (rc≠0, no signal) retries once then UNAVAILABLE-drops, not single-shot FAIL (issue #257, INV-75)
+# Design: smoke `no-response` (rc≠0, no signal) retries once then UNAVAILABLE-drops, not single-shot FAIL (issue #257, INV-76)
 
 ## Problem
 
@@ -169,7 +169,7 @@ smoke_agent <agent> <model> <timeout>
 
 ## Invariant + doc updates (same PR — Pipeline Documentation Authority)
 
-- **New [INV-75](../pipeline/invariants.md)**: a transient smoke `no-response`
+- **New [INV-76](../pipeline/invariants.md)**: a transient smoke `no-response`
   retries once, then drops UNAVAILABLE — never a single-shot gate FAIL.
   Cross-references INV-63 (three-state contract), INV-64 (Phase A.5 gate), INV-67
   (bare timeout) and INV-73 (codex malformed) as the sibling transient tolerances.

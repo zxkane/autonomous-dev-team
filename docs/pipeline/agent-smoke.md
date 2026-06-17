@@ -23,7 +23,7 @@ returns one of three states, each with a distinct rc:
 | rc | State | Meaning | Gate effect |
 |---|---|---|---|
 | 0 | **PASS** | stdout contains the nonce — the model truly responded | the win |
-| 2 | **UNAVAILABLE** | quota exhausted / backend model capacity / transient backend failure; a bare timeout ([INV-67](invariants.md#inv-67-a-bare-smoke-timeout-rc-124137-with-no-authconfig-signal-classifies-unavailable-not-fail)); a bare `no-response` that stays no-response after one retry ([INV-75](invariants.md#inv-75-a-transient-smoke-no-response-rc0-no-signal-retries-once-then-drops-unavailable--never-a-single-shot-gate-fail)) | recorded, **non-blocking** — environmental, self-healing |
+| 2 | **UNAVAILABLE** | quota exhausted / backend model capacity / transient backend failure; a bare timeout ([INV-67](invariants.md#inv-67-a-bare-smoke-timeout-rc-124137-with-no-authconfig-signal-classifies-unavailable-not-fail)); a bare `no-response` that stays no-response after one retry ([INV-76](invariants.md#inv-76-a-transient-smoke-no-response-rc0-no-signal-retries-once-then-drops-unavailable--never-a-single-shot-gate-fail)) | recorded, **non-blocking** — environmental, self-healing |
 | 1 | **FAIL** | an **auth/config scraper signal**: CLI fails to launch, auth error, region drift, a clap argv rejection. A bare timeout / bare `no-response` is NOT a FAIL (it is UNAVAILABLE — see above) | **blocking** — operator-side config/launch breakage, the gate's reason to exist |
 
 **FAIL = operator-side config/launch breakage (gate-worthy). UNAVAILABLE =
@@ -83,7 +83,7 @@ land on either stream); agy reads its own `--log-file`.
 | codex `config-error*` (clap argv rejection) | `_classify_codex_drop_reason` | **FAIL** (names the rejected flag) |
 | codex `malformed-output` (prompt-echo / startup-trace) | `_classify_codex_drop_reason` ([INV-73](invariants.md#inv-73-a-codex-review-prompt-echo--startup-trace-stdout-is-malformed-never-a-blocking-p1-fail--retry-or-drop-not-a-phantom-veto)) | **UNAVAILABLE** |
 | bare timeout (rc 124/137), no signal | `run_agent` rc | **UNAVAILABLE** ([INV-67](invariants.md#inv-67-a-bare-smoke-timeout-rc-124137-with-no-authconfig-signal-classifies-unavailable-not-fail)) |
-| bare `no-response` (rc≠0, no nonce, no signal) — **first probe** | — | retried once ([INV-75](invariants.md#inv-75-a-transient-smoke-no-response-rc0-no-signal-retries-once-then-drops-unavailable--never-a-single-shot-gate-fail)) |
+| bare `no-response` (rc≠0, no nonce, no signal) — **first probe** | — | retried once ([INV-76](invariants.md#inv-76-a-transient-smoke-no-response-rc0-no-signal-retries-once-then-drops-unavailable--never-a-single-shot-gate-fail)) |
 | bare `no-response` still after one retry | `smoke_agent` retry | **UNAVAILABLE** (`no-response (… after retry — transient infra)`) |
 | `rc=0` silent-success `no-response` (CLI exits 0, no nonce, no signal) | — | **FAIL**, no retry (issue #257 follow-up — only `rc≠0` is transient) |
 
@@ -92,7 +92,7 @@ that hits a quota wall and then hangs is still UNAVAILABLE (the cause wins over
 the bare timeout). The nonce match is exact — a truncated/garbled echo is FAIL.
 
 **`_smoke_classify` is a pure single-probe function ([INV-63](invariants.md#inv-63-agent-smoke-is-a-three-state-probe-pass--unavailable--fail-run-through-the-production-run_agent-never-a-parallel-invocation-path)).** The
-**retry-once** of a bare `no-response` ([INV-75](invariants.md#inv-75-a-transient-smoke-no-response-rc0-no-signal-retries-once-then-drops-unavailable--never-a-single-shot-gate-fail)) lives in the **driver** `smoke_agent`,
+**retry-once** of a bare `no-response` ([INV-76](invariants.md#inv-76-a-transient-smoke-no-response-rc0-no-signal-retries-once-then-drops-unavailable--never-a-single-shot-gate-fail)) lives in the **driver** `smoke_agent`,
 not in the classifier: it factors the single probe into `_smoke_probe_once` and, when
 the first probe is the step-5 bare `no-response` FAIL (detected by
 `_smoke_is_transient_no_response`: STATE==FAIL && reason starts `no-response` && the
