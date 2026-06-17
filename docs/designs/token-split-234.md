@@ -89,9 +89,11 @@ agy/generic the agent subtree gets:
 - `GH_TOKEN` = the scoped token (so `gh` and `bash scripts/gh` authenticate scoped)
 - `GH_TOKEN_FILE` **unset** (wrapper's full-token file path hidden)
 - `GITHUB_PERSONAL_ACCESS_TOKEN` / `GH_USER_PAT` **unset** (no full-write/PAT leak)
-- `PATH` with the per-run `GH_WRAPPER_DIR` entry **stripped** (the agent's `gh`
-  resolves only via `bash scripts/gh` → the project-level shim, which reads
-  `$GH_TOKEN`)
+- `PATH` **kept intact** (#234 review [P1]): the agent's bare `gh` (review prompt,
+  vendored helpers like `mark-issue-checkbox.sh`) must keep resolving the per-run
+  `gh-with-token-refresh.sh` shim — its only resolvable `gh` on `REAL_GH` hosts
+  (#92). With `GH_TOKEN_FILE` unset the shim execs real `gh` under the scoped
+  `GH_TOKEN`, so bare `gh` works AND authenticates scoped.
 
 Scrub fires ONLY when a scoped token is armed (`AGENT_GH_TOKEN_FILE` non-empty +
 readable). PAT mode / app-mode-without-scoping → empty prefix → no behavior change.
@@ -114,9 +116,12 @@ is byte-identical to today.
 
 **INV-77 — credential split contract.** In app mode the agent process is launched
 with ONLY a scoped installation token (`contents:write`, `issues:write`,
-`pull_requests:read`); the wrapper's full-write token file, full-write env vars,
-and per-run `gh` shim PATH entry are stripped from the agent subtree. The wrapper
-retains the full-write token and is the SOLE approve/merge/label/PR-create path
+`pull_requests:read`); the wrapper's full-write token file and full-write env vars
+(`GH_TOKEN_FILE` / `GITHUB_PERSONAL_ACCESS_TOKEN` / `GH_USER_PAT`) are unset for the
+agent subtree. PATH is kept intact so the agent's bare `gh` still resolves the
+per-run shim, which — with `GH_TOKEN_FILE` unset — execs real `gh` under the scoped
+`GH_TOKEN`. The wrapper retains the full-write token and is the SOLE
+approve/merge/label/PR-create path
 (complements INV-44 / INV-52). In PAT mode this degrades to convention with a
 one-time WARN. Verify-by-construction: a conformance fixture dumps the agent env
 and asserts no full-write credential is present.

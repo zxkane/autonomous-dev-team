@@ -326,8 +326,10 @@ _run_with_timeout() {
   # [INV-77] Agent env scrub. build_agent_env_argv (lib-auth.sh) emits an `env`
   # argv-prefix that gives the agent subtree ONLY the scoped installation token
   # (GH_TOKEN=<scoped>) and strips the wrapper's full-write credential
-  # (GH_TOKEN_FILE / GITHUB_PERSONAL_ACCESS_TOKEN / GH_USER_PAT) plus the per-run
-  # `gh` shim PATH entry. CLI-agnostic: applied here, it wraps EVERY adapter's
+  # (GH_TOKEN_FILE / GITHUB_PERSONAL_ACCESS_TOKEN / GH_USER_PAT). PATH is left
+  # intact so the agent's bare `gh` still resolves the per-run gh shim (which,
+  # with GH_TOKEN_FILE unset, execs real gh under the scoped GH_TOKEN — #234
+  # review [P1]). CLI-agnostic: applied here, it wraps EVERY adapter's
   # invocation uniformly (claude/codex/gemini/kiro/opencode/agy/generic) and the
   # launcher (the `cc` function) too — `env VAR=x …` sets the env for the command
   # AND all descendants. Emits an EMPTY array (no prefix) in PAT mode /

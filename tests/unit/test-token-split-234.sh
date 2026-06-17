@@ -7,7 +7,8 @@
 #   - gh-token-refresh-daemon.sh forwards the optional 6th permissions arg.
 #   - setup_agent_token mints the scoped token (app mode) / no-ops + WARNs (PAT).
 #   - build_agent_env_argv emits the scrub prefix (scoped) / empty (no scope).
-#   - _strip_path_entry removes exactly the GH_WRAPPER_DIR PATH segment.
+#   - the scrub KEEPS PATH intact (the agent's bare gh shim must stay resolvable)
+#     while still unsetting GH_TOKEN_FILE / PAT vars (#234 review [P1]).
 #   - _run_with_timeout runs a stub agent under the scrub prefix → env dump shows
 #     scoped GH_TOKEN + NO full-write credential (the verify-by-construction gate).
 #   - drain_agent_pr_create brokers `gh pr create` only when scoping is armed.
@@ -230,23 +231,28 @@ fi
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== TC-TOKEN-SPLIT-032: _strip_path_entry removes exactly the GH_WRAPPER_DIR segment ==="
+echo "=== TC-TOKEN-SPLIT-032: scrub prefix does NOT rewrite PATH (#234 review [P1] — keep the gh shim resolvable) ==="
 # ---------------------------------------------------------------------------
-stripped=$(bash -c "source '$SBA/lib-auth.sh'; _strip_path_entry '/tmp/agent-auth-XYZ:/usr/bin:/bin' '/tmp/agent-auth-XYZ'")
-if [[ "$stripped" == "/usr/bin:/bin" ]]; then
-  assert_pass "_strip_path_entry removed the leading wrapper-dir segment, order preserved"
+# The scrub must leave PATH intact so the agent's bare `gh` keeps resolving the
+# per-run gh-with-token-refresh.sh shim. A `PATH=` element in the prefix would
+# strip the shim dir and break bare `gh` on REAL_GH/non-interactive-PATH hosts.
+if ! printf '%s\n' "$pfx" | grep -qE '(^| )PATH='; then
+  assert_pass "scrub prefix carries NO PATH= override (PATH left intact, shim stays resolvable)"
 else
-  assert_fail "_strip_path_entry wrong result: '$stripped'"
+  assert_fail "scrub prefix rewrites PATH (the #234 [P1] regression — would strip the gh shim): $pfx"
 fi
-stripped2=$(bash -c "source '$SBA/lib-auth.sh'; _strip_path_entry '/usr/bin:/tmp/agent-auth-XYZ:/bin' '/tmp/agent-auth-XYZ'")
-if [[ "$stripped2" == "/usr/bin:/bin" ]]; then
-  assert_pass "_strip_path_entry removed a middle segment, order preserved"
+# Source-level lockdown: the dead _strip_path_entry helper must be gone, and
+# build_agent_env_argv must not emit a PATH= element.
+if ! grep -q '_strip_path_entry' "$SCRIPTS/lib-auth.sh"; then
+  assert_pass "source: _strip_path_entry removed (no longer used)"
 else
-  assert_fail "_strip_path_entry middle-segment wrong: '$stripped2'"
+  assert_fail "source: _strip_path_entry still present in lib-auth.sh (dead code / PATH-strip risk)"
 fi
-nostrip=$(bash -c "source '$SBA/lib-auth.sh'; _strip_path_entry '/usr/bin:/bin' ''")
-[[ "$nostrip" == "/usr/bin:/bin" ]] && assert_pass "_strip_path_entry empty entry returns PATH unchanged" \
-                                    || assert_fail "_strip_path_entry empty-entry mangled PATH: '$nostrip'"
+if ! awk '/^build_agent_env_argv\(\)/,/^}/' "$SCRIPTS/lib-auth.sh" | grep -q 'PATH='; then
+  assert_pass "source: build_agent_env_argv emits no PATH= element"
+else
+  assert_fail "source: build_agent_env_argv still emits a PATH= element (#234 [P1] regression)"
+fi
 
 # ---------------------------------------------------------------------------
 echo ""
@@ -308,11 +314,13 @@ if ! grep -qE '^GH_USER_PAT=' "$ENVDUMP" 2>/dev/null; then
 else
   assert_fail "agent env still carries GH_USER_PAT — scrub incomplete"
 fi
+# #234 review [P1]: PATH is now KEPT INTACT — the agent's bare `gh` must keep
+# resolving the GH_WRAPPER_DIR shim. Assert the shim dir is STILL on the agent PATH.
 path_line=$(grep -E '^PATH=' "$ENVDUMP" 2>/dev/null || true)
-if ! printf '%s' "$path_line" | grep -qF "$WDIR_USED"; then
-  assert_pass "agent PATH no longer contains the GH_WRAPPER_DIR shim dir ($WDIR_USED)"
+if printf '%s' "$path_line" | grep -qF "$WDIR_USED"; then
+  assert_pass "agent PATH KEEPS the GH_WRAPPER_DIR shim dir ($WDIR_USED) — bare gh stays resolvable"
 else
-  assert_fail "agent PATH still contains the GH_WRAPPER_DIR shim ($WDIR_USED): $path_line"
+  assert_fail "agent PATH lost the GH_WRAPPER_DIR shim ($WDIR_USED) — bare gh would break on REAL_GH hosts ([P1] regression): $path_line"
 fi
 
 # ---------------------------------------------------------------------------
@@ -447,6 +455,46 @@ if awk '/emit_open_pr_fast_path_block\(\)/,/^}/' "$DEV_SH" | grep -q 'run .*gh p
   assert_pass "fast path: unscoped branch keeps direct gh pr create (PAT/no-scope unchanged)"
 else
   assert_fail "fast path: unscoped branch lost its direct gh pr create"
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-TOKEN-SPLIT-092: under the scrub, the agent's BARE gh resolves the shim → real gh with the SCOPED token (#234 [P1]) ==="
+# ---------------------------------------------------------------------------
+# The functional proof of the PATH-keep fix: with the scrub applied (GH_TOKEN=scoped,
+# GH_TOKEN_FILE unset) and the GH_WRAPPER_DIR shim on PATH, a BARE `gh` invocation
+# from the agent must resolve the gh-with-token-refresh.sh shim and exec the real gh
+# under the SCOPED token. We model the #92 REAL_GH host: a fake "real gh" prints the
+# token it sees, REAL_GH points at it, and PATH has the shim dir + only system bins
+# (no real gh dir), so the shim is the ONLY resolvable `gh`. Run the bare `gh` under
+# the EXACT env prefix build_agent_env_argv produces.
+GHFAKE="$TMPROOT/ghfake"; mkdir -p "$GHFAKE"
+cat > "$GHFAKE/fake-gh" <<'FG'
+#!/bin/bash
+echo "REALGH token=${GH_TOKEN:-<none>} file=${GH_TOKEN_FILE:-<unset>}"
+FG
+chmod +x "$GHFAKE/fake-gh"
+mapfile -t out92 < <(env -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR -u GH_TOKEN_FILE -u GITHUB_PERSONAL_ACCESS_TOKEN -u GH_USER_PAT \
+  PATH="/usr/bin:/bin" bash -c "
+  source '$SBA/lib-auth.sh'
+  wdir=\$(mktemp -d /tmp/agent-auth-XXXXXX)
+  export GH_WRAPPER_DIR=\"\$wdir\"
+  ln -sf '$SCRIPTS/gh-with-token-refresh.sh' \"\$wdir/gh\"
+  export GH_TOKEN_FILE='/tmp/full-token-file'   # wrapper-side full-write file
+  AGENT_GH_TOKEN_FILE=\"\$wdir/agent-token\"; echo 'SCOPED-92' > \"\$AGENT_GH_TOKEN_FILE\"
+  declare -a p=(); build_agent_env_argv p
+  # Build the agent PATH the way the wrapper does (shim dir prepended), and run a
+  # bare \`gh\` under the scrub prefix + REAL_GH (the #92 host). The scrub keeps PATH
+  # from the CALLER env, so we set the agent PATH explicitly to shim-dir + system.
+  REAL_GH='$GHFAKE/fake-gh' PATH=\"\$wdir:/usr/bin:/bin\" \"\${p[@]}\" gh whoami 2>&1
+  rm -rf \"\$wdir\"
+")
+out92_str="${out92[*]}"
+if printf '%s' "$out92_str" | grep -qF 'REALGH token=SCOPED-92' \
+   && printf '%s' "$out92_str" | grep -qF 'file=<unset>'; then
+  assert_pass "bare gh under the scrub resolves the shim → real gh with the SCOPED token (file unset)"
+else
+  assert_fail "bare gh under the scrub did NOT reach real gh with the scoped token: $out92_str"
 fi
 
 # ---------------------------------------------------------------------------

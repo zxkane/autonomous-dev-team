@@ -252,14 +252,26 @@ setup_agent_token() {
 }
 
 # [INV-77] build_agent_env_argv — emit, into the array named by $1, the `env`
-# argv-prefix that scrubs the agent subtree's credentials. Prepended by
+# argv-prefix that scopes the agent subtree's GitHub credential. Prepended by
 # lib-agent.sh::_run_with_timeout to every agent invocation (CLI-agnostic, so it
 # applies uniformly across all adapters). The prefix:
-#   - sets GH_TOKEN=<scoped> (the agent's `gh`/`bash scripts/gh` authenticate scoped)
-#   - unsets GH_TOKEN_FILE (hides the wrapper's full-token file path)
+#   - sets GH_TOKEN=<scoped> (the agent's `gh` authenticates with the scoped token)
+#   - unsets GH_TOKEN_FILE (hides the wrapper's full-write-token file PATH; this is
+#     also load-bearing for the credential swap — see below)
 #   - unsets GITHUB_PERSONAL_ACCESS_TOKEN and GH_USER_PAT (no full-write/PAT leak)
-#   - rewrites PATH with the per-run GH_WRAPPER_DIR entry removed (the agent's
-#     `gh` resolves only via `bash scripts/gh` → the project shim, reading $GH_TOKEN)
+#
+# PATH is DELIBERATELY left unchanged. The per-run GH_WRAPPER_DIR holds the
+# `gh-with-token-refresh.sh` shim that the agent's BARE `gh` resolves through (the
+# review prompt's `gh issue view` / `gh pr checks`, and vendored helpers like
+# mark-issue-checkbox.sh, all call bare `gh`). On `REAL_GH` / non-interactive-PATH
+# hosts (#92) that shim is the agent's ONLY resolvable `gh` — stripping it would
+# break checkbox-ticking and E2E evidence with `gh: command not found` (#234 review
+# [P1]). Keeping it is SAFE for the credential split: the shim reads GH_TOKEN_FILE
+# ONLY when set; with it unset (above) the shim falls through to `exec gh`
+# inheriting the scoped GH_TOKEN. So the bare-`gh` path authenticates with the
+# SCOPED token — `gh pr review --approve` / `gh pr merge` still 403, AND bare `gh`
+# keeps working. (`bash scripts/gh` — a relative path, not a PATH lookup — likewise
+# resolves the shim and reads the scoped GH_TOKEN.)
 #
 # Emits an EMPTY array (length 0 → no behavior change) when no scoped token is
 # armed: PAT mode, app-mode-mint-failure, or AGENT_GH_TOKEN_FILE unreadable. The
@@ -276,35 +288,13 @@ build_agent_env_argv() {
   scoped=$(cat "$AGENT_GH_TOKEN_FILE" 2>/dev/null) || return 0
   [[ -n "$scoped" ]] || return 0
 
-  # Strip the per-run GH_WRAPPER_DIR entry from PATH (order + other entries
-  # preserved). The agent never resolves the wrapper's bare-`gh` shim; it uses
-  # `bash scripts/gh` which reads $GH_TOKEN (now the scoped token).
-  local scrubbed_path
-  scrubbed_path=$(_strip_path_entry "$PATH" "$GH_WRAPPER_DIR")
-
   _env_out=(
     env
     -u GH_TOKEN_FILE
     -u GITHUB_PERSONAL_ACCESS_TOKEN
     -u GH_USER_PAT
     "GH_TOKEN=${scoped}"
-    "PATH=${scrubbed_path}"
   )
-}
-
-# _strip_path_entry <path> <entry> — echo <path> with any exact-match <entry>
-# colon-segment removed, order + remaining segments preserved. Empty <entry>
-# returns <path> unchanged. Pure string op (no PATH lookups).
-_strip_path_entry() {
-  local path="$1" entry="$2"
-  [[ -n "$entry" ]] || { printf '%s' "$path"; return 0; }
-  local out="" seg
-  local IFS=':'
-  for seg in $path; do
-    [[ "$seg" == "$entry" ]] && continue
-    if [[ -z "$out" ]]; then out="$seg"; else out="${out}:${seg}"; fi
-  done
-  printf '%s' "$out"
 }
 
 # [INV-77] drain_agent_pr_create — the narrow PR-CREATE broker. `gh pr create`

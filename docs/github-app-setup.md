@@ -129,8 +129,11 @@ SAME App credentials:
 
 The wrapper strips the full-write credential from the agent's environment before
 launching it: the agent process gets `GH_TOKEN` = the scoped token, with
-`GH_TOKEN_FILE` / `GITHUB_PERSONAL_ACCESS_TOKEN` / `GH_USER_PAT` unset and the
-per-run `gh`-shim `PATH` entry removed. The scoped token is refreshed by its own
+`GH_TOKEN_FILE` / `GITHUB_PERSONAL_ACCESS_TOKEN` / `GH_USER_PAT` unset. `PATH` is
+left intact so the agent's bare `gh` keeps resolving the `gh-with-token-refresh.sh`
+shim (the only resolvable `gh` on `REAL_GH`/non-interactive-PATH hosts); with
+`GH_TOKEN_FILE` unset that shim execs real `gh` under the scoped `GH_TOKEN`, so the
+agent's `gh` works AND is scoped. The scoped token is refreshed by its own
 background daemon (same 45-min cadence as the full-write token).
 
 ### Exact scope set
