@@ -3406,6 +3406,28 @@ split is a hard contract:
    If none resolve, the preflight emits a `::error::` + a provisioning pointer
    (naming all three sources) rather than the opaque harness FATAL.
 
+5. **The matrix is seeded only from a TRUSTED template — never from the PR
+   checkout.** The matrix `env-setup` is `eval`'d by the harness on the
+   self-hosted runner, so its content is code. On a **labeled fork PR**,
+   `actions/checkout` checks out the fork HEAD, so the in-checkout
+   `tests/e2e/e2e.conf.example` is **attacker-controlled** — seeding `SMOKE_MATRIX`
+   / the per-box file from that copy would persist arbitrary shell on the runner
+   and into future runs (PR #256 review [P1], cycle 12). All provisioning guidance
+   (the preflight job-summary pointer, `CONTRIBUTING.md`, `tests/e2e/e2e.conf.example`)
+   therefore sources the template from `main` (`gh api …/contents/…?ref=main`) or a
+   local trusted clone — never `cp tests/e2e/e2e.conf.example` from the checkout —
+   and tells the maintainer to review before use.
+
+6. **An always-on, non-failing status summary covers the unlabeled PR.** The
+   label-gated `live-smoke` job never runs on an unlabeled PR, which would leave it
+   with no explanation of the live tier (the `Keesan12` requirement, PR #256
+   review [P1], cycle 12). A separate **`live-smoke-status`** job — hermetic
+   (`ubuntu-latest`, credential-free), **always runs** (no label gate), never
+   fails — writes a `$GITHUB_STEP_SUMMARY` stating whether the live tier was
+   scheduled for this event or **intentionally skipped pending a maintainer
+   `run-live-smoke` label**. It reads the event context via env vars (never
+   `${{ }}`-inlined into the run block).
+
 **Why**: the #222 live smoke needs authenticated CLIs (claude/codex/kiro/agy via
 IAM/quota) that only the self-hosted box has. If it landed as an unconditional
 job, every fork PR would go permanently red (auth-less GitHub-hosted runners),
@@ -3415,9 +3437,9 @@ CI guidance forbids. Splitting hermetic (always-on, fork-green) from live
 (maintainer-gated, self-hosted, advisory) is the minimal compliant design. (#238,
 gates #222 + anchors on [INV-74](#inv-74-adapter-conformance-is-regression-pinned-by-a-hermetic-fixture-manifest-runner).)
 
-**Producer**: `.github/workflows/ci.yml` (the job structure + `if:` gate +
-`runs-on`); `setup-labels.sh` (defines the `run-live-smoke` gate label so it
-exists on day one).
+**Producer**: `.github/workflows/ci.yml` (the `hermetic-*` jobs, the label-gated
+`live-smoke` job + its preflight, and the always-on `live-smoke-status` reporter);
+`setup-labels.sh` (defines the `run-live-smoke` gate label so it exists on day one).
 
 **Consumer**: GitHub Actions (schedules jobs per the `on:` triggers + `if:`
 gate); maintainers (apply `run-live-smoke` to authorize a live run; set the
@@ -3435,7 +3457,10 @@ not).
   + `$HOME`-based default), is self-provisioning via the `SMOKE_MATRIX` repo
   variable materialized to a temp file (TC-CI-TIERS-024/025), exports it via
   `$GITHUB_ENV` (022), and preflights its readability with a loud `::error::`
-  (023); and `setup-labels.sh` defines `run-live-smoke`.
+  (023); the always-on `live-smoke-status` job reports skip/scheduled on every PR
+  and is hermetic (TC-CI-TIERS-026/027); the provisioning pointer seeds only from a
+  trusted `main` template, never the PR checkout (TC-CI-TIERS-028); and
+  `setup-labels.sh` defines `run-live-smoke`.
 - `hermetic-shellcheck`'s `actionlint` step — deeper workflow syntax +
   `pull_request_target` foot-gun lint (belt-and-suspenders to the gate-logic test).
 - `docs/test-cases/ci-two-tier-lanes.md` — TC-CI-TIERS-NNN enumeration + the

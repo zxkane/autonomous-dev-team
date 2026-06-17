@@ -232,6 +232,54 @@ ok = ("SMOKE_MATRIX" in region and "mktemp" in region and "SMOKE_CONF=" in regio
 print("OK" if ok else "FAIL:smoke-matrix-not-materialized-to-temp")
 '
 
+# PR #256 [P1] (cycle 12, finding 2 — Keesan12 requirement): an UNLABELED PR must
+# show a visible non-failure summary stating hermetic passed and live-smoke was
+# intentionally skipped pending a maintainer label — not silence. The label-gated
+# live-smoke job never runs on an unlabeled PR, so the explanatory summary must
+# come from an ALWAYS-ON job/step OUTSIDE the label gate.
+echo "=== TC-CI-TIERS-026: an always-on job reports live-smoke status on unlabeled PRs ==="
+assert_py "TC-CI-TIERS-026 a non-label-gated job writes a live-smoke status summary" '
+# Find a job (other than live-smoke) that runs on ubuntu-latest, is NOT gated by
+# the run-live-smoke label, and writes a step summary mentioning live-smoke skip.
+cand = []
+for name, job in jobs.items():
+    if name == "live-smoke":
+        continue
+    blob = yaml.safe_dump(job or {})
+    cond = str((job or {}).get("if", ""))
+    if "GITHUB_STEP_SUMMARY" in blob and "run-live-smoke" not in cond and ("live" in blob.lower() and "smoke" in blob.lower()):
+        cand.append(name)
+print("OK" if cand else "FAIL:no-always-on-live-smoke-status-summary")
+'
+
+echo "=== TC-CI-TIERS-027: the status job is hermetic (ubuntu-latest, credential-free) ==="
+assert_py "TC-CI-TIERS-027 the live-smoke-status job runs on ubuntu-latest with no creds" '
+job = jobs.get("live-smoke-status") or {}
+if not job:
+    print("FAIL:no-live-smoke-status-job");
+else:
+    blob = yaml.safe_dump(job)
+    secret_re = re.compile(r"secrets\.|AWS_ACCESS|AWS_SECRET|BEDROCK|ANTHROPIC_API_KEY|GH_APP_PRIVATE_KEY")
+    ok = job.get("runs-on") == "ubuntu-latest" and not secret_re.search(blob)
+    print("OK" if ok else "FAIL:status-job-not-hermetic")
+'
+
+# PR #256 [P1] (cycle 12, finding 1 — fork supply-chain): the provisioning guidance
+# must NOT tell maintainers to seed the matrix from the PR-checkout copy of
+# tests/e2e/e2e.conf.example — on a labeled fork that file is attacker head content
+# whose env-setup is eval-d on the self-hosted runner. The job-summary bootstrap
+# pointer must source a TRUSTED template (from main / ?ref=main), never the checkout.
+echo "=== TC-CI-TIERS-028: bootstrap pointer sources a trusted template, not the PR checkout ==="
+assert_py "TC-CI-TIERS-028 live-smoke provisioning pointer is fork-safe (ref=main / no checkout cp)" '
+m = re.search(r"\n  live-smoke:\n(?:.*\n)*?(?=\n  [A-Za-z0-9_-]+:\n|\Z)", raw)
+region = m.group(0) if m else ""
+# The summary must reference a trusted source for the template (ref=main) and must
+# NOT instruct a bare cp/--body-file from the in-checkout tests/e2e/e2e.conf.example.
+mentions_main = "ref=main" in region or "from `main`" in region or "from main" in region
+unsafe_checkout_cp = re.search(r"(cp|--body-file)\s+tests/e2e/e2e\.conf\.example", region)
+print("OK" if (mentions_main and not unsafe_checkout_cp) else "FAIL:bootstrap-pointer-not-fork-safe")
+'
+
 echo "=== TC-CI-TIERS-030: setup-labels.sh defines run-live-smoke ==="
 if grep -qE '"run-live-smoke\|[0-9A-Fa-f]{6}\|[^"]+"' "$SETUP_LABELS"; then
   pass "TC-CI-TIERS-030 setup-labels.sh LABELS has run-live-smoke|color|description"

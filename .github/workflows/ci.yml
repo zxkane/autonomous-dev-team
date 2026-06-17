@@ -243,23 +243,33 @@ jobs:
             {
               echo "## Live agent-smoke matrix (#222) — NOT RUN"
               echo ""
-              echo "No live smoke matrix was resolved. Provide ONE of (precedence order):"
+              echo "No live smoke matrix was resolved. Provide ONE of (precedence order)."
+              echo ""
+              echo "> ⚠️ **Seed the matrix only from a TRUSTED template — never from this"
+              echo "> checkout.** On a labeled fork PR the checked-out \`tests/e2e/e2e.conf.example\`"
+              echo "> is attacker-controlled head content, and the harness \`eval\`s each entry's"
+              echo "> \`env-setup\` on the self-hosted runner. Always fetch the template from"
+              echo "> \`main\` (\`?ref=main\`) or a local trusted clone, then review it before use."
               echo ""
               echo "1. **\`SMOKE_MATRIX\` repo variable (recommended for the autoscaling pool)** —"
               echo "   set it to the matrix CONTENT; the lane materializes it to a temp file at"
-              echo "   job time, so any pool runner gets it (no per-box provisioning):"
+              echo "   job time, so any pool runner gets it (no per-box provisioning). Seed from"
+              echo "   the template on \`main\` (NOT the PR checkout), review, then set it:"
               echo ""
               echo '   ```'
-              echo "       gh variable set SMOKE_MATRIX --repo <owner>/<repo> --body-file tests/e2e/e2e.conf.example"
+              echo "       gh api repos/<owner>/<repo>/contents/tests/e2e/e2e.conf.example?ref=main \\"
+              echo "         --jq '.content' | base64 -d > /tmp/smoke-matrix.tmpl   # review it, then:"
+              echo "       gh variable set SMOKE_MATRIX --repo <owner>/<repo> --body-file /tmp/smoke-matrix.tmpl"
               echo '   ```'
               echo ""
               echo "2. \`RUNNER_SMOKE_CONF\` repo variable — a PATH to a runner-local matrix file."
               echo ""
-              echo "3. A per-box file (for a pinned, long-lived runner):"
+              echo "3. A per-box file (for a pinned, long-lived runner), seeded from \`main\`:"
               echo ""
               echo '   ```'
               echo "       mkdir -p \"\$HOME/.config/autonomous-dev-team\""
-              echo "       cp tests/e2e/e2e.conf.example \"\$HOME/.config/autonomous-dev-team/e2e.conf\""
+              echo "       gh api repos/<owner>/<repo>/contents/tests/e2e/e2e.conf.example?ref=main \\"
+              echo "         --jq '.content' | base64 -d > \"\$HOME/.config/autonomous-dev-team/e2e.conf\"   # review + edit"
               echo '   ```'
               echo ""
               echo "The matrix MUST live OUTSIDE the repo checkout — \`actions/checkout\` runs"
@@ -298,3 +308,48 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           exit "$rc"
+
+  # Always-on status reporter (Keesan12 request, PR #256 review): the label-gated
+  # `live-smoke` job NEVER runs on an unlabeled PR, so without this an unlabeled PR
+  # would show NO explanation of the live tier at all. This hermetic, credential-free
+  # job ALWAYS runs (no label gate) on `ubuntu-latest` and writes a non-failing
+  # `$GITHUB_STEP_SUMMARY` stating whether live-smoke ran or was intentionally
+  # skipped pending a maintainer `run-live-smoke` label. It never fails the build.
+  live-smoke-status:
+    name: Live agent-smoke status (always-on)
+    runs-on: ubuntu-latest
+    env:
+      # Did THIS event schedule the live tier? (label-applied PR OR push to main).
+      # Read via env (never `${{ }}`-inlined into run:) — injection-safe.
+      EVENT_NAME: ${{ github.event_name }}
+      LABEL_NAME: ${{ github.event.label.name }}
+      REF: ${{ github.ref }}
+    steps:
+      - name: Report live-smoke status
+        run: |
+          live_will_run="no"
+          if [[ "$EVENT_NAME" == "pull_request" && "$LABEL_NAME" == "run-live-smoke" ]]; then
+            live_will_run="yes"
+          elif [[ "$EVENT_NAME" == "push" && "$REF" == "refs/heads/main" ]]; then
+            live_will_run="yes"
+          fi
+          {
+            echo "## Live agent-smoke — status"
+            echo ""
+            echo "Hermetic tier (unit + ShellCheck + conformance) is the merge-required,"
+            echo "credential-free CI and runs on every PR/push."
+            echo ""
+            if [[ "$live_will_run" == "yes" ]]; then
+              echo "✅ **Live tier scheduled** for this event — see the \`Live agent-smoke\`"
+              echo "job for the SMOKE matrix results."
+            else
+              echo "⏭️ **Live tier intentionally SKIPPED** for this event (not a failure)."
+              echo ""
+              echo "The live agent-smoke matrix runs real authenticated CLIs on the"
+              echo "self-hosted runner and is **advisory (non-required)**. It is gated to"
+              echo "maintainer authorization: a maintainer applies the \`run-live-smoke\`"
+              echo "label (or it runs on push to \`main\`). A fork PR / unlabeled PR never"
+              echo "schedules it — so your PR is fully green on the hermetic tier without"
+              echo "any agent-CLI credentials."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

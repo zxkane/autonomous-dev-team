@@ -158,21 +158,35 @@ a maintainer will label your PR if a live run is warranted.
 
 > **Maintainer one-time setup:** the live matrix config must live **outside** the
 > repo checkout (because `actions/checkout` runs `git clean -ffdx` and would delete
-> a checkout-internal `tests/e2e/e2e.conf`). Provide it via one of, in precedence
-> order:
+> a checkout-internal `tests/e2e/e2e.conf`).
+>
+> > ⚠️ **Seed it only from a TRUSTED template — never from this PR's checkout.** On
+> > a labeled fork PR the checked-out `tests/e2e/e2e.conf.example` is attacker head
+> > content, and `run-agent-smoke.sh` `eval`s each entry's `env-setup` on the
+> > self-hosted runner — so copying the *checkout* copy can persist arbitrary shell
+> > on the runner. Always fetch the template from `main` (`?ref=main`) or a local
+> > trusted clone, **review it**, then seed.
+>
+> Provide it via one of, in precedence order:
 >
 > 1. **`SMOKE_MATRIX` repo variable (recommended)** — set it to the matrix
 >    *content*; the `live-smoke` job materializes it to a temp file at job time, so
 >    it works on the **autoscaling self-hosted pool** (a per-box file does not
 >    survive pool churn). Maintainer-only; must not carry secrets (Bedrock entries
->    use the runner instance role):
->    `gh variable set SMOKE_MATRIX --repo <owner>/<repo> --body-file tests/e2e/e2e.conf.example` (then edit).
+>    use the runner instance role). Seed from the template on `main`, review, set:
+>    ```bash
+>    gh api repos/<owner>/<repo>/contents/tests/e2e/e2e.conf.example?ref=main \
+>      --jq '.content' | base64 -d > /tmp/smoke-matrix.tmpl   # review + edit, then:
+>    gh variable set SMOKE_MATRIX --repo <owner>/<repo> --body-file /tmp/smoke-matrix.tmpl
+>    ```
 > 2. **`RUNNER_SMOKE_CONF` repo variable** — a PATH to a runner-local matrix file.
-> 3. **A per-box file** for a pinned, long-lived runner:
->    `cp tests/e2e/e2e.conf.example "$HOME/.config/autonomous-dev-team/e2e.conf"` and edit.
+> 3. **A per-box file** for a pinned, long-lived runner, seeded from `main` (not the
+>    checkout): `gh api repos/<owner>/<repo>/contents/tests/e2e/e2e.conf.example?ref=main --jq '.content' | base64 -d > "$HOME/.config/autonomous-dev-team/e2e.conf"` then review + edit.
 >
 > The `live-smoke` job preflights this and fails with a provisioning pointer
-> (naming all three sources) if none resolve.
+> (naming all three sources) if none resolve. An **always-on `live-smoke-status`
+> job** also writes a non-failing summary on every PR so an unlabeled PR clearly
+> shows the live tier was intentionally skipped pending a maintainer label.
 
 ## PR checklist
 
