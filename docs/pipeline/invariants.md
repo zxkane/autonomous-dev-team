@@ -3335,6 +3335,141 @@ Design: `docs/designs/smoke-no-response-retry.md`. Test plan:
 - [INV-73](#inv-73-a-codex-review-prompt-echo--startup-trace-stdout-is-malformed-never-a-blocking-p1-fail--retry-or-drop-not-a-phantom-veto) — the review-stage codex transient fix (#252 / #254) this is the smoke-stage sibling of.
 - [INV-40](#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback) / [INV-58](#inv-58-agy-quotaauth-unavailable-drops-surface-a-distinct-reason-fan-out--reviewed-head-model-labels-are-per-agent) / [INV-61](#inv-61-kiro-authlogin-failure-unavailable-drops-surface-a-distinct-reason-not-a-bare-opaque-unavailable) — the environmental → drop tolerance this aligns with.
 
+## INV-77: CI is two tiers — hermetic always-on + credential-free; live agent-smoke is self-hosted, label-gated, and advisory
+
+> **Note**: authored as INV-75 (next free number when `main` was at INV-74), then
+> renumbered to **INV-77** across two rebases: PR #259 (per-CLI adapters, issue #232)
+> landed INV-75 on `main` first, then PR #258 (smoke no-response retry, issue #257)
+> landed INV-76 — so this section took the next free number per the standard
+> duplicate-heading / broken-anchor avoidance (see "Adding a new invariant"). The
+> number is disambiguated by issue #238.
+
+**Rule**: `.github/workflows/ci.yml` is split into two explicit tiers, and the
+split is a hard contract:
+
+1. **Tier 1 — HERMETIC.** Every job whose name starts with `hermetic-`
+   (`hermetic-unit`, `hermetic-shellcheck`) runs on `ubuntu-latest` and is
+   **credential-free** — no `secrets.*`, no `AWS_*` / `BEDROCK` / `ANTHROPIC_API_KEY`
+   / `GH_APP_PRIVATE_KEY`. These are the unit tests, ShellCheck, the adapter
+   conformance suite ([INV-74](#inv-74-adapter-conformance-is-regression-pinned-by-a-hermetic-fixture-manifest-runner)),
+   and the stub-mode self-tests of the smoke/metrics/error-envelope harnesses.
+   Because they need no credentials, a **fork PR** (or any external contributor)
+   gets a fully green, fully meaningful CI. These are the **merge-required**
+   checks.
+
+2. **Tier 2 — LIVE.** The single `live-smoke` job runs the #222 live agent-CLI
+   smoke matrix (`tests/e2e/run-agent-smoke.sh`,
+   [INV-63](#inv-63-agent-smoke-is-a-three-state-probe-pass--unavailable--fail-run-through-the-production-run_agent-never-a-parallel-invocation-path))
+   against the box's **real** CLIs + credentials. It is gated by
+   `if: (github.event_name == 'pull_request' && github.event.label.name == 'run-live-smoke') || (github.event_name == 'push' && github.ref == 'refs/heads/main')`
+   and targets the self-hosted pool
+   (`runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'self-hosted' }}`).
+   It is **advisory (non-required)** — never block a fork PR's merge on hardware /
+   credentials only maintainers have. The rc contract is #222's: any FAIL → the
+   job fails; UNAVAILABLE (quota) / SKIP → non-blocking. The SMOKE evidence lines
+   are written to `$GITHUB_STEP_SUMMARY`.
+
+3. **The gate is the security boundary.** A fork PR with **no** label NEVER
+   schedules `live-smoke` — the `if:` has no unconditional branch, so untrusted PR
+   code cannot self-trigger the self-hosted tier. Applying the `run-live-smoke`
+   label is the **authorization act**; label application requires write access, so
+   only a maintainer can authorize a live run. The workflow uses plain
+   `pull_request` (with the `labeled` type so the event is delivered), **never**
+   `pull_request_target` — `pull_request_target` would run with the base repo's
+   token/secrets against untrusted head code (the classic injection foot-gun).
+
+4. **The live matrix config lives OUTSIDE the checkout, and the lane is
+   self-provisioning.** The matrix (`name|agent_cmd|model|env-setup` entries,
+   credentials sourced in `env-setup`) must NOT sit inside the repo tree, because
+   `actions/checkout` defaults to `clean: true` (`git clean -ffdx`) and would
+   delete a gitignored `tests/e2e/e2e.conf` before the run step — the job would
+   then die on `FATAL: matrix not found/readable` instead of proving the matrix
+   (PR #256 review [P1]). The `live-smoke` job resolves the matrix from the first
+   of three sources that hits, exports the result as `SMOKE_CONF` to `$GITHUB_ENV`
+   (the harness honors the `SMOKE_CONF` override), and **preflights its
+   readability**:
+   1. **`RUNNER_SMOKE_CONF`** repo variable — a PATH to a runner-local matrix file.
+   2. **`SMOKE_MATRIX`** repo variable — the matrix **CONTENT**, materialized at
+      job time to a runner TEMP file (`mktemp` under `$RUNNER_TEMP`, outside the
+      checkout). This is the **self-provisioning** channel and the one that works
+      on the shared pool: the self-hosted fleet is an **ephemeral autoscaling
+      spot pool**, so a per-box file does NOT survive pool churn — a labeled run
+      lands on a fresh runner with no file. A repo variable travels with the repo,
+      so any pool runner materializes the same matrix (cycle-11 [P1] fix). It is
+      consumed as a quoted shell env var (never `${{ }}`-inlined into the run
+      block), so its content cannot be parsed as workflow/shell syntax;
+      maintainer-only (a repo variable needs write access) and MUST NOT carry
+      secrets (Bedrock entries use the runner instance role; key entries source a
+      runner-local secrets file inside `env-setup`).
+   3. **`$HOME/.config/autonomous-dev-team/e2e.conf`** — a stable per-box default
+      for a pinned, long-lived runner.
+   If none resolve, the preflight emits a `::error::` + a provisioning pointer
+   (naming all three sources) rather than the opaque harness FATAL.
+
+5. **The matrix is seeded only from a TRUSTED template — never from the PR
+   checkout.** The matrix `env-setup` is `eval`'d by the harness on the
+   self-hosted runner, so its content is code. On a **labeled fork PR**,
+   `actions/checkout` checks out the fork HEAD, so the in-checkout
+   `tests/e2e/e2e.conf.example` is **attacker-controlled** — seeding `SMOKE_MATRIX`
+   / the per-box file from that copy would persist arbitrary shell on the runner
+   and into future runs (PR #256 review [P1], cycle 12). All provisioning guidance
+   (the preflight job-summary pointer, `CONTRIBUTING.md`, `tests/e2e/e2e.conf.example`)
+   therefore sources the template from `main` (`gh api …/contents/…?ref=main`) or a
+   local trusted clone — never `cp tests/e2e/e2e.conf.example` from the checkout —
+   and tells the maintainer to review before use.
+
+6. **An always-on, non-failing status summary covers the unlabeled PR.** The
+   label-gated `live-smoke` job never runs on an unlabeled PR, which would leave it
+   with no explanation of the live tier (the `Keesan12` requirement, PR #256
+   review [P1], cycle 12). A separate **`live-smoke-status`** job — hermetic
+   (`ubuntu-latest`, credential-free), **always runs** (no label gate), never
+   fails — writes a `$GITHUB_STEP_SUMMARY` stating whether the live tier was
+   scheduled for this event or **intentionally skipped pending a maintainer
+   `run-live-smoke` label**. It reads the event context via env vars (never
+   `${{ }}`-inlined into the run block).
+
+**Why**: the #222 live smoke needs authenticated CLIs (claude/codex/kiro/agy via
+IAM/quota) that only the self-hosted box has. If it landed as an unconditional
+job, every fork PR would go permanently red (auth-less GitHub-hosted runners),
+training everyone to ignore CI; and exposing a self-hosted runner to untrusted PR
+code unconditionally is a host-compromise vector that the operator's public-repo
+CI guidance forbids. Splitting hermetic (always-on, fork-green) from live
+(maintainer-gated, self-hosted, advisory) is the minimal compliant design. (#238,
+gates #222 + anchors on [INV-74](#inv-74-adapter-conformance-is-regression-pinned-by-a-hermetic-fixture-manifest-runner).)
+
+**Producer**: `.github/workflows/ci.yml` (the `hermetic-*` jobs, the label-gated
+`live-smoke` job + its preflight, and the always-on `live-smoke-status` reporter);
+`setup-labels.sh` (defines the `run-live-smoke` gate label so it exists on day one).
+
+**Consumer**: GitHub Actions (schedules jobs per the `on:` triggers + `if:`
+gate); maintainers (apply `run-live-smoke` to authorize a live run; set the
+`SMOKE_MATRIX` repo variable to self-provision the matrix on the autoscaling
+pool); branch protection (marks the two `hermetic-*` jobs required, `live-smoke`
+not).
+
+**Tested by**:
+- `tests/unit/test-ci-two-tier-lanes.sh` (TC-CI-TIERS-010..051) — structural
+  truth-table assertions over `ci.yml` (pyyaml): hermetic jobs are
+  `ubuntu-latest` + credential-free; `live-smoke.if` matches the label-OR-push
+  gate; no `pull_request_target`; `pull_request` declares `labeled`; `live-smoke`
+  invokes `run-agent-smoke.sh`, targets self-hosted, writes a job summary;
+  resolves the matrix config OUTSIDE the checkout (TC-CI-TIERS-021: `RUNNER_SMOKE_CONF`
+  + `$HOME`-based default), is self-provisioning via the `SMOKE_MATRIX` repo
+  variable materialized to a temp file (TC-CI-TIERS-024/025), exports it via
+  `$GITHUB_ENV` (022), and preflights its readability with a loud `::error::`
+  (023); the always-on `live-smoke-status` job reports skip/scheduled on every PR
+  and is hermetic (TC-CI-TIERS-026/027); the provisioning pointer seeds only from a
+  trusted `main` template, never the PR checkout (TC-CI-TIERS-028); and
+  `setup-labels.sh` defines `run-live-smoke`.
+- `hermetic-shellcheck`'s `actionlint` step — deeper workflow syntax +
+  `pull_request_target` foot-gun lint (belt-and-suspenders to the gate-logic test).
+- `docs/test-cases/ci-two-tier-lanes.md` — TC-CI-TIERS-NNN enumeration + the
+  gate truth table.
+
+**Cross-references**:
+- [INV-63](#inv-63-agent-smoke-is-a-three-state-probe-pass--unavailable--fail-run-through-the-production-run_agent-never-a-parallel-invocation-path) — the live matrix harness this tier runs; its three-state rc contract is why UNAVAILABLE does not fail the job.
+- [INV-74](#inv-74-adapter-conformance-is-regression-pinned-by-a-hermetic-fixture-manifest-runner) — the hermetic conformance suite that anchors Tier 1.
+
 ## Adding a new invariant
 
 When fixing a pipeline bug, after locating the bug on the state machine + flow docs:

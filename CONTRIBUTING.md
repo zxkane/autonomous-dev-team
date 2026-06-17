@@ -117,6 +117,77 @@ This repo's TDD + worktree + review-bot discipline is documented in [`CLAUDE.md`
 
 Don't bypass with `--no-verify`. If a hook fires, fix the underlying issue.
 
+## What CI runs on your PR
+
+CI is split into two tiers ([`ci.yml`](.github/workflows/ci.yml),
+[INV-77](docs/pipeline/invariants.md#inv-77-ci-is-two-tiers--hermetic-always-on--credential-free-live-agent-smoke-is-self-hosted-label-gated-and-advisory)):
+
+### Tier 1 — hermetic (always on, no credentials)
+
+Every PR and push runs the `hermetic-*` jobs on GitHub-hosted `ubuntu-latest`
+with **zero credentials**:
+
+- `hermetic-unit` — all `tests/unit/*.sh`, the adapter
+  [conformance suite](tests/conformance/README.md), and the stub-mode self-tests
+  of the smoke / metrics / error-envelope harnesses.
+- `hermetic-shellcheck` — ShellCheck over the dispatcher scripts + `actionlint`
+  over the workflows.
+
+Because the hermetic tier needs no secrets, **a fork PR or external contribution
+gets a fully green, fully meaningful CI** — you do not need any agent CLI auth to
+pass CI. These are the checks that gate merge (branch-protection required).
+
+### Tier 2 — live agent-smoke (self-hosted, maintainer-gated, advisory)
+
+The `live-smoke` job runs the [#222 live agent-CLI smoke matrix](docs/pipeline/agent-smoke.md)
+against **real** CLIs (claude/codex/kiro/agy) on the self-hosted runner. It runs
+**only** when:
+
+- a **maintainer applies the `run-live-smoke` label** to the PR (label
+  application requires write access — that IS the authorization), **or**
+- the change is pushed to `main`.
+
+A fork PR cannot trigger the live tier on its own (no label = not scheduled),
+because a self-hosted runner must never execute untrusted PR code unconditionally.
+The live tier is **advisory (non-required)** — a quota-walled CLI reports
+`UNAVAILABLE` without failing the job, and the live result never blocks merge. Its
+SMOKE evidence is posted to the run's job summary.
+
+**As an external contributor you never need to do anything for the live tier** —
+a maintainer will label your PR if a live run is warranted.
+
+> **Maintainer one-time setup:** the live matrix config must live **outside** the
+> repo checkout (because `actions/checkout` runs `git clean -ffdx` and would delete
+> a checkout-internal `tests/e2e/e2e.conf`).
+>
+> > ⚠️ **Seed it only from a TRUSTED template — never from this PR's checkout.** On
+> > a labeled fork PR the checked-out `tests/e2e/e2e.conf.example` is attacker head
+> > content, and `run-agent-smoke.sh` `eval`s each entry's `env-setup` on the
+> > self-hosted runner — so copying the *checkout* copy can persist arbitrary shell
+> > on the runner. Always fetch the template from `main` (`?ref=main`) or a local
+> > trusted clone, **review it**, then seed.
+>
+> Provide it via one of, in precedence order:
+>
+> 1. **`SMOKE_MATRIX` repo variable (recommended)** — set it to the matrix
+>    *content*; the `live-smoke` job materializes it to a temp file at job time, so
+>    it works on the **autoscaling self-hosted pool** (a per-box file does not
+>    survive pool churn). Maintainer-only; must not carry secrets (Bedrock entries
+>    use the runner instance role). Seed from the template on `main`, review, set:
+>    ```bash
+>    gh api repos/<owner>/<repo>/contents/tests/e2e/e2e.conf.example?ref=main \
+>      --jq '.content' | base64 -d > /tmp/smoke-matrix.tmpl   # review + edit, then:
+>    gh variable set SMOKE_MATRIX --repo <owner>/<repo> --body-file /tmp/smoke-matrix.tmpl
+>    ```
+> 2. **`RUNNER_SMOKE_CONF` repo variable** — a PATH to a runner-local matrix file.
+> 3. **A per-box file** for a pinned, long-lived runner, seeded from `main` (not the
+>    checkout): `gh api repos/<owner>/<repo>/contents/tests/e2e/e2e.conf.example?ref=main --jq '.content' | base64 -d > "$HOME/.config/autonomous-dev-team/e2e.conf"` then review + edit.
+>
+> The `live-smoke` job preflights this and fails with a provisioning pointer
+> (naming all three sources) if none resolve. An **always-on `live-smoke-status`
+> job** also writes a non-failing summary on every PR so an unlabeled PR clearly
+> shows the live tier was intentionally skipped pending a maintainer label.
+
 ## PR checklist
 
 Before opening a PR, confirm:

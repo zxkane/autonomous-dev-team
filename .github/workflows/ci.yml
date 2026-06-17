@@ -1,14 +1,42 @@
 name: CI
 
+# Two-tier CI (issue #238, INV-77):
+#
+#   Tier 1 — HERMETIC (jobs prefixed `hermetic-`): unit tests, ShellCheck,
+#     adapter conformance, and the stub-mode self-tests. Runs on every PR/push
+#     on `ubuntu-latest` with ZERO credentials, so a fork PR or external
+#     contributor gets a fully green, fully meaningful CI. These are the
+#     merge-required checks.
+#
+#   Tier 2 — LIVE (`live-smoke`): the #222 agent-CLI smoke matrix that needs
+#     authenticated CLIs (claude/codex/kiro/agy via IAM/quota). It runs ONLY on
+#     the self-hosted runner and ONLY when a maintainer applies the
+#     `run-live-smoke` label (pull_request `labeled`) OR on push to main. It is
+#     ADVISORY (non-required) — never block a fork PR on hardware/credentials
+#     only maintainers have.
+#
+# THREAT MODEL (why the label gate, not an unconditional self-hosted job):
+#   self-hosted runner + untrusted PR code = host compromise. A fork PR must NOT
+#   be able to schedule the live tier on its own. Applying the `run-live-smoke`
+#   label is the authorization act and requires write access (maintainer-only).
+#   We use plain `pull_request` (NOT `pull_request_target`): `pull_request_target`
+#   would run with the base repo's token/secrets against untrusted head code —
+#   the classic foot-gun. The `labeled` event still runs in the base-repo context
+#   but checks out the PR head, so the live tier must treat head code as
+#   untrusted (it runs only agent-CLI smokes, no head-controlled build steps).
+
 on:
   pull_request:
     branches: [main]
+    # `labeled` is required so applying `run-live-smoke` delivers the event that
+    # gates the live-smoke job (github.event.label.name).
+    types: [opened, synchronize, reopened, labeled]
   push:
     branches: [main]
 
 jobs:
-  unit-tests:
-    name: Unit Tests
+  hermetic-unit:
+    name: Hermetic / Unit + conformance
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -39,7 +67,8 @@ jobs:
       # harness against stub CLIs so CI exercises it end-to-end without real
       # CLIs/credentials. The stub matrix contains a deliberate FAIL entry, so
       # the harness exits 1 by design — we assert on the SMOKE-SUMMARY tally
-      # rather than the exit code.
+      # rather than the exit code. This is the HERMETIC self-test of the harness;
+      # the LIVE matrix (real CLIs) is the separate label-gated live-smoke job.
       - name: agent-smoke harness stub-mode self-test
         run: |
           out=$(SMOKE_STUB=1 bash tests/e2e/run-agent-smoke.sh) || true
@@ -75,8 +104,9 @@ jobs:
       # exit on ANY fixture FAIL, so the step gates the build directly.
       - name: adapter conformance suite (hermetic)
         run: bash tests/conformance/run-conformance.sh
-  shellcheck:
-    name: ShellCheck
+
+  hermetic-shellcheck:
+    name: Hermetic / ShellCheck + workflow lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -125,3 +155,201 @@ jobs:
             skills/autonomous-common/hooks/install-git-pre-push.sh \
             skills/autonomous-common/scripts/install-claude-hooks.sh \
             skills/autonomous-common/scripts/install-project-hooks.sh
+
+      # actionlint over the workflows — catches a `pull_request_target` foot-gun,
+      # expression typos, and shellcheck issues inside `run:` blocks. Pinned by
+      # commit SHA. This is the deeper syntax lint; the always-runnable
+      # gate-logic truth-table assertions live in
+      # tests/unit/test-ci-two-tier-lanes.sh (#238, INV-77) and run in the
+      # unit-test step above.
+      - name: actionlint (workflow syntax + foot-gun lint)
+        uses: raven-actions/actionlint@205b530c5d9fa8f44ae9ed59f341a0db994aa6f8 # v2.1.2
+        with:
+          files: ".github/workflows/*.yml"
+
+  live-smoke:
+    name: Live agent-smoke (self-hosted, label-gated)
+    # Gate: a maintainer applying the `run-live-smoke` label to a PR (the
+    # authorization act — label application needs write access), OR a push to
+    # main. A fork PR with no label NEVER reaches this job. There is no
+    # unconditional branch, so the live tier cannot self-trigger from untrusted
+    # PR code. See the THREAT MODEL note in the `on:` header above.
+    if: >-
+      (github.event_name == 'pull_request' && github.event.label.name == 'run-live-smoke')
+      || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    # Target the shared self-hosted pool via the operator's RUNNER_LABEL ternary
+    # (lazy &&/|| so an unset var falls back without an eager fromJSON crash).
+    # Default to bare `self-hosted` when the var is unset — a GitHub-hosted
+    # fallback would have no authenticated CLIs, defeating the live tier.
+    runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'self-hosted' }}
+    env:
+      # Operator override for the machine-local matrix PATH. Empty when the
+      # `RUNNER_SMOKE_CONF` repo variable is unset; the preflight then tries the
+      # SMOKE_MATRIX content var, else the per-box default
+      # ($HOME/.config/autonomous-dev-team/e2e.conf).
+      RUNNER_SMOKE_CONF: ${{ vars.RUNNER_SMOKE_CONF }}
+      # Self-provisioning source (preferred): the matrix CONTENT, stored in the
+      # `SMOKE_MATRIX` repo variable, materialized to a runner temp file at job
+      # time. The shared self-hosted pool is an ephemeral autoscaling spot fleet —
+      # a per-box file does NOT survive pool churn, so a repo variable that travels
+      # with the repo is the portable provisioning channel. Operator-trusted: the
+      # matrix env-setup is `eval`'d (same trust model as RUNNER_SMOKE_CONF / a
+      # local file), so this var is maintainer-only (setting a repo variable needs
+      # write access) and MUST NOT carry secrets — Bedrock entries use the runner's
+      # instance-role creds; key-based entries source a runner-local secrets file.
+      SMOKE_MATRIX: ${{ vars.SMOKE_MATRIX }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      # Preflight: resolve the live matrix config from OUTSIDE the checkout —
+      # `actions/checkout` defaults to `clean: true` (`git clean -ffdx`), which
+      # would wipe a gitignored `tests/e2e/e2e.conf` inside the checkout (the [P1]
+      # from PR #256's review). Source precedence (first hit wins):
+      #   1. $RUNNER_SMOKE_CONF — operator-set PATH to a runner-local matrix file.
+      #   2. $SMOKE_MATRIX      — the matrix CONTENT (repo variable), materialized
+      #      here to a runner TEMP file (via mktemp, outside the checkout). This is
+      #      the self-provisioning channel: the shared self-hosted pool is an
+      #      ephemeral autoscaling spot fleet, so a per-box file does not survive
+      #      pool churn — a repo variable travels with the repo and any pool runner
+      #      gets it (the cycle-11 [P1] fix).
+      #   3. $HOME/.config/autonomous-dev-team/e2e.conf — stable per-box default
+      #      (works on a pinned, long-lived runner).
+      # The resolved path is exported to $GITHUB_ENV as SMOKE_CONF so the run step
+      # (and run-agent-smoke.sh, which honors the SMOKE_CONF override) read the same
+      # file. If none resolve, FAIL LOUD with a remediation pointer rather than
+      # letting run-agent-smoke.sh emit the opaque `FATAL: matrix not found`.
+      #
+      # SMOKE_MATRIX is consumed as a quoted shell env var (never `${{ }}`-inlined
+      # into the run block), so its content can never be parsed as workflow/shell
+      # syntax. It is operator-trusted (maintainer-only repo variable) — its
+      # env-setup is later `eval`'d by the harness, the same trust model as a
+      # runner-local file; it MUST NOT carry secrets.
+      - name: Preflight — live smoke matrix config present (outside checkout)
+        run: |
+          if [[ -n "${RUNNER_SMOKE_CONF:-}" ]]; then
+            SMOKE_CONF="$RUNNER_SMOKE_CONF"
+          elif [[ -n "${SMOKE_MATRIX:-}" ]]; then
+            # Materialize the repo-variable matrix content to a runner temp file
+            # OUTSIDE the checkout (git clean cannot reach it).
+            SMOKE_CONF="$(mktemp "${RUNNER_TEMP:-/tmp}/smoke-matrix.XXXXXX")"
+            printf '%s\n' "$SMOKE_MATRIX" > "$SMOKE_CONF"
+            echo "Materialized live smoke matrix from the SMOKE_MATRIX repo variable."
+          else
+            SMOKE_CONF="$HOME/.config/autonomous-dev-team/e2e.conf"
+          fi
+          echo "SMOKE_CONF=$SMOKE_CONF" >> "$GITHUB_ENV"
+          if [[ ! -r "$SMOKE_CONF" ]]; then
+            echo "::error::Live smoke matrix not found — set the SMOKE_MATRIX repo variable, or RUNNER_SMOKE_CONF, or provision $HOME/.config/autonomous-dev-team/e2e.conf"
+            {
+              echo "## Live agent-smoke matrix (#222) — NOT RUN"
+              echo ""
+              echo "No live smoke matrix was resolved. Provide ONE of (precedence order)."
+              echo ""
+              echo "> ⚠️ **Seed the matrix only from a TRUSTED template — never from this"
+              echo "> checkout.** On a labeled fork PR the checked-out \`tests/e2e/e2e.conf.example\`"
+              echo "> is attacker-controlled head content, and the harness \`eval\`s each entry's"
+              echo "> \`env-setup\` on the self-hosted runner. Always fetch the template from"
+              echo "> \`main\` (\`?ref=main\`) or a local trusted clone, then review it before use."
+              echo ""
+              echo "1. **\`SMOKE_MATRIX\` repo variable (recommended for the autoscaling pool)** —"
+              echo "   set it to the matrix CONTENT; the lane materializes it to a temp file at"
+              echo "   job time, so any pool runner gets it (no per-box provisioning). Seed from"
+              echo "   the template on \`main\` (NOT the PR checkout), review, then set it:"
+              echo ""
+              echo '   ```'
+              echo "       gh api repos/<owner>/<repo>/contents/tests/e2e/e2e.conf.example?ref=main \\"
+              echo "         --jq '.content' | base64 -d > /tmp/smoke-matrix.tmpl   # review it, then:"
+              echo "       gh variable set SMOKE_MATRIX --repo <owner>/<repo> --body-file /tmp/smoke-matrix.tmpl"
+              echo '   ```'
+              echo ""
+              echo "2. \`RUNNER_SMOKE_CONF\` repo variable — a PATH to a runner-local matrix file."
+              echo ""
+              echo "3. A per-box file (for a pinned, long-lived runner), seeded from \`main\`:"
+              echo ""
+              echo '   ```'
+              echo "       mkdir -p \"\$HOME/.config/autonomous-dev-team\""
+              echo "       gh api repos/<owner>/<repo>/contents/tests/e2e/e2e.conf.example?ref=main \\"
+              echo "         --jq '.content' | base64 -d > \"\$HOME/.config/autonomous-dev-team/e2e.conf\"   # review + edit"
+              echo '   ```'
+              echo ""
+              echo "The matrix MUST live OUTSIDE the repo checkout — \`actions/checkout\` runs"
+              echo "\`git clean -ffdx\`, which would delete a gitignored \`tests/e2e/e2e.conf\`."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          echo "Using live smoke matrix: $SMOKE_CONF"
+
+      # Run the #222 live matrix against the box's real CLIs + credentials, with
+      # the matrix read from $SMOKE_CONF (outside the checkout — the harness
+      # honors the SMOKE_CONF env override). rc contract (#222):
+      #   any FAIL → rc 1 (operator-side config/launch breakage — fails the job)
+      #   UNAVAILABLE (quota) / SKIP → non-blocking (rc 0).
+      # So a quota-walled agy yields UNAVAILABLE without failing the job. Because
+      # live-smoke is advisory (non-required), even a FAIL never blocks a PR's
+      # merge — it is a maintainer signal, surfaced in the job summary below.
+      - name: Run live agent-smoke matrix
+        run: |
+          set -o pipefail
+          out_file="$(mktemp)"
+          # Clean up on any exit path — live-smoke runs on a persistent
+          # self-hosted box, so a cancelled run must not leak the temp file.
+          trap 'rm -f "$out_file"' EXIT
+          rc=0
+          bash tests/e2e/run-agent-smoke.sh | tee "$out_file" || rc=$?
+          {
+            echo "## Live agent-smoke matrix (#222)"
+            echo ""
+            echo "Matrix: \`$SMOKE_CONF\` (outside the checkout — survives git clean)"
+            echo ""
+            echo "Exit code: \`${rc}\` (FAIL → 1; UNAVAILABLE/SKIP non-blocking)"
+            echo ""
+            echo '```'
+            grep -E '^SMOKE' "$out_file" || echo '(no SMOKE evidence lines captured)'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+
+  # Always-on status reporter (Keesan12 request, PR #256 review): the label-gated
+  # `live-smoke` job NEVER runs on an unlabeled PR, so without this an unlabeled PR
+  # would show NO explanation of the live tier at all. This hermetic, credential-free
+  # job ALWAYS runs (no label gate) on `ubuntu-latest` and writes a non-failing
+  # `$GITHUB_STEP_SUMMARY` stating whether live-smoke ran or was intentionally
+  # skipped pending a maintainer `run-live-smoke` label. It never fails the build.
+  live-smoke-status:
+    name: Live agent-smoke status (always-on)
+    runs-on: ubuntu-latest
+    env:
+      # Did THIS event schedule the live tier? (label-applied PR OR push to main).
+      # Read via env (never `${{ }}`-inlined into run:) — injection-safe.
+      EVENT_NAME: ${{ github.event_name }}
+      LABEL_NAME: ${{ github.event.label.name }}
+      REF: ${{ github.ref }}
+    steps:
+      - name: Report live-smoke status
+        run: |
+          live_will_run="no"
+          if [[ "$EVENT_NAME" == "pull_request" && "$LABEL_NAME" == "run-live-smoke" ]]; then
+            live_will_run="yes"
+          elif [[ "$EVENT_NAME" == "push" && "$REF" == "refs/heads/main" ]]; then
+            live_will_run="yes"
+          fi
+          {
+            echo "## Live agent-smoke — status"
+            echo ""
+            echo "Hermetic tier (unit + ShellCheck + conformance) is the merge-required,"
+            echo "credential-free CI and runs on every PR/push."
+            echo ""
+            if [[ "$live_will_run" == "yes" ]]; then
+              echo "✅ **Live tier scheduled** for this event — see the \`Live agent-smoke\`"
+              echo "job for the SMOKE matrix results."
+            else
+              echo "⏭️ **Live tier intentionally SKIPPED** for this event (not a failure)."
+              echo ""
+              echo "The live agent-smoke matrix runs real authenticated CLIs on the"
+              echo "self-hosted runner and is **advisory (non-required)**. It is gated to"
+              echo "maintainer authorization: a maintainer applies the \`run-live-smoke\`"
+              echo "label (or it runs on push to \`main\`). A fork PR / unlabeled PR never"
+              echo "schedules it — so your PR is fully green on the hermetic tier without"
+              echo "any agent-CLI credentials."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

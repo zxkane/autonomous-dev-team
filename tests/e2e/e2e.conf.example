@@ -3,6 +3,29 @@
 # Copy to tests/e2e/e2e.conf (gitignored, machine-local) and edit for THIS box's
 # installed CLIs + credentials. Then:  bash tests/e2e/run-agent-smoke.sh
 #
+# CI (the `live-smoke` self-hosted tier, INV-77) reads the matrix from OUTSIDE the
+# repo checkout, because actions/checkout runs `git clean -ffdx` and would delete
+# a checkout-internal tests/e2e/e2e.conf.
+#
+# !! FORK SAFETY: when seeding the CI matrix, ALWAYS source this template from
+#    `main` (?ref=main) or a local trusted clone — NEVER from a PR's checkout. On a
+#    labeled fork PR the checked-out copy is attacker head content, and the harness
+#    `eval`s each entry's env-setup on the self-hosted runner. Review before use.
+#
+# Provide the CI matrix via ONE of (precedence order):
+#   1. SMOKE_MATRIX repo variable (recommended for the autoscaling pool) — the
+#      matrix CONTENT; the job materializes it to a temp file at run time, so any
+#      pool runner gets it without per-box provisioning. Seed from `main`:
+#        gh api repos/<owner>/<repo>/contents/tests/e2e/e2e.conf.example?ref=main \
+#          --jq '.content' | base64 -d > /tmp/smoke-matrix.tmpl   # review + edit
+#        gh variable set SMOKE_MATRIX --repo <owner>/<repo> --body-file /tmp/smoke-matrix.tmpl
+#   2. RUNNER_SMOKE_CONF repo variable — a PATH to a runner-local matrix file.
+#   3. A per-box file (for a pinned, long-lived runner), seeded from `main`:
+#        mkdir -p "$HOME/.config/autonomous-dev-team"
+#        gh api repos/<owner>/<repo>/contents/tests/e2e/e2e.conf.example?ref=main \
+#          --jq '.content' | base64 -d > "$HOME/.config/autonomous-dev-team/e2e.conf"
+# The harness honors the SMOKE_CONF env override that the workflow exports.
+#
 # Format, one entry per line:
 #   name | agent_cmd | model | env-setup
 #
