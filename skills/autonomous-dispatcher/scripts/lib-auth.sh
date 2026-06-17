@@ -255,9 +255,14 @@ setup_agent_token() {
 # argv-prefix that scopes the agent subtree's GitHub credential. Prepended by
 # lib-agent.sh::_run_with_timeout to every agent invocation (CLI-agnostic, so it
 # applies uniformly across all adapters). The prefix:
-#   - sets GH_TOKEN=<scoped> (the agent's `gh` authenticates with the scoped token)
-#   - unsets GH_TOKEN_FILE (hides the wrapper's full-write-token file PATH; this is
-#     also load-bearing for the credential swap — see below)
+#   - points GH_TOKEN_FILE at the SCOPED token file (AGENT_GH_TOKEN_FILE), NOT the
+#     wrapper's full-write file — so the agent's `gh` is REFRESH-AWARE: the shim
+#     re-reads the scoped file on every call and the scoped refresh daemon keeps it
+#     fresh past the 1h App-token TTL (#234 review [P1] — a one-time GH_TOKEN
+#     snapshot went stale on long runs and started failing pushes/comments/ticks).
+#   - sets GH_TOKEN=<scoped snapshot> as a FALLBACK for any direct `gh` resolution
+#     that bypasses the refresh shim (the shim, when GH_TOKEN_FILE is set, re-reads
+#     the file and overrides this snapshot — so the file always wins when fresh).
 #   - unsets GITHUB_PERSONAL_ACCESS_TOKEN and GH_USER_PAT (no full-write/PAT leak)
 #
 # PATH is DELIBERATELY left unchanged. The per-run GH_WRAPPER_DIR holds the
@@ -266,12 +271,13 @@ setup_agent_token() {
 # mark-issue-checkbox.sh, all call bare `gh`). On `REAL_GH` / non-interactive-PATH
 # hosts (#92) that shim is the agent's ONLY resolvable `gh` — stripping it would
 # break checkbox-ticking and E2E evidence with `gh: command not found` (#234 review
-# [P1]). Keeping it is SAFE for the credential split: the shim reads GH_TOKEN_FILE
-# ONLY when set; with it unset (above) the shim falls through to `exec gh`
-# inheriting the scoped GH_TOKEN. So the bare-`gh` path authenticates with the
-# SCOPED token — `gh pr review --approve` / `gh pr merge` still 403, AND bare `gh`
-# keeps working. (`bash scripts/gh` — a relative path, not a PATH lookup — likewise
-# resolves the shim and reads the scoped GH_TOKEN.)
+# [P1]). With GH_TOKEN_FILE pointed at the SCOPED file, the shim reads the fresh
+# scoped token each call: the bare-`gh` path authenticates with the SCOPED token
+# (`gh pr review --approve` / `gh pr merge` still 403) AND stays fresh on long runs.
+# (`bash scripts/gh` — a relative path, not a PATH lookup — resolves the same shim.)
+# SECURITY: GH_TOKEN_FILE is set to the SCOPED file only; the wrapper's full-write
+# token file (a DIFFERENT path, held in the wrapper shell's GH_TOKEN_FILE) is never
+# exposed to the agent subtree.
 #
 # Emits an EMPTY array (length 0 → no behavior change) when no scoped token is
 # armed: PAT mode, app-mode-mint-failure, or AGENT_GH_TOKEN_FILE unreadable. The
@@ -290,9 +296,9 @@ build_agent_env_argv() {
 
   _env_out=(
     env
-    -u GH_TOKEN_FILE
     -u GITHUB_PERSONAL_ACCESS_TOKEN
     -u GH_USER_PAT
+    "GH_TOKEN_FILE=${AGENT_GH_TOKEN_FILE}"
     "GH_TOKEN=${scoped}"
   )
 }

@@ -88,21 +88,27 @@ environment differs from the wrapper's:
 
 | Var | Wrapper shell | Agent subtree (app mode, scoped) | Agent subtree (PAT / no-scope) |
 |-----|---------------|----------------------------------|-------------------------------|
-| `GH_TOKEN` | full-write token | **scoped** token | inherited (shared) |
-| `GH_TOKEN_FILE` | full-write token file | **unset** | inherited |
+| `GH_TOKEN` | full-write token | **scoped** token (snapshot fallback) | inherited (shared) |
+| `GH_TOKEN_FILE` | full-write token file | **scoped** token file (`AGENT_GH_TOKEN_FILE`) | inherited |
 | `GITHUB_PERSONAL_ACCESS_TOKEN` | full-write token | **unset** | inherited |
 | `GH_USER_PAT` | host PAT (if set) | **unset** | inherited |
 | `PATH` (per-run `GH_WRAPPER_DIR` shim) | present | **kept** | present |
 
+`GH_TOKEN_FILE` is pointed at the **scoped** token file (NOT unset, NOT the
+wrapper's full-write file) so the agent's `gh` is **refresh-aware** (#234 review
+[P1]): the shim re-reads the scoped file on every call and the scoped refresh
+daemon keeps it fresh past the 1-hour App-token TTL — a one-time `GH_TOKEN`
+snapshot went stale on long runs and started failing pushes/comments/ticks.
 `PATH` is deliberately left intact (#234 review [P1]): the agent's BARE `gh` (the
 review prompt's `gh issue view`/`gh pr checks`, and vendored helpers like
 `mark-issue-checkbox.sh`) must keep resolving the per-run `gh-with-token-refresh.sh`
 shim — on `REAL_GH`/non-interactive-PATH hosts (#92) it is the agent's ONLY
 resolvable `gh`, so stripping it broke checkbox-ticking and E2E evidence with
 `gh: command not found`. Both the bare-`gh` (PATH-resolved shim) and
-`bash scripts/gh` (relative-path shim) routes — with `GH_TOKEN_FILE` unset — fall
-through to `exec gh` inheriting the scoped `GH_TOKEN`. So the agent authenticates as
-the scoped identity and gets a 403 on `gh pr review --approve` / `gh pr merge`. Because
+`bash scripts/gh` (relative-path shim) routes read the fresh scoped token from
+`GH_TOKEN_FILE` and `exec gh` with it. So the agent authenticates as the scoped
+identity, stays fresh on long runs, and gets a 403 on
+`gh pr review --approve` / `gh pr merge`. Because
 `pull_requests:read` also blocks `gh pr create`, the dev agent writes a
 `branch: <head>` line + the PR title+body to `AGENT_PR_CREATE_FILE` and the
 wrapper opens the PR with an **explicit `--head <branch>`**

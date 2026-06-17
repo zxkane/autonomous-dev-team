@@ -86,14 +86,19 @@ A new lib-auth helper `build_agent_env_argv` emits an `env`-prefix argv that
 prepends to the agent command. Uniformly for claude/codex/gemini/kiro/opencode/
 agy/generic the agent subtree gets:
 
-- `GH_TOKEN` = the scoped token (so `gh` and `bash scripts/gh` authenticate scoped)
-- `GH_TOKEN_FILE` **unset** (wrapper's full-token file path hidden)
+- `GH_TOKEN_FILE` = the **scoped** token file (`AGENT_GH_TOKEN_FILE`) — NOT unset,
+  NOT the wrapper's full-write file. This makes the agent's `gh` **refresh-aware**
+  (#234 review [P1]): the shim re-reads the scoped file each call and the scoped
+  daemon keeps it fresh past the 1h App-token TTL (a one-time `GH_TOKEN` snapshot
+  went stale on long runs and started failing pushes/comments/ticks).
+- `GH_TOKEN` = the scoped token as a snapshot fallback (the shim re-reads the file
+  and overrides it, so the fresh file wins).
 - `GITHUB_PERSONAL_ACCESS_TOKEN` / `GH_USER_PAT` **unset** (no full-write/PAT leak)
 - `PATH` **kept intact** (#234 review [P1]): the agent's bare `gh` (review prompt,
   vendored helpers like `mark-issue-checkbox.sh`) must keep resolving the per-run
   `gh-with-token-refresh.sh` shim — its only resolvable `gh` on `REAL_GH` hosts
-  (#92). With `GH_TOKEN_FILE` unset the shim execs real `gh` under the scoped
-  `GH_TOKEN`, so bare `gh` works AND authenticates scoped.
+  (#92). The shim reads the scoped `GH_TOKEN_FILE` and execs real `gh` with the
+  fresh scoped token, so bare `gh` works, stays fresh, AND authenticates scoped.
 
 Scrub fires ONLY when a scoped token is armed (`AGENT_GH_TOKEN_FILE` non-empty +
 readable). PAT mode / app-mode-without-scoping → empty prefix → no behavior change.
@@ -116,12 +121,13 @@ is byte-identical to today.
 
 **INV-77 — credential split contract.** In app mode the agent process is launched
 with ONLY a scoped installation token (`contents:write`, `issues:write`,
-`pull_requests:read`); the wrapper's full-write token file and full-write env vars
-(`GH_TOKEN_FILE` / `GITHUB_PERSONAL_ACCESS_TOKEN` / `GH_USER_PAT`) are unset for the
-agent subtree. PATH is kept intact so the agent's bare `gh` still resolves the
-per-run shim, which — with `GH_TOKEN_FILE` unset — execs real `gh` under the scoped
-`GH_TOKEN`. The wrapper retains the full-write token and is the SOLE
-approve/merge/label/PR-create path
+`pull_requests:read`): its `GH_TOKEN_FILE` points at the SCOPED token file (kept
+fresh by the scoped daemon — refresh-aware, not a stale one-time snapshot), and
+`GITHUB_PERSONAL_ACCESS_TOKEN` / `GH_USER_PAT` are unset. The wrapper's full-write
+token file (a different path) is never exposed. PATH is kept intact so the agent's
+bare `gh` still resolves the per-run shim, which reads the scoped `GH_TOKEN_FILE`
+and execs real `gh` with the fresh scoped token. The wrapper retains the full-write
+token and is the SOLE approve/merge/label/PR-create path
 (complements INV-44 / INV-52). In PAT mode this degrades to convention with a
 one-time WARN. Verify-by-construction: a conformance fixture dumps the agent env
 and asserts no full-write credential is present.

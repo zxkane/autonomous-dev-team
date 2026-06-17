@@ -3692,15 +3692,20 @@ with ONLY a SCOPED GitHub-App installation token (`contents:write`,
 `issues:write`, `pull_requests:read` — `AGENT_TOKEN_PERMISSIONS`); the
 **wrapper's** full-write token (`pull_requests:write`) is NEVER reachable from the
 agent subtree. Concretely the agent launch env (assembled CLI-agnostically in
-`_run_with_timeout`) has: `GH_TOKEN`=the scoped token; `GH_TOKEN_FILE`,
-`GITHUB_PERSONAL_ACCESS_TOKEN`, and `GH_USER_PAT` **unset**. `PATH` is left
-**intact** — the agent's bare `gh` (review-prompt `gh issue view`/`gh pr checks`,
-vendored helpers like `mark-issue-checkbox.sh`) must keep resolving the per-run
+`_run_with_timeout`) has: `GH_TOKEN_FILE`=the **scoped** token file
+(`AGENT_GH_TOKEN_FILE`, kept fresh by the scoped refresh daemon — so the agent's
+`gh` is REFRESH-AWARE past the 1h App-token TTL, NOT a one-time snapshot that goes
+stale on long runs — #234 review [P1]); `GH_TOKEN`=the scoped token as a snapshot
+fallback (the shim re-reads the file and overrides it, so the fresh file wins);
+`GITHUB_PERSONAL_ACCESS_TOKEN` and `GH_USER_PAT` **unset**. The wrapper's full-write
+token file (a DIFFERENT path) is NEVER exposed. `PATH` is left **intact** — the
+agent's bare `gh` (review-prompt `gh issue view`/`gh pr checks`, vendored helpers
+like `mark-issue-checkbox.sh`) must keep resolving the per-run
 `gh-with-token-refresh.sh` shim, which is its ONLY resolvable `gh` on
-`REAL_GH`/non-interactive-PATH hosts (#92); with `GH_TOKEN_FILE` unset the shim
-falls through to `exec gh` inheriting the SCOPED `GH_TOKEN`, so bare `gh` keeps
-working AND authenticates scoped (stripping the shim from PATH broke this — #234
-review [P1]). The wrapper retains the
+`REAL_GH`/non-interactive-PATH hosts (#92); the shim reads the SCOPED `GH_TOKEN_FILE`
+and `exec gh` with the fresh scoped token, so bare `gh` keeps working, stays fresh,
+AND authenticates scoped (stripping the shim from PATH, or snapshotting the token
+once, both broke this — #234 review [P1]s). The wrapper retains the
 full-write token in its OWN shell and is the SOLE actor that flips labels,
 approves, merges, posts the verdict, brokers `gh pr create` (the scoped token
 cannot create a PR — `pull_requests:read`), and brokers the browser-E2E report.

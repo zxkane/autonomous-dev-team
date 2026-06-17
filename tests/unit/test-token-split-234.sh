@@ -217,16 +217,24 @@ done
 [[ "$pfxlen" -gt 0 ]] && assert_pass "app mode: build_agent_env_argv emits a non-empty scrub prefix (len=$pfxlen)" \
                       || assert_fail "app mode scrub prefix empty"
 if printf '%s' "$pfx" | grep -qF 'GH_TOKEN=SCOPED-TOKEN-abc123'; then
-  assert_pass "scrub prefix sets GH_TOKEN to the SCOPED token"
+  assert_pass "scrub prefix sets GH_TOKEN to the SCOPED token (snapshot fallback)"
 else
   assert_fail "scrub prefix missing scoped GH_TOKEN: $pfx"
 fi
-if printf '%s' "$pfx" | grep -qF -- '-u GH_TOKEN_FILE' \
-   && printf '%s' "$pfx" | grep -qF -- '-u GITHUB_PERSONAL_ACCESS_TOKEN' \
-   && printf '%s' "$pfx" | grep -qF -- '-u GH_USER_PAT'; then
-  assert_pass "scrub prefix unsets GH_TOKEN_FILE / GITHUB_PERSONAL_ACCESS_TOKEN / GH_USER_PAT"
+# #234 review [P1]: GH_TOKEN_FILE must be POINTED AT the scoped file (refresh-aware),
+# NOT unset — else the agent's gh goes stale after the 1h App-token TTL. The value
+# must equal AGENT_GH_TOKEN_FILE (the scoped file, under GH_WRAPPER_DIR).
+if printf '%s' "$pfx" | grep -qF "GH_TOKEN_FILE=${agent_file}" \
+   && ! printf '%s' "$pfx" | grep -qF -- '-u GH_TOKEN_FILE'; then
+  assert_pass "scrub prefix points GH_TOKEN_FILE at the scoped file (refresh-aware), does NOT unset it"
 else
-  assert_fail "scrub prefix missing an -u unset: $pfx"
+  assert_fail "scrub prefix does not point GH_TOKEN_FILE at the scoped file (stale-token [P1] regression): $pfx"
+fi
+if printf '%s' "$pfx" | grep -qF -- '-u GITHUB_PERSONAL_ACCESS_TOKEN' \
+   && printf '%s' "$pfx" | grep -qF -- '-u GH_USER_PAT'; then
+  assert_pass "scrub prefix unsets GITHUB_PERSONAL_ACCESS_TOKEN / GH_USER_PAT"
+else
+  assert_fail "scrub prefix missing a PAT-var unset: $pfx"
 fi
 
 # ---------------------------------------------------------------------------
@@ -299,10 +307,15 @@ if [[ "$gh_token_line" == "GH_TOKEN=SCOPED-TOKEN-zzz" ]]; then
 else
   assert_fail "agent env GH_TOKEN not scoped (got: '$gh_token_line')"
 fi
-if ! grep -qE '^GH_TOKEN_FILE=' "$ENVDUMP" 2>/dev/null; then
-  assert_pass "agent env has NO GH_TOKEN_FILE (scrubbed)"
+# #234 review [P1]: GH_TOKEN_FILE must point at the SCOPED file (refresh-aware),
+# NOT the wrapper's full-write file (/tmp/full-token-file) and NOT be unset.
+gh_token_file_line=$(grep -E '^GH_TOKEN_FILE=' "$ENVDUMP" 2>/dev/null || true)
+if [[ "$gh_token_file_line" == "GH_TOKEN_FILE=${WDIR_USED}/agent-token" ]]; then
+  assert_pass "agent env GH_TOKEN_FILE points at the SCOPED file (refresh-aware): $gh_token_file_line"
+elif [[ "$gh_token_file_line" == "GH_TOKEN_FILE=/tmp/full-token-file" ]]; then
+  assert_fail "agent env GH_TOKEN_FILE still points at the WRAPPER's full-write file — credential leak!"
 else
-  assert_fail "agent env still carries GH_TOKEN_FILE — scrub incomplete"
+  assert_fail "agent env GH_TOKEN_FILE is wrong (not the scoped file): '$gh_token_file_line'"
 fi
 if ! grep -qE '^GITHUB_PERSONAL_ACCESS_TOKEN=' "$ENVDUMP" 2>/dev/null; then
   assert_pass "agent env has NO GITHUB_PERSONAL_ACCESS_TOKEN (scrubbed)"
@@ -415,12 +428,19 @@ env -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR -u GH_TOKEN_FILE -u GITHUB_PERSONAL_AC
   _run_with_timeout true >/dev/null 2>&1
   rm -rf \"\$wdir\"
 " >/dev/null 2>&1
+# Scrub APPLIED iff: GH_TOKEN=scoped AND no full-write leaks — i.e.
+# GITHUB_PERSONAL_ACCESS_TOKEN absent AND GH_TOKEN_FILE is NOT the wrapper's
+# full-write file (/tmp/full-token-file). GH_TOKEN_FILE IS now set (to the scoped
+# file, refresh-aware), so we assert its VALUE is not the full-write path rather
+# than its absence. If the env prefix were passed to the launcher as args (the
+# [P1] #1 regression), GH_TOKEN would be empty and the full-write GH_TOKEN_FILE
+# would survive — both caught here.
 if grep -qE '^GH_TOKEN=SCOPED-TOKEN-launcher' "$ENVDUMP3" 2>/dev/null \
-   && ! grep -qE '^GH_TOKEN_FILE=' "$ENVDUMP3" 2>/dev/null \
+   && ! grep -qE '^GH_TOKEN_FILE=/tmp/full-token-file' "$ENVDUMP3" 2>/dev/null \
    && ! grep -qE '^GITHUB_PERSONAL_ACCESS_TOKEN=' "$ENVDUMP3" 2>/dev/null; then
   assert_pass "launcher present: scrub APPLIED (scoped GH_TOKEN, no full-write creds) — env prefix runs the launcher, not passed through"
 else
-  assert_fail "launcher present: scrub NOT applied (env prefix passed to launcher as args — the #234 [P1] #1 regression). Dump GH_TOKEN=$(grep -E '^GH_TOKEN=' "$ENVDUMP3" 2>/dev/null), GH_TOKEN_FILE present=$(grep -cE '^GH_TOKEN_FILE=' "$ENVDUMP3" 2>/dev/null)"
+  assert_fail "launcher present: scrub NOT applied (env prefix passed to launcher as args — the #234 [P1] #1 regression). Dump GH_TOKEN=$(grep -E '^GH_TOKEN=' "$ENVDUMP3" 2>/dev/null), GH_TOKEN_FILE=$(grep -E '^GH_TOKEN_FILE=' "$ENVDUMP3" 2>/dev/null)"
 fi
 # Source-level lockdown: the env prefix MUST precede AGENT_LAUNCHER_ARGV in the
 # cmd assembly (guards against a future reorder reintroducing the bug).
@@ -462,22 +482,25 @@ echo ""
 echo "=== TC-TOKEN-SPLIT-092: under the scrub, the agent's BARE gh resolves the shim → real gh with the SCOPED token (#234 [P1]) ==="
 # ---------------------------------------------------------------------------
 # The functional proof of the PATH-keep fix: with the scrub applied (GH_TOKEN=scoped,
-# GH_TOKEN_FILE unset) and the GH_WRAPPER_DIR shim on PATH, a BARE `gh` invocation
-# from the agent must resolve the gh-with-token-refresh.sh shim and exec the real gh
-# under the SCOPED token. We model the #92 REAL_GH host: a fake "real gh" prints the
-# token it sees, REAL_GH points at it, and PATH has the shim dir + only system bins
-# (no real gh dir), so the shim is the ONLY resolvable `gh`. Run the bare `gh` under
-# the EXACT env prefix build_agent_env_argv produces.
+# GH_TOKEN_FILE pointed at the SCOPED file) and the GH_WRAPPER_DIR shim on PATH, a
+# BARE `gh` invocation from the agent must resolve the gh-with-token-refresh.sh shim
+# and exec the real gh under the SCOPED token. We model the #92 REAL_GH host: a fake
+# "real gh" prints the token it sees + which file the shim read it from, REAL_GH
+# points at it, and PATH has the shim dir + only system bins (no real gh dir), so the
+# shim is the ONLY resolvable `gh`. Run the bare `gh` under the EXACT env prefix
+# build_agent_env_argv produces.
 GHFAKE="$TMPROOT/ghfake"; mkdir -p "$GHFAKE"
 cat > "$GHFAKE/fake-gh" <<'FG'
 #!/bin/bash
 echo "REALGH token=${GH_TOKEN:-<none>} file=${GH_TOKEN_FILE:-<unset>}"
 FG
 chmod +x "$GHFAKE/fake-gh"
+WDIR92_SENT="$TMPROOT/wdir92.txt"
 mapfile -t out92 < <(env -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR -u GH_TOKEN_FILE -u GITHUB_PERSONAL_ACCESS_TOKEN -u GH_USER_PAT \
   PATH="/usr/bin:/bin" bash -c "
   source '$SBA/lib-auth.sh'
   wdir=\$(mktemp -d /tmp/agent-auth-XXXXXX)
+  printf '%s' \"\$wdir\" > '$WDIR92_SENT'
   export GH_WRAPPER_DIR=\"\$wdir\"
   ln -sf '$SCRIPTS/gh-with-token-refresh.sh' \"\$wdir/gh\"
   export GH_TOKEN_FILE='/tmp/full-token-file'   # wrapper-side full-write file
@@ -489,12 +512,44 @@ mapfile -t out92 < <(env -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR -u GH_TOKEN_FILE 
   REAL_GH='$GHFAKE/fake-gh' PATH=\"\$wdir:/usr/bin:/bin\" \"\${p[@]}\" gh whoami 2>&1
   rm -rf \"\$wdir\"
 ")
+WDIR92=$(cat "$WDIR92_SENT" 2>/dev/null || echo "/tmp/none")
 out92_str="${out92[*]}"
 if printf '%s' "$out92_str" | grep -qF 'REALGH token=SCOPED-92' \
-   && printf '%s' "$out92_str" | grep -qF 'file=<unset>'; then
-  assert_pass "bare gh under the scrub resolves the shim → real gh with the SCOPED token (file unset)"
+   && printf '%s' "$out92_str" | grep -qF "file=${WDIR92}/agent-token" \
+   && ! printf '%s' "$out92_str" | grep -qF 'file=/tmp/full-token-file'; then
+  assert_pass "bare gh under the scrub → real gh with the SCOPED token, reading the SCOPED file (not the wrapper's full-write file)"
 else
-  assert_fail "bare gh under the scrub did NOT reach real gh with the scoped token: $out92_str"
+  assert_fail "bare gh under the scrub did NOT reach real gh with the scoped token/file: $out92_str"
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-TOKEN-SPLIT-093: agent's gh is REFRESH-AWARE — a daemon refresh of the scoped file is picked up (#234 [P1]) ==="
+# ---------------------------------------------------------------------------
+# The core of this [P1]: the agent's gh must re-read the scoped file each call so a
+# scoped-daemon refresh (past the 1h App-token TTL) is honored — NOT a one-time
+# GH_TOKEN snapshot. Invoke the bare gh TWICE under the same scrub prefix, rewriting
+# the scoped file between calls (simulating the daemon), and assert call 2 sees the
+# refreshed token.
+mapfile -t out93 < <(env -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR -u GH_TOKEN_FILE -u GITHUB_PERSONAL_ACCESS_TOKEN -u GH_USER_PAT \
+  PATH="/usr/bin:/bin" bash -c "
+  source '$SBA/lib-auth.sh'
+  wdir=\$(mktemp -d /tmp/agent-auth-XXXXXX)
+  export GH_WRAPPER_DIR=\"\$wdir\"
+  ln -sf '$SCRIPTS/gh-with-token-refresh.sh' \"\$wdir/gh\"
+  AGENT_GH_TOKEN_FILE=\"\$wdir/agent-token\"; echo 'tok-INITIAL' > \"\$AGENT_GH_TOKEN_FILE\"
+  declare -a p=(); build_agent_env_argv p
+  REAL_GH='$GHFAKE/fake-gh' PATH=\"\$wdir:/usr/bin:/bin\" \"\${p[@]}\" gh a 2>&1
+  echo 'tok-REFRESHED' > \"\$AGENT_GH_TOKEN_FILE\"   # simulate the scoped daemon refresh
+  REAL_GH='$GHFAKE/fake-gh' PATH=\"\$wdir:/usr/bin:/bin\" \"\${p[@]}\" gh b 2>&1
+  rm -rf \"\$wdir\"
+")
+out93_str="${out93[*]}"
+if printf '%s' "$out93_str" | grep -qF 'token=tok-INITIAL' \
+   && printf '%s' "$out93_str" | grep -qF 'token=tok-REFRESHED'; then
+  assert_pass "agent gh is refresh-aware: call 1 saw tok-INITIAL, call 2 saw the refreshed tok-REFRESHED"
+else
+  assert_fail "agent gh did NOT pick up the refreshed scoped token (stale-snapshot [P1] regression): $out93_str"
 fi
 
 # ---------------------------------------------------------------------------

@@ -30,10 +30,12 @@ ID format: `TC-TOKEN-SPLIT-NNN`. INV-77.
 
 | ID | Scenario | Expected |
 |----|----------|----------|
-| TC-TOKEN-SPLIT-030 | scoped token armed → prefix sets `GH_TOKEN=<scoped>` | `GH_TOKEN=` element present with the scoped token value |
-| TC-TOKEN-SPLIT-031 | prefix unsets `GH_TOKEN_FILE`, `GITHUB_PERSONAL_ACCESS_TOKEN`, `GH_USER_PAT` | `-u GH_TOKEN_FILE -u GITHUB_PERSONAL_ACCESS_TOKEN -u GH_USER_PAT` all present |
-| TC-TOKEN-SPLIT-032 | prefix strips the per-run `GH_WRAPPER_DIR` entry from PATH | `PATH=` element excludes `GH_WRAPPER_DIR`; other entries preserved + order kept |
+| TC-TOKEN-SPLIT-030 | scoped token armed → prefix sets `GH_TOKEN=<scoped>` (snapshot fallback) | `GH_TOKEN=` element present with the scoped token value |
+| TC-TOKEN-SPLIT-031 | prefix points `GH_TOKEN_FILE` at the SCOPED file (refresh-aware, not unset) + unsets `GITHUB_PERSONAL_ACCESS_TOKEN`/`GH_USER_PAT` | `GH_TOKEN_FILE=<AGENT_GH_TOKEN_FILE>` present, no `-u GH_TOKEN_FILE`; `-u GITHUB_PERSONAL_ACCESS_TOKEN -u GH_USER_PAT` present |
+| TC-TOKEN-SPLIT-032 | prefix does NOT rewrite PATH (keep the shim resolvable) | no `PATH=` element; `_strip_path_entry` removed |
 | TC-TOKEN-SPLIT-033 | no scoped token (PAT / app-no-scope) → empty prefix | length 0 |
+| TC-TOKEN-SPLIT-092 | bare `gh` under the scrub (REAL_GH host) → real `gh` with the scoped token, reading the scoped file | dump shows scoped token + scoped `GH_TOKEN_FILE`, not the wrapper's full-write file |
+| TC-TOKEN-SPLIT-093 | agent `gh` is refresh-aware — a scoped-file refresh between calls is picked up | call 1 sees initial token, call 2 sees the refreshed token |
 
 ## Unit — scrub completeness (env-dump assertion, the verify-by-construction gate)
 
