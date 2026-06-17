@@ -97,13 +97,22 @@ therefore lives in the **driver**, `smoke_agent`, which already owns the
 
 - Factor the single-probe body (nonce/session-id mint → `run_agent` in a subshell →
   classify) into an inner helper `_smoke_probe_once`, which echoes a structured
-  `STATE|reason|elapsed|rc` line.
+  `STATE|reason|elapsed` line (the original CLI exit code is carried inside the
+  reason text — `_smoke_classify` step 5 always renders `rc=<n>` — so the driver
+  recovers it from the reason rather than a separate field).
 - `_smoke_classify` keeps emitting the human-readable `FAIL|no-response (rc=%s; …)`
   reason for step 5 unchanged; the driver detects the retry-eligible case
   **structurally**: `STATE == FAIL` **and** the reason begins with `no-response`
-  (the auth/config FAILs carry their own scraper phrases, never `no-response`; the
-  bad-args/mktemp pre-flight FAILs are emitted by the driver before any probe and
-  never reach this path).
+  **and** the `rc=<n>` it carries is **non-zero** (the auth/config FAILs carry their
+  own scraper phrases, never `no-response`; the bad-args/mktemp pre-flight FAILs are
+  emitted by the driver before any probe and never reach this path).
+- **`rc=0` silent-success carve-out (issue #257 review follow-up).** Step 5 also
+  fires when a CLI exits **`0`** with no nonce/no signal — a CLI that claimed success
+  but produced no token. That is genuine broken-output / misconfiguration, not a
+  Bedrock transient (a transient kills the CLI with a non-zero exit). So the retry
+  guard keys on the **original non-zero exit code**: a `rc=0` no-response (or any
+  unparseable rc) stays a **single-shot gate-worthy FAIL** — no retry — keeping the
+  relaxation scoped exactly to the `rc≠0` fallthrough #257 targets.
 - On a retry-eligible first probe, run a second `_smoke_probe_once`; map
   `PASS → PASS`, a genuine config FAIL → FAIL, anything else → the
   `no-response … no nonce after retry — transient infra` UNAVAILABLE.

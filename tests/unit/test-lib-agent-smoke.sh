@@ -716,6 +716,37 @@ if [[ "$cls" == FAIL\|* && "$cls" != *no-response* ]]; then
 else
   echo -e "  ${RED}FAIL${NC}: TC-AGENT-SMOKE-075i unexpected classify=[$cls]"; FAIL=$((FAIL + 1))
 fi
+
+# TC-AGENT-SMOKE-075j (REGRESSION — MUST fail before the rc-guard fix; issue #257
+# 07:41:50Z [P1] follow-up) — an `rc=0` SILENT-SUCCESS no-response is NOT a
+# transient. `_smoke_classify` emits the `FAIL|no-response (rc=0; …)` shape when a
+# CLI exits 0 but produces no nonce/no scraper signal; the CLI CLAIMED success, so
+# this is genuine broken-output/misconfig, NOT a Bedrock infra hiccup (which exits
+# non-zero). Issue #257 only relaxed the `rc≠0` step-5 fallthrough, so the retry
+# guard MUST key on the ORIGINAL non-zero exit code: a bare `rc=0` no-response stays
+# a single-shot gate-worthy FAIL (rc 1) and is NOT retried/downgraded.
+#
+# A `claude` stub that exits 0 with NO output (no nonce, no scraper signal): the
+# reviewer's exact repro. Bump the counter so the bound check confirms NO retry.
+make_stub claude '
+cat >/dev/null
+n=$(cat "'"$SMOKE_RETRY_CTR"'" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "'"$SMOKE_RETRY_CTR"'"
+exit 0'
+: > "$SMOKE_RETRY_CTR"
+out=$(PATH="$STUB_DIR:$ORIG_PATH" smoke_agent claude sonnet 5); rc=$?
+assert_rc "TC-AGENT-SMOKE-075j rc=0 silent-success no-response → rc 1 FAIL (NOT retried/downgraded)" 1 "$rc"
+assert_contains "TC-AGENT-SMOKE-075j2 evidence is FAIL (gate-worthy, not UNAVAILABLE)" "SMOKE claude FAIL" "$out"
+n=$(cat "$SMOKE_RETRY_CTR" 2>/dev/null || echo 0)
+assert_eq "TC-AGENT-SMOKE-075j3 rc=0 no-response is NOT retried (stub ran exactly 1x)" "1" "$n"
+
+# TC-AGENT-SMOKE-075k — the retry predicate itself: `_smoke_is_transient_no_response`
+# is retry-eligible ONLY for a non-zero-rc no-response. A `rc=0` no-response reason
+# is NOT transient (must return rc 1 → no retry); a `rc≠0` one IS (rc 0 → retry).
+trc=0; _smoke_is_transient_no_response FAIL "no-response (rc=0; nonce absent from CLI output)" || trc=$?
+assert_eq "TC-AGENT-SMOKE-075k rc=0 no-response is NOT transient (predicate rc 1)" "1" "$trc"
+trc=0; _smoke_is_transient_no_response FAIL "no-response (rc=4; nonce absent from CLI output)" || trc=$?
+assert_eq "TC-AGENT-SMOKE-075k2 rc=4 no-response IS transient (predicate rc 0)" "0" "$trc"
+
 rm -f "$EMPTY" "$CFGCAP" "$SMOKE_RETRY_CTR" 2>/dev/null || true
 # Restore the plain PASS claude stub for any later cases.
 make_stub claude 'in=$(cat); printf "%s\n" "$(printf "%s" "$in" | grep -oE "SMOKE-[0-9a-f]{16}" | head -1)"; exit 0'
@@ -791,8 +822,14 @@ assert_contains "TC-AGENT-SMOKE-028b present entry PASSes (not skipped)" "SMOKE 
 
 # TC-AGENT-SMOKE-031 — entries run in PARALLEL (wall-clock ≈ slowest). Three
 # entries each running a 2s-sleeping stub; total must be well under 6s (the sum).
-make_stub slow2 'cat >/dev/null; sleep 2; printf "%s\n" "$(cat)" >/dev/null; exit 3'
-# Use a matrix of three slow FAIL entries; measure wall-clock.
+#
+# The stub echoes the nonce and exits 0 — a clean PASS that runs EXACTLY ONCE. It
+# must NOT be a bare `no-response` FAIL (rc≠0, no nonce): under [INV-75] that path
+# is now retried once (a second 2s probe), doubling each entry's wall-clock to ~4s
+# and pushing this parallelism bound to its flaky edge under box load. A PASS stub
+# isolates the property under test (parallel scheduling, not the retry).
+make_stub slow2 'in=$(cat); sleep 2; printf "%s\n" "$(printf "%s" "$in" | grep -oE "SMOKE-[0-9a-f]{16}" | head -1)"; exit 0'
+# Use a matrix of three slow PASS entries; measure wall-clock.
 par_conf=$(mktemp)
 printf 'x1|slow2||true\nx2|slow2||true\nx3|slow2||true\n' > "$par_conf"
 pstart=$(date +%s)

@@ -488,22 +488,38 @@ _smoke_probe_once() {
 }
 
 # _smoke_is_transient_no_response <state> <reason> — rc 0 iff the probe outcome is
-# the step-5 generic `no-response` FAIL (the retry-eligible TRANSIENT case), rc 1
-# otherwise. This is the discriminator smoke_agent uses to decide whether to retry:
+# the step-5 generic `no-response` FAIL with a NON-ZERO CLI exit (the retry-eligible
+# TRANSIENT case), rc 1 otherwise. This is the discriminator smoke_agent uses to
+# decide whether to retry:
 #
 #   - `_smoke_classify`'s step-5 fallthrough is the ONLY path that emits
-#     `FAIL|no-response (…)`. The genuine operator-side FAILs (`auth-failed`,
+#     `FAIL|no-response (rc=<n>; …)`. The genuine operator-side FAILs (`auth-failed`,
 #     `config-error[:<flag>]`) carry their own scraper phrase, never `no-response`,
 #     so they do NOT match → no retry, gate-worthy on the first probe (preserved).
 #   - The pre-flight FAILs (`bad-args`, `mktemp-failed`) also do NOT start with
 #     `no-response`.
+#   - rc==0 SILENT-SUCCESS guard (issue #257 review follow-up): step 5 also fires
+#     when a CLI exits `0` with no nonce/no scraper signal — the CLI CLAIMED success
+#     but produced no token. Issue #257 ONLY relaxed the `rc≠0` fallthrough: a
+#     transient Bedrock hiccup kills the CLI with a NON-ZERO exit, whereas a clean
+#     `rc=0`-with-no-answer is genuine broken-output / misconfiguration, not a
+#     capacity blip. So the retry guard keys on the ORIGINAL non-zero exit code
+#     (preserved in the `rc=<n>` of the reason): a `rc=0` no-response is NOT
+#     transient → no retry, single-shot gate-worthy FAIL (preserved). Only `rc≠0` is
+#     retry-eligible.
 #
-# Keying on STATE==FAIL && reason-prefix `no-response` is the structural contract
-# (mirrors [INV-67]'s note that only the bare branch is relaxed); a future reword of
-# the human reason text MUST keep the `no-response` prefix or update this guard.
+# Keying on STATE==FAIL && reason-prefix `no-response` && rc≠0 is the structural
+# contract (mirrors [INV-67]'s note that only the bare branch is relaxed); a future
+# reword of the human reason text MUST keep the `no-response (rc=<n>; …)` shape or
+# update this guard.
 _smoke_is_transient_no_response() {
   local state="$1" reason="$2"
-  [[ "$state" == "FAIL" && "$reason" == no-response* ]]
+  [[ "$state" == "FAIL" && "$reason" == no-response* ]] || return 1
+  # Parse the original CLI exit out of the `rc=<n>;` token the step-5 reason carries.
+  # A non-zero rc → transient (retry-eligible); rc=0 (silent success) or an
+  # unparseable rc → NOT transient (conservative: stays a gate-worthy FAIL).
+  local rc="${reason#*rc=}"; rc="${rc%%;*}"
+  [[ "$rc" =~ ^[0-9]+$ && "$rc" -ne 0 ]]
 }
 
 # smoke_agent <agent-cmd> <model> [timeout-seconds]

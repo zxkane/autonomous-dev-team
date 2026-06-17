@@ -3234,13 +3234,25 @@ TRANSIENT (the same tolerance [INV-67](#inv-67-a-bare-smoke-timeout-rc-124137-wi
 
 Sub-rules:
 
-1. **ONLY the step-5 bare `no-response` is retried.** The discriminator is structural
-   (`_smoke_is_transient_no_response`): STATE==`FAIL` **and** the reason begins with
-   `no-response`. `_smoke_classify`'s step-5 fallthrough is the ONLY path that emits
-   `FAIL|no-response (…)`; the genuine operator-side FAILs (`auth-failed`,
-   `config-error[:<flag>]`) carry their own scraper phrase, never `no-response`, and
-   the pre-flight FAILs (`bad-args`, `mktemp-failed`) likewise. So a genuine config
-   break is **FAIL on the first probe, no retry** — unchanged, gate-worthy.
+1. **ONLY the step-5 bare `no-response` with a NON-ZERO CLI exit is retried.** The
+   discriminator is structural (`_smoke_is_transient_no_response`): STATE==`FAIL`
+   **and** the reason begins with `no-response` **and** the `rc=<n>` the step-5 reason
+   carries is **non-zero**. `_smoke_classify`'s step-5 fallthrough is the ONLY path
+   that emits `FAIL|no-response (rc=<n>; …)`; the genuine operator-side FAILs
+   (`auth-failed`, `config-error[:<flag>]`) carry their own scraper phrase, never
+   `no-response`, and the pre-flight FAILs (`bad-args`, `mktemp-failed`) likewise. So
+   a genuine config break is **FAIL on the first probe, no retry** — unchanged,
+   gate-worthy.
+
+   **`rc=0` silent-success carve-out (issue #257 review follow-up).** `_smoke_classify`
+   step 5 ALSO fires when a CLI exits **`0`** with no nonce/no scraper signal — a CLI
+   that CLAIMED success but produced no token. A transient Bedrock hiccup kills the CLI
+   with a **non-zero** exit; a clean `rc=0`-with-no-answer is genuine broken-output /
+   misconfiguration, **not** a capacity blip. So the retry guard keys on the
+   **original non-zero exit code** (preserved in the reason's `rc=<n>`): a `rc=0`
+   no-response (or any unparseable rc) is **NOT** transient → **no retry, single-shot
+   gate-worthy FAIL** (preserved). This keeps the relaxation scoped exactly to the
+   `rc≠0` step-5 fallthrough that #257 set out to fix.
 
 2. **The already-environmental UNAVAILABLE cases are untouched.** `quota-exhausted` /
    `stream-error` / `malformed-output` (the `*|*|*` UNAVAILABLE branch) and the bare

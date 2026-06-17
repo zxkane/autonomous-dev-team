@@ -23,6 +23,8 @@ running) so the retry path is exercised end-to-end.
 | TC-AGENT-SMOKE-075e | Stub `agy`: probe #1 writes the **quota** fixture to `--log-file`, exits empty | rc **2** (UNAVAILABLE), quota reason, **NO retry** (env signal wins) | rc 2 UNAVAILABLE (unchanged) |
 | TC-AGENT-SMOKE-075f (bound) | Same stub as 075a; assert the stub was invoked **exactly twice** (probe + one retry — never a third) | invocation counter == **2** | (n/a — no retry existed) |
 | TC-AGENT-SMOKE-075g | Stub CLI: probe #1 no-response, probe #2 surfaces a genuine **`config-error`** signal | rc **1** (FAIL) — the retry exposed real operator-side breakage; do NOT mask it as UNAVAILABLE | (n/a) |
+| TC-AGENT-SMOKE-075j | Stub `claude`: probe #1 exits **`rc=0`** with **no** token / **no** scraper signal (silent success) | rc **1** (FAIL), evidence `SMOKE claude FAIL`, **NO retry** (stub ran exactly 1×) — `rc=0` no-response is genuine broken-output, not a transient (issue #257 review follow-up) | rc **2** UNAVAILABLE, retried (regression — MUST fail before the rc-guard fix) |
+| TC-AGENT-SMOKE-075k | `_smoke_is_transient_no_response FAIL "no-response (rc=0; …)"` vs `"… (rc=4; …)"` | rc=0 reason → **NOT transient** (predicate rc 1, no retry); rc=4 reason → **transient** (predicate rc 0, retry) | rc=0 wrongly transient (predicate rc 0) |
 
 ## Unit — `_smoke_classify` purity (regression guard, `tests/unit/test-lib-agent-smoke.sh`)
 

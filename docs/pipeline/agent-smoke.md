@@ -85,6 +85,7 @@ land on either stream); agy reads its own `--log-file`.
 | bare timeout (rc 124/137), no signal | `run_agent` rc | **UNAVAILABLE** ([INV-67](invariants.md#inv-67-a-bare-smoke-timeout-rc-124137-with-no-authconfig-signal-classifies-unavailable-not-fail)) |
 | bare `no-response` (rc≠0, no nonce, no signal) — **first probe** | — | retried once ([INV-75](invariants.md#inv-75-a-transient-smoke-no-response-rc0-no-signal-retries-once-then-drops-unavailable--never-a-single-shot-gate-fail)) |
 | bare `no-response` still after one retry | `smoke_agent` retry | **UNAVAILABLE** (`no-response (… after retry — transient infra)`) |
+| `rc=0` silent-success `no-response` (CLI exits 0, no nonce, no signal) | — | **FAIL**, no retry (issue #257 follow-up — only `rc≠0` is transient) |
 
 The environmental signal is checked **before** the timeout branch, so an agy
 that hits a quota wall and then hangs is still UNAVAILABLE (the cause wins over
@@ -94,13 +95,17 @@ the bare timeout). The nonce match is exact — a truncated/garbled echo is FAIL
 **retry-once** of a bare `no-response` ([INV-75](invariants.md#inv-75-a-transient-smoke-no-response-rc0-no-signal-retries-once-then-drops-unavailable--never-a-single-shot-gate-fail)) lives in the **driver** `smoke_agent`,
 not in the classifier: it factors the single probe into `_smoke_probe_once` and, when
 the first probe is the step-5 bare `no-response` FAIL (detected by
-`_smoke_is_transient_no_response`: STATE==FAIL && reason starts `no-response`), runs
+`_smoke_is_transient_no_response`: STATE==FAIL && reason starts `no-response` && the
+reason's `rc=<n>` is **non-zero**), runs
 **exactly one** more fresh probe. A retry that PASSes → PASS; a retry that surfaces a
 genuine `auth-failed`/`config-error` → FAIL; a retry that stays no-response (or any
 other non-FAIL transient) → UNAVAILABLE. Genuine config FAILs and the already-
 environmental UNAVAILABLE cases (quota / stream-error / malformed-output / bare
 timeout) are returned on the **first** probe with no retry — the discriminator keys
-strictly on the `no-response` prefix that only the step-5 fallthrough emits.
+on the `no-response` prefix that only the step-5 fallthrough emits **and** a non-zero
+exit; a **`rc=0` silent-success** `no-response` (CLI exits 0 but produced no token) is
+genuine broken-output, **not** a transient, so it stays a single-shot gate-worthy
+FAIL with no retry (issue #257 follow-up).
 
 ### Evidence line
 
