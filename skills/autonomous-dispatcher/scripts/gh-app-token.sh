@@ -109,13 +109,21 @@ print(val)
 }
 
 # Get a GitHub App installation token for a specific repository.
-# Args: $1=app_id, $2=pem_file, $3=repo_owner, $4=repo_name
+# Args: $1=app_id, $2=pem_file, $3=repo_owner, $4=repo_name,
+#       $5=permissions_json (OPTIONAL, [INV-77]) — a JSON object scoping the
+#          minted token to a SUBSET of the installation's granted permissions,
+#          e.g. '{"contents":"write","issues":"write","pull_requests":"read"}'.
+#          When omitted/empty the token carries the installation's FULL grant
+#          (the existing wrapper-token behavior — unchanged). The requested
+#          permissions MUST be a subset of the installation's grant or GitHub
+#          rejects the exchange with HTTP 422.
 # Outputs the token string to stdout.
 get_gh_app_token() {
   local app_id="$1"
   local pem_file="$2"
   local repo_owner="$3"
   local repo_name="$4"
+  local permissions_json="${5:-}"
 
   # Validate repo_owner and repo_name contain only safe characters
   if ! [[ "$repo_owner" =~ ^[a-zA-Z0-9_-]+$ ]]; then
@@ -158,6 +166,17 @@ get_gh_app_token() {
     return 1
   }
 
+  # Build the access-token request body. Always scope to the single repo; when a
+  # permissions object is provided ([INV-77] scoped agent token), embed it so the
+  # minted token carries ONLY that subset (e.g. pull_requests:read → cannot
+  # approve/merge). _build_access_token_body keeps the JSON well-formed for both
+  # the full-grant (no permissions) and scoped cases.
+  local request_body
+  request_body=$(_build_access_token_body "$repo_name" "$permissions_json") || {
+    echo "ERROR: Failed to build access-token request body" >&2
+    return 1
+  }
+
   # Exchange JWT for an installation access token
   local token_response
   token_response=$(curl -s \
@@ -166,7 +185,7 @@ get_gh_app_token() {
     -H "Accept: application/vnd.github+json" \
     -w "\n%{http_code}" \
     "https://api.github.com/app/installations/${installation_id}/access_tokens" \
-    -d "{\"repositories\":[\"${repo_name}\"]}")
+    -d "$request_body")
 
   http_code=$(echo "$token_response" | tail -1)
   token_response=$(echo "$token_response" | sed '$d')
@@ -188,4 +207,60 @@ get_gh_app_token() {
   fi
 
   echo "$token"
+}
+
+# Build the JSON body for the access-token exchange ([INV-77]).
+# Args: $1=repo_name, $2=permissions_json (optional)
+# Always includes the single-repo `repositories` array. When a non-empty
+# permissions object is given, embeds it as `permissions` AFTER validating it as
+# a flat object of "read"/"write"/"admin" values (rejecting injection / malformed
+# input). On a missing permissions arg the body is exactly the pre-[INV-77]
+# full-grant body. Echoes the JSON body on stdout; returns non-zero on a
+# malformed permissions object.
+_build_access_token_body() {
+  local repo_name="$1"
+  local permissions_json="${2:-}"
+
+  if [[ -z "$permissions_json" ]]; then
+    printf '{"repositories":["%s"]}' "$repo_name"
+    return 0
+  fi
+
+  # Validate the permissions object: a flat JSON object whose every value is
+  # exactly read/write/admin and whose keys are GitHub permission identifiers
+  # ([a-z_]+). python3 is already a hard dependency (JWT encoding), so reuse it
+  # for parse + canonicalization rather than forking jq (not guaranteed present).
+  local canonical
+  canonical=$(printf '%s' "$permissions_json" | python3 -c '
+import sys, json, re
+try:
+    obj = json.load(sys.stdin)
+except Exception:
+    print("ERROR: permissions is not valid JSON", file=sys.stderr); sys.exit(1)
+if not isinstance(obj, dict) or not obj:
+    print("ERROR: permissions must be a non-empty JSON object", file=sys.stderr); sys.exit(1)
+key_re = re.compile(r"^[a-z_]+$")
+for k, v in obj.items():
+    if not key_re.match(k):
+        print(f"ERROR: invalid permission key {k!r}", file=sys.stderr); sys.exit(1)
+    if v not in ("read", "write", "admin"):
+        print(f"ERROR: permission {k!r} has invalid value {v!r}", file=sys.stderr); sys.exit(1)
+# Emit compact, key-sorted for deterministic test assertions.
+print(json.dumps(obj, separators=(",", ":"), sort_keys=True))
+') || return 1
+
+  printf '{"repositories":["%s"],"permissions":%s}' "$repo_name" "$canonical"
+}
+
+# Convenience wrapper: mint a SCOPED installation token ([INV-77]). Identical to
+# get_gh_app_token but REQUIRES the permissions object (the agent token must
+# always be down-scoped — a bare scoped mint with no permissions would be a bug).
+# Args: $1=app_id, $2=pem_file, $3=repo_owner, $4=repo_name, $5=permissions_json
+get_gh_app_scoped_token() {
+  local permissions_json="${5:-}"
+  if [[ -z "$permissions_json" ]]; then
+    echo "ERROR: get_gh_app_scoped_token requires a non-empty permissions JSON (5th arg)" >&2
+    return 1
+  fi
+  get_gh_app_token "$1" "$2" "$3" "$4" "$permissions_json"
 }

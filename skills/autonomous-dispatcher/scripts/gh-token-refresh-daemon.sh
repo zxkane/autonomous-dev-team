@@ -4,21 +4,28 @@
 # long-running Claude Code sessions (which can exceed the 1-hour token TTL).
 #
 # Usage:
-#   scripts/gh-token-refresh-daemon.sh <token_file> <app_id> <pem_file> <repo_owner> <repo_name> &
+#   scripts/gh-token-refresh-daemon.sh <token_file> <app_id> <pem_file> <repo_owner> <repo_name> [permissions_json] &
 #   DAEMON_PID=$!
 #
 # The daemon writes the token to <token_file> every REFRESH_INTERVAL seconds.
 # The wrapper script should set GH_TOKEN to read from this file before each gh call.
 #
+# [INV-77] Optional 6th arg <permissions_json>: when non-empty, every mint
+# (initial + each refresh) down-scopes the token to that permissions object —
+# this is how the SCOPED agent-token daemon keeps the agent's narrower token
+# fresh. Omitted/empty → full-grant token (the existing wrapper-token daemon,
+# byte-identical to the pre-[INV-77] 5-arg form).
+#
 # Kill the daemon when the session ends (e.g., in a trap handler).
 
 set -euo pipefail
 
-TOKEN_FILE="${1:?Usage: gh-token-refresh-daemon.sh <token_file> <app_id> <pem_file> <repo_owner> <repo_name>}"
+TOKEN_FILE="${1:?Usage: gh-token-refresh-daemon.sh <token_file> <app_id> <pem_file> <repo_owner> <repo_name> [permissions_json]}"
 APP_ID="${2:?Missing app_id}"
 PEM_FILE="${3:?Missing pem_file}"
 REPO_OWNER="${4:?Missing repo_owner}"
 REPO_NAME="${5:?Missing repo_name}"
+PERMISSIONS_JSON="${6:-}"
 
 # Refresh every 45 minutes (token TTL is 60 minutes)
 REFRESH_INTERVAL="${GH_TOKEN_REFRESH_INTERVAL:-2700}"
@@ -34,8 +41,10 @@ source "${LIB_DIR}/gh-app-token.sh"
 
 log() { echo "[token-refresh] $(date -u +%H:%M:%S) $*"; }
 
-# Write initial token atomically with restrictive permissions
-TOKEN=$(get_gh_app_token "$APP_ID" "$PEM_FILE" "$REPO_OWNER" "$REPO_NAME") || {
+# Write initial token atomically with restrictive permissions.
+# [INV-77] PERMISSIONS_JSON (when set) is forwarded as get_gh_app_token's 5th
+# arg so the minted token is down-scoped; empty → full-grant (5-arg behavior).
+TOKEN=$(get_gh_app_token "$APP_ID" "$PEM_FILE" "$REPO_OWNER" "$REPO_NAME" "$PERMISSIONS_JSON") || {
   log "ERROR: Failed to generate initial token"
   exit 1
 }
@@ -64,7 +73,7 @@ while true; do
     exit 0
   fi
 
-  NEW_TOKEN=$(get_gh_app_token "$APP_ID" "$PEM_FILE" "$REPO_OWNER" "$REPO_NAME") || {
+  NEW_TOKEN=$(get_gh_app_token "$APP_ID" "$PEM_FILE" "$REPO_OWNER" "$REPO_NAME" "$PERMISSIONS_JSON") || {
     ((FAIL_COUNT++))
     log "WARNING: Failed to refresh token (failure $FAIL_COUNT/$MAX_CONSECUTIVE_FAILURES), keeping existing"
     if [[ $FAIL_COUNT -ge $MAX_CONSECUTIVE_FAILURES ]]; then

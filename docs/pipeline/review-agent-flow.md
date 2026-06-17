@@ -74,6 +74,7 @@ Same pattern as the dev wrapper — see [`dev-agent-flow.md`](dev-agent-flow.md#
 
 - PID file: `${PID_DIR}/review-<N>.pid` ([INV-01](invariants.md#inv-01-pid-file-naming)) — `${PID_DIR}` resolved by `lib-config.sh::pid_dir_for_project`.
 - Auth: review-agent app mode uses `REVIEW_AGENT_APP_ID` / `REVIEW_AGENT_APP_PEM` (separate App identity from dev so reviewer comments are attributed correctly).
+- **Two-token split ([INV-77])**: after `setup_github_auth`, the review wrapper calls `setup_agent_token` to mint the SCOPED token (`contents:write`, `issues:write`, `pull_requests:read`) for the review-agent subtree — identical to the dev side (see [dev-agent-flow § Two-token split](dev-agent-flow.md#two-token-split--the-agents-scrubbed-environment-inv-77)). Review agents only READ the PR and post issue/PR comments + the E2E report, so none need `pull_requests:write`; the wrapper's full-write token remains the sole approve/merge path ([INV-44](invariants.md#inv-44-the-wrapper-owns-the-mergeability-gate-merge-only-when-githubs-mergeable-true-not-the-agents-claim) / [INV-52](invariants.md#inv-52-a-substantive-fail-asserts-the-prs-github-native-state-not-just-a-comment)). `lib-agent.sh::_run_with_timeout` applies the same CLI-agnostic env scrub to every fan-out agent + the browser-E2E lane. PAT mode → one-time WARN + no scrub.
 
 ## PR discovery (3 fallback methods)
 
@@ -133,9 +134,11 @@ E2E_ACTIVE == true:
         evidence (fence ac-coverage:begin/end, jq-validated, fail-safe) → the
         per-round sidecar E2E_AC_COVERAGE_FILE for the fan-out's deterministic check.
     browser mode → ONE LLM lane (run_agent against build_browser_e2e_prompt). The
-        LLM posts a `## E2E Verification Report` comment; the WRAPPER stamps the SHA
-        marker ONTO that report (_stamp_browser_evidence_marker, REST PATCH) after a
-        clean exit. No report to stamp → fail closed (rc forced non-zero).
+        LLM WRITES its `## E2E Verification Report` to $E2E_REPORT_FILE (the INV-77
+        broker); the WRAPPER posts it (_post_brokered_e2e_report) then stamps the
+        SHA marker ONTO that report (_stamp_browser_evidence_marker, REST PATCH)
+        after a clean exit. The LLM ALSO posts directly as a fallback (issues:write
+        retained). No report to stamp → fail closed (rc forced non-zero).
   E2E HARD GATE — _classify_e2e_gate <lane_rc> <evidence_present>:
     (a) lane .rc == 0  AND
     (b) re-fetch (_fetch_sha_evidence, bounded retry) finds a SHA-matching
@@ -158,7 +161,7 @@ E2E_ACTIVE == false → no lane, no gate (E2E_GATE=inactive); straight to fan-ou
 ```
 
 - **command-mode lane is shell, not an LLM.** `_run_command_e2e_lane` runs entirely in the wrapper shell — no `run_agent`, no tokens. The verify command runs under `setsid` + `timeout --kill-after=30s --signal=TERM ${E2E_COMMAND_TIMEOUT_SECONDS}` so its subtree is reapable ([INV-23](invariants.md#inv-23-pid_file-points-at-a-process-whose-death-reaps-the-entire-agent-subtree)); the lane's PGID is added to `_reap_fanout_processes`'s arg list alongside the fan-out agents'.
-- **browser-mode is ONE LLM lane**, not replicated across review agents. The wrapper stamps `<!-- e2e-evidence: complete sha="${PR_HEAD_SHA}" -->` **onto the LLM-posted `## E2E Verification Report` comment** (`_stamp_browser_evidence_marker`, REST `PATCH`, idempotent) so the gate anchor is deterministic without the LLM transcribing the SHA — and so the gate's evidence-present signal + the review agents' evidence-read both resolve to the REAL report, not a marker-only comment. A clean exit with NO stampable report comment fails the gate closed (rc forced non-zero) — a marker-only comment can never satisfy the gate.
+- **browser-mode is ONE LLM lane**, not replicated across review agents. **Report broker ([INV-77]):** the LLM WRITES the report to `$E2E_REPORT_FILE` and the wrapper posts it (`_post_brokered_e2e_report`) — matching the verdict-artifact broker direction so report DELIVERY does not depend on the agent's own write capability under the scoped token (the agent's direct post is a retained fallback via `issues:write`). The wrapper then stamps `<!-- e2e-evidence: complete sha="${PR_HEAD_SHA}" -->` **onto the `## E2E Verification Report` comment** (`_stamp_browser_evidence_marker`, REST `PATCH`, idempotent) so the gate anchor is deterministic without the LLM transcribing the SHA — and so the gate's evidence-present signal + the review agents' evidence-read both resolve to the REAL report, not a marker-only comment. A clean exit with NO stampable report comment fails the gate closed (rc forced non-zero) — a marker-only comment can never satisfy the gate.
 - **The gate is a mechanical dual-signal**, fail-closed: a crash between parser-ok and comment-post (`rc=0` but no SHA-matching evidence) routes `block-nonsubstantive` (transient re-queue), not a dev bounce; a real verify failure (`rc≠0`) routes `fail` (substantive). A `rc≠0`-with-stale-present-evidence does NOT pass.
 - **Review agents are PURE code reviewers.** `build_review_prompt` no longer contains any E2E execution block; the prompt tells each agent to READ the wrapper-posted evidence comment as input and cross-check it against the acceptance criteria. They do not run E2E.
 - **Structured AC-coverage double-check ([INV-49](invariants.md#inv-49-command-mode-e2e-may-feed-the-review-fan-out-a-structured-ac-coverage-artifact--optional-fail-safe), #183).** Command-mode only: when the evidence parser emits the optional `ac-coverage:begin … ac-coverage:end` JSON fence, the lane jq-validates it (fail-safe — malformed → empty, fall back to free-form; never fail-open) and writes it to `E2E_AC_COVERAGE_FILE`. When that per-round sidecar is non-empty, `build_review_prompt` PREFERS the deterministic map over LLM-parsing the free-form markdown table; an empty/absent sidecar yields the exact post-#182 free-form double-check. The artifact is a review aid only — the E2E hard gate is unchanged.

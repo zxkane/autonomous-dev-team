@@ -299,8 +299,16 @@ if [[ "$GH_AUTH_MODE" == "app" ]]; then
       "docs/pipeline/errors.md#authentication-class-class-auth" auth
     exit 1
   fi
+  # [INV-77] Mint the SECOND, scoped token for the review-agent subtree (reuses
+  # the review App credentials). Review agents only READ the PR + post comments /
+  # the E2E report — none need pull_requests:write, so the same scoped profile
+  # fits. Best-effort: a mint failure WARNs and leaves agents on the full-write
+  # credential (no scrub) rather than blocking the review.
+  setup_agent_token "${REVIEW_AGENT_APP_ID}" "${REVIEW_AGENT_APP_PEM}"
 else
   setup_github_auth
+  # [INV-77] PAT mode: no second token possible — logs a one-time WARN.
+  setup_agent_token
 fi
 
 # ---------------------------------------------------------------------------
@@ -1251,6 +1259,10 @@ if [[ "${E2E_ACTIVE:-false}" == "true" ]]; then
       # wrapper stamps the SHA marker after the lane posts its report.
       _e2e_session_id=$(uuidgen)
       _e2e_log="/tmp/agent-${PROJECT_ID}-review-${ISSUE_NUMBER}-e2e-browser.log"
+      # [INV-77] E2E report broker: the agent WRITES its report to this file and
+      # the wrapper posts it (the credential-split delivery path). Exported so it
+      # survives the agent env scrub (`env -u …` only unsets the credential vars).
+      export E2E_REPORT_FILE="${_E2E_LANE_DIR}/e2e-report.md"
       _e2e_prompt=$(build_browser_e2e_prompt)
       _e2e_rc=0
       # Browser lane runs under run_agent; its setsid PGID lands in
@@ -1271,6 +1283,10 @@ if [[ "${E2E_ACTIVE:-false}" == "true" ]]; then
         run_agent "$_e2e_session_id" "$_e2e_prompt" "${AGENT_REVIEW_MODEL:-sonnet}" \
           "review-e2e-pr-${PR_NUMBER}-issue-${ISSUE_NUMBER}" >>"$_e2e_log" 2>&1
       ) || _e2e_rc=$?
+      # [INV-77] Broker the agent-written report onto the PR (no-op if the agent's
+      # direct issues:write fallback already posted, or no file was written). Done
+      # BEFORE the SHA-marker stamp so the stamp finds the report comment.
+      _post_brokered_e2e_report
       # Wrapper-stamp the SHA marker ONTO the lane's posted '## E2E Verification
       # Report' comment so the gate anchor is deterministic (the LLM never
       # transcribes the SHA) AND the gate's evidence-present signal resolves to

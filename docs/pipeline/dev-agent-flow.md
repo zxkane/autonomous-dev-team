@@ -70,6 +70,40 @@ Both modes then install the `gh-with-token-refresh.sh` wrapper on **two distinct
 
 Cleanup (`cleanup_github_auth`, called from the wrapper trap) kills the daemon (if any) and removes the per-run `GH_WRAPPER_DIR` (token file + the per-run `gh`), then resets `GH_WRAPPER_DIR`/`GH_TOKEN_FILE`/`TOKEN_DAEMON_PID` so a reused-shell `setup → cleanup → setup` doesn't point at the deleted dir. It deliberately does **NOT** touch the shared `scripts/gh` — a per-run cleanup must never delete a shared artifact another run depends on (#163).
 
+### Two-token split — the agent's scrubbed environment ([INV-77])
+
+After `setup_github_auth`, the dev wrapper calls `setup_agent_token` to mint a
+SECOND, **scoped** installation token (`contents:write`, `issues:write`,
+`pull_requests:read`) into `AGENT_GH_TOKEN_FILE` with its own refresh daemon
+(reaped by `cleanup_github_auth` alongside the full-write daemon). When that
+scoped token is armed, `lib-agent.sh::_run_with_timeout` prepends a CLI-agnostic
+`env`-scrub prefix (`build_agent_env_argv`) to EVERY adapter launch, so the agent
+subtree's environment differs from the wrapper's:
+
+| Var | Wrapper shell | Agent subtree (app mode, scoped) | Agent subtree (PAT / no-scope) |
+|-----|---------------|----------------------------------|-------------------------------|
+| `GH_TOKEN` | full-write token | **scoped** token | inherited (shared) |
+| `GH_TOKEN_FILE` | full-write token file | **unset** | inherited |
+| `GITHUB_PERSONAL_ACCESS_TOKEN` | full-write token | **unset** | inherited |
+| `GH_USER_PAT` | host PAT (if set) | **unset** | inherited |
+| `PATH` (per-run `GH_WRAPPER_DIR` shim) | present | **stripped** | present |
+
+The agent's `bash scripts/gh` resolves the shared `scripts/gh` shim (a relative
+path, NOT a `PATH` lookup), which — with `GH_TOKEN_FILE` unset — falls through to
+`exec gh` inheriting the scoped `GH_TOKEN`. So the agent authenticates as the
+scoped identity and gets a 403 on `gh pr review --approve` / `gh pr merge`. Because
+`pull_requests:read` also blocks `gh pr create`, the dev agent writes a
+`branch: <head>` line + the PR title+body to `AGENT_PR_CREATE_FILE` and the
+wrapper opens the PR with an **explicit `--head <branch>`**
+(`drain_agent_pr_create`, in the exit trap before the `PR_EXISTS` lookup). The
+explicit head is load-bearing: the wrapper runs from `PROJECT_DIR` (checked out on
+the BASE branch), so a bare `gh pr create` would infer head=base and fail — the
+broker takes the agent's `branch:` line, else derives the pushed `*issue-<N>*`
+branch from origin (the [INV-45] glob), and skips with a WARN if neither yields a
+branch (#234 review). In PAT
+mode / app-mode-mint-failure the prefix is empty (no scrub) — byte-identical to
+pre-INV-77. See [INV-77](invariants.md#inv-77-in-app-mode-the-agent-process-gets-only-a-scoped-token-the-wrapper-keeps-full-write-and-is-the-sole-approvemergepr-create-path).
+
 ## Path resolution lessons (#58)
 
 `lib-agent.sh` and `lib-auth.sh` use `readlink -f $BASH_SOURCE` to find their own dir, which **breaks the symlink-vendor pattern** consumer projects use (symlinking from `<project>/scripts/lib-agent.sh` into `.claude/skills/.../lib-agent.sh`). After `readlink -f`, the script's idea of "its own dir" is the skill installation dir, not the project's `scripts/` — and the autonomous.conf lookup misses.

@@ -493,6 +493,53 @@ _stamp_browser_evidence_marker() {
 }
 
 # ---------------------------------------------------------------------------
+# _post_brokered_e2e_report — [INV-77] E2E report broker. The browser lane agent
+# WRITES its `## E2E Verification Report` to E2E_REPORT_FILE (a wrapper-set path);
+# the WRAPPER (full-write token) posts it on the PR. This matches the verdict-
+# artifact broker direction so the report path does not DEPEND on the agent's own
+# write capability (though the scoped agent token keeps issues:write, so the
+# agent's direct `bash scripts/gh pr comment` remains a working fallback — a
+# missed broker write never loses the report).
+#
+# Idempotent + fail-safe: posts ONLY when E2E_REPORT_FILE is set, exists, and is
+# non-empty. A missing/empty file → no post (the agent's direct fallback already
+# posted, OR there is genuinely nothing to post) and a 0 return. Reads
+# PR_NUMBER / REPO / E2E_REPORT_FILE from the environment. Returns 0 always (the
+# downstream SHA-marker stamp + dual-signal gate is the authoritative evidence
+# check — this broker is a delivery convenience, never a gate).
+_post_brokered_e2e_report() {
+  [[ -n "${E2E_REPORT_FILE:-}" ]] || return 0
+  [[ -s "${E2E_REPORT_FILE}" ]] || return 0
+  local body
+  body=$(cat "${E2E_REPORT_FILE}" 2>/dev/null) || return 0
+  [[ -n "$body" ]] || return 0
+
+  # Dedupe: if a `## E2E Verification Report` comment already exists in this
+  # review's window (the agent took its documented write-FAILED fallback and
+  # posted directly), do NOT post again — the wrapper's broker is the primary
+  # path, the direct post is the fallback, and we must not duplicate the comment.
+  # Window-bounded by WRAPPER_START_TS (the same anchor _stamp_browser_evidence_
+  # marker uses); best-effort — a gh failure here just means we proceed to post.
+  if [[ -n "${WRAPPER_START_TS:-}" ]]; then
+    local _existing
+    _existing=$(gh api "repos/${REPO_OWNER}/${REPO_NAME}/issues/${PR_NUMBER}/comments" --paginate \
+      --jq "[.[] | select((.created_at >= \"${WRAPPER_START_TS}\") and (.body | contains(\"## E2E Verification Report\")))] | length" \
+      2>/dev/null | tail -n1 || true)
+    if [[ "$_existing" =~ ^[0-9]+$ ]] && [[ "$_existing" -gt 0 ]]; then
+      log "INV-77: an E2E report comment already exists in this review window (agent posted directly) — skipping the brokered post to avoid a duplicate."
+      return 0
+    fi
+  fi
+
+  if gh pr comment "$PR_NUMBER" --repo "$REPO" --body "$body" >/dev/null 2>&1; then
+    log "INV-77: wrapper brokered the browser E2E report comment onto PR #${PR_NUMBER} (agent wrote ${E2E_REPORT_FILE})."
+  else
+    log "INV-77: brokered E2E report post failed (non-fatal) — the agent's direct issues:write fallback may already have posted; the SHA-marker stamp + gate remain authoritative."
+  fi
+  return 0
+}
+
+# ---------------------------------------------------------------------------
 # build_browser_e2e_prompt — the ONE browser-mode E2E lane prompt (issue #182).
 #
 # E2E_MODE=browser needs an LLM to drive Chrome DevTools MCP, so it stays an
@@ -554,9 +601,18 @@ echo "Uploaded: \$SCREENSHOT_URL"
   (\`list_console_messages\`).
 - \`take_screenshot\` at each verification point and upload immediately.
 
-### Step 7: Post the E2E report as a PR comment
-Post a structured comment on PR #${PR_NUMBER} (NOT the issue) with this format
-(the WRAPPER will append the SHA evidence marker — you do NOT add it):
+### Step 7: Deliver the E2E report (broker — [INV-77])
+WRITE your structured report to the file path in the \`E2E_REPORT_FILE\`
+environment variable (\`\$(printenv E2E_REPORT_FILE)\`); the WRAPPER reads that
+file and posts it on PR #${PR_NUMBER} for you (the brokered, credential-split
+path — your scoped token cannot approve/merge, so report DELIVERY is brokered
+through the wrapper, like the verdict artifact). The WRAPPER appends the SHA
+evidence marker — you do NOT add it.
+ONLY IF writing that file FAILS (e.g. the path is unwritable), fall back to
+posting the SAME report directly as a PR comment on #${PR_NUMBER} (NOT the
+issue) — your token retains issues:write. Do NOT do both: writing the file is
+the primary path and the wrapper handles the post, so a direct post on top
+would duplicate the comment. Use this format for the report:
 
 \`\`\`markdown
 ## E2E Verification Report
@@ -584,11 +640,12 @@ Post a structured comment on PR #${PR_NUMBER} (NOT the issue) with this format
 | Console errors | PASS/FAIL |
 \`\`\`
 
-If ALL E2E checks pass, exit 0 after posting the report. If ANY check fails,
-post the report with the failures recorded and exit non-zero — the wrapper's
-E2E hard gate will then FAIL the review WITHOUT fanning out the code reviewers.
+If ALL E2E checks pass, exit 0 after writing/posting the report. If ANY check
+fails, write/post the report with the failures recorded and exit non-zero — the
+wrapper's E2E hard gate will then FAIL the review WITHOUT fanning out the code
+reviewers.
 
 IMPORTANT: Work autonomously. Do NOT review code — only run the browser E2E and
-post the report.
+deliver the report (write \`\$E2E_REPORT_FILE\` + post as a fallback).
 E2E_BROWSER_LANE
 }

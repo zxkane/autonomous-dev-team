@@ -322,7 +322,27 @@ _run_with_timeout() {
   if [[ -n "$_AGENT_TIMEOUT_CMD" ]]; then
     cmd+=("$_AGENT_TIMEOUT_CMD" --kill-after=30s --signal=TERM "$AGENT_TIMEOUT")
   fi
-  cmd+=("${AGENT_LAUNCHER_ARGV[@]}" "$@")
+
+  # [INV-77] Agent env scrub. build_agent_env_argv (lib-auth.sh) emits an `env`
+  # argv-prefix that gives the agent subtree ONLY the scoped installation token
+  # (GH_TOKEN=<scoped>) and strips the wrapper's full-write credential
+  # (GH_TOKEN_FILE / GITHUB_PERSONAL_ACCESS_TOKEN / GH_USER_PAT) plus the per-run
+  # `gh` shim PATH entry. CLI-agnostic: applied here, it wraps EVERY adapter's
+  # invocation uniformly (claude/codex/gemini/kiro/opencode/agy/generic) and the
+  # launcher (the `cc` function) too — `env VAR=x …` sets the env for the command
+  # AND all descendants. Emits an EMPTY array (no prefix) in PAT mode /
+  # app-mode-mint-failure, so behavior is byte-identical when no scoped token is
+  # armed. Guarded on the helper existing so a unit harness that sources lib-agent
+  # without lib-auth still runs (no scrub).
+  local _agent_env_prefix=()
+  if declare -F build_agent_env_argv >/dev/null 2>&1; then
+    build_agent_env_argv _agent_env_prefix
+  fi
+
+  # Order: [timeout] <launcher> <env-scrub> <agent argv>. The scrub prefix sits
+  # AFTER the launcher so the launcher process is scrubbed too, and BEFORE the
+  # agent argv so the agent and its whole subtree run under the scoped token.
+  cmd+=("${AGENT_LAUNCHER_ARGV[@]}" "${_agent_env_prefix[@]}" "$@")
 
   # Prepend setsid when available so the agent gets its own session+PGID.
   # On the rare host without it (no util-linux), the agent runs in the

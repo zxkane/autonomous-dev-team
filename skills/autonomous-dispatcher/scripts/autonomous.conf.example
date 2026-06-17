@@ -562,6 +562,24 @@ REVIEW_AGENT_APP_PEM=""
 DISPATCHER_APP_ID=""
 DISPATCHER_APP_PEM=""
 
+# --- Scoped agent token ([INV-77], app mode only) ---
+# In GH_AUTH_MODE=app the wrapper mints a SECOND, down-scoped installation token
+# for the AGENT subprocess (the wrapper keeps the full-write token for label
+# flips / approve / merge / verdict). The agent's token is scrubbed of the
+# full-write credential at launch, so `gh pr review --approve` / `gh pr merge`
+# fail 403 from the agent — the wrapper's INV-44/52 gates are the sole approve/
+# merge path. `gh pr create` is brokered through the wrapper (the agent writes
+# the PR title+body to a file). The default scope is enough to push branches,
+# comment, and tick checkboxes:
+#   contents:write (push — REQUIRED), issues:write (comments/ticks),
+#   pull_requests:read (cannot approve/merge/create — the containment lever).
+# Override only if you understand the trade-off (e.g. a narrower review-side
+# profile once metrics justify a per-side split). The App INSTALLATION must
+# still grant pull_requests:write (the wrapper needs it); the scoped token just
+# requests a subset. PAT mode ignores this (a PAT cannot be down-scoped) and
+# logs a one-time WARN. See docs/github-app-setup.md "Two-token split".
+# AGENT_TOKEN_PERMISSIONS='{"contents":"write","issues":"write","pull_requests":"read"}'
+
 # Absolute path to the real `gh` CLI binary. Set this when `gh` is installed
 # outside the minimal POSIX PATH (Homebrew, nvm, asdf, ~/bin, /snap/bin,
 # container /opt/gh, etc.) AND the dispatcher/wrappers may be spawned from
