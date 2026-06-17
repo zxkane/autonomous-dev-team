@@ -158,6 +158,79 @@ assert_eq "TC-VERDICT-ARTIFACT-015a first read state captured (valid)" "valid" "
 assert_eq "TC-VERDICT-ARTIFACT-015b first read verdict captured (pass) — late write not retroactively applied" \
   "pass" "$FIRST_V"
 
+# TC-038 — TRUE read-once: validation must derive from the SAME snapshot the
+# state/verdict are read from ([P1] #1). Previously the classifier cat'd the bytes
+# into _bytes but then validated $_path (a second disk read), so a rename landing
+# between those two reads could flip valid↔malformed. We can't deterministically
+# win that race in a test, but we CAN pin the structural guarantee: a single
+# _classify_verdict_artifact call must NOT read the path more than once. Use a
+# `cat` shim that counts reads of the target file.
+_READ_COUNT_FILE="$TMP/read-count"
+: > "$_READ_COUNT_FILE"
+# Re-source the lib in a subshell with `cat` shimmed to tally reads of the artifact.
+read_count_for() {
+  local _f="$1"
+  ( : > "$_READ_COUNT_FILE"
+    cat() {
+      local a; for a in "$@"; do
+        [[ "$a" == "$_f" ]] && echo r >> "$_READ_COUNT_FILE"
+      done
+      command cat "$@"
+    }
+    export -f cat 2>/dev/null || true
+    _classify_verdict_artifact "$_f" >/dev/null 2>&1
+    wc -l < "$_READ_COUNT_FILE" | tr -d ' '
+  )
+}
+cp "$EXAMPLES/verdict-artifact.golden.pass.json" "$TMP/verdict-once.json"
+_READS=$(read_count_for "$TMP/verdict-once.json")
+assert_eq "TC-VERDICT-ARTIFACT-038 classifier reads the artifact path exactly ONCE (true snapshot, [P1]#1)" \
+  "1" "$_READS"
+
+# TC-039 — identity binding ([P1] #2): a schema-valid artifact whose runId/agent do
+# NOT match the wrapper-assigned session/agent MUST be rejected (malformed), so a
+# buggy adapter copying example JSON or another agent's identifiers cannot cast a
+# vote for this review slot. _classify_verdict_artifact takes optional
+# <expected-run-id> <expected-agent>; when supplied, a mismatch → malformed.
+# golden.pass has runId=01c9c077-… agent=claude.
+GP="$EXAMPLES/verdict-artifact.golden.pass.json"
+assert_eq "TC-VERDICT-ARTIFACT-039a matching runId+agent → valid" \
+  "valid" "$(_classify_verdict_artifact "$GP" "01c9c077-febc-4cf3-a716-ee66ae584135" claude | head -n1)"
+assert_eq "TC-VERDICT-ARTIFACT-039b mismatched runId → malformed (foreign session)" \
+  "malformed" "$(_classify_verdict_artifact "$GP" "different-session-uuid" claude | head -n1)"
+assert_eq "TC-VERDICT-ARTIFACT-039c mismatched agent → malformed (foreign agent identifiers)" \
+  "malformed" "$(_classify_verdict_artifact "$GP" "01c9c077-febc-4cf3-a716-ee66ae584135" agy | head -n1)"
+assert_eq "TC-VERDICT-ARTIFACT-039d no expected identity passed → identity check skipped (back-compat)" \
+  "valid" "$(_classify_verdict_artifact "$GP" | head -n1)"
+# The identity-mismatch reason is surfaced (loud, distinct from a generic schema error).
+assert_grep_str() { local d="$1" hay="$2" needle="$3"; if [[ "$hay" == *"$needle"* ]]; then echo -e "  ${GREEN}PASS${NC}: $d"; PASS=$((PASS+1)); else echo -e "  ${RED}FAIL${NC}: $d"; echo "      haystack=[$hay]"; FAIL=$((FAIL+1)); fi; }
+assert_grep_str "TC-VERDICT-ARTIFACT-039e identity-mismatch error names the mismatch" \
+  "$(_artifact_schema_error "$GP" "different-session-uuid" claude)" "identity"
+
+# TC-040 — jq fallback must enforce the FULL schema shape ([P1] #3), not just a few
+# top-level fields. Force the jq backend (unset the schema so python is skipped on
+# the [[ -f ]] gate; _validate_verdict_artifact_jq is also tested directly). Each
+# of these is schema-INVALID and MUST be rejected by the jq fallback.
+jq_state() { ( unset VERDICT_ARTIFACT_SCHEMA; _classify_verdict_artifact "$1" | head -n1 ); }
+mk() { printf '%s' "$2" > "$TMP/$1.json"; }
+mk bf-empty-obj  '{"schema_version":1,"verdict":"PASS","blockingFindings":{},"runId":"r","agent":"a"}'
+mk nbf-string    '{"schema_version":1,"verdict":"PASS","nonBlockingFindings":"oops","runId":"r","agent":"a"}'
+mk finding-no-title '{"schema_version":1,"verdict":"FAIL","blockingFindings":[{"detail":"no title"}],"runId":"r","agent":"a"}'
+mk addl-prop     '{"schema_version":1,"verdict":"PASS","runId":"r","agent":"a","bogusExtra":true}'
+mk finding-bad-line '{"schema_version":1,"verdict":"FAIL","blockingFindings":[{"title":"x","line":-3}],"runId":"r","agent":"a"}'
+for case in bf-empty-obj:blockingFindings-empty-object nbf-string:nonBlockingFindings-as-string \
+            finding-no-title:finding-missing-title addl-prop:additional-property \
+            finding-bad-line:finding-negative-line; do
+  f="${case%%:*}"; desc="${case#*:}"
+  assert_eq "TC-VERDICT-ARTIFACT-040 jq fallback rejects $desc → malformed" \
+    "malformed" "$(_validate_verdict_artifact_jq "$TMP/$f.json" && echo valid || echo malformed)"
+done
+# And a genuinely valid artifact still passes the strengthened jq fallback.
+assert_eq "TC-VERDICT-ARTIFACT-040z jq fallback still accepts a valid golden" \
+  "valid" "$(_validate_verdict_artifact_jq "$EXAMPLES/verdict-artifact.golden.pass.json" && echo valid || echo malformed)"
+assert_eq "TC-VERDICT-ARTIFACT-040y jq fallback still accepts a valid FAIL golden (findings array w/ title)" \
+  "valid" "$(_validate_verdict_artifact_jq "$EXAMPLES/verdict-artifact.golden.fail.json" && echo valid || echo malformed)"
+
 # ---------------------------------------------------------------------------
 # Part 2: source-of-truth wiring in the wrapper
 # ---------------------------------------------------------------------------
@@ -171,6 +244,13 @@ assert_grep "TC-VERDICT-ARTIFACT-W4 prompt injects the artifact path + atomic-wr
   'rename|atomic|\.tmp' "$WRAPPER"
 assert_grep "TC-VERDICT-ARTIFACT-W5 wrapper classifies the artifact first (_classify_verdict_artifact)" \
   '_classify_verdict_artifact' "$WRAPPER"
+# [P1] #2 (#233 review): the wrapper MUST pass the per-agent expected identity
+# (session id + agent name) so a foreign-identity artifact cannot vote for this
+# slot. Pin the call shape so a refactor can't silently drop the binding.
+assert_grep "TC-VERDICT-ARTIFACT-W5b wrapper binds artifact identity (_classify_verdict_artifact … session-id agent-name)" \
+  '_classify_verdict_artifact "\$_art_path" "\$\{AGENT_SESSION_IDS\[\$_i\]\}" "\$\{AGENT_NAMES\[\$_i\]\}"' "$WRAPPER"
+assert_grep "TC-VERDICT-ARTIFACT-W5c malformed envelope reason also binds identity (_artifact_schema_error … session-id agent-name)" \
+  '_artifact_schema_error "\$_art_path" "\$\{AGENT_SESSION_IDS\[\$_i\]\}" "\$\{AGENT_NAMES\[\$_i\]\}"' "$WRAPPER"
 assert_grep "TC-VERDICT-ARTIFACT-W6 logged verdict-source=artifact marker" \
   'verdict-source=artifact' "$WRAPPER"
 assert_grep "TC-VERDICT-ARTIFACT-W7 logged verdict-source=comment-fallback marker" \

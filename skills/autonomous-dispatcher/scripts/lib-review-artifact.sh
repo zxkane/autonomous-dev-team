@@ -111,24 +111,67 @@ PY
 }
 
 # _validate_verdict_artifact_jq <instance> — rc 0 valid / 1 rejected / 2 error.
-# Structural fallback when python3-jsonschema is unavailable. Cannot run the full
-# Draft-07 conditional graph, but enforces the load-bearing rules the spec's
-# negative fixtures pin:
+# Structural fallback when python3-jsonschema is unavailable (the packaged-skill
+# default, since the JSON Schema lives outside the skill tree). [P1] #3 (#233
+# review): this MUST enforce the FULL schema shape, not just a few top-level
+# fields — otherwise a schema-invalid payload (e.g. PASS with `blockingFindings`
+# as an object, a finding without `title`, an unknown top-level key) would be
+# accepted as `valid` in the default deployment, suppressing the malformed
+# envelope. The checks below mirror verdict-artifact.schema.json
+# (additionalProperties:false at every level, the finding shape, the typed
+# evidence sub-objects, and the FAIL⇔≥1-blocking both-directions conditional):
 #   - well-formed JSON object;
-#   - required keys present: schema_version, verdict, runId, agent;
-#   - schema_version == 1;
-#   - verdict ∈ {PASS, FAIL};
-#   - FAIL ⇔ ≥1 blocking finding (both directions): FAIL+empty-blocking rejected,
-#     PASS+non-empty-blocking rejected;
-#   - runId / agent non-empty strings.
+#   - ONLY the schema's known top-level keys (additionalProperties:false);
+#   - required: schema_version==1, verdict ∈ {PASS,FAIL}, runId/agent non-empty
+#     strings; model (if present) a string;
+#   - blockingFindings / nonBlockingFindings (if present) are ARRAYS of findings,
+#     each an object with a non-empty string `title`, only the known finding keys,
+#     and (if present) detail:string / file:string / line:integer>=0;
+#   - evidence (if present) an object with only acCoverage / e2eReport, where
+#     acCoverage is an object of "pass"|"fail" values and e2eReport.gate ∈
+#     {pass,fail,skipped,not-run};
+#   - FAIL ⇔ ≥1 blocking finding (both directions).
 _validate_verdict_artifact_jq() {
   local _inst="$1"
   jq -e '
+    # --- finding shape (shared by blocking + non-blocking) ---
+    def is_finding:
+      (type == "object")
+      and (has("title") and (.title | type == "string") and ((.title | length) >= 1))
+      and ((keys - ["title","detail","file","line"]) | length == 0)
+      and ((has("detail") | not) or (.detail | type == "string"))
+      and ((has("file")   | not) or (.file   | type == "string"))
+      and ((has("line")   | not) or (.line   | (type == "number") and (. == floor) and (. >= 0)));
+    def is_finding_array:
+      (type == "array") and (all(.[]; is_finding));
+    def is_ac_coverage:
+      (type == "object") and (all(.[]; . == "pass" or . == "fail"));
+    def is_e2e_report:
+      (type == "object")
+      and ((keys - ["gate","mode","summary"]) | length == 0)
+      and (has("gate") and (.gate | IN("pass","fail","skipped","not-run")))
+      and ((has("mode")    | not) or (.mode    | IN("command","browser")))
+      and ((has("summary") | not) or (.summary | type == "string"));
+    def is_evidence:
+      (type == "object")
+      and ((keys - ["acCoverage","e2eReport"]) | length == 0)
+      and ((has("acCoverage") | not) or (.acCoverage | is_ac_coverage))
+      and ((has("e2eReport")  | not) or (.e2eReport  | is_e2e_report));
+
     (type == "object")
+    # additionalProperties:false at the top level.
+    and ((keys - ["schema_version","verdict","blockingFindings","nonBlockingFindings","evidence","runId","agent","model"]) | length == 0)
     and has("schema_version") and (.schema_version == 1)
     and has("runId")  and (.runId  | type == "string" and length >= 1)
     and has("agent")  and (.agent  | type == "string" and length >= 1)
+    and ((has("model") | not) or (.model | type == "string"))
     and has("verdict") and ((.verdict == "PASS") or (.verdict == "FAIL"))
+    and ((has("blockingFindings")    | not) or (.blockingFindings    | is_finding_array))
+    and ((has("nonBlockingFindings") | not) or (.nonBlockingFindings | is_finding_array))
+    and ((has("evidence") | not) or (.evidence | is_evidence))
+    # FAIL ⇔ ≥1 blocking finding (both directions). Guard the length on an ARRAY
+    # only — a non-array blockingFindings is already rejected by is_finding_array
+    # above, so here `// []` just defaults an ABSENT key.
     and (((.blockingFindings // []) | length) as $n
          | (if .verdict == "FAIL" then $n >= 1 else $n == 0 end))
   ' "$_inst" >/dev/null 2>&1
@@ -139,30 +182,45 @@ _validate_verdict_artifact_jq() {
   return 1
 }
 
-# _classify_verdict_artifact <path>
+# _classify_verdict_artifact <path> [<expected-run-id> [<expected-agent>]]
 #
-# The §4.3 `verdict.state`. Reads the file ONCE (Clause VA5: a write that lands
-# after this read is never observed — the caller captures this snapshot and does
-# not re-stat). Echoes:
+# The §4.3 `verdict.state`. Echoes:
 #
-#   valid\n<canonical-json>   — schema-pass; line 1 is the state, line 2..N is the
-#                               compact canonical JSON for the caller to map.
-#   malformed                 — the file exists but fails schema validation
-#                               (Clause V1: caller treats this as absent FOR THE
-#                               VOTE but surfaces it loudly — never a silent PASS).
+#   valid\n<canonical-json>   — schema-pass (AND identity-match when expected
+#                               run-id/agent are supplied); line 1 is the state,
+#                               line 2..N is the compact canonical JSON.
+#   malformed                 — the file exists but fails schema validation, OR
+#                               its `.runId`/`.agent` do not match the expected
+#                               identity (Clause V1: caller treats this as absent
+#                               FOR THE VOTE but surfaces it loudly — never a
+#                               silent PASS).
 #   absent                    — no file at <path> (the rename hasn't landed, or the
 #                               agent never wrote one). A bare `<path>.tmp*` is NOT
 #                               the read target, so a torn read is impossible.
 #
-# Pure w.r.t. the wrapper's globals; touches only the filesystem (one read).
+# TRUE read-once ([P1] #1, #233 review): the bytes are cat'd ONCE into an
+# in-memory snapshot, that snapshot is written to a private temp file, and BOTH
+# the schema validation and the identity check run against the SNAPSHOT — never a
+# second read of `$_path`. So a rename that lands after the first `cat` cannot
+# flip the result (it is simply never observed). Clause VA5.
+#
+# Identity binding ([P1] #2, #233 review): when <expected-run-id> and/or
+# <expected-agent> are supplied (the wrapper passes the per-agent session id +
+# CLI name), a schema-valid artifact whose `.runId`/`.agent` do NOT equal them is
+# classified `malformed` — a buggy adapter that copies example JSON or writes
+# another agent's identifiers cannot cast a vote for THIS review slot. Omitting
+# the expected args skips the identity check (back-compat; pure-schema callers).
+#
+# Pure w.r.t. the wrapper's globals; touches only the filesystem (one read of the
+# target + one private temp-file write/read of the snapshot).
 _classify_verdict_artifact() {
-  local _path="$1"
+  local _path="$1" _expect_run="${2:-}" _expect_agent="${3:-}"
   if [[ -z "$_path" || ! -f "$_path" ]]; then
     printf 'absent\n'
     return 0
   fi
-  # Read once into memory — the snapshot the verdict is derived from. A later
-  # write to the same path replaces the bytes on disk but not this snapshot.
+  # Read once into memory — the snapshot the verdict is derived from. Every
+  # subsequent check reads THIS snapshot, never `$_path` again.
   local _bytes
   _bytes="$(cat -- "$_path" 2>/dev/null || true)"
   if [[ -z "${_bytes//[[:space:]]/}" ]]; then
@@ -170,31 +228,63 @@ _classify_verdict_artifact() {
     return 0
   fi
 
-  local _schema _valid_rc
+  # Materialize the snapshot to a private temp file so the validators (which take
+  # a FILE arg) see exactly the bytes we read — not a possibly-renamed `$_path`.
+  local _snap
+  _snap="$(mktemp "${TMPDIR:-/tmp}/verdict-snap-XXXXXX" 2>/dev/null || true)"
+  if [[ -z "$_snap" ]]; then
+    # mktemp failed (full /tmp etc.) — cannot guarantee a stable snapshot to
+    # validate. Fail safe: malformed rather than re-reading the racy path.
+    printf 'malformed\n'; return 0
+  fi
+  # Local cleanup of the snapshot regardless of return path.
+  printf '%s' "$_bytes" > "$_snap" 2>/dev/null || { rm -f "$_snap" 2>/dev/null; printf 'malformed\n'; return 0; }
+
+  local _schema _valid_rc _ok=1
   _schema="$(_verdict_artifact_schema_file)"
   if _verdict_artifact_have_py && [[ -f "$_schema" ]]; then
-    _validate_verdict_artifact_py "$_schema" "$_path"
-    _valid_rc=$?
+    # Self-guard the rc capture: a malformed/rejected artifact is the COMMON case
+    # (py exits 1/2), and a bare `cmd; rc=$?` would abort under `set -e` BEFORE the
+    # capture if this function were ever called as a bare statement (today every
+    # call site uses `$(...)`, which suppresses it — but don't depend on that).
+    # `|| _valid_rc=$?` preserves the true rc without tripping errexit.
+    _valid_rc=0
+    _validate_verdict_artifact_py "$_schema" "$_snap" || _valid_rc=$?
     # rc 2 (unreadable/garbage JSON) is treated as malformed, same as rc 1.
-    [[ "$_valid_rc" -eq 0 ]] || { printf 'malformed\n'; return 0; }
+    [[ "$_valid_rc" -eq 0 ]] || _ok=0
   elif command -v jq >/dev/null 2>&1; then
-    if ! _validate_verdict_artifact_jq "$_path"; then
-      printf 'malformed\n'; return 0
-    fi
+    _validate_verdict_artifact_jq "$_snap" || _ok=0
   else
     # No validation backend at all — extremely unlikely on the dispatcher box (jq
     # is a hard dep). Fail safe: cannot certify the artifact, so treat as
     # malformed rather than trusting unverified bytes (Clause V1 fail-safe).
+    _ok=0
+  fi
+
+  # Identity binding ([P1] #2): a schema-valid artifact must ALSO carry the
+  # runId/agent the wrapper assigned to this slot. Checked against the SAME
+  # snapshot. Only applied when the expected values were supplied.
+  if [[ "$_ok" -eq 1 ]] && command -v jq >/dev/null 2>&1; then
+    local _got_run _got_agent
+    _got_run="$(jq -r '.runId // empty'  "$_snap" 2>/dev/null || true)"
+    _got_agent="$(jq -r '.agent // empty' "$_snap" 2>/dev/null || true)"
+    if [[ -n "$_expect_run"   && "$_got_run"   != "$_expect_run"   ]]; then _ok=0; fi
+    if [[ -n "$_expect_agent" && "$_got_agent" != "$_expect_agent" ]]; then _ok=0; fi
+  fi
+
+  if [[ "$_ok" -ne 1 ]]; then
+    rm -f "$_snap" 2>/dev/null
     printf 'malformed\n'; return 0
   fi
 
-  # Valid — emit the state then the compact canonical JSON for the caller.
+  # Valid — emit the state then the compact canonical JSON (from the SNAPSHOT).
   printf 'valid\n'
   if command -v jq >/dev/null 2>&1; then
-    jq -c . <<<"$_bytes" 2>/dev/null || printf '%s\n' "$_bytes"
+    jq -c . "$_snap" 2>/dev/null || printf '%s\n' "$_bytes"
   else
     printf '%s\n' "$_bytes"
   fi
+  rm -f "$_snap" 2>/dev/null
 }
 
 # _verdict_from_artifact_json <canonical-json>
@@ -215,17 +305,35 @@ _verdict_from_artifact_json() {
   esac
 }
 
-# _artifact_schema_error <path>
+# _artifact_schema_error <path> [<expected-run-id> [<expected-agent>]]
 #
 # Echoes a SINGLE-LINE, sanitized human summary of why <path> failed validation —
 # for the malformed-verdict error envelope (#231). Best-effort: returns the first
 # python3-jsonschema error message when available, else a generic jq-derived
 # reason, else a bare "schema validation failed". Never multi-line (the envelope
 # is a single operator-facing field); control chars are stripped.
+#
+# Identity ([P1] #2): when expected run-id/agent are supplied AND the artifact is
+# otherwise schema-valid but its `.runId`/`.agent` mismatch, the reason names the
+# IDENTITY mismatch (the schema validator would report no error) so the operator
+# sees the real cause (a foreign-identity vote attempt), not a generic message.
 _artifact_schema_error() {
-  local _path="$1" _schema _msg=""
+  local _path="$1" _expect_run="${2:-}" _expect_agent="${3:-}" _schema _msg=""
   _schema="$(_verdict_artifact_schema_file)"
-  if _verdict_artifact_have_py && [[ -f "$_schema" ]]; then
+  # Identity mismatch first ([P1] #2): if expected run-id/agent were supplied and
+  # the artifact carries DIFFERENT values, the schema validators find no error, so
+  # name the identity mismatch explicitly (a foreign-identity vote attempt).
+  if [[ ( -n "$_expect_run" || -n "$_expect_agent" ) ]] && command -v jq >/dev/null 2>&1; then
+    local _gr _ga
+    _gr="$(jq -r '.runId // empty'  "$_path" 2>/dev/null || true)"
+    _ga="$(jq -r '.agent // empty' "$_path" 2>/dev/null || true)"
+    if [[ -n "$_expect_run" && "$_gr" != "$_expect_run" ]]; then
+      _msg="identity mismatch: artifact runId='${_gr}' != expected '${_expect_run}'"
+    elif [[ -n "$_expect_agent" && "$_ga" != "$_expect_agent" ]]; then
+      _msg="identity mismatch: artifact agent='${_ga}' != expected '${_expect_agent}'"
+    fi
+  fi
+  if [[ -z "$_msg" ]] && _verdict_artifact_have_py && [[ -f "$_schema" ]]; then
     _msg="$(python3 - "$_schema" "$_path" <<'PY' 2>/dev/null || true
 import json, sys
 try:

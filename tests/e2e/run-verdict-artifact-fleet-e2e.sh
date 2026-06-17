@@ -54,30 +54,38 @@ source "$DISP/lib-review-poll.sh"
 SANDBOX=$(mktemp -d)
 trap 'rm -rf "$SANDBOX"' EXIT
 
-echo "=== TC-VERDICT-ARTIFACT-037: 3-stub fleet (valid / malformed / absent-with-comment) ==="
+echo "=== TC-VERDICT-ARTIFACT-037: 4-stub fleet (valid / malformed / absent-with-comment / foreign-identity) ==="
 
 # --- fleet state (mirrors the wrapper globals) -----------------------------
-AGENT_NAMES=(agent-A agent-B agent-C)
-AGENT_SESSION_IDS=(sid-A sid-B sid-C)
+#   A: valid PASS artifact with MATCHING identity        → resolved from artifact
+#   B: malformed artifact                                → loud envelope + drop
+#   C: NO artifact, posts a PASS comment                 → comment-fallback
+#   D: schema-valid artifact but FOREIGN runId/agent      → rejected (malformed)
+#      ([P1] #2, #233 review — a copied/foreign artifact must NOT vote)
+AGENT_NAMES=(agent-A agent-B agent-C agent-D)
+AGENT_SESSION_IDS=(sid-A sid-B sid-C sid-D)
 AGENT_ARTIFACT_PATHS=()
 declare -A AGENT_LAUNCH_RC=()
 COMMENT_FETCH_COUNT=0
 ENVELOPE_COUNT=0
 ENVELOPE_TEXT=""
 
-# Provision per-agent artifact paths under the sandbox state dir, then stage the
-# three artifact states (A valid PASS, B malformed; C writes none).
-for i in 0 1 2; do
+# A valid PASS artifact whose runId/agent MATCH the slot the wrapper assigned.
+mk_valid_pass() { # <path> <runId> <agent>
+  printf '{"schema_version":1,"verdict":"PASS","blockingFindings":[],"runId":"%s","agent":"%s"}\n' "$2" "$3" > "$1"
+}
+
+for i in 0 1 2 3; do
   rid="${AGENT_SESSION_IDS[$i]}"
-  XDG_STATE_HOME="$SANDBOX/state" \
-    p="$(XDG_STATE_HOME="$SANDBOX/state" _verdict_artifact_path proj "$rid" "${AGENT_NAMES[$i]}")"
+  p="$(XDG_STATE_HOME="$SANDBOX/state" _verdict_artifact_path proj "$rid" "${AGENT_NAMES[$i]}")"
   mkdir -p "$(dirname "$p")"
   AGENT_ARTIFACT_PATHS+=("$p")
   AGENT_LAUNCH_RC["$rid"]=0
 done
-cp "$EXAMPLES/verdict-artifact.golden.pass.json"         "${AGENT_ARTIFACT_PATHS[0]}"  # A valid PASS
+mk_valid_pass "${AGENT_ARTIFACT_PATHS[0]}" "sid-A" "agent-A"            # A valid PASS, matching identity
 cp "$EXAMPLES/verdict-artifact.negative.no-schema-version.json" "${AGENT_ARTIFACT_PATHS[1]}"  # B malformed
 # C: no artifact file — only a posted comment (set in the stub below).
+mk_valid_pass "${AGENT_ARTIFACT_PATHS[3]}" "FOREIGN-session" "other-agent"  # D schema-valid, FOREIGN identity
 
 # Stub the comment fetcher (the fallback channel) + the loud-envelope surfacer.
 # The fetcher runs inside the poll loop's `$(…)` command substitution (a
@@ -98,13 +106,15 @@ error_surface() {
 }
 
 # --- resolution control flow (mirrors autonomous-review.sh, INV-78) --------
-AGENT_VERDICTS=("" "" "")
-AGENT_VERDICT_BODIES=("" "" "")
-AGENT_VERDICT_SOURCES=("" "" "")
+AGENT_VERDICTS=("" "" "" "")
+AGENT_VERDICT_BODIES=("" "" "" "")
+AGENT_VERDICT_SOURCES=("" "" "" "")
 
-# Artifact-first pass.
+# Artifact-first pass — passes the per-agent EXPECTED identity (session id + agent
+# name), exactly as autonomous-review.sh does, so a foreign-identity artifact (D)
+# is rejected as malformed rather than casting a vote.
 for i in "${!AGENT_NAMES[@]}"; do
-  out=$(_classify_verdict_artifact "${AGENT_ARTIFACT_PATHS[$i]}")
+  out=$(_classify_verdict_artifact "${AGENT_ARTIFACT_PATHS[$i]}" "${AGENT_SESSION_IDS[$i]}" "${AGENT_NAMES[$i]}")
   st="${out%%$'\n'*}"
   case "$st" in
     valid)
@@ -132,31 +142,39 @@ done
 AGG=$(_aggregate_review_verdicts "${AGENT_VERDICTS[@]}")
 
 # --- assertions ------------------------------------------------------------
-[[ "$AGG" == "pass" ]] && ok "aggregate verdict = pass (A pass + B drop + C pass)" \
+# A pass + B drop + C pass + D drop → 2 deciding PASS → pass.
+[[ "$AGG" == "pass" ]] && ok "aggregate verdict = pass (A pass + B drop + C pass + D drop)" \
   || bad "aggregate verdict expected=pass actual=$AGG"
 
-[[ "${AGENT_VERDICT_SOURCES[0]}" == "artifact" ]] && ok "agent-A source = artifact" \
+[[ "${AGENT_VERDICT_SOURCES[0]}" == "artifact" ]] && ok "agent-A source = artifact (matching identity)" \
   || bad "agent-A source expected=artifact actual=${AGENT_VERDICT_SOURCES[0]}"
 [[ "${AGENT_VERDICT_SOURCES[1]}" == "artifact-malformed" ]] && ok "agent-B source = artifact-malformed" \
   || bad "agent-B source expected=artifact-malformed actual=${AGENT_VERDICT_SOURCES[1]}"
 [[ "${AGENT_VERDICT_SOURCES[2]}" == "comment-fallback" ]] && ok "agent-C source = comment-fallback" \
   || bad "agent-C source expected=comment-fallback actual=${AGENT_VERDICT_SOURCES[2]}"
+# [P1] #2: agent-D's artifact is schema-VALID but its runId/agent are foreign →
+# rejected as artifact-malformed (NOT a silent vote for this slot).
+[[ "${AGENT_VERDICT_SOURCES[3]}" == "artifact-malformed" ]] && ok "agent-D (foreign identity) rejected as artifact-malformed (NOT a vote) [P1]#2" \
+  || bad "agent-D source expected=artifact-malformed actual=${AGENT_VERDICT_SOURCES[3]}"
+[[ "${AGENT_VERDICTS[3]}" == "unavailable" ]] && ok "agent-D (foreign identity) dropped from the vote (unavailable)" \
+  || bad "agent-D expected=unavailable actual=${AGENT_VERDICTS[3]}"
 
 [[ "${AGENT_VERDICTS[1]}" == "unavailable" ]] && ok "agent-B (malformed) dropped from the vote (unavailable, Clause V1)" \
   || bad "agent-B expected=unavailable actual=${AGENT_VERDICTS[1]}"
 
-[[ "$ENVELOPE_COUNT" -eq 1 ]] && ok "exactly one loud error envelope emitted (the malformed agent)" \
-  || bad "envelope count expected=1 actual=$ENVELOPE_COUNT"
-[[ "$ENVELOPE_TEXT" == *"agent-B"* ]] && ok "envelope names the malformed agent (agent-B)" \
-  || bad "envelope did not name agent-B: [$ENVELOPE_TEXT]"
+# Two loud envelopes: the malformed artifact (B) AND the foreign-identity one (D).
+[[ "$ENVELOPE_COUNT" -eq 2 ]] && ok "two loud error envelopes emitted (malformed B + foreign-identity D)" \
+  || bad "envelope count expected=2 actual=$ENVELOPE_COUNT"
+[[ "$ENVELOPE_TEXT" == *"agent-B"* && "$ENVELOPE_TEXT" == *"agent-D"* ]] && ok "envelopes name both the malformed (agent-B) and foreign-identity (agent-D) agents" \
+  || bad "envelopes did not name both agent-B and agent-D: [$ENVELOPE_TEXT]"
 
 # Only agent-C (no artifact) reached the comment fallback. A=valid → skipped;
-# B=malformed → skipped (Clause V1). So exactly ONE agent (agent-C) was polled.
+# B,D=malformed → skipped (Clause V1). So exactly ONE agent (agent-C) was polled.
 COMMENT_FETCH_COUNT=$(wc -l < "$COMMENT_FETCH_LOG" | tr -d ' ')
 [[ "$COMMENT_FETCH_COUNT" -eq 1 ]] && ok "comment fallback consulted for exactly 1 agent (the no-artifact agent)" \
   || bad "comment fetch count expected=1 actual=$COMMENT_FETCH_COUNT (valid+malformed agents must skip the poll)"
-if grep -q '^agent-C$' "$COMMENT_FETCH_LOG" && ! grep -qE '^agent-(A|B)$' "$COMMENT_FETCH_LOG"; then
-  ok "the polled agent was agent-C only (valid agent-A + malformed agent-B never comment-polled)"
+if grep -q '^agent-C$' "$COMMENT_FETCH_LOG" && ! grep -qE '^agent-(A|B|D)$' "$COMMENT_FETCH_LOG"; then
+  ok "the polled agent was agent-C only (valid A + malformed B + foreign-identity D never comment-polled)"
 else
   bad "wrong agent polled: $(tr '\n' ' ' < "$COMMENT_FETCH_LOG")"
 fi

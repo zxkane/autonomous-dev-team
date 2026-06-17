@@ -2054,7 +2054,12 @@ done
 for _i in "${!AGENT_NAMES[@]}"; do
   _art_path="${AGENT_ARTIFACT_PATHS[$_i]:-}"
   [[ -n "$_art_path" ]] || continue
-  _art_out=$(_classify_verdict_artifact "$_art_path")
+  # Identity binding ([P1] #2, #233 review): the artifact's `.runId` MUST equal
+  # the session UUID the wrapper minted for THIS slot and `.agent` MUST equal this
+  # agent's CLI name — else a buggy adapter that copied example JSON or wrote
+  # another agent's identifiers would cast a vote for this slot. A mismatch is
+  # classified `malformed` (loud, treated absent), not a silent `valid`.
+  _art_out=$(_classify_verdict_artifact "$_art_path" "${AGENT_SESSION_IDS[$_i]}" "${AGENT_NAMES[$_i]}")
   _art_state="${_art_out%%$'\n'*}"
   case "$_art_state" in
     valid)
@@ -2081,8 +2086,8 @@ for _i in "${!AGENT_NAMES[@]}"; do
       # would be clobbered. The terminal scan ORs-in any `artifact-malformed`
       # source instead.
       AGENT_VERDICT_SOURCES[$_i]="artifact-malformed"
-      _art_err=$(_artifact_schema_error "$_art_path")
-      log "INV-78: review agent '${AGENT_NAMES[$_i]}' wrote a MALFORMED verdict artifact (verdict-source=artifact-malformed; schema error: ${_art_err}); treating as absent for the vote (Clause V1) and surfacing a loud envelope. Path ${_art_path}"
+      _art_err=$(_artifact_schema_error "$_art_path" "${AGENT_SESSION_IDS[$_i]}" "${AGENT_NAMES[$_i]}")
+      log "INV-78: review agent '${AGENT_NAMES[$_i]}' wrote a MALFORMED verdict artifact (verdict-source=artifact-malformed; schema/identity error: ${_art_err}); treating as absent for the vote (Clause V1) and surfacing a loud envelope. Path ${_art_path}"
       error_surface "${ISSUE_NUMBER:-}" "VERDICT_ARTIFACT_MALFORMED" \
         "Review agent '${AGENT_NAMES[$_i]}' produced a malformed verdict artifact" \
         "The verdict artifact at ${_art_path} failed schema validation (verdict-artifact.schema.json, INV-78): ${_art_err}" \

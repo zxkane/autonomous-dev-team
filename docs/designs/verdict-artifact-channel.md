@@ -83,26 +83,41 @@ classification is unit-testable without a live agent. Functions:
 - `_verdict_artifact_path <project> <run-id>` — echoes the per-agent artifact
   path. Single source of truth shared by the provisioner and the reader so they
   can never diverge.
-- `_classify_verdict_artifact <path>` — echoes one of `valid` / `malformed` /
-  `absent` (the §4.3 `verdict.state`). Reads the file ONCE (Clause VA5: ignore
-  post-read writes — a later write is simply never observed because we cat once),
-  validates against `verdict-artifact.schema.json`, and on `valid` ALSO echoes the
-  canonicalized JSON on a second line for the caller. Validation backend mirrors
-  test-adapter-spec-schemas.sh: prefer `python3 -m jsonschema` (full Draft-07
-  conditionals), fall back to a `jq` structural check (required keys, enum
-  membership, the FAIL⇔≥1-blocking rule) so it runs on bare CI with no pip.
+- `_classify_verdict_artifact <path> [<expected-run-id> [<expected-agent>]]` —
+  echoes one of `valid` / `malformed` / `absent` (the §4.3 `verdict.state`).
+  Reads the file ONCE into an in-memory snapshot, writes that snapshot to a
+  private temp file, and validates the **snapshot** (Clause VA5: a later write to
+  `<path>` is never observed — the validators never re-read `<path>`). On `valid`
+  ALSO echoes the canonicalized JSON on a second line for the caller. When the
+  expected run-id/agent are supplied, a schema-valid artifact whose `.runId`/
+  `.agent` mismatch is classified `malformed` (identity binding — review [P1] #2).
+  Validation backend mirrors test-adapter-spec-schemas.sh: prefer
+  `python3 -m jsonschema` (full Draft-07 conditionals), fall back to a `jq`
+  structural check that enforces the **full schema shape** (additionalProperties
+  at every level, the finding object shape, typed evidence sub-objects, the
+  FAIL⇔≥1-blocking rule) so the packaged-install default still rejects every
+  schema-invalid payload (review [P1] #3).
 - `_verdict_from_artifact_json <json>` — echoes `pass` / `fail` from a validated
   artifact's `verdict` field (`PASS`→pass, `FAIL`→fail), feeding the existing
   `_aggregate_review_verdicts` token vocabulary verbatim.
-- `_artifact_schema_error <path>` — echoes a one-line human schema-error summary
-  for the malformed error envelope (#231).
+- `_artifact_schema_error <path> [<expected-run-id> [<expected-agent>]]` — echoes
+  a one-line human schema/identity-error summary for the malformed error envelope
+  (#231); names an identity mismatch explicitly when expected identity is supplied.
 
-**Atomic-rename land detection.** The agent is instructed to write
+**Atomic-rename + true read-once.** The agent is instructed to write
 `<path>.tmp.$$` then `rename(2)` to `<path>` (an `mv` on the same filesystem is
 atomic). The reader only ever stats/cats the final `<path>`; a half-written
 `.tmp` is never the read target, so a torn read is structurally impossible. The
-reader reads exactly once and keeps that snapshot — a duplicate/late write that
-lands after the read is ignored and logged (Clause VA5).
+reader `cat`s exactly once into a snapshot and validates **that snapshot** (not a
+re-read of `<path>`), so a rename that lands between the read and the validate
+cannot flip the verdict — and a duplicate/late write is ignored (Clause VA5,
+review [P1] #1).
+
+**Identity binding.** The wrapper passes the per-agent expected identity
+(`AGENT_SESSION_IDS[i]` → `.runId`, `AGENT_NAMES[i]` → `.agent`). A schema-valid
+artifact whose identity fields don't match is rejected as `malformed` — a buggy
+adapter copying example JSON or another agent's identifiers can't vote for this
+slot (review [P1] #2).
 
 ### Aggregation precedence (artifact > comment)
 

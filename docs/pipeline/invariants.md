@@ -3520,10 +3520,35 @@ The artifact's `verdict.state` (adapter-spec § 4.3) drives resolution:
   [INV-48](#inv-48-a-timed-out-review-agent-is-a-deciding-fail-veto-not-a-silent-drop)
   still govern absence).
 
-**Atomic write (Clause VA5)**: the agent writes `<path>.tmp.$$` then `mv`
-(rename) into place; the wrapper reads only the final path ONCE. A half-written
-`.tmp` is never the read target (no torn read), and a duplicate/late write that
-lands after the read is ignored.
+**Atomic write + TRUE read-once (Clause VA5)**: the agent writes `<path>.tmp.$$`
+then `mv` (rename) into place; the wrapper reads only the final path. A
+half-written `.tmp` is never the read target (no torn read). Read-once is
+**enforced by validating an in-memory snapshot**, not by re-reading the path:
+`_classify_verdict_artifact` `cat`s the bytes ONCE into a private temp file and
+runs BOTH schema validation AND the identity check against that snapshot — never
+a second read of `<path>`. So a rename that lands between the read and the
+validate cannot flip the result valid↔malformed (#233 review [P1] #1); a
+duplicate/late write is simply never observed.
+
+**Identity binding (Clause VA4 enforcement)**: a schema-valid artifact is
+accepted ONLY if its `.runId` equals the session UUID the wrapper minted for this
+slot AND its `.agent` equals this agent's CLI name. A mismatch is classified
+`malformed` (loud envelope, dropped from the vote) — so a buggy adapter that
+copies the example JSON or writes another agent's identifiers **cannot cast a
+vote for this review slot** (#233 review [P1] #2). The wrapper passes the
+expected identity to `_classify_verdict_artifact <path> <session-id> <agent>`.
+
+**Validation backend enforces the FULL schema in BOTH modes**: the preferred
+python3-jsonschema path runs the full Draft-07 graph. The `jq` structural
+fallback — the **default on a packaged install** (the JSON Schema lives outside
+the skill tree, so `npx skills add` does not ship it) — mirrors the schema's
+shape rather than checking a few top-level keys: `additionalProperties:false` at
+every level, the finding object shape (`title` required string; only the known
+finding keys; `line` an integer ≥0), the typed `evidence` sub-objects, and the
+FAIL⇔≥1-blocking both-directions rule. A schema-invalid payload (e.g. PASS with
+`blockingFindings` as an object, a finding without `title`, an unknown key) is
+therefore rejected as `malformed` in the default deployment, not silently
+accepted (#233 review [P1] #3).
 
 **post-verdict.sh stays the ONLY comment poster** ([INV-56](#inv-56-review-agents-post-their-verdict-comment-only-through-post-verdictsh)):
 agents still post their human-facing verdict comment through it, and the wrapper
@@ -3561,10 +3586,15 @@ the **human record + the fallback channel**.
   change (it kills factory A).
 - **Test**: `tests/unit/test-verdict-artifact.sh` (TC-VERDICT-ARTIFACT-NNN) —
   valid/malformed/absent classification, atomic-rename / duplicate / late-write,
-  path provisioning, aggregation precedence (artifact > comment; conflict logged),
-  the zero-comment-poll AC, malformed → loud envelope + treated-absent, comment-
+  **true read-once (single path read, TC-038)**, **identity binding (matching →
+  valid, foreign runId/agent → malformed, TC-039)**, **the jq fallback enforcing
+  the full schema shape (TC-040: empty-object findings, finding-without-title,
+  additional-property, non-array finding lists all rejected)**, path provisioning,
+  aggregation precedence (artifact > comment; conflict logged), the
+  zero-comment-poll AC, malformed → loud envelope + treated-absent, comment-
   fallback parity, and the timeout-veto regression pin; plus the conformance
-  manifests asserting `verdict.state` from artifact files.
+  manifests asserting `verdict.state` from artifact files and the stub-fleet E2E
+  (`run-verdict-artifact-fleet-e2e.sh`) covering a foreign-identity agent.
 
 **Cross-references**:
 - [`adapter-spec.md` § 4.3 / § 5](adapter-spec.md#43-verdict--state-payloadref-payloadref-required-when-state--valid) — the NORMATIVE verdict axis + artifact contract this implements.

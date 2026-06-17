@@ -76,9 +76,17 @@ bare CI.
 | TC-VERDICT-ARTIFACT-034 | post-verdict.sh | the agent verdict comment trailer (`Review Session:`/`Review Agent:`) is byte-for-byte unchanged |
 | TC-VERDICT-ARTIFACT-035 | prompt | build_review_prompt injects the artifact path + atomic-write (tmp+rename) instruction |
 
+## Unit — review-finding hardening ([P1]s on PR #262)
+
+| ID | Scenario | Expected |
+|---|---|---|
+| TC-VERDICT-ARTIFACT-038 | True read-once ([P1]#1): classifier reads the artifact path exactly ONCE; validates the in-memory snapshot, not a re-read of `$_path` | single read; rename-after-read cannot flip the verdict |
+| TC-VERDICT-ARTIFACT-039 | Identity binding ([P1]#2): `_classify_verdict_artifact <path> <run-id> <agent>` → matching identity valid; mismatched runId/agent → malformed; no expected identity → check skipped (back-compat); error names the mismatch | foreign-identity artifact rejected, never votes |
+| TC-VERDICT-ARTIFACT-040 | jq fallback full schema ([P1]#3): rejects blockingFindings-empty-object, nonBlockingFindings-as-string, finding-missing-title, additional-property, negative line; still accepts valid goldens | full-shape enforcement in the packaged-install default |
+
 ## E2E — conformance + stub-fleet
 
 | ID | Scenario | Expected |
 |---|---|---|
-| TC-VERDICT-ARTIFACT-036 | Conformance manifest: per-CLI fixture asserts `verdict.state` from an artifact file | matches expected state |
-| TC-VERDICT-ARTIFACT-037 | Stub-fleet: 3 stub agents (valid / malformed / absent-with-comment) | aggregate, drop reasons, posted render all asserted |
+| TC-VERDICT-ARTIFACT-036 | Conformance manifest: per-CLI fixture asserts `verdict.state` from an artifact file (incl. codex malformed) | matches expected state |
+| TC-VERDICT-ARTIFACT-037 | Stub-fleet: 4 stub agents (valid / malformed / absent-with-comment / foreign-identity) | aggregate, per-agent sources, two loud envelopes (malformed + foreign-identity), zero-comment-poll all asserted |
