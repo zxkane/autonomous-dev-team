@@ -26,6 +26,10 @@ Restructure CI into two explicit tiers:
 - **Tier 2 — live** (#222 agent-smoke matrix with real CLIs): runs **only** on the
   self-hosted runner and **only** when a maintainer applies the `run-live-smoke` label
   (`pull_request` `labeled` event) **OR** on push to `main`. Advisory (non-required).
+  The matrix config is resolved from **outside** the checkout, self-provisioning via
+  the `SMOKE_MATRIX` repo variable (content → temp file) so it works on the
+  ephemeral autoscaling pool, with `RUNNER_SMOKE_CONF` (path) and a per-box default
+  as fallbacks — see [INV-77](../pipeline/invariants.md#inv-77-ci-is-two-tiers--hermetic-always-on--credential-free-live-agent-smoke-is-self-hosted-label-gated-and-advisory) sub-point 4.
 
 ## Gate truth table (the spec the structure test asserts)
 

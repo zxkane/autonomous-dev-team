@@ -5,12 +5,16 @@
 #
 # CI (the `live-smoke` self-hosted tier, INV-77) reads the matrix from OUTSIDE the
 # repo checkout, because actions/checkout runs `git clean -ffdx` and would delete
-# a checkout-internal tests/e2e/e2e.conf. For the self-hosted runner, provision
-# the matrix once at $HOME/.config/autonomous-dev-team/e2e.conf (or set the
-# RUNNER_SMOKE_CONF repo variable to a custom path) — the harness honors the
-# SMOKE_CONF env override that the workflow exports:
-#   mkdir -p "$HOME/.config/autonomous-dev-team"
-#   cp tests/e2e/e2e.conf.example "$HOME/.config/autonomous-dev-team/e2e.conf"
+# a checkout-internal tests/e2e/e2e.conf. Provide it via ONE of (precedence order):
+#   1. SMOKE_MATRIX repo variable (recommended for the autoscaling pool) — the
+#      matrix CONTENT; the job materializes it to a temp file at run time, so any
+#      pool runner gets it without per-box provisioning:
+#        gh variable set SMOKE_MATRIX --repo <owner>/<repo> --body-file tests/e2e/e2e.conf.example
+#   2. RUNNER_SMOKE_CONF repo variable — a PATH to a runner-local matrix file.
+#   3. A per-box file (for a pinned, long-lived runner):
+#        mkdir -p "$HOME/.config/autonomous-dev-team"
+#        cp tests/e2e/e2e.conf.example "$HOME/.config/autonomous-dev-team/e2e.conf"
+# The harness honors the SMOKE_CONF env override that the workflow exports.
 #
 # Format, one entry per line:
 #   name | agent_cmd | model | env-setup

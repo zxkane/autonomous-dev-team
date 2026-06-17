@@ -156,14 +156,23 @@ SMOKE evidence is posted to the run's job summary.
 **As an external contributor you never need to do anything for the live tier** —
 a maintainer will label your PR if a live run is warranted.
 
-> **Maintainer one-time setup:** the live matrix config is machine-local +
-> gitignored and must live **outside** the repo checkout (because
-> `actions/checkout` runs `git clean -ffdx` and would delete a checkout-internal
-> `tests/e2e/e2e.conf`). Provision it once per self-hosted box —
-> `cp tests/e2e/e2e.conf.example "$HOME/.config/autonomous-dev-team/e2e.conf"` and
-> edit for that box — or point the `RUNNER_SMOKE_CONF` repo variable at a custom
-> path. The `live-smoke` job preflights this and fails with a provisioning pointer
-> if it is missing.
+> **Maintainer one-time setup:** the live matrix config must live **outside** the
+> repo checkout (because `actions/checkout` runs `git clean -ffdx` and would delete
+> a checkout-internal `tests/e2e/e2e.conf`). Provide it via one of, in precedence
+> order:
+>
+> 1. **`SMOKE_MATRIX` repo variable (recommended)** — set it to the matrix
+>    *content*; the `live-smoke` job materializes it to a temp file at job time, so
+>    it works on the **autoscaling self-hosted pool** (a per-box file does not
+>    survive pool churn). Maintainer-only; must not carry secrets (Bedrock entries
+>    use the runner instance role):
+>    `gh variable set SMOKE_MATRIX --repo <owner>/<repo> --body-file tests/e2e/e2e.conf.example` (then edit).
+> 2. **`RUNNER_SMOKE_CONF` repo variable** — a PATH to a runner-local matrix file.
+> 3. **A per-box file** for a pinned, long-lived runner:
+>    `cp tests/e2e/e2e.conf.example "$HOME/.config/autonomous-dev-team/e2e.conf"` and edit.
+>
+> The `live-smoke` job preflights this and fails with a provisioning pointer
+> (naming all three sources) if none resolve.
 
 ## PR checklist
 

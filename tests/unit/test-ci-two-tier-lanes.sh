@@ -206,6 +206,32 @@ ok = ("! -r" in region and "SMOKE_CONF" in region and "::error::" in region)
 print("OK" if ok else "FAIL:no-preflight-readability-guard-in-live-smoke")
 '
 
+# PR #256 [P1] (cycle 11): the self-hosted pool is an ephemeral autoscaling spot
+# fleet — a per-box file at $HOME/.config/... does NOT persist across pool churn,
+# so a labeled run lands on a fresh runner with no matrix and the preflight fails.
+# The lane must be self-provisioning: a `SMOKE_MATRIX` repo variable carrying the
+# matrix CONTENT, materialized to a file at job time, so any pool runner has it.
+echo "=== TC-CI-TIERS-024: live-smoke is self-provisioning via the SMOKE_MATRIX repo variable ==="
+assert_py "TC-CI-TIERS-024 live-smoke materializes SMOKE_MATRIX content when no path source exists" '
+blob = yaml.safe_dump(jobs.get("live-smoke") or {})
+# The job must (a) wire the SMOKE_MATRIX repo variable into env, and (b) write its
+# content to a file when neither RUNNER_SMOKE_CONF nor the per-box default resolves
+# — so the lane works on an autoscaling pool runner with no pre-provisioned file.
+ok = "SMOKE_MATRIX" in blob and "vars.SMOKE_MATRIX" in blob
+print("OK" if ok else "FAIL:no-smoke-matrix-self-provisioning-branch")
+'
+
+echo "=== TC-CI-TIERS-025: SMOKE_MATRIX materialization lands OUTSIDE the checkout ==="
+assert_py "TC-CI-TIERS-025 materialized matrix uses a temp path, not a checkout-internal file" '
+m = re.search(r"\n  live-smoke:\n(?:.*\n)*?(?=\n  [A-Za-z0-9_-]+:\n|\Z)", raw)
+region = m.group(0) if m else ""
+# When materializing SMOKE_MATRIX, the file must be created via mktemp (a runner
+# temp dir outside the checkout), never written into tests/e2e/ where git clean
+# would wipe it — and the resolved path still exported as SMOKE_CONF.
+ok = ("SMOKE_MATRIX" in region and "mktemp" in region and "SMOKE_CONF=" in region)
+print("OK" if ok else "FAIL:smoke-matrix-not-materialized-to-temp")
+'
+
 echo "=== TC-CI-TIERS-030: setup-labels.sh defines run-live-smoke ==="
 if grep -qE '"run-live-smoke\|[0-9A-Fa-f]{6}\|[^"]+"' "$SETUP_LABELS"; then
   pass "TC-CI-TIERS-030 setup-labels.sh LABELS has run-live-smoke|color|description"

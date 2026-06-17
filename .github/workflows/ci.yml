@@ -183,49 +183,87 @@ jobs:
     # fallback would have no authenticated CLIs, defeating the live tier.
     runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'self-hosted' }}
     env:
-      # Operator override for the machine-local matrix path. Empty when the
-      # `RUNNER_SMOKE_CONF` repo variable is unset; the steps below then fall
-      # back to a stable per-box default ($HOME/.config/autonomous-dev-team/
-      # e2e.conf), resolved in shell where $HOME actually expands.
+      # Operator override for the machine-local matrix PATH. Empty when the
+      # `RUNNER_SMOKE_CONF` repo variable is unset; the preflight then tries the
+      # SMOKE_MATRIX content var, else the per-box default
+      # ($HOME/.config/autonomous-dev-team/e2e.conf).
       RUNNER_SMOKE_CONF: ${{ vars.RUNNER_SMOKE_CONF }}
+      # Self-provisioning source (preferred): the matrix CONTENT, stored in the
+      # `SMOKE_MATRIX` repo variable, materialized to a runner temp file at job
+      # time. The shared self-hosted pool is an ephemeral autoscaling spot fleet —
+      # a per-box file does NOT survive pool churn, so a repo variable that travels
+      # with the repo is the portable provisioning channel. Operator-trusted: the
+      # matrix env-setup is `eval`'d (same trust model as RUNNER_SMOKE_CONF / a
+      # local file), so this var is maintainer-only (setting a repo variable needs
+      # write access) and MUST NOT carry secrets — Bedrock entries use the runner's
+      # instance-role creds; key-based entries source a runner-local secrets file.
+      SMOKE_MATRIX: ${{ vars.SMOKE_MATRIX }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      # Preflight: the live matrix config is machine-local + gitignored, so it
-      # CANNOT live inside the checkout — `actions/checkout` defaults to
-      # `clean: true` (`git clean -ffdx`), which would wipe a gitignored
-      # `tests/e2e/e2e.conf` on the persistent self-hosted workspace before this
-      # step runs (the [P1] from PR #256's review). We instead read the matrix
-      # from a path OUTSIDE the checkout: `$RUNNER_SMOKE_CONF` if the operator
-      # set it, else a stable per-box default. The resolved path is exported to
-      # `$GITHUB_ENV` as `SMOKE_CONF` so the run step (and run-agent-smoke.sh,
-      # which honors the SMOKE_CONF override) read the same file. If it is not
-      # provisioned, FAIL LOUD with a remediation pointer rather than letting
-      # run-agent-smoke.sh emit the opaque `FATAL: matrix not found/readable`.
+      # Preflight: resolve the live matrix config from OUTSIDE the checkout —
+      # `actions/checkout` defaults to `clean: true` (`git clean -ffdx`), which
+      # would wipe a gitignored `tests/e2e/e2e.conf` inside the checkout (the [P1]
+      # from PR #256's review). Source precedence (first hit wins):
+      #   1. $RUNNER_SMOKE_CONF — operator-set PATH to a runner-local matrix file.
+      #   2. $SMOKE_MATRIX      — the matrix CONTENT (repo variable), materialized
+      #      here to a runner TEMP file (via mktemp, outside the checkout). This is
+      #      the self-provisioning channel: the shared self-hosted pool is an
+      #      ephemeral autoscaling spot fleet, so a per-box file does not survive
+      #      pool churn — a repo variable travels with the repo and any pool runner
+      #      gets it (the cycle-11 [P1] fix).
+      #   3. $HOME/.config/autonomous-dev-team/e2e.conf — stable per-box default
+      #      (works on a pinned, long-lived runner).
+      # The resolved path is exported to $GITHUB_ENV as SMOKE_CONF so the run step
+      # (and run-agent-smoke.sh, which honors the SMOKE_CONF override) read the same
+      # file. If none resolve, FAIL LOUD with a remediation pointer rather than
+      # letting run-agent-smoke.sh emit the opaque `FATAL: matrix not found`.
+      #
+      # SMOKE_MATRIX is consumed as a quoted shell env var (never `${{ }}`-inlined
+      # into the run block), so its content can never be parsed as workflow/shell
+      # syntax. It is operator-trusted (maintainer-only repo variable) — its
+      # env-setup is later `eval`'d by the harness, the same trust model as a
+      # runner-local file; it MUST NOT carry secrets.
       - name: Preflight — live smoke matrix config present (outside checkout)
         run: |
-          SMOKE_CONF="${RUNNER_SMOKE_CONF:-$HOME/.config/autonomous-dev-team/e2e.conf}"
+          if [[ -n "${RUNNER_SMOKE_CONF:-}" ]]; then
+            SMOKE_CONF="$RUNNER_SMOKE_CONF"
+          elif [[ -n "${SMOKE_MATRIX:-}" ]]; then
+            # Materialize the repo-variable matrix content to a runner temp file
+            # OUTSIDE the checkout (git clean cannot reach it).
+            SMOKE_CONF="$(mktemp "${RUNNER_TEMP:-/tmp}/smoke-matrix.XXXXXX")"
+            printf '%s\n' "$SMOKE_MATRIX" > "$SMOKE_CONF"
+            echo "Materialized live smoke matrix from the SMOKE_MATRIX repo variable."
+          else
+            SMOKE_CONF="$HOME/.config/autonomous-dev-team/e2e.conf"
+          fi
           echo "SMOKE_CONF=$SMOKE_CONF" >> "$GITHUB_ENV"
           if [[ ! -r "$SMOKE_CONF" ]]; then
-            echo "::error::Live smoke matrix not found at SMOKE_CONF=$SMOKE_CONF"
+            echo "::error::Live smoke matrix not found — set the SMOKE_MATRIX repo variable, or RUNNER_SMOKE_CONF, or provision $HOME/.config/autonomous-dev-team/e2e.conf"
             {
               echo "## Live agent-smoke matrix (#222) — NOT RUN"
               echo ""
-              echo "The machine-local matrix config was not found at:"
+              echo "No live smoke matrix was resolved. Provide ONE of (precedence order):"
               echo ""
-              echo "    $SMOKE_CONF"
+              echo "1. **\`SMOKE_MATRIX\` repo variable (recommended for the autoscaling pool)** —"
+              echo "   set it to the matrix CONTENT; the lane materializes it to a temp file at"
+              echo "   job time, so any pool runner gets it (no per-box provisioning):"
               echo ""
-              echo "It must live OUTSIDE the repo checkout (a persistent self-hosted"
-              echo "path), because \`actions/checkout\` runs \`git clean -ffdx\` and would"
-              echo "delete a gitignored \`tests/e2e/e2e.conf\` inside the checkout."
+              echo '   ```'
+              echo "       gh variable set SMOKE_MATRIX --repo <owner>/<repo> --body-file tests/e2e/e2e.conf.example"
+              echo '   ```'
               echo ""
-              echo "Provision it once on the runner (or set the \`RUNNER_SMOKE_CONF\`"
-              echo "repo variable to its path):"
+              echo "2. \`RUNNER_SMOKE_CONF\` repo variable — a PATH to a runner-local matrix file."
               echo ""
-              echo '```'
-              echo "    mkdir -p \"\$(dirname \"$SMOKE_CONF\")\""
-              echo "    cp tests/e2e/e2e.conf.example \"$SMOKE_CONF\"   # then edit for this box"
-              echo '```'
+              echo "3. A per-box file (for a pinned, long-lived runner):"
+              echo ""
+              echo '   ```'
+              echo "       mkdir -p \"\$HOME/.config/autonomous-dev-team\""
+              echo "       cp tests/e2e/e2e.conf.example \"\$HOME/.config/autonomous-dev-team/e2e.conf\""
+              echo '   ```'
+              echo ""
+              echo "The matrix MUST live OUTSIDE the repo checkout — \`actions/checkout\` runs"
+              echo "\`git clean -ffdx\`, which would delete a gitignored \`tests/e2e/e2e.conf\`."
             } >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
