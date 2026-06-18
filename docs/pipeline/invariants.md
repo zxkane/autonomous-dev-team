@@ -4004,16 +4004,29 @@ The run-id is:
 1. **Exported** as `RUN_ID`/`RUN_DIR` so sourced libs/adapters inherit it.
 2. **Threaded into every `metrics_emit`** ([INV-70](#inv-70-metrics-are-observe-only-emit-failures-never-change-wrapper-behavior))
    as `run_id=<id>` — the correlation key joining a metrics event to its run dir.
-3. **Embedded in every wrapper-posted comment** as a footer
-   `run-id: <id> · artifacts: <dir>` — so a FAIL comment is a one-hop link to the
-   raw evidence (issue #235 AC1). This covers BOTH the terminal/diagnostic comments
-   (dev session report, startup-failure report, no-PR retry, review crash note) AND
-   the **wrapper-owned verdict comments** — the two `post-verdict.sh` sites the
-   WRAPPER owns (the codex stdout-fallback, INV-62; and the INV-78 aggregate verdict
-   comment) append the footer to the body via `_append_run_footer_to_file` before
-   posting (#235 review [P1]). An AGENT's own self-posted verdict runs in the
-   scrubbed agent subtree (`RUN_DIR` unset), so it is out of scope — the footer is a
-   wrapper-owned-comment guarantee.
+3. **Embedded in EVERY wrapper-owned comment** as a footer
+   `run-id: <id> · artifacts: <dir>` — so any wrapper comment is a one-hop link to
+   the raw evidence (issue #235 AC1). This is exhaustive across the wrapper's
+   comment paths:
+   - dev wrapper: session report, startup-failure report, no-PR retry;
+   - review wrapper: the crash note, the two **wrapper-owned verdict comments**
+     (the codex stdout-fallback, INV-62; and the INV-78 aggregate verdict comment —
+     footered on the body file via `_append_run_footer_to_file` before
+     `post-verdict.sh`), AND every wrapper-owned **diagnostic** comment: no-PR-found,
+     E2E-gate fail / evidence-missing, pre-fan-out smoke FAIL / all-unavailable /
+     dropped-survivor, timeout-veto, dropped-agent, mandatory-bot-review
+     fail / re-queue, mergeable CONFLICTING / UNKNOWN, approval-failed fallback,
+     no-auto-close manual-merge notice, and auto-merge-failure (the PR-side rebase
+     marker) (#235 review [P1] r4).
+   The footer is appended at the END of the body (after `run_footer`'s own
+   `\n---\n`), so a comment whose FIRST line is a machine-parsed token
+   (`Review findings:`, `Auto-merge failed:`) keeps that leading line intact.
+   **Two deliberate exceptions, both pure machine channels:** the `Reviewed HEAD:`
+   SHA trailer and the `<!-- review-verdict: … -->` HTML trailer (both emitted for
+   the dispatcher's detection, never operator-facing) are NOT footered — a footer
+   there is noise the SHA-match / verdict regex would have to skip. An AGENT's own
+   self-posted verdict runs in the scrubbed agent subtree (`RUN_DIR` unset), so it
+   too is out of scope — the footer is a **wrapper-owned-comment** guarantee.
 
 **Coordination with [INV-78](#inv-78-review-verdicts-resolve-from-a-typed-artifact-file-first-comment-scraping-is-an-explicitly-logged-fallback-a-malformed-artifact-is-loud-never-a-silent-absent)
 — same `runs/` parent, distinct namespaces, NO duplication.** INV-78's per-AGENT

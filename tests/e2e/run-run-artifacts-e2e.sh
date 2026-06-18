@@ -194,6 +194,49 @@ expect "TC-086f wrapper sources call _append_run_footer_to_file" "_append_run_fo
 APPEND_COUNT="$(grep -c '_append_run_footer_to_file "' "$REVIEW_SH")"
 expect "TC-086g >=2 footer-append call sites (codex-fallback + aggregate)" "yes" "$([[ "$APPEND_COUNT" -ge 2 ]] && echo yes || echo "no($APPEND_COUNT)")"
 
+# ---------------------------------------------------------------------------
+# TC-087: EVERY wrapper-owned diagnostic comment carries the run footer (#235
+# review [P1] r4 — the no-PR-found / E2E-gate / smoke / mergeable / dropped-agent
+# / approval / merge-conflict paths). Structural grep-assert against the wrapper
+# source: for each real `gh issue comment` / `gh pr comment` call, a `run_footer`
+# (inline) or `_append_run_footer_to_file` must appear within the call's body
+# window. The `Reviewed HEAD:` trailer is a pure machine channel and is the ONE
+# intentional exception (a footer there is noise the dispatcher's SHA-match reads).
+# ---------------------------------------------------------------------------
+echo "== TC-087 every wrapper-owned diagnostic comment is footered =="
+# Build the list of real comment-call line numbers, excluding prose/prompt-text
+# lines (the `gh issue comment` substrings inside comments + agent-prompt heredocs)
+# by requiring the line to be an actual command invocation. Matches all three
+# invocation forms: bare `gh issue comment`, a capture `_var=$(gh issue comment`,
+# and an `if ! _var=$(gh pr comment` guard — so even a future bare-capture
+# diagnostic (like the Reviewed-HEAD trailer's form) is REACHED by the audit and
+# then explicitly window-skipped below, rather than silently escaping it.
+mapfile -t _CALL_LINES < <(grep -nE '^[[:space:]]*(if ! )?(_[A-Za-z_]+=\$\()?gh (issue|pr) comment ' "$REVIEW_SH" | cut -d: -f1)
+_unfootered=""; _checked=0
+for _cl in "${_CALL_LINES[@]}"; do
+  _checked=$((_checked + 1))
+  # The body of a comment call spans from the call line to the line containing the
+  # closing `2>/dev/null`/`2>&1` of that call — scan a generous 14-line window.
+  _win="$(sed -n "${_cl},$((_cl + 14))p" "$REVIEW_SH")"
+  # Is this the Reviewed-HEAD trailer? (intentional non-footer machine channel)
+  if printf '%s' "$_win" | grep -q 'Reviewed HEAD:'; then
+    continue
+  fi
+  if ! printf '%s' "$_win" | grep -q 'run_footer\|_append_run_footer_to_file'; then
+    _unfootered+="${_cl} "
+  fi
+done
+expect "TC-087a found wrapper-owned comment calls to audit" "yes" "$([[ "$_checked" -ge 10 ]] && echo yes || echo "no($_checked)")"
+expect "TC-087b every diagnostic comment is footered (Reviewed-HEAD excepted)" "" "${_unfootered# }"
+# TC-087c: the Reviewed-HEAD trailer is deliberately NOT footered (machine channel).
+_rhead_line="$(grep -n 'Reviewed HEAD: \\`' "$REVIEW_SH" | head -1 | cut -d: -f1)"
+if [[ -n "$_rhead_line" ]]; then
+  _rhead_win="$(sed -n "${_rhead_line},$((_rhead_line + 3))p" "$REVIEW_SH")"
+  expect_not "TC-087c Reviewed-HEAD trailer NOT footered (machine channel)" "run_footer" "$_rhead_win"
+else
+  bad "TC-087c Reviewed-HEAD trailer present to check" "no 'Reviewed HEAD:' trailer found"
+fi
+
 echo ""
 echo "RUN-ARTIFACTS-E2E-SUMMARY pass=${PASS} fail=${FAIL}"
 [[ "$FAIL" -eq 0 ]]
