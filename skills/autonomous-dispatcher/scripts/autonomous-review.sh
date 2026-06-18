@@ -299,7 +299,7 @@ if [[ "$GH_AUTH_MODE" == "app" ]]; then
       "docs/pipeline/errors.md#authentication-class-class-auth" auth
     exit 1
   fi
-  # [INV-78] Mint the SECOND, scoped token for the review-agent subtree (reuses
+  # [INV-79] Mint the SECOND, scoped token for the review-agent subtree (reuses
   # the review App credentials). Review agents only READ the PR + post comments /
   # the E2E report — none need pull_requests:write, so the same scoped profile
   # fits. Best-effort: a mint failure WARNs and leaves agents on the full-write
@@ -307,7 +307,7 @@ if [[ "$GH_AUTH_MODE" == "app" ]]; then
   setup_agent_token "${REVIEW_AGENT_APP_ID}" "${REVIEW_AGENT_APP_PEM}"
 else
   setup_github_auth
-  # [INV-78] PAT mode: no second token possible — logs a one-time WARN.
+  # [INV-79] PAT mode: no second token possible — logs a one-time WARN.
   setup_agent_token
 fi
 
@@ -582,7 +582,7 @@ install_agent_sigterm_trap
 acquire_pid_guard "$PID_FILE" "autonomous-review" "$ISSUE_NUMBER"
 export AGENT_PID_FILE="$PID_FILE"
 
-# [INV-78] Bot-trigger broker file (review side). GH_USER_PAT is scrubbed from the
+# [INV-79] Bot-trigger broker file (review side). GH_USER_PAT is scrubbed from the
 # review-agent subtree, so a scoped review agent cannot post the real-user
 # bot-trigger comments (`/q review` etc.) itself. Instead it writes the trigger
 # phrase(s) here and the WRAPPER posts them via gh-as-user.sh in cleanup
@@ -641,7 +641,7 @@ cleanup() {
     metrics_prune "${METRICS_RETENTION_DAYS:-90}" 2>/dev/null || true
   fi
 
-  # [INV-78] Bot-trigger broker drain (review side). The scoped review agent cannot
+  # [INV-79] Bot-trigger broker drain (review side). The scoped review agent cannot
   # post the real-user `/q review` etc. itself (GH_USER_PAT scrubbed) — it writes the
   # trigger phrase(s) to AGENT_BOT_TRIGGER_FILE and we post them here via gh-as-user.sh
   # (the wrapper shell has GH_USER_PAT). Runs on EVERY exit path (before the
@@ -1298,7 +1298,7 @@ if [[ "${E2E_ACTIVE:-false}" == "true" ]]; then
       # wrapper stamps the SHA marker after the lane posts its report.
       _e2e_session_id=$(uuidgen)
       _e2e_log="/tmp/agent-${PROJECT_ID}-review-${ISSUE_NUMBER}-e2e-browser.log"
-      # [INV-78] E2E report broker: the agent WRITES its report to this file and
+      # [INV-79] E2E report broker: the agent WRITES its report to this file and
       # the wrapper posts it (the credential-split delivery path). Exported so it
       # survives the agent env scrub (`env -u …` only unsets the credential vars).
       export E2E_REPORT_FILE="${_E2E_LANE_DIR}/e2e-report.md"
@@ -1322,7 +1322,7 @@ if [[ "${E2E_ACTIVE:-false}" == "true" ]]; then
         run_agent "$_e2e_session_id" "$_e2e_prompt" "${AGENT_REVIEW_MODEL:-sonnet}" \
           "review-e2e-pr-${PR_NUMBER}-issue-${ISSUE_NUMBER}" >>"$_e2e_log" 2>&1
       ) || _e2e_rc=$?
-      # [INV-78] Broker the agent-written report onto the PR (no-op if the agent's
+      # [INV-79] Broker the agent-written report onto the PR (no-op if the agent's
       # direct issues:write fallback already posted, or no file was written). Done
       # BEFORE the SHA-marker stamp so the stamp finds the report comment.
       _post_brokered_e2e_report
@@ -2965,7 +2965,7 @@ if [[ "$PASSED_VERDICT" == "true" ]]; then
   # -------------------------------------------------------------------------
   # Mandatory-bot-review hard gate (#234 review [P1] 37450359).
   # -------------------------------------------------------------------------
-  # Under the [INV-78] scoped scrub the review agent BROKERS the bot trigger and is
+  # Under the [INV-79] scoped scrub the review agent BROKERS the bot trigger and is
   # told NOT to FAIL on a not-yet-present bot review (the trigger posts post-run via
   # drain_agent_bot_triggers in cleanup). So the AGENT's PASS can arrive before a
   # mandatory REVIEW_BOTS review exists. The WRAPPER must therefore block the
@@ -2997,10 +2997,10 @@ if [[ "$PASSED_VERDICT" == "true" ]]; then
 
 Findings->Decision Gate: 1 blocking finding(s) -- FAIL.
 
-1. **[BLOCKING] Mandatory review bot(s) [${MISSING_BOTS}] did not review PR #${PR_NUMBER}** after ${_wait_count} brokered trigger attempt(s) on this HEAD. The bot may be misconfigured, rate-limited, or down. Investigate the bot integration (REVIEW_BOTS) — a maintainer can re-trigger once the bot is healthy, or remove it from REVIEW_BOTS. ([INV-78])" 2>/dev/null || true
+1. **[BLOCKING] Mandatory review bot(s) [${MISSING_BOTS}] did not review PR #${PR_NUMBER}** after ${_wait_count} brokered trigger attempt(s) on this HEAD. The bot may be misconfigured, rate-limited, or down. Investigate the bot integration (REVIEW_BOTS) — a maintainer can re-trigger once the bot is healthy, or remove it from REVIEW_BOTS. ([INV-79])" 2>/dev/null || true
         emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-substantive" "" 2>/dev/null || true
         submit_request_changes "$PR_NUMBER" \
-          "Mandatory review bot(s) [${MISSING_BOTS}] did not review this PR after ${_wait_count} trigger attempt(s) (INV-78). Investigate the bot integration; reviewDecision is CHANGES_REQUESTED until the bot review is present." \
+          "Mandatory review bot(s) [${MISSING_BOTS}] did not review this PR after ${_wait_count} trigger attempt(s) (INV-79). Investigate the bot integration; reviewDecision is CHANGES_REQUESTED until the bot review is present." \
           || log "WARNING: submit_request_changes returned non-zero (best-effort); continuing the FAIL route."
         gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
           --remove-label "reviewing" --add-label "pending-dev" 2>/dev/null || true
@@ -3010,7 +3010,7 @@ Findings->Decision Gate: 1 blocking finding(s) -- FAIL.
 
       log "Mandatory-bot-review gate: configured bot review(s) still missing on PR #${PR_NUMBER}: ${MISSING_BOTS} (wait ${_wait_count}/${BOT_REVIEW_WAIT_MAX:-3}). Brokering the trigger(s) in cleanup and re-queuing for re-review (no approve/merge this tick)."
       gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
-        --body "Review held — the agent verdict is PASS, but the mandatory configured review bot(s) [${MISSING_BOTS}] have not posted a review on PR #${PR_NUMBER} yet. The trigger(s) are being posted as a real user; the next review tick will evaluate the PR once the bot review is present. (No approve/merge this tick — [INV-78].) ${_wait_marker}" 2>/dev/null || true
+        --body "Review held — the agent verdict is PASS, but the mandatory configured review bot(s) [${MISSING_BOTS}] have not posted a review on PR #${PR_NUMBER} yet. The trigger(s) are being posted as a real user; the next review tick will evaluate the PR once the bot review is present. (No approve/merge this tick — [INV-79].) ${_wait_marker}" 2>/dev/null || true
       # Non-substantive re-queue (transient/awaiting), NOT a dev bounce. Route to
       # pending-review (NOT pending-dev): the code is fine — we are only waiting for
       # the async bot review. pending-dev's #106 stale-verdict guard would otherwise
@@ -3018,7 +3018,7 @@ Findings->Decision Gate: 1 blocking finding(s) -- FAIL.
       # re-reviewing. pending-review → the dispatcher Step 3 re-dispatches a fresh
       # REVIEW on the next tick, which sees the (now-posted) bot review and proceeds.
       # emit a non-substantive trailer so INV-24 dead-detection stays heartbeat-
-      # consistent. ([INV-78]; documented as a reviewing→pending-review edge.) The
+      # consistent. ([INV-79]; documented as a reviewing→pending-review edge.) The
       # SHA-bound wait marker bounds the loop (BOT_REVIEW_WAIT_MAX) and resets when
       # dev pushes a new HEAD.
       emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-non-substantive" "awaiting-bot-review" 2>/dev/null || true

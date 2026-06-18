@@ -135,7 +135,7 @@ get_bot_login() {
 # Echoes the exact trigger phrases for the configured bots, one per line. Used by
 # the wrapper-side bot-trigger broker (drain_agent_bot_triggers) to restrict what a
 # scoped agent can ask the wrapper to post as the host user — only an EXACT
-# configured trigger phrase is forwarded ([INV-78], #234 review [P1]: the broker is
+# configured trigger phrase is forwarded ([INV-79], #234 review [P1]: the broker is
 # a "review-bot trigger only" exception, not an arbitrary-comment channel). Empty
 # REVIEW_BOTS → nothing. Returns non-zero if REVIEW_BOTS does not validate.
 bot_trigger_allowlist() {
@@ -151,7 +151,7 @@ bot_trigger_allowlist() {
 #
 # Echoes (one per line) the short-name of every configured bot that has NOT yet
 # posted a review on the PR. Empty output = all configured bots have reviewed (or
-# REVIEW_BOTS is empty). Used by the wrapper-side hard gate ([INV-78], #234 review
+# REVIEW_BOTS is empty). Used by the wrapper-side hard gate ([INV-79], #234 review
 # [P1]): under the scoped scrub the review agent brokers the bot trigger and does
 # NOT fail on an absent bot review, so the WRAPPER must block a PASS while a
 # mandatory bot review is still missing (re-queue; a later tick sees it present).
@@ -192,7 +192,7 @@ render_bot_review_section() {
     return 0  # caller emits nothing into the prompt
   fi
 
-  # [INV-78] Scoped-token mode: GH_USER_PAT is scrubbed from the review-agent
+  # [INV-79] Scoped-token mode: GH_USER_PAT is scrubbed from the review-agent
   # subtree, so the agent CANNOT run gh-as-user.sh itself. When AGENT_GH_TOKEN_FILE
   # is set, the trigger step is BROKERED — the agent writes the trigger phrase to
   # AGENT_BOT_TRIGGER_FILE and the wrapper posts it post-run via gh-as-user.sh

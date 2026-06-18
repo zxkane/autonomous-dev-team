@@ -1,6 +1,6 @@
 # Test Cases: Two-token split + agent env scrubbing (issue #234)
 
-ID format: `TC-TOKEN-SPLIT-NNN`. INV-78.
+ID format: `TC-TOKEN-SPLIT-NNN`. INV-79.
 
 ## Unit — scoped-token mint / refresh (`get_gh_app_scoped_token`)
 
@@ -38,7 +38,7 @@ ID format: `TC-TOKEN-SPLIT-NNN`. INV-78.
 | TC-TOKEN-SPLIT-093 | agent `gh` is refresh-aware — a scoped-file refresh between calls is picked up | call 1 sees initial token, call 2 sees the refreshed token |
 | TC-TOKEN-SPLIT-095 | `GH_USER_PAT` is scrubbed from the agent; bot triggers brokered via the wrapper (dev path) | agent subtree has NO `GH_USER_PAT`/App-token alias; `drain_agent_bot_triggers` (with the `REVIEW_BOTS` trigger allow-list) posts each allowed phrase via `gh-as-user.sh` (blank/#comment skipped); no-op when scoping off |
 | TC-TOKEN-SPLIT-096 | the REVIEW path also brokers bot triggers under the scrub | scoped mode: `render_bot_review_section` writes `AGENT_BOT_TRIGGER_FILE` (no direct `gh-as-user.sh`); unscoped mode: direct `gh-as-user.sh` kept; `autonomous-review.sh` exports the file + drains it |
-| TC-TOKEN-SPLIT-097 | bot-trigger broker allow-list + wrapper-side missing-bot-review hard gate (INV-78) | `drain_agent_bot_triggers` posts ONLY lines exactly matching a configured `REVIEW_BOTS` trigger phrase, rejects any non-trigger line with a WARN, and an EMPTY allow-list is fail-closed (posts nothing); `bot_trigger_allowlist` echoes the exact configured trigger phrases; `missing_bot_reviews` echoes short-names of configured bots with no review (a `gh` failure ⇒ MISSING, fail-closed); `autonomous-review.sh` PASS branch sources the hard gate (`missing_bot_reviews` → `−reviewing +pending-review` under `BOT_REVIEW_WAIT_MAX`, then `+pending-dev` substantive FAIL) |
+| TC-TOKEN-SPLIT-097 | bot-trigger broker allow-list + wrapper-side missing-bot-review hard gate (INV-79) | `drain_agent_bot_triggers` posts ONLY lines exactly matching a configured `REVIEW_BOTS` trigger phrase, rejects any non-trigger line with a WARN, and an EMPTY allow-list is fail-closed (posts nothing); `bot_trigger_allowlist` echoes the exact configured trigger phrases; `missing_bot_reviews` echoes short-names of configured bots with no review (a `gh` failure ⇒ MISSING, fail-closed); `autonomous-review.sh` PASS branch sources the hard gate (`missing_bot_reviews` → `−reviewing +pending-review` under `BOT_REVIEW_WAIT_MAX`, then `+pending-dev` substantive FAIL) |
 
 ## Unit — scrub completeness (env-dump assertion, the verify-by-construction gate)
 

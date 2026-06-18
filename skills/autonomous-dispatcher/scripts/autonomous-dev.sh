@@ -37,7 +37,7 @@ export AUTONOMOUS_CONF_DIR="$SCRIPT_DIR"
 source "${LIB_DIR}/lib-error.sh"
 source "${LIB_DIR}/lib-agent.sh"
 source "${LIB_DIR}/lib-auth.sh"
-# [INV-78] lib-review-bots.sh provides bot_trigger_allowlist — the dev-side
+# [INV-79] lib-review-bots.sh provides bot_trigger_allowlist — the dev-side
 # bot-trigger broker (drain_agent_bot_triggers) passes the configured trigger
 # phrases so only an EXACT REVIEW_BOTS trigger is ever posted (allow-list,
 # #234 review [P1]). Guarded source: a failure leaves the function undefined and
@@ -115,13 +115,13 @@ if [[ "$GH_AUTH_MODE" == "app" ]]; then
       "docs/pipeline/errors.md#authentication-class-class-auth" auth
     exit 1
   fi
-  # [INV-78] Mint the SECOND, scoped token for the agent subtree (reuses the dev
+  # [INV-79] Mint the SECOND, scoped token for the agent subtree (reuses the dev
   # App credentials). Best-effort: a mint failure WARNs and leaves the agent on
   # the full-write credential (no scrub) rather than blocking the run.
   setup_agent_token "${DEV_AGENT_APP_ID}" "${DEV_AGENT_APP_PEM}"
 else
   setup_github_auth
-  # [INV-78] PAT mode: no second token possible — logs a one-time WARN.
+  # [INV-79] PAT mode: no second token possible — logs a one-time WARN.
   setup_agent_token
 fi
 
@@ -257,7 +257,7 @@ install_agent_sigterm_trap
 acquire_pid_guard "$PID_FILE" "autonomous-dev" "$ISSUE_NUMBER"
 export AGENT_PID_FILE="$PID_FILE"
 
-# [INV-78] PR-create broker file. When the scoped agent token is armed
+# [INV-79] PR-create broker file. When the scoped agent token is armed
 # (AGENT_GH_TOKEN_FILE set by setup_agent_token), `gh pr create` (which needs
 # pull_requests:write) is brokered: the agent writes the PR title+body here and
 # the wrapper opens the PR in cleanup (drain_agent_pr_create). Exported so it
@@ -274,7 +274,7 @@ else
 fi
 export AGENT_PR_CREATE_FILE
 
-# [INV-78] Bot-trigger broker file. GH_USER_PAT is scrubbed from the agent subtree
+# [INV-79] Bot-trigger broker file. GH_USER_PAT is scrubbed from the agent subtree
 # (#234 review [P1]), so the agent can no longer post the real-user bot-trigger
 # comments (`/q review` etc.) itself. Instead it writes the trigger phrase(s) here
 # and the wrapper posts them via gh-as-user.sh in cleanup (drain_agent_bot_triggers,
@@ -400,7 +400,7 @@ emit_open_pr_fast_path_block() {
   needs_open_pr_only "$issue_num" || return 0
   log "Detected pushed head branch with commits ahead of base but no PR for issue #${issue_num} — injecting open-PR-only fast path ([INV-45])."
 
-  # [INV-78] When the scoped agent token is armed, the agent CANNOT run
+  # [INV-79] When the scoped agent token is armed, the agent CANNOT run
   # `gh pr create` (pull_requests:read → 403). The fast-path's open-PR step MUST
   # route through the same wrapper broker as the normal scoped-token path (#234
   # review [P1] #2): write the head branch + title + body to AGENT_PR_CREATE_FILE
@@ -410,7 +410,7 @@ emit_open_pr_fast_path_block() {
   if [[ -n "${AGENT_GH_TOKEN_FILE:-}" ]]; then
     open_pr_step="3. Go STRAIGHT to the open-PR step. Your token is SCOPED and CANNOT run
    \`gh pr create\` — instead WRITE the PR to \`\$(printenv AGENT_PR_CREATE_FILE)\`
-   with EXACTLY this layout (the WRAPPER opens the PR for you, see [INV-78]):
+   with EXACTLY this layout (the WRAPPER opens the PR for you, see [INV-79]):
      - line 1: \`branch: <the-pushed-branch-you-checked-out>\`
      - line 2: the PR title
      - line 3 onward: the PR body (include \"Closes #${issue_num}\")"
@@ -649,7 +649,7 @@ EOF
     fi
   fi
 
-  # [INV-78] PR-create broker: if the scoped agent token is armed and the agent
+  # [INV-79] PR-create broker: if the scoped agent token is armed and the agent
   # wrote a PR title+body (it cannot `gh pr create` with pull_requests:read),
   # open the PR now with the wrapper's full-write token — BEFORE the PR_EXISTS
   # lookup below so a brokered create routes the success path to pending-review.
@@ -661,7 +661,7 @@ EOF
   PR_EXISTS=$(gh pr list --repo "$REPO" --state open --json body \
     -q "[.[] | select(.body | test(\"#${ISSUE_NUMBER}[^0-9]\") or test(\"#${ISSUE_NUMBER}$\"))] | length" 2>/dev/null || echo "0")
 
-  # [INV-78] Bot-trigger broker: if the scoped agent token is armed and the agent
+  # [INV-79] Bot-trigger broker: if the scoped agent token is armed and the agent
   # wrote bot-trigger phrase(s) (it cannot post them itself — GH_USER_PAT is scrubbed
   # from its subtree), post them now via gh-as-user.sh with the wrapper's GH_USER_PAT.
   # Runs AFTER drain_agent_pr_create so the PR exists; the helper resolves the PR
@@ -790,7 +790,7 @@ fi
 # so the fast path engages regardless of which mode the dispatcher routed.
 OPEN_PR_FAST_PATH="$(emit_open_pr_fast_path_block "$ISSUE_NUMBER")"
 
-# [INV-78] PR-create broker instruction. Non-empty ONLY when the scoped agent
+# [INV-79] PR-create broker instruction. Non-empty ONLY when the scoped agent
 # token is armed (AGENT_GH_TOKEN_FILE set by setup_agent_token in app mode). The
 # scoped token has pull_requests:read, so `gh pr create` would 403 — instead the
 # agent writes the PR title+body to $AGENT_PR_CREATE_FILE and the wrapper opens
@@ -805,7 +805,7 @@ if [[ -n "${AGENT_GH_TOKEN_FILE:-}" ]]; then
   # Everything that must reach the agent VERBATIM is escaped: `\$(printenv …)` (the
   # agent runs it at runtime) and the backtick-quoted command names `\`…\``.
   PR_CREATE_BROKER_BLOCK="$(cat <<BROKER_BLOCK
-## Credential note ([INV-78]) — opening the PR
+## Credential note ([INV-79]) — opening the PR
 Your GitHub token is SCOPED (it can push branches and comment, but it CANNOT
 approve or merge PRs, and it cannot run \`gh pr create\`). To open the PR, do NOT
 run \`gh pr create\`. Instead, AFTER you have pushed your feature branch with
@@ -819,7 +819,7 @@ The WRAPPER will run \`gh pr create --head <your-branch>\` for you after you fin
 Still push your branch with \`git push\` as usual (your token has contents:write).
 Everything else (progress comments, checkbox ticks) works with your token directly.
 
-### Triggering the built-in review bots ([INV-78])
+### Triggering the built-in review bots ([INV-79])
 Your scoped token also CANNOT post the real-user bot-trigger comments (\`/q review\`,
 \`/codex review\`, \`@claude review\`) — those bots reject GitHub-App-attributed
 comments and the host PAT is not in your environment. Do NOT run

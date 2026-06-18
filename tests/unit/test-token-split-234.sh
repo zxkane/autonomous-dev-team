@@ -1,5 +1,5 @@
 #!/bin/bash
-# test-token-split-234.sh — Unit tests for INV-78 (issue #234).
+# test-token-split-234.sh — Unit tests for INV-79 (issue #234).
 #
 # Two-token split + agent env scrubbing. Asserts:
 #   - get_gh_app_token / get_gh_app_scoped_token build the access-token request
@@ -43,7 +43,7 @@ else
   assert_fail "scoped body missing repo/permissions: $body"
 fi
 
-# Full-grant body (no permissions arg) is the pre-INV-78 shape (no permissions key).
+# Full-grant body (no permissions arg) is the pre-INV-79 shape (no permissions key).
 body_full=$(bash -c "source '$SCRIPTS/gh-app-token.sh'; _build_access_token_body 'myrepo' ''")
 if [[ "$body_full" == '{"repositories":["myrepo"]}' ]]; then
   assert_pass "full-grant body unchanged (no permissions key): $body_full"
@@ -87,7 +87,7 @@ PERMS_SEEN="$DSB/perms-seen.txt"
 cat > "$DSB/gh-app-token.sh" <<STUB
 #!/bin/bash
 get_gh_app_token() {
-  # \$5 is the permissions arg ([INV-78]).
+  # \$5 is the permissions arg ([INV-79]).
   printf '%s' "\${5:-<none>}" > "$PERMS_SEEN"
   echo "stub-token-value"
 }
