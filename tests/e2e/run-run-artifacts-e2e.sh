@@ -102,12 +102,18 @@ esac
 GH
 chmod +x "$BIN/gh"
 
+# A REAL empty conf isolates status.sh's config load: `/dev/null` is not a
+# regular file, so load_autonomous_conf's `-f` tier-1 misses it and falls through
+# to `$PROJECT_DIR/scripts/autonomous.conf` when PROJECT_DIR is exported (#235
+# review [P1]). `env -u PROJECT_DIR` removes that fallback tier outright.
+EMPTY_CONF="$TMP/empty-autonomous.conf"; : > "$EMPTY_CONF"
 STATUS_OUT="$(
+  env -u PROJECT_DIR \
   PATH="$BIN:$PATH" \
   REPO="zxkane/e2e" REPO_OWNER="zxkane" PROJECT_ID="e2e-proj" \
   MAX_RETRIES=3 MAX_CONCURRENT=5 \
   AUTONOMOUS_PID_DIR="$PID_DIR" AUTONOMOUS_RUN_DIR_BASE="$STATE_ROOT/autonomous-e2e-proj" \
-  AUTONOMOUS_CONF="/dev/null" \
+  AUTONOMOUS_CONF="$EMPTY_CONF" \
     bash "$STATUS_SH" 700 2>&1
 )"
 expect "TC-083a status shows labels" "pending-review" "$STATUS_OUT"

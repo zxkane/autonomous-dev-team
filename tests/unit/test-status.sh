@@ -32,6 +32,13 @@ TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 BIN="$TMP/bin"; mkdir -p "$BIN"
 PID_DIR="$TMP/piddir"; mkdir -p "$PID_DIR"
 RUN_BASE="$TMP/state/autonomous-test-proj"; mkdir -p "$RUN_BASE/runs"
+# A REAL empty conf to isolate status.sh's config load. `/dev/null` is NOT a
+# regular file, so load_autonomous_conf's `[[ -f ]]` tier-1 check MISSES it and
+# falls through to the `$PROJECT_DIR/scripts/autonomous.conf` tier — which loads
+# the live conf when PROJECT_DIR is exported (e.g. in the review environment),
+# breaking isolation (#235 review [P1]). A real empty file passes `-f`, so tier-1
+# wins; `run_status` ALSO unsets PROJECT_DIR as belt-and-suspenders.
+EMPTY_CONF="$TMP/empty-autonomous.conf"; : > "$EMPTY_CONF"
 
 # ---- stub gh -------------------------------------------------------------
 # Answers the specific queries status.sh issues:
@@ -77,11 +84,15 @@ write_fixture() {
 
 run_status() {  # run_status <issue> [extra args...]
   local issue="$1"; shift || true
+  # `env -u PROJECT_DIR` removes the live-conf fallback tier entirely; EMPTY_CONF
+  # (a real regular file) satisfies load_autonomous_conf's tier-1 `-f` check so
+  # the test never sources a project's autonomous.conf (#235 review [P1]).
+  env -u PROJECT_DIR \
   PATH="$BIN:$PATH" \
   REPO="zxkane/autonomous-dev-team" REPO_OWNER="zxkane" PROJECT_ID="test-proj" \
   MAX_RETRIES=3 MAX_CONCURRENT=5 \
   AUTONOMOUS_PID_DIR="$PID_DIR" AUTONOMOUS_RUN_DIR_BASE="$RUN_BASE" \
-  AUTONOMOUS_CONF="/dev/null" \
+  AUTONOMOUS_CONF="$EMPTY_CONF" \
     bash "$STATUS_SH" "$issue" "$@" 2>&1
 }
 
@@ -189,8 +200,8 @@ assert_contains "TC-048 project override reflected" "project: other-proj" "$out"
 # TC-049 invalid/missing issue arg
 # ---------------------------------------------------------------------------
 echo "== TC-049 bad arg =="
-out="$(PATH="$BIN:$PATH" REPO=x/y REPO_OWNER=x PROJECT_ID=test-proj \
-  AUTONOMOUS_CONF=/dev/null bash "$STATUS_SH" notanumber 2>&1; echo "rc=$?")"
+out="$(env -u PROJECT_DIR PATH="$BIN:$PATH" REPO=x/y REPO_OWNER=x PROJECT_ID=test-proj \
+  AUTONOMOUS_CONF="$EMPTY_CONF" bash "$STATUS_SH" notanumber 2>&1; echo "rc=$?")"
 assert_contains "TC-049a usage error" "Usage:" "$out"
 assert_contains "TC-049b non-zero exit" "rc=2" "$out"
 
