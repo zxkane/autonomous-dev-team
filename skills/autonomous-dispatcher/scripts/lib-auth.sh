@@ -482,6 +482,14 @@ drain_agent_pr_create() {
 # comment on the issue's PR. The wrapper resolves the PR number itself (same
 # body-#N selector as PR_EXISTS) — the agent does not need to know it.
 #
+# ALLOW-LIST (#234 review [P1]): the broker is a "review-bot trigger ONLY" exception,
+# not an arbitrary-comment channel. The caller passes $3 = the EXACT allowed trigger
+# phrases (newline-separated — from lib-review-bots.sh::bot_trigger_allowlist). A
+# line is posted ONLY if it EXACTLY matches an allowed phrase; any other line is
+# REJECTED with a WARN and never reaches gh-as-user.sh. An empty/absent allow-list
+# means "no triggers permitted" → nothing is posted (fail-closed): a scoped agent
+# cannot make the wrapper emit a user-attributed comment of its choosing.
+#
 # Fail-safe + idempotent: a no-op unless the scoped token is armed
 # (AGENT_GH_TOKEN_FILE set — so this only brokers in the scrubbed-agent case) AND
 # AGENT_BOT_TRIGGER_FILE is set + non-empty AND a PR exists. Returns 0 always; a
@@ -489,9 +497,10 @@ drain_agent_pr_create() {
 # project-side scripts dir), the same place the agent's `bash scripts/gh-as-user.sh`
 # would have found it.
 #
-# Args: $1=issue_number, $2=repo. Reads AGENT_GH_TOKEN_FILE / AGENT_BOT_TRIGGER_FILE.
+# Args: $1=issue_number, $2=repo, $3=allowlist (newline-separated exact phrases).
+# Reads AGENT_GH_TOKEN_FILE / AGENT_BOT_TRIGGER_FILE.
 drain_agent_bot_triggers() {
-  local issue_number="$1" repo="$2"
+  local issue_number="$1" repo="$2" allowlist="${3:-}"
   [[ -n "$AGENT_GH_TOKEN_FILE" ]] || return 0
   [[ -n "${AGENT_BOT_TRIGGER_FILE:-}" && -s "${AGENT_BOT_TRIGGER_FILE}" ]] || return 0
 
@@ -510,11 +519,22 @@ drain_agent_bot_triggers() {
     return 0
   fi
 
-  local line posted=0
+  local line posted=0 allowed
   while IFS= read -r line || [[ -n "$line" ]]; do
     # Trim leading/trailing whitespace; skip blanks and #-comments.
     line="${line#"${line%%[![:space:]]*}"}"; line="${line%"${line##*[![:space:]]}"}"
     [[ -z "$line" || "$line" == \#* ]] && continue
+    # ALLOW-LIST gate: post ONLY an EXACT configured trigger phrase. A non-matching
+    # line is a misuse attempt (or a typo) — reject it, never forward to the host.
+    allowed=0
+    local _phrase
+    while IFS= read -r _phrase; do
+      [[ -n "$_phrase" && "$line" == "$_phrase" ]] && { allowed=1; break; }
+    done <<< "$allowlist"
+    if [[ "$allowed" -ne 1 ]]; then
+      echo "WARN: [INV-78] rejected brokered bot-trigger line not in the configured allow-list (REVIEW_BOTS triggers only): '${line}'" >&2
+      continue
+    fi
     if bash "$gh_as_user" pr comment "$pr_number" --repo "$repo" --body "$line" >/dev/null 2>&1; then
       posted=$((posted + 1))
     else

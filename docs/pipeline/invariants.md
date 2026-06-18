@@ -3735,7 +3735,15 @@ an agent that runs `gh pr review --approve` / `gh pr merge` gets a deterministic
   the permissions (refresh integrated, [INV-31] class); `build_agent_env_argv`
   emits the scrub `env`-prefix; `drain_agent_pr_create` brokers `gh pr create`;
   `drain_agent_bot_triggers` brokers the real-user bot-trigger comments via
-  `gh-as-user.sh`; `cleanup_github_auth` reaps the second daemon.
+  `gh-as-user.sh` **constrained to an allow-list** (3rd arg) — only lines that
+  exactly match a configured `REVIEW_BOTS` trigger phrase are posted; any other
+  line is rejected with a WARN and an empty allow-list is fail-closed (post
+  nothing), so the broker cannot be turned into an arbitrary post-as-user channel
+  by a compromised agent; `cleanup_github_auth` reaps the second daemon.
+  `lib-review-bots.sh` supplies `bot_trigger_allowlist <REVIEW_BOTS>` (the exact
+  configured trigger phrases, one per line) and `missing_bot_reviews <REVIEW_BOTS>
+  <PR> <REPO>` (short-names of configured bots with no review on the PR; a `gh`
+  failure counts a bot as MISSING — fail-closed).
 - **Consumer**: `lib-agent.sh::_run_with_timeout` prepends the scrub prefix to
   EVERY adapter invocation (CLI-agnostic — claude/codex/gemini/kiro/opencode/agy/
   generic all route through it), **before** `AGENT_LAUNCHER_ARGV` so the launcher
@@ -3748,7 +3756,21 @@ an agent that runs `gh pr review --approve` / `gh pr merge` gets a deterministic
   a direct create — #234 review [P1] #2); the dev wrapper also drains the
   bot-trigger broker (posts `/q review` etc. via `gh-as-user.sh`, since the agent's
   `GH_USER_PAT` is scrubbed — #234 review [P1] f97959a3); the review wrapper posts
-  the brokered E2E report (`lib-review-e2e.sh::_post_brokered_e2e_report`).
+  the brokered E2E report (`lib-review-e2e.sh::_post_brokered_e2e_report`) AND
+  enforces a **mandatory-bot-review hard gate** before approving: because the
+  scoped review prompt brokers its bot triggers (the agent itself cannot post as
+  the user) and the broker only runs in `cleanup`, a `PASSED_VERDICT` could
+  otherwise be approved+merged BEFORE the configured `REVIEW_BOTS` have actually
+  reviewed. So in the PASS branch (after the PR-open guard) the wrapper computes
+  `missing_bot_reviews`; if non-empty and the SHA-bound wait count is `<
+  BOT_REVIEW_WAIT_MAX` (3) it re-queues `−reviewing +pending-review` with a
+  `failed-non-substantive` `awaiting-bot-review` trailer + a SHA-bound
+  `<!-- bot-review-wait sha=… -->` marker (the next tick re-reviews once the bot
+  review lands); at/after the max it is a substantive FAIL → `+pending-dev` +
+  `gh pr review --request-changes` (the bot is misconfigured/down — a maintainer
+  investigates). This is the wrapper-owned enforcement that the prompt's "Do NOT
+  FAIL on an absent bot review" instruction relies on — the agent never blocks on
+  the bot; the wrapper does — #234 review [P1] 37450359.
 - **Degraded mode (PAT)**: `GH_AUTH_MODE=token` — a PAT cannot be down-scoped at
   mint, so there is NO second token. `setup_agent_token` logs a ONE-TIME WARN
   ("enforcement degraded to convention in PAT mode"), `build_agent_env_argv`
@@ -3768,7 +3790,11 @@ an agent that runs `gh pr review --approve` / `gh pr merge` gets a deterministic
   one-time PAT WARN, `build_agent_env_argv` scrub assembly, the env-dump
   verify-by-construction gate via the real `_run_with_timeout` (no full-write
   credential + no shim PATH in the agent env), the `pull_requests:read` scope pin,
-  the PR-create broker, and the E2E report broker.
+  the PR-create broker, the E2E report broker, the bot-trigger broker allow-list
+  (exact-match accept, non-trigger reject, fail-closed empty), the
+  `bot_trigger_allowlist` / `missing_bot_reviews` helpers, and a source-level lock
+  that the review wrapper's PASS branch wires the mandatory-bot-review hard gate
+  (`missing_bot_reviews` → `pending-review` / `pending-dev`).
 
 ## Adding a new invariant
 

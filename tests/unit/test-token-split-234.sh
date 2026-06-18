@@ -695,11 +695,13 @@ exit 0
 GH
 chmod +x "$GHSB95/gh"
 BTF95="$TMPROOT/bt-file"; printf '/q review\n# comment\n\n/codex review\n' > "$BTF95"
-PATH="$GHSB95:$PATH" bash -c "
+env -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR PATH="$GHSB95:/usr/bin:/bin" bash -c "
   source '$SBA95/lib-auth.sh'
   AGENT_GH_TOKEN_FILE='/some/scoped/token'   # scoping armed
   AGENT_BOT_TRIGGER_FILE='$BTF95'
-  drain_agent_bot_triggers 234 owner/repo
+  # Pass an allow-list covering both phrases (the file's content) so the broker
+  # posts them; the literal mirrors bot_trigger_allowlist 'q codex'.
+  drain_agent_bot_triggers 234 owner/repo \$'/q review\n/codex review'
 " >/dev/null 2>&1
 posts=$(grep -c '^GAU' "$BT_POSTS" 2>/dev/null || echo 0)
 # The skipped `# comment` line would appear as a `--body # comment` post if not
@@ -759,6 +761,76 @@ if grep -qF 'export AGENT_BOT_TRIGGER_FILE' "$REVIEW_SH" \
   assert_pass "source: autonomous-review.sh exports AGENT_BOT_TRIGGER_FILE and drains it (drain_agent_bot_triggers)"
 else
   assert_fail "source: autonomous-review.sh does not export/drain the bot-trigger broker file"
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-TOKEN-SPLIT-097: broker allow-list restricts to EXACT configured triggers + wrapper hard-gates a missing bot review (#234 [P1] 37450359) ==="
+# ---------------------------------------------------------------------------
+LIB_BOTS="$SCRIPTS/lib-review-bots.sh"
+# (a) bot_trigger_allowlist echoes the exact configured trigger phrases.
+allow97=$(bash -c "source '$LIB_BOTS'; bot_trigger_allowlist 'q codex'" 2>/dev/null)
+if printf '%s' "$allow97" | grep -qxF '/q review' && printf '%s' "$allow97" | grep -qxF '/codex review'; then
+  assert_pass "bot_trigger_allowlist echoes the exact configured trigger phrases (/q review, /codex review)"
+else
+  assert_fail "bot_trigger_allowlist wrong: $allow97"
+fi
+# (b) drain_agent_bot_triggers REJECTS a non-trigger line and posts ONLY the
+#     allow-listed phrases (the #234 [P1] #2 — no arbitrary user-attributed comments).
+DRAIN_SBA="$TMPROOT/drain-allow"; mkdir -p "$DRAIN_SBA"
+cp "$SCRIPTS/lib-auth.sh" "$DRAIN_SBA/"; cp "$LIB_BOTS" "$DRAIN_SBA/"
+printf '#!/bin/bash\nload_autonomous_conf(){ return 0; }\n' > "$DRAIN_SBA/lib-config.sh"
+printf '#!/bin/bash\nget_gh_app_token(){ echo X; }\nget_gh_app_scoped_token(){ echo X; }\n' > "$DRAIN_SBA/gh-app-token.sh"
+DRAIN_POSTS="$TMPROOT/drain-posts.log"; : > "$DRAIN_POSTS"
+printf '#!/bin/bash\nprintf "POST %%s\\n" "$*" >> "%s"\n' "$DRAIN_POSTS" > "$DRAIN_SBA/gh-as-user.sh"; chmod +x "$DRAIN_SBA/gh-as-user.sh"
+DRAIN_GH="$TMPROOT/drain-gh"; mkdir -p "$DRAIN_GH"
+printf '#!/bin/bash\nif [[ "$1" == "pr" && "$2" == "list" ]]; then echo 42; exit 0; fi\nexit 0\n' > "$DRAIN_GH/gh"; chmod +x "$DRAIN_GH/gh"
+DRAIN_BTF="$TMPROOT/drain-bt"; printf '/q review\n/evil arbitrary comment\n/codex review\n' > "$DRAIN_BTF"
+env -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR PATH="$DRAIN_GH:/usr/bin:/bin" bash -c "
+  source '$DRAIN_SBA/lib-auth.sh'; source '$DRAIN_SBA/lib-review-bots.sh'
+  AGENT_GH_TOKEN_FILE='/scoped'; AGENT_BOT_TRIGGER_FILE='$DRAIN_BTF'
+  allow=\$(bot_trigger_allowlist 'q codex')
+  drain_agent_bot_triggers 234 owner/repo \"\$allow\"
+" >/dev/null 2>&1
+if grep -qF -- '--body /q review' "$DRAIN_POSTS" && grep -qF -- '--body /codex review' "$DRAIN_POSTS" \
+   && ! grep -qF -- '--body /evil arbitrary comment' "$DRAIN_POSTS"; then
+  assert_pass "drain allow-list: posts ONLY the configured triggers, REJECTS the arbitrary line"
+else
+  assert_fail "drain allow-list leaked a non-trigger line or dropped an allowed one: $(cat "$DRAIN_POSTS" 2>/dev/null)"
+fi
+# (c) empty allow-list → fail-closed (nothing posted even for a real-looking trigger).
+: > "$DRAIN_POSTS"
+env -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR PATH="$DRAIN_GH:/usr/bin:/bin" bash -c "
+  source '$DRAIN_SBA/lib-auth.sh'
+  AGENT_GH_TOKEN_FILE='/scoped'; AGENT_BOT_TRIGGER_FILE='$DRAIN_BTF'
+  drain_agent_bot_triggers 234 owner/repo ''
+" >/dev/null 2>&1
+if [[ ! -s "$DRAIN_POSTS" ]]; then
+  assert_pass "drain empty allow-list: fail-closed (nothing posted)"
+else
+  assert_fail "drain empty allow-list posted something it shouldn't have: $(cat "$DRAIN_POSTS" 2>/dev/null)"
+fi
+# (d) missing_bot_reviews echoes a configured bot with no review (stub gh → 0 reviews).
+MBR=$(env -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR PATH="$TMPROOT/mbr-gh:/usr/bin:/bin" bash -c "
+  mkdir -p '$TMPROOT/mbr-gh'
+  printf '#!/bin/bash\nif [[ \"\\\$1\" == \"api\" ]]; then echo 0; exit 0; fi\nexit 0\n' > '$TMPROOT/mbr-gh/gh'; chmod +x '$TMPROOT/mbr-gh/gh'
+  source '$LIB_BOTS'
+  missing_bot_reviews 'q' 42 owner/repo
+" 2>/dev/null | tr '\n' ' ')
+if printf '%s' "$MBR" | grep -qw 'q'; then
+  assert_pass "missing_bot_reviews lists a configured bot with no review (the wrapper hard-gate signal)"
+else
+  assert_fail "missing_bot_reviews did not list the missing bot: '$MBR'"
+fi
+# (e) source-level: autonomous-review.sh hard-gates a missing bot review in the PASS
+#     branch (calls missing_bot_reviews and re-queues to pending-review) + passes the
+#     allow-list to the drain; autonomous-dev.sh passes the allow-list too.
+if grep -qF 'missing_bot_reviews "$REVIEW_BOTS_VALIDATED" "$PR_NUMBER" "$REPO"' "$REVIEW_SH" \
+   && grep -qF 'drain_agent_bot_triggers "$ISSUE_NUMBER" "$REPO" "$_bot_allowlist"' "$REVIEW_SH" \
+   && grep -qF 'drain_agent_bot_triggers "$ISSUE_NUMBER" "$REPO" "$_bot_allowlist"' "$DEV_SH"; then
+  assert_pass "source: review wrapper hard-gates a missing bot review + both wrappers pass the trigger allow-list to the drain"
+else
+  assert_fail "source: missing the wrapper hard-gate or the allow-list arg on a drain call"
 fi
 
 # ---------------------------------------------------------------------------

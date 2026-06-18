@@ -576,6 +576,41 @@ if PASSED_VERDICT == true:
 - **UNKNOWN** posts no PR marker (no confirmed conflict ⇒ no forced rebase) and does NOT submit `--request-changes` ([INV-52](invariants.md#inv-52-the-review-wrapper-owns-the-github-native-pr-reviewmerge-action-the-agent-posts-verdicts-only): a transient re-queue is not a dev-actionable blocking finding); the `failed-non-substantive` trailer makes the dispatcher flip the issue back to `pending-review` (re-review) under the `REVIEW_RETRY_LIMIT` cap ([INV-35](invariants.md#inv-35-review-aware-resume-routing-for-completed-sessions)).
 - Happy path (`MERGEABLE`) is byte-for-byte today's behavior plus one `gh pr view --json mergeable` call.
 
+## Mandatory bot-review hard gate (INV-78)
+
+When scoping is armed ([INV-78](invariants.md#inv-78-in-app-mode-the-agent-process-gets-only-a-scoped-token-the-wrapper-keeps-full-write-and-is-the-sole-approvemergepr-create-path)), the review agent's `GH_USER_PAT` is scrubbed, so it **cannot** post the `REVIEW_BOTS` trigger comments (`/q review`, `/codex review`) as the real user — `render_bot_review_section` instead has it write the trigger phrase(s) to `$AGENT_BOT_TRIGGER_FILE`, and the wrapper brokers them via `gh-as-user.sh` in `cleanup` (`drain_agent_bot_triggers`, allow-list-constrained). Because that broker runs only at cleanup — *after* the verdict — a `PASSED_VERDICT` could otherwise be approved+merged in the SAME tick, before any configured bot has reviewed. The scoped review prompt is therefore told "do NOT FAIL on an absent bot review"; the **wrapper** owns the wait instead, so the gate cannot be skipped by an agent's verdict.
+
+**Order in the PASS chain:** PR-open guard ([INV-54](invariants.md#inv-54-the-pr-still-open-guard-gates-all-pass-chain-exits-not-just-pass)) → **this bot-review gate** → mergeable gate ([INV-44](invariants.md#inv-44-mergeable-hard-gate--a-conflicting-pr-can-never-reach-approved)) → PASS path. It runs right after the PR-open guard (PR already confirmed OPEN) and *before* the mergeable poll, so a still-missing bot review re-queues cheaply without spending the mergeable retry budget. (The Mergeable section is documented above for narrative continuity, but executes after this gate.)
+
+```
+if PASSED_VERDICT == true:           # PR-open guard already passed; mergeable gate runs AFTER this
+  MISSING_BOTS = missing_bot_reviews "$REVIEW_BOTS_VALIDATED" "$PR_NUMBER" "$REPO"
+                 # short-names of configured bots with NO review on the PR;
+                 # a gh failure counts a bot MISSING — fail-closed (lib-review-bots.sh)
+  if MISSING_BOTS non-empty:
+    _wait_marker = "<!-- bot-review-wait sha=\"$PR_HEAD_SHA\" -->"
+    _wait_count  = count of prior bot-review-wait markers for THIS HEAD sha
+    if _wait_count < BOT_REVIEW_WAIT_MAX (3):
+      issue comment "Review held — ... mandatory configured review bot(s) [$MISSING_BOTS]
+                     have not posted a review on PR #$PR_NUMBER yet ... (No approve/merge
+                     this tick — INV-78.)"  + the SHA-bound _wait_marker
+      emit_verdict_trailer failed-non-substantive cause=awaiting-bot-review
+      −reviewing +pending-review ; exit 0      # next tick re-reviews once the bot review lands
+    else:                                       # bot misconfigured / down
+      issue comment "Review findings: ... [BLOCKING] Mandatory review bot(s) [$MISSING_BOTS]
+                     did not review PR #$PR_NUMBER after $BOT_REVIEW_WAIT_MAX attempt(s) ..."
+      emit_verdict_trailer failed-substantive
+      submit_request_changes <PR>               # INV-52 (substantive)
+      −reviewing +pending-dev ; exit 0
+  # else: no bot missing → fall through to the PASS path below (UNCHANGED)
+```
+
+- **Why `pending-review`, not `pending-dev`, on the wait branch.** There is no new commit for a dev agent to make — the code is fine, the wrapper is just waiting for an *external* bot. Routing to `pending-dev` would strand the issue: the [#106 stale-verdict dispatcher guard](state-machine.md) keeps `pending-dev` + open-PR + no-new-commits parked. `pending-review` re-queues a clean re-review on the next tick, by which time `drain_agent_bot_triggers` has fired and the bot's review is present. This is the only `reviewing → pending-review` producer in the wrapper.
+- **Bounded.** The `<!-- bot-review-wait sha="…" -->` marker is SHA-bound, so a force-push (new HEAD) resets the count; on a stable HEAD the wait is capped at `BOT_REVIEW_WAIT_MAX` (3) before escalating to a substantive FAIL → `pending-dev`, on the assumption the bot is misconfigured/down and a maintainer should look. The marker is read by counting prior markers for the current HEAD SHA, so it cannot loop indefinitely.
+- **Fail-closed.** `missing_bot_reviews` treats a failed `gh api .../reviews` call as "bot MISSING" (it never silently passes a bot whose review state it could not confirm). An empty `REVIEW_BOTS` makes the gate a no-op (nothing to wait for) — it only fires for *configured* bots.
+- **Unscoped / PAT mode — gate is SKIPPED.** The whole gate is guarded by `[[ -n "${AGENT_GH_TOKEN_FILE:-}" ]]` (scoped mode only). When scoping is NOT armed the agent posts the bot triggers directly (in-run) via `gh-as-user.sh` and polls for the bot review *during* the run, so its OWN verdict already covers a missing bot review — there is nothing for the wrapper to wait on, and `missing_bot_reviews` does not run. The wrapper-owned wait exists solely because the scoped scrub defers the trigger to cleanup (post-verdict).
+- **Skipped on FAIL.** The gate lives inside the `PASSED_VERDICT == true` chain only — a FAIL/block verdict never reaches it (the dev side will produce a new HEAD anyway, re-arming bot review).
+
 ## Verdict = PASS path
 
 ```

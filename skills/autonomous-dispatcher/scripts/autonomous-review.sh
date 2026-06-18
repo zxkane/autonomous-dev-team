@@ -655,7 +655,13 @@ cleanup() {
       GH_TOKEN=$(get_gh_app_token "${REVIEW_AGENT_APP_ID}" "${REVIEW_AGENT_APP_PEM}" "$REPO_OWNER" "$REPO_NAME" 2>/dev/null) \
         && { export GH_TOKEN; export GITHUB_PERSONAL_ACCESS_TOKEN="$GH_TOKEN"; } || true
     fi
-    drain_agent_bot_triggers "$ISSUE_NUMBER" "$REPO" || true
+    # Allow-list (#234 review [P1]): only EXACT configured REVIEW_BOTS triggers may
+    # be brokered. Empty/undefined → fail-closed (nothing posted).
+    local _bot_allowlist=""
+    if declare -F bot_trigger_allowlist >/dev/null 2>&1; then
+      _bot_allowlist=$(bot_trigger_allowlist "${REVIEW_BOTS_VALIDATED:-}" 2>/dev/null || true)
+    fi
+    drain_agent_bot_triggers "$ISSUE_NUMBER" "$REPO" "$_bot_allowlist" || true
   fi
 
   # If result was already parsed by the main script, labels are handled there
@@ -2954,6 +2960,73 @@ if [[ "$PASSED_VERDICT" == "true" ]]; then
       --remove-label "reviewing" 2>/dev/null || true
     RESULT_PARSED=true
     exit 0
+  fi
+
+  # -------------------------------------------------------------------------
+  # Mandatory-bot-review hard gate (#234 review [P1] 37450359).
+  # -------------------------------------------------------------------------
+  # Under the [INV-78] scoped scrub the review agent BROKERS the bot trigger and is
+  # told NOT to FAIL on a not-yet-present bot review (the trigger posts post-run via
+  # drain_agent_bot_triggers in cleanup). So the AGENT's PASS can arrive before a
+  # mandatory REVIEW_BOTS review exists. The WRAPPER must therefore block the
+  # approve/merge while any configured bot review is still missing — otherwise we'd
+  # merge without the mandatory bot review. This is a transient RE-QUEUE (stay
+  # `reviewing`, NOT a dev bounce): the trigger fires in cleanup, and a later review
+  # tick sees the bot review present (COUNT > 0) and proceeds. Only active when
+  # REVIEW_BOTS is configured AND scoping is armed (in PAT/no-scope mode the agent
+  # triggers + polls in-run, so its FAIL already covers a missing bot review). Best-
+  # effort: missing_bot_reviews counts a gh failure as MISSING (fail-closed → block).
+  if [[ -n "${REVIEW_BOTS_VALIDATED:-}" && -n "${AGENT_GH_TOKEN_FILE:-}" ]] \
+     && declare -F missing_bot_reviews >/dev/null 2>&1; then
+    MISSING_BOTS=$(missing_bot_reviews "$REVIEW_BOTS_VALIDATED" "$PR_NUMBER" "$REPO" 2>/dev/null | tr '\n' ' ')
+    MISSING_BOTS="${MISSING_BOTS%"${MISSING_BOTS##*[![:space:]]}"}"
+    if [[ -n "$MISSING_BOTS" ]]; then
+      # Bound the re-queue: a permanently-broken/unconfigured bot must not loop
+      # pending-review ⇄ reviewing forever. Count prior "awaiting bot review" hold
+      # markers on the issue; after BOT_REVIEW_WAIT_MAX (default 3) holds, give up
+      # waiting and route to pending-dev as a substantive FAIL so a human/dev
+      # investigates the missing bot.
+      _wait_marker="<!-- bot-review-wait sha=\"${PR_HEAD_SHA:-unknown}\" -->"
+      _wait_count=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json comments \
+        --jq "[.comments[] | select(.body | contains(\"bot-review-wait sha=\\\"${PR_HEAD_SHA:-unknown}\\\"\"))] | length" 2>/dev/null || echo 0)
+      [[ "$_wait_count" =~ ^[0-9]+$ ]] || _wait_count=0
+      if [[ "$_wait_count" -ge "${BOT_REVIEW_WAIT_MAX:-3}" ]]; then
+        log "Mandatory-bot-review gate: bot review(s) [${MISSING_BOTS}] still missing after ${_wait_count} wait(s) on HEAD ${PR_HEAD_SHA:0:7} — giving up, routing to pending-dev (substantive)."
+        gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
+          --body "Review findings:
+
+Findings->Decision Gate: 1 blocking finding(s) -- FAIL.
+
+1. **[BLOCKING] Mandatory review bot(s) [${MISSING_BOTS}] did not review PR #${PR_NUMBER}** after ${_wait_count} brokered trigger attempt(s) on this HEAD. The bot may be misconfigured, rate-limited, or down. Investigate the bot integration (REVIEW_BOTS) — a maintainer can re-trigger once the bot is healthy, or remove it from REVIEW_BOTS. ([INV-78])" 2>/dev/null || true
+        emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-substantive" "" 2>/dev/null || true
+        submit_request_changes "$PR_NUMBER" \
+          "Mandatory review bot(s) [${MISSING_BOTS}] did not review this PR after ${_wait_count} trigger attempt(s) (INV-78). Investigate the bot integration; reviewDecision is CHANGES_REQUESTED until the bot review is present." \
+          || log "WARNING: submit_request_changes returned non-zero (best-effort); continuing the FAIL route."
+        gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
+          --remove-label "reviewing" --add-label "pending-dev" 2>/dev/null || true
+        RESULT_PARSED=true
+        exit 0
+      fi
+
+      log "Mandatory-bot-review gate: configured bot review(s) still missing on PR #${PR_NUMBER}: ${MISSING_BOTS} (wait ${_wait_count}/${BOT_REVIEW_WAIT_MAX:-3}). Brokering the trigger(s) in cleanup and re-queuing for re-review (no approve/merge this tick)."
+      gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
+        --body "Review held — the agent verdict is PASS, but the mandatory configured review bot(s) [${MISSING_BOTS}] have not posted a review on PR #${PR_NUMBER} yet. The trigger(s) are being posted as a real user; the next review tick will evaluate the PR once the bot review is present. (No approve/merge this tick — [INV-78].) ${_wait_marker}" 2>/dev/null || true
+      # Non-substantive re-queue (transient/awaiting), NOT a dev bounce. Route to
+      # pending-review (NOT pending-dev): the code is fine — we are only waiting for
+      # the async bot review. pending-dev's #106 stale-verdict guard would otherwise
+      # STALL here (PR HEAD == last Reviewed HEAD, no new commits to push), never
+      # re-reviewing. pending-review → the dispatcher Step 3 re-dispatches a fresh
+      # REVIEW on the next tick, which sees the (now-posted) bot review and proceeds.
+      # emit a non-substantive trailer so INV-24 dead-detection stays heartbeat-
+      # consistent. ([INV-78]; documented as a reviewing→pending-review edge.) The
+      # SHA-bound wait marker bounds the loop (BOT_REVIEW_WAIT_MAX) and resets when
+      # dev pushes a new HEAD.
+      emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-non-substantive" "awaiting-bot-review" 2>/dev/null || true
+      gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
+        --remove-label "reviewing" --add-label "pending-review" 2>/dev/null || true
+      RESULT_PARSED=true
+      exit 0
+    fi
   fi
 
   # Poll mergeable while UNKNOWN (GitHub computes it asynchronously). The

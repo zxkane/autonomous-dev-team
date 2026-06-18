@@ -130,6 +130,49 @@ get_bot_login() {
   esac
 }
 
+# bot_trigger_allowlist <REVIEW_BOTS-value>
+#
+# Echoes the exact trigger phrases for the configured bots, one per line. Used by
+# the wrapper-side bot-trigger broker (drain_agent_bot_triggers) to restrict what a
+# scoped agent can ask the wrapper to post as the host user — only an EXACT
+# configured trigger phrase is forwarded ([INV-78], #234 review [P1]: the broker is
+# a "review-bot trigger only" exception, not an arbitrary-comment channel). Empty
+# REVIEW_BOTS → nothing. Returns non-zero if REVIEW_BOTS does not validate.
+bot_trigger_allowlist() {
+  local review_bots="$1" bots bot
+  bots=$(parse_review_bots "$review_bots") || return $?
+  [[ -z "$bots" ]] && return 0
+  for bot in $bots; do
+    get_bot_trigger "$bot" || return 1
+  done
+}
+
+# missing_bot_reviews <REVIEW_BOTS-value> <PR_NUMBER> <REPO>
+#
+# Echoes (one per line) the short-name of every configured bot that has NOT yet
+# posted a review on the PR. Empty output = all configured bots have reviewed (or
+# REVIEW_BOTS is empty). Used by the wrapper-side hard gate ([INV-78], #234 review
+# [P1]): under the scoped scrub the review agent brokers the bot trigger and does
+# NOT fail on an absent bot review, so the WRAPPER must block a PASS while a
+# mandatory bot review is still missing (re-queue; a later tick sees it present).
+#
+# Fail-safe: a `gh` query failure for a bot counts it as MISSING (block, don't
+# fail-open). Returns 0 always (the missing list is the signal).
+missing_bot_reviews() {
+  local review_bots="$1" pr_number="$2" repo="$3" bots bot login count
+  bots=$(parse_review_bots "$review_bots" 2>/dev/null) || return 0
+  [[ -z "$bots" ]] && return 0
+  for bot in $bots; do
+    login=$(get_bot_login "$bot" 2>/dev/null) || { printf '%s\n' "$bot"; continue; }
+    count=$(gh api "repos/${repo}/pulls/${pr_number}/reviews" --paginate \
+      --jq "[.[] | select(.user.login == \"${login}\")] | length" 2>/dev/null \
+      | awk '{s+=$1} END {print s+0}')
+    [[ "$count" =~ ^[0-9]+$ ]] || count=0
+    [[ "$count" -eq 0 ]] && printf '%s\n' "$bot"
+  done
+  return 0
+}
+
 # render_bot_review_section <REVIEW_BOTS-value> <PR_NUMBER> <REPO>
 #
 # Echoes the Markdown block to splice into the review-agent prompt.

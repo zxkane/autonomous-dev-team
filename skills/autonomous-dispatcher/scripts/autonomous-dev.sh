@@ -37,6 +37,14 @@ export AUTONOMOUS_CONF_DIR="$SCRIPT_DIR"
 source "${LIB_DIR}/lib-error.sh"
 source "${LIB_DIR}/lib-agent.sh"
 source "${LIB_DIR}/lib-auth.sh"
+# [INV-78] lib-review-bots.sh provides bot_trigger_allowlist — the dev-side
+# bot-trigger broker (drain_agent_bot_triggers) passes the configured trigger
+# phrases so only an EXACT REVIEW_BOTS trigger is ever posted (allow-list,
+# #234 review [P1]). Guarded source: a failure leaves the function undefined and
+# the drain call below falls back to an empty allow-list (fail-closed — nothing
+# posted), never aborting the wrapper.
+# shellcheck source=lib-review-bots.sh
+source "${LIB_DIR}/lib-review-bots.sh" 2>/dev/null || true
 # [INV-70] Observe-only metrics emitter. Sourced from LIB_DIR (skill tree) like
 # the other libs; provides metrics_emit/metrics_dir. A failure here must never
 # abort the wrapper, so the source itself is guarded.
@@ -657,9 +665,15 @@ EOF
   # wrote bot-trigger phrase(s) (it cannot post them itself — GH_USER_PAT is scrubbed
   # from its subtree), post them now via gh-as-user.sh with the wrapper's GH_USER_PAT.
   # Runs AFTER drain_agent_pr_create so the PR exists; the helper resolves the PR
-  # number itself and no-ops when scoping is off / no triggers / no PR.
+  # number itself and no-ops when scoping is off / no triggers / no PR. The allow-list
+  # (#234 review [P1]) restricts the broker to EXACT configured REVIEW_BOTS triggers —
+  # only post a line that matches one. Empty/undefined → fail-closed (nothing posted).
   if [[ "${PR_EXISTS:-0}" -gt 0 ]]; then
-    drain_agent_bot_triggers "$ISSUE_NUMBER" "$REPO" || true
+    local _bot_allowlist=""
+    if declare -F bot_trigger_allowlist >/dev/null 2>&1; then
+      _bot_allowlist=$(bot_trigger_allowlist "${REVIEW_BOTS:-}" 2>/dev/null || true)
+    fi
+    drain_agent_bot_triggers "$ISSUE_NUMBER" "$REPO" "$_bot_allowlist" || true
   fi
 
   # SIGTERM convergence (INV-15): Step 5a only kills us when a PR is ready.
