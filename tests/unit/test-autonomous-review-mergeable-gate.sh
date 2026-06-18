@@ -129,10 +129,12 @@ echo "=== TC-MG-SRC-12: emit_verdict_trailer grew by exactly 2 (gate's two block
 # adds two (CONFLICTING substantive + UNKNOWN non-substantive); the INV-46 E2E
 # gate (#182) adds two more (E2E-fail substantive + E2E-evidence-missing
 # non-substantive); the INV-64 Phase-A.5 smoke gate (#224) adds one (smoke-FAIL
-# abort) → 11. All sit OUTSIDE the per-agent collection loop.
+# abort); the INV-78 mandatory-bot-review gate (#234) adds two (awaiting-bot-review
+# wait + the max-waits substantive FAIL) → 13. All sit OUTSIDE the per-agent
+# collection loop.
 EMIT_COUNT=$(grep -cE '^\s*emit_verdict_trailer ' "$WRAPPER")
-assert_eq "TC-MG-SRC-12 emit_verdict_trailer call count is 11 (6 existing + 2 INV-44 gate + 2 INV-46 E2E gate + 1 INV-64 smoke abort)" \
-  "11" "$EMIT_COUNT"
+assert_eq "TC-MG-SRC-12 emit_verdict_trailer call count is 13 (6 existing + 2 INV-44 gate + 2 INV-46 E2E gate + 1 INV-64 smoke abort + 2 INV-78 bot-review gate)" \
+  "13" "$EMIT_COUNT"
 
 # ---------------------------------------------------------------------------
 echo ""
