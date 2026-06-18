@@ -294,4 +294,27 @@ if [[ $POST_RC -ne 0 ]]; then
   exit 1
 fi
 
+# [INV-69 / INV-78] Successful post — CLEAR any stale post-failed breadcrumb for
+# this session. The breadcrumb is a "the LAST post attempt failed" signal, and a
+# review CLI may call this helper more than once per session (a first attempt
+# fails → breadcrumb written; a retry succeeds → comment lands). Without this
+# removal the stale breadcrumb would persist and the wrapper's INV-78
+# breadcrumb-gated artifact re-post would DOUBLE-POST (it would believe the
+# agent's comment never landed). Best-effort: a removal failure never changes the
+# success exit code. Reconstructs the SAME path the failure branch writes.
+# Guard on PROJECT_ID first: pid_dir_for_project's leading `${PROJECT_ID:?…}`
+# HARD-EXITS the shell when PROJECT_ID is unset (a `:?` abort that `|| true`
+# inside the `$(…)` does NOT recover — it fires before the `||`). With no
+# PROJECT_ID there is no per-project pid dir and so no breadcrumb to clear, so
+# skipping is correct AND keeps a successful post returning 0 (the bug a missing
+# guard caused: a clean post exited 1 whenever PROJECT_ID was unset). Run the
+# removal in a `( … ) || true` subshell as belt-and-suspenders so any residual
+# abort can never change this helper's success exit code.
+if [[ -n "${PROJECT_ID:-}" ]] && declare -F pid_dir_for_project >/dev/null 2>&1; then
+  ( set +e
+    _bc_dir=$(pid_dir_for_project 2>/dev/null || true)
+    [[ -n "${_bc_dir:-}" ]] && rm -f "${_bc_dir}/verdict-postfail-${SESSION_ID}" 2>/dev/null
+  ) || true
+fi
+
 echo "$URL"

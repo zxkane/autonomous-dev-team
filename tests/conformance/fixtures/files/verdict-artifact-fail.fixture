@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "verdict": "FAIL",
+  "blockingFindings": [
+    {
+      "title": "Atomic-write contract not honored: verdict file written in place",
+      "detail": "The artifact is written with `> file` rather than tmp + rename, so a concurrent reader can observe a torn write.",
+      "file": "skills/autonomous-dispatcher/scripts/post-verdict.sh",
+      "line": 60
+    }
+  ],
+  "nonBlockingFindings": [],
+  "evidence": {
+    "acCoverage": {
+      "AC-1 atomic write": "fail"
+    }
+  },
+  "runId": "7b09ae0a-894a-4c0a-bbbb-000000000000",
+  "agent": "codex",
+  "model": "gpt-5-codex"
+}

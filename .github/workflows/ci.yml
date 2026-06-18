@@ -105,6 +105,15 @@ jobs:
       - name: adapter conformance suite (hermetic)
         run: bash tests/conformance/run-conformance.sh
 
+      # Verdict-artifact channel stub-fleet E2E (INV-77, #233): a 4-stub review
+      # fleet (valid / malformed / absent-with-comment / foreign-identity) drives
+      # the REAL artifact-first resolution + comment-fallback + INV-40 aggregation
+      # libs; asserts the aggregate, per-agent verdict sources, the loud malformed
+      # + foreign-identity envelopes, and the zero-comment-poll AC. No network /
+      # credentials — part of the always-on hermetic tier.
+      - name: verdict-artifact channel stub-fleet E2E
+        run: bash tests/e2e/run-verdict-artifact-fleet-e2e.sh
+
   hermetic-shellcheck:
     name: Hermetic / ShellCheck + workflow lint
     runs-on: ubuntu-latest
@@ -135,6 +144,7 @@ jobs:
             skills/autonomous-dispatcher/scripts/lib-review-agy.sh \
             skills/autonomous-dispatcher/scripts/lib-review-kiro.sh \
             skills/autonomous-dispatcher/scripts/lib-review-postfail.sh \
+            skills/autonomous-dispatcher/scripts/lib-review-artifact.sh \
             skills/autonomous-dispatcher/scripts/lib-review-resolve.sh \
             skills/autonomous-dispatcher/scripts/lib-review-request-changes.sh \
             skills/autonomous-dispatcher/scripts/lib-review-smoke.sh \
@@ -145,6 +155,7 @@ jobs:
             tests/e2e/run-agent-smoke.sh \
             tests/e2e/run-metrics-report.sh \
             tests/e2e/run-error-envelope-e2e.sh \
+            tests/e2e/run-verdict-artifact-fleet-e2e.sh \
             tests/conformance/run-conformance.sh \
             tests/conformance/lib-conformance.sh \
             skills/autonomous-dispatcher/scripts/post-verdict.sh \

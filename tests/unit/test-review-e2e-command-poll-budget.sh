@@ -155,11 +155,13 @@ assert_not_grep "TC-RPB-SRC-06d reaper call does NOT pass the subshell PIDs (_fa
   '_reap_fanout_processes "\$\{_fanout_pids' "$WRAPPER"
 # INV-46 (#182) SUPERSEDED the per-agent E2E entirely: the E2E now runs ONCE in
 # a wrapper lane before the fan-out, so build_review_prompt no longer receives a
-# multi-agent E2E signal arg (it is 2-arg now) and the prompt no longer carries
-# the sibling-evidence re-check (the single lane is the strong guarantee). These
-# two assertions flip to the post-#182 contract.
-assert_grep "TC-RPB-SRC-07 build_review_prompt is 2-arg (INV-46 dropped the multi-agent E2E signal)" \
-  'build_review_prompt "\$_agent" "\$_agent_session_id"\)' "$WRAPPER"
+# multi-agent E2E signal arg, and the prompt no longer carries the
+# sibling-evidence re-check (the single lane is the strong guarantee). INV-77
+# (#233) then ADDED a 3rd arg — the per-agent VERDICT-ARTIFACT path (NOT an E2E
+# signal) — so build_review_prompt is now `<agent> <session-id> <artifact-path>`.
+# These two assertions hold the post-#182 + post-#233 contract.
+assert_grep "TC-RPB-SRC-07 build_review_prompt takes <agent> <session-id> <artifact-path> (no E2E signal arg; INV-77 #233 adds the artifact path)" \
+  'build_review_prompt "\$_agent" "\$_agent_session_id" "\$_agent_artifact_path"\)' "$WRAPPER"
 assert_not_grep "TC-RPB-SRC-08 prompt no longer carries the per-agent sibling-evidence re-check (INV-46 single lane)" \
   'MULTI-AGENT NOTE \(INV-43\)|re-check .* sibling review agent has already posted' "$WRAPPER"
 assert_grep "TC-RPB-SRC-09 wrapper references INV-43" \
