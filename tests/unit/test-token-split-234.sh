@@ -515,6 +515,46 @@ fi
 
 # ---------------------------------------------------------------------------
 echo ""
+echo "=== TC-TOKEN-SPLIT-094: PR_CREATE_BROKER_BLOCK interpolates \${ISSUE_NUMBER} (NOT a single-quoted heredoc) (#234 [P1]) ==="
+# ---------------------------------------------------------------------------
+# #234 review [P1]: the broker block was built with a SINGLE-QUOTED heredoc
+# (`cat <<'BROKER_BLOCK'`), so the agent received the LITERAL `Closes #${ISSUE_NUMBER}`
+# — GitHub won't link/auto-close and the wrapper's PR-by-#N lookup fails. The block
+# MUST use an interpolating heredoc so ${ISSUE_NUMBER} expands, while keeping the
+# runtime `$(printenv AGENT_PR_CREATE_FILE)` literal.
+# (a) Source-level lockdown: the PR_CREATE_BROKER_BLOCK heredoc delimiter must NOT
+#     be single-quoted.
+if grep -qE "PR_CREATE_BROKER_BLOCK=.*cat <<'BROKER_BLOCK'" "$DEV_SH"; then
+  assert_fail "PR_CREATE_BROKER_BLOCK uses a single-quoted heredoc — \${ISSUE_NUMBER} stays literal ([P1] regression)"
+else
+  assert_pass "source: PR_CREATE_BROKER_BLOCK does not use a single-quoted heredoc"
+fi
+# (b) Behavioral: extract the block's heredoc body from the source and render it
+#     with ISSUE_NUMBER=234, asserting `Closes #234` (interpolated) AND the literal
+#     `$(printenv AGENT_PR_CREATE_FILE)` (NOT expanded by us) both appear.
+broker_body=$(awk '/PR_CREATE_BROKER_BLOCK="\$\(cat <<BROKER_BLOCK/{f=1; next} f&&/^BROKER_BLOCK$/{exit} f{print}' "$DEV_SH")
+if [[ -n "$broker_body" ]]; then
+  rendered=$(ISSUE_NUMBER=234 bash -c "cat <<BROKER_BLOCK
+${broker_body}
+BROKER_BLOCK
+" 2>/dev/null)
+  if printf '%s' "$rendered" | grep -qF 'Closes #234' \
+     && ! printf '%s' "$rendered" | grep -qF 'Closes #${ISSUE_NUMBER}'; then
+    assert_pass "rendered broker block interpolates Closes #234 (not the literal \${ISSUE_NUMBER})"
+  else
+    assert_fail "rendered broker block did NOT interpolate the issue number: $(printf '%s' "$rendered" | grep -i closes)"
+  fi
+  if printf '%s' "$rendered" | grep -qF '$(printenv AGENT_PR_CREATE_FILE)'; then
+    assert_pass "rendered broker block keeps \$(printenv AGENT_PR_CREATE_FILE) literal (agent runs it at runtime)"
+  else
+    assert_fail "rendered broker block lost the literal \$(printenv AGENT_PR_CREATE_FILE)"
+  fi
+else
+  assert_fail "could not extract the PR_CREATE_BROKER_BLOCK heredoc body from $DEV_SH (interpolating-heredoc form expected)"
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
 echo "=== TC-TOKEN-SPLIT-092: bare gh resolves the AGENT-OWN shim → real gh with the SCOPED token; wrapper shim NOT used (#234 [P1] / AC#1) ==="
 # ---------------------------------------------------------------------------
 # The functional proof: with the scrub applied, the agent runs under the PATH=

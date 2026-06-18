@@ -761,13 +761,19 @@ OPEN_PR_FAST_PATH="$(emit_open_pr_fast_path_block "$ISSUE_NUMBER")"
 # `gh pr create` flow is unchanged there. Interpolated into all three prompts.
 PR_CREATE_BROKER_BLOCK=""
 if [[ -n "${AGENT_GH_TOKEN_FILE:-}" ]]; then
-  PR_CREATE_BROKER_BLOCK="$(cat <<'BROKER_BLOCK'
+  # Interpolating heredoc (NOT single-quoted): ${ISSUE_NUMBER} MUST expand so the
+  # agent writes the real `Closes #<N>` into the PR body — a single-quoted heredoc
+  # emitted the literal `Closes #${ISSUE_NUMBER}`, which GitHub won't link/auto-close
+  # and the wrapper's PR-by-issue-number lookup won't find (#234 review [P1]).
+  # Everything that must reach the agent VERBATIM is escaped: `\$(printenv …)` (the
+  # agent runs it at runtime) and the backtick-quoted command names `\`…\``.
+  PR_CREATE_BROKER_BLOCK="$(cat <<BROKER_BLOCK
 ## Credential note ([INV-78]) — opening the PR
 Your GitHub token is SCOPED (it can push branches and comment, but it CANNOT
-approve or merge PRs, and it cannot run `gh pr create`). To open the PR, do NOT
-run `gh pr create`. Instead, AFTER you have pushed your feature branch with
-`git push`, WRITE the PR to the file in the `AGENT_PR_CREATE_FILE` environment
-variable (`$(printenv AGENT_PR_CREATE_FILE)`) with EXACTLY this layout:
+approve or merge PRs, and it cannot run \`gh pr create\`). To open the PR, do NOT
+run \`gh pr create\`. Instead, AFTER you have pushed your feature branch with
+\`git push\`, WRITE the PR to the file in the \`AGENT_PR_CREATE_FILE\` environment
+variable (\`\$(printenv AGENT_PR_CREATE_FILE)\`) with EXACTLY this layout:
   - line 1: \`branch: <your-pushed-feature-branch-name>\` (REQUIRED — the exact
     branch you pushed to origin, e.g. \`branch: feat/issue-${ISSUE_NUMBER}-foo\`)
   - line 2: the PR title
