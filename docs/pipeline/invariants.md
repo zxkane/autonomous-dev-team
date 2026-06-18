@@ -1,20 +1,6 @@
-# Cross-cutting Invariants
-
-Rules that span the dispatcher / dev / review boundaries. When a bug fix discovers a new invariant, add it here under a new `INV-NN` ID and reference it from the relevant flow doc.
-
-Each invariant has the same shape:
-
-- **Rule** (one sentence)
-- **Why** — the historical bug this exists to prevent
-- **Producer** — which actor must uphold it
-- **Consumer** — which actor relies on it
-- **Test** — where it's verified, or "TODO: add test"
-
-Some invariants below describe behavior the **code does not yet enforce** — they are explicitly marked with `Status: NOT YET ENFORCED` or `Status: DOCUMENTED, NOT YET FIXED`. PR-4 enforced INV-11, INV-14, and INV-16. PR-6 enforced INV-12, INV-13, and INV-15.
-
----
-
 ## INV-01: PID file naming
+
+_Triage (issue #236): [machine-checked: tests/unit/test-pid-dir-helper.sh, tests/unit/test-kill-before-spawn.sh]_
 
 **Rule**: Wrappers write their PID to `${PID_DIR}/issue-<N>.pid` (dev wrapper) or `${PID_DIR}/review-<N>.pid` (review wrapper), where `${PID_DIR}` is the per-user runtime directory returned by `lib-config.sh::pid_dir_for_project`.
 
@@ -35,6 +21,8 @@ The helper `mkdir -p`s the directory and `chmod 700`s it on first call.
 
 ## INV-02: PID file is not a symlink
 
+_Triage (issue #236): [machine-checked: tests/unit/test-kill-before-spawn.sh, tests/unit/test-pid-dir-helper.sh]_
+
 **Rule**: Both `acquire_pid_guard` (in `lib-agent.sh`) and `kill_stale_wrapper` (in `dispatch-local.sh`) MUST refuse to operate on a PID file that is a symlink, and exit 1 immediately on detection.
 
 **Why**: CWE-59 (Link Following). Originally the primary defense for the predictable `/tmp` PID paths; with [INV-01]'s per-user PID dir (PR-7, mode 0700), this becomes belt-and-suspenders rather than the only line of defense. The defense costs ~3 lines of bash and remains valuable: `pid_dir_for_project` itself refuses a symlinked dir, and the per-PID-file check catches edge cases where the user's own ~/.local/state/autonomous-${PROJECT_ID} is somehow tampered with.
@@ -44,6 +32,8 @@ The helper `mkdir -p`s the directory and `chmod 700`s it on first call.
 **Test**: `tests/unit/test-kill-before-spawn.sh` TC-DKBS-006, `tests/unit/test-pid-dir-helper.sh` TC-PD-005.
 
 ## INV-03: Dev session report comment format
+
+_Triage (issue #236): [machine-checked: tests/unit/test-autonomous-dev-cleanup-startup-failure.sh]_
 
 **Rule**: The dev wrapper's exit trap MUST post an issue comment matching this format:
 
@@ -82,6 +72,8 @@ extraction reads them. They live between the existing `- Mode:` and
 
 ## INV-04: Reviewed-HEAD trailer format
 
+_Triage (issue #236): [machine-checked: tests/unit/test-autonomous-review-reviewed-head-annotation.sh]_
+
 **Rule**: The review wrapper, after a verdict comment is found, posts a separate issue comment matching this format:
 
 ```
@@ -110,6 +102,8 @@ side and `lib-agent.sh:41`.
 
 ## INV-05: Retry counter cutoff rule
 
+_Triage (issue #236): [design-rationale]_
+
 **Rule**: The dispatcher's Step 4a retry counter MUST count failure events (Agent Session Report dev failures + dispatcher-crash comments) ONLY if their `createdAt` is **after** the most recent `Marking as stalled` comment on the issue.
 
 **Why**: Without this, removing the `stalled` label to re-arm the pipeline would leave the historical retry counter intact — the issue would re-stall on the very next failure. With the cutoff, removing `stalled` is a clean reset (#41).
@@ -122,6 +116,8 @@ The cutoff timestamp falls back to epoch (1970-01-01) for issues that have never
 
 ## INV-06: "crashed" / "process not found" keyword contract
 
+_Triage (issue #236): [design-rationale]_
+
 **Rule**: The dispatcher's Step 5b dispatcher-crash comments MUST contain one of: `Task appears to have crashed (no PR found)`, or `process not found`. Forward-progress comments — specifically Step 5a's "Dev process still alive but PR ... ready" and Step 5b's "Dev process exited (PR found)" / "Dev process exited (no new commits since last review at ...)" — MUST NOT contain these phrases.
 
 **Why**: Step 4a's retry-counter regex is `Task appears to have crashed \(no PR found\)|process not found`. A forward-progress comment that accidentally contained the word "crashed" (or "process not found") would be miscounted as a dev failure → eventually mark `stalled` despite the dev having actually progressed (#50).
@@ -131,6 +127,8 @@ The cutoff timestamp falls back to epoch (1970-01-01) for issues that have never
 **Test**: TODO: add test that Step 5a and Step 5b PR-found comments don't match the Step 4a regex.
 
 ## INV-07: Empty Reviewed-HEAD trailer routes to pending-review
+
+_Triage (issue #236): [design-rationale]_
 
 **Rule**: When the dispatcher's Step 5b DEAD-with-PR branch finds an empty `LAST_REVIEWED_HEAD`, it MUST route to `pending-review`, NOT `pending-dev`.
 
@@ -142,6 +140,8 @@ The cutoff timestamp falls back to epoch (1970-01-01) for issues that have never
 **Operator note**: if `pending-review` cycles repeatedly without new commits, grep `/tmp/agent-${PROJECT_ID}-review-*.log` for `WARNING: Failed to post Reviewed HEAD trailer`.
 
 ## INV-08: Wrapper exit trap label edits are atomic per call
+
+_Triage (issue #236): [design-rationale]_
 
 **Rule**: Wrapper exit traps MUST update labels using single `gh issue edit --remove-label X --add-label Y` calls, never two separate calls. This guarantees no transient "both labels present" or "neither label present" state visible to the dispatcher between calls.
 
@@ -155,6 +155,8 @@ The cutoff timestamp falls back to epoch (1970-01-01) for issues that have never
 
 ## INV-09: `JUST_DISPATCHED` skip rule
 
+_Triage (issue #236): [design-rationale]_
+
 **Rule**: Within a single dispatcher tick, Step 5 MUST skip any issue whose number is in the `JUST_DISPATCHED` array (issues dispatched in Steps 2/3/4 of the same tick).
 
 **Why**: Freshly-dispatched wrappers are spawned via `nohup` and may not have written their PID file yet when Step 5 runs. Without the skip, Step 5 sees the PID file missing, diagnoses DEAD-no-PR, increments the retry counter, and eventually marks the issue stalled — for issues that were just dispatched and are in fact running fine (#34, #41).
@@ -164,6 +166,8 @@ The cutoff timestamp falls back to epoch (1970-01-01) for issues that have never
 **Test**: TODO: add test that simulates a Step 2 → Step 5 within the same tick.
 
 ## INV-10: 5-minute idle gate before SIGTERM
+
+_Triage (issue #236): [design-rationale]_
 
 **Rule**: Step 5a MUST require `now - PR.updatedAt > 300s` (strict greater-than, matching SKILL.md's `[ "$IDLE_SECONDS" -gt 300 ]`) before sending SIGTERM to an alive wrapper.
 
@@ -175,6 +179,8 @@ The cutoff timestamp falls back to epoch (1970-01-01) for issues that have never
 
 ## INV-11: Dependency state includes `MERGED`
 
+_Triage (issue #236): [machine-checked: tests/unit/test-check-deps-resolved.sh]_
+
 **Rule**: Step 2's dependency check MUST treat both `CLOSED` and `MERGED` as resolved states. PRs return `MERGED` when merged, NOT `CLOSED`. The same `state ∉ {"CLOSED", "MERGED"}` rule applies to cross-repo refs resolved under [INV-39](#inv-39-dependency-parsing-is-list-item-scoped-and-supports-cross-repo-refs).
 
 **Why**: When a `## Dependencies` section references a PR that has been merged, `gh issue view N --json state` returns `state: "MERGED"`. A naive `state != "CLOSED"` check leaves the dependent issue blocked forever (#61).
@@ -185,6 +191,8 @@ The cutoff timestamp falls back to epoch (1970-01-01) for issues that have never
 **Test**: `tests/unit/test-check-deps-resolved.sh` covers single-CLOSED, single-MERGED, single-OPEN, multi-dep mixed-state scenarios, and cross-repo MERGED/CLOSED/OPEN.
 
 ## INV-12: Resume only against unfinished sessions
+
+_Triage (issue #236): [machine-checked: tests/unit/test-is-session-completed.sh, tests/unit/test-autonomous-launcher-verdict-fresh.sh]_
 
 **Rule**: The dispatcher's Step 4 MUST query the agent session's terminal state before issuing a resume, and treat both `terminal_reason == completed` and `terminal_reason == prompt_too_long` as terminal (skip resume).
 
@@ -205,6 +213,8 @@ The cutoff timestamp falls back to epoch (1970-01-01) for issues that have never
 
 ## INV-13: Wall-clock cap on agent invocations
 
+_Triage (issue #236): [machine-checked: tests/unit/test-agent-timeout-wrapper.sh]_
+
 **Rule**: `lib-agent.sh::run_agent` and `resume_agent` MUST wrap the underlying CLI call in `timeout --kill-after=30s --signal=TERM ${AGENT_TIMEOUT:-4h}` (with graceful fallback to `gtimeout` on macOS).
 
 **Why**: Any of: SSE keepalive without stop event (#59 root cause), MCP server stdio deadlock, DNS/TCP black hole. Without a wall-clock cap, any of those can pin a wrapper for 8+ hours (#60).
@@ -215,6 +225,8 @@ The cutoff timestamp falls back to epoch (1970-01-01) for issues that have never
 **Test**: `tests/unit/test-agent-timeout-wrapper.sh` (6 cases): timeout fires within budget on `sleep 5` vs `AGENT_TIMEOUT=1s`; passthrough exit codes preserved (0 and non-zero); fallback path with `_AGENT_TIMEOUT_CMD=""` works for both success and non-zero commands.
 
 ## INV-14: Config lookup honors symlink-vendor pattern
+
+_Triage (issue #236): [machine-checked: tests/unit/test-bash-source-empty.sh, tests/unit/test-symlink-resolution.sh]_
 
 **Rule**: Scripts that load `autonomous.conf` MUST resolve their own dir using `${BASH_SOURCE[0]:-$0}` directly, NOT `readlink -f`. The autonomous.conf fallback search path MUST cover the symlink-vendor layout (project's `scripts/lib-agent.sh` is a symlink into `.claude/skills/.../lib-agent.sh`).
 
@@ -256,6 +268,8 @@ Each entry-point script sources sibling lib files via `${SCRIPT_DIR}/<sibling>.s
 
 ## INV-15: Step 5a SIGTERM race is non-deterministic
 
+_Triage (issue #236): [machine-checked: tests/unit/test-sigterm-trap.sh]_
+
 **Rule**: When the dispatcher's Step 5a sends SIGTERM to an alive wrapper for a PR-ready issue, the dispatcher writes `+pending-review` AND the wrapper's exit trap (which fires from the SIGTERM with bash exit status 143) writes `+pending-dev` — they target **different** final states. The race outcome is whichever `gh issue edit` lands last; in practice the trap's edit lands ~1s after the dispatcher's because the trap also posts a Session Report comment first.
 
 **Why**: surfaced by the PR-2 docs review. The dev wrapper has no SIGTERM-aware code path; `cleanup()` only inspects `$exit_code` (143 ≠ 0 ⇒ failure branch ⇒ `pending-dev`). The dispatcher's Step 5a was designed under the assumption that the trap would route to `pending-review` (the "PR-ready" intent). It does not.
@@ -271,6 +285,8 @@ Each entry-point script sources sibling lib files via `${SCRIPT_DIR}/<sibling>.s
 
 ## INV-16: jq named-group regex uses Oniguruma syntax, not Python
 
+_Triage (issue #236): [machine-checked: tests/unit/test-lib-dispatch.sh]_
+
 **Rule**: Any jq regex that names a capture group MUST use Oniguruma syntax `(?<name>...)`, NOT Python-style `(?P<name>...)`. jq 1.6+ uses Oniguruma; the Python-style form errors with `Regex failure: undefined group option`.
 
 **Why**: surfaced by PR-3's unit testing of `extract_dev_session_id` (#70). The original SKILL.md regex used `(?P<id>...)` — every `gh issue view ... -q '...capture(...)...'` call returned exit 5 with the regex error in stderr, and the `// empty` fallback did NOT catch it (jq exits before `//` is evaluated). In production this meant `extract_dev_session_id` always returned empty, and `dispatch-local.sh dev-resume <issue> ""` either failed input validation or silently fell back to a fresh session — i.e. resume mode was probably never resuming context across review cycles.
@@ -284,6 +300,8 @@ Each entry-point script sources sibling lib files via `${SCRIPT_DIR}/<sibling>.s
 **Test**: `tests/unit/test-lib-dispatch.sh` asserts that `extract_dev_session_id` returns `abc-123-def` for a comment containing `Dev Session ID: \`abc-123-def\`` (was previously asserting empty under the broken regex).
 
 ## INV-17: Trunk protection requires defense in depth across 3 layers
+
+_Triage (issue #236): [machine-checked: tests/unit/test-block-push-regex.sh, tests/unit/test-install-git-pre-push.sh]_
 
 **Rule**: Direct pushes to the trunk branch MUST be blocked by **at least two** independent layers, since each layer alone has known gaps:
 
@@ -306,6 +324,8 @@ In environments without Layer 3 (server-side), Layers 1 and 2 must both be insta
 ---
 
 ## INV-18: Cold-start grace period before stale detection
+
+_Triage (issue #236): [machine-checked: tests/unit/test-dispatcher-reliability-99.sh]_
 
 **Rule**: every Step 2/3/4 dispatch in `dispatcher-tick.sh` MUST write a dispatcher-controlled marker comment in the form
 
@@ -330,6 +350,8 @@ Step 5 stale detection MUST NOT classify an active issue as crashed while its la
 
 ## INV-19: Retry counter requires confirmed agent startup
 
+_Triage (issue #236): [machine-checked: tests/unit/test-dispatcher-reliability-99.sh, tests/unit/test-lib-dispatch.sh]_
+
 **Rule**: `count_retries` MUST count dispatcher-detected crash comments toward `MAX_RETRIES` ONLY when the agent has confirmed startup at some point in the current retry cycle — i.e., a `Dev Session ID:` comment exists after the most recent stalled-cutoff AND that comment is NOT a `Mode: startup-failure` report. Agent failure session reports (`Agent Session Report (Dev)` with non-zero exit code) always count regardless.
 
 The `Mode: startup-failure` exclusion matters: `autonomous-dev.sh`'s startup-failure trap (when the wrapper exits before invoking the agent — e.g., #92 missing-`gh` path) still emits a session report containing the SESSION_ID that was forwarded for dev-resume mode. Counting that as "agent confirmed startup" would re-arm dispatcher-crash counting on a wrapper that never actually invoked the agent.
@@ -347,6 +369,8 @@ The `Mode: startup-failure` exclusion matters: `autonomous-dev.sh`'s startup-fai
 ---
 
 ## INV-20: Verdict authenticity binding (actor + window + trailer presence)
+
+_Triage (issue #236): [machine-checked: tests/unit/test-autonomous-launcher-verdict-fresh.sh, tests/unit/test-autonomous-review-prompt.sh]_
 
 > **Demoted to a fallback by [INV-78](#inv-78-review-verdicts-resolve-from-a-typed-artifact-file-first-comment-scraping-is-an-explicitly-logged-fallback-a-malformed-artifact-is-loud-never-a-silent-absent) (#233).** The review wrapper now resolves each agent's verdict from a typed artifact FILE FIRST; this comment-authenticity binding runs ONLY for an agent that produced no artifact (logged `verdict-source=comment-fallback`). It remains fully load-bearing on that fallback path and is unchanged.
 
@@ -368,6 +392,8 @@ The `Mode: startup-failure` exclusion matters: `autonomous-dev.sh`'s startup-fai
 
 ## INV-21: Resume-fallback fresh session id is dispatcher-readable
 
+_Triage (issue #236): [machine-checked: tests/unit/test-autonomous-launcher-verdict-fresh.sh]_
+
 **Rule**: `autonomous-dev.sh` MODE=resume's non-zero-exit fallback path, immediately after assigning `SESSION_ID="$NEW_SESSION_ID"`, MUST post a standalone GitHub issue comment matching the regex `Dev Session ID: \`<id>\``.
 
 **Why**: Without this, the only place the new session id surfaces to GitHub before the agent runs is inside the explanatory "Resume failed... Starting new session..." comment — which does NOT match the dispatcher's `extract_dev_session_id` regex. If the wrapper crashes between the resume-fallback decision and the trap-on-exit `Agent Session Report (Dev)` post (e.g. a transient gh outage on the report post), the dispatcher's next tick reads the OLD session id from prior comments and resumes the dead session forever.
@@ -381,6 +407,8 @@ The `Mode: startup-failure` exclusion matters: `autonomous-dev.sh`'s startup-fai
 **Test**: `tests/unit/test-autonomous-launcher-verdict-fresh.sh` TC-PTL-005.
 
 ## INV-22: AGENT_LAUNCHER tokenization + claude-only invocation contract
+
+_Triage (issue #236): [machine-checked: tests/unit/test-autonomous-launcher-verdict-fresh.sh]_
 
 **Rule**: `lib-agent.sh` MUST tokenize `AGENT_LAUNCHER` (when non-empty) into `AGENT_LAUNCHER_ARGV[]` exactly once at source time via `eval "AGENT_LAUNCHER_ARGV=($AGENT_LAUNCHER)"`.
 
@@ -406,6 +434,8 @@ The `Mode: startup-failure` exclusion matters: `autonomous-dev.sh`'s startup-fai
 
 ## INV-23: PID_FILE points at a process whose death reaps the entire agent subtree
 
+_Triage (issue #236): [machine-checked: tests/unit/test-pid-guard-pgid.sh, tests/unit/test-sigterm-trap.sh]_
+
 **Rule**: The PID written to PID_FILE MUST identify a process whose death is sufficient to terminate every descendant of the agent invocation. In practice this means the session leader of a setsid-spawned process group: `_run_with_timeout` (in `lib-agent.sh`) launches the agent under `setsid`, captures the resulting PID into `_AGENT_RUN_PID`, and writes it to `$AGENT_PID_FILE` if set. Because setsid makes the child a session and group leader, `_AGENT_RUN_PID` IS the PGID, so `kill -TERM -- -<pid>` (in both `kill_stale_wrapper` and the wrappers' SIGTERM trap) cascades to every descendant atomically.
 
 **Why**: Pre-fix, `acquire_pid_guard` wrote the wrapper shell's `$$` while the timeout/agent subtree ran as a child. When the wrapper exited before the subtree finished unwinding (cleanup-trap path, SIGTERM-forwarding race, or normal completion before the agent fully stopped), the subtree was reparented to PID 1 and unreachable through PID_FILE. The next tick's `kill_stale_wrapper` saw ESRCH on the dead `$$`, declared the slot clean, and dispatched a fresh agent — producing multiple coexisting agent trees per issue (#109 reproduced 4 generations across one session, 2 still alive an hour after merge). $$ is not a process group leader, so `kill -- -$$` is a no-op; only the session leader's PID gives the cascade we need.
@@ -427,6 +457,8 @@ The `Mode: startup-failure` exclusion matters: `autonomous-dev.sh`'s startup-fai
 - `tests/unit/test-sigterm-trap.sh` updated to accept either inline `on_sigterm` or `install_agent_sigterm_trap` factoring.
 
 ## INV-24: Review wrapper DEAD detection requires both pid_alive miss AND no near-success PR signal
+
+_Triage (issue #236): [machine-checked: tests/unit/test-dispatcher-review-near-success.sh, tests/unit/test-wrapper-heartbeat.sh]_
 
 **Rule**: The dispatcher's Step 5b review-DEAD branch MUST NOT post a "Review process appears to have crashed" comment or flip `reviewing` → `pending-dev` on a bare `pid_alive` miss. It must additionally consult `review_near_success` (in `lib-dispatch.sh`), which returns 0 (skip) when ANY of these signals are positive within `REVIEW_NEAR_SUCCESS_WINDOW_SECONDS` (default 300s):
 
@@ -464,6 +496,8 @@ Pre-fix, a transient `pid_alive` miss (race or short-lived sub-shell exit) withi
 
 ## INV-25: Terminal labels (`approved`, `stalled`) are sticky; transitional residue is healed at tick start
 
+_Triage (issue #236): [machine-checked: tests/unit/test-step0-hygiene.sh]_
+
 **Rule**: When an issue carries either terminal label (`approved` or `stalled`) AND any transitional label (`in-progress`, `reviewing`, `pending-review`, `pending-dev`), the dispatcher MUST strip the transitional label(s) at the very top of every tick — before Step 1's concurrency gate, before any `list_*` selector reads labels. Strips are atomic per issue (single `gh issue edit --remove-label A --remove-label B ...`). For each `(issue, sorted-set-of-stripped-labels)` tuple, an audit comment of the form `Label hygiene: stripped \`X\`, \`Y\` from \`<terminal>\` issue (INV-25). <!-- INV-25-hygiene:<sorted-labels> -->` is posted at most once — the marker comment gates re-posting on subsequent ticks.
 
 **Why**: `state-machine.md::Forbidden transitions` already declared this combination invalid. Code did not enforce it: when residue landed (wrapper crash between two label edits, [INV-15] SIGTERM race, manual reconciliation by an operator), the next tick's `list_*` selectors disagreed about how to handle the issue and one of them re-armed dispatch. Issue #115 Bug A (PR #116) fixed one specific selector; Bug B (this invariant) closes the class by self-healing residue regardless of which selector would have misclassified it.
@@ -485,6 +519,8 @@ Step 0 runs UNCONDITIONALLY — even when concurrency is saturated. Hygiene is p
 - `tests/unit/test-step0-hygiene.sh` (23 cases) — TC-HAS-TERM-001..005 cover the predicate, TC-HYG-001..006 cover per-issue strip logic, TC-COMMENT-001..003 cover audit-comment idempotency, TC-STEP0-INT-001..003 statically pin Step 0 placement (before Step 1, not gated by concurrency).
 
 ## INV-26: Stall decision excludes dispatcher-induced terminations and defers on live wrappers
+
+_Triage (issue #236): [machine-checked: tests/unit/test-pid-alive-remote-aws-ssm.sh, tests/unit/test-count-agent-failures-sigterm.sh]_
 
 **Rule**: Two conjunct conditions must hold before the dispatcher can mark an issue `+stalled`:
 
@@ -513,6 +549,8 @@ Step 0 runs UNCONDITIONALLY — even when concurrency is saturated. Hygiene is p
 - `tests/unit/test-mark-stalled-liveness.sh` (5 cases): TC-MSL-001/004/005 cover the alive-wrapper deferral path, TC-MSL-002/003 cover the dead-PID and missing-PID paths (existing behavior preserved). Uses a real spawned `sleep` for the alive case to avoid mocking `kill -0`.
 
 ## INV-27: Dev wrapper DEAD detection requires both pid_alive miss AND no near-success in-flight signal
+
+_Triage (issue #236): [machine-checked: tests/unit/test-dev-near-success.sh]_
 
 **Rule**: The dispatcher's Step 5b dev-DEAD-no-PR branch MUST NOT post a "Task appears to have crashed (no PR found)" comment or flip `in-progress` → `pending-dev` on a bare `pid_alive` miss. It must additionally consult `dev_near_success` (in `lib-dispatch.sh`), which returns 0 (skip) when ANY of these in-flight signals are positive within `DEV_NEAR_SUCCESS_WINDOW_SECONDS` (default 300s):
 
@@ -548,6 +586,8 @@ Only when ALL four signals are negative does the existing crashed-comment + labe
 
 ## INV-28: pgrep fallback must be scoped by project AND wrapper type
 
+_Triage (issue #236): [machine-checked: tests/unit/test-dispatch-local-pgrep-type-scope.sh, tests/unit/test-pid-guard-pgid.sh]_
+
 **Rule**: `dispatch-local.sh::kill_stale_wrapper`'s `pgrep -f` defence-in-depth (the [INV-23] "option C" fallback) MUST scope its match on three independent axes:
 
 1. **Project**: anchor on `${PROJECT_DIR}/scripts/`. Multiple autonomous projects can run on the same host with overlapping issue numbers; a regex without this anchor cross-kills wrappers across projects.
@@ -579,6 +619,8 @@ Only when ALL four signals are negative does the existing crashed-comment + labe
 - [INV-26] (stall decision excludes dispatcher-induced terminations + defers on live wrappers) reduces the residue created when `kill_stale_wrapper` itself fires. INV-28 prevents the *wrong* kills that caused the residue in the first place.
 
 ## INV-29: pid_alive heartbeat is owned exclusively by the wrapper, NOT by the PID file alone
+
+_Triage (issue #236): [machine-checked: tests/unit/test-pid-alive-long-running.sh, tests/unit/test-kill-before-spawn.sh]_
 
 **Rule**: Two conjunct sub-rules.
 
@@ -618,6 +660,8 @@ The two sub-rules close the loop independently: rule (1) gives `pid_alive` an ow
 - [INV-25] (sticky terminal labels with hygiene at tick start) — heals residue from rare cases where the stall decision still slips through. INV-29 reduces the producer of that residue; [INV-25]'s hygiene pass remains the safety net.
 
 ## INV-30: `pid_alive` is authoritative under all execution backends
+
+_Triage (issue #236): [machine-checked: tests/unit/test-pid-alive-remote-aws-ssm.sh, tests/unit/test-liveness-check-remote-aws-ssm.sh]_
 
 **Rule**: under any non-`local` `EXECUTION_BACKEND`, `pid_alive` MUST consult a backend-specific liveness transport (today: `liveness-check-remote-aws-ssm.sh`) before any local probe. The transport runs the equivalent of [INV-29]'s three-tier check (kill -0, PID-file mtime, heartbeat sibling mtime) on the box where the wrapper actually lives, not on the dispatcher box.
 
@@ -659,6 +703,8 @@ The transport's stdout is one of `ALIVE` / `DEAD` / empty. Indeterminate verdict
 
 ## INV-31: Operator-tunable per-CLI flags live in conf, not in `lib-agent.sh`
 
+_Triage (issue #236): [machine-checked: tests/unit/test-lib-agent-extra-args.sh]_
+
 **Rule**: `lib-agent.sh` MUST NOT hardcode operator-tunable safety / output-format flags inside per-CLI `case` branches. The two passthrough vars — `AGENT_DEV_EXTRA_ARGS` (consumed by `run_agent`) and `AGENT_REVIEW_EXTRA_ARGS` (consumed by `resume_agent`) — are tokenized at call time by `_parse_extra_args` and appended verbatim after the structural arguments (and before the prompt positional) of every case branch. Defaults are empty strings.
 
 **Scope**: "operator-tunable" = flags whose correct value depends on deployment environment (auth model, sandbox posture, debug needs) rather than on the CLI invocation contract. **Structural** flags — `--session-id` / `--resume` / `--model` / `exec --json` / `run --format json` / `--agent` / `--no-interactive` / `chat` / `-p` / `--output-format json` (claude) / `--permission-mode` (claude, mapped 1:1 from `AGENT_PERMISSION_MODE`) — remain hardcoded because they encode the CLI's expected invocation shape, not operator policy.
@@ -685,6 +731,8 @@ The transport's stdout is one of `ALIVE` / `DEAD` / empty. Indeterminate verdict
 Plus the existing `test-lib-agent-gemini.sh` (22 assertions) and `test-lib-agent-kiro-permission.sh` (16 assertions) updated to assert the post-#140 structural-only contract on the gemini and kiro branches.
 
 ## INV-32: gh wrapper is installed on two paths: shared scripts/gh for the agent, per-run PATH dir for the wrapper
+
+_Triage (issue #236): [machine-checked: tests/unit/test-lib-auth-gh-symlink.sh, tests/unit/test-dev-skill-bash-scripts-gh.sh]_
 
 **Rule**: `setup_github_auth` in `lib-auth.sh` MUST, regardless of
 `GH_AUTH_MODE`, install the `gh-with-token-refresh.sh` wrapper for **both** of
@@ -815,6 +863,8 @@ target is therefore harmless: each carries its own `GH_TOKEN_FILE`/`REAL_GH`.
 
 ## INV-33: Review wrapper MUST NOT close the linked issue
 
+_Triage (issue #236): [machine-checked: tests/unit/test-autonomous-review-auto-merge-failure.sh, tests/unit/test-autonomous-dev-rebase-marker.sh]_
+
 **Rule**: `autonomous-review.sh` (and any helper it sources) MUST NOT call
 `gh issue close` (nor any equivalent state-mutating call that transitions
 an issue from `OPEN` to `CLOSED`) on any code path. The only sanctioned
@@ -912,6 +962,8 @@ verdict-PASS branch (the auto-merge sub-branch).
 
 ## INV-34: agent prompt is fed via stdin, never as a single argv element
 
+_Triage (issue #236): [machine-checked: tests/unit/test-lib-agent-prompt-stdin.sh]_
+
 > **Implemented in `adapters/<cli>.sh`** ([INV-75](#inv-75-all-per-cli-behavior-lives-in-that-clis-adapter--inline-cli-conditionals-in-orchestration-code-are-a-defect), #232): each `adapter_invoke_<cli>` feeds the prompt on stdin. The one carve-out — codex `review`'s positional `[PROMPT]` (Clause A2) — lives in `adapters/codex.sh::_run_codex_review`.
 
 **Rule**: `lib-agent.sh::run_agent` and `resume_agent` MUST feed the
@@ -996,6 +1048,8 @@ updated in the same PR to assert "prompt on stdin, not argv".
 
 ## INV-35: Review-aware resume routing for completed sessions
 
+_Triage (issue #236): [machine-checked: tests/unit/test-handle-completed-session-routing.sh, tests/unit/test-classify-recent-review-verdict.sh]_
+
 **Rule**: When the dispatcher's Step 4 finds a `pending-dev` issue whose prior dev session reached `end_turn|completed` ([INV-12](#inv-12-resume-only-against-unfinished-sessions)), it MUST consult the most recent review-failure verdict comment that is newer than the session's end-of-turn before deciding what to do. The routing is:
 
 | Recent post-completion verdict | Route |
@@ -1053,6 +1107,8 @@ Where `<short-token>` is one of `bot-timeout`, `ci-transport`, `no-pr-found`, `m
 
 ## INV-36: agy conversation id capture is best-effort
 
+_Triage (issue #236): [machine-checked: tests/unit/test-lib-agent-agy.sh]_
+
 **Rule**: `_agy_capture_conversation` (in `lib-agent.sh`, used by the `agy)` branch of `run_agent` / `resume_agent`) MUST NOT gate `run_agent`'s exit code on capture success. A grep miss, missing log file, or unwritable sidecar path all return 0 from the helper and leave the sidecar absent. `resume_agent` MUST handle sidecar-absent by falling back to a fresh `run_agent`.
 
 **Why**: agy's `Print mode: conversation=<UUID>` log line is undocumented (emitted from agy's internal `printmode.go:130` as of agy 1.0.2). A future agy version may rename the log message, change the format, or move the channel entirely. Gating `run_agent` on capture would convert a documentation drift into a pipeline outage. The sidecar pattern already includes a degraded-but-functional fallback (fresh run loses conversation continuity but preserves pipeline progress) — INV-36 makes that explicit so future maintainers do not "helpfully" promote capture failure to a hard error.
@@ -1069,6 +1125,8 @@ Where `<short-token>` is one of `bot-timeout`, `ci-transport`, `no-pr-found`, `m
 - [INV-34](#inv-34-agent-prompt-is-fed-via-stdin-never-as-a-single-argv-element) — agy's `-p` (no value) reads from stdin, same channel contract as claude/gemini.
 
 ## INV-37: per-side AGENT_CMD precedence
+
+_Triage (issue #236): [machine-checked: tests/unit/test-wrapper-rebind-order.sh, tests/unit/test-lib-agent-per-side-cmd.sh]_
 
 **Rule**: `lib-agent.sh` exposes `AGENT_DEV_CMD` and `AGENT_REVIEW_CMD` as side-specific overrides of `AGENT_CMD`. Both default to `${AGENT_CMD:-claude}` so existing deployments are byte-for-byte unchanged. `autonomous-dev.sh` sets `AGENT_CMD="$AGENT_DEV_CMD"` exactly once, **after sourcing both `lib-agent.sh` AND `lib-auth.sh`** (and any other lib that may transitively re-source `autonomous.conf`). `autonomous-review.sh` sets `AGENT_CMD="$AGENT_REVIEW_CMD"` in the same position — after `lib-agent.sh` + `lib-auth.sh` + `lib-review-bots.sh` + `lib-review-verdict.sh`. After the override, the `case "$AGENT_CMD"` statements in `run_agent` / `resume_agent` dispatch to the right CLI per-side without any signature change.
 
@@ -1092,6 +1150,8 @@ Where `<short-token>` is one of `bot-timeout`, `ci-transport`, `no-pr-found`, `m
 
 ## INV-38: per-side AGENT_LAUNCHER precedence
 
+_Triage (issue #236): [machine-checked: tests/unit/test-lib-agent-per-side-launcher.sh, tests/unit/test-wrapper-rebind-order.sh]_
+
 > **Launcher tokenization/gating stays CLI-agnostic in `lib-agent.sh`** ([INV-75](#inv-75-all-per-cli-behavior-lives-in-that-clis-adapter--inline-cli-conditionals-in-orchestration-code-are-a-defect), #232): the per-side `*_LAUNCHER` → `AGENT_LAUNCHER_ARGV` tokenization + the claude-only guard remain in `lib-agent.sh` (they are config, not per-CLI argv). The claude adapter (`adapters/claude.sh`) reads `AGENT_LAUNCHER_ARGV` to choose its direct-vs-launcher invocation path; `_agent_launch_binary` consults `adapter_binary_<cli>` (the kiro → kiro-cli alias) instead of an inline case.
 
 **Rule**: `lib-agent.sh` exposes `AGENT_DEV_LAUNCHER` and `AGENT_REVIEW_LAUNCHER` as side-specific overrides of `AGENT_LAUNCHER`. Both default to `${AGENT_LAUNCHER:-}` so existing deployments are byte-for-byte unchanged. Each side's tokenized argv array is gated independently: `AGENT_DEV_LAUNCHER` non-empty requires `AGENT_DEV_CMD=claude`; `AGENT_REVIEW_LAUNCHER` non-empty requires `AGENT_REVIEW_CMD=claude`. The two guards replace the single `[INV-37]` guard. Each wrapper rebinds the existing `AGENT_LAUNCHER_ARGV` (the array `_run_with_timeout` reads) to its side's array immediately after sourcing `lib-agent.sh` — paired with the existing `AGENT_CMD` rebind from `[INV-37]`. After both rebinds, `run_agent` / `resume_agent` continue reading `AGENT_LAUNCHER_ARGV[@]` without signature changes.
@@ -1111,6 +1171,8 @@ Where `<short-token>` is one of `bot-timeout`, `ci-transport`, `no-pr-found`, `m
 - [INV-13](#inv-13-wall-clock-cap-on-agent-invocations) — wall-clock cap. Unaffected: each side's launcher still runs inside `_run_with_timeout` exactly as before.
 
 ## INV-39: Dependency parsing is list-item scoped and supports cross-repo refs
+
+_Triage (issue #236): [machine-checked: tests/unit/test-check-deps-resolved.sh]_
 
 **Rule**: Step 2's dependency check parses ONLY list-item lines (lines that start with `-`, `*`, or `1.` after optional leading whitespace) inside the `## Dependencies` section. Prose, blockquotes (`> ...`), and headings between `## Dependencies` and the next `## ` heading are ignored — they MUST NOT cause an issue to be blocked. On each list item, two ref shapes are recognized:
 
@@ -1141,6 +1203,8 @@ List-item-only scope eliminates the prose false positives. Explicit `owner/repo#
 - The `create-issue` skill's `## Dependencies` guidance documents the user-facing parsing rules (`skills/create-issue/SKILL.md`, `skills/create-issue/references/issue-templates.md`).
 
 ## INV-40: Multi-agent review attribution, unanimous aggregation, and all-unavailable fallback
+
+_Triage (issue #236): [machine-checked: tests/unit/test-autonomous-review-multi-agent.sh, tests/unit/test-autonomous-review-prompt.sh]_
 
 > **Verdict CHANNEL changed by [INV-78](#inv-78-review-verdicts-resolve-from-a-typed-artifact-file-first-comment-scraping-is-an-explicitly-logged-fallback-a-malformed-artifact-is-loud-never-a-silent-absent) (#233), aggregation UNCHANGED.** The per-agent verdict now resolves from a typed artifact FILE first (PASS→pass / FAIL→fail), with comment attribution (sub-rule 1) as a logged fallback. A malformed artifact is treated as `absent` for the vote (adapter-spec Clause V1) — it feeds the SAME unanimous-PASS / timed-out-veto aggregation (sub-rules 2-3) below, which is byte-for-byte unchanged.
 
@@ -1185,6 +1249,8 @@ This is DISTINCT from `REVIEW_BOTS` (`/q review`, `/codex review`): those trigge
 - [INV-41](#inv-41-per-agent-review-model--extra-args-resolution) — per-agent model / extra-args resolution layered on this fan-out (#168).
 
 ## INV-41: Per-agent review model / extra-args resolution
+
+_Triage (issue #236): [machine-checked: tests/unit/test-autonomous-review-per-agent-model.sh, tests/unit/test-lib-review-codex.sh]_
 
 **Rule**: within the [INV-40](#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback) multi-agent review fan-out, each agent resolves its OWN model and its OWN extra-args from per-agent override keys, falling back to the shared review values when a per-agent key is unset/empty. The keys extend the flat `AGENT_REVIEW_*` convention with an uppercased agent-name suffix where every character outside `[A-Z0-9]` becomes `_`:
 
@@ -1231,6 +1297,8 @@ The suffix is computed by `lib-review-resolve.sh::_review_agent_key_suffix <name
 
 ## INV-42: Per-agent review launcher resolution
 
+_Triage (issue #236): [machine-checked: tests/unit/test-autonomous-review-per-agent-launcher.sh]_
+
 **Rule**: within the [INV-40](#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback) multi-agent review fan-out, each agent MAY resolve its OWN launcher from a per-agent override key, extending the per-agent override convention of [INV-41](#inv-41-per-agent-review-model--extra-args-resolution) with a third axis. The key uses the same uppercased agent-name suffix (every char outside `[A-Z0-9]` → `_`, via `lib-review-resolve.sh::_review_agent_key_suffix`):
 
 - `AGENT_REVIEW_LAUNCHER_<SUFFIX>` (e.g. `AGENT_REVIEW_LAUNCHER_CODEX=$'bash -c \'source ~/.bash_aliases && codex "$@"\' --'`)
@@ -1268,6 +1336,8 @@ The suffix is computed by `lib-review-resolve.sh::_review_agent_key_suffix <name
 - [`docs/designs/per-agent-review-launcher.md`](../designs/per-agent-review-launcher.md) — design canvas.
 
 ## INV-43: Command-mode E2E review wait budgets must not be smaller than the E2E they dispatched
+
+_Triage (issue #236): [machine-checked: tests/unit/test-review-e2e-command-poll-budget.sh, tests/unit/test-review-cli-exit-grace.sh]_
 
 **Rule**: when `E2E_MODE=command`, the review wrapper's verdict-poll budget AND the dispatcher's review-stall window MUST be sized for the configured `E2E_COMMAND_TIMEOUT_SECONDS`, so a review agent that FAITHFULLY runs the (slow) command-mode E2E is not dropped as `unavailable` solely for taking as long as the E2E it was asked to run.
 
@@ -1311,6 +1381,8 @@ Three sub-rules:
 
 ## INV-44: Mergeable hard gate — a CONFLICTING PR can never reach `approved`
 
+_Triage (issue #236): [machine-checked: tests/unit/test-autonomous-review-mergeable-gate.sh]_
+
 **Rule**: after `autonomous-review.sh` aggregates the per-agent verdicts to PASS, and BEFORE it acts on that PASS (the `emit_verdict_trailer "passed"` + approve/merge branch), the wrapper re-queries the PR's `mergeable` status and gates on it **mechanically** — independently of whether the review agent ran its Step-0 pre-review rebase prompt. The decision is computed by the pure `lib-review-mergeable.sh::_classify_mergeable_gate <mergeable>` helper:
 
 | `mergeable` (case-insensitive) | gate | wrapper action |
@@ -1352,6 +1424,8 @@ Two sub-rules:
 
 ## INV-45: Pushed-branch-with-commits-ahead + no PR ⇒ resume to open-PR-only, never full re-dev
 
+_Triage (issue #236): [machine-checked: tests/unit/test-autonomous-dev-pushed-no-pr-resume.sh]_
+
 **Rule**: when a dev session is (re)dispatched for an issue whose head branch is **already pushed to origin with commits ahead of the base branch** but for which **no open PR exists**, the dev wrapper MUST steer the agent **straight to the open-PR step** (Step 7 `gh pr create`) and MUST NOT cause design/test/implement to be re-run from scratch. Development is effectively complete; only PR creation remains.
 
 `autonomous-dev.sh::needs_open_pr_only <issue_num>` is the detector. It returns 0 (engage the fast path) only when BOTH hold:
@@ -1385,6 +1459,8 @@ When `needs_open_pr_only` returns 0, `emit_open_pr_fast_path_block` produces the
 - [`dev-agent-flow.md` § Open-PR-only fast path](dev-agent-flow.md#open-pr-only-fast-path-inv-45) — runtime walkthrough.
 
 ## INV-46: E2E runs ONCE in a dedicated lane before the review fan-out — gated, not per-agent
+
+_Triage (issue #236): [machine-checked: tests/unit/test-autonomous-review-sequential-e2e.sh]_
 
 **Rule**: when `E2E_MODE` is active (`browser` or `command`), `autonomous-review.sh` MUST run the project E2E **exactly once per review round** in a dedicated lane that runs to completion **before** the review fan-out, compute a mechanical **E2E hard gate** from the lane's result, and only fan out the N review agents on a gate pass. The review agents are PURE code reviewers — `build_review_prompt` MUST NOT contain any E2E execution block; the prompt instead instructs the agent to READ the wrapper-posted E2E evidence comment as input. A gate FAIL short-circuits to the FAIL route (`−reviewing +pending-dev`) **without** spawning the review agents at all.
 
@@ -1430,6 +1506,8 @@ Five sub-rules:
 
 ## INV-48: Per-side review wall-clock timeout (AGENT_REVIEW_TIMEOUT, 1h default) with browser-E2E exclusion and timeout-veto
 
+_Triage (issue #236): [machine-checked: tests/unit/test-review-agent-timeout.sh]_
+
 **Rule**: `autonomous-review.sh` MUST cap REVIEW-agent CLIs with a **per-side** wall-clock timeout that defaults to **1h** (not the shared 4h [INV-13](#inv-13-wall-clock-cap-on-agent-invocations) `AGENT_TIMEOUT`), operator-overridable via `AGENT_REVIEW_TIMEOUT`. The dev wrapper (`autonomous-dev.sh`) is UNTOUCHED — it keeps `AGENT_TIMEOUT` (4h). The cap is implemented by **rebinding the live `AGENT_TIMEOUT`** in the review wrapper's per-side override block (next to the [INV-37](#inv-37-per-side-agent_cmd-precedence) `AGENT_CMD` and [INV-38](#inv-38-per-side-agent_launcher-precedence) `AGENT_LAUNCHER_ARGV` rebinds), so [INV-13](#inv-13-wall-clock-cap-on-agent-invocations)'s `_run_with_timeout` (which reads the live `AGENT_TIMEOUT` at call time) and agy's `--print-timeout "$AGENT_TIMEOUT"` apply the review cap to every review fan-out agent with no change to `lib-agent.sh`'s invocation sites.
 
 Four sub-rules:
@@ -1465,6 +1543,8 @@ Four sub-rules:
 - [`docs/designs/review-agent-timeout.md`](../designs/review-agent-timeout.md) — design canvas.
 
 ## INV-49: command-mode E2E may feed the review fan-out a structured AC-coverage artifact — optional, fail-safe
+
+_Triage (issue #236): [machine-checked: tests/unit/test-autonomous-review-structured-ac.sh]_
 
 **Rule**: a command-mode E2E evidence parser MAY emit an **optional** structured AC-coverage artifact — a flat JSON object `{ "<criterion-id-or-text>": "pass" | "fail", ... }` — inside an `ac-coverage:begin … ac-coverage:end` HTML-comment fence embedded in its evidence stdout. The wrapper's command-mode E2E lane ([INV-46](#inv-46-e2e-runs-once-in-a-dedicated-lane-before-the-review-fan-out--gated-not-per-agent)) extracts + validates it (`jq`) and writes the result to the per-round sidecar `E2E_AC_COVERAGE_FILE` (`/tmp/e2e-ac-coverage-${PR_NUMBER}.json`). When that sidecar is non-empty AND **re-validates** at prompt-read time, each review agent's prompt PREFERS the structured map to verify acceptance-criteria coverage **deterministically** instead of LLM-parsing the free-form markdown table. The artifact is a **review double-check aid only** — it does NOT change the E2E hard gate.
 
@@ -1502,6 +1582,8 @@ Five sub-rules:
 
 ## INV-50: agy `--model` is validated against `agy models` before forwarding
 
+_Triage (issue #236): [machine-checked: tests/unit/test-lib-agent-agy.sh, tests/unit/test-autonomous-review-per-agent-model.sh]_
+
 > **Implemented in `adapters/agy.sh`** ([INV-75](#inv-75-all-per-cli-behavior-lives-in-that-clis-adapter--inline-cli-conditionals-in-orchestration-code-are-a-defect), #232): `_agy_known_model` / `_agy_build_model_args` moved into the agy adapter (with the rest of agy's per-CLI behavior). The validation stays wrapper-side — never forwarded blindly.
 
 **Rule**: the `agy` branch of `run_agent` / `resume_agent` (in `lib-agent.sh`) forwards `--model` to the agy CLI **only after validating** the resolved model id against `agy models`. Resolution (in `_agy_build_model_args` → `_agy_known_model`):
@@ -1536,6 +1618,8 @@ The **label-honesty mirror** (#220 — the DISPLAY side of this same drop) is te
 - [INV-58](#inv-58-agy-quotaauth-unavailable-drops-surface-a-distinct-reason-fan-out--reviewed-head-model-labels-are-per-agent) / [INV-60](#inv-60-the-review-model-is-shown-inline-on-every-verdict-comments-review-agent-line) — the model-label / verdict-trailer consumers that **mirror this drop** (#220): for an agy member whose resolved id this invariant drops, the label renders the agy default (`agy default (settings.json)`), never the dropped id, via `lib-review-resolve.sh::_resolve_review_agent_model_label`.
 
 ## INV-51: codex review thread auto-resumes until a verdict-posting turn
+
+_Triage (issue #236): [superseded]_
 
 > ⚠️ **SUPERSEDED for the review path by [INV-62](#inv-62-the-codex-review-lane-runs-the-codex-review-subcommand-auto-scoped-prompt-carried-gate-with-a-stdout-verdict-fallback) (#218).** The codex review lane no longer runs `codex exec` + a resume loop; it runs the purpose-built `codex review "<prompt>"` subcommand, which is natively multi-step and never strands mid-review. `_run_codex_review_with_resume`, `_codex_log_has_verdict_message`, and `_codex_resume_prompt` are DELETED. This entry is kept for historical context only.
 
@@ -1678,6 +1762,8 @@ stay green. Test plan: `docs/test-cases/codex-review-resume-loop.md`.
 
 ## INV-52: the review WRAPPER owns the GitHub-native PR review/merge action; the agent posts verdicts only
 
+_Triage (issue #236): [machine-checked: tests/unit/test-autonomous-review-request-changes.sh]_
+
 **Rule**: the review **wrapper** (`autonomous-review.sh`) is the SOLE actor that submits a GitHub-native PR review or merge. It submits `gh pr review --approve` (+ `gh pr merge`, unless `no-auto-close`) on a PASS — **after** the [INV-44](#inv-44-mergeable-hard-gate--a-conflicting-pr-can-never-reach-approved) mergeable hard gate and the `no-auto-close` skip-merge check — and `gh pr review --request-changes` on a **substantive** FAIL, so the PR's GitHub-native `reviewDecision` always reflects the verdict (`CHANGES_REQUESTED` on a blocking FAIL). The review **agent** posts a verdict **comment** only (`Review PASSED` / `Review findings:` + the trailers) and MUST NEVER run `gh pr review --approve`, `gh pr review --request-changes`, `gh pr merge`, or the MCP merge tools.
 
 Two halves of one invariant:
@@ -1730,6 +1816,8 @@ Sub-rules:
 - [`docs/designs/request-changes-on-fail.md`](../designs/request-changes-on-fail.md) — design canvas.
 
 ## INV-53: codex review convergence keys on the VERDICT TRAILER, not any `agent_message`
+
+_Triage (issue #236): [superseded]_
 
 > **Further demoted by [INV-78](#inv-78-review-verdicts-resolve-from-a-typed-artifact-file-first-comment-scraping-is-an-explicitly-logged-fallback-a-malformed-artifact-is-loud-never-a-silent-absent) (#233).** The verdict-trailer convergence concept (and the INV-62 codex stdout classifier it became) now runs only on the comment-fallback path — when a codex review produced no verdict artifact. With an artifact present, the typed file is the verdict; no trailer/stdout parsing is consulted.
 
@@ -1852,6 +1940,8 @@ attribution trailers). Investigation artifact:
 
 ## INV-54: the PR-still-open guard gates ALL PASS-chain exits, not just PASS
 
+_Triage (issue #236): [machine-checked: tests/unit/test-autonomous-review-fail-branch-open-guard.sh, tests/unit/test-autonomous-review-e2e-gate-open-guard.sh]_
+
 > **Extended (#195):** the guard now also gates the INV-46 E2E hard-gate block branches (a second application point — see Rule (b) below). The heading is kept for anchor stability; the guard's reach is no longer limited to the PASS chain.
 
 **Rule**: `autonomous-review.sh` MUST re-check PR state before writing a
@@ -1907,6 +1997,8 @@ The mergeable-gate (`test-autonomous-review-mergeable-gate.sh`) and sequential-E
 - [`docs/designs/e2e-gate-open-guard.md`](../designs/e2e-gate-open-guard.md) — design canvas for check (b, #195).
 
 ## INV-55: the codex review lane receives the PR diff INLINE in its prompt
+
+_Triage (issue #236): [superseded]_
 
 > ⚠️ **SUPERSEDED by [INV-62](#inv-62-the-codex-review-lane-runs-the-codex-review-subcommand-auto-scoped-prompt-carried-gate-with-a-stdout-verdict-fallback) (#218).** The inline-diff was a workaround for `codex exec`'s single-turn budget. `codex review` fetches and re-reads its own auto-scoped diff across multiple steps, so there is nothing to inline — and `[PROMPT]` is mutually exclusive with `--base`/`--commit` anyway. The inline-diff prompt block (`gh pr diff` fetch, nonce'd `DIFF_START`/`DIFF_END` markers, the `CODEX_REVIEW_INLINE_DIFF_MAX_BYTES` cap, the self-fetch fallback) is DELETED from the codex branch of `build_review_prompt`; no other agent used it (it was codex-only), so INV-55 is fully retired. This entry is kept for historical context only.
 
@@ -1979,6 +2071,8 @@ stay green. Test plan: `docs/test-cases/codex-inline-diff-review-prompt.md`.
 - [`docs/designs/codex-inline-diff-review-prompt.md`](../designs/codex-inline-diff-review-prompt.md) — design canvas.
 
 ## INV-56: review verdict is posted via the deterministic post-verdict helper, not the agent's bare gh
+
+_Triage (issue #236): [machine-checked: tests/unit/test-post-verdict.sh, tests/unit/test-autonomous-review-verdict-via-helper.sh]_
 
 **Rule**: a review agent's verdict comment MUST be posted through the deterministic,
 wrapper-provided helper `scripts/post-verdict.sh`, NOT through a hand-rolled bare
@@ -2086,6 +2180,8 @@ call a `scripts/post-verdict.sh` symlink that doesn't exist yet.
 
 ## INV-57: dev-resume must not short-circuit on a standing APPROVAL when newer review findings exist
 
+_Triage (issue #236): [machine-checked: tests/unit/test-dev-resume-post-approval-findings.sh, tests/unit/test-resume-review-comments-filter.sh]_
+
 **Rule**: on `dev-resume`, the done/not-done decision is governed by **approval-timestamp vs
 findings-timestamp ordering**, NOT by the standing `reviewDecision` alone. A PR whose current state is
 `reviewDecision == APPROVED` + green CI + mergeable is "nothing outstanding" **only** when there is no
@@ -2188,6 +2284,8 @@ look-behind bug. Test plan:
 
 ## INV-58: agy quota/auth `unavailable` drops surface a distinct reason; fan-out + Reviewed-HEAD model labels are per-agent
 
+_Triage (issue #236): [machine-checked: tests/unit/test-lib-review-agy.sh, tests/unit/test-autonomous-review-per-agent-model.sh]_
+
 > **Implemented in `adapters/agy.sh`** ([INV-75](#inv-75-all-per-cli-behavior-lives-in-that-clis-adapter--inline-cli-conditionals-in-orchestration-code-are-a-defect), #232): the `_classify_agy_drop_reason` / `_agy_drop_reason_phrase` scrapers moved from `lib-review-agy.sh` (now a thin compat shim) into the agy adapter.
 
 **Rule**: two related observability fixes to the [INV-40](#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback) review fan-out, neither of which changes the vote:
@@ -2229,6 +2327,8 @@ look-behind bug. Test plan:
 
 ## INV-59: codex transient stream-error drops surface a distinct reason and are ridden out by the resume loop, not opaquely dropped
 
+_Triage (issue #236): [machine-checked: tests/unit/test-lib-review-codex.sh]_
+
 > **Implemented in `adapters/codex.sh`** ([INV-75](#inv-75-all-per-cli-behavior-lives-in-that-clis-adapter--inline-cli-conditionals-in-orchestration-code-are-a-defect), #232): the `_codex_review_has_stream_error` / `_classify_codex_drop_reason` / `_codex_drop_reason_phrase` scrapers moved from `lib-review-codex.sh` (now a thin compat shim) into the codex adapter.
 
 > ⚠️ **RE-SCOPED by [INV-62](#inv-62-the-codex-review-lane-runs-the-codex-review-subcommand-auto-scoped-prompt-carried-gate-with-a-stdout-verdict-fallback) (#218).** Both halves below are preserved in spirit but re-implemented for the `codex review` subcommand: **(half 1, drop-reason detector)** survives but now scans codex review's human-readable **stdout/stderr capture** for the stream-disconnect / reconnect-ladder signal instead of the `codex exec` JSONL `turn.failed` event (`codex review` emits no JSONL stream). The function names (`_classify_codex_drop_reason`, `_codex_drop_reason_phrase`) and the rc-0-always fail-safe contract are unchanged; `_codex_log_has_stream_error` is renamed `_codex_review_has_stream_error`. **(half 2, transient-retry)** is subsumed by INV-62's bounded **re-run** of `codex review` (a non-zero exit re-runs a fresh review, bounded by `CODEX_REVIEW_MAX_RERUNS` + the `AGENT_REVIEW_TIMEOUT` wall-clock deadline) — there is no resume loop left to "fall through into". The text below describes the pre-#218 `codex exec` implementation; read it as historical.
@@ -2269,6 +2369,8 @@ look-behind bug. Test plan:
 - [`review-agent-flow.md` § codex stream-error drop reason + retry (INV-59, re-scoped by INV-62)](review-agent-flow.md#codex-stream-error-drop-reason--retry-inv-59-re-scoped-by-inv-62) — runtime walkthrough.
 
 ## INV-60: the review model is shown inline on every verdict comment's `Review Agent:` line
+
+_Triage (issue #236): [machine-checked: tests/unit/test-post-verdict.sh, tests/unit/test-autonomous-review-verdict-via-helper.sh]_
 
 **Rule**: the AGENT verdict trailer that `scripts/post-verdict.sh` appends folds the per-agent **resolved review model** into the existing `Review Agent:` line, inline, as a parenthetical — NOT a new third trailer line:
 
@@ -2316,6 +2418,8 @@ The displayed value is the model the wrapper **launched** the agent with — so 
 
 ## INV-61: kiro auth/login-failure `unavailable` drops surface a distinct reason, not a bare opaque `unavailable`
 
+_Triage (issue #236): [machine-checked: tests/unit/test-lib-review-kiro.sh, tests/unit/test-autonomous-review-multi-agent.sh]_
+
 > **Implemented in `adapters/kiro.sh`** ([INV-75](#inv-75-all-per-cli-behavior-lives-in-that-clis-adapter--inline-cli-conditionals-in-orchestration-code-are-a-defect), #232): the `_classify_kiro_drop_reason` / `_kiro_drop_reason_phrase` scrapers moved from `lib-review-kiro.sh` (now a thin compat shim) into the kiro adapter.
 
 **Rule**: when a fan-out member whose CLI is `kiro` is resolved `unavailable`, the wrapper scrapes that agent's OWN generic per-agent log (`$_agent_log` = `/tmp/agent-${PROJECT_ID}-review-${ISSUE_NUMBER}-kiro.log`, captured per-agent into `AGENT_KIRO_LOGS` during fan-out — kiro has NO separate `--log-file` like agy) via `lib-review-kiro.sh::_classify_kiro_drop_reason <log>` and, if an auth/login-failure signal is present, attaches a distinct, actionable reason (naming the operator remedy `kiro-cli login --use-device-flow`) to the `WARNING: review agent(s) dropped (unavailable)` log line AND the posted "dropped (unavailable) agent(s)" issue comment (and the all-unavailable `log` line). Classification:
@@ -2350,6 +2454,8 @@ The displayed value is the model the wrapper **launched** the agent with — so 
 - [`review-agent-flow.md` § kiro auth/login drop reason (INV-61)](review-agent-flow.md#kiro-authlogin-drop-reason-inv-61) — runtime walkthrough.
 
 ## INV-62: the codex review lane runs the `codex review` subcommand (auto-scoped, prompt-carried gate) with a stdout verdict fallback
+
+_Triage (issue #236): [machine-checked: tests/unit/test-lib-review-codex.sh, tests/unit/test-lib-agent-codex.sh]_
 
 > **Implemented in `adapters/codex.sh`** ([INV-75](#inv-75-all-per-cli-behavior-lives-in-that-clis-adapter--inline-cli-conditionals-in-orchestration-code-are-a-defect), #232): the entire review lane — `_run_codex_review`, the worktree prep/cleanup, the prompt-echo malformed guard, the stdout classifier, and the re-run controller — moved from `lib-review-codex.sh` (now a thin compat shim) into the codex adapter. `codex review`'s positional `[PROMPT]` is the [INV-34](#inv-34-agent-prompt-is-fed-via-stdin-never-as-a-single-argv-element) Clause A2 carve-out.
 
@@ -2412,6 +2518,8 @@ Sub-rules:
 
 ## INV-63: agent-smoke is a three-state probe (PASS / UNAVAILABLE / FAIL) run through the production `run_agent`, never a parallel invocation path
 
+_Triage (issue #236): [machine-checked: tests/e2e/run-agent-smoke.sh, tests/unit/test-lib-agent-smoke.sh]_
+
 **Rule**: the agent-CLI smoke (`lib-agent-smoke.sh::smoke_agent <agent-cmd> <model> [timeout-seconds]`) verifies that a coding-agent CLI can launch, authenticate, and get a **real model response**, and MUST classify the outcome into exactly **three states**, returning a distinct rc per state:
 
 - **rc 0 — PASS**: the CLI's stdout contains the generated nonce (the model truly responded).
@@ -2465,6 +2573,8 @@ This mirrors the production wrapper's [INV-38](#inv-38-per-side-agent_launcher-p
 
 ## INV-64: the review wrapper smokes every fan-out member before the fan-out (Phase A.5); FAIL aborts the review, UNAVAILABLE drops the member, PASS proceeds
 
+_Triage (issue #236): [machine-checked: tests/unit/test-lib-review-smoke.sh, tests/unit/test-autonomous-review-smoke-gate.sh]_
+
 **Rule**: when `REVIEW_SMOKE_ENABLED=true`, `autonomous-review.sh` runs a pre-fan-out **agent-smoke gate (Phase A.5)** — positioned AFTER the [INV-46](#inv-46-e2e-runs-once-in-a-dedicated-lane-before-the-review-fan-out--gated-not-per-agent) E2E lane (Phase A) and BEFORE the [INV-40](#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback) review fan-out (Phase B) — that smokes EVERY `REVIEW_AGENTS_LIST` member via [INV-63](#inv-63-agent-smoke-is-a-three-state-probe-pass--unavailable--fail-run-through-the-production-run_agent-never-a-parallel-invocation-path)'s `lib-agent-smoke.sh::smoke_agent` and applies three-state semantics to decide whether — and with which members — the fan-out runs:
 
 - **PASS** (smoke rc 0) → the member proceeds to the fan-out.
@@ -2503,6 +2613,8 @@ This mirrors the production wrapper's [INV-38](#inv-38-per-side-agent_launcher-p
 
 ## INV-65: entry scripts resolve conf from the unresolved path and libs from the real skill-tree path (two-dir resolution)
 
+_Triage (issue #236): [machine-checked: tests/unit/test-entry-point-resolution.sh, tests/unit/test-entry-point-startup-e2e.sh]_
+
 **Rule**: Every dispatcher / wrapper **entry script** MUST compute TWO directories from its own `${BASH_SOURCE[0]:-$0}` and use each for a distinct purpose:
 
 | Dir | Computed from | Used for |
@@ -2528,6 +2640,8 @@ This mirrors the production wrapper's [INV-38](#inv-38-per-side-agent_launcher-p
 - [`dispatcher-flow.md` § install/topology](dispatcher-flow.md#pre-step-wrapper-exec-bit-self-heal-closes-97) — the consumer install topology updated for the manifest-only model.
 
 ## INV-66: adapter conformance is spec-defined
+
+_Triage (issue #236): [machine-checked: tests/unit/test-adapter-spec-schemas.sh]_
 
 **Rule**: the agent-CLI adapter boundary (dev + review + e2e) has a single
 **normative** contract — [`adapter-spec.md`](adapter-spec.md) (`spec_version: 1`)
@@ -2632,6 +2746,8 @@ implement this spec.
 
 ## INV-67: a bare smoke timeout (rc 124/137) with no auth/config signal classifies UNAVAILABLE, not FAIL
 
+_Triage (issue #236): [machine-checked: tests/unit/test-lib-agent-smoke.sh, tests/unit/test-autonomous-review-smoke-gate.sh]_
+
 **Rule**: in `lib-agent-smoke.sh::_smoke_classify`, a smoke that times out (`run_agent` rc `124`/`137`) with **no preceding auth/config scraper signal** classifies **UNAVAILABLE** (smoke `smoke_agent` rc 2), **not FAIL**. This refines the [INV-63](#inv-63-agent-smoke-is-a-three-state-probe-pass--unavailable--fail-run-through-the-production-run_agent-never-a-parallel-invocation-path) three-state contract: the "bare timeout → FAIL" of the original (#222) wording becomes "bare timeout → UNAVAILABLE". Consequence at the [INV-64](#inv-64-the-review-wrapper-smokes-every-fan-out-member-before-the-fan-out-phase-a5-fail-aborts-the-review-unavailable-drops-the-member-pass-proceeds) Phase A.5 gate: a timed-out member is **dropped** (drop reason `smoke: timeout …`) and the review **proceeds** on the survivors — instead of the prior FAIL that **aborted the entire review** (all fan-out members) and left the issue stuck in `reviewing`.
 
 Sub-rules:
@@ -2664,6 +2780,8 @@ Sub-rules:
 
 ## INV-68: a routine re-dispatch preserves the prior run's per-issue log (single-generation rotation); only the INV-12 / INV-35 recovery branches truncate it deliberately
 
+_Triage (issue #236): [machine-checked: tests/unit/test-dispatch-local-log-retention.sh]_
+
 **Rule**: when `dispatch-local.sh` prepares the per-issue agent log for a `dev-new` / `dev-resume` / `review` spawn, it MUST **preserve the prior run's log content** rather than zeroing it. The mechanism is **single-generation rotation**: if `…-${ISSUE}.log` already exists, `mv -f` it to `…-${ISSUE}.log.1` (overwriting any older `.1` — bounded to one extra generation per `(issue, type)`), then create the fresh current log `0600`. The rotated `.1` is forced to `0600` too, so the prior run's (possibly secret-bearing) output never becomes world-readable across rotation. A first dispatch (no existing log) creates only the fresh `0600` current log — no `.1`.
 
 The **only** code that may truncate the per-issue log is the deliberate recovery path:
@@ -2684,6 +2802,8 @@ Those recovery-truncates clear the **current** log only; they never touch `…-$
 - [`dispatcher-flow.md` § per-issue agent log retention (INV-68)](dispatcher-flow.md#per-issue-agent-log-retention-inv-69) — runtime walkthrough.
 
 ## INV-69: a failed verdict post surfaces a distinct `post-failed` drop reason (CLI-agnostic), not a bare opaque `unavailable`
+
+_Triage (issue #236): [machine-checked: tests/unit/test-lib-review-postfail.sh, tests/unit/test-post-verdict.sh]_
 
 > **Note**: landed as **INV-69**, after the two sibling PRs that merged just ahead of it against the same `main` — INV-67 (smoke-timeout→UNAVAILABLE, #246) and INV-68 (re-dispatch log retention, #245). Several stability-redesign PRs were in flight concurrently, so the final number was assigned at merge to avoid a duplicate-heading / broken-anchor collision (sibling-first: the lower number goes to whichever lands first).
 
@@ -2717,6 +2837,8 @@ Because every CLI posts through the SAME `post-verdict.sh`, this detector is **C
 
 ## INV-70: metrics emission is observe-only — silent-to-pipeline, loud-to-report
 
+_Triage (issue #236): [machine-checked: tests/unit/test-lib-metrics.sh, tests/unit/test-metrics-report.sh]_
+
 **Rule**: The metrics lane (`lib-metrics.sh::metrics_emit` and the events it appends to `metrics.jsonl`) is **purely observational**. A metrics-emission failure of ANY kind — unwritable state dir, missing `jq`, full disk, malformed input — MUST NOT change a wrapper/dispatcher **exit code**, **label transition**, **verdict**, or **merge decision**. Concretely:
 
 - `metrics_emit` swallows every internal error and ALWAYS `return`s 0. It never aborts the caller, even under `set -e`.
@@ -2742,6 +2864,8 @@ The **report** half (`metrics-report.sh`) is the opposite: it is **loud** about 
 
 ## INV-71: run-event channel decision recorded, implementation gated
 
+_Triage (issue #236): [design-rationale]_
+
 **Rule**: The durable run-event channel that a *future* reconciler/lease design would consume is **decided** in [`docs/designs/run-event-channel-adr.md`](../designs/run-event-channel-adr.md), but is **NOT implemented**. The decision: lease/heartbeat **renewals stay local** (state dir, never a shared-quota GitHub channel — proven rate-limit-unsafe at fleet scale); sparse **lifecycle events** (start/verdict/merge/end) use **create-only issue/PR comments** (the only candidate viable in every auth × execution topology cell), with **GitHub check-runs rejected as a sole channel** (App-mode-only — a PAT cannot create check-runs). Labels stay **canonical** (a canonical run-ledger was evaluated and declined — review T1). No code in any wrapper, dispatcher, hook, label transition, verdict path, or merge decision changes on account of this ADR.
 
 **Why**: Review consensus flagged the event channel as the load-bearing unknown of the gated reconciler phase. Committing reconciler design before measuring the channel would bake in a substrate that fails part of the fleet (check-runs need `checks:write`, comment-editing races itself, a local dir is invisible to a remote SSM dispatcher without a round-trip). The ADR settles the channel choice — with a measured comment-propagation lag (~3–5 s), measured check-run latency (~1.6 s), the step-by-step secondary-rate-limit arithmetic at N=25 concurrent runs, an idempotency-key scheme (§7.1) and a `(run_id, seq)` ordering contract (§7.2) — so that *if* the stop-rule gate opens, the decision is already made. It records the decision; it does not open the gate. (#237)
@@ -2756,6 +2880,8 @@ The **report** half (`metrics-report.sh`) is the opposite: it is **loud** about 
 - [INV-29] heartbeat (local file touch — the renewal signal stays here), [INV-70] metrics observe-only (the local JSONL the ADR's C3 candidate generalizes; also the `label-race` failure class the run-ledger question weighs), [INV-24] DEAD cross-check (the dead-detection latency `L_dead` the cadence table tunes).
 
 ## INV-72: config-class failures MUST surface on the issue, never log-only
+
+_Triage (issue #236): [machine-checked: tests/unit/test-lib-error-envelope.sh, tests/unit/test-lib-agent-binary-preflight.sh]_
 
 **Rule**: a **config-class** wrapper/dispatcher failure (every
 operator-actionable `provider.class` — `config`, `auth`, `quota`) **MUST**
@@ -2891,6 +3017,8 @@ for config-class failures only.
 
 ## INV-73: a codex review prompt-echo / startup-trace stdout is `malformed`, never a blocking `[P1]` FAIL — retry-or-drop, not a phantom veto
 
+_Triage (issue #236): [machine-checked: tests/unit/test-lib-review-codex.sh, tests/unit/test-autonomous-review-multi-agent.sh]_
+
 **Rule**: a `codex review` stdout capture that is codex's **own prompt + CLI startup trace echoed back** (the startup banner `OpenAI Codex vX.Y.Z` / a `workdir:`+`model:`+`provider:` header, followed by the verbatim review prompt — the inlined decision-gate rules, the `gh issue view` comment-history dump, and the issue body — truncated at the wrapper's char cap, with NO analysis and NO verdict) MUST be classified **`malformed`**, NOT a blocking `[P1]` FAIL. `_codex_review_classify_stdout` runs the `malformed` check **FIRST**, before its `[P1]` scan, so a `[P1]` present in the capture **only as quoted instruction text** (the prompt's literal `Prefix EACH blocking finding with [P1]` instruction, or a quoted prior-round finding in the comment-history dump) can never produce a verdict. A `malformed` capture is **never composed into a `Review findings:` body and never posted**; codex is left UNRESOLVED for the terminal sweep → `unavailable` (dropped — contributes **no** [INV-40](#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback) vote, the "absent ⇒ not a deciding vote" semantics), with a distinct **`malformed-output`** drop reason. A genuine codex review with a real `[P1]` still FAILs; one with no `[P1]` still PASSes — no happy-path change.
 
 This is a **distinct fourth `codex review` failure mode** from the three already handled: it exits **rc 0** ("succeeded", just produced garbage), so it is caught by none of [INV-59](#inv-59-codex-transient-stream-error-drops-surface-a-distinct-reason-and-are-ridden-out-by-the-resume-loop-not-opaquely-dropped)/[INV-62](#inv-62-the-codex-review-lane-runs-the-codex-review-subcommand-auto-scoped-prompt-carried-gate-with-a-stdout-verdict-fallback) (`turn.failed`/5xx → non-zero exit → retry), [INV-67](#inv-67-a-bare-smoke-timeout-rc-124137-with-no-authconfig-signal-classifies-unavailable-not-fail) (smoke timeout rc 124/137 → UNAVAILABLE), or [INV-69](#inv-69-a-failed-verdict-post-surfaces-a-distinct-post-failed-drop-reason-cli-agnostic-not-a-bare-opaque-unavailable) (a failed `gh` post). Before this guard, the bare `_codex_review_classify_stdout` `grep -qF '[P1]'` matched the echoed prompt's `[P1]` instruction text → a phantom blocking FAIL, and `_codex_review_compose_body` posted the 700+-line prompt/trace dump as the `Review findings:` body. Under the INV-40 unanimous-PASS gate, that single phantom FAIL vetoed an otherwise-clean PR on every round — a non-self-terminating dev↔review loop (observed 3× across one PR's review rounds: codex CLI `0.139.0`, model `openai.gpt-5.4`, provider `amazon-bedrock`; the PR was independently PASSED twice by `claude` on the same HEAD, CI-green and `MERGEABLE`).
@@ -2930,6 +3058,8 @@ Sub-rules:
 - [`review-agent-flow.md` § codex malformed-output (prompt-echo) drop reason (INV-73)](review-agent-flow.md#codex-malformed-output-prompt-echo-drop-reason-inv-73) — runtime walkthrough.
 
 ## INV-74: adapter conformance is regression-pinned by a hermetic fixture-manifest runner
+
+_Triage (issue #236): [machine-checked: tests/conformance/run-conformance.sh, tests/e2e/run-agent-smoke.sh]_
 
 > **Note**: landed as **INV-74**, not INV-68 — several stability-redesign PRs
 > merged ahead of this one against the same `main` (INV-67 smoke-timeout #246,
@@ -3153,6 +3283,8 @@ green-before-and-after gate protects.
 
 ## INV-75: all per-CLI behavior lives in that CLI's adapter — inline CLI conditionals in orchestration code are a defect
 
+_Triage (issue #236): [machine-checked: tests/unit/test-cli-adapters.sh]_
+
 **Rule**: every per-CLI special case — argv assembly, the stdin-vs-positional
 prompt channel ([INV-34](#inv-34-agent-prompt-is-fed-via-stdin-never-as-a-single-argv-element)),
 session-handle capture/recall (codex thread-id, opencode `ses_`, agy `--log-file`
@@ -3211,6 +3343,8 @@ plus the **generic-fallback `*)` branch** for an unknown CLI. An inline
 - [INV-14](#inv-14-vendored-scripts-resolve-siblings-via-bash_source-not-cwd) / [INV-65](#inv-65-entry-scripts-resolve-conf-from-the-unresolved-path-and-libs-from-the-real-skill-tree-path-two-dir-resolution) — the BASH_SOURCE / skill-tree resolution the shims and adapter sourcing use.
 
 ## INV-76: a transient smoke `no-response` (rc≠0, no signal) retries once, then drops UNAVAILABLE — never a single-shot gate FAIL
+
+_Triage (issue #236): [machine-checked: tests/unit/test-lib-agent-smoke.sh]_
 
 > **Note**: authored as INV-75 (next free number when `main` was at INV-74), then
 > renumbered to **INV-76** at rebase: PR #259 (per-CLI adapters, issue #232) landed
@@ -3342,6 +3476,8 @@ Design: `docs/designs/smoke-no-response-retry.md`. Test plan:
 - [INV-40](#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback) / [INV-58](#inv-58-agy-quotaauth-unavailable-drops-surface-a-distinct-reason-fan-out--reviewed-head-model-labels-are-per-agent) / [INV-61](#inv-61-kiro-authlogin-failure-unavailable-drops-surface-a-distinct-reason-not-a-bare-opaque-unavailable) — the environmental → drop tolerance this aligns with.
 
 ## INV-77: CI is two tiers — hermetic always-on + credential-free; live agent-smoke is self-hosted, label-gated, and advisory
+
+_Triage (issue #236): [machine-checked: tests/unit/test-ci-two-tier-lanes.sh]_
 
 > **Note**: authored as INV-75 (next free number when `main` was at INV-74), then
 > renumbered to **INV-77** across two rebases: PR #259 (per-CLI adapters, issue #232)
@@ -3477,6 +3613,8 @@ not).
 - [INV-74](#inv-74-adapter-conformance-is-regression-pinned-by-a-hermetic-fixture-manifest-runner) — the hermetic conformance suite that anchors Tier 1.
 
 ## INV-78: review verdicts resolve from a typed artifact FILE first; comment scraping is an explicitly-logged fallback; a malformed artifact is loud, never a silent absent
+
+_Triage (issue #236): [machine-checked: tests/unit/test-verdict-artifact.sh]_
 
 > **Note**: authored as INV-76 (next free number when `main` was at INV-75), then
 > renumbered to **INV-78** across two rebases: PR #258 (smoke no-response retry,
@@ -3681,6 +3819,8 @@ agent DID deliver output, it was just unparseable.)
 
 ## INV-79: in app mode the agent process gets ONLY a scoped token; the wrapper keeps full-write and is the sole approve/merge/PR-create path
 
+_Triage (issue #236): [machine-checked: tests/unit/test-token-split-234.sh]_
+
 > **Note**: authored as INV-76, renumbered to **INV-79** across three rebases —
 > PR #258 (smoke `no-response`, #257) took INV-76, PR #256 (two-tier CI, #238) took
 > INV-77, and PR #262 (verdict-artifact channel, #233) took INV-78 on `main` before
@@ -3797,6 +3937,32 @@ an agent that runs `gh pr review --approve` / `gh pr merge` gets a deterministic
   that the review wrapper's PASS branch wires the mandatory-bot-review hard gate
   (`missing_bot_reviews` → `pending-review` / `pending-dev`).
 
+## INV-80: the label state machine is a CI-checked executable spec — the mermaid diagram is generated, undeclared label transitions fail CI
+
+_Triage (issue #236): [machine-checked: tests/unit/test-spec-drift.sh]_
+
+> **Note**: authored as INV-78 (next free number when this PR was drafted), then
+> renumbered to **INV-80** across two rebases: PR #262 (verdict-artifact channel,
+> issue #233) landed INV-78 on `main`, then PR #261 (two-token split, issue #234)
+> landed INV-79 — so this section took the next free number per the standard
+> duplicate-heading / broken-anchor avoidance (see "Adding a new invariant"). The
+> number is disambiguated by issue #236.
+
+**Rule**: The issue-label state machine is encoded as data in [`transitions.json`](transitions.json) (schema: [`schemas/transitions.schema.json`](schemas/transitions.schema.json)), and three CI checks (the `spec-drift` job, `scripts/check-spec-drift.sh`) keep it in lockstep with the dispatcher/wrapper code:
+
+1. **Generated diagram** — the mermaid block in [`state-machine.md`](state-machine.md) is generated FROM `transitions.json` by `scripts/gen-state-machine.sh` (marker-delimited region). Hand-editing inside the markers, or editing the table without regenerating, fails CI (`gen-state-machine.sh --check` diffs and exits non-zero).
+2. **Guard/action mapping** — every `guard`/`action` token in `transitions.json` maps (via [`spec-guard-map.json`](spec-guard-map.json)) to a named function or greppable predicate that MUST still resolve in `lib-dispatch.sh` / the wrappers. A token with no mapping, or a mapped anchor that no longer resolves, fails CI naming the pair. (The map keys on function names + grep-stable literals, NEVER line numbers.)
+3. **Label-write-site completeness** — five sub-checks (plus a variable-write ban) over every `label_swap` arg + every `--add/--remove-label` literal in the four pipeline files. **C.1 vocabulary**: each label literal written must appear in `transitions.json` as a state or `actions[]` entry (catches a brand-new label, e.g. a typo). **C.2 movement**: each write *site*'s `(removes→adds)` movement — the set it removes plus the set it adds, normalized as `<sorted-removes>|<sorted-adds>` — must equal the `(remove-label:…, add-label:…)` actions of some transition (catches a write that reuses *known* labels in an **undeclared combination**, e.g. `label_swap "$n" "approved" "stalled"`). **C.3 code-site coverage**: C.2 is movement-*set* membership, so two transitions sharing one movement make a row's deletion invisible. [`spec-codesite-map.json`](spec-codesite-map.json)'s `code_sites` pins every **code-bearing** transition (actor ∉ {maintainer, github}) to a grep-stable anchor, checked both ways — *forward* (anchor still greps) and *reverse* (every key is a live transition id); deleting `dispatch-pending-dev-pr-exists` (movement shared with `dispatch-review-aware-reroute-review`) orphans its entry → **CI red**. **C.4 discovered-site reconciliation**: a NEW site whose movement already exists elsewhere passes C.2/C.3, so C.4 requires the count of literal write sites per `(file, movement)` to equal the count of `spec-codesite-map.json`'s `sites[]` manifest entries — an added/removed/duplicate site drifts the count → **CI red**. **C.5 per-site anchor adjacency**: C.4 is a *count*, so RELOCATING a write within a file (same movement, count unchanged) is invisible; each `sites[]` entry's `anchor` must therefore grep **exactly once** AND have a write of its `movement` within ±8 lines — moving the `label_swap "$n" "pending-dev" "pending-review"` out of `handle_pending_dev_pr_exists()` leaves its anchor with no adjacent write → **CI red**. **P1.1 variable-write ban**: a variable-valued `--add/--remove-label "$x"` is a hard **CI red** (not a NOTE) unless its enclosing function is in `variable_write_allowlist` (the `label_swap` helper + the `hygiene_strip_residual_labels` loop) — a variable write could inject an undeclared label invisibly. (C.4/C.5 counts are over CODE SITES, not rows: one site can back several rows and one row can collapse several physical paths, so the count is the stable quantity.) Together C.1+C.2+C.3+C.4+C.5 + the ban make "a PR adding (even a duplicate / shared-movement / relocated / variable) or removing a label-write site without the matching transitions.json entry fails CI" actually hold. Each fails CI with an actionable message naming the orphan label / undeclared movement / orphaned-or-unmapped transition / stale-or-ambiguous anchor / unaccounted-or-count-mismatched site / relocated write / non-allowlisted variable write.
+
+The typed inputs the guards read are enumerated in [`observation-snapshot.md`](observation-snapshot.md) (schema: [`schemas/observation-snapshot.schema.json`](schemas/observation-snapshot.schema.json)), including the SSM-indeterminate third liveness state ([INV-30]).
+
+**Why**: "Docs are authoritative" had no enforcement — the hand-drawn diagram and the transition table drifted from ~11K lines of bash silently, and every drift is a future incident (issue #236). This is the **CI-checker half** of the executable-spec pillar; the runtime reconciler (single-writer enforcement that refuses undeclared transitions at dispatch time) is the gated/stop-ruled phase and would consume the same `transitions.json` unchanged. This invariant changes ZERO dispatch behavior — it documents and gates the existing machine.
+
+**Producer**: `transitions.json`, `spec-guard-map.json`, `spec-codesite-map.json`, `gen-state-machine.sh`, `check-spec-drift.sh` (all additive; no runtime lib is modified).
+**Consumer**: the `spec-drift` CI job (`.github/workflows/ci.yml`); `state-machine.md`'s generated region.
+**Status**: **ENFORCED** in this PR (closes #236). The runtime reconciler remains out of scope (gated phase).
+**Test**: `tests/unit/test-spec-drift.sh` (generator idempotence, bidirectional drift injection, guard-map removal, label-write vocabulary completeness, **movement coverage** — TC-SPEC-GATE-035/036, **code-site coverage** — TC-SPEC-GATE-037 asserts deleting a transition row whose movement is shared elsewhere fails via the orphaned `spec-codesite-map.json` entry, TC-SPEC-GATE-038 a stale code-site anchor fails, TC-SPEC-GATE-039 full code-site coverage on the real repo, **discovered-site reconciliation** — TC-SPEC-GATE-042 asserts a NEW write site with an already-declared (shared) movement fails via the per-(file,movement) count, TC-SPEC-GATE-043 a count delta in an existing group fails, TC-SPEC-GATE-044 full reconciliation on the real repo, **anchor adjacency + variable-write ban** — TC-SPEC-GATE-045 asserts a non-allowlisted variable-valued write fails (P1.1), TC-SPEC-GATE-046 asserts relocating a write within a file (same movement) fails via C.5 anchor adjacency, TC-SPEC-GATE-047 full per-site anchor adjacency on the real repo, **equals-flag form** — TC-SPEC-GATE-050 asserts a variable-valued `--add-label=$x` write fails (P1.1 `=` form), TC-SPEC-GATE-052 asserts a literal `--add-label="frobnicate"` write fails the C.1/C.2 literal scanners (the `[ \t=]+` separator covers both the whitespace and `=` write forms), **continuation + single-quote forms** — TC-SPEC-GATE-053 asserts a variable write split across backslash-continuation lines fails (P1.1 logical-line join), TC-SPEC-GATE-054 asserts a single-quoted literal `--add-label 'frobnicate'` write fails the literal scanners (the `["']` quote class covers both quote styles), **digit-bearing label** — TC-SPEC-GATE-056 asserts a literal `--add-label "v2-blocked"` write fails (the `[a-z][a-z0-9-]*` char class matches `transitions.schema.json` exactly, so a digit/hyphen label is not silently skipped), **unquoted (bare-word) form** — TC-SPEC-GATE-057 asserts an UNQUOTED literal `--add-label frobnicate` write fails (the form-2 regex accepts a quoted-OR-bare label alternative; a bare label can never match a `$`-prefixed variable write, so the P1.1 ban still owns those — TC-SPEC-GATE-045); together these make every write form — whitespace/`=` separator, **no quote / single / double quote**, single-line/continuation, literal/variable, and any schema-legal label spelling — fail the gate, none bypasses — schema golden+negatives, triage-tag coverage).
+
 ## Adding a new invariant
 
 When fixing a pipeline bug, after locating the bug on the state machine + flow docs:
@@ -3807,8 +3973,20 @@ When fixing a pipeline bug, after locating the bug on the state machine + flow d
 4. Identify producer and consumer — these are the actors whose behavior the invariant constrains.
 5. Add a TODO for the test, even if you don't write the test in the same PR. (Tests for these invariants should live in `tests/unit/` and be enumerated in the CI shellcheck job.)
 6. Reference the invariant by ID from the flow doc(s) where it's relevant.
+7. Add the one-line triage tag (see [Triage tags](#triage-tags) below) directly under the heading.
 
 Once `INV-NN` exists, prefer "violates [INV-NN](#inv-NN-...)" in commit messages and PR descriptions over re-explaining the rule.
+
+## Triage tags
+
+Every `## INV-NN:` heading carries a one-line `_Triage (issue #236): [<tag>]_`
+annotation directly beneath it (issue #236). The tag is one of:
+
+- **`[machine-checked: <test/CI>]`** — a test or CI job mechanically enforces this invariant today. The cited file is the enforcement of record.
+- **`[design-rationale]`** — a real rule with no current machine check (the `**Test**:` line is a `TODO`, or enforcement is human-review-only / gated). A candidate for a future regression test.
+- **`[superseded]`** — the invariant's mechanism was removed/replaced (the `**Status**:` line says SUPERSEDED); the text is retained for historical context only.
+
+This is triage metadata, not a content rewrite — the full machine-checked-vs-rationale migration (writing the missing regression tests) is later, gated work. New INV entries MUST carry a tag (step 7 above); `tests/unit/test-spec-drift.sh` asserts every heading is tagged and the tag is one of the three forms.
 
 ## Cross-references
 

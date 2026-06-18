@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "Minimal valid transitions instance (golden) — one dispatcher transition.",
+  "states": [
+    { "id": "autonomous", "label": "autonomous", "kind": "active", "mermaid": "autonomous" },
+    { "id": "in_progress", "label": "in-progress", "kind": "active", "mermaid": "in_progress" }
+  ],
+  "label_vocabulary": ["autonomous", "in-progress"],
+  "transitions": [
+    {
+      "id": "dispatch-new",
+      "from": "autonomous",
+      "to": "in_progress",
+      "event": "dispatcher-step2-scan-new",
+      "actor": "dispatcher",
+      "guards": ["deps-resolved"],
+      "actions": ["add-label:in-progress", "comment:dispatching-dev"],
+      "mermaid": "autonomous --> in_progress: Dispatcher Step 2 scan-new"
+    }
+  ],
+  "diagram": { "header": "stateDiagram-v2" }
+}

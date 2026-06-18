@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "description": "Golden — a review FAIL transition with a request-changes action and inv_refs.",
+  "states": [
+    { "id": "reviewing", "label": "reviewing", "kind": "active", "mermaid": "reviewing" },
+    { "id": "pending_dev", "label": "pending-dev", "kind": "active", "mermaid": "pending_dev" }
+  ],
+  "label_vocabulary": ["reviewing", "pending-dev"],
+  "transitions": [
+    {
+      "id": "review-fail-substantive",
+      "from": "reviewing",
+      "to": "pending_dev",
+      "event": "review-verdict-fail",
+      "actor": "review-wrapper",
+      "guards": ["verdict-fail", "pr-still-open"],
+      "actions": ["remove-label:reviewing", "add-label:pending-dev", "request-changes", "comment:review-findings"],
+      "mermaid": "reviewing --> pending_dev: Review wrapper verdict FAIL",
+      "inv_refs": ["INV-20", "INV-52"]
+    }
+  ],
+  "diagram": { "header": "stateDiagram-v2" }
+}

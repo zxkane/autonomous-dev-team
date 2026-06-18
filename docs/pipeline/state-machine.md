@@ -19,43 +19,53 @@ The five **active** states are `autonomous` (no other state label), `in-progress
 
 ## State diagram
 
+> **GENERATED** — the mermaid block below is generated from
+> [`transitions.json`](transitions.json) by
+> [`scripts/gen-state-machine.sh`](../../skills/autonomous-dispatcher/scripts/gen-state-machine.sh).
+> **Do not hand-edit between the markers.** To change the diagram, edit
+> `transitions.json` and run `scripts/gen-state-machine.sh`; the `spec-drift` CI
+> job fails on any drift between the table and this region (issue #236).
+
+<!-- BEGIN GENERATED: state-machine — edit docs/pipeline/transitions.json + run scripts/gen-state-machine.sh; do NOT hand-edit between the markers -->
 ```mermaid
 stateDiagram-v2
-    [*] --> autonomous: maintainer applies autonomous label
 
-    autonomous --> in_progress: Dispatcher Step 2 scan-new (deps resolved)
-
-    in_progress --> pending_review: Dev wrapper trap (exit 0, PR exists)
-    in_progress --> pending_dev: Dev wrapper trap (exit 0 no PR, or exit non-zero)
-    in_progress --> pending_review: Dispatcher Step 5a (ALIVE+PR ready, idle 5min, CI green) and wrapper trap converge (INV-15 PR-6)
-    in_progress --> pending_dev: Step 5a SIGTERM with no PR (operator kill / orphan)
-    in_progress --> pending_review: Dispatcher Step 5b (DEAD+PR, new commits)
-    in_progress --> pending_dev: Dispatcher Step 5b (DEAD+PR, no new commits)
-    in_progress --> pending_dev: Dispatcher Step 5b (DEAD, no PR)
-
-    pending_review --> reviewing: Dispatcher Step 3 scan-pending-review
-
-    reviewing --> approved: Review wrapper verdict PASS (merged or manual)
-    reviewing --> pending_dev: Review wrapper verdict FAIL
-    reviewing --> pending_dev: Review wrapper PASS but auto-merge failed (INV-33)
-    reviewing --> pending_dev: Review wrapper PASS but PR CONFLICTING (mergeable gate, INV-44)
-    reviewing --> pending_dev: Review wrapper PASS but mergeable UNKNOWN (mergeable gate, INV-44)
-    reviewing --> pending_dev: E2E hard gate FAIL — no review fan-out (INV-46, only if PR still OPEN per INV-54)
-    reviewing --> pending_dev: E2E evidence missing after lane — re-queue (INV-46, only if PR still OPEN per INV-54)
-    reviewing --> pending_review: PASS but a mandatory REVIEW_BOTS review is still missing — re-queue for re-review (INV-79, scoped mode; bounded by BOT_REVIEW_WAIT_MAX)
-    reviewing --> pending_dev: Mandatory bot review absent after BOT_REVIEW_WAIT_MAX waits — substantive FAIL (INV-79)
-    reviewing --> pending_dev: Review wrapper trap (crash exit non-zero)
-    reviewing --> pending_dev: Dispatcher Step 5b (DEAD reviewing)
-
-    pending_dev --> in_progress: Dispatcher Step 4 scan-pending-dev (retries below MAX)
-    pending_dev --> in_progress: Step 4 review-aware (completed session + substantive review failure → dev-new) [INV-35]
-    pending_dev --> pending_review: Step 4 review-aware (completed session + non-substantive review failure, under retry cap) [INV-35]
-    pending_dev --> stalled: Dispatcher Step 4 (retries at MAX)
-    pending_dev --> stalled: Step 4 review-aware (non-substantive review-retry cap reached) [INV-35]
-
-    stalled --> pending_dev: Maintainer removes stalled label (retry counter resets)
-
-    approved --> [*]: PR merged (auto or manual)
+[*] --> autonomous: maintainer applies autonomous label
+autonomous --> in_progress: Dispatcher Step 2 scan-new (deps resolved)
+in_progress --> pending_review: Dev wrapper trap (exit 0, PR exists)
+in_progress --> pending_dev: Dev wrapper trap (exit 0 no PR, or exit non-zero)
+in_progress --> pending_review: Dispatcher Step 5a (ALIVE+PR ready, idle 5min, CI green) and wrapper trap converge (INV-15 PR-6)
+in_progress --> pending_dev: Step 5a SIGTERM with no PR (operator kill / orphan)
+in_progress --> pending_review: Dispatcher Step 5b (DEAD+PR, new commits)
+in_progress --> pending_dev: Dispatcher Step 5b (DEAD+PR, no new commits)
+in_progress --> pending_dev: Dispatcher Step 5b (DEAD, no PR)
+pending_review --> reviewing: Dispatcher Step 3 scan-pending-review
+reviewing --> approved: Review wrapper verdict PASS (merged or manual)
+reviewing --> pending_dev: Review wrapper verdict FAIL
+reviewing --> pending_dev: Review wrapper PASS but auto-merge failed (INV-33)
+reviewing --> pending_dev: Review wrapper PASS but PR CONFLICTING (mergeable gate, INV-44)
+reviewing --> pending_dev: Review wrapper PASS but mergeable UNKNOWN (mergeable gate, INV-44)
+reviewing --> pending_dev: E2E hard gate FAIL — no review fan-out (INV-46, only if PR still OPEN per INV-54)
+reviewing --> pending_dev: E2E evidence missing after lane — re-queue (INV-46, only if PR still OPEN per INV-54)
+reviewing --> pending_dev: Review wrapper trap (crash exit non-zero)
+reviewing --> pending_dev: Dispatcher Step 5b (DEAD reviewing)
+pending_dev --> in_progress: Dispatcher Step 4 scan-pending-dev (retries below MAX)
+pending_dev --> in_progress: Step 4 review-aware (completed session + substantive review failure → dev-new) [INV-35]
+pending_dev --> pending_review: Step 4 review-aware (completed session + non-substantive review failure, under retry cap) [INV-35]
+pending_dev --> pending_review: Step 4 PR-exists short-circuit (a PR already references this issue)
+pending_dev --> stalled: Dispatcher Step 4 (retries at MAX)
+pending_dev --> stalled: Step 4 review-aware (non-substantive review-retry cap reached) [INV-35]
+reviewing --> approved: Review PASS + no-auto-close (PR open, awaiting manual merge)
+reviewing --> approved: Review PASS but gh pr review --approve failed (manual approval needed)
+reviewing --> pending_dev: Review found no PR (all 3 discovery methods failed)
+reviewing --> reviewing: Concurrent merge — PR no longer OPEN, silent −reviewing (INV-54)
+reviewing --> reviewing: Pre-fan-out smoke FAIL (config error) — stays reviewing, self-heals (INV-64)
+reviewing --> pending_review: PASS but a mandatory REVIEW_BOTS review is still missing — re-queue for re-review (INV-79, scoped mode; bounded by BOT_REVIEW_WAIT_MAX)
+reviewing --> pending_dev: Mandatory bot review absent after BOT_REVIEW_WAIT_MAX waits — substantive FAIL (INV-79)
+approved --> approved: Step 0 hygiene strips transitional residue (INV-25)
+stalled --> stalled: Step 0 hygiene strips transitional residue (INV-25)
+stalled --> autonomous: Maintainer removes stalled label (autonomous retained → re-enters via Step 2; retry counter resets, INV-05)
+approved --> [*]: PR merged (auto or manual)
 
     note right of approved
         Sticky terminal state (INV-25):
@@ -70,8 +80,11 @@ stateDiagram-v2
         stripped at tick start.
     end note
 ```
+<!-- END GENERATED: state-machine -->
 
-(Edges are condensed; see the transition table below for preconditions and side effects.)
+Each `X --> Y: label` edge corresponds 1:1 to a `transitions[]` entry in
+`transitions.json` (the `mermaid` field). The table below adds the preconditions
+(guards) and side effects (actions) the diagram omits.
 
 ## Transition table
 
@@ -99,8 +112,6 @@ Each row is one legal transition. "Actor" identifies who writes the labels. "Pre
 | `reviewing` | `−reviewing +approved` (manual approval needed) | PR-approval API call failed | Review wrapper | Verdict matched but `gh pr review --approve` returned non-zero | "Review PASSED but formal PR approval failed... please approve and merge manually." |
 | `reviewing` | `−reviewing` (no add) | Concurrent review / out-of-band merge — PR no longer OPEN, at the **PASS-chain** gate ([INV-54](invariants.md#inv-54-the-pr-still-open-guard-gates-all-pass-chain-exits-not-just-pass)) | Review wrapper (hoisted PR-open guard) | Aggregate PASS but `gh pr view --json state` ≠ OPEN; `_pr_open_gate` → `skip`. Runs at the TOP of the `PASSED_VERDICT=true` chain, so it short-circuits the mergeable gate's `block-substantive`/`block-nonsubstantive` branches AND the PASS approve/merge path — none of them flip `+pending-dev` once the PR is merged/closed | (none — silent skip; another review/merge wrote `approved` or merged first) |
 | `reviewing` | `−reviewing` (no add) | Concurrent review / out-of-band merge — PR no longer OPEN, at the **E2E hard gate** ([INV-54](invariants.md#inv-54-the-pr-still-open-guard-gates-all-pass-chain-exits-not-just-pass) extension, #195) | Review wrapper (E2E-gate PR-open guard) | E2E gate is `fail`/`block-nonsubstantive` but `gh pr view --json state` ≠ OPEN; `_pr_open_gate` → `skip`. Runs after `_classify_e2e_gate`, before the E2E block cascade — so a PR merged WHILE the E2E lane ran is not flipped `+pending-dev` | (none — silent skip; another review/merge wrote `approved` or merged first) |
-| `reviewing` | `−reviewing +pending-review` | PASS but a mandatory `REVIEW_BOTS` review is still missing ([INV-79](invariants.md#inv-79-in-app-mode-the-agent-process-gets-only-a-scoped-token-the-wrapper-keeps-full-write-and-is-the-sole-approvemergepr-create-path), scoped mode) | Review wrapper (mandatory-bot-review gate) | `PASSED_VERDICT=true`, PR still OPEN, but `missing_bot_reviews` is non-empty AND prior wait count < `BOT_REVIEW_WAIT_MAX` (3). The agent's bot trigger is brokered post-run (`drain_agent_bot_triggers`); routing to **pending-review** (NOT pending-dev — no new commits to make, the #106 stale-verdict guard would stall) lets the next tick re-review once the bot review is present | "Review held — ... mandatory configured review bot(s) [...] have not posted a review yet ..." (`failed-non-substantive` cause `awaiting-bot-review`; SHA-bound `bot-review-wait` marker bounds the loop) |
-| `reviewing` | `−reviewing +pending-dev` | Mandatory bot review still absent after `BOT_REVIEW_WAIT_MAX` waits ([INV-79](invariants.md#inv-79-in-app-mode-the-agent-process-gets-only-a-scoped-token-the-wrapper-keeps-full-write-and-is-the-sole-approvemergepr-create-path)) | Review wrapper (mandatory-bot-review gate) | Same as above but the SHA-bound wait count has reached `BOT_REVIEW_WAIT_MAX` — the bot is misconfigured/down. Routes to pending-dev as a substantive FAIL so a maintainer investigates | "Review findings: ... [BLOCKING] Mandatory review bot(s) [...] did not review ... after N attempt(s)" (`failed-substantive`); wrapper also submits `gh pr review --request-changes` ([INV-52](invariants.md#inv-52-the-review-wrapper-owns-the-github-native-pr-reviewmerge-action-the-agent-posts-verdicts-only)) |
 | `reviewing` | `−reviewing +pending-dev` | Review verdict FAIL (substantive — agent posted findings) | Review wrapper | Verdict comment is "Review findings:" matching session-id (`failed-substantive`) | (verdict comment serves as postcondition); wrapper also submits `gh pr review --request-changes` → `reviewDecision=CHANGES_REQUESTED` ([INV-52](invariants.md#inv-52-the-review-wrapper-owns-the-github-native-pr-reviewmerge-action-the-agent-posts-verdicts-only), best-effort). A crash with NO verdict (`failed-non-substantive`) does NOT request changes. |
 | `reviewing` | `−reviewing +pending-dev` | Review wrapper crash | Review wrapper trap | Wrapper exit ≠ 0 AND `RESULT_PARSED=false` | "Review process crashed (exit code: N). Moving back to development for retry." |
 | `reviewing` | `reviewing` (NO change — stays reviewing) | Pre-fan-out agent-smoke FAIL — config error ([INV-64](invariants.md#inv-64-the-review-wrapper-smokes-every-fan-out-member-before-the-fan-out-phase-a5-fail-aborts-the-review-unavailable-drops-the-member-pass-proceeds)) | Review wrapper (Phase A.5) | `REVIEW_SMOKE_ENABLED=true` and `_classify_smoke_gate`→`fail`; wrapper sets `RESULT_PARSED=true` (so the crash trap does NOT flip `+pending-dev`) and exits ≠ 0 | "Review aborted: pre-fan-out agent smoke FAILED ... operator-side configuration/launch error, not a PR defect ... stays `reviewing`" (`failed-non-substantive` cause `smoke-config-error`). Self-heals: the dispatcher re-runs review next tick once the config is fixed. NOT a label transition — distinct from the crash trap (which fires only when `RESULT_PARSED=false`). |
@@ -111,7 +122,7 @@ Each row is one legal transition. "Actor" identifies who writes the labels. "Pre
 | `pending-dev` | `−pending-dev +pending-review` | Step 4 review-aware: prior session `end_turn\|completed` + non-substantive review-failure verdict, under `REVIEW_RETRY_LIMIT` ([INV-35](invariants.md#inv-35-review-aware-resume-routing-for-completed-sessions)) | Dispatcher | concurrency below cap; non-substantive flip count for this session < `REVIEW_RETRY_LIMIT` (default 2) | `<!-- review-aware-flip:non-substantive cause=<x> -->` marker + "Re-routing to review (last review failed for non-substantive reason: <x>)." |
 | `pending-dev` | `−pending-dev +stalled` | Dispatcher Step 4 (retry exhausted) | Dispatcher | retry count ≥ `MAX_RETRIES` (after stalled-cutoff filtering) | "Marking as stalled" comment with @owner mention |
 | `pending-dev` | `−pending-dev +stalled` | Step 4 review-aware: non-substantive review-retry cap reached ([INV-35](invariants.md#inv-35-review-aware-resume-routing-for-completed-sessions)) | Dispatcher | non-substantive flip count for this session ≥ `REVIEW_RETRY_LIMIT` | "Marking as stalled — review failed N times for non-substantive reasons" with @owner mention |
-| `stalled` | `−stalled` (back to `pending-dev`) | Maintainer removes label | Maintainer | — | — |
+| `stalled` | `−stalled` (issue is left `autonomous`-only → re-enters via Step 2 `dispatch-new`) | Maintainer removes label | Maintainer | — | — |
 
 > **Note on `+approved`:** the auto-merge-success path also removes `autonomous` so the issue is no longer eligible for re-dispatch (and GitHub auto-closes the issue via the PR's `Closes #N` keyword — the wrapper itself does not call `gh issue close`, see [INV-33](invariants.md#inv-33-review-wrapper-must-not-close-the-linked-issue)). The `no-auto-close` and approval-failure paths keep `autonomous` (the issue is not auto-closed; manual operator intervention completes the flow). The auto-merge-**failure** path is *not* in the `+approved` group: it transitions to `+pending-dev` with `autonomous` retained, and the dispatcher Step 4 re-dispatches dev to rebase onto main.
 
