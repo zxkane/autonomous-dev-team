@@ -389,7 +389,12 @@ ONCE and classifies the §4.3 `verdict.state`:
   double-posts on the pure comment-channel path, but always lands a
   `Review PASSED`/`Review findings:` comment when the artifact is the only channel
   (replacing the old per-agent breadcrumb re-post that missed reaped-before-post
-  agents and could emit contradictory per-agent comments).
+  agents and could emit contradictory per-agent comments). In a MIXED fleet where
+  one agent resolves a PASS artifact and another times out (rc 124/137 → deciding
+  FAIL veto), the timeout-veto blocking finding is folded into `LATEST_COMMENT`
+  unconditionally (round-6) so the aggregate comment states the blocking timeout
+  reason rather than just the PASS body; the standalone INV-48 timeout comment is
+  skipped when the aggregate carries it.
 - **`malformed`** (file present, schema-fail) → surface a LOUD operator error
   envelope (`VERDICT_ARTIFACT_MALFORMED`, #231) naming the agent + the schema
   error, and treat the artifact as **absent for the vote** (Clause V1 — never a

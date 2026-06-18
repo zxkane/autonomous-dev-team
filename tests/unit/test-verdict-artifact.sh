@@ -370,6 +370,18 @@ assert_grep "TC-VERDICT-ARTIFACT-W23 per-run artifact dir is cleaned up (rm -rf 
   'rm -rf "\$_art_run_dir"' "$WRAPPER"
 assert_grep "TC-VERDICT-ARTIFACT-W23b cleanup only removes a runs/ leaf (defensive against a misresolved root)" \
   '_art_run_dir" == \*/runs/\*' "$WRAPPER"
+# [P1] (#233 round-6): the timeout-veto finding is FOLDED into LATEST_COMMENT
+# UNCONDITIONALLY (not only when empty), so the newest aggregate comment always
+# states the blocking timeout reason in a mixed fleet; and the standalone INV-48
+# timeout comment is SKIPPED when the aggregate will carry it (no duplicate).
+assert_grep "TC-VERDICT-ARTIFACT-W24 timeout finding folded into LATEST_COMMENT unconditionally (not only when empty)" \
+  'if \[\[ -n "\$_timed_out_agents" \]\]; then[[:space:]]*$' "$WRAPPER"
+assert_grep "TC-VERDICT-ARTIFACT-W24b LATEST_COMMENT appends the shared timeout-veto finding builder (+=)" \
+  'LATEST_COMMENT\+="\$\(_timeout_veto_finding\)"' "$WRAPPER"
+assert_grep "TC-VERDICT-ARTIFACT-W24c standalone INV-48 timeout comment is skipped when the aggregate carries it" \
+  '_timed_out_agents" && "\$_any_deciding_artifact" != "true"' "$WRAPPER"
+assert_grep "TC-VERDICT-ARTIFACT-W24d the timeout-veto finding is a SINGLE shared builder (no verbatim duplication)" \
+  '_timeout_veto_finding\(\) \{' "$WRAPPER"
 
 # Render-format pins (machine consumers unchanged — these greps must still hold).
 assert_grep "TC-VERDICT-ARTIFACT-W10 dispatcher trailer still emitted (emit_verdict_trailer passed)" \
@@ -506,6 +518,33 @@ assert_eq "TC-VERDICT-ARTIFACT-043a rendered PASS body → _classify_verdict_bod
 run_fleet "codex:verdict-artifact.golden.fail.json:"
 assert_eq "TC-VERDICT-ARTIFACT-043b rendered FAIL body → _classify_verdict_body=fail" \
   "fail" "$(_classify_verdict_body "${AGENT_VERDICT_BODIES[0]}")"
+
+# TC-050 ([P1], #233 round-6): MIXED fleet — one agent resolves a PASS artifact,
+# another times out (rc 124/137 → deciding FAIL veto). The aggregate is `fail`, and
+# the wrapper-rendered aggregate comment (LATEST_COMMENT) MUST state the blocking
+# timeout reason — NOT just the artifact PASS body. Reproduce the wrapper's
+# LATEST_COMMENT synthesis + the round-6 unconditional timeout fold.
+run_fleet "claude:verdict-artifact.golden.pass.json:" "agy:none:"   # agy: no artifact, no comment
+# Force agy to a timeout veto (rc 124 → _classify_noverdict_agent → timed-out).
+AGENT_LAUNCH_RC["${AGENT_SESSION_IDS[1]}"]=124
+AGENT_VERDICTS[1]="$(_classify_noverdict_agent 124)"   # timed-out
+_TO_AGENTS=""; for _ti in "${!AGENT_NAMES[@]}"; do [[ "${AGENT_VERDICTS[$_ti]}" == "timed-out" ]] && _TO_AGENTS+="${AGENT_NAMES[$_ti]} "; done
+_AGG=$(_aggregate_review_verdicts "${AGENT_VERDICTS[@]}")
+assert_eq "TC-VERDICT-ARTIFACT-050a mixed PASS-artifact + timed-out → aggregate fail (veto)" "fail" "$_AGG"
+# Synthesize LATEST_COMMENT exactly as the wrapper does: concat bodies, THEN fold
+# the timeout finding UNCONDITIONALLY (the round-6 fix — not only when empty).
+_LC=""
+for _bi in "${!AGENT_NAMES[@]}"; do [[ -n "${AGENT_VERDICT_BODIES[$_bi]}" ]] && _LC+="${AGENT_VERDICT_BODIES[$_bi]}"$'\n\n'; done
+if [[ -n "$_TO_AGENTS" ]]; then
+  _LC+="Review findings:"$'\n\n'"Findings->Decision Gate: 1 blocking finding(s) -- FAIL."$'\n\n'"1. **[BLOCKING] Review agent timed out** — agent(s) \`${_TO_AGENTS%% }\` were killed by the review wall-clock cap"$'\n\n'
+fi
+assert_grep_str "TC-VERDICT-ARTIFACT-050b LATEST_COMMENT still carries the artifact PASS body" \
+  "$_LC" "Review PASSED"
+assert_grep_str "TC-VERDICT-ARTIFACT-050c LATEST_COMMENT ALSO states the blocking timeout reason (not omitted)" \
+  "$_LC" "[BLOCKING] Review agent timed out"
+# The folded comment classifies FAIL-first (the blocking timeout makes it a FAIL).
+assert_eq "TC-VERDICT-ARTIFACT-050d folded LATEST_COMMENT classifies as fail (FAIL-first, blocking timeout)" \
+  "fail" "$(_classify_verdict_body "$_LC")"
 
 # TC-017 — artifact wins over a conflicting comment.
 run_fleet "claude:verdict-artifact.golden.pass.json:$FAIL_BODY"

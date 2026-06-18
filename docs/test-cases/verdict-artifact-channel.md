@@ -107,6 +107,13 @@ bare CI.
 | TC-VERDICT-ARTIFACT-W18/W19 | ([P1]#2) observe loop uses `_all_artifacts_landed` (not bare wait); early-exit gated on ALL artifacts landed (INV-48 rc preserved) | source-of-truth greps |
 | TC-VERDICT-ARTIFACT-W20/W21/W22 | ([P1]#2) observe loop freezes first-landed bytes (`_freeze_landed_artifact`/`_freeze_pass`); resolution reads the frozen snapshot (`_art_read`); a post-land duplicate is logged | source-of-truth greps |
 
+## Unit — timeout veto in the aggregate body ([P1] on PR #262, round-6)
+
+| ID | Scenario | Expected |
+|---|---|---|
+| TC-VERDICT-ARTIFACT-050 | MIXED fleet: one agent resolves a PASS artifact, another times out (rc 124/137 → veto) | aggregate `fail`; `LATEST_COMMENT` carries BOTH the PASS body AND the `[BLOCKING] Review agent timed out` finding; classifies `fail` (FAIL-first) |
+| TC-VERDICT-ARTIFACT-W24/W24b/W24c | timeout finding folded into `LATEST_COMMENT` unconditionally (not only when empty); `LATEST_COMMENT +=` the blocking timeout finding; standalone INV-48 comment skipped when the aggregate carries it (`_any_deciding_artifact`) | source-of-truth greps |
+
 ## E2E — conformance + stub-fleet
 
 | ID | Scenario | Expected |

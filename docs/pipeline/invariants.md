@@ -3593,6 +3593,17 @@ authoritative aggregate. It guarantees a comment when **the artifact is the only
 successful channel**, and the single aggregate is the newest `Review findings:` /
 `Review PASSED` comment so dev-resume's INV-57 newest-wins semantics consume it.
 
+**Timeout-veto folded into the aggregate (round-6, [P1]).** Because the aggregate
+renders `LATEST_COMMENT`, an INV-48 timeout veto MUST be present in that body —
+otherwise a MIXED fleet (one agent resolves a PASS artifact, another times out →
+aggregate FAIL by the veto) would render a newest comment showing only the PASS
+body, hiding the blocking timeout reason. So the timeout-veto blocking finding is
+folded into `LATEST_COMMENT` **unconditionally** when any agent timed out (not only
+when `LATEST_COMMENT` is empty), and the standalone INV-48 timeout comment is
+SKIPPED when the aggregate will carry it (`_any_deciding_artifact` true) so there is
+no duplicate. The newest wrapper-rendered comment therefore always states why the
+run failed.
+
 **Live artifact-landing completion signal (#233 review round-4, [P1] #2)**: the
 fan-out join is a bounded OBSERVE loop, not a blocking `wait`. It breaks on EITHER
 (a) every collected `_fanout_pids` PID exited (`kill -0` — the backstop, which
@@ -3652,7 +3663,9 @@ agent DID deliver output, it was just unparseable.)
   double-prefix, LATEST_COMMENT non-empty, round-trips through
   `_classify_verdict_body`, still zero comment polls)**, **the single wrapper-owned
   AGGREGATE verdict comment gated on a deciding artifact source (W16, W17a-c — the
-  per-agent breadcrumb re-post is removed)**, **the `_all_artifacts_landed`
+  per-agent breadcrumb re-post is removed)**, **the timeout-veto finding folded
+  into the aggregate body in a mixed fleet so the newest comment always states the
+  failure (TC-050, W24a-c)**, **the `_all_artifacts_landed`
   completion-signal helper + the ALL-artifacts-landed early-exit gate (TC-048,
   W18-W19)**, and **the first-land freeze: `_freeze_landed_artifact` snapshots the
   first bytes, a later differing write is reported `duplicate` + logged, and the

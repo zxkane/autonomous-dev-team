@@ -2639,20 +2639,39 @@ if declare -F metrics_emit >/dev/null 2>&1; then
   done
 fi
 
+# _timeout_veto_finding — the INV-48 timeout-veto `Review findings:` body. SINGLE
+# SOURCE OF TRUTH for both the standalone post (when no deciding artifact) and the
+# folded aggregate body (#233 review round-6) — the two were verbatim-duplicated,
+# which is a desync hazard precisely because they are mutually exclusive at runtime
+# (no test ever sees both), so a wording tweak to one would silently diverge.
+# Reads `_timed_out_agents` + `AGENT_TIMEOUT` from the enclosing scope.
+_timeout_veto_finding() {
+  printf '%s' "Review findings:
+
+Findings->Decision Gate: 1 blocking finding(s) -- FAIL.
+
+1. **[BLOCKING] Review agent timed out** — agent(s) \`${_timed_out_agents%% }\` were killed by the review wall-clock cap (\`${AGENT_TIMEOUT}\`, INV-48) before posting a verdict (CLI exit 124/137). A timed-out reviewer VETOES the merge rather than being dropped from the vote. Raise \`AGENT_REVIEW_TIMEOUT\` if reviews legitimately need longer, or investigate why the agent hung (e.g. a >1h CI queue the agent watched). The PR was NOT approved."
+}
+
 # Loud timeout-veto breadcrumb (INV-48): a review agent reaped by its wall-clock
 # cap (rc 124/137) with no verdict VETOES the merge. Post ONE human-visible
 # finding so the FAIL is attributable to the timeout (not a silent drop) — this
 # also guarantees LATEST_COMMENT is non-empty below even when EVERY deciding
 # agent was a timeout (no posted bodies), so the run routes as a substantive
 # FAIL with an explanatory comment rather than the empty-comment crash branch.
+#
+# #233 review round-6: SKIP this standalone post when the wrapper-owned aggregate
+# comment will fire (`_any_deciding_artifact` true) — that aggregate now FOLDS the
+# timeout finding into its body (see LATEST_COMMENT synthesis below), so it is the
+# single newest authoritative comment and a standalone here would just duplicate
+# it. When NO deciding agent was artifact-sourced (the aggregate is skipped), this
+# standalone IS the timeout surface, so it still fires.
 if [[ -n "$_timed_out_agents" ]]; then
   log "INV-48: review agent(s) timed out (rc 124/137, no verdict) — VETO (deciding FAIL): ${_timed_out_agents%% }"
+fi
+if [[ -n "$_timed_out_agents" && "$_any_deciding_artifact" != "true" ]]; then
   gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
-    --body "Review findings:
-
-Findings->Decision Gate: 1 blocking finding(s) -- FAIL.
-
-1. **[BLOCKING] Review agent timed out** — agent(s) \`${_timed_out_agents%% }\` were killed by the review wall-clock cap (\`${AGENT_TIMEOUT}\`, INV-48) before posting a verdict (CLI exit 124/137). A timed-out reviewer VETOES the merge rather than being dropped from the vote. Raise \`AGENT_REVIEW_TIMEOUT\` if reviews legitimately need longer, or investigate why the agent hung (e.g. a >1h CI queue the agent watched). The PR was NOT approved." 2>/dev/null || true
+    --body "$(_timeout_veto_finding)" 2>/dev/null || true
 fi
 
 # LATEST_COMMENT drives (a) the Reviewed-HEAD trailer gate (post only when a
@@ -2665,13 +2684,18 @@ for _i in "${!AGENT_NAMES[@]}"; do
     LATEST_COMMENT+="${AGENT_VERDICT_BODIES[$_i]}"$'\n\n'
   fi
 done
-# INV-48: a timed-out agent posts no body, but its veto is a deciding FAIL. Mark
-# LATEST_COMMENT non-empty so this run is treated as a verdict-reaching FAIL (the
-# Reviewed-HEAD trailer is posted, and the downstream FAIL branch takes the
-# substantive path, not the empty-comment crash path). Only matters when there
-# are NO other deciding bodies (e.g. every deciding agent timed out).
-if [[ -z "$LATEST_COMMENT" && -n "$_timed_out_agents" ]]; then
-  LATEST_COMMENT="Review FAILED: agent(s) timed out (review wall-clock cap, INV-48): ${_timed_out_agents%% }"$'\n\n'
+# INV-48: a timed-out agent posts no body, but its veto is a deciding FAIL. FOLD
+# the timeout-veto finding INTO LATEST_COMMENT whenever any agent timed out —
+# ALWAYS, not only when LATEST_COMMENT is empty (#233 review round-6, [P1]). The
+# aggregate verdict comment below renders LATEST_COMMENT; in a MIXED fleet (one
+# agent resolved a PASS artifact, another timed out → aggregate FAIL via the veto)
+# the prior "append only when empty" left LATEST_COMMENT holding ONLY the PASS body,
+# so the newest wrapper-rendered comment showed a PASS body and OMITTED the blocking
+# timeout reason. Folding it in unconditionally guarantees the newest aggregate
+# `Review findings:` comment always states why the run failed. Use the SAME full
+# blocking-finding wording the standalone INV-48 comment uses (kept in sync).
+if [[ -n "$_timed_out_agents" ]]; then
+  LATEST_COMMENT+="$(_timeout_veto_finding)"$'\n\n'
 fi
 
 # [P1] #1 (#233 review round-5): post EXACTLY ONE wrapper-owned AGGREGATE verdict
