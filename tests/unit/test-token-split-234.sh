@@ -728,6 +728,41 @@ fi
 
 # ---------------------------------------------------------------------------
 echo ""
+echo "=== TC-TOKEN-SPLIT-096: the REVIEW path also brokers bot triggers under the scrub (#234 [P1] 8e87de14) ==="
+# ---------------------------------------------------------------------------
+# #234 review [P1]: the dev path brokered bot triggers but the review path still
+# told scoped review agents to run gh-as-user.sh directly (which can't auth with
+# GH_USER_PAT scrubbed). render_bot_review_section must broker in scoped mode, and
+# autonomous-review.sh must export AGENT_BOT_TRIGGER_FILE + drain it post-run.
+LIB_BOTS="$SCRIPTS/lib-review-bots.sh"
+REVIEW_SH="$SCRIPTS/autonomous-review.sh"
+# (a) scoped mode: render_bot_review_section emits the broker instruction, NOT a
+#     direct gh-as-user.sh trigger.
+scoped_sec=$(AGENT_GH_TOKEN_FILE=/tmp/x bash -c "source '$LIB_BOTS'; render_bot_review_section 'q' 42 owner/repo" 2>/dev/null)
+if printf '%s' "$scoped_sec" | grep -qF 'AGENT_BOT_TRIGGER_FILE' \
+   && printf '%s' "$scoped_sec" | grep -qiF 'Do NOT run' \
+   && ! printf '%s' "$scoped_sec" | grep -qF 'gh-as-user.sh pr comment'; then
+  assert_pass "review scoped mode: render_bot_review_section brokers the trigger (writes AGENT_BOT_TRIGGER_FILE, no direct gh-as-user.sh)"
+else
+  assert_fail "review scoped mode: render_bot_review_section did NOT broker the trigger ([P1] regression)"
+fi
+# (b) unscoped mode: keeps the direct gh-as-user.sh trigger (PAT/no-scope unchanged).
+unscoped_sec=$(env -u AGENT_GH_TOKEN_FILE bash -c "source '$LIB_BOTS'; render_bot_review_section 'q' 42 owner/repo" 2>/dev/null)
+if printf '%s' "$unscoped_sec" | grep -qF 'gh-as-user.sh pr comment 42 --body "/q review"'; then
+  assert_pass "review unscoped mode: render_bot_review_section keeps direct gh-as-user.sh (PAT/no-scope unchanged)"
+else
+  assert_fail "review unscoped mode: lost the direct gh-as-user.sh trigger"
+fi
+# (c) source-level: autonomous-review.sh exports AGENT_BOT_TRIGGER_FILE AND drains it.
+if grep -qF 'export AGENT_BOT_TRIGGER_FILE' "$REVIEW_SH" \
+   && grep -qF 'drain_agent_bot_triggers "$ISSUE_NUMBER" "$REPO"' "$REVIEW_SH"; then
+  assert_pass "source: autonomous-review.sh exports AGENT_BOT_TRIGGER_FILE and drains it (drain_agent_bot_triggers)"
+else
+  assert_fail "source: autonomous-review.sh does not export/drain the bot-trigger broker file"
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
 echo "=== TC-TOKEN-SPLIT-060: scoped permissions are pull_requests:read (cannot approve/merge) ==="
 # ---------------------------------------------------------------------------
 # The default scoped permissions string the lib ships must request pull_requests

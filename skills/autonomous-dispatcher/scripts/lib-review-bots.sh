@@ -149,6 +149,60 @@ render_bot_review_section() {
     return 0  # caller emits nothing into the prompt
   fi
 
+  # [INV-78] Scoped-token mode: GH_USER_PAT is scrubbed from the review-agent
+  # subtree, so the agent CANNOT run gh-as-user.sh itself. When AGENT_GH_TOKEN_FILE
+  # is set, the trigger step is BROKERED — the agent writes the trigger phrase to
+  # AGENT_BOT_TRIGGER_FILE and the wrapper posts it post-run via gh-as-user.sh
+  # (drain_agent_bot_triggers). In that mode the same-run poll can't observe the
+  # bot review (the trigger posts after the agent exits), so the prompt tells the
+  # agent to broker the trigger and let the NEXT review tick verify — not to FAIL on
+  # a same-run timeout. Empty AGENT_GH_TOKEN_FILE (PAT / no-scope) → unchanged
+  # direct gh-as-user.sh + same-run poll.
+  local scoped=0
+  [[ -n "${AGENT_GH_TOKEN_FILE:-}" ]] && scoped=1
+
+  if [[ "$scoped" -eq 1 ]]; then
+    cat <<EOF
+## Configured Review Bots — MANDATORY
+
+The following bots are configured for this project: ${bots}.
+
+Your token is SCOPED and CANNOT post the real-user bot triggers (\`/q review\` etc.;
+those bots reject GitHub-App accounts). Do NOT run \`gh-as-user.sh\` yourself — it
+cannot authenticate. For EACH configured bot, before approving:
+
+EOF
+    local bot trigger login
+    for bot in $bots; do
+      trigger=$(get_bot_trigger "$bot")
+      login=$(get_bot_login "$bot")
+      cat <<EOF
+### Bot: ${bot}
+
+- Trigger phrase: \`${trigger}\`
+- Bot login (user.login filter): \`${login}\`
+
+Steps:
+1. Check if a review by this bot already exists on this PR:
+   \`\`\`bash
+   COUNT=\$(gh api repos/${repo}/pulls/${pr_number}/reviews \\
+     --jq '[.[] | select(.user.login == "${login}")] | length')
+   \`\`\`
+2. If COUNT > 0, the bot already reviewed — read its inline comments and verify
+   all threads are resolved, then proceed.
+3. If COUNT is 0, the bot has not reviewed yet. APPEND the trigger phrase to the
+   file in the \`AGENT_BOT_TRIGGER_FILE\` env var (\`\$(printenv AGENT_BOT_TRIGGER_FILE)\`),
+   one phrase per line, e.g. \`echo '${trigger}' >> "\$(printenv AGENT_BOT_TRIGGER_FILE)"\`.
+   The WRAPPER posts it as a real user after you finish. Do NOT FAIL the review for a
+   not-yet-present bot review in this case — the dispatcher re-runs the review on the
+   next tick and that run will see the bot's review (COUNT > 0). Note this as
+   "awaiting ${bot} review (trigger brokered)" in your verdict reasoning.
+
+EOF
+    done
+    return 0
+  fi
+
   cat <<EOF
 ## Configured Review Bots — MANDATORY
 

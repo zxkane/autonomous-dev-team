@@ -582,6 +582,22 @@ install_agent_sigterm_trap
 acquire_pid_guard "$PID_FILE" "autonomous-review" "$ISSUE_NUMBER"
 export AGENT_PID_FILE="$PID_FILE"
 
+# [INV-78] Bot-trigger broker file (review side). GH_USER_PAT is scrubbed from the
+# review-agent subtree, so a scoped review agent cannot post the real-user
+# bot-trigger comments (`/q review` etc.) itself. Instead it writes the trigger
+# phrase(s) here and the WRAPPER posts them via gh-as-user.sh in cleanup
+# (drain_agent_bot_triggers, which has GH_USER_PAT in the wrapper shell). Exported
+# so it survives the agent env scrub; placed inside the per-run GH_WRAPPER_DIR
+# (mode 700) when available, else a private mktemp file. Harmless when scoping is
+# off (the broker no-ops unless AGENT_GH_TOKEN_FILE is set, and render_bot_review_
+# section then keeps the direct gh-as-user.sh instruction).
+if [[ -n "${GH_WRAPPER_DIR:-}" && -d "${GH_WRAPPER_DIR}" ]]; then
+  AGENT_BOT_TRIGGER_FILE="${GH_WRAPPER_DIR}/agent-bot-triggers"
+else
+  AGENT_BOT_TRIGGER_FILE="$(mktemp "/tmp/agent-bot-triggers-review-${ISSUE_NUMBER}-XXXXXX")"
+fi
+export AGENT_BOT_TRIGGER_FILE
+
 # Heartbeat: refresh PID-file mtime on a timer so the dispatcher's
 # pid_alive mtime fallback (#111 Part B) can distinguish a transient
 # `kill -0` race from a genuinely dead wrapper. Disabled when
@@ -623,6 +639,23 @@ cleanup() {
     # (default 90d). Best-effort — metrics_prune always returns 0, so it can
     # never affect the wrapper rc or the crash-path label transitions below.
     metrics_prune "${METRICS_RETENTION_DAYS:-90}" 2>/dev/null || true
+  fi
+
+  # [INV-78] Bot-trigger broker drain (review side). The scoped review agent cannot
+  # post the real-user `/q review` etc. itself (GH_USER_PAT scrubbed) — it writes the
+  # trigger phrase(s) to AGENT_BOT_TRIGGER_FILE and we post them here via gh-as-user.sh
+  # (the wrapper shell has GH_USER_PAT). Runs on EVERY exit path (before the
+  # RESULT_PARSED early-return) so the trigger posts even when this round's review
+  # FAILs awaiting the bot — the next review tick then sees the bot's review present.
+  # No-op when scoping is off / no triggers / no PR. app-mode token refresh keeps the
+  # helper's `gh pr list` working (the crash path's own refresh happens later, but
+  # the drain is before it, so refresh here best-effort).
+  if declare -F drain_agent_bot_triggers >/dev/null 2>&1; then
+    if [[ "$GH_AUTH_MODE" == "app" ]] && command -v get_gh_app_token &>/dev/null; then
+      GH_TOKEN=$(get_gh_app_token "${REVIEW_AGENT_APP_ID}" "${REVIEW_AGENT_APP_PEM}" "$REPO_OWNER" "$REPO_NAME" 2>/dev/null) \
+        && { export GH_TOKEN; export GITHUB_PERSONAL_ACCESS_TOKEN="$GH_TOKEN"; } || true
+    fi
+    drain_agent_bot_triggers "$ISSUE_NUMBER" "$REPO" || true
   fi
 
   # If result was already parsed by the main script, labels are handled there

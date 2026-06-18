@@ -36,7 +36,8 @@ ID format: `TC-TOKEN-SPLIT-NNN`. INV-78.
 | TC-TOKEN-SPLIT-033 | no scoped token (PAT / app-no-scope) → empty prefix | length 0 |
 | TC-TOKEN-SPLIT-092 | bare `gh` resolves the AGENT-own shim (REAL_GH host) → real `gh` with the scoped token, reading the scoped file | scoped token + scoped `GH_TOKEN_FILE`, wrapper shim dir NOT on the agent PATH |
 | TC-TOKEN-SPLIT-093 | agent `gh` is refresh-aware — a scoped-file refresh between calls is picked up | call 1 sees initial token, call 2 sees the refreshed token |
-| TC-TOKEN-SPLIT-095 | `GH_USER_PAT` is scrubbed from the agent; bot triggers brokered via the wrapper | agent subtree has NO `GH_USER_PAT`/App-token alias; `drain_agent_bot_triggers` posts each phrase via `gh-as-user.sh` (blank/#comment skipped); no-op when scoping off |
+| TC-TOKEN-SPLIT-095 | `GH_USER_PAT` is scrubbed from the agent; bot triggers brokered via the wrapper (dev path) | agent subtree has NO `GH_USER_PAT`/App-token alias; `drain_agent_bot_triggers` posts each phrase via `gh-as-user.sh` (blank/#comment skipped); no-op when scoping off |
+| TC-TOKEN-SPLIT-096 | the REVIEW path also brokers bot triggers under the scrub | scoped mode: `render_bot_review_section` writes `AGENT_BOT_TRIGGER_FILE` (no direct `gh-as-user.sh`); unscoped mode: direct `gh-as-user.sh` kept; `autonomous-review.sh` exports the file + drains it |
 
 ## Unit — scrub completeness (env-dump assertion, the verify-by-construction gate)
 
