@@ -136,6 +136,58 @@ expect_file "TC-085b footer's dir has raw evidence (meta.json)" "$FOOTER_DIR/met
 expect_file "TC-085c footer's dir has raw evidence (run.log)"   "$FOOTER_DIR/run.log"
 expect "TC-085d run.log has the durable wrapper output" "dev wrapper output captured" "$(cat "$FOOTER_DIR/run.log")"
 
+# ---------------------------------------------------------------------------
+# TC-086: wrapper-owned verdict comment carries the run footer (AC1, #235
+# review [P1]). The two wrapper-owned post-verdict.sh call sites
+# (codex stdout-fallback + INV-78 aggregate) must append the run footer to the
+# body file so a PASS/FAIL verdict comment leads to the durable run dir. We
+# exercise the REAL helper `_append_run_footer_to_file` extracted from
+# autonomous-review.sh against the real run_footer.
+# ---------------------------------------------------------------------------
+echo "== TC-086 wrapper-owned verdict comment footer =="
+REVIEW_SH="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/autonomous-review.sh"
+
+# Source ONLY the helper definition (awk: from its `_append_run_footer_to_file() {`
+# line through the matching closing `}` at column 0) so we don't run the whole
+# wrapper. The helper depends only on run_footer (already sourced) + RUN_ID/RUN_DIR.
+HELPER_SRC="$(awk '/^_append_run_footer_to_file\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$REVIEW_SH")"
+if [[ -n "$HELPER_SRC" ]]; then
+  eval "$HELPER_SRC"
+  if declare -F _append_run_footer_to_file >/dev/null 2>&1; then
+    ok "TC-086a helper extracted + defined"
+    # Footer appended when a run is active (use the dev run from TC-080).
+    export RUN_ID="$DEV_RUN_ID" RUN_DIR="$DEV_RUN_DIR"
+    VERDICT_BODY_FILE="$TMP/verdict-body.md"
+    printf 'Review PASSED\n\nAll acceptance criteria met.' > "$VERDICT_BODY_FILE"
+    _append_run_footer_to_file "$VERDICT_BODY_FILE"
+    BODY_AFTER="$(cat "$VERDICT_BODY_FILE")"
+    expect "TC-086b verdict body keeps its original content" "All acceptance criteria met." "$BODY_AFTER"
+    expect "TC-086c verdict body gains run-id footer" "run-id: $DEV_RUN_ID" "$BODY_AFTER"
+    expect "TC-086d verdict body gains artifacts pointer" "artifacts: $DEV_RUN_DIR" "$BODY_AFTER"
+    # No-op (observe-only) when RUN_ID is unset — a verdict comment is never broken.
+    unset RUN_ID RUN_DIR
+    NOFOOTER_FILE="$TMP/verdict-nofooter.md"
+    printf 'Review findings:\n\n1. [BLOCKING] something' > "$NOFOOTER_FILE"
+    BEFORE="$(cat "$NOFOOTER_FILE")"
+    _append_run_footer_to_file "$NOFOOTER_FILE"
+    expect "TC-086e no-op when RUN_ID unset (body unchanged)" "$BEFORE" "$(cat "$NOFOOTER_FILE")"
+  else
+    bad "TC-086a helper extracted + defined" "eval did not define _append_run_footer_to_file"
+  fi
+else
+  bad "TC-086a helper extracted + defined" "could not extract _append_run_footer_to_file from $REVIEW_SH"
+fi
+
+# TC-086f/g: both wrapper-owned post-verdict.sh call sites append the footer FIRST
+# (grep-assert against the wrapper source — the codex stdout-fallback + the INV-78
+# aggregate post). Guards against a future edit dropping the footer on a verdict.
+REVIEW_SRC="$(cat "$REVIEW_SH")"
+expect "TC-086f wrapper sources call _append_run_footer_to_file" "_append_run_footer_to_file" "$REVIEW_SRC"
+# Each `post-verdict.sh` wrapper-owned invocation must be preceded by a footer
+# append within a small window — assert there are at least two append call sites.
+APPEND_COUNT="$(grep -c '_append_run_footer_to_file "' "$REVIEW_SH")"
+expect "TC-086g >=2 footer-append call sites (codex-fallback + aggregate)" "yes" "$([[ "$APPEND_COUNT" -ge 2 ]] && echo yes || echo "no($APPEND_COUNT)")"
+
 echo ""
 echo "RUN-ARTIFACTS-E2E-SUMMARY pass=${PASS} fail=${FAIL}"
 [[ "$FAIL" -eq 0 ]]

@@ -629,6 +629,26 @@ install_agent_heartbeat
 # ---------------------------------------------------------------------------
 log() { echo "[autonomous-review] $(date -u +%H:%M:%S) $*"; }
 
+# [INV-80] _append_run_footer_to_file <body-file> — append the run-id/artifacts
+# footer to a WRAPPER-OWNED verdict-comment body before it is handed to
+# post-verdict.sh, so a PASS/FAIL verdict comment leads (via its footer) to the
+# durable run dir (issue #235 AC1). Best-effort + observe-only: a missing
+# run_footer / unset RUN_ID / unwritable file is a silent no-op that NEVER
+# changes the body or the post (run_footer itself echoes nothing when RUN_ID is
+# unset, so the `>>` appends nothing). Only the WRAPPER's own posts call this —
+# an AGENT's self-posted verdict runs in the scrubbed agent subtree where RUN_DIR
+# is not set, and footering that is out of scope.
+_append_run_footer_to_file() {
+  local _body_file="$1"
+  [[ -n "$_body_file" && -f "$_body_file" ]] || return 0
+  declare -F run_footer >/dev/null 2>&1 || return 0
+  local _footer
+  _footer="$(run_footer)" || return 0
+  [[ -n "$_footer" ]] || return 0
+  printf '%s\n' "$_footer" >> "$_body_file" 2>/dev/null || true
+  return 0
+}
+
 # Track whether normal result parsing completed (set at end of script)
 RESULT_PARSED=false
 
@@ -2391,6 +2411,9 @@ for _i in "${!AGENT_NAMES[@]}"; do
   log "INV-62: codex did not self-post a verdict — wrapper deriving '${_cx_verdict}' from codex review stdout and posting on its behalf."
   _cx_body_file=$(mktemp "/tmp/codex-review-fallback-${ISSUE_NUMBER}-XXXXXX.md")
   _codex_review_compose_body "$_cx_verdict" "$_cx_stdout" > "$_cx_body_file" 2>/dev/null || true
+  # [INV-80] AC1: this is a WRAPPER-owned verdict post (codex didn't self-post) —
+  # append the run footer so the comment links to the durable run dir.
+  _append_run_footer_to_file "$_cx_body_file"
   _cx_fb_model=$(_resolve_review_agent_model "codex")
   _cx_fb_model="${_cx_fb_model:-sonnet}"
   if bash "${SCRIPT_DIR}/post-verdict.sh" "$ISSUE_NUMBER" "$_cx_verdict" "$_cx_body_file" \
@@ -2820,6 +2843,9 @@ if [[ "$_any_deciding_artifact" == "true" && -n "$LATEST_COMMENT" ]] \
   _agg_body_file=$(mktemp "/tmp/aggregate-verdict-${ISSUE_NUMBER}-XXXXXX.md" 2>/dev/null) || _agg_body_file=""
   if [[ -n "$_agg_body_file" ]]; then
     printf '%s' "$LATEST_COMMENT" > "$_agg_body_file" 2>/dev/null || true
+    # [INV-80] AC1: a wrapper-owned verdict comment must carry the run footer so
+    # the operator can navigate from the PASS/FAIL comment to the durable run dir.
+    _append_run_footer_to_file "$_agg_body_file"
     _agg_model=$(_resolve_review_agent_model "${AGENT_NAMES[0]}" 2>/dev/null || true)
     _agg_model="${_agg_model:-sonnet}"
     if bash "${SCRIPT_DIR}/post-verdict.sh" "$ISSUE_NUMBER" "$AGGREGATE" "$_agg_body_file" \

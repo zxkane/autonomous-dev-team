@@ -4004,10 +4004,16 @@ The run-id is:
 1. **Exported** as `RUN_ID`/`RUN_DIR` so sourced libs/adapters inherit it.
 2. **Threaded into every `metrics_emit`** ([INV-70](#inv-70-metrics-are-observe-only-emit-failures-never-change-wrapper-behavior))
    as `run_id=<id>` — the correlation key joining a metrics event to its run dir.
-3. **Embedded in every wrapper-posted terminal/diagnostic comment** (dev session
-   report, startup-failure report, no-PR retry, review crash note) as a footer:
+3. **Embedded in every wrapper-posted comment** as a footer
    `run-id: <id> · artifacts: <dir>` — so a FAIL comment is a one-hop link to the
-   raw evidence (issue #235 AC1).
+   raw evidence (issue #235 AC1). This covers BOTH the terminal/diagnostic comments
+   (dev session report, startup-failure report, no-PR retry, review crash note) AND
+   the **wrapper-owned verdict comments** — the two `post-verdict.sh` sites the
+   WRAPPER owns (the codex stdout-fallback, INV-62; and the INV-78 aggregate verdict
+   comment) append the footer to the body via `_append_run_footer_to_file` before
+   posting (#235 review [P1]). An AGENT's own self-posted verdict runs in the
+   scrubbed agent subtree (`RUN_DIR` unset), so it is out of scope — the footer is a
+   wrapper-owned-comment guarantee.
 
 **Coordination with [INV-78](#inv-78-review-verdicts-resolve-from-a-typed-artifact-file-first-comment-scraping-is-an-explicitly-logged-fallback-a-malformed-artifact-is-loud-never-a-silent-absent)
 — same `runs/` parent, distinct namespaces, NO duplication.** INV-78's per-AGENT

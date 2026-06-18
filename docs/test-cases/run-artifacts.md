@@ -91,3 +91,4 @@ Suites:
 | TC-RUN-ARTIFACTS-083 | `status.sh` output snapshot for the seeded issue | contains labels, lease, last run-ids, next action lines |
 | TC-RUN-ARTIFACTS-084 | reboot simulation: clear `/tmp`, keep XDG state | run dirs + meta.json + run.log still present and readable (durability AC) |
 | TC-RUN-ARTIFACTS-085 | FAIL-comment footer → dir round trip (AC1) | given a footer string, the referenced artifact dir exists and contains raw evidence (meta.json/run.log) |
+| TC-RUN-ARTIFACTS-086 | wrapper-owned verdict comment carries the footer (AC1, #235 review [P1]) | the review wrapper's `_append_run_footer_to_file` appends the run-id/artifacts footer to a verdict body before `post-verdict.sh`; no-op when `RUN_ID` unset; both wrapper-owned post sites (codex stdout-fallback + INV-78 aggregate) call it |

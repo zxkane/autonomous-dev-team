@@ -736,10 +736,16 @@ and tees its stdout/stderr into `run.log`. It threads `run_id=` into every
 `drops.jsonl` (`run_artifacts_record_drop`, alongside the `agent_drop` metric),
 footers the crash comment with `run-id: … · artifacts: …`, and `cleanup()` calls
 `run_artifacts_finalize` (end marker + rc + timing) for both the normal and crash
-paths. All best-effort + `declare -F`-guarded — a failure leaves `RUN_ID`/`RUN_DIR`
-empty and degrades to no-ops, never changing the verdict, merge decision, or
-labels. `status.sh <issue>` reads these run dirs (the "last run-ids" + "last drop
-reasons" lines). See [`debugging.md`](debugging.md).
+paths. **Wrapper-owned verdict comments carry the footer too (AC1, #235 review
+[P1])**: the two `post-verdict.sh` sites the WRAPPER owns — the codex
+stdout-fallback (INV-62) and the INV-78 aggregate verdict comment — run
+`_append_run_footer_to_file` on the body before posting, so a PASS/FAIL verdict
+comment links to the durable run dir. (An AGENT's own self-posted verdict runs in
+the scrubbed agent subtree where `RUN_DIR` is unset, so it is out of scope — the
+footer is a wrapper-owned-comment guarantee.) All best-effort + `declare -F`-guarded
+— a failure leaves `RUN_ID`/`RUN_DIR` empty and degrades to no-ops, never changing
+the verdict, merge decision, or labels. `status.sh <issue>` reads these run dirs
+(the "last run-ids" + "last drop reasons" lines). See [`debugging.md`](debugging.md).
 
 ## Cross-references
 
