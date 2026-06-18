@@ -726,6 +726,21 @@ At `wrapper_end` it also **prunes the metrics log once per run**
 collection. A metrics failure (emit or prune) can never change the verdict, the
 merge decision, or the trap's label transitions. See [`metrics.md`](metrics.md).
 
+### Observe-only run-artifacts + run-id footer ([INV-80](invariants.md#inv-80-every-wrapper-run-mints-a-run-id-and-a-durable-per-run-artifact-dir-the-run-id-threads-through-logs-metrics-and-every-wrapper-posted-comment-footer-statussh-answers-pipeline-state-from-the-dispatchers-real-predicates-observe-only--never-changes-wrapper-rc-or-labels))
+
+Right after PID setup the review wrapper mints `RUN_ID`
+(`<project>-<issue>-review-<ts>`), provisions a durable run dir (`runs/<run-id>/`,
+sibling to INV-78's per-agent verdict UUID dirs under the same `runs/` parent),
+and tees its stdout/stderr into `run.log`. It threads `run_id=` into every
+`metrics_emit` above, records each dropped fan-out member in the run dir's
+`drops.jsonl` (`run_artifacts_record_drop`, alongside the `agent_drop` metric),
+footers the crash comment with `run-id: … · artifacts: …`, and `cleanup()` calls
+`run_artifacts_finalize` (end marker + rc + timing) for both the normal and crash
+paths. All best-effort + `declare -F`-guarded — a failure leaves `RUN_ID`/`RUN_DIR`
+empty and degrades to no-ops, never changing the verdict, merge decision, or
+labels. `status.sh <issue>` reads these run dirs (the "last run-ids" + "last drop
+reasons" lines). See [`debugging.md`](debugging.md).
+
 ## Cross-references
 
 - [`dispatcher-flow.md`](dispatcher-flow.md) — Step 3 is the producer side of the dispatcher → review handoff.

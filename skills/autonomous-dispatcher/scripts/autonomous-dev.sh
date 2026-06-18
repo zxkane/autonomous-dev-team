@@ -50,6 +50,11 @@ source "${LIB_DIR}/lib-review-bots.sh" 2>/dev/null || true
 # abort the wrapper, so the source itself is guarded.
 # shellcheck source=lib-metrics.sh
 source "${LIB_DIR}/lib-metrics.sh" 2>/dev/null || true
+# [INV-80] Observe-only run-artifacts: durable per-run dir + run-id threading +
+# comment footer. Same best-effort contract as lib-metrics — a failure here
+# never aborts the wrapper, so the source is guarded.
+# shellcheck source=lib-run-artifacts.sh
+source "${LIB_DIR}/lib-run-artifacts.sh" 2>/dev/null || true
 # Per-side AGENT_CMD override (INV-37). Empty-string fallback already
 # applied inside lib-agent.sh; this just rebinds AGENT_CMD so the case
 # statements in run_agent / resume_agent dispatch to the dev-side CLI.
@@ -225,8 +230,28 @@ if [[ -f "$LOG_FILE" ]]; then
   METRICS_LOG_OFFSET=$(wc -c < "$LOG_FILE" 2>/dev/null | tr -d '[:space:]') || METRICS_LOG_OFFSET=0
   [[ "$METRICS_LOG_OFFSET" =~ ^[0-9]+$ ]] || METRICS_LOG_OFFSET=0
 fi
+# [INV-80] Provision the durable per-run artifact dir + mint RUN_ID BEFORE the
+# metrics emit so wrapper_start carries the run_id correlation key. Best-effort:
+# `|| true` keeps a failure (unwritable XDG base, missing jq) from aborting the
+# wrapper — RUN_ID/RUN_DIR simply stay empty and the footer/threading degrade to
+# no-ops (observe-only contract). The run dir holds meta.json (start/end + rc +
+# timing + redacted env) and a run.log copy that survives a /tmp wipe.
+if declare -F run_artifacts_init >/dev/null 2>&1; then
+  run_artifacts_init dev "${ISSUE_NUMBER}" || true
+fi
+# [INV-80] Tee the wrapper's own stdout/stderr into the durable run.log so a run
+# survives a /tmp wipe. dispatch-local.sh ALSO redirects fd1/fd2 to the legacy
+# /tmp/agent-*.log (append, INV-69 rotation) — that path is unchanged; this tee
+# is additive and also gives a direct `bash autonomous-dev.sh` invocation a
+# run.log. Guarded on RUN_DIR (empty when init failed) so a tee setup failure
+# never breaks the wrapper. The seeded first-line pointer (run-dir:/tmp-log:) was
+# already written by run_artifacts_init, so we append from here on.
+if [[ -n "${RUN_DIR:-}" ]] && [[ -d "${RUN_DIR}" ]]; then
+  exec > >(tee -a "${RUN_DIR}/run.log") 2>&1 || true
+fi
 if declare -F metrics_emit >/dev/null 2>&1; then
-  metrics_emit wrapper_start side=dev "mode=${MODE}" "issue=${ISSUE_NUMBER}" "agent=${AGENT_CMD:-claude}" || true
+  metrics_emit wrapper_start side=dev "mode=${MODE}" "issue=${ISSUE_NUMBER}" \
+    "agent=${AGENT_CMD:-claude}" "run_id=${RUN_ID:-}" || true
 fi
 
 # SIGTERM-aware exit routing (INV-15, closes #67).
@@ -563,7 +588,7 @@ cleanup() {
     [[ "$METRICS_START_TS" -gt 0 && "$_now" -ge "$METRICS_START_TS" ]] 2>/dev/null \
       && _dur=$((_now - METRICS_START_TS))
     metrics_emit wrapper_end side=dev "rc=${_rc}" "duration_s=${_dur}" \
-      "issue=${ISSUE_NUMBER:-}" "agent=${AGENT_CMD:-claude}" || true
+      "issue=${ISSUE_NUMBER:-}" "agent=${AGENT_CMD:-claude}" "run_id=${RUN_ID:-}" || true
     # Token usage from the agent log, if the CLI emitted any (claude JSON /
     # codex line). Splice the parsed `input_tokens=.. output_tokens=..
     # total_tokens=..` words in (the schema key names the aggregator reads).
@@ -574,7 +599,7 @@ cleanup() {
     _tok="$(metrics_parse_tokens "${LOG_FILE:-}" "${METRICS_LOG_OFFSET:-0}" 2>/dev/null)" || true
     if [[ -n "$_tok" ]]; then
       # shellcheck disable=SC2086  # intentional word-split of the k=v fields
-      metrics_emit token_usage side=dev "issue=${ISSUE_NUMBER:-}" "agent=${AGENT_CMD:-claude}" $_tok || true
+      metrics_emit token_usage side=dev "issue=${ISSUE_NUMBER:-}" "agent=${AGENT_CMD:-claude}" "run_id=${RUN_ID:-}" $_tok || true
     fi
     # [INV-70] Retention is built INTO the collector: prune the metrics log once
     # per wrapper run (here, at wrapper_end — not per emit, which would rewrite
@@ -621,7 +646,7 @@ cleanup() {
 
 The wrapper exited before the agent ran. Common causes: \`gh\` binary
 not on PATH (set \`REAL_GH\` in autonomous.conf — see #92), missing
-required env, or auth setup failure. Inspect the log file above.
+required env, or auth setup failure. Inspect the log file above.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)
 EOF
 )" 2>/dev/null || log "WARNING: Failed to post startup-failure report"
       gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
@@ -632,6 +657,10 @@ EOF
       log "Exiting with code $exit_code (agent never ran, no ISSUE_NUMBER or gh — silent)."
     fi
     _emit_dev_end "$exit_code"
+    # [INV-80] Write the run end marker (rc + timing) to meta.json. Best-effort.
+    if declare -F run_artifacts_finalize >/dev/null 2>&1; then
+      run_artifacts_finalize "${RUN_DIR:-}" "$exit_code" || true
+    fi
     cleanup_github_auth
     return
   fi
@@ -711,7 +740,7 @@ EOF
 - Agent: ${AGENT_CMD:-claude}
 - Model: ${AGENT_DEV_MODEL:-<default>}
 - Timestamp: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
-- Log: \`${LOG_FILE}\`
+- Log: \`${LOG_FILE}\`$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)
 EOF
 )" || log "WARNING: Failed to post session report comment"
 
@@ -726,7 +755,7 @@ EOF
       # Agent exited 0 but no PR was created — retry development
       log "WARNING: Agent exited 0 but no PR was created for issue #${ISSUE_NUMBER}"
       gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
-        --body "Agent exited successfully but no PR was created. Moving to pending-dev for retry." 2>/dev/null || true
+        --body "Agent exited successfully but no PR was created. Moving to pending-dev for retry.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
       gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
         --remove-label "in-progress" \
         --add-label "pending-dev" || log "WARNING: Failed to update issue labels"
@@ -754,11 +783,17 @@ EOF
       -q "[.[] | select(.body != null and ((.body | test(\"#${ISSUE_NUMBER}[^0-9]\")) or (.body | test(\"#${ISSUE_NUMBER}\$\"))))] | sort_by(.createdAt) | (.[0].createdAt // empty)" \
       2>/dev/null || true)"
     if [[ -n "${_pr_created_at:-}" ]]; then
-      metrics_emit pr_opened side=dev "issue=${ISSUE_NUMBER:-}" "pr_opened_at=${_pr_created_at}" || true
+      metrics_emit pr_opened side=dev "issue=${ISSUE_NUMBER:-}" "pr_opened_at=${_pr_created_at}" "run_id=${RUN_ID:-}" || true
     else
-      metrics_emit pr_opened side=dev "issue=${ISSUE_NUMBER:-}" || true
+      metrics_emit pr_opened side=dev "issue=${ISSUE_NUMBER:-}" "run_id=${RUN_ID:-}" || true
     fi
     unset _pr_created_at
+  fi
+
+  # [INV-80] Write the run end marker (rc + timing) to meta.json. Best-effort,
+  # observe-only — never affects the rc or the label transitions above.
+  if declare -F run_artifacts_finalize >/dev/null 2>&1; then
+    run_artifacts_finalize "${RUN_DIR:-}" "$exit_code" || true
   fi
 
   cleanup_github_auth

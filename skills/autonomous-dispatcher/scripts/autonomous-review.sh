@@ -166,6 +166,11 @@ source "${LIB_DIR}/lib-review-request-changes.sh"
 # review wrapper.
 # shellcheck source=lib-metrics.sh
 source "${LIB_DIR}/lib-metrics.sh" 2>/dev/null || true
+# [INV-80] Observe-only run-artifacts: durable per-run dir + run-id threading +
+# comment footer + per-agent drop recording. Same best-effort contract as
+# lib-metrics — a load failure never aborts the review wrapper.
+# shellcheck source=lib-run-artifacts.sh
+source "${LIB_DIR}/lib-run-artifacts.sh" 2>/dev/null || true
 # Per-side AGENT_CMD override (INV-37). See autonomous-dev.sh for the
 # matching dev-side override. Together they let one project run dev
 # and review on different agent CLIs (e.g. claude for dev, agy for
@@ -563,6 +568,21 @@ PID_DIR=$(pid_dir_for_project) || {
 }
 PID_FILE="${PID_DIR}/review-${ISSUE_NUMBER}.pid"
 
+# [INV-80] Provision the durable per-run artifact dir + mint RUN_ID early so the
+# tee below captures the full run and every wrapper-posted comment can footer it.
+# Best-effort (`|| true`): a failure leaves RUN_ID/RUN_DIR empty and the
+# footer/threading degrade to no-ops (observe-only). The run dir survives a /tmp
+# wipe; meta.json holds start/end + rc + timing + redacted env.
+if declare -F run_artifacts_init >/dev/null 2>&1; then
+  run_artifacts_init review "${ISSUE_NUMBER}" || true
+fi
+# Tee the wrapper's own stdout/stderr into the durable run.log. dispatch-local.sh
+# ALSO redirects fd1/fd2 to the legacy /tmp/agent-*-review-*.log (unchanged);
+# this tee is additive and also covers a direct `bash autonomous-review.sh` run.
+if [[ -n "${RUN_DIR:-}" ]] && [[ -d "${RUN_DIR}" ]]; then
+  exec > >(tee -a "${RUN_DIR}/run.log") 2>&1 || true
+fi
+
 # Create log file with restrictive permissions (sensitive agent output)
 # Note: log file is created by nohup redirect in dispatch-local.sh.
 # Do NOT truncate it here (install -m 600 /dev/null would destroy nohup output).
@@ -634,7 +654,7 @@ cleanup() {
     [[ "${METRICS_START_TS:-0}" -gt 0 && "$_now" -ge "${METRICS_START_TS:-0}" ]] 2>/dev/null \
       && _dur=$((_now - METRICS_START_TS))
     metrics_emit wrapper_end side=review "rc=${exit_code}" "duration_s=${_dur}" \
-      "issue=${ISSUE_NUMBER:-}" "agent=${AGENT_CMD:-claude}" || true
+      "issue=${ISSUE_NUMBER:-}" "agent=${AGENT_CMD:-claude}" "run_id=${RUN_ID:-}" || true
     # [INV-70] Retention built into the collector: prune once per review run
     # (default 90d). Best-effort — metrics_prune always returns 0, so it can
     # never affect the wrapper rc or the crash-path label transitions below.
@@ -664,6 +684,13 @@ cleanup() {
     drain_agent_bot_triggers "$ISSUE_NUMBER" "$REPO" "$_bot_allowlist" || true
   fi
 
+  # [INV-80] Write the run end marker (rc + timing) to meta.json. Fires for BOTH
+  # the normal (RESULT_PARSED) and crash paths — placed before the early return,
+  # like wrapper_end. Best-effort, observe-only.
+  if declare -F run_artifacts_finalize >/dev/null 2>&1; then
+    run_artifacts_finalize "${RUN_DIR:-}" "$exit_code" || true
+  fi
+
   # If result was already parsed by the main script, labels are handled there
   if [[ "$RESULT_PARSED" == "true" ]]; then
     cleanup_github_auth
@@ -686,7 +713,7 @@ cleanup() {
     fi
 
     gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
-      --body "Review process crashed (exit code: ${exit_code}). Moving back to development for retry." 2>/dev/null || true
+      --body "Review process crashed (exit code: ${exit_code}). Moving back to development for retry.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
     # INV-35: emit verdict trailer so dispatcher Step 4b.5.1 routes a
     # completed-session crash to the substantive recovery path (a wrapper
     # crash isn't a transient bot/CI/transport blip — it requires a fresh
@@ -812,7 +839,8 @@ WRAPPER_START_TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 # Best-effort, observe-only — never affects review behavior.
 METRICS_START_TS=$(date +%s 2>/dev/null || echo 0)
 if declare -F metrics_emit >/dev/null 2>&1; then
-  metrics_emit wrapper_start side=review "issue=${ISSUE_NUMBER}" "agent=${AGENT_CMD:-claude}" || true
+  metrics_emit wrapper_start side=review "issue=${ISSUE_NUMBER}" \
+    "agent=${AGENT_CMD:-claude}" "run_id=${RUN_ID:-}" || true
 fi
 # BOT_LOGIN — the bot identity this wrapper authenticates as. We need
 # the diagnostic on failure (token expired, GH App perms reduced, rate
@@ -1666,9 +1694,13 @@ The review was NOT run and the PR was NOT evaluated. The issue stays \`reviewing
             _sm_tok=$(_smoke_evidence_reason "${_smoke_evidence[$_si]:-}")
             _sm_class=$(metrics_map_drop_reason "unavailable" "$_sm_tok")
             metrics_emit review_agent_run side=review "agent_name=${REVIEW_AGENTS_LIST[$_si]}" \
-              state=unavailable phase=smoke "issue=${ISSUE_NUMBER:-}" "pr=${PR_NUMBER:-}" || true
+              state=unavailable phase=smoke "issue=${ISSUE_NUMBER:-}" "pr=${PR_NUMBER:-}" "run_id=${RUN_ID:-}" || true
             metrics_emit agent_drop side=review "agent_name=${REVIEW_AGENTS_LIST[$_si]}" \
-              "reason=${_sm_class}" phase=smoke "issue=${ISSUE_NUMBER:-}" "pr=${PR_NUMBER:-}" || true
+              "reason=${_sm_class}" phase=smoke "issue=${ISSUE_NUMBER:-}" "pr=${PR_NUMBER:-}" "run_id=${RUN_ID:-}" || true
+            # [INV-80] Record the smoke-phase drop in the run dir too. Best-effort.
+            if declare -F run_artifacts_record_drop >/dev/null 2>&1; then
+              run_artifacts_record_drop "${RUN_DIR:-}" "${REVIEW_AGENTS_LIST[$_si]}" "smoke:${_sm_class}" || true
+            fi
           done
         fi
         REVIEW_AGENTS_LIST=("${_smoke_survivors[@]}")
@@ -2480,7 +2512,7 @@ log "Per-agent verdicts: ${AGENT_VERDICTS[*]} → aggregate: ${AGGREGATE}"
 # [INV-70] Metrics: aggregated verdict. Best-effort, observe-only — emitted
 # AFTER the decision is made, never gating it.
 if declare -F metrics_emit >/dev/null 2>&1; then
-  metrics_emit verdict side=review "verdict=${AGGREGATE}" "issue=${ISSUE_NUMBER:-}" "pr=${PR_NUMBER:-}" || true
+  metrics_emit verdict side=review "verdict=${AGGREGATE}" "issue=${ISSUE_NUMBER:-}" "pr=${PR_NUMBER:-}" "run_id=${RUN_ID:-}" || true
 fi
 
 # A representative SESSION_ID for the Reviewed-HEAD trailer (INV-04) and the
@@ -2662,7 +2694,7 @@ if declare -F metrics_emit >/dev/null 2>&1; then
   for _mi in "${!AGENT_NAMES[@]}"; do
     _mstate="${AGENT_VERDICTS[$_mi]}"
     metrics_emit review_agent_run side=review "agent_name=${AGENT_NAMES[$_mi]}" \
-      "state=${_mstate}" "issue=${ISSUE_NUMBER:-}" "pr=${PR_NUMBER:-}" || true
+      "state=${_mstate}" "issue=${ISSUE_NUMBER:-}" "pr=${PR_NUMBER:-}" "run_id=${RUN_ID:-}" || true
 
     # [INV-70] (#228 round-8): review-side token usage. Parse THIS member's
     # generic per-agent log (claude `--output-format json` usage / codex `tokens
@@ -2675,7 +2707,7 @@ if declare -F metrics_emit >/dev/null 2>&1; then
       if [[ -n "$_mtok" ]]; then
         # shellcheck disable=SC2086  # intentional word-split of the k=v fields
         metrics_emit token_usage side=review "agent=${AGENT_NAMES[$_mi]}" \
-          "issue=${ISSUE_NUMBER:-}" "pr=${PR_NUMBER:-}" $_mtok || true
+          "issue=${ISSUE_NUMBER:-}" "pr=${PR_NUMBER:-}" "run_id=${RUN_ID:-}" $_mtok || true
       fi
     fi
 
@@ -2690,7 +2722,13 @@ if declare -F metrics_emit >/dev/null 2>&1; then
     fi
     _mreason=$(metrics_map_drop_reason "$_mstate" "$_mtoken")
     metrics_emit agent_drop side=review "agent_name=${AGENT_NAMES[$_mi]}" \
-      "reason=${_mreason}" "issue=${ISSUE_NUMBER:-}" "pr=${PR_NUMBER:-}" || true
+      "reason=${_mreason}" "issue=${ISSUE_NUMBER:-}" "pr=${PR_NUMBER:-}" "run_id=${RUN_ID:-}" || true
+    # [INV-80] Also record the drop in the run dir's drops.jsonl so `status.sh`
+    # can answer "last drop reasons" from durable per-run state (not just the
+    # project-wide metrics log). Best-effort, observe-only.
+    if declare -F run_artifacts_record_drop >/dev/null 2>&1; then
+      run_artifacts_record_drop "${RUN_DIR:-}" "${AGENT_NAMES[$_mi]}" "${_mreason}" || true
+    fi
   done
 fi
 
@@ -3189,7 +3227,7 @@ if [[ "$PASSED_VERDICT" == "true" ]]; then
       # [INV-70] Metrics: successful auto-merge. Also the TTHW labeled→merged
       # endpoint. Best-effort, observe-only.
       if declare -F metrics_emit >/dev/null 2>&1; then
-        metrics_emit merge "result=success" "pr=${PR_NUMBER:-}" "issue=${ISSUE_NUMBER:-}" || true
+        metrics_emit merge "result=success" "pr=${PR_NUMBER:-}" "issue=${ISSUE_NUMBER:-}" "run_id=${RUN_ID:-}" || true
       fi
 
       # INV-33: never close the issue directly — GitHub auto-closes it
@@ -3209,7 +3247,7 @@ if [[ "$PASSED_VERDICT" == "true" ]]; then
 
       # [INV-70] Metrics: failed auto-merge — failure class `infra`. Best-effort.
       if declare -F metrics_emit >/dev/null 2>&1; then
-        metrics_emit merge "result=failure" failure_class=infra "pr=${PR_NUMBER:-}" "issue=${ISSUE_NUMBER:-}" || true
+        metrics_emit merge "result=failure" failure_class=infra "pr=${PR_NUMBER:-}" "issue=${ISSUE_NUMBER:-}" "run_id=${RUN_ID:-}" || true
       fi
 
       if ! _comment_err=$(gh pr comment "$PR_NUMBER" --repo "$REPO" \

@@ -3976,6 +3976,100 @@ The typed inputs the guards read are enumerated in [`observation-snapshot.md`](o
 **Status**: **ENFORCED** in this PR (closes #236). The runtime reconciler remains out of scope (gated phase).
 **Test**: `tests/unit/test-spec-drift.sh` (generator idempotence, bidirectional drift injection, guard-map removal, label-write vocabulary completeness, **movement coverage** — TC-SPEC-GATE-035/036, **code-site coverage** — TC-SPEC-GATE-037 asserts deleting a transition row whose movement is shared elsewhere fails via the orphaned `spec-codesite-map.json` entry, TC-SPEC-GATE-038 a stale code-site anchor fails, TC-SPEC-GATE-039 full code-site coverage on the real repo, **discovered-site reconciliation** — TC-SPEC-GATE-042 asserts a NEW write site with an already-declared (shared) movement fails via the per-(file,movement) count, TC-SPEC-GATE-043 a count delta in an existing group fails, TC-SPEC-GATE-044 full reconciliation on the real repo, **anchor adjacency + variable-write ban** — TC-SPEC-GATE-045 asserts a non-allowlisted variable-valued write fails (P1.1), TC-SPEC-GATE-046 asserts relocating a write within a file (same movement) fails via C.5 anchor adjacency, TC-SPEC-GATE-047 full per-site anchor adjacency on the real repo, **equals-flag form** — TC-SPEC-GATE-050 asserts a variable-valued `--add-label=$x` write fails (P1.1 `=` form), TC-SPEC-GATE-052 asserts a literal `--add-label="frobnicate"` write fails the C.1/C.2 literal scanners (the `[ \t=]+` separator covers both the whitespace and `=` write forms), **continuation + single-quote forms** — TC-SPEC-GATE-053 asserts a variable write split across backslash-continuation lines fails (P1.1 logical-line join), TC-SPEC-GATE-054 asserts a single-quoted literal `--add-label 'frobnicate'` write fails the literal scanners (the `["']` quote class covers both quote styles), **digit-bearing label** — TC-SPEC-GATE-056 asserts a literal `--add-label "v2-blocked"` write fails (the `[a-z][a-z0-9-]*` char class matches `transitions.schema.json` exactly, so a digit/hyphen label is not silently skipped), **unquoted (bare-word) form** — TC-SPEC-GATE-057 asserts an UNQUOTED literal `--add-label frobnicate` write fails (the form-2 regex accepts a quoted-OR-bare label alternative; a bare label can never match a `$`-prefixed variable write, so the P1.1 ban still owns those — TC-SPEC-GATE-045); together these make every write form — whitespace/`=` separator, **no quote / single / double quote**, single-line/continuation, literal/variable, and any schema-legal label spelling — fail the gate, none bypasses — schema golden+negatives, triage-tag coverage).
 
+## INV-81: every wrapper run mints a run-id and a durable per-run artifact dir; the run-id threads through logs, metrics, and every wrapper-posted comment footer; `status.sh` answers pipeline state from the dispatcher's REAL predicates (observe-only — never changes wrapper rc or labels)
+
+> **Note**: authored as INV-79 (next free number when this PR branched off `main`),
+> then renumbered to **INV-80** (PR #261 two-token split, issue #234, took INV-79),
+> then again to **INV-81** at the next rebase: PR #260 (executable-spec gate, issue
+> #236) landed INV-80 on `main` first, so this section took the next free number per
+> the standard duplicate-heading / broken-anchor avoidance (see "Adding a new
+> invariant"). The number is disambiguated by issue #235.
+
+**Rule**: at start, each dev/review wrapper run mints a **run-id**
+`<project>-<issue>-<dev|review>-<ts>` (UTC, second resolution; honors a pre-set
+`RUN_ID`) and provisions a **durable** per-run directory
+`${XDG_STATE_HOME:-$HOME/.local/state}/autonomous-<project>/runs/<run-id>/`
+(mode 0700, [`lib-run-artifacts.sh`](../../skills/autonomous-dispatcher/scripts/lib-run-artifacts.sh)).
+The dir holds:
+
+- `meta.json` — start marker (run-id, project, issue, side, started_at, redacted
+  `host_env`) rewritten at cleanup with `ended_at` + `rc` + `duration_s`.
+- `run.log` — a tee of the wrapper's own stdout/stderr (seeded with a `run-dir:`/
+  `tmp-log:` first-line pointer). Survives a `/tmp` wipe (reboot); the legacy
+  `/tmp/agent-*.log` (append + INV-69 rotation) is **unchanged**, this is additive.
+- `drops.jsonl` — one `{agent, reason, ts}` line per dropped/unavailable review
+  fan-out member (review side only).
+
+The run-id is:
+1. **Exported** as `RUN_ID`/`RUN_DIR` so sourced libs/adapters inherit it.
+2. **Threaded into every `metrics_emit`** ([INV-70](#inv-70-metrics-are-observe-only-emit-failures-never-change-wrapper-behavior))
+   as `run_id=<id>` — the correlation key joining a metrics event to its run dir.
+3. **Embedded in every wrapper-posted terminal/diagnostic comment** (dev session
+   report, startup-failure report, no-PR retry, review crash note) as a footer:
+   `run-id: <id> · artifacts: <dir>` — so a FAIL comment is a one-hop link to the
+   raw evidence (issue #235 AC1).
+
+**Coordination with [INV-78](#inv-78-review-verdicts-resolve-from-a-typed-artifact-file-first-comment-scraping-is-an-explicitly-logged-fallback-a-malformed-artifact-is-loud-never-a-silent-absent)
+— same `runs/` parent, distinct namespaces, NO duplication.** INV-78's per-AGENT
+verdict artifacts live at `…/runs/<review-session-uuid>/verdict-<agent>.json`
+where `<review-session-uuid>` is a bare RFC-4122 UUID (the minted Review Session,
+[INV-20](#inv-20-the-review-wrapper-must-only-act-on-its-own-verdict-comment)).
+This invariant's wrapper-run dirs are SIBLINGS under the same `runs/` parent but
+always match `<project>-<issue>-(dev|review)-<ts>`. The two are structurally
+distinguishable, so `status.sh` scanning + `run_prune` key on the wrapper-run-id
+glob and **never touch** INV-78's per-agent UUID dirs. The verdict-artifact path
+owner stays INV-78; `status.sh` only *reads* it.
+
+**Retention**: `run_prune [days]` (default 30, `RUN_RETENTION_DAYS`) runs once per
+wrapper start (best-effort, like `metrics_prune`). It removes wrapper-run-id dirs
+strictly older than N days (exactly-N is retained) and **NEVER** the active run-id
+(excluded by exact name match) nor INV-78's UUID dirs nor a symlinked candidate
+(CWE-59).
+
+**`status.sh <issue> [--project <id>]` predicate parity.** The read-only inspector
+([`status.sh`](../../skills/autonomous-dispatcher/scripts/status.sh)) **sources the
+dispatcher's real predicate library** (`lib-dispatch.sh`) and answers "what will
+the next tick do?" by calling the SAME functions the tick calls —
+[`pid_alive`](#inv-29-the-wrapper-owns-a-heartbeat-file-the-dispatcher-reads-its-mtime),
+`count_retries` ([INV-05](#inv-05-the-retry-counter-resets-at-each-stall)),
+`fetch_pr_for_issue`,
+[`dev_near_success`](#inv-27-dev-side-crash-declaration-is-gated-by-dev_near_success) /
+[`review_near_success`](#inv-24-review-side-crash-declaration-is-gated-by-review_near_success).
+It NEVER reimplements them — a divergent answer would be a NEW false-signal source,
+worse than no tool. `status.sh` is strictly **read-only**: it issues no
+`gh issue edit`, no `gh pr merge`, no `gh * comment`.
+
+**Observe-only contract**: every `lib-run-artifacts.sh` function is best-effort —
+a failure (unwritable XDG base, missing jq, missing PROJECT_ID) is a silent no-op
+that leaves `RUN_ID`/`RUN_DIR` empty and degrades the footer/threading to no-ops.
+It can **never** change a wrapper's rc or its label transitions. Same contract as
+[INV-70](#inv-70-metrics-are-observe-only-emit-failures-never-change-wrapper-behavior).
+
+**Why**: issue #235 (funded debuggability scope T2). The 2am story was grepping
+append-mode `/tmp/agent-*.log` files that evaporate on reboot, with no correlation
+key between a GitHub comment and the run that produced it. A run-id footer + a
+durable dir turns "spelunk three logs" into "open one directory"; `status.sh`
+turns "reconstruct labels + ps + PID files + read dispatcher source" into one
+read-only command. Depends on #228 (metrics carry the run-id) and #233 (shared
+`runs/<run-id>/` layout).
+
+**Producer**: `autonomous-dev.sh` + `autonomous-review.sh` (mint/init/finalize/
+footer/drop, thread `run_id` into metrics). **Consumer**: operators (via the
+footer + `status.sh`); the metrics aggregator (run-id is an additive field).
+
+**Tests**: `tests/unit/test-lib-run-artifacts.sh` (TC-RUN-ARTIFACTS-001..039 —
+minting/uniqueness, init/finalize, footer, prune age-boundary + never-active +
+INV-78 UUID untouched), `tests/unit/test-status.sh` (TC-RUN-ARTIFACTS-040..051 —
+four canonical states, read-only contract, predicate-parity grep-assert),
+`tests/e2e/run-run-artifacts-e2e.sh` (TC-RUN-ARTIFACTS-080..085 — stub dev+review
+cycle, status.sh snapshot, reboot simulation, footer→dir round-trip).
+
+**Cross-references**:
+- [INV-70](#inv-70-metrics-are-observe-only-emit-failures-never-change-wrapper-behavior) — the observe-only sibling; metrics events now carry `run_id`.
+- [INV-78](#inv-78-review-verdicts-resolve-from-a-typed-artifact-file-first-comment-scraping-is-an-explicitly-logged-fallback-a-malformed-artifact-is-loud-never-a-silent-absent) — the per-agent verdict artifact channel sharing the `runs/` parent.
+- [INV-69](#inv-69-on-re-dispatch-the-prior-runs-agent-log-is-rotated-to-a-single-1-generation-not-truncated) — the legacy `/tmp/agent-*.log` rotation that `run.log` complements (does not replace).
+- [`debugging.md`](debugging.md) — the 2am runbook: comment footer → run-id → dir → what's in it → `status.sh`.
+
 ## Adding a new invariant
 
 When fixing a pipeline bug, after locating the bug on the state machine + flow docs:
