@@ -3679,6 +3679,124 @@ agent DID deliver output, it was just unparseable.)
 - [INV-56](#inv-56-review-agents-post-their-verdict-comment-only-through-post-verdictsh) — post-verdict.sh stays the sole comment poster.
 - [INV-35](#inv-35-the-review-wrapper-emits-a-machine-readable-verdict-trailer-comment) — the rendered aggregate trailer (the dispatcher's machine channel) is unchanged.
 
+## INV-79: in app mode the agent process gets ONLY a scoped token; the wrapper keeps full-write and is the sole approve/merge/PR-create path
+
+> **Note**: authored as INV-76, renumbered to **INV-79** across three rebases —
+> PR #258 (smoke `no-response`, #257) took INV-76, PR #256 (two-tier CI, #238) took
+> INV-77, and PR #262 (verdict-artifact channel, #233) took INV-78 on `main` before
+> this PR merged, so this section took the next free number per the standard
+> duplicate-heading / broken-anchor avoidance (see "Adding a new invariant"). The
+> number is disambiguated by issue #234.
+
+**Rule**: in `GH_AUTH_MODE=app`, the autonomous **agent** subprocess is launched
+with ONLY a SCOPED GitHub-App installation token (`contents:write`,
+`issues:write`, `pull_requests:read` — `AGENT_TOKEN_PERMISSIONS`); the
+**wrapper's** full-write token (`pull_requests:write`) is NEVER reachable from the
+agent subtree. Concretely the agent launch env (assembled CLI-agnostically in
+`_run_with_timeout`) has: `GH_TOKEN_FILE`=the **scoped** token file
+(`AGENT_GH_TOKEN_FILE`, kept fresh by the scoped refresh daemon — so the agent's
+`gh` is REFRESH-AWARE past the 1h App-token TTL, NOT a one-time snapshot that goes
+stale on long runs — #234 review [P1]); `GH_TOKEN`=the scoped token as a snapshot
+fallback (the shim re-reads the file and overrides it, so the fresh file wins);
+`GITHUB_PERSONAL_ACCESS_TOKEN` (the App-token alias) **unset**. `GH_USER_PAT` is
+ALSO **scrubbed** — it is a host-user PAT (typically `repo`-scoped), and a scoped
+agent retaining it could `export GH_TOKEN="$GH_USER_PAT"` (or invoke `gh-as-user.sh`)
+to regain approve/merge, defeating this invariant (#234 review [P1] f97959a3). The
+agent's only legitimate use of `GH_USER_PAT` — posting the real-user bot-trigger
+comments (`/q review` etc., which reject GitHub-App bot accounts; autonomous-dev
+SKILL Step 10/11) — is now **brokered**: the agent writes the trigger phrase(s) to
+`AGENT_BOT_TRIGGER_FILE` and the WRAPPER posts them via `gh-as-user.sh` post-run
+(`drain_agent_bot_triggers`), keeping `GH_USER_PAT` in the wrapper shell only. The
+wrapper's full-write token file (a DIFFERENT path) is NEVER exposed. `PATH` is **rewritten**: the
+wrapper's per-run `GH_WRAPPER_DIR` shim entry is **stripped** (AC #1 — the agent env
+dump shows "no wrapper gh shim") and the agent's OWN per-run shim dir
+(`AGENT_GH_SHIM_DIR`, with its own `gh → gh-with-token-refresh.sh` symlink) is
+**prepended** in its place — so the agent's bare `gh` (review-prompt
+`gh issue view`/`gh pr checks`, vendored helpers like `mark-issue-checkbox.sh`)
+still resolves a `gh` on `REAL_GH`/non-interactive-PATH hosts (#92), resolving the
+AGENT-own shim rather than the wrapper's. The agent shim reads the SCOPED
+`GH_TOKEN_FILE` and `exec gh` with the fresh scoped token, so bare `gh` keeps
+working, stays fresh, AND authenticates scoped (keeping the WRAPPER shim on PATH
+violated AC #1; stripping all shims broke bare `gh`; snapshotting the token once
+went stale — all three were #234 review [P1]s, reconciled by the agent-own shim).
+The wrapper retains the
+full-write token in its OWN shell and is the SOLE actor that flips labels,
+approves, merges, posts the verdict, brokers `gh pr create` (the scoped token
+cannot create a PR — `pull_requests:read`), and brokers the browser-E2E report.
+This is the credential-level enforcement of the approve/merge gates
+([INV-44](#inv-44-the-wrapper-owns-the-mergeability-gate-merge-only-when-githubs-mergeable-true-not-the-agents-claim) /
+[INV-52](#inv-52-a-substantive-fail-asserts-the-prs-github-native-state-not-just-a-comment)):
+an agent that runs `gh pr review --approve` / `gh pr merge` gets a deterministic
+**403** from its token, independent of the (claude-only) PreToolUse hook layer
+(which misses `gh api` and non-claude CLIs — the #191/#193 incident class).
+
+- **Producer**: `lib-auth.sh` — `setup_agent_token` mints the scoped token (via
+  `get_gh_app_scoped_token` → the `permissions` body in `gh-app-token.sh`) into
+  `AGENT_GH_TOKEN_FILE` and starts a second `gh-token-refresh-daemon.sh` keyed on
+  the permissions (refresh integrated, [INV-31] class); `build_agent_env_argv`
+  emits the scrub `env`-prefix; `drain_agent_pr_create` brokers `gh pr create`;
+  `drain_agent_bot_triggers` brokers the real-user bot-trigger comments via
+  `gh-as-user.sh` **constrained to an allow-list** (3rd arg) — only lines that
+  exactly match a configured `REVIEW_BOTS` trigger phrase are posted; any other
+  line is rejected with a WARN and an empty allow-list is fail-closed (post
+  nothing), so the broker cannot be turned into an arbitrary post-as-user channel
+  by a compromised agent; `cleanup_github_auth` reaps the second daemon.
+  `lib-review-bots.sh` supplies `bot_trigger_allowlist <REVIEW_BOTS>` (the exact
+  configured trigger phrases, one per line) and `missing_bot_reviews <REVIEW_BOTS>
+  <PR> <REPO>` (short-names of configured bots with no review on the PR; a `gh`
+  failure counts a bot as MISSING — fail-closed).
+- **Consumer**: `lib-agent.sh::_run_with_timeout` prepends the scrub prefix to
+  EVERY adapter invocation (CLI-agnostic — claude/codex/gemini/kiro/opencode/agy/
+  generic all route through it), **before** `AGENT_LAUNCHER_ARGV` so the launcher
+  runs under the scrubbed env (a scrub placed AFTER the launcher would be passed
+  to it as positional `$@` and never applied — #234 review [P1] #1);
+  `autonomous-dev.sh` / `autonomous-review.sh` call `setup_agent_token` after
+  `setup_github_auth`; the dev wrapper drains the PR-create broker, and BOTH its
+  normal prompt and the [INV-45] open-PR fast-path block route `gh pr create`
+  through that broker when scoping is armed (the fast path would otherwise 403 on
+  a direct create — #234 review [P1] #2); the dev wrapper also drains the
+  bot-trigger broker (posts `/q review` etc. via `gh-as-user.sh`, since the agent's
+  `GH_USER_PAT` is scrubbed — #234 review [P1] f97959a3); the review wrapper posts
+  the brokered E2E report (`lib-review-e2e.sh::_post_brokered_e2e_report`) AND
+  enforces a **mandatory-bot-review hard gate** before approving: because the
+  scoped review prompt brokers its bot triggers (the agent itself cannot post as
+  the user) and the broker only runs in `cleanup`, a `PASSED_VERDICT` could
+  otherwise be approved+merged BEFORE the configured `REVIEW_BOTS` have actually
+  reviewed. So in the PASS branch (after the PR-open guard) the wrapper computes
+  `missing_bot_reviews`; if non-empty and the SHA-bound wait count is `<
+  BOT_REVIEW_WAIT_MAX` (3) it re-queues `−reviewing +pending-review` with a
+  `failed-non-substantive` `awaiting-bot-review` trailer + a SHA-bound
+  `<!-- bot-review-wait sha=… -->` marker (the next tick re-reviews once the bot
+  review lands); at/after the max it is a substantive FAIL → `+pending-dev` +
+  `gh pr review --request-changes` (the bot is misconfigured/down — a maintainer
+  investigates). This is the wrapper-owned enforcement that the prompt's "Do NOT
+  FAIL on an absent bot review" instruction relies on — the agent never blocks on
+  the bot; the wrapper does — #234 review [P1] 37450359.
+- **Degraded mode (PAT)**: `GH_AUTH_MODE=token` — a PAT cannot be down-scoped at
+  mint, so there is NO second token. `setup_agent_token` logs a ONE-TIME WARN
+  ("enforcement degraded to convention in PAT mode"), `build_agent_env_argv`
+  emits an EMPTY prefix (no scrub), and behavior is byte-identical to pre-INV-79.
+  An app-mode scoped-mint failure degrades the same way (WARN + no scrub) —
+  availability over the defense-in-depth bonus.
+- **Containment boundary (NOT isolation)**: same OS user, so the agent could read
+  the wrapper's token file off disk if it deliberately went looking — this is
+  defense-in-depth, not a sandbox. OS-user / container isolation is out of scope
+  (#234). What it buys: the token the agent's `gh` *uses* cannot approve/merge.
+- **Why** (#234): agents inherited the wrapper's full-write token via exported
+  env, so an agent could `gh pr review --approve` + `gh pr merge` itself, bypassing
+  the wrapper gates (the #191 self-merge incident class). Scoping turns "agent CAN
+  merge" into "agent's token CANNOT merge".
+- **Test**: `tests/unit/test-token-split-234.sh` (TC-TOKEN-SPLIT-NNN) — scoped
+  mint body, daemon permissions forwarding, `setup_agent_token` app/PAT paths, the
+  one-time PAT WARN, `build_agent_env_argv` scrub assembly, the env-dump
+  verify-by-construction gate via the real `_run_with_timeout` (no full-write
+  credential + no shim PATH in the agent env), the `pull_requests:read` scope pin,
+  the PR-create broker, the E2E report broker, the bot-trigger broker allow-list
+  (exact-match accept, non-trigger reject, fail-closed empty), the
+  `bot_trigger_allowlist` / `missing_bot_reviews` helpers, and a source-level lock
+  that the review wrapper's PASS branch wires the mandatory-bot-review hard gate
+  (`missing_bot_reviews` → `pending-review` / `pending-dev`).
+
 ## Adding a new invariant
 
 When fixing a pipeline bug, after locating the bug on the state machine + flow docs:

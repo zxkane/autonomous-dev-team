@@ -322,7 +322,39 @@ _run_with_timeout() {
   if [[ -n "$_AGENT_TIMEOUT_CMD" ]]; then
     cmd+=("$_AGENT_TIMEOUT_CMD" --kill-after=30s --signal=TERM "$AGENT_TIMEOUT")
   fi
-  cmd+=("${AGENT_LAUNCHER_ARGV[@]}" "$@")
+
+  # [INV-79] Agent env scrub. build_agent_env_argv (lib-auth.sh) emits an `env`
+  # argv-prefix that gives the agent subtree ONLY the scoped installation token
+  # (GH_TOKEN=<scoped>) and strips the wrapper's full-write credential
+  # (GH_TOKEN_FILE / GITHUB_PERSONAL_ACCESS_TOKEN / GH_USER_PAT). PATH is left
+  # intact so the agent's bare `gh` still resolves the per-run gh shim (which,
+  # with GH_TOKEN_FILE unset, execs real gh under the scoped GH_TOKEN — #234
+  # review [P1]). CLI-agnostic: applied here, it wraps EVERY adapter's
+  # invocation uniformly (claude/codex/gemini/kiro/opencode/agy/generic) and the
+  # launcher (the `cc` function) too — `env VAR=x …` sets the env for the command
+  # AND all descendants. Emits an EMPTY array (no prefix) in PAT mode /
+  # app-mode-mint-failure, so behavior is byte-identical when no scoped token is
+  # armed. Guarded on the helper existing so a unit harness that sources lib-agent
+  # without lib-auth still runs (no scrub).
+  local _agent_env_prefix=()
+  if declare -F build_agent_env_argv >/dev/null 2>&1; then
+    build_agent_env_argv _agent_env_prefix
+  fi
+
+  # Order: [timeout] <env-scrub> <launcher> <agent argv>. The scrub `env …`
+  # prefix MUST come BEFORE the launcher (#234 review [P1]): the launcher form
+  # is an argv prefix that EXECs the real CLI with its trailing args verbatim
+  # (`cc "$@"` / `bash -c '… claude "$@"' --`), so a scrub placed AFTER the
+  # launcher is passed to the launcher as positional `$@` and forwarded to
+  # `claude` as LITERAL arguments — `env` never runs, the scrub silently no-ops
+  # (the agent keeps the full-write credential) AND the bogus `env …` args can
+  # make claude fail before it starts. Placing `env …` first runs the LAUNCHER
+  # (and thus the agent it execs, and the whole subtree) under the scrubbed
+  # environment, which is the intent. With no launcher the order is unchanged in
+  # effect (`<env-scrub> <agent argv>`); the claude adapter's own
+  # `env -u CLAUDECODE` (launcher-less path A) simply chains after our `env …`,
+  # which is valid (the second env inherits the first's modified environment).
+  cmd+=("${_agent_env_prefix[@]}" "${AGENT_LAUNCHER_ARGV[@]}" "$@")
 
   # Prepend setsid when available so the agent gets its own session+PGID.
   # On the rare host without it (no util-linux), the agent runs in the

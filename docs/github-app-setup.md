@@ -117,6 +117,85 @@ DISPATCHER_APP_ID="345678"
 DISPATCHER_APP_PEM="/path/to/project/.github-apps/dispatcher.pem"
 ```
 
+## Two-token split — scoped agent token ([INV-79])
+
+In **app mode** the pipeline mints **two** installation tokens per run from the
+SAME App credentials:
+
+| Token | Holder | contents | issues | pull_requests | Used for |
+|-------|--------|----------|--------|---------------|----------|
+| **Full-write** (existing) | the **wrapper** shell only | write | write | **write** | label flips, PR approve/merge, verdict posting, brokered `gh pr create`, brokered E2E report |
+| **Scoped** (new) | the **agent** subprocess only | write | write | **read** | push branches, progress comments, checkbox ticks, E2E report (write to broker file) |
+
+The wrapper strips the full-write credential from the agent's environment before
+launching it: the agent process gets `GH_TOKEN_FILE` pointed at the **scoped** token
+file (kept fresh by the scoped daemon — so the agent's `gh` stays valid past the 1h
+App-token TTL), `GH_TOKEN` = the scoped token as a snapshot fallback, and
+`GITHUB_PERSONAL_ACCESS_TOKEN` unset (the wrapper's full-write token file is a
+different path and is never exposed). `GH_USER_PAT` is **scrubbed** too — a scoped
+agent retaining that host-user PAT could `export GH_TOKEN="$GH_USER_PAT"` and regain
+approve/merge. The agent still triggers the built-in review bots, but through a
+**broker**: it writes the trigger phrase(s) (`/q review` etc.) to a file and the
+wrapper posts them via `gh-as-user.sh` (the bots reject App-bot accounts), keeping
+`GH_USER_PAT` in the wrapper shell only. `PATH` is rewritten: the wrapper's
+per-run shim dir is stripped and the agent's OWN per-run shim dir is prepended, so
+the agent env carries no wrapper `gh` shim while the agent's bare `gh` still
+resolves (the agent-own `gh-with-token-refresh.sh` shim — the only resolvable `gh`
+on `REAL_GH`/non-interactive-PATH hosts); that shim reads the scoped
+`GH_TOKEN_FILE` and execs real `gh` with the fresh scoped token, so the agent's `gh`
+works, stays fresh, AND is scoped. The scoped token is refreshed by its own
+background daemon (same 45-min cadence as the full-write token).
+
+### Exact scope set
+
+The scoped agent token requests exactly:
+
+```json
+{ "contents": "write", "issues": "write", "pull_requests": "read" }
+```
+
+(operator-overridable via `AGENT_TOKEN_PERMISSIONS` in `autonomous.conf`).
+
+- `contents: write` — **required**: the dev agent MUST push feature branches; a
+  read-only token is factually impossible for development.
+- `issues: write` — progress comments, checkbox ticks, and the E2E report
+  fallback post.
+- `pull_requests: read` — the containment lever: `gh pr review --approve` and
+  `gh pr merge` BOTH require `pull_requests:write`, so the agent's token gets a
+  deterministic **403** on either. `gh pr create` ALSO requires
+  `pull_requests:write`, so the dev agent does NOT run it directly — it writes the
+  PR title+body to a broker file and the wrapper opens the PR (see [INV-79] in
+  `docs/pipeline/invariants.md`).
+
+> The App **installation** must still grant `pull_requests: write` (the wrapper's
+> full-write token needs it). The *scoped* token simply requests a subset; GitHub
+> rejects a scoped request that exceeds the installation's grant with HTTP 422.
+
+### Attack-surface note (defense-in-depth, NOT isolation)
+
+The agent and the wrapper run as the **same OS user**, so a determined agent could
+read the wrapper's token file off disk. This split is **defense-in-depth, not a
+sandbox**. What it guarantees: the token the agent's `gh` *actually uses* cannot
+approve or merge a PR — turning "agent CAN merge" (the self-merge incident class,
+where an agent ran `gh pr review --approve` + merge, bypassing the wrapper gates)
+into "agent's token CANNOT merge", independent of the PreToolUse hook layer (which
+misses `gh api` and has no coverage for non-claude CLIs). **Explicitly out of
+scope**: OS-user / container isolation of the agent.
+
+### PAT mode degradation
+
+In **token mode** (`GH_AUTH_MODE=token`) a PAT cannot be down-scoped at mint, so
+there is **no** second token. The agent keeps the shared PAT; the wrapper logs a
+one-time WARN:
+
+```
+WARN: [INV-79] GH_AUTH_MODE=token — a PAT cannot be down-scoped, so agent
+credential enforcement degraded to convention in PAT mode ...
+```
+
+In PAT mode the approve/merge containment relies on the wrapper's INV-44/52 gates
+plus the PreToolUse hook layer — the credential boundary is NOT available.
+
 ## Token Refresh Daemon
 
 GitHub App installation tokens expire after 1 hour. The pipeline includes a background token refresh daemon that automatically generates new tokens before expiration.

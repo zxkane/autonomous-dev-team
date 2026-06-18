@@ -167,10 +167,11 @@ assert_grep "TC-RC-SRC-01 submit_request_changes defined in lib" \
   '^submit_request_changes\(\)' "$RC_LIB"
 
 # TC-RC-SRC-02: the wrapper invokes the helper on every substantive FAIL route —
-# the three are: agent-posted findings FAIL, the CONFLICTING mergeable block, and
-# the E2E hard-gate failure ([INV-46], a dev-actionable blocking FAIL produced
-# before the review fan-out — #197 codex finding). Count INVOCATIONS only — the
-# call form is `submit_request_changes "<pr>"`; a `|| log "... submit_request_changes
+# the four are: agent-posted findings FAIL, the CONFLICTING mergeable block, the
+# E2E hard-gate failure ([INV-46], a dev-actionable blocking FAIL produced before
+# the review fan-out — #197 codex finding), and the INV-79 mandatory-bot-review
+# MAX-waits FAIL (#234). Count INVOCATIONS only — the call form is
+# `submit_request_changes "<pr>"`; a `|| log "... submit_request_changes
 # returned ..."` mention is NOT a call.
 _calls=$(grep -cE 'submit_request_changes "' "$WRAPPER_CODE" || true)
 if [[ "$_calls" -ge 3 ]]; then
@@ -214,14 +215,18 @@ fi
 
 # TC-RC-SRC-04: the NON-substantive routes must NOT submit REQUEST_CHANGES —
 # they are transient re-queues / transport failures, not dev-actionable code
-# defects. Pin the helper call count at EXACTLY 3 (the three substantive routes:
-# agent-findings FAIL, CONFLICTING mergeable block, E2E hard-gate fail). A 4th
-# call would mean a non-substantive route (mergeable-UNKNOWN, E2E-evidence-missing,
-# or the agent-crash-no-verdict path) wrongly wired it in.
-if [[ "$_calls" -eq 3 ]]; then
-  echo -e "  ${GREEN}PASS${NC}: TC-RC-SRC-04 helper called on EXACTLY the 3 substantive routes (non-substantive routes excluded)"; PASS=$((PASS + 1))
+# defects. Pin the helper call count at EXACTLY 4 (the four substantive routes:
+# agent-findings FAIL, CONFLICTING mergeable block, E2E hard-gate fail, and the
+# INV-79 mandatory-bot-review MAX-waits FAIL — a bot misconfigured/down after
+# BOT_REVIEW_WAIT_MAX is a dev/maintainer-actionable blocking finding). The INV-79
+# WAIT branch (awaiting-bot-review, pending-review) is NON-substantive and must
+# NOT call the helper. Any further call would mean a non-substantive route
+# (mergeable-UNKNOWN, E2E-evidence-missing, agent-crash-no-verdict, or the INV-79
+# wait re-queue) wrongly wired it in.
+if [[ "$_calls" -eq 4 ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-RC-SRC-04 helper called on EXACTLY the 4 substantive routes (non-substantive routes excluded)"; PASS=$((PASS + 1))
 else
-  echo -e "  ${RED}FAIL${NC}: TC-RC-SRC-04 expected exactly 3 helper calls (non-substantive routes must NOT request changes), found $_calls"; FAIL=$((FAIL + 1))
+  echo -e "  ${RED}FAIL${NC}: TC-RC-SRC-04 expected exactly 4 helper calls (non-substantive routes must NOT request changes), found $_calls"; FAIL=$((FAIL + 1))
 fi
 
 # TC-RC-SRC-04b: the E2E hard-gate FAIL route (the `failed-substantive` +

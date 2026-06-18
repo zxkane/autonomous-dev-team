@@ -74,6 +74,7 @@ Same pattern as the dev wrapper — see [`dev-agent-flow.md`](dev-agent-flow.md#
 
 - PID file: `${PID_DIR}/review-<N>.pid` ([INV-01](invariants.md#inv-01-pid-file-naming)) — `${PID_DIR}` resolved by `lib-config.sh::pid_dir_for_project`.
 - Auth: review-agent app mode uses `REVIEW_AGENT_APP_ID` / `REVIEW_AGENT_APP_PEM` (separate App identity from dev so reviewer comments are attributed correctly).
+- **Two-token split ([INV-79])**: after `setup_github_auth`, the review wrapper calls `setup_agent_token` to mint the SCOPED token (`contents:write`, `issues:write`, `pull_requests:read`) for the review-agent subtree — identical to the dev side (see [dev-agent-flow § Two-token split](dev-agent-flow.md#two-token-split--the-agents-scrubbed-environment-inv-79)). Review agents only READ the PR and post issue/PR comments + the E2E report, so none need `pull_requests:write`; the wrapper's full-write token remains the sole approve/merge path ([INV-44](invariants.md#inv-44-the-wrapper-owns-the-mergeability-gate-merge-only-when-githubs-mergeable-true-not-the-agents-claim) / [INV-52](invariants.md#inv-52-a-substantive-fail-asserts-the-prs-github-native-state-not-just-a-comment)). `lib-agent.sh::_run_with_timeout` applies the same CLI-agnostic env scrub to every fan-out agent + the browser-E2E lane. `GH_USER_PAT` is scrubbed here too, so the mandatory `REVIEW_BOTS` trigger step is **brokered**: when scoping is armed, `render_bot_review_section` tells the agent to write the trigger phrase(s) to `$AGENT_BOT_TRIGGER_FILE` (instead of running `gh-as-user.sh`, which can't authenticate), and the wrapper posts them via `gh-as-user.sh` post-run (`drain_agent_bot_triggers`, in `cleanup`) — the next review tick then sees the bot's review present (#234 review [P1] 8e87de14). PAT mode → one-time WARN + no scrub + the direct `gh-as-user.sh` trigger.
 
 ## PR discovery (3 fallback methods)
 
@@ -133,9 +134,11 @@ E2E_ACTIVE == true:
         evidence (fence ac-coverage:begin/end, jq-validated, fail-safe) → the
         per-round sidecar E2E_AC_COVERAGE_FILE for the fan-out's deterministic check.
     browser mode → ONE LLM lane (run_agent against build_browser_e2e_prompt). The
-        LLM posts a `## E2E Verification Report` comment; the WRAPPER stamps the SHA
-        marker ONTO that report (_stamp_browser_evidence_marker, REST PATCH) after a
-        clean exit. No report to stamp → fail closed (rc forced non-zero).
+        LLM WRITES its `## E2E Verification Report` to $E2E_REPORT_FILE (the INV-79
+        broker); the WRAPPER posts it (_post_brokered_e2e_report) then stamps the
+        SHA marker ONTO that report (_stamp_browser_evidence_marker, REST PATCH)
+        after a clean exit. The LLM ALSO posts directly as a fallback (issues:write
+        retained). No report to stamp → fail closed (rc forced non-zero).
   E2E HARD GATE — _classify_e2e_gate <lane_rc> <evidence_present>:
     (a) lane .rc == 0  AND
     (b) re-fetch (_fetch_sha_evidence, bounded retry) finds a SHA-matching
@@ -158,7 +161,7 @@ E2E_ACTIVE == false → no lane, no gate (E2E_GATE=inactive); straight to fan-ou
 ```
 
 - **command-mode lane is shell, not an LLM.** `_run_command_e2e_lane` runs entirely in the wrapper shell — no `run_agent`, no tokens. The verify command runs under `setsid` + `timeout --kill-after=30s --signal=TERM ${E2E_COMMAND_TIMEOUT_SECONDS}` so its subtree is reapable ([INV-23](invariants.md#inv-23-pid_file-points-at-a-process-whose-death-reaps-the-entire-agent-subtree)); the lane's PGID is added to `_reap_fanout_processes`'s arg list alongside the fan-out agents'.
-- **browser-mode is ONE LLM lane**, not replicated across review agents. The wrapper stamps `<!-- e2e-evidence: complete sha="${PR_HEAD_SHA}" -->` **onto the LLM-posted `## E2E Verification Report` comment** (`_stamp_browser_evidence_marker`, REST `PATCH`, idempotent) so the gate anchor is deterministic without the LLM transcribing the SHA — and so the gate's evidence-present signal + the review agents' evidence-read both resolve to the REAL report, not a marker-only comment. A clean exit with NO stampable report comment fails the gate closed (rc forced non-zero) — a marker-only comment can never satisfy the gate.
+- **browser-mode is ONE LLM lane**, not replicated across review agents. **Report broker ([INV-79]):** the LLM WRITES the report to `$E2E_REPORT_FILE` and the wrapper posts it (`_post_brokered_e2e_report`) — matching the verdict-artifact broker direction so report DELIVERY does not depend on the agent's own write capability under the scoped token (the agent's direct post is a retained fallback via `issues:write`). The wrapper then stamps `<!-- e2e-evidence: complete sha="${PR_HEAD_SHA}" -->` **onto the `## E2E Verification Report` comment** (`_stamp_browser_evidence_marker`, REST `PATCH`, idempotent) so the gate anchor is deterministic without the LLM transcribing the SHA — and so the gate's evidence-present signal + the review agents' evidence-read both resolve to the REAL report, not a marker-only comment. A clean exit with NO stampable report comment fails the gate closed (rc forced non-zero) — a marker-only comment can never satisfy the gate.
 - **The gate is a mechanical dual-signal**, fail-closed: a crash between parser-ok and comment-post (`rc=0` but no SHA-matching evidence) routes `block-nonsubstantive` (transient re-queue), not a dev bounce; a real verify failure (`rc≠0`) routes `fail` (substantive). A `rc≠0`-with-stale-present-evidence does NOT pass.
 - **Review agents are PURE code reviewers.** `build_review_prompt` no longer contains any E2E execution block; the prompt tells each agent to READ the wrapper-posted evidence comment as input and cross-check it against the acceptance criteria. They do not run E2E.
 - **Structured AC-coverage double-check ([INV-49](invariants.md#inv-49-command-mode-e2e-may-feed-the-review-fan-out-a-structured-ac-coverage-artifact--optional-fail-safe), #183).** Command-mode only: when the evidence parser emits the optional `ac-coverage:begin … ac-coverage:end` JSON fence, the lane jq-validates it (fail-safe — malformed → empty, fall back to free-form; never fail-open) and writes it to `E2E_AC_COVERAGE_FILE`. When that per-round sidecar is non-empty, `build_review_prompt` PREFERS the deterministic map over LLM-parsing the free-form markdown table; an empty/absent sidecar yields the exact post-#182 free-form double-check. The artifact is a review aid only — the E2E hard gate is unchanged.
@@ -436,7 +439,7 @@ Major prompt sections:
 | **Step 0.5: requirement drift detection** | Read all issue comments before reading the PR diff. Find scope changes posted after implementation began. Drift ⇒ FAIL with "[BLOCKING] Requirement drift". |
 | **Review checklist** | Process compliance, code quality, testing, infra. The Kiro path skips `code-simplifier` / `pr-review` items since Kiro doesn't support those. |
 | **Acceptance criteria verification** | For each `## Acceptance Criteria` checkbox in the issue body, verify against PR code/tests/build then mark via `bash scripts/mark-issue-checkbox.sh`. ALL must be checked before approving. |
-| **Amazon Q Developer trigger** | Mandatory bot-review trigger. Q ignores `/q review` from bot accounts ⇒ wrapper instructs the agent to use `bash scripts/gh-as-user.sh pr comment N --body "/q review"`. Poll up to 3 min for the bot to respond. |
+| **Amazon Q Developer trigger** | Mandatory bot-review trigger. Q ignores `/q review` from bot accounts ⇒ in PAT/no-scope mode the wrapper instructs the agent to use `bash scripts/gh-as-user.sh pr comment N --body "/q review"` and poll up to 3 min. Under the [INV-79] scoped scrub (`GH_USER_PAT` removed) the trigger is **brokered**: the agent writes the phrase to `$AGENT_BOT_TRIGGER_FILE` and the wrapper posts it via `gh-as-user.sh` post-run; the next review tick verifies the bot's review is present. |
 | **E2E verification (if `E2E_MODE` ∈ {browser, command})** | Branch on `E2E_MODE`. `browser`: Chrome DevTools MCP procedure (navigate, login, execute happy-path + feature test cases, screenshot+upload each, post structured E2E report on PR). `command`: invoke project-supplied `E2E_COMMAND`, run `E2E_COMMAND_EVIDENCE_PARSER`, post evidence block ending with SHA-bound marker `<!-- e2e-evidence: complete sha="${PR_HEAD_SHA}" -->` as PR comment. See **E2E mode dispatch** above. |
 | **Decision** | PASS ⇒ post a "Review PASSED ..." verdict on the **issue** (not PR). FAIL ⇒ post a "Review findings: ..." verdict with a numbered remediation list. **The verdict is posted ONLY via `bash scripts/post-verdict.sh` — never a bare `gh issue comment`** ([INV-56](invariants.md#inv-56-review-verdict-is-posted-via-the-deterministic-post-verdict-helper-not-the-agents-bare-gh)); the helper guarantees the first-line phrasing and appends the `Review Session:` / `Review Agent:` trailer itself. See [Verdict posting (INV-56)](#verdict-posting-inv-56) below. |
 
@@ -572,6 +575,41 @@ if PASSED_VERDICT == true:
 - **CONFLICTING** reuses the `Auto-merge failed:` PR marker so the dev-resume branch ([§ Auto-merge failure → dev re-dispatch](#auto-merge-failure--dev-re-dispatch-inv-33)) prepends its mandatory rebase pre-step — giving the conflict a deterministic owner. It is a substantive blocking finding, so the wrapper also submits `--request-changes` ([INV-52](invariants.md#inv-52-the-review-wrapper-owns-the-github-native-pr-reviewmerge-action-the-agent-posts-verdicts-only); `reviewDecision=CHANGES_REQUESTED`).
 - **UNKNOWN** posts no PR marker (no confirmed conflict ⇒ no forced rebase) and does NOT submit `--request-changes` ([INV-52](invariants.md#inv-52-the-review-wrapper-owns-the-github-native-pr-reviewmerge-action-the-agent-posts-verdicts-only): a transient re-queue is not a dev-actionable blocking finding); the `failed-non-substantive` trailer makes the dispatcher flip the issue back to `pending-review` (re-review) under the `REVIEW_RETRY_LIMIT` cap ([INV-35](invariants.md#inv-35-review-aware-resume-routing-for-completed-sessions)).
 - Happy path (`MERGEABLE`) is byte-for-byte today's behavior plus one `gh pr view --json mergeable` call.
+
+## Mandatory bot-review hard gate (INV-79)
+
+When scoping is armed ([INV-79](invariants.md#inv-79-in-app-mode-the-agent-process-gets-only-a-scoped-token-the-wrapper-keeps-full-write-and-is-the-sole-approvemergepr-create-path)), the review agent's `GH_USER_PAT` is scrubbed, so it **cannot** post the `REVIEW_BOTS` trigger comments (`/q review`, `/codex review`) as the real user — `render_bot_review_section` instead has it write the trigger phrase(s) to `$AGENT_BOT_TRIGGER_FILE`, and the wrapper brokers them via `gh-as-user.sh` in `cleanup` (`drain_agent_bot_triggers`, allow-list-constrained). Because that broker runs only at cleanup — *after* the verdict — a `PASSED_VERDICT` could otherwise be approved+merged in the SAME tick, before any configured bot has reviewed. The scoped review prompt is therefore told "do NOT FAIL on an absent bot review"; the **wrapper** owns the wait instead, so the gate cannot be skipped by an agent's verdict.
+
+**Order in the PASS chain:** PR-open guard ([INV-54](invariants.md#inv-54-the-pr-still-open-guard-gates-all-pass-chain-exits-not-just-pass)) → **this bot-review gate** → mergeable gate ([INV-44](invariants.md#inv-44-mergeable-hard-gate--a-conflicting-pr-can-never-reach-approved)) → PASS path. It runs right after the PR-open guard (PR already confirmed OPEN) and *before* the mergeable poll, so a still-missing bot review re-queues cheaply without spending the mergeable retry budget. (The Mergeable section is documented above for narrative continuity, but executes after this gate.)
+
+```
+if PASSED_VERDICT == true:           # PR-open guard already passed; mergeable gate runs AFTER this
+  MISSING_BOTS = missing_bot_reviews "$REVIEW_BOTS_VALIDATED" "$PR_NUMBER" "$REPO"
+                 # short-names of configured bots with NO review on the PR;
+                 # a gh failure counts a bot MISSING — fail-closed (lib-review-bots.sh)
+  if MISSING_BOTS non-empty:
+    _wait_marker = "<!-- bot-review-wait sha=\"$PR_HEAD_SHA\" -->"
+    _wait_count  = count of prior bot-review-wait markers for THIS HEAD sha
+    if _wait_count < BOT_REVIEW_WAIT_MAX (3):
+      issue comment "Review held — ... mandatory configured review bot(s) [$MISSING_BOTS]
+                     have not posted a review on PR #$PR_NUMBER yet ... (No approve/merge
+                     this tick — INV-79.)"  + the SHA-bound _wait_marker
+      emit_verdict_trailer failed-non-substantive cause=awaiting-bot-review
+      −reviewing +pending-review ; exit 0      # next tick re-reviews once the bot review lands
+    else:                                       # bot misconfigured / down
+      issue comment "Review findings: ... [BLOCKING] Mandatory review bot(s) [$MISSING_BOTS]
+                     did not review PR #$PR_NUMBER after $BOT_REVIEW_WAIT_MAX attempt(s) ..."
+      emit_verdict_trailer failed-substantive
+      submit_request_changes <PR>               # INV-52 (substantive)
+      −reviewing +pending-dev ; exit 0
+  # else: no bot missing → fall through to the PASS path below (UNCHANGED)
+```
+
+- **Why `pending-review`, not `pending-dev`, on the wait branch.** There is no new commit for a dev agent to make — the code is fine, the wrapper is just waiting for an *external* bot. Routing to `pending-dev` would strand the issue: the [#106 stale-verdict dispatcher guard](state-machine.md) keeps `pending-dev` + open-PR + no-new-commits parked. `pending-review` re-queues a clean re-review on the next tick, by which time `drain_agent_bot_triggers` has fired and the bot's review is present. This is the only `reviewing → pending-review` producer in the wrapper.
+- **Bounded.** The `<!-- bot-review-wait sha="…" -->` marker is SHA-bound, so a force-push (new HEAD) resets the count; on a stable HEAD the wait is capped at `BOT_REVIEW_WAIT_MAX` (3) before escalating to a substantive FAIL → `pending-dev`, on the assumption the bot is misconfigured/down and a maintainer should look. The marker is read by counting prior markers for the current HEAD SHA, so it cannot loop indefinitely.
+- **Fail-closed.** `missing_bot_reviews` treats a failed `gh api .../reviews` call as "bot MISSING" (it never silently passes a bot whose review state it could not confirm). An empty `REVIEW_BOTS` makes the gate a no-op (nothing to wait for) — it only fires for *configured* bots.
+- **Unscoped / PAT mode — gate is SKIPPED.** The whole gate is guarded by `[[ -n "${AGENT_GH_TOKEN_FILE:-}" ]]` (scoped mode only). When scoping is NOT armed the agent posts the bot triggers directly (in-run) via `gh-as-user.sh` and polls for the bot review *during* the run, so its OWN verdict already covers a missing bot review — there is nothing for the wrapper to wait on, and `missing_bot_reviews` does not run. The wrapper-owned wait exists solely because the scoped scrub defers the trigger to cleanup (post-verdict).
+- **Skipped on FAIL.** The gate lives inside the `PASSED_VERDICT == true` chain only — a FAIL/block verdict never reaches it (the dev side will produce a new HEAD anyway, re-arming bot review).
 
 ## Verdict = PASS path
 

@@ -211,10 +211,12 @@ fi
 
 # TC-EOG-REG-04: emit_verdict_trailer call count (the open-guard adds no new
 # trailer). INV-46 pinned this at 10; INV-64 (#224) added the one Phase-A.5
-# smoke-FAIL abort site → 11. The open-guard itself must not change it.
+# smoke-FAIL abort site → 11; INV-79 (#234) added the mandatory-bot-review hard
+# gate's two trailer sites (awaiting-bot-review wait + the max-waits substantive
+# FAIL) → 13. The open-guard itself must not change it.
 _trailer_count=$(grep -cE 'emit_verdict_trailer ' "$WRAPPER")
-assert_eq "TC-EOG-REG-04 emit_verdict_trailer call count is 11 (10 + INV-64 smoke abort; open-guard adds none)" \
-  "11" "$_trailer_count"
+assert_eq "TC-EOG-REG-04 emit_verdict_trailer call count is 13 (10 + INV-64 smoke abort + INV-79 bot-review gate x2; open-guard adds none)" \
+  "13" "$_trailer_count"
 
 # ---------------------------------------------------------------------------
 echo ""
