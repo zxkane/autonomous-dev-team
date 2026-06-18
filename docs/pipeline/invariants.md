@@ -3698,11 +3698,14 @@ agent subtree. Concretely the agent launch env (assembled CLI-agnostically in
 stale on long runs — #234 review [P1]); `GH_TOKEN`=the scoped token as a snapshot
 fallback (the shim re-reads the file and overrides it, so the fresh file wins);
 `GITHUB_PERSONAL_ACCESS_TOKEN` (the App-token alias) **unset**. `GH_USER_PAT` is
-**preserved** (NOT scrubbed) — it is the operator's real-user PAT the agent uses
-via `gh-as-user.sh` to trigger the built-in review bots (`/q review` etc., which
-reject GitHub-App bot accounts; autonomous-dev SKILL Step 10/11); scrubbing it broke
-bot triggers on `REVIEW_BOTS` projects with no host `gh auth` (#234 review [P1]). It
-is a SEPARATE operator credential, not the wrapper's full-write App token. The
+ALSO **scrubbed** — it is a host-user PAT (typically `repo`-scoped), and a scoped
+agent retaining it could `export GH_TOKEN="$GH_USER_PAT"` (or invoke `gh-as-user.sh`)
+to regain approve/merge, defeating this invariant (#234 review [P1] f97959a3). The
+agent's only legitimate use of `GH_USER_PAT` — posting the real-user bot-trigger
+comments (`/q review` etc., which reject GitHub-App bot accounts; autonomous-dev
+SKILL Step 10/11) — is now **brokered**: the agent writes the trigger phrase(s) to
+`AGENT_BOT_TRIGGER_FILE` and the WRAPPER posts them via `gh-as-user.sh` post-run
+(`drain_agent_bot_triggers`), keeping `GH_USER_PAT` in the wrapper shell only. The
 wrapper's full-write token file (a DIFFERENT path) is NEVER exposed. `PATH` is **rewritten**: the
 wrapper's per-run `GH_WRAPPER_DIR` shim entry is **stripped** (AC #1 — the agent env
 dump shows "no wrapper gh shim") and the agent's OWN per-run shim dir
@@ -3731,7 +3734,8 @@ an agent that runs `gh pr review --approve` / `gh pr merge` gets a deterministic
   `AGENT_GH_TOKEN_FILE` and starts a second `gh-token-refresh-daemon.sh` keyed on
   the permissions (refresh integrated, [INV-31] class); `build_agent_env_argv`
   emits the scrub `env`-prefix; `drain_agent_pr_create` brokers `gh pr create`;
-  `cleanup_github_auth` reaps the second daemon.
+  `drain_agent_bot_triggers` brokers the real-user bot-trigger comments via
+  `gh-as-user.sh`; `cleanup_github_auth` reaps the second daemon.
 - **Consumer**: `lib-agent.sh::_run_with_timeout` prepends the scrub prefix to
   EVERY adapter invocation (CLI-agnostic — claude/codex/gemini/kiro/opencode/agy/
   generic all route through it), **before** `AGENT_LAUNCHER_ARGV` so the launcher
@@ -3741,8 +3745,10 @@ an agent that runs `gh pr review --approve` / `gh pr merge` gets a deterministic
   `setup_github_auth`; the dev wrapper drains the PR-create broker, and BOTH its
   normal prompt and the [INV-45] open-PR fast-path block route `gh pr create`
   through that broker when scoping is armed (the fast path would otherwise 403 on
-  a direct create — #234 review [P1] #2); the review wrapper posts the brokered
-  E2E report (`lib-review-e2e.sh::_post_brokered_e2e_report`).
+  a direct create — #234 review [P1] #2); the dev wrapper also drains the
+  bot-trigger broker (posts `/q review` etc. via `gh-as-user.sh`, since the agent's
+  `GH_USER_PAT` is scrubbed — #234 review [P1] f97959a3); the review wrapper posts
+  the brokered E2E report (`lib-review-e2e.sh::_post_brokered_e2e_report`).
 - **Degraded mode (PAT)**: `GH_AUTH_MODE=token` — a PAT cannot be down-scoped at
   mint, so there is NO second token. `setup_agent_token` logs a ONE-TIME WARN
   ("enforcement degraded to convention in PAT mode"), `build_agent_env_argv`

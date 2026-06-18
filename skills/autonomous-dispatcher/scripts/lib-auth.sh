@@ -291,11 +291,11 @@ setup_agent_token() {
 #   - sets GH_TOKEN=<scoped snapshot> as a FALLBACK for any direct `gh` resolution
 #     that bypasses the refresh shim (the shim, when GH_TOKEN_FILE is set, re-reads
 #     the file and overrides this snapshot — so the file always wins when fresh).
-#   - unsets GITHUB_PERSONAL_ACCESS_TOKEN (the App-token alias; no full-write leak).
-#     GH_USER_PAT is INTENTIONALLY preserved — it is the operator's real-user PAT
-#     the agent uses via `gh-as-user.sh` to trigger the built-in review bots
-#     (#234 review [P1]); it is NOT the wrapper's full-write App token. See the
-#     in-body NOTE for the full rationale.
+#   - unsets GITHUB_PERSONAL_ACCESS_TOKEN (the App-token alias) AND GH_USER_PAT (the
+#     host-user PAT — a scoped agent retaining it could `export GH_TOKEN=$GH_USER_PAT`
+#     and regain approve/merge, defeating the contract; #234 review [P1] f97959a3).
+#     The agent's only legitimate use of GH_USER_PAT — bot-trigger comments — is now
+#     BROKERED through the wrapper (AGENT_BOT_TRIGGER_FILE + drain_agent_bot_triggers).
 #
 # PATH is REWRITTEN, not left unchanged: the wrapper's per-run GH_WRAPPER_DIR shim
 # entry is STRIPPED (issue #234 AC #1: the agent env dump must show "no wrapper gh
@@ -332,22 +332,21 @@ build_agent_env_argv() {
   scoped=$(cat "$AGENT_GH_TOKEN_FILE" 2>/dev/null) || return 0
   [[ -n "$scoped" ]] || return 0
 
-  # NOTE ([INV-78], #234 review [P1]): GH_USER_PAT is DELIBERATELY NOT unset. It is
-  # the operator's real-user PAT that the agent is *supposed* to use via
-  # `bash scripts/gh-as-user.sh` to trigger the built-in review bots (`/q review`,
-  # `/codex review`, `@claude review` — all three reject GitHub-App bot accounts;
-  # autonomous-dev SKILL Step 10/11 mandates gh-as-user.sh). Unsetting it broke
-  # bot-trigger comments on REVIEW_BOTS projects that rely on GH_USER_PAT with no
-  # host `gh auth` session — gh-as-user.sh fell through to its "no user auth → skip"
-  # branch and the bots never ran. It is a SEPARATE, operator-provisioned credential,
-  # not the wrapper's full-write App token (the #234 containment target). The App
-  # token (GH_TOKEN_FILE / the full-write GH_TOKEN / GITHUB_PERSONAL_ACCESS_TOKEN) is
-  # still fully scoped/scrubbed below. (gh-as-user.sh itself does
-  # `env -u GH_TOKEN_FILE GH_TOKEN="$GH_USER_PAT"`, so the scoped GH_TOKEN_FILE we set
-  # here never leaks into its bot-trigger call.)
+  # [INV-78] GH_USER_PAT is SCRUBBED from the agent subtree. It is a host-user PAT
+  # (typically `repo`-scoped) — a scoped agent that retained it could
+  # `export GH_TOKEN="$GH_USER_PAT"` (or invoke gh-as-user.sh) and regain
+  # approve/merge, defeating #234's core contract that the agent gets ONLY the
+  # scoped token and the wrapper is the SOLE approve/merge path (#234 review [P1],
+  # session f97959a3). The agent's only legitimate use of GH_USER_PAT is posting
+  # bot-trigger comments (`/q review` etc.); those are now BROKERED — the agent
+  # writes trigger requests to AGENT_BOT_TRIGGER_FILE and the WRAPPER posts them via
+  # gh-as-user.sh post-run (drain_agent_bot_triggers), keeping the PAT in the
+  # wrapper shell only. GITHUB_PERSONAL_ACCESS_TOKEN (the App-token alias) is also
+  # unset; the App token is scoped via GH_TOKEN_FILE / GH_TOKEN below.
   _env_out=(
     env
     -u GITHUB_PERSONAL_ACCESS_TOKEN
+    -u GH_USER_PAT
     "GH_TOKEN_FILE=${AGENT_GH_TOKEN_FILE}"
     "GH_TOKEN=${scoped}"
   )
@@ -462,6 +461,68 @@ drain_agent_pr_create() {
   else
     echo "WARN: [INV-78] brokered 'gh pr create' (head=${branch}) failed — the success path's no-PR retry will re-queue the issue to pending-dev." >&2
   fi
+  return 0
+}
+
+# [INV-78] drain_agent_bot_triggers — the bot-trigger broker. The built-in review
+# bots (`/q review`, `/codex review`, `@claude review`) reject GitHub-App-attributed
+# comments, so the trigger must be posted by a REAL user via gh-as-user.sh (which
+# reads GH_USER_PAT). But GH_USER_PAT is SCRUBBED from the agent subtree (#234 review
+# [P1] f97959a3 — a scoped agent retaining it could regain approve/merge), so the
+# agent can no longer post the trigger itself. Instead the agent WRITES the trigger
+# phrase(s) to AGENT_BOT_TRIGGER_FILE and the WRAPPER (which has GH_USER_PAT in its
+# own shell) posts them here, post-run, via gh-as-user.sh — keeping the PAT in the
+# wrapper only. Narrow broker: exactly bot-trigger PR comments, distinct from the
+# out-of-scope "allow-list shim for arbitrary agent writes".
+#
+# File format (the agent writes it): one trigger phrase per line, e.g.
+#   /q review
+#   /codex review
+# Blank lines and `#`-comment lines are ignored. Each phrase is posted as a PR
+# comment on the issue's PR. The wrapper resolves the PR number itself (same
+# body-#N selector as PR_EXISTS) — the agent does not need to know it.
+#
+# Fail-safe + idempotent: a no-op unless the scoped token is armed
+# (AGENT_GH_TOKEN_FILE set — so this only brokers in the scrubbed-agent case) AND
+# AGENT_BOT_TRIGGER_FILE is set + non-empty AND a PR exists. Returns 0 always; a
+# failed post is logged, not fatal. gh-as-user.sh resolves via _LIB_AUTH_DIR (the
+# project-side scripts dir), the same place the agent's `bash scripts/gh-as-user.sh`
+# would have found it.
+#
+# Args: $1=issue_number, $2=repo. Reads AGENT_GH_TOKEN_FILE / AGENT_BOT_TRIGGER_FILE.
+drain_agent_bot_triggers() {
+  local issue_number="$1" repo="$2"
+  [[ -n "$AGENT_GH_TOKEN_FILE" ]] || return 0
+  [[ -n "${AGENT_BOT_TRIGGER_FILE:-}" && -s "${AGENT_BOT_TRIGGER_FILE}" ]] || return 0
+
+  local gh_as_user="${_LIB_AUTH_DIR}/gh-as-user.sh"
+  if [[ ! -f "$gh_as_user" ]]; then
+    echo "WARN: [INV-78] agent requested bot triggers but ${gh_as_user} is absent — skipping (project has no gh-as-user.sh)." >&2
+    return 0
+  fi
+
+  # Resolve the PR number for this issue (same body-#N selector as PR_EXISTS).
+  local pr_number
+  pr_number=$(gh pr list --repo "$repo" --state open --json number,body \
+    -q "[.[] | select(.body | test(\"#${issue_number}[^0-9]\") or test(\"#${issue_number}\$\"))] | (.[0].number // empty)" 2>/dev/null || true)
+  if ! [[ "$pr_number" =~ ^[0-9]+$ ]]; then
+    echo "WARN: [INV-78] agent requested bot triggers but no open PR found for issue #${issue_number} — skipping." >&2
+    return 0
+  fi
+
+  local line posted=0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    # Trim leading/trailing whitespace; skip blanks and #-comments.
+    line="${line#"${line%%[![:space:]]*}"}"; line="${line%"${line##*[![:space:]]}"}"
+    [[ -z "$line" || "$line" == \#* ]] && continue
+    if bash "$gh_as_user" pr comment "$pr_number" --repo "$repo" --body "$line" >/dev/null 2>&1; then
+      posted=$((posted + 1))
+    else
+      echo "WARN: [INV-78] brokered bot-trigger post failed for PR #${pr_number} body='${line}' (gh-as-user.sh — GH_USER_PAT / host auth may be unset)." >&2
+    fi
+  done < "${AGENT_BOT_TRIGGER_FILE}"
+
+  [[ "$posted" -gt 0 ]] && echo "[INV-78] wrapper brokered ${posted} bot-trigger comment(s) onto PR #${pr_number} via gh-as-user.sh (agent wrote ${AGENT_BOT_TRIGGER_FILE})." >&2
   return 0
 }
 

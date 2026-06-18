@@ -94,9 +94,11 @@ agy/generic the agent subtree gets:
 - `GH_TOKEN` = the scoped token as a snapshot fallback (the shim re-reads the file
   and overrides it, so the fresh file wins).
 - `GITHUB_PERSONAL_ACCESS_TOKEN` **unset** (the App-token alias). `GH_USER_PAT` is
-  **preserved** — the agent uses it via `gh-as-user.sh` to trigger the built-in
-  review bots (those reject App-bot accounts); it is a separate operator credential,
-  not the wrapper's App token (#234 review [P1]).
+  **scrubbed** too — a scoped agent retaining that host-user PAT could
+  `export GH_TOKEN="$GH_USER_PAT"` and regain approve/merge (#234 review [P1]
+  f97959a3). Bot triggers (`/q review` etc.) are brokered: the agent writes the
+  phrase(s) to `AGENT_BOT_TRIGGER_FILE` and the wrapper posts them via
+  `gh-as-user.sh` (`drain_agent_bot_triggers`), keeping the PAT wrapper-side.
 - `PATH` **rewritten** (#234 review [P1] / AC #1): the wrapper's `GH_WRAPPER_DIR`
   shim entry is **stripped** (AC #1 — agent env shows no wrapper gh shim) and the
   agent's OWN per-run shim dir (`AGENT_GH_SHIM_DIR`, with its own
@@ -130,10 +132,11 @@ is byte-identical to today.
 with ONLY a scoped installation token (`contents:write`, `issues:write`,
 `pull_requests:read`): its `GH_TOKEN_FILE` points at the SCOPED token file (kept
 fresh by the scoped daemon — refresh-aware, not a stale one-time snapshot), and
-`GITHUB_PERSONAL_ACCESS_TOKEN` is unset. `GH_USER_PAT` is PRESERVED (the agent's
-`gh-as-user.sh` bot-trigger path needs it — #234 review [P1]; it is not the
-wrapper's App token). The wrapper's full-write token file (a different path) is
-never exposed. PATH is rewritten: the wrapper's
+`GITHUB_PERSONAL_ACCESS_TOKEN` is unset. `GH_USER_PAT` is SCRUBBED too (a scoped
+agent retaining it could regain approve/merge — #234 review [P1] f97959a3); the
+agent's bot-trigger comments are brokered through the wrapper instead. The wrapper's
+full-write token file (a different path) is never exposed. PATH is rewritten: the
+wrapper's
 `GH_WRAPPER_DIR` shim is stripped (AC #1 — no wrapper gh shim in the agent env) and
 the agent's OWN shim dir (`AGENT_GH_SHIM_DIR`) is prepended, so the agent's bare
 `gh` still resolves (the agent-own shim, reading the scoped `GH_TOKEN_FILE` →

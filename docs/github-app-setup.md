@@ -132,10 +132,12 @@ launching it: the agent process gets `GH_TOKEN_FILE` pointed at the **scoped** t
 file (kept fresh by the scoped daemon — so the agent's `gh` stays valid past the 1h
 App-token TTL), `GH_TOKEN` = the scoped token as a snapshot fallback, and
 `GITHUB_PERSONAL_ACCESS_TOKEN` unset (the wrapper's full-write token file is a
-different path and is never exposed). `GH_USER_PAT` is **preserved** — the agent
-needs it to trigger the built-in review bots via `gh-as-user.sh` (those bots reject
-App-bot accounts), and it is a separate operator credential, not the wrapper's
-full-write App token. `PATH` is rewritten: the wrapper's
+different path and is never exposed). `GH_USER_PAT` is **scrubbed** too — a scoped
+agent retaining that host-user PAT could `export GH_TOKEN="$GH_USER_PAT"` and regain
+approve/merge. The agent still triggers the built-in review bots, but through a
+**broker**: it writes the trigger phrase(s) (`/q review` etc.) to a file and the
+wrapper posts them via `gh-as-user.sh` (the bots reject App-bot accounts), keeping
+`GH_USER_PAT` in the wrapper shell only. `PATH` is rewritten: the wrapper's
 per-run shim dir is stripped and the agent's OWN per-run shim dir is prepended, so
 the agent env carries no wrapper `gh` shim while the agent's bare `gh` still
 resolves (the agent-own `gh-with-token-refresh.sh` shim — the only resolvable `gh`

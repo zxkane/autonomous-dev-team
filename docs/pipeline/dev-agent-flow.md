@@ -91,7 +91,7 @@ environment differs from the wrapper's:
 | `GH_TOKEN` | full-write token | **scoped** token (snapshot fallback) | inherited (shared) |
 | `GH_TOKEN_FILE` | full-write token file | **scoped** token file (`AGENT_GH_TOKEN_FILE`) | inherited |
 | `GITHUB_PERSONAL_ACCESS_TOKEN` | full-write token | **unset** | inherited |
-| `GH_USER_PAT` | host PAT (if set) | **preserved** (agent needs it for `gh-as-user.sh` bot triggers) | inherited |
+| `GH_USER_PAT` | host PAT (if set) | **unset** (bot triggers brokered via the wrapper) | inherited |
 | `PATH` (per-run `GH_WRAPPER_DIR` shim) | present | **wrapper dir stripped; AGENT-own shim dir prepended** | present |
 
 `GH_TOKEN_FILE` is pointed at the **scoped** token file (NOT unset, NOT the
@@ -111,13 +111,15 @@ Both the bare-`gh` (agent-shim) and `bash scripts/gh` (relative-path shim) route
 read the fresh scoped token from `GH_TOKEN_FILE` and `exec gh` with it. So the
 agent authenticates as the scoped identity, stays fresh on long runs, and gets a
 403 on
-`gh pr review --approve` / `gh pr merge`. `GH_USER_PAT` is **preserved** (not
-scrubbed, #234 review [P1]): it is the operator's real-user PAT the agent uses via
-`bash scripts/gh-as-user.sh` to trigger the built-in review bots (Step 10/11) —
-those bots reject GitHub-App bot accounts, so scrubbing `GH_USER_PAT` (when there is
-no host `gh auth` session) sent `gh-as-user.sh` to its "no user auth → skip" branch
-and the bots never ran. `GH_USER_PAT` is a separate operator credential, not the
-wrapper's full-write App token (which stays scoped). Because
+`gh pr review --approve` / `gh pr merge`. `GH_USER_PAT` is **scrubbed** (#234 review
+[P1] f97959a3): it is a host-user PAT (typically `repo`-scoped), so a scoped agent
+retaining it could `export GH_TOKEN="$GH_USER_PAT"` and regain approve/merge. The
+agent's only legitimate use of it — posting the real-user bot-trigger comments
+(`/q review`, `/codex review`, `@claude review`; those bots reject GitHub-App
+accounts; Step 10/11) — is **brokered**: the agent writes the trigger phrase(s) to
+`AGENT_BOT_TRIGGER_FILE` and the wrapper posts them via `bash scripts/gh-as-user.sh`
+post-run (`drain_agent_bot_triggers`), keeping `GH_USER_PAT` in the wrapper shell
+only. Because
 `pull_requests:read` also blocks `gh pr create`, the dev agent writes a
 `branch: <head>` line + the PR title+body to `AGENT_PR_CREATE_FILE` and the
 wrapper opens the PR with an **explicit `--head <branch>`**

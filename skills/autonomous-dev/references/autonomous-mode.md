@@ -173,6 +173,8 @@ All built-in bots reject GitHub App bot triggers; `scripts/gh-as-user.sh` posts 
 
 > Do NOT use the default `gh` wrapper (`gh-with-token-refresh.sh`) for bot review triggers -- it authenticates as a bot, which some reviewers ignore. All other `gh` operations should continue using the default `gh` wrapper.
 
+> **Scoped-token runs ([INV-78]):** when the dispatch wrapper runs the agent under the two-token split (app mode), `GH_USER_PAT` is scrubbed from the agent environment, so `gh-as-user.sh` cannot authenticate as a real user from inside the agent. In that mode the wrapper injects a "Credential note" into the prompt telling the agent to instead write the trigger phrase(s) — one per line — to `$AGENT_BOT_TRIGGER_FILE`; the wrapper posts them via `gh-as-user.sh` post-run. Follow the prompt's instruction when present; otherwise (PAT mode / no scoping) call `gh-as-user.sh` directly as above.
+
 **Wait for bot review** (poll every 30 seconds, timeout 3 minutes):
 
 ```bash

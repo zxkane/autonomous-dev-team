@@ -266,6 +266,20 @@ else
 fi
 export AGENT_PR_CREATE_FILE
 
+# [INV-78] Bot-trigger broker file. GH_USER_PAT is scrubbed from the agent subtree
+# (#234 review [P1]), so the agent can no longer post the real-user bot-trigger
+# comments (`/q review` etc.) itself. Instead it writes the trigger phrase(s) here
+# and the wrapper posts them via gh-as-user.sh in cleanup (drain_agent_bot_triggers,
+# which has GH_USER_PAT in the wrapper shell). Exported so it survives the scrub;
+# same per-run-dir / mktemp placement + scoping-gated no-op semantics as the
+# PR-create broker above.
+if [[ -n "${GH_WRAPPER_DIR:-}" && -d "${GH_WRAPPER_DIR}" ]]; then
+  AGENT_BOT_TRIGGER_FILE="${GH_WRAPPER_DIR}/agent-bot-triggers"
+else
+  AGENT_BOT_TRIGGER_FILE="$(mktemp "/tmp/agent-bot-triggers-${ISSUE_NUMBER}-XXXXXX")"
+fi
+export AGENT_BOT_TRIGGER_FILE
+
 # Heartbeat: refresh PID-file mtime on a timer so the dispatcher's
 # pid_alive mtime fallback (#111 Part B) can distinguish a transient
 # `kill -0` race from a genuinely dead wrapper. Disabled when
@@ -639,6 +653,15 @@ EOF
   PR_EXISTS=$(gh pr list --repo "$REPO" --state open --json body \
     -q "[.[] | select(.body | test(\"#${ISSUE_NUMBER}[^0-9]\") or test(\"#${ISSUE_NUMBER}$\"))] | length" 2>/dev/null || echo "0")
 
+  # [INV-78] Bot-trigger broker: if the scoped agent token is armed and the agent
+  # wrote bot-trigger phrase(s) (it cannot post them itself — GH_USER_PAT is scrubbed
+  # from its subtree), post them now via gh-as-user.sh with the wrapper's GH_USER_PAT.
+  # Runs AFTER drain_agent_pr_create so the PR exists; the helper resolves the PR
+  # number itself and no-ops when scoping is off / no triggers / no PR.
+  if [[ "${PR_EXISTS:-0}" -gt 0 ]]; then
+    drain_agent_bot_triggers "$ISSUE_NUMBER" "$REPO" || true
+  fi
+
   # SIGTERM convergence (INV-15): Step 5a only kills us when a PR is ready.
   # Treat SIGTERM+PR as a successful handoff (exit_code → 0) so the success
   # branch routes to pending-review instead of the failure branch routing to
@@ -781,6 +804,18 @@ variable (\`\$(printenv AGENT_PR_CREATE_FILE)\`) with EXACTLY this layout:
 The WRAPPER will run \`gh pr create --head <your-branch>\` for you after you finish.
 Still push your branch with \`git push\` as usual (your token has contents:write).
 Everything else (progress comments, checkbox ticks) works with your token directly.
+
+### Triggering the built-in review bots ([INV-78])
+Your scoped token also CANNOT post the real-user bot-trigger comments (\`/q review\`,
+\`/codex review\`, \`@claude review\`) — those bots reject GitHub-App-attributed
+comments and the host PAT is not in your environment. Do NOT run
+\`gh-as-user.sh\` yourself (it will not authenticate). Instead, if the project's
+\`REVIEW_BOTS\` requires triggering a bot review, WRITE the trigger phrase(s) — one
+per line — to the file in the \`AGENT_BOT_TRIGGER_FILE\` environment variable
+(\`\$(printenv AGENT_BOT_TRIGGER_FILE)\`), e.g.:
+  /q review
+  /codex review
+The WRAPPER posts each as a real user via gh-as-user.sh after you finish.
 
 BROKER_BLOCK
 )"

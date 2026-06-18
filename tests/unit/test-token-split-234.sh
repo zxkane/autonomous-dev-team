@@ -235,12 +235,13 @@ if printf '%s' "$pfx" | grep -qF -- '-u GITHUB_PERSONAL_ACCESS_TOKEN'; then
 else
   assert_fail "scrub prefix missing -u GITHUB_PERSONAL_ACCESS_TOKEN: $pfx"
 fi
-# #234 review [P1]: GH_USER_PAT must NOT be unset — the agent needs it for the
-# mandated `bash scripts/gh-as-user.sh` bot-trigger path on REVIEW_BOTS projects.
-if ! printf '%s' "$pfx" | grep -qF -- '-u GH_USER_PAT'; then
-  assert_pass "scrub prefix does NOT unset GH_USER_PAT (gh-as-user.sh bot triggers still work)"
+# #234 review [P1] (f97959a3): GH_USER_PAT MUST be unset — a scoped agent retaining
+# it could `export GH_TOKEN=$GH_USER_PAT` and regain approve/merge. Bot triggers are
+# brokered through the wrapper instead (drain_agent_bot_triggers).
+if printf '%s' "$pfx" | grep -qF -- '-u GH_USER_PAT'; then
+  assert_pass "scrub prefix unsets GH_USER_PAT (agent can't regain the PAT's approve/merge; bot triggers brokered)"
 else
-  assert_fail "scrub prefix unsets GH_USER_PAT — breaks gh-as-user.sh bot triggers ([P1] regression): $pfx"
+  assert_fail "scrub prefix does NOT unset GH_USER_PAT — a scoped agent could regain approve/merge ([P1] regression): $pfx"
 fi
 
 # ---------------------------------------------------------------------------
@@ -358,12 +359,13 @@ if ! grep -qE '^GITHUB_PERSONAL_ACCESS_TOKEN=' "$ENVDUMP" 2>/dev/null; then
 else
   assert_fail "agent env still carries GITHUB_PERSONAL_ACCESS_TOKEN — scrub incomplete"
 fi
-# #234 review [P1]: GH_USER_PAT is INTENTIONALLY preserved — the agent needs it for
-# the mandated gh-as-user.sh bot-trigger path. The harness exported GH_USER_PAT=fullpat.
-if grep -qE '^GH_USER_PAT=fullpat$' "$ENVDUMP" 2>/dev/null; then
-  assert_pass "agent env KEEPS GH_USER_PAT (gh-as-user.sh bot triggers work; it is NOT the wrapper's App token)"
+# #234 review [P1] (f97959a3): GH_USER_PAT is SCRUBBED — a scoped agent retaining it
+# could regain approve/merge. The harness exported GH_USER_PAT=fullpat; it must be
+# gone from the agent dump. Bot triggers are brokered through the wrapper instead.
+if ! grep -qE '^GH_USER_PAT=' "$ENVDUMP" 2>/dev/null; then
+  assert_pass "agent env has NO GH_USER_PAT (scrubbed — agent can't regain the PAT's approve/merge)"
 else
-  assert_fail "agent env lost GH_USER_PAT — gh-as-user.sh bot triggers would break ([P1] regression)"
+  assert_fail "agent env still carries GH_USER_PAT — a scoped agent could regain approve/merge ([P1] regression)"
 fi
 # #234 review [P1] (AC #1 — "no wrapper gh shim"): the agent PATH must NOT carry the
 # WRAPPER's GH_WRAPPER_DIR; it must carry the AGENT's OWN shim dir instead, so bare
@@ -647,17 +649,15 @@ fi
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== TC-TOKEN-SPLIT-095: under the scrub, gh-as-user.sh authenticates with GH_USER_PAT (bot triggers work) (#234 [P1]) ==="
+echo "=== TC-TOKEN-SPLIT-095: GH_USER_PAT is scrubbed from the agent; bot triggers are BROKERED through the wrapper (#234 [P1] f97959a3) ==="
 # ---------------------------------------------------------------------------
-# #234 review [P1]: the scrub used to unset GH_USER_PAT, so the agent's mandated
-# `bash scripts/gh-as-user.sh pr comment "/q review"` lost its real-user auth and
-# the built-in review bots never triggered. The fix keeps GH_USER_PAT in the agent
-# env. We prove this HERMETICALLY (no real `gh` exec — gh-as-user.sh's priority-1
-# `exec env … gh …` would invoke a network-touching gh and hang on a CI/dev box):
-# (a) apply the REAL scrub prefix to a trivial child that echoes $GH_USER_PAT —
-#     proving the agent subtree still sees it (so gh-as-user.sh's priority-1
-#     `[[ -n "$GH_USER_PAT" ]]` is TRUE); and
-# (b) source-level: gh-as-user.sh's priority 1 keys on GH_USER_PAT.
+# #234 review [P1] (f97959a3): preserving GH_USER_PAT let a scoped agent
+# `export GH_TOKEN=$GH_USER_PAT` and regain approve/merge. So GH_USER_PAT is now
+# SCRUBBED, and the agent's bot-trigger comments are BROKERED — the agent writes
+# trigger phrases to AGENT_BOT_TRIGGER_FILE and the wrapper posts them via
+# gh-as-user.sh (which has GH_USER_PAT only in the wrapper shell). We prove both
+# HERMETICALLY (no real gh / gh-as-user.sh exec — stub them).
+# (a) the agent subtree does NOT see GH_USER_PAT under the scrub:
 out95=$(env -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR -u GH_TOKEN -u GH_TOKEN_FILE -u GITHUB_PERSONAL_ACCESS_TOKEN -u GH_USER_PAT \
   PATH="/usr/bin:/bin" bash -c "
   source '$SBA/lib-auth.sh'
@@ -666,24 +666,64 @@ out95=$(env -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR -u GH_TOKEN -u GH_TOKEN_FILE -
   AGENT_GH_TOKEN_FILE=\"\$wdir/agent-token\"; echo 'SCOPED-tok' > \"\$AGENT_GH_TOKEN_FILE\"
   AGENT_GH_SHIM_DIR=\$(mktemp -d /tmp/agent-shim-XXXXXX)
   declare -a p=(); build_agent_env_argv p
-  # Apply the prefix to a trivial child: report whether GH_USER_PAT survived AND
-  # whether the App-token aliases were scrubbed — exactly what gh-as-user.sh's
-  # priority-1 guard reads. No real gh, no network.
   \"\${p[@]}\" bash -c 'echo \"SEEN pat=\${GH_USER_PAT:-<unset>} ppat=\${GITHUB_PERSONAL_ACCESS_TOKEN:-<unset>}\"'
   rm -rf \"\$wdir\" \"\$AGENT_GH_SHIM_DIR\"
 ")
-if printf '%s' "$out95" | grep -qF 'SEEN pat=USER-PAT-realuser ppat=<unset>'; then
-  assert_pass "under the scrub the agent subtree KEEPS GH_USER_PAT (gh-as-user.sh priority-1 fires) while GITHUB_PERSONAL_ACCESS_TOKEN is scrubbed"
+if printf '%s' "$out95" | grep -qF 'SEEN pat=<unset> ppat=<unset>'; then
+  assert_pass "agent subtree has NO GH_USER_PAT (scrubbed — can't regain approve/merge) nor the App-token alias"
 else
-  assert_fail "agent subtree lost GH_USER_PAT (or kept the App-token alias) — gh-as-user.sh bot triggers would break ([P1] regression): $out95"
+  assert_fail "agent subtree still sees GH_USER_PAT / App-token alias under the scrub ([P1] regression): $out95"
 fi
-# (b) source-level lockdown: gh-as-user.sh's priority-1 branch keys on GH_USER_PAT.
-GHASUSER="$PROJECT_ROOT/skills/autonomous-common/scripts/gh-as-user.sh"
-if grep -qE 'if \[\[ -n "\$\{GH_USER_PAT:-\}" \]\]' "$GHASUSER" \
-   && grep -qF 'GH_TOKEN="$GH_USER_PAT"' "$GHASUSER"; then
-  assert_pass "source: gh-as-user.sh priority-1 authenticates with GH_USER_PAT (the var the scrub now preserves)"
+# (b) drain_agent_bot_triggers posts each trigger phrase via gh-as-user.sh (the
+#     wrapper holds GH_USER_PAT). Stub gh (pr list → PR 42) + a stub gh-as-user.sh
+#     that records its posts. No real gh / network.
+SBA95="$TMPROOT/bt-sandbox"; mkdir -p "$SBA95"
+cp "$SCRIPTS/lib-auth.sh" "$SBA95/"
+printf '#!/bin/bash\nload_autonomous_conf(){ return 0; }\n' > "$SBA95/lib-config.sh"
+printf '#!/bin/bash\nget_gh_app_token(){ echo X; }\nget_gh_app_scoped_token(){ echo X; }\n' > "$SBA95/gh-app-token.sh"
+BT_POSTS="$TMPROOT/bt-posts.log"; : > "$BT_POSTS"
+cat > "$SBA95/gh-as-user.sh" <<GAU
+#!/bin/bash
+printf 'GAU %s\n' "\$*" >> '$BT_POSTS'
+GAU
+chmod +x "$SBA95/gh-as-user.sh"
+GHSB95="$TMPROOT/bt-gh"; mkdir -p "$GHSB95"
+cat > "$GHSB95/gh" <<'GH'
+#!/bin/bash
+if [[ "$1" == "pr" && "$2" == "list" ]]; then echo 42; exit 0; fi
+exit 0
+GH
+chmod +x "$GHSB95/gh"
+BTF95="$TMPROOT/bt-file"; printf '/q review\n# comment\n\n/codex review\n' > "$BTF95"
+PATH="$GHSB95:$PATH" bash -c "
+  source '$SBA95/lib-auth.sh'
+  AGENT_GH_TOKEN_FILE='/some/scoped/token'   # scoping armed
+  AGENT_BOT_TRIGGER_FILE='$BTF95'
+  drain_agent_bot_triggers 234 owner/repo
+" >/dev/null 2>&1
+posts=$(grep -c '^GAU' "$BT_POSTS" 2>/dev/null || echo 0)
+# The skipped `# comment` line would appear as a `--body # comment` post if not
+# skipped; assert that exact body never posted (NOT a bare 'comment' substring,
+# which the `pr comment` subcommand contains).
+if [[ "$posts" -eq 2 ]] \
+   && grep -qF -- '--body /q review' "$BT_POSTS" && grep -qF -- '--body /codex review' "$BT_POSTS" \
+   && ! grep -qF -- '--body # comment' "$BT_POSTS"; then
+  assert_pass "drain_agent_bot_triggers posted the 2 trigger phrases via gh-as-user.sh (blank + #comment lines skipped)"
 else
-  assert_fail "source: gh-as-user.sh priority-1 no longer keys on GH_USER_PAT — the preserve-GH_USER_PAT fix would be moot"
+  assert_fail "bot-trigger broker did not post exactly the 2 phrases (posts=$posts): $(cat "$BT_POSTS" 2>/dev/null)"
+fi
+# (c) scoping OFF → broker no-ops.
+: > "$BT_POSTS"
+PATH="$GHSB95:$PATH" bash -c "
+  source '$SBA95/lib-auth.sh'
+  AGENT_GH_TOKEN_FILE=''   # scoping OFF
+  AGENT_BOT_TRIGGER_FILE='$BTF95'
+  drain_agent_bot_triggers 234 owner/repo
+" >/dev/null 2>&1
+if [[ ! -s "$BT_POSTS" ]]; then
+  assert_pass "scoping off: drain_agent_bot_triggers is a no-op (no spurious bot triggers)"
+else
+  assert_fail "scoping off: broker posted triggers it shouldn't have: $(cat "$BT_POSTS" 2>/dev/null)"
 fi
 
 # ---------------------------------------------------------------------------
