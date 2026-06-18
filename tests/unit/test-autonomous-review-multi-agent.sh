@@ -303,18 +303,21 @@ assert_grep "TC-MAR-SRC-07 launcher neutralized for non-claude member (INV-38)" 
 # subshell's AGENT_PID_FILE is reassigned away from the wrapper's $PID_FILE.
 assert_grep "TC-MAR-SRC-08 per-agent subshell reassigns AGENT_PID_FILE to a private sidecar (no shared-PID thrash)" \
   'AGENT_PID_FILE="\$\{_FANOUT_DIR\}/\$\{?_agent_session_id\}?\.pgid"|unset AGENT_PID_FILE' "$WRAPPER"
-# TC-MAR-SRC-09 (regression for the fan-out hang): the wrapper MUST wait only
+# TC-MAR-SRC-09 (regression for the fan-out hang): the wrapper MUST observe only
 # the backgrounded fan-out subshells by their COLLECTED PIDs — never a bare
 # `wait`. A bare `wait` blocks on ALL background jobs, including the long-lived
 # gh-token-refresh-daemon and the heartbeat sleep loop, which never exit — so
 # the wrapper would hang forever after the agents finish, stranding the issue
 # in `reviewing`. Therefore: (a) each `) &` subshell's PID is appended to a
-# fan-out PID array, and (b) the wait targets that array, and (c) there is NO
-# bare `wait` line anywhere in the wrapper.
+# fan-out PID array, and (b) the completion-observe loop iterates THAT array
+# (INV-78 [P1] #2, #233: a bounded loop that breaks when all `_fanout_pids`
+# exited via `kill -0` OR all artifacts landed — replacing the prior bare
+# `wait "${_fanout_pids[@]}"`; still PID-array-scoped, never the daemon/heartbeat),
+# and (c) there is NO bare `wait` line anywhere in the wrapper.
 assert_grep "TC-MAR-SRC-09a fan-out collects each subshell PID (\$!)" \
   '_fanout_pids\+=\("?\$!"?\)' "$WRAPPER"
-assert_grep "TC-MAR-SRC-09b wrapper waits the COLLECTED fan-out PIDs (not bare wait)" \
-  'wait "\$\{_fanout_pids\[@\]\}"' "$WRAPPER"
+assert_grep "TC-MAR-SRC-09b completion-observe loop iterates the COLLECTED fan-out PIDs via kill -0 (not bare wait, not the daemon)" \
+  'for _fp in "\$\{_fanout_pids\[@\]\}"' "$WRAPPER"
 assert_not_grep "TC-MAR-SRC-09c no bare \`wait\` (would also wait the token-refresh daemon + heartbeat → hang)" \
   '^[[:space:]]*wait[[:space:]]*(#.*)?$|^[[:space:]]*wait[[:space:]]*;' "$WRAPPER"
 assert_grep "TC-MAR-SRC-10 per-agent jq verdict predicate keys on Review Agent:" \

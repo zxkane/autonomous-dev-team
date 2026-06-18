@@ -231,6 +231,41 @@ assert_eq "TC-VERDICT-ARTIFACT-040z jq fallback still accepts a valid golden" \
 assert_eq "TC-VERDICT-ARTIFACT-040y jq fallback still accepts a valid FAIL golden (findings array w/ title)" \
   "valid" "$(_validate_verdict_artifact_jq "$EXAMPLES/verdict-artifact.golden.fail.json" && echo valid || echo malformed)"
 
+# --- [P1] #1 (#233 review round-4): human-facing body rendered from the artifact
+GPASS_JSON="$(cat "$EXAMPLES/verdict-artifact.golden.pass.json")"
+GFAIL_JSON="$(cat "$EXAMPLES/verdict-artifact.golden.fail.json")"
+# TC-041 PASS body first line is the canonical `Review PASSED` prefix.
+assert_grep_first() { local d="$1" pat="$2" body="$3"; if printf '%s' "$body" | head -n1 | grep -qE "$pat"; then echo -e "  ${GREEN}PASS${NC}: $d"; PASS=$((PASS+1)); else echo -e "  ${RED}FAIL${NC}: $d (first line: $(printf '%s' "$body" | head -n1))"; FAIL=$((FAIL+1)); fi; }
+assert_grep_first "TC-VERDICT-ARTIFACT-041 PASS body first line matches '^Review PASSED'" \
+  '^Review PASSED' "$(_verdict_body_from_artifact_json "$GPASS_JSON")"
+# TC-042 FAIL body first line `Review findings:` AND contains the blocking title.
+assert_grep_first "TC-VERDICT-ARTIFACT-042a FAIL body first line matches '^Review findings:'" \
+  '^Review findings:' "$(_verdict_body_from_artifact_json "$GFAIL_JSON")"
+assert_grep_str "TC-VERDICT-ARTIFACT-042b FAIL body lists the blocking finding title" \
+  "$(_verdict_body_from_artifact_json "$GFAIL_JSON")" "Atomic-write contract not honored"
+# TC-044 rendered FAIL body is NOT double-prefixed (exactly one leading 'Review findings:').
+assert_eq "TC-VERDICT-ARTIFACT-044 FAIL body has exactly one leading 'Review findings:'" \
+  "1" "$(_verdict_body_from_artifact_json "$GFAIL_JSON" | grep -c '^Review findings:')"
+# TC-045 unmappable/empty input → non-empty deterministic classifiable body.
+assert_nonempty "TC-VERDICT-ARTIFACT-045a empty-verdict input → non-empty body" \
+  "$(_verdict_body_from_artifact_json '{}')"
+assert_grep_first "TC-VERDICT-ARTIFACT-045b unmappable verdict → classifiable FAIL stub" \
+  '^Review findings:' "$(_verdict_body_from_artifact_json '{"verdict":"???"}')"
+# TC-048 _all_artifacts_landed: all present → 0; one missing/empty/.tmp-only → non-zero.
+cp "$EXAMPLES/verdict-artifact.golden.pass.json" "$TMP/land-a.json"
+cp "$EXAMPLES/verdict-artifact.golden.pass.json" "$TMP/land-b.json"
+_all_artifacts_landed "$TMP/land-a.json" "$TMP/land-b.json" && _r=0 || _r=1
+assert_eq "TC-VERDICT-ARTIFACT-048a all final files exist → landed (rc 0)" "0" "$_r"
+_all_artifacts_landed "$TMP/land-a.json" "$TMP/missing.json" && _r=0 || _r=1
+assert_eq "TC-VERDICT-ARTIFACT-048b one missing → not landed (rc 1)" "1" "$_r"
+_all_artifacts_landed "$TMP/land-a.json" "" && _r=0 || _r=1
+assert_eq "TC-VERDICT-ARTIFACT-048c empty-string arg → not landed (rc 1)" "1" "$_r"
+cp "$EXAMPLES/verdict-artifact.golden.pass.json" "$TMP/land-c.json.tmp.99"
+_all_artifacts_landed "$TMP/land-c.json" && _r=0 || _r=1
+assert_eq "TC-VERDICT-ARTIFACT-048d only .tmp present, final missing → not landed (rc 1)" "1" "$_r"
+_all_artifacts_landed && _r=0 || _r=1
+assert_eq "TC-VERDICT-ARTIFACT-048e no args → not landed (rc 1)" "1" "$_r"
+
 # ---------------------------------------------------------------------------
 # Part 2: source-of-truth wiring in the wrapper
 # ---------------------------------------------------------------------------
@@ -275,6 +310,27 @@ assert_grep "TC-VERDICT-ARTIFACT-W13 _any_nonsubstantive_drop scans AGENT_VERDIC
 # pass/fail vote — a silent-PASS path the artifact channel forbids.
 assert_grep "TC-VERDICT-ARTIFACT-W14 codex stdout fallback skips an artifact-malformed agent (Clause V1)" \
   'INV-78: codex member .* malformed verdict artifact' "$WRAPPER"
+
+# [P1] #1 (#233 review round-4): the artifact `valid` branch populates
+# AGENT_VERDICT_BODIES from the rendered artifact body so LATEST_COMMENT is
+# non-empty (Reviewed-HEAD trailer posts; FAIL branch substantive) even when the
+# agent's own comment never landed.
+assert_grep "TC-VERDICT-ARTIFACT-W15 valid-artifact branch populates AGENT_VERDICT_BODIES via _verdict_body_from_artifact_json" \
+  'AGENT_VERDICT_BODIES\[\$_i\]=.*_verdict_body_from_artifact_json' "$WRAPPER"
+# The wrapper posts a wrapper-rendered verdict comment for an artifact-resolved
+# agent whose own post FAILED — gated on the INV-69 post-failed breadcrumb (a
+# filesystem stat, NOT a comment-list poll), so the all-artifact happy path makes
+# ZERO comment-list calls (TC-020 preserved).
+assert_grep "TC-VERDICT-ARTIFACT-W16 wrapper re-posts the artifact body via post-verdict.sh when the agent post failed" \
+  '"\$\{AGENT_NAMES\[\$_i\]\}" "\$\{AGENT_SESSION_IDS\[\$_i\]\}" "\$_ar_model"' "$WRAPPER"
+assert_grep "TC-VERDICT-ARTIFACT-W17 the wrapper-render block is breadcrumb-gated (no _fetch on the all-artifact path)" \
+  '_classify_postfail_drop_reason.*# INV-78 artifact-render gate|INV-78.*post-failed breadcrumb' "$WRAPPER"
+# [P1] #2 (#233 review round-4): the fan-out join early-exits when all artifacts
+# land, so a hung agent doesn't hold a landed verdict hostage to the wall-clock cap.
+assert_grep "TC-VERDICT-ARTIFACT-W18 fan-out join observes artifact landing (_all_artifacts_landed) instead of a bare wait" \
+  '_all_artifacts_landed' "$WRAPPER"
+assert_grep "TC-VERDICT-ARTIFACT-W19 early-exit is gated on ALL artifacts landed (preserves INV-48 timeout-veto rc)" \
+  'all artifacts landed|ALL artifacts? (have )?landed|INV-48.*preserv' "$WRAPPER"
 
 # Render-format pins (machine consumers unchanged — these greps must still hold).
 assert_grep "TC-VERDICT-ARTIFACT-W10 dispatcher trailer still emitted (emit_verdict_trailer passed)" \
@@ -349,7 +405,9 @@ run_fleet() {
       valid)
         _art_json="${_art_out#*$'\n'}"
         _art_verdict=$(_verdict_from_artifact_json "$_art_json")
-        AGENT_VERDICTS[$_i]="$_art_verdict"; AGENT_VERDICT_SOURCES[$_i]="artifact" ;;
+        AGENT_VERDICTS[$_i]="$_art_verdict"; AGENT_VERDICT_SOURCES[$_i]="artifact"
+        # [P1] #1 (#233 round-4): mirror the wrapper — populate the body from the artifact.
+        AGENT_VERDICT_BODIES[$_i]="$(_verdict_body_from_artifact_json "$_art_json")" ;;
       malformed)
         AGENT_VERDICT_SOURCES[$_i]="artifact-malformed"
         error_surface "x" "${AGENT_NAMES[$_i]}" "p" "c" "r" "d" "config" ;;
@@ -389,6 +447,26 @@ run_fleet "claude:verdict-artifact.golden.pass.json:" "agy:verdict-artifact.gold
 assert_eq "TC-VERDICT-ARTIFACT-020a all-artifact fleet aggregate pass" "pass" "$FLEET_AGG"
 assert_eq "TC-VERDICT-ARTIFACT-020b all-artifact fleet did ZERO comment polls" "0" "$COMMENT_FETCH_COUNT"
 assert_eq "TC-VERDICT-ARTIFACT-020c source is artifact" "artifact" "${AGENT_VERDICT_SOURCES[0]}"
+
+# TC-043/046/047 ([P1] #1, #233 round-4): an artifact-resolved agent now carries a
+# rendered body, so LATEST_COMMENT is non-empty (Reviewed-HEAD trailer posts; FAIL
+# branch substantive) even when the agent's own comment never landed — and the
+# body round-trips through _classify_verdict_body to the same verdict.
+run_fleet "claude:verdict-artifact.golden.pass.json:" "agy:verdict-artifact.golden.pass.json:"
+assert_nonempty "TC-VERDICT-ARTIFACT-046a artifact-resolved agent has a non-empty rendered body" \
+  "${AGENT_VERDICT_BODIES[0]}"
+# Synthesize LATEST_COMMENT exactly as the wrapper does (concat non-empty bodies).
+_LC=""
+for _bi in "${!AGENT_NAMES[@]}"; do [[ -n "${AGENT_VERDICT_BODIES[$_bi]}" ]] && _LC+="${AGENT_VERDICT_BODIES[$_bi]}"$'\n\n'; done
+assert_nonempty "TC-VERDICT-ARTIFACT-046b all-artifact PASS fleet → synthesized LATEST_COMMENT non-empty (Reviewed-HEAD trailer gate)" "$_LC"
+assert_eq "TC-VERDICT-ARTIFACT-047 adding the body renderer did NOT introduce a comment poll (TC-020 still 0)" \
+  "0" "$COMMENT_FETCH_COUNT"
+# Round-trip: the rendered body classifies back to the artifact verdict.
+assert_eq "TC-VERDICT-ARTIFACT-043a rendered PASS body → _classify_verdict_body=pass" \
+  "pass" "$(_classify_verdict_body "${AGENT_VERDICT_BODIES[0]}")"
+run_fleet "codex:verdict-artifact.golden.fail.json:"
+assert_eq "TC-VERDICT-ARTIFACT-043b rendered FAIL body → _classify_verdict_body=fail" \
+  "fail" "$(_classify_verdict_body "${AGENT_VERDICT_BODIES[0]}")"
 
 # TC-017 — artifact wins over a conflicting comment.
 run_fleet "claude:verdict-artifact.golden.pass.json:$FAIL_BODY"

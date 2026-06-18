@@ -3561,13 +3561,52 @@ comment channel keeps working: the dispatcher's `classify_recent_review_verdict`
 The artifact is the wrapper's **own aggregation** parsing surface; the comment is
 the **human record + the fallback channel**.
 
+**Human-facing body derived from the artifact (#233 review round-4, [P1] #1)**: a
+`valid` artifact populates `AGENT_VERDICT_BODIES` from a body RENDERED off the
+artifact (`_verdict_body_from_artifact_json` — `Review PASSED …` / `Review
+findings:` + numbered blocking list, matching the phrasing the poller and
+post-verdict.sh key on). This makes `LATEST_COMMENT` non-empty whenever any agent
+resolved `valid`, so the `Reviewed HEAD` trailer (INV-04) posts and the FAIL
+branch takes the SUBSTANTIVE path — **even when the artifact is the only
+successful channel** (the agent's own `post-verdict.sh` comment failed). The
+render is a pure string transform (no API, no comment poll — the zero-comment-poll
+AC holds). When the agent's own verdict post FAILED (detected via the INV-69
+`verdict-postfail-<session_id>` BREADCRUMB — a filesystem stat, **not** a
+comment-list call), the wrapper itself posts the artifact-derived body through
+`post-verdict.sh` so a `Review PASSED` / `Review findings:` issue comment always
+lands for the machine consumers. The breadcrumb gate guarantees no double-post (a
+successful agent post leaves no breadcrumb).
+
+**Live artifact-landing completion signal (#233 review round-4, [P1] #2)**: the
+fan-out join is a bounded OBSERVE loop, not a blocking `wait`. It breaks on EITHER
+(a) every collected `_fanout_pids` PID exited (`kill -0` — the backstop, which
+inherits each agent's `_run_with_timeout` 124/137 cap so INV-48's timeout-veto rc
+is preserved) OR (b) **ALL** per-agent artifacts landed (`_all_artifacts_landed` —
+the early exit). A landed verdict is therefore not held hostage by an agent that
+hangs in `post-verdict.sh` / teardown until the wall-clock cap. The early exit is
+gated on ALL artifacts landing (not any): if every artifact is present, every
+agent resolves valid/malformed from its FILE and none flows to the rc-based
+terminal sweep, so a still-running agent's launch rc is never consulted — INV-48
+is not engaged for it; if even one artifact is missing the loop keeps waiting on
+PIDs so the missing-artifact agent still gets its real 124/137 rc. A still-running
+agent the loop early-exits past is group-killed by `_reap_fanout_processes` after
+resolution (its PGID sidecar is written at spawn by `_run_with_timeout`).
+(Edge case, consistent with Clause V1: an agent that writes a MALFORMED artifact
+and then hangs may be early-exited past — `_all_artifacts_landed` checks landing,
+not validity — so it resolves `unavailable`/`malformed-output` rather than the
+`timed-out` veto a missing-artifact hang would get. This is the documented
+"malformed = treated absent → dropped" semantics, not a weakening of INV-48: the
+agent DID deliver output, it was just unparseable.)
+
 - **Path**: `${XDG_STATE_HOME:-$HOME/.local/state}/autonomous-<project>/runs/<run-id>/verdict-<agent>.json`,
   where `<run-id>` is the per-agent minted session UUID (the `Review Session:`
   trailer, INV-20). One run-dir per agent run → no collision across a
   multi-codex fleet. Provisioned (mkdir 0700) + injected into the prompt + exported
   as `VERDICT_ARTIFACT_PATH` by `autonomous-review.sh`.
 - **Producer**: each review agent (instructed by `build_review_prompt`); the
-  wrapper itself for the codex stdout fallback (a no-artifact path).
+  wrapper itself for the codex stdout fallback (a no-artifact path) AND for an
+  artifact-resolved agent whose own `post-verdict.sh` comment failed (the INV-69
+  breadcrumb-gated artifact-derived re-post above).
 - **Consumer**: `autonomous-review.sh` (the artifact-first resolution loop),
   `lib-review-artifact.sh` (`_verdict_artifact_path` / `_classify_verdict_artifact`
   / `_verdict_from_artifact_json` / `_artifact_schema_error`), and
@@ -3592,7 +3631,12 @@ the **human record + the fallback channel**.
   additional-property, non-array finding lists all rejected)**, path provisioning,
   aggregation precedence (artifact > comment; conflict logged), the
   zero-comment-poll AC, malformed → loud envelope + treated-absent, comment-
-  fallback parity, and the timeout-veto regression pin; plus the conformance
+  fallback parity, the timeout-veto regression pin, **the human-facing body
+  rendered from the artifact (TC-041..047: PASS/FAIL first-line phrasing, no
+  double-prefix, LATEST_COMMENT non-empty, round-trips through
+  `_classify_verdict_body`, still zero comment polls)**, and **the `_all_artifacts_landed`
+  completion-signal helper + the breadcrumb-gated wrapper re-post + the
+  ALL-artifacts-landed early-exit gate (TC-048, W15..W19)**; plus the conformance
   manifests asserting `verdict.state` from artifact files and the stub-fleet E2E
   (`run-verdict-artifact-fleet-e2e.sh`) covering a foreign-identity agent.
 

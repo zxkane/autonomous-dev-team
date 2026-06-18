@@ -546,6 +546,29 @@ else
 fi
 rm -rf "$SB"
 
+# TC-PF-BC-07 (#233 review round-4): retry-after-fail — a STALE breadcrumb from a
+# prior failed attempt MUST be CLEARED by a later successful post for the SAME
+# session. Otherwise the INV-78 breadcrumb-gated artifact re-post would
+# double-post (it would believe the agent's comment never landed). Simulate the
+# prior failure by pre-creating the breadcrumb, then run a SUCCESSFUL post and
+# assert it is removed.
+SB=$(make_sandbox 0)
+printf 'body' > "$SB/body.md"
+PID="$SB/piddir"
+BC=$(breadcrumb_path "$SB" "sid-BC07")
+mkdir -p "$PID"; printf 'issue=247\nsession=sid-BC07\ngh_rc=1\n' > "$BC"
+OUT=$(PROJECT_ID=tproj AUTONOMOUS_PID_DIR="$PID" \
+  bash "$SB/post-verdict.sh" 247 pass "$SB/body.md" agy "sid-BC07" 2>/dev/null); RC=$?
+assert_eq "TC-PF-BC-07a retry-success exits 0" "0" "$RC"
+if [[ ! -f "$BC" ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-PF-BC-07b successful post CLEARED the stale post-failed breadcrumb (no double-post)"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-PF-BC-07b stale breadcrumb survived a successful post (would cause an INV-78 double-post)"
+  FAIL=$((FAIL + 1))
+fi
+rm -rf "$SB"
+
 # TC-PF-BC-05: pid dir cannot resolve (PROJECT_ID unset) on a failed post →
 # the helper STILL exits 1 (breadcrumb skipped silently, never aborts).
 SB=$(make_sandbox 1)

@@ -305,6 +305,94 @@ _verdict_from_artifact_json() {
   esac
 }
 
+# _verdict_body_from_artifact_json <canonical-json>
+#
+# Renders the HUMAN-FACING verdict comment body from a VALIDATED artifact ([P1] #1,
+# #233 review round-4). This is the body that populates AGENT_VERDICT_BODIES so the
+# wrapper's own rendering paths work when the artifact is the ONLY successful
+# channel (the agent's post-verdict.sh comment failed/never landed): LATEST_COMMENT
+# becomes non-empty → the Reviewed-HEAD trailer (INV-04) posts and the FAIL branch
+# takes the substantive path; and the wrapper can re-post this body via
+# post-verdict.sh so the comment-format machine consumers (dispatcher INV-03/06/07,
+# dev-resume `Review findings:` parser) keep working.
+#
+# The FIRST LINE matches exactly what lib-review-poll.sh::_classify_verdict_body
+# and post-verdict.sh key on, so a body fed back through post-verdict.sh is NOT
+# double-prefixed:
+#   PASS → `Review PASSED - …` + optional AC-coverage + non-blocking advisories.
+#   FAIL → `Review findings:` + the decision-gate line + a numbered blocking list
+#          (`1. **[BLOCKING] <title>** — <detail> (file:line)`), mirroring the
+#          wording the wrapper's other FAIL comments use.
+#
+# Pure (no globals, no API, no _fetch — preserves the zero-comment-poll AC). jq is
+# guarded; on no-jq / parse failure it falls back to a minimal-but-classifiable
+# deterministic body so it is NEVER empty and NEVER aborts under `set -e`.
+_verdict_body_from_artifact_json() {
+  local _json="$1" _verdict="" _body=""
+  if command -v jq >/dev/null 2>&1; then
+    _verdict="$(jq -r '.verdict // empty' <<<"$_json" 2>/dev/null || true)"
+  fi
+
+  if [[ "$_verdict" == "PASS" ]]; then
+    _body="Review PASSED - verdict from artifact (INV-78); all blocking checks clear."
+    if command -v jq >/dev/null 2>&1; then
+      # Append a compact AC-coverage line + any non-blocking advisories (best-effort).
+      local _ac _nb
+      _ac="$(jq -r '
+        (.evidence.acCoverage // {}) | to_entries
+        | map("- \(.key): \(.value)") | .[]' <<<"$_json" 2>/dev/null || true)"
+      [[ -n "$_ac" ]] && _body="${_body}"$'\n\n'"Acceptance criteria coverage:"$'\n'"${_ac}"
+      _nb="$(jq -r '
+        (.nonBlockingFindings // [])
+        | map("- " + .title + (if .file then " (" + .file + (if .line then ":" + (.line|tostring) else "" end) + ")" else "" end)) | .[]' <<<"$_json" 2>/dev/null || true)"
+      [[ -n "$_nb" ]] && _body="${_body}"$'\n\n'"Non-blocking advisories:"$'\n'"${_nb}"
+    fi
+  elif [[ "$_verdict" == "FAIL" ]]; then
+    local _findings="" _n=0
+    if command -v jq >/dev/null 2>&1; then
+      _n="$(jq -r '(.blockingFindings // []) | length' <<<"$_json" 2>/dev/null || echo 0)"
+      [[ "$_n" =~ ^[0-9]+$ ]] || _n=0
+      _findings="$(jq -r '
+        (.blockingFindings // [])
+        | to_entries
+        | map(
+            "\(.key + 1). **[BLOCKING] \(.value.title)**"
+            + (if .value.detail then " — " + .value.detail else "" end)
+            + (if .value.file then " (" + .value.file + (if .value.line then ":" + (.value.line|tostring) else "" end) + ")" else "" end)
+          ) | .[]' <<<"$_json" 2>/dev/null || true)"
+    fi
+    _body="Review findings:"$'\n\n'"Findings->Decision Gate: ${_n} blocking finding(s) -- FAIL."
+    [[ -n "$_findings" ]] && _body="${_body}"$'\n\n'"${_findings}"
+  else
+    # Unmappable verdict — never silently approve; emit a classifiable FAIL stub.
+    _body="Review findings:"$'\n\n'"Findings->Decision Gate: review FAILED (artifact verdict unmappable)."
+  fi
+
+  # Single trailing newline normalization; strip stray CRs (the body is posted as
+  # a comment, multi-line is fine, but no carriage returns).
+  printf '%s\n' "$_body" | tr -d '\r'
+}
+
+# _all_artifacts_landed <path...>
+#
+# Returns 0 iff EVERY argument is a non-empty path STRING that exists as a regular file
+# ([P1] #2, #233 review round-4). This is the rename-LAND completion signal: the
+# fan-out join early-exits when all per-agent verdict artifacts have landed, so a
+# verdict that already landed is not held hostage by an agent that hangs in
+# post-verdict.sh / teardown until the wall-clock cap. A bare `<path>.tmp` does
+# NOT count (we check the final path only — same no-torn-read guarantee as
+# _classify_verdict_artifact). An empty-string arg (an agent with no provisioned
+# path) makes it return non-zero — we cannot claim "all landed" when a slot has no
+# target. Pure: only `[[ -f ]]` stats, no command substitution, no `set -e` hazard.
+_all_artifacts_landed() {
+  [[ "$#" -gt 0 ]] || return 1
+  local _p
+  for _p in "$@"; do
+    [[ -n "$_p" && -f "$_p" ]] || return 1
+  done
+  return 0
+}
+
 # _artifact_schema_error <path> [<expected-run-id> [<expected-agent>]]
 #
 # Echoes a SINGLE-LINE, sanitized human summary of why <path> failed validation —

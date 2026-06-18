@@ -360,13 +360,27 @@ For each agent the wrapper provisioned (in the fan-out loop) a path
 `${XDG_STATE_HOME:-$HOME/.local/state}/autonomous-<project>/runs/<run-id>/verdict-<agent>.json`
 (run-id = the agent's session UUID), exported it as `VERDICT_ARTIFACT_PATH`, and
 told the agent (in the prompt) to write its verdict JSON there atomically
-(tmp + `mv`). After the fan-out join, `lib-review-artifact.sh::_classify_verdict_artifact`
-reads it ONCE and classifies the §4.3 `verdict.state`:
+(tmp + `mv`). The fan-out join is a **bounded observe loop** (INV-78 [P1] #2): it
+breaks as soon as EITHER all `_fanout_pids` exited (`kill -0`) OR **all** artifacts
+landed (`_all_artifacts_landed`) — so a verdict that already landed is not held
+hostage by an agent that hangs in `post-verdict.sh`/teardown until the wall-clock
+cap. The early exit is gated on ALL artifacts (not any) so a missing-artifact
+agent still gets its real 124/137 launch rc for the INV-48 timeout-veto; a
+still-running agent the loop passes is group-killed by the reaper after
+resolution. Then `lib-review-artifact.sh::_classify_verdict_artifact` reads each
+artifact ONCE and classifies the §4.3 `verdict.state`:
 
 - **`valid`** (schema-pass) → seed `AGENT_VERDICTS[i]` from the artifact
-  (`PASS`→pass / `FAIL`→fail), logged `verdict-source=artifact`. The poll loop
-  then skips that agent → **no comment poll**. When every agent produces a valid
-  artifact, the fleet resolves with **ZERO** comment-list API calls.
+  (`PASS`→pass / `FAIL`→fail) AND populate `AGENT_VERDICT_BODIES[i]` with a
+  human-facing body RENDERED off the artifact (`_verdict_body_from_artifact_json`),
+  logged `verdict-source=artifact`. The body makes `LATEST_COMMENT` non-empty so
+  the `Reviewed HEAD` trailer posts and a FAIL takes the substantive path even
+  when the artifact is the only successful channel ([P1] #1); if the agent's own
+  `post-verdict.sh` comment FAILED (INV-69 breadcrumb present — a filesystem stat,
+  not a comment poll), the wrapper re-posts that body via `post-verdict.sh` so a
+  `Review PASSED`/`Review findings:` comment always lands. The poll loop then skips
+  that agent → **no comment poll**. When every agent produces a valid artifact,
+  the fleet resolves with **ZERO** comment-list API calls.
 - **`malformed`** (file present, schema-fail) → surface a LOUD operator error
   envelope (`VERDICT_ARTIFACT_MALFORMED`, #231) naming the agent + the schema
   error, and treat the artifact as **absent for the vote** (Clause V1 — never a
@@ -385,7 +399,7 @@ machine consumers keep working.
 
 ### Per-agent verdict collection (comment fallback)
 
-For each agent **the artifact-first pass did NOT already resolve**, the wrapper runs ONE verdict jq query with the [INV-20](invariants.md#inv-20-verdict-authenticity-binding-actor--window--trailer-presence) authenticity binding PLUS a per-agent `Review Agent: <name>` discriminator predicate, taking `last` per agent. Each matched comment is classified with the existing two-step FAIL-first rule (`_classify_verdict_body`, in `lib-review-poll.sh`). An agent whose artifact was `artifact-malformed` is NOT comment-polled (INV-77 Clause V1 — its machine output is untrustworthy; the loud envelope + terminal sweep is the contract). A no-verdict agent is resolved at window-expiry by `lib-review-aggregate.sh::_classify_noverdict_agent <rc>` ([INV-48](invariants.md#inv-48-per-side-review-wall-clock-timeout-agent_review_timeout-1h-default-with-browser-e2e-exclusion-and-timeout-veto)): CLI exit `124`/`137` (killed by the review wall-clock cap) → **`timed-out`** (a deciding FAIL veto), any other rc → **`unavailable`** (dropped). The window is the full (INV-43-scaled) poll window — a non-zero exit does **not** drop it early (see [Verdict polling](#verdict-polling), #180), and a verdict (PASS or FAIL) it *did* post always counts, even if the CLI also exited non-zero.
+For each agent **the artifact-first pass did NOT already resolve**, the wrapper runs ONE verdict jq query with the [INV-20](invariants.md#inv-20-verdict-authenticity-binding-actor--window--trailer-presence) authenticity binding PLUS a per-agent `Review Agent: <name>` discriminator predicate, taking `last` per agent. Each matched comment is classified with the existing two-step FAIL-first rule (`_classify_verdict_body`, in `lib-review-poll.sh`). An agent whose artifact was `artifact-malformed` is NOT comment-polled (INV-78 Clause V1 — its machine output is untrustworthy; the loud envelope + terminal sweep is the contract). A no-verdict agent is resolved at window-expiry by `lib-review-aggregate.sh::_classify_noverdict_agent <rc>` ([INV-48](invariants.md#inv-48-per-side-review-wall-clock-timeout-agent_review_timeout-1h-default-with-browser-e2e-exclusion-and-timeout-veto)): CLI exit `124`/`137` (killed by the review wall-clock cap) → **`timed-out`** (a deciding FAIL veto), any other rc → **`unavailable`** (dropped). The window is the full (INV-43-scaled) poll window — a non-zero exit does **not** drop it early (see [Verdict polling](#verdict-polling), #180), and a verdict (PASS or FAIL) it *did* post always counts, even if the CLI also exited non-zero.
 
 ### Aggregation (unanimous PASS)
 

@@ -1927,15 +1927,54 @@ done
 # only. A bare `wait` here would also block on the gh-token-refresh-daemon and
 # the heartbeat loop and hang forever (the bug this guards against).
 #
-# `|| true`: bash's single-PID `wait` (the N=1 fan-out) propagates the
-# subshell's exit code, which under `set -e` would abort the wrapper BEFORE
-# aggregation if that subshell exited non-zero (only reachable if the
-# sidecar `printf` itself failed — e.g. a full tmpfs; run_agent's own rc is
-# already captured into the sidecar via `|| _rc=$?`). We suppress that so the
-# wrapper always proceeds to read the sidecars and aggregate; a missing/
-# unwritten sidecar is then handled as a launch failure (rc=1) below. The
-# multi-PID `wait` already returns 0 regardless of child rc.
-wait "${_fanout_pids[@]}" || true
+# [P1] #2 (#233 review round-4): bounded COMPLETION-OBSERVE loop instead of an
+# unconditional `wait`. A landed verdict artifact must NOT be held hostage by an
+# agent that hangs in post-verdict.sh / teardown until the wall-clock cap — the
+# rename-LAND of the artifact is the completion signal. The loop breaks on EITHER:
+#   (a) every fan-out PID has exited (`kill -0` miss for all) — the legacy
+#       completion, which inherits each agent's `_run_with_timeout` 124/137 cap, so
+#       a genuinely-stuck agent still terminates and its launch rc is preserved
+#       (INV-48 timeout-veto intact); OR
+#   (b) ALL per-agent artifacts have landed (`_all_artifacts_landed`) — the EARLY
+#       exit. This is gated on ALL artifacts landing, NOT any: if every artifact is
+#       present, every agent resolves valid/malformed FROM ITS FILE and NONE flows
+#       to the rc-based terminal sweep, so a still-running agent's (as-yet-unwritten)
+#       launch rc is never consulted — INV-48 is not engaged for it. If even one
+#       artifact is missing we do NOT early-break; we keep waiting on PIDs so the
+#       missing-artifact agent still gets its real 124/137 rc for the timeout-veto.
+# A still-running agent we early-exit past is reaped by _reap_fanout_processes
+# (its PGID sidecar is written at spawn by _run_with_timeout, before the agent
+# body) after verdict resolution. The token-refresh daemon / heartbeat are NOT in
+# `_fanout_pids`, so they are never observed here (unchanged from the bare wait).
+#
+# Defensive: when NO artifact paths were provisioned (e.g. a degraded run), the
+# loop reduces to the legacy "wait until all PIDs exit" behavior. An absolute
+# ceiling (VERDICT_ARTIFACT_OBSERVE_TIMEOUT_SECONDS, default 6h — well above the
+# per-agent cap) guards against an un-reapable PID; on expiry we break to the
+# reaper. The per-round sleep is the shared verdict-poll cadence.
+_observe_deadline=$(( SECONDS + ${VERDICT_ARTIFACT_OBSERVE_TIMEOUT_SECONDS:-21600} ))
+_observe_interval="${_VERDICT_POLL_INTERVAL_SECONDS:-5}"
+while :; do
+  # (a) all fan-out PIDs exited?
+  _any_alive=0
+  for _fp in "${_fanout_pids[@]}"; do
+    if kill -0 "$_fp" 2>/dev/null; then _any_alive=1; break; fi
+  done
+  [[ "$_any_alive" -eq 0 ]] && break
+  # (b) all artifacts landed? (early exit — INV-48-safe, see above). Guarded so a
+  # run with no provisioned paths never early-breaks here (falls to the PID check).
+  if [[ "${#AGENT_ARTIFACT_PATHS[@]}" -gt 0 ]] \
+     && _all_artifacts_landed "${AGENT_ARTIFACT_PATHS[@]}"; then
+    log "INV-78: all ${#AGENT_ARTIFACT_PATHS[@]} verdict artifact(s) landed — proceeding to resolve without waiting on a possibly-hung agent (rename-land completion signal). Lingering agent(s) are reaped after resolution."
+    break
+  fi
+  # Absolute safety ceiling.
+  if [[ "$SECONDS" -ge "$_observe_deadline" ]]; then
+    log "WARNING: INV-78 fan-out observe loop hit the absolute ceiling (${VERDICT_ARTIFACT_OBSERVE_TIMEOUT_SECONDS:-21600}s) with agent(s) still alive and not all artifacts landed — proceeding to reap + resolve."
+    break
+  fi
+  sleep "$_observe_interval"
+done
 
 # Read each agent's launch exit code AND its setsid PGID from the sidecars
 # (INV-43: the PGID must be captured before _FANOUT_DIR is removed below — the
@@ -2068,6 +2107,16 @@ for _i in "${!AGENT_NAMES[@]}"; do
       if [[ "$_art_verdict" == "pass" || "$_art_verdict" == "fail" ]]; then
         AGENT_VERDICTS[$_i]="$_art_verdict"
         AGENT_VERDICT_SOURCES[$_i]="artifact"
+        # [P1] #1 (#233 review round-4): derive the HUMAN-FACING verdict body from
+        # the artifact so the wrapper's own rendering paths work when the artifact
+        # is the ONLY successful channel (the agent's post-verdict.sh comment
+        # failed/never landed). Populating AGENT_VERDICT_BODIES makes LATEST_COMMENT
+        # non-empty downstream → the Reviewed-HEAD trailer (INV-04) posts and the
+        # FAIL branch takes the SUBSTANTIVE path (not the empty-comment crash path).
+        # Pure string render (no API, no _fetch) — preserves the zero-comment-poll
+        # AC. The actual wrapper-rendered comment (when the agent's own post failed)
+        # is posted later, breadcrumb-gated (see the artifact-render block below).
+        AGENT_VERDICT_BODIES[$_i]="$(_verdict_body_from_artifact_json "$_art_json")"
         log "INV-78: resolved review agent '${AGENT_NAMES[$_i]}' verdict-source=artifact verdict=${_art_verdict} (path ${_art_path})"
       else
         # A `valid`-classified artifact whose verdict field is neither PASS nor
@@ -2255,6 +2304,50 @@ for _i in "${!AGENT_NAMES[@]}"; do
     AGENT_VERDICT_SOURCES[$_i]="comment-fallback"
     log "INV-78: resolved review agent '${AGENT_NAMES[$_i]}' verdict-source=comment-fallback verdict=${AGENT_VERDICTS[$_i]} (no artifact; comment channel)"
   fi
+done
+
+# [P1] #1 (#233 review round-4): ENSURE a wrapper-rendered `Review PASSED` /
+# `Review findings:` issue comment LANDS for an artifact-resolved agent whose own
+# post-verdict.sh comment FAILED — so the comment-format machine consumers
+# (dispatcher INV-03/06/07, dev-resume `Review findings:` parser, the
+# submit_request_changes "see the Review findings: comment" reference) keep
+# working when the artifact is the ONLY successful channel.
+#
+# Gated on the INV-69 post-failed BREADCRUMB (`verdict-postfail-<session_id>`,
+# written by post-verdict.sh ONLY when its `gh` post returned non-zero). That
+# breadcrumb is a filesystem stat via _classify_postfail_drop_reason — NOT a
+# comment-list poll — so the all-artifact happy path makes ZERO comment-list API
+# calls (TC-020 preserved) and never calls _fetch_agent_verdict_body. A non-empty
+# breadcrumb PROVES the agent's comment did NOT land, so re-posting cannot
+# double-post (a successful agent post leaves no breadcrumb → this is skipped).
+# The post goes through post-verdict.sh (INV-56 sole-poster). Best-effort: a
+# non-zero post is logged, never fatal (the artifact verdict already counts).
+for _i in "${!AGENT_NAMES[@]}"; do
+  [[ "${AGENT_VERDICT_SOURCES[$_i]}" == "artifact" ]] || continue
+  # INV-78 artifact-render gate: only when the agent's own verdict post FAILED
+  # (INV-69 post-failed breadcrumb present). _classify_postfail_drop_reason ALWAYS
+  # returns 0 (rc-0-always; load-bearing under set -e) and reads only the
+  # session-keyed breadcrumb file — no comment-list call.
+  _pf_token=$(_classify_postfail_drop_reason "${AGENT_SESSION_IDS[$_i]:-}")
+  [[ -n "$_pf_token" ]] || continue
+  log "INV-78: review agent '${AGENT_NAMES[$_i]}' resolved from artifact but its own verdict post FAILED (post-failed breadcrumb: ${_pf_token}) — wrapper posting the artifact-derived verdict comment so comment-format consumers keep working."
+  # Guard the mktemp so a full /tmp can't abort the wrapper under `set -e` right
+  # at the end of resolution (the verdict already counts from the artifact).
+  _ar_body_file=$(mktemp "/tmp/artifact-verdict-${ISSUE_NUMBER}-XXXXXX.md" 2>/dev/null) || _ar_body_file=""
+  if [[ -z "$_ar_body_file" ]]; then
+    log "WARNING: INV-78 mktemp failed for the artifact-derived verdict comment of '${AGENT_NAMES[$_i]}'; skipping the wrapper re-post (the artifact verdict still counts)."
+    continue
+  fi
+  printf '%s' "${AGENT_VERDICT_BODIES[$_i]}" > "$_ar_body_file" 2>/dev/null || true
+  _ar_model=$(_resolve_review_agent_model "${AGENT_NAMES[$_i]}")
+  _ar_model="${_ar_model:-sonnet}"
+  if bash "${SCRIPT_DIR}/post-verdict.sh" "$ISSUE_NUMBER" "${AGENT_VERDICTS[$_i]}" "$_ar_body_file" \
+       "${AGENT_NAMES[$_i]}" "${AGENT_SESSION_IDS[$_i]}" "$_ar_model" >/dev/null 2>&1; then
+    log "INV-78: wrapper posted artifact-derived verdict comment on behalf of '${AGENT_NAMES[$_i]}' (verdict-source=artifact; agent comment had failed)."
+  else
+    log "WARNING: INV-78 artifact-derived verdict-comment post failed (post-verdict.sh non-zero) for '${AGENT_NAMES[$_i]}'; the artifact verdict still counts, but no wrapper-rendered comment landed."
+  fi
+  rm -f "$_ar_body_file" 2>/dev/null || true
 done
 
 # Any agent still unresolved after the poll window is terminally resolved here

@@ -84,6 +84,20 @@ bare CI.
 | TC-VERDICT-ARTIFACT-039 | Identity binding ([P1]#2): `_classify_verdict_artifact <path> <run-id> <agent>` → matching identity valid; mismatched runId/agent → malformed; no expected identity → check skipped (back-compat); error names the mismatch | foreign-identity artifact rejected, never votes |
 | TC-VERDICT-ARTIFACT-040 | jq fallback full schema ([P1]#3): rejects blockingFindings-empty-object, nonBlockingFindings-as-string, finding-missing-title, additional-property, negative line; still accepts valid goldens | full-shape enforcement in the packaged-install default |
 
+## Unit — artifact-only channel hardening ([P1]s on PR #262, round-4)
+
+| ID | Scenario | Expected |
+|---|---|---|
+| TC-VERDICT-ARTIFACT-041 | `_verdict_body_from_artifact_json` on golden.pass | first line `^Review PASSED` |
+| TC-VERDICT-ARTIFACT-042 | on golden.fail | first line `^Review findings:`; body lists the blocking title |
+| TC-VERDICT-ARTIFACT-043 | rendered body round-trips through `_classify_verdict_body` | PASS body→pass, FAIL body→fail |
+| TC-VERDICT-ARTIFACT-044 | rendered FAIL body not double-prefixed | exactly one leading `Review findings:` |
+| TC-VERDICT-ARTIFACT-045 | empty/unmappable verdict input | non-empty, classifiable FAIL stub; never aborts |
+| TC-VERDICT-ARTIFACT-046 | ([P1]#1) artifact-resolved agent populates `AGENT_VERDICT_BODIES` → synthesized `LATEST_COMMENT` non-empty | Reviewed-HEAD trailer would post; FAIL substantive |
+| TC-VERDICT-ARTIFACT-047 | ([P1]#1) body renderer introduces no comment poll | all-artifact path still 0 comment-list calls |
+| TC-VERDICT-ARTIFACT-048 | ([P1]#2) `_all_artifacts_landed`: all present→0; one missing/empty-arg/`.tmp`-only/no-args→non-zero | rename-land completion signal |
+| TC-VERDICT-ARTIFACT-W15..W19 | wrapper wiring: body populated from artifact; breadcrumb-gated wrapper re-post; observe loop iterates `_fanout_pids` via `kill -0`; early-exit gated on ALL artifacts landed | source-of-truth greps |
+
 ## E2E — conformance + stub-fleet
 
 | ID | Scenario | Expected |
