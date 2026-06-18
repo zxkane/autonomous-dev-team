@@ -351,12 +351,13 @@ assert_grep "TC-RTO-VAL-12b validate_review_timeout_config called at startup" \
 assert_grep "TC-RTO-VAL-12c startup log line shows resolved review cap" \
   '[Rr]eview (CLI )?(wall-clock )?(timeout|cap)' "$WRAPPER"
 # emit_verdict_trailer count: the timeout-veto adds NO new trailer site (its veto
-# routes through the existing FAIL branch's trailer). The total is 11 = the 10
+# routes through the existing FAIL branch's trailer). The total is 13 = the 10
 # pre-INV-64 sites (6 legacy + 2 INV-44 mergeable gate + 2 INV-46 E2E gate) PLUS
-# the 1 INV-64 Phase-A.5 smoke-FAIL abort site (#224) — the veto itself still
-# contributes none.
+# the 1 INV-64 Phase-A.5 smoke-FAIL abort site (#224) PLUS the 2 INV-79
+# mandatory-bot-review gate sites (#234: awaiting-bot-review wait + max-waits
+# substantive FAIL) — the veto itself still contributes none.
 EMIT_COUNT=$(grep -cE '^\s*emit_verdict_trailer ' "$WRAPPER")
-assert_eq "TC-RTO-SRC-06 emit_verdict_trailer count is 11 (veto adds none; INV-64 smoke abort is the only new site)" "11" "$EMIT_COUNT"
+assert_eq "TC-RTO-SRC-06 emit_verdict_trailer count is 13 (veto adds none; INV-64 smoke abort + INV-79 bot-review gate x2 are the new sites)" "13" "$EMIT_COUNT"
 # Post-window sweep classifies a no-verdict agent via _classify_noverdict_agent.
 assert_grep "TC-RTO-VETO-11 post-window sweep uses _classify_noverdict_agent on launch rc" \
   '_classify_noverdict_agent' "$WRAPPER"
