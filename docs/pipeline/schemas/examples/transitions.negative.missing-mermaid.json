@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "description": "NEGATIVE — a transition is missing the required `mermaid` edge string, so the diagram could not be generated from it. Must be rejected.",
+  "states": [
+    { "id": "autonomous", "label": "autonomous", "kind": "active", "mermaid": "autonomous" },
+    { "id": "in_progress", "label": "in-progress", "kind": "active", "mermaid": "in_progress" }
+  ],
+  "label_vocabulary": ["autonomous", "in-progress"],
+  "transitions": [
+    {
+      "id": "no-mermaid",
+      "from": "autonomous",
+      "to": "in_progress",
+      "event": "dispatcher-step2-scan-new",
+      "actor": "dispatcher",
+      "guards": ["deps-resolved"],
+      "actions": ["add-label:in-progress"]
+    }
+  ],
+  "diagram": { "header": "stateDiagram-v2" }
+}

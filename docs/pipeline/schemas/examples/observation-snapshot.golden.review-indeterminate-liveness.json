@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "issue": { "number": 170 },
+  "labels": {
+    "all": ["autonomous", "reviewing", "no-auto-close"],
+    "autonomous": true,
+    "active_state": "reviewing",
+    "no_auto_close": true
+  },
+  "dependencies": { "resolved": true },
+  "pr": {
+    "exists": true,
+    "number": 401,
+    "state": "OPEN",
+    "review_decision": "CHANGES_REQUESTED",
+    "mergeable": "UNKNOWN",
+    "ci_state": "PENDING",
+    "head_ref_oid": "ffeeddccbbaa99887766554433221100ffeeddcc",
+    "reviewed_head": "ffeeddccbbaa99887766554433221100ffeeddcc",
+    "updated_at": "2026-06-16T05:10:00Z"
+  },
+  "session": { "id": "review-9f", "completed": true, "terminal_reason": "completed", "ended_at": "2026-06-16T05:05:00Z" },
+  "verdict": { "state": "failed-non-substantive", "cause": "mergeable-unknown", "created_at": "2026-06-16T05:09:00Z" },
+  "liveness": {
+    "state": "indeterminate",
+    "pid_file_present": true,
+    "heartbeat_fresh": false,
+    "near_success": false,
+    "within_grace": false
+  },
+  "retries": { "count": 1, "max": 3, "review_flip_count": 1, "review_flip_limit": 2 }
+}

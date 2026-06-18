@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "issue": { "number": 236 },
+  "labels": { "all": ["autonomous", "in-progress"], "autonomous": true, "active_state": "in-progress", "no_auto_close": false },
+  "dependencies": { "resolved": true },
+  "pr": { "exists": false },
+  "session": { "completed": false },
+  "verdict": { "state": null },
+  "liveness": {
+    "state": "maybe-alive",
+    "near_success": false
+  },
+  "retries": { "count": 0, "max": 3 }
+}

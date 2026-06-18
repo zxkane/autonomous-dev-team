@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "description": "NEGATIVE — an action uses an unknown verb (not add-label/remove-label/comment/sigterm-wrapper/request-changes). Must be rejected.",
+  "states": [
+    { "id": "reviewing", "label": "reviewing", "kind": "active", "mermaid": "reviewing" },
+    { "id": "approved", "label": "approved", "kind": "terminal", "mermaid": "approved" }
+  ],
+  "label_vocabulary": ["reviewing", "approved"],
+  "transitions": [
+    {
+      "id": "bad-action",
+      "from": "reviewing",
+      "to": "approved",
+      "event": "review-pass",
+      "actor": "review-wrapper",
+      "guards": ["verdict-pass"],
+      "actions": ["remove-label:reviewing", "add-label:approved", "teleport-pr"],
+      "mermaid": "reviewing --> approved: x"
+    }
+  ],
+  "diagram": { "header": "stateDiagram-v2" }
+}

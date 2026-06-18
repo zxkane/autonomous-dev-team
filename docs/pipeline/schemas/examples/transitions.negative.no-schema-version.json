@@ -1,0 +1,21 @@
+{
+  "description": "NEGATIVE — missing the required schema_version (must be rejected).",
+  "states": [
+    { "id": "autonomous", "label": "autonomous", "kind": "active", "mermaid": "autonomous" },
+    { "id": "in_progress", "label": "in-progress", "kind": "active", "mermaid": "in_progress" }
+  ],
+  "label_vocabulary": ["autonomous", "in-progress"],
+  "transitions": [
+    {
+      "id": "dispatch-new",
+      "from": "autonomous",
+      "to": "in_progress",
+      "event": "dispatcher-step2-scan-new",
+      "actor": "dispatcher",
+      "guards": ["deps-resolved"],
+      "actions": ["add-label:in-progress"],
+      "mermaid": "autonomous --> in_progress: x"
+    }
+  ],
+  "diagram": { "header": "stateDiagram-v2" }
+}

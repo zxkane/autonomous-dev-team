@@ -1,0 +1,128 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/zxkane/autonomous-dev-team/docs/pipeline/schemas/transitions.schema.json",
+  "title": "Transitions",
+  "description": "The executable spec for the autonomous-pipeline issue-label state machine (issue #236). Encodes every legal (from, event, guards[], actions[], to) tuple. scripts/gen-state-machine.sh generates the mermaid diagram FROM this file; scripts/check-spec-drift.sh checks it against the dispatcher/wrapper code. CI-checked spec — NOT a runtime component.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "states", "label_vocabulary", "transitions", "diagram"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "description": { "type": "string" },
+    "states": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "label", "kind", "mermaid"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+          "label": { "type": "string" },
+          "kind": { "type": "string", "enum": ["pseudo", "active", "terminal"] },
+          "mermaid": { "type": "string" }
+        }
+      }
+    },
+    "label_vocabulary": {
+      "description": "The complete set of GitHub-issue label literals the pipeline reads or writes. The drift checker asserts every label written by the dispatcher/wrappers is a member.",
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string" },
+      "uniqueItems": true
+    },
+    "transitions": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "from", "to", "event", "actor", "guards", "actions", "mermaid"],
+        "properties": {
+          "id": {
+            "description": "Stable unique transition identifier.",
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]*$"
+          },
+          "from": {
+            "description": "Source state id (must match a states[].id).",
+            "type": "string",
+            "enum": ["start", "autonomous", "in_progress", "pending_review", "reviewing", "pending_dev", "approved", "stalled", "end"]
+          },
+          "to": {
+            "description": "Target state id (must match a states[].id).",
+            "type": "string",
+            "enum": ["start", "autonomous", "in_progress", "pending_review", "reviewing", "pending_dev", "approved", "stalled", "end"]
+          },
+          "event": {
+            "description": "The observed event that triggers the transition.",
+            "type": "string",
+            "minLength": 1
+          },
+          "actor": {
+            "description": "Who writes the labels for this transition.",
+            "type": "string",
+            "enum": ["maintainer", "dispatcher", "dev-wrapper-trap", "review-wrapper", "review-wrapper-trap", "github"]
+          },
+          "guards": {
+            "description": "Preconditions that must all hold. Each token maps to a named function or greppable predicate via spec-guard-map.json.",
+            "type": "array",
+            "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" }
+          },
+          "actions": {
+            "description": "Side effects performed as part of the transition. Label writes use the add-label:<L> / remove-label:<L> verb forms; other verbs (comment:*, sigterm-wrapper, request-changes) map to a named function or predicate via spec-guard-map.json.",
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^(add-label:[a-z][a-z0-9-]*|remove-label:[a-z][a-z0-9-]*|comment:[a-z][a-z0-9-]*|sigterm-wrapper|request-changes)$"
+            }
+          },
+          "mermaid": {
+            "description": "The exact mermaid stateDiagram-v2 edge line emitted for this transition. The generator copies this verbatim.",
+            "type": "string",
+            "minLength": 1
+          },
+          "code_site": { "type": "string" },
+          "inv_refs": {
+            "type": "array",
+            "items": { "type": "string", "pattern": "^INV-[0-9]{2,}$" }
+          },
+          "note": { "type": "string" }
+        }
+      }
+    },
+    "diagram": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["header"],
+      "properties": {
+        "title": { "type": "string" },
+        "header": { "type": "string", "const": "stateDiagram-v2" },
+        "notes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["side", "of", "lines"],
+            "properties": {
+              "side": { "type": "string", "enum": ["left", "right"] },
+              "of": { "type": "string" },
+              "lines": { "type": "array", "items": { "type": "string" } }
+            }
+          }
+        }
+      }
+    },
+    "invalid_combinations": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["description", "active_states", "terminal_states", "rule"],
+      "properties": {
+        "description": { "type": "string" },
+        "active_states": { "type": "array", "items": { "type": "string" } },
+        "terminal_states": { "type": "array", "items": { "type": "string" } },
+        "rule": { "type": "string" }
+      }
+    }
+  }
+}

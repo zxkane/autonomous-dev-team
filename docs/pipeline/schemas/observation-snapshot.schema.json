@@ -1,0 +1,158 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/zxkane/autonomous-dev-team/docs/pipeline/schemas/observation-snapshot.schema.json",
+  "title": "ObservationSnapshot",
+  "description": "The complete typed set of inputs the dispatcher + dev/review wrappers CONSULT to decide a label transition for ONE issue at ONE tick. This is the spec contract: docs/pipeline/observation-snapshot.md cites the file:line that reads each field today, and the (gated/stop-ruled) runtime reconciler would assemble exactly this object before evaluating transitions.json guards. NOT a runtime artifact today — it documents the read surface so the guards in transitions.json are grounded in real inputs. The dispatcher does not literally serialize this object; the schema validates a fixture snapshot assembled from stubbed gh outputs (tests/unit/fixtures/spec-gate/).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "issue", "labels", "dependencies", "pr", "session", "verdict", "liveness", "retries"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "issue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["number"],
+      "properties": {
+        "number": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "labels": {
+      "description": "The issue's current label set, partitioned into the pipeline-meaningful members. Source: gh issue list/view --json labels (lib-dispatch.sh list_* selectors + dispatcher-tick.sh Step-5 membership greps).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["all", "autonomous", "active_state", "no_auto_close"],
+      "properties": {
+        "all": { "type": "array", "items": { "type": "string" } },
+        "autonomous": { "type": "boolean" },
+        "active_state": {
+          "description": "At most one active/terminal state label (the state-machine invariant). null when only `autonomous` is present.",
+          "type": ["string", "null"],
+          "enum": ["in-progress", "pending-review", "reviewing", "pending-dev", "approved", "stalled", null]
+        },
+        "no_auto_close": { "type": "boolean" }
+      }
+    },
+    "dependencies": {
+      "description": "The `## Dependencies` resolution (INV-11). Source: lib-dispatch.sh check_deps_resolved.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["resolved"],
+      "properties": {
+        "resolved": {
+          "description": "true iff every referenced dependency issue/PR is CLOSED or MERGED (INV-11). A new issue is dispatched only when true.",
+          "type": "boolean"
+        },
+        "unresolved_refs": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "pr": {
+      "description": "The PR linked to the issue (body references #N) and its review-relevant state. Source: lib-dispatch.sh fetch_pr_for_issue / last_reviewed_head; autonomous-review.sh mergeable gate.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["exists"],
+      "properties": {
+        "exists": { "type": "boolean" },
+        "number": { "type": ["integer", "null"] },
+        "state": {
+          "description": "gh pr view --json state. The INV-54 PR-open guard keys on this.",
+          "type": ["string", "null"],
+          "enum": ["OPEN", "CLOSED", "MERGED", null]
+        },
+        "review_decision": {
+          "description": "gh pr view --json reviewDecision (wrapper-owned per INV-52).",
+          "type": ["string", "null"],
+          "enum": ["APPROVED", "CHANGES_REQUESTED", "REVIEW_REQUIRED", "", null]
+        },
+        "mergeable": {
+          "description": "gh pr view --json mergeable. INV-44 mergeable hard gate; UNKNOWN is retried up to MERGEABLE_RETRIES.",
+          "type": ["string", "null"],
+          "enum": ["MERGEABLE", "CONFLICTING", "UNKNOWN", "", null]
+        },
+        "ci_state": {
+          "description": "Aggregate of gh pr checks; Step 5a requires all SUCCESS.",
+          "type": ["string", "null"],
+          "enum": ["SUCCESS", "PENDING", "FAILURE", null]
+        },
+        "head_ref_oid": { "type": ["string", "null"] },
+        "reviewed_head": {
+          "description": "The `Reviewed HEAD: <sha>` trailer from the latest review comment (INV-04/07). Step 5b compares head_ref_oid vs this.",
+          "type": ["string", "null"]
+        },
+        "updated_at": { "type": ["string", "null"] }
+      }
+    },
+    "session": {
+      "description": "The prior agent session's completion state (INV-12 / INV-35). Source: lib-dispatch.sh is_session_completed + extract_dev_session_id.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["completed"],
+      "properties": {
+        "id": { "type": ["string", "null"] },
+        "completed": {
+          "description": "true iff the prior session reached a terminal reason (end_turn|completed, or prompt_too_long). Drives INV-12 resume-eligibility and INV-35 review-aware routing.",
+          "type": "boolean"
+        },
+        "terminal_reason": {
+          "type": ["string", "null"],
+          "enum": ["end_turn", "completed", "prompt_too_long", null]
+        },
+        "ended_at": { "type": ["string", "null"] }
+      }
+    },
+    "verdict": {
+      "description": "The most recent authentic review verdict (INV-20 actor+window+trailer binding) and its cause. Source: lib-dispatch.sh classify_recent_review_verdict.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state"],
+      "properties": {
+        "state": {
+          "type": ["string", "null"],
+          "enum": ["passed", "failed-substantive", "failed-non-substantive", null]
+        },
+        "cause": {
+          "description": "The non-substantive cause sub-classification, when state is failed-non-substantive.",
+          "type": ["string", "null"],
+          "enum": ["mergeable-unknown", "e2e-evidence-missing", "smoke-config-error", "unavailable", null]
+        },
+        "created_at": { "type": ["string", "null"] }
+      }
+    },
+    "liveness": {
+      "description": "Wrapper PID liveness (INV-01/18/24/30). CRITICAL: the remote-SSM path is TRI-STATE — alive | dead | indeterminate. `indeterminate` (the SSM query itself failed / timed out) is a distinct THIRD state that biases ALIVE so the dispatcher does not kill a wrapper it cannot see. Source: lib-dispatch.sh pid_alive + liveness-check-remote-aws-ssm.sh.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "near_success"],
+      "properties": {
+        "state": {
+          "type": "string",
+          "enum": ["alive", "dead", "indeterminate"]
+        },
+        "pid_file_present": { "type": "boolean" },
+        "heartbeat_fresh": {
+          "description": "PID-file / .heartbeat sibling mtime within HEARTBEAT_INTERVAL_SECONDS*3 (INV-29/18).",
+          "type": "boolean"
+        },
+        "near_success": {
+          "description": "INV-24: a recent dev/review success signal (merged PR, APPROVED review, recent verdict/session-report comment, live PGID). DEAD requires pid miss AND no near_success AND no fresh heartbeat.",
+          "type": "boolean"
+        },
+        "within_grace": {
+          "description": "INV-17/18 cold-start grace: a freshly-dispatched wrapper is never declared DEAD until DISPATCH_GRACE_PERIOD_SECONDS elapses.",
+          "type": "boolean"
+        }
+      }
+    },
+    "retries": {
+      "description": "Retry accounting (INV-05/19). Source: lib-dispatch.sh count_retries + count_review_aware_flips.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["count", "max"],
+      "properties": {
+        "count": { "type": "integer", "minimum": 0 },
+        "max": { "type": "integer", "minimum": 0 },
+        "review_flip_count": { "type": "integer", "minimum": 0 },
+        "review_flip_limit": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}
