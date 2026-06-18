@@ -3697,8 +3697,13 @@ agent subtree. Concretely the agent launch env (assembled CLI-agnostically in
 `gh` is REFRESH-AWARE past the 1h App-token TTL, NOT a one-time snapshot that goes
 stale on long runs — #234 review [P1]); `GH_TOKEN`=the scoped token as a snapshot
 fallback (the shim re-reads the file and overrides it, so the fresh file wins);
-`GITHUB_PERSONAL_ACCESS_TOKEN` and `GH_USER_PAT` **unset**. The wrapper's full-write
-token file (a DIFFERENT path) is NEVER exposed. `PATH` is **rewritten**: the
+`GITHUB_PERSONAL_ACCESS_TOKEN` (the App-token alias) **unset**. `GH_USER_PAT` is
+**preserved** (NOT scrubbed) — it is the operator's real-user PAT the agent uses
+via `gh-as-user.sh` to trigger the built-in review bots (`/q review` etc., which
+reject GitHub-App bot accounts; autonomous-dev SKILL Step 10/11); scrubbing it broke
+bot triggers on `REVIEW_BOTS` projects with no host `gh auth` (#234 review [P1]). It
+is a SEPARATE operator credential, not the wrapper's full-write App token. The
+wrapper's full-write token file (a DIFFERENT path) is NEVER exposed. `PATH` is **rewritten**: the
 wrapper's per-run `GH_WRAPPER_DIR` shim entry is **stripped** (AC #1 — the agent env
 dump shows "no wrapper gh shim") and the agent's OWN per-run shim dir
 (`AGENT_GH_SHIM_DIR`, with its own `gh → gh-with-token-refresh.sh` symlink) is

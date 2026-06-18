@@ -291,7 +291,11 @@ setup_agent_token() {
 #   - sets GH_TOKEN=<scoped snapshot> as a FALLBACK for any direct `gh` resolution
 #     that bypasses the refresh shim (the shim, when GH_TOKEN_FILE is set, re-reads
 #     the file and overrides this snapshot — so the file always wins when fresh).
-#   - unsets GITHUB_PERSONAL_ACCESS_TOKEN and GH_USER_PAT (no full-write/PAT leak)
+#   - unsets GITHUB_PERSONAL_ACCESS_TOKEN (the App-token alias; no full-write leak).
+#     GH_USER_PAT is INTENTIONALLY preserved — it is the operator's real-user PAT
+#     the agent uses via `gh-as-user.sh` to trigger the built-in review bots
+#     (#234 review [P1]); it is NOT the wrapper's full-write App token. See the
+#     in-body NOTE for the full rationale.
 #
 # PATH is REWRITTEN, not left unchanged: the wrapper's per-run GH_WRAPPER_DIR shim
 # entry is STRIPPED (issue #234 AC #1: the agent env dump must show "no wrapper gh
@@ -328,10 +332,22 @@ build_agent_env_argv() {
   scoped=$(cat "$AGENT_GH_TOKEN_FILE" 2>/dev/null) || return 0
   [[ -n "$scoped" ]] || return 0
 
+  # NOTE ([INV-78], #234 review [P1]): GH_USER_PAT is DELIBERATELY NOT unset. It is
+  # the operator's real-user PAT that the agent is *supposed* to use via
+  # `bash scripts/gh-as-user.sh` to trigger the built-in review bots (`/q review`,
+  # `/codex review`, `@claude review` — all three reject GitHub-App bot accounts;
+  # autonomous-dev SKILL Step 10/11 mandates gh-as-user.sh). Unsetting it broke
+  # bot-trigger comments on REVIEW_BOTS projects that rely on GH_USER_PAT with no
+  # host `gh auth` session — gh-as-user.sh fell through to its "no user auth → skip"
+  # branch and the bots never ran. It is a SEPARATE, operator-provisioned credential,
+  # not the wrapper's full-write App token (the #234 containment target). The App
+  # token (GH_TOKEN_FILE / the full-write GH_TOKEN / GITHUB_PERSONAL_ACCESS_TOKEN) is
+  # still fully scoped/scrubbed below. (gh-as-user.sh itself does
+  # `env -u GH_TOKEN_FILE GH_TOKEN="$GH_USER_PAT"`, so the scoped GH_TOKEN_FILE we set
+  # here never leaks into its bot-trigger call.)
   _env_out=(
     env
     -u GITHUB_PERSONAL_ACCESS_TOKEN
-    -u GH_USER_PAT
     "GH_TOKEN_FILE=${AGENT_GH_TOKEN_FILE}"
     "GH_TOKEN=${scoped}"
   )

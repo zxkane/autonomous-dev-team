@@ -230,11 +230,17 @@ if printf '%s' "$pfx" | grep -qF "GH_TOKEN_FILE=${agent_file}" \
 else
   assert_fail "scrub prefix does not point GH_TOKEN_FILE at the scoped file (stale-token [P1] regression): $pfx"
 fi
-if printf '%s' "$pfx" | grep -qF -- '-u GITHUB_PERSONAL_ACCESS_TOKEN' \
-   && printf '%s' "$pfx" | grep -qF -- '-u GH_USER_PAT'; then
-  assert_pass "scrub prefix unsets GITHUB_PERSONAL_ACCESS_TOKEN / GH_USER_PAT"
+if printf '%s' "$pfx" | grep -qF -- '-u GITHUB_PERSONAL_ACCESS_TOKEN'; then
+  assert_pass "scrub prefix unsets GITHUB_PERSONAL_ACCESS_TOKEN (the App-token alias)"
 else
-  assert_fail "scrub prefix missing a PAT-var unset: $pfx"
+  assert_fail "scrub prefix missing -u GITHUB_PERSONAL_ACCESS_TOKEN: $pfx"
+fi
+# #234 review [P1]: GH_USER_PAT must NOT be unset — the agent needs it for the
+# mandated `bash scripts/gh-as-user.sh` bot-trigger path on REVIEW_BOTS projects.
+if ! printf '%s' "$pfx" | grep -qF -- '-u GH_USER_PAT'; then
+  assert_pass "scrub prefix does NOT unset GH_USER_PAT (gh-as-user.sh bot triggers still work)"
+else
+  assert_fail "scrub prefix unsets GH_USER_PAT — breaks gh-as-user.sh bot triggers ([P1] regression): $pfx"
 fi
 
 # ---------------------------------------------------------------------------
@@ -352,10 +358,12 @@ if ! grep -qE '^GITHUB_PERSONAL_ACCESS_TOKEN=' "$ENVDUMP" 2>/dev/null; then
 else
   assert_fail "agent env still carries GITHUB_PERSONAL_ACCESS_TOKEN — scrub incomplete"
 fi
-if ! grep -qE '^GH_USER_PAT=' "$ENVDUMP" 2>/dev/null; then
-  assert_pass "agent env has NO GH_USER_PAT (scrubbed)"
+# #234 review [P1]: GH_USER_PAT is INTENTIONALLY preserved — the agent needs it for
+# the mandated gh-as-user.sh bot-trigger path. The harness exported GH_USER_PAT=fullpat.
+if grep -qE '^GH_USER_PAT=fullpat$' "$ENVDUMP" 2>/dev/null; then
+  assert_pass "agent env KEEPS GH_USER_PAT (gh-as-user.sh bot triggers work; it is NOT the wrapper's App token)"
 else
-  assert_fail "agent env still carries GH_USER_PAT — scrub incomplete"
+  assert_fail "agent env lost GH_USER_PAT — gh-as-user.sh bot triggers would break ([P1] regression)"
 fi
 # #234 review [P1] (AC #1 — "no wrapper gh shim"): the agent PATH must NOT carry the
 # WRAPPER's GH_WRAPPER_DIR; it must carry the AGENT's OWN shim dir instead, so bare
@@ -635,6 +643,47 @@ if printf '%s' "$out93_str" | grep -qF 'token=tok-INITIAL' \
   assert_pass "agent gh is refresh-aware: call 1 saw tok-INITIAL, call 2 saw the refreshed tok-REFRESHED"
 else
   assert_fail "agent gh did NOT pick up the refreshed scoped token (stale-snapshot [P1] regression): $out93_str"
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-TOKEN-SPLIT-095: under the scrub, gh-as-user.sh authenticates with GH_USER_PAT (bot triggers work) (#234 [P1]) ==="
+# ---------------------------------------------------------------------------
+# #234 review [P1]: the scrub used to unset GH_USER_PAT, so the agent's mandated
+# `bash scripts/gh-as-user.sh pr comment "/q review"` lost its real-user auth and
+# the built-in review bots never triggered. The fix keeps GH_USER_PAT in the agent
+# env. We prove this HERMETICALLY (no real `gh` exec — gh-as-user.sh's priority-1
+# `exec env … gh …` would invoke a network-touching gh and hang on a CI/dev box):
+# (a) apply the REAL scrub prefix to a trivial child that echoes $GH_USER_PAT —
+#     proving the agent subtree still sees it (so gh-as-user.sh's priority-1
+#     `[[ -n "$GH_USER_PAT" ]]` is TRUE); and
+# (b) source-level: gh-as-user.sh's priority 1 keys on GH_USER_PAT.
+out95=$(env -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR -u GH_TOKEN -u GH_TOKEN_FILE -u GITHUB_PERSONAL_ACCESS_TOKEN -u GH_USER_PAT \
+  PATH="/usr/bin:/bin" bash -c "
+  source '$SBA/lib-auth.sh'
+  wdir=\$(mktemp -d /tmp/agent-auth-XXXXXX); export GH_WRAPPER_DIR=\"\$wdir\"; export PATH=\"\$wdir:\$PATH\"
+  export GH_USER_PAT='USER-PAT-realuser'
+  AGENT_GH_TOKEN_FILE=\"\$wdir/agent-token\"; echo 'SCOPED-tok' > \"\$AGENT_GH_TOKEN_FILE\"
+  AGENT_GH_SHIM_DIR=\$(mktemp -d /tmp/agent-shim-XXXXXX)
+  declare -a p=(); build_agent_env_argv p
+  # Apply the prefix to a trivial child: report whether GH_USER_PAT survived AND
+  # whether the App-token aliases were scrubbed — exactly what gh-as-user.sh's
+  # priority-1 guard reads. No real gh, no network.
+  \"\${p[@]}\" bash -c 'echo \"SEEN pat=\${GH_USER_PAT:-<unset>} ppat=\${GITHUB_PERSONAL_ACCESS_TOKEN:-<unset>}\"'
+  rm -rf \"\$wdir\" \"\$AGENT_GH_SHIM_DIR\"
+")
+if printf '%s' "$out95" | grep -qF 'SEEN pat=USER-PAT-realuser ppat=<unset>'; then
+  assert_pass "under the scrub the agent subtree KEEPS GH_USER_PAT (gh-as-user.sh priority-1 fires) while GITHUB_PERSONAL_ACCESS_TOKEN is scrubbed"
+else
+  assert_fail "agent subtree lost GH_USER_PAT (or kept the App-token alias) — gh-as-user.sh bot triggers would break ([P1] regression): $out95"
+fi
+# (b) source-level lockdown: gh-as-user.sh's priority-1 branch keys on GH_USER_PAT.
+GHASUSER="$PROJECT_ROOT/skills/autonomous-common/scripts/gh-as-user.sh"
+if grep -qE 'if \[\[ -n "\$\{GH_USER_PAT:-\}" \]\]' "$GHASUSER" \
+   && grep -qF 'GH_TOKEN="$GH_USER_PAT"' "$GHASUSER"; then
+  assert_pass "source: gh-as-user.sh priority-1 authenticates with GH_USER_PAT (the var the scrub now preserves)"
+else
+  assert_fail "source: gh-as-user.sh priority-1 no longer keys on GH_USER_PAT — the preserve-GH_USER_PAT fix would be moot"
 fi
 
 # ---------------------------------------------------------------------------

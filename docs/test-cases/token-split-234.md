@@ -31,17 +31,18 @@ ID format: `TC-TOKEN-SPLIT-NNN`. INV-78.
 | ID | Scenario | Expected |
 |----|----------|----------|
 | TC-TOKEN-SPLIT-030 | scoped token armed → prefix sets `GH_TOKEN=<scoped>` (snapshot fallback) | `GH_TOKEN=` element present with the scoped token value |
-| TC-TOKEN-SPLIT-031 | prefix points `GH_TOKEN_FILE` at the SCOPED file (refresh-aware, not unset) + unsets `GITHUB_PERSONAL_ACCESS_TOKEN`/`GH_USER_PAT` | `GH_TOKEN_FILE=<AGENT_GH_TOKEN_FILE>` present, no `-u GH_TOKEN_FILE`; `-u GITHUB_PERSONAL_ACCESS_TOKEN -u GH_USER_PAT` present |
+| TC-TOKEN-SPLIT-031 | prefix points `GH_TOKEN_FILE` at the SCOPED file (refresh-aware, not unset) + unsets `GITHUB_PERSONAL_ACCESS_TOKEN` + does NOT unset `GH_USER_PAT` | `GH_TOKEN_FILE=<AGENT_GH_TOKEN_FILE>` present, no `-u GH_TOKEN_FILE`; `-u GITHUB_PERSONAL_ACCESS_TOKEN` present; NO `-u GH_USER_PAT` |
 | TC-TOKEN-SPLIT-032 | prefix `PATH=` strips the WRAPPER `GH_WRAPPER_DIR` and prepends the AGENT-own shim dir (AC #1) | `PATH=` excludes the wrapper dir, prepends `AGENT_GH_SHIM_DIR`; `_strip_path_entry` present |
 | TC-TOKEN-SPLIT-033 | no scoped token (PAT / app-no-scope) → empty prefix | length 0 |
 | TC-TOKEN-SPLIT-092 | bare `gh` resolves the AGENT-own shim (REAL_GH host) → real `gh` with the scoped token, reading the scoped file | scoped token + scoped `GH_TOKEN_FILE`, wrapper shim dir NOT on the agent PATH |
 | TC-TOKEN-SPLIT-093 | agent `gh` is refresh-aware — a scoped-file refresh between calls is picked up | call 1 sees initial token, call 2 sees the refreshed token |
+| TC-TOKEN-SPLIT-095 | under the scrub, `GH_USER_PAT` survives so `gh-as-user.sh` priority-1 bot-trigger auth works | agent subtree keeps `GH_USER_PAT` (App-token alias scrubbed); `gh-as-user.sh` priority-1 keys on `GH_USER_PAT` |
 
 ## Unit — scrub completeness (env-dump assertion, the verify-by-construction gate)
 
 | ID | Scenario | Expected |
 |----|----------|----------|
-| TC-TOKEN-SPLIT-040 | `_run_with_timeout` runs a stub "agent" that dumps `env`; scoped token armed | dump shows `GH_TOKEN`=scoped, NO `GH_TOKEN_FILE`, NO `GITHUB_PERSONAL_ACCESS_TOKEN`, NO `GH_USER_PAT`, PATH head ≠ `GH_WRAPPER_DIR` |
+| TC-TOKEN-SPLIT-040 | `_run_with_timeout` runs a stub "agent" that dumps `env`; scoped token armed | dump shows `GH_TOKEN`=scoped, `GH_TOKEN_FILE`=scoped file (not the wrapper's), NO `GITHUB_PERSONAL_ACCESS_TOKEN`, `GH_USER_PAT` PRESERVED, the wrapper `GH_WRAPPER_DIR` NOT on PATH but the agent-own shim dir IS |
 | TC-TOKEN-SPLIT-041 | same stub, NO scoped token | dump is byte-identical to the unscrubbed env (regression pin: PAT/no-scope unaffected) |
 
 ## Unit — wrapper own-calls unaffected (regression pins)
@@ -70,7 +71,7 @@ ID format: `TC-TOKEN-SPLIT-NNN`. INV-78.
 
 | ID | Scenario | Expected |
 |----|----------|----------|
-| TC-TOKEN-SPLIT-080 | a stub agent (`env`) is run through the REAL `_run_with_timeout` with a scoped token armed; its dumped env is asserted | scoped `GH_TOKEN` present; NO full-write credential (`GH_TOKEN_FILE` / `GITHUB_PERSONAL_ACCESS_TOKEN` / `GH_USER_PAT`); the `GH_WRAPPER_DIR` shim dir is absent from the agent PATH. **Realized by TC-TOKEN-SPLIT-040/041** in `tests/unit/test-token-split-234.sh` — `_run_with_timeout` IS the production launch seam every adapter routes through, so dumping `env` through it (with a stub `env` "agent") proves the scrub by construction. The existing hermetic conformance suite (`tests/conformance/`) pins the per-CLI *output-classification* contract (drop-reason / verdict-state) and intentionally is NOT extended for env (env is not an AdapterResult axis); the env proof lives in the unit suite where the launch seam is exercised directly. |
+| TC-TOKEN-SPLIT-080 | a stub agent (`env`) is run through the REAL `_run_with_timeout` with a scoped token armed; its dumped env is asserted | scoped `GH_TOKEN` present; `GH_TOKEN_FILE`=the scoped file (not the wrapper's full-write file); NO `GITHUB_PERSONAL_ACCESS_TOKEN` (App-token alias); `GH_USER_PAT` preserved (operator bot-trigger credential, not the App token); the WRAPPER `GH_WRAPPER_DIR` shim dir is absent from the agent PATH (agent-own shim prepended). **Realized by TC-TOKEN-SPLIT-040/041** in `tests/unit/test-token-split-234.sh` — `_run_with_timeout` IS the production launch seam every adapter routes through, so dumping `env` through it (with a stub `env` "agent") proves the scrub by construction. The existing hermetic conformance suite (`tests/conformance/`) pins the per-CLI *output-classification* contract (drop-reason / verdict-state) and intentionally is NOT extended for env (env is not an AdapterResult axis); the env proof lives in the unit suite where the launch seam is exercised directly. |
 
 ## E2E (stub-fleet — documented in PR; not a new CI lane)
 

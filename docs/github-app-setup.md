@@ -131,8 +131,11 @@ The wrapper strips the full-write credential from the agent's environment before
 launching it: the agent process gets `GH_TOKEN_FILE` pointed at the **scoped** token
 file (kept fresh by the scoped daemon — so the agent's `gh` stays valid past the 1h
 App-token TTL), `GH_TOKEN` = the scoped token as a snapshot fallback, and
-`GITHUB_PERSONAL_ACCESS_TOKEN` / `GH_USER_PAT` unset (the wrapper's full-write token
-file is a different path and is never exposed). `PATH` is rewritten: the wrapper's
+`GITHUB_PERSONAL_ACCESS_TOKEN` unset (the wrapper's full-write token file is a
+different path and is never exposed). `GH_USER_PAT` is **preserved** — the agent
+needs it to trigger the built-in review bots via `gh-as-user.sh` (those bots reject
+App-bot accounts), and it is a separate operator credential, not the wrapper's
+full-write App token. `PATH` is rewritten: the wrapper's
 per-run shim dir is stripped and the agent's OWN per-run shim dir is prepended, so
 the agent env carries no wrapper `gh` shim while the agent's bare `gh` still
 resolves (the agent-own `gh-with-token-refresh.sh` shim — the only resolvable `gh`
