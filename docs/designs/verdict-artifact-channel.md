@@ -104,14 +104,17 @@ classification is unit-testable without a live agent. Functions:
   a one-line human schema/identity-error summary for the malformed error envelope
   (#231); names an identity mismatch explicitly when expected identity is supplied.
 
-**Atomic-rename + true read-once.** The agent is instructed to write
-`<path>.tmp.$$` then `rename(2)` to `<path>` (an `mv` on the same filesystem is
-atomic). The reader only ever stats/cats the final `<path>`; a half-written
-`.tmp` is never the read target, so a torn read is structurally impossible. The
-reader `cat`s exactly once into a snapshot and validates **that snapshot** (not a
-re-read of `<path>`), so a rename that lands between the read and the validate
-cannot flip the verdict — and a duplicate/late write is ignored (Clause VA5,
-review [P1] #1).
+**Atomic-rename + first-land freeze + true read-once.** The agent writes
+`<path>.tmp.$$` then `rename(2)` to `<path>` (atomic `mv`); a half-written `.tmp`
+is never the read target. The fan-out observe loop **freezes** each artifact's
+bytes to a `<path>.landed` snapshot the moment it first lands
+(`_freeze_landed_artifact`), and the resolution loop validates THAT frozen
+snapshot — so a duplicate `mv` that lands in the gap between the
+`_all_artifacts_landed` early-exit signal and resolution replaces the live file
+but NOT the frozen bytes (the first land wins; the rewrite is `cmp`-detected and
+logged as a duplicate). `_classify_verdict_artifact` then `cat`s the frozen
+snapshot exactly once and validates that, so a rename during classification also
+cannot flip the verdict (Clause VA5; review round-1 + round-5 [P1] #2).
 
 **Identity binding.** The wrapper passes the per-agent expected identity
 (`AGENT_SESSION_IDS[i]` → `.runId`, `AGENT_NAMES[i]` → `.agent`). A schema-valid

@@ -393,6 +393,38 @@ _all_artifacts_landed() {
   return 0
 }
 
+# _freeze_landed_artifact <live-path> <snapshot-path>
+#
+# Clause VA5 first-land freeze ([P1] #2, #233 review round-5). The observe loop
+# calls this every round for each agent. Behavior:
+#   - live file absent → no-op (rc 0); the artifact hasn't landed yet.
+#   - live present, snapshot ABSENT → copy the live bytes to the snapshot ONCE
+#     (the FIRST land wins) and echo `frozen` on stdout.
+#   - live present, snapshot ALREADY exists → the first land is already frozen.
+#     If the live bytes now DIFFER from the frozen snapshot, a duplicate/late `mv`
+#     landed AFTER first-land: echo `duplicate` (the caller logs it once) and do
+#     NOT re-copy — the first-landed bytes remain authoritative. If identical,
+#     echo nothing (steady state).
+# Best-effort + rc-0-always: every `cp`/`cmp` is guarded so a transient FS error
+# (full disk, unlink race) can NEVER abort the caller under `set -euo pipefail`
+# (which would strand the issue in `reviewing`). A failed copy simply leaves the
+# snapshot absent → the resolution loop falls back to reading the live path
+# (today's behavior for that one agent), never a crash.
+_freeze_landed_artifact() {
+  local _live="$1" _snap="$2"
+  [[ -n "$_live" && -n "$_snap" && -f "$_live" ]] || return 0
+  if [[ ! -f "$_snap" ]]; then
+    ( umask 077; cp -- "$_live" "$_snap" ) 2>/dev/null || true
+    [[ -f "$_snap" ]] && printf 'frozen\n'
+    return 0
+  fi
+  # Snapshot already taken — detect a post-land rewrite.
+  if ! cmp -s -- "$_live" "$_snap" 2>/dev/null; then
+    printf 'duplicate\n'
+  fi
+  return 0
+}
+
 # _artifact_schema_error <path> [<expected-run-id> [<expected-agent>]]
 #
 # Echoes a SINGLE-LINE, sanitized human summary of why <path> failed validation —

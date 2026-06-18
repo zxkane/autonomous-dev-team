@@ -367,20 +367,29 @@ hostage by an agent that hangs in `post-verdict.sh`/teardown until the wall-cloc
 cap. The early exit is gated on ALL artifacts (not any) so a missing-artifact
 agent still gets its real 124/137 launch rc for the INV-48 timeout-veto; a
 still-running agent the loop passes is group-killed by the reaper after
-resolution. Then `lib-review-artifact.sh::_classify_verdict_artifact` reads each
-artifact ONCE and classifies the §4.3 `verdict.state`:
+resolution. The loop also **freezes the first-landed bytes** each round
+(`_freeze_landed_artifact` copies `<path>` → `<path>.landed` the first time it
+lands, round-5 [P1] #2): the resolution pass validates the frozen snapshot, so a
+duplicate `mv` that lands in the gap between the land-signal and resolution
+replaces the live file but NOT the snapshot — the first-landed bytes win and the
+rewrite is logged as a duplicate (Clause VA5). Then
+`lib-review-artifact.sh::_classify_verdict_artifact` reads each frozen snapshot
+ONCE and classifies the §4.3 `verdict.state`:
 
 - **`valid`** (schema-pass) → seed `AGENT_VERDICTS[i]` from the artifact
   (`PASS`→pass / `FAIL`→fail) AND populate `AGENT_VERDICT_BODIES[i]` with a
   human-facing body RENDERED off the artifact (`_verdict_body_from_artifact_json`),
   logged `verdict-source=artifact`. The body makes `LATEST_COMMENT` non-empty so
   the `Reviewed HEAD` trailer posts and a FAIL takes the substantive path even
-  when the artifact is the only successful channel ([P1] #1); if the agent's own
-  `post-verdict.sh` comment FAILED (INV-69 breadcrumb present — a filesystem stat,
-  not a comment poll), the wrapper re-posts that body via `post-verdict.sh` so a
-  `Review PASSED`/`Review findings:` comment always lands. The poll loop then skips
-  that agent → **no comment poll**. When every agent produces a valid artifact,
-  the fleet resolves with **ZERO** comment-list API calls.
+  when the artifact is the only successful channel. The poll loop then skips that
+  agent → **no comment poll**. When every agent produces a valid artifact, the
+  fleet resolves with **ZERO** comment-list API calls. After aggregation, the
+  wrapper posts **exactly ONE aggregate verdict comment** from `AGGREGATE` (round-5
+  [P1] #1) — gated on ≥1 deciding agent being artifact-sourced so it never
+  double-posts on the pure comment-channel path, but always lands a
+  `Review PASSED`/`Review findings:` comment when the artifact is the only channel
+  (replacing the old per-agent breadcrumb re-post that missed reaped-before-post
+  agents and could emit contradictory per-agent comments).
 - **`malformed`** (file present, schema-fail) → surface a LOUD operator error
   envelope (`VERDICT_ARTIFACT_MALFORMED`, #231) naming the agent + the schema
   error, and treat the artifact as **absent for the vote** (Clause V1 — never a

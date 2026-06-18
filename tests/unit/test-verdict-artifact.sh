@@ -266,6 +266,25 @@ assert_eq "TC-VERDICT-ARTIFACT-048d only .tmp present, final missing → not lan
 _all_artifacts_landed && _r=0 || _r=1
 assert_eq "TC-VERDICT-ARTIFACT-048e no args → not landed (rc 1)" "1" "$_r"
 
+# TC-049 ([P1] #2, #233 round-5): _freeze_landed_artifact — first land freezes the
+# bytes; a later DIFFERENT write is reported `duplicate` and IGNORED (the frozen
+# snapshot keeps the first-landed bytes); an absent live file is a no-op.
+cp "$EXAMPLES/verdict-artifact.golden.pass.json" "$TMP/fz.json"
+assert_eq "TC-VERDICT-ARTIFACT-049a first land → frozen" \
+  "frozen" "$(_freeze_landed_artifact "$TMP/fz.json" "$TMP/fz.json.landed")"
+assert_eq "TC-VERDICT-ARTIFACT-049b steady (same bytes) → no output" \
+  "" "$(_freeze_landed_artifact "$TMP/fz.json" "$TMP/fz.json.landed")"
+cp "$EXAMPLES/verdict-artifact.golden.fail.json" "$TMP/fz.json"   # late rewrite (PASS→FAIL)
+assert_eq "TC-VERDICT-ARTIFACT-049c post-land rewrite → duplicate (logged, ignored)" \
+  "duplicate" "$(_freeze_landed_artifact "$TMP/fz.json" "$TMP/fz.json.landed")"
+assert_eq "TC-VERDICT-ARTIFACT-049d frozen snapshot keeps the FIRST-landed bytes (PASS), not the rewrite (FAIL)" \
+  "PASS" "$(jq -r .verdict "$TMP/fz.json.landed" 2>/dev/null)"
+# The verdict resolved from the snapshot is the FIRST land (pass), not the rewrite.
+assert_eq "TC-VERDICT-ARTIFACT-049e verdict from the frozen snapshot is the first land (pass)" \
+  "pass" "$(_verdict_from_artifact_json "$(_classify_verdict_artifact "$TMP/fz.json.landed" | tail -n +2)")"
+assert_eq "TC-VERDICT-ARTIFACT-049f absent live file → no-op (empty)" \
+  "" "$(_freeze_landed_artifact "$TMP/does-not-exist.json" "$TMP/does-not-exist.landed")"
+
 # ---------------------------------------------------------------------------
 # Part 2: source-of-truth wiring in the wrapper
 # ---------------------------------------------------------------------------
@@ -279,13 +298,15 @@ assert_grep "TC-VERDICT-ARTIFACT-W4 prompt injects the artifact path + atomic-wr
   'rename|atomic|\.tmp' "$WRAPPER"
 assert_grep "TC-VERDICT-ARTIFACT-W5 wrapper classifies the artifact first (_classify_verdict_artifact)" \
   '_classify_verdict_artifact' "$WRAPPER"
-# [P1] #2 (#233 review): the wrapper MUST pass the per-agent expected identity
-# (session id + agent name) so a foreign-identity artifact cannot vote for this
-# slot. Pin the call shape so a refactor can't silently drop the binding.
-assert_grep "TC-VERDICT-ARTIFACT-W5b wrapper binds artifact identity (_classify_verdict_artifact … session-id agent-name)" \
-  '_classify_verdict_artifact "\$_art_path" "\$\{AGENT_SESSION_IDS\[\$_i\]\}" "\$\{AGENT_NAMES\[\$_i\]\}"' "$WRAPPER"
-assert_grep "TC-VERDICT-ARTIFACT-W5c malformed envelope reason also binds identity (_artifact_schema_error … session-id agent-name)" \
-  '_artifact_schema_error "\$_art_path" "\$\{AGENT_SESSION_IDS\[\$_i\]\}" "\$\{AGENT_NAMES\[\$_i\]\}"' "$WRAPPER"
+# Identity binding (#233 review round-2): the wrapper MUST pass the per-agent
+# expected identity (session id + agent name) so a foreign-identity artifact
+# cannot vote for this slot. Pin the call shape so a refactor can't silently drop
+# the binding. The read target is the FROZEN snapshot ($_art_read, round-5 [P1] #2),
+# not the live path — identity validates against the first-landed bytes.
+assert_grep "TC-VERDICT-ARTIFACT-W5b wrapper binds artifact identity (_classify_verdict_artifact <snapshot> session-id agent-name)" \
+  '_classify_verdict_artifact "\$_art_read" "\$\{AGENT_SESSION_IDS\[\$_i\]\}" "\$\{AGENT_NAMES\[\$_i\]\}"' "$WRAPPER"
+assert_grep "TC-VERDICT-ARTIFACT-W5c malformed envelope reason also binds identity (_artifact_schema_error <snapshot> session-id agent-name)" \
+  '_artifact_schema_error "\$_art_read" "\$\{AGENT_SESSION_IDS\[\$_i\]\}" "\$\{AGENT_NAMES\[\$_i\]\}"' "$WRAPPER"
 assert_grep "TC-VERDICT-ARTIFACT-W6 logged verdict-source=artifact marker" \
   'verdict-source=artifact' "$WRAPPER"
 assert_grep "TC-VERDICT-ARTIFACT-W7 logged verdict-source=comment-fallback marker" \
@@ -317,20 +338,38 @@ assert_grep "TC-VERDICT-ARTIFACT-W14 codex stdout fallback skips an artifact-mal
 # agent's own comment never landed.
 assert_grep "TC-VERDICT-ARTIFACT-W15 valid-artifact branch populates AGENT_VERDICT_BODIES via _verdict_body_from_artifact_json" \
   'AGENT_VERDICT_BODIES\[\$_i\]=.*_verdict_body_from_artifact_json' "$WRAPPER"
-# The wrapper posts a wrapper-rendered verdict comment for an artifact-resolved
-# agent whose own post FAILED — gated on the INV-69 post-failed breadcrumb (a
-# filesystem stat, NOT a comment-list poll), so the all-artifact happy path makes
-# ZERO comment-list calls (TC-020 preserved).
-assert_grep "TC-VERDICT-ARTIFACT-W16 wrapper re-posts the artifact body via post-verdict.sh when the agent post failed" \
-  '"\$\{AGENT_NAMES\[\$_i\]\}" "\$\{AGENT_SESSION_IDS\[\$_i\]\}" "\$_ar_model"' "$WRAPPER"
-assert_grep "TC-VERDICT-ARTIFACT-W17 the wrapper-render block is breadcrumb-gated (no _fetch on the all-artifact path)" \
-  '_classify_postfail_drop_reason.*# INV-78 artifact-render gate|INV-78.*post-failed breadcrumb' "$WRAPPER"
-# [P1] #2 (#233 review round-4): the fan-out join early-exits when all artifacts
-# land, so a hung agent doesn't hold a landed verdict hostage to the wall-clock cap.
+# [P1] #1 (#233 review round-5): EXACTLY ONE wrapper-owned AGGREGATE verdict comment
+# posted from `AGGREGATE` (not a per-agent breadcrumb re-post). post-verdict.sh is
+# called with the aggregate verdict + the representative agent/session.
+assert_grep "TC-VERDICT-ARTIFACT-W16 wrapper posts ONE aggregate verdict comment from AGGREGATE via post-verdict.sh" \
+  'post-verdict\.sh" "\$ISSUE_NUMBER" "\$AGGREGATE" "\$_agg_body_file"' "$WRAPPER"
+assert_grep "TC-VERDICT-ARTIFACT-W17a aggregate post is gated on a deciding ARTIFACT-sourced agent (no double-post on the comment path)" \
+  '_any_deciding_artifact == "true"|_any_deciding_artifact" == "true"' "$WRAPPER"
+assert_grep "TC-VERDICT-ARTIFACT-W17b _any_deciding_artifact keys on source==artifact AND a pass/fail verdict" \
+  'AGENT_VERDICT_SOURCES\[\$_i\]:-\}" == "artifact"' "$WRAPPER"
+# The old per-agent breadcrumb re-post loop is GONE (it could miss reaped-before-post
+# agents and emit contradictory per-agent comments).
+assert_not_grep "TC-VERDICT-ARTIFACT-W17c the per-agent breadcrumb-gated re-post loop is removed" \
+  'wrapper posting the artifact-derived verdict comment so comment-format' "$WRAPPER"
+# [P1] #2 (#233 review round-4/5): the fan-out join observes artifact landing AND
+# freezes the first-landed bytes (Clause VA5) so a hung agent doesn't hold a landed
+# verdict hostage AND a duplicate later write can't replace the resolved verdict.
 assert_grep "TC-VERDICT-ARTIFACT-W18 fan-out join observes artifact landing (_all_artifacts_landed) instead of a bare wait" \
   '_all_artifacts_landed' "$WRAPPER"
 assert_grep "TC-VERDICT-ARTIFACT-W19 early-exit is gated on ALL artifacts landed (preserves INV-48 timeout-veto rc)" \
   'all artifacts landed|ALL artifacts? (have )?landed|INV-48.*preserv' "$WRAPPER"
+assert_grep "TC-VERDICT-ARTIFACT-W20 observe loop freezes first-landed bytes (_freeze_landed_artifact / _freeze_pass)" \
+  '_freeze_landed_artifact|_freeze_pass' "$WRAPPER"
+assert_grep "TC-VERDICT-ARTIFACT-W21 resolution loop reads the FROZEN snapshot, not a re-read of the live path" \
+  '_art_read="\$\{AGENT_ARTIFACT_SNAPSHOTS\[\$_i\]' "$WRAPPER"
+assert_grep "TC-VERDICT-ARTIFACT-W22 a post-land duplicate write is logged (Clause VA5)" \
+  'duplicate/late verdict-artifact write landed' "$WRAPPER"
+# The per-run artifact dir is cleaned up after resolution (no accumulation), gated
+# on a `.../runs/` leaf path so a misresolved root is never removed.
+assert_grep "TC-VERDICT-ARTIFACT-W23 per-run artifact dir is cleaned up (rm -rf the runs/<run-id> leaf)" \
+  'rm -rf "\$_art_run_dir"' "$WRAPPER"
+assert_grep "TC-VERDICT-ARTIFACT-W23b cleanup only removes a runs/ leaf (defensive against a misresolved root)" \
+  '_art_run_dir" == \*/runs/\*' "$WRAPPER"
 
 # Render-format pins (machine consumers unchanged — these greps must still hold).
 assert_grep "TC-VERDICT-ARTIFACT-W10 dispatcher trailer still emitted (emit_verdict_trailer passed)" \

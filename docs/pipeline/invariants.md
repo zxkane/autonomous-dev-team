@@ -3520,15 +3520,23 @@ The artifact's `verdict.state` (adapter-spec § 4.3) drives resolution:
   [INV-48](#inv-48-a-timed-out-review-agent-is-a-deciding-fail-veto-not-a-silent-drop)
   still govern absence).
 
-**Atomic write + TRUE read-once (Clause VA5)**: the agent writes `<path>.tmp.$$`
-then `mv` (rename) into place; the wrapper reads only the final path. A
-half-written `.tmp` is never the read target (no torn read). Read-once is
-**enforced by validating an in-memory snapshot**, not by re-reading the path:
-`_classify_verdict_artifact` `cat`s the bytes ONCE into a private temp file and
-runs BOTH schema validation AND the identity check against that snapshot — never
-a second read of `<path>`. So a rename that lands between the read and the
-validate cannot flip the result valid↔malformed (#233 review [P1] #1); a
-duplicate/late write is simply never observed.
+**Atomic write + TRUE read-once + first-land freeze (Clause VA5)**: the agent
+writes `<path>.tmp.$$` then `mv` (rename) into place; a half-written `.tmp` is
+never the read target (no torn read). Read-once is enforced at TWO layers:
+1. **First-land freeze (#233 review round-5, [P1] #2).** The fan-out observe loop
+   copies each artifact's bytes to a private `<path>.landed` SNAPSHOT the moment
+   it FIRST observes the final file (`_freeze_landed_artifact`), and the
+   resolution loop validates that frozen snapshot — NOT a re-read of the live
+   path. So a duplicate `mv` that lands in the gap between the
+   `_all_artifacts_landed` early-exit signal and the later resolution replaces the
+   live file but NOT the snapshot: the FIRST-landed bytes are authoritative, and
+   the later rewrite is detected (`cmp` against the snapshot) and logged once as a
+   duplicate. This closes the multi-second window the in-function read-once below
+   does not cover.
+2. **In-function read-once.** `_classify_verdict_artifact` `cat`s the (frozen)
+   bytes ONCE into a private temp file and runs BOTH schema validation AND the
+   identity check against that snapshot — never a second read. So a rename during
+   classification cannot flip the result valid↔malformed (#233 review round-1).
 
 **Identity binding (Clause VA4 enforcement)**: a schema-valid artifact is
 accepted ONLY if its `.runId` equals the session UUID the wrapper minted for this
@@ -3561,21 +3569,29 @@ comment channel keeps working: the dispatcher's `classify_recent_review_verdict`
 The artifact is the wrapper's **own aggregation** parsing surface; the comment is
 the **human record + the fallback channel**.
 
-**Human-facing body derived from the artifact (#233 review round-4, [P1] #1)**: a
+**Human-facing body derived from the artifact (#233 review round-4/5, [P1] #1)**: a
 `valid` artifact populates `AGENT_VERDICT_BODIES` from a body RENDERED off the
 artifact (`_verdict_body_from_artifact_json` — `Review PASSED …` / `Review
 findings:` + numbered blocking list, matching the phrasing the poller and
 post-verdict.sh key on). This makes `LATEST_COMMENT` non-empty whenever any agent
 resolved `valid`, so the `Reviewed HEAD` trailer (INV-04) posts and the FAIL
-branch takes the SUBSTANTIVE path — **even when the artifact is the only
-successful channel** (the agent's own `post-verdict.sh` comment failed). The
-render is a pure string transform (no API, no comment poll — the zero-comment-poll
-AC holds). When the agent's own verdict post FAILED (detected via the INV-69
-`verdict-postfail-<session_id>` BREADCRUMB — a filesystem stat, **not** a
-comment-list call), the wrapper itself posts the artifact-derived body through
-`post-verdict.sh` so a `Review PASSED` / `Review findings:` issue comment always
-lands for the machine consumers. The breadcrumb gate guarantees no double-post (a
-successful agent post leaves no breadcrumb).
+branch takes the SUBSTANTIVE path. The render is a pure string transform (no API,
+no comment poll — the zero-comment-poll AC holds).
+
+The wrapper then posts **EXACTLY ONE wrapper-owned AGGREGATE verdict comment** from
+`AGGREGATE` (round-5), rendered from the deciding bodies in `LATEST_COMMENT` and
+posted via `post-verdict.sh` (INV-56 sole-poster). This replaced a per-agent
+breadcrumb-gated re-post that had two defects: an agent reaped BEFORE it ever
+called `post-verdict.sh` left no breadcrumb → no rendered comment at all; and
+multiple breadcrumb-leaving agents could emit CONTRADICTORY per-agent PASS+FAIL
+comments. The aggregate post is gated on **at least one DECIDING agent being
+artifact-sourced** (`_any_deciding_artifact`): if the deciding surface was
+entirely comment-channel the agents already posted their own comment (today's
+behavior — no wrapper post, no double-post); if any deciding agent was
+artifact-sourced its human surface may be missing, so the wrapper renders the
+authoritative aggregate. It guarantees a comment when **the artifact is the only
+successful channel**, and the single aggregate is the newest `Review findings:` /
+`Review PASSED` comment so dev-resume's INV-57 newest-wins semantics consume it.
 
 **Live artifact-landing completion signal (#233 review round-4, [P1] #2)**: the
 fan-out join is a bounded OBSERVE loop, not a blocking `wait`. It breaks on EITHER
@@ -3634,9 +3650,13 @@ agent DID deliver output, it was just unparseable.)
   fallback parity, the timeout-veto regression pin, **the human-facing body
   rendered from the artifact (TC-041..047: PASS/FAIL first-line phrasing, no
   double-prefix, LATEST_COMMENT non-empty, round-trips through
-  `_classify_verdict_body`, still zero comment polls)**, and **the `_all_artifacts_landed`
-  completion-signal helper + the breadcrumb-gated wrapper re-post + the
-  ALL-artifacts-landed early-exit gate (TC-048, W15..W19)**; plus the conformance
+  `_classify_verdict_body`, still zero comment polls)**, **the single wrapper-owned
+  AGGREGATE verdict comment gated on a deciding artifact source (W16, W17a-c — the
+  per-agent breadcrumb re-post is removed)**, **the `_all_artifacts_landed`
+  completion-signal helper + the ALL-artifacts-landed early-exit gate (TC-048,
+  W18-W19)**, and **the first-land freeze: `_freeze_landed_artifact` snapshots the
+  first bytes, a later differing write is reported `duplicate` + logged, and the
+  resolved verdict is the first land (TC-049, W20-W22)**; plus the conformance
   manifests asserting `verdict.state` from artifact files and the stub-fleet E2E
   (`run-verdict-artifact-fleet-e2e.sh`) covering a foreign-identity agent.
 

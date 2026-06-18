@@ -96,7 +96,16 @@ bare CI.
 | TC-VERDICT-ARTIFACT-046 | ([P1]#1) artifact-resolved agent populates `AGENT_VERDICT_BODIES` → synthesized `LATEST_COMMENT` non-empty | Reviewed-HEAD trailer would post; FAIL substantive |
 | TC-VERDICT-ARTIFACT-047 | ([P1]#1) body renderer introduces no comment poll | all-artifact path still 0 comment-list calls |
 | TC-VERDICT-ARTIFACT-048 | ([P1]#2) `_all_artifacts_landed`: all present→0; one missing/empty-arg/`.tmp`-only/no-args→non-zero | rename-land completion signal |
-| TC-VERDICT-ARTIFACT-W15..W19 | wrapper wiring: body populated from artifact; breadcrumb-gated wrapper re-post; observe loop iterates `_fanout_pids` via `kill -0`; early-exit gated on ALL artifacts landed | source-of-truth greps |
+
+## Unit — first-land freeze + single aggregate comment ([P1]s on PR #262, round-5)
+
+| ID | Scenario | Expected |
+|---|---|---|
+| TC-VERDICT-ARTIFACT-049 | ([P1]#2) `_freeze_landed_artifact`: first land→`frozen`; same bytes→empty; post-land DIFFERING write→`duplicate` (logged, ignored); frozen snapshot keeps the first-landed bytes; verdict resolved from the snapshot is the first land; absent live→no-op | first-landed bytes win; later rewrite ignored |
+| TC-VERDICT-ARTIFACT-W15 | valid branch populates `AGENT_VERDICT_BODIES` via `_verdict_body_from_artifact_json` | source-of-truth grep |
+| TC-VERDICT-ARTIFACT-W16/W17a-c | ([P1]#1) wrapper posts ONE aggregate comment from `AGGREGATE`; gated on `_any_deciding_artifact` (source==artifact + pass/fail); the old per-agent breadcrumb re-post loop is REMOVED | no double-post on comment path; comment guaranteed when artifact-only |
+| TC-VERDICT-ARTIFACT-W18/W19 | ([P1]#2) observe loop uses `_all_artifacts_landed` (not bare wait); early-exit gated on ALL artifacts landed (INV-48 rc preserved) | source-of-truth greps |
+| TC-VERDICT-ARTIFACT-W20/W21/W22 | ([P1]#2) observe loop freezes first-landed bytes (`_freeze_landed_artifact`/`_freeze_pass`); resolution reads the frozen snapshot (`_art_read`); a post-land duplicate is logged | source-of-truth greps |
 
 ## E2E — conformance + stub-fleet
 
