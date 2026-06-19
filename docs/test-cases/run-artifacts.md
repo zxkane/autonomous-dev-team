@@ -66,6 +66,7 @@ Suites:
 | TC-RUN-ARTIFACTS-090 | `run_artifacts_init` prunes ALL issues, not just the active one (#235 r14) | init for issue 235 reaps a 99-day dir belonging to issue 236; the active 235 run dir is created + retained |
 | TC-RUN-ARTIFACTS-091..095 | `run_artifacts_persist_log` (#235 r14) | copies a /tmp per-agent log into `agent-logs/<label>.log` (content preserved); sanitizes a path-traversal label (slashes→`_`, stays inside agent-logs/); missing src → rc-0 no-op; empty dir → rc-0 no-op |
 | TC-RUN-ARTIFACTS-096 | `run_artifacts_init` breadcrumbs the legacy /tmp agent log (#235 r15) | `$LOG_FILE` gains a `[run-artifacts] run-dir: … · run-id: …` line (first line on an empty log); one breadcrumb per distinct run dir; the idempotency guard keeps the original dir's breadcrumb at exactly one occurrence |
+| TC-RUN-ARTIFACTS-098 | review fan-out persists the CONTROLLER log, not the stdout alias (#235 r16) | structural grep-assert over `autonomous-review.sh`: the `<agent>.log` persist passes the derived `_agent_log` controller path (deterministic `/tmp/agent-<proj>-review-<issue>-<agent>.log`), NOT `AGENT_GENERIC_LOGS` (which for codex aliases the clean stdout → would double-store stdout + lose the controller log); the codex CLEAN stdout is still persisted under `<agent>-stdout` |
 
 ## status.sh — four canonical states (TC + predicate parity)
 

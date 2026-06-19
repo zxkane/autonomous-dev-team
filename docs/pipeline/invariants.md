@@ -4008,13 +4008,18 @@ The dir holds:
   best-effort + symlink-guarded.
 - `drops.jsonl` — one `{agent, reason, ts}` line per dropped/unavailable review
   fan-out member (review side only).
-- `agent-logs/<agent>.log` — the raw per-agent fan-out log(s) copied from `/tmp`
-  by `run_artifacts_persist_log` so the per-agent evidence (dropped agents, codex
-  fallback verdicts, stream/auth failures) survives a `/tmp` wipe (review side;
-  #235 review [P1]). Persisted for every fan-out member (pass/fail AND
-  dropped/timed-out); a codex member also gets its CLEAN stdout capture under
-  `<agent>-stdout.log`. The label is sanitized to `[A-Za-z0-9._-]` (path-traversal
-  defense) and the subdir is symlink-guarded (CWE-59).
+- `agent-logs/<agent>.log` — the raw per-agent **controller** log (the
+  deterministic `/tmp/agent-<project>-review-<issue>-<agent>.log` that EVERY CLI's
+  invocation tee's into: PR-worktree setup, stream/auth failures, the wrapper's own
+  per-agent diagnostics) copied by `run_artifacts_persist_log` so the per-agent
+  evidence survives a `/tmp` wipe (review side; #235 review [P1]). Persisted for
+  every fan-out member (pass/fail AND dropped/timed-out). A codex member ALSO gets
+  its CLEAN stdout capture under `<agent>-stdout.log` — that is distinct evidence
+  from the controller log (and for codex the controller log is what a pre-stdout
+  failure leaves behind, so persisting the controller log — NOT the stdout alias —
+  is what saves a codex that dies before emitting stdout; #235 review [P1] r16).
+  The label is sanitized to `[A-Za-z0-9._-]` (path-traversal defense) and the
+  subdir is symlink-guarded (CWE-59).
 
 The run-id is:
 1. **Exported** as `RUN_ID`/`RUN_DIR` so sourced libs/adapters inherit it.

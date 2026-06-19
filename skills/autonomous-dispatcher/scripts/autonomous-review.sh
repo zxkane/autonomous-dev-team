@@ -2737,10 +2737,18 @@ if declare -F metrics_emit >/dev/null 2>&1; then
     # evidence — dropped agents, codex fallback verdicts, stream/auth failures —
     # after a /tmp wipe or reboot (#235 review [P1]). Runs for EVERY member (before
     # the unavailable/timed-out `continue` below) so pass/fail logs are kept too.
-    # The codex CLEAN stdout capture is distinct evidence from the generic log, so
-    # persist it under a `<agent>-stdout` label as well. Best-effort, observe-only.
+    #
+    # ALWAYS persist the CONTROLLER log `_agent_log` as `<agent>.log` — this is the
+    # deterministic /tmp path EVERY CLI's invocation tee's into (PR-worktree setup,
+    # stream/auth failures, the wrapper's own per-agent diagnostics). For codex,
+    # AGENT_GENERIC_LOGS aliases the CLEAN stdout capture (token-parse convenience),
+    # NOT the controller log — so persisting the generic log would store stdout
+    # twice and LOSE the controller evidence for a codex that fails before emitting
+    # stdout (#235 review [P1] r16). So derive `_agent_log` here instead, and
+    # persist the codex CLEAN stdout capture separately as `<agent>-stdout.log`.
     if declare -F run_artifacts_persist_log >/dev/null 2>&1; then
-      run_artifacts_persist_log "${RUN_DIR:-}" "${AGENT_NAMES[$_mi]}" "${AGENT_GENERIC_LOGS[$_mi]:-}" || true
+      _m_controller_log="/tmp/agent-${PROJECT_ID}-review-${ISSUE_NUMBER}-${AGENT_NAMES[$_mi]}.log"
+      run_artifacts_persist_log "${RUN_DIR:-}" "${AGENT_NAMES[$_mi]}" "$_m_controller_log" || true
       [[ "${AGENT_NAMES[$_mi]}" == "codex" ]] \
         && run_artifacts_persist_log "${RUN_DIR:-}" "${AGENT_NAMES[$_mi]}-stdout" "${AGENT_CODEX_LOGS[$_mi]:-}" || true
     fi

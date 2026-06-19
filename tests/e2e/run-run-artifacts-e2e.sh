@@ -237,6 +237,28 @@ else
   bad "TC-087c Reviewed-HEAD trailer present to check" "no 'Reviewed HEAD:' trailer found"
 fi
 
+# ---------------------------------------------------------------------------
+# TC-098: the review fan-out persists the CONTROLLER log (_agent_log), not the
+# AGENT_GENERIC_LOGS alias (which is codex's CLEAN stdout) — #235 review [P1] r16.
+# For codex, AGENT_GENERIC_LOGS == the stdout capture, so persisting it as
+# <agent>.log would store stdout twice and lose the controller log (PR-worktree
+# setup / pre-stdout failures). Structural grep-assert against the wrapper source.
+# ---------------------------------------------------------------------------
+echo "== TC-098 review persist uses the controller log, not the stdout alias =="
+PERSIST_WIN="$(grep -n 'run_artifacts_persist_log "\${RUN_DIR' "$REVIEW_SH" | head -1 | cut -d: -f1)"
+if [[ -n "$PERSIST_WIN" ]]; then
+  _pwin="$(sed -n "$((PERSIST_WIN - 4)),$((PERSIST_WIN + 4))p" "$REVIEW_SH")"
+  # The <agent>.log persist must pass the derived controller-log path, NOT the
+  # AGENT_GENERIC_LOGS array (the round-14 double-stdout bug).
+  expect "TC-098a persists the derived controller log (_agent_log path)" "_m_controller_log" "$_pwin"
+  expect_not "TC-098b does NOT pass AGENT_GENERIC_LOGS to persist (no double-stdout)" 'run_artifacts_persist_log "${RUN_DIR:-}" "${AGENT_NAMES[$_mi]}" "${AGENT_GENERIC_LOGS' "$_pwin"
+  expect "TC-098c codex CLEAN stdout still persisted under -stdout" 'AGENT_NAMES[$_mi]}-stdout' "$_pwin"
+  # The derived controller path matches the deterministic _agent_log scheme.
+  expect "TC-098d controller path is the deterministic /tmp _agent_log scheme" 'agent-${PROJECT_ID}-review-${ISSUE_NUMBER}-${AGENT_NAMES[$_mi]}.log' "$_pwin"
+else
+  bad "TC-098 persist call site present to check" "no run_artifacts_persist_log call found in $REVIEW_SH"
+fi
+
 echo ""
 echo "RUN-ARTIFACTS-E2E-SUMMARY pass=${PASS} fail=${FAIL}"
 [[ "$FAIL" -eq 0 ]]

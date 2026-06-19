@@ -741,10 +741,13 @@ early init). It later tees its stdout/stderr into `run.log`,
 threads `run_id=` into every
 `metrics_emit` above, records each dropped fan-out member in the run dir's
 `drops.jsonl` (`run_artifacts_record_drop`, alongside the `agent_drop` metric),
-**persists each fan-out member's raw per-agent log into `runs/<run-id>/agent-logs/`**
+**persists each fan-out member's raw CONTROLLER log into `runs/<run-id>/agent-logs/<agent>.log`**
 (`run_artifacts_persist_log`, in the same per-member loop — for every member, not
-just dropped ones; a codex member also gets its CLEAN stdout capture, so the raw
-evidence survives a `/tmp` wipe; #235 review [P1]), and
+just dropped ones — copying the deterministic `_agent_log` controller path, NOT
+the `AGENT_GENERIC_LOGS` alias which for codex is the clean stdout capture; a codex
+member ALSO gets that stdout capture under `<agent>-stdout.log`, so a codex that
+dies before emitting stdout still leaves its controller evidence; #235 review [P1]
+r16), and
 `cleanup()` calls `run_artifacts_finalize` (end marker + rc + timing) for both the
 normal and crash paths. **EVERY wrapper-owned comment carries the `run-id: … ·
 artifacts: …` footer (AC1, #235 review [P1] r4)** — not only the crash note and the
