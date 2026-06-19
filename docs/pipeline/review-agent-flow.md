@@ -726,6 +726,47 @@ At `wrapper_end` it also **prunes the metrics log once per run**
 collection. A metrics failure (emit or prune) can never change the verdict, the
 merge decision, or the trap's label transitions. See [`metrics.md`](metrics.md).
 
+### Observe-only run-artifacts + run-id footer ([INV-81](invariants.md#inv-81-every-wrapper-run-mints-a-run-id-and-a-durable-per-run-artifact-dir-the-run-id-threads-through-logs-metrics-and-every-wrapper-posted-comment-footer-statussh-answers-pipeline-state-from-the-dispatchers-real-predicates-observe-only--never-changes-wrapper-rc-or-labels))
+
+**EARLY** — right after the `--issue` peek and BEFORE the config/auth/E2E/PID
+`error_surface` calls (#235 review [P1]) — the review wrapper mints `RUN_ID`
+(`<project>-<issue>-review-<ts>`) and provisions a durable run dir (`runs/<run-id>/`,
+sibling to INV-78's per-agent verdict UUID dirs under the same `runs/` parent). This
+early ordering is what lets a startup-failure operator error envelope
+(`lib-error.sh::error_surface`, [INV-72](invariants.md#inv-72-config-class-failures-must-surface-on-the-issue-never-log-only))
+carry the run-id footer — the two footerless-by-ordering exceptions being a
+missing-`PROJECT_ID` abort (nothing to anchor a run dir on) and `lib-agent.sh`'s
+source-time launcher guards (they fire during `source lib-agent.sh`, before the
+early init). It later tees its stdout/stderr into `run.log`,
+threads `run_id=` into every
+`metrics_emit` above, records each dropped fan-out member in the run dir's
+`drops.jsonl` (`run_artifacts_record_drop`, alongside the `agent_drop` metric),
+**persists each fan-out member's raw CONTROLLER log into `runs/<run-id>/agent-logs/<agent>.log`**
+(`run_artifacts_persist_log`, in the same per-member loop — for every member, not
+just dropped ones — copying the deterministic `_agent_log` controller path, NOT
+the `AGENT_GENERIC_LOGS` alias which for codex is the clean stdout capture; a codex
+member ALSO gets that stdout capture under `<agent>-stdout.log`, so a codex that
+dies before emitting stdout still leaves its controller evidence; #235 review [P1]
+r16), and
+`cleanup()` calls `run_artifacts_finalize` (end marker + rc + timing) for both the
+normal and crash paths. **EVERY wrapper-owned comment carries the `run-id: … ·
+artifacts: …` footer (AC1, #235 review [P1] r4)** — not only the crash note and the
+two wrapper-owned verdict comments (codex stdout-fallback INV-62 + INV-78 aggregate,
+footered on the body file via `_append_run_footer_to_file` before `post-verdict.sh`)
+but ALSO every diagnostic path: no-PR-found, E2E-gate fail / evidence-missing,
+pre-fan-out smoke FAIL / all-unavailable / dropped-survivor, timeout-veto,
+dropped-agent, mandatory-bot-review fail / re-queue, mergeable CONFLICTING / UNKNOWN,
+approval-failed fallback, no-auto-close manual-merge notice, and the auto-merge-failure
+PR rebase marker. The footer is appended at the END (after `run_footer`'s `\n---\n`),
+so comments whose FIRST line is machine-parsed (`Review findings:`, `Auto-merge
+failed:`) keep that leading line intact. The `Reviewed HEAD:` SHA trailer and the
+`<!-- review-verdict: … -->` HTML trailer are the two deliberate exceptions (pure
+machine channels — a footer there is noise the dispatcher would skip). All
+best-effort + `declare -F`-guarded — a failure leaves `RUN_ID`/`RUN_DIR` empty and
+degrades to no-ops, never changing the verdict, merge decision, or labels.
+`status.sh <issue>` reads these run dirs (the "last run-ids" + "last drop reasons"
+lines). See [`debugging.md`](debugging.md).
+
 ## Cross-references
 
 - [`dispatcher-flow.md`](dispatcher-flow.md) — Step 3 is the producer side of the dispatcher → review handoff.

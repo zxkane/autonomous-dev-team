@@ -114,7 +114,21 @@ jobs:
       - name: verdict-artifact channel stub-fleet E2E
         run: bash tests/e2e/run-verdict-artifact-fleet-e2e.sh
 
-  # Executable-spec gate (INV-79, #236): the issue-label state machine is encoded
+      # Run-artifacts + status.sh E2E (INV-81, #235): a stub dev+review cycle
+      # populates durable run dirs (meta.json + run.log + drops.jsonl) under the
+      # XDG state root; asserts comment footers carry the run-id, status.sh's
+      # four-state output, and a reboot simulation (/tmp cleared) leaving the
+      # artifacts intact. No network / credentials — always-on hermetic tier.
+      - name: run-artifacts + status.sh E2E
+        run: |
+          out=$(bash tests/e2e/run-run-artifacts-e2e.sh)
+          echo "$out"
+          echo "$out" | grep -q 'RUN-ARTIFACTS-E2E-SUMMARY pass=' || {
+            echo "::error::run-artifacts E2E self-test did not produce the expected summary"
+            exit 1
+          }
+
+  # Executable-spec gate (INV-80, #236): the issue-label state machine is encoded
   # in docs/pipeline/transitions.json; the mermaid diagram is GENERATED from it,
   # and every guard/action + every dispatcher label-write must be declared. This
   # job fails when code and the spec table drift. Pure docs/spec check — no
@@ -168,6 +182,8 @@ jobs:
             skills/autonomous-dispatcher/scripts/lib-agent-smoke.sh \
             skills/autonomous-dispatcher/scripts/lib-metrics.sh \
             skills/autonomous-dispatcher/scripts/metrics-report.sh \
+            skills/autonomous-dispatcher/scripts/lib-run-artifacts.sh \
+            skills/autonomous-dispatcher/scripts/status.sh \
             skills/autonomous-dispatcher/scripts/lib-error.sh \
             skills/autonomous-dispatcher/scripts/gen-state-machine.sh \
             skills/autonomous-dispatcher/scripts/check-spec-drift.sh \
@@ -175,6 +191,7 @@ jobs:
             tests/e2e/run-agent-smoke.sh \
             tests/e2e/run-metrics-report.sh \
             tests/e2e/run-error-envelope-e2e.sh \
+            tests/e2e/run-run-artifacts-e2e.sh \
             tests/e2e/run-verdict-artifact-fleet-e2e.sh \
             tests/conformance/run-conformance.sh \
             tests/conformance/lib-conformance.sh \
