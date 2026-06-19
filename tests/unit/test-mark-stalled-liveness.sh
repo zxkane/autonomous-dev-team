@@ -158,6 +158,114 @@ mark_stalled 103 >/dev/null
 edit_calls=$(printf '%s\n' "${_GH_CALLS[@]}" | grep -E '^issue edit' || true)
 assert_match "TC-MSL-003 missing PID file → stall label edit fires" "issue edit 103.*stalled" "$edit_calls"
 
+# ===================================================================
+echo
+echo "=== TC-MSL-006..010: at-cap liveness ceiling (issue #263) ==="
+
+# Stub SSM liveness driver so the remote-backend pid_alive path is exercised
+# without an actual SSM call. The driver echoes canned stdout and exits a
+# canned rc; an empty stdout + rc≠0 is the "indeterminate" verdict that
+# [INV-30] biases toward ALIVE for non-at-cap callers.
+DRIVER_STDOUT_FILE="$TMPDIR/driver-stdout"
+DRIVER_RC_FILE="$TMPDIR/driver-rc"
+STUB_DRIVER="$TMPDIR/liveness-check-remote-aws-ssm.sh"
+cat > "$STUB_DRIVER" <<'EOF'
+#!/bin/bash
+[[ -f "$DRIVER_STDOUT_FILE" ]] && cat "$DRIVER_STDOUT_FILE"
+exit "$(cat "$DRIVER_RC_FILE" 2>/dev/null || echo 0)"
+EOF
+chmod +x "$STUB_DRIVER"
+export DRIVER_STDOUT_FILE DRIVER_RC_FILE
+export _LIVENESS_CHECK_DRIVER_OVERRIDE="$STUB_DRIVER"
+
+# TC-MSL-006 (CRITICAL regression) — remote backend, retry exhausted, SSM
+# persistently indeterminate. The MAX_RETRIES caller invokes
+# `mark_stalled --at-cap`, which propagates `--at-cap` to `pid_alive`; the flag
+# overrides the indeterminate ALIVE-bias to DEAD, and the stall label is written
+# on the SAME tick. This is the downstream-consumer ~40h-hang bug.
+#
+# Assert BOTH (per the locked plan + codex guardrail #2):
+#   (a) `issue edit <N> ... --add-label stalled` IS called, AND
+#   (b) NO `INV-26-stall-deferral` comment is posted.
+# A return-code-only assertion would pass BEFORE the fix (pre-fix mark_stalled
+# `return 0`s on the deferral path) and prove nothing.
+_GH_CALLS=()
+: > "$DRIVER_STDOUT_FILE"        # empty stdout
+echo "2" > "$DRIVER_RC_FILE"     # rc≠0 → indeterminate
+_REMOTE_LIVENESS_DEGRADED_COUNT=0
+EXECUTION_BACKEND=remote-aws-ssm mark_stalled --at-cap 106 >/dev/null 2>&1
+edit_calls=$(printf '%s\n' "${_GH_CALLS[@]}" | grep -E '^issue edit' || true)
+comment_calls=$(printf '%s\n' "${_GH_CALLS[@]}" | grep -E '^issue comment' || true)
+assert_match    "TC-MSL-006 remote at-cap indeterminate → stall label edit fires" "issue edit 106.*stalled" "$edit_calls"
+assert_no_match "TC-MSL-006 remote at-cap indeterminate → NO deferral comment"     "INV-26-stall-deferral"   "$comment_calls"
+
+# TC-MSL-007 — local backend, empty PID file but pid_alive ALIVE via fresh
+# PID-file mtime (legacy tier-2). An empty PID means no wrapper is running, so
+# mark_stalled treats it as DEAD: write `stalled`, no deferral comment.
+_GH_CALLS=()
+: > "$TMPDIR/issue-107.pid"      # present but empty content
+touch "$TMPDIR/issue-107.pid"    # fresh mtime → tier-2 would return ALIVE
+unset _LIVENESS_CHECK_DRIVER_OVERRIDE   # ensure local path (defensive)
+EXECUTION_BACKEND=local mark_stalled 107 >/dev/null 2>&1
+export _LIVENESS_CHECK_DRIVER_OVERRIDE="$STUB_DRIVER"
+edit_calls=$(printf '%s\n' "${_GH_CALLS[@]}" | grep -E '^issue edit' || true)
+comment_calls=$(printf '%s\n' "${_GH_CALLS[@]}" | grep -E '^issue comment' || true)
+assert_match    "TC-MSL-007 local empty-PID → stall label edit fires"     "issue edit 107.*stalled" "$edit_calls"
+assert_no_match "TC-MSL-007 local empty-PID → NO deferral comment posted"  "INV-26-stall-deferral"   "$comment_calls"
+rm -f "$TMPDIR/issue-107.pid"
+
+# TC-MSL-008 (regression guard) — non-empty PID + genuine ALIVE process under
+# local backend: existing [INV-26] deferral path preserved (defer, no stall).
+_GH_CALLS=()
+sleep 60 &
+LIVE_PID=$!
+echo "$LIVE_PID" > "$TMPDIR/issue-108.pid"
+unset _LIVENESS_CHECK_DRIVER_OVERRIDE
+EXECUTION_BACKEND=local mark_stalled 108 >/dev/null 2>&1
+export _LIVENESS_CHECK_DRIVER_OVERRIDE="$STUB_DRIVER"
+edit_calls=$(printf '%s\n' "${_GH_CALLS[@]}" | grep -E '^issue edit' || true)
+comment_calls=$(printf '%s\n' "${_GH_CALLS[@]}" | grep -E '^issue comment 108' || true)
+assert_no_match "TC-MSL-008 genuine alive (non-empty PID) → NO stall label edit" "issue edit.*stalled" "$edit_calls"
+assert_match    "TC-MSL-008 genuine alive (non-empty PID) → deferral comment posted" "issue comment 108" "$comment_calls"
+kill "$LIVE_PID" 2>/dev/null || true
+wait "$LIVE_PID" 2>/dev/null || true
+rm -f "$TMPDIR/issue-108.pid"
+
+# TC-MSL-009 (regression guard for pid_alive) — calling pid_alive WITHOUT
+# --at-cap under remote backend with the indeterminate driver MUST still return
+# 0 (ALIVE-bias), proving the flag is the only thing that flips the verdict and
+# the [INV-30] default is untouched. Capture rc before asserting (set -e safe).
+: > "$DRIVER_STDOUT_FILE"
+echo "2" > "$DRIVER_RC_FILE"
+_REMOTE_LIVENESS_DEGRADED_COUNT=0
+rc=0
+EXECUTION_BACKEND=remote-aws-ssm pid_alive issue 109 >/dev/null 2>&1 || rc=$?
+assert_match "TC-MSL-009 pid_alive WITHOUT --at-cap → ALIVE (rc 0) on remote indeterminate" "^0$" "$rc"
+# And WITH --at-cap → DEAD (rc 1) on the same indeterminate verdict.
+_REMOTE_LIVENESS_DEGRADED_COUNT=0
+rc=0
+EXECUTION_BACKEND=remote-aws-ssm pid_alive --at-cap issue 109 >/dev/null 2>&1 || rc=$?
+assert_match "TC-MSL-009 pid_alive WITH --at-cap → DEAD (rc 1) on remote indeterminate" "^1$" "$rc"
+
+# TC-MSL-010 (CRITICAL regression — #263 review BLOCKING finding) — the OTHER
+# mark_stalled caller is handle_completed_session_routing's REVIEW_RETRY_LIMIT
+# branch, which calls `mark_stalled "$issue_num"` WITHOUT `--at-cap`. That path
+# is the review-retry-cap state, NOT the retry-budget-exhausted state, so it
+# MUST retain [INV-30]'s indeterminate→ALIVE bias under the remote backend:
+# mark_stalled defers (posts the deferral comment, no stall label) rather than
+# stalling immediately. A blanket `--at-cap` (the pre-fix bug) would have
+# over-applied the DEAD bias here and stalled an issue whose dev wrapper may
+# still be alive but unreachable through a flaky SSM transport.
+_GH_CALLS=()
+: > "$DRIVER_STDOUT_FILE"        # empty stdout
+echo "2" > "$DRIVER_RC_FILE"     # rc≠0 → indeterminate
+_REMOTE_LIVENESS_DEGRADED_COUNT=0
+EXECUTION_BACKEND=remote-aws-ssm mark_stalled 110 >/dev/null 2>&1   # NO --at-cap
+edit_calls=$(printf '%s\n' "${_GH_CALLS[@]}" | grep -E '^issue edit' || true)
+comment_calls=$(printf '%s\n' "${_GH_CALLS[@]}" | grep -E '^issue comment 110' || true)
+assert_no_match "TC-MSL-010 review-cap caller (no --at-cap) remote indeterminate → NO stall label edit" "issue edit.*stalled" "$edit_calls"
+assert_match    "TC-MSL-010 review-cap caller (no --at-cap) remote indeterminate → deferral comment posted (INV-30 ALIVE-bias preserved)" "INV-26-stall-deferral" "$comment_calls"
+
 echo
 echo "=== Summary ==="
 echo "Passed: $PASS"

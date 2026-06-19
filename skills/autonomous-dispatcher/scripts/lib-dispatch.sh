@@ -453,7 +453,20 @@ count_dispatcher_crashes() {
 
 # Mark issue as stalled (retry exhausted). Posts the canonical "Marking as
 # stalled" comment that the next stalled-cutoff calculation will key off.
+#
+# Optional leading positional `--at-cap` flag (issue #263): propagated to the
+# liveness probe (`pid_alive --at-cap`). It MUST be passed ONLY by the
+# retry-budget-exhausted caller (`dispatcher-tick.sh` Step 4, fired at
+# `count_retries >= MAX_RETRIES`). The other caller —
+# `handle_completed_session_routing`'s `REVIEW_RETRY_LIMIT` branch — is the
+# review-retry-cap state, NOT the retry-budget-exhausted state, so it does
+# NOT pass the flag and therefore retains [INV-30]'s indeterminate→ALIVE
+# bias under the remote backend. (A blanket `--at-cap` would over-apply the
+# DEAD bias to that path; flagged BLOCKING in #263 review.) The flag is
+# positional, never an env var, so it cannot leak between callers.
 mark_stalled() {
+  local at_cap=false
+  if [ "${1:-}" = "--at-cap" ]; then at_cap=true; shift; fi
   local issue_num="$1"
 
   # Liveness defer (#121 Fix C): if a dev wrapper is still alive on this
@@ -469,17 +482,54 @@ mark_stalled() {
   # one-shot deferral comment (idempotency-keyed on the agent's current
   # session id pulled from the wrapper PID file path, so re-ticks against
   # the same alive wrapper don't fill the timeline).
-  if pid_alive issue "$issue_num"; then
-    local pid current_session_marker
+  #
+  # At-cap propagation ([INV-30] exception, issue #263): when this call was
+  # made `--at-cap` (the MAX_RETRIES caller), pass the flag through to
+  # `pid_alive` so a persistently-indeterminate remote-SSM verdict flips
+  # from ALIVE-bias to DEAD, bounding the defer loop to one tick instead of
+  # forever (a downstream consumer's ~40h hang). When NOT at-cap (the
+  # review-retry-cap caller), the plain `pid_alive` call keeps INV-30's
+  # ALIVE-bias. Definite ALIVE/DEAD verdicts are unaffected either way.
+  local _alive
+  if [ "$at_cap" = true ]; then
+    pid_alive --at-cap issue "$issue_num" && _alive=0 || _alive=1
+  else
+    pid_alive issue "$issue_num" && _alive=0 || _alive=1
+  fi
+  if [ "$_alive" = 0 ]; then
+    local pid current_session_marker _backend
     pid=$(get_pid issue "$issue_num")
-    current_session_marker="INV-26-stall-deferral:pid=${pid}"
-    if gh issue view "$issue_num" --repo "$REPO" --json comments \
-        -q "[.comments[].body | select(contains(\"${current_session_marker}\"))] | length" \
-        2>/dev/null | grep -q '^0$'; then
-      gh issue comment "$issue_num" --repo "$REPO" \
-        --body "Stall decision deferred: dev wrapper PID ${pid} is still alive — counter says ${MAX_RETRIES} but a wrapper is making progress. Re-evaluating next tick. (\`${current_session_marker}\`)"
+    # Resolve the backend on its own line, compare against the literal on
+    # the next — keep the env-var name and the backend literal on SEPARATE
+    # lines. TC-RPA-010 sets its awk in_block on the FIRST line naming both
+    # together, so they must never co-occur on one line at or before
+    # `pid_alive`. Do NOT collapse the assignment and the comparison below.
+    _backend="${EXECUTION_BACKEND:-local}"
+
+    # Empty-PID = DEAD shortcut, narrowed to local backend (issue #263).
+    # Under local backend `pid_alive` can return ALIVE via tier-2 PID-file
+    # mtime or tier-3 heartbeat mtime even when the PID file *content* is
+    # empty (no wrapper holds it) — an empty PID then means no wrapper is
+    # running, so treat it as DEAD: skip the deferral comment and fall
+    # through to write `stalled`. Do NOT apply under the remote backend:
+    # there the PID file lives on the wrapper box and dispatcher-side
+    # `get_pid` is ALWAYS empty regardless of wrapper state, so empty-PID is
+    # the steady state, not a DEAD signal — the `--at-cap` flag above
+    # handles the indeterminate case instead. Re-introducing an
+    # unconditional empty-PID shortcut here would resurrect the #121 /
+    # downstream-consumer false-stall bug under the remote backend.
+    if [ "$_backend" != "remote-aws-ssm" ] && [ -z "$pid" ]; then
+      : # fall through to the stall path below (no deferral comment)
+    else
+      current_session_marker="INV-26-stall-deferral:pid=${pid}"
+      if gh issue view "$issue_num" --repo "$REPO" --json comments \
+          -q "[.comments[].body | select(contains(\"${current_session_marker}\"))] | length" \
+          2>/dev/null | grep -q '^0$'; then
+        gh issue comment "$issue_num" --repo "$REPO" \
+          --body "Stall decision deferred: dev wrapper PID ${pid} is still alive — counter says ${MAX_RETRIES} but a wrapper is making progress. Re-evaluating next tick. (\`${current_session_marker}\`)"
+      fi
+      return 0
     fi
-    return 0
   fi
 
   local agent_failures dispatcher_crashes false_positives
@@ -1023,6 +1073,20 @@ _remote_pid_alive_query() {
 _REMOTE_LIVENESS_DEGRADED_COUNT="${_REMOTE_LIVENESS_DEGRADED_COUNT:-0}"
 
 pid_alive() {
+  # Optional leading `--at-cap` positional flag ([INV-30] at-cap exception,
+  # issue #263). When set, the remote-backend *indeterminate* verdict flips
+  # from ALIVE-bias to DEAD. The flag reaches here only via `mark_stalled
+  # --at-cap`, which the dispatcher passes ONLY from its MAX_RETRIES site
+  # (`dispatcher-tick.sh` Step 4) — at that point the wrapper has no claim to
+  # the one-tick deference INV-30 normally grants, and persistent
+  # indeterminate would otherwise defer the stall forever. The review-retry-
+  # cap caller of `mark_stalled` omits the flag, so its probe keeps the
+  # ALIVE-bias. A positional flag (NOT an exported env var) is required so
+  # the at-cap policy cannot leak into unrelated `pid_alive` calls across
+  # exported functions. All ALIVE/DEAD verdicts and all non-at-cap callers
+  # are unchanged.
+  local at_cap=false
+  if [ "${1:-}" = "--at-cap" ]; then at_cap=true; shift; fi
   local kind="$1" issue_num="$2"
   local pid_file pid hb_file
 
@@ -1033,6 +1097,19 @@ pid_alive() {
      && [ "${REMOTE_LIVENESS_CHECK_DISABLE:-false}" != "true" ]; then
     local _verdict
     _verdict=$(_remote_pid_alive_query "$kind" "$issue_num")
+    # At-cap exception ([INV-30], issue #263): when the caller has proven
+    # retry budget is exhausted, an indeterminate verdict means "stop
+    # waiting" — return DEAD instead of biasing ALIVE. Placed BEFORE the
+    # `case` so the `*)` branch body (and its `return 0`) stays byte-for-byte
+    # intact for TC-RPA-010's source-of-truth grep. Definite ALIVE/DEAD
+    # verdicts skip this guard and fall through to the case unchanged.
+    if [ "$at_cap" = true ] && [ "$_verdict" != "ALIVE" ] && [ "$_verdict" != "DEAD" ]; then
+      _REMOTE_LIVENESS_DEGRADED_COUNT=$((_REMOTE_LIVENESS_DEGRADED_COUNT + 1))
+      echo "[lib-dispatch] WARN: remote liveness check indeterminate at-cap" \
+           "(kind=$kind issue=$issue_num" \
+           "count=$_REMOTE_LIVENESS_DEGRADED_COUNT); returning DEAD to stop deferring per [INV-30] at-cap exception" >&2
+      return 1
+    fi
     case "$_verdict" in
       ALIVE) return 0 ;;
       DEAD)  return 1 ;;
