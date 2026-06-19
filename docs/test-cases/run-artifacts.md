@@ -65,6 +65,7 @@ Suites:
 | TC-RUN-ARTIFACTS-039 | prune on missing `runs/` dir | no-op, returns 0 |
 | TC-RUN-ARTIFACTS-090 | `run_artifacts_init` prunes ALL issues, not just the active one (#235 r14) | init for issue 235 reaps a 99-day dir belonging to issue 236; the active 235 run dir is created + retained |
 | TC-RUN-ARTIFACTS-091..095 | `run_artifacts_persist_log` (#235 r14) | copies a /tmp per-agent log into `agent-logs/<label>.log` (content preserved); sanitizes a path-traversal label (slashes→`_`, stays inside agent-logs/); missing src → rc-0 no-op; empty dir → rc-0 no-op |
+| TC-RUN-ARTIFACTS-096 | `run_artifacts_init` breadcrumbs the legacy /tmp agent log (#235 r15) | `$LOG_FILE` gains a `[run-artifacts] run-dir: … · run-id: …` line (first line on an empty log); one breadcrumb per distinct run dir; the idempotency guard keeps the original dir's breadcrumb at exactly one occurrence |
 
 ## status.sh — four canonical states (TC + predicate parity)
 

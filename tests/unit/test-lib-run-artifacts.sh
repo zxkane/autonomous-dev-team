@@ -196,6 +196,36 @@ echo "== init / finalize / meta =="
   assert_true "TC-013 #233 UUID dir survives (not a wrapper-run-id)" [ -d "$uuiddir" ]
 )
 
+# TC-096 the LEGACY /tmp agent log gets a durable-run-dir breadcrumb at init
+# (#235 r15). Uses an isolated LOG_FILE under TMP_ROOT (not a real /tmp path).
+(
+  export PROJECT_ID="proj"
+  export AUTONOMOUS_RUN_DIR_BASE="$TMP_ROOT/tmplog/autonomous-proj"
+  export LOG_FILE="$TMP_ROOT/tmplog-agent-proj-issue-235.log"
+  : > "$LOG_FILE"   # dispatch-local.sh pre-creates the /tmp log (here: empty)
+  unset RUN_ID RUN_DIR
+  run_artifacts_init dev 235 || true
+  assert_true "TC-096a /tmp log gained a run-dir breadcrumb" \
+    grep -qF "run-dir: ${RUN_DIR} " "$LOG_FILE"
+  assert_contains "TC-096b breadcrumb names the run-id" "$RUN_ID" "$(cat "$LOG_FILE")"
+  # init runs early (empty log) → the breadcrumb is the FIRST line.
+  assert_contains "TC-096c breadcrumb is the first line" "run-dir: ${RUN_DIR}" "$(head -1 "$LOG_FILE")"
+  # Idempotency guard: a redundant breadcrumb for the SAME dir is not re-appended.
+  # (A genuine re-init mints a fresh run-id → a different dir → a legitimately new
+  # breadcrumb, so we exercise the guard directly against the already-written dir.)
+  _saved_run_dir="$RUN_DIR"
+  _before_n="$(grep -c 'run-dir:' "$LOG_FILE")"
+  # Re-run init with the dir already present → disambiguation makes a NEW dir, so a
+  # NEW breadcrumb IS expected (one per distinct run dir). Confirm exactly +1, not
+  # an unbounded duplicate, and that the guard skipped the original dir's line.
+  unset RUN_ID; RUN_DIR=""
+  run_artifacts_init dev 235 || true
+  assert_eq "TC-096d one breadcrumb per distinct run dir (no dup of the original)" \
+    "$((_before_n + 1))" "$(grep -c 'run-dir:' "$LOG_FILE")"
+  assert_eq "TC-096e original dir's breadcrumb appears exactly once (guard held)" \
+    "1" "$(grep -cF "run-dir: ${_saved_run_dir} " "$LOG_FILE")"
+)
+
 # TC-023 finalize rc=1
 (
   export PROJECT_ID="proj"

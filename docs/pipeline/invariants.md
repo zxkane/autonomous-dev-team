@@ -3999,6 +3999,13 @@ The dir holds:
 - `run.log` — a tee of the wrapper's own stdout/stderr (seeded with a `run-dir:`/
   `tmp-log:` first-line pointer). Survives a `/tmp` wipe (reboot); the legacy
   `/tmp/agent-*.log` (append + INV-69 rotation) is **unchanged**, this is additive.
+  **Reciprocally**, `run_artifacts_init` also writes a one-line `[run-artifacts]
+  run-dir: … · run-id: …` breadcrumb into the legacy `/tmp/agent-*.log` itself, so
+  an operator who starts from the old `/tmp` log (muscle memory) still has the
+  one-hop link to the durable dir after a rotation/reboot (issue #235 requirement;
+  review [P1]). init runs early (before agent output), so the breadcrumb lands near
+  the top; idempotent (skipped if a breadcrumb for this dir is already present),
+  best-effort + symlink-guarded.
 - `drops.jsonl` — one `{agent, reason, ts}` line per dropped/unavailable review
   fan-out member (review side only).
 - `agent-logs/<agent>.log` — the raw per-agent fan-out log(s) copied from `/tmp`

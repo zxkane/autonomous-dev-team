@@ -192,6 +192,25 @@ run_artifacts_init() {
       "$run_id" "$side" "$issue" "${_RUN_STARTED_AT:-?}"
   } >> "${dir}/run.log" 2>/dev/null || true
 
+  # ALSO breadcrumb the LEGACY /tmp agent log so an operator who starts from the
+  # old `/tmp/agent-*.log` (muscle memory) still has a one-hop link to the durable
+  # run dir after a /tmp rotation or reboot (issue #235 requirement; review [P1]).
+  # init runs very early (right after the --issue peek, before the agent produces
+  # output), so this appended line lands near the TOP of the /tmp log — the
+  # closest we can get to a "first line" without rewriting an append-mode file
+  # that dispatch-local.sh + the wrapper tee are concurrently writing. Idempotent:
+  # skip if a run-dir pointer for THIS run is already present (re-init / resume).
+  # Best-effort + symlink-guarded (CWE-59); a failure never affects the wrapper.
+  if [[ -n "${LOG_FILE:-}" && ! -L "${LOG_FILE}" ]]; then
+    # Idempotency: skip if a breadcrumb for THIS run dir is already present (re-init
+    # / resume). Match the run-dir substring (the line has trailing ` · run-id: …`
+    # text, so no `$` anchor). `-F` so a `.`/`-` in the path is literal, not regex.
+    if ! grep -qF "run-dir: ${dir} " "${LOG_FILE}" 2>/dev/null; then
+      printf '[run-artifacts] run-dir: %s · run-id: %s (durable evidence survives a /tmp wipe; see %s/run.log)\n' \
+        "$dir" "$run_id" "$dir" >> "${LOG_FILE}" 2>/dev/null || true
+    fi
+  fi
+
   # Retention is built into init (best-effort, once per wrapper start) — mirrors
   # metrics_prune. Prune ALL issues' aged run dirs, NOT just this issue's: a run
   # for issue N must also reap 30+ day artifacts left by issues that never run
