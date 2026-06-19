@@ -1,6 +1,7 @@
 # Test Cases — `mark_stalled` at-cap liveness ceiling (issue #263)
 
 Tracks: issue #263 ([INV-26] / [INV-30] amendments).
+Design: [`docs/designs/mark-stalled-at-cap-ceiling.md`](../designs/mark-stalled-at-cap-ceiling.md).
 
 ## Scenario
 
