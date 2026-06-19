@@ -4001,6 +4001,13 @@ The dir holds:
   `/tmp/agent-*.log` (append + INV-69 rotation) is **unchanged**, this is additive.
 - `drops.jsonl` — one `{agent, reason, ts}` line per dropped/unavailable review
   fan-out member (review side only).
+- `agent-logs/<agent>.log` — the raw per-agent fan-out log(s) copied from `/tmp`
+  by `run_artifacts_persist_log` so the per-agent evidence (dropped agents, codex
+  fallback verdicts, stream/auth failures) survives a `/tmp` wipe (review side;
+  #235 review [P1]). Persisted for every fan-out member (pass/fail AND
+  dropped/timed-out); a codex member also gets its CLEAN stdout capture under
+  `<agent>-stdout.log`. The label is sanitized to `[A-Za-z0-9._-]` (path-traversal
+  defense) and the subdir is symlink-guarded (CWE-59).
 
 The run-id is:
 1. **Exported** as `RUN_ID`/`RUN_DIR` so sourced libs/adapters inherit it.
@@ -4064,7 +4071,10 @@ owner stays INV-78; `status.sh` only *reads* it.
 wrapper start (best-effort, like `metrics_prune`). It removes wrapper-run-id dirs
 strictly older than N days (exactly-N is retained) and **NEVER** the active run-id
 (excluded by exact name match) nor INV-78's UUID dirs nor a symlinked candidate
-(CWE-59).
+(CWE-59). `run_artifacts_init` invokes it for **ALL issues** of the project (no
+issue arg → the all-issues glob), NOT just the current issue: a run for issue N
+must also reap aged dirs left by issues that never run again, or the store grows
+unbounded (#235 review [P1]).
 
 **`status.sh <issue> [--project <id>]` predicate parity.** The read-only inspector
 ([`status.sh`](../../skills/autonomous-dispatcher/scripts/status.sh)) **sources the

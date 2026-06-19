@@ -20,8 +20,11 @@
 #                                          seed run.log, prune; export RUN_ID/RUN_DIR
 #   run_artifacts_finalize <dir> <rc>    — write end marker + rc + duration
 #   run_artifacts_record_drop <dir> <agent> <reason>  — append a drop line
+#   run_artifacts_persist_log <dir> <label> <src-log> — copy a /tmp per-agent log
+#                                          into <dir>/agent-logs/<label>.log
 #   run_footer                           — echo the run-id + artifacts footer block
 #   run_prune [days] [issue]             — drop run dirs older than N days
+#                                          (no issue ⇒ all issues for the project)
 #
 # Path scheme (coordinates with #233 / INV-78 — same `runs/` parent, distinct
 # run-id namespace):
@@ -190,8 +193,11 @@ run_artifacts_init() {
   } >> "${dir}/run.log" 2>/dev/null || true
 
   # Retention is built into init (best-effort, once per wrapper start) — mirrors
-  # metrics_prune. The active run-id is excluded by name so it's never pruned.
-  run_prune "${RUN_RETENTION_DAYS:-30}" "$issue" || true
+  # metrics_prune. Prune ALL issues' aged run dirs, NOT just this issue's: a run
+  # for issue N must also reap 30+ day artifacts left by issues that never run
+  # again, or the durable runs/ store grows unbounded (#235 review [P1]). The
+  # active run-id is excluded by exact name inside run_prune, so it's never pruned.
+  run_prune "${RUN_RETENTION_DAYS:-30}" || true
   return 0
 }
 
@@ -224,6 +230,29 @@ run_artifacts_record_drop() {
     '{agent:$agent, reason:$reason, ts:$ts}' 2>/dev/null)" || return 0
   [[ -n "$line" ]] || return 0
   printf '%s\n' "$line" >> "${dir}/drops.jsonl" 2>/dev/null || true
+  return 0
+}
+
+# run_artifacts_persist_log <dir> <label> <src-log> — copy a raw per-agent log
+# (e.g. a review fan-out member's generic log, the codex stdout capture) from its
+# volatile /tmp path into the DURABLE run dir under `agent-logs/<label>.log`, so
+# the footer-linked run dir still holds the per-agent evidence (dropped agents,
+# codex fallback verdicts, stream/auth failures) after a /tmp wipe or reboot
+# (#235 review [P1]). Best-effort + observe-only: a missing src / unwritable dir /
+# empty label is a silent no-op that never changes the wrapper's rc or labels.
+# <label> is sanitized to [A-Za-z0-9._-] so a hostile agent name can't escape the
+# agent-logs/ subdir (path-traversal defense).
+run_artifacts_persist_log() {
+  local dir="$1" label="$2" src="$3"
+  [[ -n "$dir" && -d "$dir" ]] || return 0
+  [[ -n "$label" && -n "$src" && -f "$src" ]] || return 0
+  # Strip any path separators / unexpected chars from the label.
+  label="${label//[^A-Za-z0-9._-]/_}"
+  [[ -n "$label" ]] || return 0
+  local logdir="${dir}/agent-logs"
+  mkdir -p "$logdir" 2>/dev/null || return 0
+  [[ -L "$logdir" ]] && return 0   # CWE-59: never write through a symlinked dir
+  cp -f "$src" "${logdir}/${label}.log" 2>/dev/null || true
   return 0
 }
 

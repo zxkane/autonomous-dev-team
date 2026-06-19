@@ -2732,6 +2732,19 @@ if declare -F metrics_emit >/dev/null 2>&1; then
     metrics_emit review_agent_run side=review "agent_name=${AGENT_NAMES[$_mi]}" \
       "state=${_mstate}" "issue=${ISSUE_NUMBER:-}" "pr=${PR_NUMBER:-}" "run_id=${RUN_ID:-}" || true
 
+    # [INV-81] Persist THIS member's raw per-agent log(s) into the DURABLE run dir
+    # (agent-logs/<agent>.log) so the footer-linked run dir still holds the raw
+    # evidence — dropped agents, codex fallback verdicts, stream/auth failures —
+    # after a /tmp wipe or reboot (#235 review [P1]). Runs for EVERY member (before
+    # the unavailable/timed-out `continue` below) so pass/fail logs are kept too.
+    # The codex CLEAN stdout capture is distinct evidence from the generic log, so
+    # persist it under a `<agent>-stdout` label as well. Best-effort, observe-only.
+    if declare -F run_artifacts_persist_log >/dev/null 2>&1; then
+      run_artifacts_persist_log "${RUN_DIR:-}" "${AGENT_NAMES[$_mi]}" "${AGENT_GENERIC_LOGS[$_mi]:-}" || true
+      [[ "${AGENT_NAMES[$_mi]}" == "codex" ]] \
+        && run_artifacts_persist_log "${RUN_DIR:-}" "${AGENT_NAMES[$_mi]}-stdout" "${AGENT_CODEX_LOGS[$_mi]:-}" || true
+    fi
+
     # [INV-70] (#228 round-8): review-side token usage. Parse THIS member's
     # generic per-agent log (claude `--output-format json` usage / codex `tokens
     # used` line) and emit token_usage side=review keyed by issue/pr/agent_name —

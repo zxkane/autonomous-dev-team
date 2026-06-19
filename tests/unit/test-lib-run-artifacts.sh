@@ -323,6 +323,61 @@ echo "== run_prune =="
 )
 
 # ---------------------------------------------------------------------------
+# run_artifacts_init prunes ALL issues, not just the active one (TC-090, #235 r14)
+# ---------------------------------------------------------------------------
+echo "== TC-090 init prunes other issues' aged dirs =="
+(
+  export PROJECT_ID="proj"
+  export AUTONOMOUS_RUN_DIR_BASE="$TMP_ROOT/prune-all/autonomous-proj"
+  parent="$AUTONOMOUS_RUN_DIR_BASE/runs"
+  mkdir -p "$parent"
+  # An aged dir for a DIFFERENT issue (236) that will never run again.
+  mk236() { local d="$parent/proj-236-dev-OLD"; mkdir -p "$d"
+    jq -nc --arg s "$(date -u -d '-99 days' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v-99d +%Y-%m-%dT%H:%M:%SZ)" \
+      '{started_at:$s}' > "$d/meta.json"; }
+  mk236
+  unset RUN_ID RUN_DIR
+  # Start a run for issue 235; its init-time prune must reap issue 236's aged dir.
+  run_artifacts_init dev 235 || true
+  assert_false "TC-090a init for #235 prunes #236's 99-day dir (all-issues retention)" \
+    [ -d "$parent/proj-236-dev-OLD" ]
+  assert_true  "TC-090b the active #235 run dir is created + retained" [ -d "$RUN_DIR" ]
+)
+
+# ---------------------------------------------------------------------------
+# run_artifacts_persist_log (TC-091..095, #235 r14)
+# ---------------------------------------------------------------------------
+echo "== run_artifacts_persist_log =="
+(
+  export PROJECT_ID="proj"
+  export AUTONOMOUS_RUN_DIR_BASE="$TMP_ROOT/persist/autonomous-proj"
+  unset RUN_ID RUN_DIR
+  run_artifacts_init review 235 || true
+  src="$TMP_ROOT/fake-tmp-agent.log"
+  printf 'raw codex stdout line 1\nstream error blah\n' > "$src"
+
+  run_artifacts_persist_log "$RUN_DIR" "codex" "$src" || true
+  assert_true "TC-091 per-agent log copied into agent-logs/<agent>.log" [ -f "$RUN_DIR/agent-logs/codex.log" ]
+  assert_contains "TC-092 copied content preserved" "raw codex stdout line 1" "$(cat "$RUN_DIR/agent-logs/codex.log" 2>/dev/null)"
+
+  # label sanitization: a hostile name with path separators stays inside agent-logs/
+  # (only the `/` chars are replaced with `_`; dots are in the allowed class but a
+  # flat filename can't traverse out of agent-logs/ anyway — that's what TC-093 pins).
+  run_artifacts_persist_log "$RUN_DIR" "../../escape" "$src" || true
+  assert_false "TC-093 path-traversal label cannot escape agent-logs/" [ -e "$RUN_DIR/../escape.log" ]
+  assert_true  "TC-093b sanitized label written inside agent-logs/ (slashes→_)" [ -f "$RUN_DIR/agent-logs/.._.._escape.log" ]
+
+  # missing source → no-op, returns 0
+  out="$(run_artifacts_persist_log "$RUN_DIR" "ghost" "$TMP_ROOT/does-not-exist.log"; echo rc=$?)"
+  assert_contains "TC-094 missing src → rc 0 no-op" "rc=0" "$out"
+  assert_false "TC-094b no file created for missing src" [ -f "$RUN_DIR/agent-logs/ghost.log" ]
+
+  # unset/empty RUN_DIR (init failed) → no-op
+  out="$(run_artifacts_persist_log "" "codex" "$src"; echo rc=$?)"
+  assert_contains "TC-095 empty dir → rc 0 no-op" "rc=0" "$out"
+)
+
+# ---------------------------------------------------------------------------
 PASS="$(wc -l < "$PASS_FILE" | tr -d '[:space:]')"
 FAIL="$(wc -l < "$FAIL_FILE" | tr -d '[:space:]')"
 echo ""

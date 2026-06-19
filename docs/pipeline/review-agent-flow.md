@@ -740,7 +740,11 @@ source-time launcher guards (they fire during `source lib-agent.sh`, before the
 early init). It later tees its stdout/stderr into `run.log`,
 threads `run_id=` into every
 `metrics_emit` above, records each dropped fan-out member in the run dir's
-`drops.jsonl` (`run_artifacts_record_drop`, alongside the `agent_drop` metric), and
+`drops.jsonl` (`run_artifacts_record_drop`, alongside the `agent_drop` metric),
+**persists each fan-out member's raw per-agent log into `runs/<run-id>/agent-logs/`**
+(`run_artifacts_persist_log`, in the same per-member loop — for every member, not
+just dropped ones; a codex member also gets its CLEAN stdout capture, so the raw
+evidence survives a `/tmp` wipe; #235 review [P1]), and
 `cleanup()` calls `run_artifacts_finalize` (end marker + rc + timing) for both the
 normal and crash paths. **EVERY wrapper-owned comment carries the `run-id: … ·
 artifacts: …` footer (AC1, #235 review [P1] r4)** — not only the crash note and the
