@@ -230,6 +230,70 @@ assert_contains "TC-053c newest review's own drops are shown" "codex: agent-unav
 assert_not_contains "TC-053d older review's drops still not shown" "agy: agent-unavailable:quota" "$out"
 
 # ---------------------------------------------------------------------------
+# TC-054 same-second collision tie-break (#235 review [P1] r19): two review runs
+# minted within the SAME UTC second share one started_at/epoch; the LATER mint is
+# disambiguated as `<run-id>-<n>`. status.sh must surface the LATER run, NOT
+# whichever the glob yielded first (the older run). A strict `-gt`/`-k1,1nr` alone
+# keeps the older dir → stale drops + mis-ordered run list. Both helpers must break
+# the equal-epoch tie in favor of the HIGHER (later) disambiguation suffix.
+# ---------------------------------------------------------------------------
+echo "== TC-054 same-second review collision tie-break =="
+export GH_FIXTURE="$TMP/fx-tie.json"
+write_fixture "$GH_FIXTURE" "autonomous pending-review" "OPEN" "[]"
+# BASE review (older), same second, WITH drops — must NOT be surfaced as latest.
+_tie_base="$RUN_BASE/runs/test-proj-54-review-20260619T120000Z"; mkdir -p "$_tie_base"
+jq -cn '{started_at:"2026-06-19T12:00:00Z", rc:0, ended_at:"2026-06-19T12:00:30Z"}' > "$_tie_base/meta.json"
+echo '{"agent":"agy","reason":"older-same-second-drop","ts":"2026-06-19T12:00:20Z"}' > "$_tie_base/drops.jsonl"
+# LATER review (`-2` disambiguation), SAME started_at second, with its OWN drops.
+_tie_late="$RUN_BASE/runs/test-proj-54-review-20260619T120000Z-2"; mkdir -p "$_tie_late"
+jq -cn '{started_at:"2026-06-19T12:00:00Z", rc:1, ended_at:"2026-06-19T12:00:45Z"}' > "$_tie_late/meta.json"
+echo '{"agent":"codex","reason":"later-same-second-drop","ts":"2026-06-19T12:00:40Z"}' > "$_tie_late/drops.jsonl"
+out="$(run_status 54)"
+assert_contains "TC-054a later same-second run's drops are shown" \
+  "codex: later-same-second-drop" "$out"
+assert_not_contains "TC-054b older same-second run's drops are NOT shown" \
+  "agy: older-same-second-drop" "$out"
+# _recent_runs lists the later (`-2`) dir ahead of the base dir on the equal-epoch tie.
+_tie_runs="$(printf '%s\n' "$out" | grep -A4 'last run-ids' | grep -m1 'test-proj-54-')"
+assert_contains "TC-054c later (\`-2\`) run-id sorts first on the same-second tie" \
+  "test-proj-54-review-20260619T120000Z-2" "$_tie_runs"
+
+# ---------------------------------------------------------------------------
+# TC-054 DOUBLE-DIGIT (#235 review [P2] r19): once a same-second collision reaches
+# double digits, the disambiguation suffix MUST be compared NUMERICALLY, not as a
+# string. The pair `…Z-10` vs `…Z-11` is chosen deliberately so it discriminates
+# the numeric key from BOTH stringly alternatives the prior review flagged:
+#   • `_latest_review_drops`: a reverse-LEXICAL run-id compare (`[[ name > … ]]`)
+#     ranks `…Z-11` over `…Z-10` only because '1'>'0' at the last char — but on
+#     `…Z-9` vs `…Z-10` it would mis-pick `-9`; the numeric `[[ suffix -gt … ]]` is
+#     unambiguous. (TC-054a/b already pin the original [P1] strict-`-gt` regression.)
+#   • `_recent_runs`: GNU `sort`'s old whole-line `-k1,1nr` fallback compares the
+#     equal-epoch lines char-by-char ASCENDING after the epoch, so `…-10…` sorts
+#     BEFORE `…-11…` → it would put `-10` first (WRONG). Only the numeric `-k2,2nr`
+#     secondary key puts the LATER `-11` first. `-10` vs `-11` is exactly where the
+#     whole-line fallback and the numeric key DIVERGE, so this genuinely pins it.
+# ---------------------------------------------------------------------------
+echo "== TC-054 double-digit suffix (…Z-10 vs …Z-11) =="
+export GH_FIXTURE="$TMP/fx-tie11.json"
+write_fixture "$GH_FIXTURE" "autonomous pending-review" "OPEN" "[]"
+# `…Z-10` (the EARLIER mint) WITH drops — must NOT be surfaced as latest.
+_t10="$RUN_BASE/runs/test-proj-55-review-20260619T120000Z-10"; mkdir -p "$_t10"
+jq -cn '{started_at:"2026-06-19T12:00:00Z", rc:0, ended_at:"2026-06-19T12:00:30Z"}' > "$_t10/meta.json"
+echo '{"agent":"agy","reason":"tenth-mint-drop","ts":"2026-06-19T12:00:20Z"}' > "$_t10/drops.jsonl"
+# `…Z-11` (the LATER mint) WITH its own drops — must be latest.
+_t11="$RUN_BASE/runs/test-proj-55-review-20260619T120000Z-11"; mkdir -p "$_t11"
+jq -cn '{started_at:"2026-06-19T12:00:00Z", rc:1, ended_at:"2026-06-19T12:00:45Z"}' > "$_t11/meta.json"
+echo '{"agent":"codex","reason":"eleventh-mint-drop","ts":"2026-06-19T12:00:40Z"}' > "$_t11/drops.jsonl"
+out="$(run_status 55)"
+assert_contains "TC-054d double-digit: later (-11) run's drops shown, not (-10)'s" \
+  "codex: eleventh-mint-drop" "$out"
+assert_not_contains "TC-054e double-digit: earlier (-10) run's drops NOT shown" \
+  "agy: tenth-mint-drop" "$out"
+_tie11_runs="$(printf '%s\n' "$out" | grep -A4 'last run-ids' | grep -m1 'test-proj-55-')"
+assert_contains "TC-054f double-digit: (-11) sorts first (numeric suffix vs whole-line fallback)" \
+  "test-proj-55-review-20260619T120000Z-11" "$_tie11_runs"
+
+# ---------------------------------------------------------------------------
 # TC-046 retry count parity — value must equal count_retries (here 0, no comments)
 # ---------------------------------------------------------------------------
 echo "== TC-046 retry count surfaced =="

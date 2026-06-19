@@ -6,7 +6,7 @@ observe-only).
 
 Suites:
 - Unit: `tests/unit/test-lib-run-artifacts.sh` (001–039, 090–097)
-- Unit: `tests/unit/test-status.sh` (040–053)
+- Unit: `tests/unit/test-status.sh` (040–054)
 - E2E:  `tests/e2e/run-run-artifacts-e2e.sh` (080–087, 098)
 
 ---
@@ -87,6 +87,7 @@ Suites:
 | TC-RUN-ARTIFACTS-051 | **predicate parity** | status.sh source `source`s `lib-dispatch.sh` AND calls `pid_alive`, `count_retries`, `fetch_pr_for_issue` (grep-assert — no duplicated predicate logic) |
 | TC-RUN-ARTIFACTS-052 | `_recent_runs` mixed meta/mtime ordering (#235 owner [P1] r17) | a newer mtime-only run (no meta.json) sorts AHEAD of an older ISO-backed run — both keyed via `_run_sort_epoch` to a numeric epoch + `sort -k1,1nr` (a lexical sort would rank the ISO string above the epoch) |
 | TC-RUN-ARTIFACTS-053 | `_latest_review_drops` newest-without-drops (#235 owner [P1] r17) | the drops section reflects the NEWEST review run: a clean newest review (no drops.jsonl) shows "none recorded", NOT an older review's stale drops; when the newest review has drops, its own drops are shown |
+| TC-RUN-ARTIFACTS-054 | same-second collision tie-break (#235 review [P1]/[P2] r19) | (a–c) two review runs minted in the SAME UTC second (equal `started_at`/epoch; later mint disambiguated `<run-id>-2`) → both `_latest_review_drops` and `_recent_runs` surface the LATER run (`…Z-2`), NOT the glob-first older `…Z`. (d–f) **double-digit** `…Z-10` vs `…Z-11`: the tie-break compares the disambiguation suffix NUMERICALLY so the later `…Z-11` wins — the pair is chosen so it diverges from BOTH stringly alternatives (`_recent_runs`' old whole-line `-k1,1nr` ascending fallback would put `-10` first; a reverse-lexical `-k2,2r` likewise), genuinely pinning the `-k2,2nr` / `[[ suffix -gt … ]]` numeric key |
 
 ## E2E — stub fleet + reboot simulation
 

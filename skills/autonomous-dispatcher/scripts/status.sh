@@ -135,13 +135,25 @@ _run_sort_epoch() {
   printf '%s\n' "$key"
 }
 
+# _run_disambig_suffix <run-id-basename> — echo the NUMERIC disambiguation suffix
+# used to break a same-UTC-second tie. run_artifacts_init appends `-<n>` (n≥2,
+# climbing to 99) when a minted run-id collides with an existing dir, so the bare
+# run-id is the FIRST mint (suffix 1) and `<run-id>-2` the second, etc. Comparing
+# this number (not the run-id lexically) keeps `…Z-10` AFTER `…Z-9` — a lexical
+# compare ranks `…Z-9` above `…Z-10` and would resurface a stale double-digit
+# collision (#235 r19 review [P2]). A name with no `-<n>` tail → 1.
+_run_disambig_suffix() {
+  local name="$1"
+  if [[ "$name" =~ -([0-9]+)$ ]]; then printf '%s\n' "${BASH_REMATCH[1]}"; else printf '1\n'; fi
+}
+
 # Echo the up-to-3 most recent run dirs for THIS issue, newest first. The sort key
 # is the NUMERIC epoch from `_run_sort_epoch` (NOT the raw started_at string), so
 # `sort -t'|' -k1,1nr` (numeric, on the epoch field) orders ISO-backed and
 # mtime-fallback dirs consistently.
 _recent_runs() {
   [[ -n "$RUNS_PARENT" && -d "$RUNS_PARENT" ]] || return 0
-  local d epoch rc ended outcome name
+  local d epoch suffix rc ended outcome name
   local -a rows=()
   for d in "$RUNS_PARENT/${PROJECT_ID}-${ISSUE_NUMBER}-dev-"* \
            "$RUNS_PARENT/${PROJECT_ID}-${ISSUE_NUMBER}-review-"*; do
@@ -153,16 +165,21 @@ _recent_runs() {
       ended="$(jq -r '.ended_at // empty' "$d/meta.json" 2>/dev/null || echo "")"
     fi
     epoch="$(_run_sort_epoch "$d")"
+    suffix="$(_run_disambig_suffix "$name")"
     if [[ -z "$ended" ]]; then outcome="in-flight (no end marker)"
     elif [[ "$rc" == "0" ]]; then outcome="rc=0 (success)"
     elif [[ -n "$rc" ]]; then outcome="rc=${rc} (failure)"
     else outcome="ended (rc unknown)"; fi
-    rows+=("${epoch}|${name}|${outcome}")
+    rows+=("${epoch}|${suffix}|${name}|${outcome}")
   done
   [[ ${#rows[@]} -gt 0 ]] || return 0
-  # Numeric sort on the epoch field (field 1, `|`-separated), newest first.
-  printf '%s\n' "${rows[@]}" | sort -t'|' -k1,1nr | head -3 \
-    | awk -F'|' '{printf "  %s  —  %s\n", $2, $3}'
+  # Primary: numeric-desc on the epoch (field 1). Secondary: numeric-desc on the
+  # disambiguation suffix (field 2) so two runs minted in the SAME UTC second
+  # (equal epoch, disambiguated `<run-id>-2`) order with the LATER-minted dir first.
+  # Both keys are NUMERIC (`n`) — a reverse-LEXICAL run-id key would rank `…Z-9`
+  # above `…Z-10` once a collision reaches double digits (#235 r19 review [P1]/[P2]).
+  printf '%s\n' "${rows[@]}" | sort -t'|' -k1,1nr -k2,2nr | head -3 \
+    | awk -F'|' '{printf "  %s  —  %s\n", $3, $4}'
 }
 
 # Echo the drop reasons from the NEWEST review run dir — but only if THAT run
@@ -171,11 +188,23 @@ _recent_runs() {
 # from an OLDER review when the newest review had none (#235 review [P1]).
 _latest_review_drops() {
   [[ -n "$RUNS_PARENT" && -d "$RUNS_PARENT" ]] || return 0
-  local d latest="" latest_key=-1 key
+  local d name latest="" latest_key=-1 latest_suffix=-1 key suffix
   for d in "$RUNS_PARENT/${PROJECT_ID}-${ISSUE_NUMBER}-review-"*; do
     [[ -d "$d" ]] || continue   # consider EVERY review run, not only those with drops
+    name="$(basename "$d")"
     key="$(_run_sort_epoch "$d")"
-    if [[ "$key" -gt "$latest_key" ]]; then latest="$d"; latest_key="$key"; fi
+    suffix="$(_run_disambig_suffix "$name")"
+    # Newer epoch wins; on an EQUAL epoch — two runs minted within the same UTC
+    # second, which THIS feature deliberately creates via the disambiguated
+    # `<run-id>-<n>` suffix (both dirs share one `started_at`/truncated mtime) —
+    # break the tie in favor of the HIGHER disambiguation suffix, i.e. the
+    # LATER-minted dir (`…Z-2` over the bare `…Z`, `…Z-10` over `…Z-9`). The suffix
+    # is compared NUMERICALLY: a lexical run-id compare keeps the glob-first older
+    # dir on a single-digit tie and mis-ranks `…Z-9` above `…Z-10` (#235 r19 [P1]/[P2]).
+    if [[ "$key" -gt "$latest_key" ]] \
+       || { [[ "$key" -eq "$latest_key" ]] && [[ "$suffix" -gt "$latest_suffix" ]]; }; then
+      latest="$d"; latest_key="$key"; latest_suffix="$suffix"
+    fi
   done
   [[ -n "$latest" ]] || return 0
   # Render the newest review run's drops ONLY if that run has the file; a newest
