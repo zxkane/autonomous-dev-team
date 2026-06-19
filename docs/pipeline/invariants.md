@@ -3978,6 +3978,8 @@ The typed inputs the guards read are enumerated in [`observation-snapshot.md`](o
 
 ## INV-81: every wrapper run mints a run-id and a durable per-run artifact dir; the run-id threads through logs, metrics, and every wrapper-posted comment footer; `status.sh` answers pipeline state from the dispatcher's REAL predicates (observe-only — never changes wrapper rc or labels)
 
+_Triage (issue #236): [machine-checked: tests/unit/test-lib-run-artifacts.sh, tests/unit/test-status.sh, tests/e2e/run-run-artifacts-e2e.sh]_
+
 > **Note**: authored as INV-79 (next free number when this PR branched off `main`),
 > then renumbered to **INV-80** (PR #261 two-token split, issue #234, took INV-79),
 > then again to **INV-81** at the next rebase: PR #260 (executable-spec gate, issue
