@@ -4140,6 +4140,55 @@ cycle, status.sh snapshot, reboot simulation, footer→dir round-trip).
 - [INV-69](#inv-69-on-re-dispatch-the-prior-runs-agent-log-is-rotated-to-a-single-1-generation-not-truncated) — the legacy `/tmp/agent-*.log` rotation that `run.log` complements (does not replace).
 - [`debugging.md`](debugging.md) — the 2am runbook: comment footer → run-id → dir → what's in it → `status.sh`.
 
+## INV-82: the workflow-enforcement hooks' `is_git_command` quote-strip MUST terminate on every input — a glob-significant char inside a quoted region can never spin the strip loop
+
+_Triage (issue #236): [machine-checked: tests/unit/test-is-git-command-quote-strip.sh]_
+
+**Rule**: `is_git_command(operation, command)` in
+[`skills/autonomous-common/hooks/lib.sh`](../../skills/autonomous-common/hooks/lib.sh)
+strips single- and double-quoted regions from `command` before scanning for a
+`git <operation>` invocation, so an incidental mention inside a quoted argument
+(`--body "see git push docs"`) cannot trip a gate. The strip loops
+(`while [[ "$stripped" =~ … ]]; do stripped="${stripped/…/ }"; done`) MUST make
+forward progress on **every** input and terminate in bounded time. They MUST NOT
+busy-loop, regardless of what characters the quoted region contains.
+
+**Why**: the strip fed the regex match into a bash **glob-pattern** substitution
+**unquoted** — `${stripped/${BASH_REMATCH[0]}/ }`. The first operand of
+`${var/pattern/repl}` is interpreted as a glob, but `BASH_REMATCH[0]` is *literal*
+matched text. When the matched region held a glob-significant char (a backslash
+from an escaped quote `\"`, or `[` / `?` / `*` that matched nothing), the
+substitution replaced nothing, `stripped` stayed unchanged, and the
+`while [[ … =~ … ]]` test re-matched the identical region forever — a 100%-CPU
+busy-loop. On the shared dispatcher/wrapper host this leaked **212** orphan hook
+processes (all `PPID=1`, on-CPU, ~8h CPU each). Every PreToolUse `git`-gating hook
+that sources this function (`block-push-to-main`, `block-commit-outside-worktree`,
+`check-design-canvas`, `check-unit-tests`, `post-git-action-clear`,
+`check-pr-review`, `check-code-simplifier`, `check-shellcheck`, `post-git-push`,
+`check-rebase-before-push`, `warn-skip-verification`, `check-test-plan`) fanned the
+one offending command out to a spinner per session tick. The fix quotes the match
+on both loops — `${stripped/"${BASH_REMATCH[0]}"/ }` — forcing a **literal**
+substitution and removing the glob interpretation. See issue #266 / PR #267.
+
+**Producer**: `is_git_command` in `lib.sh` (and every hook that sources it).
+**Consumer**: every git-gating PreToolUse / PostToolUse hook — they rely on the
+function returning a verdict promptly so the session is never wedged.
+
+**Scope note**: this is the *termination* contract only. The strip's documented
+defense-in-depth limitation is unchanged — the ERE treats `\"` as a region
+boundary, so a *missed strip* (a `git push` mention surviving inside an escaped
+inner quote) remains possible. That is acceptable: the intent is to suppress
+incidental mentions, not to defeat an adversarial author (who can always use
+`--no-verify`). A full shell-quoting parser is out of scope. What is **not**
+acceptable, and what this invariant pins, is the strip failing to terminate.
+
+**Tests**: `tests/unit/test-is-git-command-quote-strip.sh`
+(TC-IGC-QS-001..009 — escaped-quote payload, `[x]` / `?` / `*` glob metachars, the
+single-quote sibling loop, the genuine-invocation no-regression cases, and the
+whole `block-commit-outside-worktree.sh` hook on the repro payload — each
+bounded-time case runs under `timeout` in a fresh `bash` so a pre-fix loop cannot
+hang the harness).
+
 ## Adding a new invariant
 
 When fixing a pipeline bug, after locating the bug on the state machine + flow docs:
