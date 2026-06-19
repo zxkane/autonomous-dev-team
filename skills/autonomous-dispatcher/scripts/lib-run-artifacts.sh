@@ -1,6 +1,6 @@
 #!/bin/bash
 # lib-run-artifacts.sh — durable per-run artifact directory + run-id threading.
-# Issue #235 / [INV-80].
+# Issue #235 / [INV-81].
 #
 # Gives every wrapper run a stable run-id and a durable directory that survives
 # a /tmp wipe (reboot), so a GitHub comment's footer is a one-hop link to the

@@ -1,6 +1,6 @@
 # Test Cases — Per-run artifact directory + run-id threading + `status.sh` (#235)
 
-ID format: `TC-RUN-ARTIFACTS-NNN`. Invariant under test: **INV-80** (run-id
+ID format: `TC-RUN-ARTIFACTS-NNN`. Invariant under test: **INV-81** (run-id
 threading + durable per-run artifact dir + read-only `status.sh` inspector,
 observe-only).
 

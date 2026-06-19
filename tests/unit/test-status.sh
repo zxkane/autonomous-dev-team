@@ -1,5 +1,5 @@
 #!/bin/bash
-# test-status.sh — issue #235 / INV-80.
+# test-status.sh — issue #235 / INV-81.
 #
 # Covers scripts/status.sh: the read-only operator inspector. Asserts the four
 # canonical states (idle / in-progress+live / stalled+dead / approved-awaiting-

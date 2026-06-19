@@ -1,6 +1,6 @@
 #!/bin/bash
 # run-run-artifacts-e2e.sh — E2E for the per-run artifact dir + run-id threading
-# + status.sh inspector (issue #235, INV-80). Test IDs: TC-RUN-ARTIFACTS-080..085.
+# + status.sh inspector (issue #235, INV-81). Test IDs: TC-RUN-ARTIFACTS-080..085.
 #
 # Drives a STUB dev + review cycle through the REAL lib-run-artifacts.sh
 # (init → finalize → footer → drop), then runs the REAL status.sh against a stub

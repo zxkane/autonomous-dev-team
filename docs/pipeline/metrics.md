@@ -36,7 +36,7 @@ Every line carries this common envelope plus event-specific fields:
   `rc`, `duration_s`, `input_tokens`, `output_tokens`, `total_tokens`,
   `retry_count`) are emitted as JSON numbers; all other values are strings.
 - `run_id` — the per-run correlation key
-  (`<project>-<issue>-<dev|review>-<ts>`, [INV-80](invariants.md#inv-80-every-wrapper-run-mints-a-run-id-and-a-durable-per-run-artifact-dir-the-run-id-threads-through-logs-metrics-and-every-wrapper-posted-comment-footer-statussh-answers-pipeline-state-from-the-dispatchers-real-predicates-observe-only--never-changes-wrapper-rc-or-labels)).
+  (`<project>-<issue>-<dev|review>-<ts>`, [INV-81](invariants.md#inv-81-every-wrapper-run-mints-a-run-id-and-a-durable-per-run-artifact-dir-the-run-id-threads-through-logs-metrics-and-every-wrapper-posted-comment-footer-statussh-answers-pipeline-state-from-the-dispatchers-real-predicates-observe-only--never-changes-wrapper-rc-or-labels)).
   Carried by every wrapper-emitted event so a metrics line can be joined to its
   durable run dir (`runs/<run_id>/`). Additive string field — does **not** bump
   `schema_version` (empty when the run-artifacts lib failed to init).

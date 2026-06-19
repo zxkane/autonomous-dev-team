@@ -166,7 +166,7 @@ source "${LIB_DIR}/lib-review-request-changes.sh"
 # review wrapper.
 # shellcheck source=lib-metrics.sh
 source "${LIB_DIR}/lib-metrics.sh" 2>/dev/null || true
-# [INV-80] Observe-only run-artifacts: durable per-run dir + run-id threading +
+# [INV-81] Observe-only run-artifacts: durable per-run dir + run-id threading +
 # comment footer + per-agent drop recording. Same best-effort contract as
 # lib-metrics — a load failure never aborts the review wrapper.
 # shellcheck source=lib-run-artifacts.sh
@@ -568,7 +568,7 @@ PID_DIR=$(pid_dir_for_project) || {
 }
 PID_FILE="${PID_DIR}/review-${ISSUE_NUMBER}.pid"
 
-# [INV-80] Provision the durable per-run artifact dir + mint RUN_ID early so the
+# [INV-81] Provision the durable per-run artifact dir + mint RUN_ID early so the
 # tee below captures the full run and every wrapper-posted comment can footer it.
 # Best-effort (`|| true`): a failure leaves RUN_ID/RUN_DIR empty and the
 # footer/threading degrade to no-ops (observe-only). The run dir survives a /tmp
@@ -629,7 +629,7 @@ install_agent_heartbeat
 # ---------------------------------------------------------------------------
 log() { echo "[autonomous-review] $(date -u +%H:%M:%S) $*"; }
 
-# [INV-80] _append_run_footer_to_file <body-file> — append the run-id/artifacts
+# [INV-81] _append_run_footer_to_file <body-file> — append the run-id/artifacts
 # footer to a WRAPPER-OWNED verdict-comment body before it is handed to
 # post-verdict.sh, so a PASS/FAIL verdict comment leads (via its footer) to the
 # durable run dir (issue #235 AC1). Best-effort + observe-only: a missing
@@ -704,7 +704,7 @@ cleanup() {
     drain_agent_bot_triggers "$ISSUE_NUMBER" "$REPO" "$_bot_allowlist" || true
   fi
 
-  # [INV-80] Write the run end marker (rc + timing) to meta.json. Fires for BOTH
+  # [INV-81] Write the run end marker (rc + timing) to meta.json. Fires for BOTH
   # the normal (RESULT_PARSED) and crash paths — placed before the early return,
   # like wrapper_end. Best-effort, observe-only.
   if declare -F run_artifacts_finalize >/dev/null 2>&1; then
@@ -1717,7 +1717,7 @@ The review was NOT run and the PR was NOT evaluated. The issue stays \`reviewing
               state=unavailable phase=smoke "issue=${ISSUE_NUMBER:-}" "pr=${PR_NUMBER:-}" "run_id=${RUN_ID:-}" || true
             metrics_emit agent_drop side=review "agent_name=${REVIEW_AGENTS_LIST[$_si]}" \
               "reason=${_sm_class}" phase=smoke "issue=${ISSUE_NUMBER:-}" "pr=${PR_NUMBER:-}" "run_id=${RUN_ID:-}" || true
-            # [INV-80] Record the smoke-phase drop in the run dir too. Best-effort.
+            # [INV-81] Record the smoke-phase drop in the run dir too. Best-effort.
             if declare -F run_artifacts_record_drop >/dev/null 2>&1; then
               run_artifacts_record_drop "${RUN_DIR:-}" "${REVIEW_AGENTS_LIST[$_si]}" "smoke:${_sm_class}" || true
             fi
@@ -2411,7 +2411,7 @@ for _i in "${!AGENT_NAMES[@]}"; do
   log "INV-62: codex did not self-post a verdict — wrapper deriving '${_cx_verdict}' from codex review stdout and posting on its behalf."
   _cx_body_file=$(mktemp "/tmp/codex-review-fallback-${ISSUE_NUMBER}-XXXXXX.md")
   _codex_review_compose_body "$_cx_verdict" "$_cx_stdout" > "$_cx_body_file" 2>/dev/null || true
-  # [INV-80] AC1: this is a WRAPPER-owned verdict post (codex didn't self-post) —
+  # [INV-81] AC1: this is a WRAPPER-owned verdict post (codex didn't self-post) —
   # append the run footer so the comment links to the durable run dir.
   _append_run_footer_to_file "$_cx_body_file"
   _cx_fb_model=$(_resolve_review_agent_model "codex")
@@ -2746,7 +2746,7 @@ if declare -F metrics_emit >/dev/null 2>&1; then
     _mreason=$(metrics_map_drop_reason "$_mstate" "$_mtoken")
     metrics_emit agent_drop side=review "agent_name=${AGENT_NAMES[$_mi]}" \
       "reason=${_mreason}" "issue=${ISSUE_NUMBER:-}" "pr=${PR_NUMBER:-}" "run_id=${RUN_ID:-}" || true
-    # [INV-80] Also record the drop in the run dir's drops.jsonl so `status.sh`
+    # [INV-81] Also record the drop in the run dir's drops.jsonl so `status.sh`
     # can answer "last drop reasons" from durable per-run state (not just the
     # project-wide metrics log). Best-effort, observe-only.
     if declare -F run_artifacts_record_drop >/dev/null 2>&1; then
@@ -2843,7 +2843,7 @@ if [[ "$_any_deciding_artifact" == "true" && -n "$LATEST_COMMENT" ]] \
   _agg_body_file=$(mktemp "/tmp/aggregate-verdict-${ISSUE_NUMBER}-XXXXXX.md" 2>/dev/null) || _agg_body_file=""
   if [[ -n "$_agg_body_file" ]]; then
     printf '%s' "$LATEST_COMMENT" > "$_agg_body_file" 2>/dev/null || true
-    # [INV-80] AC1: a wrapper-owned verdict comment must carry the run footer so
+    # [INV-81] AC1: a wrapper-owned verdict comment must carry the run footer so
     # the operator can navigate from the PASS/FAIL comment to the durable run dir.
     _append_run_footer_to_file "$_agg_body_file"
     _agg_model=$(_resolve_review_agent_model "${AGENT_NAMES[0]}" 2>/dev/null || true)

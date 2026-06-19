@@ -1,5 +1,5 @@
 #!/bin/bash
-# test-run-artifacts-e2e.sh — issue #235 / INV-80 / TC-RUN-ARTIFACTS-080..085.
+# test-run-artifacts-e2e.sh — issue #235 / INV-81 / TC-RUN-ARTIFACTS-080..085.
 #
 # Thin wrapper so the CI `tests/unit/test-*.sh` loop runs the run-artifacts +
 # status.sh E2E (tests/e2e/run-run-artifacts-e2e.sh) end-to-end. The real work +

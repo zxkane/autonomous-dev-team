@@ -50,7 +50,7 @@ source "${LIB_DIR}/lib-review-bots.sh" 2>/dev/null || true
 # abort the wrapper, so the source itself is guarded.
 # shellcheck source=lib-metrics.sh
 source "${LIB_DIR}/lib-metrics.sh" 2>/dev/null || true
-# [INV-80] Observe-only run-artifacts: durable per-run dir + run-id threading +
+# [INV-81] Observe-only run-artifacts: durable per-run dir + run-id threading +
 # comment footer. Same best-effort contract as lib-metrics — a failure here
 # never aborts the wrapper, so the source is guarded.
 # shellcheck source=lib-run-artifacts.sh
@@ -230,7 +230,7 @@ if [[ -f "$LOG_FILE" ]]; then
   METRICS_LOG_OFFSET=$(wc -c < "$LOG_FILE" 2>/dev/null | tr -d '[:space:]') || METRICS_LOG_OFFSET=0
   [[ "$METRICS_LOG_OFFSET" =~ ^[0-9]+$ ]] || METRICS_LOG_OFFSET=0
 fi
-# [INV-80] Provision the durable per-run artifact dir + mint RUN_ID BEFORE the
+# [INV-81] Provision the durable per-run artifact dir + mint RUN_ID BEFORE the
 # metrics emit so wrapper_start carries the run_id correlation key. Best-effort:
 # `|| true` keeps a failure (unwritable XDG base, missing jq) from aborting the
 # wrapper — RUN_ID/RUN_DIR simply stay empty and the footer/threading degrade to
@@ -239,7 +239,7 @@ fi
 if declare -F run_artifacts_init >/dev/null 2>&1; then
   run_artifacts_init dev "${ISSUE_NUMBER}" || true
 fi
-# [INV-80] Tee the wrapper's own stdout/stderr into the durable run.log so a run
+# [INV-81] Tee the wrapper's own stdout/stderr into the durable run.log so a run
 # survives a /tmp wipe. dispatch-local.sh ALSO redirects fd1/fd2 to the legacy
 # /tmp/agent-*.log (append, INV-69 rotation) — that path is unchanged; this tee
 # is additive and also gives a direct `bash autonomous-dev.sh` invocation a
@@ -657,7 +657,7 @@ EOF
       log "Exiting with code $exit_code (agent never ran, no ISSUE_NUMBER or gh — silent)."
     fi
     _emit_dev_end "$exit_code"
-    # [INV-80] Write the run end marker (rc + timing) to meta.json. Best-effort.
+    # [INV-81] Write the run end marker (rc + timing) to meta.json. Best-effort.
     if declare -F run_artifacts_finalize >/dev/null 2>&1; then
       run_artifacts_finalize "${RUN_DIR:-}" "$exit_code" || true
     fi
@@ -790,7 +790,7 @@ EOF
     unset _pr_created_at
   fi
 
-  # [INV-80] Write the run end marker (rc + timing) to meta.json. Best-effort,
+  # [INV-81] Write the run end marker (rc + timing) to meta.json. Best-effort,
   # observe-only — never affects the rc or the label transitions above.
   if declare -F run_artifacts_finalize >/dev/null 2>&1; then
     run_artifacts_finalize "${RUN_DIR:-}" "$exit_code" || true

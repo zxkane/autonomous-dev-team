@@ -1,4 +1,4 @@
-# Debugging runbook — the 2am path ([INV-80](invariants.md#inv-80-every-wrapper-run-mints-a-run-id-and-a-durable-per-run-artifact-dir-the-run-id-threads-through-logs-metrics-and-every-wrapper-posted-comment-footer-statussh-answers-pipeline-state-from-the-dispatchers-real-predicates-observe-only--never-changes-wrapper-rc-or-labels))
+# Debugging runbook — the 2am path ([INV-81](invariants.md#inv-81-every-wrapper-run-mints-a-run-id-and-a-durable-per-run-artifact-dir-the-run-id-threads-through-logs-metrics-and-every-wrapper-posted-comment-footer-statussh-answers-pipeline-state-from-the-dispatchers-real-predicates-observe-only--never-changes-wrapper-rc-or-labels))
 
 > You got paged: issue #N is stuck, or a PR has a FAIL comment and you don't know
 > why. This is the one-page path from a GitHub comment to the raw evidence, and
@@ -28,7 +28,7 @@ That's it. The rest of this doc is the detail.
 
 ## 1. Comment → run-id → directory
 
-Every **terminal/diagnostic** comment a wrapper posts carries an [INV-80](invariants.md#inv-80-every-wrapper-run-mints-a-run-id-and-a-durable-per-run-artifact-dir-the-run-id-threads-through-logs-metrics-and-every-wrapper-posted-comment-footer-statussh-answers-pipeline-state-from-the-dispatchers-real-predicates-observe-only--never-changes-wrapper-rc-or-labels)
+Every **terminal/diagnostic** comment a wrapper posts carries an [INV-81](invariants.md#inv-81-every-wrapper-run-mints-a-run-id-and-a-durable-per-run-artifact-dir-the-run-id-threads-through-logs-metrics-and-every-wrapper-posted-comment-footer-statussh-answers-pipeline-state-from-the-dispatchers-real-predicates-observe-only--never-changes-wrapper-rc-or-labels)
 footer. The footer's `artifacts:` path is absolute — copy it and `ls` it:
 
 ```bash
@@ -100,7 +100,7 @@ retry count:   1 / 3   (count_retries, the Step-4 stall gate input)
 **The "next dispatcher tick" line is computed from the dispatcher's REAL predicate
 functions** (`pid_alive`, `count_retries`, `fetch_pr_for_issue`,
 `dev_near_success`/`review_near_success` — all sourced from `lib-dispatch.sh`), so
-it can never drift from what the tick actually does ([INV-80](invariants.md#inv-80-every-wrapper-run-mints-a-run-id-and-a-durable-per-run-artifact-dir-the-run-id-threads-through-logs-metrics-and-every-wrapper-posted-comment-footer-statussh-answers-pipeline-state-from-the-dispatchers-real-predicates-observe-only--never-changes-wrapper-rc-or-labels)
+it can never drift from what the tick actually does ([INV-81](invariants.md#inv-81-every-wrapper-run-mints-a-run-id-and-a-durable-per-run-artifact-dir-the-run-id-threads-through-logs-metrics-and-every-wrapper-posted-comment-footer-statussh-answers-pipeline-state-from-the-dispatchers-real-predicates-observe-only--never-changes-wrapper-rc-or-labels)
 predicate-parity rule).
 
 ### The four canonical "stuck" states
@@ -133,7 +133,7 @@ jq -c 'select(.run_id == "<run-id>")' \
 
 ## See also
 
-- [INV-80](invariants.md#inv-80-every-wrapper-run-mints-a-run-id-and-a-durable-per-run-artifact-dir-the-run-id-threads-through-logs-metrics-and-every-wrapper-posted-comment-footer-statussh-answers-pipeline-state-from-the-dispatchers-real-predicates-observe-only--never-changes-wrapper-rc-or-labels) — the run-id / artifact-dir / status.sh invariant.
+- [INV-81](invariants.md#inv-81-every-wrapper-run-mints-a-run-id-and-a-durable-per-run-artifact-dir-the-run-id-threads-through-logs-metrics-and-every-wrapper-posted-comment-footer-statussh-answers-pipeline-state-from-the-dispatchers-real-predicates-observe-only--never-changes-wrapper-rc-or-labels) — the run-id / artifact-dir / status.sh invariant.
 - [`metrics.md`](metrics.md) — the metrics event schema (now with `run_id`) + failure-class taxonomy.
 - [`dispatcher-flow.md`](dispatcher-flow.md) — the full 5-step tick `status.sh` mirrors for one issue.
 - [`errors.md`](errors.md) — the operator error-envelope classes a comment may carry.

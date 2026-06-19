@@ -1,6 +1,6 @@
 #!/bin/bash
 # status.sh — one-command operator view of an issue's pipeline state. Issue #235
-# / [INV-80]. READ-ONLY: issues NO label edits, NO comments, NO merges.
+# / [INV-81]. READ-ONLY: issues NO label edits, NO comments, NO merges.
 #
 # Usage:
 #   scripts/status.sh <issue> [--project <id>]

@@ -726,7 +726,7 @@ At `wrapper_end` it also **prunes the metrics log once per run**
 collection. A metrics failure (emit or prune) can never change the verdict, the
 merge decision, or the trap's label transitions. See [`metrics.md`](metrics.md).
 
-### Observe-only run-artifacts + run-id footer ([INV-80](invariants.md#inv-80-every-wrapper-run-mints-a-run-id-and-a-durable-per-run-artifact-dir-the-run-id-threads-through-logs-metrics-and-every-wrapper-posted-comment-footer-statussh-answers-pipeline-state-from-the-dispatchers-real-predicates-observe-only--never-changes-wrapper-rc-or-labels))
+### Observe-only run-artifacts + run-id footer ([INV-81](invariants.md#inv-81-every-wrapper-run-mints-a-run-id-and-a-durable-per-run-artifact-dir-the-run-id-threads-through-logs-metrics-and-every-wrapper-posted-comment-footer-statussh-answers-pipeline-state-from-the-dispatchers-real-predicates-observe-only--never-changes-wrapper-rc-or-labels))
 
 Right after PID setup the review wrapper mints `RUN_ID`
 (`<project>-<issue>-review-<ts>`), provisions a durable run dir (`runs/<run-id>/`,

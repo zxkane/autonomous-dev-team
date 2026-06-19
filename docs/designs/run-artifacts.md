@@ -169,7 +169,7 @@ source — worse than no tool (issue Design Considerations).
 3. **stalled with dead PID** — label in-progress, `pid_alive` false, no near-success → "next tick: Step 5b crash declaration → pending-dev (retry M/MAX)".
 4. **approved-awaiting-merge** — PR approved + `no-auto-close` → "next tick: none; operator merges manually".
 
-## Observe-only / safety invariants (INV-80)
+## Observe-only / safety invariants (INV-81)
 
 - All `lib-run-artifacts.sh` functions are best-effort; a failure (unwritable
   dir, missing jq) is a silent no-op and **never** changes wrapper rc or labels.

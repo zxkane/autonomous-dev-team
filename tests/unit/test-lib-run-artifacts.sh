@@ -1,5 +1,5 @@
 #!/bin/bash
-# test-lib-run-artifacts.sh — issue #235 / INV-80.
+# test-lib-run-artifacts.sh — issue #235 / INV-81.
 #
 # Covers lib-run-artifacts.sh: run-id minting + uniqueness, run-dir path scheme
 # + coordination with #233, run_artifacts_init/finalize + meta.json, footer
@@ -8,7 +8,7 @@
 #
 # Strategy: source the lib, point AUTONOMOUS_RUN_DIR_BASE at a temp dir, exercise
 # the functions, assert on the resulting files with jq. The observe-only contract
-# (INV-80) is checked by exercising under `set -e` with an unwritable base and
+# (INV-81) is checked by exercising under `set -e` with an unwritable base and
 # asserting the surrounding rc is unchanged.
 #
 # Run: bash tests/unit/test-lib-run-artifacts.sh
