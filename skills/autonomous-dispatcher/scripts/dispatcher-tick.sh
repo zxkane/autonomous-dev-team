@@ -343,7 +343,12 @@ for i in $(seq 0 $((pd_count - 1))); do
     if declare -F metrics_emit >/dev/null 2>&1; then
       metrics_emit dispatch_retry "issue=${issue_num}" "retry_count=${retry_count}" stalled=true || true
     fi
-    mark_stalled "$issue_num"
+    # `--at-cap` ([INV-30] exception, issue #263): retry budget is exhausted
+    # here, so a persistently-indeterminate remote-SSM liveness verdict must
+    # resolve to DEAD (stop deferring) rather than biasing ALIVE forever. This
+    # is the ONLY at-cap mark_stalled call site — the review-retry-cap caller
+    # in handle_completed_session_routing() deliberately omits the flag.
+    mark_stalled --at-cap "$issue_num"
     continue
   fi
 

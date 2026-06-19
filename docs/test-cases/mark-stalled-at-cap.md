@@ -22,14 +22,22 @@ in `pending-dev` indefinitely (reproduced as a downstream consumer's 40h hang).
    All other verdicts (ALIVE/DEAD) and all other callers are unchanged. The
    default `*) return 0` form (the [INV-30] ALIVE-bias) is preserved literally
    for callers that do NOT pass `--at-cap` — TC-RPA-010 still grep-asserts it.
-2. **`mark_stalled` is the only `--at-cap` caller.** It is invoked from exactly
-   one site and only when retries are exhausted, so it always passes the flag:
-   `pid_alive --at-cap issue "$issue_num"`.
+2. **`mark_stalled` accepts and conditionally propagates `--at-cap`.**
+   `mark_stalled` has TWO callers: the retry-budget-exhausted site
+   (`dispatcher-tick.sh` Step 4, `count_retries >= MAX_RETRIES`) and the
+   review-retry-cap site (`handle_completed_session_routing`'s
+   `REVIEW_RETRY_LIMIT` branch). Only the MAX_RETRIES caller invokes
+   `mark_stalled --at-cap`, which then calls `pid_alive --at-cap`. The
+   review-retry-cap caller invokes plain `mark_stalled` (no flag), so its probe
+   keeps the [INV-30] ALIVE-bias. (A blanket `--at-cap` inside `mark_stalled`
+   would have over-applied the DEAD bias to the review-cap path — the BLOCKING
+   finding from the #263 review.) The flag is positional, never an env var.
 3. **Empty-PID short-circuit, narrowed to local backend.** Under local backend,
    an empty/absent PID file means no wrapper is running, so `mark_stalled` treats
    it as DEAD (no deferral comment, write `stalled` immediately). This is NOT
    applied under `remote-aws-ssm`, where the PID file lives on the wrapper box
    and dispatcher-side `get_pid` is always empty regardless of wrapper state.
+   The shortcut is independent of `--at-cap` (correct for both callers).
 
 **Policy framing**: at-cap indeterminate means "stop waiting", NOT "proved
 dead". The fix is scoped to indeterminate verdicts only; a hung SSM driver, a
@@ -42,10 +50,11 @@ dispatcher's retry counter, which is what `--at-cap` keys on.
 
 | ID | Setup | Expected |
 |----|---|---|
-| TC-MSL-006 | `EXECUTION_BACKEND=remote-aws-ssm`, retry exhausted, SSM driver stubbed to return indeterminate (rc≠0, empty stdout) | `mark_stalled` writes `stalled` on the SAME tick. **Assert BOTH:** (a) `issue edit <N> ... --add-label stalled` IS called, AND (b) NO `INV-26-stall-deferral` comment posted. Fails before fix, passes after. This is the downstream-consumer ~40h-hang bug. |
+| TC-MSL-006 | `EXECUTION_BACKEND=remote-aws-ssm`, retry exhausted, SSM driver stubbed to return indeterminate (rc≠0, empty stdout); `mark_stalled --at-cap` (the MAX_RETRIES caller) | `mark_stalled` writes `stalled` on the SAME tick. **Assert BOTH:** (a) `issue edit <N> ... --add-label stalled` IS called, AND (b) NO `INV-26-stall-deferral` comment posted. Fails before fix, passes after. This is the downstream-consumer ~40h-hang bug. |
 | TC-MSL-007 | local backend, `get_pid` empty + `pid_alive` ALIVE (legacy three-tier returns 0 via fresh PID-file/heartbeat mtime, PID content empty) | `mark_stalled` writes `stalled`, NO deferral comment posted. |
 | TC-MSL-008 | non-empty PID + `pid_alive` genuine ALIVE (real spawned process under the PID) | existing [INV-26] deferral path preserved: deferral comment posted, NO `stalled` label edit. TC-MSL-001/004/005 still pass. |
 | TC-MSL-009 | `pid_alive issue <N>` called directly WITHOUT `--at-cap` under `EXECUTION_BACKEND=remote-aws-ssm` with indeterminate driver | still returns 0 (ALIVE). TC-RPA-010's `*) return 0` form intact. Capture rc into a variable under `set -e` before asserting. |
+| TC-MSL-010 | `EXECUTION_BACKEND=remote-aws-ssm`, indeterminate driver; `mark_stalled <N>` WITHOUT `--at-cap` (the review-retry-cap caller) | `mark_stalled` DEFERS: deferral comment posted, NO `stalled` label edit. Confirms the review-retry-cap caller retains [INV-30]'s ALIVE-bias — the #263-review BLOCKING-finding regression. |
 
 ## Acceptance
 
@@ -58,6 +67,10 @@ dispatcher's retry counter, which is what `--at-cap` keys on.
   the genuine-alive deferral.
 - TC-MSL-009 (and the pre-existing TC-RPA-010 / TC-RPA-003) guard that the
   default `pid_alive` ALIVE-bias for non-at-cap callers is unchanged.
+- TC-MSL-010 guards that the review-retry-cap caller of `mark_stalled` (which
+  omits `--at-cap`) keeps the [INV-30] ALIVE-bias under remote indeterminate —
+  the BLOCKING finding from the #263 review (a blanket `--at-cap` would have
+  over-stalled that path).
 - A retry-exhausted issue receives the `stalled` label within ONE dispatcher
   tick once the at-cap flag overrides the indeterminate ALIVE-bias.
 - The pre-existing unit suite stays green.

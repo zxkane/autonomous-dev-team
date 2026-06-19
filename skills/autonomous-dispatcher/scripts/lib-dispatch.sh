@@ -453,7 +453,20 @@ count_dispatcher_crashes() {
 
 # Mark issue as stalled (retry exhausted). Posts the canonical "Marking as
 # stalled" comment that the next stalled-cutoff calculation will key off.
+#
+# Optional leading positional `--at-cap` flag (issue #263): propagated to the
+# liveness probe (`pid_alive --at-cap`). It MUST be passed ONLY by the
+# retry-budget-exhausted caller (`dispatcher-tick.sh` Step 4, fired at
+# `count_retries >= MAX_RETRIES`). The other caller —
+# `handle_completed_session_routing`'s `REVIEW_RETRY_LIMIT` branch — is the
+# review-retry-cap state, NOT the retry-budget-exhausted state, so it does
+# NOT pass the flag and therefore retains [INV-30]'s indeterminate→ALIVE
+# bias under the remote backend. (A blanket `--at-cap` would over-apply the
+# DEAD bias to that path; flagged BLOCKING in #263 review.) The flag is
+# positional, never an env var, so it cannot leak between callers.
 mark_stalled() {
+  local at_cap=false
+  if [ "${1:-}" = "--at-cap" ]; then at_cap=true; shift; fi
   local issue_num="$1"
 
   # Liveness defer (#121 Fix C): if a dev wrapper is still alive on this
@@ -470,14 +483,20 @@ mark_stalled() {
   # session id pulled from the wrapper PID file path, so re-ticks against
   # the same alive wrapper don't fill the timeline).
   #
-  # At-cap call ([INV-30] exception, issue #263): `mark_stalled` is the sole
-  # `pid_alive --at-cap` caller. It is invoked from exactly one site
-  # (dispatcher Step 4) and only when `count_retries >= MAX_RETRIES`, so the
-  # flag is always set here. Under the remote SSM backend, the `--at-cap`
-  # flag flips a persistently-indeterminate liveness verdict from ALIVE-bias
-  # to DEAD, bounding the defer loop to one tick instead of forever (the
-  # a downstream consumer's ~40h hang). Definite ALIVE/DEAD verdicts unaffected.
-  if pid_alive --at-cap issue "$issue_num"; then
+  # At-cap propagation ([INV-30] exception, issue #263): when this call was
+  # made `--at-cap` (the MAX_RETRIES caller), pass the flag through to
+  # `pid_alive` so a persistently-indeterminate remote-SSM verdict flips
+  # from ALIVE-bias to DEAD, bounding the defer loop to one tick instead of
+  # forever (a downstream consumer's ~40h hang). When NOT at-cap (the
+  # review-retry-cap caller), the plain `pid_alive` call keeps INV-30's
+  # ALIVE-bias. Definite ALIVE/DEAD verdicts are unaffected either way.
+  local _alive
+  if [ "$at_cap" = true ]; then
+    pid_alive --at-cap issue "$issue_num" && _alive=0 || _alive=1
+  else
+    pid_alive issue "$issue_num" && _alive=0 || _alive=1
+  fi
+  if [ "$_alive" = 0 ]; then
     local pid current_session_marker _backend
     pid=$(get_pid issue "$issue_num")
     # Resolve the backend on its own line, compare against the literal on
@@ -1056,13 +1075,16 @@ _REMOTE_LIVENESS_DEGRADED_COUNT="${_REMOTE_LIVENESS_DEGRADED_COUNT:-0}"
 pid_alive() {
   # Optional leading `--at-cap` positional flag ([INV-30] at-cap exception,
   # issue #263). When set, the remote-backend *indeterminate* verdict flips
-  # from ALIVE-bias to DEAD: the only caller is `mark_stalled`, which fires
-  # only at MAX_RETRIES — at that point the wrapper has no claim to the
-  # one-tick deference INV-30 normally grants, and persistent indeterminate
-  # would otherwise defer the stall forever. A positional flag (NOT an
-  # exported env var) is required so the at-cap policy cannot leak into
-  # unrelated `pid_alive` calls across exported functions. All ALIVE/DEAD
-  # verdicts and all non-at-cap callers are unchanged.
+  # from ALIVE-bias to DEAD. The flag reaches here only via `mark_stalled
+  # --at-cap`, which the dispatcher passes ONLY from its MAX_RETRIES site
+  # (`dispatcher-tick.sh` Step 4) — at that point the wrapper has no claim to
+  # the one-tick deference INV-30 normally grants, and persistent
+  # indeterminate would otherwise defer the stall forever. The review-retry-
+  # cap caller of `mark_stalled` omits the flag, so its probe keeps the
+  # ALIVE-bias. A positional flag (NOT an exported env var) is required so
+  # the at-cap policy cannot leak into unrelated `pid_alive` calls across
+  # exported functions. All ALIVE/DEAD verdicts and all non-at-cap callers
+  # are unchanged.
   local at_cap=false
   if [ "${1:-}" = "--at-cap" ]; then at_cap=true; shift; fi
   local kind="$1" issue_num="$2"

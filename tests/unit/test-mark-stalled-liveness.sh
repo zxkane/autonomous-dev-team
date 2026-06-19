@@ -160,7 +160,7 @@ assert_match "TC-MSL-003 missing PID file → stall label edit fires" "issue edi
 
 # ===================================================================
 echo
-echo "=== TC-MSL-006..009: at-cap liveness ceiling (issue #263) ==="
+echo "=== TC-MSL-006..010: at-cap liveness ceiling (issue #263) ==="
 
 # Stub SSM liveness driver so the remote-backend pid_alive path is exercised
 # without an actual SSM call. The driver echoes canned stdout and exits a
@@ -179,7 +179,8 @@ export DRIVER_STDOUT_FILE DRIVER_RC_FILE
 export _LIVENESS_CHECK_DRIVER_OVERRIDE="$STUB_DRIVER"
 
 # TC-MSL-006 (CRITICAL regression) — remote backend, retry exhausted, SSM
-# persistently indeterminate. mark_stalled calls `pid_alive --at-cap`, the flag
+# persistently indeterminate. The MAX_RETRIES caller invokes
+# `mark_stalled --at-cap`, which propagates `--at-cap` to `pid_alive`; the flag
 # overrides the indeterminate ALIVE-bias to DEAD, and the stall label is written
 # on the SAME tick. This is the downstream-consumer ~40h-hang bug.
 #
@@ -192,7 +193,7 @@ _GH_CALLS=()
 : > "$DRIVER_STDOUT_FILE"        # empty stdout
 echo "2" > "$DRIVER_RC_FILE"     # rc≠0 → indeterminate
 _REMOTE_LIVENESS_DEGRADED_COUNT=0
-EXECUTION_BACKEND=remote-aws-ssm mark_stalled 106 >/dev/null 2>&1
+EXECUTION_BACKEND=remote-aws-ssm mark_stalled --at-cap 106 >/dev/null 2>&1
 edit_calls=$(printf '%s\n' "${_GH_CALLS[@]}" | grep -E '^issue edit' || true)
 comment_calls=$(printf '%s\n' "${_GH_CALLS[@]}" | grep -E '^issue comment' || true)
 assert_match    "TC-MSL-006 remote at-cap indeterminate → stall label edit fires" "issue edit 106.*stalled" "$edit_calls"
@@ -245,6 +246,25 @@ _REMOTE_LIVENESS_DEGRADED_COUNT=0
 rc=0
 EXECUTION_BACKEND=remote-aws-ssm pid_alive --at-cap issue 109 >/dev/null 2>&1 || rc=$?
 assert_match "TC-MSL-009 pid_alive WITH --at-cap → DEAD (rc 1) on remote indeterminate" "^1$" "$rc"
+
+# TC-MSL-010 (CRITICAL regression — #263 review BLOCKING finding) — the OTHER
+# mark_stalled caller is handle_completed_session_routing's REVIEW_RETRY_LIMIT
+# branch, which calls `mark_stalled "$issue_num"` WITHOUT `--at-cap`. That path
+# is the review-retry-cap state, NOT the retry-budget-exhausted state, so it
+# MUST retain [INV-30]'s indeterminate→ALIVE bias under the remote backend:
+# mark_stalled defers (posts the deferral comment, no stall label) rather than
+# stalling immediately. A blanket `--at-cap` (the pre-fix bug) would have
+# over-applied the DEAD bias here and stalled an issue whose dev wrapper may
+# still be alive but unreachable through a flaky SSM transport.
+_GH_CALLS=()
+: > "$DRIVER_STDOUT_FILE"        # empty stdout
+echo "2" > "$DRIVER_RC_FILE"     # rc≠0 → indeterminate
+_REMOTE_LIVENESS_DEGRADED_COUNT=0
+EXECUTION_BACKEND=remote-aws-ssm mark_stalled 110 >/dev/null 2>&1   # NO --at-cap
+edit_calls=$(printf '%s\n' "${_GH_CALLS[@]}" | grep -E '^issue edit' || true)
+comment_calls=$(printf '%s\n' "${_GH_CALLS[@]}" | grep -E '^issue comment 110' || true)
+assert_no_match "TC-MSL-010 review-cap caller (no --at-cap) remote indeterminate → NO stall label edit" "issue edit.*stalled" "$edit_calls"
+assert_match    "TC-MSL-010 review-cap caller (no --at-cap) remote indeterminate → deferral comment posted (INV-30 ALIVE-bias preserved)" "INV-26-stall-deferral" "$comment_calls"
 
 echo
 echo "=== Summary ==="
