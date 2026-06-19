@@ -117,54 +117,70 @@ if declare -F _runs_parent >/dev/null 2>&1; then
   RUNS_PARENT="$(_runs_parent 2>/dev/null || echo "")"
 fi
 
-# Echo the up-to-3 most recent run dirs for THIS issue, newest first. Sort key is
-# meta.started_at when present, else dir mtime. Each line: "<run-id>\t<outcome>".
+# _run_sort_epoch <dir> — echo a NUMERIC epoch sort key for a run dir: the
+# `meta.json.started_at` ISO timestamp converted to epoch when present+parseable,
+# else the dir's mtime, else 0. Both `_recent_runs` and `_latest_review_drops`
+# use this so ISO-backed and mtime-fallback dirs compare on the SAME numeric axis
+# — a lexical compare would rank an ISO string (`2026-…`) above a 10-digit epoch
+# (`17…`) regardless of real time, so a newer mtime-only run could sort behind an
+# older ISO-backed run (#235 review [P1]).
+_run_sort_epoch() {
+  local d="$1" iso="" key=""
+  if [[ -f "$d/meta.json" ]] && command -v jq >/dev/null 2>&1; then
+    iso="$(jq -r '.started_at // empty' "$d/meta.json" 2>/dev/null || echo "")"
+    [[ -n "$iso" ]] && key="$(date -u -d "$iso" +%s 2>/dev/null || echo "")"
+  fi
+  [[ -n "${key:-}" ]] || key="$(stat -c %Y "$d" 2>/dev/null || stat -f %m "$d" 2>/dev/null || echo 0)"
+  [[ "$key" =~ ^[0-9]+$ ]] || key=0
+  printf '%s\n' "$key"
+}
+
+# Echo the up-to-3 most recent run dirs for THIS issue, newest first. The sort key
+# is the NUMERIC epoch from `_run_sort_epoch` (NOT the raw started_at string), so
+# `sort -t'|' -k1,1nr` (numeric, on the epoch field) orders ISO-backed and
+# mtime-fallback dirs consistently.
 _recent_runs() {
   [[ -n "$RUNS_PARENT" && -d "$RUNS_PARENT" ]] || return 0
-  local d started rc ended outcome name
+  local d epoch rc ended outcome name
   local -a rows=()
   for d in "$RUNS_PARENT/${PROJECT_ID}-${ISSUE_NUMBER}-dev-"* \
            "$RUNS_PARENT/${PROJECT_ID}-${ISSUE_NUMBER}-review-"*; do
     [[ -d "$d" ]] || continue
     name="$(basename "$d")"
-    started=""; rc=""; ended=""
+    rc=""; ended=""
     if [[ -f "$d/meta.json" ]] && command -v jq >/dev/null 2>&1; then
-      started="$(jq -r '.started_at // empty' "$d/meta.json" 2>/dev/null || echo "")"
       rc="$(jq -r '.rc // empty' "$d/meta.json" 2>/dev/null || echo "")"
       ended="$(jq -r '.ended_at // empty' "$d/meta.json" 2>/dev/null || echo "")"
     fi
-    [[ -n "$started" ]] || started="$(stat -c %Y "$d" 2>/dev/null || stat -f %m "$d" 2>/dev/null || echo 0)"
+    epoch="$(_run_sort_epoch "$d")"
     if [[ -z "$ended" ]]; then outcome="in-flight (no end marker)"
     elif [[ "$rc" == "0" ]]; then outcome="rc=0 (success)"
     elif [[ -n "$rc" ]]; then outcome="rc=${rc} (failure)"
     else outcome="ended (rc unknown)"; fi
-    rows+=("${started}|${name}|${outcome}")
+    rows+=("${epoch}|${name}|${outcome}")
   done
   [[ ${#rows[@]} -gt 0 ]] || return 0
-  printf '%s\n' "${rows[@]}" | sort -r | head -3 \
+  # Numeric sort on the epoch field (field 1, `|`-separated), newest first.
+  printf '%s\n' "${rows[@]}" | sort -t'|' -k1,1nr | head -3 \
     | awk -F'|' '{printf "  %s  —  %s\n", $2, $3}'
 }
 
-# Echo the drop reasons from the LATEST review run dir's drops.jsonl.
+# Echo the drop reasons from the NEWEST review run dir — but only if THAT run
+# actually has a `drops.jsonl`. Selecting the newest run FIRST (regardless of
+# whether it has drops) and rendering only its file avoids showing stale drops
+# from an OLDER review when the newest review had none (#235 review [P1]).
 _latest_review_drops() {
   [[ -n "$RUNS_PARENT" && -d "$RUNS_PARENT" ]] || return 0
-  local d latest="" latest_key=0 iso key
+  local d latest="" latest_key=-1 key
   for d in "$RUNS_PARENT/${PROJECT_ID}-${ISSUE_NUMBER}-review-"*; do
-    [[ -d "$d" ]] || continue
-    [[ -f "$d/drops.jsonl" ]] || continue
-    # Normalize the sort key to a numeric EPOCH so meta.started_at (ISO) and the
-    # mtime fallback compare uniformly — a lexical compare of ISO-vs-mtime would
-    # always rank the ISO string higher ('2' > '1') regardless of real time.
-    iso=""; key=""
-    if [[ -f "$d/meta.json" ]] && command -v jq >/dev/null 2>&1; then
-      iso="$(jq -r '.started_at // empty' "$d/meta.json" 2>/dev/null || echo "")"
-      [[ -n "$iso" ]] && key="$(date -u -d "$iso" +%s 2>/dev/null || echo "")"
-    fi
-    [[ -n "${key:-}" ]] || key="$(stat -c %Y "$d" 2>/dev/null || stat -f %m "$d" 2>/dev/null || echo 0)"
-    [[ "$key" =~ ^[0-9]+$ ]] || key=0
-    if [[ "$key" -gt "$latest_key" || -z "$latest" ]]; then latest="$d"; latest_key="$key"; fi
+    [[ -d "$d" ]] || continue   # consider EVERY review run, not only those with drops
+    key="$(_run_sort_epoch "$d")"
+    if [[ "$key" -gt "$latest_key" ]]; then latest="$d"; latest_key="$key"; fi
   done
   [[ -n "$latest" ]] || return 0
+  # Render the newest review run's drops ONLY if that run has the file; a newest
+  # run with no drops correctly shows nothing (not an older run's stale drops).
+  [[ -f "$latest/drops.jsonl" ]] || return 0
   command -v jq >/dev/null 2>&1 || return 0
   jq -r '"  " + .agent + ": " + .reason + "  (" + (.ts // "") + ")"' "$latest/drops.jsonl" 2>/dev/null || true
 }

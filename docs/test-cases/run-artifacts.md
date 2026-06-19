@@ -84,6 +84,8 @@ Suites:
 | TC-RUN-ARTIFACTS-049 | invalid/missing issue arg | usage error, non-zero exit, no gh calls |
 | TC-RUN-ARTIFACTS-050 | **read-only contract** | status.sh issues NO `gh issue edit`, `gh pr merge`, or `gh * comment` (grep-assert the source has no mutation calls) |
 | TC-RUN-ARTIFACTS-051 | **predicate parity** | status.sh source `source`s `lib-dispatch.sh` AND calls `pid_alive`, `count_retries`, `fetch_pr_for_issue` (grep-assert — no duplicated predicate logic) |
+| TC-RUN-ARTIFACTS-052 | `_recent_runs` mixed meta/mtime ordering (#235 owner [P1] r17) | a newer mtime-only run (no meta.json) sorts AHEAD of an older ISO-backed run — both keyed via `_run_sort_epoch` to a numeric epoch + `sort -k1,1nr` (a lexical sort would rank the ISO string above the epoch) |
+| TC-RUN-ARTIFACTS-053 | `_latest_review_drops` newest-without-drops (#235 owner [P1] r17) | the drops section reflects the NEWEST review run: a clean newest review (no drops.jsonl) shows "none recorded", NOT an older review's stale drops; when the newest review has drops, its own drops are shown |
 
 ## E2E — stub fleet + reboot simulation
 

@@ -182,6 +182,54 @@ out="$(run_status 51)"
 assert_contains "TC-047 no runs recorded line" "no runs recorded" "$out"
 
 # ---------------------------------------------------------------------------
+# TC-052 mixed meta/mtime ordering in _recent_runs (#235 owner [P1] r17):
+# a NEWER run WITHOUT meta.json (mtime-only) must sort AHEAD of an OLDER ISO-backed
+# run. A lexical sort would rank the ISO string (`2026-…`) above the epoch (`17…`).
+# ---------------------------------------------------------------------------
+echo "== TC-052 _recent_runs mixed meta/mtime ordering =="
+export GH_FIXTURE="$TMP/fx-mixed.json"
+write_fixture "$GH_FIXTURE" "autonomous pending-review" "OPEN" "[]"
+# OLDER run, ISO-backed via meta.json (started_at ~2024).
+_old="$RUN_BASE/runs/test-proj-52-dev-20240101T000000Z"; mkdir -p "$_old"
+jq -cn '{started_at:"2024-01-01T00:00:00Z", rc:0, ended_at:"2024-01-01T00:05:00Z"}' > "$_old/meta.json"
+touch -d "2024-01-01T00:00:00Z" "$_old" 2>/dev/null || true
+# NEWER run, NO meta.json → mtime fallback only; set mtime to NOW so it is newest.
+_new="$RUN_BASE/runs/test-proj-52-review-20260619T090000Z"; mkdir -p "$_new"
+# (no meta.json on purpose) — mtime defaults to creation = now, strictly > 2024.
+out="$(run_status 52)"
+# The newest (mtime-only) run must appear on the FIRST run-id line; pull the run-ids
+# block and check the first listed run-id is the mtime-only one.
+_runline="$(printf '%s\n' "$out" | grep -A4 'last run-ids' | grep -m1 'test-proj-52-')"
+assert_contains "TC-052a newest mtime-only run sorts first (not behind older ISO run)" \
+  "test-proj-52-review-20260619T090000Z" "$_runline"
+
+# ---------------------------------------------------------------------------
+# TC-053 newest-review-without-drops vs older-with-drops (#235 owner [P1] r17):
+# the "last drop reasons" must reflect the NEWEST review run; if that run has no
+# drops.jsonl, show nothing — never an older review's stale drops.
+# ---------------------------------------------------------------------------
+echo "== TC-053 _latest_review_drops newest-without-drops =="
+export GH_FIXTURE="$TMP/fx-drops.json"
+write_fixture "$GH_FIXTURE" "autonomous pending-review" "OPEN" "[]"
+# OLDER review WITH drops.
+_oldrev="$RUN_BASE/runs/test-proj-53-review-20260601T000000Z"; mkdir -p "$_oldrev"
+jq -cn '{started_at:"2026-06-01T00:00:00Z", rc:0, ended_at:"2026-06-01T00:05:00Z"}' > "$_oldrev/meta.json"
+echo '{"agent":"agy","reason":"agent-unavailable:quota","ts":"2026-06-01T00:04:00Z"}' > "$_oldrev/drops.jsonl"
+# NEWER review WITHOUT drops (clean run — every agent passed).
+_newrev="$RUN_BASE/runs/test-proj-53-review-20260618T000000Z"; mkdir -p "$_newrev"
+jq -cn '{started_at:"2026-06-18T00:00:00Z", rc:0, ended_at:"2026-06-18T00:05:00Z"}' > "$_newrev/meta.json"
+out="$(run_status 53)"
+assert_not_contains "TC-053a newest review has no drops → older stale drops NOT shown" \
+  "agy: agent-unavailable:quota" "$out"
+assert_contains "TC-053b drops section reports none recorded for the clean newest review" \
+  "none recorded" "$out"
+# Conversely, when the newest review DOES have drops, they ARE shown.
+echo '{"agent":"codex","reason":"agent-unavailable:auth","ts":"2026-06-18T00:04:00Z"}' > "$_newrev/drops.jsonl"
+out="$(run_status 53)"
+assert_contains "TC-053c newest review's own drops are shown" "codex: agent-unavailable:auth" "$out"
+assert_not_contains "TC-053d older review's drops still not shown" "agy: agent-unavailable:quota" "$out"
+
+# ---------------------------------------------------------------------------
 # TC-046 retry count parity — value must equal count_retries (here 0, no comments)
 # ---------------------------------------------------------------------------
 echo "== TC-046 retry count surfaced =="
