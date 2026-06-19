@@ -114,8 +114,13 @@ per-agent dirs. We do **not** re-implement #233's verdict path — `status.sh`
 - `/tmp/agent-*.log` keeps working exactly as today (append-mode, INV-69 rotation).
 - The wrapper writes a **first-line pointer** into the run dir's `run.log`
   (`run-dir: <abs path>` + `tmp-log: <abs path>`) and, best-effort, prepends a
-  one-line pointer comment to the `/tmp` log on first write so an operator who
-  opens the `/tmp` log is told where the durable copy is.
+  one-line pointer comment to the `/tmp` log so an operator who opens the `/tmp`
+  log is told where the durable copy is. The `/tmp` log is reused across
+  retries/resumes, so each init **strips the prior breadcrumb and prepends the
+  current run's** — the active run always owns the top-of-file pointer (#235 r18).
+  The rewrite is in place (`cat >`, not `mv`) so the `/tmp` log inode survives and
+  dispatch-local.sh's open append fd is not orphaned; init runs before any agent
+  output so there is no concurrent writer to tear.
 - New wrapper stdout **tees** into `run.log` (the existing `/tmp` redirect in
   `dispatch-local.sh` is unchanged; the tee is added wrapper-side so a direct
   `bash autonomous-dev.sh` invocation also gets a run.log).

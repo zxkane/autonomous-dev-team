@@ -4003,9 +4003,17 @@ The dir holds:
   run-dir: … · run-id: …` breadcrumb into the legacy `/tmp/agent-*.log` itself, so
   an operator who starts from the old `/tmp` log (muscle memory) still has the
   one-hop link to the durable dir after a rotation/reboot (issue #235 requirement;
-  review [P1]). init runs early (before agent output), so the breadcrumb lands near
-  the top; idempotent (skipped if a breadcrumb for this dir is already present),
-  best-effort + symlink-guarded.
+  review [P1]). The `/tmp` log is **reused across retries/resumes** for the same
+  issue (dispatch-local.sh rotates only a single `.1` generation), so the CURRENT
+  run must own the **top-of-file** pointer: init strips any prior `[run-artifacts]
+  run-dir:` line(s) and **prepends** the active run's, keeping the prior log body
+  below (#235 review [P1] r18). Without this, a plain append left the FIRST run's
+  breadcrumb at the top forever and an operator reading `head -1` would land on a
+  STALE run dir. The rewrite is **in place** (`cat >`, not `mv`) so the file inode
+  is preserved and a concurrent open `>>` fd from dispatch-local.sh is not orphaned;
+  it is safe because init runs early (before the wrapper's `exec >(tee …)` and any
+  agent output, so there is no concurrent writer at that instant). Exactly one
+  breadcrumb survives per run; best-effort + symlink-guarded.
 - `drops.jsonl` — one `{agent, reason, ts}` line per dropped/unavailable review
   fan-out member (review side only).
 - `agent-logs/<agent>.log` — the raw per-agent **controller** log (the

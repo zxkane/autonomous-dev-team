@@ -195,19 +195,41 @@ run_artifacts_init() {
   # ALSO breadcrumb the LEGACY /tmp agent log so an operator who starts from the
   # old `/tmp/agent-*.log` (muscle memory) still has a one-hop link to the durable
   # run dir after a /tmp rotation or reboot (issue #235 requirement; review [P1]).
-  # init runs very early (right after the --issue peek, before the agent produces
-  # output), so this appended line lands near the TOP of the /tmp log — the
-  # closest we can get to a "first line" without rewriting an append-mode file
-  # that dispatch-local.sh + the wrapper tee are concurrently writing. Idempotent:
-  # skip if a run-dir pointer for THIS run is already present (re-init / resume).
-  # Best-effort + symlink-guarded (CWE-59); a failure never affects the wrapper.
-  if [[ -n "${LOG_FILE:-}" && ! -L "${LOG_FILE}" ]]; then
-    # Idempotency: skip if a breadcrumb for THIS run dir is already present (re-init
-    # / resume). Match the run-dir substring (the line has trailing ` · run-id: …`
-    # text, so no `$` anchor). `-F` so a `.`/`-` in the path is literal, not regex.
-    if ! grep -qF "run-dir: ${dir} " "${LOG_FILE}" 2>/dev/null; then
-      printf '[run-artifacts] run-dir: %s · run-id: %s (durable evidence survives a /tmp wipe; see %s/run.log)\n' \
-        "$dir" "$run_id" "$dir" >> "${LOG_FILE}" 2>/dev/null || true
+  #
+  # The /tmp log is REUSED across retries/resumes for the same issue (dispatch-
+  # local.sh rotates only a single `.1` generation), so a plain append leaves the
+  # FIRST run's breadcrumb at the top of the file on every subsequent run — an
+  # operator reading `head -1` would land on a STALE run dir (#235 review [P1] r18).
+  # Instead the CURRENT run must own the top-of-file pointer: drop any prior
+  # `[run-artifacts] run-dir:` breadcrumb line(s) and PREPEND this run's. The rest
+  # of the log is preserved below. This is a whole-file rewrite, but init runs
+  # very early (right after the --issue peek, BEFORE the wrapper's `exec >(tee …)`
+  # redirect and before the agent produces output), so there is no concurrent
+  # writer to tear at this instant. Best-effort + symlink-guarded (CWE-59); a
+  # failure BEFORE the in-place `cat >` rewrite leaves the original log untouched.
+  # The `>` truncates the log before `cat` writes, so a SIGKILL/ENOSPC mid-rewrite
+  # could leave the VOLATILE /tmp mirror empty — acceptable: run.log is the durable
+  # authoritative copy, /tmp is disposable. Either way the wrapper rc is unaffected.
+  if [[ -n "${LOG_FILE:-}" && -f "${LOG_FILE}" && ! -L "${LOG_FILE}" ]]; then
+    local _bc _tmp
+    _bc="$(printf '[run-artifacts] run-dir: %s · run-id: %s (durable evidence survives a /tmp wipe; see %s/run.log)' \
+      "$dir" "$run_id" "$dir")"
+    _tmp="$(mktemp "${LOG_FILE}.runbc.XXXXXX" 2>/dev/null || echo '')"
+    if [[ -n "$_tmp" ]]; then
+      # Current breadcrumb first, then the log body with ALL prior breadcrumb lines
+      # stripped (so exactly one — the active run's — survives, at the top).
+      # `grep -vF` exits 1 when the body is empty or every line matched (nothing
+      # left to print); that is a SUCCESSFUL strip, not a failure, so `|| true`
+      # keeps the breadcrumb-only rewrite from being skipped (the `cat` must run).
+      {
+        printf '%s\n' "$_bc"
+        grep -vF '[run-artifacts] run-dir: ' "${LOG_FILE}" 2>/dev/null || true
+      } > "$_tmp" 2>/dev/null
+      # Overwrite IN PLACE (`cat >`, not `mv`) so the file inode is preserved and a
+      # concurrent open `>>` fd from dispatch-local.sh keeps appending to the live
+      # log rather than an orphaned, unlinked temp inode.
+      cat "$_tmp" > "${LOG_FILE}" 2>/dev/null || true
+      rm -f "$_tmp" 2>/dev/null || true
     fi
   fi
 

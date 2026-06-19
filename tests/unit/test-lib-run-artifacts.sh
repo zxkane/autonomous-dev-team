@@ -210,20 +210,53 @@ echo "== init / finalize / meta =="
   assert_contains "TC-096b breadcrumb names the run-id" "$RUN_ID" "$(cat "$LOG_FILE")"
   # init runs early (empty log) → the breadcrumb is the FIRST line.
   assert_contains "TC-096c breadcrumb is the first line" "run-dir: ${RUN_DIR}" "$(head -1 "$LOG_FILE")"
-  # Idempotency guard: a redundant breadcrumb for the SAME dir is not re-appended.
-  # (A genuine re-init mints a fresh run-id → a different dir → a legitimately new
-  # breadcrumb, so we exercise the guard directly against the already-written dir.)
-  _saved_run_dir="$RUN_DIR"
-  _before_n="$(grep -c 'run-dir:' "$LOG_FILE")"
-  # Re-run init with the dir already present → disambiguation makes a NEW dir, so a
-  # NEW breadcrumb IS expected (one per distinct run dir). Confirm exactly +1, not
-  # an unbounded duplicate, and that the guard skipped the original dir's line.
-  unset RUN_ID; RUN_DIR=""
-  run_artifacts_init dev 235 || true
-  assert_eq "TC-096d one breadcrumb per distinct run dir (no dup of the original)" \
-    "$((_before_n + 1))" "$(grep -c 'run-dir:' "$LOG_FILE")"
-  assert_eq "TC-096e original dir's breadcrumb appears exactly once (guard held)" \
-    "1" "$(grep -cF "run-dir: ${_saved_run_dir} " "$LOG_FILE")"
+  # Exactly one breadcrumb after a single init (no accidental duplication).
+  assert_eq "TC-096d exactly one breadcrumb after a single init" \
+    "1" "$(grep -cF '[run-artifacts] run-dir: ' "$LOG_FILE")"
+)
+
+# TC-097 consecutive runs on the SAME /tmp log path: the CURRENT run must own the
+# top-of-file pointer (#235 review [P1] r18). The /tmp log is reused across
+# retries/resumes for the same issue, so a plain append would leave the FIRST
+# run's breadcrumb at the top forever — an operator reading `head -1` would land
+# on a STALE run dir. init must strip prior breadcrumb(s) and PREPEND the active
+# run's, preserving the prior log BODY below it and keeping the file inode (so an
+# open `>>` fd from dispatch-local.sh is not orphaned).
+(
+  export PROJECT_ID="proj"
+  export AUTONOMOUS_RUN_DIR_BASE="$TMP_ROOT/tmplog97/autonomous-proj"
+  export LOG_FILE="$TMP_ROOT/tmplog97-agent-proj-issue-777.log"
+  # Seed with pre-existing agent output so we verify the body survives the rewrite.
+  printf 'prior agent line A\nprior agent line B\n' > "$LOG_FILE"
+  _ino_before="$(stat -c %i "$LOG_FILE" 2>/dev/null || echo 0)"
+
+  # RUN 1
+  unset RUN_ID RUN_DIR
+  run_artifacts_init dev 777 || true
+  RUN1_DIR="$RUN_DIR"
+  printf 'agent output produced during RUN1\n' >> "$LOG_FILE"
+
+  # RUN 2 (a resume/retry reusing the same /tmp log) → mints a different run dir.
+  unset RUN_ID RUN_DIR
+  run_artifacts_init dev 777 || true
+  RUN2_DIR="$RUN_DIR"
+
+  assert_true "TC-097a the two runs minted distinct dirs" [ "$RUN1_DIR" != "$RUN2_DIR" ]
+  # head -1 now resolves to the CURRENT (RUN2) dir, not the stale RUN1 dir.
+  assert_contains "TC-097b head -1 points at the CURRENT run dir" \
+    "run-dir: ${RUN2_DIR} " "$(head -1 "$LOG_FILE")"
+  assert_not_contains "TC-097c stale RUN1 dir is NOT the first line" \
+    "run-dir: ${RUN1_DIR} " "$(head -1 "$LOG_FILE")"
+  # Exactly one breadcrumb survives (prior ones stripped, not accumulated).
+  assert_eq "TC-097d exactly one breadcrumb after two runs (prior stripped)" \
+    "1" "$(grep -cF '[run-artifacts] run-dir: ' "$LOG_FILE")"
+  # The prior log body (both the seed and RUN1's output) is preserved below.
+  assert_contains "TC-097e prior seed line preserved" "prior agent line A" "$(cat "$LOG_FILE")"
+  assert_contains "TC-097f RUN1 agent output preserved" "agent output produced during RUN1" "$(cat "$LOG_FILE")"
+  # Inode preserved → an open append fd from dispatch-local.sh keeps writing live.
+  _ino_after="$(stat -c %i "$LOG_FILE" 2>/dev/null || echo 1)"
+  assert_eq "TC-097g log inode preserved across the rewrite (open >> fd not orphaned)" \
+    "$_ino_before" "$_ino_after"
 )
 
 # TC-023 finalize rc=1
