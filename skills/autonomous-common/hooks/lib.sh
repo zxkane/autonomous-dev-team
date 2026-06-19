@@ -74,23 +74,33 @@ parse_file_path() {
 # (`git -c key=val push`, `git --git-dir=/x push`) and command chains
 # (`cd /tmp && git push`).
 #
-# Limitation: the quote-stripping pass does not understand escaped
-# quotes (`"see \"git push\" docs"`). This is acceptable because the
-# intent is defense-in-depth against incidental mentions, not
-# adversarial bypass (any workflow author who wants to dodge the hook
-# can use `--no-verify`).
+# Limitation: the quote-stripping pass does not fully understand escaped
+# quotes (`"see \"git push\" docs"`) — the ERE treats `\"` as a region
+# boundary, so a missed strip is possible. This is acceptable because the
+# intent is defense-in-depth against incidental mentions, not adversarial
+# bypass (any workflow author who wants to dodge the hook can use
+# `--no-verify`). The strip MUST still terminate on every input — see the
+# quoted-substitution note inside the function (#266).
 is_git_command() {
   local operation="$1"
   local command="$2"
 
   # Strip single- and double-quoted regions so mentions inside quoted
   # strings (e.g. `--body "see git push docs"`) cannot match.
+  #
+  # The match MUST be quoted inside the substitution — `${var/"$x"/ }`, not
+  # `${var/$x/ }`. The first operand of `${var/pattern/repl}` is interpreted as
+  # a glob pattern, but BASH_REMATCH[0] is literal matched text. An unquoted
+  # match containing a glob-significant char (a backslash from an escaped quote
+  # `\"`, or `[`, `?`, `*`) would match nothing, leave `stripped` unchanged, and
+  # the `while [[ … =~ … ]]` test would re-match the same region forever — a
+  # 100%-CPU infinite loop. Quoting forces a literal substitution. See #266.
   local stripped="$command"
   while [[ "$stripped" =~ \"[^\"]*\" ]]; do
-    stripped="${stripped/${BASH_REMATCH[0]}/ }"
+    stripped="${stripped/"${BASH_REMATCH[0]}"/ }"
   done
   while [[ "$stripped" =~ \'[^\']*\' ]]; do
-    stripped="${stripped/${BASH_REMATCH[0]}/ }"
+    stripped="${stripped/"${BASH_REMATCH[0]}"/ }"
   done
 
   # Split on shell separators so each segment can be scanned independently.
