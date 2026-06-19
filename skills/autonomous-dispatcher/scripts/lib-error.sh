@@ -305,6 +305,19 @@ error_surface() {
     return 0
   fi
 
+  # [INV-81] Append the run-id/artifacts footer so a startup-failure envelope (this
+  # is a wrapper-owned comment) links to the durable run dir — same guarantee the
+  # wrappers give their other comments. Best-effort + `declare -F`-guarded:
+  # lib-error.sh is sourced before lib-run-artifacts.sh and BEFORE run_artifacts_init
+  # has minted a RUN_ID on the earliest config aborts, so run_footer is either
+  # undefined or echoes nothing then — in both cases the envelope is unchanged
+  # (run_footer emits its own leading `\n---\n` only when RUN_ID is set). The
+  # footer goes at the END, never altering the envelope's machine-read marker JSON.
+  if declare -F run_footer >/dev/null 2>&1; then
+    local _ef; _ef="$(run_footer 2>/dev/null)" || _ef=""
+    [[ -n "$_ef" ]] && rendered="${rendered}${_ef}"
+  fi
+
   # Run the post with errexit disabled so a non-zero `gh` never aborts the
   # caller (which runs under `set -euo pipefail`); restore the caller's exact
   # errexit state afterward rather than blindly re-enabling it.

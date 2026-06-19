@@ -728,10 +728,17 @@ merge decision, or the trap's label transitions. See [`metrics.md`](metrics.md).
 
 ### Observe-only run-artifacts + run-id footer ([INV-81](invariants.md#inv-81-every-wrapper-run-mints-a-run-id-and-a-durable-per-run-artifact-dir-the-run-id-threads-through-logs-metrics-and-every-wrapper-posted-comment-footer-statussh-answers-pipeline-state-from-the-dispatchers-real-predicates-observe-only--never-changes-wrapper-rc-or-labels))
 
-Right after PID setup the review wrapper mints `RUN_ID`
-(`<project>-<issue>-review-<ts>`), provisions a durable run dir (`runs/<run-id>/`,
-sibling to INV-78's per-agent verdict UUID dirs under the same `runs/` parent),
-and tees its stdout/stderr into `run.log`. It threads `run_id=` into every
+**EARLY** — right after the `--issue` peek and BEFORE the config/auth/E2E/PID
+`error_surface` calls (#235 review [P1]) — the review wrapper mints `RUN_ID`
+(`<project>-<issue>-review-<ts>`) and provisions a durable run dir (`runs/<run-id>/`,
+sibling to INV-78's per-agent verdict UUID dirs under the same `runs/` parent). This
+early ordering is what lets a startup-failure operator error envelope
+(`lib-error.sh::error_surface`, [INV-72](invariants.md#inv-72-config-class-failures-must-surface-on-the-issue-never-log-only))
+carry the run-id footer — the two footerless-by-ordering exceptions being a
+missing-`PROJECT_ID` abort (nothing to anchor a run dir on) and `lib-agent.sh`'s
+source-time launcher guards (they fire during `source lib-agent.sh`, before the
+early init). It later tees its stdout/stderr into `run.log`,
+threads `run_id=` into every
 `metrics_emit` above, records each dropped fan-out member in the run dir's
 `drops.jsonl` (`run_artifacts_record_drop`, alongside the `agent_drop` metric), and
 `cleanup()` calls `run_artifacts_finalize` (end marker + rc + timing) for both the

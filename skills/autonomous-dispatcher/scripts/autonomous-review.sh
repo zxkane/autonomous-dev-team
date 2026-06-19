@@ -247,6 +247,23 @@ fi
 # context for surfacing. `-` (dispatcher-alert sentinel) when no valid --issue.
 ISSUE_NUMBER="$(error_peek_issue_arg "$@")"
 
+# [INV-81] Provision the durable per-run artifact dir + mint RUN_ID AS EARLY AS
+# POSSIBLE — BEFORE the config/auth/E2E/PID error_surface calls below — so a
+# startup-failure error-envelope comment carries the run-id footer + has a durable
+# run dir (#235 review [P1]). Conf is already loaded (lib-agent.sh sourced it), so
+# PROJECT_ID is known here unless it is the missing key — then run_artifacts_init
+# no-ops (mint needs PROJECT_ID) and that single `ADT_CFG_MISSING_KEY` envelope has
+# no run dir to point at, which is correct. Guarded on a numeric peeked issue so the
+# `-` dispatcher-alert sentinel never mints a bogus run-id. The tee + wrapper_start
+# further down reuse this RUN_DIR/RUN_ID. (Moved here from after PID setup — #235 review.)
+# Set LOG_FILE first (only needs PROJECT_ID + ISSUE_NUMBER) so the run-dir's
+# meta.json `log_pointer` + run.log `tmp-log:` first-line pointer are accurate; the
+# canonical assignment later is byte-identical (harmless idempotent re-set).
+if [[ "$ISSUE_NUMBER" =~ ^[0-9]+$ ]] && declare -F run_artifacts_init >/dev/null 2>&1; then
+  LOG_FILE="/tmp/agent-${PROJECT_ID:-}-review-${ISSUE_NUMBER}.log"
+  run_artifacts_init review "${ISSUE_NUMBER}" || true
+fi
+
 # Validate required config (loaded by lib-agent.sh from autonomous.conf).
 # [INV-72] config-class failure → surface on the issue when known, else
 # dispatcher-alert. NOTE: this runs before setup_github_auth, so the gh proxy
@@ -568,14 +585,10 @@ PID_DIR=$(pid_dir_for_project) || {
 }
 PID_FILE="${PID_DIR}/review-${ISSUE_NUMBER}.pid"
 
-# [INV-81] Provision the durable per-run artifact dir + mint RUN_ID early so the
-# tee below captures the full run and every wrapper-posted comment can footer it.
-# Best-effort (`|| true`): a failure leaves RUN_ID/RUN_DIR empty and the
-# footer/threading degrade to no-ops (observe-only). The run dir survives a /tmp
-# wipe; meta.json holds start/end + rc + timing + redacted env.
-if declare -F run_artifacts_init >/dev/null 2>&1; then
-  run_artifacts_init review "${ISSUE_NUMBER}" || true
-fi
+# [INV-81] The per-run artifact dir + RUN_ID were already provisioned EARLY (right
+# after the `--issue` peek, before the config/auth/E2E/PID error_surface calls) so
+# startup failures footer correctly. RUN_DIR/RUN_ID persist to here; we only set up
+# the tee now so it captures the run's body to the durable run.log.
 # Tee the wrapper's own stdout/stderr into the durable run.log. dispatch-local.sh
 # ALSO redirects fd1/fd2 to the legacy /tmp/agent-*-review-*.log (unchanged);
 # this tee is additive and also covers a direct `bash autonomous-review.sh` run.

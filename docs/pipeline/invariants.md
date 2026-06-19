@@ -4017,10 +4017,29 @@ The run-id is:
      dropped-survivor, timeout-veto, dropped-agent, mandatory-bot-review
      fail / re-queue, mergeable CONFLICTING / UNKNOWN, approval-failed fallback,
      no-auto-close manual-merge notice, and auto-merge-failure (the PR-side rebase
-     marker) (#235 review [P1] r4).
+     marker) (#235 review [P1] r4);
+   - **the operator error envelope** ([INV-72](#inv-72-config-class-failures-must-surface-on-the-issue-never-log-only)) for a
+     startup-failure abort (config / auth / E2E-mode / project-dir / PID-dir):
+     `lib-error.sh::error_surface` appends the footer to the rendered envelope.
+     For this to carry a run dir, **`run_artifacts_init` is provisioned EARLY** in
+     both wrappers — right after the `--issue` peek, BEFORE the first
+     `error_surface` call — so the startup scenarios this issue set out to improve
+     are exactly the ones that footer (#235 review [P1]). Two footerless-by-ordering
+     exceptions remain, both acceptable: (a) `ADT_CFG_MISSING_KEY` for `PROJECT_ID`
+     itself — with no project there is nothing to anchor a run dir on (run-id minting
+     needs `PROJECT_ID`); and (b) the **source-time launcher guards** in
+     `lib-agent.sh` (`ADT_CFG_LAUNCHER_PARSE`, `ADT_CFG_LAUNCHER_CLI_MISMATCH`, INV-38)
+     — these run during `source lib-agent.sh`, which is structurally BEFORE the
+     `--issue` peek + early init, so `RUN_ID` is not yet minted (init cannot move
+     ahead of that source: `PROJECT_ID` is loaded BY lib-agent.sh's
+     `load_autonomous_conf`). Both are rare operator-misconfig aborts; every other
+     startup envelope (the config/auth/E2E/project-dir/PID-dir set surfaced from the
+     wrapper body, after the early init) carries the footer.
    The footer is appended at the END of the body (after `run_footer`'s own
    `\n---\n`), so a comment whose FIRST line is a machine-parsed token
-   (`Review findings:`, `Auto-merge failed:`) keeps that leading line intact.
+   (`Review findings:`, `Auto-merge failed:`) keeps that leading line intact; the
+   error-envelope's `<!-- adt-error-envelope: … -->` marker is likewise preserved
+   (footer follows it).
    **Two deliberate exceptions, both pure machine channels:** the `Reviewed HEAD:`
    SHA trailer and the `<!-- review-verdict: … -->` HTML trailer (both emitted for
    the dispatcher's detection, never operator-facing) are NOT footered — a footer

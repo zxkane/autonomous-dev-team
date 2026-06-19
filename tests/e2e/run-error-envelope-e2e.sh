@@ -131,6 +131,50 @@ fi
 
 # ===========================================================================
 echo ""
+echo "=== TC-ERR-ENVELOPE-042 (INV-81, #235): a startup-failure envelope carries the run-id footer when a run dir is provisioned ==="
+# The wrappers now provision the run dir + RUN_ID BEFORE the config/auth/E2E/PID
+# error_surface calls, so a startup-failure envelope links to the durable run dir.
+# Drive error_surface with lib-run-artifacts sourced + a real run dir minted, and
+# assert the posted body gains the `run-id: … · artifacts: …` footer.
+LIB_RUN_ARTIFACTS="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-run-artifacts.sh"
+CALLS2="$SANDBOX/gh-calls-2.log"; : > "$CALLS2"
+# Own scripts dir so this case never disturbs the original gh stub above.
+mkdir -p "$SANDBOX/scripts2"
+cat > "$SANDBOX/scripts2/gh" <<EOF
+#!/bin/bash
+{ echo "GH-INVOCATION"; printf '%s\n' "\$@"; echo "---"; } >> "$CALLS2"
+echo "https://github.com/zxkane/autonomous-dev-team/issues/231#issuecomment-10000"
+exit 0
+EOF
+chmod +x "$SANDBOX/scripts2/gh"
+RUN_STATE_BASE="$SANDBOX/state/autonomous-errenv-proj"
+(
+  set -euo pipefail
+  export AUTONOMOUS_CONF_DIR="$SANDBOX/scripts2"
+  export REPO="zxkane/autonomous-dev-team"
+  export PROJECT_ID="errenv-proj"
+  export AUTONOMOUS_RUN_DIR_BASE="$RUN_STATE_BASE"
+  # shellcheck disable=SC1090
+  source "$LIB_RUN_ARTIFACTS"
+  # shellcheck disable=SC1090
+  source "$LIB_ERROR"
+  # Provision the run dir + RUN_ID exactly as the wrappers now do at startup,
+  # BEFORE surfacing — this is the ordering the [P1] fix enforces.
+  run_artifacts_init review 231 || true
+  error_surface 231 ADT_CFG_E2E_MODE_INVALID \
+    "E2E_MODE has an unrecognized value" \
+    "E2E_MODE='foo' is not one of none / browser / command" \
+    "Set E2E_MODE to none, browser, or command in scripts/autonomous.conf, then re-dispatch" \
+    "docs/pipeline/errors.md#configuration-class-class-config"
+) 2>/dev/null
+CALLBODY2=$(cat "$CALLS2")
+if [[ "$CALLBODY2" == *"ADT_CFG_E2E_MODE_INVALID"* ]]; then ok "042 envelope still carries the code (footer is additive)"; else bad "042 envelope lost the code"; fi
+if [[ "$CALLBODY2" == *"run-id: errenv-proj-231-review-"* ]]; then ok "042 envelope carries the run-id footer"; else bad "042 envelope MISSING the run-id footer"; fi
+if [[ "$CALLBODY2" == *"artifacts: ${RUN_STATE_BASE}/runs/errenv-proj-231-review-"* ]]; then ok "042 envelope footer points at the durable run dir"; else bad "042 envelope footer missing the artifacts dir"; fi
+if [[ "$CALLBODY2" == *"adt-error-envelope:"* ]]; then ok "042 envelope marker JSON still present (footer appended at END, marker intact)"; else bad "042 envelope marker lost"; fi
+
+# ===========================================================================
+echo ""
 echo "=== TC-ERR-ENVELOPE-041: review-wrapper startup validations target the issue (P1-1 pin) ==="
 # Regression pin for the P1-1 finding: the review wrapper's startup validations
 # run BEFORE the authoritative arg-parse loop. Pre-fix they called

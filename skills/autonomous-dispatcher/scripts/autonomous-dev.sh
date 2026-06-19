@@ -78,6 +78,24 @@ AGENT_LAUNCHER_ARGV=("${AGENT_DEV_LAUNCHER_ARGV[@]}")
 # context for surfacing. `-` (dispatcher-alert sentinel) when no valid --issue.
 ISSUE_NUMBER="$(error_peek_issue_arg "$@")"
 
+# [INV-81] Provision the durable per-run artifact dir + mint RUN_ID AS EARLY AS
+# POSSIBLE — BEFORE the config/auth error_surface calls below — so a startup-failure
+# error-envelope comment carries the run-id footer + has a durable run dir (the very
+# scenarios this issue set out to improve; #235 review [P1]). Conf is already loaded
+# (lib-agent.sh sourced it), so PROJECT_ID is known here unless it is the missing key
+# — in which case run_artifacts_init no-ops (mint needs PROJECT_ID) and that single
+# `ADT_CFG_MISSING_KEY` envelope has no run dir to point at, which is correct. Guarded
+# on a numeric peeked issue so the `-` dispatcher-alert sentinel never mints a bogus
+# run-id. Best-effort `|| true`; the tee + wrapper_start below reuse the RUN_DIR/RUN_ID
+# this sets. (Moved here from after PID setup — see #235 review.)
+# Set LOG_FILE first (only needs PROJECT_ID + ISSUE_NUMBER) so the run-dir's
+# meta.json `log_pointer` + run.log `tmp-log:` first-line pointer are accurate; the
+# canonical assignment later is byte-identical (harmless idempotent re-set).
+if [[ "$ISSUE_NUMBER" =~ ^[0-9]+$ ]] && declare -F run_artifacts_init >/dev/null 2>&1; then
+  LOG_FILE="/tmp/agent-${PROJECT_ID:-}-issue-${ISSUE_NUMBER}.log"
+  run_artifacts_init dev "${ISSUE_NUMBER}" || true
+fi
+
 # Validate required config (loaded by lib-agent.sh from autonomous.conf).
 # [INV-72] A missing key is a config-class failure: surface on the issue when
 # known, else dispatcher-alert. REPO may itself be the missing key, so
@@ -230,15 +248,11 @@ if [[ -f "$LOG_FILE" ]]; then
   METRICS_LOG_OFFSET=$(wc -c < "$LOG_FILE" 2>/dev/null | tr -d '[:space:]') || METRICS_LOG_OFFSET=0
   [[ "$METRICS_LOG_OFFSET" =~ ^[0-9]+$ ]] || METRICS_LOG_OFFSET=0
 fi
-# [INV-81] Provision the durable per-run artifact dir + mint RUN_ID BEFORE the
-# metrics emit so wrapper_start carries the run_id correlation key. Best-effort:
-# `|| true` keeps a failure (unwritable XDG base, missing jq) from aborting the
-# wrapper — RUN_ID/RUN_DIR simply stay empty and the footer/threading degrade to
-# no-ops (observe-only contract). The run dir holds meta.json (start/end + rc +
-# timing + redacted env) and a run.log copy that survives a /tmp wipe.
-if declare -F run_artifacts_init >/dev/null 2>&1; then
-  run_artifacts_init dev "${ISSUE_NUMBER}" || true
-fi
+# [INV-81] The per-run artifact dir + RUN_ID were already provisioned EARLY (right
+# after the `--issue` peek, before the config/auth error_surface calls) so startup
+# failures footer correctly. RUN_DIR/RUN_ID persist to here; we only need the tee +
+# the run_id on wrapper_start now. (If the early init no-op'd — e.g. PROJECT_ID was
+# the missing key and the wrapper exited — we never reach here.)
 # [INV-81] Tee the wrapper's own stdout/stderr into the durable run.log so a run
 # survives a /tmp wipe. dispatch-local.sh ALSO redirects fd1/fd2 to the legacy
 # /tmp/agent-*.log (append, INV-69 rotation) — that path is unchanged; this tee
