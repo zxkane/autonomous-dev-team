@@ -87,12 +87,16 @@ EOF
 chmod +x "$GHBIN/gh"
 
 # Stub the scoped mint (gh-app-token.sh's get_gh_app_scoped_token). Echo the
-# per-repo sentinel so the scope-aware gh stub honors the lookup.
+# per-repo sentinel so the scope-aware gh stub honors the lookup, and append the
+# minted `owner/repo` to a count file so the tick-scoped-dedup scenario can prove
+# how many mints happened (file, not a var — the mint runs in a `$(...)` subshell
+# inside resolve_dep_state).
+MINT_LOG="$WORK/mint.log"; : > "$MINT_LOG"
 GAT_STUB="$WORK/gh-app-token.sh"
-cat > "$GAT_STUB" <<'EOF'
+cat > "$GAT_STUB" <<EOF
 #!/bin/bash
-get_gh_app_scoped_token() { printf 'scoped-token-for-%s/%s' "$3" "$4"; }
-get_gh_app_token() { printf 'scoped-token-for-%s/%s' "$3" "$4"; }
+get_gh_app_scoped_token() { printf '%s/%s\n' "\$3" "\$4" >> '$MINT_LOG'; printf 'scoped-token-for-%s/%s' "\$3" "\$4"; }
+get_gh_app_token() { printf 'scoped-token-for-%s/%s' "\$3" "\$4"; }
 EOF
 
 run_check() {
@@ -185,6 +189,42 @@ TOK=user-pat out=$(run_check token)
 rc=$(rc_of "$out")
 [[ "$rc" == "0" ]] && ok "PAT mode cross-repo CLOSED resolves (rc 0) — no mint, ambient fallback" \
                    || bad "PAT mode cross-repo CLOSED blocked (rc=$rc) — regression"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== E2E-CRDEP-5: tick-scoped cache — two ISSUES on the same dep repo mint ONCE (AC #2) ==="
+# ---------------------------------------------------------------------------
+# The #269 review [P1]: AC #2 requires caching by owner/repo WITHIN the tick.
+# Two issues processed in one tick (one process, one source of lib-dispatch, the
+# tick-boundary reset called ONCE) that both depend on the same external repo
+# must reuse the first mint → exactly ONE entry in the mint log. A per-issue
+# reset would mint twice.
+printf '## Dependencies\n- %s#7\n' "$DEP_REPO" > "$WORK/dep-body.txt"
+printf '%s:7 CLOSED\n' "$DEP_REPO" > "$WORK/dep-state.txt"
+: > "$WORK/scope-enforce"
+: > "$MINT_LOG"
+tick_out=$(PATH="$GHBIN:$PATH" REPO="$REPO" REPO_OWNER=example-org PROJECT_ID=e2e-proj \
+  MAX_RETRIES=3 MAX_CONCURRENT=5 GH_AUTH_MODE=app \
+  DISPATCHER_APP_ID=12345 DISPATCHER_APP_PEM=/nonexistent.pem GH_TOKEN=ambient-repoA-token \
+  bash -c "
+    set -uo pipefail
+    source '$GAT_STUB'
+    source '$LIB'
+    set +e
+    _reset_dep_token_cache          # the tick boundary (dispatcher-tick.sh does this once)
+    check_deps_resolved 101; echo \"RC1=\$?\"   # issue #101 — mints
+    check_deps_resolved 102; echo \"RC2=\$?\"   # issue #102 same tick — reuses
+  " 2>/dev/null)
+rc1=$(printf '%s' "$tick_out" | sed -n 's/^RC1=//p')
+rc2=$(printf '%s' "$tick_out" | sed -n 's/^RC2=//p')
+mint_count=$(grep -cx "${DEP_REPO}" "$MINT_LOG" 2>/dev/null || true); mint_count=${mint_count:-0}
+[[ "$rc1" == "0" && "$rc2" == "0" ]] && ok "both issues resolve (rc 0) in one tick" \
+                                     || bad "tick-dedup: an issue blocked (rc1=$rc1 rc2=$rc2)"
+if [[ "$mint_count" == "1" ]]; then
+  ok "tick-scoped cache: same dep repo across TWO issues minted ONCE (AC #2)"
+else
+  bad "tick-scoped cache violated: minted $mint_count times across two issues (expected 1) — the #269 [P1]"
+fi
 
 # ---------------------------------------------------------------------------
 echo ""

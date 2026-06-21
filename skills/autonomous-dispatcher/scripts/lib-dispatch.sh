@@ -291,22 +291,26 @@ _DEP_LOOKUP_PERMISSIONS_DEFAULT='{"issues":"read"}'
 DEP_LOOKUP_PERMISSIONS="${DEP_LOOKUP_PERMISSIONS:-$_DEP_LOOKUP_PERMISSIONS_DEFAULT}"
 
 # [INV-83] Cross-repo dependency lookup-token cache, keyed by `owner/repo`.
-# Deduplicates N deps on the same repo to a single mint WITHIN one
-# `check_deps_resolved` call (one issue's dependency check). A failed mint is
-# cached negatively (empty string) so a doomed repo is not re-minted for every
-# ref. Lives at module scope so the cache survives the multiple per-ref calls to
-# `resolve_dep_state` within one `check_deps_resolved` invocation (those run in
-# the caller's shell, not a subshell — see resolve_dep_state's out-var note).
-# `_reset_dep_token_cache` clears it at the TOP of every `check_deps_resolved`
-# call, so the scope is per-issue (the safer isolation): a value can never leak
-# across issues, across ticks (the rare reused-shell case), or into PAT mode
-# (where it stays empty).
+# TICK-SCOPED (AC #2): deduplicates every dep on the same external repo to a
+# SINGLE mint across ALL issues processed in one dispatcher tick — not per-issue.
+# A failed mint is cached negatively (empty string) so a doomed repo is not
+# re-minted for every ref. Lives at module scope; the dispatcher tick is one
+# process that sources lib-dispatch.sh once, so the cache naturally persists
+# across the tick's multiple `check_deps_resolved` calls (and across the
+# per-ref `resolve_dep_state` calls within each, which run in the caller's shell
+# — see resolve_dep_state's out-var note). It is cleared ONLY at the tick
+# boundary by `_reset_dep_token_cache` (dispatcher-tick.sh calls it once, before
+# Step 2). In PAT mode the mint branch is never entered, so the cache stays
+# empty — no dep-lookup token can leak into PAT mode; the per-tick fresh process
+# (cron) plus the explicit boundary reset prevent any cross-tick leak.
 declare -A _DEP_TOKEN_CACHE 2>/dev/null || true
 
-# Clear the cross-repo lookup-token cache. Called at the top of
-# check_deps_resolved so each issue evaluation starts clean — in PAT mode the
-# cache is never populated, guarding against an inherited dep-lookup token being
-# honored across issues or across multi-tick subshells ([INV-83], #269 T4).
+# Clear the cross-repo lookup-token cache at the TICK boundary. dispatcher-tick.sh
+# calls this once per tick (before Step 2 scan-new) so the cache starts each tick
+# clean; the multi-project tick runs each project in its own subshell, so a fresh
+# subshell already gives per-project isolation, and this boundary reset covers the
+# rare reused-shell case (e.g. a long-lived dispatcher process or test harness)
+# without sacrificing the within-tick cross-issue dedup ([INV-83], #269 AC #2/T4).
 _reset_dep_token_cache() {
   unset _DEP_TOKEN_CACHE
   declare -gA _DEP_TOKEN_CACHE 2>/dev/null || true
@@ -434,9 +438,13 @@ _dep_block_comment() {
 check_deps_resolved() {
   local issue_num="$1"
   local body section line state dep_repo dep_num matched
-  # [INV-83] Start each issue evaluation with a clean per-tick token cache so a
-  # dep-lookup token can never leak across ticks (reused-shell) or into PAT mode.
-  _reset_dep_token_cache
+  # [INV-83] The dep-lookup token cache is TICK-scoped, NOT per-issue: AC #2
+  # requires caching by `owner/repo` *within the tick* so two issues in the same
+  # tick that depend on the same external repo reuse ONE minted token. The cache
+  # therefore persists across check_deps_resolved calls here and is cleared only
+  # at the tick boundary by `_reset_dep_token_cache` (dispatcher-tick.sh calls it
+  # once, before Step 2). Do NOT reset it here — that defeats the cross-issue
+  # dedup (#269 review [P1]).
   body=$(gh issue view "$issue_num" --repo "$REPO" --json body -q '.body')
   section=$(printf '%s\n' "$body" | sed -n '/^## Dependencies/,/^## /p')
 

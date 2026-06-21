@@ -177,6 +177,12 @@ _reset_states() {
   # and let token-mode tests override GH_AUTH_MODE explicitly. Pre-#269 tests
   # never touch these and stay in token mode (GH_AUTH_MODE unset).
   unset GH_TOKEN GH_AUTH_MODE DISPATCHER_APP_ID DISPATCHER_APP_PEM
+  # [INV-83, #269] Clear the dep-lookup token cache between INDEPENDENT cases.
+  # The cache is now TICK-scoped (persists across check_deps_resolved calls in a
+  # tick), so check_deps_resolved no longer self-resets — each test case must
+  # start from the tick boundary. (The cross-TICK-dedup test below deliberately
+  # does NOT call _reset_states between its two check_deps_resolved calls.)
+  _reset_dep_token_cache
 }
 
 # Register a scoped-mint failure for owner/repo (file-backed, subshell-safe).
@@ -715,6 +721,53 @@ else
   echo -e "  ${RED}FAIL${NC}: duplicate block comment posted (log: $(cat "$_COMMENT_LOG_FILE"))"
   FAIL=$((FAIL + 1))
 fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-CRDEP-011: cache spans the TICK — two ISSUES on the same dep repo mint ONCE (AC #2) ==="
+# ---------------------------------------------------------------------------
+# THE #269 review [P1] regression: AC #2 requires caching by `owner/repo`
+# *within the tick*, not per-issue. Two different issues processed in the same
+# tick (the cache is NOT reset between their check_deps_resolved calls — only at
+# the tick boundary) that both depend on the same external repo MUST reuse the
+# first issue's minted token → exactly ONE mint. With the pre-fix per-call reset
+# this minted twice; this assertion fails without the fix.
+_reset_states                      # tick boundary (clears the cache once)
+_arm_app_mode
+# Two issues' bodies. The mock `gh --json body` returns _MOCK_BODY for ANY issue
+# number, so we set the shared body and call check_deps_resolved for two issue
+# numbers WITHOUT _reset_states between them (mid-tick).
+_MOCK_BODY="## Dependencies
+- shared-owner/shared-repo#7
+"
+_set_repo_state shared-owner/shared-repo 7 CLOSED
+check_deps_resolved 101            # issue #101 (first in the tick) — mints once
+rc1=$?
+check_deps_resolved 102           # issue #102 (same tick, same dep repo) — reuses
+rc2=$?
+assert_eq "issue #101 cross-repo CLOSED dep → rc 0" "0" "$rc1"
+assert_eq "issue #102 cross-repo CLOSED dep → rc 0" "0" "$rc2"
+assert_eq "TICK-scoped cache: same dep repo across TWO issues minted ONCE (AC #2)" "1" "$(_mint_count_for shared-owner/shared-repo)"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-CRDEP-012: the tick-boundary reset clears the cache (a new tick re-mints) ==="
+# ---------------------------------------------------------------------------
+# After a tick boundary (_reset_dep_token_cache, what dispatcher-tick.sh calls
+# once per tick before Step 2), a fresh tick processing the same dep repo mints
+# again — the cache does NOT leak across ticks.
+_reset_states
+_arm_app_mode
+_MOCK_BODY="## Dependencies
+- shared-owner/shared-repo#7
+"
+_set_repo_state shared-owner/shared-repo 7 CLOSED
+check_deps_resolved 201            # tick A: one mint
+mints_after_tick_a=$(_mint_count_for shared-owner/shared-repo)
+_reset_dep_token_cache             # <-- tick boundary (dispatcher-tick.sh does this)
+check_deps_resolved 202            # tick B: must mint AGAIN (cache cleared)
+assert_eq "tick A minted once" "1" "$mints_after_tick_a"
+assert_eq "after tick-boundary reset, tick B re-mints (no cross-tick leak) → 2 total" "2" "$(_mint_count_for shared-owner/shared-repo)"
 
 # ---------------------------------------------------------------------------
 echo ""

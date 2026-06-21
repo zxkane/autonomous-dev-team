@@ -68,6 +68,19 @@ code.
   ambient token (or empty under the fallback) so the lookup degrades to the
   fail-safe block; it never `exit`s. A failed mint is cached negatively so we do
   not re-mint a doomed token for every ref in that repo.
+- **Cache scope = the tick, not one issue (#269 review [P1] correction).** AC #2
+  requires caching by `owner/repo` *within the tick*. `_DEP_TOKEN_CACHE` is
+  module-scope and the tick is one process that sources `lib-dispatch.sh` once,
+  so the cache persists across every `check_deps_resolved` call in the tick —
+  two issues depending on the same external repo reuse ONE mint.
+  `check_deps_resolved` therefore does **not** self-reset; clearing happens only
+  at the tick boundary (T4). An early draft reset per-call (per-issue), which
+  defeated the cross-issue dedup — corrected here.
+- **`resolve_dep_state` uses an out-var, not stdout.** The mint mutates the
+  module-scope cache, and that write must happen in the caller's shell so the
+  cache survives across refs (and across issues). A `state=$(resolve_dep_state)`
+  capture would subshell the body and lose the cache write — so the resolved
+  state is returned via `printf -v "$out_var"`.
 
 ### T3 — sharpened WARNING (`lib-dispatch.sh`)
 
@@ -86,6 +99,15 @@ ambient-token fallback applies (PAT mode and any partial-config safety). A
 per-ref mint failure degrades to the fail-safe block — **never `exit 1`** (so
 same-repo issues still dispatch). In PAT mode the cache is never populated, so
 no stale dep-lookup token is honored.
+
+`dispatcher-tick.sh` also owns the **tick boundary** for the cache: it calls
+`_reset_dep_token_cache` once (right after the tick-local `JUST_DISPATCHED=()`
+init, before Step 2) so each tick starts clean while the within-tick cross-issue
+dedup is preserved. The call is `declare -F`-guarded so a future lib refactor
+that drops the helper can't abort the tick. The multi-project tick
+(`dispatcher-multi-tick.sh`) runs each project in its own subshell, so a fresh
+subshell already isolates per-project; the boundary reset covers the
+reused-shell case.
 
 ### T5 — block visibility (once-per-issue comment)
 
