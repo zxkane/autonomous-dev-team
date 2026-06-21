@@ -44,12 +44,12 @@ Guards grounded here: `only-autonomous-label`, `still-reviewing`,
 `no-auto-close-present`/`absent`, `terminal-with-transitional-residue`
 (Step 0 hygiene, `lib-dispatch.sh:163` `hygiene_strip_residual_labels`).
 
-## 2. Dependency resolution → `dependencies` (INV-11)
+## 2. Dependency resolution → `dependencies` (INV-11, INV-39, INV-83)
 
 | Field | Source | How read |
 |---|---|---|
-| `dependencies.resolved` | `lib-dispatch.sh:298` `check_deps_resolved` | `gh issue view --json body` → `sed -n '/^## Dependencies/,/^## /p'` → per-ref `gh issue view --json state`; resolved iff every ref is `CLOSED` or `MERGED` ([INV-11](invariants.md#inv-11-dependency-state-includes-merged)) |
-| `dependencies.unresolved_refs` | same | the refs whose state is not yet terminal |
+| `dependencies.resolved` | `lib-dispatch.sh` `check_deps_resolved` | `gh issue view --json body` → `sed -n '/^## Dependencies/,/^## /p'` → per-ref state lookup; resolved iff every ref is `CLOSED` or `MERGED` ([INV-11](invariants.md#inv-11-dependency-state-includes-merged)). Same-repo `#N` uses the ambient token; cross-repo `owner/repo#N` uses a per-dep-repo scoped read token minted by `resolve_dep_state` ([INV-83](invariants.md#inv-83-cross-repo-dependency-lookups-use-a-per-dep-repo-scoped-read-token-the-app-must-be-installed-on-the-dep-repo)) — the ambient dispatcher token covers the dispatching repo only |
+| `dependencies.unresolved_refs` | same | the refs whose state is not yet terminal (or whose cross-repo lookup failed because the App is not installed on the dep repo, [INV-83]) |
 
 Guard grounded here: `deps-resolved` (precondition for `dispatch-new`).
 

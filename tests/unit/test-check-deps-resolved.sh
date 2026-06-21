@@ -38,8 +38,67 @@ export MAX_CONCURRENT=5
 _MOCK_BODY=""
 declare -A _MOCK_STATES
 
+# ---------------------------------------------------------------------------
+# [INV-83, #269] $GH_TOKEN-aware scope enforcement.
+#
+# The #269 bug is that the ambient dispatcher token is scoped to the DISPATCHING
+# repo only, so a cross-repo lookup 404s. To make the regression test meaningful
+# (fail-WITHOUT-fix / pass-WITH-fix), the mock must SIMULATE that scope: when
+# `_SCOPE_ENFORCE=1`, a state lookup against a repo OTHER than $REPO returns
+# empty (the 404) UNLESS the in-scope `$GH_TOKEN` equals the per-repo sentinel
+# that the (stubbed) scoped mint produces. A lookup against $REPO succeeds with
+# any token (that IS the dispatching repo the ambient token covers).
+#
+# Off by default (`_SCOPE_ENFORCE` unset) so every pre-#269 test in this file —
+# which runs in token mode with no scope sentinels — is byte-for-byte unchanged.
+# ---------------------------------------------------------------------------
+_SCOPE_ENFORCE=0
+# resolve_dep_state mints via `_minted=$(get_gh_app_scoped_token ...)` — a
+# command-substitution subshell, so a shell-variable mint counter would die with
+# it. Record mints + posted comments to FILES (the codebase's standard
+# subshell-safe tally pattern). _MINT_LOG / _COMMENT_LOG_FILE hold paths.
+_MINT_LOG=$(mktemp)
+_COMMENT_LOG_FILE=$(mktemp)
+# Mint-failure registry must also survive the subshell read, so back it with a
+# directory of marker files rather than an associative array.
+_MINT_FAIL_DIR=$(mktemp -d)
+trap 'rm -f "$_MINT_LOG" "$_COMMENT_LOG_FILE"; rm -rf "$_MINT_FAIL_DIR"' EXIT
+
+# The per-repo sentinel token the stubbed mint returns for a given dep repo.
+_scoped_sentinel_for() { printf 'scoped-token-for-%s' "$1"; }
+
+# Stub the scoped-token mint that resolve_dep_state calls in app mode. Records
+# each mint to the _MINT_LOG file (so the cache-dedup + routing tests can count
+# mints) and echoes the per-repo sentinel — unless the repo is registered as a
+# mint-failure, in which case it fails (rc 1, empty) so resolve_dep_state
+# negative-caches it. Both the log and the failure registry are FILES so the
+# command-substitution subshell's writes/reads survive.
+get_gh_app_scoped_token() {
+  local owner_repo="$3/$4"
+  printf '%s\n' "$owner_repo" >> "$_MINT_LOG"
+  if [[ -f "$_MINT_FAIL_DIR/$(printf '%s' "$owner_repo" | tr '/' '_')" ]]; then
+    return 1
+  fi
+  _scoped_sentinel_for "$owner_repo"
+}
+export -f get_gh_app_scoped_token _scoped_sentinel_for
+
 gh() {
-  local mode="" issue_num="" repo=""
+  local mode="" issue_num="" repo="" body=""
+  # gh issue comment <num> --repo R --body "..."  (block-visibility post, #269 T5)
+  if [[ "$1" == "issue" && "$2" == "comment" ]]; then
+    shift 2
+    issue_num="$1"; shift
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --body) body="$2"; shift 2 ;;
+        --repo) shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    printf '%s\n' "$body" >> "$_COMMENT_LOG_FILE"
+    return 0
+  fi
   while [[ $# -gt 0 ]]; do
     case "$1" in
       view) issue_num="$2"; shift 2 ;;
@@ -48,6 +107,7 @@ gh() {
         case "$2" in
           body) mode="body" ;;
           state) mode="state" ;;
+          comments) mode="comments" ;;
         esac
         shift 2
         ;;
@@ -63,11 +123,28 @@ gh() {
       if [[ "$s" == "__FAIL__" ]]; then
         return 1
       fi
+      # [INV-83, #269] Scope enforcement: a cross-repo lookup (repo != $REPO)
+      # 404s unless GH_TOKEN is the per-repo scoped sentinel.
+      if [[ "$_SCOPE_ENFORCE" == "1" && "$repo" != "$REPO" ]]; then
+        if [[ "${GH_TOKEN:-}" != "$(_scoped_sentinel_for "$repo")" ]]; then
+          return 1
+        fi
+      fi
       printf '%s' "$s"
+      ;;
+    comments)
+      # Dedup probe for _dep_block_comment: the lib runs
+      # `... | select(contains(MARKER)) | length` then `grep -q '^0$'`.
+      # We return the registered existing-marker count for this issue (default
+      # 0 → not yet posted → the lib posts). Tests bump the count to simulate an
+      # already-posted block so the once-per-ref dedup is exercised.
+      local key="${repo}:${issue_num}"
+      printf '%s' "${_EXISTING_COMMENTS_COUNT[$key]:-0}"
       ;;
   esac
 }
 export -f gh
+declare -A _EXISTING_COMMENTS_COUNT
 
 # shellcheck source=../../skills/autonomous-dispatcher/scripts/lib-dispatch.sh
 source "$LIB"
@@ -90,6 +167,28 @@ assert_eq() {
 _reset_states() {
   unset _MOCK_STATES
   declare -gA _MOCK_STATES
+  # [INV-83, #269] Reset the scope-enforcement scaffolding too.
+  _SCOPE_ENFORCE=0
+  unset _EXISTING_COMMENTS_COUNT; declare -gA _EXISTING_COMMENTS_COUNT
+  : > "$_MINT_LOG"
+  : > "$_COMMENT_LOG_FILE"
+  rm -f "$_MINT_FAIL_DIR"/*
+  # Each scope-aware test runs in app mode with creds present; default to that
+  # and let token-mode tests override GH_AUTH_MODE explicitly. Pre-#269 tests
+  # never touch these and stay in token mode (GH_AUTH_MODE unset).
+  unset GH_TOKEN GH_AUTH_MODE DISPATCHER_APP_ID DISPATCHER_APP_PEM
+}
+
+# Register a scoped-mint failure for owner/repo (file-backed, subshell-safe).
+_set_mint_fail() {
+  : > "$_MINT_FAIL_DIR/$(printf '%s' "$1" | tr '/' '_')"
+}
+
+# Count how many times the scoped mint was invoked for a given owner/repo.
+# `grep -c` prints 0 AND exits 1 on no match, so a `|| echo 0` would double-print
+# — count lines explicitly with awk instead.
+_mint_count_for() {
+  awk -v want="$1" 'index($0, want) == 1 && $0 == want { n++ } END { print n + 0 }' "$_MINT_LOG"
 }
 
 # Register state for an arbitrary repo:issue pair.
@@ -406,11 +505,214 @@ _set_repo_state typo-owner/nonexistent 456 __FAIL__
 err=$(check_deps_resolved 99 2>&1 >/dev/null)
 rc=$?
 assert_eq "failed cross-repo lookup → blocked (rc=1)" "1" "$rc"
-if [[ "$err" == *"WARNING: lookup failed for typo-owner/nonexistent#456"* ]]; then
-  echo -e "  ${GREEN}PASS${NC}: failed lookup emits stderr warning naming the ref"
+# [INV-83, #269] The cross-repo empty-state WARNING is SHARPENED to name the
+# scope/installation cause FIRST. It must still name the failed ref AND now
+# carry the "App may not be installed" phrasing.
+if [[ "$err" == *"cross-repo lookup failed for typo-owner/nonexistent#456"* \
+   && "$err" == *"App may not be installed on typo-owner/nonexistent"* ]]; then
+  echo -e "  ${GREEN}PASS${NC}: failed lookup emits sharpened stderr warning naming the ref + scope cause"
   PASS=$((PASS + 1))
 else
-  echo -e "  ${RED}FAIL${NC}: missing stderr warning (got: ${err})"
+  echo -e "  ${RED}FAIL${NC}: missing/old stderr warning (got: ${err})"
+  FAIL=$((FAIL + 1))
+fi
+
+# ===========================================================================
+# [INV-83, #269] cross-repo dependency lookup uses a per-dep-repo scoped token
+# ===========================================================================
+# These cases run under `_SCOPE_ENFORCE=1` + app mode, simulating the #269 bug:
+# the ambient dispatcher token is scoped to $REPO only, so a cross-repo lookup
+# 404s UNLESS resolve_dep_state mints a token scoped to the TARGET repo.
+
+# Common app-mode arming for the scope-aware cases.
+_arm_app_mode() {
+  _SCOPE_ENFORCE=1
+  export GH_AUTH_MODE=app
+  export DISPATCHER_APP_ID=12345
+  export DISPATCHER_APP_PEM=/nonexistent.pem   # mint is stubbed; file never read
+  export GH_TOKEN=ambient-repoA-scoped-token   # the #269 narrow token
+}
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-CRDEP-001: app mode, cross-repo CLOSED dep → resolved via scoped mint (AC #1) ==="
+# ---------------------------------------------------------------------------
+# Fails WITHOUT the fix (ambient repo-A token 404s on repo-B); passes WITH it.
+_MOCK_BODY="## Dependencies
+- other-owner/other-repo#7
+"
+_reset_states
+_arm_app_mode
+_set_repo_state other-owner/other-repo 7 CLOSED
+check_deps_resolved 99
+assert_eq "cross-repo CLOSED dep resolves via target-scoped mint → rc 0" "0" "$?"
+assert_eq "scoped mint invoked exactly once for the dep repo" "1" "$(_mint_count_for other-owner/other-repo)"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-CRDEP-002: app mode, cross-repo MERGED dep → resolved ==="
+# ---------------------------------------------------------------------------
+_reset_states
+_arm_app_mode
+_set_repo_state other-owner/other-repo 7 MERGED
+check_deps_resolved 99
+assert_eq "cross-repo MERGED dep → rc 0" "0" "$?"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-CRDEP-003: app mode, cross-repo OPEN dep → blocked ==="
+# ---------------------------------------------------------------------------
+_reset_states
+_arm_app_mode
+_set_repo_state other-owner/other-repo 7 OPEN
+check_deps_resolved 99
+assert_eq "cross-repo OPEN dep → rc 1 (blocked)" "1" "$?"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-CRDEP-004: app mode, App-not-installed (empty state) → block + sharpened WARN + comment ==="
+# ---------------------------------------------------------------------------
+# Mint succeeds but the dep repo is unreachable (state __FAIL__) — models a repo
+# the App cannot see. The block must be observable: sharpened WARN + once-per-ref
+# comment.
+_MOCK_BODY="## Dependencies
+- unreachable-owner/unreachable#42
+"
+_reset_states
+_arm_app_mode
+_set_repo_state unreachable-owner/unreachable 42 __FAIL__
+err=$(check_deps_resolved 99 2>&1 >/dev/null)
+rc=$?
+assert_eq "App-not-installed cross-repo dep → rc 1 (blocked)" "1" "$rc"
+if [[ "$err" == *"App may not be installed on unreachable-owner/unreachable"* ]]; then
+  echo -e "  ${GREEN}PASS${NC}: sharpened WARNING names the scope/installation cause"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: sharpened WARNING missing (got: ${err})"
+  FAIL=$((FAIL + 1))
+fi
+# The block-visibility comment is posted (current-shell call, so _COMMENT_LOG
+# persists when check_deps_resolved runs NOT in a subshell). Re-run in-shell to
+# capture the comment side-effect.
+_reset_states
+_arm_app_mode
+_set_repo_state unreachable-owner/unreachable 42 __FAIL__
+check_deps_resolved 99 >/dev/null 2>&1
+if grep -qF 'dep-block:unreachable-owner/unreachable#42' "$_COMMENT_LOG_FILE"; then
+  echo -e "  ${GREEN}PASS${NC}: once-per-ref block-visibility comment posted with the dedup marker"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: block-visibility comment missing (log: $(cat "$_COMMENT_LOG_FILE"))"
+  FAIL=$((FAIL + 1))
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-CRDEP-005: token routing — same-repo uses ambient, cross-repo uses scoped ==="
+# ---------------------------------------------------------------------------
+# A same-repo #N (resolved against $REPO with the ambient token) AND a cross-repo
+# ref in one body: same-repo resolves with the ambient token (scope enforce only
+# bites repo != $REPO), cross-repo resolves only because the scoped mint fired.
+_MOCK_BODY="## Dependencies
+- #42
+- other-owner/other-repo#7
+"
+_reset_states
+_arm_app_mode
+_set_same_repo_state 42 CLOSED          # same-repo: ambient token OK
+_set_repo_state other-owner/other-repo 7 CLOSED
+check_deps_resolved 99
+assert_eq "same-repo (ambient) + cross-repo (scoped) both CLOSED → rc 0" "0" "$?"
+assert_eq "scoped mint fired only for the cross-repo dep (not same-repo)" "1" "$(_mint_count_for other-owner/other-repo)"
+assert_eq "no scoped mint for the dispatching repo" "0" "$(_mint_count_for "$REPO")"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-CRDEP-006: per-repo mint FAILURE degrades to fail-safe block, does NOT exit ==="
+# ---------------------------------------------------------------------------
+# The mint fails (App lacks the dep repo's installation). resolve_dep_state must
+# fall back to the ambient token (which 404s under scope enforce → empty state →
+# fail-safe block), return 1, and NOT exit — so check_deps_resolved returns and
+# control flows on. We prove "did not exit" by observing the function returned a
+# value the test can read (an `exit 1` would have killed the whole test process).
+_MOCK_BODY="## Dependencies
+- mintfail-owner/mintfail#9
+"
+_reset_states
+_arm_app_mode
+_set_mint_fail "mintfail-owner/mintfail"
+_set_repo_state mintfail-owner/mintfail 9 CLOSED   # would resolve IF token were scoped
+check_deps_resolved 99
+assert_eq "mint failure → fail-safe block (rc 1), function returned (no exit)" "1" "$?"
+echo -e "  ${GREEN}PASS${NC}: test process still alive after mint-failure path (no exit 1)"
+PASS=$((PASS + 1))
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-CRDEP-007: PAT mode — no mint, ambient fallback, no behavior change ==="
+# ---------------------------------------------------------------------------
+# In token mode resolve_dep_state never mints; the ambient token is used. With
+# scope enforce OFF (token-mode default), the cross-repo CLOSED dep resolves
+# exactly as the legacy path did.
+_MOCK_BODY="## Dependencies
+- other-owner/other-repo#7
+"
+_reset_states
+# token mode: leave GH_AUTH_MODE unset, _SCOPE_ENFORCE=0 (a PAT spans repos, so
+# the mock does not 404 cross-repo).
+_set_repo_state other-owner/other-repo 7 CLOSED
+check_deps_resolved 99
+assert_eq "PAT mode cross-repo CLOSED → rc 0 (ambient token)" "0" "$?"
+assert_eq "PAT mode: NO scoped mint happened" "0" "$(_mint_count_for other-owner/other-repo)"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-CRDEP-008: PR-number cross-repo dep (MERGED) resolves ==="
+# ---------------------------------------------------------------------------
+# `gh issue view --json state` on a PR returns MERGED; the dep is a PR ref.
+_MOCK_BODY="## Dependencies
+- other-owner/other-repo#1234
+"
+_reset_states
+_arm_app_mode
+_set_repo_state other-owner/other-repo 1234 MERGED
+check_deps_resolved 99
+assert_eq "cross-repo MERGED PR ref → rc 0" "0" "$?"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-CRDEP-009: cache — two deps in the SAME cross-repo are minted ONCE ==="
+# ---------------------------------------------------------------------------
+_MOCK_BODY="## Dependencies
+- other-owner/other-repo#7
+- other-owner/other-repo#8
+"
+_reset_states
+_arm_app_mode
+_set_repo_state other-owner/other-repo 7 CLOSED
+_set_repo_state other-owner/other-repo 8 MERGED
+check_deps_resolved 99
+assert_eq "two deps same repo, both resolved → rc 0" "0" "$?"
+assert_eq "scoped mint invoked ONCE for the shared dep repo (cache dedup)" "1" "$(_mint_count_for other-owner/other-repo)"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-CRDEP-010: block-visibility comment is once-per-ref (dedup marker) ==="
+# ---------------------------------------------------------------------------
+# An already-posted block (existing-comment count = 1) must NOT post again.
+_MOCK_BODY="## Dependencies
+- unreachable-owner/unreachable#42
+"
+_reset_states
+_arm_app_mode
+_set_repo_state unreachable-owner/unreachable 42 __FAIL__
+_EXISTING_COMMENTS_COUNT["${REPO}:99"]=1   # a prior block comment already exists
+check_deps_resolved 99 >/dev/null 2>&1
+if [[ ! -s "$_COMMENT_LOG_FILE" ]]; then
+  echo -e "  ${GREEN}PASS${NC}: block already surfaced → no duplicate comment (once-per-ref dedup)"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: duplicate block comment posted (log: $(cat "$_COMMENT_LOG_FILE"))"
   FAIL=$((FAIL + 1))
 fi
 

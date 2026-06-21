@@ -1207,13 +1207,18 @@ List-item-only scope eliminates the prose false positives. Explicit `owner/repo#
 
 **Lookup-failure semantics**: when `gh issue view` returns a non-zero exit (404 / network error / private repo the dispatcher token can't see), the resulting empty `$state` MUST be treated as fail-safe block AND emit a stderr warning naming the failed `<repo>#N`. The original #157 bug was the silent-block half of this rule; without the warning half, a typo in `owner/repo#N` would silently recreate the same bug class.
 
+**Token used for the lookup** (see [INV-83](#inv-83-cross-repo-dependency-lookups-use-a-per-dep-repo-scoped-read-token-the-app-must-be-installed-on-the-dep-repo)): the cross-repo arm resolves state via `resolve_dep_state`, which in app mode mints a token scoped to the **target** dep repo. The ambient dispatcher token is scoped to the **dispatching** repo only and 404s on any other repo — pre-#269 that 404 fell straight into this fail-safe block, silently silencing any issue with a cross-repo dependency forever (#269). The App MUST be installed on the dep repo; otherwise the dependency is genuinely unresolvable and the block is correct (now surfaced via a sharpened WARNING + a once-per-issue-per-ref comment).
+
 **Status**: **ENFORCED** in #157's fix. The function uses `grep -E '^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]'` to filter the `## Dependencies` section to list items, then bash regex `(^|[[:space:]\(])([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#([0-9]+)` followed by `(^|[[:space:]\(])#([0-9]+)` for stage-2 extraction with a match-and-strip loop. Empty-state lookups emit a `[check_deps_resolved] WARNING: lookup failed for ...` line on stderr and return 1.
 
 **Test**: `tests/unit/test-check-deps-resolved.sh` covers cross-repo CLOSED/MERGED/OPEN, same-repo + cross-repo mixed, prose-embedded refs (must not block), blockquote refs (must not block), URL-fragment refs (must not block), and lookup-failure warning (cross-repo ref to a non-existent repo blocks AND prints the warning). The mock `gh` keys state lookups on `<repo>:<num>` so the same number resolves to different states in different repos.
 
 **Cross-references**:
 - [INV-11](#inv-11-dependency-state-includes-merged) — `state ∉ {CLOSED, MERGED}` rule applies to both same-repo and cross-repo refs.
+- [INV-83](#inv-83-cross-repo-dependency-lookups-use-a-per-dep-repo-scoped-read-token-the-app-must-be-installed-on-the-dep-repo) — the cross-repo lookup uses a per-dep-repo scoped read token (the #269 fix). The App must be installed on the dep repo.
 - The `create-issue` skill's `## Dependencies` guidance documents the user-facing parsing rules (`skills/create-issue/SKILL.md`, `skills/create-issue/references/issue-templates.md`).
+
+**App-installation migration note (#269)**: with the per-dep-repo scoped token, a cross-repo dependency `owner/repo-B#N` only resolves if the dispatcher's GitHub App is **installed on `repo-B`** (and, if the App uses "selected repositories", `repo-B` is selected). Operators adding a cross-repo dependency MUST ensure the App's installation covers the target repo — otherwise the dependency stays blocked (now with a sharpened WARNING + an on-issue comment instead of a silent skip). This is a precondition, not a regression: the pre-#269 ambient token could never see `repo-B` either; #269 makes the lookup possible *when the App is installed* and makes the failure visible *when it is not*.
 
 ## INV-40: Multi-agent review attribution, unanimous aggregation, and all-unavailable fallback
 
@@ -4188,6 +4193,33 @@ single-quote sibling loop, the genuine-invocation no-regression cases, and the
 whole `block-commit-outside-worktree.sh` hook on the repro payload — each
 bounded-time case runs under `timeout` in a fresh `bash` so a pre-fix loop cannot
 hang the harness).
+
+## INV-83: cross-repo dependency lookups use a per-dep-repo scoped read token; the App MUST be installed on the dep repo
+
+_Triage (issue #236): [machine-checked: tests/unit/test-check-deps-resolved.sh, tests/unit/test-gh-app-token-split-269.sh, tests/e2e/run-cross-repo-dep-e2e.sh]_
+
+**Rule**: When Step 2's dependency check ([INV-39](#inv-39-dependency-parsing-is-list-item-scoped-and-supports-cross-repo-refs)) resolves a **cross-repo** `owner/repo#N` reference, it MUST do so with a token scoped to the **target** dependency repo, not the ambient dispatcher token. In app mode (`GH_AUTH_MODE=app` with `DISPATCHER_APP_ID` + `DISPATCHER_APP_PEM` present) `resolve_dep_state` mints a read-only installation token scoped to the dep repo (`{"issues":"read"}`) via `get_gh_app_scoped_token`, cached per `owner/repo` for the duration of a single `check_deps_resolved` call (one mint covers N deps on the same repo *within one issue's* dependency check; the cache is reset at the top of every call, so two issues in the same tick each mint once — the safer per-issue isolation). The **same-repo** `#N` arm is unchanged — it keeps the ambient `$GH_TOKEN`, which already covers `$REPO`. In PAT mode (or app mode with creds absent) no mint happens and the ambient token is used (a PAT already spans repos) — byte-identical to the pre-#269 behavior.
+
+**Hard requirement (operator)**: the App MUST be installed on each dependency repo (and, if the App uses "selected repositories", that repo must be selected). No token shape avoids this: an installation token can only be scoped to repos the installation can already see. If the App cannot see the dep repo, the dependency is genuinely unresolvable and the fail-safe block ([INV-39]) is correct — the cross-repo empty-state WARNING names the scope/installation cause first, and a once-per-issue-per-ref comment surfaces the persistent block on the issue so it is not invisible behind a stderr WARN.
+
+**Why**: the dispatcher's tick mints its token at `dispatcher-tick.sh` via `get_gh_app_token "$REPO_OWNER" "$REPO_NAME"` with **no permissions arg**, so `_build_access_token_body` produces `{"repositories":["repo-A"]}` and `export GH_TOKEN=<repo-A-scoped token>`. The pre-#269 cross-repo arm ran `gh issue view N --repo owner/repo-B --json state` under that ambient token; GitHub returns 404 / `Could not resolve to a Repository`, `$state` is empty, and the [INV-39] fail-safe `return 1` silently skips the issue **every tick** — a cross-repo dependency permanently silences the issue even when the dependency is already CLOSED. The parsing ([INV-39] `owner/repo#N` extraction) was already correct; only the **token used for the cross-repo lookup** was wrong (#269).
+
+**Permissions object**: `{"issues":"read"}`. `metadata` is implicit for GitHub App installation tokens and the `POST /app/installations/{id}/access_tokens` exchange returns HTTP 422 if it is named explicitly. Per the issue #269 locked decision the empirical contract is `{"issues":"read"}` → HTTP 200 + a token that reads issue state; `{"issues":"read","metadata":"read"}` → HTTP 422. The single live mint against `api.github.com` confirming this is an **operator pre-merge step** (#269 T8) — it is not run from inside a wrapper (no live credential mint in the dependency-check path). Operator-overridable via `DEP_LOOKUP_PERMISSIONS`.
+
+**Failure semantics**: a per-dep-repo mint failure (App not installed, transport error) is **negative-cached** (empty token) so the doomed repo is not re-minted for every ref; the lookup then falls back to the ambient token, which 404s → empty state → fail-safe block. A mint failure NEVER aborts the tick — a same-repo issue in the same body must still dispatch (#269 T4). In PAT mode the per-tick token cache is reset at the top of every `check_deps_resolved` call and never populated, so a dep-lookup token can never leak across ticks or into PAT mode.
+
+**Producer**: `lib-dispatch.sh::resolve_dep_state` (token routing + cache) + `gh-app-token.sh::get_gh_app_scoped_token` (the scoped mint, which reuses the structural `_app_install_token` core extracted in #269 T1). Threaded by `dispatcher-tick.sh` (the app-mode block already exports `DISPATCHER_APP_ID` / `DISPATCHER_APP_PEM`, which `resolve_dep_state` reads from the environment).
+
+**Consumer**: `lib-dispatch.sh::check_deps_resolved` (the cross-repo arm).
+
+**Status**: **ENFORCED** in #269's fix.
+
+**Tests**: `tests/unit/test-check-deps-resolved.sh` (TC-CRDEP-001..010 — a `$GH_TOKEN`-aware mock `gh` simulates the scope 404; cross-repo CLOSED/MERGED/OPEN, App-not-installed empty-state + sharpened WARNING + block comment, token routing same-repo-ambient vs cross-repo-scoped, per-repo mint-failure degradation without `exit`, PAT-mode no-mint fallback, PR-number ref, per-repo mint cache dedup, once-per-ref block-comment dedup). `tests/unit/test-gh-app-token-split-269.sh` (the T1 structural split — `_app_install_token` extraction + byte-identical body shape). `tests/e2e/run-cross-repo-dep-e2e.sh` (end-to-end against a scope-enforcing stub `gh`, with a counter-proof that the no-mint path 404s) — run in the hermetic CI tier via the `tests/unit/test-cross-repo-dep-e2e-wrapper.sh` wrapper (a scoped App token cannot edit `.github/workflows/`, so the E2E is gated through the existing `tests/unit/test-*.sh` loop rather than a dedicated CI step).
+
+**Cross-references**:
+- [INV-39](#inv-39-dependency-parsing-is-list-item-scoped-and-supports-cross-repo-refs) — the cross-repo ref parsing this token-routing fix sits inside. The parse was always correct; #269 fixes only the lookup token.
+- [INV-11](#inv-11-dependency-state-includes-merged) — `state ∉ {CLOSED, MERGED}` still applies to the resolved cross-repo state.
+- [INV-79](#inv-79-in-app-mode-the-agent-process-gets-only-a-scoped-token-the-wrapper-keeps-full-write-and-is-the-sole-approvemergepr-create-path) — the scoped-mint machinery (`get_gh_app_scoped_token`, `_build_access_token_body`) reused here. #269 T1 extracts the shared exchange core (`_app_install_token`) byte-identically.
 
 ## Adding a new invariant
 

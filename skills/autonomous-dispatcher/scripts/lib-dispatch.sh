@@ -275,6 +275,136 @@ run_hygiene_pass() {
 # Step 2: dependency check
 # ---------------------------------------------------------------------------
 
+# [INV-83] Permissions object for the per-dep-repo cross-repo lookup token.
+# Read-only issue state is all the dependency check needs. `metadata` is NOT
+# requested — it is implicit for GitHub App installation tokens and the
+# `POST /app/installations/{id}/access_tokens` exchange returns HTTP 422 if it
+# is named explicitly. Per the issue #269 locked decision (cross-model review),
+# the empirical contract is: `{"issues":"read"}` → HTTP 200 + a token that reads
+# issue state; `{"issues":"read","metadata":"read"}` → HTTP 422. The one live
+# mint against api.github.com confirming this is an OPERATOR pre-merge step
+# (#269 T8) — it is not run from inside a wrapper (no live credential mint here).
+# Operator-overridable via DEP_LOOKUP_PERMISSIONS if a future App grant differs.
+# (Default assigned in two steps so the JSON value stays literal — embedding it
+# inside a `${VAR:-...}` default would let the inner quotes be taken literally.)
+_DEP_LOOKUP_PERMISSIONS_DEFAULT='{"issues":"read"}'
+DEP_LOOKUP_PERMISSIONS="${DEP_LOOKUP_PERMISSIONS:-$_DEP_LOOKUP_PERMISSIONS_DEFAULT}"
+
+# [INV-83] Cross-repo dependency lookup-token cache, keyed by `owner/repo`.
+# Deduplicates N deps on the same repo to a single mint WITHIN one
+# `check_deps_resolved` call (one issue's dependency check). A failed mint is
+# cached negatively (empty string) so a doomed repo is not re-minted for every
+# ref. Lives at module scope so the cache survives the multiple per-ref calls to
+# `resolve_dep_state` within one `check_deps_resolved` invocation (those run in
+# the caller's shell, not a subshell — see resolve_dep_state's out-var note).
+# `_reset_dep_token_cache` clears it at the TOP of every `check_deps_resolved`
+# call, so the scope is per-issue (the safer isolation): a value can never leak
+# across issues, across ticks (the rare reused-shell case), or into PAT mode
+# (where it stays empty).
+declare -A _DEP_TOKEN_CACHE 2>/dev/null || true
+
+# Clear the cross-repo lookup-token cache. Called at the top of
+# check_deps_resolved so each issue evaluation starts clean — in PAT mode the
+# cache is never populated, guarding against an inherited dep-lookup token being
+# honored across issues or across multi-tick subshells ([INV-83], #269 T4).
+_reset_dep_token_cache() {
+  unset _DEP_TOKEN_CACHE
+  declare -gA _DEP_TOKEN_CACHE 2>/dev/null || true
+}
+
+# resolve_dep_state <owner/repo> <num> — [INV-83] cross-repo aware state lookup.
+#
+# Writes the dependency's GitHub state (OPEN / CLOSED / MERGED) into the named
+# out-var (3rd arg), or empty on lookup failure (404 / transport error / App not
+# installed). Always returns 0 — the caller fail-safe-blocks on an empty value.
+#
+# An OUT-VAR (not stdout) is used deliberately: the token mint mutates the
+# module-level _DEP_TOKEN_CACHE, and that write MUST happen in the caller's shell
+# so the cache survives across the multiple refs in one `check_deps_resolved`
+# call. If this echoed and the caller captured via `state=$(resolve_dep_state)`,
+# the whole body — including the cache write — would run in a command-
+# substitution subshell and the dedup cache would reset on every ref (re-minting
+# per ref). `printf -v` keeps it in-shell.
+#
+# Token routing (the #269 fix):
+#   - In app mode (GH_AUTH_MODE=app with both DISPATCHER_APP_ID and
+#     DISPATCHER_APP_PEM set), the cross-repo lookup uses a token scoped to the
+#     TARGET repo, minted once per `owner/repo` via get_gh_app_scoped_token and
+#     cached in _DEP_TOKEN_CACHE. The ambient $GH_TOKEN is scoped to the
+#     DISPATCHING repo only, so it 404s on any other repo — the root cause of
+#     #269.
+#   - In PAT mode (or app mode with creds absent), no mint happens; the lookup
+#     uses the ambient $GH_TOKEN, which (for a PAT) already spans repos. This is
+#     byte-identical to the pre-#269 behavior.
+#
+# A per-repo mint FAILURE is cached as the empty string so the lookup falls back
+# to the ambient token (which then 404s → empty state → fail-safe block) and the
+# doomed repo is not re-minted for every ref. The mint NEVER aborts the tick — a
+# same-repo issue in the same body must still dispatch (#269 T4).
+resolve_dep_state() {
+  local owner_repo="$1" num="$2" out_var="$3"
+  # `${GH_TOKEN:-}` guard: in PAT mode the dispatcher does NOT export GH_TOKEN
+  # (it relies on `gh auth login`), so an unguarded `$GH_TOKEN` would trip
+  # `set -u`. Empty here just means "use whatever ambient auth gh already has".
+  local lookup_token="${GH_TOKEN:-}"
+
+  # App mode with creds present → mint a target-repo-scoped read token, cached.
+  if [ "${GH_AUTH_MODE:-token}" = "app" ] \
+     && [ -n "${DISPATCHER_APP_ID:-}" ] && [ -n "${DISPATCHER_APP_PEM:-}" ]; then
+    if [ -z "${_DEP_TOKEN_CACHE[$owner_repo]+set}" ]; then
+      # First sight of this dep repo this tick — mint once. get_gh_app_scoped_token
+      # lives in gh-app-token.sh, sourced by dispatcher-tick.sh in app mode; source
+      # it lazily (LIB_DIR pattern) so a standalone-sourced lib-dispatch.sh (unit
+      # tests, ad-hoc) still resolves it. Guard on the function existing.
+      if ! declare -F get_gh_app_scoped_token >/dev/null 2>&1; then
+        local _self _lib_dir
+        _self="${BASH_SOURCE[0]:-$0}"
+        _lib_dir="$(cd "$(dirname "$(readlink -f "$_self")")" && pwd 2>/dev/null)" || _lib_dir=""
+        [ -n "$_lib_dir" ] && [ -r "${_lib_dir}/gh-app-token.sh" ] \
+          && source "${_lib_dir}/gh-app-token.sh"
+      fi
+      local _minted=""
+      if declare -F get_gh_app_scoped_token >/dev/null 2>&1; then
+        _minted=$(get_gh_app_scoped_token \
+          "$DISPATCHER_APP_ID" "$DISPATCHER_APP_PEM" \
+          "${owner_repo%/*}" "${owner_repo#*/}" "$DEP_LOOKUP_PERMISSIONS" 2>/dev/null || true)
+      fi
+      # Negative-cache an empty mint so the doomed repo is not re-minted per ref.
+      _DEP_TOKEN_CACHE[$owner_repo]="$_minted"
+    fi
+    # Use the cached scoped token when non-empty; otherwise fall back to ambient.
+    [ -n "${_DEP_TOKEN_CACHE[$owner_repo]}" ] && lookup_token="${_DEP_TOKEN_CACHE[$owner_repo]}"
+  fi
+
+  # `GH_TOKEN="$lookup_token"` prefix: in app mode this is the target-repo scoped
+  # token; in PAT mode lookup_token is empty, and `gh` treats an empty-string
+  # GH_TOKEN as not-present (falling back to the host `gh auth login` creds),
+  # which is byte-identical to the pre-#269 unprefixed `gh issue view` call.
+  local _state
+  _state=$(GH_TOKEN="$lookup_token" gh issue view "$num" --repo "$owner_repo" --json state -q '.state' 2>/dev/null || true)
+  printf -v "$out_var" '%s' "$_state"
+}
+
+# _dep_block_comment <issue_num> <owner/repo> <num> — [INV-83] block visibility.
+#
+# Posts a once-per-issue-per-ref comment when a cross-repo dependency stays
+# unresolvable, so a persistent block is not invisible behind a stderr WARN.
+# Dedup is keyed on a hidden `<!-- dep-block:<repo>#<num> -->` marker scanned
+# from existing comments (fail-closed: a transient gh error yields empty output,
+# grep returns non-zero, and we skip the post). Best-effort — never changes the
+# caller's fail-safe rc.
+_dep_block_comment() {
+  local issue_num="$1" owner_repo="$2" num="$3"
+  local marker="dep-block:${owner_repo}#${num}"
+  if gh issue view "$issue_num" --repo "$REPO" --json comments \
+      -q "[.comments[].body | select(contains(\"${marker}\"))] | length" \
+      2>/dev/null | grep -q '^0$'; then
+    gh issue comment "$issue_num" --repo "$REPO" \
+      --body "Dependency \`${owner_repo}#${num}\` could not be resolved — the App may not be installed on \`${owner_repo}\` (or the issue is private/deleted). This issue stays blocked until the dependency is reachable and CLOSED/MERGED. <!-- ${marker} -->" \
+      2>/dev/null || true
+  fi
+}
+
 # Returns 0 (resolved) if every issue referenced in the issue body's
 # `## Dependencies` section is in a resolved state (CLOSED or MERGED).
 # Returns 1 (blocked) on the first unresolved dependency. Returns 0 if no
@@ -292,12 +422,21 @@ run_hygiene_pass() {
 #     URL fragments (`https://github.com/.../issues/123`) and inline
 #     punctuation aren't misparsed.
 #
+# Token routing ([INV-83], #269): the cross-repo `owner/repo#N` arm resolves
+# state via resolve_dep_state, which (in app mode) mints a token scoped to the
+# TARGET repo — the ambient $GH_TOKEN is scoped to the DISPATCHING repo only and
+# 404s on any other repo, the root cause of #269. The same-repo `#N` arm keeps
+# the ambient $GH_TOKEN unchanged.
+#
 # Closes #61 (MERGED PRs report `state: "MERGED"`, not `"CLOSED"`),
 # #73 (replace GNU-only `grep -oP '#\K[0-9]+'` with portable extraction),
-# and #157 (cross-repo refs + list-only scope).
+# #157 (cross-repo refs + list-only scope), and #269 (cross-repo scoped token).
 check_deps_resolved() {
   local issue_num="$1"
   local body section line state dep_repo dep_num matched
+  # [INV-83] Start each issue evaluation with a clean per-tick token cache so a
+  # dep-lookup token can never leak across ticks (reused-shell) or into PAT mode.
+  _reset_dep_token_cache
   body=$(gh issue view "$issue_num" --repo "$REPO" --json body -q '.body')
   section=$(printf '%s\n' "$body" | sed -n '/^## Dependencies/,/^## /p')
 
@@ -314,12 +453,21 @@ check_deps_resolved() {
       matched="${BASH_REMATCH[0]}"
       dep_repo="${BASH_REMATCH[2]}"
       dep_num="${BASH_REMATCH[3]}"
-      state=$(gh issue view "$dep_num" --repo "$dep_repo" --json state -q '.state' 2>/dev/null || true)
-      # Empty state means the lookup failed (404, network error, private
-      # repo). [INV-39]: fail-safe blocks dispatch, but the failure must
-      # be observable — otherwise we silently recreate the #157 bug class.
+      # [INV-83] Resolve against the TARGET repo with a target-repo-scoped token
+      # (app mode); the ambient $GH_TOKEN is locked to the dispatching repo (#269).
+      # Out-var (not `state=$(...)`) so the per-tick mint cache, mutated inside
+      # resolve_dep_state, survives across refs (a subshell capture would reset it).
+      state=""
+      resolve_dep_state "$dep_repo" "$dep_num" state
+      # Empty state means the lookup failed (404, network error, private repo, or
+      # — the #269 case — the App is not installed on the dep repo). [INV-39]:
+      # fail-safe blocks dispatch, but the failure must be observable. The
+      # sharpened WARNING names the scope/installation cause FIRST ([INV-83]); a
+      # once-per-ref comment ([INV-83] T5) surfaces a persistent block on the
+      # issue so it is not invisible behind a stderr WARN.
       if [ -z "$state" ]; then
-        echo "[check_deps_resolved] WARNING: lookup failed for ${dep_repo}#${dep_num} (issue ${issue_num}); blocking" >&2
+        echo "[check_deps_resolved] WARNING: cross-repo lookup failed for ${dep_repo}#${dep_num} (issue ${issue_num}) — the App may not be installed on ${dep_repo} (or the issue is private/deleted); blocking" >&2
+        _dep_block_comment "$issue_num" "$dep_repo" "$dep_num"
         return 1
       fi
       if [ "$state" != "CLOSED" ] && [ "$state" != "MERGED" ]; then
@@ -327,7 +475,8 @@ check_deps_resolved() {
       fi
       line="${line/"$matched"/ }"
     done
-    # Stage 2b: bare `#N` on the residue. Same-repo lookup against $REPO.
+    # Stage 2b: bare `#N` on the residue. Same-repo lookup against $REPO with the
+    # ambient $GH_TOKEN (UNCHANGED — the dispatcher token already covers $REPO).
     while [[ "$line" =~ (^|[[:space:]\(])#([0-9]+) ]]; do
       matched="${BASH_REMATCH[0]}"
       dep_num="${BASH_REMATCH[2]}"
