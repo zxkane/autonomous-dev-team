@@ -217,6 +217,17 @@ dispatch() {
 # Steps 2/3/4 of this tick, so Step 5 can skip them ([INV-09]).
 JUST_DISPATCHED=()
 
+# [INV-83] Tick boundary for the cross-repo dependency lookup-token cache. The
+# cache is TICK-scoped (AC #2): Step 2's check_deps_resolved reuses a single
+# per-`owner/repo` minted token across ALL new issues in this tick, so two issues
+# depending on the same external repo mint only ONCE. Clearing here (once, before
+# the issue loop) starts each tick clean while preserving the within-tick dedup —
+# a per-issue reset would defeat it (#269 review [P1]). Guarded so a future
+# lib-dispatch refactor that drops the helper can't abort the tick.
+if declare -F _reset_dep_token_cache >/dev/null 2>&1; then
+  _reset_dep_token_cache
+fi
+
 # ---------------------------------------------------------------------------
 # Step 0: label hygiene pass ([INV-25], issue #115 Bug B)
 # ---------------------------------------------------------------------------
