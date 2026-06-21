@@ -108,37 +108,23 @@ print(val)
 " "$field" "$context"
 }
 
-# Get a GitHub App installation token for a specific repository.
-# Args: $1=app_id, $2=pem_file, $3=repo_owner, $4=repo_name,
-#       $5=permissions_json (OPTIONAL, [INV-79]) — a JSON object scoping the
-#          minted token to a SUBSET of the installation's granted permissions,
-#          e.g. '{"contents":"write","issues":"write","pull_requests":"read"}'.
-#          When omitted/empty the token carries the installation's FULL grant
-#          (the existing wrapper-token behavior — unchanged). The requested
-#          permissions MUST be a subset of the installation's grant or GitHub
-#          rejects the exchange with HTTP 422.
-# Outputs the token string to stdout.
-get_gh_app_token() {
+# Mint a GitHub App installation token for a specific repository from a
+# pre-built access-token request body (#269 T1, structural extraction).
+#
+# This is the shared JWT-gen → installation-lookup → token-exchange core that
+# get_gh_app_token reuses. The ONLY variant between callers is the request body,
+# so the body is the 5th arg here; everything else is fixed. Splitting this out
+# keeps get_gh_app_token byte-identical while letting other call sites (the
+# per-dep-repo scoped lookup token in #269) reuse the exact same exchange.
+#
+# Args: $1=app_id, $2=pem_file, $3=repo_owner, $4=repo_name, $5=request_body
+# Outputs the token string to stdout; returns non-zero on any failure.
+_app_install_token() {
   local app_id="$1"
   local pem_file="$2"
   local repo_owner="$3"
   local repo_name="$4"
-  local permissions_json="${5:-}"
-
-  # Validate repo_owner and repo_name contain only safe characters
-  if ! [[ "$repo_owner" =~ ^[a-zA-Z0-9_-]+$ ]]; then
-    echo "ERROR: repo_owner contains invalid characters: '$repo_owner'" >&2
-    return 1
-  fi
-  if ! [[ "$repo_name" =~ ^[a-zA-Z0-9_.-]+$ ]]; then
-    echo "ERROR: repo_name contains invalid characters: '$repo_name'" >&2
-    return 1
-  fi
-
-  command -v curl >/dev/null 2>&1 || {
-    echo "ERROR: Required command 'curl' not found in PATH" >&2
-    return 1
-  }
+  local request_body="$5"
 
   local jwt
   jwt=$(_generate_jwt "$app_id" "$pem_file") || return 1
@@ -163,17 +149,6 @@ get_gh_app_token() {
   local installation_id
   installation_id=$(echo "$install_response" | _parse_json_field "id" "installation lookup") || {
     echo "ERROR: Failed to parse installation ID. Response: $install_response" >&2
-    return 1
-  }
-
-  # Build the access-token request body. Always scope to the single repo; when a
-  # permissions object is provided ([INV-79] scoped agent token), embed it so the
-  # minted token carries ONLY that subset (e.g. pull_requests:read → cannot
-  # approve/merge). _build_access_token_body keeps the JSON well-formed for both
-  # the full-grant (no permissions) and scoped cases.
-  local request_body
-  request_body=$(_build_access_token_body "$repo_name" "$permissions_json") || {
-    echo "ERROR: Failed to build access-token request body" >&2
     return 1
   }
 
@@ -207,6 +182,52 @@ get_gh_app_token() {
   fi
 
   echo "$token"
+}
+
+# Get a GitHub App installation token for a specific repository.
+# Args: $1=app_id, $2=pem_file, $3=repo_owner, $4=repo_name,
+#       $5=permissions_json (OPTIONAL, [INV-79]) — a JSON object scoping the
+#          minted token to a SUBSET of the installation's granted permissions,
+#          e.g. '{"contents":"write","issues":"write","pull_requests":"read"}'.
+#          When omitted/empty the token carries the installation's FULL grant
+#          (the existing wrapper-token behavior — unchanged). The requested
+#          permissions MUST be a subset of the installation's grant or GitHub
+#          rejects the exchange with HTTP 422.
+# Outputs the token string to stdout.
+get_gh_app_token() {
+  local app_id="$1"
+  local pem_file="$2"
+  local repo_owner="$3"
+  local repo_name="$4"
+  local permissions_json="${5:-}"
+
+  # Validate repo_owner and repo_name contain only safe characters
+  if ! [[ "$repo_owner" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+    echo "ERROR: repo_owner contains invalid characters: '$repo_owner'" >&2
+    return 1
+  fi
+  if ! [[ "$repo_name" =~ ^[a-zA-Z0-9_.-]+$ ]]; then
+    echo "ERROR: repo_name contains invalid characters: '$repo_name'" >&2
+    return 1
+  fi
+
+  command -v curl >/dev/null 2>&1 || {
+    echo "ERROR: Required command 'curl' not found in PATH" >&2
+    return 1
+  }
+
+  # Build the access-token request body. Always scope to the single repo; when a
+  # permissions object is provided ([INV-79] scoped agent token), embed it so the
+  # minted token carries ONLY that subset (e.g. pull_requests:read → cannot
+  # approve/merge). _build_access_token_body keeps the JSON well-formed for both
+  # the full-grant (no permissions) and scoped cases.
+  local request_body
+  request_body=$(_build_access_token_body "$repo_name" "$permissions_json") || {
+    echo "ERROR: Failed to build access-token request body" >&2
+    return 1
+  }
+
+  _app_install_token "$app_id" "$pem_file" "$repo_owner" "$repo_name" "$request_body"
 }
 
 # Build the JSON body for the access-token exchange ([INV-79]).
