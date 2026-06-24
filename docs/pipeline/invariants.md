@@ -3767,10 +3767,11 @@ fan-out join is a bounded OBSERVE loop, not a blocking `wait`. It breaks on EITH
 inherits each agent's `_run_with_timeout` 124/137 cap so INV-48's timeout-veto rc
 is preserved) OR (b) **every agent slot has a resolved first verdict**
 (`_all_first_verdicts_resolved` — the early exit; INV-84). A slot is resolved when
-its artifact's first-land snapshot exists OR (for a comment-only agent that never
-writes an artifact file) its verdict comment is observed via the comment poll. A
-landed/posted verdict is therefore not held hostage by an agent that hangs in
-`post-verdict.sh` / teardown until the wall-clock cap.
+its artifact's first-land snapshot classifies **valid** (`_classify_verdict_artifact`
+with the slot identity) OR (for a comment-only agent that never writes an artifact
+file) its verdict comment is observed via the comment poll. A landed/posted verdict
+is therefore not held hostage by an agent that hangs in `post-verdict.sh` /
+teardown until the wall-clock cap.
 
 > **Superseded sub-rule (#233 → #271):** round-4 gated this early exit on
 > `_all_artifacts_landed` — an artifact-FILE-existence check over every slot. That
@@ -3778,21 +3779,24 @@ landed/posted verdict is therefore not held hostage by an agent that hangs in
 > that never writes a file), letting a single lingering PID pin the loop to the 6h
 > ceiling (#271). INV-84 replaces it with the per-slot first-verdict-resolved gate
 > above. The INV-48 property is unchanged: a slot we early-exit past is ALREADY
-> resolved (its verdict wins over its rc, INV-40); any unresolved slot (no
-> artifact, no comment) keeps the gate false, so the loop keeps waiting on PIDs and
-> that agent still gets its real 124/137 rc. `_all_artifacts_landed ⟹
-> _all_first_verdicts_resolved`, so an all-artifact-writer panel is byte-for-byte
-> unchanged.
+> resolved with a VALID verdict (its verdict wins over its rc, INV-40); any
+> unresolved slot — no VALID artifact (a `malformed` snapshot does NOT count), no
+> comment — keeps the gate false, so the loop keeps waiting on PIDs and that agent
+> still gets its real 124/137 rc. `_all_artifacts_landed ⟹
+> _all_first_verdicts_resolved` therefore holds only for VALID artifacts; an
+> all-valid-artifact panel is byte-for-byte unchanged.
 
 A still-running
 agent the loop early-exits past is group-killed by `_reap_fanout_processes` after
 resolution (its PGID sidecar is written at spawn by `_run_with_timeout`).
 (Edge case, consistent with Clause V1: an agent that writes a MALFORMED artifact
-and then hangs may be early-exited past — `_all_artifacts_landed` checks landing,
-not validity — so it resolves `unavailable`/`malformed-output` rather than the
-`timed-out` veto a missing-artifact hang would get. This is the documented
-"malformed = treated absent → dropped" semantics, not a weakening of INV-48: the
-agent DID deliver output, it was just unparseable.)
+and then hangs is NOT early-exited past — INV-84's gate classifies the snapshot and
+a `malformed` one is treated absent, so the loop keeps waiting on its PID, and the
+agent resolves `unavailable`/`malformed-output` on a clean exit or the `timed-out`
+veto on a 124/137 cap, exactly like a no-artifact hang. The pre-#271-review code
+gated on file EXISTENCE not validity and would have reaped it early — see
+[INV-84](#inv-84-the-fan-out-observe-loop-early-exit-fires-once-every-agent-slot-has-a-resolved-first-verdict-artifact-frozen-or-comment-observed--not-when-every-artifact-file-exists)
+"Malformed artifact ⇒ NOT resolved".)
 
 - **Path**: `${XDG_STATE_HOME:-$HOME/.local/state}/autonomous-<project>/runs/<run-id>/verdict-<agent>.json`,
   where `<run-id>` is the per-agent minted session UUID (the `Review Session:`
@@ -4276,24 +4280,43 @@ consumer project's review runs in one day; both needed a manual kill + label nud
 fired when EVERY artifact landed, so no agent ever flowed to the rc-based terminal
 sweep on that path and a still-running agent's launch rc (124/137) was never
 consulted. The replacement keeps that property: a slot the loop early-exits past
-is ALREADY resolved (its verdict wins over its rc —
+is ALREADY resolved with a **valid** verdict (a valid artifact OR a posted comment;
+its verdict wins over its rc —
 [INV-40](#inv-40-multi-agent-review-aggregates-under-unanimous-pass-each-agents-verdict-is-attributed-by-a-review-agent-discriminator)),
-and any slot that is NOT resolved (no artifact, no comment) makes
+and any slot that is NOT resolved (no valid artifact, no comment) makes
 `_all_first_verdicts_resolved` false, so the loop keeps waiting on PIDs (path a)
 until that agent's CLI exits with its real 124/137 cap — preserving
 [INV-48](#inv-48-per-side-review-wall-clock-timeout-agent_review_timeout-1h-default-with-browser-e2e-exclusion-and-timeout-veto)'s
-`timed-out` veto for it. Because `_all_artifacts_landed ⟹
-_all_first_verdicts_resolved` (a landed artifact freezes a snapshot ⇒ that slot is
-resolved), the **all-artifact-writer panel keeps byte-for-byte its prior
-behavior** (early-exit on the same round, no extra API calls).
+`timed-out` veto for it. An all-**valid**-artifact panel still early-exits on the
+same round with zero comment polls (a valid snapshot resolves its slot before the
+comment branch runs).
 
-**Malformed edge case (unchanged INV-78 semantics)**: a malformed artifact still
-freezes a `.landed` snapshot (`_freeze_landed_artifact` copies on first land
-regardless of validity), so a malformed-then-hang agent counts as "resolved" for
-the early exit and is reaped — resolving `unavailable`/`malformed-output` rather
-than the `timed-out` veto. This is exactly INV-78's documented "malformed = the
-agent DID deliver output → treated absent → dropped" edge case (Clause V1), not a
-weakening of INV-48.
+**Malformed artifact ⇒ NOT resolved, and its comment is NOT consulted (#271 review
+[P1] ×2)**: `_observe_agent_resolved` classifies the landed snapshot
+(`_classify_verdict_artifact` with the slot's identity) and resolves the slot ONLY
+on `valid`. A `malformed` snapshot returns NOT-resolved **and does NOT fall through
+to the comment branch** — it short-circuits exactly like the POST-LOOP resolution,
+which refuses to let a malformed agent's comment override its artifact (a malformed
+artifact means the agent's machine output is untrustworthy — INV-78 Clause V1). This
+double rule is load-bearing for INV-48: a malformed artifact is "treated absent FOR
+THE VOTE", and an absent verdict is exactly what must keep the loop waiting on the
+PID. Were a malformed-AND-still-running agent treated as resolved — whether via its
+snapshot OR via a comment it happened to also post — the early exit would reap it
+**before its rc sidecar landed**, silently converting an rc-124/137 `timed-out`
+deciding-FAIL veto into a dropped `unavailable` vote (the terminal sweep keys on the
+durable `artifact-malformed` source) — letting a passing sibling approve the PR. If
+the observe gate consulted the comment for a malformed slot, a malformed agent that
+ALSO self-posted would re-open that dropped-veto bug through the comment door; so the
+gate skips the comment for `malformed`, matching the post-loop Clause V1 skip. (A
+malformed agent that has ALREADY exited is reaped via break-path (a) "all PIDs
+exited", where its rc sidecar IS present — so the `valid`-only gate changes only the
+still-running case, which is precisely the one that must wait.) Consequently
+`_all_artifacts_landed ⟹ _all_first_verdicts_resolved` holds **only for valid
+artifacts**: a panel of all-valid artifacts is byte-for-byte the prior behavior; a
+panel containing a malformed-AND-still-running artifact now correctly WAITS on that
+agent's PID rather than reaping it early. Once the agent exits and resolves
+`unavailable`/`malformed-output` (or `timed-out` on a 124/137 cap), that is the
+documented INV-78 Clause V1 outcome.
 
 **Producer**: `lib-review-poll.sh::_observe_agent_resolved` /
 `::_all_first_verdicts_resolved` (the per-slot + fleet resolved checks).

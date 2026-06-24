@@ -19,7 +19,15 @@ sets `AGENT_NAMES` / `AGENT_SESSION_IDS` / `AGENT_ARTIFACT_SNAPSHOTS` arrays.
 | TC-OBS-271-06 | MIXED panel: artifact slot frozen + comment slot has NO comment | `_all_first_verdicts_resolved` rc 1 (does not early-exit while a comment agent is still pending — regression AC#3) |
 | TC-OBS-271-07 | all-artifact-writer panel: every snapshot present | `_all_first_verdicts_resolved` rc 0 (parity with `_all_artifacts_landed`) |
 | TC-OBS-271-08 | empty fleet (no agents) | `_all_first_verdicts_resolved` rc 1 (cannot claim all-resolved with zero slots) |
-| TC-OBS-271-09 | `_all_artifacts_landed` true ⟹ `_all_first_verdicts_resolved` true (generalization holds for the all-writer case) | both rc 0 |
+| TC-OBS-271-09 | `_all_artifacts_landed` true ⟹ `_all_first_verdicts_resolved` true (generalization holds for the all-**valid**-writer case) | both rc 0 |
+| TC-OBS-271-13a | **malformed** artifact snapshot (file exists, schema-fail) | `_observe_agent_resolved` rc 1 — NOT resolved (#271 review [P1]) |
+| TC-OBS-271-13b | the same malformed snapshot DOES exist | `_all_artifacts_landed` rc 0 — proving existence ≠ resolved (the gate divergence is intentional) |
+| TC-OBS-271-13c | MIXED panel: malformed artifact (still-running) + comment sibling resolved | `_all_first_verdicts_resolved` rc 1 — loop keeps waiting on the malformed agent's PID so its real 124/137 rc lands (INV-48 `timed-out` veto preserved, NOT a dropped `unavailable`) |
+
+> Artifacts in the pure-lib tests are provisioned **identity-matching** (`runId` =
+> slot session-id, `agent` = slot name) via `obs_write_artifact`, because
+> `_observe_agent_resolved` now runs the real `_classify_verdict_artifact` identity
+> check — a bare golden fixture would (correctly) classify `malformed`.
 
 ## Integration: the observe loop early-exits a mixed panel with a lingering PID
 

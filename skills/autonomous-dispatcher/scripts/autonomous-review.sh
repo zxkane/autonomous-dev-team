@@ -1786,12 +1786,14 @@ declare -a AGENT_GENERIC_LOGS=()
 declare -a AGENT_ARTIFACT_PATHS=()
 # INV-78 (#233 review round-5, [P1] #2): the per-agent FROZEN snapshot path —
 # `<artifact>.landed`. The observe loop copies the artifact's bytes here the FIRST
-# time it observes the final file land, and the resolution loop validates THIS
-# frozen copy (not a re-read of the live path). This closes the gap between the
-# `_all_artifacts_landed` early-exit signal and the later `_classify_verdict_artifact`
-# read: a duplicate `mv` that lands in that window replaces the live file but NOT
-# the frozen snapshot, so the first-landed bytes win (Clause VA5) and the rewrite
-# is logged as a duplicate. Parallel-indexed to AGENT_ARTIFACT_PATHS.
+# time it observes the final file land. The snapshot is consumed by BOTH the observe
+# gate (`_observe_agent_resolved` classifies it for the INV-84 early-exit signal,
+# #271) and the post-loop resolution (validates THIS frozen copy, not a re-read of
+# the live path). This closes the gap between the early-exit signal and the later
+# `_classify_verdict_artifact` read: a duplicate `mv` that lands in that window
+# replaces the live file but NOT the frozen snapshot, so the first-landed bytes win
+# (Clause VA5) and the rewrite is logged as a duplicate. Parallel-indexed to
+# AGENT_ARTIFACT_PATHS.
 declare -a AGENT_ARTIFACT_SNAPSHOTS=()
 # PIDs of the backgrounded per-agent subshells. We MUST `wait` these specific
 # PIDs — never a bare `wait`. A bare `wait` blocks on ALL background jobs of

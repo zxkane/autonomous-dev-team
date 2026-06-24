@@ -367,18 +367,20 @@ told the agent (in the prompt) to write its verdict JSON there atomically
 breaks as soon as EITHER all `_fanout_pids` exited (`kill -0`) OR **every agent
 slot has a resolved first verdict** (`_all_first_verdicts_resolved` —
 [INV-84](invariants.md#inv-84-the-fan-out-observe-loop-early-exit-fires-once-every-agent-slot-has-a-resolved-first-verdict-artifact-frozen-or-comment-observed--not-when-every-artifact-file-exists), #271:
-artifact first-land snapshot present OR, for a comment-only agent, its verdict
-comment observed via the poll) — so a verdict that already landed/posted is not
-held hostage by an agent that hangs in `post-verdict.sh`/teardown until the
+artifact first-land snapshot classifies **valid** OR, for a comment-only agent, its
+verdict comment observed via the poll) — so a verdict that already landed/posted is
+not held hostage by an agent that hangs in `post-verdict.sh`/teardown until the
 wall-clock cap. This **replaces** the pre-#271 file-only `_all_artifacts_landed`
 gate, which was dead on a MIXED panel (a comment-only agent never writes a file,
 so the all-files-exist check never held → a lingering PID pinned the loop to the
 6h ceiling). The INV-48 property is unchanged: a slot the loop passes is ALREADY
-resolved (its verdict wins over its rc, INV-40), and any unresolved agent (no
-artifact, no comment) keeps the gate false so the loop keeps waiting on PIDs and
-that agent still gets its real 124/137 launch rc for the timeout-veto; a
-still-running agent the loop passes is group-killed by the reaper after
-resolution. The loop also **freezes the first-landed bytes** each round
+resolved with a VALID verdict (its verdict wins over its rc, INV-40), and any
+unresolved agent — no VALID artifact (a `malformed` snapshot does **not** count,
+#271 review [P1]) and no comment — keeps the gate false so the loop keeps waiting
+on PIDs and that agent still gets its real 124/137 launch rc for the timeout-veto
+(otherwise a malformed-AND-still-running reviewer would be reaped before its rc
+landed → dropped `unavailable` instead of the `timed-out` veto); a still-running
+agent the loop passes is group-killed by the reaper after resolution. The loop also **freezes the first-landed bytes** each round
 (`_freeze_landed_artifact` copies `<path>` → `<path>.landed` the first time it
 lands, round-5 [P1] #2): the resolution pass validates the frozen snapshot, so a
 duplicate `mv` that lands in the gap between the land-signal and resolution

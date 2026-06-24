@@ -649,8 +649,11 @@ assert_eq "TC-VERDICT-ARTIFACT-031b fallback parity pass+pass → pass" "pass" "
 # ---------------------------------------------------------------------------
 
 # A dedicated comment-fetch stub with a CALL COUNTER so we can pin that the
-# artifact branch is checked FIRST (no API call when the snapshot exists) and that
-# an all-artifact-writer panel makes ZERO comment fetches.
+# artifact branch is checked FIRST (no API call when a VALID snapshot exists) and
+# that an all-VALID-artifact panel makes ZERO comment fetches. NOTE: these tests
+# use the REAL _classify_verdict_artifact (lib-review-artifact.sh was sourced in
+# Part 3), so an artifact snapshot only counts as resolved when it is schema-valid
+# AND its identity (runId=session-id, agent=name) matches the slot (#271 [P1]).
 OBS_FETCH_LOG="$TMP/obs-comment-fetches.log"
 declare -A OBS_COMMENT_BODY=()
 _fetch_agent_verdict_body() {
@@ -660,7 +663,7 @@ _fetch_agent_verdict_body() {
 obs_fetch_count() { [[ -f "$OBS_FETCH_LOG" ]] && wc -l < "$OBS_FETCH_LOG" | tr -d ' ' || echo 0; }
 
 # Build a fixed panel: index 0 = artifact-writer "claude", index 1 = comment-only
-# "agy". The snapshot path mirrors the wrapper's `<artifact>.landed` convention.
+# "agy". The snapshot path mirrors the wrapper's `<path>.landed` convention.
 OBS_DIR="$TMP/obs"
 mkdir -p "$OBS_DIR"
 obs_setup() {
@@ -671,13 +674,30 @@ obs_setup() {
   AGENT_ARTIFACT_SNAPSHOTS=("$OBS_DIR/verdict-claude.json.landed" "$OBS_DIR/verdict-agy.json.landed")
   rm -f "${AGENT_ARTIFACT_SNAPSHOTS[@]}"
 }
+# obs_write_artifact <idx> <PASS|FAIL> — write an IDENTITY-MATCHING valid artifact
+# snapshot for slot <idx> by templating the golden fixture with this slot's
+# session-id (runId) + agent name. Without the identity match the wrapper's
+# _classify_verdict_artifact would (correctly) reject it as malformed.
+obs_write_artifact() {
+  local _idx="$1" _verdict="$2" _fix
+  [[ "$_verdict" == "FAIL" ]] && _fix="$EXAMPLES/verdict-artifact.golden.fail.json" \
+                              || _fix="$EXAMPLES/verdict-artifact.golden.pass.json"
+  jq --arg r "${AGENT_SESSION_IDS[$_idx]}" --arg a "${AGENT_NAMES[$_idx]}" \
+    '.runId=$r | .agent=$a' "$_fix" > "${AGENT_ARTIFACT_SNAPSHOTS[$_idx]}"
+}
+# obs_write_malformed_artifact <idx> — write a snapshot that EXISTS but fails schema
+# validation (no schema_version), to model a malformed-output agent (#271 [P1]).
+obs_write_malformed_artifact() {
+  local _idx="$1"
+  printf '{"verdict":"PASS"}\n' > "${AGENT_ARTIFACT_SNAPSHOTS[$_idx]}"
+}
 
-# TC-OBS-271-01: artifact slot whose .landed snapshot exists → resolved (rc 0),
-# and the comment fetch is NOT called for it.
+# TC-OBS-271-01: artifact slot whose VALID identity-matching snapshot exists →
+# resolved (rc 0), and the comment fetch is NOT called for it.
 obs_setup
-cp "$EXAMPLES/verdict-artifact.golden.pass.json" "${AGENT_ARTIFACT_SNAPSHOTS[0]}"
+obs_write_artifact 0 PASS
 _observe_agent_resolved 0 && _r=0 || _r=1
-assert_eq "TC-OBS-271-01 artifact slot with frozen snapshot → resolved (rc 0)" "0" "$_r"
+assert_eq "TC-OBS-271-01 artifact slot with valid frozen snapshot → resolved (rc 0)" "0" "$_r"
 assert_eq "TC-OBS-271-04 artifact branch checked first → NO comment fetch for it" "0" "$(obs_fetch_count)"
 
 # TC-OBS-271-02: comment-only slot, snapshot absent, comment present → resolved.
@@ -691,54 +711,94 @@ obs_setup
 _observe_agent_resolved 1 && _r=0 || _r=1
 assert_eq "TC-OBS-271-03 comment-only slot, no artifact + no comment → unresolved (rc 1)" "1" "$_r"
 
-# TC-OBS-271-05: MIXED panel — artifact slot frozen + comment slot has a comment →
+# TC-OBS-271-05: MIXED panel — valid artifact slot + comment slot has a comment →
 # every slot resolved → early-exit gate true.
 obs_setup
-cp "$EXAMPLES/verdict-artifact.golden.pass.json" "${AGENT_ARTIFACT_SNAPSHOTS[0]}"
+obs_write_artifact 0 PASS
 OBS_COMMENT_BODY["agy"]="$PASS_BODY"
 _all_first_verdicts_resolved && _r=0 || _r=1
-assert_eq "TC-OBS-271-05 mixed panel: artifact frozen + comment observed → all resolved (rc 0)" "0" "$_r"
+assert_eq "TC-OBS-271-05 mixed panel: valid artifact + comment observed → all resolved (rc 0)" "0" "$_r"
 
-# TC-OBS-271-06 (regression AC#3): MIXED panel — artifact slot frozen but the
+# TC-OBS-271-06 (regression AC#3): MIXED panel — valid artifact slot but the
 # comment-only slot has NO comment yet → gate FALSE (must NOT early-exit while a
 # comment agent is still pending; no premature resolution).
 obs_setup
-cp "$EXAMPLES/verdict-artifact.golden.pass.json" "${AGENT_ARTIFACT_SNAPSHOTS[0]}"
+obs_write_artifact 0 PASS
 _all_first_verdicts_resolved && _r=0 || _r=1
-assert_eq "TC-OBS-271-06 mixed panel: artifact frozen but comment agent pending → NOT all resolved (rc 1)" "1" "$_r"
+assert_eq "TC-OBS-271-06 mixed panel: valid artifact but comment agent pending → NOT all resolved (rc 1)" "1" "$_r"
 
-# TC-OBS-271-07: all-artifact-writer panel — every snapshot present → all resolved,
-# and ZERO comment fetches (parity with _all_artifacts_landed; zero-comment-poll AC).
+# TC-OBS-271-07: all-artifact-writer panel — every slot a VALID artifact → all
+# resolved, and ZERO comment fetches (zero-comment-poll AC preserved).
 obs_setup
-cp "$EXAMPLES/verdict-artifact.golden.pass.json" "${AGENT_ARTIFACT_SNAPSHOTS[0]}"
-cp "$EXAMPLES/verdict-artifact.golden.fail.json" "${AGENT_ARTIFACT_SNAPSHOTS[1]}"
+obs_write_artifact 0 PASS
+obs_write_artifact 1 FAIL
 _all_first_verdicts_resolved && _r=0 || _r=1
-assert_eq "TC-OBS-271-07 all-artifact-writer panel → all resolved (rc 0)" "0" "$_r"
-assert_eq "TC-OBS-271-07b all-artifact-writer panel makes ZERO comment fetches" "0" "$(obs_fetch_count)"
+assert_eq "TC-OBS-271-07 all-valid-artifact panel → all resolved (rc 0)" "0" "$_r"
+assert_eq "TC-OBS-271-07b all-valid-artifact panel makes ZERO comment fetches" "0" "$(obs_fetch_count)"
 
 # TC-OBS-271-08: empty fleet → rc 1 (cannot claim all-resolved with zero slots).
 AGENT_NAMES=(); AGENT_SESSION_IDS=(); AGENT_ARTIFACT_SNAPSHOTS=()
 _all_first_verdicts_resolved && _r=0 || _r=1
 assert_eq "TC-OBS-271-08 empty fleet → not all resolved (rc 1)" "1" "$_r"
 
-# TC-OBS-271-09: generalization — _all_artifacts_landed true ⟹
-# _all_first_verdicts_resolved true (the all-writer case the old gate covered).
+# TC-OBS-271-09: an all-VALID-artifact panel that _all_artifacts_landed would also
+# accept is likewise resolved by the first-verdict gate (the all-writer case the
+# old gate covered — generalization holds for VALID artifacts).
 obs_setup
-cp "$EXAMPLES/verdict-artifact.golden.pass.json" "${AGENT_ARTIFACT_SNAPSHOTS[0]}"
-cp "$EXAMPLES/verdict-artifact.golden.pass.json" "${AGENT_ARTIFACT_SNAPSHOTS[1]}"
+obs_write_artifact 0 PASS
+obs_write_artifact 1 PASS
 _all_artifacts_landed "${AGENT_ARTIFACT_SNAPSHOTS[@]}" && _land=0 || _land=1
 _all_first_verdicts_resolved && _res=0 || _res=1
-assert_eq "TC-OBS-271-09a all snapshots present → _all_artifacts_landed true" "0" "$_land"
-assert_eq "TC-OBS-271-09b ⟹ _all_first_verdicts_resolved also true (generalization)" "0" "$_res"
+assert_eq "TC-OBS-271-09a all valid snapshots present → _all_artifacts_landed true" "0" "$_land"
+assert_eq "TC-OBS-271-09b ⟹ _all_first_verdicts_resolved also true (valid-artifact generalization)" "0" "$_res"
+
+# TC-OBS-271-13 (#271 review [P1]): a MALFORMED artifact snapshot must NOT count as
+# resolved — even though the FILE exists, _all_artifacts_landed would say "landed".
+# This is the regression the reviewer flagged: a malformed-AND-still-running agent
+# must keep the loop waiting on its PID so its real 124/137 rc lands (INV-48 veto),
+# NOT be reaped early and dropped `unavailable`.
+obs_setup
+obs_write_malformed_artifact 0
+_observe_agent_resolved 0 && _r=0 || _r=1
+assert_eq "TC-OBS-271-13a malformed artifact snapshot → slot NOT resolved (rc 1)" "1" "$_r"
+# _all_artifacts_landed (file-existence) WOULD say landed — proving the divergence
+# is intentional: existence != resolved for a malformed artifact.
+_all_artifacts_landed "${AGENT_ARTIFACT_SNAPSHOTS[0]}" && _land=0 || _land=1
+assert_eq "TC-OBS-271-13b the malformed snapshot DOES exist (_all_artifacts_landed true) — so the gate divergence is real" "0" "$_land"
+# Mixed panel: malformed artifact (still-running) + comment sibling resolved → the
+# fleet gate stays FALSE because the malformed slot is unresolved (no comment of
+# its own), so the loop keeps waiting on the malformed agent's PID.
+obs_setup
+obs_write_malformed_artifact 0
+OBS_COMMENT_BODY["agy"]="$PASS_BODY"
+_all_first_verdicts_resolved && _r=0 || _r=1
+assert_eq "TC-OBS-271-13c mixed panel: malformed artifact + resolved comment sibling → NOT all resolved (rc 1, INV-48 veto preserved)" "1" "$_r"
+
+# TC-OBS-271-13d (#271 review [P1] ×2 — the residual the reviewer flagged): a
+# malformed-artifact agent that ALSO posted its OWN verdict comment must STILL be
+# unresolved by the observe gate — the malformed snapshot returns rc 1 WITHOUT
+# consulting the comment, mirroring the post-loop Clause V1 skip (which keys on the
+# durable artifact-malformed source and refuses the comment). Otherwise the comment
+# branch would resolve it → reaped early → dropped `unavailable` at the terminal
+# sweep instead of the real 124/137 `timed-out` veto. Slot 0 is the malformed agent
+# AND it has a comment of its own; it must NOT resolve.
+obs_setup
+obs_write_malformed_artifact 0
+OBS_COMMENT_BODY["claude"]="$PASS_BODY"   # the malformed agent ALSO self-posted
+obs_fetch_before=$(obs_fetch_count)
+_observe_agent_resolved 0 && _r=0 || _r=1
+assert_eq "TC-OBS-271-13d malformed artifact agent that ALSO posted a comment → STILL NOT resolved (comment NOT consulted, Clause V1)" "1" "$_r"
+assert_eq "TC-OBS-271-13e malformed slot does NOT fall through to the comment fetch (no API call)" \
+  "$obs_fetch_before" "$(obs_fetch_count)"
 
 # TC-OBS-271-10 (integration): the observe-loop break logic over a MIXED panel
 # where the artifact agent's PID lingers forever. We reproduce the loop's exact
 # break decision (freeze-then-resolved-gate) and assert it breaks on the gate, NOT
 # on the lingering PID and NOT at the ceiling. The "PID" is a sleeper we never reap.
 obs_setup
-# Live artifact file (claude) + live comment (agy). Simulate the freeze that
+# Live VALID artifact (claude) + live comment (agy). Simulate the freeze that
 # _freeze_pass would do each round (artifact already landed → snapshot frozen).
-cp "$EXAMPLES/verdict-artifact.golden.pass.json" "${AGENT_ARTIFACT_SNAPSHOTS[0]}"
+obs_write_artifact 0 PASS
 OBS_COMMENT_BODY["agy"]="$PASS_BODY"
 sleep 600 & OBS_LINGER_PID=$!     # a fan-out PID that never exits within the test
 _obs_broke_via=""
@@ -766,7 +826,7 @@ assert_eq "TC-OBS-271-10b the lingering PID is reaped after the break (no longer
 # polling until the PID exits or the ceiling (here: the small ceiling, proving no
 # premature `resolved` break).
 obs_setup
-cp "$EXAMPLES/verdict-artifact.golden.pass.json" "${AGENT_ARTIFACT_SNAPSHOTS[0]}"
+obs_write_artifact 0 PASS
 # agy: no comment, no artifact → unresolved forever.
 sleep 600 & OBS_LINGER_PID=$!
 _obs_broke_via=""

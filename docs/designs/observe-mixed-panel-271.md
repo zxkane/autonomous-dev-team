@@ -96,14 +96,27 @@ a snapshot ⟹ that slot is resolved), so the **all-artifact-writer panel keeps
 byte-for-byte its current behavior** (early-exit on the same round, no extra API
 calls).
 
-### Malformed-artifact edge case (unchanged semantics)
+### Malformed-artifact edge case (#271 review [P1] — `valid`-only gate)
 
-A malformed artifact still freezes a `.landed` snapshot (`_freeze_landed_artifact`
-copies on first land regardless of validity), so a malformed-then-hang agent is
-considered "resolved" for early-exit and is reaped — resolving `unavailable` /
-`malformed-output` rather than the `timed-out` veto. This is exactly the
-documented INV-78 edge case (Clause V1: "malformed = the agent DID deliver output,
-treated absent → dropped", not a weakening of INV-48). No change.
+`_observe_agent_resolved` classifies a landed snapshot and resolves the slot
+**only when `_classify_verdict_artifact` (with the slot identity) returns
+`valid`**. A `malformed` snapshot returns NOT-resolved **and does NOT fall through
+to the comment branch** — it short-circuits exactly like the post-loop resolution,
+which refuses to consult a malformed agent's comment (Clause V1: a malformed
+artifact means the agent's machine output is untrustworthy). This double rule is
+load-bearing for INV-48: a malformed artifact is "treated absent for the vote", and
+an absent verdict must keep the loop waiting on the PID. If a malformed-AND-still-
+running agent were treated as resolved — via its snapshot OR via a comment it
+happened to also post — the early exit would reap it **before its rc sidecar
+landed**, converting an rc-124/137 `timed-out` deciding-FAIL veto into a dropped
+`unavailable` vote (the terminal sweep keys on the durable `artifact-malformed`
+source) — letting a passing sibling approve the PR. Skipping the comment for a
+malformed slot keeps the observe gate consistent with the post-loop Clause V1 skip,
+closing the dropped-veto path through both the artifact and comment doors. A
+malformed agent that has already exited is handled by break-path (a) (its rc
+sidecar is present), so the `valid`-only gate changes only the still-running case —
+exactly the one that must wait. Consequently `_all_artifacts_landed ⟹
+_all_first_verdicts_resolved` holds only for VALID artifacts.
 
 ## Invariant
 
