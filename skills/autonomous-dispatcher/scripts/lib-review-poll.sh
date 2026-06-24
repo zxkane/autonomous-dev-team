@@ -240,6 +240,117 @@ _run_verdict_poll_loop() {
   done
 }
 
+# _observe_agent_resolved <index> — INV-84 (#271): has fan-out slot <index>
+# resolved its FIRST verdict? rc 0 iff yes.
+#
+# The fan-out observe loop's early-exit (INV-78 [P1] #2) was gated on
+# `_all_artifacts_landed` — a path-existence check over EVERY slot's artifact
+# FILE. But a comment-only agent (one that posts its verdict as a GitHub comment
+# and never writes the artifact file) never satisfies that check, so on a MIXED
+# panel the early-exit was permanently dead and a single lingering agent PID
+# pinned the loop to its 6h ceiling. This helper resolves a slot the SAME way the
+# post-loop resolution does — artifact first, comment fallback:
+#
+#   • artifact branch — the slot's first-land FROZEN snapshot
+#     (AGENT_ARTIFACT_SNAPSHOTS[index], a `<path>.landed` file `_freeze_pass`
+#     copies the moment the artifact lands) exists AND classifies `valid`
+#     (`_classify_verdict_artifact` with this slot's identity, the SAME check the
+#     post-loop resolution applies). Checked FIRST so an all-VALID-artifact panel
+#     makes ZERO comment-list API calls — the INV-78 zero-comment-poll AC holds.
+#
+#     The snapshot is CLASSIFIED (not merely stat'd), and the branch resolves the
+#     slot on three states:
+#       - `valid`     → resolved (rc 0).
+#       - `malformed` → NOT resolved, and we DO NOT consult the comment either —
+#                       return rc 1 immediately (see the malformed rule below).
+#       - `absent`*   → fall through to the comment branch (the rename hasn't
+#                       landed; treat like a no-artifact agent).
+#     (*A snapshot that exists but classifies neither valid nor malformed is the
+#     classifier-unavailable test path; see the `declare -F` guard.)
+#
+#     MALFORMED ⇒ NOT resolved, comment NOT consulted (#271 review [P1] ×2): a
+#     malformed artifact is "treated absent FOR THE VOTE" (INV-78 Clause V1), and an
+#     absent verdict is exactly what must keep the loop waiting on the PID —
+#     otherwise the early exit would reap a malformed-AND-still-running agent BEFORE
+#     its rc sidecar lands, silently converting an INV-48 `timed-out` (rc 124/137)
+#     deciding-FAIL veto into a dropped `unavailable` vote and letting a passing
+#     sibling approve the PR. Crucially we do NOT fall through to the comment branch
+#     for a malformed snapshot: the POST-LOOP resolution refuses to let a malformed
+#     agent's comment override its artifact (Clause V1 — a malformed artifact means
+#     the agent's machine output is untrustworthy), so the observe gate MUST match
+#     that — else a malformed agent that ALSO posted a comment would resolve via the
+#     comment here, get reaped early, then be dropped `unavailable` at the terminal
+#     sweep (which keys on the durable `artifact-malformed` source), re-opening the
+#     exact dropped-veto bug through the comment door. (A malformed agent that has
+#     ALREADY exited is reaped via break-path (a) "all PIDs exited", where its rc
+#     sidecar IS present — so the `valid`-only gate changes only the still-running
+#     case, which is precisely the one that must wait.)
+#
+#   • comment branch — only when NO artifact snapshot is present (state `absent`):
+#     the slot's verdict COMMENT is observable via `_fetch_agent_verdict_body` (the
+#     SAME fetch + INV-20/INV-40 authenticity binding `_run_verdict_poll_loop`
+#     uses). A non-empty body means the agent posted its verdict; the verdict wins
+#     over the launch rc (INV-40), so the slot is resolved regardless of its PID.
+#
+# Reads AGENT_NAMES / AGENT_SESSION_IDS / AGENT_ARTIFACT_SNAPSHOTS. Uses
+# `_classify_verdict_artifact` (lib-review-artifact.sh) + `_fetch_agent_verdict_body`
+# (both overridable by tests). No `set -e` hazard: both are inside `$(...)` and the
+# helper never runs a bare failing command.
+_observe_agent_resolved() {
+  local _idx="$1"
+  # Artifact first-land snapshot, classified for VALIDITY (not mere existence).
+  # AGENT_ARTIFACT_SNAPSHOTS may be unset in a degraded run — the `:-` keeps safe.
+  local _snap="${AGENT_ARTIFACT_SNAPSHOTS[$_idx]:-}"
+  if [[ -n "$_snap" && -f "$_snap" ]]; then
+    local _st
+    _st=$(_classify_verdict_artifact "$_snap" "${AGENT_SESSION_IDS[$_idx]}" "${AGENT_NAMES[$_idx]}")
+    _st="${_st%%$'\n'*}"
+    if [[ "$_st" == "valid" ]]; then
+      return 0                       # valid artifact → resolved
+    elif [[ "$_st" == "malformed" ]]; then
+      return 1                       # malformed → NOT resolved, comment NOT consulted (Clause V1; see header)
+    elif ! declare -F _classify_verdict_artifact >/dev/null 2>&1; then
+      # Classifier unavailable (a harness that did not source lib-review-artifact.sh):
+      # preserve the legacy snapshot-present-means-resolved behavior for that case.
+      return 0
+    fi
+    # else `absent` (the rename hasn't landed despite the file appearing, or an
+    # unmappable state) → fall through to the comment branch.
+  fi
+  # Comment fallback — observe THIS slot's verdict comment (no artifact snapshot).
+  local _body
+  _body=$(_fetch_agent_verdict_body "${AGENT_NAMES[$_idx]}" "${AGENT_SESSION_IDS[$_idx]}")
+  [[ -n "$_body" ]] && return 0
+  return 1
+}
+
+# _all_first_verdicts_resolved — INV-84 (#271): rc 0 iff EVERY fan-out slot has a
+# resolved first verdict (per `_observe_agent_resolved`). This is the mixed-panel-
+# aware early-exit signal that REPLACES the artifact-file-only
+# `_all_artifacts_landed` gate in the observe loop.
+#
+# INV-48 timeout-veto is preserved by construction: a slot we early-exit past is
+# one that is ALREADY resolved with a VALID verdict (its verdict wins over its rc —
+# INV-40), and any slot that is NOT resolved (no valid artifact, no comment —
+# INCLUDING a malformed-artifact agent, #271 review [P1]) makes this return
+# non-zero, so the loop keeps waiting on PIDs until that agent's CLI exits with its
+# real 124/137 cap (the `timed-out` veto). An all-VALID-artifact panel still
+# early-exits on the same round with zero comment polls (a valid snapshot resolves
+# its slot before the comment branch); a panel with a malformed-AND-still-running
+# artifact agent now correctly WAITS on that agent's PID instead of reaping it
+# before its rc lands.
+#
+# Empty fleet (no slots) → rc 1: we cannot claim "all resolved" with zero slots
+# (mirrors `_all_artifacts_landed`'s no-args guard). Reads AGENT_NAMES.
+_all_first_verdicts_resolved() {
+  [[ "${#AGENT_NAMES[@]}" -gt 0 ]] || return 1
+  local _i
+  for _i in "${!AGENT_NAMES[@]}"; do
+    _observe_agent_resolved "$_i" || return 1
+  done
+  return 0
+}
+
 # _reap_fanout_processes <pgid...> — INV-43 (#172): group-kill any still-running
 # fan-out agent process group so a dropped / undecided review agent's CLI does
 # not outlive its review round (the orphaned-process side effect #172 reports).

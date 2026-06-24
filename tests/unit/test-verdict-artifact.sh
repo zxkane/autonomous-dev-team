@@ -72,6 +72,21 @@ assert_grep() {
   fi
 }
 
+# assert_not_grep — the negative of assert_grep (pattern MUST be absent). Used to
+# pin the removal of a defect-prone construct. Previously referenced (W17c) but
+# never defined, so it silently errored `command not found` and asserted nothing;
+# defining it here makes both W17c and the INV-84 W19b checks real (#271).
+assert_not_grep() {
+  local desc="$1" pattern="$2" file="$3"
+  if ! grep -qE "$pattern" "$file"; then
+    echo -e "  ${GREEN}PASS${NC}: $desc"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${NC}: $desc (pattern unexpectedly present: $pattern)"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # Part 1: pure-lib classification / path / mapping
 # ---------------------------------------------------------------------------
@@ -351,13 +366,19 @@ assert_grep "TC-VERDICT-ARTIFACT-W17b _any_deciding_artifact keys on source==art
 # agents and emit contradictory per-agent comments).
 assert_not_grep "TC-VERDICT-ARTIFACT-W17c the per-agent breadcrumb-gated re-post loop is removed" \
   'wrapper posting the artifact-derived verdict comment so comment-format' "$WRAPPER"
-# [P1] #2 (#233 review round-4/5): the fan-out join observes artifact landing AND
+# [P1] #2 (#233 review round-4/5): the fan-out join observes verdict resolution AND
 # freezes the first-landed bytes (Clause VA5) so a hung agent doesn't hold a landed
 # verdict hostage AND a duplicate later write can't replace the resolved verdict.
-assert_grep "TC-VERDICT-ARTIFACT-W18 fan-out join observes artifact landing (_all_artifacts_landed) instead of a bare wait" \
-  '_all_artifacts_landed' "$WRAPPER"
-assert_grep "TC-VERDICT-ARTIFACT-W19 early-exit is gated on ALL artifacts landed (preserves INV-48 timeout-veto rc)" \
-  'all artifacts landed|ALL artifacts? (have )?landed|INV-48.*preserv' "$WRAPPER"
+# INV-84 (#271): the early-exit gate is now the mixed-panel-aware
+# _all_first_verdicts_resolved (artifact OR comment per slot), NOT the file-only
+# _all_artifacts_landed (which was dead on a mixed panel).
+assert_grep "TC-VERDICT-ARTIFACT-W18 fan-out join uses a bounded observe loop (not a bare wait)" \
+  '_observe_deadline|completion-observe|COMPLETION-OBSERVE' "$WRAPPER"
+assert_grep "TC-VERDICT-ARTIFACT-W19 early-exit gated on every slot's FIRST verdict resolved (preserves INV-48 timeout-veto rc)" \
+  'first verdict|first-verdict|INV-48.*preserv|preserv.*INV-48' "$WRAPPER"
+# INV-84 (#271): the early-exit must NOT be the file-only _all_artifacts_landed call.
+assert_not_grep "TC-VERDICT-ARTIFACT-W19b the observe loop no longer early-exits on the file-only _all_artifacts_landed gate" \
+  '_all_artifacts_landed "\$\{AGENT_ARTIFACT_PATHS' "$WRAPPER"
 assert_grep "TC-VERDICT-ARTIFACT-W20 observe loop freezes first-landed bytes (_freeze_landed_artifact / _freeze_pass)" \
   '_freeze_landed_artifact|_freeze_pass' "$WRAPPER"
 assert_grep "TC-VERDICT-ARTIFACT-W21 resolution loop reads the FROZEN snapshot, not a re-read of the live path" \
@@ -382,6 +403,18 @@ assert_grep "TC-VERDICT-ARTIFACT-W24c standalone INV-48 timeout comment is skipp
   '_timed_out_agents" && "\$_any_deciding_artifact" != "true"' "$WRAPPER"
 assert_grep "TC-VERDICT-ARTIFACT-W24d the timeout-veto finding is a SINGLE shared builder (no verbatim duplication)" \
   '_timeout_veto_finding\(\) \{' "$WRAPPER"
+
+# INV-84 (#271): the observe loop's early-exit uses the mixed-panel-aware
+# _all_first_verdicts_resolved gate, names the completion signal, and a lingering
+# PID is reaped after resolution.
+assert_grep "TC-VERDICT-ARTIFACT-W25 observe loop early-exits on the mixed-panel _all_first_verdicts_resolved gate" \
+  'if _all_first_verdicts_resolved; then' "$WRAPPER"
+assert_grep "TC-VERDICT-ARTIFACT-W26 the early-exit log names the first-verdict-resolved (mixed-panel) completion signal" \
+  'INV-84:.*resolved first verdict.*artifact landed or comment observed' "$WRAPPER"
+assert_grep "TC-VERDICT-ARTIFACT-W27 a lingering PID early-exited past is reaped after resolution (_reap_fanout_processes)" \
+  '_reap_fanout_processes "\$\{_AGENT_PGIDS' "$WRAPPER"
+assert_grep "TC-VERDICT-ARTIFACT-W28 the helpers live in lib-review-poll.sh (sourced via LIB_DIR)" \
+  'source "\$\{LIB_DIR\}/lib-review-poll.sh"' "$WRAPPER"
 
 # Render-format pins (machine consumers unchanged — these greps must still hold).
 assert_grep "TC-VERDICT-ARTIFACT-W10 dispatcher trailer still emitted (emit_verdict_trailer passed)" \
@@ -605,6 +638,253 @@ run_fleet "claude:none:$PASS_BODY" "agy:none:$FAIL_BODY"
 assert_eq "TC-VERDICT-ARTIFACT-031a fallback parity pass+fail → fail" "fail" "$FLEET_AGG"
 run_fleet "claude:none:$PASS_BODY" "agy:none:$PASS_BODY"
 assert_eq "TC-VERDICT-ARTIFACT-031b fallback parity pass+pass → pass" "pass" "$FLEET_AGG"
+
+# ---------------------------------------------------------------------------
+# Part 4: INV-84 (#271) — the observe-loop early-exit gate (_observe_agent_resolved
+# / _all_first_verdicts_resolved). A MIXED panel (artifact-writer + comment-only
+# agent) must early-exit once every slot's FIRST verdict is resolved, WITHOUT
+# depending on a lingering PID exiting and WITHOUT reaching the 6h ceiling — the
+# bug this issue fixes (the file-only _all_artifacts_landed gate was dead on a
+# mixed panel). The helpers live in lib-review-poll.sh (sourced above).
+# ---------------------------------------------------------------------------
+
+# A dedicated comment-fetch stub with a CALL COUNTER so we can pin that the
+# artifact branch is checked FIRST (no API call when a VALID snapshot exists) and
+# that an all-VALID-artifact panel makes ZERO comment fetches. NOTE: these tests
+# use the REAL _classify_verdict_artifact (lib-review-artifact.sh was sourced in
+# Part 3), so an artifact snapshot only counts as resolved when it is schema-valid
+# AND its identity (runId=session-id, agent=name) matches the slot (#271 [P1]).
+OBS_FETCH_LOG="$TMP/obs-comment-fetches.log"
+declare -A OBS_COMMENT_BODY=()
+_fetch_agent_verdict_body() {
+  printf '%s\n' "$1" >> "$OBS_FETCH_LOG"
+  printf '%s' "${OBS_COMMENT_BODY[$1]:-}"
+}
+obs_fetch_count() { [[ -f "$OBS_FETCH_LOG" ]] && wc -l < "$OBS_FETCH_LOG" | tr -d ' ' || echo 0; }
+
+# Build a fixed panel: index 0 = artifact-writer "claude", index 1 = comment-only
+# "agy". The snapshot path mirrors the wrapper's `<path>.landed` convention.
+OBS_DIR="$TMP/obs"
+mkdir -p "$OBS_DIR"
+obs_setup() {
+  : > "$OBS_FETCH_LOG"
+  OBS_COMMENT_BODY=()
+  AGENT_NAMES=("claude" "agy")
+  AGENT_SESSION_IDS=("obs-sid-0" "obs-sid-1")
+  AGENT_ARTIFACT_SNAPSHOTS=("$OBS_DIR/verdict-claude.json.landed" "$OBS_DIR/verdict-agy.json.landed")
+  rm -f "${AGENT_ARTIFACT_SNAPSHOTS[@]}"
+}
+# obs_write_artifact <idx> <PASS|FAIL> — write an IDENTITY-MATCHING valid artifact
+# snapshot for slot <idx> by templating the golden fixture with this slot's
+# session-id (runId) + agent name. Without the identity match the wrapper's
+# _classify_verdict_artifact would (correctly) reject it as malformed.
+obs_write_artifact() {
+  local _idx="$1" _verdict="$2" _fix
+  [[ "$_verdict" == "FAIL" ]] && _fix="$EXAMPLES/verdict-artifact.golden.fail.json" \
+                              || _fix="$EXAMPLES/verdict-artifact.golden.pass.json"
+  jq --arg r "${AGENT_SESSION_IDS[$_idx]}" --arg a "${AGENT_NAMES[$_idx]}" \
+    '.runId=$r | .agent=$a' "$_fix" > "${AGENT_ARTIFACT_SNAPSHOTS[$_idx]}"
+}
+# obs_write_malformed_artifact <idx> — write a snapshot that EXISTS but fails schema
+# validation (no schema_version), to model a malformed-output agent (#271 [P1]).
+obs_write_malformed_artifact() {
+  local _idx="$1"
+  printf '{"verdict":"PASS"}\n' > "${AGENT_ARTIFACT_SNAPSHOTS[$_idx]}"
+}
+
+# TC-OBS-271-01: artifact slot whose VALID identity-matching snapshot exists →
+# resolved (rc 0), and the comment fetch is NOT called for it.
+obs_setup
+obs_write_artifact 0 PASS
+_observe_agent_resolved 0 && _r=0 || _r=1
+assert_eq "TC-OBS-271-01 artifact slot with valid frozen snapshot → resolved (rc 0)" "0" "$_r"
+assert_eq "TC-OBS-271-04 artifact branch checked first → NO comment fetch for it" "0" "$(obs_fetch_count)"
+
+# TC-OBS-271-02: comment-only slot, snapshot absent, comment present → resolved.
+obs_setup
+OBS_COMMENT_BODY["agy"]="$PASS_BODY"
+_observe_agent_resolved 1 && _r=0 || _r=1
+assert_eq "TC-OBS-271-02 comment-only slot with observed comment → resolved (rc 0)" "0" "$_r"
+
+# TC-OBS-271-03: comment-only slot, snapshot absent, NO comment yet → unresolved.
+obs_setup
+_observe_agent_resolved 1 && _r=0 || _r=1
+assert_eq "TC-OBS-271-03 comment-only slot, no artifact + no comment → unresolved (rc 1)" "1" "$_r"
+
+# TC-OBS-271-05: MIXED panel — valid artifact slot + comment slot has a comment →
+# every slot resolved → early-exit gate true.
+obs_setup
+obs_write_artifact 0 PASS
+OBS_COMMENT_BODY["agy"]="$PASS_BODY"
+_all_first_verdicts_resolved && _r=0 || _r=1
+assert_eq "TC-OBS-271-05 mixed panel: valid artifact + comment observed → all resolved (rc 0)" "0" "$_r"
+
+# TC-OBS-271-06 (regression AC#3): MIXED panel — valid artifact slot but the
+# comment-only slot has NO comment yet → gate FALSE (must NOT early-exit while a
+# comment agent is still pending; no premature resolution).
+obs_setup
+obs_write_artifact 0 PASS
+_all_first_verdicts_resolved && _r=0 || _r=1
+assert_eq "TC-OBS-271-06 mixed panel: valid artifact but comment agent pending → NOT all resolved (rc 1)" "1" "$_r"
+
+# TC-OBS-271-07: all-artifact-writer panel — every slot a VALID artifact → all
+# resolved, and ZERO comment fetches (zero-comment-poll AC preserved).
+obs_setup
+obs_write_artifact 0 PASS
+obs_write_artifact 1 FAIL
+_all_first_verdicts_resolved && _r=0 || _r=1
+assert_eq "TC-OBS-271-07 all-valid-artifact panel → all resolved (rc 0)" "0" "$_r"
+assert_eq "TC-OBS-271-07b all-valid-artifact panel makes ZERO comment fetches" "0" "$(obs_fetch_count)"
+
+# TC-OBS-271-08: empty fleet → rc 1 (cannot claim all-resolved with zero slots).
+AGENT_NAMES=(); AGENT_SESSION_IDS=(); AGENT_ARTIFACT_SNAPSHOTS=()
+_all_first_verdicts_resolved && _r=0 || _r=1
+assert_eq "TC-OBS-271-08 empty fleet → not all resolved (rc 1)" "1" "$_r"
+
+# TC-OBS-271-09: an all-VALID-artifact panel that _all_artifacts_landed would also
+# accept is likewise resolved by the first-verdict gate (the all-writer case the
+# old gate covered — generalization holds for VALID artifacts).
+obs_setup
+obs_write_artifact 0 PASS
+obs_write_artifact 1 PASS
+_all_artifacts_landed "${AGENT_ARTIFACT_SNAPSHOTS[@]}" && _land=0 || _land=1
+_all_first_verdicts_resolved && _res=0 || _res=1
+assert_eq "TC-OBS-271-09a all valid snapshots present → _all_artifacts_landed true" "0" "$_land"
+assert_eq "TC-OBS-271-09b ⟹ _all_first_verdicts_resolved also true (valid-artifact generalization)" "0" "$_res"
+
+# TC-OBS-271-13 (#271 review [P1]): a MALFORMED artifact snapshot must NOT count as
+# resolved — even though the FILE exists, _all_artifacts_landed would say "landed".
+# This is the regression the reviewer flagged: a malformed-AND-still-running agent
+# must keep the loop waiting on its PID so its real 124/137 rc lands (INV-48 veto),
+# NOT be reaped early and dropped `unavailable`.
+obs_setup
+obs_write_malformed_artifact 0
+_observe_agent_resolved 0 && _r=0 || _r=1
+assert_eq "TC-OBS-271-13a malformed artifact snapshot → slot NOT resolved (rc 1)" "1" "$_r"
+# _all_artifacts_landed (file-existence) WOULD say landed — proving the divergence
+# is intentional: existence != resolved for a malformed artifact.
+_all_artifacts_landed "${AGENT_ARTIFACT_SNAPSHOTS[0]}" && _land=0 || _land=1
+assert_eq "TC-OBS-271-13b the malformed snapshot DOES exist (_all_artifacts_landed true) — so the gate divergence is real" "0" "$_land"
+# Mixed panel: malformed artifact (still-running) + comment sibling resolved → the
+# fleet gate stays FALSE because the malformed slot is unresolved (no comment of
+# its own), so the loop keeps waiting on the malformed agent's PID.
+obs_setup
+obs_write_malformed_artifact 0
+OBS_COMMENT_BODY["agy"]="$PASS_BODY"
+_all_first_verdicts_resolved && _r=0 || _r=1
+assert_eq "TC-OBS-271-13c mixed panel: malformed artifact + resolved comment sibling → NOT all resolved (rc 1, INV-48 veto preserved)" "1" "$_r"
+
+# TC-OBS-271-13d (#271 review [P1] ×2 — the residual the reviewer flagged): a
+# malformed-artifact agent that ALSO posted its OWN verdict comment must STILL be
+# unresolved by the observe gate — the malformed snapshot returns rc 1 WITHOUT
+# consulting the comment, mirroring the post-loop Clause V1 skip (which keys on the
+# durable artifact-malformed source and refuses the comment). Otherwise the comment
+# branch would resolve it → reaped early → dropped `unavailable` at the terminal
+# sweep instead of the real 124/137 `timed-out` veto. Slot 0 is the malformed agent
+# AND it has a comment of its own; it must NOT resolve.
+obs_setup
+obs_write_malformed_artifact 0
+OBS_COMMENT_BODY["claude"]="$PASS_BODY"   # the malformed agent ALSO self-posted
+obs_fetch_before=$(obs_fetch_count)
+_observe_agent_resolved 0 && _r=0 || _r=1
+assert_eq "TC-OBS-271-13d malformed artifact agent that ALSO posted a comment → STILL NOT resolved (comment NOT consulted, Clause V1)" "1" "$_r"
+assert_eq "TC-OBS-271-13e malformed slot does NOT fall through to the comment fetch (no API call)" \
+  "$obs_fetch_before" "$(obs_fetch_count)"
+
+# TC-OBS-271-10 (integration): the observe-loop break logic over a MIXED panel
+# where the artifact agent's PID lingers forever. We reproduce the loop's exact
+# break decision (freeze-then-resolved-gate) and assert it breaks on the gate, NOT
+# on the lingering PID and NOT at the ceiling. The "PID" is a sleeper we never reap.
+obs_setup
+# Live VALID artifact (claude) + live comment (agy). Simulate the freeze that
+# _freeze_pass would do each round (artifact already landed → snapshot frozen).
+obs_write_artifact 0 PASS
+OBS_COMMENT_BODY["agy"]="$PASS_BODY"
+sleep 600 & OBS_LINGER_PID=$!     # a fan-out PID that never exits within the test
+_obs_broke_via=""
+_obs_rounds=0
+_obs_deadline=$((SECONDS + 30))   # a SMALL ceiling — if we ever reach it, the test fails
+while :; do
+  _obs_rounds=$((_obs_rounds + 1))
+  # (a) PID check — the linger PID is always alive, so this never breaks here.
+  if ! kill -0 "$OBS_LINGER_PID" 2>/dev/null; then _obs_broke_via="pid"; break; fi
+  # (b) first-verdict-resolved gate (the fix).
+  if _all_first_verdicts_resolved; then _obs_broke_via="resolved"; break; fi
+  # (c) ceiling.
+  if [[ "$SECONDS" -ge "$_obs_deadline" ]]; then _obs_broke_via="ceiling"; break; fi
+  sleep 1
+done
+kill "$OBS_LINGER_PID" 2>/dev/null || true   # reap the lingerer (mirrors _reap_fanout_processes)
+wait "$OBS_LINGER_PID" 2>/dev/null || true
+assert_eq "TC-OBS-271-10 mixed panel + lingering PID → loop breaks on the resolved gate (not PID, not ceiling)" \
+  "resolved" "$_obs_broke_via"
+assert_eq "TC-OBS-271-10b the lingering PID is reaped after the break (no longer alive)" \
+  "dead" "$(kill -0 "$OBS_LINGER_PID" 2>/dev/null && echo alive || echo dead)"
+
+# TC-OBS-271-11 (regression): same loop, but the comment agent NEVER posts. The
+# gate stays false, so the loop does NOT break on `resolved` — it would keep
+# polling until the PID exits or the ceiling (here: the small ceiling, proving no
+# premature `resolved` break).
+obs_setup
+obs_write_artifact 0 PASS
+# agy: no comment, no artifact → unresolved forever.
+sleep 600 & OBS_LINGER_PID=$!
+_obs_broke_via=""
+_obs_deadline=$((SECONDS + 5))    # small ceiling — the expected exit when a slot stays unresolved
+while :; do
+  if ! kill -0 "$OBS_LINGER_PID" 2>/dev/null; then _obs_broke_via="pid"; break; fi
+  if _all_first_verdicts_resolved; then _obs_broke_via="resolved"; break; fi
+  if [[ "$SECONDS" -ge "$_obs_deadline" ]]; then _obs_broke_via="ceiling"; break; fi
+  sleep 1
+done
+kill "$OBS_LINGER_PID" 2>/dev/null || true
+wait "$OBS_LINGER_PID" 2>/dev/null || true
+assert_eq "TC-OBS-271-11 comment agent pending → loop does NOT break on resolved (no premature exit)" \
+  "ceiling" "$_obs_broke_via"
+
+# TC-OBS-271-12 (regression for the #271 pr-review C1 finding): the observe loop's
+# comment branch must resolve a comment-only slot using the REAL
+# _fetch_agent_verdict_body (NOT the stub the TC-OBS tests above install). That
+# fetch references _VERDICT_RE; if _VERDICT_RE is unbound at observe-loop time
+# (the pre-fix wrapper defined it ~50 lines AFTER the observe loop), `set -u`
+# silently kills the `$(...)` fetch in the gate's condition context → the comment
+# branch resolves NOTHING → the mixed-panel early-exit stays dead (the very bug).
+# Run in a SUBSHELL under `set -euo pipefail` so we get the REAL lib function +
+# the real WRAPPER ordering, with `gh` stubbed to return a matching verdict comment.
+obs_real_fetch_resolved=$(
+  set -euo pipefail
+  # Re-source the lib fresh so _fetch_agent_verdict_body is the REAL one (this
+  # outer file overrode it for the stub-driven TC-OBS tests above).
+  # shellcheck source=/dev/null
+  source "$DISP/lib-review-poll.sh"
+  # Stub `gh` to return a verdict comment matching the INV-20/INV-40 binding.
+  gh() { printf '%s' "Review PASSED - all good
+Review Session: real-sid-0
+Review Agent: agy"; }
+  ISSUE_NUMBER=1; REPO="o/r"; BOT_LOGIN=""; WRAPPER_START_TS="2026-01-01T00:00:00Z"
+  # _VERDICT_RE IS in scope here — exactly as the FIXED wrapper guarantees by
+  # defining it before the observe loop. (Mirror the wrapper's value.)
+  _VERDICT_RE='Review PASSED|Review APPROVED|APPROVED FOR MERGE|LGTM|Review PASS|Review findings:|Review FAILED|Review REJECTED|Changes requested'
+  AGENT_NAMES=("agy"); AGENT_SESSION_IDS=("real-sid-0")
+  AGENT_ARTIFACT_SNAPSHOTS=("/nonexistent-271.landed")   # no artifact → comment branch
+  # Call through the gate's condition context, exactly like the observe loop does.
+  if _all_first_verdicts_resolved; then echo "resolved"; else echo "unresolved"; fi
+)
+assert_eq "TC-OBS-271-12 comment-only slot resolves via the REAL _fetch_agent_verdict_body (_VERDICT_RE in scope)" \
+  "resolved" "$obs_real_fetch_resolved"
+
+# W29 (#271 pr-review C1): _VERDICT_RE MUST be assigned BEFORE the observe loop's
+# early-exit gate in the wrapper, else the comment branch silently no-ops under
+# `set -u`. Pin the source-order so a future refactor can't move it back.
+W29_def_line=$(grep -n '^_VERDICT_RE=' "$WRAPPER" | head -n1 | cut -d: -f1)
+W29_gate_line=$(grep -n 'if _all_first_verdicts_resolved; then' "$WRAPPER" | head -n1 | cut -d: -f1)
+if [[ -n "$W29_def_line" && -n "$W29_gate_line" && "$W29_def_line" -lt "$W29_gate_line" ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-VERDICT-ARTIFACT-W29 _VERDICT_RE defined (line $W29_def_line) before the observe-loop early-exit (line $W29_gate_line)"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-VERDICT-ARTIFACT-W29 _VERDICT_RE (line ${W29_def_line:-none}) must precede the early-exit gate (line ${W29_gate_line:-none})"
+  FAIL=$((FAIL + 1))
+fi
 
 # ---------------------------------------------------------------------------
 echo ""

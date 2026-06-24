@@ -3673,7 +3673,7 @@ The artifact's `verdict.state` (adapter-spec § 4.3) drives resolution:
   resolved by the comment fallback + the post-window sweep — **unchanged**. This
   invariant moves the verdict **CHANNEL**, not the absence model
   ([INV-43](#inv-43-the-verdict-poll-budget-scales-with-the-command-mode-e2e-timeout) /
-  [INV-48](#inv-48-a-timed-out-review-agent-is-a-deciding-fail-veto-not-a-silent-drop)
+  [INV-48](#inv-48-per-side-review-wall-clock-timeout-agent_review_timeout-1h-default-with-browser-e2e-exclusion-and-timeout-veto)
   still govern absence).
 
 **Atomic write + TRUE read-once + first-land freeze (Clause VA5)**: the agent
@@ -3760,26 +3760,43 @@ SKIPPED when the aggregate will carry it (`_any_deciding_artifact` true) so ther
 no duplicate. The newest wrapper-rendered comment therefore always states why the
 run failed.
 
-**Live artifact-landing completion signal (#233 review round-4, [P1] #2)**: the
+**Live verdict-resolution completion signal (#233 review round-4, [P1] #2;
+generalized in [INV-84](#inv-84-the-fan-out-observe-loop-early-exit-fires-once-every-agent-slot-has-a-resolved-first-verdict-artifact-frozen-or-comment-observed--not-when-every-artifact-file-exists), #271)**: the
 fan-out join is a bounded OBSERVE loop, not a blocking `wait`. It breaks on EITHER
 (a) every collected `_fanout_pids` PID exited (`kill -0` — the backstop, which
 inherits each agent's `_run_with_timeout` 124/137 cap so INV-48's timeout-veto rc
-is preserved) OR (b) **ALL** per-agent artifacts landed (`_all_artifacts_landed` —
-the early exit). A landed verdict is therefore not held hostage by an agent that
-hangs in `post-verdict.sh` / teardown until the wall-clock cap. The early exit is
-gated on ALL artifacts landing (not any): if every artifact is present, every
-agent resolves valid/malformed from its FILE and none flows to the rc-based
-terminal sweep, so a still-running agent's launch rc is never consulted — INV-48
-is not engaged for it; if even one artifact is missing the loop keeps waiting on
-PIDs so the missing-artifact agent still gets its real 124/137 rc. A still-running
+is preserved) OR (b) **every agent slot has a resolved first verdict**
+(`_all_first_verdicts_resolved` — the early exit; INV-84). A slot is resolved when
+its artifact's first-land snapshot classifies **valid** (`_classify_verdict_artifact`
+with the slot identity) OR (for a comment-only agent that never writes an artifact
+file) its verdict comment is observed via the comment poll. A landed/posted verdict
+is therefore not held hostage by an agent that hangs in `post-verdict.sh` /
+teardown until the wall-clock cap.
+
+> **Superseded sub-rule (#233 → #271):** round-4 gated this early exit on
+> `_all_artifacts_landed` — an artifact-FILE-existence check over every slot. That
+> was permanently DEAD on a MIXED panel (an artifact-writer + a comment-only agent
+> that never writes a file), letting a single lingering PID pin the loop to the 6h
+> ceiling (#271). INV-84 replaces it with the per-slot first-verdict-resolved gate
+> above. The INV-48 property is unchanged: a slot we early-exit past is ALREADY
+> resolved with a VALID verdict (its verdict wins over its rc, INV-40); any
+> unresolved slot — no VALID artifact (a `malformed` snapshot does NOT count), no
+> comment — keeps the gate false, so the loop keeps waiting on PIDs and that agent
+> still gets its real 124/137 rc. `_all_artifacts_landed ⟹
+> _all_first_verdicts_resolved` therefore holds only for VALID artifacts; an
+> all-valid-artifact panel is byte-for-byte unchanged.
+
+A still-running
 agent the loop early-exits past is group-killed by `_reap_fanout_processes` after
 resolution (its PGID sidecar is written at spawn by `_run_with_timeout`).
 (Edge case, consistent with Clause V1: an agent that writes a MALFORMED artifact
-and then hangs may be early-exited past — `_all_artifacts_landed` checks landing,
-not validity — so it resolves `unavailable`/`malformed-output` rather than the
-`timed-out` veto a missing-artifact hang would get. This is the documented
-"malformed = treated absent → dropped" semantics, not a weakening of INV-48: the
-agent DID deliver output, it was just unparseable.)
+and then hangs is NOT early-exited past — INV-84's gate classifies the snapshot and
+a `malformed` one is treated absent, so the loop keeps waiting on its PID, and the
+agent resolves `unavailable`/`malformed-output` on a clean exit or the `timed-out`
+veto on a 124/137 cap, exactly like a no-artifact hang. The pre-#271-review code
+gated on file EXISTENCE not validity and would have reaped it early — see
+[INV-84](#inv-84-the-fan-out-observe-loop-early-exit-fires-once-every-agent-slot-has-a-resolved-first-verdict-artifact-frozen-or-comment-observed--not-when-every-artifact-file-exists)
+"Malformed artifact ⇒ NOT resolved".)
 
 - **Path**: `${XDG_STATE_HOME:-$HOME/.local/state}/autonomous-<project>/runs/<run-id>/verdict-<agent>.json`,
   where `<run-id>` is the per-agent minted session UUID (the `Review Session:`
@@ -4220,6 +4237,111 @@ _Triage (issue #236): [machine-checked: tests/unit/test-check-deps-resolved.sh, 
 - [INV-39](#inv-39-dependency-parsing-is-list-item-scoped-and-supports-cross-repo-refs) — the cross-repo ref parsing this token-routing fix sits inside. The parse was always correct; #269 fixes only the lookup token.
 - [INV-11](#inv-11-dependency-state-includes-merged) — `state ∉ {CLOSED, MERGED}` still applies to the resolved cross-repo state.
 - [INV-79](#inv-79-in-app-mode-the-agent-process-gets-only-a-scoped-token-the-wrapper-keeps-full-write-and-is-the-sole-approvemergepr-create-path) — the scoped-mint machinery (`get_gh_app_scoped_token`, `_build_access_token_body`) reused here. #269 T1 extracts the shared exchange core (`_app_install_token`) byte-identically.
+
+## INV-84: the fan-out observe-loop early-exit fires once every agent slot has a RESOLVED FIRST VERDICT (artifact frozen OR comment observed) — not when every artifact FILE exists
+
+_Triage (issue #236): [machine-checked: tests/unit/test-verdict-artifact.sh]_
+
+**Rule**: the review wrapper's post-fan-out **completion-observe loop**
+([INV-78](#inv-78-review-verdicts-resolve-from-a-typed-artifact-file-first-comment-scraping-is-an-explicitly-logged-fallback-a-malformed-artifact-is-loud-never-a-silent-absent)
+"Live artifact-landing completion signal") takes its EARLY exit when
+**every fan-out agent slot has a resolved first verdict** — NOT when an artifact
+FILE exists for every slot. A slot is *resolved* when EITHER:
+
+- its artifact's first-land **frozen snapshot** (`<path>.landed`, frozen by
+  `_freeze_pass` the moment the artifact lands) exists; OR
+- (for a **comment-only** agent that never writes an artifact file) its verdict
+  **comment** is observable via `_fetch_agent_verdict_body` — the SAME fetch +
+  INV-20/INV-40 authenticity binding `_run_verdict_poll_loop` uses.
+
+The gate is `_all_first_verdicts_resolved` (an OR over `_observe_agent_resolved`
+per slot, both in `lib-review-poll.sh`); it REPLACES the file-only
+`_all_artifacts_landed "${AGENT_ARTIFACT_PATHS[@]}"` early-exit. The artifact
+branch is checked FIRST (a local `[[ -f ]]` stat, no API call); the comment fetch
+runs ONLY for a slot whose artifact has not landed — so an **all-artifact-writer**
+panel still makes ZERO comment-list API calls (INV-78's zero-comment-poll AC is
+preserved). A still-running agent the loop early-exits past is group-killed by
+`_reap_fanout_processes` after resolution, exactly as under INV-78.
+
+**Why** (#271): INV-78's early exit was gated purely on `_all_artifacts_landed` —
+a path-existence check over EVERY slot's artifact FILE. `AGENT_ARTIFACT_PATHS` is
+provisioned for every agent, but only an **artifact-writing** agent ever creates
+the file; a **comment-only** agent posts its verdict as a GitHub comment and never
+writes the artifact. So on a **MIXED panel** (≥1 artifact-writer + ≥1 comment-only
+agent) the early exit was permanently **dead**: at least one `-f` check always
+missed. The loop was then left with only (a) "all PIDs exited" and (c) the 6h
+`VERDICT_ARTIFACT_OBSERVE_TIMEOUT_SECONDS` ceiling. If the artifact-writing agent's
+subshell lingered in post-verdict teardown (its PID alive past verdict-land), (a)
+never fired either, and the loop silently spun to (c) — stranding the issue in
+`reviewing` for hours with a posted-but-unconsumed verdict. Observed twice in a
+consumer project's review runs in one day; both needed a manual kill + label nudge.
+
+**INV-48 timeout-veto preserved (by construction)**: the original early exit only
+fired when EVERY artifact landed, so no agent ever flowed to the rc-based terminal
+sweep on that path and a still-running agent's launch rc (124/137) was never
+consulted. The replacement keeps that property: a slot the loop early-exits past
+is ALREADY resolved with a **valid** verdict (a valid artifact OR a posted comment;
+its verdict wins over its rc —
+[INV-40](#inv-40-multi-agent-review-aggregates-under-unanimous-pass-each-agents-verdict-is-attributed-by-a-review-agent-discriminator)),
+and any slot that is NOT resolved (no valid artifact, no comment) makes
+`_all_first_verdicts_resolved` false, so the loop keeps waiting on PIDs (path a)
+until that agent's CLI exits with its real 124/137 cap — preserving
+[INV-48](#inv-48-per-side-review-wall-clock-timeout-agent_review_timeout-1h-default-with-browser-e2e-exclusion-and-timeout-veto)'s
+`timed-out` veto for it. An all-**valid**-artifact panel still early-exits on the
+same round with zero comment polls (a valid snapshot resolves its slot before the
+comment branch runs).
+
+**Malformed artifact ⇒ NOT resolved, and its comment is NOT consulted (#271 review
+[P1] ×2)**: `_observe_agent_resolved` classifies the landed snapshot
+(`_classify_verdict_artifact` with the slot's identity) and resolves the slot ONLY
+on `valid`. A `malformed` snapshot returns NOT-resolved **and does NOT fall through
+to the comment branch** — it short-circuits exactly like the POST-LOOP resolution,
+which refuses to let a malformed agent's comment override its artifact (a malformed
+artifact means the agent's machine output is untrustworthy — INV-78 Clause V1). This
+double rule is load-bearing for INV-48: a malformed artifact is "treated absent FOR
+THE VOTE", and an absent verdict is exactly what must keep the loop waiting on the
+PID. Were a malformed-AND-still-running agent treated as resolved — whether via its
+snapshot OR via a comment it happened to also post — the early exit would reap it
+**before its rc sidecar landed**, silently converting an rc-124/137 `timed-out`
+deciding-FAIL veto into a dropped `unavailable` vote (the terminal sweep keys on the
+durable `artifact-malformed` source) — letting a passing sibling approve the PR. If
+the observe gate consulted the comment for a malformed slot, a malformed agent that
+ALSO self-posted would re-open that dropped-veto bug through the comment door; so the
+gate skips the comment for `malformed`, matching the post-loop Clause V1 skip. (A
+malformed agent that has ALREADY exited is reaped via break-path (a) "all PIDs
+exited", where its rc sidecar IS present — so the `valid`-only gate changes only the
+still-running case, which is precisely the one that must wait.) Consequently
+`_all_artifacts_landed ⟹ _all_first_verdicts_resolved` holds **only for valid
+artifacts**: a panel of all-valid artifacts is byte-for-byte the prior behavior; a
+panel containing a malformed-AND-still-running artifact now correctly WAITS on that
+agent's PID rather than reaping it early. Once the agent exits and resolves
+`unavailable`/`malformed-output` (or `timed-out` on a 124/137 cap), that is the
+documented INV-78 Clause V1 outcome.
+
+**Producer**: `lib-review-poll.sh::_observe_agent_resolved` /
+`::_all_first_verdicts_resolved` (the per-slot + fleet resolved checks).
+
+**Consumer**: `autonomous-review.sh` (the post-fan-out observe loop's early-exit
+gate).
+
+**Status**: **ENFORCED** in #271's fix.
+
+**Tests**: `tests/unit/test-verdict-artifact.sh` — pure-lib TC-OBS-271-01..09
+(artifact-first resolution with no comment fetch, comment-only resolution, the
+mixed-panel all-resolved + the regression that a pending comment agent keeps the
+gate false, the all-artifact-writer parity + zero-comment-poll, the empty-fleet
+guard, and the `_all_artifacts_landed ⟹ _all_first_verdicts_resolved`
+generalization); integration TC-OBS-271-10/11 (the loop breaks on the resolved
+gate with a lingering PID and does NOT prematurely break while a comment agent is
+pending); and source-of-truth wiring W18/W19/W19b/W25-W28 (the wrapper uses the
+new gate, no longer the file-only one, names the completion signal, and reaps the
+lingerer after resolution).
+
+**Cross-references**:
+- [INV-78](#inv-78-review-verdicts-resolve-from-a-typed-artifact-file-first-comment-scraping-is-an-explicitly-logged-fallback-a-malformed-artifact-is-loud-never-a-silent-absent) — the verdict-artifact channel this refines; the "Live artifact-landing completion signal" paragraph now points here for the early-exit gate.
+- [INV-40](#inv-40-multi-agent-review-aggregates-under-unanimous-pass-each-agents-verdict-is-attributed-by-a-review-agent-discriminator) — a posted verdict wins over the launch rc (why a resolved slot's rc is irrelevant).
+- [INV-43](#inv-43-the-verdict-poll-budget-scales-with-the-command-mode-e2e-timeout) — `_reap_fanout_processes` (the lingerer cleanup) + the comment-poll fetch this gate reuses.
+- [INV-48](#inv-48-per-side-review-wall-clock-timeout-agent_review_timeout-1h-default-with-browser-e2e-exclusion-and-timeout-veto) — the timeout-veto preserved for genuinely-unresolved (no-artifact, no-comment) agents.
 
 ## Adding a new invariant
 
