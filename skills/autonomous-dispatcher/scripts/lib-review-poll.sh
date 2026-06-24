@@ -240,6 +240,74 @@ _run_verdict_poll_loop() {
   done
 }
 
+# _observe_agent_resolved <index> — INV-84 (#271): has fan-out slot <index>
+# resolved its FIRST verdict? rc 0 iff yes.
+#
+# The fan-out observe loop's early-exit (INV-78 [P1] #2) was gated on
+# `_all_artifacts_landed` — a path-existence check over EVERY slot's artifact
+# FILE. But a comment-only agent (one that posts its verdict as a GitHub comment
+# and never writes the artifact file) never satisfies that check, so on a MIXED
+# panel the early-exit was permanently dead and a single lingering agent PID
+# pinned the loop to its 6h ceiling. This helper resolves a slot the SAME way the
+# post-loop resolution does — artifact first, comment fallback:
+#
+#   • artifact branch — the slot's first-land FROZEN snapshot
+#     (AGENT_ARTIFACT_SNAPSHOTS[index], a `<path>.landed` file `_freeze_pass`
+#     copies the moment the artifact lands) exists. A local `[[ -f ]]` stat, NO
+#     API call. Checked FIRST so an all-artifact-writer panel makes ZERO extra
+#     comment-list API calls — the INV-78 zero-comment-poll AC is preserved.
+#     (A landed-but-MALFORMED artifact also freezes a snapshot, so it counts as
+#     resolved here — consistent with the documented INV-78 "malformed = the
+#     agent DID deliver output → treated absent → dropped" edge case; it is reaped
+#     and resolves unavailable/malformed-output, NOT a timed-out veto.)
+#
+#   • comment branch — only when the snapshot is absent: the slot's verdict
+#     COMMENT is observable via `_fetch_agent_verdict_body` (the SAME fetch +
+#     INV-20/INV-40 authenticity binding `_run_verdict_poll_loop` uses). A
+#     non-empty body means the agent posted its verdict; the verdict wins over
+#     the launch rc (INV-40), so the slot is resolved regardless of its PID.
+#
+# Reads AGENT_NAMES / AGENT_SESSION_IDS / AGENT_ARTIFACT_SNAPSHOTS. Uses
+# `_fetch_agent_verdict_body` (overridable by tests). No `set -e` hazard: the
+# comment fetch is inside `$(...)` and the helper never runs a bare failing
+# command.
+_observe_agent_resolved() {
+  local _idx="$1"
+  # Artifact first-land freeze (no API). AGENT_ARTIFACT_SNAPSHOTS may be unset in
+  # a degraded run with no provisioned paths — the `:-` keeps it safe.
+  local _snap="${AGENT_ARTIFACT_SNAPSHOTS[$_idx]:-}"
+  [[ -n "$_snap" && -f "$_snap" ]] && return 0
+  # Comment fallback — observe THIS slot's verdict comment (artifact never landed).
+  local _body
+  _body=$(_fetch_agent_verdict_body "${AGENT_NAMES[$_idx]}" "${AGENT_SESSION_IDS[$_idx]}")
+  [[ -n "$_body" ]] && return 0
+  return 1
+}
+
+# _all_first_verdicts_resolved — INV-84 (#271): rc 0 iff EVERY fan-out slot has a
+# resolved first verdict (per `_observe_agent_resolved`). This is the mixed-panel-
+# aware early-exit signal that REPLACES the artifact-file-only
+# `_all_artifacts_landed` gate in the observe loop.
+#
+# INV-48 timeout-veto is preserved by construction: a slot we early-exit past is
+# one that is ALREADY resolved (its verdict wins over its rc — INV-40), and any
+# slot that is NOT resolved (no artifact, no comment) makes this return non-zero,
+# so the loop keeps waiting on PIDs until that agent's CLI exits with its real
+# 124/137 cap (the `timed-out` veto). `_all_artifacts_landed ⟹
+# _all_first_verdicts_resolved` (a landed artifact freezes a snapshot), so an
+# all-artifact-writer panel keeps byte-for-byte its current behavior.
+#
+# Empty fleet (no slots) → rc 1: we cannot claim "all resolved" with zero slots
+# (mirrors `_all_artifacts_landed`'s no-args guard). Reads AGENT_NAMES.
+_all_first_verdicts_resolved() {
+  [[ "${#AGENT_NAMES[@]}" -gt 0 ]] || return 1
+  local _i
+  for _i in "${!AGENT_NAMES[@]}"; do
+    _observe_agent_resolved "$_i" || return 1
+  done
+  return 0
+}
+
 # _reap_fanout_processes <pgid...> — INV-43 (#172): group-kill any still-running
 # fan-out agent process group so a dropped / undecided review agent's CLI does
 # not outlive its review round (the orphaned-process side effect #172 reports).

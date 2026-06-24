@@ -2067,23 +2067,42 @@ done
 #       completion, which inherits each agent's `_run_with_timeout` 124/137 cap, so
 #       a genuinely-stuck agent still terminates and its launch rc is preserved
 #       (INV-48 timeout-veto intact); OR
-#   (b) ALL per-agent artifacts have landed (`_all_artifacts_landed`) — the EARLY
-#       exit. This is gated on ALL artifacts landing, NOT any: if every artifact is
-#       present, every agent resolves valid/malformed FROM ITS FILE and NONE flows
-#       to the rc-based terminal sweep, so a still-running agent's (as-yet-unwritten)
-#       launch rc is never consulted — INV-48 is not engaged for it. If even one
-#       artifact is missing we do NOT early-break; we keep waiting on PIDs so the
-#       missing-artifact agent still gets its real 124/137 rc for the timeout-veto.
+#   (b) every agent slot has a RESOLVED FIRST VERDICT (`_all_first_verdicts_resolved`,
+#       INV-84, #271) — the EARLY exit. A slot is resolved when its artifact's
+#       first-land frozen snapshot exists OR (for a comment-only agent that never
+#       writes an artifact file) its verdict comment is observable via the comment
+#       poll. This REPLACES the pre-#271 `_all_artifacts_landed` file-only gate,
+#       which was permanently DEAD on a MIXED panel (an artifact-writer + a
+#       comment-only agent): the comment-only slot never created a file, so the
+#       all-files-exist check never held and a single lingering PID pinned the loop
+#       to the 6h ceiling (#271). INV-48 is preserved by construction: a slot we
+#       early-exit past is ALREADY resolved (its verdict wins over its rc, INV-40),
+#       and any unresolved slot (no artifact, no comment) keeps this gate false → we
+#       keep waiting on PIDs so that agent still gets its real 124/137 rc for the
+#       timeout-veto. `_all_artifacts_landed ⟹ _all_first_verdicts_resolved`, so the
+#       all-artifact-writer panel keeps its exact prior behavior.
 # A still-running agent we early-exit past is reaped by _reap_fanout_processes
 # (its PGID sidecar is written at spawn by _run_with_timeout, before the agent
 # body) after verdict resolution. The token-refresh daemon / heartbeat are NOT in
 # `_fanout_pids`, so they are never observed here (unchanged from the bare wait).
 #
-# Defensive: when NO artifact paths were provisioned (e.g. a degraded run), the
-# loop reduces to the legacy "wait until all PIDs exit" behavior. An absolute
-# ceiling (VERDICT_ARTIFACT_OBSERVE_TIMEOUT_SECONDS, default 6h — well above the
-# per-agent cap) guards against an un-reapable PID; on expiry we break to the
-# reaper. The per-round sleep is the shared verdict-poll cadence.
+# Defensive: when NO agents resolve (a degraded run with no artifacts and no
+# comments), the loop reduces to the legacy "wait until all PIDs exit" behavior. An
+# absolute ceiling (VERDICT_ARTIFACT_OBSERVE_TIMEOUT_SECONDS, default 6h — well
+# above the per-agent cap) guards against an un-reapable PID; on expiry we break to
+# the reaper. The per-round sleep is the shared verdict-poll cadence.
+#
+# Verdict-keyword regex (closes #95): canonical phrasings plus drift variants.
+# Read by _fetch_agent_verdict_body (lib-review-poll.sh) when building the jq
+# finder. Keep in sync with _classify_verdict_body — this is the UNION of its
+# fail-bucket and pass-bucket patterns (the finder must match anything the
+# classifier can bucket). DEFINED HERE (before the observe loop), not at the later
+# comment-poll block: INV-84 (#271) makes the observe loop's early-exit gate call
+# _fetch_agent_verdict_body for a comment-only agent, which references _VERDICT_RE;
+# under `set -u` an unbound _VERDICT_RE would silently kill that `$(...)` fetch
+# (condition context suppresses the abort) → the comment branch would resolve
+# nothing → the mixed-panel early-exit would stay dead (the very bug #271 fixes).
+_VERDICT_RE='Review PASSED|Review APPROVED|APPROVED FOR MERGE|LGTM|Review PASS|Review findings:|Review FAILED|Review REJECTED|Changes requested'
 _observe_deadline=$(( SECONDS + ${VERDICT_ARTIFACT_OBSERVE_TIMEOUT_SECONDS:-21600} ))
 _observe_interval="${_VERDICT_POLL_INTERVAL_SECONDS:-5}"
 # [P1] #2: per-agent "duplicate already warned" flags so a post-land rewrite is
@@ -2111,20 +2130,23 @@ while :; do
   for _fp in "${_fanout_pids[@]}"; do
     if kill -0 "$_fp" 2>/dev/null; then _any_alive=1; break; fi
   done
-  # Freeze any newly-landed artifact at FIRST land, BEFORE the all-landed check —
-  # so the bytes the early-exit signal certifies are exactly the bytes resolved.
+  # Freeze any newly-landed artifact at FIRST land, BEFORE the resolved check — so
+  # the bytes the early-exit signal certifies are exactly the bytes resolved, and
+  # so _observe_agent_resolved's artifact branch (snapshot-present) sees a slot
+  # whose artifact landed this round.
   _freeze_pass
   [[ "$_any_alive" -eq 0 ]] && break
-  # (b) all artifacts landed? (early exit — INV-48-safe, see above). Guarded so a
-  # run with no provisioned paths never early-breaks here (falls to the PID check).
-  if [[ "${#AGENT_ARTIFACT_PATHS[@]}" -gt 0 ]] \
-     && _all_artifacts_landed "${AGENT_ARTIFACT_PATHS[@]}"; then
-    log "INV-78: all ${#AGENT_ARTIFACT_PATHS[@]} verdict artifact(s) landed — proceeding to resolve without waiting on a possibly-hung agent (rename-land completion signal). Lingering agent(s) are reaped after resolution."
+  # (b) every slot has a RESOLVED FIRST VERDICT? (early exit — INV-48-safe + mixed-
+  # panel-aware, INV-84 #271, see above). Artifact frozen-snapshot OR comment
+  # observed per slot; the comment fetch runs only for a slot whose artifact has
+  # not landed, so an all-artifact-writer panel makes zero extra comment-list calls.
+  if _all_first_verdicts_resolved; then
+    log "INV-84: every fan-out review agent (${#AGENT_NAMES[@]}) has a resolved first verdict (artifact landed or comment observed) — proceeding to resolve without waiting on a possibly-hung agent (mixed-panel completion signal). Lingering agent(s) are reaped after resolution."
     break
   fi
   # Absolute safety ceiling.
   if [[ "$SECONDS" -ge "$_observe_deadline" ]]; then
-    log "WARNING: INV-78 fan-out observe loop hit the absolute ceiling (${VERDICT_ARTIFACT_OBSERVE_TIMEOUT_SECONDS:-21600}s) with agent(s) still alive and not all artifacts landed — proceeding to reap + resolve."
+    log "WARNING: INV-78/INV-84 fan-out observe loop hit the absolute ceiling (${VERDICT_ARTIFACT_OBSERVE_TIMEOUT_SECONDS:-21600}s) with agent(s) still alive and not all first verdicts resolved — proceeding to reap + resolve."
     break
   fi
   sleep "$_observe_interval"
@@ -2163,12 +2185,10 @@ rm -rf "$_FANOUT_DIR" 2>/dev/null || true
 # ---------------------------------------------------------------------------
 log "Parsing review results from issue comments (per agent)..."
 
-# Verdict-keyword regex (closes #95): canonical phrasings plus drift variants.
-# Read by _fetch_agent_verdict_body (lib-review-poll.sh) when building the jq
-# finder. Keep in sync with _classify_verdict_body — this is the UNION of its
-# fail-bucket and pass-bucket patterns (the finder must match anything the
-# classifier can bucket).
-_VERDICT_RE='Review PASSED|Review APPROVED|APPROVED FOR MERGE|LGTM|Review PASS|Review findings:|Review FAILED|Review REJECTED|Changes requested'
+# Verdict-keyword regex (_VERDICT_RE) is defined ABOVE, before the fan-out observe
+# loop (INV-84, #271) — the observe-loop early-exit's comment branch references it,
+# so it must be in scope by then. It is still the same UNION-of-buckets regex
+# _fetch_agent_verdict_body builds its jq finder from here.
 
 # The verdict classifier (_classify_verdict_body, pass|fail FAIL-first, #95), the
 # per-round decision (_classify_unresolved_agent, #180), the per-agent verdict
