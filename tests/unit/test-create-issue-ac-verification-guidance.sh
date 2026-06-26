@@ -235,7 +235,10 @@ assert_contains "TC-ACV-020 templates reference the surface concept (verificatio
 # wrappers won't do — the `## Dependencies` sections legitimately still use `<!--`.
 note_lines=$(grep -nE 'known driver of non-terminating dev' "$TEMPLATES_MD")
 note_total=$(printf '%s\n' "$note_lines" | grep -c .)
-note_blockquote=$(printf '%s\n' "$note_lines" | grep -cE ':[[:space:]]*>')
+# Anchor to the `grep -n` line-number prefix (`<N>:`) so the `>` must be the FIRST
+# rendered character of the line (optionally indented), not a `: >` sequence buried
+# inside the note's body text — a blockquote line is what GitHub actually renders.
+note_blockquote=$(printf '%s\n' "$note_lines" | grep -cE '^[0-9]+:[[:space:]]*>')
 if [[ "$note_total" -eq 2 && "$note_blockquote" -eq 2 ]]; then
   echo -e "  ${GREEN}PASS${NC}: TC-ACV-021 pre-merge note is a VISIBLE blockquote in BOTH AC sections (not an HTML comment)"
   PASS=$((PASS + 1))
