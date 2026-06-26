@@ -227,6 +227,42 @@ assert_count "TC-ACV-018/019 pre-merge note (loop-driver wording) present in BOT
 assert_contains "TC-ACV-020 templates reference the surface concept (verification surface)" \
   "$(cat "$TEMPLATES_MD")" "verification surface"
 
+# TC-ACV-021: the note must be VISIBLE in the rendered GitHub draft, not buried in
+# an HTML comment (GitHub's renderer hides `<!-- ... -->`, so a commented note is
+# invisible on every draft — the exact [P1] finding on #273). Requirement: every
+# line carrying the loop-driver wording must be a Markdown BLOCKQUOTE line (begins
+# with `>`, optionally indented), which renders. A naive count of HTML-comment
+# wrappers won't do — the `## Dependencies` sections legitimately still use `<!--`.
+note_lines=$(grep -nE 'known driver of non-terminating dev' "$TEMPLATES_MD")
+note_total=$(printf '%s\n' "$note_lines" | grep -c .)
+note_blockquote=$(printf '%s\n' "$note_lines" | grep -cE ':[[:space:]]*>')
+if [[ "$note_total" -eq 2 && "$note_blockquote" -eq 2 ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-ACV-021 pre-merge note is a VISIBLE blockquote in BOTH AC sections (not an HTML comment)"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-ACV-021 pre-merge note must be a visible blockquote (line starting with the > marker) in both AC sections"
+  echo "      note lines total: $note_total ; blockquote lines: $note_blockquote (both must be 2)"
+  echo "      offending lines:"; printf '%s\n' "$note_lines" | sed 's/^/        /'
+  FAIL=$((FAIL + 1))
+fi
+
+# TC-ACV-022: belt-and-suspenders — the note must NOT be inside an HTML comment.
+# Scan each line for the note wording and confirm none sits between a `<!--` and a
+# `-->` (would render invisibly). Implemented as an awk in-comment state machine.
+note_in_comment=$(awk '
+  /<!--/ { incomment=1 }
+  incomment && /known driver of non-terminating dev/ { hits++ }
+  /-->/ { incomment=0 }
+  END { print hits + 0 }
+' "$TEMPLATES_MD")
+if [[ "$note_in_comment" -eq 0 ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-ACV-022 pre-merge note never appears inside an HTML comment (would be hidden on GitHub)"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-ACV-022 pre-merge note found INSIDE an HTML comment ($note_in_comment occurrence(s)) — GitHub hides it"
+  FAIL=$((FAIL + 1))
+fi
+
 echo
 echo "=== Summary ==="
 echo "Passed: $PASS"

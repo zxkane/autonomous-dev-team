@@ -55,7 +55,9 @@ pre-merge is a known driver of non-terminating dev↔review cycles.
 | TC-ACV-017 | Bug template now has `## Dependencies` (parity fix) | `## Dependencies` appears **twice** in file (count assertion) |
 | TC-ACV-018 | Feature AC section carries pre-merge note | note present in first AC section |
 | TC-ACV-019 | Bug AC section carries pre-merge note | note present in second AC section |
-| TC-ACV-020 | Pre-merge note references the surface concept | `pre-merge` in the always-present note |
+| TC-ACV-020 | Pre-merge note references the surface concept | `verification surface` in the always-present note |
+| TC-ACV-021 | Note is a **visible** blockquote in BOTH AC sections (not an HTML comment GitHub hides) | both note lines begin with the `>` blockquote marker |
+| TC-ACV-022 | Note never sits inside an HTML comment | awk in-comment scan finds 0 occurrences between `<!--` / `-->` |
 
 ## Acceptance criteria for this change (pre-merge verifiable)
 

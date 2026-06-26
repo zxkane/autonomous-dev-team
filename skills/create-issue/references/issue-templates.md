@@ -35,18 +35,17 @@
 - [ ] <Edge case: empty state / error state / unauthorized access>
 
 ## Acceptance Criteria
-<!--
-  For EACH criterion, classify it as PRE-MERGE VERIFIABLE (evidence obtainable
-  before merge — name the surface: CI job, PR-preview URL, staging command, or
-  local repro — plus the expected evidence) vs NOT pre-merge verifiable (needs
-  deploy/prod, real users, time soak, external approval, prod telemetry, or
-  credentials the bot lacks). Prefer pre-merge-verifiable criteria and name the
-  verification surface. A genuinely not-pre-merge criterion belongs in a separate
-  NON-blocking, NON-`autonomous` follow-up (reference it under `## Out of Scope`,
-  never `## Dependencies`) — a blocking AC the autonomous loop cannot satisfy
-  pre-merge is a known driver of non-terminating dev↔review loops. See
-  `references/ac-verification.md`.
--->
+
+> **Classify each criterion: is it _pre-merge verifiable_?** PRE-MERGE VERIFIABLE =
+> evidence obtainable before merge — **name the verification surface** (CI job, PR-preview URL,
+> staging command, or local repro) **+ the expected evidence**. NOT pre-merge
+> verifiable = needs deploy/prod, real users, time soak, external approval, prod
+> telemetry, or credentials the bot lacks. Prefer pre-merge-verifiable criteria. A
+> genuinely not-pre-merge criterion belongs in a separate **NON-blocking,
+> NON-`autonomous` follow-up** (reference it under `## Out of Scope`, **never**
+> `## Dependencies`) — a blocking AC the autonomous loop cannot satisfy pre-merge is
+> a known driver of non-terminating dev↔review loops. See `references/ac-verification.md`.
+
 - [ ] <Criterion 1 -- pre-merge verifiable; name the surface + expected evidence>
 - [ ] <Criterion 2>
 
@@ -125,22 +124,21 @@
 - [ ] Test the exact reproduction steps above end-to-end
 
 ## Acceptance Criteria
-<!--
-  For EACH criterion, classify it as PRE-MERGE VERIFIABLE (evidence obtainable
-  before merge — name the surface: CI job, PR-preview URL, staging command, or
-  local repro — plus the expected evidence) vs NOT pre-merge verifiable (needs
-  deploy/prod, real users, time soak, external approval, prod telemetry, or
-  credentials the bot lacks). Prefer pre-merge-verifiable criteria and name the
-  verification surface. A genuinely not-pre-merge criterion belongs in a separate
-  NON-blocking, NON-`autonomous` follow-up (reference it under `## Out of Scope`,
-  never `## Dependencies`) — a blocking AC the autonomous loop cannot satisfy
-  pre-merge is a known driver of non-terminating dev↔review loops. See
-  `references/ac-verification.md`.
 
-  NOTE: the bug `## Environment` field above may legitimately say `prod` — that is
-  the repro environment, NOT an acceptance criterion. The pre-merge classification
-  applies to the AC checkbox lines below, not to the Environment field.
--->
+> **Classify each criterion: is it _pre-merge verifiable_?** PRE-MERGE VERIFIABLE =
+> evidence obtainable before merge — **name the verification surface** (CI job, PR-preview URL,
+> staging command, or local repro) **+ the expected evidence**. NOT pre-merge
+> verifiable = needs deploy/prod, real users, time soak, external approval, prod
+> telemetry, or credentials the bot lacks. Prefer pre-merge-verifiable criteria. A
+> genuinely not-pre-merge criterion belongs in a separate **NON-blocking,
+> NON-`autonomous` follow-up** (reference it under `## Out of Scope`, **never**
+> `## Dependencies`) — a blocking AC the autonomous loop cannot satisfy pre-merge is
+> a known driver of non-terminating dev↔review loops. See `references/ac-verification.md`.
+>
+> NOTE: the bug `## Environment` field above may legitimately say `prod` — that is the
+> repro environment, NOT an acceptance criterion; the classification applies to the AC
+> checkbox lines below.
+
 - [ ] <Criterion 1 -- pre-merge verifiable; e.g. the regression test fails before
       the fix and passes after, green in the CI `unit` job (name the surface)>
 - [ ] <Criterion 2>
