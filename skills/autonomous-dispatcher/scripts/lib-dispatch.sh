@@ -1529,14 +1529,19 @@ last_reviewed_head() {
 # RE2-safe (plain alternation, no look-behind/ahead) so a `gh --jq` run can't
 # abort the wrapper under `set -e` ([gh --jq is RE2]).
 dev_report_bot_unfixable() {
-  local issue_num="$1" current_head="${2:-}" since_iso="" dev_login="" hits
+  # NOTE: arg 2 (the current PR head) is intentionally accepted-but-unused — the
+  # lower bound is now the current dev attempt's dispatch token, not a HEAD
+  # trailer (see scoping (2) below). Kept in the signature for call-site
+  # stability and because the caller already gates on the head.
+  local issue_num="$1" _current_head_unused="${2:-}" since_iso="" dev_login="" hits
 
-  # Count a PR-metadata 403 ONLY when it was authored BY the dev agent itself,
-  # within the current HEAD's review cycle. A 403 only proves the *active dev
-  # attempt* is bot-blocked when the dev agent reported it — not when a reviewer,
-  # a maintainer/owner, or a human comment merely *quotes* the signature. Three
-  # scopings, all fail-open toward NOT unfixable (so a same-HEAD failure still
-  # gets its one bounded retry rather than a spurious stall):
+  # Count a PR-metadata 403 ONLY when it was authored BY the dev agent during the
+  # CURRENT dev attempt. A 403 only proves the *active dev attempt* is bot-blocked
+  # when the dev agent reported it in this attempt — not when a reviewer, a
+  # maintainer/owner, or a human comment merely *quotes* the signature, and not
+  # when a PRIOR same-HEAD attempt hit a 403 the maintainer has since cleared.
+  # Three scopings, all fail-open toward NOT unfixable (so a same-HEAD failure
+  # still gets its one bounded retry rather than a spurious stall):
   #
   #   (1) AUTHOR allow-list (#274 review [P1] round-5): resolve the dev agent's
   #       comment author login from the most recent `Agent Session Report (Dev)`
@@ -1546,14 +1551,19 @@ dev_report_bot_unfixable() {
   #       yet), return NOT-unfixable — the active attempt keeps its bounded retry.
   #       This is the primary, robust discriminator; the review-marker exclusion
   #       below is kept only as belt-and-suspenders.
-  #   (2) Lower-bound the scan at the most recent `Reviewed HEAD:` trailer for a
-  #       SHA *different* from current_head — i.e. when the current HEAD became
-  #       the reviewed HEAD — so a 403 from a PRIOR cycle (even one the SAME dev
-  #       bot authored) falls before the bound. "No lower bound" only on the
-  #       genuinely-first cycle. NOT lower-bounded at the dev session's `Dev
-  #       Session ID:` comment: that trailer is posted in cleanup() at the END of
-  #       the run, AFTER the agent's completion/blocking note explaining the 403,
-  #       so anchoring there would miss the real 403 (round-4 finding 2).
+  #   (2) Lower-bound the scan at the CURRENT dev attempt's start — the most
+  #       recent dispatcher-token comment with `mode=dev-new` / `mode=dev-resume`
+  #       (posted by post_dispatch_token / Step 4 BEFORE the agent runs, so it
+  #       precedes the agent's completion 403 — round-4 finding 2 stays fixed).
+  #       This EXPIRES a 403 after each same-HEAD review cycle (#274 review [P1]
+  #       round-6): every re-dispatch posts a fresh dev-dispatch token, so a 403
+  #       the dev hit in a PRIOR attempt against the same HEAD falls before the
+  #       new token and is ignored — if a maintainer clears the obstacle (no new
+  #       commit) and a later same-HEAD review finds a *different* actionable
+  #       issue, that new finding still gets its bounded `dev-new`. NOT bounded at
+  #       a `Reviewed HEAD:` trailer (review-side, persists across same-HEAD
+  #       cycles) nor the cleanup-time `Dev Session ID:` trailer (posted after the
+  #       agent's 403). "No lower bound" only when no dev-dispatch token exists.
   #   (3) EXCLUDE review-agent comments (`Review Session:` / `Review findings` /
   #       `Review Agent:` markers) — redundant given (1) but harmless.
   #
@@ -1568,12 +1578,13 @@ dev_report_bot_unfixable() {
     2>/dev/null) || dev_login=""
   [ -n "$dev_login" ] || return 1
 
-  # (2) HEAD-cycle lower bound.
-  if [ -n "$current_head" ]; then
-    since_iso=$(gh issue view "$issue_num" --repo "$REPO" --json comments \
-      -q "[.comments[] | select((.body // \"\") | test(\"Reviewed HEAD:\")) | select((.body // \"\") | test(\"Reviewed HEAD: \`${current_head}\`\") | not)] | last | .createdAt // empty" \
-      2>/dev/null) || since_iso=""
-  fi
+  # (2) Current-dev-attempt lower bound: createdAt of the most recent
+  # `dispatcher-token ... mode=dev-new|dev-resume` comment. The `mode=dev-`
+  # prefix matches both and excludes `mode=review`. RE2-safe (literal substring,
+  # no look-behind/ahead).
+  since_iso=$(gh issue view "$issue_num" --repo "$REPO" --json comments \
+    -q "[.comments[] | select((.body // \"\") | test(\"<!-- dispatcher-token: .* mode=dev-\")) | .createdAt] | last // empty" \
+    2>/dev/null) || since_iso=""
   since_iso="${since_iso:-1970-01-01T00:00:00Z}"
 
   # `.body` is null when a comment has an empty body; `null | test(...)` aborts

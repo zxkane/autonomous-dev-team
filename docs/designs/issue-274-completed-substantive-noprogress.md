@@ -113,14 +113,17 @@ current HEAD's review cycle, not one quoted by any other commenter. Three scopin
   discriminator — a maintainer comment quoting the 403 is **not** a review-agent
   comment, so the review-marker exclusion alone could not drop it. If the dev
   author can't be resolved (no dev session report yet), return NOT-unfixable.
-- **Lower bound at the most recent `Reviewed HEAD:` trailer for a *different* SHA**
-  (when the current HEAD became the reviewed HEAD), falling back to "no lower
-  bound" only on the genuinely-first cycle. An old 403 self-expires once a newer
-  cycle's trailer lands. The bound is deliberately **not** the dev session's
-  `Dev Session ID:` comment: that is the `Agent Session Report (Dev)` trailer
-  posted in `cleanup()` at the *end* of the run, AFTER the agent's own completion
-  comment explaining the 403 — anchoring there would put the real 403 before the
-  bound and miss it (round-4 finding 2).
+- **Lower bound at the current dev attempt's start** — the most recent
+  `dispatcher-token … mode=dev-new` / `mode=dev-resume` comment (posted *before*
+  the agent runs), falling back to "no lower bound" only when no dev-dispatch
+  token exists. This **expires** a 403 after each same-HEAD review cycle: every
+  re-dispatch posts a fresh dev token, so a 403 from a PRIOR same-HEAD attempt
+  falls before the new token and is ignored — a later same-HEAD finding still
+  gets its bounded `dev-new` (round-6 finding). The bound is deliberately **not**
+  a `Reviewed HEAD:` trailer (review-side, persists across same-HEAD cycles) nor
+  the `Dev Session ID:` comment (the `Agent Session Report (Dev)` trailer posted
+  in `cleanup()` at the *end* of the run, AFTER the agent's completion 403 —
+  anchoring there would miss it, round-4 finding 2).
 - **Exclusion of review-agent comments** (`Review Session:` / `Review findings` /
   `Review Agent:` markers) — redundant given the author allow-list, kept as
   belt-and-suspenders.

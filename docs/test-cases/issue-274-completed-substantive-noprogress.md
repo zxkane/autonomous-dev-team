@@ -96,29 +96,35 @@ asserts the guard requests `number,headRefOid,body`. The routing suite mocks
 which would make `gh pr list` omit `.body`, the helper's `.body` filter return
 empty, and both guards silently no-op in production.
 
-### TC-BU (`test-dev-report-bot-unfixable.sh`, ids 001..007 + 010..015, 13 cases): detector dev-author + HEAD-cycle scoping
+### TC-BU (`test-dev-report-bot-unfixable.sh`, ids 001..007 + 010..016, 14 cases): detector dev-author + per-attempt scoping
 
 Standalone tests of the REAL `dev_report_bot_unfixable` against a scripted `gh`
 mock (the routing suite mocks the function itself). All fixtures carry
-`.author.login`; the dev agent authors `dev-bot[bot]` and its `Agent Session
-Report (Dev)` comment (the dev-login anchor):
-- **001..007** (dev-authored, HEAD-cycle window): in-window dev 403 on a PR edit
-  → unfixable; a 403 OLDER than the last different-HEAD `Reviewed HEAD:` trailer
-  → NOT unfixable (self-expiry); a 403 without PR-metadata context → not the
-  signature; null comment bodies tolerated (#148 guard); first-cycle
-  conservative-toward-escalate; same-head trailer ignored for the window boundary.
+`.author.login`; the dev agent authors `dev-bot[bot]` (with an `Agent Session
+Report (Dev)` comment = the dev-login anchor), the dispatcher authors the
+`dispatcher-token … mode=dev-*` comment (the per-attempt lower bound):
+- **001..007** (dev-authored, per-attempt window): a dev 403 AFTER the current
+  dev-dispatch token → unfixable; a 403 BEFORE it → NOT unfixable (prior attempt
+  expired); a 403 without PR-metadata context → not the signature; null comment
+  bodies tolerated (#148 guard); no dev token → no bound (conservative); a
+  `mode=review` token does NOT move the bound.
 - **010..011** (review-comment exclusion, round-3): a **review-agent** comment
   quoting the 403 → different author → NOT counted; a genuine dev 403 alongside a
   sibling review quote → the dev one still counts.
-- **012** (round-4 finding 2 regression): the agent's completion 403 posted
-  *before* the cleanup-time `Dev Session ID:` trailer → still detected.
-- **013**: a 403 before the most recent different-HEAD trailer → out of window →
-  NOT unfixable.
+- **012** (round-4 finding 2 regression): the agent's completion 403 posted after
+  the dev-dispatch token but *before* the cleanup-time `Dev Session ID:` trailer
+  → still detected.
+- **013**: a 403 before the current dev-dispatch token → out of window → NOT
+  unfixable.
 - **014** (round-5 [P1] regression): a **maintainer/owner** comment (NOT a review
-  agent, so the review-marker exclusion would not drop it) quoting the 403 with
-  PR-edit text → different author → NOT counted.
+  agent) quoting the 403 with PR-edit text → different author → NOT counted.
 - **015**: no dev session report → dev author unresolvable → fail-open (NOT
-  unfixable), even with a dev-looking 403 present.
+  unfixable).
+- **016** (round-6 [P1] regression): a PRIOR same-HEAD attempt hit a 403, a
+  maintainer cleared the metadata (no new commit), the issue was re-dispatched (a
+  NEW dev-dispatch token), and the new same-HEAD attempt did not hit the 403 →
+  the old 403 expires at the new token → NOT unfixable (the new finding gets its
+  bounded retry).
 
 ### TC-DISP-NOPROG-005: first substantive attempt at a HEAD → records marker, dev-new (bounded N=1)
 
