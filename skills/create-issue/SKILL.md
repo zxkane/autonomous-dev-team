@@ -32,6 +32,17 @@ When the user describes a feature or bug, gather context through clarifying ques
 **For features, clarify:**
 - What is the user-facing goal? (not implementation details)
 - What are the acceptance criteria? (how to verify it works)
+- **For each acceptance criterion, is it _pre-merge verifiable_?** Can its evidence
+  be obtained before the PR merges, from a surface the autonomous dev/review agents
+  can reach — a CI job, a PR-preview URL, a staging command, a local repro? Prefer
+  pre-merge-verifiable ACs and have the author **name the surface + expected
+  evidence**. If a criterion is *not* pre-merge verifiable (needs deploy/prod, real
+  users, a time soak, an external approval, prod telemetry, or credentials the bot
+  lacks), first check whether an existing PR-preview/staging path already covers the
+  same code path with the same input; if it genuinely cannot be verified pre-merge,
+  split it into a separate **non-blocking, non-`autonomous` follow-up** (see
+  **`references/ac-verification.md`**). A blocking AC the loop cannot satisfy
+  pre-merge is a known driver of non-terminating dev↔review loops.
 - Are there UI/UX implications?
 - What existing functionality does this relate to?
 - Priority and scope constraints
@@ -78,6 +89,18 @@ Present the draft issue to the user with:
 Use AskUserQuestion to confirm:
 - "Does this issue look correct? Should I create it?"
 - Ask about autonomous label: whether AI should handle this automatically
+
+**Advisory pre-merge-verifiability self-scan** (you are the linter — no runtime
+script): self-scan the draft's **AC checkbox lines only** (the `- [ ]` lines under
+`## Acceptance Criteria`, NOT other fields — this avoids false positives on the bug
+template's `## Environment` field, whose `Stage:` value may legitimately be `prod`)
+for phrasing that signals a not-pre-merge AC:
+`post-merge`, `after merge`, `in production`, **and the long tail** — `live users`,
+`soak`, `rollout`, `approver`, `prod telemetry`, `manual smoke`. If a **blocking** AC
+matches and there is no paired follow-up split, **warn the author (advisory, not
+blocking)** and offer to split it per **`references/ac-verification.md`** §3 (create
+a non-blocking, non-`autonomous` follow-up; reference it under `## Out of Scope`,
+never under `## Dependencies`). Do not hard-fail the draft on a match.
 
 ### Step 5: Create the Issue
 
@@ -129,6 +152,7 @@ Frame the question as:
 - **Title**: Start with verb, be specific. "Add pagination to plans list page" not "Plans page improvement"
 - **Body**: Write for an AI developer who has access to the full codebase but no verbal context from this conversation
 - **Acceptance criteria**: Must be objectively verifiable, not subjective
+- **AC verification surface**: For each acceptance criterion, classify it as **pre-merge verifiable** (evidence obtainable before merge — name the surface: CI job, PR-preview URL, staging command, or local repro — plus the expected evidence) vs **not pre-merge verifiable** (needs deploy/prod, real users, time soak, external approval, prod telemetry, or credentials the bot lacks). Prefer the former, and always **name the surface + expected evidence** rather than asserting the outcome alone. A genuinely not-pre-merge criterion belongs in a separate **non-blocking, non-`autonomous` follow-up** (reference it under `## Out of Scope`, never `## Dependencies`) — leaving it as a blocking AC is a known driver of non-terminating dev↔review loops. Full rubric, reuse-existing-preview guidance, the split procedure, and worked examples: **`references/ac-verification.md`**.
 - **Scope**: Prefer smaller, focused issues over large multi-part ones
 - **References**: Link to related issues, PRD sections, or code paths when relevant
 - **Dependencies**: The `## Dependencies` section must contain **only** issues that must be closed/merged before this issue can be started. Do NOT include: parent epics referenced for context, issues this one unblocks, or any `#NNN` reference that isn't a true blocker. The autonomous dispatcher parses this section literally — any open list-item ref causes this issue to be silently skipped until it closes/merges. Parsing scope: **list-item lines only** (lines starting with `-`, `*`, or `1.`); prose and blockquotes between `## Dependencies` and the next `## ` are ignored. On a list item, both `#N` (same-repo) and `owner/repo#N` (cross-repo) are recognized. If there are no blockers, write exactly `None`. Create issues in dependency order so earlier issue numbers are known when writing later ones.
@@ -152,4 +176,5 @@ When breaking a large feature into multiple issues:
 
 For detailed content, consult:
 - **`references/issue-templates.md`** -- Full feature and bug issue templates with all required sections
+- **`references/ac-verification.md`** -- Pre-merge-vs-not-pre-merge AC classification rubric, reuse-existing-preview guidance, the split-to-non-blocking-follow-up procedure, the `no-auto-close` clarification, and two worked examples (loop prevention)
 - **`references/workspace-changes.md`** -- Complete workspace change detection, attachment strategies, and cleanup procedure
