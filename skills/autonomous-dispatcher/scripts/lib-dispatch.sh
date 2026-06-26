@@ -1030,7 +1030,7 @@ handle_completed_session_routing() {
       # is no PR body to have hit a 403 against.)
       if [ -n "$_np_current_head" ] && [ -n "$_np_last_head" ] \
          && [ "$_np_current_head" = "$_np_last_head" ] \
-         && dev_report_bot_unfixable "$issue_num" "$_np_current_head"; then
+         && dev_report_bot_unfixable "$issue_num" "$_np_current_head" "$session_id"; then
         log "  issue #${issue_num} substantive review failure is bot-unfixable (PR-metadata 403 / maintainer-only) — escalating to operator, no dev-new"
         if gh issue view "$issue_num" --repo "$REPO" --json comments \
             -q "[.comments[].body | select(contains(\"${_np_notice_marker}\"))] | length" \
@@ -1097,14 +1097,35 @@ handle_completed_session_routing() {
       post_dispatch_token "$issue_num" "dev-new"
       dispatch dev-new "$issue_num"
       # Record the per-HEAD attempt marker ONLY now that the fresh dev-new has
-      # actually been dispatched (#274 review [P1] finding 2). The next tick that
-      # sees the same HEAD still failing substantively will find this marker and
-      # take branch B (escalate) instead of looping another dev-new. Skipped when
-      # the HEAD is unknown (no PR) — branch B can't key on an empty head anyway.
+      # actually been dispatched (the marker means "a dev-new ran for this
+      # HEAD"; writing it before dispatch would leave a phantom marker on an
+      # aborted dispatch). The next tick that sees the same HEAD still failing
+      # substantively finds this marker and takes branch B (escalate) instead of
+      # looping another dev-new. Skipped when the HEAD is unknown (no PR) —
+      # branch B can't key on an empty head anyway.
+      #
+      # Do NOT swallow a marker-write failure with `|| true` (#274 review [P1]
+      # finding 2): the one-per-HEAD bound depends on this comment landing. If
+      # GitHub rejects it (rate-limit/auth/network blip), retry once, and on
+      # persistent failure post a LOUD operator notice so the degraded bound is
+      # visible — the `MAX_RETRIES` retry-count backstop (this dev-new consumed a
+      # retry slot, per INV-35) still caps the loop, but the operator should know
+      # the tighter N=1 guarantee was lost for this HEAD.
       if [ -n "$_np_current_head" ]; then
-        gh issue comment "$issue_num" --repo "$REPO" \
-          --body "<!-- no-progress-substantive-attempt:${_np_current_head} session=${session_id} -->" \
-          2>/dev/null || true
+        # The marker is an HTML comment carrying the EXACT token branch B greps
+        # for (`no-progress-substantive-attempt:<head>`). The operator notice
+        # below must NOT contain that literal token verbatim — otherwise the
+        # notice itself would satisfy branch B's presence check next tick and
+        # cause the very false-stall this guard prevents. The notice therefore
+        # describes the marker without reproducing the grep token.
+        local _attempt_marker="<!-- no-progress-substantive-attempt:${_np_current_head} session=${session_id} -->"
+        if ! gh issue comment "$issue_num" --repo "$REPO" --body "$_attempt_marker" 2>/dev/null \
+           && ! gh issue comment "$issue_num" --repo "$REPO" --body "$_attempt_marker" 2>/dev/null; then
+          log "  WARNING: failed to post the no-progress attempt marker for issue #${issue_num} HEAD ${_np_current_head} after retry — N=1 no-progress bound degraded for this HEAD (MAX_RETRIES remains the backstop)."
+          gh issue comment "$issue_num" --repo "$REPO" \
+            --body "⚠️ Dispatched a fresh dev session for the substantive review failure, but could not record the per-HEAD no-progress attempt tracker for \`${_np_current_head}\` (GitHub API rejected the hidden marker comment twice). The per-HEAD one-retry bound ([INV-85]) is degraded for this HEAD; the issue is still bounded by \`MAX_RETRIES\`. @${REPO_OWNER} no action needed unless the issue churns dev retries against an unchanged HEAD." 2>/dev/null \
+            || log "  WARNING: operator notice for the degraded no-progress tracker also failed to post for issue #${issue_num}."
+        fi
       fi
       return 0
       ;;
@@ -1501,23 +1522,36 @@ last_reviewed_head() {
 # RE2-safe (plain alternation, no look-behind/ahead) so a `gh --jq` run can't
 # abort the wrapper under `set -e` ([gh --jq is RE2]).
 dev_report_bot_unfixable() {
-  local issue_num="$1" current_head="${2:-}" since_iso hits
+  local issue_num="$1" current_head="${2:-}" session_id="${3:-}" since_iso="" hits
 
-  # HEAD-scope the scan (#274 review [P1] finding 1): a PR-metadata 403 is only
-  # meaningful for the CURRENT HEAD's review cycle. Scanning ALL history makes a
-  # single old 403 permanently mark the issue unfixable, even after HEAD advances
-  # or a maintainer applies the metadata edit. We therefore only consider 403
-  # comments created AFTER the most recent `Reviewed HEAD:` trailer for a
-  # *different* (older) SHA — i.e. since the current HEAD became the reviewed
-  # HEAD. When HEAD advances, the next review's trailer for the new SHA moves the
-  # window forward and an earlier 403 drops out of scope (self-expiring).
+  # Scope the scan to the ACTIVE dev attempt (#274 review [P1] findings 1×2). A
+  # PR-metadata 403 only proves the *current* dev attempt is bot-blocked when it
+  # was reported by THIS dev session, not when some earlier review/human/dev
+  # comment merely quotes the 403 text. Two bounds, both fail-open toward NOT
+  # unfixable (so a same-HEAD failure still gets its bounded retry rather than a
+  # spurious stall):
   #
-  # `since_iso` empty (no prior different-HEAD trailer — e.g. first review) means
-  # "no lower bound": scan all comments. That is the conservative-toward-escalate
-  # choice ONLY for the genuinely-first cycle; the caller additionally gates this
-  # whole branch on `current_head == last_reviewed_head`, so a HEAD that has
-  # advanced never reaches here regardless of `since_iso`.
-  if [ -n "$current_head" ]; then
+  #   (1) Lower-bound the scan at the current session's `Dev Session ID:
+  #       <session_id>` comment timestamp — the moment the active attempt
+  #       started. A 403 quoted in any PRIOR-attempt comment (or by a maintainer
+  #       before this attempt) falls before the bound and is ignored. Falls back
+  #       to the current-HEAD review window (most recent `Reviewed HEAD:` trailer
+  #       for a *different* SHA) when the session-id comment isn't found, then to
+  #       "no lower bound" only on the genuinely-first cycle.
+  #   (2) EXCLUDE review-agent comments (those carrying `Review Session:` /
+  #       `Review findings` / `Review Agent:` markers) so a reviewer that quotes
+  #       `Resource not accessible by integration` while *describing* the bug is
+  #       never counted as the dev attempt hitting it.
+  #
+  # The caller additionally gates this whole branch on
+  # `current_head == last_reviewed_head`, so HEAD-advanced attempts never reach
+  # here regardless of the bounds.
+  if [ -n "$session_id" ]; then
+    since_iso=$(gh issue view "$issue_num" --repo "$REPO" --json comments \
+      -q "[.comments[] | select((.body // \"\") | test(\"Dev Session ID: .${session_id}\"))] | last | .createdAt // empty" \
+      2>/dev/null) || since_iso=""
+  fi
+  if [ -z "$since_iso" ] && [ -n "$current_head" ]; then
     since_iso=$(gh issue view "$issue_num" --repo "$REPO" --json comments \
       -q "[.comments[] | select((.body // \"\") | test(\"Reviewed HEAD:\")) | select((.body // \"\") | test(\"Reviewed HEAD: \`${current_head}\`\") | not)] | last | .createdAt // empty" \
       2>/dev/null) || since_iso=""
@@ -1531,6 +1565,7 @@ dev_report_bot_unfixable() {
     -q "[.comments[]
          | select(.createdAt > \"${since_iso}\")
          | (.body // \"\")
+         | select((test(\"Review Session:\") or test(\"Review findings\") or test(\"Review Agent:\")) | not)
          | select(test(\"Resource not accessible by integration\"))
          | select(test(\"pr edit\"; \"i\") or test(\"PATCH\"; \"i\") or test(\"pull request\"; \"i\") or test(\"PR body\"; \"i\") or test(\"pull_request\"; \"i\"))] | length" \
     2>/dev/null) || return 1

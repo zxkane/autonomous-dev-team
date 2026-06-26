@@ -127,15 +127,23 @@ gh() {
   local cmd="${1:-}"
   local sub="${2:-}"
   if [[ "$cmd" == "issue" && "$sub" == "comment" ]]; then
-    while [[ $# -gt 0 ]]; do
-      if [[ "$1" == "--body" ]]; then
-        _MOCK_LAST_COMMENT_BODY="$2"
-        _MOCK_FULL_COMMENT_LOG+="$2"$'\n'
-        _MOCK_COMMENT_COUNT=$((_MOCK_COMMENT_COUNT + 1))
-        return 0
+    local _body=""
+    local _i
+    for ((_i = 1; _i <= $#; _i++)); do
+      if [[ "${!_i}" == "--body" ]]; then
+        local _bi=$((_i + 1)); _body="${!_bi}"; break
       fi
-      shift
     done
+    # #274 INV-85 finding 2: simulate a GitHub rejection of the attempt-marker
+    # write so the retry + loud-operator-notice path can be exercised. Counts
+    # the rejected attempts (the production code retries once).
+    if [[ "$_MOCK_ATTEMPT_WRITE_FAILS" == "1" && "$_body" == *"no-progress-substantive-attempt:"* ]]; then
+      _MOCK_ATTEMPT_WRITE_TRIES=$((_MOCK_ATTEMPT_WRITE_TRIES + 1))
+      return 1
+    fi
+    _MOCK_LAST_COMMENT_BODY="$_body"
+    _MOCK_FULL_COMMENT_LOG+="$_body"$'\n'
+    _MOCK_COMMENT_COUNT=$((_MOCK_COMMENT_COUNT + 1))
     return 0
   fi
   if [[ "$cmd" == "issue" && "$sub" == "view" ]]; then
@@ -165,6 +173,8 @@ _MOCK_LAST_REVIEWED_HEAD=""
 _MOCK_BOT_UNFIXABLE=1            # 1 = not unfixable (default); 0 = unfixable
 _MOCK_NOPROG_ATTEMPT_PRESENT="0"
 _MOCK_NOPROG_NOTICE_PRESENT="0"
+_MOCK_ATTEMPT_WRITE_FAILS="0"    # 1 = reject attempt-marker writes (finding 2)
+_MOCK_ATTEMPT_WRITE_TRIES=0
 
 fetch_pr_for_issue() {
   # Emits the same single-line JSON shape the real helper does, or empty.
@@ -196,6 +206,8 @@ reset_mocks() {
   _MOCK_BOT_UNFIXABLE=1
   _MOCK_NOPROG_ATTEMPT_PRESENT="0"
   _MOCK_NOPROG_NOTICE_PRESENT="0"
+  _MOCK_ATTEMPT_WRITE_FAILS="0"
+  _MOCK_ATTEMPT_WRITE_TRIES=0
   unset REVIEW_RETRY_LIMIT
   if [[ -n "$_MOCK_LOG_FILE" ]]; then
     chmod u+w "$_MOCK_LOG_FILE" 2>/dev/null || true
@@ -530,6 +542,32 @@ assert_eq "NOPROG-005 NO stall (first attempt allowed)" "" "$_MOCK_MARK_STALLED_
 assert_contains "NOPROG-005 attempt marker recorded" "no-progress-substantive-attempt:deadbeef" "$_MOCK_FULL_COMMENT_LOG"
 log_size=$(stat -c '%s' "$_MOCK_LOG_FILE")
 assert_eq "NOPROG-005 log truncated to 0 bytes" "0" "$log_size"
+
+# TC-DISP-NOPROG-008 (#274 review [P1] round-3 finding 2): when the attempt-marker
+# write is rejected by GitHub, the code must NOT silently swallow it — it retries
+# once (2 total attempts) and posts a LOUD operator notice that the N=1 bound is
+# degraded. dev-new still dispatched; MAX_RETRIES remains the backstop.
+reset_mocks
+_MOCK_VERDICT="failed-substantive"
+_MOCK_PR_HEAD="deadbeef"
+_MOCK_LAST_REVIEWED_HEAD="deadbeef"
+_MOCK_NOPROG_ATTEMPT_PRESENT="0"
+_MOCK_ATTEMPT_WRITE_FAILS="1"         # GitHub rejects the marker comment
+prepare_log 100
+assert_returns "NOPROG-008 returns 0" 0 \
+  handle_completed_session_routing 100 "sid-np008" "2026-05-21T03:18:00Z"
+assert_eq "NOPROG-008 dispatch dev-new still fired" "dev-new:100 " "$_MOCK_DISPATCH_CALLS"
+assert_eq "NOPROG-008 marker write retried once (2 attempts)" "2" "$_MOCK_ATTEMPT_WRITE_TRIES"
+assert_contains "NOPROG-008 loud operator notice on degraded bound" "could not record the per-HEAD no-progress attempt tracker for \`deadbeef\`" "$_MOCK_LAST_COMMENT_BODY"
+# The loud notice must NOT contain the literal grep token, else it would satisfy
+# branch B's marker-presence check next tick → a false stall.
+if [[ "$_MOCK_LAST_COMMENT_BODY" != *"no-progress-substantive-attempt:"* ]]; then
+  echo -e "  ${GREEN}PASS${NC}: NOPROG-008 notice avoids the literal marker grep token"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: NOPROG-008 notice contains the grep token (would false-trigger branch B)"
+  FAIL=$((FAIL + 1))
+fi
 
 # Cleanup
 reset_mocks

@@ -103,16 +103,33 @@ is a PR-body edit its scoped token can't perform ([INV-79]). When present, no
 commit the bot can push will clear the finding, so we escalate without spending a
 `dev-new`.
 
-**HEAD-window scoping (#274 review [P1] finding 1)**: the scan is bounded to
-comments created *after* the most recent `Reviewed HEAD:` trailer for a SHA
-**different** from `current_head` — i.e. within the current HEAD's review cycle.
-This makes an old 403 self-expire: once HEAD advances and a new review posts a
-`Reviewed HEAD:<new>` trailer, the prior 403 falls outside the window. The caller
-**additionally** gates branch A on `current_head == last_reviewed_head`, so a 403
-can only escalate when HEAD has not advanced. Without this, a single historical
-403 comment would route *every* later completed-session substantive failure on
-the issue to `mark_stalled`, even after a maintainer applied the metadata edit or
-the dev pushed unrelated progress.
+**Active-attempt scoping (#274 review [P1], findings 1 across two review rounds)**:
+the scan only counts a 403 reported BY the current dev attempt, not one merely
+quoted by an earlier review/human/dev comment. Two scopings:
+- **Lower bound at the current session's `Dev Session ID: <session_id>` comment**
+  (the moment the active attempt started), falling back to the current-HEAD
+  review window (comments after the most recent `Reviewed HEAD:` trailer for a
+  *different* SHA), then to "no lower bound" only on the genuinely-first cycle.
+  An old 403 self-expires once a newer session/trailer lands.
+- **Exclusion of review-agent comments** (`Review Session:` / `Review findings` /
+  `Review Agent:` markers) so a reviewer that quotes
+  `Resource not accessible by integration` while *describing* the finding is
+  never counted as the dev attempt hitting it.
+
+The caller **additionally** gates branch A on `current_head == last_reviewed_head`,
+so a 403 can only escalate when HEAD has not advanced. Both bounds are fail-open
+toward NOT-unfixable. Without this scoping, a single historical or quoted 403 would
+route *every* later completed-session substantive failure on the issue to
+`mark_stalled`, even after a maintainer applied the metadata edit or the dev pushed
+unrelated progress.
+
+**Attempt-marker write failure is not swallowed (#274 review [P1] round-3 finding
+2)**: the marker write (after dispatch) is retried once; on persistent failure a
+loud operator notice is posted — worded WITHOUT the literal
+`no-progress-substantive-attempt:<head>` grep token so the notice can't itself
+satisfy branch B next tick. A lost marker degrades the N=1 bound but the issue
+stays bounded by `MAX_RETRIES` (the completed-session `dev-new` consumes a retry
+slot).
 
 The detector is fail-safe: a `gh` transport error yields empty output → the
 signature is "not found" → we fall through to the bounded-retry path (B/C), which

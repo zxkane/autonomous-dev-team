@@ -116,6 +116,43 @@ _MOCK_COMMENTS_JSON='{"comments":[
 ]}'
 assert_rc "BU-007 same-head trailer ignored for window → unfixable" 0 dev_report_bot_unfixable 100 "newsha"
 
+# --- #274 review [P1] round-3: active-attempt scoping (3rd arg = session_id) ---
+
+# BU-008: a 403 reported BEFORE the current session's `Dev Session ID:` comment
+# is from a PRIOR attempt → NOT counted (active-attempt lower bound). This is the
+# round-3 finding-1 regression: only the CURRENT dev attempt's 403 should stall.
+_MOCK_COMMENTS_JSON='{"comments":[
+  {"createdAt":"2026-06-26T09:00:00Z","body":"prior attempt 403 Resource not accessible by integration on gh pr edit (PR body)"},
+  {"createdAt":"2026-06-26T10:00:00Z","body":"**Agent Session Report (Dev)**\n- Dev Session ID: `sess-CURRENT`"}
+]}'
+assert_rc "BU-008 403 before current session start → NOT unfixable" 1 dev_report_bot_unfixable 100 "newsha" "sess-CURRENT"
+
+# BU-009: a 403 reported AFTER the current session's `Dev Session ID:` comment IS
+# the active attempt → unfixable.
+_MOCK_COMMENTS_JSON='{"comments":[
+  {"createdAt":"2026-06-26T10:00:00Z","body":"**Agent Session Report (Dev)**\n- Dev Session ID: `sess-CURRENT`"},
+  {"createdAt":"2026-06-26T10:30:00Z","body":"I hit 403 Resource not accessible by integration on gh pr edit (PR body)"}
+]}'
+assert_rc "BU-009 403 after current session start → unfixable" 0 dev_report_bot_unfixable 100 "newsha" "sess-CURRENT"
+
+# BU-010: a REVIEW-AGENT comment that QUOTES the 403 while describing the bug is
+# excluded → NOT unfixable. This is the round-3 finding-1 core case: a reviewer
+# (or human) merely mentioning the signature must not stall the active attempt.
+_MOCK_COMMENTS_JSON='{"comments":[
+  {"createdAt":"2026-06-26T10:00:00Z","body":"**Agent Session Report (Dev)**\n- Dev Session ID: `sess-CURRENT`"},
+  {"createdAt":"2026-06-26T10:30:00Z","body":"Review findings:\n1. [P1] The dev hit 403 Resource not accessible by integration on gh pr edit (PR body) — handle it.\nReview Agent: codex"}
+]}'
+assert_rc "BU-010 review comment quoting 403 excluded → NOT unfixable" 1 dev_report_bot_unfixable 100 "newsha" "sess-CURRENT"
+
+# BU-011: review comment quoting the 403 AND a genuine dev 403 in the same
+# window → the dev one still counts (exclusion drops only the review comment).
+_MOCK_COMMENTS_JSON='{"comments":[
+  {"createdAt":"2026-06-26T10:00:00Z","body":"**Agent Session Report (Dev)**\n- Dev Session ID: `sess-CURRENT`"},
+  {"createdAt":"2026-06-26T10:20:00Z","body":"Review findings:\n1. quotes 403 Resource not accessible by integration on gh pr edit.\nReview Session: `r1`"},
+  {"createdAt":"2026-06-26T10:40:00Z","body":"dev here: I genuinely hit 403 Resource not accessible by integration editing the PR body via gh pr edit"}
+]}'
+assert_rc "BU-011 dev 403 counts despite a sibling review quote" 0 dev_report_bot_unfixable 100 "newsha" "sess-CURRENT"
+
 echo ""
 echo "=== Summary ==="
 echo "  PASS: $PASS"

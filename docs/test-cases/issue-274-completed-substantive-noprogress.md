@@ -77,15 +77,31 @@ regression: the attempt marker must be written only after a successful dispatch.
 `no-progress-substantive-attempt:` marker posted (so the next tick re-attempts
 cleanly instead of stalling on a phantom marker).
 
-### TC-BU-001..007 (`test-dev-report-bot-unfixable.sh`): detector HEAD-window scoping
+### TC-DISP-NOPROG-008 (#274 review [P1] round-3 finding 2): marker write failure → retry + loud notice, never silent
+
+**Setup**: first attempt at a HEAD; GitHub rejects the
+`no-progress-substantive-attempt:<head>` comment (`_MOCK_ATTEMPT_WRITE_FAILS=1`).
+
+**Expected**: `dev-new` still dispatched; the marker write is retried once (2
+attempts total); a **loud operator notice** is posted reporting the degraded N=1
+bound — and that notice does NOT contain the literal `no-progress-substantive-attempt:`
+grep token (else it would false-trigger branch B's presence check next tick).
+`MAX_RETRIES` remains the backstop.
+
+### TC-BU-001..011 (`test-dev-report-bot-unfixable.sh`): detector active-attempt scoping
 
 Standalone tests of the REAL `dev_report_bot_unfixable` against a scripted `gh`
-mock (the routing suite mocks the function itself): an in-window 403 on a PR
-edit → unfixable; a 403 OLDER than the last different-HEAD `Reviewed HEAD:`
-trailer → NOT unfixable (self-expiry); a 403 without PR-metadata context → not
-the signature; null comment bodies tolerated (#148 guard); first-cycle (no prior
-trailer) conservative-toward-escalate; a same-head trailer ignored for the window
-boundary.
+mock (the routing suite mocks the function itself):
+- **001..007** (HEAD-window): in-window 403 on a PR edit → unfixable; a 403 OLDER
+  than the last different-HEAD `Reviewed HEAD:` trailer → NOT unfixable
+  (self-expiry); a 403 without PR-metadata context → not the signature; null
+  comment bodies tolerated (#148 guard); first-cycle conservative-toward-escalate;
+  same-head trailer ignored for the window boundary.
+- **008..011** (active-attempt scoping, round-3 finding 1): a 403 BEFORE the
+  current session's `Dev Session ID:` comment → NOT unfixable (prior attempt);
+  a 403 AFTER it → unfixable; a **review-agent** comment quoting the 403 →
+  excluded → NOT unfixable; a genuine dev 403 alongside a sibling review quote →
+  the dev one still counts.
 
 ### TC-DISP-NOPROG-005: first substantive attempt at a HEAD → records marker, dev-new (bounded N=1)
 
