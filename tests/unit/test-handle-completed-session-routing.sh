@@ -33,6 +33,7 @@ _MOCK_CAUSE=""
 _MOCK_FLIP_COUNT=0
 _MOCK_NOTICE_PRESENT="0"
 _MOCK_LAST_COMMENT_BODY=""
+_MOCK_FULL_COMMENT_LOG=""
 _MOCK_COMMENT_COUNT=0
 _MOCK_LABEL_SWAPS=""
 _MOCK_DISPATCH_CALLS=""
@@ -79,6 +80,7 @@ gh() {
     while [[ $# -gt 0 ]]; do
       if [[ "$1" == "--body" ]]; then
         _MOCK_LAST_COMMENT_BODY="$2"
+        _MOCK_FULL_COMMENT_LOG+="$2"$'\n'
         _MOCK_COMMENT_COUNT=$((_MOCK_COMMENT_COUNT + 1))
         return 0
       fi
@@ -125,21 +127,65 @@ gh() {
   local cmd="${1:-}"
   local sub="${2:-}"
   if [[ "$cmd" == "issue" && "$sub" == "comment" ]]; then
-    while [[ $# -gt 0 ]]; do
-      if [[ "$1" == "--body" ]]; then
-        _MOCK_LAST_COMMENT_BODY="$2"
-        _MOCK_COMMENT_COUNT=$((_MOCK_COMMENT_COUNT + 1))
-        return 0
+    local _body=""
+    local _i
+    for ((_i = 1; _i <= $#; _i++)); do
+      if [[ "${!_i}" == "--body" ]]; then
+        local _bi=$((_i + 1)); _body="${!_bi}"; break
       fi
-      shift
     done
+    # #274 INV-85 finding 2: simulate a GitHub rejection of the attempt-marker
+    # write so the retry + loud-operator-notice path can be exercised. Counts
+    # the rejected attempts (the production code retries once).
+    if [[ "$_MOCK_ATTEMPT_WRITE_FAILS" == "1" && "$_body" == *"no-progress-substantive-attempt:"* ]]; then
+      _MOCK_ATTEMPT_WRITE_TRIES=$((_MOCK_ATTEMPT_WRITE_TRIES + 1))
+      return 1
+    fi
+    _MOCK_LAST_COMMENT_BODY="$_body"
+    _MOCK_FULL_COMMENT_LOG+="$_body"$'\n'
+    _MOCK_COMMENT_COUNT=$((_MOCK_COMMENT_COUNT + 1))
     return 0
   fi
   if [[ "$cmd" == "issue" && "$sub" == "view" ]]; then
+    # #274 INV-85: distinguish marker-presence queries. The no-progress guard
+    # asks `select(contains("no-progress-substantive..."))` for two distinct
+    # markers; route those to per-marker presence maps so idempotency and
+    # attempt-marker logic can be asserted independently of the INV-35
+    # fresh-dev notice (which keeps the legacy _MOCK_NOTICE_PRESENT default).
+    local _args="$*"
+    if [[ "$_args" == *"no-progress-substantive-attempt:"* ]]; then
+      printf '%s\n' "$_MOCK_NOPROG_ATTEMPT_PRESENT"
+      return 0
+    fi
+    if [[ "$_args" == *"no-progress-substantive:"* ]]; then
+      printf '%s\n' "$_MOCK_NOPROG_NOTICE_PRESENT"
+      return 0
+    fi
     printf '%s\n' "$_MOCK_NOTICE_PRESENT"
     return 0
   fi
   return 0
+}
+
+# #274 INV-85 routing-side mocks (overridable per test).
+_MOCK_PR_HEAD=""
+_MOCK_LAST_REVIEWED_HEAD=""
+_MOCK_BOT_UNFIXABLE=1            # 1 = not unfixable (default); 0 = unfixable
+_MOCK_NOPROG_ATTEMPT_PRESENT="0"
+_MOCK_NOPROG_NOTICE_PRESENT="0"
+_MOCK_ATTEMPT_WRITE_FAILS="0"    # 1 = reject attempt-marker writes (finding 2)
+_MOCK_ATTEMPT_WRITE_TRIES=0
+
+fetch_pr_for_issue() {
+  # Emits the same single-line JSON shape the real helper does, or empty.
+  [ -n "$_MOCK_PR_HEAD" ] || { printf '%s' ""; return 0; }
+  printf '{"number":777,"headRefOid":"%s"}\n' "$_MOCK_PR_HEAD"
+}
+last_reviewed_head() {
+  printf '%s' "$_MOCK_LAST_REVIEWED_HEAD"
+}
+dev_report_bot_unfixable() {
+  return "$_MOCK_BOT_UNFIXABLE"
 }
 
 reset_mocks() {
@@ -148,12 +194,20 @@ reset_mocks() {
   _MOCK_FLIP_COUNT=0
   _MOCK_NOTICE_PRESENT="0"
   _MOCK_LAST_COMMENT_BODY=""
+  _MOCK_FULL_COMMENT_LOG=""
   _MOCK_COMMENT_COUNT=0
   _MOCK_LABEL_SWAPS=""
   _MOCK_DISPATCH_CALLS=""
   _MOCK_POST_TOKEN_CALLS=""
   _MOCK_TRUNCATE_FAIL=0
   _MOCK_MARK_STALLED_CALLS=""
+  _MOCK_PR_HEAD=""
+  _MOCK_LAST_REVIEWED_HEAD=""
+  _MOCK_BOT_UNFIXABLE=1
+  _MOCK_NOPROG_ATTEMPT_PRESENT="0"
+  _MOCK_NOPROG_NOTICE_PRESENT="0"
+  _MOCK_ATTEMPT_WRITE_FAILS="0"
+  _MOCK_ATTEMPT_WRITE_TRIES=0
   unset REVIEW_RETRY_LIMIT
   if [[ -n "$_MOCK_LOG_FILE" ]]; then
     chmod u+w "$_MOCK_LOG_FILE" 2>/dev/null || true
@@ -209,6 +263,22 @@ prepare_readonly_log() {
   prepare_log "$1"
   chmod 444 "$_MOCK_LOG_FILE"
 }
+
+# ---------------------------------------------------------------------------
+echo "=== INV-85 source-pin: fetch_pr_for_issue call includes body (#274 [P1]) ==="
+# ---------------------------------------------------------------------------
+# fetch_pr_for_issue filters on `.body`, so the INV-85 call MUST request `body`
+# in its --json field list — otherwise `gh pr list` omits it, the filter sees
+# null, and the helper returns empty (both guards silently no-op in production).
+# The routing tests MOCK fetch_pr_for_issue, so only this source grep catches a
+# missing `body` field. (#274 review [P1] round-4 finding 1.)
+if grep -Eq 'fetch_pr_for_issue "\$issue_num" "number,headRefOid,body"' "$LIB"; then
+  echo -e "  ${GREEN}PASS${NC}: INV-85 fetch_pr_for_issue call requests body"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: INV-85 fetch_pr_for_issue call is missing the body field (guards will no-op in production)"
+  FAIL=$((FAIL + 1))
+fi
 
 # ---------------------------------------------------------------------------
 echo "=== handle_completed_session_routing (INV-35) ==="
@@ -350,6 +420,170 @@ prepare_log 100
 assert_returns "INV-35-fresh-dev marker present → still dispatches but no duplicate comment" 0 \
   handle_completed_session_routing 100 "sid-040" "2026-05-21T03:18:00Z"
 assert_eq "INV-35-fresh-dev idempotency: comment count = 0" "0" "$_MOCK_COMMENT_COUNT"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== completed-session failed-substantive no-progress guard (#274 / INV-85) ==="
+# ---------------------------------------------------------------------------
+
+# TC-DISP-NOPROG-001: same HEAD + prior dev-new already ran for this HEAD →
+# escalate (mark_stalled + idempotent notice), NO dev-new.
+reset_mocks
+_MOCK_VERDICT="failed-substantive"
+_MOCK_PR_HEAD="deadbeef"
+_MOCK_LAST_REVIEWED_HEAD="deadbeef"
+_MOCK_NOPROG_ATTEMPT_PRESENT="1"   # a dev-new already ran for deadbeef
+prepare_log 100
+assert_returns "NOPROG-001 returns 0" 0 \
+  handle_completed_session_routing 100 "sid-np001" "2026-05-21T03:18:00Z"
+assert_eq "NOPROG-001 NO dispatch dev-new" "" "$_MOCK_DISPATCH_CALLS"
+assert_eq "NOPROG-001 NO post_dispatch_token" "" "$_MOCK_POST_TOKEN_CALLS"
+assert_eq "NOPROG-001 NO label swap to in-progress" "" "$_MOCK_LABEL_SWAPS"
+assert_eq "NOPROG-001 mark_stalled fired" "100 " "$_MOCK_MARK_STALLED_CALLS"
+assert_contains "NOPROG-001 idempotent notice marker" "no-progress-substantive:deadbeef" "$_MOCK_LAST_COMMENT_BODY"
+assert_eq "NOPROG-001 exactly one notice posted" "1" "$_MOCK_COMMENT_COUNT"
+# Log is NOT truncated on the escalation path (no fresh dispatch).
+log_size=$(stat -c '%s' "$_MOCK_LOG_FILE")
+if [[ "$log_size" != "0" ]]; then
+  echo -e "  ${GREEN}PASS${NC}: NOPROG-001 log left intact (not truncated)"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: NOPROG-001 log was truncated on escalation path"
+  FAIL=$((FAIL + 1))
+fi
+
+# TC-DISP-NOPROG-002: new HEAD (dev pushed new commits) → dev-new proceeds,
+# attempt marker recorded for the new HEAD, NO stall (no regression).
+reset_mocks
+_MOCK_VERDICT="failed-substantive"
+_MOCK_PR_HEAD="cafe1234"
+_MOCK_LAST_REVIEWED_HEAD="deadbeef"   # older — HEAD advanced
+_MOCK_NOPROG_ATTEMPT_PRESENT="0"
+prepare_log 100
+assert_returns "NOPROG-002 returns 0" 0 \
+  handle_completed_session_routing 100 "sid-np002" "2026-05-21T03:18:00Z"
+assert_eq "NOPROG-002 label swap pending-dev → in-progress" "100:pending-dev:in-progress " "$_MOCK_LABEL_SWAPS"
+assert_eq "NOPROG-002 dispatch token dev-new" "100:dev-new " "$_MOCK_POST_TOKEN_CALLS"
+assert_eq "NOPROG-002 dispatch dev-new fired" "dev-new:100 " "$_MOCK_DISPATCH_CALLS"
+assert_eq "NOPROG-002 NO stall" "" "$_MOCK_MARK_STALLED_CALLS"
+log_size=$(stat -c '%s' "$_MOCK_LOG_FILE")
+assert_eq "NOPROG-002 log truncated to 0 bytes" "0" "$log_size"
+assert_contains "NOPROG-002 attempt marker recorded for new HEAD" "no-progress-substantive-attempt:cafe1234" "$_MOCK_FULL_COMMENT_LOG"
+
+# TC-DISP-NOPROG-003: same HEAD + escalation notice already present → no
+# duplicate notice; still no dev-new; still stalled.
+reset_mocks
+_MOCK_VERDICT="failed-substantive"
+_MOCK_PR_HEAD="deadbeef"
+_MOCK_LAST_REVIEWED_HEAD="deadbeef"
+_MOCK_NOPROG_ATTEMPT_PRESENT="1"
+_MOCK_NOPROG_NOTICE_PRESENT="1"      # escalation notice already posted
+prepare_log 100
+assert_returns "NOPROG-003 returns 0" 0 \
+  handle_completed_session_routing 100 "sid-np003" "2026-05-21T03:18:00Z"
+assert_eq "NOPROG-003 no duplicate notice" "0" "$_MOCK_COMMENT_COUNT"
+assert_eq "NOPROG-003 NO dispatch dev-new" "" "$_MOCK_DISPATCH_CALLS"
+assert_eq "NOPROG-003 mark_stalled still fired" "100 " "$_MOCK_MARK_STALLED_CALLS"
+
+# TC-DISP-NOPROG-004: bot-unfixable 403 signature at the SAME (unchanged) HEAD
+# → operator handoff, no dev-new. Branch A requires current_head == last_head
+# (#274 review [P1] finding 1): a 403 only blocks when HEAD has not advanced.
+reset_mocks
+_MOCK_VERDICT="failed-substantive"
+_MOCK_PR_HEAD="deadbeef"
+_MOCK_LAST_REVIEWED_HEAD="deadbeef"   # HEAD unchanged since last review — gates branch A
+_MOCK_BOT_UNFIXABLE=0                 # the 403-on-PR-body-edit signature is present
+prepare_log 100
+assert_returns "NOPROG-004 returns 0" 0 \
+  handle_completed_session_routing 100 "sid-np004" "2026-05-21T03:18:00Z"
+assert_eq "NOPROG-004 NO dispatch dev-new" "" "$_MOCK_DISPATCH_CALLS"
+assert_eq "NOPROG-004 NO post_dispatch_token" "" "$_MOCK_POST_TOKEN_CALLS"
+assert_eq "NOPROG-004 NO label swap to in-progress" "" "$_MOCK_LABEL_SWAPS"
+assert_eq "NOPROG-004 mark_stalled fired" "100 " "$_MOCK_MARK_STALLED_CALLS"
+assert_contains "NOPROG-004 notice cites bot-unfixable" "no-progress-substantive:deadbeef" "$_MOCK_LAST_COMMENT_BODY"
+
+# TC-DISP-NOPROG-006 (#274 review [P1] finding 1 regression): bot-unfixable 403
+# present BUT HEAD has advanced since the last review → the 403 is stale; branch
+# A must NOT fire. dev-new proceeds (the dev made progress; a new attempt against
+# the new HEAD is correct). This is the bug the reviewer flagged: a single old
+# 403 must not permanently stall the issue after HEAD moves.
+reset_mocks
+_MOCK_VERDICT="failed-substantive"
+_MOCK_PR_HEAD="cafe1234"              # HEAD advanced
+_MOCK_LAST_REVIEWED_HEAD="deadbeef"  # older — current != last
+_MOCK_BOT_UNFIXABLE=0                # an old 403 is still on the issue, but stale
+_MOCK_NOPROG_ATTEMPT_PRESENT="0"
+prepare_log 100
+assert_returns "NOPROG-006 returns 0" 0 \
+  handle_completed_session_routing 100 "sid-np006" "2026-05-21T03:18:00Z"
+assert_eq "NOPROG-006 NO stall (stale 403, HEAD advanced)" "" "$_MOCK_MARK_STALLED_CALLS"
+assert_eq "NOPROG-006 dispatch dev-new fired" "dev-new:100 " "$_MOCK_DISPATCH_CALLS"
+assert_eq "NOPROG-006 label swap pending-dev → in-progress" "100:pending-dev:in-progress " "$_MOCK_LABEL_SWAPS"
+assert_contains "NOPROG-006 attempt marker recorded for new HEAD" "no-progress-substantive-attempt:cafe1234" "$_MOCK_FULL_COMMENT_LOG"
+
+# TC-DISP-NOPROG-007 (#274 review [P1] finding 2 regression): when the fresh
+# dispatch is aborted by a transient failure (log truncate fails → fail-closed
+# return 0 WITHOUT dispatching), the attempt marker MUST NOT be written —
+# otherwise the next tick would wrongly conclude a dev-new already ran and stall.
+reset_mocks
+_MOCK_VERDICT="failed-substantive"
+_MOCK_PR_HEAD="deadbeef"
+_MOCK_LAST_REVIEWED_HEAD="deadbeef"
+_MOCK_NOPROG_ATTEMPT_PRESENT="0"      # first attempt at this HEAD
+prepare_readonly_log 100              # truncate will fail (read-only log)
+assert_returns "NOPROG-007 returns 0 (fail-closed)" 0 \
+  handle_completed_session_routing 100 "sid-np007" "2026-05-21T03:18:00Z"
+assert_eq "NOPROG-007 NO dispatch (truncate failed)" "" "$_MOCK_DISPATCH_CALLS"
+assert_eq "NOPROG-007 NO label swap (truncate failed)" "" "$_MOCK_LABEL_SWAPS"
+if [[ "$_MOCK_FULL_COMMENT_LOG" != *"no-progress-substantive-attempt:"* ]]; then
+  echo -e "  ${GREEN}PASS${NC}: NOPROG-007 attempt marker NOT written when dispatch aborted"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: NOPROG-007 attempt marker was written despite aborted dispatch"
+  FAIL=$((FAIL + 1))
+fi
+
+# TC-DISP-NOPROG-005: first substantive attempt at a HEAD (no marker yet) →
+# records attempt marker AND mints dev-new (bounded N=1).
+reset_mocks
+_MOCK_VERDICT="failed-substantive"
+_MOCK_PR_HEAD="deadbeef"
+_MOCK_LAST_REVIEWED_HEAD="deadbeef"
+_MOCK_NOPROG_ATTEMPT_PRESENT="0"      # no prior dev-new for this HEAD
+prepare_log 100
+assert_returns "NOPROG-005 returns 0" 0 \
+  handle_completed_session_routing 100 "sid-np005" "2026-05-21T03:18:00Z"
+assert_eq "NOPROG-005 dispatch dev-new fired" "dev-new:100 " "$_MOCK_DISPATCH_CALLS"
+assert_eq "NOPROG-005 NO stall (first attempt allowed)" "" "$_MOCK_MARK_STALLED_CALLS"
+assert_contains "NOPROG-005 attempt marker recorded" "no-progress-substantive-attempt:deadbeef" "$_MOCK_FULL_COMMENT_LOG"
+log_size=$(stat -c '%s' "$_MOCK_LOG_FILE")
+assert_eq "NOPROG-005 log truncated to 0 bytes" "0" "$log_size"
+
+# TC-DISP-NOPROG-008 (#274 review [P1] round-3 finding 2): when the attempt-marker
+# write is rejected by GitHub, the code must NOT silently swallow it — it retries
+# once (2 total attempts) and posts a LOUD operator notice that the N=1 bound is
+# degraded. dev-new still dispatched; MAX_RETRIES remains the backstop.
+reset_mocks
+_MOCK_VERDICT="failed-substantive"
+_MOCK_PR_HEAD="deadbeef"
+_MOCK_LAST_REVIEWED_HEAD="deadbeef"
+_MOCK_NOPROG_ATTEMPT_PRESENT="0"
+_MOCK_ATTEMPT_WRITE_FAILS="1"         # GitHub rejects the marker comment
+prepare_log 100
+assert_returns "NOPROG-008 returns 0" 0 \
+  handle_completed_session_routing 100 "sid-np008" "2026-05-21T03:18:00Z"
+assert_eq "NOPROG-008 dispatch dev-new still fired" "dev-new:100 " "$_MOCK_DISPATCH_CALLS"
+assert_eq "NOPROG-008 marker write retried once (2 attempts)" "2" "$_MOCK_ATTEMPT_WRITE_TRIES"
+assert_contains "NOPROG-008 loud operator notice on degraded bound" "could not record the per-HEAD no-progress attempt tracker for \`deadbeef\`" "$_MOCK_LAST_COMMENT_BODY"
+# The loud notice must NOT contain the literal grep token, else it would satisfy
+# branch B's marker-presence check next tick → a false stall.
+if [[ "$_MOCK_LAST_COMMENT_BODY" != *"no-progress-substantive-attempt:"* ]]; then
+  echo -e "  ${GREEN}PASS${NC}: NOPROG-008 notice avoids the literal marker grep token"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: NOPROG-008 notice contains the grep token (would false-trigger branch B)"
+  FAIL=$((FAIL + 1))
+fi
 
 # Cleanup
 reset_mocks

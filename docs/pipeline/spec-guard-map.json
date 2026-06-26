@@ -46,6 +46,7 @@
     "session-completed": { "kind": "function", "file": "lib-dispatch.sh", "name": "is_session_completed", "note": "INV-35: end_turn|completed terminal reason." },
     "review-flips-below-limit": { "kind": "predicate", "file": "lib-dispatch.sh", "pattern": "REVIEW_RETRY_LIMIT", "note": "INV-35: non-substantive flip count < limit." },
     "review-flips-at-limit": { "kind": "predicate", "file": "lib-dispatch.sh", "pattern": "REVIEW_RETRY_LIMIT", "note": "INV-35: non-substantive flip count ≥ limit → stalled." },
+    "dev-no-progress-or-bot-unfixable": { "kind": "function", "file": "lib-dispatch.sh", "name": "dev_report_bot_unfixable", "note": "INV-85: completed-session failed-substantive escalates to stalled when the PR HEAD is unchanged since the last review AND a prior dev-new already ran for it (no-progress, gated by the no-progress-substantive-attempt marker), OR the dev agent hit a PR-metadata 403 (dev_report_bot_unfixable). Bounded to one dev-new per HEAD." },
     "terminal-with-transitional-residue": { "kind": "function", "file": "lib-dispatch.sh", "name": "hygiene_strip_residual_labels", "note": "INV-25: Step 0 hygiene strips residue on terminal issues." }
   },
   "actions": {

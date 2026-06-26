@@ -16,6 +16,7 @@
     "dispatch-pending-dev-pr-exists":        {"file": "lib-dispatch.sh",     "anchor": "handle_pending_dev_pr_exists()"},
     "dispatch-stalled-retries":              {"file": "lib-dispatch.sh",     "anchor": "mark_stalled()"},
     "dispatch-stalled-review-cap":           {"file": "lib-dispatch.sh",     "anchor": "mark_stalled()"},
+    "dispatch-stalled-noprogress-substantive": {"file": "lib-dispatch.sh",   "anchor": "mark_stalled()"},
     "hygiene-strip-residue-approved":        {"file": "lib-dispatch.sh",     "anchor": "hygiene_strip_residual_labels()"},
     "hygiene-strip-residue-stalled":         {"file": "lib-dispatch.sh",     "anchor": "hygiene_strip_residual_labels()"},
     "dev-trap-success-pr":                   {"file": "autonomous-dev.sh",   "anchor": "--add-label \"pending-review\""},
