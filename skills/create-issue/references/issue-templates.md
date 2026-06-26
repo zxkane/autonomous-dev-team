@@ -35,7 +35,18 @@
 - [ ] <Edge case: empty state / error state / unauthorized access>
 
 ## Acceptance Criteria
-- [ ] <Criterion 1 -- how to verify>
+
+> **Classify each criterion: is it _pre-merge verifiable_?** PRE-MERGE VERIFIABLE =
+> evidence obtainable before merge — **name the verification surface** (CI job, PR-preview URL,
+> staging command, or local repro) **+ the expected evidence**. NOT pre-merge
+> verifiable = needs deploy/prod, real users, time soak, external approval, prod
+> telemetry, or credentials the bot lacks. Prefer pre-merge-verifiable criteria. A
+> genuinely not-pre-merge criterion belongs in a separate **NON-blocking,
+> NON-`autonomous` follow-up** (reference it under `## Out of Scope`, **never**
+> `## Dependencies`) — a blocking AC the autonomous loop cannot satisfy pre-merge is
+> a known driver of non-terminating dev↔review loops. See `references/ac-verification.md`.
+
+- [ ] <Criterion 1 -- pre-merge verifiable; name the surface + expected evidence>
 - [ ] <Criterion 2>
 
 ## Dependencies
@@ -111,4 +122,41 @@
 ### E2E Tests (if UI-related)
 - [ ] Add or update E2E test to cover the fixed behavior
 - [ ] Test the exact reproduction steps above end-to-end
+
+## Acceptance Criteria
+
+> **Classify each criterion: is it _pre-merge verifiable_?** PRE-MERGE VERIFIABLE =
+> evidence obtainable before merge — **name the verification surface** (CI job, PR-preview URL,
+> staging command, or local repro) **+ the expected evidence**. NOT pre-merge
+> verifiable = needs deploy/prod, real users, time soak, external approval, prod
+> telemetry, or credentials the bot lacks. Prefer pre-merge-verifiable criteria. A
+> genuinely not-pre-merge criterion belongs in a separate **NON-blocking,
+> NON-`autonomous` follow-up** (reference it under `## Out of Scope`, **never**
+> `## Dependencies`) — a blocking AC the autonomous loop cannot satisfy pre-merge is
+> a known driver of non-terminating dev↔review loops. See `references/ac-verification.md`.
+>
+> NOTE: the bug `## Environment` field above may legitimately say `prod` — that is the
+> repro environment, NOT an acceptance criterion; the classification applies to the AC
+> checkbox lines below.
+
+- [ ] <Criterion 1 -- pre-merge verifiable; e.g. the regression test fails before
+      the fix and passes after, green in the CI `unit` job (name the surface)>
+- [ ] <Criterion 2>
+
+## Dependencies
+<!--
+  List ONLY issues that must be closed/merged before this bug fix can be started.
+  The autonomous dispatcher parses this section literally — any OPEN list-item ref
+  (`#N` same-repo or `owner/repo#N` cross-repo) silently blocks dispatch until it
+  closes/merges. Prose and blockquotes are ignored. If there are no blockers, write
+  exactly: None.
+-->
+- None
+
+## Out of Scope
+<!-- The non-blocking home for any genuinely post-merge/prod-only verification the
+     `## Acceptance Criteria` note told you to split out. Reference the follow-up
+     issue here (prose) — NEVER under `## Dependencies` (that would hard-block the
+     fix). Also list anything this bug fix deliberately does NOT cover. -->
+<Explicitly list what this fix does NOT cover, incl. any post-deploy follow-up issue (non-blocking)>
 ```
