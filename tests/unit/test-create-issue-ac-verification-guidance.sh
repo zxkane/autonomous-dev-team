@@ -163,6 +163,23 @@ step1_block=$(extract_section "$SKILL_MD" "### Step 1: Understand the Request" "
 assert_contains "TC-ACV-011 Step 1 adds per-AC 'pre-merge verifiable' classification prompt" \
   "$step1_block" "pre-merge verifiable"
 
+# Step 1 must apply the classification to BOTH issue types, not just features —
+# a bug report can otherwise ship a blocking prod-only AC and recreate the loop
+# (regression for the [P1] review finding on #273). The 'pre-merge verifiable'
+# phrase must appear in BOTH the feature AND bug clarification blocks; pin via the
+# cross-type wording AND a count (>= 2 occurrences inside the Step 1 region).
+assert_contains_ci "TC-ACV-011b Step 1 states the classification applies to bugs too" \
+  "$step1_block" "applies to **both** issue"
+step1_premerge_count=$(printf '%s\n' "$step1_block" | grep -c "pre-merge verifiable")
+if [[ "$step1_premerge_count" -ge 2 ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-ACV-011c 'pre-merge verifiable' appears in both Step 1 clarify blocks (count=$step1_premerge_count)"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-ACV-011c 'pre-merge verifiable' must appear in both feature AND bug clarify blocks"
+  echo "      want >= 2 occurrences in Step 1 region; got: $step1_premerge_count"
+  FAIL=$((FAIL + 1))
+fi
+
 # Writing Guidelines section.
 wg_block=$(extract_section "$SKILL_MD" "## Writing Guidelines" "^## ")
 assert_contains "TC-ACV-012a Writing Guidelines has an 'AC verification surface' bullet" \
