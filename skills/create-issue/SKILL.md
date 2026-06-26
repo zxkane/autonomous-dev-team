@@ -53,18 +53,20 @@ When the user describes a feature or bug, gather context through clarifying ques
 - Environment (prod, staging, PR preview)
 - Severity (blocking, degraded, cosmetic)
 - Any error messages or logs
-- **How will the fix be verified — and is that verification _pre-merge verifiable_?**
-  A bug's acceptance criterion is most often "a regression test fails before the fix
-  and passes after" (pre-merge verifiable — name the surface: the CI `unit`/E2E job).
-  Beware framing it as a *post-merge/prod replay* ("verify by replaying the failing
-  batch through the deployed pipeline"): if an existing PR-preview/staging path
-  already exercises the same code path with the same input, point the criterion at
-  that surface instead. If the fix genuinely can only be confirmed post-deploy, split
-  that confirmation into a separate **non-blocking, non-`autonomous` follow-up** (see
-  **`references/ac-verification.md`**). This applies to bug fixes too — a blocking AC
-  the loop cannot satisfy pre-merge is a known driver of non-terminating dev↔review
-  loops regardless of issue type. (Note: the bug `## Environment` field may legitimately
-  be `prod` — that's the *repro* environment, not an acceptance criterion.)
+- **For each acceptance criterion of the fix, is it _pre-merge verifiable_?** A bug
+  fix usually has more than one AC — classify **every** one, not just the headline
+  "the regression test fails before the fix and passes after" (that one is the
+  pre-merge default — name the surface: the CI `unit`/E2E job). Beware framing any
+  criterion as a *post-merge/prod replay* ("verify by replaying the failing batch
+  through the deployed pipeline"): if an existing PR-preview/staging path already
+  exercises the same code path with the same input, point that criterion at that
+  surface instead. If a criterion genuinely can only be confirmed post-deploy, split
+  it into a separate **non-blocking, non-`autonomous` follow-up** (see
+  **`references/ac-verification.md`**). This per-criterion classification applies to
+  bug fixes exactly as it does to features — a blocking AC the loop cannot satisfy
+  pre-merge is a known driver of non-terminating dev↔review loops regardless of issue
+  type. (Note: the bug `## Environment` field may legitimately be `prod` — that's the
+  *repro* environment, not an acceptance criterion.)
 
 Ask 2-3 focused questions per round. Stop when there is enough information to write a clear issue.
 

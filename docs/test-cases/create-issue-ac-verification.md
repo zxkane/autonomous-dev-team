@@ -42,6 +42,8 @@ pre-merge is a known driver of non-terminating dev↔review cycles.
 | ID | Scenario | Expected |
 |----|----------|----------|
 | TC-ACV-011 | Step 1 adds per-AC "is this pre-merge verifiable?" prompt | `pre-merge verifiable` in Step 1 region |
+| TC-ACV-011b/c | Classification applies to BOTH issue types; bug-clarify block ITSELF carries it | cross-type wording + phrase scoped to the bug sub-block |
+| TC-ACV-011d | Bug-clarify prompt is **per-criterion** (not a single verification plan) | `for each acceptance criterion` in the bug sub-block |
 | TC-ACV-012 | Writing Guidelines "AC verification surface" bullet | `verification surface` in Writing Guidelines |
 | TC-ACV-013 | Step 4 advisory self-scan, AC-checkbox-lines only | `advisory` + `AC checkbox lines` in Step 4 |
 | TC-ACV-014 | Step 4 long-tail phrases listed | `after merge` + `in production` + a long-tail token (`soak`/`rollout`) |
@@ -58,6 +60,7 @@ pre-merge is a known driver of non-terminating dev↔review cycles.
 | TC-ACV-020 | Pre-merge note references the surface concept | `verification surface` in the always-present note |
 | TC-ACV-021 | Note is a **visible** blockquote in BOTH AC sections (not an HTML comment GitHub hides) | both note lines begin with the `>` blockquote marker |
 | TC-ACV-022 | Note never sits inside an HTML comment | awk in-comment scan finds 0 occurrences between `<!--` / `-->` |
+| TC-ACV-023 | Bug template has `## Out of Scope` (the non-blocking follow-up home the note points to) | `## Out of Scope` appears **twice** in file (count assertion) |
 
 ## Acceptance criteria for this change (pre-merge verifiable)
 

@@ -180,6 +180,13 @@ bug_block=$(printf '%s\n' "$step1_block" \
 assert_contains "TC-ACV-011c bug-clarify block ITSELF carries the pre-merge classification" \
   "$bug_block" "pre-merge verifiable"
 
+# TC-ACV-011d: the bug-clarify prompt must classify EACH criterion, not just ask
+# for a single "how will the fix be verified" plan — bug issues commonly carry
+# multiple ACs, so a per-criterion prompt is what stops a prod-only criterion from
+# slipping through unclassified (regression for the second [P1] on #273).
+assert_contains_ci "TC-ACV-011d bug-clarify prompt is PER-criterion (not a single verification plan)" \
+  "$bug_block" "for each acceptance criterion"
+
 # Writing Guidelines section.
 wg_block=$(extract_section "$SKILL_MD" "## Writing Guidelines" "^## ")
 assert_contains "TC-ACV-012a Writing Guidelines has an 'AC verification surface' bullet" \
@@ -217,6 +224,16 @@ assert_count "TC-ACV-016 '## Acceptance Criteria' appears in both templates" \
   "$TEMPLATES_MD" '^## Acceptance Criteria' 2
 assert_count "TC-ACV-017 '## Dependencies' appears in both templates" \
   "$TEMPLATES_MD" '^## Dependencies' 2
+
+# TC-ACV-023: the bug template must ALSO have an '## Out of Scope' section — the
+# split-to-follow-up note tells authors to reference a non-blocking post-merge
+# follow-up under `## Out of Scope`, so that section must actually exist in the bug
+# template (it previously jumped straight from AC to Dependencies). With the feature
+# template's existing section, '## Out of Scope' must now appear in BOTH => exactly 2
+# (regression for the second [P1] on #273: guidance pointing at a non-existent
+# section nudges authors back toward AC/Dependencies, the loop-causing outcomes).
+assert_count "TC-ACV-023 '## Out of Scope' appears in both templates (bug now has a non-blocking follow-up home)" \
+  "$TEMPLATES_MD" '^## Out of Scope' 2
 
 # Always-present pre-merge note must sit inside an Acceptance Criteria section.
 # Both AC sections carry the same note; pin it via the loop-driver wording, which

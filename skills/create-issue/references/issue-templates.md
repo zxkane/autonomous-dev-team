@@ -152,4 +152,11 @@
   exactly: None.
 -->
 - None
+
+## Out of Scope
+<!-- The non-blocking home for any genuinely post-merge/prod-only verification the
+     `## Acceptance Criteria` note told you to split out. Reference the follow-up
+     issue here (prose) — NEVER under `## Dependencies` (that would hard-block the
+     fix). Also list anything this bug fix deliberately does NOT cover. -->
+<Explicitly list what this fix does NOT cover, incl. any post-deploy follow-up issue (non-blocking)>
 ```
