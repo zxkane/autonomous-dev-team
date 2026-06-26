@@ -88,20 +88,31 @@ bound — and that notice does NOT contain the literal `no-progress-substantive-
 grep token (else it would false-trigger branch B's presence check next tick).
 `MAX_RETRIES` remains the backstop.
 
-### TC-BU-001..011 (`test-dev-report-bot-unfixable.sh`): detector active-attempt scoping
+### Source-pin: INV-85 `fetch_pr_for_issue` call includes `body` (round-4 finding 1)
+
+In `test-handle-completed-session-routing.sh`, a grep of `lib-dispatch.sh`
+asserts the guard requests `number,headRefOid,body`. The routing suite mocks
+`fetch_pr_for_issue`, so only this source check catches a missing `body` field —
+which would make `gh pr list` omit `.body`, the helper's `.body` filter return
+empty, and both guards silently no-op in production.
+
+### TC-BU-001..013 (`test-dev-report-bot-unfixable.sh`): detector HEAD-cycle scoping
 
 Standalone tests of the REAL `dev_report_bot_unfixable` against a scripted `gh`
 mock (the routing suite mocks the function itself):
-- **001..007** (HEAD-window): in-window 403 on a PR edit → unfixable; a 403 OLDER
-  than the last different-HEAD `Reviewed HEAD:` trailer → NOT unfixable
+- **001..007** (HEAD-cycle window): in-window 403 on a PR edit → unfixable; a 403
+  OLDER than the last different-HEAD `Reviewed HEAD:` trailer → NOT unfixable
   (self-expiry); a 403 without PR-metadata context → not the signature; null
   comment bodies tolerated (#148 guard); first-cycle conservative-toward-escalate;
   same-head trailer ignored for the window boundary.
-- **008..011** (active-attempt scoping, round-3 finding 1): a 403 BEFORE the
-  current session's `Dev Session ID:` comment → NOT unfixable (prior attempt);
-  a 403 AFTER it → unfixable; a **review-agent** comment quoting the 403 →
-  excluded → NOT unfixable; a genuine dev 403 alongside a sibling review quote →
-  the dev one still counts.
+- **010..011** (review-comment exclusion, round-3): a **review-agent** comment
+  quoting the 403 → excluded → NOT unfixable; a genuine dev 403 alongside a
+  sibling review quote → the dev one still counts.
+- **012** (round-4 finding 2 regression): the agent's completion 403 posted
+  *before* the cleanup-time `Dev Session ID:` trailer → still detected (the
+  cycle window includes it; a session-trailer lower bound would miss it).
+- **013**: a 403 before the most recent different-HEAD trailer → out of window →
+  NOT unfixable.
 
 ### TC-DISP-NOPROG-005: first substantive attempt at a HEAD → records marker, dev-new (bounded N=1)
 

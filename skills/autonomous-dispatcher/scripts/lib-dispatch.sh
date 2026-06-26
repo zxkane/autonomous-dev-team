@@ -1008,7 +1008,14 @@ handle_completed_session_routing() {
       #
       # Compute the PR HEAD and the last-reviewed HEAD once for both sub-checks.
       local _np_pr_info _np_current_head _np_last_head
-      _np_pr_info=$(fetch_pr_for_issue "$issue_num" "number,headRefOid")
+      # `body` MUST be in the field list: fetch_pr_for_issue's jq filters on
+      # `.body` (`select(.body != null and (.body | test("#N")))`), so omitting
+      # `body` makes `gh pr list --json number,headRefOid` return objects with no
+      # `.body` → the filter sees null → empty result → `_np_current_head` stays
+      # blank → both INV-85 guards silently no-op and dev-new loops as before
+      # (#274 review [P1]). The unit tests mock fetch_pr_for_issue, so this is
+      # only observable against the real `gh`.
+      _np_pr_info=$(fetch_pr_for_issue "$issue_num" "number,headRefOid,body")
       _np_current_head=$(jq -r '.headRefOid // empty' <<<"$_np_pr_info" 2>/dev/null)
       _np_last_head=$(last_reviewed_head "$issue_num")
       local _np_notice_marker="no-progress-substantive:${_np_current_head}"
@@ -1030,7 +1037,7 @@ handle_completed_session_routing() {
       # is no PR body to have hit a 403 against.)
       if [ -n "$_np_current_head" ] && [ -n "$_np_last_head" ] \
          && [ "$_np_current_head" = "$_np_last_head" ] \
-         && dev_report_bot_unfixable "$issue_num" "$_np_current_head" "$session_id"; then
+         && dev_report_bot_unfixable "$issue_num" "$_np_current_head"; then
         log "  issue #${issue_num} substantive review failure is bot-unfixable (PR-metadata 403 / maintainer-only) — escalating to operator, no dev-new"
         if gh issue view "$issue_num" --repo "$REPO" --json comments \
             -q "[.comments[].body | select(contains(\"${_np_notice_marker}\"))] | length" \
@@ -1522,22 +1529,29 @@ last_reviewed_head() {
 # RE2-safe (plain alternation, no look-behind/ahead) so a `gh --jq` run can't
 # abort the wrapper under `set -e` ([gh --jq is RE2]).
 dev_report_bot_unfixable() {
-  local issue_num="$1" current_head="${2:-}" session_id="${3:-}" since_iso="" hits
+  local issue_num="$1" current_head="${2:-}" since_iso="" hits
 
-  # Scope the scan to the ACTIVE dev attempt (#274 review [P1] findings 1×2). A
-  # PR-metadata 403 only proves the *current* dev attempt is bot-blocked when it
-  # was reported by THIS dev session, not when some earlier review/human/dev
+  # Scope the scan to the current HEAD's review cycle (#274 review [P1]). A
+  # PR-metadata 403 only proves the *current* attempt is bot-blocked when it was
+  # reported within this HEAD's cycle, not when some earlier-cycle or review/human
   # comment merely quotes the 403 text. Two bounds, both fail-open toward NOT
   # unfixable (so a same-HEAD failure still gets its bounded retry rather than a
   # spurious stall):
   #
-  #   (1) Lower-bound the scan at the current session's `Dev Session ID:
-  #       <session_id>` comment timestamp — the moment the active attempt
-  #       started. A 403 quoted in any PRIOR-attempt comment (or by a maintainer
-  #       before this attempt) falls before the bound and is ignored. Falls back
-  #       to the current-HEAD review window (most recent `Reviewed HEAD:` trailer
-  #       for a *different* SHA) when the session-id comment isn't found, then to
-  #       "no lower bound" only on the genuinely-first cycle.
+  #   (1) Lower-bound the scan at the most recent `Reviewed HEAD:` trailer for a
+  #       SHA *different* from current_head — i.e. when the current HEAD became
+  #       the reviewed HEAD. A 403 from a prior HEAD's cycle (or a maintainer
+  #       comment before this cycle) falls before the bound and is ignored; the
+  #       bound self-advances when HEAD moves. "No lower bound" only on the
+  #       genuinely-first cycle.
+  #
+  #       NOT lower-bounded at the dev session's `Dev Session ID:` comment: that
+  #       comment is the `Agent Session Report (Dev)` trailer the wrapper posts in
+  #       cleanup() at the END of the run, AFTER the agent has already posted its
+  #       completion/blocking note explaining the 403. Anchoring there would put
+  #       the real 403 comment BEFORE the bound and miss it (#274 review [P1]
+  #       round-4 finding 2). The HEAD-cycle bound includes the agent's
+  #       completion comment, which is what we need to detect.
   #   (2) EXCLUDE review-agent comments (those carrying `Review Session:` /
   #       `Review findings` / `Review Agent:` markers) so a reviewer that quotes
   #       `Resource not accessible by integration` while *describing* the bug is
@@ -1546,12 +1560,7 @@ dev_report_bot_unfixable() {
   # The caller additionally gates this whole branch on
   # `current_head == last_reviewed_head`, so HEAD-advanced attempts never reach
   # here regardless of the bounds.
-  if [ -n "$session_id" ]; then
-    since_iso=$(gh issue view "$issue_num" --repo "$REPO" --json comments \
-      -q "[.comments[] | select((.body // \"\") | test(\"Dev Session ID: .${session_id}\"))] | last | .createdAt // empty" \
-      2>/dev/null) || since_iso=""
-  fi
-  if [ -z "$since_iso" ] && [ -n "$current_head" ]; then
+  if [ -n "$current_head" ]; then
     since_iso=$(gh issue view "$issue_num" --repo "$REPO" --json comments \
       -q "[.comments[] | select((.body // \"\") | test(\"Reviewed HEAD:\")) | select((.body // \"\") | test(\"Reviewed HEAD: \`${current_head}\`\") | not)] | last | .createdAt // empty" \
       2>/dev/null) || since_iso=""

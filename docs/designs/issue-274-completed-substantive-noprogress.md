@@ -103,14 +103,17 @@ is a PR-body edit its scoped token can't perform ([INV-79]). When present, no
 commit the bot can push will clear the finding, so we escalate without spending a
 `dev-new`.
 
-**Active-attempt scoping (#274 review [P1], findings 1 across two review rounds)**:
-the scan only counts a 403 reported BY the current dev attempt, not one merely
-quoted by an earlier review/human/dev comment. Two scopings:
-- **Lower bound at the current session's `Dev Session ID: <session_id>` comment**
-  (the moment the active attempt started), falling back to the current-HEAD
-  review window (comments after the most recent `Reviewed HEAD:` trailer for a
-  *different* SHA), then to "no lower bound" only on the genuinely-first cycle.
-  An old 403 self-expires once a newer session/trailer lands.
+**Current-HEAD-cycle scoping (#274 review [P1], refined across review rounds)**:
+the scan only counts a 403 reported within the current HEAD's review cycle, not
+one quoted by an earlier-cycle or review/human comment. Two scopings:
+- **Lower bound at the most recent `Reviewed HEAD:` trailer for a *different* SHA**
+  (when the current HEAD became the reviewed HEAD), falling back to "no lower
+  bound" only on the genuinely-first cycle. An old 403 self-expires once a newer
+  cycle's trailer lands. The bound is deliberately **not** the dev session's
+  `Dev Session ID:` comment: that is the `Agent Session Report (Dev)` trailer
+  posted in `cleanup()` at the *end* of the run, AFTER the agent's own completion
+  comment explaining the 403 — anchoring there would put the real 403 before the
+  bound and miss it (round-4 finding 2).
 - **Exclusion of review-agent comments** (`Review Session:` / `Review findings` /
   `Review Agent:` markers) so a reviewer that quotes
   `Resource not accessible by integration` while *describing* the finding is
@@ -122,6 +125,12 @@ toward NOT-unfixable. Without this scoping, a single historical or quoted 403 wo
 route *every* later completed-session substantive failure on the issue to
 `mark_stalled`, even after a maintainer applied the metadata edit or the dev pushed
 unrelated progress.
+
+**The PR-head fetch includes `body` (round-4 finding 1)**: the guard calls
+`fetch_pr_for_issue "$issue_num" "number,headRefOid,body"`. The helper filters PRs
+on `.body`, so omitting `body` returns empty → `current_head` blank → both guards
+silently no-op in production (the unit tests mock the helper, so a source-pin grep
+guards the field list).
 
 **Attempt-marker write failure is not swallowed (#274 review [P1] round-3 finding
 2)**: the marker write (after dispatch) is retried once; on persistent failure a
