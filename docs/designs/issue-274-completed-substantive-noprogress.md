@@ -103,9 +103,16 @@ is a PR-body edit its scoped token can't perform ([INV-79]). When present, no
 commit the bot can push will clear the finding, so we escalate without spending a
 `dev-new`.
 
-**Current-HEAD-cycle scoping (#274 review [P1], refined across review rounds)**:
-the scan only counts a 403 reported within the current HEAD's review cycle, not
-one quoted by an earlier-cycle or review/human comment. Two scopings:
+**Dev-authored + current-HEAD-cycle scoping (#274 review [P1], refined across
+review rounds)**: the scan only counts a 403 reported BY the dev agent within the
+current HEAD's review cycle, not one quoted by any other commenter. Three scopings:
+- **Author allow-list** (round-5): resolve the dev agent's comment-author login
+  from the most recent `Agent Session Report (Dev)` comment, and count a 403 ONLY
+  in comments by that author. A reviewer / maintainer / owner / human comment
+  quoting the 403 has a *different* author → excluded. This is the primary
+  discriminator — a maintainer comment quoting the 403 is **not** a review-agent
+  comment, so the review-marker exclusion alone could not drop it. If the dev
+  author can't be resolved (no dev session report yet), return NOT-unfixable.
 - **Lower bound at the most recent `Reviewed HEAD:` trailer for a *different* SHA**
   (when the current HEAD became the reviewed HEAD), falling back to "no lower
   bound" only on the genuinely-first cycle. An old 403 self-expires once a newer
@@ -115,9 +122,8 @@ one quoted by an earlier-cycle or review/human comment. Two scopings:
   comment explaining the 403 — anchoring there would put the real 403 before the
   bound and miss it (round-4 finding 2).
 - **Exclusion of review-agent comments** (`Review Session:` / `Review findings` /
-  `Review Agent:` markers) so a reviewer that quotes
-  `Resource not accessible by integration` while *describing* the finding is
-  never counted as the dev attempt hitting it.
+  `Review Agent:` markers) — redundant given the author allow-list, kept as
+  belt-and-suspenders.
 
 The caller **additionally** gates branch A on `current_head == last_reviewed_head`,
 so a 403 can only escalate when HEAD has not advanced. Both bounds are fail-open
