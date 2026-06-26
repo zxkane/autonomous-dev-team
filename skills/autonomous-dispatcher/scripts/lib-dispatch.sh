@@ -998,6 +998,71 @@ handle_completed_session_routing() {
       ;;
 
     failed-substantive)
+      # [INV-85] (#274) No-progress / bot-unfixable guard — symmetric to the
+      # #106 last_reviewed_head guard in handle_pending_dev_pr_exists, applied
+      # to THIS completed-session substantive-failure path (which #106 did not
+      # cover). Without it, a substantive FAIL the dev agent cannot resolve
+      # (bot lacks permission to edit the PR body, or the finding is only
+      # satisfiable post-merge) loops dev-new every tick forever: no new commit
+      # → identical re-review against the unchanged HEAD → another dev-new.
+      #
+      # Compute the PR HEAD and the last-reviewed HEAD once for both sub-checks.
+      local _np_pr_info _np_current_head _np_last_head
+      _np_pr_info=$(fetch_pr_for_issue "$issue_num" "number,headRefOid")
+      _np_current_head=$(jq -r '.headRefOid // empty' <<<"$_np_pr_info" 2>/dev/null)
+      _np_last_head=$(last_reviewed_head "$issue_num")
+      local _np_notice_marker="no-progress-substantive:${_np_current_head}"
+
+      # Branch A — bot-unfixable: the dev agent already reported a 403 on a
+      # PR-metadata edit (its scoped token can't do it) or a maintainer/
+      # post-merge-only finding. No commit clears it → escalate with ZERO
+      # dev-new. Runs before the HEAD comparison: a bot-permission 403 is
+      # un-resolvable regardless of whether HEAD moved.
+      if dev_report_bot_unfixable "$issue_num"; then
+        log "  issue #${issue_num} substantive review failure is bot-unfixable (PR-metadata 403 / maintainer-only) — escalating to operator, no dev-new"
+        if gh issue view "$issue_num" --repo "$REPO" --json comments \
+            -q "[.comments[].body | select(contains(\"${_np_notice_marker}\"))] | length" \
+            2>/dev/null | grep -q '^0$'; then
+          gh issue comment "$issue_num" --repo "$REPO" \
+            --body "Substantive review failure on completed session \`${session_id}\` is **not resolvable by the autonomous dev agent**: its scoped token hit \`Resource not accessible by integration\` on a PR-metadata edit, or the finding requires a maintainer / post-merge action. Marking stalled — no further \`dev-new\` will be dispatched. @${REPO_OWNER} please apply the PR-body / metadata change manually, or split the post-merge criterion into a follow-up. (\`${_np_notice_marker}\`)"
+        fi
+        mark_stalled "$issue_num"
+        return 0
+      fi
+
+      # Branch B — no-progress: the current PR HEAD already matches the last
+      # reviewed HEAD AND a prior dev-new already ran against this HEAD (the
+      # attempt marker below was dropped on the previous tick). The earlier
+      # dev-new produced no new commit, so a fresh one would loop. Escalate.
+      if [ -n "$_np_last_head" ] && [ -n "$_np_current_head" ] \
+         && [ "$_np_current_head" = "$_np_last_head" ] \
+         && gh issue view "$issue_num" --repo "$REPO" --json comments \
+              -q "[.comments[].body | select(contains(\"no-progress-substantive-attempt:${_np_current_head}\"))] | length" \
+              2>/dev/null | grep -q -v '^0$'; then
+        log "  issue #${issue_num} substantive review failure with no HEAD progress since \`${_np_current_head}\` (prior dev-new made no new commit) — escalating to operator, no dev-new"
+        if gh issue view "$issue_num" --repo "$REPO" --json comments \
+            -q "[.comments[].body | select(contains(\"${_np_notice_marker}\"))] | length" \
+            2>/dev/null | grep -q '^0$'; then
+          gh issue comment "$issue_num" --repo "$REPO" \
+            --body "Substantive review failure on completed session \`${session_id}\`, but PR HEAD \`${_np_current_head}\` is unchanged since the last review and a prior fresh dev session already ran against it without producing a new commit. The finding appears un-actionable by the dev agent. Marking stalled — no further \`dev-new\` will be dispatched. @${REPO_OWNER} please investigate. (\`${_np_notice_marker}\`)"
+        fi
+        mark_stalled "$issue_num"
+        return 0
+      fi
+
+      # Branch C — first substantive attempt against THIS head (or HEAD moved):
+      # record a per-HEAD attempt marker so the NEXT same-HEAD tick takes branch
+      # B, then fall through to the existing INV-35 dev-new dispatch. This bounds
+      # dev-new to exactly one attempt per unchanged HEAD (#274 proposal #2,
+      # N=1) while preserving the legitimate "dev needs one more pass" case and
+      # the no-PR fall-through (empty _np_current_head → no marker, dispatch as
+      # before).
+      if [ -n "$_np_current_head" ]; then
+        gh issue comment "$issue_num" --repo "$REPO" \
+          --body "<!-- no-progress-substantive-attempt:${_np_current_head} session=${session_id} -->" \
+          2>/dev/null || true
+      fi
+
       log "  issue #${issue_num} substantive review failure on completed session ${session_id} — minting fresh dev session"
       local _fresh_marker="INV-35-fresh-dev:${session_id}"
       if gh issue view "$issue_num" --repo "$REPO" --json comments \
@@ -1400,6 +1465,32 @@ last_reviewed_head() {
   local issue_num="$1"
   gh issue view "$issue_num" --repo "$REPO" --json comments \
     -q '[.comments[].body | capture("Reviewed HEAD: `(?<sha>[0-9a-f]{7,40})`"; "g") | .sha] | last // empty'
+}
+
+# [INV-85] (#274): returns 0 (true) if any issue comment carries the
+# bot-permission signature that proves the only fix is one the scoped agent
+# token cannot perform — a `Resource not accessible by integration` 403 in a
+# PR-metadata-edit context (`gh pr edit`, a `PATCH .../pulls/N`, or an explicit
+# "PR body"/"pull request" mention). When present, no commit the bot can push
+# clears the finding, so the completed-session failed-substantive branch
+# escalates to the operator without spending even one `dev-new`.
+#
+# Fail-safe: a `gh` transport error / no match yields empty → return 1 (NOT
+# unfixable), so the caller falls through to the bounded-retry path (which still
+# terminates the loop). We short-circuit ONLY on a positive signature, never on
+# absence — we don't fabricate an operator handoff. The jq `test()` filter is
+# RE2-safe (plain alternation, no look-behind/ahead) so a `gh --jq` run can't
+# abort the wrapper under `set -e` ([gh --jq is RE2]).
+dev_report_bot_unfixable() {
+  local issue_num="$1" hits
+  # `.body` is null when a comment has an empty body; `null | test(...)` aborts
+  # the jq filter (silently hiding any match — #148), so guard with `// ""`.
+  hits=$(gh issue view "$issue_num" --repo "$REPO" --json comments \
+    -q '[.comments[].body // ""
+         | select(test("Resource not accessible by integration"))
+         | select(test("pr edit"; "i") or test("PATCH"; "i") or test("pull request"; "i") or test("PR body"; "i") or test("pull_request"; "i"))] | length' \
+    2>/dev/null) || return 1
+  [ -n "$hits" ] && [ "$hits" != "0" ]
 }
 
 # Step 5b: echoes seconds since the most recent review-agent verdict

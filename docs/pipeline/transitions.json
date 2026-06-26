@@ -348,6 +348,19 @@
       "note": "Non-substantive flip count >= REVIEW_RETRY_LIMIT."
     },
     {
+      "id": "dispatch-stalled-noprogress-substantive",
+      "from": "pending_dev",
+      "to": "stalled",
+      "event": "dispatcher-step4-review-aware-substantive-no-progress",
+      "actor": "dispatcher",
+      "guards": ["session-completed", "verdict-fail-substantive", "head-equals-reviewed", "dev-no-progress-or-bot-unfixable"],
+      "actions": ["remove-label:pending-dev", "add-label:stalled", "comment:no-progress-substantive"],
+      "code_site": "lib-dispatch.sh mark_stalled() (from handle_completed_session_routing failed-substantive no-progress / bot-unfixable branch)",
+      "mermaid": "pending_dev --> stalled: Step 4 review-aware (completed session + substantive review failure, no HEAD progress or bot-unfixable) [INV-85]",
+      "inv_refs": ["INV-85", "INV-35"],
+      "note": "INV-85 (#274): completed-session failed-substantive escalates to stalled instead of looping dev-new when the prior dev-new made no commit against the unchanged HEAD, or the dev agent hit a PR-metadata 403 (bot-unfixable). Bounded to one dev-new per HEAD."
+    },
+    {
       "id": "review-pass-no-auto-close",
       "from": "reviewing",
       "to": "approved",

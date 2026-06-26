@@ -33,6 +33,7 @@ _MOCK_CAUSE=""
 _MOCK_FLIP_COUNT=0
 _MOCK_NOTICE_PRESENT="0"
 _MOCK_LAST_COMMENT_BODY=""
+_MOCK_FULL_COMMENT_LOG=""
 _MOCK_COMMENT_COUNT=0
 _MOCK_LABEL_SWAPS=""
 _MOCK_DISPATCH_CALLS=""
@@ -79,6 +80,7 @@ gh() {
     while [[ $# -gt 0 ]]; do
       if [[ "$1" == "--body" ]]; then
         _MOCK_LAST_COMMENT_BODY="$2"
+        _MOCK_FULL_COMMENT_LOG+="$2"$'\n'
         _MOCK_COMMENT_COUNT=$((_MOCK_COMMENT_COUNT + 1))
         return 0
       fi
@@ -128,6 +130,7 @@ gh() {
     while [[ $# -gt 0 ]]; do
       if [[ "$1" == "--body" ]]; then
         _MOCK_LAST_COMMENT_BODY="$2"
+        _MOCK_FULL_COMMENT_LOG+="$2"$'\n'
         _MOCK_COMMENT_COUNT=$((_MOCK_COMMENT_COUNT + 1))
         return 0
       fi
@@ -136,10 +139,43 @@ gh() {
     return 0
   fi
   if [[ "$cmd" == "issue" && "$sub" == "view" ]]; then
+    # #274 INV-85: distinguish marker-presence queries. The no-progress guard
+    # asks `select(contains("no-progress-substantive..."))` for two distinct
+    # markers; route those to per-marker presence maps so idempotency and
+    # attempt-marker logic can be asserted independently of the INV-35
+    # fresh-dev notice (which keeps the legacy _MOCK_NOTICE_PRESENT default).
+    local _args="$*"
+    if [[ "$_args" == *"no-progress-substantive-attempt:"* ]]; then
+      printf '%s\n' "$_MOCK_NOPROG_ATTEMPT_PRESENT"
+      return 0
+    fi
+    if [[ "$_args" == *"no-progress-substantive:"* ]]; then
+      printf '%s\n' "$_MOCK_NOPROG_NOTICE_PRESENT"
+      return 0
+    fi
     printf '%s\n' "$_MOCK_NOTICE_PRESENT"
     return 0
   fi
   return 0
+}
+
+# #274 INV-85 routing-side mocks (overridable per test).
+_MOCK_PR_HEAD=""
+_MOCK_LAST_REVIEWED_HEAD=""
+_MOCK_BOT_UNFIXABLE=1            # 1 = not unfixable (default); 0 = unfixable
+_MOCK_NOPROG_ATTEMPT_PRESENT="0"
+_MOCK_NOPROG_NOTICE_PRESENT="0"
+
+fetch_pr_for_issue() {
+  # Emits the same single-line JSON shape the real helper does, or empty.
+  [ -n "$_MOCK_PR_HEAD" ] || { printf '%s' ""; return 0; }
+  printf '{"number":777,"headRefOid":"%s"}\n' "$_MOCK_PR_HEAD"
+}
+last_reviewed_head() {
+  printf '%s' "$_MOCK_LAST_REVIEWED_HEAD"
+}
+dev_report_bot_unfixable() {
+  return "$_MOCK_BOT_UNFIXABLE"
 }
 
 reset_mocks() {
@@ -148,12 +184,18 @@ reset_mocks() {
   _MOCK_FLIP_COUNT=0
   _MOCK_NOTICE_PRESENT="0"
   _MOCK_LAST_COMMENT_BODY=""
+  _MOCK_FULL_COMMENT_LOG=""
   _MOCK_COMMENT_COUNT=0
   _MOCK_LABEL_SWAPS=""
   _MOCK_DISPATCH_CALLS=""
   _MOCK_POST_TOKEN_CALLS=""
   _MOCK_TRUNCATE_FAIL=0
   _MOCK_MARK_STALLED_CALLS=""
+  _MOCK_PR_HEAD=""
+  _MOCK_LAST_REVIEWED_HEAD=""
+  _MOCK_BOT_UNFIXABLE=1
+  _MOCK_NOPROG_ATTEMPT_PRESENT="0"
+  _MOCK_NOPROG_NOTICE_PRESENT="0"
   unset REVIEW_RETRY_LIMIT
   if [[ -n "$_MOCK_LOG_FILE" ]]; then
     chmod u+w "$_MOCK_LOG_FILE" 2>/dev/null || true
@@ -350,6 +392,101 @@ prepare_log 100
 assert_returns "INV-35-fresh-dev marker present → still dispatches but no duplicate comment" 0 \
   handle_completed_session_routing 100 "sid-040" "2026-05-21T03:18:00Z"
 assert_eq "INV-35-fresh-dev idempotency: comment count = 0" "0" "$_MOCK_COMMENT_COUNT"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== completed-session failed-substantive no-progress guard (#274 / INV-85) ==="
+# ---------------------------------------------------------------------------
+
+# TC-DISP-NOPROG-001: same HEAD + prior dev-new already ran for this HEAD →
+# escalate (mark_stalled + idempotent notice), NO dev-new.
+reset_mocks
+_MOCK_VERDICT="failed-substantive"
+_MOCK_PR_HEAD="deadbeef"
+_MOCK_LAST_REVIEWED_HEAD="deadbeef"
+_MOCK_NOPROG_ATTEMPT_PRESENT="1"   # a dev-new already ran for deadbeef
+prepare_log 100
+assert_returns "NOPROG-001 returns 0" 0 \
+  handle_completed_session_routing 100 "sid-np001" "2026-05-21T03:18:00Z"
+assert_eq "NOPROG-001 NO dispatch dev-new" "" "$_MOCK_DISPATCH_CALLS"
+assert_eq "NOPROG-001 NO post_dispatch_token" "" "$_MOCK_POST_TOKEN_CALLS"
+assert_eq "NOPROG-001 NO label swap to in-progress" "" "$_MOCK_LABEL_SWAPS"
+assert_eq "NOPROG-001 mark_stalled fired" "100 " "$_MOCK_MARK_STALLED_CALLS"
+assert_contains "NOPROG-001 idempotent notice marker" "no-progress-substantive:deadbeef" "$_MOCK_LAST_COMMENT_BODY"
+assert_eq "NOPROG-001 exactly one notice posted" "1" "$_MOCK_COMMENT_COUNT"
+# Log is NOT truncated on the escalation path (no fresh dispatch).
+log_size=$(stat -c '%s' "$_MOCK_LOG_FILE")
+if [[ "$log_size" != "0" ]]; then
+  echo -e "  ${GREEN}PASS${NC}: NOPROG-001 log left intact (not truncated)"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: NOPROG-001 log was truncated on escalation path"
+  FAIL=$((FAIL + 1))
+fi
+
+# TC-DISP-NOPROG-002: new HEAD (dev pushed new commits) → dev-new proceeds,
+# attempt marker recorded for the new HEAD, NO stall (no regression).
+reset_mocks
+_MOCK_VERDICT="failed-substantive"
+_MOCK_PR_HEAD="cafe1234"
+_MOCK_LAST_REVIEWED_HEAD="deadbeef"   # older — HEAD advanced
+_MOCK_NOPROG_ATTEMPT_PRESENT="0"
+prepare_log 100
+assert_returns "NOPROG-002 returns 0" 0 \
+  handle_completed_session_routing 100 "sid-np002" "2026-05-21T03:18:00Z"
+assert_eq "NOPROG-002 label swap pending-dev → in-progress" "100:pending-dev:in-progress " "$_MOCK_LABEL_SWAPS"
+assert_eq "NOPROG-002 dispatch token dev-new" "100:dev-new " "$_MOCK_POST_TOKEN_CALLS"
+assert_eq "NOPROG-002 dispatch dev-new fired" "dev-new:100 " "$_MOCK_DISPATCH_CALLS"
+assert_eq "NOPROG-002 NO stall" "" "$_MOCK_MARK_STALLED_CALLS"
+log_size=$(stat -c '%s' "$_MOCK_LOG_FILE")
+assert_eq "NOPROG-002 log truncated to 0 bytes" "0" "$log_size"
+assert_contains "NOPROG-002 attempt marker recorded for new HEAD" "no-progress-substantive-attempt:cafe1234" "$_MOCK_FULL_COMMENT_LOG"
+
+# TC-DISP-NOPROG-003: same HEAD + escalation notice already present → no
+# duplicate notice; still no dev-new; still stalled.
+reset_mocks
+_MOCK_VERDICT="failed-substantive"
+_MOCK_PR_HEAD="deadbeef"
+_MOCK_LAST_REVIEWED_HEAD="deadbeef"
+_MOCK_NOPROG_ATTEMPT_PRESENT="1"
+_MOCK_NOPROG_NOTICE_PRESENT="1"      # escalation notice already posted
+prepare_log 100
+assert_returns "NOPROG-003 returns 0" 0 \
+  handle_completed_session_routing 100 "sid-np003" "2026-05-21T03:18:00Z"
+assert_eq "NOPROG-003 no duplicate notice" "0" "$_MOCK_COMMENT_COUNT"
+assert_eq "NOPROG-003 NO dispatch dev-new" "" "$_MOCK_DISPATCH_CALLS"
+assert_eq "NOPROG-003 mark_stalled still fired" "100 " "$_MOCK_MARK_STALLED_CALLS"
+
+# TC-DISP-NOPROG-004: bot-unfixable 403 signature → operator handoff, no dev-new.
+reset_mocks
+_MOCK_VERDICT="failed-substantive"
+_MOCK_PR_HEAD="deadbeef"
+_MOCK_LAST_REVIEWED_HEAD=""           # irrelevant — branch A precedes HEAD check
+_MOCK_BOT_UNFIXABLE=0                 # the 403-on-PR-body-edit signature is present
+prepare_log 100
+assert_returns "NOPROG-004 returns 0" 0 \
+  handle_completed_session_routing 100 "sid-np004" "2026-05-21T03:18:00Z"
+assert_eq "NOPROG-004 NO dispatch dev-new" "" "$_MOCK_DISPATCH_CALLS"
+assert_eq "NOPROG-004 NO post_dispatch_token" "" "$_MOCK_POST_TOKEN_CALLS"
+assert_eq "NOPROG-004 NO label swap to in-progress" "" "$_MOCK_LABEL_SWAPS"
+assert_eq "NOPROG-004 mark_stalled fired" "100 " "$_MOCK_MARK_STALLED_CALLS"
+assert_contains "NOPROG-004 notice cites bot-unfixable" "no-progress-substantive:deadbeef" "$_MOCK_LAST_COMMENT_BODY"
+
+# TC-DISP-NOPROG-005: first substantive attempt at a HEAD (no marker yet) →
+# records attempt marker AND mints dev-new (bounded N=1).
+reset_mocks
+_MOCK_VERDICT="failed-substantive"
+_MOCK_PR_HEAD="deadbeef"
+_MOCK_LAST_REVIEWED_HEAD="deadbeef"
+_MOCK_NOPROG_ATTEMPT_PRESENT="0"      # no prior dev-new for this HEAD
+prepare_log 100
+assert_returns "NOPROG-005 returns 0" 0 \
+  handle_completed_session_routing 100 "sid-np005" "2026-05-21T03:18:00Z"
+assert_eq "NOPROG-005 dispatch dev-new fired" "dev-new:100 " "$_MOCK_DISPATCH_CALLS"
+assert_eq "NOPROG-005 NO stall (first attempt allowed)" "" "$_MOCK_MARK_STALLED_CALLS"
+assert_contains "NOPROG-005 attempt marker recorded" "no-progress-substantive-attempt:deadbeef" "$_MOCK_FULL_COMMENT_LOG"
+log_size=$(stat -c '%s' "$_MOCK_LOG_FILE")
+assert_eq "NOPROG-005 log truncated to 0 bytes" "0" "$log_size"
 
 # Cleanup
 reset_mocks

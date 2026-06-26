@@ -4343,6 +4343,32 @@ lingerer after resolution).
 - [INV-43](#inv-43-the-verdict-poll-budget-scales-with-the-command-mode-e2e-timeout) — `_reap_fanout_processes` (the lingerer cleanup) + the comment-poll fetch this gate reuses.
 - [INV-48](#inv-48-per-side-review-wall-clock-timeout-agent_review_timeout-1h-default-with-browser-e2e-exclusion-and-timeout-veto) — the timeout-veto preserved for genuinely-unresolved (no-artifact, no-comment) agents.
 
+## INV-85: the completed-session `failed-substantive` route is bounded to one `dev-new` per unchanged HEAD; a no-progress or bot-unfixable finding escalates to `stalled`, never loops
+
+_Triage (issue #236): [machine-checked: tests/unit/test-handle-completed-session-routing.sh]_
+
+**Rule**: when `handle_completed_session_routing()` ([INV-35](#inv-35-review-aware-resume-routing-for-completed-sessions)) routes a `pending-dev` issue on the `failed-substantive` verdict, it MUST NOT mint a fresh `dev-new` unconditionally. Before dispatching, it consults the PR `headRefOid` and the most recent `Reviewed HEAD:` trailer ([INV-04](#inv-04-reviewed-head-trailer-format) / [INV-07](#inv-07-empty-reviewed-head-trailer-routes-to-pending-review)), the same signals the #106 guard uses in `handle_pending_dev_pr_exists`. The routing is:
+
+| Condition | Route |
+|---|---|
+| The dev agent's comments carry the **bot-unfixable signature** — `Resource not accessible by integration` (a 403) co-occurring with a PR-metadata-edit context (`gh pr edit`, `PATCH .../pulls/N`, "PR body"/"pull request") | Escalate immediately: post a one-time `no-progress-substantive:<head>` operator notice (@owner) and `mark_stalled`. **Zero** `dev-new`. |
+| Current PR HEAD == last `Reviewed HEAD:` trailer **AND** a `no-progress-substantive-attempt:<head>` marker already exists (a prior `dev-new` ran for this HEAD and produced no new commit) | Escalate: post a one-time `no-progress-substantive:<head>` notice (@owner) and `mark_stalled`. **Zero** further `dev-new`. |
+| Otherwise (first substantive attempt at this HEAD, HEAD advanced since last review, or no PR yet so HEAD is uncomputable) | Record a `no-progress-substantive-attempt:<head>` marker (when a HEAD is known), then fall through to the existing INV-35 fresh-`dev-new` dispatch. This is the **one** allowed `dev-new` per unchanged HEAD. |
+
+**Why** (#274): #106 added a `last_reviewed_head` guard to the *crash-recovery* PR-exists branch, but a session that reaches `end_turn|completed` and then gets a `failed-substantive` verdict routes through `handle_completed_session_routing()` instead — and that branch minted `dev-new` with no HEAD comparison. When the substantive FAIL is one the dev agent cannot resolve (its scoped token can't edit the PR body per [INV-79](#inv-79-in-app-mode-the-agent-process-gets-only-a-scoped-token-the-wrapper-keeps-full-write-and-is-the-sole-approvemergepr-create-path), or the finding is satisfiable only post-merge), each cycle produced no new commit, the next review re-reported the identical finding against the unchanged HEAD, and the dispatcher minted yet another `dev-new` — looping every ~5 min until a human intervened. Observed on a consumer project: a PR sat ~14h in this loop, three near-identical `failed-substantive` comments against the same HEAD, broken only when a maintainer manually edited the PR body. This is the runtime backstop to #273's authoring-time prevention of the same failure class.
+
+**Bounded-retry (N=1) rationale**: the `no-progress-substantive-attempt:<head>` marker is the persisted "a `dev-new` already ran against this HEAD" signal. The first substantive failure at a HEAD records the marker and still mints one `dev-new` (the dev legitimately gets one more pass — it might fix it). If the next review still fails substantively and HEAD is unchanged, the prior `dev-new` made no progress → escalate. The marker is HEAD-scoped: a dev push that advances HEAD makes `current_head != last_head`, so a fresh attempt against the **new** HEAD proceeds exactly as before — no regression.
+
+**Fail-safe / escalation contract**: the bot-unfixable detector (`dev_report_bot_unfixable`) and the attempt-marker presence check are both fail-closed toward *more* `dev-new`, never toward a false stall: a `gh` transport error or absent signature falls through to the bounded-retry path (which still terminates the loop after one attempt). The escalation routes to `mark_stalled` (not merely "hold in `pending-dev` without re-dispatch" — the gap the #274 review flagged in `handle_pending_dev_pr_exists`), so a stuck issue ends up with a `stalled` label + a human signal rather than churning ticks silently. This `mark_stalled` call does NOT pass `--at-cap` (it is the review-no-progress state, not the retry-budget-exhausted state), retaining [INV-30](#inv-30-pid_alive-is-authoritative-under-all-execution-backends)'s ALIVE bias under the remote backend, mirroring the [INV-35] `REVIEW_RETRY_LIMIT` caller.
+
+**Idempotency**: the operator notice keys on `no-progress-substantive:<head>` and the attempt marker on `no-progress-substantive-attempt:<head>` — both use the `grep -q '^0$'`-style fail-closed presence check (same pattern as `stale-verdict:` / `INV-12-completed:` / `INV-35-fresh-dev:`). Repeated ticks against the same HEAD find the marker(s) and don't spam comments or re-stall.
+
+**Producer**: `lib-dispatch.sh::handle_completed_session_routing` (the `failed-substantive)` case) + `lib-dispatch.sh::dev_report_bot_unfixable` (the bot-unfixable detector). The attempt + notice markers are produced by the same function.
+
+**Consumer**: subsequent dispatcher ticks (read the markers to decide escalate-vs-dispatch); the operator (reads the `stalled` label + `no-progress-substantive:<head>` notice).
+
+**Status**: **ENFORCED** as of #274. Delta on top of [INV-35](#inv-35-review-aware-resume-routing-for-completed-sessions); design recorded in `docs/designs/issue-274-completed-substantive-noprogress.md`.
+
 ## Adding a new invariant
 
 When fixing a pipeline bug, after locating the bug on the state machine + flow docs:
