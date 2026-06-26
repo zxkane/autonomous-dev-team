@@ -54,9 +54,12 @@ In the `failed-substantive)` case, **before** the existing truncate +
 current_head = fetch_pr_for_issue(issue).headRefOid
 last_head    = last_reviewed_head(issue)
 
-# (A) bot-unfixable → escalate immediately, zero dev-new
-if dev_report_bot_unfixable(issue):
-    post once (no-progress-substantive:<head>) "...403 / maintainer-only..." 
+# (A) bot-unfixable AT THE UNCHANGED HEAD → escalate, zero dev-new.
+#     Gated on same-HEAD (a 403 only blocks when the dev made no progress);
+#     dev_report_bot_unfixable is itself HEAD-window-scoped (see below).
+if current_head non-empty AND current_head == last_head
+   AND dev_report_bot_unfixable(issue, current_head):
+    post once (no-progress-substantive:<head>) "...403 / maintainer-only..."
     mark_stalled(issue); return
 
 # (B) no-progress (same HEAD, a prior dev-new already ran for this HEAD)
@@ -65,13 +68,13 @@ if last_head non-empty AND current_head == last_head
     post once (no-progress-substantive:<head>) "...no new commits since <head>..."
     mark_stalled(issue); return
 
-# (C) first substantive attempt against THIS head — record the attempt
-#     marker so the *next* same-HEAD tick takes branch (B), then fall through
-#     to the existing INV-35 dev-new dispatch.
-if current_head non-empty:
-    post hidden marker `<!-- no-progress-substantive-attempt:<head> ... -->`
-
+# (C) first substantive attempt against THIS head (or HEAD moved) — fall through
+#     to the existing INV-35 dev-new dispatch, THEN record the attempt marker
+#     AFTER dispatch succeeds (so a transiently-aborted dispatch leaves no false
+#     marker) so the *next* same-HEAD tick takes branch (B).
 # ... existing INV-35-fresh-dev notice + truncate + label_swap + dispatch dev-new
+if current_head non-empty:   # AFTER dispatch, not before
+    post hidden marker `<!-- no-progress-substantive-attempt:<head> ... -->`
 ```
 
 ### Why a per-HEAD attempt marker (bounded retries, N=1)
@@ -92,13 +95,24 @@ old HEAD applies — branch (C) records a fresh marker for the *new* HEAD and a
 
 ### Bot-unfixable detection (branch A)
 
-`dev_report_bot_unfixable(issue)` scans the most-recent dev **Agent Session
-Report (Dev)** comment for the bot-permission signature. We look for the literal
-`Resource not accessible by integration` co-occurring with a PR-metadata-edit
-context (`pr edit` / `PATCH` / `pull request` / `PR body`). This is the
-permission 403 the dev agent hits when the only fix is a PR-body edit its scoped
-token can't perform ([INV-79]). When present, no commit the bot can push will
-clear the finding, so we escalate without spending a `dev-new`.
+`dev_report_bot_unfixable(issue, current_head)` scans the issue comments for the
+literal `Resource not accessible by integration` co-occurring with a
+PR-metadata-edit context (`pr edit` / `PATCH` / `pull request` / `PR body` /
+`pull_request`). This is the permission 403 the dev agent hits when the only fix
+is a PR-body edit its scoped token can't perform ([INV-79]). When present, no
+commit the bot can push will clear the finding, so we escalate without spending a
+`dev-new`.
+
+**HEAD-window scoping (#274 review [P1] finding 1)**: the scan is bounded to
+comments created *after* the most recent `Reviewed HEAD:` trailer for a SHA
+**different** from `current_head` — i.e. within the current HEAD's review cycle.
+This makes an old 403 self-expire: once HEAD advances and a new review posts a
+`Reviewed HEAD:<new>` trailer, the prior 403 falls outside the window. The caller
+**additionally** gates branch A on `current_head == last_reviewed_head`, so a 403
+can only escalate when HEAD has not advanced. Without this, a single historical
+403 comment would route *every* later completed-session substantive failure on
+the issue to `mark_stalled`, even after a maintainer applied the metadata edit or
+the dev pushed unrelated progress.
 
 The detector is fail-safe: a `gh` transport error yields empty output → the
 signature is "not found" → we fall through to the bounded-retry path (B/C), which

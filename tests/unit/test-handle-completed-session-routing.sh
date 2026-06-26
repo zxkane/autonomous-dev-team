@@ -457,11 +457,13 @@ assert_eq "NOPROG-003 no duplicate notice" "0" "$_MOCK_COMMENT_COUNT"
 assert_eq "NOPROG-003 NO dispatch dev-new" "" "$_MOCK_DISPATCH_CALLS"
 assert_eq "NOPROG-003 mark_stalled still fired" "100 " "$_MOCK_MARK_STALLED_CALLS"
 
-# TC-DISP-NOPROG-004: bot-unfixable 403 signature → operator handoff, no dev-new.
+# TC-DISP-NOPROG-004: bot-unfixable 403 signature at the SAME (unchanged) HEAD
+# → operator handoff, no dev-new. Branch A requires current_head == last_head
+# (#274 review [P1] finding 1): a 403 only blocks when HEAD has not advanced.
 reset_mocks
 _MOCK_VERDICT="failed-substantive"
 _MOCK_PR_HEAD="deadbeef"
-_MOCK_LAST_REVIEWED_HEAD=""           # irrelevant — branch A precedes HEAD check
+_MOCK_LAST_REVIEWED_HEAD="deadbeef"   # HEAD unchanged since last review — gates branch A
 _MOCK_BOT_UNFIXABLE=0                 # the 403-on-PR-body-edit signature is present
 prepare_log 100
 assert_returns "NOPROG-004 returns 0" 0 \
@@ -471,6 +473,47 @@ assert_eq "NOPROG-004 NO post_dispatch_token" "" "$_MOCK_POST_TOKEN_CALLS"
 assert_eq "NOPROG-004 NO label swap to in-progress" "" "$_MOCK_LABEL_SWAPS"
 assert_eq "NOPROG-004 mark_stalled fired" "100 " "$_MOCK_MARK_STALLED_CALLS"
 assert_contains "NOPROG-004 notice cites bot-unfixable" "no-progress-substantive:deadbeef" "$_MOCK_LAST_COMMENT_BODY"
+
+# TC-DISP-NOPROG-006 (#274 review [P1] finding 1 regression): bot-unfixable 403
+# present BUT HEAD has advanced since the last review → the 403 is stale; branch
+# A must NOT fire. dev-new proceeds (the dev made progress; a new attempt against
+# the new HEAD is correct). This is the bug the reviewer flagged: a single old
+# 403 must not permanently stall the issue after HEAD moves.
+reset_mocks
+_MOCK_VERDICT="failed-substantive"
+_MOCK_PR_HEAD="cafe1234"              # HEAD advanced
+_MOCK_LAST_REVIEWED_HEAD="deadbeef"  # older — current != last
+_MOCK_BOT_UNFIXABLE=0                # an old 403 is still on the issue, but stale
+_MOCK_NOPROG_ATTEMPT_PRESENT="0"
+prepare_log 100
+assert_returns "NOPROG-006 returns 0" 0 \
+  handle_completed_session_routing 100 "sid-np006" "2026-05-21T03:18:00Z"
+assert_eq "NOPROG-006 NO stall (stale 403, HEAD advanced)" "" "$_MOCK_MARK_STALLED_CALLS"
+assert_eq "NOPROG-006 dispatch dev-new fired" "dev-new:100 " "$_MOCK_DISPATCH_CALLS"
+assert_eq "NOPROG-006 label swap pending-dev → in-progress" "100:pending-dev:in-progress " "$_MOCK_LABEL_SWAPS"
+assert_contains "NOPROG-006 attempt marker recorded for new HEAD" "no-progress-substantive-attempt:cafe1234" "$_MOCK_FULL_COMMENT_LOG"
+
+# TC-DISP-NOPROG-007 (#274 review [P1] finding 2 regression): when the fresh
+# dispatch is aborted by a transient failure (log truncate fails → fail-closed
+# return 0 WITHOUT dispatching), the attempt marker MUST NOT be written —
+# otherwise the next tick would wrongly conclude a dev-new already ran and stall.
+reset_mocks
+_MOCK_VERDICT="failed-substantive"
+_MOCK_PR_HEAD="deadbeef"
+_MOCK_LAST_REVIEWED_HEAD="deadbeef"
+_MOCK_NOPROG_ATTEMPT_PRESENT="0"      # first attempt at this HEAD
+prepare_readonly_log 100              # truncate will fail (read-only log)
+assert_returns "NOPROG-007 returns 0 (fail-closed)" 0 \
+  handle_completed_session_routing 100 "sid-np007" "2026-05-21T03:18:00Z"
+assert_eq "NOPROG-007 NO dispatch (truncate failed)" "" "$_MOCK_DISPATCH_CALLS"
+assert_eq "NOPROG-007 NO label swap (truncate failed)" "" "$_MOCK_LABEL_SWAPS"
+if [[ "$_MOCK_FULL_COMMENT_LOG" != *"no-progress-substantive-attempt:"* ]]; then
+  echo -e "  ${GREEN}PASS${NC}: NOPROG-007 attempt marker NOT written when dispatch aborted"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: NOPROG-007 attempt marker was written despite aborted dispatch"
+  FAIL=$((FAIL + 1))
+fi
 
 # TC-DISP-NOPROG-005: first substantive attempt at a HEAD (no marker yet) →
 # records attempt marker AND mints dev-new (bounded N=1).

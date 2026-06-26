@@ -44,16 +44,48 @@ already present.
 **Expected**: NO duplicate notice posted; still NO `dev-new`; `mark_stalled`
 still fired (stall is idempotent against an already-stalled issue).
 
-### TC-DISP-NOPROG-004: bot-unfixable 403 signature → operator handoff, no dev-new
+### TC-DISP-NOPROG-004: bot-unfixable 403 signature at the SAME HEAD → operator handoff, no dev-new
 
 **Setup**: `_MOCK_VERDICT=failed-substantive`; `dev_report_bot_unfixable`
-returns true (the most-recent dev report contains
-`Resource not accessible by integration` in a PR-edit context). HEAD values are
-irrelevant (the bot-unfixable branch precedes the HEAD comparison).
+returns true (a `Resource not accessible by integration` in a PR-edit context
+within the current HEAD's window); `current_head == last_reviewed_head` (HEAD
+unchanged — the gate for branch A, #274 review [P1] finding 1).
 
 **Expected**: one idempotent `no-progress-substantive:<head>` notice citing the
 bot-permission signature; `mark_stalled` fired; NO `post_dispatch_token`; NO
 `dispatch dev-new`; no label swap to `in-progress`.
+
+### TC-DISP-NOPROG-006: bot-unfixable 403 but HEAD advanced → dev-new proceeds (no stale-stall)
+
+**Setup**: `_MOCK_VERDICT=failed-substantive`; `dev_report_bot_unfixable` would
+return true (an old 403 is still on the issue) BUT `current_head != last_head`
+(the dev pushed new commits). This is the #274 review [P1] finding-1 regression:
+an old 403 must not permanently stall the issue once HEAD advances.
+
+**Expected**: branch A does NOT fire; `dev-new` proceeds (`label_swap pending-dev
+→ in-progress`, `dispatch dev-new`, attempt marker for the new HEAD); NO
+`mark_stalled`.
+
+### TC-DISP-NOPROG-007: dispatch aborted (truncate fails) → attempt marker NOT written
+
+**Setup**: `_MOCK_VERDICT=failed-substantive`; first attempt at a HEAD (no
+marker); the per-issue log is read-only so the fail-closed truncate guard takes
+its `return 0` path WITHOUT dispatching. This is the #274 review [P1] finding-2
+regression: the attempt marker must be written only after a successful dispatch.
+
+**Expected**: NO `dispatch dev-new`; NO label swap; and crucially NO
+`no-progress-substantive-attempt:` marker posted (so the next tick re-attempts
+cleanly instead of stalling on a phantom marker).
+
+### TC-BU-001..007 (`test-dev-report-bot-unfixable.sh`): detector HEAD-window scoping
+
+Standalone tests of the REAL `dev_report_bot_unfixable` against a scripted `gh`
+mock (the routing suite mocks the function itself): an in-window 403 on a PR
+edit → unfixable; a 403 OLDER than the last different-HEAD `Reviewed HEAD:`
+trailer → NOT unfixable (self-expiry); a 403 without PR-metadata context → not
+the signature; null comment bodies tolerated (#148 guard); first-cycle (no prior
+trailer) conservative-toward-escalate; a same-head trailer ignored for the window
+boundary.
 
 ### TC-DISP-NOPROG-005: first substantive attempt at a HEAD → records marker, dev-new (bounded N=1)
 

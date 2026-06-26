@@ -1013,12 +1013,24 @@ handle_completed_session_routing() {
       _np_last_head=$(last_reviewed_head "$issue_num")
       local _np_notice_marker="no-progress-substantive:${_np_current_head}"
 
-      # Branch A — bot-unfixable: the dev agent already reported a 403 on a
-      # PR-metadata edit (its scoped token can't do it) or a maintainer/
-      # post-merge-only finding. No commit clears it → escalate with ZERO
-      # dev-new. Runs before the HEAD comparison: a bot-permission 403 is
-      # un-resolvable regardless of whether HEAD moved.
-      if dev_report_bot_unfixable "$issue_num"; then
+      # Branch A — bot-unfixable: the dev agent reported a 403 on a PR-metadata
+      # edit (its scoped token can't do it) or a maintainer/post-merge-only
+      # finding, within the CURRENT HEAD's review cycle. No commit clears it →
+      # escalate with ZERO dev-new.
+      #
+      # Gated on `current_head == last_head` (#274 review [P1] finding 1): a 403
+      # only blocks when HEAD has NOT advanced since the last review. If the dev
+      # pushed new commits (HEAD moved) — or a maintainer applied the metadata
+      # edit and a re-review advanced the trailer — the prior 403 is stale and
+      # this branch must NOT fire; we fall through to branch C and dispatch a
+      # fresh dev-new against the new HEAD. `dev_report_bot_unfixable` is itself
+      # HEAD-window-scoped (see its definition) as defense-in-depth, but the
+      # same-HEAD gate here is the primary guard against a stale-403 permanent
+      # stall. (Empty current_head — no PR yet — also skips this branch: there
+      # is no PR body to have hit a 403 against.)
+      if [ -n "$_np_current_head" ] && [ -n "$_np_last_head" ] \
+         && [ "$_np_current_head" = "$_np_last_head" ] \
+         && dev_report_bot_unfixable "$issue_num" "$_np_current_head"; then
         log "  issue #${issue_num} substantive review failure is bot-unfixable (PR-metadata 403 / maintainer-only) — escalating to operator, no dev-new"
         if gh issue view "$issue_num" --repo "$REPO" --json comments \
             -q "[.comments[].body | select(contains(\"${_np_notice_marker}\"))] | length" \
@@ -1050,19 +1062,16 @@ handle_completed_session_routing() {
         return 0
       fi
 
-      # Branch C — first substantive attempt against THIS head (or HEAD moved):
-      # record a per-HEAD attempt marker so the NEXT same-HEAD tick takes branch
-      # B, then fall through to the existing INV-35 dev-new dispatch. This bounds
-      # dev-new to exactly one attempt per unchanged HEAD (#274 proposal #2,
-      # N=1) while preserving the legitimate "dev needs one more pass" case and
-      # the no-PR fall-through (empty _np_current_head → no marker, dispatch as
-      # before).
-      if [ -n "$_np_current_head" ]; then
-        gh issue comment "$issue_num" --repo "$REPO" \
-          --body "<!-- no-progress-substantive-attempt:${_np_current_head} session=${session_id} -->" \
-          2>/dev/null || true
-      fi
-
+      # Branch C — first substantive attempt against THIS head (or HEAD moved,
+      # or no PR yet): fall through to the existing INV-35 dev-new dispatch. The
+      # per-HEAD `no-progress-substantive-attempt:<head>` marker that makes the
+      # NEXT same-HEAD tick take branch B is recorded AFTER the dispatch
+      # succeeds (see below), NOT here (#274 review [P1] finding 2): writing it
+      # up-front would, on a transient truncate/label/dispatch failure (the
+      # `return 0` fail-closed path below), leave a marker claiming a dev-new ran
+      # for this HEAD when none did — stalling the issue on the next tick. This
+      # bounds dev-new to exactly one attempt per unchanged HEAD (#274 proposal
+      # #2, N=1) only once a fresh session is actually launched.
       log "  issue #${issue_num} substantive review failure on completed session ${session_id} — minting fresh dev session"
       local _fresh_marker="INV-35-fresh-dev:${session_id}"
       if gh issue view "$issue_num" --repo "$REPO" --json comments \
@@ -1087,6 +1096,16 @@ handle_completed_session_routing() {
       label_swap "$issue_num" "pending-dev" "in-progress"
       post_dispatch_token "$issue_num" "dev-new"
       dispatch dev-new "$issue_num"
+      # Record the per-HEAD attempt marker ONLY now that the fresh dev-new has
+      # actually been dispatched (#274 review [P1] finding 2). The next tick that
+      # sees the same HEAD still failing substantively will find this marker and
+      # take branch B (escalate) instead of looping another dev-new. Skipped when
+      # the HEAD is unknown (no PR) — branch B can't key on an empty head anyway.
+      if [ -n "$_np_current_head" ]; then
+        gh issue comment "$issue_num" --repo "$REPO" \
+          --body "<!-- no-progress-substantive-attempt:${_np_current_head} session=${session_id} -->" \
+          2>/dev/null || true
+      fi
       return 0
       ;;
 
@@ -1482,13 +1501,38 @@ last_reviewed_head() {
 # RE2-safe (plain alternation, no look-behind/ahead) so a `gh --jq` run can't
 # abort the wrapper under `set -e` ([gh --jq is RE2]).
 dev_report_bot_unfixable() {
-  local issue_num="$1" hits
+  local issue_num="$1" current_head="${2:-}" since_iso hits
+
+  # HEAD-scope the scan (#274 review [P1] finding 1): a PR-metadata 403 is only
+  # meaningful for the CURRENT HEAD's review cycle. Scanning ALL history makes a
+  # single old 403 permanently mark the issue unfixable, even after HEAD advances
+  # or a maintainer applies the metadata edit. We therefore only consider 403
+  # comments created AFTER the most recent `Reviewed HEAD:` trailer for a
+  # *different* (older) SHA — i.e. since the current HEAD became the reviewed
+  # HEAD. When HEAD advances, the next review's trailer for the new SHA moves the
+  # window forward and an earlier 403 drops out of scope (self-expiring).
+  #
+  # `since_iso` empty (no prior different-HEAD trailer — e.g. first review) means
+  # "no lower bound": scan all comments. That is the conservative-toward-escalate
+  # choice ONLY for the genuinely-first cycle; the caller additionally gates this
+  # whole branch on `current_head == last_reviewed_head`, so a HEAD that has
+  # advanced never reaches here regardless of `since_iso`.
+  if [ -n "$current_head" ]; then
+    since_iso=$(gh issue view "$issue_num" --repo "$REPO" --json comments \
+      -q "[.comments[] | select((.body // \"\") | test(\"Reviewed HEAD:\")) | select((.body // \"\") | test(\"Reviewed HEAD: \`${current_head}\`\") | not)] | last | .createdAt // empty" \
+      2>/dev/null) || since_iso=""
+  fi
+  since_iso="${since_iso:-1970-01-01T00:00:00Z}"
+
   # `.body` is null when a comment has an empty body; `null | test(...)` aborts
   # the jq filter (silently hiding any match — #148), so guard with `// ""`.
+  # The `test()` filters are RE2-safe (plain alternation, no look-behind/ahead).
   hits=$(gh issue view "$issue_num" --repo "$REPO" --json comments \
-    -q '[.comments[].body // ""
-         | select(test("Resource not accessible by integration"))
-         | select(test("pr edit"; "i") or test("PATCH"; "i") or test("pull request"; "i") or test("PR body"; "i") or test("pull_request"; "i"))] | length' \
+    -q "[.comments[]
+         | select(.createdAt > \"${since_iso}\")
+         | (.body // \"\")
+         | select(test(\"Resource not accessible by integration\"))
+         | select(test(\"pr edit\"; \"i\") or test(\"PATCH\"; \"i\") or test(\"pull request\"; \"i\") or test(\"PR body\"; \"i\") or test(\"pull_request\"; \"i\"))] | length" \
     2>/dev/null) || return 1
   [ -n "$hits" ] && [ "$hits" != "0" ]
 }
