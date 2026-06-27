@@ -160,10 +160,20 @@ The *callers* keep their logic; only the leaf `gh` call moves behind a verb.
 > '<INV-25 subtraction>'`) and the leaf forwards it to `gh issue list --repo
 > "$REPO" "$@"`, so the emitted argv + `--json` field list stay byte-identical and
 > the INV-25 terminal-state subtraction stays in the caller's `-q` (caller-side,
-> provider-neutral). The WRITE leaves (`itp_transition_state`/`itp_post_comment`/
-> `itp_edit_comment`/`itp_mark_checkbox`/`itp_provision_states`) and the dep leaves
-> (`itp_resolve_dep`/`itp_begin_tick`) are still scaffolds (downstream itp-writes /
-> itp-deps-begin-tick).
+> provider-neutral). **The WRITE leaves —
+> `itp_transition_state`/`itp_post_comment`/`itp_edit_comment`/`itp_mark_checkbox`/
+> `itp_provision_states` — are migrated for the GitHub backend in #283**
+> ([`tests/unit/test-itp-write-leaves.sh`](../../tests/unit/test-itp-write-leaves.sh)):
+> `label_swap` routes through `itp_transition_state`; all 18 `gh issue comment`
+> sites in `lib-dispatch.sh` (including the dispatcher markers `post_dispatch_token`
+> [INV-18] / `_dep_block_comment` [INV-39]) route through `itp_post_comment` ([INV-89],
+> `grep -c 'gh issue comment' lib-dispatch.sh` == 0); the INV-46 SHA stamp
+> (`lib-review-e2e.sh`) routes through `itp_edit_comment` with an `edit_comment=0`
+> fresh-marker fallback; `mark-issue-checkbox.sh` routes through `itp_mark_checkbox`;
+> `setup-labels.sh` through `itp_provision_states` — all byte-identical, with the
+> marker text / retry / dedup / [INV-25] terminal-state subtraction staying
+> caller-side. The dep leaves (`itp_resolve_dep`/`itp_begin_tick`) are still
+> scaffolds (downstream itp-deps-begin-tick).
 
 ### 3.2 Code-Host Provider (CHP) verbs
 
@@ -559,19 +569,19 @@ becomes a verb, the surrounding INV-coupled logic stays caller-side.
 | `list_pending_dev` (`:91`) | `itp_list_by_state` | (b) entangled | same [INV-25] subtraction stays caller-side |
 | `list_stale_candidates` (`:110`) | `itp_list_by_state` | (a) separable-leaf | the staleness-window enumeration leaf |
 | `list_hygiene_residue` (`:143`) | `itp_list_forbidden_combos` | (a) separable-leaf | the [INV-25] forbidden-combination query leaf |
-| `label_swap` (`:1986`) | `itp_transition_state` | (a) separable-leaf | the atomic remove+add `gh issue edit` |
+| `label_swap` (`lib-dispatch.sh`) | `itp_transition_state` | (a) separable-leaf | the atomic remove+add `gh issue edit` — **migrated #283** (the `mark_stalled` inline `pending-dev→stalled` edit was folded into a `label_swap` call so every transition funnels through the one verb) |
 | `resolve_dep_state` (`:348`) | `itp_resolve_dep` + `itp_begin_tick` | (b) entangled | leaf lookup → `itp_resolve_dep`; [INV-83] scoped-token mint + `_DEP_TOKEN_CACHE` → provider behind `itp_begin_tick`; the `## Dependencies` parse stays caller-side |
 | `check_deps_resolved` (`:438`) | `itp_read_task` + `itp_resolve_dep` | (b) entangled | `gh issue view --json body` + the per-ref lookup become verbs; the parse + block/proceed decision stay caller-side |
-| `mark_stalled` (`:624`) | `itp_post_comment` + `itp_transition_state` | **(b) entangled multi-op orchestrator** | becomes glue calling comment-post + label-swap verbs interleaved with NON-host ops (`pid_alive`, log truncate) that stay caller-side |
-| `handle_completed_session_routing` (`:947`) | `itp_post_comment` + `itp_transition_state` (+ dispatch) | **(b) entangled multi-op orchestrator** | the [INV-35]/[INV-85] routing decision + `dispatch dev-new` stay caller-side; only the comment/label leaves become verbs |
-| `post_dispatch_token` (`:1227`) | `itp_post_comment` | (a) separable-leaf | the [INV-18] dispatcher-marker comment write — routes through the ITP choke-point ([INV-89]) |
-| `_dep_block_comment` (`:400`) | `itp_post_comment` | (a) separable-leaf | the [INV-39] dependency-block dispatcher-marker comment write |
+| `mark_stalled` (`lib-dispatch.sh`) | `itp_post_comment` + `itp_transition_state` | **(b) entangled multi-op orchestrator** | **leaf I/O migrated #283**: its comment posts → `itp_post_comment`, its `pending-dev→stalled` edit → `label_swap` (→ `itp_transition_state`); the NON-host ops (`pid_alive`, log truncate) stay caller-side. The orchestrator restructuring itself is owned by entangled-orchestrators-golden-trace |
+| `handle_completed_session_routing` (`lib-dispatch.sh`) | `itp_post_comment` + `itp_transition_state` (+ dispatch) | **(b) entangled multi-op orchestrator** | **leaf I/O migrated #283**: all comment posts → `itp_post_comment`, label moves → `label_swap`; the [INV-35]/[INV-85] routing decision + `dispatch dev-new` + log truncate stay caller-side |
+| `post_dispatch_token` (`lib-dispatch.sh`) | `itp_post_comment` | (a) separable-leaf | the [INV-18] dispatcher-marker comment write — routes through the ITP choke-point ([INV-89]) — **migrated #283** (marker BODY composed caller-side, verbatim) |
+| `_dep_block_comment` (`lib-dispatch.sh`) | `itp_post_comment` | (a) separable-leaf | the [INV-39] dependency-block dispatcher-marker comment write — **migrated #283** (the dedup READ stays on `itp_list_comments`) |
 | `fetch_pr_for_issue` (`:1471`) | `chp_find_pr_for_issue` | (b) entangled | the `gh pr list --json $FIELDS` leaf moves with `FIELDS` forwarded byte-identically ([M1]); the `select(.body\|test("#N"))` filter stays caller-side |
 | `ci_is_green` (`:1485`) | `chp_ci_status` | (a) separable-leaf | the `gh pr checks` status leaf → `green`/`pending`/`failed`/`none` |
 | `autonomous-review.sh:3159` mergeable I/O | `chp_mergeable` | (b) entangled | only the `gh pr view --json mergeable` leaf moves ([M2]); `_classify_mergeable_gate`/`_pr_open_gate` ([INV-44]/[INV-54]) stay caller-side |
-| `setup-labels.sh:47` `gh label create` | `itp_provision_states` | (a) separable-leaf | the state-primitive provisioning leaf; hex color gated by `label_colors` |
-| `reply-to-comments.sh:44-45` | `itp_post_comment` (returning `id`/`url`) | (a) separable-leaf | the reply-comment POST leaf returning `{id, url}` |
-| `lib-review-e2e.sh:486` PATCH ([INV-46]) | `itp_edit_comment` | (a) separable-leaf | the edit-in-place PATCH leaf; gated by `edit_comment` |
+| `setup-labels.sh` `gh label create` | `itp_provision_states` | (a) separable-leaf | the state-primitive provisioning leaf; hex color gated by `label_colors` — **migrated #283** (the 9-label table stays caller-side) |
+| `reply-to-comments.sh:44-45` | `itp_post_comment` (returning `id`/`url`) | (a) separable-leaf | the reply-comment POST leaf returning `{id, url}` — this is a CHP review-thread reply (`pulls/.../comments`), owned by chp-pr-lifecycle, NOT migrated in #283 |
+| `lib-review-e2e.sh` PATCH ([INV-46]) | `itp_edit_comment` | (a) separable-leaf | the edit-in-place PATCH leaf; gated by `edit_comment` — **migrated #283** (GET-comment-id / GET-body reads stay caller-side; `edit_comment=0` → fresh `itp_post_comment` marker) |
 | `Closes #${issue_num}` literals (`autonomous-dev.sh:851/866/914/1151`) | `chp_close_keyword` | (a) separable-leaf | the hardcoded auto-close keyword becomes a verb-rendered string ([M4]) |
 
 > `mark_stalled` and `handle_completed_session_routing` are explicitly **entangled

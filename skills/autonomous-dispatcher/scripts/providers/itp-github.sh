@@ -134,3 +134,100 @@ itp_github_list_comments() {
     ] | sort_by(.createdAt // \"\")
   "
 }
+
+# ===========================================================================
+# WRITE leaves (#283). Each is the byte-identical innermost `gh` I/O the caller
+# emitted before the verb existed — the no-behavior-change golden-trace anchor
+# (spec §7.3, [INV-87]). ALL INV-coupled logic (marker text, retry, dedup,
+# idempotency, terminal-state jq subtraction, fail-closed rc) stays CALLER-side;
+# only the leaf moves here. See the verb↔current-function mapping appendix in
+# docs/pipeline/provider-spec.md.
+# ===========================================================================
+
+# itp_github_transition_state ISSUE REMOVE ADD — atomic label state move.
+#
+# Spec §3.1: remove REMOVE, add ADD in ONE `gh issue edit` (atomic per [INV-08]).
+# Moves the leaf out of `label_swap` (lib-dispatch.sh) byte-identically: the
+# empty-REMOVE / empty-ADD cases STILL omit the corresponding flag, preserving
+# the `[ -n "$remove" ]` / `[ -n "$add" ]` guards the caller used. The terminal-
+# state jq subtraction in list_pending_review/list_pending_dev ([INV-25]
+# defense-in-depth) is NOT this leaf's concern — it stays caller-side (spec §3.1).
+itp_github_transition_state() {
+  local issue_num="$1" remove="$2" add="$3"
+  local args=()
+  [ -n "$remove" ] && args+=(--remove-label "$remove")
+  [ -n "$add" ] && args+=(--add-label "$add")
+  gh issue edit "$issue_num" --repo "$REPO" "${args[@]}"
+}
+
+# itp_github_post_comment ISSUE BODY — post a machine-marker / progress comment.
+#
+# Spec §3.1 [M6] / [INV-89]: the SINGLE choke-point for ALL machine markers —
+# agent progress/verdict comments AND the dispatcher's own markers
+# (post_dispatch_token [INV-18], _dep_block_comment [INV-39]). The BODY (incl. the
+# verbatim `<!-- dispatcher-token: … -->` / `<!-- dep-block:… -->` HTML markers)
+# is composed CALLER-side and passed through unmodified — GitHub's
+# marker_channel=html round-trips HTML comments verbatim (a marker_channel=text
+# provider would post via a non-sanitizing plain field instead). The caller owns
+# the `2>/dev/null || true` fail-safe / retry-`&&` framing; this leaf is the bare
+# byte-identical `gh issue comment` emit.
+itp_github_post_comment() {
+  local issue_num="$1" body="$2"
+  gh issue comment "$issue_num" --repo "$REPO" --body "$body"
+}
+
+# itp_github_edit_comment ISSUE COMMENT_ID BODY — edit a comment in place.
+#
+# Spec §3.1 [M5] / [INV-46]: the SHA evidence-marker PATCH leaf
+# (lib-review-e2e.sh). GitHub has comment edit-in-place (`edit_comment=1`), so the
+# byte-identical leaf is `gh api -X PATCH …/issues/comments/<id> -f body=<body>`.
+# The path is the ISSUE/PR-comments REST endpoint (PR comments are issue comments
+# for this endpoint); it uses $REPO_OWNER/$REPO_NAME (the caller's env, matching
+# the pre-refactor call exactly). The GET-comment-id / GET-body READ leaves and
+# the idempotent SHA-already-present skip stay caller-side (itp-reads + caller).
+# A backend without edit (`edit_comment=0`) is handled by the CALLER falling back
+# to a fresh marker via itp_post_comment — not in this leaf.
+itp_github_edit_comment() {
+  local _issue="$1" comment_id="$2" body="$3"
+  gh api -X PATCH "repos/${REPO_OWNER}/${REPO_NAME}/issues/comments/${comment_id}" \
+    -f body="$body"
+}
+
+# itp_github_mark_checkbox ISSUE NEW_BODY — persist a task-body checkbox tick.
+#
+# Spec §3.1 (`body_checkbox`): GitHub ticks a markdown body checkbox, so the leaf
+# is the byte-identical body PATCH `gh api repos/$REPO/issues/<n> --method PATCH
+# --field body=<new_body> --silent`. The caller (mark-issue-checkbox.sh) owns the
+# GET-body fetch, the `- [ ]`→`- [x]` awk rewrite, and the not-found / already-
+# checked exit codes (0/1/2) — only the PATCH primitive moves here, receiving the
+# already-rewritten body. A `body_checkbox=0` backend remaps to a native-subtask
+# completion in the caller (defined; not implemented this PR).
+itp_github_mark_checkbox() {
+  local issue_num="$1" new_body="$2"
+  gh api "repos/${REPO}/issues/${issue_num}" \
+    --method PATCH \
+    --field body="$new_body" \
+    --silent
+}
+
+# itp_github_provision_states NAME COLOR DESCRIPTION — provision one state primitive.
+#
+# Spec §3.1 [m5] (`label_colors`): GitHub state primitives are labels, so the leaf
+# is the idempotent per-label view-or-create
+# (`gh label view` skip; else `gh label create --color <hex> --description <d>`),
+# byte-identical to setup-labels.sh's loop body. The 9-label definition table stays
+# caller-side. `label_colors=1` (GitHub) → the `--color` hex is emitted; a
+# `label_colors=0` backend omits `--color` (defined; not live this PR). Echoes the
+# same `[skip]`/`[created]` lines the caller printed before, so console output is
+# unchanged.
+itp_github_provision_states() {
+  local name="$1" color="$2" description="$3"
+  if gh label view "$name" --repo "$REPO" &>/dev/null; then
+    echo "  [skip] '$name' already exists"
+  else
+    gh label create "$name" --repo "$REPO" \
+      --color "$color" \
+      --description "$description"
+    echo "  [created] '$name'"
+  fi
+}

@@ -289,8 +289,8 @@ hygiene_post_audit_comment() {
 
   local pretty
   pretty=$(echo "$stripped_labels" | tr ' ' '\n' | awk 'NF{printf "%s`%s`", (NR>1?", ":""), $1}')
-  gh issue comment "$issue_num" --repo "$REPO" \
-    --body "Label hygiene: stripped ${pretty} from \`${terminal_label}\` issue (INV-25). <!-- ${marker} -->" \
+  itp_post_comment "$issue_num" \
+    "Label hygiene: stripped ${pretty} from \`${terminal_label}\` issue (INV-25). <!-- ${marker} -->" \
     2>/dev/null || true
 }
 
@@ -459,8 +459,8 @@ _dep_block_comment() {
   if itp_list_comments "$issue_num" 2>/dev/null \
       | jq -r "[.[].body | select(contains(\"${marker}\"))] | length" \
       2>/dev/null | grep -q '^0$'; then
-    gh issue comment "$issue_num" --repo "$REPO" \
-      --body "Dependency \`${owner_repo}#${num}\` could not be resolved — the App may not be installed on \`${owner_repo}\` (or the issue is private/deleted). This issue stays blocked until the dependency is reachable and CLOSED/MERGED. <!-- ${marker} -->" \
+    itp_post_comment "$issue_num" \
+      "Dependency \`${owner_repo}#${num}\` could not be resolved — the App may not be installed on \`${owner_repo}\` (or the issue is private/deleted). This issue stays blocked until the dependency is reachable and CLOSED/MERGED. <!-- ${marker} -->" \
       2>/dev/null || true
   fi
 }
@@ -738,8 +738,8 @@ mark_stalled() {
       if itp_list_comments "$issue_num" 2>/dev/null \
           | jq -r "[.[].body | select(contains(\"${current_session_marker}\"))] | length" \
           2>/dev/null | grep -q '^0$'; then
-        gh issue comment "$issue_num" --repo "$REPO" \
-          --body "Stall decision deferred: dev wrapper PID ${pid} is still alive — counter says ${MAX_RETRIES} but a wrapper is making progress. Re-evaluating next tick. (\`${current_session_marker}\`)"
+        itp_post_comment "$issue_num" \
+          "Stall decision deferred: dev wrapper PID ${pid} is still alive — counter says ${MAX_RETRIES} but a wrapper is making progress. Re-evaluating next tick. (\`${current_session_marker}\`)"
       fi
       return 0
     fi
@@ -749,16 +749,18 @@ mark_stalled() {
   agent_failures=$(count_agent_failures "$issue_num")
   dispatcher_crashes=$(count_dispatcher_crashes "$issue_num")
   false_positives=$(count_dispatcher_false_positives "$issue_num")
-  gh issue edit "$issue_num" --repo "$REPO" \
-    --remove-label "pending-dev" \
-    --add-label "stalled"
+  # [INV-87]/[INV-89] The pending-dev→stalled transition routes through the single
+  # label_swap helper (→ itp_transition_state) instead of an inline `gh issue
+  # edit`, so every transition funnels through one choke-point. Same labels, same
+  # order, same atomic bundled edit — zero behavior change.
+  label_swap "$issue_num" "pending-dev" "stalled"
   # Operator visibility: counted vs. suppressed dispatcher events ([INV-18]).
   # Suppressed events are dispatcher-detected crashes that occurred before the
   # agent confirmed startup (no Dev Session ID written) — these are
   # dispatcher-side false positives and do NOT consume MAX_RETRIES.
   local counted_dispatcher_crashes=$(( dispatcher_crashes - false_positives ))
-  gh issue comment "$issue_num" --repo "$REPO" \
-    --body "Issue has exceeded the maximum retry limit (${MAX_RETRIES} failed attempts: ${agent_failures} agent failures + ${counted_dispatcher_crashes} dispatcher-detected crashes; ${false_positives} dispatcher false positives suppressed per #99). Marking as stalled. @${REPO_OWNER} please investigate manually."
+  itp_post_comment "$issue_num" \
+    "Issue has exceeded the maximum retry limit (${MAX_RETRIES} failed attempts: ${agent_failures} agent failures + ${counted_dispatcher_crashes} dispatcher-detected crashes; ${false_positives} dispatcher false positives suppressed per #99). Marking as stalled. @${REPO_OWNER} please investigate manually."
 }
 
 # ---------------------------------------------------------------------------
@@ -1020,8 +1022,8 @@ handle_completed_session_routing() {
       if itp_list_comments "$issue_num" 2>/dev/null \
           | jq -r "[.[].body | select(contains(\"${_notice_marker}\"))] | length" \
           2>/dev/null | grep -q '^0$'; then
-        gh issue comment "$issue_num" --repo "$REPO" \
-          --body "Session \`${session_id}\` already ended (stop_reason=end_turn, terminal_reason=completed). Resume would hang on idle SSE — skipping. Manually transition to \`pending-review\` if a PR exists, or close the issue if work is done. (\`${_notice_marker}\`)"
+        itp_post_comment "$issue_num" \
+          "Session \`${session_id}\` already ended (stop_reason=end_turn, terminal_reason=completed). Resume would hang on idle SSE — skipping. Manually transition to \`pending-review\` if a PR exists, or close the issue if work is done. (\`${_notice_marker}\`)"
       fi
       return 0
       ;;
@@ -1043,14 +1045,14 @@ handle_completed_session_routing() {
       # cap=0 → unbounded (operator opt-in to bounce-forever).
       if [ "$_limit" -gt 0 ] && [ "$_flip_count" -ge "$_limit" ]; then
         log "  issue #${issue_num} non-substantive review failure (cause=${_cause}) reached REVIEW_RETRY_LIMIT=${_limit} — stalling"
-        gh issue comment "$issue_num" --repo "$REPO" \
-          --body "Persistent review-failure-non-substantive on session \`${session_id}\` (cause=\`${_cause}\`, flips=${_flip_count}/${_limit}). Marking stalled. @${REPO_OWNER} please investigate the upstream review dependency (bot/CI/transport)."
+        itp_post_comment "$issue_num" \
+          "Persistent review-failure-non-substantive on session \`${session_id}\` (cause=\`${_cause}\`, flips=${_flip_count}/${_limit}). Marking stalled. @${REPO_OWNER} please investigate the upstream review dependency (bot/CI/transport)."
         mark_stalled "$issue_num"
         return 0
       fi
       log "  issue #${issue_num} non-substantive review failure (cause=${_cause}, flip ${_flip_count}/${_limit}) — flipping to pending-review"
-      gh issue comment "$issue_num" --repo "$REPO" \
-        --body "$(printf '%s\n%s' \
+      itp_post_comment "$issue_num" \
+        "$(printf '%s\n%s' \
           "<!-- review-aware-flip:non-substantive cause=${_cause} session=${session_id} -->" \
           "Re-routing to review (last review failed for non-substantive reason: ${_cause}).")"
       label_swap "$issue_num" "pending-dev" "pending-review"
@@ -1102,8 +1104,8 @@ handle_completed_session_routing() {
         if itp_list_comments "$issue_num" 2>/dev/null \
             | jq -r "[.[].body | select(contains(\"${_np_notice_marker}\"))] | length" \
             2>/dev/null | grep -q '^0$'; then
-          gh issue comment "$issue_num" --repo "$REPO" \
-            --body "Substantive review failure on completed session \`${session_id}\` is **not resolvable by the autonomous dev agent**: its scoped token hit \`Resource not accessible by integration\` on a PR-metadata edit, or the finding requires a maintainer / post-merge action. Marking stalled — no further \`dev-new\` will be dispatched. @${REPO_OWNER} please apply the PR-body / metadata change manually, or split the post-merge criterion into a follow-up. (\`${_np_notice_marker}\`)"
+          itp_post_comment "$issue_num" \
+            "Substantive review failure on completed session \`${session_id}\` is **not resolvable by the autonomous dev agent**: its scoped token hit \`Resource not accessible by integration\` on a PR-metadata edit, or the finding requires a maintainer / post-merge action. Marking stalled — no further \`dev-new\` will be dispatched. @${REPO_OWNER} please apply the PR-body / metadata change manually, or split the post-merge criterion into a follow-up. (\`${_np_notice_marker}\`)"
         fi
         mark_stalled "$issue_num"
         return 0
@@ -1122,8 +1124,8 @@ handle_completed_session_routing() {
         if itp_list_comments "$issue_num" 2>/dev/null \
             | jq -r "[.[].body | select(contains(\"${_np_notice_marker}\"))] | length" \
             2>/dev/null | grep -q '^0$'; then
-          gh issue comment "$issue_num" --repo "$REPO" \
-            --body "Substantive review failure on completed session \`${session_id}\`, but PR HEAD \`${_np_current_head}\` is unchanged since the last review and a prior fresh dev session already ran against it without producing a new commit. The finding appears un-actionable by the dev agent. Marking stalled — no further \`dev-new\` will be dispatched. @${REPO_OWNER} please investigate. (\`${_np_notice_marker}\`)"
+          itp_post_comment "$issue_num" \
+            "Substantive review failure on completed session \`${session_id}\`, but PR HEAD \`${_np_current_head}\` is unchanged since the last review and a prior fresh dev session already ran against it without producing a new commit. The finding appears un-actionable by the dev agent. Marking stalled — no further \`dev-new\` will be dispatched. @${REPO_OWNER} please investigate. (\`${_np_notice_marker}\`)"
         fi
         mark_stalled "$issue_num"
         return 0
@@ -1144,8 +1146,8 @@ handle_completed_session_routing() {
       if itp_list_comments "$issue_num" 2>/dev/null \
           | jq -r "[.[].body | select(contains(\"${_fresh_marker}\"))] | length" \
           2>/dev/null | grep -q '^0$'; then
-        gh issue comment "$issue_num" --repo "$REPO" \
-          --body "Review failed substantively on completed session \`${session_id}\`. A completed session cannot be resumed; minting a fresh dev session via the INV-12 PTL recovery pattern. (\`${_fresh_marker}\`)"
+        itp_post_comment "$issue_num" \
+          "Review failed substantively on completed session \`${session_id}\`. A completed session cannot be resumed; minting a fresh dev session via the INV-12 PTL recovery pattern. (\`${_fresh_marker}\`)"
       fi
       # Truncate per-issue log so the next tick sees an empty log and
       # doesn't re-trigger this completed-detection branch. Fail-closed
@@ -1156,8 +1158,8 @@ handle_completed_session_routing() {
       local _log_file="/tmp/agent-${PROJECT_ID}-issue-${issue_num}.log"
       if ! : > "$_log_file" 2>/dev/null; then
         log "  ERROR: failed to truncate ${_log_file} (perm/disk?). Skipping INV-35 dev-new dispatch to avoid re-detection loop."
-        gh issue comment "$issue_num" --repo "$REPO" \
-          --body "Could not reset agent log at \`${_log_file}\` for fresh INV-35 dispatch (permission or disk error). Operator: please clear the log file and retry. Skipping dispatch to prevent a silent retry loop." 2>/dev/null || true
+        itp_post_comment "$issue_num" \
+          "Could not reset agent log at \`${_log_file}\` for fresh INV-35 dispatch (permission or disk error). Operator: please clear the log file and retry. Skipping dispatch to prevent a silent retry loop." 2>/dev/null || true
         return 0
       fi
       label_swap "$issue_num" "pending-dev" "in-progress"
@@ -1186,11 +1188,11 @@ handle_completed_session_routing() {
         # cause the very false-stall this guard prevents. The notice therefore
         # describes the marker without reproducing the grep token.
         local _attempt_marker="<!-- no-progress-substantive-attempt:${_np_current_head} session=${session_id} -->"
-        if ! gh issue comment "$issue_num" --repo "$REPO" --body "$_attempt_marker" 2>/dev/null \
-           && ! gh issue comment "$issue_num" --repo "$REPO" --body "$_attempt_marker" 2>/dev/null; then
+        if ! itp_post_comment "$issue_num" "$_attempt_marker" 2>/dev/null \
+           && ! itp_post_comment "$issue_num" "$_attempt_marker" 2>/dev/null; then
           log "  WARNING: failed to post the no-progress attempt marker for issue #${issue_num} HEAD ${_np_current_head} after retry — N=1 no-progress bound degraded for this HEAD (MAX_RETRIES remains the backstop)."
-          gh issue comment "$issue_num" --repo "$REPO" \
-            --body "⚠️ Dispatched a fresh dev session for the substantive review failure, but could not record the per-HEAD no-progress attempt tracker for \`${_np_current_head}\` (GitHub API rejected the hidden marker comment twice). The per-HEAD one-retry bound ([INV-85]) is degraded for this HEAD; the issue is still bounded by \`MAX_RETRIES\`. @${REPO_OWNER} no action needed unless the issue churns dev retries against an unchanged HEAD." 2>/dev/null \
+          itp_post_comment "$issue_num" \
+            "⚠️ Dispatched a fresh dev session for the substantive review failure, but could not record the per-HEAD no-progress attempt tracker for \`${_np_current_head}\` (GitHub API rejected the hidden marker comment twice). The per-HEAD one-retry bound ([INV-85]) is degraded for this HEAD; the issue is still bounded by \`MAX_RETRIES\`. @${REPO_OWNER} no action needed unless the issue churns dev retries against an unchanged HEAD." 2>/dev/null \
             || log "  WARNING: operator notice for the degraded no-progress tracker also failed to post for issue #${issue_num}."
         fi
       fi
@@ -1206,8 +1208,8 @@ handle_completed_session_routing() {
       if itp_list_comments "$issue_num" 2>/dev/null \
           | jq -r "[.[].body | select(contains(\"${_notice_marker_default}\"))] | length" \
           2>/dev/null | grep -q '^0$'; then
-        gh issue comment "$issue_num" --repo "$REPO" \
-          --body "Session \`${session_id}\` completed; verdict classifier returned unexpected value. Operator handoff. (\`${_notice_marker_default}\`)"
+        itp_post_comment "$issue_num" \
+          "Session \`${session_id}\` completed; verdict classifier returned unexpected value. Operator handoff. (\`${_notice_marker_default}\`)"
       fi
       return 0
       ;;
@@ -1300,8 +1302,12 @@ post_dispatch_token() {
     review)      human="Dispatching autonomous review..." ;;
     *)           human="Dispatching ${mode}..." ;;
   esac
-  gh issue comment "$issue_num" --repo "$REPO" \
-    --body "<!-- dispatcher-token: ${token} at ${now} mode=${mode} -->
+  # [INV-18]/[INV-89] The dispatcher's own dispatch-token marker is a machine
+  # marker — it MUST post through itp_post_comment (the marker_channel choke-point)
+  # like every other marker. The `<!-- dispatcher-token: … -->` HTML marker text is
+  # composed CALLER-side and passed verbatim as the BODY (GitHub's html channel
+  # round-trips it unchanged; the read-side capture() depends on it surviving).
+  itp_post_comment "$issue_num" "<!-- dispatcher-token: ${token} at ${now} mode=${mode} -->
 ${human}"
 }
 
@@ -2033,15 +2039,15 @@ handle_pending_dev_pr_exists() {
     if itp_list_comments "$issue_num" 2>/dev/null \
         | jq -r "[.[].body | select(contains(\"${notice_marker}\"))] | length" \
         2>/dev/null | grep -q '^0$'; then
-      gh issue comment "$issue_num" --repo "$REPO" \
-        --body "PR ${pr_ref} HEAD \`${current_head}\` already reviewed with FAILED verdict; awaiting new commits before re-review. (\`${notice_marker}\`)"
+      itp_post_comment "$issue_num" \
+        "PR ${pr_ref} HEAD \`${current_head}\` already reviewed with FAILED verdict; awaiting new commits before re-review. (\`${notice_marker}\`)"
     fi
     return 0
   fi
 
   # New HEAD or first review — keep existing Bug 3 (#99) behavior.
-  gh issue comment "$issue_num" --repo "$REPO" \
-    --body "PR ${pr_ref} exists for this issue; transitioning to pending-review instead of retrying dev (#99 Bug 3)."
+  itp_post_comment "$issue_num" \
+    "PR ${pr_ref} exists for this issue; transitioning to pending-review instead of retrying dev (#99 Bug 3)."
   label_swap "$issue_num" "pending-dev" "pending-review"
   return 0
 }
@@ -2051,12 +2057,17 @@ handle_pending_dev_pr_exists() {
 # ---------------------------------------------------------------------------
 
 # Atomic single-call swap. Both label args may be empty strings.
+#
+# [INV-87]/[INV-89] The atomic remove+add `gh issue edit` leaf routes through
+# itp_transition_state (GitHub impl: itp_github_transition_state forwards the same
+# args and rebuilds the byte-identical `gh issue edit … "${args[@]}"`, omitting
+# --remove-label/--add-label for an empty side exactly as before). The empty-arg
+# guards stay here (the caller decides which flags to pass); the [INV-25]
+# terminal-state jq subtraction in list_pending_review/list_pending_dev stays
+# caller-side (spec §3.1 note), NOT folded into the transition verb.
 label_swap() {
   local issue_num="$1" remove="$2" add="$3"
-  local args=()
-  [ -n "$remove" ] && args+=(--remove-label "$remove")
-  [ -n "$add" ] && args+=(--add-label "$add")
-  gh issue edit "$issue_num" --repo "$REPO" "${args[@]}"
+  itp_transition_state "$issue_num" "$remove" "$add"
 }
 
 # ---------------------------------------------------------------------------

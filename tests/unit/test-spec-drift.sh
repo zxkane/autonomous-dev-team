@@ -541,15 +541,19 @@ rc=$?
 if [[ "$rc" -ne 0 ]] && grep -q "splitlabel" <<<"$out"; then ok "continuation-line write scanned → red naming 'splitlabel'"; else bad "continuation-line write NOT scanned (rc=$rc) — M2 regression"; fi
 cp "$SCRIPTS/dispatcher-tick.sh" "$SCRATCH/dispatcher-tick.sh"  # restore
 
-echo "=== TC-SPEC-GATE-034: the two legitimate variable label writes are ALLOWLISTED (real repo passes) ==="
-# The real label_swap() helper + hygiene_strip_residual_labels() loop use
-# --remove-label "$var" legitimately; they MUST be recognized as allowlisted
-# (info, not a FAIL — the P1.1 ban only fires on NON-allowlisted variable writes,
-# see TC-045). The real repo must therefore still PASS C-overall.
+echo "=== TC-SPEC-GATE-034: the legitimate variable label write is ALLOWLISTED (real repo passes) ==="
+# #283: label_swap() no longer holds a variable label write — its body now
+# delegates to itp_transition_state (the [INV-87] ITP transition verb), whose
+# byte-identical `gh issue edit … --add-label "$add"` leaf lives in
+# providers/itp-github.sh, OUTSIDE the four scanned PIPELINE_FILES. So the only
+# remaining variable label write in the pipeline files is the
+# hygiene_strip_residual_labels() loop (`--remove-label "$t"` over a hard-coded
+# declared transitional-label list). It MUST be recognized as allowlisted (info,
+# not a FAIL — the P1.1 ban only fires on NON-allowlisted variable writes, see
+# TC-045), so the real repo still PASSES C-overall.
 out="$(bash "$CHECK" 2>&1)"
-if grep -q "allowlisted variable label write at lib-dispatch.sh.*hygiene_strip_residual_labels" <<<"$out" \
-   && grep -q "allowlisted variable label write at lib-dispatch.sh.*label_swap" <<<"$out"; then
-  ok "both legitimate variable writes (label_swap, hygiene loop) are allowlisted"
+if grep -q "allowlisted variable label write at lib-dispatch.sh.*hygiene_strip_residual_labels" <<<"$out"; then
+  ok "the legitimate variable write (hygiene loop) is allowlisted; label_swap delegates to itp_transition_state (#283)"
 else
   bad "legitimate variable writes NOT recognized as allowlisted"
 fi

@@ -31,6 +31,24 @@ for _conf_candidate in \
 done
 REPO="${GITHUB_REPO:-${REPO:-owner/repo}}"
 
+# [INV-87] Issue-Tracker Provider dispatch. The body-checkbox PATCH leaf routes
+# through itp_mark_checkbox (→ itp_${ISSUE_PROVIDER}_mark_checkbox). The provider
+# lib lives in the autonomous-dispatcher skill tree; resolve it via readlink -f of
+# THIS script (the [INV-14]/[INV-65] skill-tree idiom) — NOT SCRIPT_DIR, which is
+# deliberately the project-side symlink dir so the conf-lookup above finds the
+# project's autonomous.conf. Guarded + best-effort: if the lib is absent the verb
+# stays undefined and the caller's `command -v` guard below falls back to the
+# inline `gh api` PATCH (a non-github backend would have its own provider lib).
+if ! declare -F itp_mark_checkbox >/dev/null 2>&1; then
+  _mic_real_dir="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]:-$0}")")" && pwd 2>/dev/null)" || _mic_real_dir=""
+  _mic_lib="${_mic_real_dir}/../../autonomous-dispatcher/scripts/lib-issue-provider.sh"
+  if [[ -n "$_mic_real_dir" && -r "$_mic_lib" ]]; then
+    # shellcheck source=../../autonomous-dispatcher/scripts/lib-issue-provider.sh
+    source "$_mic_lib"
+  fi
+  unset _mic_real_dir _mic_lib
+fi
+
 ISSUE_NUMBER="${1:-}"
 CHECKBOX_TEXT="${2:-}"
 
@@ -93,11 +111,23 @@ mark_checkbox() {
     { print }
   ')
 
-  # PATCH the issue body
-  gh api "repos/${REPO}/issues/${ISSUE_NUMBER}" \
-    --method PATCH \
-    --field body="$new_body" \
-    --silent || {
+  # [INV-87] PATCH the issue body via the body-checkbox write leaf. The
+  # `- [ ]`→`- [x]` awk rewrite above + the not-found/already-checked exit codes
+  # (0/1/2) stay caller-side; only the PATCH primitive moves behind
+  # itp_mark_checkbox, which receives the already-rewritten body. On GitHub
+  # (`body_checkbox=1`) this is the byte-identical
+  # `gh api repos/$REPO/issues/$N --method PATCH --field body=… --silent`. A
+  # `body_checkbox=0` backend would remap to a native-subtask completion
+  # (defined; not implemented this PR). Fallback to the inline leaf if the
+  # provider lib is unavailable (keeps the script self-contained).
+  if declare -F itp_mark_checkbox >/dev/null 2>&1; then
+    itp_mark_checkbox "$ISSUE_NUMBER" "$new_body"
+  else
+    gh api "repos/${REPO}/issues/${ISSUE_NUMBER}" \
+      --method PATCH \
+      --field body="$new_body" \
+      --silent
+  fi || {
     echo "Error: Failed to update issue #${ISSUE_NUMBER}" >&2
     return 1
   }
