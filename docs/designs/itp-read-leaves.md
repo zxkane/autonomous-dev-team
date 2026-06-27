@@ -92,13 +92,40 @@ distinct `-q` queries are deliberately consolidated.
 
 ## Scope boundary (per issue Out-of-Scope)
 
-- **OUT:** the dep-lookup leaf — `resolve_dep_state` (`--json state` @ lib-dispatch),
-  `check_deps_resolved` (`--json body` + bare-`#N` `--json state`), the
-  `_DEP_TOKEN_CACHE`. Owned by `itp-deps-begin-tick`. The issue's read_task line
-  refs (`388/448/491`) point INTO these dep functions and are **stale**; the spec
-  mapping appendix assigns them to `itp_resolve_dep`+`itp_begin_tick`/`itp_read_task`
-  under the deps-begin-tick issue. THIS PR migrates only the standalone read_task
-  sites (`autonomous-dev.sh:1097`, `status.sh:85`).
+- **OUT:** the dep-lookup reads in `resolve_dep_state` / `check_deps_resolved`
+  (`--json state` @ lib-dispatch.sh:444 + :547, `--json body` @ :504) and the
+  `_DEP_TOKEN_CACHE`. **Owned by #284** (`providers: migrate dependency resolution
+  behind itp_resolve_dep + itp_begin_tick token-cache lifecycle (INV-83)`).
+
+  **Why these are NOT #281's `itp_read_task` work** (the resolution of the
+  apparent AC contradiction — the issue's read_task line lists `388/448/491`,
+  which now resolve to these dep functions, but the issue's *own* Out-of-Scope
+  says "THIS issue MUST NOT move the dep-lookup leaf"). The **authoritative spec**
+  ([`provider-spec.md`](../pipeline/provider-spec.md), the documented tiebreaker
+  per CLAUDE.md → Pipeline Documentation Authority) settles it:
+  - **Mapping appendix line 563** — `resolve_dep_state` (`:348`) →
+    **`itp_resolve_dep` + `itp_begin_tick`** (class-(b) entangled), **NOT
+    `itp_read_task`**. Its `--json state` leaf carries the [INV-83] scoped-token
+    mint + `_DEP_TOKEN_CACHE`, so it CANNOT be lifted as a plain `itp_read_task`
+    field read.
+  - **Mapping appendix line 564 + §7.1(b)** — `check_deps_resolved` (`:438`) is a
+    **single entangled migration unit**: its `gh issue view --json body` read
+    moves *together with* `resolve_dep_state`'s mint+lookup (`§7.1(b)`: "`gh issue
+    view --json body` + `resolve_dep_state`'s mint+lookup become verbs"). The
+    `## Dependencies` parse + block/proceed decision stay caller-side. Splitting
+    the `--json body` read off into #281 would fracture the entangled unit and
+    leave a half-migrated `check_deps_resolved` straddling two PRs.
+  - **#284 explicitly claims these leaves**: its ACs require `itp_github_resolve_dep`
+    to "move the `gh issue view ... --json state` leaf from lib-dispatch.sh:388
+    verbatim, plus the same-repo ... leaf from lib-dispatch.sh:491", and assert
+    `git grep -c 'gh issue view .*--json state' lib-dispatch.sh` → 0 there.
+    Moving them in #281 would COLLIDE head-on with #284 and risk the #269
+    single-mint-per-tick regression the `_DEP_TOKEN_CACHE` guards.
+
+  So #281's read_task migration is **only the standalone field reads** —
+  `autonomous-dev.sh:1097` (`--json title,body`) and `status.sh:85`
+  (`--json state,labels,title`) — which carry no dep-token machinery. The dep
+  reads stay byte-identical and untouched, by spec, until #284.
 - **OUT:** all ITP WRITE verbs (`gh issue comment`/`gh issue edit`/label_swap),
   all CHP verbs, the orchestrator GLUE in `mark_stalled`/`handle_completed_session_routing`
   (the `itp_post_comment`+`itp_transition_state`+dispatch interleave). Those
