@@ -653,7 +653,7 @@ cleanup() {
   if [[ "$AGENT_RAN" != "true" ]]; then
     if [[ -n "${ISSUE_NUMBER:-}" ]] && command -v gh &>/dev/null; then
       log "Exiting with code $exit_code (agent never ran). Posting startup-failure report."
-      gh issue comment "$ISSUE_NUMBER" --repo "$REPO" --body "$(cat <<EOF
+      itp_post_comment "$ISSUE_NUMBER" "$(cat <<EOF
 **Agent Session Report (Dev)**
 - Dev Session ID: \`${SESSION_ID:-<none>}\`
 - Exit code: ${exit_code}
@@ -751,7 +751,7 @@ EOF
   # (test author's intent: "exercise the empty-string path") stay
   # distinguishable. The two `-` vs `:-` choices are load-bearing in
   # opposite directions; don't unify them. (#128, TC-CL-006)
-  gh issue comment "$ISSUE_NUMBER" --repo "$REPO" --body "$(cat <<EOF
+  itp_post_comment "$ISSUE_NUMBER" "$(cat <<EOF
 **Agent Session Report (Dev)**
 - Dev Session ID: \`${SESSION_ID}\`
 - Exit code: ${exit_code}
@@ -773,8 +773,8 @@ EOF
     else
       # Agent exited 0 but no PR was created — retry development
       log "WARNING: Agent exited 0 but no PR was created for issue #${ISSUE_NUMBER}"
-      gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
-        --body "Agent exited successfully but no PR was created. Moving to pending-dev for retry.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
+      itp_post_comment "$ISSUE_NUMBER" \
+        "Agent exited successfully but no PR was created. Moving to pending-dev for retry.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
       gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
         --remove-label "in-progress" \
         --add-label "pending-dev" || log "WARNING: Failed to update issue labels"
@@ -1088,11 +1088,11 @@ EOF
     # view (which would otherwise leave the next tick chasing the dead
     # session forever). On failure log a WARNING — silent failure here
     # would mask a sustained GH outage that risks the orphan scenario.
-    gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
-      --body "Resume failed (session \`${SESSION_ID}\`). Starting new session \`${NEW_SESSION_ID}\`." \
+    itp_post_comment "$ISSUE_NUMBER" \
+      "Resume failed (session \`${SESSION_ID}\`). Starting new session \`${NEW_SESSION_ID}\`." \
       || log "WARNING: Failed to post resume-fallback explanation comment (non-fatal)"
-    gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
-      --body "Dev Session ID: \`${NEW_SESSION_ID}\` (mode: resume-fallback)" \
+    itp_post_comment "$ISSUE_NUMBER" \
+      "Dev Session ID: \`${NEW_SESSION_ID}\` (mode: resume-fallback)" \
       || log "WARNING: Failed to post Dev Session ID marker for resume-fallback. If the trap-side session report also fails, the next dispatcher tick may resume the dead session ${SESSION_ID} instead of the new ${NEW_SESSION_ID}."
 
     SESSION_ID="$NEW_SESSION_ID"

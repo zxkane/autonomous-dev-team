@@ -107,6 +107,13 @@ run_cleanup() {
     set +e
     log() { echo \"[test-log] \$*\" >&2; }
     cleanup_github_auth() { :; }
+    # [INV-89] cleanup() posts its session-report markers through the ITP
+    # choke-point itp_post_comment. This harness evals cleanup() in isolation
+    # WITHOUT sourcing lib-issue-provider.sh, so stub the verb to forward
+    # byte-identically to the recording \`gh\` stub — itp_github_post_comment
+    # emits exactly \`gh issue comment ISSUE --repo \$REPO --body BODY\`, so the
+    # recorded argv is unchanged from the pre-cutover call.
+    itp_post_comment() { gh issue comment \"\$1\" --repo \"\$REPO\" --body \"\$2\"; }
     $CLEANUP_FN
     (exit $want_exit); cleanup
   " 2>"$stderr_log"

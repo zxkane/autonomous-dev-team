@@ -83,13 +83,17 @@ echo
 echo "=== TC-DSRR-002: Trailer post is non-fatal ==="
 echo
 
-# Extract just the trailer command — from "gh issue comment ... Reviewed HEAD"
-# up to the next blank line or `fi`. The post must either:
+# Extract just the trailer command — from the Reviewed-HEAD post up to the next
+# blank line or `fi`. [INV-89] the post now routes through the ITP choke-point
+# `itp_post_comment "$ISSUE_NUMBER" \` with the body (`"Reviewed HEAD: …"`) on the
+# next line, so the start pattern matches the verb call OR the body line — covering
+# both the legacy `gh issue comment … --body "Reviewed HEAD` and the migrated form.
+# The post must either:
 #   - be wrapped in `|| true`, OR
 #   - chain to a `log` warning with `||` (which under set -e still suppresses
 #     the failure because log returns 0, ending the chain successfully).
 TRAILER_BLOCK=$(awk '
-  /gh issue comment.*Reviewed HEAD|--body "Reviewed HEAD/ { found=1 }
+  /itp_post_comment.*Reviewed HEAD|gh issue comment.*Reviewed HEAD|--body "Reviewed HEAD|"Reviewed HEAD/ { found=1 }
   found {
     print
     if (/^[[:space:]]*$/ || /^fi[[:space:]]*$/) { found=0 }

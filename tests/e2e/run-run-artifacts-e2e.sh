@@ -206,12 +206,16 @@ expect "TC-086g >=2 footer-append call sites (codex-fallback + aggregate)" "yes"
 echo "== TC-087 every wrapper-owned diagnostic comment is footered =="
 # Build the list of real comment-call line numbers, excluding prose/prompt-text
 # lines (the `gh issue comment` substrings inside comments + agent-prompt heredocs)
-# by requiring the line to be an actual command invocation. Matches all three
-# invocation forms: bare `gh issue comment`, a capture `_var=$(gh issue comment`,
-# and an `if ! _var=$(gh pr comment` guard — so even a future bare-capture
-# diagnostic (like the Reviewed-HEAD trailer's form) is REACHED by the audit and
-# then explicitly window-skipped below, rather than silently escaping it.
-mapfile -t _CALL_LINES < <(grep -nE '^[[:space:]]*(if ! )?(_[A-Za-z_]+=\$\()?gh (issue|pr) comment ' "$REVIEW_SH" | cut -d: -f1)
+# by requiring the line to be an actual command invocation. [INV-89] (#283) the
+# wrapper's issue-comment writes now route through the ITP choke-point
+# `itp_post_comment "$ISSUE_NUMBER"` (the run_footer is still composed caller-side
+# into the BODY arg, so the footer audit below still applies); `gh pr comment`
+# stays raw (CHP). Match all invocation forms: bare `itp_post_comment` /
+# `gh pr comment`, a capture `_var=$(itp_post_comment` / `_var=$(gh pr comment`,
+# and an `if ! _var=$(gh pr comment` guard — so even a bare-capture diagnostic
+# (like the Reviewed-HEAD trailer's form) is REACHED by the audit and then
+# explicitly window-skipped below, rather than silently escaping it.
+mapfile -t _CALL_LINES < <(grep -nE '^[[:space:]]*(if ! )?(_[A-Za-z_]+=\$\()?(itp_post_comment|gh (issue|pr) comment) ' "$REVIEW_SH" | cut -d: -f1)
 _unfootered=""; _checked=0
 for _cl in "${_CALL_LINES[@]}"; do
   _checked=$((_checked + 1))

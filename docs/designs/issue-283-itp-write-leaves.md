@@ -107,6 +107,38 @@ emitting the byte-identical `gh label view` / `gh label create --color hex
 --description d`. `label_colors=1` gates the `--color` flag (a `label_colors=0`
 provider omits color, defined-not-live). The script sources the provider seam.
 
+## Repo-wide ITP-issue-comment cutover (post-review expansion)
+
+A review pass flagged [BLOCKING/P1] that the INV-89 Rule ("EVERY machine marker …
+posted only through the declared `marker_channel`" / "the single choke-point for
+**ALL** machine markers" — authored by #279/#281, normative) was satisfied only in
+`lib-dispatch.sh`, while `autonomous-dev.sh`, `autonomous-review.sh`,
+`dispatcher-tick.sh`, and `lib-review-verdict.sh` still emitted raw `gh issue
+comment`. A `marker_channel=text` / non-GitHub provider would bypass the seam for
+those session-report and verdict-trailer markers. The finding is correct: the
+spec's "ALL" is a repo-wide contract, not a lib-dispatch.sh-local one.
+
+Resolution (zero behavior change): route **every machine-marker ISSUE comment** in
+those four files through `itp_post_comment` too —
+- `autonomous-dev.sh`: 5 sites (2 heredoc session-report bodies + 3 resume-fallback markers),
+- `autonomous-review.sh`: 17 sites (verdict / diagnostic / held / smoke comments + the Reviewed-HEAD trailer capture),
+- `dispatcher-tick.sh`: 9 sites (PTL / crash / no-PR / pending-review markers),
+- `lib-review-verdict.sh`: 1 site (`emit_verdict_trailer`'s `<!-- review-verdict: … -->`).
+
+Each file gains a guarded `lib-issue-provider.sh` self-source (mirroring
+`lib-dispatch.sh` / `lib-review-e2e.sh`) so `itp_post_comment` resolves even when the
+file is sourced standalone or by the review wrapper (which does not source
+`lib-dispatch.sh`). All sites use `--repo "$REPO"` (global), which the verb hardcodes,
+so the emitted `gh issue comment … --body` argv is byte-identical. `$REPO` is loaded
+at wrapper startup (`load_autonomous_conf`), so the verb's `$REPO` read is always in
+scope — the verdict-trailer unit test now exports `REPO` to match (it previously
+relied on the local `$repo` param the pre-cutover code used).
+
+**Still out of scope** (unchanged): `gh pr comment` / review-thread replies (CHP,
+owned by chp-pr-lifecycle); and the CI **cutover-guard lint** that mechanically
+rejects future raw-gh (owned by the cutover-guard-lint sibling — this PR does the
+migration; that sibling adds the enforcing lint).
+
 ## No new entry-point script
 Every change is to an existing entry script (`setup-labels.sh`,
 `mark-issue-checkbox.sh`) or a `lib-*.sh` / `providers/*.sh` sourced via the

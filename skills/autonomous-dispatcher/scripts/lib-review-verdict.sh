@@ -12,6 +12,22 @@
 # FAIL-non-substantive auto-merge-failure). Extracting it keeps the wrapper
 # readable and the logic unit-testable in isolation.
 
+# [INV-87]/[INV-89] The verdict trailer is an issue-level MACHINE MARKER, so its
+# write routes through itp_post_comment (the marker_channel choke-point), not a
+# raw `gh issue comment`. The review wrapper does not source lib-issue-provider.sh,
+# and this lib is also sourced standalone in unit tests — so self-source the seam
+# from the REAL skill tree via readlink -f of this file's own BASH_SOURCE (the
+# same idiom lib-dispatch.sh / lib-review-e2e.sh use). Idempotent + guarded.
+if ! declare -F itp_post_comment >/dev/null 2>&1; then
+  _lrv_self="${BASH_SOURCE[0]:-$0}"
+  _lrv_dir="$(cd "$(dirname "$(readlink -f "$_lrv_self")")" && pwd 2>/dev/null)" || _lrv_dir=""
+  if [ -n "$_lrv_dir" ] && [ -r "${_lrv_dir}/lib-issue-provider.sh" ]; then
+    # shellcheck source=lib-issue-provider.sh
+    source "${_lrv_dir}/lib-issue-provider.sh"
+  fi
+  unset _lrv_self _lrv_dir
+fi
+
 # emit_verdict_trailer <issue_num> <repo> <verdict> <cause>
 #
 #   verdict ∈ { passed, failed-substantive, failed-non-substantive }
@@ -58,6 +74,9 @@ emit_verdict_trailer() {
     body="<!-- review-verdict: ${verdict} -->"
   fi
 
-  gh issue comment "$issue_num" --repo "$repo" --body "$body" >/dev/null 2>&1 || true
+  # [INV-89] Route through the marker choke-point. `itp_github_post_comment` posts
+  # to the global $REPO; every caller passes $repo == $REPO (the wrapper's repo),
+  # so the emitted `gh issue comment … --body "$body"` is byte-identical.
+  itp_post_comment "$issue_num" "$body" >/dev/null 2>&1 || true
   return 0
 }

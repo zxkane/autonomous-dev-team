@@ -182,6 +182,16 @@ source "${LIB_DIR}/lib-metrics.sh" 2>/dev/null || true
 # lib-metrics — a load failure never aborts the review wrapper.
 # shellcheck source=lib-run-artifacts.sh
 source "${LIB_DIR}/lib-run-artifacts.sh" 2>/dev/null || true
+# [INV-87]/[INV-89] Issue-Tracker Provider dispatch. The review wrapper's own
+# issue-level machine markers (verdict/progress/diagnostic comments) post through
+# itp_post_comment (the marker_channel choke-point), so a non-GitHub / text-channel
+# provider routes them through the seam too. lib-review-e2e.sh self-sources this lib,
+# but source it explicitly here so the verbs do not depend on that side effect or on
+# source ordering. Guarded + idempotent (the shims/.caps reader guard redefinition).
+if ! declare -F itp_post_comment >/dev/null 2>&1; then
+  # shellcheck source=lib-issue-provider.sh
+  source "${LIB_DIR}/lib-issue-provider.sh"
+fi
 # Per-side AGENT_CMD override (INV-37). See autonomous-dev.sh for the
 # matching dev-side override. Together they let one project run dev
 # and review on different agent CLIs (e.g. claude for dev, agy for
@@ -756,8 +766,8 @@ cleanup() {
       fi
     fi
 
-    gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
-      --body "Review process crashed (exit code: ${exit_code}). Moving back to development for retry.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
+    itp_post_comment "$ISSUE_NUMBER" \
+      "Review process crashed (exit code: ${exit_code}). Moving back to development for retry.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
     # INV-35: emit verdict trailer so dispatcher Step 4b.5.1 routes a
     # completed-session crash to the substantive recovery path (a wrapper
     # crash isn't a transient bot/CI/transport blip — it requires a fresh
@@ -801,8 +811,8 @@ log "Review CLI wall-clock cap: ${AGENT_TIMEOUT} (${_review_cap_source}); browse
 # rather than burning a dev retry.
 _review_abort_no_valid_pr() {
   local _comment_body="$1"
-  gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
-    --body "${_comment_body}$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
+  itp_post_comment "$ISSUE_NUMBER" \
+    "${_comment_body}$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
   emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-non-substantive" "no-pr-found" 2>/dev/null || true
   gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
     --remove-label "reviewing" \
@@ -1494,8 +1504,8 @@ if [[ "${E2E_ACTIVE:-false}" == "true" ]]; then
   # E2E gate fail / block → route WITHOUT fanning out the review agents.
   if [[ "$E2E_GATE" == "fail" ]]; then
     log "INV-46: E2E hard gate FAIL — overriding to FAIL WITHOUT review fan-out (saves ${#REVIEW_AGENTS_LIST[@]} review run(s))."
-    gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
-      --body "Review findings:
+    itp_post_comment "$ISSUE_NUMBER" \
+      "Review findings:
 
 Findings->Decision Gate: 1 blocking finding(s) -- FAIL.
 
@@ -1518,8 +1528,8 @@ Findings->Decision Gate: 1 blocking finding(s) -- FAIL.
     exit 0
   elif [[ "$E2E_GATE" == "block-nonsubstantive" ]]; then
     log "INV-46: E2E lane exited clean but no SHA-matching evidence visible after re-fetch — re-queuing (non-substantive), NO fan-out."
-    gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
-      --body "Review held: the wrapper ran E2E once (INV-46) and it exited clean, but no SHA-matching e2e-evidence comment for HEAD \`${PR_HEAD_SHA:0:7}\` is visible (likely transient — comment-post or GitHub propagation). The PR is NOT auto-reviewed while the evidence is missing; it will be re-reviewed on the next dispatch tick.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
+    itp_post_comment "$ISSUE_NUMBER" \
+      "Review held: the wrapper ran E2E once (INV-46) and it exited clean, but no SHA-matching e2e-evidence comment for HEAD \`${PR_HEAD_SHA:0:7}\` is visible (likely transient — comment-post or GitHub propagation). The PR is NOT auto-reviewed while the evidence is missing; it will be re-reviewed on the next dispatch tick.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
     emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-non-substantive" "e2e-evidence-missing" 2>/dev/null || true
     gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
       --remove-label "reviewing" --add-label "pending-dev" 2>/dev/null || true
@@ -1686,8 +1696,8 @@ if [[ "${REVIEW_SMOKE_ENABLED:-false}" == "true" ]]; then
         fi
       done
       log "INV-64: smoke FAIL — aborting the review WITHOUT fan-out. Failed agent(s): ${_smoke_failed_agents%% }"
-      gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
-        --body "Review aborted: pre-fan-out agent smoke FAILED (INV-64).
+      itp_post_comment "$ISSUE_NUMBER" \
+        "Review aborted: pre-fan-out agent smoke FAILED (INV-64).
 
 The following review agent(s) failed a one-token smoke before the review fan-out — this is an operator-side **configuration/launch error** (wrong model id, expired auth, region drift, or a launcher that does not fit the CLI), **not a PR defect**:
 
@@ -1727,8 +1737,8 @@ The review was NOT run and the PR was NOT evaluated. The issue stays \`reviewing
       # — a more-correct outcome than this comment claims. The comment never
       # over-blocks (it changes no label and casts no verdict); it only narrates
       # why the round looked unavailable at smoke time.
-      gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
-        --body "Multi-agent review: all review agent(s) \`${REVIEW_AGENTS_LIST[*]}\` were UNAVAILABLE at the pre-fan-out smoke (INV-64) — quota/capacity, not a config error. The PR was not evaluated this round; it will be re-reviewed on the next dispatch tick once capacity recovers.${_smoke_reasons:+ Reason(s): ${_smoke_reasons%; }}$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
+      itp_post_comment "$ISSUE_NUMBER" \
+        "Multi-agent review: all review agent(s) \`${REVIEW_AGENTS_LIST[*]}\` were UNAVAILABLE at the pre-fan-out smoke (INV-64) — quota/capacity, not a config error. The PR was not evaluated this round; it will be re-reviewed on the next dispatch tick once capacity recovers.${_smoke_reasons:+ Reason(s): ${_smoke_reasons%; }}$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
       # Fall through to the fan-out with the list unchanged; every member will
       # smoke-free run and post no verdict (already known unavailable), so the
       # aggregate is all-unavailable. (We keep the list rather than emptying it so
@@ -1755,8 +1765,8 @@ The review was NOT run and the PR was NOT evaluated. The issue stays \`reviewing
       done
       if [[ -n "$_smoke_dropped" ]]; then
         log "INV-64: dropping smoke-UNAVAILABLE review agent(s) before the fan-out: ${_smoke_dropped%% } — reason(s): ${_smoke_drop_reasons%; }; fanning out: ${_smoke_survivors[*]}"
-        gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
-          --body "Multi-agent review: dropped (unavailable) at the pre-fan-out smoke (INV-64): \`${_smoke_dropped%% }\`. Fanning out the rest: \`${_smoke_survivors[*]}\`. (UNAVAILABLE = quota/capacity, not a config error — the dropped agent does not block the vote.) Drop reason(s): ${_smoke_drop_reasons%; }.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
+        itp_post_comment "$ISSUE_NUMBER" \
+          "Multi-agent review: dropped (unavailable) at the pre-fan-out smoke (INV-64): \`${_smoke_dropped%% }\`. Fanning out the rest: \`${_smoke_survivors[*]}\`. (UNAVAILABLE = quota/capacity, not a config error — the dropped agent does not block the vote.) Drop reason(s): ${_smoke_drop_reasons%; }.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
         # [INV-70] Metrics: a smoke-dropped member is removed from REVIEW_AGENTS_LIST
         # BELOW, so the post-fan-out review_agent_run/agent_drop loop (which iterates
         # AGENT_NAMES = the SURVIVING set) never records it — its quota/auth drop
@@ -2885,8 +2895,8 @@ if [[ -n "$_timed_out_agents" ]]; then
   log "INV-48: review agent(s) timed out (rc 124/137, no verdict) — VETO (deciding FAIL): ${_timed_out_agents%% }"
 fi
 if [[ -n "$_timed_out_agents" && "$_any_deciding_artifact" != "true" ]]; then
-  gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
-    --body "$(_timeout_veto_finding)$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
+  itp_post_comment "$ISSUE_NUMBER" \
+    "$(_timeout_veto_finding)$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
 fi
 
 # LATEST_COMMENT drives (a) the Reviewed-HEAD trailer gate (post only when a
@@ -3039,8 +3049,8 @@ if [[ -n "$_dropped_agents" && "$AGGREGATE" != "all-unavailable" ]]; then
   log "WARNING: review agent(s) dropped (unavailable): ${_dropped_agents%% }; decided on: ${_deciding_agents%% }${_reason_suffix}"
   _comment_reason=""
   [[ -n "$_dropped_reasons" ]] && _comment_reason=" Drop reason(s): ${_dropped_reasons%; }."
-  gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
-    --body "Multi-agent review: dropped (unavailable) agent(s): \`${_dropped_agents%% }\`. Decision made on: \`${_deciding_agents%% }\`. (INV-40: unavailable = CLI launch failure or no verdict within the poll window.)${_comment_reason}$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
+  itp_post_comment "$ISSUE_NUMBER" \
+    "Multi-agent review: dropped (unavailable) agent(s): \`${_dropped_agents%% }\`. Decision made on: \`${_deciding_agents%% }\`. (INV-40: unavailable = CLI launch failure or no verdict within the poll window.)${_comment_reason}$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
 fi
 
 # Post a "Reviewed HEAD" trailer comment so the dispatcher can detect whether
@@ -3077,8 +3087,8 @@ if [[ -n "$LATEST_COMMENT" && -n "$PR_HEAD_SHA" ]]; then
   _REVIEW_HEAD_AGENT="${AGENT_NAMES[0]:-${AGENT_CMD:-claude}}"
   _REVIEW_HEAD_MODEL="$(_resolve_review_agent_model_label "$_REVIEW_HEAD_AGENT")"
   _REVIEW_HEAD_MODEL="${_REVIEW_HEAD_MODEL:-${AGENT_REVIEW_MODEL:-sonnet}}"
-  _trailer_err=$(gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
-    --body "Reviewed HEAD: \`${PR_HEAD_SHA}\` (issue #${ISSUE_NUMBER}, session \`${SESSION_ID}\`, agent \`${_REVIEW_HEAD_AGENT}\`, model \`${_REVIEW_HEAD_MODEL}\`)" \
+  _trailer_err=$(itp_post_comment "$ISSUE_NUMBER" \
+    "Reviewed HEAD: \`${PR_HEAD_SHA}\` (issue #${ISSUE_NUMBER}, session \`${SESSION_ID}\`, agent \`${_REVIEW_HEAD_AGENT}\`, model \`${_REVIEW_HEAD_MODEL}\`)" \
     2>&1 >/dev/null) \
     || log "WARNING: Failed to post Reviewed HEAD trailer (non-fatal): ${_trailer_err}"
 fi
@@ -3155,8 +3165,8 @@ if [[ "$PASSED_VERDICT" == "true" ]]; then
       [[ "$_wait_count" =~ ^[0-9]+$ ]] || _wait_count=0
       if [[ "$_wait_count" -ge "${BOT_REVIEW_WAIT_MAX:-3}" ]]; then
         log "Mandatory-bot-review gate: bot review(s) [${MISSING_BOTS}] still missing after ${_wait_count} wait(s) on HEAD ${PR_HEAD_SHA:0:7} — giving up, routing to pending-dev (substantive)."
-        gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
-          --body "Review findings:
+        itp_post_comment "$ISSUE_NUMBER" \
+          "Review findings:
 
 Findings->Decision Gate: 1 blocking finding(s) -- FAIL.
 
@@ -3172,8 +3182,8 @@ Findings->Decision Gate: 1 blocking finding(s) -- FAIL.
       fi
 
       log "Mandatory-bot-review gate: configured bot review(s) still missing on PR #${PR_NUMBER}: ${MISSING_BOTS} (wait ${_wait_count}/${BOT_REVIEW_WAIT_MAX:-3}). Brokering the trigger(s) in cleanup and re-queuing for re-review (no approve/merge this tick)."
-      gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
-        --body "Review held — the agent verdict is PASS, but the mandatory configured review bot(s) [${MISSING_BOTS}] have not posted a review on PR #${PR_NUMBER} yet. The trigger(s) are being posted as a real user; the next review tick will evaluate the PR once the bot review is present. (No approve/merge this tick — [INV-79].) ${_wait_marker}$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
+      itp_post_comment "$ISSUE_NUMBER" \
+        "Review held — the agent verdict is PASS, but the mandatory configured review bot(s) [${MISSING_BOTS}] have not posted a review on PR #${PR_NUMBER} yet. The trigger(s) are being posted as a real user; the next review tick will evaluate the PR once the bot review is present. (No approve/merge this tick — [INV-79].) ${_wait_marker}$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
       # Non-substantive re-queue (transient/awaiting), NOT a dev bounce. Route to
       # pending-review (NOT pending-dev): the code is fine — we are only waiting for
       # the async bot review. pending-dev's #106 stale-verdict guard would otherwise
@@ -3218,8 +3228,8 @@ Findings->Decision Gate: 1 blocking finding(s) -- FAIL.
 
     # [BLOCKING] finding on the ISSUE with dev-actionable rebase instructions
     # (mirrors references/merge-conflict-resolution.md).
-    gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
-      --body "Review findings:
+    itp_post_comment "$ISSUE_NUMBER" \
+      "Review findings:
 
 Findings->Decision Gate: 1 blocking finding(s) -- FAIL.
 
@@ -3264,8 +3274,8 @@ Findings->Decision Gate: 1 blocking finding(s) -- FAIL.
     # conflict, so we must not trigger an unnecessary rebase.
     log "BLOCKING: PR #${PR_NUMBER} mergeable is UNKNOWN past the retry budget — re-queuing (not auto-approving)."
 
-    gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
-      --body "Review held: PR #${PR_NUMBER} mergeable status is \`${MERGEABLE_STATUS:-UNKNOWN}\` (GitHub has not finished computing mergeability after ${MERGEABLE_RETRIES} attempts). Per the mergeable hard gate (INV-44) the PR is NOT auto-approved while mergeability is unresolved; it will be re-reviewed on the next dispatch tick.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
+    itp_post_comment "$ISSUE_NUMBER" \
+      "Review held: PR #${PR_NUMBER} mergeable status is \`${MERGEABLE_STATUS:-UNKNOWN}\` (GitHub has not finished computing mergeability after ${MERGEABLE_RETRIES} attempts). Per the mergeable hard gate (INV-44) the PR is NOT auto-approved while mergeability is unresolved; it will be re-reviewed on the next dispatch tick.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
 
     # INV-35: not a code issue — GitHub-side transient. Re-route through review.
     emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-non-substantive" "mergeable-unknown" 2>/dev/null || true
@@ -3309,8 +3319,8 @@ if [[ "$PASSED_VERDICT" == "true" ]]; then
   else
     log "ERROR: Failed to submit PR approval for PR #${PR_NUMBER}."
     log "Falling back to manual review notification."
-    gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
-      --body "Review PASSED but formal PR approval failed (permission issue?). @${REPO_OWNER} please approve and merge PR #${PR_NUMBER} manually.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
+    itp_post_comment "$ISSUE_NUMBER" \
+      "Review PASSED but formal PR approval failed (permission issue?). @${REPO_OWNER} please approve and merge PR #${PR_NUMBER} manually.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
     gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
       --remove-label "reviewing" \
       --add-label "approved" 2>/dev/null || true
@@ -3326,8 +3336,8 @@ if [[ "$PASSED_VERDICT" == "true" ]]; then
     log "Issue has 'no-auto-close' label — skipping auto-merge."
 
     # Notify project owner to merge manually
-    gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
-      --body "Review PASSED — this issue has the 'no-auto-close' label. @${REPO_OWNER} please review and merge PR #${PR_NUMBER} when ready.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
+    itp_post_comment "$ISSUE_NUMBER" \
+      "Review PASSED — this issue has the 'no-auto-close' label. @${REPO_OWNER} please review and merge PR #${PR_NUMBER} when ready.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
 
     # Update labels: remove reviewing, add approved (keep no-auto-close and autonomous)
     gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
@@ -3403,8 +3413,8 @@ else
 
   # If agent crashed without posting a comment, add a fallback
   if [[ $AGENT_EXIT -ne 0 ]] && [[ -z "$LATEST_COMMENT" ]]; then
-    gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
-      --body "Review process encountered an error (agent exit code: ${AGENT_EXIT}). Moving back to development for investigation.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
+    itp_post_comment "$ISSUE_NUMBER" \
+      "Review process encountered an error (agent exit code: ${AGENT_EXIT}). Moving back to development for investigation.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
     # INV-35: agent crash without verdict comment — non-substantive
     # (transport / mid-stream failure, not a code issue identified by the
     # agent). Cause `other` because we don't have a more specific signal.

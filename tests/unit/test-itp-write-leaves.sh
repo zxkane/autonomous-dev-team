@@ -275,6 +275,24 @@ echo "=== CUTOVER PIN + FUNCTION-MOCK SHIM AUDIT ==="
 comment_count=$(grep -c 'gh issue comment' "$LIB")
 assert_eq "TC-CUTOVER-COMMENT0 no raw 'gh issue comment' in lib-dispatch.sh" "0" "$comment_count"
 
+# [INV-89] Repo-wide ITP-issue-comment cutover: every machine-marker issue comment
+# — dispatcher AND agent AND wrapper — routes through itp_post_comment, so a
+# non-GitHub / marker_channel=text provider cannot bypass the seam for ANY issue
+# comment. Pins ZERO raw `gh issue comment` across all five ITP-issue-comment files.
+# (`gh pr comment` / review-thread replies are CHP, NOT counted — owned by
+# chp-pr-lifecycle.) NOTE: the cutover LINT (a CI guard that fails on raw-gh) is the
+# separate cutover-guard-lint deliverable; this is the migration-completeness pin.
+for _f in "$LIB" \
+          "$SCRIPTS/autonomous-dev.sh" \
+          "$SCRIPTS/autonomous-review.sh" \
+          "$SCRIPTS/dispatcher-tick.sh" \
+          "$SCRIPTS/lib-review-verdict.sh"; do
+  # A REAL call is `gh issue comment "<var>` (the issue-id arg). Exclude `#` comment
+  # lines (prose mentions) and the prompt-embedded backtick references.
+  _c=$(grep -vE '^[[:space:]]*#' "$_f" | grep -cE '(^|[^`-])gh issue comment "')
+  assert_eq "TC-CUTOVER-COMMENT0-WIDE no raw 'gh issue comment' in $(basename "$_f")" "0" "$_c"
+done
+
 # label_swap() body delegates to itp_transition_state (no raw gh issue edit in it).
 label_swap_body=$(awk '/^label_swap\(\) \{/{f=1} f{print} /^\}/{if(f)exit}' "$LIB")
 assert_contains "TC-CUTOVER-SWAP label_swap delegates to itp_transition_state" "itp_transition_state" "$label_swap_body"
