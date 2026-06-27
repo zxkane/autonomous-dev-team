@@ -4375,6 +4375,35 @@ _Triage (issue #236): [machine-checked: tests/unit/test-handle-completed-session
 
 **Status**: **ENFORCED** as of #274. Delta on top of [INV-35](#inv-35-review-aware-resume-routing-for-completed-sessions); design recorded in `docs/designs/issue-274-completed-substantive-noprogress.md`.
 
+> **Update (#277 / [INV-86](#inv-86-prissue-binding-is-authoritative-via-closingissuesreferences-never-a-bare-n-body-mention-and-no-pr-is-mutated-without-verified-linkage))**: `fetch_pr_for_issue` no longer filters PRs on a `.body | test("#N")` body mention — it now delegates to `resolve_pr_for_issue`, which binds by GitHub's parsed `closingIssuesReferences` (with a branch-name fallback). The "MUST include `body`" rule above is therefore no longer load-bearing for *resolution* (the resolver keys on `closingIssuesReferences`/`headRefName`); INV-85's caller still requests `number,headRefOid,body` and reads `.headRefOid`, and `body` remains in the echoed object (harmless), so the source-pin grep test stays valid. The HEAD-comparison logic of INV-85 is unchanged.
+
+## INV-86: PR↔issue binding is authoritative via `closingIssuesReferences` (never a bare `#N` body mention), and no PR is mutated without verified linkage
+
+_Triage (issue #236): [machine-checked: tests/unit/test-pr-issue-linkage-277.sh]_
+
+**Rule**: PR-to-issue resolution MUST bind an issue to the open PR that **closes** it — GitHub's parsed close linkage, read via `gh pr list --json closingIssuesReferences` — NOT to any open PR whose body merely **mentions** `#N`. The shared resolver `resolve_pr_for_issue` ([`lib-pr-linkage.sh`](../../skills/autonomous-dispatcher/scripts/lib-pr-linkage.sh)) applies this precedence:
+
+1. **Close linkage (authoritative)**: the open PR whose `closingIssuesReferences[].number` equals the issue. Lowest PR number on ties (deterministic; GitHub binds one closing PR per issue).
+2. **Branch-name fallback**: only when no PR carries close linkage — the open PR whose `headRefName` matches the boundary-anchored `issue-<N>` marker (`(^|[^0-9])issue-N([^0-9]|$)`), lowest PR number on ties. This serves close-keyword-less partial-fix PRs (which deliberately omit `Closes #N` so GitHub doesn't auto-close — see [the close-keyword guidance](../../skills/create-issue/SKILL.md)). **Never** a bare `.[0]` body mention.
+
+**Both discovery sites use this resolver**: `autonomous-review.sh`'s "Finding PR for issue" block (its old Method 1 loose `select(.body | test("#N"))] | .[0]`, plus the loose Method 2 comment scrape and Method 3 `gh search "issue N"`, are removed) AND the shared `lib-dispatch.sh::fetch_pr_for_issue` (which delegates to `resolve_pr_for_issue`; its name is preserved so the [spec guard-map](spec-guard-map.json) anchor `pr-exists-for-issue` / `no-pr-for-issue` keeps resolving).
+
+**Hard linkage guard before ANY PR mutation**: before the review wrapper hands the resolved `PR_NUMBER` to any GitHub-state-changing action — `submit_request_changes` / `gh pr review --approve` / `gh pr merge` / label flip — it MUST assert `verify_pr_closes_issue "$PR_NUMBER" "$ISSUE_NUMBER"` (the resolved PR closes this issue by close linkage, or — when it carries no close linkage at all — matches the `issue-<N>` branch marker). On failure the wrapper refuses to review, emits a diagnostic, and routes through the **existing** no-valid-PR branch (`failed-non-substantive` / `no-pr-found` → `reviewing` → `pending-dev`). **No GitHub review action is ever taken against a PR not linked to the issue under review.** This is a second, independent guard: pre-#277 `submit_request_changes` was unguarded once `PR_NUMBER` was set, so a mis-resolved foreign PR would receive a `REQUEST_CHANGES`.
+
+**Why** (#277): the pre-fix matcher keyed on a bare `#N` body mention and trusted `.[0]`. When two issues were in flight concurrently and one PR's body cross-referenced the other issue (a deliberate, good-practice `related to #A` line), the review wrapper for issue A selected the cross-referencing PR-B, reviewed the wrong PR, posted a dev-actionable FAILED verdict to issue A citing files that exist only in PR-B, submitted `REQUEST_CHANGES` against the foreign PR-B, and moved issue A to `pending-dev` — a non-terminating dev↔review loop driver that also mutated an unrelated PR's review state. Reproduced in this repo during the #273/#274 cycle: the issue-273 review wrapper resolved PR #276 (the #274 fix) because #276's body contained a `- #273 — …` line, yet `gh pr view 276 --json closingIssuesReferences` returns `274` (not 273), proving the close linkage is authoritative and immune to body cross-references. The trigger (cross-referencing in a PR body) is exactly the context-linking we want authors to write, so the fix tolerates mentions and binds only on the *close* reference.
+
+**RE2 / null safety**: every jq regex is RE2-safe (`(^|[^0-9])` / `([^0-9]|$)` — plain alternation, no look-behind/ahead) so a `gh --jq` run can never abort a caller under `set -e` ([gh --jq is RE2](#)); `.body` / `.headRefName` / `.closingIssuesReferences` are guarded with `// ""` / `[]?` so a null field can't abort the filter and silently hide a match (parity with the [INV-?] #148 null-body guard).
+
+**No new label transition**: the foreign-PR / no-linkage case reuses the **existing** `reviewing → pending-dev` no-valid-PR transition, so `transitions.json` / `state-machine.md` are unchanged.
+
+**Producer**: `lib-pr-linkage.sh::resolve_pr_for_issue` (discovery) + `lib-pr-linkage.sh::verify_pr_closes_issue` (mutation guard); `lib-dispatch.sh::fetch_pr_for_issue` (delegate); `autonomous-review.sh` (discovery + guard wiring).
+
+**Consumer**: the review wrapper (binds the PR it reviews); the dispatcher Step-5 helpers `review_near_success` / `handle_pending_dev_pr_exists` (resolve the PR via `fetch_pr_for_issue`).
+
+**Out of scope** (follow-up): a broader audit of every `#N` body-mention match elsewhere in the dispatcher (dev cleanup/resume, bot-trigger brokerage). This invariant fixes the review-discovery path + the shared `fetch_pr_for_issue` it depends on.
+
+**Status**: **ENFORCED** as of #277. Design recorded in `docs/designs/issue-277-pr-linkage.md`.
+
 ## Adding a new invariant
 
 When fixing a pipeline bug, after locating the bug on the state machine + flow docs:

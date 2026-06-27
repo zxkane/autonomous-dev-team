@@ -86,7 +86,7 @@ flowchart LR
 
 **Consumer-side invariants** (dispatcher Step 3 must tolerate):
 
-- The PR returned by `gh pr list` may have a body that mentions multiple issues (`Closes #1, fixes #2`). The body-match regex (`#N[^0-9]` OR `#N$`) must not over-match (e.g. `#10` for issue 1).
+- The PR returned by `gh pr list` is the one whose parsed `closingIssuesReferences` contains this issue ([INV-86](invariants.md#inv-86-prissue-binding-is-authoritative-via-closingissuesreferences-never-a-bare-n-body-mention-and-no-pr-is-mutated-without-verified-linkage)). A PR body that merely *mentions* other issues (`Closes #1, related to #2`) does NOT bind those issues — only the close reference does, so a cross-referencing sibling PR can never be mis-selected.
 - The Reviewed-HEAD trailer may not yet exist (this is the first review). Step 5b's empty-trailer fallthrough routes to `pending-review` ([INV-07](invariants.md#inv-07-empty-reviewed-head-trailer-routes-to-pending-review)) — same as the new-commits case.
 
 **Race window**: Step 5a's SIGTERM path is the most concurrent case. Dispatcher and wrapper trap both edit labels in a ~few-second window. Both write `pending-review`, both post a comment. Worst case: 2 comments and 2 redundant label edits per ~1% of transitions — bounded and self-healing.
@@ -108,7 +108,7 @@ flowchart LR
 
 **Consumer-side invariants**:
 
-- Review wrapper must run PR discovery (3 fallback methods) — the issue may have multiple PRs, or the PR body may not yet say `Closes #N`. If discovery fails, the wrapper exits with `−reviewing +pending-dev` and a clear comment.
+- Review wrapper must run PR discovery via authoritative close linkage ([INV-86](invariants.md#inv-86-prissue-binding-is-authoritative-via-closingissuesreferences-never-a-bare-n-body-mention-and-no-pr-is-mutated-without-verified-linkage)) — bind the PR whose `closingIssuesReferences` contains this issue (branch-name `issue-<N>` fallback for close-keyword-less partial-fix PRs), then assert the same linkage with `verify_pr_closes_issue` before any PR mutation. If discovery yields no PR (or the guard fails) it exits with `−reviewing +pending-dev` and a clear comment — never reviewing or mutating a foreign PR.
 - Review wrapper must filter verdict comments by session-id ([anti-spoofing defense](review-agent-flow.md#verdict-polling)): another commenter could write "Review PASSED" verbatim.
 - The wrapper MAY fan out to multiple verdict-reaching agents internally ([INV-40](invariants.md#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback)) when `AGENT_REVIEW_AGENTS` lists more than one CLI. This does NOT change the handoff carrier: the dispatcher still sets one `+reviewing` label and hands off one issue; the wrapper aggregates the N verdicts under the unanimous-PASS rule and emits exactly one carrier label transition (H5) plus one verdict trailer. The fan-out is invisible to the dispatcher.
 

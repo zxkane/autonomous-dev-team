@@ -161,6 +161,17 @@ source "${LIB_DIR}/lib-review-artifact.sh"
 # strand the issue). The review AGENT posts verdict comments only and never runs
 # `gh pr review`/`gh pr merge` itself. Inert on the PASS path.
 source "${LIB_DIR}/lib-review-request-changes.sh"
+# shellcheck source=lib-pr-linkage.sh
+# INV-86 (#277): authoritative PR↔issue resolution. The PR-discovery block below
+# binds the issue to the PR that *closes* it (GitHub's parsed
+# `closingIssuesReferences`) via resolve_pr_for_issue, NOT to any open PR whose
+# body merely mentions `#N` (which bound the review to a cross-referencing
+# sibling PR and submitted REQUEST_CHANGES against a foreign PR). verify_pr_closes_issue
+# is the hard linkage guard asserted before the resolved PR is handed downstream
+# to any mutation (request-changes / approve / merge / label flip). Lives in its
+# own lib so the dispatcher (lib-dispatch.sh::fetch_pr_for_issue) resolves PRs
+# identically. [INV-65] sourced from the real skill tree via LIB_DIR.
+source "${LIB_DIR}/lib-pr-linkage.sh"
 # [INV-70] Observe-only metrics emitter. Sourced from LIB_DIR (skill tree);
 # provides metrics_emit/metrics_dir. Guarded so a load failure never aborts the
 # review wrapper.
@@ -780,37 +791,69 @@ else
   _review_cap_source="AGENT_REVIEW_TIMEOUT unset → 1h default"
 fi
 log "Review CLI wall-clock cap: ${AGENT_TIMEOUT} (${_review_cap_source}); browser-E2E cap: ${E2E_BROWSER_TIMEOUT_SECONDS}; dev side unaffected (${_ORIG_AGENT_TIMEOUT})."
-log "Finding PR for issue #${ISSUE_NUMBER}..."
-
-# Method 1: Search PRs that reference the issue
-PR_NUMBER=$(gh pr list --repo "$REPO" --state open --json number,body \
-  -q "[.[] | select(.body | test(\"#${ISSUE_NUMBER}[^0-9]\") or test(\"#${ISSUE_NUMBER}$\"))] | .[0].number // empty" 2>/dev/null || true)
-
-# Method 2: Extract PR number from issue comments
-if [[ -z "$PR_NUMBER" ]]; then
-  PR_NUMBER=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json comments \
-    -q '[.comments[].body | capture("(?:PR|pull)[/ #]*(?P<pr>[0-9]+)"; "g") | .pr] | last // empty' 2>/dev/null || true)
-fi
-
-# Method 3: Search PRs mentioning the issue number
-if [[ -z "$PR_NUMBER" ]]; then
-  PR_NUMBER=$(gh pr list --repo "$REPO" --state open --search "issue ${ISSUE_NUMBER}" --json number \
-    -q '.[0].number // empty' 2>/dev/null || true)
-fi
-
-if [[ -z "$PR_NUMBER" ]]; then
-  log "ERROR: No PR found for issue #${ISSUE_NUMBER}"
+# [INV-86] No-valid-PR abort. BOTH the "no PR resolved" and the "resolved PR is
+# not linked" (foreign-PR guard) cases route here — a single physical
+# `reviewing → pending-dev` write site so the close-linkage guard does not add a
+# new label-write site to the spec manifest (Check C.4 counts physical sites,
+# not transition rows). The cause is fixed: `no-pr-found` is non-substantive
+# (INV-35) — the prior dev session may have completed cleanly but its PR-create
+# failed, so the dispatcher should re-route to review on the next tick
+# rather than burning a dev retry.
+_review_abort_no_valid_pr() {
+  local _comment_body="$1"
   gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
-    --body "Review failed: no PR found linked to this issue. Please ensure the PR description contains 'Closes #${ISSUE_NUMBER}'.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
-  # INV-35: no-pr-found is a non-substantive failure — the prior dev session
-  # may have completed cleanly but its PR-create call failed (transport,
-  # token expiry). The dispatcher should re-route to review on the next tick
-  # rather than burning a dev retry.
+    --body "${_comment_body}$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
   emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-non-substantive" "no-pr-found" 2>/dev/null || true
   gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
     --remove-label "reviewing" \
     --add-label "pending-dev" 2>/dev/null || true
-  exit 1
+  # The wrapper has fully HANDLED this exit: it posted the non-substantive
+  # `no-pr-found` verdict and flipped the label itself. Mark RESULT_PARSED=true
+  # and exit 0 — otherwise the EXIT trap's `RESULT_PARSED != true && exit_code
+  # != 0` crash branch would ALSO fire, posting a duplicate "Review process
+  # crashed" comment and emitting a `failed-substantive` trailer that overrides
+  # this `failed-non-substantive` verdict (sending the issue down the wrong
+  # recovery path — #277 review [P1]). Mirrors the INV-46 E2E-gate handled-abort
+  # idiom (RESULT_PARSED=true; exit 0). `exit 0` does not abort `RESULT_PARSED`
+  # assignment under `set -e` because the assignment runs first.
+  RESULT_PARSED=true
+  exit 0
+}
+
+log "Finding PR for issue #${ISSUE_NUMBER}..."
+
+# [INV-86] Authoritative discovery: bind the issue to the PR that *closes* it
+# (GitHub's parsed `closingIssuesReferences`), with a deterministic branch-name
+# fallback for close-keyword-less partial-fix PRs. NEVER a bare `#N` body
+# mention — that bound the review to a cross-referencing sibling PR (issue #277:
+# a PR-B whose body carried a good-practice `- related to #A` line was reviewed,
+# and REQUEST_CHANGES was submitted against it, under issue A). resolve_pr_for_issue
+# lives in lib-pr-linkage.sh and is the SAME resolver the dispatcher's
+# fetch_pr_for_issue delegates to (the issue's "fix both sites" requirement).
+# The old Method 2 (loose `PR #N` comment scrape) and Method 3 (`gh search
+# "issue N"`) are removed — they shared the same loose-match weakness and the
+# close-linkage resolver + branch-name fallback supersede them.
+PR_NUMBER=$(resolve_pr_for_issue "$ISSUE_NUMBER" number 2>/dev/null | jq -r '.number // empty' 2>/dev/null || true)
+
+if [[ -z "$PR_NUMBER" ]]; then
+  log "ERROR: No PR found for issue #${ISSUE_NUMBER} (no open PR closes it and no branch matches issue-${ISSUE_NUMBER})"
+  _review_abort_no_valid_pr "Review failed: no PR found linked to this issue. Please ensure the PR description contains 'Closes #${ISSUE_NUMBER}' (or push from an \`issue-${ISSUE_NUMBER}\`-named branch)."
+fi
+
+# [INV-86] Hard linkage guard before ANY PR mutation. resolve_pr_for_issue
+# returns a close-linked or branch-matched PR; this guard re-asserts the linkage
+# independently (defense in depth) before PR_NUMBER is handed to the downstream
+# review / submit_request_changes / approve / merge / label-flip path. Discovery
+# and the guard share the SAME branch-tier predicate — a branch-name match is
+# accepted only when the PR carries NO close linkage at all (a PR on an `issue-N`
+# branch that actually `Closes #OTHER` is in neither tier), so resolve never
+# returns a PR the guard would reject (#277 review [P1] finding 1). The guard
+# remains as defense-in-depth: any future discovery drift that surfaced a foreign
+# PR is refused here and routes through the SAME no-valid-PR abort above (no
+# GitHub review action is ever taken against a PR not linked to this issue).
+if ! verify_pr_closes_issue "$PR_NUMBER" "$ISSUE_NUMBER"; then
+  log "ERROR: resolved PR #${PR_NUMBER} does not close issue #${ISSUE_NUMBER} (linkage guard) — refusing to review/mutate a foreign PR"
+  _review_abort_no_valid_pr "Review failed: the PR discovered for this issue (#${PR_NUMBER}) does not close issue #${ISSUE_NUMBER} (GitHub close-linkage / branch name). Refusing to review or mutate an unrelated PR. Ensure the PR for this issue contains 'Closes #${ISSUE_NUMBER}'."
 fi
 
 log "Found PR #${PR_NUMBER} for issue #${ISSUE_NUMBER}"

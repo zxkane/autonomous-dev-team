@@ -267,11 +267,12 @@ prepare_readonly_log() {
 # ---------------------------------------------------------------------------
 echo "=== INV-85 source-pin: fetch_pr_for_issue call includes body (#274 [P1]) ==="
 # ---------------------------------------------------------------------------
-# fetch_pr_for_issue filters on `.body`, so the INV-85 call MUST request `body`
-# in its --json field list — otherwise `gh pr list` omits it, the filter sees
-# null, and the helper returns empty (both guards silently no-op in production).
-# The routing tests MOCK fetch_pr_for_issue, so only this source grep catches a
-# missing `body` field. (#274 review [P1] round-4 finding 1.)
+# The INV-85 call MUST keep `body` in its --json field list. Originally (#274
+# review [P1] round-4 finding 1) this was because fetch_pr_for_issue filtered on
+# `.body`; under [INV-86] (#277) it now binds by `closingIssuesReferences`, so
+# `body` is no longer load-bearing for resolution — but the literal field list
+# is pinned here for call-site stability (the routing tests MOCK
+# fetch_pr_for_issue, so only this source grep catches a drifted field list).
 if grep -Eq 'fetch_pr_for_issue "\$issue_num" "number,headRefOid,body"' "$LIB"; then
   echo -e "  ${GREEN}PASS${NC}: INV-85 fetch_pr_for_issue call requests body"
   PASS=$((PASS + 1))

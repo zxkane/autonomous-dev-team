@@ -76,15 +76,20 @@ Same pattern as the dev wrapper — see [`dev-agent-flow.md`](dev-agent-flow.md#
 - Auth: review-agent app mode uses `REVIEW_AGENT_APP_ID` / `REVIEW_AGENT_APP_PEM` (separate App identity from dev so reviewer comments are attributed correctly).
 - **Two-token split ([INV-79])**: after `setup_github_auth`, the review wrapper calls `setup_agent_token` to mint the SCOPED token (`contents:write`, `issues:write`, `pull_requests:read`) for the review-agent subtree — identical to the dev side (see [dev-agent-flow § Two-token split](dev-agent-flow.md#two-token-split--the-agents-scrubbed-environment-inv-79)). Review agents only READ the PR and post issue/PR comments + the E2E report, so none need `pull_requests:write`; the wrapper's full-write token remains the sole approve/merge path ([INV-44](invariants.md#inv-44-the-wrapper-owns-the-mergeability-gate-merge-only-when-githubs-mergeable-true-not-the-agents-claim) / [INV-52](invariants.md#inv-52-a-substantive-fail-asserts-the-prs-github-native-state-not-just-a-comment)). `lib-agent.sh::_run_with_timeout` applies the same CLI-agnostic env scrub to every fan-out agent + the browser-E2E lane. `GH_USER_PAT` is scrubbed here too, so the mandatory `REVIEW_BOTS` trigger step is **brokered**: when scoping is armed, `render_bot_review_section` tells the agent to write the trigger phrase(s) to `$AGENT_BOT_TRIGGER_FILE` (instead of running `gh-as-user.sh`, which can't authenticate), and the wrapper posts them via `gh-as-user.sh` post-run (`drain_agent_bot_triggers`, in `cleanup`) — the next review tick then sees the bot's review present (#234 review [P1] 8e87de14). PAT mode → one-time WARN + no scrub + the direct `gh-as-user.sh` trigger.
 
-## PR discovery (3 fallback methods)
+## PR discovery — authoritative close linkage ([INV-86](invariants.md#inv-86-prissue-binding-is-authoritative-via-closingissuesreferences-never-a-bare-n-body-mention-and-no-pr-is-mutated-without-verified-linkage))
 
-1. **Body reference**: `gh pr list --state open --json number,body` and select the one whose body matches `#N` (with a non-digit boundary so `#1` doesn't match `#123`).
-2. **Comment-mention extract**: scan issue comments for `(?:PR|pull)[/ #]*<digits>`.
-3. **Search**: `gh pr list --search "issue N"` as a last resort.
+The wrapper binds the issue to the open PR that **closes** it via the shared `resolve_pr_for_issue` ([`lib-pr-linkage.sh`](../../skills/autonomous-dispatcher/scripts/lib-pr-linkage.sh)) — GitHub's parsed close linkage, NOT a `#N` body mention:
 
-If all three fail → comment "Review failed: no PR found linked to this issue. Please ensure the PR description contains 'Closes #N'." → `−reviewing +pending-dev` → exit 1.
+1. **Close linkage (authoritative)**: `gh pr list --state open --json …,closingIssuesReferences` and select the PR whose `closingIssuesReferences[].number` equals the issue (lowest PR number on ties).
+2. **Branch-name fallback**: only when no PR carries close linkage — the PR whose `headRefName` matches the boundary-anchored `issue-<N>` marker (lowest PR number on ties). Serves close-keyword-less partial-fix PRs. **Never** a bare `.[0]` body mention.
 
-This is one of the five legitimate ways the wrapper can transition to `pending-dev` even though the agent never ran. The dispatcher's Step 4a retry counter does NOT count this as a dev-failure — only `Agent Session Report (Dev)` comments and the dispatcher's own crash regex feed the counter.
+> **Pre-#277 the wrapper used three loose fallbacks** — Method 1 `select(.body | test("#N"))] | .[0]`, Method 2 a `(?:PR|pull)[/ #]*<digits>` comment scrape, Method 3 `gh pr list --search "issue N"`. All keyed on a bare `#N` **mention**, so a sibling PR whose body cross-referenced this issue (a good-practice `related to #N` line) could be selected, reviewed, and **mutated** (a `REQUEST_CHANGES` against a foreign PR) — the [INV-86](invariants.md#inv-86-prissue-binding-is-authoritative-via-closingissuesreferences-never-a-bare-n-body-mention-and-no-pr-is-mutated-without-verified-linkage) loop driver. They are removed; the same resolver also backs the dispatcher's `lib-dispatch.sh::fetch_pr_for_issue`.
+
+**Hard linkage guard before any PR mutation**: after resolving `PR_NUMBER`, the wrapper asserts `verify_pr_closes_issue "$PR_NUMBER" "$ISSUE_NUMBER"` before handing the PR to the review / `submit_request_changes` / `--approve` / `gh pr merge` / label-flip path. A foreign / unlinked PR is refused (diagnostic + no GitHub review action against it).
+
+If discovery yields no PR **or** the linkage guard fails → comment "Review failed: no PR found linked to this issue …" → `emit_verdict_trailer … failed-non-substantive no-pr-found` → `−reviewing +pending-dev` → exit 1.
+
+This is one of the legitimate ways the wrapper can transition to `pending-dev` even though the agent never ran. The dispatcher's Step 4a retry counter does NOT count this as a dev-failure — only `Agent Session Report (Dev)` comments and the dispatcher's own crash regex feed the counter.
 
 ## E2E mode dispatch (issue #161)
 
