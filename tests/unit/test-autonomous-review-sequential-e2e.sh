@@ -346,8 +346,16 @@ if [[ -f "$E2E_LIB" ]]; then
     '_stamp_browser_evidence_marker' "$WRAPPER"
   assert_grep "TC-SE2E-STAMP-06 stamp failure forces E2E FAIL (no marker-only pass)" \
     'if ! _stamp_browser_evidence_marker; then' "$WRAPPER"
-  assert_grep "TC-SE2E-STAMP-07 helper PATCHes the report comment in place (REST edit)" \
-    'gh api -X PATCH .*issues/comments' "$E2E_LIB"
+  # TC-SE2E-STAMP-07: the in-place edit is a REST PATCH. Since #283 ([INV-87]/[INV-46])
+  # the helper routes the stamp through the ITP verb `itp_edit_comment` (the byte-
+  # identical `gh api -X PATCH …/issues/comments/<id>` leaf moved into
+  # providers/itp-github.sh::itp_github_edit_comment). Assert BOTH halves: the lib
+  # calls the verb, and the verb's GitHub leaf still emits the REST PATCH.
+  assert_grep "TC-SE2E-STAMP-07 helper routes the in-place edit through itp_edit_comment" \
+    'itp_edit_comment ' "$E2E_LIB"
+  PROVIDER_ITP="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/providers/itp-github.sh"
+  assert_grep "TC-SE2E-STAMP-07b itp_github_edit_comment emits the byte-identical REST PATCH leaf" \
+    'gh api -X PATCH .*issues/comments' "$PROVIDER_ITP"
 fi
 
 # ---------------------------------------------------------------------------

@@ -142,7 +142,7 @@ The *callers* keep their logic; only the leaf `gh` call moves behind a verb.
 | `itp_transition_state ISSUE REMOVE ADD` | `label_swap` (`:1986`) | Atomic state move (remove REMOVE, add ADD). GitHub: `gh issue edit --remove-label --add-label` in one call. **Note:** the terminal-state jq subtraction in `list_pending_review`/`list_pending_dev` ([INV-25] defense-in-depth) stays **caller-side**, not in this verb. |
 | `itp_read_task ISSUE FIELD` | `gh issue view --json title,body,state` sites | Return `title` / `body` / `state` for one task. |
 | `itp_post_comment ISSUE BODY` | every `gh issue comment` site (agent **and** dispatcher — incl. `post_dispatch_token` ([INV-18], `lib-dispatch.sh:1227`), `_dep_block_comment` ([INV-39], `:400`) — see [M6]) | Post a progress / verdict / audit / dispatcher-marker comment **through the provider's declared `marker_channel`** (§4). The single choke-point for ALL machine markers. MAY return the new comment's `id`/`url` (matches `reply-to-comments.sh:44-45`). |
-| `itp_edit_comment ISSUE COMMENT_ID BODY` | `lib-review-e2e.sh:486` (`gh api -X PATCH …/issues/comments/${id}`, [INV-46] SHA stamp) | Edit a comment in place. **New verb [M5]** — an append-only `itp_post_comment` could not satisfy the [INV-46] evidence-marker stamp, which GETs the last bot comment's `id` then PATCHes it. Capability-gated: a backend without edit (`edit_comment=0`) falls back to a fresh marker comment. |
+| `itp_edit_comment ISSUE COMMENT_ID BODY` | `lib-review-e2e.sh:486` (`gh api -X PATCH …/issues/comments/${id}`, [INV-46] SHA stamp) | Edit a comment in place. **New verb [M5]** — an append-only `itp_post_comment` could not satisfy the [INV-46] evidence-marker stamp, which GETs the last bot comment's `id` then PATCHes it. Capability-gated: a backend without edit (`edit_comment=0`) falls back to re-posting **the full report body WITH the marker appended** as a fresh comment (NOT a marker-only post — `_fetch_sha_evidence` returns the `last` SHA-marked comment's full body, so a marker-only fallback would pass the E2E gate with no report/screenshots/AC; [INV-46]). |
 | `itp_list_comments ISSUE` | every issue-level `gh issue view --json comments -q …` site (28 sites) | Return ISSUE-level comments as a **normalized JSON array** `[{id, author, body, createdAt}]`, **sorted ascending by `createdAt` (normative MUST** — the `\| last` / `sort_by(.createdAt)` idioms depend on it). `id`/`author`/`createdAt` contract pinned in §3.3. **Scoped to issue-level comments only** — review-thread / inline-PR comments are a separate CHP shape (§3.2, [M8]). |
 | `itp_resolve_dep REF` | `resolve_dep_state` (`:348`) / `check_deps_resolved` (`:438`) leaf I/O only | Given a dependency ref, return abstract state `OPEN`/`CLOSED`. **The [INV-83] per-dep-repo scoped-token mint + tick-scoped `_DEP_TOKEN_CACHE` move into the provider** behind the `itp_begin_tick` lifecycle hook (see §3.6); the `## Dependencies` body parse + block/proceed decision stay **caller-side**. Ref form is capability-gated (§4: `cross_ref_shorthand`). |
 | `itp_mark_checkbox ISSUE SELECTOR` | `mark-issue-checkbox.sh` | Mark a task sub-item done. GitHub: tick a body markdown checkbox. Capability-gated (§4: `body_checkbox`). |
@@ -169,7 +169,8 @@ The *callers* keep their logic; only the leaf `gh` call moves behind a verb.
 > [INV-18] / `_dep_block_comment` [INV-39]) route through `itp_post_comment` ([INV-89],
 > `grep -c 'gh issue comment' lib-dispatch.sh` == 0); the INV-46 SHA stamp
 > (`lib-review-e2e.sh`) routes through `itp_edit_comment` with an `edit_comment=0`
-> fresh-marker fallback; `mark-issue-checkbox.sh` routes through `itp_mark_checkbox`;
+> fallback that re-posts the full report body + SHA marker (never marker-only);
+> `mark-issue-checkbox.sh` routes through `itp_mark_checkbox`;
 > `setup-labels.sh` through `itp_provision_states` — all byte-identical, with the
 > marker text / retry / dedup / [INV-25] terminal-state subtraction staying
 > caller-side. The dep leaves (`itp_resolve_dep`/`itp_begin_tick`) are still
@@ -289,7 +290,7 @@ distinct_bot_author=1        # a real bot identity exists for self/other discrim
 read_after_write_state=1     # a transition is immediately visible to a re-list
 cross_ref_shorthand=1        # owner/repo#N style dep refs work (else gid/permalink)
 body_checkbox=1              # markdown checkbox in body (else native subtask)
-edit_comment=1               # comment edit-in-place exists (INV-46 stamp; else fresh marker)  [M5]
+edit_comment=1               # comment edit-in-place exists (INV-46 stamp; else re-post full report+marker)  [M5]
 label_colors=1               # state primitive carries a hex color (GitHub/GitLab; Asana: n/a)  [m5]
 marker_channel=html          # html=HTML comments survive; text=plain only (covers dispatcher markers too)  [M6]
 
@@ -314,7 +315,7 @@ merge_closes_issue=1         # merging a PR with `Closes #N` auto-transitions th
 | `read_after_write_state` | ✓ | ✓ | ✗ (search lag 10–60s) | post-transition guard: read the task directly (consistent), not via search |
 | `cross_ref_shorthand` | ✓ | ✓ (path%2F + iid) | ✗ (opaque gid) | dependency refs carry full id / permalink URL |
 | `body_checkbox` | ✓ | ✓ (string-rewrite) | ✗ (no body checkboxes) | `itp_mark_checkbox` maps to **subtask-complete** |
-| `edit_comment` | ✓ | ✓ | ✓ (`PUT /tasks/.../stories`) | [INV-46] stamp falls back to a fresh marker comment |
+| `edit_comment` | ✓ | ✓ | ✓ (`PUT /tasks/.../stories`) | [INV-46] stamp falls back to re-posting the full report body + marker as a fresh comment (never marker-only) |
 | `label_colors` | ✓ | ✓ | ✗ (single-select options, no hex) | `itp_provision_states` skips color |
 | `marker_channel` | `html` | `html` | `text` | marker writer **and** read-side `capture()` regex both branch on channel (Asana `html_text` **rejects** `<!-- -->` with HTTP 400) — covers dispatcher markers ([INV-18]/[INV-39]) too |
 
@@ -581,7 +582,7 @@ becomes a verb, the surrounding INV-coupled logic stays caller-side.
 | `autonomous-review.sh:3159` mergeable I/O | `chp_mergeable` | (b) entangled | only the `gh pr view --json mergeable` leaf moves ([M2]); `_classify_mergeable_gate`/`_pr_open_gate` ([INV-44]/[INV-54]) stay caller-side |
 | `setup-labels.sh` `gh label create` | `itp_provision_states` | (a) separable-leaf | the state-primitive provisioning leaf; hex color gated by `label_colors` — **migrated #283** (the 9-label table stays caller-side) |
 | `reply-to-comments.sh:44-45` | `itp_post_comment` (returning `id`/`url`) | (a) separable-leaf | the reply-comment POST leaf returning `{id, url}` — this is a CHP review-thread reply (`pulls/.../comments`), owned by chp-pr-lifecycle, NOT migrated in #283 |
-| `lib-review-e2e.sh` PATCH ([INV-46]) | `itp_edit_comment` | (a) separable-leaf | the edit-in-place PATCH leaf; gated by `edit_comment` — **migrated #283** (GET-comment-id / GET-body reads stay caller-side; `edit_comment=0` → fresh `itp_post_comment` marker) |
+| `lib-review-e2e.sh` PATCH ([INV-46]) | `itp_edit_comment` | (a) separable-leaf | the edit-in-place PATCH leaf; gated by `edit_comment` — **migrated #283** (GET-comment-id / GET-body reads stay caller-side; `edit_comment=0` → `itp_post_comment` re-posts the full report body + marker, never marker-only) |
 | `Closes #${issue_num}` literals (`autonomous-dev.sh:851/866/914/1151`) | `chp_close_keyword` | (a) separable-leaf | the hardcoded auto-close keyword becomes a verb-rendered string ([M4]) |
 
 > `mark_stalled` and `handle_completed_session_routing` are explicitly **entangled

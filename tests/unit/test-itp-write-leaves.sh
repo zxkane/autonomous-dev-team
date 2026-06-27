@@ -226,33 +226,73 @@ if [[ -d "$FAKE_PROVIDER" ]]; then
   assert_contains "TC-CAP-COLORS0 degraded: label_colors=0 (color-omitted create branch)" "COLORS=0" "$fake"
   assert_contains "TC-CAP-CHANNEL-TEXT degraded: marker_channel=text (non-html channel)" "CHANNEL=text" "$fake"
 
-  # INV-46 caller branch: edit_comment=0 → posts a FRESH itp_post_comment marker,
-  # never an itp_edit_comment PATCH. Drive the decision the migrated caller makes.
-  edit_branch=$(
-    env -u AUTONOMOUS_PROVIDERS_DIR ISSUE_PROVIDER=degraded AUTONOMOUS_PROVIDERS_DIR="$FAKE_PROVIDER" \
-    bash -c '
-      source "'"$ITP_LIB"'"
-      itp_post_comment() { echo "FRESH_MARKER_POSTED:$2"; }
-      itp_edit_comment() { echo "PATCH_TAKEN"; }
-      _edit_cap="$(itp_caps edit_comment 2>/dev/null || true)"
-      marker="<!-- e2e-evidence: complete sha=\"deadbeef\" -->"
-      if [[ "$_edit_cap" == "0" ]]; then itp_post_comment 42 "$marker"; else itp_edit_comment 42 99 "body"; fi
-    '
-  )
-  assert_contains "TC-CAP-EDIT0-BRANCH edit_comment=0 posts a fresh marker (no PATCH)" "FRESH_MARKER_POSTED:<!-- e2e-evidence: complete sha=\"deadbeef\" -->" "$edit_branch"
-  assert_not_contains "TC-CAP-EDIT0-BRANCH edit_comment=0 does NOT PATCH" "PATCH_TAKEN" "$edit_branch"
+  # INV-46 [P1] regression — drive the REAL _stamp_browser_evidence_marker with
+  # edit_comment=0 and assert the fresh comment carries the FULL E2E report body
+  # PLUS the SHA marker, NOT a marker-only post. A marker-only fallback would let
+  # _fetch_sha_evidence (which returns the `last` SHA-marked comment's full body)
+  # satisfy the dual-signal gate with no report/screenshots/AC — the
+  # marker-only-fabrication hole [INV-46] closes. The gh READ leaves (comment-id +
+  # body fetch) are stubbed; itp_post_comment captures what the fallback posts.
+  # NOTE: _stamp_browser_evidence_marker calls the write verb with `>/dev/null
+  # 2>&1`, so the stub must capture into a FILE (stdout is swallowed). $_CAP_FILE
+  # records every verb call + its args.
+  _CAP_FILE="$(mktemp)"
+  env -u AUTONOMOUS_PROVIDERS_DIR ISSUE_PROVIDER=degraded AUTONOMOUS_PROVIDERS_DIR="$FAKE_PROVIDER" \
+      PR_NUMBER=42 REPO_OWNER=o REPO_NAME=r PR_HEAD_SHA=deadbeef \
+      WRAPPER_START_TS=2026-01-01T00:00:00Z REPO=o/r BOT_LOGIN= _CAP_FILE="$_CAP_FILE" \
+  bash -c '
+    set -uo pipefail
+    log() { :; }
+    # Stub the gh READ leaves used by _stamp_browser_evidence_marker:
+    #  1) read comment body (…/issues/comments/99) → the full E2E report (checked
+    #     FIRST since its path also ends in "comments")
+    #  2) list comments (…/PR/comments) → emit the numeric report-comment id (99)
+    gh() {
+      if [[ "$1" == "api" && "$2" == *"/issues/comments/99" ]]; then
+        printf "%s" "## E2E Verification Report - AC-1: PASS - screenshot.png"; return 0; fi
+      if [[ "$1" == "api" && "$2" == *"/comments" ]]; then echo "99"; return 0; fi
+      return 0
+    }
+    # Source the lib FIRST so the REAL seam (incl. itp_caps reading the degraded
+    # .caps → edit_comment=0) loads; THEN override the two write verbs with stubs
+    # that record into $_CAP_FILE (the call args survive the verb call'\''s
+    # >/dev/null 2>&1 redirect, which would swallow stdout/stderr).
+    source "'"$E2E_LIB"'"
+    itp_post_comment() { printf "POSTED_BODY<<%s>>\n" "$2" >> "$_CAP_FILE"; }
+    itp_edit_comment() { printf "PATCH_TAKEN\n" >> "$_CAP_FILE"; }
+    _stamp_browser_evidence_marker
+  '
+  edit0_post="$(cat "$_CAP_FILE")"; : > "$_CAP_FILE"
+  assert_contains "TC-CAP-EDIT0-REPORT edit_comment=0 fresh post carries the FULL report body" \
+    "## E2E Verification Report" "$edit0_post"
+  assert_contains "TC-CAP-EDIT0-REPORT edit_comment=0 fresh post carries the AC evidence" \
+    "AC-1: PASS" "$edit0_post"
+  assert_contains "TC-CAP-EDIT0-REPORT edit_comment=0 fresh post carries the SHA marker" \
+    'e2e-evidence: complete sha="deadbeef"' "$edit0_post"
+  assert_not_contains "TC-CAP-EDIT0-REPORT edit_comment=0 does NOT take the PATCH path" "PATCH_TAKEN" "$edit0_post"
 
-  # edit_comment=1 (github) → PATCH path is taken.
-  edit_branch_gh=$(
-    env -u AUTONOMOUS_PROVIDERS_DIR ISSUE_PROVIDER=github bash -c '
-      source "'"$ITP_LIB"'"
-      itp_post_comment() { echo "FRESH_MARKER_POSTED"; }
-      itp_edit_comment() { echo "PATCH_TAKEN:$*"; }
-      _edit_cap="$(itp_caps edit_comment 2>/dev/null || true)"
-      if [[ "$_edit_cap" == "0" ]]; then itp_post_comment 42 m; else itp_edit_comment 42 99 body; fi
-    '
-  )
-  assert_contains "TC-CAP-EDIT1-BRANCH edit_comment=1 (github) takes the PATCH path" "PATCH_TAKEN:42 99 body" "$edit_branch_gh"
+  # edit_comment=1 (github) → PATCH path is taken, with the full report+marker body.
+  env -u AUTONOMOUS_PROVIDERS_DIR ISSUE_PROVIDER=github \
+      PR_NUMBER=42 REPO_OWNER=o REPO_NAME=r PR_HEAD_SHA=deadbeef \
+      WRAPPER_START_TS=2026-01-01T00:00:00Z REPO=o/r BOT_LOGIN= _CAP_FILE="$_CAP_FILE" \
+  bash -c '
+    set -uo pipefail
+    log() { :; }
+    gh() {
+      if [[ "$1" == "api" && "$2" == *"/issues/comments/99" ]]; then
+        printf "%s" "## E2E Verification Report - AC-1: PASS"; return 0; fi
+      if [[ "$1" == "api" && "$2" == *"/comments" ]]; then echo "99"; return 0; fi
+      return 0
+    }
+    source "'"$E2E_LIB"'"
+    itp_post_comment() { printf "FRESH_POST_TAKEN\n" >> "$_CAP_FILE"; }
+    itp_edit_comment() { printf "PATCH_TAKEN id=%s body<<%s>>\n" "$2" "$3" >> "$_CAP_FILE"; }
+    _stamp_browser_evidence_marker
+  '
+  edit1_post="$(cat "$_CAP_FILE")"; rm -f "$_CAP_FILE"
+  assert_contains "TC-CAP-EDIT1-BRANCH edit_comment=1 (github) takes the PATCH path on comment 99" "PATCH_TAKEN id=99" "$edit1_post"
+  assert_contains "TC-CAP-EDIT1-BRANCH edit_comment=1 PATCH body carries report+marker" "## E2E Verification Report" "$edit1_post"
+  assert_not_contains "TC-CAP-EDIT1-BRANCH edit_comment=1 does NOT post a fresh comment" "FRESH_POST_TAKEN" "$edit1_post"
 else
   echo -e "  ${RED}FAIL${NC}: degraded fake provider fixture missing at $FAKE_PROVIDER (expected from #280)"
   FAIL=$((FAIL+1))

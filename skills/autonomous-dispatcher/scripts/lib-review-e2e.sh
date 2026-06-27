@@ -499,24 +499,28 @@ _stamp_browser_evidence_marker() {
     return 0
   fi
 
-  # [INV-87]/[INV-46] Stamp the SHA marker. The new_body appends the marker on
-  # its own line (the literal newline embedded via $'...'). On a provider with
-  # comment edit-in-place (`edit_comment=1`, GitHub) the byte-identical PATCH
-  # leaf moves behind itp_edit_comment (→ `gh api -X PATCH …/issues/comments/<id>
-  # -f body=<new_body>`). On a provider WITHOUT edit (`edit_comment=0`) an
-  # append-only itp_post_comment of a fresh marker comment is the documented
-  # degradation (spec §4.1 edit_comment row) — the dual-signal gate then matches
-  # the SHA marker from either the edited or the fresh comment on re-fetch. The
-  # GET-comment-id / GET-body reads above stay caller-side (itp-reads territory).
+  # [INV-87]/[INV-46] Stamp the SHA marker. `_new_body` is the FULL report body
+  # with the marker appended on its own line (the literal newline embedded via
+  # $'...'). On a provider with comment edit-in-place (`edit_comment=1`, GitHub)
+  # the byte-identical PATCH leaf moves behind itp_edit_comment (→ `gh api -X
+  # PATCH …/issues/comments/<id> -f body=<new_body>`).
   local _new_body="${_body}"$'\n\n'"${marker}"
   local _edit_cap; _edit_cap="$(itp_caps edit_comment 2>/dev/null || true)"
   if [[ "$_edit_cap" == "0" ]]; then
-    # Degradation: no in-place edit — post the marker as a fresh comment.
-    if itp_post_comment "$PR_NUMBER" "$marker" >/dev/null 2>&1; then
-      log "INV-46: edit_comment=0 — stamped SHA marker as a FRESH comment (provider lacks edit-in-place)."
+    # Degradation (spec §4.1 edit_comment row): no in-place edit, so post a FRESH
+    # comment carrying the SAME `_new_body` — the full report body PLUS the SHA
+    # marker — NOT a marker-only comment. `_fetch_sha_evidence` returns the
+    # `last` SHA-marked comment's FULL body to the dual-signal gate; a marker-only
+    # post would let an append-only provider satisfy the gate with no report,
+    # screenshots, or AC evidence attached (the marker-only-fabrication hole
+    # [INV-46] explicitly closes). Posting the full body reproduces the same end
+    # state as the edit path (a comment carrying report + marker), just as a new
+    # comment instead of an in-place edit.
+    if itp_post_comment "$PR_NUMBER" "$_new_body" >/dev/null 2>&1; then
+      log "INV-46: edit_comment=0 — re-posted the FULL E2E report + SHA marker as a fresh comment (provider lacks edit-in-place)."
       return 0
     fi
-    log "INV-46: failed to post the fresh SHA-marker comment (edit_comment=0) — gate fails closed."
+    log "INV-46: failed to post the fresh report+marker comment (edit_comment=0) — gate fails closed."
     return 1
   fi
   if itp_edit_comment "$PR_NUMBER" "$_comment_id" "$_new_body" >/dev/null 2>&1; then

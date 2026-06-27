@@ -186,7 +186,9 @@ itp_github_post_comment() {
 # the pre-refactor call exactly). The GET-comment-id / GET-body READ leaves and
 # the idempotent SHA-already-present skip stay caller-side (itp-reads + caller).
 # A backend without edit (`edit_comment=0`) is handled by the CALLER falling back
-# to a fresh marker via itp_post_comment — not in this leaf.
+# to re-posting the FULL report body + marker as a fresh comment via
+# itp_post_comment (never marker-only — _fetch_sha_evidence returns the comment's
+# full body to the E2E gate) — not in this leaf.
 itp_github_edit_comment() {
   local _issue="$1" comment_id="$2" body="$3"
   gh api -X PATCH "repos/${REPO_OWNER}/${REPO_NAME}/issues/comments/${comment_id}" \

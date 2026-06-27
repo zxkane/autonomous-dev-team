@@ -78,9 +78,14 @@ caller-side. AC: `grep -c 'gh issue comment' lib-dispatch.sh` == 0.
 lib-review-e2e.sh `:486` PATCH → `itp_edit_comment "$PR_NUMBER" "$_comment_id"
 "$new_body"`. The GET-comment-id (`:461`) and GET-body (`:473`) READ leaves are
 **out of scope** (itp-reads territory). When `itp_caps edit_comment` == 0 the
-caller falls back to posting a fresh marker comment via `itp_post_comment`
-(spec §4.1 `edit_comment` row). For GitHub (`edit_comment=1`) the PATCH path is
-taken unchanged — same idempotent SHA-marker skip and fail-closed return.
+caller falls back to re-posting **the full report body WITH the SHA marker
+appended** (`$_new_body`, the same body the PATCH path would write) as a fresh
+comment via `itp_post_comment` — NOT a marker-only post. `_fetch_sha_evidence`
+returns the `last` SHA-marked comment's FULL body to the dual-signal E2E gate, so
+a marker-only fallback would pass the gate with no report/screenshots/AC (the
+marker-only-fabrication hole [INV-46] closes; review [P1] r3). For GitHub
+(`edit_comment=1`) the PATCH path is taken unchanged — same idempotent SHA-marker
+skip and fail-closed return.
 lib-review-e2e.sh self-sources `lib-issue-provider.sh` (readlink-f BASH_SOURCE
 idiom) because `autonomous-review.sh` does not source it.
 
@@ -155,7 +160,9 @@ required on consumers (Step 1 `npx skills update -g` alone). PR carries no
 3. **`.caps` parse** — `edit_comment=1`, `body_checkbox=1`, `label_colors=1`,
    `marker_channel=html` from `itp-github.caps`.
 4. **Capability-branch** via the named degraded fake provider (`edit_comment=0`
-   fallback posts a fresh marker; `body_checkbox=0` / `label_colors=0` fallbacks).
+   fallback re-posts the full report body + marker, never marker-only — driven
+   through the real `_stamp_browser_evidence_marker`; `body_checkbox=0` /
+   `label_colors=0` fallbacks).
 5. **`marker_channel` regression** — `itp_github_post_comment` does not strip
    `<!-- … -->` (pins INV-18/INV-39 survival).
 6. **Function-mock shim audit** — no function is renamed → existing function-level

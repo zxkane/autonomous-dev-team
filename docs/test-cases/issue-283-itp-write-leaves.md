@@ -45,7 +45,7 @@ The degraded fixture declares `edit_comment=0`, `body_checkbox=0`, `label_colors
 
 | ID | Assertion |
 |---|---|
-| TC-CAP-EDIT0 | INV-46 caller: `edit_comment=0` → posts a fresh `itp_post_comment` marker instead of PATCH (no `itp_edit_comment` call) |
+| TC-CAP-EDIT0 | INV-46 caller: `edit_comment=0` → `itp_post_comment` re-posts the FULL report body + SHA marker (never marker-only), no `itp_edit_comment` PATCH — driven through the real `_stamp_browser_evidence_marker` |
 | TC-CAP-EDIT1 | `edit_comment=1` (github) → PATCH path taken (`itp_edit_comment` called) |
 | TC-CAP-CHECKBOX0 | `body_checkbox=0` → the documented native-subtask-remap branch (defined; mark-issue-checkbox skips the markdown PATCH) |
 | TC-CAP-COLORS0 | `label_colors=0` → `itp_github`-equivalent create omits `--color` |
