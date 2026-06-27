@@ -270,6 +270,30 @@ else
   echo -e "  ${RED}FAIL${NC}: TC-CHP-CAP-BOTS0-GATE bot-review wait not gated on the review_bots cap"; FAIL=$((FAIL+1))
 fi
 
+# review_bots=0 must ALSO suppress the PROMPT bot-review section (#282 review
+# round 3 [P1]) — not just the wrapper-side wait. The source-level gate blanks
+# REVIEW_BOTS_VALIDATED when `chp_caps review_bots != 1`, which propagates to BOTH
+# the prompt's render_bot_review_section AND the trigger broker AND the wait gate.
+if grep -qE 'review_bots 2>/dev/null \|\| echo 1.*!=.*"1"|chp_caps review_bots' "$REVIEW_WRAPPER" \
+   && grep -qE 'REVIEW_BOTS_VALIDATED=""' "$REVIEW_WRAPPER"; then
+  echo -e "  ${GREEN}PASS${NC}: TC-CHP-CAP-BOTS0-PROMPT source blanks REVIEW_BOTS_VALIDATED on review_bots=0 (suppresses prompt section + broker + wait)"; PASS=$((PASS+1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-CHP-CAP-BOTS0-PROMPT no source-level review_bots=0 blank of REVIEW_BOTS_VALIDATED"; FAIL=$((FAIL+1))
+fi
+# Mechanism check: render_bot_review_section "" emits NOTHING — the empty-set
+# path the gate relies on to suppress the prompt section.
+rbs_empty=$(
+  env -u PROJECT_DIR bash -c '
+    source "'"$SCRIPTS"'/lib-review-bots.sh" 2>/dev/null
+    render_bot_review_section "" 99 "'"$REPO"'"
+  '
+)
+if [[ -z "$rbs_empty" ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-CHP-CAP-BOTS0-RENDER render_bot_review_section '' emits nothing (empty set → no prompt section)"; PASS=$((PASS+1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-CHP-CAP-BOTS0-RENDER render_bot_review_section '' emitted content"; FAIL=$((FAIL+1))
+fi
+
 # ===========================================================================
 # 5. FUNCTION-MOCK SHIM AUDIT (§7.3 m3) — fetch_pr_for_issue keeps its name and
 #    delegates to chp_find_pr_for_issue; resolve_pr_for_issue routes through it.

@@ -325,6 +325,29 @@ if ! REVIEW_BOTS_VALIDATED=$(parse_review_bots "${REVIEW_BOTS:-}"); then
   exit 1
 fi
 
+# [INV-87]/§4.2 review_bots capability gate (#282 review [P1]): slash-command
+# review-bot triggers are only meaningful when the code host has a custom-slash
+# registry. On a `review_bots=0` backend (e.g. GitLab; the degraded fake fixture)
+# chp_trigger_bot is a no-op, so the bots can NEVER review — telling the agent (in
+# the prompt) to trigger/wait for them would FAIL or REQUEUE an otherwise-clean
+# review forever. Blank the effective bot set at the SOURCE so EVERY consumer
+# suppresses bot enforcement uniformly: the prompt's `render_bot_review_section`
+# (emits nothing) and its Step-8 line (prints the "disabled" note), the
+# `bot_trigger_allowlist` broker feed (nothing brokered), and the wrapper-side
+# mandatory-bot-review wait gate (guard fails). GitHub (review_bots=1) keeps the
+# configured set verbatim. The cap reader degrades to "1" when chp_caps is
+# unavailable, so a lib-load failure leaves the legacy path intact. (This is the
+# prompt-side half the wrapper-side gate alone missed — #282 review round 3.)
+if [[ -n "$REVIEW_BOTS_VALIDATED" ]] && declare -F chp_caps >/dev/null 2>&1 \
+   && [[ "$(chp_caps review_bots 2>/dev/null || echo 1)" != "1" ]]; then
+  # NOTE: `log()` is not defined until later in the file, so this runs at top
+  # level under `set -euo pipefail` BEFORE it exists — use a bare `echo >&2`
+  # (matching log()'s format) so a missing `log` can't `command not found` →
+  # abort the wrapper.
+  echo "[autonomous-review] Code host review_bots=0 — disabling bot-review enforcement (REVIEW_BOTS='${REVIEW_BOTS_VALIDATED}' has no effect: the backend has no slash-command registry, so the prompt's bot-review section, the trigger broker, and the post-run wait are all suppressed)." >&2
+  REVIEW_BOTS_VALIDATED=""
+fi
+
 # ---------------------------------------------------------------------------
 # GitHub authentication
 # ---------------------------------------------------------------------------
