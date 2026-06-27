@@ -155,6 +155,20 @@ echo "=== TC-PROVIDER-SPEC-014: state-machine.md abstract-state-per-backend note
 assert_grep "states are abstract / rendered per-backend" "abstract" "$STATE_MACHINE"
 assert_grep "single-select custom field rendering named" "single-select" "$STATE_MACHINE"
 
+echo "=== TC-PROVIDER-SPEC-015: companion design + test-case docs present ==="
+# The autonomous-dev review checklist requires a design canvas under docs/designs/
+# (or docs/plans/) and a test-case doc under docs/test-cases/ for the feature.
+if [[ -f "$PROJECT_ROOT/docs/designs/provider-spec.md" ]]; then
+  ok "design canvas present: docs/designs/provider-spec.md"
+else
+  bad "design canvas MISSING: docs/designs/provider-spec.md"
+fi
+if [[ -f "$PROJECT_ROOT/docs/test-cases/provider-spec.md" ]]; then
+  ok "test-case doc present: docs/test-cases/provider-spec.md"
+else
+  bad "test-case doc MISSING: docs/test-cases/provider-spec.md"
+fi
+
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 [[ "$FAIL" -eq 0 ]] && exit 0 || exit 1
