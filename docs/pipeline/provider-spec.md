@@ -697,24 +697,26 @@ selected through the public seam `ISSUE_PROVIDER=degraded` / `CODE_HOST=degraded
 (`tests/unit/test-provider-caps-branches.sh`). It splits the 13 caps (9 ITP + 4
 CHP, §4.1/§4.2) honestly:
 
-- **EXERCISED (7)** — the caps with a LIVE caller branch on this GitHub-only HEAD
-  (`cross_ref_shorthand`, `edit_comment`, `label_colors`, `native_issue_pr_link`,
-  `rest_request_changes`, `review_bots`, `merge_closes_issue`): the gate asserts
-  the branch is reachable AND its degraded value is driveable through the public
-  seam, and RUNS three of them end-to-end against the degraded fixture
-  (`label_colors=0` via a real `setup-labels.sh` subprocess; `merge_closes_issue=0`
-  + `native_issue_pr_link=0/1` via the real `_render_close_keyword`) — so
-  "reachable" is demonstrated by execution, not just grep.
-- **WAIVED (6)** — the caps whose caller branch is not yet wired (it lands with the
+- **EXERCISED (8)** — the caps with a LIVE caller branch on this GitHub-only HEAD
+  (`cross_ref_shorthand`, `edit_comment`, `label_colors`, `body_checkbox`,
+  `native_issue_pr_link`, `rest_request_changes`, `review_bots`,
+  `merge_closes_issue`): the gate asserts the branch is reachable AND its degraded
+  value is driveable through the public seam, and RUNS four of them end-to-end
+  against the degraded fixture (`label_colors=0` via a real `setup-labels.sh`
+  subprocess; `merge_closes_issue=0` + `native_issue_pr_link=0/1` via the real
+  `_render_close_keyword`; `body_checkbox=0` via a real `mark-issue-checkbox.sh`
+  subprocess that fires the documented native-subtask-remap error without issuing a
+  PATCH) — so "reachable" is demonstrated by execution, not just grep.
+- **WAIVED (5)** — the caps whose caller branch is not yet wired (it lands with the
   GitLab/Asana PRs, §4.3; the degraded fixture `.sh` are empty scaffolds, so there
   is no branch to run). These are NOT a free pass: each is asserted STILL unwired
   behind a **fail-on-wiring tripwire** — if a waived cap ever gains a caller branch
   the suite FAILs ("move it to EXERCISED + add a real exercise test"), so no
   future `caps=0` branch can ship untested.
 
-The headline prints `exercised=7 waived=6 total=13` and asserts the split equals
+The headline prints `exercised=8 waived=5 total=13` and asserts the split equals
 the full matrix, and a tripwire self-test proves the branch-detector is not a
-no-op grep. (Exercising all 13 is not possible on a GitHub-only HEAD — 6 branches
+no-op grep. (Exercising all 13 is not possible on a GitHub-only HEAD — 5 branches
 do not exist — and fabricating a test-only consumer would violate §4.3's
 no-behavior-change anchor; the waiver + tripwire is the honest maximum.)
 

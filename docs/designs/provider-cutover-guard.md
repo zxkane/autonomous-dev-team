@@ -18,10 +18,11 @@ caller layer outside `scripts/providers/`.
 >   `.github/workflows/`. The ci.yml step is an optional operator enhancement, not
 >   a precondition for CI execution — the docs no longer claim a dedicated step
 >   exists.
-> - **F4**: the caps gate no longer emits a bare PASS for the 6 unwired caps. The
->   7 live caps are EXERCISED (3 run end-to-end against the degraded fixture); the
->   6 are WAIVED behind a fail-on-wiring tripwire; headline `exercised=7 waived=6
->   total=13`.
+> - **F4**: the caps gate no longer emits a bare PASS for the unwired caps. The
+>   8 live caps are EXERCISED (4 run end-to-end against the degraded fixture); the
+>   5 are WAIVED behind a fail-on-wiring tripwire; headline `exercised=8 waived=5
+>   total=13`. (`body_checkbox` is live-branched in `mark-issue-checkbox.sh` — its
+>   degraded `body_checkbox=0` native-subtask-remap path is run end-to-end.)
 >
 > **Revision (review round 2, codex 2 BLOCKING findings).**
 > - **R2-F1**: the scan now RECURSES (`find -L` over every `*.sh` at any depth) —

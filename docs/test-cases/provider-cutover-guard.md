@@ -32,8 +32,8 @@ Drives `check-provider-cutover.sh` against scratch copies via the
 
 ## `tests/unit/test-provider-caps-branches.sh` — caps-branch coverage gate
 
-Spec §4.3: on this GitHub-only HEAD only the 7 caps with a LIVE caller branch can
-be EXERCISED; the other 6 have no caller branch yet and are WAIVED behind a
+Spec §4.3: on this GitHub-only HEAD only the 8 caps with a LIVE caller branch can
+be EXERCISED; the other 5 have no caller branch yet and are WAIVED behind a
 fail-on-wiring tripwire (NOT a free pass). Fabricating a test-only consumer to
 "exercise" a nonexistent branch would violate §4.3 (no behavior change), so the
 waiver+tripwire is the honest maximum.
@@ -41,8 +41,8 @@ waiver+tripwire is the honest maximum.
 | ID | Scenario | Expected |
 |---|---|---|
 | TC-CAPS-000 | Tripwire self-test: `caller_branch_for` returns a hit for a known-present cap and empty for a known-absent token | detector is not a no-op grep |
-| TC-CAPS-001..007 | For each LIVE-branch cap: caller layer HAS a branch reading it AND the degraded fixture reports the degraded value through the public seam | reachable + driveable |
-| TC-CAPS-008 | END-TO-END execution of ≥3 caps=0 branches against the degraded fixture: `label_colors=0` (real `setup-labels.sh` subprocess → exit 1 + documented error), `merge_closes_issue=0`+`native_issue_pr_link=0/1` (real `_render_close_keyword` → `Related to #N` / empty), default `merge_closes_issue=1` → `Closes #N` | branches RUN, degraded observable asserted |
-| TC-CAPS-010..015 | For each WAIVED cap (`server_side_state_and`, `server_side_state_negation`, `distinct_bot_author`, `read_after_write_state`, `body_checkbox`, `marker_channel`): assert NO caller branch keys on it yet (tripwire) AND the fixture still declares the degraded value. If a branch EVER appears → FAIL (wiring landed → must exercise) | waived + tripwire armed |
-| TC-CAPS-020 | Accounting: `exercised=7 waived=6 total=13` (9 ITP + 4 CHP); ≥3 executed end-to-end; no cap unaccounted | sum + split checks |
+| TC-CAPS-001..008 | For each LIVE-branch cap: caller layer HAS a branch reading it AND the degraded fixture reports the degraded value through the public seam | reachable + driveable |
+| TC-CAPS-008 | END-TO-END execution of ≥4 caps=0 branches against the degraded fixture: `label_colors=0` (real `setup-labels.sh` subprocess → exit 1 + documented error), `merge_closes_issue=0`+`native_issue_pr_link=0/1` (real `_render_close_keyword` → `Related to #N` / empty), default `merge_closes_issue=1` → `Closes #N`, `body_checkbox=0` (real `mark-issue-checkbox.sh` subprocess → exit 1 + documented native-subtask-remap error, no PATCH) | branches RUN, degraded observable asserted |
+| TC-CAPS-010..015 | For each WAIVED cap (`server_side_state_and`, `server_side_state_negation`, `distinct_bot_author`, `read_after_write_state`, `marker_channel`): assert NO caller branch keys on it yet (tripwire) AND the fixture still declares the degraded value. If a branch EVER appears → FAIL (wiring landed → must exercise) | waived + tripwire armed |
+| TC-CAPS-020 | Accounting: `exercised=8 waived=5 total=13` (9 ITP + 4 CHP); ≥4 executed end-to-end; no cap unaccounted | sum + split checks |
 | TC-CAPS-021 | Fake degraded fixture passes `bash -n` and all 13 caps resolve through the seam | no crash |

@@ -10,8 +10,8 @@
 # not dead code", and "FAILs if any caller degradation branch is unreachable/dead".
 #
 # REALITY (spec §4.3, the no-behavior-change / GitHub-only first deliverable):
-# "the only live branches are GitHub's current ones." grep proves exactly 7 of the
-# 13 caps have a LIVE caller-side branch that reads the cap TODAY; the other 6
+# "the only live branches are GitHub's current ones." grep proves exactly 8 of the
+# 13 caps have a LIVE caller-side branch that reads the cap TODAY; the other 5
 # caller branches land later with the GitLab/Asana PRs (their .caps degraded value
 # is already declared, but no caller-side code branches on them yet, and the
 # degraded fixture .sh are empty scaffolds — there is NO branch to run). Exercising
@@ -20,19 +20,19 @@
 # splits the 13 into two honestly-distinguished sets and is GREEN only because the
 # deferred set is explicitly WAIVED with a fail-on-wiring tripwire — never a bare PASS:
 #
-#   EXERCISED (7): the cap has a live caller branch AND
+#   EXERCISED (8): the cap has a live caller branch AND
 #     - the degraded value is driveable through the public seam (itp_caps/chp_caps),
 #       AND for a representative subset the branch is RUN END-TO-END against the
 #       degraded fixture and its degraded observable asserted (so "reachable" is
 #       demonstrated by execution, not just by grep + value-read);
-#   WAIVED  (6): NO caller branch reads the cap yet (asserted absent). This is NOT
+#   WAIVED  (5): NO caller branch reads the cap yet (asserted absent). This is NOT
 #     a pass — it is a tripwired waiver: if a caller branch EVER appears for a
 #     waived cap, TC-CAPS-010..015 FAIL ("wiring landed → move it to EXERCISED and
 #     add a real exercise test"), so no future caps=0 branch can ship untested.
 #
-# The headline prints `exercised=7 waived=6 total=13` and asserts the split sums to
+# The headline prints `exercised=8 waived=5 total=13` and asserts the split sums to
 # the full 9 ITP + 4 CHP matrix — the gate cannot go green while hiding an
-# unaccounted cap, and cannot claim all 13 are exercised when 6 have no branch.
+# unaccounted cap, and cannot claim all 13 are exercised when 5 have no branch.
 #
 # Fixture: tests/unit/fixtures/provider-degraded/, selected through the PUBLIC seam
 # (ISSUE_PROVIDER=degraded / CODE_HOST=degraded + AUTONOMOUS_PROVIDERS_DIR), per
@@ -52,12 +52,14 @@ CHP_LIB="$SCRIPTS/lib-code-host.sh"
 FAKE_PROVIDER="$SCRIPT_DIR/fixtures/provider-degraded"
 
 # The caller-layer files that may carry a caps-keyed degradation branch: the
-# cutover caller layer PLUS the two standalone consumers (setup-labels.sh,
-# lib-auth.sh) that also read caps. A cap is "live-branched" iff
+# cutover caller layer PLUS the standalone consumers (setup-labels.sh, lib-auth.sh,
+# mark-issue-checkbox.sh) that also read caps. A cap is "live-branched" iff
 # `itp_caps <cap>` / `chp_caps <cap>` appears as executable (non-comment) code here.
+# mark-issue-checkbox.sh is a symlink into autonomous-common/scripts/ (the real
+# source of the body_checkbox=0 branch); grep follows it transparently.
 CALLER_FILES=(
   "$SCRIPTS/lib-dispatch.sh" "$SCRIPTS/autonomous-dev.sh" "$SCRIPTS/autonomous-review.sh"
-  "$SCRIPTS/setup-labels.sh" "$SCRIPTS/lib-auth.sh"
+  "$SCRIPTS/setup-labels.sh" "$SCRIPTS/lib-auth.sh" "$SCRIPTS/mark-issue-checkbox.sh"
 )
 for f in "$SCRIPTS"/lib-review-*.sh; do CALLER_FILES+=("$f"); done
 
@@ -96,23 +98,25 @@ read_degraded_cap() {
   '
 }
 
-# 7 caps WITH a live caller branch. "<seam> <cap> <expected-degraded-value>".
+# 8 caps WITH a live caller branch. "<seam> <cap> <expected-degraded-value>".
+# body_checkbox is live-branched in mark-issue-checkbox.sh:137 (the documented
+# body_checkbox=0 native-subtask remap error path) — exercised end-to-end below.
 LIVE_BRANCH_CAPS=(
   "itp cross_ref_shorthand 0"
   "itp edit_comment 0"
   "itp label_colors 0"
+  "itp body_checkbox 0"
   "chp native_issue_pr_link 0"
   "chp rest_request_changes 0"
   "chp review_bots 0"
   "chp merge_closes_issue 0"
 )
-# 6 caps whose caller branch is NOT yet wired (spec §4.3). "<seam> <cap>".
+# 5 caps whose caller branch is NOT yet wired (spec §4.3). "<seam> <cap>".
 WAIVED_CAPS=(
   "itp server_side_state_and"
   "itp server_side_state_negation"
   "itp distinct_bot_author"
   "itp read_after_write_state"
-  "itp body_checkbox"
   "itp marker_channel"
 )
 
@@ -129,7 +133,7 @@ if caller_branch_for "no_such_cap_zzz_unwired" >/dev/null; then bad "tripwire ma
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== TC-CAPS-001..007: each LIVE-branch cap is reachable + its degraded value driveable through the seam ==="
+echo "=== TC-CAPS-001..008: each LIVE-branch cap is reachable + its degraded value driveable through the seam ==="
 # ---------------------------------------------------------------------------
 for row in "${LIVE_BRANCH_CAPS[@]}"; do
   read -r seam cap expected <<<"$row"
@@ -201,6 +205,32 @@ if [ "$out_closes" = "Closes #42" ]; then
 else
   bad "[merge_closes_issue=1] default arm wrong: '$out_closes' (expected 'Closes #42')"
 fi
+
+# (4) body_checkbox=0 — run mark-issue-checkbox.sh as a subprocess with the
+#     degraded provider active and a stub `gh` returning a body that contains the
+#     target unchecked checkbox. The script must reach the cap check AFTER the awk
+#     rewrite and fire the documented body_checkbox=0 native-subtask-remap error
+#     (exit 1) WITHOUT issuing any PATCH — proving the degraded branch executes.
+_bc_tmp="$(mktemp -d)"
+cat >"$_bc_tmp/gh" <<'STUB'
+#!/bin/bash
+# Stub gh: any `api repos/.../issues/N` read returns a body with the target
+# checkbox; a PATCH must NEVER happen on the body_checkbox=0 path (fail loud if it does).
+for a in "$@"; do [ "$a" = "PATCH" ] && { echo "STUB-PATCH-CALLED" >&2; exit 99; }; done
+echo "- [ ] flip me"
+STUB
+chmod +x "$_bc_tmp/gh"
+e2e_bc="$(env -u AUTONOMOUS_CONF -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR \
+          PATH="$_bc_tmp:$PATH" \
+          ISSUE_PROVIDER=degraded AUTONOMOUS_PROVIDERS_DIR="$FAKE_PROVIDER" \
+          bash "$SCRIPTS/mark-issue-checkbox.sh" 42 "flip me" 2>&1)"; e2e_bc_rc=$?
+if [ "$e2e_bc_rc" -ne 0 ] && grep -q 'body_checkbox=0' <<<"$e2e_bc" && ! grep -q 'STUB-PATCH-CALLED' <<<"$e2e_bc"; then
+  ok "[body_checkbox] END-TO-END: mark-issue-checkbox.sh ran the body_checkbox=0 branch (exit $e2e_bc_rc, documented error, no PATCH issued)"
+  EXECUTED=$((EXECUTED + 1))
+else
+  bad "[body_checkbox] END-TO-END did not execute the body_checkbox=0 branch (rc=$e2e_bc_rc, out: ${e2e_bc:0:160})"
+fi
+rm -rf "$_bc_tmp"
 
 # ---------------------------------------------------------------------------
 echo ""
