@@ -144,10 +144,14 @@ is **caps-aware and leaf-guarded** (3-way):
 
 1. provider **leaf exists** (`chp_has_leaf close_keyword`) → `chp_close_keyword`
    (the verb renders `Closes #<N>` for GitHub `merge_closes_issue=1`, empty for `=0`);
-2. **leaf absent + `merge_closes_issue=0`** → the **empty string** — a
-   non-auto-closing backend MUST NOT inject a non-functional `Closes #N` even when
-   it omits the leaf (the caller transitions the issue explicitly post-merge, see
-   [INV-33](invariants.md#inv-33-review-wrapper-must-not-close-the-linked-issue));
+2. **leaf absent + `merge_closes_issue=0`** → a NON-auto-closing reference, NOT
+   `Closes #N`. Sub-cased on `native_issue_pr_link` (review round 7): when
+   `native_issue_pr_link=0` (PR-discovery greps the body for `#N`) → `Related to
+   #<N>` so a created PR stays **discoverable/linkable** without triggering
+   auto-close (`Related to` is not a GitHub close keyword); when
+   `native_issue_pr_link=1` (a native issue↔PR link exists, no body grep needed) →
+   the **empty string**. Either way the caller transitions the issue explicitly
+   post-merge, see [INV-33](invariants.md#inv-33-review-wrapper-must-not-close-the-linked-issue);
 3. **leaf absent + `merge_closes_issue=1` / lib-load failure** → the GitHub
    literal `Closes #<N>` (today's behavior, unchanged).
 

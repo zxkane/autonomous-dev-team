@@ -943,25 +943,29 @@ generalization)**: the "rely on GitHub's link semantics" rule above is a
   caller MUST transition the issue to its terminal state after `chp_merge`, or the
   issue never reaches it. **Wired live in #282**: the review wrapper's merge
   success path branches on `chp_caps merge_closes_issue` and, when it is not `1`,
-  transitions the issue — **preferring the ITP-seam verb `itp_transition_state`
-  when it is defined** (guarded on `declare -F`, so it engages automatically once
-  the downstream **itp-writes** issue migrates that verb and wires the ITP seam
-  into the review wrapper; a blind call to the bodyless shim would abort under
-  `set -e`), and **falling back to `gh issue close … --reason completed`** — the
-  GitHub-rendered terminal transition — while the ITP verb is still a scaffold
-  (`itp_transition_state` is named in #282's Out-of-Scope as itp-writes' work).
-  This `gh issue close` is the SINGLE sanctioned close in the wrapper — the #145
-  regression (an *unconditional* close, and any close on the auto-merge-FAILURE
-  path) stays forbidden (`test-autonomous-review-auto-merge-failure.sh`
-  TC-AMF-006). The `chp_close_keyword` verb correspondingly returns the empty
-  string for such a backend (so the PR-body prompt builder emits no
-  non-functional `Closes #N`), and the dev-side close-keyword rendering ([M4])
-  goes through that verb. **PR-discovery note (review round 6):** a backend that is
-  *also* `native_issue_pr_link=0` needs a NON-closing PR-body backref so the
-  body-grep PR-discovery can still link the PR — that backref is provider-supplied
-  via the backend's own `chp_close_keyword` leaf (`provider-spec.md` §4.2, a
-  GitLab/Asana provider-PR concern), not #282's. GitHub is `merge_closes_issue=1`,
-  so it renders `Closes #N` and discovery is unaffected (zero behavior change).
+  transitions the issue with a **provider-correct 3-way** (review rounds 6-7):
+  1. **`itp_transition_state` defined** → use it (provider-neutral; guarded on
+     `declare -F` so it engages automatically once the downstream **itp-writes**
+     issue migrates that verb and wires the ITP seam into the review wrapper — a
+     blind call to the bodyless shim would abort under `set -e`);
+  2. **verb absent AND `ISSUE_PROVIDER=github`** → `gh issue close … --reason
+     completed` (the GitHub-rendered terminal transition, correct ONLY because the
+     tracker IS GitHub — `itp_transition_state` is named in #282's Out-of-Scope as
+     itp-writes' work);
+  3. **verb absent AND a NON-GitHub tracker** → a loud `ERROR` log, leaving the
+     transition to the operator / the downstream verb — a GitHub `gh issue close`
+     would be *wrong* on a non-GitHub tracker, so it is never issued there.
+
+  The `gh issue close` (branch 2) is the SINGLE sanctioned close in the wrapper —
+  the #145 regression (an *unconditional* close, and any close on the
+  auto-merge-FAILURE path) stays forbidden (`test-autonomous-review-auto-merge-failure.sh`
+  TC-AMF-006). On the dev side, the `chp_close_keyword` rendering ([M4]) returns,
+  for a `merge_closes_issue=0` backend, a **non-closing** PR-body reference so the
+  PR stays discoverable: `Related to #N` when `native_issue_pr_link=0` (body-grep
+  discovery), empty when `native_issue_pr_link=1` (native link) — never a
+  `Closes #N`. GitHub is `merge_closes_issue=1`, so it renders `Closes #N` and both
+  the transition (branch 2 unreached — GitHub auto-closes) and PR-discovery are
+  unaffected (zero behavior change).
 
 For the GitHub reference backend this is **zero behavior change** — `chp_merge`
 is the same `gh pr merge` leaf and the wrapper still performs no post-merge

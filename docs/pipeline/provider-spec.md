@@ -230,12 +230,17 @@ The *callers* keep their logic; only the leaf `gh` call moves behind a verb.
 > is exempt — it has a real reader body, not a leaf-dispatching shim.
 >
 > The leaf-absent **fallback must still honor the capability contract**, not just
-> avoid the abort: `chp_close_keyword`'s caller (`_render_close_keyword`) renders
-> the **empty string** when the leaf is absent AND `chp_caps merge_closes_issue=0`
-> (a non-auto-closing backend must not inject a non-functional `Closes #N`), and
-> the GitHub literal only when `merge_closes_issue=1` or the cap is unreadable
-> (#282 review round 5). The leaf guard prevents the crash; the cap read keeps the
-> rendered value correct.
+> avoid the abort: `chp_close_keyword`'s caller (`_render_close_keyword`) renders,
+> when the leaf is absent AND `chp_caps merge_closes_issue=0`, a NON-auto-closing
+> reference — `Related to #N` when `native_issue_pr_link=0` (so the body-grep
+> PR-discovery still links the PR; `Related to` is not a GitHub close keyword) and
+> the empty string when `native_issue_pr_link=1` — and the GitHub literal
+> `Closes #N` only when `merge_closes_issue=1` or the cap is unreadable (#282
+> review rounds 5-7). The leaf guard prevents the crash; the cap reads keep the
+> rendered value both non-auto-closing AND discoverable. The matching post-merge
+> transition (`autonomous-review.sh`) is likewise provider-gated: `itp_transition_state`
+> when defined, else `gh issue close` only under `ISSUE_PROVIDER=github`, else a
+> loud error (never a wrong GitHub close on a non-GitHub tracker).
 
 ### 3.3 The normalized comment-JSON contract (load-bearing)
 

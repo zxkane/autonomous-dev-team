@@ -460,22 +460,23 @@ _render_close_keyword() {
     chp_close_keyword "$_issue"
     return 0
   fi
-  # Leaf absent: honor merge_closes_issue when the cap is readable.
+  # Leaf absent + merge_closes_issue=0 → the keyword must NOT auto-close the issue
+  # (the caller transitions it explicitly post-merge). But the PR body still needs
+  # a DISCOVERABLE reference whenever PR-discovery greps the body for `#N`, i.e.
+  # when native_issue_pr_link=0 (#282 review round 7 [P1] #1): otherwise a created
+  # PR is invisible to the wrapper's `gh pr list | grep #N` lookup and the issue is
+  # re-queued/duplicated. So:
+  #   - native_issue_pr_link=0 (body-grep discovery) → a NON-CLOSING `Related to #N`
+  #     (keeps the PR linkable WITHOUT triggering auto-close; `Related to` is not a
+  #     GitHub close keyword);
+  #   - native_issue_pr_link=1 (native issue↔PR link → no body grep needed) → empty.
   if declare -F chp_caps >/dev/null 2>&1 \
      && [[ "$(chp_caps merge_closes_issue 2>/dev/null || echo 1)" == "0" ]]; then
-    # caps=0 backend without a leaf → empty (no auto-close keyword). NOTE
-    # (#282 review round 6 [P1] #1 / provider-spec.md §4.2 `native_issue_pr_link`):
-    # a backend that is ALSO native_issue_pr_link=0 needs a NON-closing PR-body
-    # backref for the grep-`#N` PR-discovery to still link the PR. That backref is
-    # "provider-supplied via chp_close_keyword / id rendering" — i.e. the
-    # provider's OWN chp_<host>_close_keyword LEAF renders it (taken by the
-    # leaf-present branch above). A provider that is native_issue_pr_link=0 AND
-    # merge_closes_issue=0 MUST therefore SHIP that leaf; the leaf-less fallback
-    # here only ever fires for the all-zeros TEST fixture (no real such backend
-    # exists in-repo — those are the §8 GitLab/Asana provider PRs). The GitHub
-    # reference backend is merge_closes_issue=1 → renders `Closes #N` below, so
-    # PR-discovery is unaffected (zero behavior change).
-    printf ''
+    if [[ "$(chp_caps native_issue_pr_link 2>/dev/null || echo 0)" == "0" ]]; then
+      printf 'Related to #%s' "$_issue"   # non-closing, discoverable backref
+    else
+      printf ''                            # native link → no body backref needed
+    fi
     return 0
   fi
   printf 'Closes #%s' "$_issue"

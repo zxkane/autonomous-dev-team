@@ -3433,30 +3433,47 @@ if [[ "$PASSED_VERDICT" == "true" ]]; then
       # degrades to "1" when chp_caps is unavailable, so the legacy GitHub path is
       # intact under any lib-load failure.
       #
-      # Transition routing ([M4], #282 review round 6 [P1] #2): the terminal
+      # Transition routing ([M4], #282 review rounds 6-7 [P1] #2): the terminal
       # transition is an ITP-seam concern (`itp_transition_state`). That verb is the
       # downstream itp-writes issue's to migrate (#282 Out-of-Scope: "NO ITP
       # verbs … itp_transition_state … those are itp-writes"), and the review
-      # wrapper does not yet source the ITP seam — so PREFER the verb when it is
-      # actually defined (guard on `declare -F itp_transition_state`, NOT a blind
-      # call: a bodyless shim would dispatch to an undefined leaf and abort under
-      # set -e), and otherwise fall back to `gh issue close` — the GitHub-rendered
-      # terminal transition INV-33 sanctions as the single interim close. When
-      # itp-writes lands (and wires the seam into this wrapper), the verb path
-      # engages automatically with no further change here.
+      # wrapper does not yet source the ITP seam. Three-way, provider-correct:
+      #   1. `itp_transition_state` DEFINED → use it (provider-neutral; guard on
+      #      `declare -F`, NOT a blind call — a bodyless shim would dispatch to an
+      #      undefined leaf and abort under set -e);
+      #   2. verb absent AND ISSUE_PROVIDER=github → `gh issue close` (the
+      #      GitHub-rendered terminal transition INV-33 sanctions as the single
+      #      interim close — correct ONLY because the tracker IS GitHub);
+      #   3. verb absent AND a NON-GitHub tracker → loud ERROR + leave it (no
+      #      provider-neutral primitive exists here; a GitHub close would be wrong).
+      # When itp-writes lands (and wires the seam in), branch 1 engages — no change.
       _merge_closes=1
       if declare -F chp_caps >/dev/null 2>&1; then
         _merge_closes="$(chp_caps merge_closes_issue 2>/dev/null || echo 1)"
       fi
       if [[ "$_merge_closes" != "1" ]]; then
         if declare -F itp_transition_state >/dev/null 2>&1; then
+          # Provider-neutral path: route through the ITP-seam verb (engages once
+          # itp-writes migrates it + wires the seam into this wrapper).
           log "code host merge_closes_issue=0 — transitioning issue #${ISSUE_NUMBER} to its terminal state via itp_transition_state (merge does not auto-transition it)."
           itp_transition_state "$ISSUE_NUMBER" "reviewing" "approved" 2>/dev/null \
             || log "WARNING: itp_transition_state failed for #${ISSUE_NUMBER} (merge_closes_issue=0 backend) — issue may remain in a non-terminal state."
-        else
-          log "code host merge_closes_issue=0 — closing issue #${ISSUE_NUMBER} explicitly (merge does not auto-transition it; itp_transition_state not yet migrated → GitHub-rendered close)."
+        elif [[ "${ISSUE_PROVIDER:-github}" == "github" ]]; then
+          # itp_transition_state not yet migrated AND the issue tracker IS GitHub:
+          # `gh issue close` is the correct GitHub-rendered terminal transition
+          # (INV-33's single sanctioned interim close). This branch is GitHub-only
+          # BY GUARD now (#282 review round 7 [P1] #2) — a non-GitHub tracker no
+          # longer gets a wrong GitHub-specific close.
+          log "code host merge_closes_issue=0, GitHub issue tracker — closing issue #${ISSUE_NUMBER} explicitly (itp_transition_state not yet migrated → GitHub-rendered close)."
           gh issue close "$ISSUE_NUMBER" --repo "$REPO" --reason completed 2>/dev/null \
             || log "WARNING: explicit issue close failed for #${ISSUE_NUMBER} (merge_closes_issue=0 backend) — issue may remain open."
+        else
+          # Non-GitHub issue tracker without a migrated itp_transition_state: there
+          # is NO provider-neutral primitive to transition the task here, and a
+          # GitHub `gh issue close` would be wrong (the task lives in another
+          # system). Surface it loudly and leave the transition to the operator /
+          # the downstream itp-writes verb — never silently mis-transition.
+          log "ERROR: code host merge_closes_issue=0 on a non-GitHub issue tracker (ISSUE_PROVIDER='${ISSUE_PROVIDER:-github}') but itp_transition_state is not migrated — CANNOT transition issue #${ISSUE_NUMBER} to its terminal state. The PR merged; a maintainer (or the itp-writes verb once it lands) must complete the issue transition."
         fi
       fi
 

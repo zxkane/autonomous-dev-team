@@ -253,60 +253,56 @@ if [[ -d "$FAKE_PROVIDER" ]]; then
   # always defined) yet calling the verb dispatches to an undefined leaf and aborts
   # under `set -e`. chp_has_leaf must report the LEAF absent so the caller falls
   # back — and the fallback MUST be caps-aware (#282 review round 5 [P1]): a
-  # leaf-less merge_closes_issue=0 backend renders the EMPTY string, NOT a
-  # non-functional GitHub `Closes #N`. This mirrors autonomous-dev.sh's
-  # _render_close_keyword 3-way logic verbatim and drives it under set -euo on the
-  # degraded fixture (no leaf + merge_closes_issue=0).
+  # leaf-less merge_closes_issue=0 backend renders a NON-CLOSING discoverable
+  # backref (`Related to #N`) when native_issue_pr_link=0 (so the body-grep
+  # PR-discovery still links the PR — #282 review round 7 [P1] #1), empty only when
+  # native_issue_pr_link=1. This mirrors autonomous-dev.sh's _render_close_keyword
+  # 3-way logic verbatim and drives it under set -euo on the degraded fixture
+  # (no leaf + merge_closes_issue=0 + native_issue_pr_link=0).
+  _render_helper='
+      _render_close_keyword() {
+        local _issue="$1"
+        if declare -F chp_has_leaf >/dev/null 2>&1 && chp_has_leaf close_keyword; then chp_close_keyword "$_issue"; return 0; fi
+        if declare -F chp_caps >/dev/null 2>&1 && [[ "$(chp_caps merge_closes_issue 2>/dev/null || echo 1)" == "0" ]]; then
+          if [[ "$(chp_caps native_issue_pr_link 2>/dev/null || echo 0)" == "0" ]]; then printf "Related to #%s" "$_issue"; else printf ""; fi
+          return 0
+        fi
+        printf "Closes #%s" "$_issue"
+      }'
   leaf_guard=$(
     env -u AUTONOMOUS_CONF -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR \
         REPO="$REPO" CODE_HOST=degraded AUTONOMOUS_PROVIDERS_DIR="$FAKE_PROVIDER" \
     bash -c '
       set -euo pipefail
       source "'"$CHP_LIB"'" 2>/dev/null
-      _render_close_keyword() {
-        local _issue="$1"
-        if declare -F chp_has_leaf >/dev/null 2>&1 && chp_has_leaf close_keyword; then chp_close_keyword "$_issue"; return 0; fi
-        if declare -F chp_caps >/dev/null 2>&1 && [[ "$(chp_caps merge_closes_issue 2>/dev/null || echo 1)" == "0" ]]; then printf ""; return 0; fi
-        printf "Closes #%s" "$_issue"
-      }
+      '"$_render_helper"'
       printf "KW=[%s]\n" "$(_render_close_keyword 282)"
       echo "HASLEAF=$(chp_has_leaf close_keyword && echo present || echo absent)"
     ' 2>&1
   )
-  # degraded = leaf ABSENT + merge_closes_issue=0 → MUST be the empty string (no abort).
-  if [[ "$leaf_guard" == *"KW=[]"* && "$leaf_guard" == *"HASLEAF=absent"* ]]; then
-    echo -e "  ${GREEN}PASS${NC}: TC-CHP-LEAF-GUARD leaf-less merge_closes_issue=0 backend → EMPTY close keyword (caps-aware fallback, no set -e abort)"; PASS=$((PASS+1))
+  # degraded = leaf ABSENT + mci=0 + native_issue_pr_link=0 → non-closing discoverable backref.
+  if [[ "$leaf_guard" == *"KW=[Related to #282]"* && "$leaf_guard" == *"HASLEAF=absent"* ]]; then
+    echo -e "  ${GREEN}PASS${NC}: TC-CHP-LEAF-GUARD leaf-less mci=0 + native_issue_pr_link=0 → 'Related to #282' (non-closing, discoverable; no set -e abort)"; PASS=$((PASS+1))
   else
-    echo -e "  ${RED}FAIL${NC}: TC-CHP-LEAF-GUARD degraded close_keyword should be empty (mci=0) but was: $leaf_guard"; FAIL=$((FAIL+1))
+    echo -e "  ${RED}FAIL${NC}: TC-CHP-LEAF-GUARD degraded close_keyword should be 'Related to #282' but was: $leaf_guard"; FAIL=$((FAIL+1))
+  fi
+  # `Related to #N` must (a) match the PR-discovery body-grep AND (b) NOT be a GitHub close keyword.
+  if printf 'x\nRelated to #282\ny' | grep -qE '(^|[^0-9])#282([^0-9]|$)' \
+     && ! printf 'Related to #282' | grep -qiE '(close[sd]?|fix(e[sd])?|resolve[sd]?) #282'; then
+    echo -e "  ${GREEN}PASS${NC}: TC-CHP-LEAF-GUARD-BACKREF 'Related to #282' is discoverable AND not a close keyword"; PASS=$((PASS+1))
+  else
+    echo -e "  ${RED}FAIL${NC}: TC-CHP-LEAF-GUARD-BACKREF 'Related to #282' not discoverable or is a close keyword"; FAIL=$((FAIL+1))
   fi
   # github keeps the leaf present → verb is called → Closes #<n>.
   gh_kw=$(
     env -u AUTONOMOUS_CONF -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR REPO="$REPO" CODE_HOST=github \
-    bash -c '
-      set -euo pipefail; source "'"$CHP_LIB"'" 2>/dev/null
-      _render_close_keyword() {
-        local _issue="$1"
-        if declare -F chp_has_leaf >/dev/null 2>&1 && chp_has_leaf close_keyword; then chp_close_keyword "$_issue"; return 0; fi
-        if declare -F chp_caps >/dev/null 2>&1 && [[ "$(chp_caps merge_closes_issue 2>/dev/null || echo 1)" == "0" ]]; then printf ""; return 0; fi
-        printf "Closes #%s" "$_issue"
-      }
-      _render_close_keyword 282
-    '
+    bash -c 'set -euo pipefail; source "'"$CHP_LIB"'" 2>/dev/null; '"$_render_helper"'; _render_close_keyword 282'
   )
   assert_eq "TC-CHP-LEAF-GUARD-GH github (leaf present, merge_closes_issue=1) → Closes #282" "Closes #282" "$gh_kw"
   # lib-load failure (no chp_* at all) → GitHub literal (legacy fallback unchanged).
   nolib_kw=$(
     env -i PATH="/usr/local/bin:/usr/bin:/bin" HOME="$HOME" REPO="$REPO" \
-    bash -c '
-      set -euo pipefail
-      _render_close_keyword() {
-        local _issue="$1"
-        if declare -F chp_has_leaf >/dev/null 2>&1 && chp_has_leaf close_keyword; then chp_close_keyword "$_issue"; return 0; fi
-        if declare -F chp_caps >/dev/null 2>&1 && [[ "$(chp_caps merge_closes_issue 2>/dev/null || echo 1)" == "0" ]]; then printf ""; return 0; fi
-        printf "Closes #%s" "$_issue"
-      }
-      _render_close_keyword 282
-    '
+    bash -c 'set -euo pipefail; '"$_render_helper"'; _render_close_keyword 282'
   )
   assert_eq "TC-CHP-LEAF-GUARD-NOLIB lib-load failure (no chp_*) → GitHub literal Closes #282" "Closes #282" "$nolib_kw"
   # The wrapper's _render_close_keyword definition matches this 3-way logic (pin).
@@ -330,43 +326,55 @@ echo "=== caps=0 caller branches present in autonomous-review.sh (§4.2) ==="
 REVIEW_WRAPPER="$SCRIPTS/autonomous-review.sh"
 # merge_closes_issue=0 → the wrapper PREFERS itp_transition_state (guarded on
 # `declare -F`, so it engages the moment itp-writes wires the seam) and FALLS BACK
-# to the INV-33-sanctioned `gh issue close` placeholder while the ITP verb is still
-# a scaffold (#282 review round 6 [P1] #2 — route through the ITP seam, not a raw
-# GitHub-only close).
+# to the gh-close placeholder ONLY when ISSUE_PROVIDER=github (a non-GitHub
+# tracker without the verb gets a loud ERROR, never a wrong GitHub close — #282
+# review round 7 [P1] #2).
 if grep -qE 'chp_caps merge_closes_issue' "$REVIEW_WRAPPER" \
    && grep -qE 'declare -F itp_transition_state' "$REVIEW_WRAPPER" \
    && grep -qE 'itp_transition_state "\$ISSUE_NUMBER"' "$REVIEW_WRAPPER" \
+   && grep -qE 'ISSUE_PROVIDER:-github.*== "github"' "$REVIEW_WRAPPER" \
    && grep -qE 'gh issue close .*ISSUE_NUMBER' "$REVIEW_WRAPPER"; then
-  echo -e "  ${GREEN}PASS${NC}: TC-CHP-CAP-MCI0-BRANCH merge_closes_issue=0 prefers itp_transition_state, falls back to gh issue close"; PASS=$((PASS+1))
+  echo -e "  ${GREEN}PASS${NC}: TC-CHP-CAP-MCI0-BRANCH mci=0 → itp_transition_state, else github-gated gh issue close, else loud ERROR"; PASS=$((PASS+1))
 else
-  echo -e "  ${RED}FAIL${NC}: TC-CHP-CAP-MCI0-BRANCH merge_closes_issue=0 transition not routed through the ITP seam"; FAIL=$((FAIL+1))
+  echo -e "  ${RED}FAIL${NC}: TC-CHP-CAP-MCI0-BRANCH mci=0 transition not provider-gated through the ITP seam"; FAIL=$((FAIL+1))
 fi
-# Behavioral: the branch prefers the verb when defined, else the gh-close fallback.
-mci0_route=$(
-  env -i PATH="/usr/local/bin:/usr/bin:/bin" HOME="$HOME" REPO=o/r bash -c '
-    set -euo pipefail; log(){ :; }
-    chp_caps(){ [[ "$1" == merge_closes_issue ]] && echo 0 || echo 1; }
-    itp_transition_state(){ echo "VERB:$*"; }
-    gh(){ echo "GHCLOSE:$*"; }
-    ISSUE_NUMBER=282; REPO=o/r; _merge_closes=1
+# Behavioral: the EXACT 3-way branch from autonomous-review.sh.
+_mci0_branch='
+    _merge_closes=1
     declare -F chp_caps >/dev/null 2>&1 && _merge_closes="$(chp_caps merge_closes_issue 2>/dev/null || echo 1)"
     if [[ "$_merge_closes" != "1" ]]; then
-      if declare -F itp_transition_state >/dev/null 2>&1; then itp_transition_state "$ISSUE_NUMBER" reviewing approved; else gh issue close "$ISSUE_NUMBER"; fi
+      if declare -F itp_transition_state >/dev/null 2>&1; then itp_transition_state "$ISSUE_NUMBER" reviewing approved
+      elif [[ "${ISSUE_PROVIDER:-github}" == "github" ]]; then gh issue close "$ISSUE_NUMBER" --repo "$REPO" --reason completed
+      else echo "TRANSITION_ERROR (non-github, no verb)"; fi
     fi'
+# (a) verb defined → itp_transition_state (even on a non-github tracker).
+mci0_verb=$(
+  env -i PATH="/usr/local/bin:/usr/bin:/bin" HOME="$HOME" bash -c '
+    set -euo pipefail; chp_caps(){ [[ "$1" == merge_closes_issue ]] && echo 0 || echo 1; }
+    itp_transition_state(){ echo "VERB:$*"; }; gh(){ echo "GHCLOSE:$*"; }
+    ISSUE_NUMBER=282; REPO=o/r; ISSUE_PROVIDER=asana'"$_mci0_branch"
 )
-assert_eq "TC-CHP-CAP-MCI0-VERB mci=0 + itp_transition_state defined → verb (no gh issue close)" "VERB:282 reviewing approved" "$mci0_route"
-mci0_fallback=$(
-  env -i PATH="/usr/local/bin:/usr/bin:/bin" HOME="$HOME" REPO=o/r bash -c '
-    set -euo pipefail; log(){ :; }
-    chp_caps(){ [[ "$1" == merge_closes_issue ]] && echo 0 || echo 1; }
+assert_eq "TC-CHP-CAP-MCI0-VERB mci=0 + itp_transition_state defined → verb (no gh close)" "VERB:282 reviewing approved" "$mci0_verb"
+# (b) verb absent + ISSUE_PROVIDER=github → gh issue close placeholder.
+mci0_gh=$(
+  env -i PATH="/usr/local/bin:/usr/bin:/bin" HOME="$HOME" bash -c '
+    set -euo pipefail; chp_caps(){ [[ "$1" == merge_closes_issue ]] && echo 0 || echo 1; }
     gh(){ echo "GHCLOSE:$*"; }
-    ISSUE_NUMBER=282; REPO=o/r; _merge_closes=1
-    declare -F chp_caps >/dev/null 2>&1 && _merge_closes="$(chp_caps merge_closes_issue 2>/dev/null || echo 1)"
-    if [[ "$_merge_closes" != "1" ]]; then
-      if declare -F itp_transition_state >/dev/null 2>&1; then itp_transition_state "$ISSUE_NUMBER" reviewing approved; else gh issue close "$ISSUE_NUMBER"; fi
-    fi'
+    ISSUE_NUMBER=282; REPO=o/r; ISSUE_PROVIDER=github'"$_mci0_branch"
 )
-assert_contains "TC-CHP-CAP-MCI0-FALLBACK mci=0 + verb absent → gh issue close placeholder" "GHCLOSE:issue close 282" "$mci0_fallback"
+assert_contains "TC-CHP-CAP-MCI0-GH mci=0 + verb absent + github → gh issue close placeholder" "GHCLOSE:issue close 282" "$mci0_gh"
+# (c) verb absent + non-github tracker → loud ERROR, NEVER a wrong gh close.
+mci0_nongh=$(
+  env -i PATH="/usr/local/bin:/usr/bin:/bin" HOME="$HOME" bash -c '
+    set -euo pipefail; chp_caps(){ [[ "$1" == merge_closes_issue ]] && echo 0 || echo 1; }
+    gh(){ echo "GHCLOSE_WRONGLY_CALLED:$*"; }
+    ISSUE_NUMBER=282; REPO=o/r; ISSUE_PROVIDER=gitlab'"$_mci0_branch"
+)
+if [[ "$mci0_nongh" == *"TRANSITION_ERROR"* && "$mci0_nongh" != *"GHCLOSE_WRONGLY_CALLED"* ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-CHP-CAP-MCI0-NONGH mci=0 + verb absent + non-github → loud ERROR, no wrong gh close"; PASS=$((PASS+1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-CHP-CAP-MCI0-NONGH non-github fallback wrong: $mci0_nongh"; FAIL=$((FAIL+1))
+fi
 if grep -qE '_review_bots_cap' "$REVIEW_WRAPPER"; then
   echo -e "  ${GREEN}PASS${NC}: TC-CHP-CAP-BOTS0-GATE mandatory-bot-review wait is gated on review_bots==1"; PASS=$((PASS+1))
 else
