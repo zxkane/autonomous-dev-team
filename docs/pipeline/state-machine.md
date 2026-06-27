@@ -17,6 +17,8 @@ The autonomous pipeline is a state machine over GitHub issue labels. An issue mo
 
 The five **active** states are `autonomous` (no other state label), `in-progress`, `pending-review`, `reviewing`, `pending-dev`. The two **terminal** states are `approved` and `stalled`.
 
+> **Pipeline states are ABSTRACT — rendered per-backend by the Issue-Tracker Provider.** The state names above and the transitions below are **provider-neutral**: they are the contract, not a GitHub-specific representation. How a state is *projected onto a backend* moves behind the ITP seam ([`provider-spec.md`](provider-spec.md) §2.1, [INV-87](invariants.md#inv-87-provider-dispatch-is-spec-defined--callers-route-every-issuecode-host-op-through-itp_chp_-never-a-raw-gh-in-the-caller-layer)) — GitHub renders a state as a **label**, GitLab as a **label** too, and Asana as the value of a **single-select custom field**. The mermaid diagram and the transition table are unchanged by the provider seams: the *abstract* state machine is identical across backends; only the `itp_transition_state` leaf differs. All marker-parsing, retry counting, and verdict routing stays in the provider-neutral caller layer.
+
 ## State diagram
 
 > **GENERATED** — the mermaid block below is generated from

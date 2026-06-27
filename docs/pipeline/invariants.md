@@ -4404,6 +4404,81 @@ _Triage (issue #236): [machine-checked: tests/unit/test-pr-issue-linkage-277.sh]
 
 **Status**: **ENFORCED** as of #277. Design recorded in `docs/designs/issue-277-pr-linkage.md`.
 
+## INV-87: provider-dispatch is spec-defined — callers route every issue/code-host op through `itp_*`/`chp_*`, never a raw `gh` in the caller layer
+
+_Triage (issue #236): [machine-checked: tests/unit/test-provider-spec.sh]_
+
+**Rule**: the pipeline's GitHub coupling is abstracted behind **two provider seams** ([`provider-spec.md`](provider-spec.md)) — an Issue-Tracker Provider (ITP, `ISSUE_PROVIDER`) and a Code-Host Provider (CHP, `CODE_HOST`). Once a verb exists for an operation, the provider-neutral caller layer (`lib-dispatch.sh`, the wrappers, `lib-review-*.sh`) MUST invoke it through the verb's thin dispatcher (`itp_<verb>` → `itp_${ISSUE_PROVIDER}_<verb>`, `chp_<verb>` → `chp_${CODE_HOST}_<verb>`) and MUST NOT emit a raw `gh` call for that operation. This explicitly includes the **dispatcher's own marker writers** — `post_dispatch_token` ([INV-18]) and `_dep_block_comment` ([INV-39]) route through `itp_post_comment`, not a bare `gh issue comment`. The verb tables and the exact current function each verb replaces are normative in [`provider-spec.md`](provider-spec.md) §3.1 (13 ITP verbs) / §3.2 (12 CHP verbs); the marker-parsing, retry-counting, verdict-routing, and INV-coupled timing logic stays in the caller layer — only the leaf I/O call moves behind a verb.
+
+**Why**: GitHub today fills two distinct roles (issue tracker + code host) the codebase conflates across ~145 `gh` call sites in ~30 files with no abstraction. The headline `asana`/`github` topology needs the two roles to be independent, separately-configured seams. Mirrors the agent-CLI adapter precedent ([INV-66]/[INV-75], [`adapter-spec.md`](adapter-spec.md)): a normative spec + a thin dispatcher + one file per backend.
+
+**Status**: **SPEC-DEFINED, not yet code-enforced.** This invariant lands with the normative `provider-spec.md` (issue #279); the dispatch skeleton, the `providers/` files, and the `gh`-site refactor are later, separately-funded sibling issues that implement it. No wrapper behavior changes in #279.
+
+**Producer**: the (future) `lib-issue-provider.sh` / `lib-code-host.sh` dispatchers + `providers/itp-github.sh` / `providers/chp-github.sh`. **Consumer**: every caller in `lib-dispatch.sh` / the wrappers that today emits a `gh` call.
+
+**Tests**: `tests/unit/test-provider-spec.sh` asserts the spec lists all 25 verbs and names the dispatcher's own marker writers. The dispatch-routing / golden-trace runtime tests gate the code-bearing siblings (per [`provider-spec.md`](provider-spec.md) §7), NOT #279.
+
+**Cross-references**:
+- [`provider-spec.md`](provider-spec.md) — the verb tables this invariant enforces routing through.
+- [INV-66](#inv-66-adapter-conformance-is-spec-defined) / [INV-75](#inv-75-all-per-cli-behavior-lives-in-that-clis-adapter--inline-cli-conditionals-in-orchestration-code-are-a-defect) — the agent-CLI adapter precedent this mirrors.
+- [INV-89](#inv-89-every-machine-marker--agent-and-dispatcher-inv-18inv-39-included--is-posted-only-through-the-declared-marker_channel-the-read-side-capture-regex-branches-on-channel) — the marker-channel pin that `itp_post_comment` enforces.
+
+## INV-88: the GitHub `.caps` manifests describe current behavior EXACTLY (the no-behavior-change anchor) — honestly declared, not all-ones
+
+_Triage (issue #236): [machine-checked: tests/unit/test-provider-spec.sh]_
+
+**Rule**: each provider declares a `.caps` capability manifest (a declarative key=value file, parsed not sourced) and callers branch on it ([`provider-spec.md`](provider-spec.md) §4). The GitHub provider's manifests (`providers/itp-github.caps`, `providers/chp-github.caps`) MUST describe **exactly today's behavior** — this is the no-behavior-change anchor. That means GitHub is honestly declared, **not** all-ones: `server_side_state_negation=0` (GitHub does label negation client-side via jq, not server-side) and `native_issue_pr_link=0` (GitHub has no native issue↔PR link and greps the PR body for `#N`) are GitHub's **real current behavior**. Every caller therefore takes the **identical code path** it takes now; the only *new* runtime behavior is the `caps=0` branches, which GitHub never takes.
+
+**Why**: forcing every provider to fake GitHub's full surface produces silent breakage (e.g. Asana strips `<!-- -->` HTML comments). Declaring caps honestly — including the two GitHub-is-weaker cases — lets GitLab/Asana PRs slot in without re-architecting callers, while keeping the GitHub reference path byte-identical. Same discipline as the adapter-spec: write the contract now, implement one reference backend, prove zero behavior change.
+
+**Status**: **SPEC-DEFINED** with #279; the `.caps` manifests + reader ship in the dispatch-skeleton sibling issue. The 9 ITP + 4 CHP capability keys and their github/gitlab/asana columns are normative in [`provider-spec.md`](provider-spec.md) §4.1/§4.2.
+
+**Producer**: the (future) `providers/itp-github.caps` / `providers/chp-github.caps`. **Consumer**: the `itp_caps`/`chp_caps` reader + every capability-branching caller.
+
+**Tests**: `tests/unit/test-provider-spec.sh` asserts the spec pins `server_side_state_negation=0`, `native_issue_pr_link=0`, and `marker_channel=html` as GitHub's declared values.
+
+**Cross-references**:
+- [`provider-spec.md`](provider-spec.md) §4.3 — the no-behavior-change anchor.
+- [INV-87](#inv-87-provider-dispatch-is-spec-defined--callers-route-every-issuecode-host-op-through-itp_chp_-never-a-raw-gh-in-the-caller-layer) — the dispatch the caps gate.
+
+## INV-89: every machine marker — agent AND dispatcher (INV-18/INV-39 included) — is posted only through the declared `marker_channel`; the read-side `capture()` regex branches on channel
+
+_Triage (issue #236): [machine-checked: tests/unit/test-provider-spec.sh]_
+
+**Rule**: a provider declares a `marker_channel` capability (`html` for GitHub/GitLab, `text` for Asana). EVERY machine marker the pipeline writes — agent progress/verdict comments **and** the dispatcher's own markers ([INV-18] dispatch token, [INV-39] dependency-block notice) — MUST be posted through `itp_post_comment` on that declared channel, and the **read-side** `capture()` regexes MUST branch on the channel too. A `text`-channel provider MUST NOT use a sanitizing rich field: Asana's `html_text` field is strict-XML-whitelisted and **rejects HTML comments (`<!-- marker -->`) with HTTP 400**, so a `marker_channel=text` provider posts via the plain `text` story field, which round-trips `<!-- marker -->` verbatim. `itp_post_comment` is the single choke-point for ALL machine markers.
+
+**Why**: the marker scheme uses `<!-- dispatcher-token: … -->` / `<!-- … -->` HTML comments that survive on GitHub but would be silently stripped (or rejected) by a backend with a sanitizing rich field — the marker scheme would then die **silently**. Covering the dispatcher's *own* writers (not just the comment readers) closes the gap where a v1 framing pinned only the read side and let `post_dispatch_token`/`_dep_block_comment` emit raw GitHub-shaped markers a non-GitHub provider could not round-trip.
+
+**Status**: **SPEC-DEFINED** with #279. GitHub's `marker_channel=html` is today's behavior (zero change); the `text`-channel branch is the Asana path that ships with the Asana provider.
+
+**Producer**: `itp_post_comment` (the write side) + the per-provider `marker_channel` cap. **Consumer**: every marker writer (agent + `post_dispatch_token` + `_dep_block_comment`) and every `capture()`-style read-side scanner.
+
+**Tests**: `tests/unit/test-provider-spec.sh` asserts the spec pins `marker_channel=html` for GitHub and documents the agent-AND-dispatcher coverage + the read-side channel branch.
+
+**Cross-references**:
+- [`provider-spec.md`](provider-spec.md) §4 (`marker_channel`) + §3.1 (`itp_post_comment` choke-point).
+- INV-18 (dispatch-token comment, `post_dispatch_token`) / [INV-39](#inv-39-dependency-parsing-is-list-item-scoped-and-supports-cross-repo-refs) (dependency-block comment, `_dep_block_comment`) — the dispatcher markers this pin now covers. (Issue #279 cites the dispatch-token marker as "INV-18"; it is pinned by the `post_dispatch_token` function, not a same-numbered heading — the current INV-18 is "Cold-start grace period".)
+- [INV-87](#inv-87-provider-dispatch-is-spec-defined--callers-route-every-issuecode-host-op-through-itp_chp_-never-a-raw-gh-in-the-caller-layer) — the dispatch routing that funnels markers through `itp_post_comment`.
+
+## INV-90: the normalized issue-comment shape is `[{id, author, body, createdAt}]`, sorted ascending by `createdAt`, with `author` a machine handle for EXACT equality
+
+_Triage (issue #236): [machine-checked: tests/unit/test-provider-spec.sh]_
+
+**Rule**: `itp_list_comments` returns ISSUE-level comments as a normalized JSON array `[{id, author, body, createdAt}]` (plus the normalized `authorKind` enum `bot`/`human`/`self`), **sorted ascending by `createdAt` (a normative MUST)**. Field contracts ([`provider-spec.md`](provider-spec.md) §3.3): `id` is the backend-native comment id the **same provider's** `itp_edit_comment`/reply verbs consume (GitHub: REST **numeric** id — the [INV-46] PATCH path needs numeric, not a GraphQL node_id); `author` is a **stable machine handle for EXACT equality**, NOT a display name (GitHub: `user.login` **including the `[bot]` suffix verbatim**); `createdAt` is an ISO-8601 UTC string. The marker-parsing logic stays caller-side and provider-neutral; only the fetch moves behind the ITP. Review-thread / inline-PR comments are a **separate CHP shape** (`{thread_id, resolved, comments:[{id, path, line, author, body, createdAt}]}`), never folded into this issue-comment shape.
+
+**Why**: the shape is load-bearing for two existing invariants. [INV-46] (the SHA evidence stamp) GETs the last bot comment's `id` then PATCHes it — a shape without `id` cannot identify-then-mutate. [INV-85] (the bot-unfixable exact-equality detector) does `select((.author.login // "") == $dev)` — a display name silently breaks `== $dev`. The ascending-`createdAt` order is what the `| last` and `sort_by(.createdAt) | last` idioms ([INV-05]/[INV-57]) and the `.createdAt > cutoff` string compares depend on. Deliberately OUT of the shape (zero consumers): `reactions`, `isMinimized`, `permalink`, `viewerDidAuthor`, `authorAssociation`, `updatedAt`/`lastEditedAt` — recorded as a forward risk for any future in-place-edit backend.
+
+**Status**: **SPEC-DEFINED** with #279; the GitHub provider produces this shape byte-identically from today's `gh issue view --json comments` output. No reader changes in #279.
+
+**Producer**: the (future) `itp_list_comments` GitHub impl. **Consumer**: the 28 marker-scanners (`extract_dev_session_id`, `last_reviewed_head`, `classify_recent_review_verdict`, `count_agent_failures`, the [INV-85] detector, …).
+
+**Tests**: `tests/unit/test-provider-spec.sh` asserts the spec carries the `[{id, author, body, createdAt}]` shape literal + the `authorKind` enum.
+
+**Cross-references**:
+- [`provider-spec.md`](provider-spec.md) §3.3 — the normalized comment-JSON contract.
+- [INV-46](#inv-46-e2e-runs-once-in-a-dedicated-lane-before-the-review-fan-out--gated-not-per-agent) — the edit/PATCH path that needs the numeric `id`.
+- [INV-85](#inv-85-the-completed-session-failed-substantive-route-is-bounded-to-one-dev-new-per-unchanged-head-a-no-progress-or-bot-unfixable-finding-escalates-to-stalled-never-loops) — the exact-equality detector that needs `author` as a machine handle.
+
 ## Adding a new invariant
 
 When fixing a pipeline bug, after locating the bug on the state machine + flow docs:
