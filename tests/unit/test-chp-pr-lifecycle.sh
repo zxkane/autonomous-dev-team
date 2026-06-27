@@ -246,6 +246,40 @@ if [[ -d "$FAKE_PROVIDER" ]]; then
   else
     echo -e "  ${RED}FAIL${NC}: TC-CHP-CAP-BOTS0-LIVE drain still posted on review_bots=0: $bt0"; FAIL=$((FAIL+1))
   fi
+
+  # chp_has_leaf vs the shim (#282 review round 4 [P1]): on a backend whose
+  # provider file omits a leaf (the degraded fixture has the shim but NO
+  # chp_degraded_close_keyword body), `declare -F chp_close_keyword` is TRUE (shim
+  # always defined) yet calling the verb dispatches to an undefined leaf and aborts
+  # under `set -e`. chp_has_leaf must report the LEAF absent so the caller falls
+  # back. Drive the EXACT autonomous-dev.sh guard under `set -euo pipefail`.
+  leaf_guard=$(
+    env -u AUTONOMOUS_CONF -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR \
+        REPO="$REPO" CODE_HOST=degraded AUTONOMOUS_PROVIDERS_DIR="$FAKE_PROVIDER" \
+    bash -c '
+      set -euo pipefail
+      source "'"$CHP_LIB"'" 2>/dev/null
+      issue_num=282
+      if declare -F chp_has_leaf >/dev/null 2>&1 && chp_has_leaf close_keyword; then
+        _kw="$(chp_close_keyword "$issue_num")"
+      else
+        _kw="Closes #${issue_num}"
+      fi
+      echo "KW=${_kw}"
+      echo "HASLEAF=$(chp_has_leaf close_keyword && echo present || echo absent)"
+    ' 2>&1
+  )
+  if [[ "$leaf_guard" == *"KW=Closes #282"* && "$leaf_guard" == *"HASLEAF=absent"* ]]; then
+    echo -e "  ${GREEN}PASS${NC}: TC-CHP-LEAF-GUARD chp_has_leaf falls back (no set -e abort) when the provider omits the leaf"; PASS=$((PASS+1))
+  else
+    echo -e "  ${RED}FAIL${NC}: TC-CHP-LEAF-GUARD degraded close_keyword guard aborted or wrong: $leaf_guard"; FAIL=$((FAIL+1))
+  fi
+  # github keeps the leaf present → verb is called.
+  gh_leaf=$(
+    env -u AUTONOMOUS_CONF -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR REPO="$REPO" CODE_HOST=github \
+    bash -c 'set -euo pipefail; source "'"$CHP_LIB"'" 2>/dev/null; chp_has_leaf close_keyword && echo present || echo absent'
+  )
+  assert_eq "TC-CHP-LEAF-GUARD-GH github provider DOES define the close_keyword leaf" "present" "$gh_leaf"
 else
   echo -e "  ${RED}FAIL${NC}: degraded fake provider fixture missing at $FAKE_PROVIDER (expected from #280)"
   FAIL=$((FAIL+1))

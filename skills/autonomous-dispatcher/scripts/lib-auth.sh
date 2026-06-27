@@ -479,9 +479,11 @@ drain_agent_pr_create() {
   # --body …`. ALL of the INV-79 broker logic above (token scoping, file parse,
   # head resolution, the no-PR-yet idempotency guard) is unchanged. `$REPO` is the
   # wrapper's required env (the broker's `$repo` arg always equals it). Falls back
-  # to the raw `gh pr create` if the verb is unavailable (lib-code-host source
-  # failed), preserving today's behavior under any lib-load failure.
-  if declare -F chp_create_pr >/dev/null 2>&1; then
+  # to the raw `gh pr create` if the provider LEAF is unavailable (guard on
+  # chp_has_leaf, NOT `declare -F chp_create_pr` — the shim is always defined once
+  # lib-code-host is sourced, so that would dispatch to an undefined leaf and abort
+  # under set -e on a backend without it; #282 review round 4 [P1]).
+  if declare -F chp_has_leaf >/dev/null 2>&1 && chp_has_leaf create_pr; then
     _pr_create_ok() { chp_create_pr --head "$branch" --title "$title" --body "$body" >/dev/null 2>&1; }
   else
     _pr_create_ok() { gh pr create --repo "$repo" --head "$branch" --title "$title" --body "$body" >/dev/null 2>&1; }
@@ -584,9 +586,10 @@ drain_agent_bot_triggers() {
     # AUTONOMOUS_CONF_DIR) the broker resolved above, so the emitted
     # `gh-as-user.sh pr comment $pr --repo $REPO --body $line` is byte-identical.
     # The allow-list gate, PR resolution, and posted/failed tally all stay here.
-    # Falls back to the raw `bash "$gh_as_user" …` call if the verb is unavailable
-    # (lib-code-host source failed), preserving today's behavior.
-    if declare -F chp_trigger_bot >/dev/null 2>&1; then
+    # Falls back to the raw `bash "$gh_as_user" …` call if the provider LEAF is
+    # unavailable (guard on chp_has_leaf, NOT `declare -F chp_trigger_bot` — the
+    # shim is always defined once lib-code-host is sourced; #282 review round 4 [P1]).
+    if declare -F chp_has_leaf >/dev/null 2>&1 && chp_has_leaf trigger_bot; then
       _bot_post_ok() { chp_trigger_bot "$pr_number" "$line" >/dev/null 2>&1; }
     else
       _bot_post_ok() { bash "$gh_as_user" pr comment "$pr_number" --repo "$repo" --body "$line" >/dev/null 2>&1; }

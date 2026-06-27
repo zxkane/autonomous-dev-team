@@ -216,6 +216,18 @@ The *callers* keep their logic; only the leaf `gh` call moves behind a verb.
 > (`autonomous-dev.sh` / `autonomous-review.sh`) — are deliberately left as raw
 > `gh` and are owned by no current verb (the literal-`gh`-freedom lint is the
 > separate cutover-guard issue).
+>
+> **Caller guard convention (`chp_has_leaf`, #282 review round 4).** A caller that
+> conditionally invokes a CHP verb MUST guard on whether the ENABLED provider
+> actually defines the **leaf** (`chp_has_leaf <verb>` → `declare -F
+> chp_${CODE_HOST}_<verb>`), NOT on `declare -F chp_<verb>` (the thin shim is
+> ALWAYS defined once `lib-code-host.sh` is sourced, so it would dispatch to an
+> undefined leaf and abort the caller under `set -e` on a backend whose provider
+> file omits that leaf — the degraded fake CHP fixture has exactly that shape).
+> This applies to the optional/fallback-bearing verbs the GitHub callers guard
+> (`chp_close_keyword`, `chp_create_pr`, `chp_trigger_bot`); core verbs invoked in
+> an `if`-condition / `$(… || …)` context are abort-safe without the guard. `chp_caps`
+> is exempt — it has a real reader body, not a leaf-dispatching shim.
 
 ### 3.3 The normalized comment-JSON contract (load-bearing)
 

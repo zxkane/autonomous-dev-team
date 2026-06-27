@@ -452,9 +452,13 @@ emit_open_pr_fast_path_block() {
   log "Detected pushed head branch with commits ahead of base but no PR for issue #${issue_num} — injecting open-PR-only fast path ([INV-45])."
 
   # [INV-87]/[M4] (#282) backend-correct PR-body close keyword via chp_close_keyword;
-  # falls back to the GitHub literal if the verb is unavailable (today's behavior).
+  # falls back to the GitHub literal if the provider LEAF is unavailable (today's
+  # behavior). Guard on chp_has_leaf (the provider leaf), NOT `declare -F
+  # chp_close_keyword` (the shim is always defined once lib-code-host is sourced,
+  # so that would dispatch to an undefined leaf and abort under set -e — #282
+  # review round 4 [P1]).
   local _close_kw
-  if declare -F chp_close_keyword >/dev/null 2>&1; then
+  if declare -F chp_has_leaf >/dev/null 2>&1 && chp_has_leaf close_keyword; then
     _close_kw="$(chp_close_keyword "$issue_num")"
   else
     _close_kw="Closes #${issue_num}"
@@ -864,10 +868,12 @@ OPEN_PR_FAST_PATH="$(emit_open_pr_fast_path_block "$ISSUE_NUMBER")"
 # interpolate is rendered by chp_close_keyword (provider-spec.md §3.2) rather
 # than a hardcoded GitHub `Closes #N`. GitHub (merge_closes_issue=1) returns
 # `Closes #<N>` — byte-identical to today; a merge_closes_issue=0 backend returns
-# empty (the caller transitions explicitly post-merge). Fall back to the GitHub
-# literal if the verb is unavailable (guarded source above), so a lib-load failure
-# leaves today's behavior unchanged.
-if declare -F chp_close_keyword >/dev/null 2>&1; then
+# empty (the caller transitions explicitly post-merge). Guard on chp_has_leaf (the
+# provider LEAF), NOT `declare -F chp_close_keyword` (the shim is always defined
+# once lib-code-host is sourced → would dispatch to an undefined leaf and abort
+# under set -e on a backend without the leaf — #282 review round 4 [P1]). Fall back
+# to the GitHub literal so a lib-load failure leaves today's behavior unchanged.
+if declare -F chp_has_leaf >/dev/null 2>&1 && chp_has_leaf close_keyword; then
   CLOSE_KEYWORD="$(chp_close_keyword "$ISSUE_NUMBER")"
 else
   CLOSE_KEYWORD="Closes #${ISSUE_NUMBER}"

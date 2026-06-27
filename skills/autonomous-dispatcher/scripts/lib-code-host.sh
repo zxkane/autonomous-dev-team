@@ -96,6 +96,20 @@ chp_resolve_thread()    { chp_${CODE_HOST}_resolve_thread "$@"; }
 chp_trigger_bot()       { chp_${CODE_HOST}_trigger_bot "$@"; }
 chp_close_keyword()     { chp_${CODE_HOST}_close_keyword "$@"; }
 
+# chp_has_leaf <verb> — returns 0 iff the ENABLED provider actually defines the
+# leaf `chp_${CODE_HOST}_<verb>` (e.g. `chp_has_leaf close_keyword`).
+#
+# A caller MUST NOT guard a verb invocation with `declare -F chp_<verb>`: the
+# thin shim above is ALWAYS defined once this lib is sourced, so that test is
+# always true even on a backend whose provider file omits the leaf — the shim
+# then dispatches to an undefined `chp_${CODE_HOST}_<verb>` and aborts the caller
+# under `set -e` (#282 review round 4 [P1]: the degraded fake CHP fixture has
+# exactly that shape — shim present, leaf absent). Guard on the LEAF instead:
+#   chp_has_leaf close_keyword && kw="$(chp_close_keyword "$n")" || kw="<fallback>"
+chp_has_leaf() {
+  declare -F "chp_${CODE_HOST}_$1" >/dev/null 2>&1
+}
+
 # chp_caps <key> — emit the capability map value for <key> from the enabled
 # CHP provider's .caps manifest (spec §4). The only CHP shim with a real body in
 # #280: it reads the declarative manifest, it does NOT forward to a provider
