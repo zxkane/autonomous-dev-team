@@ -53,10 +53,20 @@ resolve_pr_for_issue() {
   # (chained off `. as $prs`, so neither rewrites `.` for the other) — close
   # linkage first, branch-name fallback second. Boundary-anchored branch match:
   # `issue-273` must not match `issue-2730`.
+  #
+  # The branch tier ALSO requires the candidate to carry NO close linkage at all
+  # (`closingIssuesReferences` empty) — this keeps it SYMMETRIC with
+  # verify_pr_closes_issue's branch clause (#277 review [P1] finding 1): a PR on
+  # an `issue-N` branch that actually `Closes #OTHER` would otherwise be sorted
+  # into the branch candidates and could shadow the real close-keyword-less
+  # partial-fix PR for this issue, only to be REJECTED by the guard → a spurious
+  # abort even though a valid PR exists. (A PR that closes THIS issue is already
+  # handled by the authoritative `$closes` tier, so excluding all close-linked
+  # PRs from the branch tier never drops a real match.)
   q="$(cat <<JQ
 . as \$prs
 | ([\$prs[] | select(any(.closingIssuesReferences[]?; .number == ${issue_num}))] | sort_by(.number)) as \$closes
-| ([\$prs[] | select((.headRefName // "") | test("(^|[^0-9])issue-${issue_num}([^0-9]|\$)"))] | sort_by(.number)) as \$branch
+| ([\$prs[] | select(((.closingIssuesReferences // []) | length) == 0 and ((.headRefName // "") | test("(^|[^0-9])issue-${issue_num}([^0-9]|\$)")))] | sort_by(.number)) as \$branch
 | (if (\$closes | length) > 0 then \$closes[0] elif (\$branch | length) > 0 then \$branch[0] else empty end)
 JQ
 )"

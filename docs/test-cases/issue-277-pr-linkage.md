@@ -29,6 +29,15 @@ that mentions `#A`.
 | TC-XWIRE-009 | `fetch_pr_for_issue` field-subset contract: caller requests `number,headRefOid,body`. | Echoed object carries exactly the requested fields for the close-linked PR (INV-85's `body` field preserved). |
 | TC-XWIRE-010 | Close linkage takes precedence over branch name when both exist and point at different PRs. | Close-linked PR wins. |
 
+### #277 review [P1] regressions (round 2)
+
+| ID | Scenario | Expected |
+|---|---|---|
+| **TC-XWIRE-011** | Finding 1: PR #10 on a `fix/issue-273-*` branch that actually `Closes #999`, alongside PR #11 (the real close-keyword-less partial-fix PR for #273, empty close-linkage). #10 is first by number. | `resolve_pr_for_issue 273` returns **#11** — the branch tier excludes #10 (it has close linkage to a different issue), so it never shadows the real PR and forces a spurious guard-reject abort. **Fails before the fix** (returned #10). |
+| **TC-XWIRE-011b** | Only candidate is the `fix/issue-273-*` branch closing #999, no real #273 PR. | Empty (the foreign PR is bound to ITS OWN issue's close-linkage tier, never to #273). |
+| **TC-XWIRE-012** | resolve↔verify consistency across all fixtures. | Whatever `resolve_pr_for_issue` returns, `verify_pr_closes_issue` accepts (rc 0) — discovery never yields a PR the guard rejects (no spurious abort). |
+| **TC-XWIRE-013** | Finding 2: `_review_abort_no_valid_pr` must mark the run handled before exiting. | Source-pin: the helper sets `RESULT_PARSED=true` and does **not** `exit 1` — so the EXIT trap's crash branch does not double-post a "Review process crashed" comment or emit a `failed-substantive` trailer that overrides the intended `failed-non-substantive`/`no-pr-found` verdict. |
+
 ## Integration / E2E
 
 | ID | Scenario | Expected |

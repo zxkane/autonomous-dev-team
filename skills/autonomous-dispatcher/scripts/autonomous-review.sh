@@ -807,7 +807,17 @@ _review_abort_no_valid_pr() {
   gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
     --remove-label "reviewing" \
     --add-label "pending-dev" 2>/dev/null || true
-  exit 1
+  # The wrapper has fully HANDLED this exit: it posted the non-substantive
+  # `no-pr-found` verdict and flipped the label itself. Mark RESULT_PARSED=true
+  # and exit 0 — otherwise the EXIT trap's `RESULT_PARSED != true && exit_code
+  # != 0` crash branch would ALSO fire, posting a duplicate "Review process
+  # crashed" comment and emitting a `failed-substantive` trailer that overrides
+  # this `failed-non-substantive` verdict (sending the issue down the wrong
+  # recovery path — #277 review [P1]). Mirrors the INV-46 E2E-gate handled-abort
+  # idiom (RESULT_PARSED=true; exit 0). `exit 0` does not abort `RESULT_PARSED`
+  # assignment under `set -e` because the assignment runs first.
+  RESULT_PARSED=true
+  exit 0
 }
 
 log "Finding PR for issue #${ISSUE_NUMBER}..."
@@ -833,14 +843,14 @@ fi
 # [INV-86] Hard linkage guard before ANY PR mutation. resolve_pr_for_issue
 # returns a close-linked or branch-matched PR; this guard re-asserts the linkage
 # independently (defense in depth) before PR_NUMBER is handed to the downstream
-# review / submit_request_changes / approve / merge / label-flip path. The guard
-# is intentionally STRICTER than discovery on its branch tier: it accepts a
-# branch-name match only when the PR carries NO close linkage at all — so a PR
-# on an `issue-N` branch that actually `Closes #OTHER` is REFUSED here even
-# though discovery's branch fallback would pick it. That divergence is
-# deliberate and fail-closed: refusing routes through the SAME no-valid-PR abort
-# above (no GitHub review action against a PR not linked to this issue), which is
-# always safer than reviewing/mutating a PR that closes a different issue.
+# review / submit_request_changes / approve / merge / label-flip path. Discovery
+# and the guard share the SAME branch-tier predicate — a branch-name match is
+# accepted only when the PR carries NO close linkage at all (a PR on an `issue-N`
+# branch that actually `Closes #OTHER` is in neither tier), so resolve never
+# returns a PR the guard would reject (#277 review [P1] finding 1). The guard
+# remains as defense-in-depth: any future discovery drift that surfaced a foreign
+# PR is refused here and routes through the SAME no-valid-PR abort above (no
+# GitHub review action is ever taken against a PR not linked to this issue).
 if ! verify_pr_closes_issue "$PR_NUMBER" "$ISSUE_NUMBER"; then
   log "ERROR: resolved PR #${PR_NUMBER} does not close issue #${ISSUE_NUMBER} (linkage guard) — refusing to review/mutate a foreign PR"
   _review_abort_no_valid_pr "Review failed: the PR discovered for this issue (#${PR_NUMBER}) does not close issue #${ISSUE_NUMBER} (GitHub close-linkage / branch name). Refusing to review or mutate an unrelated PR. Ensure the PR for this issue contains 'Closes #${ISSUE_NUMBER}'."

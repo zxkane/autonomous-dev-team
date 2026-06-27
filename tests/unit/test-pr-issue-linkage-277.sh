@@ -201,6 +201,49 @@ out=$(resolve_pr_for_issue 273 "number" 2>/dev/null)
 assert_eq "TC-XWIRE-010 close linkage beats branch-name match" "31" "$(extract_number "$out")"
 
 # ---------------------------------------------------------------------------
+echo "=== branch-tier excludes other-issue closing PRs (#277 review [P1] finding 1) ==="
+# ---------------------------------------------------------------------------
+
+# TC-XWIRE-011: a PR on a `fix/issue-273-*` branch that actually closes a
+# DIFFERENT issue (#999) must NOT shadow the real close-keyword-less partial-fix
+# PR for #273. PR #10 (issue-273 branch, Closes #999) is FIRST so a naive
+# branch-sort would pick it; resolve must skip it (it has close linkage) and
+# return PR #11 (the empty-close-linkage partial fix). Pre-finding-1-fix this
+# returned #10 → verify rejects it → spurious abort even though #11 is valid.
+OTHER_ISSUE_BRANCH_FIX='[
+  {"number":10,"headRefName":"fix/issue-273-but-closes-other","closingIssuesReferences":[{"number":999}],"body":"Closes #999"},
+  {"number":11,"headRefName":"fix/issue-273-partial","closingIssuesReferences":[],"body":"partial fix for 273 (no Closes keyword)"}
+]'
+_MOCK_PR_LIST_JSON="$OTHER_ISSUE_BRANCH_FIX"
+out=$(resolve_pr_for_issue 273 "number" 2>/dev/null)
+assert_eq "TC-XWIRE-011 branch tier skips an issue-273 branch that Closes #OTHER → picks the real partial-fix PR" "11" "$(extract_number "$out")"
+
+# TC-XWIRE-011b: ONLY candidate is a `fix/issue-273-*` branch that closes a
+# different issue (#999), no real #273 PR → resolve returns empty (NOT the
+# foreign PR). The foreign PR is handled by ITS OWN issue's close-linkage tier.
+ONLY_OTHER_FIX='[
+  {"number":10,"headRefName":"fix/issue-273-but-closes-other","closingIssuesReferences":[{"number":999}],"body":"Closes #999"}
+]'
+_MOCK_PR_LIST_JSON="$ONLY_OTHER_FIX"
+out=$(resolve_pr_for_issue 273 "number" 2>/dev/null)
+assert_eq "TC-XWIRE-011b issue-273 branch closing #OTHER, no real #273 PR → empty (not the foreign PR)" "" "$out"
+
+# TC-XWIRE-012: resolve↔verify consistency — whatever resolve_pr_for_issue
+# returns, verify_pr_closes_issue MUST accept (no spurious abort). Exercise it
+# across the close-linked, branch-fallback, and other-issue-branch fixtures.
+for fx in "$FIX_CLOSES" "$NOCLOSE_FIX" "$OTHER_ISSUE_BRANCH_FIX"; do
+  _MOCK_PR_LIST_JSON="$fx"
+  rpr="$(extract_number "$(resolve_pr_for_issue 273 number 2>/dev/null)")"
+  if [[ -z "$rpr" ]]; then
+    : # empty resolution is vacuously consistent (nothing to verify)
+  else
+    _MOCK_PR_LIST_JSON="$fx"
+    verify_pr_closes_issue "$rpr" 273 2>/dev/null
+    assert_rc "TC-XWIRE-012 resolve→verify consistent for PR $rpr (no spurious abort)" "0" "$?"
+  fi
+done
+
+# ---------------------------------------------------------------------------
 echo "=== boundary + empty + happy-path ==="
 # ---------------------------------------------------------------------------
 
@@ -262,6 +305,27 @@ assert_not_grep "review wrapper no longer uses gh search 'issue N' fallback" \
 # A linkage guard must gate the PR before downstream use.
 assert_grep "review wrapper asserts verify_pr_closes_issue before proceeding" \
   "verify_pr_closes_issue" "$WRAPPER"
+
+# #277 review [P1] finding 2: _review_abort_no_valid_pr MUST mark the run handled
+# (RESULT_PARSED=true) and exit 0 — otherwise the EXIT trap's
+# `RESULT_PARSED != true && exit_code != 0` crash branch ALSO fires, posting a
+# duplicate "Review process crashed" comment + a `failed-substantive` trailer
+# that overrides the intended `failed-non-substantive`/`no-pr-found` verdict.
+# Extract the helper body, then strip comment-only and blank lines so the
+# assertions match CODE, not comment prose (a future comment mentioning `exit 1`
+# or `RESULT_PARSED=true` must not flip these source pins — review fragility note).
+ABORT_FN_BODY="$(awk '/^_review_abort_no_valid_pr\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$WRAPPER" \
+  | grep -vE '^[[:space:]]*#' | grep -vE '^[[:space:]]*$')"
+if grep -q 'RESULT_PARSED=true' <<<"$ABORT_FN_BODY"; then
+  echo -e "  ${GREEN}PASS${NC}: TC-XWIRE-013 abort helper sets RESULT_PARSED=true (no crash-trap override)"; PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-XWIRE-013 abort helper missing RESULT_PARSED=true → crash trap will double-post + reclassify"; FAIL=$((FAIL + 1))
+fi
+if grep -q 'exit 1' <<<"$ABORT_FN_BODY"; then
+  echo -e "  ${RED}FAIL${NC}: TC-XWIRE-013b abort helper still uses 'exit 1' (non-zero → crash-trap branch fires)"; FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${NC}: TC-XWIRE-013b abort helper does not 'exit 1' (clean handled exit)"; PASS=$((PASS + 1))
+fi
 
 # ---------------------------------------------------------------------------
 echo "=== source-of-truth: lib-pr-linkage.sh + lib-dispatch.sh ==="

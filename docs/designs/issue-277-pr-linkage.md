@@ -82,13 +82,14 @@ After resolution, before the review proceeds, assert the resolved PR closes this
 issue (close linkage) **or** matches the issue's branch-name marker. The guard is
 asserted **explicitly and independently** at the wrapper level (defense in
 depth): a `verify_pr_closes_issue` predicate is re-checked just before the
-discovery block hands `PR_NUMBER` downstream. The guard is intentionally
-**stricter than discovery** on its branch tier — it accepts a branch-name match
-only when the PR carries **no** close linkage at all, so a PR on an `issue-N`
-branch that actually `Closes #OTHER` is refused here even though discovery's
-branch fallback would select it. That divergence is deliberate and fail-closed:
-refusing is always safer than reviewing/mutating a PR that closes a different
-issue. On failure the wrapper refuses to review, emits a diagnostic, and routes through the
+discovery block hands `PR_NUMBER` downstream. Discovery's branch tier and the
+guard's branch clause share the **same** predicate — a branch-name match counts
+only when the PR carries **no** close linkage at all — so a PR on an `issue-N`
+branch that actually `Closes #OTHER` is in neither, and `resolve_pr_for_issue`
+never returns a PR the guard would reject (a PR closing a *different* issue can no
+longer shadow the real close-keyword-less partial-fix PR and force a spurious
+abort). The guard remains as defense-in-depth against any future discovery drift.
+On failure the wrapper refuses to review, emits a diagnostic, and routes through the
 existing no-valid-PR branch — it never runs `submit_request_changes`, approve,
 merge, or a label flip against the resolved PR.
 
