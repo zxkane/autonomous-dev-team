@@ -217,15 +217,29 @@ dispatch() {
 # Steps 2/3/4 of this tick, so Step 5 can skip them ([INV-09]).
 JUST_DISPATCHED=()
 
-# [INV-83] Tick boundary for the cross-repo dependency lookup-token cache. The
-# cache is TICK-scoped (AC #2): Step 2's check_deps_resolved reuses a single
-# per-`owner/repo` minted token across ALL new issues in this tick, so two issues
-# depending on the same external repo mint only ONCE. Clearing here (once, before
-# the issue loop) starts each tick clean while preserving the within-tick dedup —
-# a per-issue reset would defeat it (#269 review [P1]). Guarded so a future
-# lib-dispatch refactor that drops the helper can't abort the tick.
-if declare -F _reset_dep_token_cache >/dev/null 2>&1; then
-  _reset_dep_token_cache
+# [INV-83] Tick boundary for the cross-repo dependency lookup-token cache, via
+# the itp_begin_tick lifecycle hook (#284, spec §3.6). The cache is TICK-scoped
+# (AC #2): Step 2's check_deps_resolved reuses a single per-`owner/repo` minted
+# token across ALL new issues in this tick, so two issues depending on the same
+# external repo mint only ONCE. The cache + the reset are provider-internal now
+# (GitHub ITP maps itp_begin_tick → its own _DEP_TOKEN_CACHE reset); calling the
+# verb once here (before Step 2 scan-new) starts each tick clean while preserving
+# the within-tick dedup — a per-issue reset would defeat it (#269 review [P1]).
+#
+# Guard on the PROVIDER LEAF (`itp_${ISSUE_PROVIDER}_begin_tick`), NOT the shim:
+# lib-issue-provider.sh ALWAYS defines the `itp_begin_tick` shim, but begin_tick
+# is an OPTIONAL lifecycle hook — a provider with no per-tick state (no token
+# cache) legitimately does not implement the leaf. Guarding on the shim would
+# always pass and then call an undefined `itp_${ISSUE_PROVIDER}_begin_tick`,
+# aborting the tick under `set -e` with `command not found` (e.g. the degraded
+# fixture provider, or any not-yet-migrated gitlab/asana backend). Guarding on the
+# leaf restores the pre-#284 no-op-when-absent semantics the old
+# `declare -F _reset_dep_token_cache` guard had (the GitHub default DOES define
+# the leaf, so the real dispatcher still resets the cache every tick). ISSUE_PROVIDER
+# is set by lib-issue-provider.sh (`${ISSUE_PROVIDER:-github}`); the `:-github`
+# here keeps the guard `set -u`-safe if the seam was somehow not sourced.
+if declare -F "itp_${ISSUE_PROVIDER:-github}_begin_tick" >/dev/null 2>&1; then
+  itp_begin_tick
 fi
 
 # ---------------------------------------------------------------------------
