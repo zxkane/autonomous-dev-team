@@ -37,6 +37,22 @@ fi
 source "${_LIB_AUTH_REAL_DIR}/lib-config.sh"
 load_autonomous_conf "${_LIB_AUTH_DIR}" || true
 
+# [INV-87] (#282) Code-Host Provider dispatch. The PR-create broker
+# (drain_agent_pr_create) and bot-trigger broker (drain_agent_bot_triggers) below
+# route their innermost `gh pr create` / real-user bot-trigger-post leaves through
+# the `chp_create_pr` / `chp_trigger_bot` verbs (`chp_<verb>` →
+# `chp_${CODE_HOST}_<verb>`). LEAF-ONLY swap: the [INV-79] token scoping, the
+# AGENT_*_FILE parsing, head resolution, and the bot-trigger allow-list gate all
+# stay here unchanged — only the bottom `gh`/`gh-as-user.sh` primitive moves
+# behind the verb (the same leaf, byte-identical argv). Sourced from the REAL
+# skill tree via readlink -f (`_LIB_AUTH_REAL_DIR`); guarded + idempotent (the
+# shims guard their own redefinition).
+if ! declare -F chp_create_pr >/dev/null 2>&1 \
+   && [ -r "${_LIB_AUTH_REAL_DIR}/lib-code-host.sh" ]; then
+  # shellcheck source=lib-code-host.sh
+  source "${_LIB_AUTH_REAL_DIR}/lib-code-host.sh"
+fi
+
 GH_AUTH_MODE="${GH_AUTH_MODE:-token}"
 TOKEN_DAEMON_PID=""
 GH_TOKEN_FILE=""
@@ -456,11 +472,26 @@ drain_agent_pr_create() {
 
   # Explicit --head: the wrapper's cwd (PROJECT_DIR) is on the base branch, so a
   # bare create would infer the wrong head (#234 [P1]).
-  if gh pr create --repo "$repo" --head "$branch" --title "$title" --body "$body" >/dev/null 2>&1; then
+  #
+  # [INV-87] (#282) the `gh pr create` leaf moves behind chp_create_pr — the verb
+  # prepends `--repo "$REPO"` and forwards the rest, so the emitted argv is
+  # byte-identical to the prior `gh pr create --repo "$repo" --head … --title …
+  # --body …`. ALL of the INV-79 broker logic above (token scoping, file parse,
+  # head resolution, the no-PR-yet idempotency guard) is unchanged. `$REPO` is the
+  # wrapper's required env (the broker's `$repo` arg always equals it). Falls back
+  # to the raw `gh pr create` if the verb is unavailable (lib-code-host source
+  # failed), preserving today's behavior under any lib-load failure.
+  if declare -F chp_create_pr >/dev/null 2>&1; then
+    _pr_create_ok() { chp_create_pr --head "$branch" --title "$title" --body "$body" >/dev/null 2>&1; }
+  else
+    _pr_create_ok() { gh pr create --repo "$repo" --head "$branch" --title "$title" --body "$body" >/dev/null 2>&1; }
+  fi
+  if _pr_create_ok; then
     echo "[INV-79] wrapper brokered the PR create for issue #${issue_number} (head=${branch}, agent wrote ${AGENT_PR_CREATE_FILE})." >&2
   else
-    echo "WARN: [INV-79] brokered 'gh pr create' (head=${branch}) failed — the success path's no-PR retry will re-queue the issue to pending-dev." >&2
+    echo "WARN: [INV-79] brokered PR create (head=${branch}) failed — the success path's no-PR retry will re-queue the issue to pending-dev." >&2
   fi
+  unset -f _pr_create_ok
   return 0
 }
 
@@ -535,12 +566,25 @@ drain_agent_bot_triggers() {
       echo "WARN: [INV-79] rejected brokered bot-trigger line not in the configured allow-list (REVIEW_BOTS triggers only): '${line}'" >&2
       continue
     fi
-    if bash "$gh_as_user" pr comment "$pr_number" --repo "$repo" --body "$line" >/dev/null 2>&1; then
+    # [INV-87] (#282) the real-user bot-trigger post moves behind chp_trigger_bot.
+    # The verb resolves gh-as-user.sh via the SAME project-side dir (_LIB_AUTH_DIR /
+    # AUTONOMOUS_CONF_DIR) the broker resolved above, so the emitted
+    # `gh-as-user.sh pr comment $pr --repo $REPO --body $line` is byte-identical.
+    # The allow-list gate, PR resolution, and posted/failed tally all stay here.
+    # Falls back to the raw `bash "$gh_as_user" …` call if the verb is unavailable
+    # (lib-code-host source failed), preserving today's behavior.
+    if declare -F chp_trigger_bot >/dev/null 2>&1; then
+      _bot_post_ok() { chp_trigger_bot "$pr_number" "$line" >/dev/null 2>&1; }
+    else
+      _bot_post_ok() { bash "$gh_as_user" pr comment "$pr_number" --repo "$repo" --body "$line" >/dev/null 2>&1; }
+    fi
+    if _bot_post_ok; then
       posted=$((posted + 1))
     else
       echo "WARN: [INV-79] brokered bot-trigger post failed for PR #${pr_number} body='${line}' (gh-as-user.sh — GH_USER_PAT / host auth may be unset)." >&2
     fi
   done < "${AGENT_BOT_TRIGGER_FILE}"
+  unset -f _bot_post_ok 2>/dev/null || true
 
   [[ "$posted" -gt 0 ]] && echo "[INV-79] wrapper brokered ${posted} bot-trigger comment(s) onto PR #${pr_number} via gh-as-user.sh (agent wrote ${AGENT_BOT_TRIGGER_FILE})." >&2
   return 0

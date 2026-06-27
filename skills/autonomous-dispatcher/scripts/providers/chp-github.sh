@@ -86,12 +86,11 @@ chp_github_mergeable() {
 # `--repo $REPO` and forwards the rest byte-identically (the explicit `--head`
 # from the broker is preserved — the wrapper cwd is on the base branch, #234).
 #
-# NOTE (#282 scope): the live executable `gh pr create` is the auth-side broker
-# (lib-auth.sh:459), which this issue's Out-of-Scope forbids editing
-# ("NO auth-code change"). This verb is defined so the 11-verb CHP contract is
-# complete and the spec mapping is filled; the broker→verb rewire is an
-# auth-side follow-up. PAT-mode / app-mode-without-scoping creates the PR via the
-# agent directly (prompt-driven `gh pr create`), unchanged.
+# The wrapper-side broker `drain_agent_pr_create` (lib-auth.sh) calls this verb to
+# perform the create — a LEAF-ONLY swap of its inner `gh pr create` for the verb
+# (byte-identical argv; no INV-79 token/scoping change). PAT-mode /
+# app-mode-without-scoping creates the PR via the agent directly (prompt-driven
+# `gh pr create`), unchanged.
 chp_github_create_pr() {
   gh pr create --repo "$REPO" "$@"
 }
@@ -224,23 +223,27 @@ mutation($threadId: ID!) {
 # login mapping (lib-review-bots.sh) STAY caller-side.
 #
 # GitHub's built-in review bots (q/codex/claude) REJECT GitHub-App-attributed
-# comments, so the trigger MUST be posted by a REAL user via gh-as-user.sh — the
-# same path the wrapper-side broker (drain_agent_bot_triggers, lib-auth.sh) uses.
+# comments, so the trigger MUST be posted by a REAL user via gh-as-user.sh (which
+# reads GH_USER_PAT from the wrapper shell) — the path the wrapper-side broker
+# (drain_agent_bot_triggers, lib-auth.sh) calls this verb to perform.
 #
-# NOTE (#282 scope): the live executable trigger post is the auth-side broker
-# (lib-auth.sh:538, `gh-as-user.sh pr comment`), which this issue's Out-of-Scope
-# forbids editing ("NO auth-code change"). This verb is defined so the 11-verb
-# CHP contract is complete and the spec mapping is filled; the broker→verb
-# rewire is an auth-side follow-up. gh-as-user.sh is resolved beside this file's
-# real skill tree (the same dir the broker's _LIB_AUTH_DIR resolves).
+# gh-as-user.sh resolution mirrors the broker's BYTE-IDENTICALLY: the PROJECT-side
+# scripts dir first (`_LIB_AUTH_DIR`, else `AUTONOMOUS_CONF_DIR`) — the same place
+# the broker resolved it and the same place the agent's `bash scripts/gh-as-user.sh`
+# would find it (so the project's own gh-wrapper PATH is honored) — then this
+# provider file's own skill-tree dir as a fallback. Echoes nothing; returns the
+# `gh-as-user.sh` exit status so the broker's per-line posted/failed tally is
+# preserved.
 chp_github_trigger_bot() {
   local pr="$1" trigger="$2"
-  local _self _dir
+  local _self _skill_dir gh_as_user="" _d
   _self="${BASH_SOURCE[0]:-$0}"
-  _dir="$(cd "$(dirname "$(readlink -f "$_self")")/.." && pwd 2>/dev/null)" || _dir=""
-  local gh_as_user="${_dir}/gh-as-user.sh"
-  if [[ ! -f "$gh_as_user" ]]; then
-    echo "WARN: chp_github_trigger_bot: ${gh_as_user} absent — cannot post bot trigger as a real user." >&2
+  _skill_dir="$(cd "$(dirname "$(readlink -f "$_self")")/.." && pwd 2>/dev/null)" || _skill_dir=""
+  for _d in "${_LIB_AUTH_DIR:-}" "${AUTONOMOUS_CONF_DIR:-}" "$_skill_dir"; do
+    [[ -n "$_d" && -f "${_d}/gh-as-user.sh" ]] && { gh_as_user="${_d}/gh-as-user.sh"; break; }
+  done
+  if [[ -z "$gh_as_user" ]]; then
+    echo "WARN: chp_github_trigger_bot: gh-as-user.sh not found — cannot post bot trigger as a real user." >&2
     return 1
   fi
   bash "$gh_as_user" pr comment "$pr" --repo "$REPO" --body "$trigger"

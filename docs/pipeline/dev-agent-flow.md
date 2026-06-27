@@ -147,10 +147,12 @@ the issue explicitly post-merge, see [INV-33](invariants.md#inv-33-review-wrappe
 literal, so a lib-load failure leaves today's behavior unchanged.
 
 **PR creation** is the CHP verb `chp_create_pr` ([`provider-spec.md`](provider-spec.md)
-§3.2). The verb is **defined** in `providers/chp-github.sh`, but the live
-executable `gh pr create` leaf is the auth-side broker `drain_agent_pr_create`
-(`lib-auth.sh`) described above — the broker→verb rewire is an auth-side
-follow-up because `lib-auth.sh` is outside #282's scope ("NO auth-code change").
+§3.2). The broker `drain_agent_pr_create` (`lib-auth.sh`) described above routes
+its `gh pr create --head/--title/--body` leaf through the verb (a leaf-only swap —
+byte-identical argv; the [INV-79] token-scoping, file parse, and head resolution
+are unchanged), falling back to the raw `gh pr create` if the verb is
+unavailable. The review-bot trigger broker (`drain_agent_bot_triggers`) likewise
+routes through `chp_trigger_bot` ([INV-87], #282).
 
 ## Path resolution lessons (#58)
 

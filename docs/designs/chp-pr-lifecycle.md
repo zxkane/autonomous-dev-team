@@ -57,11 +57,15 @@ authoritative enumeration. Therefore:
   swap their resolution semantics to the INV-86 close-linkage form — a behavior
   change (and a #277 regression), violating the ZERO-behavior-change mandate.
 - **`chp_create_pr` / `chp_trigger_bot`**: their live executable leaves are in
-  `lib-auth.sh` (the broker), which the issue's Out-of-Scope explicitly forbids
-  editing ("NO auth-code change — lib-auth.sh / gh-app-token.sh unchanged"). The
-  verb BODIES are defined so the 11-verb contract is complete and the spec
-  mapping is filled; the broker→verb rewire is an auth-side follow-up. `lib-auth.sh`
-  is not in the issue's grep-AC file list, so leaving it raw is compliant.
+  `lib-auth.sh` (the brokers `drain_agent_pr_create` / `drain_agent_bot_triggers`).
+  The review of PR #290 ruled (correctly) that a defined-but-unwired verb does
+  NOT complete the seam — so #282 routes both brokers through the verbs as a
+  **LEAF-ONLY swap**: only the innermost `gh pr create` / `gh-as-user.sh pr comment`
+  primitive moves behind the verb (byte-identical argv), with a fallback to the
+  raw leaf if the verb is unavailable. This honors the *intent* of "NO auth-code
+  change" — no token minting, scoping, refresh, or allow-list logic changes; only
+  the bottom `gh` primitive is swapped for the verb that emits the identical
+  command. The `lib-auth.sh` source gains one guarded `lib-code-host.sh` source.
 
 ### grep-AC compliance (phrased per-shape, like #281)
 

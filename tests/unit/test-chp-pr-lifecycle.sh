@@ -259,6 +259,56 @@ delegated=$(
 assert_contains "TC-CHP-SHIM-DELEGATES resolve_pr_for_issue routes the leaf through chp_find_pr_for_issue" "VERB_HIT:number,body" "$delegated"
 
 # ===========================================================================
+# 5b. BROKER REWIRE — the live lib-auth.sh brokers route through the verbs
+#     (PR-create + bot-trigger). The [P1] review finding: a defined-but-unwired
+#     verb does not complete the seam; the real executable leaf must move.
+# ===========================================================================
+echo "=== BROKER REWIRE: drain_agent_pr_create → chp_create_pr / drain_agent_bot_triggers → chp_trigger_bot ==="
+# drain_agent_pr_create: stub the verb + a PR-create file, assert the broker hits
+# chp_create_pr with the resolved --head/--title/--body (NOT a raw gh pr create).
+prfile=$(mktemp); printf 'branch: feat/issue-282-foo\nMy title\nBody line.\nCloses #282\n' > "$prfile"
+# The broker discards the leaf's stdout (`>/dev/null`), so the verb override
+# records its argv to a SENTINEL FILE (not stdout) where we can read it.
+pr_sentinel=$(mktemp)
+env -u PROJECT_DIR REPO="$REPO" PRFILE="$prfile" SENTINEL="$pr_sentinel" \
+  bash -c '
+    log() { :; }
+    gh() { [[ "$1 $2" == "pr list" ]] && { echo 0; return 0; }; echo "RAW_GH_PR_CREATE:$*" >> "$SENTINEL"; }  # no existing PR; raw create MUST NOT be hit
+    source "'"$CHP_LIB"'" 2>/dev/null
+    chp_create_pr() { echo "CHP_CREATE_PR:$*" >> "$SENTINEL"; }   # override the github leaf
+    source "'"$SCRIPTS"'/lib-auth.sh" 2>/dev/null
+    # Arm the scoped-token broker AFTER sourcing — lib-auth.sh resets the AGENT_*
+    # state at source time, so setting these in env would be clobbered.
+    AGENT_GH_TOKEN_FILE=/dev/null AGENT_PR_CREATE_FILE="$PRFILE" \
+      drain_agent_pr_create 282 "'"$REPO"'" >/dev/null 2>&1
+  '
+broker_pr=$(cat "$pr_sentinel"); rm -f "$prfile" "$pr_sentinel"
+assert_contains "TC-CHP-BROKER-CREATE drain_agent_pr_create routes through chp_create_pr (--head/--title/--body)" "CHP_CREATE_PR:--head feat/issue-282-foo --title My title --body" "$broker_pr"
+if [[ "$broker_pr" != *"RAW_GH_PR_CREATE"* ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-CHP-BROKER-CREATE no raw 'gh pr create' fallback when chp_create_pr is defined"; PASS=$((PASS+1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-CHP-BROKER-CREATE raw gh pr create still hit"; echo "      out: $broker_pr"; FAIL=$((FAIL+1))
+fi
+
+# drain_agent_bot_triggers: stub the verb + a trigger file + an allow-listed
+# phrase, assert the broker hits chp_trigger_bot (NOT a raw gh-as-user.sh).
+btfile=$(mktemp); printf '/q review\n' > "$btfile"
+bt_sentinel=$(mktemp)
+env -u PROJECT_DIR REPO="$REPO" AUTONOMOUS_CONF_DIR="$COMMON_SCRIPTS" BTFILE="$btfile" SENTINEL="$bt_sentinel" \
+  bash -c '
+    log() { :; }
+    gh() { [[ "$1 $2" == "pr list" ]] && { echo 99; return 0; }; return 0; }  # PR #99 exists
+    source "'"$CHP_LIB"'" 2>/dev/null
+    chp_trigger_bot() { echo "CHP_TRIGGER_BOT:$*" >> "$SENTINEL"; }   # override the github leaf (broker discards its stdout)
+    source "'"$SCRIPTS"'/lib-auth.sh" 2>/dev/null
+    # Arm AFTER sourcing (lib-auth.sh resets the AGENT_* state at source time).
+    AGENT_GH_TOKEN_FILE=/dev/null AGENT_BOT_TRIGGER_FILE="$BTFILE" \
+      drain_agent_bot_triggers 282 "'"$REPO"'" "/q review" >/dev/null 2>&1
+  '
+broker_bt=$(cat "$bt_sentinel"); rm -f "$btfile" "$bt_sentinel"
+assert_contains "TC-CHP-BROKER-TRIGGER drain_agent_bot_triggers routes through chp_trigger_bot (PR + phrase)" "CHP_TRIGGER_BOT:99 /q review" "$broker_bt"
+
+# ===========================================================================
 # 6. CONFORMANCE FIXTURE RULE (INV-75) — cp -r providers/.
 # ===========================================================================
 echo "=== CONFORMANCE FIXTURE RULE (INV-75) ==="
