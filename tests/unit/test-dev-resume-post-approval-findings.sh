@@ -156,6 +156,11 @@ run_helper() {
     bash -c "
       set -euo pipefail
       log() { :; }
+      # [INV-87] (#282) emit_post_approval_findings_block now reads the PR's
+      # reviews via chp_pr_view (the general read primitive). Real leaf:
+      # \`gh pr view \$pr --repo \$REPO \"\$@\"\`; define the same shim so this
+      # isolation harness (PATH-stubbed gh + extracted helper) resolves the verb.
+      chp_pr_view() { local _pr=\"\$1\"; shift; gh pr view \"\$_pr\" --repo \"\${REPO:-acme/widget}\" \"\$@\"; }
       $HELPER_FN
       emit_post_approval_findings_block '$issue' '$pr'
     "

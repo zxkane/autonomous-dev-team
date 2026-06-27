@@ -1582,7 +1582,7 @@ ci_is_green() {
     ci_err_content=$(cat "$ci_err_file")
     rm -f "$ci_err_file"
     if [ -n "$ci_err_content" ]; then
-      echo "WARN: gh pr checks failed for PR #${pr_num}: ${ci_err_content}" >&2
+      echo "WARN: CI-status query (chp_ci_status) failed for PR #${pr_num}: ${ci_err_content}" >&2
     fi
     ci_states='[]'
   fi

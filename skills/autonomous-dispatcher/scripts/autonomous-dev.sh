@@ -382,8 +382,10 @@ needs_open_pr_only() {
 
   # (1) No open PR for this issue. Reuse the same body-reference selector the
   # cleanup trap uses. Any non-zero count means a PR exists → not our state.
+  # [INV-87] (#282 r8) body-mention existence lookup → chp_pr_list (general read
+  # leaf); the `--state open --json body -q …` tail is forwarded byte-identically.
   local pr_count
-  pr_count=$(gh pr list --repo "$REPO" --state open --json body \
+  pr_count=$(chp_pr_list --state open --json body \
     -q "[.[] | select(.body != null and ((.body | test(\"#${issue_num}[^0-9]\")) or (.body | test(\"#${issue_num}$\"))))] | length" 2>/dev/null) || return 1
   [[ "$pr_count" =~ ^[0-9]+$ ]] || return 1
   [ "$pr_count" -eq 0 ] || return 1
@@ -596,8 +598,10 @@ emit_post_approval_findings_block() {
   # Latest APPROVED review timestamp. FAIL-CLOSED: capture the query's exit
   # status separately so a transient/permission/API failure is NOT mistaken for
   # "no approval" (review finding 1). On failure: emit nothing, return 0.
+  # [INV-87] (#282 r8) PR-number-keyed reviews read → chp_pr_view (general read
+  # leaf); `--json reviews -q …` forwarded byte-identically.
   local approved_at findings_at
-  if ! approved_at=$(gh pr view "$pr_num" --repo "$REPO" --json reviews \
+  if ! approved_at=$(chp_pr_view "$pr_num" --json reviews \
     -q '[.reviews[]? | select(.state == "APPROVED") | .submittedAt] | sort | last // empty' 2>/dev/null); then
     return 0
   fi
@@ -758,8 +762,9 @@ EOF
   drain_agent_pr_create "$ISSUE_NUMBER" "$REPO" || true
 
   # Look up PR-exists state once (used by SIGTERM rewrite and the success path).
+  # [INV-87] (#282 r8) body-mention existence lookup → chp_pr_list.
   local PR_EXISTS
-  PR_EXISTS=$(gh pr list --repo "$REPO" --state open --json body \
+  PR_EXISTS=$(chp_pr_list --state open --json body \
     -q "[.[] | select(.body | test(\"#${ISSUE_NUMBER}[^0-9]\") or test(\"#${ISSUE_NUMBER}$\"))] | length" 2>/dev/null || echo "0")
 
   # [INV-79] Bot-trigger broker: if the scoped agent token is armed and the agent
@@ -851,7 +856,10 @@ EOF
     # `createdAt` and emit it as `pr_opened_at`; the aggregator prefers it over
     # `ts` (mirrors the issue_labeled→labeled_at fix). On any gh failure the
     # field is omitted and the aggregator falls back to `ts` (#228 review).
-    _pr_created_at="$(gh pr list --repo "$REPO" --state all --json createdAt,body \
+    # [INV-87] (#282 r8) body-mention metrics lookup → chp_pr_list; note `--state
+    # all` (NOT open) is forwarded byte-identically (the general leaf hardcodes no
+    # --state, unlike chp_find_pr_for_issue).
+    _pr_created_at="$(chp_pr_list --state all --json createdAt,body \
       -q "[.[] | select(.body != null and ((.body | test(\"#${ISSUE_NUMBER}[^0-9]\")) or (.body | test(\"#${ISSUE_NUMBER}\$\"))))] | sort_by(.createdAt) | (.[0].createdAt // empty)" \
       2>/dev/null || true)"
     if [[ -n "${_pr_created_at:-}" ]]; then
@@ -1040,8 +1048,9 @@ elif [[ "$MODE" = "resume" ]]; then
   REVIEW_COMMENTS=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json comments \
     -q '[.comments[] | select((.body | startswith("Review findings")) or (.body | startswith("Review PASSED")) or ((.body | test("(?i)(^|[^A-Za-z-])BLOCKING\\b|\\[P1\\]")) and ((.body | test("(?i)^\\s*(Review PASSED|Review APPROVED|#+\\s*✅|\\*\\*Agent Session Report|Agent Session Report|Multi-agent review|Reviewed HEAD|<!--|Dispatching|Resuming|Moving to|Implementation complete)")) | not)))] | last // empty')
 
-  # Fetch PR number linked to this issue for inline review comments
-  PR_NUM=$(gh pr list --repo "$REPO" --state open --json number,body \
+  # Fetch PR number linked to this issue for inline review comments.
+  # [INV-87] (#282 r8) body-mention lookup → chp_pr_list.
+  PR_NUM=$(chp_pr_list --state open --json number,body \
     -q "[.[] | select(.body | test(\"#${ISSUE_NUMBER}[^0-9]\") or test(\"#${ISSUE_NUMBER}$\"))] | .[0].number // empty" 2>/dev/null || true)
 
   # Fetch PR inline review comments if PR exists

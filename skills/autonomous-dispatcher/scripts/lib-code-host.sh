@@ -96,6 +96,20 @@ chp_resolve_thread()    { chp_${CODE_HOST}_resolve_thread "$@"; }
 chp_trigger_bot()       { chp_${CODE_HOST}_trigger_bot "$@"; }
 chp_close_keyword()     { chp_${CODE_HOST}_close_keyword "$@"; }
 
+# General read primitives (#282 review round 8). These are NOT among the 11 named
+# PR-lifecycle verbs above — they are the provider-neutral `gh pr view` / `gh pr
+# list` read leaves that the caller layer's INCIDENTAL reads route through so the
+# caller layer carries ZERO raw `gh pr` (the [INV-87] final-AC grep). The caller
+# keeps its own `--json`/`-q` projection (forwarded via "$@", byte-identical), as
+# with every other CHP verb; only the innermost primitive moves behind the seam.
+#   chp_pr_view PR  [--json … -q …]     → gh pr view PR  --repo $REPO …
+#   chp_pr_list     [--state … --json … -q …] → gh pr list --repo $REPO …
+# (chp_pr_list is the generalized issue-keyed/body-mention list the dispatcher's
+# pre-#277 existence lookups use — distinct from chp_find_pr_for_issue, which is
+# the [INV-86] close-linkage resolver.)
+chp_pr_view()           { chp_${CODE_HOST}_pr_view "$@"; }
+chp_pr_list()           { chp_${CODE_HOST}_pr_list "$@"; }
+
 # chp_has_leaf <verb> — returns 0 iff the ENABLED provider actually defines the
 # leaf `chp_${CODE_HOST}_<verb>` (e.g. `chp_has_leaf close_keyword`).
 #

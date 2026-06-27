@@ -308,9 +308,11 @@ echo "=== TC-DSAP-014: gh pr checks failure is observable ==="
 echo
 # The original `2>/dev/null || echo '[]'` discarded stderr. The fix must
 # capture it and surface it (via WARN log or stderr) so a chronic gh failure
-# is diagnosable instead of silently skipping issues forever.
-assert_contains "gh pr checks failure logged" \
-  "gh pr checks failed" "$SKILL_CONTENT"
+# is diagnosable instead of silently skipping issues forever. (#282: the
+# `gh pr checks` leaf moved behind chp_ci_status; the WARN wording is now
+# "CI-status query (chp_ci_status) failed".)
+assert_contains "CI-status query failure logged" \
+  "CI-status query (chp_ci_status) failed" "$SKILL_CONTENT"
 
 # ============================================================================
 # TC-DSAP-015: Stderr capture uses mktemp, not a fixed /tmp path

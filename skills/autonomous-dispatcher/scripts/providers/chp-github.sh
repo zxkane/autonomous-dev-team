@@ -260,3 +260,29 @@ chp_github_close_keyword() {
   local issue="$1"
   printf 'Closes #%s' "$issue"
 }
+
+# chp_github_pr_view PR [extra gh args…] — general PR read leaf (#282 review r8).
+#
+# The provider-neutral `gh pr view` primitive the caller layer's INCIDENTAL
+# PR-number-keyed reads route through (preview-URL/headRefName/headRefOid/state/
+# comments/reviews projections at autonomous-dev.sh / autonomous-review.sh) so the
+# caller carries ZERO raw `gh pr view`. The caller supplies its own
+# `--json <fields> -q <filter>` via "$@"; the leaf forwards it byte-identically.
+chp_github_pr_view() {
+  local pr="$1"; shift
+  gh pr view "$pr" --repo "$REPO" "$@"
+}
+
+# chp_github_pr_list [extra gh args…] — general PR list read leaf (#282 review r8).
+#
+# The provider-neutral `gh pr list` primitive the caller layer's INCIDENTAL
+# body-mention existence lookups use (needs_open_pr_only / cleanup PR_EXISTS /
+# metrics / resume PR_NUM in autonomous-dev.sh). DISTINCT from
+# chp_find_pr_for_issue (the [INV-86] close-linkage resolver): this is the loose
+# `select(.body|test("#N"))` body-mention form these pre-#277 lookups deliberately
+# keep. The caller supplies the full tail (`--state open|all --json … -q …`) via
+# "$@"; the leaf forwards it byte-identically (no `--state` hardcoded, so a
+# `--state all` caller is byte-identical too).
+chp_github_pr_list() {
+  gh pr list --repo "$REPO" "$@"
+}

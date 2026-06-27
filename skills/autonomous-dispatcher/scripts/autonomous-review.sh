@@ -911,7 +911,7 @@ if [[ "${E2E_ACTIVE:-false}" == "true" && -n "${E2E_PREVIEW_URL_PATTERN:-}" ]]; 
   PREVIEW_URL="${E2E_PREVIEW_URL_PATTERN//\{N\}/$PR_NUMBER}"
 
   # Also try to extract from PR comments (may contain a more specific URL)
-  COMMENT_URL=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json comments \
+  COMMENT_URL=$(chp_pr_view "$PR_NUMBER" --json comments \
     -q '[.comments[].body | select(contains("Preview"))] | last' 2>/dev/null \
     | grep -oP 'https://[^\s"]+' | head -1 || true)
   PREVIEW_URL="${COMMENT_URL:-$PREVIEW_URL}"
@@ -941,8 +941,8 @@ fi
 # ---------------------------------------------------------------------------
 # Build review prompt
 # ---------------------------------------------------------------------------
-PR_BRANCH=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefName -q '.headRefName' 2>/dev/null || true)
-PR_HEAD_SHA=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefOid -q '.headRefOid' 2>/dev/null || true)
+PR_BRANCH=$(chp_pr_view "$PR_NUMBER" --json headRefName -q '.headRefName' 2>/dev/null || true)
+PR_HEAD_SHA=$(chp_pr_view "$PR_NUMBER" --json headRefOid -q '.headRefOid' 2>/dev/null || true)
 log "PR branch: ${PR_BRANCH:-UNKNOWN} (HEAD: ${PR_HEAD_SHA:0:7})"
 
 # Verdict-detection bindings: actor + time window + body-trailer
@@ -1522,7 +1522,7 @@ if [[ "${E2E_ACTIVE:-false}" == "true" ]]; then
   # Best-effort / non-fatal: a failed `gh` query → "UNKNOWN" → skip (conservative;
   # we never add pending-dev when PR state is in doubt, matching the INV-54 guard).
   if [[ "$E2E_GATE" == "fail" || "$E2E_GATE" == "block-nonsubstantive" ]]; then
-    E2E_PR_STATE=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json state -q '.state' 2>/dev/null || echo "UNKNOWN")
+    E2E_PR_STATE=$(chp_pr_view "$PR_NUMBER" --json state -q '.state' 2>/dev/null || echo "UNKNOWN")
     if [[ "$(_pr_open_gate "$E2E_PR_STATE")" == "skip" ]]; then
       log "PR #${PR_NUMBER} is no longer open (state: ${E2E_PR_STATE}) at the E2E hard gate. Skipping the pending-dev flip — another review/merge likely completed first."
       gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
@@ -3157,7 +3157,7 @@ if [[ "$PASSED_VERDICT" == "true" ]]; then
   # Best-effort / non-fatal: a failed `gh` query → "UNKNOWN" → skip (conservative;
   # we never add pending-dev when PR state is in doubt — matches the prior PASS
   # guard which treated a failed query as non-OPEN).
-  PR_STATE=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json state -q '.state' 2>/dev/null || echo "UNKNOWN")
+  PR_STATE=$(chp_pr_view "$PR_NUMBER" --json state -q '.state' 2>/dev/null || echo "UNKNOWN")
   if [[ "$(_pr_open_gate "$PR_STATE")" == "skip" ]]; then
     log "PR #${PR_NUMBER} is no longer open (state: ${PR_STATE}). Skipping mergeable gate + approve/merge — another review/merge likely completed first."
     gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
@@ -3203,7 +3203,7 @@ if [[ "$PASSED_VERDICT" == "true" ]]; then
       # waiting and route to pending-dev as a substantive FAIL so a human/dev
       # investigates the missing bot.
       _wait_marker="<!-- bot-review-wait sha=\"${PR_HEAD_SHA:-unknown}\" -->"
-      _wait_count=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json comments \
+      _wait_count=$(chp_pr_view "$PR_NUMBER" --json comments \
         --jq "[.comments[] | select(.body | contains(\"bot-review-wait sha=\\\"${PR_HEAD_SHA:-unknown}\\\"\"))] | length" 2>/dev/null || echo 0)
       [[ "$_wait_count" =~ ^[0-9]+$ ]] || _wait_count=0
       if [[ "$_wait_count" -ge "${BOT_REVIEW_WAIT_MAX:-3}" ]]; then
@@ -3406,7 +3406,7 @@ if [[ "$PASSED_VERDICT" == "true" ]]; then
     MERGE_OUT=$(chp_merge "$PR_NUMBER" --squash --delete-branch 2>&1)
     MERGE_RC=$?
     set -e
-    [[ -n "$MERGE_OUT" ]] && log "gh pr merge output: ${MERGE_OUT}"
+    [[ -n "$MERGE_OUT" ]] && log "chp_merge output: ${MERGE_OUT}"
 
     if [[ $MERGE_RC -eq 0 ]]; then
       log "PR #${PR_NUMBER} merged successfully."

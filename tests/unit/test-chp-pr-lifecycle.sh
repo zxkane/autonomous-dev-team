@@ -137,6 +137,18 @@ argv=$(run_trace chp_resolve_thread "PRRT_kwABC")
 assert_contains "TC-CHP-RESOLVE chp_resolve_thread emits resolveReviewThread mutation" "resolveReviewThread(input: {threadId: \$threadId})" "$argv"
 assert_contains "TC-CHP-RESOLVE -F threadId forwards the thread id" "threadId=PRRT_kwABC" "$argv"
 
+# General read primitives (#282 review round 8) — the incidental reads route
+# through these; byte-identical argv (the caller's --json/-q ride via "$@").
+argv=$(run_trace chp_pr_view 42 --json state -q '.state')
+assert_eq "TC-CHP-PRVIEW chp_pr_view byte-identical gh pr view argv" \
+  "pr view 42 --repo $REPO --json state -q .state " "$argv"
+argv=$(run_trace chp_pr_list --state open --json body -q '.[0]')
+assert_eq "TC-CHP-PRLIST chp_pr_list byte-identical gh pr list argv (--state forwarded, no hardcode)" \
+  "pr list --repo $REPO --state open --json body -q .[0] " "$argv"
+argv=$(run_trace chp_pr_list --state all --json createdAt,body -q 'X')
+assert_eq "TC-CHP-PRLIST-ALL chp_pr_list forwards --state all byte-identically (metrics #228 anchor)" \
+  "pr list --repo $REPO --state all --json createdAt,body -q X " "$argv"
+
 # ===========================================================================
 # 2. M8 review-thread shape — {thread_id, resolved, comments:[{id,path,line,…}]}.
 # ===========================================================================
@@ -506,6 +518,52 @@ if grep -qE 'chp_review_threads|chp_resolve_thread' <<<"$rt_code" \
 else
   echo -e "  ${RED}FAIL${NC}: TC-CHP-RESOLVE-THREADS resolve-threads.sh still has an inline gh api graphql leaf"; FAIL=$((FAIL+1))
 fi
+
+# ===========================================================================
+# 7. FINAL-AC GREP — the caller layer carries ZERO EXECUTABLE raw `gh pr`
+#    (#282 review round 8). The literal AC grep flags comments / log strings /
+#    prompt-heredoc text too, so we filter to EXECUTABLE forms: a `$(gh pr …`
+#    command-sub, `if gh pr …`, `=$(gh pr …`, or a bare leading `gh pr …`. Every
+#    such call must now be a chp_* verb (or the kept fetch_pr_for_issue shim).
+# ===========================================================================
+echo "=== FINAL-AC GREP: no executable raw 'gh pr' in the caller layer ==="
+_ac_files="lib-dispatch.sh autonomous-dev.sh autonomous-review.sh lib-review-request-changes.sh lib-review-bots.sh resolve-threads.sh"
+exec_gh=$(
+  cd "$SCRIPTS" 2>/dev/null && for f in $_ac_files; do
+    [ -f "$f" ] || continue
+    # Keep ONLY lines where `gh pr <verb>` is an executable invocation — i.e.
+    # immediately preceded by a shell command-context token (`$(`, `=$(`, `if `,
+    # `&& `, `| `). This EXCLUDES `#` comments, prompt-heredoc instruction text
+    # (indented `   gh pr checks ${PR_NUMBER}` — agent-run, not caller-run; prompt
+    # text uses `${VAR}` braces, never a command-context prefix), and backtick
+    # prose (`\`gh pr create\``).
+    grep -nE '(\$\(|=\$\(|if |&& |\| )gh pr (list|checks|view|create|review|merge)' "$f" \
+      | grep -vE '^[0-9]+:[[:space:]]*#' \
+      | sed "s#^#$f:#"
+  done
+)
+if [ -z "$exec_gh" ]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-CHP-FINAL-AC no executable raw 'gh pr' in the 6 caller files (all behind chp_* verbs)"; PASS=$((PASS+1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-CHP-FINAL-AC executable raw 'gh pr' remains:"; printf '%s\n' "$exec_gh"; FAIL=$((FAIL+1))
+fi
+# resolveReviewThread executable mutation is gone from resolve-threads.sh (only the header comment remains).
+if grep -vE '^[[:space:]]*#' "$COMMON_SCRIPTS/resolve-threads.sh" | grep -q 'resolveReviewThread'; then
+  echo -e "  ${RED}FAIL${NC}: TC-CHP-FINAL-AC resolveReviewThread still executable in resolve-threads.sh"; FAIL=$((FAIL+1))
+else
+  echo -e "  ${GREEN}PASS${NC}: TC-CHP-FINAL-AC no executable resolveReviewThread in resolve-threads.sh"; PASS=$((PASS+1))
+fi
+# Dispatch routing for the two new general read verbs.
+routed=$(
+  env -u CODE_HOST -u AUTONOMOUS_CONF -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR bash -c '
+    source "'"$CHP_LIB"'" 2>/dev/null
+    chp_github_pr_view(){ echo "VIEW-ROUTED:$*"; }
+    chp_github_pr_list(){ echo "LIST-ROUTED:$*"; }
+    chp_pr_view 42 --json state
+    chp_pr_list --state open'
+)
+assert_contains "TC-CHP-PRVIEW-ROUTE chp_pr_view → chp_github_pr_view" "VIEW-ROUTED:42 --json state" "$routed"
+assert_contains "TC-CHP-PRLIST-ROUTE chp_pr_list → chp_github_pr_list" "LIST-ROUTED:--state open" "$routed"
 
 rm -f "$_GH_ARGV_FILE"
 
