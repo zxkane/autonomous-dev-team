@@ -80,9 +80,23 @@ gh() {
     return 0
   fi
   if [[ "$cmd" == "issue" && "$sub" == "view" ]]; then
-    # The handler uses this to count prior stale-verdict notices.
-    # Return _MOCK_NOTICE_PRESENT directly — caller pipes through grep '^0$'.
-    printf '%s\n' "$_MOCK_NOTICE_PRESENT"
+    # The handler counts prior stale-verdict notices. Post the ITP read-leaf
+    # refactor (#281) it runs `itp_list_comments | jq '[.[]|select(contains(
+    # marker))]|length' | grep '^0$'`, where itp_list_comments calls a single
+    # `gh issue view … --json comments -q '<normalize>'`. So this stub applies
+    # the requested `-q` to a synthesized `{comments:[…]}` of _MOCK_NOTICE_PRESENT
+    # comments whose body carries the exact `stale-verdict:<head>` marker the
+    # handler searches for (head taken from _MOCK_PR_INFO).
+    local _q="" _i=1 _j
+    while [[ $_i -le $# ]]; do
+      if [[ "${!_i}" == "-q" || "${!_i}" == "--jq" ]]; then _j=$((_i+1)); _q="${!_j}"; break; fi
+      _i=$((_i+1))
+    done
+    local _head; _head=$(jq -r '.headRefOid // empty' <<<"${_MOCK_PR_INFO:-{}}" 2>/dev/null)
+    local _n="${_MOCK_NOTICE_PRESENT:-0}"; [[ "$_n" =~ ^[0-9]+$ ]] || _n=0
+    local _arr; _arr=$(jq -cn --argjson n "$_n" --arg body "PR #42 HEAD already reviewed (\`stale-verdict:${_head}\`)" \
+      '{comments: [range($n) | {url:"https://x/issues/1#issuecomment-\(.+1)", author:{login:"my-claw"}, body:$body, createdAt:"2026-06-12T00:00:0\(.)Z"}]}')
+    if [[ -n "$_q" ]]; then jq -r "$_q" <<<"$_arr"; else printf '%s' "$_arr"; fi
     return 0
   fi
   return 0

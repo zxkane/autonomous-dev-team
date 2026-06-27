@@ -84,7 +84,7 @@ get_gh_app_scoped_token() {
 export -f get_gh_app_scoped_token _scoped_sentinel_for
 
 gh() {
-  local mode="" issue_num="" repo="" body=""
+  local mode="" issue_num="" repo="" body="" q=""
   # gh issue comment <num> --repo R --body "..."  (block-visibility post, #269 T5)
   if [[ "$1" == "issue" && "$2" == "comment" ]]; then
     shift 2
@@ -111,6 +111,7 @@ gh() {
         esac
         shift 2
         ;;
+      -q|--jq) q="$2"; shift 2 ;;
       *) shift ;;
     esac
   done
@@ -133,13 +134,20 @@ gh() {
       printf '%s' "$s"
       ;;
     comments)
-      # Dedup probe for _dep_block_comment: the lib runs
-      # `... | select(contains(MARKER)) | length` then `grep -q '^0$'`.
-      # We return the registered existing-marker count for this issue (default
-      # 0 → not yet posted → the lib posts). Tests bump the count to simulate an
-      # already-posted block so the once-per-ref dedup is exercised.
+      # Dedup probe for _dep_block_comment. Post the ITP read-leaf refactor
+      # (#281) the lib runs `itp_list_comments | jq '[.[].body|select(contains(
+      # MARKER))]|length' | grep -q '^0$'`, where itp_list_comments calls one
+      # `gh issue view … --json comments -q '<normalize>'`. So this stub applies
+      # the requested `-q` to a synthesized `{comments:[…]}` of
+      # _EXISTING_COMMENTS_COUNT comments whose body carries _MOCK_DEP_BLOCK_BODY
+      # (the exact `dep-block:<ref>` marker the present-case test sets). Default
+      # count 0 → empty array → length 0 → the lib posts.
       local key="${repo}:${issue_num}"
-      printf '%s' "${_EXISTING_COMMENTS_COUNT[$key]:-0}"
+      local _n="${_EXISTING_COMMENTS_COUNT[$key]:-0}"; [[ "$_n" =~ ^[0-9]+$ ]] || _n=0
+      local _arr; _arr=$(jq -cn --argjson n "$_n" --arg body "${_MOCK_DEP_BLOCK_BODY:-}" \
+        '{comments: [range($n) | {url:"https://x/issues/1#issuecomment-\(.+1)", author:{login:"my-claw"}, body:$body, createdAt:"2026-06-12T00:00:0\(.)Z"}]}')
+      # _dep_block_comment passes the normalize via -q; apply it to the array.
+      if [[ -n "$q" ]]; then jq -r "$q" <<<"$_arr"; else printf '%s' "$_arr"; fi
       ;;
   esac
 }
@@ -170,6 +178,7 @@ _reset_states() {
   # [INV-83, #269] Reset the scope-enforcement scaffolding too.
   _SCOPE_ENFORCE=0
   unset _EXISTING_COMMENTS_COUNT; declare -gA _EXISTING_COMMENTS_COUNT
+  _MOCK_DEP_BLOCK_BODY=""   # #281: body of synthesized existing block comments
   : > "$_MINT_LOG"
   : > "$_COMMENT_LOG_FILE"
   rm -f "$_MINT_FAIL_DIR"/*
@@ -713,6 +722,10 @@ _reset_states
 _arm_app_mode
 _set_repo_state unreachable-owner/unreachable 42 __FAIL__
 _EXISTING_COMMENTS_COUNT["${REPO}:99"]=1   # a prior block comment already exists
+# The existing comment carries the exact once-per-ref marker the dedup probe
+# searches for (#281: itp_list_comments returns the normalized body; the
+# `contains(marker)` count stays caller-side).
+_MOCK_DEP_BLOCK_BODY='Dependency could not be resolved <!-- dep-block:unreachable-owner/unreachable#42 -->'
 check_deps_resolved 99 >/dev/null 2>&1
 if [[ ! -s "$_COMMENT_LOG_FILE" ]]; then
   echo -e "  ${GREEN}PASS${NC}: block already surfaced → no duplicate comment (once-per-ref dedup)"

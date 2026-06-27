@@ -55,6 +55,11 @@ source "${LIB_DIR}/lib-metrics.sh" 2>/dev/null || true
 # never aborts the wrapper, so the source is guarded.
 # shellcheck source=lib-run-artifacts.sh
 source "${LIB_DIR}/lib-run-artifacts.sh" 2>/dev/null || true
+# [INV-87] Issue-Tracker Provider dispatch — provides the itp_read_task verb the
+# resume-fallback issue re-fetch (below) routes through. Load-bearing (the read
+# must succeed), so sourced UNGUARDED from the skill tree like lib-agent.sh.
+# shellcheck source=lib-issue-provider.sh
+source "${LIB_DIR}/lib-issue-provider.sh"
 # Per-side AGENT_CMD override (INV-37). Empty-string fallback already
 # applied inside lib-agent.sh; this just rebinds AGENT_CMD so the case
 # statements in run_agent / resume_agent dispatch to the dev-side CLI.
@@ -1093,8 +1098,9 @@ EOF
     SESSION_ID="$NEW_SESSION_ID"
     SESSION_NAME="dev-issue-${ISSUE_NUMBER}-retry"
 
-    # Re-fetch issue for full context
-    ISSUE_BODY=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json title,body -q '.')
+    # Re-fetch issue for full context. [INV-87] via itp_read_task — the GitHub
+    # leaf forwards `--json title,body -q '.'` byte-identically (spec §3.1).
+    ISSUE_BODY=$(itp_read_task "$ISSUE_NUMBER" title,body -q '.')
 
     FULL_PROMPT="$(cat <<EOF
 You are continuing work on GitHub issue #${ISSUE_NUMBER}. A previous session failed.

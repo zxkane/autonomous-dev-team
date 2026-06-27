@@ -64,14 +64,32 @@ gh() {
           fi
           ;;
         view)
-          # Tests use _MOCK_COMMENTS_JSON as the direct integer return
-          # value of the marker-count query (0 = no marker, 1+ = present).
-          # That mirrors `gh issue view ... --json comments -q '[...] | length'`
-          # which always returns an integer — bypassing jq keeps the stub
-          # simple.
-          if [[ -n "${_MOCK_COMMENTS_JSON:-}" ]]; then
-            printf '%s' "$_MOCK_COMMENTS_JSON"
-          fi
+          # The ITP read-leaf refactor (#281) routes the marker-count through
+          # `itp_list_comments` → `itp_github_list_comments`, which runs ONE
+          # `gh issue view … --json comments -q '<normalize>'` and the caller
+          # then applies its `[.[] | select(contains(marker))] | length` jq over
+          # the normalized array. So this stub must apply the requested `-q`
+          # (the normalize program) to a `{comments:[…]}` fixture.
+          #
+          # `_MOCK_COMMENTS_JSON` keeps its 0-vs-1 "marker present?" semantics:
+          #   '0' (or empty) → zero matching comments (an empty comments array);
+          #   '1' (or N)     → N comments whose body carries `_MOCK_MARKER_BODY`
+          #                    (the exact marker the helper searches for, set by
+          #                    the TC that needs "present"). The normalize `-q`
+          #                    carries the body through verbatim; the caller's
+          #                    `contains(marker)` then matches.
+          local _q="" _ii=3 _jj
+          while [[ $_ii -le $# ]]; do
+            if [[ "${!_ii}" == "-q" || "${!_ii}" == "--jq" ]]; then
+              _jj=$((_ii + 1)); _q="${!_jj}"; break
+            fi
+            _ii=$((_ii + 1))
+          done
+          local _n="${_MOCK_COMMENTS_JSON:-0}"
+          [[ "$_n" =~ ^[0-9]+$ ]] || _n=0
+          local _arr; _arr=$(jq -cn --argjson n "$_n" --arg body "${_MOCK_MARKER_BODY:-}" \
+            '{comments: [range($n) | {url:"https://x/issues/1#issuecomment-\(.+1)", author:{login:"my-claw"}, body:$body, createdAt:"2026-06-12T00:00:0\(.)Z"}]}')
+          if [[ -n "$_q" ]]; then jq -r "$_q" <<<"$_arr"; else printf '%s' "$_arr"; fi
           ;;
         edit|comment)
           # Side-effect verbs — no stdout.
@@ -228,12 +246,17 @@ hygiene_post_audit_comment 200 "approved" "in-progress reviewing" >/dev/null
 comment_calls=$(printf '%s\n' "${_GH_CALLS[@]}" | grep -cE '^issue comment' || true)
 assert_eq "TC-COMMENT-001 no marker → 1 comment posted" "1" "$comment_calls"
 
-# TC-COMMENT-002 — marker present, must skip
+# TC-COMMENT-002 — marker present, must skip. The returned comment body carries
+# the EXACT marker the helper computes for these args
+# (sorted "in-progress reviewing" → `INV-25-hygiene:in-progress,reviewing;`) so
+# the real normalize→`contains(marker)`→`length` path counts it as present.
 _GH_CALLS=()
 _MOCK_COMMENTS_JSON='1'
+_MOCK_MARKER_BODY='Label hygiene: stripped ... (INV-25). <!-- INV-25-hygiene:in-progress,reviewing; -->'
 hygiene_post_audit_comment 201 "approved" "in-progress reviewing" >/dev/null
 comment_calls=$(printf '%s\n' "${_GH_CALLS[@]}" | grep -cE '^issue comment' || true)
 assert_eq "TC-COMMENT-002 marker present → 0 comments" "0" "$comment_calls"
+_MOCK_MARKER_BODY=''
 
 # TC-COMMENT-003 — different-residue marker won't match
 # (helper computes its own marker from the residue list; the mock returns 0

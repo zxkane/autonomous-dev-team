@@ -188,6 +188,41 @@ dev_report_bot_unfixable() {
   return "$_MOCK_BOT_UNFIXABLE"
 }
 
+# #281: handle_completed_session_routing's marker-presence idempotency checks
+# now fetch via `itp_list_comments | jq '[.[].body|select(contains(M))]|length'`
+# instead of routing the marker through the `gh issue view` argv. Override the
+# READ verb directly (the seam this issue introduces) and synthesize a
+# normalized array whose bodies carry exactly the markers the per-flag mocks
+# declare "present". The head-scoped no-progress markers use _MOCK_PR_HEAD; the
+# INV-12/INV-35 fresh-dev notices key on the legacy _MOCK_NOTICE_PRESENT flag
+# (any session id → emit a body containing both literals when present).
+itp_list_comments() {
+  local _bodies=()
+  if [[ "${_MOCK_NOPROG_ATTEMPT_PRESENT:-0}" != "0" ]]; then
+    _bodies+=("<!-- no-progress-substantive-attempt:${_MOCK_PR_HEAD} -->")
+  fi
+  if [[ "${_MOCK_NOPROG_NOTICE_PRESENT:-0}" != "0" ]]; then
+    _bodies+=("no-progress-substantive:${_MOCK_PR_HEAD} notice")
+  fi
+  if [[ "${_MOCK_NOTICE_PRESENT:-0}" != "0" ]]; then
+    # The fresh-dev/INV-12 notices are session-scoped — the branch searches for
+    # `contains("INV-12-completed:<sid>")` / `INV-35-fresh-dev:<sid>`. Emit a
+    # body carrying both literals for the session id the idempotency test
+    # declares via _MOCK_NOTICE_SESSION (defaults to a sentinel that matches
+    # nothing, so a stray _MOCK_NOTICE_PRESENT=1 without a session never
+    # accidentally suppresses).
+    local _sid="${_MOCK_NOTICE_SESSION:-__no_session__}"
+    _bodies+=("INV-12-completed:${_sid} INV-35-fresh-dev:${_sid} prior notice")
+  fi
+  local _json="[]" _ts=0 b
+  for b in "${_bodies[@]}"; do
+    _json=$(jq -c --arg b "$b" --argjson t "$_ts" \
+      '. + [{id:(100+$t), author:"my-claw", authorKind:"self", body:$b, createdAt:"2026-06-12T00:00:0\($t)Z"}]' <<<"$_json")
+    _ts=$((_ts + 1))
+  done
+  printf '%s' "$_json"
+}
+
 reset_mocks() {
   _MOCK_VERDICT="none"
   _MOCK_CAUSE=""
@@ -208,6 +243,7 @@ reset_mocks() {
   _MOCK_NOPROG_NOTICE_PRESENT="0"
   _MOCK_ATTEMPT_WRITE_FAILS="0"
   _MOCK_ATTEMPT_WRITE_TRIES=0
+  _MOCK_NOTICE_SESSION=""   # #281: session id the synthesized INV-12/INV-35 marker carries
   unset REVIEW_RETRY_LIMIT
   if [[ -n "$_MOCK_LOG_FILE" ]]; then
     chmod u+w "$_MOCK_LOG_FILE" 2>/dev/null || true
@@ -299,6 +335,7 @@ assert_eq "RT-001 no dispatch" "" "$_MOCK_DISPATCH_CALLS"
 reset_mocks
 _MOCK_VERDICT="none"
 _MOCK_NOTICE_PRESENT="1"
+_MOCK_NOTICE_SESSION="sid-001"   # #281: existing INV-12 marker carries this session id
 assert_returns "RT-001-idem returns 0 even when marker present" 0 \
   handle_completed_session_routing 100 "sid-001" "2026-05-21T03:18:00Z"
 assert_eq "RT-001-idem suppresses duplicate" "0" "$_MOCK_COMMENT_COUNT"
@@ -417,6 +454,7 @@ assert_eq "RT-030 no dispatch" "" "$_MOCK_DISPATCH_CALLS"
 reset_mocks
 _MOCK_VERDICT="failed-substantive"
 _MOCK_NOTICE_PRESENT="1"
+_MOCK_NOTICE_SESSION="sid-040"   # #281: existing INV-35-fresh-dev marker carries this session id
 prepare_log 100
 assert_returns "INV-35-fresh-dev marker present → still dispatches but no duplicate comment" 0 \
   handle_completed_session_routing 100 "sid-040" "2026-05-21T03:18:00Z"

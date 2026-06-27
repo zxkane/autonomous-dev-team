@@ -42,14 +42,39 @@ if ! declare -F resolve_pr_for_issue >/dev/null 2>&1; then
   unset _ld_self _ld_dir
 fi
 
+# [INV-87] Issue-Tracker Provider dispatch. The state-list / read_task /
+# list_comments READ leaves below route through the `itp_*` shims
+# (`itp_<verb>` → `itp_${ISSUE_PROVIDER}_<verb>`) defined in
+# lib-issue-provider.sh, which also sources providers/itp-${ISSUE_PROVIDER}.sh
+# (the GitHub reference impl is providers/itp-github.sh). Sourced from the REAL
+# skill tree via readlink -f (the same idiom as lib-pr-linkage.sh above) so a
+# standalone unit test that sources only lib-dispatch.sh still gets the verbs.
+# Idempotent (the shims and the .caps reader guard their own redefinition).
+if ! declare -F itp_list_comments >/dev/null 2>&1; then
+  _ld_self="${BASH_SOURCE[0]:-$0}"
+  _ld_dir="$(cd "$(dirname "$(readlink -f "$_ld_self")")" && pwd 2>/dev/null)" || _ld_dir=""
+  if [ -n "$_ld_dir" ] && [ -r "${_ld_dir}/lib-issue-provider.sh" ]; then
+    # shellcheck source=lib-issue-provider.sh
+    source "${_ld_dir}/lib-issue-provider.sh"
+  fi
+  unset _ld_self _ld_dir
+fi
+
 # ---------------------------------------------------------------------------
 # Concurrency
 # ---------------------------------------------------------------------------
 
 # Count issues currently in active state (in-progress or reviewing).
 # Echoes a non-negative integer.
+#
+# [INV-87] The `gh issue list … --json labels -q '… | length'` leaf routes
+# through itp_count_by_state (the GitHub impl forwards the args to `gh issue
+# list --repo "$REPO"` byte-identically; the `… | length` is supplied here so
+# the verb returns the INTEGER the dispatcher-tick concurrency gate compares
+# numerically — spec §3.1 [M3]). The state set + the `| length` projection stay
+# caller-side; only the leaf I/O moved.
 count_active() {
-  gh issue list --repo "$REPO" --state open --limit 100 \
+  itp_count_by_state --state open --limit 100 \
     --label "autonomous" --json labels \
     -q '[.[] | select(.labels[].name | IN("in-progress","reviewing"))] | length'
 }
@@ -60,8 +85,12 @@ count_active() {
 
 # Step 2: issues with `autonomous` label and NO state label.
 # Echoes JSON array of {number, labels, title}.
+#
+# [INV-87] The `gh issue list` enumeration leaf routes through itp_list_by_state
+# (GitHub impl forwards byte-identically); the no-state-label jq subtraction
+# stays caller-side (spec §3.1 note / mapping appendix).
 list_new_issues() {
-  gh issue list --repo "$REPO" --state open --limit 100 \
+  itp_list_by_state --state open --limit 100 \
     --label "autonomous" --json number,labels,title \
     -q '[.[] | select(
       [.labels[].name] | (
@@ -87,7 +116,10 @@ list_new_issues() {
 # investigation: original "dev wrapper flips back" hypothesis was wrong;
 # the actual third producer was this missing filter).
 list_pending_review() {
-  gh issue list --repo "$REPO" --state open --limit 100 \
+  # [INV-87] leaf via itp_list_by_state; the [INV-25] terminal-state subtraction
+  # (`reviewing`/`approved`/`stalled` defense-in-depth, #115 Bug C) STAYS
+  # caller-side per spec §3.1 — only the `gh issue list` enumeration moved.
+  itp_list_by_state --state open --limit 100 \
     --label "autonomous,pending-review" --json number,labels \
     -q '[.[] | select(
       ([.labels[].name] | contains(["reviewing"]) | not) and
@@ -105,7 +137,10 @@ list_pending_review() {
 # against an approved issue — the actual mechanism behind the wedge that
 # motivated this issue.
 list_pending_dev() {
-  gh issue list --repo "$REPO" --state open --limit 100 \
+  # [INV-87] leaf via itp_list_by_state. The `--json number,labels,comments`
+  # field list (incl. `comments`) and the [INV-25] terminal-state subtraction
+  # stay byte-identical / caller-side per spec §3.1.
+  itp_list_by_state --state open --limit 100 \
     --label "autonomous,pending-dev" --json number,labels,comments \
     -q '[.[] | select(
       ([.labels[].name] | contains(["approved"]) | not) and
@@ -124,7 +159,9 @@ list_pending_dev() {
 # active label to `pending-dev`, which re-arms Step 4 on the next tick —
 # infinite loop burning tokens on a terminally-decided issue.
 list_stale_candidates() {
-  gh issue list --repo "$REPO" --state open --limit 100 \
+  # [INV-87] leaf via itp_list_by_state; the active-state selector + the
+  # `approved` subtraction (#115 Bug A) stay caller-side per spec §3.1.
+  itp_list_by_state --state open --limit 100 \
     --label "autonomous" --json number,labels \
     -q '[.[] | select(
       (.labels[].name | IN("in-progress","reviewing")) and
@@ -157,7 +194,10 @@ _has_terminal_label() {
 # Returns a JSON array of {number, labels:[{name}]}. Empty array when no
 # residue exists (the steady state).
 list_hygiene_residue() {
-  gh issue list --repo "$REPO" --state open --limit 100 \
+  # [INV-87] leaf via itp_list_forbidden_combos (spec §3.1 [M3]): the 2-axis
+  # (terminal AND transitional) [INV-25] forbidden-combo predicate STAYS
+  # caller-side — only the `gh issue list` enumeration moved behind the verb.
+  itp_list_forbidden_combos --state open --limit 100 \
     --label "autonomous" --json number,labels \
     -q '[.[] | select(
       ([.labels[].name] | (contains(["approved"]) or contains(["stalled"])))
@@ -239,8 +279,8 @@ hygiene_post_audit_comment() {
   local marker="INV-25-hygiene:${sorted};"
 
   local existing
-  existing=$(gh issue view "$issue_num" --repo "$REPO" --json comments \
-    -q "[.comments[].body | select(contains(\"${marker}\"))] | length" \
+  existing=$(itp_list_comments "$issue_num" 2>/dev/null \
+    | jq -r "[.[].body | select(contains(\"${marker}\"))] | length" \
     2>/dev/null || echo 0)
 
   if [[ "$existing" != "0" ]]; then
@@ -416,8 +456,8 @@ resolve_dep_state() {
 _dep_block_comment() {
   local issue_num="$1" owner_repo="$2" num="$3"
   local marker="dep-block:${owner_repo}#${num}"
-  if gh issue view "$issue_num" --repo "$REPO" --json comments \
-      -q "[.comments[].body | select(contains(\"${marker}\"))] | length" \
+  if itp_list_comments "$issue_num" 2>/dev/null \
+      | jq -r "[.[].body | select(contains(\"${marker}\"))] | length" \
       2>/dev/null | grep -q '^0$'; then
     gh issue comment "$issue_num" --repo "$REPO" \
       --body "Dependency \`${owner_repo}#${num}\` could not be resolved — the App may not be installed on \`${owner_repo}\` (or the issue is private/deleted). This issue stays blocked until the dependency is reachable and CLOSED/MERGED. <!-- ${marker} -->" \
@@ -580,10 +620,10 @@ count_dispatcher_false_positives() {
 _agent_started_since_stall() {
   local issue_num="$1"
   local last_stalled_at session_seen
-  last_stalled_at=$(gh issue view "$issue_num" --repo "$REPO" --json comments \
-    -q '[.comments[] | select(.body | test("Marking as stalled"))] | last | .createdAt // "1970-01-01T00:00:00Z"')
-  session_seen=$(gh issue view "$issue_num" --repo "$REPO" --json comments \
-    -q "[.comments[] | select((.createdAt > \"${last_stalled_at}\") and (.body | test(\"Dev Session ID: .[a-zA-Z0-9_-]+\")) and (.body | test(\"Mode: startup-failure\") | not))] | length")
+  last_stalled_at=$(itp_list_comments "$issue_num" \
+    | jq -r '[.[] | select(.body | test("Marking as stalled"))] | last | .createdAt // "1970-01-01T00:00:00Z"')
+  session_seen=$(itp_list_comments "$issue_num" \
+    | jq -r "[.[] | select((.createdAt > \"${last_stalled_at}\") and (.body | test(\"Dev Session ID: .[a-zA-Z0-9_-]+\")) and (.body | test(\"Mode: startup-failure\") | not))] | length")
   [ "${session_seen:-0}" -gt 0 ]
 }
 
@@ -591,8 +631,8 @@ _agent_started_since_stall() {
 count_agent_failures() {
   local issue_num="$1"
   local last_stalled_at
-  last_stalled_at=$(gh issue view "$issue_num" --repo "$REPO" --json comments \
-    -q '[.comments[] | select(.body | test("Marking as stalled"))] | last | .createdAt // "1970-01-01T00:00:00Z"')
+  last_stalled_at=$(itp_list_comments "$issue_num" \
+    | jq -r '[.[] | select(.body | test("Marking as stalled"))] | last | .createdAt // "1970-01-01T00:00:00Z"')
   # Exit code exclusions:
   #   0   → success (pre-existing exclusion).
   #   143 → SIGTERM. Almost always caused by `dispatch-local.sh::kill_stale_wrapper`
@@ -605,8 +645,8 @@ count_agent_failures() {
   # exit code 124 (kept counting) and any non-listed non-zero exit (real
   # agent crashes). The regex anchors on word boundaries (`Exit code:
   # 143\b`-equivalent via `\\b`) so 144 / 1430 / etc. don't false-match.
-  gh issue view "$issue_num" --repo "$REPO" --json comments \
-    -q "[.comments[] | select(
+  itp_list_comments "$issue_num" \
+    | jq -r "[.[] | select(
          (.createdAt > \"${last_stalled_at}\")
          and (.body | test(\"Agent Session Report \\\\(Dev\\\\)\"))
          and (.body | test(\"Exit code: 0\\\\b\") | not)
@@ -618,10 +658,10 @@ count_agent_failures() {
 count_dispatcher_crashes() {
   local issue_num="$1"
   local last_stalled_at
-  last_stalled_at=$(gh issue view "$issue_num" --repo "$REPO" --json comments \
-    -q '[.comments[] | select(.body | test("Marking as stalled"))] | last | .createdAt // "1970-01-01T00:00:00Z"')
-  gh issue view "$issue_num" --repo "$REPO" --json comments \
-    -q "[.comments[] | select((.createdAt > \"${last_stalled_at}\") and (.body | test(\"Task appears to have crashed \\\\(no PR found\\\\)|process not found\")))] | length"
+  last_stalled_at=$(itp_list_comments "$issue_num" \
+    | jq -r '[.[] | select(.body | test("Marking as stalled"))] | last | .createdAt // "1970-01-01T00:00:00Z"')
+  itp_list_comments "$issue_num" \
+    | jq -r "[.[] | select((.createdAt > \"${last_stalled_at}\") and (.body | test(\"Task appears to have crashed \\\\(no PR found\\\\)|process not found\")))] | length"
 }
 
 # Mark issue as stalled (retry exhausted). Posts the canonical "Marking as
@@ -695,8 +735,8 @@ mark_stalled() {
       : # fall through to the stall path below (no deferral comment)
     else
       current_session_marker="INV-26-stall-deferral:pid=${pid}"
-      if gh issue view "$issue_num" --repo "$REPO" --json comments \
-          -q "[.comments[].body | select(contains(\"${current_session_marker}\"))] | length" \
+      if itp_list_comments "$issue_num" 2>/dev/null \
+          | jq -r "[.[].body | select(contains(\"${current_session_marker}\"))] | length" \
           2>/dev/null | grep -q '^0$'; then
         gh issue comment "$issue_num" --repo "$REPO" \
           --body "Stall decision deferred: dev wrapper PID ${pid} is still alive — counter says ${MAX_RETRIES} but a wrapper is making progress. Re-evaluating next tick. (\`${current_session_marker}\`)"
@@ -734,8 +774,8 @@ mark_stalled() {
 # `//` is evaluated). See [INV-16].
 extract_dev_session_id() {
   local issue_num="$1"
-  gh issue view "$issue_num" --repo "$REPO" --json comments \
-    -q '[.comments[].body | capture("Dev Session ID: `(?<id>[a-zA-Z0-9_-]+)`"; "g") | .id] | last // empty'
+  itp_list_comments "$issue_num" \
+    | jq -r '[.[].body | capture("Dev Session ID: `(?<id>[a-zA-Z0-9_-]+)`"; "g") | .id] | last // empty'
 }
 
 # is_session_completed — return 0 if the agent's last log object indicates a
@@ -867,9 +907,13 @@ classify_recent_review_verdict() {
   # fallback), drop actor-binding and rely on FALLBACK_SESSION_ID embedded
   # in the comment body (the same "Review Session: <sid>" trailer the
   # review wrapper already emits per autonomous-review.sh:588-590).
+  # Over itp_list_comments' normalized array, `author` IS the login string
+  # (spec §3.3: `user.login` incl `[bot]` verbatim), so the actor binding is a
+  # flat `.author == BOT_LOGIN` exact-eq — equivalent to the pre-refactor
+  # `.author.login == BOT_LOGIN` over the raw `.comments[]`.
   local actor_predicate
   if [ -n "${BOT_LOGIN:-}" ]; then
-    actor_predicate=".author.login == \"${BOT_LOGIN}\""
+    actor_predicate=".author == \"${BOT_LOGIN}\""
   elif [ -n "${FALLBACK_SESSION_ID:-}" ]; then
     actor_predicate="(.body | test(\"Review Session.*${FALLBACK_SESSION_ID}\"))"
   else
@@ -885,8 +929,8 @@ classify_recent_review_verdict() {
   # excludes a comment timestamped exactly at session end (rare, but the
   # design pins this for determinism).
   local newest_body
-  newest_body=$(gh issue view "$issue_num" --repo "$REPO" --json comments \
-    -q "[.comments[] | select(${actor_predicate} and (.createdAt > \"${session_end}\"))] | sort_by(.createdAt) | last | .body // empty" \
+  newest_body=$(itp_list_comments "$issue_num" 2>/dev/null \
+    | jq -r "[.[] | select(${actor_predicate} and (.createdAt > \"${session_end}\"))] | sort_by(.createdAt) | last | .body // empty" \
     2>/dev/null)
 
   [ -n "$newest_body" ] || return 0
@@ -934,8 +978,8 @@ count_review_aware_flips() {
   local issue_num="$1"
   local session_id="$2"
   [ -n "$session_id" ] || { printf '%s' "0"; return 0; }
-  gh issue view "$issue_num" --repo "$REPO" --json comments \
-    -q "[.comments[].body | select(contains(\"<!-- review-aware-flip:non-substantive\")) | select(contains(\"session=${session_id}\"))] | length" \
+  itp_list_comments "$issue_num" 2>/dev/null \
+    | jq -r "[.[].body | select(contains(\"<!-- review-aware-flip:non-substantive\")) | select(contains(\"session=${session_id}\"))] | length" \
     2>/dev/null || printf '%s' "0"
 }
 
@@ -973,8 +1017,8 @@ handle_completed_session_routing() {
       # Original INV-12 operator handoff — preserved for back-compat.
       log "  issue #${issue_num} session ${session_id} already completed (no post-session verdict) — operator handoff"
       local _notice_marker="INV-12-completed:${session_id}"
-      if gh issue view "$issue_num" --repo "$REPO" --json comments \
-          -q "[.comments[].body | select(contains(\"${_notice_marker}\"))] | length" \
+      if itp_list_comments "$issue_num" 2>/dev/null \
+          | jq -r "[.[].body | select(contains(\"${_notice_marker}\"))] | length" \
           2>/dev/null | grep -q '^0$'; then
         gh issue comment "$issue_num" --repo "$REPO" \
           --body "Session \`${session_id}\` already ended (stop_reason=end_turn, terminal_reason=completed). Resume would hang on idle SSE — skipping. Manually transition to \`pending-review\` if a PR exists, or close the issue if work is done. (\`${_notice_marker}\`)"
@@ -1055,8 +1099,8 @@ handle_completed_session_routing() {
          && [ "$_np_current_head" = "$_np_last_head" ] \
          && dev_report_bot_unfixable "$issue_num" "$_np_current_head"; then
         log "  issue #${issue_num} substantive review failure is bot-unfixable (PR-metadata 403 / maintainer-only) — escalating to operator, no dev-new"
-        if gh issue view "$issue_num" --repo "$REPO" --json comments \
-            -q "[.comments[].body | select(contains(\"${_np_notice_marker}\"))] | length" \
+        if itp_list_comments "$issue_num" 2>/dev/null \
+            | jq -r "[.[].body | select(contains(\"${_np_notice_marker}\"))] | length" \
             2>/dev/null | grep -q '^0$'; then
           gh issue comment "$issue_num" --repo "$REPO" \
             --body "Substantive review failure on completed session \`${session_id}\` is **not resolvable by the autonomous dev agent**: its scoped token hit \`Resource not accessible by integration\` on a PR-metadata edit, or the finding requires a maintainer / post-merge action. Marking stalled — no further \`dev-new\` will be dispatched. @${REPO_OWNER} please apply the PR-body / metadata change manually, or split the post-merge criterion into a follow-up. (\`${_np_notice_marker}\`)"
@@ -1071,12 +1115,12 @@ handle_completed_session_routing() {
       # dev-new produced no new commit, so a fresh one would loop. Escalate.
       if [ -n "$_np_last_head" ] && [ -n "$_np_current_head" ] \
          && [ "$_np_current_head" = "$_np_last_head" ] \
-         && gh issue view "$issue_num" --repo "$REPO" --json comments \
-              -q "[.comments[].body | select(contains(\"no-progress-substantive-attempt:${_np_current_head}\"))] | length" \
+         && itp_list_comments "$issue_num" 2>/dev/null \
+              | jq -r "[.[].body | select(contains(\"no-progress-substantive-attempt:${_np_current_head}\"))] | length" \
               2>/dev/null | grep -q -v '^0$'; then
         log "  issue #${issue_num} substantive review failure with no HEAD progress since \`${_np_current_head}\` (prior dev-new made no new commit) — escalating to operator, no dev-new"
-        if gh issue view "$issue_num" --repo "$REPO" --json comments \
-            -q "[.comments[].body | select(contains(\"${_np_notice_marker}\"))] | length" \
+        if itp_list_comments "$issue_num" 2>/dev/null \
+            | jq -r "[.[].body | select(contains(\"${_np_notice_marker}\"))] | length" \
             2>/dev/null | grep -q '^0$'; then
           gh issue comment "$issue_num" --repo "$REPO" \
             --body "Substantive review failure on completed session \`${session_id}\`, but PR HEAD \`${_np_current_head}\` is unchanged since the last review and a prior fresh dev session already ran against it without producing a new commit. The finding appears un-actionable by the dev agent. Marking stalled — no further \`dev-new\` will be dispatched. @${REPO_OWNER} please investigate. (\`${_np_notice_marker}\`)"
@@ -1097,8 +1141,8 @@ handle_completed_session_routing() {
       # #2, N=1) only once a fresh session is actually launched.
       log "  issue #${issue_num} substantive review failure on completed session ${session_id} — minting fresh dev session"
       local _fresh_marker="INV-35-fresh-dev:${session_id}"
-      if gh issue view "$issue_num" --repo "$REPO" --json comments \
-          -q "[.comments[].body | select(contains(\"${_fresh_marker}\"))] | length" \
+      if itp_list_comments "$issue_num" 2>/dev/null \
+          | jq -r "[.[].body | select(contains(\"${_fresh_marker}\"))] | length" \
           2>/dev/null | grep -q '^0$'; then
         gh issue comment "$issue_num" --repo "$REPO" \
           --body "Review failed substantively on completed session \`${session_id}\`. A completed session cannot be resumed; minting a fresh dev session via the INV-12 PTL recovery pattern. (\`${_fresh_marker}\`)"
@@ -1159,8 +1203,8 @@ handle_completed_session_routing() {
       # handoff (safest).
       log "  WARN: classify_recent_review_verdict returned unknown verdict '${_verdict}' for issue #${issue_num} — falling back to operator handoff"
       local _notice_marker_default="INV-12-completed:${session_id}"
-      if gh issue view "$issue_num" --repo "$REPO" --json comments \
-          -q "[.comments[].body | select(contains(\"${_notice_marker_default}\"))] | length" \
+      if itp_list_comments "$issue_num" 2>/dev/null \
+          | jq -r "[.[].body | select(contains(\"${_notice_marker_default}\"))] | length" \
           2>/dev/null | grep -q '^0$'; then
         gh issue comment "$issue_num" --repo "$REPO" \
           --body "Session \`${session_id}\` completed; verdict classifier returned unexpected value. Operator handoff. (\`${_notice_marker_default}\`)"
@@ -1200,8 +1244,8 @@ handle_completed_session_routing() {
 latest_dispatch_token_age_seconds() {
   local issue_num="$1"
   local latest_iso
-  latest_iso=$(gh issue view "$issue_num" --repo "$REPO" --json comments \
-    -q '[.comments[].body | capture("<!-- dispatcher-token: [a-zA-Z0-9_-]+ at (?<ts>[0-9TZ:-]+) mode=[a-z-]+ -->"; "g") | .ts] | last // empty')
+  latest_iso=$(itp_list_comments "$issue_num" \
+    | jq -r '[.[].body | capture("<!-- dispatcher-token: [a-zA-Z0-9_-]+ at (?<ts>[0-9TZ:-]+) mode=[a-z-]+ -->"; "g") | .ts] | last // empty')
   [ -n "$latest_iso" ] || { echo ""; return; }
   _iso_age_seconds "$latest_iso"
 }
@@ -1531,8 +1575,8 @@ pr_idle_seconds() {
 # pending-review per [INV-07]).
 last_reviewed_head() {
   local issue_num="$1"
-  gh issue view "$issue_num" --repo "$REPO" --json comments \
-    -q '[.comments[].body | capture("Reviewed HEAD: `(?<sha>[0-9a-f]{7,40})`"; "g") | .sha] | last // empty'
+  itp_list_comments "$issue_num" \
+    | jq -r '[.[].body | capture("Reviewed HEAD: `(?<sha>[0-9a-f]{7,40})`"; "g") | .sha] | last // empty'
 }
 
 # [INV-85] (#274): returns 0 (true) if any issue comment carries the
@@ -1593,9 +1637,10 @@ dev_report_bot_unfixable() {
   # here regardless of the bounds.
 
   # (1) Resolve the dev-agent author from its session-report comment. Fail-open:
-  # no resolvable dev author → not unfixable (return 1).
-  dev_login=$(gh issue view "$issue_num" --repo "$REPO" --json comments \
-    -q "[.comments[] | select((.body // \"\") | test(\"Agent Session Report \\\\(Dev\\\\)\")) | .author.login // empty] | last // empty" \
+  # no resolvable dev author → not unfixable (return 1). Over the normalized
+  # array, `author` IS the login (spec §3.3) — `.author` replaces `.author.login`.
+  dev_login=$(itp_list_comments "$issue_num" 2>/dev/null \
+    | jq -r "[.[] | select((.body // \"\") | test(\"Agent Session Report \\\\(Dev\\\\)\")) | .author // empty] | last // empty" \
     2>/dev/null) || dev_login=""
   [ -n "$dev_login" ] || return 1
 
@@ -1603,21 +1648,23 @@ dev_report_bot_unfixable() {
   # `dispatcher-token ... mode=dev-new|dev-resume` comment. The `mode=dev-`
   # prefix matches both and excludes `mode=review`. RE2-safe (literal substring,
   # no look-behind/ahead).
-  since_iso=$(gh issue view "$issue_num" --repo "$REPO" --json comments \
-    -q "[.comments[] | select((.body // \"\") | test(\"<!-- dispatcher-token: .* mode=dev-\")) | .createdAt] | last // empty" \
+  since_iso=$(itp_list_comments "$issue_num" 2>/dev/null \
+    | jq -r "[.[] | select((.body // \"\") | test(\"<!-- dispatcher-token: .* mode=dev-\")) | .createdAt] | last // empty" \
     2>/dev/null) || since_iso=""
   since_iso="${since_iso:-1970-01-01T00:00:00Z}"
 
   # `.body` is null when a comment has an empty body; `null | test(...)` aborts
   # the jq filter (silently hiding any match — #148), so guard with `// ""`.
   # The `test()` filters are RE2-safe (plain alternation, no look-behind/ahead).
-  # The dev login is passed to a standalone `jq --arg` (gh's `-q` has no --arg
-  # passthrough) so a `[bot]`-suffixed login is matched literally — no string
-  # interpolation of the login into the jq program, no regex of it.
-  hits=$(gh issue view "$issue_num" --repo "$REPO" --json comments 2>/dev/null \
+  # The dev login is passed to a standalone `jq --arg` (the normalized array
+  # carries `author` as the bare login string, spec §3.3) so a `[bot]`-suffixed
+  # login is matched literally via EXACT `==` ([INV-85]) — no string
+  # interpolation of the login into the jq program, no regex of it. The fetch
+  # moved behind itp_list_comments; the whole select/exact-eq parse stays here.
+  hits=$(itp_list_comments "$issue_num" 2>/dev/null \
     | jq -r --arg dev "$dev_login" \
-      "[.comments[]
-         | select((.author.login // \"\") == \$dev)
+      "[.[]
+         | select((.author // \"\") == \$dev)
          | select(.createdAt > \"${since_iso}\")
          | (.body // \"\")
          | select((test(\"Review Session:\") or test(\"Review findings\") or test(\"Review Agent:\")) | not)
@@ -1635,8 +1682,8 @@ dev_report_bot_unfixable() {
 latest_review_verdict_age_seconds() {
   local issue_num="$1"
   local latest_iso
-  latest_iso=$(gh issue view "$issue_num" --repo "$REPO" --json comments \
-    -q '[.comments[] | select(.body | test("^Review (PASSED|findings)"))] | last | .createdAt // empty')
+  latest_iso=$(itp_list_comments "$issue_num" \
+    | jq -r '[.[] | select(.body | test("^Review (PASSED|findings)"))] | last | .createdAt // empty')
   [ -n "$latest_iso" ] || { echo ""; return; }
   _iso_age_seconds "$latest_iso"
 }
@@ -1647,8 +1694,8 @@ latest_review_verdict_age_seconds() {
 latest_dev_success_age_seconds() {
   local issue_num="$1"
   local latest_iso
-  latest_iso=$(gh issue view "$issue_num" --repo "$REPO" --json comments \
-    -q '[.comments[] | select((.body | test("Agent Session Report \\(Dev\\)")) and (.body | test("Exit code: 0\\b")))] | last | .createdAt // empty')
+  latest_iso=$(itp_list_comments "$issue_num" \
+    | jq -r '[.[] | select((.body | test("Agent Session Report \\(Dev\\)")) and (.body | test("Exit code: 0\\b")))] | last | .createdAt // empty')
   [ -n "$latest_iso" ] || { echo ""; return; }
   _iso_age_seconds "$latest_iso"
 }
@@ -1662,8 +1709,8 @@ latest_dev_success_age_seconds() {
 latest_dev_session_id_age_seconds() {
   local issue_num="$1"
   local latest_iso
-  latest_iso=$(gh issue view "$issue_num" --repo "$REPO" --json comments \
-    -q '[.comments[] | select(.body | test("Dev Session ID:"))] | last | .createdAt // empty')
+  latest_iso=$(itp_list_comments "$issue_num" \
+    | jq -r '[.[] | select(.body | test("Dev Session ID:"))] | last | .createdAt // empty')
   [ -n "$latest_iso" ] || { echo ""; return; }
   _iso_age_seconds "$latest_iso"
 }
@@ -1920,8 +1967,8 @@ recent_error_envelope() {
 
   # Newest comment whose body carries the envelope marker, with its createdAt.
   local latest_json
-  latest_json=$(gh issue view "$issue_num" --repo "$REPO" --json comments \
-    -q '[.comments[] | select(.body | test("adt-error-envelope:"))] | last | {body, createdAt} // empty' 2>/dev/null)
+  latest_json=$(itp_list_comments "$issue_num" 2>/dev/null \
+    | jq -r '[.[] | select(.body | test("adt-error-envelope:"))] | last | {body, createdAt} // empty' 2>/dev/null)
   [ -n "$latest_json" ] || { echo ""; return 1; }
 
   local created_iso age
@@ -1983,8 +2030,8 @@ handle_pending_dev_pr_exists() {
     # refresh blips. Mirrors the existing INV-12-completed marker pattern
     # in dispatcher-tick.sh:267-269.
     notice_marker="stale-verdict:${current_head}"
-    if gh issue view "$issue_num" --repo "$REPO" --json comments \
-        -q "[.comments[].body | select(contains(\"${notice_marker}\"))] | length" \
+    if itp_list_comments "$issue_num" 2>/dev/null \
+        | jq -r "[.[].body | select(contains(\"${notice_marker}\"))] | length" \
         2>/dev/null | grep -q '^0$'; then
       gh issue comment "$issue_num" --repo "$REPO" \
         --body "PR ${pr_ref} HEAD \`${current_head}\` already reviewed with FAILED verdict; awaiting new commits before re-review. (\`${notice_marker}\`)"
