@@ -542,9 +542,13 @@ fi
 # (b) Behavioral: extract the block's heredoc body from the source and render it
 #     with ISSUE_NUMBER=234, asserting `Closes #234` (interpolated) AND the literal
 #     `$(printenv AGENT_PR_CREATE_FILE)` (NOT expanded by us) both appear.
+#     The PR-body close keyword now flows through ${CLOSE_KEYWORD} ([INV-87]/[M4],
+#     #282 — rendered by chp_close_keyword; `chp_close_keyword 234` → `Closes #234`
+#     for the GitHub default), so the wrapper computes CLOSE_KEYWORD before building
+#     the block. Render with both set to mirror the wrapper's runtime environment.
 broker_body=$(awk '/PR_CREATE_BROKER_BLOCK="\$\(cat <<BROKER_BLOCK/{f=1; next} f&&/^BROKER_BLOCK$/{exit} f{print}' "$DEV_SH")
 if [[ -n "$broker_body" ]]; then
-  rendered=$(ISSUE_NUMBER=234 bash -c "cat <<BROKER_BLOCK
+  rendered=$(ISSUE_NUMBER=234 CLOSE_KEYWORD='Closes #234' bash -c "cat <<BROKER_BLOCK
 ${broker_body}
 BROKER_BLOCK
 " 2>/dev/null)

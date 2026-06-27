@@ -63,9 +63,17 @@ source "${LIB_DIR}/lib-review-poll.sh"
 # aggregation and before acting on a PASS, the wrapper re-checks the PR's
 # `mergeable` status; a CONFLICTING (or persistently-UNKNOWN) PR can never reach
 # `approved`, regardless of whether the review agent ran its Step-0 pre-review
-# rebase prompt. _classify_mergeable_gate is the pure decision half (the gh
-# query + UNKNOWN-retry loop stays in the wrapper). Inert on the FAIL path.
+# rebase prompt. _classify_mergeable_gate is the pure decision half (the
+# chp_mergeable verb call + UNKNOWN-retry loop stays in the wrapper). Inert on FAIL.
 source "${LIB_DIR}/lib-review-mergeable.sh"
+# shellcheck source=lib-code-host.sh
+# [INV-87] (#282): Code-Host Provider dispatch. The mergeable / approve / merge
+# leaves below — and submit_request_changes (lib-review-request-changes.sh) — route
+# their innermost `gh pr *` primitive through the `chp_*` shims
+# (`chp_<verb>` → `chp_${CODE_HOST}_<verb>`). The INV-44/INV-54 classifiers
+# (lib-review-mergeable.sh) and the INV-52/INV-79 wrapper-owns-approve/merge
+# ownership are UNCHANGED — only the gh leaf moves. Guarded + idempotent.
+source "${LIB_DIR}/lib-code-host.sh"
 # shellcheck source=lib-review-e2e.sh
 # INV-46 (#182): run E2E ONCE in a dedicated lane, sequentially, BEFORE the
 # review fan-out — not once per fan-out review agent. The command-mode lane is a
@@ -315,6 +323,29 @@ if ! REVIEW_BOTS_VALIDATED=$(parse_review_bots "${REVIEW_BOTS:-}"); then
     "Fix REVIEW_BOTS in scripts/autonomous.conf to a space-separated list of known bot short-names (or empty), then re-dispatch" \
     "docs/pipeline/errors.md#configuration-class-class-config"
   exit 1
+fi
+
+# [INV-87]/§4.2 review_bots capability gate (#282 review [P1]): slash-command
+# review-bot triggers are only meaningful when the code host has a custom-slash
+# registry. On a `review_bots=0` backend (e.g. GitLab; the degraded fake fixture)
+# chp_trigger_bot is a no-op, so the bots can NEVER review — telling the agent (in
+# the prompt) to trigger/wait for them would FAIL or REQUEUE an otherwise-clean
+# review forever. Blank the effective bot set at the SOURCE so EVERY consumer
+# suppresses bot enforcement uniformly: the prompt's `render_bot_review_section`
+# (emits nothing) and its Step-8 line (prints the "disabled" note), the
+# `bot_trigger_allowlist` broker feed (nothing brokered), and the wrapper-side
+# mandatory-bot-review wait gate (guard fails). GitHub (review_bots=1) keeps the
+# configured set verbatim. The cap reader degrades to "1" when chp_caps is
+# unavailable, so a lib-load failure leaves the legacy path intact. (This is the
+# prompt-side half the wrapper-side gate alone missed — #282 review round 3.)
+if [[ -n "$REVIEW_BOTS_VALIDATED" ]] && declare -F chp_caps >/dev/null 2>&1 \
+   && [[ "$(chp_caps review_bots 2>/dev/null || echo 1)" != "1" ]]; then
+  # NOTE: `log()` is not defined until later in the file, so this runs at top
+  # level under `set -euo pipefail` BEFORE it exists — use a bare `echo >&2`
+  # (matching log()'s format) so a missing `log` can't `command not found` →
+  # abort the wrapper.
+  echo "[autonomous-review] Code host review_bots=0 — disabling bot-review enforcement (REVIEW_BOTS='${REVIEW_BOTS_VALIDATED}' has no effect: the backend has no slash-command registry, so the prompt's bot-review section, the trigger broker, and the post-run wait are all suppressed)." >&2
+  REVIEW_BOTS_VALIDATED=""
 fi
 
 # ---------------------------------------------------------------------------
@@ -880,7 +911,7 @@ if [[ "${E2E_ACTIVE:-false}" == "true" && -n "${E2E_PREVIEW_URL_PATTERN:-}" ]]; 
   PREVIEW_URL="${E2E_PREVIEW_URL_PATTERN//\{N\}/$PR_NUMBER}"
 
   # Also try to extract from PR comments (may contain a more specific URL)
-  COMMENT_URL=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json comments \
+  COMMENT_URL=$(chp_pr_view "$PR_NUMBER" --json comments \
     -q '[.comments[].body | select(contains("Preview"))] | last' 2>/dev/null \
     | grep -oP 'https://[^\s"]+' | head -1 || true)
   PREVIEW_URL="${COMMENT_URL:-$PREVIEW_URL}"
@@ -910,8 +941,8 @@ fi
 # ---------------------------------------------------------------------------
 # Build review prompt
 # ---------------------------------------------------------------------------
-PR_BRANCH=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefName -q '.headRefName' 2>/dev/null || true)
-PR_HEAD_SHA=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefOid -q '.headRefOid' 2>/dev/null || true)
+PR_BRANCH=$(chp_pr_view "$PR_NUMBER" --json headRefName -q '.headRefName' 2>/dev/null || true)
+PR_HEAD_SHA=$(chp_pr_view "$PR_NUMBER" --json headRefOid -q '.headRefOid' 2>/dev/null || true)
 log "PR branch: ${PR_BRANCH:-UNKNOWN} (HEAD: ${PR_HEAD_SHA:0:7})"
 
 # Verdict-detection bindings: actor + time window + body-trailer
@@ -1491,7 +1522,7 @@ if [[ "${E2E_ACTIVE:-false}" == "true" ]]; then
   # Best-effort / non-fatal: a failed `gh` query → "UNKNOWN" → skip (conservative;
   # we never add pending-dev when PR state is in doubt, matching the INV-54 guard).
   if [[ "$E2E_GATE" == "fail" || "$E2E_GATE" == "block-nonsubstantive" ]]; then
-    E2E_PR_STATE=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json state -q '.state' 2>/dev/null || echo "UNKNOWN")
+    E2E_PR_STATE=$(chp_pr_view "$PR_NUMBER" --json state -q '.state' 2>/dev/null || echo "UNKNOWN")
     if [[ "$(_pr_open_gate "$E2E_PR_STATE")" == "skip" ]]; then
       log "PR #${PR_NUMBER} is no longer open (state: ${E2E_PR_STATE}) at the E2E hard gate. Skipping the pending-dev flip — another review/merge likely completed first."
       gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
@@ -3126,7 +3157,7 @@ if [[ "$PASSED_VERDICT" == "true" ]]; then
   # Best-effort / non-fatal: a failed `gh` query → "UNKNOWN" → skip (conservative;
   # we never add pending-dev when PR state is in doubt — matches the prior PASS
   # guard which treated a failed query as non-OPEN).
-  PR_STATE=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json state -q '.state' 2>/dev/null || echo "UNKNOWN")
+  PR_STATE=$(chp_pr_view "$PR_NUMBER" --json state -q '.state' 2>/dev/null || echo "UNKNOWN")
   if [[ "$(_pr_open_gate "$PR_STATE")" == "skip" ]]; then
     log "PR #${PR_NUMBER} is no longer open (state: ${PR_STATE}). Skipping mergeable gate + approve/merge — another review/merge likely completed first."
     gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
@@ -3149,7 +3180,19 @@ if [[ "$PASSED_VERDICT" == "true" ]]; then
   # REVIEW_BOTS is configured AND scoping is armed (in PAT/no-scope mode the agent
   # triggers + polls in-run, so its FAIL already covers a missing bot review). Best-
   # effort: missing_bot_reviews counts a gh failure as MISSING (fail-closed → block).
-  if [[ -n "${REVIEW_BOTS_VALIDATED:-}" && -n "${AGENT_GH_TOKEN_FILE:-}" ]] \
+  #
+  # [INV-87]/§4.2 review_bots capability gate (#282 review [P1]): on a
+  # `review_bots=0` code host (e.g. GitLab; the degraded fake fixture) the trigger
+  # broker (drain_agent_bot_triggers) is a no-op, so a bot review can NEVER arrive —
+  # waiting for one here would loop pending-review ⇄ reviewing forever. Skip the
+  # whole mandatory-bot-review wait when review_bots != 1. GitHub (review_bots=1)
+  # takes the unchanged path; the cap reader degrades to "1" when chp_caps is
+  # unavailable, so the legacy path is intact under any lib-load failure.
+  _review_bots_cap=1
+  if declare -F chp_caps >/dev/null 2>&1; then
+    _review_bots_cap="$(chp_caps review_bots 2>/dev/null || echo 1)"
+  fi
+  if [[ -n "${REVIEW_BOTS_VALIDATED:-}" && -n "${AGENT_GH_TOKEN_FILE:-}" && "$_review_bots_cap" == "1" ]] \
      && declare -F missing_bot_reviews >/dev/null 2>&1; then
     MISSING_BOTS=$(missing_bot_reviews "$REVIEW_BOTS_VALIDATED" "$PR_NUMBER" "$REPO" 2>/dev/null | tr '\n' ' ')
     MISSING_BOTS="${MISSING_BOTS%"${MISSING_BOTS##*[![:space:]]}"}"
@@ -3160,7 +3203,7 @@ if [[ "$PASSED_VERDICT" == "true" ]]; then
       # waiting and route to pending-dev as a substantive FAIL so a human/dev
       # investigates the missing bot.
       _wait_marker="<!-- bot-review-wait sha=\"${PR_HEAD_SHA:-unknown}\" -->"
-      _wait_count=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json comments \
+      _wait_count=$(chp_pr_view "$PR_NUMBER" --json comments \
         --jq "[.comments[] | select(.body | contains(\"bot-review-wait sha=\\\"${PR_HEAD_SHA:-unknown}\\\"\"))] | length" 2>/dev/null || echo 0)
       [[ "$_wait_count" =~ ^[0-9]+$ ]] || _wait_count=0
       if [[ "$_wait_count" -ge "${BOT_REVIEW_WAIT_MAX:-3}" ]]; then
@@ -3209,7 +3252,10 @@ Findings->Decision Gate: 1 blocking finding(s) -- FAIL.
   MERGEABLE_RETRIES="${MERGEABLE_RETRIES:-3}"
   MERGEABLE_STATUS=""
   for _mg_attempt in $(seq 1 "$MERGEABLE_RETRIES"); do
-    MERGEABLE_STATUS=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json mergeable -q '.mergeable' 2>/dev/null || echo "")
+    # [INV-87] (#282) the `gh pr view --json mergeable` leaf moves behind chp_mergeable
+    # ([M2]); the raw token + the `-q '.mergeable'` projection are consumed here. The
+    # UNKNOWN-retry loop + _classify_mergeable_gate (INV-44/INV-54) stay caller-side.
+    MERGEABLE_STATUS=$(chp_mergeable "$PR_NUMBER" -q '.mergeable' 2>/dev/null || echo "")
     [[ "${MERGEABLE_STATUS^^}" != "UNKNOWN" && -n "$MERGEABLE_STATUS" ]] && break
     # Only sleep when another attempt will follow — no point waiting after the
     # final probe (the loop is about to exit and classify the settled value).
@@ -3313,7 +3359,9 @@ if [[ "$PASSED_VERDICT" == "true" ]]; then
     log "ERROR: Token refresh failed — token daemon may have crashed. Attempting approval with current token..."
   fi
   log "Submitting PR approval for PR #${PR_NUMBER}..."
-  if gh pr review "$PR_NUMBER" --repo "$REPO" --approve \
+  # [INV-87] (#282) the `gh pr review --approve` leaf moves behind chp_approve; the
+  # INV-52/INV-79 wrapper-owns-approve ownership + the PASS-gate chain stay caller-side.
+  if chp_approve "$PR_NUMBER" --approve \
     --body "All acceptance criteria verified.$(if [[ "${E2E_ACTIVE:-false}" == "true" ]]; then echo " E2E verification passed."; fi)" 2>&1; then
     log "PR #${PR_NUMBER} approved successfully."
   else
@@ -3351,10 +3399,14 @@ if [[ "$PASSED_VERDICT" == "true" ]]; then
     # Capture merge stdout+stderr so the failure-path PR comment can
     # surface the merge error to the dev re-dispatch (#145).
     set +e
-    MERGE_OUT=$(gh pr merge "$PR_NUMBER" --repo "$REPO" --squash --delete-branch 2>&1)
+    # [INV-87] (#282) the `gh pr merge` leaf moves behind chp_merge; INV-52/INV-79
+    # ownership unchanged. [M4]/[INV-33]: merge_closes_issue=1 (GitHub) means the
+    # `Closes #N` PR body auto-transitions the issue on merge — the wrapper MUST NOT
+    # call itp_transition_state after merge (it does not; see the INV-33 note below).
+    MERGE_OUT=$(chp_merge "$PR_NUMBER" --squash --delete-branch 2>&1)
     MERGE_RC=$?
     set -e
-    [[ -n "$MERGE_OUT" ]] && log "gh pr merge output: ${MERGE_OUT}"
+    [[ -n "$MERGE_OUT" ]] && log "chp_merge output: ${MERGE_OUT}"
 
     if [[ $MERGE_RC -eq 0 ]]; then
       log "PR #${PR_NUMBER} merged successfully."
@@ -3371,7 +3423,61 @@ if [[ "$PASSED_VERDICT" == "true" ]]; then
         --remove-label "reviewing" --remove-label "autonomous" \
         --add-label "approved" 2>/dev/null || true
 
-      log "Issue #${ISSUE_NUMBER} marked approved; auto-close handled by GitHub via 'Closes #N' resolution."
+      # [INV-87]/[M4]/§4.2 merge_closes_issue capability gate (#282 review [P1]):
+      # INV-33's "GitHub auto-closes on merge" is a CODE-HOST capability, not a
+      # universal truth. On a `merge_closes_issue=0` backend the merged MR/PR does
+      # NOT transition its linked issue, so the wrapper MUST close it explicitly
+      # (the terminal transition GitHub's `Closes #N` would otherwise perform) —
+      # else the relabeled issue lingers OPEN forever. GitHub (merge_closes_issue=1)
+      # takes the unchanged no-op path (INV-33: no explicit close). The cap reader
+      # degrades to "1" when chp_caps is unavailable, so the legacy GitHub path is
+      # intact under any lib-load failure.
+      #
+      # Transition routing ([M4], #282 review rounds 6-7 [P1] #2): the terminal
+      # transition is an ITP-seam concern (`itp_transition_state`). That verb is the
+      # downstream itp-writes issue's to migrate (#282 Out-of-Scope: "NO ITP
+      # verbs … itp_transition_state … those are itp-writes"), and the review
+      # wrapper does not yet source the ITP seam. Three-way, provider-correct:
+      #   1. `itp_transition_state` DEFINED → use it (provider-neutral; guard on
+      #      `declare -F`, NOT a blind call — a bodyless shim would dispatch to an
+      #      undefined leaf and abort under set -e);
+      #   2. verb absent AND ISSUE_PROVIDER=github → `gh issue close` (the
+      #      GitHub-rendered terminal transition INV-33 sanctions as the single
+      #      interim close — correct ONLY because the tracker IS GitHub);
+      #   3. verb absent AND a NON-GitHub tracker → loud ERROR + leave it (no
+      #      provider-neutral primitive exists here; a GitHub close would be wrong).
+      # When itp-writes lands (and wires the seam in), branch 1 engages — no change.
+      _merge_closes=1
+      if declare -F chp_caps >/dev/null 2>&1; then
+        _merge_closes="$(chp_caps merge_closes_issue 2>/dev/null || echo 1)"
+      fi
+      if [[ "$_merge_closes" != "1" ]]; then
+        if declare -F itp_transition_state >/dev/null 2>&1; then
+          # Provider-neutral path: route through the ITP-seam verb (engages once
+          # itp-writes migrates it + wires the seam into this wrapper).
+          log "code host merge_closes_issue=0 — transitioning issue #${ISSUE_NUMBER} to its terminal state via itp_transition_state (merge does not auto-transition it)."
+          itp_transition_state "$ISSUE_NUMBER" "reviewing" "approved" 2>/dev/null \
+            || log "WARNING: itp_transition_state failed for #${ISSUE_NUMBER} (merge_closes_issue=0 backend) — issue may remain in a non-terminal state."
+        elif [[ "${ISSUE_PROVIDER:-github}" == "github" ]]; then
+          # itp_transition_state not yet migrated AND the issue tracker IS GitHub:
+          # `gh issue close` is the correct GitHub-rendered terminal transition
+          # (INV-33's single sanctioned interim close). This branch is GitHub-only
+          # BY GUARD now (#282 review round 7 [P1] #2) — a non-GitHub tracker no
+          # longer gets a wrong GitHub-specific close.
+          log "code host merge_closes_issue=0, GitHub issue tracker — closing issue #${ISSUE_NUMBER} explicitly (itp_transition_state not yet migrated → GitHub-rendered close)."
+          gh issue close "$ISSUE_NUMBER" --repo "$REPO" --reason completed 2>/dev/null \
+            || log "WARNING: explicit issue close failed for #${ISSUE_NUMBER} (merge_closes_issue=0 backend) — issue may remain open."
+        else
+          # Non-GitHub issue tracker without a migrated itp_transition_state: there
+          # is NO provider-neutral primitive to transition the task here, and a
+          # GitHub `gh issue close` would be wrong (the task lives in another
+          # system). Surface it loudly and leave the transition to the operator /
+          # the downstream itp-writes verb — never silently mis-transition.
+          log "ERROR: code host merge_closes_issue=0 on a non-GitHub issue tracker (ISSUE_PROVIDER='${ISSUE_PROVIDER:-github}') but itp_transition_state is not migrated — CANNOT transition issue #${ISSUE_NUMBER} to its terminal state. The PR merged; a maintainer (or the itp-writes verb once it lands) must complete the issue transition."
+        fi
+      fi
+
+      log "Issue #${ISSUE_NUMBER} marked approved; auto-close handled by GitHub via 'Closes #N' resolution (merge_closes_issue=${_merge_closes})."
     else
       # Auto-merge failed (#145). Post the marker on the PR (dev re-dispatch
       # detects it via /issues/<n>/comments to trigger rebase), then flip the

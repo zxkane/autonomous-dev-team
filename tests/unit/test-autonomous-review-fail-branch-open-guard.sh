@@ -112,7 +112,7 @@ assert_src "TC-OG-SRC-01 wrapper calls _pr_open_gate" \
 # TC-OG-SRC-02: the open-check `gh pr view ... --json state` is HOISTED ahead of
 # the `_classify_mergeable_gate` call (so it gates the block branches, not just
 # PASS). Compare line numbers of the first state query vs the gate classifier.
-_state_line=$(grep -nE 'gh pr view "\$PR_NUMBER" --repo "\$REPO" --json state' "$WRAPPER" | head -1 | cut -d: -f1)
+_state_line=$(grep -nE 'chp_pr_view "\$PR_NUMBER" --json state' "$WRAPPER" | head -1 | cut -d: -f1)
 _gate_line=$(grep -nE '_classify_mergeable_gate "\$MERGEABLE_STATUS"' "$WRAPPER" | head -1 | cut -d: -f1)
 if [[ -n "$_state_line" && -n "$_gate_line" && "$_state_line" -lt "$_gate_line" ]]; then
   echo -e "  ${GREEN}PASS${NC}: TC-OG-SRC-02 open-check (line $_state_line) precedes _classify_mergeable_gate (line $_gate_line)"
@@ -122,18 +122,19 @@ else
   FAIL=$((FAIL + 1))
 fi
 
-# TC-OG-SRC-03: the wrapper holds exactly TWO `gh pr view ... --json state`
+# TC-OG-SRC-03: the wrapper holds exactly TWO `chp_pr_view ... --json state`
 # queries — the hoisted PASS-chain guard (this issue, #196) PLUS the E2E hard-gate
 # guard added by the INV-54 extension (#195). Before #195 this count was 1; the
-# extension legitimately adds a second, distinct query at the E2E gate.
-_state_count=$(grep -cE 'gh pr view "\$PR_NUMBER" --repo "\$REPO" --json state' "$WRAPPER")
+# extension legitimately adds a second, distinct query at the E2E gate. (The
+# `gh pr view --json state` leaf moved behind chp_pr_view in #282.)
+_state_count=$(grep -cE 'chp_pr_view "\$PR_NUMBER" --json state' "$WRAPPER")
 assert_eq "TC-OG-SRC-03 exactly two --json state queries (PASS-chain hoisted + E2E gate, #195)" \
   "2" "$_state_count"
 # TC-OG-SRC-03b: the PASS-chain guard stays DRY — exactly ONE query assigns the
 # PASS-chain `PR_STATE=` (the redundant PASS-branch duplicate is still gone). The
 # `\b` word boundary excludes the E2E gate's `E2E_PR_STATE=` (preceded by `_`,
 # which is a word char → no boundary), so this counts only the PASS-chain query.
-_passchain_state_count=$(grep -cE '\bPR_STATE=\$\(gh pr view "\$PR_NUMBER" --repo "\$REPO" --json state' "$WRAPPER")
+_passchain_state_count=$(grep -cE '\bPR_STATE=\$\(chp_pr_view "\$PR_NUMBER" --json state' "$WRAPPER")
 assert_eq "TC-OG-SRC-03b PASS-chain guard stays DRY (exactly one PR_STATE= query)" \
   "1" "$_passchain_state_count"
 
@@ -142,7 +143,7 @@ assert_eq "TC-OG-SRC-03b PASS-chain guard stays DRY (exactly one PR_STATE= query
 # assert: contains `--remove-label "reviewing"`, contains no `add-label
 # "pending-dev"`.
 _skip_block=$(awk '
-  /gh pr view "\$PR_NUMBER" --repo "\$REPO" --json state/ { capture=1 }
+  /chp_pr_view "\$PR_NUMBER" --json state/ { capture=1 }
   capture { print }
   capture && /exit 0/ { exit }
 ' "$WRAPPER")

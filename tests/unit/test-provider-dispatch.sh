@@ -243,14 +243,16 @@ done
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== TC-PROVIDER-DISPATCH-020..022: GitHub READ leaves (#281) + WRITE leaves (#283) migrated; dep + all CHP still scaffolds ==="
+echo "=== TC-PROVIDER-DISPATCH-020..022: GitHub READ (#281) + WRITE (#283) + ALL CHP (#282) leaves migrated; ITP dep still scaffolds ==="
 # ---------------------------------------------------------------------------
 # The ITP READ leaves (list_by_state / count_by_state / list_forbidden_combos /
 # read_task / list_comments) are migrated into providers/itp-github.sh by #281,
-# and the ITP WRITE leaves (transition_state / post_comment / edit_comment /
-# mark_checkbox / provision_states) by #283, so their bodies are now DEFINED.
-# The remaining ITP DEP verbs (resolve_dep / begin_tick) and ALL CHP verbs are
-# still empty scaffolds (downstream itp-deps-begin-tick / chp-pr-lifecycle).
+# the ITP WRITE leaves (transition_state / post_comment / edit_comment /
+# mark_checkbox / provision_states) by #283, and ALL CHP verbs (find_pr_for_issue /
+# ci_status / mergeable / create_pr / approve / request_changes / merge /
+# review_threads / resolve_thread / trigger_bot / close_keyword) by #282 — so their
+# bodies are now DEFINED. Only the ITP DEP verbs (resolve_dep / begin_tick) remain
+# empty scaffolds (downstream itp-deps-begin-tick).
 scaffold=$(
   bash -c '
     source "'"$PROVIDERS"'/itp-github.sh" 2>/dev/null
@@ -265,7 +267,7 @@ scaffold=$(
 assert_contains     "itp-github.sh DEFINES the migrated READ leaf itp_github_list_comments (#281)" "ITP_READ_PRESENT" "$scaffold"
 assert_contains     "itp-github.sh DEFINES the migrated WRITE leaf itp_github_transition_state (#283)" "ITP_WRITE_PRESENT" "$scaffold"
 assert_not_contains "itp-github.sh defines NO itp_github_resolve_dep body yet (itp-deps-begin-tick)" "ITP_DEP_PRESENT" "$scaffold"
-assert_not_contains "chp-github.sh defines NO chp_github_create_pr body yet" "CHP_VERB_PRESENT" "$scaffold"
+assert_contains     "chp-github.sh DEFINES the migrated CHP leaf chp_github_create_pr (#282)" "CHP_VERB_PRESENT" "$scaffold"
 assert_contains "providers/*.sh scaffolds source clean (no syntax error)" "SOURCED_CLEAN" "$scaffold"
 # bash -n syntax check
 if bash -n "$PROVIDERS/itp-github.sh" 2>/dev/null; then ok "itp-github.sh passes bash -n"; else bad "itp-github.sh syntax error"; fi

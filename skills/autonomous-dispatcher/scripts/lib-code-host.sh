@@ -96,6 +96,58 @@ chp_resolve_thread()    { chp_${CODE_HOST}_resolve_thread "$@"; }
 chp_trigger_bot()       { chp_${CODE_HOST}_trigger_bot "$@"; }
 chp_close_keyword()     { chp_${CODE_HOST}_close_keyword "$@"; }
 
+# General read primitives (#282 review round 8). These are NOT among the 11 named
+# PR-lifecycle verbs above — they are the provider-neutral `gh pr view` / `gh pr
+# list` read leaves that the caller layer's INCIDENTAL reads route through so the
+# caller layer carries ZERO raw `gh pr` (the [INV-87] final-AC grep). The caller
+# keeps its own `--json`/`-q` projection (forwarded via "$@", byte-identical), as
+# with every other CHP verb; only the innermost primitive moves behind the seam.
+#   chp_pr_view PR  [--json … -q …]     → gh pr view PR  --repo $REPO …
+#   chp_pr_list     [--state … --json … -q …] → gh pr list --repo $REPO …
+# (chp_pr_list is the generalized issue-keyed/body-mention list the dispatcher's
+# pre-#277 existence lookups use — distinct from chp_find_pr_for_issue, which is
+# the [INV-86] close-linkage resolver.)
+#
+# Self-guarding dispatch (#282 review round 9 [P1]): unlike the 11 lifecycle
+# verbs (which callers guard via `chp_has_leaf` + a meaningful fallback), the
+# incidental-read callers dispatch these UNGUARDED. So if the enabled provider
+# omits the leaf (the all-empty degraded fixture; any future non-GitHub provider
+# that hasn't yet implemented its read leaf), a blind `chp_${CODE_HOST}_pr_view`
+# would `command not found` → abort the wrapper at its FIRST PR read. Instead the
+# shim checks the leaf and, when absent, emits a WARN and returns 1 — a clean
+# non-zero that every incidental-read call site already degrades on (each is a
+# `$(… 2>/dev/null || echo/true)`, `if ! …`, or `… || return 1`), so the wrapper
+# fails-soft (empty read) instead of aborting, and the misconfiguration is loud.
+# A real backend MUST implement these (they are core, non-capability-gated reads).
+chp_pr_view() {
+  if ! declare -F "chp_${CODE_HOST}_pr_view" >/dev/null 2>&1; then
+    echo "WARN: [INV-87] CODE_HOST='${CODE_HOST}' provider defines no chp_${CODE_HOST}_pr_view leaf — PR read unavailable (a non-GitHub CHP provider MUST implement it)." >&2
+    return 1
+  fi
+  chp_${CODE_HOST}_pr_view "$@"
+}
+chp_pr_list() {
+  if ! declare -F "chp_${CODE_HOST}_pr_list" >/dev/null 2>&1; then
+    echo "WARN: [INV-87] CODE_HOST='${CODE_HOST}' provider defines no chp_${CODE_HOST}_pr_list leaf — PR list read unavailable (a non-GitHub CHP provider MUST implement it)." >&2
+    return 1
+  fi
+  chp_${CODE_HOST}_pr_list "$@"
+}
+
+# chp_has_leaf <verb> — returns 0 iff the ENABLED provider actually defines the
+# leaf `chp_${CODE_HOST}_<verb>` (e.g. `chp_has_leaf close_keyword`).
+#
+# A caller MUST NOT guard a verb invocation with `declare -F chp_<verb>`: the
+# thin shim above is ALWAYS defined once this lib is sourced, so that test is
+# always true even on a backend whose provider file omits the leaf — the shim
+# then dispatches to an undefined `chp_${CODE_HOST}_<verb>` and aborts the caller
+# under `set -e` (#282 review round 4 [P1]: the degraded fake CHP fixture has
+# exactly that shape — shim present, leaf absent). Guard on the LEAF instead:
+#   chp_has_leaf close_keyword && kw="$(chp_close_keyword "$n")" || kw="<fallback>"
+chp_has_leaf() {
+  declare -F "chp_${CODE_HOST}_$1" >/dev/null 2>&1
+}
+
 # chp_caps <key> — emit the capability map value for <key> from the enabled
 # CHP provider's .caps manifest (spec §4). The only CHP shim with a real body in
 # #280: it reads the declarative manifest, it does NOT forward to a provider

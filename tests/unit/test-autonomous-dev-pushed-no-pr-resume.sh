@@ -132,6 +132,12 @@ run_helper() {
     bash -c "
       set +e
       log() { :; }
+      # [INV-87] (#282) needs_open_pr_only now routes its body-mention existence
+      # lookup through chp_pr_list (the general read primitive). The real leaf is
+      # \`gh pr list --repo \$REPO \"\$@\"\`; define the same thin shim here so this
+      # isolation harness (which stubs the gh binary on PATH and extracts only
+      # needs_open_pr_only) resolves the verb and still exercises the gh stub.
+      chp_pr_list() { gh pr list --repo \"\$REPO\" \"\$@\"; }
       $HELPER_FN
       needs_open_pr_only '$issue'
     "

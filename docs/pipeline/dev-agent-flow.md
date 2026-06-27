@@ -132,6 +132,41 @@ branch (#234 review). In PAT
 mode / app-mode-mint-failure the prefix is empty (no scrub) — byte-identical to
 pre-INV-79. See [INV-79](invariants.md#inv-79-in-app-mode-the-agent-process-gets-only-a-scoped-token-the-wrapper-keeps-full-write-and-is-the-sole-approvemergepr-create-path).
 
+## Code-Host Provider seam — close keyword + PR creation ([INV-87](invariants.md#inv-87-provider-dispatch-is-spec-defined--callers-route-every-issuecode-host-op-through-itp_chp_-never-a-raw-gh-in-the-caller-layer), #282)
+
+The PR-body **auto-close keyword** the prompt builders interpolate is now
+rendered by the wrapper-local `_render_close_keyword` helper ([`provider-spec.md`](provider-spec.md)
+§3.2, [M4]) instead of a hardcoded GitHub `Closes #N`. The wrapper computes
+`CLOSE_KEYWORD=$(_render_close_keyword "$ISSUE_NUMBER")` once before building any
+prompt (and the open-PR fast path computes its own `_close_kw` the same way); all
+three prompt builders + the fast-path block interpolate that variable. The helper
+is **caps-aware and leaf-guarded** (3-way):
+
+1. provider **leaf exists** (`chp_has_leaf close_keyword`) → `chp_close_keyword`
+   (the verb renders `Closes #<N>` for GitHub `merge_closes_issue=1`, empty for `=0`);
+2. **leaf absent + `merge_closes_issue=0`** → a NON-auto-closing reference, NOT
+   `Closes #N`. Sub-cased on `native_issue_pr_link` (review round 7): when
+   `native_issue_pr_link=0` (PR-discovery greps the body for `#N`) → `Related to
+   #<N>` so a created PR stays **discoverable/linkable** without triggering
+   auto-close (`Related to` is not a GitHub close keyword); when
+   `native_issue_pr_link=1` (a native issue↔PR link exists, no body grep needed) →
+   the **empty string**. Either way the caller transitions the issue explicitly
+   post-merge, see [INV-33](invariants.md#inv-33-review-wrapper-must-not-close-the-linked-issue);
+3. **leaf absent + `merge_closes_issue=1` / lib-load failure** → the GitHub
+   literal `Closes #<N>` (today's behavior, unchanged).
+
+Guarding on the provider leaf (`chp_has_leaf`) — not `declare -F chp_close_keyword`
+(the always-defined shim) — keeps a leaf-less backend from dispatching to an
+undefined function and aborting under `set -e`.
+
+**PR creation** is the CHP verb `chp_create_pr` ([`provider-spec.md`](provider-spec.md)
+§3.2). The broker `drain_agent_pr_create` (`lib-auth.sh`) described above routes
+its `gh pr create --head/--title/--body` leaf through the verb (a leaf-only swap —
+byte-identical argv; the [INV-79] token-scoping, file parse, and head resolution
+are unchanged), falling back to the raw `gh pr create` if the verb is
+unavailable. The review-bot trigger broker (`drain_agent_bot_triggers`) likewise
+routes through `chp_trigger_bot` ([INV-87], #282).
+
 ## Path resolution lessons (#58)
 
 `lib-agent.sh` and `lib-auth.sh` use `readlink -f $BASH_SOURCE` to find their own dir, which **breaks the symlink-vendor pattern** consumer projects use (symlinking from `<project>/scripts/lib-agent.sh` into `.claude/skills/.../lib-agent.sh`). After `readlink -f`, the script's idea of "its own dir" is the skill installation dir, not the project's `scripts/` — and the autonomous.conf lookup misses.
