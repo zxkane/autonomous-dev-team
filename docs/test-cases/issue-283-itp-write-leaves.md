@@ -47,8 +47,8 @@ The degraded fixture declares `edit_comment=0`, `body_checkbox=0`, `label_colors
 |---|---|
 | TC-CAP-EDIT0 | INV-46 caller: `edit_comment=0` → `itp_post_comment` re-posts the FULL report body + SHA marker (never marker-only), no `itp_edit_comment` PATCH — driven through the real `_stamp_browser_evidence_marker` |
 | TC-CAP-EDIT1 | `edit_comment=1` (github) → PATCH path taken (`itp_edit_comment` called) |
-| TC-CAP-CHECKBOX0 | `body_checkbox=0` → the documented native-subtask-remap branch (defined; mark-issue-checkbox skips the markdown PATCH) |
-| TC-CAP-COLORS0 | `label_colors=0` → `itp_github`-equivalent create omits `--color` |
+| TC-CAP-CHECKBOX0 / -BRANCH | `body_checkbox=0` → the documented native-subtask-remap branch: the REAL mark-issue-checkbox.sh (run with `ISSUE_PROVIDER=degraded`) takes the cap-gated fallback (no markdown PATCH), fails LOUD-but-clean, and does NOT crash with `itp_degraded_mark_checkbox: command not found` (the branch keys on `itp_caps body_checkbox`, not `declare -F` of the always-defined shim) |
+| TC-CAP-COLORS0 / -BRANCH | `label_colors=0` → the documented color-omitted path: the REAL setup-labels.sh (`ISSUE_PROVIDER=degraded`) takes the cap-gated fallback (no `gh label` call), fails LOUD-but-clean, and does NOT crash with `itp_degraded_provision_states: command not found` |
 
 ## 5. `marker_channel` regression (INV-89 / INV-18 / INV-39 survival)
 

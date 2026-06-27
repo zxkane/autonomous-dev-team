@@ -92,10 +92,16 @@ idiom) because `autonomous-review.sh` does not source it.
 ### `mark-issue-checkbox.sh` PATCH (a) → `itp_mark_checkbox`
 The GET-body + `- [ ]`→`- [x]` awk rewrite + not-found/already-checked exit codes
 (0/1/2) stay caller-side. Only the final `gh api … --method PATCH --field body=`
-leaf moves into `itp_github_mark_checkbox ISSUE NEW_BODY`. `body_checkbox=1` →
-markdown-checkbox path (the only live branch); a `body_checkbox=0` provider would
-remap to native subtask (defined-not-implemented this PR). The script sources the
-provider seam.
+leaf moves into `itp_github_mark_checkbox ISSUE NEW_BODY`. The branch keys on the
+`body_checkbox` **capability** (`itp_caps body_checkbox`), NOT `declare -F
+itp_mark_checkbox` — the shim is always defined after the seam is sourced, so a
+`declare -F` check never falls back and a backend without the leaf would crash with
+`itp_<p>_mark_checkbox: command not found` (review [P1] r4). `body_checkbox=1` →
+markdown-checkbox path (`itp_mark_checkbox`, the only live branch); `body_checkbox=0`
+→ the documented native-subtask remap, defined-not-implemented this PR → fail
+LOUD-but-clean (no missing-leaf crash). When `itp_caps` is absent (script run
+standalone without the skill tree) the inline `gh api` PATCH is the self-contained
+fallback. The script sources the provider seam.
 
 > **AC reconciliation (`itp_mark_checkbox` arity).** The issue AC shows
 > `itp_mark_checkbox "$ISSUE_NUMBER" "$CHECKBOX_TEXT"` *and* "the awk body rewrite
@@ -109,8 +115,13 @@ provider seam.
 The 9-label `name|color|description` table stays caller-side. The per-label
 view-or-create leaf moves into `itp_github_provision_states NAME COLOR DESC`,
 emitting the byte-identical `gh label view` / `gh label create --color hex
---description d`. `label_colors=1` gates the `--color` flag (a `label_colors=0`
-provider omits color, defined-not-live). The script sources the provider seam.
+--description d`. The branch keys on the `label_colors` **capability** (`itp_caps
+label_colors`), NOT `declare -F itp_provision_states` (same shim-always-defined
+trap as the checkbox case, review [P1] r4). `label_colors=1` → `itp_provision_states`
+emits the `--color` hex (the only live branch); `label_colors=0` → the documented
+color-omitted path, defined-not-live this PR → fail LOUD-but-clean (no missing-leaf
+crash). When `itp_caps` is absent the inline gh-label leaf is the self-contained
+fallback. The script sources the provider seam.
 
 ## Repo-wide ITP-issue-comment cutover (post-review expansion)
 

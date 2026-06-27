@@ -293,6 +293,54 @@ if [[ -d "$FAKE_PROVIDER" ]]; then
   assert_contains "TC-CAP-EDIT1-BRANCH edit_comment=1 (github) takes the PATCH path on comment 99" "PATCH_TAKEN id=99" "$edit1_post"
   assert_contains "TC-CAP-EDIT1-BRANCH edit_comment=1 PATCH body carries report+marker" "## E2E Verification Report" "$edit1_post"
   assert_not_contains "TC-CAP-EDIT1-BRANCH edit_comment=1 does NOT post a fresh comment" "FRESH_POST_TAKEN" "$edit1_post"
+
+  # body_checkbox=0 branch (review [P1] r4): the DOCUMENTED fallback must key on the
+  # CAPABILITY, not `declare -F itp_mark_checkbox` (the shim is always defined after
+  # sourcing the seam). With ISSUE_PROVIDER=degraded the script must NOT crash with
+  # `itp_degraded_mark_checkbox: command not found` — it takes the native-subtask
+  # remap path (defined-not-implemented → clean LOUD error, no missing-leaf crash).
+  # Drive the REAL mark-issue-checkbox.sh; stub the gh body-read; capture stderr.
+  _CB_STUB="$(mktemp -d)"
+  cat > "$_CB_STUB/gh" <<'GHEOF'
+#!/bin/bash
+if [[ "$1" == "api" && "$3" == "--jq" ]]; then printf '## Requirements\n- [ ] Do the thing\n'; exit 0; fi
+echo "GH_PATCH_CALLED $*" >&2; exit 0
+GHEOF
+  chmod +x "$_CB_STUB/gh"
+  # `unset -f gh` first: the golden-trace section above `export -f gh`s a recording
+  # shell function that a child bash inherits and which would shadow this PATH stub
+  # binary (returning an empty body → the "has no body" early-exit, masking the
+  # body_checkbox branch under test).
+  cb_degraded=$(
+    env -u PROJECT_DIR ISSUE_PROVIDER=degraded AUTONOMOUS_PROVIDERS_DIR="$FAKE_PROVIDER" \
+        REPO=o/r PATH="$_CB_STUB:$PATH" \
+    bash -c 'unset -f gh; bash "$1" "$2" "$3"' _ "$COMMON_SCRIPTS/mark-issue-checkbox.sh" 1 "Do the thing" 2>&1
+  )
+  assert_contains "TC-CAP-CHECKBOX0-BRANCH body_checkbox=0 takes the documented native-subtask fallback" "body_checkbox=0" "$cb_degraded"
+  assert_not_contains "TC-CAP-CHECKBOX0-BRANCH body_checkbox=0 does NOT crash on a missing provider leaf" "command not found" "$cb_degraded"
+  assert_not_contains "TC-CAP-CHECKBOX0-BRANCH body_checkbox=0 does NOT PATCH via gh" "GH_PATCH_CALLED" "$cb_degraded"
+  rm -rf "$_CB_STUB"
+
+  # label_colors=0 branch (review [P1] r4): same shim-vs-cap fix in setup-labels.sh.
+  # ISSUE_PROVIDER=degraded must NOT crash with `itp_degraded_provision_states:
+  # command not found` — it takes the documented color-omitted path (defined-not-live
+  # → clean LOUD error, no gh label call, no missing-leaf crash).
+  _LC_STUB="$(mktemp -d)"
+  cat > "$_LC_STUB/gh" <<'GHEOF'
+#!/bin/bash
+echo "GH_LABEL_CALLED $*" >&2; exit 0
+GHEOF
+  chmod +x "$_LC_STUB/gh"
+  # `unset -f gh` first (same inherited-function shadow as the checkbox case above).
+  lc_degraded=$(
+    env -u PROJECT_DIR ISSUE_PROVIDER=degraded AUTONOMOUS_PROVIDERS_DIR="$FAKE_PROVIDER" \
+        PATH="$_LC_STUB:$PATH" \
+    bash -c 'unset -f gh; bash "$1" "$2"' _ "$SCRIPTS/setup-labels.sh" o/r 2>&1
+  )
+  assert_contains "TC-CAP-COLORS0-BRANCH label_colors=0 takes the documented color-omitted fallback" "label_colors=0" "$lc_degraded"
+  assert_not_contains "TC-CAP-COLORS0-BRANCH label_colors=0 does NOT crash on a missing provider leaf" "command not found" "$lc_degraded"
+  assert_not_contains "TC-CAP-COLORS0-BRANCH label_colors=0 does NOT call gh label" "GH_LABEL_CALLED" "$lc_degraded"
+  rm -rf "$_LC_STUB"
 else
   echo -e "  ${RED}FAIL${NC}: degraded fake provider fixture missing at $FAKE_PROVIDER (expected from #280)"
   FAIL=$((FAIL+1))

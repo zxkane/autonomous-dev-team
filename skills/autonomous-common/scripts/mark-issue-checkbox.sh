@@ -114,12 +114,31 @@ mark_checkbox() {
   # [INV-87] PATCH the issue body via the body-checkbox write leaf. The
   # `- [ ]`→`- [x]` awk rewrite above + the not-found/already-checked exit codes
   # (0/1/2) stay caller-side; only the PATCH primitive moves behind
-  # itp_mark_checkbox, which receives the already-rewritten body. On GitHub
-  # (`body_checkbox=1`) this is the byte-identical
-  # `gh api repos/$REPO/issues/$N --method PATCH --field body=… --silent`. A
-  # `body_checkbox=0` backend would remap to a native-subtask completion
-  # (defined; not implemented this PR). Fallback to the inline leaf if the
-  # provider lib is unavailable (keeps the script self-contained).
+  # itp_mark_checkbox, which receives the already-rewritten body.
+  #
+  # The DOCUMENTED branch point is the `body_checkbox` CAPABILITY (spec §4.1), NOT
+  # `declare -F itp_mark_checkbox` — after lib-issue-provider.sh is sourced the
+  # `itp_mark_checkbox` SHIM is always defined (it forwards to
+  # itp_${ISSUE_PROVIDER}_mark_checkbox), so a `declare -F` check never falls back
+  # and a backend without the leaf would crash with `itp_<p>_mark_checkbox: command
+  # not found`. We branch on the cap instead:
+  #   - body_checkbox=1 (GitHub) → the markdown-checkbox path: itp_mark_checkbox
+  #     emits the byte-identical
+  #     `gh api repos/$REPO/issues/$N --method PATCH --field body=… --silent`.
+  #   - body_checkbox=0 → the documented native-subtask-completion remap, DEFINED
+  #     but NOT IMPLEMENTED this PR — fail LOUD-but-clean (no missing-leaf crash) so
+  #     the no-behavior-change scope holds and the gap is visible, not silent.
+  # When the provider lib is unavailable (no itp_caps — script run standalone
+  # without the skill tree), fall back to the inline `gh api` PATCH so the script
+  # stays self-contained (GitHub's today behavior).
+  local _bc_cap=""
+  if declare -F itp_caps >/dev/null 2>&1; then
+    _bc_cap="$(itp_caps body_checkbox 2>/dev/null || true)"
+  fi
+  if [[ "$_bc_cap" == "0" ]]; then
+    echo "Error: provider '${ISSUE_PROVIDER:-?}' has body_checkbox=0 — native-subtask checkbox completion is not implemented yet (this PR migrates the GitHub markdown-checkbox leaf only). Cannot mark '${CHECKBOX_TEXT}' on issue #${ISSUE_NUMBER}." >&2
+    return 1
+  fi
   if declare -F itp_mark_checkbox >/dev/null 2>&1; then
     itp_mark_checkbox "$ISSUE_NUMBER" "$new_body"
   else
