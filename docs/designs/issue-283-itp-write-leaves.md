@@ -135,11 +135,19 @@ those session-report and verdict-trailer markers. The finding is correct: the
 spec's "ALL" is a repo-wide contract, not a lib-dispatch.sh-local one.
 
 Resolution (zero behavior change): route **every machine-marker ISSUE comment** in
-those four files through `itp_post_comment` too —
+those files through `itp_post_comment` too —
 - `autonomous-dev.sh`: 5 sites (2 heredoc session-report bodies + 3 resume-fallback markers),
 - `autonomous-review.sh`: 17 sites (verdict / diagnostic / held / smoke comments + the Reviewed-HEAD trailer capture),
 - `dispatcher-tick.sh`: 9 sites (PTL / crash / no-PR / pending-review markers),
-- `lib-review-verdict.sh`: 1 site (`emit_verdict_trailer`'s `<!-- review-verdict: … -->`).
+- `lib-review-verdict.sh`: 1 site (`emit_verdict_trailer`'s `<!-- review-verdict: … -->`),
+- `post-verdict.sh`: 1 site (review [P1] r5) — the [INV-56] AGENT verdict comment (the
+  [INV-78] fallback verdict comment the wrapper scrapes when the typed artifact is
+  absent). Special-cased: it MUST keep posting via the co-located token-refresh proxy
+  `gh` (the [INV-56] identity guarantee — never the host's bare `gh auth`). So the
+  fix prepends the proxy's dir to `PATH` for the `itp_post_comment` call, making the
+  verb's bare `gh` resolve to `${SCRIPT_DIR}/gh` (the proxy) — routed through the seam
+  AND proxy-attributed. The proxy-existence guard + the `$GH` direct fallback (when
+  the seam is unavailable) are retained.
 
 Each file gains a guarded `lib-issue-provider.sh` self-source (mirroring
 `lib-dispatch.sh` / `lib-review-e2e.sh`) so `itp_post_comment` resolves even when the

@@ -366,15 +366,19 @@ assert_eq "TC-CUTOVER-COMMENT0 no raw 'gh issue comment' in lib-dispatch.sh" "0"
 # [INV-89] Repo-wide ITP-issue-comment cutover: every machine-marker issue comment
 # — dispatcher AND agent AND wrapper — routes through itp_post_comment, so a
 # non-GitHub / marker_channel=text provider cannot bypass the seam for ANY issue
-# comment. Pins ZERO raw `gh issue comment` across all five ITP-issue-comment files.
+# comment. Pins ZERO raw `gh issue comment` across all SIX ITP-issue-comment files.
 # (`gh pr comment` / review-thread replies are CHP, NOT counted — owned by
 # chp-pr-lifecycle.) NOTE: the cutover LINT (a CI guard that fails on raw-gh) is the
 # separate cutover-guard-lint deliverable; this is the migration-completeness pin.
+# post-verdict.sh's fallback legitimately uses the `"$GH"` proxy variable, NOT a raw
+# `gh issue comment "` token, so it too pins to 0 here (its routing through
+# itp_post_comment is asserted by TC-POSTVERDICT-* above).
 for _f in "$LIB" \
           "$SCRIPTS/autonomous-dev.sh" \
           "$SCRIPTS/autonomous-review.sh" \
           "$SCRIPTS/dispatcher-tick.sh" \
-          "$SCRIPTS/lib-review-verdict.sh"; do
+          "$SCRIPTS/lib-review-verdict.sh" \
+          "$SCRIPTS/post-verdict.sh"; do
   # A REAL call is `gh issue comment "<var>` (the issue-id arg). Exclude `#` comment
   # lines (prose mentions) and the prompt-embedded backtick references.
   _c=$(grep -vE '^[[:space:]]*#' "$_f" | grep -cE '(^|[^`-])gh issue comment "')
@@ -420,6 +424,53 @@ assert_contains "TC-PROVISION-DELEGATE setup-labels.sh calls itp_provision_state
   "itp_provision_states" "$(cat "$SCRIPTS/setup-labels.sh")"
 assert_contains "TC-E2E-DELEGATE lib-review-e2e.sh calls itp_edit_comment" \
   "itp_edit_comment" "$(cat "$E2E_LIB")"
+
+# post-verdict.sh: the INV-78 fallback verdict comment is a machine marker and must
+# route through itp_post_comment (review [P1] r5), NOT a bare `$GH issue comment`.
+_pv_src="$(cat "$SCRIPTS/post-verdict.sh")"
+assert_contains "TC-POSTVERDICT-DELEGATE post-verdict.sh routes the verdict through itp_post_comment" \
+  "itp_post_comment" "$_pv_src"
+
+echo "=== POST-VERDICT INV-78 fallback routes via itp_post_comment + preserves INV-56 proxy ==="
+# Drive the REAL post-verdict.sh with the seam available. A sandbox holds the proxy
+# `gh` at $SB/gh (records argv+body) AND a copy of lib-issue-provider.sh + the github
+# provider so the script's readlink-f seam-source resolves and itp_post_comment is
+# defined. The post must (a) reach the proxy gh (INV-56 identity) with (b) byte-
+# identical `issue comment <n> --repo <repo> --body <composed>` argv carrying the
+# verdict trailer (INV-40/INV-20), routed through the verb (INV-89).
+_PVSB="$(mktemp -d)"
+cp "$SCRIPTS/post-verdict.sh" "$_PVSB/post-verdict.sh"
+cp "$SCRIPTS/lib-issue-provider.sh" "$_PVSB/lib-issue-provider.sh"
+mkdir -p "$_PVSB/providers"
+cp "$PROVIDERS/itp-github.sh" "$PROVIDERS/itp-github.caps" "$_PVSB/providers/"
+[[ -f "$SCRIPTS/lib-config.sh" ]] && cp "$SCRIPTS/lib-config.sh" "$_PVSB/lib-config.sh"
+printf 'REPO="o/r"\n' > "$_PVSB/autonomous.conf"
+cat > "$_PVSB/gh" <<'PVGH'
+#!/bin/bash
+printf '%s\n' "$@" > "$PVSB_ARGV"
+_b=""; _prev=""
+for _a in "$@"; do [[ "$_prev" == "--body" ]] && _b="$_a"; _prev="$_a"; done
+printf '%s' "$_b" > "$PVSB_BODY"
+echo "https://github.com/o/r/issues/202#issuecomment-1"
+PVGH
+chmod +x "$_PVSB/gh"
+printf 'PASS body line' > "$_PVSB/body.md"
+pv_out=$(
+  env -u PROJECT_DIR PVSB_ARGV="$_PVSB/argv.txt" PVSB_BODY="$_PVSB/body.txt" \
+  bash -c 'unset -f gh; bash "$1" 202 pass "$2" codex sid-AAAA sonnet' _ \
+    "$_PVSB/post-verdict.sh" "$_PVSB/body.md" 2>&1
+)
+pv_argv="$(cat "$_PVSB/argv.txt" 2>/dev/null | paste -sd' ')"
+pv_body="$(cat "$_PVSB/body.txt" 2>/dev/null)"
+assert_contains "TC-POSTVERDICT-PROXY post reaches the INV-56 proxy gh with issue-comment argv" \
+  "issue comment 202 --repo o/r --body" "$pv_argv"
+assert_contains "TC-POSTVERDICT-BODY composed body carries the Review Session trailer (INV-20)" \
+  "Review Session: \`sid-AAAA\`" "$pv_body"
+assert_contains "TC-POSTVERDICT-BODY composed body carries the Review Agent trailer (INV-40/INV-60)" \
+  "Review Agent: codex (model: sonnet)" "$pv_body"
+assert_contains "TC-POSTVERDICT-URL helper echoes the comment URL on success" \
+  "issuecomment-1" "$pv_out"
+rm -rf "$_PVSB"
 
 rm -f "$_GH_ARGV_FILE"
 

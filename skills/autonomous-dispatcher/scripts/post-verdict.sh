@@ -91,6 +91,26 @@ if [[ -f "${SCRIPT_DIR}/lib-config.sh" ]]; then
   source "${SCRIPT_DIR}/lib-config.sh"
 fi
 
+# [INV-87]/[INV-89] Issue-Tracker Provider dispatch. The fallback verdict comment
+# this helper posts is an issue-level MACHINE MARKER (the INV-78 comment fallback
+# the review wrapper scrapes when the typed artifact is absent; it carries the
+# `Review PASSED` / `Review findings:` + `Review Session:` / `Review Agent:`
+# trailer) and therefore MUST post through itp_post_comment on the declared
+# marker_channel ([`provider-spec.md`] INV-77/INV-78 reconciliation). Resolve the
+# provider lib from the REAL skill tree via readlink -f of THIS script (the
+# [INV-14]/[INV-65] idiom) — NOT SCRIPT_DIR, which is the project-side symlink dir
+# (libs are not symlinked there). Guarded + idempotent; if the lib is absent the
+# verb stays undefined and the post site below falls back to the proxy `$GH`
+# directly (keeps the helper self-contained).
+if ! declare -F itp_post_comment >/dev/null 2>&1; then
+  _pv_real_dir="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]:-$0}")")" && pwd 2>/dev/null)" || _pv_real_dir=""
+  if [[ -n "$_pv_real_dir" && -r "${_pv_real_dir}/lib-issue-provider.sh" ]]; then
+    # shellcheck source=lib-issue-provider.sh
+    source "${_pv_real_dir}/lib-issue-provider.sh"
+  fi
+  unset _pv_real_dir
+fi
+
 ISSUE_NUMBER="${1:-}"
 VERDICT_RAW="${2:-}"
 BODY_FILE="${3:-}"
@@ -249,8 +269,22 @@ if [[ ! -x "$GH" ]]; then
   exit 1
 fi
 
+# [INV-89]/[INV-56] Post through the ITP marker choke-point itp_post_comment so a
+# non-GitHub / marker_channel=text provider routes the INV-78 fallback verdict
+# comment correctly. itp_post_comment → itp_github_post_comment emits bare
+# `gh issue comment "$ISSUE" --repo "$REPO" --body "$BODY"` — IDENTICAL argv to the
+# direct `$GH …` call below, AND identical comment URL on stdout. To preserve the
+# [INV-56] identity guarantee (the verdict MUST post via the token-refresh proxy,
+# never the host's bare `gh auth` session), prepend the proxy's dir to PATH for the
+# call so the verb's bare `gh` resolves to `${SCRIPT_DIR}/gh` (the proxy). When the
+# provider lib is unavailable (verb undefined) fall back to the proxy `$GH`
+# directly — self-contained, same argv.
 set +e
-URL=$("$GH" issue comment "$ISSUE_NUMBER" --repo "$REPO" --body "$COMPOSED" 2>&1)
+if declare -F itp_post_comment >/dev/null 2>&1; then
+  URL=$(PATH="${SCRIPT_DIR}:${PATH}" itp_post_comment "$ISSUE_NUMBER" "$COMPOSED" 2>&1)
+else
+  URL=$("$GH" issue comment "$ISSUE_NUMBER" --repo "$REPO" --body "$COMPOSED" 2>&1)
+fi
 POST_RC=$?
 set -e
 
