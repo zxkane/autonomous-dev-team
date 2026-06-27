@@ -142,10 +142,10 @@ rm -f "$PID_DIR/issue-42.pid"
 # ---------------------------------------------------------------------------
 echo "== TC-043 approved + no-auto-close =="
 export GH_FIXTURE="$TMP/fx-approved.json"
-# PR body must reference #43 — fetch_pr_for_issue filters on `.body` matching
-# `#<issue>` (the same predicate the dispatcher uses; #148 null-guard).
+# PR must CLOSE #43 — fetch_pr_for_issue binds by GitHub's parsed close linkage
+# (`closingIssuesReferences`), not a `#N` body mention (#277 / INV-86).
 write_fixture "$GH_FIXTURE" "autonomous approved no-auto-close" "OPEN" \
-  '[{"number":777,"reviewDecision":"APPROVED","mergeable":"MERGEABLE","state":"OPEN","body":"Closes #43"}]'
+  '[{"number":777,"reviewDecision":"APPROVED","mergeable":"MERGEABLE","state":"OPEN","body":"Closes #43","closingIssuesReferences":[{"number":43}],"headRefName":"fix/issue-43"}]'
 out="$(run_status 43)"
 assert_contains "TC-043a PR + reviewDecision shown" "reviewDecision=APPROVED" "$out"
 assert_contains "TC-043b no-auto-close surfaced" "no-auto-close" "$out"
@@ -325,7 +325,7 @@ export GH_FIXTURE="$TMP/fx-ro.json"
 export GH_CALLS="$TMP/gh-calls.log"
 : > "$GH_CALLS"
 write_fixture "$GH_FIXTURE" "autonomous in-progress" "OPEN" \
-  '[{"number":1,"reviewDecision":"APPROVED","mergeable":"MERGEABLE","state":"OPEN","body":"Closes #60"}]'
+  '[{"number":1,"reviewDecision":"APPROVED","mergeable":"MERGEABLE","state":"OPEN","body":"Closes #60","closingIssuesReferences":[{"number":60}],"headRefName":"fix/issue-60"}]'
 echo "$$" > "$PID_DIR/issue-60.pid"
 run_status 60 >/dev/null
 rm -f "$PID_DIR/issue-60.pid"

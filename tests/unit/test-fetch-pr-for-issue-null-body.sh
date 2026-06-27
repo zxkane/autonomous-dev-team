@@ -1,12 +1,17 @@
 #!/bin/bash
-# test-fetch-pr-for-issue-null-body.sh — Regression for issue #148.
+# test-fetch-pr-for-issue-null-body.sh — Regression for issue #148 (under the
+# #277 / INV-86 contract).
 #
-# `fetch_pr_for_issue` in skills/autonomous-dispatcher/scripts/lib-dispatch.sh
-# applies `.body | test(...)` to every open PR. When ANY open PR has
-# `body: null`, jq aborts the filter and the function silently returns empty
-# even when a matching PR exists. This test mocks `gh pr list` output
-# (jq-fixture style) to assert the helper still returns the matching PR
-# when a null-body sibling exists.
+# `fetch_pr_for_issue` (now delegating to lib-pr-linkage.sh::resolve_pr_for_issue)
+# filters every open PR through a jq `test()`/`// ""` chain. When ANY open PR has
+# `body: null`, an unguarded `.body | test(...)` would abort the jq filter and
+# silently return empty even when a genuinely-linked PR exists. This test mocks
+# `gh pr list` output (jq-fixture style) to assert the helper still returns the
+# linked PR when a null-body sibling exists.
+#
+# [INV-86, #277] The BINDING signal changed from a loose `#N` body mention to
+# GitHub's parsed close linkage (`closingIssuesReferences`); the fixtures here
+# carry that field. The #148 null-body resilience invariant is unchanged.
 #
 # Test cases mirror docs/test-cases/fetch-pr-for-issue-null-body.md.
 #
@@ -82,39 +87,47 @@ extract_number() {
 }
 
 # ---------------------------------------------------------------------------
-echo "=== fetch_pr_for_issue null-body resilience (issue #148) ==="
+echo "=== fetch_pr_for_issue null-body resilience (issue #148, #277/INV-86) ==="
 # ---------------------------------------------------------------------------
+# [INV-86, #277] CONTRACT CHANGE: fetch_pr_for_issue now binds by GitHub's parsed
+# close linkage (`closingIssuesReferences`), NOT by a `#N` body mention (which
+# bound an issue to a cross-referencing sibling PR). The #148 invariant under
+# test here is unchanged: a `.body == null` sibling must not abort the jq filter
+# and silently hide the genuinely-linked PR. The fixtures are updated to carry
+# `closingIssuesReferences` (the new binding signal) while keeping the null-body
+# sibling that exercises the #148 resilience.
 
-# TC-FETCH-PR-001: regression — null-body PR + matching PR. Pre-fix this
-# returns "" because jq aborts on the null body.
-_MOCK_PR_LIST_JSON='[{"number":1,"body":null},{"number":2,"body":"Closes #145 in this PR"}]'
+# TC-FETCH-PR-001: regression — null-body PR + close-linked PR. The null body
+# must not abort the jq filter (#148) and hide the close-linked PR.
+_MOCK_PR_LIST_JSON='[{"number":1,"body":null,"closingIssuesReferences":[],"headRefName":"x"},{"number":2,"body":"Closes #145 in this PR","closingIssuesReferences":[{"number":145}],"headRefName":"fix/issue-145"}]'
 out=$(fetch_pr_for_issue 145 "number,body" 2>/dev/null)
-assert_eq "TC-FETCH-PR-001 null-body sibling does not hide the matching PR" "2" "$(extract_number "$out")"
+assert_eq "TC-FETCH-PR-001 null-body sibling does not hide the close-linked PR" "2" "$(extract_number "$out")"
 
-# TC-FETCH-PR-002: only PR has null body, no match — must be empty.
-_MOCK_PR_LIST_JSON='[{"number":1,"body":null}]'
+# TC-FETCH-PR-002: only PR has null body, no close linkage / branch — empty.
+_MOCK_PR_LIST_JSON='[{"number":1,"body":null,"closingIssuesReferences":[],"headRefName":"x"}]'
 out=$(fetch_pr_for_issue 145 "number,body" 2>/dev/null)
-assert_eq "TC-FETCH-PR-002 null-body only, no match → empty" "" "$out"
+assert_eq "TC-FETCH-PR-002 null-body only, no link → empty" "" "$out"
 
-# TC-FETCH-PR-003: baseline — all bodies non-null, one matches.
-_MOCK_PR_LIST_JSON='[{"number":1,"body":"unrelated"},{"number":2,"body":"Fixes #145"}]'
+# TC-FETCH-PR-003: baseline — all bodies non-null, one close-linked.
+_MOCK_PR_LIST_JSON='[{"number":1,"body":"unrelated","closingIssuesReferences":[],"headRefName":"x"},{"number":2,"body":"Fixes #145","closingIssuesReferences":[{"number":145}],"headRefName":"fix/issue-145"}]'
 out=$(fetch_pr_for_issue 145 "number,body" 2>/dev/null)
-assert_eq "TC-FETCH-PR-003 all bodies non-null, one matches" "2" "$(extract_number "$out")"
+assert_eq "TC-FETCH-PR-003 all bodies non-null, one close-linked" "2" "$(extract_number "$out")"
 
-# TC-FETCH-PR-004: all bodies non-null, none match.
-_MOCK_PR_LIST_JSON='[{"number":1,"body":"unrelated"}]'
+# TC-FETCH-PR-004: all bodies non-null, none link.
+_MOCK_PR_LIST_JSON='[{"number":1,"body":"unrelated","closingIssuesReferences":[],"headRefName":"x"}]'
 out=$(fetch_pr_for_issue 145 "number,body" 2>/dev/null)
-assert_eq "TC-FETCH-PR-004 all bodies non-null, none match → empty" "" "$out"
+assert_eq "TC-FETCH-PR-004 all bodies non-null, none link → empty" "" "$out"
 
-# TC-FETCH-PR-005: trailing-`#NNN` body match alongside null-body sibling.
-_MOCK_PR_LIST_JSON='[{"number":1,"body":null},{"number":2,"body":"closes #145"}]'
+# TC-FETCH-PR-005: close-linked match alongside a null-body sibling.
+_MOCK_PR_LIST_JSON='[{"number":1,"body":null,"closingIssuesReferences":[],"headRefName":"x"},{"number":2,"body":"closes #145","closingIssuesReferences":[{"number":145}],"headRefName":"fix/issue-145"}]'
 out=$(fetch_pr_for_issue 145 "number,body" 2>/dev/null)
-assert_eq "TC-FETCH-PR-005 trailing #NNN match, null sibling" "2" "$(extract_number "$out")"
+assert_eq "TC-FETCH-PR-005 close-linked match, null sibling" "2" "$(extract_number "$out")"
 
-# TC-FETCH-PR-006: substring guard — `#1450` must NOT match issue 145.
-_MOCK_PR_LIST_JSON='[{"number":1,"body":null},{"number":2,"body":"see #1450 for context"}]'
+# TC-FETCH-PR-006: substring guard — a PR that closes #1450 (and merely mentions
+# #145) must NOT bind issue 145. Boundary protected by close linkage itself.
+_MOCK_PR_LIST_JSON='[{"number":1,"body":null,"closingIssuesReferences":[],"headRefName":"x"},{"number":2,"body":"see #1450 / #145 for context","closingIssuesReferences":[{"number":1450}],"headRefName":"fix/issue-1450"}]'
 out=$(fetch_pr_for_issue 145 "number,body" 2>/dev/null)
-assert_eq "TC-FETCH-PR-006 #1450 must not match #145 (boundary)" "" "$out"
+assert_eq "TC-FETCH-PR-006 #1450 close-linked PR must not bind #145 (boundary)" "" "$out"
 
 # ---------------------------------------------------------------------------
 echo ""

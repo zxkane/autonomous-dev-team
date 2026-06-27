@@ -26,6 +26,22 @@ set -euo pipefail
 MAX_RETRIES="${MAX_RETRIES:-3}"
 MAX_CONCURRENT="${MAX_CONCURRENT:-5}"
 
+# [INV-86] Authoritative PR↔issue resolution (resolve_pr_for_issue /
+# verify_pr_closes_issue) lives in lib-pr-linkage.sh so the review wrapper —
+# which does NOT source this heavy lib — can resolve PRs identically. Source it
+# from the real skill tree (readlink -f, the LIB_DIR pattern) so a standalone
+# unit test that sources only lib-dispatch.sh still gets the delegate target.
+# Idempotent (re-source is harmless).
+if ! declare -F resolve_pr_for_issue >/dev/null 2>&1; then
+  _ld_self="${BASH_SOURCE[0]:-$0}"
+  _ld_dir="$(cd "$(dirname "$(readlink -f "$_ld_self")")" && pwd 2>/dev/null)" || _ld_dir=""
+  if [ -n "$_ld_dir" ] && [ -r "${_ld_dir}/lib-pr-linkage.sh" ]; then
+    # shellcheck source=lib-pr-linkage.sh
+    source "${_ld_dir}/lib-pr-linkage.sh"
+  fi
+  unset _ld_self _ld_dir
+fi
+
 # ---------------------------------------------------------------------------
 # Concurrency
 # ---------------------------------------------------------------------------
@@ -1008,13 +1024,13 @@ handle_completed_session_routing() {
       #
       # Compute the PR HEAD and the last-reviewed HEAD once for both sub-checks.
       local _np_pr_info _np_current_head _np_last_head
-      # `body` MUST be in the field list: fetch_pr_for_issue's jq filters on
-      # `.body` (`select(.body != null and (.body | test("#N")))`), so omitting
-      # `body` makes `gh pr list --json number,headRefOid` return objects with no
-      # `.body` → the filter sees null → empty result → `_np_current_head` stays
-      # blank → both INV-85 guards silently no-op and dev-new loops as before
-      # (#274 review [P1]). The unit tests mock fetch_pr_for_issue, so this is
-      # only observable against the real `gh`.
+      # We read `.headRefOid` here. `body` stays in the field list for
+      # back-compat (it is carried through to the echoed object and a #274
+      # source-pin grep test asserts the literal field list), but under
+      # [INV-86] (#277) `fetch_pr_for_issue` binds by GitHub's parsed
+      # `closingIssuesReferences` — NOT a `.body | test("#N")` mention — so
+      # `body` is no longer load-bearing for the resolution that returns this
+      # object. The unit tests mock fetch_pr_for_issue.
       _np_pr_info=$(fetch_pr_for_issue "$issue_num" "number,headRefOid,body")
       _np_current_head=$(jq -r '.headRefOid // empty' <<<"$_np_pr_info" 2>/dev/null)
       _np_last_head=$(last_reviewed_head "$issue_num")
@@ -1468,13 +1484,18 @@ get_pid() {
 # line) with the requested fields, or empty string if no PR found.
 # `fields` is a comma-separated list passed to `--json` (e.g.
 # "number,body,updatedAt" or "number,body,headRefOid").
+#
+# [INV-86] Delegates to the authoritative resolver in lib-pr-linkage.sh — binds
+# by GitHub's parsed close linkage (`closingIssuesReferences`) with a
+# branch-name fallback, NOT by a loose `#N` body mention (which bound an issue
+# to a cross-referencing sibling PR — issue #277). The function name is
+# preserved so the spec guard-map anchor (pr-exists-for-issue / no-pr-for-issue
+# → fetch_pr_for_issue) keeps resolving, and all existing callers
+# (review_near_success, handle_pending_dev_pr_exists, INV-85's body-bearing
+# fetch) keep their echo-JSON-object contract unchanged.
 fetch_pr_for_issue() {
   local issue_num="$1" fields="$2"
-  # `.body` is null when a PR has an empty description. Guard before
-  # `test()` — `null | test(...)` aborts the jq filter, drops to stderr, and
-  # silently hides any matching PR (issue #148).
-  gh pr list --repo "$REPO" --state open --json "$fields" \
-    -q "[.[] | select(.body != null and ((.body | test(\"#${issue_num}[^0-9]\")) or (.body | test(\"#${issue_num}$\"))))] | .[0] // empty"
+  resolve_pr_for_issue "$issue_num" "$fields"
 }
 
 # Step 5a: returns 0 if every CI check is SUCCESS (and at least one exists).

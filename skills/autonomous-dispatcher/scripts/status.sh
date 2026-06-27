@@ -89,8 +89,11 @@ LABELS="$(jq -r '[.labels[].name] | join(" ")' <<<"$ISSUE_JSON" 2>/dev/null || e
 has_label() { [[ " $LABELS " == *" $1 "* ]]; }
 
 # Open PR + reviewDecision (via the dispatcher's own fetch_pr_for_issue helper).
-# `body` MUST be in the field list — fetch_pr_for_issue's -q filters on
-# `.body` matching `#<issue>` (#148), so omitting it returns nothing.
+# Under [INV-86] (#277) fetch_pr_for_issue binds by GitHub's parsed
+# `closingIssuesReferences` (not a `.body` mention), so `body` is no longer
+# required for resolution; it is retained in the field list for parity with the
+# dispatcher's other fetch_pr_for_issue calls (harmless — carried into the
+# echoed object, unused here).
 PR_JSON="$(fetch_pr_for_issue "$ISSUE_NUMBER" "number,reviewDecision,mergeable,state,body" 2>/dev/null || echo "")"
 PR_NUMBER=""; PR_REVIEW_DECISION=""; PR_MERGEABLE=""
 if [[ -n "$PR_JSON" ]]; then
