@@ -718,15 +718,18 @@ no-op grep. (Exercising all 13 is not possible on a GitHub-only HEAD — 6 branc
 do not exist — and fabricating a test-only consumer would violate §4.3's
 no-behavior-change anchor; the waiver + tripwire is the honest maximum.)
 
-CI execution: the guard RUNS in CI through the existing `tests/unit/test-*.sh`
-loop — `tests/unit/test-provider-cutover.sh` invokes `check-provider-cutover.sh`
-against the real repo, so a regression goes red in the hermetic-unit job with NO
-dedicated workflow step. This is the same accommodation [INV-83] uses, because the
-scoped GitHub-App token **cannot push `.github/workflows/`** (`invariants.md`
-[INV-83] status note). A dedicated `spec-drift` lint step + `shellcheck -S error`
-entries for the new files are an OPTIONAL operator enhancement: the exact snippet
-ships in the #286 PR body for a maintainer with `workflows` permission to apply —
-the guard's CI execution does not depend on it.
+CI wiring: the intended `.github/workflows/ci.yml` change adds a dedicated
+`check-provider-cutover.sh` step to the credential-free `spec-drift` job (sibling
+to `check-spec-drift.sh`) and adds `check-provider-cutover.sh` +
+`tests/unit/test-provider-cutover.sh` + `tests/unit/test-provider-caps-branches.sh`
+to the hermetic `shellcheck -S error` file list. **The dev-side scoped GitHub-App
+token CANNOT push `.github/workflows/`** ([INV-83]: a `git push` of the workflow
+hunk is rejected `without 'workflows' permission`), so the exact 2-hunk diff ships
+in the #286 PR body for a **maintainer to apply** — it is a required part of the
+deliverable, not optional polish. Until then the guard still executes in CI
+through the existing `tests/unit/test-*.sh` loop: `test-provider-cutover.sh`
+invokes `check-provider-cutover.sh` against the real repo, so a regression goes
+red in the hermetic-unit job even before the dedicated step lands.
 
 ---
 
