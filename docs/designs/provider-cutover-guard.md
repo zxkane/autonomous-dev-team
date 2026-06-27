@@ -22,6 +22,20 @@ caller layer outside `scripts/providers/`.
 >   7 live caps are EXERCISED (3 run end-to-end against the degraded fixture); the
 >   6 are WAIVED behind a fail-on-wiring tripwire; headline `exercised=7 waived=6
 >   total=13`.
+>
+> **Revision (review round 2, codex 2 BLOCKING findings).**
+> - **R2-F1**: the scan now RECURSES (`find -L` over every `*.sh` at any depth) —
+>   the old top-level + `providers/`-only glob missed `adapters/*.sh` and any
+>   nested subdir. `-L` keeps the tracked-but-symlinked scripts
+>   (`mark-issue-checkbox.sh`, `reply-to-comments.sh`, `upload-screenshot.sh`,
+>   `gh-as-user.sh`) in scope (a plain `-type f` would skip a symlink and silently
+>   drop their gh sites). Baseline regrew to 82 sigs / 104 occ.
+> - **R2-F2**: `check-provider-cutover.sh` is NO LONGER wholesale-allowlisted — it
+>   is scanned like any file and its own `gh `-mentioning lines are baselined
+>   survivors, so a real `gh api user` added to the checker now trips the guard.
+>   Regression tests: TC-CUTOVER-015 (nested `adapters/codex.sh`), TC-CUTOVER-016
+>   (symlinked `mark-issue-checkbox.sh`), TC-CUTOVER-014 (rewritten: a new gh in
+>   the checker FAILs).
 
 ## Reality check that shapes this design (the load-bearing decision)
 

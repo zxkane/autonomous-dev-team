@@ -91,12 +91,19 @@ command -v jq >/dev/null 2>&1 || { echo "check-provider-cutover.sh: jq is requir
 # itself is TREE-WIDE per AC #41.)
 CALLER_FILES=(lib-dispatch.sh autonomous-dev.sh autonomous-review.sh)
 # Allowlisted gh-holding files: the auth/refresh wrappers + the remote-SSM
-# transport (spec §8: GitHub auth is unchanged; the wrappers are allowlisted, not
-# refactored), PLUS this guard script itself (its own source mentions `gh ` in its
-# regex/comments/messages — it is the lint, not a caller). `gh` is the project-side
-# wrapper SYMLINK (scripts/gh → gh-with-token-refresh.sh): allowlisted by NAME but
-# gitignored/operator-local, so it has no committed file to scan or stat.
-ALLOWLISTED_FILES=(gh gh-with-token-refresh.sh gh-app-token.sh gh-as-user.sh dispatch-remote-aws-ssm.sh check-provider-cutover.sh)
+# transport ONLY (spec §8: GitHub auth is unchanged; the wrappers are allowlisted,
+# not refactored). `gh` is the project-side wrapper SYMLINK (scripts/gh →
+# gh-with-token-refresh.sh): allowlisted by NAME but gitignored/operator-local, so
+# it has no committed file to scan or stat.
+#
+# NOTE: this guard script itself is NOT allowlisted (#286 review round 2 [P1] #2).
+# Wholesale-exempting it meant a real `gh api user` could be added to the checker
+# without tripping. Instead the checker IS scanned like any other file: its own
+# legitimate `gh `-mentioning lines (the consuming-boundary regex literal + the
+# PASS/FAIL messages) are recorded in the baseline as ordinary surviving sites, so
+# a NEW raw gh added to the checker is unbaselined → FAILs. (Its comment lines are
+# skipped by the detector; the baseline'd lines are the few non-comment ones.)
+ALLOWLISTED_FILES=(gh gh-with-token-refresh.sh gh-app-token.sh gh-as-user.sh dispatch-remote-aws-ssm.sh)
 
 # Files that need not exist on disk to be a valid allowlist entry (runtime symlink).
 ALLOWLIST_NO_STAT=(gh)
@@ -107,12 +114,24 @@ info() { echo "  $*"; }
 
 in_list() { local needle="$1"; shift; local e; for e in "$@"; do [ "$e" = "$needle" ] && return 0; done; return 1; }
 
-# Every *.sh in the scripts tree + providers/*.sh, as bare relative paths
-# (basenames for top-level, "providers/<name>" for provider files).
+# Every *.sh ANYWHERE under the scripts tree, as paths RELATIVE to SCRIPTS_DIR
+# ("autonomous-dev.sh", "adapters/codex.sh", "providers/itp-github.sh", and any
+# future nested subdir). RECURSIVE (find), so a raw gh under adapters/ or any new
+# subdirectory is discovered — a top-level + providers/-only glob silently missed
+# them (#286 review round 2 [P1] #1). NUL-delimited to survive odd names; emits a
+# leading "./" that we strip so the relative path matches the allowlist/baseline.
 tree_sh_files() {
-  local f
-  for f in "$SCRIPTS_DIR"/*.sh; do [ -f "$f" ] && printf '%s\n' "${f##*/}"; done
-  for f in "$SCRIPTS_DIR"/providers/*.sh; do [ -f "$f" ] && printf 'providers/%s\n' "${f##*/}"; done
+  [ -d "$SCRIPTS_DIR" ] || return 0
+  # `find -L` FOLLOWS symlinks: several tracked scripts (mark-issue-checkbox.sh,
+  # reply-to-comments.sh, upload-screenshot.sh, gh-as-user.sh) are committed as
+  # symlinks into sibling skill dirs but still live in skills/autonomous-dispatcher/
+  # scripts/ and carry raw gh — a plain `find -type f` (no -L) would SKIP them
+  # (a symlink is not -type f) and silently drop their gh sites from the scan. The
+  # printed path is the symlink's own relative path (its basename), which is the
+  # baseline/allowlist key. No symlink target here points back inside SCRIPTS_DIR,
+  # so -L introduces no cycle.
+  ( cd "$SCRIPTS_DIR" && find -L . -type f -name '*.sh' -print ) 2>/dev/null \
+    | sed 's#^\./##' | LC_ALL=C sort
 }
 
 # Resolve the caller-layer file list (literals + lib-review-*.sh glob), bare
@@ -194,7 +213,7 @@ if [ "$GENERATE" -eq 1 ]; then
   # the surviving-site freeze.
   jq -n --argjson sites "$sites_json" \
     '{
-      _comment: "Baseline of raw-gh sites surviving across the dispatcher scripts tree (EXCLUDING providers/ and the allowlisted files) after the partial pluggable-providers migration (#281-#285). check-provider-cutover.sh ([INV-91]) FAILs any tree raw-gh NOT under providers/, NOT an allowlisted file, and NOT accounted for here — naming the exact file:line. Regenerate with: bash check-provider-cutover.sh --generate-baseline. Migration PRs that remove a gh leaf MUST shrink this manifest in the same PR; the guard becomes a strict from-zero ban once this is empty. The file-allowlist (scripts/gh, gh-with-token-refresh.sh, gh-app-token.sh, gh-as-user.sh, dispatch-remote-aws-ssm.sh, check-provider-cutover.sh) lives in the script, not here.",
+      _comment: "Baseline of raw-gh sites surviving across the dispatcher scripts tree (RECURSIVE; EXCLUDING providers/ and the allowlisted files) after the partial pluggable-providers migration (#281-#285). check-provider-cutover.sh ([INV-91]) FAILs any tree raw-gh NOT under providers/, NOT an allowlisted file, and NOT accounted for here — naming the exact file:line. The checker script itself is scanned (not allowlisted), so its own non-comment gh-mentioning lines (the consuming-boundary regex + PASS/FAIL messages) appear here as ordinary survivors. Regenerate with: bash check-provider-cutover.sh --generate-baseline. Migration PRs that remove a gh leaf MUST shrink this manifest in the same PR; the guard becomes a strict from-zero ban once this is empty. The file-allowlist (scripts/gh, gh-with-token-refresh.sh, gh-app-token.sh, gh-as-user.sh, dispatch-remote-aws-ssm.sh) lives in the script, not here.",
       surviving_sites: $sites
     }'
   exit 0

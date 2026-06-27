@@ -23,7 +23,9 @@ Drives `check-provider-cutover.sh` against scratch copies via the
 | TC-CUTOVER-011 | `--generate-baseline` emits valid JSON the checker then accepts (generator ⇄ checker consistent by construction) | round-trip PASS |
 | TC-CUTOVER-012 | **(F2/AC #41)** Inject a NEW `gh` into a NON-caller dispatcher script (`setup-labels.sh`) | `exit 1`, caught tree-wide, names `setup-labels.sh:LINE` |
 | TC-CUTOVER-013 | A NEW `gh` UNDER `providers/` (the migration target) | does NOT trip (`exit 0`) |
-| TC-CUTOVER-014 | The guard EXCLUDES ITSELF — its own `gh`-mentioning source must not trip | self-allowlisted |
+| TC-CUTOVER-014 | **(R2-F2)** The guard is NOT wholesale-allowlisted — a NEW `gh api user` in the checker itself | `exit 1`, names `check-provider-cutover.sh:LINE` (clean tree still PASSES — its legit gh lines are baselined) |
+| TC-CUTOVER-015 | **(R2-F1)** Inject a NEW `gh` into a NESTED `adapters/codex.sh` | `exit 1`, caught by the recursive scan, names `adapters/codex.sh:LINE` |
+| TC-CUTOVER-016 | **(R2-F1)** Inject a NEW `gh` into a tracked-but-symlinked script (`mark-issue-checkbox.sh`) | `exit 1` (`find -L` keeps symlinked scripts in scope) |
 
 > Note (F1/AC #2): TC-CUTOVER-002 asserts the `::error::` names the exact
 > `file:line` (`lib-dispatch.sh:NNNN`), not just the file.

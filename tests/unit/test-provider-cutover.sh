@@ -28,13 +28,18 @@ command -v jq >/dev/null 2>&1 || { echo "jq required"; exit 1; }
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-# A fresh scratch scripts dir (real *.sh + providers/) per mutating test, so
-# injections never touch the committed tree.
+# A fresh scratch scripts dir per mutating test, so injections never touch the
+# committed tree. Mirrors top-level *.sh PLUS the nested subdirs (providers/,
+# adapters/) — `cp -rL` dereferences the symlinked tracked scripts
+# (mark-issue-checkbox.sh etc.) into real files so the scratch tree is a faithful,
+# self-contained copy the recursive `find -L` scan walks identically to the repo.
 fresh_scratch() {
-  local d="$WORK/scratch.$1"
+  local d="$WORK/scratch.$1" sub
   rm -rf "$d"; mkdir -p "$d"
-  cp "$SCRIPTS"/*.sh "$d/" 2>/dev/null
-  [ -d "$SCRIPTS/providers" ] && cp -r "$SCRIPTS/providers" "$d/providers"
+  cp -L "$SCRIPTS"/*.sh "$d/" 2>/dev/null
+  for sub in providers adapters; do
+    [ -d "$SCRIPTS/$sub" ] && cp -rL "$SCRIPTS/$sub" "$d/$sub" 2>/dev/null
+  done
   printf '%s' "$d"
 }
 
@@ -222,15 +227,62 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-echo "=== TC-CUTOVER-014: the guard EXCLUDES ITSELF (its own gh-mentioning source must not trip) ==="
+echo "=== TC-CUTOVER-014: the guard is NOT wholesale-allowlisted — a NEW raw gh in the checker itself FAILS (round 2 [P1] #2) ==="
 # ---------------------------------------------------------------------------
-# check-provider-cutover.sh's own source contains `gh ` (its regex/comments/msgs).
-# It is allowlisted by name; a clean tree (which includes the guard script) PASSES
-# — already covered by TC-001, but assert the script is in the allowlist explicitly.
-if grep -Eq 'ALLOWLISTED_FILES=\(.*check-provider-cutover\.sh' <<<"$src"; then
-  ok "check-provider-cutover.sh allowlists itself (its own 'gh ' mentions are the lint, not a caller)"
+# The checker's own `gh `-mentioning lines (its regex literal + PASS/FAIL messages)
+# are recorded in the baseline as ordinary survivors, NOT exempted by file. So a
+# clean tree PASSES (those lines are baselined — TC-001), but a genuinely-new raw
+# gh invocation added to the checker is unbaselined → FAILs. (Previously the whole
+# file was allowlisted, so a `gh api user` backdoor in the checker passed silently.)
+if grep -Eq 'ALLOWLISTED_FILES=\([^)]*check-provider-cutover\.sh' <<<"$src"; then
+  bad "check-provider-cutover.sh is STILL wholesale-allowlisted — a raw gh in the checker would pass silently (round 2 [P1] #2 not fixed)"
 else
-  bad "the guard does NOT allowlist itself — its own source would trip the scan"
+  ok "check-provider-cutover.sh is NOT in ALLOWLISTED_FILES (it is scanned like any file; its legit gh lines are baselined)"
+fi
+S="$(fresh_scratch 014)"
+# shellcheck disable=SC2016
+printf '\ngh_backdoor() { gh api user; }\n' >> "$S/check-provider-cutover.sh"
+out="$(bash "$CHECK" --scripts-dir "$S" --baseline "$BASELINE" 2>&1)"; rc=$?
+if [[ "$rc" -ne 0 ]] && grep -Eq 'check-provider-cutover\.sh:[0-9]+' <<<"$out" && grep -q 'gh api user' <<<"$out"; then
+  ok "a NEW 'gh api user' added to the checker itself → exit non-zero naming check-provider-cutover.sh:LINE"
+else
+  bad "a NEW raw gh in the checker was NOT caught (rc=$rc) — the self-exemption is still too broad"
+fi
+
+# ---------------------------------------------------------------------------
+echo "=== TC-CUTOVER-015: NESTED subdir — a NEW raw-gh in adapters/*.sh is discovered (recursive scan, round 2 [P1] #1) ==="
+# ---------------------------------------------------------------------------
+# tree_sh_files() must recurse: a raw gh under adapters/ (or any nested subdir)
+# was invisible to the old top-level + providers/-only glob. Inject into a real
+# nested adapter and confirm the recursive scan catches it, naming the nested path.
+S="$(fresh_scratch 015)"
+if [ -f "$S/adapters/codex.sh" ]; then
+  # shellcheck disable=SC2016
+  printf '\nnested_inject() { gh issue view 123 --json title; }\n' >> "$S/adapters/codex.sh"
+  out="$(bash "$CHECK" --scripts-dir "$S" --baseline "$BASELINE" 2>&1)"; rc=$?
+  if [[ "$rc" -ne 0 ]] && grep -Eq 'adapters/codex\.sh:[0-9]+' <<<"$out"; then
+    ok "NEW raw-gh in adapters/codex.sh → caught by the recursive scan naming adapters/codex.sh:LINE"
+  else
+    bad "nested-subdir raw-gh NOT caught (rc=$rc) — scan is not recursing into adapters/"
+  fi
+else
+  bad "scratch tree missing adapters/codex.sh — fresh_scratch did not copy the nested subdir"
+fi
+
+# ---------------------------------------------------------------------------
+echo "=== TC-CUTOVER-016: symlinked tracked scripts (mark-issue-checkbox.sh) stay in scope (find -L) ==="
+# ---------------------------------------------------------------------------
+# Several tracked scripts are committed as symlinks; `find -L` must still scan
+# them (a plain -type f would skip a symlink → drop its gh sites). Inject a NEW gh
+# and confirm it is caught.
+S="$(fresh_scratch 016)"
+# shellcheck disable=SC2016
+printf '\nsym_inject() { gh issue comment 1 --body z; }\n' >> "$S/mark-issue-checkbox.sh"
+out="$(bash "$CHECK" --scripts-dir "$S" --baseline "$BASELINE" 2>&1)"; rc=$?
+if [[ "$rc" -ne 0 ]] && grep -Eq 'mark-issue-checkbox\.sh:[0-9]+' <<<"$out"; then
+  ok "NEW raw-gh in the (symlinked) mark-issue-checkbox.sh → caught (find -L keeps symlinked scripts in scope)"
+else
+  bad "symlinked-script raw-gh NOT caught (rc=$rc) — find -L regressed"
 fi
 
 # ===========================================================================

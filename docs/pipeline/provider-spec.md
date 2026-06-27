@@ -656,19 +656,25 @@ re-entering the provider-neutral caller layer (`lib-dispatch.sh`,
 is **`check-provider-cutover.sh`** ([INV-91], issue #286) — a credential-free
 grep/jq lint modeled on `check-spec-drift.sh`:
 
-- **Scan** the WHOLE dispatcher scripts tree (every `*.sh` + `providers/*.sh`) for
-  a raw `gh ` token via the RE2-safe consuming boundary `(^|[^A-Za-z_-])gh `
-  (never a look-behind — `gh --jq` runs Go RE2; see `invariants.md`). Scanning the
-  whole tree — not just the caller layer — is #286 AC #41 ("every surviving raw-gh
-  in `skills/autonomous-dispatcher/scripts/` resolves to providers/ or an
-  allowlisted file"), so dispatcher/util scripts like `setup-labels.sh`,
-  `lib-auth.sh`, `dispatcher-tick.sh` are in scope too. A drift FAILs LOUD naming
-  the exact `file:line` (AC #2).
-- **Allowlist** (declarative, in the script): the auth/transport wrappers
+- **Scan** the WHOLE dispatcher scripts tree **recursively** (`find -L` over every
+  `*.sh` at any depth — top-level, `adapters/`, `providers/`, and any future nested
+  subdir) for a raw `gh ` token via the RE2-safe consuming boundary
+  `(^|[^A-Za-z_-])gh ` (never a look-behind — `gh --jq` runs Go RE2; see
+  `invariants.md`). Recursing the whole tree — not just top-level + the caller
+  layer — is #286 AC #41 ("every surviving raw-gh in
+  `skills/autonomous-dispatcher/scripts/` resolves to providers/ or an allowlisted
+  file"), so dispatcher/util scripts (`setup-labels.sh`, `lib-auth.sh`,
+  `dispatcher-tick.sh`) AND nested `adapters/*.sh` are in scope. `-L` follows
+  symlinks so the tracked-but-symlinked scripts (`mark-issue-checkbox.sh`,
+  `reply-to-comments.sh`, `upload-screenshot.sh`, `gh-as-user.sh`) stay scanned. A
+  drift FAILs LOUD naming the exact `file:line` (AC #2).
+- **Allowlist** (declarative, in the script): ONLY the auth/transport wrappers
   `scripts/gh`, `gh-with-token-refresh.sh`, `gh-app-token.sh`, `gh-as-user.sh`,
-  `dispatch-remote-aws-ssm.sh` (§8: GitHub auth is unchanged, NOT refactored), the
-  guard script itself (its own source mentions `gh `), + the `providers/` tree
-  (the legitimate home of host I/O). Everything else must be a baselined survivor.
+  `dispatch-remote-aws-ssm.sh` (§8: GitHub auth is unchanged, NOT refactored) +
+  the `providers/` tree (the legitimate home of host I/O). The guard script is
+  **NOT** allowlisted (round 2 [P1] #2): it is scanned like any file and its own
+  `gh `-mentioning lines are baselined survivors, so a NEW raw `gh` added to the
+  checker trips the guard. Everything else must be a baselined survivor.
 - **Baseline-anchored** (NOT a from-zero ban yet): the depends-on issues
   (#281–#285) migrated only the §3.1/§3.2 verb leaves, so the caller layer still
   carries the surviving raw-gh the first deliverable did not migrate. Those are

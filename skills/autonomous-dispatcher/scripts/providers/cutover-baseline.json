@@ -1,5 +1,5 @@
 {
-  "_comment": "Baseline of raw-gh sites surviving across the dispatcher scripts tree (EXCLUDING providers/ and the allowlisted files) after the partial pluggable-providers migration (#281-#285). check-provider-cutover.sh ([INV-91]) FAILs any tree raw-gh NOT under providers/, NOT an allowlisted file, and NOT accounted for here — naming the exact file:line. Regenerate with: bash check-provider-cutover.sh --generate-baseline. Migration PRs that remove a gh leaf MUST shrink this manifest in the same PR; the guard becomes a strict from-zero ban once this is empty. The file-allowlist (scripts/gh, gh-with-token-refresh.sh, gh-app-token.sh, gh-as-user.sh, dispatch-remote-aws-ssm.sh, check-provider-cutover.sh) lives in the script, not here.",
+  "_comment": "Baseline of raw-gh sites surviving across the dispatcher scripts tree (RECURSIVE; EXCLUDING providers/ and the allowlisted files) after the partial pluggable-providers migration (#281-#285). check-provider-cutover.sh ([INV-91]) FAILs any tree raw-gh NOT under providers/, NOT an allowlisted file, and NOT accounted for here — naming the exact file:line. The checker script itself is scanned (not allowlisted), so its own non-comment gh-mentioning lines (the consuming-boundary regex + PASS/FAIL messages) appear here as ordinary survivors. Regenerate with: bash check-provider-cutover.sh --generate-baseline. Migration PRs that remove a gh leaf MUST shrink this manifest in the same PR; the guard becomes a strict from-zero ban once this is empty. The file-allowlist (scripts/gh, gh-with-token-refresh.sh, gh-app-token.sh, gh-as-user.sh, dispatch-remote-aws-ssm.sh) lives in the script, not here.",
   "surviving_sites": [
     {
       "count": 1,
@@ -180,6 +180,36 @@
       "count": 1,
       "file": "autonomous-review.sh",
       "content": "log \"WARNING: gh api user failed; verdict detector falling back to session-id binding. stderr (truncated): ${_bot_login_raw:0:200}\""
+    },
+    {
+      "count": 1,
+      "file": "check-provider-cutover.sh",
+      "content": "ALLOWLISTED_FILES=(gh gh-with-token-refresh.sh gh-app-token.sh gh-as-user.sh dispatch-remote-aws-ssm.sh)"
+    },
+    {
+      "count": 1,
+      "file": "check-provider-cutover.sh",
+      "content": "_comment: \"Baseline of raw-gh sites surviving across the dispatcher scripts tree (RECURSIVE; EXCLUDING providers/ and the allowlisted files) after the partial pluggable-providers migration (#281-#285). check-provider-cutover.sh ([INV-91]) FAILs any tree raw-gh NOT under providers/, NOT an allowlisted file, and NOT accounted for here — naming the exact file:line. The checker script itself is scanned (not allowlisted), so its own non-comment gh-mentioning lines (the consuming-boundary regex + PASS/FAIL messages) appear here as ordinary survivors. Regenerate with: bash check-provider-cutover.sh --generate-baseline. Migration PRs that remove a gh leaf MUST shrink this manifest in the same PR; the guard becomes a strict from-zero ban once this is empty. The file-allowlist (scripts/gh, gh-with-token-refresh.sh, gh-app-token.sh, gh-as-user.sh, dispatch-remote-aws-ssm.sh) lives in the script, not here.\","
+    },
+    {
+      "count": 1,
+      "file": "check-provider-cutover.sh",
+      "content": "echo \"cutover-guard: PASS — no new raw gh across the dispatcher scripts tree; the migration surface is unchanged.\""
+    },
+    {
+      "count": 1,
+      "file": "check-provider-cutover.sh",
+      "content": "fail \"NEW/unbaselined raw-gh (${layer}) at ${locs:-$dfile:?}(×$dcount): '$dcontent'. Route this host I/O through an itp_*/chp_* verb (a raw gh outside providers/ is an [INV-91] cutover regression). If it is a legitimate surviving site (or a count change), regenerate providers/cutover-baseline.json (--generate-baseline).\""
+    },
+    {
+      "count": 1,
+      "file": "check-provider-cutover.sh",
+      "content": "fail \"baseline declares a raw-gh site the scanner no longer finds at this count — $bfile (×$bcount): '$bcontent'. A gh leaf was removed/changed (good — a migration landed). Shrink providers/cutover-baseline.json to match (--generate-baseline).\""
+    },
+    {
+      "count": 1,
+      "file": "check-provider-cutover.sh",
+      "content": "grep -E '(^|[^A-Za-z_-])gh ' \"$path\" 2>/dev/null | awk '"
     },
     {
       "count": 1,
