@@ -535,6 +535,19 @@ drain_agent_bot_triggers() {
   [[ -n "$AGENT_GH_TOKEN_FILE" ]] || return 0
   [[ -n "${AGENT_BOT_TRIGGER_FILE:-}" && -s "${AGENT_BOT_TRIGGER_FILE}" ]] || return 0
 
+  # [INV-87]/§4.2 review_bots capability gate (#282 review [P1]): slash-command
+  # review-bot triggers are only meaningful when the code host has a custom-slash
+  # registry. On a `review_bots=0` backend (e.g. GitLab; the degraded fake fixture)
+  # chp_trigger_bot is a no-op, so posting the triggers would be pointless and the
+  # caller would then wait for bot reviews that can never arrive. Short-circuit the
+  # whole broker here. GitHub (review_bots=1) takes the unchanged path. The cap
+  # reader degrades to "1" (today's GitHub behavior) when chp_caps is unavailable,
+  # so a lib-load failure leaves the legacy path intact.
+  if declare -F chp_caps >/dev/null 2>&1 && [[ "$(chp_caps review_bots 2>/dev/null || echo 1)" != "1" ]]; then
+    echo "[INV-87] code host review_bots=0 — skipping bot-trigger broker (no slash-command registry)." >&2
+    return 0
+  fi
+
   local gh_as_user="${_LIB_AUTH_DIR}/gh-as-user.sh"
   if [[ ! -f "$gh_as_user" ]]; then
     echo "WARN: [INV-79] agent requested bot triggers but ${gh_as_user} is absent — skipping (project has no gh-as-user.sh)." >&2

@@ -65,13 +65,30 @@ WRAPPER_CODE=$(strip_comments "$WRAPPER")
 trap 'rm -f "$WRAPPER_CODE"' EXIT
 
 # ---------------------------------------------------------------------------
-echo "=== TC-AMF-006: regression — wrapper contains zero gh issue close calls ==="
+echo "=== TC-AMF-006: regression — the ONLY gh issue close is the merge_closes_issue=0 cap-gated terminal transition ==="
 # ---------------------------------------------------------------------------
-# This is THE regression pin for issue #145. No path inside the review
-# wrapper may close the issue directly; closure happens via GitHub's
-# Closes #N keyword on PR merge.
-assert_not_grep "no 'gh issue close' calls in executable code" \
-  '^[^#]*gh +issue +close' "$WRAPPER_CODE"
+# This is THE regression pin for issue #145. On the GitHub default
+# (merge_closes_issue=1) closure happens via GitHub's `Closes #N` keyword on PR
+# merge — the wrapper MUST NOT close the issue directly. The ONE sanctioned
+# exception ([INV-87]/[M4]/§4.2, #282): a `merge_closes_issue=0` backend's merge
+# does NOT auto-transition the issue, so the success path closes it explicitly,
+# GATED behind the cap check. So: (a) AT MOST ONE executable `gh issue close`, and
+# (b) it must be the cap-gated one (a `_merge_closes != "1"` guard precedes it on
+# the same success branch), and (c) NEVER on the auto-merge-FAILURE path (#145).
+_close_count=$(grep -cE '^[^#]*gh +issue +close' "$WRAPPER_CODE" || true)
+if [[ "$_close_count" -le 1 ]]; then
+  echo -e "  ${GREEN}PASS${NC}: at most one executable 'gh issue close' (found ${_close_count})"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: more than one executable 'gh issue close' (found ${_close_count}) — #145 regression risk"
+  FAIL=$((FAIL + 1))
+fi
+# The sole close must be cap-gated: a `_merge_closes` (merge_closes_issue) guard
+# appears in the wrapper.
+if [[ "$_close_count" -eq 1 ]]; then
+  assert_grep "the gh issue close is gated on the merge_closes_issue cap" \
+    '_merge_closes.*!=.*"1"' "$WRAPPER_CODE"
+fi
 
 # Defense-in-depth: also forbid the equivalent gh issue edit --state-change
 # patterns. (gh issue edit doesn't take --state, but a future gh release

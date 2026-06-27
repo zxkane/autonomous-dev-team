@@ -223,9 +223,51 @@ if [[ -d "$FAKE_PROVIDER" ]]; then
   else
     echo -e "  ${RED}FAIL${NC}: TC-CHP-CAP-REQCHG0-LIVE submit_request_changes did NOT skip"; echo "      out: $rc_skip"; FAIL=$((FAIL+1))
   fi
+
+  # review_bots=0 branch (#282 review [P1] #1): drain_agent_bot_triggers must
+  # SHORT-CIRCUIT (no chp_trigger_bot call) on a review_bots=0 backend. Drive the
+  # real broker with the degraded fake CHP selected through the public seam.
+  bt_sentinel0=$(mktemp); btfile0=$(mktemp); printf '/q review\n' > "$btfile0"
+  env -u PROJECT_DIR REPO="$REPO" AUTONOMOUS_CONF_DIR="$COMMON_SCRIPTS" \
+      CODE_HOST=degraded AUTONOMOUS_PROVIDERS_DIR="$FAKE_PROVIDER" \
+      BTFILE="$btfile0" SENTINEL="$bt_sentinel0" \
+    bash -c '
+      log() { :; }
+      gh() { [[ "$1 $2" == "pr list" ]] && { echo 99; return 0; }; return 0; }
+      source "'"$CHP_LIB"'" 2>/dev/null
+      chp_trigger_bot() { echo "TRIGGER_HIT:$*" >> "$SENTINEL"; }   # MUST NOT be reached on review_bots=0
+      source "'"$SCRIPTS"'/lib-auth.sh" 2>/dev/null
+      AGENT_GH_TOKEN_FILE=/dev/null AGENT_BOT_TRIGGER_FILE="$BTFILE" \
+        drain_agent_bot_triggers 282 "'"$REPO"'" "/q review" >/dev/null 2>&1
+    '
+  bt0=$(cat "$bt_sentinel0"); rm -f "$btfile0" "$bt_sentinel0"
+  if [[ -z "$bt0" ]]; then
+    echo -e "  ${GREEN}PASS${NC}: TC-CHP-CAP-BOTS0-LIVE drain_agent_bot_triggers short-circuits when review_bots=0 (no chp_trigger_bot)"; PASS=$((PASS+1))
+  else
+    echo -e "  ${RED}FAIL${NC}: TC-CHP-CAP-BOTS0-LIVE drain still posted on review_bots=0: $bt0"; FAIL=$((FAIL+1))
+  fi
 else
   echo -e "  ${RED}FAIL${NC}: degraded fake provider fixture missing at $FAKE_PROVIDER (expected from #280)"
   FAIL=$((FAIL+1))
+fi
+
+# merge_closes_issue=0 + review_bots=0 caller branches are wired in
+# autonomous-review.sh (the merge success path + the mandatory-bot-review wait
+# gate). Source-grep the wrapper for the cap-gated branches (the merge path is
+# too deep to drive in isolation; this pins the branch exists — its runtime
+# correctness is the no-behavior-change anchor for GitHub's cap=1 path).
+echo "=== caps=0 caller branches present in autonomous-review.sh (§4.2) ==="
+REVIEW_WRAPPER="$SCRIPTS/autonomous-review.sh"
+if grep -qE 'chp_caps merge_closes_issue' "$REVIEW_WRAPPER" \
+   && grep -qE 'gh issue close .*ISSUE_NUMBER' "$REVIEW_WRAPPER"; then
+  echo -e "  ${GREEN}PASS${NC}: TC-CHP-CAP-MCI0-BRANCH merge path closes the issue when merge_closes_issue!=1"; PASS=$((PASS+1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-CHP-CAP-MCI0-BRANCH no merge_closes_issue=0 post-merge transition in the wrapper"; FAIL=$((FAIL+1))
+fi
+if grep -qE '_review_bots_cap' "$REVIEW_WRAPPER"; then
+  echo -e "  ${GREEN}PASS${NC}: TC-CHP-CAP-BOTS0-GATE mandatory-bot-review wait is gated on review_bots==1"; PASS=$((PASS+1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-CHP-CAP-BOTS0-GATE bot-review wait not gated on the review_bots cap"; FAIL=$((FAIL+1))
 fi
 
 # ===========================================================================

@@ -3157,7 +3157,19 @@ if [[ "$PASSED_VERDICT" == "true" ]]; then
   # REVIEW_BOTS is configured AND scoping is armed (in PAT/no-scope mode the agent
   # triggers + polls in-run, so its FAIL already covers a missing bot review). Best-
   # effort: missing_bot_reviews counts a gh failure as MISSING (fail-closed → block).
-  if [[ -n "${REVIEW_BOTS_VALIDATED:-}" && -n "${AGENT_GH_TOKEN_FILE:-}" ]] \
+  #
+  # [INV-87]/§4.2 review_bots capability gate (#282 review [P1]): on a
+  # `review_bots=0` code host (e.g. GitLab; the degraded fake fixture) the trigger
+  # broker (drain_agent_bot_triggers) is a no-op, so a bot review can NEVER arrive —
+  # waiting for one here would loop pending-review ⇄ reviewing forever. Skip the
+  # whole mandatory-bot-review wait when review_bots != 1. GitHub (review_bots=1)
+  # takes the unchanged path; the cap reader degrades to "1" when chp_caps is
+  # unavailable, so the legacy path is intact under any lib-load failure.
+  _review_bots_cap=1
+  if declare -F chp_caps >/dev/null 2>&1; then
+    _review_bots_cap="$(chp_caps review_bots 2>/dev/null || echo 1)"
+  fi
+  if [[ -n "${REVIEW_BOTS_VALIDATED:-}" && -n "${AGENT_GH_TOKEN_FILE:-}" && "$_review_bots_cap" == "1" ]] \
      && declare -F missing_bot_reviews >/dev/null 2>&1; then
     MISSING_BOTS=$(missing_bot_reviews "$REVIEW_BOTS_VALIDATED" "$PR_NUMBER" "$REPO" 2>/dev/null | tr '\n' ' ')
     MISSING_BOTS="${MISSING_BOTS%"${MISSING_BOTS##*[![:space:]]}"}"
@@ -3388,7 +3400,29 @@ if [[ "$PASSED_VERDICT" == "true" ]]; then
         --remove-label "reviewing" --remove-label "autonomous" \
         --add-label "approved" 2>/dev/null || true
 
-      log "Issue #${ISSUE_NUMBER} marked approved; auto-close handled by GitHub via 'Closes #N' resolution."
+      # [INV-87]/[M4]/§4.2 merge_closes_issue capability gate (#282 review [P1]):
+      # INV-33's "GitHub auto-closes on merge" is a CODE-HOST capability, not a
+      # universal truth. On a `merge_closes_issue=0` backend the merged MR/PR does
+      # NOT transition its linked issue, so the wrapper MUST close it explicitly
+      # (the terminal transition GitHub's `Closes #N` would otherwise perform) —
+      # else the relabeled issue lingers OPEN forever. GitHub (merge_closes_issue=1)
+      # takes the unchanged no-op path (INV-33: no explicit close). The cap reader
+      # degrades to "1" when chp_caps is unavailable, so the legacy GitHub path is
+      # intact under any lib-load failure. (When itp_transition_state — the ITP
+      # terminal-state verb — lands in the downstream itp-writes issue, this raw
+      # `gh issue close` becomes that verb call; for now it is the GitHub-rendered
+      # terminal transition.)
+      _merge_closes=1
+      if declare -F chp_caps >/dev/null 2>&1; then
+        _merge_closes="$(chp_caps merge_closes_issue 2>/dev/null || echo 1)"
+      fi
+      if [[ "$_merge_closes" != "1" ]]; then
+        log "code host merge_closes_issue=0 — closing issue #${ISSUE_NUMBER} explicitly (merge does not auto-transition it)."
+        gh issue close "$ISSUE_NUMBER" --repo "$REPO" --reason completed 2>/dev/null \
+          || log "WARNING: explicit issue close failed for #${ISSUE_NUMBER} (merge_closes_issue=0 backend) — issue may remain open."
+      fi
+
+      log "Issue #${ISSUE_NUMBER} marked approved; auto-close handled by GitHub via 'Closes #N' resolution (merge_closes_issue=${_merge_closes})."
     else
       # Auto-merge failed (#145). Post the marker on the PR (dev re-dispatch
       # detects it via /issues/<n>/comments to trigger rebase), then flip the

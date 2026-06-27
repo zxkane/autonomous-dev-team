@@ -939,13 +939,19 @@ generalization)**: the "rely on GitHub's link semantics" rule above is a
   `itp_transition_state` (the provider-neutral state move) — nor `gh issue
   close` — after the merge. This is exactly the INV-33 rule, now stated
   cross-seam: the CHP merge performs the ITP terminal transition implicitly.
-- **`merge_closes_issue=0` (a hypothetical backend with no merge→issue
-  side-effect):** the caller MUST call `itp_transition_state ISSUE
-  <non-terminal> <terminal>` after `chp_merge`, or the issue never reaches its
-  terminal state. The `chp_close_keyword` verb correspondingly returns the empty
+- **`merge_closes_issue=0` (a backend with no merge→issue side-effect):** the
+  caller MUST transition the issue to its terminal state after `chp_merge`, or the
+  issue never reaches it. **Wired live in #282**: the review wrapper's merge
+  success path branches on `chp_caps merge_closes_issue` and, when it is not `1`,
+  explicitly closes the issue (`gh issue close … --reason completed` — the
+  GitHub-rendered terminal transition; it becomes an `itp_transition_state` call
+  when that ITP verb lands downstream). This is the SINGLE sanctioned `gh issue
+  close` in the wrapper — the #145 regression (an *unconditional* close, and any
+  close on the auto-merge-FAILURE path) stays forbidden (`test-autonomous-review-auto-merge-failure.sh`
+  TC-AMF-006). The `chp_close_keyword` verb correspondingly returns the empty
   string for such a backend (so the PR-body prompt builder emits no
-  non-functional `Closes #N`), and the dev-side close-keyword rendering
-  ([M4]) goes through that verb.
+  non-functional `Closes #N`), and the dev-side close-keyword rendering ([M4])
+  goes through that verb.
 
 For the GitHub reference backend this is **zero behavior change** — `chp_merge`
 is the same `gh pr merge` leaf and the wrapper still performs no post-merge
@@ -4468,7 +4474,7 @@ _Triage (issue #236): [machine-checked: tests/unit/test-provider-spec.sh]_
 
 **Why**: forcing every provider to fake GitHub's full surface produces silent breakage (e.g. Asana strips `<!-- -->` HTML comments). Declaring caps honestly — including the two GitHub-is-weaker cases — lets GitLab/Asana PRs slot in without re-architecting callers, while keeping the GitHub reference path byte-identical. Same discipline as the adapter-spec: write the contract now, implement one reference backend, prove zero behavior change.
 
-**Status**: **CAPS MANIFESTS + READER SHIP** with the dispatch skeleton (#280). The `.caps` manifests (`providers/itp-github.caps`, `providers/chp-github.caps`) declaring exactly today's GitHub behavior, and the parsed-not-sourced `itp_caps`/`chp_caps` reader, land in #280. The 9 ITP + 4 CHP capability keys and their github/gitlab/asana columns are normative in [`provider-spec.md`](provider-spec.md) §4.1/§4.2. The capability *branches* in callers ship with the downstream leaf-migration issues; #280 proves each `caps=0` branch is reachable via a named degraded fake fixture provider, with zero behavior change. **#281 (ITP READ leaves)** consumes the GitHub `.caps` as the no-behavior-change anchor: GitHub's `server_side_state_negation=0` (negation client-side via jq) and `server_side_state_and=1` are its real current behavior, so every migrated read caller takes the identical code path. `tests/unit/test-itp-read-leaves.sh` re-asserts the `.caps` values consumed by the read verbs and exercises the read-side `caps=0` branches (negation + AND done client-side) through the degraded fake provider via the PUBLIC seam.
+**Status**: **CAPS MANIFESTS + READER SHIP** with the dispatch skeleton (#280). The `.caps` manifests (`providers/itp-github.caps`, `providers/chp-github.caps`) declaring exactly today's GitHub behavior, and the parsed-not-sourced `itp_caps`/`chp_caps` reader, land in #280. The 9 ITP + 4 CHP capability keys and their github/gitlab/asana columns are normative in [`provider-spec.md`](provider-spec.md) §4.1/§4.2. The capability *branches* in callers ship with the leaf-migration issues; #280 proves each `caps=0` branch is reachable via a named degraded fake fixture provider, with zero behavior change. **#281 (ITP READ leaves)** consumes the GitHub `.caps` as the no-behavior-change anchor: GitHub's `server_side_state_negation=0` (negation client-side via jq) and `server_side_state_and=1` are its real current behavior, so every migrated read caller takes the identical code path. `tests/unit/test-itp-read-leaves.sh` re-asserts the `.caps` values consumed by the read verbs and exercises the read-side `caps=0` branches (negation + AND done client-side) through the degraded fake provider via the PUBLIC seam. **#282 (CHP PR-lifecycle leaves)** ships the THREE CHP `caps=0` caller branches live: `rest_request_changes=0` (`submit_request_changes` skips the native REST submit), `review_bots=0` (the bot-trigger broker `drain_agent_bot_triggers` short-circuits AND the wrapper's mandatory-bot-review wait gate is skipped, so a `review_bots=0` backend never waits for a review that can't arrive), and `merge_closes_issue=0` (the merge success path explicitly closes the issue after `chp_merge`). GitHub's `caps=1` values keep all three on the unchanged path; `tests/unit/test-chp-pr-lifecycle.sh` exercises each `caps=0` branch through the degraded fake provider via the PUBLIC seam.
 
 **Producer**: `providers/itp-github.caps` / `providers/chp-github.caps` (exist as of #280). **Consumer**: the `itp_caps`/`chp_caps` reader (#280) + every capability-branching caller (downstream).
 
