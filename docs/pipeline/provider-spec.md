@@ -228,6 +228,14 @@ The *callers* keep their logic; only the leaf `gh` call moves behind a verb.
 > (`chp_close_keyword`, `chp_create_pr`, `chp_trigger_bot`); core verbs invoked in
 > an `if`-condition / `$(… || …)` context are abort-safe without the guard. `chp_caps`
 > is exempt — it has a real reader body, not a leaf-dispatching shim.
+>
+> The leaf-absent **fallback must still honor the capability contract**, not just
+> avoid the abort: `chp_close_keyword`'s caller (`_render_close_keyword`) renders
+> the **empty string** when the leaf is absent AND `chp_caps merge_closes_issue=0`
+> (a non-auto-closing backend must not inject a non-functional `Closes #N`), and
+> the GitHub literal only when `merge_closes_issue=1` or the cap is unreadable
+> (#282 review round 5). The leaf guard prevents the crash; the cap read keeps the
+> rendered value correct.
 
 ### 3.3 The normalized comment-JSON contract (load-bearing)
 

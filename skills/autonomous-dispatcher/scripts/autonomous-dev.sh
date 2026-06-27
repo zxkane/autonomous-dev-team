@@ -442,6 +442,33 @@ needs_open_pr_only() {
 # satisfied, or nothing otherwise. Captured into a variable and interpolated
 # into the prompt builders below (resume, resume-fallback, new).
 #
+# _render_close_keyword <issue> — the PR-body auto-close keyword the prompt
+# builders interpolate ([INV-87]/[M4], #282). Single source of the 3-way logic:
+#   1. provider LEAF exists  → chp_close_keyword (verb owns the rendering:
+#      `Closes #<n>` for merge_closes_issue=1, empty for =0).
+#   2. leaf absent, merge_closes_issue=0 → EMPTY string (a non-auto-closing
+#      backend must NOT inject a non-functional `Closes #N` — the fallback must
+#      honor the caps=0 contract even when the leaf is missing; #282 review round
+#      5 [P1]). Read the cap directly (chp_caps has a real reader body, no leaf).
+#   3. leaf absent, merge_closes_issue=1 / caps unavailable → the GitHub literal
+#      `Closes #<n>` (today's behavior under any lib-load failure).
+# Guard every chp_* probe on `declare -F` so a wrapper without lib-code-host
+# sourced still renders the GitHub literal rather than aborting.
+_render_close_keyword() {
+  local _issue="$1"
+  if declare -F chp_has_leaf >/dev/null 2>&1 && chp_has_leaf close_keyword; then
+    chp_close_keyword "$_issue"
+    return 0
+  fi
+  # Leaf absent: honor merge_closes_issue when the cap is readable.
+  if declare -F chp_caps >/dev/null 2>&1 \
+     && [[ "$(chp_caps merge_closes_issue 2>/dev/null || echo 1)" == "0" ]]; then
+    printf ''        # caps=0 backend without a leaf → empty (no auto-close keyword)
+    return 0
+  fi
+  printf 'Closes #%s' "$_issue"
+}
+
 # [INV-06] keyword contract: this block is forward-progress prompt text, NOT
 # a status comment, and deliberately contains none of the crash keywords
 # (`Task appears to have crashed`, `process not found`) that Step 4a's retry
@@ -451,18 +478,11 @@ emit_open_pr_fast_path_block() {
   needs_open_pr_only "$issue_num" || return 0
   log "Detected pushed head branch with commits ahead of base but no PR for issue #${issue_num} — injecting open-PR-only fast path ([INV-45])."
 
-  # [INV-87]/[M4] (#282) backend-correct PR-body close keyword via chp_close_keyword;
-  # falls back to the GitHub literal if the provider LEAF is unavailable (today's
-  # behavior). Guard on chp_has_leaf (the provider leaf), NOT `declare -F
-  # chp_close_keyword` (the shim is always defined once lib-code-host is sourced,
-  # so that would dispatch to an undefined leaf and abort under set -e — #282
-  # review round 4 [P1]).
+  # [INV-87]/[M4] (#282) backend-correct PR-body close keyword (caps-aware,
+  # leaf-guarded — see _render_close_keyword: a leaf-less merge_closes_issue=0
+  # backend renders EMPTY, not the GitHub literal; round-4/5 [P1]).
   local _close_kw
-  if declare -F chp_has_leaf >/dev/null 2>&1 && chp_has_leaf close_keyword; then
-    _close_kw="$(chp_close_keyword "$issue_num")"
-  else
-    _close_kw="Closes #${issue_num}"
-  fi
+  _close_kw="$(_render_close_keyword "$issue_num")"
 
   # [INV-79] When the scoped agent token is armed, the agent CANNOT run
   # `gh pr create` (pull_requests:read → 403). The fast-path's open-PR step MUST
@@ -865,19 +885,13 @@ fi
 OPEN_PR_FAST_PATH="$(emit_open_pr_fast_path_block "$ISSUE_NUMBER")"
 
 # [INV-87]/[M4] (#282) The PR-body auto-close keyword the prompt builders
-# interpolate is rendered by chp_close_keyword (provider-spec.md §3.2) rather
-# than a hardcoded GitHub `Closes #N`. GitHub (merge_closes_issue=1) returns
-# `Closes #<N>` — byte-identical to today; a merge_closes_issue=0 backend returns
-# empty (the caller transitions explicitly post-merge). Guard on chp_has_leaf (the
-# provider LEAF), NOT `declare -F chp_close_keyword` (the shim is always defined
-# once lib-code-host is sourced → would dispatch to an undefined leaf and abort
-# under set -e on a backend without the leaf — #282 review round 4 [P1]). Fall back
-# to the GitHub literal so a lib-load failure leaves today's behavior unchanged.
-if declare -F chp_has_leaf >/dev/null 2>&1 && chp_has_leaf close_keyword; then
-  CLOSE_KEYWORD="$(chp_close_keyword "$ISSUE_NUMBER")"
-else
-  CLOSE_KEYWORD="Closes #${ISSUE_NUMBER}"
-fi
+# interpolate is rendered by _render_close_keyword (caps-aware, leaf-guarded):
+# GitHub (merge_closes_issue=1) → `Closes #<N>` (byte-identical to today); a
+# merge_closes_issue=0 backend → EMPTY (the caller transitions explicitly
+# post-merge), INCLUDING when the provider omits the chp_close_keyword leaf —
+# the fallback must NOT inject a non-functional `Closes #N` (#282 review round 5
+# [P1]). A lib-load failure (no chp_caps) renders the GitHub literal, unchanged.
+CLOSE_KEYWORD="$(_render_close_keyword "$ISSUE_NUMBER")"
 
 # [INV-79] PR-create broker instruction. Non-empty ONLY when the scoped agent
 # token is armed (AGENT_GH_TOKEN_FILE set by setup_agent_token in app mode). The

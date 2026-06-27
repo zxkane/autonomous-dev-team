@@ -252,34 +252,70 @@ if [[ -d "$FAKE_PROVIDER" ]]; then
   # chp_degraded_close_keyword body), `declare -F chp_close_keyword` is TRUE (shim
   # always defined) yet calling the verb dispatches to an undefined leaf and aborts
   # under `set -e`. chp_has_leaf must report the LEAF absent so the caller falls
-  # back. Drive the EXACT autonomous-dev.sh guard under `set -euo pipefail`.
+  # back — and the fallback MUST be caps-aware (#282 review round 5 [P1]): a
+  # leaf-less merge_closes_issue=0 backend renders the EMPTY string, NOT a
+  # non-functional GitHub `Closes #N`. This mirrors autonomous-dev.sh's
+  # _render_close_keyword 3-way logic verbatim and drives it under set -euo on the
+  # degraded fixture (no leaf + merge_closes_issue=0).
   leaf_guard=$(
     env -u AUTONOMOUS_CONF -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR \
         REPO="$REPO" CODE_HOST=degraded AUTONOMOUS_PROVIDERS_DIR="$FAKE_PROVIDER" \
     bash -c '
       set -euo pipefail
       source "'"$CHP_LIB"'" 2>/dev/null
-      issue_num=282
-      if declare -F chp_has_leaf >/dev/null 2>&1 && chp_has_leaf close_keyword; then
-        _kw="$(chp_close_keyword "$issue_num")"
-      else
-        _kw="Closes #${issue_num}"
-      fi
-      echo "KW=${_kw}"
+      _render_close_keyword() {
+        local _issue="$1"
+        if declare -F chp_has_leaf >/dev/null 2>&1 && chp_has_leaf close_keyword; then chp_close_keyword "$_issue"; return 0; fi
+        if declare -F chp_caps >/dev/null 2>&1 && [[ "$(chp_caps merge_closes_issue 2>/dev/null || echo 1)" == "0" ]]; then printf ""; return 0; fi
+        printf "Closes #%s" "$_issue"
+      }
+      printf "KW=[%s]\n" "$(_render_close_keyword 282)"
       echo "HASLEAF=$(chp_has_leaf close_keyword && echo present || echo absent)"
     ' 2>&1
   )
-  if [[ "$leaf_guard" == *"KW=Closes #282"* && "$leaf_guard" == *"HASLEAF=absent"* ]]; then
-    echo -e "  ${GREEN}PASS${NC}: TC-CHP-LEAF-GUARD chp_has_leaf falls back (no set -e abort) when the provider omits the leaf"; PASS=$((PASS+1))
+  # degraded = leaf ABSENT + merge_closes_issue=0 → MUST be the empty string (no abort).
+  if [[ "$leaf_guard" == *"KW=[]"* && "$leaf_guard" == *"HASLEAF=absent"* ]]; then
+    echo -e "  ${GREEN}PASS${NC}: TC-CHP-LEAF-GUARD leaf-less merge_closes_issue=0 backend → EMPTY close keyword (caps-aware fallback, no set -e abort)"; PASS=$((PASS+1))
   else
-    echo -e "  ${RED}FAIL${NC}: TC-CHP-LEAF-GUARD degraded close_keyword guard aborted or wrong: $leaf_guard"; FAIL=$((FAIL+1))
+    echo -e "  ${RED}FAIL${NC}: TC-CHP-LEAF-GUARD degraded close_keyword should be empty (mci=0) but was: $leaf_guard"; FAIL=$((FAIL+1))
   fi
-  # github keeps the leaf present → verb is called.
-  gh_leaf=$(
+  # github keeps the leaf present → verb is called → Closes #<n>.
+  gh_kw=$(
     env -u AUTONOMOUS_CONF -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR REPO="$REPO" CODE_HOST=github \
-    bash -c 'set -euo pipefail; source "'"$CHP_LIB"'" 2>/dev/null; chp_has_leaf close_keyword && echo present || echo absent'
+    bash -c '
+      set -euo pipefail; source "'"$CHP_LIB"'" 2>/dev/null
+      _render_close_keyword() {
+        local _issue="$1"
+        if declare -F chp_has_leaf >/dev/null 2>&1 && chp_has_leaf close_keyword; then chp_close_keyword "$_issue"; return 0; fi
+        if declare -F chp_caps >/dev/null 2>&1 && [[ "$(chp_caps merge_closes_issue 2>/dev/null || echo 1)" == "0" ]]; then printf ""; return 0; fi
+        printf "Closes #%s" "$_issue"
+      }
+      _render_close_keyword 282
+    '
   )
-  assert_eq "TC-CHP-LEAF-GUARD-GH github provider DOES define the close_keyword leaf" "present" "$gh_leaf"
+  assert_eq "TC-CHP-LEAF-GUARD-GH github (leaf present, merge_closes_issue=1) → Closes #282" "Closes #282" "$gh_kw"
+  # lib-load failure (no chp_* at all) → GitHub literal (legacy fallback unchanged).
+  nolib_kw=$(
+    env -i PATH="/usr/local/bin:/usr/bin:/bin" HOME="$HOME" REPO="$REPO" \
+    bash -c '
+      set -euo pipefail
+      _render_close_keyword() {
+        local _issue="$1"
+        if declare -F chp_has_leaf >/dev/null 2>&1 && chp_has_leaf close_keyword; then chp_close_keyword "$_issue"; return 0; fi
+        if declare -F chp_caps >/dev/null 2>&1 && [[ "$(chp_caps merge_closes_issue 2>/dev/null || echo 1)" == "0" ]]; then printf ""; return 0; fi
+        printf "Closes #%s" "$_issue"
+      }
+      _render_close_keyword 282
+    '
+  )
+  assert_eq "TC-CHP-LEAF-GUARD-NOLIB lib-load failure (no chp_*) → GitHub literal Closes #282" "Closes #282" "$nolib_kw"
+  # The wrapper's _render_close_keyword definition matches this 3-way logic (pin).
+  if grep -qE '_render_close_keyword\(\)' "$SCRIPTS/autonomous-dev.sh" \
+     && grep -qE 'chp_caps merge_closes_issue' "$SCRIPTS/autonomous-dev.sh"; then
+    echo -e "  ${GREEN}PASS${NC}: TC-CHP-LEAF-GUARD-SRC autonomous-dev.sh defines a caps-aware _render_close_keyword"; PASS=$((PASS+1))
+  else
+    echo -e "  ${RED}FAIL${NC}: TC-CHP-LEAF-GUARD-SRC autonomous-dev.sh missing caps-aware _render_close_keyword"; FAIL=$((FAIL+1))
+  fi
 else
   echo -e "  ${RED}FAIL${NC}: degraded fake provider fixture missing at $FAKE_PROVIDER (expected from #280)"
   FAIL=$((FAIL+1))

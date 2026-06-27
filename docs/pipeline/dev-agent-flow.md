@@ -135,16 +135,25 @@ pre-INV-79. See [INV-79](invariants.md#inv-79-in-app-mode-the-agent-process-gets
 ## Code-Host Provider seam — close keyword + PR creation ([INV-87](invariants.md#inv-87-provider-dispatch-is-spec-defined--callers-route-every-issuecode-host-op-through-itp_chp_-never-a-raw-gh-in-the-caller-layer), #282)
 
 The PR-body **auto-close keyword** the prompt builders interpolate is now
-rendered by the CHP verb `chp_close_keyword` ([`provider-spec.md`](provider-spec.md)
+rendered by the wrapper-local `_render_close_keyword` helper ([`provider-spec.md`](provider-spec.md)
 §3.2, [M4]) instead of a hardcoded GitHub `Closes #N`. The wrapper computes
-`CLOSE_KEYWORD=$(chp_close_keyword "$ISSUE_NUMBER")` once before building any
-prompt (and the open-PR fast path computes its own `_close_kw`); all three prompt
-builders + the fast-path block interpolate that variable. For GitHub
-(`merge_closes_issue=1`) it renders `Closes #<N>` — **byte-identical** to today;
-a `merge_closes_issue=0` backend returns the empty string (the caller transitions
-the issue explicitly post-merge, see [INV-33](invariants.md#inv-33-review-wrapper-must-not-close-the-linked-issue)). The verb is sourced best-effort from
-`lib-code-host.sh`; if unavailable the computation falls back to the GitHub
-literal, so a lib-load failure leaves today's behavior unchanged.
+`CLOSE_KEYWORD=$(_render_close_keyword "$ISSUE_NUMBER")` once before building any
+prompt (and the open-PR fast path computes its own `_close_kw` the same way); all
+three prompt builders + the fast-path block interpolate that variable. The helper
+is **caps-aware and leaf-guarded** (3-way):
+
+1. provider **leaf exists** (`chp_has_leaf close_keyword`) → `chp_close_keyword`
+   (the verb renders `Closes #<N>` for GitHub `merge_closes_issue=1`, empty for `=0`);
+2. **leaf absent + `merge_closes_issue=0`** → the **empty string** — a
+   non-auto-closing backend MUST NOT inject a non-functional `Closes #N` even when
+   it omits the leaf (the caller transitions the issue explicitly post-merge, see
+   [INV-33](invariants.md#inv-33-review-wrapper-must-not-close-the-linked-issue));
+3. **leaf absent + `merge_closes_issue=1` / lib-load failure** → the GitHub
+   literal `Closes #<N>` (today's behavior, unchanged).
+
+Guarding on the provider leaf (`chp_has_leaf`) — not `declare -F chp_close_keyword`
+(the always-defined shim) — keeps a leaf-less backend from dispatching to an
+undefined function and aborting under `set -e`.
 
 **PR creation** is the CHP verb `chp_create_pr` ([`provider-spec.md`](provider-spec.md)
 §3.2). The broker `drain_agent_pr_create` (`lib-auth.sh`) described above routes
