@@ -1,0 +1,11 @@
+# tests/unit/fixtures/provider-degraded/chp-degraded.caps
+#
+# NAMED degraded fake CHP provider manifest (#280, provider-spec.md §8
+# fake-provider; design-spec §7.4 third bullet).
+# Every gated CHP capability is set to its ABSENT value so EACH caps=0 branch is
+# exercisable NOW. Pairs with itp-degraded.caps.
+
+native_issue_pr_link=0       # grep PR/MR body for the issue ref (no native link)
+rest_request_changes=0       # emulate via quick-action note / unresolved-discussion
+review_bots=0                # chp_trigger_bot is a no-op; in-process review only
+merge_closes_issue=0         # caller MUST call itp_transition_state after chp_merge

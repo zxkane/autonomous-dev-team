@@ -48,6 +48,14 @@ chmod +x "$SKILL"/*.sh
 if [[ -d "$DISPATCHER_SCRIPTS/adapters" ]]; then
   cp -r "$DISPATCHER_SCRIPTS/adapters" "$SKILL/adapters"
 fi
+# [INV-65]/[INV-87] #280: lib-issue-provider.sh / lib-code-host.sh source
+# providers/<p>.sh and read providers/<p>.caps from their OWN (real) dir via the
+# same readlink -f resolution — so the fixture skill tree MUST carry the
+# providers/ subdir too (the `*.sh` glob above does not descend into subdirs).
+# Mirrors the cp -r adapters/ rule exactly (spec §6/§7.4 fixture rule).
+if [[ -d "$DISPATCHER_SCRIPTS/providers" ]]; then
+  cp -r "$DISPATCHER_SCRIPTS/providers" "$SKILL/providers"
+fi
 
 # Temp project: scripts/ holds ONLY a project-side symlink to the entry + a
 # real autonomous.conf. NO lib symlinks at all — that's the whole point.

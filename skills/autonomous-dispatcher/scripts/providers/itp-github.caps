@@ -1,0 +1,17 @@
+# providers/itp-github.caps — GitHub Issue-Tracker Provider capability manifest.
+#
+# Declarative key=value, PARSED (never sourced) by the itp_caps reader in
+# lib-issue-provider.sh ([INV-88], spec §4 / §10 Q1). Describes EXACTLY today's
+# GitHub behavior — the no-behavior-change anchor. GitHub is honestly declared,
+# NOT all-ones: server_side_state_negation=0 is GitHub's real current behavior
+# (label negation done client-side via jq, not server-side). Spec §4 / §4.1.
+
+server_side_state_and=1      # filter by label-AND server-side (GitHub: yes)
+server_side_state_negation=0 # filter by NOT-label server-side (GitHub: NO — done client-side via jq)  [M3]
+distinct_bot_author=1        # a real bot identity exists for self/other discrimination
+read_after_write_state=1     # a transition is immediately visible to a re-list
+cross_ref_shorthand=1        # owner/repo#N style dep refs work (else gid/permalink)
+body_checkbox=1              # markdown checkbox in body (else native subtask)
+edit_comment=1               # comment edit-in-place exists (INV-46 stamp; else fresh marker)  [M5]
+label_colors=1               # state primitive carries a hex color (GitHub/GitLab; Asana: n/a)  [m5]
+marker_channel=html          # html=HTML comments survive; text=plain only (covers dispatcher markers too)  [M6]
