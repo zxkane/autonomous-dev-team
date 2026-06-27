@@ -192,6 +192,31 @@ The *callers* keep their logic; only the leaf `gh` call moves behind a verb.
 | `chp_close_keyword ISSUE` | the `Closes #${ISSUE_NUMBER}` literal in the PR-body prompt (`autonomous-dev.sh:851/866/914/1151`) | Render the backend's PR-body auto-close keyword for the prompt builder to interpolate. **New verb [M4]** — the keyword was hardcoded GitHub-specific prompt text; a GitLab/Asana prompt builder would otherwise emit a non-functional `Closes #N`. GitHub returns `Closes #<n>`; a backend with `merge_closes_issue=0` returns empty (caller transitions explicitly post-merge). |
 | `chp_caps` | — (new) | Emit the capability map (§4). |
 
+> **Implementation status.** ALL CHP verbs above —
+> `chp_find_pr_for_issue`, `chp_ci_status`, `chp_mergeable`, `chp_approve`,
+> `chp_request_changes`, `chp_merge`, `chp_review_threads`,
+> `chp_resolve_thread`, `chp_close_keyword` — are **migrated for the GitHub
+> backend in #282** (`providers/chp-github.sh`), proven byte-identical by
+> golden-trace
+> ([`tests/unit/test-chp-pr-lifecycle.sh`](../../tests/unit/test-chp-pr-lifecycle.sh)).
+> The innermost `gh` primitive moves behind the verb while the INV-coupled logic
+> stays caller-side: the [M1] `select(.body|test("#N"))` resolution, the
+> [INV-44]/[INV-54] mergeable/open-PR classifiers ([M2],
+> `lib-review-mergeable.sh` byte-unchanged), the [INV-52]/[INV-79]
+> wrapper-owns-approve/merge ownership, and the review-thread select-unresolved
+> all remain provider-neutral. `chp_create_pr` and `chp_trigger_bot` are also
+> **defined** in `providers/chp-github.sh` (completing the verb contract), but
+> their live executable leaves are the auth-side brokers (`drain_agent_pr_create`
+> / `drain_agent_bot_triggers` in `lib-auth.sh`); the broker→verb rewire is an
+> auth-side follow-up because `lib-auth.sh` is outside #282's scope ("NO
+> auth-code change"). A small set of **incidental PR reads** that no CHP verb in
+> §3.2 names — the issue-keyed body-mention `gh pr list … select(.body|test("#N"))`
+> existence COUNT/number lookups (`autonomous-dev.sh`) and the PR-number-keyed
+> `gh pr view $PR --json comments/state/headRefName/headRefOid/reviews`
+> (`autonomous-dev.sh` / `autonomous-review.sh`) — are deliberately left as raw
+> `gh` and are owned by no current verb (the literal-`gh`-freedom lint is the
+> separate cutover-guard issue).
+
 ### 3.3 The normalized comment-JSON contract (load-bearing)
 
 Today 28 marker-scanners (`extract_dev_session_id`, `last_reviewed_head`,
@@ -577,13 +602,20 @@ becomes a verb, the surrounding INV-coupled logic stays caller-side.
 | `handle_completed_session_routing` (`lib-dispatch.sh`) | `itp_post_comment` + `itp_transition_state` (+ dispatch) | **(b) entangled multi-op orchestrator** | **leaf I/O migrated #283**: all comment posts → `itp_post_comment`, label moves → `label_swap`; the [INV-35]/[INV-85] routing decision + `dispatch dev-new` + log truncate stay caller-side |
 | `post_dispatch_token` (`lib-dispatch.sh`) | `itp_post_comment` | (a) separable-leaf | the [INV-18] dispatcher-marker comment write — routes through the ITP choke-point ([INV-89]) — **migrated #283** (marker BODY composed caller-side, verbatim) |
 | `_dep_block_comment` (`lib-dispatch.sh`) | `itp_post_comment` | (a) separable-leaf | the [INV-39] dependency-block dispatcher-marker comment write — **migrated #283** (the dedup READ stays on `itp_list_comments`) |
-| `fetch_pr_for_issue` (`:1471`) | `chp_find_pr_for_issue` | (b) entangled | the `gh pr list --json $FIELDS` leaf moves with `FIELDS` forwarded byte-identically ([M1]); the `select(.body\|test("#N"))` filter stays caller-side |
-| `ci_is_green` (`:1485`) | `chp_ci_status` | (a) separable-leaf | the `gh pr checks` status leaf → `green`/`pending`/`failed`/`none` |
-| `autonomous-review.sh:3159` mergeable I/O | `chp_mergeable` | (b) entangled | only the `gh pr view --json mergeable` leaf moves ([M2]); `_classify_mergeable_gate`/`_pr_open_gate` ([INV-44]/[INV-54]) stay caller-side |
-| `setup-labels.sh` `gh label create` | `itp_provision_states` | (a) separable-leaf | the state-primitive provisioning leaf; hex color gated by `label_colors` — **migrated #283** (the 9-label table stays caller-side) |
+| `resolve_pr_for_issue` (`lib-pr-linkage.sh:73`) + `verify_pr_closes_issue` (`:99`); `fetch_pr_for_issue` (`lib-dispatch.sh`) is the kept same-named delegate shim | `chp_find_pr_for_issue` | (b) entangled | the `gh pr list --json $FIELDS` leaf moves with `FIELDS` forwarded byte-identically ([M1]); the [INV-86] close-linkage/branch resolution + projection `$q` stay caller-side. **MIGRATED #282.** (Post-#277 `fetch_pr_for_issue` is a pure delegate to `resolve_pr_for_issue` — that delegate stays as the function-mock shim, §7.2 m3.) |
+| `ci_is_green` (`lib-dispatch.sh`) | `chp_ci_status` | (a) separable-leaf | the `gh pr checks --json state -q '[.[].state]'` leaf moves; the `length>0 and all(.=="SUCCESS")` gate → `green`/`pending`/`failed`/`none` stays caller-side. **MIGRATED #282.** |
+| `autonomous-review.sh` mergeable poll (`gh pr view … --json mergeable`) | `chp_mergeable` | (b) entangled | only the `gh pr view --json mergeable` leaf moves ([M2]); the UNKNOWN-retry loop + `_classify_mergeable_gate`/`_pr_open_gate` ([INV-44]/[INV-54], `lib-review-mergeable.sh` byte-unchanged) stay caller-side. **MIGRATED #282.** |
+| `gh pr create` (the broker `drain_agent_pr_create`, `lib-auth.sh`) | `chp_create_pr` | (a) separable-leaf | the `gh pr create --head/--title/--body` leaf; the broker routes through the verb (leaf-only swap, no INV-79 change). **MIGRATED #282.** |
+| `gh pr review --approve` (`autonomous-review.sh` PASS path) | `chp_approve` | (a) separable-leaf | the `--approve --body …` leaf; the [INV-52]/[INV-79] wrapper-owns-approve ownership + PASS-gate chain stay caller-side. **MIGRATED #282.** |
+| `gh pr review --request-changes` (`submit_request_changes`, `lib-review-request-changes.sh`) | `chp_request_changes` | (b) entangled | the `--request-changes --body $body` leaf; gated by `rest_request_changes` (§4.2). The best-effort return-0 + token-refresh glue stays caller-side. **MIGRATED #282.** |
+| `gh pr merge` (`autonomous-review.sh` merge path) | `chp_merge` | (a) separable-leaf | the `--squash --delete-branch` leaf. [M4]/[INV-33]: `merge_closes_issue=1` (GitHub) means the wrapper MUST NOT transition post-merge; a `merge_closes_issue=0` backend transitions via `itp_transition_state` (else github-gated `gh issue close`). **MIGRATED #282.** |
+| `resolve-threads.sh` reviewThreads list + `resolveReviewThread` mutation | `chp_review_threads` / `chp_resolve_thread` | (a) separable-leaf | the two `gh api graphql` leaves → the M8 thread shape `{thread_id, resolved, comments:[{id, path, line, …}]}`; the select-unresolved + resolved/failed tally stay caller-side. **MIGRATED #282.** |
+| bot-trigger post (the broker `drain_agent_bot_triggers`, `lib-auth.sh`; `gh-as-user.sh pr comment`) | `chp_trigger_bot` | (a) separable-leaf | the real-user trigger post, gated by `review_bots` (§4.2); `parse_review_bots`/login mapping + allow-list stay caller-side; the broker routes through the verb. **MIGRATED #282.** |
+| incidental `gh pr view $PR --json …` reads + body-mention `gh pr list … select(.body\|test("#N"))` lookups (`autonomous-dev.sh` / `autonomous-review.sh`) | `chp_pr_view` / `chp_pr_list` (general read primitives) | (a) separable-leaf | the PR-number-keyed `gh pr view` + loose body-mention `gh pr list` leaves; caller keeps its `--json`/`-q`. NOT named §3.2 lifecycle verbs — added so the caller layer carries zero executable raw `gh pr`. **MIGRATED #282 (review r8).** |
+| `setup-labels.sh:47` `gh label create` | `itp_provision_states` | (a) separable-leaf | the state-primitive provisioning leaf; hex color gated by `label_colors` — **migrated #283** (the 9-label table stays caller-side) |
 | `reply-to-comments.sh:44-45` | `itp_post_comment` (returning `id`/`url`) | (a) separable-leaf | the reply-comment POST leaf returning `{id, url}` — this is a CHP review-thread reply (`pulls/.../comments`), owned by chp-pr-lifecycle, NOT migrated in #283 |
 | `lib-review-e2e.sh` PATCH ([INV-46]) | `itp_edit_comment` | (a) separable-leaf | the edit-in-place PATCH leaf; gated by `edit_comment` — **migrated #283** (GET-comment-id / GET-body reads stay caller-side; `edit_comment=0` → `itp_post_comment` re-posts the full report body + marker, never marker-only) |
-| `Closes #${issue_num}` literals (`autonomous-dev.sh:851/866/914/1151`) | `chp_close_keyword` | (a) separable-leaf | the hardcoded auto-close keyword becomes a verb-rendered string ([M4]) |
+| `Closes #${issue_num}` literals (`autonomous-dev.sh` PR-body prompts) | `chp_close_keyword` | (a) separable-leaf | the hardcoded auto-close keyword becomes a verb-rendered string ([M4]); caps-aware `_render_close_keyword` renders `Related to #N` (non-closing) when `merge_closes_issue=0`+`native_issue_pr_link=0`. **MIGRATED #282.** |
 
 > `mark_stalled` and `handle_completed_session_routing` are explicitly **entangled
 > multi-op orchestrators** — they are the load-bearing examples that "the caller

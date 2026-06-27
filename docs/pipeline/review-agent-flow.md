@@ -4,6 +4,8 @@ The review-agent wrapper is `skills/autonomous-dispatcher/scripts/autonomous-rev
 
 The wrapper is the **producer** for two of the five [handoffs](handoffs.md) (review → approved/merged, review → pending-dev) and the **consumer** for one (dispatcher → review).
 
+> **Code-Host Provider seam ([INV-87](invariants.md#inv-87-provider-dispatch-is-spec-defined--callers-route-every-issuecode-host-op-through-itp_chp_-never-a-raw-gh-in-the-caller-layer), #282).** The wrapper's PR-lifecycle leaves now route through the CHP verbs ([`provider-spec.md`](provider-spec.md) §3.2): the mergeable poll is `chp_mergeable` (returns the raw token; the [INV-44]/[INV-54] `_classify_mergeable_gate`/`_pr_open_gate` classifiers in `lib-review-mergeable.sh` are **byte-unchanged** caller-side and consume it), `--approve` is `chp_approve`, `--request-changes` (in `submit_request_changes`) is `chp_request_changes` (gated by the `rest_request_changes` cap §4.2), `gh pr merge` is `chp_merge`, and CI status (`ci_is_green`) is `chp_ci_status`. The PR↔issue resolution (`resolve_pr_for_issue`/`verify_pr_closes_issue`) routes its `gh pr list` leaf through `chp_find_pr_for_issue` ([M1] FIELDS forwarded byte-identically). **Leaf-only move, zero behavior change**: the [INV-52]/[INV-79] wrapper-owns-approve/merge ownership, the INV-44/INV-54 gate decision logic, and the UNKNOWN-retry loop all stay caller-side. (The diagram's `gh pr review`/`gh pr merge` arrows are these verbs' GitHub leaves.)
+
 The default model is Sonnet (vs Opus for dev) — review is checklist-driven and benefits less from the larger model, and using a different model class avoids quota contention with the more expensive dev sessions.
 
 ## Lifecycle

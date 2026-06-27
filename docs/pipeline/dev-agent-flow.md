@@ -132,6 +132,26 @@ branch (#234 review). In PAT
 mode / app-mode-mint-failure the prefix is empty (no scrub) — byte-identical to
 pre-INV-79. See [INV-79](invariants.md#inv-79-in-app-mode-the-agent-process-gets-only-a-scoped-token-the-wrapper-keeps-full-write-and-is-the-sole-approvemergepr-create-path).
 
+## Code-Host Provider seam — close keyword + PR creation ([INV-87](invariants.md#inv-87-provider-dispatch-is-spec-defined--callers-route-every-issuecode-host-op-through-itp_chp_-never-a-raw-gh-in-the-caller-layer), #282)
+
+The PR-body **auto-close keyword** the prompt builders interpolate is now
+rendered by the CHP verb `chp_close_keyword` ([`provider-spec.md`](provider-spec.md)
+§3.2, [M4]) instead of a hardcoded GitHub `Closes #N`. The wrapper computes
+`CLOSE_KEYWORD=$(chp_close_keyword "$ISSUE_NUMBER")` once before building any
+prompt (and the open-PR fast path computes its own `_close_kw`); all three prompt
+builders + the fast-path block interpolate that variable. For GitHub
+(`merge_closes_issue=1`) it renders `Closes #<N>` — **byte-identical** to today;
+a `merge_closes_issue=0` backend returns the empty string (the caller transitions
+the issue explicitly post-merge, see [INV-33](invariants.md#inv-33-review-wrapper-must-not-close-the-linked-issue)). The verb is sourced best-effort from
+`lib-code-host.sh`; if unavailable the computation falls back to the GitHub
+literal, so a lib-load failure leaves today's behavior unchanged.
+
+**PR creation** is the CHP verb `chp_create_pr` ([`provider-spec.md`](provider-spec.md)
+§3.2). The verb is **defined** in `providers/chp-github.sh`, but the live
+executable `gh pr create` leaf is the auth-side broker `drain_agent_pr_create`
+(`lib-auth.sh`) described above — the broker→verb rewire is an auth-side
+follow-up because `lib-auth.sh` is outside #282's scope ("NO auth-code change").
+
 ## Path resolution lessons (#58)
 
 `lib-agent.sh` and `lib-auth.sh` use `readlink -f $BASH_SOURCE` to find their own dir, which **breaks the symlink-vendor pattern** consumer projects use (symlinking from `<project>/scripts/lib-agent.sh` into `.claude/skills/.../lib-agent.sh`). After `readlink -f`, the script's idea of "its own dir" is the skill installation dir, not the project's `scripts/` — and the autonomous.conf lookup misses.

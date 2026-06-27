@@ -25,6 +25,23 @@
 # `.closingIssuesReferences` are guarded with `// ""` / `[]?` so a null field
 # can't abort the jq filter and silently hide a match (parity with the #148
 # null-body guard).
+#
+# [INV-87] (#282) The innermost `gh pr list` leaf both resolvers run is the CHP
+# `chp_find_pr_for_issue` verb (provider-spec.md §3.2 [M1]) — the resolution +
+# projection jq (`$q`) stays HERE (caller-side, provider-neutral) and travels as
+# the `-q` arg; only the `gh pr list --json $FIELDS` primitive moves behind the
+# verb. Sourced from the REAL skill tree via readlink -f (the lib-dispatch.sh
+# idiom) so a standalone unit test that sources only this lib still gets the verb.
+# Idempotent (the shims + .caps reader guard their own redefinition).
+if ! declare -F chp_find_pr_for_issue >/dev/null 2>&1; then
+  _lpl_self="${BASH_SOURCE[0]:-$0}"
+  _lpl_dir="$(cd "$(dirname "$(readlink -f "$_lpl_self")")" && pwd 2>/dev/null)" || _lpl_dir=""
+  if [ -n "$_lpl_dir" ] && [ -r "${_lpl_dir}/lib-code-host.sh" ]; then
+    # shellcheck source=lib-code-host.sh
+    source "${_lpl_dir}/lib-code-host.sh"
+  fi
+  unset _lpl_self _lpl_dir
+fi
 
 # resolve_pr_for_issue <issue_num> [fields]
 #
@@ -70,7 +87,9 @@ resolve_pr_for_issue() {
 | (if (\$closes | length) > 0 then \$closes[0] elif (\$branch | length) > 0 then \$branch[0] else empty end)
 JQ
 )"
-  gh pr list --repo "$REPO" --state open --json "$all_fields" -q "$q"
+  # [INV-87] leaf moves behind the CHP verb; FIELDS ($all_fields) forwarded
+  # byte-identically, the resolution+projection `$q` stays caller-side ([M1]).
+  chp_find_pr_for_issue "$issue_num" "$all_fields" -q "$q"
 }
 
 # verify_pr_closes_issue <pr_num> <issue_num>
@@ -96,7 +115,9 @@ verify_pr_closes_issue() {
                and ((.closingIssuesReferences // []) | length) == 0))] | length
 JQ
 )"
-  hit=$(gh pr list --repo "$REPO" --state open --json number,closingIssuesReferences,headRefName -q "$q" 2>/dev/null) || return 1
+  # [INV-87] leaf moves behind the CHP verb; the fixed FIELDS list + guard `$q`
+  # stay caller-side. Same byte-identical `gh pr list --json …` argv as before.
+  hit=$(chp_find_pr_for_issue "$issue_num" "number,closingIssuesReferences,headRefName" -q "$q" 2>/dev/null) || return 1
   [ -n "$hit" ] && [ "$hit" != "0" ]
 }
 

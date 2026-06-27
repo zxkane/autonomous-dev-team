@@ -5,6 +5,12 @@
 #
 # Example:
 #   ./resolve-threads.sh zxkane openhands-infra 5
+#
+# [INV-87] (#282) The reviewThreads list + resolveReviewThread mutation are the
+# Code-Host-Provider (CHP) `chp_review_threads` / `chp_resolve_thread` verbs
+# (docs/pipeline/provider-spec.md §3.2 [M8]). The `gh api graphql` primitives
+# move behind the verbs; the select-unresolved + the resolved/failed tally stay
+# here (provider-neutral).
 
 set -e
 
@@ -32,26 +38,41 @@ if [ -z "$OWNER" ] || [ -z "$REPO" ] || [ "$PR_NUMBER" -eq 0 ]; then
     exit 1
 fi
 
+# The CHP verbs derive owner/name from $REPO, so this CLI's `owner repo` arg pair
+# becomes the provider-neutral `$REPO` namespace.
+export REPO="${OWNER}/${REPO}"
+
+# Source lib-code-host.sh (the CHP dispatch shims). It resolves from the REAL
+# skill tree via readlink -f. In the INSTALLED skill tree this script and
+# lib-code-host.sh are siblings in autonomous-dispatcher/scripts/; in the SOURCE
+# repo this file lives in autonomous-common/scripts/ while lib-code-host.sh lives
+# in autonomous-dispatcher/scripts/ — so try the own-dir first, then the
+# dispatcher-sibling fallback. (The verbs are the contract — fail loudly rather
+# than silently re-inlining the gh leaves.)
+_rt_self="${BASH_SOURCE[0]:-$0}"
+_rt_dir="$(cd "$(dirname "$(readlink -f "$_rt_self")")" && pwd 2>/dev/null)" || _rt_dir=""
+_rt_chp=""
+for _c in \
+  "${_rt_dir}/lib-code-host.sh" \
+  "${_rt_dir}/../../autonomous-dispatcher/scripts/lib-code-host.sh"; do
+  if [ -r "$_c" ]; then _rt_chp="$_c"; break; fi
+done
+if [ -z "$_rt_chp" ]; then
+  echo "Error: lib-code-host.sh not found beside resolve-threads.sh — cannot resolve the CHP review-thread verbs." >&2
+  exit 1
+fi
+# shellcheck source=/dev/null
+source "$_rt_chp"
+unset _rt_self _rt_dir _rt_chp _c
+
 echo "Fetching unresolved review threads for PR #$PR_NUMBER..."
 
-# Get unresolved thread IDs using parameterized GraphQL variables
-THREAD_IDS=$(gh api graphql \
-  -F owner="$OWNER" \
-  -F repo="$REPO" \
-  -F prNumber="$PR_NUMBER" \
-  -f query='
-query($owner: String!, $repo: String!, $prNumber: Int!) {
-  repository(owner: $owner, name: $repo) {
-    pullRequest(number: $prNumber) {
-      reviewThreads(first: 100) {
-        nodes {
-          id
-          isResolved
-        }
-      }
-    }
-  }
-}' --jq '.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false) | .id')
+# Get unresolved thread IDs via the CHP verb. chp_review_threads returns the M8
+# thread shape ([{thread_id, resolved, comments:[…]}]); select the unresolved
+# thread_ids — byte-equivalent to the prior inline
+# `reviewThreads.nodes[]|select(.isResolved==false).id`.
+THREAD_IDS=$(chp_review_threads "$PR_NUMBER" \
+  | jq -r '.[] | select(.resolved == false) | .thread_id')
 
 if [ -z "$THREAD_IDS" ]; then
     echo "No unresolved threads found!"
@@ -70,14 +91,8 @@ FAILED=0
 while read thread_id; do
     if [ -n "$thread_id" ]; then
         echo -n "Resolving thread $thread_id... "
-        result=$(gh api graphql \
-          -F threadId="$thread_id" \
-          -f query='
-mutation($threadId: ID!) {
-  resolveReviewThread(input: {threadId: $threadId}) {
-    thread { isResolved }
-  }
-}' --jq '.data.resolveReviewThread.thread.isResolved' 2>/dev/null)
+        # CHP verb resolves the thread and echoes the post-mutation isResolved.
+        result=$(chp_resolve_thread "$thread_id" 2>/dev/null)
 
         if [ "$result" = "true" ]; then
             echo "OK"

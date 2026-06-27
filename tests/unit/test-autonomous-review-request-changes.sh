@@ -199,9 +199,10 @@ else
 fi
 
 # TC-RC-SRC-07: PASS branch still submits --approve (regression pin — the fix
-# must NOT remove the existing approve).
-assert_grep "TC-RC-SRC-07 PASS path still submits gh pr review --approve" \
-  'gh +pr +review .*--approve' "$WRAPPER_CODE"
+# must NOT remove the existing approve). The leaf now routes through the CHP
+# verb chp_approve ([INV-87], #282) — still `--approve`, wrapper-owned.
+assert_grep "TC-RC-SRC-07 PASS path still submits the approve via chp_approve" \
+  'chp_approve .*--approve' "$WRAPPER_CODE"
 
 # TC-RC-SRC-08: PASS and REQUEST_CHANGES are mutually exclusive — no single
 # logical statement submits both. (Pin: --approve and submit_request_changes

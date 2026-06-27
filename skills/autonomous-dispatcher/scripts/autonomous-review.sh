@@ -63,9 +63,17 @@ source "${LIB_DIR}/lib-review-poll.sh"
 # aggregation and before acting on a PASS, the wrapper re-checks the PR's
 # `mergeable` status; a CONFLICTING (or persistently-UNKNOWN) PR can never reach
 # `approved`, regardless of whether the review agent ran its Step-0 pre-review
-# rebase prompt. _classify_mergeable_gate is the pure decision half (the gh
-# query + UNKNOWN-retry loop stays in the wrapper). Inert on the FAIL path.
+# rebase prompt. _classify_mergeable_gate is the pure decision half (the
+# chp_mergeable verb call + UNKNOWN-retry loop stays in the wrapper). Inert on FAIL.
 source "${LIB_DIR}/lib-review-mergeable.sh"
+# shellcheck source=lib-code-host.sh
+# [INV-87] (#282): Code-Host Provider dispatch. The mergeable / approve / merge
+# leaves below — and submit_request_changes (lib-review-request-changes.sh) — route
+# their innermost `gh pr *` primitive through the `chp_*` shims
+# (`chp_<verb>` → `chp_${CODE_HOST}_<verb>`). The INV-44/INV-54 classifiers
+# (lib-review-mergeable.sh) and the INV-52/INV-79 wrapper-owns-approve/merge
+# ownership are UNCHANGED — only the gh leaf moves. Guarded + idempotent.
+source "${LIB_DIR}/lib-code-host.sh"
 # shellcheck source=lib-review-e2e.sh
 # INV-46 (#182): run E2E ONCE in a dedicated lane, sequentially, BEFORE the
 # review fan-out — not once per fan-out review agent. The command-mode lane is a
@@ -3209,7 +3217,10 @@ Findings->Decision Gate: 1 blocking finding(s) -- FAIL.
   MERGEABLE_RETRIES="${MERGEABLE_RETRIES:-3}"
   MERGEABLE_STATUS=""
   for _mg_attempt in $(seq 1 "$MERGEABLE_RETRIES"); do
-    MERGEABLE_STATUS=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json mergeable -q '.mergeable' 2>/dev/null || echo "")
+    # [INV-87] (#282) the `gh pr view --json mergeable` leaf moves behind chp_mergeable
+    # ([M2]); the raw token + the `-q '.mergeable'` projection are consumed here. The
+    # UNKNOWN-retry loop + _classify_mergeable_gate (INV-44/INV-54) stay caller-side.
+    MERGEABLE_STATUS=$(chp_mergeable "$PR_NUMBER" -q '.mergeable' 2>/dev/null || echo "")
     [[ "${MERGEABLE_STATUS^^}" != "UNKNOWN" && -n "$MERGEABLE_STATUS" ]] && break
     # Only sleep when another attempt will follow — no point waiting after the
     # final probe (the loop is about to exit and classify the settled value).
@@ -3313,7 +3324,9 @@ if [[ "$PASSED_VERDICT" == "true" ]]; then
     log "ERROR: Token refresh failed — token daemon may have crashed. Attempting approval with current token..."
   fi
   log "Submitting PR approval for PR #${PR_NUMBER}..."
-  if gh pr review "$PR_NUMBER" --repo "$REPO" --approve \
+  # [INV-87] (#282) the `gh pr review --approve` leaf moves behind chp_approve; the
+  # INV-52/INV-79 wrapper-owns-approve ownership + the PASS-gate chain stay caller-side.
+  if chp_approve "$PR_NUMBER" --approve \
     --body "All acceptance criteria verified.$(if [[ "${E2E_ACTIVE:-false}" == "true" ]]; then echo " E2E verification passed."; fi)" 2>&1; then
     log "PR #${PR_NUMBER} approved successfully."
   else
@@ -3351,7 +3364,11 @@ if [[ "$PASSED_VERDICT" == "true" ]]; then
     # Capture merge stdout+stderr so the failure-path PR comment can
     # surface the merge error to the dev re-dispatch (#145).
     set +e
-    MERGE_OUT=$(gh pr merge "$PR_NUMBER" --repo "$REPO" --squash --delete-branch 2>&1)
+    # [INV-87] (#282) the `gh pr merge` leaf moves behind chp_merge; INV-52/INV-79
+    # ownership unchanged. [M4]/[INV-33]: merge_closes_issue=1 (GitHub) means the
+    # `Closes #N` PR body auto-transitions the issue on merge — the wrapper MUST NOT
+    # call itp_transition_state after merge (it does not; see the INV-33 note below).
+    MERGE_OUT=$(chp_merge "$PR_NUMBER" --squash --delete-branch 2>&1)
     MERGE_RC=$?
     set -e
     [[ -n "$MERGE_OUT" ]] && log "gh pr merge output: ${MERGE_OUT}"

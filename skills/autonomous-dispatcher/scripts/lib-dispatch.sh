@@ -60,6 +60,22 @@ if ! declare -F itp_list_comments >/dev/null 2>&1; then
   unset _ld_self _ld_dir
 fi
 
+# [INV-87] Code-Host Provider dispatch (#282). `ci_is_green` (and, via
+# lib-pr-linkage.sh, the PR↔issue resolvers) route their innermost `gh pr *`
+# leaf through the `chp_*` shims (`chp_<verb>` → `chp_${CODE_HOST}_<verb>`)
+# defined in lib-code-host.sh, which also sources providers/chp-${CODE_HOST}.sh
+# (the GitHub reference impl is providers/chp-github.sh). Same readlink -f idiom
+# as the lib-pr-linkage / lib-issue-provider sources above; idempotent.
+if ! declare -F chp_ci_status >/dev/null 2>&1; then
+  _ld_self="${BASH_SOURCE[0]:-$0}"
+  _ld_dir="$(cd "$(dirname "$(readlink -f "$_ld_self")")" && pwd 2>/dev/null)" || _ld_dir=""
+  if [ -n "$_ld_dir" ] && [ -r "${_ld_dir}/lib-code-host.sh" ]; then
+    # shellcheck source=lib-code-host.sh
+    source "${_ld_dir}/lib-code-host.sh"
+  fi
+  unset _ld_self _ld_dir
+fi
+
 # ---------------------------------------------------------------------------
 # Concurrency
 # ---------------------------------------------------------------------------
@@ -1557,7 +1573,10 @@ ci_is_green() {
   local pr_num="$1"
   local ci_states ci_err_file ci_err_content
   ci_err_file=$(mktemp)
-  if ci_states=$(gh pr checks "$pr_num" --repo "$REPO" --json state -q '[.[].state]' 2>"$ci_err_file"); then
+  # [INV-87] the `gh pr checks --json state` leaf moves behind chp_ci_status; the
+  # `-q '[.[].state]'` projection + the green/pending/failed/none gate below stay
+  # caller-side (provider-neutral). Byte-identical argv (spec §3.2).
+  if ci_states=$(chp_ci_status "$pr_num" --json state -q '[.[].state]' 2>"$ci_err_file"); then
     rm -f "$ci_err_file"
   else
     ci_err_content=$(cat "$ci_err_file")
