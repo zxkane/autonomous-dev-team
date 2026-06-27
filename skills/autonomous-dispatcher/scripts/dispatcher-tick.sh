@@ -217,15 +217,18 @@ dispatch() {
 # Steps 2/3/4 of this tick, so Step 5 can skip them ([INV-09]).
 JUST_DISPATCHED=()
 
-# [INV-83] Tick boundary for the cross-repo dependency lookup-token cache. The
-# cache is TICK-scoped (AC #2): Step 2's check_deps_resolved reuses a single
-# per-`owner/repo` minted token across ALL new issues in this tick, so two issues
-# depending on the same external repo mint only ONCE. Clearing here (once, before
-# the issue loop) starts each tick clean while preserving the within-tick dedup —
-# a per-issue reset would defeat it (#269 review [P1]). Guarded so a future
-# lib-dispatch refactor that drops the helper can't abort the tick.
-if declare -F _reset_dep_token_cache >/dev/null 2>&1; then
-  _reset_dep_token_cache
+# [INV-83] Tick boundary for the cross-repo dependency lookup-token cache, via
+# the itp_begin_tick lifecycle hook (#284, spec §3.6). The cache is TICK-scoped
+# (AC #2): Step 2's check_deps_resolved reuses a single per-`owner/repo` minted
+# token across ALL new issues in this tick, so two issues depending on the same
+# external repo mint only ONCE. The cache + the reset are provider-internal now
+# (GitHub ITP maps itp_begin_tick → its own _DEP_TOKEN_CACHE reset); calling the
+# verb once here (before Step 2 scan-new) starts each tick clean while preserving
+# the within-tick dedup — a per-issue reset would defeat it (#269 review [P1]).
+# Guarded so a future provider/lib refactor that drops the verb can't abort the
+# tick (the shim is defined by lib-issue-provider.sh, self-sourced by lib-dispatch.sh).
+if declare -F itp_begin_tick >/dev/null 2>&1; then
+  itp_begin_tick
 fi
 
 # ---------------------------------------------------------------------------

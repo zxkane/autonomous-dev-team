@@ -144,11 +144,11 @@ The *callers* keep their logic; only the leaf `gh` call moves behind a verb.
 | `itp_post_comment ISSUE BODY` | every `gh issue comment` site (agent **and** dispatcher — incl. `post_dispatch_token` ([INV-18], `lib-dispatch.sh:1227`), `_dep_block_comment` ([INV-39], `:400`) — see [M6]) | Post a progress / verdict / audit / dispatcher-marker comment **through the provider's declared `marker_channel`** (§4). The single choke-point for ALL machine markers. MAY return the new comment's `id`/`url` (matches `reply-to-comments.sh:44-45`). |
 | `itp_edit_comment ISSUE COMMENT_ID BODY` | `lib-review-e2e.sh:486` (`gh api -X PATCH …/issues/comments/${id}`, [INV-46] SHA stamp) | Edit a comment in place. **New verb [M5]** — an append-only `itp_post_comment` could not satisfy the [INV-46] evidence-marker stamp, which GETs the last bot comment's `id` then PATCHes it. Capability-gated: a backend without edit (`edit_comment=0`) falls back to re-posting **the full report body WITH the marker appended** as a fresh comment (NOT a marker-only post — `_fetch_sha_evidence` returns the `last` SHA-marked comment's full body, so a marker-only fallback would pass the E2E gate with no report/screenshots/AC; [INV-46]). |
 | `itp_list_comments ISSUE` | every issue-level `gh issue view --json comments -q …` site (28 sites) | Return ISSUE-level comments as a **normalized JSON array** `[{id, author, body, createdAt}]`, **sorted ascending by `createdAt` (normative MUST** — the `\| last` / `sort_by(.createdAt)` idioms depend on it). `id`/`author`/`createdAt` contract pinned in §3.3. **Scoped to issue-level comments only** — review-thread / inline-PR comments are a separate CHP shape (§3.2, [M8]). |
-| `itp_resolve_dep REF` | `resolve_dep_state` (`:348`) / `check_deps_resolved` (`:438`) leaf I/O only | Given a dependency ref, return abstract state `OPEN`/`CLOSED`. **The [INV-83] per-dep-repo scoped-token mint + tick-scoped `_DEP_TOKEN_CACHE` move into the provider** behind the `itp_begin_tick` lifecycle hook (see §3.6); the `## Dependencies` body parse + block/proceed decision stay **caller-side**. Ref form is capability-gated (§4: `cross_ref_shorthand`). |
+| `itp_resolve_dep REF` | `resolve_dep_state` (`lib-dispatch.sh`) / `check_deps_resolved` leaf I/O only | Given a dependency ref, write the abstract state `OPEN`/`CLOSED`/`MERGED` (GitHub PR refs report `MERGED`; empty on lookup failure) into the caller's out-var. **Realized as `itp_resolve_dep OWNER_REPO NUM OUT_VAR`** (the abstract `REF` is the `OWNER_REPO`+`NUM` pair) — the **out-var (`printf -v`) contract is mandatory** so the [INV-83] per-dep-repo scoped-token mint + tick-scoped `_DEP_TOKEN_CACHE` (which **move into the provider**, GitHub leaf `itp_github_resolve_dep`, behind the `itp_begin_tick` lifecycle hook — see §3.6) mutate the cache in the caller's shell, not a command-substitution subshell. The `## Dependencies` body parse, the [INV-11] CLOSED/MERGED predicate, and the block/proceed decision stay **caller-side**. The cross-repo `owner/repo#N` ref form is capability-gated (§4: `cross_ref_shorthand=1` for GitHub); the same-repo `#N` arm resolves against `$REPO` with the mint skipped (ambient token). **Migrated #284.** |
 | `itp_mark_checkbox ISSUE SELECTOR` | `mark-issue-checkbox.sh` | Mark a task sub-item done. GitHub: tick a body markdown checkbox. Capability-gated (§4: `body_checkbox`). |
 | `itp_provision_states` | `setup-labels.sh:47` (`gh label create --color <hex>`) | Provision the backend's state primitives (GitHub: create the 9 pipeline labels). **New verb [m5]** — was an un-refactored ITP write surface. Hex color is a GitHub/GitLab concern (gate via the `label_colors` cap); Asana creates single-select options instead. |
 | `itp_caps` | — (new) | Emit the capability map (§4). Resolved to a declarative `.caps` manifest + thin reader (§6). |
-| `itp_begin_tick` | `dispatcher-tick.sh:228` `_reset_dep_token_cache` + the `lib-dispatch.sh:306` `_DEP_TOKEN_CACHE` ([INV-83]) | Tick-lifecycle hook — see §3.6. The dispatcher calls it **once** before Step 2; the GitHub provider maps it to `_reset_dep_token_cache` and owns `_DEP_TOKEN_CACHE` internally. **New verb [m2]**. |
+| `itp_begin_tick` | `dispatcher-tick.sh` `_reset_dep_token_cache` call + the `_DEP_TOKEN_CACHE` declaration ([INV-83]) | Tick-lifecycle hook — see §3.6. The dispatcher calls it **once** before Step 2; the GitHub provider's leaf `itp_github_begin_tick` owns `_DEP_TOKEN_CACHE` (declared + reset internally) and is the new home of the body previously in `lib-dispatch.sh::_reset_dep_token_cache`. **New verb [m2]; migrated #284**. |
 
 > **Implementation status.** The READ leaves —
 > `itp_list_by_state`, `itp_count_by_state`, `itp_list_forbidden_combos`,
@@ -173,8 +173,20 @@ The *callers* keep their logic; only the leaf `gh` call moves behind a verb.
 > `mark-issue-checkbox.sh` routes through `itp_mark_checkbox`;
 > `setup-labels.sh` through `itp_provision_states` — all byte-identical, with the
 > marker text / retry / dedup / [INV-25] terminal-state subtraction staying
-> caller-side. The dep leaves (`itp_resolve_dep`/`itp_begin_tick`) are still
-> scaffolds (downstream itp-deps-begin-tick).
+> caller-side. **The dependency-resolution + tick-lifecycle leaves —
+> `itp_resolve_dep`/`itp_begin_tick` — are migrated for the GitHub backend in
+> #284** ([INV-83],
+> [`tests/unit/test-itp-resolve-dep-golden-trace.sh`](../../tests/unit/test-itp-resolve-dep-golden-trace.sh)):
+> `itp_github_resolve_dep` owns the cross-repo + same-repo `gh issue view --json
+> state` leaf, the per-dep-repo scoped-token mint, the `_DEP_TOKEN_CACHE`, the
+> `DEP_LOOKUP_PERMISSIONS` default, and the `get_gh_app_scoped_token` lazy-source;
+> `itp_github_begin_tick` owns the tick-boundary cache reset.
+> `lib-dispatch.sh::resolve_dep_state` is a thin wrapper forwarding to
+> `itp_resolve_dep` (out-var contract preserved); `dispatcher-tick.sh` calls
+> `itp_begin_tick` once before Step 2; the `## Dependencies` parse, the [INV-11]
+> predicate, the fail-safe block, and the `_dep_block_comment` call stay
+> caller-side, with the cross-repo arm gated on `cross_ref_shorthand`
+> (`grep -c 'gh issue view .*--json state' lib-dispatch.sh` == 0).
 
 ### 3.2 Code-Host Provider (CHP) verbs
 
@@ -309,15 +321,27 @@ provider-internal** — callers never see a partial page or a 429.
 
 ### 3.6 Tick lifecycle hook (`itp_begin_tick`)
 
-`resolve_dep_state` mints a **target-repo-scoped** GitHub-App token and caches it
-in `_DEP_TOKEN_CACHE` (`lib-dispatch.sh:306`), whose lifetime is **tick-scoped**
-and reset once per tick by `dispatcher-tick.sh:228` `_reset_dep_token_cache`
-([INV-83] / #269). Moving the leaf behind `itp_resolve_dep` without a lifecycle
-hook would either re-mint per ref (the #269 regression) or strand the cache. So
-the ITP exposes an **`itp_begin_tick`** hook the dispatcher calls **once before
-Step 2**; the GitHub provider maps it to `_reset_dep_token_cache` and owns
-`_DEP_TOKEN_CACHE` internally. Cross-namespace dep resolution may need
-provider-internal token re-scoping ([INV-83]).
+The cross-repo dependency lookup mints a **target-repo-scoped** GitHub-App token
+and caches it in `_DEP_TOKEN_CACHE`, whose lifetime is **tick-scoped** and reset
+once per tick ([INV-83] / #269). Moving the leaf behind `itp_resolve_dep` without
+a lifecycle hook would either re-mint per ref (the #269 regression) or strand the
+cache. So the ITP exposes an **`itp_begin_tick`** hook the dispatcher calls **once
+before Step 2**.
+
+**Realized in #284:** the GitHub provider's `itp_github_begin_tick`
+(`providers/itp-github.sh`) owns `_DEP_TOKEN_CACHE` — it declares the cache at
+provider-module scope and resets it (`unset` + `declare -gA`), exactly the body
+that previously lived in `lib-dispatch.sh::_reset_dep_token_cache`. The leaf state
+lookup + the per-dep-repo scoped-token mint + the `DEP_LOOKUP_PERMISSIONS` default
++ the `get_gh_app_scoped_token` lazy-source all live in `itp_github_resolve_dep`.
+`dispatcher-tick.sh` calls `itp_begin_tick` once before Step 2 (the position
+`_reset_dep_token_cache` occupied); `lib-dispatch.sh::resolve_dep_state` is a thin
+wrapper forwarding `(owner_repo, num, out_var)` to `itp_resolve_dep` with the
+out-var contract intact, so the cache mutation stays in the dispatcher's shell.
+The `_DEP_TOKEN_CACHE` persists across the tick's `check_deps_resolved` calls
+because `providers/itp-github.sh` is sourced once per dispatcher process (via
+`lib-issue-provider.sh`, self-sourced by `lib-dispatch.sh`). Cross-namespace dep
+resolution may need provider-internal token re-scoping ([INV-83]).
 
 ---
 
@@ -626,8 +650,8 @@ becomes a verb, the surrounding INV-coupled logic stays caller-side.
 | `list_stale_candidates` (`:110`) | `itp_list_by_state` | (a) separable-leaf | the staleness-window enumeration leaf |
 | `list_hygiene_residue` (`:143`) | `itp_list_forbidden_combos` | (a) separable-leaf | the [INV-25] forbidden-combination query leaf |
 | `label_swap` (`lib-dispatch.sh`) | `itp_transition_state` | (a) separable-leaf | the atomic remove+add `gh issue edit` — **migrated #283** (the `mark_stalled` inline `pending-dev→stalled` edit was folded into a `label_swap` call so every transition funnels through the one verb) |
-| `resolve_dep_state` (`:348`) | `itp_resolve_dep` + `itp_begin_tick` | (b) entangled | leaf lookup → `itp_resolve_dep`; [INV-83] scoped-token mint + `_DEP_TOKEN_CACHE` → provider behind `itp_begin_tick`; the `## Dependencies` parse stays caller-side |
-| `check_deps_resolved` (`:438`) | `itp_read_task` + `itp_resolve_dep` | (b) entangled | `gh issue view --json body` + the per-ref lookup become verbs; the parse + block/proceed decision stay caller-side |
+| `resolve_dep_state` (`lib-dispatch.sh`) | `itp_resolve_dep` + `itp_begin_tick` | (b) entangled | **migrated #284**: leaf state lookup → `itp_github_resolve_dep` (out-var contract preserved); [INV-83] scoped-token mint + `_DEP_TOKEN_CACHE` + `DEP_LOOKUP_PERMISSIONS` default + `get_gh_app_scoped_token` lazy-source → provider; tick reset (`_reset_dep_token_cache` body) → `itp_github_begin_tick`. `resolve_dep_state` is now a thin caller-side wrapper forwarding to `itp_resolve_dep`; the `## Dependencies` parse stays caller-side |
+| `check_deps_resolved` (`lib-dispatch.sh`) | `itp_read_task` + `itp_resolve_dep` | (b) entangled | the per-ref lookup (both the cross-repo and same-repo arms) routes through `itp_resolve_dep` (**migrated #284**, cross-repo arm gated on `cross_ref_shorthand`); the `## Dependencies` parse, the [INV-11] CLOSED/MERGED predicate, the fail-safe `return 1`, and the `_dep_block_comment` call stay caller-side. (The `gh issue view --json body` task read remains a raw caller-side `gh` call; `itp_read_task` is its eventual home.) |
 | `mark_stalled` (`lib-dispatch.sh`) | `itp_post_comment` + `itp_transition_state` | **(b) entangled multi-op orchestrator** | **leaf I/O migrated #283**: its comment posts → `itp_post_comment`, its `pending-dev→stalled` edit → `label_swap` (→ `itp_transition_state`); the NON-host ops (`pid_alive`, log truncate) stay caller-side. The orchestrator restructuring itself is owned by entangled-orchestrators-golden-trace |
 | `handle_completed_session_routing` (`lib-dispatch.sh`) | `itp_post_comment` + `itp_transition_state` (+ dispatch) | **(b) entangled multi-op orchestrator** | **leaf I/O migrated #283**: all comment posts → `itp_post_comment`, label moves → `label_swap`; the [INV-35]/[INV-85] routing decision + `dispatch dev-new` + log truncate stay caller-side |
 | `post_dispatch_token` (`lib-dispatch.sh`) | `itp_post_comment` | (a) separable-leaf | the [INV-18] dispatcher-marker comment write — routes through the ITP choke-point ([INV-89]) — **migrated #283** (marker BODY composed caller-side, verbatim) |

@@ -211,7 +211,7 @@ tick_out=$(PATH="$GHBIN:$PATH" REPO="$REPO" REPO_OWNER=example-org PROJECT_ID=e2
     source '$GAT_STUB'
     source '$LIB'
     set +e
-    _reset_dep_token_cache          # the tick boundary (dispatcher-tick.sh does this once)
+    itp_begin_tick                  # the tick boundary (dispatcher-tick.sh does this once; #284 verb)
     check_deps_resolved 101; echo \"RC1=\$?\"   # issue #101 — mints
     check_deps_resolved 102; echo \"RC2=\$?\"   # issue #102 same tick — reuses
   " 2>/dev/null)

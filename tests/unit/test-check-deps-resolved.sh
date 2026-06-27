@@ -4,13 +4,32 @@
 #   - #61: MERGED PR dependencies count as resolved
 #   - #73: portable (non-GNU) dep extraction
 #   - #157: cross-repo `owner/repo#N` deps + list-only extraction
+#   - #269/INV-83: per-dep-repo scoped-token cross-repo lookup (TC-CRDEP-001..012)
+#   - #284/INV-83: the leaf + mint + cache moved behind itp_resolve_dep /
+#     itp_begin_tick (providers/itp-github.sh). These tests run against the VERB
+#     SEAM: sourcing lib-dispatch.sh self-sources lib-issue-provider.sh →
+#     itp-github.sh (default ISSUE_PROVIDER=github), so resolve_dep_state forwards
+#     to itp_github_resolve_dep and the tick-boundary reset is itp_begin_tick.
 #
 # `check_deps_resolved` makes multiple gh calls in sequence:
-#   1. `gh issue view N --repo $REPO --json body -q .body`
+#   1. `gh issue view N --repo $REPO --json body -q .body`        (caller-side)
 #   2. for each dep: `gh issue view M --repo <repo> --json state -q .state`
+#      — this leaf now lives in providers/itp-github.sh::itp_github_resolve_dep,
+#      but it emits the SAME argv, so the gh BINARY mock below applies unchanged.
 #
-# The mock `gh` keys state lookups on "<repo>:<num>" so the same number can
-# resolve to different states in different repos.
+# FUNCTION-MOCK SHIM AUDIT (#284, §7.3 m3 — shim-vs-rename policy):
+#   - The gh BINARY mock (the `gh()` function) stubs the leaf I/O. The migration
+#     keeps the emitted `gh issue view … --json state` argv byte-identical
+#     (golden-trace pinned in test-itp-resolve-dep-golden-trace.sh), so this
+#     binary mock is unaffected by where the leaf lives.
+#   - `get_gh_app_scoped_token` is stubbed as a SHELL FUNCTION and `export -f`'d
+#     BEFORE sourcing the lib (see lines ~76/84). The provider's
+#     itp_github_resolve_dep lazy-sources gh-app-token.sh only when the function
+#     is NOT already defined (`declare -F` guard), so the stub WINS — the mint
+#     primitive stays resolvable from the provider's lazy-source path. This is a
+#     function-level SHIM, NOT a rename: the production function name is
+#     unchanged, so the provider resolves the real mint in production and the
+#     stub in tests.
 #
 # Run: bash tests/unit/test-check-deps-resolved.sh
 
@@ -186,12 +205,16 @@ _reset_states() {
   # and let token-mode tests override GH_AUTH_MODE explicitly. Pre-#269 tests
   # never touch these and stay in token mode (GH_AUTH_MODE unset).
   unset GH_TOKEN GH_AUTH_MODE DISPATCHER_APP_ID DISPATCHER_APP_PEM
-  # [INV-83, #269] Clear the dep-lookup token cache between INDEPENDENT cases.
-  # The cache is now TICK-scoped (persists across check_deps_resolved calls in a
-  # tick), so check_deps_resolved no longer self-resets — each test case must
-  # start from the tick boundary. (The cross-TICK-dedup test below deliberately
+  # [INV-83, #269/#284] Clear the dep-lookup token cache between INDEPENDENT
+  # cases. The cache is TICK-scoped (persists across check_deps_resolved calls in
+  # a tick), so check_deps_resolved no longer self-resets — each test case must
+  # start from the tick boundary. Since #284 the cache + reset are provider-owned
+  # (providers/itp-github.sh) and the boundary reset is the `itp_begin_tick` verb
+  # (dispatcher-tick.sh calls it once before Step 2), NOT a direct
+  # `_reset_dep_token_cache` call. We reset through the verb here, proving the
+  # cache is cleared by the verb. (The cross-TICK-dedup test below deliberately
   # does NOT call _reset_states between its two check_deps_resolved calls.)
-  _reset_dep_token_cache
+  itp_begin_tick
 }
 
 # Register a scoped-mint failure for owner/repo (file-backed, subshell-safe).
@@ -766,9 +789,11 @@ assert_eq "TICK-scoped cache: same dep repo across TWO issues minted ONCE (AC #2
 echo ""
 echo "=== TC-CRDEP-012: the tick-boundary reset clears the cache (a new tick re-mints) ==="
 # ---------------------------------------------------------------------------
-# After a tick boundary (_reset_dep_token_cache, what dispatcher-tick.sh calls
-# once per tick before Step 2), a fresh tick processing the same dep repo mints
-# again — the cache does NOT leak across ticks.
+# After a tick boundary (itp_begin_tick, what dispatcher-tick.sh calls once per
+# tick before Step 2 — #284 relocated the reset body into the provider's
+# itp_github_begin_tick), a fresh tick processing the same dep repo mints again —
+# the cache does NOT leak across ticks. This proves the cache is cleared by the
+# verb, not by check_deps_resolved.
 _reset_states
 _arm_app_mode
 _MOCK_BODY="## Dependencies
@@ -777,10 +802,10 @@ _MOCK_BODY="## Dependencies
 _set_repo_state shared-owner/shared-repo 7 CLOSED
 check_deps_resolved 201            # tick A: one mint
 mints_after_tick_a=$(_mint_count_for shared-owner/shared-repo)
-_reset_dep_token_cache             # <-- tick boundary (dispatcher-tick.sh does this)
+itp_begin_tick                     # <-- tick boundary (dispatcher-tick.sh does this)
 check_deps_resolved 202            # tick B: must mint AGAIN (cache cleared)
 assert_eq "tick A minted once" "1" "$mints_after_tick_a"
-assert_eq "after tick-boundary reset, tick B re-mints (no cross-tick leak) → 2 total" "2" "$(_mint_count_for shared-owner/shared-repo)"
+assert_eq "after itp_begin_tick (tick-boundary reset), tick B re-mints (no cross-tick leak) → 2 total" "2" "$(_mint_count_for shared-owner/shared-repo)"
 
 # ---------------------------------------------------------------------------
 echo ""
