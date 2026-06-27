@@ -150,6 +150,21 @@ The *callers* keep their logic; only the leaf `gh` call moves behind a verb.
 | `itp_caps` | — (new) | Emit the capability map (§4). Resolved to a declarative `.caps` manifest + thin reader (§6). |
 | `itp_begin_tick` | `dispatcher-tick.sh:228` `_reset_dep_token_cache` + the `lib-dispatch.sh:306` `_DEP_TOKEN_CACHE` ([INV-83]) | Tick-lifecycle hook — see §3.6. The dispatcher calls it **once** before Step 2; the GitHub provider maps it to `_reset_dep_token_cache` and owns `_DEP_TOKEN_CACHE` internally. **New verb [m2]**. |
 
+> **Implementation status.** The READ leaves —
+> `itp_list_by_state`, `itp_count_by_state`, `itp_list_forbidden_combos`,
+> `itp_read_task`, `itp_list_comments` — are **migrated for the GitHub backend in
+> #281** (`providers/itp-github.sh`), proven byte-identical by golden-trace
+> ([`tests/unit/test-itp-read-leaves.sh`](../../tests/unit/test-itp-read-leaves.sh)).
+> The GitHub list verbs are faithful pass-throughs: the caller passes its existing
+> `gh issue list` argument tail (`--state open --limit 100 --label … --json … -q
+> '<INV-25 subtraction>'`) and the leaf forwards it to `gh issue list --repo
+> "$REPO" "$@"`, so the emitted argv + `--json` field list stay byte-identical and
+> the INV-25 terminal-state subtraction stays in the caller's `-q` (caller-side,
+> provider-neutral). The WRITE leaves (`itp_transition_state`/`itp_post_comment`/
+> `itp_edit_comment`/`itp_mark_checkbox`/`itp_provision_states`) and the dep leaves
+> (`itp_resolve_dep`/`itp_begin_tick`) are still scaffolds (downstream itp-writes /
+> itp-deps-begin-tick).
+
 ### 3.2 Code-Host Provider (CHP) verbs
 
 | Verb | Replaces | Contract |
@@ -217,6 +232,14 @@ rate-limit retry (today's behavior, zero change); a `curl`-based provider
 (GitLab keyset/offset, Asana cursors) implements page-walking and `429` /
 `Retry-After` backoff **inside the provider**. **Rate-limit/retry ownership is
 provider-internal** — callers never see a partial page or a 429.
+
+> **GitHub read leaves (#281) honor this with ZERO added page-walk code.** Each
+> migrated read verb (`itp_github_list_by_state` / `itp_github_count_by_state` /
+> `itp_github_list_forbidden_combos` / `itp_github_list_comments`) is a thin
+> wrapper over the same `gh issue list` / `gh issue view --json comments` call the
+> caller emitted before — `gh` already walks `--json` pagination and retries
+> secondary rate limits transparently, so the COMPLETE-set guarantee is inherited
+> unchanged.
 
 ### 3.6 Tick lifecycle hook (`itp_begin_tick`)
 
@@ -357,7 +380,7 @@ scripts/
   lib-issue-provider.sh          # itp_<verb>() dispatch → itp_${ISSUE_PROVIDER}_<verb>; reads .caps  (#280)
   lib-code-host.sh               # chp_<verb>() dispatch → chp_${CODE_HOST}_<verb>; reads .caps        (#280)
   providers/                     # dir, sibling to adapters/  (#280)
-    itp-github.sh                # itp_github_*  — reference impl (EMPTY scaffold in #280; gh leaves moved verbatim by the itp-reads/itp-writes siblings)
+    itp-github.sh                # itp_github_*  — reference impl. READ leaves (list_by_state, count_by_state, list_forbidden_combos, read_task, list_comments) MIGRATED in #281; WRITE leaves still scaffold (itp-writes); dep leaves still scaffold (itp-deps-begin-tick)
     itp-github.caps              # declarative capability manifest (parsed, not sourced)  (#280)
     chp-github.sh                # chp_github_*  — reference impl (EMPTY scaffold in #280; gh leaves moved verbatim by the chp-pr-lifecycle sibling)
     chp-github.caps              # declarative capability manifest  (#280)

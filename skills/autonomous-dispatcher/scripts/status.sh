@@ -82,7 +82,9 @@ MAX_RETRIES="${MAX_RETRIES:-3}"
 # ---------------------------------------------------------------------------
 # Gather state (read-only gh + lib predicates)
 # ---------------------------------------------------------------------------
-ISSUE_JSON="$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json state,labels,title 2>/dev/null || echo '{}')"
+# [INV-87] issue-level task read routes through itp_read_task; the GitHub leaf
+# forwards `--json state,labels,title` byte-identically (spec §3.1 read_task).
+ISSUE_JSON="$(itp_read_task "$ISSUE_NUMBER" state,labels,title 2>/dev/null || echo '{}')"
 ISSUE_STATE="$(jq -r '.state // "UNKNOWN"' <<<"$ISSUE_JSON")"
 ISSUE_TITLE="$(jq -r '.title // ""' <<<"$ISSUE_JSON")"
 LABELS="$(jq -r '[.labels[].name] | join(" ")' <<<"$ISSUE_JSON" 2>/dev/null || echo "")"
