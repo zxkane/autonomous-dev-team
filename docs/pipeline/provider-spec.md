@@ -343,6 +343,17 @@ because `providers/itp-github.sh` is sourced once per dispatcher process (via
 `lib-issue-provider.sh`, self-sourced by `lib-dispatch.sh`). Cross-namespace dep
 resolution may need provider-internal token re-scoping ([INV-83]).
 
+**`itp_begin_tick` is an OPTIONAL hook.** `lib-issue-provider.sh` ALWAYS defines
+the `itp_begin_tick` shim (it forwards to `itp_${ISSUE_PROVIDER}_begin_tick`), but
+a provider with no per-tick state (no token cache) legitimately implements no
+leaf. The dispatcher therefore guards the call on the **provider leaf**
+(`declare -F "itp_${ISSUE_PROVIDER}_begin_tick"`), NOT the always-present shim — an
+absent leaf is a no-op, never a `command not found` abort under `set -e` (the
+degraded fixture provider and any not-yet-migrated GitLab/Asana backend take this
+no-op path). This preserves the pre-#284 `declare -F _reset_dep_token_cache`
+no-op-when-absent guard semantics. The GitHub default DOES define the leaf, so the
+reference dispatcher resets the cache every tick (#284 review [P1]).
+
 ---
 
 ## 4. Capability flags

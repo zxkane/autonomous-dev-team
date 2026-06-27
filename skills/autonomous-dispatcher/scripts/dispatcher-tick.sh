@@ -225,9 +225,20 @@ JUST_DISPATCHED=()
 # (GitHub ITP maps itp_begin_tick → its own _DEP_TOKEN_CACHE reset); calling the
 # verb once here (before Step 2 scan-new) starts each tick clean while preserving
 # the within-tick dedup — a per-issue reset would defeat it (#269 review [P1]).
-# Guarded so a future provider/lib refactor that drops the verb can't abort the
-# tick (the shim is defined by lib-issue-provider.sh, self-sourced by lib-dispatch.sh).
-if declare -F itp_begin_tick >/dev/null 2>&1; then
+#
+# Guard on the PROVIDER LEAF (`itp_${ISSUE_PROVIDER}_begin_tick`), NOT the shim:
+# lib-issue-provider.sh ALWAYS defines the `itp_begin_tick` shim, but begin_tick
+# is an OPTIONAL lifecycle hook — a provider with no per-tick state (no token
+# cache) legitimately does not implement the leaf. Guarding on the shim would
+# always pass and then call an undefined `itp_${ISSUE_PROVIDER}_begin_tick`,
+# aborting the tick under `set -e` with `command not found` (e.g. the degraded
+# fixture provider, or any not-yet-migrated gitlab/asana backend). Guarding on the
+# leaf restores the pre-#284 no-op-when-absent semantics the old
+# `declare -F _reset_dep_token_cache` guard had (the GitHub default DOES define
+# the leaf, so the real dispatcher still resets the cache every tick). ISSUE_PROVIDER
+# is set by lib-issue-provider.sh (`${ISSUE_PROVIDER:-github}`); the `:-github`
+# here keeps the guard `set -u`-safe if the seam was somehow not sourced.
+if declare -F "itp_${ISSUE_PROVIDER:-github}_begin_tick" >/dev/null 2>&1; then
   itp_begin_tick
 fi
 

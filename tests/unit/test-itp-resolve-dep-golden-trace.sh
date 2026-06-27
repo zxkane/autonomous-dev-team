@@ -22,7 +22,6 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 SCRIPTS="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts"
 LIB="$SCRIPTS/lib-dispatch.sh"
-PROVIDERS="$SCRIPTS/providers"
 FAKE_PROVIDER="$SCRIPT_DIR/fixtures/provider-degraded"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; NC='\033[0m'
@@ -339,9 +338,9 @@ rm -rf "$neg_gh_dir"
 assert_contains "doomed cross-repo mint-failure yields empty state (negative-cached, no abort)" "DOOMED=[]" "$neg_out"
 assert_contains "same-repo dep still resolves in the same tick (mint failure did NOT abort, #269 T4)" "SAMEREPO=[CLOSED]" "$neg_out"
 assert_contains "process survived the mint-failure path (no exit)" "ALIVE=yes" "$neg_out"
-# The doomed repo is negative-cached: a second ref to it does NOT re-mint.
+# The doomed repo is negative-cached: a second ref to it does NOT re-mint. Run
+# only for the mint-log side effect (stdout discarded).
 _reset_logs
-neg2_out=$(
   env PATH="$GH_DIR:$PATH" \
       REPO="$REPO" REPO_OWNER="$REPO_OWNER" PROJECT_ID="$PROJECT_ID" MAX_RETRIES=3 MAX_CONCURRENT=5 \
       GH_AUTH_MODE=app DISPATCHER_APP_ID=12345 DISPATCHER_APP_PEM=/x.pem GH_TOKEN=ambient-repoA \
@@ -356,11 +355,58 @@ neg2_out=$(
     st=''
     resolve_dep_state doomed-owner/doomed 9 st
     resolve_dep_state doomed-owner/doomed 10 st
-    echo done
-  "
-)
+  " >/dev/null 2>&1
 mints=$(grep -cx "doomed-owner/doomed" "$_MINT_LOG")
 assert_eq "negative-cached doomed repo is minted ONCE for two refs (no re-mint per ref)" "1" "$mints"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-RDGT-009: dispatcher-tick begin_tick guard is a NO-OP for a provider WITHOUT a begin_tick leaf (#284 review [P1]) ==="
+# ---------------------------------------------------------------------------
+# REGRESSION for the review [P1]: lib-issue-provider.sh ALWAYS defines the
+# `itp_begin_tick` SHIM, so a guard on `declare -F itp_begin_tick` always passes
+# and then calls an undefined `itp_<provider>_begin_tick` → `command not found` →
+# aborts the tick under `set -e`. begin_tick is an OPTIONAL lifecycle hook (a
+# provider with no per-tick token cache implements no leaf). The dispatcher-tick
+# guard MUST key on the PROVIDER LEAF (`itp_${ISSUE_PROVIDER}_begin_tick`) so an
+# absent leaf is a no-op, restoring the pre-#284 `_reset_dep_token_cache` guard
+# semantics. The degraded fixture provider (itp-degraded.sh is an empty scaffold,
+# NO itp_degraded_begin_tick) selected through the PUBLIC seam exercises this.
+#
+# (a) The buggy SHIM guard aborts under set -e; (b) the LEAF guard is a clean
+# no-op; (c) the dispatcher-tick.sh source itself uses the LEAF guard.
+guard_dir="$SCRIPT_DIR/fixtures/provider-degraded"
+guard_out=$(
+  env -u ISSUE_PROVIDER -u AUTONOMOUS_CONF -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR \
+      ISSUE_PROVIDER=degraded AUTONOMOUS_PROVIDERS_DIR="$guard_dir" \
+      REPO="$REPO" REPO_OWNER="$REPO_OWNER" PROJECT_ID="$PROJECT_ID" MAX_RETRIES=3 MAX_CONCURRENT=5 \
+  bash -c '
+    set -euo pipefail
+    source "'"$LIB"'" 2>/dev/null
+    # The fix: guard on the provider LEAF, exactly as dispatcher-tick.sh does.
+    if declare -F "itp_${ISSUE_PROVIDER:-github}_begin_tick" >/dev/null 2>&1; then
+      itp_begin_tick
+    fi
+    echo "TICK-NOT-ABORTED"
+  ' 2>&1
+)
+assert_contains "degraded provider (no begin_tick leaf): the LEAF guard is a no-op, tick NOT aborted under set -e" "TICK-NOT-ABORTED" "$guard_out"
+assert_not_contains "no 'command not found' from an undefined provider begin_tick leaf" "command not found" "$guard_out"
+# Pin that dispatcher-tick.sh's actual guard keys on the provider LEAF, not the shim.
+DISPATCHER_TICK="$SCRIPTS/dispatcher-tick.sh"
+tick_src=$(cat "$DISPATCHER_TICK")
+assert_contains "dispatcher-tick.sh guards itp_begin_tick on the provider LEAF (itp_\${ISSUE_PROVIDER...}_begin_tick)" \
+  'declare -F "itp_${ISSUE_PROVIDER:-github}_begin_tick"' "$tick_src"
+# And the GitHub default DOES define the leaf, so the real dispatcher still resets.
+github_leaf=$(
+  env -u ISSUE_PROVIDER -u AUTONOMOUS_CONF -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR \
+      REPO="$REPO" REPO_OWNER="$REPO_OWNER" PROJECT_ID="$PROJECT_ID" MAX_RETRIES=3 MAX_CONCURRENT=5 \
+  bash -c '
+    source "'"$LIB"'" 2>/dev/null
+    declare -F "itp_${ISSUE_PROVIDER:-github}_begin_tick" >/dev/null 2>&1 && echo "GH-LEAF-DEFINED"
+  '
+)
+assert_contains "GitHub default DEFINES itp_github_begin_tick → the real dispatcher still resets every tick" "GH-LEAF-DEFINED" "$github_leaf"
 
 echo ""
 echo "=== SUMMARY: $PASS passed, $FAIL failed ==="
