@@ -2,13 +2,14 @@
 # tests/unit/fixtures/provider-degraded/itp-degraded.sh
 #
 # NAMED degraded fake ITP provider (#280, provider-spec.md §8 fake-provider;
-# design-spec §7.4 third bullet). EMPTY scaffold — the fake
-# provider exists to exercise the .caps caps=0 branches via itp-degraded.caps,
-# not to implement real verb leaves. Sourcing it is a no-op (it defines no
-# itp_degraded_<verb> bodies); the capability-branch test reads the paired
-# .caps manifest through the shared reader.
+# design-spec §7.4 third bullet). EMPTY scaffold — the fake provider exists to
+# exercise the caps=0 branches via itp-degraded.caps, not to implement real verb
+# leaves. Sourcing it is a no-op (it defines no itp_degraded_<verb> bodies).
 #
-# A future capability-branch test that wants the dispatch path live (rather than
-# reading the .caps directly) can point ISSUE_PROVIDER=degraded with this dir on
-# the provider resolution path and stub the itp_degraded_<verb> leaves it needs.
+# The capability-branch test (test-provider-dispatch.sh TC-030) selects this
+# provider through the PUBLIC seam — ISSUE_PROVIDER=degraded +
+# AUTONOMOUS_PROVIDERS_DIR=<this dir> — and reads the paired itp-degraded.caps
+# via itp_caps (the real provider-selection path), NOT by reading the .caps file
+# directly. A downstream caps-branch test that wants leaf dispatch live can stub
+# the itp_degraded_<verb> leaves it needs here.
 :

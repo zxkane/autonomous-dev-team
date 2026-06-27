@@ -32,7 +32,15 @@
 
 _LIB_ITP_SELF="${BASH_SOURCE[0]:-$0}"
 _LIB_ITP_REAL_DIR="$(cd "$(dirname "$(readlink -f "$_LIB_ITP_SELF")")" && pwd)"
-_LIB_ITP_PROVIDERS_DIR="${_LIB_ITP_REAL_DIR}/providers"
+# Provider-file search dir. Defaults to the skill-tree `providers/` resolved via
+# readlink -f (the production path). Overridable via AUTONOMOUS_PROVIDERS_DIR so
+# a NON-github backend selected through the PUBLIC seam (`ISSUE_PROVIDER=<name>`)
+# resolves its `providers/itp-<name>.{sh,caps}` from an alternate dir — this is
+# the hook the named degraded fake fixture provider uses to exercise the caps=0
+# branches through `itp_caps`, not by reading the `.caps` file directly (#280
+# review [P1]; it is the reusable provider-selection harness downstream
+# caps-branch issues build on). Empty/unset → the skill-tree default.
+_LIB_ITP_PROVIDERS_DIR="${AUTONOMOUS_PROVIDERS_DIR:-${_LIB_ITP_REAL_DIR}/providers}"
 
 # Seam config: default to the GitHub reference backend (spec §2). Callers never
 # read provider-scoped config directly (spec §3.4).

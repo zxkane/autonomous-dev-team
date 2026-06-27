@@ -46,7 +46,8 @@ pin any `gh` argv (no leaf is migrated; golden-trace is downstream).
 
 | ID | Scenario | Expected |
 |---|---|---|
-| TC-PROVIDER-DISPATCH-030 | Point reader at the named degraded fake provider `.caps`; read every gated key | every gated cap reports its `caps=0` / `text` value, proving each `caps=0` branch is reachable now |
+| TC-PROVIDER-DISPATCH-030 | Select the fake provider **through the public seam** — `ISSUE_PROVIDER=degraded` / `CODE_HOST=degraded` + `AUTONOMOUS_PROVIDERS_DIR=<fixture>` — then call `itp_caps`/`chp_caps` for every gated key | every gated cap reports its `caps=0` / `text` value via the public verbs (real provider-selection path), proving each `caps=0` branch is reachable now — the reusable harness downstream caps-branch tests build on (#280 review [P1]) |
+| TC-PROVIDER-DISPATCH-031 | Override semantics: (a) `ISSUE_PROVIDER=degraded` with NO `AUTONOMOUS_PROVIDERS_DIR` → `itp_caps` rc 1 (provider not on resolution path); (b) `AUTONOMOUS_PROVIDERS_DIR=<skill-tree providers/>` + `github` → `marker_channel=html` (default path unchanged) | (a) rc 1; (b) `html` — provider resolution is the seam, override defaults to the skill tree |
 
 ## Fixture-rule regression ([INV-65], §6 `cp -r providers/`)
 

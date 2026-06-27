@@ -72,6 +72,16 @@ This is why **no `install-project-hooks.sh` re-run** is needed — the new
 `lib-*.sh` + sourced provider files resolve via the skill tree after `npx
 skills update -g` alone (Step 1 only, per the lib-vs-entry rule, spec §6/§8).
 
+The provider search dir is **overridable** via `AUTONOMOUS_PROVIDERS_DIR`
+(defaults to the skill-tree `providers/`). This is the hook that lets a
+**non-`github` backend selected through the public seam** (`ISSUE_PROVIDER=<name>`
+/ `CODE_HOST=<name>`) resolve its `providers/{itp,chp}-<name>.{sh,caps}` from an
+alternate dir — so the named degraded fake fixture provider is exercised through
+`itp_caps`/`chp_caps` (the real provider-selection path), NOT by reading its
+`.caps` file directly. That is what makes the fixture the reusable caps=0 harness
+downstream caps-branch tests build on (#280 review [P1]). The same key is shared
+by both seams, so an `asana`/`asana`-style topology can point both at one dir.
+
 ### `.caps` reader — parsed, NEVER sourced ([INV-88], spec §4/§10 Q1)
 
 ```bash

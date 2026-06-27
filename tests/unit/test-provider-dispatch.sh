@@ -267,34 +267,68 @@ if bash -n "$PROVIDERS/chp-github.sh" 2>/dev/null; then ok "chp-github.sh passes
 echo ""
 echo "=== TC-PROVIDER-DISPATCH-030: capability-branch via the named degraded fake fixture provider (provider-spec.md §8 fake-provider; design-spec §7.4) ==="
 # ---------------------------------------------------------------------------
-# Point ISSUE_PROVIDER/CODE_HOST at the fake degraded provider and assert
-# itp_caps/chp_caps report the caps=0 values — proving each caps=0 branch is
-# reachable now (the caller branches ship downstream; the fixture + reader they
-# consume are tested here). The fake provider's .caps lives in the fixture tree
-# alongside its .sh; the reader resolves it the same way the github one is.
+# Select the named degraded fake provider through the PUBLIC seam — set
+# ISSUE_PROVIDER=degraded / CODE_HOST=degraded and point provider resolution at
+# the fixture dir via AUTONOMOUS_PROVIDERS_DIR — then assert itp_caps/chp_caps
+# (the public verbs) report the caps=0 values. This proves each caps=0 branch is
+# reachable through the real provider-selection path (not by reading the .caps
+# directly), which is what makes the fixture the reusable harness downstream
+# caps-branch tests build on (#280 review [P1]; provider-spec.md §8 fake-provider).
 fake_caps=$(
-  env -u AUTONOMOUS_CONF -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR bash -c '
+  env -u AUTONOMOUS_CONF -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR \
+      ISSUE_PROVIDER=degraded CODE_HOST=degraded AUTONOMOUS_PROVIDERS_DIR="$FAKE_PROVIDER" \
+  bash -c '
     source "'"$ITP_LIB"'" 2>/dev/null
     source "'"$CHP_LIB"'" 2>/dev/null
-    # Read the fake provider .caps directly via the shared reader (the provider
-    # files do not have to be on the resolution path for the cap lookup).
-    echo "SSA=$(_provider_read_cap "'"$FAKE_PROVIDER"'/itp-degraded.caps" server_side_state_and)"
-    echo "DBA=$(_provider_read_cap "'"$FAKE_PROVIDER"'/itp-degraded.caps" distinct_bot_author)"
-    echo "MC=$(_provider_read_cap "'"$FAKE_PROVIDER"'/itp-degraded.caps" marker_channel)"
-    echo "EC=$(_provider_read_cap "'"$FAKE_PROVIDER"'/itp-degraded.caps" edit_comment)"
-    echo "NIPL=$(_provider_read_cap "'"$FAKE_PROVIDER"'/chp-degraded.caps" native_issue_pr_link)"
-    echo "MCI=$(_provider_read_cap "'"$FAKE_PROVIDER"'/chp-degraded.caps" merge_closes_issue)"
+    # Public seam: itp_caps/chp_caps resolve providers/itp-${ISSUE_PROVIDER}.caps
+    # / chp-${CODE_HOST}.caps from AUTONOMOUS_PROVIDERS_DIR (the fixture dir).
+    echo "SSA=$(itp_caps server_side_state_and)"
+    echo "DBA=$(itp_caps distinct_bot_author)"
+    echo "MC=$(itp_caps marker_channel)"
+    echo "EC=$(itp_caps edit_comment)"
+    echo "NIPL=$(chp_caps native_issue_pr_link)"
+    echo "MCI=$(chp_caps merge_closes_issue)"
   '
 )
-assert_contains "fake provider: server_side_state_and=0 (caps=0 branch reachable)" "SSA=0" "$fake_caps"
-assert_contains "fake provider: distinct_bot_author=0" "DBA=0" "$fake_caps"
-assert_contains "fake provider: marker_channel=text (not html)" "MC=text" "$fake_caps"
-assert_contains "fake provider: edit_comment=0" "EC=0" "$fake_caps"
-assert_contains "fake provider: native_issue_pr_link=0" "NIPL=0" "$fake_caps"
-assert_contains "fake provider: merge_closes_issue=0" "MCI=0" "$fake_caps"
-# Fake provider .sh scaffolds must be syntactically valid too.
+assert_contains "public seam ISSUE_PROVIDER=degraded: itp_caps server_side_state_and=0 (caps=0 branch reachable)" "SSA=0" "$fake_caps"
+assert_contains "public seam: itp_caps distinct_bot_author=0" "DBA=0" "$fake_caps"
+assert_contains "public seam: itp_caps marker_channel=text (not html)" "MC=text" "$fake_caps"
+assert_contains "public seam: itp_caps edit_comment=0" "EC=0" "$fake_caps"
+assert_contains "public seam CODE_HOST=degraded: chp_caps native_issue_pr_link=0" "NIPL=0" "$fake_caps"
+assert_contains "public seam: chp_caps merge_closes_issue=0" "MCI=0" "$fake_caps"
+# Sourcing the fake provider .sh through the seam must not crash, and its
+# scaffolds must be syntactically valid.
 if bash -n "$FAKE_PROVIDER/itp-degraded.sh" 2>/dev/null; then ok "fake itp-degraded.sh passes bash -n"; else bad "fake itp-degraded.sh syntax error"; fi
 if bash -n "$FAKE_PROVIDER/chp-degraded.sh" 2>/dev/null; then ok "fake chp-degraded.sh passes bash -n"; else bad "fake chp-degraded.sh syntax error"; fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-PROVIDER-DISPATCH-031: AUTONOMOUS_PROVIDERS_DIR override semantics (provider-selection is the seam) ==="
+# ---------------------------------------------------------------------------
+# 1) Without the override, selecting a non-skill-tree provider through the seam
+#    has no provider file to resolve → itp_caps returns rc 1 / empty (documents
+#    that providers must live on the resolution path; this is exactly the
+#    pre-fix behavior the #280 review [P1] flagged, now a guarded contract).
+no_override=$(
+  env -u AUTONOMOUS_CONF -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR -u AUTONOMOUS_PROVIDERS_DIR \
+      ISSUE_PROVIDER=degraded bash -c '
+    source "'"$ITP_LIB"'" 2>/dev/null
+    out=$(itp_caps marker_channel); rc=$?
+    echo "OUT=[$out] RC=$rc"
+  '
+)
+assert_contains "no AUTONOMOUS_PROVIDERS_DIR: degraded provider not on skill-tree path → itp_caps rc 1" "RC=1" "$no_override"
+# 2) The override resolves the github default's manifest unchanged when pointed
+#    at the real providers/ dir — proving the default path equals the override
+#    pointed at the skill tree (no behavior change for github).
+default_via_override=$(
+  env -u AUTONOMOUS_CONF -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR \
+      ISSUE_PROVIDER=github AUTONOMOUS_PROVIDERS_DIR="$PROVIDERS" bash -c '
+    source "'"$ITP_LIB"'" 2>/dev/null
+    echo "MC=$(itp_caps marker_channel)"
+  '
+)
+assert_contains "AUTONOMOUS_PROVIDERS_DIR=<skill-tree providers/> + github → itp_caps marker_channel=html (default path unchanged)" "MC=html" "$default_via_override"
 
 # ---------------------------------------------------------------------------
 echo ""

@@ -30,7 +30,15 @@
 
 _LIB_CHP_SELF="${BASH_SOURCE[0]:-$0}"
 _LIB_CHP_REAL_DIR="$(cd "$(dirname "$(readlink -f "$_LIB_CHP_SELF")")" && pwd)"
-_LIB_CHP_PROVIDERS_DIR="${_LIB_CHP_REAL_DIR}/providers"
+# Provider-file search dir. Defaults to the skill-tree `providers/` resolved via
+# readlink -f (the production path). Overridable via AUTONOMOUS_PROVIDERS_DIR so
+# a NON-github backend selected through the PUBLIC seam (`CODE_HOST=<name>`)
+# resolves its `providers/chp-<name>.{sh,caps}` from an alternate dir — this is
+# the hook the named degraded fake fixture provider uses to exercise the caps=0
+# branches through `chp_caps`, not by reading the `.caps` file directly (#280
+# review [P1]). Empty/unset → the skill-tree default. Shared override key with
+# lib-issue-provider.sh (a topology may swap both seams to the same fixture dir).
+_LIB_CHP_PROVIDERS_DIR="${AUTONOMOUS_PROVIDERS_DIR:-${_LIB_CHP_REAL_DIR}/providers}"
 
 # Seam config: default to the GitHub reference backend (spec §2).
 CODE_HOST="${CODE_HOST:-github}"
