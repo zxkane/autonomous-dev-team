@@ -62,10 +62,11 @@ S="$(fresh_scratch 002)"
 # shellcheck disable=SC2016
 printf '\ninjected_fn() { gh pr view "$INJECTED_VAR" --json state; }\n' >> "$S/lib-dispatch.sh"
 out="$(bash "$CHECK" --scripts-dir "$S" --baseline "$BASELINE" 2>&1)"; rc=$?
-if [[ "$rc" -ne 0 ]] && grep -q 'lib-dispatch.sh' <<<"$out" && grep -q 'gh pr view "\$INJECTED_VAR"' <<<"$out"; then
-  ok "injected raw 'gh pr view' → exit non-zero, ::error:: names lib-dispatch.sh + the offending content"
+# AC #2: the ::error:: must name the EXACT file:line of the offending raw-gh.
+if [[ "$rc" -ne 0 ]] && grep -Eq 'lib-dispatch\.sh:[0-9]+' <<<"$out" && grep -q 'gh pr view "\$INJECTED_VAR"' <<<"$out"; then
+  ok "injected raw 'gh pr view' → exit non-zero, ::error:: names exact lib-dispatch.sh:LINE + the offending content (AC #2)"
 else
-  bad "injected raw 'gh pr view' NOT caught (rc=$rc)"
+  bad "injected raw 'gh pr view' NOT caught with file:line (rc=$rc)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -189,6 +190,47 @@ if bash "$CHECK" --generate-baseline > "$gen" 2>/dev/null && jq -e . "$gen" >/de
   fi
 else
   bad "--generate-baseline did not emit valid JSON"
+fi
+
+# ---------------------------------------------------------------------------
+echo "=== TC-CUTOVER-012: tree-wide — a NEW raw-gh in a NON-caller dispatcher script is caught with file:line (AC #41) ==="
+# ---------------------------------------------------------------------------
+# AC #41: every surviving raw-gh in skills/autonomous-dispatcher/scripts/ must
+# resolve to providers/ or an allowlisted file — NOT just the caller layer. Inject
+# into setup-labels.sh (a non-caller-layer dispatcher script) and confirm the
+# tree-wide scan catches it, naming file:line.
+S="$(fresh_scratch 012)"
+# shellcheck disable=SC2016
+printf '\ntree_inject() { gh issue comment "$N" --body x; }\n' >> "$S/setup-labels.sh"
+out="$(bash "$CHECK" --scripts-dir "$S" --baseline "$BASELINE" 2>&1)"; rc=$?
+if [[ "$rc" -ne 0 ]] && grep -Eq 'setup-labels\.sh:[0-9]+' <<<"$out"; then
+  ok "NEW raw-gh in a non-caller script (setup-labels.sh) → caught tree-wide naming file:line (AC #41)"
+else
+  bad "tree-wide scan missed a non-caller-script raw-gh (rc=$rc) — Check is still caller-layer-only"
+fi
+
+# ---------------------------------------------------------------------------
+echo "=== TC-CUTOVER-013: a NEW raw-gh UNDER providers/ does NOT trip (migration target) ==="
+# ---------------------------------------------------------------------------
+S="$(fresh_scratch 013)"
+# shellcheck disable=SC2016
+printf '\nitp_github_newleaf() { gh issue view "$1" --json body; }\n' >> "$S/providers/itp-github.sh"
+if bash "$CHECK" --scripts-dir "$S" --baseline "$BASELINE" >/dev/null 2>&1; then
+  ok "a raw gh under providers/ is allowed (the legitimate home of migrated host I/O)"
+else
+  bad "providers/ gh tripped the lint (it must not — providers/ is the migration target)"
+fi
+
+# ---------------------------------------------------------------------------
+echo "=== TC-CUTOVER-014: the guard EXCLUDES ITSELF (its own gh-mentioning source must not trip) ==="
+# ---------------------------------------------------------------------------
+# check-provider-cutover.sh's own source contains `gh ` (its regex/comments/msgs).
+# It is allowlisted by name; a clean tree (which includes the guard script) PASSES
+# — already covered by TC-001, but assert the script is in the allowlist explicitly.
+if grep -Eq 'ALLOWLISTED_FILES=\(.*check-provider-cutover\.sh' <<<"$src"; then
+  ok "check-provider-cutover.sh allowlists itself (its own 'gh ' mentions are the lint, not a caller)"
+else
+  bad "the guard does NOT allowlist itself — its own source would trip the scan"
 fi
 
 # ===========================================================================

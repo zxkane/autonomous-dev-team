@@ -1,23 +1,42 @@
 #!/bin/bash
 # test-provider-caps-branches.sh — issue #286, caps-branch coverage gate
 # (TC-CAPS-NNN). Promotes the §7.4 fake degraded-capability fixture provider to a
-# COVERAGE GATE: for every caps=0/degraded flag that has a LIVE caller
-# degradation branch on this HEAD, the fake provider drives it through the public
-# seam and the test asserts the branch is REACHABLE (not dead code); for every
-# flag whose caller branch is NOT yet wired (it lands with the GitLab/Asana PRs,
-# spec §4.3), the test asserts NO caller branch keys on it yet — a structural
-# "nothing to cover" that a future wiring PR is FORCED to flip (and thus add its
-# coverage test).
+# COVERAGE GATE for the caps=0 caller-degradation branches.
 #
-# Spec §4.3: GitHub's .caps = today's behavior; "the only live branches are
-# GitHub's current ones". On this GitHub-only HEAD, grep proves exactly 7 of the
-# 13 caps have a live caller branch reading the cap; the other 6 degradations are
-# defined in the provider/spec but not yet wired into a caller branch.
+# COVERAGE TAXONOMY (read against issue #286's AC literally).
+# ---------------------------------------------------------------------------
+# AC #286: "for EACH caps=0 flag … the fake provider exercises the corresponding
+# caller degradation branch at least once — asserting the branch is reachable,
+# not dead code", and "FAILs if any caller degradation branch is unreachable/dead".
 #
-# The fake provider is selected through the PUBLIC seam (ISSUE_PROVIDER=degraded
-# / CODE_HOST=degraded + AUTONOMOUS_PROVIDERS_DIR pointed at the fixture dir),
-# exactly the #280 TC-PROVIDER-DISPATCH-030/031 harness — NOT by reading .caps
-# directly.
+# REALITY (spec §4.3, the no-behavior-change / GitHub-only first deliverable):
+# "the only live branches are GitHub's current ones." grep proves exactly 7 of the
+# 13 caps have a LIVE caller-side branch that reads the cap TODAY; the other 6
+# caller branches land later with the GitLab/Asana PRs (their .caps degraded value
+# is already declared, but no caller-side code branches on them yet, and the
+# degraded fixture .sh are empty scaffolds — there is NO branch to run). Exercising
+# a branch that does not exist is impossible, and writing a test-only consumer to
+# fake it would test a path that is not in production (violating §4.3). So this gate
+# splits the 13 into two honestly-distinguished sets and is GREEN only because the
+# deferred set is explicitly WAIVED with a fail-on-wiring tripwire — never a bare PASS:
+#
+#   EXERCISED (7): the cap has a live caller branch AND
+#     - the degraded value is driveable through the public seam (itp_caps/chp_caps),
+#       AND for a representative subset the branch is RUN END-TO-END against the
+#       degraded fixture and its degraded observable asserted (so "reachable" is
+#       demonstrated by execution, not just by grep + value-read);
+#   WAIVED  (6): NO caller branch reads the cap yet (asserted absent). This is NOT
+#     a pass — it is a tripwired waiver: if a caller branch EVER appears for a
+#     waived cap, TC-CAPS-010..015 FAIL ("wiring landed → move it to EXERCISED and
+#     add a real exercise test"), so no future caps=0 branch can ship untested.
+#
+# The headline prints `exercised=7 waived=6 total=13` and asserts the split sums to
+# the full 9 ITP + 4 CHP matrix — the gate cannot go green while hiding an
+# unaccounted cap, and cannot claim all 13 are exercised when 6 have no branch.
+#
+# Fixture: tests/unit/fixtures/provider-degraded/, selected through the PUBLIC seam
+# (ISSUE_PROVIDER=degraded / CODE_HOST=degraded + AUTONOMOUS_PROVIDERS_DIR), per
+# #280 TC-PROVIDER-DISPATCH-030/031.
 #
 # Run: bash tests/unit/test-provider-caps-branches.sh
 
@@ -32,11 +51,10 @@ ITP_LIB="$SCRIPTS/lib-issue-provider.sh"
 CHP_LIB="$SCRIPTS/lib-code-host.sh"
 FAKE_PROVIDER="$SCRIPT_DIR/fixtures/provider-degraded"
 
-# The caller-layer files that may carry a caps-keyed degradation branch. This is
-# the cutover caller layer PLUS the two standalone consumers (setup-labels.sh,
-# lib-auth.sh) that also read caps — the FULL set a degradation branch could live
-# in. A cap is "live-branched" iff `itp_caps <cap>` / `chp_caps <cap>` appears in
-# one of these as executable (non-comment) code.
+# The caller-layer files that may carry a caps-keyed degradation branch: the
+# cutover caller layer PLUS the two standalone consumers (setup-labels.sh,
+# lib-auth.sh) that also read caps. A cap is "live-branched" iff
+# `itp_caps <cap>` / `chp_caps <cap>` appears as executable (non-comment) code here.
 CALLER_FILES=(
   "$SCRIPTS/lib-dispatch.sh" "$SCRIPTS/autonomous-dev.sh" "$SCRIPTS/autonomous-review.sh"
   "$SCRIPTS/setup-labels.sh" "$SCRIPTS/lib-auth.sh"
@@ -51,14 +69,13 @@ note() { echo -e "  ${YELLOW}NOTE${NC}: $1"; }
 command -v jq >/dev/null 2>&1 || { echo "jq required"; exit 1; }
 
 # Does any caller-layer file have an EXECUTABLE (non-comment) branch reading
-# `<seam>_caps <cap>`? Returns the "file:line — text" of the first hit, or empty.
+# `<seam>_caps <cap>`? Prints the first "file — text" hit, or returns 1.
 caller_branch_for() {
-  local cap="$1" f rest
+  local cap="$1" f rest stripped
   for f in "${CALLER_FILES[@]}"; do
     [ -f "$f" ] || continue
-    # Match `itp_caps <cap>` or `chp_caps <cap>`, skip comment lines.
     while IFS= read -r rest; do
-      local stripped="${rest#"${rest%%[![:space:]]*}"}"
+      stripped="${rest#"${rest%%[![:space:]]*}"}"
       [ "${stripped:0:1}" = "#" ] && continue
       printf '%s — %s\n' "${f##*/}" "$stripped"
       return 0
@@ -68,7 +85,6 @@ caller_branch_for() {
 }
 
 # Read a cap through the PUBLIC seam against the degraded fixture provider.
-#   read_degraded_cap <itp|chp> <cap> → prints the value (or empty on miss).
 read_degraded_cap() {
   local seam="$1" cap="$2"
   env -u AUTONOMOUS_CONF -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR \
@@ -80,8 +96,7 @@ read_degraded_cap() {
   '
 }
 
-# The 7 caps WITH a live caller degradation branch on this HEAD. Each row:
-# "<seam> <cap> <expected-degraded-value>".
+# 7 caps WITH a live caller branch. "<seam> <cap> <expected-degraded-value>".
 LIVE_BRANCH_CAPS=(
   "itp cross_ref_shorthand 0"
   "itp edit_comment 0"
@@ -91,9 +106,8 @@ LIVE_BRANCH_CAPS=(
   "chp review_bots 0"
   "chp merge_closes_issue 0"
 )
-# The 6 caps whose caller branch is NOT yet wired (degradation lands with the
-# GitLab/Asana PRs; spec §4.3). Each row: "<seam> <cap>".
-NO_BRANCH_CAPS=(
+# 6 caps whose caller branch is NOT yet wired (spec §4.3). "<seam> <cap>".
+WAIVED_CAPS=(
   "itp server_side_state_and"
   "itp server_side_state_negation"
   "itp distinct_bot_author"
@@ -102,77 +116,135 @@ NO_BRANCH_CAPS=(
   "itp marker_channel"
 )
 
+EXERCISED=0; WAIVED=0; EXECUTED=0
+
 # ---------------------------------------------------------------------------
-echo "=== TC-CAPS-001..007: each LIVE-branch cap is reachable + driven through the degraded fixture ==="
+echo "=== TC-CAPS-000: tripwire self-test — caller_branch_for is not a no-op grep ==="
+# ---------------------------------------------------------------------------
+# Prove the detector RETURNS a branch for a known-present cap and NOTHING for a
+# known-absent token. Without this, the WAIVED tripwire (TC-CAPS-010..015) could
+# be a grep that never matches anything — a silent hole.
+if caller_branch_for "label_colors" >/dev/null; then ok "tripwire finds a known-present cap (label_colors)"; else bad "tripwire FAILED to find label_colors — detector is broken"; fi
+if caller_branch_for "no_such_cap_zzz_unwired" >/dev/null; then bad "tripwire matched a nonexistent cap — detector over-matches"; else ok "tripwire returns empty for a known-absent token"; fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-CAPS-001..007: each LIVE-branch cap is reachable + its degraded value driveable through the seam ==="
 # ---------------------------------------------------------------------------
 for row in "${LIVE_BRANCH_CAPS[@]}"; do
   read -r seam cap expected <<<"$row"
-  # (a) a live caller branch reads the cap (reachable, not dead).
   if hit="$(caller_branch_for "$cap")"; then
     ok "[$cap] live caller branch reads ${seam}_caps $cap → $hit"
   else
-    bad "[$cap] NO caller branch reads ${seam}_caps $cap — the degradation branch is missing or dead (this cap was declared live-branched)"
+    bad "[$cap] NO caller branch reads ${seam}_caps $cap — declared live but the branch is missing/dead"
   fi
-  # (b) the fake degraded provider reports the degraded value through the seam,
-  #     so the branch's caps=0 path is actually driveable end-to-end.
   val="$(read_degraded_cap "$seam" "$cap")"
   if [ "$val" = "$expected" ]; then
-    ok "[$cap] degraded fixture reports ${seam}_caps $cap=$val through the public seam (caps=0 branch driveable)"
+    ok "[$cap] degraded fixture reports ${seam}_caps $cap=$val through the public seam (caps=0 path driveable)"
+    EXERCISED=$((EXERCISED + 1))
   else
-    bad "[$cap] degraded fixture ${seam}_caps $cap='$val' (expected '$expected') — caps=0 branch NOT driveable"
+    bad "[$cap] degraded fixture ${seam}_caps $cap='$val' (expected '$expected') — caps=0 path NOT driveable"
   fi
 done
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== TC-CAPS-010..015: each NO-LIVE-BRANCH cap has NO caller branch yet (structural 'nothing to cover'; spec §4.3) ==="
+echo "=== TC-CAPS-008: END-TO-END execution of representative caps=0 branches against the degraded fixture ==="
 # ---------------------------------------------------------------------------
-# These degradations are DEFINED in the fixture/spec but not yet wired into a
-# caller branch (they land with the GitLab/Asana PRs). Asserting their ABSENCE
-# is the coverage guard: when a future PR wires one, this flips red and FORCES a
-# coverage assertion to be added (moving the cap into LIVE_BRANCH_CAPS).
-for row in "${NO_BRANCH_CAPS[@]}"; do
+# Converts "grep-reachable + value-driveable" into "demonstrably RUN": call the
+# REAL caller code with the degraded provider active and assert the degraded
+# observable. Even a subset proves the harness drives real branches (so the
+# grep-reachability of the rest is a genuine reachability check, not a fig leaf).
+
+# (1) label_colors=0 — run setup-labels.sh as a subprocess with the degraded
+#     provider; the documented label_colors=0 error path must fire (exit 1).
+e2e1="$(env -u AUTONOMOUS_CONF -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR \
+        ISSUE_PROVIDER=degraded AUTONOMOUS_PROVIDERS_DIR="$FAKE_PROVIDER" \
+        bash "$SCRIPTS/setup-labels.sh" owner/repo 2>&1)"; e2e1_rc=$?
+if [ "$e2e1_rc" -ne 0 ] && grep -q 'label_colors=0' <<<"$e2e1"; then
+  ok "[label_colors] END-TO-END: setup-labels.sh ran the label_colors=0 branch (exit $e2e1_rc, documented error emitted)"
+  EXECUTED=$((EXECUTED + 1))
+else
+  bad "[label_colors] END-TO-END did not execute the label_colors=0 branch (rc=$e2e1_rc)"
+fi
+
+# (2)+(3) merge_closes_issue=0 + native_issue_pr_link=0 — eval the REAL
+#     _render_close_keyword bytes from autonomous-dev.sh (NOT a hand copy) with a
+#     degraded chp_caps stub; the non-closing `Related to #N` backref must render.
+render_kw() {
+  local mc="$1" nipl="$2" issue="$3"
+  bash -c '
+    eval "$(sed -n "/^_render_close_keyword()/,/^}/p" "'"$SCRIPTS"'/autonomous-dev.sh")"
+    chp_caps() { case "$1" in merge_closes_issue) echo "'"$mc"'";; native_issue_pr_link) echo "'"$nipl"'";; *) echo 0;; esac; }
+    _render_close_keyword "'"$issue"'"
+  '
+}
+out_related="$(render_kw 0 0 42)"
+if [ "$out_related" = "Related to #42" ]; then
+  ok "[merge_closes_issue+native_issue_pr_link] END-TO-END: _render_close_keyword(0,0) ran the degraded branch → 'Related to #42'"
+  EXECUTED=$((EXECUTED + 1))
+else
+  bad "[merge_closes_issue+native_issue_pr_link] END-TO-END degraded branch wrong: '$out_related' (expected 'Related to #42')"
+fi
+# native_issue_pr_link=1 sub-branch → empty backref (the OTHER arm of the same branch).
+out_empty="$(render_kw 0 1 42)"
+if [ -z "$out_empty" ]; then
+  ok "[native_issue_pr_link=1] END-TO-END: _render_close_keyword(0,1) ran the native-link arm → empty backref"
+  EXECUTED=$((EXECUTED + 1))
+else
+  bad "[native_issue_pr_link=1] END-TO-END arm wrong: '$out_empty' (expected empty)"
+fi
+# Sanity: the NON-degraded default (merge_closes_issue=1) renders the GitHub literal.
+out_closes="$(render_kw 1 0 42)"
+if [ "$out_closes" = "Closes #42" ]; then
+  ok "[merge_closes_issue=1] END-TO-END: default arm renders 'Closes #42' (no behavior change for GitHub)"
+else
+  bad "[merge_closes_issue=1] default arm wrong: '$out_closes' (expected 'Closes #42')"
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-CAPS-010..015: each WAIVED cap has NO caller branch yet — tripwired, NOT a free pass (spec §4.3) ==="
+# ---------------------------------------------------------------------------
+for row in "${WAIVED_CAPS[@]}"; do
   read -r seam cap <<<"$row"
   if hit="$(caller_branch_for "$cap")"; then
-    bad "[$cap] a caller branch now reads ${seam}_caps $cap ($hit) — wiring landed; MOVE $cap into LIVE_BRANCH_CAPS and add a driven-branch assertion (no caps=0 branch may ship untested, spec §7.4)"
+    bad "[$cap] WIRING LANDED — a caller branch now reads ${seam}_caps $cap ($hit). MOVE $cap into LIVE_BRANCH_CAPS and add a real exercise/execution test: no caps=0 branch may ship untested (spec §7.4). This waiver tripwire is doing its job."
   else
-    ok "[$cap] no caller branch keys on $cap yet (degradation lands with GitLab/Asana; nothing to cover on this GitHub-only HEAD — spec §4.3)"
+    ok "[$cap] WAIVED: no caller branch keys on $cap yet (lands with GitLab/Asana, spec §4.3) — tripwire armed"
+    WAIVED=$((WAIVED + 1))
   fi
-  # The fixture STILL declares the degraded value (so the future wiring has a
-  # fixture to drive). Confirm it is readable through the seam.
+  # The fixture MUST still declare the degraded value (so the future wiring PR has
+  # a fixture to drive) — a HARD assertion, not a NOTE.
   val="$(read_degraded_cap "$seam" "$cap")"
-  if [ -n "$val" ]; then
-    note "[$cap] fixture declares the degraded value ($val) ready for the future wiring PR"
-  else
-    bad "[$cap] degraded fixture does NOT declare $cap — the future wiring PR will have no fixture to drive"
-  fi
+  if [ -n "$val" ]; then ok "[$cap] degraded fixture declares the value ($val) — ready for the future wiring PR"; else bad "[$cap] degraded fixture does NOT declare $cap — the future wiring PR has no fixture to drive"; fi
 done
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== TC-CAPS-020: all 13 caps accounted for (7 live + 6 deferred = 9 ITP + 4 CHP) ==="
+echo "=== TC-CAPS-020: coverage accounting — exercised + waived = 13 (9 ITP + 4 CHP), no cap unaccounted ==="
 # ---------------------------------------------------------------------------
-n_live=${#LIVE_BRANCH_CAPS[@]}
-n_def=${#NO_BRANCH_CAPS[@]}
-total=$((n_live + n_def))
-if [ "$total" -eq 13 ]; then ok "13 caps total ($n_live live + $n_def deferred)"; else bad "cap accounting wrong: $n_live + $n_def = $total (expected 13)"; fi
-# ITP = 9 (8 listed by name in §4.1 + marker_channel), CHP = 4.
-n_itp=$(printf '%s\n' "${LIVE_BRANCH_CAPS[@]}" "${NO_BRANCH_CAPS[@]}" | awk '$1=="itp"' | wc -l | tr -d ' ')
-n_chp=$(printf '%s\n' "${LIVE_BRANCH_CAPS[@]}" "${NO_BRANCH_CAPS[@]}" | awk '$1=="chp"' | wc -l | tr -d ' ')
+n_live=${#LIVE_BRANCH_CAPS[@]}; n_waived=${#WAIVED_CAPS[@]}; total=$((n_live + n_waived))
+echo "  COVERAGE: exercised=$EXERCISED (driveable) / executed-end-to-end=$EXECUTED / waived=$WAIVED / declared-live=$n_live declared-waived=$n_waived total=$total"
+if [ "$total" -eq 13 ]; then ok "13 caps total ($n_live live + $n_waived waived)"; else bad "cap accounting wrong: $n_live + $n_waived = $total (expected 13)"; fi
+if [ "$EXERCISED" -eq "$n_live" ]; then ok "every declared-live cap is reachable + driveable ($EXERCISED/$n_live)"; else bad "only $EXERCISED/$n_live live caps driveable"; fi
+if [ "$WAIVED" -eq "$n_waived" ]; then ok "every declared-waived cap is still unwired ($WAIVED/$n_waived) — none silently gained a branch"; else bad "a waived cap gained a branch ($WAIVED/$n_waived still unwired) — see TC-CAPS-010..015"; fi
+if [ "$EXECUTED" -ge 3 ]; then ok "at least 3 caps=0 branches RUN end-to-end ($EXECUTED) — 'reachable' is demonstrated by execution, not just grep"; else bad "only $EXECUTED caps=0 branches executed end-to-end (need >=3 to demonstrate the harness drives real branches)"; fi
+n_itp=$(printf '%s\n' "${LIVE_BRANCH_CAPS[@]}" "${WAIVED_CAPS[@]}" | awk '$1=="itp"' | wc -l | tr -d ' ')
+n_chp=$(printf '%s\n' "${LIVE_BRANCH_CAPS[@]}" "${WAIVED_CAPS[@]}" | awk '$1=="chp"' | wc -l | tr -d ' ')
 if [ "$n_itp" -eq 9 ] && [ "$n_chp" -eq 4 ]; then ok "9 ITP + 4 CHP caps (matches §4.1/§4.2)"; else bad "ITP/CHP split wrong: $n_itp ITP + $n_chp CHP (expected 9 + 4)"; fi
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== TC-CAPS-021: degraded fixture sources clean through the seam + every cap reads back ==="
+echo "=== TC-CAPS-021: degraded fixture sources clean + every cap reads back through the seam ==="
 # ---------------------------------------------------------------------------
 if bash -n "$FAKE_PROVIDER/itp-degraded.sh" 2>/dev/null && bash -n "$FAKE_PROVIDER/chp-degraded.sh" 2>/dev/null; then
   ok "fake itp-degraded.sh + chp-degraded.sh pass bash -n"
 else
   bad "fake degraded provider .sh has a syntax error"
 fi
-# Every one of the 13 caps must read back a non-empty value through the seam.
 missing=""
-for row in "${LIVE_BRANCH_CAPS[@]}" "${NO_BRANCH_CAPS[@]}"; do
+for row in "${LIVE_BRANCH_CAPS[@]}" "${WAIVED_CAPS[@]}"; do
   read -r seam cap _ <<<"$row"
   [ -n "$(read_degraded_cap "$seam" "$cap")" ] || missing="$missing $cap"
 done
@@ -180,5 +252,5 @@ if [ -z "$missing" ]; then ok "all 13 caps resolve through the degraded fixture 
 
 # ===========================================================================
 echo ""
-echo "=== Results: $PASS passed, $FAIL failed ==="
+echo "=== Results: $PASS passed, $FAIL failed (exercised=$EXERCISED executed=$EXECUTED waived=$WAIVED) ==="
 [[ "$FAIL" -eq 0 ]] && exit 0 || exit 1

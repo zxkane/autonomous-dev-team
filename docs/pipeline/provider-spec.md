@@ -656,13 +656,19 @@ re-entering the provider-neutral caller layer (`lib-dispatch.sh`,
 is **`check-provider-cutover.sh`** ([INV-91], issue #286) — a credential-free
 grep/jq lint modeled on `check-spec-drift.sh`:
 
-- **Scan** the caller layer for a raw `gh ` token via the RE2-safe consuming
-  boundary `(^|[^A-Za-z_-])gh ` (never a look-behind — `gh --jq` runs Go RE2;
-  see `invariants.md`).
+- **Scan** the WHOLE dispatcher scripts tree (every `*.sh` + `providers/*.sh`) for
+  a raw `gh ` token via the RE2-safe consuming boundary `(^|[^A-Za-z_-])gh `
+  (never a look-behind — `gh --jq` runs Go RE2; see `invariants.md`). Scanning the
+  whole tree — not just the caller layer — is #286 AC #41 ("every surviving raw-gh
+  in `skills/autonomous-dispatcher/scripts/` resolves to providers/ or an
+  allowlisted file"), so dispatcher/util scripts like `setup-labels.sh`,
+  `lib-auth.sh`, `dispatcher-tick.sh` are in scope too. A drift FAILs LOUD naming
+  the exact `file:line` (AC #2).
 - **Allowlist** (declarative, in the script): the auth/transport wrappers
   `scripts/gh`, `gh-with-token-refresh.sh`, `gh-app-token.sh`, `gh-as-user.sh`,
-  `dispatch-remote-aws-ssm.sh` (§8: GitHub auth is unchanged, NOT refactored) +
-  the `providers/` tree (the legitimate home of host I/O).
+  `dispatch-remote-aws-ssm.sh` (§8: GitHub auth is unchanged, NOT refactored), the
+  guard script itself (its own source mentions `gh `), + the `providers/` tree
+  (the legitimate home of host I/O). Everything else must be a baselined survivor.
 - **Baseline-anchored** (NOT a from-zero ban yet): the depends-on issues
   (#281–#285) migrated only the §3.1/§3.2 verb leaves, so the caller layer still
   carries the surviving raw-gh the first deliverable did not migrate. Those are
@@ -682,18 +688,39 @@ through `itp_post_comment` (the sole marker choke-point [M6], [INV-89]).
 fake degraded-capability fixture provider (`tests/unit/fixtures/provider-degraded/`,
 selected through the public seam `ISSUE_PROVIDER=degraded` / `CODE_HOST=degraded`
 + `AUTONOMOUS_PROVIDERS_DIR`) is promoted to a coverage gate
-(`tests/unit/test-provider-caps-branches.sh`): for every `caps=0`/degraded flag
-that has a LIVE caller branch on this GitHub-only HEAD (7 of 13) it drives the
-degraded value through the seam and asserts the branch is REACHABLE; for the
-remaining caps whose branch is not yet wired (they land with the GitLab/Asana
-PRs, §4.3) it asserts NO caller branch keys on the cap yet — a structural
-"nothing to cover" that a future wiring PR is FORCED to flip, so no `caps=0`
-branch can ever ship as dead untested code.
+(`tests/unit/test-provider-caps-branches.sh`). It splits the 13 caps (9 ITP + 4
+CHP, §4.1/§4.2) honestly:
 
-CI wiring: the lint runs in the credential-free `spec-drift` job; the script + the
-two tests are in the hermetic `shellcheck -S error` list (sibling to
-`check-spec-drift.sh`); the tests auto-discover via the `tests/unit/test-*.sh`
-glob.
+- **EXERCISED (7)** — the caps with a LIVE caller branch on this GitHub-only HEAD
+  (`cross_ref_shorthand`, `edit_comment`, `label_colors`, `native_issue_pr_link`,
+  `rest_request_changes`, `review_bots`, `merge_closes_issue`): the gate asserts
+  the branch is reachable AND its degraded value is driveable through the public
+  seam, and RUNS three of them end-to-end against the degraded fixture
+  (`label_colors=0` via a real `setup-labels.sh` subprocess; `merge_closes_issue=0`
+  + `native_issue_pr_link=0/1` via the real `_render_close_keyword`) — so
+  "reachable" is demonstrated by execution, not just grep.
+- **WAIVED (6)** — the caps whose caller branch is not yet wired (it lands with the
+  GitLab/Asana PRs, §4.3; the degraded fixture `.sh` are empty scaffolds, so there
+  is no branch to run). These are NOT a free pass: each is asserted STILL unwired
+  behind a **fail-on-wiring tripwire** — if a waived cap ever gains a caller branch
+  the suite FAILs ("move it to EXERCISED + add a real exercise test"), so no
+  future `caps=0` branch can ship untested.
+
+The headline prints `exercised=7 waived=6 total=13` and asserts the split equals
+the full matrix, and a tripwire self-test proves the branch-detector is not a
+no-op grep. (Exercising all 13 is not possible on a GitHub-only HEAD — 6 branches
+do not exist — and fabricating a test-only consumer would violate §4.3's
+no-behavior-change anchor; the waiver + tripwire is the honest maximum.)
+
+CI execution: the guard RUNS in CI through the existing `tests/unit/test-*.sh`
+loop — `tests/unit/test-provider-cutover.sh` invokes `check-provider-cutover.sh`
+against the real repo, so a regression goes red in the hermetic-unit job with NO
+dedicated workflow step. This is the same accommodation [INV-83] uses, because the
+scoped GitHub-App token **cannot push `.github/workflows/`** (`invariants.md`
+[INV-83] status note). A dedicated `spec-drift` lint step + `shellcheck -S error`
+entries for the new files are an OPTIONAL operator enhancement: the exact snippet
+ships in the #286 PR body for a maintainer with `workflows` permission to apply —
+the guard's CI execution does not depend on it.
 
 ---
 

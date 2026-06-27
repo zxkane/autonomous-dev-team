@@ -18,17 +18,29 @@ Drives `check-provider-cutover.sh` against scratch copies via the
 | TC-CUTOVER-006 | Stale baseline entry — baseline names a file that no longer exists | `exit 1`, names the stale file |
 | TC-CUTOVER-007 | `providers/itp-github.sh` or `chp-github.sh` missing | `exit 1`, names the missing provider file |
 | TC-CUTOVER-008 | REMOVED site — delete a baselined gh line from a scratch wrapper (simulates a migration landing) | `exit 1` (baseline count > discovered → forces baseline shrink) |
-| TC-CUTOVER-009 | Header cites INV-91; `set -uo pipefail`; depends only on jq+coreutils | grep assertions on the script source |
+| TC-CUTOVER-009 | Header cites INV-91; `set -uo pipefail`; RE2-safe boundary present, no look-behind/ahead | grep assertions on the script source |
 | TC-CUTOVER-010 | `--help` prints usage, `exit 0`; unknown flag → `exit 2` | usage/exit-code contract |
+| TC-CUTOVER-011 | `--generate-baseline` emits valid JSON the checker then accepts (generator ⇄ checker consistent by construction) | round-trip PASS |
+| TC-CUTOVER-012 | **(F2/AC #41)** Inject a NEW `gh` into a NON-caller dispatcher script (`setup-labels.sh`) | `exit 1`, caught tree-wide, names `setup-labels.sh:LINE` |
+| TC-CUTOVER-013 | A NEW `gh` UNDER `providers/` (the migration target) | does NOT trip (`exit 0`) |
+| TC-CUTOVER-014 | The guard EXCLUDES ITSELF — its own `gh`-mentioning source must not trip | self-allowlisted |
+
+> Note (F1/AC #2): TC-CUTOVER-002 asserts the `::error::` names the exact
+> `file:line` (`lib-dispatch.sh:NNNN`), not just the file.
 
 ## `tests/unit/test-provider-caps-branches.sh` — caps-branch coverage gate
 
 Spec §4.3: on this GitHub-only HEAD only the 7 caps with a LIVE caller branch can
-be exercised; the other 6 have no caller branch yet.
+be EXERCISED; the other 6 have no caller branch yet and are WAIVED behind a
+fail-on-wiring tripwire (NOT a free pass). Fabricating a test-only consumer to
+"exercise" a nonexistent branch would violate §4.3 (no behavior change), so the
+waiver+tripwire is the honest maximum.
 
 | ID | Scenario | Expected |
 |---|---|---|
-| TC-CAPS-001..007 | For each LIVE-branch cap (`cross_ref_shorthand`, `edit_comment`, `label_colors`, `native_issue_pr_link`, `rest_request_changes`, `review_bots`, `merge_closes_issue`): the caller layer HAS a branch reading that cap, AND the fake degraded provider reports the cap's degraded value through the public seam (`itp_caps`/`chp_caps`) | branch present + caps=0/text reachable |
-| TC-CAPS-010..015 | For each NO-LIVE-BRANCH cap (`server_side_state_and`, `server_side_state_negation`, `distinct_bot_author`, `read_after_write_state`, `body_checkbox`, `marker_channel`): assert NO caller-layer branch keys on it yet (structural "nothing to cover"); the fixture still DECLARES the degraded value (so when a future PR wires the branch, this assertion flips red and forces a coverage test) | no caller branch; documented gap |
-| TC-CAPS-020 | All 13 caps accounted for (7 live + 6 deferred = 13 = 9 ITP + 4 CHP) | sum check |
-| TC-CAPS-021 | Fake degraded fixture sourced via `ISSUE_PROVIDER=degraded`/`CODE_HOST=degraded` + `AUTONOMOUS_PROVIDERS_DIR` passes `bash -n` and resolves caps | no crash |
+| TC-CAPS-000 | Tripwire self-test: `caller_branch_for` returns a hit for a known-present cap and empty for a known-absent token | detector is not a no-op grep |
+| TC-CAPS-001..007 | For each LIVE-branch cap: caller layer HAS a branch reading it AND the degraded fixture reports the degraded value through the public seam | reachable + driveable |
+| TC-CAPS-008 | END-TO-END execution of ≥3 caps=0 branches against the degraded fixture: `label_colors=0` (real `setup-labels.sh` subprocess → exit 1 + documented error), `merge_closes_issue=0`+`native_issue_pr_link=0/1` (real `_render_close_keyword` → `Related to #N` / empty), default `merge_closes_issue=1` → `Closes #N` | branches RUN, degraded observable asserted |
+| TC-CAPS-010..015 | For each WAIVED cap (`server_side_state_and`, `server_side_state_negation`, `distinct_bot_author`, `read_after_write_state`, `body_checkbox`, `marker_channel`): assert NO caller branch keys on it yet (tripwire) AND the fixture still declares the degraded value. If a branch EVER appears → FAIL (wiring landed → must exercise) | waived + tripwire armed |
+| TC-CAPS-020 | Accounting: `exercised=7 waived=6 total=13` (9 ITP + 4 CHP); ≥3 executed end-to-end; no cap unaccounted | sum + split checks |
+| TC-CAPS-021 | Fake degraded fixture passes `bash -n` and all 13 caps resolve through the seam | no crash |

@@ -1,5 +1,5 @@
 {
-  "_comment": "Baseline of raw-gh sites surviving in the provider-neutral caller layer after the partial pluggable-providers migration (#281-#285). check-provider-cutover.sh ([INV-91]) FAILs any caller-layer gh NOT accounted for here. Regenerate with: bash check-provider-cutover.sh --generate-baseline. Migration PRs that remove a caller-side gh leaf MUST shrink this manifest in the same PR; the guard becomes a strict from-zero ban once this is empty. The file-allowlist (scripts/gh, gh-with-token-refresh.sh, gh-app-token.sh, gh-as-user.sh, dispatch-remote-aws-ssm.sh) lives in the script, not here.",
+  "_comment": "Baseline of raw-gh sites surviving across the dispatcher scripts tree (EXCLUDING providers/ and the allowlisted files) after the partial pluggable-providers migration (#281-#285). check-provider-cutover.sh ([INV-91]) FAILs any tree raw-gh NOT under providers/, NOT an allowlisted file, and NOT accounted for here — naming the exact file:line. Regenerate with: bash check-provider-cutover.sh --generate-baseline. Migration PRs that remove a gh leaf MUST shrink this manifest in the same PR; the guard becomes a strict from-zero ban once this is empty. The file-allowlist (scripts/gh, gh-with-token-refresh.sh, gh-app-token.sh, gh-as-user.sh, dispatch-remote-aws-ssm.sh, check-provider-cutover.sh) lives in the script, not here.",
   "surviving_sites": [
     {
       "count": 1,
@@ -183,6 +183,56 @@
     },
     {
       "count": 1,
+      "file": "dispatcher-tick.sh",
+      "content": "_labeled_at=\"$(gh api \"repos/${REPO}/issues/${issue_num}/timeline\" \\"
+    },
+    {
+      "count": 1,
+      "file": "dispatcher-tick.sh",
+      "content": "if gh issue view \"$issue_num\" --repo \"$REPO\" --json comments \\"
+    },
+    {
+      "count": 1,
+      "file": "lib-auth.sh",
+      "content": "_pr_create_ok() { gh pr create --repo \"$repo\" --head \"$branch\" --title \"$title\" --body \"$body\" >/dev/null 2>&1; }"
+    },
+    {
+      "count": 1,
+      "file": "lib-auth.sh",
+      "content": "branch=$(git ls-remote --heads \"$(gh repo view \"$repo\" --json url -q .url 2>/dev/null || echo \"https://github.com/${repo}.git\")\" \\"
+    },
+    {
+      "count": 1,
+      "file": "lib-auth.sh",
+      "content": "echo \"Run 'export GH_TOKEN=<token>' or 'gh auth login'.\" >&2"
+    },
+    {
+      "count": 1,
+      "file": "lib-auth.sh",
+      "content": "echo \"WARN: [INV-79] could not create the agent-owned gh shim — falling back to the wrapper shim dir on the agent PATH (bare gh still resolves; AC#1 no-wrapper-shim not met this run).\" >&2"
+    },
+    {
+      "count": 1,
+      "file": "lib-auth.sh",
+      "content": "echo \"WARNING: No GH_TOKEN set and gh auth not configured.\" >&2"
+    },
+    {
+      "count": 1,
+      "file": "lib-auth.sh",
+      "content": "existing=$(gh pr list --repo \"$repo\" --state open --json body \\"
+    },
+    {
+      "count": 1,
+      "file": "lib-auth.sh",
+      "content": "if ! command -v gh &>/dev/null || ! gh auth status &>/dev/null 2>&1; then"
+    },
+    {
+      "count": 1,
+      "file": "lib-auth.sh",
+      "content": "pr_number=$(gh pr list --repo \"$repo\" --state open --json number,body \\"
+    },
+    {
+      "count": 1,
       "file": "lib-dispatch.sh",
       "content": "body=$(gh issue view \"$issue_num\" --repo \"$REPO\" --json body -q '.body')"
     },
@@ -190,6 +240,16 @@
       "count": 1,
       "file": "lib-dispatch.sh",
       "content": "gh \"${args[@]}\" 2>/dev/null || true"
+    },
+    {
+      "count": 1,
+      "file": "lib-error.sh",
+      "content": "_error_log \"failed to surface envelope ${code} on issue #${issue} (gh rc=${post_rc}); degrading to log-only:\""
+    },
+    {
+      "count": 1,
+      "file": "lib-error.sh",
+      "content": "_error_log \"token-refresh gh proxy not resolvable (AUTONOMOUS_CONF_DIR='${AUTONOMOUS_CONF_DIR:-}', skill-tree fallback '${_LIB_ERROR_DIR}/gh-with-token-refresh.sh' missing); degrading envelope ${code} to log-only:\""
     },
     {
       "count": 3,
@@ -245,6 +305,81 @@
       "count": 1,
       "file": "lib-review-postfail.sh",
       "content": "printf 'post-failed (verdict comment post failed; gh rc %s — transient GitHub/API or token error)\\n' \"$rc\""
+    },
+    {
+      "count": 1,
+      "file": "mark-issue-checkbox.sh",
+      "content": "body=$(gh api \"repos/${REPO}/issues/${ISSUE_NUMBER}\" --jq '.body') || {"
+    },
+    {
+      "count": 1,
+      "file": "mark-issue-checkbox.sh",
+      "content": "gh api \"repos/${REPO}/issues/${ISSUE_NUMBER}\" \\"
+    },
+    {
+      "count": 1,
+      "file": "post-verdict.sh",
+      "content": "echo \"Error: failed to post verdict comment on issue #${ISSUE_NUMBER} (gh rc=${POST_RC})\" >&2"
+    },
+    {
+      "count": 1,
+      "file": "post-verdict.sh",
+      "content": "echo \"Error: token-refresh gh proxy not found/executable at '${GH}'. Refusing to post the verdict via bare PATH gh (it would mis-attribute the comment). Re-run install-project-hooks.sh to restore the scripts/gh symlink (INV-56).\" >&2"
+    },
+    {
+      "count": 1,
+      "file": "reply-to-comments.sh",
+      "content": "gh api \"repos/$OWNER/$REPO/pulls/$PR_NUMBER/comments\" \\"
+    },
+    {
+      "count": 1,
+      "file": "setup-labels.sh",
+      "content": "elif gh label view \"$name\" --repo \"$REPO\" &>/dev/null; then"
+    },
+    {
+      "count": 1,
+      "file": "setup-labels.sh",
+      "content": "gh label create \"$name\" --repo \"$REPO\" \\"
+    },
+    {
+      "count": 2,
+      "file": "upload-screenshot.sh",
+      "content": "BRANCH_EXISTS=$(gh api \"repos/${REPO}/git/ref/heads/${BRANCH}\" 2>/dev/null | jq -r '.ref // empty' 2>/dev/null || true)"
+    },
+    {
+      "count": 1,
+      "file": "upload-screenshot.sh",
+      "content": "EXISTING_SHA=$(gh api \"repos/${REPO}/contents/${FILE_PATH}?ref=${BRANCH}\" 2>/dev/null | jq -r '.sha // empty' 2>/dev/null || true)"
+    },
+    {
+      "count": 1,
+      "file": "upload-screenshot.sh",
+      "content": "README_BLOB=$(gh api \"repos/${REPO}/git/blobs\" \\"
+    },
+    {
+      "count": 1,
+      "file": "upload-screenshot.sh",
+      "content": "[[ -n \"$COMMIT_SHA\" ]] && gh api \"repos/${REPO}/git/refs\" \\"
+    },
+    {
+      "count": 1,
+      "file": "upload-screenshot.sh",
+      "content": "[[ -n \"$README_BLOB\" ]] && TREE_SHA=$(gh api \"repos/${REPO}/git/trees\" \\"
+    },
+    {
+      "count": 1,
+      "file": "upload-screenshot.sh",
+      "content": "[[ -n \"$TREE_SHA\" ]] && COMMIT_SHA=$(gh api \"repos/${REPO}/git/commits\" \\"
+    },
+    {
+      "count": 1,
+      "file": "upload-screenshot.sh",
+      "content": "command -v gh >/dev/null 2>&1 || fail \"gh CLI is required but not found in PATH\""
+    },
+    {
+      "count": 1,
+      "file": "upload-screenshot.sh",
+      "content": "gh api \"repos/${REPO}/contents/${FILE_PATH}\" \\"
     }
   ]
 }

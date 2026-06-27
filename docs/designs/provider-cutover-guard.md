@@ -4,6 +4,25 @@ Issue #286. Final strangler-fig cutover guard for the pluggable-providers refact
 (spec §7 / §9). Guards that no NEW raw `gh` call re-enters the provider-neutral
 caller layer outside `scripts/providers/`.
 
+> **Revision (review round 1, codex 4 BLOCKING findings).** This design was
+> updated after review. The authoritative descriptions now live in
+> `docs/pipeline/invariants.md` (INV-91) and `provider-spec.md` §9; the changes:
+> - **F1/AC #2**: failure messages now name the exact `file:line` (resolved live
+>   via `grep -nF` at report time; the baseline stays line-number-free).
+> - **F2/AC #41**: the scan is **tree-wide** (every `*.sh` + `providers/*.sh`),
+>   not just the caller layer — `setup-labels.sh`/`lib-auth.sh`/`dispatcher-tick.sh`
+>   etc. are in scope; the baseline grew from 49→76 sigs accordingly, and the
+>   guard script allowlists itself.
+> - **F3**: the guard RUNS in CI via the existing `tests/unit/test-*.sh` loop
+>   (the [INV-83] precedent), because the scoped App token cannot push
+>   `.github/workflows/`. The ci.yml step is an optional operator enhancement, not
+>   a precondition for CI execution — the docs no longer claim a dedicated step
+>   exists.
+> - **F4**: the caps gate no longer emits a bare PASS for the 6 unwired caps. The
+>   7 live caps are EXERCISED (3 run end-to-end against the degraded fixture); the
+>   6 are WAIVED behind a fail-on-wiring tripwire; headline `exercised=7 waived=6
+>   total=13`.
+
 ## Reality check that shapes this design (the load-bearing decision)
 
 The issue body assumes the depends-on issues (#281–#285) left the caller layer
