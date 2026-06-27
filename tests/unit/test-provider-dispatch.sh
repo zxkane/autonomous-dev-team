@@ -243,26 +243,28 @@ done
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== TC-PROVIDER-DISPATCH-020..022: GitHub READ leaves migrated (#281); WRITE/dep + all CHP still scaffolds ==="
+echo "=== TC-PROVIDER-DISPATCH-020..022: GitHub READ leaves (#281) + WRITE leaves (#283) migrated; dep + all CHP still scaffolds ==="
 # ---------------------------------------------------------------------------
 # The ITP READ leaves (list_by_state / count_by_state / list_forbidden_combos /
 # read_task / list_comments) are migrated into providers/itp-github.sh by #281,
-# so their bodies are now DEFINED. The remaining ITP WRITE/dep verbs
-# (transition_state / post_comment / edit_comment / mark_checkbox /
-# provision_states / resolve_dep / begin_tick) and ALL CHP verbs are still empty
-# scaffolds (downstream itp-writes / itp-deps-begin-tick / chp-pr-lifecycle).
+# and the ITP WRITE leaves (transition_state / post_comment / edit_comment /
+# mark_checkbox / provision_states) by #283, so their bodies are now DEFINED.
+# The remaining ITP DEP verbs (resolve_dep / begin_tick) and ALL CHP verbs are
+# still empty scaffolds (downstream itp-deps-begin-tick / chp-pr-lifecycle).
 scaffold=$(
   bash -c '
     source "'"$PROVIDERS"'/itp-github.sh" 2>/dev/null
     source "'"$PROVIDERS"'/chp-github.sh" 2>/dev/null
     declare -F itp_github_list_comments    >/dev/null 2>&1 && echo "ITP_READ_PRESENT"
     declare -F itp_github_transition_state >/dev/null 2>&1 && echo "ITP_WRITE_PRESENT"
+    declare -F itp_github_resolve_dep      >/dev/null 2>&1 && echo "ITP_DEP_PRESENT"
     declare -F chp_github_create_pr        >/dev/null 2>&1 && echo "CHP_VERB_PRESENT"
     echo "SOURCED_CLEAN"
   '
 )
 assert_contains     "itp-github.sh DEFINES the migrated READ leaf itp_github_list_comments (#281)" "ITP_READ_PRESENT" "$scaffold"
-assert_not_contains "itp-github.sh defines NO itp_github_transition_state body yet (itp-writes)" "ITP_WRITE_PRESENT" "$scaffold"
+assert_contains     "itp-github.sh DEFINES the migrated WRITE leaf itp_github_transition_state (#283)" "ITP_WRITE_PRESENT" "$scaffold"
+assert_not_contains "itp-github.sh defines NO itp_github_resolve_dep body yet (itp-deps-begin-tick)" "ITP_DEP_PRESENT" "$scaffold"
 assert_not_contains "chp-github.sh defines NO chp_github_create_pr body yet" "CHP_VERB_PRESENT" "$scaffold"
 assert_contains "providers/*.sh scaffolds source clean (no syntax error)" "SOURCED_CLEAN" "$scaffold"
 # bash -n syntax check

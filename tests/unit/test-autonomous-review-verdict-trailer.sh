@@ -113,6 +113,13 @@ assert_eq() {
   fi
 }
 
+# [INV-87]/[INV-89] emit_verdict_trailer now routes its issue-comment write through
+# itp_post_comment → itp_github_post_comment, which posts to the provider's config
+# namespace $REPO (spec §3.4). In production the review wrapper always has $REPO set
+# (from autonomous.conf); every emit_verdict_trailer caller passes $REPO as arg2, so
+# the emitted `gh issue comment … --body` is byte-identical. Export it here to match.
+export REPO="zxkane/autonomous-dev-team"
+
 # ---------------------------------------------------------------------------
 echo "=== emit_verdict_trailer (INV-35) ==="
 # ---------------------------------------------------------------------------

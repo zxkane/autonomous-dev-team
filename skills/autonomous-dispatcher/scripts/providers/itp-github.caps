@@ -12,6 +12,6 @@ distinct_bot_author=1        # a real bot identity exists for self/other discrim
 read_after_write_state=1     # a transition is immediately visible to a re-list
 cross_ref_shorthand=1        # owner/repo#N style dep refs work (else gid/permalink)
 body_checkbox=1              # markdown checkbox in body (else native subtask)
-edit_comment=1               # comment edit-in-place exists (INV-46 stamp; else fresh marker)  [M5]
+edit_comment=1               # comment edit-in-place exists (INV-46 stamp; else re-post full report+marker)  [M5]
 label_colors=1               # state primitive carries a hex color (GitHub/GitLab; Asana: n/a)  [m5]
 marker_channel=html          # html=HTML comments survive; text=plain only (covers dispatcher markers too)  [M6]

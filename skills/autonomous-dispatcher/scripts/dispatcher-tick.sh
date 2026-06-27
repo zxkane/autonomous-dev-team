@@ -412,8 +412,8 @@ for i in $(seq 0 $((pd_count - 1))); do
       if gh issue view "$issue_num" --repo "$REPO" --json comments \
           -q "[.comments[].body | select(contains(\"${notice_marker}\"))] | length" \
           2>/dev/null | grep -q '^0$'; then
-        gh issue comment "$issue_num" --repo "$REPO" \
-          --body "Session \`${session_id}\` exhausted the model context window (terminal_reason=prompt_too_long). \`claude -p\` does not auto-compact, so resume would crash again. Forcing a fresh dev session on the next tick. (\`${notice_marker}\`)"
+        itp_post_comment "$issue_num" \
+          "Session \`${session_id}\` exhausted the model context window (terminal_reason=prompt_too_long). \`claude -p\` does not auto-compact, so resume would crash again. Forcing a fresh dev session on the next tick. (\`${notice_marker}\`)"
       fi
       # Truncate the log so the next tick sees an empty/missing log and
       # doesn't re-trigger this is_session_completed branch. The dev-new
@@ -428,8 +428,8 @@ for i in $(seq 0 $((pd_count - 1))); do
       _ptl_log="/tmp/agent-${PROJECT_ID}-issue-${issue_num}.log"
       if ! : > "$_ptl_log" 2>/dev/null; then
         log "  ERROR: failed to truncate ${_ptl_log} (perm/disk?). Skipping PTL dev-new dispatch to avoid re-detection loop."
-        gh issue comment "$issue_num" --repo "$REPO" \
-          --body "Could not reset prompt-too-long log at \`${_ptl_log}\` for fresh dispatch (permission or disk error). Operator: please clear the log file and retry. Skipping dispatch to prevent a silent retry loop." 2>/dev/null || true
+        itp_post_comment "$issue_num" \
+          "Could not reset prompt-too-long log at \`${_ptl_log}\` for fresh dispatch (permission or disk error). Operator: please clear the log file and retry. Skipping dispatch to prevent a silent retry loop." 2>/dev/null || true
         continue
       fi
       log "  dispatching dev-new for issue #${issue_num} (fresh after prompt_too_long)"
@@ -557,8 +557,8 @@ for i in $(seq 0 $((cand_count - 1))); do
     else
       kill_note="PID ${pid} already gone"
     fi
-    gh issue comment "$issue_num" --repo "$REPO" \
-      --body "Dev process still alive but PR #${pr_num} is ready (all CI checks passed, idle ${idle_seconds}s). ${kill_note}. Moving to pending-review."
+    itp_post_comment "$issue_num" \
+      "Dev process still alive but PR #${pr_num} is ready (all CI checks passed, idle ${idle_seconds}s). ${kill_note}. Moving to pending-review."
     label_swap "$issue_num" "in-progress" "pending-review"
 
   else
@@ -598,11 +598,11 @@ for i in $(seq 0 $((cand_count - 1))); do
         # operator fixes the conf, then the retry succeeds.
         _env_summary=$(recent_error_envelope "$issue_num" || true)
         if [ -n "$_env_summary" ]; then
-          gh issue comment "$issue_num" --repo "$REPO" \
-            --body "Dev wrapper aborted on a configuration error (no PR found): ${_env_summary}. See the surfaced error envelope above. Moving to pending-dev — fix the configuration before the retry."
+          itp_post_comment "$issue_num" \
+            "Dev wrapper aborted on a configuration error (no PR found): ${_env_summary}. See the surfaced error envelope above. Moving to pending-dev — fix the configuration before the retry."
         else
-          gh issue comment "$issue_num" --repo "$REPO" \
-            --body "Task appears to have crashed (no PR found). Moving to pending-dev for retry."
+          itp_post_comment "$issue_num" \
+            "Task appears to have crashed (no PR found). Moving to pending-dev for retry."
         fi
         unset _env_summary
         label_swap "$issue_num" "in-progress" "pending-dev"
@@ -616,14 +616,14 @@ for i in $(seq 0 $((cand_count - 1))); do
         # No new commits since last review — retry dev so it can act on
         # existing review feedback. ([INV-06] keyword guard: avoid
         # "crashed" / "process not found" so Step 4a doesn't count this.)
-        gh issue comment "$issue_num" --repo "$REPO" \
-          --body "Dev process exited (no new commits since last review at \`${last_head}\`). Moving to pending-dev for retry."
+        itp_post_comment "$issue_num" \
+          "Dev process exited (no new commits since last review at \`${last_head}\`). Moving to pending-dev for retry."
         label_swap "$issue_num" "in-progress" "pending-dev"
       else
         # PR has new commits OR no prior trailer — let review assess
         # ([INV-07] empty-trailer fallthrough).
-        gh issue comment "$issue_num" --repo "$REPO" \
-          --body "Dev process exited (PR found). Moving to pending-review for assessment."
+        itp_post_comment "$issue_num" \
+          "Dev process exited (PR found). Moving to pending-review for assessment."
         label_swap "$issue_num" "in-progress" "pending-review"
       fi
     else
@@ -656,11 +656,11 @@ for i in $(seq 0 $((cand_count - 1))); do
       # transient one.
       _env_summary=$(recent_error_envelope "$issue_num" || true)
       if [ -n "$_env_summary" ]; then
-        gh issue comment "$issue_num" --repo "$REPO" \
-          --body "Review wrapper aborted on a configuration error: ${_env_summary}. See the surfaced error envelope above. Moving to pending-dev — fix the configuration before the retry."
+        itp_post_comment "$issue_num" \
+          "Review wrapper aborted on a configuration error: ${_env_summary}. See the surfaced error envelope above. Moving to pending-dev — fix the configuration before the retry."
       else
-        gh issue comment "$issue_num" --repo "$REPO" \
-          --body "Review process appears to have crashed. Moving to pending-dev for retry."
+        itp_post_comment "$issue_num" \
+          "Review process appears to have crashed. Moving to pending-dev for retry."
       fi
       unset _env_summary
       label_swap "$issue_num" "reviewing" "pending-dev"

@@ -42,7 +42,7 @@
     {"file": "autonomous-dev.sh",   "movement": "in-progress,pending-dev|pending-review",                 "anchor": "PR found: move to pending-review for the review agent"},
     {"file": "autonomous-dev.sh",   "movement": "in-progress|pending-dev",                                "anchor": "no PR was created — retry development"},
     {"file": "autonomous-dev.sh",   "movement": "in-progress|pending-dev",                                "anchor": "Failure: move back to pending-dev so dispatcher can retry"},
-    {"file": "lib-dispatch.sh",     "movement": "pending-dev|stalled",                                    "anchor": "--add-label \"stalled\""},
+    {"file": "lib-dispatch.sh",     "movement": "pending-dev|stalled",                                    "anchor": "label_swap \"$issue_num\" \"pending-dev\" \"stalled\""},
     {"file": "lib-dispatch.sh",     "movement": "pending-dev|pending-review",                             "anchor": "Re-routing to review (last review failed"},
     {"file": "lib-dispatch.sh",     "movement": "pending-dev|in-progress",                                "anchor": "post_dispatch_token \"$issue_num\" \"dev-new\""},
     {"file": "lib-dispatch.sh",     "movement": "pending-dev|pending-review",                             "anchor": "transitioning to pending-review instead of"},
@@ -72,9 +72,8 @@
     {"file": "autonomous-review.sh", "movement": "reviewing|pending-review",                              "anchor": "awaiting-bot-review"}
   ],
   "variable_write_allowlist": {
-    "_comment": "P1.1 — the ONLY code sites in the four pipeline files where a variable-valued --add/--remove-label \"$var\" is legitimate. Each entry's `anchor` must grep in `file` and is the function whose body holds the dynamic write. Every OTHER variable-valued label write is a hard FAIL (a variable write can introduce an undeclared label the literal-site checks never see). (1) label_swap() is the generic helper — its $remove/$add come from the LITERAL label_swap callers that C.1-C.5 already validate. (2) hygiene_strip_residual_labels() loops --remove-label \"$t\" over a hard-coded list of the four transitional labels (all declared), modeled by the hygiene-strip-residue-* transitions.",
+    "_comment": "P1.1 — the ONLY code site in the four pipeline files where a variable-valued --add/--remove-label \"$var\" is legitimate. Each entry's `anchor` must grep in `file` and is the function whose body holds the dynamic write. Every OTHER variable-valued label write is a hard FAIL (a variable write can introduce an undeclared label the literal-site checks never see). hygiene_strip_residual_labels() loops --remove-label \"$t\" over a hard-coded list of the four transitional labels (all declared), modeled by the hygiene-strip-residue-* transitions. NOTE (#283): label_swap() NO LONGER holds a variable label write — its body now delegates to itp_transition_state (the [INV-87] ITP transition verb), whose byte-identical `gh issue edit … --add-label \"$add\"` leaf lives in providers/itp-github.sh, which is OUTSIDE the four scanned PIPELINE_FILES. So label_swap() is no longer an allowlist site here; its $remove/$add still come from the LITERAL label_swap callers that C.1–C.5 validate.",
     "sites": [
-      {"file": "lib-dispatch.sh", "anchor": "label_swap() {",                       "reason": "generic helper; $remove/$add come from validated literal callers"},
       {"file": "lib-dispatch.sh", "anchor": "hygiene_strip_residual_labels()",      "reason": "loops --remove-label \"$t\" over a hard-coded declared transitional-label list (INV-25)"}
     ]
   }

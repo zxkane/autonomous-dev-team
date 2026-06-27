@@ -31,6 +31,24 @@ for _conf_candidate in \
 done
 REPO="${GITHUB_REPO:-${REPO:-owner/repo}}"
 
+# [INV-87] Issue-Tracker Provider dispatch. The body-checkbox PATCH leaf routes
+# through itp_mark_checkbox (→ itp_${ISSUE_PROVIDER}_mark_checkbox). The provider
+# lib lives in the autonomous-dispatcher skill tree; resolve it via readlink -f of
+# THIS script (the [INV-14]/[INV-65] skill-tree idiom) — NOT SCRIPT_DIR, which is
+# deliberately the project-side symlink dir so the conf-lookup above finds the
+# project's autonomous.conf. Guarded + best-effort: if the lib is absent the verb
+# stays undefined and the caller's `command -v` guard below falls back to the
+# inline `gh api` PATCH (a non-github backend would have its own provider lib).
+if ! declare -F itp_mark_checkbox >/dev/null 2>&1; then
+  _mic_real_dir="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]:-$0}")")" && pwd 2>/dev/null)" || _mic_real_dir=""
+  _mic_lib="${_mic_real_dir}/../../autonomous-dispatcher/scripts/lib-issue-provider.sh"
+  if [[ -n "$_mic_real_dir" && -r "$_mic_lib" ]]; then
+    # shellcheck source=../../autonomous-dispatcher/scripts/lib-issue-provider.sh
+    source "$_mic_lib"
+  fi
+  unset _mic_real_dir _mic_lib
+fi
+
 ISSUE_NUMBER="${1:-}"
 CHECKBOX_TEXT="${2:-}"
 
@@ -93,11 +111,42 @@ mark_checkbox() {
     { print }
   ')
 
-  # PATCH the issue body
-  gh api "repos/${REPO}/issues/${ISSUE_NUMBER}" \
-    --method PATCH \
-    --field body="$new_body" \
-    --silent || {
+  # [INV-87] PATCH the issue body via the body-checkbox write leaf. The
+  # `- [ ]`→`- [x]` awk rewrite above + the not-found/already-checked exit codes
+  # (0/1/2) stay caller-side; only the PATCH primitive moves behind
+  # itp_mark_checkbox, which receives the already-rewritten body.
+  #
+  # The DOCUMENTED branch point is the `body_checkbox` CAPABILITY (spec §4.1), NOT
+  # `declare -F itp_mark_checkbox` — after lib-issue-provider.sh is sourced the
+  # `itp_mark_checkbox` SHIM is always defined (it forwards to
+  # itp_${ISSUE_PROVIDER}_mark_checkbox), so a `declare -F` check never falls back
+  # and a backend without the leaf would crash with `itp_<p>_mark_checkbox: command
+  # not found`. We branch on the cap instead:
+  #   - body_checkbox=1 (GitHub) → the markdown-checkbox path: itp_mark_checkbox
+  #     emits the byte-identical
+  #     `gh api repos/$REPO/issues/$N --method PATCH --field body=… --silent`.
+  #   - body_checkbox=0 → the documented native-subtask-completion remap, DEFINED
+  #     but NOT IMPLEMENTED this PR — fail LOUD-but-clean (no missing-leaf crash) so
+  #     the no-behavior-change scope holds and the gap is visible, not silent.
+  # When the provider lib is unavailable (no itp_caps — script run standalone
+  # without the skill tree), fall back to the inline `gh api` PATCH so the script
+  # stays self-contained (GitHub's today behavior).
+  local _bc_cap=""
+  if declare -F itp_caps >/dev/null 2>&1; then
+    _bc_cap="$(itp_caps body_checkbox 2>/dev/null || true)"
+  fi
+  if [[ "$_bc_cap" == "0" ]]; then
+    echo "Error: provider '${ISSUE_PROVIDER:-?}' has body_checkbox=0 — native-subtask checkbox completion is not implemented yet (this PR migrates the GitHub markdown-checkbox leaf only). Cannot mark '${CHECKBOX_TEXT}' on issue #${ISSUE_NUMBER}." >&2
+    return 1
+  fi
+  if declare -F itp_mark_checkbox >/dev/null 2>&1; then
+    itp_mark_checkbox "$ISSUE_NUMBER" "$new_body"
+  else
+    gh api "repos/${REPO}/issues/${ISSUE_NUMBER}" \
+      --method PATCH \
+      --field body="$new_body" \
+      --silent
+  fi || {
     echo "Error: Failed to update issue #${ISSUE_NUMBER}" >&2
     return 1
   }

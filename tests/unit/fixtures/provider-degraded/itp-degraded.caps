@@ -13,6 +13,6 @@ distinct_bot_author=0        # use the normalized authorKind field, not author==
 read_after_write_state=0     # re-read the task directly, not via search
 cross_ref_shorthand=0        # dep refs carry full id / permalink
 body_checkbox=0              # itp_mark_checkbox maps to subtask-complete
-edit_comment=0               # INV-46 stamp falls back to a fresh marker comment
+edit_comment=0               # INV-46 stamp falls back to re-posting the full report body + marker (never marker-only)
 label_colors=0               # itp_provision_states skips color
 marker_channel=text          # plain text channel (HTML comments stripped — Asana-like)

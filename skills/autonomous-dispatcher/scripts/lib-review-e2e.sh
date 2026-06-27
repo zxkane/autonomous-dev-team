@@ -23,6 +23,24 @@
 # dispatches command→_run_command_e2e_lane / browser→one run_agent lane, reads
 # the .rc sidecar, computes the gate via _classify_e2e_gate, and branches.
 
+# [INV-87]/[INV-46] Issue-Tracker Provider dispatch for the SHA evidence-marker
+# stamp. The INV-46 stamp's in-place PATCH leaf routes through itp_edit_comment
+# (→ itp_${ISSUE_PROVIDER}_edit_comment) and its edit_comment=0 fallback through
+# itp_post_comment + itp_caps. The review wrapper (autonomous-review.sh) does NOT
+# source lib-issue-provider.sh, so this lib self-sources it from the REAL skill
+# tree via readlink -f of its own BASH_SOURCE (the same idiom lib-dispatch.sh
+# uses). Idempotent (the shims + .caps reader guard their own redefinition);
+# guarded so a standalone-sourced lib-review-e2e.sh still resolves the verbs.
+if ! declare -F itp_edit_comment >/dev/null 2>&1; then
+  _lre2e_self="${BASH_SOURCE[0]:-$0}"
+  _lre2e_dir="$(cd "$(dirname "$(readlink -f "$_lre2e_self")")" && pwd 2>/dev/null)" || _lre2e_dir=""
+  if [ -n "$_lre2e_dir" ] && [ -r "${_lre2e_dir}/lib-issue-provider.sh" ]; then
+    # shellcheck source=lib-issue-provider.sh
+    source "${_lre2e_dir}/lib-issue-provider.sh"
+  fi
+  unset _lre2e_self _lre2e_dir
+fi
+
 # ---------------------------------------------------------------------------
 # _classify_e2e_gate <rc> <evidence_present>
 #
@@ -481,10 +499,31 @@ _stamp_browser_evidence_marker() {
     return 0
   fi
 
-  # PATCH the report comment, appending the marker on its own line. -f body=…
-  # sends the field as a string; the literal newline is embedded via $'...'.
-  if gh api -X PATCH "repos/${REPO_OWNER}/${REPO_NAME}/issues/comments/${_comment_id}" \
-      -f body="${_body}"$'\n\n'"${marker}" >/dev/null 2>&1; then
+  # [INV-87]/[INV-46] Stamp the SHA marker. `_new_body` is the FULL report body
+  # with the marker appended on its own line (the literal newline embedded via
+  # $'...'). On a provider with comment edit-in-place (`edit_comment=1`, GitHub)
+  # the byte-identical PATCH leaf moves behind itp_edit_comment (→ `gh api -X
+  # PATCH …/issues/comments/<id> -f body=<new_body>`).
+  local _new_body="${_body}"$'\n\n'"${marker}"
+  local _edit_cap; _edit_cap="$(itp_caps edit_comment 2>/dev/null || true)"
+  if [[ "$_edit_cap" == "0" ]]; then
+    # Degradation (spec §4.1 edit_comment row): no in-place edit, so post a FRESH
+    # comment carrying the SAME `_new_body` — the full report body PLUS the SHA
+    # marker — NOT a marker-only comment. `_fetch_sha_evidence` returns the
+    # `last` SHA-marked comment's FULL body to the dual-signal gate; a marker-only
+    # post would let an append-only provider satisfy the gate with no report,
+    # screenshots, or AC evidence attached (the marker-only-fabrication hole
+    # [INV-46] explicitly closes). Posting the full body reproduces the same end
+    # state as the edit path (a comment carrying report + marker), just as a new
+    # comment instead of an in-place edit.
+    if itp_post_comment "$PR_NUMBER" "$_new_body" >/dev/null 2>&1; then
+      log "INV-46: edit_comment=0 — re-posted the FULL E2E report + SHA marker as a fresh comment (provider lacks edit-in-place)."
+      return 0
+    fi
+    log "INV-46: failed to post the fresh report+marker comment (edit_comment=0) — gate fails closed."
+    return 1
+  fi
+  if itp_edit_comment "$PR_NUMBER" "$_comment_id" "$_new_body" >/dev/null 2>&1; then
     log "INV-46: stamped SHA marker onto the browser E2E report comment (id=${_comment_id})."
     return 0
   fi

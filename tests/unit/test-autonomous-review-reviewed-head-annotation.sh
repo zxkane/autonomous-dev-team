@@ -84,6 +84,12 @@ run_trailer() {
   bash -c "
     set +e
     log() { echo \"[test-log] \$*\" >&2; }
+    # [INV-89] The Reviewed-HEAD trailer now posts through the ITP choke-point
+    # itp_post_comment. This harness evals the extracted block WITHOUT sourcing
+    # lib-issue-provider.sh, so stub the verb to forward byte-identically to the
+    # recording \`gh\` stub (itp_github_post_comment emits exactly \`gh issue
+    # comment ISSUE --repo \$REPO --body BODY\`).
+    itp_post_comment() { gh issue comment \"\$1\" --repo \"\$REPO\" --body \"\$2\"; }
     $TRAILER_BLOCK
   " 2>/dev/null
   GH_LOG=$(cat "$record")
