@@ -227,7 +227,12 @@ The *callers* keep their logic; only the leaf `gh` call moves behind a verb.
 > This applies to the optional/fallback-bearing verbs the GitHub callers guard
 > (`chp_close_keyword`, `chp_create_pr`, `chp_trigger_bot`); core verbs invoked in
 > an `if`-condition / `$(… || …)` context are abort-safe without the guard. `chp_caps`
-> is exempt — it has a real reader body, not a leaf-dispatching shim.
+> is exempt — it has a real reader body, not a leaf-dispatching shim. The two
+> general read primitives `chp_pr_view` / `chp_pr_list` are invoked unguarded by
+> the incidental-read sites, so the SHIMS themselves are **self-guarding**
+> (#282 review round 9): when the enabled provider omits the leaf they emit a WARN
+> and `return 1` (a clean non-zero the read call sites' `|| echo/true/return`
+> already degrade on) rather than dispatching to an undefined leaf and aborting.
 >
 > The leaf-absent **fallback must still honor the capability contract**, not just
 > avoid the abort: `chp_close_keyword`'s caller (`_render_close_keyword`) renders,

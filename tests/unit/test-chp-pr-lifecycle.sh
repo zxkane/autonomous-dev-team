@@ -565,6 +565,36 @@ routed=$(
 assert_contains "TC-CHP-PRVIEW-ROUTE chp_pr_view → chp_github_pr_view" "VIEW-ROUTED:42 --json state" "$routed"
 assert_contains "TC-CHP-PRLIST-ROUTE chp_pr_list → chp_github_pr_list" "LIST-ROUTED:--state open" "$routed"
 
+# Self-guarding dispatch (#282 review round 9 [P1]): on a backend whose provider
+# omits the pr_view/pr_list leaf (the degraded fixture; any future non-GitHub
+# provider) the shim must NOT `command not found`-abort the caller — it returns 1
+# (clean non-zero) so the caller's `|| echo/true/return` fallback degrades the
+# read to empty. Drive the EXACT needs_open_pr_only caller pattern under set -euo
+# with CODE_HOST=degraded (no chp_degraded_pr_* leaf).
+if [[ -d "$FAKE_PROVIDER" ]]; then
+  guard_out=$(
+    env -u AUTONOMOUS_CONF -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR \
+        REPO="$REPO" CODE_HOST=degraded AUTONOMOUS_PROVIDERS_DIR="$FAKE_PROVIDER" \
+    bash -c '
+      set -euo pipefail
+      source "'"$CHP_LIB"'" 2>/dev/null
+      # caller-pattern 1 (needs_open_pr_only): $(...) || return-equiv
+      pr_count=$(chp_pr_list --state open --json body -q "X" 2>/dev/null) || pr_count=0
+      # caller-pattern 2 (PR_STATE): $(... || echo UNKNOWN)
+      st=$(chp_pr_view 42 --json state -q ".state" 2>/dev/null || echo "UNKNOWN")
+      echo "REACHED pr_count=[$pr_count] st=[$st]"
+    ' 2>/dev/null
+  )
+  assert_contains "TC-CHP-PRGUARD degraded (no leaf) → shim returns 1, caller fallback degrades (no set -e abort)" "REACHED pr_count=[0] st=[UNKNOWN]" "$guard_out"
+  # The shim source contains the leaf-existence guard (not a blind dispatch).
+  if grep -qE 'declare -F "chp_\$\{CODE_HOST\}_pr_view"' "$CHP_LIB" \
+     && grep -qE 'declare -F "chp_\$\{CODE_HOST\}_pr_list"' "$CHP_LIB"; then
+    echo -e "  ${GREEN}PASS${NC}: TC-CHP-PRGUARD-SRC chp_pr_view/chp_pr_list shims guard the leaf before dispatch"; PASS=$((PASS+1))
+  else
+    echo -e "  ${RED}FAIL${NC}: TC-CHP-PRGUARD-SRC chp_pr_view/chp_pr_list shims dispatch blindly (no leaf guard)"; FAIL=$((FAIL+1))
+  fi
+fi
+
 rm -f "$_GH_ARGV_FILE"
 
 # ===========================================================================

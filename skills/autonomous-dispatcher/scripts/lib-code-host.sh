@@ -107,8 +107,32 @@ chp_close_keyword()     { chp_${CODE_HOST}_close_keyword "$@"; }
 # (chp_pr_list is the generalized issue-keyed/body-mention list the dispatcher's
 # pre-#277 existence lookups use — distinct from chp_find_pr_for_issue, which is
 # the [INV-86] close-linkage resolver.)
-chp_pr_view()           { chp_${CODE_HOST}_pr_view "$@"; }
-chp_pr_list()           { chp_${CODE_HOST}_pr_list "$@"; }
+#
+# Self-guarding dispatch (#282 review round 9 [P1]): unlike the 11 lifecycle
+# verbs (which callers guard via `chp_has_leaf` + a meaningful fallback), the
+# incidental-read callers dispatch these UNGUARDED. So if the enabled provider
+# omits the leaf (the all-empty degraded fixture; any future non-GitHub provider
+# that hasn't yet implemented its read leaf), a blind `chp_${CODE_HOST}_pr_view`
+# would `command not found` → abort the wrapper at its FIRST PR read. Instead the
+# shim checks the leaf and, when absent, emits a WARN and returns 1 — a clean
+# non-zero that every incidental-read call site already degrades on (each is a
+# `$(… 2>/dev/null || echo/true)`, `if ! …`, or `… || return 1`), so the wrapper
+# fails-soft (empty read) instead of aborting, and the misconfiguration is loud.
+# A real backend MUST implement these (they are core, non-capability-gated reads).
+chp_pr_view() {
+  if ! declare -F "chp_${CODE_HOST}_pr_view" >/dev/null 2>&1; then
+    echo "WARN: [INV-87] CODE_HOST='${CODE_HOST}' provider defines no chp_${CODE_HOST}_pr_view leaf — PR read unavailable (a non-GitHub CHP provider MUST implement it)." >&2
+    return 1
+  fi
+  chp_${CODE_HOST}_pr_view "$@"
+}
+chp_pr_list() {
+  if ! declare -F "chp_${CODE_HOST}_pr_list" >/dev/null 2>&1; then
+    echo "WARN: [INV-87] CODE_HOST='${CODE_HOST}' provider defines no chp_${CODE_HOST}_pr_list leaf — PR list read unavailable (a non-GitHub CHP provider MUST implement it)." >&2
+    return 1
+  fi
+  chp_${CODE_HOST}_pr_list "$@"
+}
 
 # chp_has_leaf <verb> — returns 0 iff the ENABLED provider actually defines the
 # leaf `chp_${CODE_HOST}_<verb>` (e.g. `chp_has_leaf close_keyword`).
