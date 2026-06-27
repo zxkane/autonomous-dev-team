@@ -441,6 +441,27 @@ check_deps_resolved() {
   # that backend lands (only GitHub's =1 path is live now). Read once per call.
   local _xref_shorthand
   _xref_shorthand=$(itp_caps cross_ref_shorthand 2>/dev/null || echo 1)
+
+  # [INV-83] Provider-leaf presence guard (#284 review [P1]). BOTH dep arms (the
+  # cross-repo Stage 2a and the same-repo Stage 2b) resolve state through
+  # `resolve_dep_state` → the `itp_resolve_dep` verb. lib-issue-provider.sh ALWAYS
+  # defines the `itp_resolve_dep` SHIM, but a provider that has not migrated its
+  # dependency-resolution leaf yet (the degraded fixture provider, any
+  # not-yet-migrated gitlab/asana backend) defines no `itp_${ISSUE_PROVIDER}_resolve_dep`
+  # — so the shim would call an undefined function → `command not found` → abort the
+  # tick under `set -e` (and, even if it didn't abort, every dep would spuriously
+  # block on an empty state). A provider without the leaf simply CANNOT evaluate
+  # cross-task dependencies through the seam, so dependency-gating is skipped:
+  # `check_deps_resolved` returns 0 (resolved/proceed) rather than aborting or
+  # permanently blocking. GitHub (the only live provider) DOES define the leaf, so
+  # this guard is never taken in production and dep-gating works exactly as designed.
+  # This restores the pre-#284 "any provider can do the same-repo lookup" robustness
+  # the raw `gh issue view` call had, without re-introducing a raw caller-side gh
+  # call (AC #4) — it degrades the whole dep check, not a single arm.
+  if ! declare -F "itp_${ISSUE_PROVIDER:-github}_resolve_dep" >/dev/null 2>&1; then
+    return 0
+  fi
+
   body=$(gh issue view "$issue_num" --repo "$REPO" --json body -q '.body')
   section=$(printf '%s\n' "$body" | sed -n '/^## Dependencies/,/^## /p')
 

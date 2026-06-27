@@ -408,6 +408,60 @@ github_leaf=$(
 )
 assert_contains "GitHub default DEFINES itp_github_begin_tick → the real dispatcher still resets every tick" "GH-LEAF-DEFINED" "$github_leaf"
 
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-RDGT-010: check_deps_resolved skips dep-gating (no abort) for a provider WITHOUT a resolve_dep leaf (#284 review [P1] #2) ==="
+# ---------------------------------------------------------------------------
+# REGRESSION for the second review [P1]: BOTH dep arms (cross-repo Stage 2a AND
+# same-repo Stage 2b) route through resolve_dep_state → the itp_resolve_dep verb.
+# lib-issue-provider.sh ALWAYS defines the itp_resolve_dep SHIM, so for a provider
+# with no itp_<provider>_resolve_dep leaf (the degraded fixture, any
+# not-yet-migrated gitlab/asana) the shim called an undefined function →
+# `command not found` → aborted check_deps_resolved under `set -e` (the same-repo
+# arm was a raw `gh` call on main, so this was a NEW regression). The provider-leaf
+# presence guard makes check_deps_resolved skip dep-gating (return 0) for such a
+# provider — never aborts, never spuriously blocks. GitHub DEFINES the leaf, so
+# production dep-gating is unaffected.
+#
+# (a) degraded provider (cross_ref_shorthand=0, no resolve_dep leaf) + a same-repo
+# `#N` dep under set -e → resolved, no abort, no `command not found`.
+deps_guard_out=$(
+  env -u ISSUE_PROVIDER -u AUTONOMOUS_CONF -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR \
+      ISSUE_PROVIDER=degraded AUTONOMOUS_PROVIDERS_DIR="$FAKE_PROVIDER" \
+      REPO="$REPO" REPO_OWNER="$REPO_OWNER" PROJECT_ID="$PROJECT_ID" MAX_RETRIES=3 MAX_CONCURRENT=5 \
+  bash -c '
+    set -euo pipefail
+    gh() { local m=""; while [[ $# -gt 0 ]]; do case "$1" in --json) m="$2"; shift 2;; *) shift;; esac; done
+          case "$m" in body) printf "## Dependencies\n- #42\n";; state) printf CLOSED;; esac; }
+    export -f gh
+    source "'"$LIB"'" 2>/dev/null
+    check_deps_resolved 99 && echo "DEPS-RC=0" || echo "DEPS-RC=$?"
+    echo "REACHED-END"
+  ' 2>&1
+)
+assert_contains "no-resolve_dep-leaf provider + same-repo #N dep: check_deps_resolved did NOT abort under set -e" "REACHED-END" "$deps_guard_out"
+assert_contains "no-resolve_dep-leaf provider: dep-gating skipped → resolved (rc 0), not a spurious block" "DEPS-RC=0" "$deps_guard_out"
+assert_not_contains "no 'command not found' from an undefined provider resolve_dep leaf" "command not found" "$deps_guard_out"
+# (b) source-pin the provider-leaf guard in lib-dispatch.sh's check_deps_resolved.
+lib_src=$(cat "$LIB")
+assert_contains "lib-dispatch.sh check_deps_resolved guards on the resolve_dep provider LEAF" \
+  'declare -F "itp_${ISSUE_PROVIDER:-github}_resolve_dep"' "$lib_src"
+# (c) GitHub (leaf present) is UNAFFECTED — it still blocks on an OPEN same-repo dep.
+gh_gate_out=$(
+  env -u ISSUE_PROVIDER -u AUTONOMOUS_CONF -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR \
+      REPO="$REPO" REPO_OWNER="$REPO_OWNER" PROJECT_ID="$PROJECT_ID" MAX_RETRIES=3 MAX_CONCURRENT=5 \
+  bash -c '
+    set -uo pipefail
+    gh() { local m="" num=""; while [[ $# -gt 0 ]]; do case "$1" in view) num="$2"; shift 2;; --json) m="$2"; shift 2;; *) shift;; esac; done
+          case "$m" in body) printf "## Dependencies\n- #42\n";; state) [ "$num" = 42 ] && printf OPEN || printf CLOSED;; esac; }
+    export -f gh
+    source "'"$LIB"'" 2>/dev/null
+    set +e
+    check_deps_resolved 99; echo "GH-DEPS-RC=$?"
+  '
+)
+assert_contains "GitHub (resolve_dep leaf present): still blocks on an OPEN same-repo dep (dep-gating intact)" "GH-DEPS-RC=1" "$gh_gate_out"
+
 echo ""
 echo "=== SUMMARY: $PASS passed, $FAIL failed ==="
 [[ "$FAIL" -eq 0 ]] && exit 0 || exit 1

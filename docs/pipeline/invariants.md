@@ -4282,7 +4282,7 @@ _Triage (issue #236): [machine-checked: tests/unit/test-check-deps-resolved.sh, 
 
 **Producer**: `providers/itp-github.sh::itp_github_resolve_dep` (token routing + the `_DEP_TOKEN_CACHE` mint+cache) + `providers/itp-github.sh::itp_github_begin_tick` (the tick-boundary cache reset) + `gh-app-token.sh::get_gh_app_scoped_token` (the scoped mint, which reuses the structural `_app_install_token` core extracted in #269 T1). The caller-side `lib-dispatch.sh::resolve_dep_state` is a thin wrapper that forwards to the `itp_resolve_dep` shim (#284). Threaded by `dispatcher-tick.sh` (the app-mode block exports `DISPATCHER_APP_ID` / `DISPATCHER_APP_PEM`, which the provider reads from the environment, and calls `itp_begin_tick` once before Step 2).
 
-**Consumer**: `lib-dispatch.sh::check_deps_resolved` (the cross-repo arm, gated on `cross_ref_shorthand`; the same-repo arm routes through `itp_resolve_dep` against `$REPO` with the mint skipped).
+**Consumer**: `lib-dispatch.sh::check_deps_resolved` (the cross-repo arm, gated on `cross_ref_shorthand`; the same-repo arm routes through `itp_resolve_dep` against `$REPO` with the mint skipped). Both arms route through the `itp_resolve_dep` verb; because `lib-issue-provider.sh` always defines the shim but a not-yet-migrated provider defines no `itp_${ISSUE_PROVIDER}_resolve_dep` leaf, `check_deps_resolved` guards on the **provider leaf** and skips dependency-gating (returns resolved/proceed, never a `set -e` abort or a spurious permanent block) when the leaf is absent (#284 review [P1]). GitHub defines the leaf, so production gating is unaffected.
 
 **Status**: **ENFORCED** in #269's fix; the leaf relocated behind `itp_resolve_dep` / `itp_begin_tick` in #284 (no behavior change).
 
