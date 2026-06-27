@@ -354,23 +354,28 @@ fixture rule ([INV-75]):
 
 ```
 scripts/
-  lib-issue-provider.sh          # NEW. itp_<verb>() dispatch → itp_${ISSUE_PROVIDER}_<verb>; reads .caps
-  lib-code-host.sh               # NEW. chp_<verb>() dispatch → chp_${CODE_HOST}_<verb>; reads .caps
-  providers/                     # NEW dir, sibling to adapters/
-    itp-github.sh                # itp_github_*  — reference impl, gh leaves moved verbatim
-    itp-github.caps              # declarative capability manifest (parsed, not sourced)
-    chp-github.sh                # chp_github_*  — reference impl, gh leaves moved verbatim
-    chp-github.caps              # declarative capability manifest
+  lib-issue-provider.sh          # itp_<verb>() dispatch → itp_${ISSUE_PROVIDER}_<verb>; reads .caps  (#280)
+  lib-code-host.sh               # chp_<verb>() dispatch → chp_${CODE_HOST}_<verb>; reads .caps        (#280)
+  providers/                     # dir, sibling to adapters/  (#280)
+    itp-github.sh                # itp_github_*  — reference impl (EMPTY scaffold in #280; gh leaves moved verbatim by the itp-reads/itp-writes siblings)
+    itp-github.caps              # declarative capability manifest (parsed, not sourced)  (#280)
+    chp-github.sh                # chp_github_*  — reference impl (EMPTY scaffold in #280; gh leaves moved verbatim by the chp-pr-lifecycle sibling)
+    chp-github.caps              # declarative capability manifest  (#280)
     # gitlab / asana files added in later PRs
 ```
 
 All new files are `lib-*.sh` / sourced provider files → picked up via the
 skill-tree `readlink -f` resolution. **No new entry-point script → no
 `install-project-hooks.sh` re-run** required on consumers (Step 1 `npx skills
-update -g` alone suffices). The conformance fixtures' fake-skill-tree must
-`cp -r providers/` exactly as it already `cp -r adapters/`. **None of these files
-ship in this PR** — this section is the target the dispatch-skeleton sibling issue
-implements.
+update -g` alone suffices). The conformance + unit fixtures' fake-skill-tree must
+`cp -r providers/` exactly as it already `cp -r adapters/` —
+[`tests/unit/test-entry-point-startup-e2e.sh`](../../tests/unit/test-entry-point-startup-e2e.sh)
+does both as of #280. **The dispatch skeleton (the two `lib-*.sh` dispatchers,
+the empty `providers/itp-github.{sh,caps}` / `chp-github.{sh,caps}` scaffolds,
+and the `.caps` reader) ships in issue #280** with ZERO verb leaves migrated and
+zero behavior change; the `gh`-leaf migration into the `itp_github_*` /
+`chp_github_*` bodies is the downstream itp-reads / itp-writes / chp-pr-lifecycle
+issues. #279 (this doc) ships ZERO code.
 
 ---
 
