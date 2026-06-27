@@ -4536,6 +4536,28 @@ _Triage (issue #236): [machine-checked: tests/unit/test-provider-spec.sh]_
 - [INV-46](#inv-46-e2e-runs-once-in-a-dedicated-lane-before-the-review-fan-out--gated-not-per-agent) — the edit/PATCH path that needs the numeric `id`.
 - [INV-85](#inv-85-the-completed-session-failed-substantive-route-is-bounded-to-one-dev-new-per-unchanged-head-a-no-progress-or-bot-unfixable-finding-escalates-to-stalled-never-loops) — the exact-equality detector that needs `author` as a machine handle.
 
+## INV-91: the provider-neutral caller layer routes ALL host I/O through `itp_*`/`chp_*` verbs — a NEW raw `gh` outside `providers/` is a CI-failing cutover regression (baseline-anchored)
+
+_Triage (issue #236): [machine-checked: tests/unit/test-provider-cutover.sh]_
+
+**Rule**: the provider-neutral caller layer (`lib-dispatch.sh`, `autonomous-dev.sh`, `autonomous-review.sh`, every `lib-review-*.sh`) MUST route every issue-tracker / code-host operation through an ITP/CHP verb (`itp_*`/`chp_*`), never a raw `gh`. This explicitly includes the dispatcher's OWN marker writers — `post_dispatch_token` ([INV-18]) and `_dep_block_comment` ([INV-39]) — which post through `itp_post_comment`, the **sole marker choke-point** ([provider-spec.md](provider-spec.md) §M6, [INV-89]). The host-I/O leaves live ONLY under `scripts/providers/` (`itp-github.sh`, `chp-github.sh`); the auth/transport wrappers (`scripts/gh`, `gh-with-token-refresh.sh`, `gh-app-token.sh`, `gh-as-user.sh`, `dispatch-remote-aws-ssm.sh`) are allowlisted (spec §8: GitHub auth is unchanged, not refactored). `check-provider-cutover.sh` enforces this in CI: it scans the caller layer for a raw `gh ` token via the RE2-safe consuming boundary `(^|[^A-Za-z_-])gh ` (never a look-behind — [gh --jq is RE2]) and FAILs any site not accounted for.
+
+**Baseline-anchored, NOT a from-zero ban**: the depends-on issues (#281–#285) migrated only the spec-named verb leaves (§3.1/§3.2), so the caller layer still holds the surviving raw-gh sites the first deliverable did not migrate (label flips, `gh issue view/close`, `gh pr comment`, `gh api`, and agent-prompt heredoc prose). Those are frozen in the declarative manifest `providers/cutover-baseline.json`, keyed by `(file, trimmed-content)` COUNT (the same discovered-vs-declared reconciliation as [INV-80]'s `check-spec-drift.sh` Check C.4). The guard PASSES today, FAILs any NEW raw-gh (content not baselined), FAILs a DUPLICATE of a baselined line (count bump), and FAILs a REMOVED baselined site (count drop) — so a migration PR that pulls a caller-side `gh` leaf behind a verb is FORCED to shrink the baseline in the same PR. As the survivors migrate, the baseline shrinks to empty and the guard becomes the strict from-zero ban the cutover envisioned.
+
+**Why**: the "sole choke-point" property (one verb per host operation) is what lets a GitLab/Asana backend slot in without re-architecting callers (spec §1/§7). A raw `gh` that re-enters the caller layer silently re-couples the pipeline to GitHub and bypasses the capability/marker-channel branches — exactly the regression this guard exists to catch. Without a CI gate, the partial migration would silently rot back toward raw-gh as new pipeline code is added (issue #286).
+
+**Producer**: the ITP/CHP verb dispatch (`lib-issue-provider.sh`/`lib-code-host.sh`, [INV-87]) + `providers/itp-github.sh`/`chp-github.sh`. **Consumer**: every caller-layer file + `check-provider-cutover.sh` (the CI gate) + `providers/cutover-baseline.json` (the regression anchor).
+
+**Status**: **IMPLEMENTED in #286** (the cutover guard). The guard is wired into the credential-free `spec-drift` CI job and the hermetic `shellcheck -S error` list. The §7.4 fake degraded-capability fixture is promoted to a coverage gate (`tests/unit/test-provider-caps-branches.sh`) proving each caps=0 caller branch that exists today is reachable (not dead), and asserting the caps whose branch is not yet wired (spec §4.3) have nothing to cover yet. NOTE: on the HEAD #286 targets the migration is PARTIAL (~70 surviving caller-layer `gh ` tokens), so the guard is the baseline-anchored regression form described above, not yet a from-zero ban.
+
+**Tests**: `tests/unit/test-provider-cutover.sh` (clean-pass, injected-new-gh fail, allowlisted-file pass, consuming-boundary catch, duplicate-bump fail, removed-site fail, stale-baseline fail, missing-provider fail). `tests/unit/test-provider-caps-branches.sh` (every caps=0 branch reachable + the deferred caps asserted as not-yet-wired).
+
+**Cross-references**:
+- [`provider-spec.md`](provider-spec.md) §9 — references this invariant as the cutover/anti-regression guard.
+- [INV-87](#inv-87-provider-dispatch-is-spec-defined--callers-route-every-issuecode-host-op-through-itp_chp_-never-a-raw-gh-in-the-caller-layer) — the verb-dispatch contract this guard enforces.
+- [INV-89](#inv-89-every-machine-marker--agent-and-dispatcher-inv-18inv-39-included--is-posted-only-through-the-declared-marker_channel-the-read-side-capture-regex-branches-on-channel) — the marker choke-point ([INV-18]/[INV-39] markers via `itp_post_comment`).
+- [INV-80](#inv-80-the-label-state-machine-is-a-ci-checked-executable-spec--the-mermaid-diagram-is-generated-undeclared-label-transitions-fail-ci) — the sibling `check-spec-drift.sh` discovered-vs-declared (C.4) reconciliation pattern.
+
 ## Adding a new invariant
 
 When fixing a pipeline bug, after locating the bug on the state machine + flow docs:

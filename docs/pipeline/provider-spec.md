@@ -646,6 +646,57 @@ config namespace (§3.4).
 
 ---
 
+## 9. Cutover guard — anti-regression for the sole choke-point ([INV-91])
+
+The "provider-dispatch is spec-defined" property ([INV-87]) — every issue/code-host
+op routes through an `itp_*`/`chp_*` verb, the host-I/O leaves live ONLY under
+`scripts/providers/` — is only durable if a CI gate stops a NEW raw `gh` from
+re-entering the provider-neutral caller layer (`lib-dispatch.sh`,
+`autonomous-dev.sh`, `autonomous-review.sh`, every `lib-review-*.sh`). That gate
+is **`check-provider-cutover.sh`** ([INV-91], issue #286) — a credential-free
+grep/jq lint modeled on `check-spec-drift.sh`:
+
+- **Scan** the caller layer for a raw `gh ` token via the RE2-safe consuming
+  boundary `(^|[^A-Za-z_-])gh ` (never a look-behind — `gh --jq` runs Go RE2;
+  see `invariants.md`).
+- **Allowlist** (declarative, in the script): the auth/transport wrappers
+  `scripts/gh`, `gh-with-token-refresh.sh`, `gh-app-token.sh`, `gh-as-user.sh`,
+  `dispatch-remote-aws-ssm.sh` (§8: GitHub auth is unchanged, NOT refactored) +
+  the `providers/` tree (the legitimate home of host I/O).
+- **Baseline-anchored** (NOT a from-zero ban yet): the depends-on issues
+  (#281–#285) migrated only the §3.1/§3.2 verb leaves, so the caller layer still
+  carries the surviving raw-gh the first deliverable did not migrate. Those are
+  frozen in `providers/cutover-baseline.json`, keyed by `(file, trimmed-content)`
+  COUNT (the same discovered-vs-declared reconciliation as `check-spec-drift.sh`
+  Check C.4). The guard PASSES today, FAILs any NEW raw-gh, FAILs a DUPLICATE of
+  a baselined line, and FAILs a REMOVED baselined site — so a migration PR that
+  pulls a `gh` leaf behind a verb MUST shrink the baseline in the same PR. As the
+  survivors migrate, the baseline shrinks to empty and the guard becomes the
+  strict from-zero ban.
+
+The guard explicitly covers the dispatcher's own marker writers
+`post_dispatch_token` ([INV-18]) and `_dep_block_comment` ([INV-39]), which post
+through `itp_post_comment` (the sole marker choke-point [M6], [INV-89]).
+
+**Caps-branch coverage gate (dead-code guard for `caps=0` branches).** The §7.4
+fake degraded-capability fixture provider (`tests/unit/fixtures/provider-degraded/`,
+selected through the public seam `ISSUE_PROVIDER=degraded` / `CODE_HOST=degraded`
++ `AUTONOMOUS_PROVIDERS_DIR`) is promoted to a coverage gate
+(`tests/unit/test-provider-caps-branches.sh`): for every `caps=0`/degraded flag
+that has a LIVE caller branch on this GitHub-only HEAD (7 of 13) it drives the
+degraded value through the seam and asserts the branch is REACHABLE; for the
+remaining caps whose branch is not yet wired (they land with the GitLab/Asana
+PRs, §4.3) it asserts NO caller branch keys on the cap yet — a structural
+"nothing to cover" that a future wiring PR is FORCED to flip, so no `caps=0`
+branch can ever ship as dead untested code.
+
+CI wiring: the lint runs in the credential-free `spec-drift` job; the script + the
+two tests are in the hermetic `shellcheck -S error` list (sibling to
+`check-spec-drift.sh`); the tests auto-discover via the `tests/unit/test-*.sh`
+glob.
+
+---
+
 ## Mapping appendix — verb↔current-function
 
 How today's behavior maps onto the contract. Each `~18` moved function is tagged
@@ -695,6 +746,7 @@ becomes a verb, the surrounding INV-coupled logic stays caller-side.
 - [`invariants.md` § INV-88](invariants.md#inv-88-the-github-caps-manifests-describe-current-behavior-exactly-the-no-behavior-change-anchor--honestly-declared-not-all-ones) — GitHub `.caps` = today's behavior (the no-behavior-change anchor).
 - [`invariants.md` § INV-89](invariants.md#inv-89-every-machine-marker--agent-and-dispatcher-inv-18inv-39-included--is-posted-only-through-the-declared-marker_channel-the-read-side-capture-regex-branches-on-channel) — the `marker_channel` pin.
 - [`invariants.md` § INV-90](invariants.md#inv-90-the-normalized-issue-comment-shape-is-id-author-body-createdat-sorted-ascending-by-createdat-with-author-a-machine-handle-for-exact-equality) — the normalized comment shape.
+- [`invariants.md` § INV-91](invariants.md#inv-91-the-provider-neutral-caller-layer-routes-all-host-io-through-itp_chp_-verbs--a-new-raw-gh-outside-providers-is-a-ci-failing-cutover-regression-baseline-anchored) — the cutover guard (`check-provider-cutover.sh`, §9 above) that keeps the caller layer raw-gh-free.
 - [`invariants.md` § INV-78](invariants.md#inv-78-review-verdicts-resolve-from-a-typed-artifact-file-first-comment-scraping-is-an-explicitly-logged-fallback-a-malformed-artifact-is-loud-never-a-silent-absent) — the verdict-artifact channel (issue #279 cites it as INV-77; renumbered to INV-78) reconciled above.
 - [`invariants.md` § INV-79](invariants.md#inv-79-in-app-mode-the-agent-process-gets-only-a-scoped-token-the-wrapper-keeps-full-write-and-is-the-sole-approvemergepr-create-path) / [INV-83](invariants.md#inv-83-cross-repo-dependency-lookups-use-a-per-dep-repo-scoped-read-token-the-app-must-be-installed-on-the-dep-repo) — the per-seam auth cut (CHP-side / ITP-side).
 - [`adapter-spec.md`](adapter-spec.md) — the agent-CLI adapter spec this provider spec mirrors ([INV-66]/[INV-75]).

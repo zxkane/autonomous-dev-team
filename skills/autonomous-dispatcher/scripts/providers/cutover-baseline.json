@@ -1,0 +1,250 @@
+{
+  "_comment": "Baseline of raw-gh sites surviving in the provider-neutral caller layer after the partial pluggable-providers migration (#281-#285). check-provider-cutover.sh ([INV-91]) FAILs any caller-layer gh NOT accounted for here. Regenerate with: bash check-provider-cutover.sh --generate-baseline. Migration PRs that remove a caller-side gh leaf MUST shrink this manifest in the same PR; the guard becomes a strict from-zero ban once this is empty. The file-allowlist (scripts/gh, gh-with-token-refresh.sh, gh-app-token.sh, gh-as-user.sh, dispatch-remote-aws-ssm.sh) lives in the script, not here.",
+  "surviving_sites": [
+    {
+      "count": 1,
+      "file": "autonomous-dev.sh",
+      "content": "1. Read the issue body to understand the full requirements: \\`gh issue view ${ISSUE_NUMBER} --repo ${REPO} --json body -q '.body'\\`"
+    },
+    {
+      "count": 1,
+      "file": "autonomous-dev.sh",
+      "content": "AUTO_MERGE_FAILURE_MARKER=$(gh api \"repos/${REPO}/issues/${PR_NUM}/comments\" \\"
+    },
+    {
+      "count": 1,
+      "file": "autonomous-dev.sh",
+      "content": "ISSUE_BODY=$(gh issue view \"$ISSUE_NUMBER\" --repo \"$REPO\" --json title,body,comments -q '.')"
+    },
+    {
+      "count": 1,
+      "file": "autonomous-dev.sh",
+      "content": "PR_REVIEW_COMMENTS=$(gh api \"repos/${REPO}/pulls/${PR_NUM}/comments\" \\"
+    },
+    {
+      "count": 1,
+      "file": "autonomous-dev.sh",
+      "content": "REVIEW_COMMENTS=$(gh issue view \"$ISSUE_NUMBER\" --repo \"$REPO\" --json comments \\"
+    },
+    {
+      "count": 1,
+      "file": "autonomous-dev.sh",
+      "content": "The WRAPPER will run \\`gh pr create --head <your-branch>\\` for you after you finish."
+    },
+    {
+      "count": 1,
+      "file": "autonomous-dev.sh",
+      "content": "\\`gh pr create\\` — instead WRITE the PR to \\`\\$(printenv AGENT_PR_CREATE_FILE)\\`"
+    },
+    {
+      "count": 1,
+      "file": "autonomous-dev.sh",
+      "content": "ahead of the base branch, but was interrupted before \\`gh pr create\\` completed."
+    },
+    {
+      "count": 1,
+      "file": "autonomous-dev.sh",
+      "content": "approve or merge PRs, and it cannot run \\`gh pr create\\`). To open the PR, do NOT"
+    },
+    {
+      "count": 4,
+      "file": "autonomous-dev.sh",
+      "content": "gh issue edit \"$ISSUE_NUMBER\" --repo \"$REPO\" \\"
+    },
+    {
+      "count": 1,
+      "file": "autonomous-dev.sh",
+      "content": "if ! findings_at=$(gh issue view \"$issue_num\" --repo \"$REPO\" --json comments \\"
+    },
+    {
+      "count": 1,
+      "file": "autonomous-dev.sh",
+      "content": "if [[ -n \"${ISSUE_NUMBER:-}\" ]] && command -v gh &>/dev/null; then"
+    },
+    {
+      "count": 1,
+      "file": "autonomous-dev.sh",
+      "content": "log \"Exiting with code $exit_code (agent never ran, no ISSUE_NUMBER or gh — silent).\""
+    },
+    {
+      "count": 1,
+      "file": "autonomous-dev.sh",
+      "content": "means the review verdict was PASS but \\`gh pr merge\\` failed (likely a merge"
+    },
+    {
+      "count": 1,
+      "file": "autonomous-dev.sh",
+      "content": "open_pr_step=\"3. Go STRAIGHT to the open-PR step: run \\`gh pr create\\` with a generated"
+    },
+    {
+      "count": 1,
+      "file": "autonomous-dev.sh",
+      "content": "run \\`gh pr create\\`. Instead, AFTER you have pushed your feature branch with"
+    },
+    {
+      "count": 1,
+      "file": "autonomous-dev.sh",
+      "content": "verdict was PASS but \\`gh pr merge\\` failed). Rebase the PR branch onto"
+    },
+    {
+      "count": 1,
+      "file": "autonomous-review.sh",
+      "content": "1. Check: \\`gh pr view ${PR_NUMBER} --repo ${REPO} --json mergeable -q '.mergeable'\\`"
+    },
+    {
+      "count": 1,
+      "file": "autonomous-review.sh",
+      "content": "3. $(if [[ \"${_agent_name}\" == \"codex\" ]]; then echo \"Review the PR diff \\`codex review\\` already scoped for you (its merge-target diff) — do NOT re-run \\`git diff\\`/\\`gh pr diff\\` to reconstruct it (INV-62)\"; else echo \"Read the PR diff to verify implementation\"; fi)"
+    },
+    {
+      "count": 1,
+      "file": "autonomous-review.sh",
+      "content": "5. Check that CI checks are passing: gh pr checks ${PR_NUMBER}"
+    },
+    {
+      "count": 1,
+      "file": "autonomous-review.sh",
+      "content": "Do **NOT** use a bare \\`gh issue comment\\` for the verdict — a hand-rolled"
+    },
+    {
+      "count": 1,
+      "file": "autonomous-review.sh",
+      "content": "HAS_NO_AUTO_CLOSE=$(gh issue view \"$ISSUE_NUMBER\" --repo \"$REPO\" --json labels \\"
+    },
+    {
+      "count": 1,
+      "file": "autonomous-review.sh",
+      "content": "[[ \"$BOT_LOGIN\" == \"null\" ]] && log \"WARNING: gh api user returned null login; falling back to session-id binding\""
+    },
+    {
+      "count": 1,
+      "file": "autonomous-review.sh",
+      "content": "\\`gh pr diff\\` to reconstruct the review range; review the diff codex gave you."
+    },
+    {
+      "count": 1,
+      "file": "autonomous-review.sh",
+      "content": "\\`gh pr view\\` / \\`gh pr checks\\`):"
+    },
+    {
+      "count": 1,
+      "file": "autonomous-review.sh",
+      "content": "_bot_login_raw=$(gh api user --jq '.login' 2>&1) && BOT_LOGIN=\"$_bot_login_raw\" || {"
+    },
+    {
+      "count": 1,
+      "file": "autonomous-review.sh",
+      "content": "below — do NOT hand-roll a bare \\`gh issue comment\\` for the verdict): a FAIL when"
+    },
+    {
+      "count": 1,
+      "file": "autonomous-review.sh",
+      "content": "gh issue close \"$ISSUE_NUMBER\" --repo \"$REPO\" --reason completed 2>/dev/null \\"
+    },
+    {
+      "count": 14,
+      "file": "autonomous-review.sh",
+      "content": "gh issue edit \"$ISSUE_NUMBER\" --repo \"$REPO\" \\"
+    },
+    {
+      "count": 1,
+      "file": "autonomous-review.sh",
+      "content": "gh issue view ${ISSUE_NUMBER} --repo ${REPO} --json comments \\\\"
+    },
+    {
+      "count": 1,
+      "file": "autonomous-review.sh",
+      "content": "gh pr checks ${PR_NUMBER} --watch --interval 30"
+    },
+    {
+      "count": 1,
+      "file": "autonomous-review.sh",
+      "content": "gh pr comment \"$PR_NUMBER\" --repo \"$REPO\" \\"
+    },
+    {
+      "count": 2,
+      "file": "autonomous-review.sh",
+      "content": "gh pr view ${PR_NUMBER} --repo ${REPO} --json comments \\\\"
+    },
+    {
+      "count": 1,
+      "file": "autonomous-review.sh",
+      "content": "if ! _comment_err=$(gh pr comment \"$PR_NUMBER\" --repo \"$REPO\" \\"
+    },
+    {
+      "count": 1,
+      "file": "autonomous-review.sh",
+      "content": "if ! _edit_err=$(gh issue edit \"$ISSUE_NUMBER\" --repo \"$REPO\" \\"
+    },
+    {
+      "count": 1,
+      "file": "autonomous-review.sh",
+      "content": "log \"WARNING: gh api user failed; verdict detector falling back to session-id binding. stderr (truncated): ${_bot_login_raw:0:200}\""
+    },
+    {
+      "count": 1,
+      "file": "lib-dispatch.sh",
+      "content": "body=$(gh issue view \"$issue_num\" --repo \"$REPO\" --json body -q '.body')"
+    },
+    {
+      "count": 1,
+      "file": "lib-dispatch.sh",
+      "content": "gh \"${args[@]}\" 2>/dev/null || true"
+    },
+    {
+      "count": 3,
+      "file": "lib-review-bots.sh",
+      "content": "COUNT=\\$(gh api repos/${repo}/pulls/${pr_number}/reviews \\\\"
+    },
+    {
+      "count": 1,
+      "file": "lib-review-bots.sh",
+      "content": "count=$(gh api \"repos/${repo}/pulls/${pr_number}/reviews\" --paginate \\"
+    },
+    {
+      "count": 1,
+      "file": "lib-review-e2e.sh",
+      "content": "_body=$(gh api \"repos/${REPO_OWNER}/${REPO_NAME}/issues/comments/${_comment_id}\" \\"
+    },
+    {
+      "count": 1,
+      "file": "lib-review-e2e.sh",
+      "content": "_body=$(gh pr view \"$PR_NUMBER\" --repo \"$REPO\" --json comments \\"
+    },
+    {
+      "count": 1,
+      "file": "lib-review-e2e.sh",
+      "content": "_comment_id=$(gh api \"repos/${REPO_OWNER}/${REPO_NAME}/issues/${PR_NUMBER}/comments\" --paginate \\"
+    },
+    {
+      "count": 1,
+      "file": "lib-review-e2e.sh",
+      "content": "_existing=$(gh api \"repos/${REPO_OWNER}/${REPO_NAME}/issues/${PR_NUMBER}/comments\" --paginate \\"
+    },
+    {
+      "count": 1,
+      "file": "lib-review-e2e.sh",
+      "content": "gh pr comment \"$PR_NUMBER\" --repo \"$REPO\" --body \"$evidence\" 2>/dev/null || rc=$?"
+    },
+    {
+      "count": 3,
+      "file": "lib-review-e2e.sh",
+      "content": "gh pr comment \"$PR_NUMBER\" --repo \"$REPO\" \\"
+    },
+    {
+      "count": 1,
+      "file": "lib-review-e2e.sh",
+      "content": "if gh pr comment \"$PR_NUMBER\" --repo \"$REPO\" --body \"$body\" >/dev/null 2>&1; then"
+    },
+    {
+      "count": 1,
+      "file": "lib-review-poll.sh",
+      "content": "gh issue view \"$ISSUE_NUMBER\" --repo \"$REPO\" --json comments \\"
+    },
+    {
+      "count": 1,
+      "file": "lib-review-postfail.sh",
+      "content": "printf 'post-failed (verdict comment post failed; gh rc %s — transient GitHub/API or token error)\\n' \"$rc\""
+    }
+  ]
+}
