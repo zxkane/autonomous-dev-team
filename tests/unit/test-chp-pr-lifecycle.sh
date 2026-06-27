@@ -328,12 +328,45 @@ fi
 # correctness is the no-behavior-change anchor for GitHub's cap=1 path).
 echo "=== caps=0 caller branches present in autonomous-review.sh (§4.2) ==="
 REVIEW_WRAPPER="$SCRIPTS/autonomous-review.sh"
+# merge_closes_issue=0 → the wrapper PREFERS itp_transition_state (guarded on
+# `declare -F`, so it engages the moment itp-writes wires the seam) and FALLS BACK
+# to the INV-33-sanctioned `gh issue close` placeholder while the ITP verb is still
+# a scaffold (#282 review round 6 [P1] #2 — route through the ITP seam, not a raw
+# GitHub-only close).
 if grep -qE 'chp_caps merge_closes_issue' "$REVIEW_WRAPPER" \
+   && grep -qE 'declare -F itp_transition_state' "$REVIEW_WRAPPER" \
+   && grep -qE 'itp_transition_state "\$ISSUE_NUMBER"' "$REVIEW_WRAPPER" \
    && grep -qE 'gh issue close .*ISSUE_NUMBER' "$REVIEW_WRAPPER"; then
-  echo -e "  ${GREEN}PASS${NC}: TC-CHP-CAP-MCI0-BRANCH merge path closes the issue when merge_closes_issue!=1"; PASS=$((PASS+1))
+  echo -e "  ${GREEN}PASS${NC}: TC-CHP-CAP-MCI0-BRANCH merge_closes_issue=0 prefers itp_transition_state, falls back to gh issue close"; PASS=$((PASS+1))
 else
-  echo -e "  ${RED}FAIL${NC}: TC-CHP-CAP-MCI0-BRANCH no merge_closes_issue=0 post-merge transition in the wrapper"; FAIL=$((FAIL+1))
+  echo -e "  ${RED}FAIL${NC}: TC-CHP-CAP-MCI0-BRANCH merge_closes_issue=0 transition not routed through the ITP seam"; FAIL=$((FAIL+1))
 fi
+# Behavioral: the branch prefers the verb when defined, else the gh-close fallback.
+mci0_route=$(
+  env -i PATH="/usr/local/bin:/usr/bin:/bin" HOME="$HOME" REPO=o/r bash -c '
+    set -euo pipefail; log(){ :; }
+    chp_caps(){ [[ "$1" == merge_closes_issue ]] && echo 0 || echo 1; }
+    itp_transition_state(){ echo "VERB:$*"; }
+    gh(){ echo "GHCLOSE:$*"; }
+    ISSUE_NUMBER=282; REPO=o/r; _merge_closes=1
+    declare -F chp_caps >/dev/null 2>&1 && _merge_closes="$(chp_caps merge_closes_issue 2>/dev/null || echo 1)"
+    if [[ "$_merge_closes" != "1" ]]; then
+      if declare -F itp_transition_state >/dev/null 2>&1; then itp_transition_state "$ISSUE_NUMBER" reviewing approved; else gh issue close "$ISSUE_NUMBER"; fi
+    fi'
+)
+assert_eq "TC-CHP-CAP-MCI0-VERB mci=0 + itp_transition_state defined → verb (no gh issue close)" "VERB:282 reviewing approved" "$mci0_route"
+mci0_fallback=$(
+  env -i PATH="/usr/local/bin:/usr/bin:/bin" HOME="$HOME" REPO=o/r bash -c '
+    set -euo pipefail; log(){ :; }
+    chp_caps(){ [[ "$1" == merge_closes_issue ]] && echo 0 || echo 1; }
+    gh(){ echo "GHCLOSE:$*"; }
+    ISSUE_NUMBER=282; REPO=o/r; _merge_closes=1
+    declare -F chp_caps >/dev/null 2>&1 && _merge_closes="$(chp_caps merge_closes_issue 2>/dev/null || echo 1)"
+    if [[ "$_merge_closes" != "1" ]]; then
+      if declare -F itp_transition_state >/dev/null 2>&1; then itp_transition_state "$ISSUE_NUMBER" reviewing approved; else gh issue close "$ISSUE_NUMBER"; fi
+    fi'
+)
+assert_contains "TC-CHP-CAP-MCI0-FALLBACK mci=0 + verb absent → gh issue close placeholder" "GHCLOSE:issue close 282" "$mci0_fallback"
 if grep -qE '_review_bots_cap' "$REVIEW_WRAPPER"; then
   echo -e "  ${GREEN}PASS${NC}: TC-CHP-CAP-BOTS0-GATE mandatory-bot-review wait is gated on review_bots==1"; PASS=$((PASS+1))
 else

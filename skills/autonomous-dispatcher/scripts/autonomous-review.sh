@@ -3431,18 +3431,33 @@ if [[ "$PASSED_VERDICT" == "true" ]]; then
       # else the relabeled issue lingers OPEN forever. GitHub (merge_closes_issue=1)
       # takes the unchanged no-op path (INV-33: no explicit close). The cap reader
       # degrades to "1" when chp_caps is unavailable, so the legacy GitHub path is
-      # intact under any lib-load failure. (When itp_transition_state — the ITP
-      # terminal-state verb — lands in the downstream itp-writes issue, this raw
-      # `gh issue close` becomes that verb call; for now it is the GitHub-rendered
-      # terminal transition.)
+      # intact under any lib-load failure.
+      #
+      # Transition routing ([M4], #282 review round 6 [P1] #2): the terminal
+      # transition is an ITP-seam concern (`itp_transition_state`). That verb is the
+      # downstream itp-writes issue's to migrate (#282 Out-of-Scope: "NO ITP
+      # verbs … itp_transition_state … those are itp-writes"), and the review
+      # wrapper does not yet source the ITP seam — so PREFER the verb when it is
+      # actually defined (guard on `declare -F itp_transition_state`, NOT a blind
+      # call: a bodyless shim would dispatch to an undefined leaf and abort under
+      # set -e), and otherwise fall back to `gh issue close` — the GitHub-rendered
+      # terminal transition INV-33 sanctions as the single interim close. When
+      # itp-writes lands (and wires the seam into this wrapper), the verb path
+      # engages automatically with no further change here.
       _merge_closes=1
       if declare -F chp_caps >/dev/null 2>&1; then
         _merge_closes="$(chp_caps merge_closes_issue 2>/dev/null || echo 1)"
       fi
       if [[ "$_merge_closes" != "1" ]]; then
-        log "code host merge_closes_issue=0 — closing issue #${ISSUE_NUMBER} explicitly (merge does not auto-transition it)."
-        gh issue close "$ISSUE_NUMBER" --repo "$REPO" --reason completed 2>/dev/null \
-          || log "WARNING: explicit issue close failed for #${ISSUE_NUMBER} (merge_closes_issue=0 backend) — issue may remain open."
+        if declare -F itp_transition_state >/dev/null 2>&1; then
+          log "code host merge_closes_issue=0 — transitioning issue #${ISSUE_NUMBER} to its terminal state via itp_transition_state (merge does not auto-transition it)."
+          itp_transition_state "$ISSUE_NUMBER" "reviewing" "approved" 2>/dev/null \
+            || log "WARNING: itp_transition_state failed for #${ISSUE_NUMBER} (merge_closes_issue=0 backend) — issue may remain in a non-terminal state."
+        else
+          log "code host merge_closes_issue=0 — closing issue #${ISSUE_NUMBER} explicitly (merge does not auto-transition it; itp_transition_state not yet migrated → GitHub-rendered close)."
+          gh issue close "$ISSUE_NUMBER" --repo "$REPO" --reason completed 2>/dev/null \
+            || log "WARNING: explicit issue close failed for #${ISSUE_NUMBER} (merge_closes_issue=0 backend) — issue may remain open."
+        fi
       fi
 
       log "Issue #${ISSUE_NUMBER} marked approved; auto-close handled by GitHub via 'Closes #N' resolution (merge_closes_issue=${_merge_closes})."
