@@ -51,6 +51,17 @@ caller layer outside `scripts/providers/`.
 > - The detector now greps with **`-a`** (force text): a script carrying UTF-8
 >   punctuation can be misclassified "binary" by grep under some locales, silently
 >   suppressing matches — a latent hole where a real raw-gh could slip the scan.
+>
+> **Revision (later review round, codex — shallow-CI Check 4 skip hole).**
+> - Check 4's graceful skip on an unresolvable trusted ref disabled it in the one
+>   place the guard runs: the hermetic-unit job uses a depth-1 `actions/checkout`
+>   (no `origin/main`), so a PR could add a raw-gh + regenerate the baseline and
+>   pass green (reproduced in a shallow clone). Added **`--require-trusted-ref`**
+>   (env `CUTOVER_REQUIRE_TRUSTED_REF=1`): an unresolvable trusted ref becomes a
+>   hard FAILURE, not a skip. Default stays permissive (fork / ad-hoc runs); the
+>   unit test drives the guard with it ON against a self-contained git fixture
+>   (TC-CUTOVER-019), so monotonicity is enforced regardless of checkout depth, and
+>   the operator-applied ci.yml step uses `fetch-depth: 0` + `--require-trusted-ref`.
 
 ## Reality check that shapes this design (the load-bearing decision)
 

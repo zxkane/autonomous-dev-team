@@ -68,6 +68,13 @@
 #                                             trusted copy at git REF (default
 #                                             origin/main); FAIL if it GREW. May
 #                                             only SHRINK. Skips off-git/missing-ref.
+#   check-provider-cutover.sh --require-trusted-ref
+#                                             Make Check 4 FAIL (not skip) when the
+#                                             trusted ref is unresolvable. Closes the
+#                                             shallow-CI hole: the unit test runs the
+#                                             guard with this ON (after making the
+#                                             ref resolvable) so monotonicity is
+#                                             enforced regardless of checkout depth.
 #
 # Exit: 0 all checks pass; 1 a drift/integrity failure; 2 usage; 3 env.
 
@@ -88,6 +95,15 @@ TRUSTED_REF="${CUTOVER_TRUSTED_REF:-origin/main}"
 # copy via `git show <ref>:<path>`. Defaults to the in-repo location; overridable
 # so a test can point at a scratch ref. Empty => derive from BASELINE at run time.
 TRUSTED_BASELINE_PATH="${CUTOVER_TRUSTED_BASELINE_PATH:-skills/autonomous-dispatcher/scripts/providers/cutover-baseline.json}"
+# STRICT monotonicity: when set, a Check 4 that cannot resolve the trusted ref
+# (no git / shallow checkout / ref absent) is a FAILURE, not a graceful skip. This
+# closes the shallow-CI hole (#286 review): the hermetic job runs the guard via the
+# test glob under a depth-1 checkout where origin/main is absent, so a permissive
+# skip there would let a self-ratifying PR pass green. The unit test drives the
+# guard with this ON (after making a trusted ref resolvable), so the monotonicity
+# property is enforced regardless of CI checkout depth. Default OFF so a fork PR /
+# ad-hoc run without origin/main still works (the test, not the bare run, is the gate).
+REQUIRE_TRUSTED_REF="${CUTOVER_REQUIRE_TRUSTED_REF:-0}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -96,7 +112,8 @@ while [ $# -gt 0 ]; do
     --generate-baseline)  GENERATE=1 ;;
     --trusted-ref)        TRUSTED_REF="$2"; shift ;;
     --trusted-baseline-path) TRUSTED_BASELINE_PATH="$2"; shift ;;
-    -h|--help)            sed -n '2,72p' "$0"; exit 0 ;;
+    --require-trusted-ref) REQUIRE_TRUSTED_REF=1 ;;
+    -h|--help)            sed -n '2,79p' "$0"; exit 0 ;;
     *) echo "check-provider-cutover.sh: unknown argument: $1" >&2; exit 2 ;;
   esac
   shift
@@ -346,10 +363,22 @@ done < <(jq -r '.surviving_sites[].file' "$BASELINE" | sort -u)
 # though Check 1 was satisfied by the regenerated manifest.
 # ---------------------------------------------------------------------------
 echo "=== Check 4: baseline monotonicity vs trusted ref ($TRUSTED_REF) — a PR may only SHRINK the baseline ==="
+# When --require-trusted-ref / CUTOVER_REQUIRE_TRUSTED_REF is set, an unresolvable
+# trusted ref is a FAILURE (the shallow-CI hole, #286 review): a permissive skip in
+# the depth-1 hermetic job would let a self-ratifying PR pass green. Default OFF →
+# graceful skip so a fork / no-origin/main run still works; the unit test runs the
+# guard with it ON after making a trusted ref resolvable.
+_no_trusted_ref() {  # $1 = human reason
+  if [ "$REQUIRE_TRUSTED_REF" = "1" ]; then
+    fail "monotonicity check REQUIRED but $1. With --require-trusted-ref a missing trusted baseline is a failure, not a skip — otherwise a shallow CI checkout (no origin/main) lets a PR add a raw-gh + regenerate the baseline and still pass (#286). Deepen the checkout (fetch-depth: 0) or fetch '$TRUSTED_REF', or run without --require-trusted-ref."
+  else
+    info "$1 — skipping monotonicity check (Check 1 still anchors the tree to the in-repo baseline; run with --require-trusted-ref to make this a hard failure)"
+  fi
+}
 if ! command -v git >/dev/null 2>&1 || ! git rev-parse --git-dir >/dev/null 2>&1; then
-  info "not a git work tree (or git absent) — skipping monotonicity check (Check 1 still anchors the tree to the in-repo baseline)"
+  _no_trusted_ref "not a git work tree (or git absent)"
 elif ! git rev-parse --verify --quiet "$TRUSTED_REF" >/dev/null 2>&1; then
-  info "trusted ref '$TRUSTED_REF' not resolvable here (shallow/forked checkout) — skipping monotonicity check; the merge gate re-runs it with origin/main present"
+  _no_trusted_ref "trusted ref '$TRUSTED_REF' not resolvable here (shallow/forked checkout)"
 else
   TRUSTED_TMP="$(mktemp)"
   if git show "${TRUSTED_REF}:${TRUSTED_BASELINE_PATH}" >"$TRUSTED_TMP" 2>/dev/null && jq -e . "$TRUSTED_TMP" >/dev/null 2>&1; then

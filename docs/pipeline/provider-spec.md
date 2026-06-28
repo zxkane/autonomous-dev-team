@@ -695,9 +695,17 @@ grep/jq lint modeled on `check-spec-drift.sh`:
   count — so a PR can only ever SHRINK the baseline; ratifying a new site is
   rejected even when the in-PR reconcile is satisfied. Off-git, or when the ref /
   trusted baseline is unresolvable (shallow / fork checkout, or the first PR that
-  introduces the baseline), this check SKIPS gracefully (the merge gate re-runs it
-  with `origin/main`). The scan greps with `-a` (force text) so a script carrying
-  UTF-8 punctuation is never misclassified "binary" and silently skipped.
+  introduces the baseline), this check SKIPS gracefully **by default** — BUT under
+  `--require-trusted-ref` (env `CUTOVER_REQUIRE_TRUSTED_REF=1`) an unresolvable ref
+  is a hard FAILURE, not a skip. That strict mode closes the shallow-CI hole (#286
+  review): the hermetic job runs the guard via the test glob under a depth-1
+  checkout where `origin/main` is absent, so a permissive skip there would let a
+  self-ratifying PR pass green. The unit test drives the guard with
+  `--require-trusted-ref` against a self-contained git fixture (so monotonicity is
+  enforced regardless of checkout depth), and the operator-applied ci.yml step uses
+  `fetch-depth: 0` + `--require-trusted-ref` so the dedicated step enforces it too.
+  The scan greps with `-a` (force text) so a script carrying UTF-8 punctuation is
+  never misclassified "binary" and silently skipped.
 
 The guard explicitly covers the dispatcher's own marker writers
 `post_dispatch_token` ([INV-18]) and `_dep_block_comment` ([INV-39]), which post
@@ -737,14 +745,22 @@ CI wiring: the intended `.github/workflows/ci.yml` change adds a dedicated
 `check-provider-cutover.sh` step to the credential-free `spec-drift` job (sibling
 to `check-spec-drift.sh`) and adds `check-provider-cutover.sh` +
 `tests/unit/test-provider-cutover.sh` + `tests/unit/test-provider-caps-branches.sh`
-to the hermetic `shellcheck -S error` file list. **The dev-side scoped GitHub-App
-token CANNOT push `.github/workflows/`** ([INV-83]: a `git push` of the workflow
-hunk is rejected `without 'workflows' permission`), so the exact 2-hunk diff ships
-in the #286 PR body for a **maintainer to apply** — it is a required part of the
-deliverable, not optional polish. Until then the guard still executes in CI
-through the existing `tests/unit/test-*.sh` loop: `test-provider-cutover.sh`
-invokes `check-provider-cutover.sh` against the real repo, so a regression goes
-red in the hermetic-unit job even before the dedicated step lands.
+to the hermetic `shellcheck -S error` file list. **For Check 4 (monotonicity) to
+run in that dedicated step, the step's `actions/checkout` MUST use `fetch-depth: 0`
+(so `origin/main` resolves) and invoke the guard with `--require-trusted-ref`** —
+otherwise the default depth-1 checkout has no `origin/main` and Check 4 would
+silently skip, letting a self-ratifying PR pass (the #286 shallow-CI hole). **The
+dev-side scoped GitHub-App token CANNOT push `.github/workflows/`** ([INV-83]: a
+`git push` of the workflow hunk is rejected `without 'workflows' permission`), so
+the exact diff (the `fetch-depth: 0` + `--require-trusted-ref` step + the
+ShellCheck-list entries) ships in the #286 PR body for a **maintainer to apply** —
+it is a required part of the deliverable, not optional polish. Until then the guard
+still executes in CI through the existing `tests/unit/test-*.sh` loop:
+`test-provider-cutover.sh` invokes `check-provider-cutover.sh` against the real repo
+(Checks 1-3), AND drives Check 4 / `--require-trusted-ref` against a self-contained
+git fixture (TC-CUTOVER-017/019), so the monotonicity property is enforced
+regardless of the hermetic job's checkout depth even before the dedicated step
+lands.
 
 ---
 

@@ -351,6 +351,46 @@ else
   ok "git unavailable — TC-CUTOVER-018 skipped"
 fi
 
+# ---------------------------------------------------------------------------
+echo "=== TC-CUTOVER-019: --require-trusted-ref closes the shallow-CI skip hole ==="
+# ---------------------------------------------------------------------------
+# The #286 review hole: the hermetic-unit job runs the guard via the test glob under
+# a DEPTH-1 checkout where origin/main is absent, so Check 4 SKIPS and a PR that adds
+# a raw-gh + regenerates the baseline passes green. --require-trusted-ref makes an
+# unresolvable trusted ref a FAILURE instead of a skip. Two assertions:
+#   (a) ref PRESENT + unchanged baseline → PASS even under strict (no false positive);
+#   (b) ref ABSENT under strict → FAIL (the shallow hole is now caught, not skipped).
+if command -v git >/dev/null 2>&1; then
+  S="$(fresh_scratch 019)"
+  GROOT="$WORK/gitrepo019"
+  rm -rf "$GROOT"; mkdir -p "$GROOT/skills/autonomous-dispatcher/scripts"
+  cp -rL "$S"/. "$GROOT/skills/autonomous-dispatcher/scripts/" 2>/dev/null
+  ( cd "$GROOT" && git init -q && git config user.email t@t && git config user.name t \
+      && git add -A >/dev/null 2>&1 && git commit -qm base >/dev/null 2>&1 && git branch trusted-main )
+  GS="$GROOT/skills/autonomous-dispatcher/scripts"
+  # (a) strict + ref present + unchanged baseline → PASS
+  if ( cd "$GROOT" && bash "$CHECK" --scripts-dir "$GS" --baseline "$GS/providers/cutover-baseline.json" --trusted-ref trusted-main --require-trusted-ref >/dev/null 2>&1 ); then
+    ok "strict mode + resolvable trusted ref + unchanged baseline → PASS (no false positive)"
+  else
+    bad "strict mode false-positived with the trusted ref present"
+  fi
+  # (b) strict + UNRESOLVABLE ref → FAIL (the shallow-CI hole, now caught)
+  out="$( cd "$GROOT" && bash "$CHECK" --scripts-dir "$GS" --baseline "$GS/providers/cutover-baseline.json" --trusted-ref no-such-ref --require-trusted-ref 2>&1 )"; rc=$?
+  if [[ "$rc" -ne 0 ]] && grep -q 'monotonicity check REQUIRED' <<<"$out"; then
+    ok "strict mode + UNRESOLVABLE trusted ref → FAIL (shallow-CI skip hole closed)"
+  else
+    bad "strict mode did NOT fail on a missing trusted ref (rc=$rc): ${out:0:200}"
+  fi
+  # Sanity: default (non-strict) mode still SKIPS gracefully on the same missing ref.
+  if ( cd "$GROOT" && bash "$CHECK" --scripts-dir "$GS" --baseline "$GS/providers/cutover-baseline.json" --trusted-ref no-such-ref >/dev/null 2>&1 ); then
+    ok "non-strict mode still skips gracefully on a missing ref (fork/ad-hoc runs unaffected)"
+  else
+    bad "non-strict mode unexpectedly failed on a missing ref (the opt-in should be required)"
+  fi
+else
+  ok "git unavailable — TC-CUTOVER-019 skipped"
+fi
+
 # ===========================================================================
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="

@@ -28,6 +28,7 @@ Drives `check-provider-cutover.sh` against scratch copies via the
 | TC-CUTOVER-016 | **(R2-F1)** Inject a NEW `gh` into a tracked-but-symlinked script (`mark-issue-checkbox.sh`) | `exit 1` (`find -L` keeps symlinked scripts in scope) |
 | TC-CUTOVER-017 | **(Check 4)** In a real git repo: commit the clean tree as `trusted-main`, then inject a `gh` + `--generate-baseline` (the same-PR self-ratification bypass), run with `--trusted-ref trusted-main` | `exit 1`, `baseline GREW vs trusted-main` names the grown `dispatcher-tick.sh` site (bypass closed) |
 | TC-CUTOVER-018 | **(Check 4)** Unchanged baseline vs `trusted-main`; and an unresolvable `--trusted-ref` | unchanged → `exit 0` (`baseline did not grow`); missing ref → `exit 0` (graceful skip, `not resolvable`) |
+| TC-CUTOVER-019 | **(Check 4 strict)** `--require-trusted-ref`: ref present + unchanged → `exit 0`; ref ABSENT → `exit 1` (`monotonicity check REQUIRED`, shallow-CI hole closed); non-strict on the same missing ref → `exit 0` (graceful skip) | strict mode catches the depth-1-checkout skip; default stays permissive |
 
 > Note (F1/AC #2): TC-CUTOVER-002 asserts the `::error::` names the exact
 > `file:line` (`lib-dispatch.sh:NNNN`), not just the file.
