@@ -646,6 +646,131 @@ config namespace (§3.4).
 
 ---
 
+## 9. Cutover guard — anti-regression for the sole choke-point ([INV-91])
+
+The "provider-dispatch is spec-defined" property ([INV-87]) — every issue/code-host
+op routes through an `itp_*`/`chp_*` verb, the host-I/O leaves live ONLY under
+`scripts/providers/` — is only durable if a CI gate stops a NEW raw `gh` from
+re-entering the provider-neutral caller layer (`lib-dispatch.sh`,
+`autonomous-dev.sh`, `autonomous-review.sh`, every `lib-review-*.sh`). That gate
+is **`check-provider-cutover.sh`** ([INV-91], issue #286) — a credential-free
+grep/jq lint modeled on `check-spec-drift.sh`:
+
+- **Scan** the WHOLE dispatcher scripts tree **recursively** (`find -L` over every
+  `*.sh` at any depth — top-level, `adapters/`, `providers/`, and any future nested
+  subdir) for a raw `gh ` token via the RE2-safe consuming boundary
+  `(^|[^A-Za-z_-])gh ` (never a look-behind — `gh --jq` runs Go RE2; see
+  `invariants.md`). Recursing the whole tree — not just top-level + the caller
+  layer — is #286 AC #41 ("every surviving raw-gh in
+  `skills/autonomous-dispatcher/scripts/` resolves to providers/ or an allowlisted
+  file"), so dispatcher/util scripts (`setup-labels.sh`, `lib-auth.sh`,
+  `dispatcher-tick.sh`) AND nested `adapters/*.sh` are in scope. `-L` follows
+  symlinks so the tracked-but-symlinked scripts (`mark-issue-checkbox.sh`,
+  `reply-to-comments.sh`, `upload-screenshot.sh`, `gh-as-user.sh`) stay scanned. A
+  drift FAILs LOUD naming the exact `file:line` (AC #2).
+- **Allowlist** (declarative, in the script): ONLY the auth/transport wrappers
+  `scripts/gh`, `gh-with-token-refresh.sh`, `gh-app-token.sh`, `gh-as-user.sh`,
+  `dispatch-remote-aws-ssm.sh` (§8: GitHub auth is unchanged, NOT refactored) +
+  the `providers/` tree (the legitimate home of host I/O). The guard script is
+  **NOT** allowlisted (round 2 [P1] #2): it is scanned like any file and its own
+  `gh `-mentioning lines are baselined survivors, so a NEW raw `gh` added to the
+  checker trips the guard. Everything else must be a baselined survivor.
+- **Baseline-anchored** (NOT a from-zero ban yet): the depends-on issues
+  (#281–#285) migrated only the §3.1/§3.2 verb leaves, so the caller layer still
+  carries the surviving raw-gh the first deliverable did not migrate. Those are
+  frozen in `providers/cutover-baseline.json`, keyed by `(file, trimmed-content)`
+  COUNT (the same discovered-vs-declared reconciliation as `check-spec-drift.sh`
+  Check C.4). The guard PASSES today, FAILs any NEW raw-gh, FAILs a DUPLICATE of
+  a baselined line, and FAILs a REMOVED baselined site — so a migration PR that
+  pulls a `gh` leaf behind a verb MUST shrink the baseline in the same PR. As the
+  survivors migrate, the baseline shrinks to empty and the guard becomes the
+  strict from-zero ban.
+- **Monotonicity-anchored to the trusted ref** (closes the same-PR
+  self-ratification bypass): the baseline-reconcile above only proves the tree
+  matches WHATEVER baseline ships in the same change, so a PR that BOTH adds a
+  raw-gh AND `--generate-baseline`s would pass it. The guard therefore also reads
+  the trusted (merged) baseline at `--trusted-ref` (default `origin/main`, override
+  via the flag or `CUTOVER_TRUSTED_REF`) and FAILs if the working-tree baseline
+  GREW — a new `(file,content)` signature or a higher count — so a PR can only ever
+  SHRINK the baseline; ratifying a new site is rejected even when the in-PR reconcile
+  is satisfied. The trusted survivor set comes from one of two sources: (1) the
+  trusted baseline JSON at the ref (the steady state, once the baseline has landed on
+  main); else (2) it is **DERIVED FROM THE TRUSTED TREE** itself — discovering raw-gh
+  directly from the ref's `*.sh` via `git show <ref>:<path>` (dereferencing symlinked
+  tracked scripts, the ref-tree analogue of the working-tree `find -L`). Source (2)
+  closes the **initial-landing self-ratification hole** (#286 review finding #1): the
+  PR that INTRODUCES the baseline has no baseline JSON on main to compare against, so
+  deriving from the tree means a new raw-gh added to an EXISTING (on-ref) caller-layer
+  script is still caught even on that first PR. A growth in a file ABSENT from the
+  trusted ref is this PR legitimately introducing a NEW file (e.g. the guard itself) —
+  allowed (still gated by the tree-wide reconcile above), not a monotonicity
+  regression. Off-git, or when the ref is unresolvable (shallow / fork checkout),
+  this check SKIPS gracefully **by default** — BUT under
+  `--require-trusted-ref` (env `CUTOVER_REQUIRE_TRUSTED_REF=1`) an unresolvable ref
+  is a hard FAILURE, not a skip. That strict mode closes the shallow-CI hole (#286
+  review): the hermetic job runs the guard via the test glob under a depth-1
+  checkout where `origin/main` is absent, so a permissive skip there would let a
+  self-ratifying PR pass green. The unit test drives the guard with
+  `--require-trusted-ref` against a self-contained git fixture (so monotonicity is
+  enforced regardless of checkout depth), and the operator-applied ci.yml step uses
+  `fetch-depth: 0` + `--require-trusted-ref` so the dedicated step enforces it too.
+  The scan greps with `-a` (force text) so a script carrying UTF-8 punctuation is
+  never misclassified "binary" and silently skipped.
+
+The guard explicitly covers the dispatcher's own marker writers
+`post_dispatch_token` ([INV-18]) and `_dep_block_comment` ([INV-39]), which post
+through `itp_post_comment` (the sole marker choke-point [M6], [INV-89]).
+
+**Caps-branch coverage gate (dead-code guard for `caps=0` branches).** The §7.4
+fake degraded-capability fixture provider (`tests/unit/fixtures/provider-degraded/`,
+selected through the public seam `ISSUE_PROVIDER=degraded` / `CODE_HOST=degraded`
++ `AUTONOMOUS_PROVIDERS_DIR`) is promoted to a coverage gate
+(`tests/unit/test-provider-caps-branches.sh`). It splits the 13 caps (9 ITP + 4
+CHP, §4.1/§4.2) honestly:
+
+- **EXERCISED (8)** — the caps with a LIVE caller branch on this GitHub-only HEAD
+  (`cross_ref_shorthand`, `edit_comment`, `label_colors`, `body_checkbox`,
+  `native_issue_pr_link`, `rest_request_changes`, `review_bots`,
+  `merge_closes_issue`): the gate asserts the branch is reachable AND its degraded
+  value is driveable through the public seam, and RUNS four of them end-to-end
+  against the degraded fixture (`label_colors=0` via a real `setup-labels.sh`
+  subprocess; `merge_closes_issue=0` + `native_issue_pr_link=0/1` via the real
+  `_render_close_keyword`; `body_checkbox=0` via a real `mark-issue-checkbox.sh`
+  subprocess that fires the documented native-subtask-remap error without issuing a
+  PATCH) — so "reachable" is demonstrated by execution, not just grep.
+- **WAIVED (5)** — the caps whose caller branch is not yet wired (it lands with the
+  GitLab/Asana PRs, §4.3; the degraded fixture `.sh` are empty scaffolds, so there
+  is no branch to run). These are NOT a free pass: each is asserted STILL unwired
+  behind a **fail-on-wiring tripwire** — if a waived cap ever gains a caller branch
+  the suite FAILs ("move it to EXERCISED + add a real exercise test"), so no
+  future `caps=0` branch can ship untested.
+
+The headline prints `exercised=8 waived=5 total=13` and asserts the split equals
+the full matrix, and a tripwire self-test proves the branch-detector is not a
+no-op grep. (Exercising all 13 is not possible on a GitHub-only HEAD — 5 branches
+do not exist — and fabricating a test-only consumer would violate §4.3's
+no-behavior-change anchor; the waiver + tripwire is the honest maximum.)
+
+CI wiring: the intended `.github/workflows/ci.yml` change adds a dedicated
+`check-provider-cutover.sh` step to the credential-free `spec-drift` job (sibling
+to `check-spec-drift.sh`) and adds `check-provider-cutover.sh` +
+`tests/unit/test-provider-cutover.sh` + `tests/unit/test-provider-caps-branches.sh`
+to the hermetic `shellcheck -S error` file list. For Check 4 (monotonicity) to run
+in that dedicated step, the step's `actions/checkout` would use `fetch-depth: 0` (so
+`origin/main` resolves) and invoke the guard with `--require-trusted-ref`. **This
+ci.yml wiring is a NON-BLOCKING maintainer follow-up (#295), NOT part of this PR**
+(owner ruling 2026-06-28): the dev-side scoped GitHub-App token CANNOT push
+`.github/workflows/` ([INV-83]: a `git push` of any workflow change is rejected
+`without 'workflows' permission`), and #286 was explicitly re-scoped so the PR MUST
+NOT be blocked on a workflows edit. Meanwhile the guard runs in CI through the
+existing `tests/unit/test-*.sh` loop: `test-provider-cutover.sh` invokes
+`check-provider-cutover.sh` against the real repo (Checks 1-3), AND drives the
+strict Check 4 / `--require-trusted-ref` fail-closed + monotonicity behavior against
+self-contained git fixtures (TC-CUTOVER-017/019/020/021), so the property is
+enforced regardless of checkout depth even before #295 lands the dedicated step.
+
+---
+
 ## Mapping appendix — verb↔current-function
 
 How today's behavior maps onto the contract. Each `~18` moved function is tagged
@@ -695,6 +820,7 @@ becomes a verb, the surrounding INV-coupled logic stays caller-side.
 - [`invariants.md` § INV-88](invariants.md#inv-88-the-github-caps-manifests-describe-current-behavior-exactly-the-no-behavior-change-anchor--honestly-declared-not-all-ones) — GitHub `.caps` = today's behavior (the no-behavior-change anchor).
 - [`invariants.md` § INV-89](invariants.md#inv-89-every-machine-marker--agent-and-dispatcher-inv-18inv-39-included--is-posted-only-through-the-declared-marker_channel-the-read-side-capture-regex-branches-on-channel) — the `marker_channel` pin.
 - [`invariants.md` § INV-90](invariants.md#inv-90-the-normalized-issue-comment-shape-is-id-author-body-createdat-sorted-ascending-by-createdat-with-author-a-machine-handle-for-exact-equality) — the normalized comment shape.
+- [`invariants.md` § INV-91](invariants.md#inv-91-the-provider-neutral-caller-layer-routes-all-host-io-through-itp_chp_-verbs--a-new-raw-gh-outside-providers-is-a-ci-failing-cutover-regression-baseline-anchored) — the cutover guard (`check-provider-cutover.sh`, §9 above) that keeps the caller layer raw-gh-free.
 - [`invariants.md` § INV-78](invariants.md#inv-78-review-verdicts-resolve-from-a-typed-artifact-file-first-comment-scraping-is-an-explicitly-logged-fallback-a-malformed-artifact-is-loud-never-a-silent-absent) — the verdict-artifact channel (issue #279 cites it as INV-77; renumbered to INV-78) reconciled above.
 - [`invariants.md` § INV-79](invariants.md#inv-79-in-app-mode-the-agent-process-gets-only-a-scoped-token-the-wrapper-keeps-full-write-and-is-the-sole-approvemergepr-create-path) / [INV-83](invariants.md#inv-83-cross-repo-dependency-lookups-use-a-per-dep-repo-scoped-read-token-the-app-must-be-installed-on-the-dep-repo) — the per-seam auth cut (CHP-side / ITP-side).
 - [`adapter-spec.md`](adapter-spec.md) — the agent-CLI adapter spec this provider spec mirrors ([INV-66]/[INV-75]).
