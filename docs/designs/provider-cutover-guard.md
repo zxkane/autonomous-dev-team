@@ -62,6 +62,22 @@ caller layer outside `scripts/providers/`.
 >   unit test drives the guard with it ON against a self-contained git fixture
 >   (TC-CUTOVER-019), so monotonicity is enforced regardless of checkout depth, and
 >   the operator-applied ci.yml step uses `fetch-depth: 0` + `--require-trusted-ref`.
+>
+> **Revision (later review round, codex — initial-landing self-ratification + CI-vs-main).**
+> - Check 4 returned PASS when the trusted ref existed but had no `cutover-baseline.json`
+>   yet ("nothing to regress against"), so the PR that INTRODUCES the baseline could
+>   bake in new raw-gh (reproduced: add `gh issue view 999` to `dispatcher-tick.sh` +
+>   `--generate-baseline` -> exit 0). Fix: when the trusted baseline JSON is absent at
+>   the ref, **DERIVE the trusted survivor set from the trusted TREE** (`git show
+>   <ref>:<path>` over its `*.sh`, dereferencing symlinked tracked scripts -- the
+>   ref-tree analogue of `find -L`). A new raw-gh in an EXISTING on-ref script is then
+>   caught even on the landing PR; a growth in a file ABSENT from the ref is the
+>   legitimate introduction of a NEW file (e.g. the guard itself), allowed + still
+>   gated by Check 1. Regression test: TC-CUTOVER-020.
+> - finding #2 (CI never compares this branch's baseline to real `origin/main`): the
+>   monotonicity algorithm is proven against a self-contained fixture, and the real
+>   branch-vs-main comparison runs once the operator-applied ci.yml step lands
+>   `fetch-depth: 0` + `--require-trusted-ref` (un-pushable by the scoped token, INV-83).
 
 ## Reality check that shapes this design (the load-bearing decision)
 

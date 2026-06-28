@@ -95,6 +95,9 @@ TRUSTED_REF="${CUTOVER_TRUSTED_REF:-origin/main}"
 # copy via `git show <ref>:<path>`. Defaults to the in-repo location; overridable
 # so a test can point at a scratch ref. Empty => derive from BASELINE at run time.
 TRUSTED_BASELINE_PATH="${CUTOVER_TRUSTED_BASELINE_PATH:-skills/autonomous-dispatcher/scripts/providers/cutover-baseline.json}"
+# Git-root-relative path to the scripts dir IN THE TRUSTED TREE -- used to derive the
+# trusted survivor set from the ref when its baseline JSON is absent (#286 finding #1).
+TRUSTED_SCRIPTS_PREFIX="${CUTOVER_TRUSTED_SCRIPTS_PREFIX:-$(d="${TRUSTED_BASELINE_PATH%/*}"; printf '%s' "${d%/*}")}"
 # STRICT monotonicity: when set, a Check 4 that cannot resolve the trusted ref
 # (no git / shallow checkout / ref absent) is a FAILURE, not a graceful skip. This
 # closes the shallow-CI hole (#286 review): the hermetic job runs the guard via the
@@ -223,6 +226,51 @@ discover_guarded_sites() {
     rest = line; sub(/^[0-9]+[[:space:]]+/, "", rest)
     print count "\t" rest
   }'
+}
+
+# Does a SCRIPTS_DIR-relative path exist (as a file OR symlink) in the trusted ref?
+ref_has_file() { git ls-tree "${1}" -- "${TRUSTED_SCRIPTS_PREFIX}/${2}" 2>/dev/null | grep -q .; }
+
+# Read a tree path from a ref, dereferencing one level of git symlink (mode 120000):
+# git show of a symlink entry yields the LINK TARGET text, not content, so symlinked
+# tracked scripts (mark-issue-checkbox.sh -> ../../autonomous-common/...) would
+# undercount. Resolve the target relative to the entry dir and show THAT. (find -L
+# does the equivalent for the working tree; this is the ref-tree analogue.)
+git_show_deref() {
+  local ref="$1" path="$2" mode tgt dir
+  mode="$(git ls-tree "$ref" -- "$path" 2>/dev/null | awk '{print $1}')"
+  if [ "$mode" = "120000" ]; then
+    tgt="$(git show "${ref}:${path}" 2>/dev/null)"
+    dir="${path%/*}"
+    # normalize dir/tgt (handles ../) via a subshell pwd against a virtual root.
+    path="$(cd / && p="${dir}/${tgt}"; printf '%s' "$(realpath -m --relative-to=/ "/$p" 2>/dev/null || echo "$p")")"
+  fi
+  git show "${ref}:${path}" 2>/dev/null
+}
+
+# Discover raw-gh sites in the TRUSTED TREE at a git ref (NOT the working tree),
+# emitting "<count>\t<file>\t<content>" rows. Mirrors discover_guarded_sites but
+# reads each file via git_show_deref. Used by Check 4 to derive the trusted survivor
+# set when the trusted baseline JSON is absent at the ref (#286 review finding #1).
+discover_guarded_sites_at_ref() {
+  local ref="$1" relroot="${2:-$TRUSTED_SCRIPTS_PREFIX}" rel sub gtmp
+  gtmp="$(mktemp)"
+  while IFS= read -r sub; do
+    [ -z "$sub" ] && continue
+    rel="${sub#"$relroot"/}"
+    case "$rel" in providers/*) continue ;; esac
+    in_list "$rel" "${ALLOWLISTED_FILES[@]}" && continue
+    git_show_deref "$ref" "$sub" >"$gtmp" 2>/dev/null || continue
+    gh_lines_in "$gtmp" | sed "s#^#${rel}\t#"
+  done < <(git ls-tree -r --name-only "$ref" -- "$relroot" 2>/dev/null | grep -E '\.sh$') \
+    | LC_ALL=C sort | uniq -c | awk '{
+      line = $0
+      sub(/^[[:space:]]+/, "", line)
+      count = line; sub(/[[:space:]].*$/, "", count)
+      rest = line; sub(/^[0-9]+[[:space:]]+/, "", rest)
+      print count "\t" rest
+    }'
+  rm -f "$gtmp"
 }
 
 # Resolve the concrete file:line(s) of a (file, trimmed-content) site for the
@@ -380,28 +428,45 @@ if ! command -v git >/dev/null 2>&1 || ! git rev-parse --git-dir >/dev/null 2>&1
 elif ! git rev-parse --verify --quiet "$TRUSTED_REF" >/dev/null 2>&1; then
   _no_trusted_ref "trusted ref '$TRUSTED_REF' not resolvable here (shallow/forked checkout)"
 else
-  TRUSTED_TMP="$(mktemp)"
-  if git show "${TRUSTED_REF}:${TRUSTED_BASELINE_PATH}" >"$TRUSTED_TMP" 2>/dev/null && jq -e . "$TRUSTED_TMP" >/dev/null 2>&1; then
-    # Emit "<file>\t<content>\t<count>" for both, then for every PR signature whose
-    # count exceeds the trusted count (absent ⇒ trusted 0), FAIL. jq does the join.
-    grew="$(jq -rn --slurpfile cur "$BASELINE" --slurpfile old "$TRUSTED_TMP" '
-      ($old[0].surviving_sites // []) | map({key: (.file+" "+.content), value: .count}) | from_entries as $oldmap
-      | ($cur[0].surviving_sites // [])
-      | map(select(.count > ($oldmap[(.file+" "+.content)] // 0)))
-      | .[] | "\(.file)\t\(.content)\t\(.count)\t\(($oldmap[(.file+" "+.content)] // 0))"
-    ' 2>/dev/null)"
-    if [ -n "$grew" ]; then
-      while IFS=$'\t' read -r gfile gcontent gcount goldcount; do
-        [ -z "$gfile" ] && continue
-        fail "baseline GREW vs $TRUSTED_REF -- $gfile raw-gh '$gcontent' count $goldcount->$gcount. This ratifies a NEW raw-gh site in the same change that adds it (the [INV-91] self-ratification bypass). Route the new host I/O through an itp_*/chp_* verb instead of baselining it; the baseline may only shrink as migrations land."
-      done <<< "$grew"
-    else
-      info "baseline did not grow vs $TRUSTED_REF (signatures + counts are <= the trusted copy) -- no new raw-gh ratified"
-    fi
+  # TRUSTED SURVIVOR TABLE "<file>\t<content>\t<count>" from: (1) the trusted
+  # baseline JSON at the ref (steady state, once it has landed on main); else (2)
+  # DERIVED from the trusted TREE (the initial-landing PR -- main has the scripts but
+  # not the baseline JSON yet; #286 finding #1). Deriving from the tree stops a PR
+  # self-ratifying a new raw-gh in an EXISTING script.
+  TRUSTED_SET="$(mktemp)"; TRUSTED_RAW="$(mktemp)"
+  _trusted_src=""; _derived_from_tree=0
+  if git show "${TRUSTED_REF}:${TRUSTED_BASELINE_PATH}" >"$TRUSTED_RAW" 2>/dev/null && jq -e . "$TRUSTED_RAW" >/dev/null 2>&1; then
+    jq -r '.surviving_sites[]? | "\(.file)\t\(.content)\t\(.count)"' "$TRUSTED_RAW" 2>/dev/null | LC_ALL=C sort > "$TRUSTED_SET"
+    _trusted_src="trusted baseline at ${TRUSTED_REF}:${TRUSTED_BASELINE_PATH}"
   else
-    info "no trusted baseline at ${TRUSTED_REF}:${TRUSTED_BASELINE_PATH} (first introduction of the baseline, or path differs) — nothing to regress against yet"
+    discover_guarded_sites_at_ref "$TRUSTED_REF" | awk -F'\t' '{
+      c=$1; f=$2; content=$3; for(i=4;i<=NF;i++) content=content "\t" $i; print f "\t" content "\t" c
+    }' | LC_ALL=C sort > "$TRUSTED_SET"
+    _trusted_src="trusted TREE ${TRUSTED_REF}:${TRUSTED_SCRIPTS_PREFIX}/ (no baseline JSON there -- derived from the tree)"
+    _derived_from_tree=1
   fi
-  rm -f "$TRUSTED_TMP"
+  grew="$(awk -F'\t' '
+    NR==FNR { old[$1 FS $2]=$3; next }
+    { k=$1 FS $2; oc=(k in old)?old[k]:0; if (($3+0) > (oc+0)) print $1 "\t" $2 "\t" $3 "\t" oc }
+  ' "$TRUSTED_SET" <(jq -r '.surviving_sites[]? | "\(.file)\t\(.content)\t\(.count)"' "$BASELINE" 2>/dev/null) 2>/dev/null)"
+  _grew_real=0
+  if [ -n "$grew" ]; then
+    while IFS=$'\t' read -r gfile gcontent gcount goldcount; do
+      [ -z "$gfile" ] && continue
+      # Derived-from-tree: a growth in a file ABSENT from the trusted ref is this PR
+      # legitimately introducing a NEW file (e.g. the guard itself) -- gated by Check 1,
+      # not a caller-layer regression. Only growth in a file PRESENT on the ref is a
+      # self-ratified new raw-gh in existing code -> FAIL.
+      if [ "$_derived_from_tree" = "1" ] && ! ref_has_file "$TRUSTED_REF" "$gfile"; then
+        info "baseline adds raw-gh in NEW file '$gfile' (absent from $TRUSTED_REF) -- allowed introduction, gated by Check 1; not a monotonicity regression"
+        continue
+      fi
+      _grew_real=1
+      fail "baseline GREW vs $_trusted_src -- $gfile raw-gh '$gcontent' count $goldcount->$gcount. This ratifies a NEW raw-gh site in an existing script in the same change that adds it (the [INV-91] self-ratification bypass). Route the new host I/O through an itp_*/chp_* verb instead of baselining it; the baseline may only shrink as migrations land."
+    done <<< "$grew"
+  fi
+  [ "$_grew_real" = "0" ] && info "baseline did not grow vs $_trusted_src for any file present on the trusted ref -- no new raw-gh ratified in existing code"
+  rm -f "$TRUSTED_SET" "$TRUSTED_RAW"
 fi
 
 # ---------------------------------------------------------------------------

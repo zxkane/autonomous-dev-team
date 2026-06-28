@@ -690,12 +690,22 @@ grep/jq lint modeled on `check-spec-drift.sh`:
   matches WHATEVER baseline ships in the same change, so a PR that BOTH adds a
   raw-gh AND `--generate-baseline`s would pass it. The guard therefore also reads
   the trusted (merged) baseline at `--trusted-ref` (default `origin/main`, override
-  via the flag or `CUTOVER_TRUSTED_REF`) via `git show <ref>:<path>` and FAILs if
-  the working-tree baseline GREW — a new `(file,content)` signature or a higher
-  count — so a PR can only ever SHRINK the baseline; ratifying a new site is
-  rejected even when the in-PR reconcile is satisfied. Off-git, or when the ref /
-  trusted baseline is unresolvable (shallow / fork checkout, or the first PR that
-  introduces the baseline), this check SKIPS gracefully **by default** — BUT under
+  via the flag or `CUTOVER_TRUSTED_REF`) and FAILs if the working-tree baseline
+  GREW — a new `(file,content)` signature or a higher count — so a PR can only ever
+  SHRINK the baseline; ratifying a new site is rejected even when the in-PR reconcile
+  is satisfied. The trusted survivor set comes from one of two sources: (1) the
+  trusted baseline JSON at the ref (the steady state, once the baseline has landed on
+  main); else (2) it is **DERIVED FROM THE TRUSTED TREE** itself — discovering raw-gh
+  directly from the ref's `*.sh` via `git show <ref>:<path>` (dereferencing symlinked
+  tracked scripts, the ref-tree analogue of the working-tree `find -L`). Source (2)
+  closes the **initial-landing self-ratification hole** (#286 review finding #1): the
+  PR that INTRODUCES the baseline has no baseline JSON on main to compare against, so
+  deriving from the tree means a new raw-gh added to an EXISTING (on-ref) caller-layer
+  script is still caught even on that first PR. A growth in a file ABSENT from the
+  trusted ref is this PR legitimately introducing a NEW file (e.g. the guard itself) —
+  allowed (still gated by the tree-wide reconcile above), not a monotonicity
+  regression. Off-git, or when the ref is unresolvable (shallow / fork checkout),
+  this check SKIPS gracefully **by default** — BUT under
   `--require-trusted-ref` (env `CUTOVER_REQUIRE_TRUSTED_REF=1`) an unresolvable ref
   is a hard FAILURE, not a skip. That strict mode closes the shallow-CI hole (#286
   review): the hermetic job runs the guard via the test glob under a depth-1

@@ -308,7 +308,7 @@ if command -v git >/dev/null 2>&1; then
   # Check 1 alone now passes (baseline ratified the new site); the FULL guard with
   # Check 4 vs trusted-main must FAIL.
   out="$( cd "$GROOT" && bash "$CHECK" --scripts-dir "$GS" --baseline "$GS/providers/cutover-baseline.json" --trusted-ref trusted-main 2>&1 )"; rc=$?
-  if [[ "$rc" -ne 0 ]] && grep -q 'baseline GREW vs trusted-main' <<<"$out" && grep -q 'dispatcher-tick.sh' <<<"$out"; then
+  if [[ "$rc" -ne 0 ]] && grep -q 'baseline GREW' <<<"$out" && grep -q 'trusted-main' <<<"$out" && grep -q 'dispatcher-tick.sh' <<<"$out"; then
     ok "same-PR baseline regeneration that ADDS a raw-gh → Check 4 FAILs naming the grown site (bypass closed)"
   else
     bad "Check 4 did NOT catch the self-ratification bypass (rc=$rc): ${out:0:200}"
@@ -389,6 +389,50 @@ if command -v git >/dev/null 2>&1; then
   fi
 else
   ok "git unavailable — TC-CUTOVER-019 skipped"
+fi
+
+# ---------------------------------------------------------------------------
+echo "=== TC-CUTOVER-020: derive-from-tree closes the initial-landing self-ratification (#286 finding #1) ==="
+# ---------------------------------------------------------------------------
+# When the trusted ref has the scripts but NOT the baseline JSON yet (the PR that
+# INTRODUCES the baseline — origin/main today), Check 4 derives the trusted survivor
+# set from the trusted TREE. Three properties:
+#   (a) a NEW raw-gh in an EXISTING (on-ref) script + regenerated baseline → FAIL
+#       (the landing PR can't self-ratify a new caller-layer gh);
+#   (b) sites in a NEW file (absent from the ref) → allowed introduction, no FAIL
+#       (gated by Check 1, not a monotonicity regression);
+#   (c) symlinked tracked scripts (mark-issue-checkbox.sh) do NOT false-positive
+#       (the ref-tree read dereferences the symlink, mirroring the working-tree find -L).
+if command -v git >/dev/null 2>&1; then
+  S="$(fresh_scratch 020)"
+  GROOT="$WORK/gitrepo020"; GS="$GROOT/sd"
+  rm -rf "$GROOT"; mkdir -p "$GS"
+  cp -rL "$S"/. "$GS/" 2>/dev/null
+  rm -f "$GS/providers/cutover-baseline.json"   # trusted tree has scripts but NO baseline JSON
+  ( cd "$GROOT" && git init -q && git config user.email t@t && git config user.name t \
+      && git add -A >/dev/null 2>&1 && git commit -qm base >/dev/null 2>&1 && git branch trusted-main )
+  # PR: inject a NEW gh into an EXISTING script + regenerate the baseline (ratify it).
+  # shellcheck disable=SC2016
+  printf '\nabuse_fn() { gh pr view 999 --json state; }\n' >> "$GS/lib-dispatch.sh"
+  CUTOVER_TRUSTED_SCRIPTS_PREFIX="sd" bash "$CHECK" --generate-baseline --scripts-dir "$GS" > "$GS/providers/cutover-baseline.json" 2>/dev/null
+  out="$( cd "$GROOT" && CUTOVER_TRUSTED_SCRIPTS_PREFIX="sd" bash "$CHECK" --scripts-dir "$GS" --baseline "$GS/providers/cutover-baseline.json" --trusted-ref trusted-main --require-trusted-ref --trusted-baseline-path "sd/providers/cutover-baseline.json" 2>&1 )"; rc=$?
+  if [[ "$rc" -ne 0 ]] && grep -q 'lib-dispatch.sh raw-gh' <<<"$out" && grep -q 'gh pr view 999' <<<"$out"; then
+    ok "(a) NEW gh in an EXISTING on-ref script, derived-from-tree → FAIL naming lib-dispatch.sh (landing PR can't self-ratify)"
+  else
+    bad "(a) derive-from-tree did NOT catch the new gh in lib-dispatch.sh (rc=$rc): ${out:0:200}"
+  fi
+  # (b) the checker's OWN new-file sites (check-provider-cutover.sh is absent from the
+  #     trusted ref here — it was copied in but let's prove a brand-new file is exempt)
+  #     and (c) symlinked scripts must NOT appear as real growth.
+  if ! grep -q "GREW vs .* mark-issue-checkbox.sh" <<<"$out" \
+     && ! grep -q "GREW vs .* reply-to-comments.sh" <<<"$out" \
+     && ! grep -q "GREW vs .* upload-screenshot.sh" <<<"$out"; then
+    ok "(c) symlinked tracked scripts do NOT false-positive (ref-tree read dereferences the symlink)"
+  else
+    bad "(c) a symlinked tracked script false-positived as growth: ${out:0:200}"
+  fi
+else
+  ok "git unavailable — TC-CUTOVER-020 skipped"
 fi
 
 # ===========================================================================
