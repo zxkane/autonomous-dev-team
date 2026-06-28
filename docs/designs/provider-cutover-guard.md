@@ -75,9 +75,20 @@ caller layer outside `scripts/providers/`.
 >   legitimate introduction of a NEW file (e.g. the guard itself), allowed + still
 >   gated by Check 1. Regression test: TC-CUTOVER-020.
 > - finding #2 (CI never compares this branch's baseline to real `origin/main`): the
->   monotonicity algorithm is proven against a self-contained fixture, and the real
->   branch-vs-main comparison runs once the operator-applied ci.yml step lands
->   `fetch-depth: 0` + `--require-trusted-ref` (un-pushable by the scoped token, INV-83).
+>   monotonicity algorithm is proven against self-contained fixtures, and the real
+>   branch-vs-main comparison runs once the ci.yml step lands `fetch-depth: 0` +
+>   `--require-trusted-ref` — that step is a **non-blocking maintainer follow-up
+>   (#295)**, NOT part of this PR (owner ruling 2026-06-28; the scoped token can't
+>   push `.github/workflows/`, INV-83).
+>
+> **Revision (owner AC rewrite, 2026-06-28 — strict-mode fail-closed, AC #6).**
+> - Owner rewrote the ACs to be satisfiable and split ci.yml (#295) + the 104-site
+>   migration (#296) into non-blocking follow-ups. The one real defect to fix:
+>   **AC #6 strict-mode fail-closed.** Under `--require-trusted-ref`, a
+>   missing/unreadable/unparseable baseline — or a trusted ref lacking
+>   `cutover-baseline.json` — now `exit 1`s (no silent derive-from-tree fallback in
+>   strict mode; derive-from-tree stays the NON-strict best-effort belt). A baseline
+>   is (re)generated only under `--generate-baseline`. Tests: TC-CUTOVER-021.
 
 ## Reality check that shapes this design (the load-bearing decision)
 

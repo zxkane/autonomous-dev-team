@@ -755,22 +755,19 @@ CI wiring: the intended `.github/workflows/ci.yml` change adds a dedicated
 `check-provider-cutover.sh` step to the credential-free `spec-drift` job (sibling
 to `check-spec-drift.sh`) and adds `check-provider-cutover.sh` +
 `tests/unit/test-provider-cutover.sh` + `tests/unit/test-provider-caps-branches.sh`
-to the hermetic `shellcheck -S error` file list. **For Check 4 (monotonicity) to
-run in that dedicated step, the step's `actions/checkout` MUST use `fetch-depth: 0`
-(so `origin/main` resolves) and invoke the guard with `--require-trusted-ref`** —
-otherwise the default depth-1 checkout has no `origin/main` and Check 4 would
-silently skip, letting a self-ratifying PR pass (the #286 shallow-CI hole). **The
-dev-side scoped GitHub-App token CANNOT push `.github/workflows/`** ([INV-83]: a
-`git push` of the workflow hunk is rejected `without 'workflows' permission`), so
-the exact diff (the `fetch-depth: 0` + `--require-trusted-ref` step + the
-ShellCheck-list entries) ships in the #286 PR body for a **maintainer to apply** —
-it is a required part of the deliverable, not optional polish. Until then the guard
-still executes in CI through the existing `tests/unit/test-*.sh` loop:
-`test-provider-cutover.sh` invokes `check-provider-cutover.sh` against the real repo
-(Checks 1-3), AND drives Check 4 / `--require-trusted-ref` against a self-contained
-git fixture (TC-CUTOVER-017/019), so the monotonicity property is enforced
-regardless of the hermetic job's checkout depth even before the dedicated step
-lands.
+to the hermetic `shellcheck -S error` file list. For Check 4 (monotonicity) to run
+in that dedicated step, the step's `actions/checkout` would use `fetch-depth: 0` (so
+`origin/main` resolves) and invoke the guard with `--require-trusted-ref`. **This
+ci.yml wiring is a NON-BLOCKING maintainer follow-up (#295), NOT part of this PR**
+(owner ruling 2026-06-28): the dev-side scoped GitHub-App token CANNOT push
+`.github/workflows/` ([INV-83]: a `git push` of any workflow change is rejected
+`without 'workflows' permission`), and #286 was explicitly re-scoped so the PR MUST
+NOT be blocked on a workflows edit. Meanwhile the guard runs in CI through the
+existing `tests/unit/test-*.sh` loop: `test-provider-cutover.sh` invokes
+`check-provider-cutover.sh` against the real repo (Checks 1-3), AND drives the
+strict Check 4 / `--require-trusted-ref` fail-closed + monotonicity behavior against
+self-contained git fixtures (TC-CUTOVER-017/019/020/021), so the property is
+enforced regardless of checkout depth even before #295 lands the dedicated step.
 
 ---
 

@@ -69,12 +69,15 @@
 #                                             origin/main); FAIL if it GREW. May
 #                                             only SHRINK. Skips off-git/missing-ref.
 #   check-provider-cutover.sh --require-trusted-ref
-#                                             Make Check 4 FAIL (not skip) when the
-#                                             trusted ref is unresolvable. Closes the
-#                                             shallow-CI hole: the unit test runs the
-#                                             guard with this ON (after making the
-#                                             ref resolvable) so monotonicity is
-#                                             enforced regardless of checkout depth.
+#                                             STRICT mode (fail-closed, AC #6): a
+#                                             missing/unreadable/unparseable baseline,
+#                                             an unresolvable trusted ref, OR a trusted
+#                                             ref lacking cutover-baseline.json each
+#                                             EXIT 1 (never exit 0 + "nothing to
+#                                             regress against"). No silent derive-from-
+#                                             tree fallback here; a baseline is rebuilt
+#                                             only via --generate-baseline. Closes the
+#                                             shallow-CI + initial-landing holes.
 #
 # Exit: 0 all checks pass; 1 a drift/integrity failure; 2 usage; 3 env.
 
@@ -116,7 +119,7 @@ while [ $# -gt 0 ]; do
     --trusted-ref)        TRUSTED_REF="$2"; shift ;;
     --trusted-baseline-path) TRUSTED_BASELINE_PATH="$2"; shift ;;
     --require-trusted-ref) REQUIRE_TRUSTED_REF=1 ;;
-    -h|--help)            sed -n '2,79p' "$0"; exit 0 ;;
+    -h|--help)            sed -n '2,82p' "$0"; exit 0 ;;
     *) echo "check-provider-cutover.sh: unknown argument: $1" >&2; exit 2 ;;
   esac
   shift
@@ -309,8 +312,19 @@ fi
 # ---------------------------------------------------------------------------
 # Env / file prerequisites.
 # ---------------------------------------------------------------------------
-[ -f "$BASELINE" ] || { echo "check-provider-cutover.sh: baseline not found: $BASELINE" >&2; exit 3; }
-jq -e . "$BASELINE" >/dev/null 2>&1 || { fail "baseline is not valid JSON: $BASELINE"; echo "cutover-guard: FAIL"; exit 1; }
+# AC #6 (review P1#1) -- a missing/unreadable/unparseable working-tree baseline is
+# FAIL-CLOSED under strict mode (exit 1), never a silent pass. Without strict it is
+# an env error (exit 3) -- a bare lint with no baseline file is a setup mistake, not
+# a ratchet regression. Either way a baseline is (re)generated ONLY via the explicit
+# --generate-baseline maintainer flag, never silently here.
+if [ ! -f "$BASELINE" ]; then
+  if [ "$REQUIRE_TRUSTED_REF" = "1" ]; then
+    fail "strict mode: baseline not found at '$BASELINE' (a missing baseline FAILs closed under --require-trusted-ref; regenerate it with --generate-baseline as a maintainer, never silently)."
+    echo "cutover-guard: FAIL"; exit 1
+  fi
+  echo "check-provider-cutover.sh: baseline not found: $BASELINE" >&2; exit 3
+fi
+jq -e . "$BASELINE" >/dev/null 2>&1 || { fail "baseline is not valid JSON / unreadable: $BASELINE (fail-closed; --generate-baseline to rebuild as a maintainer)"; echo "cutover-guard: FAIL"; exit 1; }
 
 PROVIDERS_DIR="$SCRIPTS_DIR/providers"
 
@@ -438,11 +452,21 @@ else
   if git show "${TRUSTED_REF}:${TRUSTED_BASELINE_PATH}" >"$TRUSTED_RAW" 2>/dev/null && jq -e . "$TRUSTED_RAW" >/dev/null 2>&1; then
     jq -r '.surviving_sites[]? | "\(.file)\t\(.content)\t\(.count)"' "$TRUSTED_RAW" 2>/dev/null | LC_ALL=C sort > "$TRUSTED_SET"
     _trusted_src="trusted baseline at ${TRUSTED_REF}:${TRUSTED_BASELINE_PATH}"
+  elif [ "$REQUIRE_TRUSTED_REF" = "1" ]; then
+    # AC #6 (review P1#1) -- STRICT mode FAILs CLOSED when the trusted ref resolves
+    # but carries no readable/parseable cutover-baseline.json. We do NOT fall back to
+    # deriving from the tree here: strict mode demands a committed trusted baseline to
+    # ratchet against, and a baseline is (re)generated only under the explicit
+    # --generate-baseline maintainer flag, never silently during a normal lint. (The
+    # non-strict default below still derives-from-tree as a best-effort belt.)
+    fail "strict monotonicity: trusted ref '$TRUSTED_REF' has no readable cutover-baseline.json at '${TRUSTED_BASELINE_PATH}'. With --require-trusted-ref a missing/unreadable trusted baseline is a hard FAILURE (never 'nothing to regress against' + exit 0) -- otherwise the initial-landing PR could self-ratify. Land the baseline on '$TRUSTED_REF' first, or run without --require-trusted-ref."
+    rm -f "$TRUSTED_SET" "$TRUSTED_RAW"
+    _trusted_src=""
   else
     discover_guarded_sites_at_ref "$TRUSTED_REF" | awk -F'\t' '{
       c=$1; f=$2; content=$3; for(i=4;i<=NF;i++) content=content "\t" $i; print f "\t" content "\t" c
     }' | LC_ALL=C sort > "$TRUSTED_SET"
-    _trusted_src="trusted TREE ${TRUSTED_REF}:${TRUSTED_SCRIPTS_PREFIX}/ (no baseline JSON there -- derived from the tree)"
+    _trusted_src="trusted TREE ${TRUSTED_REF}:${TRUSTED_SCRIPTS_PREFIX}/ (no baseline JSON there -- derived from the tree, non-strict best-effort)"
     _derived_from_tree=1
   fi
   grew="$(awk -F'\t' '

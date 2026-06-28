@@ -395,14 +395,14 @@ fi
 echo "=== TC-CUTOVER-020: derive-from-tree closes the initial-landing self-ratification (#286 finding #1) ==="
 # ---------------------------------------------------------------------------
 # When the trusted ref has the scripts but NOT the baseline JSON yet (the PR that
-# INTRODUCES the baseline — origin/main today), Check 4 derives the trusted survivor
-# set from the trusted TREE. Three properties:
+# INTRODUCES the baseline — origin/main today), the NON-STRICT Check 4 derives the
+# trusted survivor set from the trusted TREE (a best-effort belt). Two properties:
 #   (a) a NEW raw-gh in an EXISTING (on-ref) script + regenerated baseline → FAIL
-#       (the landing PR can't self-ratify a new caller-layer gh);
-#   (b) sites in a NEW file (absent from the ref) → allowed introduction, no FAIL
-#       (gated by Check 1, not a monotonicity regression);
+#       (the landing PR can't self-ratify a new caller-layer gh), naming the site;
 #   (c) symlinked tracked scripts (mark-issue-checkbox.sh) do NOT false-positive
 #       (the ref-tree read dereferences the symlink, mirroring the working-tree find -L).
+# NOTE: derive-from-tree is NON-STRICT only; under --require-trusted-ref a missing
+# trusted baseline FAILs closed BEFORE deriving (AC #6) -- covered by TC-CUTOVER-021.
 if command -v git >/dev/null 2>&1; then
   S="$(fresh_scratch 020)"
   GROOT="$WORK/gitrepo020"; GS="$GROOT/sd"
@@ -415,15 +415,13 @@ if command -v git >/dev/null 2>&1; then
   # shellcheck disable=SC2016
   printf '\nabuse_fn() { gh pr view 999 --json state; }\n' >> "$GS/lib-dispatch.sh"
   CUTOVER_TRUSTED_SCRIPTS_PREFIX="sd" bash "$CHECK" --generate-baseline --scripts-dir "$GS" > "$GS/providers/cutover-baseline.json" 2>/dev/null
-  out="$( cd "$GROOT" && CUTOVER_TRUSTED_SCRIPTS_PREFIX="sd" bash "$CHECK" --scripts-dir "$GS" --baseline "$GS/providers/cutover-baseline.json" --trusted-ref trusted-main --require-trusted-ref --trusted-baseline-path "sd/providers/cutover-baseline.json" 2>&1 )"; rc=$?
+  # NON-strict: derive-from-tree catches the growth (no --require-trusted-ref).
+  out="$( cd "$GROOT" && CUTOVER_TRUSTED_SCRIPTS_PREFIX="sd" bash "$CHECK" --scripts-dir "$GS" --baseline "$GS/providers/cutover-baseline.json" --trusted-ref trusted-main --trusted-baseline-path "sd/providers/cutover-baseline.json" 2>&1 )"; rc=$?
   if [[ "$rc" -ne 0 ]] && grep -q 'lib-dispatch.sh raw-gh' <<<"$out" && grep -q 'gh pr view 999' <<<"$out"; then
-    ok "(a) NEW gh in an EXISTING on-ref script, derived-from-tree → FAIL naming lib-dispatch.sh (landing PR can't self-ratify)"
+    ok "(a) NON-strict: NEW gh in an EXISTING on-ref script, derived-from-tree → FAIL naming lib-dispatch.sh (landing PR can't self-ratify)"
   else
-    bad "(a) derive-from-tree did NOT catch the new gh in lib-dispatch.sh (rc=$rc): ${out:0:200}"
+    bad "(a) non-strict derive-from-tree did NOT catch the new gh in lib-dispatch.sh (rc=$rc): ${out:0:200}"
   fi
-  # (b) the checker's OWN new-file sites (check-provider-cutover.sh is absent from the
-  #     trusted ref here — it was copied in but let's prove a brand-new file is exempt)
-  #     and (c) symlinked scripts must NOT appear as real growth.
   if ! grep -q "GREW vs .* mark-issue-checkbox.sh" <<<"$out" \
      && ! grep -q "GREW vs .* reply-to-comments.sh" <<<"$out" \
      && ! grep -q "GREW vs .* upload-screenshot.sh" <<<"$out"; then
@@ -433,6 +431,49 @@ if command -v git >/dev/null 2>&1; then
   fi
 else
   ok "git unavailable — TC-CUTOVER-020 skipped"
+fi
+
+# ---------------------------------------------------------------------------
+echo "=== TC-CUTOVER-021: strict-mode FAIL-CLOSED on a missing baseline (AC #6 / review P1#1) ==="
+# ---------------------------------------------------------------------------
+# Owner ruling (2026-06-28, AC #6): with --require-trusted-ref, a missing/unreadable/
+# unparseable baseline -- OR a trusted ref that resolves but lacks cutover-baseline.json
+# -- MUST exit 1, never "nothing to regress against yet" + exit 0. A baseline is
+# (re)generated ONLY under --generate-baseline, never silently during a normal lint.
+if command -v git >/dev/null 2>&1; then
+  S="$(fresh_scratch 021)"
+  GROOT="$WORK/gitrepo021"; GS="$GROOT/sd"
+  rm -rf "$GROOT"; mkdir -p "$GS"
+  cp -rL "$S"/. "$GS/" 2>/dev/null
+  rm -f "$GS/providers/cutover-baseline.json"   # trusted tree: scripts present, NO baseline JSON
+  ( cd "$GROOT" && git init -q && git config user.email t@t && git config user.name t \
+      && git add -A >/dev/null 2>&1 && git commit -qm base >/dev/null 2>&1 && git branch trusted-main )
+  # Working tree DOES have a (regenerated) baseline so Check 1 passes; the trusted ref does NOT.
+  CUTOVER_TRUSTED_SCRIPTS_PREFIX="sd" bash "$CHECK" --generate-baseline --scripts-dir "$GS" > "$GS/providers/cutover-baseline.json" 2>/dev/null
+  # (1) strict + trusted ref lacks baseline.json → FAIL CLOSED (no derive-from-tree fallback).
+  out="$( cd "$GROOT" && CUTOVER_TRUSTED_SCRIPTS_PREFIX="sd" bash "$CHECK" --scripts-dir "$GS" --baseline "$GS/providers/cutover-baseline.json" --trusted-ref trusted-main --require-trusted-ref --trusted-baseline-path "sd/providers/cutover-baseline.json" 2>&1 )"; rc=$?
+  if [[ "$rc" -ne 0 ]] && grep -q 'strict monotonicity' <<<"$out" && grep -q 'has no readable cutover-baseline.json' <<<"$out"; then
+    ok "(1) strict + trusted ref lacks cutover-baseline.json → FAIL CLOSED (no silent derive-from-tree, no exit 0)"
+  else
+    bad "(1) strict-missing-trusted-baseline did NOT fail closed (rc=$rc): ${out:0:200}"
+  fi
+  # (2) strict + missing WORKING-TREE baseline → FAIL CLOSED (exit 1, not the exit-3 env path).
+  out="$( cd "$GROOT" && CUTOVER_TRUSTED_SCRIPTS_PREFIX="sd" bash "$CHECK" --scripts-dir "$GS" --baseline "$GS/providers/does-not-exist.json" --trusted-ref trusted-main --require-trusted-ref --trusted-baseline-path "sd/providers/cutover-baseline.json" 2>&1 )"; rc=$?
+  if [[ "$rc" -eq 1 ]] && grep -q 'baseline not found' <<<"$out"; then
+    ok "(2) strict + missing working-tree baseline → exit 1 fail-closed (not the non-strict exit-3 env path)"
+  else
+    bad "(2) strict-missing-working-baseline did NOT exit 1 (rc=$rc): ${out:0:200}"
+  fi
+  # (3) NON-strict + trusted ref lacks baseline → still derives-from-tree (does NOT fail-closed)
+  #     on an unchanged baseline: PASS (the permissive default is preserved).
+  out="$( cd "$GROOT" && CUTOVER_TRUSTED_SCRIPTS_PREFIX="sd" bash "$CHECK" --scripts-dir "$GS" --baseline "$GS/providers/cutover-baseline.json" --trusted-ref trusted-main --trusted-baseline-path "sd/providers/cutover-baseline.json" 2>&1 )"; rc=$?
+  if [[ "$rc" -eq 0 ]]; then
+    ok "(3) NON-strict + trusted ref lacks baseline + unchanged tree → PASS (derive-from-tree belt; permissive default preserved)"
+  else
+    bad "(3) non-strict unexpectedly failed on an unchanged tree (rc=$rc): ${out:0:200}"
+  fi
+else
+  ok "git unavailable — TC-CUTOVER-021 skipped"
 fi
 
 # ===========================================================================
