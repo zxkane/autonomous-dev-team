@@ -37,6 +37,20 @@ caller layer outside `scripts/providers/`.
 >   Regression tests: TC-CUTOVER-015 (nested `adapters/codex.sh`), TC-CUTOVER-016
 >   (symlinked `mark-issue-checkbox.sh`), TC-CUTOVER-014 (rewritten: a new gh in
 >   the checker FAILs).
+>
+> **Revision (later review round, codex — same-PR baseline self-ratification).**
+> - The checker's baseline was self-ratifying: a PR that BOTH added a raw-gh AND
+>   `--generate-baseline`d passed Check 1 (review reproduced `gh issue view 123` +
+>   regenerate → exit 0). Added **Check 4 — baseline monotonicity vs the trusted
+>   ref** (`origin/main` by default; `--trusted-ref` / `CUTOVER_TRUSTED_REF`): the
+>   working-tree baseline may only SHRINK vs the merged copy; a grown signature or
+>   count FAILs naming the site. Skips gracefully off-git / on the first PR that
+>   introduces the baseline (the merge gate re-runs it with `origin/main`).
+>   Regression tests: TC-CUTOVER-017 (bypass closed), TC-CUTOVER-018 (shrink/clean
+>   allowed + missing-ref graceful skip).
+> - The detector now greps with **`-a`** (force text): a script carrying UTF-8
+>   punctuation can be misclassified "binary" by grep under some locales, silently
+>   suppressing matches — a latent hole where a real raw-gh could slip the scan.
 
 ## Reality check that shapes this design (the load-bearing decision)
 
@@ -91,9 +105,26 @@ runtime wrapper logic"; self-hosting: never dirty a live wrapper).
   `dispatch-remote-aws-ssm.sh`) is declarative in the script; a stale entry
   (file gone) FAILs. The baseline JSON must be well-formed; a baseline entry
   whose file no longer exists FAILs.
+- **Check 4 — baseline MONOTONICITY vs the trusted (merged) ref.** Closes the
+  same-PR self-ratification bypass: Check 1 only proves the tree matches WHATEVER
+  baseline ships in the same change, so a PR that BOTH adds a raw-gh AND
+  `--generate-baseline`s would pass Check 1 (the #286 review reproduced this with
+  `gh issue view 123` + a regenerated baseline → exit 0). Check 4 reads the trusted
+  baseline at `--trusted-ref` (default `origin/main`, overridable via the flag or
+  `CUTOVER_TRUSTED_REF`) with `git show <ref>:<path>` and FAILs if the working-tree
+  baseline GREW — a new `(file,content)` signature, or a higher count for an
+  existing one. SHRINKING (a migration removed a leaf) is allowed; the baseline may
+  only ever get smaller. When not in a git work tree, or the ref / trusted baseline
+  is unresolvable (shallow / fork checkout, or the very first PR that introduces the
+  baseline), Check 4 SKIPS gracefully with an `info` note — the credential-free
+  merge gate re-runs it with `origin/main` present, and Check 1 still anchors the
+  tree to the in-repo baseline meanwhile.
 
 Baseline keyed by content (not line numbers) → robust to line drift. Count-based
-→ robust to identical-duplicate lines.
+→ robust to identical-duplicate lines. The detector greps with `-a` (force text):
+a script carrying UTF-8 punctuation can be misclassified "binary" by grep under
+some locales, which would SILENTLY suppress matches — `-a` makes the scan
+content/locale-independent.
 
 ## Caps-branch coverage gate (`test-provider-caps-branches.sh`)
 

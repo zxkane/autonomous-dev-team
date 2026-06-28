@@ -62,6 +62,12 @@
 #                                             Emit a fresh baseline JSON for the
 #                                             current tree to stdout (regenerate
 #                                             after a migration PR shrinks the set).
+#   check-provider-cutover.sh --trusted-ref REF [--trusted-baseline-path P]
+#                                             Check 4 (monotonicity): compare the
+#                                             working-tree baseline against the
+#                                             trusted copy at git REF (default
+#                                             origin/main); FAIL if it GREW. May
+#                                             only SHRINK. Skips off-git/missing-ref.
 #
 # Exit: 0 all checks pass; 1 a drift/integrity failure; 2 usage; 3 env.
 
@@ -72,13 +78,25 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 SCRIPTS_DIR="$SCRIPT_DIR"
 BASELINE="$SCRIPT_DIR/providers/cutover-baseline.json"
 GENERATE=0
+# The git ref carrying the TRUSTED (already-merged, already-reviewed) baseline that
+# the working-tree baseline is checked against for MONOTONICITY (Check 4). A PR may
+# only SHRINK the baseline (migration removes a leaf); it may NEVER grow it — that
+# would ratify a NEW raw-gh in the same change that introduces it, the [INV-91]
+# bypass the cutover guard exists to prevent. Override for tests/forks.
+TRUSTED_REF="${CUTOVER_TRUSTED_REF:-origin/main}"
+# Path of the baseline file RELATIVE to the git repo root, used to read the trusted
+# copy via `git show <ref>:<path>`. Defaults to the in-repo location; overridable
+# so a test can point at a scratch ref. Empty => derive from BASELINE at run time.
+TRUSTED_BASELINE_PATH="${CUTOVER_TRUSTED_BASELINE_PATH:-skills/autonomous-dispatcher/scripts/providers/cutover-baseline.json}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --scripts-dir)        SCRIPTS_DIR="$2"; shift ;;
     --baseline)           BASELINE="$2"; shift ;;
     --generate-baseline)  GENERATE=1 ;;
-    -h|--help)            sed -n '2,62p' "$0"; exit 0 ;;
+    --trusted-ref)        TRUSTED_REF="$2"; shift ;;
+    --trusted-baseline-path) TRUSTED_BASELINE_PATH="$2"; shift ;;
+    -h|--help)            sed -n '2,72p' "$0"; exit 0 ;;
     *) echo "check-provider-cutover.sh: unknown argument: $1" >&2; exit 2 ;;
   esac
   shift
@@ -158,7 +176,11 @@ is_caller_layer() {
 gh_lines_in() {
   local path="$1"
   [ -f "$path" ] || return 0
-  grep -E '(^|[^A-Za-z_-])gh ' "$path" 2>/dev/null | awk '
+  # -a (treat input as text): a script carrying UTF-8 punctuation (em-dashes in
+  # comments, etc.) can be misclassified "binary data" by grep under some locales,
+  # which then SILENTLY suppresses all matches → a real raw-gh site would slip past
+  # the scan. -a forces text mode so the detector is content/locale-independent.
+  grep -aE '(^|[^A-Za-z_-])gh ' "$path" 2>/dev/null | awk '
     { s = $0; sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s)
       if (substr(s, 1, 1) == "#") next
       print s }'
@@ -195,7 +217,7 @@ sites_file_lines() {
   [ -f "$path" ] || { printf '%s:?' "$rel"; return; }
   while IFS=: read -r n _; do
     [ -n "$n" ] && printf '%s:%s ' "$rel" "$n"
-  done < <(grep -nF -- "$content" "$path" 2>/dev/null)
+  done < <(grep -anF -- "$content" "$path" 2>/dev/null)
 }
 
 # ---------------------------------------------------------------------------
@@ -311,6 +333,47 @@ while IFS= read -r bfile; do
   [ -z "$bfile" ] && continue
   [ -f "$SCRIPTS_DIR/$bfile" ] || fail "baseline references file '$bfile' which no longer exists in $SCRIPTS_DIR — drop the stale baseline entry (--generate-baseline)."
 done < <(jq -r '.surviving_sites[].file' "$BASELINE" | sort -u)
+
+# ---------------------------------------------------------------------------
+# Check 4 — baseline MONOTONICITY vs the trusted (merged) ref. Closes the
+# same-PR self-ratification bypass: Check 1 only proves the tree matches WHATEVER
+# baseline ships in the same change, so a PR that BOTH adds a raw-gh AND regenerates
+# the baseline passes Check 1 (#286 review: `gh issue view 123` + --generate-baseline
+# → exit 0). This check compares the working-tree baseline against the trusted copy
+# at $TRUSTED_REF and FAILs if the PR's baseline GREW — a new signature, or a higher
+# count for an existing one. SHRINKING (a migration removed a leaf) is allowed.
+# The baseline may only ever get smaller; ratifying a new site is rejected here even
+# though Check 1 was satisfied by the regenerated manifest.
+# ---------------------------------------------------------------------------
+echo "=== Check 4: baseline monotonicity vs trusted ref ($TRUSTED_REF) — a PR may only SHRINK the baseline ==="
+if ! command -v git >/dev/null 2>&1 || ! git rev-parse --git-dir >/dev/null 2>&1; then
+  info "not a git work tree (or git absent) — skipping monotonicity check (Check 1 still anchors the tree to the in-repo baseline)"
+elif ! git rev-parse --verify --quiet "$TRUSTED_REF" >/dev/null 2>&1; then
+  info "trusted ref '$TRUSTED_REF' not resolvable here (shallow/forked checkout) — skipping monotonicity check; the merge gate re-runs it with origin/main present"
+else
+  TRUSTED_TMP="$(mktemp)"
+  if git show "${TRUSTED_REF}:${TRUSTED_BASELINE_PATH}" >"$TRUSTED_TMP" 2>/dev/null && jq -e . "$TRUSTED_TMP" >/dev/null 2>&1; then
+    # Emit "<file>\t<content>\t<count>" for both, then for every PR signature whose
+    # count exceeds the trusted count (absent ⇒ trusted 0), FAIL. jq does the join.
+    grew="$(jq -rn --slurpfile cur "$BASELINE" --slurpfile old "$TRUSTED_TMP" '
+      ($old[0].surviving_sites // []) | map({key: (.file+" "+.content), value: .count}) | from_entries as $oldmap
+      | ($cur[0].surviving_sites // [])
+      | map(select(.count > ($oldmap[(.file+" "+.content)] // 0)))
+      | .[] | "\(.file)\t\(.content)\t\(.count)\t\(($oldmap[(.file+" "+.content)] // 0))"
+    ' 2>/dev/null)"
+    if [ -n "$grew" ]; then
+      while IFS=$'\t' read -r gfile gcontent gcount goldcount; do
+        [ -z "$gfile" ] && continue
+        fail "baseline GREW vs $TRUSTED_REF -- $gfile raw-gh '$gcontent' count $goldcount->$gcount. This ratifies a NEW raw-gh site in the same change that adds it (the [INV-91] self-ratification bypass). Route the new host I/O through an itp_*/chp_* verb instead of baselining it; the baseline may only shrink as migrations land."
+      done <<< "$grew"
+    else
+      info "baseline did not grow vs $TRUSTED_REF (signatures + counts are <= the trusted copy) -- no new raw-gh ratified"
+    fi
+  else
+    info "no trusted baseline at ${TRUSTED_REF}:${TRUSTED_BASELINE_PATH} (first introduction of the baseline, or path differs) — nothing to regress against yet"
+  fi
+  rm -f "$TRUSTED_TMP"
+fi
 
 # ---------------------------------------------------------------------------
 echo ""

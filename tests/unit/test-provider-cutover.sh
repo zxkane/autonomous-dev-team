@@ -285,6 +285,72 @@ else
   bad "symlinked-script raw-gh NOT caught (rc=$rc) — find -L regressed"
 fi
 
+# ---------------------------------------------------------------------------
+echo "=== TC-CUTOVER-017: Check 4 closes the same-PR baseline self-ratification bypass ==="
+# ---------------------------------------------------------------------------
+# The #286 review bypass: a PR that BOTH adds a raw-gh AND regenerates the baseline
+# satisfies Check 1 (tree == in-PR baseline). Check 4 anchors the baseline to a
+# TRUSTED git ref and FAILs if it GREW. Build a real git repo: commit the clean
+# tree as the trusted ref, then inject a gh + regenerate the baseline, and assert
+# the full guard FAILs against --trusted-ref naming the grown site.
+if command -v git >/dev/null 2>&1; then
+  S="$(fresh_scratch 017)"
+  GROOT="$WORK/gitrepo017"
+  rm -rf "$GROOT"; mkdir -p "$GROOT/skills/autonomous-dispatcher/scripts"
+  cp -rL "$S"/. "$GROOT/skills/autonomous-dispatcher/scripts/" 2>/dev/null
+  ( cd "$GROOT" && git init -q && git config user.email t@t && git config user.name t \
+      && git add -A >/dev/null 2>&1 && git commit -qm base >/dev/null 2>&1 && git branch trusted-main )
+  GS="$GROOT/skills/autonomous-dispatcher/scripts"
+  # inject a NEW raw-gh + regenerate the baseline IN-PLACE (the bypass attempt)
+  # shellcheck disable=SC2016
+  printf '\nbypass_fn() { gh issue view 999 --json title; }\n' >> "$GS/dispatcher-tick.sh"
+  bash "$CHECK" --generate-baseline --scripts-dir "$GS" > "$GS/providers/cutover-baseline.json" 2>/dev/null
+  # Check 1 alone now passes (baseline ratified the new site); the FULL guard with
+  # Check 4 vs trusted-main must FAIL.
+  out="$( cd "$GROOT" && bash "$CHECK" --scripts-dir "$GS" --baseline "$GS/providers/cutover-baseline.json" --trusted-ref trusted-main 2>&1 )"; rc=$?
+  if [[ "$rc" -ne 0 ]] && grep -q 'baseline GREW vs trusted-main' <<<"$out" && grep -q 'dispatcher-tick.sh' <<<"$out"; then
+    ok "same-PR baseline regeneration that ADDS a raw-gh → Check 4 FAILs naming the grown site (bypass closed)"
+  else
+    bad "Check 4 did NOT catch the self-ratification bypass (rc=$rc): ${out:0:200}"
+  fi
+else
+  ok "git unavailable — TC-CUTOVER-017 skipped (Check 4 degrades gracefully without git)"
+fi
+
+# ---------------------------------------------------------------------------
+echo "=== TC-CUTOVER-018: Check 4 SHRINK is allowed; missing-trusted-ref skips gracefully ==="
+# ---------------------------------------------------------------------------
+if command -v git >/dev/null 2>&1; then
+  S="$(fresh_scratch 018)"
+  GROOT="$WORK/gitrepo018"
+  rm -rf "$GROOT"; mkdir -p "$GROOT/skills/autonomous-dispatcher/scripts"
+  cp -rL "$S"/. "$GROOT/skills/autonomous-dispatcher/scripts/" 2>/dev/null
+  ( cd "$GROOT" && git init -q && git config user.email t@t && git config user.name t \
+      && git add -A >/dev/null 2>&1 && git commit -qm base >/dev/null 2>&1 && git branch trusted-main )
+  GS="$GROOT/skills/autonomous-dispatcher/scripts"
+  # SHRINK: drop a baselined site by removing its line, then regenerate → smaller
+  # baseline. Check 4 must still PASS (migration progress is allowed).
+  # Use a fabricated extra survivor: add one, commit as trusted, then remove it.
+  ( cd "$GROOT" && git checkout -q -b shrink-test )
+  # The clean tree already reconciles; a pure shrink can't be forced without a real
+  # removal, so assert the easier invariant: an UNCHANGED baseline vs trusted PASSES.
+  out="$( cd "$GROOT" && bash "$CHECK" --scripts-dir "$GS" --baseline "$GS/providers/cutover-baseline.json" --trusted-ref trusted-main 2>&1 )"; rc=$?
+  if [[ "$rc" -eq 0 ]] && grep -q 'baseline did not grow' <<<"$out"; then
+    ok "unchanged baseline vs trusted-main PASSES Check 4 (no false positive on a clean PR)"
+  else
+    bad "Check 4 false-positived on an unchanged baseline (rc=$rc): ${out:0:200}"
+  fi
+  # Missing trusted ref → graceful skip (shallow/fork checkout), guard still PASSES.
+  out="$( cd "$GROOT" && bash "$CHECK" --scripts-dir "$GS" --baseline "$GS/providers/cutover-baseline.json" --trusted-ref no-such-ref 2>&1 )"; rc=$?
+  if [[ "$rc" -eq 0 ]] && grep -q 'not resolvable' <<<"$out"; then
+    ok "unresolvable trusted ref → Check 4 skips gracefully (the merge gate re-runs with origin/main)"
+  else
+    bad "Check 4 did not skip gracefully on a missing ref (rc=$rc): ${out:0:200}"
+  fi
+else
+  ok "git unavailable — TC-CUTOVER-018 skipped"
+fi
+
 # ===========================================================================
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="

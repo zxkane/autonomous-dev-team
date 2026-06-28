@@ -209,7 +209,7 @@
     {
       "count": 1,
       "file": "check-provider-cutover.sh",
-      "content": "grep -E '(^|[^A-Za-z_-])gh ' \"$path\" 2>/dev/null | awk '"
+      "content": "grep -aE '(^|[^A-Za-z_-])gh ' \"$path\" 2>/dev/null | awk '"
     },
     {
       "count": 1,

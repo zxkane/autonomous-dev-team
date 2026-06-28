@@ -685,6 +685,19 @@ grep/jq lint modeled on `check-spec-drift.sh`:
   pulls a `gh` leaf behind a verb MUST shrink the baseline in the same PR. As the
   survivors migrate, the baseline shrinks to empty and the guard becomes the
   strict from-zero ban.
+- **Monotonicity-anchored to the trusted ref** (closes the same-PR
+  self-ratification bypass): the baseline-reconcile above only proves the tree
+  matches WHATEVER baseline ships in the same change, so a PR that BOTH adds a
+  raw-gh AND `--generate-baseline`s would pass it. The guard therefore also reads
+  the trusted (merged) baseline at `--trusted-ref` (default `origin/main`, override
+  via the flag or `CUTOVER_TRUSTED_REF`) via `git show <ref>:<path>` and FAILs if
+  the working-tree baseline GREW — a new `(file,content)` signature or a higher
+  count — so a PR can only ever SHRINK the baseline; ratifying a new site is
+  rejected even when the in-PR reconcile is satisfied. Off-git, or when the ref /
+  trusted baseline is unresolvable (shallow / fork checkout, or the first PR that
+  introduces the baseline), this check SKIPS gracefully (the merge gate re-runs it
+  with `origin/main`). The scan greps with `-a` (force text) so a script carrying
+  UTF-8 punctuation is never misclassified "binary" and silently skipped.
 
 The guard explicitly covers the dispatcher's own marker writers
 `post_dispatch_token` ([INV-18]) and `_dep_block_comment` ([INV-39]), which post

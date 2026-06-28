@@ -26,9 +26,14 @@ Drives `check-provider-cutover.sh` against scratch copies via the
 | TC-CUTOVER-014 | **(R2-F2)** The guard is NOT wholesale-allowlisted — a NEW `gh api user` in the checker itself | `exit 1`, names `check-provider-cutover.sh:LINE` (clean tree still PASSES — its legit gh lines are baselined) |
 | TC-CUTOVER-015 | **(R2-F1)** Inject a NEW `gh` into a NESTED `adapters/codex.sh` | `exit 1`, caught by the recursive scan, names `adapters/codex.sh:LINE` |
 | TC-CUTOVER-016 | **(R2-F1)** Inject a NEW `gh` into a tracked-but-symlinked script (`mark-issue-checkbox.sh`) | `exit 1` (`find -L` keeps symlinked scripts in scope) |
+| TC-CUTOVER-017 | **(Check 4)** In a real git repo: commit the clean tree as `trusted-main`, then inject a `gh` + `--generate-baseline` (the same-PR self-ratification bypass), run with `--trusted-ref trusted-main` | `exit 1`, `baseline GREW vs trusted-main` names the grown `dispatcher-tick.sh` site (bypass closed) |
+| TC-CUTOVER-018 | **(Check 4)** Unchanged baseline vs `trusted-main`; and an unresolvable `--trusted-ref` | unchanged → `exit 0` (`baseline did not grow`); missing ref → `exit 0` (graceful skip, `not resolvable`) |
 
 > Note (F1/AC #2): TC-CUTOVER-002 asserts the `::error::` names the exact
 > `file:line` (`lib-dispatch.sh:NNNN`), not just the file.
+> Note (Check 4): the monotonicity guard reads the trusted baseline at
+> `--trusted-ref` (default `origin/main`) via `git show`; a PR may only SHRINK the
+> baseline, never grow it — closing the same-PR self-ratification bypass.
 
 ## `tests/unit/test-provider-caps-branches.sh` — caps-branch coverage gate
 
