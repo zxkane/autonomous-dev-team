@@ -137,13 +137,30 @@ jobs:
     name: Spec Drift
     runs-on: ubuntu-latest
     steps:
+      # fetch-depth: 0 so the provider-cutover guard's strict monotonicity check
+      # (--require-trusted-ref, below) can resolve origin/main (the current tip of
+      # main, which carries the trusted cutover-baseline.json) and read its baseline.
+      # A shallow (depth-1) checkout has no origin/main, and under
+      # --require-trusted-ref an unresolvable trusted ref FAILs closed (#286 P1#1 — a
+      # permissive skip would let a PR add a raw-gh + regenerate the baseline and
+      # self-ratify). check-spec-drift.sh below is unaffected by depth.
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
 
       # (a) regenerate the state-machine.md mermaid region from transitions.json
       #     and fail on any diff; (b) guard/action mapping + label-write
       #     completeness. Same checker the unit test (test-spec-drift.sh) drives.
       - name: Check spec/code drift
         run: bash skills/autonomous-dispatcher/scripts/check-spec-drift.sh
+
+      # Provider-cutover ratchet guard ([INV-91]): no NEW raw `gh` may re-enter the
+      # provider-neutral caller layer outside providers/. Run in strict mode
+      # (--require-trusted-ref) so a missing/unreadable trusted baseline FAILs closed
+      # rather than silently passing. Credential-free (jq + coreutils); same checker
+      # the unit test (test-provider-cutover.sh) drives.
+      - name: Check provider cutover (no new raw gh in caller layer)
+        run: bash skills/autonomous-dispatcher/scripts/check-provider-cutover.sh --require-trusted-ref
 
   hermetic-shellcheck:
     name: Hermetic / ShellCheck + workflow lint
@@ -188,6 +205,9 @@ jobs:
             skills/autonomous-dispatcher/scripts/gen-state-machine.sh \
             skills/autonomous-dispatcher/scripts/check-spec-drift.sh \
             tests/unit/test-spec-drift.sh \
+            skills/autonomous-dispatcher/scripts/check-provider-cutover.sh \
+            tests/unit/test-provider-cutover.sh \
+            tests/unit/test-provider-caps-branches.sh \
             tests/e2e/run-agent-smoke.sh \
             tests/e2e/run-metrics-report.sh \
             tests/e2e/run-error-envelope-e2e.sh \
