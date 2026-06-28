@@ -476,6 +476,47 @@ else
   ok "git unavailable — TC-CUTOVER-021 skipped"
 fi
 
+# ---------------------------------------------------------------------------
+echo "=== TC-CUTOVER-022: --trusted-baseline-path override WITHOUT prefix env still classifies growth (#286 review P1#1) ==="
+# ---------------------------------------------------------------------------
+# Regression for the prefix-staleness bug: TRUSTED_SCRIPTS_PREFIX was derived from the
+# DEFAULT TRUSTED_BASELINE_PATH at init time, BEFORE the arg loop parsed
+# --trusted-baseline-path. So a caller overriding ONLY --trusted-baseline-path (no
+# CUTOVER_TRUSTED_SCRIPTS_PREFIX env, no --trusted-scripts-prefix flag) probed the
+# trusted tree under the wrong (default) prefix -> a real growth in an EXISTING file
+# was misclassified as a new-file introduction -> false PASS. The fix derives the
+# prefix AFTER arg parsing. This test deliberately passes NO prefix env/flag.
+if command -v git >/dev/null 2>&1; then
+  S="$(fresh_scratch 022)"
+  GROOT="$WORK/gitrepo022"; GS="$GROOT/sd"
+  rm -rf "$GROOT"; mkdir -p "$GS"
+  cp -rL "$S"/. "$GS/" 2>/dev/null
+  rm -f "$GS/providers/cutover-baseline.json"
+  ( cd "$GROOT" && git init -q && git config user.email t@t && git config user.name t \
+      && git add -A >/dev/null 2>&1 && git commit -qm base >/dev/null 2>&1 && git branch trusted-main )
+  # shellcheck disable=SC2016
+  printf '\nabuse_fn() { gh pr view 999 --json state; }\n' >> "$GS/lib-dispatch.sh"
+  # generate the baseline WITHOUT the prefix env too (the prefix must derive from
+  # --trusted-baseline-path for the trusted-tree probe; generate only needs scripts-dir).
+  bash "$CHECK" --generate-baseline --scripts-dir "$GS" > "$GS/providers/cutover-baseline.json" 2>/dev/null
+  # NO CUTOVER_TRUSTED_SCRIPTS_PREFIX, NO --trusted-scripts-prefix: only --trusted-baseline-path.
+  out="$( cd "$GROOT" && bash "$CHECK" --scripts-dir "$GS" --baseline "$GS/providers/cutover-baseline.json" --trusted-ref trusted-main --trusted-baseline-path "sd/providers/cutover-baseline.json" 2>&1 )"; rc=$?
+  if [[ "$rc" -ne 0 ]] && grep -q 'lib-dispatch.sh raw-gh' <<<"$out" && grep -q 'gh pr view 999' <<<"$out"; then
+    ok "override --trusted-baseline-path alone (no prefix env/flag) → prefix derives correctly, growth CAUGHT (P1#1 fixed)"
+  else
+    bad "prefix-staleness regression: --trusted-baseline-path override misclassified growth as a new file (rc=$rc): ${out:0:200}"
+  fi
+  # And an explicit --trusted-scripts-prefix override is honored too.
+  out2="$( cd "$GROOT" && bash "$CHECK" --scripts-dir "$GS" --baseline "$GS/providers/cutover-baseline.json" --trusted-ref trusted-main --trusted-baseline-path "sd/providers/cutover-baseline.json" --trusted-scripts-prefix "sd" 2>&1 )"; rc2=$?
+  if [[ "$rc2" -ne 0 ]] && grep -q 'gh pr view 999' <<<"$out2"; then
+    ok "explicit --trusted-scripts-prefix is honored (growth still caught)"
+  else
+    bad "explicit --trusted-scripts-prefix not honored (rc=$rc2): ${out2:0:200}"
+  fi
+else
+  ok "git unavailable — TC-CUTOVER-022 skipped"
+fi
+
 # ===========================================================================
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="

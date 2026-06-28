@@ -81,6 +81,15 @@ caller layer outside `scripts/providers/`.
 >   (#295)**, NOT part of this PR (owner ruling 2026-06-28; the scoped token can't
 >   push `.github/workflows/`, INV-83).
 >
+> **Revision (later review round, codex — TRUSTED_SCRIPTS_PREFIX staleness, P1#1).**
+> - `TRUSTED_SCRIPTS_PREFIX` was derived from the DEFAULT `TRUSTED_BASELINE_PATH` at
+>   init time, BEFORE the arg loop parsed `--trusted-baseline-path`. A caller
+>   overriding ONLY `--trusted-baseline-path` (no `CUTOVER_TRUSTED_SCRIPTS_PREFIX`)
+>   then probed the trusted tree under the wrong prefix → real growth in an EXISTING
+>   file was misclassified as a new-file introduction → false PASS. Fix: derive the
+>   prefix from the FINAL `TRUSTED_BASELINE_PATH` AFTER the arg loop (unless set via
+>   env or the new `--trusted-scripts-prefix` flag). Regression test: TC-CUTOVER-022.
+>
 > **Revision (owner AC rewrite, 2026-06-28 — strict-mode fail-closed, AC #6).**
 > - Owner rewrote the ACs to be satisfiable and split ci.yml (#295) + the 104-site
 >   migration (#296) into non-blocking follow-ups. The one real defect to fix:

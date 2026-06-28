@@ -63,11 +63,15 @@
 #                                             current tree to stdout (regenerate
 #                                             after a migration PR shrinks the set).
 #   check-provider-cutover.sh --trusted-ref REF [--trusted-baseline-path P]
+#                              [--trusted-scripts-prefix D]
 #                                             Check 4 (monotonicity): compare the
 #                                             working-tree baseline against the
 #                                             trusted copy at git REF (default
 #                                             origin/main); FAIL if it GREW. May
 #                                             only SHRINK. Skips off-git/missing-ref.
+#                                             --trusted-scripts-prefix overrides the
+#                                             ref-tree scripts dir (else derived from
+#                                             --trusted-baseline-path AFTER parsing).
 #   check-provider-cutover.sh --require-trusted-ref
 #                                             STRICT mode (fail-closed, AC #6): a
 #                                             missing/unreadable/unparseable baseline,
@@ -100,7 +104,13 @@ TRUSTED_REF="${CUTOVER_TRUSTED_REF:-origin/main}"
 TRUSTED_BASELINE_PATH="${CUTOVER_TRUSTED_BASELINE_PATH:-skills/autonomous-dispatcher/scripts/providers/cutover-baseline.json}"
 # Git-root-relative path to the scripts dir IN THE TRUSTED TREE -- used to derive the
 # trusted survivor set from the ref when its baseline JSON is absent (#286 finding #1).
-TRUSTED_SCRIPTS_PREFIX="${CUTOVER_TRUSTED_SCRIPTS_PREFIX:-$(d="${TRUSTED_BASELINE_PATH%/*}"; printf '%s' "${d%/*}")}"
+# DERIVED FROM TRUSTED_BASELINE_PATH *after* arg parsing (see below) unless explicitly
+# set here via the env. It MUST track a --trusted-baseline-path override: deriving it
+# eagerly from the DEFAULT path (before the arg loop) left it stale when a caller
+# overrode --trusted-baseline-path without also exporting CUTOVER_TRUSTED_SCRIPTS_PREFIX
+# -- the ref-tree probe then used the wrong prefix and misclassified real growth in an
+# existing file as a new-file introduction -> false PASS (#286 review P1#1, 2026-06-28).
+TRUSTED_SCRIPTS_PREFIX="${CUTOVER_TRUSTED_SCRIPTS_PREFIX:-}"
 # STRICT monotonicity: when set, a Check 4 that cannot resolve the trusted ref
 # (no git / shallow checkout / ref absent) is a FAILURE, not a graceful skip. This
 # closes the shallow-CI hole (#286 review): the hermetic job runs the guard via the
@@ -118,12 +128,24 @@ while [ $# -gt 0 ]; do
     --generate-baseline)  GENERATE=1 ;;
     --trusted-ref)        TRUSTED_REF="$2"; shift ;;
     --trusted-baseline-path) TRUSTED_BASELINE_PATH="$2"; shift ;;
+    --trusted-scripts-prefix) TRUSTED_SCRIPTS_PREFIX="$2"; shift ;;
     --require-trusted-ref) REQUIRE_TRUSTED_REF=1 ;;
-    -h|--help)            sed -n '2,82p' "$0"; exit 0 ;;
+    -h|--help)            sed -n '2,86p' "$0"; exit 0 ;;
     *) echo "check-provider-cutover.sh: unknown argument: $1" >&2; exit 2 ;;
   esac
   shift
 done
+
+# Derive TRUSTED_SCRIPTS_PREFIX from the FINAL TRUSTED_BASELINE_PATH (dir two levels
+# up: .../scripts/providers/cutover-baseline.json -> .../scripts) unless it was set
+# explicitly (env CUTOVER_TRUSTED_SCRIPTS_PREFIX or --trusted-scripts-prefix). Doing
+# this AFTER the arg loop is the #286 P1#1 fix: it now tracks a --trusted-baseline-path
+# override instead of being frozen to the default at init time.
+if [ -z "$TRUSTED_SCRIPTS_PREFIX" ]; then
+  _tbp_dir="${TRUSTED_BASELINE_PATH%/*}"
+  TRUSTED_SCRIPTS_PREFIX="${_tbp_dir%/*}"
+  unset _tbp_dir
+fi
 
 command -v jq >/dev/null 2>&1 || { echo "check-provider-cutover.sh: jq is required" >&2; exit 3; }
 
