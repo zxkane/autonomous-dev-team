@@ -227,6 +227,74 @@ assert_eq "edge: whitespace-tolerant trailer parse" "passed" "$v"
 
 # ---------------------------------------------------------------------------
 echo ""
+echo "=== INV-92 (#298): optional dev-actionable 5th out-param ==="
+# ---------------------------------------------------------------------------
+
+# TC-INV92-CL-001: failed-substantive + dev-actionable=false → out-var false.
+_MOCK_COMMENTS_JSON=$(jq -n \
+  --argjson c1 "$(mkc "$BOT" "2026-05-21T05:30:00Z" "<!-- review-verdict: failed-substantive dev-actionable=false -->")" \
+  '[$c1]')
+v=""; c=""; da=""
+classify_recent_review_verdict 100 "$SESSION_END" v c da
+assert_eq "TC-INV92-CL-001 verdict" "failed-substantive" "$v"
+assert_eq "TC-INV92-CL-001 dev-actionable parsed false" "false" "$da"
+
+# TC-INV92-CL-002: failed-substantive WITHOUT the token → out-var defaults true.
+_MOCK_COMMENTS_JSON=$(jq -n \
+  --argjson c1 "$(mkc "$BOT" "2026-05-21T05:30:00Z" "<!-- review-verdict: failed-substantive -->")" \
+  '[$c1]')
+v=""; c=""; da="SENTINEL"
+classify_recent_review_verdict 100 "$SESSION_END" v c da
+assert_eq "TC-INV92-CL-002 verdict" "failed-substantive" "$v"
+assert_eq "TC-INV92-CL-002 absent token ⇒ default true" "true" "$da"
+
+# TC-INV92-CL-003: explicit dev-actionable=true → out-var true.
+_MOCK_COMMENTS_JSON=$(jq -n \
+  --argjson c1 "$(mkc "$BOT" "2026-05-21T05:30:00Z" "<!-- review-verdict: failed-substantive dev-actionable=true -->")" \
+  '[$c1]')
+v=""; c=""; da=""
+classify_recent_review_verdict 100 "$SESSION_END" v c da
+assert_eq "TC-INV92-CL-003 explicit true → true" "true" "$da"
+
+# TC-INV92-CL-004: the token is IGNORED on a non-substantive verdict (it only
+# rides failed-substantive) — out-var stays the default true.
+_MOCK_COMMENTS_JSON=$(jq -n \
+  --argjson c1 "$(mkc "$BOT" "2026-05-21T05:30:00Z" "<!-- review-verdict: failed-non-substantive cause=bot-timeout -->")" \
+  '[$c1]')
+v=""; c=""; da="SENTINEL"
+classify_recent_review_verdict 100 "$SESSION_END" v c da
+assert_eq "TC-INV92-CL-004 non-substantive verdict still parsed" "failed-non-substantive" "$v"
+assert_eq "TC-INV92-CL-004 cause still parsed" "bot-timeout" "$c"
+assert_eq "TC-INV92-CL-004 dev-actionable default true (token only on substantive)" "true" "$da"
+
+# TC-INV92-CL-005: passed verdict + dev-actionable absent → true (and verdict passed).
+_MOCK_COMMENTS_JSON=$(jq -n \
+  --argjson c1 "$(mkc "$BOT" "2026-05-21T05:30:00Z" "<!-- review-verdict: passed -->")" \
+  '[$c1]')
+v=""; c=""; da=""
+classify_recent_review_verdict 100 "$SESSION_END" v c da
+assert_eq "TC-INV92-CL-005 passed verdict" "passed" "$v"
+assert_eq "TC-INV92-CL-005 dev-actionable default true" "true" "$da"
+
+# TC-INV92-CL-006: the LEGACY 4-arg call (no 5th out-param) MUST still work under
+# `set -u` — the guarded `printf -v "$_da_var"` is a no-op on an empty name. Run
+# under set -e/-u to mirror the dispatcher (it is set +e here for the harness, so
+# re-enable transiently to prove no unbound-variable crash).
+_MOCK_COMMENTS_JSON=$(jq -n \
+  --argjson c1 "$(mkc "$BOT" "2026-05-21T05:30:00Z" "<!-- review-verdict: failed-substantive dev-actionable=false -->")" \
+  '[$c1]')
+v=""; c=""
+( set -eu
+  classify_recent_review_verdict 100 "$SESSION_END" v c
+) ; _legacy_rc=$?
+assert_eq "TC-INV92-CL-006 4-arg legacy call does not crash under set -eu" "0" "$_legacy_rc"
+# And it still classifies the verdict correctly (token simply ignored, no 5th arg).
+v=""; c=""
+classify_recent_review_verdict 100 "$SESSION_END" v c
+assert_eq "TC-INV92-CL-006 4-arg legacy verdict still correct" "failed-substantive" "$v"
+
+# ---------------------------------------------------------------------------
+echo ""
 echo "=== Summary ==="
 echo "  PASS: $PASS"
 echo "  FAIL: $FAIL"

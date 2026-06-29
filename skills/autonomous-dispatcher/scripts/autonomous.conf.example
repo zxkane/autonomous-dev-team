@@ -678,6 +678,31 @@ DEV_SKILL_CMD="/autonomous-dev"
 # uses scripts/gh-as-user.sh to post as a real user.
 REVIEW_BOTS=""
 
+# REVIEW_PROTECTED_PATHS: space-separated glob patterns marking paths the
+# autonomous dev agent provably CANNOT edit — either policy files a human owns
+# or paths needing a token scope the agent's scoped GitHub-App token lacks
+# (INV-92, #298). When the review agent reports a blocking finding on a matching
+# path, it classifies the finding `actionable_by_dev_agent=false`; if EVERY
+# blocking finding of a `failed-substantive` verdict is non-actionable, the
+# wrapper folds `dev-actionable=false` into the verdict trailer and the
+# dispatcher ESCALATES the issue to `stalled` (with an @owner notice,
+# reason=non_actionable_finding) instead of re-dispatching a dev session that
+# could never satisfy the finding.
+#
+# Default (when unset): ".github/workflows/** CODEOWNERS .github/CODEOWNERS"
+#   - .github/workflows/**         — editing GitHub Actions workflows needs the
+#                                    `workflows` token scope, which the agent's
+#                                    scoped token does NOT carry (see
+#                                    AGENT_TOKEN_PERMISSIONS / INV-79). This is
+#                                    the #286 deadlock the classification fixes.
+#   - CODEOWNERS / .github/CODEOWNERS — maintainer-owned code-ownership policy.
+#
+# Matching uses bash extglob/glob semantics (`**`/`*` cross `/`). Override to add
+# project-specific protected paths (e.g. a release-config or infra dir a human
+# owns). Set to "" to disable protected-path classification entirely (every
+# finding is then treated as dev-actionable — the pre-#298 behavior).
+# REVIEW_PROTECTED_PATHS=".github/workflows/** CODEOWNERS .github/CODEOWNERS"
+
 # === E2E Verification (optional) ===
 #
 # E2E has three modes (issue #161). The mode is selected by E2E_MODE.

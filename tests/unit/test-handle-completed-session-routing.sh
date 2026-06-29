@@ -30,6 +30,7 @@ export MAX_CONCURRENT=5
 # Routing-side mocks.
 _MOCK_VERDICT="none"
 _MOCK_CAUSE=""
+_MOCK_DEV_ACTIONABLE="true"   # INV-92 (#298): the dev-actionable 5th out-param
 _MOCK_FLIP_COUNT=0
 _MOCK_NOTICE_PRESENT="0"
 _MOCK_LAST_COMMENT_BODY=""
@@ -46,9 +47,12 @@ _MOCK_REVIEW_RETRY_LIMIT="${REVIEW_RETRY_LIMIT:-2}"
 log() { :; }
 
 classify_recent_review_verdict() {
-  local _issue="$1" _ts="$2" _v="$3" _c="$4"
+  local _issue="$1" _ts="$2" _v="$3" _c="$4" _da="${5:-}"
   printf -v "$_v" '%s' "$_MOCK_VERDICT"
   printf -v "$_c" '%s' "$_MOCK_CAUSE"
+  # INV-92 (#298): when the handler passes a 5th out-param, set it from the mock
+  # (default "true"). Guarded like the real helper so a 4-arg call is a no-op.
+  [ -n "$_da" ] && printf -v "$_da" '%s' "${_MOCK_DEV_ACTIONABLE:-true}"
   return 0
 }
 
@@ -102,9 +106,12 @@ set +e
 # Re-define mocks AFTER sourcing.
 log() { :; }
 classify_recent_review_verdict() {
-  local _issue="$1" _ts="$2" _v="$3" _c="$4"
+  local _issue="$1" _ts="$2" _v="$3" _c="$4" _da="${5:-}"
   printf -v "$_v" '%s' "$_MOCK_VERDICT"
   printf -v "$_c" '%s' "$_MOCK_CAUSE"
+  # INV-92 (#298): when the handler passes a 5th out-param, set it from the mock
+  # (default "true"). Guarded like the real helper so a 4-arg call is a no-op.
+  [ -n "$_da" ] && printf -v "$_da" '%s' "${_MOCK_DEV_ACTIONABLE:-true}"
   return 0
 }
 count_review_aware_flips() {
@@ -173,6 +180,7 @@ _MOCK_LAST_REVIEWED_HEAD=""
 _MOCK_BOT_UNFIXABLE=1            # 1 = not unfixable (default); 0 = unfixable
 _MOCK_NOPROG_ATTEMPT_PRESENT="0"
 _MOCK_NOPROG_NOTICE_PRESENT="0"
+_MOCK_NONACT_NOTICE_PRESENT="0"  # INV-92 (#298) Branch B′ notice already posted?
 _MOCK_ATTEMPT_WRITE_FAILS="0"    # 1 = reject attempt-marker writes (finding 2)
 _MOCK_ATTEMPT_WRITE_TRIES=0
 
@@ -204,6 +212,11 @@ itp_list_comments() {
   if [[ "${_MOCK_NOPROG_NOTICE_PRESENT:-0}" != "0" ]]; then
     _bodies+=("no-progress-substantive:${_MOCK_PR_HEAD} notice")
   fi
+  # INV-92 (#298) Branch B′ idempotency: the non-actionable-finding notice keys on
+  # `non-actionable-finding:<head>` (head defaults to `none` when no PR resolved).
+  if [[ "${_MOCK_NONACT_NOTICE_PRESENT:-0}" != "0" ]]; then
+    _bodies+=("non-actionable-finding:${_MOCK_PR_HEAD:-none} prior notice")
+  fi
   if [[ "${_MOCK_NOTICE_PRESENT:-0}" != "0" ]]; then
     # The fresh-dev/INV-12 notices are session-scoped — the branch searches for
     # `contains("INV-12-completed:<sid>")` / `INV-35-fresh-dev:<sid>`. Emit a
@@ -226,6 +239,7 @@ itp_list_comments() {
 reset_mocks() {
   _MOCK_VERDICT="none"
   _MOCK_CAUSE=""
+  _MOCK_DEV_ACTIONABLE="true"
   _MOCK_FLIP_COUNT=0
   _MOCK_NOTICE_PRESENT="0"
   _MOCK_LAST_COMMENT_BODY=""
@@ -241,6 +255,7 @@ reset_mocks() {
   _MOCK_BOT_UNFIXABLE=1
   _MOCK_NOPROG_ATTEMPT_PRESENT="0"
   _MOCK_NOPROG_NOTICE_PRESENT="0"
+  _MOCK_NONACT_NOTICE_PRESENT="0"
   _MOCK_ATTEMPT_WRITE_FAILS="0"
   _MOCK_ATTEMPT_WRITE_TRIES=0
   _MOCK_NOTICE_SESSION=""   # #281: session id the synthesized INV-12/INV-35 marker carries
@@ -623,6 +638,117 @@ else
   echo -e "  ${RED}FAIL${NC}: NOPROG-008 notice contains the grep token (would false-trigger branch B)"
   FAIL=$((FAIL + 1))
 fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== INV-92 (#298) Branch B′: non-actionable finding → escalate, no dev-new ==="
+# ---------------------------------------------------------------------------
+
+# TC-INV92-RT-001: failed-substantive + dev-actionable=false → mark_stalled,
+# idempotent escalation notice, NO dispatch dev-new, NO label swap to in-progress.
+# HEAD has NOT advanced (so neither INV-85 branch A nor B fires — branch A needs
+# the bot-unfixable signature (default off), branch B needs an attempt marker
+# (default absent)) — Branch B′ is the one that fires on the false token.
+reset_mocks
+_MOCK_VERDICT="failed-substantive"
+_MOCK_DEV_ACTIONABLE="false"
+_MOCK_PR_HEAD="cafef00d"
+_MOCK_LAST_REVIEWED_HEAD="cafef00d"
+prepare_log 100
+assert_returns "INV92-RT-001 returns 0" 0 \
+  handle_completed_session_routing 100 "sid-na001" "2026-05-21T03:18:00Z"
+assert_eq "INV92-RT-001 mark_stalled fired" "100 " "$_MOCK_MARK_STALLED_CALLS"
+assert_eq "INV92-RT-001 NO dispatch dev-new" "" "$_MOCK_DISPATCH_CALLS"
+assert_eq "INV92-RT-001 NO post_dispatch_token" "" "$_MOCK_POST_TOKEN_CALLS"
+assert_eq "INV92-RT-001 NO label swap to in-progress" "" "$_MOCK_LABEL_SWAPS"
+assert_contains "INV92-RT-001 notice keyed non-actionable-finding:<head>" "non-actionable-finding:cafef00d" "$_MOCK_LAST_COMMENT_BODY"
+assert_contains "INV92-RT-001 notice carries reason=non_actionable_finding" "reason=non_actionable_finding" "$_MOCK_LAST_COMMENT_BODY"
+assert_eq "INV92-RT-001 exactly one notice posted" "1" "$_MOCK_COMMENT_COUNT"
+# Log NOT truncated on the escalation path.
+log_size=$(stat -c '%s' "$_MOCK_LOG_FILE")
+if [[ "$log_size" != "0" ]]; then
+  echo -e "  ${GREEN}PASS${NC}: INV92-RT-001 log left intact (not truncated)"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: INV92-RT-001 log was truncated on escalation path"
+  FAIL=$((FAIL + 1))
+fi
+
+# TC-INV92-RT-002: failed-substantive + dev-actionable=true → falls through to
+# Branch C dev-new (regression — the common case is unchanged).
+reset_mocks
+_MOCK_VERDICT="failed-substantive"
+_MOCK_DEV_ACTIONABLE="true"
+_MOCK_PR_HEAD="cafef00d"
+_MOCK_LAST_REVIEWED_HEAD="deadbeef"   # HEAD advanced → branch C
+prepare_log 100
+assert_returns "INV92-RT-002 returns 0" 0 \
+  handle_completed_session_routing 100 "sid-na002" "2026-05-21T03:18:00Z"
+assert_eq "INV92-RT-002 dispatch dev-new fired (actionable)" "dev-new:100 " "$_MOCK_DISPATCH_CALLS"
+assert_eq "INV92-RT-002 NO stall" "" "$_MOCK_MARK_STALLED_CALLS"
+assert_eq "INV92-RT-002 label swap to in-progress" "100:pending-dev:in-progress " "$_MOCK_LABEL_SWAPS"
+
+# TC-INV92-RT-003: failed-substantive + token ABSENT (legacy, mock defaults true)
+# → Branch C dev-new (fail-open regression).
+reset_mocks
+_MOCK_VERDICT="failed-substantive"
+# _MOCK_DEV_ACTIONABLE stays "true" from reset (the handler defaults absent ⇒ true)
+_MOCK_PR_HEAD="cafef00d"
+_MOCK_LAST_REVIEWED_HEAD="deadbeef"
+prepare_log 100
+assert_returns "INV92-RT-003 returns 0" 0 \
+  handle_completed_session_routing 100 "sid-na003" "2026-05-21T03:18:00Z"
+assert_eq "INV92-RT-003 dispatch dev-new fired (legacy fail-open)" "dev-new:100 " "$_MOCK_DISPATCH_CALLS"
+assert_eq "INV92-RT-003 NO stall (legacy fail-open)" "" "$_MOCK_MARK_STALLED_CALLS"
+
+# TC-INV92-RT-004: idempotency — second tick, same HEAD, dev-actionable=false,
+# the escalation notice already present → mark_stalled still fires but NO
+# duplicate notice.
+reset_mocks
+_MOCK_VERDICT="failed-substantive"
+_MOCK_DEV_ACTIONABLE="false"
+_MOCK_PR_HEAD="cafef00d"
+_MOCK_LAST_REVIEWED_HEAD="cafef00d"
+_MOCK_NONACT_NOTICE_PRESENT="1"        # notice already posted
+prepare_log 100
+assert_returns "INV92-RT-004 returns 0" 0 \
+  handle_completed_session_routing 100 "sid-na004" "2026-05-21T03:18:00Z"
+assert_eq "INV92-RT-004 no duplicate notice" "0" "$_MOCK_COMMENT_COUNT"
+assert_eq "INV92-RT-004 NO dispatch dev-new" "" "$_MOCK_DISPATCH_CALLS"
+assert_eq "INV92-RT-004 mark_stalled still fired" "100 " "$_MOCK_MARK_STALLED_CALLS"
+
+# TC-INV92-RT-005: Branch A (bot-unfixable) takes PRECEDENCE over Branch B′ when
+# both could apply (the 403 signature + unchanged HEAD) — the existing INV-85
+# escalation path is unchanged; dev-actionable=false does not change which branch
+# wins, only that the issue escalates (both lead to mark_stalled). This pins that
+# Branch B′ is inserted AFTER A and B, so an already-detected bot-unfixable 403
+# still routes through Branch A's notice marker.
+reset_mocks
+_MOCK_VERDICT="failed-substantive"
+_MOCK_DEV_ACTIONABLE="false"
+_MOCK_PR_HEAD="cafef00d"
+_MOCK_LAST_REVIEWED_HEAD="cafef00d"
+_MOCK_BOT_UNFIXABLE=0                   # branch A 403 signature present
+prepare_log 100
+assert_returns "INV92-RT-005 returns 0" 0 \
+  handle_completed_session_routing 100 "sid-na005" "2026-05-21T03:18:00Z"
+assert_eq "INV92-RT-005 mark_stalled fired" "100 " "$_MOCK_MARK_STALLED_CALLS"
+assert_eq "INV92-RT-005 NO dispatch dev-new" "" "$_MOCK_DISPATCH_CALLS"
+assert_contains "INV92-RT-005 Branch A notice wins (no-progress-substantive marker)" "no-progress-substantive:cafef00d" "$_MOCK_LAST_COMMENT_BODY"
+
+# TC-INV92-RT-006: dev-actionable=false but NO PR resolved (head empty) → the
+# notice keys on `non-actionable-finding:none` and still escalates.
+reset_mocks
+_MOCK_VERDICT="failed-substantive"
+_MOCK_DEV_ACTIONABLE="false"
+_MOCK_PR_HEAD=""                        # no PR
+_MOCK_LAST_REVIEWED_HEAD=""
+prepare_log 100
+assert_returns "INV92-RT-006 returns 0" 0 \
+  handle_completed_session_routing 100 "sid-na006" "2026-05-21T03:18:00Z"
+assert_eq "INV92-RT-006 mark_stalled fired (no PR)" "100 " "$_MOCK_MARK_STALLED_CALLS"
+assert_eq "INV92-RT-006 NO dispatch dev-new" "" "$_MOCK_DISPATCH_CALLS"
+assert_contains "INV92-RT-006 notice keys non-actionable-finding:none" "non-actionable-finding:none" "$_MOCK_LAST_COMMENT_BODY"
 
 # Cleanup
 reset_mocks
