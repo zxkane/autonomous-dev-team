@@ -249,17 +249,7 @@
     {
       "count": 1,
       "file": "lib-auth.sh",
-      "content": "existing=$(gh pr list --repo \"$repo\" --state open --json body \\"
-    },
-    {
-      "count": 1,
-      "file": "lib-auth.sh",
       "content": "if ! command -v gh &>/dev/null || ! gh auth status &>/dev/null 2>&1; then"
-    },
-    {
-      "count": 1,
-      "file": "lib-auth.sh",
-      "content": "pr_number=$(gh pr list --repo \"$repo\" --state open --json number,body \\"
     },
     {
       "count": 1,
@@ -290,11 +280,6 @@
       "count": 1,
       "file": "lib-review-e2e.sh",
       "content": "_body=$(gh api \"repos/${REPO_OWNER}/${REPO_NAME}/issues/comments/${_comment_id}\" \\"
-    },
-    {
-      "count": 1,
-      "file": "lib-review-e2e.sh",
-      "content": "_body=$(gh pr view \"$PR_NUMBER\" --repo \"$REPO\" --json comments \\"
     },
     {
       "count": 1,
