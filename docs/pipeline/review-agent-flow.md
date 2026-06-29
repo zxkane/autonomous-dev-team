@@ -677,6 +677,15 @@ A maintainer running `/q review` plus a manual `gh pr merge` while the autonomou
 
 Since [INV-54](invariants.md#inv-54-the-pr-still-open-guard-gates-all-pass-chain-exits-not-just-pass) (#196) this guard is **hoisted to the top of the `PASSED_VERDICT == true` chain** (see [§ PR-open guard (INV-54)](#pr-open-guard-inv-54)) so it also protects the INV-44 block-substantive / block-nonsubstantive branches — not just the approve/merge path. The old in-PASS-branch copy was removed (DRY). The original concurrent-merge motivation is unchanged. See [`state-machine.md` § Concurrent reviews on the same PR](state-machine.md#concurrent-reviews-on-the-same-pr) and [#31](https://github.com/zxkane/autonomous-dev-team/issues/31).
 
+## Per-finding actionability classification ([INV-92](invariants.md#inv-92-a-review-blocking-finding-the-dev-agent-provably-cannot-act-on-protected-path--missing-token-scope-is-not-routed-to-dev-resume--the-wrapper-classifies-each-findings-actionability-and-the-dispatcher-escalates-a-non-actionable-verdict-to-stalled))
+
+Each blocking finding the review agent writes into the verdict artifact carries an OPTIONAL actionability classification so the dispatcher does not re-dispatch the dev agent on a finding it provably cannot act on (issue #298, the proactive complement to [INV-85](invariants.md#inv-85-the-completed-session-failed-substantive-route-is-bounded-to-one-dev-new-per-unchanged-head-a-no-progress-or-bot-unfixable-finding-escalates-to-stalled-never-loops)'s reactive 403 guard):
+
+1. **Per-finding (agent, into the artifact)**: for each blocking finding, set `actionable_by_dev_agent` / `requires_human` / `requires_privileged_token` / `blocking_for_merge` (boolean) and `recommended_next_owner` (`dev_agent`|`human`|`maintainer`). The rule (also re-validated wrapper-side from the schema-checked artifact, TOCTOU-safe): a finding on a **protected path** (`review_path_is_protected` over `REVIEW_PROTECTED_PATHS`, default `.github/workflows/** CODEOWNERS .github/CODEOWNERS`) ⇒ `actionable_by_dev_agent=false`, `requires_human=true`, `recommended_next_owner=maintainer` (and `requires_privileged_token=true` only for a `.github/workflows/**` edit when `agent_token_has_workflow_scope` is false); else `actionable_by_dev_agent=true`, `recommended_next_owner=dev_agent`. These two probes live in `lib-review-classify.sh` and are pure config-var reads (the protected list + `AGENT_TOKEN_PERMISSIONS`) — NO GitHub API call, NO sidecar.
+2. **Aggregate (wrapper)**: DURING the verdict-artifact resolution loop (while each agent's validated `_art_json` is live, BEFORE the per-run artifact dirs are `rm -rf`'d), the wrapper computes each agent's effective aggregate `actionable_by_dev_agent` (OR over its blocking findings; absent ⇒ true) into the surviving global `AGENT_DEV_ACTIONABLE[]`. At the substantive-FAIL emit it derives a cross-agent aggregate-OR over the FAILing agents and folds a single coarse `dev-actionable=true|false` token into the trailer — `false` ONLY when EVERY blocking finding of EVERY FAILing agent is non-actionable. The four non-aggregate `failed-substantive` emits (crash-trap, E2E hard gate, missing-bot give-up, merge-conflict) hardcode `dev-actionable=true` (all are dev-actionable). The rich artifact stays local (humans + future on-box consumers); only the coarse trailer token is portable to the dispatcher (which under `remote-aws-ssm` cannot read the artifact).
+
+The dispatcher (`handle_completed_session_routing` Branch B′) routes a `failed-substantive` + `dev-actionable=false` to escalation (an idempotent per-HEAD `@owner` notice with `reason=non_actionable_finding`, then `mark_stalled`) instead of dev-resume — see [`dispatcher-flow.md`](dispatcher-flow.md) and [INV-92](invariants.md#inv-92-a-review-blocking-finding-the-dev-agent-provably-cannot-act-on-protected-path--missing-token-scope-is-not-routed-to-dev-resume--the-wrapper-classifies-each-findings-actionability-and-the-dispatcher-escalates-a-non-actionable-verdict-to-stalled). An absent token (legacy / artifact malformed) defaults `true` ⇒ today's dev-new path (zero regression).
+
 ## Verdict = FAIL or missing path
 
 ```
@@ -685,7 +694,7 @@ Since [INV-54](invariants.md#inv-54-the-pr-still-open-guard-gates-all-pass-chain
      emit_verdict_trailer failed-non-substantive other
    (This is the only fallback comment; if a verdict was posted but agent exited non-zero, the verdict already says everything.)
    else (SUBSTANTIVE — agent posted a FAIL verdict comment):
-     emit_verdict_trailer failed-substantive
+     emit_verdict_trailer failed-substantive dev-actionable=<aggregate>   # INV-92 (#298); aggregate-OR over FAILing agents' blocking findings
      submit_request_changes <PR> "<body linking the Review findings: comment>"   # INV-52, best-effort
 2. −reviewing +pending-dev
 ```

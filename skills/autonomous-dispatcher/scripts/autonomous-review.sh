@@ -160,6 +160,12 @@ source "${LIB_DIR}/lib-review-postfail.sh"
 # today's bounded-retry/drop semantics via the comment fallback + post-window
 # sweep. [INV-65] sourced from the real skill tree via LIB_DIR (no project symlink).
 source "${LIB_DIR}/lib-review-artifact.sh"
+# shellcheck source=lib-review-classify.sh
+# INV-92 (#298): per-finding actionability classification — the deterministic
+# protected-paths matcher + token-scope probe + the aggregate dev-actionability
+# derivation the wrapper folds into the verdict trailer. Pure config-var probes
+# (no API, no sidecar). [INV-65] sourced from the real skill tree via LIB_DIR.
+source "${LIB_DIR}/lib-review-classify.sh"
 # shellcheck source=lib-review-request-changes.sh
 # INV-52 (#193): the wrapper OWNS the GitHub-native PR review action — `--approve`
 # on a PASS and `--request-changes` on a SUBSTANTIVE FAIL — so the PR's
@@ -803,7 +809,9 @@ cleanup() {
     # completed-session crash to the substantive recovery path (a wrapper
     # crash isn't a transient bot/CI/transport blip — it requires a fresh
     # dev session, not a re-review).
-    emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-substantive" "" 2>/dev/null || true
+    # INV-92 (#298): a wrapper crash is ALWAYS dev-actionable (fail-open) — a
+    # fresh dev session is the right recovery, never an escalation.
+    emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-substantive" "" "true" 2>/dev/null || true
     gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
       --remove-label "reviewing" \
       --add-label "pending-dev" 2>/dev/null || true
@@ -1263,7 +1271,19 @@ cat > "${_verdict_artifact_path}.tmp.\$\$" <<VERDICT_JSON
   {
     "schema_version": 1,
     "verdict": "<PASS|FAIL>",
-    "blockingFindings": [ { "title": "...", "detail": "...", "file": "...", "line": 0 } ],
+    "blockingFindings": [
+      {
+        "title": "...",
+        "detail": "...",
+        "file": "...",
+        "line": 0,
+        "actionable_by_dev_agent": true,
+        "requires_human": false,
+        "requires_privileged_token": false,
+        "blocking_for_merge": true,
+        "recommended_next_owner": "dev_agent"
+      }
+    ],
     "nonBlockingFindings": [],
     "runId": "${_agent_session_id}",
     "agent": "${_agent_name}",
@@ -1279,6 +1299,29 @@ issue, NOT silently ignored):
 - \`verdict: "FAIL"\` MUST carry at least one entry in \`blockingFindings\`; a PASS
   MUST have \`blockingFindings\` empty/absent. (FAIL ⇔ ≥1 blocking finding.)
 - \`runId\` MUST be \`${_agent_session_id}\` and \`agent\` MUST be \`${_agent_name}\`.
+
+**Per-finding actionability classification ([INV-92], #298)** — for EACH blocking
+finding, classify WHO can fix it so the dispatcher does not re-dispatch the dev
+agent on a finding it provably cannot act on (these five fields are OPTIONAL; omit
+them and the wrapper defaults each finding to dev-actionable, i.e. today's
+behavior):
+- \`actionable_by_dev_agent\` (boolean) — \`true\` iff the autonomous dev agent can
+  fix it by editing code and pushing a commit. Set it \`false\` ONLY when the
+  finding requires a HUMAN or a token scope the dev agent's scoped token lacks.
+- \`requires_human\` (boolean), \`requires_privileged_token\` (boolean),
+  \`blocking_for_merge\` (boolean), \`recommended_next_owner\`
+  (\`"dev_agent"\`|\`"human"\`|\`"maintainer"\`).
+- Apply this rule:
+  - If the finding's \`file\` is a PROTECTED path (a GitHub Actions workflow under
+    \`.github/workflows/\`, or \`CODEOWNERS\` / \`.github/CODEOWNERS\`):
+    set \`actionable_by_dev_agent: false\`, \`requires_human: true\`,
+    \`recommended_next_owner: "maintainer"\`. Additionally set
+    \`requires_privileged_token: true\` ONLY for a \`.github/workflows/\` edit when
+    the dev agent's token lacks the \`workflows\` scope (it does by default).
+  - Otherwise: \`actionable_by_dev_agent: true\`,
+    \`recommended_next_owner: "dev_agent"\`.
+- The wrapper RE-DERIVES the aggregate routing signal from this validated JSON
+  (it does NOT trust a self-reported summary), so classify each finding HONESTLY.
 
 Write the artifact FIRST, then ALSO post the human-facing verdict comment via
 \`post-verdict.sh\` below (the comment stays for humans + as a fallback channel).
@@ -1541,7 +1584,8 @@ if [[ "${E2E_ACTIVE:-false}" == "true" ]]; then
 Findings->Decision Gate: 1 blocking finding(s) -- FAIL.
 
 1. **[BLOCKING] E2E verification failed** — the wrapper ran the project E2E once before review (INV-46) and it did NOT pass (lane exit code ${_e2e_lane_rc}). See the E2E failure comment on PR #${PR_NUMBER}. The review agents were NOT run because a failing E2E is a hard gate. Fix the failure and push; the next review round re-runs E2E.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
-    emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-substantive" "" 2>/dev/null || true
+    # INV-92 (#298): a failing E2E is a dev-actionable code defect (fail-open).
+    emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-substantive" "" "true" 2>/dev/null || true
 
     # INV-52: a failed E2E hard gate is a dev-actionable blocking FAIL — assert
     # it on the PR's GitHub-native state too (reviewDecision → CHANGES_REQUESTED),
@@ -2324,10 +2368,21 @@ declare -a AGENT_VERDICT_BODIES=()  # the matched comment body (or empty)
 # the legacy comment poll / codex stdout path resolved it). Empty until resolved.
 # Logged so #228 metrics can measure fallback frequency per CLI.
 declare -a AGENT_VERDICT_SOURCES=()
+# INV-92 (#298): per-agent EFFECTIVE aggregate dev-actionability, computed from
+# the agent's VALIDATED verdict artifact (`_art_json`) DURING the resolution loop
+# below — while `_art_json` is still live and BEFORE the per-run artifact dir is
+# `rm -rf`'d. A SURVIVING global (sibling of AGENT_VERDICT_BODIES): the
+# substantive-FAIL emit site reads THIS array, NOT the deleted snapshot file (a
+# re-read at the emit site would always see `absent` → the feature would be
+# inert). "true" (the default) iff the artifact is absent/legacy or ≥1 blocking
+# finding is dev-actionable; "false" only when EVERY blocking finding is
+# non-actionable.
+declare -a AGENT_DEV_ACTIONABLE=()
 for _i in "${!AGENT_NAMES[@]}"; do
   AGENT_VERDICTS+=("")        # filled in below
   AGENT_VERDICT_BODIES+=("")
   AGENT_VERDICT_SOURCES+=("")
+  AGENT_DEV_ACTIONABLE+=("true")   # zero-regression default until derived below
 done
 
 # INV-78 (#233): the verdict-artifact channel — resolve verdicts from the typed
@@ -2389,7 +2444,16 @@ for _i in "${!AGENT_NAMES[@]}"; do
         # AC. The actual wrapper-rendered comment (when the agent's own post failed)
         # is posted later, breadcrumb-gated (see the artifact-render block below).
         AGENT_VERDICT_BODIES[$_i]="$(_verdict_body_from_artifact_json "$_art_json")"
-        log "INV-78: resolved review agent '${AGENT_NAMES[$_i]}' verdict-source=artifact verdict=${_art_verdict} (path ${_art_path})"
+        # INV-92 (#298): derive this agent's EFFECTIVE aggregate dev-actionability
+        # from the SAME live `_art_json` (TOCTOU-safe, mirrors INV-49) and stash it
+        # into the surviving AGENT_DEV_ACTIONABLE global — the substantive-FAIL
+        # emit reads that, NOT the per-run file which is `rm -rf`'d before the emit.
+        # Aggregate-OR over blocking findings: "false" only when EVERY blocking
+        # finding is non-actionable; "true" otherwise (incl. absent/legacy fields).
+        if declare -F review_classify_artifact_dev_actionable >/dev/null 2>&1; then
+          AGENT_DEV_ACTIONABLE[$_i]="$(review_classify_artifact_dev_actionable "$_art_json")"
+        fi
+        log "INV-78: resolved review agent '${AGENT_NAMES[$_i]}' verdict-source=artifact verdict=${_art_verdict} (path ${_art_path}) dev-actionable=${AGENT_DEV_ACTIONABLE[$_i]:-true}"
       else
         # A `valid`-classified artifact whose verdict field is neither PASS nor
         # FAIL is impossible under the schema, but never silently approve — leave
@@ -3214,7 +3278,9 @@ if [[ "$PASSED_VERDICT" == "true" ]]; then
 Findings->Decision Gate: 1 blocking finding(s) -- FAIL.
 
 1. **[BLOCKING] Mandatory review bot(s) [${MISSING_BOTS}] did not review PR #${PR_NUMBER}** after ${_wait_count} brokered trigger attempt(s) on this HEAD. The bot may be misconfigured, rate-limited, or down. Investigate the bot integration (REVIEW_BOTS) — a maintainer can re-trigger once the bot is healthy, or remove it from REVIEW_BOTS. ([INV-79])$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
-        emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-substantive" "" 2>/dev/null || true
+        # INV-92 (#298): a missing-bot give-up is dev-actionable (the dev side can
+        # surface the issue / a re-push re-triggers) — fail-open, never escalate here.
+        emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-substantive" "" "true" 2>/dev/null || true
         submit_request_changes "$PR_NUMBER" \
           "Mandatory review bot(s) [${MISSING_BOTS}] did not review this PR after ${_wait_count} trigger attempt(s) (INV-79). Investigate the bot integration; reviewDecision is CHANGES_REQUESTED until the bot review is present." \
           || log "WARNING: submit_request_changes returned non-zero (best-effort); continuing the FAIL route."
@@ -3295,7 +3361,8 @@ Findings->Decision Gate: 1 blocking finding(s) -- FAIL.
       --body "Auto-merge failed: PR is CONFLICTING with main (mergeable gate, INV-44). Re-dispatching dev agent to rebase onto main.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
 
     # INV-35: a merge conflict is a real, dev-actionable finding — substantive.
-    emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-substantive" "" 2>/dev/null || true
+    # INV-92 (#298): a rebase is exactly what the dev agent does — dev-actionable.
+    emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-substantive" "" "true" 2>/dev/null || true
 
     # INV-52: a CONFLICTING PR is a blocking finding — assert it on the PR's
     # GitHub-native state too (reviewDecision → CHANGES_REQUESTED) so the
@@ -3529,7 +3596,32 @@ else
     # INV-35: agent posted a verdict comment but the verdict was FAILED
     # (or pattern-matched only fail keywords). This is a substantive
     # finding — agent identified code issues to address.
-    emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-substantive" "" 2>/dev/null || true
+    #
+    # INV-92 (#298): derive the AGGREGATE dev-actionability for the trailer from
+    # the SURVIVING AGENT_DEV_ACTIONABLE global (computed in the resolution loop
+    # while each `_art_json` was live, BEFORE the per-run artifact dirs were
+    # rm -rf'd). Cross-agent aggregate-OR over the agents that voted `fail`: the
+    # token is `true` if ANY FAILing agent has ≥1 dev-actionable blocking finding
+    # (a dev-resume can still make progress), and `false` ONLY when EVERY FAILing
+    # agent classified ALL its blocking findings non-actionable. Fail-open: if no
+    # agent voted `fail` (defensive) or no artifact was resolved, the default stays
+    # `true` → today's dispatcher behavior (dev-new). A buggy agent cannot forge
+    # `true` on a protected-path finding — the aggregate was computed from the
+    # schema-validated artifact, not an agent-emitted summary (TOCTOU-safe).
+    _AGG_DEV_ACTIONABLE="false"
+    _any_fail_seen="false"
+    for _i in "${!AGENT_NAMES[@]}"; do
+      [[ "${AGENT_VERDICTS[$_i]:-}" == "fail" ]] || continue
+      _any_fail_seen="true"
+      if [[ "${AGENT_DEV_ACTIONABLE[$_i]:-true}" != "false" ]]; then
+        _AGG_DEV_ACTIONABLE="true"
+        break
+      fi
+    done
+    # No FAILing agent resolved an artifact (e.g. comment-only fallback) → fail-open.
+    [[ "$_any_fail_seen" == "true" ]] || _AGG_DEV_ACTIONABLE="true"
+    log "INV-92: aggregate dev-actionable=${_AGG_DEV_ACTIONABLE} for the substantive FAIL trailer (any-fail-seen=${_any_fail_seen})."
+    emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-substantive" "" "$_AGG_DEV_ACTIONABLE" 2>/dev/null || true
 
     # INV-52: assert the blocking verdict on the PR's GitHub-native state so
     # `reviewDecision` becomes CHANGES_REQUESTED — authoritative for humans,

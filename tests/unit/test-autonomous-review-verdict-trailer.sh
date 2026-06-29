@@ -170,6 +170,63 @@ assert_contains "uppercase cause is rejected/normalized" "cause=" "$_MOCK_LAST_C
 
 # ---------------------------------------------------------------------------
 echo ""
+echo "=== INV-92 (#298): optional dev-actionable token on failed-substantive ==="
+# ---------------------------------------------------------------------------
+
+# failed-substantive + dev-actionable=false → token rides the trailer.
+reset
+emit_verdict_trailer 149 "zxkane/autonomous-dev-team" "failed-substantive" "" "false"
+assert_contains "failed-substantive dev-actionable=false carries the token" \
+  "<!-- review-verdict: failed-substantive dev-actionable=false -->" "$_MOCK_LAST_COMMENT_BODY"
+
+# failed-substantive + dev-actionable=true → token OMITTED (dispatcher default true).
+reset
+emit_verdict_trailer 149 "zxkane/autonomous-dev-team" "failed-substantive" "" "true"
+assert_contains "failed-substantive dev-actionable=true OMITS token (bare trailer)" \
+  "<!-- review-verdict: failed-substantive -->" "$_MOCK_LAST_COMMENT_BODY"
+if [[ "$_MOCK_LAST_COMMENT_BODY" != *"dev-actionable"* ]]; then
+  echo -e "  ${GREEN}PASS${NC}: dev-actionable=true does not emit the token"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: dev-actionable=true unexpectedly emitted the token"
+  FAIL=$((FAIL + 1))
+fi
+
+# failed-substantive WITHOUT a 5th arg → bare trailer (back-compat; the 4-arg
+# call sites must keep emitting the legacy bare trailer byte-identically).
+reset
+emit_verdict_trailer 149 "zxkane/autonomous-dev-team" "failed-substantive" ""
+assert_contains "failed-substantive 4-arg (no token) → bare trailer (back-compat)" \
+  "<!-- review-verdict: failed-substantive -->" "$_MOCK_LAST_COMMENT_BODY"
+if [[ "$_MOCK_LAST_COMMENT_BODY" != *"dev-actionable"* ]]; then
+  echo -e "  ${GREEN}PASS${NC}: 4-arg substantive call emits no dev-actionable token"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: 4-arg substantive call leaked a dev-actionable token"
+  FAIL=$((FAIL + 1))
+fi
+
+# The dev-actionable token NEVER rides a non-substantive trailer even if passed.
+reset
+emit_verdict_trailer 149 "zxkane/autonomous-dev-team" "failed-non-substantive" "bot-timeout" "false"
+if [[ "$_MOCK_LAST_COMMENT_BODY" != *"dev-actionable"* ]]; then
+  echo -e "  ${GREEN}PASS${NC}: dev-actionable token never rides a non-substantive trailer"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: dev-actionable token leaked onto a non-substantive trailer"
+  FAIL=$((FAIL + 1))
+fi
+assert_contains "non-substantive trailer still carries only cause" \
+  "<!-- review-verdict: failed-non-substantive cause=bot-timeout -->" "$_MOCK_LAST_COMMENT_BODY"
+
+# A non-`false` dev-actionable value (garbage) is treated as true → token OMITTED.
+reset
+emit_verdict_trailer 149 "zxkane/autonomous-dev-team" "failed-substantive" "" "garbage"
+assert_contains "non-false dev-actionable value → bare trailer (treated true)" \
+  "<!-- review-verdict: failed-substantive -->" "$_MOCK_LAST_COMMENT_BODY"
+
+# ---------------------------------------------------------------------------
+echo ""
 echo "=== Summary ==="
 echo "  PASS: $PASS"
 echo "  FAIL: $FAIL"

@@ -135,13 +135,25 @@ _validate_verdict_artifact_jq() {
   local _inst="$1"
   jq -e '
     # --- finding shape (shared by blocking + non-blocking) ---
+    # INV-92 (#298): five OPTIONAL per-finding classification fields ride the
+    # finding object (actionable_by_dev_agent / requires_human /
+    # requires_privileged_token / blocking_for_merge : boolean;
+    # recommended_next_owner : enum). They are in the allow-list AND type/enum
+    # checked here — a malformed classification (non-boolean, bad enum) is a
+    # malformed artifact, not silently accepted (Clause V1). Absent ⇒ legacy
+    # behavior (this `is_finding` still accepts a {title}-only finding).
     def is_finding:
       (type == "object")
       and (has("title") and (.title | type == "string") and ((.title | length) >= 1))
-      and ((keys - ["title","detail","file","line"]) | length == 0)
+      and ((keys - ["title","detail","file","line","actionable_by_dev_agent","requires_human","requires_privileged_token","blocking_for_merge","recommended_next_owner"]) | length == 0)
       and ((has("detail") | not) or (.detail | type == "string"))
       and ((has("file")   | not) or (.file   | type == "string"))
-      and ((has("line")   | not) or (.line   | (type == "number") and (. == floor) and (. >= 0)));
+      and ((has("line")   | not) or (.line   | (type == "number") and (. == floor) and (. >= 0)))
+      and ((has("actionable_by_dev_agent")   | not) or (.actionable_by_dev_agent   | type == "boolean"))
+      and ((has("requires_human")            | not) or (.requires_human            | type == "boolean"))
+      and ((has("requires_privileged_token") | not) or (.requires_privileged_token | type == "boolean"))
+      and ((has("blocking_for_merge")        | not) or (.blocking_for_merge        | type == "boolean"))
+      and ((has("recommended_next_owner")    | not) or (.recommended_next_owner    | IN("dev_agent","human","maintainer")));
     def is_finding_array:
       (type == "array") and (all(.[]; is_finding));
     def is_ac_coverage:
@@ -359,6 +371,10 @@ _verdict_body_from_artifact_json() {
             "\(.key + 1). **[BLOCKING] \(.value.title)**"
             + (if .value.detail then " — " + .value.detail else "" end)
             + (if .value.file then " (" + .value.file + (if .value.line then ":" + (.value.line|tostring) else "" end) + ")" else "" end)
+            # INV-92 (#298): surface the recommended owner for humans when the
+            # agent marked the finding non-actionable by the dev agent (absent
+            # field ⇒ dev_agent, so no annotation in the common case).
+            + (if (.value.recommended_next_owner // "dev_agent") != "dev_agent" then " [next owner: " + .value.recommended_next_owner + "]" else "" end)
           ) | .[]' <<<"$_json" 2>/dev/null || true)"
     fi
     _body="Review findings:"$'\n\n'"Findings->Decision Gate: ${_n} blocking finding(s) -- FAIL."

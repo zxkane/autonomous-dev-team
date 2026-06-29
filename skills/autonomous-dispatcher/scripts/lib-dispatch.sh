@@ -850,7 +850,7 @@ is_session_completed() {
 # INV-35: review-verdict classification for completed dev sessions.
 # ---------------------------------------------------------------------------
 #
-# classify_recent_review_verdict <issue_num> <session_end_iso> <verdict_var> <cause_var>
+# classify_recent_review_verdict <issue_num> <session_end_iso> <verdict_var> <cause_var> [dev_actionable_var]
 #
 # Reads issue comments, finds the newest comment that:
 #   (a) was authored by ${BOT_LOGIN} (or matches the session-id-binding
@@ -862,16 +862,29 @@ is_session_completed() {
 # Out-vars receive:
 #   verdict_var ∈ { none, passed, failed-substantive, failed-non-substantive }
 #   cause_var   — non-empty only when verdict is failed-non-substantive.
+#   dev_actionable_var — INV-92 (#298) OPTIONAL 5th arg. When supplied, receives
+#       `true` or `false`: `false` only when the failed-substantive trailer
+#       carried `dev-actionable=false`; `true` otherwise (absent token ⇒ `true`,
+#       the zero-regression default). The ≥10 existing 4-arg callers do not pass
+#       this var and are unaffected — the write is GUARDED on `[ -n "$_da_var" ]`
+#       so it never `printf -v` into an empty name (which would crash under set -u).
 #
-# Always returns 0. See docs/designs/inv35-review-aware-resume.md § 5.
+# Always returns 0. See docs/designs/inv35-review-aware-resume.md § 5 and
+# docs/designs/issue-298-verdict-finding-classification.md § 3.5.
 classify_recent_review_verdict() {
   local issue_num="$1"
   local session_end="$2"
   local verdict_var="$3"
   local cause_var="$4"
+  # INV-92 (#298): optional 5th out-param. "${5:-}" is set -u-safe; the write
+  # below is guarded on a non-empty name so the 4-arg callers never trip it.
+  local _da_var="${5:-}"
 
   printf -v "$verdict_var" '%s' "none"
   printf -v "$cause_var"   '%s' ""
+  # Default the dev-actionable out-var to "true" (absent token ⇒ today's
+  # behavior). Guarded so a 4-arg caller (empty name) is a no-op.
+  [ -n "$_da_var" ] && printf -v "$_da_var" '%s' "true"
 
   # Build the actor predicate. When BOT_LOGIN is empty (the gh-api-user-403
   # fallback), drop actor-binding and rely on FALLBACK_SESSION_ID embedded
@@ -908,8 +921,15 @@ classify_recent_review_verdict() {
   # Match the trailer — first occurrence wins (TC-INV35-CL-007 pins this
   # to "first" rather than "last" so a quoted prior verdict can't override
   # the actual current verdict in pathological cases).
+  #
+  # INV-92 (#298): the optional `dev-actionable=true|false` token rides the
+  # failed-substantive trailer. The regex now tolerates EITHER optional token
+  # (`cause=…` for failed-non-substantive, `dev-actionable=…` for
+  # failed-substantive) in the post-verdict span. The verdict + each token are
+  # extracted independently below, so a legacy `cause`-only trailer and a new
+  # `dev-actionable`-only trailer both parse.
   local trailer_line
-  trailer_line=$(printf '%s' "$newest_body" | grep -oE '<!--[[:space:]]*review-verdict:[[:space:]]*[a-z-]+([[:space:]]+cause=[a-zA-Z0-9_-]+)?[[:space:]]*-->' | head -1)
+  trailer_line=$(printf '%s' "$newest_body" | grep -oE '<!--[[:space:]]*review-verdict:[[:space:]]*[a-z-]+([[:space:]]+(cause=[a-zA-Z0-9_-]+|dev-actionable=[a-z]+))*[[:space:]]*-->' | head -1)
 
   if [ -z "$trailer_line" ]; then
     # Legacy: bot-authored comment with no trailer is conservatively
@@ -924,14 +944,25 @@ classify_recent_review_verdict() {
   # Avoid generic local names (v, c) — they would shadow the caller-supplied
   # var names that printf -v resolves through, e.g. caller passes "v" as the
   # out-var name and `local v` would mask it.
-  local _parsed_verdict _parsed_cause
+  local _parsed_verdict _parsed_cause _parsed_dev_actionable
   _parsed_verdict=$(printf '%s' "$trailer_line" | sed -nE 's/<!--[[:space:]]*review-verdict:[[:space:]]*([a-z-]+).*-->/\1/p')
   _parsed_cause=$(printf '%s' "$trailer_line" | sed -nE 's/.*cause=([a-zA-Z0-9_-]+).*/\1/p')
+  # INV-92 (#298): extract the optional dev-actionable token. Absent ⇒ "" here;
+  # the out-var stays at its "true" default (set at function entry). Only an
+  # explicit `dev-actionable=false` flips it to false. `sed -n …/p` prints
+  # nothing when the token is absent, so `_parsed_dev_actionable` is empty.
+  _parsed_dev_actionable=$(printf '%s' "$trailer_line" | sed -nE 's/.*dev-actionable=([a-z]+).*/\1/p')
 
   case "$_parsed_verdict" in
     passed|failed-substantive|failed-non-substantive)
       printf -v "$verdict_var" '%s' "$_parsed_verdict"
       [ "$_parsed_verdict" = "failed-non-substantive" ] && printf -v "$cause_var" '%s' "$_parsed_cause"
+      # Only `failed-substantive` + an explicit `dev-actionable=false` sets the
+      # out-var to false; everything else leaves it at the "true" default.
+      if [ -n "$_da_var" ] && [ "$_parsed_verdict" = "failed-substantive" ] \
+         && [ "$_parsed_dev_actionable" = "false" ]; then
+        printf -v "$_da_var" '%s' "false"
+      fi
       ;;
     *)
       # Unknown verdict token — treat as missing-trailer (failed-substantive).
@@ -979,8 +1010,10 @@ handle_completed_session_routing() {
   local session_id="$2"
   local session_end_iso="$3"
 
-  local _verdict="" _cause=""
-  classify_recent_review_verdict "$issue_num" "$session_end_iso" _verdict _cause
+  # INV-92 (#298): capture the optional dev-actionable signal (5th out-param).
+  # Defaults to "true" when the trailer carries no token — today's behavior.
+  local _verdict="" _cause="" _dev_actionable="true"
+  classify_recent_review_verdict "$issue_num" "$session_end_iso" _verdict _cause _dev_actionable
 
   case "$_verdict" in
     none)
@@ -1094,6 +1127,39 @@ handle_completed_session_routing() {
             2>/dev/null | grep -q '^0$'; then
           itp_post_comment "$issue_num" \
             "Substantive review failure on completed session \`${session_id}\`, but PR HEAD \`${_np_current_head}\` is unchanged since the last review and a prior fresh dev session already ran against it without producing a new commit. The finding appears un-actionable by the dev agent. Marking stalled — no further \`dev-new\` will be dispatched. @${REPO_OWNER} please investigate. (\`${_np_notice_marker}\`)"
+        fi
+        mark_stalled "$issue_num"
+        return 0
+      fi
+
+      # Branch B′ — [INV-92] (#298) non-actionable finding: the review wrapper
+      # classified EVERY blocking finding as not dev-agent-actionable (a
+      # protected-path / missing-token-scope finding — e.g. a `.github/workflows`
+      # edit the agent's scoped token can't make, or a CODEOWNERS change), folded
+      # into the trailer as `dev-actionable=false`. A dev-resume cannot satisfy
+      # it, so escalate — reuse the existing `pending-dev→stalled` movement
+      # (mark_stalled, a NEW CALL SITE of an existing edge, NOT a new label
+      # transition) with a structured `reason=non_actionable_finding` distinct
+      # from the retry-exhaustion `reason=max_retries_exceeded`. This is the
+      # PROACTIVE complement to INV-85 Branch A (which only fires reactively,
+      # after a dev agent burns a cycle hitting the 403) — it skips the wasted
+      # first dev-new and covers findings the dev agent would never signal with
+      # that exact 403 string. Placed between Branch B (no-progress) and Branch C
+      # (dev-new): a `true`/absent token (the legacy / common case) falls straight
+      # through to Branch C, byte-identical to today.
+      #
+      # Idempotent per-HEAD: keyed on the current PR HEAD (or `none` when no PR is
+      # resolved), the notice posts once. mark_stalled is itself idempotent w.r.t.
+      # the label (label_swap is a no-op if already stalled).
+      if [ "$_dev_actionable" = "false" ]; then
+        local _na_head="${_np_current_head:-none}"
+        local _na_marker="non-actionable-finding:${_na_head}"
+        log "  issue #${issue_num} substantive review failure is NOT dev-agent-actionable (every blocking finding requires a human / privileged token, [INV-92]) — escalating to operator, no dev-new"
+        if itp_list_comments "$issue_num" 2>/dev/null \
+            | jq -r "[.[].body | select(contains(\"${_na_marker}\"))] | length" \
+            2>/dev/null | grep -q '^0$'; then
+          itp_post_comment "$issue_num" \
+            "Substantive review failure on completed session \`${session_id}\` is **not resolvable by the autonomous dev agent**: the review classified every blocking finding as requiring a human or a privileged token the agent's scoped token lacks (e.g. a \`.github/workflows\` edit needs the \`workflows\` scope, or a CODEOWNERS / maintainer-owned change — [INV-92]). Marking stalled — no \`dev-new\` will be dispatched (\`reason=non_actionable_finding\`). @${REPO_OWNER} please apply the change manually, grant the required scope, or split the criterion into a maintainer follow-up. (\`${_na_marker}\`)"
         fi
         mark_stalled "$issue_num"
         return 0

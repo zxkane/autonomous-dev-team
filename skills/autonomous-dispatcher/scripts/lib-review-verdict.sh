@@ -28,7 +28,7 @@ if ! declare -F itp_post_comment >/dev/null 2>&1; then
   unset _lrv_self _lrv_dir
 fi
 
-# emit_verdict_trailer <issue_num> <repo> <verdict> <cause>
+# emit_verdict_trailer <issue_num> <repo> <verdict> <cause> [dev-actionable]
 #
 #   verdict ∈ { passed, failed-substantive, failed-non-substantive }
 #   cause   — required only for failed-non-substantive (extensible token,
@@ -36,6 +36,15 @@ fi
 #             merge-conflict-unresolvable, other). Defaults to "other"
 #             when verdict is failed-non-substantive and cause is empty,
 #             or when cause contains characters outside the whitelist.
+#   dev-actionable — INV-92 (#298) OPTIONAL 5th arg, honored ONLY on
+#             failed-substantive: `true` or `false`. When `false`, the trailer
+#             carries `dev-actionable=false` so the dispatcher routes the
+#             completed-session substantive failure to escalation (mark_stalled)
+#             instead of dev-resume. A SEPARATE key — NOT routed through the
+#             `cause` `^[a-z0-9-]+$` whitelist. ANY value other than the literal
+#             `false` (including absent/empty/`true`/garbage) OMITS the token ⇒
+#             the dispatcher's default `true` (today's behavior). Omitting the
+#             token entirely is the zero-regression default.
 #
 # Returns 0 on success, 1 on rejection (unknown verdict).
 #
@@ -51,6 +60,7 @@ emit_verdict_trailer() {
   local repo="$2"
   local verdict="$3"
   local cause="${4:-}"
+  local dev_actionable="${5:-}"
 
   case "$verdict" in
     passed|failed-substantive|failed-non-substantive)
@@ -70,6 +80,18 @@ emit_verdict_trailer() {
       cause="other"
     fi
     body="<!-- review-verdict: failed-non-substantive cause=${cause} -->"
+  elif [ "$verdict" = "failed-substantive" ]; then
+    # INV-92 (#298): the OPTIONAL dev-actionable token rides ONLY the
+    # failed-substantive trailer. Emit it ONLY when explicitly `false` (the
+    # routing-diverting state today's wrappers never emit). `true` / absent /
+    # any other value OMITS the token so the dispatcher applies its default
+    # `true` (byte-identical to today). A separate key — never folded into
+    # `cause`, so the cause whitelist is untouched.
+    if [ "$dev_actionable" = "false" ]; then
+      body="<!-- review-verdict: failed-substantive dev-actionable=false -->"
+    else
+      body="<!-- review-verdict: failed-substantive -->"
+    fi
   else
     body="<!-- review-verdict: ${verdict} -->"
   fi

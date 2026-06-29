@@ -114,7 +114,28 @@
         "title": { "type": "string", "minLength": 1 },
         "detail": { "type": "string" },
         "file": { "type": "string" },
-        "line": { "type": "integer", "minimum": 0 }
+        "line": { "type": "integer", "minimum": 0 },
+        "actionable_by_dev_agent": {
+          "description": "INV-92 (#298): whether the autonomous dev agent can act on this finding. Absent ⇒ true (a legacy finding omitting it behaves as today). The dispatcher routes off the aggregate-OR of this over the blocking findings, folded into the `dev-actionable` verdict-trailer token; `false` diverts routing away from dev-resume (escalate), it does NOT remove the finding from blockingFindings (the FAIL⇔≥1-blocking rule is unchanged).",
+          "type": "boolean"
+        },
+        "requires_human": {
+          "description": "INV-92 (#298): the finding needs a human (e.g. a maintainer-owned policy file). Absent ⇒ false.",
+          "type": "boolean"
+        },
+        "requires_privileged_token": {
+          "description": "INV-92 (#298): the finding requires a token scope the agent's scoped token lacks (e.g. `workflows` for a `.github/workflows/**` edit). Absent ⇒ false.",
+          "type": "boolean"
+        },
+        "blocking_for_merge": {
+          "description": "INV-92 (#298): whether this finding blocks the merge. Absent ⇒ membership in blockingFindings (i.e. true for a blocking finding). Advisory annotation; routing keys on actionable_by_dev_agent, not this.",
+          "type": "boolean"
+        },
+        "recommended_next_owner": {
+          "description": "INV-92 (#298): who should act on this finding next. Absent ⇒ dev_agent.",
+          "type": "string",
+          "enum": ["dev_agent", "human", "maintainer"]
+        }
       }
     }
   }
