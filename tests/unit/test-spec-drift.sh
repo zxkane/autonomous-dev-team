@@ -599,6 +599,55 @@ adj=$(awk '/^## INV-[0-9]+:/{h=NR} /^_Triage \(issue #236\):/{if(h && NR-h<=2) c
 if [[ "$adj" -eq "$n_head" ]]; then ok "every tag is adjacent to its heading"; else bad "only $adj/$n_head tags are heading-adjacent"; fi
 
 # ===========================================================================
+echo "=== TC-SPEC-GATE-058: #296 B2 doc-retraction is enforced by check-spec-drift.sh Check D (runs in the spec-drift CI job) ==="
+# After #296 B2 (#306) migrated check_deps_resolved's issue-BODY read behind
+# itp_read_task, the normative claim that this read "remains a raw caller-side `gh`
+# call; itp_read_task is its eventual home" became FALSE. The pipeline-docs-gate
+# only checks that SOME docs/pipeline/*.md changed — it cannot catch stale content
+# — so per CLAUDE.md "docs are authoritative" the retraction is enforced by
+# check-spec-drift.sh's Check D, which runs in the SAME `spec-drift` CI job named in
+# the #306 owner comment (NOT only the hermetic-unit test glob — the #306 review
+# [BLOCKING] finding). This case drives that checker the same way the other
+# TC-SPEC-GATE cases do: clean tree → green; injected stale phrase → red naming the
+# file:line.
+SPEC="$DOCS/provider-spec.md"
+
+# (a) the committed provider-spec.md is already retracted → the phrase is ABSENT.
+if [[ -z "$(grep -nF 'remains a raw caller-side' "$SPEC" || true)" ]]; then
+  ok "committed provider-spec.md no longer asserts the body read 'remains a raw caller-side' gh call (#306/B2 migrated)"
+else
+  bad "stale 'remains a raw caller-side' assertion survives in committed provider-spec.md (#306/B2 retraction missing)"
+fi
+
+# (b) check-spec-drift.sh PASSES against the clean committed provider-spec.md (Check D green).
+out="$(bash "$CHECK" --transitions "$DOCS/transitions.json" --guard-map "$DOCS/spec-guard-map.json" \
+  --codesite-map "$DOCS/spec-codesite-map.json" --doc "$DOCS/state-machine.md" \
+  --provider-spec "$SPEC" --scripts-dir "$SCRIPTS" 2>&1)"
+rc=$?
+if [[ "$rc" -eq 0 ]] && grep -q 'retraction holds' <<<"$out"; then
+  ok "check-spec-drift.sh Check D is GREEN on the retracted provider-spec.md (spec-drift CI job passes)"
+else
+  bad "check-spec-drift.sh did not pass Check D on the clean provider-spec.md (rc=$rc)"
+fi
+
+# (c) re-inject the stale phrase into a SCRATCH provider-spec → Check D must go RED
+#     naming the file:line (this is the deterministic gate; a reviewer call is NOT
+#     relied upon). Driving $CHECK proves the spec-drift JOB catches it, not just a
+#     local grep in the hermetic-unit job.
+spec_scratch="$WORK/provider-spec-stale.md"
+cp "$SPEC" "$spec_scratch"
+printf '\n| x | y | z | the body read remains a raw caller-side `gh` call |\n' >> "$spec_scratch"
+out="$(bash "$CHECK" --transitions "$DOCS/transitions.json" --guard-map "$DOCS/spec-guard-map.json" \
+  --codesite-map "$DOCS/spec-codesite-map.json" --doc "$DOCS/state-machine.md" \
+  --provider-spec "$spec_scratch" --scripts-dir "$SCRIPTS" 2>&1)"
+rc=$?
+if [[ "$rc" -ne 0 ]] && grep -Eq "Check D: stale 'remains a raw caller-side' assertion survives in provider-spec\.md:[0-9]+" <<<"$out"; then
+  ok "injected stale assertion → check-spec-drift.sh Check D RED naming provider-spec.md:LINE (spec-drift CI job enforces the retraction)"
+else
+  bad "injected stale assertion NOT caught by check-spec-drift.sh Check D (rc=$rc) — the spec-drift job would not enforce the retraction [BLOCKING]"
+fi
+
+# ===========================================================================
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 [[ "$FAIL" -eq 0 ]] && exit 0 || exit 1

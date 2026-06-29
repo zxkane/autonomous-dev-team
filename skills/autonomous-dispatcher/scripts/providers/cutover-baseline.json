@@ -264,11 +264,6 @@
     {
       "count": 1,
       "file": "lib-dispatch.sh",
-      "content": "body=$(gh issue view \"$issue_num\" --repo \"$REPO\" --json body -q '.body')"
-    },
-    {
-      "count": 1,
-      "file": "lib-dispatch.sh",
       "content": "gh \"${args[@]}\" 2>/dev/null || true"
     },
     {
