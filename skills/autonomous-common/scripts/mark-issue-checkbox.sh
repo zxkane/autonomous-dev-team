@@ -36,9 +36,9 @@ REPO="${GITHUB_REPO:-${REPO:-owner/repo}}"
 # lib lives in the autonomous-dispatcher skill tree; resolve it via readlink -f of
 # THIS script (the [INV-14]/[INV-65] skill-tree idiom) — NOT SCRIPT_DIR, which is
 # deliberately the project-side symlink dir so the conf-lookup above finds the
-# project's autonomous.conf. Guarded + best-effort: if the lib is absent the verb
-# stays undefined and the caller's `command -v` guard below falls back to the
-# inline `gh api` PATCH (a non-github backend would have its own provider lib).
+# project's autonomous.conf. Guarded: if the lib is absent the verb stays undefined
+# and the PATCH write below FAILs LOUD ([INV-91]: a raw `gh` fallback would silently
+# execute GitHub commands for a non-GitHub backend — never silently fall through).
 if ! declare -F itp_mark_checkbox >/dev/null 2>&1; then
   _mic_real_dir="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]:-$0}")")" && pwd 2>/dev/null)" || _mic_real_dir=""
   _mic_lib="${_mic_real_dir}/../../autonomous-dispatcher/scripts/lib-issue-provider.sh"
@@ -128,9 +128,11 @@ mark_checkbox() {
   #   - body_checkbox=0 → the documented native-subtask-completion remap, DEFINED
   #     but NOT IMPLEMENTED this PR — fail LOUD-but-clean (no missing-leaf crash) so
   #     the no-behavior-change scope holds and the gap is visible, not silent.
-  # When the provider lib is unavailable (no itp_caps — script run standalone
-  # without the skill tree), fall back to the inline `gh api` PATCH so the script
-  # stays self-contained (GitHub's today behavior).
+  # When the provider lib is unavailable the itp_mark_checkbox SHIM is undefined; we
+  # FAIL LOUD ([INV-91]) rather than fall back to a raw `gh api` PATCH — a hardcoded
+  # GitHub call would silently execute against GitHub even when the project is
+  # configured for a non-GitHub backend (provider not loaded), the exact silent-
+  # wrong-backend bug the cutover guard exists to prevent.
   local _bc_cap=""
   if declare -F itp_caps >/dev/null 2>&1; then
     _bc_cap="$(itp_caps body_checkbox 2>/dev/null || true)"
@@ -139,14 +141,11 @@ mark_checkbox() {
     echo "Error: provider '${ISSUE_PROVIDER:-?}' has body_checkbox=0 — native-subtask checkbox completion is not implemented yet (this PR migrates the GitHub markdown-checkbox leaf only). Cannot mark '${CHECKBOX_TEXT}' on issue #${ISSUE_NUMBER}." >&2
     return 1
   fi
-  if declare -F itp_mark_checkbox >/dev/null 2>&1; then
-    itp_mark_checkbox "$ISSUE_NUMBER" "$new_body"
-  else
-    gh api "repos/${REPO}/issues/${ISSUE_NUMBER}" \
-      --method PATCH \
-      --field body="$new_body" \
-      --silent
-  fi || {
+  if ! declare -F itp_mark_checkbox >/dev/null 2>&1; then
+    echo "Error: itp_mark_checkbox not available (provider lib not loaded; ISSUE_PROVIDER=${ISSUE_PROVIDER:-?}). Cannot mark checkbox on #${ISSUE_NUMBER}." >&2
+    return 1
+  fi
+  itp_mark_checkbox "$ISSUE_NUMBER" "$new_body" || {
     echo "Error: Failed to update issue #${ISSUE_NUMBER}" >&2
     return 1
   }

@@ -28,8 +28,9 @@ REPO="${1:-${REPO:?Usage: setup-labels.sh [owner/repo] or set REPO in autonomous
 # lib-issue-provider.sh is a sibling in the REAL skill tree; resolve it via
 # readlink -f of THIS script (the [INV-14]/[INV-65] idiom) — NOT SCRIPT_DIR, which
 # is intentionally the project-side symlink dir for conf-lookup. Guarded: if the
-# lib is absent the verb stays undefined and the loop below falls back to the
-# inline gh-label leaf (keeps the script self-contained when run standalone).
+# lib is absent the verb stays undefined and the loop below FAILs LOUD ([INV-91])
+# rather than fall back to a raw gh-label leaf — a hardcoded GitHub call would
+# silently provision GitHub labels for a non-GitHub backend (provider not loaded).
 if ! declare -F itp_provision_states >/dev/null 2>&1; then
   _sl_real_dir="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]:-$0}")")" && pwd 2>/dev/null)" || _sl_real_dir=""
   if [[ -n "$_sl_real_dir" && -r "${_sl_real_dir}/lib-issue-provider.sh" ]]; then
@@ -69,9 +70,11 @@ echo "Setting up labels for ${REPO}..."
 #     NOT LIVE this PR (no non-GitHub provision leaf exists yet) — fail LOUD-but-clean
 #     (no missing-leaf crash) so the no-behavior-change scope holds and the gap is
 #     visible, not silent.
-# When the provider lib is unavailable (no itp_caps — script run standalone without
-# the skill tree), fall back to the inline gh-label leaf so the script stays
-# self-contained (GitHub's today behavior).
+# When the provider lib is unavailable the itp_provision_states SHIM is undefined; we
+# FAIL LOUD ([INV-91]) rather than fall back to a raw gh-label leaf — a hardcoded
+# GitHub call would silently provision GitHub labels even when the project is
+# configured for a non-GitHub backend (provider not loaded), the silent-wrong-backend
+# bug the cutover guard exists to prevent.
 _LC_CAP=""
 if declare -F itp_caps >/dev/null 2>&1; then
   _LC_CAP="$(itp_caps label_colors 2>/dev/null || true)"
@@ -81,19 +84,14 @@ if [[ "$_LC_CAP" == "0" ]]; then
   exit 1
 fi
 
+if ! declare -F itp_provision_states >/dev/null 2>&1; then
+  echo "Error: itp_provision_states not available (provider lib not loaded; ISSUE_PROVIDER=${ISSUE_PROVIDER:-?}). Cannot provision labels for ${REPO}." >&2
+  exit 1
+fi
+
 for entry in "${LABELS[@]}"; do
   IFS='|' read -r name color description <<< "$entry"
-
-  if declare -F itp_provision_states >/dev/null 2>&1; then
-    itp_provision_states "$name" "$color" "$description"
-  elif gh label view "$name" --repo "$REPO" &>/dev/null; then
-    echo "  [skip] '$name' already exists"
-  else
-    gh label create "$name" --repo "$REPO" \
-      --color "$color" \
-      --description "$description"
-    echo "  [created] '$name'"
-  fi
+  itp_provision_states "$name" "$color" "$description"
 done
 
 echo "Done."
