@@ -347,6 +347,102 @@ else
 fi
 
 # ===========================================================================
+# 4b. PROVIDER-LIB-ABSENT FAIL-LOUD (#303 B1, [INV-91]). When the provider lib
+#     CANNOT be resolved at all (no skill tree beside the script), the
+#     itp_mark_checkbox / itp_provision_states SHIMS stay UNDEFINED. The old code
+#     silently fell back to a HARDCODED `gh` call (a non-GitHub backend would then
+#     execute GitHub commands); B1 DELETED that fallback. Each script MUST now FAIL
+#     LOUD (non-zero exit + a "provider lib not loaded" error naming the verb) and
+#     MUST NOT invoke `gh`. We force the shim-undefined state by running a COPY of
+#     each script ALONE in an isolated temp dir, so its readlink-f lib lookup finds
+#     no sibling lib-issue-provider.sh. A tripwire `gh` on PATH fails the assertion
+#     if it is ever called.
+# ===========================================================================
+echo "=== PROVIDER-LIB-ABSENT FAIL-LOUD (#303 B1): shim undefined → fail loud, no gh ==="
+
+# Tripwire `gh`: any invocation prints a sentinel + exits non-zero (so a fallthrough
+# to a raw gh both shows up in the captured output AND would change the rc).
+_TRIPWIRE_DIR="$(mktemp -d)"
+cat > "$_TRIPWIRE_DIR/gh" <<'GHEOF'
+#!/bin/bash
+echo "TRIPWIRE_GH_CALLED $*" >&2
+exit 0
+GHEOF
+chmod +x "$_TRIPWIRE_DIR/gh"
+
+# (1) mark-issue-checkbox.sh — copy ALONE (no provider lib beside it), stub the gh
+#     body-READ so the script reaches the PATCH-write decision with a real unchecked
+#     checkbox in the body. itp_mark_checkbox / itp_caps stay UNDEFINED → must fail
+#     loud with "itp_mark_checkbox not available" and never PATCH via gh.
+_MIC_ISO="$(mktemp -d)"
+cp "$COMMON_SCRIPTS/mark-issue-checkbox.sh" "$_MIC_ISO/mark-issue-checkbox.sh"
+# A read-stub gh that returns a body with the target checkbox, but trips on a PATCH.
+cat > "$_MIC_ISO/gh" <<'GHEOF'
+#!/bin/bash
+for a in "$@"; do [ "$a" = "PATCH" ] && { echo "TRIPWIRE_GH_PATCH_CALLED $*" >&2; exit 0; }; done
+if [[ "$1" == "api" && "$3" == "--jq" ]]; then printf '## Requirements\n- [ ] Do the thing\n'; exit 0; fi
+echo "TRIPWIRE_GH_CALLED $*" >&2; exit 0
+GHEOF
+chmod +x "$_MIC_ISO/gh"
+mic_absent=$(
+  env -u PROJECT_DIR -u AUTONOMOUS_CONF -u AUTONOMOUS_CONF_DIR -u AUTONOMOUS_PROVIDERS_DIR \
+      -u ISSUE_PROVIDER REPO=o/r PATH="$_MIC_ISO:$PATH" \
+  bash -c 'unset -f gh; bash "$1" "$2" "$3"' _ "$_MIC_ISO/mark-issue-checkbox.sh" 1 "Do the thing" 2>&1
+); mic_rc=$?
+assert_contains "TC-B1-CHECKBOX-ABSENT fails loud naming itp_mark_checkbox when provider lib absent" \
+  "itp_mark_checkbox not available" "$mic_absent"
+[ "$mic_rc" -ne 0 ] && echo -e "  ${GREEN}PASS${NC}: TC-B1-CHECKBOX-ABSENT non-zero exit (rc=$mic_rc)" && PASS=$((PASS+1)) \
+  || { echo -e "  ${RED}FAIL${NC}: TC-B1-CHECKBOX-ABSENT expected non-zero exit, got rc=$mic_rc"; FAIL=$((FAIL+1)); }
+assert_not_contains "TC-B1-CHECKBOX-ABSENT does NOT PATCH via gh (no silent GitHub fallback)" \
+  "TRIPWIRE_GH_PATCH_CALLED" "$mic_absent"
+rm -rf "$_MIC_ISO"
+
+# (2) setup-labels.sh — copy ALONE (no provider lib beside it). itp_provision_states
+#     / itp_caps stay UNDEFINED → must fail loud with "itp_provision_states not
+#     available" and never call `gh label`.
+_SL_ISO="$(mktemp -d)"
+cp "$SCRIPTS/setup-labels.sh" "$_SL_ISO/setup-labels.sh"
+sl_absent=$(
+  env -u PROJECT_DIR -u AUTONOMOUS_CONF -u AUTONOMOUS_CONF_DIR -u AUTONOMOUS_PROVIDERS_DIR \
+      -u ISSUE_PROVIDER PATH="$_TRIPWIRE_DIR:$PATH" \
+  bash -c 'unset -f gh; bash "$1" "$2"' _ "$_SL_ISO/setup-labels.sh" o/r 2>&1
+); sl_rc=$?
+assert_contains "TC-B1-PROVISION-ABSENT fails loud naming itp_provision_states when provider lib absent" \
+  "itp_provision_states not available" "$sl_absent"
+[ "$sl_rc" -ne 0 ] && echo -e "  ${GREEN}PASS${NC}: TC-B1-PROVISION-ABSENT non-zero exit (rc=$sl_rc)" && PASS=$((PASS+1)) \
+  || { echo -e "  ${RED}FAIL${NC}: TC-B1-PROVISION-ABSENT expected non-zero exit, got rc=$sl_rc"; FAIL=$((FAIL+1)); }
+assert_not_contains "TC-B1-PROVISION-ABSENT does NOT call gh label (no silent GitHub fallback)" \
+  "TRIPWIRE_GH_CALLED" "$sl_absent"
+rm -rf "$_SL_ISO"
+
+# (3) HAPPY PATH still routes through the verb when the shim IS defined (github).
+#     mark-issue-checkbox.sh resolves the real provider lib from its skill-tree
+#     location; the recording gh stub (section 1) is restored so the PATCH leaf
+#     fires through itp_github_mark_checkbox. Asserts the deletion did not break the
+#     verb-routed write.
+_HP_FILE="$(mktemp)"
+hp_out=$(
+  env -u PROJECT_DIR -u AUTONOMOUS_PROVIDERS_DIR ISSUE_PROVIDER=github REPO=o/r \
+      _HP_FILE="$_HP_FILE" \
+  bash -c '
+    set -uo pipefail
+    gh() {
+      if [[ "$1" == "api" && "$3" == "--jq" ]]; then printf "## Requirements\n- [ ] Do the thing\n"; return 0; fi
+      printf "HP_GH %s\n" "$*" >> "$_HP_FILE"; return 0
+    }
+    export -f gh
+    bash "$1" "$2" "$3"
+  ' _ "$COMMON_SCRIPTS/mark-issue-checkbox.sh" 1 "Do the thing" 2>&1
+); hp_rc=$?
+hp_gh="$(cat "$_HP_FILE")"; rm -f "$_HP_FILE"
+[ "$hp_rc" -eq 0 ] && echo -e "  ${GREEN}PASS${NC}: TC-B1-CHECKBOX-HAPPY shim defined → exit 0 (verb-routed write)" && PASS=$((PASS+1)) \
+  || { echo -e "  ${RED}FAIL${NC}: TC-B1-CHECKBOX-HAPPY expected exit 0, got rc=$hp_rc (out: ${hp_out:0:200})"; FAIL=$((FAIL+1)); }
+assert_contains "TC-B1-CHECKBOX-HAPPY happy path PATCHes via the github verb leaf" \
+  "HP_GH api repos/o/r/issues/1 --method PATCH" "$hp_gh"
+
+rm -rf "$_TRIPWIRE_DIR"
+
+# ===========================================================================
 # 5. marker_channel REGRESSION — itp_github_post_comment does NOT strip the
 #    <!-- ... --> HTML marker (the dispatcher-marker survival INV-18/INV-39
 #    depend on; the github/html channel round-trips it verbatim).
