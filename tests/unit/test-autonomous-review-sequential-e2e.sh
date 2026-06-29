@@ -212,15 +212,27 @@ fi
 echo "=== TC-SE2E-FETCH: _fetch_sha_evidence present/absent + bounded retry ==="
 # ---------------------------------------------------------------------------
 if [[ -f "$E2E_LIB" ]]; then
+  CHP_LIB="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-code-host.sh"
+  # [#296 B4, #308] _fetch_sha_evidence's SHA-evidence read now routes through
+  # chp_pr_view (the verb prepends `--repo "$REPO"`). In the review wrapper,
+  # autonomous-review.sh sources lib-code-host.sh BEFORE lib-review-e2e.sh, so
+  # chp_pr_view is defined. This isolation harness mirrors that ordering by
+  # sourcing the CHP seam itself — lib-review-e2e.sh deliberately does NOT
+  # self-source it (#308 keeps the production source graph untouched). Without the
+  # seam, chp_pr_view would be undefined and the read would fail-soft to empty (the
+  # `2>/dev/null || true`), silently breaking these assertions — exactly the AC5
+  # fail-soft hazard. The gh() override below intercepts chp_github_pr_view's
+  # `gh pr view …` leaf.
   _fetch_harness() {
     local setup="$1"
-    env -i PATH="$PATH" bash -c "
+    env -i PATH="$PATH" CHP_LIB="$CHP_LIB" E2E_LIB="$E2E_LIB" bash -c '
       set -uo pipefail
-      source '$E2E_LIB'
+      source "$CHP_LIB"      # chp_pr_view → chp_github_pr_view → gh pr view (seam)
+      source "$E2E_LIB"
       export PR_NUMBER=42 REPO=owner/repo PR_HEAD_SHA=deadbeefcafe
-      $setup
-      _fetch_sha_evidence \${RETRIES:-1} 0
-    "
+      '"$setup"'
+      _fetch_sha_evidence ${RETRIES:-1} 0
+    '
   }
 
   # TC-SE2E-FETCH-01: SHA-matching comment present → echoes body.
@@ -243,6 +255,30 @@ if [[ -f "$E2E_LIB" ]]; then
     RETRIES=3
   ')
   assert_eq "TC-SE2E-FETCH-03 bounded-retry-then-empty → empty (no hang)" "" "$out"
+
+  # TC-SE2E-FETCH-04 [#296 B4, #308] AC5/AC4: the SHA-evidence read was OBSERVED
+  # through chp_pr_view → the gh stub saw `gh pr view 42 --repo owner/repo --json
+  # comments …`. Recording stub captures argv NUL-delimited (boundaries preserved);
+  # we assert the verb-supplied `--repo $REPO` + the positional PR + `--json
+  # comments`. Proves the path was EXERCISED, not just reachable — an undefined
+  # chp_pr_view would fail-soft to empty and never reach the stub.
+  REC=$(mktemp -d)
+  out=$(env -i PATH="$PATH" CHP_LIB="$CHP_LIB" E2E_LIB="$E2E_LIB" REC="$REC" bash -c '
+    set -uo pipefail
+    source "$CHP_LIB"; source "$E2E_LIB"
+    export PR_NUMBER=42 REPO=owner/repo PR_HEAD_SHA=deadbeefcafe
+    gh() { printf "%s\0" "$@" > "$REC/argv"; printf ""; }
+    _fetch_sha_evidence 1 0
+  ')
+  if [[ -f "$REC/argv" ]]; then
+    mapfile -d '' -t SE2E_ARGV < "$REC/argv"
+    obs="${SE2E_ARGV[*]}"
+    assert_grep "TC-SE2E-FETCH-04 observed gh pr view through chp_pr_view (verb prepends --repo \$REPO)" \
+      'pr view 42 --repo owner/repo --json comments' <(printf '%s\n' "$obs")
+  else
+    echo -e "  ${RED}FAIL${NC}: TC-SE2E-FETCH-04 chp_pr_view not exercised — stub saw no gh pr view (fail-soft hazard)"; FAIL=$((FAIL+1))
+  fi
+  rm -rf "$REC"
 fi
 
 # ---------------------------------------------------------------------------

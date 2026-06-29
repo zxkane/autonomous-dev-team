@@ -433,8 +433,14 @@ drain_agent_pr_create() {
 
   # Skip if a PR already exists for this issue (agent created it directly, or a
   # prior tick did). Same body-#N selector the wrapper's PR_EXISTS uses.
+  # [INV-87]/[INV-91] (#296 B3, #308) the body-mention existence read routes
+  # through chp_pr_list (the verb prepends `--repo "$REPO"`; the broker's `$repo`
+  # arg always equals the global `$REPO` — see the autonomous-dev.sh callers).
+  # Byte-identical to the prior `gh pr list --repo "$repo" --state open --json
+  # body -q …`. lib-auth.sh self-sources lib-code-host.sh above, so the verb is
+  # defined; the `2>/dev/null || echo "0"` keeps the read fail-soft.
   local existing
-  existing=$(gh pr list --repo "$repo" --state open --json body \
+  existing=$(chp_pr_list --state open --json body \
     -q "[.[] | select(.body | test(\"#${issue_number}[^0-9]\") or test(\"#${issue_number}\$\"))] | length" 2>/dev/null || echo "0")
   [[ "$existing" =~ ^[0-9]+$ ]] || existing=0
   if [[ "$existing" -gt 0 ]]; then
@@ -557,8 +563,13 @@ drain_agent_bot_triggers() {
   fi
 
   # Resolve the PR number for this issue (same body-#N selector as PR_EXISTS).
+  # [INV-87]/[INV-91] (#296 B3, #308) routes through chp_pr_list (verb prepends
+  # `--repo "$REPO"`; `$repo == $REPO` here — see the autonomous-{dev,review}.sh
+  # callers). Byte-identical to the prior `gh pr list --repo "$repo" --state open
+  # --json number,body -q …`. Verb is defined via the lib-code-host self-source
+  # above; the `2>/dev/null || true` keeps the read fail-soft.
   local pr_number
-  pr_number=$(gh pr list --repo "$repo" --state open --json number,body \
+  pr_number=$(chp_pr_list --state open --json number,body \
     -q "[.[] | select(.body | test(\"#${issue_number}[^0-9]\") or test(\"#${issue_number}\$\"))] | (.[0].number // empty)" 2>/dev/null || true)
   if ! [[ "$pr_number" =~ ^[0-9]+$ ]]; then
     echo "WARN: [INV-79] agent requested bot triggers but no open PR found for issue #${issue_number} — skipping." >&2

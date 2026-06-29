@@ -113,11 +113,28 @@ fi
 # ---------------------------------------------------------------------------
 # Shared lib-auth sandbox builder (mirrors test-lib-auth-gh-symlink.sh).
 # ---------------------------------------------------------------------------
+# [#296 B3, #308] copy_chp_seam <dir> — materialize the CHP seam (lib-code-host.sh
+# + the github provider) alongside a copied lib-auth.sh so its self-source (readlink
+# -f → this dir) DEFINES chp_pr_list. The migrated drain_agent_pr_create /
+# drain_agent_bot_triggers PR-existence reads route through chp_pr_list; without the
+# seam the call fails-soft to "0"/empty (undefined verb + `|| echo 0`/`|| true`) — a
+# SILENT behavior change a crash-expecting test would miss (AC5). With the seam,
+# chp_pr_list → chp_github_pr_list → `gh pr list`, which the recording stub on PATH
+# observes. Every inline lib-auth.sh sandbox in this file calls this.
+copy_chp_seam() {
+  local d="$1"
+  cp "$SCRIPTS/lib-code-host.sh" "$d/lib-code-host.sh"
+  mkdir -p "$d/providers"
+  cp "$SCRIPTS/providers/chp-github.sh" "$d/providers/chp-github.sh"
+  cp "$SCRIPTS/providers/chp-github.caps" "$d/providers/chp-github.caps" 2>/dev/null || true
+}
+
 new_auth_sandbox() {
   local d; d=$(mktemp -d "$TMPROOT/auth-XXXXXX")
   cp "$SCRIPTS/lib-auth.sh" "$d/lib-auth.sh"
   cp "$SCRIPTS/gh-with-token-refresh.sh" "$d/gh-with-token-refresh.sh"
   chmod +x "$d/gh-with-token-refresh.sh"
+  copy_chp_seam "$d"
   cat > "$d/lib-config.sh" <<'CFG'
 #!/bin/bash
 load_autonomous_conf() { return 0; }
@@ -683,6 +700,7 @@ fi
 #     that records its posts. No real gh / network.
 SBA95="$TMPROOT/bt-sandbox"; mkdir -p "$SBA95"
 cp "$SCRIPTS/lib-auth.sh" "$SBA95/"
+copy_chp_seam "$SBA95"   # [#296 B3, #308] chp_pr_list for the PR-number read
 printf '#!/bin/bash\nload_autonomous_conf(){ return 0; }\n' > "$SBA95/lib-config.sh"
 printf '#!/bin/bash\nget_gh_app_token(){ echo X; }\nget_gh_app_scoped_token(){ echo X; }\n' > "$SBA95/gh-app-token.sh"
 BT_POSTS="$TMPROOT/bt-posts.log"; : > "$BT_POSTS"
@@ -783,6 +801,7 @@ fi
 #     allow-listed phrases (the #234 [P1] #2 — no arbitrary user-attributed comments).
 DRAIN_SBA="$TMPROOT/drain-allow"; mkdir -p "$DRAIN_SBA"
 cp "$SCRIPTS/lib-auth.sh" "$DRAIN_SBA/"; cp "$LIB_BOTS" "$DRAIN_SBA/"
+copy_chp_seam "$DRAIN_SBA"   # [#296 B3, #308] chp_pr_list for the PR-number read
 printf '#!/bin/bash\nload_autonomous_conf(){ return 0; }\n' > "$DRAIN_SBA/lib-config.sh"
 printf '#!/bin/bash\nget_gh_app_token(){ echo X; }\nget_gh_app_scoped_token(){ echo X; }\n' > "$DRAIN_SBA/gh-app-token.sh"
 DRAIN_POSTS="$TMPROOT/drain-posts.log"; : > "$DRAIN_POSTS"
@@ -860,13 +879,18 @@ fi
 echo ""
 echo "=== TC-TOKEN-SPLIT-070: drain_agent_pr_create brokers only when scoping armed ==="
 # ---------------------------------------------------------------------------
-# Stub `gh` on PATH: `gh pr list` → 0 (no existing PR); `gh pr create` → record
-# args; `gh repo view` → a repo URL (drain uses it for the ls-remote fallback).
+# Stub `gh` on PATH: `gh pr list` → empty (no existing PR) AND record the argv
+# ([#296 B3, #308] the existence read now routes through chp_pr_list → the verb
+# emits `gh pr list --repo <REPO> …`; we assert the stub OBSERVED it through the
+# verb, not just that the broker ran — reachability ≠ exercised, AC5/AC4);
+# `gh pr create` → record args; `gh repo view` → a repo URL (drain uses it for
+# the ls-remote fallback).
 GHSB="$TMPROOT/gh-stub"; mkdir -p "$GHSB"
 PR_CREATE_LOG="$GHSB/pr-create.log"
+PR_LIST_LOG="$GHSB/pr-list.log"
 cat > "$GHSB/gh" <<GHSTUB
 #!/bin/bash
-if [[ "\$1" == "pr" && "\$2" == "list" ]]; then echo 0; exit 0; fi
+if [[ "\$1" == "pr" && "\$2" == "list" ]]; then echo "LISTED \$*" >> "$PR_LIST_LOG"; printf ""; exit 0; fi
 if [[ "\$1" == "repo" && "\$2" == "view" ]]; then echo "https://github.com/owner/repo.git"; exit 0; fi
 if [[ "\$1" == "pr" && "\$2" == "create" ]]; then echo "CREATED \$*" >> "$PR_CREATE_LOG"; exit 0; fi
 exit 0
@@ -879,8 +903,10 @@ PRFILE="$TMPROOT/agent-pr-create"
 printf 'branch: feat/issue-234-foo\nfeat: my title\nBody line.\nCloses #234\n' > "$PRFILE"
 
 # (a) scoping armed + explicit branch → broker fires with --head <branch> + title.
-rm -f "$PR_CREATE_LOG"
-PATH="$GHSB:$PATH" bash -c "
+# REPO is the GLOBAL the verb prepends; set it so the observed-argv assert below
+# checks `--repo owner/repo` (the broker's $repo arg equals $REPO at runtime, AC7).
+rm -f "$PR_CREATE_LOG" "$PR_LIST_LOG"
+PATH="$GHSB:$PATH" REPO="owner/repo" bash -c "
   source '$SBA/lib-auth.sh'
   AGENT_GH_TOKEN_FILE='/some/scoped/token'
   AGENT_PR_CREATE_FILE='$PRFILE'
@@ -892,6 +918,16 @@ if [[ -s "$PR_CREATE_LOG" ]] \
   assert_pass "scoping armed: drain_agent_pr_create ran gh pr create --head <branch> with the title"
 else
   assert_fail "scoping armed: broker did NOT create with --head (log: $(cat "$PR_CREATE_LOG" 2>/dev/null))"
+fi
+# [#296 B3, #308] AC5/AC4: the PR-existence read was OBSERVED through chp_pr_list →
+# `gh pr list --repo owner/repo --state open …`. With the CHP seam now copied into
+# the sandbox (new_auth_sandbox), an UNDEFINED-verb fail-soft can no longer pass
+# this for the wrong reason: the stub must have actually recorded the gh pr list.
+if [[ -s "$PR_LIST_LOG" ]] \
+   && grep -qF -- '--repo owner/repo --state open --json body' "$PR_LIST_LOG"; then
+  assert_pass "scoping armed: existence read OBSERVED through chp_pr_list (gh pr list --repo owner/repo --state open --json body)"
+else
+  assert_fail "existence read NOT observed through chp_pr_list (verb undefined → silent fail-soft?) (log: $(cat "$PR_LIST_LOG" 2>/dev/null))"
 fi
 
 # (b) scoping OFF (AGENT_GH_TOKEN_FILE empty) → broker NO-OPs (agent created directly).

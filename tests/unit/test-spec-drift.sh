@@ -648,6 +648,15 @@ else
 fi
 
 # ===========================================================================
+echo "=== TC-SPEC-GATE-308: INV-91 Migration-log carries the exact #296 B3+B4 (#308) bullet ==="
+# [#296 B3+B4, #308] AC6 — the migration that pulled the lib-auth PR-existence
+# reads + lib-review-e2e SHA-evidence read behind chp_pr_list/chp_pr_view records
+# its byte-identical, baseline-shrink-by-3 entry in INV-91's Migration log. Pinned
+# here (Spec Drift surface) so doc-and-code stay coupled per CONTRIBUTING Rule 1.
+AC6_308='- #296 B3+B4 (#308): lib-auth PR-existence reads (2× chp_pr_list, lib-auth.sh), lib-review-e2e SHA-evidence read (1× chp_pr_view, lib-review-e2e.sh) — byte-identical; baseline shrank by 3 sigs.'
+if grep -qF -- "$AC6_308" "$INV"; then ok "INV-91 Migration-log has the exact #296 B3+B4 (#308) bullet"; else bad "INV-91 Migration-log missing/changed the #296 B3+B4 (#308) bullet"; fi
+
+# ===========================================================================
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 [[ "$FAIL" -eq 0 ]] && exit 0 || exit 1
