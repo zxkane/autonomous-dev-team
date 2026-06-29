@@ -599,6 +599,24 @@ adj=$(awk '/^## INV-[0-9]+:/{h=NR} /^_Triage \(issue #236\):/{if(h && NR-h<=2) c
 if [[ "$adj" -eq "$n_head" ]]; then ok "every tag is adjacent to its heading"; else bad "only $adj/$n_head tags are heading-adjacent"; fi
 
 # ===========================================================================
+echo "=== TC-SPEC-GATE-058: #296 B2 doc-retraction — the stale 'remains a raw caller-side' assertion is gone from provider-spec.md ==="
+# After #296 B2 (#306) migrated the check_deps_resolved issue-BODY read behind
+# itp_read_task, the normative claim that this read "remains a raw caller-side `gh`
+# call; itp_read_task is its eventual home" became FALSE. The pipeline-docs-gate
+# only checks that SOME docs/pipeline/*.md changed — it cannot catch stale content
+# — so per CLAUDE.md "docs are authoritative" this asserts the retraction
+# deterministically: the phrase occurred EXACTLY ONCE today (only for this read),
+# so it MUST now appear ZERO times. Fails loud with the file:line if it survives.
+SPEC="$DOCS/provider-spec.md"
+stale=$(grep -nF 'remains a raw caller-side' "$SPEC" || true)
+if [[ -z "$stale" ]]; then
+  ok "provider-spec.md no longer asserts the body read 'remains a raw caller-side' gh call (#306/B2 migrated)"
+else
+  bad "stale 'remains a raw caller-side' assertion survives in provider-spec.md (#306/B2 retraction missing):"
+  printf '      %s\n' "$stale" | sed "s#$SPEC#docs/pipeline/provider-spec.md#"
+fi
+
+# ===========================================================================
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 [[ "$FAIL" -eq 0 ]] && exit 0 || exit 1

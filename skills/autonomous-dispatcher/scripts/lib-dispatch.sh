@@ -458,11 +458,22 @@ check_deps_resolved() {
   # This restores the pre-#284 "any provider can do the same-repo lookup" robustness
   # the raw `gh issue view` call had, without re-introducing a raw caller-side gh
   # call (AC #4) — it degrades the whole dep check, not a single arm.
+  #
+  # NOTE (#296 B2, #306): this guard is keyed on the `resolve_dep` verb. The body
+  # read below now routes through the DIFFERENT `read_task` verb. Both leaves exist
+  # for the live GitHub provider, so the GitHub path is unaffected; widening this
+  # guard to also cover `read_task` is out of scope for B2 (the raw `gh` ran
+  # regardless before, so the "zero behavior change" claim holds for GitHub).
   if ! declare -F "itp_${ISSUE_PROVIDER:-github}_resolve_dep" >/dev/null 2>&1; then
     return 0
   fi
 
-  body=$(gh issue view "$issue_num" --repo "$REPO" --json body -q '.body')
+  # [INV-87] (#296 B2, #306) the issue-BODY read routes through the itp_read_task
+  # verb (GitHub leaf itp_github_read_task → `gh issue view "$issue_num" --repo
+  # "$REPO" --json body -q '.body'`, byte-identical). lib-issue-provider.sh is
+  # already sourced above, so the shim is reachable. The `## Dependencies` sed
+  # extraction + per-ref predicate stay caller-side (spec §3.6).
+  body=$(itp_read_task "$issue_num" body -q '.body')
   section=$(printf '%s\n' "$body" | sed -n '/^## Dependencies/,/^## /p')
 
   # Stage 1: restrict to list-item lines. `grep -E` exits non-zero when
