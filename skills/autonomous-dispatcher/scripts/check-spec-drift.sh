@@ -2,10 +2,17 @@
 # check-spec-drift.sh — issue #236, executable-spec gate (CI-checker half).
 #
 # Fails (non-zero) when the dispatcher/wrapper CODE drifts from the declared
-# spec in docs/pipeline/transitions.json. Three independent checks:
+# spec in docs/pipeline/transitions.json. Four independent checks:
 #
 #   A. Diagram drift — state-machine.md mermaid must equal the generator's
 #      output (delegates to gen-state-machine.sh --check).
+#   D. Retracted-doc drift — normative provider-spec.md text that a migration
+#      falsified MUST NOT survive. Today: the #296/B2 (#306) issue-body read
+#      migration retired the claim that check_deps_resolved's body read "remains a
+#      raw caller-side `gh` call" — so that exact phrase MUST NOT appear in
+#      provider-spec.md. This runs in the SAME `spec-drift` CI job as A/B/C (the
+#      job the #306 owner comment named), so the named surface enforces it; it is
+#      NOT only in the hermetic-unit job. Fails LOUD naming the file:line.
 #   B. Guard/action mapping — every guard + every load-bearing action verb in
 #      transitions.json must have an entry in spec-guard-map.json, and every
 #      mapped anchor (function name OR greppable predicate) must still resolve
@@ -73,6 +80,9 @@ TRANSITIONS="$PROJECT_ROOT/docs/pipeline/transitions.json"
 GUARD_MAP="$PROJECT_ROOT/docs/pipeline/spec-guard-map.json"
 CODESITE_MAP="$PROJECT_ROOT/docs/pipeline/spec-codesite-map.json"
 DOC="$PROJECT_ROOT/docs/pipeline/state-machine.md"
+# Check D (retracted-doc drift) target. Overridable so the unit test can point at a
+# scratch copy for injection; defaults to the pipeline-doc sibling of $DOC.
+PROVIDER_SPEC="$PROJECT_ROOT/docs/pipeline/provider-spec.md"
 SCRIPTS_DIR="$SCRIPT_DIR"
 GEN="$SCRIPT_DIR/gen-state-machine.sh"
 
@@ -82,6 +92,7 @@ while [ $# -gt 0 ]; do
     --guard-map)    GUARD_MAP="$2"; shift ;;
     --codesite-map) CODESITE_MAP="$2"; shift ;;
     --doc)          DOC="$2"; shift ;;
+    --provider-spec) PROVIDER_SPEC="$2"; shift ;;
     --scripts-dir)  SCRIPTS_DIR="$2"; shift ;;
     --gen)          GEN="$2"; shift ;;
     -h|--help)      sed -n '2,40p' "$0"; exit 0 ;;
@@ -837,6 +848,35 @@ done < "$SITES_TMP"
 if [ "$C5_OK" -eq 1 ] && [ "$FAILED" -eq 0 ]; then
   n_manifest="$(wc -l < "$SITES_TMP" | tr -d ' ')"
   info "all $n_manifest manifest sites are uniquely anchored and adjacent to their write"
+fi
+
+# ---------------------------------------------------------------------------
+# Check D — retracted-doc drift (#296/B2, #306).
+# ---------------------------------------------------------------------------
+# A migration that turns a documented "raw `gh` call" into a verb-routed call
+# FALSIFIES any normative doc line still asserting it is raw. The pipeline-docs-gate
+# only checks that SOME docs/pipeline/*.md changed — it cannot catch stale CONTENT.
+# Per CLAUDE.md "docs are authoritative", a surviving false assertion is a drift bug.
+#
+# Today's retracted assertion: #296/B2 (#306) migrated check_deps_resolved's
+# issue-body read behind itp_read_task, so the claim that it "remains a raw
+# caller-side `gh` call" (the phrase `remains a raw caller-side`, which occurred
+# EXACTLY ONCE in provider-spec.md — only for this read) MUST now be absent. This
+# check runs in the SAME `spec-drift` CI job as A/B/C, so the named Spec Drift
+# surface enforces the retraction deterministically (#306 review [BLOCKING]).
+echo ""
+echo "=== Check D: retracted normative provider-spec.md assertions stay retracted (#296/B2) ==="
+if [ ! -f "$PROVIDER_SPEC" ]; then
+  fail "Check D: provider-spec.md not found at '$PROVIDER_SPEC' — cannot verify the #296/B2 doc retraction"
+else
+  d_stale="$(grep -nF 'remains a raw caller-side' "$PROVIDER_SPEC" || true)"
+  if [ -z "$d_stale" ]; then
+    info "provider-spec.md no longer asserts a body read 'remains a raw caller-side' \`gh\` call (#296/B2 retraction holds)"
+  else
+    while IFS= read -r ln; do
+      fail "Check D: stale 'remains a raw caller-side' assertion survives in provider-spec.md:${ln%%:*} — #296/B2 migrated check_deps_resolved's body read behind itp_read_task; retract this line. ($(printf '%s' "$ln" | cut -d: -f2- | sed 's/^[[:space:]]*//' | cut -c1-80)…)"
+    done <<< "$d_stale"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
