@@ -115,34 +115,65 @@ agent_token_has_workflow_scope() {
 #
 # The aggregate routing signal (§3.4): echoes `true` or `false`.
 #
-#   true  iff ≥1 blocking finding has effective `actionable_by_dev_agent=true`
+#   true  iff ≥1 blocking finding has EFFECTIVE `actionable_by_dev_agent=true`
 #         (the aggregate-OR — if ANY blocking finding the dev agent CAN fix exists,
 #         a dev-resume is still worthwhile).
 #   false iff there is ≥1 blocking finding AND EVERY blocking finding has effective
 #         `actionable_by_dev_agent=false` (no dev-resume can make progress).
 #
-# "Effective" honors the zero-regression default: an absent `actionable_by_dev_agent`
-# on a finding ⇒ `true` (a legacy artifact omitting the field behaves exactly as
-# today). With NO blocking findings at all the result is `true` (fail-open — a PASS
-# or an empty list never diverts routing). A non-JSON / no-jq input also yields
-# `true` (fail-open — never invent a non-actionable signal from a parse failure).
+# EFFECTIVE actionability is the wrapper's AUTHORITATIVE derivation (INV-92,
+# invariants.md:4578 — "re-validated by the wrapper from the schema-checked
+# artifact … so a buggy agent can't forge `dev-actionable=true` on a protected-path
+# finding"). For each blocking finding it is `false` when EITHER:
+#   - the finding's `file` matches REVIEW_PROTECTED_PATHS (`review_path_is_protected`
+#     — the deterministic policy surface), regardless of what the agent set; OR
+#   - the agent explicitly set `actionable_by_dev_agent:false`.
+# Otherwise effective actionability is `true` (an absent field on a NON-protected
+# path ⇒ true — the zero-regression legacy default). The protected-path check is the
+# load-bearing override: it makes a `.github/workflows/**` / CODEOWNERS finding
+# non-actionable even when the agent OMITS the flag or (mistakenly/maliciously) sets
+# it `true`, closing the forge the dispatcher would otherwise loop on (PR #300 [P1]).
+# The override only ever flips protected→false; it NEVER promotes an agent-asserted
+# `false` to `true`, so an honest agent that marks a non-protected finding
+# non-actionable is still respected.
 #
-# This is computed from the VALIDATED artifact (TOCTOU-safe, mirrors INV-49): a
-# buggy agent cannot forge `dev-actionable=true` on a protected-path finding,
-# because the wrapper derives the aggregate here from the schema-checked JSON, not
-# from an agent-emitted summary token.
+# With NO blocking findings at all the result is `true` (fail-open — a PASS or an
+# empty list never diverts routing). A non-JSON / no-jq input also yields `true`
+# (fail-open — never invent a non-actionable signal from a parse failure).
 review_classify_artifact_dev_actionable() {
-  local _json="$1" _out="true"
+  local _json="$1"
   command -v jq >/dev/null 2>&1 || { printf 'true\n'; return 0; }
-  # any: ≥1 blocking finding whose effective actionable_by_dev_agent is true
-  # (absent ⇒ true). none: zero blocking findings. jq prints "true"/"false".
-  _out="$(jq -r '
-    (.blockingFindings // []) as $bf
-    | if ($bf | length) == 0 then true
-      else ($bf | any(.actionable_by_dev_agent != false))
-      end' <<<"$_json" 2>/dev/null || printf 'true')"
-  case "$_out" in
-    true|false) printf '%s\n' "$_out" ;;
-    *)          printf 'true\n' ;;   # fail-open on any unexpected jq output
-  esac
+
+  # Emit one TAB-separated record per blocking finding:
+  #   <field-effective-actionable>\t<file>
+  # where <field-effective-actionable> is the agent-supplied field collapsed to the
+  # legacy default (absent ⇒ true) — `false` only when the agent EXPLICITLY set
+  # false. The protected-path override is applied below in bash (jq cannot run
+  # `review_path_is_protected`, which uses the conf-overridable bash glob list).
+  # `@tsv` keeps a NUL-free, newline-delimited stream; `// ""` guards a fileless
+  # finding. On any jq failure the whole pipeline yields empty → fail-open `true`.
+  local _records
+  _records="$(jq -r '
+    (.blockingFindings // [])[]
+    | [ (if .actionable_by_dev_agent == false then "false" else "true" end),
+        (.file // "") ]
+    | @tsv' <<<"$_json" 2>/dev/null)" || { printf 'true\n'; return 0; }
+
+  # No blocking findings → fail-open true (never diverts routing).
+  [ -n "$_records" ] || { printf 'true\n'; return 0; }
+
+  local _field _file _any_actionable=1
+  while IFS=$'\t' read -r _field _file; do
+    [ -n "$_field" ] || continue
+    # AUTHORITATIVE override: a protected path is non-actionable regardless of the
+    # agent's self-reported field. Otherwise honor the (legacy-defaulted) field.
+    if review_path_is_protected "$_file"; then
+      :   # effective actionable = false; contributes nothing to the OR
+    elif [ "$_field" = "true" ]; then
+      _any_actionable=0
+      break   # one effectively-actionable finding is enough for the OR
+    fi
+  done <<<"$_records"
+
+  if [ "$_any_actionable" -eq 0 ]; then printf 'true\n'; else printf 'false\n'; fi
 }

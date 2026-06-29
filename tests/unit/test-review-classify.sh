@@ -157,6 +157,74 @@ assert_eq "all blocking non-actionable → false" "false" \
 
 # ---------------------------------------------------------------------------
 echo ""
+echo "=== authoritative protected-path override (INV-92: the wrapper re-validates, never trusts the field) ==="
+# ---------------------------------------------------------------------------
+# These pin the PR #300 review [P1]: the aggregate MUST consult
+# review_path_is_protected over each finding's `file`, NOT only the agent-supplied
+# `actionable_by_dev_agent` flag. A finding on a protected path is non-actionable
+# even when the agent OMITS the flag or (mistakenly/maliciously) sets it true — so a
+# protected-path finding can never forge dev-actionable=true and re-enter the loop.
+
+# Protected path (.github/workflows/**), field ABSENT → effective false (the
+# wrapper derives it from the path; the legacy "absent ⇒ true" default does NOT
+# apply to a protected path). Sole blocking finding → aggregate false.
+J_PROT_ABSENT='{"verdict":"FAIL","blockingFindings":[{"title":"edit ci.yml","file":".github/workflows/ci.yml"}]}'
+assert_eq "protected path, field absent → false (wrapper-derived, not legacy true)" "false" \
+  "$(review_classify_artifact_dev_actionable "$J_PROT_ABSENT")"
+
+# Protected path with the agent ASSERTING actionable_by_dev_agent=true → the wrapper
+# OVERRIDES it to false. This is the exact forge the [P1] is about.
+J_PROT_FORGED='{"verdict":"FAIL","blockingFindings":[{"title":"edit ci.yml","file":".github/workflows/ci.yml","actionable_by_dev_agent":true}]}'
+assert_eq "protected path, agent claims actionable=true → overridden to false" "false" \
+  "$(review_classify_artifact_dev_actionable "$J_PROT_FORGED")"
+
+# Nested workflow path, field absent → false (the ** glob matches sub-dirs).
+J_PROT_NESTED='{"verdict":"FAIL","blockingFindings":[{"title":"deploy wf","file":".github/workflows/sub/deploy.yml"}]}'
+assert_eq "nested protected path, field absent → false" "false" \
+  "$(review_classify_artifact_dev_actionable "$J_PROT_NESTED")"
+
+# CODEOWNERS (a protected literal), agent claims actionable=true → overridden false.
+J_PROT_CODEOWNERS='{"verdict":"FAIL","blockingFindings":[{"title":"owners","file":"CODEOWNERS","actionable_by_dev_agent":true}]}'
+assert_eq "CODEOWNERS, agent claims actionable=true → overridden to false" "false" \
+  "$(review_classify_artifact_dev_actionable "$J_PROT_CODEOWNERS")"
+
+# Mixed: one protected (forged true) + one genuinely actionable code finding →
+# aggregate true (the dev agent CAN still make progress on the code finding).
+J_PROT_MIXED='{"verdict":"FAIL","blockingFindings":[{"title":"edit ci.yml","file":".github/workflows/ci.yml","actionable_by_dev_agent":true},{"title":"fix bug","file":"src/foo.ts"}]}'
+assert_eq "mixed protected(forged true) + actionable code → true" "true" \
+  "$(review_classify_artifact_dev_actionable "$J_PROT_MIXED")"
+
+# Ordinary code path with the agent (wrongly) claiming non-actionable → stays false
+# (the wrapper does NOT promote a non-protected finding to actionable; the agent's
+# explicit `false` is still honored — the override only flips protected→false, never
+# the reverse).
+J_CODE_FALSE='{"verdict":"FAIL","blockingFindings":[{"title":"fix bug","file":"src/foo.ts","actionable_by_dev_agent":false}]}'
+assert_eq "ordinary path, agent says non-actionable → stays false (override never promotes)" "false" \
+  "$(review_classify_artifact_dev_actionable "$J_CODE_FALSE")"
+
+# Ordinary code path, field absent → true (legacy default preserved for non-protected).
+J_CODE_ABSENT='{"verdict":"FAIL","blockingFindings":[{"title":"fix bug","file":"src/foo.ts"}]}'
+assert_eq "ordinary path, field absent → true (legacy default preserved)" "true" \
+  "$(review_classify_artifact_dev_actionable "$J_CODE_ABSENT")"
+
+# A path merely MENTIONING workflows (docs) is NOT protected → field absent ⇒ true.
+J_NEARMISS='{"verdict":"FAIL","blockingFindings":[{"title":"doc","file":"docs/workflows-guide.md"}]}'
+assert_eq "near-miss path (docs/workflows-guide.md) not protected → true" "true" \
+  "$(review_classify_artifact_dev_actionable "$J_NEARMISS")"
+
+# Operator override of REVIEW_PROTECTED_PATHS is honored by the aggregate too: a
+# finding on a path the operator added is non-actionable even with the field absent.
+( export REVIEW_PROTECTED_PATHS="infra/**"
+  source "$CLASSIFY_LIB"
+  review_classify_artifact_dev_actionable \
+    '{"verdict":"FAIL","blockingFindings":[{"title":"tf","file":"infra/prod/main.tf"}]}'
+) > /tmp/aggovr-$$.out 2>&1
+assert_eq "aggregate honors REVIEW_PROTECTED_PATHS override (infra/** → false)" "false" \
+  "$(cat /tmp/aggovr-$$.out)"
+rm -f /tmp/aggovr-$$.out
+
+# ---------------------------------------------------------------------------
+echo ""
 echo "=== jq validator accepts the 5 INV-92 fields / rejects bad ones (JQ PATH) ==="
 # ---------------------------------------------------------------------------
 # Force the jq structural backend: _validate_verdict_artifact_jq is the
