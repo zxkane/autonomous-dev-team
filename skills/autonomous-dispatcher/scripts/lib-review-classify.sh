@@ -34,9 +34,13 @@
 #                             the `workflows` token scope, which the agent's scoped
 #                             token does NOT carry (AGENT_TOKEN_PERMISSIONS, INV-79).
 #   - CODEOWNERS / .github/CODEOWNERS — code-ownership policy a maintainer owns.
-# The `:=` default-assignment is conditional: an operator override in
-# autonomous.conf (sourced before this lib) is preserved.
-: "${REVIEW_PROTECTED_PATHS:=.github/workflows/** CODEOWNERS .github/CODEOWNERS}"
+#
+# `${VAR-default}` (NO colon) — the default is applied ONLY when the var is UNSET.
+# An explicit `REVIEW_PROTECTED_PATHS=""` in autonomous.conf is a deliberate
+# "no protected paths" (every finding is then dev-actionable, the pre-#298 behavior
+# the conf doc promises); the `:=` form previously swallowed that empty override and
+# re-applied the default. An operator override to a non-empty list is preserved.
+REVIEW_PROTECTED_PATHS="${REVIEW_PROTECTED_PATHS-.github/workflows/** CODEOWNERS .github/CODEOWNERS}"
 
 # review_path_is_protected <path>
 #
@@ -109,6 +113,50 @@ agent_token_has_workflow_scope() {
   # ANY non-zero — false OR parse error — maps to rc 1 (fail-open: lacks scope).
   jq -e 'has("workflows")' <<<"$AGENT_TOKEN_PERMISSIONS" >/dev/null 2>&1 && return 0
   return 1
+}
+
+# review_protected_paths_prompt_rule
+#
+# Emits (to stdout) the per-finding protected-path classification rule for the
+# review-agent prompt, built from the SAME `$REVIEW_PROTECTED_PATHS` value
+# `review_path_is_protected` matches against — one source of truth (issue #301).
+# Previously this rule was a hardcoded `.github/workflows/`/`CODEOWNERS` literal
+# inside `build_review_prompt`, so an operator override changed the lib matcher but
+# NOT what the agent was told.
+#
+# The output is captured via `$(...)` into the wrapper's `cat <<EOF` prompt heredoc,
+# so it is the FINAL literal text (markdown backticks etc. are emitted as-is).
+#
+# When the protected list is empty (operator set `REVIEW_PROTECTED_PATHS=""` to
+# disable protection) the rule advertises that there are NO protected paths, so the
+# agent classifies every finding dev-actionable — matching the now-empty lib matcher.
+review_protected_paths_prompt_rule() {
+  local _pp="${REVIEW_PROTECTED_PATHS-}"
+  # Trim to detect a list that is empty or whitespace-only.
+  local _trimmed="${_pp#"${_pp%%[![:space:]]*}"}"
+  _trimmed="${_trimmed%"${_trimmed##*[![:space:]]}"}"
+  if [ -z "$_trimmed" ]; then
+    cat <<'NO_PROTECTED'
+- Apply this rule:
+  - This project defines NO protected paths (the operator set
+    `REVIEW_PROTECTED_PATHS=""`), so classify EVERY blocking finding
+    `actionable_by_dev_agent: true`, `recommended_next_owner: "dev_agent"`.
+NO_PROTECTED
+    return 0
+  fi
+  # Non-empty: advertise the exact protected glob list the lib matcher uses.
+  cat <<PROTECTED
+- Apply this rule:
+  - If the finding's \`file\` matches a PROTECTED-PATH pattern — the
+    space-separated glob list \`${_pp}\` (the same patterns the wrapper matches
+    against; \`**\`/\`*\` cross \`/\`):
+    set \`actionable_by_dev_agent: false\`, \`requires_human: true\`,
+    \`recommended_next_owner: "maintainer"\`. Additionally set
+    \`requires_privileged_token: true\` ONLY for a \`.github/workflows/\` edit when
+    the dev agent's token lacks the \`workflows\` scope (it does by default).
+  - Otherwise: \`actionable_by_dev_agent: true\`,
+    \`recommended_next_owner: "dev_agent"\`.
+PROTECTED
 }
 
 # review_classify_artifact_dev_actionable <canonical-json>

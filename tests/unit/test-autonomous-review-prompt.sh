@@ -114,6 +114,27 @@ assert_grep "per-agent verdict jq predicate keys on 'Review Agent:'" \
 
 # ---------------------------------------------------------------------------
 echo ""
+echo "=== TC-ARP-07: protected-path classification rule built from \$REVIEW_PROTECTED_PATHS (issue #301) ==="
+# ---------------------------------------------------------------------------
+# Defect 1 (#301): the per-finding classification rule must be generated from the
+# same $REVIEW_PROTECTED_PATHS the lib matcher reads (one source of truth), via
+# the lib helper interpolated into the prompt heredoc — NOT a hardcoded
+# `.github/workflows/`/`CODEOWNERS` literal in build_review_prompt.
+assert_grep "prompt body interpolates review_protected_paths_prompt_rule" \
+  'review_protected_paths_prompt_rule' "$WRAPPER"
+# The old hardcoded protected-path literal must be gone from the wrapper prompt.
+# (The classification helper now lives in lib-review-classify.sh; the wrapper's
+# only remaining `workflows` reference is inside that helper's interpolated output,
+# which is in the lib, not the wrapper.)
+assert_not_grep "no hardcoded 'a GitHub Actions workflow under' literal in wrapper prompt" \
+  "a GitHub Actions workflow under" "$WRAPPER"
+# The single-source helper is defined in the classification lib.
+CLASSIFY_LIB="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-review-classify.sh"
+assert_grep "review_protected_paths_prompt_rule defined in lib-review-classify.sh" \
+  '^review_protected_paths_prompt_rule\(\)' "$CLASSIFY_LIB"
+
+# ---------------------------------------------------------------------------
+echo ""
 echo "=== TC-ARP-05: bash syntax valid ==="
 # ---------------------------------------------------------------------------
 if bash -n "$WRAPPER" 2>/dev/null; then
