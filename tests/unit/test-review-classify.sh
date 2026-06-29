@@ -84,7 +84,7 @@ assert_rc "a path merely mentioning workflows → NOT protected (rc 1)" 1 \
 shopt -q extglob; _eg_after=$?
 assert_eq "review_path_is_protected restores caller extglob state (expect default off)" "1" "$_eg_after"
 
-# Operator override is honored (the lib's `:=` does not clobber a set value).
+# Operator override is honored (the lib's `${VAR-default}` does not clobber a set value).
 echo "--- override REVIEW_PROTECTED_PATHS ---"
 ( export REVIEW_PROTECTED_PATHS="infra/** Makefile"
   source "$CLASSIFY_LIB"
@@ -96,6 +96,109 @@ assert_eq "override: infra/prod/main.tf protected"        "ovr-infra:0" "$(grep 
 assert_eq "override: Makefile protected"                  "ovr-make:0"  "$(grep -o 'ovr-make:[01]'  /tmp/ovr-$$.out)"
 assert_eq "override drops default workflows (not in list)" "ovr-wf:1"   "$(grep -o 'ovr-wf:[01]'    /tmp/ovr-$$.out)"
 rm -f /tmp/ovr-$$.out
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== REVIEW_PROTECTED_PATHS override plumbing (issue #301) ==="
+# ---------------------------------------------------------------------------
+# Defect 2: the lib's default-assignment must distinguish UNSET (apply default)
+# from EXPLICIT-EMPTY (no protected paths). It now uses `${VAR-default}` (no colon),
+# so `REVIEW_PROTECTED_PATHS=""` means "nothing protected" — the conf doc's promised
+# "set to \"\" to disable protection" — while an unset var still defaults (fail-safe).
+
+# TC-301-01 (regression / fail-safe): unset ⇒ the default list applies. Run in a
+# subshell with the var fully unset, then re-source the lib so its assignment fires.
+( unset REVIEW_PROTECTED_PATHS
+  source "$CLASSIFY_LIB"
+  review_path_is_protected ".github/workflows/ci.yml" && echo "uns-wf:0" || echo "uns-wf:1"
+  review_path_is_protected "CODEOWNERS"               && echo "uns-co:0" || echo "uns-co:1"
+  review_path_is_protected "src/foo.ts"               && echo "uns-src:0" || echo "uns-src:1"
+) > /tmp/uns-$$.out 2>&1
+assert_eq "unset ⇒ default list protects .github/workflows/ci.yml" "uns-wf:0" "$(grep -o 'uns-wf:[01]'  /tmp/uns-$$.out)"
+assert_eq "unset ⇒ default list protects CODEOWNERS"               "uns-co:0" "$(grep -o 'uns-co:[01]'  /tmp/uns-$$.out)"
+assert_eq "unset ⇒ ordinary src/foo.ts not protected"             "uns-src:1" "$(grep -o 'uns-src:[01]' /tmp/uns-$$.out)"
+rm -f /tmp/uns-$$.out
+
+# TC-301-02: explicit empty ⇒ NOTHING protected (incl. the former defaults).
+( export REVIEW_PROTECTED_PATHS=""
+  source "$CLASSIFY_LIB"
+  review_path_is_protected ".github/workflows/ci.yml" && echo "emp-wf:0" || echo "emp-wf:1"
+  review_path_is_protected "CODEOWNERS"               && echo "emp-co:0" || echo "emp-co:1"
+  review_path_is_protected "src/foo.ts"               && echo "emp-src:0" || echo "emp-src:1"
+) > /tmp/emp-$$.out 2>&1
+assert_eq "explicit empty ⇒ .github/workflows/ci.yml NOT protected" "emp-wf:1"  "$(grep -o 'emp-wf:[01]'  /tmp/emp-$$.out)"
+assert_eq "explicit empty ⇒ CODEOWNERS NOT protected"               "emp-co:1"  "$(grep -o 'emp-co:[01]'  /tmp/emp-$$.out)"
+assert_eq "explicit empty ⇒ src/foo.ts NOT protected"               "emp-src:1" "$(grep -o 'emp-src:[01]' /tmp/emp-$$.out)"
+rm -f /tmp/emp-$$.out
+
+# TC-301-03: explicit empty ⇒ a protected-path finding is dev-actionable again
+# (no path is protected, so the legacy "absent ⇒ true" default applies).
+( export REVIEW_PROTECTED_PATHS=""
+  source "$CLASSIFY_LIB"
+  review_classify_artifact_dev_actionable \
+    '{"verdict":"FAIL","blockingFindings":[{"title":"edit ci.yml","file":".github/workflows/ci.yml"}]}'
+) > /tmp/empagg-$$.out 2>&1
+assert_eq "explicit empty ⇒ aggregate on a .github/workflows finding → true (nothing protected)" \
+  "true" "$(cat /tmp/empagg-$$.out)"
+rm -f /tmp/empagg-$$.out
+
+# TC-301-04: custom override ⇒ only the override matches; the default workflows path
+# is no longer protected.
+( export REVIEW_PROTECTED_PATHS="custom/**"
+  source "$CLASSIFY_LIB"
+  review_path_is_protected "custom/foo"               && echo "cus-c:0" || echo "cus-c:1"
+  review_path_is_protected ".github/workflows/ci.yml" && echo "cus-wf:0" || echo "cus-wf:1"
+) > /tmp/cus-$$.out 2>&1
+assert_eq "custom override protects custom/foo"                    "cus-c:0"  "$(grep -o 'cus-c:[01]'  /tmp/cus-$$.out)"
+assert_eq "custom override drops default .github/workflows/ci.yml" "cus-wf:1" "$(grep -o 'cus-wf:[01]' /tmp/cus-$$.out)"
+rm -f /tmp/cus-$$.out
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== review_protected_paths_prompt_rule (prompt built from \$REVIEW_PROTECTED_PATHS, issue #301) ==="
+# ---------------------------------------------------------------------------
+# Defect 1: the review-agent classification PROMPT must be generated from the SAME
+# $REVIEW_PROTECTED_PATHS the lib matcher reads — not a hardcoded literal. The wrapper
+# interpolates `$(review_protected_paths_prompt_rule)` into build_review_prompt.
+
+# TC-301-05: a custom override is reflected verbatim in the prompt; the rule no longer
+# hardcodes the default `.github/workflows/`/`CODEOWNERS` literal as the protected set.
+PR_CUSTOM="$( REVIEW_PROTECTED_PATHS="custom/**" bash -c 'source "$1"; review_protected_paths_prompt_rule' _ "$CLASSIFY_LIB" )"
+case "$PR_CUSTOM" in
+  *"custom/**"*) echo "  PASS: prompt rule advertises the custom override verbatim"; PASS=$((PASS+1));;
+  *) echo "  FAIL: prompt rule missing custom/** override"; echo "      got: $PR_CUSTOM"; FAIL=$((FAIL+1));;
+esac
+case "$PR_CUSTOM" in
+  *".github/workflows/**"*|*"CODEOWNERS"*)
+    echo "  FAIL: prompt rule still hardcodes the default protected literal under a custom override"; FAIL=$((FAIL+1));;
+  *) echo "  PASS: prompt rule does not hardcode the default list under a custom override"; PASS=$((PASS+1));;
+esac
+
+# TC-301-06: explicit empty ⇒ the prompt advertises NO protected paths.
+PR_EMPTY="$( REVIEW_PROTECTED_PATHS="" bash -c 'source "$1"; review_protected_paths_prompt_rule' _ "$CLASSIFY_LIB" )"
+case "$PR_EMPTY" in
+  *"NO protected paths"*)
+    echo "  PASS: empty list ⇒ prompt advertises NO protected paths"; PASS=$((PASS+1));;
+  *) echo "  FAIL: empty list ⇒ prompt should advertise NO protected paths"; echo "      got: $PR_EMPTY"; FAIL=$((FAIL+1));;
+esac
+# And it must NOT name a protected glob (no PROTECTED-PATH instruction at all).
+case "$PR_EMPTY" in
+  *"PROTECTED-PATH pattern"*)
+    echo "  FAIL: empty list ⇒ prompt should NOT emit a protected-path matching rule"; FAIL=$((FAIL+1));;
+  *) echo "  PASS: empty list ⇒ prompt emits no protected-path matching rule"; PASS=$((PASS+1));;
+esac
+
+# TC-301-07 (regression): unset ⇒ the prompt advertises the DEFAULT list (the same
+# var the lib uses, via its `${VAR-default}` assignment).
+PR_DEFAULT="$( unset REVIEW_PROTECTED_PATHS; bash -c 'source "$1"; review_protected_paths_prompt_rule' _ "$CLASSIFY_LIB" )"
+case "$PR_DEFAULT" in
+  *".github/workflows/**"*) echo "  PASS: unset ⇒ prompt advertises default .github/workflows/**"; PASS=$((PASS+1));;
+  *) echo "  FAIL: unset ⇒ prompt missing default .github/workflows/**"; echo "      got: $PR_DEFAULT"; FAIL=$((FAIL+1));;
+esac
+case "$PR_DEFAULT" in
+  *"CODEOWNERS"*) echo "  PASS: unset ⇒ prompt advertises default CODEOWNERS"; PASS=$((PASS+1));;
+  *) echo "  FAIL: unset ⇒ prompt missing default CODEOWNERS"; echo "      got: $PR_DEFAULT"; FAIL=$((FAIL+1));;
+esac
 
 # ---------------------------------------------------------------------------
 echo ""

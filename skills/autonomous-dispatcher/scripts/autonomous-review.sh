@@ -1311,15 +1311,7 @@ behavior):
 - \`requires_human\` (boolean), \`requires_privileged_token\` (boolean),
   \`blocking_for_merge\` (boolean), \`recommended_next_owner\`
   (\`"dev_agent"\`|\`"human"\`|\`"maintainer"\`).
-- Apply this rule:
-  - If the finding's \`file\` is a PROTECTED path (a GitHub Actions workflow under
-    \`.github/workflows/\`, or \`CODEOWNERS\` / \`.github/CODEOWNERS\`):
-    set \`actionable_by_dev_agent: false\`, \`requires_human: true\`,
-    \`recommended_next_owner: "maintainer"\`. Additionally set
-    \`requires_privileged_token: true\` ONLY for a \`.github/workflows/\` edit when
-    the dev agent's token lacks the \`workflows\` scope (it does by default).
-  - Otherwise: \`actionable_by_dev_agent: true\`,
-    \`recommended_next_owner: "dev_agent"\`.
+$(review_protected_paths_prompt_rule)
 - The wrapper RE-DERIVES the aggregate routing signal from this validated JSON
   (it does NOT trust a self-reported summary), so classify each finding HONESTLY.
 
