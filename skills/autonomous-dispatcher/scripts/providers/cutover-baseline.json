@@ -229,11 +229,6 @@
     {
       "count": 1,
       "file": "lib-review-e2e.sh",
-      "content": "_existing=$(gh api \"repos/${REPO_OWNER}/${REPO_NAME}/issues/${PR_NUMBER}/comments\" --paginate \\"
-    },
-    {
-      "count": 1,
-      "file": "lib-review-e2e.sh",
       "content": "gh pr comment \"$PR_NUMBER\" --repo \"$REPO\" --body \"$evidence\" 2>/dev/null || rc=$?"
     },
     {

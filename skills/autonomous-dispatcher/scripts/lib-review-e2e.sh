@@ -568,8 +568,18 @@ _post_brokered_e2e_report() {
   # marker uses); best-effort — a gh failure here just means we proceed to post.
   if [[ -n "${WRAPPER_START_TS:-}" ]]; then
     local _existing
-    _existing=$(gh api "repos/${REPO_OWNER}/${REPO_NAME}/issues/${PR_NUMBER}/comments" --paginate \
-      --jq "[.[] | select((.created_at >= \"${WRAPPER_START_TS}\") and (.body | contains(\"## E2E Verification Report\")))] | length" \
+    # [#333/#296] Comment LIST read → the SHIPPED itp_list_comments verb (shape-
+    # equivalent, no new verb). The verb emits the normalized [INV-90] array
+    # `[{id,author,authorKind,body,createdAt}]`; the dedup `select` stays caller-side.
+    # `.created_at` → the normalized `.createdAt` (same ISO-8601 `…Z` string, so the
+    # `>=` window compare is order-identical), `.body`/`contains()` verbatim. The
+    # select is literal `contains`/`>=` (no `test()`/regex), so moving it from
+    # `gh --jq` (RE2) to the system `jq` introduces no engine divergence. `| tail -n1`
+    # is KEPT as a zero-cost net: the verb yields one `length` line today, but were a
+    # future provider to re-paginate into multi-line output, a bare `length` would
+    # feed the numeric guard below a multi-line value → fail-closed → double-post.
+    _existing=$(itp_list_comments "$PR_NUMBER" 2>/dev/null \
+      | jq -r "[.[] | select((.createdAt >= \"${WRAPPER_START_TS}\") and (.body | contains(\"## E2E Verification Report\")))] | length" \
       2>/dev/null | tail -n1 || true)
     if [[ "$_existing" =~ ^[0-9]+$ ]] && [[ "$_existing" -gt 0 ]]; then
       log "INV-79: an E2E report comment already exists in this review window (agent posted directly) — skipping the brokered post to avoid a duplicate."
