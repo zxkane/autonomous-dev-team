@@ -301,9 +301,13 @@ if [[ -d "$FAKE_PROVIDER" ]]; then
   # remap path (defined-not-implemented → clean LOUD error, no missing-leaf crash).
   # Drive the REAL mark-issue-checkbox.sh; stub the gh body-read; capture stderr.
   _CB_STUB="$(mktemp -d)"
+  # The body READ is now `gh issue view <N> --repo <REPO> --json body -q '.body'`
+  # (#296: itp_read_task → itp_degraded_read_task → this shape) — NOT the old
+  # `gh api … --jq .body`. Recognize the new read shape and return the body; a
+  # PATCH must still trip GH_PATCH_CALLED.
   cat > "$_CB_STUB/gh" <<'GHEOF'
 #!/bin/bash
-if [[ "$1" == "api" && "$3" == "--jq" ]]; then printf '## Requirements\n- [ ] Do the thing\n'; exit 0; fi
+if [[ "$1" == "issue" && "$2" == "view" ]]; then printf '## Requirements\n- [ ] Do the thing\n'; exit 0; fi
 echo "GH_PATCH_CALLED $*" >&2; exit 0
 GHEOF
   chmod +x "$_CB_STUB/gh"
@@ -370,17 +374,22 @@ exit 0
 GHEOF
 chmod +x "$_TRIPWIRE_DIR/gh"
 
-# (1) mark-issue-checkbox.sh — copy ALONE (no provider lib beside it), stub the gh
-#     body-READ so the script reaches the PATCH-write decision with a real unchecked
-#     checkbox in the body. itp_mark_checkbox / itp_caps stay UNDEFINED → must fail
-#     loud with "itp_mark_checkbox not available" and never PATCH via gh.
+# (1) mark-issue-checkbox.sh — copy ALONE (no provider lib beside it). itp_read_task
+#     / itp_mark_checkbox / itp_caps stay UNDEFINED. Since #296 the body READ routes
+#     through itp_read_task BEFORE the PATCH-cap branch, so the EARLIER fail-loud
+#     (read-side) fires first: the script must fail loud naming "itp_read_task not
+#     available", exit non-zero, and never invoke gh (no read, no PATCH). The
+#     tripwire gh below is keyed on the NEW read shape (gh issue view … --json body)
+#     AND a PATCH; neither should ever be reached.
 _MIC_ISO="$(mktemp -d)"
 cp "$COMMON_SCRIPTS/mark-issue-checkbox.sh" "$_MIC_ISO/mark-issue-checkbox.sh"
 # A read-stub gh that returns a body with the target checkbox, but trips on a PATCH.
+# (Recognizes the migrated `gh issue view … --json body` read shape; with the verb
+# undefined the script fails BEFORE any gh call, so neither arm should fire.)
 cat > "$_MIC_ISO/gh" <<'GHEOF'
 #!/bin/bash
 for a in "$@"; do [ "$a" = "PATCH" ] && { echo "TRIPWIRE_GH_PATCH_CALLED $*" >&2; exit 0; }; done
-if [[ "$1" == "api" && "$3" == "--jq" ]]; then printf '## Requirements\n- [ ] Do the thing\n'; exit 0; fi
+if [[ "$1" == "issue" && "$2" == "view" ]]; then printf '## Requirements\n- [ ] Do the thing\n'; exit 0; fi
 echo "TRIPWIRE_GH_CALLED $*" >&2; exit 0
 GHEOF
 chmod +x "$_MIC_ISO/gh"
@@ -389,8 +398,15 @@ mic_absent=$(
       -u ISSUE_PROVIDER REPO=o/r PATH="$_MIC_ISO:$PATH" \
   bash -c 'unset -f gh; bash "$1" "$2" "$3"' _ "$_MIC_ISO/mark-issue-checkbox.sh" 1 "Do the thing" 2>&1
 ); mic_rc=$?
-assert_contains "TC-B1-CHECKBOX-ABSENT fails loud naming itp_mark_checkbox when provider lib absent" \
-  "itp_mark_checkbox not available" "$mic_absent"
+# AC2c re-baseline: provider lib absent → the body READ verb (itp_read_task) is
+# undefined, so the script fails loud in the EARLIER fetch handler — NOT at the
+# itp_mark_checkbox PATCH-cap branch, NOT a `command not found`.
+assert_contains "TC-B1-CHECKBOX-ABSENT fails loud naming itp_read_task when provider lib absent (earlier read-side fail)" \
+  "itp_read_task not available" "$mic_absent"
+assert_not_contains "TC-B1-CHECKBOX-ABSENT does NOT die on a missing-verb command-not-found" \
+  "command not found" "$mic_absent"
+assert_not_contains "TC-B1-CHECKBOX-ABSENT does NOT read via gh (no silent GitHub fallback)" \
+  "TRIPWIRE_GH_CALLED" "$mic_absent"
 [ "$mic_rc" -ne 0 ] && echo -e "  ${GREEN}PASS${NC}: TC-B1-CHECKBOX-ABSENT non-zero exit (rc=$mic_rc)" && PASS=$((PASS+1)) \
   || { echo -e "  ${RED}FAIL${NC}: TC-B1-CHECKBOX-ABSENT expected non-zero exit, got rc=$mic_rc"; FAIL=$((FAIL+1)); }
 assert_not_contains "TC-B1-CHECKBOX-ABSENT does NOT PATCH via gh (no silent GitHub fallback)" \
@@ -426,8 +442,11 @@ hp_out=$(
       _HP_FILE="$_HP_FILE" \
   bash -c '
     set -uo pipefail
+    # Read arm matches the migrated body-read shape (gh issue view … --json body,
+    # #296); every other call (the PATCH) is recorded as an HP_GH line so the
+    # verb-routed write can be asserted.
     gh() {
-      if [[ "$1" == "api" && "$3" == "--jq" ]]; then printf "## Requirements\n- [ ] Do the thing\n"; return 0; fi
+      if [[ "$1" == "issue" && "$2" == "view" ]]; then printf "## Requirements\n- [ ] Do the thing\n"; return 0; fi
       printf "HP_GH %s\n" "$*" >> "$_HP_FILE"; return 0
     }
     export -f gh
@@ -569,6 +588,104 @@ assert_contains "TC-POSTVERDICT-URL helper echoes the comment URL on success" \
 rm -rf "$_PVSB"
 
 rm -f "$_GH_ARGV_FILE"
+
+# ===========================================================================
+# 7. BEHAVIOR-EQUIVALENCE (#296 mark-checkbox body-read migration). Run the REAL
+#    mark-issue-checkbox.sh as a SUBPROCESS with a binary `gh` stub on PATH (NOT by
+#    calling itp_read_task directly) so the test exercises seam-sourcing + the
+#    `|| { … }` handler + the retry path end-to-end. The migration is shape-
+#    equivalent: the old `gh api repos/$REPO/issues/$N --jq .body` read became
+#    `itp_read_task <N> body -q .body` → `gh issue view <N> --repo <REPO> --json
+#    body -q .body`. The returned body STRING is identical, so the SAME body is
+#    marked and the SAME error handling fires.
+#
+#    Sandbox trick (conf isolation + seam resolution): the script is invoked via a
+#    SYMLINK in a temp dir. `$0`/SCRIPT_DIR is the symlink dir (so the conf-lookup
+#    finds NO autonomous.conf → the env REPO=o/r survives, no contamination from an
+#    operator-local conf), while `readlink -f "$BASH_SOURCE"` resolves to the REAL
+#    skill-tree file so the provider seam still sources and itp_read_task is defined.
+# ===========================================================================
+echo "=== BEHAVIOR-EQUIVALENCE: mark-issue-checkbox.sh body-read via itp_read_task (#296) ==="
+_BE_SANDBOX="$(mktemp -d)"
+ln -s "$COMMON_SCRIPTS/mark-issue-checkbox.sh" "$_BE_SANDBOX/mark-issue-checkbox.sh"
+
+# (a) HAPPY + same body + (b) the READ uses the migrated `gh issue view --json body`
+#     shape (NOT `gh api … --jq`). The binary gh stub records its READ argv and the
+#     PATCHed body; assert the PATCH carries the marked body and the READ shape.
+_BE_READ_ARGV="$(mktemp)"; _BE_PATCH_BODY="$(mktemp)"
+cat > "$_BE_SANDBOX/gh" <<GHEOF
+#!/bin/bash
+if [[ "\$1" == "issue" && "\$2" == "view" ]]; then
+  printf '%s\n' "\$@" > "$_BE_READ_ARGV"
+  printf '## Requirements\n- [ ] Do the thing\n'
+  exit 0
+fi
+# PATCH write: capture the --field body=… value.
+_prev=""
+for _a in "\$@"; do
+  case "\$_prev" in --field) printf '%s' "\${_a#body=}" > "$_BE_PATCH_BODY" ;; esac
+  _prev="\$_a"
+done
+exit 0
+GHEOF
+chmod +x "$_BE_SANDBOX/gh"
+be_happy=$(
+  env -u PROJECT_DIR -u AUTONOMOUS_CONF -u AUTONOMOUS_CONF_DIR -u AUTONOMOUS_PROVIDERS_DIR \
+      ISSUE_PROVIDER=github REPO=o/r PATH="$_BE_SANDBOX:$PATH" \
+  bash -c 'unset -f gh; bash "$1" "$2" "$3"' _ "$_BE_SANDBOX/mark-issue-checkbox.sh" 1 "Do the thing" 2>&1
+); be_happy_rc=$?
+be_read_argv="$(paste -sd' ' "$_BE_READ_ARGV")"
+be_patch_body="$(cat "$_BE_PATCH_BODY")"
+[ "$be_happy_rc" -eq 0 ] && echo -e "  ${GREEN}PASS${NC}: TC-MCB-EQUIV-HAPPY script exits 0" && PASS=$((PASS+1)) \
+  || { echo -e "  ${RED}FAIL${NC}: TC-MCB-EQUIV-HAPPY expected exit 0, got rc=$be_happy_rc (out: ${be_happy:0:200})"; FAIL=$((FAIL+1)); }
+assert_contains "TC-MCB-EQUIV-HAPPY the same body is marked (- [x] Do the thing in the PATCHed body)" \
+  "- [x] Do the thing" "$be_patch_body"
+assert_eq "TC-MCB-EQUIV-READSHAPE read uses the migrated gh issue view --json body shape" \
+  "issue view 1 --repo o/r --json body -q .body" "$be_read_argv"
+
+# (c) ERROR — the body READ fails (gh issue view exits non-zero); the `|| { … }`
+#     handler must fire identically (Error: Failed to fetch …), non-zero exit, no PATCH.
+_BE_ERR_PATCH="$(mktemp)"
+cat > "$_BE_SANDBOX/gh" <<GHEOF
+#!/bin/bash
+if [[ "\$1" == "issue" && "\$2" == "view" ]]; then echo "gh: read failed" >&2; exit 1; fi
+echo "BE_ERR_PATCH_CALLED \$*" >> "$_BE_ERR_PATCH"
+exit 0
+GHEOF
+chmod +x "$_BE_SANDBOX/gh"
+be_err=$(
+  env -u PROJECT_DIR -u AUTONOMOUS_CONF -u AUTONOMOUS_CONF_DIR -u AUTONOMOUS_PROVIDERS_DIR \
+      ISSUE_PROVIDER=github REPO=o/r PATH="$_BE_SANDBOX:$PATH" \
+  bash -c 'unset -f gh; bash "$1" "$2" "$3"' _ "$_BE_SANDBOX/mark-issue-checkbox.sh" 1 "Do the thing" 2>&1
+); be_err_rc=$?
+assert_contains "TC-MCB-EQUIV-ERROR the || { … } handler fires on a read error" \
+  "Error: Failed to fetch issue #1" "$be_err"
+[ "$be_err_rc" -ne 0 ] && echo -e "  ${GREEN}PASS${NC}: TC-MCB-EQUIV-ERROR non-zero exit on read error (rc=$be_err_rc)" && PASS=$((PASS+1)) \
+  || { echo -e "  ${RED}FAIL${NC}: TC-MCB-EQUIV-ERROR expected non-zero exit, got rc=$be_err_rc"; FAIL=$((FAIL+1)); }
+assert_not_contains "TC-MCB-EQUIV-ERROR no PATCH after a read failure" \
+  "BE_ERR_PATCH_CALLED" "$(cat "$_BE_ERR_PATCH")"
+
+# (d) REPO-FALLBACK — self-repo, no autonomous.conf, REPO/GITHUB_REPO unset → REPO
+#     resolves to the placeholder owner/repo; the read against it fails so the
+#     script exits non-zero (the same exit-1-when-REPO-unresolvable behavior as
+#     before the migration — the swap of the read primitive did NOT alter it).
+cat > "$_BE_SANDBOX/gh" <<'GHEOF'
+#!/bin/bash
+# A placeholder-repo read fails (as a real gh would 404 on owner/repo).
+if [[ "$1" == "issue" && "$2" == "view" ]]; then echo "gh: Could not resolve to a Repository" >&2; exit 1; fi
+exit 0
+GHEOF
+chmod +x "$_BE_SANDBOX/gh"
+be_repo=$(
+  env -u PROJECT_DIR -u AUTONOMOUS_CONF -u AUTONOMOUS_CONF_DIR -u AUTONOMOUS_PROVIDERS_DIR \
+      -u REPO -u GITHUB_REPO ISSUE_PROVIDER=github PATH="$_BE_SANDBOX:$PATH" \
+  bash -c 'unset -f gh; bash "$1" "$2" "$3"' _ "$_BE_SANDBOX/mark-issue-checkbox.sh" 1 "Do the thing" 2>&1
+); be_repo_rc=$?
+[ "$be_repo_rc" -ne 0 ] && echo -e "  ${GREEN}PASS${NC}: TC-MCB-REPO-FALLBACK exits non-zero when REPO is unresolvable (preserved)" && PASS=$((PASS+1)) \
+  || { echo -e "  ${RED}FAIL${NC}: TC-MCB-REPO-FALLBACK expected non-zero exit, got rc=$be_repo_rc (out: ${be_repo:0:200})"; FAIL=$((FAIL+1)); }
+
+rm -f "$_BE_READ_ARGV" "$_BE_PATCH_BODY" "$_BE_ERR_PATCH"
+rm -rf "$_BE_SANDBOX"
 
 # ===========================================================================
 echo ""

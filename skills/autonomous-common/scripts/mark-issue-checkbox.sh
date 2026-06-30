@@ -31,15 +31,18 @@ for _conf_candidate in \
 done
 REPO="${GITHUB_REPO:-${REPO:-owner/repo}}"
 
-# [INV-87] Issue-Tracker Provider dispatch. The body-checkbox PATCH leaf routes
-# through itp_mark_checkbox (→ itp_${ISSUE_PROVIDER}_mark_checkbox). The provider
-# lib lives in the autonomous-dispatcher skill tree; resolve it via readlink -f of
-# THIS script (the [INV-14]/[INV-65] skill-tree idiom) — NOT SCRIPT_DIR, which is
-# deliberately the project-side symlink dir so the conf-lookup above finds the
-# project's autonomous.conf. Guarded: if the lib is absent the verb stays undefined
-# and the PATCH write below FAILs LOUD ([INV-91]: a raw `gh` fallback would silently
+# [INV-87] Issue-Tracker Provider dispatch. Two leaves route through the seam:
+# the body READ (itp_read_task → itp_${ISSUE_PROVIDER}_read_task, #296) AND the
+# body-checkbox PATCH (itp_mark_checkbox → itp_${ISSUE_PROVIDER}_mark_checkbox).
+# The provider lib lives in the autonomous-dispatcher skill tree; resolve it via
+# readlink -f of THIS script (the [INV-14]/[INV-65] skill-tree idiom) — NOT
+# SCRIPT_DIR, which is deliberately the project-side symlink dir so the conf-lookup
+# above finds the project's autonomous.conf. Guarded on EITHER verb being undefined
+# (so the genuinely-absent-lib case still attempts the source even if a caller
+# pre-defined only one of them): if the lib is absent both verbs stay undefined and
+# the READ/PATCH below FAIL LOUD ([INV-91]: a raw `gh` fallback would silently
 # execute GitHub commands for a non-GitHub backend — never silently fall through).
-if ! declare -F itp_mark_checkbox >/dev/null 2>&1; then
+if ! declare -F itp_read_task >/dev/null 2>&1 || ! declare -F itp_mark_checkbox >/dev/null 2>&1; then
   _mic_real_dir="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]:-$0}")")" && pwd 2>/dev/null)" || _mic_real_dir=""
   _mic_lib="${_mic_real_dir}/../../autonomous-dispatcher/scripts/lib-issue-provider.sh"
   if [[ -n "$_mic_real_dir" && -r "$_mic_lib" ]]; then
@@ -73,9 +76,23 @@ if [[ "$CHECKBOX_TEXT" =~ $'\n' ]] || [[ "$CHECKBOX_TEXT" =~ $'\r' ]]; then
 fi
 
 mark_checkbox() {
-  # Fetch current issue body
+  # Fetch current issue body via the itp_read_task READ leaf (#296, [INV-87]).
+  # Shape-equivalent (NOT byte-identical) migration: the old raw `gh api
+  # repos/$REPO/issues/$N --jq .body` REST read becomes
+  # `itp_read_task "$ISSUE_NUMBER" body -q '.body'` → itp_github_read_task →
+  # `gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json body -q '.body'`. The
+  # returned body STRING is identical; only the gh subcommand/endpoint differ.
+  # If the provider lib is unavailable itp_read_task stays undefined and this
+  # FAILs LOUD here (earlier than the PATCH-cap branch below) — intentionally,
+  # NOT a raw `gh` fallback ([INV-91]: a hardcoded GitHub read would execute
+  # against GitHub even for a non-GitHub backend; re-adding it would re-introduce
+  # the survivor this migration removes). The `|| { … }` handler is unchanged.
   local body
-  body=$(gh api "repos/${REPO}/issues/${ISSUE_NUMBER}" --jq '.body') || {
+  if ! declare -F itp_read_task >/dev/null 2>&1; then
+    echo "Error: itp_read_task not available (provider lib not loaded; ISSUE_PROVIDER=${ISSUE_PROVIDER:-?}). Cannot fetch issue #${ISSUE_NUMBER}." >&2
+    return 1
+  fi
+  body=$(itp_read_task "$ISSUE_NUMBER" body -q '.body') || {
     echo "Error: Failed to fetch issue #${ISSUE_NUMBER}" >&2
     return 1
   }

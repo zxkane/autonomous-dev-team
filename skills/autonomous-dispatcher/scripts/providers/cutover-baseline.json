@@ -308,11 +308,6 @@
     },
     {
       "count": 1,
-      "file": "mark-issue-checkbox.sh",
-      "content": "body=$(gh api \"repos/${REPO}/issues/${ISSUE_NUMBER}\" --jq '.body') || {"
-    },
-    {
-      "count": 1,
       "file": "post-verdict.sh",
       "content": "echo \"Error: failed to post verdict comment on issue #${ISSUE_NUMBER} (gh rc=${POST_RC})\" >&2"
     },
