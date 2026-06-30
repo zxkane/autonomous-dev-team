@@ -181,6 +181,27 @@ chp_list_inline_comments() {
 # validation + the `-eq 0` MISSING decision (lib-review-bots.sh::missing_bot_reviews).
 chp_count_reviews_by_login() { chp_${CODE_HOST}_count_reviews_by_login "$@"; }
 
+# chp_commit_file REPO BRANCH FILE_PATH CONTENT_BASE64 MESSAGE — whole-op file
+# commit (#330, [INV-99]). The standalone upload-screenshot.sh review util's ONE
+# code-host op (commit a PNG onto an orphan `screenshots` branch + echo the
+# committed SHA) routes through this verb. SELF-GUARDING like chp_pr_view /
+# chp_pr_list (NOT the lifecycle-verb chp_has_leaf posture): upload-screenshot.sh
+# is standalone and exits non-zero on failure, invoking the verb UNGUARDED, so
+# when the enabled provider omits the leaf (the all-empty degraded fixture; any
+# non-GitHub backend without a file-commit leaf) the shim emits a WARN and returns
+# 1 — a clean non-zero the caller's `chp_commit_file … || fail` already degrades
+# on — rather than dispatching to an undefined leaf and command-not-found-aborting
+# under set -e. A real backend MUST implement this (a core write leaf, not
+# capability-gated). The GitHub leaf is the whole 8-call git-Data-API op; a GitLab
+# backend would be one Files API call.
+chp_commit_file() {
+  if ! declare -F "chp_${CODE_HOST}_commit_file" >/dev/null 2>&1; then
+    echo "WARN: [INV-99] CODE_HOST='${CODE_HOST}' provider defines no chp_${CODE_HOST}_commit_file leaf — file commit unavailable." >&2
+    return 1
+  fi
+  chp_${CODE_HOST}_commit_file "$@"
+}
+
 # chp_has_leaf <verb> — returns 0 iff the ENABLED provider actually defines the
 # leaf `chp_${CODE_HOST}_<verb>` (e.g. `chp_has_leaf close_keyword`).
 #

@@ -4968,6 +4968,78 @@ Per **Pipeline Documentation Authority**, the INV-35 / INV-85 routing is the loa
 - [INV-92](#inv-92-a-review-blocking-finding-the-dev-agent-provably-cannot-act-on-protected-path--missing-token-scope-is-not-routed-to-dev-resume--the-wrapper-classifies-each-findings-actionability-and-the-dispatcher-escalates-a-non-actionable-verdict-to-stalled) — the non-actionable-finding escalation the delegated router applies.
 - [`dispatcher-flow.md`](dispatcher-flow.md#step-4a5-pr-exists-short-circuit-99-bug-3-106) — Step 4a.5 (the delegating caller) and Step 4b.5.1 (the delegated router; the "two entry points" note).
 
+## INV-99: the screenshot-commit op routes through the whole-op `chp_commit_file` verb; its GitHub leaf is the 8-call git-Data-API implementation and cleans its temps INLINE (no `trap … EXIT`/`… RETURN`)
+
+_Triage (issue #236): [machine-checked: tests/unit/test-chp-commit-file.sh]_
+
+**Rule**: `upload-screenshot.sh` commits a screenshot PNG onto the orphan
+`screenshots` branch through the Code-Host Provider verb
+`chp_commit_file REPO BRANCH FILE_PATH CONTENT_BASE64 MESSAGE` (GitHub leaf
+`chp_github_commit_file`), NOT a sequence of raw caller-side `gh api` git-Data-API
+calls. This is a **whole-op verb**, the largest single #296 migration: GitHub has
+no single "commit one file to a branch" primitive, so the leaf IS the cohesive
+op's 8-call implementation (`git/ref` get → `git/blobs` → `git/trees` →
+`git/commits` → `git/refs` → re-`git/ref` verify → `contents` GET → `contents`
+PUT, with the orphan-branch create-vs-update branching). A GitLab backend collapses
+the same op into ONE Files API call (`POST …/repository/files/:path`,
+`encoding=base64`). This is the `chp_review_threads`-wraps-a-whole-GraphQL-walk
+posture ([INV-87] §3.2 [M8]), NOT 8 thin per-call shims.
+
+- **Leaf-internal (provider implementation):** the get-ref→…→put sequence, the
+  orphan-branch create chain, the `.ref // empty` / `.sha // empty` provider-shape
+  jq (constant, leaf-internal — NOT a provider-neutral shape), the `?ref=` query,
+  and the temp-file JSON build that dodges the ARG_MAX limit (base64 can exceed
+  128 KB).
+- **Caller-side (provider-neutral):** the local file-read + `base64 -w0` encode
+  (`CONTENT_BASE64` is the provider-neutral currency — GitLab's Files API also
+  takes `encoding=base64`), the `BRANCH` / `FILE_PATH` / `MESSAGE` rendering, the
+  `[[ -n "$SHA" ]] || fail`-on-empty-SHA glue, and the final `/blob/` URL echo.
+  The leaf echoes the committed blob SHA on success and returns non-zero on commit
+  failure, so the caller's empty-SHA `fail` becomes `chp_commit_file … || fail`.
+- **`REPO` is threaded EXPLICITLY** as `$1`, not read from a global `$REPO`:
+  `upload-screenshot.sh` is a standalone review util that resolves its own `$REPO`
+  from `autonomous.conf` and never sources the wrapper env, so an ambient `$REPO`
+  must not silently win (the #324 dropped-repo-arg lesson). The
+  `BRANCH`/`FILE_PATH`/`MESSAGE` are caller-rendered params, not hardcoded in the
+  leaf.
+- **The shim is SELF-GUARDING** (the `chp_pr_view`/`chp_pr_list` posture, [INV-87]
+  §3.2): `upload-screenshot.sh` invokes the verb UNGUARDED and exits non-zero on
+  failure, so when the enabled provider omits the leaf the `chp_commit_file` shim
+  emits a WARN and returns 1 — a clean non-zero the caller's `|| fail` degrades on
+  — rather than dispatching to an undefined leaf and command-not-found-aborting
+  under `set -e`. Lib-load failure (no `chp_commit_file` at all) FAILS LOUD: a raw
+  `gh` fallback would silently run GitHub git-Data-API commands for a non-GitHub
+  backend ([INV-91]).
+- **Temp-file cleanup is INLINE** (a plain `rm -f` before every return) — the leaf
+  installs NO `trap`. `trap … EXIT` would REPLACE the standalone caller's own EXIT
+  trap and the now-`local` temp vars would expand empty when it fired at caller
+  exit (reproduced on-box: caller trap clobbered + `unbound variable`). A
+  `trap … RETURN` is no safer: it is NOT cleared at leaf return, so it PERSISTS and
+  fires AGAIN when the `chp_commit_file` shim returns into the caller, by then the
+  leaf's `local` `$json_tmpfile`/`$upload_response_file` are out of scope →
+  `unbound variable` under the caller's `set -u` (also reproduced on-box, the
+  shim-dispatch path). Inline cleanup sidesteps both.
+
+The migration shrinks the [INV-91] cutover baseline by **8 occurrences / 7
+signatures** (the get-ref signature appears twice; 60→52 occurrences, 54→47
+distinct signatures). `upload-screenshot.sh` retains exactly one baselined raw-gh
+survivor — the `command -v gh` presence guard (a residue, not a call site). The
+leaf still uses `gh`, but it now lives under `providers/` (excluded from the
+cutover scan).
+
+**Test**: `tests/unit/test-chp-commit-file.sh` — golden whole-op (branch-absent
+create, branch-present update, new-file create, put-fail, branch-create-fail) via
+a stateful per-endpoint `gh` stub; the no-trap source-shape + the behavioral
+through-the-shim `set -euo` repro (caller EXIT trap survives, no `unbound
+variable`); the REPO-from-arg pin; the source-shape (zero raw `gh api`
+git/contents, guard stays, leaf+shim+verb present, baseline −8); the self-guarding
+shim (degraded fixture → WARN + non-zero).
+
+**Cross-references**:
+- [INV-87](#inv-87-provider-dispatch-is-spec-defined--callers-route-every-issuecode-host-op-through-itp_chp_-never-a-raw-gh-in-the-caller-layer) — the verb-dispatch contract this verb extends (the whole-op + self-guarding-shim postures).
+- [INV-91](#inv-91-the-provider-neutral-caller-layer-routes-all-host-io-through-itp_chp_-verbs--a-new-raw-gh-outside-providers-is-a-ci-failing-cutover-regression-baseline-anchored) — the cutover guard whose baseline this migration shrinks (60→52 occurrences).
+- [`provider-spec.md`](provider-spec.md) §3.2 — the `chp_commit_file` verb row + the §7.2 mapping entry.
+
 ## Adding a new invariant
 
 When fixing a pipeline bug, after locating the bug on the state machine + flow docs:

@@ -362,3 +362,121 @@ chp_github_count_reviews_by_login() {
     || { echo 0; return 0; }
   awk '{s+=$1} END {print s+0}' <<<"$lengths"
 }
+
+# chp_github_commit_file REPO BRANCH FILE_PATH CONTENT_BASE64 MESSAGE — commit a
+# single file onto a branch and echo the committed blob SHA (#330, [INV-99]).
+#
+# Spec §3.2: the WHOLE-OP CHP write verb behind upload-screenshot.sh. GitHub has
+# no single "commit one file to an (orphan) branch" primitive, so the leaf is the
+# 8-call git-Data-API implementation of that ONE op (get-ref → blob → tree →
+# commit → ref → re-get-ref verify → get-contents → put-contents) — exactly the
+# `chp_review_threads`-wraps-a-whole-GraphQL-walk posture. A GitLab backend
+# collapses the same op into a single Files API call. The body is the pre-#330
+# upload-screenshot.sh lines 76-134 VERBATIM (the no-behavior-change anchor),
+# with two deliberate deltas:
+#
+#   - REPO is the EXPLICIT $1 (NOT a global $REPO): upload-screenshot.sh is a
+#     standalone util that resolves its own $REPO from autonomous.conf and never
+#     sources the wrapper env, so threading it as an arg keeps a stray ambient
+#     $REPO from silently winning (the #324 dropped-repo-arg lesson).
+#   - the temp-file cleanup is INLINE at each return path — NEITHER the script's
+#     `trap … EXIT` NOR a `trap … RETURN`. A sourced function's `trap … EXIT`
+#     REPLACES the caller's EXIT trap, and the now-local temp vars expand empty
+#     when it fires at caller exit (reproduced on-box: caller trap clobbered +
+#     `unbound variable` crash). A `trap … RETURN` has its OWN hazard: it is NOT
+#     cleared when the leaf returns, so it PERSISTS and fires AGAIN when the
+#     calling `chp_commit_file` shim returns — by then the leaf's `local`
+#     `$json_tmpfile` is out of scope → `unbound variable` under the caller's
+#     `set -u` (reproduced on-box: the shim-dispatch path crashes). So the leaf
+#     `rm -f`s its temps INLINE before every return — no trap manipulation at all,
+#     the caller's EXIT trap is untouched, and nothing dangling references the
+#     leaf's locals after it returns. (The orphan-branch-create failure returns
+#     BEFORE the temps are created, so it needs no cleanup.)
+#
+# Caller-side (provider-neutral, stays in upload-screenshot.sh): the local
+# file-read + `base64 -w0` encode (CONTENT_BASE64 is the provider-neutral
+# currency — GitLab's Files API also takes `encoding=base64`), the BRANCH /
+# FILE_PATH / MESSAGE rendering, the `[[ -n "$SHA" ]] || fail`-on-empty-SHA glue,
+# and the final `/blob/` URL echo + the `command -v gh`/`jq` presence guards.
+#
+# No jq injection: the `.ref // empty` / `.sha // empty` are leaf-internal
+# CONSTANT jq filters; REPO/BRANCH/FILE_PATH/MESSAGE/CONTENT_BASE64 go into REST
+# paths, the `?ref=` query, or the temp-file JSON payload — never a jq pattern.
+#
+# Echoes the committed blob SHA on success (rc 0); returns non-zero on commit
+# failure (so the caller's `chp_commit_file … || fail` triggers).
+chp_github_commit_file() {
+  local repo="$1" branch="$2" file_path="$3" content_base64="$4" message="$5"
+
+  # Ensure the orphan branch exists
+  local branch_exists
+  branch_exists=$(gh api "repos/${repo}/git/ref/heads/${branch}" 2>/dev/null | jq -r '.ref // empty' 2>/dev/null || true)
+
+  if [[ -z "$branch_exists" ]]; then
+    # Create orphan branch: blob → tree → commit → ref
+    local readme_blob tree_sha commit_sha
+    readme_blob=$(gh api "repos/${repo}/git/blobs" \
+      -f content="Screenshots for PR E2E verification reports.\nThis branch is auto-managed — do not edit manually.\n" \
+      -f encoding=utf-8 \
+      --jq '.sha' 2>/dev/null) || true
+
+    tree_sha=""
+    [[ -n "$readme_blob" ]] && tree_sha=$(gh api "repos/${repo}/git/trees" \
+      --jq '.sha' \
+      -f "tree[][path]=README.md" \
+      -f "tree[][mode]=100644" \
+      -f "tree[][type]=blob" \
+      -f "tree[][sha]=${readme_blob}" 2>/dev/null) || true
+
+    commit_sha=""
+    [[ -n "$tree_sha" ]] && commit_sha=$(gh api "repos/${repo}/git/commits" \
+      -f message="chore: initialize screenshots branch" \
+      -f "tree=${tree_sha}" \
+      --jq '.sha' 2>/dev/null) || true
+
+    [[ -n "$commit_sha" ]] && gh api "repos/${repo}/git/refs" \
+      -f "ref=refs/heads/${branch}" \
+      -f "sha=${commit_sha}" >/dev/null 2>&1 || true
+
+    # Verify branch was created
+    branch_exists=$(gh api "repos/${repo}/git/ref/heads/${branch}" 2>/dev/null | jq -r '.ref // empty' 2>/dev/null || true)
+    [[ -n "$branch_exists" ]] || { echo "Error: failed to create orphan branch '${branch}'" >&2; return 1; }
+  fi
+
+  # Check if file already exists (need SHA for update)
+  local existing_sha
+  existing_sha=$(gh api "repos/${repo}/contents/${file_path}?ref=${branch}" 2>/dev/null | jq -r '.sha // empty' 2>/dev/null || true)
+
+  # Build JSON payload via temp file to avoid ARG_MAX limit with large base64 content.
+  # The base64 string for screenshots can exceed 128KB, which breaks shell argument passing.
+  local json_tmpfile upload_response_file
+  json_tmpfile=$(mktemp /tmp/screenshot-upload-XXXXXX.json)
+  upload_response_file=$(mktemp /tmp/screenshot-response-XXXXXX.json)
+
+  {
+    printf '{"message":"%s","content":"' "$message"
+    printf '%s' "$content_base64"
+    printf '","branch":"%s"' "$branch"
+    if [[ -n "$existing_sha" ]]; then
+      printf ',"sha":"%s"' "$existing_sha"
+    fi
+    printf '}'
+  } > "$json_tmpfile"
+
+  gh api "repos/${repo}/contents/${file_path}" \
+    -X PUT \
+    --input "$json_tmpfile" \
+    > "$upload_response_file" 2>/dev/null || true
+
+  local upload_sha
+  upload_sha=$(jq -r '.content.sha // empty' "$upload_response_file" 2>/dev/null || true)
+
+  # INLINE cleanup (no trap — see the header note): rm the temps before EVERY
+  # return so neither the caller's EXIT trap nor a persistent RETURN trap is
+  # involved (#330 [INV-99] P3 fix).
+  rm -f "$json_tmpfile" "$upload_response_file"
+
+  [[ -n "$upload_sha" ]] || { echo "Error: GitHub API upload failed for ${file_path}" >&2; return 1; }
+
+  printf '%s\n' "$upload_sha"
+}
