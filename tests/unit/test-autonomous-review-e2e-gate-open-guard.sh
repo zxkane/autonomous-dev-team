@@ -123,18 +123,23 @@ fi
 
 # TC-EOG-SRC-04: the E2E-gate skip path removes `reviewing` and does NOT add
 # `pending-dev`. Extract the block from the E2E_PR_STATE query down to its
-# `exit 0` and assert the label semantics.
+# `exit 0` and assert the label semantics. Post-#296/B8 the remove-only flip is
+# the ITP-seam verb `itp_transition_state "$ISSUE_NUMBER" "reviewing" ""` (empty
+# 3rd operand → the leaf's `[ -n "$add" ]` guard emits only `--remove-label`,
+# byte-identical to the prior `gh issue edit … --remove-label "reviewing"`). The
+# positive asserts the remove-only transition; the negative keeps proving no
+# `pending-dev` add reaches the skip path.
 _e2e_skip_block=$(awk '
   /E2E_PR_STATE=\$\(chp_pr_view "\$PR_NUMBER" --json state/ { capture=1 }
   capture { print }
   capture && /exit 0/ { exit }
 ' "$WRAPPER")
-if grep -qE 'remove-label "reviewing"' <<<"$_e2e_skip_block" \
-   && ! grep -qE 'add-label "pending-dev"' <<<"$_e2e_skip_block"; then
-  echo -e "  ${GREEN}PASS${NC}: TC-EOG-SRC-04 E2E open-gate skip path removes reviewing, never adds pending-dev"
+if grep -qE 'itp_transition_state "\$ISSUE_NUMBER" "reviewing" ""' <<<"$_e2e_skip_block" \
+   && ! grep -qE 'add-label "pending-dev"|"reviewing" "pending-dev"' <<<"$_e2e_skip_block"; then
+  echo -e "  ${GREEN}PASS${NC}: TC-EOG-SRC-04 E2E open-gate skip path removes reviewing (itp_transition_state remove-only), never adds pending-dev"
   PASS=$((PASS + 1))
 else
-  echo -e "  ${RED}FAIL${NC}: TC-EOG-SRC-04 E2E open-gate skip path must remove reviewing and not add pending-dev"
+  echo -e "  ${RED}FAIL${NC}: TC-EOG-SRC-04 E2E open-gate skip path must remove reviewing (remove-only itp_transition_state) and not add pending-dev"
   FAIL=$((FAIL + 1))
 fi
 
@@ -166,10 +171,11 @@ echo ""
 echo "=== TC-EOG-REG: OPEN-path regression pins (byte-for-byte unchanged) ==="
 # ---------------------------------------------------------------------------
 
-# TC-EOG-REG-01: both E2E block branches still write −reviewing +pending-dev.
-# Count the `--remove-label "reviewing" --add-label "pending-dev"` form that the
-# E2E branches use (single-line form).
-_e2e_pendingdev_count=$(grep -cE 'remove-label "reviewing" --add-label "pending-dev"' "$WRAPPER")
+# TC-EOG-REG-01: both E2E block branches still move −reviewing +pending-dev.
+# Post-#296/B8 the flip is the ITP-seam verb (positional operands), so count the
+# `itp_transition_state "$ISSUE_NUMBER" "reviewing" "pending-dev"` form that the
+# E2E fail / evidence-missing branches now use.
+_e2e_pendingdev_count=$(grep -cE 'itp_transition_state "\$ISSUE_NUMBER" "reviewing" "pending-dev"' "$WRAPPER")
 if [[ "$_e2e_pendingdev_count" -ge 2 ]]; then
   echo -e "  ${GREEN}PASS${NC}: TC-EOG-REG-01 both E2E block branches still write −reviewing +pending-dev (count=$_e2e_pendingdev_count ≥ 2)"
   PASS=$((PASS + 1))

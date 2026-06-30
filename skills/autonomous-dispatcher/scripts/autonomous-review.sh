@@ -812,9 +812,7 @@ cleanup() {
     # INV-92 (#298): a wrapper crash is ALWAYS dev-actionable (fail-open) — a
     # fresh dev session is the right recovery, never an escalation.
     emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-substantive" "" "true" 2>/dev/null || true
-    gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
-      --remove-label "reviewing" \
-      --add-label "pending-dev" 2>/dev/null || true
+    itp_transition_state "$ISSUE_NUMBER" "reviewing" "pending-dev" 2>/dev/null || true
 
     log "Issue #${ISSUE_NUMBER} moved to pending-dev due to crash."
   fi
@@ -853,9 +851,7 @@ _review_abort_no_valid_pr() {
   itp_post_comment "$ISSUE_NUMBER" \
     "${_comment_body}$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
   emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-non-substantive" "no-pr-found" 2>/dev/null || true
-  gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
-    --remove-label "reviewing" \
-    --add-label "pending-dev" 2>/dev/null || true
+  itp_transition_state "$ISSUE_NUMBER" "reviewing" "pending-dev" 2>/dev/null || true
   # The wrapper has fully HANDLED this exit: it posted the non-substantive
   # `no-pr-found` verdict and flipped the label itself. Mark RESULT_PARSED=true
   # and exit 0 — otherwise the EXIT trap's `RESULT_PARSED != true && exit_code
@@ -1560,8 +1556,7 @@ if [[ "${E2E_ACTIVE:-false}" == "true" ]]; then
     E2E_PR_STATE=$(chp_pr_view "$PR_NUMBER" --json state -q '.state' 2>/dev/null || echo "UNKNOWN")
     if [[ "$(_pr_open_gate "$E2E_PR_STATE")" == "skip" ]]; then
       log "PR #${PR_NUMBER} is no longer open (state: ${E2E_PR_STATE}) at the E2E hard gate. Skipping the pending-dev flip — another review/merge likely completed first."
-      gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
-        --remove-label "reviewing" 2>/dev/null || true
+      itp_transition_state "$ISSUE_NUMBER" "reviewing" "" 2>/dev/null || true
       RESULT_PARSED=true
       exit 0
     fi
@@ -1588,8 +1583,7 @@ Findings->Decision Gate: 1 blocking finding(s) -- FAIL.
       "E2E verification failed (lane exit code ${_e2e_lane_rc}): the wrapper ran the project E2E once before review (INV-46) and it did NOT pass. See the E2E failure comment on PR #${PR_NUMBER}, fix the failure, and push — reviewDecision is set to CHANGES_REQUESTED until a new review with a passing E2E (INV-52)." \
       || log "WARNING: submit_request_changes returned non-zero (unexpected — helper is best-effort); continuing the FAIL route."
 
-    gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
-      --remove-label "reviewing" --add-label "pending-dev" 2>/dev/null || true
+    itp_transition_state "$ISSUE_NUMBER" "reviewing" "pending-dev" 2>/dev/null || true
     log "Issue #${ISSUE_NUMBER} moved to pending-dev (E2E hard gate fail — no fan-out)."
     RESULT_PARSED=true
     exit 0
@@ -1598,8 +1592,7 @@ Findings->Decision Gate: 1 blocking finding(s) -- FAIL.
     itp_post_comment "$ISSUE_NUMBER" \
       "Review held: the wrapper ran E2E once (INV-46) and it exited clean, but no SHA-matching e2e-evidence comment for HEAD \`${PR_HEAD_SHA:0:7}\` is visible (likely transient — comment-post or GitHub propagation). The PR is NOT auto-reviewed while the evidence is missing; it will be re-reviewed on the next dispatch tick.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
     emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-non-substantive" "e2e-evidence-missing" 2>/dev/null || true
-    gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
-      --remove-label "reviewing" --add-label "pending-dev" 2>/dev/null || true
+    itp_transition_state "$ISSUE_NUMBER" "reviewing" "pending-dev" 2>/dev/null || true
     log "Issue #${ISSUE_NUMBER} moved to pending-dev (E2E evidence missing — re-queue, no fan-out)."
     RESULT_PARSED=true
     exit 0
@@ -3216,8 +3209,7 @@ if [[ "$PASSED_VERDICT" == "true" ]]; then
   PR_STATE=$(chp_pr_view "$PR_NUMBER" --json state -q '.state' 2>/dev/null || echo "UNKNOWN")
   if [[ "$(_pr_open_gate "$PR_STATE")" == "skip" ]]; then
     log "PR #${PR_NUMBER} is no longer open (state: ${PR_STATE}). Skipping mergeable gate + approve/merge — another review/merge likely completed first."
-    gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
-      --remove-label "reviewing" 2>/dev/null || true
+    itp_transition_state "$ISSUE_NUMBER" "reviewing" "" 2>/dev/null || true
     RESULT_PARSED=true
     exit 0
   fi
@@ -3276,8 +3268,7 @@ Findings->Decision Gate: 1 blocking finding(s) -- FAIL.
         submit_request_changes "$PR_NUMBER" \
           "Mandatory review bot(s) [${MISSING_BOTS}] did not review this PR after ${_wait_count} trigger attempt(s) (INV-79). Investigate the bot integration; reviewDecision is CHANGES_REQUESTED until the bot review is present." \
           || log "WARNING: submit_request_changes returned non-zero (best-effort); continuing the FAIL route."
-        gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
-          --remove-label "reviewing" --add-label "pending-dev" 2>/dev/null || true
+        itp_transition_state "$ISSUE_NUMBER" "reviewing" "pending-dev" 2>/dev/null || true
         RESULT_PARSED=true
         exit 0
       fi
@@ -3296,8 +3287,7 @@ Findings->Decision Gate: 1 blocking finding(s) -- FAIL.
       # SHA-bound wait marker bounds the loop (BOT_REVIEW_WAIT_MAX) and resets when
       # dev pushes a new HEAD.
       emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-non-substantive" "awaiting-bot-review" 2>/dev/null || true
-      gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
-        --remove-label "reviewing" --add-label "pending-review" 2>/dev/null || true
+      itp_transition_state "$ISSUE_NUMBER" "reviewing" "pending-review" 2>/dev/null || true
       RESULT_PARSED=true
       exit 0
     fi
@@ -3363,9 +3353,7 @@ Findings->Decision Gate: 1 blocking finding(s) -- FAIL.
       "Merge conflict with main: PR \`${PR_BRANCH:-the PR branch}\` is CONFLICTING with the base branch and cannot be merged (mergeable hard gate, INV-44). Rebase onto main before re-review — see the \`Review findings:\` comment on issue #${ISSUE_NUMBER} for the step-by-step rebase instructions (INV-52)." \
       || log "WARNING: submit_request_changes returned non-zero (unexpected — helper is best-effort); continuing the FAIL route."
 
-    gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
-      --remove-label "reviewing" \
-      --add-label "pending-dev" 2>/dev/null || true
+    itp_transition_state "$ISSUE_NUMBER" "reviewing" "pending-dev" 2>/dev/null || true
 
     log "Issue #${ISSUE_NUMBER} moved to pending-dev (merge conflict — dev must rebase)."
     RESULT_PARSED=true
@@ -3385,9 +3373,7 @@ Findings->Decision Gate: 1 blocking finding(s) -- FAIL.
     # INV-35: not a code issue — GitHub-side transient. Re-route through review.
     emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-non-substantive" "mergeable-unknown" 2>/dev/null || true
 
-    gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
-      --remove-label "reviewing" \
-      --add-label "pending-dev" 2>/dev/null || true
+    itp_transition_state "$ISSUE_NUMBER" "reviewing" "pending-dev" 2>/dev/null || true
 
     log "Issue #${ISSUE_NUMBER} moved to pending-dev (mergeable UNKNOWN — re-queue)."
     RESULT_PARSED=true
@@ -3428,9 +3414,7 @@ if [[ "$PASSED_VERDICT" == "true" ]]; then
     log "Falling back to manual review notification."
     itp_post_comment "$ISSUE_NUMBER" \
       "Review PASSED but formal PR approval failed (permission issue?). @${REPO_OWNER} please approve and merge PR #${PR_NUMBER} manually.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
-    gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
-      --remove-label "reviewing" \
-      --add-label "approved" 2>/dev/null || true
+    itp_transition_state "$ISSUE_NUMBER" "reviewing" "approved" 2>/dev/null || true
     log "Issue #${ISSUE_NUMBER} marked as approved. Manual merge required due to approval failure."
     exit 0
   fi
@@ -3450,9 +3434,7 @@ if [[ "$PASSED_VERDICT" == "true" ]]; then
       "Review PASSED — this issue has the 'no-auto-close' label. @${REPO_OWNER} please review and merge PR #${PR_NUMBER} when ready.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
 
     # Update labels: remove reviewing, add approved (keep no-auto-close and autonomous)
-    gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
-      --remove-label "reviewing" \
-      --add-label "approved" 2>/dev/null || true
+    itp_transition_state "$ISSUE_NUMBER" "reviewing" "approved" 2>/dev/null || true
 
     log "Issue #${ISSUE_NUMBER} marked as approved. Awaiting manual merge."
   else
@@ -3632,9 +3614,7 @@ else
     fi
   fi
 
-  gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
-    --remove-label "reviewing" \
-    --add-label "pending-dev" 2>/dev/null || true
+  itp_transition_state "$ISSUE_NUMBER" "reviewing" "pending-dev" 2>/dev/null || true
 
   log "Issue #${ISSUE_NUMBER} moved to pending-dev."
 fi
