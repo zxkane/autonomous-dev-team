@@ -19,11 +19,6 @@
     {
       "count": 1,
       "file": "autonomous-dev.sh",
-      "content": "REVIEW_COMMENTS=$(gh issue view \"$ISSUE_NUMBER\" --repo \"$REPO\" --json comments \\"
-    },
-    {
-      "count": 1,
-      "file": "autonomous-dev.sh",
       "content": "The WRAPPER will run \\`gh pr create --head <your-branch>\\` for you after you finish."
     },
     {
@@ -45,11 +40,6 @@
       "count": 1,
       "file": "autonomous-dev.sh",
       "content": "gh issue edit \"$ISSUE_NUMBER\" --repo \"$REPO\" \\"
-    },
-    {
-      "count": 1,
-      "file": "autonomous-dev.sh",
-      "content": "if ! findings_at=$(gh issue view \"$issue_num\" --repo \"$REPO\" --json comments \\"
     },
     {
       "count": 1,

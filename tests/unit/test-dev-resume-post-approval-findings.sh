@@ -72,16 +72,25 @@ if [[ -z "$HELPER_FN" ]]; then
 fi
 
 # --- Stub harness -----------------------------------------------------------
-# The helper queries two `gh` shapes:
-#   gh pr view <pr> ... --json reviews   → approval submittedAt(s)
-#   gh issue view <issue> ... --json comments → findings comment createdAt + body
+# The helper queries two host shapes (post-#296-B6):
+#   chp_pr_view <pr> ... --json reviews          → approval submittedAt(s)  [gh pr view]
+#   itp_list_comments <issue> | jq -r '<sel>'    → findings comment createdAt + body
 #
-# We stub `gh` on PATH. It reads two files whose paths come from env:
+# `chp_pr_view` still resolves to a real `gh pr view`, so we stub `gh` on PATH for
+# the approval query. The findings READ migrated to `itp_list_comments` (the
+# normalized [INV-90] array `[{…,body,createdAt}]`), so we define an
+# `itp_list_comments` shim in run_helper that emits that array from the fixture —
+# the helper pipes it into its OWN `jq -r '<selector>'` (the REAL selector baked
+# into the wrapper, not a test-local re-implementation). Files come from env:
 #   GH_PR_REVIEWS_JSON   → JSON object printed for the `pr view --json reviews` call
 #                          BEFORE the helper's -q jq filter is applied. The stub
 #                          applies the helper's -q expression itself (extracted from $@).
-#   GH_ISSUE_COMMENTS_JSON → JSON object for the `issue view --json comments` call.
-#   GH_FAIL              → if "1", every gh call exits non-zero (transient error).
+#   GH_ISSUE_COMMENTS_JSON → {comments:[…]} fixture the itp_list_comments shim
+#                          unwraps to the normalized array `.comments`.
+#   GH_FAIL              → if "1", every gh call AND itp_list_comments fails
+#                          (transient outage — both reads fail-closed).
+#   GH_PR_VIEW_FAIL=1    → only the approval query (`gh pr view`) fails; the
+#                          findings READ (itp_list_comments) still succeeds.
 #
 # The stub honors the `-q <expr>` the helper passes so the test exercises the
 # REAL jq expressions baked into the wrapper, not a test-local re-implementation.
@@ -90,9 +99,11 @@ mkdir -p "$STUB_DIR"
 
 cat > "$STUB_DIR/gh" <<'EOF'
 #!/bin/bash
-# GH_FAIL=1         → ALL gh calls fail (transient outage).
-# GH_PR_VIEW_FAIL=1 → only `gh pr view` (the approval query) fails; `gh issue
-#                     view` (the findings query) still succeeds. Pins the
+# GH_FAIL=1         → ALL gh calls fail (transient outage). The itp_list_comments
+#                     shim (run_helper) honors GH_FAIL too, so the findings read
+#                     fails-closed in lockstep.
+# GH_PR_VIEW_FAIL=1 → only `gh pr view` (the approval query) fails; the findings
+#                     query (`itp_list_comments`) still succeeds. Pins the
 #                     fail-closed contract: an approval-query failure must NOT be
 #                     mistaken for "no approval" (issue #188 codex finding 1).
 [[ "${GH_FAIL:-0}" == "1" ]] && exit 3
@@ -161,6 +172,18 @@ run_helper() {
       # \`gh pr view \$pr --repo \$REPO \"\$@\"\`; define the same shim so this
       # isolation harness (PATH-stubbed gh + extracted helper) resolves the verb.
       chp_pr_view() { local _pr=\"\$1\"; shift; gh pr view \"\$_pr\" --repo \"\${REPO:-acme/widget}\" \"\$@\"; }
+      # [INV-87]/[INV-90] (#296 B6) emit_post_approval_findings_block now reads the
+      # issue comments via itp_list_comments (the normalized array \`[{…,body,createdAt}]\`)
+      # then applies its OWN \`jq -r '<selector>'\`. Shim the verb so this isolation
+      # harness emits that array from the {comments:[…]} fixture. Fail-closed on
+      # GH_FAIL (a verb failure → empty + non-zero so the helper's \`if !\` returns 0);
+      # GH_PR_VIEW_FAIL is NOT honored here (only the approval query fails in that case).
+      itp_list_comments() {
+        [[ \"\${GH_FAIL:-0}\" == \"1\" ]] && return 3
+        local _src=\"\${GH_ISSUE_COMMENTS_JSON:-}\"
+        [[ -n \"\$_src\" && -f \"\$_src\" ]] || { echo \"\"; return 0; }
+        jq -c '.comments // []' < \"\$_src\"
+      }
       $HELPER_FN
       emit_post_approval_findings_block '$issue' '$pr'
     "
@@ -298,6 +321,61 @@ out=$(run_helper 188 50 \
   GH_PR_REVIEWS_JSON="$(write_reviews APPROVED 2026-06-08T07:00:00Z)" \
   GH_ISSUE_COMMENTS_JSON="$(write_comments "2026-06-08T08:00:00Z::$SESSION_REPORT")")
 assert_not_emitted "TC-PAF-013 Agent Session Report with tokens → no emit (status, not finding)" "$out"
+
+# TC-PAF-TIE (AC4) — :613 is ORDER-IMMUNE. Two findings with byte-identical
+# whole-second createdAt, ONE older than the approval and ONE equal-to/after the
+# findings projection: the explicit `| sort` on projected ISO-8601 strings picks
+# the same max timestamp regardless of insertion order, so the emit decision is
+# invariant. Here APPROVED@07:00 and two findings@08:00 (same second) → findings
+# are newer → emit, and the chosen timestamp is 08:00 either way.
+out=$(run_helper 188 50 \
+  GH_PR_REVIEWS_JSON="$(write_reviews APPROVED 2026-06-08T07:00:00Z)" \
+  GH_ISSUE_COMMENTS_JSON="$(write_comments \
+    "2026-06-08T08:00:00Z::$FINDINGS_P1" \
+    "2026-06-08T08:00:00Z::$OPERATOR_NOTE")")
+assert_emitted "TC-PAF-TIE :613 order-immune — same-second findings newer than approval → emit (explicit | sort)" "$out"
+
+echo ""
+echo "=== TC-PAF-MIG: #296 B6 migration guards (false-green hazard closed) ==="
+
+# Extract the findings selector from the migrated :613 site (the `findings_at`
+# assignment now reads `itp_list_comments "$issue_num" 2>/dev/null | jq -r '<EXPR>'`).
+PAF_SELECTOR=$(awk '
+  /if ! findings_at=\$\(itp_list_comments/ {
+    match($0, /jq -r '\''([^'\'']+)'\''/, a)
+    if (a[1] != "") { print a[1]; exit }
+  }' "$WRAPPER")
+if [[ -n "$PAF_SELECTOR" ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-PAF-MIG01 findings selector extracted (non-empty) from the migrated itp_list_comments read"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-PAF-MIG01 could not extract the migrated findings selector (itp_list_comments | jq -r) from $WRAPPER"
+  FAIL=$((FAIL + 1))
+fi
+
+# Unique-live-site: the extracted selector must match the live migrated findings_at
+# assignment EXACTLY ONCE (proves we exercised the real wrapper read, not a stale dup).
+if [[ -n "$PAF_SELECTOR" ]]; then
+  _paf_live="if ! findings_at=\$(itp_list_comments \"\$issue_num\" 2>/dev/null | jq -r '${PAF_SELECTOR}' 2>/dev/null); then"
+  _paf_count=$(grep -Fc -- "$_paf_live" "$WRAPPER")
+  if [[ "$_paf_count" -eq 1 ]]; then
+    echo -e "  ${GREEN}PASS${NC}: TC-PAF-MIG02 extracted selector matches the live findings_at assignment exactly once"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${NC}: TC-PAF-MIG02 extracted selector matched the live findings_at assignment $_paf_count times (expected 1)"
+    FAIL=$((FAIL + 1))
+  fi
+fi
+
+# Static guard: the OLD raw `gh issue view … --json comments` reads are GONE.
+if grep -qE 'gh issue view "\$(ISSUE_NUMBER|issue_num)" --repo "\$REPO" --json comments' "$WRAPPER"; then
+  echo -e "  ${RED}FAIL${NC}: TC-PAF-MIG03 a raw 'gh issue view … --json comments' resume read survives — not migrated"
+  grep -nE 'gh issue view "\$(ISSUE_NUMBER|issue_num)" --repo "\$REPO" --json comments' "$WRAPPER" | sed 's/^/      /'
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${NC}: TC-PAF-MIG03 no raw 'gh issue view … --json comments' resume read remains (both behind itp_list_comments)"
+  PASS=$((PASS + 1))
+fi
 
 echo ""
 echo "=== Source-of-truth greps (prompt wiring + INV) ==="

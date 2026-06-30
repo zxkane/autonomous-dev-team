@@ -609,8 +609,17 @@ emit_post_approval_findings_block() {
   # Newest findings/change-request comment timestamp (empty when none). Same
   # narrowed recognition as the REVIEW_COMMENTS selector. FAIL-CLOSED likewise:
   # a failed query → emit nothing, return 0.
-  if ! findings_at=$(gh issue view "$issue_num" --repo "$REPO" --json comments \
-    -q '[.comments[] | select((.body | startswith("Review findings")) or ((.body | test("(?i)(^|[^A-Za-z-])BLOCKING\\b|\\[P1\\]")) and ((.body | test("(?i)^\\s*(Review PASSED|Review APPROVED|#+\\s*✅|\\*\\*Agent Session Report|Agent Session Report|Multi-agent review|Reviewed HEAD|<!--|Dispatching|Resuming|Moving to|Implementation complete)")) | not))) | .createdAt] | sort | last // empty' 2>/dev/null); then
+  # [INV-87]/[INV-90] (#296 B6) The issue-comment READ routes through
+  # `itp_list_comments` (the normalized `[{id,author,authorKind,body,createdAt}]`
+  # array, sorted ascending by `createdAt`); the marker-parsing jq stays
+  # caller-side. The selector iterates `.[]` (the flattened array) instead of
+  # gh's `.comments[]`, and the `(?i)`/`\b`/`\s` constructs are rewritten to
+  # explicit, engine-equivalent forms because the jq now runs under the system
+  # jq's Oniguruma engine, not gh's Go RE2 — see the REVIEW_COMMENTS selector
+  # below for the full rewrite rationale. Selection is identical to the old RE2
+  # selector across ASCII / accented / CJK / Unicode-fold / NBSP / lowercase.
+  # This site is order-immune (explicit `| sort` on projected ISO-8601 strings).
+  if ! findings_at=$(itp_list_comments "$issue_num" 2>/dev/null | jq -r '[.[] | select((.body | startswith("Review findings")) or ((.body | test("(?i:(^|[^A-Za-z-])BLOCKING)($|[^A-Za-z0-9_])|(?i:\\[P1\\])")) and ((.body | test("^[ \\t\\r\\n\\f]*(?i:Review PASSED|Review APPROVED|#+\\s*✅|\\*\\*Agent Session Report|Agent Session Report|Multi-agent review|Reviewed HEAD|<!--|Dispatching|Resuming|Moving to|Implementation complete)")) | not))) | .createdAt] | sort | last // empty' 2>/dev/null); then
     return 0
   fi
 
@@ -1025,24 +1034,45 @@ elif [[ "$MODE" = "resume" ]]; then
   # carrying a `BLOCKING` or `[P1]` token (case-insensitive) is treated as
   # actionable change-request feedback — BUT ONLY when its first line is NOT a
   # known non-findings shape. The `BLOCKING` alternative is anchored
-  # `(^|[^A-Za-z-])BLOCKING\b` so `NON-BLOCKING` does not match. This MUST be a
-  # *consuming* leading group, NOT a look-behind: `gh --jq` runs Go's RE2 engine
-  # which has no look-behind and REJECTS `(?<![A-Za-z-])` at runtime (`invalid
-  # named capture`), aborting the wrapper under `set -e` (issue #188 review: kiro).
+  # `(^|[^A-Za-z-])BLOCKING` (a *consuming* leading group, never a look-behind)
+  # so `NON-BLOCKING` does not match, followed by a *consuming* right boundary
+  # `($|[^A-Za-z0-9_])` so `BLOCKINGS` does not match either.
+  #
+  # [INV-87]/[INV-90] (#296 B6) The issue-comment READ routes through
+  # `itp_list_comments` — the normalized `[{id,author,authorKind,body,createdAt}]`
+  # array (sorted ascending by `createdAt`, a normative MUST per [INV-90]) — and
+  # the marker-parsing jq stays caller-side. Two shape consequences:
+  #   1. The selector iterates the flattened `.[]`, not gh's `.comments[]`.
+  #   2. The jq now runs under the SYSTEM jq's Oniguruma engine, not gh's Go RE2.
+  #      RE2 and Oniguruma DIVERGE on `\b`/`\s`/`(?i)` for non-ASCII input, so the
+  #      selector is rewritten to explicit, engine-equivalent forms that select
+  #      IDENTICALLY in both (= the old RE2 behavior):
+  #        • `BLOCKING\b` → `(?i:(^|[^A-Za-z-])BLOCKING)($|[^A-Za-z0-9_])` — the
+  #          case-insensitive scope wraps ONLY the literal; the boundary classes
+  #          stay explicit ASCII OUTSIDE `(?i)` (a global `(?i)` would leak into
+  #          `[^A-Za-z0-9_]` and exclude Unicode simple-fold chars like `K` U+212A
+  #          / `ſ` U+017F, diverging from RE2's ASCII `\b`).
+  #        • `\[P1\]` → `(?i:\[P1\])` (scoped; brackets/digits have no case).
+  #        • leading `^\s*` → `^[ \t\r\n\f]*` (explicit ASCII whitespace; excludes
+  #          NBSP, matching RE2's `\s`).
+  #        • each exclusion `(?i)` → a scoped `(?i:Review PASSED|...|Moving to|...)`.
+  #      The `| last` over the array order relies on `itp_list_comments`' ascending
+  #      `sort_by(.createdAt)` ([INV-90] MUST) — the same guarantee gh's raw
+  #      `.comments[]` gave; at same-second ties the stable sort keeps the
+  #      later-INSERTED comment last (relied on here for the latest-finding pick).
   #
   # That exclusion (issue #188 review finding 2) is load-bearing: a pure
   # token match also fires on a `Review PASSED - No BLOCKING issues remain`
   # verdict and on dev status/session comments that mention `BLOCKING`/`[P1]`
   # in prose (this issue's own `## ✅ Implementation complete` comment does),
   # which would misclassify a status report as a review change-request. The
-  # `^\s*(...)` anchor list excludes PASS/APPROVED verdicts, `## ✅` status
-  # headings, `**Agent Session Report`, the `Multi-agent review:` /
+  # `^[ \t\r\n\f]*(?i:...)` anchor list excludes PASS/APPROVED verdicts, `## ✅`
+  # status headings, `**Agent Session Report`, the `Multi-agent review:` /
   # `Reviewed HEAD:` / `<!-- … -->` review-wrapper markers, and the
   # `Dispatching`/`Resuming`/`Moving to` dispatcher chatter (#113). `Review
   # PASSED` is also matched by its own dedicated clause so the resume still
   # sees the latest PASS verdict as feedback context.
-  REVIEW_COMMENTS=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json comments \
-    -q '[.comments[] | select((.body | startswith("Review findings")) or (.body | startswith("Review PASSED")) or ((.body | test("(?i)(^|[^A-Za-z-])BLOCKING\\b|\\[P1\\]")) and ((.body | test("(?i)^\\s*(Review PASSED|Review APPROVED|#+\\s*✅|\\*\\*Agent Session Report|Agent Session Report|Multi-agent review|Reviewed HEAD|<!--|Dispatching|Resuming|Moving to|Implementation complete)")) | not)))] | last // empty')
+  REVIEW_COMMENTS=$(itp_list_comments "$ISSUE_NUMBER" 2>/dev/null | jq -r '[.[] | select((.body | startswith("Review findings")) or (.body | startswith("Review PASSED")) or ((.body | test("(?i:(^|[^A-Za-z-])BLOCKING)($|[^A-Za-z0-9_])|(?i:\\[P1\\])")) and ((.body | test("^[ \\t\\r\\n\\f]*(?i:Review PASSED|Review APPROVED|#+\\s*✅|\\*\\*Agent Session Report|Agent Session Report|Multi-agent review|Reviewed HEAD|<!--|Dispatching|Resuming|Moving to|Implementation complete)")) | not)))] | last // empty')
 
   # Fetch PR number linked to this issue for inline review comments.
   # [INV-87] (#282 r8) body-mention lookup → chp_pr_list.
