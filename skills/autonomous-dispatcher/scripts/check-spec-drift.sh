@@ -299,8 +299,13 @@ collect_writes() {
         }
       }
       function scan(s,   rest, st, ln, tok, lbl) {
-        # Form 1: label_swap — all quoted label operands.
-        if (s ~ /label_swap[ \t]/) { emit_labels(s); return }
+        # Form 1 (label_swap) + Form 3 (itp_transition_state, INV-87) are both
+        # positional; emit_labels prints every QUOTED lowercase label literal. A
+        # variable operand (issue-number or a dollar-var) starts with a dollar
+        # sign, which the quoted-lowercase regex excludes, so only static labels
+        # are emitted (a fully variable-arg itp_transition_state call emits
+        # nothing here, symmetric with emit_movement skip-variable guard).
+        if (s ~ /label_swap[ \t]/ || s ~ /itp_transition_state[ \t]/) { emit_labels(s); return }
         # Form 2: --add-label/--remove-label LITERAL — the literal may be DOUBLE-
         # quoted, SINGLE-quoted, OR BARE (unquoted shell word, e.g.
         # `--add-label frobnicate`; reviewer [BLOCKING]). A bare label is matched by
@@ -520,16 +525,33 @@ collect_movements() {
       # globals survive — but the discipline matches collect_writes/INV-75).
       function emit_movement(s,   rest, st, ln, tok, lbl, rem, add, i, isrem) {
         rem = ""; add = ""
-        if (s ~ /label_swap[ \t]/) {
-          # Positional: count quoted tokens; #2 = remove, #3 = add.
+        # Form 1 (label_swap) AND Form 3 (itp_transition_state, the INV-87 ITP
+        # transition verb) are POSITIONAL and structurally identical: token #1 =
+        # issue number (ignored), #2 = remove label, #3 = add label. A variable
+        # operand (a dollar-var) is NOT a static label, so skip it: a fully
+        # variable-arg call (such as the label_swap delegation
+        # itp_transition_state DOLLARissue_num DOLLARremove DOLLARadd in
+        # lib-dispatch.sh) emits no movement; those labels come from the LITERAL
+        # label_swap callers this same scanner reads as their own Form-1 sites.
+        # LIMITATION (intentional): the positional loop matches DOUBLE-quoted
+        # operands only; single-quoted / bare itp_transition_state args escape
+        # movement coverage. The repo is uniformly double-quoted (38/38 label
+        # operands) and #296 migrations emit double-quoted positionals, so this
+        # is sufficient. If the convention ever changes, widen the token regex to
+        # a quoted-or-bare alternative like Form 2 and add tests.
+        if (s ~ /label_swap[ \t]/ || s ~ /itp_transition_state[ \t]/) {
           rest = s; i = 0
           while (match(rest, /"[^"]*"/)) {
             st = RSTART; ln = RLENGTH
             tok = substr(rest, st + 1, ln - 2); rest = substr(rest, st + ln); i++
+            # Skip variable operands ($-leading) — only literal labels are movements.
+            if (substr(tok, 1, 1) == "$") tok = ""
             if (i == 2 && tok != "") rem = tok
             if (i == 3 && tok != "") add = tok
           }
-          print norm(rem) "|" norm(add) "\t" file ":" startno
+          # Only emit when at least one literal label was found; a fully-variable
+          # call (no static movement) declares nothing.
+          if (rem != "" || add != "") print norm(rem) "|" norm(add) "\t" file ":" startno
           return
         }
         # gh issue edit form: gather every --add/remove-label LITERAL on the line.
@@ -559,7 +581,7 @@ collect_movements() {
       cont == 0 { startno = NR; buf = stripped }
       cont == 1 { buf = buf " " stripped }
       /\\[[:space:]]*$/ { cont = 1; next }
-      { if (buf ~ /label_swap[ \t]/ || buf ~ /--(add|remove)-label/) emit_movement(buf); cont = 0 }
+      { if (buf ~ /label_swap[ \t]/ || buf ~ /itp_transition_state[ \t]/ || buf ~ /--(add|remove)-label/) emit_movement(buf); cont = 0 }
     ' "$path"
   done
 }
@@ -793,10 +815,14 @@ write_lines_for_file() {
     }
     function movement(s,   rest, st, ln, tok, lbl, rem, add, i, isrem) {
       rem = ""; add = ""
-      if (s ~ /label_swap[ \t]/) {
+      # Form 1 (label_swap) + Form 3 (itp_transition_state, [INV-87]): positional
+      # #2=remove #3=add; skip $-variable operands (mirrors emit_movement so C.5
+      # binds the same migrated sites C.4 counts).
+      if (s ~ /label_swap[ \t]/ || s ~ /itp_transition_state[ \t]/) {
         rest = s; i = 0
-        while (match(rest, /"[^"]*"/)) { st = RSTART; ln = RLENGTH; tok = substr(rest, st + 1, ln - 2); rest = substr(rest, st + ln); i++; if (i == 2 && tok != "") rem = tok; if (i == 3 && tok != "") add = tok }
-        return norm(rem) "|" norm(add)
+        while (match(rest, /"[^"]*"/)) { st = RSTART; ln = RLENGTH; tok = substr(rest, st + 1, ln - 2); rest = substr(rest, st + ln); i++; if (substr(tok, 1, 1) == "$") tok = ""; if (i == 2 && tok != "") rem = tok; if (i == 3 && tok != "") add = tok }
+        if (rem != "" || add != "") return norm(rem) "|" norm(add)
+        return ""
       }
       rest = s
       while (match(rest, /--(add|remove)-label[ \t=]+(["'\''][a-z][a-z0-9-]*["'\'']|[a-z][a-z0-9-]*)/)) { st = RSTART; ln = RLENGTH; tok = substr(rest, st, ln); isrem = (tok ~ /--remove-label/); sub(/^--(add|remove)-label[ \t=]+/, "", tok); if (substr(tok, 1, 1) == "\"" || substr(tok, 1, 1) == "'\''") lbl = substr(tok, 2, length(tok) - 2); else lbl = tok; if (isrem) rem = (rem == "" ? lbl : rem "," lbl); else add = (add == "" ? lbl : add "," lbl); rest = substr(rest, st + ln) }
@@ -808,7 +834,7 @@ write_lines_for_file() {
     cont == 0 { startno = NR; buf = stripped }
     cont == 1 { buf = buf " " stripped }
     /\\[[:space:]]*$/ { cont = 1; next }
-    { if (buf ~ /label_swap[ \t]/ || buf ~ /--(add|remove)-label/) { mv = movement(buf); if (mv != "") print startno "\t" mv } cont = 0 }
+    { if (buf ~ /label_swap[ \t]/ || buf ~ /itp_transition_state[ \t]/ || buf ~ /--(add|remove)-label/) { mv = movement(buf); if (mv != "") print startno "\t" mv } cont = 0 }
   ' "$path"
 }
 
