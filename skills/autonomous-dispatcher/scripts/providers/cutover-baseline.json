@@ -42,7 +42,7 @@
       "content": "approve or merge PRs, and it cannot run \\`gh pr create\\`). To open the PR, do NOT"
     },
     {
-      "count": 4,
+      "count": 1,
       "file": "autonomous-dev.sh",
       "content": "gh issue edit \"$ISSUE_NUMBER\" --repo \"$REPO\" \\"
     },
@@ -132,7 +132,7 @@
       "content": "gh issue close \"$ISSUE_NUMBER\" --repo \"$REPO\" --reason completed 2>/dev/null \\"
     },
     {
-      "count": 14,
+      "count": 1,
       "file": "autonomous-review.sh",
       "content": "gh issue edit \"$ISSUE_NUMBER\" --repo \"$REPO\" \\"
     },

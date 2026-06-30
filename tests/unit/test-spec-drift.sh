@@ -657,6 +657,18 @@ AC6_308='- #296 B3+B4 (#308): lib-auth PR-existence reads (2× chp_pr_list, lib-
 if grep -qF -- "$AC6_308" "$INV"; then ok "INV-91 Migration-log has the exact #296 B3+B4 (#308) bullet"; else bad "INV-91 Migration-log missing/changed the #296 B3+B4 (#308) bullet"; fi
 
 # ===========================================================================
+echo "=== TC-SPEC-GATE-311: INV-91 Migration-log carries the exact #296 B8 (#311) bullet ==="
+# [#296 B8, #311] AC9 — the migration that collapsed the 16 clean live-wrapper
+# label flips (13 autonomous-review.sh + 3 autonomous-dev.sh) behind
+# itp_transition_state records its byte-identical, baseline-count-shrink entry in
+# INV-91's Migration log. Unlike B1/B5+B7 (whole signatures vanished) this batch
+# only drops occurrence COUNTS — the multi-remove survivors keep the bare-edit
+# content key at count 1 (signatures stay 73→73), so the wording is "occurrences".
+# Pinned here (Spec Drift surface) so doc-and-code stay coupled per CONTRIBUTING Rule 1.
+AC9_311='- #296 B8 (#311): live-wrapper label flips (16 sites: 13 autonomous-review.sh, 3 autonomous-dev.sh) → itp_transition_state — byte-identical; baseline counts shrank by 16 occurrences (review-bare 14→1, dev-bare 4→1), no signature removed; ZERO manifest edit (Form-3 coverage-neutral, #313).'
+if grep -qF -- "$AC9_311" "$INV"; then ok "INV-91 Migration-log has the exact #296 B8 (#311) bullet"; else bad "INV-91 Migration-log missing/changed the #296 B8 (#311) bullet"; fi
+
+# ===========================================================================
 # Form 3 — the scanner recognizes a DIRECT itp_transition_state call as a
 # positional label-write site (spec-gate-itp prerequisite for #296/B8 / #311).
 # Keeps spec-gate coverage as gh issue edit → itp_transition_state migrates.

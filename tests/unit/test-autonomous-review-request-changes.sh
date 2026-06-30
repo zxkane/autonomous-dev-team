@@ -233,8 +233,15 @@ fi
 # TC-RC-SRC-04b: the E2E hard-gate FAIL route (the `failed-substantive` +
 # `E2E verification failed` branch, INV-46) submits REQUEST_CHANGES, while the
 # E2E `block-nonsubstantive` (evidence-missing re-queue) route does NOT. Verify
-# by checking the 25-line window after each `[BLOCKING] E2E verification failed`
-# / `e2e-evidence-missing` marker contains / lacks a helper invocation.
+# by scanning each branch's own BLOCK — from its marker to its terminating
+# `exit 0` — for a helper invocation. The block-scoped scan is robust to the
+# label-flip line collapse (#296/B8): when the preceding E2E-fail branch's
+# `gh issue edit` (3 lines) became a single `itp_transition_state`, its
+# `submit_request_changes` moved within 12 lines of the evidence-missing marker.
+# A fixed ±line window reaching BACKWARD into the prior branch would then
+# false-positive; scanning FORWARD from the marker to the block's own `exit 0`
+# scopes the check to exactly the evidence-missing route. (TC-RC-SRC-04 above
+# also pins the whole-file helper count at exactly 4, the authoritative guard.)
 _e2e_fail_ln=$(grep -nE '\[BLOCKING\] E2E verification failed' "$WRAPPER_CODE" | head -1 | cut -d: -f1)
 _e2e_block_ln=$(grep -nE 'e2e-evidence-missing' "$WRAPPER_CODE" | head -1 | cut -d: -f1)
 if [[ -n "$_e2e_fail_ln" ]] && sed -n "${_e2e_fail_ln},$((_e2e_fail_ln + 25))p" "$WRAPPER_CODE" | grep -qE 'submit_request_changes "'; then
@@ -242,7 +249,10 @@ if [[ -n "$_e2e_fail_ln" ]] && sed -n "${_e2e_fail_ln},$((_e2e_fail_ln + 25))p" 
 else
   echo -e "  ${RED}FAIL${NC}: TC-RC-SRC-04b E2E hard-gate FAIL route does NOT request changes (should)"; FAIL=$((FAIL + 1))
 fi
-if [[ -n "$_e2e_block_ln" ]] && ! sed -n "$((_e2e_block_ln - 12)),$((_e2e_block_ln + 12))p" "$WRAPPER_CODE" | grep -qE 'submit_request_changes "'; then
+# Block-scoped: marker → the branch's own `exit 0` (awk captures from the
+# evidence-missing marker line down to and including its terminating `exit 0`).
+_e2e_block=$(awk 'NR>='"${_e2e_block_ln:-0}"' { print } NR>='"${_e2e_block_ln:-0}"' && /exit 0/ { exit }' "$WRAPPER_CODE")
+if [[ -n "$_e2e_block_ln" ]] && ! grep -qE 'submit_request_changes "' <<<"$_e2e_block"; then
   echo -e "  ${GREEN}PASS${NC}: TC-RC-SRC-04c E2E evidence-missing (non-substantive) route does NOT request changes"; PASS=$((PASS + 1))
 else
   echo -e "  ${RED}FAIL${NC}: TC-RC-SRC-04c E2E evidence-missing route wrongly requests changes (should NOT)"; FAIL=$((FAIL + 1))

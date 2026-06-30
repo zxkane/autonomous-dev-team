@@ -725,9 +725,7 @@ not on PATH (set \`REAL_GH\` in autonomous.conf — see #92), missing
 required env, or auth setup failure. Inspect the log file above.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)
 EOF
 )" 2>/dev/null || log "WARNING: Failed to post startup-failure report"
-      gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
-        --remove-label "in-progress" \
-        --add-label "pending-dev" 2>/dev/null \
+      itp_transition_state "$ISSUE_NUMBER" "in-progress" "pending-dev" 2>/dev/null \
         || log "WARNING: Failed to update issue labels on startup failure"
     else
       log "Exiting with code $exit_code (agent never ran, no ISSUE_NUMBER or gh — silent)."
@@ -833,15 +831,11 @@ EOF
       log "WARNING: Agent exited 0 but no PR was created for issue #${ISSUE_NUMBER}"
       itp_post_comment "$ISSUE_NUMBER" \
         "Agent exited successfully but no PR was created. Moving to pending-dev for retry.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
-      gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
-        --remove-label "in-progress" \
-        --add-label "pending-dev" || log "WARNING: Failed to update issue labels"
+      itp_transition_state "$ISSUE_NUMBER" "in-progress" "pending-dev" || log "WARNING: Failed to update issue labels"
     fi
   else
     # Failure: move back to pending-dev so dispatcher can retry
-    gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
-      --remove-label "in-progress" \
-      --add-label "pending-dev" || log "WARNING: Failed to update issue labels"
+    itp_transition_state "$ISSUE_NUMBER" "in-progress" "pending-dev" || log "WARNING: Failed to update issue labels"
     log "Agent failed (exit $exit_code). Issue remains in pending-dev for retry."
   fi
 

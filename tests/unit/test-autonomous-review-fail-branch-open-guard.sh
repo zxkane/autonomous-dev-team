@@ -140,19 +140,22 @@ assert_eq "TC-OG-SRC-03b PASS-chain guard stays DRY (exactly one PR_STATE= query
 
 # TC-OG-SRC-04: the hoisted open-gate skip path removes `reviewing` and does NOT
 # add `pending-dev`. Extract the lines from the state query to its `exit 0` and
-# assert: contains `--remove-label "reviewing"`, contains no `add-label
-# "pending-dev"`.
+# assert the label semantics. Post-#296/B8 this remove-only flip is the ITP-seam
+# verb `itp_transition_state "$ISSUE_NUMBER" "reviewing" ""` (empty 3rd operand →
+# the leaf's `[ -n "$add" ]` guard emits only `--remove-label`, byte-identical to
+# the prior `gh issue edit … --remove-label "reviewing"`). Positive: remove-only
+# transition; negative: still proves no `pending-dev` add reaches the skip path.
 _skip_block=$(awk '
   /chp_pr_view "\$PR_NUMBER" --json state/ { capture=1 }
   capture { print }
   capture && /exit 0/ { exit }
 ' "$WRAPPER")
-if grep -qE 'remove-label "reviewing"' <<<"$_skip_block" \
-   && ! grep -qE 'add-label "pending-dev"' <<<"$_skip_block"; then
-  echo -e "  ${GREEN}PASS${NC}: TC-OG-SRC-04 open-gate skip path removes reviewing, never adds pending-dev"
+if grep -qE 'itp_transition_state "\$ISSUE_NUMBER" "reviewing" ""' <<<"$_skip_block" \
+   && ! grep -qE 'add-label "pending-dev"|"reviewing" "pending-dev"' <<<"$_skip_block"; then
+  echo -e "  ${GREEN}PASS${NC}: TC-OG-SRC-04 open-gate skip path removes reviewing (itp_transition_state remove-only), never adds pending-dev"
   PASS=$((PASS + 1))
 else
-  echo -e "  ${RED}FAIL${NC}: TC-OG-SRC-04 open-gate skip path must remove reviewing and not add pending-dev"
+  echo -e "  ${RED}FAIL${NC}: TC-OG-SRC-04 open-gate skip path must remove reviewing (remove-only itp_transition_state) and not add pending-dev"
   FAIL=$((FAIL + 1))
 fi
 

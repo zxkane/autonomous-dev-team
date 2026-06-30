@@ -114,6 +114,20 @@ run_cleanup() {
     # emits exactly \`gh issue comment ISSUE --repo \$REPO --body BODY\`, so the
     # recorded argv is unchanged from the pre-cutover call.
     itp_post_comment() { gh issue comment \"\$1\" --repo \"\$REPO\" --body \"\$2\"; }
+    # [#296 B8] cleanup()'s startup-failure label flip (autonomous-dev.sh:728)
+    # now routes through the ITP choke-point itp_transition_state. This harness
+    # evals cleanup() WITHOUT sourcing lib-issue-provider.sh, so stub the verb to
+    # forward byte-identically to the recording \`gh\` stub —
+    # itp_github_transition_state reconstructs exactly
+    # \`gh issue edit ISSUE --repo \$REPO [--remove-label R] [--add-label A]\`
+    # (the \`[ -n ]\` guards omit a flag when the operand is empty), so the
+    # recorded argv is unchanged from the pre-cutover \`gh issue edit\` call.
+    itp_transition_state() {
+      local args=()
+      [ -n \"\$2\" ] && args+=(--remove-label \"\$2\")
+      [ -n \"\$3\" ] && args+=(--add-label \"\$3\")
+      gh issue edit \"\$1\" --repo \"\$REPO\" \"\${args[@]}\"
+    }
     $CLEANUP_FN
     (exit $want_exit); cleanup
   " 2>"$stderr_log"
