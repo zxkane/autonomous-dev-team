@@ -668,11 +668,18 @@ assert_not_contains "TC-MCB-EQUIV-ERROR no PATCH after a read failure" \
 # (d) REPO-FALLBACK — self-repo, no autonomous.conf, REPO/GITHUB_REPO unset → REPO
 #     resolves to the placeholder owner/repo; the read against it fails so the
 #     script exits non-zero (the same exit-1-when-REPO-unresolvable behavior as
-#     before the migration — the swap of the read primitive did NOT alter it).
-cat > "$_BE_SANDBOX/gh" <<'GHEOF'
+#     before the migration — the swap of the read primitive did NOT alter it). The
+#     stub records the read's --repo arg so we can prove REPO actually fell back to
+#     the placeholder (not merely that the read failed).
+_BE_REPO_ARG="$(mktemp)"
+cat > "$_BE_SANDBOX/gh" <<GHEOF
 #!/bin/bash
-# A placeholder-repo read fails (as a real gh would 404 on owner/repo).
-if [[ "$1" == "issue" && "$2" == "view" ]]; then echo "gh: Could not resolve to a Repository" >&2; exit 1; fi
+# A placeholder-repo read fails (as a real gh would 404 on owner/repo). Record the
+# --repo value so the test asserts REPO resolution fell back to owner/repo.
+if [[ "\$1" == "issue" && "\$2" == "view" ]]; then
+  _prev=""; for _a in "\$@"; do [[ "\$_prev" == "--repo" ]] && printf '%s' "\$_a" > "$_BE_REPO_ARG"; _prev="\$_a"; done
+  echo "gh: Could not resolve to a Repository" >&2; exit 1
+fi
 exit 0
 GHEOF
 chmod +x "$_BE_SANDBOX/gh"
@@ -683,8 +690,10 @@ be_repo=$(
 ); be_repo_rc=$?
 [ "$be_repo_rc" -ne 0 ] && echo -e "  ${GREEN}PASS${NC}: TC-MCB-REPO-FALLBACK exits non-zero when REPO is unresolvable (preserved)" && PASS=$((PASS+1)) \
   || { echo -e "  ${RED}FAIL${NC}: TC-MCB-REPO-FALLBACK expected non-zero exit, got rc=$be_repo_rc (out: ${be_repo:0:200})"; FAIL=$((FAIL+1)); }
+assert_eq "TC-MCB-REPO-FALLBACK REPO resolved to the placeholder owner/repo (fallback path intact, not conf-overridden)" \
+  "owner/repo" "$(cat "$_BE_REPO_ARG")"
 
-rm -f "$_BE_READ_ARGV" "$_BE_PATCH_BODY" "$_BE_ERR_PATCH"
+rm -f "$_BE_READ_ARGV" "$_BE_PATCH_BODY" "$_BE_ERR_PATCH" "$_BE_REPO_ARG"
 rm -rf "$_BE_SANDBOX"
 
 # ===========================================================================
