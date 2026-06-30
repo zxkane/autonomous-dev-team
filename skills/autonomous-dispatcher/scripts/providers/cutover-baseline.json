@@ -198,11 +198,6 @@
     },
     {
       "count": 1,
-      "file": "dispatcher-tick.sh",
-      "content": "if gh issue view \"$issue_num\" --repo \"$REPO\" --json comments \\"
-    },
-    {
-      "count": 1,
       "file": "lib-auth.sh",
       "content": "_pr_create_ok() { gh pr create --repo \"$repo\" --head \"$branch\" --title \"$title\" --body \"$body\" >/dev/null 2>&1; }"
     },
@@ -280,11 +275,6 @@
       "count": 1,
       "file": "lib-review-e2e.sh",
       "content": "if gh pr comment \"$PR_NUMBER\" --repo \"$REPO\" --body \"$body\" >/dev/null 2>&1; then"
-    },
-    {
-      "count": 1,
-      "file": "lib-review-poll.sh",
-      "content": "gh issue view \"$ISSUE_NUMBER\" --repo \"$REPO\" --json comments \\"
     },
     {
       "count": 1,

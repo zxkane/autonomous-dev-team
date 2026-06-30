@@ -423,9 +423,17 @@ for i in $(seq 0 $((pd_count - 1))); do
     if [ "$_session_terminal_reason" = "prompt_too_long" ]; then
       log "  issue #${issue_num} session ${session_id} hit prompt_too_long — clearing for fresh dispatch"
       notice_marker="INV-12-prompt-too-long:${session_id}"
-      if gh issue view "$issue_num" --repo "$REPO" --json comments \
-          -q "[.comments[].body | select(contains(\"${notice_marker}\"))] | length" \
-          2>/dev/null | grep -q '^0$'; then
+      # [INV-91]/[INV-90] (#321): the idempotency-dedup READ routes through
+      # itp_list_comments (the normalized array `.[]`; the verb unwraps gh's
+      # `{comments:[…]}` envelope), NOT a raw `gh issue view --json comments -q`.
+      # `contains()` is a LITERAL substring test — engine-agnostic, no
+      # RE2/Oniguruma divergence. Fail-closed: an empty/error fetch leaves the
+      # count empty (≠ "0"), so the notice is NOT re-posted (the marker is the
+      # dedup key; the next tick re-checks) — same posture as the old
+      # `grep -q '^0$'` (no `^0$` line on a fetch error → guard false → no post).
+      _ptl_notice_count="$(itp_list_comments "$issue_num" 2>/dev/null \
+          | jq -r "[.[].body | select(contains(\"${notice_marker}\"))] | length" 2>/dev/null)"
+      if [ "${_ptl_notice_count:-}" = "0" ]; then
         itp_post_comment "$issue_num" \
           "Session \`${session_id}\` exhausted the model context window (terminal_reason=prompt_too_long). \`claude -p\` does not auto-compact, so resume would crash again. Forcing a fresh dev session on the next tick. (\`${notice_marker}\`)"
       fi

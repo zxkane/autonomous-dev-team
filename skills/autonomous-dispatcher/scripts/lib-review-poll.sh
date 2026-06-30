@@ -146,8 +146,8 @@ _classify_verdict_body() {
 # _fetch_agent_verdict_body <agent_name> <session_id> — query the issue comments
 # for THIS agent's verdict comment and echo the matched body (empty if none yet).
 #
-# Encapsulates the single `gh issue view … -q <jq>` call so the verdict-poll loop
-# can be driven in unit tests by overriding this one function (the test injects a
+# Encapsulates the single comment-scan + `select` so the verdict-poll loop can be
+# driven in unit tests by overriding this one function (the test injects a
 # round-dependent body without a live GitHub). The authenticity binding (INV-20)
 # + per-agent discriminator (INV-40) is built here:
 #   - actor: author == BOT_LOGIN (when set), else the BOT_LOGIN-empty fallback
@@ -155,20 +155,69 @@ _classify_verdict_body() {
 #   - time window: createdAt >= WRAPPER_START_TS;
 #   - per-agent discriminator: the `Review Agent: <name>` line (INV-40);
 #   - verdict keyword: _VERDICT_RE.
-# Takes `last` so a re-posted verdict wins. Reads ISSUE_NUMBER / REPO / BOT_LOGIN
-# / WRAPPER_START_TS / _VERDICT_RE from the environment (set by the wrapper).
+# `sort_by(.createdAt // "", .id // 0) | last` so a re-posted verdict wins (a
+# same-second tie breaks on the monotone REST comment id). Reads ISSUE_NUMBER / BOT_LOGIN /
+# WRAPPER_START_TS / _VERDICT_RE from the environment (set by the wrapper); the
+# repo is no longer read here — `itp_list_comments` owns the host-side `--repo`.
+#
+# [INV-91]/[INV-90] (#321): the comment read routes through `itp_list_comments`
+# (the normalized array `[{id, author, authorKind, body, createdAt}]`, sorted
+# ascending by `createdAt`), NOT a raw `gh issue view --json comments -q`. This
+# moved the `select` from gh's embedded engine (gojq → Go RE2, ASCII-only case
+# folding) to system jq (Oniguruma, Unicode folding) — a real regex-engine
+# boundary, so four behavior-preservation fixes restore RE2 parity + fail-CLOSED:
+#   1. `.comments[]`→`.[]` and `.author.login`→`.author` (the verb unwraps the
+#      envelope and exposes `author` verbatim, INV-85). Exact-eq is engine-irrelevant.
+#   2. verdict match `test(_VERDICT_RE;"i")` → `ascii_downcase | test("<lc>")` with
+#      NO "i" flag. Oniguruma "i" does Unicode simple case-folding — it would widen
+#      the literal ASCII keywords to also match U+212A (K) / U+017F (ſ), a
+#      false-positive widening at the authenticity gate that RE2's ASCII fold never
+#      made. ascii_downcase (ASCII-only) on BOTH sides restores parity. The
+#      shell-side lowercase MUST be `LC_ALL=C tr` (NOT bash `${,,}`): _VERDICT_RE
+#      carries an uppercase I ("Review FAILED"); bash `,,` under a Turkish locale
+#      folds I→dotless ı ≠ the data-side `failed`, silently dropping the most common
+#      verdict. The three case-SENSITIVE predicates (Review Session / Review
+#      Session.*<sid> / Review Agent: <name>) stay UNCHANGED — no boundary/class/
+#      "i" flag, so RE2 ≡ Oniguruma (a case-sensitive test() does NOT Unicode-fold).
+#   3. `// empty` on the verdict jq: `[…]|last|.body` over a no-match selection
+#      yields jq `null`, which `jq -r` prints as the literal string "null"; the old
+#      `gh -q` path emitted EMPTY. The caller treats any non-empty body as "verdict
+#      present" (`[[ -n "$body" ]]`), so a literal "null" would mis-resolve a
+#      no-verdict poll. `// empty` restores the empty-on-no-match contract.
+#   4. `[[ -z "$_vre_lc" ]] && return 0` before building the jq: an empty pattern
+#      makes `test("")` match EVERY body (fail-OPEN); an unset/empty _VERDICT_RE
+#      fails CLOSED (empty body) instead.
+# The self-source of the ITP seam is LAZY (in-function), NOT top-level: the review
+# wrapper sources this lib BEFORE lib-issue-provider.sh, so a top-level guard would
+# change production source order. In-function it covers both entry paths (the poll
+# loop + the observe-loop comment branch) and is needed only for standalone unit
+# sourcing — production already has the seam by the time the poll runs.
 _fetch_agent_verdict_body() {
   local _agent="$1" _sid="$2"
+  if ! declare -F itp_list_comments >/dev/null 2>&1; then
+    local _frp_self _frp_dir
+    _frp_self="${BASH_SOURCE[0]:-$0}"
+    _frp_dir="$(cd "$(dirname "$(readlink -f "$_frp_self")")" && pwd 2>/dev/null)" || _frp_dir=""
+    if [ -n "$_frp_dir" ] && [ -r "${_frp_dir}/lib-issue-provider.sh" ]; then
+      # shellcheck source=lib-issue-provider.sh
+      source "${_frp_dir}/lib-issue-provider.sh"
+    fi
+  fi
+  # Fix 4 — empty/unset _VERDICT_RE fails CLOSED (test("") would match every body).
+  local _vre_lc
+  _vre_lc="$(printf '%s' "${_VERDICT_RE:-}" | LC_ALL=C tr '[:upper:]' '[:lower:]')"
+  [[ -z "$_vre_lc" ]] && return 0
   local _auth_predicate _agent_predicate _verdict_jq
   if [[ -n "${BOT_LOGIN:-}" ]]; then
-    _auth_predicate="(.author.login == \"${BOT_LOGIN}\") and (.createdAt >= \"${WRAPPER_START_TS}\") and (.body | test(\"Review Session\"))"
+    _auth_predicate="(.author == \"${BOT_LOGIN}\") and (.createdAt >= \"${WRAPPER_START_TS}\") and (.body | test(\"Review Session\"))"
   else
     _auth_predicate="(.createdAt >= \"${WRAPPER_START_TS}\") and (.body | test(\"Review Session.*${_sid}\"))"
   fi
   _agent_predicate="(.body | test(\"Review Agent: ${_agent}\"))"
-  _verdict_jq="[.comments[] | select(${_auth_predicate} and ${_agent_predicate} and (.body | test(\"${_VERDICT_RE}\"; \"i\")))] | last | .body"
-  gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json comments \
-    -q "$_verdict_jq" 2>/dev/null || true
+  # Fix 2 (ascii_downcase, no "i"), Fix 3 (// empty), plus the same-second .id
+  # tiebreak (re-sorting an already-ascending array is idempotent — INV-90 untouched).
+  _verdict_jq="([ .[] | select(${_auth_predicate} and ${_agent_predicate} and (.body | ascii_downcase | test(\"${_vre_lc}\"))) ] | sort_by(.createdAt // \"\", .id // 0) | last | .body) // empty"
+  itp_list_comments "$ISSUE_NUMBER" 2>/dev/null | jq -r "$_verdict_jq" 2>/dev/null || true
 }
 
 # _run_verdict_poll_loop — the per-agent verdict-poll loop (INV-40 / INV-43 /
