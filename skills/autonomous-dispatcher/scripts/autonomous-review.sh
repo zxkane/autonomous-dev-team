@@ -3435,8 +3435,11 @@ if [[ "$PASSED_VERDICT" == "true" ]]; then
     exit 0
   fi
 
-  # Check if issue has the 'no-auto-close' label
-  HAS_NO_AUTO_CLOSE=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json labels \
+  # Check if issue has the 'no-auto-close' label.
+  # [INV-87] via itp_read_task (#296 B7) — the GitHub leaf forwards
+  # `--json labels -q '<selector>'` byte-identically (spec §3.1); the trailing
+  # `2>/dev/null || echo "false"` guard is unchanged.
+  HAS_NO_AUTO_CLOSE=$(itp_read_task "$ISSUE_NUMBER" labels \
     -q '[.labels[].name] | any(. == "no-auto-close")' 2>/dev/null || echo "false")
 
   if [[ "$HAS_NO_AUTO_CLOSE" == "true" ]]; then
