@@ -883,15 +883,18 @@ echo "=== TC-TOKEN-SPLIT-070: drain_agent_pr_create brokers only when scoping ar
 # ([#296 B3, #308] the existence read now routes through chp_pr_list → the verb
 # emits `gh pr list --repo <REPO> …`; we assert the stub OBSERVED it through the
 # verb, not just that the broker ran — reachability ≠ exercised, AC5/AC4);
-# `gh pr create` → record args; `gh repo view` → a repo URL (drain uses it for
-# the ls-remote fallback).
+# `gh pr create` → record args. The head-resolution fallback no longer calls
+# `gh repo view` (#316, Option A: it now trusts `origin` directly via
+# `git ls-remote --heads origin`, mirroring [INV-45] at autonomous-dev.sh:397) —
+# the stub still LOGS any `repo view` call so TC-316-01 can assert it NEVER fires.
 GHSB="$TMPROOT/gh-stub"; mkdir -p "$GHSB"
 PR_CREATE_LOG="$GHSB/pr-create.log"
 PR_LIST_LOG="$GHSB/pr-list.log"
+REPO_VIEW_LOG="$GHSB/repo-view.log"
 cat > "$GHSB/gh" <<GHSTUB
 #!/bin/bash
 if [[ "\$1" == "pr" && "\$2" == "list" ]]; then echo "LISTED \$*" >> "$PR_LIST_LOG"; printf ""; exit 0; fi
-if [[ "\$1" == "repo" && "\$2" == "view" ]]; then echo "https://github.com/owner/repo.git"; exit 0; fi
+if [[ "\$1" == "repo" && "\$2" == "view" ]]; then echo "REPO-VIEW \$*" >> "$REPO_VIEW_LOG"; echo "https://github.com/owner/repo.git"; exit 0; fi
 if [[ "\$1" == "pr" && "\$2" == "create" ]]; then echo "CREATED \$*" >> "$PR_CREATE_LOG"; exit 0; fi
 exit 0
 GHSTUB
@@ -963,6 +966,118 @@ if [[ ! -s "$PR_CREATE_LOG" ]]; then
   assert_pass "no branch derivable: broker SKIPS gh pr create (no doomed same-branch PR)"
 else
   assert_fail "no branch derivable: broker created a PR anyway (log: $(cat "$PR_CREATE_LOG" 2>/dev/null))"
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-316-01: head resolution uses \`git ls-remote --heads origin\`, never \`gh repo view\` ==="
+# ---------------------------------------------------------------------------
+# #316 (Option A): no explicit `branch:` line → the broker derives the head from
+# `origin` directly via `git ls-remote --heads origin "*issue-N*"`, NOT by first
+# resolving a clone URL with `gh repo view`. Stub `git` so `ls-remote --heads
+# origin` returns a fixture ref AND logs its argv; assert the stub OBSERVED it and
+# the `gh` stub NEVER recorded a `repo view`; the resolved branch flows into
+# `gh pr create --head <fixture>`.
+GITSB1="$TMPROOT/git-stub-316-01"; mkdir -p "$GITSB1"
+GIT_LSREMOTE_LOG="$GITSB1/ls-remote.log"
+cat > "$GITSB1/git" <<GITSTUB
+#!/bin/bash
+if [[ "\$1" == "ls-remote" ]]; then
+  echo "LS-REMOTE \$*" >> "$GIT_LSREMOTE_LOG"
+  # Emit a fixture <sha>\trefs/heads/<branch> line for the *issue-N* glob.
+  printf '%s\trefs/heads/feat/issue-316-foo\n' "0123456789abcdef0123456789abcdef01234567"
+  exit 0
+fi
+exit 0
+GITSTUB
+chmod +x "$GITSB1/git"
+
+PRFILE_316="$TMPROOT/agent-pr-create-316-01"
+printf 'feat: titled, no branch line\nBody.\nCloses #316\n' > "$PRFILE_316"
+rm -f "$PR_CREATE_LOG" "$REPO_VIEW_LOG" "$GIT_LSREMOTE_LOG"
+PATH="$GITSB1:$GHSB:$PATH" REPO="owner/repo" bash -c "
+  source '$SBA/lib-auth.sh'
+  AGENT_GH_TOKEN_FILE='/some/scoped/token'
+  AGENT_PR_CREATE_FILE='$PRFILE_316'
+  drain_agent_pr_create 316 owner/repo
+" >/dev/null 2>&1
+# (1) ls-remote OBSERVED with `--heads origin "*issue-316*"`.
+if [[ -s "$GIT_LSREMOTE_LOG" ]] \
+   && grep -qF -- 'LS-REMOTE ls-remote --heads origin *issue-316*' "$GIT_LSREMOTE_LOG"; then
+  assert_pass "TC-316-01: head resolved via OBSERVED git ls-remote --heads origin *issue-316*"
+else
+  assert_fail "TC-316-01: git ls-remote --heads origin NOT observed (log: $(cat "$GIT_LSREMOTE_LOG" 2>/dev/null))"
+fi
+# (2) `gh repo view` NEVER invoked (the survivor is gone).
+if [[ ! -s "$REPO_VIEW_LOG" ]]; then
+  assert_pass "TC-316-01: gh repo view NEVER invoked (Option A removed the clone-URL read)"
+else
+  assert_fail "TC-316-01: gh repo view WAS invoked (log: $(cat "$REPO_VIEW_LOG" 2>/dev/null))"
+fi
+# (3) resolved branch == fixture; gh pr create got --head <fixture>.
+if [[ -s "$PR_CREATE_LOG" ]] \
+   && grep -qF -- '--head feat/issue-316-foo' "$PR_CREATE_LOG"; then
+  assert_pass "TC-316-01: resolved branch feeds gh pr create --head feat/issue-316-foo"
+else
+  assert_fail "TC-316-01: gh pr create did NOT get --head <fixture> (log: $(cat "$PR_CREATE_LOG" 2>/dev/null))"
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-316-02/03/04: no-branch WARN — origin URL surfaced, credentials redacted, set -e safe ==="
+# ---------------------------------------------------------------------------
+# Driver: stub `git` so `ls-remote --heads origin` is EMPTY (no pushed branch) and
+# `git remote get-url origin` returns a configurable URL (or fails). The broker
+# must WARN+skip identically (no gh pr create) and the WARN now carries the origin
+# URL — with any credential userinfo REDACTED, and the `git remote get-url` capture
+# `set -e`-safe.
+drain_warn_stderr() {
+  # $1 = git stub body for `git remote get-url origin` (echoed verbatim into the stub)
+  local geturl_body="$1"
+  local sb="$TMPROOT/git-stub-warn-$RANDOM"; mkdir -p "$sb"
+  cat > "$sb/git" <<GITWARN
+#!/bin/bash
+if [[ "\$1" == "ls-remote" ]]; then exit 0; fi   # no matching branch on origin
+if [[ "\$1" == "remote" && "\$2" == "get-url" ]]; then ${geturl_body}; fi
+exit 0
+GITWARN
+  chmod +x "$sb/git"
+  rm -f "$PR_CREATE_LOG"
+  PATH="$sb:$GHSB:$PATH" REPO="owner/repo" bash -c "
+    set -e
+    source '$SBA/lib-auth.sh'
+    AGENT_GH_TOKEN_FILE='/some/scoped/token'
+    AGENT_PR_CREATE_FILE='$PRFILE_NOBRANCH'
+    drain_agent_pr_create 316 owner/repo
+  " 2>&1
+}
+
+# TC-316-02: plain origin URL → WARN+skip; WARN carries the origin URL.
+WARN_OUT=$(drain_warn_stderr 'echo "https://github.com/owner/repo.git"')
+if [[ ! -s "$PR_CREATE_LOG" ]] \
+   && grep -qF 'no head branch' <<<"$WARN_OUT" \
+   && grep -qF 'origin=https://github.com/owner/repo.git' <<<"$WARN_OUT"; then
+  assert_pass "TC-316-02: no-branch path WARN+skips and carries the origin URL"
+else
+  assert_fail "TC-316-02: WARN missing origin URL or broker created a PR (out: $WARN_OUT)"
+fi
+
+# TC-316-03: credential-bearing origin → token REDACTED, never logged.
+WARN_OUT=$(drain_warn_stderr 'echo "https://x-access-token:SECRET@github.com/owner/repo.git"')
+if grep -qF 'origin=https://<redacted>@github.com/owner/repo.git' <<<"$WARN_OUT" \
+   && ! grep -qF 'SECRET' <<<"$WARN_OUT"; then
+  assert_pass "TC-316-03: credential-bearing origin redacted to <redacted>@; token never logged"
+else
+  assert_fail "TC-316-03: token leaked or not redacted (out: $WARN_OUT)"
+fi
+
+# TC-316-04: `git remote get-url origin` FAILS (non-zero) under set -e → must NOT abort.
+WARN_OUT=$(drain_warn_stderr 'exit 3')
+if [[ ! -s "$PR_CREATE_LOG" ]] \
+   && grep -qF 'no head branch' <<<"$WARN_OUT"; then
+  assert_pass "TC-316-04: failing git remote get-url is set -e-safe (WARN+skip still fires)"
+else
+  assert_fail "TC-316-04: function aborted on failing git remote get-url (out: $WARN_OUT)"
 fi
 
 # ---------------------------------------------------------------------------

@@ -219,11 +219,6 @@
     {
       "count": 1,
       "file": "lib-auth.sh",
-      "content": "branch=$(git ls-remote --heads \"$(gh repo view \"$repo\" --json url -q .url 2>/dev/null || echo \"https://github.com/${repo}.git\")\" \\"
-    },
-    {
-      "count": 1,
-      "file": "lib-auth.sh",
       "content": "echo \"Run 'export GH_TOKEN=<token>' or 'gh auth login'.\" >&2"
     },
     {

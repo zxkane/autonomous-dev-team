@@ -96,10 +96,10 @@ gh() {
   # Tag the verb (first two args) so the harness can find the pr-list/pr-view call.
   printf "%s %s\n" "${1:-}" "${2:-}" >> "$REC_DIR/.verbs"
   # Benign payloads: pr list → "0" (no PR) / empty number; pr view → empty body;
-  # repo view → a URL (the no-branch fallback path, unused here); else 0.
+  # else 0. (#316 removed the lib-auth `gh repo view` head-resolution fallback —
+  # Option A trusts `origin` directly — so no `repo view` stub branch is needed.)
   if [[ "${1:-}" == "pr" && "${2:-}" == "list" ]]; then printf ""; return 0; fi
   if [[ "${1:-}" == "pr" && "${2:-}" == "view" ]]; then printf ""; return 0; fi
-  if [[ "${1:-}" == "repo" && "${2:-}" == "view" ]]; then printf "https://github.com/%s.git" "$REPO"; return 0; fi
   return 0
 }
 '

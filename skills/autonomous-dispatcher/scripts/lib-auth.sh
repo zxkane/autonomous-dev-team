@@ -464,15 +464,30 @@ drain_agent_pr_create() {
   fi
   [[ -n "$title" ]] || { echo "WARN: [INV-79] AGENT_PR_CREATE_FILE present but empty title — skipping brokered PR create." >&2; return 0; }
 
-  # No explicit branch → derive the pushed feature branch from origin (the same
-  # `*issue-<N>*` glob [INV-45] uses). Take the first match; strip the refs/heads/
-  # prefix. Empty when no such branch was pushed.
+  # No explicit branch → derive the pushed feature branch from `origin` (the same
+  # `*issue-<N>*` glob + the same `origin` remote name [INV-45] trusts directly at
+  # autonomous-dev.sh:397). `git ls-remote` is git-transport plumbing, not code-host
+  # REST/CLI I/O, so [INV-91]'s provider seam does not own it and no verb is minted
+  # (#316). The prior repo-view-resolved clone URL (and its hand-built HTTPS
+  # fallback) are deleted: `origin` reliably resolves to `$repo` here because the
+  # wrapper runs in PROJECT_DIR — the same checkout whose `origin` [INV-45]'s 397
+  # trusts unconditionally (a PROJECT_DIR whose `origin` ≠ target repo is an invalid
+  # deployment state that would already break that discovery). Take the first match;
+  # strip the refs/heads/ prefix. Empty when no such branch was pushed.
   if [[ -z "$branch" ]]; then
-    branch=$(git ls-remote --heads "$(gh repo view "$repo" --json url -q .url 2>/dev/null || echo "https://github.com/${repo}.git")" \
-      "*issue-${issue_number}*" 2>/dev/null | head -n1 | sed -E 's#^[0-9a-f]+[[:space:]]+refs/heads/##' || true)
+    branch=$(git ls-remote --heads origin "*issue-${issue_number}*" 2>/dev/null \
+      | head -n1 | sed -E 's#^[0-9a-f]+[[:space:]]+refs/heads/##' || true)
   fi
   if [[ -z "$branch" ]]; then
-    echo "WARN: [INV-79] brokered PR create: no head branch (no \`branch:\` line and no pushed *issue-${issue_number}* branch on origin) — skipping; the no-PR retry re-queues to pending-dev." >&2
+    # Surface the resolved `origin` URL so a MISCONFIGURED origin (≠ target repo) is
+    # distinguishable from a genuine "no pushed branch" (#316 observability hedge).
+    # MUST be `set -e`-safe (`|| true`) and MUST NOT leak credentials — a
+    # token-bearing HTTPS origin (`https://x-access-token:<token>@github.com/…`) is
+    # redacted at the userinfo before it reaches the log.
+    local origin_for_log
+    origin_for_log=$(git remote get-url origin 2>/dev/null || true)
+    origin_for_log="${origin_for_log/#https:\/\/*@/https://<redacted>@}"
+    echo "WARN: [INV-79] brokered PR create: no head branch (no \`branch:\` line and no pushed *issue-${issue_number}* branch on origin=${origin_for_log:-<unknown>}) — skipping; the no-PR retry re-queues to pending-dev." >&2
     return 0
   fi
 
