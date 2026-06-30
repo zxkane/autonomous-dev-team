@@ -261,6 +261,27 @@ chp_github_close_keyword() {
   printf 'Closes #%s' "$issue"
 }
 
+# chp_github_reply_review_comment PR COMMENT_ID BODY — reply to one PR review
+# comment ([INV-96], #327). The program's LAST raw `gh api …pulls/<n>/comments
+# -X POST … in_reply_to=…` site (reply-to-comments.sh:41) moves here BYTE-
+# IDENTICALLY. The caller (reply-to-comments.sh) composes `REPO="$OWNER/$REPO"`
+# before invoking the verb, so the endpoint path `repos/${REPO}/pulls/${pr}/
+# comments` is byte-identical to today's `repos/$OWNER/$REPO/pulls/$PR_NUMBER/
+# comments`; the owner/repo arg split + the COMMENT_ID `sed 's/[^0-9]//g'`
+# sanitization stay caller-side.
+#
+# No injection pre-encode: `body` is a REST `-f` field (form-encoded, not a jq
+# pattern); `in_reply_to` is a REST `-F` field (caller-sanitized numeric); the
+# `--jq '{id: .id, url: .html_url}'` is a fixed literal with zero `${var}`
+# interpolation (contrast the injection-prone chp_count_reviews_by_login /
+# itp_label_event_ts leaves that JSON-encode their arg). Echoes `{id, url}`.
+chp_github_reply_review_comment() {
+  local pr="$1" comment_id="$2" body="$3"
+  gh api "repos/${REPO}/pulls/${pr}/comments" \
+    -X POST -f body="$body" -F in_reply_to="$comment_id" \
+    --jq '{id: .id, url: .html_url}'
+}
+
 # chp_github_pr_view PR [extra gh args…] — general PR read leaf (#282 review r8).
 #
 # The provider-neutral `gh pr view` primitive the caller layer's INCIDENTAL

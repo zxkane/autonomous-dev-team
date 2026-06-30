@@ -96,6 +96,18 @@ chp_resolve_thread()    { chp_${CODE_HOST}_resolve_thread "$@"; }
 chp_trigger_bot()       { chp_${CODE_HOST}_trigger_bot "$@"; }
 chp_close_keyword()     { chp_${CODE_HOST}_close_keyword "$@"; }
 
+# chp_reply_review_comment PR COMMENT_ID BODY — reply to one PR review comment
+# ([INV-96], #327). The program's LAST raw `gh api …pulls/<n>/comments -X POST …
+# in_reply_to=…` site (reply-to-comments.sh, an autonomous-common util) routes
+# through this verb. Forwards "$@" to the leaf via the same one-line shim shape as
+# the 11 named lifecycle verbs above. The owner/repo arg split + the COMMENT_ID
+# numeric sanitization stay caller-side (reply-to-comments.sh); the GitHub leaf
+# uses the global $REPO slug the caller composes (REPO="$OWNER/$REPO"), so the
+# endpoint path repos/$REPO/pulls/$PR/comments is byte-identical to today's. NOT
+# capability-gated (a core code-host write — every code host with PR review
+# comments has a reply endpoint), so it carries no `.caps` key.
+chp_reply_review_comment() { chp_${CODE_HOST}_reply_review_comment "$@"; }
+
 # General read primitives (#282 review round 8). These are NOT among the 11 named
 # PR-lifecycle verbs above — they are the provider-neutral `gh pr view` / `gh pr
 # list` read leaves that the caller layer's INCIDENTAL reads route through so the
