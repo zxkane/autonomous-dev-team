@@ -214,8 +214,9 @@ fi
 _bc_tmp="$(mktemp -d)"
 cat >"$_bc_tmp/gh" <<'STUB'
 #!/bin/bash
-# Stub gh: any `api repos/.../issues/N` read returns a body with the target
-# checkbox; a PATCH must NEVER happen on the body_checkbox=0 path (fail loud if it does).
+# Stub gh: any non-PATCH call (the migrated `gh issue view … --json body` read,
+# #296) returns a body with the target checkbox; a PATCH must NEVER happen on the
+# body_checkbox=0 path (fail loud if it does).
 for a in "$@"; do [ "$a" = "PATCH" ] && { echo "STUB-PATCH-CALLED" >&2; exit 99; }; done
 echo "- [ ] flip me"
 STUB
