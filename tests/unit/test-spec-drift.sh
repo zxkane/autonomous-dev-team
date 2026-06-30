@@ -657,6 +657,100 @@ AC6_308='- #296 B3+B4 (#308): lib-auth PR-existence reads (2× chp_pr_list, lib-
 if grep -qF -- "$AC6_308" "$INV"; then ok "INV-91 Migration-log has the exact #296 B3+B4 (#308) bullet"; else bad "INV-91 Migration-log missing/changed the #296 B3+B4 (#308) bullet"; fi
 
 # ===========================================================================
+# Form 3 — the scanner recognizes a DIRECT itp_transition_state call as a
+# positional label-write site (spec-gate-itp prerequisite for #296/B8 / #311).
+# Keeps spec-gate coverage as gh issue edit → itp_transition_state migrates.
+# ===========================================================================
+
+echo "=== TC-SPEC-GATE-059: a NEW itp_transition_state literal call with a shared movement → red (C.4 Form-3 discovery) ==="
+# Appending `itp_transition_state "$n" "reviewing" "pending-dev"` adds a write site
+# whose movement is ALREADY declared. Before Form 3 the scanner was BLIND to it and
+# CI stayed green (silent coverage loss). With Form 3, C.4 discovers it (count up by
+# one for that (file,movement)) → unaccounted site fails. This is the core proof
+# that itp_transition_state is now a first-class scanned label-write site.
+cp "$SCRIPTS"/*.sh "$SCRATCH/" 2>/dev/null
+# shellcheck disable=SC2016
+printf '\nitp_transition_state "$n" "reviewing" "pending-dev"\n' >> "$SCRATCH/autonomous-review.sh"
+out="$(bash "$CHECK" --transitions "$DOCS/transitions.json" --guard-map "$DOCS/spec-guard-map.json" \
+  --codesite-map "$DOCS/spec-codesite-map.json" --doc "$DOCS/state-machine.md" --scripts-dir "$SCRATCH" 2>&1)"
+rc=$?
+if [[ "$rc" -ne 0 ]] && grep -Eq 'C\.4:.*reviewing\|pending-dev' <<<"$out"; then
+  ok "new itp_transition_state literal call → red (C.4 Form-3 discovery)"
+else
+  bad "Form-3 itp_transition_state call NOT discovered (rc=$rc) — scanner still blind to the verb"
+fi
+cp "$SCRIPTS/autonomous-review.sh" "$SCRATCH/autonomous-review.sh"  # restore
+
+echo "=== TC-SPEC-GATE-060: a VARIABLE-arg itp_transition_state call emits NO movement and trips NO P1.1 ==="
+# `itp_transition_state "$n" "$rm" "$add"` (the label_swap delegation form) carries
+# no static labels and no --add/--remove-label flag. Form 3 must SKIP its variable
+# operands (no movement → no C.4 count change) AND it must NOT trip the P1.1
+# variable-write ban (no flag). A miss either way would FAIL the otherwise-green
+# real repo, so a green run with this line appended proves both guards hold.
+cp "$SCRIPTS"/*.sh "$SCRATCH/" 2>/dev/null
+# shellcheck disable=SC2016
+printf '\nvariable_itp_call() {\n  itp_transition_state "$n" "$rm" "$add"\n}\n' >> "$SCRATCH/dispatcher-tick.sh"
+out="$(bash "$CHECK" --transitions "$DOCS/transitions.json" --guard-map "$DOCS/spec-guard-map.json" \
+  --codesite-map "$DOCS/spec-codesite-map.json" --doc "$DOCS/state-machine.md" --scripts-dir "$SCRATCH" 2>&1)"
+rc=$?
+if [[ "$rc" -eq 0 ]]; then
+  ok "variable-arg itp_transition_state → no movement, no P1.1 trip (skip-variable guard holds)"
+else
+  bad "variable-arg itp_transition_state wrongly flagged (rc=$rc) — skip-variable guard or P1.1 over-fired: $(grep -E 'C\.4|P1.1|variable' <<<"$out" | head -2)"
+fi
+cp "$SCRIPTS/dispatcher-tick.sh" "$SCRATCH/dispatcher-tick.sh"  # restore
+
+echo "=== TC-SPEC-GATE-061: itp_transition_state token #1 (issue) ignored, #2/#3 literals read ==="
+# `itp_transition_state "$ISSUE_NUMBER" "reviewing" "pending-review"`: token #1 is a
+# $-var (skipped), #2=reviewing #3=pending-review. The discovered movement must be
+# reviewing|pending-review (NOT mis-reading the issue arg as a label). Use the
+# already-declared reviewing|pending-review movement; the extra site makes its
+# count exceed the manifest → C.4 names exactly reviewing|pending-review.
+cp "$SCRIPTS"/*.sh "$SCRATCH/" 2>/dev/null
+# shellcheck disable=SC2016
+printf '\nitp_transition_state "$ISSUE_NUMBER" "reviewing" "pending-review"\n' >> "$SCRATCH/autonomous-review.sh"
+out="$(bash "$CHECK" --transitions "$DOCS/transitions.json" --guard-map "$DOCS/spec-guard-map.json" \
+  --codesite-map "$DOCS/spec-codesite-map.json" --doc "$DOCS/state-machine.md" --scripts-dir "$SCRATCH" 2>&1)"
+rc=$?
+if [[ "$rc" -ne 0 ]] && grep -Eq 'C\.4:.*reviewing\|pending-review' <<<"$out"; then
+  ok "token #1 issue-arg ignored; #2/#3 read as reviewing|pending-review (C.4)"
+else
+  bad "Form-3 positional parse wrong (rc=$rc) — issue arg mis-read or movement wrong"
+fi
+cp "$SCRIPTS/autonomous-review.sh" "$SCRATCH/autonomous-review.sh"  # restore
+
+echo "=== TC-SPEC-GATE-062: real repo reconciles WITH the existing itp_transition_state site (review.sh:3518) ==="
+# The merge_closes_issue=0 fallback at autonomous-review.sh:3518 is a real, shipped
+# itp_transition_state "$ISSUE_NUMBER" "reviewing" "approved" call. Form 3 now sees
+# it, and the sites[] manifest declares it (anchor 'merge_closes_issue=0 —
+# transitioning issue'). The real repo must reconcile (C.4 reviewing|approved
+# discovers 3 == declares 3) and PASS — the load-bearing coverage proof.
+out="$(bash "$CHECK" 2>&1)"
+rc=$?
+if [[ "$rc" -eq 0 ]] && grep -q "all discovered label-write sites reconcile with the sites\[\] manifest" <<<"$out"; then
+  ok "real repo reconciles with the itp_transition_state site (review.sh:3518) declared (C.4)"
+else
+  bad "real repo did NOT reconcile with the itp_transition_state site (rc=$rc) — manifest entry for 3518 missing/wrong"
+fi
+
+echo "=== TC-SPEC-GATE-063: removing the review.sh:3518 manifest entry → red (the entry is load-bearing) ==="
+# Negative proof: strip the new sites[] entry for the 3518 itp_transition_state call
+# from a scratch manifest → Form 3 still discovers 3 reviewing|approved sites but the
+# manifest now declares 2 → C.4 FAILs. Confirms Form 3 genuinely sees 3518 (not a
+# no-op) and the manifest entry is required, not decorative.
+SCRATCH_MAP="$WORK/codesite-map-no3518.json"
+jq 'del(.sites[] | select(.file=="autonomous-review.sh" and .movement=="reviewing|approved" and .anchor=="merge_closes_issue=0 — transitioning issue"))' \
+  "$DOCS/spec-codesite-map.json" > "$SCRATCH_MAP"
+out="$(bash "$CHECK" --transitions "$DOCS/transitions.json" --guard-map "$DOCS/spec-guard-map.json" \
+  --codesite-map "$SCRATCH_MAP" --doc "$DOCS/state-machine.md" 2>&1)"
+rc=$?
+if [[ "$rc" -ne 0 ]] && grep -Eq 'C\.4:.*reviewing\|approved' <<<"$out"; then
+  ok "removing the 3518 manifest entry → red (Form 3 sees 3518; entry is load-bearing)"
+else
+  bad "removing the 3518 entry did NOT fail (rc=$rc) — Form 3 may not actually discover 3518"
+fi
+
+# ===========================================================================
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 [[ "$FAIL" -eq 0 ]] && exit 0 || exit 1
