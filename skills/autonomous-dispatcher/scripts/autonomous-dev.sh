@@ -884,7 +884,9 @@ trap cleanup EXIT
 # Fetch issue context
 # ---------------------------------------------------------------------------
 log "Fetching issue #${ISSUE_NUMBER} details..."
-ISSUE_BODY=$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json title,body,comments -q '.')
+# [INV-87] via itp_read_task (#296 B5) — the GitHub leaf forwards
+# `--json title,body,comments -q '.'` byte-identically (spec §3.1).
+ISSUE_BODY=$(itp_read_task "$ISSUE_NUMBER" title,body,comments -q '.')
 
 # ---------------------------------------------------------------------------
 # Normalize mode: resume without session falls back to new

@@ -14,11 +14,6 @@
     {
       "count": 1,
       "file": "autonomous-dev.sh",
-      "content": "ISSUE_BODY=$(gh issue view \"$ISSUE_NUMBER\" --repo \"$REPO\" --json title,body,comments -q '.')"
-    },
-    {
-      "count": 1,
-      "file": "autonomous-dev.sh",
       "content": "PR_REVIEW_COMMENTS=$(gh api \"repos/${REPO}/pulls/${PR_NUM}/comments\" \\"
     },
     {
@@ -105,11 +100,6 @@
       "count": 1,
       "file": "autonomous-review.sh",
       "content": "Do **NOT** use a bare \\`gh issue comment\\` for the verdict — a hand-rolled"
-    },
-    {
-      "count": 1,
-      "file": "autonomous-review.sh",
-      "content": "HAS_NO_AUTO_CLOSE=$(gh issue view \"$ISSUE_NUMBER\" --repo \"$REPO\" --json labels \\"
     },
     {
       "count": 1,
