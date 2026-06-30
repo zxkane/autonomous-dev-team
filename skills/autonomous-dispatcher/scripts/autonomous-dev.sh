@@ -1087,11 +1087,17 @@ elif [[ "$MODE" = "resume" ]]; then
       --jq '[.[] | "- **\(.path):\(.line // .original_line // "N/A")** — \(.body)"] | join("\n")' 2>/dev/null || true)
 
     # Detect the auto-merge-failure marker the review wrapper posts when
-    # `gh pr merge` fails (#145). Issue-level PR comments live under
-    # /issues/<n>/comments (not /pulls/<n>/comments, which is inline-review
-    # only). Anchor with startswith so quoted history can't false-positive.
-    AUTO_MERGE_FAILURE_MARKER=$(gh api "repos/${REPO}/issues/${PR_NUM}/comments" \
-      --jq '[.[] | select(.body | startswith("Auto-merge failed:"))] | last // empty | .body' 2>/dev/null || true)
+    # `gh pr merge` fails (#145). A PR IS an issue on GitHub, so its issue-level
+    # comments resolve via `itp_list_comments "$PR_NUM"` ([INV-87]/[INV-90], #332
+    # — the shipped issue-level comment verb, spec §3.1; #315 shape-equivalence).
+    # The select stays caller-side over the verb's normalized array (the #281/#319
+    # form): `.[]` iterates the flat array, `.body` is verbatim, and `last //
+    # empty` newest-wins is preserved by the verb's ascending sort_by(createdAt)
+    # ([INV-90] MUST). `startswith` is literal/engine-agnostic — no test()/regex,
+    # so NO RE2→Oniguruma divergence — and anchors so quoted history can't
+    # false-positive.
+    AUTO_MERGE_FAILURE_MARKER=$(itp_list_comments "$PR_NUM" 2>/dev/null \
+      | jq -r '[.[] | select(.body | startswith("Auto-merge failed:"))] | last // empty | .body' 2>/dev/null || true)
   fi
 
   # Post-approval-findings override ([INV-57], closes #188). Non-empty only when
