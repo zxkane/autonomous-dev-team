@@ -4674,6 +4674,89 @@ migration.
 - [INV-91](#inv-91-the-provider-neutral-caller-layer-routes-all-host-io-through-itp_chp_-verbs--a-new-raw-gh-outside-providers-is-a-ci-failing-cutover-regression-baseline-anchored) — the cutover guard whose baseline this migration shrinks (67 → 66).
 - [`provider-spec.md`](provider-spec.md) §3.1 — the `itp_label_event_ts` verb row + the mapping appendix entry.
 
+## INV-96: the review-comment reply POST routes through the `chp_reply_review_comment` verb — `reply-to-comments.sh` self-sources the CHP seam standalone and fails LOUD if the leaf is absent (no raw-`gh` fallback)
+
+_Triage (issue #236): [machine-checked: tests/unit/test-reply-review-comment.sh]_
+
+**Rule**: `reply-to-comments.sh` (an autonomous-common agent-callable util — the
+review-thread reply path) posts its `in_reply_to` review-comment reply through the
+CHP verb `chp_reply_review_comment PR COMMENT_ID BODY` (GitHub leaf
+`chp_github_reply_review_comment`, #327), NOT a raw caller-side
+`gh api …/pulls/<n>/comments -X POST`. This was the program's LAST raw
+`gh api …pulls/<n>/comments -X POST … in_reply_to=…` site — the CHP review-thread
+reply the spec pre-classified as "owned by chp-pr-lifecycle, NOT migrated in #283"
+(`provider-spec.md` §3.2 deferred-sites table). The leaf moves BYTE-IDENTICALLY:
+`gh api "repos/${REPO}/pulls/${pr}/comments" -X POST -f body="$body"
+-F in_reply_to="$comment_id" --jq '{id: .id, url: .html_url}'`.
+
+**Self-source the seam (standalone util)**: `reply-to-comments.sh` is invoked
+STANDALONE (`bash scripts/reply-to-comments.sh <owner> <repo> <pr> <comment_id>
+"<msg>"`) and sources NO lib otherwise, so it **self-sources the CHP seam**
+(`lib-code-host.sh`) via `readlink -f` of its own `BASH_SOURCE` — the
+[INV-14]/[INV-65] skill-tree idiom (NOT `$0`/`dirname`, the project-side symlink
+dir), the EXACT precedent of the sibling cross-skill util `mark-issue-checkbox.sh`
+(#315, which self-sources `lib-issue-provider.sh`). The verb seam lives in
+autonomous-dispatcher; the util in autonomous-common (a sibling skill dir reached
+via `../../autonomous-dispatcher/scripts/lib-code-host.sh`).
+
+**Fail LOUD on leaf-absent** ([INV-91]): guarded on `chp_reply_review_comment`
+being undefined. If the provider lib is absent the verb stays undefined and the
+POST FAILs LOUD (names the unavailable verb, non-zero exit) — it does NOT fall back
+to a raw `gh api` POST. A hardcoded GitHub call would silently execute against
+GitHub even when the project is configured for a non-GitHub backend (provider not
+loaded), the exact silent-wrong-backend bug the cutover guard exists to prevent.
+
+**Repo threading** (#324 lesson): the leaf uses the global `$REPO` `owner/repo`
+slug (like every CHP leaf), so the caller composes `REPO="$OWNER/$REPO_NAME"` from
+the owner + repo-name args before invoking the verb — preserving the byte-identical
+endpoint path `repos/$OWNER/$REPO_NAME/pulls/$PR_NUMBER/comments`. The owner/repo
+arg split + the `COMMENT_ID` `sed 's/[^0-9]//g'` sanitization stay caller-side.
+
+**No `.caps` key, no injection pre-encode**: the reply POST is a core code-host
+write (every code host with PR review comments has a reply endpoint), NOT
+capability-gated like `rest_request_changes` / `review_bots` — adding a cap would be
+untested under the #286 caps tripwire and imply an undefined degraded path. `body`
+is a REST `-f` field (form-encoded, not a jq pattern); `in_reply_to` is a REST `-F`
+field (caller-sanitized numeric); the `--jq '{id: .id, url: .html_url}'` is a fixed
+literal with zero `${var}` interpolation — so no `jq -rn … @json` pre-encode is
+needed (contrast the injection-prone `chp_count_reviews_by_login` /
+`itp_label_event_ts` leaves).
+
+**Producer**: `reply-to-comments.sh` (caller; arg parse + sanitize + `REPO`
+compose + the self-source + the fail-loud guard) + `lib-code-host.sh::chp_reply_review_comment`
+(shim) + `providers/chp-github.sh::chp_github_reply_review_comment` (GitHub leaf:
+the byte-identical `gh api …/comments -X POST …` POST). **Consumer**: the
+autonomous-dev / autonomous-review review-comment-reply path (agents invoke
+`scripts/reply-to-comments.sh` when replying to a review thread).
+
+**Why** (#327): `#296` migrates surviving raw-`gh` caller-layer sites behind
+pluggable `itp_*`/`chp_*` provider verbs. `reply-to-comments.sh:41` was the last
+raw `gh api …pulls/<n>/comments -X POST` site — a CHP-owned reply leaf deferred from
+#283. This is that follow-up.
+
+**Baseline**: `providers/cutover-baseline.json` shrinks by the one migrated leaf
+signature (66 → 65 distinct signatures, 72 → 71 occurrences). [INV-91] /
+`check-provider-cutover.sh` enforces the shrink (monotonic, may only shrink).
+
+**Status**: **ENFORCED** as of #327. Delta on top of [INV-87] (the CHP-leaf
+migration contract) and [INV-91] (the cutover guard); design recorded in
+`docs/designs/issue-327-chp-reply-review-comment.md`.
+
+**Tests**: `tests/unit/test-reply-review-comment.sh` — the leaf golden-trace
+(byte-identical `gh api …/comments -X POST -f body=… -F in_reply_to=… --jq` argv,
+REPO-threaded endpoint path, fixed `{id, url}` projection, spaces-in-body
+survival), the shim→leaf dispatch routing, the self-source isolation (standalone
+`reply-to-comments.sh` via a symlink sandbox resolves the verb + routes the POST;
+leaf-absent → fail LOUD, no raw-`gh` POST), and the source-shape pins (zero raw
+`gh api …pulls/…/comments` in `reply-to-comments.sh`, shim+leaf present, baseline
+−1 pinned 72→71 / 66→65). The cutover guard ([INV-91],
+`tests/unit/test-provider-cutover.sh`) reconciles the shrunk baseline.
+
+**Cross-references**:
+- [INV-87](#inv-87-provider-dispatch-is-spec-defined--callers-route-every-issuecode-host-op-through-itp_chp_-never-a-raw-gh-in-the-caller-layer) — the CHP-leaf migration contract (the innermost `gh` primitive moves behind a verb; INV-coupled logic stays caller-side).
+- [INV-91](#inv-91-the-provider-neutral-caller-layer-routes-all-host-io-through-itp_chp_-verbs--a-new-raw-gh-outside-providers-is-a-ci-failing-cutover-regression-baseline-anchored) — the cutover guard whose baseline this migration shrinks (66 → 65).
+- [`provider-spec.md`](provider-spec.md) §3.2 — the `chp_reply_review_comment` verb row + the deferred-sites mapping entry.
+
 ## Adding a new invariant
 
 When fixing a pipeline bug, after locating the bug on the state machine + flow docs:
