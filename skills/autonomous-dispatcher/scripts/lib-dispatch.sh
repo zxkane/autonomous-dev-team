@@ -257,11 +257,21 @@ hygiene_strip_residual_labels() {
     return 0
   fi
 
-  local args=(issue edit "$issue_num" --repo "$REPO")
-  for t in $stripped; do
-    args+=(--remove-label "$t")
-  done
-  gh "${args[@]}" 2>/dev/null || true
+  # [INV-97] CSV multi-remove: route the atomic strip through the ITP verb. The
+  # REMOVE operand is the variable-N `$stripped` list (a hardcoded, comma-free
+  # transitional-label set per the jq allowlist above) joined space→comma; no add.
+  # One verb call = one atomic `gh issue edit`, identical to the prior bundled edit
+  # (the per-issue atomicity [INV-25] depends on). The `2>/dev/null || true`
+  # fail-safe framing and the `echo "$stripped"` return are preserved byte-for-byte.
+  # The CSV is built on its OWN line into `$remove_csv` so the verb call carries
+  # only `$`-leading variable operands — the spec-gate Form-3 scanner's skip-variable
+  # guard then emits no (garbage) movement (identical posture to label_swap's
+  # fully-variable `itp_transition_state "$issue_num" "$remove" "$add"` delegation);
+  # the LITERAL transitional-label set is validated upstream by the jq allowlist +
+  # the hygiene-strip-residue-* transitions (P1.1 variable_write_allowlist).
+  local remove_csv
+  remove_csv=$(echo "$stripped" | tr ' ' ',')
+  itp_transition_state "$issue_num" "$remove_csv" "" 2>/dev/null || true
   echo "$stripped"
 }
 

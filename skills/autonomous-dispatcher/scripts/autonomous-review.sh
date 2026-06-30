@@ -3475,9 +3475,9 @@ if [[ "$PASSED_VERDICT" == "true" ]]; then
 
       # INV-33: never close the issue directly — GitHub auto-closes it
       # via the PR's `Closes #N` keyword on merge. See docs/pipeline/invariants.md.
-      gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
-        --remove-label "reviewing" --remove-label "autonomous" \
-        --add-label "approved" 2>/dev/null || true
+      # [INV-97] CSV multi-remove: route the atomic 2-remove+1-add approved-flip
+      # through the ITP verb (REMOVE is a comma-separated list). Byte-identical edit.
+      itp_transition_state "$ISSUE_NUMBER" "reviewing,autonomous" "approved" 2>/dev/null || true
 
       # [INV-87]/[M4]/§4.2 merge_closes_issue capability gate (#282 review [P1]):
       # INV-33's "GitHub auto-closes on merge" is a CODE-HOST capability, not a
@@ -3561,9 +3561,10 @@ Re-dispatching dev agent to rebase onto main.$(declare -F run_footer >/dev/null 
       # Capture stderr so a failed label transition is diagnosable from logs —
       # otherwise the issue would silently stick in `reviewing` and the next
       # dispatcher tick wouldn't re-dispatch dev.
-      if ! _edit_err=$(gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
-        --remove-label "reviewing" \
-        --add-label "pending-dev" 2>&1 >/dev/null); then
+      # [INV-97] single-remove via the unchanged 3-positional verb; the caller-side
+      # stderr-capture `if ! _err=$(… 2>&1 >/dev/null)` framing is preserved so the
+      # failed-transition diagnostic still lands in the log.
+      if ! _edit_err=$(itp_transition_state "$ISSUE_NUMBER" "reviewing" "pending-dev" 2>&1 >/dev/null); then
         log "WARNING: Failed to flip issue #${ISSUE_NUMBER} to pending-dev (issue may stay stuck in reviewing): ${_edit_err}"
       else
         log "Issue #${ISSUE_NUMBER} flipped to pending-dev for rebase re-dispatch (autonomous label retained)."

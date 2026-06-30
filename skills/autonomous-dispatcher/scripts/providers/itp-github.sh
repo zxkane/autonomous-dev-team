@@ -147,16 +147,35 @@ itp_github_list_comments() {
 # itp_github_transition_state ISSUE REMOVE ADD — atomic label state move.
 #
 # Spec §3.1: remove REMOVE, add ADD in ONE `gh issue edit` (atomic per [INV-08]).
-# Moves the leaf out of `label_swap` (lib-dispatch.sh) byte-identically: the
-# empty-REMOVE / empty-ADD cases STILL omit the corresponding flag, preserving
-# the `[ -n "$remove" ]` / `[ -n "$add" ]` guards the caller used. The terminal-
-# state jq subtraction in list_pending_review/list_pending_dev ([INV-25]
-# defense-in-depth) is NOT this leaf's concern — it stays caller-side (spec §3.1).
+# Moves the leaf out of `label_swap` (lib-dispatch.sh) byte-identically.
+#
+# CSV multi-label ([INV-97], #331): REMOVE and ADD are each ONE label OR a
+# comma-separated LIST of labels. A single label is a CSV of length 1, so every
+# existing 3-positional single-label caller emits BYTE-IDENTICAL argv (exactly one
+# `--remove-label`/`--add-label`). A CSV emits one flag per NON-EMPTY member, in
+# order; an empty member is dropped; an empty side omits its flag entirely
+# (preserving the `[ -n ]` empty-side guards the original single-label leaf used).
+# This expresses the multi-`--remove-label` Part-A flips (e.g.
+# "in-progress,pending-dev" → two removes) the prior single-remove leaf could not,
+# keeping them ATOMIC (one edit, [INV-08]) rather than splitting into a remove-only
+# verb + a separate add.
+#
+# Precondition (spec §3.1): the comma IS the member separator — a label NAME that
+# itself contains a comma is unsupported via this path (it would split). Inert for
+# the pipeline (every label is comma-free; hygiene_strip's CSV is built from a
+# hardcoded comma-free jq allowlist), but documented as a provider-portability
+# boundary. The split is a pure `IFS=,` shell op on caller-controlled label names
+# fed to `--remove-label`/`--add-label` argv (NOT a jq pattern) — no injection.
+#
+# The terminal-state jq subtraction in list_pending_review/list_pending_dev
+# ([INV-25] defense-in-depth) is NOT this leaf's concern — it stays caller-side.
 itp_github_transition_state() {
   local issue_num="$1" remove="$2" add="$3"
-  local args=()
-  [ -n "$remove" ] && args+=(--remove-label "$remove")
-  [ -n "$add" ] && args+=(--add-label "$add")
+  local args=() _csv=() _m
+  IFS=',' read -ra _csv <<<"$remove"
+  for _m in "${_csv[@]}"; do [ -n "$_m" ] && args+=(--remove-label "$_m"); done
+  IFS=',' read -ra _csv <<<"$add"
+  for _m in "${_csv[@]}"; do [ -n "$_m" ] && args+=(--add-label "$_m"); done
   gh issue edit "$issue_num" --repo "$REPO" "${args[@]}"
 }
 

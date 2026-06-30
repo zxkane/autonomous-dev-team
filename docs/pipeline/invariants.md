@@ -4842,6 +4842,68 @@ leaf-absent → fail LOUD, no raw-`gh` POST), and the source-shape pins (zero ra
 - [INV-91](#inv-91-the-provider-neutral-caller-layer-routes-all-host-io-through-itp_chp_-verbs--a-new-raw-gh-outside-providers-is-a-ci-failing-cutover-regression-baseline-anchored) — the cutover guard whose baseline this migration shrinks (66 → 65).
 - [`provider-spec.md`](provider-spec.md) §3.2 — the `chp_reply_review_comment` verb row + the deferred-sites mapping entry.
 
+## INV-97: `itp_transition_state` REMOVE/ADD are comma-separated label LISTS — a single label is a CSV of length 1 (byte-identical), a CSV emits one flag per non-empty member, and the four live-wrapper label-flips route through the verb (zero raw `gh issue edit` in the caller layer)
+
+_Triage (issue #236): [machine-checked: tests/unit/test-itp-transition-variadic.sh]_
+
+**Rule**: the [INV-87] ITP transition verb `itp_transition_state ISSUE REMOVE ADD` accepts each
+of REMOVE and ADD as **one label OR a comma-separated list of labels**. The GitHub leaf
+`itp_github_transition_state` splits each operand on `,` (a pure `IFS=,` shell op) and emits one
+`--remove-label`/`--add-label` per **non-empty** member, in order, in ONE atomic `gh issue edit`
+([INV-08]).
+
+- **Backward-compat (byte-identical):** a single label is a CSV of length 1 → exactly one flag,
+  identical to the pre-#331 single-label leaf. The empty-side flag omission (`[ -n ]`) is
+  preserved (an empty operand contributes zero members → no flag). The 17 existing 3-positional
+  single-label callers (incl. the `label_swap` delegation) are unaffected.
+- **Multi-label:** `"in-progress,pending-dev"` → two `--remove-label`; `""` add → no
+  `--add-label`. This expresses the two Part-A multi-`--remove-label` flips (the dev PR-found
+  flip, the review approved-flip [INV-33]) and the variadic-N `hygiene_strip_residual_labels`
+  remove **atomically** — a separate remove-only verb would break [INV-08] atomicity (the
+  Part-A flips remove AND add in the same edit), and the operand-reorder sentinel form would
+  break the spec-gate Form-3 movement scanner (which hard-codes positional token #2=remove,
+  #3=add).
+- **Precondition (provider-portability boundary):** the comma IS the member separator — a label
+  NAME containing `,` is unsupported via this path (it would split). Inert for the pipeline
+  (every label is comma-free; `hygiene_strip`'s CSV is built from a hardcoded comma-free jq
+  allowlist), but documented in `provider-spec.md` §3.1 and pinned by a TC-ITV split-semantics
+  test, not silently swallowed.
+- **No injection:** label names flow into `--remove-label`/`--add-label` argv, never a jq
+  pattern; the CSV split is a pure shell operation on caller-controlled label names.
+- **Spec-gate coverage preserved:** the Form-3 scanner (#313) already recognizes
+  `itp_transition_state` and `norm()` splits the operand on `,`, so the migrated multi-label
+  flips emit their full movement (`in-progress,pending-dev|pending-review`, `autonomous,reviewing|approved`,
+  `reviewing|pending-dev`) and reconcile against the existing `sites[]` manifest with NO scanner
+  change. `hygiene_strip`'s CSV is built into a local `$remove_csv` on its own line so the verb
+  call carries only `$`-leading variable operands (skip-variable guard → no garbage movement),
+  identical to `label_swap`'s fully-variable delegation. The three `code_sites` C.3 anchors that
+  pinned the raw `gh issue edit` literals were re-anchored to grep-stable comments adjacent to
+  the migrated calls **in the same PR** (else C.3 fails with `code-site for …` errors).
+
+**Status**: **ENFORCED** as of #331. The four migrated sites — `autonomous-dev.sh` (PR-found
+success), `autonomous-review.sh` (post-merge approved-flip [INV-33] + auto-merge-fail re-queue),
+`lib-dispatch.sh::hygiene_strip_residual_labels` — now hold ZERO raw `gh issue edit`; the cutover
+baseline ([INV-91]) shrank by the 4 signatures. Design in
+`docs/designs/issue-331-itp-transition-csv.md`; test plan in
+`docs/test-cases/issue-331-itp-transition-csv.md`.
+
+**Tests**: `tests/unit/test-itp-transition-variadic.sh` — leaf CSV golden-trace (single-label
+byte-identical, multi-remove, empty-member drop, empty-side omission, comma-separator
+precondition), shim routing, per-site migrated-form + caller-side fail-safe-framing preservation
+(`|| log`, `2>/dev/null || true`, the stderr-capture `if ! _err=$(… 2>&1 >/dev/null)`),
+`hygiene_strip` atomic single-call + already-clean ZERO-call early-return, the spec-gate C.3
+re-anchor (the 3 anchors no longer list the raw `gh issue edit` literals; RED-without-the-reanchor),
+and source-shape (zero raw `gh issue edit` at the 4 sites; baseline −4). The golden-trace leaf
+matrix also lives in `tests/unit/test-itp-write-leaves.sh`; behavior preservation in
+`tests/unit/test-step0-hygiene.sh`; spec-gate reconciliation in `tests/unit/test-spec-drift.sh`;
+cutover in `tests/unit/test-provider-cutover.sh`.
+
+**Cross-references**:
+- [INV-08](#inv-08-wrapper-exit-trap-label-edits-are-atomic-per-call) — the atomicity this CSV verb preserves (one edit, never split).
+- [INV-87](#inv-87-provider-dispatch-is-spec-defined--callers-route-every-issuecode-host-op-through-itp_chp_-never-a-raw-gh-in-the-caller-layer) — the verb-dispatch contract.
+- [INV-91](#inv-91-the-provider-neutral-caller-layer-routes-all-host-io-through-itp_chp_-verbs--a-new-raw-gh-outside-providers-is-a-ci-failing-cutover-regression-baseline-anchored) — the cutover guard whose baseline this migration shrinks by 4.
+- [`provider-spec.md`](provider-spec.md) §3.1 — the `itp_transition_state` verb row (CSV semantics + comma precondition) + the mapping appendix entry.
+
 ## INV-98: the Step 4a.5 same-HEAD PR-exists park is NOT terminal — a `completed` session delegates to the INV-35 router; only the residual cases park
 
 _Triage (issue #236): [machine-checked: tests/unit/test-issue-351-stale-verdict-delegate.sh]_

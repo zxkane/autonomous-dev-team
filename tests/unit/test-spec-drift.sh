@@ -541,21 +541,23 @@ rc=$?
 if [[ "$rc" -ne 0 ]] && grep -q "splitlabel" <<<"$out"; then ok "continuation-line write scanned → red naming 'splitlabel'"; else bad "continuation-line write NOT scanned (rc=$rc) — M2 regression"; fi
 cp "$SCRIPTS/dispatcher-tick.sh" "$SCRATCH/dispatcher-tick.sh"  # restore
 
-echo "=== TC-SPEC-GATE-034: the legitimate variable label write is ALLOWLISTED (real repo passes) ==="
-# #283: label_swap() no longer holds a variable label write — its body now
-# delegates to itp_transition_state (the [INV-87] ITP transition verb), whose
-# byte-identical `gh issue edit … --add-label "$add"` leaf lives in
-# providers/itp-github.sh, OUTSIDE the four scanned PIPELINE_FILES. So the only
-# remaining variable label write in the pipeline files is the
-# hygiene_strip_residual_labels() loop (`--remove-label "$t"` over a hard-coded
-# declared transitional-label list). It MUST be recognized as allowlisted (info,
-# not a FAIL — the P1.1 ban only fires on NON-allowlisted variable writes, see
-# TC-045), so the real repo still PASSES C-overall.
+echo "=== TC-SPEC-GATE-034: NO variable label write survives in the pipeline files (real repo passes P1.1) ==="
+# #283: label_swap() delegated its variable label write to itp_transition_state
+# (the [INV-87] ITP verb), whose leaf lives in providers/itp-github.sh, OUTSIDE the
+# four scanned PIPELINE_FILES. #331 ([INV-97]): hygiene_strip_residual_labels() did
+# the SAME — its `--remove-label "$t"` loop is gone; it now builds a CSV ($remove_csv)
+# from its hard-coded transitional-label set and delegates to
+# `itp_transition_state "$issue_num" "$remove_csv" ""` (the CSV-extended leaf). So
+# NO `--add/--remove-label "$var"` write remains in any PIPELINE_FILE: check_variable_writes
+# emits NEITHER an allowlist INFO nor a P1.1 FAIL, and the real repo PASSES C-overall.
+# (variable_write_allowlist.sites is now empty — the orphaned entry was dropped.)
 out="$(bash "$CHECK" 2>&1)"
-if grep -q "allowlisted variable label write at lib-dispatch.sh.*hygiene_strip_residual_labels" <<<"$out"; then
-  ok "the legitimate variable write (hygiene loop) is allowlisted; label_swap delegates to itp_transition_state (#283)"
+if grep -qE "::error::.*variable label write" <<<"$out"; then
+  bad "a variable label write FAILed P1.1 on the real repo (post-#331 there should be NONE): $(grep -E '::error::.*variable label write' <<<"$out" | head -1)"
+elif grep -q "allowlisted variable label write" <<<"$out"; then
+  bad "the real repo still reports a variable label write (post-#331 the hygiene loop should delegate to itp_transition_state → none remain): $(grep 'allowlisted variable label write' <<<"$out" | head -1)"
 else
-  bad "legitimate variable writes NOT recognized as allowlisted"
+  ok "no variable label write remains in the pipeline files; label_swap (#283) + hygiene_strip (#331) both delegate to itp_transition_state — P1.1 silent, C-overall passes"
 fi
 
 echo "=== TC-SPEC-GATE-016: reversed markers fail the generator loud (L1) ==="
