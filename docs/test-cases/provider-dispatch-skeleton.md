@@ -13,7 +13,7 @@ pin any `gh` argv (no leaf is migrated; golden-trace is downstream).
 
 | ID | Scenario | Expected |
 |---|---|---|
-| TC-PROVIDER-DISPATCH-001 | Source `lib-issue-provider.sh`; `declare -F` each of the 13 ITP verbs | all 13 defined |
+| TC-PROVIDER-DISPATCH-001 | Source `lib-issue-provider.sh`; `declare -F` each of the 14 ITP verbs (incl. `itp_label_event_ts`, #323) | all 14 defined |
 | TC-PROVIDER-DISPATCH-002 | Source `lib-code-host.sh`; `declare -F` each of the 12 CHP verbs | all 12 defined |
 | TC-PROVIDER-DISPATCH-003 | Default-resolution: `ISSUE_PROVIDER`/`CODE_HOST` unset → stub `itp_github_*`/`chp_github_*` echo a sentinel; call `itp_<verb>`/`chp_<verb>` | sentinel returned (routed to `…_github_<verb>`) |
 | TC-PROVIDER-DISPATCH-004 | Each ITP shim body forwards to `itp_${ISSUE_PROVIDER}_<verb> "$@"`; each CHP shim to `chp_${CODE_HOST}_<verb> "$@"` | grep of lib bodies confirms the forward literal per verb |

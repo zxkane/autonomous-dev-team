@@ -294,7 +294,7 @@ Before dispatching a resume, call `is_session_completed <issue> _reason` (in `li
 | `completed` | Normal end-of-turn (`stop_reason=end_turn` too). Resuming would attach to a closed SSE stream and hang. | Branch on most recent post-completion review verdict — see Step 4b.5.1 below. |
 | `prompt_too_long` | JSONL transcript exceeded the model's input window. Headless `claude -p` has no auto-compaction, so resuming re-feeds the whole transcript and crashes again. | Auto-recover: post `INV-12-prompt-too-long:<sid>` notice (idempotent), **truncate the per-issue log**, `label_swap pending-dev → in-progress`, `post_dispatch_token dev-new`, `dispatch dev-new`. The next tick mints a fresh session id with a smaller seed prompt that re-derives state from git/issue/PR. |
 
-The PTL branch's `INV-12-prompt-too-long:<sid>` notice is posted at most once per session-id: the idempotency-dedup READ routes through `itp_list_comments` (the [INV-90] normalized array; #321 migrated this off a raw `gh issue view --json comments -q`) with a caller-side `[.[].body | select(contains(<marker>))] | length` string-compared `= "0"` — `contains()` is a literal substring test, engine-agnostic. **Fail-closed**: an empty/error fetch leaves the count ≠ `"0"`, so the notice is NOT re-posted (the same posture as the prior `grep -q '^0$'`). The `dispatcher-tick.sh` timeline `gh api …/timeline` read (a separate `itp_label_event_ts` second-tier item) is NOT migrated by #321 and stays raw `gh`.
+The PTL branch's `INV-12-prompt-too-long:<sid>` notice is posted at most once per session-id: the idempotency-dedup READ routes through `itp_list_comments` (the [INV-90] normalized array; #321 migrated this off a raw `gh issue view --json comments -q`) with a caller-side `[.[].body | select(contains(<marker>))] | length` string-compared `= "0"` — `contains()` is a literal substring test, engine-agnostic. **Fail-closed**: an empty/error fetch leaves the count ≠ `"0"`, so the notice is NOT re-posted (the same posture as the prior `grep -q '^0$'`). The `dispatcher-tick.sh` Step-2 TTHW timeline read (a separate second-tier item, out of #321's scope) is migrated behind the `itp_label_event_ts` ITP verb in #323 ([INV-93]) — `dispatcher-tick.sh` now holds ZERO raw `gh`.
 
 The PTL branch hard-fails if the log truncate fails (perm drift, ENOSPC): post an operator-actionable comment and `continue` without dispatching. Without this guard, the next tick would re-read the same stale PTL log, the idempotency-marker check would suppress a fresh notice (it's keyed on the old session_id), and the dispatcher would silently dispatch dev-new every tick forever.
 
@@ -424,8 +424,9 @@ This branch is the safety net for the case where the wrapper died so abruptly th
 The tick emits (all `metrics_emit … || true`, guarded on `declare -F`):
 `issue_labeled` at Step 2 when an issue is first picked up for dev-new (the TTHW
 "labeled" endpoint — first dispatch only, not resumes; carries a best-effort
-`labeled_at` fetched from the GitHub timeline so TTHW counts queued wait rather
-than measuring from the dispatch instant); `dispatch_retry` at Step 4 — on EVERY
+`labeled_at` fetched from the issue-tracker timeline so TTHW counts queued wait
+rather than measuring from the dispatch instant — the timeline read routes through
+the `itp_label_event_ts` ITP verb ([INV-93](invariants.md#inv-93-the-tthw-labeled_at-timeline-read-routes-through-the-observe-only-itp_label_event_ts-verb--leaf-absent-or-any-failure-yields-empty-and-the-aggregator-falls-back-to-the-dispatch-instant-ts-it-never-blocks-dispatch), GitHub leaf `itp_github_label_event_ts`, #323; observe-only / non-blocking, guarded on the bare `itp_${ISSUE_PROVIDER}_label_event_ts` so a provider with no leaf or any failure simply omits `labeled_at` and the aggregator falls back to the dispatch-instant `ts`)); `dispatch_retry` at Step 4 — on EVERY
 below-limit pending-dev re-evaluation (`stalled=false`, so the full retry history
 is recorded, not just the final stall) AND once at `MAX_RETRIES` when the issue is
 marked stalled (`stalled=true`); and `dispatch_stale` at

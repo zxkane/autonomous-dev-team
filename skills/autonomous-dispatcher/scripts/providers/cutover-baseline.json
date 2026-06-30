@@ -193,11 +193,6 @@
     },
     {
       "count": 1,
-      "file": "dispatcher-tick.sh",
-      "content": "_labeled_at=\"$(gh api \"repos/${REPO}/issues/${issue_num}/timeline\" \\"
-    },
-    {
-      "count": 1,
       "file": "lib-auth.sh",
       "content": "_pr_create_ok() { gh pr create --repo \"$repo\" --head \"$branch\" --title \"$title\" --body \"$body\" >/dev/null 2>&1; }"
     },

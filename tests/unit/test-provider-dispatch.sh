@@ -5,7 +5,7 @@
 # Mirrors tests/unit/test-cli-adapters.sh (the [INV-75] adapter precedent):
 #   - dispatch routing: itp_<verb> → itp_${ISSUE_PROVIDER}_<verb>,
 #     chp_<verb> → chp_${CODE_HOST}_<verb> (default provider = github);
-#   - all 13 ITP + 12 CHP shims defined after sourcing (declare -F), like
+#   - all 14 ITP + 12 CHP shims defined after sourcing (declare -F), like
 #     TC-ADAPTER-EXTRACT-013;
 #   - the readlink -f-of-BASH_SOURCE skill-tree resolution ([INV-14]/[INV-65]);
 #   - the .caps reader parses key=value and NEVER sources the manifest (§4/§10);
@@ -41,12 +41,13 @@ assert_eq() { local d="$1" e="$2" a="$3"; if [[ "$e" == "$a" ]]; then ok "$d"; e
 assert_contains() { local d="$1" n="$2" h="$3"; if [[ "$h" == *"$n"* ]]; then ok "$d"; else bad "$d"; echo "      needle='$n'"; echo "      haystack='${h:0:300}'"; fi; }
 assert_not_contains() { local d="$1" n="$2" h="$3"; if [[ "$h" != *"$n"* ]]; then ok "$d"; else bad "$d"; echo "      should not contain: '$n'"; fi; }
 
-# The 13 ITP verbs (spec §3.1) and 12 CHP verbs (spec §3.2), verbatim.
+# The 14 ITP verbs (spec §3.1) and 12 CHP verbs (spec §3.2), verbatim.
+# (itp_label_event_ts is the #323 second-tier observe-only TTHW verb.)
 ITP_VERBS=(
   itp_list_by_state itp_count_by_state itp_list_forbidden_combos
   itp_transition_state itp_read_task itp_post_comment itp_edit_comment
   itp_list_comments itp_resolve_dep itp_mark_checkbox itp_provision_states
-  itp_begin_tick itp_caps
+  itp_begin_tick itp_label_event_ts itp_caps
 )
 CHP_VERBS=(
   chp_find_pr_for_issue chp_ci_status chp_mergeable chp_create_pr chp_approve
@@ -55,7 +56,7 @@ CHP_VERBS=(
 )
 
 # ---------------------------------------------------------------------------
-echo "=== TC-PROVIDER-DISPATCH-001: all 13 ITP shims defined after sourcing lib-issue-provider.sh ==="
+echo "=== TC-PROVIDER-DISPATCH-001: all 14 ITP shims defined after sourcing lib-issue-provider.sh ==="
 # ---------------------------------------------------------------------------
 itp_defined=$(
   env -u ISSUE_PROVIDER -u AUTONOMOUS_CONF -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR \
