@@ -224,14 +224,20 @@ assert_contains "TC-RRC-032a lib-code-host.sh defines the chp_reply_review_comme
 assert_contains "TC-RRC-032b providers/chp-github.sh defines chp_github_reply_review_comment" \
   "chp_github_reply_review_comment()" "$(cat "$PROVIDERS/chp-github.sh")"
 
-# TC-RRC-033 — baseline shrank: the migrated wire-string is GONE and the total
-# occurrence count is prior − 1 (72 → 71); distinct signatures 66 → 65.
+# TC-RRC-033 — baseline shrank: the migrated wire-string is GONE. #327 itself
+# removed reply-to-comments.sh's signature (72→71 occ, 66→65 sigs at that time).
+# The absolute totals then dropped further as sibling #296 second-tier migrations
+# stacked onto main: #334 (auto-merge-marker read → itp_list_comments: 71→70 occ,
+# 65→64 sigs) and #328 (PR inline-comment read → chp_list_inline_comments: 70→69
+# occ, 64→63 sigs). The migration-robust invariant (TC-RRC-033a) is that NO
+# reply-to-comments.sh signature survives; the absolute totals below are pinned to
+# the current stacked value (69 occ / 63 sigs) and move with each sibling migration.
 mig_in_baseline=$(jq '[.surviving_sites[] | select(.file=="reply-to-comments.sh")] | length' "$BASELINE")
 assert_eq "TC-RRC-033a no reply-to-comments.sh signature remains in the cutover baseline" "0" "$mig_in_baseline"
 total_occ=$(jq '[.surviving_sites[].count] | add' "$BASELINE")
-assert_eq "TC-RRC-033b cutover baseline total occurrences == 71 (was 72, −1 migrated)" "71" "$total_occ"
+assert_eq "TC-RRC-033b cutover baseline total occurrences == 69 (#327 71, then #334 −1, #328 −1)" "69" "$total_occ"
 distinct_sigs=$(jq '.surviving_sites | length' "$BASELINE")
-assert_eq "TC-RRC-033c cutover baseline distinct signatures == 65 (was 66, −1 migrated)" "65" "$distinct_sigs"
+assert_eq "TC-RRC-033c cutover baseline distinct signatures == 63 (#327 65, then #334 −1, #328 −1)" "63" "$distinct_sigs"
 
 # ===========================================================================
 # 5. SPEC / INVARIANT (AC4) — the new INV heading + its triage marker; spec row.

@@ -1083,7 +1083,12 @@ elif [[ "$MODE" = "resume" ]]; then
   PR_REVIEW_COMMENTS=""
   AUTO_MERGE_FAILURE_MARKER=""
   if [[ -n "$PR_NUM" ]]; then
-    PR_REVIEW_COMMENTS=$(gh api "repos/${REPO}/pulls/${PR_NUM}/comments" \
+    # [INV-95] (#296 second-tier, #328) PR inline (file-anchored) review-comment
+    # read → chp_list_inline_comments. The `- **path:line** — body` formatter STAYS
+    # caller-side (#281 jq-stays-caller; it's a prompt-rendering decision); the verb
+    # forwards it byte-identically. The self-guarding shim degrades to empty (WARN +
+    # return 1) on a leaf-absent backend, which this `|| true` site already handles.
+    PR_REVIEW_COMMENTS=$(chp_list_inline_comments "$PR_NUM" \
       --jq '[.[] | "- **\(.path):\(.line // .original_line // "N/A")** — \(.body)"] | join("\n")' 2>/dev/null || true)
 
     # Detect the auto-merge-failure marker the review wrapper posts when

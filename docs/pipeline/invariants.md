@@ -4567,6 +4567,7 @@ _Triage (issue #236): [machine-checked: tests/unit/test-provider-cutover.sh]_
 - #296 B6 (#319): the two `autonomous-dev.sh` resume-time review-feedback comment scanners — `findings_at` in `emit_post_approval_findings_block` ([INV-57]) and the `REVIEW_COMMENTS` resume-prompt builder — migrated from raw `gh issue view --json comments -q '<sel>'` to `itp_list_comments "$ISSUE" | jq -r '<sel>'`. **Shape-equivalent, NOT byte-identical**: the selector iterates the normalized [INV-90] array `.[]` (not gh's `.comments[]`), and the select moved from gh's Go-**RE2** jq to the system jq's **Oniguruma** engine. RE2/Oniguruma diverge on `\b`/`\s`/`(?i)` for non-ASCII input, so the selector text was rewritten to explicit, engine-equivalent forms that select IDENTICALLY in both (= the old RE2 behavior): `BLOCKING\b` → `(?i:(^|[^A-Za-z-])BLOCKING)($|[^A-Za-z0-9_])` (scoped `(?i)` over the literal only; the boundary classes stay explicit ASCII OUTSIDE the fold so Unicode simple-fold chars `K` U+212A / `ſ` U+017F don't diverge from RE2's ASCII `\b`); `\[P1\]` → `(?i:\[P1\])`; leading `^\s*` → `^[ \t\r\n\f]*` (excludes NBSP, matching RE2's `\s`); each exclusion `(?i)` → a scoped `(?i:…)`. Selection-equivalence (the boolean `select` result) is identical — proven by the 17 `TC-RFB-*` cases run through the system jq plus new engine-divergence fixtures (`BLOCKINGK`/`ſ`/`é`/`中`, NBSP-`Moving to`, lowercase, `NON-BLOCKING`/`BLOCKINGS`). The `:613` site is order-immune (explicit `| sort`); `:1051`'s `| last` relies on [INV-90]'s now-explicit **stable** ascending `createdAt` sort (the same-second-tie test pins it). Baseline shrank by 2 sigs (the two `gh issue view … --json comments` survivors). The `gh api` PR-number REST reads (`:1086`/`:1093`) are deferred (different shape, issue-only verb does not forward `-q`).
 - #296 final-2-marker-scanners (#321): the **last two** raw `gh issue view --json comments` comment-scanner leaves migrated behind `itp_list_comments` — **S1** the [INV-12] PTL idempotency marker-count scanner (`dispatcher-tick.sh`) and **S2** `_fetch_agent_verdict_body` (`lib-review-poll.sh`), the **verdict-authenticity choke-point** ([INV-20]/[INV-40]). **S1 is shape-equivalent / engine-agnostic**: `[.comments[].body | select(contains(M)) | length]` → `itp_list_comments | jq -r '[.[].body | select(contains(M))] | length'` captured + string-compared `= "0"`; `contains()` is a LITERAL substring test (no RE2/Oniguruma divergence) and the old `grep -q '^0$'` fail-closed posture is preserved (empty/error fetch ⇒ count ≠ `"0"` ⇒ notice NOT re-posted). The `dispatcher-tick.sh` timeline `gh api …/timeline` read STAYS (separate `itp_label_event_ts` second-tier item, out of scope — migrated in #323, see the bullet below). **S2 is behavior-equivalent, NOT byte-identical** — the verdict `select` moved from gh's Go-**RE2** (ASCII-only case fold) to system jq's **Oniguruma** (Unicode fold), so four fixes restore RE2 parity + fail-CLOSED: (1) `.comments[]`→`.[]`, `.author.login`→`.author` (verb unwraps + exposes `author` verbatim, regex-irrelevant exact-eq); (2) verdict `test(_VERDICT_RE;"i")` → `ascii_downcase | test("<lc>")` with NO `"i"` flag (Oniguruma `"i"` Unicode-folds the literal ASCII keywords to ALSO match U+212A `K` / U+017F `ſ` — a false-positive **widening** at the authenticity gate RE2's ASCII fold never made; verified on-box `Review PAſSED` matches `review passed` under `"i"`), the shell-side lowercase being `LC_ALL=C tr` NOT bash `${,,}` (the uppercase `I` in "Review FAILED" folds to dotless `ı` under a Turkish locale ≠ data-side `failed`, silently dropping the most common verdict); (3) `// empty` on the verdict jq (a no-match `…|last|.body` yields jq `null` → `jq -r` prints literal `"null"`, which the caller's `[[ -n "$body" ]]` would mis-read as a verdict present; the old `gh -q` path emitted EMPTY); (4) `[[ -z "$_vre_lc" ]] && return 0` before building the jq (an empty `_VERDICT_RE` makes `test("")` match EVERY body — fail-OPEN; the guard fails CLOSED). Plus a caller-side `sort_by(.createdAt // "", .id // 0) | last` (same-second tie breaks on the monotone REST comment id; re-sorting an already-ascending array is idempotent — the [INV-90] verb contract is untouched). The three **case-SENSITIVE** predicates (`Review Session` / `Review Session.*<sid>` / `Review Agent: <name>`) stay UNCHANGED — no boundary/class/`"i"`, so RE2 ≡ Oniguruma (a case-sensitive `test()` does NOT Unicode-fold, verified on-box). The self-source of the ITP seam is **LAZY (in-function)**, not top-level: the review wrapper sources `lib-review-poll.sh` BEFORE `lib-issue-provider.sh`, so a top-level guard would change production source order; in-function it covers both entry paths into the helper (poll loop + observe-loop comment branch) and is needed only for standalone unit sourcing. Baseline shrank by 2 sigs (the two `gh issue view … --json comments` survivors → **the last comment-scanner leaves**). Proven by `tests/unit/test-final2-marker-scanners.sh` (the 10-case S2 golden-parity matrix (a)-(j) + S1 idempotency + source-shape pins + the durable cutover-baseline absence/presence pins — #323 rewrote Prong 4's once-mechanical prior−2 delta to the #308/#310 absence/presence idiom + flipped TC-FINAL2-042 once the timeline survivor migrated, since a prior−N delta-vs-origin/main pin goes stale the moment the PR merges) and the retargeted `test-verdict-artifact.sh::TC-OBS-271-12` (stub re-pointed from the `gh` binary to `itp_list_comments`, asserting the SELECTED BODY not just the gate).
 - #296 second-tier (#323): the **last** raw-`gh` survivor in `dispatcher-tick.sh` — the best-effort, observe-only TTHW timeline read (`gh api …/issues/<n>/timeline --jq …`, the [INV-70] `labeled_at` for #228 finding 4) — migrated behind the new focused verb `itp_label_event_ts` (GitHub leaf `itp_github_label_event_ts`, [INV-93]). The leaf owns the GitHub-internal `event`/`.label.name`/`.created_at` timeline jq and returns a neutral **scalar** (the documented #281 exception — "jq stays caller-side" governs provider-NEUTRAL shapes — mirroring `itp_count_by_state`/`itp_resolve_dep`). It **JSON-encodes** the label into the jq string literal (injection-safe: a raw `${label}` interpolation widens the selector / is a jq syntax error; the `--arg` name MUST be `lbl` because jq 1.6 reserves `label`, and `gh api` has no `--arg` so the label is pre-encoded). For `LABEL=autonomous` the spliced program is **argv-equivalent** to the pre-#323 inline selector. The `dispatcher-tick.sh` Step-2 emit routes through the verb behind the **bare** `itp_${ISSUE_PROVIDER}_label_event_ts` guard (IDENTICAL to the shim's dispatch — a `:-github` guard would diverge from the bare shim when `ISSUE_PROVIDER` is empty, the shim then aborting on `itp__…` under `set -e`). Observe-only / non-blocking: leaf-absent or any failure → empty → the aggregator falls back to the dispatch-instant `ts`; never blocks dispatch. Baseline shrank by 1 sig (the timeline survivor) → **`dispatcher-tick.sh` now has ZERO raw-`gh` survivors** (67 → 66 signatures). Proven by `tests/unit/test-label-event-ts.sh` (leaf-golden matrix (a)-(g) + injection-safety + argv-equivalence + caller-wiring + leaf-absent/guard + the empty-`ISSUE_PROVIDER` no-abort divergence repro) and the flipped `test-final2-marker-scanners.sh::TC-FINAL2-042` (co-requiring src-absent + verb-call-present + baseline-entry-removed).
+- #296 second-tier (#328): the dev-resume PR inline-review-comment read (`PR_REVIEW_COMMENTS`, autonomous-dev.sh) migrated from raw `gh api repos/$REPO/pulls/$PR_NUM/comments --jq` to the NEW verb `chp_list_inline_comments` — byte-identical (the `--jq` formatter stays caller-side, #281); baseline shrank by 1 sig. (The distinct `:1093` `issues/$PR_NUM/comments` AUTO_MERGE-marker read this issue had scoped OUT was migrated independently behind `itp_list_comments` by #334, so it is no longer a baselined survivor either.) The flat REST `pulls/N/comments` inline shape (`.path`/`.line`/`.original_line`) is **CHP-owned** ([INV-95]), distinct from `chp_review_threads` (GraphQL thread tree), `chp_pr_view` (no `pulls/N/comments` sub-resource), and `itp_list_comments` (issue-level normalized). The GitHub leaf `chp_github_list_inline_comments` mirrors `chp_github_pr_view` (`local pr="$1"; shift; gh api "repos/${REPO}/pulls/${pr}/comments" "$@"`); the `lib-code-host.sh` shim self-guards like `chp_pr_view`/`chp_pr_list` (#282 convention) — the site is invoked unguarded in a `$(… 2>/dev/null || true)` context, so leaf-absent → WARN + `return 1` (degrades to empty `PR_REVIEW_COMMENTS`), never a `set -e` abort; the bare `${CODE_HOST}` guard mirrors the leaf dispatch (#323/#324 bare-guard lesson). Proven by `tests/unit/test-chp-list-inline-comments.sh` (golden-trace argv byte-identity + caller-formatter rendering + leaf-absent/unset-`CODE_HOST` fail-soft + source-shape `:1086`-gone + baseline shrink) and `tests/unit/test-provider-cutover.sh` (the shrunk baseline reconciles tree-wide; monotonicity Check 4 allows the shrink).
 
 **Cross-references**:
 - [`provider-spec.md`](provider-spec.md) §9 — references this invariant as the cutover/anti-regression guard.
@@ -4673,6 +4674,74 @@ migration.
 - [INV-87](#inv-87-provider-dispatch-is-spec-defined--callers-route-every-issuecode-host-op-through-itp_chp_-never-a-raw-gh-in-the-caller-layer) — the verb-dispatch contract; this is its terminal `dispatcher-tick.sh` migration.
 - [INV-91](#inv-91-the-provider-neutral-caller-layer-routes-all-host-io-through-itp_chp_-verbs--a-new-raw-gh-outside-providers-is-a-ci-failing-cutover-regression-baseline-anchored) — the cutover guard whose baseline this migration shrinks (67 → 66).
 - [`provider-spec.md`](provider-spec.md) §3.1 — the `itp_label_event_ts` verb row + the mapping appendix entry.
+
+## INV-95: the dev-resume PR inline-review-comment read routes through the CHP verb `chp_list_inline_comments` — a distinct CHP-owned flat-REST shape, self-guarding so a leaf-absent backend degrades to empty rather than aborting
+
+_Triage (issue #236): [machine-checked: tests/unit/test-chp-list-inline-comments.sh]_
+
+> Note: INV-94 is claimed by #324 (`chp_count_reviews_by_login`, in flight); this
+> second-tier #296 migration takes the next free number, INV-95.
+
+**Rule**: `autonomous-dev.sh`'s dev-resume prompt builder reads the PR's **inline
+(file-anchored) review comments** — the comments the dev agent is told to address +
+reply-to + resolve — through the CHP verb `chp_list_inline_comments PR [extra gh
+args…]` (GitHub leaf `chp_github_list_inline_comments` → `gh api
+"repos/${REPO}/pulls/${pr}/comments" "$@"`), NOT a raw caller-side `gh api
+…/pulls/N/comments`. The verb is a **byte-identical** focused-raw read:
+
+- The leaf forwards `"$@"` byte-identically and does **no formatting**: the caller
+  threads its own `--jq` `- **\(.path):\(.line // .original_line // "N/A")** —
+  \(.body)` prompt formatter ([#281] jq-stays-caller — it is a prompt-rendering
+  decision, a provider-NEUTRAL shape). `$REPO`/`$PR` go into the REST **path**, not a
+  jq pattern, so there is **no injection surface** and no `@json` pre-encode. No
+  `--paginate` today (a page-walk is a separate change).
+- The flat REST `pulls/N/comments` inline-comment shape (`.path`/`.line`/
+  `.original_line`) is **CHP-owned** and DISTINCT from `chp_review_threads` (the
+  GraphQL thread tree `{thread_id, resolved, comments:[…]}`), `chp_pr_view` (the `gh
+  pr view --json` projection — no `pulls/N/comments` sub-resource), and
+  `itp_list_comments` (the issue-level normalized `[{id, author, body, createdAt}]`).
+  The inline fields are never folded into the ITP issue-comment shape
+  ([`provider-spec.md`](provider-spec.md) §3.2).
+- The `lib-code-host.sh` shim is **self-guarding** (the #282 convention, mirroring
+  `chp_pr_view`/`chp_pr_list`): the `:1086` caller invokes it UNGUARDED in a `$(…
+  2>/dev/null || true)` context, so when the enabled provider omits the leaf the
+  shim emits a `WARN: [INV-95] …` and `return 1` (a clean non-zero the `|| true` site
+  degrades to an empty `PR_REVIEW_COMMENTS` on) rather than dispatching to an
+  undefined leaf and aborting the wrapper under `set -e`. The `declare -F` guard uses
+  the **bare** `${CODE_HOST}` expansion — IDENTICAL to the leaf dispatch, safe under
+  `set -u` because `CODE_HOST` is defaulted at source time; a `:-github` guard would
+  diverge from the bare shim when `CODE_HOST` is empty (the #323/#324 bare-guard
+  lesson). A real non-GitHub backend MUST implement the leaf (it is a core,
+  non-capability-gated read).
+
+This picks up the site #319 explicitly deferred ("the `gh api` PR-number REST reads
+are deferred — different shape, issue-only verb does not forward `-q`"). The
+**distinct** `:1093` `issues/$PR_NUM/comments` AUTO_MERGE-marker read is a separate
+issue-level shape, OUT OF SCOPE here — migrated behind the shipped `itp_list_comments`
+in the separate follow-up #334 (so it is no longer a baselined survivor).
+
+**Status**: **ENFORCED** as of #328. Closes the inline-comment read as a raw-`gh`
+caller (cutover baseline shrank by 1 signature, [INV-91]). Design recorded in
+`docs/designs/issue-328-chp-list-inline-comments.md`; test plan in
+`docs/test-cases/chp-list-inline-comments.md`.
+
+**Tests**: `tests/unit/test-chp-list-inline-comments.sh` — golden-trace argv
+byte-identity (NUL-delimited capture preserves the `--jq` formatter's spaces + `|`
+pipe as a single argv element) + the caller-formatter `- **path:line** — body`
+rendering (incl. the `.line // .original_line // "N/A"` fallback) through the system
+jq + leaf-absent / unset-`CODE_HOST` fail-soft (WARN + `return 1`, no `set -e` abort)
++ source-shape (`:1086` raw-`gh` gone, `chp_list_inline_comments "$PR_NUM"` present)
++ baseline-shrink. The cutover guard ([INV-91],
+`check-provider-cutover.sh` via `tests/unit/test-provider-cutover.sh`) reconciles the
+shrunk baseline tree-wide and its monotonicity Check 4 allows the shrink.
+`tests/unit/test-spec-drift.sh` TC-SPEC-GATE-040/041 covers this heading's
+heading-adjacent triage tag.
+
+**Cross-references**:
+- [INV-87](#inv-87-provider-dispatch-is-spec-defined--callers-route-every-issuecode-host-op-through-itp_chp_-never-a-raw-gh-in-the-caller-layer) — the verb-dispatch contract this read now obeys.
+- [INV-90](#inv-90-the-normalized-issue-comment-shape-is-id-author-body-createdat-sorted-ascending-by-createdat-with-author-a-machine-handle-for-exact-equality) — the ITP issue-comment shape this inline-comment shape is deliberately NOT folded into.
+- [INV-91](#inv-91-the-provider-neutral-caller-layer-routes-all-host-io-through-itp_chp_-verbs--a-new-raw-gh-outside-providers-is-a-ci-failing-cutover-regression-baseline-anchored) — the cutover guard whose baseline this migration shrinks.
+- [`provider-spec.md`](provider-spec.md) §3.2 — the `chp_list_inline_comments` verb row + the mapping appendix entry.
 
 ## INV-96: the review-comment reply POST routes through the `chp_reply_review_comment` verb — `reply-to-comments.sh` self-sources the CHP seam standalone and fails LOUD if the leaf is absent (no raw-`gh` fallback)
 

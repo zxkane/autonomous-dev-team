@@ -9,11 +9,6 @@
     {
       "count": 1,
       "file": "autonomous-dev.sh",
-      "content": "PR_REVIEW_COMMENTS=$(gh api \"repos/${REPO}/pulls/${PR_NUM}/comments\" \\"
-    },
-    {
-      "count": 1,
-      "file": "autonomous-dev.sh",
       "content": "The WRAPPER will run \\`gh pr create --head <your-branch>\\` for you after you finish."
     },
     {

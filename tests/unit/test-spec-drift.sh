@@ -669,6 +669,17 @@ AC9_311='- #296 B8 (#311): live-wrapper label flips (16 sites: 13 autonomous-rev
 if grep -qF -- "$AC9_311" "$INV"; then ok "INV-91 Migration-log has the exact #296 B8 (#311) bullet"; else bad "INV-91 Migration-log missing/changed the #296 B8 (#311) bullet"; fi
 
 # ===========================================================================
+echo "=== TC-SPEC-GATE-328: INV-91 Migration-log carries the exact #296 second-tier (#328) bullet ==="
+# [#296 second-tier, #328] AC4 — the migration that pulled the dev-resume PR
+# inline-review-comment read behind the NEW verb chp_list_inline_comments records
+# its byte-identical, baseline-shrink-by-1 entry in INV-91's Migration log. Pinned
+# here (Spec Drift surface) so doc-and-code stay coupled per CONTRIBUTING Rule 1.
+# Match the bullet's stable leading clause (the full bullet is long; the leading
+# clause uniquely identifies it without pinning every prose word).
+AC4_328='- #296 second-tier (#328): the dev-resume PR inline-review-comment read (`PR_REVIEW_COMMENTS`, autonomous-dev.sh) migrated from raw `gh api repos/$REPO/pulls/$PR_NUM/comments --jq` to the NEW verb `chp_list_inline_comments` — byte-identical (the `--jq` formatter stays caller-side, #281); baseline shrank by 1 sig.'
+if grep -qF -- "$AC4_328" "$INV"; then ok "INV-91 Migration-log has the exact #296 second-tier (#328) bullet"; else bad "INV-91 Migration-log missing/changed the #296 second-tier (#328) bullet"; fi
+
+# ===========================================================================
 # Form 3 — the scanner recognizes a DIRECT itp_transition_state call as a
 # positional label-write site (spec-gate-itp prerequisite for #296/B8 / #311).
 # Keeps spec-gate coverage as gh issue edit → itp_transition_state migrates.
