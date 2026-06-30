@@ -4613,7 +4613,7 @@ _Triage (issue #236): [machine-checked: tests/unit/test-handle-completed-session
 
 ## INV-93: the TTHW `labeled_at` timeline read routes through the observe-only `itp_label_event_ts` verb — leaf-absent or any failure yields empty and the aggregator falls back to the dispatch-instant `ts`; it NEVER blocks dispatch
 
-_Triage (issue #323): [machine-checked: tests/unit/test-label-event-ts.sh]_
+_Triage (issue #236): [machine-checked: tests/unit/test-label-event-ts.sh]_
 
 **Rule**: the dispatcher's Step-2 metrics emit fetches the real `autonomous`-label
 time (the [INV-70] `labeled_at`, #228 finding 4) through the ITP verb
