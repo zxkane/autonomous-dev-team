@@ -850,28 +850,54 @@ assert_eq "TC-OBS-271-11 comment agent pending → loop does NOT break on resolv
 # silently kills the `$(...)` fetch in the gate's condition context → the comment
 # branch resolves NOTHING → the mixed-panel early-exit stays dead (the very bug).
 # Run in a SUBSHELL under `set -euo pipefail` so we get the REAL lib function +
-# the real WRAPPER ordering, with `gh` stubbed to return a matching verdict comment.
-obs_real_fetch_resolved=$(
+# the real WRAPPER ordering.
+#
+# #321: the REAL _fetch_agent_verdict_body now reads `itp_list_comments` (the
+# [INV-90] normalized array), NOT a raw `gh issue view --json comments`. So the
+# stub is re-pointed from the `gh` BINARY to `itp_list_comments` (emitting the
+# normalized array). We assert BOTH the gate resolves AND the SELECTED BODY is the
+# matching verdict — a gate-only assertion over one happy-path fixture is
+# vacuous-green (any non-empty fetch flips the gate). The full selector-
+# discrimination matrix (RE2-fold parity, wrong-agent/window/author exclusion,
+# fail-closed) is covered by the golden-parity tests in
+# tests/unit/test-final2-marker-scanners.sh; this test stays scoped to the
+# artifact-channel plumbing + the comment-branch wiring.
+_obs_271_body="Review PASSED - all good
+Review Session: real-sid-0
+Review Agent: agy"
+obs_real_fetch=$(
   set -euo pipefail
   # Re-source the lib fresh so _fetch_agent_verdict_body is the REAL one (this
   # outer file overrode it for the stub-driven TC-OBS tests above).
   # shellcheck source=/dev/null
   source "$DISP/lib-review-poll.sh"
-  # Stub `gh` to return a verdict comment matching the INV-20/INV-40 binding.
-  gh() { printf '%s' "Review PASSED - all good
+  # Stub the ITP seam to return the [INV-90] normalized array carrying one verdict
+  # comment matching the INV-20 (window+session) / INV-40 (per-agent) binding.
+  _obs_271_body="Review PASSED - all good
 Review Session: real-sid-0
-Review Agent: agy"; }
+Review Agent: agy"
+  itp_list_comments() {
+    jq -cn --arg b "$_obs_271_body" \
+      '[{id:1, author:"anyone", authorKind:"bot", body:$b, createdAt:"2026-06-01T00:00:00Z"}]'
+  }
   ISSUE_NUMBER=1; REPO="o/r"; BOT_LOGIN=""; WRAPPER_START_TS="2026-01-01T00:00:00Z"
   # _VERDICT_RE IS in scope here — exactly as the FIXED wrapper guarantees by
   # defining it before the observe loop. (Mirror the wrapper's value.)
   _VERDICT_RE='Review PASSED|Review APPROVED|APPROVED FOR MERGE|LGTM|Review PASS|Review findings:|Review FAILED|Review REJECTED|Changes requested'
   AGENT_NAMES=("agy"); AGENT_SESSION_IDS=("real-sid-0")
   AGENT_ARTIFACT_SNAPSHOTS=("/nonexistent-271.landed")   # no artifact → comment branch
-  # Call through the gate's condition context, exactly like the observe loop does.
-  if _all_first_verdicts_resolved; then echo "resolved"; else echo "unresolved"; fi
+  # Assert the REAL selector returns the matching body (not just the gate).
+  _sel="$(_fetch_agent_verdict_body "agy" "real-sid-0")"
+  # Then call through the gate's condition context, exactly like the observe loop.
+  if _all_first_verdicts_resolved; then _gate="resolved"; else _gate="unresolved"; fi
+  printf '%s\n--SEP--\n%s' "$_gate" "$_sel"
 )
-assert_eq "TC-OBS-271-12 comment-only slot resolves via the REAL _fetch_agent_verdict_body (_VERDICT_RE in scope)" \
-  "resolved" "$obs_real_fetch_resolved"
+obs_real_gate="${obs_real_fetch%%--SEP--*}"; obs_real_gate="${obs_real_gate%$'\n'}"
+obs_real_sel="${obs_real_fetch#*--SEP--$'\n'}"
+assert_eq "TC-OBS-271-12 comment-only slot resolves via the REAL _fetch_agent_verdict_body (_VERDICT_RE in scope, itp_list_comments seam)" \
+  "resolved" "$obs_real_gate"
+assert_eq "TC-OBS-271-12b the REAL selector returns the matching verdict BODY (not vacuous-green)" \
+  "$_obs_271_body" "$obs_real_sel"
 
 # W29 (#271 pr-review C1): _VERDICT_RE MUST be assigned BEFORE the observe loop's
 # early-exit gate in the wrapper, else the comment branch silently no-ops under

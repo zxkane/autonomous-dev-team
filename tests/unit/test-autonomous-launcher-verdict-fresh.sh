@@ -355,18 +355,37 @@ ptl_branch_body() {
 }
 
 # Stub harness: each call appended to $CALL_LOG so we can assert order.
+#
+# #321: the PTL branch's idempotency-dedup READ now routes through
+# `itp_list_comments` (the [INV-90] normalized array), NOT a raw
+# `gh issue view --json comments -q`, and the notice POST through
+# `itp_post_comment`. So the harness stubs those verbs:
+#   - itp_list_comments emits an array whose body either DOES or does NOT carry
+#     the notice marker, driven by GH_MOCK_MARKER_COUNT ('0' = not present yet →
+#     the branch's caller-side `select(contains(<marker>)) | length` returns 0
+#     and posts; non-zero → emits a comment carrying the marker so length>0 and
+#     the post is suppressed). The branch resolves the marker from `$session_id`.
+#   - itp_post_comment logs `itp_post_comment <issue> <body>` so the marker-text
+#     assertion finds it.
+# `gh` is still stubbed defensively (no raw gh remains in the branch, but a
+# stray call must not escape to a live gh).
 cat > "$TC_PTL_DIR/harness.sh" <<'HARNESS'
 log() { echo "[harness] $*" >> "$CALL_LOG"; }
-gh() {
-  echo "gh $*" >> "$CALL_LOG"
-  # Mock: `gh issue view ... --json comments -q "...select(contains(...))"`
-  # For our test, we want to control whether the marker exists. The
-  # GH_MOCK_MARKER_COUNT env var drives this — '0' = not present yet.
-  if [[ "$*" == *"select(contains"* ]]; then
-    echo "${GH_MOCK_MARKER_COUNT:-0}"
+itp_list_comments() {
+  echo "itp_list_comments $*" >> "$CALL_LOG"
+  local mk="INV-12-prompt-too-long:${session_id:-}"
+  if [[ "${GH_MOCK_MARKER_COUNT:-0}" != "0" ]]; then
+    # marker ALREADY present → length>0 → post suppressed.
+    jq -cn --arg b "Session exhausted … (${mk})" \
+      '[{id:1, author:"bot", authorKind:"bot", body:$b, createdAt:"2026-01-01T00:00:00Z"}]'
+  else
+    # marker absent → length 0 → branch posts.
+    jq -cn '[{id:1, author:"bot", authorKind:"bot", body:"unrelated", createdAt:"2026-01-01T00:00:00Z"}]'
   fi
   return 0
 }
+itp_post_comment() { echo "itp_post_comment $*" >> "$CALL_LOG"; }
+gh() { echo "gh $*" >> "$CALL_LOG"; return 0; }
 label_swap() { echo "label_swap $*" >> "$CALL_LOG"; }
 post_dispatch_token() { echo "post_dispatch_token $*" >> "$CALL_LOG"; }
 dispatch() { echo "dispatch $*" >> "$CALL_LOG"; }
@@ -433,7 +452,8 @@ fi
 # TC-PTL-007c: idempotency — marker already present → no marker post,
 # but still dispatches (the branch's purpose is to recover).
 CALLS=$(run_ptl_branch 7001 "session-7001" '{"type":"result","stop_reason":"stop_sequence","terminal_reason":"prompt_too_long"}' 1)
-# When marker_count=1 the 'if grep -q ^0$' check fails → marker not posted.
+# When marker_count=1 itp_list_comments emits a comment carrying the marker, so
+# the caller-side `select(contains(<marker>)) | length` is >0 (≠ "0") → not posted.
 if echo "$CALLS" | grep -q "INV-12-prompt-too-long:session-7001.*Forcing a fresh"; then
   echo -e "  ${RED}FAIL${NC}: TC-PTL-007c idempotency: marker re-posted"
   FAIL=$((FAIL + 1))
