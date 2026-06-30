@@ -326,3 +326,39 @@ chp_github_list_inline_comments() {
   local pr="$1"; shift
   gh api "repos/${REPO}/pulls/${pr}/comments" "$@"
 }
+
+# chp_github_count_reviews_by_login REPO PR LOGIN — count a login's PR reviews (#324).
+#
+# Spec §3.2 [INV-94]: the leaf behind the [INV-79] wrapper bot-review hard-gate
+# (lib-review-bots.sh::missing_bot_reviews). Returns the INTEGER count of reviews on
+# PR (in REPO) by LOGIN, across ALL pages, or 0 on ANY failure. The `--paginate` +
+# `awk '{s+=$1}'` sum is a GitHub-transport artifact (`--jq '|length'` emits one
+# length per page) with no provider-neutral meaning — encapsulated here; the
+# caller-side `^[0-9]+$` validation + the `-eq 0` MISSING decision STAY caller-side,
+# mirroring chp_github_mergeable's leaf-returns-raw / classify-caller-side split.
+#
+# REPO is an EXPLICIT 1st parameter (NOT global $REPO): the caller threads its own
+# `repo=$3`, so the verb mirrors that — a global-$REPO verb would query the wrong
+# repo if they ever differ (correctness-by-construction).
+#
+# Injection-safe: a raw ${login} spliced into the `--jq` string literal is a jq
+# injection (a login bearing `"` widens/breaks the selector). LOGIN is JSON-encoded
+# via a SEPARATE jq pass; the `--arg` name MUST be non-reserved (jq-1.6 reserves
+# `label` etc., NOT `loginarg`), and the reviews-endpoint read tool has no `--arg`,
+# so pre-encoding is the only path. For `github-actions[bot]` the encoded literal is
+# `"github-actions[bot]"` — count-equivalent to the pre-#324 inline leaf.
+#
+# Fail-SAFE: the leaf CAPTURES the read output, CHECKS its exit, THEN sums. Piping
+# the read straight into `awk` (the pre-#324 inline leaf) swallowed the exit, so a
+# partial-pagination stream (page-1 length emitted, page-2 errors) was summed →
+# count>0 → false PRESENT → fail-OPEN at the hard-gate. Here a non-zero exit → 0 →
+# the caller counts the bot MISSING → blocks the PASS. Every failure path (non-zero
+# exit, encode error) → 0.
+chp_github_count_reviews_by_login() {
+  local repo="$1" pr="$2" login="$3" login_json lengths
+  login_json="$(jq -rn --arg loginarg "$login" '$loginarg | @json' 2>/dev/null)" || { echo 0; return 0; }
+  lengths="$(gh api "repos/${repo}/pulls/${pr}/reviews" --paginate \
+    --jq "[.[] | select(.user.login == ${login_json})] | length" 2>/dev/null)" \
+    || { echo 0; return 0; }
+  awk '{s+=$1} END {print s+0}' <<<"$lengths"
+}

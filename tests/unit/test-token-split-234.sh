@@ -833,17 +833,108 @@ if [[ ! -s "$DRAIN_POSTS" ]]; then
 else
   assert_fail "drain empty allow-list posted something it shouldn't have: $(cat "$DRAIN_POSTS" 2>/dev/null)"
 fi
-# (d) missing_bot_reviews echoes a configured bot with no review (stub gh → 0 reviews).
-MBR=$(env -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR PATH="$TMPROOT/mbr-gh:/usr/bin:/bin" bash -c "
-  mkdir -p '$TMPROOT/mbr-gh'
-  printf '#!/bin/bash\nif [[ \"\\\$1\" == \"api\" ]]; then echo 0; exit 0; fi\nexit 0\n' > '$TMPROOT/mbr-gh/gh'; chmod +x '$TMPROOT/mbr-gh/gh'
-  source '$LIB_BOTS'
+# (d) missing_bot_reviews wiring through chp_count_reviews_by_login ([INV-94], #324).
+#     The per-bot review count now routes through the CHP verb (the leaf encapsulates
+#     the --paginate sum; the -eq 0 MISSING decision stays caller-side). These cases
+#     materialize the CHP seam (copy_chp_seam) alongside lib-review-bots.sh so the
+#     verb path is genuinely exercised; the leaf-absent cases drop the seam and run
+#     under explicit `set -euo pipefail` to prove the fail-safe + no-abort.
+MBR_SBA="$TMPROOT/mbr-sba"; mkdir -p "$MBR_SBA"
+cp "$LIB_BOTS" "$MBR_SBA/lib-review-bots.sh"
+copy_chp_seam "$MBR_SBA"   # [#324] lib-code-host.sh + chp-github.sh → defines chp_count_reviews_by_login
+# Recording gh stub: `api …/reviews --jq '…|length'` honored against a fixture via
+# real jq (single page); anything else is a no-op success.
+MBR_GH="$TMPROOT/mbr-gh"; mkdir -p "$MBR_GH"
+cat > "$MBR_GH/gh" <<'MBRGH'
+#!/bin/bash
+if [[ "${1:-}" != "api" ]]; then exit 0; fi
+jqf=""; prev=""
+for a in "$@"; do [[ "$prev" == "--jq" ]] && jqf="$a"; prev="$a"; done
+printf '%s' "${MBR_REVIEWS:-[]}" | jq "$jqf"
+MBRGH
+chmod +x "$MBR_GH/gh"
+
+# (d.1 / TC-CRBL-021) NO review by the bot → bot listed MISSING (the existing :841 TC).
+MBR=$(env -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR PATH="$MBR_GH:/usr/bin:/bin" \
+  MBR_REVIEWS='[]' bash -c "
+  source '$MBR_SBA/lib-code-host.sh'
+  source '$MBR_SBA/lib-review-bots.sh'
   missing_bot_reviews 'q' 42 owner/repo
 " 2>/dev/null | tr '\n' ' ')
 if printf '%s' "$MBR" | grep -qw 'q'; then
-  assert_pass "missing_bot_reviews lists a configured bot with no review (the wrapper hard-gate signal)"
+  assert_pass "missing_bot_reviews (seam loaded): lists a configured bot with no review (hard-gate signal)"
 else
   assert_fail "missing_bot_reviews did not list the missing bot: '$MBR'"
+fi
+
+# (d.2 / TC-CRBL-020) a PRESENT review by the bot login → bot NOT listed (verb returns >0).
+MBR2=$(env -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR PATH="$MBR_GH:/usr/bin:/bin" \
+  MBR_REVIEWS='[{"user":{"login":"amazon-q-developer[bot]"}}]' bash -c "
+  source '$MBR_SBA/lib-code-host.sh'
+  source '$MBR_SBA/lib-review-bots.sh'
+  missing_bot_reviews 'q' 42 owner/repo
+" 2>/dev/null | tr '\n' ' ')
+if ! printf '%s' "$MBR2" | grep -qw 'q'; then
+  assert_pass "missing_bot_reviews (seam loaded): a present review → bot NOT listed (verb counts it PRESENT)"
+else
+  assert_fail "missing_bot_reviews listed a bot that DID review: '$MBR2'"
+fi
+
+# (d.3 / TC-CRBL-022) leaf/shim ABSENT, unset CODE_HOST, under explicit `set -euo
+#     pipefail`: the bare dual guard skips → count=0 → bot MISSING, NO abort. (The
+#     bash -c harness lacks set -e, so the case enables it explicitly — else a
+#     `set -e` abort would slip past.) Only lib-review-bots.sh is sourced (NO seam),
+#     and CODE_HOST is unset; the short-circuit && means the bare ${CODE_HOST} in the
+#     2nd guard is never reached (the 1st `declare -F chp_count_reviews_by_login` is
+#     already false). We capture BOTH the output and the exit status.
+MBR3_OUT="$TMPROOT/mbr3.out"
+env -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR -u CODE_HOST PATH="$MBR_GH:/usr/bin:/bin" bash -c "
+  set -euo pipefail
+  source '$MBR_SBA/lib-review-bots.sh'
+  missing_bot_reviews 'q' 42 owner/repo
+" >"$MBR3_OUT" 2>/dev/null
+MBR3_RC=$?
+if [[ "$MBR3_RC" -eq 0 ]] && grep -qw 'q' "$MBR3_OUT"; then
+  assert_pass "missing_bot_reviews leaf-absent + unset CODE_HOST under set -euo pipefail → bot MISSING, NO abort"
+else
+  assert_fail "leaf-absent/unset-CODE_HOST aborted or dropped the bot (rc=$MBR3_RC, out='$(cat "$MBR3_OUT")') — INV-79 fail-safe broken"
+fi
+
+# (d.4 / TC-CRBL-023) leaf ABSENT but CODE_HOST SET to a provider with no such leaf,
+#     under set -euo pipefail: source lib-code-host.sh (so the shim + CODE_HOST exist)
+#     pointed at a fixture providers dir whose chp-noleaf.sh defines NO
+#     count_reviews_by_login leaf → the 2nd guard (bare chp_noleaf_…) is false →
+#     count=0 → bot MISSING, NO abort.
+NOLEAF_DIR="$TMPROOT/noleaf-providers"; mkdir -p "$NOLEAF_DIR"
+cat > "$NOLEAF_DIR/chp-noleaf.sh" <<'NOLEAF'
+#!/bin/bash
+# A provider that deliberately omits chp_noleaf_count_reviews_by_login.
+chp_noleaf_pr_view() { :; }
+NOLEAF
+MBR4_OUT="$TMPROOT/mbr4.out"
+env -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR PATH="$MBR_GH:/usr/bin:/bin" \
+  CODE_HOST=noleaf AUTONOMOUS_PROVIDERS_DIR="$NOLEAF_DIR" bash -c "
+  set -euo pipefail
+  source '$MBR_SBA/lib-code-host.sh'
+  source '$MBR_SBA/lib-review-bots.sh'
+  missing_bot_reviews 'q' 42 owner/repo
+" >"$MBR4_OUT" 2>/dev/null
+MBR4_RC=$?
+if [[ "$MBR4_RC" -eq 0 ]] && grep -qw 'q' "$MBR4_OUT"; then
+  assert_pass "missing_bot_reviews CODE_HOST=noleaf (leaf absent) under set -euo pipefail → bot MISSING, NO abort"
+else
+  assert_fail "CODE_HOST=noleaf leaf-absent aborted or dropped the bot (rc=$MBR4_RC, out='$(cat "$MBR4_OUT")')"
+fi
+
+# (d.5 / TC-CRBL-024) guard expr-equality: the caller's 2nd leaf-guard MUST use the
+#     BARE chp_${CODE_HOST}_count_reviews_by_login IDENTICAL to the shim's dispatch
+#     (a `:-github` guard vs the bare shim diverges on unset CODE_HOST → abort).
+LIB_CHP_SRC="$SCRIPTS/lib-code-host.sh"
+if grep -qE 'declare -F "chp_\$\{CODE_HOST\}_count_reviews_by_login"' "$LIB_BOTS" \
+   && grep -qE 'chp_count_reviews_by_login\(\)[[:space:]]*\{[[:space:]]*chp_\$\{CODE_HOST\}_count_reviews_by_login' "$LIB_CHP_SRC"; then
+  assert_pass "guard expr == shim dispatch: caller guards the BARE chp_\${CODE_HOST}_count_reviews_by_login (no :-github divergence)"
+else
+  assert_fail "guard expr diverges from the shim's bare chp_\${CODE_HOST}_ dispatch (latent unset-CODE_HOST abort)"
 fi
 # (e) source-level: autonomous-review.sh hard-gates a missing bot review in the PASS
 #     branch (calls missing_bot_reviews and re-queues to pending-review) + passes the

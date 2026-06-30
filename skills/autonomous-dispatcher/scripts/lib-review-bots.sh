@@ -156,17 +156,30 @@ bot_trigger_allowlist() {
 # NOT fail on an absent bot review, so the WRAPPER must block a PASS while a
 # mandatory bot review is still missing (re-queue; a later tick sees it present).
 #
-# Fail-safe: a `gh` query failure for a bot counts it as MISSING (block, don't
+# Fail-safe: a count failure for a bot counts it as MISSING (block, don't
 # fail-open). Returns 0 always (the missing list is the signal).
+#
+# The per-bot review count routes through the CHP verb `chp_count_reviews_by_login`
+# ([INV-94], #324) — the `--paginate` all-pages sum is a GitHub-transport artifact
+# encapsulated in the leaf, while the `^[0-9]+$` validation + the `-eq 0` MISSING
+# decision STAY here (provider-neutral). The verb is fail-SAFE on ANY failure
+# (returns 0 → bot MISSING). The review wrapper sources the CHP seam before calling
+# this; the dual `declare -F` guard (the shim AND the bare leaf expr, IDENTICAL to
+# the shim's own dispatch) is the safety net for any context where the seam is not
+# loaded (CODE_HOST unset, a provider without the leaf): the caller fails-safe to
+# `count=0` (bot MISSING), never aborts under `set -e`.
 missing_bot_reviews() {
   local review_bots="$1" pr_number="$2" repo="$3" bots bot login count
   bots=$(parse_review_bots "$review_bots" 2>/dev/null) || return 0
   [[ -z "$bots" ]] && return 0
   for bot in $bots; do
     login=$(get_bot_login "$bot" 2>/dev/null) || { printf '%s\n' "$bot"; continue; }
-    count=$(gh api "repos/${repo}/pulls/${pr_number}/reviews" --paginate \
-      --jq "[.[] | select(.user.login == \"${login}\")] | length" 2>/dev/null \
-      | awk '{s+=$1} END {print s+0}')
+    if declare -F chp_count_reviews_by_login >/dev/null 2>&1 \
+       && declare -F "chp_${CODE_HOST}_count_reviews_by_login" >/dev/null 2>&1; then
+      count=$(chp_count_reviews_by_login "$repo" "$pr_number" "$login")
+    else
+      count=0   # leaf/shim absent → MISSING (fail-safe)
+    fi
     [[ "$count" =~ ^[0-9]+$ ]] || count=0
     [[ "$count" -eq 0 ]] && printf '%s\n' "$bot"
   done
