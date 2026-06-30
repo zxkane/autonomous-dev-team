@@ -51,11 +51,12 @@ assert_grep_re() {
   if grep -qE "$pattern" "$file" 2>/dev/null; then ok "$desc"; else bad "$desc (missing /$pattern/)"; fi
 }
 
-# The 13 ITP verbs (spec §3.1) and 12 CHP verbs (spec §3.2), verbatim.
+# The 14 ITP verbs (spec §3.1) and 12 CHP verbs (spec §3.2), verbatim.
+# (itp_label_event_ts is the #323 second-tier observe-only TTHW verb.)
 ITP_VERBS=(
   itp_list_by_state itp_count_by_state itp_list_forbidden_combos itp_transition_state
   itp_read_task itp_post_comment itp_edit_comment itp_list_comments itp_resolve_dep
-  itp_mark_checkbox itp_provision_states itp_caps itp_begin_tick
+  itp_mark_checkbox itp_provision_states itp_caps itp_begin_tick itp_label_event_ts
 )
 CHP_VERBS=(
   chp_find_pr_for_issue chp_ci_status chp_mergeable chp_create_pr chp_approve
@@ -90,7 +91,7 @@ echo "=== TC-PROVIDER-SPEC-003: both config keys with defaults ==="
 assert_grep "documents ISSUE_PROVIDER" "ISSUE_PROVIDER" "$SPEC"
 assert_grep "documents CODE_HOST" "CODE_HOST" "$SPEC"
 
-echo "=== TC-PROVIDER-SPEC-004: all 13 ITP verbs verbatim ==="
+echo "=== TC-PROVIDER-SPEC-004: all 14 ITP verbs verbatim ==="
 for v in "${ITP_VERBS[@]}"; do assert_grep "ITP verb $v" "$v" "$SPEC"; done
 
 echo "=== TC-PROVIDER-SPEC-005: all 12 CHP verbs verbatim ==="

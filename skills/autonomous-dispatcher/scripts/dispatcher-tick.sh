@@ -299,12 +299,28 @@ for i in $(seq 0 $((new_count - 1))); do
   # label time by ticks (concurrency cap, unresolved deps). For accurate TTHW we
   # also fetch the actual `autonomous`-label timeline timestamp and emit it as
   # `labeled_at`; the aggregator prefers it over `ts`, so labeled→PR/merge counts
-  # the queue wait (#228 review finding 4). The timeline call is best-effort: on
-  # any failure `labeled_at` is omitted and the aggregator falls back to `ts`.
+  # the queue wait (#228 review finding 4). The timeline read routes through the
+  # `itp_label_event_ts` ITP verb ([INV-93], GitHub leaf `itp_github_label_event_ts`,
+  # #323) — the GitHub-internal timeline jq lives under providers/. It is best-effort
+  # / observe-only: on any failure (or a provider with no leaf) `labeled_at` is
+  # omitted and the aggregator falls back to `ts`. The call is guarded on the BARE
+  # provider-leaf expression `itp_${ISSUE_PROVIDER}_label_event_ts` — IDENTICAL to
+  # the always-present shim's BARE dispatch (lib-issue-provider.sh), so a provider
+  # that has not implemented the leaf is skipped rather than calling an undefined
+  # `itp_${ISSUE_PROVIDER}_label_event_ts` under `set -e`. A `:-github` guard here
+  # would DIVERGE from the bare shim when `ISSUE_PROVIDER` were empty (guard passes
+  # on `itp_github_…`, shim aborts on `itp__…`); the bare guard matches the shim's
+  # bare dispatch so the two never disagree (#323 review R2). (Unlike the
+  # `itp_begin_tick` guard above, which carries a `:-github` for `set -u` safety,
+  # this one is deliberately bare for guard/shim equality — safe because
+  # lib-issue-provider.sh, sourced via lib-dispatch.sh well before Step 2, always
+  # sets `ISSUE_PROVIDER="${ISSUE_PROVIDER:-github}"`, so it is never unset here.)
+  # It never blocks dispatch.
   if declare -F metrics_emit >/dev/null 2>&1; then
-    _labeled_at="$(gh api "repos/${REPO}/issues/${issue_num}/timeline" \
-      --jq 'map(select(.event == "labeled" and .label.name == "autonomous")) | (.[0].created_at // empty)' \
-      2>/dev/null || true)"
+    _labeled_at=""
+    if declare -F "itp_${ISSUE_PROVIDER}_label_event_ts" >/dev/null 2>&1; then
+      _labeled_at="$(itp_label_event_ts "$issue_num" "autonomous")"
+    fi
     if [[ -n "${_labeled_at:-}" ]]; then
       metrics_emit issue_labeled "issue=${issue_num}" "labeled_at=${_labeled_at}" || true
     else

@@ -21,7 +21,7 @@
 # authorKind discriminator, `$BOT_LOGIN`) are in scope from the caller's
 # environment (lib-dispatch.sh's required env).
 #
-# 13 ITP verbs (spec §3.1):
+# 14 ITP verbs (spec §3.1):
 #   itp_github_list_by_state       itp_github_count_by_state        [#281 READ]
 #   itp_github_list_forbidden_combos                                [#281 READ]
 #   itp_github_read_task           itp_github_list_comments         [#281 READ]
@@ -29,6 +29,7 @@
 #   itp_github_edit_comment        itp_github_mark_checkbox         [itp-writes]
 #   itp_github_provision_states                                     [itp-writes]
 #   itp_github_resolve_dep         itp_github_begin_tick            [#284 DEP]
+#   itp_github_label_event_ts                                       [#323 OBSERVE]
 # (itp_caps reads the .caps manifest in the dispatcher, not a function here.)
 
 # ---------------------------------------------------------------------------
@@ -372,4 +373,51 @@ itp_github_resolve_dep() {
   local _state
   _state=$(GH_TOKEN="$lookup_token" gh issue view "$num" --repo "$owner_repo" --json state -q '.state' 2>/dev/null || true)
   printf -v "$out_var" '%s' "$_state"
+}
+
+# ===========================================================================
+# OBSERVE-ONLY METRICS leaf (#323, [INV-93]). The TTHW label-time read behind the
+# itp_label_event_ts verb. Best-effort / non-blocking: any failure returns empty
+# and the metrics aggregator falls back to the dispatch-instant event `ts`
+# (pre-#228 behavior) — it NEVER blocks dispatch. See the verb↔current-function
+# mapping appendix in docs/pipeline/provider-spec.md.
+# ===========================================================================
+
+# itp_github_label_event_ts ISSUE LABEL — first-`labeled`-event timestamp leaf.
+#
+# Spec §3.1 [m]: echo the ISO-8601 UTC `created_at` of the FIRST `labeled` event
+# for LABEL visible in the GitHub issue timeline, or empty if none / on failure.
+# The `event` / `.label.name` / `.created_at` fields are GitHub-internal REST
+# timeline vocabulary with NO provider-neutral shape, so the leaf owns the query
+# and returns a neutral SCALAR (a timestamp string) — the documented #281
+# exception ("jq stays caller-side" governs provider-NEUTRAL shapes), mirroring
+# itp_count_by_state returning an int / itp_resolve_dep returning an abstract
+# state. NOT the §3.3 comment-array shape.
+#
+# INJECTION-SAFE label (#323 review R1 [P1]): a raw `${label}` interpolation into
+# the `--jq` string is a jq INJECTION — a label like `autonomous" or .label.name
+# == "bug` would widen the selector, and a quote-bearing valid label would be a
+# jq syntax error. So the label is JSON-ENCODED to a string literal and spliced
+# into the program. Two on-box-verified gotchas:
+#   (1) the `--arg` name MUST be `lbl` — jq 1.6 reserves `label` as a KEYWORD, so
+#       `--arg label` + `$label` is a parse error;
+#   (2) `gh api` has NO `--arg` flag (`unknown flag: --arg`) — it does not forward
+#       jq variable bindings, so the label MUST be pre-encoded, not bound on the
+#       `gh api` call.
+# For LABEL=autonomous, `lbl_json` is exactly `"autonomous"` → the spliced program
+# is argv-equivalent to the inline selector dispatcher-tick.sh emitted pre-#323.
+#
+# BEST-EFFORT / no pagination (byte-identical to the pre-#323 read): the single
+# `gh api …/timeline` call carries NO `--paginate`, so a label event beyond the
+# default page returns empty (aggregator falls back to `ts`). The preserved
+# `2>/dev/null || true` swallows a malformed/non-array gh response (`map()` errors)
+# → empty, identical to the prior caller-side read.
+itp_github_label_event_ts() {
+  local issue="$1" label="$2" lbl_json
+  # Pre-encode LABEL to a JSON string literal (injection-safe). On any jq error
+  # here (should not happen for a normal label), fail soft → empty.
+  lbl_json="$(jq -rn --arg lbl "$label" '$lbl | @json')" || { echo ""; return 0; }
+  gh api "repos/${REPO}/issues/${issue}/timeline" \
+    --jq "map(select(.event == \"labeled\" and .label.name == ${lbl_json})) | (.[0].created_at // empty)" \
+    2>/dev/null || true
 }

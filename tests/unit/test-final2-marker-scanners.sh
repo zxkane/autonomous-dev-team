@@ -18,7 +18,9 @@
 #      `itp_list_comments` stubbed to emit the [INV-90] normalized array;
 #   2. S1 idempotency — drives the migrated marker-count guard logic;
 #   3. source-shape pins (the choke-point has two entry paths) + the four fix tokens;
-#   4. cutover-baseline delta pinned MECHANICALLY (prior − 2, the two wire-forms gone).
+#   4. cutover-baseline pins (DURABLE absence/presence — the two #321 wire-forms gone,
+#      dispatcher-tick.sh terminally raw-gh-free; #323 flipped TC-FINAL2-042 once the
+#      timeline survivor migrated behind itp_label_event_ts).
 #
 # Run: env -u PROJECT_DIR bash tests/unit/test-final2-marker-scanners.sh
 
@@ -297,42 +299,57 @@ else
 fi
 
 # --------------------------------------------------------------------------
-# Prong 4 — cutover-baseline delta pinned MECHANICALLY (prior − 2).
+# Prong 4 — cutover-baseline delta pinned DURABLY (absence/presence, not a
+# fragile prior−N delta-vs-origin/main arithmetic).
 # --------------------------------------------------------------------------
-echo "=== Prong 4: cutover-baseline delta (mechanical, prior − 2) ==="
+# #321 originally pinned its own −2 delta with `cur_total == origin/main − 2`.
+# That arithmetic is only valid in the PR that introduces the delta — once #321
+# merged, origin/main carries the −2 already, so the pin went STALE (it asserts
+# `origin/main − 2` against an origin/main that now equals the post-#321 total).
+# #323 (this PR) removes the LAST survivor in dispatcher-tick.sh (the timeline
+# read), shrinking the baseline by 1 more — which would make a `−2` pin fail
+# `72 == 73−2 = 71`. So Prong 4 is rewritten to the DURABLE idiom #308/#310 use:
+# assert the specific migrated wire-forms are ABSENT from the baseline + the
+# terminal property (dispatcher-tick.sh has ZERO baseline survivors). The total
+# reconciliation is the cutover guard's own job (TC-CUTOVER-001 / Check 1/4), so
+# no PR-relative delta arithmetic is duplicated here where it can rot.
+echo "=== Prong 4: cutover-baseline (durable absence/presence pins) ==="
 
 S1_WIRE='if gh issue view "$issue_num" --repo "$REPO" --json comments \'
 S2_WIRE='gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json comments \'
 TIMELINE_WIRE='gh api "repos/${REPO}/issues/${issue_num}/timeline"'
 
-# The two migrated wire-forms are ABSENT from the working-tree baseline.
+# #321's two migrated wire-forms are ABSENT from the working-tree baseline.
 n_s1="$(jq --arg c "$S1_WIRE" '[.surviving_sites[] | select(.content == $c)] | length' "$BASELINE")"
 n_s2="$(jq --arg c "$S2_WIRE" '[.surviving_sites[] | select(.content == $c)] | length' "$BASELINE")"
 assert_eq "TC-FINAL2-040a S1 wire-form absent from baseline" "0" "$n_s1"
 assert_eq "TC-FINAL2-040b S2 wire-form absent from baseline" "0" "$n_s2"
 
-# Mechanical delta: working-tree total == prior (origin/main) − 2. Computed from the
-# trusted ref so the pin is robust to whatever the absolute number is on the day this
-# lands (it catches an accidental regeneration that drops an UNRELATED survivor, which
-# a visual 73→71 diff would miss).
-cur_total="$(jq '[.surviving_sites[].count] | add' "$BASELINE")"
-prior_total="$(git -C "$PROJECT_ROOT" show origin/main:skills/autonomous-dispatcher/scripts/providers/cutover-baseline.json 2>/dev/null \
-  | jq '[.surviving_sites[].count] | add' 2>/dev/null)"
-if [[ -n "$prior_total" && "$prior_total" =~ ^[0-9]+$ ]]; then
-  assert_eq "TC-FINAL2-041 baseline total shrank by EXACTLY 2 vs origin/main ($prior_total → $((prior_total - 2)))" \
-    "$((prior_total - 2))" "$cur_total"
-else
-  echo -e "  ${GREEN}PASS${NC}: TC-FINAL2-041 skipped (origin/main baseline unresolvable — shallow/forked checkout)"
-  PASS=$((PASS + 1))
-fi
+# TC-FINAL2-041 (rewritten, durable): dispatcher-tick.sh is TERMINALLY raw-gh-free —
+# ZERO entries in the cutover baseline. (#323 removed the last one, the timeline
+# read.) This is the standing property the #296 second-tier batch establishes; it
+# does not rot across future PRs the way a prior−N delta does.
+n_tick="$(jq '[.surviving_sites[] | select(.file == "dispatcher-tick.sh")] | length' "$BASELINE")"
+assert_eq "TC-FINAL2-041 dispatcher-tick.sh has ZERO cutover-baseline survivors (terminally raw-gh-free, #323)" \
+  "0" "$n_tick"
 
-# TC-FINAL2-042: the dispatcher-tick timeline gh api entry STAYS (out of scope).
-n_tl="$(jq --arg c "$TIMELINE_WIRE" '[.surviving_sites[] | select(.content | contains($c))] | length' "$BASELINE")"
-if [[ "$n_tl" -ge 1 ]]; then
-  echo -e "  ${GREEN}PASS${NC}: TC-FINAL2-042 timeline gh api survivor STILL present (separate itp_label_event_ts item)"
+# TC-FINAL2-042 (FLIPPED, #323): the dispatcher-tick timeline gh api survivor is now
+# GONE — #321 left it as out-of-scope; #323 migrated it behind itp_label_event_ts.
+# Co-require ALL THREE pins in one block so a vacuous-green (one pin satisfied while
+# another regressed) cannot pass:
+#   (i)   `gh api …/timeline` is ABSENT from dispatcher-tick.sh (executable, non-comment);
+#   (ii)  `itp_label_event_ts "$issue_num" "autonomous"` is PRESENT in dispatcher-tick.sh;
+#   (iii) the specific timeline WIRE-STRING is the baseline entry that was removed.
+n_tl_src="$(grep -aE '(^|[^A-Za-z_-])gh ' "$TICK" \
+  | awk '{s=$0;sub(/^[[:space:]]+/,"",s); if(substr(s,1,1)=="#")next; print s}' \
+  | grep -c 'gh api .*timeline' || true)"
+has_verb_call="$(grep -cF 'itp_label_event_ts "$issue_num" "autonomous"' "$TICK" || true)"
+n_tl_base="$(jq --arg c "$TIMELINE_WIRE" '[.surviving_sites[] | select(.content | contains($c))] | length' "$BASELINE")"
+if [[ "$n_tl_src" -eq 0 && "$has_verb_call" -ge 1 && "$n_tl_base" -eq 0 ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-FINAL2-042 timeline gh api survivor MIGRATED (src absent + verb call present + baseline entry removed)"
   PASS=$((PASS + 1))
 else
-  echo -e "  ${RED}FAIL${NC}: TC-FINAL2-042 timeline gh api survivor MISSING — it must stay (out of scope)"
+  echo -e "  ${RED}FAIL${NC}: TC-FINAL2-042 timeline migration incomplete (src_gh=$n_tl_src verb_call=$has_verb_call base_entry=$n_tl_base — all 3 pins co-required)"
   FAIL=$((FAIL + 1))
 fi
 

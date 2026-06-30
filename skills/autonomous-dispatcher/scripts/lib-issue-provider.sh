@@ -10,11 +10,11 @@
 #
 # CONTRACT (provider-spec.md §3.1, the authoritative spec):
 #   ISSUE_PROVIDER ∈ { github (default), gitlab, asana }  (spec §2)
-#   13 ITP verbs, each forwarding to itp_${ISSUE_PROVIDER}_<verb> "$@":
+#   14 ITP verbs, each forwarding to itp_${ISSUE_PROVIDER}_<verb> "$@":
 #     itp_list_by_state itp_count_by_state itp_list_forbidden_combos
 #     itp_transition_state itp_read_task itp_post_comment itp_edit_comment
 #     itp_list_comments itp_resolve_dep itp_mark_checkbox itp_provision_states
-#     itp_begin_tick itp_caps
+#     itp_begin_tick itp_label_event_ts itp_caps
 #
 # SCOPE (#280): this file ships ONLY the dispatch shims + the .caps reader. NO
 # verb leaf is migrated — the itp_github_<verb> bodies are EMPTY scaffolds in
@@ -103,6 +103,7 @@ itp_resolve_dep()          { itp_${ISSUE_PROVIDER}_resolve_dep "$@"; }
 itp_mark_checkbox()        { itp_${ISSUE_PROVIDER}_mark_checkbox "$@"; }
 itp_provision_states()     { itp_${ISSUE_PROVIDER}_provision_states "$@"; }
 itp_begin_tick()           { itp_${ISSUE_PROVIDER}_begin_tick "$@"; }
+itp_label_event_ts()       { itp_${ISSUE_PROVIDER}_label_event_ts "$@"; }
 
 # itp_caps <key> — emit the capability map value for <key> from the enabled
 # ITP provider's .caps manifest (spec §4). The only ITP shim with a real body
