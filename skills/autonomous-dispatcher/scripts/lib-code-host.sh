@@ -146,6 +146,31 @@ chp_pr_list() {
   chp_${CODE_HOST}_pr_list "$@"
 }
 
+# chp_list_inline_comments PR [extra gh args…] — PR inline (file-anchored)
+# review-comment read (#296 second-tier, #328, [INV-95]). The dev-resume prompt
+# builder's PR_REVIEW_COMMENTS read (autonomous-dev.sh) routes through this so the
+# caller layer carries ZERO raw `gh api …/pulls/N/comments`. Caller keeps its own
+# `--jq` formatter (forwarded via "$@", byte-identical, #281 jq-stays-caller); only
+# the innermost `gh api` primitive moves behind the seam. DISTINCT shape from
+# chp_review_threads (GraphQL thread tree) / itp_list_comments (issue-level) — the
+# inline `.path`/`.line`/`.original_line` fields are CHP-owned (§3.2).
+#
+# Self-guarding (the #282 convention, mirroring chp_pr_view/chp_pr_list): the
+# :1086 caller invokes this UNGUARDED inside a `$(… 2>/dev/null || true)`, so when
+# the enabled provider omits the leaf the shim emits a WARN and returns 1 (a clean
+# non-zero the `|| true` site degrades to an empty PR_REVIEW_COMMENTS on) rather
+# than dispatching to an undefined leaf and aborting under `set -e`. The bare
+# `${CODE_HOST}` expansion is IDENTICAL to the leaf dispatch (safe under `set -u` —
+# CODE_HOST is defaulted at source time); a `:-github` guard would diverge from the
+# bare shim when CODE_HOST is empty (the #323/#324 bare-guard lesson).
+chp_list_inline_comments() {
+  if ! declare -F "chp_${CODE_HOST}_list_inline_comments" >/dev/null 2>&1; then
+    echo "WARN: [INV-95] CODE_HOST='${CODE_HOST}' provider defines no chp_${CODE_HOST}_list_inline_comments leaf — PR inline-comment read unavailable." >&2
+    return 1
+  fi
+  chp_${CODE_HOST}_list_inline_comments "$@"
+}
+
 # chp_has_leaf <verb> — returns 0 iff the ENABLED provider actually defines the
 # leaf `chp_${CODE_HOST}_<verb>` (e.g. `chp_has_leaf close_keyword`).
 #

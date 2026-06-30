@@ -307,3 +307,22 @@ chp_github_pr_view() {
 chp_github_pr_list() {
   gh pr list --repo "$REPO" "$@"
 }
+
+# chp_github_list_inline_comments PR [extra gh args…] — PR inline (file-anchored)
+# review-comment read leaf (#296 second-tier, #328). Mirrors chp_github_pr_view.
+#
+# Spec §3.2 [INV-95]: the flat REST `pulls/N/comments` inline-comment read the
+# dev-resume prompt builder uses (autonomous-dev.sh's PR_REVIEW_COMMENTS — the
+# comments the dev agent is told to address + reply-to + resolve). DISTINCT shape
+# from chp_review_threads (GraphQL thread tree), chp_pr_view (no pulls/N/comments
+# sub-resource), and itp_list_comments (issue-level normalized): the inline
+# `.path`/`.line`/`.original_line` fields are CHP-owned and NEVER folded into the
+# ITP issue-comment shape (§3.2). The caller supplies its own `--jq` formatter via
+# "$@" (the `- **path:line** — body` prompt rendering stays caller-side, #281
+# jq-stays-caller); the leaf forwards it byte-identically and does no formatting
+# (focused-raw). No `--paginate` today (kept byte-identical; a page-walk is a
+# separate change). $REPO is from the caller env.
+chp_github_list_inline_comments() {
+  local pr="$1"; shift
+  gh api "repos/${REPO}/pulls/${pr}/comments" "$@"
+}
