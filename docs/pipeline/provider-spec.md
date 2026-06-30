@@ -254,13 +254,15 @@ The *callers* keep their logic; only the leaf `gh` call moves behind a verb.
 > This applies to the optional/fallback-bearing verbs the GitHub callers guard
 > (`chp_close_keyword`, `chp_create_pr`, `chp_trigger_bot`); core verbs invoked in
 > an `if`-condition / `$(… || …)` context are abort-safe without the guard. `chp_caps`
-> is exempt — it has a real reader body, not a leaf-dispatching shim. The
-> general read primitives `chp_pr_view` / `chp_pr_list` (and the inline-comment
-> read `chp_list_inline_comments`, #328) are invoked unguarded by the
-> incidental-read sites, so the SHIMS themselves are **self-guarding**
+> is exempt — it has a real reader body, not a leaf-dispatching shim. The four
+> general read+write primitives `chp_pr_view` / `chp_pr_list` (#282), the
+> inline-comment read `chp_list_inline_comments` (#328), and `chp_pr_comment`
+> (#329, the PR-comment WRITE primitive) are invoked unguarded by the
+> incidental read/write sites, so the SHIMS themselves are **self-guarding**
 > (#282 review round 9): when the enabled provider omits the leaf they emit a WARN
-> and `return 1` (a clean non-zero the read call sites' `|| echo/true/return`
-> already degrade on) rather than dispatching to an undefined leaf and aborting.
+> and `return 1` (a clean non-zero the call sites' `|| echo/true/return` reads and
+> `… 2>/dev/null || true` comment-writes already degrade on) rather than
+> dispatching to an undefined leaf and aborting.
 >
 > The leaf-absent **fallback must still honor the capability contract**, not just
 > avoid the abort: `chp_close_keyword`'s caller (`_render_close_keyword`) renders,
@@ -865,6 +867,7 @@ becomes a verb, the surrounding INV-coupled logic stays caller-side.
 | bot-trigger post (the broker `drain_agent_bot_triggers`, `lib-auth.sh`; `gh-as-user.sh pr comment`) | `chp_trigger_bot` | (a) separable-leaf | the real-user trigger post, gated by `review_bots` (§4.2); `parse_review_bots`/login mapping + allow-list stay caller-side; the broker routes through the verb. **MIGRATED #282.** **Leaf-absent disposition #346:** the retained raw `gh-as-user.sh pr comment` fallback is github-gated (`${CODE_HOST:-github} == "github"`, checked once before the posting loop) — a non-GitHub backend without the leaf fails LOUD (no triggers posted), never a silent GitHub-user comment. The `gh-as-user.sh` transport wrapper is allowlisted so this residue carries no cutover-baseline entry ([INV-91]). |
 | incidental `gh pr view $PR --json …` reads + body-mention `gh pr list … select(.body\|test("#N"))` lookups (`autonomous-dev.sh` / `autonomous-review.sh`) | `chp_pr_view` / `chp_pr_list` (general read primitives) | (a) separable-leaf | the PR-number-keyed `gh pr view` + loose body-mention `gh pr list` leaves; caller keeps its `--json`/`-q`. NOT named §3.2 lifecycle verbs — added so the caller layer carries zero executable raw `gh pr`. **MIGRATED #282 (review r8).** |
 | dev-resume `PR_REVIEW_COMMENTS` inline-comment read (`autonomous-dev.sh`, the flat REST `gh api repos/$REPO/pulls/$PR/comments --jq <fmt>`) | `chp_list_inline_comments` | (a) separable-leaf | the PR-number-keyed `gh api …/pulls/N/comments` leaf; caller keeps its `--jq` `- **path:line** — body` formatter ([#281] jq-stays-caller). Self-guarding shim ([#282] convention). **MIGRATED #296 second-tier (#328), [INV-95].** The distinct `:1093` `issues/N/comments` AUTO_MERGE-marker read this issue had scoped OUT was migrated independently behind `itp_list_comments` by #334. |
+| the 7 PR-comment writes (`gh pr comment $PR` — auto-merge markers `autonomous-review.sh`, E2E-failure reports + the [INV-79] brokered E2E report `lib-review-e2e.sh`) | `chp_pr_comment` (general write primitive) | (a) separable-leaf | the PR-number-keyed `gh pr comment` write leaf; the caller keeps its own redirect/capture/gating framing (4 forms: `… 2>/dev/null \|\| true`, `if ! _err=$(… 2>&1 >/dev/null)`, `… 2>/dev/null \|\| rc=$?`, broker `… >/dev/null 2>&1`) — the leaf adds NONE. The PR-comment sibling of `chp_pr_view`/`chp_pr_list`; DISTINCT from `itp_post_comment` (the ISSUE-level marker choke-point), different seam owner for a split-backend topology. **MIGRATED #329 (#296 second-tier), [INV-102] (renumbered from INV-95, then INV-101, on successive rebases — see the note under the INV-102 heading).** |
 | `setup-labels.sh:47` `gh label create` | `itp_provision_states` | (a) separable-leaf | the state-primitive provisioning leaf; hex color gated by `label_colors` — **migrated #283** (the 9-label table stays caller-side) |
 | `reply-to-comments.sh:41` | `chp_reply_review_comment` (returning `id`/`url`) | (a) separable-leaf | the reply-comment POST leaf returning `{id, url}` — a CHP review-thread reply (`pulls/.../comments`), owned by chp-pr-lifecycle. **MIGRATED #327** ([INV-96]): the `gh api …/comments -X POST -f body=… -F in_reply_to=… --jq '{id,url}'` leaf moves to `chp_github_reply_review_comment` byte-identically; the standalone util self-sources the CHP seam via `readlink -f` (the #315 `mark-issue-checkbox.sh` precedent), composes `REPO="$OWNER/$REPO"` for the leaf scope, and fails LOUD (no raw-`gh` fallback) if the leaf is absent. Closes `reply-to-comments.sh` as a raw-`gh` caller (cutover baseline 66 → 65). NOT capability-gated; no `@json` pre-encode (REST `-f`/`-F` fields, fixed `--jq` literal). |
 | `lib-review-e2e.sh` PATCH ([INV-46]) | `itp_edit_comment` | (a) separable-leaf | the edit-in-place PATCH leaf; gated by `edit_comment` — **migrated #283** (GET-comment-id / GET-body reads stay caller-side; `edit_comment=0` → `itp_post_comment` re-posts the full report body + marker, never marker-only) |

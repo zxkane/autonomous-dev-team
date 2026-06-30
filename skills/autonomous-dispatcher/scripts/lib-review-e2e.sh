@@ -347,7 +347,7 @@ _run_command_e2e_lane() {
     bash -c "${E2E_COMMAND_PRE_HOOKS_RENDERED}" >>"$log" 2>&1 || rc=$?
     if [[ "$rc" -ne 0 ]]; then
       log "INV-46: E2E pre-hooks FAILED (rc=${rc}) — skipping verify + parser."
-      gh pr comment "$PR_NUMBER" --repo "$REPO" \
+      chp_pr_comment "$PR_NUMBER" \
         --body "## E2E Failure (pre-hooks exited ${rc})
 
 Pre-hook command: \`${E2E_COMMAND_PRE_HOOKS_RENDERED}\`
@@ -383,14 +383,14 @@ $(tail -50 "$log" 2>/dev/null)
       # branch, so a verify_rc=124 with a recovered, SHA-marked artifact passes
       # (the artifact-recovery exception) and verify_rc=0 passes. Only a failed
       # comment-post (the `|| rc=$?` below) can make this branch non-zero.
-      gh pr comment "$PR_NUMBER" --repo "$REPO" --body "$evidence" 2>/dev/null || rc=$?
+      chp_pr_comment "$PR_NUMBER" --body "$evidence" 2>/dev/null || rc=$?
     else
       # Parser produced no SHA-marked block (malformed log, or timeout with no
       # recoverable artifact) → fail.
       log "INV-46: evidence parser produced no SHA-marked block (verify_rc=${verify_rc}) — E2E FAIL."
       rc="${verify_rc:-1}"
       [[ "$rc" -eq 0 ]] && rc=1
-      gh pr comment "$PR_NUMBER" --repo "$REPO" \
+      chp_pr_comment "$PR_NUMBER" \
         --body "## E2E Failure (evidence block missing/malformed, verify exit ${verify_rc})
 
 Command: \`${E2E_COMMAND_RENDERED}\`
@@ -405,7 +405,7 @@ $(tail -50 "$log" 2>/dev/null)
     # log-tail comment instead.
     log "INV-46: E2E verify hard-failed (rc=${verify_rc}) — skipping parser, posting log tail."
     rc="$verify_rc"
-    gh pr comment "$PR_NUMBER" --repo "$REPO" \
+    chp_pr_comment "$PR_NUMBER" \
       --body "## E2E Failure (verify command exit code: ${verify_rc})
 
 Command: \`${E2E_COMMAND_RENDERED}\`
@@ -593,7 +593,7 @@ _post_brokered_e2e_report() {
     fi
   fi
 
-  if gh pr comment "$PR_NUMBER" --repo "$REPO" --body "$body" >/dev/null 2>&1; then
+  if chp_pr_comment "$PR_NUMBER" --body "$body" >/dev/null 2>&1; then
     log "INV-79: wrapper brokered the browser E2E report comment onto PR #${PR_NUMBER} (agent wrote ${E2E_REPORT_FILE})."
   else
     log "INV-79: brokered E2E report post failed (non-fatal) — the agent's direct issues:write fallback may already have posted; the SHA-marker stamp + gate remain authoritative."

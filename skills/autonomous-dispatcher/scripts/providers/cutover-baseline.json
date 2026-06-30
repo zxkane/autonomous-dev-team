@@ -117,19 +117,9 @@
       "content": "gh pr checks ${PR_NUMBER} --watch --interval 30"
     },
     {
-      "count": 1,
-      "file": "autonomous-review.sh",
-      "content": "gh pr comment \"$PR_NUMBER\" --repo \"$REPO\" \\"
-    },
-    {
       "count": 2,
       "file": "autonomous-review.sh",
       "content": "gh pr view ${PR_NUMBER} --repo ${REPO} --json comments \\\\"
-    },
-    {
-      "count": 1,
-      "file": "autonomous-review.sh",
-      "content": "if ! _comment_err=$(gh pr comment \"$PR_NUMBER\" --repo \"$REPO\" \\"
     },
     {
       "count": 1,
@@ -200,21 +190,6 @@
       "count": 1,
       "file": "lib-review-e2e.sh",
       "content": "_comment_id=$(gh api \"repos/${REPO_OWNER}/${REPO_NAME}/issues/${PR_NUMBER}/comments\" --paginate \\"
-    },
-    {
-      "count": 1,
-      "file": "lib-review-e2e.sh",
-      "content": "gh pr comment \"$PR_NUMBER\" --repo \"$REPO\" --body \"$evidence\" 2>/dev/null || rc=$?"
-    },
-    {
-      "count": 3,
-      "file": "lib-review-e2e.sh",
-      "content": "gh pr comment \"$PR_NUMBER\" --repo \"$REPO\" \\"
-    },
-    {
-      "count": 1,
-      "file": "lib-review-e2e.sh",
-      "content": "if gh pr comment \"$PR_NUMBER\" --repo \"$REPO\" --body \"$body\" >/dev/null 2>&1; then"
     },
     {
       "count": 1,

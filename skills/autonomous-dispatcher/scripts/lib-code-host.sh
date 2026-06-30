@@ -108,29 +108,38 @@ chp_close_keyword()     { chp_${CODE_HOST}_close_keyword "$@"; }
 # comments has a reply endpoint), so it carries no `.caps` key.
 chp_reply_review_comment() { chp_${CODE_HOST}_reply_review_comment "$@"; }
 
-# General read primitives (#282 review round 8). These are NOT among the 11 named
-# PR-lifecycle verbs above — they are the provider-neutral `gh pr view` / `gh pr
-# list` read leaves that the caller layer's INCIDENTAL reads route through so the
-# caller layer carries ZERO raw `gh pr` (the [INV-87] final-AC grep). The caller
-# keeps its own `--json`/`-q` projection (forwarded via "$@", byte-identical), as
-# with every other CHP verb; only the innermost primitive moves behind the seam.
+# General read+write primitives (`chp_pr_view`/`chp_pr_list` #282 review round 8;
+# `chp_pr_comment` #329, [INV-101]). These are NOT among the 11 named PR-lifecycle verbs above
+# — they are the provider-neutral `gh pr view` / `gh pr list` read leaves AND the
+# `gh pr comment` write leaf that the caller layer's INCIDENTAL PR reads/writes
+# route through so the caller layer carries ZERO raw `gh pr` (the [INV-87] final-AC
+# grep). The caller keeps its own `--json`/`-q` projection (reads) or `--body` tail
+# + redirect/capture framing (the comment write) — forwarded via "$@",
+# byte-identical — as with every other CHP verb; only the innermost primitive moves
+# behind the seam.
 #   chp_pr_view PR  [--json … -q …]     → gh pr view PR  --repo $REPO …
 #   chp_pr_list     [--state … --json … -q …] → gh pr list --repo $REPO …
+#   chp_pr_comment PR [--body … | extra args] → gh pr comment PR --repo $REPO …
 # (chp_pr_list is the generalized issue-keyed/body-mention list the dispatcher's
 # pre-#277 existence lookups use — distinct from chp_find_pr_for_issue, which is
-# the [INV-86] close-linkage resolver.)
+# the [INV-86] close-linkage resolver. chp_pr_comment is the PR-comment write the
+# two HOT review files use for auto-merge markers / E2E reports / the [INV-79]
+# brokered report — distinct from itp_post_comment, the ISSUE-level marker
+# choke-point: same GitHub endpoint, different seam owner for a split-backend
+# topology.)
 #
 # Self-guarding dispatch (#282 review round 9 [P1]): unlike the 11 lifecycle
 # verbs (which callers guard via `chp_has_leaf` + a meaningful fallback), the
-# incidental-read callers dispatch these UNGUARDED. So if the enabled provider
-# omits the leaf (the all-empty degraded fixture; any future non-GitHub provider
-# that hasn't yet implemented its read leaf), a blind `chp_${CODE_HOST}_pr_view`
-# would `command not found` → abort the wrapper at its FIRST PR read. Instead the
-# shim checks the leaf and, when absent, emits a WARN and returns 1 — a clean
-# non-zero that every incidental-read call site already degrades on (each is a
-# `$(… 2>/dev/null || echo/true)`, `if ! …`, or `… || return 1`), so the wrapper
-# fails-soft (empty read) instead of aborting, and the misconfiguration is loud.
-# A real backend MUST implement these (they are core, non-capability-gated reads).
+# incidental read/write callers dispatch these UNGUARDED. So if the enabled
+# provider omits the leaf (the all-empty degraded fixture; any future non-GitHub
+# provider that hasn't yet implemented its leaf), a blind `chp_${CODE_HOST}_pr_view`
+# would `command not found` → abort the wrapper at its FIRST PR read/write. Instead
+# the shim checks the leaf and, when absent, emits a WARN and returns 1 — a clean
+# non-zero that every incidental call site already degrades on (each is a
+# `$(… 2>/dev/null || echo/true)`, `if ! …`, `… || return 1`, or a comment-write
+# `… 2>/dev/null || true`), so the wrapper fails-soft (empty read / unposted
+# comment) instead of aborting, and the misconfiguration is loud. A real backend
+# MUST implement these (they are core, non-capability-gated PR I/O).
 chp_pr_view() {
   if ! declare -F "chp_${CODE_HOST}_pr_view" >/dev/null 2>&1; then
     echo "WARN: [INV-87] CODE_HOST='${CODE_HOST}' provider defines no chp_${CODE_HOST}_pr_view leaf — PR read unavailable (a non-GitHub CHP provider MUST implement it)." >&2
@@ -144,6 +153,13 @@ chp_pr_list() {
     return 1
   fi
   chp_${CODE_HOST}_pr_list "$@"
+}
+chp_pr_comment() {
+  if ! declare -F "chp_${CODE_HOST}_pr_comment" >/dev/null 2>&1; then
+    echo "WARN: [INV-87] CODE_HOST='${CODE_HOST}' provider defines no chp_${CODE_HOST}_pr_comment leaf — PR comment unavailable (a non-GitHub CHP provider MUST implement it)." >&2
+    return 1
+  fi
+  chp_${CODE_HOST}_pr_comment "$@"
 }
 
 # chp_list_inline_comments PR [extra gh args…] — PR inline (file-anchored)
