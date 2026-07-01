@@ -1056,6 +1056,18 @@ build_review_prompt() {
   local _agent_model
   _agent_model=$(_resolve_review_agent_model_label "${_agent_name}")
   _agent_model="${_agent_model:-sonnet}"
+  # (#353): the comment-fallback verdict BODY scratch file, namespaced by
+  # issue number + this agent's OWN session id (not just the agent name) — the
+  # bare `/tmp/verdict-<agent>.md` form is GLOBAL across every concurrent
+  # review on the host (all projects, all issues), so two overlapping codex
+  # reviews in different projects raced on the same path: the later writer's
+  # findings got posted under the earlier issue's session trailer (passing
+  # every INV-20/INV-40 attribution check — see #342's two poisoned verdicts).
+  # Mirrors the INV-78 typed-artifact path's per-run uniqueness, which never
+  # had this race. Two agents in the SAME fan-out already get distinct session
+  # ids (INV-20), so this also keeps working within one review's multi-agent
+  # fan-out — its original collision-avoidance purpose.
+  local _verdict_body_path="/tmp/verdict-${_agent_name}-${ISSUE_NUMBER}-${_agent_session_id}.md"
   cat <<EOF
 You are reviewing PR #${PR_NUMBER} for issue #${ISSUE_NUMBER} in the ${REPO} project.
 PR branch: ${PR_BRANCH:-UNKNOWN}
@@ -1350,11 +1362,11 @@ Helper usage (verdict comment ONLY — keep using bare \`gh\` for reads like
 \`gh pr view\` / \`gh pr checks\`):
 \`\`\`bash
 # Write your verdict body to a file (a FILE avoids shell-quoting mangling):
-cat > /tmp/verdict-${_agent_name}.md <<'VERDICT'
+cat > ${_verdict_body_path} <<'VERDICT'
 <your one-line PASS summary, or the numbered findings list>
 VERDICT
 # Then post it (the helper prepends the canonical first line + appends the trailer):
-bash scripts/post-verdict.sh ${ISSUE_NUMBER} <pass|fail> /tmp/verdict-${_agent_name}.md ${_agent_name} ${_agent_session_id} '${_agent_model}'
+bash scripts/post-verdict.sh ${ISSUE_NUMBER} <pass|fail> ${_verdict_body_path} ${_agent_name} ${_agent_session_id} '${_agent_model}'
 \`\`\`
 
 - If ALL checklist items pass AND code quality is good$(if [[ "${E2E_ACTIVE:-false}" == "true" ]]; then echo " AND the wrapper-posted E2E evidence covers the acceptance criteria"; fi) AND no requirement drift detected:
@@ -1364,8 +1376,8 @@ bash scripts/post-verdict.sh ${ISSUE_NUMBER} <pass|fail> /tmp/verdict-${_agent_n
   (a body that doesn't already start with \`Review PASSED\` gets that exact
   prefix prepended by the helper). Concretely:
   \`\`\`bash
-  printf '%s' "All checklist items verified, code quality good. No requirement drift." > /tmp/verdict-${_agent_name}.md
-  bash scripts/post-verdict.sh ${ISSUE_NUMBER} pass /tmp/verdict-${_agent_name}.md ${_agent_name} ${_agent_session_id} '${_agent_model}'
+  printf '%s' "All checklist items verified, code quality good. No requirement drift." > ${_verdict_body_path}
+  bash scripts/post-verdict.sh ${ISSUE_NUMBER} pass ${_verdict_body_path} ${_agent_name} ${_agent_session_id} '${_agent_model}'
   \`\`\`
   Then exit.
 
@@ -1376,11 +1388,11 @@ bash scripts/post-verdict.sh ${ISSUE_NUMBER} <pass|fail> /tmp/verdict-${_agent_n
   gets that exact prefix prepended by the helper).$(if [[ "${E2E_ACTIVE:-false}" == "true" ]]; then echo "
   For any E2E gap, quote the relevant row of the posted evidence comment (the wrapper ran E2E once — do NOT re-run it)."; fi) Concretely:
   \`\`\`bash
-  cat > /tmp/verdict-${_agent_name}.md <<'VERDICT'
+  cat > ${_verdict_body_path} <<'VERDICT'
   1. <first finding + remediation>
   2. <second finding + remediation>
   VERDICT
-  bash scripts/post-verdict.sh ${ISSUE_NUMBER} fail /tmp/verdict-${_agent_name}.md ${_agent_name} ${_agent_session_id} '${_agent_model}'
+  bash scripts/post-verdict.sh ${ISSUE_NUMBER} fail ${_verdict_body_path} ${_agent_name} ${_agent_session_id} '${_agent_model}'
   \`\`\`
   Then exit.
 

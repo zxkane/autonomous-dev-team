@@ -1,0 +1,201 @@
+#!/bin/bash
+# test-issue-353-verdict-body-namespace.sh — issue #353.
+#
+# Background. The review-agent prompt template (`build_review_prompt` in
+# autonomous-review.sh) told every review agent to write its comment-fallback
+# verdict BODY to `/tmp/verdict-<agent-name>.md` — a path keyed ONLY on the
+# agent name. That path is GLOBAL across every concurrent review on the host
+# (every project, every issue, every session). Two overlapping reviews in
+# different projects (or even the same project, different issues) race on the
+# same file: the later writer's findings land in the earlier issue's verdict
+# comment, under the earlier issue's session trailer — passing every
+# INV-20/INV-40 attribution check (observed twice against #342 on 2026-07-01).
+#
+# Fix: the body-scratch path is now namespaced by agent name + issue number +
+# the agent's OWN session id — `/tmp/verdict-<agent>-<issue>-<session>.md` —
+# so two concurrent reviews (different issues, hence different session ids)
+# can never collide on the same file. Mirrors the INV-78 typed-artifact path's
+# per-run uniqueness, which never had this race.
+#
+# This test:
+#   1. Source-of-truth greps: the bare `/tmp/verdict-<agent>.md` form (no issue
+#      number, no session id token) is ABSENT from autonomous-review.sh; the
+#      namespaced form (both ${ISSUE_NUMBER} and ${_agent_session_id} present
+#      in the same literal path expression) is present.
+#   2. Behavioral two-writer simulation: render the prompt for two DISTINCT
+#      (issue, session) pairs, resolve each to its OWN body path, write a
+#      DIFFERENT body to each path (simulating two concurrent agents), then
+#      invoke the real post-verdict.sh for issue 1 and assert the posted body
+#      is body A verbatim — never body B.
+#
+# Run: bash tests/unit/test-issue-353-verdict-body-namespace.sh
+
+set -uo pipefail
+
+PASS=0
+FAIL=0
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+WRAPPER="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/autonomous-review.sh"
+HELPER_SRC="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/post-verdict.sh"
+LIBCONFIG_SRC="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-config.sh"
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+NC='\033[0m'
+
+assert_true() {
+  local desc="$1" cond="$2"
+  if [[ "$cond" == "true" ]]; then
+    echo -e "  ${GREEN}PASS${NC}: $desc"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${NC}: $desc"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
+PROMPT_FN=$(awk '/^build_review_prompt\(\) \{/,/^\}/' "$WRAPPER")
+
+# ---------------------------------------------------------------------------
+echo "=== TC-VBN-SRC: the bare global verdict-body path is gone; namespaced form present ==="
+# ---------------------------------------------------------------------------
+
+# AC1: the bare `/tmp/verdict-${_agent_name}.md` form (agent name only, no
+# issue number, no session id) must be ABSENT from the prompt function.
+if grep -qE '/tmp/verdict-\$\{_agent_name\}\.md' <<<"$PROMPT_FN"; then
+  echo -e "  ${RED}FAIL${NC}: TC-VBN-01 bare /tmp/verdict-\${_agent_name}.md form still present"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${NC}: TC-VBN-01 bare /tmp/verdict-\${_agent_name}.md form is absent"
+  PASS=$((PASS + 1))
+fi
+
+# AC1: a namespaced body-path variable is declared and carries BOTH the issue
+# number and the agent's session id tokens in one literal path expression.
+if grep -qE '_verdict_body_path=.*/tmp/verdict-.*\$\{_agent_name\}.*\$\{ISSUE_NUMBER\}.*\$\{_agent_session_id\}' <<<"$PROMPT_FN"; then
+  echo -e "  ${GREEN}PASS${NC}: TC-VBN-02 namespaced body path declares agent+issue+session tokens"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-VBN-02 no namespaced body-path declaration found (agent+issue+session)"
+  FAIL=$((FAIL + 1))
+fi
+
+# The namespaced variable must actually be USED at every verdict-post site
+# (not just declared and ignored) — at least 3 uses (the generic example +
+# the PASS branch + the FAIL branch), consistent with post-verdict.sh being
+# referenced 5x (3 concrete invocations + 2 prose mentions).
+_n_body_path_uses=$(grep -coE '\$\{_verdict_body_path\}' <<<"$PROMPT_FN")
+if [[ "$_n_body_path_uses" -ge 3 ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-VBN-03 namespaced body path used at >=3 sites (found $_n_body_path_uses)"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-VBN-03 namespaced body path used at only $_n_body_path_uses site(s), expected >=3"
+  FAIL=$((FAIL + 1))
+fi
+
+# post-verdict.sh's own usage-example doc string must no longer show the bare
+# `/tmp/verdict.md` global-scratch form.
+if grep -qF '/tmp/verdict.md' "$HELPER_SRC"; then
+  echo -e "  ${RED}FAIL${NC}: TC-VBN-04 post-verdict.sh usage example still shows the bare /tmp/verdict.md form"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${NC}: TC-VBN-04 post-verdict.sh usage example no longer shows the bare /tmp/verdict.md form"
+  PASS=$((PASS + 1))
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-VBN-BEHAVE: rendered prompt resolves to a DISTINCT path per (issue, session) ==="
+# ---------------------------------------------------------------------------
+_FN_SLICE=$(mktemp)
+awk '/^build_review_prompt\(\) \{/,/^}$/' "$WRAPPER" > "$_FN_SLICE"
+_RESOLVE_LIB="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-review-resolve.sh"
+
+render_for_issue() {
+  local issue="$1" sid="$2"
+  (
+    set +e
+    render_bot_review_section() { :; }
+    _revalidate_ac_coverage_file() { printf ''; }
+    gh() { return 0; }
+    PR_NUMBER=210; ISSUE_NUMBER="$issue"; REPO="owner/repo"; REPO_OWNER="owner"
+    REPO_NAME="repo"; PR_BRANCH="feat/x"; REVIEW_BOTS_VALIDATED=""; E2E_ACTIVE="false"
+    unset AGENT_REVIEW_MODEL AGENT_REVIEW_MODEL_CLAUDE AGENT_REVIEW_MODEL_CODEX
+    source "$_RESOLVE_LIB"
+    source "$_FN_SLICE"
+    build_review_prompt "codex" "$sid"
+  )
+}
+
+# Two DIFFERENT (issue, session) pairs — simulating two concurrent codex
+# reviews on the host, in different projects/issues (#342's actual scenario).
+PROMPT_ISSUE_1=$(render_for_issue 342 "174a3d5b-b345-4f91-9d46-17ab86ee6d09")
+PROMPT_ISSUE_2=$(render_for_issue 999 "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+rm -f "$_FN_SLICE"
+
+PATH_1=$(grep -oE '/tmp/verdict-codex-342-174a3d5b-b345-4f91-9d46-17ab86ee6d09\.md' <<<"$PROMPT_ISSUE_1" | head -1)
+PATH_2=$(grep -oE '/tmp/verdict-codex-999-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\.md' <<<"$PROMPT_ISSUE_2" | head -1)
+
+assert_true "TC-VBN-05 issue #342/session 174a3d5b resolves its own namespaced path" \
+  "$([[ -n "$PATH_1" ]] && echo true || echo false)"
+assert_true "TC-VBN-06 issue #999/session aaaaaaaa resolves its own namespaced path" \
+  "$([[ -n "$PATH_2" ]] && echo true || echo false)"
+assert_true "TC-VBN-07 the two resolved paths are DISTINCT (no collision)" \
+  "$([[ "$PATH_1" != "$PATH_2" ]] && echo true || echo false)"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-VBN-SIM: two-writer race simulation — post-verdict.sh for issue 1 posts body A, never body B ==="
+# ---------------------------------------------------------------------------
+# Reproduces the #342 race directly: write body A to issue 1's resolved path
+# and body B to issue 2's resolved path (any interleaving — order does not
+# matter since the paths no longer collide), then invoke the REAL
+# post-verdict.sh for issue 1 against a stub gh and assert the captured body
+# is body A verbatim.
+
+SIM_SB="$(mktemp -d)"
+cat > "$SIM_SB/autonomous.conf" <<'CONF'
+REPO="owner/repo"
+REPO_OWNER="owner"
+REPO_NAME="repo"
+CONF
+cat > "$SIM_SB/gh" <<STUB
+#!/bin/bash
+prev=""
+for a in "\$@"; do
+  if [[ "\$prev" == "--body" ]]; then printf '%s' "\$a" > "$SIM_SB/gh-body.txt"; fi
+  prev="\$a"
+done
+echo "https://github.com/owner/repo/issues/342#issuecomment-1"
+exit 0
+STUB
+chmod +x "$SIM_SB/gh"
+cp "$HELPER_SRC" "$SIM_SB/post-verdict.sh"
+chmod +x "$SIM_SB/post-verdict.sh"
+[[ -f "$LIBCONFIG_SRC" ]] && cp "$LIBCONFIG_SRC" "$SIM_SB/lib-config.sh"
+
+BODY_A_PATH="/tmp/verdict-codex-342-174a3d5b-b345-4f91-9d46-17ab86ee6d09-$$.md"
+BODY_B_PATH="/tmp/verdict-codex-999-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee-$$.md"
+printf 'Review findings:\n1. GENUINE finding for issue 342 (ours).' > "$BODY_A_PATH"
+printf 'Review findings:\n1. FOREIGN finding for issue 999 (sibling project — must NEVER appear on 342).' > "$BODY_B_PATH"
+
+( cd "$SIM_SB" && ./post-verdict.sh 342 fail "$BODY_A_PATH" codex "174a3d5b-b345-4f91-9d46-17ab86ee6d09" sonnet >/dev/null 2>&1 )
+SIM_RC=$?
+POSTED_BODY=$(cat "$SIM_SB/gh-body.txt" 2>/dev/null || echo "")
+rm -f "$BODY_A_PATH" "$BODY_B_PATH"
+rm -rf "$SIM_SB"
+
+assert_true "TC-VBN-08 post-verdict.sh for issue 342 exited 0" \
+  "$([[ "$SIM_RC" -eq 0 ]] && echo true || echo false)"
+assert_true "TC-VBN-09 posted body contains issue 342's GENUINE finding" \
+  "$([[ "$POSTED_BODY" == *"GENUINE finding for issue 342"* ]] && echo true || echo false)"
+assert_true "TC-VBN-10 posted body does NOT contain issue 999's FOREIGN finding" \
+  "$([[ "$POSTED_BODY" != *"FOREIGN finding for issue 999"* ]] && echo true || echo false)"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Summary ==="
+echo "  PASS: $PASS"
+echo "  FAIL: $FAIL"
+[[ $FAIL -eq 0 ]] || exit 1

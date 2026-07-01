@@ -200,10 +200,10 @@ echo "=== TC-PVP-MODEL: INV-60 — verdict-post examples carry the per-agent mod
 # Extract those invocation lines per block and assert the 6th arg is present and
 # equals the agent's resolved model.
 #
-# The invocation lines look like:
-#   bash scripts/post-verdict.sh 202 <pass|fail> /tmp/verdict-claude.md claude sid-claude sonnet
-#   bash scripts/post-verdict.sh 202 pass /tmp/verdict-claude.md claude sid-claude sonnet
-#   bash scripts/post-verdict.sh 202 fail /tmp/verdict-claude.md claude sid-claude sonnet
+# The invocation lines look like (#353: body-file namespaced by issue + session id):
+#   bash scripts/post-verdict.sh 202 <pass|fail> /tmp/verdict-claude-202-sid-claude.md claude sid-claude sonnet
+#   bash scripts/post-verdict.sh 202 pass /tmp/verdict-claude-202-sid-claude.md claude sid-claude sonnet
+#   bash scripts/post-verdict.sh 202 fail /tmp/verdict-claude-202-sid-claude.md claude sid-claude sonnet
 # We grep the invocation lines and check the trailing token after the session id.
 
 # expected resolved model per rendered agent (mirrors _resolve_review_agent_model
@@ -271,9 +271,10 @@ fi
 # ends with `'Gemini 3.5 Flash (High)'` (the quoted whole id) after agy's sid.
 # Count only the concrete INVOCATION lines (those that write a body file), not
 # the INV-56 prose mention of `bash scripts/post-verdict.sh` with no positional
-# args — match on the `/tmp/verdict-agy.md` body-file token that only an actual
+# args — match on the `/tmp/verdict-agy-202-sid-agy.md` body-file token (#353:
+# namespaced by issue + session id, not just agent name) that only an actual
 # invocation carries.
-_n_agy_inv=$(grep -E 'post-verdict\.sh' <<<"$agy_block" | grep -cF '/tmp/verdict-agy.md')
+_n_agy_inv=$(grep -E 'post-verdict\.sh' <<<"$agy_block" | grep -cF '/tmp/verdict-agy-202-sid-agy.md')
 _n_agy_quoted=$(grep -cF "agy sid-agy 'Gemini 3.5 Flash (High)'" <<<"$agy_block")
 if [[ "$_n_agy_inv" -ge 1 && "$_n_agy_quoted" -eq "$_n_agy_inv" ]]; then
   echo -e "  ${GREEN}PASS${NC}: TC-PVP-12 all $_n_agy_inv agy invocation(s) single-quote the multi-word model as one token"

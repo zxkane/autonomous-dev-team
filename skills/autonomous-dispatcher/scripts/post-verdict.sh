@@ -33,6 +33,15 @@
 #                read the body from stdin. A FILE (not an argv string) is used
 #                so a multi-line body with backticks/quotes/$() can't be mangled
 #                by the agent's shell quoting (the suspected agy failure mode).
+#                CALLER must namespace this path by issue number + the agent's
+#                OWN session id (e.g. `/tmp/verdict-<agent>-<issue>-<session>.md`),
+#                NOT the bare `/tmp/verdict-<agent>.md` — that form is GLOBAL
+#                across every concurrent review on the host (all projects, all
+#                issues) and two overlapping reviews race on it: the later
+#                writer's findings get posted under the earlier issue's session
+#                trailer, passing every [INV-20]/[INV-40] attribution check
+#                (#353). This helper does not itself read the path twice, so it
+#                cannot detect the race — the fix is the caller-side namespacing.
 #
 #   <model>      OPTIONAL 6th arg ([INV-60], issue #208): the per-agent RESOLVED
 #                review model the wrapper launched this agent with. When present
@@ -60,8 +69,8 @@
 #       model containing a control character (newline/CR) or over the length cap).
 #
 # Example:
-#   printf '%s' "$findings" > /tmp/verdict.md
-#   bash scripts/post-verdict.sh 202 fail /tmp/verdict.md codex "$SESSION_ID" sonnet
+#   printf '%s' "$findings" > /tmp/verdict-codex-202-${SESSION_ID}.md
+#   bash scripts/post-verdict.sh 202 fail /tmp/verdict-codex-202-${SESSION_ID}.md codex "$SESSION_ID" sonnet
 
 set -euo pipefail
 
