@@ -518,6 +518,196 @@ else
 fi
 
 # ===========================================================================
+# #286-amendment (#343) — the guard stops self-detecting its own ALLOWLISTED_FILES
+# array + primary matcher + _comment template lines, so an allowlist disposition no
+# longer self-trips Check 4 monotonicity. TC-CUTAMEND-NNN.
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+echo "=== TC-CUTAMEND-001: --generate-baseline emits NO checker ALLOWLISTED_FILES=( signature (R1) ==="
+# ---------------------------------------------------------------------------
+gen_amend="$WORK/gen-amend.json"
+bash "$CHECK" --generate-baseline > "$gen_amend" 2>/dev/null
+n_arr="$(jq '[.surviving_sites[] | select(.file=="check-provider-cutover.sh") | select(.content | startswith("ALLOWLISTED_FILES=("))] | length' "$gen_amend" 2>/dev/null)"
+if [[ "$n_arr" == "0" ]]; then
+  ok "generated baseline has ZERO check-provider-cutover.sh 'ALLOWLISTED_FILES=(' survivor (array line structurally exempt, R1)"
+else
+  bad "generated baseline still carries $n_arr checker 'ALLOWLISTED_FILES=(' signature(s) — array line not exempted (R1)"
+fi
+
+# ---------------------------------------------------------------------------
+echo "=== TC-CUTAMEND-002: --generate-baseline emits NO checker primary-matcher signature (R1) ==="
+# ---------------------------------------------------------------------------
+# The matcher line is the sole `grep -aE '(^|[^…])gh ' …` line in the checker.
+n_match="$(jq -r '[.surviving_sites[] | select(.file=="check-provider-cutover.sh") | .content] | map(select(startswith("grep -aE"))) | length' "$gen_amend" 2>/dev/null)"
+if [[ "$n_match" == "0" ]]; then
+  ok "generated baseline has ZERO check-provider-cutover.sh 'grep -aE …' matcher survivor (matcher line structurally exempt, R1)"
+else
+  bad "generated baseline still carries $n_match checker matcher signature(s) — matcher line not exempted (R1)"
+fi
+
+# ---------------------------------------------------------------------------
+echo "=== TC-CUTAMEND-003: the structural skip is FILE-SCOPED — array/matcher-shaped lines in ANOTHER file still FAIL (R1: no escape hatch) ==="
+# ---------------------------------------------------------------------------
+# An ALLOWLISTED_FILES=(gh …)-shaped line and a matcher-shaped line injected into a
+# NON-checker file must STILL be caught as NEW unbaselined raw-gh — the exemption is
+# NOT a general annotation an arbitrary file can carry (guards against self-allowlisting).
+S="$(fresh_scratch amend003a)"
+# shellcheck disable=SC2016
+printf '\nALLOWLISTED_FILES=(gh some-other.sh)\n' >> "$S/setup-labels.sh"
+out="$(bash "$CHECK" --scripts-dir "$S" --baseline "$BASELINE" 2>&1)"; rc=$?
+if [[ "$rc" -ne 0 ]] && grep -Eq 'setup-labels\.sh:[0-9]+' <<<"$out"; then
+  ok "an 'ALLOWLISTED_FILES=(gh …)'-shaped line in setup-labels.sh → still FAILs (file-scoped skip, no escape hatch)"
+else
+  bad "the ALLOWLISTED_FILES-shaped exemption leaked to a non-checker file (rc=$rc) — the skip is NOT file-scoped"
+fi
+S="$(fresh_scratch amend003b)"
+# shellcheck disable=SC2016
+printf "\nmatcher_copy() { grep -aE '(^|[^A-Za-z_-])gh ' \"\$f\"; }\n" >> "$S/setup-labels.sh"
+out="$(bash "$CHECK" --scripts-dir "$S" --baseline "$BASELINE" 2>&1)"; rc=$?
+if [[ "$rc" -ne 0 ]] && grep -Eq 'setup-labels\.sh:[0-9]+' <<<"$out"; then
+  ok "a matcher-shaped 'grep -aE …gh ' line in setup-labels.sh → still FAILs (matcher exemption is file-scoped too)"
+else
+  bad "the matcher-shaped exemption leaked to a non-checker file (rc=$rc)"
+fi
+
+# ---------------------------------------------------------------------------
+echo "=== TC-CUTAMEND-004: committed baseline dropped the 2 exempt infra sigs but KEPT the PASS/FAIL self-scan sigs (R2) ==="
+# ---------------------------------------------------------------------------
+# The array line + matcher line leave; the deliberate self-scan of the guard's own
+# PASS/FAIL message strings STAYS (a NEW raw gh in the checker must still FAIL).
+n_arr_c="$(jq '[.surviving_sites[] | select(.file=="check-provider-cutover.sh") | select(.content | startswith("ALLOWLISTED_FILES=("))] | length' "$BASELINE")"
+n_match_c="$(jq -r '[.surviving_sites[] | select(.file=="check-provider-cutover.sh") | .content] | map(select(startswith("grep -aE"))) | length' "$BASELINE")"
+n_self="$(jq '[.surviving_sites[] | select(.file=="check-provider-cutover.sh") | select((.content|contains("cutover-guard: PASS")) or (.content|startswith("fail ")))] | length' "$BASELINE")"
+if [[ "$n_arr_c" == "0" && "$n_match_c" == "0" && "$n_self" -ge 1 ]]; then
+  ok "committed baseline: 0 array-line + 0 matcher-line checker sigs, $n_self PASS/FAIL self-scan sigs retained (R2)"
+else
+  bad "committed baseline R2 property violated (array=$n_arr_c matcher=$n_match_c self-scan=$n_self)"
+fi
+
+# ---------------------------------------------------------------------------
+echo "=== TC-CUTAMEND-005: the _comment template no longer EMBEDS the allowlist file-list (R2 neutralization) ==="
+# ---------------------------------------------------------------------------
+# Both the generator template (in the script) and the committed baseline _comment
+# must not carry the parenthesized allowlist file-list, so an allowlist edit no
+# longer churns the _comment signature.
+comment_committed="$(jq -r '._comment' "$BASELINE")"
+if ! grep -Eq '\((scripts/)?gh[, ]gh-with-token-refresh\.sh' <<<"$comment_committed" \
+   && ! grep -Eq 'gh-app-token\.sh, gh-as-user\.sh, dispatch-remote-aws-ssm\.sh' <<<"$comment_committed"; then
+  ok "committed baseline _comment no longer embeds the allowlist file-list (allowlist edits won't churn it, R2)"
+else
+  bad "committed baseline _comment STILL embeds the allowlist file-list — an allowlist edit will still churn the _comment signature"
+fi
+# And the generator template in the script itself.
+if ! grep -Eq '_comment:.*\((scripts/)?gh gh-with-token-refresh\.sh' "$CHECK" \
+   && ! grep -Eq '_comment:.*\(scripts/gh, gh-with-token-refresh\.sh' "$CHECK"; then
+  ok "the _comment generator template (in check-provider-cutover.sh) no longer embeds the allowlist file-list (R2)"
+else
+  bad "the _comment generator template STILL embeds the allowlist file-list"
+fi
+
+# ---------------------------------------------------------------------------
+echo "=== TC-CUTAMEND-006: self-scan PRESERVED — a NEW genuine 'gh api user' in the checker still FAILs unbaselined (R3) ==="
+# ---------------------------------------------------------------------------
+# The amendment narrows the exemption to the two infra lines + _comment; it does NOT
+# wholesale-allowlist the checker. A NEW raw gh added to the checker (not matching an
+# anchor) is still unbaselined → FAILs (TC-CUTOVER-014 stays green too).
+S="$(fresh_scratch amend006)"
+# shellcheck disable=SC2016
+printf '\namend_backdoor() { gh api user; }\n' >> "$S/check-provider-cutover.sh"
+out="$(bash "$CHECK" --scripts-dir "$S" --baseline "$BASELINE" 2>&1)"; rc=$?
+if [[ "$rc" -ne 0 ]] && grep -Eq 'check-provider-cutover\.sh:[0-9]+' <<<"$out" && grep -q 'gh api user' <<<"$out"; then
+  ok "a NEW 'gh api user' in the checker → still FAILs naming check-provider-cutover.sh:LINE (self-scan preserved, R3)"
+else
+  bad "the amendment over-broadened the exemption — a NEW raw gh in the checker was NOT caught (rc=$rc): ${out:0:200}"
+fi
+
+# ---------------------------------------------------------------------------
+echo "=== TC-CUTAMEND-007: an allowlist edit + baseline shrink no longer self-trips Check 4 on the guard's own file (R4) ==="
+# ---------------------------------------------------------------------------
+# The amendment's whole point: (i) append a filename to ALLOWLISTED_FILES, (ii) drop
+# that file's own signatures from the baseline (what a real allowlist PR does), (iii)
+# regenerate, (iv) run the FULL guard (strict --require-trusted-ref) — it must PASS
+# with NO change to any check-provider-cutover.sh signature in the baseline. Before
+# this amendment step (iv) FAILed because the edited array line itself became a NEW
+# unbaselined checker signature (+ the old one "no longer found").
+if command -v git >/dev/null 2>&1; then
+  S="$(fresh_scratch amend007)"
+  GROOT="$WORK/gitrepo-amend007"
+  rm -rf "$GROOT"; mkdir -p "$GROOT/skills/autonomous-dispatcher/scripts"
+  cp -rL "$S"/. "$GROOT/skills/autonomous-dispatcher/scripts/" 2>/dev/null
+  GS="$GROOT/skills/autonomous-dispatcher/scripts"
+  # A real allowlist PR edits check-provider-cutover.sh's OWN ALLOWLISTED_FILES and
+  # runs THAT edited checker to regenerate + verify — so drive the SCRATCH checker
+  # (the one whose allowlist we mutate), not the worktree $CHECK.
+  GCHECK="$GS/check-provider-cutover.sh"
+  # Regenerate the scratch baseline so the committed-vs-scratch tree reconciles as the
+  # trusted base, then commit as trusted-main.
+  bash "$GCHECK" --generate-baseline --scripts-dir "$GS" > "$GS/providers/cutover-baseline.json" 2>/dev/null
+  ( cd "$GROOT" && git init -q && git config user.email t@t && git config user.name t \
+      && git add -A >/dev/null 2>&1 && git commit -qm base >/dev/null 2>&1 && git branch trusted-main )
+  # Snapshot the checker's OWN signatures on trusted-main (must be unchanged after the edit).
+  checker_sigs_before="$(jq -S '[.surviving_sites[] | select(.file=="check-provider-cutover.sh")]' "$GS/providers/cutover-baseline.json")"
+  # (i) allowlist a file: pick a currently-baselined file (upload-screenshot.sh) and add it.
+  perl -0pi -e 's/^ALLOWLISTED_FILES=\(([^)]*)\)/ALLOWLISTED_FILES=($1 upload-screenshot.sh)/m' "$GCHECK"
+  # (ii)+(iii) regenerate with the EDITED checker: allowlisting the file drops its own
+  #            sigs; the array-line edit does NOT introduce a new checker sig (exempt).
+  bash "$GCHECK" --generate-baseline --scripts-dir "$GS" > "$GS/providers/cutover-baseline.json" 2>/dev/null
+  checker_sigs_after="$(jq -S '[.surviving_sites[] | select(.file=="check-provider-cutover.sh")]' "$GS/providers/cutover-baseline.json")"
+  # (iv) run the FULL guard STRICT vs trusted-main (with the EDITED checker).
+  out="$( cd "$GROOT" && bash "$GCHECK" --scripts-dir "$GS" --baseline "$GS/providers/cutover-baseline.json" --trusted-ref trusted-main --require-trusted-ref 2>&1 )"; rc=$?
+  # Property 1: the guard PASSES (Checks 1-4 all green).
+  if [[ "$rc" -eq 0 ]]; then
+    ok "(1) allowlist edit + baseline shrink → FULL guard PASSES under --require-trusted-ref (no self-trip, R4)"
+  else
+    bad "(1) allowlist edit self-tripped the guard (rc=$rc): ${out:0:260}"
+  fi
+  # Property 2: NO check-provider-cutover.sh signature changed in the baseline.
+  if [[ "$checker_sigs_before" == "$checker_sigs_after" ]]; then
+    ok "(2) NO check-provider-cutover.sh signature changed by the allowlist edit (array line structurally exempt, R4)"
+  else
+    bad "(2) an allowlist edit changed a check-provider-cutover.sh baseline signature (R4 violated)"
+  fi
+  # Property 3: upload-screenshot.sh sigs actually left (the real allowlist effect landed).
+  n_up="$(jq '[.surviving_sites[] | select(.file=="upload-screenshot.sh")] | length' "$GS/providers/cutover-baseline.json")"
+  if [[ "$n_up" == "0" ]]; then
+    ok "(3) the newly-allowlisted upload-screenshot.sh sigs left the baseline (the allowlist disposition took effect)"
+  else
+    bad "(3) upload-screenshot.sh still has $n_up sigs — allowlisting did not drop them"
+  fi
+else
+  ok "git unavailable — TC-CUTAMEND-007 skipped"
+fi
+
+# ---------------------------------------------------------------------------
+echo "=== TC-CUTAMEND-008: regression pin — the edited ALLOWLISTED_FILES array line is NOT reported as Check 4 GREW (R4) ==="
+# ---------------------------------------------------------------------------
+# The pre-amendment failure surfaced as a Check 4 'baseline GREW … check-provider-
+# cutover.sh … ALLOWLISTED_FILES' monotonicity error (the edited array line became a
+# new unbaselined checker signature). Pin that it no longer appears.
+if command -v git >/dev/null 2>&1; then
+  S="$(fresh_scratch amend008)"
+  GROOT="$WORK/gitrepo-amend008"; GS="$GROOT/sd"
+  rm -rf "$GROOT"; mkdir -p "$GS"
+  cp -rL "$S"/. "$GS/" 2>/dev/null
+  bash "$CHECK" --generate-baseline --scripts-dir "$GS" > "$GS/providers/cutover-baseline.json" 2>/dev/null
+  ( cd "$GROOT" && git init -q && git config user.email t@t && git config user.name t \
+      && git add -A >/dev/null 2>&1 && git commit -qm base >/dev/null 2>&1 && git branch trusted-main )
+  # Append a name to ALLOWLISTED_FILES (a benign non-baselined name is fine here — we
+  # only assert the array-line EDIT itself does not register as growth).
+  perl -0pi -e 's/ALLOWLISTED_FILES=\(([^)]*)\)/ALLOWLISTED_FILES=($1 some-new-wrapper.sh)/' "$GS/check-provider-cutover.sh"
+  bash "$CHECK" --generate-baseline --scripts-dir "$GS" > "$GS/providers/cutover-baseline.json" 2>/dev/null
+  out="$( cd "$GROOT" && CUTOVER_TRUSTED_SCRIPTS_PREFIX="sd" bash "$CHECK" --scripts-dir "$GS" --baseline "$GS/providers/cutover-baseline.json" --trusted-ref trusted-main --trusted-baseline-path "sd/providers/cutover-baseline.json" 2>&1 )"; rc=$?
+  if [[ "$rc" -eq 0 ]] && ! grep -Eiq 'GREW.*check-provider-cutover\.sh.*ALLOWLISTED_FILES' <<<"$out"; then
+    ok "editing ONLY ALLOWLISTED_FILES → no 'baseline GREW … ALLOWLISTED_FILES' monotonicity failure (pre-amendment mode fixed, R4)"
+  else
+    bad "the edited ALLOWLISTED_FILES array line still registers as Check 4 growth (rc=$rc): ${out:0:260}"
+  fi
+else
+  ok "git unavailable — TC-CUTAMEND-008 skipped"
+fi
+
+# ===========================================================================
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 [[ "$FAIL" -eq 0 ]] && exit 0 || exit 1

@@ -16,9 +16,16 @@
 # layer. So the guard scans the WHOLE scripts tree (every *.sh + providers/*.sh)
 # and classifies each non-comment raw `gh ` token as exactly one of:
 #   (1) under providers/            — the legitimate home of migrated host I/O;
-#   (2) an allowlisted FILE         — the auth/transport wrappers (spec §8) +
-#                                     this guard script itself;
-#   (3) a BASELINED surviving site  — frozen in providers/cutover-baseline.json.
+#   (2) an allowlisted FILE         — the auth/transport wrappers (spec §8);
+#   (3) a BASELINED surviving site  — frozen in providers/cutover-baseline.json;
+#   (4) one of the guard's OWN structurally-exempt infrastructure lines — ONLY in
+#       check-provider-cutover.sh, ONLY the ALLOWLISTED_FILES array declaration, the
+#       primary matcher line, and the generated _comment template, matched by a
+#       top-of-line structural anchor (is_checker_infra_line, #286-amendment #343).
+#       These change content whenever the allowlist POLICY changes, so baselining
+#       them meant an allowlist disposition self-tripped Check 4 monotonicity. The
+#       guard's PASS/FAIL MESSAGE strings are NOT exempt — a NEW raw `gh` added to
+#       the checker still FAILs (the guard is NOT wholesale-allowlisted; #286 round 2).
 # Anything else is a NEW raw-gh and FAILs LOUD naming the exact file:line (AC #2).
 #
 # The depends-on issues (#281–#285) migrated ONLY the spec-named verb leaves
@@ -162,11 +169,47 @@ CALLER_FILES=(lib-dispatch.sh autonomous-dev.sh autonomous-review.sh)
 # NOTE: this guard script itself is NOT allowlisted (#286 review round 2 [P1] #2).
 # Wholesale-exempting it meant a real `gh api user` could be added to the checker
 # without tripping. Instead the checker IS scanned like any other file: its own
-# legitimate `gh `-mentioning lines (the consuming-boundary regex literal + the
-# PASS/FAIL messages) are recorded in the baseline as ordinary surviving sites, so
-# a NEW raw gh added to the checker is unbaselined → FAILs. (Its comment lines are
-# skipped by the detector; the baseline'd lines are the few non-comment ones.)
+# legitimate `gh `-mentioning lines (the PASS/FAIL messages) are recorded in the
+# baseline as ordinary surviving sites, so a NEW raw gh added to the checker is
+# unbaselined → FAILs. (Its comment lines are skipped by the detector; the
+# baseline'd lines are the few non-comment ones.)
 ALLOWLISTED_FILES=(gh gh-with-token-refresh.sh gh-app-token.sh gh-as-user.sh dispatch-remote-aws-ssm.sh)
+
+# The #286-amendment (#343). The guard's OWN infrastructure lines change content
+# whenever the allowlist POLICY changes, so baselining them means an allowlist
+# disposition self-trips Check 4 monotonicity — the edited line's (file,content)
+# signature changes, so the old signature "no longer found" AND a NEW unbaselined
+# signature appears, forcing a hand-edit of the baseline in the same PR (the exact
+# self-ratification the guard exists to prevent). So these lines are STRUCTURALLY
+# EXEMPT from the scan — but ONLY in check-provider-cutover.sh, and ONLY when the
+# line matches a structural ANCHOR (the assignment/matcher/generator shape), NEVER a
+# magic comment an arbitrary file could carry (a general escape hatch would invite
+# self-allowlisting — TC-CUTOVER-014). The deliberate self-scan of the guard's
+# PASS/FAIL MESSAGE strings STAYS: a NEW raw `gh` added to the checker (not matching
+# an anchor) is still unbaselined → FAILs LOUD (TC-CUTAMEND-006). Exempt:
+#   (a) the ALLOWLISTED_FILES=(…) array declaration  — churns directly on an edit;
+#   (b) the guard's own primary matcher line          — the mechanical detector
+#       (`grep -aE '(^|[^A-Za-z_-])gh ' …` in gh_lines_in — the ONLY line in this
+#        file that mentions `gh ` as part of the detector regex, not a message);
+#   (c) the generated baseline `_comment:` template   — embeds the allowlist
+#       file-list (see the jq -n block), so an allowlist edit churns it too.
+# True iff (rel, trimmed content) is one of check-provider-cutover.sh's own
+# structurally-exempt infrastructure lines. rel-scoped to this one file; anchored on
+# line SHAPE (the assignment / matcher / generator prefix), not a comment marker.
+# The (b) anchor deliberately stops the literal BEFORE the `gh ` token so this arm
+# is not itself a scannable raw-gh line (else the exemption would re-introduce the
+# very signature it removes); the matcher line is the sole `grep -aE '(^|[^…` line.
+CHECKER_SELF="check-provider-cutover.sh"
+is_checker_infra_line() {
+  local rel="$1" content="$2"
+  [ "$rel" = "$CHECKER_SELF" ] || return 1
+  case "$content" in
+    'ALLOWLISTED_FILES=('*)          return 0 ;;   # (a) allowlist array declaration
+    "grep -aE '(^|[^A-Za-z_-])"*)    return 0 ;;   # (b) the primary matcher line
+    '_comment:'*)                    return 0 ;;   # (c) the generated _comment template
+  esac
+  return 1
+}
 
 # Files that need not exist on disk to be a valid allowlist entry (runtime symlink).
 ALLOWLIST_NO_STAT=(gh)
@@ -231,6 +274,19 @@ gh_lines_in() {
       print s }'
 }
 
+# gh_lines_in for a SCRIPTS_DIR-relative file, additionally dropping
+# check-provider-cutover.sh's OWN structurally-exempt infrastructure lines
+# (#286-amendment, #343 — is_checker_infra_line). Used by BOTH the working-tree scan
+# (discover_guarded_sites) and the ref-tree scan (discover_guarded_sites_at_ref), so
+# the exemption is applied identically on the check path and --generate-baseline.
+guarded_gh_lines_in() {
+  local rel="$1" path="$2" line
+  gh_lines_in "$path" | while IFS= read -r line; do
+    is_checker_infra_line "$rel" "$line" && continue
+    printf '%s\n' "$line"
+  done
+}
+
 # Discover raw-gh sites across the WHOLE tree, EXCLUDING providers/ and the
 # allowlisted files. These are the sites the baseline must account for. Emits
 # "<count>\t<file>\t<content>" rows grouped by trimmed content.
@@ -240,7 +296,7 @@ discover_guarded_sites() {
     [ -z "$rel" ] && continue
     case "$rel" in providers/*) continue ;; esac        # providers/ is the migration target
     in_list "$rel" "${ALLOWLISTED_FILES[@]}" && continue # allowlisted file
-    gh_lines_in "$SCRIPTS_DIR/$rel" | sed "s#^#${rel}\t#"
+    guarded_gh_lines_in "$rel" "$SCRIPTS_DIR/$rel" | sed "s#^#${rel}\t#"
   done < <(tree_sh_files) | LC_ALL=C sort | uniq -c | awk '{
     # `uniq -c` prefixes "<spaces><count> <file>\t<content>". Pull the leading
     # count off WITHOUT rebuilding $0 (which would collapse the file\tcontent tab
@@ -286,7 +342,7 @@ discover_guarded_sites_at_ref() {
     case "$rel" in providers/*) continue ;; esac
     in_list "$rel" "${ALLOWLISTED_FILES[@]}" && continue
     git_show_deref "$ref" "$sub" >"$gtmp" 2>/dev/null || continue
-    gh_lines_in "$gtmp" | sed "s#^#${rel}\t#"
+    guarded_gh_lines_in "$rel" "$gtmp" | sed "s#^#${rel}\t#"
   done < <(git ls-tree -r --name-only "$ref" -- "$relroot" 2>/dev/null | grep -E '\.sh$') \
     | LC_ALL=C sort | uniq -c | awk '{
       line = $0
@@ -323,9 +379,16 @@ if [ "$GENERATE" -eq 1 ]; then
   # ONLY in check-provider-cutover.sh's ALLOWLISTED_FILES array, so a data-file
   # edit cannot silently widen the guarded surface. This manifest carries ONLY
   # the surviving-site freeze.
+  #
+  # #286-amendment (#343): the _comment template no longer EMBEDS the allowlist
+  # file-list — an allowlist-policy edit used to churn this _comment signature too
+  # (it appeared in the baseline as a survivor). The template is also structurally
+  # exempt from the scan now (is_checker_infra_line, anchor `_comment:`), so this
+  # string is neither scanned nor baselined; keeping the file-list out of it keeps
+  # the single source of truth in ALLOWLISTED_FILES and prevents future churn.
   jq -n --argjson sites "$sites_json" \
     '{
-      _comment: "Baseline of raw-gh sites surviving across the dispatcher scripts tree (RECURSIVE; EXCLUDING providers/ and the allowlisted files) after the partial pluggable-providers migration (#281-#285). check-provider-cutover.sh ([INV-91]) FAILs any tree raw-gh NOT under providers/, NOT an allowlisted file, and NOT accounted for here — naming the exact file:line. The checker script itself is scanned (not allowlisted), so its own non-comment gh-mentioning lines (the consuming-boundary regex + PASS/FAIL messages) appear here as ordinary survivors. Regenerate with: bash check-provider-cutover.sh --generate-baseline. Migration PRs that remove a gh leaf MUST shrink this manifest in the same PR; the guard becomes a strict from-zero ban once this is empty. The file-allowlist (scripts/gh, gh-with-token-refresh.sh, gh-app-token.sh, gh-as-user.sh, dispatch-remote-aws-ssm.sh) lives in the script, not here.",
+      _comment: "Baseline of raw-gh sites surviving across the dispatcher scripts tree (RECURSIVE; EXCLUDING providers/ and the allowlisted files) after the partial pluggable-providers migration (#281-#285). check-provider-cutover.sh ([INV-91]) FAILs any tree raw-gh NOT under providers/, NOT an allowlisted file, and NOT accounted for here — naming the exact file:line. The checker script itself is scanned (not allowlisted), so its own PASS/FAIL message strings appear here as ordinary survivors; its infrastructure lines (the ALLOWLISTED_FILES array declaration, the primary matcher line, and this _comment template) are structurally exempt (#286-amendment #343) so an allowlist-policy edit does not self-trip Check 4 monotonicity. Regenerate with: bash check-provider-cutover.sh --generate-baseline. Migration PRs that remove a gh leaf MUST shrink this manifest in the same PR; the guard becomes a strict from-zero ban once this is empty. The file-allowlist lives in check-provider-cutover.sh (ALLOWLISTED_FILES), not here.",
       surviving_sites: $sites
     }'
   exit 0
