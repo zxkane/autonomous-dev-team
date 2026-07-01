@@ -653,13 +653,79 @@ count_dispatcher_crashes() {
     | jq -r "[.[] | select((.createdAt > \"${last_stalled_at}\") and (.body | test(\"Task appears to have crashed \\\\(no PR found\\\\)|process not found\")))] | length"
 }
 
+# may_stall_now — shared INV-26 liveness/eligibility PREDICATE (no side-effect).
+#
+# Returns 0 (eligible to stall NOW) / 1 (defer — a dev wrapper is still alive).
+# This is the liveness gate extracted out of `mark_stalled` so BOTH `mark_stalled`
+# AND the [INV-97] convergence circuit-breaker (#297) share ONE source of truth
+# for "is it safe to take a terminal action against this issue right now" — no
+# copy-pasted `pid_alive` block ([INV-97] C4′/C9b).
+#
+# Scope of the extraction (C9b): the LIVENESS PREDICATE ONLY —
+#   - the `pid_alive [--at-cap]` probe, AND
+#   - the local-backend empty-PID→DEAD narrowing (issue #263).
+# It emits NO comment. `mark_stalled` keeps its own idempotent
+# `INV-26-stall-deferral` "Stall decision deferred" operator comment (so INV-26's
+# operator-visible deferral behavior is byte-identical before/after this factoring
+# — the deferral comment is NOT part of the predicate).
+#
+# Optional leading positional `--at-cap` flag (issue #263): propagated to the
+# `pid_alive` probe. Passed ONLY by the retry-budget-exhausted `mark_stalled`
+# caller (`dispatcher-tick.sh` Step 4). The review-retry-cap `mark_stalled`
+# caller AND the #297 breaker both call WITHOUT `--at-cap` (they are not
+# retry-budget-exhausted), so an indeterminate remote-SSM verdict keeps [INV-30]'s
+# ALIVE-bias → defer (a MISS, which the #297 design biases toward — C9b/R4). The
+# flag is positional, never an env var, so it cannot leak between callers.
+#
+# Returns 1 (DEFER) when a wrapper is ALIVE; returns 0 (ELIGIBLE) otherwise
+# (dead PID, absent PID file, or local empty-PID→DEAD).
+may_stall_now() {
+  local at_cap=false
+  if [ "${1:-}" = "--at-cap" ]; then at_cap=true; shift; fi
+  local issue_num="$1"
+
+  local _alive
+  if [ "$at_cap" = true ]; then
+    pid_alive --at-cap issue "$issue_num" && _alive=0 || _alive=1
+  else
+    pid_alive issue "$issue_num" && _alive=0 || _alive=1
+  fi
+  if [ "$_alive" = 0 ]; then
+    local pid _backend
+    pid=$(get_pid issue "$issue_num")
+    # Resolve the backend on its own line, compare against the literal on
+    # the next — keep the env-var name and the backend literal on SEPARATE
+    # lines. TC-RPA-010 sets its awk in_block on the FIRST line naming both
+    # together, so they must never co-occur on one line at or before
+    # `pid_alive`. Do NOT collapse the assignment and the comparison below.
+    _backend="${EXECUTION_BACKEND:-local}"
+
+    # Empty-PID = DEAD shortcut, narrowed to local backend (issue #263).
+    # Under local backend `pid_alive` can return ALIVE via tier-2 PID-file
+    # mtime or tier-3 heartbeat mtime even when the PID file *content* is
+    # empty (no wrapper holds it) — an empty PID then means no wrapper is
+    # running, so treat it as DEAD (eligible to stall). Do NOT apply under
+    # the remote backend: there the PID file lives on the wrapper box and
+    # dispatcher-side `get_pid` is ALWAYS empty regardless of wrapper state,
+    # so empty-PID is the steady state, not a DEAD signal — the `--at-cap`
+    # flag handles the indeterminate case instead. Re-introducing an
+    # unconditional empty-PID shortcut here would resurrect the #121 /
+    # downstream-consumer false-stall bug under the remote backend.
+    if [ "$_backend" != "remote-aws-ssm" ] && [ -z "$pid" ]; then
+      return 0   # eligible (no live wrapper)
+    fi
+    return 1     # defer (a wrapper is alive)
+  fi
+  return 0       # eligible (pid_alive says DEAD)
+}
+
 # Mark issue as stalled (retry exhausted). Posts the canonical "Marking as
 # stalled" comment that the next stalled-cutoff calculation will key off.
 #
 # Optional leading positional `--at-cap` flag (issue #263): propagated to the
-# liveness probe (`pid_alive --at-cap`). It MUST be passed ONLY by the
-# retry-budget-exhausted caller (`dispatcher-tick.sh` Step 4, fired at
-# `count_retries >= MAX_RETRIES`). The other caller —
+# liveness probe (`pid_alive --at-cap`) via the shared `may_stall_now`. It MUST
+# be passed ONLY by the retry-budget-exhausted caller (`dispatcher-tick.sh`
+# Step 4, fired at `count_retries >= MAX_RETRIES`). The other caller —
 # `handle_completed_session_routing`'s `REVIEW_RETRY_LIMIT` branch — is the
 # review-retry-cap state, NOT the retry-budget-exhausted state, so it does
 # NOT pass the flag and therefore retains [INV-30]'s indeterminate→ALIVE
@@ -687,51 +753,40 @@ mark_stalled() {
   #
   # At-cap propagation ([INV-30] exception, issue #263): when this call was
   # made `--at-cap` (the MAX_RETRIES caller), pass the flag through to
-  # `pid_alive` so a persistently-indeterminate remote-SSM verdict flips
-  # from ALIVE-bias to DEAD, bounding the defer loop to one tick instead of
-  # forever (a downstream consumer's ~40h hang). When NOT at-cap (the
-  # review-retry-cap caller), the plain `pid_alive` call keeps INV-30's
-  # ALIVE-bias. Definite ALIVE/DEAD verdicts are unaffected either way.
-  local _alive
+  # `pid_alive` (via the shared `may_stall_now` predicate) so a
+  # persistently-indeterminate remote-SSM verdict flips from ALIVE-bias to DEAD,
+  # bounding the defer loop to one tick instead of forever (a downstream
+  # consumer's ~40h hang). When NOT at-cap (the review-retry-cap caller), the
+  # plain probe keeps INV-30's ALIVE-bias. Definite ALIVE/DEAD verdicts are
+  # unaffected either way.
+  #
+  # [INV-97] (#297): the liveness predicate itself (pid_alive + local
+  # empty-PID→DEAD narrowing) is now the shared `may_stall_now` helper — but the
+  # idempotent `INV-26-stall-deferral` OPERATOR COMMENT stays HERE, so
+  # mark_stalled's deferral-comment behavior is byte-identical before/after the
+  # #297 factoring (the comment is NOT part of the predicate — C9b). The #297
+  # breaker calls `may_stall_now` WITHOUT posting this comment (its own deferral
+  # is a silent MISS).
+  local _may
   if [ "$at_cap" = true ]; then
-    pid_alive --at-cap issue "$issue_num" && _alive=0 || _alive=1
+    may_stall_now --at-cap "$issue_num" && _may=0 || _may=1
   else
-    pid_alive issue "$issue_num" && _alive=0 || _alive=1
+    may_stall_now "$issue_num" && _may=0 || _may=1
   fi
-  if [ "$_alive" = 0 ]; then
-    local pid current_session_marker _backend
+  if [ "$_may" = 1 ]; then
+    # Defer — a dev wrapper is still alive. Post a one-shot deferral comment
+    # (idempotency-keyed on the wrapper PID so re-ticks against the same alive
+    # wrapper don't fill the timeline).
+    local pid current_session_marker
     pid=$(get_pid issue "$issue_num")
-    # Resolve the backend on its own line, compare against the literal on
-    # the next — keep the env-var name and the backend literal on SEPARATE
-    # lines. TC-RPA-010 sets its awk in_block on the FIRST line naming both
-    # together, so they must never co-occur on one line at or before
-    # `pid_alive`. Do NOT collapse the assignment and the comparison below.
-    _backend="${EXECUTION_BACKEND:-local}"
-
-    # Empty-PID = DEAD shortcut, narrowed to local backend (issue #263).
-    # Under local backend `pid_alive` can return ALIVE via tier-2 PID-file
-    # mtime or tier-3 heartbeat mtime even when the PID file *content* is
-    # empty (no wrapper holds it) — an empty PID then means no wrapper is
-    # running, so treat it as DEAD: skip the deferral comment and fall
-    # through to write `stalled`. Do NOT apply under the remote backend:
-    # there the PID file lives on the wrapper box and dispatcher-side
-    # `get_pid` is ALWAYS empty regardless of wrapper state, so empty-PID is
-    # the steady state, not a DEAD signal — the `--at-cap` flag above
-    # handles the indeterminate case instead. Re-introducing an
-    # unconditional empty-PID shortcut here would resurrect the #121 /
-    # downstream-consumer false-stall bug under the remote backend.
-    if [ "$_backend" != "remote-aws-ssm" ] && [ -z "$pid" ]; then
-      : # fall through to the stall path below (no deferral comment)
-    else
-      current_session_marker="INV-26-stall-deferral:pid=${pid}"
-      if itp_list_comments "$issue_num" 2>/dev/null \
-          | jq -r "[.[].body | select(contains(\"${current_session_marker}\"))] | length" \
-          2>/dev/null | grep -q '^0$'; then
-        itp_post_comment "$issue_num" \
-          "Stall decision deferred: dev wrapper PID ${pid} is still alive — counter says ${MAX_RETRIES} but a wrapper is making progress. Re-evaluating next tick. (\`${current_session_marker}\`)"
-      fi
-      return 0
+    current_session_marker="INV-26-stall-deferral:pid=${pid}"
+    if itp_list_comments "$issue_num" 2>/dev/null \
+        | jq -r "[.[].body | select(contains(\"${current_session_marker}\"))] | length" \
+        2>/dev/null | grep -q '^0$'; then
+      itp_post_comment "$issue_num" \
+        "Stall decision deferred: dev wrapper PID ${pid} is still alive — counter says ${MAX_RETRIES} but a wrapper is making progress. Re-evaluating next tick. (\`${current_session_marker}\`)"
     fi
+    return 0
   fi
 
   local agent_failures dispatcher_crashes false_positives
@@ -1103,6 +1158,105 @@ count_review_aware_flips() {
 }
 
 # ---------------------------------------------------------------------------
+# INV-97 (#297): convergence circuit-breaker helpers.
+# ---------------------------------------------------------------------------
+
+# convergence_trailer_hash <verdict> <cause> <dev_actionable>
+#
+# Echoes a stable hash of the canonical string `{verdict}|{cause}|{dev-actionable}`
+# (pipe-delimited, empty string for absent fields), derived from the
+# `classify_recent_review_verdict` OUT-VARS — NOT from body text ([INV-97] C1/C2).
+# Used as the SECONDARY convergence gate (same verdict CLASS across rounds) and as
+# the idempotency-marker + report key. `review-comment-id` / `dev-session-id` /
+# timestamps are deliberately EXCLUDED from the hash — each is fresh per round, so
+# including them would make strict key-equality never match (codex R2/C2).
+#
+# Prefers `sha1sum` (12-char prefix, stable + collision-resistant enough for an
+# idempotency key); falls back to `cksum` when sha1sum is absent so the helper
+# never aborts the tick under `set -e`.
+convergence_trailer_hash() {
+  local _canon="${1:-}|${2:-}|${3:-}"
+  if command -v sha1sum >/dev/null 2>&1; then
+    printf '%s' "$_canon" | sha1sum | cut -c1-12
+  else
+    printf '%s' "$_canon" | cksum | tr -d ' ' | cut -c1-12
+  fi
+}
+
+# count_frozen_convergence_rounds <issue_num> <frozen_head>
+#
+# Echoes the number of COMPLETED zero-commit dev-resume rounds observed against
+# `<frozen_head>` ([INV-97] C1/C9a). The count is DERIVED from the pre-existing
+# per-round dispatcher comment (`dispatcher-tick.sh` Step 5b, the [INV-06]-guarded
+# "Dev process exited (no new commits since last review at `<head>`)…"), which
+# fires exactly once per completed zero-commit round and embeds the frozen head.
+# #297 writes NO per-round breadcrumb of its own — a new per-round write on a
+# NON-trip round would reintroduce the C7 orphan-artifact TOCTOU. We SCAN the
+# already-emitted comment instead.
+#
+# Filter: `head == frozen_head` (rounds since the head last advanced) AND the
+# round was NOT routed to #298 ([INV-92]) — a `non-actionable-finding:<head>`
+# escalation marker on this head means a `dev-actionable=false` round already
+# stalled the issue, so it must NOT accrete #297 history (C6/C8). The current
+# verdict is `failed-substantive` + `dev-actionable=true` by construction (the
+# breaker's call site is reached only then), so the join reduces to: count the
+# frozen-head per-round comments, and yield 0 when a Branch-B′ #298 marker is
+# present for this head.
+#
+# Fail-closed toward NOT tripping: an empty/error fetch yields 0 (biases to MISS
+# per R4 — MAX_RETRIES is the backstop). Uses a LITERAL `contains()` substring
+# match (engine-agnostic, no RE2/Oniguruma divergence). The frozen head is
+# 7-40 lowercase hex, so it needs no jq-string escaping.
+count_frozen_convergence_rounds() {
+  local issue_num="$1"
+  local frozen_head="$2"
+  [ -n "$frozen_head" ] || { printf '%s' "0"; return 0; }
+
+  local _comments
+  _comments=$(itp_list_comments "$issue_num" 2>/dev/null) || { printf '%s' "0"; return 0; }
+
+  # If a #298 non-actionable escalation already fired for this head, the loop was
+  # NOT a #297 non-convergence case — do not count it (C6/C8).
+  local _na_present
+  _na_present=$(jq -r "[.[].body | select(contains(\"non-actionable-finding:${frozen_head}\"))] | length" \
+    2>/dev/null <<<"$_comments")
+  if [ "${_na_present:-0}" != "0" ]; then printf '%s' "0"; return 0; fi
+
+  # Count the per-round "no new commits since last review at `<frozen_head>`"
+  # comments. The literal carries the head inside backticks; match the exact
+  # phrase + head so an unrelated mention can't inflate the count.
+  local _count
+  _count=$(jq -r "[.[].body | select(contains(\"no new commits since last review at \`${frozen_head}\`\"))] | length" \
+    2>/dev/null <<<"$_comments")
+  printf '%s' "${_count:-0}"
+}
+
+# recent_review_verdict_body <issue_num> <session_end_iso>
+#
+# Echoes the body of the newest BOT-authored review verdict comment created after
+# the dev session ended — the verbatim repeated finding shown in the [INV-97]
+# convergence report's evidence block. Mirrors `classify_recent_review_verdict`'s
+# actor-predicate + strict-`>` timestamp selection (spec §3.3: `author` is the
+# login string incl `[bot]`), but returns the raw body rather than parsing the
+# trailer. Best-effort: an empty/error fetch or missing actor signal yields empty
+# (the report omits the excerpt gracefully) — never aborts the tick.
+recent_review_verdict_body() {
+  local issue_num="$1"
+  local session_end="$2"
+  local actor_predicate
+  if [ -n "${BOT_LOGIN:-}" ]; then
+    actor_predicate=".author == \"${BOT_LOGIN}\""
+  elif [ -n "${FALLBACK_SESSION_ID:-}" ]; then
+    actor_predicate="(.body | test(\"Review Session.*${FALLBACK_SESSION_ID}\"))"
+  else
+    return 0
+  fi
+  itp_list_comments "$issue_num" 2>/dev/null \
+    | jq -r "[.[] | select(${actor_predicate} and (.createdAt > \"${session_end}\"))] | sort_by(.createdAt) | last | .body // empty" \
+    2>/dev/null
+}
+
+# ---------------------------------------------------------------------------
 # INV-35 Step 4b.5.1: review-aware routing for `completed` sessions.
 # ---------------------------------------------------------------------------
 #
@@ -1198,6 +1352,9 @@ handle_completed_session_routing() {
       # object. The unit tests mock fetch_pr_for_issue.
       _np_pr_info=$(fetch_pr_for_issue "$issue_num" "number,headRefOid,body")
       _np_current_head=$(jq -r '.headRefOid // empty' <<<"$_np_pr_info" 2>/dev/null)
+      # [INV-97] (#297): the PR number for the convergence report's evidence line.
+      local _np_pr_number
+      _np_pr_number=$(jq -r '.number // empty' <<<"$_np_pr_info" 2>/dev/null)
       _np_last_head=$(last_reviewed_head "$issue_num")
       local _np_notice_marker="no-progress-substantive:${_np_current_head}"
 
@@ -1280,6 +1437,132 @@ handle_completed_session_routing() {
             "Substantive review failure on completed session \`${session_id}\` is **not resolvable by the autonomous dev agent**: the review classified every blocking finding as requiring a human or a privileged token the agent's scoped token lacks (e.g. a \`.github/workflows\` edit needs the \`workflows\` scope, or a CODEOWNERS / maintainer-owned change — [INV-92]). Marking stalled — no \`dev-new\` will be dispatched (\`reason=non_actionable_finding\`). @${REPO_OWNER} please apply the change manually, grant the required scope, or split the criterion into a maintainer follow-up. (\`${_na_marker}\`)"
         fi
         mark_stalled "$issue_num"
+        return 0
+      fi
+
+      # Branch B″ — [INV-97] (#297) convergence circuit-breaker. Reached ONLY for
+      # a `failed-substantive` + `dev-actionable=true` verdict that survived
+      # Branch A (bot-unfixable), Branch B (INV-85 single-shot no-progress), and
+      # Branch B′ (INV-92 non-actionable). This is the BELT to INV-85's
+      # single-attempt-marker suspenders: it counts the DURABLE per-round
+      # "no new commits" comments (C9a) rather than a fragile one-shot marker, so
+      # it catches the #286 shape — a genuinely dev-actionable-looking but
+      # un-satisfiable spec that churns dev-resume for 6+ rounds against a frozen
+      # head (each round completes with zero commits, so INV-85's marker resets on
+      # every log-truncating dev-new).
+      #
+      # PRIMARY signal (C1): the PR head SHA is FROZEN across ≥ threshold COMPLETED
+      # zero-commit rounds. SECONDARY gate (C1/C2): the normalized trailer-hash
+      # (`{verdict}|{cause}|{dev-actionable}` — from the classify out-vars, NOT body
+      # text) is stable; here it is `failed-substantive|<cause>|true` by
+      # construction. Match key = `{head, trailer-hash}` ONLY.
+      #
+      # Bias to MISS (R4): a head that has NOT frozen (no PR / advanced HEAD /
+      # empty last-reviewed head), fewer than `threshold` rounds, OR a live dev PID
+      # → do NOT trip. `MAX_RETRIES`→`mark_stalled` is the cheap backstop for
+      # everything this misses. A false-trip discards a converging loop's work +
+      # removes `autonomous` (expensive on an unattended pipeline).
+      local _cb_threshold="${CONVERGENCE_STALL_THRESHOLD:-3}"
+      # Defensive numeric guards: a mis-set conf value or a surprising count must
+      # never abort the tick under `set -e` (a non-numeric operand to `[ -ge ]`
+      # errors out). A non-numeric threshold ⇒ default 3; a non-numeric count ⇒ 0
+      # (bias to MISS, R4).
+      [[ "$_cb_threshold" =~ ^[0-9]+$ ]] || _cb_threshold=3
+      local _cb_rounds=0
+      # Frozen head requires a resolved, unchanged HEAD (same gate INV-85 A/B use).
+      if [ -n "$_np_current_head" ] && [ -n "$_np_last_head" ] \
+         && [ "$_np_current_head" = "$_np_last_head" ]; then
+        _cb_rounds=$(count_frozen_convergence_rounds "$issue_num" "$_np_current_head")
+        [[ "$_cb_rounds" =~ ^[0-9]+$ ]] || _cb_rounds=0
+      fi
+      if [ "$_cb_threshold" -gt 0 ] && [ "$_cb_rounds" -ge "$_cb_threshold" ]; then
+        # Eligibility PRE-GATE (C4′/C7/C9b): check liveness BEFORE any write. If a
+        # dev PID is ALIVE, post NOTHING, mark NOTHING, defer to next tick — no
+        # orphan report/marker. Call WITHOUT `--at-cap` (not retry-exhausted; an
+        # indeterminate remote verdict biases ALIVE→defer = MISS, per R4).
+        if ! may_stall_now "$issue_num"; then
+          log "  issue #${issue_num} convergence breaker: ≥${_cb_threshold} frozen-head rounds on \`${_np_current_head}\` but a dev wrapper is ALIVE — deferring terminal action ([INV-97])"
+          return 0
+        fi
+
+        local _cb_hash
+        _cb_hash=$(convergence_trailer_hash "$_verdict" "$_cause" "$_dev_actionable")
+        local _cb_marker="<!-- dispatcher-convergence-breaker: issue=${issue_num} head=${_np_current_head} trailer=${_cb_hash} -->"
+
+        # Idempotency (C5/R6): if THIS exact case ({issue, head, trailer-hash}) was
+        # already reported, post NOTHING and do NOT re-transition. A genuinely NEW
+        # non-convergence case (a new trailer-hash on the same frozen head) has a
+        # DIFFERENT marker → re-evaluates. Keyed on a bot-authored comment carrying
+        # the exact marker.
+        # `|| echo 0` guards the bare assignment under `set -euo pipefail`: a
+        # routine `gh` transport error (5xx / token expiry / network blip) exits
+        # non-zero, and under `pipefail` an UNGUARDED substitution would abort the
+        # whole tick. Mirrors the pre-existing count-markers idiom at
+        # dispatcher-tick.sh:298. On a fetch error the count is "0" → we FALL
+        # THROUGH to the report+transition; that is the fail-toward-halt posture
+        # for a breaker that has ALREADY confirmed ≥N frozen rounds + eligibility
+        # (a missing dedup read must not silently defer a confirmed non-convergence
+        # trip). Re-posting is bounded: the marker lands on this same tick, and a
+        # subsequent tick re-reads it.
+        local _cb_present
+        _cb_present=$(itp_list_comments "$issue_num" 2>/dev/null \
+          | jq -r "[.[].body | select(contains(\"${_cb_marker}\"))] | length" \
+          2>/dev/null || echo 0)
+        if [ "${_cb_present:-0}" != "0" ]; then
+          log "  issue #${issue_num} convergence breaker already reported for head \`${_np_current_head}\` (trailer=${_cb_hash}) — idempotent no-op ([INV-97])"
+          return 0
+        fi
+
+        log "  issue #${issue_num} NON-CONVERGENCE detected: ${_cb_rounds} completed zero-commit rounds on frozen head \`${_np_current_head}\` (trailer=${_cb_hash}) — halting per [INV-97]"
+
+        # Extract the verbatim repeated finding (the newest bot-authored review
+        # verdict comment after the dev session end) for the report's evidence,
+        # best-effort. Absent ⇒ omit gracefully.
+        local _cb_verdict_body
+        _cb_verdict_body=$(recent_review_verdict_body "$issue_num" "$session_end_iso" 2>/dev/null || true)
+
+        # Post the ONE structured `reason=non-convergence` report + marker, THEN the
+        # terminal transition via the plain declared `pending-dev → stalled`
+        # `label_swap` — one eligibility-gated unit (C4′/C5/C7). Exactly ONE terminal
+        # comment (NOT mark_stalled's "@owner retry exhausted" — C4). Reuse `stalled`;
+        # no new label (R5). NOTE: `autonomous` is already OFF during the loop (it is
+        # removed at first dispatch, `autonomous → in_progress`), so halting autonomy
+        # IS the `pending-dev → stalled` move — the SAME declared movement
+        # `mark_stalled` uses (no undeclared `autonomous → stalled` edge; passes
+        # check-spec-drift Check C.2).
+        itp_post_comment "$issue_num" "$(cat <<CBREPORT
+${_cb_marker}
+## ⛔ Convergence circuit-breaker tripped — halting a non-converging dev↔review loop (\`reason=non-convergence\`, [INV-97])
+
+The autonomous dev↔review loop is **not converging**: the review keeps failing
+substantively on PR **#${_np_pr_number:-?}** while the PR head SHA stays **frozen**
+— the dev agent completed **${_cb_rounds}** dev-resume rounds against
+\`${_np_current_head}\` (≥ threshold ${_cb_threshold}) and produced **zero new
+commits** each time. This is the #286 deadlock shape: a \`failed-substantive\`
+verdict the dev agent cannot satisfy (typically a self-contradictory / malformed
+acceptance criterion, or a fix the agent's scoped token can't apply).
+
+**Dispatcher actions taken** (this loop is now HALTED — no more \`dev-resume\`):
+- Transitioned the issue to \`stalled\` (autonomy halted; \`pending-dev\` removed) — re-adding \`autonomous\` is now the operator's explicit opt-in to resume.
+- Posted this one-time report.
+
+**Evidence**
+- PR: #${_np_pr_number:-<none>}
+- Frozen PR head: \`${_np_current_head}\`
+- Repeated substantive review verdict (\`cause=${_cause:-<none>}\`, \`dev-actionable=${_dev_actionable}\`):
+$(if [ -n "$_cb_verdict_body" ]; then printf '  > %s\n' "${_cb_verdict_body:0:600}"; else printf '  > (verdict body unavailable — see the latest review comment above)\n'; fi)
+- Repeated-failure count on this frozen head: **${_cb_rounds}**
+
+**Human action needed** — pick one, then resume:
+- [ ] Rewrite the invalid / self-contradictory acceptance criterion in the issue body, OR
+- [ ] Grant the permission / scope the dev agent lacked (if the fix needs a privileged token or a protected-path edit), OR
+- [ ] Close the issue, or split the un-satisfiable part into a maintainer follow-up.
+
+**To resume: fix per the checklist above, then re-add the \`autonomous\` label.**
+@${REPO_OWNER}
+CBREPORT
+)"
+        label_swap "$issue_num" "pending-dev" "stalled"
         return 0
       fi
 

@@ -5615,6 +5615,169 @@ untouched).
 - [INV-103](#inv-103-acquire_pid_guard-acquires-the-per-issue-mode-start-slot-atomically--no-check-then-write-toctou-window) — the sibling half of the #360/302a fix (the atomic start lock) closing the same incident's first mechanism.
 - [`review-agent-flow.md` § Fan-out reap (INV-43)](review-agent-flow.md#multi-agent-fan-out-inv-40) — runtime walkthrough of the reap call site.
 
+
+
+## INV-103: a non-converging dev↔review loop (a `failed-substantive`+`dev-actionable=true` verdict that churns ≥N completed zero-commit dev-resume rounds against a FROZEN PR head) is detected and HALTED — the breaker posts ONE structured `reason=non-convergence` report and transitions to `stalled`, gated behind the shared `may_stall_now` live-PID pre-gate, idempotent per `{issue, head, trailer-hash}`
+
+_Triage (issue #236): [machine-checked: tests/unit/test-convergence-breaker.sh]_
+
+> Note: originally minted as INV-97 by #297; renumbered to INV-102 when main
+> claimed INV-97 (#311, `itp_transition_state` CSV); renumbered AGAIN to
+> INV-103 when #337 (`chp_pr_comment`) claimed INV-102 through
+> INV-100 (#357); #337 (INV-101, `chp_pr_comment`) was also in flight ahead of
+> this PR. Renumbered to the next free slot, INV-102, per the documented
+> first-merged-keeps-its-number convention.
+
+**Rule**: the dispatcher detects a **non-converging** dev↔review loop and halts it
+automatically instead of burning tokens in an infinite `dev-resume` loop. The
+motivating case is #286: CI-green-but-`failed-substantive` for 6+ rounds against a
+self-contradictory acceptance spec, with zero human intervention — the dispatcher
+kept re-dispatching a dev agent that could never satisfy a malformed spec. The
+breaker is the **belt** to [INV-85]'s single-shot-marker **suspenders**: INV-85
+bounds the `failed-substantive` route to ONE `dev-new` per unchanged HEAD via a
+per-HEAD attempt marker, but that marker resets on every log-truncating `dev-new`
+and can be missed when the crash-recovery path (`dispatcher-tick.sh` Step 5b)
+re-routes without writing it. INV-102 counts the DURABLE per-round evidence and
+trips deterministically after ≥N rounds.
+
+**Where** (single insertion point): `handle_completed_session_routing`'s
+`failed-substantive` case, as **Branch B″** — AFTER Branch A (bot-unfixable 403),
+Branch B ([INV-85] no-progress marker), and Branch B′ ([INV-92]
+`dev-actionable=false` → #298), and BEFORE Branch C (`dev-new`). Only a
+`failed-substantive` + `dev-actionable=true` verdict that survives A/B/B′ reaches
+the breaker. `scan-pending-dev` merely SKIPS an already-`stalled` issue (Step 0
+hygiene + label gating). This is the single existing SHA-comparison site (reuses
+`_np_current_head`/`_np_last_head`); the dev session-end timestamp is in scope
+(`session_end_iso`, passed to `classify_recent_review_verdict` arg 2).
+
+**#298 precedence** (an ordering at the same site): a `dev-actionable=false`
+verdict is owned by [INV-92]'s Branch B′ and returns via `mark_stalled` BEFORE the
+breaker — so a non-actionable round never runs OR accretes #297 history.
+
+**PRIMARY trip signal** — the PR head SHA is **FROZEN** across **≥
+`CONVERGENCE_STALL_THRESHOLD` (default 3)** COMPLETED zero-commit dev-resume
+rounds. A "completed zero-commit round" is DERIVED from the pre-existing per-round
+dispatcher comment (`dispatcher-tick.sh` Step 5b — the [INV-06]-guarded "Dev
+process exited (no new commits since last review at `<head>`)…"), which fires
+exactly once per completed zero-commit round and embeds the frozen head. #297
+writes NO per-round breadcrumb of its own — a new per-round write on a NON-trip
+round would reintroduce an orphan-artifact TOCTOU. `count_frozen_convergence_rounds`
+scans the already-emitted comment, filtered to `head == current_head` (rounds since
+the head last advanced) and yielding 0 when a `non-actionable-finding:<head>`
+Branch-B′ marker is present (that round was #298's, not #297's). The frozen-head
+gate (`current_head == last_reviewed_head`, both non-empty) is the SAME gate
+INV-85 Branch A/B use, so it never fires when HEAD advanced or no PR exists.
+
+**SECONDARY gate + report/idempotency key** — the normalized **trailer-hash** =
+`convergence_trailer_hash("{verdict}|{cause}|{dev-actionable}")` from the
+`classify_recent_review_verdict` OUT-VARS (NOT body text). All counted rounds are
+`failed-substantive` + `dev-actionable=true` by construction, so the hash is stable
+across the window; it is primarily the report + idempotency key. Match key =
+`{head, trailer-hash}` ONLY — `review-comment-id` / `dev-session-id` / timestamps
+are EVIDENCE ROWS for the report, never the key (each is fresh per round, so
+including them would make strict key-equality never match).
+
+**Distinct convergence counter, NOT `retry_count`**: the ≥N count is #297's OWN
+signal (frozen-head zero-commit rounds), distinct from the `MAX_RETRIES`
+`retry_count` `mark_stalled` uses — `retry_count` counts agent-failures +
+dispatcher-crashes (#99) and is moved by `dev-actionable=false` rounds. The count
+is persisted across ticks via the pre-existing per-round comment scan (not a
+dedicated marker), and resets when the head advances OR the trailer-hash changes.
+The #297 threshold is independent of `MAX_RETRIES`.
+
+**Eligibility pre-gate — shared `may_stall_now` (no live-PID false-trip)**:
+`label_swap` is a plain `itp_transition_state` wrapper with NO live-PID deferral
+(the [INV-26] deferral lives inside `mark_stalled`). Routing the breaker THROUGH
+`mark_stalled` would dual-post its "retry exhausted @owner" comment alongside the
+#297 report. So the [INV-26] liveness PREDICATE (the `pid_alive` probe + the
+local-backend empty-PID→DEAD narrowing) is **factored into a shared
+`may_stall_now <issue>` helper** — the liveness/eligibility predicate ONLY, with
+NO comment side-effect. BOTH `mark_stalled` (whose own `INV-26-stall-deferral`
+operator comment STAYS in `mark_stalled` — its deferral behavior is byte-identical
+before/after) AND the #297 breaker call it. The breaker calls `may_stall_now`
+WITHOUT `--at-cap` (it is not retry-exhausted; an indeterminate remote-SSM verdict
+biases ALIVE→defer = a MISS). The gate runs FIRST (a TOCTOU fix): only if the
+terminal transition WILL proceed this tick do we post the report + marker + do the
+transition — one eligibility-gated unit. A live dev PID → post NOTHING, mark
+NOTHING, defer to next tick (no orphan report/marker).
+
+**Terminal action — exactly ONE comment, declared movement**: post ONE structured
+`reason=non-convergence` report carrying the PR ref + frozen head SHA + the round
+count + the verbatim repeated finding (`recent_review_verdict_body`) + the
+`cause=`/`dev-actionable` hint + a human-action checklist + the explicit "**To
+resume: fix per the checklist, then re-add the `autonomous` label.**" instruction
++ the idempotency marker
+`<!-- dispatcher-convergence-breaker: issue=<N> head=<sha> trailer=<hash> -->`;
+THEN the terminal transition via the plain declared `pending-dev → stalled`
+`label_swap` (the SAME movement `mark_stalled` uses — NOT a new `autonomous →
+stalled` edge; `autonomous` is already OFF during the loop, removed at first
+dispatch, so halting autonomy IS the `pending-dev → stalled` move). This yields
+exactly ONE terminal comment (the #297 report — NOT `mark_stalled`'s "@owner retry
+exhausted"), plus the live-PID deferral (via the shared `may_stall_now`), plus NO
+new declared label edge (passes `check-spec-drift.sh` Check C.2 — no
+`transitions.json` / `state-machine.md` edit). `stalled` is REUSED — no new
+`deadlocked` label ([INV-102] does not fork one; both recovery actions are "read
+report, fix, re-add `autonomous`").
+
+**Idempotency**: before posting, grep bot-authored comments for the exact
+`{issue, head, trailer-hash}` marker; a re-run on the SAME case is suppressed
+(post NOTHING, do NOT re-transition), while a genuinely NEW non-convergence case (a
+new trailer-hash on the same frozen head) has a DIFFERENT marker and is
+re-evaluated.
+
+**Bias to MISS**: < N rounds, any head advance, any trailer-hash change, or a live
+dev PID → do NOT trip. `MAX_RETRIES` → `mark_stalled` remains the cheap backstop
+for everything the breaker misses — a false-trip discards a converging loop's work
++ removes autonomy (expensive on an unattended pipeline); a missed trip is caught
+by `MAX_RETRIES` (cheap).
+
+**Producer/Consumer**: `lib-dispatch.sh` — `handle_completed_session_routing`
+Branch B″ (the detect + eligibility-gate + report + transition), plus the helpers
+`may_stall_now` (shared liveness predicate), `convergence_trailer_hash`,
+`count_frozen_convergence_rounds`, `recent_review_verdict_body`. The per-round
+"no new commits" comment it counts is produced by `dispatcher-tick.sh` Step 5b
+(pre-existing, unchanged).
+
+**Why** (#297): follow-up to the #286 deadlock retrospective; sibling of #298
+([INV-92]), which proactively escalates a `dev-actionable=false` verdict. #297
+owns the separate detect-non-convergence + halt mechanism for a genuinely
+`dev-actionable=true` verdict the dev agent still cannot satisfy. The design went
+through four rounds of standard review (the original fuzzy-token-overlap detector
+was UNANIMOUS-BLOCKED as unbuildable; the deterministic frozen-head + trailer-hash
+design is what ships).
+
+**Status**: **ENFORCED** as of #297. Delta on top of
+[INV-35](#inv-35-review-aware-resume-routing-for-completed-sessions),
+[INV-85](#inv-85-the-completed-session-failed-substantive-route-is-bounded-to-one-dev-new-per-unchanged-head-a-no-progress-or-bot-unfixable-finding-escalates-to-stalled-never-loops),
+[INV-92](#inv-92-a-review-blocking-finding-the-dev-agent-provably-cannot-act-on-protected-path--missing-token-scope-is-not-routed-to-dev-resume--the-wrapper-classifies-each-findings-actionability-and-the-dispatcher-escalates-a-non-actionable-verdict-to-stalled),
+and [INV-26](#inv-26-stall-decision-excludes-dispatcher-induced-terminations-and-defers-on-live-wrappers). No `state-machine.md` label edit
+(reuses `stalled`). Design recorded in
+`docs/designs/issue-297-convergence-breaker.md`; test plan in
+`docs/test-cases/convergence-breaker.md`.
+
+**Tests**: `tests/unit/test-convergence-breaker.sh` — `convergence_trailer_hash`
+determinism (keyed on verdict|cause|dev-actionable); `count_frozen_convergence_rounds`
+(counts the per-round comment, excludes a #298 non-actionable head); the trip
+(CB-TRIP-001: ≥3 frozen + `dev-actionable=true` + eligible → ONE report + marker +
+`pending-dev → stalled`, NO `mark_stalled`, NO dev-new, log intact); the report
+content (CB-REPORT-008: PR ref + frozen SHA + resume instruction + count + verbatim
+finding); the misses (CB-MISS-002 head advanced, CB-MISS-003 < threshold);
+#298-precedence (CB-PRECEDENCE-004); live-PID defer (CB-LIVE-005: no orphan);
+idempotency (CB-IDEM-006 same key → no-op, CB-IDEM-007 new hash → re-evaluate);
+threshold override (CB-THRESH-012); the source-of-truth pins (CB-SHARED-010: both
+`mark_stalled` and the breaker call `may_stall_now`; the empty-PID→DEAD narrowing
+lives in exactly one place). `tests/unit/test-mark-stalled-liveness.sh` (extended)
+— `may_stall_now` predicate (TC-MSL-011..013: alive→DEFER side-effect-free,
+absent→ELIGIBLE, remote-indeterminate ALIVE-bias without `--at-cap` / DEAD with),
+and the UNCHANGED TC-MSL-001..010 that pin `mark_stalled`'s deferral-comment
+behavior byte-identical after the factoring.
+
+**Cross-references**:
+- [INV-85](#inv-85-the-completed-session-failed-substantive-route-is-bounded-to-one-dev-new-per-unchanged-head-a-no-progress-or-bot-unfixable-finding-escalates-to-stalled-never-loops) — the reactive single-shot no-progress guard this breaker is the deterministic ≥N belt to.
+- [INV-92](#inv-92-a-review-blocking-finding-the-dev-agent-provably-cannot-act-on-protected-path--missing-token-scope-is-not-routed-to-dev-resume--the-wrapper-classifies-each-findings-actionability-and-the-dispatcher-escalates-a-non-actionable-verdict-to-stalled) — the #298 sibling whose Branch B′ takes precedence at the same site.
+- [INV-26](#inv-26-stall-decision-excludes-dispatcher-induced-terminations-and-defers-on-live-wrappers) — the live-PID deferral whose predicate is now the shared `may_stall_now` helper both this and `mark_stalled` call.
+- [`dispatcher-flow.md`](dispatcher-flow.md) § Step 4b.5.1 — the completed-session routing table this breaker's row extends.
+
 ## Adding a new invariant
 
 When fixing a pipeline bug, after locating the bug on the state machine + flow docs:

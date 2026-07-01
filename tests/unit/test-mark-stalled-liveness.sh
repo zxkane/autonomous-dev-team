@@ -266,6 +266,52 @@ comment_calls=$(printf '%s\n' "${_GH_CALLS[@]}" | grep -E '^issue comment 110' |
 assert_no_match "TC-MSL-010 review-cap caller (no --at-cap) remote indeterminate → NO stall label edit" "issue edit.*stalled" "$edit_calls"
 assert_match    "TC-MSL-010 review-cap caller (no --at-cap) remote indeterminate → deferral comment posted (INV-30 ALIVE-bias preserved)" "INV-26-stall-deferral" "$comment_calls"
 
+# ===================================================================
+echo
+echo "=== TC-MSL-011..013: may_stall_now shared liveness helper ([INV-97] #297) ==="
+# The INV-26 liveness predicate is now the shared `may_stall_now` helper, so BOTH
+# mark_stalled AND the #297 convergence breaker share one source of truth. It
+# returns the PREDICATE ONLY (eligible=0 / defer=1) with NO comment side-effect —
+# the `INV-26-stall-deferral` operator comment STAYS in mark_stalled (asserted
+# byte-identical by TC-MSL-001/004/008 above, which are UNCHANGED after the
+# factoring).
+
+# TC-MSL-011 — may_stall_now returns 1 (DEFER) on a genuinely alive wrapper, and
+# posts NO comment (predicate is side-effect-free).
+_GH_CALLS=()
+sleep 60 &
+LIVE_PID=$!
+echo "$LIVE_PID" > "$TMPDIR/issue-201.pid"
+unset _LIVENESS_CHECK_DRIVER_OVERRIDE
+rc=0
+EXECUTION_BACKEND=local may_stall_now 201 >/dev/null 2>&1 || rc=$?
+export _LIVENESS_CHECK_DRIVER_OVERRIDE="$STUB_DRIVER"
+assert_match "TC-MSL-011 may_stall_now alive → DEFER (rc 1)" "^1$" "$rc"
+comment_calls=$(printf '%s\n' "${_GH_CALLS[@]}" | grep -E '^issue comment 201' || true)
+assert_no_match "TC-MSL-011 may_stall_now is side-effect-free (NO deferral comment)" "issue comment 201" "$comment_calls"
+kill "$LIVE_PID" 2>/dev/null || true
+wait "$LIVE_PID" 2>/dev/null || true
+rm -f "$TMPDIR/issue-201.pid"
+
+# TC-MSL-012 — may_stall_now returns 0 (ELIGIBLE) on a dead/absent wrapper.
+rc=0
+EXECUTION_BACKEND=local may_stall_now 202 >/dev/null 2>&1 || rc=$?   # no PID file
+assert_match "TC-MSL-012 may_stall_now absent PID → ELIGIBLE (rc 0)" "^0$" "$rc"
+
+# TC-MSL-013 — may_stall_now WITHOUT --at-cap under remote indeterminate keeps the
+# INV-30 ALIVE-bias → DEFER (rc 1); this is the posture the #297 breaker relies on
+# (bias to MISS). WITH --at-cap → ELIGIBLE (rc 0) on the same verdict.
+: > "$DRIVER_STDOUT_FILE"
+echo "2" > "$DRIVER_RC_FILE"
+_REMOTE_LIVENESS_DEGRADED_COUNT=0
+rc=0
+EXECUTION_BACKEND=remote-aws-ssm may_stall_now 203 >/dev/null 2>&1 || rc=$?
+assert_match "TC-MSL-013 may_stall_now WITHOUT --at-cap remote indeterminate → DEFER (rc 1, ALIVE-bias)" "^1$" "$rc"
+_REMOTE_LIVENESS_DEGRADED_COUNT=0
+rc=0
+EXECUTION_BACKEND=remote-aws-ssm may_stall_now --at-cap 203 >/dev/null 2>&1 || rc=$?
+assert_match "TC-MSL-013 may_stall_now WITH --at-cap remote indeterminate → ELIGIBLE (rc 0)" "^0$" "$rc"
+
 echo
 echo "=== Summary ==="
 echo "Passed: $PASS"
