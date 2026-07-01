@@ -50,7 +50,12 @@ matching seam lib, (ii) define/stub **every** verb of the missing family the lib
 calls — a partial stub set is NON-compliant (review round-2 P1 #1), or (iii) be
 waived. A "shell context" = the top-level test script OR one `bash -c` /
 `env … bash -c` string. A top-level seam source does NOT satisfy a `bash -c`
-sandbox that re-sources the lib (the TC-TOKEN-SPLIT-072 shape).
+sandbox that re-sources the lib (the TC-TOKEN-SPLIT-072 shape). "BEFORE" is
+POSITIONAL down to the statement segment (round-4 P1): each line is split on
+`; & |` and walked left-to-right with check-then-consume, so a same-line
+`source LIB; source SEAM` (or stub-after) is an offender while
+`source SEAM; source LIB` is compliant — for the top level, multi-line
+sandboxes, and single-line inline `bash -c` bodies alike.
 
 Source-target matching recognizes a lib source by basename: literal
 `lib-<name>.sh`, or `$VAR`/`${VAR}` where a same-file assignment of `VAR`
@@ -86,6 +91,7 @@ mktemp function-slice fixtures authored inline by their own test):
 | `TC-SEAMSRC-043` | source/verb text living only inside a heredoc body (document prose) | no offender, no unresolved finding |
 | `TC-SEAMSRC-044` | (pre-push review L1) quoted-RHS env prefix: `FOO="some value" chp_pr_view 42` / `BAR='y z' source "$MYSTERY"` | verb call detected; unresolved target surfaced — the quoted RHS is consumed by the prefix strip |
 | `TC-SEAMSRC-045` | (pre-push review L2) inline `bash -c "echo \"x\"; source …consumer…"` — escaped inner quotes before the source | inline body scanned past the escapes; seam-less consumer source flagged (first escaped quote ≠ closing quote) |
+| `TC-SEAMSRC-046` | (round-4 P1) same-line ordering: `source LIB; source SEAM` / `source LIB; verb() { :; }` / inline `bash -c "source LIB; source SEAM"` vs the compliant `source SEAM; source LIB` one-liner | seam-or-stub AFTER the lib source on the same line is an offender — the context walk is per-statement-segment left-to-right (check-then-consume), never whole-line |
 
 Negative-path fixtures mirror `test-provider-cutover.sh`'s scratch-tree pattern:
 the checker's core is a bash function driven against scratch scripts+tests dirs,

@@ -340,20 +340,46 @@ context_report() {
       }
       return (total>0)
     }
-    # body_compliant: for a SINGLE-LINE inline bash -c body — seam sourced, or
-    # every called verb defined within the body string itself.
-    function body_compliant(body,   i, n, arr, v, allv, total) {
-      if (has_seam(body)) return 1
-      n = split(VERBSTR, arr, " "); total=0; allv=1
-      for (i=1;i<=n;i++) {
-        v = arr[i]; if (v=="") continue
-        total++
-        if (body !~ ("(^|[^A-Za-z0-9_])" v "[[:space:]]*\\(\\)")) allv=0
-      }
-      return (total>0 && allv)
-    }
     function ctx_compliant(ctx) {
       return (SEAMSEEN[ctx] || all_stubbed(ctx))
+    }
+    # process_text: ORDER-AWARE per-line evaluation (#342 round-4 P1 #1). A line
+    # may hold several statements (source "$LIB"; source "$SEAM") — the seam or
+    # complete stub set must appear BEFORE the lib source POSITIONALLY, so the
+    # line is split into statement segments on ; & | and walked left-to-right:
+    # each segment is first CHECKED (does it source the lib while the context is
+    # not yet compliant?) and only then CONSUMED into seam/stub state. Whole-line
+    # state updates before the check would treat seam-after-lib one-liners as
+    # compliant — the exact round-4 false negative.
+    function process_text(text, ctx, lineno,   m, seg, i, t) {
+      m = split(text, seg, /[;&|]/)
+      for (i=1;i<=m;i++) {
+        t = seg[i]
+        if (sources_base(t, LIB) && !ctx_compliant(ctx)) print ctx "\t" lineno
+        if (has_seam(t)) SEAMSEEN[ctx]=1
+        mark_stubs(t, ctx)
+      }
+    }
+    # body_offender: the same left-to-right ordering rule for a SINGLE-LINE
+    # inline bash -c body (#342 round-4 P1 #2) — local seam flag + local stub
+    # set, a lib source is an offense unless the seam or the COMPLETE stub set
+    # precedes it within the body.
+    function body_offender(body,   m, seg, i, t, seamok, j, n, arr, v, allok, total) {
+      m = split(body, seg, /[;&|]/)
+      seamok=0
+      delete BSTUB
+      for (i=1;i<=m;i++) {
+        t = seg[i]
+        if (sources_base(t, LIB) && !seamok) {
+          n = split(VERBSTR, arr, " "); total=0; allok=1
+          for (j=1;j<=n;j++) { v=arr[j]; if (v=="") continue; total++; if (!(v in BSTUB)) allok=0 }
+          if (total==0 || !allok) return 1
+        }
+        if (has_seam(t)) seamok=1
+        n = split(VERBSTR, arr, " ")
+        for (j=1;j<=n;j++) { v=arr[j]; if (v=="") continue; if (t ~ ("(^|[^A-Za-z0-9_])" v "[[:space:]]*\\(\\)")) BSTUB[v]=1 }
+      }
+      return 0
     }
     BEGIN { depth=0; ctx="top"; SEAMSEEN["top"]=0; lineno=0 }
     {
@@ -398,7 +424,7 @@ context_report() {
           # own context — a top-level seam does NOT cover it (same rule as a
           # multi-line sandbox). Evaluate seam/complete-stub-set WITHIN the body.
           body=substr(rest, 1, close_pos-1)
-          if (sources_base(body, LIB) && !body_compliant(body)) print "bashc@" lineno "\t" lineno
+          if (body_offender(body)) print "bashc@" lineno "\t" lineno
           # depth stays 0 — we remain in the enclosing context (top or an outer
           # sandbox is not possible here since depth==0). Do NOT consume the line
           # for the top-level seam/lib scan: an inline sandbox source is the
@@ -408,11 +434,7 @@ context_report() {
         # Multi-line opener: enter the sandbox context; the opening line remainder
         # may itself carry a seam/lib (rare) — evaluate it as the first body line.
         depth=1; ctx="bashc@" lineno; SEAMSEEN[ctx]=0
-        if (rest ~ /[^[:space:]]/) {
-          if (has_seam(rest)) SEAMSEEN[ctx]=1
-          mark_stubs(rest, ctx)
-          if (sources_base(rest, LIB) && !ctx_compliant(ctx)) print ctx "\t" lineno
-        }
+        if (rest ~ /[^[:space:]]/) process_text(rest, ctx, lineno)
         next
       }
       if (depth==1) {
@@ -423,20 +445,12 @@ context_report() {
         if (qc=="\"") { if (substr(s,1,1)=="\"") closer=1 }
         else          { if (substr(s,1,1)=="\x27") closer=1 }
         if (closer) { depth=0; ctx="top"; next }
-        # inside the bash -c context:
-        if (has_seam(line)) SEAMSEEN[ctx]=1
-        mark_stubs(line, ctx)
-        if (sources_base(line, LIB)) {
-          if (!ctx_compliant(ctx)) print ctx "\t" lineno
-        }
+        # inside the bash -c context (ordered walk — round-4 P1 #1):
+        process_text(line, ctx, lineno)
         next
       }
-      # top-level context:
-      if (has_seam(line)) SEAMSEEN["top"]=1
-      mark_stubs(line, "top")
-      if (sources_base(line, LIB)) {
-        if (!ctx_compliant("top")) print "top\t" lineno
-      }
+      # top-level context (ordered walk — round-4 P1 #1):
+      process_text(line, "top", lineno)
     }
   ' "$tf"
 }
@@ -1049,6 +1063,43 @@ if printf '%s\n' "$_045_off" | grep -q 'bashc@'; then
   ok "TC-SEAMSRC-045 (review L2) escaped inner quotes do not truncate an inline bash -c body — the seam-less consumer source after them is flagged"
 else
   bad "TC-SEAMSRC-045 (review L2) inline body truncated at an escaped quote — offender missed: [$_045_off]"
+fi
+
+# TC-SEAMSRC-046 (round-4 P1 #1/#2) — POSITIONAL ordering within a context: the
+# seam/stub must precede the lib source even on the SAME line. Three offender
+# shapes: (a) top-level `source LIB; source SEAM`, (b) top-level
+# `source LIB; verb() { :; }` stub-after, (c) inline bash -c
+# `"source LIB; source SEAM"`. Plus the positive control (seam;lib one-liner).
+S="$(mk_scratch 046)"
+cat > "$S/tests/test-order-a.sh" <<EOF
+#!/bin/bash
+SEAM="$S/scripts/lib-code-host.sh"
+LIBC="$S/scripts/lib-fixture-consumer.sh"
+source "\$LIBC"; source "\$SEAM"
+EOF
+cat > "$S/tests/test-order-b.sh" <<EOF
+#!/bin/bash
+LIBC="$S/scripts/lib-fixture-consumer.sh"
+source "\$LIBC"; chp_pr_view() { :; }
+EOF
+cat > "$S/tests/test-order-c.sh" <<EOF
+#!/bin/bash
+z=\$(bash -c "source \\"$S/scripts/lib-fixture-consumer.sh\\"; source \\"$S/scripts/lib-code-host.sh\\"")
+EOF
+cat > "$S/tests/test-order-ok.sh" <<EOF
+#!/bin/bash
+SEAM="$S/scripts/lib-code-host.sh"
+LIBC="$S/scripts/lib-fixture-consumer.sh"
+source "\$SEAM"; source "\$LIBC"
+EOF
+_046_a="$(harness_offenders "$S/tests/test-order-a.sh" "$S/scripts")"
+_046_b="$(harness_offenders "$S/tests/test-order-b.sh" "$S/scripts")"
+_046_c="$(harness_offenders "$S/tests/test-order-c.sh" "$S/scripts")"
+_046_ok="$(harness_offenders "$S/tests/test-order-ok.sh" "$S/scripts")"
+if [ -n "$_046_a" ] && [ -n "$_046_b" ] && printf '%s\n' "$_046_c" | grep -q 'bashc@' && [ -z "$_046_ok" ]; then
+  ok "TC-SEAMSRC-046 (round-4 P1) same-line seam/stub AFTER the lib source is an offender (top-level ×2 + inline bash -c); seam-then-lib one-liner stays compliant"
+else
+  bad "TC-SEAMSRC-046 (round-4 P1) FAILED — a=[$_046_a] b=[$_046_b] c=[$_046_c] ok=[$_046_ok]"
 fi
 
 # ===========================================================================
