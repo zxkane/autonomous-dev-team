@@ -189,6 +189,8 @@ _verb_call_tokens() {
           if (t ~ /^!([[:space:]]|$)/)  { sub(/^![[:space:]]*/, "", t); changed=1 }
           if (t ~ /^(if|then|elif|else|do|while|until|time)([[:space:]]|$)/) { sub(/^[A-Za-z]+[[:space:]]*/, "", t); changed=1 }
           if (t ~ /^[A-Za-z_][A-Za-z0-9_]*=[^"\x27[:space:]]*([[:space:]]|$)/) { sub(/^[A-Za-z_][A-Za-z0-9_]*=[^"\x27[:space:]]*[[:space:]]*/, "", t); changed=1 }
+          if (t ~ /^[A-Za-z_][A-Za-z0-9_]*="[^"]*"/) { sub(/^[A-Za-z_][A-Za-z0-9_]*="[^"]*"[[:space:]]*/, "", t); changed=1 }
+          if (t ~ /^[A-Za-z_][A-Za-z0-9_]*=\x27[^\x27]*\x27/) { sub(/^[A-Za-z_][A-Za-z0-9_]*=\x27[^\x27]*\x27[[:space:]]*/, "", t); changed=1 }
         }
         w = t; sub(/[[:space:]].*$/, "", w)
         if (w ~ /^(itp|chp)_[A-Za-z0-9_]+$/) print w
@@ -375,12 +377,27 @@ context_report() {
         # in this tree the close is the next occurrence of the same quote char on
         # this line (nested inner quotes use the OTHER quote, so the first same-qc
         # char is the true close). If so, this is a self-contained inline sandbox.
-        inline_close = (index(rest, qc) > 0)
+        # Find the TRUE closing quote: for a double-quoted body, skip
+        # backslash-escaped \" occurrences (test-token-split-234.sh:36-style
+        # inline sandboxes carry escaped inner quotes; keying on the FIRST
+        # quote char would truncate the body there and miss a consumer source
+        # after it). Single-quoted bodies cannot contain escaped \x27 in bash.
+        close_pos = 0
+        if (qc == "\"") {
+          probe = rest; off = 0
+          while (close_pos == 0 && (ix = index(probe, qc)) > 0) {
+            if (ix > 1 && substr(probe, ix-1, 1) == "\\") { off += ix; probe = substr(probe, ix+1) }
+            else close_pos = off + ix
+          }
+        } else {
+          close_pos = index(rest, qc)
+        }
+        inline_close = (close_pos > 0)
         if (inline_close) {
           # Inline sandbox: its body is rest up to the closing quote. It is its
           # own context — a top-level seam does NOT cover it (same rule as a
           # multi-line sandbox). Evaluate seam/complete-stub-set WITHIN the body.
-          body=rest; sub(qc ".*$", "", body)
+          body=substr(rest, 1, close_pos-1)
           if (sources_base(body, LIB) && !body_compliant(body)) print "bashc@" lineno "\t" lineno
           # depth stays 0 — we remain in the enclosing context (top or an outer
           # sandbox is not possible here since depth==0). Do NOT consume the line
@@ -509,6 +526,8 @@ unresolved_source_targets() {
           if (t ~ /^!([[:space:]]|$)/)  { sub(/^![[:space:]]*/, "", t); changed=1 }
           if (t ~ /^(if|then|elif|else|do|while|until|time)([[:space:]]|$)/) { sub(/^[A-Za-z]+[[:space:]]*/, "", t); changed=1 }
           if (t ~ /^[A-Za-z_][A-Za-z0-9_]*=[^"\x27[:space:]]*([[:space:]]|$)/) { sub(/^[A-Za-z_][A-Za-z0-9_]*=[^"\x27[:space:]]*[[:space:]]*/, "", t); changed=1 }
+          if (t ~ /^[A-Za-z_][A-Za-z0-9_]*="[^"]*"/) { sub(/^[A-Za-z_][A-Za-z0-9_]*="[^"]*"[[:space:]]*/, "", t); changed=1 }
+          if (t ~ /^[A-Za-z_][A-Za-z0-9_]*=\x27[^\x27]*\x27/) { sub(/^[A-Za-z_][A-Za-z0-9_]*=\x27[^\x27]*\x27[[:space:]]*/, "", t); changed=1 }
         }
         w = t; sub(/[[:space:]].*$/, "", w)
         if (w != "source" && w != ".") continue
@@ -993,6 +1012,43 @@ if [ -z "$_043_off" ] && [ -z "$_043_unres" ]; then
   ok "TC-SEAMSRC-043 heredoc-body source/verb text is document prose — no offender, no unresolved finding"
 else
   bad "TC-SEAMSRC-043 heredoc prose was scanned as executable — off=[$_043_off] unres=[$_043_unres]"
+fi
+
+# TC-SEAMSRC-044 (pre-push review L1) — a QUOTED-RHS env-assignment prefix must
+# not defeat detection: `FOO="some value" chp_pr_view 42` is a command-position
+# call, and `BAR='y z' source "$MYSTERY"` is an unresolved source target.
+S="$(mk_scratch 044)"
+cat > "$S/scripts/lib-fixture-envpfx.sh" <<'ENV'
+#!/bin/bash
+envpfx_read() { FOO="some value" chp_pr_view "$1"; }
+ENV
+_044_verbs="$(_verb_call_tokens "$S/scripts/lib-fixture-envpfx.sh")"
+{
+  printf '%s\n' '#!/bin/bash'
+  printf '%s\n' "BAR='y z' source \"\$MYSTERY\""
+} > "$S/tests/test-envpfx.sh"
+_044_unres="$(unresolved_source_targets "$S/tests/test-envpfx.sh")"
+if printf '%s\n' "$_044_verbs" | grep -qx 'chp_pr_view' \
+   && printf '%s\n' "$_044_unres" | grep -q '^MYSTERY	'; then
+  ok "TC-SEAMSRC-044 (review L1) quoted-RHS env prefix does not hide a verb call or an unresolved source target"
+else
+  bad "TC-SEAMSRC-044 (review L1) FAILED — verbs=[$_044_verbs] unres=[$_044_unres]"
+fi
+
+# TC-SEAMSRC-045 (pre-push review L2) — an inline bash -c body with ESCAPED
+# inner quotes before the consumer source is still scanned past the escapes:
+# z=$(bash -c "echo \"x\"; source …consumer…; …") must flag the inline sandbox
+# (the first escaped quote is NOT the closing quote).
+S="$(mk_scratch 045)"
+cat > "$S/tests/test-inline-escq.sh" <<EOF
+#!/bin/bash
+z=\$(bash -c "echo \\"x\\"; source '$S/scripts/lib-fixture-consumer.sh'; fixture_read 1")
+EOF
+_045_off="$(harness_offenders "$S/tests/test-inline-escq.sh" "$S/scripts")"
+if printf '%s\n' "$_045_off" | grep -q 'bashc@'; then
+  ok "TC-SEAMSRC-045 (review L2) escaped inner quotes do not truncate an inline bash -c body — the seam-less consumer source after them is flagged"
+else
+  bad "TC-SEAMSRC-045 (review L2) inline body truncated at an escaped quote — offender missed: [$_045_off]"
 fi
 
 # ===========================================================================

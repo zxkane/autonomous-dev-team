@@ -84,6 +84,8 @@ mktemp function-slice fixtures authored inline by their own test):
 | `TC-SEAMSRC-041` | (round-2 P1 #2) `source "$PICK"` where `PICK=$(pick_a_lib_somehow)` vs literal-bound `$LIBC` | opaque target SURFACES as unresolved; literal-bound does not |
 | `TC-SEAMSRC-042` | (round-2 P1 #3) a lib whose only verb mentions are assignment RHS / quoted string / `declare -F` guard, then + one real call | mentions-only → NOT a consumer; command-position call → consumer |
 | `TC-SEAMSRC-043` | source/verb text living only inside a heredoc body (document prose) | no offender, no unresolved finding |
+| `TC-SEAMSRC-044` | (pre-push review L1) quoted-RHS env prefix: `FOO="some value" chp_pr_view 42` / `BAR='y z' source "$MYSTERY"` | verb call detected; unresolved target surfaced — the quoted RHS is consumed by the prefix strip |
+| `TC-SEAMSRC-045` | (pre-push review L2) inline `bash -c "echo \"x\"; source …consumer…"` — escaped inner quotes before the source | inline body scanned past the escapes; seam-less consumer source flagged (first escaped quote ≠ closing quote) |
 
 Negative-path fixtures mirror `test-provider-cutover.sh`'s scratch-tree pattern:
 the checker's core is a bash function driven against scratch scripts+tests dirs,
