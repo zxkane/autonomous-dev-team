@@ -1161,13 +1161,24 @@ count_review_aware_flips() {
 # INV-97 (#297): convergence circuit-breaker helpers.
 # ---------------------------------------------------------------------------
 
+# convergence_canonical <verdict> <cause> <dev_actionable>
+#
+# Echoes the canonical trailer string `{verdict}|{cause}|{dev-actionable}`
+# (pipe-delimited, empty string for absent fields), derived from the
+# `classify_recent_review_verdict` OUT-VARS — NOT body text ([INV-97] C1/C2). This
+# is the SINGLE source of truth for the convergence match key: `convergence_trailer_hash`
+# hashes it for the compact marker key, and `count_frozen_convergence_rounds` joins
+# each zero-commit round's preceding verdict against it ([P1] finding 1: only rounds
+# whose classified trailer matches the ACTIVE {head, trailer} case count).
+convergence_canonical() {
+  printf '%s|%s|%s' "${1:-}" "${2:-}" "${3:-}"
+}
+
 # convergence_trailer_hash <verdict> <cause> <dev_actionable>
 #
-# Echoes a stable hash of the canonical string `{verdict}|{cause}|{dev-actionable}`
-# (pipe-delimited, empty string for absent fields), derived from the
-# `classify_recent_review_verdict` OUT-VARS — NOT from body text ([INV-97] C1/C2).
-# Used as the SECONDARY convergence gate (same verdict CLASS across rounds) and as
-# the idempotency-marker + report key. `review-comment-id` / `dev-session-id` /
+# Echoes a stable hash of the canonical string (see convergence_canonical), used as
+# the SECONDARY convergence gate (same verdict CLASS across rounds) and as the
+# idempotency-marker + report key. `review-comment-id` / `dev-session-id` /
 # timestamps are deliberately EXCLUDED from the hash — each is fresh per round, so
 # including them would make strict key-equality never match (codex R2/C2).
 #
@@ -1175,7 +1186,8 @@ count_review_aware_flips() {
 # idempotency key); falls back to `cksum` when sha1sum is absent so the helper
 # never aborts the tick under `set -e`.
 convergence_trailer_hash() {
-  local _canon="${1:-}|${2:-}|${3:-}"
+  local _canon
+  _canon="$(convergence_canonical "${1:-}" "${2:-}" "${3:-}")"
   if command -v sha1sum >/dev/null 2>&1; then
     printf '%s' "$_canon" | sha1sum | cut -c1-12
   else
@@ -1183,52 +1195,98 @@ convergence_trailer_hash() {
   fi
 }
 
-# count_frozen_convergence_rounds <issue_num> <frozen_head>
+# _frozen_convergence_rounds_json <issue_num> <frozen_head> <active_canonical>
 #
-# Echoes the number of COMPLETED zero-commit dev-resume rounds observed against
-# `<frozen_head>` ([INV-97] C1/C9a). The count is DERIVED from the pre-existing
-# per-round dispatcher comment (`dispatcher-tick.sh` Step 5b, the [INV-06]-guarded
-# "Dev process exited (no new commits since last review at `<head>`)…"), which
-# fires exactly once per completed zero-commit round and embeds the frozen head.
-# #297 writes NO per-round breadcrumb of its own — a new per-round write on a
-# NON-trip round would reintroduce the C7 orphan-artifact TOCTOU. We SCAN the
-# already-emitted comment instead.
+# Emits a JSON array of the COMPLETED zero-commit dev-resume rounds on
+# `<frozen_head>` that belong to the ACTIVE convergence case — each element is
+# `{createdAt}` (the round comment's timestamp), sorted ascending. This is the
+# single source of truth backing BOTH `count_frozen_convergence_rounds` (its
+# length) and the [INV-97] report's per-round timestamp evidence ([P1] finding 2).
 #
-# Filter: `head == frozen_head` (rounds since the head last advanced) AND the
-# round was NOT routed to #298 ([INV-92]) — a `non-actionable-finding:<head>`
-# escalation marker on this head means a `dev-actionable=false` round already
-# stalled the issue, so it must NOT accrete #297 history (C6/C8). The current
-# verdict is `failed-substantive` + `dev-actionable=true` by construction (the
-# breaker's call site is reached only then), so the join reduces to: count the
-# frozen-head per-round comments, and yield 0 when a Branch-B′ #298 marker is
-# present for this head.
+# Derivation ([INV-97] C1/C9a): rounds are the pre-existing per-round dispatcher
+# comment (`dispatcher-tick.sh` Step 5b, the [INV-06]-guarded "Dev process exited
+# (no new commits since last review at `<head>`)…"), which fires exactly once per
+# completed zero-commit round and embeds the frozen head. #297 writes NO per-round
+# breadcrumb of its own — a new per-round write on a NON-trip round would
+# reintroduce the C7 orphan-artifact TOCTOU. We SCAN the already-emitted comment.
 #
-# Fail-closed toward NOT tripping: an empty/error fetch yields 0 (biases to MISS
-# per R4 — MAX_RETRIES is the backstop). Uses a LITERAL `contains()` substring
-# match (engine-agnostic, no RE2/Oniguruma divergence). The frozen head is
-# 7-40 lowercase hex, so it needs no jq-string escaping.
-count_frozen_convergence_rounds() {
+# JOIN ([P1] finding 1 — the fix for early-trip / forever-suppression): counting
+# EVERY frozen-head zero-commit comment is wrong — stale `failed-non-substantive`
+# or `dev-actionable=false` history on the SAME SHA (from an earlier, now-resolved
+# case) would either trip the breaker early or, via the old blanket
+# `non-actionable-finding:<head>` zero-out, suppress a genuine later
+# `dev-actionable=true` non-convergence forever. Instead, each round is joined to
+# the review VERDICT it was reacting to — the newest `<!-- review-verdict: … -->`
+# trailer comment strictly BEFORE the round comment — and counted ONLY when that
+# verdict's canonical `{verdict}|{cause}|{dev-actionable}` equals `<active_canonical>`
+# (the current `failed-substantive|<cause>|true` case, per convergence_canonical).
+# So the count is the ACTIVE {head, trailer} window, not the whole head's history:
+# a `dev-actionable=false` round's canonical (`…|false`) or a non-substantive
+# round's (`failed-non-substantive|…`) never matches and is excluded — no separate
+# #298-marker zero-out needed (a false round is handled by Branch B′ precedence for
+# the CURRENT round, and excluded from the count for PRIOR rounds).
+#
+# Fail-closed toward NOT tripping: an empty/error fetch yields `[]` (biases to
+# MISS per R4). The trailer parse mirrors classify_recent_review_verdict: verdict
+# = first `[a-z-]+` token; cause captured ONLY for failed-non-substantive; absent
+# dev-actionable ⇒ "true". jq 1.6 Oniguruma `capture()` (same engine the sibling
+# session-id/dispatcher-token reads use). The frozen head is 7-40 lowercase hex.
+_frozen_convergence_rounds_json() {
   local issue_num="$1"
   local frozen_head="$2"
-  [ -n "$frozen_head" ] || { printf '%s' "0"; return 0; }
+  local active_canonical="$3"
+  { [ -n "$frozen_head" ] && [ -n "$active_canonical" ]; } || { printf '%s' "[]"; return 0; }
 
   local _comments
-  _comments=$(itp_list_comments "$issue_num" 2>/dev/null) || { printf '%s' "0"; return 0; }
+  _comments=$(itp_list_comments "$issue_num" 2>/dev/null) || { printf '%s' "[]"; return 0; }
 
-  # If a #298 non-actionable escalation already fired for this head, the loop was
-  # NOT a #297 non-convergence case — do not count it (C6/C8).
-  local _na_present
-  _na_present=$(jq -r "[.[].body | select(contains(\"non-actionable-finding:${frozen_head}\"))] | length" \
-    2>/dev/null <<<"$_comments")
-  if [ "${_na_present:-0}" != "0" ]; then printf '%s' "0"; return 0; fi
+  # jq program:
+  #  - `canon(body)`: parse the review-verdict trailer into the canonical
+  #    `{verdict}|{cause}|{dev-actionable}`, mirroring classify_recent_review_verdict
+  #    (cause only for failed-non-substantive; absent dev-actionable ⇒ true).
+  #  - For each round comment on the frozen head, find the newest verdict trailer
+  #    comment with createdAt < the round's, compute its canonical, keep the round
+  #    iff that canonical == $ac. Emit the matched rounds' {createdAt}, sorted.
+  jq -c --arg head "$frozen_head" --arg ac "$active_canonical" '
+    def trailer($b):
+      ($b | capture("<!--[[:space:]]*review-verdict:[[:space:]]*(?<v>[a-z-]+)(?<rest>[^>]*)-->"; "g") ) // null;
+    def canon($b):
+      trailer($b) as $t
+      | if $t == null then null
+        else
+          ($t.v) as $v
+          | ( $t.rest | (capture("cause=(?<c>[a-zA-Z0-9_-]+)").c) // "" ) as $c
+          | ( $t.rest | (capture("dev-actionable=(?<d>[a-z]+)").d) // "true" ) as $d
+          | (if $v == "failed-non-substantive" then $c else "" end) as $cc
+          | "\($v)|\($cc)|\($d)"
+        end;
+    ( [ .[] | select(.body | type == "string") ] | sort_by(.createdAt) ) as $all
+    | [ $all[]
+        | select(.body | contains("no new commits since last review at `" + $head + "`"))
+        | . as $round
+        | ( [ $all[] | select((.createdAt < $round.createdAt) and (canon(.body) != null)) ]
+            | last ) as $pv
+        | select($pv != null and (canon($pv.body) == $ac))
+        | {createdAt: $round.createdAt}
+      ]
+  ' 2>/dev/null <<<"$_comments" || printf '%s' "[]"
+}
 
-  # Count the per-round "no new commits since last review at `<frozen_head>`"
-  # comments. The literal carries the head inside backticks; match the exact
-  # phrase + head so an unrelated mention can't inflate the count.
-  local _count
-  _count=$(jq -r "[.[].body | select(contains(\"no new commits since last review at \`${frozen_head}\`\"))] | length" \
-    2>/dev/null <<<"$_comments")
-  printf '%s' "${_count:-0}"
+# count_frozen_convergence_rounds <issue_num> <frozen_head> <active_canonical>
+#
+# Echoes the number of ACTIVE-case completed zero-commit dev-resume rounds on
+# `<frozen_head>` — the length of `_frozen_convergence_rounds_json` ([INV-97]
+# C1/C9a + [P1] finding 1: only rounds whose preceding verdict matches the active
+# `{verdict}|{cause}|{dev-actionable}` canonical count). Fail-closed to 0.
+count_frozen_convergence_rounds() {
+  local _rounds _n
+  _rounds="$(_frozen_convergence_rounds_json "$1" "$2" "${3:-}")"
+  # `|| echo 0` guards the substitution under `set -euo pipefail` for symmetry with
+  # the live Branch B″ site (which inlines the guarded variant). `_rounds` is always
+  # `[]` or valid `jq -c` output today, but a future live caller must not risk a
+  # tick abort here.
+  _n="$(jq -r 'length' 2>/dev/null <<<"$_rounds" || echo 0)"
+  printf '%s' "${_n:-0}"
 }
 
 # recent_review_verdict_body <issue_num> <session_end_iso>
@@ -1468,11 +1526,20 @@ handle_completed_session_routing() {
       # errors out). A non-numeric threshold ⇒ default 3; a non-numeric count ⇒ 0
       # (bias to MISS, R4).
       [[ "$_cb_threshold" =~ ^[0-9]+$ ]] || _cb_threshold=3
-      local _cb_rounds=0
+      # The ACTIVE convergence case's canonical `{verdict}|{cause}|{dev-actionable}`
+      # ([P1] finding 1): the count + report timestamps window on THIS case, not the
+      # whole head's stale history. Here it is `failed-substantive|<cause>|true` by
+      # construction (Branch A/B/B′ already returned for the other classes).
+      local _cb_canonical
+      _cb_canonical="$(convergence_canonical "$_verdict" "$_cause" "$_dev_actionable")"
+      local _cb_rounds=0 _cb_rounds_json="[]"
       # Frozen head requires a resolved, unchanged HEAD (same gate INV-85 A/B use).
       if [ -n "$_np_current_head" ] && [ -n "$_np_last_head" ] \
          && [ "$_np_current_head" = "$_np_last_head" ]; then
-        _cb_rounds=$(count_frozen_convergence_rounds "$issue_num" "$_np_current_head")
+        # Compute the matched-rounds JSON ONCE (used for both the count and the
+        # report's per-round timestamp evidence, [P1] finding 2).
+        _cb_rounds_json="$(_frozen_convergence_rounds_json "$issue_num" "$_np_current_head" "$_cb_canonical")"
+        _cb_rounds="$(jq -r 'length' 2>/dev/null <<<"$_cb_rounds_json" || echo 0)"
         [[ "$_cb_rounds" =~ ^[0-9]+$ ]] || _cb_rounds=0
       fi
       if [ "$_cb_threshold" -gt 0 ] && [ "$_cb_rounds" -ge "$_cb_threshold" ]; then
@@ -1521,6 +1588,14 @@ handle_completed_session_routing() {
         local _cb_verdict_body
         _cb_verdict_body=$(recent_review_verdict_body "$issue_num" "$session_end_iso" 2>/dev/null || true)
 
+        # Per-round timestamps of the counted completed dev-resume rounds ([P1]
+        # finding 2 / #297 spec evidence block): a comma-separated ISO list, in
+        # order, from the SAME matched-rounds JSON the count is derived from — so
+        # the report shows exactly which completed zero-commit rounds tripped the
+        # breaker. Best-effort; empty ⇒ the report omits the list gracefully.
+        local _cb_round_ts
+        _cb_round_ts="$(jq -r '[.[].createdAt] | join(", ")' 2>/dev/null <<<"$_cb_rounds_json" || true)"
+
         # Post the ONE structured `reason=non-convergence` report + marker, THEN the
         # terminal transition via the plain declared `pending-dev → stalled`
         # `label_swap` — one eligibility-gated unit (C4′/C5/C7). Exactly ONE terminal
@@ -1552,6 +1627,7 @@ acceptance criterion, or a fix the agent's scoped token can't apply).
 - Repeated substantive review verdict (\`cause=${_cause:-<none>}\`, \`dev-actionable=${_dev_actionable}\`):
 $(if [ -n "$_cb_verdict_body" ]; then printf '  > %s\n' "${_cb_verdict_body:0:600}"; else printf '  > (verdict body unavailable — see the latest review comment above)\n'; fi)
 - Repeated-failure count on this frozen head: **${_cb_rounds}**
+- Counted completed dev-resume rounds (timestamps): ${_cb_round_ts:-(unavailable)}
 
 **Human action needed** — pick one, then resume:
 - [ ] Rewrite the invalid / self-contradictory acceptance criterion in the issue body, OR

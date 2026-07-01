@@ -5656,26 +5656,47 @@ breaker — so a non-actionable round never runs OR accretes #297 history.
 
 **PRIMARY trip signal** — the PR head SHA is **FROZEN** across **≥
 `CONVERGENCE_STALL_THRESHOLD` (default 3)** COMPLETED zero-commit dev-resume
-rounds. A "completed zero-commit round" is DERIVED from the pre-existing per-round
-dispatcher comment (`dispatcher-tick.sh` Step 5b — the [INV-06]-guarded "Dev
-process exited (no new commits since last review at `<head>`)…"), which fires
-exactly once per completed zero-commit round and embeds the frozen head. #297
-writes NO per-round breadcrumb of its own — a new per-round write on a NON-trip
-round would reintroduce an orphan-artifact TOCTOU. `count_frozen_convergence_rounds`
-scans the already-emitted comment, filtered to `head == current_head` (rounds since
-the head last advanced) and yielding 0 when a `non-actionable-finding:<head>`
-Branch-B′ marker is present (that round was #298's, not #297's). The frozen-head
-gate (`current_head == last_reviewed_head`, both non-empty) is the SAME gate
-INV-85 Branch A/B use, so it never fires when HEAD advanced or no PR exists.
+rounds **belonging to the ACTIVE convergence case**. A "completed zero-commit
+round" is DERIVED from the pre-existing per-round dispatcher comment
+(`dispatcher-tick.sh` Step 5b — the [INV-06]-guarded "Dev process exited (no new
+commits since last review at `<head>`)…"), which fires exactly once per completed
+zero-commit round and embeds the frozen head. #297 writes NO per-round breadcrumb
+of its own — a new per-round write on a NON-trip round would reintroduce an
+orphan-artifact TOCTOU. `_frozen_convergence_rounds_json` scans the already-emitted
+comments, filtered to `head == current_head` (rounds since the head last advanced),
+and **joins each round to the review VERDICT it was reacting to** — the newest
+`<!-- review-verdict: … -->` trailer comment strictly BEFORE the round comment —
+counting the round **only when that verdict's canonical
+`{verdict}|{cause}|{dev-actionable}` equals the ACTIVE case's canonical**
+(`failed-substantive|<cause>|true` here). `count_frozen_convergence_rounds` is its
+length; the SAME matched-rounds JSON supplies the report's per-round timestamps.
+
+The per-round trailer JOIN (the [P1] round-1 review fix) is load-bearing:
+counting **every** frozen-head zero-commit comment would (a) let stale
+`failed-non-substantive` or `dev-actionable=false` history on the SAME SHA (from an
+earlier, now-resolved case) TRIP the breaker EARLY, and (b) — via the old blanket
+`non-actionable-finding:<head>` zero-out — SUPPRESS a genuine later
+`dev-actionable=true` non-convergence on that SHA FOREVER. Joining to the
+per-round verdict windows the count to the active `{head, trailer}` case: a
+`dev-actionable=false` round's canonical (`…|false`) or a non-substantive round's
+(`failed-non-substantive|…`) never matches and is excluded — no separate #298-marker
+zero-out is needed (a `dev-actionable=false` CURRENT round is handled by Branch B′
+precedence; PRIOR ones are simply not counted). The frozen-head gate
+(`current_head == last_reviewed_head`, both non-empty) is the SAME gate INV-85
+Branch A/B use, so it never fires when HEAD advanced or no PR exists.
 
 **SECONDARY gate + report/idempotency key** — the normalized **trailer-hash** =
-`convergence_trailer_hash("{verdict}|{cause}|{dev-actionable}")` from the
-`classify_recent_review_verdict` OUT-VARS (NOT body text). All counted rounds are
-`failed-substantive` + `dev-actionable=true` by construction, so the hash is stable
-across the window; it is primarily the report + idempotency key. Match key =
-`{head, trailer-hash}` ONLY — `review-comment-id` / `dev-session-id` / timestamps
-are EVIDENCE ROWS for the report, never the key (each is fresh per round, so
-including them would make strict key-equality never match).
+`convergence_trailer_hash` of the canonical `{verdict}|{cause}|{dev-actionable}`
+(via `convergence_canonical`, the SINGLE source of truth the per-round JOIN and the
+marker key share) from the `classify_recent_review_verdict` OUT-VARS (NOT body
+text). All counted rounds share the active canonical by construction, so the hash is
+stable across the window; it is the report + idempotency key. Match key =
+`{head, trailer-hash}` ONLY — `review-comment-id` / `dev-session-id` are EVIDENCE
+never the key (each is fresh per round, so including them would make strict
+key-equality never match). **The counted rounds' per-round timestamps ARE surfaced
+in the report's evidence block** (the [P1] round-1 review fix — the halted report
+names exactly which completed dev-resume rounds were used), sourced from the same
+matched-rounds JSON, but are still never part of the match key.
 
 **Distinct convergence counter, NOT `retry_count`**: the ≥N count is #297's OWN
 signal (frozen-head zero-commit rounds), distinct from the `MAX_RETRIES`
@@ -5756,12 +5777,16 @@ and [INV-26](#inv-26-stall-decision-excludes-dispatcher-induced-terminations-and
 `docs/test-cases/convergence-breaker.md`.
 
 **Tests**: `tests/unit/test-convergence-breaker.sh` — `convergence_trailer_hash`
-determinism (keyed on verdict|cause|dev-actionable); `count_frozen_convergence_rounds`
-(counts the per-round comment, excludes a #298 non-actionable head); the trip
-(CB-TRIP-001: ≥3 frozen + `dev-actionable=true` + eligible → ONE report + marker +
-`pending-dev → stalled`, NO `mark_stalled`, NO dev-new, log intact); the report
-content (CB-REPORT-008: PR ref + frozen SHA + resume instruction + count + verbatim
-finding); the misses (CB-MISS-002 head advanced, CB-MISS-003 < threshold);
+determinism (keyed on verdict|cause|dev-actionable); the trailer-joined
+`count_frozen_convergence_rounds` (CB-COUNT-009a stale non-substantive rounds on the
+same SHA EXCLUDED — no early trip; CB-COUNT-009b a prior `dev-actionable=false`
+round EXCLUDED without zeroing the genuine active rounds — no forever-suppression;
+CB-COUNT-009c a non-matching active canonical → 0); the trip (CB-TRIP-001: ≥3 frozen
++ `dev-actionable=true` + eligible → ONE report + marker + `pending-dev → stalled`,
+NO `mark_stalled`, NO dev-new, log intact); the report content (CB-REPORT-008: PR
+ref + frozen SHA + resume instruction + count + verbatim finding + the **per-round
+timestamps** of the counted rounds — [P1] round-1 review fix); the misses
+(CB-MISS-002 head advanced, CB-MISS-003 < threshold);
 #298-precedence (CB-PRECEDENCE-004); live-PID defer (CB-LIVE-005: no orphan);
 idempotency (CB-IDEM-006 same key → no-op, CB-IDEM-007 new hash → re-evaluate);
 threshold override (CB-THRESH-012); the source-of-truth pins (CB-SHARED-010: both

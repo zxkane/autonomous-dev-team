@@ -54,7 +54,10 @@ _MOCK_PR_NUMBER="777"
 _MOCK_LAST_REVIEWED_HEAD=""
 _MOCK_BOT_UNFIXABLE=1
 # Convergence-specific:
-_MOCK_FROZEN_ROUND_COMMENTS=0     # how many "no new commits since last review at `<head>`" comments to synthesize
+_MOCK_FROZEN_ROUND_COMMENTS=0     # how many ACTIVE-case (matching-trailer) frozen-head rounds to synthesize
+_MOCK_STALE_ROUNDS=0              # how many STALE (non-matching-trailer) frozen-head rounds to prepend ([P1] finding 1)
+_MOCK_STALE_VERDICT_TRAILER="<!-- review-verdict: failed-non-substantive cause=bot-timeout -->"  # the stale rounds' preceding verdict
+_MOCK_ROUND_VERDICT_TRAILER="<!-- review-verdict: failed-substantive -->"  # the active rounds' preceding verdict (canonical failed-substantive||true)
 _MOCK_NONACT_MARKER_PRESENT=0     # a non-actionable-finding:<head> marker already on the issue?
 _MOCK_CB_MARKER_PRESENT=0         # a dispatcher-convergence-breaker marker (same trailer) already posted?
 _MOCK_CB_MARKER_HASH=""           # the trailer-hash the synthesized existing marker carries
@@ -103,15 +106,30 @@ may_stall_now() {
   return 0
 }
 
-# Synthesize the normalized issue-comment array. Emits:
-#   - _MOCK_FROZEN_ROUND_COMMENTS copies of the per-round "no new commits" comment
-#     for the current head (this is what count_frozen_convergence_rounds counts),
+# Synthesize the normalized issue-comment array. [P1] finding 1: each per-round
+# "no new commits" comment is now PRECEDED by a review-verdict trailer comment, so
+# the join in _frozen_convergence_rounds_json can classify each round. Emits, in
+# chronological order:
+#   - _MOCK_STALE_ROUNDS pairs of (STALE verdict trailer + round comment) on the
+#     current head FIRST — these have a non-matching canonical (default a
+#     failed-non-substantive trailer) and MUST be excluded from the count,
+#   - _MOCK_FROZEN_ROUND_COMMENTS pairs of (_MOCK_ROUND_VERDICT_TRAILER + round
+#     comment) on the current head — the ACTIVE-case rounds the count includes,
 #   - a non-actionable-finding:<head> marker when _MOCK_NONACT_MARKER_PRESENT,
 #   - an existing dispatcher-convergence-breaker marker when _MOCK_CB_MARKER_PRESENT.
+# Timestamps are zero-padded to 4 digits so >9 comments stay monotonic.
 itp_list_comments() {
   local _bodies=() i
+  local _round="Dev process exited (no new commits since last review at \`${_MOCK_PR_HEAD}\`). Moving to pending-dev for retry."
+  # Stale, non-matching rounds first (default: failed-non-substantive → different canonical).
+  for ((i = 0; i < ${_MOCK_STALE_ROUNDS:-0}; i++)); do
+    _bodies+=("${_MOCK_STALE_VERDICT_TRAILER:-<!-- review-verdict: failed-non-substantive cause=bot-timeout -->}")
+    _bodies+=("$_round")
+  done
+  # Active-case rounds: each preceded by the active verdict trailer.
   for ((i = 0; i < _MOCK_FROZEN_ROUND_COMMENTS; i++)); do
-    _bodies+=("Dev process exited (no new commits since last review at \`${_MOCK_PR_HEAD}\`). Moving to pending-dev for retry.")
+    _bodies+=("${_MOCK_ROUND_VERDICT_TRAILER:-<!-- review-verdict: failed-substantive -->}")
+    _bodies+=("$_round")
   done
   if [[ "$_MOCK_NONACT_MARKER_PRESENT" != "0" ]]; then
     _bodies+=("non-actionable-finding:${_MOCK_PR_HEAD} prior escalation")
@@ -119,10 +137,20 @@ itp_list_comments() {
   if [[ "$_MOCK_CB_MARKER_PRESENT" != "0" ]]; then
     _bodies+=("<!-- dispatcher-convergence-breaker: issue=100 head=${_MOCK_PR_HEAD} trailer=${_MOCK_CB_MARKER_HASH} -->")
   fi
-  local _json="[]" _ts=0 b
+  local _json="[]" _ts=0 b _hh _mm _tsiso
   for b in "${_bodies[@]}"; do
-    _json=$(jq -c --arg b "$b" --argjson t "$_ts" \
-      '. + [{id:(100+$t), author:"my-claw", authorKind:"self", body:$b, createdAt:"2026-06-12T00:00:0\($t)Z"}]' <<<"$_json")
+    # Monotonic ISO timestamp: HH:MM derived from the index (supports up to
+    # 24*60 comments, far beyond any test). Zero-padded so string sort == time.
+    _hh=$(printf '%02d' $(( _ts / 60 )))
+    _mm=$(printf '%02d' $(( _ts % 60 )))
+    _tsiso="2026-06-12T${_hh}:${_mm}:00Z"
+    # Author: verdict trailers are BOT-authored (kane-review-agent); everything
+    # else is self/dispatcher (my-claw). The join keys on the trailer TEXT, not
+    # the author, but keep authors realistic.
+    local _author="my-claw"
+    [[ "$b" == *"review-verdict:"* ]] && _author="kane-review-agent"
+    _json=$(jq -c --arg b "$b" --arg a "$_author" --arg ts "$_tsiso" --argjson id "$(( 100 + _ts ))" \
+      '. + [{id:$id, author:$a, authorKind:"self", body:$b, createdAt:$ts}]' <<<"$_json")
     _ts=$((_ts + 1))
   done
   printf '%s' "$_json"
@@ -151,6 +179,9 @@ reset_mocks() {
   _MOCK_LAST_REVIEWED_HEAD=""
   _MOCK_BOT_UNFIXABLE=1
   _MOCK_FROZEN_ROUND_COMMENTS=0
+  _MOCK_STALE_ROUNDS=0
+  _MOCK_STALE_VERDICT_TRAILER="<!-- review-verdict: failed-non-substantive cause=bot-timeout -->"
+  _MOCK_ROUND_VERDICT_TRAILER="<!-- review-verdict: failed-substantive -->"
   _MOCK_NONACT_MARKER_PRESENT=0
   _MOCK_CB_MARKER_PRESENT=0
   _MOCK_CB_MARKER_HASH=""
@@ -217,17 +248,43 @@ fi
 
 # ===========================================================================
 echo ""
-echo "=== count_frozen_convergence_rounds: derives from the per-round comment ==="
+echo "=== count_frozen_convergence_rounds: trailer-joined active-case window ([P1] finding 1) ==="
+AC_SUB="$(convergence_canonical failed-substantive "" true)"   # the active case: failed-substantive||true
+
+# Baseline: 3 rounds each preceded by a matching failed-substantive verdict → counted.
 reset_mocks
 _MOCK_PR_HEAD="deadbeef"
 _MOCK_FROZEN_ROUND_COMMENTS=3
-assert_eq "counts 3 per-round frozen-head comments" "3" "$(count_frozen_convergence_rounds 100 deadbeef)"
+assert_eq "counts 3 active-case (matching-trailer) rounds" "3" "$(count_frozen_convergence_rounds 100 deadbeef "$AC_SUB")"
+
+# CB-COUNT-009a: STALE failed-non-substantive rounds on the SAME head are EXCLUDED —
+# only the 2 active-case rounds count (does NOT trip at threshold 3). This is the
+# early-trip fix: stale history no longer inflates the count.
+reset_mocks
+_MOCK_PR_HEAD="deadbeef"
+_MOCK_STALE_ROUNDS=4                    # 4 stale failed-non-substantive rounds
+_MOCK_FROZEN_ROUND_COMMENTS=2          # 2 active-case rounds
+assert_eq "CB-COUNT-009a: stale non-substantive rounds excluded (only 2 active count, not 6)" "2" "$(count_frozen_convergence_rounds 100 deadbeef "$AC_SUB")"
+
+# CB-COUNT-009b: a prior dev-actionable=false round on the SAME head is EXCLUDED
+# (different canonical) but does NOT zero-out the genuine active-case rounds — this
+# is the forever-suppression fix (old blanket non-actionable-finding zero-out gone).
+reset_mocks
+_MOCK_PR_HEAD="deadbeef"
+_MOCK_STALE_ROUNDS=1
+_MOCK_STALE_VERDICT_TRAILER="<!-- review-verdict: failed-substantive dev-actionable=false -->"  # #298 round
+_MOCK_FROZEN_ROUND_COMMENTS=3
+assert_eq "CB-COUNT-009b: prior dev-actionable=false round excluded, active 3 still counted (no forever-suppression)" "3" "$(count_frozen_convergence_rounds 100 deadbeef "$AC_SUB")"
+
+# CB-COUNT-009c: the active canonical MUST match — asking for a DIFFERENT case
+# (a different cause) counts 0 of the failed-substantive||true rounds.
 reset_mocks
 _MOCK_PR_HEAD="deadbeef"
 _MOCK_FROZEN_ROUND_COMMENTS=3
-_MOCK_NONACT_MARKER_PRESENT=1
-assert_eq "CB-COUNT-009: a #298 non-actionable marker on this head → count 0 (round routed to #298)" "0" "$(count_frozen_convergence_rounds 100 deadbeef)"
-assert_eq "empty head → 0" "0" "$(count_frozen_convergence_rounds 100 "")"
+assert_eq "CB-COUNT-009c: non-matching active canonical → 0" "0" "$(count_frozen_convergence_rounds 100 deadbeef "$(convergence_canonical failed-non-substantive ci-transport true)")"
+
+assert_eq "empty head → 0" "0" "$(count_frozen_convergence_rounds 100 "" "$AC_SUB")"
+assert_eq "empty canonical → 0" "0" "$(count_frozen_convergence_rounds 100 deadbeef "")"
 
 # ===========================================================================
 echo ""
@@ -269,6 +326,15 @@ assert_contains "CB-REPORT-008 resume instruction present" "re-add the \`autonom
 assert_contains "CB-REPORT-008 repeated-failure count present" "Repeated-failure count on this frozen head: **3**" "$_MOCK_LAST_COMMENT_BODY"
 assert_contains "CB-REPORT-008 verbatim finding excerpt present" "acceptance criterion #3 contradicts #1" "$_MOCK_LAST_COMMENT_BODY"
 assert_contains "CB-REPORT-008 human-action checklist present" "Human action needed" "$_MOCK_LAST_COMMENT_BODY"
+# [P1] finding 2: per-round timestamps of the counted rounds are in the evidence block.
+assert_contains "CB-REPORT-008/finding-2 per-round timestamps label present" "Counted completed dev-resume rounds (timestamps):" "$_MOCK_LAST_COMMENT_BODY"
+assert_contains "CB-REPORT-008/finding-2 an actual round timestamp present (ISO)" "2026-06-12T00:" "$_MOCK_LAST_COMMENT_BODY"
+# The timestamps line must NOT be the "(unavailable)" fallback when rounds exist.
+if [[ "$_MOCK_LAST_COMMENT_BODY" == *"Counted completed dev-resume rounds (timestamps): (unavailable)"* ]]; then
+  echo -e "  ${RED}FAIL${NC}: CB-REPORT-008/finding-2 timestamps fell back to (unavailable) despite counted rounds"; FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${NC}: CB-REPORT-008/finding-2 timestamps populated (not the unavailable fallback)"; PASS=$((PASS + 1))
+fi
 
 # ===========================================================================
 echo ""
