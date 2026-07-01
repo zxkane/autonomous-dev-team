@@ -689,8 +689,31 @@ grep/jq lint modeled on `check-spec-drift.sh`:
   `dispatch-remote-aws-ssm.sh` (§8: GitHub auth is unchanged, NOT refactored) +
   the `providers/` tree (the legitimate home of host I/O). The guard script is
   **NOT** allowlisted (round 2 [P1] #2): it is scanned like any file and its own
-  `gh `-mentioning lines are baselined survivors, so a NEW raw `gh` added to the
-  checker trips the guard. Everything else must be a baselined survivor.
+  `gh `-mentioning **PASS/FAIL message strings** are baselined survivors, so a NEW
+  raw `gh` added to the checker trips the guard. Everything else must be a baselined
+  survivor.
+- **The guard's own infrastructure lines are structurally exempt** (#286-amendment,
+  #343): three lines in `check-provider-cutover.sh` change content whenever the
+  **allowlist policy** changes — the `ALLOWLISTED_FILES=(…)` array declaration, the
+  guard's own primary matcher line, and the generated baseline `_comment:` template
+  (which used to embed the allowlist file-list). Baselining them meant an allowlist
+  disposition **self-tripped Check 4 monotonicity**: the edited line's
+  `(file,content)` signature changes, so the old signature "no longer found" AND a
+  NEW unbaselined signature appears — forcing a hand-edit of the baseline in the
+  same PR (the exact self-ratification the guard exists to prevent), so the #296
+  final allowlist batch could not land. The scan (both the check path AND
+  `--generate-baseline`) now STRUCTURALLY SKIPS these three lines — but ONLY in
+  `check-provider-cutover.sh`, and ONLY when the line matches a top-of-line
+  structural anchor (`is_checker_infra_line`: `^ALLOWLISTED_FILES=(`, the
+  `grep -aE '(^|[^…])` matcher prefix, or the `_comment:` generator prefix), NEVER a
+  magic comment an arbitrary file could carry — a general escape hatch would invite
+  self-allowlisting (TC-CUTOVER-014). The exemption is **file-scoped**: the same
+  shapes in any OTHER file are still caught. The `_comment` template also drops the
+  embedded allowlist file-list (single source of truth stays in `ALLOWLISTED_FILES`),
+  so an allowlist edit no longer churns it. The deliberate self-scan of the guard's
+  PASS/FAIL MESSAGE strings STAYS normative: a NEW raw `gh` added to the checker
+  (not matching an anchor) still FAILs LOUD. This amendment shrank the baseline by
+  exactly the three exempted signatures (`63 → 60` distinct, `69 → 66` occurrences).
 - **Baseline-anchored** (NOT a from-zero ban yet): the depends-on issues
   (#281–#285) migrated only the §3.1/§3.2 verb leaves, so the caller layer still
   carries the surviving raw-gh the first deliverable did not migrate. Those are
