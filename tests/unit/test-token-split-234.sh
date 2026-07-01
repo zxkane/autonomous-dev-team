@@ -1100,6 +1100,13 @@ rm -f "$E2E_POST_LOG"
 PATH="$RSB:$PATH" bash -c "
   log() { :; }
   PR_NUMBER=99; REPO=owner/repo; E2E_REPORT_FILE='$REPORTFILE'
+  # [#342] Source the CHP seam FIRST, mirroring production order (autonomous-review.sh
+  # sources lib-code-host.sh BEFORE lib-review-e2e.sh). Today's _post_brokered_e2e_report
+  # posts via a raw \`gh pr comment\`, so the seam is inert here — but when that post
+  # migrates behind a CHP verb (e.g. #329's chp_pr_comment), the verb resolves through
+  # this seam to the PATH \`gh\` stub instead of dying command-not-found inside this
+  # bash -c sandbox (the TC-TOKEN-SPLIT-072 shape the seam-source meta-check prevents).
+  source '$SCRIPTS/lib-code-host.sh' 2>/dev/null || true
   # Pull just the helper out of lib-review-e2e.sh (avoid sourcing the whole file's
   # top-level deps) by sourcing the file with stubs already defined.
   source '$SCRIPTS/lib-review-e2e.sh' 2>/dev/null || true
@@ -1115,6 +1122,9 @@ rm -f "$E2E_POST_LOG"
 PATH="$RSB:$PATH" bash -c "
   log() { :; }
   PR_NUMBER=99; REPO=owner/repo; E2E_REPORT_FILE='$RSB/does-not-exist.md'
+  # [#342] CHP seam first (see the note on the (a) sandbox above) — same TC-TOKEN-SPLIT-072
+  # anti-recurrence: keep the seam resolvable in THIS bash -c context before the lib source.
+  source '$SCRIPTS/lib-code-host.sh' 2>/dev/null || true
   source '$SCRIPTS/lib-review-e2e.sh' 2>/dev/null || true
   _post_brokered_e2e_report
 " >/dev/null 2>&1
