@@ -13,6 +13,16 @@
 # lib-dispatch.sh helper `handle_pending_dev_pr_exists` so it can be unit
 # tested in isolation.
 #
+# NOTE ([INV-98], #351): the same-HEAD park is no longer unconditional — it now
+# DELEGATES a `completed` dev session to `handle_completed_session_routing` and
+# only parks the residual cases (no session id / session not completed). The
+# same-HEAD cases here exercise the RESIDUAL park path: the mocked environment
+# resolves no `Dev Session ID:` trailer (real `extract_dev_session_id` over the
+# stub gh) and has no `{"type":"result"}` agent log, so `is_session_completed`
+# returns false and the helper falls through to the `stale-verdict:` park exactly
+# as documented. The delegation branch is covered by
+# `test-issue-351-stale-verdict-delegate.sh`.
+#
 # Run: bash tests/unit/test-dispatcher-step4-stale-verdict.sh
 
 set -uo pipefail
@@ -127,6 +137,11 @@ reset_mocks() {
   _MOCK_LAST_COMMENT_BODY=""
   _MOCK_COMMENT_COUNT=0
   _MOCK_LABEL_SWAPS=""
+  # [INV-98], #351: the same-HEAD branch now consults is_session_completed,
+  # which reads /tmp/agent-${PROJECT_ID}-issue-<N>.log for the claude dev CLI.
+  # Remove any stray log so the same-HEAD tests deterministically take the
+  # residual-park path (no completed session detected → park, not delegate).
+  rm -f "/tmp/agent-${PROJECT_ID}-issue-99.log" 2>/dev/null || true
 }
 
 assert_eq() {

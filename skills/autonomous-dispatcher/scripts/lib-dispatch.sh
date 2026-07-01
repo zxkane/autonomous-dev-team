@@ -2052,13 +2052,25 @@ recent_error_envelope() {
 #
 # Returns:
 #   0 — handled (caller should `continue` to next issue)
-#   1 — no PR for this issue (caller falls through to session/dispatch logic)
+#   1 — no PR for this issue, OR the same-HEAD session hit `prompt_too_long`
+#       (caller falls through to session/dispatch logic — the tick's INV-12
+#       PTL branch owns PTL recovery; see the same-HEAD block below).
 #
 # Side effects (only when returning 0):
-#   - Same HEAD already reviewed → idempotent stale-verdict notice;
-#     label stays pending-dev.
 #   - HEAD differs OR no prior review → flips pending-dev → pending-review
 #     and posts the Bug 3 transition comment.
+#   - Same HEAD already reviewed ([INV-98], #351): the park is NOT terminal.
+#     For a `completed` dev session it DELEGATES to
+#     `handle_completed_session_routing` (Step 4b.5.1) so the INV-35 / INV-85 /
+#     INV-92 verdict-routing table (bounded dev-new / non-substantive re-review
+#     / non-actionable stall) is reachable. It falls back to the idempotent
+#     `stale-verdict:<sha>` park (label stays pending-dev) ONLY for the residual
+#     cases the router cannot handle: no resolvable session id, a session that
+#     is NOT completed per `is_session_completed` (a live/crashed wrapper — Step
+#     5 owns liveness; note this is log-based detection scoped to the claude dev
+#     CLI, so non-claude dev CLIs park by design), or a verdict the classifier
+#     cannot bind (the router's own `none`/unknown arms fail-closed to an
+#     operator handoff — never a spurious dispatch).
 handle_pending_dev_pr_exists() {
   local issue_num="$1"
   local pr_info pr_num current_head pr_ref last_head notice_marker
@@ -2075,8 +2087,43 @@ handle_pending_dev_pr_exists() {
 
   if [ -n "$last_head" ] && [ -n "$current_head" ] && [ "$current_head" = "$last_head" ]; then
     # Same HEAD already reviewed — verdict was FAILED (otherwise the issue
-    # wouldn't be in pending-dev). Don't redo review; surface the stale
-    # verdict and keep pending-dev so the dev agent can act on feedback.
+    # wouldn't be in pending-dev). Don't redo review.
+    #
+    # [INV-98] (#351): before parking, try to route the review feedback to the
+    # dev side. If the prior dev session reached a terminal `completed` state,
+    # delegate to `handle_completed_session_routing` — the SAME router the tick
+    # calls at Step 4b.5.1 — which classifies the newest post-session verdict
+    # and implements the INV-35 (fresh dev-new) / INV-85 (one dev-new per
+    # unchanged HEAD, then stall) / INV-92 (non-actionable → stall) table.
+    # Without this delegation the park is unconditional and, because a PR
+    # always exists after a review FAIL, the entire verdict-routing table is
+    # unreachable and every issue deadlocks in pending-dev after one review
+    # round (the #351 repro).
+    #
+    # `prompt_too_long` is explicitly EXCLUDED from delegation: it needs the
+    # tick's INV-12 PTL recovery (log reset + `INV-12-prompt-too-long:<sid>`
+    # notice + fresh dev-new), NOT the INV-35 completed-session path. We return
+    # 1 so the caller falls through to Step 4b, where `is_session_completed`
+    # re-detects the PTL state and the PTL branch fires. (`is_session_completed`
+    # is a cheap single-log-line read; calling it twice on the PTL path is
+    # harmless.)
+    local _sid _term_reason="" _end_iso=""
+    _sid=$(extract_dev_session_id "$issue_num")
+    if [ -n "$_sid" ] && is_session_completed "$issue_num" _term_reason _end_iso; then
+      if [ "$_term_reason" = "prompt_too_long" ]; then
+        return 1
+      fi
+      # _term_reason == "completed" (the only other rc=0 case). Route the
+      # verdict to the dev/review side via the shared INV-35 router.
+      handle_completed_session_routing "$issue_num" "$_sid" "$_end_iso"
+      return 0
+    fi
+
+    # Residual park: no resolvable session id, or a session that is not
+    # `completed` per `is_session_completed` (a live/crashed wrapper — Step 5
+    # owns liveness — or a non-claude dev CLI whose log has no `{"type":"result"}`
+    # line, which returns false BY DESIGN). Surface the stale verdict and keep
+    # pending-dev.
     #
     # Idempotency check uses `grep -q '^0$'` (fail-closed): a transient
     # `gh issue view` error yields empty output, grep returns 1, and we
