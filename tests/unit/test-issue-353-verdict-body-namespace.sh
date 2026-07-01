@@ -134,8 +134,15 @@ PROMPT_ISSUE_1=$(render_for_issue 342 "174a3d5b-b345-4f91-9d46-17ab86ee6d09")
 PROMPT_ISSUE_2=$(render_for_issue 999 "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
 rm -f "$_FN_SLICE"
 
-PATH_1=$(grep -oE '/tmp/verdict-codex-342-174a3d5b-b345-4f91-9d46-17ab86ee6d09\.md' <<<"$PROMPT_ISSUE_1" | head -1)
-PATH_2=$(grep -oE '/tmp/verdict-codex-999-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\.md' <<<"$PROMPT_ISSUE_2" | head -1)
+# Extract each prompt's RESOLVED body path generically (not a hardcoded
+# expected literal) — whatever /tmp/verdict-codex-...-....md the CURRENT
+# code actually renders. This is what makes TC-VBN-SIM below a genuine
+# regression test: if the namespacing were reverted to the bare
+# agent-name-only form, PATH_1 and PATH_2 would resolve to the IDENTICAL
+# string (both are "codex"), and the simulation's second write would clobber
+# the first writer's file at that shared path — exactly the #342 race.
+PATH_1=$(grep -oE '/tmp/verdict-codex[A-Za-z0-9.-]*\.md' <<<"$PROMPT_ISSUE_1" | head -1)
+PATH_2=$(grep -oE '/tmp/verdict-codex[A-Za-z0-9.-]*\.md' <<<"$PROMPT_ISSUE_2" | head -1)
 
 assert_true "TC-VBN-05 issue #342/session 174a3d5b resolves its own namespaced path" \
   "$([[ -n "$PATH_1" ]] && echo true || echo false)"
@@ -148,11 +155,16 @@ assert_true "TC-VBN-07 the two resolved paths are DISTINCT (no collision)" \
 echo ""
 echo "=== TC-VBN-SIM: two-writer race simulation — post-verdict.sh for issue 1 posts body A, never body B ==="
 # ---------------------------------------------------------------------------
-# Reproduces the #342 race directly: write body A to issue 1's resolved path
-# and body B to issue 2's resolved path (any interleaving — order does not
-# matter since the paths no longer collide), then invoke the REAL
-# post-verdict.sh for issue 1 against a stub gh and assert the captured body
-# is body A verbatim.
+# Reproduces the #342 race directly using the SAME resolved paths PATH_1/
+# PATH_2 extracted above (not independently-constructed literals). Writer A
+# (issue 342) writes FIRST to PATH_1; writer B (issue 999, sibling project)
+# writes SECOND to PATH_2, simulating B's write landing after A's but before
+# A's post-verdict.sh invocation reads it — the exact interleaving that
+# poisoned #342. Because the fix makes PATH_1 != PATH_2 (asserted by
+# TC-VBN-07), B's write cannot clobber A's file. Pre-fix (bare agent-name-only
+# path), PATH_1 would equal PATH_2, B's write WOULD clobber A's file, and
+# TC-VBN-09/10 below would fail — proving this is a genuine regression test,
+# not a tautology.
 
 SIM_SB="$(mktemp -d)"
 cat > "$SIM_SB/autonomous.conf" <<'CONF'
@@ -175,15 +187,16 @@ cp "$HELPER_SRC" "$SIM_SB/post-verdict.sh"
 chmod +x "$SIM_SB/post-verdict.sh"
 [[ -f "$LIBCONFIG_SRC" ]] && cp "$LIBCONFIG_SRC" "$SIM_SB/lib-config.sh"
 
-BODY_A_PATH="/tmp/verdict-codex-342-174a3d5b-b345-4f91-9d46-17ab86ee6d09-$$.md"
-BODY_B_PATH="/tmp/verdict-codex-999-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee-$$.md"
-printf 'Review findings:\n1. GENUINE finding for issue 342 (ours).' > "$BODY_A_PATH"
-printf 'Review findings:\n1. FOREIGN finding for issue 999 (sibling project — must NEVER appear on 342).' > "$BODY_B_PATH"
+# writer A (issue 342) writes first...
+printf 'Review findings:\n1. GENUINE finding for issue 342 (ours).' > "$PATH_1"
+# ...then writer B (issue 999, sibling project) writes second — if PATH_1 and
+# PATH_2 were the same file (the pre-fix bug), this OVERWRITES writer A's body.
+printf 'Review findings:\n1. FOREIGN finding for issue 999 (sibling project — must NEVER appear on 342).' > "$PATH_2"
 
-( cd "$SIM_SB" && ./post-verdict.sh 342 fail "$BODY_A_PATH" codex "174a3d5b-b345-4f91-9d46-17ab86ee6d09" sonnet >/dev/null 2>&1 )
+( cd "$SIM_SB" && ./post-verdict.sh 342 fail "$PATH_1" codex "174a3d5b-b345-4f91-9d46-17ab86ee6d09" sonnet >/dev/null 2>&1 )
 SIM_RC=$?
 POSTED_BODY=$(cat "$SIM_SB/gh-body.txt" 2>/dev/null || echo "")
-rm -f "$BODY_A_PATH" "$BODY_B_PATH"
+rm -f "$PATH_1" "$PATH_2"
 rm -rf "$SIM_SB"
 
 assert_true "TC-VBN-08 post-verdict.sh for issue 342 exited 0" \

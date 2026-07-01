@@ -2197,7 +2197,7 @@ posting the later review's findings under the earlier issue's own valid
 `Review Session:` trailer — passing every INV-20/INV-40 attribution check (observed
 twice against #342). `post-verdict.sh` itself only reads the caller-supplied path
 once and cannot detect the race; the fix is caller-side namespacing, mirroring the
-per-run uniqueness [INV-78](#inv-78-review-verdict-resolution-prefers-a-typed-json-artifact-over-comment-scraping-with-a-loud-envelope-on-a-malformed-artifact)'s
+per-run uniqueness [INV-78](#inv-78-review-verdicts-resolve-from-a-typed-artifact-file-first-comment-scraping-is-an-explicitly-logged-fallback-a-malformed-artifact-is-loud-never-a-silent-absent)'s
 typed-artifact path already had. The two wrapper-owned body files (codex-stdout-fallback,
 aggregate-comment) were never affected — both already use `mktemp` with a random suffix.
 
