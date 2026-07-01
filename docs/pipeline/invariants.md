@@ -2186,6 +2186,21 @@ The helper:
 - **fails loudly**: non-zero exit when the post fails (`gh` non-zero) or the proxy is
   absent, exit `2` on invalid args, and echoes the created comment URL on success.
 
+**The `<body-file>` path MUST be namespaced by agent + issue + session (#353)**:
+`build_review_prompt` renders it as `/tmp/verdict-${_agent_name}-${ISSUE_NUMBER}-${_agent_session_id}.md`,
+never the bare `/tmp/verdict-${_agent_name}.md` form. The bare form is unique only
+*within one fan-out* (its original collision-avoidance purpose) but is a GLOBAL `/tmp`
+path shared by every concurrent review on the host, across every project and issue.
+Two overlapping reviews on the same host raced on that shared file: the later writer's
+body could land between an earlier agent's write and its `post-verdict.sh` read,
+posting the later review's findings under the earlier issue's own valid
+`Review Session:` trailer — passing every INV-20/INV-40 attribution check (observed
+twice against #342). `post-verdict.sh` itself only reads the caller-supplied path
+once and cannot detect the race; the fix is caller-side namespacing, mirroring the
+per-run uniqueness [INV-78](#inv-78-review-verdicts-resolve-from-a-typed-artifact-file-first-comment-scraping-is-an-explicitly-logged-fallback-a-malformed-artifact-is-loud-never-a-silent-absent)'s
+typed-artifact path already had. The two wrapper-owned body files (codex-stdout-fallback,
+aggregate-comment) were never affected — both already use `mktemp` with a random suffix.
+
 **Why**: each CLI previously hand-rolled its own bare `gh issue comment` for the
 verdict. This is unreliable across CLIs: the `agy` review agent **exited 0 claiming it
 posted the verdict, but the comment never landed** — so the wrapper's verdict poller
