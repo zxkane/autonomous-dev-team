@@ -1,0 +1,11 @@
+# tests/unit/fixtures/provider-fbdisp-gh-notrigger/chp-github.caps
+#
+# review_bots=1 so drain_agent_bot_triggers proceeds past the review_bots
+# short-circuit and reaches the trigger_bot leaf check — where, the leaf being
+# ABSENT in this fixture's chp-github.sh, the CODE_HOST==github raw `else` fallback
+# fires (the #346 TC-FBDISP-004 target). Mirrors the real GitHub caps otherwise.
+
+native_issue_pr_link=0
+rest_request_changes=1
+review_bots=1
+merge_closes_issue=1

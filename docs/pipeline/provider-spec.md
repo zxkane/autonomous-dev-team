@@ -274,6 +274,26 @@ The *callers* keep their logic; only the leaf `gh` call moves behind a verb.
 > transition (`autonomous-review.sh`) is likewise provider-gated: `itp_transition_state`
 > when defined, else `gh issue close` only under `ISSUE_PROVIDER=github`, else a
 > loud error (never a wrong GitHub close on a non-GitHub tracker).
+>
+> **Capability-fallback rows — the leaf-absent disposition of the three
+> github-gated raw-`gh` residues (#296 second-tier, #346).** The three surviving
+> leaf-absent fallbacks that could re-couple to GitHub are now each dispositioned
+> as **spec-sanctioned github-gated residue** — the raw call is retained ONLY under
+> an explicit backend-identity guard; a non-GitHub backend with the leaf absent
+> fails LOUD (the #303/B1 + #327 no-silent-fallback pattern), never a silent GitHub
+> call:
+>
+> | Site (`file`) | Leaf | Leaf-absent + `github` | Leaf-absent + non-github | Regression pin |
+> |---|---|---|---|---|
+> | `drain_agent_pr_create` (`lib-auth.sh`) | `chp_create_pr` | retained raw `gh pr create --repo … --head … --title … --body …` under `${CODE_HOST:-github} == "github"` (byte-identical; baselined [INV-91] residue) | loud `[INV-79]/[INV-91]` error, **NO** PR created (no-PR retry re-queues to pending-dev) | `test-token-split-234.sh` TC-FBDISP-001/010/020/041 |
+> | `drain_agent_bot_triggers` (`lib-auth.sh`) | `chp_trigger_bot` | retained raw `gh-as-user.sh pr comment … --body <phrase>` under `${CODE_HOST:-github} == "github"` (the `gh-as-user.sh` transport wrapper is allowlisted, so no baseline entry) | loud `[INV-79]/[INV-91]` error checked ONCE before the posting loop, **NO** bot triggers posted | `test-token-split-234.sh` TC-FBDISP-002/011/021/041 |
+> | `autonomous-review.sh:~3512` interim close | `itp_transition_state` | retained `gh issue close … --reason completed` under `${ISSUE_PROVIDER:-github} == "github"` (#282 round 7 — the [INV-33] single sanctioned interim close) | loud `TRANSITION_ERROR`, **NO** wrong `gh issue close` (a maintainer / the itp-writes verb completes the transition) | `test-chp-pr-lifecycle.sh` TC-CHP-CAP-MCI0-NONGH (**documentation-only** disposition in #346 — this site was already github-gated + pinned; no code change) |
+>
+> `${CODE_HOST:-github}` / `${ISSUE_PROVIDER:-github}` (the #327 precedent): an
+> unset backend var defaults to `github`, i.e. today's exact behavior — the raw
+> path is retained. Zero behavior change on the github/github topology; the retained
+> raw calls stay baselined ([INV-91]) as residue with an explicit guard, so the
+> cutover baseline neither grows nor shrinks for #346.
 
 ### 3.3 The normalized comment-JSON contract (load-bearing)
 
@@ -837,12 +857,12 @@ becomes a verb, the surrounding INV-coupled logic stays caller-side.
 | `resolve_pr_for_issue` (`lib-pr-linkage.sh:73`) + `verify_pr_closes_issue` (`:99`); `fetch_pr_for_issue` (`lib-dispatch.sh`) is the kept same-named delegate shim | `chp_find_pr_for_issue` | (b) entangled | the `gh pr list --json $FIELDS` leaf moves with `FIELDS` forwarded byte-identically ([M1]); the [INV-86] close-linkage/branch resolution + projection `$q` stay caller-side. **MIGRATED #282.** (Post-#277 `fetch_pr_for_issue` is a pure delegate to `resolve_pr_for_issue` — that delegate stays as the function-mock shim, §7.2 m3.) |
 | `ci_is_green` (`lib-dispatch.sh`) | `chp_ci_status` | (a) separable-leaf | the `gh pr checks --json state -q '[.[].state]'` leaf moves; the `length>0 and all(.=="SUCCESS")` gate → `green`/`pending`/`failed`/`none` stays caller-side. **MIGRATED #282.** |
 | `autonomous-review.sh` mergeable poll (`gh pr view … --json mergeable`) | `chp_mergeable` | (b) entangled | only the `gh pr view --json mergeable` leaf moves ([M2]); the UNKNOWN-retry loop + `_classify_mergeable_gate`/`_pr_open_gate` ([INV-44]/[INV-54], `lib-review-mergeable.sh` byte-unchanged) stay caller-side. **MIGRATED #282.** |
-| `gh pr create` (the broker `drain_agent_pr_create`, `lib-auth.sh`) | `chp_create_pr` | (a) separable-leaf | the `gh pr create --head/--title/--body` leaf; the broker routes through the verb (leaf-only swap, no INV-79 change). **MIGRATED #282.** |
+| `gh pr create` (the broker `drain_agent_pr_create`, `lib-auth.sh`) | `chp_create_pr` | (a) separable-leaf | the `gh pr create --head/--title/--body` leaf; the broker routes through the verb (leaf-only swap, no INV-79 change). **MIGRATED #282.** **Leaf-absent disposition #346:** the retained raw `gh pr create` fallback is github-gated (`${CODE_HOST:-github} == "github"`) — a non-GitHub backend without the leaf fails LOUD (no PR created), never a silent GitHub PR. Spec-sanctioned [INV-91] residue (byte-identical, baseline unchanged). |
 | `gh pr review --approve` (`autonomous-review.sh` PASS path) | `chp_approve` | (a) separable-leaf | the `--approve --body …` leaf; the [INV-52]/[INV-79] wrapper-owns-approve ownership + PASS-gate chain stay caller-side. **MIGRATED #282.** |
 | `gh pr review --request-changes` (`submit_request_changes`, `lib-review-request-changes.sh`) | `chp_request_changes` | (b) entangled | the `--request-changes --body $body` leaf; gated by `rest_request_changes` (§4.2). The best-effort return-0 + token-refresh glue stays caller-side. **MIGRATED #282.** |
 | `gh pr merge` (`autonomous-review.sh` merge path) | `chp_merge` | (a) separable-leaf | the `--squash --delete-branch` leaf. [M4]/[INV-33]: `merge_closes_issue=1` (GitHub) means the wrapper MUST NOT transition post-merge; a `merge_closes_issue=0` backend transitions via `itp_transition_state` (else github-gated `gh issue close`). **MIGRATED #282.** |
 | `resolve-threads.sh` reviewThreads list + `resolveReviewThread` mutation | `chp_review_threads` / `chp_resolve_thread` | (a) separable-leaf | the two `gh api graphql` leaves → the M8 thread shape `{thread_id, resolved, comments:[{id, path, line, …}]}`; the select-unresolved + resolved/failed tally stay caller-side. **MIGRATED #282.** |
-| bot-trigger post (the broker `drain_agent_bot_triggers`, `lib-auth.sh`; `gh-as-user.sh pr comment`) | `chp_trigger_bot` | (a) separable-leaf | the real-user trigger post, gated by `review_bots` (§4.2); `parse_review_bots`/login mapping + allow-list stay caller-side; the broker routes through the verb. **MIGRATED #282.** |
+| bot-trigger post (the broker `drain_agent_bot_triggers`, `lib-auth.sh`; `gh-as-user.sh pr comment`) | `chp_trigger_bot` | (a) separable-leaf | the real-user trigger post, gated by `review_bots` (§4.2); `parse_review_bots`/login mapping + allow-list stay caller-side; the broker routes through the verb. **MIGRATED #282.** **Leaf-absent disposition #346:** the retained raw `gh-as-user.sh pr comment` fallback is github-gated (`${CODE_HOST:-github} == "github"`, checked once before the posting loop) — a non-GitHub backend without the leaf fails LOUD (no triggers posted), never a silent GitHub-user comment. The `gh-as-user.sh` transport wrapper is allowlisted so this residue carries no cutover-baseline entry ([INV-91]). |
 | incidental `gh pr view $PR --json …` reads + body-mention `gh pr list … select(.body\|test("#N"))` lookups (`autonomous-dev.sh` / `autonomous-review.sh`) | `chp_pr_view` / `chp_pr_list` (general read primitives) | (a) separable-leaf | the PR-number-keyed `gh pr view` + loose body-mention `gh pr list` leaves; caller keeps its `--json`/`-q`. NOT named §3.2 lifecycle verbs — added so the caller layer carries zero executable raw `gh pr`. **MIGRATED #282 (review r8).** |
 | dev-resume `PR_REVIEW_COMMENTS` inline-comment read (`autonomous-dev.sh`, the flat REST `gh api repos/$REPO/pulls/$PR/comments --jq <fmt>`) | `chp_list_inline_comments` | (a) separable-leaf | the PR-number-keyed `gh api …/pulls/N/comments` leaf; caller keeps its `--jq` `- **path:line** — body` formatter ([#281] jq-stays-caller). Self-guarding shim ([#282] convention). **MIGRATED #296 second-tier (#328), [INV-95].** The distinct `:1093` `issues/N/comments` AUTO_MERGE-marker read this issue had scoped OUT was migrated independently behind `itp_list_comments` by #334. |
 | `setup-labels.sh:47` `gh label create` | `itp_provision_states` | (a) separable-leaf | the state-primitive provisioning leaf; hex color gated by `label_colors` — **migrated #283** (the 9-label table stays caller-side) |

@@ -1,0 +1,12 @@
+# tests/unit/fixtures/provider-fbdisp-noleaf/chp-fbdispnoleaf.caps
+#
+# Capability manifest for the #346 fail-loud fixture (non-GitHub backend, leaves
+# absent). review_bots=1 is DELIBERATE: it lets drain_agent_bot_triggers proceed
+# past its review_bots short-circuit so the test reaches the leaf-absent
+# CODE_HOST != github fail-loud gate. The provider .sh omits the create_pr /
+# trigger_bot leaves, so chp_has_leaf returns false for both.
+
+native_issue_pr_link=0
+rest_request_changes=1
+review_bots=1                # meaningful so the bot-trigger broker reaches the leaf gate
+merge_closes_issue=1

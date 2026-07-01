@@ -1249,6 +1249,272 @@ fi
 
 # ---------------------------------------------------------------------------
 echo ""
+echo "=== TC-FBDISP-*: [INV-91] (#346) fail-loud disposition for the leaf-absent raw-gh fallbacks ==="
+# ---------------------------------------------------------------------------
+# drain_agent_pr_create / drain_agent_bot_triggers retain their raw `gh pr create`
+# / `gh-as-user.sh` fallback ONLY under `CODE_HOST == github` (spec-sanctioned
+# github-gated residue). A non-GitHub backend that omits the create_pr / trigger_bot
+# leaf must NOT silently make a GitHub call — it fails LOUD and does nothing.
+# The two named fake providers are selected through the PUBLIC seam
+# (CODE_HOST=<name> + AUTONOMOUS_PROVIDERS_DIR=<fixture dir>):
+#   - provider-fbdisp-noleaf/chp-fbdispnoleaf.sh: NO create_pr/trigger_bot leaf
+#     (defines only pr_list so the broker reads resolve), review_bots=1.
+#   - provider-fbdisp-leaf/chp-fbdispleaf.sh: create_pr/trigger_bot leaves DEFINED
+#     (record argv to CHP_FBDISP_LEAF_LOG), review_bots=1.
+# CHP_FBDISP_PR_BODY controls the fixture's canned PR body so ONE fixture serves
+# both broker reads: default body does NOT mention #<issue> (pr-create existence
+# COUNT → 0 → proceed to create); set it to mention #<issue> for the bot-trigger
+# PR-NUMBER read.
+FBDISP_NOLEAF="$SCRIPT_DIR/fixtures/provider-fbdisp-noleaf"
+FBDISP_LEAF="$SCRIPT_DIR/fixtures/provider-fbdisp-leaf"
+# GitHub-named fixture that defines chp_github_pr_list but OMITS chp_github_trigger_bot
+# — drives TC-FBDISP-004 (the raw `else` under CODE_HOST=github with the leaf absent).
+FBDISP_GH_NOTRIGGER="$SCRIPT_DIR/fixtures/provider-fbdisp-gh-notrigger"
+
+# new_auth_sandbox already copies lib-code-host.sh + providers/chp-github.{sh,caps};
+# add a gh-as-user.sh stub (for the bot-trigger broker's resolution) so the sandbox
+# serves both brokers.
+fbdisp_sandbox() {
+  local d; d=$(new_auth_sandbox)
+  # gh-as-user.sh stub records posts; overwritten per-test to point at the log.
+  echo "$d"
+}
+
+if [[ -d "$FBDISP_NOLEAF" && -d "$FBDISP_LEAF" && -d "$FBDISP_GH_NOTRIGGER" ]]; then
+  # -------------------------------------------------------------------------
+  # TC-FBDISP-001: github topology → drain_agent_pr_create emits byte-identical
+  # `gh pr create --repo … --head … --title … --body …` argv (golden trace). AC1.
+  # Uses the DEFAULT github seam (new_auth_sandbox copies chp-github, whose
+  # create_pr leaf IS defined) so the VERB path (chp_create_pr → chp_github_create_pr
+  # → `gh pr create --repo "$REPO" "$@"`) is taken — that verb forwards to the SAME
+  # `gh pr create` argv the raw github fallback would emit, so the observed argv is
+  # byte-identical either way. The raw `elif [[ CODE_HOST==github ]]` fallback branch
+  # itself (reachable only when chp_has_leaf create_pr is false, e.g. lib-code-host
+  # not sourced) gets its OWN execution trace in TC-FBDISP-003.
+  SBG1=$(fbdisp_sandbox)
+  GHG1="$TMPROOT/fbdisp-gh1"; mkdir -p "$GHG1"; PRC1="$GHG1/pr-create.log"
+  cat > "$GHG1/gh" <<GHSTUB
+#!/bin/bash
+if [[ "\$1" == "pr" && "\$2" == "list" ]]; then printf ""; exit 0; fi
+if [[ "\$1" == "pr" && "\$2" == "create" ]]; then echo "CREATED \$*" >> "$PRC1"; exit 0; fi
+exit 0
+GHSTUB
+  chmod +x "$GHG1/gh"
+  PRF1="$TMPROOT/fbdisp-prf1"; printf 'branch: feat/issue-346-foo\nfeat: my title\nBody.\nCloses #346\n' > "$PRF1"
+  env -u CODE_HOST -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR PATH="$GHG1:/usr/bin:/bin" REPO="owner/repo" bash -c "
+    source '$SBG1/lib-auth.sh'
+    AGENT_GH_TOKEN_FILE='/scoped'; AGENT_PR_CREATE_FILE='$PRF1'
+    drain_agent_pr_create 346 owner/repo
+  " >/dev/null 2>&1
+  if grep -qF -- 'CREATED pr create --repo owner/repo --head feat/issue-346-foo --title feat: my title --body' "$PRC1"; then
+    assert_pass "TC-FBDISP-001 github topology: drain_agent_pr_create raw fallback argv byte-identical (gh pr create --repo … --head … --title … --body …)"
+  else
+    assert_fail "TC-FBDISP-001 github fallback argv changed: $(cat "$PRC1" 2>/dev/null)"
+  fi
+
+  # -------------------------------------------------------------------------
+  # TC-FBDISP-002: github topology → drain_agent_bot_triggers emits byte-identical
+  # `gh-as-user.sh pr comment … --body <phrase>` posts. AC1. As in TC-FBDISP-001,
+  # the github seam's trigger_bot leaf IS defined, so the VERB path forwards to the
+  # same gh-as-user.sh argv; the raw `else` fallback (reachable only when the leaf
+  # is absent under CODE_HOST==github) gets its own trace in TC-FBDISP-004.
+  SBG2=$(fbdisp_sandbox)
+  GAU2="$TMPROOT/fbdisp-gau2.log"; : > "$GAU2"
+  printf '#!/bin/bash\nprintf "GAU %%s\\n" "$*" >> "%s"\n' "$GAU2" > "$SBG2/gh-as-user.sh"; chmod +x "$SBG2/gh-as-user.sh"
+  GHG2="$TMPROOT/fbdisp-gh2"; mkdir -p "$GHG2"
+  cat > "$GHG2/gh" <<'GHSTUB'
+#!/bin/bash
+if [[ "$1" == "pr" && "$2" == "list" ]]; then echo 4242; exit 0; fi
+exit 0
+GHSTUB
+  chmod +x "$GHG2/gh"
+  BTF2="$TMPROOT/fbdisp-bt2"; printf '/q review\n/codex review\n' > "$BTF2"
+  env -u CODE_HOST -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR PATH="$GHG2:/usr/bin:/bin" REPO="owner/repo" \
+    AUTONOMOUS_CONF_DIR="$SBG2" bash -c "
+    source '$SBG2/lib-auth.sh'
+    AGENT_GH_TOKEN_FILE='/scoped'; AGENT_BOT_TRIGGER_FILE='$BTF2'
+    drain_agent_bot_triggers 346 owner/repo \$'/q review\n/codex review'
+  " >/dev/null 2>&1
+  if grep -qF -- 'GAU pr comment 4242 --repo owner/repo --body /q review' "$GAU2" \
+     && grep -qF -- 'GAU pr comment 4242 --repo owner/repo --body /codex review' "$GAU2"; then
+    assert_pass "TC-FBDISP-002 github topology: drain_agent_bot_triggers raw gh-as-user.sh fallback argv byte-identical"
+  else
+    assert_fail "TC-FBDISP-002 github fallback argv changed: $(cat "$GAU2" 2>/dev/null)"
+  fi
+
+  # -------------------------------------------------------------------------
+  # TC-FBDISP-003: the RAW `elif [[ CODE_HOST==github ]]` fallback branch itself
+  # fires byte-identically when chp_has_leaf is UNDEFINED (the lib-code-host-not-
+  # sourced / leaf-undefined degraded case #346's ${CODE_HOST:-github} default
+  # protects). Sandbox OMITS lib-code-host.sh + providers/ so lib-auth.sh's
+  # self-source is skipped → chp_has_leaf undefined, CODE_HOST unset → the raw
+  # elif branch is the one exercised (NOT the verb path of TC-FBDISP-001). AC1.
+  SBRAW="$TMPROOT/fbdisp-raw-sb"; mkdir -p "$SBRAW"
+  cp "$SCRIPTS/lib-auth.sh" "$SBRAW/"   # NO lib-code-host.sh / providers/ → chp_has_leaf undefined
+  printf '#!/bin/bash\nload_autonomous_conf(){ return 0; }\n' > "$SBRAW/lib-config.sh"
+  printf '#!/bin/bash\nget_gh_app_token(){ echo X; }\nget_gh_app_scoped_token(){ echo X; }\n' > "$SBRAW/gh-app-token.sh"
+  GHRAW="$TMPROOT/fbdisp-raw-gh"; mkdir -p "$GHRAW"; PRCRAW="$GHRAW/pr-create.log"
+  cat > "$GHRAW/gh" <<GHSTUB
+#!/bin/bash
+if [[ "\$1" == "pr" && "\$2" == "list" ]]; then printf ""; exit 0; fi
+if [[ "\$1" == "pr" && "\$2" == "create" ]]; then echo "CREATED \$*" >> "$PRCRAW"; exit 0; fi
+exit 0
+GHSTUB
+  chmod +x "$GHRAW/gh"
+  PRFRAW="$TMPROOT/fbdisp-raw-prf"; printf 'branch: feat/issue-346-foo\nfeat: my title\nBody.\n' > "$PRFRAW"
+  out_raw=$(env -u CODE_HOST -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR PATH="$GHRAW:/usr/bin:/bin" REPO="owner/repo" bash -c "
+    source '$SBRAW/lib-auth.sh'
+    declare -F chp_has_leaf >/dev/null 2>&1 && echo 'SEAM_PRESENT' || echo 'SEAM_ABSENT'
+    AGENT_GH_TOKEN_FILE='/scoped'; AGENT_PR_CREATE_FILE='$PRFRAW'
+    drain_agent_pr_create 346 owner/repo
+  " 2>&1)
+  if printf '%s' "$out_raw" | grep -qF 'SEAM_ABSENT' \
+     && grep -qF -- 'CREATED pr create --repo owner/repo --head feat/issue-346-foo --title feat: my title --body' "$PRCRAW"; then
+    assert_pass "TC-FBDISP-003 chp_has_leaf undefined + CODE_HOST unset: the github-gated raw elif fallback fires byte-identically (lib-load-failure degraded path)"
+  else
+    assert_fail "TC-FBDISP-003 raw elif branch not exercised byte-identically (out=$out_raw; log=$(cat "$PRCRAW" 2>/dev/null))"
+  fi
+
+  # -------------------------------------------------------------------------
+  # TC-FBDISP-004: the RAW `else` gh-as-user.sh fallback in drain_agent_bot_triggers
+  # fires byte-identically when the trigger_bot leaf is ABSENT under CODE_HOST=github.
+  # Unlike -003 (pr-create), the bot-trigger broker's PR-NUMBER read routes through
+  # chp_pr_list, so a fully-seam-absent sandbox would fail that read first ("no open
+  # PR found") and never reach the posting loop. So this uses a GitHub-named fixture
+  # (provider-fbdisp-gh-notrigger) that DEFINES chp_github_pr_list but OMITS
+  # chp_github_trigger_bot, selected via CODE_HOST=github + AUTONOMOUS_PROVIDERS_DIR:
+  # the PR read resolves, `chp_has_leaf trigger_bot` is FALSE, `${CODE_HOST:-github}
+  # == github` is TRUE → the raw `else` branch is the one exercised. AC1.
+  SBGN=$(fbdisp_sandbox)   # copies lib-code-host.sh so chp_has_leaf/chp_pr_list resolve
+  GAUGN="$TMPROOT/fbdisp-gn-gau.log"; : > "$GAUGN"
+  printf '#!/bin/bash\nprintf "GAU %%s\\n" "$*" >> "%s"\n' "$GAUGN" > "$SBGN/gh-as-user.sh"; chmod +x "$SBGN/gh-as-user.sh"
+  GHGN="$TMPROOT/fbdisp-gn-gh"; mkdir -p "$GHGN"
+  cat > "$GHGN/gh" <<'GHSTUB'
+#!/bin/bash
+if [[ "$1" == "pr" && "$2" == "list" ]]; then echo 4242; exit 0; fi
+exit 0
+GHSTUB
+  chmod +x "$GHGN/gh"
+  BTFGN="$TMPROOT/fbdisp-gn-bt"; printf '/q review\n' > "$BTFGN"
+  out_gn=$(env -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR PATH="$GHGN:/usr/bin:/bin" REPO="owner/repo" \
+    AUTONOMOUS_CONF_DIR="$SBGN" CODE_HOST=github AUTONOMOUS_PROVIDERS_DIR="$FBDISP_GH_NOTRIGGER" bash -c "
+    source '$SBGN/lib-auth.sh'
+    declare -F chp_has_leaf >/dev/null 2>&1 && { chp_has_leaf trigger_bot && echo 'LEAF_PRESENT' || echo 'LEAF_ABSENT'; }
+    AGENT_GH_TOKEN_FILE='/scoped'; AGENT_BOT_TRIGGER_FILE='$BTFGN'
+    drain_agent_bot_triggers 346 owner/repo '/q review'
+  " 2>&1)
+  if printf '%s' "$out_gn" | grep -qF 'LEAF_ABSENT' \
+     && grep -qF -- 'GAU pr comment 4242 --repo owner/repo --body /q review' "$GAUGN"; then
+    assert_pass "TC-FBDISP-004 trigger_bot leaf absent under CODE_HOST=github: the github-gated raw gh-as-user.sh fallback fires byte-identically"
+  else
+    assert_fail "TC-FBDISP-004 raw else branch not exercised byte-identically (out=$out_gn; log=$(cat "$GAUGN" 2>/dev/null))"
+  fi
+
+  # -------------------------------------------------------------------------
+  # TC-FBDISP-010: non-github + create_pr leaf ABSENT → loud error, NO raw gh
+  # (tripwire). AC2.
+  SBN1=$(fbdisp_sandbox)
+  TRIP1="$TMPROOT/fbdisp-trip1.log"; : > "$TRIP1"
+  GHN1="$TMPROOT/fbdisp-ghn1"; mkdir -p "$GHN1"
+  printf '#!/bin/bash\nprintf "GH_TRIPWIRE %%s\\n" "$*" >> "%s"\nexit 0\n' "$TRIP1" > "$GHN1/gh"; chmod +x "$GHN1/gh"
+  PRFN1="$TMPROOT/fbdisp-prfn1"; printf 'branch: feat/issue-346-foo\nfeat: title\nBody.\n' > "$PRFN1"
+  out_n1=$(env -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR PATH="$GHN1:/usr/bin:/bin" REPO="owner/repo" \
+    CODE_HOST=fbdispnoleaf AUTONOMOUS_PROVIDERS_DIR="$FBDISP_NOLEAF" bash -c "
+    source '$SBN1/lib-auth.sh'
+    AGENT_GH_TOKEN_FILE='/scoped'; AGENT_PR_CREATE_FILE='$PRFN1'
+    drain_agent_pr_create 346 owner/repo
+  " 2>&1)
+  if [[ ! -s "$TRIP1" ]] && printf '%s' "$out_n1" | grep -qF 'refusing to open a GitHub PR on a non-GitHub backend'; then
+    assert_pass "TC-FBDISP-010 non-github + leaf-absent: drain_agent_pr_create fails LOUD, NO raw gh pr create executed"
+  else
+    assert_fail "TC-FBDISP-010 non-github pr-create leaked a gh call or missed the loud error (trip=$(cat "$TRIP1" 2>/dev/null); out=$out_n1)"
+  fi
+
+  # -------------------------------------------------------------------------
+  # TC-FBDISP-011: non-github + trigger_bot leaf ABSENT (review_bots=1 so the
+  # earlier review_bots short-circuit does NOT fire) → loud error, NO raw
+  # gh-as-user.sh (tripwire). AC2.
+  SBN2=$(fbdisp_sandbox)
+  GAUTRIP="$TMPROOT/fbdisp-gautrip.log"; : > "$GAUTRIP"
+  printf '#!/bin/bash\nprintf "GAU_TRIPWIRE %%s\\n" "$*" >> "%s"\n' "$GAUTRIP" > "$SBN2/gh-as-user.sh"; chmod +x "$SBN2/gh-as-user.sh"
+  GHN2="$TMPROOT/fbdisp-ghn2"; mkdir -p "$GHN2"
+  printf '#!/bin/bash\nprintf "GH_TRIPWIRE %%s\\n" "$*" >> "%s"\nexit 0\n' "$GAUTRIP" > "$GHN2/gh"; chmod +x "$GHN2/gh"
+  BTFN2="$TMPROOT/fbdisp-btn2"; printf '/q review\n/codex review\n' > "$BTFN2"
+  out_n2=$(env -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR PATH="$GHN2:/usr/bin:/bin" REPO="owner/repo" \
+    AUTONOMOUS_CONF_DIR="$SBN2" CHP_FBDISP_PR_BODY="closes #346" \
+    CODE_HOST=fbdispnoleaf AUTONOMOUS_PROVIDERS_DIR="$FBDISP_NOLEAF" bash -c "
+    source '$SBN2/lib-auth.sh'
+    AGENT_GH_TOKEN_FILE='/scoped'; AGENT_BOT_TRIGGER_FILE='$BTFN2'
+    drain_agent_bot_triggers 346 owner/repo \$'/q review\n/codex review'
+  " 2>&1)
+  if [[ ! -s "$GAUTRIP" ]] && printf '%s' "$out_n2" | grep -qF 'refusing to post a GitHub-user comment on a non-GitHub backend'; then
+    assert_pass "TC-FBDISP-011 non-github + leaf-absent: drain_agent_bot_triggers fails LOUD, NO raw gh-as-user.sh executed"
+  else
+    assert_fail "TC-FBDISP-011 non-github bot-trigger leaked a post or missed the loud error (trip=$(cat "$GAUTRIP" 2>/dev/null); out=$out_n2)"
+  fi
+
+  # -------------------------------------------------------------------------
+  # TC-FBDISP-020: non-github + create_pr leaf PRESENT → the VERB path is taken
+  # (no raw gh). AC2 verb-present.
+  SBL1=$(fbdisp_sandbox)
+  LEAFLOG1="$TMPROOT/fbdisp-leaf1.log"; : > "$LEAFLOG1"
+  TRIPL1="$TMPROOT/fbdisp-tripl1.log"; : > "$TRIPL1"
+  GHL1="$TMPROOT/fbdisp-ghl1"; mkdir -p "$GHL1"
+  printf '#!/bin/bash\nprintf "GH_RAW %%s\\n" "$*" >> "%s"\nexit 0\n' "$TRIPL1" > "$GHL1/gh"; chmod +x "$GHL1/gh"
+  PRFL1="$TMPROOT/fbdisp-prfl1"; printf 'branch: feat/issue-346-foo\nfeat: title\nBody.\n' > "$PRFL1"
+  env -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR PATH="$GHL1:/usr/bin:/bin" REPO="owner/repo" \
+    CHP_FBDISP_LEAF_LOG="$LEAFLOG1" CODE_HOST=fbdispleaf AUTONOMOUS_PROVIDERS_DIR="$FBDISP_LEAF" bash -c "
+    source '$SBL1/lib-auth.sh'
+    AGENT_GH_TOKEN_FILE='/scoped'; AGENT_PR_CREATE_FILE='$PRFL1'
+    drain_agent_pr_create 346 owner/repo
+  " >/dev/null 2>&1
+  if grep -qF 'VERB_CREATE_PR --head feat/issue-346-foo --title feat: title --body' "$LEAFLOG1" && [[ ! -s "$TRIPL1" ]]; then
+    assert_pass "TC-FBDISP-020 non-github + leaf-present: drain_agent_pr_create routes through chp_create_pr (no raw gh)"
+  else
+    assert_fail "TC-FBDISP-020 verb path not taken (leaf=$(cat "$LEAFLOG1" 2>/dev/null); raw=$(cat "$TRIPL1" 2>/dev/null))"
+  fi
+
+  # -------------------------------------------------------------------------
+  # TC-FBDISP-021: non-github + trigger_bot leaf PRESENT → the VERB path is taken
+  # (no raw gh-as-user.sh). AC2 verb-present.
+  SBL2=$(fbdisp_sandbox)
+  LEAFLOG2="$TMPROOT/fbdisp-leaf2.log"; : > "$LEAFLOG2"
+  GAUL2="$TMPROOT/fbdisp-gaul2.log"; : > "$GAUL2"
+  printf '#!/bin/bash\nprintf "GAU_RAW %%s\\n" "$*" >> "%s"\n' "$GAUL2" > "$SBL2/gh-as-user.sh"; chmod +x "$SBL2/gh-as-user.sh"
+  GHL2="$TMPROOT/fbdisp-ghl2"; mkdir -p "$GHL2"; printf '#!/bin/bash\nexit 0\n' > "$GHL2/gh"; chmod +x "$GHL2/gh"
+  BTFL2="$TMPROOT/fbdisp-btl2"; printf '/q review\n' > "$BTFL2"
+  env -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR PATH="$GHL2:/usr/bin:/bin" REPO="owner/repo" \
+    AUTONOMOUS_CONF_DIR="$SBL2" CHP_FBDISP_PR_BODY="closes #346" CHP_FBDISP_LEAF_LOG="$LEAFLOG2" \
+    CODE_HOST=fbdispleaf AUTONOMOUS_PROVIDERS_DIR="$FBDISP_LEAF" bash -c "
+    source '$SBL2/lib-auth.sh'
+    AGENT_GH_TOKEN_FILE='/scoped'; AGENT_BOT_TRIGGER_FILE='$BTFL2'
+    drain_agent_bot_triggers 346 owner/repo '/q review'
+  " >/dev/null 2>&1
+  if grep -qF 'VERB_TRIGGER_BOT 4242 /q review' "$LEAFLOG2" && [[ ! -s "$GAUL2" ]]; then
+    assert_pass "TC-FBDISP-021 non-github + leaf-present: drain_agent_bot_triggers routes through chp_trigger_bot (no raw gh-as-user.sh)"
+  else
+    assert_fail "TC-FBDISP-021 verb path not taken (leaf=$(cat "$LEAFLOG2" 2>/dev/null); raw=$(cat "$GAUL2" 2>/dev/null))"
+  fi
+
+  # -------------------------------------------------------------------------
+  # TC-FBDISP-041: source-shape — both drains gate their raw fallback on
+  # `${CODE_HOST:-github}` == "github", and the raw `gh pr create` line is
+  # byte-identical to the baselined content. AC3.
+  LIB_AUTH_SRC="$SCRIPTS/lib-auth.sh"
+  if grep -qF 'elif [[ "${CODE_HOST:-github}" == "github" ]]; then' "$LIB_AUTH_SRC" \
+     && grep -qF 'refusing to open a GitHub PR on a non-GitHub backend' "$LIB_AUTH_SRC" \
+     && grep -qF 'refusing to post a GitHub-user comment on a non-GitHub backend' "$LIB_AUTH_SRC" \
+     && grep -qF '_pr_create_ok() { gh pr create --repo "$repo" --head "$branch" --title "$title" --body "$body" >/dev/null 2>&1; }' "$LIB_AUTH_SRC"; then
+    assert_pass "TC-FBDISP-041 source: both drains gate the raw fallback on CODE_HOST==github; raw gh pr create line byte-identical"
+  else
+    assert_fail "TC-FBDISP-041 source: missing the CODE_HOST==github guard, a loud-error line, or the byte-identical raw gh pr create"
+  fi
+else
+  echo -e "  ${RED}FAIL${NC}: TC-FBDISP fixtures missing ($FBDISP_NOLEAF / $FBDISP_LEAF)"; FAIL=$((FAIL + 1))
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
 echo "=== Summary ==="
 echo "  PASS: $PASS"
 echo "  FAIL: $FAIL"

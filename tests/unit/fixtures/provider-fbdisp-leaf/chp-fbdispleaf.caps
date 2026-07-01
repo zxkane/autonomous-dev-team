@@ -1,0 +1,10 @@
+# tests/unit/fixtures/provider-fbdisp-leaf/chp-fbdispleaf.caps
+#
+# Capability manifest for the #346 verb-path fixture (non-GitHub backend WITH
+# create_pr / trigger_bot leaves). review_bots=1 so the bot-trigger broker reaches
+# the leaf, which — being DEFINED — routes through the verb, not the raw fallback.
+
+native_issue_pr_link=0
+rest_request_changes=1
+review_bots=1
+merge_closes_issue=1
