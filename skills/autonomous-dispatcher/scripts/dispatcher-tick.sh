@@ -464,7 +464,7 @@ for i in $(seq 0 $((pd_count - 1))); do
       # dev-new every tick forever. Stay in pending-dev so the operator
       # sees the issue accumulating retries via mark_stalled instead.
       #
-      # [INV-100] (#356): routes through `_reset_session_log` (lib-dispatch.sh)
+      # [INV-101] (#356): routes through `_reset_session_log` (lib-dispatch.sh)
       # — backend-aware, so under EXECUTION_BACKEND=remote-aws-ssm the reset
       # happens on the execution host via SSM (the same host
       # `is_session_completed`'s remote probe read the stale line from),

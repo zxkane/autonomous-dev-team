@@ -225,11 +225,15 @@ branch is byte-for-byte the pre-#356 implementation.
 **Adding a new non-local backend**: implement
 `session-log-probe-<your-name>.sh` per the [terminal-state probe
 transport](#3-terminal-state-probe-transport-synchronous-probe-truncate)
-contract above, then extend BOTH `_remote_session_log_probe` and
-`_reset_session_log`'s case-statements to match the new backend's name.
-Same whitelist-not-blanket rule as `pid_alive`: relaxing either
-condition to `!= "local"` would fall through to a local file read that
-always misses under the new backend, silently disabling [INV-98] /
+contract above, then extend the `EXECUTION_BACKEND` equality check
+inside BOTH `_remote_session_log_probe` and `_reset_session_log`
+(`lib-dispatch.sh`) to also match the new backend's name — today each is
+a single `if [ "${EXECUTION_BACKEND:-local}" = "remote-aws-ssm" ]`, not
+a `case`; a second backend name means widening that one `if` (or an
+`||` of both names) at BOTH call sites, since they don't share a
+dispatch table. Same whitelist-not-blanket rule as `pid_alive`: relaxing
+either condition to `!= "local"` would fall through to a local file read
+that always misses under the new backend, silently disabling [INV-98] /
 [INV-12] PTL recovery for it (the exact #356 bug, on a different
 backend).
 

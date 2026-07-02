@@ -1,7 +1,7 @@
 #!/bin/bash
 # session-log-probe-remote-aws-ssm.sh — Synchronous SSM-driven terminal-state
 # probe for the dispatcher's is_session_completed under
-# EXECUTION_BACKEND=remote-aws-ssm (#356, INV-100).
+# EXECUTION_BACKEND=remote-aws-ssm (#356, INV-101).
 #
 # Mirrors liveness-check-remote-aws-ssm.sh's shape (INV-30): the dispatcher
 # tick runs on the controller host, but the dev wrapper writes its per-issue
@@ -140,15 +140,22 @@ if [[ -n "$SSM_REMOTE_PROFILE" ]]; then
 fi
 
 if [[ "$MODE_FLAG" == "--probe" ]]; then
+  # NOTE: the grep pattern and printf format below MUST use double quotes,
+  # not single quotes. INNER_CMD is later interpolated inside an OUTER
+  # single-quoted `-c '...'` wrapper (see FULL_CMD below) — any single quote
+  # in INNER_CMD's literal text would prematurely close that outer quoting
+  # and corrupt the argv the remote shell receives (verified: an embedded
+  # `grep '^{"type":"result"'` truncates FULL_CMD's quoting, and the remote
+  # `sudo … bash -l -c '<truncated>'` mis-parses everything after it).
   INNER_CMD=$(cat <<EOF
 ${profile_prefix}set -u
 PROJECT_ID="${SSM_REMOTE_PROJECT_ID}"
 N="${ISSUE_NUM}"
 LOG="/tmp/agent-\${PROJECT_ID}-issue-\${N}.log"
 if [ -r "\$LOG" ]; then
-  LINE=\$(grep '^{"type":"result"' "\$LOG" 2>/dev/null | tail -1)
+  LINE=\$(grep "^{\"type\":\"result\"" "\$LOG" 2>/dev/null | tail -1)
   if [ -n "\$LINE" ]; then
-    printf '%s\n' "\$LINE"
+    printf "%s\n" "\$LINE"
     stat -c %Y "\$LOG" 2>/dev/null || true
   fi
 fi

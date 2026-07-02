@@ -819,7 +819,7 @@ extract_dev_session_id() {
 # correct degradation — slower recovery (one full tick cycle) but no risk
 # of false-positive auto-recovery on a CLI whose JSON we haven't observed.
 #
-# [INV-100] (#356) Backend seam: the log this function reads lives on the
+# [INV-101] (#356) Backend seam: the log this function reads lives on the
 # box that runs the dev wrapper, NOT necessarily the box running this tick.
 # Under `EXECUTION_BACKEND=remote-aws-ssm` the read is dispatched to the
 # execution host via `_remote_session_log_probe` (mirrors [INV-30]'s
@@ -838,7 +838,7 @@ is_session_completed() {
 
   local last_line log_file _end_epoch=""
   if [ "${EXECUTION_BACKEND:-local}" = "remote-aws-ssm" ]; then
-    # [INV-100] Remote branch: the log lives on the execution host. The
+    # [INV-101] Remote branch: the log lives on the execution host. The
     # driver echoes the last `{"type":"result"...}` line on stdout line 1
     # and (only when line 1 is non-empty) the log's mtime as a Unix epoch
     # on line 2. SSM error/timeout/no-match all collapse to empty output —
@@ -918,7 +918,7 @@ _session_log_probe_driver_path() {
   fi
 }
 
-# _remote_session_log_probe <issue_num> — [INV-100] (#356). Synchronous SSM
+# _remote_session_log_probe <issue_num> — [INV-101] (#356). Synchronous SSM
 # query into the dev wrapper's per-issue log on the execution host.
 #
 # ALWAYS returns 0 — driver failure (rc≠0: SSM transport fault, timeout,
@@ -942,7 +942,7 @@ _remote_session_log_probe() {
   return 0
 }
 
-# _reset_session_log <issue_num> — [INV-100] (#356) backend-aware truncate.
+# _reset_session_log <issue_num> — [INV-101] (#356) backend-aware truncate.
 # Companion seam to `_remote_session_log_probe`: once a remote session
 # becomes detectable as completed/PTL, the two existing recovery-truncate
 # call sites (`handle_completed_session_routing`'s failed-substantive
@@ -1308,7 +1308,7 @@ handle_completed_session_routing() {
       # line, the idempotency marker would suppress a fresh notice, and
       # we'd silently dispatch dev-new every tick forever.
       #
-      # [INV-100] (#356): the truncate routes through `_reset_session_log`,
+      # [INV-101] (#356): the truncate routes through `_reset_session_log`,
       # which is backend-aware — under EXECUTION_BACKEND=remote-aws-ssm it
       # resets the log ON THE EXECUTION HOST via SSM (the same host
       # `_remote_session_log_probe` read from), not a controller-local path.
