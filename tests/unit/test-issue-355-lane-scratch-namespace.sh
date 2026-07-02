@@ -71,6 +71,7 @@ echo "=== TC-LSN-MATRIX: two-writer matrix (D1) ==="
 _FN_SLICE=$(mktemp)
 awk '/^build_review_prompt\(\) \{/,/^}$/' "$WRAPPER" > "$_FN_SLICE"
 _RESOLVE_LIB="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-review-resolve.sh"
+_ARTIFACT_LIB="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-review-artifact.sh"
 
 render() {
   local project="$1" agent="$2" issue="$3" sid="$4"
@@ -84,6 +85,10 @@ render() {
     PROJECT_ID="$project"
     unset AGENT_REVIEW_MODEL AGENT_REVIEW_MODEL_CLAUDE AGENT_REVIEW_MODEL_CODEX AGENT_REVIEW_MODEL_AGY
     source "$_RESOLVE_LIB"
+    # #355: _verdict_body_lane_dir (the D1 lane-dir provisioner) lives in
+    # lib-review-artifact.sh, sourced by the real wrapper but not by this
+    # function-slice sandbox.
+    source "$_ARTIFACT_LIB"
     source "$_FN_SLICE"
     build_review_prompt "$agent" "$sid"
   )
@@ -189,6 +194,7 @@ PROMPT_EMPTY_SID=$(
   PROJECT_ID="proj-epsilon"
   unset AGENT_REVIEW_MODEL AGENT_REVIEW_MODEL_CLAUDE AGENT_REVIEW_MODEL_CODEX
   source "$_RESOLVE_LIB"
+  source "$_ARTIFACT_LIB"
   source "$_FN_SLICE2"
   # EMPTY 2nd arg — codex/opencode mint their thread/session id AFTER launch,
   # so this is what the prompt render sees for those CLIs.
@@ -349,8 +355,10 @@ check_absent "TC-LSN-R6-05b /tmp/e2e-\${PR_NUMBER}.log in a doc-code-span (no PR
   '`/tmp/e2e-\$\{PR_NUMBER\}\.log`'
 
 # Positive control: the NEW forms ARE present (proves the greps above aren't
-# vacuously passing because the whole feature is missing).
-if grep -rqF '/tmp/review-${PROJECT_ID:-noproject}-${_agent_name}-${ISSUE_NUMBER:-0}-XXXXXX' "$SKILLS_DIR" 2>/dev/null; then
+# vacuously passing because the whole feature is missing). D1's lane-dir
+# template lives once, in the shared _verdict_body_lane_dir helper
+# (lib-review-artifact.sh) — both call sites route through it.
+if grep -rqF 'mktemp -d "/tmp/review-${_project}-${_agent}-${_issue}-XXXXXX"' "$SKILLS_DIR" 2>/dev/null; then
   echo -e "  ${GREEN}PASS${NC}: TC-LSN-R6-06 positive control — D1 lane-dir mechanism IS present"
   PASS=$((PASS + 1))
 else

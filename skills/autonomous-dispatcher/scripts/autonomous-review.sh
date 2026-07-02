@@ -1056,9 +1056,7 @@ build_review_prompt() {
   # a collision-free, render-time-independent path.
   local _verdict_body_path="${4:-}"
   if [[ -z "$_verdict_body_path" ]]; then
-    local _self_lane_dir
-    _self_lane_dir=$(mktemp -d "/tmp/review-${PROJECT_ID:-noproject}-${_agent_name}-${ISSUE_NUMBER:-0}-XXXXXX" 2>/dev/null) || _self_lane_dir="/tmp"
-    _verdict_body_path="${_self_lane_dir}/verdict.md"
+    _verdict_body_path="$(_verdict_body_lane_dir "${PROJECT_ID:-}" "${_agent_name}" "${ISSUE_NUMBER:-}")/verdict.md"
   fi
   # [INV-60] (#208): resolve THIS agent's review model for the verdict trailer
   # exactly as the `Reviewed HEAD:` trailer (~`_REVIEW_HEAD_MODEL` below) and the
@@ -2015,10 +2013,10 @@ for _agent in "${REVIEW_AGENTS_LIST[@]}"; do
   # ISSUE_NUMBER, with a random mktemp suffix for collision-freedom that does
   # NOT depend on the session id being non-empty at render time (the codex/
   # opencode gap #354 left open — those CLIs mint their thread/session id AFTER
-  # launch). Falls back to a bare mktemp under /tmp on a provisioning failure
-  # (full disk / perms) rather than aborting the loop under `set -e`.
-  _agent_verdict_lane_dir=$(mktemp -d "/tmp/review-${PROJECT_ID}-${_agent}-${ISSUE_NUMBER}-XXXXXX" 2>/dev/null) \
-    || _agent_verdict_lane_dir=$(mktemp -d 2>/dev/null) || _agent_verdict_lane_dir="/tmp"
+  # launch). `_verdict_body_lane_dir` (lib-review-artifact.sh) is the single
+  # source of truth for this path shape — shared with build_review_prompt's
+  # legacy-caller self-provisioning fallback so the two can never diverge.
+  _agent_verdict_lane_dir=$(_verdict_body_lane_dir "$PROJECT_ID" "$_agent" "$ISSUE_NUMBER")
   AGENT_VERDICT_LANE_DIRS+=("$_agent_verdict_lane_dir")
   # [P1] #2: the frozen-at-first-land snapshot path (same dir → same fs + 0700
   # parent). The agent NEVER writes here; only the observe loop copies into it.

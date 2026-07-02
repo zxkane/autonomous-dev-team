@@ -101,6 +101,9 @@ awk '/^build_review_prompt\(\) \{/,/^}$/' "$WRAPPER" > "$_FN_SLICE"
 # lib-review-resolve.sh::_resolve_review_agent_model (INV-41) — source the lib
 # in the sandbox so the resolver is the production one, not a stub.
 _RESOLVE_LIB="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-review-resolve.sh"
+# #355: _verdict_body_lane_dir (the D1 lane-dir provisioner build_review_prompt's
+# legacy-caller fallback calls) lives in lib-review-artifact.sh.
+_ARTIFACT_LIB="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-review-artifact.sh"
 SANDBOX_OUT=$(
   set +e
   render_bot_review_section() { :; }
@@ -127,6 +130,7 @@ SANDBOX_OUT=$(
   AGENT_REVIEW_MODEL_AGY="Gemini 3.5 Flash (High)"
   unset AGENT_REVIEW_MODEL AGENT_REVIEW_MODEL_CLAUDE AGENT_REVIEW_MODEL_CODEX
   source "$_RESOLVE_LIB"
+  source "$_ARTIFACT_LIB"
   # issue #220: build_review_prompt's verdict-trailer model now routes through
   # _resolve_review_agent_model_label, which mirrors INV-50 by validating an agy
   # id against `agy models`. Stub _agy_known_model (deterministic — no shell-out)

@@ -95,13 +95,16 @@ else
   PASS=$((PASS + 1))
 fi
 
-# AC1 (#355): the self-provisioning fallback mints a mktemp -d lane dir keyed
-# by PROJECT_ID + agent name + ISSUE_NUMBER — no session-id token required.
-if grep -qE 'mktemp -d "/tmp/review-\$\{PROJECT_ID:-noproject\}-\$\{_agent_name\}-\$\{ISSUE_NUMBER:-0\}-XXXXXX"' <<<"$PROMPT_FN"; then
-  echo -e "  ${GREEN}PASS${NC}: TC-VBN-02b self-provisioning lane-dir fallback keyed by project+agent+issue (no session-id dependency)"
+# AC1 (#355): the self-provisioning fallback calls the shared
+# _verdict_body_lane_dir helper (lib-review-artifact.sh) keyed by PROJECT_ID +
+# agent name + ISSUE_NUMBER — no session-id token required. Routed through the
+# single-source-of-truth helper (not a second hand-rolled mktemp template) so
+# it can never diverge from the fan-out loop's own provisioning call.
+if grep -qE '_verdict_body_lane_dir "\$\{PROJECT_ID:-\}" "\$\{_agent_name\}" "\$\{ISSUE_NUMBER:-\}"' <<<"$PROMPT_FN"; then
+  echo -e "  ${GREEN}PASS${NC}: TC-VBN-02b self-provisioning fallback calls _verdict_body_lane_dir keyed by project+agent+issue (no session-id dependency)"
   PASS=$((PASS + 1))
 else
-  echo -e "  ${RED}FAIL${NC}: TC-VBN-02b no self-provisioning lane-dir fallback found"
+  echo -e "  ${RED}FAIL${NC}: TC-VBN-02b no self-provisioning _verdict_body_lane_dir call found"
   FAIL=$((FAIL + 1))
 fi
 
@@ -135,6 +138,7 @@ echo "=== TC-VBN-BEHAVE: rendered prompt resolves to a DISTINCT path per (issue,
 _FN_SLICE=$(mktemp)
 awk '/^build_review_prompt\(\) \{/,/^}$/' "$WRAPPER" > "$_FN_SLICE"
 _RESOLVE_LIB="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-review-resolve.sh"
+_ARTIFACT_LIB="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-review-artifact.sh"
 
 render_for_issue() {
   local issue="$1" sid="$2" project="${3:-}"
@@ -150,6 +154,10 @@ render_for_issue() {
     PROJECT_ID="$project"
     unset AGENT_REVIEW_MODEL AGENT_REVIEW_MODEL_CLAUDE AGENT_REVIEW_MODEL_CODEX
     source "$_RESOLVE_LIB"
+    # #355: _verdict_body_lane_dir (the D1 lane-dir provisioner) lives in
+    # lib-review-artifact.sh, sourced by the real wrapper but not by this
+    # function-slice sandbox.
+    source "$_ARTIFACT_LIB"
     source "$_FN_SLICE"
     build_review_prompt "codex" "$sid"
   )
