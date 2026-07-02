@@ -119,6 +119,16 @@ post NOTHING, mark NOTHING, defer to next tick (no orphan report).
 Once ≥3-frozen-completed + identical-trailer-hash + `dev-actionable=true` +
 #298-precedence hold AND `may_stall_now` says eligible:
 
+**Owner correction (round-10): the resume path is REMOVE `stalled`, not
+re-add `autonomous`.** `autonomous` is never removed by this pipeline except on
+a successful review-close (`state-machine.md`'s label table) — `mark_stalled`
+does not remove it, and neither does this breaker's `label_swap`. So the issue
+sitting in `stalled` still carries `autonomous`; the maintainer's actual re-arm
+action (`stalled-rearm` in `transitions.json`) is to **remove the `stalled`
+label**, which re-enters via dispatcher Step 2 (`autonomous → in_progress`) and
+resets the retry counter (INV-05). "Re-add `autonomous`" is a no-op on this
+pipeline and must not appear in the report or docs.
+
 1. Post ONE structured `reason=non-convergence` report carrying:
    - the PR ref + frozen head SHA (R7),
    - the round timestamps (evidence rows, C2),
@@ -126,27 +136,47 @@ Once ≥3-frozen-completed + identical-trailer-hash + `dev-actionable=true` +
    - the `cause=` / `dev-actionable` hint (routes the human toward malformed-AC
      vs missing-permission vs genuine),
    - the dispatcher actions taken,
-   - a **"To resume: fix per the checklist, then re-add the `autonomous` label."**
-     instruction (R7),
+   - a **"To resume: fix per the checklist, then REMOVE the `stalled` label
+     (`autonomous` is retained; removal re-arms the pipeline via Step 2 and
+     resets the retry counter, INV-05)."** instruction (R7, corrected round-10),
    - the idempotency marker
      `<!-- dispatcher-convergence-breaker: issue=<N> head=<sha> trailer=<hash> -->`.
-2. Then the terminal transition via plain `label_swap`: add `stalled`, remove
-   `autonomous` + `pending-dev`. Exactly ONE terminal comment (the #297 report —
-   NOT `mark_stalled`'s "@owner retry exhausted").
+2. Then the terminal transition via plain `label_swap`: `pending-dev → stalled`
+   (the SAME declared movement `mark_stalled` uses — `autonomous` is retained
+   throughout, never part of this movement). Exactly ONE terminal comment (the
+   #297 report — NOT `mark_stalled`'s "@owner retry exhausted").
+3. **Atomicity (round-10 [P1]):** the marker (step 1) and the transition (step
+   2) MUST land as one atomic unit from the perspective of the idempotency
+   check — persist the marker into the SAME comment payload that also embeds
+   proof the transition landed, or perform the transition FIRST and have the
+   report's post-transition write be the operation the idempotency check keys
+   on. If the label transition fails after the marker is posted, the next tick
+   must not see a "reported" marker on an issue that is still `pending-dev` — it
+   must retry the transition rather than silently no-op. See `lib-dispatch.sh`
+   for the concrete ordering (transition-then-report, with the marker read
+   scoped to bot comments AND the current `stalled` label state).
 
-Reuse `stalled` — no new `deadlocked` label (R5): both recovery actions are
-"read report, fix, re-add `autonomous`". No `state-machine.md` label edit.
+Reuse `stalled` — no new `deadlocked` label (R5): the recovery action is "read
+report, fix, remove `stalled`". No `state-machine.md` label edit (the
+`pending-dev → stalled` movement is already declared).
 
 ## 6. Idempotency (C5/R6)
 
-Before posting, grep bot-authored comments for the exact marker
+Before doing anything, grep bot-authored comments for the exact marker
 `<!-- dispatcher-convergence-breaker: issue=<N> head=<sha> trailer=<hash> -->`.
 Keying on `{issue, head, trailer-hash}` means a genuinely NEW non-convergence
 case (a new trailer on the same frozen head) produces a different marker and is
-re-evaluated, while a re-run on the SAME case is suppressed. Re-read labels
-immediately before the transition (two-tick race guard) — implicit via
-`itp_transition_state`'s bundled edit + the `stalled` terminal-label stickiness
-([INV-25]).
+re-evaluated, while a re-run on the SAME case is suppressed.
+
+**Ordering vs. the terminal transition (round-10 [P1] finding 1):** the
+idempotency check runs BEFORE the transition, and the transition itself runs
+BEFORE the marker is posted (§5). So the marker being present is proof the
+transition ALREADY landed (transition-first) — checking for the marker is
+equivalent to checking "has this exact case already been fully handled",
+never "is a report queued for a transition that might still fail". A
+`label_swap` failure aborts the whole routing call under `set -euo pipefail`
+before any marker write, so no partially-handled state is ever observable —
+the next tick simply re-evaluates and retries from scratch.
 
 ## 7. Bias to MISS (R4)
 

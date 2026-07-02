@@ -5621,12 +5621,12 @@ untouched).
 
 _Triage (issue #236): [machine-checked: tests/unit/test-convergence-breaker.sh]_
 
-> Note: originally minted as INV-97 by #297; renumbered to INV-102 when main
-> claimed INV-97 (#311, `itp_transition_state` CSV); renumbered AGAIN to
-> INV-103 when #337 (`chp_pr_comment`) claimed INV-102 through
-> INV-100 (#357); #337 (INV-101, `chp_pr_comment`) was also in flight ahead of
-> this PR. Renumbered to the next free slot, INV-102, per the documented
-> first-merged-keeps-its-number convention.
+> Note: originally minted as INV-97 by #297; renumbered to INV-102 on a rebase
+> after main independently claimed INV-97..101 (INV-100 #355, INV-101 #356) in
+> the interim; renumbered AGAIN to INV-103 (this heading) when #337
+> (`chp_pr_comment`) claimed INV-102 through a second mid-flight collision.
+> Next-free-slot renumbering follows the documented first-merged-keeps-its-number
+> convention; the design doc's lineage note records the full 97→102→103 history.
 
 **Rule**: the dispatcher detects a **non-converging** dev↔review loop and halts it
 automatically instead of burning tokens in an infinite `dev-resume` loop. The
@@ -5637,7 +5637,7 @@ breaker is the **belt** to [INV-85]'s single-shot-marker **suspenders**: INV-85
 bounds the `failed-substantive` route to ONE `dev-new` per unchanged HEAD via a
 per-HEAD attempt marker, but that marker resets on every log-truncating `dev-new`
 and can be missed when the crash-recovery path (`dispatcher-tick.sh` Step 5b)
-re-routes without writing it. INV-102 counts the DURABLE per-round evidence and
+re-routes without writing it. INV-103 counts the DURABLE per-round evidence and
 trips deterministically after ≥N rounds.
 
 **Where** (single insertion point): `handle_completed_session_routing`'s
@@ -5733,23 +5733,38 @@ terminal transition WILL proceed this tick do we post the report + marker + do t
 transition — one eligibility-gated unit. A live dev PID → post NOTHING, mark
 NOTHING, defer to next tick (no orphan report/marker).
 
-**Terminal action — exactly ONE comment, declared movement**: post ONE structured
-`reason=non-convergence` report carrying the PR ref + frozen head SHA + the round
-count + the verbatim repeated finding (`recent_review_verdict_body`) + the
-`cause=`/`dev-actionable` hint + a human-action checklist + the explicit "**To
-resume: fix per the checklist, then REMOVE the `stalled` label.**" instruction
-+ the idempotency marker
-`<!-- dispatcher-convergence-breaker: issue=<N> head=<sha> trailer=<hash> -->`;
-THEN the terminal transition via the plain declared `pending-dev → stalled`
-`label_swap` (the SAME movement `mark_stalled` uses — NOT a new `autonomous →
-stalled` edge; `autonomous` is already OFF during the loop, removed at first
-dispatch, so halting autonomy IS the `pending-dev → stalled` move). This yields
-exactly ONE terminal comment (the #297 report — NOT `mark_stalled`'s "@owner retry
+**Terminal action — exactly ONE comment, declared movement, ATOMIC ordering**:
+the terminal transition via the plain declared `pending-dev → stalled`
+`label_swap` runs **FIRST** — the SAME movement `mark_stalled` uses, and the
+SAME ordering `mark_stalled` already follows (transition, then comment).
+`autonomous` is NEVER removed by this move (or by `mark_stalled`'s identical
+movement) — it is retained throughout the issue's entire active lifecycle,
+including while `stalled`; halting autonomy is achieved by `stalled` itself
+being terminal (Step 2 `scan-new` only dispatches `autonomous`-only issues), not
+by removing `autonomous`. Only AFTER the transition has landed does the breaker
+post ONE structured `reason=non-convergence` report carrying the PR ref + frozen
+head SHA + the round count + the verbatim repeated finding
+(`recent_review_verdict_body`) + the `cause=`/`dev-actionable` hint + a
+human-action checklist + the explicit "**To resume: fix per the checklist, then
+REMOVE the `stalled` label (`autonomous` is retained; removal re-arms via Step 2
+and resets the retry counter, INV-05).**" instruction + the idempotency marker
+`<!-- dispatcher-convergence-breaker: issue=<N> head=<sha> trailer=<hash> -->`.
+**Atomicity (round-10 [P1] BLOCKING finding 1):** posting the marker BEFORE the
+transition landed was a TOCTOU — a transient `label_swap` failure (e.g. a `gh
+issue edit` transport error) would leave the marker on the issue while it was
+still `pending-dev`, and the idempotency check (keyed on the marker alone) would
+then suppress every subsequent retry forever. Transition-first closes this: a
+`label_swap` failure aborts the unguarded statement under the dispatcher's `set
+-euo pipefail` BEFORE the marker is ever posted, so the next tick re-evaluates
+this issue from scratch and retries — self-healing, and consistent with
+`mark_stalled`'s own (equally unguarded) `label_swap` call. This yields exactly
+ONE terminal comment (the #297 report — NOT `mark_stalled`'s "@owner retry
 exhausted"), plus the live-PID deferral (via the shared `may_stall_now`), plus NO
 new declared label edge (passes `check-spec-drift.sh` Check C.2 — no
-`transitions.json` / `state-machine.md` edit). `stalled` is REUSED — no new
-`deadlocked` label ([INV-102] does not fork one; both recovery actions are "read
-report, fix, remove `stalled`").
+`transitions.json` / `state-machine.md` edit for a NEW edge; the movement itself
+is declared as its own `dispatch-stalled-convergence` transition row, see below).
+`stalled` is REUSED — no new `deadlocked` label ([INV-103] does not fork one;
+the recovery action is "read report, fix, remove `stalled`").
 
 **Idempotency**: before posting, grep bot-authored comments for the exact
 `{issue, head, trailer-hash}` marker; a re-run on the SAME case is suppressed

@@ -1641,15 +1641,35 @@ handle_completed_session_routing() {
         local _cb_round_ts
         _cb_round_ts="$(jq -r '[.[].createdAt] | join(", ")' 2>/dev/null <<<"$_cb_rounds_json" || true)"
 
-        # Post the ONE structured `reason=non-convergence` report + marker, THEN the
-        # terminal transition via the plain declared `pending-dev → stalled`
-        # `label_swap` — one eligibility-gated unit (C4′/C5/C7). Exactly ONE terminal
-        # comment (NOT mark_stalled's "@owner retry exhausted" — C4). Reuse `stalled`;
-        # no new label (R5). NOTE: `autonomous` is already OFF during the loop (it is
-        # removed at first dispatch, `autonomous → in_progress`), so halting autonomy
-        # IS the `pending-dev → stalled` move — the SAME declared movement
-        # `mark_stalled` uses (no undeclared `autonomous → stalled` edge; passes
-        # check-spec-drift Check C.2).
+        # ATOMICITY (round-10 [P1] BLOCKING finding 1): the terminal `label_swap`
+        # runs BEFORE the marker/report is posted — the same ordering `mark_stalled`
+        # already uses (transition first, comment second). This is the fix for a
+        # TOCTOU where posting the marker FIRST let a subsequent transient
+        # `label_swap` failure leave the issue stuck `pending-dev` forever: the
+        # idempotency check (above) would see the marker on every later tick and
+        # suppress the retry, even though the transition never landed. With the
+        # transition FIRST:
+        #   - `label_swap` fails → this statement is unguarded, so `set -euo
+        #     pipefail` aborts the tick before the marker is ever posted. No orphan
+        #     marker exists; the NEXT tick re-evaluates this issue from scratch
+        #     (still `pending-dev`, count/eligibility recomputed) and retries the
+        #     transition — self-healing, matching mark_stalled's existing risk
+        #     profile (its own `label_swap` call is equally unguarded).
+        #   - `label_swap` succeeds → the issue is now correctly `stalled` (the
+        #     state change has LANDED) before we attempt to post the report. If the
+        #     SUBSEQUENT `itp_post_comment` then fails, the operator loses the
+        #     report text, but the pipeline state is already correct (halted) —
+        #     a lost report is a much smaller defect than a permanently-stuck loop.
+        # `label_swap` uses the plain declared `pending-dev → stalled` movement —
+        # the SAME movement `mark_stalled` uses (no undeclared `autonomous →
+        # stalled` edge; `autonomous` is retained throughout, never part of this
+        # movement; passes check-spec-drift Check C.2).
+        label_swap "$issue_num" "pending-dev" "stalled"
+
+        # Post the ONE structured `reason=non-convergence` report + marker AFTER
+        # the transition has landed (C4′/C5/C7 eligibility-gated unit). Exactly ONE
+        # terminal comment (NOT mark_stalled's "@owner retry exhausted" — C4).
+        # Reuse `stalled`; no new label (R5).
         itp_post_comment "$issue_num" "$(cat <<CBREPORT
 ${_cb_marker}
 ## ⛔ Convergence circuit-breaker tripped — halting a non-converging dev↔review loop (\`reason=non-convergence\`, [INV-103])
@@ -1683,7 +1703,6 @@ $(if [ -n "$_cb_verdict_body" ]; then printf '  > %s\n' "${_cb_verdict_body:0:60
 @${REPO_OWNER}
 CBREPORT
 )"
-        label_swap "$issue_num" "pending-dev" "stalled"
         return 0
       fi
 

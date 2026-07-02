@@ -43,6 +43,12 @@ _MOCK_CAUSE=""
 _MOCK_DEV_ACTIONABLE="true"
 _MOCK_FLIP_COUNT=0
 _MOCK_LABEL_SWAPS=""
+# round-10 [P1] finding 1: records label_swap/itp_post_comment call sequence in a
+# FILE (survives a set -e subshell — see CB-ATOMIC-014). One file for the whole run;
+# reset_mocks truncates it between cases.
+_CALL_ORDER_FILE="$(mktemp)"
+trap 'rm -f "$_CALL_ORDER_FILE"' EXIT
+_MOCK_LABEL_SWAP_FAILS=0  # 1 = simulate a transient label_swap failure (rc 1, no state change)
 _MOCK_DISPATCH_CALLS=""
 _MOCK_POST_TOKEN_CALLS=""
 _MOCK_MARK_STALLED_CALLS=""
@@ -81,8 +87,20 @@ classify_recent_review_verdict() {
   return 0
 }
 count_review_aware_flips() { printf '%s' "$_MOCK_FLIP_COUNT"; }
+# _CALL_ORDER_FILE records the sequence of label_swap / itp_post_comment calls
+# (round-10 [P1] finding 1: atomicity — the transition MUST land before the
+# marker/report is posted). A FILE (not a plain variable) so the record survives
+# a `set -e` subshell invocation (CB-ATOMIC-014 below) — a subshell's variable
+# writes never propagate to the parent, but its file writes do.
+# _MOCK_LABEL_SWAP_FAILS simulates a transient `label_swap` failure (e.g. a
+# `gh issue edit` transport error) so the test can assert NO marker/report is
+# posted when the transition doesn't land.
 label_swap() {
   local issue_num="$1" remove="$2" add="$3"
+  echo "label_swap" >> "$_CALL_ORDER_FILE"
+  if [[ "${_MOCK_LABEL_SWAP_FAILS:-0}" != "0" ]]; then
+    return 1
+  fi
   _MOCK_LABEL_SWAPS+="${issue_num}:${remove}:${add} "
 }
 mark_stalled() { _MOCK_MARK_STALLED_CALLS+="${1} "; }
@@ -168,6 +186,7 @@ itp_list_comments() {
   printf '%s' "$_json"
 }
 itp_post_comment() {
+  echo "itp_post_comment" >> "$_CALL_ORDER_FILE"
   _MOCK_LAST_COMMENT_BODY="$2"
   _MOCK_FULL_COMMENT_LOG+="$2"$'\n'
   _MOCK_COMMENT_COUNT=$((_MOCK_COMMENT_COUNT + 1))
@@ -180,6 +199,8 @@ reset_mocks() {
   _MOCK_DEV_ACTIONABLE="true"
   _MOCK_FLIP_COUNT=0
   _MOCK_LABEL_SWAPS=""
+  : > "$_CALL_ORDER_FILE"
+  _MOCK_LABEL_SWAP_FAILS=0
   _MOCK_DISPATCH_CALLS=""
   _MOCK_POST_TOKEN_CALLS=""
   _MOCK_MARK_STALLED_CALLS=""
@@ -400,6 +421,56 @@ if [[ "$_MOCK_LAST_COMMENT_BODY" == *"Counted completed dev-resume rounds (times
 else
   echo -e "  ${GREEN}PASS${NC}: CB-REPORT-008/finding-2 timestamps populated (not the unavailable fallback)"; PASS=$((PASS + 1))
 fi
+
+# ===========================================================================
+echo ""
+echo "=== CB-ATOMIC-013/014: marker atomic with the transition (round-10 [P1] finding 1) ==="
+
+# CB-ATOMIC-013: on a successful trip, label_swap (the transition) is called
+# STRICTLY BEFORE itp_post_comment (the marker/report) — the fix ordering.
+reset_mocks
+_MOCK_VERDICT="failed-substantive"
+_MOCK_DEV_ACTIONABLE="true"
+_MOCK_PR_HEAD="deadbeef"
+_MOCK_LAST_REVIEWED_HEAD="deadbeef"
+_MOCK_FROZEN_ROUND_COMMENTS=3
+_MOCK_PID_ALIVE=1
+prepare_log 100
+handle_completed_session_routing 100 "sid-atomic013" "2026-05-21T03:18:00Z" >/dev/null
+assert_eq "CB-ATOMIC-013 label_swap called before itp_post_comment" \
+  "$(printf 'label_swap\nitp_post_comment')" "$(cat "$_CALL_ORDER_FILE")"
+
+# CB-ATOMIC-014: if label_swap FAILS (transient transport error), under the
+# real dispatcher's `set -euo pipefail` the bare `label_swap` statement aborts
+# the function BEFORE the marker/report is ever posted — no orphan marker, no
+# state left claiming "reported" while the issue is still `pending-dev`. Drive
+# this in a real `set -e` subshell (the harness itself runs `set +e` so it can
+# keep asserting after a routing call returns non-zero). `_CALL_ORDER_FILE` is a
+# real file, so the subshell's write to it survives past the subshell exiting —
+# unlike a plain bash variable, which a subshell can never mutate in the parent.
+reset_mocks
+_MOCK_VERDICT="failed-substantive"
+_MOCK_DEV_ACTIONABLE="true"
+_MOCK_PR_HEAD="deadbeef"
+_MOCK_LAST_REVIEWED_HEAD="deadbeef"
+_MOCK_FROZEN_ROUND_COMMENTS=3
+_MOCK_PID_ALIVE=1
+_MOCK_LABEL_SWAP_FAILS=1
+prepare_log 100
+(
+  set -e
+  handle_completed_session_routing 100 "sid-atomic014" "2026-05-21T03:18:00Z" >/dev/null
+) 2>/dev/null
+rc=$?
+if [[ "$rc" -ne 0 ]]; then
+  echo -e "  ${GREEN}PASS${NC}: CB-ATOMIC-014 a failing label_swap aborts under set -e (rc=$rc)"; PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: CB-ATOMIC-014 expected a non-zero abort when label_swap fails under set -e"; FAIL=$((FAIL + 1))
+fi
+assert_eq "CB-ATOMIC-014 NO marker/report posted when the transition failed" "0" "$_MOCK_COMMENT_COUNT"
+assert_eq "CB-ATOMIC-014 label_swap was attempted (recorded via the survives-subshell file)" \
+  "label_swap" "$(cat "$_CALL_ORDER_FILE")"
+assert_eq "CB-ATOMIC-014 the label state did NOT change (label_swap failed)" "" "$_MOCK_LABEL_SWAPS"
 
 # ===========================================================================
 echo ""

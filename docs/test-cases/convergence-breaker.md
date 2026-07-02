@@ -12,14 +12,16 @@ CI parity.
 
 | Test ID | Scenario | Expected |
 |---|---|---|
-| CB-TRIP-001 | 3 frozen-head completed zero-commit rounds, `dev-actionable=true`, identical trailer-hash, no live PID | ONE `reason=non-convergence` report + `<!-- dispatcher-convergence-breaker … -->` marker; `stalled` added, `autonomous`+`pending-dev` removed; NO dev-new dispatch |
+| CB-TRIP-001 | 3 frozen-head completed zero-commit rounds, `dev-actionable=true`, identical trailer-hash, no live PID | ONE `reason=non-convergence` report + `<!-- dispatcher-convergence-breaker … -->` marker; `pending-dev` removed, `stalled` added (`autonomous` RETAINED); NO dev-new dispatch |
 | CB-MISS-002 | Latest round's PR head ADVANCED (converging) | Does NOT trip → Branch C dev-new |
 | CB-MISS-003 | Only 2 frozen rounds (< `CONVERGENCE_STALL_THRESHOLD`=3) | Does NOT trip → Branch C dev-new |
 | CB-PRECEDENCE-004 | `failed-substantive` + `dev-actionable=false` | Branch B′ ([INV-92]) escalates; breaker does NOT run and does NOT count the round |
 | CB-LIVE-005 | ≥3 frozen rounds BUT `may_stall_now` reports a live dev PID | Posts NOTHING, marks NOTHING, defers (no orphan report/marker); returns 0 |
 | CB-IDEM-006 | Second tick, same `{issue, head, trailer-hash}`, marker already present | Nothing posted, nothing dispatched, NO duplicate `label_swap` |
 | CB-IDEM-007 | NEW trailer-hash on the same frozen head | Re-evaluates (different marker → not suppressed) |
-| CB-REPORT-008 | Trip report content | Contains PR ref (`#<num>`), frozen head SHA, `reason=non-convergence`, "re-add the `autonomous` label" resume instruction, repeated-failure count, AND the counted rounds' **per-round timestamps** ([P1] round-1 finding 2, not the `(unavailable)` fallback) |
+| CB-REPORT-008 | Trip report content | Contains PR ref (`#<num>`), frozen head SHA, `reason=non-convergence`, "REMOVE the `stalled` label" resume instruction (`autonomous` retained — round-10 owner correction), repeated-failure count, AND the counted rounds' **per-round timestamps** ([P1] round-1 finding 2, not the `(unavailable)` fallback) |
+| CB-ATOMIC-013 | Successful trip | `label_swap` (the transition) is called STRICTLY BEFORE `itp_post_comment` (the marker/report) — round-10 [P1] finding 1 |
+| CB-ATOMIC-014 | `label_swap` FAILS (transient transport error) under `set -euo pipefail` | Aborts BEFORE the marker/report is posted; no orphan marker; label state unchanged; next tick retries — round-10 [P1] finding 1 |
 | CB-COUNT-009a | Stale `failed-non-substantive` rounds precede the active `failed-substantive`+`dev-actionable=true` rounds on the same SHA | Count = only the active-case rounds (stale excluded → no early trip) — [P1] round-1 finding 1 |
 | CB-COUNT-009b | A prior `dev-actionable=false` round on the same SHA + genuine active `dev-actionable=true` rounds | The false round is excluded but does NOT zero the active rounds (no forever-suppression) — [P1] round-1 finding 1 |
 | CB-COUNT-009c | Active canonical does not match the rounds' verdict | Count = 0 |
@@ -36,3 +38,4 @@ CI parity.
 - **AC4** (docs updated: dispatcher-flow + INV-103): enforced by the pipeline-docs-gate + TC-SPEC-GATE-040/041 (heading-adjacent triage tag).
 - **#298 precedence**: CB-PRECEDENCE-004.
 - **live-PID deferral inherited via shared helper**: CB-LIVE-005, CB-SHARED-010, MSL-CHAR-011.
+- **marker/transition atomicity** (round-10 [P1] finding 1): CB-ATOMIC-013, CB-ATOMIC-014.
