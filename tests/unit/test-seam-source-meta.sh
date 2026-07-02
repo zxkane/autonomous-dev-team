@@ -104,6 +104,7 @@ WAIVERS=(
   "test-kill-before-spawn.sh:dynamic-source:EXTRACT_FILE is a mktemp function-slice fixture (kill fns extracted from dispatch-local.sh)"
   "test-pid-guard-pgid.sh:dynamic-source:EXTRACT_FILE is a mktemp function-slice fixture (kill fns extracted from dispatch-local.sh)"
   "test-pid-alive-long-running.sh:dynamic-source:KILL_FN_FILE is a mktemp function-slice fixture authored inline by this test"
+  "test-issue-353-verdict-body-namespace.sh:dynamic-source:_FN_SLICE is a mktemp function-slice fixture (build_review_prompt extracted from the wrapper)"
 )
 is_waived() { # <harness> <lib-or-pseudo-lib>
   local h="$1" l="$2" e key rest elib
