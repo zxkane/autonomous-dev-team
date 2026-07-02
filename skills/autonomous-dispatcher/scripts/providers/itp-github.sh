@@ -234,16 +234,24 @@ itp_github_mark_checkbox() {
 # itp_github_provision_states NAME COLOR DESCRIPTION — provision one state primitive.
 #
 # Spec §3.1 [m5] (`label_colors`): GitHub state primitives are labels, so the leaf
-# is the idempotent per-label view-or-create
-# (`gh label view` skip; else `gh label create --color <hex> --description <d>`),
-# byte-identical to setup-labels.sh's loop body. The 9-label definition table stays
-# caller-side. `label_colors=1` (GitHub) → the `--color` hex is emitted; a
-# `label_colors=0` backend omits `--color` (defined; not live this PR). Echoes the
-# same `[skip]`/`[created]` lines the caller printed before, so console output is
+# is the idempotent per-label probe-or-create (REST existence probe `gh api
+# repos/<repo>/labels/<name> --silent`; else `gh label create --color <hex>
+# --description <d>`). [#362] `gh label` has no `view` subcommand (only
+# clone/create/delete/edit/list) — the prior existence check (`gh label` +
+# `view`) always failed, so the function always fell through to `gh label
+# create`, which itself aborts under set -e when the label already exists. The
+# REST probe is the fix; it is NOT byte-identical to any pre-existing `gh` argv
+# (the check itself was always broken), only the create-branch argv stays
+# byte-identical to setup-labels.sh's original loop body. No URL-encoding
+# needed: all 9 pipeline label names are URL-safe (`[a-z-]`). The 9-label
+# definition table stays caller-side.
+# `label_colors=1` (GitHub) → the `--color` hex is emitted; a `label_colors=0`
+# backend omits `--color` (defined; not live this PR). Echoes the same
+# `[skip]`/`[created]` lines the caller printed before, so console output is
 # unchanged.
 itp_github_provision_states() {
   local name="$1" color="$2" description="$3"
-  if gh label view "$name" --repo "$REPO" &>/dev/null; then
+  if gh api "repos/${REPO}/labels/${name}" --silent &>/dev/null; then
     echo "  [skip] '$name' already exists"
   else
     gh label create "$name" --repo "$REPO" \

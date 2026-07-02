@@ -56,7 +56,7 @@ LABELS=(
 echo "Setting up labels for ${REPO}..."
 
 # [INV-87] The 9-label name|color|description definition table stays caller-side;
-# only the per-label view-or-create leaf moves behind itp_provision_states.
+# only the per-label probe-or-create leaf moves behind itp_provision_states.
 #
 # The DOCUMENTED branch point is the `label_colors` CAPABILITY (spec §4.1), NOT
 # `declare -F itp_provision_states` — after lib-issue-provider.sh is sourced the
@@ -64,8 +64,9 @@ echo "Setting up labels for ${REPO}..."
 # itp_${ISSUE_PROVIDER}_provision_states), so a `declare -F` check never falls back
 # and a backend without the leaf would crash with
 # `itp_<p>_provision_states: command not found`. We branch on the cap instead:
-#   - label_colors=1 (GitHub) → itp_provision_states emits the byte-identical
-#     `gh label view`/`gh label create --color <hex> --description <d>` (hex passed).
+#   - label_colors=1 (GitHub) → itp_provision_states emits the REST existence
+#     probe (`gh api repos/<repo>/labels/<name> --silent`, [#362]) / `gh label
+#     create --color <hex> --description <d>` (hex passed).
 #   - label_colors=0 → the documented color-omitted provisioning path, DEFINED but
 #     NOT LIVE this PR (no non-GitHub provision leaf exists yet) — fail LOUD-but-clean
 #     (no missing-leaf crash) so the no-behavior-change scope holds and the gap is
