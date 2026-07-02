@@ -473,10 +473,17 @@ resolve_lib_var_tokens() {
     BEGIN { nb=split(BASESTR, B, " ") }
     {
       line=$0
-      # Record var→base bindings: VAR=...<base>...  (executable assignment).
-      if (!is_comment(line) && line ~ /^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=/) {
-        vname=line; sub(/=.*/,"",vname); sub(/^[[:space:]]+/,"",vname)
-        rhs=line; sub(/^[^=]*=/,"",rhs)
+      # Record var→base bindings: VAR=...<base>... (executable assignment).
+      # Accepts a `local `/`declare `/`readonly `/`export ` prefix (round-6 P1:
+      # a harness helper using `local LIB=.../lib-review-e2e.sh; source "$LIB"`
+      # was invisible to the resolver while unresolved_source_targets — which
+      # already handled `local` — treated it as bound: green on a real seam-less
+      # source). The prefix strip mirrors unresolved_source_targets.
+      if (!is_comment(line) && line ~ /^[[:space:]]*((local|declare|readonly|export)[[:space:]]+(-[A-Za-z]+[[:space:]]+)?)?[A-Za-z_][A-Za-z0-9_]*=/) {
+        l2=line
+        sub(/^[[:space:]]*(local|declare|readonly|export)[[:space:]]+(-[A-Za-z]+[[:space:]]+)?/, "", l2)
+        vname=l2; sub(/=.*/,"",vname); sub(/^[[:space:]]+/,"",vname)
+        rhs=l2; sub(/^[^=]*=/,"",rhs)
         for (i=1;i<=nb;i++) {
           b=B[i]; rb=b; gsub(/\./,"\\.",rb)
           if (rhs ~ rb) BIND[vname]=b
@@ -524,8 +531,8 @@ unresolved_source_targets() {
       line=$0
       if (is_comment(line)) next
       # Record literal-path bindings: VAR=rhs where rhs contains / or .sh
-      if (line ~ /^[[:space:]]*(local[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*=/) {
-        l2=line; sub(/^[[:space:]]*local[[:space:]]+/, "", l2)
+      if (line ~ /^[[:space:]]*((local|declare|readonly|export)[[:space:]]+(-[A-Za-z]+[[:space:]]+)?)?[A-Za-z_][A-Za-z0-9_]*=/) {
+        l2=line; sub(/^[[:space:]]*(local|declare|readonly|export)[[:space:]]+(-[A-Za-z]+[[:space:]]+)?/, "", l2)
         vname=l2; sub(/=.*/,"",vname); sub(/^[[:space:]]+/,"",vname)
         rhs=l2; sub(/^[^=]*=/,"",rhs)
         if (rhs ~ /\// || rhs ~ /\.sh/) BOUND[vname]=1
@@ -1100,6 +1107,41 @@ if [ -n "$_046_a" ] && [ -n "$_046_b" ] && printf '%s\n' "$_046_c" | grep -q 'ba
   ok "TC-SEAMSRC-046 (round-4 P1) same-line seam/stub AFTER the lib source is an offender (top-level ×2 + inline bash -c); seam-then-lib one-liner stays compliant"
 else
   bad "TC-SEAMSRC-046 (round-4 P1) FAILED — a=[$_046_a] b=[$_046_b] c=[$_046_c] ok=[$_046_ok]"
+fi
+
+# TC-SEAMSRC-047 (round-6 P1) — `local`/`declare`-prefixed bindings resolve: a
+# helper-function harness `local LIB=<consumer>; source "$LIB"` (no seam) is an
+# OFFENDER (the resolver must see through the `local` prefix), and the same
+# shape with the seam first is compliant. Also: the bound var is NOT an
+# unresolved-target finding.
+S="$(mk_scratch 047)"
+cat > "$S/tests/test-local-bind.sh" <<EOF
+#!/bin/bash
+run_lane() {
+  local LIB="$S/scripts/lib-fixture-consumer.sh"
+  source "\$LIB"
+  fixture_read 42
+}
+run_lane
+EOF
+cat > "$S/tests/test-local-bind-ok.sh" <<EOF
+#!/bin/bash
+run_lane() {
+  local SEAM="$S/scripts/lib-code-host.sh"
+  local LIB="$S/scripts/lib-fixture-consumer.sh"
+  source "\$SEAM"
+  source "\$LIB"
+  fixture_read 42
+}
+run_lane
+EOF
+_047_bad="$(harness_offenders "$S/tests/test-local-bind.sh" "$S/scripts")"
+_047_ok="$(harness_offenders "$S/tests/test-local-bind-ok.sh" "$S/scripts")"
+_047_unres="$(unresolved_source_targets "$S/tests/test-local-bind.sh")"
+if [ -n "$_047_bad" ] && [ -z "$_047_ok" ] && [ -z "$_047_unres" ]; then
+  ok "TC-SEAMSRC-047 (round-6 P1) local-prefixed consumer binding resolves — seam-less source flagged, seam-first compliant, no false unresolved finding"
+else
+  bad "TC-SEAMSRC-047 (round-6 P1) FAILED — bad=[$_047_bad] ok=[$_047_ok] unres=[$_047_unres]"
 fi
 
 # ===========================================================================
