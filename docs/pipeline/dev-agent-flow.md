@@ -48,7 +48,10 @@ After the guards: `nohup autonomous-dev.sh --issue N --mode {new|resume} ... >> 
 `acquire_pid_guard` writes `$$` to the PID file, after:
 
 - Refusing to operate on a symlinked PID file ([INV-02](invariants.md#inv-02-pid-file-is-not-a-symlink)).
-- Reading any existing PID and probing `kill -0`. If the existing PID is alive, the wrapper exits 0 (defers to the running instance — `dispatch-local.sh` already killed any stale holder, so this code path is reached only when a legitimately-running peer is detected).
+- **Atomically acquiring the (issue, mode) start slot** ([INV-103](invariants.md#inv-103-acquire_pid_guard-acquires-the-per-issue-mode-start-slot-atomically--no-check-then-write-toctou-window), #360/302a): an exclusive `flock` on `${pid_file}.lock` — atomic at the kernel level, so two near-simultaneous callers can never both observe "no live peer" — serializes the read-existing-PID + `kill -0` probe + write below against every other concurrent caller on the same path. The kernel releases the lock automatically the instant the holder's fd closes (clean return OR process death), so there is no staleness to detect and no separate reclaim step. A caller that can't acquire within `ACQUIRE_PID_GUARD_LOCK_WAIT_SECONDS` (default 2s) exits 0 quickly, logging exactly one line and writing nothing.
+- Reading any existing PID and probing `kill -0` (now inside the lock). If the existing PID is alive, the wrapper exits 0 (defers to the running instance — `dispatch-local.sh` already killed any stale holder, so this code path is reached only when a legitimately-running peer is detected).
+
+Read-side consumers — `pid_alive` / `get_pid` (`lib-dispatch.sh`) and `liveness-check-remote-aws-ssm.sh` — are unaffected: they read the exact same path with the exact same content contract (winner's PID, numeric, `kill -0`-able) before and after this change. The lock file exists only alongside the PID file and never appears in any read-side check.
 
 The PID file naming is fixed by [INV-01](invariants.md#inv-01-pid-file-naming):
 
@@ -296,4 +299,4 @@ flowchart TD
 - [`dispatcher-flow.md`](dispatcher-flow.md) — Steps 2 and 4 are the producer side of the dev-new and dev-resume handoffs.
 - [`review-agent-flow.md`](review-agent-flow.md) — the consumer of the `pending-review` label this wrapper sets.
 - [`handoffs.md`](handoffs.md) — invariants for dev → review and dev → pending-dev.
-- [`invariants.md`](invariants.md) — INV-01, INV-02, INV-03, INV-08, INV-12, INV-13, INV-14 are all referenced here.
+- [`invariants.md`](invariants.md) — INV-01, INV-02, INV-03, INV-08, INV-12, INV-13, INV-14, INV-103 are all referenced here.

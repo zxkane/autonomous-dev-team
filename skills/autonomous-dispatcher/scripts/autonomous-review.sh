@@ -2078,6 +2078,15 @@ for _agent in "${REVIEW_AGENTS_LIST[@]}"; do
     # #355 or pre-#354) and would otherwise write a stale/bare path with a
     # fresh mtime. Scope is THIS subshell only.
     export VERDICT_BODY_FILE="$_agent_verdict_body_path"
+    # [INV-43 hardened, #360/302a]: record this agent's fan-out lane on a
+    # marker env var BEFORE launch. setsid does not clear the environment, so
+    # this survives into every descendant — including one that itself calls
+    # setsid and escapes the leader's process group (the case the plain PGID
+    # group-kill above cannot reach). `_reap_fanout_recorded_descendants`
+    # (lib-review-poll.sh) sweeps by this exact marker after verdict
+    # resolution. Scope is THIS subshell only — never leaks to a sibling
+    # agent's subshell or the dev side.
+    export ADT_FANOUT_LANE_MARKER="$_agent_session_id"
     # INV-42 (#173): per-agent launcher resolution. If the operator set an
     # AGENT_REVIEW_LAUNCHER_<AGENT> key (suffix = uppercased name with every
     # non-alphanumeric char → `_`, same transform as the model/extra-args
@@ -2749,6 +2758,17 @@ done
 # synchronously in Phase A, so it has normally already exited (no-op), but a
 # subtree the lane backgrounded and orphaned is reaped on this pass.
 _reap_fanout_processes "${_AGENT_PGIDS[@]:-}" "${_AGENT_PGIDS_E2E:-}"
+
+# [INV-43 hardened, #360/302a]: best-effort sweep for a fan-out child that
+# re-parented out of its leader's process group (e.g. it called setsid
+# itself) and so survived the group-kill above. Matches on the
+# ADT_FANOUT_LANE_MARKER exported into each agent's subshell before launch
+# (AGENT_SESSION_IDS[*] are the recorded values) — reaches any descendant
+# that still carries that marker in its environment. A truly detached
+# grandchild with no identifying env state is explicitly out of scope (see
+# lib-review-poll.sh::_reap_fanout_recorded_descendants doc comment) — this
+# sweep does not claim to reach it.
+_reap_fanout_recorded_descendants "ADT_FANOUT_LANE_MARKER" "${AGENT_SESSION_IDS[@]:-}"
 
 # Aggregate under the unanimous-PASS rule (INV-40). Map the aggregate onto the
 # existing PASSED_VERDICT / LATEST_COMMENT / AGENT_EXIT variables so the

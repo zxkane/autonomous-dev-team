@@ -456,3 +456,80 @@ _reap_fanout_processes() {
 # Fallback logger used by _reap_fanout_processes when the caller (the wrapper)
 # has not defined `log`. Keeps the lib self-contained for unit tests.
 _reap_log_stderr() { printf '%s\n' "$*" >&2; }
+
+# _reap_fanout_recorded_descendants <marker-var-name> <marker-value...> —
+# issue #360 (302a) hardening of the INV-43 reap. _reap_fanout_processes above
+# only reaches a fan-out agent's setsid PGID; a child that ITSELF calls setsid
+# (or is otherwise re-parented) leaves that group and survives the group-kill
+# — the #298/PR #300 incident where a duplicate review's codex child outlived
+# verdict resolution and posted findings after merge+close.
+#
+# This is a best-effort SWEEP, not a stronger group-kill: it enumerates every
+# process on the host and TERM->KILLs one whose environment (read from
+# /proc/<pid>/environ) carries `<marker-var-name>=<one-of-marker-value>` as an
+# exact line. The wrapper exports this marker into each fan-out agent's
+# subshell BEFORE launch (inherited by every descendant, including one that
+# re-execs via setsid — setsid does not clear the environment), so a
+# recorded descendant is reachable by this sweep regardless of which process
+# group it ends up in.
+#
+# Scope (documented, not aspirational — R3 "scope honestly"): this reaches
+# any descendant that STILL carries the recorded marker in its environment.
+# It does NOT reach a process that has dropped all identifying env state
+# (e.g. re-executed under `env -i`) — that grandchild is genuinely
+# unreachable by any env-based mechanism, and no test in this codebase
+# asserts otherwise.
+#
+# Args: $1 = marker env-var NAME (e.g. ADT_FANOUT_LANE_MARKER), $2.. = the
+# marker VALUES to match (typically the fan-out's AGENT_SESSION_IDS). Empty
+# arg list, or a value list with no live match, is a clean no-op.
+_reap_fanout_recorded_descendants() {
+  local _marker_name="${1:-}"
+  shift || true
+  local -a _marker_values=("$@")
+  [[ -n "$_marker_name" ]] || return 0
+  [[ "${#_marker_values[@]}" -gt 0 ]] || return 0
+  # Linux-only mechanism (/proc/<pid>/environ). No-op on any host without a
+  # /proc — the `for` glob below simply matches nothing.
+  [[ -d /proc ]] || return 0
+
+  local _emit
+  if declare -F log >/dev/null 2>&1; then _emit=log; else _emit=_reap_log_stderr; fi
+
+  local -a _hit_pids=()
+  local _pid _val _needle
+  # Enumerate real PIDs from /proc directly (not `pgrep -f`) so we control
+  # the exact match semantics: `grep -zaFxq` on the raw NUL-separated env
+  # line, never a substring match that could false-positive on an unrelated
+  # var whose value happens to contain our marker value as a substring.
+  for _pid in /proc/[0-9]*; do
+    _pid="${_pid#/proc/}"
+    [[ "$_pid" =~ ^[0-9]+$ ]] || continue
+    [[ -r "/proc/$_pid/environ" ]] || continue
+    for _val in "${_marker_values[@]}"; do
+      [[ -n "$_val" ]] || continue
+      _needle="${_marker_name}=${_val}"
+      if grep -zaFxq -- "$_needle" "/proc/$_pid/environ" 2>/dev/null; then
+        _hit_pids+=("$_pid")
+        break
+      fi
+    done
+  done
+
+  [[ "${#_hit_pids[@]}" -gt 0 ]] || return 0
+
+  for _pid in "${_hit_pids[@]}"; do
+    if kill -0 "$_pid" 2>/dev/null; then
+      "$_emit" "INV-43: reaping recorded fan-out descendant (pid=$_pid, marker=${_marker_name})"
+      kill -TERM "$_pid" 2>/dev/null || true
+    fi
+  done
+  sleep 2
+  for _pid in "${_hit_pids[@]}"; do
+    if kill -0 "$_pid" 2>/dev/null; then
+      "$_emit" "INV-43: escalating to KILL for recorded fan-out descendant (pid=$_pid, marker=${_marker_name})"
+      kill -KILL "$_pid" 2>/dev/null || true
+    fi
+  done
+  return 0
+}

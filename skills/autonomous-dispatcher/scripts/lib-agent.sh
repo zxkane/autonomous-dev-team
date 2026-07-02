@@ -541,21 +541,124 @@ for _adapter in claude codex gemini kiro opencode agy; do
 done
 unset _adapter
 
-# Acquire PID guard: prevent duplicate instances for the same issue.
-# Checks for symlink attacks, running processes, then writes current PID.
+# Acquire PID guard: prevent duplicate instances for the same (issue, mode)
+# with an ATOMIC acquire (issue #360 / 302a). Checks for symlink attacks,
+# then serializes the "is a peer already running? / write my PID" check
+# behind an `flock` exclusive lock on `${pid_file}.lock` before touching
+# pid_file. flock is atomic at the kernel level (a single syscall grants or
+# denies the lock) AND self-releasing: the kernel drops it the instant the
+# holder's file descriptor closes — on a clean return, on `exit`, or on the
+# process being killed — so there is no "stale lock" state to detect or
+# reclaim, and therefore no separate reclaim code path that could itself
+# race (an earlier `mkdir`-lock-dir draft had exactly that problem: two
+# racers could each decide a lock was stale and `rmdir` it, with the second
+# `rmdir` deleting the FIRST racer's freshly-reacquired lock instead of the
+# stale one — verified empirically to allow multiple concurrent "winners").
+# This closes the pre-#360 TOCTOU window: the old check-then-write read
+# pid_file, ran `kill -0`, and only THEN wrote — two wrappers dispatched 1-2s
+# apart (a duplicate-dispatch race, see #302/#298) could both pass the
+# `kill -0` probe before either wrote, so both proceeded to fan out (the
+# #298/PR #300 duplicate-review incident this closes).
+#
+# The lock's role is scoped to the read-check-write itself (held for a few
+# syscalls), NOT the wrapper's lifetime — the lock fd is explicitly closed
+# on every exit path below (win or lose), which releases the flock
+# immediately rather than waiting for process exit. R1 hard constraint: the
+# PID file's read-side semantics (path, content = winner's PID) are
+# UNCHANGED — pid_alive (lib-dispatch.sh) and liveness-check-remote-aws-ssm.sh
+# keep reading the exact same file. The atomicity lives entirely in HOW the
+# file is written (the flock guarding the write), not in a new file format.
+#
+# R2: the loser of the acquire exits 0 (not an error), logs exactly one
+# line, writes nothing, and (since this returns before the caller's
+# fan-out/spawn logic ever runs) fans out nothing.
+#
 # Args: $1=pid_file, $2=label (e.g. "autonomous-dev"), $3=issue_number
 acquire_pid_guard() {
   local pid_file="$1" label="$2" issue_num="$3"
   [[ -L "$pid_file" ]] && { echo "Error: PID file is a symlink — possible attack" >&2; exit 1; }
+
+  # flock (util-linux) is required for the atomic acquire below. Fail loud
+  # rather than silently falling back to the pre-#360 racy check-then-write —
+  # a silent degrade would defeat the entire point of this fix. util-linux is
+  # universal on the Linux/Ubuntu dispatcher fleet this project targets (the
+  # same assumption _run_with_timeout's setsid dependency already makes).
+  if ! command -v flock >/dev/null 2>&1; then
+    echo "[$label] ERROR: 'flock' (util-linux) is required by acquire_pid_guard but not found on PATH; aborting before start to avoid the pre-#360 duplicate-start race." >&2
+    exit 1
+  fi
+
+  local lock_file="${pid_file}.lock"
+  # CWE-59 (Link Following) defense-in-depth, same posture as the pid_file
+  # check above (INV-02): reject an OBVIOUSLY symlinked lock sidecar before
+  # even trying to open it. This is belt-and-suspenders, NOT the load-bearing
+  # fix — see the `>>` note below for why: a HARD link shares the target's
+  # inode and is never reported by `-L` (a hard-linked sidecar sails through
+  # this check untouched; PR #365 review finding), so a symlink-only guard is
+  # incomplete on its own.
+  [[ -L "$lock_file" ]] && { echo "Error: lock file is a symlink — possible attack" >&2; exit 1; }
+
+  # Load-bearing (PR #365 review finding, round 3): reject a lock path that
+  # EXISTS but is not a regular file — a FIFO, socket, character/block
+  # device, or directory. `-f` follows a symlink (already excluded above)
+  # and true for a hard link to a regular file, so this correctly allows
+  # both while catching everything else. Without this, `exec {fd}>>` on a
+  # FIFO with no reader BLOCKS INSIDE THE OPEN ITSELF — before `flock -w`
+  # ever gets a chance to run its bounded wait — so a same-user process (or
+  # stale artifact) that leaves `${pid_file}.lock` as a FIFO hangs the
+  # wrapper indefinitely; the `wait_s` timeout below is never reached
+  # because the redirection never returns. Reproduced with `mkfifo` +
+  # `timeout 3 acquire_pid_guard …` → rc 124 (never returns) before this
+  # check existed. A MISSING lock_file is fine — `>>` creates a fresh
+  # regular file — so the check is scoped to "exists AND is not a regular
+  # file", not "must already exist as a regular file".
+  if [[ -e "$lock_file" && ! -f "$lock_file" ]]; then
+    echo "Error: lock file exists but is not a regular file (FIFO/socket/device/directory) — possible attack or stale artifact; refusing to open it" >&2
+    exit 1
+  fi
+
+  local wait_s="${ACQUIRE_PID_GUARD_LOCK_WAIT_SECONDS:-2}"
+  local _lock_fd
+
+  # Load-bearing fix: open in APPEND mode (`>>`, O_CREAT|O_APPEND, no
+  # O_TRUNC), never plain `>` (O_CREAT|O_TRUNC). `>` truncates the target on
+  # open BEFORE flock ever runs — the exact vector a symlinked OR hard-linked
+  # lock sidecar exploits: a same-user attacker pre-plants
+  # `${pid_file}.lock` as a symlink or hard link to an arbitrary victim file,
+  # and the next wrapper invocation zeroes it just by opening it, regardless
+  # of whether it ever acquires the lock. `>>` never truncates on open
+  # (verified: neither via a symlinked nor a hard-linked target) — this
+  # closes the ENTIRE class (symlink AND hard link), not just the symlink
+  # case the `-L` check above already caught. We never write through this
+  # fd (the PID goes to `pid_file`, not `lock_file`), so append-vs-truncate
+  # semantics make no functional difference to the lock itself — `flock`
+  # behaves identically on an append-mode fd.
+  exec {_lock_fd}>>"$lock_file"
+  if ! flock -w "$wait_s" "$_lock_fd"; then
+    echo "[$label] Another instance for issue #${issue_num} is already starting (start lock held). Exiting." >&2
+    exec {_lock_fd}>&-
+    exit 0
+  fi
+
+  # Lock held from here to the end of this function. Every exit path below
+  # explicitly closes the fd first (releasing the flock) — `exit` does not
+  # run a RETURN trap, so we cannot rely on one.
   if [[ -f "$pid_file" ]]; then
     local existing_pid
     existing_pid=$(cat "$pid_file" 2>/dev/null)
     if [[ -n "$existing_pid" ]] && kill -0 "$existing_pid" 2>/dev/null; then
+      exec {_lock_fd}>&-
       echo "[$label] Another instance for issue #${issue_num} is already running (PID $existing_pid). Exiting." >&2
       exit 0
     fi
   fi
+  # Test-only hook (issue #360 regression coverage): widen the window between
+  # the liveness check above and the write below so a concurrent-acquire test
+  # can assert the lock — not scheduling luck — is what prevents a double
+  # write. No-op (unset) in every real dispatch.
+  [[ -n "${_ACQUIRE_PID_GUARD_TEST_DELAY_SECONDS:-}" ]] && sleep "$_ACQUIRE_PID_GUARD_TEST_DELAY_SECONDS"
   echo $$ > "$pid_file"
+  exec {_lock_fd}>&-
 }
 
 # Run agent with a new session.

@@ -5342,6 +5342,279 @@ INV-91 Migration-log bullet (Spec Drift surface).
 - [INV-91](#inv-91-the-provider-neutral-caller-layer-routes-all-host-io-through-itp_chp_-verbs--a-new-raw-gh-outside-providers-is-a-ci-failing-cutover-regression-baseline-anchored) — the cutover guard whose baseline this migration shrinks by 5 signatures / 7 occurrences.
 - [`provider-spec.md`](provider-spec.md) §3.2 caller-guard convention prose + the mapping appendix `chp_pr_comment` row.
 
+## INV-103: `acquire_pid_guard` acquires the per-(issue, mode) start slot atomically — no check-then-write TOCTOU window
+
+_Triage (issue #236): [machine-checked: tests/unit/test-pid-guard-atomic.sh]_
+
+**Rule**: `acquire_pid_guard` (`lib-agent.sh`) MUST decide "is a peer already
+running? / do I get to start?" as a single atomic operation with respect to
+every other concurrent caller against the SAME PID file path — never as a
+separate read-then-probe followed by a separate write. The atomicity is
+provided by an exclusive `flock` on `${pid_file}.lock`: `flock` is atomic at
+the kernel level (a single syscall grants or denies the lock), so two callers
+racing on the same path can never both observe "lock free." Whichever caller
+wins the lock holds it for the few syscalls it takes to read the existing PID
+(if any), `kill -0`-probe it, and write `$$` — then explicitly closes the
+lock file descriptor (releasing the flock immediately rather than waiting for
+process exit). A losing caller waits up to `ACQUIRE_PID_GUARD_LOCK_WAIT_SECONDS`
+(default 2 s) for the lock; on timeout it exits **0** (not an error) after
+logging exactly one line, having written nothing and having never reached
+the caller's fan-out/spawn logic.
+
+**No stale-lock heuristic — the kernel's auto-release makes one unnecessary
+(and a first draft's heuristic was itself unsafe).** `flock` is released the
+instant the holder's file descriptor closes, including when the holder
+process is killed (`SIGKILL`, OOM, crash) without running any cleanup code —
+there is no window where a dead holder's lock outlives it, so there is
+nothing to detect as "stale" and nothing to reclaim. An earlier draft of this
+fix used an `mkdir`-based lock directory instead, which — being a plain
+filesystem object with no kernel-level lifecycle tied to its creator's
+process — required a separate age-based staleness check and an explicit
+`rmdir` "reclaim" step for the crashed-holder case. Code review (independent
+agent pass, empirically verified with a 20-racer stress harness) found that
+reclaim step itself unsafe: two callers could each observe the same stale
+lock dir and both decide to reclaim it, with the second caller's `rmdir`
+deleting the FIRST caller's freshly-created (non-stale) lock instead of the
+one it inspected — reopening the exact double-fan-out hole this invariant
+exists to close, just relocated to the reclaim path. It also had a separate
+unbounded-busy-loop defect if the lock path was ever occupied by something
+`rmdir` could not remove (a non-empty directory, a regular file, a dangling
+symlink): the retry loop's wait-budget accounting was skipped on that branch,
+so it could spin forever rather than reaching its timeout. `flock` avoids
+both defects structurally: there is no separate reclaim code path to get
+wrong, and a losing caller's wait is bounded by `flock -w` itself, not by an
+external counter that a different branch could fail to advance.
+
+**R1 hard constraint — read-side semantics are BYTE-IDENTICAL.** The
+atomicity lives entirely in *how* the file is written (an flock guarding the
+read-check-write), never in a new file format or path. `pid_alive`
+([INV-30](#inv-30-pid_alive-is-authoritative-under-all-execution-backends),
+`lib-dispatch.sh`) and `liveness-check-remote-aws-ssm.sh` (the remote-backend
+probe INV-30 delegates to) keep reading the exact same `${PID_DIR}/{issue,review}-<N>.pid`
+path ([INV-01](#inv-01-pid-file-naming)) with the exact same content contract
+(the winner's PID, numeric, `kill -0`-able) — neither consumer changed a
+single line for this fix, and neither needs to know a lock file briefly
+existed alongside the PID file during acquisition.
+
+**Link-following AND blocking-open defense on the lock sidecar — THREE
+review rounds.** `${pid_file}.lock` did not exist before this invariant, so
+it needed its own defense against a same-user attacker (or stale artifact)
+pre-planting it as something other than an ordinary, absent-or-regular
+file:
+
+- **Round 1 (codex review, PR #365): symlink check.** `${pid_file}.lock`
+  gets the same `-L` rejection [INV-02](#inv-02-pid-file-is-not-a-symlink)
+  already gives `pid_file`, checked immediately before the file is opened.
+  This alone stops a SYMLINKED lock sidecar: a plain `>` (truncating)
+  redirection follows a symlink and truncates whatever it points at, so
+  without the check the next wrapper invocation would silently clobber the
+  symlink's target BEFORE `flock` ever runs.
+- **Round 2 (codex review, PR #365, same PR): the symlink check alone is
+  insufficient — a HARD link is invisible to `-L`.** A hard link shares the
+  target's inode; `-L` reports false for it exactly as it would for any
+  ordinary file, so a hard-linked lock sidecar sails through round 1's check
+  untouched and a truncating `>` open still zeroes the victim on open. The
+  round 1 fix covered symlinks only — reproduced live: hard-linking the
+  sidecar to a temp file and watching it drop to 0 bytes. There is no
+  practical way to detect "this path has extra hard links to something I
+  don't own" cheaply and portably (an `nlink > 1` check has its own false
+  positives/races), so detection is not the fix. **The actual fix is to
+  never truncate on open at all**: `acquire_pid_guard` opens the lock file
+  with `exec {fd}>>"$lock_file"` (append mode — `O_CREAT|O_APPEND`, no
+  `O_TRUNC`), not `exec {fd}>"$lock_file"`. Append mode never truncates
+  the target on open, regardless of whether the path is itself the target,
+  a symlink to another file, or a hard link sharing another file's inode —
+  it closes the ENTIRE class, not just the symlink case round 1 already
+  caught. This costs nothing functionally: the lock file is never written
+  through (the PID goes to `pid_file`, a completely separate path), and
+  `flock` behaves identically on an append-mode file descriptor.
+- **Round 3 (codex review, PR #365, same PR): append mode alone does not
+  bound the OPEN'S OWN latency — a FIFO left at the lock path blocks
+  `exec {fd}>>` indefinitely before `flock -w` ever gets a chance to run.**
+  `flock -w "$wait_s"` only bounds the wait for the LOCK once the file
+  descriptor is open; it has no say over how long the underlying `open(2)`
+  itself takes. Opening a FIFO for writing blocks in the kernel until a
+  reader connects — with no reader (the normal case for a lock sidecar), the
+  `exec {fd}>>"$lock_file"` line never returns, so `wait_s` is never reached
+  and the wrapper hangs indefinitely on a `mkfifo`'d (or Unix-socket'd,
+  device-node'd) sidecar left at the predictable path. Reproduced by the
+  reviewer with `mkfifo "${pid_file}.lock"` + `timeout 3 acquire_pid_guard …`
+  → rc 124 (timed out, never returned) before this check existed. **Fix**:
+  reject the lock path BEFORE opening it if it exists and is not a regular
+  file (`[[ -e "$lock_file" && ! -f "$lock_file" ]]`) — `-f` correctly
+  follows a symlink (already excluded by round 1) and is true for a hard
+  link to a regular file (round 2's case, still allowed), so this check adds
+  FIFO/socket/device/directory rejection without re-breaking rounds 1-2's
+  allowed cases. A MISSING lock file is fine (`>>` creates a fresh regular
+  file), so the check is scoped to "exists AND is not regular," not
+  "must pre-exist as regular."
+
+Round 1's `-L` check and round 3's non-regular-file check are both retained
+as up-front, non-blocking rejections (cheap `[[ ]]` tests, no reason to
+remove either now that round 2 also covers the truncation half of the
+symlink/hard-link cases) — but round 2's append-mode open is what makes the
+truncation-safety half of the invariant hold, and round 3's pre-open type
+check is what makes the bounded-wait half hold (append mode alone cannot
+bound an `open(2)` that blocks for a reason OTHER than truncation). The
+window between these checks and the open is the same accepted-risk posture
+[INV-02] already applies to `pid_file` itself (the per-user PID dir is mode
+0700, so this defends only against the resource's own user, same threat
+model).
+
+**Why**: the pre-#360 check-then-write read `pid_file`, ran `kill -0` on any
+existing PID, and only THEN wrote `$$` — three separate operations with two
+gaps a second caller could land in. Two wrappers dispatched 1-2s apart for the
+same (issue, mode) — the controller-side duplicate-dispatch race tracked
+separately as 302b — could both pass the `kill -0` probe (neither had written
+yet) and both proceed to fan out. Observed on #298 / PR #300 (2026-06-29): two
+review run-dirs were created ~2s apart, both wrappers passed the PID guard,
+and the duplicate run's codex child survived the INV-43 reap (see
+[INV-104](#inv-104-the-inv-43-fan-out-reap-also-sweeps-recorded-descendants-that-re-parented-out-of-the-agents-process-group))
+to post stale findings after the primary run's PASS→merge. This invariant
+closes the wrapper-host half of that incident (302a); the controller-side
+duplicate-dispatch root cause is 302b's concern.
+
+**Dependency**: `flock` (util-linux) is required and hard-checked at function
+entry — a missing binary aborts loudly (`exit 1`) rather than silently
+degrading to the pre-#360 racy check-then-write, which would defeat the
+purpose of this fix. util-linux is universal on the Linux/Ubuntu dispatcher
+fleet this project targets (the same assumption `_run_with_timeout`'s
+`setsid` dependency already makes).
+
+**Producer**: `acquire_pid_guard` in `lib-agent.sh`, called unchanged (same
+call signature) from `autonomous-dev.sh` and `autonomous-review.sh`.
+
+**Consumer**: `pid_alive` / `get_pid` (`lib-dispatch.sh`), `liveness-check-remote-aws-ssm.sh`,
+`dispatch-local.sh::kill_stale_wrapper` — all three read the PID file this
+function writes and are unaffected by the acquire-path change (R1).
+
+**Status**: **ENFORCED** (closes #360 / 302a, R1+R2).
+
+**Test**: `tests/unit/test-pid-guard-atomic.sh` — TC-ATOMIC-000 (regression
+shape: the OLD check-then-write pattern IS racy under an injected delay,
+proving the test would have caught the pre-fix bug), TC-ATOMIC-001 (10
+concurrent `acquire_pid_guard` calls on the same path → exactly ONE winner,
+every loser exits 0 and logs exactly one line), TC-ATOMIC-001b (the fixed
+function stays single-winner even with the liveness-check-to-write window
+deliberately widened via a test-only hook — closes the exact gap
+TC-ATOMIC-000 demonstrated), TC-ATOMIC-001c (a holder killed mid-hold with no
+cleanup releases the lock automatically — the crashed-owner case, proving
+the kernel's auto-release rather than a staleness heuristic), TC-ATOMIC-001d
+(20-way concurrent-acquire stress — still exactly one winner, the
+regression-shape check for the reclaim-path race the flock design structurally
+avoids), TC-ATOMIC-002 (winner's PID file is readable by
+a `pid_alive`-style read: same path, numeric content), TC-ATOMIC-003 (a dead
+PID in the file still allows a fresh acquire to win — pre-existing behavior
+preserved), TC-ATOMIC-004 (symlink PID file still rejected —
+[INV-02](#inv-02-pid-file-is-not-a-symlink) unaffected), TC-ATOMIC-004b
+(round 1: a symlinked LOCK sidecar is rejected with exit 1 AND the would-be
+victim file it points at is verified untouched), TC-ATOMIC-004c (round 2:
+a HARD-linked lock sidecar — confirmed NOT reported by `-L` — still leaves
+its victim file's content untouched, proving the append-mode fix rather than
+detection is what closes this case), TC-ATOMIC-004d (round 3: a FIFO lock
+sidecar is rejected in well under a second rather than hanging — the call
+runs inside a generous 10s outer `timeout` that must NEVER actually fire;
+the assertion is on the function's own bounded return, not on the outer
+timeout rescuing the test), TC-ATOMIC-005 (source-of-truth: the function
+body uses an atomic primitive, carries no separate stale-lock reclaim code
+path, the lock-file symlink check's source line precedes the flock-open
+`exec`'s source line, the truncating `>` form is ABSENT, the append-mode
+`>>` form is PRESENT, and the non-regular-file check's source line precedes
+the flock-open `exec`'s source line). Existing `tests/unit/test-pid-guard.sh`
+and `tests/unit/test-pid-guard-pgid.sh` stay green unmodified (R1
+back-compat).
+
+**Cross-references**:
+- [INV-01](#inv-01-pid-file-naming) — the PID file path/naming this acquire path leaves unchanged.
+- [INV-02](#inv-02-pid-file-is-not-a-symlink) — the symlink defense on `pid_file`, extended by this invariant to the `${pid_file}.lock` sidecar (checked before the flock-open `exec`).
+- [INV-23](#inv-23-pid_file-points-at-a-process-whose-death-reaps-the-entire-agent-subtree) — the PID-content contract (session-leader PID) this fix's write path preserves byte-for-byte.
+- [INV-30](#inv-30-pid_alive-is-authoritative-under-all-execution-backends) — the read-side consumer whose contract is the R1 hard constraint.
+- [INV-104](#inv-104-the-inv-43-fan-out-reap-also-sweeps-recorded-descendants-that-re-parented-out-of-the-agents-process-group) — the sibling half of the #360/302a fix (the reap hardening) closing the same incident's second mechanism.
+- [`dev-agent-flow.md` § PID guard](dev-agent-flow.md#pid-guard-acquire_pid_guard-in-lib-agentsh) / [`review-agent-flow.md` § Spawn, PID guard, auth](review-agent-flow.md#spawn-pid-guard-auth) — runtime walkthrough.
+
+## INV-104: the INV-43 fan-out reap also sweeps recorded descendants that re-parented out of the agent's process group
+
+_Triage (issue #236): [machine-checked: tests/unit/test-reap-recorded-descendants.sh]_
+
+**Rule**: after review verdict resolution, the wrapper's reap of a
+still-running fan-out agent MUST cover two guaranteed cases, not one:
+
+1. **Process-group reap (pre-existing, [INV-43](#inv-43-command-mode-e2e-review-wait-budgets-must-not-be-smaller-than-the-e2e-they-dispatched)).**
+   `_reap_fanout_processes` (`lib-review-poll.sh`) group-kills the agent's
+   setsid PGID.
+2. **Recorded-descendant sweep (new, #360/302a).**
+   `_reap_fanout_recorded_descendants` (`lib-review-poll.sh`) additionally
+   TERM→KILLs any live process on the host whose environment carries a
+   marker env var (`ADT_FANOUT_LANE_MARKER=<agent's session id>`) exported
+   into that agent's subshell BEFORE launch. `setsid` does not clear the
+   calling process's environment, so this reaches a child that ITSELF calls
+   `setsid` (or is otherwise re-parented) and thereby escapes case 1's
+   group-kill — the exact mechanism by which the #298 / PR #300 duplicate
+   review's codex child survived the pre-#360 reap and posted `Review
+   findings:` comments after merge+close.
+
+Both calls run unconditionally at the same reap call site in
+`autonomous-review.sh`, immediately after verdict resolution; case 2 is
+strictly additive (case 1's call site and semantics are byte-for-byte
+unchanged).
+
+**Scope — honestly bounded, not "nothing survives ever."** The marker sweep
+reaches any descendant that still carries the recorded marker in its
+environment, regardless of which process group it ends up in. It does
+**not** reach a process that has dropped ALL identifying environment state
+(e.g. re-executed under `env -i`, or any mechanism that clears inherited
+exports) — that grandchild is genuinely unreachable by any env-based
+mechanism, on this host or any other. The regression test pins exactly this
+boundary: it asserts the guaranteed set (a pgid-surviving child AND a
+setsid-escaped-but-marked child) is reaped, and separately demonstrates that
+an env-stripped detached process is NOT reached — documenting the limit
+rather than silently leaving it untested.
+
+**Why**: `_reap_fanout_processes`'s PGID group-kill assumes the agent's
+descendants stay within its `setsid` session — true for the common case (an
+agent CLI whose own children are ordinary forks), false for a child that
+calls `setsid` again (some CLI wrapper scripts do this to detach a
+sub-process from controlling-terminal signals). The pre-#360 reap had no
+second mechanism to catch that escape, so a dropped/undecided agent's
+re-parented child could keep running — and posting — indefinitely past its
+review round, wasting tokens and (as observed) posting noise on an
+already-merged/closed PR.
+
+**Producer**: `autonomous-review.sh` (exports `ADT_FANOUT_LANE_MARKER` into
+each fan-out subshell before launch, calls `_reap_fanout_recorded_descendants`
+at the reap call site with `AGENT_SESSION_IDS[@]` as the marker values) +
+`lib-review-poll.sh` (`_reap_fanout_recorded_descendants`).
+
+**Consumer**: none — this is a cleanup-only side effect, like
+[INV-43](#inv-43-command-mode-e2e-review-wait-budgets-must-not-be-smaller-than-the-e2e-they-dispatched)'s
+existing reap. It does not affect verdict resolution, aggregation, or any
+label transition.
+
+**Status**: **ENFORCED** (closes #360 / 302a, R3). Scope-limited per the
+"honestly bounded" note above — a fully detached, marker-stripped
+grandchild is explicitly documented as unreachable, not silently assumed
+covered.
+
+**Test**: `tests/unit/test-reap-recorded-descendants.sh` — TC-REAP-DESC-001
+(source-of-truth: helper defined), TC-REAP-DESC-002 (empty/non-matching
+marker args are a clean no-op), TC-REAP-DESC-003 (the guaranteed set: a real
+setsid-group-leader child that stays in its pgid AND a separate setsid child
+that re-parented out of ITS leader's group but still carries the marker —
+both terminated after running the full pgid-reap + marker-sweep sequence),
+TC-REAP-DESC-004 (a fully env-stripped detached process is spawned, the sweep
+runs, and the process is confirmed to SURVIVE — the documented scope boundary,
+asserted rather than silently skipped), TC-REAP-DESC-005 (wrapper wiring:
+the marker is exported before launch, the sweep is called with
+`AGENT_SESSION_IDS[@]`, and the pre-existing PGID reap call site is
+unchanged). `tests/unit/test-review-e2e-command-poll-budget.sh`'s existing
+TC-RPB-REAP-01..03 and TC-RPB-SRC-04..06d stay green unmodified (case 1 is
+untouched).
+
+**Cross-references**:
+- [INV-43](#inv-43-command-mode-e2e-review-wait-budgets-must-not-be-smaller-than-the-e2e-they-dispatched) — the pre-existing PGID reap this sweep runs alongside (case 1 above), whose "orphan reap" side-effect mitigation this hardens.
+- [INV-103](#inv-103-acquire_pid_guard-acquires-the-per-issue-mode-start-slot-atomically--no-check-then-write-toctou-window) — the sibling half of the #360/302a fix (the atomic start lock) closing the same incident's first mechanism.
+- [`review-agent-flow.md` § Fan-out reap (INV-43)](review-agent-flow.md#multi-agent-fan-out-inv-40) — runtime walkthrough of the reap call site.
+
 ## Adding a new invariant
 
 When fixing a pipeline bug, after locating the bug on the state machine + flow docs:
