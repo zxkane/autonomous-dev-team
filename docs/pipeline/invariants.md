@@ -5403,7 +5403,9 @@ concurrent `acquire_pid_guard` calls on the same path → exactly ONE winner,
 every loser exits 0 and logs exactly one line), TC-ATOMIC-001b (the fixed
 function stays single-winner even with the liveness-check-to-write window
 deliberately widened via a test-only hook — closes the exact gap
-TC-ATOMIC-000 demonstrated), TC-ATOMIC-002 (winner's PID file is readable by
+TC-ATOMIC-000 demonstrated), TC-ATOMIC-001c (a lock dir older than
+`ACQUIRE_PID_GUARD_LOCK_STALE_SECONDS` is reclaimed rather than wedging every
+future acquire — the crashed-owner recovery path), TC-ATOMIC-002 (winner's PID file is readable by
 a `pid_alive`-style read: same path, numeric content), TC-ATOMIC-003 (a dead
 PID in the file still allows a fresh acquire to win — pre-existing behavior
 preserved), TC-ATOMIC-004 (symlink PID file still rejected —

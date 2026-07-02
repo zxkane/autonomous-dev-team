@@ -221,6 +221,36 @@ WIDE_WINNER_COUNT=$(grep -l '^won$' "$WIDE_RESULT_DIR"/outcome-* 2>/dev/null | w
 assert_eq "exactly ONE winner even with the check-to-write window widened to 0.2s" "1" "$WIDE_WINNER_COUNT"
 
 # ============================================================================
+# TC-ATOMIC-001c: a stale lock dir (owner crashed mid-hold) is reclaimed, not
+# a permanent wedge.
+# ============================================================================
+echo
+echo "=== TC-ATOMIC-001c: a stale lock dir is reclaimed rather than blocking forever ==="
+echo
+
+STALE_PID_FILE="$TMPDIR/stale.pid"
+STALE_LOCK_DIR="${STALE_PID_FILE}.lockdir"
+rm -f "$STALE_PID_FILE"
+mkdir "$STALE_LOCK_DIR"
+# Backdate the lock dir's mtime to simulate an owner that crashed mid-hold
+# well past the stale threshold.
+touch -d "@$(($(date -u +%s) - 100))" "$STALE_LOCK_DIR"
+
+( export ACQUIRE_PID_GUARD_LOCK_STALE_SECONDS=60
+  timeout 5 bash -c 'source "'"$TMPDIR"'/skills/autonomous-dispatcher/scripts/lib-agent.sh" 2>/dev/null; acquire_pid_guard "'"$STALE_PID_FILE"'" test-stale 42' )
+STALE_RC=$?
+assert_eq "acquire against a stale lock succeeds (not stuck)" "0" "$STALE_RC"
+if [[ -d "$STALE_LOCK_DIR" ]]; then
+  echo -e "  ${RED}FAIL${NC}: stale lock dir was not cleaned up"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${NC}: stale lock dir was reclaimed and removed"
+  PASS=$((PASS + 1))
+fi
+STALE_PID_CONTENT=$(cat "$STALE_PID_FILE" 2>/dev/null)
+assert_match "reclaimed acquire still wrote a numeric PID" '^[0-9]+$' "$STALE_PID_CONTENT"
+
+# ============================================================================
 # TC-ATOMIC-002: PID-file read-side compatibility (pid_alive-style check)
 # ============================================================================
 echo

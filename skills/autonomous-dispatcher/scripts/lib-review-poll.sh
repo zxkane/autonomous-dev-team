@@ -489,18 +489,19 @@ _reap_fanout_recorded_descendants() {
   local -a _marker_values=("$@")
   [[ -n "$_marker_name" ]] || return 0
   [[ "${#_marker_values[@]}" -gt 0 ]] || return 0
-  command -v pgrep >/dev/null 2>&1 || return 0
+  # Linux-only mechanism (/proc/<pid>/environ). No-op on any host without a
+  # /proc — the `for` glob below simply matches nothing.
+  [[ -d /proc ]] || return 0
 
   local _emit
   if declare -F log >/dev/null 2>&1; then _emit=log; else _emit=_reap_log_stderr; fi
 
   local -a _hit_pids=()
   local _pid _val _needle
-  # `pgrep -f .` / an empty pattern would over-match; iterate real PIDs from
-  # /proc directly so a host without a matching pgrep flag still works, and
-  # so we control the exact match semantics (grep -Fx on the env line, never
-  # a substring match that could false-positive on an unrelated var whose
-  # value happens to contain our marker value as a substring).
+  # Enumerate real PIDs from /proc directly (not `pgrep -f`) so we control
+  # the exact match semantics: `grep -zaFxq` on the raw NUL-separated env
+  # line, never a substring match that could false-positive on an unrelated
+  # var whose value happens to contain our marker value as a substring.
   for _pid in /proc/[0-9]*; do
     _pid="${_pid#/proc/}"
     [[ "$_pid" =~ ^[0-9]+$ ]] || continue
