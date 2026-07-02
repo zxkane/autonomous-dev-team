@@ -53,7 +53,7 @@ real-repo passes (they reconcile the live tree — migrating + re-anchoring keep
 | ID | Scenario | Assertion |
 |---|---|---|
 | TC-ITV-050 | zero raw `gh issue edit` at the 4 migrated sites | `grep -c 'gh issue edit'` at dev:835 / review:3466 / review:3552 / lib-dispatch hygiene == 0 (the migrated forms route through the verb) |
-| TC-ITV-051 | baseline shrank by 4 | the 4 specific `(file, content)` signatures are absent (asserted directly, robust to the absolute count; live 64 → 60 on rebase); `check-provider-cutover.sh` (INV-91) green |
+| TC-ITV-051 | baseline shrank by 4 | the 4 specific `(file, content)` signatures are absent (asserted directly, robust to the absolute count drifting under concurrent #296 PRs); `check-provider-cutover.sh` (INV-91) green |
 
 ## INV + triage marker (AC5 / common)
 

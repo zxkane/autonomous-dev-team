@@ -123,9 +123,12 @@ operand) — same as today's hygiene loop, covered by the `variable_write_allowl
 The 4 sites are 4 distinct `(file, content)` signatures in `providers/cutover-baseline.json`:
 `autonomous-dev.sh` (×1), `autonomous-review.sh` (×2: the A2 + B `gh issue edit` lines),
 `lib-dispatch.sh` (×1: `gh "${args[@]}" 2>/dev/null || true`). Migrating removes all 4 →
-baseline shrinks by exactly 4. **Issue said 67→63; #325/#334/#336 have since shrunk the live
-baseline, so on rebase onto `origin/main` the real delta lands 64 → 60** (still −4 — pinned
-mechanically via `--generate-baseline`).
+baseline shrinks by exactly 4 (a fixed delta). **Issue said 67→63; the #296 second-tier PR
+stream keeps shrinking the live baseline concurrently, so the absolute before/after numbers
+drift on every rebase — the delta of 4 is the invariant, not any specific pair of numbers.**
+Pinned mechanically via `--generate-baseline`; the unit test asserts the 4 specific
+`(file, content)` signatures are ABSENT rather than an absolute count, so it is robust to
+concurrent baseline churn.
 
 ### 3.6 provider-spec + INV + state-machine
 - provider-spec §3.1 `itp_transition_state` row: document the CSV multi-label semantics + the
@@ -156,7 +159,7 @@ mechanically via `--generate-baseline`).
 | `autonomous-review.sh` | A2 → `… "reviewing,autonomous" "approved"`; B → `… "reviewing" "pending-dev"` (stderr-capture) |
 | `lib-dispatch.sh` | A3 hygiene_strip → `itp_transition_state … "$(echo "$stripped"\|tr ' ' ',')" ""` |
 | `docs/pipeline/spec-codesite-map.json` | re-anchor 3 `code_sites` entries to migrated forms |
-| `providers/cutover-baseline.json` | shrink by 4 (64 → 60 on rebase), mechanical regen |
+| `providers/cutover-baseline.json` | shrink by 4 (delta fixed; absolute count drifts with concurrent #296 PRs), mechanical regen |
 | `docs/pipeline/provider-spec.md` | §3.1 CSV-semantics + comma precondition |
 | `docs/pipeline/invariants.md` | new INV (CSV multi-label semantics) + triage marker |
 | `docs/pipeline/state-machine.md` | confirm Form-3 CSV recognition note |
