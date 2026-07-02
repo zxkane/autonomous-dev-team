@@ -708,14 +708,16 @@ grep/jq lint modeled on `check-spec-drift.sh`:
   symlinks so the tracked-but-symlinked scripts (`mark-issue-checkbox.sh`,
   `reply-to-comments.sh`, `upload-screenshot.sh`, `gh-as-user.sh`) stay scanned. A
   drift FAILs LOUD naming the exact `file:line` (AC #2).
-- **Allowlist** (declarative, in the script): ONLY the auth/transport wrappers
+- **Allowlist** (declarative, in the script): the auth/transport wrappers
   `scripts/gh`, `gh-with-token-refresh.sh`, `gh-app-token.sh`, `gh-as-user.sh`,
-  `dispatch-remote-aws-ssm.sh` (§8: GitHub auth is unchanged, NOT refactored) +
-  the `providers/` tree (the legitimate home of host I/O). The guard script is
-  **NOT** allowlisted (round 2 [P1] #2): it is scanned like any file and its own
-  `gh `-mentioning **PASS/FAIL message strings** are baselined survivors, so a NEW
-  raw `gh` added to the checker trips the guard. Everything else must be a baselined
-  survivor.
+  `dispatch-remote-aws-ssm.sh` (§8: GitHub auth is unchanged, NOT refactored),
+  `upload-screenshot.sh` (#344, #296 FINAL batch — a single-purpose non-caller-layer
+  utility whose only surviving signature after #330/#335 is a `command -v gh`
+  capability-presence guard, not I/O) + the `providers/` tree (the legitimate home
+  of host I/O). The guard script is **NOT** allowlisted (round 2 [P1] #2): it is
+  scanned like any file and its own `gh `-mentioning **PASS/FAIL message strings**
+  are baselined survivors, so a NEW raw `gh` added to the checker trips the guard.
+  Everything else must be a baselined survivor.
 - **The guard's own infrastructure lines are structurally exempt** (#286-amendment,
   #343): three lines in `check-provider-cutover.sh` change content whenever the
   **allowlist policy** changes — the `ALLOWLISTED_FILES=(…)` array declaration, the

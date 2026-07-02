@@ -179,12 +179,12 @@ echo "=== TC-PF-PHR: _postfail_drop_reason_phrase ==="
 # TC-PF-PHR-01: token with rc → human clause names post-failed AND the rc.
 PHR=$(_postfail_drop_reason_phrase "post-failed:gh-rc 1")
 assert_contains "TC-PF-PHR-01a phrase names post-failed" "post-failed" "$PHR"
-assert_contains "TC-PF-PHR-01b phrase names gh rc 1" "gh rc 1" "$PHR"
+assert_contains "TC-PF-PHR-01b phrase names cli rc 1" "cli rc 1" "$PHR"
 
-# TC-PF-PHR-02: bare token → names post-failed, no `gh rc`.
+# TC-PF-PHR-02: bare token → names post-failed, no `cli rc`.
 PHR=$(_postfail_drop_reason_phrase "post-failed")
 assert_contains "TC-PF-PHR-02a bare phrase names post-failed" "post-failed" "$PHR"
-assert_not_contains "TC-PF-PHR-02b bare phrase has no 'gh rc'" "gh rc" "$PHR"
+assert_not_contains "TC-PF-PHR-02b bare phrase has no 'cli rc'" "cli rc" "$PHR"
 
 # TC-PF-PHR-03: empty token → empty phrase.
 assert_eq "TC-PF-PHR-03 empty token → empty phrase" "" "$(_postfail_drop_reason_phrase "")"

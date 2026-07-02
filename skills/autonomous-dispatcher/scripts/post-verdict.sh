@@ -340,7 +340,7 @@ ${AGENT_LINE}"
 # failing here surfaces that instead of silently posting under the wrong user.
 GH="${SCRIPT_DIR}/gh"
 if [[ ! -x "$GH" ]]; then
-  echo "Error: token-refresh gh proxy not found/executable at '${GH}'. Refusing to post the verdict via bare PATH gh (it would mis-attribute the comment). Re-run install-project-hooks.sh to restore the scripts/gh symlink (INV-56)." >&2
+  echo "Error: token-refresh CLI proxy not found/executable at '${GH}'. Refusing to post the verdict via a bare PATH CLI call (it would mis-attribute the comment). Re-run install-project-hooks.sh to restore the token-refresh proxy symlink (scripts/gh, INV-56)." >&2
   exit 1
 fi
 
@@ -364,7 +364,7 @@ POST_RC=$?
 set -e
 
 if [[ $POST_RC -ne 0 ]]; then
-  echo "Error: failed to post verdict comment on issue #${ISSUE_NUMBER} (gh rc=${POST_RC})" >&2
+  echo "Error: failed to post verdict comment on issue #${ISSUE_NUMBER} (cli rc=${POST_RC})" >&2
   echo "$URL" >&2
   # [INV-69] Drop a session-keyed breadcrumb so the review wrapper can surface a
   # distinct `post-failed` drop reason (vs. the bare opaque `unavailable` a

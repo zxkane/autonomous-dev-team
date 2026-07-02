@@ -107,7 +107,7 @@ _classify_postfail_drop_reason() {
 # `unavailable` wording). rc 0 always.
 #
 #   post-failed:gh-rc 1
-#       → "post-failed (verdict comment post failed; gh rc 1 — transient GitHub/API or token error)"
+#       → "post-failed (verdict comment post failed; cli rc 1 — transient GitHub/API or token error)"
 #   post-failed
 #       → "post-failed (verdict comment post failed — transient GitHub/API or token error)"
 _postfail_drop_reason_phrase() {
@@ -116,7 +116,7 @@ _postfail_drop_reason_phrase() {
     post-failed:gh-rc\ *)
       # Strip the leading "post-failed:gh-rc " to recover the rc number.
       local rc="${token#post-failed:gh-rc }"
-      printf 'post-failed (verdict comment post failed; gh rc %s — transient GitHub/API or token error)\n' "$rc"
+      printf 'post-failed (verdict comment post failed; cli rc %s — transient GitHub/API or token error)\n' "$rc"
       ;;
     post-failed)
       printf 'post-failed (verdict comment post failed — transient GitHub/API or token error)\n'

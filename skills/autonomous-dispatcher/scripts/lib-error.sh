@@ -300,7 +300,7 @@ error_surface() {
     gh_proxy="${_LIB_ERROR_DIR}/gh-with-token-refresh.sh"
   fi
   if [[ -z "$gh_proxy" ]]; then
-    _error_log "token-refresh gh proxy not resolvable (AUTONOMOUS_CONF_DIR='${AUTONOMOUS_CONF_DIR:-}', skill-tree fallback '${_LIB_ERROR_DIR}/gh-with-token-refresh.sh' missing); degrading envelope ${code} to log-only:"
+    _error_log "token-refresh CLI proxy not resolvable (AUTONOMOUS_CONF_DIR='${AUTONOMOUS_CONF_DIR:-}', skill-tree fallback '${_LIB_ERROR_DIR}/gh-with-token-refresh.sh' missing); degrading envelope ${code} to log-only:"
     printf '%s\n' "$rendered" >&2
     return 0
   fi
@@ -329,7 +329,7 @@ error_surface() {
   [[ "$errexit_was_set" -eq 1 ]] && set -e
 
   if [[ "$post_rc" -ne 0 ]]; then
-    _error_log "failed to surface envelope ${code} on issue #${issue} (gh rc=${post_rc}); degrading to log-only:"
+    _error_log "failed to surface envelope ${code} on issue #${issue} (cli rc=${post_rc}); degrading to log-only:"
     _error_log "$post_out"
     printf '%s\n' "$rendered" >&2
     return 0
