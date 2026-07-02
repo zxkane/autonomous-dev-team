@@ -26,7 +26,11 @@
 #        (incl. the P2 verb-error rc!=0 + empty-stdout failure mode);
 #   (iii) source-shape — the raw `:571` gh-api read is gone (function-scoped), the
 #        verb form is present, `| tail -n1` is KEPT (folded P2), baseline -1, cutover
-#        guard green, and the :486/:498 INV-46 reads in the OTHER function STILL raw.
+#        guard green. The :486/:498 INV-46 reads in the OTHER function
+#        (_stamp_browser_evidence_marker) were out of #333's scope at the time this
+#        test was written ("STILL raw") — #345 (#296 deferred) later retired that
+#        carve-out, so this file's negative-scope assertion now checks the reads are
+#        GONE, not present (see TC-333-SRC-04/05b).
 #
 # Run: env -u PROJECT_DIR bash tests/unit/test-broker-dedup-read-migration.sh
 
@@ -300,14 +304,23 @@ else
   bad "TC-333-SRC-03 '| tail -n1' was dropped — folded P2 finding says KEEP it"
 fi
 
-# TC-333-SRC-04 (negative scope) — the TWO INV-46 reads in _stamp_browser_evidence_marker
-# STILL present + raw (function-scoped; they are NOT migrated by this issue).
+# TC-333-SRC-04 (scope updated by #345) — the TWO INV-46 reads formerly in
+# _stamp_browser_evidence_marker (:486 GET-id, :498 GET-body) were OUT of #333's
+# scope at the time this test was written ("STILL present + raw"). #345 (#296
+# deferred) retired that carve-out: both raw `gh api` reads are now GONE, replaced
+# by a single itp_list_comments call. Assert the raw forms are absent (the #345
+# migration this test previously excluded is now the expected state).
 stamp_code() { printf '%s\n' "$STAMP_BODY" | grep -vE '^[[:space:]]*#'; }
 if stamp_code | grep -qE '_comment_id=\$\(gh api "repos/\$\{REPO_OWNER\}/\$\{REPO_NAME\}/issues/\$\{PR_NUMBER\}/comments"' \
-   && stamp_code | grep -qE '_body=\$\(gh api "repos/\$\{REPO_OWNER\}/\$\{REPO_NAME\}/issues/comments/\$\{_comment_id\}"'; then
-  ok "TC-333-SRC-04 INV-46 carve-out reads (:486 GET-id, :498 GET-body) STILL present + raw in _stamp_browser_evidence_marker"
+   || stamp_code | grep -qE '_body=\$\(gh api "repos/\$\{REPO_OWNER\}/\$\{REPO_NAME\}/issues/comments/\$\{_comment_id\}"'; then
+  bad "TC-333-SRC-04 an INV-46 raw gh-api read survives in _stamp_browser_evidence_marker (#345 should have migrated it behind itp_list_comments)"
 else
-  bad "TC-333-SRC-04 an INV-46 carve-out read in _stamp_browser_evidence_marker was unexpectedly altered (out of scope)"
+  ok "TC-333-SRC-04 the :486/:498 INV-46 raw gh-api reads are GONE from _stamp_browser_evidence_marker (#345 migration)"
+fi
+if stamp_code | grep -qE 'itp_list_comments "\$PR_NUMBER"'; then
+  ok "TC-333-SRC-04b _stamp_browser_evidence_marker now routes through itp_list_comments (#345)"
+else
+  bad "TC-333-SRC-04b _stamp_browser_evidence_marker does not call itp_list_comments"
 fi
 
 # TC-333-SRC-05 — baseline shrank by 1 (the broker entry gone) and cutover guard green.
@@ -316,12 +329,12 @@ if grep -Fq '_existing=$(gh api \"repos/${REPO_OWNER}/${REPO_NAME}/issues/${PR_N
 else
   ok "TC-333-SRC-05a cutover-baseline.json no longer carries the broker '_existing=\$(gh api …' entry (baseline -1)"
 fi
-# The :486 (_comment_id) + :498 (_body) entries MUST remain in the baseline.
+# The :486 (_comment_id) + :498 (_body) entries were retired from the baseline by #345.
 if grep -Fq '_comment_id=$(gh api \"repos/${REPO_OWNER}/${REPO_NAME}/issues/${PR_NUMBER}/comments\" --paginate' "$BASELINE" \
-   && grep -Fq '_body=$(gh api \"repos/${REPO_OWNER}/${REPO_NAME}/issues/comments/${_comment_id}\"' "$BASELINE"; then
-  ok "TC-333-SRC-05b cutover-baseline.json still carries the :486/:498 INV-46 carve-out entries (kept)"
+   || grep -Fq '_body=$(gh api \"repos/${REPO_OWNER}/${REPO_NAME}/issues/comments/${_comment_id}\"' "$BASELINE"; then
+  bad "TC-333-SRC-05b cutover-baseline.json still carries a :486/:498 INV-46 entry (#345 should have removed it)"
 else
-  bad "TC-333-SRC-05b a :486/:498 INV-46 baseline entry was removed (must stay)"
+  ok "TC-333-SRC-05b cutover-baseline.json no longer carries the :486/:498 INV-46 entries (#345 migration)"
 fi
 if bash "$CHECK" >/dev/null 2>&1; then
   ok "TC-333-SRC-05c check-provider-cutover.sh ([INV-91]) PASSES (baseline reconciles with HEAD)"

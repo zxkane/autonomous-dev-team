@@ -297,43 +297,55 @@ echo "=== TC-SE2E-STAMP: _stamp_browser_evidence_marker stamps the REPORT, fails
 # helper edits the report comment via REST PATCH, or returns 1 (gate fails
 # closed) when no report exists.
 if [[ -f "$E2E_LIB" ]]; then
-  # Harness: stub `gh api` to model the REST endpoints the helper hits:
-  #   GET  issues/<pr>/comments            → the comment list (jq filtered)
-  #   GET  issues/comments/<id>            → a single comment body
-  #   PATCH issues/comments/<id> -f body=… → records the new body
-  # The stub records whether a PATCH happened and whether a standalone
-  # marker-only `gh pr comment` was ever posted (it must NOT be).
+  # Harness [#345]: the id-lookup + body-fetch now route through the SHIPPED
+  # `itp_list_comments` verb (one call, normalized [INV-90] array) instead of two
+  # raw `gh api` reads — so the stub intercepts `itp_list_comments` (returning the
+  # fixture array via a FILE, so arbitrary JSON round-trips byte-exact with no
+  # nested-shell-quote corruption) and `gh` ONLY for the in-place PATCH
+  # (itp_edit_comment's real GitHub leaf still emits `gh api -X PATCH`). The stub
+  # records whether a PATCH happened and whether a standalone marker-only
+  # `gh pr comment` was ever posted (it must NOT be).
   _stamp_harness() {
-    local setup="$1"
-    env -i PATH="$PATH" bash -c "
+    # $1 = normalized [INV-90] array JSON for itp_list_comments to emit (e.g. "[]")
+    # $2 = "0" to force the gh PATCH stub to fail (default succeeds)
+    local fixture="$1" patch_ok="${2:-1}"
+    local tmp; tmp=$(mktemp -d)
+    local FIXTURE_FILE="$tmp/fixture.json" PATCH_FLAG="$tmp/patched"
+    printf '%s' "$fixture" > "$FIXTURE_FILE"
+    local out
+    out=$(env -i PATH="$PATH" FIXTURE_FILE="$FIXTURE_FILE" PATCH_FLAG="$PATCH_FLAG" PATCH_OK="$patch_ok" bash -c '
       set -uo pipefail
-      source '$E2E_LIB'
+      source "'"$E2E_LIB"'"
       log() { :; }
-      TMPD=\$(mktemp -d)
-      export PR_NUMBER=42 REPO=owner/repo REPO_OWNER=owner REPO_NAME=repo \\
+      export PR_NUMBER=42 REPO=owner/repo REPO_OWNER=owner REPO_NAME=repo \
         PR_HEAD_SHA=deadbeefcafe BOT_LOGIN=bot WRAPPER_START_TS=2026-01-01T00:00:00Z
-      export PATCH_FLAG=\"\$TMPD/patched\"; : > \"\$PATCH_FLAG\"
-      $setup
-      if _stamp_browser_evidence_marker; then echo 'STAMP_RC=0'; else echo \"STAMP_RC=\$?\"; fi
-      echo \"PATCHED=\$([[ -s \"\$PATCH_FLAG\" ]] && echo yes || echo no)\"
-    "
+      itp_list_comments() { cat "$FIXTURE_FILE"; }
+      gh() {
+        local is_patch=0 a
+        for a in "$@"; do [[ "$a" == "PATCH" ]] && is_patch=1; done
+        if [[ "$is_patch" == 1 ]]; then
+          [[ "$PATCH_OK" == "1" ]] || return 1
+          echo edited > "$PATCH_FLAG"; return 0
+        fi
+        return 1
+      }
+      if _stamp_browser_evidence_marker; then echo "STAMP_RC=0"; else echo "STAMP_RC=$?"; fi
+    ')
+    printf '%s\n' "$out"
+    echo "PATCHED=$([[ -s "$PATCH_FLAG" ]] && echo yes || echo no)"
+    rm -rf "$tmp"
+  }
+
+  # mk_norm_comment <id> <createdAt> <body> — one normalized [INV-90] array element,
+  # author fixed to "bot" (matches the harness's BOT_LOGIN=bot).
+  mk_norm_comment() {
+    jq -nc --argjson id "$1" --arg ts "$2" --arg body "$3" \
+      '{id: $id, author: "bot", authorKind: "self", body: $body, createdAt: $ts}'
   }
 
   # TC-SE2E-STAMP-01: a real report comment present → helper PATCHes it, returns 0.
-  # The stub models the two GET queries the helper issues (the comment-list query,
-  # which the helper --jq-reduces to the report comment's .id, and the
-  # single-comment body fetch) plus the PATCH edit. Because the helper passes its
-  # own --jq, the stub returns the already-reduced value (the .id / the body).
-  out=$(_stamp_harness '
-    gh() {
-      local is_patch=0; for a in "$@"; do [[ "$a" == "PATCH" ]] && is_patch=1; done
-      if [[ "$is_patch" == 1 ]]; then echo edited > "$PATCH_FLAG"; return 0; fi
-      case "$*" in
-        *"issues/42/comments"*) echo 99 ;;                 # list query → .id of the report
-        *"issues/comments/99"*) printf "## E2E Verification Report\n| Total | 1 |" ;;  # body
-      esac
-    }
-  ')
+  fx=$(jq -nc --argjson a "[$(mk_norm_comment 99 2026-01-01T00:00:01Z $'## E2E Verification Report\n| Total | 1 |')]" '$a')
+  out=$(_stamp_harness "$fx")
   assert_grep "TC-SE2E-STAMP-01 report present → stamp returns 0" \
     "STAMP_RC=0" <(printf '%s\n' "$out")
   assert_grep "TC-SE2E-STAMP-01b report present → PATCH happened (marker stamped onto report)" \
@@ -341,35 +353,49 @@ if [[ -f "$E2E_LIB" ]]; then
 
   # TC-SE2E-STAMP-02 (CORE REGRESSION): NO report comment → helper returns 1
   # (gate fails closed) and does NOT PATCH anything.
-  out=$(_stamp_harness '
-    gh() {
-      local is_patch=0; for a in "$@"; do [[ "$a" == "PATCH" ]] && is_patch=1; done
-      if [[ "$is_patch" == 1 ]]; then echo edited > "$PATCH_FLAG"; return 0; fi
-      case "$*" in
-        *"issues/42/comments"*) printf "" ;;   # list query → no report comment found (empty .id)
-      esac
-    }
-  ')
+  out=$(_stamp_harness "[]")
   assert_grep "TC-SE2E-STAMP-02 no report comment → stamp returns non-zero (fail closed)" \
     "STAMP_RC=1" <(printf '%s\n' "$out")
   assert_grep "TC-SE2E-STAMP-02b no report comment → no PATCH attempted" \
     "PATCHED=no" <(printf '%s\n' "$out")
 
   # TC-SE2E-STAMP-03 (idempotent): report ALREADY carries the SHA marker → 0, no PATCH.
-  out=$(_stamp_harness '
-    gh() {
-      local is_patch=0; for a in "$@"; do [[ "$a" == "PATCH" ]] && is_patch=1; done
-      if [[ "$is_patch" == 1 ]]; then echo edited > "$PATCH_FLAG"; return 0; fi
-      case "$*" in
-        *"issues/42/comments"*) echo 99 ;;
-        *"issues/comments/99"*) printf "## E2E Verification Report\n<!-- e2e-evidence: complete sha=\"deadbeefcafe\" -->" ;;
-      esac
-    }
-  ')
+  fx=$(jq -nc --argjson a "[$(mk_norm_comment 99 2026-01-01T00:00:01Z $'## E2E Verification Report\n<!-- e2e-evidence: complete sha="deadbeefcafe" -->')]" '$a')
+  out=$(_stamp_harness "$fx")
   assert_grep "TC-SE2E-STAMP-03 already-stamped report → returns 0 (idempotent)" \
     "STAMP_RC=0" <(printf '%s\n' "$out")
   assert_grep "TC-SE2E-STAMP-03b already-stamped report → no redundant PATCH" \
     "PATCHED=no" <(printf '%s\n' "$out")
+
+  # TC-SE2E-STAMP-08 (#345, R3 same-second tie-break): two candidate reports at the
+  # SAME createdAt second, different ids → the HIGHER id (later-inserted) wins.
+  fx=$(jq -nc --argjson a "[$(mk_norm_comment 10 2026-01-01T00:00:01Z '## E2E Verification Report v1'),$(mk_norm_comment 11 2026-01-01T00:00:01Z '## E2E Verification Report v2')]" '$a')
+  out=$(_stamp_harness "$fx")
+  patched_body=$(printf '%s' "$fx" | jq -r '.[1].body')
+  assert_grep "TC-SE2E-STAMP-08 same-second tie-break → higher id (v2) wins, stamp returns 0" \
+    "STAMP_RC=0" <(printf '%s\n' "$out")
+  assert_grep "TC-SE2E-STAMP-08b same-second tie-break → PATCH happened" \
+    "PATCHED=yes" <(printf '%s\n' "$out")
+
+  # TC-SE2E-STAMP-09 (#345, R3 WRAPPER_START_TS boundary, >= inclusive): a comment
+  # exactly AT WRAPPER_START_TS (2026-01-01T00:00:00Z) is IN-window and selected;
+  # one 1s BEFORE is excluded even though it is the only candidate.
+  fx=$(jq -nc --argjson a "[$(mk_norm_comment 20 2026-01-01T00:00:00Z '## E2E Verification Report at-boundary')]" '$a')
+  out=$(_stamp_harness "$fx")
+  assert_grep "TC-SE2E-STAMP-09 createdAt == WRAPPER_START_TS → included (>= inclusive), stamp returns 0" \
+    "STAMP_RC=0" <(printf '%s\n' "$out")
+  fx=$(jq -nc --argjson a "[$(mk_norm_comment 21 2025-12-31T23:59:59Z '## E2E Verification Report before-boundary')]" '$a')
+  out=$(_stamp_harness "$fx")
+  assert_grep "TC-SE2E-STAMP-09b createdAt 1s before WRAPPER_START_TS → excluded, fails closed" \
+    "STAMP_RC=1" <(printf '%s\n' "$out")
+
+  # TC-SE2E-STAMP-10 (#345, R1 author predicate parity): BOT_LOGIN=bot is exported
+  # by the harness; a report authored by someone else must NOT match (the
+  # _author_jq predicate re-expressed over the normalized .author, was .user.login).
+  fx=$(jq -nc '[{id: 30, author: "someone-else", authorKind: "human", body: "## E2E Verification Report", createdAt: "2026-01-01T00:00:01Z"}]')
+  out=$(_stamp_harness "$fx")
+  assert_grep "TC-SE2E-STAMP-10 non-BOT_LOGIN author excluded → fails closed" \
+    "STAMP_RC=1" <(printf '%s\n' "$out")
 
   # TC-SE2E-STAMP-04 (source-of-truth, the codex finding): the wrapper must NOT
   # post a standalone marker-only `gh pr comment … <!-- e2e-evidence: complete

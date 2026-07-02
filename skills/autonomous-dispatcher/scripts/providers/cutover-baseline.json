@@ -165,16 +165,6 @@
       "count": 3,
       "file": "lib-review-bots.sh",
       "content": "COUNT=\\$(gh api repos/${repo}/pulls/${pr_number}/reviews \\\\"
-    },
-    {
-      "count": 1,
-      "file": "lib-review-e2e.sh",
-      "content": "_body=$(gh api \"repos/${REPO_OWNER}/${REPO_NAME}/issues/comments/${_comment_id}\" \\"
-    },
-    {
-      "count": 1,
-      "file": "lib-review-e2e.sh",
-      "content": "_comment_id=$(gh api \"repos/${REPO_OWNER}/${REPO_NAME}/issues/${PR_NUMBER}/comments\" --paginate \\"
     }
   ]
 }
