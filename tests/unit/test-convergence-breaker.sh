@@ -491,6 +491,85 @@ assert_eq "CB-SHARED-010 empty-PID→DEAD narrowing lives in exactly ONE place (
 
 # ===========================================================================
 echo ""
+echo "=== recent_review_verdict_body: skips wrapper-metadata comments, returns the actual findings body ==="
+# Every other test in this file mocks recent_review_verdict_body() (line ~97) so
+# the routing tests don't depend on comment-scan details. This section tests the
+# REAL function against a realistic review-round comment sequence — the review
+# wrapper posts the agent's `Review findings:` body FIRST, then its own
+# `Reviewed HEAD: ...` forensic-attribution comment, then the bare
+# `<!-- review-verdict: ... -->` trailer (lib-review-verdict.sh::emit_verdict_trailer),
+# all same-actor and each later than the last. A naive "newest bot comment"
+# selection (what classify_recent_review_verdict correctly uses, since IT wants
+# the trailer) would return the bare trailer or the Reviewed-HEAD line here
+# instead of the findings text the [INV-97] evidence block needs to quote.
+# The mock at line ~97 shadowed the real function the moment it was defined
+# (both are top-level `name() { ... }` defs in the same shell — there is no
+# saved original to `unset -f` back to). Re-extract and re-source ONLY the real
+# `recent_review_verdict_body` definition from $LIB so this section exercises
+# the actual implementation, not the mock.
+_rrvb_real_fn="$(awk '/^recent_review_verdict_body\(\) \{/,/^}/' "$LIB")"
+eval "$_rrvb_real_fn"
+_RRVB_FINDINGS_BODY="Review findings:
+
+Findings->Decision Gate: 1 blocking finding(s) -- FAIL.
+
+1. **[BLOCKING] acceptance criterion #3 contradicts #1** — cannot satisfy both."
+_RRVB_SESSION_END="2026-06-12T09:00:00Z"
+itp_list_comments() {
+  jq -c -n \
+    --arg findings "$_RRVB_FINDINGS_BODY" \
+    --arg reviewed_head "Reviewed HEAD: \`abc1234\` (issue #42, session \`sid-1\`, agent \`claude\`, model \`sonnet\`)" \
+    --arg trailer "<!-- review-verdict: failed-substantive -->" \
+    '[
+      {id: 201, author: "kane-review-agent", authorKind: "bot", body: $findings, createdAt: "2026-06-12T09:05:00Z"},
+      {id: 202, author: "kane-review-agent", authorKind: "bot", body: $reviewed_head, createdAt: "2026-06-12T09:05:01Z"},
+      {id: 203, author: "kane-review-agent", authorKind: "bot", body: $trailer, createdAt: "2026-06-12T09:05:02Z"}
+    ]'
+}
+_rrvb_result=$(recent_review_verdict_body "42" "$_RRVB_SESSION_END")
+assert_eq "RRVB-001 returns the agent's findings body, not the newest (trailer) comment" \
+  "$_RRVB_FINDINGS_BODY" "$_rrvb_result"
+assert_eq "RRVB-002 result is not the bare verdict trailer" \
+  "no" "$([[ "$_rrvb_result" == "<!-- review-verdict: failed-substantive -->" ]] && echo yes || echo no)"
+assert_eq "RRVB-003 result is not the Reviewed-HEAD metadata line" \
+  "no" "$([[ "$_rrvb_result" == "Reviewed HEAD:"* ]] && echo yes || echo no)"
+
+# RRVB-004: only the metadata comments exist after session_end (no findings comment
+# in the window, e.g. the findings comment predates session_end) — falls back to
+# empty rather than returning the trailer or Reviewed-HEAD line as a false "finding".
+itp_list_comments() {
+  jq -c -n \
+    --arg reviewed_head "Reviewed HEAD: \`abc1234\` (issue #42, session \`sid-1\`, agent \`claude\`, model \`sonnet\`)" \
+    --arg trailer "<!-- review-verdict: failed-substantive -->" \
+    '[
+      {id: 202, author: "kane-review-agent", authorKind: "bot", body: $reviewed_head, createdAt: "2026-06-12T09:05:01Z"},
+      {id: 203, author: "kane-review-agent", authorKind: "bot", body: $trailer, createdAt: "2026-06-12T09:05:02Z"}
+    ]'
+}
+_rrvb_result2=$(recent_review_verdict_body "42" "$_RRVB_SESSION_END")
+assert_eq "RRVB-004 no findings comment in window → empty (never the trailer/Reviewed-HEAD as a false finding)" \
+  "" "$_rrvb_result2"
+
+# RRVB-005: a real findings comment that happens to MENTION "Reviewed HEAD" or a
+# verdict trailer mid-body (not as its literal opening) is NOT excluded — the
+# exclusion is a structural startswith(), not a substring/contains() check.
+itp_list_comments() {
+  jq -c -n \
+    --arg findings "Review findings:
+
+1. [BLOCKING] the dispatcher's Reviewed HEAD comment and the <!-- review-verdict: ... --> trailer are both posted separately from this comment; see design doc." \
+    '[{id: 301, author: "kane-review-agent", authorKind: "bot", body: $findings, createdAt: "2026-06-12T09:05:00Z"}]'
+}
+_rrvb_result3=$(recent_review_verdict_body "42" "$_RRVB_SESSION_END")
+assert_contains "RRVB-005 a findings body that merely MENTIONS the excluded phrases mid-body is NOT excluded" \
+  "[BLOCKING] the dispatcher's Reviewed HEAD comment" "$_rrvb_result3"
+
+# Restore the routing-side mock for any test that might run after this section
+# (source-order safety; this section is currently last).
+recent_review_verdict_body() { printf '%s' "$_MOCK_VERDICT_BODY"; }
+
+# ===========================================================================
+echo ""
 echo "=== Summary ==="
 echo "  PASS: $PASS"
 echo "  FAIL: $FAIL"

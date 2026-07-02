@@ -1291,13 +1291,29 @@ count_frozen_convergence_rounds() {
 
 # recent_review_verdict_body <issue_num> <session_end_iso>
 #
-# Echoes the body of the newest BOT-authored review verdict comment created after
-# the dev session ended — the verbatim repeated finding shown in the [INV-97]
-# convergence report's evidence block. Mirrors `classify_recent_review_verdict`'s
-# actor-predicate + strict-`>` timestamp selection (spec §3.3: `author` is the
-# login string incl `[bot]`), but returns the raw body rather than parsing the
-# trailer. Best-effort: an empty/error fetch or missing actor signal yields empty
-# (the report omits the excerpt gracefully) — never aborts the tick.
+# Echoes the body of the newest BOT-authored review VERDICT/FINDINGS comment
+# created after the dev session ended — the verbatim repeated finding shown in
+# the [INV-97] convergence report's evidence block. Mirrors
+# `classify_recent_review_verdict`'s actor-predicate + strict-`>` timestamp
+# selection (spec §3.3: `author` is the login string incl `[bot]`), but returns
+# the raw body rather than parsing the trailer. Best-effort: an empty/error fetch
+# or missing actor signal yields empty (the report omits the excerpt gracefully)
+# — never aborts the tick.
+#
+# EXCLUDES two wrapper-metadata comment shapes the normal review-round posting
+# sequence appends AFTER the agent's own findings comment (same bot actor, later
+# timestamp), which would otherwise win the plain "newest" selection
+# `classify_recent_review_verdict` uses (that function WANTS the newest,
+# including a trailer-only comment — see lib-review-verdict.sh's
+# emit_verdict_trailer header note — because it parses the trailer. This
+# function wants the human-readable finding text instead):
+#   - `Reviewed HEAD: ...` — the per-round forensic-attribution comment
+#     (autonomous-review.sh, posted right after the agent's findings comment).
+#   - a BARE `<!-- review-verdict: ... -->` trailer with no other content
+#     (emit_verdict_trailer's entire body IS the trailer literal).
+# Both are recognized structurally (body starts with the exact literal), not by
+# a magic marker, so a real findings comment that merely mentions "Reviewed
+# HEAD" or a verdict trailer mid-body is never excluded.
 recent_review_verdict_body() {
   local issue_num="$1"
   local session_end="$2"
@@ -1309,8 +1325,9 @@ recent_review_verdict_body() {
   else
     return 0
   fi
+  local exclude_predicate='((.body | startswith("Reviewed HEAD:")) or (.body | startswith("<!-- review-verdict:"))) | not'
   itp_list_comments "$issue_num" 2>/dev/null \
-    | jq -r "[.[] | select(${actor_predicate} and (.createdAt > \"${session_end}\"))] | sort_by(.createdAt) | last | .body // empty" \
+    | jq -r "[.[] | select(${actor_predicate} and (.createdAt > \"${session_end}\") and (${exclude_predicate}))] | sort_by(.createdAt) | last | .body // empty" \
     2>/dev/null
 }
 
