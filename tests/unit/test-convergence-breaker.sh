@@ -173,6 +173,14 @@ itp_list_comments() {
   for ((i = 0; i < ${_MOCK_MACHINE_MIDBODY_QUOTES:-0}; i++)); do
     _bodies+=("Re-checking the prior status: ${_round} — investigating.")
   done
+  # round-15 [BLOCKING]: a human quote that starts with the EXACT round-comment
+  # literal (offset 0, NO leading prose — so it passes the old `startswith`
+  # anchor) and appends commentary AFTER it. Distinct from
+  # _MOCK_HUMAN_QUOTE_COMMENTS's "> " leading-prefix shape, which already
+  # failed `startswith`; this is the shape that DID pass it pre-fix.
+  for ((i = 0; i < ${_MOCK_TRAILING_QUOTE_COMMENTS:-0}; i++)); do
+    _bodies+=("HUMANQUOTE:${_round} Actually I think we should keep trying a bit longer before giving up.")
+  done
   if [[ "$_MOCK_CB_MARKER_PRESENT" != "0" ]]; then
     # round-12: the marker now embeds `session=<sid>` — the test sets
     # _MOCK_CB_MARKER_SESSION to the CURRENT session-id to simulate a genuine
@@ -252,6 +260,7 @@ reset_mocks() {
   _MOCK_COMMENT_COUNT=0
   _MOCK_HUMAN_QUOTE_COMMENTS=0
   _MOCK_MACHINE_MIDBODY_QUOTES=0
+  _MOCK_TRAILING_QUOTE_COMMENTS=0
   _MOCK_HUMAN_TRAILER_QUOTE=""
   _MOCK_OTHERBOT_TRAILER_QUOTE=""
   _MOCK_ROUNDS_AUTHORKIND="self"
@@ -563,6 +572,43 @@ _MOCK_HUMAN_TRAILER_QUOTE="<!-- review-verdict: failed-substantive --> (editing 
 _saved_bot_login="$BOT_LOGIN"; BOT_LOGIN=""
 assert_eq "CB-COUNT-009o: a forged trailer with TRAILING content after it is still rejected (0)" \
   "0" "$(count_frozen_convergence_rounds 100 deadbeef "$AC_SUB")"
+BOT_LOGIN="$_saved_bot_login"
+
+# CB-COUNT-009p (regression guard, round-7's ORIGINAL `_MOCK_HUMAN_QUOTE_COMMENTS`
+# fixture — a leading `> ` prefix): confirms the round-15 tightening does not
+# regress the pre-existing leading-prose case. This shape already failed the
+# OLD `startswith` anchor (the `> ` prefix means the body does not BEGIN with
+# the exact sentence), so it is NOT itself a round-15 regression test — see
+# CB-COUNT-009q below for the shape that DID pass `startswith` pre-fix. With
+# BOT_LOGIN empty — the permanent topology at this call site — the authorKind
+# filter is ALSO dropped (it must be, so the dispatcher's own genuine rounds
+# still count in GH_AUTH_MODE=token).
+reset_mocks
+_MOCK_PR_HEAD="deadbeef"
+_MOCK_LAST_REVIEWED_HEAD="deadbeef"
+_MOCK_FROZEN_ROUND_COMMENTS=2
+_MOCK_HUMAN_QUOTE_COMMENTS=1
+_MOCK_ROUNDS_AUTHORKIND="human"
+_saved_bot_login="$BOT_LOGIN"; BOT_LOGIN=""
+assert_eq "CB-COUNT-009p: BOT_LOGIN empty — a verbatim round-line quote with '> ' prefix is still rejected (2, not 3)" \
+  "2" "$(count_frozen_convergence_rounds 100 deadbeef "$AC_SUB")"
+BOT_LOGIN="$_saved_bot_login"
+
+# CB-COUNT-009q (round-15 [BLOCKING], the exact forgery shape the finding
+# describes): the forged comment starts with the EXACT status line — no
+# leading prose at all — and appends extra commentary after it (mock:
+# _MOCK_TRAILING_QUOTE_COMMENTS). This is distinct from 009p's leading "> "
+# prefix (which already failed `startswith`) — 009q is the case that DID pass
+# the pre-fix `startswith` anchor and would have inflated the count.
+reset_mocks
+_MOCK_PR_HEAD="deadbeef"
+_MOCK_LAST_REVIEWED_HEAD="deadbeef"
+_MOCK_FROZEN_ROUND_COMMENTS=2
+_MOCK_TRAILING_QUOTE_COMMENTS=1
+_MOCK_ROUNDS_AUTHORKIND="human"
+_saved_bot_login="$BOT_LOGIN"; BOT_LOGIN=""
+assert_eq "CB-COUNT-009q: BOT_LOGIN empty — a verbatim round-line quote WITH TRAILING commentary (no leading prose) is still rejected (2, not 3)" \
+  "2" "$(count_frozen_convergence_rounds 100 deadbeef "$AC_SUB")"
 BOT_LOGIN="$_saved_bot_login"
 
 # ===========================================================================
@@ -983,6 +1029,47 @@ itp_list_comments() {
 _rrvb_result3=$(recent_review_verdict_body "42" "$_RRVB_SESSION_END")
 assert_contains "RRVB-005 a findings body that merely MENTIONS the excluded phrases mid-body is NOT excluded" \
   "[BLOCKING] the dispatcher's Reviewed HEAD comment" "$_rrvb_result3"
+
+# RRVB-006/007 (round-15 [BLOCKING]): the REAL dispatcher topology — BOT_LOGIN
+# is unset (as it ALWAYS is in the dispatcher's own process; it is resolved
+# only inside autonomous-review.sh's SEPARATE process) AND FALLBACK_SESSION_ID
+# is unset (never assigned anywhere in this codebase). Before this fix,
+# recent_review_verdict_body returned EMPTY unconditionally in this topology
+# — the convergence report's evidence excerpt was permanently
+# "(verdict body unavailable...)" in every real deployment. All prior
+# RRVB-001..005 tests above run with BOT_LOGIN SET (the file-global
+# `export BOT_LOGIN="kane-review-agent"`, matching the fixture author), so
+# none of them exercised this branch — exactly why round-13's own class of
+# bug (empty-BOT_LOGIN is the ALWAYS-taken branch at these call sites)
+# recurred here undetected.
+_saved_bot_login="$BOT_LOGIN"; BOT_LOGIN=""
+itp_list_comments() {
+  jq -c -n \
+    --arg findings "$_RRVB_FINDINGS_BODY" \
+    --arg reviewed_head "Reviewed HEAD: \`abc1234\` (issue #42, session \`sid-1\`, agent \`claude\`, model \`sonnet\`)" \
+    --arg trailer "<!-- review-verdict: failed-substantive -->" \
+    '[
+      {id: 201, author: "my-claw", authorKind: "human", body: $findings, createdAt: "2026-06-12T09:05:00Z"},
+      {id: 202, author: "my-claw", authorKind: "human", body: $reviewed_head, createdAt: "2026-06-12T09:05:01Z"},
+      {id: 203, author: "my-claw", authorKind: "human", body: $trailer, createdAt: "2026-06-12T09:05:02Z"}
+    ]'
+}
+_rrvb_result4=$(recent_review_verdict_body "42" "$_RRVB_SESSION_END")
+assert_eq "RRVB-006: BOT_LOGIN empty (real dispatcher topology) — genuine findings body still returned via structural fallback" \
+  "$_RRVB_FINDINGS_BODY" "$_rrvb_result4"
+
+# RRVB-007 (regression guard): a human comment that mentions "Review findings:"
+# mid-sentence (not as its literal opening) must NOT be picked up by the
+# structural fallback — it is not authorship-gated, so it relies entirely on
+# the startswith anchor to reject prose-prefixed mentions.
+itp_list_comments() {
+  jq -c -n \
+    '[{id: 401, author: "zxkane", authorKind: "human", body: "I was discussing Review findings: from yesterday'"'"'s run in Slack, nothing new here.", createdAt: "2026-06-12T09:05:00Z"}]'
+}
+_rrvb_result5=$(recent_review_verdict_body "42" "$_RRVB_SESSION_END")
+assert_eq "RRVB-007: BOT_LOGIN empty — a human comment merely MENTIONING the prefix mid-sentence is rejected (empty)" \
+  "" "$_rrvb_result5"
+BOT_LOGIN="$_saved_bot_login"
 
 # Restore the routing-side mock for any test that might run after this section
 # (source-order safety; this section is currently last).

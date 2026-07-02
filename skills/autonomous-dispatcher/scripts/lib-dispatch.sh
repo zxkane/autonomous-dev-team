@@ -1226,19 +1226,39 @@ convergence_trailer_hash() {
 # #298-marker zero-out needed (a false round is handled by Branch B′ precedence for
 # the CURRENT round, and excluded from the count for PRIOR rounds).
 #
-# ROUND-COMMENT AUTHENTICITY (review round-7 [P1]): a bare `contains()` over the
-# status phrase counted ANY comment quoting it — a human/reviewer comment that
-# quotes the Step-5b line ("Dev process exited (no new commits since last review
-# at `<head>`)…") inflated the round count and could trip the breaker early on a
-# still-converging issue. Two filters restore authenticity, both matching how
-# the round comment is actually emitted (dispatcher-tick.sh Step 5b via
-# itp_post_comment under the pipeline's own token ⇒ normalized authorKind=self;
-# a resumed/legacy tick posting as a [bot] is authorKind=bot — still machine):
+# ROUND-COMMENT AUTHENTICITY (review round-7 [P1], tightened round-15
+# [BLOCKING]): a bare `contains()` over the status phrase counted ANY comment
+# quoting it — a human/reviewer comment that quotes the Step-5b line ("Dev
+# process exited (no new commits since last review at `<head>`)…") inflated
+# the round count and could trip the breaker early on a still-converging
+# issue. Two filters restore authenticity, both matching how the round
+# comment is actually emitted (dispatcher-tick.sh Step 5b via itp_post_comment
+# under the pipeline's own token ⇒ normalized authorKind=self; a
+# resumed/legacy tick posting as a [bot] is authorKind=bot — still machine):
 #   1. `authorKind != "human"` — spec §3.3 [M5] discriminator; a human quoting
-#      the line is excluded regardless of wording.
-#   2. `startswith("Dev process exited (…")` — the round comment BEGINS with the
-#      sentence; a quote embedded mid-comment (reply context, code fence) fails
-#      the anchor even when machine-authored.
+#      the line is excluded when BOT_LOGIN is set (`$strict_author != "0"`).
+#      GATED off (accepted unconditionally) when BOT_LOGIN is empty — the
+#      call site's PERMANENT reality — because the provider then cannot
+#      derive `self` and the dispatcher's OWN genuine comments also
+#      normalize to `human`; see below for why this residual gap is now
+#      closed by filter 2 alone.
+#   2. **round-15 [BLOCKING]**: exact body EQUALITY against the full literal
+#      dispatcher-tick.sh Step 5b emits — not merely `startswith`. The prior
+#      `startswith` anchor authenticated any comment BEGINNING with the exact
+#      sentence, including a human's genuine quote-plus-commentary ("Dev
+#      process exited (no new commits since last review at `<head>`).
+#      Moving to pending-dev for retry. Actually I disagree, let's discuss.")
+#      — that forgery inflated the round count toward tripping the breaker on
+#      fewer than the required N genuine rounds, especially exploitable
+#      because filter 1 is UNCONDITIONALLY dropped when BOT_LOGIN is empty
+#      (the dispatcher's own comments need it dropped to be genuine rounds at
+#      all — see round-13's identical rationale on the preceding-verdict
+#      side). The round comment's ENTIRE body is this one fixed sentence
+#      (dispatcher-tick.sh:671 — no free-text suffix, no per-round variation
+#      beyond `<head>`), so equality is the correct, tighter anchor: it
+#      authenticates the genuine comment exactly and rejects ANY quote with
+#      so much as one extra trailing character, closing the gap `startswith`
+#      left open without needing an actor signal that does not exist here.
 #
 # PRECEDING-VERDICT AUTHENTICITY (review round-11 [P1] BLOCKING, corrected
 # round-13 [BLOCKING]): the ROUND comment was authenticated (above), but the
@@ -1376,7 +1396,7 @@ _frozen_convergence_rounds_json() {
     ( [ .[] | select(.body | type == "string") ] | sort_by(.createdAt) ) as $all
     | [ $all[]
         | select(($strict_author == "0") or (.authorKind != "human"))
-        | select(.body | startswith("Dev process exited (no new commits since last review at `" + $head + "`)"))
+        | select(.body == "Dev process exited (no new commits since last review at `" + $head + "`). Moving to pending-dev for retry.")
         | . as $round
         | ( [ $all[] | select((.createdAt < $round.createdAt) and authentic_verdict(.) and (canon(.body) != null)) ]
             | last ) as $pv
@@ -1411,8 +1431,7 @@ count_frozen_convergence_rounds() {
 # `classify_recent_review_verdict`'s actor-predicate + strict-`>` timestamp
 # selection (spec §3.3: `author` is the login string incl `[bot]`), but returns
 # the raw body rather than parsing the trailer. Best-effort: an empty/error fetch
-# or missing actor signal yields empty (the report omits the excerpt gracefully)
-# — never aborts the tick.
+# yields empty (the report omits the excerpt gracefully) — never aborts the tick.
 #
 # EXCLUDES two wrapper-metadata comment shapes the normal review-round posting
 # sequence appends AFTER the agent's own findings comment (same bot actor, later
@@ -1428,6 +1447,34 @@ count_frozen_convergence_rounds() {
 # Both are recognized structurally (body starts with the exact literal), not by
 # a magic marker, so a real findings comment that merely mentions "Reviewed
 # HEAD" or a verdict trailer mid-body is never excluded.
+#
+# BINDING (round-15 [BLOCKING], corrects a THIRD occurrence of the round-13
+# BOT_LOGIN-empty class of bug): the pre-fix code returned empty outright
+# when neither `BOT_LOGIN` nor `FALLBACK_SESSION_ID` was set — but exactly
+# like `_frozen_convergence_rounds_json`'s preceding-verdict join (round-13),
+# `BOT_LOGIN` is NEVER set in the dispatcher's own process (only inside
+# `autonomous-review.sh`'s SEPARATE process) and `FALLBACK_SESSION_ID` is
+# never assigned anywhere in this codebase — so this call site ALWAYS took
+# the empty branch, meaning the convergence report's evidence excerpt was
+# permanently "(verdict body unavailable...)" in every real deployment.
+# (Reproduced: with BOT_LOGIN/FALLBACK_SESSION_ID both unset and a genuine
+# `Review findings:` comment present after session_end, the pre-fix function
+# returned nothing.)
+#
+# Fix: when NEITHER actor signal is available, fall back to the SAME kind of
+# structural anchor round-13/14 introduced for the preceding-verdict join — a
+# genuine review-wrapper verdict/findings comment always STARTS WITH the
+# literal `Review findings:` or `Review PASSED` (the canonical first-line
+# prefix `post-verdict.sh`'s COMPOSED body and `lib-review-artifact.sh`'s
+# artifact-verdict body always carry; `_classify_verdict_body` keys off the
+# same prefixes). This is author-independent, so it authenticates correctly
+# with no actor signal at all — the same posture the round-comment and
+# preceding-verdict checks already take at this call site. This is a
+# best-effort EVIDENCE excerpt (never gates the breaker's trip decision, only
+# quotes text into the human-readable report), so the residual exposure to a
+# human posting a comment that happens to start with the exact same literal
+# is accepted here too, mirroring the already-documented residual elsewhere
+# in this function.
 recent_review_verdict_body() {
   local issue_num="$1"
   local session_end="$2"
@@ -1437,7 +1484,7 @@ recent_review_verdict_body() {
   elif [ -n "${FALLBACK_SESSION_ID:-}" ]; then
     actor_predicate="(.body | test(\"Review Session.*${FALLBACK_SESSION_ID}\"))"
   else
-    return 0
+    actor_predicate='((.body | startswith("Review findings:")) or (.body | startswith("Review PASSED")))'
   fi
   local exclude_predicate='((.body | startswith("Reviewed HEAD:")) or (.body | startswith("<!-- review-verdict:"))) | not'
   itp_list_comments "$issue_num" 2>/dev/null \

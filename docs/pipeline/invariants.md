@@ -5666,17 +5666,28 @@ zero-commit round and embeds the frozen head. #297 writes NO per-round breadcrum
 of its own — a new per-round write on a NON-trip round would reintroduce an
 orphan-artifact TOCTOU. `_frozen_convergence_rounds_json` scans the already-emitted
 comments, filtered to `head == current_head` (rounds since the head last advanced).
-A round comment is recognized ONLY when it is **authentic** (round-7 review [P1]:
-a human/reviewer comment QUOTING the Step-5b status line must not count): the
-comment's normalized `authorKind != "human"` (spec §3.3 [M5] — the dispatcher
-posts the round comment via `itp_post_comment` under the pipeline's own token;
-the author filter is GATED on `BOT_LOGIN` being set — with it EMPTY (the
-GH_AUTH_MODE=token topology, where the provider cannot derive `self` and
-normalizes the dispatcher's own comments to `human`) the filter is dropped and
-the `startswith` anchor alone applies, so genuine rounds are never excluded)
-AND the body `startswith("Dev process exited (no new commits since last review
-at \`<head>\`)")` — a quote embedded mid-comment fails the anchor even when
-machine-authored. Each authentic round is then **joined to the review VERDICT it
+A round comment is recognized ONLY when it is **authentic** (round-7 review [P1],
+tightened round-15 [BLOCKING]: a human/reviewer comment QUOTING the Step-5b
+status line must not count): the comment's normalized `authorKind != "human"`
+(spec §3.3 [M5] — the dispatcher posts the round comment via `itp_post_comment`
+under the pipeline's own token; the author filter is GATED on `BOT_LOGIN` being
+set — with it EMPTY (the PERMANENT topology at this call site, not a rare edge
+case — `BOT_LOGIN` is never set in the dispatcher's own process in ANY
+`GH_AUTH_MODE`, since the provider cannot derive `self` and normalizes the
+dispatcher's own comments to `human`) the filter is dropped so genuine rounds
+are never excluded) AND the body is EXACTLY EQUAL to the fixed
+`"Dev process exited (no new commits since last review at \`<head>\`). Moving
+to pending-dev for retry."` literal `dispatcher-tick.sh` Step 5b emits — **not
+merely `startswith`** (round-15 [BLOCKING]: the prior `startswith` anchor
+authenticated any comment BEGINNING with the exact sentence, including a
+human's genuine quote with commentary appended after it; since the author
+filter is UNCONDITIONALLY dropped in this topology, `startswith` alone was the
+entire gate, and such a forgery could inflate the round count toward tripping
+the breaker on fewer than the required N genuine rounds. The round comment's
+ENTIRE body is this one fixed sentence with no free-text suffix, so exact
+equality is the correct, tighter anchor — it authenticates the genuine comment
+exactly and rejects any quote with even one extra trailing character, with no
+actor signal required). Each authentic round is then **joined to the review VERDICT it
 was reacting to** — the newest **AUTHENTICATED** `<!-- review-verdict: … -->`
 trailer comment strictly BEFORE the round comment — counting the round **only
 when that verdict's canonical `{verdict}|{cause}|{dev-actionable}` equals the
@@ -5837,7 +5848,16 @@ being terminal (Step 2 `scan-new` only dispatches `autonomous`-only issues), not
 by removing `autonomous`. Only AFTER the transition has landed does the breaker
 post ONE structured `reason=non-convergence` report carrying the PR ref + frozen
 head SHA + the round count + the verbatim repeated finding
-(`recent_review_verdict_body`) + the `cause=`/`dev-actionable` hint + a
+(`recent_review_verdict_body` — round-15 [BLOCKING]: this helper returned
+EMPTY unconditionally whenever neither `BOT_LOGIN` nor `FALLBACK_SESSION_ID`
+was set, which — like the preceding-verdict join above — is the PERMANENT
+reality in the dispatcher's own process, so the evidence excerpt was
+"(verdict body unavailable...)" in every real deployment. Fixed by adding a
+structural fallback: a genuine review-wrapper verdict/findings comment always
+STARTS WITH the literal `Review findings:` or `Review PASSED` — the canonical
+first-line prefix `post-verdict.sh` and `lib-review-artifact.sh` always emit
+— so this is checked, author-independent, when no actor signal is available)
++ the `cause=`/`dev-actionable` hint + a
 human-action checklist + the explicit "**To resume: fix per the checklist, then
 REMOVE the `stalled` label (`autonomous` is retained; removal re-arms via Step 2
 and resets the retry counter, INV-05).**" instruction + the idempotency marker
@@ -5914,7 +5934,12 @@ trips end-to-end, CB-COUNT-009n the round-11 prose-prefixed-quote rejection stil
 holds under the same topology; round-14 [Critical]: CB-COUNT-009o a forged
 trailer with content TRAILING the genuine trailer text is rejected by the
 end-anchored match (the bare `startswith` round-13 first shipped would have
-accepted it)); the trip (CB-TRIP-001: ≥3 frozen
+accepted it); round-15 [BLOCKING]: CB-COUNT-009p a verbatim round-line quote
+with a leading `> ` prefix is still rejected, CB-COUNT-009q the exact forgery
+shape the finding described — a verbatim round-line quote with NO leading
+prose and commentary APPENDED after it (the shape that DID pass the pre-fix
+`startswith` round-comment anchor) is rejected by the round-15 exact-equality
+tightening); the trip (CB-TRIP-001: ≥3 frozen
 + `dev-actionable=true` + eligible → ONE report + marker + `pending-dev → stalled`,
 NO `mark_stalled`, NO dev-new, log intact); the report content (CB-REPORT-008: PR
 ref + frozen SHA + resume instruction + count + verbatim finding + the **per-round
@@ -5928,7 +5953,16 @@ the marker — with BOT_LOGIN set/empty respectively — does NOT suppress the h
 CB-IDEM-018 a genuine same-session marker still suppresses [regression guard]);
 threshold override (CB-THRESH-012); the source-of-truth pins (CB-SHARED-010: both
 `mark_stalled` and the breaker call `may_stall_now`; the empty-PID→DEAD narrowing
-lives in exactly one place). `tests/unit/test-mark-stalled-liveness.sh` (extended)
+lives in exactly one place); `recent_review_verdict_body` against the REAL
+implementation, not a mock (RRVB-001..005: returns the agent's findings body
+rather than the newest trailer/Reviewed-HEAD metadata comment, excludes both
+structurally, a real findings body merely MENTIONING the excluded phrases
+mid-body is not excluded; round-15 [BLOCKING]: RRVB-006 with `BOT_LOGIN` empty
+— the permanent dispatcher-process topology, NOT exercised by RRVB-001..005,
+which all run under the file-global `BOT_LOGIN` export — the genuine findings
+body is still returned via the structural `Review findings:`/`Review PASSED`
+fallback, RRVB-007 a human comment merely mentioning the prefix mid-sentence is
+still rejected [regression guard]). `tests/unit/test-mark-stalled-liveness.sh` (extended)
 — `may_stall_now` predicate (TC-MSL-011..013: alive→DEFER side-effect-free,
 absent→ELIGIBLE, remote-indeterminate ALIVE-bias without `--at-cap` / DEAD with),
 and the UNCHANGED TC-MSL-001..010 that pin `mark_stalled`'s deferral-comment

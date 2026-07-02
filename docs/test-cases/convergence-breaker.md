@@ -37,15 +37,20 @@ CI parity.
 | CB-COUNT-009m | Same token-mode topology, end-to-end | The breaker actually TRIPS (`label_swap pending-dev → stalled` + report) — round-13 [BLOCKING] |
 | CB-COUNT-009n | Same token-mode topology, but the human quote has PROSE before the trailer | Still rejected (0) — regression guard: round-11's anti-spoofing protection still holds under round-13's fix |
 | CB-COUNT-009o | BOT_LOGIN empty + a forged comment pastes the genuine trailer text and appends MORE content AFTER it | Still rejected (0) — round-14 [Critical]: the bare `startswith` round-13 first shipped would have accepted this; the end-anchored (`^...$`) match closes it |
+| CB-COUNT-009p | BOT_LOGIN empty + a human quote of the EXACT round-comment status line with a leading `> ` prefix | Still rejected (2 genuine rounds, not 3) — round-15 [BLOCKING] regression guard |
+| CB-COUNT-009q | BOT_LOGIN empty + a human quote that STARTS with the EXACT round-comment status line (no leading prose) and appends commentary AFTER it | Still rejected (2 genuine rounds, not 3) — round-15 [BLOCKING]: this is the exact forgery shape the finding described; the pre-fix `startswith` anchor would have accepted it |
 | CB-SHARED-010 | Source-of-truth | `mark_stalled` and the breaker both call `may_stall_now`; the `pid_alive` liveness block is NOT duplicated |
 | CB-DUAL-011 | Trip terminal comment count | Exactly ONE terminal comment (the #297 report); NO `mark_stalled` "@owner retry exhausted" dual-post |
 | CB-THRESH-012 | `CONVERGENCE_STALL_THRESHOLD` override honored | With threshold=4, 3 frozen rounds do NOT trip; 4 do |
 | MSL-CHAR-011 | `may_stall_now` factoring characterization (in `test-mark-stalled-liveness.sh`) | `mark_stalled` still defers (posts `INV-26-stall-deferral` comment, no stall label) on a live wrapper; still stalls on dead/absent PID — byte-identical to pre-factoring |
+| RRVB-001..005 | `recent_review_verdict_body` against the REAL implementation (not a mock), `BOT_LOGIN` SET | Returns the agent's findings body, not the newest trailer/Reviewed-HEAD metadata comment (both excluded structurally, not by substring) |
+| RRVB-006 | `recent_review_verdict_body`, `BOT_LOGIN` empty AND `FALLBACK_SESSION_ID` empty — the REAL, permanent dispatcher-process topology, not exercised by RRVB-001..005 | Genuine findings body still returned via the structural `Review findings:`/`Review PASSED` fallback — round-15 [BLOCKING]: pre-fix this call site returned empty unconditionally |
+| RRVB-007 | Same topology, a human comment merely MENTIONS the `Review findings:` prefix mid-sentence | Rejected (empty) — regression guard: the structural fallback is not authorship-gated, so it relies entirely on the startswith anchor |
 
 ## Acceptance criteria coverage
 
-- **AC1** (detect non-convergence + halt): CB-TRIP-001, CB-COUNT-009a/b/c/h/i/j/k/l/m/n/o, CB-THRESH-012.
-- **AC2** (single structured report with reason + SHA + repeated findings + human checklist): CB-REPORT-008, CB-DUAL-011.
+- **AC1** (detect non-convergence + halt): CB-TRIP-001, CB-COUNT-009a/b/c/h/i/j/k/l/m/n/o/p/q, CB-THRESH-012.
+- **AC2** (single structured report with reason + SHA + repeated findings + human checklist): CB-REPORT-008, CB-DUAL-011, RRVB-001..007.
 - **AC3** (converging loops unaffected + idempotent): CB-MISS-002, CB-MISS-003, CB-IDEM-006, CB-IDEM-007, CB-IDEM-015/016/017/018.
 - **AC4** (docs updated: dispatcher-flow + INV-105): enforced by the pipeline-docs-gate + TC-SPEC-GATE-040/041 (heading-adjacent triage tag).
 - **#298 precedence**: CB-PRECEDENCE-004.

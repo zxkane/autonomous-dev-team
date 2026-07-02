@@ -79,10 +79,31 @@ dispatcher-crashes and is moved by `dev-actionable=false` rounds).
 Reset: the count naturally resets when the head advances (the comment filter is
 `head == current_head`) OR when the trailer-hash changes (see secondary gate).
 
+### Round-comment authenticity (round-7 [P1], tightened round-15 [BLOCKING])
+
+A bare `contains()` over the status phrase would count ANY comment quoting it
+— a human/reviewer comment quoting the Step-5b line inflated the round count
+and could trip the breaker early on a still-converging issue. Two filters
+restore authenticity: `authorKind != "human"` (gated on `BOT_LOGIN` being
+set — DROPPED when empty, since that is the PERMANENT topology in the
+dispatcher's own process, and the dispatcher's own genuine comments then also
+normalize to `human`) AND — **round-15 [BLOCKING]** — the body EXACTLY EQUALS
+the fixed literal `dispatcher-tick.sh` Step 5b emits, not merely `startswith`.
+The prior `startswith` anchor authenticated any comment merely BEGINNING with
+the exact sentence, including a human's genuine quote with commentary
+appended after it ("Dev process exited (no new commits since last review at
+`<head>`). Moving to pending-dev for retry. Actually I think we should keep
+trying.") — since the author filter is unconditionally dropped in this
+topology, `startswith` alone was the entire gate, so this forgery could
+inflate the round count toward tripping the breaker on fewer than the
+required N genuine rounds. The round comment's ENTIRE body is this one fixed
+sentence with no free-text suffix, so exact equality is the correct, tighter
+anchor — it needs no actor signal and rejects any quote with even one extra
+trailing character.
+
 ### Preceding-verdict authenticity (round-11 [BLOCKING] [P1], corrected round-13 [BLOCKING] [P1], tightened round-14 [Critical])
 
-The round comment is authenticated (round-7 — `authorKind != "human"` +
-`startswith`, see the implementation), but the CANDIDATE VERDICT it is joined
+The round comment is authenticated (above), but the CANDIDATE VERDICT it is joined
 against was not: `_frozen_convergence_rounds_json` picked the newest PRIOR
 comment whose body merely contained a `<!-- review-verdict: … -->`-shaped
 string, regardless of who posted it. A maintainer/reviewer comment quoting a
