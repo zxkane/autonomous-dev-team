@@ -193,11 +193,6 @@
     },
     {
       "count": 1,
-      "file": "lib-review-bots.sh",
-      "content": "count=$(gh api \"repos/${repo}/pulls/${pr_number}/reviews\" --paginate \\"
-    },
-    {
-      "count": 1,
       "file": "lib-review-e2e.sh",
       "content": "_body=$(gh api \"repos/${REPO_OWNER}/${REPO_NAME}/issues/comments/${_comment_id}\" \\"
     },

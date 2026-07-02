@@ -608,8 +608,10 @@ When scoping is armed ([INV-79](invariants.md#inv-79-in-app-mode-the-agent-proce
 ```
 if PASSED_VERDICT == true:           # PR-open guard already passed; mergeable gate runs AFTER this
   MISSING_BOTS = missing_bot_reviews "$REVIEW_BOTS_VALIDATED" "$PR_NUMBER" "$REPO"
-                 # short-names of configured bots with NO review on the PR;
-                 # a gh failure counts a bot MISSING — fail-closed (lib-review-bots.sh)
+                 # short-names of configured bots with NO review on the PR; each
+                 # bot's review count routes through chp_count_reviews_by_login
+                 # (INV-94) — ANY failure counts a bot MISSING — fail-closed
+                 # (lib-review-bots.sh; the -eq 0 MISSING decision stays caller-side)
   if MISSING_BOTS non-empty:
     _wait_marker = "<!-- bot-review-wait sha=\"$PR_HEAD_SHA\" -->"
     _wait_count  = count of prior bot-review-wait markers for THIS HEAD sha
@@ -630,7 +632,7 @@ if PASSED_VERDICT == true:           # PR-open guard already passed; mergeable g
 
 - **Why `pending-review`, not `pending-dev`, on the wait branch.** There is no new commit for a dev agent to make — the code is fine, the wrapper is just waiting for an *external* bot. Routing to `pending-dev` would strand the issue: the [#106 stale-verdict dispatcher guard](state-machine.md) keeps `pending-dev` + open-PR + no-new-commits parked. `pending-review` re-queues a clean re-review on the next tick, by which time `drain_agent_bot_triggers` has fired and the bot's review is present. This is the only `reviewing → pending-review` producer in the wrapper.
 - **Bounded.** The `<!-- bot-review-wait sha="…" -->` marker is SHA-bound, so a force-push (new HEAD) resets the count; on a stable HEAD the wait is capped at `BOT_REVIEW_WAIT_MAX` (3) before escalating to a substantive FAIL → `pending-dev`, on the assumption the bot is misconfigured/down and a maintainer should look. The marker is read by counting prior markers for the current HEAD SHA, so it cannot loop indefinitely.
-- **Fail-closed.** `missing_bot_reviews` treats a failed `gh api .../reviews` call as "bot MISSING" (it never silently passes a bot whose review state it could not confirm). An empty `REVIEW_BOTS` makes the gate a no-op (nothing to wait for) — it only fires for *configured* bots.
+- **Fail-closed ([INV-94](invariants.md#inv-94-the-inv-79-bot-review-hard-gate-counts-a-bots-pr-reviews-through-chp_count_reviews_by_login--on-any-gh-failure-non-zero-exit-incl-partial-pagination-leafshim-absent-encode-error--count-0--bot-missing--block-the-pass-fail-safe-never-lets-an-unreviewed-pr-pass-the---paginate-all-pages-sum-is-part-of-the-contract-and-the-leaf-checks-the-reads-exit-before-summing)).** `missing_bot_reviews` counts each bot's PR reviews through the CHP verb `chp_count_reviews_by_login` (GitHub leaf `chp_github_count_reviews_by_login`, #324): the `--paginate` all-pages `--jq '|length'` + `awk` sum moves behind the leaf, while the `^[0-9]+$` validation + the `-eq 0` MISSING decision stay caller-side. The leaf is fail-SAFE on ANY failure (returns `0` → bot MISSING) — and CAPTURES the read's output + CHECKS its exit BEFORE summing, closing a latent partial-pagination fail-open (a stream that emitted page-1's length then errored used to be summed → false PRESENT → an unreviewed PR could PASS). LOGIN is JSON-encoded into the `--jq` literal (injection-safe); REPO is threaded as an explicit param. An empty `REVIEW_BOTS` makes the gate a no-op (nothing to wait for) — it only fires for *configured* bots.
 - **Unscoped / PAT mode — gate is SKIPPED.** The whole gate is guarded by `[[ -n "${AGENT_GH_TOKEN_FILE:-}" ]]` (scoped mode only). When scoping is NOT armed the agent posts the bot triggers directly (in-run) via `gh-as-user.sh` and polls for the bot review *during* the run, so its OWN verdict already covers a missing bot review — there is nothing for the wrapper to wait on, and `missing_bot_reviews` does not run. The wrapper-owned wait exists solely because the scoped scrub defers the trigger to cleanup (post-verdict).
 - **Skipped on FAIL.** The gate lives inside the `PASSED_VERDICT == true` chain only — a FAIL/block verdict never reaches it (the dev side will produce a new HEAD anyway, re-arming bot review).
 

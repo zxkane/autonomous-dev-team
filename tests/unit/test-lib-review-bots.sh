@@ -16,12 +16,19 @@ PASS=0
 FAIL=0
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-LIB="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-review-bots.sh"
+SCRIPTS_DIR="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts"
+LIB="$SCRIPTS_DIR/lib-review-bots.sh"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 NC='\033[0m'
 
+# lib-review-bots.sh calls chp_count_reviews_by_login ([INV-94], #324) — source the
+# CHP seam first so the shim is defined (this file doesn't exercise
+# missing_bot_reviews, but sourcing the seam keeps it future-proof + satisfies the
+# seam-source meta-check, test-seam-source-meta.sh).
+# shellcheck source=../../skills/autonomous-dispatcher/scripts/lib-code-host.sh
+source "$SCRIPTS_DIR/lib-code-host.sh"
 # shellcheck source=../../skills/autonomous-dispatcher/scripts/lib-review-bots.sh
 source "$LIB"
 

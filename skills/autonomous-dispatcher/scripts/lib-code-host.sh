@@ -171,6 +171,16 @@ chp_list_inline_comments() {
   chp_${CODE_HOST}_list_inline_comments "$@"
 }
 
+# chp_count_reviews_by_login REPO PR LOGIN — focused verb behind the [INV-79]
+# wrapper bot-review hard-gate ([INV-94], #324). Forwards "$@" to the leaf via the
+# BARE chp_${CODE_HOST}_ prefix — byte-for-byte the named-verb shim shape — so the
+# caller's leaf-guard (declare -F chp_${CODE_HOST}_count_reviews_by_login) is the
+# EXACT same expression the shim dispatches (a `:-github` guard against this bare
+# shim would diverge when CODE_HOST is unset → the shim calls chp__… → abort under
+# set -e). The leaf returns the summed integer; the caller keeps the `^[0-9]+$`
+# validation + the `-eq 0` MISSING decision (lib-review-bots.sh::missing_bot_reviews).
+chp_count_reviews_by_login() { chp_${CODE_HOST}_count_reviews_by_login "$@"; }
+
 # chp_has_leaf <verb> — returns 0 iff the ENABLED provider actually defines the
 # leaf `chp_${CODE_HOST}_<verb>` (e.g. `chp_has_leaf close_keyword`).
 #
