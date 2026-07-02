@@ -33,7 +33,9 @@ Tests live in `tests/unit/test-reply-review-comment.sh`. Run the full suite unde
 | `TC-RRC-030` | grep `reply-to-comments.sh` for raw `gh api …pulls/…/comments` | count == 0 |
 | `TC-RRC-031` | `reply-to-comments.sh` calls `chp_reply_review_comment` | present |
 | `TC-RRC-032` | `lib-code-host.sh` defines the `chp_reply_review_comment` shim; `providers/chp-github.sh` defines `chp_github_reply_review_comment` | both present |
-| `TC-RRC-033` | `cutover-baseline.json` no longer carries the `reply-to-comments.sh` POST signature; total occurrences == prior − 1 (72 → 71), signatures 66 → 65 | baseline shrunk by exactly the migrated wire-string |
+| `TC-RRC-033a` | `cutover-baseline.json` no longer carries any `reply-to-comments.sh` POST signature | migration-robust: zero `reply-to-comments.sh` survivors |
+| ~~`TC-RRC-033b`~~ | ~~cutover baseline total occurrences == \<absolute\>~~ | **REMOVED (#342)** — absolute totals move with every sibling #296 migration that shrinks the baseline, sending unrelated in-flight PRs red. No unique coverage: tree↔baseline reconciliation is Check 1 of `check-provider-cutover.sh` and shrink-only monotonicity is Check 4 (`--require-trusted-ref`), both strict in the CI `spec-drift` job. |
+| ~~`TC-RRC-033c`~~ | ~~cutover baseline distinct signatures == \<absolute\>~~ | **REMOVED (#342)** — same rationale as 033b. Absolute baseline totals MUST NOT be pinned in per-migration tests. |
 
 ## Spec / invariant (AC4)
 

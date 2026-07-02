@@ -225,21 +225,22 @@ assert_contains "TC-RRC-032b providers/chp-github.sh defines chp_github_reply_re
   "chp_github_reply_review_comment()" "$(cat "$PROVIDERS/chp-github.sh")"
 
 # TC-RRC-033 — baseline shrank: the migrated wire-string is GONE. #327 itself
-# removed reply-to-comments.sh's signature (72→71 occ, 66→65 sigs at that time).
-# The absolute totals then dropped further as sibling #296 second-tier migrations
-# stacked onto main: #334 (auto-merge-marker read → itp_list_comments: 71→70 occ,
-# 65→64 sigs), #328 (PR inline-comment read → chp_list_inline_comments: 70→69 occ,
-# 64→63 sigs), and #343 (the #286-amendment structurally exempts the guard's own
-# ALLOWLISTED_FILES array + primary matcher + _comment template lines: 69→66 occ,
-# 63→60 sigs). The migration-robust invariant (TC-RRC-033a) is that NO
-# reply-to-comments.sh signature survives; the absolute totals below are pinned to
-# the current stacked value (66 occ / 60 sigs) and move with each sibling migration.
+# removed reply-to-comments.sh's signature. Only the migration-ROBUST invariant is
+# pinned here: NO reply-to-comments.sh signature survives in the cutover baseline.
+#
+# The absolute baseline TOTALS (total occurrences / distinct signatures) are
+# DELIBERATELY NOT pinned in this per-migration test (#342). Absolute totals move
+# with EVERY sibling #296 second-tier migration that shrinks the baseline (#334,
+# #328, #343 each dropped them, and #343 was the last PR forced to re-pin the
+# absolute numbers here before #342 removed the pins entirely), so an absolute pin
+# here goes red on any concurrent shrinking PR — coverage this test does not own
+# and cannot keep current without a re-pin per sibling merge. Those totals are
+# already guarded, robustly, by check-provider-cutover.sh in the CI `spec-drift`
+# job: Check 1 reconciles the whole tree against the baseline and Check 4
+# (--require-trusted-ref, strict in CI) enforces shrink-only monotonicity vs
+# origin/main. An absolute-total assertion here would add NO unique coverage.
 mig_in_baseline=$(jq '[.surviving_sites[] | select(.file=="reply-to-comments.sh")] | length' "$BASELINE")
 assert_eq "TC-RRC-033a no reply-to-comments.sh signature remains in the cutover baseline" "0" "$mig_in_baseline"
-total_occ=$(jq '[.surviving_sites[].count] | add' "$BASELINE")
-assert_eq "TC-RRC-033b cutover baseline total occurrences == 66 (#327 71, then #334 −1, #328 −1, #343 −3)" "66" "$total_occ"
-distinct_sigs=$(jq '.surviving_sites | length' "$BASELINE")
-assert_eq "TC-RRC-033c cutover baseline distinct signatures == 60 (#327 65, then #334 −1, #328 −1, #343 −3)" "60" "$distinct_sigs"
 
 # ===========================================================================
 # 5. SPEC / INVARIANT (AC4) — the new INV heading + its triage marker; spec row.

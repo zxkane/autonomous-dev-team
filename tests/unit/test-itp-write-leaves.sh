@@ -32,6 +32,14 @@ LIB="$SCRIPTS/lib-dispatch.sh"
 ITP_LIB="$SCRIPTS/lib-issue-provider.sh"
 PROVIDERS="$SCRIPTS/providers"
 E2E_LIB="$SCRIPTS/lib-review-e2e.sh"
+# [#342] The CHP seam. lib-review-e2e.sh calls chp_pr_view (in _fetch_sha_evidence)
+# but self-sources ONLY the ITP seam, so any context that sources it must supply
+# the CHP seam itself. The _stamp_browser_evidence_marker path exercised below
+# does not call chp_pr_view, so the seam is inert here — but sourcing it BEFORE
+# the lib (mirroring autonomous-review.sh's lib-code-host→lib-review-e2e order)
+# keeps this harness compliant with the seam-source meta-check (test-seam-source-meta.sh)
+# and forward-safe if a future migration routes the stamp path through a CHP verb.
+CHP_LIB="$SCRIPTS/lib-code-host.sh"
 FAKE_PROVIDER="$SCRIPT_DIR/fixtures/provider-degraded"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; NC='\033[0m'
@@ -253,6 +261,10 @@ if [[ -d "$FAKE_PROVIDER" ]]; then
       if [[ "$1" == "api" && "$2" == *"/comments" ]]; then echo "99"; return 0; fi
       return 0
     }
+    # [#342] Source the CHP seam FIRST (chp_pr_view lives here), mirroring the
+    # review wrapper order; inert for the stamp path but keeps this bash -c
+    # context seam-source-meta compliant.
+    source "'"$CHP_LIB"'"
     # Source the lib FIRST so the REAL seam (incl. itp_caps reading the degraded
     # .caps → edit_comment=0) loads; THEN override the two write verbs with stubs
     # that record into $_CAP_FILE (the call args survive the verb call'\''s
@@ -284,6 +296,7 @@ if [[ -d "$FAKE_PROVIDER" ]]; then
       if [[ "$1" == "api" && "$2" == *"/comments" ]]; then echo "99"; return 0; fi
       return 0
     }
+    source "'"$CHP_LIB"'"   # [#342] CHP seam first (see the (a) sandbox note above)
     source "'"$E2E_LIB"'"
     itp_post_comment() { printf "FRESH_POST_TAKEN\n" >> "$_CAP_FILE"; }
     itp_edit_comment() { printf "PATCH_TAKEN id=%s body<<%s>>\n" "$2" "$3" >> "$_CAP_FILE"; }
