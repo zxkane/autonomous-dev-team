@@ -76,7 +76,7 @@ sequenceDiagram
 
 ## Spawn, PID guard, auth
 
-Same pattern as the dev wrapper — see [`dev-agent-flow.md`](dev-agent-flow.md#spawn-in-dispatch-localsh) — except:
+Same pattern as the dev wrapper — see [`dev-agent-flow.md`](dev-agent-flow.md#pid-guard-acquire_pid_guard-in-lib-agentsh) — including the atomic `mkdir`-lock acquire ([INV-103](invariants.md#inv-103-acquire_pid_guard-acquires-the-per-issue-mode-start-slot-atomically--no-check-then-write-toctou-window), #360/302a: closes the TOCTOU window where two near-simultaneous review wrappers for the same issue could both pass the old check-then-write and both fan out) — except:
 
 - PID file: `${PID_DIR}/review-<N>.pid` ([INV-01](invariants.md#inv-01-pid-file-naming)) — `${PID_DIR}` resolved by `lib-config.sh::pid_dir_for_project`.
 - Auth: review-agent app mode uses `REVIEW_AGENT_APP_ID` / `REVIEW_AGENT_APP_PEM` (separate App identity from dev so reviewer comments are attributed correctly).
@@ -127,7 +127,7 @@ The wrapper exports `PR_NUMBER` and `PR_HEAD_SHA` into the lane process's enviro
 
 For the project-side contract (`E2E_COMMAND` semantics, evidence-block format, parser PR_HEAD_SHA usage), see `skills/autonomous-review/references/e2e-command-mode.md`.
 
-> **Wait/stall budgets must fit the E2E ([INV-43](invariants.md#inv-43-command-mode-e2e-review-wait-budgets-must-not-be-smaller-than-the-e2e-they-dispatched), #172).** A command-mode E2E can take far longer than the legacy 30 s verdict-poll window or the 300 s dispatcher stall window. Post-#182 the E2E runs once in the wrapper lane (not per agent), so the per-agent verdict-poll window now only spans the residual code-review verdict wait — but the operator MUST still set `REVIEW_NEAR_SUCCESS_WINDOW_SECONDS` ≥ `E2E_COMMAND_TIMEOUT_SECONDS` because the lane runs **synchronously inside the wrapper** before the fan-out, so the dispatcher's [INV-24](invariants.md#inv-24-review-wrapper-dead-detection-requires-both-pid_alive-miss-and-no-near-success-pr-signal) crash check must not SIGTERM the still-working wrapper mid-E2E. The verdict-poll budget still auto-scales (`lib-review-poll.sh::_resolve_verdict_poll_attempts`) as belt-and-suspenders. After verdict resolution the wrapper reaps any lingering fan-out agent process group AND the E2E lane's process group so neither outlives the round.
+> **Wait/stall budgets must fit the E2E ([INV-43](invariants.md#inv-43-command-mode-e2e-review-wait-budgets-must-not-be-smaller-than-the-e2e-they-dispatched), #172).** A command-mode E2E can take far longer than the legacy 30 s verdict-poll window or the 300 s dispatcher stall window. Post-#182 the E2E runs once in the wrapper lane (not per agent), so the per-agent verdict-poll window now only spans the residual code-review verdict wait — but the operator MUST still set `REVIEW_NEAR_SUCCESS_WINDOW_SECONDS` ≥ `E2E_COMMAND_TIMEOUT_SECONDS` because the lane runs **synchronously inside the wrapper** before the fan-out, so the dispatcher's [INV-24](invariants.md#inv-24-review-wrapper-dead-detection-requires-both-pid_alive-miss-and-no-near-success-pr-signal) crash check must not SIGTERM the still-working wrapper mid-E2E. The verdict-poll budget still auto-scales (`lib-review-poll.sh::_resolve_verdict_poll_attempts`) as belt-and-suspenders. After verdict resolution the wrapper reaps any lingering fan-out agent process group AND the E2E lane's process group so neither outlives the round — hardened by [INV-104](invariants.md#inv-104-the-inv-43-fan-out-reap-also-sweeps-recorded-descendants-that-re-parented-out-of-the-agents-process-group) (#360/302a) with an additional best-effort sweep for a fan-out child that re-parented out of that process group (e.g. it called `setsid` itself) via a marker env var recorded at spawn time.
 
 ## Sequential E2E lane (INV-46)
 
@@ -819,4 +819,4 @@ lines). See [`debugging.md`](debugging.md).
 - [`dispatcher-flow.md`](dispatcher-flow.md) — Step 3 is the producer side of the dispatcher → review handoff.
 - [`dev-agent-flow.md`](dev-agent-flow.md) — the consumer of the `pending-dev` label this wrapper sets on FAIL.
 - [`handoffs.md`](handoffs.md) — invariants for review → approved and review → pending-dev.
-- [`invariants.md`](invariants.md) — INV-01, INV-04, INV-05, INV-06, INV-07, INV-08 are all referenced here.
+- [`invariants.md`](invariants.md) — INV-01, INV-04, INV-05, INV-06, INV-07, INV-08, INV-43, INV-103, INV-104 are all referenced here.

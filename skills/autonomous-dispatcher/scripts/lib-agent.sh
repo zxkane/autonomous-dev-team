@@ -541,21 +541,93 @@ for _adapter in claude codex gemini kiro opencode agy; do
 done
 unset _adapter
 
-# Acquire PID guard: prevent duplicate instances for the same issue.
-# Checks for symlink attacks, running processes, then writes current PID.
+# Acquire PID guard: prevent duplicate instances for the same (issue, mode)
+# with an ATOMIC acquire (issue #360 / 302a). Checks for symlink attacks,
+# then serializes the "is a peer already running? / write my PID" check
+# behind an `mkdir` lock directory before touching pid_file — `mkdir` is
+# atomic at the kernel level (a single EEXIST-or-success syscall), so two
+# near-simultaneous callers can never both observe "no live peer" and both
+# write. This closes the pre-#360 TOCTOU window: the old check-then-write
+# read pid_file, ran `kill -0`, and only THEN wrote — two wrappers dispatched
+# 1-2s apart (a duplicate-dispatch race, see #302/#298) could both pass the
+# `kill -0` probe before either wrote, so both proceeded to fan out (the
+# #298/PR #300 duplicate-review incident this closes).
+#
+# The lock's role is scoped to the read-check-write itself (held for a few
+# syscalls), NOT the wrapper's lifetime — the lock directory is always
+# removed before this function returns, win or lose. R1 hard constraint:
+# the PID file's read-side semantics (path, content = winner's PID) are
+# UNCHANGED — pid_alive (lib-dispatch.sh) and liveness-check-remote-aws-ssm.sh
+# keep reading the exact same file. The atomicity lives entirely in HOW the
+# file is written (lock dir guarding the write), not in a new file format.
+#
+# R2: the loser of the acquire exits 0 (not an error), logs exactly one
+# line, writes nothing, and (since this returns before the caller's
+# fan-out/spawn logic ever runs) fans out nothing.
+#
 # Args: $1=pid_file, $2=label (e.g. "autonomous-dev"), $3=issue_number
 acquire_pid_guard() {
   local pid_file="$1" label="$2" issue_num="$3"
   [[ -L "$pid_file" ]] && { echo "Error: PID file is a symlink — possible attack" >&2; exit 1; }
+
+  local lock_dir="${pid_file}.lockdir"
+  local max_wait_ms="${ACQUIRE_PID_GUARD_LOCK_WAIT_MS:-2000}"
+  local stale_after_s="${ACQUIRE_PID_GUARD_LOCK_STALE_SECONDS:-60}"
+  local waited_ms=0
+
+  while ! mkdir "$lock_dir" 2>/dev/null; do
+    # Stale-lock defense: the lock is held only for the few syscalls between
+    # here and the matching rmdir below (microseconds in practice), so a
+    # lock dir older than stale_after_s means its owner crashed mid-hold
+    # (e.g. killed -9) rather than legitimately contending. Reclaim it so a
+    # single crashed acquirer can't wedge every future dispatch for this
+    # (issue, mode) forever.
+    local _lock_age
+    _lock_age=$(_lock_dir_age_seconds "$lock_dir")
+    if [[ -n "$_lock_age" ]] && [[ "$_lock_age" -ge "$stale_after_s" ]]; then
+      echo "[$label] Reclaiming stale start lock for issue #${issue_num} (age ${_lock_age}s >= ${stale_after_s}s)." >&2
+      rmdir "$lock_dir" 2>/dev/null || true
+      continue
+    fi
+    if [[ "$waited_ms" -ge "$max_wait_ms" ]]; then
+      echo "[$label] Another instance for issue #${issue_num} is already starting (start lock held). Exiting." >&2
+      exit 0
+    fi
+    sleep 0.02
+    waited_ms=$((waited_ms + 20))
+  done
+
+  # Lock held from here to the end of this function. Every exit path below
+  # explicitly rmdir's it first — `exit` does not run a RETURN trap, so we
+  # cannot rely on one.
   if [[ -f "$pid_file" ]]; then
     local existing_pid
     existing_pid=$(cat "$pid_file" 2>/dev/null)
     if [[ -n "$existing_pid" ]] && kill -0 "$existing_pid" 2>/dev/null; then
+      rmdir "$lock_dir" 2>/dev/null || true
       echo "[$label] Another instance for issue #${issue_num} is already running (PID $existing_pid). Exiting." >&2
       exit 0
     fi
   fi
+  # Test-only hook (issue #360 regression coverage): widen the window between
+  # the liveness check above and the write below so a concurrent-acquire test
+  # can assert the lock — not scheduling luck — is what prevents a double
+  # write. No-op (unset) in every real dispatch.
+  [[ -n "${_ACQUIRE_PID_GUARD_TEST_DELAY_SECONDS:-}" ]] && sleep "$_ACQUIRE_PID_GUARD_TEST_DELAY_SECONDS"
   echo $$ > "$pid_file"
+  rmdir "$lock_dir" 2>/dev/null || true
+}
+
+# _lock_dir_age_seconds <dir> — echo the age in seconds of <dir>'s mtime, or
+# empty if it no longer exists (raced away between the failed mkdir and this
+# check) or `stat` is unavailable. Pure helper for acquire_pid_guard's
+# stale-lock reclamation; kept separate so it's independently testable.
+_lock_dir_age_seconds() {
+  local dir="$1" mtime now
+  mtime=$(stat -c %Y "$dir" 2>/dev/null) || return 0
+  [[ -n "$mtime" ]] || return 0
+  now=$(date -u +%s)
+  echo "$((now - mtime))"
 }
 
 # Run agent with a new session.

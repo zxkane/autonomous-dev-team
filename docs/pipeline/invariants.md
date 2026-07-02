@@ -5342,6 +5342,167 @@ INV-91 Migration-log bullet (Spec Drift surface).
 - [INV-91](#inv-91-the-provider-neutral-caller-layer-routes-all-host-io-through-itp_chp_-verbs--a-new-raw-gh-outside-providers-is-a-ci-failing-cutover-regression-baseline-anchored) — the cutover guard whose baseline this migration shrinks by 5 signatures / 7 occurrences.
 - [`provider-spec.md`](provider-spec.md) §3.2 caller-guard convention prose + the mapping appendix `chp_pr_comment` row.
 
+## INV-103: `acquire_pid_guard` acquires the per-(issue, mode) start slot atomically — no check-then-write TOCTOU window
+
+_Triage (issue #236): [machine-checked: tests/unit/test-pid-guard-atomic.sh]_
+
+**Rule**: `acquire_pid_guard` (`lib-agent.sh`) MUST decide "is a peer already
+running? / do I get to start?" as a single atomic operation with respect to
+every other concurrent caller against the SAME PID file path — never as a
+separate read-then-probe followed by a separate write. The atomicity is
+provided by an `mkdir`-based lock directory (`${pid_file}.lockdir`): `mkdir`
+either succeeds or fails with `EEXIST` in one kernel call, so two callers
+racing on the same path can never both observe "lock free." Whichever caller
+wins the `mkdir` holds the lock for the few syscalls it takes to read the
+existing PID (if any), `kill -0`-probe it, and write `$$` — then immediately
+`rmdir`s the lock. A losing caller retries briefly (`ACQUIRE_PID_GUARD_LOCK_WAIT_MS`,
+default 2000 ms, polling every 20 ms), reclaims the lock if it is older than
+`ACQUIRE_PID_GUARD_LOCK_STALE_SECONDS` (default 60 s — evidence the prior
+holder crashed mid-hold rather than legitimately contending, since a live
+hold never takes anywhere close to 60 s), and otherwise exits **0** (not an
+error) after logging exactly one line, having written nothing and having
+never reached the caller's fan-out/spawn logic.
+
+**R1 hard constraint — read-side semantics are BYTE-IDENTICAL.** The
+atomicity lives entirely in *how* the file is written (a lock dir guarding
+the read-check-write), never in a new file format or path. `pid_alive`
+([INV-30](#inv-30-pid_alive-is-authoritative-under-all-execution-backends),
+`lib-dispatch.sh`) and `liveness-check-remote-aws-ssm.sh` (the remote-backend
+probe INV-30 delegates to) keep reading the exact same `${PID_DIR}/{issue,review}-<N>.pid`
+path ([INV-01](#inv-01-pid-file-naming)) with the exact same content contract
+(the winner's PID, numeric, `kill -0`-able) — neither consumer changed a
+single line for this fix, and neither needs to know a lock dir briefly
+existed alongside the PID file during acquisition.
+
+**Why**: the pre-#360 check-then-write read `pid_file`, ran `kill -0` on any
+existing PID, and only THEN wrote `$$` — three separate operations with two
+gaps a second caller could land in. Two wrappers dispatched 1-2s apart for the
+same (issue, mode) — the controller-side duplicate-dispatch race tracked
+separately as 302b — could both pass the `kill -0` probe (neither had written
+yet) and both proceed to fan out. Observed on #298 / PR #300 (2026-06-29): two
+review run-dirs were created ~2s apart, both wrappers passed the PID guard,
+and the duplicate run's codex child survived the INV-43 reap (see
+[INV-104](#inv-104-the-inv-43-fan-out-reap-also-sweeps-recorded-descendants-that-re-parented-out-of-the-agents-process-group))
+to post stale findings after the primary run's PASS→merge. This invariant
+closes the wrapper-host half of that incident (302a); the controller-side
+duplicate-dispatch root cause is 302b's concern.
+
+**Producer**: `acquire_pid_guard` in `lib-agent.sh`, called unchanged (same
+call signature) from `autonomous-dev.sh` and `autonomous-review.sh`.
+
+**Consumer**: `pid_alive` / `get_pid` (`lib-dispatch.sh`), `liveness-check-remote-aws-ssm.sh`,
+`dispatch-local.sh::kill_stale_wrapper` — all three read the PID file this
+function writes and are unaffected by the acquire-path change (R1).
+
+**Status**: **ENFORCED** (closes #360 / 302a, R1+R2).
+
+**Test**: `tests/unit/test-pid-guard-atomic.sh` — TC-ATOMIC-000 (regression
+shape: the OLD check-then-write pattern IS racy under an injected delay,
+proving the test would have caught the pre-fix bug), TC-ATOMIC-001 (10
+concurrent `acquire_pid_guard` calls on the same path → exactly ONE winner,
+every loser exits 0 and logs exactly one line), TC-ATOMIC-001b (the fixed
+function stays single-winner even with the liveness-check-to-write window
+deliberately widened via a test-only hook — closes the exact gap
+TC-ATOMIC-000 demonstrated), TC-ATOMIC-002 (winner's PID file is readable by
+a `pid_alive`-style read: same path, numeric content), TC-ATOMIC-003 (a dead
+PID in the file still allows a fresh acquire to win — pre-existing behavior
+preserved), TC-ATOMIC-004 (symlink PID file still rejected —
+[INV-02](#inv-02-pid-file-is-not-a-symlink) unaffected), TC-ATOMIC-005
+(source-of-truth: the function body uses an atomic primitive, not a bare
+check-then-write). Existing `tests/unit/test-pid-guard.sh` and
+`tests/unit/test-pid-guard-pgid.sh` stay green unmodified (R1 back-compat).
+
+**Cross-references**:
+- [INV-01](#inv-01-pid-file-naming) — the PID file path/naming this acquire path leaves unchanged.
+- [INV-02](#inv-02-pid-file-is-not-a-symlink) — the symlink defense, unaffected by (and checked before) the lock acquire.
+- [INV-23](#inv-23-pid_file-points-at-a-process-whose-death-reaps-the-entire-agent-subtree) — the PID-content contract (session-leader PID) this fix's write path preserves byte-for-byte.
+- [INV-30](#inv-30-pid_alive-is-authoritative-under-all-execution-backends) — the read-side consumer whose contract is the R1 hard constraint.
+- [INV-104](#inv-104-the-inv-43-fan-out-reap-also-sweeps-recorded-descendants-that-re-parented-out-of-the-agents-process-group) — the sibling half of the #360/302a fix (the reap hardening) closing the same incident's second mechanism.
+- [`dev-agent-flow.md` § PID guard](dev-agent-flow.md#pid-guard-acquire_pid_guard-in-lib-agentsh) / [`review-agent-flow.md` § Spawn, PID guard, auth](review-agent-flow.md#spawn-pid-guard-auth) — runtime walkthrough.
+
+## INV-104: the INV-43 fan-out reap also sweeps recorded descendants that re-parented out of the agent's process group
+
+_Triage (issue #236): [machine-checked: tests/unit/test-reap-recorded-descendants.sh]_
+
+**Rule**: after review verdict resolution, the wrapper's reap of a
+still-running fan-out agent MUST cover two guaranteed cases, not one:
+
+1. **Process-group reap (pre-existing, [INV-43](#inv-43-command-mode-e2e-review-wait-budgets-must-not-be-smaller-than-the-e2e-they-dispatched)).**
+   `_reap_fanout_processes` (`lib-review-poll.sh`) group-kills the agent's
+   setsid PGID.
+2. **Recorded-descendant sweep (new, #360/302a).**
+   `_reap_fanout_recorded_descendants` (`lib-review-poll.sh`) additionally
+   TERM→KILLs any live process on the host whose environment carries a
+   marker env var (`ADT_FANOUT_LANE_MARKER=<agent's session id>`) exported
+   into that agent's subshell BEFORE launch. `setsid` does not clear the
+   calling process's environment, so this reaches a child that ITSELF calls
+   `setsid` (or is otherwise re-parented) and thereby escapes case 1's
+   group-kill — the exact mechanism by which the #298 / PR #300 duplicate
+   review's codex child survived the pre-#360 reap and posted `Review
+   findings:` comments after merge+close.
+
+Both calls run unconditionally at the same reap call site in
+`autonomous-review.sh`, immediately after verdict resolution; case 2 is
+strictly additive (case 1's call site and semantics are byte-for-byte
+unchanged).
+
+**Scope — honestly bounded, not "nothing survives ever."** The marker sweep
+reaches any descendant that still carries the recorded marker in its
+environment, regardless of which process group it ends up in. It does
+**not** reach a process that has dropped ALL identifying environment state
+(e.g. re-executed under `env -i`, or any mechanism that clears inherited
+exports) — that grandchild is genuinely unreachable by any env-based
+mechanism, on this host or any other. The regression test pins exactly this
+boundary: it asserts the guaranteed set (a pgid-surviving child AND a
+setsid-escaped-but-marked child) is reaped, and separately demonstrates that
+an env-stripped detached process is NOT reached — documenting the limit
+rather than silently leaving it untested.
+
+**Why**: `_reap_fanout_processes`'s PGID group-kill assumes the agent's
+descendants stay within its `setsid` session — true for the common case (an
+agent CLI whose own children are ordinary forks), false for a child that
+calls `setsid` again (some CLI wrapper scripts do this to detach a
+sub-process from controlling-terminal signals). The pre-#360 reap had no
+second mechanism to catch that escape, so a dropped/undecided agent's
+re-parented child could keep running — and posting — indefinitely past its
+review round, wasting tokens and (as observed) posting noise on an
+already-merged/closed PR.
+
+**Producer**: `autonomous-review.sh` (exports `ADT_FANOUT_LANE_MARKER` into
+each fan-out subshell before launch, calls `_reap_fanout_recorded_descendants`
+at the reap call site with `AGENT_SESSION_IDS[@]` as the marker values) +
+`lib-review-poll.sh` (`_reap_fanout_recorded_descendants`).
+
+**Consumer**: none — this is a cleanup-only side effect, like
+[INV-43](#inv-43-command-mode-e2e-review-wait-budgets-must-not-be-smaller-than-the-e2e-they-dispatched)'s
+existing reap. It does not affect verdict resolution, aggregation, or any
+label transition.
+
+**Status**: **ENFORCED** (closes #360 / 302a, R3). Scope-limited per the
+"honestly bounded" note above — a fully detached, marker-stripped
+grandchild is explicitly documented as unreachable, not silently assumed
+covered.
+
+**Test**: `tests/unit/test-reap-recorded-descendants.sh` — TC-REAP-DESC-001
+(source-of-truth: helper defined), TC-REAP-DESC-002 (empty/non-matching
+marker args are a clean no-op), TC-REAP-DESC-003 (the guaranteed set: a real
+setsid-group-leader child that stays in its pgid AND a separate setsid child
+that re-parented out of ITS leader's group but still carries the marker —
+both terminated after running the full pgid-reap + marker-sweep sequence),
+TC-REAP-DESC-004 (a fully env-stripped detached process is spawned, the sweep
+runs, and the process is confirmed to SURVIVE — the documented scope boundary,
+asserted rather than silently skipped), TC-REAP-DESC-005 (wrapper wiring:
+the marker is exported before launch, the sweep is called with
+`AGENT_SESSION_IDS[@]`, and the pre-existing PGID reap call site is
+unchanged). `tests/unit/test-review-e2e-command-poll-budget.sh`'s existing
+TC-RPB-REAP-01..03 and TC-RPB-SRC-04..06d stay green unmodified (case 1 is
+untouched).
+
+**Cross-references**:
+- [INV-43](#inv-43-command-mode-e2e-review-wait-budgets-must-not-be-smaller-than-the-e2e-they-dispatched) — the pre-existing PGID reap this sweep runs alongside (case 1 above), whose "orphan reap" side-effect mitigation this hardens.
+- [INV-103](#inv-103-acquire_pid_guard-acquires-the-per-issue-mode-start-slot-atomically--no-check-then-write-toctou-window) — the sibling half of the #360/302a fix (the atomic start lock) closing the same incident's first mechanism.
+- [`review-agent-flow.md` § Fan-out reap (INV-43)](review-agent-flow.md#multi-agent-fan-out-inv-40) — runtime walkthrough of the reap call site.
+
 ## Adding a new invariant
 
 When fixing a pipeline bug, after locating the bug on the state machine + flow docs:
