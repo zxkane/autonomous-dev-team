@@ -272,9 +272,11 @@ caught by `MAX_RETRIES` (cheap).
 ## 9. Docs / INV
 
 Mint **INV-97** (INV-93/95/96 taken on main; INV-94 reserved by in-flight #324)
-— renumbered to **INV-102**, then **INV-103** (second collision, #337) on rebases after main independently claimed INV-97
-through INV-100 (and #337 claimed INV-101 in flight); see the provenance note
-under the INV-103 heading in `invariants.md`. Carry
+— renumbered to **INV-102** on a rebase after main independently claimed INV-97
+through INV-100 (and #337 claimed INV-101 in flight), then to **INV-103**
+(second collision, #337 claimed INV-102), then a THIRD time to **INV-105**
+(#365 landed first and claimed both INV-103 and INV-104); see the provenance
+note under the INV-105 heading in `invariants.md`. Carry
 the heading-adjacent `_Triage (issue #236): [machine-checked:
 tests/unit/test-convergence-breaker.sh]_` marker (TC-SPEC-GATE-040/041). Update
 `docs/pipeline/dispatcher-flow.md` (a new row + subsection in Step 4b.5.1). No

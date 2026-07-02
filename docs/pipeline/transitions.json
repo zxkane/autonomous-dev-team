@@ -369,9 +369,9 @@
       "guards": ["session-completed", "verdict-fail-substantive", "head-equals-reviewed", "convergence-threshold-reached", "pid-dead"],
       "actions": ["remove-label:pending-dev", "add-label:stalled", "comment:non-convergence"],
       "code_site": "lib-dispatch.sh handle_completed_session_routing Branch B″ convergence circuit-breaker (label_swap pending-dev → stalled runs FIRST, atomically BEFORE the reason=non-convergence report + marker are posted — round-10 [P1] fix)",
-      "mermaid": "pending_dev --> stalled: Step 4 convergence breaker (completed session + substantive review failure + frozen HEAD >=N completed zero-commit rounds) [INV-103]",
-      "inv_refs": ["INV-103", "INV-85", "INV-92"],
-      "note": "INV-103 (#297): the deterministic >=N belt to INV-85's single-shot suspenders. A failed-substantive + dev-actionable=true verdict that churns >=CONVERGENCE_STALL_THRESHOLD (default 3) completed zero-commit dev-resume rounds against a frozen PR head is halted: this pending-dev -> stalled transition (via label_swap, NOT mark_stalled, so exactly one terminal comment) lands FIRST, then one reason=non-convergence report + marker is posted (transition-then-report ordering closes a TOCTOU where a failed transition could leave an orphan marker). Gated behind the shared may_stall_now live-PID pre-gate (pid-dead). autonomous is retained throughout — never removed by this movement."
+      "mermaid": "pending_dev --> stalled: Step 4 convergence breaker (completed session + substantive review failure + frozen HEAD >=N completed zero-commit rounds) [INV-105]",
+      "inv_refs": ["INV-105", "INV-85", "INV-92"],
+      "note": "INV-105 (#297): the deterministic >=N belt to INV-85's single-shot suspenders. A failed-substantive + dev-actionable=true verdict that churns >=CONVERGENCE_STALL_THRESHOLD (default 3) completed zero-commit dev-resume rounds against a frozen PR head is halted: this pending-dev -> stalled transition (via label_swap, NOT mark_stalled, so exactly one terminal comment) lands FIRST, then one reason=non-convergence report + marker is posted (transition-then-report ordering closes a TOCTOU where a failed transition could leave an orphan marker). Gated behind the shared may_stall_now live-PID pre-gate (pid-dead). autonomous is retained throughout — never removed by this movement."
     },
     {
       "id": "review-pass-no-auto-close",

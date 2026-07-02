@@ -657,9 +657,9 @@ count_dispatcher_crashes() {
 #
 # Returns 0 (eligible to stall NOW) / 1 (defer — a dev wrapper is still alive).
 # This is the liveness gate extracted out of `mark_stalled` so BOTH `mark_stalled`
-# AND the [INV-103] convergence circuit-breaker (#297) share ONE source of truth
+# AND the [INV-105] convergence circuit-breaker (#297) share ONE source of truth
 # for "is it safe to take a terminal action against this issue right now" — no
-# copy-pasted `pid_alive` block ([INV-103] C4′/C9b).
+# copy-pasted `pid_alive` block ([INV-105] C4′/C9b).
 #
 # Scope of the extraction (C9b): the LIVENESS PREDICATE ONLY —
 #   - the `pid_alive [--at-cap]` probe, AND
@@ -760,7 +760,7 @@ mark_stalled() {
   # plain probe keeps INV-30's ALIVE-bias. Definite ALIVE/DEAD verdicts are
   # unaffected either way.
   #
-  # [INV-103] (#297): the liveness predicate itself (pid_alive + local
+  # [INV-105] (#297): the liveness predicate itself (pid_alive + local
   # empty-PID→DEAD narrowing) is now the shared `may_stall_now` helper — but the
   # idempotent `INV-26-stall-deferral` OPERATOR COMMENT stays HERE, so
   # mark_stalled's deferral-comment behavior is byte-identical before/after the
@@ -1158,14 +1158,14 @@ count_review_aware_flips() {
 }
 
 # ---------------------------------------------------------------------------
-# INV-103 (#297): convergence circuit-breaker helpers.
+# INV-105 (#297): convergence circuit-breaker helpers.
 # ---------------------------------------------------------------------------
 
 # convergence_canonical <verdict> <cause> <dev_actionable>
 #
 # Echoes the canonical trailer string `{verdict}|{cause}|{dev-actionable}`
 # (pipe-delimited, empty string for absent fields), derived from the
-# `classify_recent_review_verdict` OUT-VARS — NOT body text ([INV-103] C1/C2). This
+# `classify_recent_review_verdict` OUT-VARS — NOT body text ([INV-105] C1/C2). This
 # is the SINGLE source of truth for the convergence match key: `convergence_trailer_hash`
 # hashes it for the compact marker key, and `count_frozen_convergence_rounds` joins
 # each zero-commit round's preceding verdict against it ([P1] finding 1: only rounds
@@ -1201,9 +1201,9 @@ convergence_trailer_hash() {
 # `<frozen_head>` that belong to the ACTIVE convergence case — each element is
 # `{createdAt}` (the round comment's timestamp), sorted ascending. This is the
 # single source of truth backing BOTH `count_frozen_convergence_rounds` (its
-# length) and the [INV-103] report's per-round timestamp evidence ([P1] finding 2).
+# length) and the [INV-105] report's per-round timestamp evidence ([P1] finding 2).
 #
-# Derivation ([INV-103] C1/C9a): rounds are the pre-existing per-round dispatcher
+# Derivation ([INV-105] C1/C9a): rounds are the pre-existing per-round dispatcher
 # comment (`dispatcher-tick.sh` Step 5b, the [INV-06]-guarded "Dev process exited
 # (no new commits since last review at `<head>`)…"), which fires exactly once per
 # completed zero-commit round and embeds the frozen head. #297 writes NO per-round
@@ -1389,7 +1389,7 @@ _frozen_convergence_rounds_json() {
 # count_frozen_convergence_rounds <issue_num> <frozen_head> <active_canonical>
 #
 # Echoes the number of ACTIVE-case completed zero-commit dev-resume rounds on
-# `<frozen_head>` — the length of `_frozen_convergence_rounds_json` ([INV-103]
+# `<frozen_head>` — the length of `_frozen_convergence_rounds_json` ([INV-105]
 # C1/C9a + [P1] finding 1: only rounds whose preceding verdict matches the active
 # `{verdict}|{cause}|{dev-actionable}` canonical count). Fail-closed to 0.
 count_frozen_convergence_rounds() {
@@ -1407,7 +1407,7 @@ count_frozen_convergence_rounds() {
 #
 # Echoes the body of the newest BOT-authored review VERDICT/FINDINGS comment
 # created after the dev session ended — the verbatim repeated finding shown in
-# the [INV-103] convergence report's evidence block. Mirrors
+# the [INV-105] convergence report's evidence block. Mirrors
 # `classify_recent_review_verdict`'s actor-predicate + strict-`>` timestamp
 # selection (spec §3.3: `author` is the login string incl `[bot]`), but returns
 # the raw body rather than parsing the trailer. Best-effort: an empty/error fetch
@@ -1541,7 +1541,7 @@ handle_completed_session_routing() {
       # object. The unit tests mock fetch_pr_for_issue.
       _np_pr_info=$(fetch_pr_for_issue "$issue_num" "number,headRefOid,body")
       _np_current_head=$(jq -r '.headRefOid // empty' <<<"$_np_pr_info" 2>/dev/null)
-      # [INV-103] (#297): the PR number for the convergence report's evidence line.
+      # [INV-105] (#297): the PR number for the convergence report's evidence line.
       local _np_pr_number
       _np_pr_number=$(jq -r '.number // empty' <<<"$_np_pr_info" 2>/dev/null)
       _np_last_head=$(last_reviewed_head "$issue_num")
@@ -1629,7 +1629,7 @@ handle_completed_session_routing() {
         return 0
       fi
 
-      # Branch B″ — [INV-103] (#297) convergence circuit-breaker. Reached ONLY for
+      # Branch B″ — [INV-105] (#297) convergence circuit-breaker. Reached ONLY for
       # a `failed-substantive` + `dev-actionable=true` verdict that survived
       # Branch A (bot-unfixable), Branch B (INV-85 single-shot no-progress), and
       # Branch B′ (INV-92 non-actionable). This is the BELT to INV-85's
@@ -1679,7 +1679,7 @@ handle_completed_session_routing() {
         # orphan report/marker. Call WITHOUT `--at-cap` (not retry-exhausted; an
         # indeterminate remote verdict biases ALIVE→defer = MISS, per R4).
         if ! may_stall_now "$issue_num"; then
-          log "  issue #${issue_num} convergence breaker: ≥${_cb_threshold} frozen-head rounds on \`${_np_current_head}\` but a dev wrapper is ALIVE — deferring terminal action ([INV-103])"
+          log "  issue #${issue_num} convergence breaker: ≥${_cb_threshold} frozen-head rounds on \`${_np_current_head}\` but a dev wrapper is ALIVE — deferring terminal action ([INV-105])"
           return 0
         fi
 
@@ -1738,11 +1738,11 @@ handle_completed_session_routing() {
               '[.[] | select(.authorKind != "human") | select(.body | contains($marker))] | length' \
           2>/dev/null || echo 0)
         if [ "${_cb_present:-0}" != "0" ]; then
-          log "  issue #${issue_num} convergence breaker already reported for head \`${_np_current_head}\` session \`${session_id}\` (trailer=${_cb_hash}) — idempotent no-op ([INV-103])"
+          log "  issue #${issue_num} convergence breaker already reported for head \`${_np_current_head}\` session \`${session_id}\` (trailer=${_cb_hash}) — idempotent no-op ([INV-105])"
           return 0
         fi
 
-        log "  issue #${issue_num} NON-CONVERGENCE detected: ${_cb_rounds} completed zero-commit rounds on frozen head \`${_np_current_head}\` (trailer=${_cb_hash}) — halting per [INV-103]"
+        log "  issue #${issue_num} NON-CONVERGENCE detected: ${_cb_rounds} completed zero-commit rounds on frozen head \`${_np_current_head}\` (trailer=${_cb_hash}) — halting per [INV-105]"
 
         # Extract the verbatim repeated finding (the newest bot-authored review
         # verdict comment after the dev session end) for the report's evidence,
@@ -1789,7 +1789,7 @@ handle_completed_session_routing() {
         # Reuse `stalled`; no new label (R5).
         itp_post_comment "$issue_num" "$(cat <<CBREPORT
 ${_cb_marker}
-## ⛔ Convergence circuit-breaker tripped — halting a non-converging dev↔review loop (\`reason=non-convergence\`, [INV-103])
+## ⛔ Convergence circuit-breaker tripped — halting a non-converging dev↔review loop (\`reason=non-convergence\`, [INV-105])
 
 The autonomous dev↔review loop is **not converging**: the review keeps failing
 substantively on PR **#${_np_pr_number:-?}** while the PR head SHA stays **frozen**

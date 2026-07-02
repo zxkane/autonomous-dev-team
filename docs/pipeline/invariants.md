@@ -5617,16 +5617,18 @@ untouched).
 
 
 
-## INV-103: a non-converging dev↔review loop (a `failed-substantive`+`dev-actionable=true` verdict that churns ≥N completed zero-commit dev-resume rounds against a FROZEN PR head) is detected and HALTED — the breaker transitions to `stalled` then posts ONE structured `reason=non-convergence` report, gated behind the shared `may_stall_now` live-PID pre-gate, idempotent per `{issue, head, trailer-hash, session_id}`
+## INV-105: a non-converging dev↔review loop (a `failed-substantive`+`dev-actionable=true` verdict that churns ≥N completed zero-commit dev-resume rounds against a FROZEN PR head) is detected and HALTED — the breaker transitions to `stalled` then posts ONE structured `reason=non-convergence` report, gated behind the shared `may_stall_now` live-PID pre-gate, idempotent per `{issue, head, trailer-hash, session_id}`
 
 _Triage (issue #236): [machine-checked: tests/unit/test-convergence-breaker.sh]_
 
 > Note: originally minted as INV-97 by #297; renumbered to INV-102 on a rebase
 > after main independently claimed INV-97..101 (INV-100 #355, INV-101 #356) in
-> the interim; renumbered AGAIN to INV-103 (this heading) when #337
-> (`chp_pr_comment`) claimed INV-102 through a second mid-flight collision.
-> Next-free-slot renumbering follows the documented first-merged-keeps-its-number
-> convention; the design doc's lineage note records the full 97→102→103 history.
+> the interim; renumbered to INV-103 when #337 (`chp_pr_comment`) claimed
+> INV-102 through a second mid-flight collision; renumbered a THIRD time to
+> INV-105 (this heading) when #365 (atomic PID guard + fan-out reap hardening)
+> landed first and claimed both INV-103 and INV-104. Next-free-slot
+> renumbering follows the documented first-merged-keeps-its-number convention;
+> the design doc's lineage note records the full 97→102→103→105 history.
 
 **Rule**: the dispatcher detects a **non-converging** dev↔review loop and halts it
 automatically instead of burning tokens in an infinite `dev-resume` loop. The
@@ -5637,7 +5639,7 @@ breaker is the **belt** to [INV-85]'s single-shot-marker **suspenders**: INV-85
 bounds the `failed-substantive` route to ONE `dev-new` per unchanged HEAD via a
 per-HEAD attempt marker, but that marker resets on every log-truncating `dev-new`
 and can be missed when the crash-recovery path (`dispatcher-tick.sh` Step 5b)
-re-routes without writing it. INV-103 counts the DURABLE per-round evidence and
+re-routes without writing it. INV-105 counts the DURABLE per-round evidence and
 trips deterministically after ≥N rounds.
 
 **Where** (single insertion point): `handle_completed_session_routing`'s
@@ -5854,7 +5856,7 @@ exhausted"), plus the live-PID deferral (via the shared `may_stall_now`), plus N
 new declared label edge (passes `check-spec-drift.sh` Check C.2 — no
 `transitions.json` / `state-machine.md` edit for a NEW edge; the movement itself
 is declared as its own `dispatch-stalled-convergence` transition row, see below).
-`stalled` is REUSED — no new `deadlocked` label ([INV-103] does not fork one;
+`stalled` is REUSED — no new `deadlocked` label ([INV-105] does not fork one;
 the recovery action is "read report, fix, remove `stalled`").
 
 **Idempotency**: before posting, grep machine-authored comments
