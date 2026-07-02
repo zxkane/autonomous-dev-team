@@ -76,7 +76,7 @@ sequenceDiagram
 
 ## Spawn, PID guard, auth
 
-Same pattern as the dev wrapper — see [`dev-agent-flow.md`](dev-agent-flow.md#pid-guard-acquire_pid_guard-in-lib-agentsh) — including the atomic `mkdir`-lock acquire ([INV-103](invariants.md#inv-103-acquire_pid_guard-acquires-the-per-issue-mode-start-slot-atomically--no-check-then-write-toctou-window), #360/302a: closes the TOCTOU window where two near-simultaneous review wrappers for the same issue could both pass the old check-then-write and both fan out) — except:
+Same pattern as the dev wrapper — see [`dev-agent-flow.md`](dev-agent-flow.md#pid-guard-acquire_pid_guard-in-lib-agentsh) — including the atomic `flock`-based acquire ([INV-103](invariants.md#inv-103-acquire_pid_guard-acquires-the-per-issue-mode-start-slot-atomically--no-check-then-write-toctou-window), #360/302a: closes the TOCTOU window where two near-simultaneous review wrappers for the same issue could both pass the old check-then-write and both fan out) — except:
 
 - PID file: `${PID_DIR}/review-<N>.pid` ([INV-01](invariants.md#inv-01-pid-file-naming)) — `${PID_DIR}` resolved by `lib-config.sh::pid_dir_for_project`.
 - Auth: review-agent app mode uses `REVIEW_AGENT_APP_ID` / `REVIEW_AGENT_APP_PEM` (separate App identity from dev so reviewer comments are attributed correctly).

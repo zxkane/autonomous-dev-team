@@ -5350,28 +5350,50 @@ _Triage (issue #236): [machine-checked: tests/unit/test-pid-guard-atomic.sh]_
 running? / do I get to start?" as a single atomic operation with respect to
 every other concurrent caller against the SAME PID file path — never as a
 separate read-then-probe followed by a separate write. The atomicity is
-provided by an `mkdir`-based lock directory (`${pid_file}.lockdir`): `mkdir`
-either succeeds or fails with `EEXIST` in one kernel call, so two callers
+provided by an exclusive `flock` on `${pid_file}.lock`: `flock` is atomic at
+the kernel level (a single syscall grants or denies the lock), so two callers
 racing on the same path can never both observe "lock free." Whichever caller
-wins the `mkdir` holds the lock for the few syscalls it takes to read the
-existing PID (if any), `kill -0`-probe it, and write `$$` — then immediately
-`rmdir`s the lock. A losing caller retries briefly (`ACQUIRE_PID_GUARD_LOCK_WAIT_MS`,
-default 2000 ms, polling every 20 ms), reclaims the lock if it is older than
-`ACQUIRE_PID_GUARD_LOCK_STALE_SECONDS` (default 60 s — evidence the prior
-holder crashed mid-hold rather than legitimately contending, since a live
-hold never takes anywhere close to 60 s), and otherwise exits **0** (not an
-error) after logging exactly one line, having written nothing and having
-never reached the caller's fan-out/spawn logic.
+wins the lock holds it for the few syscalls it takes to read the existing PID
+(if any), `kill -0`-probe it, and write `$$` — then explicitly closes the
+lock file descriptor (releasing the flock immediately rather than waiting for
+process exit). A losing caller waits up to `ACQUIRE_PID_GUARD_LOCK_WAIT_SECONDS`
+(default 2 s) for the lock; on timeout it exits **0** (not an error) after
+logging exactly one line, having written nothing and having never reached
+the caller's fan-out/spawn logic.
+
+**No stale-lock heuristic — the kernel's auto-release makes one unnecessary
+(and a first draft's heuristic was itself unsafe).** `flock` is released the
+instant the holder's file descriptor closes, including when the holder
+process is killed (`SIGKILL`, OOM, crash) without running any cleanup code —
+there is no window where a dead holder's lock outlives it, so there is
+nothing to detect as "stale" and nothing to reclaim. An earlier draft of this
+fix used an `mkdir`-based lock directory instead, which — being a plain
+filesystem object with no kernel-level lifecycle tied to its creator's
+process — required a separate age-based staleness check and an explicit
+`rmdir` "reclaim" step for the crashed-holder case. Code review (independent
+agent pass, empirically verified with a 20-racer stress harness) found that
+reclaim step itself unsafe: two callers could each observe the same stale
+lock dir and both decide to reclaim it, with the second caller's `rmdir`
+deleting the FIRST caller's freshly-created (non-stale) lock instead of the
+one it inspected — reopening the exact double-fan-out hole this invariant
+exists to close, just relocated to the reclaim path. It also had a separate
+unbounded-busy-loop defect if the lock path was ever occupied by something
+`rmdir` could not remove (a non-empty directory, a regular file, a dangling
+symlink): the retry loop's wait-budget accounting was skipped on that branch,
+so it could spin forever rather than reaching its timeout. `flock` avoids
+both defects structurally: there is no separate reclaim code path to get
+wrong, and a losing caller's wait is bounded by `flock -w` itself, not by an
+external counter that a different branch could fail to advance.
 
 **R1 hard constraint — read-side semantics are BYTE-IDENTICAL.** The
-atomicity lives entirely in *how* the file is written (a lock dir guarding
-the read-check-write), never in a new file format or path. `pid_alive`
+atomicity lives entirely in *how* the file is written (an flock guarding the
+read-check-write), never in a new file format or path. `pid_alive`
 ([INV-30](#inv-30-pid_alive-is-authoritative-under-all-execution-backends),
 `lib-dispatch.sh`) and `liveness-check-remote-aws-ssm.sh` (the remote-backend
 probe INV-30 delegates to) keep reading the exact same `${PID_DIR}/{issue,review}-<N>.pid`
 path ([INV-01](#inv-01-pid-file-naming)) with the exact same content contract
 (the winner's PID, numeric, `kill -0`-able) — neither consumer changed a
-single line for this fix, and neither needs to know a lock dir briefly
+single line for this fix, and neither needs to know a lock file briefly
 existed alongside the PID file during acquisition.
 
 **Why**: the pre-#360 check-then-write read `pid_file`, ran `kill -0` on any
@@ -5386,6 +5408,13 @@ and the duplicate run's codex child survived the INV-43 reap (see
 to post stale findings after the primary run's PASS→merge. This invariant
 closes the wrapper-host half of that incident (302a); the controller-side
 duplicate-dispatch root cause is 302b's concern.
+
+**Dependency**: `flock` (util-linux) is required and hard-checked at function
+entry — a missing binary aborts loudly (`exit 1`) rather than silently
+degrading to the pre-#360 racy check-then-write, which would defeat the
+purpose of this fix. util-linux is universal on the Linux/Ubuntu dispatcher
+fleet this project targets (the same assumption `_run_with_timeout`'s
+`setsid` dependency already makes).
 
 **Producer**: `acquire_pid_guard` in `lib-agent.sh`, called unchanged (same
 call signature) from `autonomous-dev.sh` and `autonomous-review.sh`.
@@ -5403,15 +5432,18 @@ concurrent `acquire_pid_guard` calls on the same path → exactly ONE winner,
 every loser exits 0 and logs exactly one line), TC-ATOMIC-001b (the fixed
 function stays single-winner even with the liveness-check-to-write window
 deliberately widened via a test-only hook — closes the exact gap
-TC-ATOMIC-000 demonstrated), TC-ATOMIC-001c (a lock dir older than
-`ACQUIRE_PID_GUARD_LOCK_STALE_SECONDS` is reclaimed rather than wedging every
-future acquire — the crashed-owner recovery path), TC-ATOMIC-002 (winner's PID file is readable by
+TC-ATOMIC-000 demonstrated), TC-ATOMIC-001c (a holder killed mid-hold with no
+cleanup releases the lock automatically — the crashed-owner case, proving
+the kernel's auto-release rather than a staleness heuristic), TC-ATOMIC-001d
+(20-way concurrent-acquire stress — still exactly one winner, the
+regression-shape check for the reclaim-path race the flock design structurally
+avoids), TC-ATOMIC-002 (winner's PID file is readable by
 a `pid_alive`-style read: same path, numeric content), TC-ATOMIC-003 (a dead
 PID in the file still allows a fresh acquire to win — pre-existing behavior
 preserved), TC-ATOMIC-004 (symlink PID file still rejected —
 [INV-02](#inv-02-pid-file-is-not-a-symlink) unaffected), TC-ATOMIC-005
-(source-of-truth: the function body uses an atomic primitive, not a bare
-check-then-write). Existing `tests/unit/test-pid-guard.sh` and
+(source-of-truth: the function body uses an atomic primitive and carries no
+separate stale-lock reclaim code path). Existing `tests/unit/test-pid-guard.sh` and
 `tests/unit/test-pid-guard-pgid.sh` stay green unmodified (R1 back-compat).
 
 **Cross-references**:

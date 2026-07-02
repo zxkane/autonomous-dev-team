@@ -221,34 +221,78 @@ WIDE_WINNER_COUNT=$(grep -l '^won$' "$WIDE_RESULT_DIR"/outcome-* 2>/dev/null | w
 assert_eq "exactly ONE winner even with the check-to-write window widened to 0.2s" "1" "$WIDE_WINNER_COUNT"
 
 # ============================================================================
-# TC-ATOMIC-001c: a stale lock dir (owner crashed mid-hold) is reclaimed, not
-# a permanent wedge.
+# TC-ATOMIC-001c: a crashed holder's lock is released automatically by the
+# kernel (flock semantics) — no stale-lock heuristic, no reclaim code path,
+# no permanent wedge.
 # ============================================================================
 echo
-echo "=== TC-ATOMIC-001c: a stale lock dir is reclaimed rather than blocking forever ==="
+echo "=== TC-ATOMIC-001c: a killed holder's lock is released automatically (flock, not a staleness heuristic) ==="
 echo
 
-STALE_PID_FILE="$TMPDIR/stale.pid"
-STALE_LOCK_DIR="${STALE_PID_FILE}.lockdir"
-rm -f "$STALE_PID_FILE"
-mkdir "$STALE_LOCK_DIR"
-# Backdate the lock dir's mtime to simulate an owner that crashed mid-hold
-# well past the stale threshold.
-touch -d "@$(($(date -u +%s) - 100))" "$STALE_LOCK_DIR"
+CRASH_PID_FILE="$TMPDIR/crash.pid"
+CRASH_LOCK_FILE="${CRASH_PID_FILE}.lock"
+rm -f "$CRASH_PID_FILE" "$CRASH_LOCK_FILE"
 
-( export ACQUIRE_PID_GUARD_LOCK_STALE_SECONDS=60
-  timeout 5 bash -c 'source "'"$TMPDIR"'/skills/autonomous-dispatcher/scripts/lib-agent.sh" 2>/dev/null; acquire_pid_guard "'"$STALE_PID_FILE"'" test-stale 42' )
-STALE_RC=$?
-assert_eq "acquire against a stale lock succeeds (not stuck)" "0" "$STALE_RC"
-if [[ -d "$STALE_LOCK_DIR" ]]; then
-  echo -e "  ${RED}FAIL${NC}: stale lock dir was not cleaned up"
-  FAIL=$((FAIL + 1))
-else
-  echo -e "  ${GREEN}PASS${NC}: stale lock dir was reclaimed and removed"
-  PASS=$((PASS + 1))
-fi
-STALE_PID_CONTENT=$(cat "$STALE_PID_FILE" 2>/dev/null)
-assert_match "reclaimed acquire still wrote a numeric PID" '^[0-9]+$' "$STALE_PID_CONTENT"
+# Hold the lock in a background subshell, then SIGKILL it mid-hold — no
+# graceful unlock, no cleanup trap. flock's kernel-level guarantee is that
+# closing the fd (including via process death) releases the lock; there is
+# no separate "is this lock stale" check to get wrong.
+#
+# `exec sleep 30` (replacing the subshell's OWN process image) rather than a
+# plain `sleep 30` (which forks a CHILD that inherits the open fd) is
+# load-bearing here: with a forked child, `kill -9` on the subshell's PID
+# does not touch the child, which still holds the fd open and the flock —
+# a test artifact that would make this test wrongly assert liveness the
+# real crash path (a killed wrapper process, not a forked descendant of it)
+# does not exhibit.
+(
+  exec {crash_fd}>"$CRASH_LOCK_FILE"
+  flock "$crash_fd"
+  exec sleep 30
+) &
+CRASH_HOLDER_PID=$!
+sleep 0.3
+kill -9 "$CRASH_HOLDER_PID" 2>/dev/null
+wait "$CRASH_HOLDER_PID" 2>/dev/null
+
+( timeout 5 bash -c 'source "'"$TMPDIR"'/skills/autonomous-dispatcher/scripts/lib-agent.sh" 2>/dev/null; acquire_pid_guard "'"$CRASH_PID_FILE"'" test-crash 42' )
+CRASH_RC=$?
+assert_eq "acquire after a killed holder succeeds immediately (not stuck)" "0" "$CRASH_RC"
+CRASH_PID_CONTENT=$(cat "$CRASH_PID_FILE" 2>/dev/null)
+assert_match "post-crash acquire still wrote a numeric PID" '^[0-9]+$' "$CRASH_PID_CONTENT"
+
+# ============================================================================
+# TC-ATOMIC-001d: high-concurrency stress (20 racers) — exactly one winner,
+# every loser exits 0 within the wait budget. Regression coverage for the
+# specific failure mode an earlier mkdir-lock-dir design had: a "reclaim a
+# stale lock" code path that itself raced (two racers both reclaiming, the
+# second deleting the first's freshly-acquired lock). flock has no such
+# code path, so this is a pure concurrency stress test, not a staleness test.
+# ============================================================================
+echo
+echo "=== TC-ATOMIC-001d: 20-way concurrent acquire stress — still exactly one winner ==="
+echo
+
+STRESS_PID_FILE="$TMPDIR/stress.pid"
+STRESS_RESULT_DIR="$TMPDIR/stress-results"
+rm -rf "$STRESS_RESULT_DIR"; mkdir -p "$STRESS_RESULT_DIR"
+rm -f "$STRESS_PID_FILE" "${STRESS_PID_FILE}.lock"
+
+STRESS_N=20
+declare -a STRESS_BGPIDS=()
+for i in $(seq 1 "$STRESS_N"); do
+  (
+    acquire_pid_guard "$STRESS_PID_FILE" "test-stress" "77$i"
+    echo "won" > "$STRESS_RESULT_DIR/outcome-$i"
+    sleep 0.2
+    exit 0
+  ) &
+  STRESS_BGPIDS+=("$!")
+done
+for bg_pid in "${STRESS_BGPIDS[@]}"; do wait "$bg_pid"; done
+
+STRESS_WINNER_COUNT=$(grep -l '^won$' "$STRESS_RESULT_DIR"/outcome-* 2>/dev/null | wc -l | tr -d ' ')
+assert_eq "exactly ONE winner among $STRESS_N concurrent acquires" "1" "$STRESS_WINNER_COUNT"
 
 # ============================================================================
 # TC-ATOMIC-002: PID-file read-side compatibility (pid_alive-style check)
@@ -331,6 +375,21 @@ if grep -qE '\bmkdir\b|\bflock\b|noclobber|set -C' <<<"$FN_BODY"; then
 else
   echo -e "  ${RED}FAIL${NC}: acquire_pid_guard does not appear to use mkdir/flock/O_EXCL"
   FAIL=$((FAIL + 1))
+fi
+
+# Regression pin: no separate "is this lock stale, reclaim it" code path.
+# An earlier mkdir-lock-dir draft had exactly this shape (age-check the lock
+# dir, then rmdir it) and the reclaim itself raced — two callers could both
+# decide a lock was stale and both rmdir, with the second deleting the
+# FIRST caller's freshly-reacquired lock instead of the stale one. flock's
+# kernel-level auto-release on fd-close (including process death) makes any
+# such heuristic unnecessary; its presence here would be a regression.
+if grep -qE '_lock_dir_age_seconds|stale.*lock|reclaim.*lock' <<<"$(tr '[:upper:]' '[:lower:]' <<<"$FN_BODY")"; then
+  echo -e "  ${RED}FAIL${NC}: acquire_pid_guard still contains a stale-lock reclaim path (the raced design this PR replaced with flock)"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${NC}: no separate stale-lock reclaim code path (flock's kernel auto-release makes one unnecessary)"
+  PASS=$((PASS + 1))
 fi
 
 # ============================================================================
