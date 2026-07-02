@@ -194,11 +194,27 @@ itp_list_comments() {
     _hh=$(printf '%02d' $(( _ts / 60 )))
     _mm=$(printf '%02d' $(( _ts % 60 )))
     _tsiso="2026-06-12T${_hh}:${_mm}:00Z"
-    # Author: verdict trailers are BOT-authored (kane-review-agent); everything
-    # else is self/dispatcher (my-claw). The join keys on the trailer TEXT, not
-    # the author, but keep authors realistic.
+    # Author: verdict trailers default to BOT-authored (kane-review-agent);
+    # everything else is self/dispatcher (my-claw). round-13 [BLOCKING]:
+    # _MOCK_VERDICT_AUTHORKIND overrides this to simulate the REAL
+    # GH_AUTH_MODE=token topology, where the review wrapper's genuine verdict
+    # comment shares the dispatcher's PAT identity and ALSO normalizes to
+    # authorKind=human (the provider cannot derive `self` without BOT_LOGIN) —
+    # CB-COUNT-009f/g predate this override and always hardcoded the verdict
+    # trailer to bot-authored, which masked the round-13 regression (the
+    # empty-BOT_LOGIN fallback rejected every genuine human-authorKind verdict).
+    # The join keys on the trailer TEXT + structural startswith, not the
+    # author, but keep authors realistic.
     local _author="my-claw" _akind="${_MOCK_ROUNDS_AUTHORKIND:-self}"
-    [[ "$b" == *"review-verdict:"* ]] && { _author="kane-review-agent"; _akind="bot"; }
+    if [[ "$b" == *"review-verdict:"* ]]; then
+      if [[ -n "${_MOCK_VERDICT_AUTHORKIND:-}" ]]; then
+        _akind="$_MOCK_VERDICT_AUTHORKIND"
+        _author="my-claw"
+        [[ "$_akind" == "bot" ]] && _author="kane-review-agent"
+      else
+        _author="kane-review-agent"; _akind="bot"
+      fi
+    fi
     if [[ "$b" == HUMANQUOTE:* ]]; then
       _author="zxkane"; _akind="human"; b="${b#HUMANQUOTE:}"
     fi
@@ -239,6 +255,7 @@ reset_mocks() {
   _MOCK_HUMAN_TRAILER_QUOTE=""
   _MOCK_OTHERBOT_TRAILER_QUOTE=""
   _MOCK_ROUNDS_AUTHORKIND="self"
+  _MOCK_VERDICT_AUTHORKIND=""
   _MOCK_LAST_COMMENT_BODY=""
   _MOCK_FULL_COMMENT_LOG=""
   _MOCK_PR_HEAD=""
@@ -451,9 +468,9 @@ _MOCK_HUMAN_TRAILER_QUOTE="Just quoting for context: <!-- review-verdict: failed
 assert_eq "CB-COUNT-009j: genuine matching trailer still counted despite an unrelated human quote present" \
   "1" "$(count_frozen_convergence_rounds 100 deadbeef "$AC_SUB")"
 
-# CB-COUNT-009k: BOT_LOGIN-empty fallback (token mode) — the coarse
-# authorKind!=human bound still rejects the human quote (proves the fallback
-# path, not just the strict-author path, closes the finding).
+# CB-COUNT-009k: BOT_LOGIN-empty fallback (token mode) — the structural
+# startswith anchor still rejects the human quote (proves the fallback path,
+# not just the strict-author path, closes the round-11 finding).
 reset_mocks
 _MOCK_PR_HEAD="deadbeef"
 _MOCK_LAST_REVIEWED_HEAD="deadbeef"
@@ -462,7 +479,67 @@ _MOCK_STALE_ROUNDS=0
 _MOCK_ROUND_VERDICT_TRAILER="<!-- review-verdict: failed-non-substantive cause=bot-timeout -->"
 _MOCK_HUMAN_TRAILER_QUOTE="Just quoting for context: <!-- review-verdict: failed-substantive -->"
 _saved_bot_login="$BOT_LOGIN"; BOT_LOGIN=""
-assert_eq "CB-COUNT-009k: BOT_LOGIN empty — human quote still rejected via authorKind!=human fallback (0)" \
+assert_eq "CB-COUNT-009k: BOT_LOGIN empty — human quote (prose before trailer) still rejected via startswith anchor (0)" \
+  "0" "$(count_frozen_convergence_rounds 100 deadbeef "$AC_SUB")"
+BOT_LOGIN="$_saved_bot_login"
+
+# ===========================================================================
+echo ""
+echo "=== CB-COUNT-009l/m/n: preceding-verdict authenticity is STRUCTURAL, not actor-based (round-13 BLOCKING) ==="
+
+# CB-COUNT-009l: the REAL GH_AUTH_MODE=token topology — BOT_LOGIN is unset (as
+# it ALWAYS is in the dispatcher's own process; it is resolved only inside
+# autonomous-review.sh's SEPARATE process) AND the review wrapper's genuine
+# verdict comments normalize to authorKind=human (shared PAT identity, same as
+# the dispatcher's own comments). Before the fix, `authentic_verdict`'s
+# empty-BOT_LOGIN fallback required `authorKind != "human"`, which REJECTED
+# these genuine verdicts outright — count stayed 0 forever, Branch B″ dead in
+# token mode. After the fix (structural `startswith` anchor, author-independent),
+# these bare-trailer comments authenticate correctly.
+reset_mocks
+_MOCK_PR_HEAD="deadbeef"
+_MOCK_LAST_REVIEWED_HEAD="deadbeef"
+_MOCK_FROZEN_ROUND_COMMENTS=3
+_MOCK_ROUNDS_AUTHORKIND="human"    # token mode: the dispatcher's own comments too
+_MOCK_VERDICT_AUTHORKIND="human"   # round-13: the review wrapper's verdict ALSO normalizes to human
+_saved_bot_login="$BOT_LOGIN"; BOT_LOGIN=""
+assert_eq "CB-COUNT-009l: token mode (BOT_LOGIN empty, verdict authorKind=human) — genuine rounds STILL counted (3)" \
+  "3" "$(count_frozen_convergence_rounds 100 deadbeef "$AC_SUB")"
+BOT_LOGIN="$_saved_bot_login"
+
+# CB-COUNT-009m: end-to-end token-mode trip — the breaker must actually HALT
+# the loop in this topology (not just report a non-zero count in isolation).
+reset_mocks
+_MOCK_VERDICT="failed-substantive"
+_MOCK_DEV_ACTIONABLE="true"
+_MOCK_PR_HEAD="deadbeef"
+_MOCK_LAST_REVIEWED_HEAD="deadbeef"
+_MOCK_FROZEN_ROUND_COMMENTS=3
+_MOCK_ROUNDS_AUTHORKIND="human"
+_MOCK_VERDICT_AUTHORKIND="human"
+_MOCK_PID_ALIVE=1
+_saved_bot_login="$BOT_LOGIN"; BOT_LOGIN=""
+prepare_log 100
+handle_completed_session_routing 100 "sid-cb009m" "2026-05-21T03:18:00Z"
+assert_eq "CB-COUNT-009m: token-mode end-to-end trip (label_swap pending-dev → stalled)" \
+  "100:pending-dev:stalled " "$_MOCK_LABEL_SWAPS"
+assert_eq "CB-COUNT-009m: posts the report" "1" "$_MOCK_COMMENT_COUNT"
+BOT_LOGIN="$_saved_bot_login"
+
+# CB-COUNT-009n (regression guard): the round-11 human-quote-with-prose
+# rejection MUST still hold even in the token-mode topology (structural
+# startswith, not authorKind, is what excludes it) — proves the fix didn't
+# simply stop checking anything.
+reset_mocks
+_MOCK_PR_HEAD="deadbeef"
+_MOCK_LAST_REVIEWED_HEAD="deadbeef"
+_MOCK_FROZEN_ROUND_COMMENTS=1
+_MOCK_ROUND_VERDICT_TRAILER="<!-- review-verdict: failed-non-substantive cause=bot-timeout -->"
+_MOCK_HUMAN_TRAILER_QUOTE="Just quoting for context: <!-- review-verdict: failed-substantive -->"
+_MOCK_ROUNDS_AUTHORKIND="human"
+_MOCK_VERDICT_AUTHORKIND="human"
+_saved_bot_login="$BOT_LOGIN"; BOT_LOGIN=""
+assert_eq "CB-COUNT-009n: even in token mode, a human quote WITH PROSE before the trailer is still rejected (0)" \
   "0" "$(count_frozen_convergence_rounds 100 deadbeef "$AC_SUB")"
 BOT_LOGIN="$_saved_bot_login"
 

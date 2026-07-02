@@ -1240,26 +1240,48 @@ convergence_trailer_hash() {
 #      sentence; a quote embedded mid-comment (reply context, code fence) fails
 #      the anchor even when machine-authored.
 #
-# PRECEDING-VERDICT AUTHENTICITY (review round-11 [P1] BLOCKING): the ROUND
-# comment was authenticated (above), but the PRECEDING verdict trailer ($pv,
-# below) was NOT — any comment containing a `<!-- review-verdict: … -->`-shaped
-# string, however posted, could be picked as "the verdict this round reacted
-# to". A maintainer/reviewer comment QUOTING a trailer (e.g. discussing a past
-# verdict, or pasting one for context) posted between the real bot verdict and
-# the Step-5b round comment would win the `last` selection over the genuine
-# trailer, letting arbitrary discussion comments trip OR suppress the breaker.
-# Fix: gate the preceding-verdict candidate set the SAME way [INV-20] gates
-# verdict authentication elsewhere (`classify_recent_review_verdict`,
-# `recent_review_verdict_body`) — when `BOT_LOGIN` is set, require the EXACT
-# actor binding `.author == BOT_LOGIN` (strictly stronger than authorKind: a
-# same-authorKind=bot comment from a DIFFERENT bot/App would still be
-# rejected); when BOT_LOGIN is empty (the gh-api-user-403 fallback topology),
-# fall back to the SAME coarse `authorKind != "human"` bound already used for
-# round-comment authenticity above — strictly better than no check, and
-# directly excludes the reported repro (a `human`-authorKind comment quoting
-# the trailer). A round whose ONLY candidate verdict fails this gate has no
-# authenticated `$pv` and is therefore excluded (fail-closed toward NOT
-# tripping) — exactly the #286-adjacent MISS bias this breaker is designed for.
+# PRECEDING-VERDICT AUTHENTICITY (review round-11 [P1] BLOCKING, corrected
+# round-13 [BLOCKING]): the ROUND comment was authenticated (above), but the
+# PRECEDING verdict trailer ($pv, below) was NOT — any comment containing a
+# `<!-- review-verdict: … -->`-shaped string, however posted, could be picked
+# as "the verdict this round reacted to". A maintainer/reviewer comment
+# QUOTING a trailer (e.g. discussing a past verdict, or pasting one for
+# context) posted between the real bot verdict and the Step-5b round comment
+# would win the `last` selection over the genuine trailer, letting arbitrary
+# discussion comments trip OR suppress the breaker.
+#
+# round-11's first fix gated on `.author == BOT_LOGIN` when set, else
+# `authorKind != "human"`. **That fallback was WRONG (round-13 BLOCKING)**:
+# `BOT_LOGIN` is NEVER set in the dispatcher's own process (it is resolved only
+# inside `autonomous-review.sh`'s SEPARATE process via `gh api user`, and never
+# threaded to `dispatcher-tick.sh`/`lib-dispatch.sh`) — so this call site
+# ALWAYS takes the empty-BOT_LOGIN branch, in EVERY `GH_AUTH_MODE`. In
+# `GH_AUTH_MODE=token` specifically, the review wrapper's genuine verdict
+# comment is posted under the SAME shared PAT identity as everything else, so
+# the provider normalizes it to `authorKind=human` (it cannot derive `self`
+# without `BOT_LOGIN`) — `authorKind != "human"` therefore REJECTED EVERY
+# GENUINE verdict, making `count_frozen_convergence_rounds` permanently 0 and
+# Branch B″ dead in the common token-mode topology. (Reproduced: 3 genuine
+# frozen `failed-substantive` rounds, all `authorKind=human` — pre-fix count
+# was 0.)
+#
+# Fix: use the SAME structural signal `recent_review_verdict_body` already
+# relies on to distinguish a genuine trailer comment from prose that merely
+# mentions/quotes one — `lib-review-verdict.sh::emit_verdict_trailer` posts the
+# trailer as its OWN bare comment whose body is JUST the trailer line, no
+# human text ("posting an additional, separate comment … so it doesn't render
+# in the GitHub issue UI" — see that function's header). So
+# `startswith("<!-- review-verdict:")` is authorship-independent and reliably
+# TRUE for the genuine wrapper-emitted comment, FALSE for a human's "Just
+# quoting for context: <!-- review-verdict: ... -->" (which has prose BEFORE
+# the trailer). This mirrors the round-comment's OWN `startswith` anchor
+# (line ~1239 above) — authenticity via STRUCTURE, not actor identity, exactly
+# because no reliable actor signal exists at this call site. `.author ==
+# BOT_LOGIN` is kept as an ADDITIONAL, strictly-stronger check for the rare
+# case BOT_LOGIN IS somehow set (defense in depth; never observed live today).
+# A round whose only candidate verdict fails this gate has no authenticated
+# `$pv` and is excluded (fail-closed toward NOT tripping) — the #286-adjacent
+# MISS bias this breaker is designed for.
 #
 # Fail-closed toward NOT tripping: an empty/error fetch yields `[]` (biases to
 # MISS per R4). The trailer parse mirrors classify_recent_review_verdict: verdict
@@ -1294,10 +1316,16 @@ _frozen_convergence_rounds_json() {
   #  - `canon(body)`: parse the review-verdict trailer into the canonical
   #    `{verdict}|{cause}|{dev-actionable}`, mirroring classify_recent_review_verdict
   #    (cause only for failed-non-substantive; absent dev-actionable ⇒ true).
-  #  - `authentic_verdict(c)`: [INV-20]-style actor binding for a CANDIDATE
-  #    verdict comment `c` — `.author == $bot_login` when BOT_LOGIN is set
-  #    (exact match, mirrors classify_recent_review_verdict), else the coarse
-  #    `authorKind != "human"` fallback (round-11 [P1]).
+  #  - `authentic_verdict(c)`: STRUCTURAL authenticity for a CANDIDATE verdict
+  #    comment `c` (round-13 [BLOCKING], corrects round-11) — the body MUST
+  #    `startswith("<!-- review-verdict:")`, mirroring emit_verdict_trailer's
+  #    contract that the trailer is posted as its OWN bare comment (no human
+  #    text). This is authorship-independent, so it works identically whether
+  #    or not BOT_LOGIN is available. `.author == $bot_login` is layered on TOP
+  #    as an additional (strictly stronger) requirement on the rare path where
+  #    BOT_LOGIN happens to be set — never the SOLE gate, since the empty-
+  #    BOT_LOGIN case (the observed live reality at this call site) must still
+  #    authenticate correctly.
   #  - For each round comment on the frozen head, find the newest AUTHENTIC
   #    verdict trailer comment with createdAt < the round's, compute its
   #    canonical, keep the round iff that canonical == $ac. Emit the matched
@@ -1316,9 +1344,8 @@ _frozen_convergence_rounds_json() {
           | "\($v)|\($cc)|\($d)"
         end;
     def authentic_verdict(c):
-      if $strict_author == "0" then c.authorKind != "human"
-      else c.author == $bot_login
-      end;
+      (c.body | startswith("<!-- review-verdict:"))
+      and (if $strict_author == "0" then true else c.author == $bot_login end);
     ( [ .[] | select(.body | type == "string") ] | sort_by(.createdAt) ) as $all
     | [ $all[]
         | select(($strict_author == "0") or (.authorKind != "human"))

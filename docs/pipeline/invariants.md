@@ -5682,23 +5682,48 @@ ACTIVE case's canonical** (`failed-substantive|<cause>|true` here).
 `count_frozen_convergence_rounds` is its length; the SAME matched-rounds JSON
 supplies the report's per-round timestamps.
 
-**PRECEDING-VERDICT AUTHENTICITY (round-11 [BLOCKING] [P1]):** the round comment
-was authenticated (above), but the CANDIDATE VERDICT it is joined against was
-not — any comment whose body merely CONTAINED a `<!-- review-verdict: … -->`-
-shaped string, however posted, could be selected as "the verdict this round
-reacted to". A maintainer/reviewer comment quoting a past trailer for
-discussion, posted between the genuine bot verdict and the Step-5b round
-comment, would win the unauthenticated `last`-before-round selection over the
-real trailer — letting arbitrary discussion comments TRIP or SUPPRESS the
-breaker. The candidate-verdict set is now gated the SAME way [INV-20] gates
-verdict authentication elsewhere (`classify_recent_review_verdict`,
-`recent_review_verdict_body`): with `BOT_LOGIN` set, require the EXACT actor
-binding `.author == BOT_LOGIN` (strictly stronger than authorKind — a
-same-authorKind=bot comment from a DIFFERENT bot/App is still rejected); with
-`BOT_LOGIN` empty (the fallback topology), fall back to the SAME coarse
-`authorKind != "human"` bound the round-comment side already uses. A round
-whose only candidate verdict fails this gate has no authenticated preceding
-verdict and is excluded — fail-closed toward NOT tripping (R4).
+**PRECEDING-VERDICT AUTHENTICITY (round-11 [BLOCKING] [P1], corrected round-13
+[BLOCKING] [P1]):** the round comment was authenticated (above), but the
+CANDIDATE VERDICT it is joined against was not — any comment whose body merely
+CONTAINED a `<!-- review-verdict: … -->`-shaped string, however posted, could
+be selected as "the verdict this round reacted to". A maintainer/reviewer
+comment quoting a past trailer for discussion, posted between the genuine bot
+verdict and the Step-5b round comment, would win the unauthenticated
+`last`-before-round selection over the real trailer — letting arbitrary
+discussion comments TRIP or SUPPRESS the breaker.
+
+round-11's first fix gated the candidate-verdict set the SAME way [INV-20]
+gates verdict authentication elsewhere: with `BOT_LOGIN` set, require the exact
+actor binding `.author == BOT_LOGIN`; with `BOT_LOGIN` empty, **fall back to
+the coarse `authorKind != "human"` bound**. **That fallback was itself wrong
+(round-13 [BLOCKING] [P1]):** `BOT_LOGIN` is resolved ONLY inside
+`autonomous-review.sh`'s own separate process (`gh api user --jq .login`) — it
+is NEVER set in the dispatcher's own process (`dispatcher-tick.sh`,
+`lib-dispatch.sh`, `lib-auth.sh`) in ANY `GH_AUTH_MODE`, so the
+"`BOT_LOGIN`-empty fallback" is not a rare edge case — it is the ALWAYS-TAKEN
+branch here. In `GH_AUTH_MODE=token`, dev/dispatcher/review wrappers share one
+PAT identity, so the provider cannot derive `self` and normalizes even the
+review wrapper's OWN genuine verdict trailer to `authorKind=human` — the
+`authorKind != "human"` fallback rejected it outright, so
+`count_frozen_convergence_rounds` stayed 0 forever and Branch B″ was dead code
+in this (the officially supported) topology.
+
+**Fix**: use the SAME structural signal `recent_review_verdict_body`'s own
+`exclude_predicate` already relies on — `emit_verdict_trailer`
+(`lib-review-verdict.sh`) posts the verdict trailer as a **separate bare
+comment whose body is JUST the trailer line** (`<!-- review-verdict: … -->`,
+no human text). `startswith("<!-- review-verdict:")` is therefore
+authorship-independent: TRUE for the genuine wrapper-emitted comment, FALSE
+for a human's "Just quoting for context: `<!-- review-verdict: … -->`"
+(prose precedes the anchor) regardless of that human's `authorKind`. This
+structural check is now the PRIMARY, always-required gate. `.author ==
+BOT_LOGIN` is retained as an ADDITIONAL, strictly-stronger AND-condition for
+the rare path where `BOT_LOGIN` happens to be set (defense in depth against a
+different bot/App sharing the structural shape) — it is layered on TOP of the
+structural check, never a standalone/sole gate, and the broken
+`authorKind != "human"` fallback is gone entirely. A round whose only
+candidate verdict fails this gate has no authenticated preceding verdict and
+is excluded — fail-closed toward NOT tripping (R4).
 
 The per-round trailer JOIN (the [P1] round-1 review fix) is load-bearing:
 counting **every** frozen-head zero-commit comment would (a) let stale
@@ -5860,7 +5885,12 @@ CB-COUNT-009c a non-matching active canonical → 0; CB-COUNT-009h/i a human/oth
 comment QUOTING a matching trailer is REJECTED so the genuine non-matching verdict
 is used and the round is excluded — round-11 [P1]; CB-COUNT-009j the genuine
 trailer is still counted despite an unrelated quote present; CB-COUNT-009k the
-BOT_LOGIN-empty fallback also rejects the quote via authorKind); the trip (CB-TRIP-001: ≥3 frozen
+BOT_LOGIN-empty fallback also rejects the quote via the structural `startswith`
+anchor; round-13 [BLOCKING]: CB-COUNT-009l the REAL `GH_AUTH_MODE=token` topology
+(`BOT_LOGIN` empty AND the genuine verdict trailer's `authorKind=human`, shared
+PAT identity) still counts the genuine rounds, CB-COUNT-009m the same topology
+trips end-to-end, CB-COUNT-009n the round-11 prose-prefixed-quote rejection still
+holds under the same topology); the trip (CB-TRIP-001: ≥3 frozen
 + `dev-actionable=true` + eligible → ONE report + marker + `pending-dev → stalled`,
 NO `mark_stalled`, NO dev-new, log intact); the report content (CB-REPORT-008: PR
 ref + frozen SHA + resume instruction + count + verbatim finding + the **per-round

@@ -79,7 +79,7 @@ dispatcher-crashes and is moved by `dev-actionable=false` rounds).
 Reset: the count naturally resets when the head advances (the comment filter is
 `head == current_head`) OR when the trailer-hash changes (see secondary gate).
 
-### Preceding-verdict authenticity (round-11 [BLOCKING] [P1])
+### Preceding-verdict authenticity (round-11 [BLOCKING] [P1], corrected round-13 [BLOCKING] [P1])
 
 The round comment is authenticated (round-7 — `authorKind != "human"` +
 `startswith`, see the implementation), but the CANDIDATE VERDICT it is joined
@@ -93,13 +93,30 @@ breaker (reproduced: `count_frozen_convergence_rounds` returned 1 with only a
 genuine `failed-non-substantive` verdict preceding, because a quoted
 `failed-substantive` trailer in a human comment won the selection).
 
-Fix: gate the candidate-verdict set with the SAME [INV-20]-style actor binding
-used elsewhere (`classify_recent_review_verdict`, `recent_review_verdict_body`)
-— `.author == BOT_LOGIN` when set (exact match, stricter than authorKind — a
-different bot/App is still rejected), else the coarse `authorKind != "human"`
-fallback (mirrors the round-comment side's own BOT_LOGIN-empty branching). A
-round whose only candidate verdict fails this gate has no authenticated
-preceding verdict and is excluded (fail-closed toward MISS, R4).
+round-11's first fix gated the candidate-verdict set with the SAME
+[INV-20]-style actor binding used elsewhere (`classify_recent_review_verdict`,
+`recent_review_verdict_body`) — `.author == BOT_LOGIN` when set, else the
+coarse `authorKind != "human"` fallback. **That fallback was itself wrong
+(round-13 [BLOCKING] [P1]):** `BOT_LOGIN` is resolved only inside
+`autonomous-review.sh`'s own separate process and is NEVER set in the
+dispatcher's own process, in ANY `GH_AUTH_MODE` — so this call site ALWAYS
+takes the empty-`BOT_LOGIN` branch. In `GH_AUTH_MODE=token`, the review
+wrapper's genuine verdict trailer shares the dispatcher's PAT identity, so it
+too normalizes to `authorKind=human` — the `authorKind != "human"` fallback
+rejected every genuine verdict, and `count_frozen_convergence_rounds` stayed 0
+forever (breaker dead in the officially supported token-mode topology).
+
+Fix: use the SAME structural signal `recent_review_verdict_body` already
+relies on — `emit_verdict_trailer` posts the trailer as its own bare comment
+whose body is JUST the trailer line, no human text. `startswith("<!--
+review-verdict:")` is therefore authorship-independent: true for the genuine
+comment, false for a human's prose-prefixed quote, regardless of authorKind.
+This structural check is now the PRIMARY, always-required gate; `.author ==
+BOT_LOGIN` is retained as an ADDITIONAL, strictly-stronger AND-condition for
+the rare path where `BOT_LOGIN` happens to be set — never a standalone/sole
+gate, and the broken `authorKind != "human"` fallback is gone. A round whose
+only candidate verdict fails this gate has no authenticated preceding verdict
+and is excluded (fail-closed toward MISS, R4).
 
 ### Secondary gate (C1/C2): identical trailer-hash
 
