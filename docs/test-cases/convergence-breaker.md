@@ -25,6 +25,10 @@ CI parity.
 | CB-COUNT-009a | Stale `failed-non-substantive` rounds precede the active `failed-substantive`+`dev-actionable=true` rounds on the same SHA | Count = only the active-case rounds (stale excluded → no early trip) — [P1] round-1 finding 1 |
 | CB-COUNT-009b | A prior `dev-actionable=false` round on the same SHA + genuine active `dev-actionable=true` rounds | The false round is excluded but does NOT zero the active rounds (no forever-suppression) — [P1] round-1 finding 1 |
 | CB-COUNT-009c | Active canonical does not match the rounds' verdict | Count = 0 |
+| CB-COUNT-009h | The ONLY genuine preceding verdict is non-matching, but a HUMAN comment between it and the round QUOTES a matching trailer | The quote is REJECTED (unauthenticated); the genuine non-matching verdict is used; round excluded (0) — round-11 [P1] BLOCKING |
+| CB-COUNT-009i | Same shape, but the impersonating comment is from a DIFFERENT bot (author != BOT_LOGIN) | Rejected regardless of authorKind matching "not human" — round-11 [P1] BLOCKING |
+| CB-COUNT-009j | Genuine matching trailer present, PLUS an unrelated human quote | Genuine trailer still counted (regression guard: the fix does not over-reject) |
+| CB-COUNT-009k | BOT_LOGIN empty (token-mode fallback) + a human quote of a matching trailer | Quote still rejected via the `authorKind != "human"` fallback bound |
 | CB-SHARED-010 | Source-of-truth | `mark_stalled` and the breaker both call `may_stall_now`; the `pid_alive` liveness block is NOT duplicated |
 | CB-DUAL-011 | Trip terminal comment count | Exactly ONE terminal comment (the #297 report); NO `mark_stalled` "@owner retry exhausted" dual-post |
 | CB-THRESH-012 | `CONVERGENCE_STALL_THRESHOLD` override honored | With threshold=4, 3 frozen rounds do NOT trip; 4 do |
@@ -32,7 +36,7 @@ CI parity.
 
 ## Acceptance criteria coverage
 
-- **AC1** (detect non-convergence + halt): CB-TRIP-001, CB-COUNT-009a/b/c, CB-THRESH-012.
+- **AC1** (detect non-convergence + halt): CB-TRIP-001, CB-COUNT-009a/b/c/h/i/j/k, CB-THRESH-012.
 - **AC2** (single structured report with reason + SHA + repeated findings + human checklist): CB-REPORT-008, CB-DUAL-011.
 - **AC3** (converging loops unaffected + idempotent): CB-MISS-002, CB-MISS-003, CB-IDEM-006, CB-IDEM-007.
 - **AC4** (docs updated: dispatcher-flow + INV-103): enforced by the pipeline-docs-gate + TC-SPEC-GATE-040/041 (heading-adjacent triage tag).

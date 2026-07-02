@@ -144,9 +144,19 @@ itp_list_comments() {
     _bodies+=("${_MOCK_STALE_VERDICT_TRAILER:-<!-- review-verdict: failed-non-substantive cause=bot-timeout -->}")
     _bodies+=("$_round")
   done
-  # Active-case rounds: each preceded by the active verdict trailer.
+  # Active-case rounds: each preceded by the active verdict trailer, THEN
+  # (round-11 [P1]) an optional UNAUTHENTICATED comment quoting a trailer —
+  # positioned AFTER the genuine verdict and BEFORE the round comment, so a
+  # naive (unauthenticated) `last`-before-round selection would pick the quote
+  # instead of the real trailer. `_MOCK_HUMAN_TRAILER_QUOTE` = a human
+  # (authorKind=human) quoting `_MOCK_HUMAN_TRAILER_QUOTE`'s trailer text;
+  # `_MOCK_OTHERBOT_TRAILER_QUOTE` = a DIFFERENT bot (authorKind=bot, author
+  # != BOT_LOGIN) posting its own trailer text — both must be rejected by the
+  # authenticity gate regardless of authorKind.
   for ((i = 0; i < _MOCK_FROZEN_ROUND_COMMENTS; i++)); do
     _bodies+=("${_MOCK_ROUND_VERDICT_TRAILER:-<!-- review-verdict: failed-substantive -->}")
+    [[ -n "${_MOCK_HUMAN_TRAILER_QUOTE:-}" ]] && _bodies+=("HUMANQUOTE:${_MOCK_HUMAN_TRAILER_QUOTE}")
+    [[ -n "${_MOCK_OTHERBOT_TRAILER_QUOTE:-}" ]] && _bodies+=("OTHERBOT:${_MOCK_OTHERBOT_TRAILER_QUOTE}")
     _bodies+=("$_round")
   done
   if [[ "$_MOCK_NONACT_MARKER_PRESENT" != "0" ]]; then
@@ -179,6 +189,12 @@ itp_list_comments() {
     if [[ "$b" == HUMANQUOTE:* ]]; then
       _author="zxkane"; _akind="human"; b="${b#HUMANQUOTE:}"
     fi
+    # round-11 [P1]: a DIFFERENT bot (authorKind=bot, but author != BOT_LOGIN)
+    # posting/quoting a trailer — must be rejected by the exact author==BOT_LOGIN
+    # binding regardless of its authorKind matching the coarse "not human" bound.
+    if [[ "$b" == OTHERBOT:* ]]; then
+      _author="some-other-bot[bot]"; _akind="bot"; b="${b#OTHERBOT:}"
+    fi
     _json=$(jq -c --arg b "$b" --arg a "$_author" --arg k "$_akind" --arg ts "$_tsiso" --argjson id "$(( 100 + _ts ))" \
       '. + [{id:$id, author:$a, authorKind:$k, body:$b, createdAt:$ts}]' <<<"$_json")
     _ts=$((_ts + 1))
@@ -207,6 +223,8 @@ reset_mocks() {
   _MOCK_COMMENT_COUNT=0
   _MOCK_HUMAN_QUOTE_COMMENTS=0
   _MOCK_MACHINE_MIDBODY_QUOTES=0
+  _MOCK_HUMAN_TRAILER_QUOTE=""
+  _MOCK_OTHERBOT_TRAILER_QUOTE=""
   _MOCK_ROUNDS_AUTHORKIND="self"
   _MOCK_LAST_COMMENT_BODY=""
   _MOCK_FULL_COMMENT_LOG=""
@@ -371,6 +389,67 @@ handle_completed_session_routing 100 "sid-cb009e" "2026-05-21T03:18:00Z"
 assert_not_contains "CB-COUNT-009e: 2 real + 2 quoted rounds does NOT trip the breaker" \
   "reason=non-convergence" "$_MOCK_FULL_COMMENT_LOG"
 assert_not_contains "CB-COUNT-009e: no stalled transition" "pending-dev:stalled" "$_MOCK_LABEL_SWAPS"
+
+# ===========================================================================
+echo ""
+echo "=== CB-COUNT-009h/i/j: preceding-verdict AUTHENTICITY (round-11 [P1] BLOCKING) ==="
+
+# CB-COUNT-009h: the ONLY genuine preceding verdict is failed-non-substantive
+# (does not match the active canonical), but a HUMAN comment posted between it
+# and the round comment QUOTES a matching failed-substantive trailer. Before
+# the fix, the unauthenticated `last` selection would pick the human quote and
+# count the round; after the fix, the quote is rejected and the genuine
+# (non-matching) verdict is used instead — round excluded, count 0.
+reset_mocks
+_MOCK_PR_HEAD="deadbeef"
+_MOCK_LAST_REVIEWED_HEAD="deadbeef"
+_MOCK_FROZEN_ROUND_COMMENTS=1
+_MOCK_STALE_ROUNDS=0
+_MOCK_ROUND_VERDICT_TRAILER="<!-- review-verdict: failed-non-substantive cause=bot-timeout -->"
+_MOCK_HUMAN_TRAILER_QUOTE="Just quoting for context: <!-- review-verdict: failed-substantive -->"
+assert_eq "CB-COUNT-009h: human quote of a matching trailer is REJECTED — genuine non-substantive verdict used, round excluded (0)" \
+  "0" "$(count_frozen_convergence_rounds 100 deadbeef "$AC_SUB")"
+
+# CB-COUNT-009i: same shape, but the impersonating comment is from a DIFFERENT
+# bot (authorKind=bot, author != BOT_LOGIN) rather than a human — the exact
+# author==BOT_LOGIN binding rejects it regardless of authorKind.
+reset_mocks
+_MOCK_PR_HEAD="deadbeef"
+_MOCK_LAST_REVIEWED_HEAD="deadbeef"
+_MOCK_FROZEN_ROUND_COMMENTS=1
+_MOCK_STALE_ROUNDS=0
+_MOCK_ROUND_VERDICT_TRAILER="<!-- review-verdict: failed-non-substantive cause=bot-timeout -->"
+_MOCK_OTHERBOT_TRAILER_QUOTE="<!-- review-verdict: failed-substantive -->"
+assert_eq "CB-COUNT-009i: a DIFFERENT bot's trailer is REJECTED (author != BOT_LOGIN) — round excluded (0)" \
+  "0" "$(count_frozen_convergence_rounds 100 deadbeef "$AC_SUB")"
+
+# CB-COUNT-009j: regression guard — the genuine bot verdict is STILL picked up
+# (and the round STILL counted) even when a human/other-bot quote is also
+# present, as long as the genuine trailer's canonical matches the active case.
+reset_mocks
+_MOCK_PR_HEAD="deadbeef"
+_MOCK_LAST_REVIEWED_HEAD="deadbeef"
+_MOCK_FROZEN_ROUND_COMMENTS=1
+_MOCK_STALE_ROUNDS=0
+_MOCK_ROUND_VERDICT_TRAILER="<!-- review-verdict: failed-substantive -->"
+_MOCK_HUMAN_TRAILER_QUOTE="Just quoting for context: <!-- review-verdict: failed-non-substantive cause=x -->"
+assert_eq "CB-COUNT-009j: genuine matching trailer still counted despite an unrelated human quote present" \
+  "1" "$(count_frozen_convergence_rounds 100 deadbeef "$AC_SUB")"
+
+# CB-COUNT-009k: BOT_LOGIN-empty fallback (token mode) — the coarse
+# authorKind!=human bound still rejects the human quote (proves the fallback
+# path, not just the strict-author path, closes the finding).
+reset_mocks
+_MOCK_PR_HEAD="deadbeef"
+_MOCK_LAST_REVIEWED_HEAD="deadbeef"
+_MOCK_FROZEN_ROUND_COMMENTS=1
+_MOCK_STALE_ROUNDS=0
+_MOCK_ROUND_VERDICT_TRAILER="<!-- review-verdict: failed-non-substantive cause=bot-timeout -->"
+_MOCK_HUMAN_TRAILER_QUOTE="Just quoting for context: <!-- review-verdict: failed-substantive -->"
+_saved_bot_login="$BOT_LOGIN"; BOT_LOGIN=""
+assert_eq "CB-COUNT-009k: BOT_LOGIN empty — human quote still rejected via authorKind!=human fallback (0)" \
+  "0" "$(count_frozen_convergence_rounds 100 deadbeef "$AC_SUB")"
+BOT_LOGIN="$_saved_bot_login"
 
 # ===========================================================================
 echo ""

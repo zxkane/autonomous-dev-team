@@ -79,6 +79,28 @@ dispatcher-crashes and is moved by `dev-actionable=false` rounds).
 Reset: the count naturally resets when the head advances (the comment filter is
 `head == current_head`) OR when the trailer-hash changes (see secondary gate).
 
+### Preceding-verdict authenticity (round-11 [BLOCKING] [P1])
+
+The round comment is authenticated (round-7 — `authorKind != "human"` +
+`startswith`, see the implementation), but the CANDIDATE VERDICT it is joined
+against was not: `_frozen_convergence_rounds_json` picked the newest PRIOR
+comment whose body merely contained a `<!-- review-verdict: … -->`-shaped
+string, regardless of who posted it. A maintainer/reviewer comment quoting a
+past trailer for discussion, posted between the genuine bot verdict and the
+Step-5b round comment, would win that unauthenticated `last` selection over the
+real trailer — letting an arbitrary discussion comment trip OR suppress the
+breaker (reproduced: `count_frozen_convergence_rounds` returned 1 with only a
+genuine `failed-non-substantive` verdict preceding, because a quoted
+`failed-substantive` trailer in a human comment won the selection).
+
+Fix: gate the candidate-verdict set with the SAME [INV-20]-style actor binding
+used elsewhere (`classify_recent_review_verdict`, `recent_review_verdict_body`)
+— `.author == BOT_LOGIN` when set (exact match, stricter than authorKind — a
+different bot/App is still rejected), else the coarse `authorKind != "human"`
+fallback (mirrors the round-comment side's own BOT_LOGIN-empty branching). A
+round whose only candidate verdict fails this gate has no authenticated
+preceding verdict and is excluded (fail-closed toward MISS, R4).
+
 ### Secondary gate (C1/C2): identical trailer-hash
 
 `trailer-hash` = a hash of the canonical string `{verdict}|{cause}|{dev-actionable}`

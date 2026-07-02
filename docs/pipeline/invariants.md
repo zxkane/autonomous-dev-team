@@ -5675,12 +5675,30 @@ the `startswith` anchor alone applies, so genuine rounds are never excluded)
 AND the body `startswith("Dev process exited (no new commits since last review
 at \`<head>\`)")` — a quote embedded mid-comment fails the anchor even when
 machine-authored. Each authentic round is then **joined to the review VERDICT it
-was reacting to** — the newest
-`<!-- review-verdict: … -->` trailer comment strictly BEFORE the round comment —
-counting the round **only when that verdict's canonical
-`{verdict}|{cause}|{dev-actionable}` equals the ACTIVE case's canonical**
-(`failed-substantive|<cause>|true` here). `count_frozen_convergence_rounds` is its
-length; the SAME matched-rounds JSON supplies the report's per-round timestamps.
+was reacting to** — the newest **AUTHENTICATED** `<!-- review-verdict: … -->`
+trailer comment strictly BEFORE the round comment — counting the round **only
+when that verdict's canonical `{verdict}|{cause}|{dev-actionable}` equals the
+ACTIVE case's canonical** (`failed-substantive|<cause>|true` here).
+`count_frozen_convergence_rounds` is its length; the SAME matched-rounds JSON
+supplies the report's per-round timestamps.
+
+**PRECEDING-VERDICT AUTHENTICITY (round-11 [BLOCKING] [P1]):** the round comment
+was authenticated (above), but the CANDIDATE VERDICT it is joined against was
+not — any comment whose body merely CONTAINED a `<!-- review-verdict: … -->`-
+shaped string, however posted, could be selected as "the verdict this round
+reacted to". A maintainer/reviewer comment quoting a past trailer for
+discussion, posted between the genuine bot verdict and the Step-5b round
+comment, would win the unauthenticated `last`-before-round selection over the
+real trailer — letting arbitrary discussion comments TRIP or SUPPRESS the
+breaker. The candidate-verdict set is now gated the SAME way [INV-20] gates
+verdict authentication elsewhere (`classify_recent_review_verdict`,
+`recent_review_verdict_body`): with `BOT_LOGIN` set, require the EXACT actor
+binding `.author == BOT_LOGIN` (strictly stronger than authorKind — a
+same-authorKind=bot comment from a DIFFERENT bot/App is still rejected); with
+`BOT_LOGIN` empty (the fallback topology), fall back to the SAME coarse
+`authorKind != "human"` bound the round-comment side already uses. A round
+whose only candidate verdict fails this gate has no authenticated preceding
+verdict and is excluded — fail-closed toward NOT tripping (R4).
 
 The per-round trailer JOIN (the [P1] round-1 review fix) is load-bearing:
 counting **every** frozen-head zero-commit comment would (a) let stale
@@ -5807,7 +5825,11 @@ determinism (keyed on verdict|cause|dev-actionable); the trailer-joined
 `count_frozen_convergence_rounds` (CB-COUNT-009a stale non-substantive rounds on the
 same SHA EXCLUDED — no early trip; CB-COUNT-009b a prior `dev-actionable=false`
 round EXCLUDED without zeroing the genuine active rounds — no forever-suppression;
-CB-COUNT-009c a non-matching active canonical → 0); the trip (CB-TRIP-001: ≥3 frozen
+CB-COUNT-009c a non-matching active canonical → 0; CB-COUNT-009h/i a human/other-bot
+comment QUOTING a matching trailer is REJECTED so the genuine non-matching verdict
+is used and the round is excluded — round-11 [P1]; CB-COUNT-009j the genuine
+trailer is still counted despite an unrelated quote present; CB-COUNT-009k the
+BOT_LOGIN-empty fallback also rejects the quote via authorKind); the trip (CB-TRIP-001: ≥3 frozen
 + `dev-actionable=true` + eligible → ONE report + marker + `pending-dev → stalled`,
 NO `mark_stalled`, NO dev-new, log intact); the report content (CB-REPORT-008: PR
 ref + frozen SHA + resume instruction + count + verbatim finding + the **per-round

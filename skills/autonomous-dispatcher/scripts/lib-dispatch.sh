@@ -1240,6 +1240,27 @@ convergence_trailer_hash() {
 #      sentence; a quote embedded mid-comment (reply context, code fence) fails
 #      the anchor even when machine-authored.
 #
+# PRECEDING-VERDICT AUTHENTICITY (review round-11 [P1] BLOCKING): the ROUND
+# comment was authenticated (above), but the PRECEDING verdict trailer ($pv,
+# below) was NOT — any comment containing a `<!-- review-verdict: … -->`-shaped
+# string, however posted, could be picked as "the verdict this round reacted
+# to". A maintainer/reviewer comment QUOTING a trailer (e.g. discussing a past
+# verdict, or pasting one for context) posted between the real bot verdict and
+# the Step-5b round comment would win the `last` selection over the genuine
+# trailer, letting arbitrary discussion comments trip OR suppress the breaker.
+# Fix: gate the preceding-verdict candidate set the SAME way [INV-20] gates
+# verdict authentication elsewhere (`classify_recent_review_verdict`,
+# `recent_review_verdict_body`) — when `BOT_LOGIN` is set, require the EXACT
+# actor binding `.author == BOT_LOGIN` (strictly stronger than authorKind: a
+# same-authorKind=bot comment from a DIFFERENT bot/App would still be
+# rejected); when BOT_LOGIN is empty (the gh-api-user-403 fallback topology),
+# fall back to the SAME coarse `authorKind != "human"` bound already used for
+# round-comment authenticity above — strictly better than no check, and
+# directly excludes the reported repro (a `human`-authorKind comment quoting
+# the trailer). A round whose ONLY candidate verdict fails this gate has no
+# authenticated `$pv` and is therefore excluded (fail-closed toward NOT
+# tripping) — exactly the #286-adjacent MISS bias this breaker is designed for.
+#
 # Fail-closed toward NOT tripping: an empty/error fetch yields `[]` (biases to
 # MISS per R4). The trailer parse mirrors classify_recent_review_verdict: verdict
 # = first `[a-z-]+` token; cause captured ONLY for failed-non-substantive; absent
@@ -1263,7 +1284,9 @@ _frozen_convergence_rounds_json() {
   # drop the author filter and rely on the startswith() anchor alone
   # (mid-body quotes still excluded; a human pasting the EXACT line at
   # offset 0 is accepted — the pre-existing exposure, strictly better than
-  # the old contains() which accepted any placement).
+  # the old contains() which accepted any placement). The SAME flag also
+  # gates the preceding-verdict actor predicate below (round-11 [P1]) — one
+  # source of truth for "is BOT_LOGIN available to bind against".
   local _strict_author=1
   [ -n "${BOT_LOGIN:-}" ] || _strict_author=0
 
@@ -1271,10 +1294,15 @@ _frozen_convergence_rounds_json() {
   #  - `canon(body)`: parse the review-verdict trailer into the canonical
   #    `{verdict}|{cause}|{dev-actionable}`, mirroring classify_recent_review_verdict
   #    (cause only for failed-non-substantive; absent dev-actionable ⇒ true).
-  #  - For each round comment on the frozen head, find the newest verdict trailer
-  #    comment with createdAt < the round's, compute its canonical, keep the round
-  #    iff that canonical == $ac. Emit the matched rounds' {createdAt}, sorted.
-  jq -c --arg head "$frozen_head" --arg ac "$active_canonical" --arg strict_author "$_strict_author" '
+  #  - `authentic_verdict(c)`: [INV-20]-style actor binding for a CANDIDATE
+  #    verdict comment `c` — `.author == $bot_login` when BOT_LOGIN is set
+  #    (exact match, mirrors classify_recent_review_verdict), else the coarse
+  #    `authorKind != "human"` fallback (round-11 [P1]).
+  #  - For each round comment on the frozen head, find the newest AUTHENTIC
+  #    verdict trailer comment with createdAt < the round's, compute its
+  #    canonical, keep the round iff that canonical == $ac. Emit the matched
+  #    rounds' {createdAt}, sorted.
+  jq -c --arg head "$frozen_head" --arg ac "$active_canonical" --arg strict_author "$_strict_author" --arg bot_login "${BOT_LOGIN:-}" '
     def trailer($b):
       ($b | capture("<!--[[:space:]]*review-verdict:[[:space:]]*(?<v>[a-z-]+)(?<rest>[^>]*)-->"; "g") ) // null;
     def canon($b):
@@ -1287,12 +1315,16 @@ _frozen_convergence_rounds_json() {
           | (if $v == "failed-non-substantive" then $c else "" end) as $cc
           | "\($v)|\($cc)|\($d)"
         end;
+    def authentic_verdict(c):
+      if $strict_author == "0" then c.authorKind != "human"
+      else c.author == $bot_login
+      end;
     ( [ .[] | select(.body | type == "string") ] | sort_by(.createdAt) ) as $all
     | [ $all[]
         | select(($strict_author == "0") or (.authorKind != "human"))
         | select(.body | startswith("Dev process exited (no new commits since last review at `" + $head + "`)"))
         | . as $round
-        | ( [ $all[] | select((.createdAt < $round.createdAt) and (canon(.body) != null)) ]
+        | ( [ $all[] | select((.createdAt < $round.createdAt) and authentic_verdict(.) and (canon(.body) != null)) ]
             | last ) as $pv
         | select($pv != null and (canon($pv.body) == $ac))
         | {createdAt: $round.createdAt}
