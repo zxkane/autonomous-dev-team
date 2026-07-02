@@ -18,9 +18,17 @@ Before starting the review, check whether the PR branch has merge conflicts with
    # Fetch latest main and the PR branch
    git fetch origin main <PR_BRANCH>
 
-   # Create a temporary worktree for the rebase
-   git worktree add /tmp/rebase-pr-<PR_NUMBER> <PR_BRANCH>
-   cd /tmp/rebase-pr-<PR_NUMBER>
+   # [INV-100] (#355): idempotent pre-clean — a crashed prior lane (same
+   # project, same agent, same PR) can leave this exact dir behind; remove it
+   # BEFORE `git worktree add` so a retry never wedges on a stale worktree.
+   git worktree remove --force /tmp/rebase-<PROJECT_ID>-<AGENT_NAME>-pr-<PR_NUMBER> 2>/dev/null || rm -rf /tmp/rebase-<PROJECT_ID>-<AGENT_NAME>-pr-<PR_NUMBER>
+
+   # Create a temporary worktree for the rebase — keyed by PROJECT_ID + this
+   # agent's name + the PR number, so a cross-project collision AND a
+   # multi-agent fan-out collision (AGENT_REVIEW_AGENTS running N agents
+   # against the SAME PR, each independently doing Step 0) are both ruled out.
+   git worktree add /tmp/rebase-<PROJECT_ID>-<AGENT_NAME>-pr-<PR_NUMBER> <PR_BRANCH>
+   cd /tmp/rebase-<PROJECT_ID>-<AGENT_NAME>-pr-<PR_NUMBER>
 
    # Rebase onto main
    git rebase origin/main
@@ -33,7 +41,7 @@ Before starting the review, check whether the PR branch has merge conflicts with
 
    # Clean up temporary worktree
    cd -
-   git worktree remove /tmp/rebase-pr-<PR_NUMBER>
+   git worktree remove /tmp/rebase-<PROJECT_ID>-<AGENT_NAME>-pr-<PR_NUMBER>
 
    # Wait for CI to restart on the new HEAD (checks reset after force push)
    # Poll until checks appear and complete
@@ -52,7 +60,7 @@ Before starting the review, check whether the PR branch has merge conflicts with
 
    # Clean up temporary worktree
    cd -
-   git worktree remove /tmp/rebase-pr-<PR_NUMBER> --force
+   git worktree remove /tmp/rebase-<PROJECT_ID>-<AGENT_NAME>-pr-<PR_NUMBER> --force
    ```
    **FAIL the review immediately** with:
    ```

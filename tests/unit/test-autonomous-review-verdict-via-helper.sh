@@ -113,6 +113,11 @@ SANDBOX_OUT=$(
   }
   PR_NUMBER=210; ISSUE_NUMBER=202; REPO="owner/repo"; REPO_OWNER="owner"
   REPO_NAME="repo"; PR_BRANCH="feat/x"; REVIEW_BOTS_VALIDATED=""; E2E_ACTIVE="false"
+  # #355: pin PROJECT_ID for a deterministic self-provisioned lane-dir path
+  # (build_review_prompt's 2-arg legacy callers self-provision one) — without
+  # this, the ambient PROJECT_ID from whatever project's autonomous.conf
+  # happens to be sourced would leak into the rendered path.
+  PROJECT_ID="test-proj"
   # INV-60: per-agent model resolution. Set an override for kiro so the
   # per-agent-override path (TC-PVP-09) renders a distinct id; an agy override
   # with SPACES + PARENS (TC-PVP-12, the multi-word-model quoting regression);
@@ -271,10 +276,10 @@ fi
 # ends with `'Gemini 3.5 Flash (High)'` (the quoted whole id) after agy's sid.
 # Count only the concrete INVOCATION lines (those that write a body file), not
 # the INV-56 prose mention of `bash scripts/post-verdict.sh` with no positional
-# args — match on the `/tmp/verdict-agy-202-sid-agy.md` body-file token (#353:
-# namespaced by issue + session id, not just agent name) that only an actual
-# invocation carries.
-_n_agy_inv=$(grep -E 'post-verdict\.sh' <<<"$agy_block" | grep -cF '/tmp/verdict-agy-202-sid-agy.md')
+# args — match on the self-provisioned lane-dir verdict.md body-file token
+# (#355: `/tmp/review-<project>-agy-202-XXXXXX/verdict.md`, no session-id
+# token) that only an actual invocation carries.
+_n_agy_inv=$(grep -E 'post-verdict\.sh' <<<"$agy_block" | grep -cE '/tmp/review-test-proj-agy-202-[A-Za-z0-9]+/verdict\.md')
 _n_agy_quoted=$(grep -cF "agy sid-agy 'Gemini 3.5 Flash (High)'" <<<"$agy_block")
 if [[ "$_n_agy_inv" -ge 1 && "$_n_agy_quoted" -eq "$_n_agy_inv" ]]; then
   echo -e "  ${GREEN}PASS${NC}: TC-PVP-12 all $_n_agy_inv agy invocation(s) single-quote the multi-word model as one token"

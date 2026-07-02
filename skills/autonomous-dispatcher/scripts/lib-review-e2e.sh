@@ -307,7 +307,13 @@ _E2E_LANE_PGID=""
 _run_command_e2e_lane() {
   local rc_file="$1"
   local rc=0
-  local log="/tmp/e2e-${PR_NUMBER}.log"
+  # [INV-100] (#355): keyed by PROJECT_ID + PR_NUMBER — the bare PR-number-only
+  # form collided across projects (two different projects' PRs can share a
+  # number). Truncated on open (below), not appended, so a same-PR retry on a
+  # later tick starts this round's log clean rather than concatenating onto a
+  # prior round's (potentially large, definitely confusing) log tail.
+  local log="/tmp/e2e-${PROJECT_ID:-}-${PR_NUMBER}.log"
+  : > "$log" 2>/dev/null || true
 
   # INV-49: start each round with an empty AC-coverage sidecar so a prior round's
   # artifact can never leak into a path that never reaches the parser (pre-hook /
