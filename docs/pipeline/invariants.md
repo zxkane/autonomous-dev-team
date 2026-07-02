@@ -5396,10 +5396,11 @@ path ([INV-01](#inv-01-pid-file-naming)) with the exact same content contract
 single line for this fix, and neither needs to know a lock file briefly
 existed alongside the PID file during acquisition.
 
-**Link-following defense on the lock sidecar (CWE-59) — TWO rounds, the
-second one load-bearing.** `${pid_file}.lock` did not exist before this
-invariant, so it needed its own defense against a same-user attacker
-pre-planting it to point at a victim file:
+**Link-following AND blocking-open defense on the lock sidecar — THREE
+review rounds.** `${pid_file}.lock` did not exist before this invariant, so
+it needed its own defense against a same-user attacker (or stale artifact)
+pre-planting it as something other than an ordinary, absent-or-regular
+file:
 
 - **Round 1 (codex review, PR #365): symlink check.** `${pid_file}.lock`
   gets the same `-L` rejection [INV-02](#inv-02-pid-file-is-not-a-symlink)
@@ -5427,14 +5428,38 @@ pre-planting it to point at a victim file:
   caught. This costs nothing functionally: the lock file is never written
   through (the PID goes to `pid_file`, a completely separate path), and
   `flock` behaves identically on an append-mode file descriptor.
+- **Round 3 (codex review, PR #365, same PR): append mode alone does not
+  bound the OPEN'S OWN latency — a FIFO left at the lock path blocks
+  `exec {fd}>>` indefinitely before `flock -w` ever gets a chance to run.**
+  `flock -w "$wait_s"` only bounds the wait for the LOCK once the file
+  descriptor is open; it has no say over how long the underlying `open(2)`
+  itself takes. Opening a FIFO for writing blocks in the kernel until a
+  reader connects — with no reader (the normal case for a lock sidecar), the
+  `exec {fd}>>"$lock_file"` line never returns, so `wait_s` is never reached
+  and the wrapper hangs indefinitely on a `mkfifo`'d (or Unix-socket'd,
+  device-node'd) sidecar left at the predictable path. Reproduced by the
+  reviewer with `mkfifo "${pid_file}.lock"` + `timeout 3 acquire_pid_guard …`
+  → rc 124 (timed out, never returned) before this check existed. **Fix**:
+  reject the lock path BEFORE opening it if it exists and is not a regular
+  file (`[[ -e "$lock_file" && ! -f "$lock_file" ]]`) — `-f` correctly
+  follows a symlink (already excluded by round 1) and is true for a hard
+  link to a regular file (round 2's case, still allowed), so this check adds
+  FIFO/socket/device/directory rejection without re-breaking rounds 1-2's
+  allowed cases. A MISSING lock file is fine (`>>` creates a fresh regular
+  file), so the check is scoped to "exists AND is not regular," not
+  "must pre-exist as regular."
 
-Round 1's `-L` check is retained as belt-and-suspenders (it rejects a
-symlinked sidecar outright, one syscall, no reason to remove it now that
-round 2 also covers that case) — but round 2's append-mode open is what
-actually makes the invariant hold. The window between the `-L` check and the
-open is the same accepted-risk posture [INV-02] already applies to `pid_file`
-itself (the per-user PID dir is mode 0700, so this defends only against the
-resource's own user, same threat model).
+Round 1's `-L` check and round 3's non-regular-file check are both retained
+as up-front, non-blocking rejections (cheap `[[ ]]` tests, no reason to
+remove either now that round 2 also covers the truncation half of the
+symlink/hard-link cases) — but round 2's append-mode open is what makes the
+truncation-safety half of the invariant hold, and round 3's pre-open type
+check is what makes the bounded-wait half hold (append mode alone cannot
+bound an `open(2)` that blocks for a reason OTHER than truncation). The
+window between these checks and the open is the same accepted-risk posture
+[INV-02] already applies to `pid_file` itself (the per-user PID dir is mode
+0700, so this defends only against the resource's own user, same threat
+model).
 
 **Why**: the pre-#360 check-then-write read `pid_file`, ran `kill -0` on any
 existing PID, and only THEN wrote `$$` — three separate operations with two
@@ -5486,11 +5511,16 @@ preserved), TC-ATOMIC-004 (symlink PID file still rejected —
 victim file it points at is verified untouched), TC-ATOMIC-004c (round 2:
 a HARD-linked lock sidecar — confirmed NOT reported by `-L` — still leaves
 its victim file's content untouched, proving the append-mode fix rather than
-detection is what closes this case), TC-ATOMIC-005 (source-of-truth: the
-function body uses an atomic primitive, carries no separate stale-lock
-reclaim code path, the lock-file symlink check's source line precedes the
-flock-open `exec`'s source line, the truncating `>` form is ABSENT, and the
-append-mode `>>` form is PRESENT). Existing `tests/unit/test-pid-guard.sh`
+detection is what closes this case), TC-ATOMIC-004d (round 3: a FIFO lock
+sidecar is rejected in well under a second rather than hanging — the call
+runs inside a generous 10s outer `timeout` that must NEVER actually fire;
+the assertion is on the function's own bounded return, not on the outer
+timeout rescuing the test), TC-ATOMIC-005 (source-of-truth: the function
+body uses an atomic primitive, carries no separate stale-lock reclaim code
+path, the lock-file symlink check's source line precedes the flock-open
+`exec`'s source line, the truncating `>` form is ABSENT, the append-mode
+`>>` form is PRESENT, and the non-regular-file check's source line precedes
+the flock-open `exec`'s source line). Existing `tests/unit/test-pid-guard.sh`
 and `tests/unit/test-pid-guard-pgid.sh` stay green unmodified (R1
 back-compat).
 

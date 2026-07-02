@@ -598,6 +598,25 @@ acquire_pid_guard() {
   # incomplete on its own.
   [[ -L "$lock_file" ]] && { echo "Error: lock file is a symlink — possible attack" >&2; exit 1; }
 
+  # Load-bearing (PR #365 review finding, round 3): reject a lock path that
+  # EXISTS but is not a regular file — a FIFO, socket, character/block
+  # device, or directory. `-f` follows a symlink (already excluded above)
+  # and true for a hard link to a regular file, so this correctly allows
+  # both while catching everything else. Without this, `exec {fd}>>` on a
+  # FIFO with no reader BLOCKS INSIDE THE OPEN ITSELF — before `flock -w`
+  # ever gets a chance to run its bounded wait — so a same-user process (or
+  # stale artifact) that leaves `${pid_file}.lock` as a FIFO hangs the
+  # wrapper indefinitely; the `wait_s` timeout below is never reached
+  # because the redirection never returns. Reproduced with `mkfifo` +
+  # `timeout 3 acquire_pid_guard …` → rc 124 (never returns) before this
+  # check existed. A MISSING lock_file is fine — `>>` creates a fresh
+  # regular file — so the check is scoped to "exists AND is not a regular
+  # file", not "must already exist as a regular file".
+  if [[ -e "$lock_file" && ! -f "$lock_file" ]]; then
+    echo "Error: lock file exists but is not a regular file (FIFO/socket/device/directory) — possible attack or stale artifact; refusing to open it" >&2
+    exit 1
+  fi
+
   local wait_s="${ACQUIRE_PID_GUARD_LOCK_WAIT_SECONDS:-2}"
   local _lock_fd
 

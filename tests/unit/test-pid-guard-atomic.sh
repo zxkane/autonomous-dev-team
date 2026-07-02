@@ -436,6 +436,54 @@ assert_eq "victim file content is untouched (no truncation via the hard-linked l
 rm -f "$HARDLINK_PID_FILE" "$HARDLINK_LOCK_FILE" "$HARDLINK_VICTIM_FILE"
 
 # ============================================================================
+# TC-ATOMIC-004d: a FIFO lock sidecar is rejected BEFORE the blocking open,
+# not left to hang forever (codex review finding on PR #365, round 3).
+# `exec {fd}>>` on a FIFO with no reader blocks INSIDE THE OPEN ITSELF —
+# before `flock -w` ever gets a chance to run its bounded wait — so a
+# same-user process (or stale artifact) that leaves `${pid_file}.lock` as a
+# FIFO hangs the wrapper indefinitely; `ACQUIRE_PID_GUARD_LOCK_WAIT_SECONDS`
+# is never reached because the redirection itself never returns. Reproduced
+# by the reviewer with `mkfifo` + `timeout 3 acquire_pid_guard …` -> rc 124.
+# This test pins that the call now returns almost instantly (well under the
+# wait budget) with a loud rejection, rather than hanging until an external
+# timeout kills it.
+# ============================================================================
+echo
+echo "=== TC-ATOMIC-004d: FIFO lock sidecar is rejected instantly, not left to hang ==="
+echo
+
+if command -v mkfifo >/dev/null 2>&1; then
+  FIFO_PID_FILE="$TMPDIR/fifo-attack.pid"
+  FIFO_LOCK_FILE="${FIFO_PID_FILE}.lock"
+  rm -f "$FIFO_PID_FILE" "$FIFO_LOCK_FILE"
+  mkfifo "$FIFO_LOCK_FILE"
+
+  FIFO_START_S=$(date +%s)
+  # A generous outer timeout (10s) that should NEVER actually fire — the
+  # function itself must return well within it. If the fix regresses to a
+  # blocking open, this `timeout` is what keeps the test suite from hanging
+  # forever, but the assertion below is on the FUNCTION's own return, not
+  # on the outer timeout rescuing us. `timeout` execs an external command,
+  # so it can't invoke the shell function directly — same `bash -c` +
+  # re-source pattern as TC-ATOMIC-001c above.
+  ( timeout 10 bash -c 'source "'"$TMPDIR"'/skills/autonomous-dispatcher/scripts/lib-agent.sh" 2>/dev/null; acquire_pid_guard "'"$FIFO_PID_FILE"'" test-fifo-lock 101' 2>/dev/null )
+  FIFO_RC=$?
+  FIFO_ELAPSED_S=$(($(date +%s) - FIFO_START_S))
+
+  assert_eq "FIFO lock sidecar is rejected with exit 1 (not left hanging)" "1" "$FIFO_RC"
+  if [[ "$FIFO_ELAPSED_S" -lt 5 ]]; then
+    echo -e "  ${GREEN}PASS${NC}: rejection returned in ${FIFO_ELAPSED_S}s — well under the 10s outer timeout (not blocked in the open)"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${NC}: rejection took ${FIFO_ELAPSED_S}s — suspiciously close to/over the outer timeout, suggesting the open still blocks"
+    FAIL=$((FAIL + 1))
+  fi
+  rm -f "$FIFO_LOCK_FILE" "$FIFO_PID_FILE"
+else
+  echo "  SKIP: mkfifo not available — FIFO-hang regression test skipped"
+fi
+
+# ============================================================================
 # TC-ATOMIC-005: source-of-truth — no bare check-then-write left in the fn
 # ============================================================================
 echo
@@ -458,7 +506,7 @@ fi
 # FIRST caller's freshly-reacquired lock instead of the stale one. flock's
 # kernel-level auto-release on fd-close (including process death) makes any
 # such heuristic unnecessary; its presence here would be a regression.
-if grep -qE '_lock_dir_age_seconds|stale.*lock|reclaim.*lock' <<<"$(tr '[:upper:]' '[:lower:]' <<<"$FN_BODY")"; then
+if grep -qE '_lock_dir_age_seconds|reclaim.*lock|rmdir.*lock_dir|lock_dir.*rmdir' <<<"$(tr '[:upper:]' '[:lower:]' <<<"$FN_BODY")"; then
   echo -e "  ${RED}FAIL${NC}: acquire_pid_guard still contains a stale-lock reclaim path (the raced design this PR replaced with flock)"
   FAIL=$((FAIL + 1))
 else
@@ -497,6 +545,19 @@ if grep -qE 'exec \{_lock_fd\}>>"\$lock_file"' <<<"$FN_BODY"; then
   PASS=$((PASS + 1))
 else
   echo -e "  ${RED}FAIL${NC}: acquire_pid_guard does not open the lock file in append mode"
+  FAIL=$((FAIL + 1))
+fi
+
+# Regression pin (codex review, PR #365 round 3): a non-regular-file check
+# (`-e && ! -f`) MUST appear in source before the `exec {fd}>>` redirection
+# — without it, a FIFO/socket/device left at the lock path blocks the OPEN
+# itself before flock -w's bounded wait ever runs, hanging the wrapper.
+LOCK_NONREGULAR_CHECK_LINE=$(grep -n '\-e "\$lock_file" && ! -f "\$lock_file"' "$LIB_AGENT" | head -1 | cut -d: -f1)
+if [[ -n "$LOCK_NONREGULAR_CHECK_LINE" && -n "$LOCK_EXEC_LINE" && "$LOCK_NONREGULAR_CHECK_LINE" -lt "$LOCK_EXEC_LINE" ]]; then
+  echo -e "  ${GREEN}PASS${NC}: lock-file non-regular-file check (line $LOCK_NONREGULAR_CHECK_LINE) precedes the flock-open exec (line $LOCK_EXEC_LINE)"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: lock-file non-regular-file check missing or does not precede the flock-open exec (check_line='$LOCK_NONREGULAR_CHECK_LINE' exec_line='$LOCK_EXEC_LINE')"
   FAIL=$((FAIL + 1))
 fi
 
