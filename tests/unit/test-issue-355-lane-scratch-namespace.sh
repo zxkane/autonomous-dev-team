@@ -1,5 +1,5 @@
 #!/bin/bash
-# test-issue-355-lane-scratch-namespace.sh — issue #355 (INV-99).
+# test-issue-355-lane-scratch-namespace.sh — issue #355 (INV-100).
 #
 # Superset hardening of #353/#354: every review-lane scratch path is keyed by
 # (PROJECT_ID, agent, PR/issue) via a wrapper-created lane dir (mktemp -d as

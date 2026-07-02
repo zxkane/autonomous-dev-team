@@ -62,7 +62,7 @@ _verdict_artifact_path() {
 
 # _verdict_body_lane_dir <project> <agent> <issue>
 #
-# [INV-99] (#355): mints and echoes THIS agent's per-lane scratch DIRECTORY for
+# [INV-100] (#355): mints and echoes THIS agent's per-lane scratch DIRECTORY for
 # the comment-fallback verdict body — `/tmp/review-<project>-<agent>-<issue>-
 # XXXXXX` (mktemp -d). Single source of truth so the fan-out loop's real
 # provisioning call and build_review_prompt's legacy-caller self-provisioning

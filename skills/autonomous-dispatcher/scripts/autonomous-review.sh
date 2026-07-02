@@ -3137,7 +3137,7 @@ for _i in "${!AGENT_VERDICT_LANE_DIRS[@]}"; do
   fi
 done
 
-# [INV-99] (#355 review finding): the E2E command-mode AC-coverage sidecar is
+# [INV-100] (#355 review finding): the E2E command-mode AC-coverage sidecar is
 # now RUN_ID-keyed (D4) rather than truncated-in-place per PR, so a fresh file
 # is minted every wrapper run with nothing removing the PREVIOUS run's file —
 # an unbounded /tmp accumulation the pre-#355 PR-number-only path never had

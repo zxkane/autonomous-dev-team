@@ -601,14 +601,14 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# [INV-99] (issue #355): D2 read-side enforcement. When VERDICT_BODY_FILE is
+# [INV-100] (issue #355): D2 read-side enforcement. When VERDICT_BODY_FILE is
 # set in the caller's environment, post-verdict.sh must (a) require the
 # positional body-file arg to realpath-equal it, (b) reject any OTHER
 # /tmp/verdict*.md literal outright, (c) reject an empty/whitespace-only body,
 # and (d) leave behavior byte-for-byte unchanged when the var is unset.
 # ---------------------------------------------------------------------------
 echo ""
-echo "--- TC-PV-25..31: D2 VERDICT_BODY_FILE read-side enforcement (INV-99, #355) ---"
+echo "--- TC-PV-25..31: D2 VERDICT_BODY_FILE read-side enforcement (INV-100, #355) ---"
 
 # TC-PV-25: VERDICT_BODY_FILE set + matching body-file arg → posts normally.
 SB=$(make_sandbox 0)
@@ -634,7 +634,7 @@ else
   echo -e "  ${RED}FAIL${NC}: TC-PV-26b gh was called despite a mismatched body-file path"
   FAIL=$((FAIL + 1))
 fi
-assert_contains "TC-PV-26c error names INV-99" "INV-99" "$OUT"
+assert_contains "TC-PV-26c error names INV-100" "INV-100" "$OUT"
 rm -rf "$SB"
 
 # TC-PV-27: VERDICT_BODY_FILE set + legacy /tmp/verdict-<agent>.md literal arg
