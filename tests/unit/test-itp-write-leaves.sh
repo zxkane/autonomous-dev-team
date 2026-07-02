@@ -85,20 +85,33 @@ export MAX_CONCURRENT=5
 # 1. GOLDEN-TRACE — record the exact `gh` argv each WRITE leaf emits, assert it
 #    byte-identical to the pre-refactor call (the no-behavior-change proof).
 # ===========================================================================
-# A recording `gh` stub: writes full argv (one arg per line) to $_GH_ARGV_FILE.
-# For `gh label view` it returns rc per $_GH_LABEL_VIEW_RC so the provision
-# view-or-create branch can be exercised both ways.
+# A recording `gh` stub: writes full argv (one arg per line) to $_GH_ARGV_FILE
+# AND appends a one-line record to $_GH_CALL_LOG (so callers can assert over
+# MULTIPLE invocations, not just the last). For the provision REST existence
+# probe (`gh api repos/<repo>/labels/<name> --silent`) it returns rc per
+# $_GH_LABEL_PROBE_RC so the probe-or-create branch can be exercised both ways.
+# [#362] `gh label` has NO `view` subcommand on real gh (only
+# clone/create/delete/edit/list) — the double does NOT implement it either; any
+# `label view` call is rejected loudly (mirroring real gh's "unknown command"
+# error), so a regression back to the pre-fix `gh label view` check trips
+# TC-PROVISION-NO-LABEL-VIEW below instead of silently recording success.
 _GH_ARGV_FILE="$(mktemp)"
-_GH_LABEL_VIEW_RC=1
+_GH_CALL_LOG="$(mktemp)"
+_GH_LABEL_PROBE_RC=1
 gh() {
   printf '%s\n' "$@" > "$_GH_ARGV_FILE"
+  printf '%s\n' "$*" >> "$_GH_CALL_LOG"
   if [[ "${1:-}" == "label" && "${2:-}" == "view" ]]; then
-    return "$_GH_LABEL_VIEW_RC"
+    echo 'unknown command "view" for "gh label"' >&2
+    return 1
+  fi
+  if [[ "${1:-}" == "api" && "${2:-}" == repos/*/labels/* && "${3:-}" == "--silent" ]]; then
+    return "$_GH_LABEL_PROBE_RC"
   fi
   return 0
 }
 export -f gh
-export _GH_ARGV_FILE _GH_LABEL_VIEW_RC
+export _GH_ARGV_FILE _GH_CALL_LOG _GH_LABEL_PROBE_RC
 
 # Source the provider leaves directly (default github).
 # shellcheck source=../../skills/autonomous-dispatcher/scripts/lib-issue-provider.sh
@@ -106,6 +119,8 @@ source "$ITP_LIB"
 set +e
 
 recorded_argv() { paste -sd' ' "$_GH_ARGV_FILE"; }
+reset_call_log() { : > "$_GH_CALL_LOG"; }
+call_log() { cat "$_GH_CALL_LOG"; }
 
 echo "=== GOLDEN-TRACE: itp_github_transition_state (label_swap leaf) ==="
 itp_github_transition_state 42 pending-dev pending-review >/dev/null
@@ -152,20 +167,67 @@ itp_github_mark_checkbox 42 "the new issue body" >/dev/null
 assert_eq "TC-GT-CHECKBOX PATCH body argv" \
   "api repos/$REPO/issues/42 --method PATCH --field body=the new issue body --silent" "$(recorded_argv)"
 
-echo "=== GOLDEN-TRACE: itp_github_provision_states (setup-labels leaf) ==="
-# label_colors=1 / not-exists → create with --color hex --description.
-_GH_LABEL_VIEW_RC=1
+echo "=== GOLDEN-TRACE: itp_github_provision_states (setup-labels leaf, [#362] REST probe) ==="
+# label_colors=1 / probe rc=1 (missing) → create with --color hex --description.
+# The create-branch argv stays byte-identical to the pre-#362 loop body.
+_GH_LABEL_PROBE_RC=1
+reset_call_log
 out=$(itp_github_provision_states autonomous 0E8A16 "Issue should be processed by autonomous pipeline")
 assert_eq "TC-GT-PROVISION-CREATE create argv with --color hex --description" \
   "label create autonomous --repo $REPO --color 0E8A16 --description Issue should be processed by autonomous pipeline" "$(recorded_argv)"
 assert_contains "TC-GT-PROVISION-CREATE prints [created]" "[created] 'autonomous'" "$out"
-# exists → skip, no create (last recorded argv is the `label view`).
-_GH_LABEL_VIEW_RC=0
+assert_contains "TC-GT-PROVISION-CREATE probes via gh api repos/*/labels/* --silent" \
+  "api repos/$REPO/labels/autonomous --silent" "$(call_log)"
+assert_not_contains "TC-GT-PROVISION-CREATE never calls gh label view" "label view" "$(call_log)"
+
+# probe rc=0 (exists) → skip, no create (last recorded argv is the REST probe).
+_GH_LABEL_PROBE_RC=0
+reset_call_log
 out=$(itp_github_provision_states autonomous 0E8A16 "desc")
-assert_eq "TC-GT-PROVISION-SKIP view-only argv (no create emitted)" \
-  "label view autonomous --repo $REPO" "$(recorded_argv)"
+assert_eq "TC-GT-PROVISION-SKIP REST-probe-only argv (no create emitted)" \
+  "api repos/$REPO/labels/autonomous --silent" "$(recorded_argv)"
 assert_contains "TC-GT-PROVISION-SKIP prints [skip]" "[skip] 'autonomous'" "$out"
-_GH_LABEL_VIEW_RC=1
+assert_not_contains "TC-GT-PROVISION-SKIP does NOT call gh label create" "label create" "$(call_log)"
+assert_not_contains "TC-GT-PROVISION-SKIP never calls gh label view" "label view" "$(call_log)"
+_GH_LABEL_PROBE_RC=1
+
+echo "=== TC-PROVISION-NO-LABEL-VIEW: the double rejects 'gh label view' like real gh ==="
+# Sanity-check the double itself models real gh (clone/create/delete/edit/list +
+# api only, no view): a direct `gh label view` call must fail non-zero. This is
+# the fixture-side proof that the golden-trace above would have FAILed against
+# the pre-#362 implementation (which called `gh label view` and got a non-zero
+# rc, hitting the create branch unconditionally) rather than silently passing.
+if gh label view autonomous --repo "$REPO" &>/dev/null; then
+  echo -e "  ${RED}FAIL${NC}: TC-PROVISION-NO-LABEL-VIEW expected 'gh label view' to fail (real gh has no such subcommand)"
+  FAIL=$((FAIL+1))
+else
+  echo -e "  ${GREEN}PASS${NC}: TC-PROVISION-NO-LABEL-VIEW 'gh label view' fails loudly, matching real gh"
+  PASS=$((PASS+1))
+fi
+
+echo "=== TC-PROVISION-ALL-SKIP: full-loop shape, all 9 labels pre-existing (AC3) ==="
+# Drive the loop body itself (not setup-labels.sh's subprocess — the loop shape
+# is identical to what setup-labels.sh runs) with the probe returning rc=0 for
+# every one of the 9 pipeline labels: exit 0, nine [skip] lines, zero creates.
+_GH_LABEL_PROBE_RC=0
+reset_call_log
+_LABELS_ALL9=(
+  "autonomous|0E8A16|d1" "in-progress|FBCA04|d2" "pending-review|1D76DB|d3"
+  "reviewing|5319E7|d4" "pending-dev|E99695|d5" "approved|0E8A16|d6"
+  "no-auto-close|d4c5f9|d7" "stalled|B60205|d8" "run-live-smoke|006B75|d9"
+)
+_all9_out=""
+_all9_rc=0
+for _entry in "${_LABELS_ALL9[@]}"; do
+  IFS='|' read -r _n _c _d <<< "$_entry"
+  _line=$(itp_github_provision_states "$_n" "$_c" "$_d") || _all9_rc=$?
+  _all9_out+="$_line"$'\n'
+done
+_skip_count=$(grep -c '^  \[skip\]' <<< "$_all9_out")
+assert_eq "TC-PROVISION-ALL-SKIP nine [skip] lines" "9" "$_skip_count"
+assert_eq "TC-PROVISION-ALL-SKIP loop completes without error (rc=0 per call)" "0" "$_all9_rc"
+assert_not_contains "TC-PROVISION-ALL-SKIP zero gh label create calls" "label create" "$(call_log)"
+_GH_LABEL_PROBE_RC=1
 
 # ===========================================================================
 # 2. DISPATCH ROUTING — itp_<verb> → itp_github_<verb> under default github.
@@ -600,7 +662,7 @@ assert_contains "TC-POSTVERDICT-URL helper echoes the comment URL on success" \
   "issuecomment-1" "$pv_out"
 rm -rf "$_PVSB"
 
-rm -f "$_GH_ARGV_FILE"
+rm -f "$_GH_ARGV_FILE" "$_GH_CALL_LOG"
 
 # ===========================================================================
 # 7. BEHAVIOR-EQUIVALENCE (#296 mark-checkbox body-read migration). Run the REAL
