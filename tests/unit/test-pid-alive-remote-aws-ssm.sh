@@ -249,14 +249,23 @@ echo "=== TC-RPA-010: source-of-truth grep — indeterminate branch returns 0 ==
 # ---------------------------------------------------------------------------
 # Load-bearing: the conservative-bias decision lives or dies on this single
 # line. A reflexive cleanup PR must fail the suite if it flips to return 1.
-if grep -A 30 'EXECUTION_BACKEND.*remote-aws-ssm' "$LIB" | grep -E '^[[:space:]]*\*\)[[:space:]]*$' >/dev/null; then
+#
+# Scoped to the `pid_alive()` function body specifically (#356 review): other
+# helpers (e.g. is_session_completed's [INV-100] remote branch) also mention
+# `EXECUTION_BACKEND.*remote-aws-ssm` earlier in the file, and a whole-file
+# grep/awk anchored on the FIRST such occurrence would silently latch onto
+# the wrong `case` block once a preceding helper adds its own case/if
+# structure. Isolating the function body first keeps this pin load-bearing
+# only for `pid_alive`, not "whatever comes first in the file."
+pid_alive_body=$(awk '/^pid_alive\(\)/{f=1} f{print} f && /^}$/{exit}' "$LIB")
+if echo "$pid_alive_body" | grep -A 30 'EXECUTION_BACKEND.*remote-aws-ssm' | grep -E '^[[:space:]]*\*\)[[:space:]]*$' >/dev/null; then
   # Extract the *) branch body (between `*)` and the next `;;`).
-  branch_body=$(awk '
+  branch_body=$(echo "$pid_alive_body" | awk '
     /EXECUTION_BACKEND.*remote-aws-ssm/ { in_block=1 }
     in_block && /^[[:space:]]*\*\)[[:space:]]*$/ { in_star=1; next }
     in_star && /^[[:space:]]*;;[[:space:]]*$/ { exit }
     in_star { print }
-  ' "$LIB")
+  ')
   # Strip comment lines so prose mentioning `return 1` doesn't
   # false-fail the assert. We want to verify the BRANCH BODY contains
   # an actual `return 0` statement and NO `return 1` statement.

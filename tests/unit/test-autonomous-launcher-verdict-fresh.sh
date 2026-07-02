@@ -389,6 +389,19 @@ gh() { echo "gh $*" >> "$CALL_LOG"; return 0; }
 label_swap() { echo "label_swap $*" >> "$CALL_LOG"; }
 post_dispatch_token() { echo "post_dispatch_token $*" >> "$CALL_LOG"; }
 dispatch() { echo "dispatch $*" >> "$CALL_LOG"; }
+# [INV-100] (#356): the extracted branch now calls `_reset_session_log`
+# (lib-dispatch.sh) instead of a bare `: > "$_ptl_log"`. This harness runs
+# the branch body standalone (no lib-dispatch.sh sourced), so it needs a
+# real local-backend implementation — NOT a logging stub — because
+# TC-PTL-007d asserts genuine truncate-FAILURE behavior (EISDIR against a
+# directory-as-log-path). This is the same local branch body as the real
+# helper (EXECUTION_BACKEND is unset in this harness, so only the local path
+# is exercised).
+_reset_session_log() {
+  local issue_num="$1"
+  local _log_file="/tmp/agent-${PROJECT_ID}-issue-${issue_num}.log"
+  : > "$_log_file" 2>/dev/null
+}
 JUST_DISPATCHED=()
 HARNESS
 

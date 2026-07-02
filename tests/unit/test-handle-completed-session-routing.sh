@@ -447,6 +447,65 @@ assert_contains "RT-021 operator-actionable comment posted" "permission" "$_MOCK
 assert_eq "RT-021 NO label swap" "" "$_MOCK_LABEL_SWAPS"
 assert_eq "RT-021 NO dispatch" "" "$_MOCK_DISPATCH_CALLS"
 
+# ---------------------------------------------------------------------------
+# TC-RESET-REMOTE: [INV-100] (#356) Branch C truncate under
+# EXECUTION_BACKEND=remote-aws-ssm. Stubs the SSM driver via
+# _SESSION_LOG_PROBE_DRIVER_OVERRIDE (same pattern as
+# test-is-session-completed-remote.sh) so this exercises the REAL
+# _reset_session_log dispatch (not a mock), just with the network hop
+# swapped for a local stub script.
+# ---------------------------------------------------------------------------
+RESET_REMOTE_TMPDIR=$(mktemp -d)
+RESET_REMOTE_STUB="$RESET_REMOTE_TMPDIR/stub-driver.sh"
+RESET_REMOTE_CALLS="$RESET_REMOTE_TMPDIR/calls.log"
+cat > "$RESET_REMOTE_STUB" <<'STUB'
+#!/bin/bash
+echo "MODE=$1 ISSUE=$2 SSM_REMOTE_PROJECT_ID=${SSM_REMOTE_PROJECT_ID:-}" >> "$RESET_REMOTE_CALLS"
+[[ "$1" = "--truncate" && "${RESET_REMOTE_TRUNCATE_FAIL:-0}" = "1" ]] && exit 2
+exit 0
+STUB
+chmod +x "$RESET_REMOTE_STUB"
+export _SESSION_LOG_PROBE_DRIVER_OVERRIDE="$RESET_REMOTE_STUB"
+export RESET_REMOTE_CALLS
+
+# TC-RESET-REMOTE-1: remote truncate succeeds → dev-new dispatched, NO local write.
+reset_mocks
+: > "$RESET_REMOTE_CALLS"
+unset RESET_REMOTE_TRUNCATE_FAIL
+_MOCK_VERDICT="failed-substantive"
+_MOCK_LOG_FILE="/tmp/agent-${PROJECT_ID}-issue-100.log"
+rm -f "$_MOCK_LOG_FILE"   # must NOT exist locally — this call must not touch it
+EXECUTION_BACKEND=remote-aws-ssm SSM_REMOTE_PROJECT_ID=remote-proj \
+  assert_returns "TC-RESET-REMOTE-1 returns 0" 0 \
+  handle_completed_session_routing 100 "sid-reset-1" "2026-05-21T03:18:00Z"
+assert_eq "TC-RESET-REMOTE-1 dispatch dev-new fired" "dev-new:100 " "$_MOCK_DISPATCH_CALLS"
+assert_eq "TC-RESET-REMOTE-1 driver invoked with --truncate mode" "1" \
+  "$(grep -c '^MODE=--truncate ISSUE=100 SSM_REMOTE_PROJECT_ID=remote-proj$' "$RESET_REMOTE_CALLS")"
+if [[ -e "$_MOCK_LOG_FILE" ]]; then
+  echo -e "  ${RED}FAIL${NC}: TC-RESET-REMOTE-1 a controller-local log file was created (should route entirely through SSM)"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${NC}: TC-RESET-REMOTE-1 no controller-local log file created"
+  PASS=$((PASS + 1))
+fi
+_MOCK_LOG_FILE=""
+
+# TC-RESET-REMOTE-2: remote truncate fails (SSM error) → fail-closed, skip dispatch.
+reset_mocks
+: > "$RESET_REMOTE_CALLS"
+export RESET_REMOTE_TRUNCATE_FAIL=1
+_MOCK_VERDICT="failed-substantive"
+EXECUTION_BACKEND=remote-aws-ssm SSM_REMOTE_PROJECT_ID=remote-proj \
+  assert_returns "TC-RESET-REMOTE-2 returns 0 (handled, fail-closed)" 0 \
+  handle_completed_session_routing 100 "sid-reset-2" "2026-05-21T03:18:00Z"
+assert_contains "TC-RESET-REMOTE-2 operator-actionable comment posted" "permission" "$_MOCK_LAST_COMMENT_BODY"
+assert_eq "TC-RESET-REMOTE-2 NO label swap" "" "$_MOCK_LABEL_SWAPS"
+assert_eq "TC-RESET-REMOTE-2 NO dispatch" "" "$_MOCK_DISPATCH_CALLS"
+unset RESET_REMOTE_TRUNCATE_FAIL
+
+unset _SESSION_LOG_PROBE_DRIVER_OVERRIDE RESET_REMOTE_CALLS
+rm -rf "$RESET_REMOTE_TMPDIR"
+
 # TC-INV35-RT-022: Missing trailer treated as substantive (back-compat) —
 # classifier returns failed-substantive directly, behavior identical to RT-020
 reset_mocks
