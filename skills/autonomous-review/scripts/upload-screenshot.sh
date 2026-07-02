@@ -41,6 +41,29 @@ done
 REPO="${REPO:-owner/repo}"
 BRANCH="screenshots"
 
+# [INV-95] Code-Host Provider dispatch. The whole 8-call git-Data-API commit op
+# (commit a PNG onto the orphan `screenshots` branch + echo the SHA) routes
+# through the CHP verb chp_commit_file (GitHub leaf chp_github_commit_file). The
+# provider lib lives in the autonomous-dispatcher skill tree; resolve it via
+# readlink -f of THIS script (the [INV-14]/[INV-65] skill-tree idiom) — NOT
+# _SCRIPT_DIR, which is deliberately the project-side symlink dir so the
+# conf-lookup above finds the project's autonomous.conf. Guarded on the verb being
+# undefined: if the lib is absent the verb stays undefined and the chp_commit_file
+# call below FAILS LOUD ([INV-91]: a raw `gh` fallback would silently execute
+# GitHub git-Data-API commands for a non-GitHub backend — never silently fall
+# through). lib-code-host.sh sources providers/chp-github.sh from its own
+# skill-tree readlink -f dir, so the leaf is reachable regardless of project-side
+# symlink topology (Step-1 `npx skills update -g` suffices, no installer re-run).
+if ! declare -F chp_commit_file >/dev/null 2>&1; then
+  _us_real_dir="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]:-$0}")")" && pwd 2>/dev/null)" || _us_real_dir=""
+  _us_lib="${_us_real_dir}/../../autonomous-dispatcher/scripts/lib-code-host.sh"
+  if [[ -n "$_us_real_dir" && -r "$_us_lib" ]]; then
+    # shellcheck source=../../autonomous-dispatcher/scripts/lib-code-host.sh
+    source "$_us_lib"
+  fi
+  unset _us_real_dir _us_lib
+fi
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -67,70 +90,22 @@ command -v gh >/dev/null 2>&1 || fail "gh CLI is required but not found in PATH"
 command -v jq >/dev/null 2>&1 || fail "jq is required but not found in PATH"
 
 # ---------------------------------------------------------------------------
-# Upload via GitHub API (create/update file on orphan branch)
+# Upload via the CHP whole-op verb (commit the PNG on the orphan branch)
 # ---------------------------------------------------------------------------
+# FILE_PATH / the commit MESSAGE are caller-rendered (provider-neutral params).
+# CONTENT_BASE64 is the provider-neutral currency — GitLab's Files API also takes
+# encoding=base64. The whole 8-call git-Data-API GitHub op (get-ref → … →
+# put-contents, incl. the orphan-branch create-vs-update branching + the ARG_MAX
+# temp-file JSON build) lives behind chp_commit_file's GitHub leaf; the
+# fail-on-empty-SHA glue stays here. REPO is threaded EXPLICITLY (the leaf takes
+# it as $1, not a global — the #324 dropped-repo-arg lesson).
 FILE_PATH="pr-${PR_NUMBER}/${TC_ID}.png"
+COMMIT_MESSAGE="screenshot: PR #${PR_NUMBER} ${TC_ID}"
 CONTENT_BASE64=$(base64 -w0 "$PNG_PATH" 2>/dev/null || base64 -i "$PNG_PATH" 2>/dev/null)
 [[ -n "$CONTENT_BASE64" ]] || fail "Failed to base64-encode $PNG_PATH"
 
-# Ensure the orphan branch exists
-BRANCH_EXISTS=$(gh api "repos/${REPO}/git/ref/heads/${BRANCH}" 2>/dev/null | jq -r '.ref // empty' 2>/dev/null || true)
-
-if [[ -z "$BRANCH_EXISTS" ]]; then
-  # Create orphan branch: blob → tree → commit → ref
-  README_BLOB=$(gh api "repos/${REPO}/git/blobs" \
-    -f content="Screenshots for PR E2E verification reports.\nThis branch is auto-managed — do not edit manually.\n" \
-    -f encoding=utf-8 \
-    --jq '.sha' 2>/dev/null) || true
-
-  TREE_SHA=""
-  [[ -n "$README_BLOB" ]] && TREE_SHA=$(gh api "repos/${REPO}/git/trees" \
-    --jq '.sha' \
-    -f "tree[][path]=README.md" \
-    -f "tree[][mode]=100644" \
-    -f "tree[][type]=blob" \
-    -f "tree[][sha]=${README_BLOB}" 2>/dev/null) || true
-
-  COMMIT_SHA=""
-  [[ -n "$TREE_SHA" ]] && COMMIT_SHA=$(gh api "repos/${REPO}/git/commits" \
-    -f message="chore: initialize screenshots branch" \
-    -f "tree=${TREE_SHA}" \
-    --jq '.sha' 2>/dev/null) || true
-
-  [[ -n "$COMMIT_SHA" ]] && gh api "repos/${REPO}/git/refs" \
-    -f "ref=refs/heads/${BRANCH}" \
-    -f "sha=${COMMIT_SHA}" >/dev/null 2>&1 || true
-
-  # Verify branch was created
-  BRANCH_EXISTS=$(gh api "repos/${REPO}/git/ref/heads/${BRANCH}" 2>/dev/null | jq -r '.ref // empty' 2>/dev/null || true)
-  [[ -n "$BRANCH_EXISTS" ]] || fail "Failed to create orphan branch '${BRANCH}'"
-fi
-
-# Check if file already exists (need SHA for update)
-EXISTING_SHA=$(gh api "repos/${REPO}/contents/${FILE_PATH}?ref=${BRANCH}" 2>/dev/null | jq -r '.sha // empty' 2>/dev/null || true)
-
-# Build JSON payload via temp file to avoid ARG_MAX limit with large base64 content.
-# The base64 string for screenshots can exceed 128KB, which breaks shell argument passing.
-JSON_TMPFILE=$(mktemp /tmp/screenshot-upload-XXXXXX.json)
-UPLOAD_RESPONSE_FILE=$(mktemp /tmp/screenshot-response-XXXXXX.json)
-trap 'rm -f "$JSON_TMPFILE" "$UPLOAD_RESPONSE_FILE"' EXIT
-
-{
-  printf '{"message":"screenshot: PR #%s %s","content":"' "$PR_NUMBER" "$TC_ID"
-  printf '%s' "$CONTENT_BASE64"
-  printf '","branch":"%s"' "$BRANCH"
-  if [[ -n "$EXISTING_SHA" ]]; then
-    printf ',"sha":"%s"' "$EXISTING_SHA"
-  fi
-  printf '}'
-} > "$JSON_TMPFILE"
-
-gh api "repos/${REPO}/contents/${FILE_PATH}" \
-  -X PUT \
-  --input "$JSON_TMPFILE" \
-  > "$UPLOAD_RESPONSE_FILE" 2>/dev/null || true
-
-UPLOAD_SHA=$(jq -r '.content.sha // empty' "$UPLOAD_RESPONSE_FILE" 2>/dev/null || true)
+UPLOAD_SHA=$(chp_commit_file "$REPO" "$BRANCH" "$FILE_PATH" "$CONTENT_BASE64" "$COMMIT_MESSAGE") \
+  || fail "GitHub API upload failed for ${FILE_PATH}"
 [[ -n "$UPLOAD_SHA" ]] || fail "GitHub API upload failed for ${FILE_PATH}"
 
 # Output a /blob/ URL — GitHub's web UI renders PNGs natively for authenticated users.
