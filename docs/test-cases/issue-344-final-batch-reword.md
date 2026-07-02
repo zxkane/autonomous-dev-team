@@ -14,8 +14,7 @@ CI glob.
 | TC-FINALBATCH-005 | R2 (no-op check) | The `gh_rc=` breadcrumb KEY (machine format, no trailing space) is UNCHANGED in `post-verdict.sh`, `lib-review-postfail.sh`, and their tests | `test-post-verdict.sh::TC-PF-BC-02d` and `test-lib-review-postfail.sh` breadcrumb helpers still pass unmodified |
 | TC-FINALBATCH-006 | R3 | `upload-screenshot.sh` is present in `check-provider-cutover.sh`'s `ALLOWLISTED_FILES` array | grep the array literal |
 | TC-FINALBATCH-007 | R3 | With `upload-screenshot.sh` allowlisted, `discover_guarded_sites` against the real tree emits ZERO signatures for `file == "upload-screenshot.sh"` | `bash check-provider-cutover.sh --generate-baseline \| jq` shows no upload-screenshot.sh entry |
-| TC-FINALBATCH-008 | R4 | The committed `providers/cutover-baseline.json` contains ZERO signatures matching any of the 6 OLD reworded strings | grep the committed baseline for each OLD string — 0 hits |
-| TC-FINALBATCH-009 | R4 | The committed baseline's distinct-signature count and total-occurrence count are each exactly 7 less than the pre-PR baseline | `jq '.surviving_sites \| length'` and `jq '[.surviving_sites[].count] \| add'` diffed against the pre-change values recorded in this doc (47→40 distinct, 52→45 occurrences) |
+| TC-FINALBATCH-008 | R4 | The committed `providers/cutover-baseline.json` contains ZERO signatures matching any of the 6 OLD reworded strings, and ZERO `upload-screenshot.sh` signatures of any kind | grep/jq the committed baseline for each OLD string + the file — 0 hits (no absolute-total pin — see the #342/#349 precedent note below) |
 | TC-FINALBATCH-010 | AC1 | `check-provider-cutover.sh --require-trusted-ref` (against `origin/main`, pre-merge) exits 0 | Check 1 (reconcile) + Check 4 (monotonicity, strictly shrunk) both pass |
 | TC-FINALBATCH-011 | AC3 | `git diff` of the 6 reworded files touches ONLY string-literal content inside `log`/`_error_log`/`printf`/`echo` calls — no change to any executable `gh` invocation | manual diff inspection (not machine-checked; recorded here as the AC3 verification step) |
 
@@ -24,6 +23,12 @@ CI glob.
 - Before: 47 distinct signatures / 52 total occurrences (verified on `origin/main` @ `bfabb2d`).
 - After: 40 distinct signatures / 45 total occurrences (6 reword sites + 1 allowlisted-file site,
   each `count: 1`, no duplicates removed).
+- These totals are recorded here as historical fact only — no test asserts them as an absolute
+  pin. Per the #342/#349 precedent (`test-reply-review-comment.sh::TC-RRC-033`), an absolute
+  distinct/occurrence pin goes red on any concurrent sibling #296 migration that also shrinks the
+  shared baseline, and adds no coverage beyond what `check-provider-cutover.sh` itself already
+  enforces (Check 1 reconciliation + Check 4 shrink-only monotonicity under `--require-trusted-ref`,
+  TC-FINALBATCH-010).
 
 ## Unit tests
 

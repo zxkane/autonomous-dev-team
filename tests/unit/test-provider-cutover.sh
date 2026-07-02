@@ -714,41 +714,35 @@ echo "=== TC-FINALBATCH-001/002: the 6 reworded sites carry zero gh-token matche
 # number, which drifts) and checked against the guard's OWN live detector regex
 # — proves the reword actually removes the trip condition (R1), not just "looks
 # reworded". Also asserts each line still carries its original
-# INV/remediation/context substrings (meaning preserved).
-declare -A FB_FILE_ANCHOR=(
-  [dev740]="autonomous-dev.sh|agent never ran, no ISSUE_NUMBER"
-  [err303]="lib-error.sh|CLI proxy not resolvable"
-  [err332]="lib-error.sh|failed to surface envelope"
-  [pf119]="lib-review-postfail.sh|verdict comment post failed;"
-  [pv268]="post-verdict.sh|CLI proxy not found/executable"
-  [pv292]="post-verdict.sh|failed to post verdict comment"
-)
-declare -A FB_KEEP=(
-  [dev740]="ISSUE_NUMBER"
-  [err303]="AUTONOMOUS_CONF_DIR"
-  [err332]="degrading to log-only"
-  [pf119]="transient GitHub/API or token error"
-  [pv268]="INV-56"
-  [pv292]="ISSUE_NUMBER"
+# INV/remediation/context substring (meaning preserved). One table
+# (file|anchor|keep|old) drives this loop AND the OLD-string-absent check in
+# TC-FINALBATCH-008 below — a single source of truth instead of two
+# independently-drifting lists.
+declare -A FB_SITE=(
+  [dev740]="autonomous-dev.sh|agent never ran, no ISSUE_NUMBER|ISSUE_NUMBER|no ISSUE_NUMBER or gh —"
+  [err303]="lib-error.sh|CLI proxy not resolvable|AUTONOMOUS_CONF_DIR|token-refresh gh proxy not resolvable"
+  [err332]="lib-error.sh|failed to surface envelope|degrading to log-only|gh rc=\${post_rc}"
+  [pf119]="lib-review-postfail.sh|verdict comment post failed;|transient GitHub/API or token error|gh rc %s"
+  [pv268]="post-verdict.sh|CLI proxy not found/executable|INV-56|token-refresh gh proxy not found/executable"
+  [pv292]="post-verdict.sh|failed to post verdict comment|ISSUE_NUMBER|gh rc=\${POST_RC}"
 )
 for key in dev740 err303 err332 pf119 pv268 pv292; do
-  entry="${FB_FILE_ANCHOR[$key]}"; f="${entry%%|*}"; anchor="${entry#*|}"
+  IFS='|' read -r f anchor keep _old <<<"${FB_SITE[$key]}"
   path="$SCRIPTS/$f"
-  content="$(grep -F "$anchor" "$path" | head -1)"
+  content="$(grep -m1 -F "$anchor" "$path")"
   if [[ -z "$content" ]]; then
     bad "TC-FINALBATCH-001 $f (anchor '$anchor') — line not found (file drifted?)"
     continue
   fi
-  hits="$(grep -ocE '(^|[^A-Za-z_-])gh ' <<<"$content")"
-  if [[ "$hits" -eq 0 ]]; then
+  if [[ "$content" =~ (^|[^A-Za-z_-])gh\  ]]; then
+    bad "TC-FINALBATCH-001 $f (anchor '$anchor') still matches the gh-token detector: $content"
+  else
     ok "TC-FINALBATCH-001 $f (anchor '$anchor') has zero gh-token matches (reword removed the trip)"
-  else
-    bad "TC-FINALBATCH-001 $f (anchor '$anchor') still matches the gh-token detector ($hits hits): $content"
   fi
-  if [[ "$content" == *"${FB_KEEP[$key]}"* ]]; then
-    ok "TC-FINALBATCH-002 $f (anchor '$anchor') preserves '${FB_KEEP[$key]}' (meaning kept)"
+  if [[ "$content" == *"$keep"* ]]; then
+    ok "TC-FINALBATCH-002 $f (anchor '$anchor') preserves '$keep' (meaning kept)"
   else
-    bad "TC-FINALBATCH-002 $f (anchor '$anchor') lost '${FB_KEEP[$key]}': $content"
+    bad "TC-FINALBATCH-002 $f (anchor '$anchor') lost '$keep': $content"
   fi
 done
 
@@ -774,26 +768,38 @@ if grep -q 'ALLOWLISTED_FILES=(.*upload-screenshot\.sh' "$CHECK"; then
 else
   bad "TC-FINALBATCH-006 upload-screenshot.sh is NOT in ALLOWLISTED_FILES"
 fi
-gen="$(bash "$CHECK" --generate-baseline 2>/dev/null)"
-if [[ -n "$gen" ]] && ! jq -e '.surviving_sites[] | select(.file=="upload-screenshot.sh")' <<<"$gen" >/dev/null 2>&1; then
+# Reuses "$gen" (TC-CUTOVER-011's --generate-baseline output, same committed
+# tree, no scripts-dir override) instead of re-running the full recursive scan
+# a third time in this file.
+if ! jq -e '.surviving_sites[] | select(.file=="upload-screenshot.sh")' "$gen" >/dev/null 2>&1; then
   ok "TC-FINALBATCH-007 --generate-baseline emits zero upload-screenshot.sh signatures"
 else
   bad "TC-FINALBATCH-007 upload-screenshot.sh still appears in the generated baseline"
 fi
 
 # ---------------------------------------------------------------------------
-echo "=== TC-FINALBATCH-008/009: committed baseline shrank by exactly the 6 reword + 1 allowlist signatures (#344, R4) ==="
+echo "=== TC-FINALBATCH-008: committed baseline carries none of the OLD reworded/allowlisted signatures (#344, R4) ==="
 # ---------------------------------------------------------------------------
+# Migration-ROBUST invariants only: no OLD string fragment (derived from the
+# SAME FB_SITE table as TC-FINALBATCH-001/002 — single source of truth) and no
+# upload-screenshot.sh signature of any kind survive in the committed baseline.
+#
+# The absolute baseline TOTALS (distinct signatures / total occurrences) are
+# DELIBERATELY NOT pinned here (#342/#349 precedent in
+# test-reply-review-comment.sh::TC-RRC-033). Absolute totals move with EVERY
+# sibling #296 second-tier migration that shrinks the shared baseline, so an
+# absolute pin here goes red on any concurrent shrinking PR — coverage this
+# test does not own. Tree↔baseline reconciliation (Check 1) and shrink-only
+# monotonicity (Check 4, --require-trusted-ref) are already enforced strict by
+# check-provider-cutover.sh itself (TC-FINALBATCH-010 below); an absolute-total
+# assertion here would add no unique coverage.
+all_content="$(jq -r '.surviving_sites[].content' "$BASELINE")"
 missing_old=0
-for needle in \
-  'no ISSUE_NUMBER or gh —' \
-  'token-refresh gh proxy not resolvable' \
-  'gh rc=${post_rc}' \
-  'gh rc %s' \
-  'gh rc=${POST_RC}'; do
-  if jq -r '.surviving_sites[].content' "$BASELINE" | grep -qF "$needle"; then
+for key in dev740 err303 err332 pf119 pv268 pv292; do
+  IFS='|' read -r _f _anchor _keep old <<<"${FB_SITE[$key]}"
+  if grep -qF "$old" <<<"$all_content"; then
     missing_old=1
-    bad "TC-FINALBATCH-008 committed baseline still contains OLD reworded string fragment: $needle"
+    bad "TC-FINALBATCH-008 committed baseline still contains OLD reworded string fragment: $old"
   fi
 done
 if [[ "$missing_old" -eq 0 ]]; then
@@ -803,13 +809,6 @@ if ! jq -e '.surviving_sites[] | select(.file=="upload-screenshot.sh")' "$BASELI
   ok "TC-FINALBATCH-008 committed baseline contains zero upload-screenshot.sh signatures"
 else
   bad "TC-FINALBATCH-008 committed baseline still carries an upload-screenshot.sh signature"
-fi
-DIST="$(jq '.surviving_sites | length' "$BASELINE")"
-OCC="$(jq '[.surviving_sites[].count] | add' "$BASELINE")"
-if [[ "$DIST" -eq 40 && "$OCC" -eq 45 ]]; then
-  ok "TC-FINALBATCH-009 committed baseline is exactly 40 distinct / 45 occurrences (47→40, 52→45, #344 shrink of 7)"
-else
-  bad "TC-FINALBATCH-009 committed baseline is ${DIST} distinct / ${OCC} occurrences, expected 40/45"
 fi
 
 # ---------------------------------------------------------------------------
