@@ -487,3 +487,30 @@ chp_github_commit_file() {
 
   printf '%s\n' "$upload_sha"
 }
+
+# chp_github_pr_comment PR [extra gh args…] — general PR-comment WRITE leaf (#329).
+#
+# The PR-comment-write sibling of the chp_github_pr_view / chp_github_pr_list read
+# primitives above (and shaped exactly like chp_github_approve). It is the
+# provider-neutral comment-on-a-PR primitive the two HOT review files
+# (autonomous-review.sh, lib-review-e2e.sh) route their auto-merge markers,
+# E2E-failure reports, and the [INV-79] brokered E2E report through, so the caller
+# layer carries ZERO raw "gh"+" pr comment".
+#
+# DISTINCT from itp_post_comment (the ISSUE-level machine-marker choke-point that
+# posts on the issue): these post on a PR keyed by $PR_NUMBER. On GitHub a PR is an
+# issue so the endpoints coincide, but seam ownership differs (issue-tracker vs
+# code-host) — a split ISSUE_PROVIDER≠CODE_HOST topology routes them to different
+# systems. They stay distinct verbs.
+#
+# A pure BYTE-IDENTICAL passthrough that adds NO redirects of its own: the 7
+# callers use 4 different redirect/capture/gating framings (`… 2>/dev/null || true`,
+# `if ! _err=$(… 2>&1 >/dev/null)`, `… 2>/dev/null || rc=$?`, broker
+# `… >/dev/null 2>&1`); baking any redirect into the leaf would double or clobber
+# them. The caller supplies the `--body <body>` tail (and any future `--body-file`/
+# `--edit-last`) via "$@"; the leaf forwards it byte-identically. Bodies are
+# pre-composed positional `--body` strings (no jq pattern) — no injection surface.
+chp_github_pr_comment() {
+  local pr="$1"; shift
+  gh pr comment "$pr" --repo "$REPO" "$@"
+}

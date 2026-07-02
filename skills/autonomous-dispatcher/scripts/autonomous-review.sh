@@ -3422,7 +3422,7 @@ Findings->Decision Gate: 1 blocking finding(s) -- FAIL.
     # mandatory rebase pre-step to the resume prompt. Posting the marker here
     # gives the conflict a deterministic owner (the next dev session) instead
     # of letting it fall through the cracks.
-    gh pr comment "$PR_NUMBER" --repo "$REPO" \
+    chp_pr_comment "$PR_NUMBER" \
       --body "Auto-merge failed: PR is CONFLICTING with main (mergeable gate, INV-44). Re-dispatching dev agent to rebase onto main.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
 
     # INV-35: a merge conflict is a real, dev-actionable finding — substantive.
@@ -3618,7 +3618,7 @@ if [[ "$PASSED_VERDICT" == "true" ]]; then
         metrics_emit merge "result=failure" failure_class=infra "pr=${PR_NUMBER:-}" "issue=${ISSUE_NUMBER:-}" "run_id=${RUN_ID:-}" || true
       fi
 
-      if ! _comment_err=$(gh pr comment "$PR_NUMBER" --repo "$REPO" \
+      if ! _comment_err=$(chp_pr_comment "$PR_NUMBER" \
         --body "Auto-merge failed: ${_err_excerpt}
 
 Re-dispatching dev agent to rebase onto main.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>&1 >/dev/null); then

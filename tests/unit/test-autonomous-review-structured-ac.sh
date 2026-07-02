@@ -29,6 +29,11 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 WRAPPER="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/autonomous-review.sh"
 E2E_LIB="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-review-e2e.sh"
+# The CHP seam: lib-review-e2e.sh's PR-comment writes route through chp_pr_comment
+# (#329). The review wrapper sources lib-code-host.sh BEFORE lib-review-e2e.sh, so
+# the verb is defined in production; the lane harnesses mirror that by sourcing the
+# seam (else chp_pr_comment is command-not-found → rc=127, masking the lane rc).
+CHP_LIB="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-code-host.sh"
 REF="$PROJECT_ROOT/skills/autonomous-review/references/e2e-command-mode.md"
 INVARIANTS="$PROJECT_ROOT/docs/pipeline/invariants.md"
 FLOW="$PROJECT_ROOT/docs/pipeline/review-agent-flow.md"
@@ -135,8 +140,9 @@ if [[ -f "$E2E_LIB" ]]; then
   # check it. ACFILE lives under a per-run temp dir.
   _lane_ac_harness() {
     local setup="$1"
-    env -i PATH="$PATH" bash -c "
+    env -i PATH="$PATH" CHP_LIB="$CHP_LIB" bash -c "
       set -uo pipefail
+      source \"\$CHP_LIB\"               # chp_pr_comment → chp_github_pr_comment → gh pr comment (seam, #329)
       source '$E2E_LIB'
       log() { :; }
       TMPD=\$(mktemp -d)
@@ -238,8 +244,9 @@ no fence this round
   # write (`>`) fail even for the owner. (test runs as non-root; root ignores the
   # mode, so skip the assertion when EUID==0 to avoid a false failure.)
   if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
-    out=$(env -i PATH="$PATH" bash -c "
+    out=$(env -i PATH="$PATH" CHP_LIB="$CHP_LIB" bash -c "
       set -uo pipefail
+      source \"\$CHP_LIB\"               # chp_pr_comment → chp_github_pr_comment → gh pr comment (seam, #329)
       source '$E2E_LIB'
       log() { :; }
       TMPD=\$(mktemp -d)

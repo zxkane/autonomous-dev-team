@@ -175,11 +175,15 @@ echo
 echo "=== TC-333-FN-01..07: INV-79 broker dedup behavior unchanged (AC4, end-to-end) ==="
 
 # Harness: source _post_brokered_e2e_report in isolation in a subshell, stub the
-# verb + log + gh, and report whether the brokered `gh pr comment` POST fired and
-# whether the verb was invoked. Stub itp_list_comments DIRECTLY (not gh) — the lib
-# self-source guard keys on `declare -F itp_edit_comment`, so a test-defined
-# itp_list_comments shadows the seam cleanly and avoids the `gh issue view -q`
-# fidelity trap.
+# dedup-read verb + log + the POST verb, and report whether the brokered POST
+# fired and whether the dedup-read verb was invoked. Stub itp_list_comments AND
+# chp_pr_comment DIRECTLY (not gh) — the broker posts via `chp_pr_comment` (#329,
+# [INV-102]), not a raw `gh pr comment`, so a `gh` stub alone never sees the call
+# in this isolated `eval "$BROKER_BODY"` harness (no lib-code-host.sh self-source
+# runs here, so the real `chp_pr_comment` shim is never defined either — #329
+# review [P1]). The lib self-source guard keys on `declare -F itp_edit_comment`,
+# so test-defined itp_list_comments/chp_pr_comment shadow the seam cleanly and
+# avoid the `gh issue view -q` fidelity trap.
 #
 # Args: <fixture> <start_ts(UNSET|<ts>)> <report_file_state(set|empty|unset)>
 # <fixture> is one of:
@@ -214,9 +218,14 @@ broker_harness() {
     else
       itp_list_comments() { : > "$VERB_FLAG"; cat "$FIXTURE_FILE"; }
     fi
-    # `gh` stub: only the `pr comment` path matters; record the POST + succeed.
-    gh() {
-      if [[ "${1:-}" == "pr" && "${2:-}" == "comment" ]]; then echo fired > "$POST_FLAG"; return 0; fi
+    # chp_pr_comment stub: the broker's POST verb (#329, [INV-102]) — flag ONLY on
+    # the exact expected argv ("$PR_NUMBER" --body "$body"), mirroring the old
+    # `gh` stub's `$1=="pr" && $2=="comment"` argv check, so a future argv
+    # mis-order/drop in the broker still fails this test instead of passing
+    # silently. No `gh` stub needed: the isolated broker body never shells out to
+    # `gh` directly for the POST.
+    chp_pr_comment() {
+      [[ "${1:-}" == "$PR_NUMBER" && "${2:-}" == "--body" ]] && echo fired > "$POST_FLAG"
       return 0
     }
     # Define ONLY the broker function (avoid running the whole lib) — the subshell

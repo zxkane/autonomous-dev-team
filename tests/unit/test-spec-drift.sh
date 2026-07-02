@@ -682,6 +682,26 @@ AC4_328='- #296 second-tier (#328): the dev-resume PR inline-review-comment read
 if grep -qF -- "$AC4_328" "$INV"; then ok "INV-91 Migration-log has the exact #296 second-tier (#328) bullet"; else bad "INV-91 Migration-log missing/changed the #296 second-tier (#328) bullet"; fi
 
 # ===========================================================================
+echo "=== TC-SPEC-GATE-329: INV-91 Migration-log carries the #296 second-tier (#329) chp_pr_comment bullet ==="
+# [#329, AC5] the migration that pulled the 7 PR-comment writes behind the new
+# general write primitive chp_pr_comment ([INV-102], renumbered from INV-95, then
+# INV-101, on successive rebases) records its baseline-shrink entry (5 sigs / 7
+# occurrences, relative to
+# whatever main's baseline is at rebase time — no absolute before/after pin, since
+# sibling #296 migrations independently shrink the same shared manifest) in
+# INV-91's Migration log. Pinned here (Spec Drift surface) so doc-and-code stay
+# coupled per CONTRIBUTING Rule 1. Keyed on stable substrings (not the full prose
+# paragraph) so a later wording tweak does not falsely red — but it MUST name
+# #329, chp_pr_comment, and the 5-sig/7-occurrence shrink.
+if grep -qE '^- #296 second-tier \(#329\):' "$INV" \
+   && grep -q 'chp_pr_comment' "$INV" \
+   && grep -qF 'shrinks by 5 sigs / 7 occurrences' "$INV"; then
+  ok "INV-91 Migration-log has the #296 second-tier (#329) chp_pr_comment bullet (named verb + 5-sig/7-occ shrink)"
+else
+  bad "INV-91 Migration-log missing/changed the #296 second-tier (#329) chp_pr_comment bullet"
+fi
+
+# ===========================================================================
 # Form 3 — the scanner recognizes a DIRECT itp_transition_state call as a
 # positional label-write site (spec-gate-itp prerequisite for #296/B8 / #311).
 # Keeps spec-gate coverage as gh issue edit → itp_transition_state migrates.

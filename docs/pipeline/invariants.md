@@ -4601,6 +4601,7 @@ _Triage (issue #236): [machine-checked: tests/unit/test-provider-cutover.sh]_
 - #296 second-tier (#328): the dev-resume PR inline-review-comment read (`PR_REVIEW_COMMENTS`, autonomous-dev.sh) migrated from raw `gh api repos/$REPO/pulls/$PR_NUM/comments --jq` to the NEW verb `chp_list_inline_comments` — byte-identical (the `--jq` formatter stays caller-side, #281); baseline shrank by 1 sig. (The distinct `:1093` `issues/$PR_NUM/comments` AUTO_MERGE-marker read this issue had scoped OUT was migrated independently behind `itp_list_comments` by #334, so it is no longer a baselined survivor either.) The flat REST `pulls/N/comments` inline shape (`.path`/`.line`/`.original_line`) is **CHP-owned** ([INV-95]), distinct from `chp_review_threads` (GraphQL thread tree), `chp_pr_view` (no `pulls/N/comments` sub-resource), and `itp_list_comments` (issue-level normalized). The GitHub leaf `chp_github_list_inline_comments` mirrors `chp_github_pr_view` (`local pr="$1"; shift; gh api "repos/${REPO}/pulls/${pr}/comments" "$@"`); the `lib-code-host.sh` shim self-guards like `chp_pr_view`/`chp_pr_list` (#282 convention) — the site is invoked unguarded in a `$(… 2>/dev/null || true)` context, so leaf-absent → WARN + `return 1` (degrades to empty `PR_REVIEW_COMMENTS`), never a `set -e` abort; the bare `${CODE_HOST}` guard mirrors the leaf dispatch (#323/#324 bare-guard lesson). Proven by `tests/unit/test-chp-list-inline-comments.sh` (golden-trace argv byte-identity + caller-formatter rendering + leaf-absent/unset-`CODE_HOST` fail-soft + source-shape `:1086`-gone + baseline shrink) and `tests/unit/test-provider-cutover.sh` (the shrunk baseline reconciles tree-wide; monotonicity Check 4 allows the shrink).
 - **#286-amendment (#343)** — the cutover guard stops **self-detecting its own infrastructure lines**, the prerequisite #296 names for the final allowlist batch. Three `check-provider-cutover.sh` lines whose content changes when the **allowlist policy** changes were previously baselined survivors: the `ALLOWLISTED_FILES=(…)` array declaration, the primary matcher line, and the generated `_comment:` template (it embedded the allowlist file-list). So editing the allowlist array **self-tripped Check 4 monotonicity** — the edited line's `(file,content)` signature changed, so the old signature "no longer found" AND a NEW unbaselined signature appeared, forcing a same-PR baseline hand-edit (the exact self-ratification the guard exists to prevent). The scanner — on BOTH the check path and `--generate-baseline` — now structurally SKIPS these three lines via `is_checker_infra_line`, scoped to `check-provider-cutover.sh` ONLY and anchored on a top-of-line structural SHAPE (`^ALLOWLISTED_FILES=(`, the `grep -aE '(^|[^…])` matcher prefix — deliberately stopping before the `gh ` token so the exemption's own code is not a scannable raw-gh line — or the `_comment:` generator prefix), NEVER a magic comment (a general escape hatch would invite self-allowlisting — TC-CUTOVER-014); the same shapes in any OTHER file are still caught (file-scoped). The `_comment` template also drops the embedded allowlist file-list (single source of truth stays in `ALLOWLISTED_FILES`), so an allowlist edit no longer churns it. The self-scan of the PASS/FAIL MESSAGE strings stays normative — a NEW raw `gh` added to the checker still FAILs (TC-CUTAMEND-006). NO detection/classification logic changed beyond the three exempted lines. Baseline shrank by exactly 3 (63 → 60 distinct signatures, 69 → 66 occurrences). Proven by `tests/unit/test-provider-cutover.sh::TC-CUTAMEND-001..008` (generate emits no array/matcher sig; file-scoped skip; committed baseline keeps the PASS/FAIL self-scan sigs; `_comment` no longer embeds the file-list; new raw-gh in the checker still FAILs; an allowlist edit + baseline shrink no longer self-trips Check 4 under `--require-trusted-ref`) and the shifted `test-reply-review-comment.sh::TC-RRC-033b/c` absolute-total pins.
 - #296 second-tier (#346): **fail-loud DISPOSITION (not a leaf migration → the baseline does NOT shrink)** of the two `lib-auth.sh` broker leaf-absent raw-`gh` fallbacks — `drain_agent_pr_create` (`gh pr create`) and `drain_agent_bot_triggers` (`gh-as-user.sh pr comment`). These retained the pre-#303/B1 shape: a leaf-absent `else`/`elif` that ran the raw GitHub call **unconditioned on backend** — the silent cross-backend re-coupling this INV forbids. Fix: gate the retained raw call on `${CODE_HOST:-github} == "github"` (the #327 precedent — an unset `CODE_HOST` defaults to github, i.e. today's exact behavior); a non-GitHub backend that omits the leaf now fails LOUD (`[INV-79]/[INV-91]` error, no PR created / no bot triggers posted), never a silent GitHub call. **The raw `gh pr create` line is kept BYTE-IDENTICAL** (only a surrounding `elif … else` is added), so its cutover-baseline `(file, trimmed-content)` signature is unchanged — the retained github-gated raw call stays baselined as **spec-sanctioned residue with an explicit guard** (baseline neither grows nor shrinks relative to whatever `origin/main`'s baseline is at rebase/merge time — this PR's own diff to the manifest is a no-op). `drain_agent_bot_triggers`' raw fallback is `bash "$gh_as_user" pr comment …` — no raw `gh ` token (the `gh-as-user.sh` transport wrapper is allowlisted), so it was never baselined and R2 does not touch the manifest. The bot-trigger gate is checked ONCE before the posting loop (the decision is backend-identity, not per-line). This is the drain-broker analogue of the already-github-gated `autonomous-review.sh:~3512` interim `gh issue close` (#282 round 7 — the third residue): that site needed NO code change (already gated on `${ISSUE_PROVIDER:-github} == "github"` + pinned by `test-chp-pr-lifecycle.sh` TC-CHP-CAP-MCI0-NONGH), so its #346 disposition is documentation-only. NO new verb minted (out of scope; the broker→verb rewire is already MIGRATED #282). Proven by `tests/unit/test-token-split-234.sh` (TC-FBDISP-001/002 github-topology byte-identical fallback golden traces; TC-FBDISP-010/011 tripwire — non-github + leaf-absent → loud error, ZERO raw `gh`/`gh-as-user`; TC-FBDISP-020/021 non-github + leaf-present → verb path; TC-FBDISP-041 source-shape) and `tests/unit/test-provider-cutover.sh` (the baseline reconciles unchanged; monotonicity Check 4 green — no growth).
+- #296 second-tier (#329): the **7** PR-comment WRITE sites in the two HOT review files — auto-merge-failure markers (`autonomous-review.sh` ×2: the conflict marker post + the captured auto-merge-failure marker) + E2E-failure reports and the [INV-79] brokered E2E report (`lib-review-e2e.sh` ×5: pre-hook failure, SHA-marked evidence (the only gating site), evidence-missing, hard-failure, broker) — migrated behind the new general WRITE primitive `chp_pr_comment` ([INV-102], GitHub leaf `chp_github_pr_comment` → `gh pr comment "$pr" --repo "$REPO" "$@"` **byte-identically**). The PR-comment sibling of `chp_pr_view`/`chp_pr_list`: a **self-guarding** shim (leaf-absent → WARN + `return 1`, the `|| true`/capture/`|| rc=$?`/broker framings degrade on it), DISTINCT from `itp_post_comment` (the ISSUE-level marker choke-point; same GitHub endpoint, different seam owner for a split `ISSUE_PROVIDER`≠`CODE_HOST` topology). The leaf adds NO redirects — all four caller-side redirect/capture/gating framings stay caller-side (the load-bearing constraint). Baseline shrinks by 5 sigs / 7 occurrences relative to whatever `origin/main`'s baseline is at rebase/merge time (the absolute pre/post totals reconcile with each rebase — see the mechanically-generated pin in `test-chp-pr-comment.sh`). Proven by `tests/unit/test-chp-pr-comment.sh` (golden-trace byte-identity + no-leaf-redirects, per-site framing preservation, self-guarding shim via the degraded fixture, source-shape) and `test-spec-drift.sh::TC-SPEC-GATE-329` (this bullet pinned on the Spec Drift surface).
 
 **Cross-references**:
 - [`provider-spec.md`](provider-spec.md) §9 — references this invariant as the cutover/anti-regression guard.
@@ -5270,6 +5271,72 @@ The transport's `--probe` stdout is either two lines (the result line + the mtim
 **Status**: **ENFORCED** as of #356. Local-backend behavior is byte-for-byte unchanged (verified by the pre-existing `test-is-session-completed.sh` / `test-is-session-completed-end-ts.sh` suites, green without modification).
 
 **Test**: `tests/unit/test-session-log-probe-remote-aws-ssm.sh` (the SSM driver in isolation, stubbed `aws`, mirroring `test-liveness-check-remote-aws-ssm.sh`'s structure) and `tests/unit/test-is-session-completed-remote.sh` (the AC1 regression: remote backend + stubbed probe → correctly detects `completed`/`prompt_too_long`; empty/error probe → fail-closed; local backend with the same stub installed → stub never invoked; non-claude CLI gate runs before the backend branch; `PROJECT_ID != SSM_REMOTE_PROJECT_ID` fixture). `tests/unit/test-handle-completed-session-routing.sh::TC-RESET-REMOTE-{1,2}` covers the Branch C truncate under remote backend (success and SSM-failure fail-closed). `tests/unit/test-issue-351-stale-verdict-delegate.sh::TC-351-DELEG-REMOTE-1` is the golden-trace proof that [INV-98]'s delegation logic is backend-agnostic once `is_session_completed` correctly reports `completed`.
+
+## INV-102: every PR-comment write in the HOT review files routes through the general `chp_pr_comment` write primitive — a self-guarding code-host leaf, NOT the issue-level `itp_post_comment` choke-point
+
+_Triage (issue #236): [machine-checked: tests/unit/test-chp-pr-comment.sh]_
+
+> Note: minted as INV-95 by #329 originally; renumbered to INV-101 on an earlier
+> rebase (main had already merged an unrelated INV-95 (`chp_list_inline_comments`,
+> #328) plus INV-96..100); renumbered AGAIN to INV-102 on this rebase — #363 landed
+> on main and independently claimed INV-101 (`is_session_completed`, #356) while
+> this PR was in flight. Per the documented convention, first-merged keeps its
+> number; this PR renumbers to the next free slot each time it collides.
+
+**Rule**: the review path's PR-comment writes (auto-merge-failure markers in
+`autonomous-review.sh`; E2E-failure reports and the [INV-79] brokered E2E report in
+`lib-review-e2e.sh`) post on a PR via `chp_pr_comment PR [extra args…]`, NOT a raw
+caller-side `gh pr comment`. `chp_pr_comment` is a **general code-host WRITE
+primitive** (the PR-comment sibling of the `chp_pr_view`/`chp_pr_list` read
+primitives, [INV-87]) — its GitHub leaf `chp_github_pr_comment` wraps the innermost
+`gh pr comment "$pr" --repo "$REPO" "$@"` **byte-identically**.
+
+- **The leaf adds NO redirects of its own** (the load-bearing constraint). The 7
+  callers use four distinct redirect/capture/gating framings — `… 2>/dev/null || true`
+  (the four report posts), `if ! _err=$(… 2>&1 >/dev/null)` (the captured marker),
+  `… 2>/dev/null || rc=$?` (the ONLY gating site, the SHA-marked evidence post), and
+  the broker `… >/dev/null 2>&1` ([INV-79]). Baking any redirect into the leaf would
+  double or clobber them, so every caller's framing stays caller-side; the leaf is a
+  pure passthrough. Bodies are pre-composed positional `--body` strings (no jq
+  pattern) — no injection surface.
+- **Self-guarding shim**: like `chp_pr_view`/`chp_pr_list` (and unlike the 11 named
+  lifecycle verbs the callers guard via `chp_has_leaf`), `chp_pr_comment` is invoked
+  UNGUARDED at every site. So when the enabled provider omits the
+  `chp_${CODE_HOST}_pr_comment` leaf the SHIM checks `declare -F` and emits a WARN +
+  `return 1` (a clean non-zero the `|| true` / capture / `|| rc=$?` framings already
+  degrade on) rather than dispatching to an undefined leaf and aborting the wrapper
+  under `set -e`. The wrapper fails-soft (comment unposted) and the misconfiguration
+  is loud.
+- **DISTINCT from `itp_post_comment`** ([INV-89], the ISSUE-level machine-marker
+  choke-point that posts on the ISSUE): these comment on a PR keyed by `$PR_NUMBER`.
+  On GitHub a PR *is* an issue so the endpoints coincide, but seam ownership differs
+  (issue-tracker vs code-host) — a split `ISSUE_PROVIDER`≠`CODE_HOST` topology routes
+  them to different systems. The verbs stay distinct.
+
+**Why**: #329 (#296 second-tier). The PR-comment write was one of the last raw-`gh`
+clusters in the two HOT review files; routing it behind the seam lets a non-GitHub
+code host slot behind `CODE_HOST`. Closes 7 raw-`gh` occurrences (5 distinct
+signatures) — the absolute baseline totals reconcile with each rebase since
+sibling `#296` migrations shrink the same shared manifest ([INV-91]).
+
+**Producer**: `autonomous-review.sh` / `lib-review-e2e.sh` (the 7 call sites);
+`providers/chp-github.sh::chp_github_pr_comment` (the leaf); `lib-code-host.sh::chp_pr_comment`
+(the self-guarding shim). **Consumer**: the same review wrappers, fail-soft on a
+leaf-absent backend.
+
+**Tests**: `tests/unit/test-chp-pr-comment.sh` — golden-trace (the leaf emits
+`gh pr comment $PR --repo $REPO --body <body>` byte-identically, NO leaf-added
+redirects), per-site framing preservation (the capture/gating/broker forms), the
+self-guarding shim (leaf-absent → WARN + `return 1`, no `set -e` abort, via the
+degraded fixture), and source-shape (zero executable raw `gh pr comment` in the two
+files; baseline −7). `tests/unit/test-spec-drift.sh::TC-SPEC-GATE-329` pins the
+INV-91 Migration-log bullet (Spec Drift surface).
+
+**Cross-references**:
+- [INV-87](#inv-87-provider-dispatch-is-spec-defined--callers-route-every-issuecode-host-op-through-itp_chp_-never-a-raw-gh-in-the-caller-layer) — the verb-dispatch contract; `chp_pr_comment` is a general (non-lifecycle) code-host primitive under it.
+- [INV-89](#inv-89-every-machine-marker--agent-and-dispatcher-inv-18inv-39-included--is-posted-only-through-the-declared-marker_channel-the-read-side-capture-regex-branches-on-channel) — the ISSUE-level marker choke-point (`itp_post_comment`) this PR-comment write is kept DISTINCT from.
+- [INV-91](#inv-91-the-provider-neutral-caller-layer-routes-all-host-io-through-itp_chp_-verbs--a-new-raw-gh-outside-providers-is-a-ci-failing-cutover-regression-baseline-anchored) — the cutover guard whose baseline this migration shrinks by 5 signatures / 7 occurrences.
+- [`provider-spec.md`](provider-spec.md) §3.2 caller-guard convention prose + the mapping appendix `chp_pr_comment` row.
 
 ## Adding a new invariant
 
