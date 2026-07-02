@@ -3137,6 +3137,18 @@ for _i in "${!AGENT_VERDICT_LANE_DIRS[@]}"; do
   fi
 done
 
+# [INV-99] (#355 review finding): the E2E command-mode AC-coverage sidecar is
+# now RUN_ID-keyed (D4) rather than truncated-in-place per PR, so a fresh file
+# is minted every wrapper run with nothing removing the PREVIOUS run's file —
+# an unbounded /tmp accumulation the pre-#355 PR-number-only path never had
+# (it truncated-in-place, self-bounding at one file per PR). Every review
+# agent's prompt has already read it (via _revalidate_ac_coverage_file, called
+# from build_review_prompt before the fan-out `wait` above), so it is safe to
+# remove now. Best-effort; a no-op when E2E_MODE != command (var unset/empty).
+if [[ -n "${E2E_AC_COVERAGE_FILE:-}" ]]; then
+  rm -f "$E2E_AC_COVERAGE_FILE" 2>/dev/null || true
+fi
+
 case "$AGGREGATE" in
   pass)
     PASSED_VERDICT=true
