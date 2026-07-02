@@ -351,12 +351,15 @@ else
   fail "TC-CCF-035 upload-screenshot.sh does NOT invoke chp_commit_file"
 fi
 
-# TC-CCF-034 — baseline shrank: no upload-screenshot.sh git/contents sigs remain;
-# the `command -v gh` sig STAYS; the cutover guard passes.
+# TC-CCF-034 — baseline shrank: no upload-screenshot.sh git/contents sigs remain.
+# The `command -v gh` presence guard was this issue's premise for #344 (#296 FINAL
+# batch) to allowlist the whole file — once landed, upload-screenshot.sh carries
+# ZERO baseline signatures at all (allowlisted files are excluded from the scan
+# entirely, not baselined survivors). TC-CCF-034b now asserts that end state.
 n_us_gitcontents=$(jq -r '[.surviving_sites[] | select(.file=="upload-screenshot.sh") | select(.content|test("git/|contents/"))] | length' "$BASELINE" 2>/dev/null || echo ERR)
 assert_eq "TC-CCF-034 baseline has zero upload-screenshot.sh git/contents sigs" "0" "$n_us_gitcontents"
-n_us_cmdguard=$(jq -r '[.surviving_sites[] | select(.file=="upload-screenshot.sh") | select(.content|test("command -v gh"))] | length' "$BASELINE" 2>/dev/null || echo ERR)
-assert_eq "TC-CCF-034b baseline keeps the upload-screenshot.sh command -v gh sig" "1" "$n_us_cmdguard"
+n_us_any=$(jq -r '[.surviving_sites[] | select(.file=="upload-screenshot.sh")] | length' "$BASELINE" 2>/dev/null || echo ERR)
+assert_eq "TC-CCF-034b upload-screenshot.sh is allowlisted (#344) — zero baseline sigs of any kind" "0" "$n_us_any"
 
 # The cutover guard (INV-91) PASSES against the real repo (Check 1 reconciles the
 # tree to the shrunk baseline). Run it like test-provider-cutover.sh does.

@@ -707,6 +707,120 @@ else
   ok "git unavailable — TC-CUTAMEND-008 skipped"
 fi
 
+# ---------------------------------------------------------------------------
+echo "=== TC-FINALBATCH-001/002: the 6 reworded sites carry zero gh-token matches, meaning preserved (#344, R1) ==="
+# ---------------------------------------------------------------------------
+# Each of the 6 committed lines, located by a stable content ANCHOR (not a line
+# number, which drifts) and checked against the guard's OWN live detector regex
+# — proves the reword actually removes the trip condition (R1), not just "looks
+# reworded". Also asserts each line still carries its original
+# INV/remediation/context substrings (meaning preserved).
+declare -A FB_FILE_ANCHOR=(
+  [dev740]="autonomous-dev.sh|agent never ran, no ISSUE_NUMBER"
+  [err303]="lib-error.sh|CLI proxy not resolvable"
+  [err332]="lib-error.sh|failed to surface envelope"
+  [pf119]="lib-review-postfail.sh|verdict comment post failed;"
+  [pv268]="post-verdict.sh|CLI proxy not found/executable"
+  [pv292]="post-verdict.sh|failed to post verdict comment"
+)
+declare -A FB_KEEP=(
+  [dev740]="ISSUE_NUMBER"
+  [err303]="AUTONOMOUS_CONF_DIR"
+  [err332]="degrading to log-only"
+  [pf119]="transient GitHub/API or token error"
+  [pv268]="INV-56"
+  [pv292]="ISSUE_NUMBER"
+)
+for key in dev740 err303 err332 pf119 pv268 pv292; do
+  entry="${FB_FILE_ANCHOR[$key]}"; f="${entry%%|*}"; anchor="${entry#*|}"
+  path="$SCRIPTS/$f"
+  content="$(grep -F "$anchor" "$path" | head -1)"
+  if [[ -z "$content" ]]; then
+    bad "TC-FINALBATCH-001 $f (anchor '$anchor') — line not found (file drifted?)"
+    continue
+  fi
+  hits="$(grep -ocE '(^|[^A-Za-z_-])gh ' <<<"$content")"
+  if [[ "$hits" -eq 0 ]]; then
+    ok "TC-FINALBATCH-001 $f (anchor '$anchor') has zero gh-token matches (reword removed the trip)"
+  else
+    bad "TC-FINALBATCH-001 $f (anchor '$anchor') still matches the gh-token detector ($hits hits): $content"
+  fi
+  if [[ "$content" == *"${FB_KEEP[$key]}"* ]]; then
+    ok "TC-FINALBATCH-002 $f (anchor '$anchor') preserves '${FB_KEEP[$key]}' (meaning kept)"
+  else
+    bad "TC-FINALBATCH-002 $f (anchor '$anchor') lost '${FB_KEEP[$key]}': $content"
+  fi
+done
+
+# ---------------------------------------------------------------------------
+echo "=== TC-FINALBATCH-005: the gh_rc= breadcrumb KEY is untouched (machine key, not scanner prose, #344) ==="
+# ---------------------------------------------------------------------------
+if grep -q "printf 'gh_rc=%s\\\\n'" "$SCRIPTS/post-verdict.sh"; then
+  ok "TC-FINALBATCH-005a post-verdict.sh still writes the gh_rc= breadcrumb key verbatim"
+else
+  bad "TC-FINALBATCH-005a post-verdict.sh's gh_rc= breadcrumb write changed unexpectedly"
+fi
+if grep -q "gh_rc=\[0-9\]" "$SCRIPTS/lib-review-postfail.sh"; then
+  ok "TC-FINALBATCH-005b lib-review-postfail.sh still reads the gh_rc= breadcrumb key verbatim"
+else
+  bad "TC-FINALBATCH-005b lib-review-postfail.sh's gh_rc= breadcrumb read changed unexpectedly"
+fi
+
+# ---------------------------------------------------------------------------
+echo "=== TC-FINALBATCH-006/007: upload-screenshot.sh is allowlisted, zero baseline signatures for it (#344, R3) ==="
+# ---------------------------------------------------------------------------
+if grep -q 'ALLOWLISTED_FILES=(.*upload-screenshot\.sh' "$CHECK"; then
+  ok "TC-FINALBATCH-006 upload-screenshot.sh is present in ALLOWLISTED_FILES"
+else
+  bad "TC-FINALBATCH-006 upload-screenshot.sh is NOT in ALLOWLISTED_FILES"
+fi
+gen="$(bash "$CHECK" --generate-baseline 2>/dev/null)"
+if [[ -n "$gen" ]] && ! jq -e '.surviving_sites[] | select(.file=="upload-screenshot.sh")' <<<"$gen" >/dev/null 2>&1; then
+  ok "TC-FINALBATCH-007 --generate-baseline emits zero upload-screenshot.sh signatures"
+else
+  bad "TC-FINALBATCH-007 upload-screenshot.sh still appears in the generated baseline"
+fi
+
+# ---------------------------------------------------------------------------
+echo "=== TC-FINALBATCH-008/009: committed baseline shrank by exactly the 6 reword + 1 allowlist signatures (#344, R4) ==="
+# ---------------------------------------------------------------------------
+missing_old=0
+for needle in \
+  'no ISSUE_NUMBER or gh —' \
+  'token-refresh gh proxy not resolvable' \
+  'gh rc=${post_rc}' \
+  'gh rc %s' \
+  'gh rc=${POST_RC}'; do
+  if jq -r '.surviving_sites[].content' "$BASELINE" | grep -qF "$needle"; then
+    missing_old=1
+    bad "TC-FINALBATCH-008 committed baseline still contains OLD reworded string fragment: $needle"
+  fi
+done
+if [[ "$missing_old" -eq 0 ]]; then
+  ok "TC-FINALBATCH-008 committed baseline contains zero OLD reworded-string fragments"
+fi
+if ! jq -e '.surviving_sites[] | select(.file=="upload-screenshot.sh")' "$BASELINE" >/dev/null 2>&1; then
+  ok "TC-FINALBATCH-008 committed baseline contains zero upload-screenshot.sh signatures"
+else
+  bad "TC-FINALBATCH-008 committed baseline still carries an upload-screenshot.sh signature"
+fi
+DIST="$(jq '.surviving_sites | length' "$BASELINE")"
+OCC="$(jq '[.surviving_sites[].count] | add' "$BASELINE")"
+if [[ "$DIST" -eq 40 && "$OCC" -eq 45 ]]; then
+  ok "TC-FINALBATCH-009 committed baseline is exactly 40 distinct / 45 occurrences (47→40, 52→45, #344 shrink of 7)"
+else
+  bad "TC-FINALBATCH-009 committed baseline is ${DIST} distinct / ${OCC} occurrences, expected 40/45"
+fi
+
+# ---------------------------------------------------------------------------
+echo "=== TC-FINALBATCH-010: check-provider-cutover.sh --require-trusted-ref strict-passes against the committed repo (#344, AC1) ==="
+# ---------------------------------------------------------------------------
+if bash "$CHECK" --require-trusted-ref >/dev/null 2>&1; then
+  ok "TC-FINALBATCH-010 committed repo strict-passes --require-trusted-ref (Check 1 + Check 4 monotonicity, shrunk)"
+else
+  bad "TC-FINALBATCH-010 committed repo FAILS --require-trusted-ref"
+fi
+
 # ===========================================================================
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="

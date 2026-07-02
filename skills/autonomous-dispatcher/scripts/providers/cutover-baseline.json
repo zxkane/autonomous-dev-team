@@ -34,11 +34,6 @@
     {
       "count": 1,
       "file": "autonomous-dev.sh",
-      "content": "log \"Exiting with code $exit_code (agent never ran, no ISSUE_NUMBER or gh — silent).\""
-    },
-    {
-      "count": 1,
-      "file": "autonomous-dev.sh",
       "content": "means the review verdict was PASS but \\`gh pr merge\\` failed (likely a merge"
     },
     {
@@ -167,16 +162,6 @@
       "content": "if ! command -v gh &>/dev/null || ! gh auth status &>/dev/null 2>&1; then"
     },
     {
-      "count": 1,
-      "file": "lib-error.sh",
-      "content": "_error_log \"failed to surface envelope ${code} on issue #${issue} (gh rc=${post_rc}); degrading to log-only:\""
-    },
-    {
-      "count": 1,
-      "file": "lib-error.sh",
-      "content": "_error_log \"token-refresh gh proxy not resolvable (AUTONOMOUS_CONF_DIR='${AUTONOMOUS_CONF_DIR:-}', skill-tree fallback '${_LIB_ERROR_DIR}/gh-with-token-refresh.sh' missing); degrading envelope ${code} to log-only:\""
-    },
-    {
       "count": 3,
       "file": "lib-review-bots.sh",
       "content": "COUNT=\\$(gh api repos/${repo}/pulls/${pr_number}/reviews \\\\"
@@ -190,26 +175,6 @@
       "count": 1,
       "file": "lib-review-e2e.sh",
       "content": "_comment_id=$(gh api \"repos/${REPO_OWNER}/${REPO_NAME}/issues/${PR_NUMBER}/comments\" --paginate \\"
-    },
-    {
-      "count": 1,
-      "file": "lib-review-postfail.sh",
-      "content": "printf 'post-failed (verdict comment post failed; gh rc %s — transient GitHub/API or token error)\\n' \"$rc\""
-    },
-    {
-      "count": 1,
-      "file": "post-verdict.sh",
-      "content": "echo \"Error: failed to post verdict comment on issue #${ISSUE_NUMBER} (gh rc=${POST_RC})\" >&2"
-    },
-    {
-      "count": 1,
-      "file": "post-verdict.sh",
-      "content": "echo \"Error: token-refresh gh proxy not found/executable at '${GH}'. Refusing to post the verdict via bare PATH gh (it would mis-attribute the comment). Re-run install-project-hooks.sh to restore the scripts/gh symlink (INV-56).\" >&2"
-    },
-    {
-      "count": 1,
-      "file": "upload-screenshot.sh",
-      "content": "command -v gh >/dev/null 2>&1 || fail \"gh CLI is required but not found in PATH\""
     }
   ]
 }

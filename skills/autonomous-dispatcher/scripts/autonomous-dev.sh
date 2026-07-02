@@ -737,7 +737,7 @@ EOF
       itp_transition_state "$ISSUE_NUMBER" "in-progress" "pending-dev" 2>/dev/null \
         || log "WARNING: Failed to update issue labels on startup failure"
     else
-      log "Exiting with code $exit_code (agent never ran, no ISSUE_NUMBER or gh — silent)."
+      log "Exiting with code $exit_code (agent never ran, no ISSUE_NUMBER or CLI proxy — silent)."
     fi
     _emit_dev_end "$exit_code"
     # [INV-81] Write the run end marker (rc + timing) to meta.json. Best-effort.

@@ -161,10 +161,15 @@ command -v jq >/dev/null 2>&1 || { echo "check-provider-cutover.sh: jq is requir
 # itself is TREE-WIDE per AC #41.)
 CALLER_FILES=(lib-dispatch.sh autonomous-dev.sh autonomous-review.sh)
 # Allowlisted gh-holding files: the auth/refresh wrappers + the remote-SSM
-# transport ONLY (spec §8: GitHub auth is unchanged; the wrappers are allowlisted,
-# not refactored). `gh` is the project-side wrapper SYMLINK (scripts/gh →
-# gh-with-token-refresh.sh): allowlisted by NAME but gitignored/operator-local, so
-# it has no committed file to scan or stat.
+# transport (spec §8: GitHub auth is unchanged; the wrappers are allowlisted,
+# not refactored), plus `upload-screenshot.sh` (#344, #296 FINAL batch) — its
+# git-Data-API commit path migrated behind chp_commit_file (#330/#335), leaving
+# only a `command -v gh` capability-presence guard, not I/O; a single-purpose
+# non-caller-layer utility script, so file-level allowlisting is the correct
+# disposition (same class as the auth/transport wrappers: a presence check, not
+# a call site the provider seam owns). `gh` is the project-side wrapper SYMLINK
+# (scripts/gh → gh-with-token-refresh.sh): allowlisted by NAME but
+# gitignored/operator-local, so it has no committed file to scan or stat.
 #
 # NOTE: this guard script itself is NOT allowlisted (#286 review round 2 [P1] #2).
 # Wholesale-exempting it meant a real `gh api user` could be added to the checker
@@ -173,7 +178,7 @@ CALLER_FILES=(lib-dispatch.sh autonomous-dev.sh autonomous-review.sh)
 # baseline as ordinary surviving sites, so a NEW raw gh added to the checker is
 # unbaselined → FAILs. (Its comment lines are skipped by the detector; the
 # baseline'd lines are the few non-comment ones.)
-ALLOWLISTED_FILES=(gh gh-with-token-refresh.sh gh-app-token.sh gh-as-user.sh dispatch-remote-aws-ssm.sh)
+ALLOWLISTED_FILES=(gh gh-with-token-refresh.sh gh-app-token.sh gh-as-user.sh dispatch-remote-aws-ssm.sh upload-screenshot.sh)
 
 # The #286-amendment (#343). The guard's OWN infrastructure lines change content
 # whenever the allowlist POLICY changes, so baselining them means an allowlist
