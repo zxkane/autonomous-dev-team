@@ -46,7 +46,7 @@ load-bearing and gates a PASS verdict).
 | `TC-CRBL-031` | the real leaf (`count=$(gh api … --paginate` caller form) is GONE from `lib-review-bots.sh` | absent |
 | `TC-CRBL-032` | the migrated caller + new leaf REDACT any literal `gh api …/reviews` in their comments (use `` `gh` `` or "the reviews endpoint") so an explanatory comment doesn't self-trip the count (#316 footgun) | no literal `gh api …/reviews` in new comment lines |
 | `TC-CRBL-033` | new shim `chp_count_reviews_by_login` present in `lib-code-host.sh`; new leaf `chp_github_count_reviews_by_login` present in `providers/chp-github.sh` | both present |
-| `TC-CRBL-034` | **baseline-delta pin** — the migrated leaf wire-string ABSENT from `cutover-baseline.json`; total signatures == prior − 1; the `COUNT=3` prose entry unchanged | leaf entry gone; total reconciled to current main's baseline (59 as of this rebase); prose entry intact |
+| `TC-CRBL-034` | **baseline-delta pin** — the migrated leaf wire-string ABSENT from `cutover-baseline.json`; the `COUNT=3` prose entry unchanged. The absolute total is deliberately NOT pinned here (#349/#342 precedent — it moves with every sibling #296 migration; `check-provider-cutover.sh` Check 1/Check 4 already guard it robustly) | leaf entry gone; prose entry intact |
 
 ## Acceptance Criteria mapping
 
@@ -55,7 +55,7 @@ load-bearing and gates a PASS verdict).
 - **AC3** → `TC-CRBL-022/023/024` (leaf/shim-absent + unset-`CODE_HOST` → MISSING, never aborts; guard expr == shim dispatch).
 - **AC4** → `TC-CRBL-006/007` (injection-safe).
 - **AC5** → `TC-CRBL-030..033` (source-shape — real leaf gone, 3 prose stay, no comment self-trip, shim/leaf present).
-- **AC6** → `TC-CRBL-034` + `check-provider-cutover.sh` (INV-91): baseline shrinks by 1 (this PR's leaf), reconciled to current main at rebase time, pinned mechanically.
+- **AC6** → `TC-CRBL-034` + `check-provider-cutover.sh` (INV-91): baseline shrinks by 1 (this PR's leaf), pinned mechanically (migration-robust, not an absolute total).
 - **AC7** → provider-spec.md §3.2 row + INV-94 + review doc; `check-spec-drift.sh` passes.
 - **AC8** → full unit suite green under `env -u PROJECT_DIR`.
 

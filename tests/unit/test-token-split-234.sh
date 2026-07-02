@@ -810,7 +810,7 @@ DRAIN_GH="$TMPROOT/drain-gh"; mkdir -p "$DRAIN_GH"
 printf '#!/bin/bash\nif [[ "$1" == "pr" && "$2" == "list" ]]; then echo 42; exit 0; fi\nexit 0\n' > "$DRAIN_GH/gh"; chmod +x "$DRAIN_GH/gh"
 DRAIN_BTF="$TMPROOT/drain-bt"; printf '/q review\n/evil arbitrary comment\n/codex review\n' > "$DRAIN_BTF"
 env -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR PATH="$DRAIN_GH:/usr/bin:/bin" bash -c "
-  source '$DRAIN_SBA/lib-auth.sh'; source '$DRAIN_SBA/lib-review-bots.sh'
+  source '$DRAIN_SBA/lib-code-host.sh'; source '$DRAIN_SBA/lib-auth.sh'; source '$DRAIN_SBA/lib-review-bots.sh'
   AGENT_GH_TOKEN_FILE='/scoped'; AGENT_BOT_TRIGGER_FILE='$DRAIN_BTF'
   allow=\$(bot_trigger_allowlist 'q codex')
   drain_agent_bot_triggers 234 owner/repo \"\$allow\"

@@ -344,27 +344,30 @@ fi
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== TC-CRBL-034: baseline-delta — leaf entry removed, total reconciled to current main, COUNT=3 prose entry intact ==="
+echo "=== TC-CRBL-034: baseline-delta — leaf entry removed, COUNT=3 prose entry intact ==="
 # ---------------------------------------------------------------------------
+# Only the migration-ROBUST invariants are pinned here: the migrated leaf's
+# wire-string is GONE, and the 3-prose entry is unchanged. The absolute baseline
+# TOTAL is deliberately NOT pinned (#349/#342 precedent, test-reply-review-comment.sh
+# TC-RRC-033): the total moves with EVERY sibling #296 second-tier migration that
+# independently shrinks the shared baseline, so an absolute pin here goes red on any
+# concurrent shrinking PR — coverage this test does not own and cannot keep current
+# without a re-pin per sibling merge. The total is already guarded, robustly, by
+# check-provider-cutover.sh in the CI `spec-drift` job: Check 1 reconciles the whole
+# tree against the baseline and Check 4 (--require-trusted-ref, strict in CI)
+# enforces shrink-only monotonicity vs origin/main. An absolute-total assertion here
+# would add NO unique coverage.
 if ! command -v jq >/dev/null 2>&1; then
   assert_fail "jq required for the baseline-delta pin"
 else
   # The migrated leaf's wire-string (trimmed content key) MUST be absent.
   leaf_entries=$(jq '[.surviving_sites[] | select(.file=="lib-review-bots.sh" and (.content | test("count=\\$\\(gh api")))] | length' "$BASELINE")
-  total=$(jq '.surviving_sites | length' "$BASELINE")
   # The 3-prose entry (count:3) must remain unchanged.
   prose_entry=$(jq '[.surviving_sites[] | select(.file=="lib-review-bots.sh" and .count==3 and (.content | test("COUNT=")))] | length' "$BASELINE")
-  # Absolute total is 59 as of this rebase (multiple sibling #296 second-tier PRs
-  # merged to main ahead of this one, each independently shrinking the shared
-  # baseline). This PR's own contribution is the leaf_entries=0 / prose_entry=1
-  # pins above; the absolute total just reconciles to whatever main's baseline is
-  # at merge time. check-provider-cutover.sh's monotonicity check (Check 4) is the
-  # authoritative guard that the baseline never GROWS — this pin is a point-in-time
-  # sanity check, expected to need updating again if main advances before merge.
-  if [[ "$leaf_entries" -eq 0 && "$total" -eq 59 && "$prose_entry" -eq 1 ]]; then
-    assert_pass "baseline: leaf entry gone, total=59 (reconciled to current main), the COUNT=3 prose entry intact"
+  if [[ "$leaf_entries" -eq 0 && "$prose_entry" -eq 1 ]]; then
+    assert_pass "baseline: leaf entry gone, the COUNT=3 prose entry intact"
   else
-    assert_fail "baseline-delta wrong: leaf_entries=$leaf_entries total=$total (want 59) prose_entry=$prose_entry (want 1)"
+    assert_fail "baseline-delta wrong: leaf_entries=$leaf_entries (want 0) prose_entry=$prose_entry (want 1)"
   fi
 fi
 

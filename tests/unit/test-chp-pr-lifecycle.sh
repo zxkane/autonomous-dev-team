@@ -407,6 +407,7 @@ fi
 # path the gate relies on to suppress the prompt section.
 rbs_empty=$(
   env -u PROJECT_DIR bash -c '
+    source "'"$SCRIPTS"'/lib-code-host.sh" 2>/dev/null
     source "'"$SCRIPTS"'/lib-review-bots.sh" 2>/dev/null
     render_bot_review_section "" 99 "'"$REPO"'"
   '

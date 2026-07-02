@@ -96,10 +96,21 @@ note() { echo -e "  ${YEL}NOTE${NC}: $1"; }
 #   - test-autonomous-review-sequential-e2e.sh / test-autonomous-review-structured-ac.sh:
 #     owned by open PR #337, which itself adds sandbox-level seam repairs to
 #     structured-ac. Removed in a post-#337 cleanup (issue #342 Out of Scope).
+#   - test-token-split-234.sh:lib-review-bots.sh: PERMANENT. lib-review-bots.sh became
+#     a CHP consumer in #324 (missing_bot_reviews calls chp_count_reviews_by_login).
+#     This harness's TC-CRBL-022/023 leaf-absent cases DELIBERATELY source
+#     lib-review-bots.sh with NO CHP seam (unset CODE_HOST / CODE_HOST=noleaf under
+#     explicit `set -euo pipefail`) to prove the dual declare -F guard fails-safe to
+#     count=0 -> bot MISSING rather than aborting — the seam's absence IS the thing
+#     under test. (Its other contexts in this file DO source the seam and would pass
+#     on their own; the whole-harness waiver is the right granularity because the
+#     rule keys on source statements, not call graphs — same precedent as
+#     test-issue-308-b3b4-chp-reads.sh above.)
 WAIVERS=(
   "test-issue-308-b3b4-chp-reads.sh:lib-review-e2e.sh:permanent — #308 AC4 FAIL-SOFT proof sources the lib with NO CHP seam on purpose"
   "test-autonomous-review-sequential-e2e.sh:lib-review-e2e.sh:owned by open PR #337 (adds sandbox seam repairs); remove waiver post-#337"
   "test-autonomous-review-structured-ac.sh:lib-review-e2e.sh:owned by open PR #337 (adds sandbox seam repairs); remove waiver post-#337"
+  "test-token-split-234.sh:lib-review-bots.sh:permanent — #324 TC-CRBL-022/023 leaf-absent proofs source the lib with NO CHP seam on purpose"
   "test-autonomous-review-verdict-via-helper.sh:dynamic-source:_FN_SLICE is a mktemp function-slice fixture authored inline by this test"
   "test-kill-before-spawn.sh:dynamic-source:EXTRACT_FILE is a mktemp function-slice fixture (kill fns extracted from dispatch-local.sh)"
   "test-pid-guard-pgid.sh:dynamic-source:EXTRACT_FILE is a mktemp function-slice fixture (kill fns extracted from dispatch-local.sh)"
