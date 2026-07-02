@@ -1,4 +1,4 @@
-# Test cases — dispatcher convergence circuit-breaker (issue #297 / INV-102)
+# Test cases — dispatcher convergence circuit-breaker (issue #297 / INV-103)
 
 Fixture-driven, mirroring the existing `test-handle-completed-session-routing.sh`
 and `test-mark-stalled-liveness.sh` harnesses. Run under `env -u PROJECT_DIR` for
@@ -33,6 +33,6 @@ CI parity.
 - **AC1** (detect non-convergence + halt): CB-TRIP-001, CB-COUNT-009a/b/c, CB-THRESH-012.
 - **AC2** (single structured report with reason + SHA + repeated findings + human checklist): CB-REPORT-008, CB-DUAL-011.
 - **AC3** (converging loops unaffected + idempotent): CB-MISS-002, CB-MISS-003, CB-IDEM-006, CB-IDEM-007.
-- **AC4** (docs updated: dispatcher-flow + INV-102): enforced by the pipeline-docs-gate + TC-SPEC-GATE-040/041 (heading-adjacent triage tag).
+- **AC4** (docs updated: dispatcher-flow + INV-103): enforced by the pipeline-docs-gate + TC-SPEC-GATE-040/041 (heading-adjacent triage tag).
 - **#298 precedence**: CB-PRECEDENCE-004.
 - **live-PID deferral inherited via shared helper**: CB-LIVE-005, CB-SHARED-010, MSL-CHAR-011.

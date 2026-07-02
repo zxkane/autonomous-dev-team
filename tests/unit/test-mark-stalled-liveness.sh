@@ -268,7 +268,7 @@ assert_match    "TC-MSL-010 review-cap caller (no --at-cap) remote indeterminate
 
 # ===================================================================
 echo
-echo "=== TC-MSL-011..013: may_stall_now shared liveness helper ([INV-102] #297) ==="
+echo "=== TC-MSL-011..013: may_stall_now shared liveness helper ([INV-103] #297) ==="
 # The INV-26 liveness predicate is now the shared `may_stall_now` helper, so BOTH
 # mark_stalled AND the #297 convergence breaker share one source of truth. It
 # returns the PREDICATE ONLY (eligible=0 / defer=1) with NO comment side-effect —

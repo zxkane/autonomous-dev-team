@@ -1,5 +1,5 @@
 #!/bin/bash
-# test-convergence-breaker.sh — INV-102 / issue #297.
+# test-convergence-breaker.sh — INV-103 / issue #297.
 #
 # Unit tests for the dispatcher convergence circuit-breaker (Branch B″ in
 # lib-dispatch.sh::handle_completed_session_routing) + its helpers
@@ -387,7 +387,7 @@ echo "=== CB-REPORT-008: report content (PR ref + SHA + resume instruction) ==="
 # reuse CB-TRIP-001's _MOCK_LAST_COMMENT_BODY
 assert_contains "CB-REPORT-008 PR ref present" "PR: #777" "$_MOCK_LAST_COMMENT_BODY"
 assert_contains "CB-REPORT-008 frozen SHA present" "\`deadbeef\`" "$_MOCK_LAST_COMMENT_BODY"
-assert_contains "CB-REPORT-008 resume instruction present" "re-add the \`autonomous\` label" "$_MOCK_LAST_COMMENT_BODY"
+assert_contains "CB-REPORT-008 resume instruction present" "REMOVE the \`stalled\` label" "$_MOCK_LAST_COMMENT_BODY"
 assert_contains "CB-REPORT-008 repeated-failure count present" "Repeated-failure count on this frozen head: **3**" "$_MOCK_LAST_COMMENT_BODY"
 assert_contains "CB-REPORT-008 verbatim finding excerpt present" "acceptance criterion #3 contradicts #1" "$_MOCK_LAST_COMMENT_BODY"
 assert_contains "CB-REPORT-008 human-action checklist present" "Human action needed" "$_MOCK_LAST_COMMENT_BODY"
@@ -566,7 +566,7 @@ echo "=== recent_review_verdict_body: skips wrapper-metadata comments, returns t
 # all same-actor and each later than the last. A naive "newest bot comment"
 # selection (what classify_recent_review_verdict correctly uses, since IT wants
 # the trailer) would return the bare trailer or the Reviewed-HEAD line here
-# instead of the findings text the [INV-102] evidence block needs to quote.
+# instead of the findings text the [INV-103] evidence block needs to quote.
 # The mock at line ~97 shadowed the real function the moment it was defined
 # (both are top-level `name() { ... }` defs in the same shell — there is no
 # saved original to `unset -f` back to). Re-extract and re-source ONLY the real

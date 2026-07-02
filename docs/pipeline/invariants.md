@@ -5737,7 +5737,7 @@ NOTHING, defer to next tick (no orphan report/marker).
 `reason=non-convergence` report carrying the PR ref + frozen head SHA + the round
 count + the verbatim repeated finding (`recent_review_verdict_body`) + the
 `cause=`/`dev-actionable` hint + a human-action checklist + the explicit "**To
-resume: fix per the checklist, then re-add the `autonomous` label.**" instruction
+resume: fix per the checklist, then REMOVE the `stalled` label.**" instruction
 + the idempotency marker
 `<!-- dispatcher-convergence-breaker: issue=<N> head=<sha> trailer=<hash> -->`;
 THEN the terminal transition via the plain declared `pending-dev → stalled`
@@ -5749,7 +5749,7 @@ exhausted"), plus the live-PID deferral (via the shared `may_stall_now`), plus N
 new declared label edge (passes `check-spec-drift.sh` Check C.2 — no
 `transitions.json` / `state-machine.md` edit). `stalled` is REUSED — no new
 `deadlocked` label ([INV-102] does not fork one; both recovery actions are "read
-report, fix, re-add `autonomous`").
+report, fix, remove `stalled`").
 
 **Idempotency**: before posting, grep bot-authored comments for the exact
 `{issue, head, trailer-hash}` marker; a re-run on the SAME case is suppressed
