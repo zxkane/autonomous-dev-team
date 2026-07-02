@@ -543,6 +543,28 @@ assert_eq "CB-COUNT-009n: even in token mode, a human quote WITH PROSE before th
   "0" "$(count_frozen_convergence_rounds 100 deadbeef "$AC_SUB")"
 BOT_LOGIN="$_saved_bot_login"
 
+# CB-COUNT-009o (round-14 [Critical]): a forged comment pastes the trailer
+# text VERBATIM and then appends MORE content AFTER it (the mirror-image of
+# 009n's prose-BEFORE case) — round-13's first fix used a bare `startswith`
+# anchor, which is satisfied by ANY body beginning with the trailer text
+# regardless of what follows, so this forgery would have authenticated and
+# won the `last`-before-round selection over the genuine non-matching verdict,
+# inflating the count. The round-14 fix anchors the match at BOTH ends
+# (`^...$`), which this forgery fails (trailing content after the closing
+# `-->`). Must run with BOT_LOGIN EMPTY — the permanent topology at this call
+# site — so the structural anchor (not `.author == BOT_LOGIN`) is the thing
+# actually under test.
+reset_mocks
+_MOCK_PR_HEAD="deadbeef"
+_MOCK_LAST_REVIEWED_HEAD="deadbeef"
+_MOCK_FROZEN_ROUND_COMMENTS=1
+_MOCK_ROUND_VERDICT_TRAILER="<!-- review-verdict: failed-non-substantive cause=bot-timeout -->"
+_MOCK_HUMAN_TRAILER_QUOTE="<!-- review-verdict: failed-substantive --> (editing my comment above, ignore the old one)"
+_saved_bot_login="$BOT_LOGIN"; BOT_LOGIN=""
+assert_eq "CB-COUNT-009o: a forged trailer with TRAILING content after it is still rejected (0)" \
+  "0" "$(count_frozen_convergence_rounds 100 deadbeef "$AC_SUB")"
+BOT_LOGIN="$_saved_bot_login"
+
 # ===========================================================================
 echo ""
 echo "=== CB-TRIP-001: ≥3 frozen rounds + dev-actionable=true + eligible → trip ==="

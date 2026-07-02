@@ -1270,18 +1270,27 @@ convergence_trailer_hash() {
 # mentions/quotes one — `lib-review-verdict.sh::emit_verdict_trailer` posts the
 # trailer as its OWN bare comment whose body is JUST the trailer line, no
 # human text ("posting an additional, separate comment … so it doesn't render
-# in the GitHub issue UI" — see that function's header). So
-# `startswith("<!-- review-verdict:")` is authorship-independent and reliably
-# TRUE for the genuine wrapper-emitted comment, FALSE for a human's "Just
-# quoting for context: <!-- review-verdict: ... -->" (which has prose BEFORE
-# the trailer). This mirrors the round-comment's OWN `startswith` anchor
-# (line ~1239 above) — authenticity via STRUCTURE, not actor identity, exactly
-# because no reliable actor signal exists at this call site. `.author ==
-# BOT_LOGIN` is kept as an ADDITIONAL, strictly-stronger check for the rare
-# case BOT_LOGIN IS somehow set (defense in depth; never observed live today).
-# A round whose only candidate verdict fails this gate has no authenticated
-# `$pv` and is excluded (fail-closed toward NOT tripping) — the #286-adjacent
-# MISS bias this breaker is designed for.
+# in the GitHub issue UI" — see that function's header). So an ANCHORED
+# full-body match against the trailer shape is authorship-independent and
+# reliably TRUE for the genuine wrapper-emitted comment, FALSE for a human's
+# "Just quoting for context: <!-- review-verdict: ... -->" (prose BEFORE the
+# trailer). `.author == BOT_LOGIN` is kept as an ADDITIONAL, strictly-stronger
+# check for the rare case BOT_LOGIN IS somehow set (defense in depth; never
+# observed live today). A round whose only candidate verdict fails this gate
+# has no authenticated `$pv` and is excluded (fail-closed toward NOT tripping)
+# — the #286-adjacent MISS bias this breaker is designed for.
+#
+# round-14 [Critical]: the FIRST round-13 fix used `startswith` alone (not
+# anchored at the end), which also authenticates a forged comment that pastes
+# the genuine trailer text and then appends MORE content after it (e.g. a
+# forged matching trailer with trailing prose, or two trailers concatenated).
+# With `BOT_LOGIN` empty — the permanent reality at this call site — that
+# `startswith` check was the ENTIRE gate, so such a forgery could manufacture
+# a false trip or shadow a genuine trailer via the `last`-before-round
+# selection, reopening the exact round-11 threat model for a slightly
+# different forgery shape. Tightened to a full `^...$`-anchored match — see
+# `authentic_verdict(c)` below for the exact pattern and its residual
+# (author-blind, unavoidable) exposure to a byte-for-byte bare-trailer copy.
 #
 # Fail-closed toward NOT tripping: an empty/error fetch yields `[]` (biases to
 # MISS per R4). The trailer parse mirrors classify_recent_review_verdict: verdict
@@ -1317,15 +1326,33 @@ _frozen_convergence_rounds_json() {
   #    `{verdict}|{cause}|{dev-actionable}`, mirroring classify_recent_review_verdict
   #    (cause only for failed-non-substantive; absent dev-actionable ⇒ true).
   #  - `authentic_verdict(c)`: STRUCTURAL authenticity for a CANDIDATE verdict
-  #    comment `c` (round-13 [BLOCKING], corrects round-11) — the body MUST
-  #    `startswith("<!-- review-verdict:")`, mirroring emit_verdict_trailer's
-  #    contract that the trailer is posted as its OWN bare comment (no human
-  #    text). This is authorship-independent, so it works identically whether
-  #    or not BOT_LOGIN is available. `.author == $bot_login` is layered on TOP
-  #    as an additional (strictly stronger) requirement on the rare path where
-  #    BOT_LOGIN happens to be set — never the SOLE gate, since the empty-
-  #    BOT_LOGIN case (the observed live reality at this call site) must still
-  #    authenticate correctly.
+  #    comment `c` (round-11, corrected round-13 [BLOCKING], tightened round-14
+  #    [Critical] — see below) — the body MUST match the trailer shape
+  #    `emit_verdict_trailer` actually posts, ANCHORED end-to-end (`^...$`, no
+  #    leading or trailing bytes) — not merely `startswith`. This is
+  #    authorship-independent, so it works identically whether or not
+  #    `BOT_LOGIN` is available. `.author == $bot_login` is layered on TOP as
+  #    an additional (strictly stronger) requirement on the rare path where
+  #    `BOT_LOGIN` happens to be set — never the SOLE gate, since the empty-
+  #    `BOT_LOGIN` case (the observed live reality at this call site) must
+  #    still authenticate correctly.
+  #  - round-14 [Critical]: round-13's fix used `startswith` alone, which
+  #    authenticates ANY comment merely BEGINNING with the trailer text —
+  #    including a human's forged comment that pastes the trailer verbatim
+  #    with extra prose or another trailer APPENDED after it (e.g. a fake
+  #    matching trailer followed by more text, still passes `startswith`).
+  #    With `BOT_LOGIN` empty — the call site's permanent reality — that was
+  #    the entire gate, so such a forgery could manufacture a false trip or
+  #    shadow a genuine trailer via the `last`-before-round selection. The
+  #    full-anchor match closes this: `emit_verdict_trailer` posts NOTHING
+  #    else in the comment body, so a genuine trailer always matches the
+  #    anchored pattern exactly, while a forgery with ANY extra content
+  #    (leading prose OR trailing content) fails it. This does not (and
+  #    cannot, absent an actor signal) defend against a human posting a
+  #    byte-for-byte copy of a genuine bare trailer with nothing else in the
+  #    comment — the same fundamental, already-documented residual exposure
+  #    the sibling round-comment check accepts (line ~1307 above: "a human
+  #    pasting the EXACT line at offset 0 is accepted").
   #  - For each round comment on the frozen head, find the newest AUTHENTIC
   #    verdict trailer comment with createdAt < the round's, compute its
   #    canonical, keep the round iff that canonical == $ac. Emit the matched
@@ -1344,7 +1371,7 @@ _frozen_convergence_rounds_json() {
           | "\($v)|\($cc)|\($d)"
         end;
     def authentic_verdict(c):
-      (c.body | startswith("<!-- review-verdict:"))
+      (c.body | test("^<!--[[:space:]]*review-verdict:[[:space:]]*[a-z-]+[^>]*-->[[:space:]]*$"))
       and (if $strict_author == "0" then true else c.author == $bot_login end);
     ( [ .[] | select(.body | type == "string") ] | sort_by(.createdAt) ) as $all
     | [ $all[]

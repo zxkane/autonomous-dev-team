@@ -79,7 +79,7 @@ dispatcher-crashes and is moved by `dev-actionable=false` rounds).
 Reset: the count naturally resets when the head advances (the comment filter is
 `head == current_head`) OR when the trailer-hash changes (see secondary gate).
 
-### Preceding-verdict authenticity (round-11 [BLOCKING] [P1], corrected round-13 [BLOCKING] [P1])
+### Preceding-verdict authenticity (round-11 [BLOCKING] [P1], corrected round-13 [BLOCKING] [P1], tightened round-14 [Critical])
 
 The round comment is authenticated (round-7 — `authorKind != "human"` +
 `startswith`, see the implementation), but the CANDIDATE VERDICT it is joined
@@ -108,15 +108,28 @@ forever (breaker dead in the officially supported token-mode topology).
 
 Fix: use the SAME structural signal `recent_review_verdict_body` already
 relies on — `emit_verdict_trailer` posts the trailer as its own bare comment
-whose body is JUST the trailer line, no human text. `startswith("<!--
-review-verdict:")` is therefore authorship-independent: true for the genuine
-comment, false for a human's prose-prefixed quote, regardless of authorKind.
-This structural check is now the PRIMARY, always-required gate; `.author ==
-BOT_LOGIN` is retained as an ADDITIONAL, strictly-stronger AND-condition for
-the rare path where `BOT_LOGIN` happens to be set — never a standalone/sole
-gate, and the broken `authorKind != "human"` fallback is gone. A round whose
-only candidate verdict fails this gate has no authenticated preceding verdict
-and is excluded (fail-closed toward MISS, R4).
+whose body is JUST the trailer line, no human text. A structural body match is
+therefore authorship-independent: true for the genuine comment, false for a
+human's prose-prefixed quote, regardless of authorKind. This structural check
+is now the PRIMARY, always-required gate; `.author == BOT_LOGIN` is retained
+as an ADDITIONAL, strictly-stronger AND-condition for the rare path where
+`BOT_LOGIN` happens to be set — never a standalone/sole gate, and the broken
+`authorKind != "human"` fallback is gone. A round whose only candidate verdict
+fails this gate has no authenticated preceding verdict and is excluded
+(fail-closed toward MISS, R4).
+
+**Tightened (round-14 [Critical]):** the round-13 fix's structural check was
+`startswith("<!-- review-verdict:")` — satisfied by any body merely
+BEGINNING with the trailer text, so a forgery that pastes the genuine trailer
+verbatim and then appends more content after it (trailing prose, or a second
+concatenated trailer) also authenticated. With `BOT_LOGIN` empty — the
+permanent reality at this call site — that was the entire gate, reopening a
+round-11-shaped hole for this forgery shape. Fixed by anchoring the match at
+both ends (`^...$`): `emit_verdict_trailer` never posts anything else in the
+comment body, so a genuine trailer always matches exactly, while any extra
+leading or trailing content fails. The unavoidable residual (a human posting
+a byte-for-byte copy of a bare genuine trailer, nothing else in the comment)
+remains — the same exposure the sibling round-comment check already accepts.
 
 ### Secondary gate (C1/C2): identical trailer-hash
 

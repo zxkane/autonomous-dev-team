@@ -5683,7 +5683,7 @@ ACTIVE case's canonical** (`failed-substantive|<cause>|true` here).
 supplies the report's per-round timestamps.
 
 **PRECEDING-VERDICT AUTHENTICITY (round-11 [BLOCKING] [P1], corrected round-13
-[BLOCKING] [P1]):** the round comment was authenticated (above), but the
+[BLOCKING] [P1], tightened round-14 [Critical]):** the round comment was authenticated (above), but the
 CANDIDATE VERDICT it is joined against was not — any comment whose body merely
 CONTAINED a `<!-- review-verdict: … -->`-shaped string, however posted, could
 be selected as "the verdict this round reacted to". A maintainer/reviewer
@@ -5712,18 +5712,37 @@ in this (the officially supported) topology.
 `exclude_predicate` already relies on — `emit_verdict_trailer`
 (`lib-review-verdict.sh`) posts the verdict trailer as a **separate bare
 comment whose body is JUST the trailer line** (`<!-- review-verdict: … -->`,
-no human text). `startswith("<!-- review-verdict:")` is therefore
-authorship-independent: TRUE for the genuine wrapper-emitted comment, FALSE
-for a human's "Just quoting for context: `<!-- review-verdict: … -->`"
-(prose precedes the anchor) regardless of that human's `authorKind`. This
-structural check is now the PRIMARY, always-required gate. `.author ==
-BOT_LOGIN` is retained as an ADDITIONAL, strictly-stronger AND-condition for
-the rare path where `BOT_LOGIN` happens to be set (defense in depth against a
-different bot/App sharing the structural shape) — it is layered on TOP of the
-structural check, never a standalone/sole gate, and the broken
-`authorKind != "human"` fallback is gone entirely. A round whose only
-candidate verdict fails this gate has no authenticated preceding verdict and
-is excluded — fail-closed toward NOT tripping (R4).
+no human text). A structural body match is therefore authorship-independent:
+TRUE for the genuine wrapper-emitted comment, FALSE for a human's "Just
+quoting for context: `<!-- review-verdict: … -->`" (prose precedes the
+anchor) regardless of that human's `authorKind`. This structural check is now
+the PRIMARY, always-required gate. `.author == BOT_LOGIN` is retained as an
+ADDITIONAL, strictly-stronger AND-condition for the rare path where
+`BOT_LOGIN` happens to be set (defense in depth against a different bot/App
+sharing the structural shape) — it is layered on TOP of the structural check,
+never a standalone/sole gate, and the broken `authorKind != "human"` fallback
+is gone entirely. A round whose only candidate verdict fails this gate has no
+authenticated preceding verdict and is excluded — fail-closed toward NOT
+tripping (R4).
+
+**Tightened (round-14 [Critical]):** the round-13 fix's structural check was
+`startswith("<!-- review-verdict:")` — satisfied by ANY body merely
+BEGINNING with the trailer text, so a forged comment that pastes the genuine
+trailer verbatim and then appends MORE content after it (e.g. trailing prose,
+or a second concatenated trailer) also authenticated. With `BOT_LOGIN` empty
+— the permanent reality at this call site, not a rare fallback — that
+`startswith` check was the ENTIRE gate, so this forgery shape could
+manufacture a false trip or shadow a genuine trailer via the
+`last`-before-round selection, reopening a round-11-shaped hole for a
+different forgery. Fixed by anchoring the match at BOTH ends
+(`^<!--[[:space:]]*review-verdict:[[:space:]]*[a-z-]+[^>]*-->[[:space:]]*$`):
+`emit_verdict_trailer` never posts anything else in the comment body, so a
+genuine trailer always matches exactly, while ANY extra leading or trailing
+content fails. This does not (and cannot, absent an actor signal) defend
+against a human posting a byte-for-byte copy of a genuine bare trailer with
+nothing else in the comment — the same residual, already-documented exposure
+the sibling round-comment check accepts ("a human pasting the EXACT line at
+offset 0 is accepted").
 
 The per-round trailer JOIN (the [P1] round-1 review fix) is load-bearing:
 counting **every** frozen-head zero-commit comment would (a) let stale
@@ -5885,12 +5904,15 @@ CB-COUNT-009c a non-matching active canonical → 0; CB-COUNT-009h/i a human/oth
 comment QUOTING a matching trailer is REJECTED so the genuine non-matching verdict
 is used and the round is excluded — round-11 [P1]; CB-COUNT-009j the genuine
 trailer is still counted despite an unrelated quote present; CB-COUNT-009k the
-BOT_LOGIN-empty fallback also rejects the quote via the structural `startswith`
-anchor; round-13 [BLOCKING]: CB-COUNT-009l the REAL `GH_AUTH_MODE=token` topology
+BOT_LOGIN-empty fallback also rejects the quote via the structural anchor;
+round-13 [BLOCKING]: CB-COUNT-009l the REAL `GH_AUTH_MODE=token` topology
 (`BOT_LOGIN` empty AND the genuine verdict trailer's `authorKind=human`, shared
 PAT identity) still counts the genuine rounds, CB-COUNT-009m the same topology
 trips end-to-end, CB-COUNT-009n the round-11 prose-prefixed-quote rejection still
-holds under the same topology); the trip (CB-TRIP-001: ≥3 frozen
+holds under the same topology; round-14 [Critical]: CB-COUNT-009o a forged
+trailer with content TRAILING the genuine trailer text is rejected by the
+end-anchored match (the bare `startswith` round-13 first shipped would have
+accepted it)); the trip (CB-TRIP-001: ≥3 frozen
 + `dev-actionable=true` + eligible → ONE report + marker + `pending-dev → stalled`,
 NO `mark_stalled`, NO dev-new, log intact); the report content (CB-REPORT-008: PR
 ref + frozen SHA + resume instruction + count + verbatim finding + the **per-round
