@@ -549,6 +549,106 @@ assert_eq "AGY-06a — model is a single argv element (quoting preserved)" \
 
 # ---------------------------------------------------------------------------
 echo ""
+echo "=== AGY-06e: known model with trailing newline → sanitized value forwarded ==="
+# ---------------------------------------------------------------------------
+# Defense-in-depth: a known model carrying an embedded newline (e.g. a config
+# value with a stray "\n") validates after the in-function strip, but the
+# FORWARDED --model argv must also be sanitized — otherwise the raw newline
+# reaches agy. _agy_build_model_args strips up-front so the same clean value is
+# both validated and forwarded. Reuse the NUL-recorder to inspect the exact argv
+# element after --model (it must equal the newline-free name, no embedded LF).
+NUL_ARGS_06E="$TMPROOT/agy-args-nul-06e"
+cat > "$BIN/agy-nul" <<'STUB'
+#!/bin/bash
+if [[ "${1:-}" == "models" ]]; then
+  cat <<'MODELS'
+Gemini 3.5 Flash (High)
+MODELS
+  exit 0
+fi
+printf '%s\0' "$@" > "$AGY_NUL_ARGS_FILE"
+cat > /dev/null
+exit 0
+STUB
+chmod +x "$BIN/agy-nul"
+mv "$BIN/agy" "$BIN/agy.real-06e"
+ln -sf "$BIN/agy-nul" "$BIN/agy"
+: > "$NUL_ARGS_06E"
+PATH="$BIN:$PATH" \
+  AUTONOMOUS_PID_DIR="$PID_DIR" \
+  PROJECT_ID="testproj" \
+  PROJECT_DIR="$TMPROOT" \
+  AGENT_CMD=agy \
+  AGENT_PERMISSION_MODE=auto \
+  AGENT_TIMEOUT=4h \
+  AGY_NUL_ARGS_FILE="$NUL_ARGS_06E" \
+  bash -c '
+    unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE \
+          _LIB_AGENT_AGY_MODEL_WARNED _LIB_AGENT_AGY_MODELS_CACHE
+    source "'"$LIB"'"
+    run_agent "66666666-1234-1234-1234-00000000060e" "with newline model" "Gemini 3.5 Flash (High)
+" ""
+  ' >/dev/null 2>&1
+# Restore the real stub for later cases.
+rm -f "$BIN/agy"
+mv "$BIN/agy.real-06e" "$BIN/agy"
+_nul_elems_06e=()
+mapfile -d '' -t _nul_elems_06e < "$NUL_ARGS_06E" 2>/dev/null || {
+  _nul_elems_06e=(); while IFS= read -r -d '' _e; do _nul_elems_06e+=("$_e"); done < "$NUL_ARGS_06E"
+}
+_model_elem_06e=""
+for ((_i = 0; _i < ${#_nul_elems_06e[@]}; _i++)); do
+  if [[ "${_nul_elems_06e[$_i]}" == "--model" ]]; then
+    _model_elem_06e="${_nul_elems_06e[$((_i + 1))]}"
+    break
+  fi
+done
+assert_eq "AGY-06e — forwarded --model is sanitized (no embedded newline)" \
+  "Gemini 3.5 Flash (High)" "$_model_elem_06e"
+
+# AGY-06e2: a known model carrying a trailing CARRIAGE RETURN (\r) must also
+# forward sanitized. _agy_known_model strips [[:cntrl:]] (newline AND \r) for the
+# grep -Fxq check, so a \r-bearing value validates clean; the forward point in
+# _agy_build_model_args MUST strip the SAME [[:cntrl:]] class — otherwise the \r
+# survives into agy's --model argv even though it validated. Mirrors the INV-60
+# [[:cntrl:]] guard in post-verdict.sh so the two model sites agree (PR #192, F2).
+NUL_ARGS_06E2="$TMPROOT/agy-args-nul-06e2"
+mv "$BIN/agy" "$BIN/agy.real-06e2"
+ln -sf "$BIN/agy-nul" "$BIN/agy"
+: > "$NUL_ARGS_06E2"
+PATH="$BIN:$PATH" \
+  AUTONOMOUS_PID_DIR="$PID_DIR" \
+  PROJECT_ID="testproj" \
+  PROJECT_DIR="$TMPROOT" \
+  AGENT_CMD=agy \
+  AGENT_PERMISSION_MODE=auto \
+  AGENT_TIMEOUT=4h \
+  AGY_NUL_ARGS_FILE="$NUL_ARGS_06E2" \
+  bash -c '
+    unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE \
+          _LIB_AGENT_AGY_MODEL_WARNED _LIB_AGENT_AGY_MODELS_CACHE
+    source "'"$LIB"'"
+    run_agent "66666666-1234-1234-1234-0000000006e2" "with cr model" \
+      "$(printf "Gemini 3.5 Flash (High)\r")" ""
+  ' >/dev/null 2>&1
+rm -f "$BIN/agy"
+mv "$BIN/agy.real-06e2" "$BIN/agy"
+_nul_elems_06e2=()
+mapfile -d '' -t _nul_elems_06e2 < "$NUL_ARGS_06E2" 2>/dev/null || {
+  _nul_elems_06e2=(); while IFS= read -r -d '' _e; do _nul_elems_06e2+=("$_e"); done < "$NUL_ARGS_06E2"
+}
+_model_elem_06e2=""
+for ((_i = 0; _i < ${#_nul_elems_06e2[@]}; _i++)); do
+  if [[ "${_nul_elems_06e2[$_i]}" == "--model" ]]; then
+    _model_elem_06e2="${_nul_elems_06e2[$((_i + 1))]}"
+    break
+  fi
+done
+assert_eq "AGY-06e2 — forwarded --model is sanitized (no embedded carriage return)" \
+  "Gemini 3.5 Flash (High)" "$_model_elem_06e2"
+
+# ---------------------------------------------------------------------------
+echo ""
 echo "=== AGY-06b: empty model → no --model, no WARN ==="
 # ---------------------------------------------------------------------------
 SESSION_ID6B="66666666-bbbb-2222-3333-123456789012"
@@ -695,6 +795,63 @@ assert_contains "TC-AGYM-KM — unknown name → rc 1"          "unknown=1" "$km
 assert_contains "TC-AGYM-KM — prefix of listed name → rc 1" "prefix=1"  "$km_out"
 assert_contains "TC-AGYM-KM — regex metachars literal → rc 1" "regex=1" "$km_out"
 assert_contains "TC-AGYM-KM — empty arg → rc 1"             "empty=1"   "$km_out"
+
+# Newline injection regression test: sanitize input before grep -Fxq.
+# A model with embedded newlines must be rejected (rc 1), not bypass validation
+# by splitting across multiple grep -Fxq lines. Requires the agy stub on PATH so
+# enumeration succeeds (rc 2 from enum-failure would mask this fix in CI).
+km_newline=$(
+  PATH="$BIN:$PATH" \
+  AGENT_CMD=agy \
+  bash -c '
+    unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE \
+          _LIB_AGENT_AGY_MODEL_WARNED _LIB_AGENT_AGY_MODELS_CACHE
+    source "'"$LIB"'"
+    _agy_known_model "Gemini 3.5 Flash (High)
+Gemini 3.5 Flash (Low)";  echo "injection=$?"
+  ' 2>/dev/null
+)
+assert_contains "TC-AGYM-KM — newline injection rejected → rc 1" "injection=1" "$km_newline"
+
+# Defense-in-depth: _agy_build_model_args strips newlines from the model BEFORE
+# both validating and forwarding it, so a known model carrying a trailing
+# newline (which still validates after the strip) forwards the SANITIZED value —
+# the raw newline never reaches agy's --model argv. Print the resolved array
+# element after "--model" with visible delimiters to assert no newline leaked.
+km_forward=$(
+  PATH="$BIN:$PATH" \
+  AGENT_CMD=agy \
+  bash -c '
+    unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE \
+          _LIB_AGENT_AGY_MODEL_WARNED _LIB_AGENT_AGY_MODELS_CACHE
+    source "'"$LIB"'"
+    _agy_build_model_args "Gemini 3.5 Flash (High)
+" args
+    # args=(--model "<value>"); emit the value bracketed so a stray newline shows.
+    printf "forward=[%s]\n" "${args[1]:-}"
+  ' 2>/dev/null
+)
+assert_contains "TC-AGYM-BM — known model + trailing newline forwards sanitized value" \
+  "forward=[Gemini 3.5 Flash (High)]" "$km_forward"
+
+# TC-AGYM-BM2: same defense-in-depth for a CARRIAGE RETURN. _agy_known_model
+# strips [[:cntrl:]] (so a \r-bearing value validates clean); the forward point
+# MUST strip the same class or the \r leaks into the --model argv. printf %q
+# renders a stray \r as $'\r', so a clean forward prints forward=[Gemini ...]
+# with no $'...' wrapper.
+km_forward_cr=$(
+  PATH="$BIN:$PATH" \
+  AGENT_CMD=agy \
+  bash -c '
+    unset AUTONOMOUS_CONF AGENT_LAUNCHER AGENT_LAUNCHER_ARGV AGENT_PID_FILE \
+          _LIB_AGENT_AGY_MODEL_WARNED _LIB_AGENT_AGY_MODELS_CACHE
+    source "'"$LIB"'"
+    _agy_build_model_args "$(printf "Gemini 3.5 Flash (High)\r")" args
+    printf "forward=[%s]\n" "${args[1]:-}"
+  ' 2>/dev/null
+)
+assert_contains "TC-AGYM-BM2 — known model + trailing carriage return forwards sanitized value" \
+  "forward=[Gemini 3.5 Flash (High)]" "$km_forward_cr"
 
 # Caching: _agy_known_model must enumerate `agy models` at most ONCE per
 # process. Use a counting stub that bumps a counter file on each `models` call.

@@ -169,11 +169,19 @@ _agy_known_model() {
     if listing=$("${AGENT_CMD:-agy}" models 2>/dev/null) && [[ -n "$listing" ]]; then
       _LIB_AGENT_AGY_MODELS_CACHE="$listing"
     else
-      _LIB_AGENT_AGY_MODELS_CACHE=$'\x01enum-failed\x01'   # sentinel
+      # \x01-wrapped sentinel: readable in logs yet un-typeable, so no real
+      # `agy models` line can ever collide with it (a plaintext sentinel could).
+      _LIB_AGENT_AGY_MODELS_CACHE=$'\x01__ENUM_FAILED__\x01'
     fi
     export _LIB_AGENT_AGY_MODELS_CACHE
   fi
-  [[ "$_LIB_AGENT_AGY_MODELS_CACHE" == $'\x01enum-failed\x01' ]] && return 2  # can't validate
+  [[ "$_LIB_AGENT_AGY_MODELS_CACHE" == $'\x01__ENUM_FAILED__\x01' ]] && return 2  # can't validate
+  # Strip the whole control-char class (notably newline AND carriage return)
+  # before the grep -Fxq check: a newline would split into separate fixed-string
+  # patterns and an \r could whole-line-match a CRLF listing — both bypass
+  # validation. Mirrors the INV-60 [[:cntrl:]] guard in post-verdict.sh so the
+  # two model sites agree.
+  model="${model//[[:cntrl:]]/}"
   printf '%s\n' "$_LIB_AGENT_AGY_MODELS_CACHE" | grep -Fxq -- "$model"
 }
 
@@ -186,11 +194,23 @@ _agy_known_model() {
 #   empty/unset model      → ()
 _agy_build_model_args() {
   local model="$1" out_name="$2"
+  # Strip the whole control-char class (notably newline AND carriage return)
+  # up-front so the SAME sanitized value is both validated and forwarded.
+  # _agy_known_model also strips for the grep check, but it operates on its own
+  # local copy — without this, a value that validates (e.g. a known name with a
+  # trailing newline OR \r) would still forward the raw control char as the
+  # --model arg. Must use the SAME [[:cntrl:]] class as _agy_known_model (and the
+  # INV-60 guard in post-verdict.sh), or a \r would validate yet leak to agy's
+  # --model.
+  model="${model//[[:cntrl:]]/}"
   eval "$out_name=()"
   [[ -n "$model" ]] || return 0
   _agy_known_model "$model"
   case $? in
-    0|2) eval "$out_name=(--model \"\$model\")" ;;
+    0|2) # Known model or enumeration failed → forward. eval is needed to assign
+         # to the dynamically-named caller array; the inner \"\$model\" keeps a
+         # multi-word name (e.g. "Gemini 3.5 Flash (High)") as ONE argv element.
+      eval "$out_name=(--model \"\$model\")" ;;
     *)   # enumerated, model not in the list → skip + warn once.
       if [[ -z "${_LIB_AGENT_AGY_MODEL_WARNED:-}" ]]; then
         echo "[lib-agent] WARN: '${model}' is not a known agy model (see \`agy models\`); omitting --model so agy uses its configured default. Set an agy-namespace model (e.g. AGENT_REVIEW_MODEL_AGY=\"Gemini 3.5 Flash (High)\") to pin one." >&2
