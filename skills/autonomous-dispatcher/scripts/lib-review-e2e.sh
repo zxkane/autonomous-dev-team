@@ -469,40 +469,56 @@ _run_command_e2e_verify() {
 # caller (wrapper) treats a non-zero return as "no usable evidence" so the gate
 # fails closed instead of passing on a fabricated marker.
 #
-# Reads PR_NUMBER / REPO_OWNER / REPO_NAME / PR_HEAD_SHA / BOT_LOGIN /
-# WRAPPER_START_TS from the environment (all set by the wrapper before the lane).
+# [INV-46]/[INV-90]/[INV-91] (#345, #296 deferred): the id-lookup + body-fetch
+# reads route through the SHIPPED `itp_list_comments` verb (shape-equivalent, NO
+# new verb — the #321 verdict-choke-point migration is the worked example for this
+# exact rewrite, incl. its `sort_by(.createdAt // "", .id // 0) | last` tie-break).
+# ONE verb call now serves BOTH the id AND the body: the normalized element
+# carries `body` verbatim, so the id-lookup element IS the body-fetch result — the
+# separate `gh api …/issues/comments/<id> --jq .body` GET is redundant and dropped
+# (R2). This retires the INV-46 carve-out (`provider-spec.md`/`invariants.md`
+# "GET-comment-id / GET-body reads stay caller-side") that froze these two reads
+# in the [INV-91] cutover baseline.
+#
+# Reads PR_NUMBER / REPO / PR_HEAD_SHA / BOT_LOGIN / WRAPPER_START_TS from the
+# environment (all set by the wrapper before the lane). REPO_OWNER/REPO_NAME are
+# no longer read here — itp_list_comments (→ `gh issue view --repo "$REPO"`) owns
+# the host-side repo scope, same as _fetch_sha_evidence's chp_pr_view.
 _stamp_browser_evidence_marker() {
   local marker="<!-- e2e-evidence: complete sha=\"${PR_HEAD_SHA}\" -->"
   # Author predicate: bind to BOT_LOGIN when available, else drop it (the same
   # fallback INV-20 uses when `gh api user` can't introspect the bot identity).
+  # Re-expressed over the normalized `.author` (was `.user.login`, [INV-90]).
   local _author_jq=""
   if [[ -n "${BOT_LOGIN:-}" ]]; then
-    _author_jq="(.user.login == \"${BOT_LOGIN}\") and "
+    _author_jq="(.author == \"${BOT_LOGIN}\") and "
   fi
-  # Find the latest report comment's numeric REST id. PR comments are issue
-  # comments for this endpoint. `last` → most recent matching report.
-  #
-  # `gh api --paginate` applies --jq PER PAGE and concatenates, so on a PR with
-  # >100 comments spread across pages this can emit one id per page. `tail -n1`
-  # collapses that to the single most-recent id (pages arrive in ascending order,
-  # so the last line is the newest) — the numeric guard below would otherwise
-  # reject a multi-line value and fail closed, harmlessly but with a spurious
-  # re-queue on very long PRs.
-  local _comment_id
-  _comment_id=$(gh api "repos/${REPO_OWNER}/${REPO_NAME}/issues/${PR_NUMBER}/comments" --paginate \
-    --jq "[.[] | select(${_author_jq}(.created_at >= \"${WRAPPER_START_TS}\") and (.body | contains(\"## E2E Verification Report\")))] | last | .id" \
-    2>/dev/null | tail -n1 || true)
+  # Select the newest report comment over the normalized array (spec §3.3):
+  # `.created_at`→`.createdAt` (verbatim ISO-8601 UTC string, order-identical `>=`
+  # compare), `.body`/`contains()` verbatim. `sort_by(.createdAt // "", .id // 0)
+  # | last` — re-sorting the already-ascending array is idempotent ([INV-90]
+  # untouched) and adds the monotone REST `id` as the same-second tie-break the
+  # #321 verdict poll uses, deterministic rather than relying on the backend's
+  # stable-sort alone. `// empty` on both id/body: an empty-array `last` yields
+  # `null`, whose `.id`/`.body` accessors also yield `null` — `jq -r` would print
+  # a bare `null` as the literal string "null" — `// empty` restores the raw-gh
+  # empty-on-no-match contract the numeric/empty guards below depend on.
+  local _select_jq="[.[] | select(${_author_jq}(.createdAt >= \"${WRAPPER_START_TS}\") and (.body | contains(\"## E2E Verification Report\")))] | sort_by(.createdAt // \"\", .id // 0) | last"
+  local _selected
+  _selected=$(itp_list_comments "$PR_NUMBER" 2>/dev/null | jq -c "$_select_jq" 2>/dev/null || true)
 
+  local _comment_id
+  _comment_id=$(printf '%s' "$_selected" | jq -r '.id // empty' 2>/dev/null || true)
   if ! [[ "$_comment_id" =~ ^[0-9]+$ ]]; then
     log "INV-46: browser lane posted NO '## E2E Verification Report' comment to stamp — gate fails closed (no marker-only fabrication)."
     return 1
   fi
 
-  # Fetch the current body so we can append the marker (idempotent: skip if the
-  # SHA marker is already present, e.g. a re-run against the same comment).
+  # The body comes from the SAME selected element — one verb call, no second
+  # id-keyed GET (R2). Idempotent: skip if the SHA marker is already present
+  # (e.g. a re-run against the same comment).
   local _body
-  _body=$(gh api "repos/${REPO_OWNER}/${REPO_NAME}/issues/comments/${_comment_id}" \
-    --jq '.body' 2>/dev/null || true)
+  _body=$(printf '%s' "$_selected" | jq -r '.body // empty' 2>/dev/null || true)
   if [[ -z "$_body" ]]; then
     log "INV-46: could not read the report comment body (id=${_comment_id}) — gate fails closed."
     return 1

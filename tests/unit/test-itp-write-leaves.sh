@@ -301,8 +301,10 @@ if [[ -d "$FAKE_PROVIDER" ]]; then
   # PLUS the SHA marker, NOT a marker-only post. A marker-only fallback would let
   # _fetch_sha_evidence (which returns the `last` SHA-marked comment's full body)
   # satisfy the dual-signal gate with no report/screenshots/AC — the
-  # marker-only-fabrication hole [INV-46] closes. The gh READ leaves (comment-id +
-  # body fetch) are stubbed; itp_post_comment captures what the fallback posts.
+  # marker-only-fabrication hole [INV-46] closes. [#345] The id-lookup + body-fetch
+  # now route through ONE itp_list_comments call (normalized [INV-90] array) instead
+  # of two raw gh reads — stub itp_list_comments to emit the fixture array;
+  # itp_post_comment captures what the fallback posts.
   # NOTE: _stamp_browser_evidence_marker calls the write verb with `>/dev/null
   # 2>&1`, so the stub must capture into a FILE (stdout is swallowed). $_CAP_FILE
   # records every verb call + its args.
@@ -313,25 +315,24 @@ if [[ -d "$FAKE_PROVIDER" ]]; then
   bash -c '
     set -uo pipefail
     log() { :; }
-    # Stub the gh READ leaves used by _stamp_browser_evidence_marker:
-    #  1) read comment body (…/issues/comments/99) → the full E2E report (checked
-    #     FIRST since its path also ends in "comments")
-    #  2) list comments (…/PR/comments) → emit the numeric report-comment id (99)
-    gh() {
-      if [[ "$1" == "api" && "$2" == *"/issues/comments/99" ]]; then
-        printf "%s" "## E2E Verification Report - AC-1: PASS - screenshot.png"; return 0; fi
-      if [[ "$1" == "api" && "$2" == *"/comments" ]]; then echo "99"; return 0; fi
-      return 0
-    }
     # [#342] Source the CHP seam FIRST (chp_pr_view lives here), mirroring the
     # review wrapper order; inert for the stamp path but keeps this bash -c
     # context seam-source-meta compliant.
     source "'"$CHP_LIB"'"
     # Source the lib FIRST so the REAL seam (incl. itp_caps reading the degraded
-    # .caps → edit_comment=0) loads; THEN override the two write verbs with stubs
-    # that record into $_CAP_FILE (the call args survive the verb call'\''s
-    # >/dev/null 2>&1 redirect, which would swallow stdout/stderr).
+    # .caps → edit_comment=0) loads; THEN override itp_list_comments + the two
+    # write verbs with stubs that record into $_CAP_FILE (the call args survive
+    # the verb call'\''s >/dev/null 2>&1 redirect, which would swallow
+    # stdout/stderr). Overriding AFTER the source is load-bearing: sourcing the
+    # lib re-sources lib-issue-provider.sh (its self-source guard, since
+    # itp_edit_comment is not yet defined in a fresh bash -c), which would
+    # clobber an itp_list_comments stub defined BEFORE the source.
     source "'"$E2E_LIB"'"
+    # [#345] Stub the itp_list_comments READ used by _stamp_browser_evidence_marker:
+    # a normalized [INV-90] array with the numeric report-comment id (99) + body.
+    itp_list_comments() {
+      printf "%s" "[{\"id\":99,\"author\":\"bot\",\"authorKind\":\"self\",\"body\":\"## E2E Verification Report - AC-1: PASS - screenshot.png\",\"createdAt\":\"2026-01-01T00:00:01Z\"}]"
+    }
     itp_post_comment() { printf "POSTED_BODY<<%s>>\n" "$2" >> "$_CAP_FILE"; }
     itp_edit_comment() { printf "PATCH_TAKEN\n" >> "$_CAP_FILE"; }
     _stamp_browser_evidence_marker
@@ -346,20 +347,20 @@ if [[ -d "$FAKE_PROVIDER" ]]; then
   assert_not_contains "TC-CAP-EDIT0-REPORT edit_comment=0 does NOT take the PATCH path" "PATCH_TAKEN" "$edit0_post"
 
   # edit_comment=1 (github) → PATCH path is taken, with the full report+marker body.
+  # [#345] itp_list_comments stubbed (see the edit_comment=0 block above).
   env -u AUTONOMOUS_PROVIDERS_DIR ISSUE_PROVIDER=github \
       PR_NUMBER=42 REPO_OWNER=o REPO_NAME=r PR_HEAD_SHA=deadbeef \
       WRAPPER_START_TS=2026-01-01T00:00:00Z REPO=o/r BOT_LOGIN= _CAP_FILE="$_CAP_FILE" \
   bash -c '
     set -uo pipefail
     log() { :; }
-    gh() {
-      if [[ "$1" == "api" && "$2" == *"/issues/comments/99" ]]; then
-        printf "%s" "## E2E Verification Report - AC-1: PASS"; return 0; fi
-      if [[ "$1" == "api" && "$2" == *"/comments" ]]; then echo "99"; return 0; fi
-      return 0
-    }
     source "'"$CHP_LIB"'"   # [#342] CHP seam first (see the (a) sandbox note above)
     source "'"$E2E_LIB"'"
+    # [#345] itp_list_comments stubbed AFTER the source (see the edit_comment=0
+    # block above for why order matters).
+    itp_list_comments() {
+      printf "%s" "[{\"id\":99,\"author\":\"bot\",\"authorKind\":\"self\",\"body\":\"## E2E Verification Report - AC-1: PASS\",\"createdAt\":\"2026-01-01T00:00:01Z\"}]"
+    }
     itp_post_comment() { printf "FRESH_POST_TAKEN\n" >> "$_CAP_FILE"; }
     itp_edit_comment() { printf "PATCH_TAKEN id=%s body<<%s>>\n" "$2" "$3" >> "$_CAP_FILE"; }
     _stamp_browser_evidence_marker
