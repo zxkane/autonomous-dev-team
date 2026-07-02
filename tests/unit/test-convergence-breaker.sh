@@ -1,5 +1,5 @@
 #!/bin/bash
-# test-convergence-breaker.sh — INV-97 / issue #297.
+# test-convergence-breaker.sh — INV-102 / issue #297.
 #
 # Unit tests for the dispatcher convergence circuit-breaker (Branch B″ in
 # lib-dispatch.sh::handle_completed_session_routing) + its helpers
@@ -501,7 +501,7 @@ echo "=== recent_review_verdict_body: skips wrapper-metadata comments, returns t
 # all same-actor and each later than the last. A naive "newest bot comment"
 # selection (what classify_recent_review_verdict correctly uses, since IT wants
 # the trailer) would return the bare trailer or the Reviewed-HEAD line here
-# instead of the findings text the [INV-97] evidence block needs to quote.
+# instead of the findings text the [INV-102] evidence block needs to quote.
 # The mock at line ~97 shadowed the real function the moment it was defined
 # (both are top-level `name() { ... }` defs in the same shell — there is no
 # saved original to `unset -f` back to). Re-extract and re-source ONLY the real

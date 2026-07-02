@@ -369,9 +369,9 @@
       "guards": ["session-completed", "verdict-fail-substantive", "head-equals-reviewed", "convergence-threshold-reached", "pid-dead"],
       "actions": ["remove-label:pending-dev", "add-label:stalled", "comment:non-convergence"],
       "code_site": "lib-dispatch.sh handle_completed_session_routing Branch B″ convergence circuit-breaker (label_swap pending-dev → stalled after the reason=non-convergence report)",
-      "mermaid": "pending_dev --> stalled: Step 4 convergence breaker (completed session + substantive review failure + frozen HEAD >=N completed zero-commit rounds) [INV-97]",
-      "inv_refs": ["INV-97", "INV-85", "INV-92"],
-      "note": "INV-97 (#297): the deterministic >=N belt to INV-85's single-shot suspenders. A failed-substantive + dev-actionable=true verdict that churns >=CONVERGENCE_STALL_THRESHOLD (default 3) completed zero-commit dev-resume rounds against a frozen PR head is halted: one reason=non-convergence report + marker, then this pending-dev -> stalled transition (via label_swap, NOT mark_stalled, so exactly one terminal comment). Gated behind the shared may_stall_now live-PID pre-gate (pid-dead)."
+      "mermaid": "pending_dev --> stalled: Step 4 convergence breaker (completed session + substantive review failure + frozen HEAD >=N completed zero-commit rounds) [INV-102]",
+      "inv_refs": ["INV-102", "INV-85", "INV-92"],
+      "note": "INV-102 (#297): the deterministic >=N belt to INV-85's single-shot suspenders. A failed-substantive + dev-actionable=true verdict that churns >=CONVERGENCE_STALL_THRESHOLD (default 3) completed zero-commit dev-resume rounds against a frozen PR head is halted: one reason=non-convergence report + marker, then this pending-dev -> stalled transition (via label_swap, NOT mark_stalled, so exactly one terminal comment). Gated behind the shared may_stall_now live-PID pre-gate (pid-dead)."
     },
     {
       "id": "review-pass-no-auto-close",
