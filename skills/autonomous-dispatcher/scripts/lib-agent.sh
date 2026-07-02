@@ -589,20 +589,32 @@ acquire_pid_guard() {
   fi
 
   local lock_file="${pid_file}.lock"
-  # CWE-59 (Link Following), same defense as the pid_file check above
-  # (INV-02): reject a symlinked lock sidecar BEFORE the `exec {fd}>` below,
-  # which otherwise follows the symlink and truncates whatever it points at
-  # — a same-user attacker could pre-plant `${pid_file}.lock` as a symlink
-  # to an arbitrary file and have the next wrapper invocation clobber it
-  # before flock ever runs (PR #365 review finding). Checked on every call
-  # (not just when the file is missing) so a symlink planted between two
-  # invocations is still caught.
+  # CWE-59 (Link Following) defense-in-depth, same posture as the pid_file
+  # check above (INV-02): reject an OBVIOUSLY symlinked lock sidecar before
+  # even trying to open it. This is belt-and-suspenders, NOT the load-bearing
+  # fix — see the `>>` note below for why: a HARD link shares the target's
+  # inode and is never reported by `-L` (a hard-linked sidecar sails through
+  # this check untouched; PR #365 review finding), so a symlink-only guard is
+  # incomplete on its own.
   [[ -L "$lock_file" ]] && { echo "Error: lock file is a symlink — possible attack" >&2; exit 1; }
 
   local wait_s="${ACQUIRE_PID_GUARD_LOCK_WAIT_SECONDS:-2}"
   local _lock_fd
 
-  exec {_lock_fd}>"$lock_file"
+  # Load-bearing fix: open in APPEND mode (`>>`, O_CREAT|O_APPEND, no
+  # O_TRUNC), never plain `>` (O_CREAT|O_TRUNC). `>` truncates the target on
+  # open BEFORE flock ever runs — the exact vector a symlinked OR hard-linked
+  # lock sidecar exploits: a same-user attacker pre-plants
+  # `${pid_file}.lock` as a symlink or hard link to an arbitrary victim file,
+  # and the next wrapper invocation zeroes it just by opening it, regardless
+  # of whether it ever acquires the lock. `>>` never truncates on open
+  # (verified: neither via a symlinked nor a hard-linked target) — this
+  # closes the ENTIRE class (symlink AND hard link), not just the symlink
+  # case the `-L` check above already caught. We never write through this
+  # fd (the PID goes to `pid_file`, not `lock_file`), so append-vs-truncate
+  # semantics make no functional difference to the lock itself — `flock`
+  # behaves identically on an append-mode fd.
+  exec {_lock_fd}>>"$lock_file"
   if ! flock -w "$wait_s" "$_lock_fd"; then
     echo "[$label] Another instance for issue #${issue_num} is already starting (start lock held). Exiting." >&2
     exec {_lock_fd}>&-

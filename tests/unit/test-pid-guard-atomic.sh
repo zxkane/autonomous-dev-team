@@ -397,6 +397,45 @@ fi
 rm -f "$ATTACK_LOCK_FILE" "$VICTIM_FILE" "$ATTACK_PID_FILE"
 
 # ============================================================================
+# TC-ATOMIC-004c: HARD-linked LOCK sidecar's victim survives untouched
+# (codex review finding on PR #365, round 2 — a `-L` symlink check alone is
+# insufficient). A hard link shares the target's inode and `-L` never
+# reports it as a symlink, so TC-ATOMIC-004b's defense does not catch this
+# case; the load-bearing fix is opening the lock file in APPEND mode (no
+# O_TRUNC) so the open itself can never zero a hard-linked (or symlinked)
+# victim, regardless of whether any symlink check fires. Unlike the
+# symlink case, `acquire_pid_guard` has no way to detect (and no reason to
+# reject) a hard link — the victim's SURVIVAL, not an exit code, is the
+# contract under test here.
+# ============================================================================
+echo
+echo "=== TC-ATOMIC-004c: hard-linked lock sidecar — victim file untouched (no O_TRUNC on open) ==="
+echo
+
+HARDLINK_PID_FILE="$TMPDIR/hardlink-attack.pid"
+HARDLINK_LOCK_FILE="${HARDLINK_PID_FILE}.lock"
+HARDLINK_VICTIM_FILE="$TMPDIR/hardlink-victim-file"
+rm -f "$HARDLINK_PID_FILE" "$HARDLINK_LOCK_FILE" "$HARDLINK_VICTIM_FILE"
+echo "HARDLINK-VICTIM-ORIGINAL-CONTENT" > "$HARDLINK_VICTIM_FILE"
+ln "$HARDLINK_VICTIM_FILE" "$HARDLINK_LOCK_FILE"
+
+if [[ -L "$HARDLINK_LOCK_FILE" ]]; then
+  echo -e "  ${RED}FAIL${NC}: setup error — hard link unexpectedly reported as a symlink by -L (test does not exercise the intended case)"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${NC}: setup confirmed — hard link is NOT reported by -L (the exact gap a symlink-only check misses)"
+  PASS=$((PASS + 1))
+fi
+
+( acquire_pid_guard "$HARDLINK_PID_FILE" "test-hardlink-lock" "100" 2>/dev/null )
+HARDLINK_RC=$?
+assert_eq "acquire against a hard-linked lock sidecar still succeeds (append-mode open, no rejection needed)" "0" "$HARDLINK_RC"
+
+HARDLINK_VICTIM_CONTENT=$(cat "$HARDLINK_VICTIM_FILE" 2>/dev/null)
+assert_eq "victim file content is untouched (no truncation via the hard-linked lock)" "HARDLINK-VICTIM-ORIGINAL-CONTENT" "$HARDLINK_VICTIM_CONTENT"
+rm -f "$HARDLINK_PID_FILE" "$HARDLINK_LOCK_FILE" "$HARDLINK_VICTIM_FILE"
+
+# ============================================================================
 # TC-ATOMIC-005: source-of-truth — no bare check-then-write left in the fn
 # ============================================================================
 echo
@@ -427,17 +466,37 @@ else
   PASS=$((PASS + 1))
 fi
 
-# Regression pin (codex review, PR #365, CWE-59): the lock-file symlink
-# check MUST appear in source before the `exec {fd}>` redirection that
-# opens it, else a pre-planted symlink is followed and its target truncated
-# before this check could ever fire.
+# Regression pin (codex review, PR #365 round 1, CWE-59): the lock-file
+# symlink check MUST appear in source before the `exec {fd}>>` redirection
+# that opens it, as belt-and-suspenders (round 2 below is the load-bearing
+# fix — the symlink check alone cannot catch a hard link).
 LOCK_SYMLINK_CHECK_LINE=$(grep -n '\[\[ -L "\$lock_file" \]\]' "$LIB_AGENT" | head -1 | cut -d: -f1)
-LOCK_EXEC_LINE=$(grep -n 'exec {_lock_fd}>"\$lock_file"' "$LIB_AGENT" | head -1 | cut -d: -f1)
+LOCK_EXEC_LINE=$(grep -n 'exec {_lock_fd}>>"\$lock_file"' "$LIB_AGENT" | head -1 | cut -d: -f1)
 if [[ -n "$LOCK_SYMLINK_CHECK_LINE" && -n "$LOCK_EXEC_LINE" && "$LOCK_SYMLINK_CHECK_LINE" -lt "$LOCK_EXEC_LINE" ]]; then
   echo -e "  ${GREEN}PASS${NC}: lock-file symlink check (line $LOCK_SYMLINK_CHECK_LINE) precedes the flock-open exec (line $LOCK_EXEC_LINE)"
   PASS=$((PASS + 1))
 else
   echo -e "  ${RED}FAIL${NC}: lock-file symlink check missing or does not precede the flock-open exec (check_line='$LOCK_SYMLINK_CHECK_LINE' exec_line='$LOCK_EXEC_LINE')"
+  FAIL=$((FAIL + 1))
+fi
+
+# Regression pin (codex review, PR #365 round 2): the flock-open MUST use
+# APPEND mode (`>>`, no O_TRUNC), never plain truncating `>` — a hard link
+# shares the target's inode and is invisible to the `-L` check above, so
+# the ONLY thing that closes the hard-link vector is never truncating on
+# open in the first place. Explicitly assert the truncating form is ABSENT.
+if grep -qE 'exec \{_lock_fd\}>"\$lock_file"' <<<"$FN_BODY"; then
+  echo -e "  ${RED}FAIL${NC}: acquire_pid_guard opens the lock file with TRUNCATING redirection ('>' not '>>') — reopens the hard-link attack vector"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${NC}: acquire_pid_guard does not open the lock file with truncating redirection"
+  PASS=$((PASS + 1))
+fi
+if grep -qE 'exec \{_lock_fd\}>>"\$lock_file"' <<<"$FN_BODY"; then
+  echo -e "  ${GREEN}PASS${NC}: acquire_pid_guard opens the lock file in append mode (no O_TRUNC — closes symlink AND hard-link truncation)"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: acquire_pid_guard does not open the lock file in append mode"
   FAIL=$((FAIL + 1))
 fi
 

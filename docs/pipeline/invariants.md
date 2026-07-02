@@ -5396,17 +5396,44 @@ path ([INV-01](#inv-01-pid-file-naming)) with the exact same content contract
 single line for this fix, and neither needs to know a lock file briefly
 existed alongside the PID file during acquisition.
 
-**Symlink defense on the lock sidecar (CWE-59).** `${pid_file}.lock` gets the
-same `-L` rejection [INV-02](#inv-02-pid-file-is-not-a-symlink) already gives
-`pid_file`, checked immediately before the `exec {fd}>"$lock_file"` that
-opens it. Without this, a same-user attacker could pre-plant the lock
-sidecar as a symlink to an arbitrary victim file; a plain `>` redirection
-follows a symlink and truncates whatever it points at, so the next wrapper
-invocation would silently clobber the victim BEFORE `flock` ever runs (a
-codex review finding on PR #365 — the check landed in the same PR, not a
-follow-up). The window between the `-L` check and the `exec` is the same
-belt-and-suspenders posture [INV-02] already accepts for `pid_file` itself
-(the per-user PID dir is mode 0700, so this defends only against the
+**Link-following defense on the lock sidecar (CWE-59) — TWO rounds, the
+second one load-bearing.** `${pid_file}.lock` did not exist before this
+invariant, so it needed its own defense against a same-user attacker
+pre-planting it to point at a victim file:
+
+- **Round 1 (codex review, PR #365): symlink check.** `${pid_file}.lock`
+  gets the same `-L` rejection [INV-02](#inv-02-pid-file-is-not-a-symlink)
+  already gives `pid_file`, checked immediately before the file is opened.
+  This alone stops a SYMLINKED lock sidecar: a plain `>` (truncating)
+  redirection follows a symlink and truncates whatever it points at, so
+  without the check the next wrapper invocation would silently clobber the
+  symlink's target BEFORE `flock` ever runs.
+- **Round 2 (codex review, PR #365, same PR): the symlink check alone is
+  insufficient — a HARD link is invisible to `-L`.** A hard link shares the
+  target's inode; `-L` reports false for it exactly as it would for any
+  ordinary file, so a hard-linked lock sidecar sails through round 1's check
+  untouched and a truncating `>` open still zeroes the victim on open. The
+  round 1 fix covered symlinks only — reproduced live: hard-linking the
+  sidecar to a temp file and watching it drop to 0 bytes. There is no
+  practical way to detect "this path has extra hard links to something I
+  don't own" cheaply and portably (an `nlink > 1` check has its own false
+  positives/races), so detection is not the fix. **The actual fix is to
+  never truncate on open at all**: `acquire_pid_guard` opens the lock file
+  with `exec {fd}>>"$lock_file"` (append mode — `O_CREAT|O_APPEND`, no
+  `O_TRUNC`), not `exec {fd}>"$lock_file"`. Append mode never truncates
+  the target on open, regardless of whether the path is itself the target,
+  a symlink to another file, or a hard link sharing another file's inode —
+  it closes the ENTIRE class, not just the symlink case round 1 already
+  caught. This costs nothing functionally: the lock file is never written
+  through (the PID goes to `pid_file`, a completely separate path), and
+  `flock` behaves identically on an append-mode file descriptor.
+
+Round 1's `-L` check is retained as belt-and-suspenders (it rejects a
+symlinked sidecar outright, one syscall, no reason to remove it now that
+round 2 also covers that case) — but round 2's append-mode open is what
+actually makes the invariant hold. The window between the `-L` check and the
+open is the same accepted-risk posture [INV-02] already applies to `pid_file`
+itself (the per-user PID dir is mode 0700, so this defends only against the
 resource's own user, same threat model).
 
 **Why**: the pre-#360 check-then-write read `pid_file`, ran `kill -0` on any
@@ -5455,13 +5482,17 @@ a `pid_alive`-style read: same path, numeric content), TC-ATOMIC-003 (a dead
 PID in the file still allows a fresh acquire to win — pre-existing behavior
 preserved), TC-ATOMIC-004 (symlink PID file still rejected —
 [INV-02](#inv-02-pid-file-is-not-a-symlink) unaffected), TC-ATOMIC-004b
-(a symlinked LOCK sidecar is rejected with exit 1 AND the would-be victim
-file it points at is verified untouched — the codex-review CWE-59 finding),
-TC-ATOMIC-005 (source-of-truth: the function body uses an atomic primitive,
-carries no separate stale-lock reclaim code path, and the lock-file symlink
-check's source line precedes the flock-open `exec`'s source line). Existing
-`tests/unit/test-pid-guard.sh` and `tests/unit/test-pid-guard-pgid.sh` stay
-green unmodified (R1 back-compat).
+(round 1: a symlinked LOCK sidecar is rejected with exit 1 AND the would-be
+victim file it points at is verified untouched), TC-ATOMIC-004c (round 2:
+a HARD-linked lock sidecar — confirmed NOT reported by `-L` — still leaves
+its victim file's content untouched, proving the append-mode fix rather than
+detection is what closes this case), TC-ATOMIC-005 (source-of-truth: the
+function body uses an atomic primitive, carries no separate stale-lock
+reclaim code path, the lock-file symlink check's source line precedes the
+flock-open `exec`'s source line, the truncating `>` form is ABSENT, and the
+append-mode `>>` form is PRESENT). Existing `tests/unit/test-pid-guard.sh`
+and `tests/unit/test-pid-guard-pgid.sh` stay green unmodified (R1
+back-compat).
 
 **Cross-references**:
 - [INV-01](#inv-01-pid-file-naming) — the PID file path/naming this acquire path leaves unchanged.
