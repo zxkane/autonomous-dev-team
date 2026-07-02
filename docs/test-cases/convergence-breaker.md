@@ -17,8 +17,12 @@ CI parity.
 | CB-MISS-003 | Only 2 frozen rounds (< `CONVERGENCE_STALL_THRESHOLD`=3) | Does NOT trip → Branch C dev-new |
 | CB-PRECEDENCE-004 | `failed-substantive` + `dev-actionable=false` | Branch B′ ([INV-92]) escalates; breaker does NOT run and does NOT count the round |
 | CB-LIVE-005 | ≥3 frozen rounds BUT `may_stall_now` reports a live dev PID | Posts NOTHING, marks NOTHING, defers (no orphan report/marker); returns 0 |
-| CB-IDEM-006 | Second tick, same `{issue, head, trailer-hash}`, marker already present | Nothing posted, nothing dispatched, NO duplicate `label_swap` |
-| CB-IDEM-007 | NEW trailer-hash on the same frozen head | Re-evaluates (different marker → not suppressed) |
+| CB-IDEM-006 | Second tick, same `{issue, head, trailer-hash, session}`, marker already present | Nothing posted, nothing dispatched, NO duplicate `label_swap` |
+| CB-IDEM-007 | NEW trailer-hash on the same frozen head, SAME session | Re-evaluates (different marker → not suppressed) |
+| CB-IDEM-015 | A STALE marker from a PRIOR, already-resolved session (SAME head+trailer, DIFFERENT session) is present; a NEW session recurs | Re-evaluates and TRIPS — the stale marker does NOT suppress a fresh re-arm trip (round-12 [BLOCKING], fixes "one-shot only") |
+| CB-IDEM-016 | A HUMAN comment QUOTES the exact marker for THIS session | The quote is REJECTED (unauthenticated); the halt still fires — round-12 [BLOCKING] |
+| CB-IDEM-017 | Same as CB-IDEM-016, but `BOT_LOGIN` is empty (fallback topology) | The quote is still rejected via `authorKind != "human"` |
+| CB-IDEM-018 | A GENUINE (machine-authored) same-session marker is present | Still suppresses (regression guard — the fix must not over-reject true idempotency) |
 | CB-REPORT-008 | Trip report content | Contains PR ref (`#<num>`), frozen head SHA, `reason=non-convergence`, "REMOVE the `stalled` label" resume instruction (`autonomous` retained — round-10 owner correction), repeated-failure count, AND the counted rounds' **per-round timestamps** ([P1] round-1 finding 2, not the `(unavailable)` fallback) |
 | CB-ATOMIC-013 | Successful trip | `label_swap` (the transition) is called STRICTLY BEFORE `itp_post_comment` (the marker/report) — round-10 [P1] finding 1 |
 | CB-ATOMIC-014 | `label_swap` FAILS (transient transport error) under `set -euo pipefail` | Aborts BEFORE the marker/report is posted; no orphan marker; label state unchanged; next tick retries — round-10 [P1] finding 1 |
@@ -38,7 +42,7 @@ CI parity.
 
 - **AC1** (detect non-convergence + halt): CB-TRIP-001, CB-COUNT-009a/b/c/h/i/j/k, CB-THRESH-012.
 - **AC2** (single structured report with reason + SHA + repeated findings + human checklist): CB-REPORT-008, CB-DUAL-011.
-- **AC3** (converging loops unaffected + idempotent): CB-MISS-002, CB-MISS-003, CB-IDEM-006, CB-IDEM-007.
+- **AC3** (converging loops unaffected + idempotent): CB-MISS-002, CB-MISS-003, CB-IDEM-006, CB-IDEM-007, CB-IDEM-015/016/017/018.
 - **AC4** (docs updated: dispatcher-flow + INV-103): enforced by the pipeline-docs-gate + TC-SPEC-GATE-040/041 (heading-adjacent triage tag).
 - **#298 precedence**: CB-PRECEDENCE-004.
 - **live-PID deferral inherited via shared helper**: CB-LIVE-005, CB-SHARED-010, MSL-CHAR-011.

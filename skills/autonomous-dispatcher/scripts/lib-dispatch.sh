@@ -1631,13 +1631,43 @@ handle_completed_session_routing() {
 
         local _cb_hash
         _cb_hash=$(convergence_trailer_hash "$_verdict" "$_cause" "$_dev_actionable")
-        local _cb_marker="<!-- dispatcher-convergence-breaker: issue=${issue_num} head=${_np_current_head} trailer=${_cb_hash} -->"
+        # SESSION-SCOPED marker (round-12 [BLOCKING]): binding the marker to
+        # `session_id` — NOT just `{issue, head, trailer-hash}` — is what makes the
+        # breaker re-trippable after an operator re-arms the pipeline (removes
+        # `stalled`, per the documented resume path). `handle_completed_session_routing`
+        # is called at most once per completed dev session (Step 4 gates on
+        # `is_session_completed`), so `session_id` is a fresh, non-reused identifier
+        # per dev-resume episode: a re-arm mints a NEW dev-new session_id (INV-35
+        # PTL/fresh-dev pattern), so a genuinely NEW non-convergence episode —
+        # even with the SAME {head, trailer-hash} as a prior, already-resolved trip
+        # — carries a DIFFERENT marker and is NOT suppressed. Within the SAME
+        # session (the intended idempotency case — e.g. a tight re-tick before the
+        # label transition is externally visible), the marker is identical and the
+        # dedupe still fires. Without this, the OLD trip's marker (still present on
+        # the issue from BEFORE the re-arm) would make the breaker "one-shot only".
+        local _cb_marker="<!-- dispatcher-convergence-breaker: issue=${issue_num} head=${_np_current_head} trailer=${_cb_hash} session=${session_id} -->"
 
-        # Idempotency (C5/R6): if THIS exact case ({issue, head, trailer-hash}) was
-        # already reported, post NOTHING and do NOT re-transition. A genuinely NEW
-        # non-convergence case (a new trailer-hash on the same frozen head) has a
-        # DIFFERENT marker → re-evaluates. Keyed on a bot-authored comment carrying
-        # the exact marker.
+        # Idempotency (C5/R6): if THIS exact case ({issue, head, trailer-hash,
+        # session}) was already reported, post NOTHING and do NOT re-transition. A
+        # genuinely NEW non-convergence case (a new trailer-hash OR a new session on
+        # the same frozen head) has a DIFFERENT marker → re-evaluates.
+        #
+        # AUTHENTICITY (round-12 [BLOCKING]): the dedupe read is gated on
+        # machine-authorship — `authorKind != "human"`. This is the breaker's OWN
+        # marker, posted via `itp_post_comment` under the DISPATCHER's identity
+        # (the same actor that posts the Step-5b round comment) — NOT the review
+        # agent's `BOT_LOGIN` identity (those can be, and in GH_AUTH_MODE=app
+        # typically ARE, two distinct bot accounts). So this mirrors the
+        # round-comment authenticity check in `_frozen_convergence_rounds_json`
+        # (round-7), NOT the `.author == BOT_LOGIN` exact binding used there for
+        # the PRECEDING-VERDICT check (round-11) — that binding authenticates a
+        # REVIEW-BOT comment specifically and would wrongly reject the
+        # dispatcher's own genuine marker whenever the two identities differ.
+        # `authorKind != "human"` is sufficient here (unlike the round-11 case)
+        # because the breaker's marker is never itself a candidate the review bot
+        # could impersonate into a false verdict — the only threat model is a
+        # HUMAN quoting/pasting the marker text, which this excludes regardless of
+        # `BOT_LOGIN` being set.
         # `|| echo 0` guards the bare assignment under `set -euo pipefail`: a
         # routine `gh` transport error (5xx / token expiry / network blip) exits
         # non-zero, and under `pipefail` an UNGUARDED substitution would abort the
@@ -1650,10 +1680,11 @@ handle_completed_session_routing() {
         # subsequent tick re-reads it.
         local _cb_present
         _cb_present=$(itp_list_comments "$issue_num" 2>/dev/null \
-          | jq -r "[.[].body | select(contains(\"${_cb_marker}\"))] | length" \
+          | jq -r --arg marker "$_cb_marker" \
+              '[.[] | select(.authorKind != "human") | select(.body | contains($marker))] | length' \
           2>/dev/null || echo 0)
         if [ "${_cb_present:-0}" != "0" ]; then
-          log "  issue #${issue_num} convergence breaker already reported for head \`${_np_current_head}\` (trailer=${_cb_hash}) — idempotent no-op ([INV-103])"
+          log "  issue #${issue_num} convergence breaker already reported for head \`${_np_current_head}\` session \`${session_id}\` (trailer=${_cb_hash}) — idempotent no-op ([INV-103])"
           return 0
         fi
 

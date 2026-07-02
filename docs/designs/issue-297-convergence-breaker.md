@@ -111,7 +111,8 @@ across them by construction; the hash is primarily the **report / idempotency
 key** (C5). `review-comment-id`, `dev-session-id`, and per-round timestamps are
 **evidence rows** for the report, never the match key (C2).
 
-Match key = `{head, trailer-hash}` ONLY.
+Count/windowing key = `{head, trailer-hash}`. (The MARKER/idempotency match key
+is a superset of this — see §6, corrected round-12 to also include `session_id`.)
 
 ## 4. Eligibility pre-gate (C4′/C7/C9b) — `may_stall_now`
 
@@ -184,11 +185,36 @@ report, fix, remove `stalled`". No `state-machine.md` label edit (the
 
 ## 6. Idempotency (C5/R6)
 
-Before doing anything, grep bot-authored comments for the exact marker
-`<!-- dispatcher-convergence-breaker: issue=<N> head=<sha> trailer=<hash> -->`.
-Keying on `{issue, head, trailer-hash}` means a genuinely NEW non-convergence
-case (a new trailer on the same frozen head) produces a different marker and is
-re-evaluated, while a re-run on the SAME case is suppressed.
+Before doing anything, grep MACHINE-authored comments (`authorKind != "human"`)
+for the exact marker
+`<!-- dispatcher-convergence-breaker: issue=<N> head=<sha> trailer=<hash> session=<sid> -->`.
+Keying on `{issue, head, trailer-hash, session_id}` means a genuinely NEW
+non-convergence case (a new trailer OR a new session on the same frozen head)
+produces a different marker and is re-evaluated, while a re-run on the SAME case
+is suppressed.
+
+**Owner correction (round-12 [BLOCKING]): the marker MUST be session-scoped and
+authorship-gated — the original `{issue, head, trailer-hash}`-only key made the
+breaker one-shot forever.** Comments are never deleted, so a marker from a
+PRIOR, already-resolved trip persists on the issue after the operator follows
+the documented resume step (removes `stalled`). If the SAME `{head,
+trailer-hash}` case genuinely recurs in a NEW dev session, the stale marker
+would still match and silently suppress the fresh halt — the issue sits
+`pending-dev` forever with no report and no transition. Fix: embed
+`session=${session_id}` in the marker. `handle_completed_session_routing` runs
+AT MOST ONCE per completed dev session, and a re-arm mints a brand-new
+`session_id` (the INV-35 PTL/fresh-dev pattern), so a genuinely new episode
+carries a different marker and is never suppressed by history. Within the SAME
+session (the true idempotency case), the marker is identical and the dedupe
+still fires correctly.
+
+The dedupe read is ALSO gated on `authorKind != "human"` (the SAME predicate the
+round-comment authenticity check uses, round-7 — NOT the round-11
+`.author == BOT_LOGIN` exact binding, which authenticates a REVIEW-BOT comment
+and is the wrong predicate here since the marker is the DISPATCHER's own post,
+a potentially different identity than the review agent's `BOT_LOGIN`). Without
+this, a human comment merely quoting the marker text for discussion would also
+suppress a genuine halt while the issue is still `pending-dev`.
 
 **Ordering vs. the terminal transition (round-10 [P1] finding 1):** the
 idempotency check runs BEFORE the transition, and the transition itself runs
@@ -241,10 +267,20 @@ Fixture-driven, mirroring `test-handle-completed-session-routing.sh` +
   runs, breaker does NOT run and does NOT count it.
 - **CB-LIVE-005** — ≥3 frozen rounds BUT `may_stall_now` reports a live dev PID →
   posts NOTHING, marks NOTHING, defers (no orphan report/marker).
-- **CB-IDEM-006** — second tick, same `{issue, head, trailer-hash}`, marker
-  already present → nothing posted, nothing dispatched.
-- **CB-IDEM-007** — a NEW trailer-hash on the same frozen head → re-evaluates
-  (different marker).
+- **CB-IDEM-006** — second tick, same `{issue, head, trailer-hash, session}`,
+  marker already present → nothing posted, nothing dispatched.
+- **CB-IDEM-007** — a NEW trailer-hash on the same frozen head, SAME session →
+  re-evaluates (different marker).
+- **CB-IDEM-015** (round-12 [BLOCKING]) — a STALE marker from a PRIOR,
+  already-resolved session (same head+trailer, different session) is present; a
+  NEW session recurs → re-evaluates and TRIPS (the stale marker does not
+  suppress a fresh re-arm episode).
+- **CB-IDEM-016/017** (round-12 [BLOCKING]) — a HUMAN comment quotes the exact
+  marker for the CURRENT session (with `BOT_LOGIN` set / empty respectively) →
+  the quote is rejected (unauthenticated); the halt still fires.
+- **CB-IDEM-018** (regression guard) — a GENUINE machine-authored same-session
+  marker is present → still suppresses (the fix doesn't over-reject true
+  idempotency).
 - **CB-REPORT-008** — the report contains the PR ref + frozen SHA + the resume
   instruction + `reason=non-convergence`.
 - **CB-COUNT-009** — the count excludes `dev-actionable=false` rounds and

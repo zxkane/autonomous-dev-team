@@ -67,6 +67,8 @@ _MOCK_ROUND_VERDICT_TRAILER="<!-- review-verdict: failed-substantive -->"  # the
 _MOCK_NONACT_MARKER_PRESENT=0     # a non-actionable-finding:<head> marker already on the issue?
 _MOCK_CB_MARKER_PRESENT=0         # a dispatcher-convergence-breaker marker (same trailer) already posted?
 _MOCK_CB_MARKER_HASH=""           # the trailer-hash the synthesized existing marker carries
+_MOCK_CB_MARKER_SESSION=""        # round-12: the session= the synthesized existing marker carries
+_MOCK_CB_MARKER_AUTHORKIND="self" # round-12: authorKind of the synthesized existing marker (self=genuine dispatcher post; human=impersonation/quote)
 _MOCK_PID_ALIVE=1                 # 1 = DEAD (eligible); 0 = ALIVE (defer)
 _MOCK_VERDICT_BODY="Blocking: acceptance criterion #3 contradicts #1 — cannot satisfy both. <!-- review-verdict: failed-substantive dev-actionable=true -->"
 
@@ -172,7 +174,18 @@ itp_list_comments() {
     _bodies+=("Re-checking the prior status: ${_round} — investigating.")
   done
   if [[ "$_MOCK_CB_MARKER_PRESENT" != "0" ]]; then
-    _bodies+=("<!-- dispatcher-convergence-breaker: issue=100 head=${_MOCK_PR_HEAD} trailer=${_MOCK_CB_MARKER_HASH} -->")
+    # round-12: the marker now embeds `session=<sid>` — the test sets
+    # _MOCK_CB_MARKER_SESSION to the CURRENT session-id to simulate a genuine
+    # same-session re-tick, or to a DIFFERENT sid (default, sentinel
+    # "__no_session__") to simulate a stale marker from a PRIOR, already-resolved
+    # trip that must NOT suppress a fresh one. authorKind is controlled by
+    # _MOCK_CB_MARKER_AUTHORKIND ("self" = genuine dispatcher post, "human" =
+    # an impersonation/quote that must never suppress the halt).
+    if [[ "${_MOCK_CB_MARKER_AUTHORKIND:-self}" == "human" ]]; then
+      _bodies+=("HUMANQUOTE:<!-- dispatcher-convergence-breaker: issue=100 head=${_MOCK_PR_HEAD} trailer=${_MOCK_CB_MARKER_HASH} session=${_MOCK_CB_MARKER_SESSION:-__no_session__} -->")
+    else
+      _bodies+=("<!-- dispatcher-convergence-breaker: issue=100 head=${_MOCK_PR_HEAD} trailer=${_MOCK_CB_MARKER_HASH} session=${_MOCK_CB_MARKER_SESSION:-__no_session__} -->")
+    fi
   fi
   local _json="[]" _ts=0 b _hh _mm _tsiso
   for b in "${_bodies[@]}"; do
@@ -239,6 +252,8 @@ reset_mocks() {
   _MOCK_NONACT_MARKER_PRESENT=0
   _MOCK_CB_MARKER_PRESENT=0
   _MOCK_CB_MARKER_HASH=""
+  _MOCK_CB_MARKER_SESSION=""
+  _MOCK_CB_MARKER_AUTHORKIND="self"
   _MOCK_PID_ALIVE=1
   _MOCK_VERDICT_BODY="Blocking: acceptance criterion #3 contradicts #1 — cannot satisfy both. <!-- review-verdict: failed-substantive dev-actionable=true -->"
   unset CONVERGENCE_STALL_THRESHOLD
@@ -619,7 +634,7 @@ assert_eq "CB-LIVE-005 dispatches NOTHING" "" "$_MOCK_DISPATCH_CALLS"
 
 # ===========================================================================
 echo ""
-echo "=== CB-IDEM-006: same {issue,head,trailer-hash} marker already present → no-op ==="
+echo "=== CB-IDEM-006: same {issue,head,trailer-hash,session} marker already present → no-op ==="
 reset_mocks
 _MOCK_VERDICT="failed-substantive"
 _MOCK_DEV_ACTIONABLE="true"
@@ -630,6 +645,7 @@ _MOCK_FROZEN_ROUND_COMMENTS=3
 _MOCK_PID_ALIVE=1
 _MOCK_CB_MARKER_PRESENT=1
 _MOCK_CB_MARKER_HASH="$(convergence_trailer_hash failed-substantive "" true)"  # SAME hash as would be computed
+_MOCK_CB_MARKER_SESSION="sid-cb006"  # round-12: SAME session as this call — the true idempotency case
 prepare_log 100
 handle_completed_session_routing 100 "sid-cb006" "2026-05-21T03:18:00Z"
 rc=$?
@@ -651,10 +667,100 @@ _MOCK_FROZEN_ROUND_COMMENTS=3
 _MOCK_PID_ALIVE=1
 _MOCK_CB_MARKER_PRESENT=1
 _MOCK_CB_MARKER_HASH="STALE_DIFFERENT_HASH"   # an OLD case's marker — different hash
+_MOCK_CB_MARKER_SESSION="sid-cb007"           # SAME session — isolates the hash mismatch as the cause of re-evaluation
 prepare_log 100
 handle_completed_session_routing 100 "sid-cb007" "2026-05-21T03:18:00Z"
 assert_eq "CB-IDEM-007 trips (new hash not suppressed)" "100:pending-dev:stalled " "$_MOCK_LABEL_SWAPS"
 assert_eq "CB-IDEM-007 posts the fresh report" "1" "$_MOCK_COMMENT_COUNT"
+
+# ===========================================================================
+echo ""
+echo "=== CB-IDEM-015/016/017: session-scoped dedupe + authenticity (round-12 BLOCKING) ==="
+
+# CB-IDEM-015: a marker from a PRIOR, already-resolved trip (a DIFFERENT
+# session-id, same {head, trailer-hash}) is present on the issue — e.g. the
+# operator followed the documented resume step (removed `stalled`), and the
+# SAME frozen-head+verdict case genuinely recurred in a NEW dev session. Before
+# the fix, the stale marker made the breaker "one-shot only" (silently no-op'd
+# forever). After the fix, a DIFFERENT session-id → a DIFFERENT marker → trips.
+reset_mocks
+_MOCK_VERDICT="failed-substantive"
+_MOCK_DEV_ACTIONABLE="true"
+_MOCK_CAUSE=""
+_MOCK_PR_HEAD="deadbeef"
+_MOCK_LAST_REVIEWED_HEAD="deadbeef"
+_MOCK_FROZEN_ROUND_COMMENTS=3
+_MOCK_PID_ALIVE=1
+_MOCK_CB_MARKER_PRESENT=1
+_MOCK_CB_MARKER_HASH="$(convergence_trailer_hash failed-substantive "" true)"  # SAME hash as the current case
+_MOCK_CB_MARKER_SESSION="sid-OLD-session"  # a PRIOR, already-resolved trip's session
+prepare_log 100
+handle_completed_session_routing 100 "sid-NEW-session" "2026-05-21T03:18:00Z"
+assert_eq "CB-IDEM-015: stale marker from a PRIOR session does NOT suppress a fresh trip (re-arm re-trips)" \
+  "100:pending-dev:stalled " "$_MOCK_LABEL_SWAPS"
+assert_eq "CB-IDEM-015: posts the fresh report" "1" "$_MOCK_COMMENT_COUNT"
+assert_contains "CB-IDEM-015: the NEW marker carries the NEW session id" "session=sid-NEW-session" "$_MOCK_LAST_COMMENT_BODY"
+
+# CB-IDEM-016: a HUMAN comment QUOTES the exact marker for THIS session (not a
+# genuine dispatcher post) — must NOT suppress the halt while the issue is
+# still `pending-dev`. The quote is injected via _MOCK_CB_MARKER_AUTHORKIND.
+reset_mocks
+_MOCK_VERDICT="failed-substantive"
+_MOCK_DEV_ACTIONABLE="true"
+_MOCK_CAUSE=""
+_MOCK_PR_HEAD="deadbeef"
+_MOCK_LAST_REVIEWED_HEAD="deadbeef"
+_MOCK_FROZEN_ROUND_COMMENTS=3
+_MOCK_PID_ALIVE=1
+_MOCK_CB_MARKER_PRESENT=1
+_MOCK_CB_MARKER_HASH="$(convergence_trailer_hash failed-substantive "" true)"
+_MOCK_CB_MARKER_SESSION="sid-cb016"          # SAME session as this call
+_MOCK_CB_MARKER_AUTHORKIND="human"           # a human QUOTED the marker, did not genuinely post it
+prepare_log 100
+handle_completed_session_routing 100 "sid-cb016" "2026-05-21T03:18:00Z"
+assert_eq "CB-IDEM-016: a human quote of the marker does NOT suppress the halt" \
+  "100:pending-dev:stalled " "$_MOCK_LABEL_SWAPS"
+assert_eq "CB-IDEM-016: posts the report despite the quote being present" "1" "$_MOCK_COMMENT_COUNT"
+
+# CB-IDEM-017: BOT_LOGIN-empty fallback — the coarse authorKind!=human bound
+# still rejects a human quote of the marker (proves the fallback path too).
+reset_mocks
+_MOCK_VERDICT="failed-substantive"
+_MOCK_DEV_ACTIONABLE="true"
+_MOCK_CAUSE=""
+_MOCK_PR_HEAD="deadbeef"
+_MOCK_LAST_REVIEWED_HEAD="deadbeef"
+_MOCK_FROZEN_ROUND_COMMENTS=3
+_MOCK_PID_ALIVE=1
+_MOCK_CB_MARKER_PRESENT=1
+_MOCK_CB_MARKER_HASH="$(convergence_trailer_hash failed-substantive "" true)"
+_MOCK_CB_MARKER_SESSION="sid-cb017"
+_MOCK_CB_MARKER_AUTHORKIND="human"
+_saved_bot_login="$BOT_LOGIN"; BOT_LOGIN=""
+prepare_log 100
+handle_completed_session_routing 100 "sid-cb017" "2026-05-21T03:18:00Z"
+assert_eq "CB-IDEM-017: BOT_LOGIN empty — human quote still rejected via authorKind!=human fallback" \
+  "100:pending-dev:stalled " "$_MOCK_LABEL_SWAPS"
+BOT_LOGIN="$_saved_bot_login"
+
+# CB-IDEM-018 (regression guard): a GENUINE self-authored marker for the SAME
+# session still suppresses — the fix must not over-reject true idempotency.
+reset_mocks
+_MOCK_VERDICT="failed-substantive"
+_MOCK_DEV_ACTIONABLE="true"
+_MOCK_CAUSE=""
+_MOCK_PR_HEAD="deadbeef"
+_MOCK_LAST_REVIEWED_HEAD="deadbeef"
+_MOCK_FROZEN_ROUND_COMMENTS=3
+_MOCK_PID_ALIVE=1
+_MOCK_CB_MARKER_PRESENT=1
+_MOCK_CB_MARKER_HASH="$(convergence_trailer_hash failed-substantive "" true)"
+_MOCK_CB_MARKER_SESSION="sid-cb018"
+_MOCK_CB_MARKER_AUTHORKIND="self"
+prepare_log 100
+handle_completed_session_routing 100 "sid-cb018" "2026-05-21T03:18:00Z"
+assert_eq "CB-IDEM-018: genuine same-session marker still suppresses (true idempotency preserved)" "" "$_MOCK_LABEL_SWAPS"
+assert_eq "CB-IDEM-018: posts nothing" "0" "$_MOCK_COMMENT_COUNT"
 
 # ===========================================================================
 echo ""
