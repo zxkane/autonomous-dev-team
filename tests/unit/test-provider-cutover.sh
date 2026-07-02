@@ -814,10 +814,36 @@ fi
 # ---------------------------------------------------------------------------
 echo "=== TC-FINALBATCH-010: check-provider-cutover.sh --require-trusted-ref strict-passes against the committed repo (#344, AC1) ==="
 # ---------------------------------------------------------------------------
-if bash "$CHECK" --require-trusted-ref >/dev/null 2>&1; then
-  ok "TC-FINALBATCH-010 committed repo strict-passes --require-trusted-ref (Check 1 + Check 4 monotonicity, shrunk)"
+# Must NOT rely on the ambient checkout's 'origin/main' resolving: the
+# hermetic-unit CI job (which runs this file via the tests/unit/test-*.sh loop)
+# uses the DEFAULT (shallow, no origin/main) checkout — only the dedicated
+# spec-drift job's own `check-provider-cutover.sh --require-trusted-ref` step
+# uses `fetch-depth: 0`. A bare `bash "$CHECK" --require-trusted-ref` here
+# would fail closed on that shallow checkout with "trusted ref 'origin/main'
+# not resolvable here" — a red herring unrelated to this PR's diff (codex
+# review finding, 2026-07-02). Mint a LOCAL trusted ref instead, mirroring
+# every other strict-mode case in this file (TC-CUTOVER-018/019/021,
+# TC-CUTAMEND-007/008): a scratch copy of the CURRENT (already-shrunk)
+# committed tree/baseline, committed as its own `trusted-main` branch, then
+# run strict mode against that SAME state. This proves the shipped tree and
+# baseline reconcile (Check 1) and strict-pass end-to-end (Check 4 sees zero
+# delta vs. its own trusted snapshot, which trivially satisfies "may only
+# shrink") without depending on ambient checkout depth.
+if command -v git >/dev/null 2>&1; then
+  S="$(fresh_scratch finalbatch010)"
+  GROOT="$WORK/gitrepo-finalbatch010"
+  rm -rf "$GROOT"; mkdir -p "$GROOT/skills/autonomous-dispatcher/scripts"
+  cp -rL "$S"/. "$GROOT/skills/autonomous-dispatcher/scripts/" 2>/dev/null
+  GS="$GROOT/skills/autonomous-dispatcher/scripts"
+  ( cd "$GROOT" && git init -q && git config user.email t@t && git config user.name t \
+      && git add -A >/dev/null 2>&1 && git commit -qm base >/dev/null 2>&1 && git branch trusted-main )
+  if ( cd "$GROOT" && bash "$GS/check-provider-cutover.sh" --scripts-dir "$GS" --baseline "$GS/providers/cutover-baseline.json" --trusted-ref trusted-main --require-trusted-ref >/dev/null 2>&1 ); then
+    ok "TC-FINALBATCH-010 committed repo strict-passes --require-trusted-ref against a local trusted ref (Check 1 + Check 4 monotonicity, shrunk)"
+  else
+    bad "TC-FINALBATCH-010 committed repo FAILS --require-trusted-ref against a local trusted ref"
+  fi
 else
-  bad "TC-FINALBATCH-010 committed repo FAILS --require-trusted-ref"
+  ok "git unavailable — TC-FINALBATCH-010 skipped"
 fi
 
 # ===========================================================================
