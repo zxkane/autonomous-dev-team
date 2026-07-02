@@ -33,15 +33,25 @@
 #                read the body from stdin. A FILE (not an argv string) is used
 #                so a multi-line body with backticks/quotes/$() can't be mangled
 #                by the agent's shell quoting (the suspected agy failure mode).
-#                CALLER must namespace this path by issue number + the agent's
-#                OWN session id (e.g. `/tmp/verdict-<agent>-<issue>-<session>.md`),
-#                NOT the bare `/tmp/verdict-<agent>.md` — that form is GLOBAL
-#                across every concurrent review on the host (all projects, all
-#                issues) and two overlapping reviews race on it: the later
-#                writer's findings get posted under the earlier issue's session
-#                trailer, passing every [INV-20]/[INV-40] attribution check
-#                (#353). This helper does not itself read the path twice, so it
-#                cannot detect the race — the fix is the caller-side namespacing.
+#                Use the EXACT literal path the wrapper rendered into your
+#                prompt — never a hand-constructed path, and never a copy of
+#                this doc-comment's template with unexpanded `${...}` tokens
+#                (that would recreate a shared literal path across every
+#                agent that copies it verbatim).
+#
+#   [INV-100] (#355) READ-SIDE ENFORCEMENT: when the wrapper has exported
+#   VERDICT_BODY_FILE into this agent's environment, <body-file> MUST resolve
+#   (realpath) to the SAME file, or the post is refused (exit 2, nothing
+#   posted) — this is what makes a RESUMED agent session holding an OLD prompt
+#   (pre-#354/#355, a bare or session-id-keyed path) fail LOUD instead of
+#   silently posting a foreign/stale body. Any `/tmp/verdict*.md` path that
+#   does NOT equal VERDICT_BODY_FILE is rejected outright, even before the
+#   realpath comparison, so a legacy literal in an old prompt can't slip
+#   through by accident. An EMPTY (0-byte or whitespace-only) body file is
+#   also rejected — a wrapper-pre-created-but-never-written file must not post
+#   (mirrors the INV-73 "malformed → never a phantom verdict" rule). When
+#   VERDICT_BODY_FILE is UNSET (human/ad-hoc use, or a caller that predates
+#   #355), none of this runs — behavior is unchanged from before #355.
 #
 #   <model>      OPTIONAL 6th arg ([INV-60], issue #208): the per-agent RESOLVED
 #                review model the wrapper launched this agent with. When present
@@ -66,11 +76,15 @@
 #   0 — Comment posted; comment URL echoed on stdout.
 #   1 — gh post failed, or a config/runtime error.
 #   2 — Invalid arguments (bad issue number / verdict / unreadable body / name /
-#       model containing a control character (newline/CR) or over the length cap).
+#       model containing a control character (newline/CR) or over the length cap /
+#       [INV-100] body-file does not match VERDICT_BODY_FILE / a legacy
+#       /tmp/verdict*.md path while VERDICT_BODY_FILE is set / an empty body
+#       file while VERDICT_BODY_FILE is set).
 #
-# Example:
-#   printf '%s' "$findings" > /tmp/verdict-codex-202-${SESSION_ID}.md
-#   bash scripts/post-verdict.sh 202 fail /tmp/verdict-codex-202-${SESSION_ID}.md codex "$SESSION_ID" sonnet
+# Example (illustrative only — in a real run, use the EXACT path the wrapper
+# rendered into your prompt, not this template):
+#   printf '%s' "$findings" > "$VERDICT_BODY_FILE"
+#   bash scripts/post-verdict.sh 202 fail "$VERDICT_BODY_FILE" codex "$SESSION_ID" sonnet
 
 set -euo pipefail
 
@@ -182,6 +196,43 @@ if [[ -n "$MODEL" ]]; then
   fi
 fi
 
+# --- [INV-100] (#355) READ-SIDE path enforcement ---------------------------
+# When the wrapper exported VERDICT_BODY_FILE into this agent's environment,
+# the caller-supplied BODY_FILE MUST be that exact file. This is what closes
+# the "resumed agent still holds an old prompt" hole: a wrapper-side render
+# fix (D1) only changes prompts rendered AFTER the fix ships — a session
+# resumed from before #354/#355 still has the OLD literal path in its context
+# and would otherwise write there with a fresh mtime, indistinguishable from a
+# genuine post. Enforcing the match HERE, at the one chokepoint every verdict
+# post routes through, closes it regardless of what the agent's prompt history
+# says. Skipped entirely (byte-for-byte legacy behavior) when the caller/
+# environment does not set VERDICT_BODY_FILE — human/ad-hoc use, or any
+# pre-#355 caller.
+if [[ -n "${VERDICT_BODY_FILE:-}" ]]; then
+  # Reject stdin (`-`) outright — VERDICT_BODY_FILE names a concrete file, so a
+  # caller passing `-` cannot be complying with the rendered path.
+  if [[ "$BODY_FILE" == "-" ]]; then
+    echo "Error: [INV-100] VERDICT_BODY_FILE is set (${VERDICT_BODY_FILE}) but body-file arg is '-' (stdin) — use the rendered file path, not stdin." >&2
+    exit 2
+  fi
+  # Reject any OTHER /tmp/verdict*.md literal outright, before the realpath
+  # comparison — a legacy bare or session-id-keyed form (pre-#354/#355) is
+  # rejected on sight even if it happens to resolve to a live file.
+  if [[ "$BODY_FILE" == /tmp/verdict*.md && "$BODY_FILE" != "$VERDICT_BODY_FILE" ]]; then
+    echo "Error: [INV-100] legacy verdict-body path '${BODY_FILE}' rejected — VERDICT_BODY_FILE is set to '${VERDICT_BODY_FILE}'. Your prompt is stale; use the path the CURRENT prompt rendered." >&2
+    exit 2
+  fi
+  # realpath-compare (resolves symlinks/relative components); a body-file that
+  # does not exist yet cannot realpath-resolve, which correctly fails closed
+  # (rather than passing on an as-yet-nonexistent path that merely LOOKS equal).
+  _pv_real_body="$(realpath -- "$BODY_FILE" 2>/dev/null || true)"
+  _pv_real_expected="$(realpath -- "$VERDICT_BODY_FILE" 2>/dev/null || printf '%s' "$VERDICT_BODY_FILE")"
+  if [[ -z "$_pv_real_body" || "$_pv_real_body" != "$_pv_real_expected" ]]; then
+    echo "Error: [INV-100] body-file '${BODY_FILE}' does not match the wrapper-rendered VERDICT_BODY_FILE '${VERDICT_BODY_FILE}' — refusing to post a mismatched path." >&2
+    exit 2
+  fi
+fi
+
 # --- Read the body (file or stdin) ----------------------------------------
 
 # Cap on the agent-supplied body. GitHub's hard comment limit is 65536 bytes;
@@ -207,6 +258,21 @@ BODY_TEXT=$(read_body)
 READ_RC=$?
 set -e
 if [[ $READ_RC -ne 0 ]]; then
+  exit 2
+fi
+
+# [INV-100] (#355): under the enforced path (VERDICT_BODY_FILE set), an EMPTY
+# (0-byte or whitespace-only) body is refused rather than posted. A file that
+# is empty means the wrapper pre-created the lane's verdict.md (or the agent
+# never wrote it) — posting it would be indistinguishable from a real empty
+# PASS/FAIL body. Mirrors the INV-73 "malformed → never a phantom verdict"
+# rule: the caller must not post nothing. Exit 2 → the wrapper's poller finds
+# no comment and resolves this agent `unavailable`, same as never reviewing.
+# Gated on VERDICT_BODY_FILE so the unset-var (legacy) path is byte-for-byte
+# unchanged — an empty body via ad-hoc/human use still posts today's default
+# PASS/FAIL prefix-only body, exactly as before #355.
+if [[ -n "${VERDICT_BODY_FILE:-}" ]] && [[ -z "${BODY_TEXT//[[:space:]]/}" ]]; then
+  echo "Error: [INV-100] body file '${BODY_FILE}' is empty/whitespace-only — refusing to post (treated as unavailable, not a phantom verdict)." >&2
   exit 2
 fi
 

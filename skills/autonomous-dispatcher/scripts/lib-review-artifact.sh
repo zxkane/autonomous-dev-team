@@ -60,6 +60,26 @@ _verdict_artifact_path() {
   printf '%s/verdict-%s.json\n' "$(_verdict_artifact_dir "$_project" "$_run_id")" "$_agent"
 }
 
+# _verdict_body_lane_dir <project> <agent> <issue>
+#
+# [INV-100] (#355): mints and echoes THIS agent's per-lane scratch DIRECTORY for
+# the comment-fallback verdict body — `/tmp/review-<project>-<agent>-<issue>-
+# XXXXXX` (mktemp -d). Single source of truth so the fan-out loop's real
+# provisioning call and build_review_prompt's legacy-caller self-provisioning
+# fallback can never diverge (they previously did — two independently
+# hand-rolled mktemp templates with two different fallback chains, one of
+# which fell back to an UNTEMPLATED `mktemp -d` whose `/tmp/tmp.XXXXXXXXXX`
+# result didn't match the wrapper's own `/tmp/review-*-*-*-??????` cleanup
+# glob — a permanently-orphaned dir on that failure path). The only fallback
+# here is the bare `/tmp` sentinel, which the cleanup glob already excludes by
+# construction (it requires the `review-` prefix), so every branch is either
+# glob-matched-and-reaped or knowingly-excluded-and-never-touched — no
+# in-between shape that silently orphans.
+_verdict_body_lane_dir() {
+  local _project="${1:-noproject}" _agent="${2:-agent}" _issue="${3:-0}"
+  mktemp -d "/tmp/review-${_project}-${_agent}-${_issue}-XXXXXX" 2>/dev/null || printf '/tmp\n'
+}
+
 # _verdict_artifact_schema_file — resolve the verdict-artifact JSON Schema.
 # Honors an explicit VERDICT_ARTIFACT_SCHEMA override (tests + the conformance
 # runner set it), else resolves it relative to this lib

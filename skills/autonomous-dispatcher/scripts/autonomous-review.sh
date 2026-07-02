@@ -1041,6 +1041,23 @@ build_review_prompt() {
   # <name> <sid>) keep working — when empty the artifact section is omitted and
   # the prompt is byte-for-byte the legacy comment-only flow.
   local _verdict_artifact_path="${3:-}"
+  # [INV-100] (#355): the LITERAL comment-fallback verdict-body path inside the
+  # per-lane scratch dir the fan-out loop provisioned for THIS agent
+  # (`LANE_DIR=$(mktemp -d "/tmp/review-${PROJECT_ID}-${agent}-${ISSUE_NUMBER}-XXXXXX")`,
+  # `${LANE_DIR}/verdict.md`) — supersedes #354's
+  # `/tmp/verdict-${_agent_name}-${ISSUE_NUMBER}-${_agent_session_id}.md` form.
+  # The mktemp suffix removes the dependency on session-id availability at
+  # RENDER time: codex/opencode mint their thread/session id AFTER launch, so
+  # #354's `${_agent_session_id}` token could still be EMPTY here for those
+  # CLIs, collapsing the path back to the cross-project-collidable
+  # `/tmp/verdict-codex-<issue>-.md` shape. Optional 4th arg so 2/3-arg legacy
+  # test callers keep working — when empty, self-provision a lane dir with the
+  # SAME mechanism (not a session-id-keyed literal), so every caller still gets
+  # a collision-free, render-time-independent path.
+  local _verdict_body_path="${4:-}"
+  if [[ -z "$_verdict_body_path" ]]; then
+    _verdict_body_path="$(_verdict_body_lane_dir "${PROJECT_ID:-}" "${_agent_name}" "${ISSUE_NUMBER:-}")/verdict.md"
+  fi
   # [INV-60] (#208): resolve THIS agent's review model for the verdict trailer
   # exactly as the `Reviewed HEAD:` trailer (~`_REVIEW_HEAD_MODEL` below) and the
   # INV-58 fan-out label do — and interpolate it as the 6th `post-verdict.sh` arg
@@ -1056,18 +1073,6 @@ build_review_prompt() {
   local _agent_model
   _agent_model=$(_resolve_review_agent_model_label "${_agent_name}")
   _agent_model="${_agent_model:-sonnet}"
-  # (#353): the comment-fallback verdict BODY scratch file, namespaced by
-  # issue number + this agent's OWN session id (not just the agent name) — the
-  # bare `/tmp/verdict-<agent>.md` form is GLOBAL across every concurrent
-  # review on the host (all projects, all issues), so two overlapping codex
-  # reviews in different projects raced on the same path: the later writer's
-  # findings got posted under the earlier issue's session trailer (passing
-  # every INV-20/INV-40 attribution check — see #342's two poisoned verdicts).
-  # Mirrors the INV-78 typed-artifact path's per-run uniqueness, which never
-  # had this race. Two agents in the SAME fan-out already get distinct session
-  # ids (INV-20), so this also keeps working within one review's multi-agent
-  # fan-out — its original collision-avoidance purpose.
-  local _verdict_body_path="/tmp/verdict-${_agent_name}-${ISSUE_NUMBER}-${_agent_session_id}.md"
   cat <<EOF
 You are reviewing PR #${PR_NUMBER} for issue #${ISSUE_NUMBER} in the ${REPO} project.
 PR branch: ${PR_BRANCH:-UNKNOWN}
@@ -1108,13 +1113,17 @@ Quick reference:
 3. If "CONFLICTING" — rebase the PR branch onto main:
    \`\`\`bash
    git fetch origin main ${PR_BRANCH}
-   git worktree add /tmp/rebase-pr-${PR_NUMBER} ${PR_BRANCH}
-   cd /tmp/rebase-pr-${PR_NUMBER}
+   # [INV-100] (#355): idempotent pre-clean — a crashed prior lane (this
+   # project, this agent, this PR) can leave this exact dir behind; remove it
+   # BEFORE \`git worktree add\` so a retry never wedges on a stale worktree.
+   git worktree remove --force /tmp/rebase-${PROJECT_ID}-${_agent_name}-pr-${PR_NUMBER} 2>/dev/null || rm -rf /tmp/rebase-${PROJECT_ID}-${_agent_name}-pr-${PR_NUMBER}
+   git worktree add /tmp/rebase-${PROJECT_ID}-${_agent_name}-pr-${PR_NUMBER} ${PR_BRANCH}
+   cd /tmp/rebase-${PROJECT_ID}-${_agent_name}-pr-${PR_NUMBER}
    git rebase origin/main
    # If rebase succeeds:
    git push --force-with-lease origin ${PR_BRANCH}
    cd -
-   git worktree remove /tmp/rebase-pr-${PR_NUMBER}
+   git worktree remove /tmp/rebase-${PROJECT_ID}-${_agent_name}-pr-${PR_NUMBER}
    # Wait for CI to restart
    sleep 10
    gh pr checks ${PR_NUMBER} --watch --interval 30
@@ -1358,6 +1367,12 @@ the arguments you pass, so it is always correct — pass the agent name
 the \`Review Agent:\` line as \`(model: …)\` so the verdict comment records which
 model produced it — INV-60).
 
+**IMPORTANT — use this EXACT path, do not substitute your own**: \`${_verdict_body_path}\`
+is the path the wrapper rendered for THIS run (also exported as \`\$VERDICT_BODY_FILE\`
+in your environment). \`post-verdict.sh\` REJECTS any other body-file path when that
+variable is set — copy the concrete path below verbatim, never a template with
+\`\${...}\` tokens in it.
+
 Helper usage (verdict comment ONLY — keep using bare \`gh\` for reads like
 \`gh pr view\` / \`gh pr checks\`):
 \`\`\`bash
@@ -1437,7 +1452,15 @@ if [[ "${E2E_MODE:-none}" == "command" ]]; then
   # to verify acceptance criteria DETERMINISTICALLY instead of LLM-parsing the
   # free-form evidence comment; an empty/absent sidecar falls back to the #182
   # free-form double-check. Browser mode does not set this (free-form by nature).
-  export E2E_AC_COVERAGE_FILE="/tmp/e2e-ac-coverage-${PR_NUMBER}.json"
+  # [INV-100] (#355): keyed by PROJECT_ID + PR_NUMBER + this wrapper run's
+  # RUN_ID (INV-81) — the bare PR-number-only form collided across projects,
+  # and a same-PR RETRY on a later dispatcher tick could rewrite the file a
+  # still-reading prior-round lane held open. Agents read this path via the
+  # exported var (never construct it themselves), so the extra components cost
+  # nothing caller-side. RUN_ID falls back to "run" on the rare tick where
+  # run_artifacts_init did not mint one (e.g. a non-numeric ISSUE_NUMBER
+  # sentinel) — still collision-free per (project, PR) for that one tick.
+  export E2E_AC_COVERAGE_FILE="/tmp/e2e-ac-coverage-${PROJECT_ID}-${PR_NUMBER}-${RUN_ID:-run}.json"
 fi
 
 # ---------------------------------------------------------------------------
@@ -1920,6 +1943,12 @@ declare -a AGENT_ARTIFACT_PATHS=()
 # (Clause VA5) and the rewrite is logged as a duplicate. Parallel-indexed to
 # AGENT_ARTIFACT_PATHS.
 declare -a AGENT_ARTIFACT_SNAPSHOTS=()
+# [INV-100] (#355): the per-lane scratch DIR the wrapper mktemp'd for THIS
+# agent's comment-fallback verdict body — `/tmp/review-${PROJECT_ID}-${agent}-
+# ${ISSUE_NUMBER}-XXXXXX`. Removed by the lane-cleanup reaper alongside the
+# INV-78 artifact run-dir, after verdict resolution. Parallel-indexed to
+# AGENT_NAMES / AGENT_SESSION_IDS.
+declare -a AGENT_VERDICT_LANE_DIRS=()
 # PIDs of the backgrounded per-agent subshells. We MUST `wait` these specific
 # PIDs — never a bare `wait`. A bare `wait` blocks on ALL background jobs of
 # this shell, which includes the long-lived gh-token-refresh-daemon (started
@@ -1979,6 +2008,16 @@ for _agent in "${REVIEW_AGENTS_LIST[@]}"; do
   _agent_artifact_path=$(_verdict_artifact_path "$PROJECT_ID" "$_agent_session_id" "$_agent")
   ( umask 077; mkdir -p "$(dirname "$_agent_artifact_path")" ) 2>/dev/null || true
   AGENT_ARTIFACT_PATHS+=("$_agent_artifact_path")
+  # [INV-100] (#355): provision THIS agent's per-lane scratch DIR for the
+  # comment-fallback verdict body — keyed by PROJECT_ID + agent name +
+  # ISSUE_NUMBER, with a random mktemp suffix for collision-freedom that does
+  # NOT depend on the session id being non-empty at render time (the codex/
+  # opencode gap #354 left open — those CLIs mint their thread/session id AFTER
+  # launch). `_verdict_body_lane_dir` (lib-review-artifact.sh) is the single
+  # source of truth for this path shape — shared with build_review_prompt's
+  # legacy-caller self-provisioning fallback so the two can never diverge.
+  _agent_verdict_lane_dir=$(_verdict_body_lane_dir "$PROJECT_ID" "$_agent" "$ISSUE_NUMBER")
+  AGENT_VERDICT_LANE_DIRS+=("$_agent_verdict_lane_dir")
   # [P1] #2: the frozen-at-first-land snapshot path (same dir → same fs + 0700
   # parent). The agent NEVER writes here; only the observe loop copies into it.
   AGENT_ARTIFACT_SNAPSHOTS+=("${_agent_artifact_path}.landed")
@@ -2021,7 +2060,8 @@ for _agent in "${REVIEW_AGENTS_LIST[@]}"; do
   else
     AGENT_GENERIC_LOGS+=("$_agent_log")
   fi
-  _agent_prompt=$(build_review_prompt "$_agent" "$_agent_session_id" "$_agent_artifact_path")
+  _agent_verdict_body_path="${_agent_verdict_lane_dir}/verdict.md"
+  _agent_prompt=$(build_review_prompt "$_agent" "$_agent_session_id" "$_agent_artifact_path" "$_agent_verdict_body_path")
   _agent_rc_file="${_FANOUT_DIR}/${_agent_session_id}.rc"
 
   (
@@ -2032,6 +2072,12 @@ for _agent in "${REVIEW_AGENTS_LIST[@]}"; do
     # addition to the prompt. Scope is THIS subshell only — never leaks to a
     # sibling agent's subshell or the dev side.
     export VERDICT_ARTIFACT_PATH="$_agent_artifact_path"
+    # [INV-100] (#355): export THIS agent's rendered comment-fallback verdict
+    # body path so `post-verdict.sh` can enforce it read-side (D2) — closing
+    # the hole where a RESUMED agent session still holds an OLD prompt (pre-
+    # #355 or pre-#354) and would otherwise write a stale/bare path with a
+    # fresh mtime. Scope is THIS subshell only.
+    export VERDICT_BODY_FILE="$_agent_verdict_body_path"
     # INV-42 (#173): per-agent launcher resolution. If the operator set an
     # AGENT_REVIEW_LAUNCHER_<AGENT> key (suffix = uppercased name with every
     # non-alphanumeric char → `_`, same transform as the model/extra-args
@@ -3077,6 +3123,31 @@ for _i in "${!AGENT_ARTIFACT_PATHS[@]}"; do
     rm -rf "$_art_run_dir" 2>/dev/null || true
   fi
 done
+
+# [INV-100] (#355): clean up each agent's per-lane verdict-body scratch dir
+# (`/tmp/review-${PROJECT_ID}-${agent}-${ISSUE_NUMBER}-XXXXXX`) — every agent's
+# verdict has already been resolved (artifact or comment) by this point, so
+# nothing reads the rendered body file past this point. Best-effort; only
+# removes a dir matching the mktemp naming convention (defensive: never rm a
+# misresolved root, e.g. the bare "/tmp" fallback used when mktemp itself fails).
+for _i in "${!AGENT_VERDICT_LANE_DIRS[@]}"; do
+  _lane_dir="${AGENT_VERDICT_LANE_DIRS[$_i]:-}"
+  if [[ -n "$_lane_dir" && "$_lane_dir" == /tmp/review-*-*-*-?????? && -d "$_lane_dir" ]]; then
+    rm -rf "$_lane_dir" 2>/dev/null || true
+  fi
+done
+
+# [INV-100] (#355 review finding): the E2E command-mode AC-coverage sidecar is
+# now RUN_ID-keyed (D4) rather than truncated-in-place per PR, so a fresh file
+# is minted every wrapper run with nothing removing the PREVIOUS run's file —
+# an unbounded /tmp accumulation the pre-#355 PR-number-only path never had
+# (it truncated-in-place, self-bounding at one file per PR). Every review
+# agent's prompt has already read it (via _revalidate_ac_coverage_file, called
+# from build_review_prompt before the fan-out `wait` above), so it is safe to
+# remove now. Best-effort; a no-op when E2E_MODE != command (var unset/empty).
+if [[ -n "${E2E_AC_COVERAGE_FILE:-}" ]]; then
+  rm -f "$E2E_AC_COVERAGE_FILE" 2>/dev/null || true
+fi
 
 case "$AGGREGATE" in
   pass)

@@ -1619,7 +1619,7 @@ Four sub-rules:
 
 _Triage (issue #236): [machine-checked: tests/unit/test-autonomous-review-structured-ac.sh]_
 
-**Rule**: a command-mode E2E evidence parser MAY emit an **optional** structured AC-coverage artifact — a flat JSON object `{ "<criterion-id-or-text>": "pass" | "fail", ... }` — inside an `ac-coverage:begin … ac-coverage:end` HTML-comment fence embedded in its evidence stdout. The wrapper's command-mode E2E lane ([INV-46](#inv-46-e2e-runs-once-in-a-dedicated-lane-before-the-review-fan-out--gated-not-per-agent)) extracts + validates it (`jq`) and writes the result to the per-round sidecar `E2E_AC_COVERAGE_FILE` (`/tmp/e2e-ac-coverage-${PR_NUMBER}.json`). When that sidecar is non-empty AND **re-validates** at prompt-read time, each review agent's prompt PREFERS the structured map to verify acceptance-criteria coverage **deterministically** instead of LLM-parsing the free-form markdown table. The artifact is a **review double-check aid only** — it does NOT change the E2E hard gate.
+**Rule**: a command-mode E2E evidence parser MAY emit an **optional** structured AC-coverage artifact — a flat JSON object `{ "<criterion-id-or-text>": "pass" | "fail", ... }` — inside an `ac-coverage:begin … ac-coverage:end` HTML-comment fence embedded in its evidence stdout. The wrapper's command-mode E2E lane ([INV-46](#inv-46-e2e-runs-once-in-a-dedicated-lane-before-the-review-fan-out--gated-not-per-agent)) extracts + validates it (`jq`) and writes the result to the per-round sidecar `E2E_AC_COVERAGE_FILE` (`/tmp/e2e-ac-coverage-${PROJECT_ID}-${PR_NUMBER}-${RUN_ID}.json` — re-keyed by [INV-100](#inv-100-review-lane-scratch-paths-are-keyed-by-project_id-agent-prissue-via-wrapper-created-lane-dirs-agents-receive-concrete-literal-paths-post-verdictsh-enforces-the-rendered-path-when-verdict_body_file-is-set) #355; was PR-number-only). When that sidecar is non-empty AND **re-validates** at prompt-read time, each review agent's prompt PREFERS the structured map to verify acceptance-criteria coverage **deterministically** instead of LLM-parsing the free-form markdown table. The artifact is a **review double-check aid only** — it does NOT change the E2E hard gate.
 
 Five sub-rules:
 
@@ -2186,20 +2186,35 @@ The helper:
 - **fails loudly**: non-zero exit when the post fails (`gh` non-zero) or the proxy is
   absent, exit `2` on invalid args, and echoes the created comment URL on success.
 
-**The `<body-file>` path MUST be namespaced by agent + issue + session (#353)**:
-`build_review_prompt` renders it as `/tmp/verdict-${_agent_name}-${ISSUE_NUMBER}-${_agent_session_id}.md`,
-never the bare `/tmp/verdict-${_agent_name}.md` form. The bare form is unique only
-*within one fan-out* (its original collision-avoidance purpose) but is a GLOBAL `/tmp`
-path shared by every concurrent review on the host, across every project and issue.
-Two overlapping reviews on the same host raced on that shared file: the later writer's
-body could land between an earlier agent's write and its `post-verdict.sh` read,
-posting the later review's findings under the earlier issue's own valid
-`Review Session:` trailer — passing every INV-20/INV-40 attribution check (observed
-twice against #342). `post-verdict.sh` itself only reads the caller-supplied path
-once and cannot detect the race; the fix is caller-side namespacing, mirroring the
-per-run uniqueness [INV-78](#inv-78-review-verdicts-resolve-from-a-typed-artifact-file-first-comment-scraping-is-an-explicitly-logged-fallback-a-malformed-artifact-is-loud-never-a-silent-absent)'s
-typed-artifact path already had. The two wrapper-owned body files (codex-stdout-fallback,
-aggregate-comment) were never affected — both already use `mktemp` with a random suffix.
+**The `<body-file>` path is a wrapper-provisioned per-lane scratch dir, enforced read-side ([INV-100](#inv-100-review-lane-scratch-paths-are-keyed-by-project_id-agent-prissue-via-wrapper-created-lane-dirs-agents-receive-concrete-literal-paths-post-verdictsh-enforces-the-rendered-path-when-verdict_body_file-is-set), #355; supersedes the #353 agent+issue+session-namespaced literal)**:
+the fan-out loop mints `LANE_DIR=$(mktemp -d "/tmp/review-${PROJECT_ID}-${agent}-${ISSUE_NUMBER}-XXXXXX")`
+per agent and `build_review_prompt` renders the literal `${LANE_DIR}/verdict.md` into
+the prompt — no `${_agent_session_id}` token in the path at all. The #353/#354 fix
+(`/tmp/verdict-${_agent_name}-${ISSUE_NUMBER}-${_agent_session_id}.md`) closed the
+GLOBAL-across-projects collision (observed twice against #342) but left two residual
+holes a host audit surfaced: (a) codex/opencode mint their thread/session id AFTER
+launch, so `${_agent_session_id}` is EMPTY at prompt-RENDER time for those CLIs,
+collapsing the path back to `/tmp/verdict-codex-<issue>-.md` — cross-project-unsafe
+again; (b) a RESUMED agent session still holds an OLD prompt (pre-#353/#354) with the
+bare or session-id-keyed literal baked into its context, and no wrapper-side render
+fix touches an already-resumed session. The `mktemp -d` suffix removes the
+session-id dependency entirely (closing (a)), and `post-verdict.sh` now enforces the
+rendered path read-side via the exported `VERDICT_BODY_FILE` env var (closing (b) —
+see the D2/R2 rule below). The two wrapper-owned body files (codex-stdout-fallback,
+aggregate-comment) were never affected — both already use `mktemp` with a random
+suffix.
+
+**Read-side enforcement ([INV-100]).** When `VERDICT_BODY_FILE` is set in the agent's
+environment (the wrapper always sets it for a fan-out-launched agent), `post-verdict.sh`
+requires the positional `<body-file>` arg to realpath-equal it, rejects any other
+`/tmp/verdict*.md` literal outright (even before the realpath comparison — a stale
+literal from an old prompt is refused on sight), and rejects an empty/whitespace-only
+body (treated as `unavailable`, never a phantom verdict — mirrors
+[INV-73](#inv-73-a-codex-review-prompt-echo--startup-trace-stdout-is-malformed-never-a-blocking-p1-fail-retry-or-drop-not-a-phantom-veto)).
+Unset `VERDICT_BODY_FILE` (human/ad-hoc use, or any pre-#355 caller) leaves the helper's
+behavior byte-for-byte unchanged. This is what makes a resumed session's stale prompt
+fail LOUD — resolving that agent `unavailable` for the round — instead of silently
+posting a foreign or stale body under a valid trailer.
 
 **Why**: each CLI previously hand-rolled its own bare `gh issue comment` for the
 verdict. This is unreliable across CLIs: the `agy` review agent **exited 0 claiming it
@@ -2252,7 +2267,8 @@ fallback** — codex review finding on PR #203).
 verdict-post spots reference `scripts/post-verdict.sh`; bare `gh issue comment`
 forbidden for the verdict; first-line phrasing preserved; no per-CLI branch — rendered
 identically for codex and a non-codex agent). Test plan:
-`docs/test-cases/post-verdict-helper.md`.
+`docs/test-cases/post-verdict-helper.md`. See [INV-100](#inv-100-review-lane-scratch-paths-are-keyed-by-project_id-agent-prissue-via-wrapper-created-lane-dirs-agents-receive-concrete-literal-paths-post-verdictsh-enforces-the-rendered-path-when-verdict_body_file-is-set)
+for the lane-dir path mechanism + read-side enforcement tests (#355).
 
 **Post-install / upgrade**: this PR **adds** `scripts/post-verdict.sh`. After merge +
 `npx skills update -g`, re-run `install-project-hooks.sh` on every onboarded project
@@ -5048,6 +5064,165 @@ shim (degraded fixture → WARN + non-zero).
 - [INV-87](#inv-87-provider-dispatch-is-spec-defined--callers-route-every-issuecode-host-op-through-itp_chp_-never-a-raw-gh-in-the-caller-layer) — the verb-dispatch contract this verb extends (the whole-op + self-guarding-shim postures).
 - [INV-91](#inv-91-the-provider-neutral-caller-layer-routes-all-host-io-through-itp_chp_-verbs--a-new-raw-gh-outside-providers-is-a-ci-failing-cutover-regression-baseline-anchored) — the cutover guard whose baseline this migration shrinks (60→52 occurrences).
 - [`provider-spec.md`](provider-spec.md) §3.2 — the `chp_commit_file` verb row + the §7.2 mapping entry.
+
+## INV-100: review-lane scratch paths are keyed by (PROJECT_ID, agent, PR/issue) via wrapper-created lane dirs; agents receive concrete literal paths; `post-verdict.sh` enforces the rendered path when `VERDICT_BODY_FILE` is set
+
+_Triage (issue #236): [machine-checked: tests/unit/test-issue-353-verdict-body-namespace.sh, tests/unit/test-post-verdict.sh, tests/unit/test-issue-355-lane-scratch-namespace.sh]_
+
+**Rule**: every review-lane scratch path that is written by one agent and read
+by another actor (the wrapper, a sibling agent's retry, a future dispatcher
+tick) MUST be keyed by enough of `(PROJECT_ID, agent name, PR/issue number)`
+to be collision-free across every axis that can run concurrently on one host:
+cross-project (11+ onboarded projects share `/tmp`), cross-agent
+(`AGENT_REVIEW_AGENTS` fans out N CLIs against the SAME PR), and cross-retry
+(a crashed lane's leftover state must not wedge the next dispatch). The
+PRIMARY mechanism is a wrapper-created `mktemp -d` **lane directory**, not a
+literal string built from request-time variables — a per-lane dir removes any
+dependency on a value (like a CLI-minted session id) that might not exist yet
+when the path is rendered. Four concrete instances, superseding #354's
+issue+session-namespaced literal for the verdict body and closing three more
+un-namespaced/#354-style-insufficient paths a host audit found:
+
+1. **Verdict comment-fallback body (D1).** The fan-out loop in
+   `autonomous-review.sh` mints
+   `LANE_DIR=$(mktemp -d "/tmp/review-${PROJECT_ID}-${agent}-${ISSUE_NUMBER}-XXXXXX")`
+   per agent and `build_review_prompt` renders the LITERAL `${LANE_DIR}/verdict.md`
+   into the prompt (no `$VAR` references — a sub-process without the env would
+   mis-resolve a template). Supersedes #354's
+   `/tmp/verdict-${_agent_name}-${ISSUE_NUMBER}-${_agent_session_id}.md`: that
+   form is EMPTY-session-unsafe for codex/opencode (they mint their thread/
+   session id AFTER launch, so `${_agent_session_id}` is empty at prompt-render
+   time, collapsing the path back to the cross-project-collidable
+   `/tmp/verdict-codex-<issue>-.md` shape) — see [INV-56](#inv-56-review-verdict-is-posted-via-the-deterministic-post-verdict-helper-not-the-agents-bare-gh)
+   for the full path history.
+2. **Rebase worktree dir (D3).** The Step 0 prompt block (and
+   `skills/autonomous-review/references/merge-conflict-resolution.md`) render
+   `/tmp/rebase-${PROJECT_ID}-${agent}-pr-${PR_NUMBER}` — was
+   `/tmp/rebase-pr-${PR_NUMBER}` (PR-number-only: a cross-project collision AND
+   a multi-agent fan-out collision, since `AGENT_REVIEW_AGENTS` runs N agents
+   against the SAME PR and each independently executes Step 0). An idempotent
+   pre-clean (`git worktree remove --force <dir> 2>/dev/null || rm -rf <dir>`
+   immediately before `git worktree add`) is prepended so a crashed prior
+   lane's leftover worktree can never wedge a retry.
+3. **E2E command-mode AC-coverage sidecar (D4).**
+   `E2E_AC_COVERAGE_FILE="/tmp/e2e-ac-coverage-${PROJECT_ID}-${PR_NUMBER}-${RUN_ID}.json"`
+   — was `/tmp/e2e-ac-coverage-${PR_NUMBER}.json` (PR-number-only: cross-project
+   collision; the JSON is also read by agents mid-round, so a same-PR retry on
+   a later dispatcher tick rewriting the bare-PR-number path could corrupt a
+   still-reading lane's read). Agents read the path via the exported
+   `E2E_AC_COVERAGE_FILE` var — never construct it — so the extra components
+   (`PROJECT_ID`, `RUN_ID`) cost nothing caller-side. See [INV-49](#inv-49-command-mode-e2e-may-feed-the-review-fan-out-a-structured-ac-coverage-artifact--optional-fail-safe)
+   for the sidecar's validation/lifecycle rules (unchanged by this re-keying).
+4. **E2E command-mode verify log.** `lib-review-e2e.sh::_run_command_e2e_lane`
+   writes to `/tmp/e2e-${PROJECT_ID}-${PR_NUMBER}.log` — was
+   `/tmp/e2e-${PR_NUMBER}.log` (PR-number-only: cross-project collision). Now
+   truncated at lane entry (not appended), so a retry starts clean rather than
+   concatenating onto a prior round's log tail.
+
+**Read-side enforcement — the class-level defense a wrapper-side render fix
+cannot provide alone.** A namespaced render (D1 above, or #354's) only changes
+prompts rendered AFTER the fix ships. A review agent session that was RESUMED
+— carrying an OLD prompt already in its context, from before #354 or before
+this fix — still holds the STALE literal path and will write there with a
+FRESH mtime on this run, indistinguishable from a genuine post by any
+render-time signal. Closing this requires enforcement at the one chokepoint
+every verdict post routes through regardless of which prompt generation wrote
+it: `post-verdict.sh` itself. The wrapper exports `VERDICT_BODY_FILE` into each
+fan-out agent's subshell environment (the same value rendered into its
+prompt). `post-verdict.sh`:
+- when `VERDICT_BODY_FILE` is set: requires the positional `<body-file>` arg
+  to realpath-equal it — a mismatch is a non-zero exit (`2`), operator-readable
+  error, and **nothing is posted**;
+- rejects any OTHER `/tmp/verdict*.md` literal OUTRIGHT, before the realpath
+  comparison, so a legacy bare or session-id-keyed form from a stale prompt is
+  refused on sight even if it happens to resolve to a live file;
+- rejects an EMPTY (0-byte or whitespace-only) body file — treated as
+  `unavailable` per [INV-73](#inv-73-a-codex-review-prompt-echo--startup-trace-stdout-is-malformed-never-a-blocking-p1-fail-retry-or-drop-not-a-phantom-veto)
+  semantics: a wrapper-pre-created-but-never-written file, or a file an agent
+  wrote nothing to, must never post as if it were a real verdict body;
+- when `VERDICT_BODY_FILE` is UNSET (human/ad-hoc use, or any pre-#355 caller):
+  none of the above runs — behavior is byte-for-byte the pre-#355 helper.
+
+**This is what makes the mixed rollout window (an old prompt in a resumed
+session + the new scripts already live) SAFE, with no feature flag needed**:
+the resumed session's stale-path post fails LOUD → the wrapper's poller finds
+no matching comment for that agent → it resolves `unavailable` for the round,
+same as never reviewing → the issue re-dispatches and the NEXT prompt render
+uses the current (lane-dir) path. No foreign or stale body is ever posted
+under a valid trailer during the transition.
+
+**mtime guard explicitly dropped.** An earlier design draft additionally
+compared the body file's mtime against launch time to catch a stale write.
+Panel consensus (7-model review, two rounds of findings) rejected it:
+bypassable via `touch`/copy, false-positive-prone (a legitimate slow write can
+have an old mtime relative to a generous launch-time baseline), and fully
+SUBSUMED by the path-equality check above — a body written to the CORRECT
+(current) `VERDICT_BODY_FILE` path is, by construction, from THIS run;
+mtime adds no additional guarantee once the path itself is enforced. Keeping
+it would have been security theater.
+
+**PROJECT_ID uniqueness.** `PROJECT_ID` is declared per-project in each
+project's `scripts/autonomous.conf` and is unique across the host **by
+onboarding convention** — the dispatcher's `dispatcher.conf` `PROJECTS+=(...)`
+block assigns one `PROJECT_ID` per onboarded project, and nothing onboards two
+projects under the same id. This invariant does not itself enforce
+uniqueness (that is a `dispatcher.conf` operator responsibility, same as
+today); it relies on the existing convention, exactly as [INV-78](#inv-78-review-verdicts-resolve-from-a-typed-artifact-file-first-comment-scraping-is-an-explicitly-logged-fallback-a-malformed-artifact-is-loud-never-a-silent-absent)'s
+typed-artifact channel already does.
+
+**Why**: #354 (merged) namespaced the verdict body by `agent-issue-session` —
+closing the observed `/tmp/verdict-<agent>.md` global-across-projects race for
+the verdict file ONLY, and only prospectively (new prompts, not resumed
+sessions holding old ones). A 7-model panel review of the class-level design
+surfaced why that alone is insufficient (the empty-session-at-render gap for
+codex/opencode, and the resumed-old-prompt gap no wrapper-side render fix can
+close), and a host audit of every OTHER review-lane scratch path found the
+same un-namespaced or insufficiently-namespaced shape in three more places
+(rebase dir, E2E AC-coverage sidecar, E2E verify log).
+
+**Producer**: `autonomous-review.sh` (the fan-out loop mints each lane dir +
+exports `VERDICT_BODY_FILE`; `build_review_prompt` renders the literal path +
+the rebase-dir Step 0 block; the E2E Phase-A block exports the re-keyed
+`E2E_AC_COVERAGE_FILE`), `lib-review-e2e.sh` (`_run_command_e2e_lane`'s
+re-keyed, truncate-on-open verify log), `post-verdict.sh` (the read-side
+enforcement), `skills/autonomous-review/references/merge-conflict-resolution.md`
+(the human-readable mirror of the rebase-dir Step 0 block).
+
+**Consumer**: the review agents (read `$VERDICT_BODY_FILE` / the rendered
+literal path from their prompt, never construct their own), the lane-cleanup
+reaper (removes each `LANE_DIR` after verdict resolution, mirroring the
+[INV-78](#inv-78-review-verdicts-resolve-from-a-typed-artifact-file-first-comment-scraping-is-an-explicitly-logged-fallback-a-malformed-artifact-is-loud-never-a-silent-absent)
+per-agent run-dir cleanup it runs alongside), the [INV-40](#inv-40-multi-agent-review-attribution-unanimous-aggregation-and-all-unavailable-fallback)
+verdict poller (unaffected — it still resolves verdicts from posted GitHub
+comments, not from the scratch path).
+
+**Status**: **ENFORCED** (closes #355; supersedes #354's path shape for the
+verdict body, whose regression test is UPDATED — not deleted — to assert the
+new lane-dir shape).
+
+**Test**: `tests/unit/test-issue-353-verdict-body-namespace.sh` — updated for
+the lane-dir path shape (asserts a `${LANE_DIR}/verdict.md` literal, no
+`$_agent_session_id` token in the path, and the empty-session-at-render case
+for a codex-shaped caller). `tests/unit/test-post-verdict.sh` — TC-PV-25..3x
+(D2: mismatched positional arg vs `VERDICT_BODY_FILE` → non-zero, nothing
+posted; a legacy `/tmp/verdict-codex.md` literal while the var is set →
+rejected outright; an empty body file → rejected as `unavailable`; the var
+unset → legacy TC-PV-01..24 behavior unchanged). New
+`tests/unit/test-issue-355-lane-scratch-namespace.sh` — the two-writer matrix
+(cross-project same issue number; same-project same-PR different agent
+fan-out; same-project same-PR different lane retry — each posts its own body
+verbatim), the rebase-dir idempotent pre-clean simulation, and the R6
+grep-pins (every legacy path form absent from `skills/`, `docs/designs/`
+history exempt).
+
+**Cross-references**:
+- [INV-56](#inv-56-review-verdict-is-posted-via-the-deterministic-post-verdict-helper-not-the-agents-bare-gh) — the deterministic verdict-post chokepoint this extends with read-side path enforcement; the #353/#354 path history is documented there.
+- [INV-78](#inv-78-review-verdicts-resolve-from-a-typed-artifact-file-first-comment-scraping-is-an-explicitly-logged-fallback-a-malformed-artifact-is-loud-never-a-silent-absent) — the typed-artifact channel whose per-run uniqueness this mirrors, and whose run-dir cleanup pattern the lane-dir reaper follows.
+- [INV-49](#inv-49-command-mode-e2e-may-feed-the-review-fan-out-a-structured-ac-coverage-artifact--optional-fail-safe) — the AC-coverage sidecar's validation/lifecycle contract, unaffected by this re-keying.
+- [INV-73](#inv-73-a-codex-review-prompt-echo--startup-trace-stdout-is-malformed-never-a-blocking-p1-fail-retry-or-drop-not-a-phantom-veto) — the "never a phantom verdict" semantics the empty-body rejection mirrors.
+- [`review-agent-flow.md` § Verdict posting (INV-56)](review-agent-flow.md#verdict-posting-inv-56) and its scratch-path table — runtime walkthrough.
+- [`skills/autonomous-review/references/merge-conflict-resolution.md`](../../skills/autonomous-review/references/merge-conflict-resolution.md) — the human-readable mirror of the rebase-dir Step 0 block.
+- [`skills/autonomous-review/references/e2e-command-mode.md`](../../skills/autonomous-review/references/e2e-command-mode.md) — the E2E sidecar/log path documentation.
 
 ## Adding a new invariant
 

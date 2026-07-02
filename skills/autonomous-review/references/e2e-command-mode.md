@@ -29,7 +29,7 @@ The wrapper expands `${PR_NUMBER}` literally at render time (not in shell). Alwa
 | Field | Required | Purpose |
 |---|---|---|
 | `E2E_MODE=command` | yes | Selects this branch in the wrapper. |
-| `E2E_COMMAND` | yes | The verify command. Stdout/stderr go to `/tmp/e2e-${PR_NUMBER}.log`. Exit code interpreted per Section "Exit-code semantics". |
+| `E2E_COMMAND` | yes | The verify command. Stdout/stderr go to `/tmp/e2e-${PROJECT_ID}-${PR_NUMBER}.log` ([INV-100](../../../docs/pipeline/invariants.md), #355 — keyed by project too, truncated at the start of each round). Exit code interpreted per Section "Exit-code semantics". |
 | `E2E_COMMAND_EVIDENCE_PARSER` | yes | Reads the log, emits a markdown evidence block to stdout (see "Evidence block contract"). |
 | `E2E_COMMAND_TIMEOUT_SECONDS` | no | Default 3600. Wrapper enforces via `timeout(1)`. Soft cap; for >60min E2E wait for the background-mode follow-up. |
 | `E2E_COMMAND_PRE_HOOKS` | no | Runs before the verify command (e.g. seed test data). Failure aborts E2E. |
@@ -99,7 +99,7 @@ ac-coverage:end -->
 
 **Fail-safe, not fail-open.** If the fence is absent, the JSON is unparseable, it isn't an object, or a value is outside `{pass, fail}`, the wrapper logs a warning and falls back to the free-form double-check (`E2E_AC_COVERAGE_FILE` is written empty). A malformed artifact **never** silently passes the gate and **never** crashes the lane. When `jq` is unavailable, the artifact is ignored (the structured check is an optimization, not a hard dependency).
 
-**Flow.** On a gate pass the lane writes the validated JSON (or empty) to the per-round sidecar `E2E_AC_COVERAGE_FILE` (`/tmp/e2e-ac-coverage-${PR_NUMBER}.json`). When that sidecar is non-empty, each review agent's prompt prefers the structured map: it verifies each `## Acceptance Criteria` item from the map and only falls back to the free-form comment for a criterion absent from the map. The artifact is a **review double-check aid only** — it does NOT change the E2E hard gate (`_classify_e2e_gate` stays the INV-46 dual-signal rc + evidence decision).
+**Flow.** On a gate pass the lane writes the validated JSON (or empty) to the per-round sidecar `E2E_AC_COVERAGE_FILE` (`/tmp/e2e-ac-coverage-${PROJECT_ID}-${PR_NUMBER}-${RUN_ID}.json` — [INV-100](../../../docs/pipeline/invariants.md), #355: run-scoped so a same-PR retry on a later dispatcher tick cannot rewrite a file another lane is still reading; agents read the path via the exported `E2E_AC_COVERAGE_FILE` var, never construct it). When that sidecar is non-empty, each review agent's prompt prefers the structured map: it verifies each `## Acceptance Criteria` item from the map and only falls back to the free-form comment for a criterion absent from the map. The artifact is a **review double-check aid only** — it does NOT change the E2E hard gate (`_classify_e2e_gate` stays the INV-46 dual-signal rc + evidence decision).
 
 Example evidence block that emits the artifact:
 

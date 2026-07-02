@@ -601,6 +601,120 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# [INV-100] (issue #355): D2 read-side enforcement. When VERDICT_BODY_FILE is
+# set in the caller's environment, post-verdict.sh must (a) require the
+# positional body-file arg to realpath-equal it, (b) reject any OTHER
+# /tmp/verdict*.md literal outright, (c) reject an empty/whitespace-only body,
+# and (d) leave behavior byte-for-byte unchanged when the var is unset.
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- TC-PV-25..31: D2 VERDICT_BODY_FILE read-side enforcement (INV-100, #355) ---"
+
+# TC-PV-25: VERDICT_BODY_FILE set + matching body-file arg → posts normally.
+SB=$(make_sandbox 0)
+printf 'All good' > "$SB/lane-verdict.md"
+OUT=$(VERDICT_BODY_FILE="$SB/lane-verdict.md" \
+  bash "$SB/post-verdict.sh" 202 pass "$SB/lane-verdict.md" agy "sid-XX25" 2>&1); RC=$?
+BODY=$(cat "$SB/gh-body.txt" 2>/dev/null || echo "")
+assert_eq "TC-PV-25a matching VERDICT_BODY_FILE exits 0" "0" "$RC"
+assert_contains "TC-PV-25b body posted normally" "All good" "$BODY"
+rm -rf "$SB"
+
+# TC-PV-26: VERDICT_BODY_FILE set + MISMATCHED body-file arg → exit 2, nothing posted.
+SB=$(make_sandbox 0)
+printf 'the real lane body' > "$SB/lane-verdict.md"
+printf 'a confused/foreign body' > "$SB/other.md"
+OUT=$(VERDICT_BODY_FILE="$SB/lane-verdict.md" \
+  bash "$SB/post-verdict.sh" 202 pass "$SB/other.md" agy "sid-XX26" 2>&1); RC=$?
+assert_eq "TC-PV-26a mismatched body-file arg → exit 2" "2" "$RC"
+if [[ ! -f "$SB/gh-argv.txt" ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-PV-26b no gh call made on a mismatched body-file path"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-PV-26b gh was called despite a mismatched body-file path"
+  FAIL=$((FAIL + 1))
+fi
+assert_contains "TC-PV-26c error names INV-100" "INV-100" "$OUT"
+rm -rf "$SB"
+
+# TC-PV-27: VERDICT_BODY_FILE set + legacy /tmp/verdict-<agent>.md literal arg
+# (a stale pre-#354/#355 prompt) → rejected OUTRIGHT, even though the legacy
+# file itself exists and is readable.
+SB=$(make_sandbox 0)
+mkdir -p "$SB/tmp"
+LEGACY="$SB/tmp/verdict-codex.md"
+printf 'stale prompt body' > "$LEGACY"
+LANE="$SB/lane-verdict.md"
+printf 'lane body' > "$LANE"
+OUT=$(VERDICT_BODY_FILE="$LANE" \
+  bash "$SB/post-verdict.sh" 202 pass "/tmp/verdict-codex.md" codex "sid-XX27" 2>&1); RC=$?
+assert_eq "TC-PV-27a legacy /tmp/verdict-codex.md literal → exit 2" "2" "$RC"
+if [[ ! -f "$SB/gh-argv.txt" ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-PV-27b no gh call made on a legacy verdict*.md literal"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-PV-27b gh was called despite a legacy verdict*.md literal"
+  FAIL=$((FAIL + 1))
+fi
+rm -rf "$SB"
+
+# TC-PV-28: VERDICT_BODY_FILE set + EMPTY body file → rejected (unavailable),
+# nothing posted.
+SB=$(make_sandbox 0)
+: > "$SB/lane-verdict.md"
+OUT=$(VERDICT_BODY_FILE="$SB/lane-verdict.md" \
+  bash "$SB/post-verdict.sh" 202 pass "$SB/lane-verdict.md" agy "sid-XX28" 2>&1); RC=$?
+assert_eq "TC-PV-28a empty body file → exit 2" "2" "$RC"
+if [[ ! -f "$SB/gh-argv.txt" ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-PV-28b no gh call made on an empty body file"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-PV-28b gh was called despite an empty body file"
+  FAIL=$((FAIL + 1))
+fi
+rm -rf "$SB"
+
+# TC-PV-28c: VERDICT_BODY_FILE set + WHITESPACE-ONLY body file → also rejected.
+SB=$(make_sandbox 0)
+printf '   \n\t\n  ' > "$SB/lane-verdict.md"
+VERDICT_BODY_FILE="$SB/lane-verdict.md" \
+  bash "$SB/post-verdict.sh" 202 pass "$SB/lane-verdict.md" agy "sid-XX28c" \
+  >/dev/null 2>&1; RC=$?
+assert_eq "TC-PV-28c whitespace-only body file → exit 2" "2" "$RC"
+rm -rf "$SB"
+
+# TC-PV-29: VERDICT_BODY_FILE UNSET → legacy behavior fully unchanged (an
+# arbitrary body-file path, and even an empty body, both post normally — no
+# new restriction applies).
+SB=$(make_sandbox 0)
+: > "$SB/anything.md"
+OUT=$(bash "$SB/post-verdict.sh" 202 pass "$SB/anything.md" agy "sid-XX29" 2>&1); RC=$?
+assert_eq "TC-PV-29a unset VERDICT_BODY_FILE + empty body → still exits 0 (legacy unchanged)" "0" "$RC"
+BODY=$(cat "$SB/gh-body.txt" 2>/dev/null || echo "")
+assert_contains "TC-PV-29b unset-var legacy empty-PASS default body posted" "Review PASSED" "$BODY"
+rm -rf "$SB"
+
+# TC-PV-30: VERDICT_BODY_FILE set + stdin ('-') body-file arg → rejected
+# (VERDICT_BODY_FILE names a concrete file; stdin cannot comply).
+SB=$(make_sandbox 0)
+OUT=$(printf 'streamed' | VERDICT_BODY_FILE="$SB/lane-verdict.md" \
+  bash "$SB/post-verdict.sh" 202 pass - agy "sid-XX30" 2>&1); RC=$?
+assert_eq "TC-PV-30 VERDICT_BODY_FILE set + stdin body-file arg → exit 2" "2" "$RC"
+rm -rf "$SB"
+
+# TC-PV-31: VERDICT_BODY_FILE set to a RELATIVE-equivalent path (symlink /
+# relative components) that realpath-resolves to the SAME file → accepted (the
+# comparison is realpath-based, not a raw string compare).
+SB=$(make_sandbox 0)
+mkdir -p "$SB/sub"
+printf 'real body' > "$SB/sub/verdict.md"
+ln -s "$SB/sub" "$SB/sub-link"
+OUT=$(VERDICT_BODY_FILE="$SB/sub/verdict.md" \
+  bash "$SB/post-verdict.sh" 202 pass "$SB/sub-link/verdict.md" agy "sid-XX31" 2>&1); RC=$?
+assert_eq "TC-PV-31 realpath-equivalent (symlinked) path accepted" "0" "$RC"
+rm -rf "$SB"
+
+# ---------------------------------------------------------------------------
 echo ""
 echo "=== Summary ==="
 echo "  PASS: $PASS"
