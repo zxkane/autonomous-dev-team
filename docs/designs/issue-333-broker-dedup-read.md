@@ -139,3 +139,16 @@ Minimal. Single-line transport swap on a non-gate, best-effort dedup count, in a
 HOT-adjacent lib (sourced by the live review wrapper) — dev in a worktree only, NO new
 entry-point script. Engine-agnostic (literal `contains`/`>=`). Covered by golden +
 parity + source-shape + broker-behavior + full-suite tests.
+
+## Pipeline docs (same PR — Pipeline Documentation Authority)
+
+- `docs/pipeline/review-agent-flow.md` — the browser-mode E2E lane bullet's report-broker
+  paragraph gets an Issue-Tracker Provider seam note for the `_existing` dedup read
+  (mirrors the #322 `review-agent-flow.md` precedent for the sibling verdict-read
+  migration): the `itp_list_comments`/[INV-90] routing, the literal `contains`/`>=`
+  select (no engine divergence), the retained `| tail -n1`, and the INV-46
+  GET-comment-id/GET-body carve-out staying out of scope.
+- `docs/pipeline/invariants.md` § INV-90 — migration-log addendum naming
+  `_post_brokered_e2e_report` (#333) alongside the sibling auto-merge-marker read
+  (#332/#334) as the #296 second-tier `gh api .../comments --paginate` count/marker
+  reads that now route through `itp_list_comments`.
