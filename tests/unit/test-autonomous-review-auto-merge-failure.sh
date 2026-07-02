@@ -131,7 +131,7 @@ echo "=== TC-AMF-003: auto-merge failure branch posts comment on PR ==="
 # The merge error must be surfaced as a comment on the PR (not the issue),
 # so the dev re-dispatch has the failure context in PR view where rebase
 # work happens. Marker prefix is "Auto-merge failed:". The PR-comment write
-# routes through the chp_pr_comment verb (#329, [INV-95]) — the raw
+# routes through the chp_pr_comment verb (#329, [INV-102]) — the raw
 # `gh pr comment` was migrated behind the CHP seam; the verb still posts on
 # `$PR_NUMBER`, so the on-the-PR intent is unchanged.
 assert_grep "auto-merge failure path posts via chp_pr_comment (PR-comment verb, #329)" \

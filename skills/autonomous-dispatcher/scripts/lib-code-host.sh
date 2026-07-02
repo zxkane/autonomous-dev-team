@@ -109,7 +109,7 @@ chp_close_keyword()     { chp_${CODE_HOST}_close_keyword "$@"; }
 chp_reply_review_comment() { chp_${CODE_HOST}_reply_review_comment "$@"; }
 
 # General read+write primitives (`chp_pr_view`/`chp_pr_list` #282 review round 8;
-# `chp_pr_comment` #329, [INV-101]). These are NOT among the 11 named PR-lifecycle verbs above
+# `chp_pr_comment` #329, [INV-102]). These are NOT among the 11 named PR-lifecycle verbs above
 # — they are the provider-neutral `gh pr view` / `gh pr list` read leaves AND the
 # `gh pr comment` write leaf that the caller layer's INCIDENTAL PR reads/writes
 # route through so the caller layer carries ZERO raw `gh pr` (the [INV-87] final-AC

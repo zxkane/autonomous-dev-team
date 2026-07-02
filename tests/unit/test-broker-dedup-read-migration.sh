@@ -178,7 +178,7 @@ echo "=== TC-333-FN-01..07: INV-79 broker dedup behavior unchanged (AC4, end-to-
 # dedup-read verb + log + the POST verb, and report whether the brokered POST
 # fired and whether the dedup-read verb was invoked. Stub itp_list_comments AND
 # chp_pr_comment DIRECTLY (not gh) — the broker posts via `chp_pr_comment` (#329,
-# [INV-101]), not a raw `gh pr comment`, so a `gh` stub alone never sees the call
+# [INV-102]), not a raw `gh pr comment`, so a `gh` stub alone never sees the call
 # in this isolated `eval "$BROKER_BODY"` harness (no lib-code-host.sh self-source
 # runs here, so the real `chp_pr_comment` shim is never defined either — #329
 # review [P1]). The lib self-source guard keys on `declare -F itp_edit_comment`,
@@ -218,7 +218,7 @@ broker_harness() {
     else
       itp_list_comments() { : > "$VERB_FLAG"; cat "$FIXTURE_FILE"; }
     fi
-    # chp_pr_comment stub: the broker's POST verb (#329, [INV-101]) — flag ONLY on
+    # chp_pr_comment stub: the broker's POST verb (#329, [INV-102]) — flag ONLY on
     # the exact expected argv ("$PR_NUMBER" --body "$body"), mirroring the old
     # `gh` stub's `$1=="pr" && $2=="comment"` argv check, so a future argv
     # mis-order/drop in the broker still fails this test instead of passing
