@@ -589,6 +589,16 @@ acquire_pid_guard() {
   fi
 
   local lock_file="${pid_file}.lock"
+  # CWE-59 (Link Following), same defense as the pid_file check above
+  # (INV-02): reject a symlinked lock sidecar BEFORE the `exec {fd}>` below,
+  # which otherwise follows the symlink and truncates whatever it points at
+  # — a same-user attacker could pre-plant `${pid_file}.lock` as a symlink
+  # to an arbitrary file and have the next wrapper invocation clobber it
+  # before flock ever runs (codex review finding on PR #365). Checked on
+  # every call (not just when the file is missing) so a symlink planted
+  # between two invocations is still caught.
+  [[ -L "$lock_file" ]] && { echo "Error: lock file is a symlink — possible attack" >&2; exit 1; }
+
   local wait_s="${ACQUIRE_PID_GUARD_LOCK_WAIT_SECONDS:-2}"
   local _lock_fd
 

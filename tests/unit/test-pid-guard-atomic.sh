@@ -362,6 +362,41 @@ assert_eq "symlink PID file rejected with exit 1" "1" "$SYMLINK_RC"
 rm -f "$SYMLINK_PID_FILE"
 
 # ============================================================================
+# TC-ATOMIC-004b: symlinked LOCK sidecar is rejected before the flock open
+# (codex review finding on PR #365, CWE-59) — a same-user attacker can
+# pre-plant `${pid_file}.lock` as a symlink to an arbitrary victim file; the
+# `exec {fd}>"$lock_file"` open follows a symlink and truncates whatever it
+# points at, BEFORE `flock` ever runs. Proves both the rejection (exit 1) AND
+# that the victim file's content is left untouched.
+# ============================================================================
+echo
+echo "=== TC-ATOMIC-004b: symlinked lock sidecar is rejected — victim file untouched ==="
+echo
+
+ATTACK_PID_FILE="$TMPDIR/attack.pid"
+ATTACK_LOCK_FILE="${ATTACK_PID_FILE}.lock"
+VICTIM_FILE="$TMPDIR/victim-file"
+rm -f "$ATTACK_PID_FILE" "$ATTACK_LOCK_FILE" "$VICTIM_FILE"
+echo "VICTIM-ORIGINAL-CONTENT" > "$VICTIM_FILE"
+ln -sf "$VICTIM_FILE" "$ATTACK_LOCK_FILE"
+
+( acquire_pid_guard "$ATTACK_PID_FILE" "test-symlink-lock" "99" 2>/dev/null )
+ATTACK_RC=$?
+assert_eq "symlinked lock sidecar rejected with exit 1" "1" "$ATTACK_RC"
+
+VICTIM_CONTENT=$(cat "$VICTIM_FILE" 2>/dev/null)
+assert_eq "victim file content is untouched (no truncation via the symlinked lock)" "VICTIM-ORIGINAL-CONTENT" "$VICTIM_CONTENT"
+
+if [[ -L "$ATTACK_LOCK_FILE" ]]; then
+  echo -e "  ${GREEN}PASS${NC}: attack symlink left in place (not silently removed/followed)"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: attack symlink unexpectedly gone"
+  FAIL=$((FAIL + 1))
+fi
+rm -f "$ATTACK_LOCK_FILE" "$VICTIM_FILE" "$ATTACK_PID_FILE"
+
+# ============================================================================
 # TC-ATOMIC-005: source-of-truth — no bare check-then-write left in the fn
 # ============================================================================
 echo
@@ -390,6 +425,20 @@ if grep -qE '_lock_dir_age_seconds|stale.*lock|reclaim.*lock' <<<"$(tr '[:upper:
 else
   echo -e "  ${GREEN}PASS${NC}: no separate stale-lock reclaim code path (flock's kernel auto-release makes one unnecessary)"
   PASS=$((PASS + 1))
+fi
+
+# Regression pin (codex review, PR #365, CWE-59): the lock-file symlink
+# check MUST appear in source before the `exec {fd}>` redirection that
+# opens it, else a pre-planted symlink is followed and its target truncated
+# before this check could ever fire.
+LOCK_SYMLINK_CHECK_LINE=$(grep -n '\[\[ -L "\$lock_file" \]\]' "$LIB_AGENT" | head -1 | cut -d: -f1)
+LOCK_EXEC_LINE=$(grep -n 'exec {_lock_fd}>"\$lock_file"' "$LIB_AGENT" | head -1 | cut -d: -f1)
+if [[ -n "$LOCK_SYMLINK_CHECK_LINE" && -n "$LOCK_EXEC_LINE" && "$LOCK_SYMLINK_CHECK_LINE" -lt "$LOCK_EXEC_LINE" ]]; then
+  echo -e "  ${GREEN}PASS${NC}: lock-file symlink check (line $LOCK_SYMLINK_CHECK_LINE) precedes the flock-open exec (line $LOCK_EXEC_LINE)"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: lock-file symlink check missing or does not precede the flock-open exec (check_line='$LOCK_SYMLINK_CHECK_LINE' exec_line='$LOCK_EXEC_LINE')"
+  FAIL=$((FAIL + 1))
 fi
 
 # ============================================================================

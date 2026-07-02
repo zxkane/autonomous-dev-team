@@ -5396,6 +5396,19 @@ path ([INV-01](#inv-01-pid-file-naming)) with the exact same content contract
 single line for this fix, and neither needs to know a lock file briefly
 existed alongside the PID file during acquisition.
 
+**Symlink defense on the lock sidecar (CWE-59).** `${pid_file}.lock` gets the
+same `-L` rejection [INV-02](#inv-02-pid-file-is-not-a-symlink) already gives
+`pid_file`, checked immediately before the `exec {fd}>"$lock_file"` that
+opens it. Without this, a same-user attacker could pre-plant the lock
+sidecar as a symlink to an arbitrary victim file; a plain `>` redirection
+follows a symlink and truncates whatever it points at, so the next wrapper
+invocation would silently clobber the victim BEFORE `flock` ever runs (a
+codex review finding on PR #365 — the check landed in the same PR, not a
+follow-up). The window between the `-L` check and the `exec` is the same
+belt-and-suspenders posture [INV-02] already accepts for `pid_file` itself
+(the per-user PID dir is mode 0700, so this defends only against the
+resource's own user, same threat model).
+
 **Why**: the pre-#360 check-then-write read `pid_file`, ran `kill -0` on any
 existing PID, and only THEN wrote `$$` — three separate operations with two
 gaps a second caller could land in. Two wrappers dispatched 1-2s apart for the
@@ -5441,14 +5454,18 @@ avoids), TC-ATOMIC-002 (winner's PID file is readable by
 a `pid_alive`-style read: same path, numeric content), TC-ATOMIC-003 (a dead
 PID in the file still allows a fresh acquire to win — pre-existing behavior
 preserved), TC-ATOMIC-004 (symlink PID file still rejected —
-[INV-02](#inv-02-pid-file-is-not-a-symlink) unaffected), TC-ATOMIC-005
-(source-of-truth: the function body uses an atomic primitive and carries no
-separate stale-lock reclaim code path). Existing `tests/unit/test-pid-guard.sh` and
-`tests/unit/test-pid-guard-pgid.sh` stay green unmodified (R1 back-compat).
+[INV-02](#inv-02-pid-file-is-not-a-symlink) unaffected), TC-ATOMIC-004b
+(a symlinked LOCK sidecar is rejected with exit 1 AND the would-be victim
+file it points at is verified untouched — the codex-review CWE-59 finding),
+TC-ATOMIC-005 (source-of-truth: the function body uses an atomic primitive,
+carries no separate stale-lock reclaim code path, and the lock-file symlink
+check's source line precedes the flock-open `exec`'s source line). Existing
+`tests/unit/test-pid-guard.sh` and `tests/unit/test-pid-guard-pgid.sh` stay
+green unmodified (R1 back-compat).
 
 **Cross-references**:
 - [INV-01](#inv-01-pid-file-naming) — the PID file path/naming this acquire path leaves unchanged.
-- [INV-02](#inv-02-pid-file-is-not-a-symlink) — the symlink defense, unaffected by (and checked before) the lock acquire.
+- [INV-02](#inv-02-pid-file-is-not-a-symlink) — the symlink defense on `pid_file`, extended by this invariant to the `${pid_file}.lock` sidecar (checked before the flock-open `exec`).
 - [INV-23](#inv-23-pid_file-points-at-a-process-whose-death-reaps-the-entire-agent-subtree) — the PID-content contract (session-leader PID) this fix's write path preserves byte-for-byte.
 - [INV-30](#inv-30-pid_alive-is-authoritative-under-all-execution-backends) — the read-side consumer whose contract is the R1 hard constraint.
 - [INV-104](#inv-104-the-inv-43-fan-out-reap-also-sweeps-recorded-descendants-that-re-parented-out-of-the-agents-process-group) — the sibling half of the #360/302a fix (the reap hardening) closing the same incident's second mechanism.
