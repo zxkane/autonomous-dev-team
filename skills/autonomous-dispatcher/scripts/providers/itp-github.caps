@@ -1,7 +1,7 @@
 # providers/itp-github.caps — GitHub Issue-Tracker Provider capability manifest.
 #
 # Declarative key=value, PARSED (never sourced) by the itp_caps reader in
-# lib-issue-provider.sh ([INV-88], spec §4 / §10 Q1). Describes EXACTLY today's
+# lib-issue-provider.sh ([INV-88], spec §4). Describes EXACTLY today's
 # GitHub behavior — the no-behavior-change anchor. GitHub is honestly declared,
 # NOT all-ones: server_side_state_negation=0 is GitHub's real current behavior
 # (label negation done client-side via jq, not server-side). Spec §4 / §4.1.

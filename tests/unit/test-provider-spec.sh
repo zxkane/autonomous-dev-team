@@ -31,6 +31,9 @@ PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 SPEC="$PROJECT_ROOT/docs/pipeline/provider-spec.md"
 INVARIANTS="$PROJECT_ROOT/docs/pipeline/invariants.md"
 STATE_MACHINE="$PROJECT_ROOT/docs/pipeline/state-machine.md"
+SCRIPTS_DIR="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts"
+ITP_LIB="$SCRIPTS_DIR/lib-issue-provider.sh"
+CHP_LIB="$SCRIPTS_DIR/lib-code-host.sh"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -51,18 +54,51 @@ assert_grep_re() {
   if grep -qE "$pattern" "$file" 2>/dev/null; then ok "$desc"; else bad "$desc (missing /$pattern/)"; fi
 }
 
-# The 14 ITP verbs (spec §3.1) and 12 CHP verbs (spec §3.2), verbatim.
-# (itp_label_event_ts is the #323 second-tier observe-only TTHW verb.)
-ITP_VERBS=(
-  itp_list_by_state itp_count_by_state itp_list_forbidden_combos itp_transition_state
-  itp_read_task itp_post_comment itp_edit_comment itp_list_comments itp_resolve_dep
-  itp_mark_checkbox itp_provision_states itp_caps itp_begin_tick itp_label_event_ts
-)
-CHP_VERBS=(
-  chp_find_pr_for_issue chp_ci_status chp_mergeable chp_create_pr chp_approve
-  chp_request_changes chp_merge chp_review_threads chp_resolve_thread chp_trigger_bot
-  chp_close_keyword chp_caps
-)
+# spec_verbs <section-start-re> <section-end-re> <prefix> <spec-file> — DERIVE the
+# verb set from the spec's §3.1/§3.2 tables rather than a hand-maintained literal
+# array (#367 R2: a hardcoded list silently stops covering the shipped surface the
+# next time a verb is added). Walks each `| `<prefix>_<verb>` ...` cell between the
+# two section headings and extracts every `<prefix>_[a-zA-Z_]+` token, sorted+uniqued
+# (one verb row, chp_review_threads/chp_resolve_thread, names two verbs in one cell).
+spec_verbs() {
+  local start_re="$1" end_re="$2" prefix="$3" file="$4"
+  awk -v start="$start_re" -v end="$end_re" -v pfx="$prefix" '
+    $0 ~ start { f = 1; next }
+    $0 ~ end   { f = 0 }
+    f && /^\|/ {
+      n = split($0, parts, "|")
+      col = parts[2]
+      pat = "`" pfx "_[a-zA-Z_]+"
+      while (match(col, pat)) {
+        print substr(col, RSTART + 1, RLENGTH - 1)
+        col = substr(col, RSTART + RLENGTH)
+      }
+    }
+  ' "$file" | sort -u
+}
+
+# shipped_shims <lib-file> <prefix> — DERIVE the verb set from the ACTUAL shipped
+# dispatch shims (`^<prefix>_[a-zA-Z_]+\(\)` at column 0), the other half of the
+# derive-from-spec cross-check (#367 R2): a new shim minted WITHOUT a matching spec
+# row must fail this file's TC-PROVIDER-SPEC-016/017 comparison, and a new spec row
+# minted WITHOUT a shipped shim must fail it too. `chp_has_leaf` is EXCLUDED — it is
+# documented in provider-spec.md §3.2 as a caller-side guard helper, not a verb (see
+# "What this section owns").
+shipped_shims() {
+  local file="$1" prefix="$2"
+  grep -oE "^${prefix}_[a-zA-Z_]+\\(\\)" "$file" 2>/dev/null \
+    | sed -E 's/\(\)$//' | grep -v "^${prefix}_has_leaf$" | sort -u
+}
+
+# The ITP verbs (spec §3.1) and CHP verbs (spec §3.2), DERIVED from the spec's own
+# tables — not a hardcoded count. (itp_label_event_ts is the #323 second-tier
+# observe-only TTHW verb; chp_review_threads/chp_resolve_thread share one table row.)
+mapfile -t ITP_VERBS < <(spec_verbs '^### 3\.1' '^### 3\.2' itp "$SPEC")
+mapfile -t CHP_VERBS < <(spec_verbs '^### 3\.2' '^### 3\.3' chp "$SPEC")
+# The ACTUAL shipped shims, DERIVED from the real lib-*.sh dispatch files — the
+# ground truth TC-PROVIDER-SPEC-016/017 reconcile the spec-derived sets against.
+mapfile -t ITP_SHIMS < <(shipped_shims "$ITP_LIB" itp)
+mapfile -t CHP_SHIMS < <(shipped_shims "$CHP_LIB" chp)
 # The 9 ITP + 4 CHP capability keys (spec §4).
 ITP_CAPS=(
   server_side_state_and server_side_state_negation distinct_bot_author
@@ -91,11 +127,53 @@ echo "=== TC-PROVIDER-SPEC-003: both config keys with defaults ==="
 assert_grep "documents ISSUE_PROVIDER" "ISSUE_PROVIDER" "$SPEC"
 assert_grep "documents CODE_HOST" "CODE_HOST" "$SPEC"
 
-echo "=== TC-PROVIDER-SPEC-004: all 14 ITP verbs verbatim ==="
+echo "=== TC-PROVIDER-SPEC-004: all spec-derived ITP verbs verbatim (${#ITP_VERBS[@]} found in §3.1) ==="
 for v in "${ITP_VERBS[@]}"; do assert_grep "ITP verb $v" "$v" "$SPEC"; done
 
-echo "=== TC-PROVIDER-SPEC-005: all 12 CHP verbs verbatim ==="
+echo "=== TC-PROVIDER-SPEC-005: all spec-derived CHP verbs verbatim (${#CHP_VERBS[@]} found in §3.2) ==="
 for v in "${CHP_VERBS[@]}"; do assert_grep "CHP verb $v" "$v" "$SPEC"; done
+
+echo "=== TC-PROVIDER-SPEC-016: spec §3.1 ITP verb set == shipped lib-issue-provider.sh shim set (derive-from-spec, R2) ==="
+# The core reconciliation this issue (#367) exists for: a shim minted WITHOUT a
+# spec row, or a spec row minted WITHOUT a shipped shim, must turn this RED — not
+# a hand-maintained count that silently stops covering the shipped surface.
+itp_spec_joined=$(printf '%s\n' "${ITP_VERBS[@]}")
+itp_shim_joined=$(printf '%s\n' "${ITP_SHIMS[@]}")
+if [[ "$itp_spec_joined" == "$itp_shim_joined" ]]; then
+  ok "spec §3.1 ITP verb set (${#ITP_VERBS[@]}) == shipped lib-issue-provider.sh shims (${#ITP_SHIMS[@]})"
+else
+  bad "spec §3.1 ITP verb set != shipped shims"
+  comm -3 <(printf '%s\n' "${ITP_VERBS[@]}") <(printf '%s\n' "${ITP_SHIMS[@]}") | sed 's/^/      diff: /'
+fi
+
+echo "=== TC-PROVIDER-SPEC-017: spec §3.2 CHP verb set == shipped lib-code-host.sh shim set (derive-from-spec, R2) ==="
+chp_spec_joined=$(printf '%s\n' "${CHP_VERBS[@]}")
+chp_shim_joined=$(printf '%s\n' "${CHP_SHIMS[@]}")
+if [[ "$chp_spec_joined" == "$chp_shim_joined" ]]; then
+  ok "spec §3.2 CHP verb set (${#CHP_VERBS[@]}) == shipped lib-code-host.sh shims (${#CHP_SHIMS[@]})"
+else
+  bad "spec §3.2 CHP verb set != shipped shims"
+  comm -3 <(printf '%s\n' "${CHP_VERBS[@]}") <(printf '%s\n' "${CHP_SHIMS[@]}") | sed 's/^/      diff: /'
+fi
+
+echo "=== TC-PROVIDER-SPEC-018: NEGATIVE proof — a shim added to a SCRATCH COPY without a spec row turns TC-017 RED ==="
+# Mirrors the guard's scratch-copy pattern (test-provider-cutover.sh::fresh_scratch /
+# test-spec-drift.sh) — never mutates the committed tree. Appends a fake shim to a
+# scratch copy of lib-code-host.sh, then re-runs the SAME derive-from-spec
+# reconciliation against the scratch copy + the real (unmodified) spec, asserting it
+# fails naming the unlisted shim — the automated demonstration AC1 requires.
+NEG_WORK=$(mktemp -d)
+scratch_chp_lib="$NEG_WORK/lib-code-host.sh"
+cp "$CHP_LIB" "$scratch_chp_lib"
+printf '\nchp_frobnicate_unlisted() { chp_${CODE_HOST}_frobnicate_unlisted "$@"; }\n' >> "$scratch_chp_lib"
+mapfile -t chp_scratch_shims < <(shipped_shims "$scratch_chp_lib" chp)
+scratch_joined=$(printf '%s\n' "${chp_scratch_shims[@]}")
+if [[ "$scratch_joined" != "$chp_spec_joined" ]] && grep -qx "chp_frobnicate_unlisted" <<<"$scratch_joined"; then
+  ok "scratch shim WITHOUT a spec row (chp_frobnicate_unlisted) makes the derive-from-spec reconciliation RED — the negative proof AC1 requires"
+else
+  bad "scratch shim injection did not turn the reconciliation red — the derive-from-spec assertion is not catching an unlisted shim"
+fi
+rm -rf "$NEG_WORK"
 
 echo "=== TC-PROVIDER-SPEC-006: all 13 capability keys ==="
 for c in "${ITP_CAPS[@]}"; do assert_grep "ITP cap $c" "$c" "$SPEC"; done

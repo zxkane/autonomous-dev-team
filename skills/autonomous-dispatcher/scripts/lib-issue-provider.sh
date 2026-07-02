@@ -58,7 +58,7 @@ if [[ -f "${_LIB_ITP_PROVIDERS_DIR}/itp-${ISSUE_PROVIDER}.sh" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# .caps reader — parsed key=value, NEVER sourced ([INV-88], spec §4 / §10 Q1).
+# .caps reader — parsed key=value, NEVER sourced ([INV-88], spec §4).
 # A declarative manifest is readable under `set -euo pipefail` without the
 # unguarded-source crash mode this codebase suffers from. Shared by both seams;
 # guarded so sourcing both libs does not redefine it.

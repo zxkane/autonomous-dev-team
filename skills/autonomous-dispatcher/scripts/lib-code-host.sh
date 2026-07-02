@@ -9,18 +9,30 @@
 # stay in the provider-neutral caller layer — only the leaf I/O moves behind a
 # verb ([INV-87]).
 #
-# CONTRACT (provider-spec.md §3.2, the authoritative spec):
+# CONTRACT (provider-spec.md §3.2, the authoritative spec — the §3.2 table is
+# normative; this header's verb list is a convenience index, not a second
+# source of truth):
 #   CODE_HOST ∈ { github (default), gitlab }  (spec §2)
-#   12 CHP verbs, each forwarding to chp_${CODE_HOST}_<verb> "$@":
+#   19 CHP verbs (18 §3.2 table rows — one row names both chp_review_threads
+#   and chp_resolve_thread), each forwarding to chp_${CODE_HOST}_<verb> "$@":
 #     chp_find_pr_for_issue chp_ci_status chp_mergeable chp_create_pr
 #     chp_approve chp_request_changes chp_merge chp_review_threads
-#     chp_resolve_thread chp_trigger_bot chp_close_keyword chp_caps
+#     chp_resolve_thread chp_trigger_bot chp_close_keyword
+#     chp_reply_review_comment chp_pr_view chp_pr_list chp_pr_comment
+#     chp_list_inline_comments chp_count_reviews_by_login chp_commit_file
+#     chp_caps
+#   chp_has_leaf is a caller-side guard helper, NOT a verb (no `.caps` entry,
+#   never forwards "$@" to a leaf) — see spec §3.2 "What this section owns".
 #
-# SCOPE (#280): this file ships ONLY the dispatch shims + the .caps reader. NO
-# verb leaf is migrated — the chp_github_<verb> bodies are EMPTY scaffolds in
-# providers/chp-github.sh (leaf migration is the downstream chp-pr-lifecycle
-# issue). chp_caps is the sole shim with a real body in this PR: it reads the
-# declarative .caps manifest ([INV-88]).
+# SCOPE (#280 — historical; the leaf migrations below post-date this file's
+# original PR): #280 shipped ONLY the dispatch shims + the .caps reader for
+# the original 12-verb set, with NO verb leaf migrated (empty scaffolds in
+# providers/chp-github.sh). Every leaf named above has since been migrated by
+# its own PR (#282 PR-lifecycle, #282 r8/#329 general read+write primitives,
+# #328/#327/#324/#330 focused verbs) — see the §3.2 "Implementation status"
+# note in provider-spec.md for the per-verb migration ledger. chp_caps remains
+# the only shim whose body is a reader rather than a leaf-forward: it reads
+# the declarative .caps manifest ([INV-88]).
 #
 # [INV-14]/[INV-65] resolution: providers/chp-${_p}.sh + the .caps manifests are
 # sourced/read from the REAL skill tree via readlink -f of THIS file's own
@@ -52,7 +64,7 @@ if [[ -f "${_LIB_CHP_PROVIDERS_DIR}/chp-${CODE_HOST}.sh" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# .caps reader — parsed key=value, NEVER sourced ([INV-88], spec §4 / §10 Q1).
+# .caps reader — parsed key=value, NEVER sourced ([INV-88], spec §4).
 # Shared with lib-issue-provider.sh; guarded so sourcing both libs (in either
 # order) does not redefine it, while keeping each lib independently sourceable.
 # ---------------------------------------------------------------------------

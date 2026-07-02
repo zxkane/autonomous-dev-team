@@ -210,17 +210,41 @@ The *callers* keep their logic; only the leaf `gh` call moves behind a verb.
 
 ### 3.2 Code-Host Provider (CHP) verbs
 
+**What this section owns (normative, #367).** Every verb named in the table
+below is a dispatchable CHP verb — the full set this section normatively
+owns, **18 table rows naming 19 verbs** (one row, `chp_review_threads` /
+`chp_resolve_thread`, names two verbs sharing one contract cell). This
+includes the 11 named PR-lifecycle verbs (`chp_find_pr_for_issue` …
+`chp_close_keyword`), the 3 general read/write primitives added for the
+incidental-PR-I/O sites (`chp_pr_view`/`chp_pr_list`/`chp_pr_comment`, #282
+review r8 / #329), and the 4 focused single-purpose verbs added by later PRs
+(`chp_list_inline_comments` #328, `chp_reply_review_comment` #327,
+`chp_count_reviews_by_login` #324, `chp_commit_file` #330). **`chp_caps` is a
+verb too** — it is the capability-map reader, not a leaf-dispatching shim.
+**`chp_has_leaf` is explicitly NOT a verb** — it is a caller-side guard helper
+(`declare -F chp_${CODE_HOST}_<verb>`) that never appears in a `.caps`
+manifest or forwards `"$@"` to a leaf; it is footnoted here, not tabled,
+precisely so a future mint does not miscount it as a 20th verb. The GitHub
+reference implementation (`lib-code-host.sh`) therefore defines **20
+top-level `chp_*()` functions**: the 19 verb shims (18 table rows) + the 1
+non-verb `chp_has_leaf` guard helper. Where a count needs to appear in prose
+elsewhere in this repo, prefer citing "the §3.2 table (18 rows / 19 verbs)"
+over a bare number, so the next mint does not re-drift the prose.
+
 | Verb | Replaces | Contract |
 |---|---|---|
 | `chp_find_pr_for_issue ISSUE FIELDS` | `fetch_pr_for_issue` (`lib-dispatch.sh:1471`, signature is `(issue_num, FIELDS)`) | Return PR JSON projected to the **caller-supplied `FIELDS`** field list, or empty. **`FIELDS` is a REQUIRED arg [M1]** — every caller varies it (`number,headRefOid,body`; `number,mergedAt,reviews`; `number,headRefOid`; `number,body,updatedAt` / `number,body,headRefOid` in `dispatcher-tick.sh`; `number,reviewDecision,mergeable,state,body` in `status.sh`). The GitHub impl forwards `FIELDS` to `gh pr list --json $FIELDS` **byte-identically**. The documented field vocabulary MUST include `reviewDecision`, `mergeable`, `state`. Regression anchors: #148 (omitting `body` silently breaks the `select(.body\|test("#N"))` filter), #274. |
-| `chp_ci_status PR` | `ci_is_green` (`lib-dispatch.sh:1485`) | Return `green` / `pending` / `failed` / `none`. |
-| `chp_mergeable PR` | **`autonomous-review.sh:3159`** (`gh pr view … --json mergeable`), **NOT** `lib-review-mergeable.sh` | Return the **raw backend `mergeable` token**. **[M2]** `lib-review-mergeable.sh` is PURE classifiers (`_classify_mergeable_gate`, `_pr_open_gate`, [INV-44]/[INV-54]) doing zero gh I/O — its own header says the query "stays in the wrapper". Those classifiers **stay in the provider-neutral caller layer** and consume the verb's raw token; only the `gh pr view` leaf moves behind the verb. |
+| `chp_ci_status PR [extra gh args…]` | `ci_is_green` (`lib-dispatch.sh`) | **Current shipped contract (#367 correction):** a **focused-raw** leaf, the `chp_mergeable` shape — the caller supplies the `--json state -q '[.[].state]'` tail and the leaf forwards it byte-identically to `gh pr checks PR --repo $REPO "$@"`, returning the RAW per-check state array (e.g. `["SUCCESS","SUCCESS"]`). The `length>0 and all(.=="SUCCESS")` boolean gate that `ci_is_green` applies to that array **stays caller-side**; `ci_is_green` itself returns a boolean (`rc 0`/`1`), never a string. **Target contract — W1(d) (out of scope here):** normalizing the leaf itself to return one of `green`/`pending`/`failed`/`none` — the tokens this cell previously (incorrectly) claimed are produced today — is the still-open W1(d) slice; see the Mapping appendix row below for the as-shipped cut line. |
+| `chp_mergeable PR [extra gh args…]` | **`autonomous-review.sh`** (`gh pr view … --json mergeable`), **NOT** `lib-review-mergeable.sh` | **Focused-raw** leaf: the caller supplies the `--json mergeable -q '.mergeable'`(or similar) tail and the leaf forwards it byte-identically to `gh pr view PR --repo $REPO "$@"`, returning the **raw backend `mergeable` token** (`MERGEABLE`/`CONFLICTING`/`UNKNOWN`/empty). **[M2]** `lib-review-mergeable.sh` is PURE classifiers (`_classify_mergeable_gate`, `_pr_open_gate`, [INV-44]/[INV-54]) doing zero gh I/O — its own header says the query "stays in the wrapper". Those classifiers **stay in the provider-neutral caller layer** and consume the verb's raw token; only the `gh pr view` leaf moves behind the verb. |
 | `chp_create_pr …` | `gh pr create` site(s) | Create PR/MR. |
 | `chp_approve PR` | `gh pr review --approve` | Approve. |
 | `chp_request_changes PR` | `gh pr review --request-changes` | Request changes. Capability-gated (§4: `rest_request_changes`). |
 | `chp_merge PR` | `gh pr merge` | Merge. **Cross-seam note [M4]:** on GitHub, merging a PR whose body carries `Closes #N` performs the ITP terminal transition as a **side effect** ([INV-33] — the wrapper MUST NOT call `gh issue close`). This coupling is now explicit via the `merge_closes_issue` capability (§4) — when absent, the caller MUST call `itp_transition_state` after `chp_merge`. |
-| `chp_review_threads PR` / `chp_resolve_thread …` | `resolve-threads.sh`, `lib-review-resolve.sh` | Review-thread I/O. **Separate shape from `itp_list_comments` [M8]:** `{thread_id, resolved, comments:[{id, path, line, author, body, createdAt}]}`. `resolve-threads.sh` selects GraphQL `reviewThreads.nodes[]\|select(.isResolved==false).id` and resolves by `threadId`; inline fields (`.path`/`.line`/`.original_line`, `autonomous-dev.sh`) are CHP-owned, never folded into the ITP issue-comment shape. |
+| `chp_review_threads PR` / `chp_resolve_thread …` | `resolve-threads.sh`, `lib-review-resolve.sh` | Review-thread I/O. **Separate shape from `itp_list_comments` [M8]:** `{thread_id, resolved, comments:[{id, path, line, author, body, createdAt}]}`. `resolve-threads.sh` selects GraphQL `reviewThreads.nodes[]\|select(.isResolved==false).id` and resolves by `threadId`; inline fields (`.path`/`.line`/`.original_line`, `autonomous-dev.sh`) are CHP-owned, never folded into the ITP issue-comment shape. **Known cut-line (§3.5):** the GitHub leaf's GraphQL walk is `reviewThreads(first: 100)` with no cursor pagination — §3.5 mandates the COMPLETE set; a PR with >100 threads is under-covered on GitHub today. Fixing the cursor walk is **W1(f)**, out of scope here — this cell only documents the known gap so the spec stops overclaiming completeness for this one leaf. |
 | `chp_list_inline_comments PR` | the dev-resume `PR_REVIEW_COMMENTS` read (`autonomous-dev.sh`, the flat REST `gh api repos/$REPO/pulls/$PR/comments`) | Return the PR's **inline (file-anchored) review comments** — the comments the dev agent is told to address + reply-to + resolve. **New verb [INV-95]** (#296 second-tier, #328). **Separate shape** from `chp_review_threads` (GraphQL thread tree), `chp_pr_view` (no `pulls/N/comments` sub-resource), and `itp_list_comments` (issue-level normalized): the flat `.path`/`.line`/`.original_line` inline fields are **CHP-owned**, never folded into the ITP issue-comment shape. **Focused-raw** (#281): the leaf does no formatting; the caller threads its own `--jq` formatter (the `- **path:line** — body` prompt rendering) via `"$@"` byte-identically. **Self-guarding shim** (#282 convention, like `chp_pr_view`/`chp_pr_list`): invoked unguarded in a `$(… 2>/dev/null \|\| true)` site, so leaf-absent → WARN + `return 1` (degrades to empty), never a `set -e` abort. No `--paginate` today. |
+| `chp_pr_view PR [--json … -q …]` | the PR-number-keyed incidental reads (`autonomous-dev.sh` / `autonomous-review.sh`, e.g. `gh pr view $PR --json comments/state/headRefName/headRefOid/reviews`) | **General READ primitive** — NOT one of the named PR-lifecycle verbs above; added so the caller layer carries zero executable raw `gh pr view`. Forwards to `gh pr view PR --repo $REPO "$@"`; the caller keeps its own `--json`/`-q` projection, byte-identical. **Self-guarding shim** (#282 review round 9): invoked unguarded by the incidental-read call sites — leaf-absent → WARN + `return 1` (degrades to empty read), never a `set -e` abort. **MIGRATED #282 (review r8).** |
+| `chp_pr_list [--state … --json … -q …]` | the issue-keyed body-mention existence/number lookups (`autonomous-dev.sh`, e.g. `gh pr list … select(.body\|test("#N"))`) | **General READ primitive** — the loose body-mention PR list/existence lookup, DISTINCT from `chp_find_pr_for_issue` (the [INV-86] close-linkage resolver, which takes a REQUIRED `FIELDS` arg). Forwards to `gh pr list --repo $REPO "$@"`; caller keeps its own `--state`/`--json`/`-q`. Self-guarding shim, same convention as `chp_pr_view`. **MIGRATED #282 (review r8).** |
+| `chp_pr_comment PR [--body … \| extra args]` | the 7 PR-comment writes (`gh pr comment $PR` — auto-merge markers `autonomous-review.sh`, E2E-failure reports + the [INV-79] brokered E2E report `lib-review-e2e.sh`) | **General WRITE primitive** — the PR-comment sibling of `chp_pr_view`/`chp_pr_list`; DISTINCT from `itp_post_comment` (the ISSUE-level marker choke-point), different seam owner for a split-backend topology. Forwards to `gh pr comment PR --repo $REPO "$@"`; the caller keeps its own redirect/capture/gating framing (4 forms observed: `… 2>/dev/null \|\| true`, `if ! _err=$(… 2>&1 >/dev/null)`, `… 2>/dev/null \|\| rc=$?`, broker `… >/dev/null 2>&1`) — the leaf adds none. Self-guarding shim. **MIGRATED #329 (#296 second-tier), [INV-102].** |
 | `chp_trigger_bot PR TRIGGER` | `lib-review-bots.sh` | Post a bot trigger. Capability-gated (§4: `review_bots`). |
 | `chp_close_keyword ISSUE` | the `Closes #${ISSUE_NUMBER}` literal in the PR-body prompt (`autonomous-dev.sh:851/866/914/1151`) | Render the backend's PR-body auto-close keyword for the prompt builder to interpolate. **New verb [M4]** — the keyword was hardcoded GitHub-specific prompt text; a GitLab/Asana prompt builder would otherwise emit a non-functional `Closes #N`. GitHub returns `Closes #<n>`; a backend with `merge_closes_issue=0` returns empty (caller transitions explicitly post-merge). |
 | `chp_reply_review_comment PR COMMENT_ID BODY` | `reply-to-comments.sh:41` (`gh api …/pulls/<n>/comments -X POST … in_reply_to=…`) | Reply to one PR **review comment** (`in_reply_to`). GitHub leaf emits `gh api "repos/$REPO/pulls/$PR/comments" -X POST -f body=$BODY -F in_reply_to=$COMMENT_ID --jq '{id, url}'` byte-identically; the caller composes `REPO="$OWNER/$REPO"` for the leaf's scope (owner/repo split + `COMMENT_ID` numeric sanitization stay caller-side). **New verb [INV-96], #327** — the last raw `gh` reply-POST site (the #283-deferred CHP review-thread reply). NOT capability-gated (a core code-host write); no injection pre-encode (`body`/`in_reply_to` are REST `-f`/`-F` fields, the `--jq '{id,url}'` a fixed literal). |
@@ -241,17 +265,19 @@ The *callers* keep their logic; only the leaf `gh` call moves behind a verb.
 > `lib-review-mergeable.sh` byte-unchanged), the [INV-52]/[INV-79]
 > wrapper-owns-approve/merge ownership, and the review-thread select-unresolved
 > all remain provider-neutral. `chp_create_pr` and `chp_trigger_bot` are also
-> **defined** in `providers/chp-github.sh` (completing the verb contract), but
+> **defined** in `providers/chp-github.sh` (completing the verb contract), and
 > their live executable leaves are the auth-side brokers (`drain_agent_pr_create`
-> / `drain_agent_bot_triggers` in `lib-auth.sh`); the broker→verb rewire is an
-> auth-side follow-up because `lib-auth.sh` is outside #282's scope ("NO
-> auth-code change"). A small set of **incidental PR reads** that no CHP verb in
-> §3.2 names — the issue-keyed body-mention `gh pr list … select(.body|test("#N"))`
+> / `drain_agent_bot_triggers` in `lib-auth.sh`), which route through the verb
+> (leaf-only swap, guarded on `chp_has_leaf`; byte-identical argv). **Status
+> correction (#367):** the incidental PR reads that no *named lifecycle* verb
+> owns — the issue-keyed body-mention `gh pr list … select(.body|test("#N"))`
 > existence COUNT/number lookups (`autonomous-dev.sh`) and the PR-number-keyed
-> `gh pr view $PR --json comments/state/headRefName/headRefOid/reviews`
-> (`autonomous-dev.sh` / `autonomous-review.sh`) — are deliberately left as raw
-> `gh` and are owned by no current verb (the literal-`gh`-freedom lint is the
-> separate cutover-guard issue).
+> `gh pr view $PR --json comments/state/headRefName/headRefOid/reviews` reads
+> (`autonomous-dev.sh` / `autonomous-review.sh`) are **no longer raw `gh`** —
+> they route through the general read primitives `chp_pr_view` / `chp_pr_list`
+> (§3.2 table above, #282 review r8), and the 7 PR-comment writes route
+> through `chp_pr_comment` (#329, [INV-102]). The caller layer carries zero
+> executable raw `gh pr` (enforced by the cutover guard, §9/[INV-91]).
 >
 > **Caller guard convention (`chp_has_leaf`, #282 review round 4).** A caller that
 > conditionally invokes a CHP verb MUST guard on whether the ENABLED provider
@@ -528,11 +554,11 @@ scripts/
   lib-issue-provider.sh          # itp_<verb>() dispatch → itp_${ISSUE_PROVIDER}_<verb>; reads .caps  (#280)
   lib-code-host.sh               # chp_<verb>() dispatch → chp_${CODE_HOST}_<verb>; reads .caps        (#280)
   providers/                     # dir, sibling to adapters/  (#280)
-    itp-github.sh                # itp_github_*  — reference impl. READ leaves (list_by_state, count_by_state, list_forbidden_combos, read_task, list_comments) MIGRATED in #281; WRITE leaves still scaffold (itp-writes); dep leaves still scaffold (itp-deps-begin-tick)
+    itp-github.sh                # itp_github_*  — reference impl. READ leaves (list_by_state, count_by_state, list_forbidden_combos, read_task, list_comments) MIGRATED #281; WRITE leaves (transition_state, post_comment, edit_comment, mark_checkbox, provision_states) MIGRATED #283; dep/tick-lifecycle leaves (resolve_dep, begin_tick) MIGRATED #284 — no scaffolds remain
     itp-github.caps              # declarative capability manifest (parsed, not sourced)  (#280)
-    chp-github.sh                # chp_github_*  — reference impl (EMPTY scaffold in #280; gh leaves moved verbatim by the chp-pr-lifecycle sibling)
+    chp-github.sh                # chp_github_*  — reference impl. ALL PR-lifecycle leaves MIGRATED #282; the general read/write primitives + focused verbs MIGRATED by their own #296-second-tier PRs (#324/#327/#328/#329/#330) — no scaffolds remain
     chp-github.caps              # declarative capability manifest  (#280)
-    # gitlab / asana files added in later PRs
+    # gitlab / asana files land in future, separately-funded issues
 ```
 
 All new files are `lib-*.sh` / sourced provider files → picked up via the
@@ -868,7 +894,7 @@ becomes a verb, the surrounding INV-coupled logic stays caller-side.
 | `_dep_block_comment` (`lib-dispatch.sh`) | `itp_post_comment` | (a) separable-leaf | the [INV-39] dependency-block dispatcher-marker comment write — **migrated #283** (the dedup READ stays on `itp_list_comments`) |
 | `dispatcher-tick.sh` Step-2 TTHW timeline read (`gh api …/issues/<n>/timeline --jq …`, [INV-70] `labeled_at`) | `itp_label_event_ts` | (a) separable-leaf | **migrated #323** ([INV-93], observe-only): the GitHub-internal timeline `gh api …--jq …` leaf moves to `itp_github_label_event_ts` (JSON-encoding the label, injection-safe) and returns the first-`labeled` timestamp scalar; the TTHW math, the `issue_labeled` emit, and the `labeled_at`-vs-`ts` preference stay caller-side. Guarded on the bare `itp_${ISSUE_PROVIDER}_label_event_ts` (leaf-absent / any failure → empty → fall back to `ts`, never blocks dispatch). Closes `dispatcher-tick.sh` as a raw-`gh` caller (cutover baseline 67 → 66). |
 | `resolve_pr_for_issue` (`lib-pr-linkage.sh:73`) + `verify_pr_closes_issue` (`:99`); `fetch_pr_for_issue` (`lib-dispatch.sh`) is the kept same-named delegate shim | `chp_find_pr_for_issue` | (b) entangled | the `gh pr list --json $FIELDS` leaf moves with `FIELDS` forwarded byte-identically ([M1]); the [INV-86] close-linkage/branch resolution + projection `$q` stay caller-side. **MIGRATED #282.** (Post-#277 `fetch_pr_for_issue` is a pure delegate to `resolve_pr_for_issue` — that delegate stays as the function-mock shim, §7.2 m3.) |
-| `ci_is_green` (`lib-dispatch.sh`) | `chp_ci_status` | (a) separable-leaf | the `gh pr checks --json state -q '[.[].state]'` leaf moves; the `length>0 and all(.=="SUCCESS")` gate → `green`/`pending`/`failed`/`none` stays caller-side. **MIGRATED #282.** |
+| `ci_is_green` (`lib-dispatch.sh`) | `chp_ci_status` | (a) separable-leaf | the `gh pr checks --json state -q '[.[].state]'` leaf moves, forwarding the caller's `--json`/`-q` byte-identically and returning the raw per-check state array; the `length>0 and all(.=="SUCCESS")` boolean gate stays caller-side (`ci_is_green` returns rc 0/1, not a `green`/`pending`/`failed`/`none` string — normalizing the leaf itself to those tokens is the open W1(d) slice, §3.2). **MIGRATED #282.** |
 | `autonomous-review.sh` mergeable poll (`gh pr view … --json mergeable`) | `chp_mergeable` | (b) entangled | only the `gh pr view --json mergeable` leaf moves ([M2]); the UNKNOWN-retry loop + `_classify_mergeable_gate`/`_pr_open_gate` ([INV-44]/[INV-54], `lib-review-mergeable.sh` byte-unchanged) stay caller-side. **MIGRATED #282.** |
 | `gh pr create` (the broker `drain_agent_pr_create`, `lib-auth.sh`) | `chp_create_pr` | (a) separable-leaf | the `gh pr create --head/--title/--body` leaf; the broker routes through the verb (leaf-only swap, no INV-79 change). **MIGRATED #282.** **Leaf-absent disposition #346:** the retained raw `gh pr create` fallback is github-gated (`${CODE_HOST:-github} == "github"`) — a non-GitHub backend without the leaf fails LOUD (no PR created), never a silent GitHub PR. Spec-sanctioned [INV-91] residue (byte-identical, baseline unchanged). |
 | `gh pr review --approve` (`autonomous-review.sh` PASS path) | `chp_approve` | (a) separable-leaf | the `--approve --body …` leaf; the [INV-52]/[INV-79] wrapper-owns-approve ownership + PASS-gate chain stay caller-side. **MIGRATED #282.** |
