@@ -21,18 +21,21 @@ Run under `env -u PROJECT_DIR bash tests/unit/test-chp-commit-file.sh`.
 
 ## 2. Trap-hazard regression (AC2 — the load-bearing fix)
 
-> The leaf installs **NO `trap`** and cleans its temps **INLINE** (`rm -f` before
-> every return). `trap … EXIT` would replace the standalone caller's EXIT trap;
-> `trap … RETURN` is no safer — it is NOT cleared at leaf return, so it persists
-> and re-fires when the `chp_commit_file` shim returns into the caller, by then the
-> leaf's `local` temps are out of scope → `unbound variable` under `set -u` (both
-> crash modes reproduced on-box; the issue's stated RETURN alternative was found to
-> crash via the shim-dispatch path, so inline cleanup is used instead).
+> The leaf uses a **function-scoped, SELF-DISARMING `trap '…; trap - RETURN' RETURN`**
+> (AC2's literal contract). `trap … EXIT` would replace the standalone caller's EXIT
+> trap. A BARE `trap … RETURN` (no self-disarm) is no safer — it is NOT cleared at
+> leaf return, so it persists and re-fires when the `chp_commit_file` shim returns
+> into the caller, by then the leaf's `local` temps are out of scope → `unbound
+> variable` under `set -u` (both crash modes reproduced on-box). The self-disarm
+> — the trap body's own last action is `trap - RETURN` — keeps the RETURN-trap
+> contract while firing exactly once per invocation, sidestepping the persistence
+> hazard.
 
 | ID | Scenario | Expected |
 |----|----------|----------|
-| TC-CCF-010 | Source-shape: leaf installs NO `trap …` (neither `EXIT` nor `RETURN`) and cleans its temps inline | `grep` of the `chp_github_commit_file` body (comments stripped) shows no `trap`; an inline `rm -f` of `$json_tmpfile`/`$upload_response_file` is present (TC-CCF-010b) |
-| TC-CCF-011 | Behavioral (the production crash path): a caller under `set -euo pipefail` with its OWN `trap … EXIT` sources the FULL `lib-code-host.sh` and calls the verb THROUGH the `chp_commit_file` shim; the caller reaches `PRE_EXIT_OK`, the shim returns the SHA, the caller's EXIT trap STILL fires and its temp is cleaned, with NO `unbound variable` | TC-CCF-011/011b/011c/011d/011e all green (no crash, SHA returned, no `unbound variable`, caller EXIT trap fires, caller temp cleaned) |
+| TC-CCF-010 | Source-shape: leaf installs a function-scoped `trap … RETURN`, never `trap … EXIT` | `grep` of the `chp_github_commit_file` body (comments stripped) finds a `trap '…' RETURN` (TC-CCF-010) and no `trap … EXIT` (TC-CCF-010a) |
+| TC-CCF-010b/c | The RETURN trap SELF-DISARMS (`trap - RETURN` is its own last action) and its body cleans `$json_tmpfile`/`$upload_response_file` | both assertions green |
+| TC-CCF-011 | Behavioral (the production crash path): a caller under `set -euo pipefail` with its OWN `trap … EXIT` sources the FULL `lib-code-host.sh` and calls the verb TWICE THROUGH the `chp_commit_file` shim; the caller reaches `PRE_EXIT_OK`, both shim calls return their SHA, the caller's EXIT trap STILL fires and its temp is cleaned, with NO `unbound variable` on either call | TC-CCF-011/011b/011b2/011c/011d/011e all green (no crash, both SHAs returned, no `unbound variable`, caller EXIT trap fires, caller temp cleaned) |
 
 ## 3. REPO threaded from arg (AC3)
 

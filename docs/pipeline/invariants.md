@@ -4968,7 +4968,7 @@ Per **Pipeline Documentation Authority**, the INV-35 / INV-85 routing is the loa
 - [INV-92](#inv-92-a-review-blocking-finding-the-dev-agent-provably-cannot-act-on-protected-path--missing-token-scope-is-not-routed-to-dev-resume--the-wrapper-classifies-each-findings-actionability-and-the-dispatcher-escalates-a-non-actionable-verdict-to-stalled) — the non-actionable-finding escalation the delegated router applies.
 - [`dispatcher-flow.md`](dispatcher-flow.md#step-4a5-pr-exists-short-circuit-99-bug-3-106) — Step 4a.5 (the delegating caller) and Step 4b.5.1 (the delegated router; the "two entry points" note).
 
-## INV-99: the screenshot-commit op routes through the whole-op `chp_commit_file` verb; its GitHub leaf is the 8-call git-Data-API implementation and cleans its temps INLINE (no `trap … EXIT`/`… RETURN`)
+## INV-99: the screenshot-commit op routes through the whole-op `chp_commit_file` verb; its GitHub leaf is the 8-call git-Data-API implementation and cleans its temps via a SELF-DISARMING function-scoped `trap … RETURN`
 
 _Triage (issue #236): [machine-checked: tests/unit/test-chp-commit-file.sh]_
 
@@ -5010,15 +5010,23 @@ posture ([INV-87] §3.2 [M8]), NOT 8 thin per-call shims.
   under `set -e`. Lib-load failure (no `chp_commit_file` at all) FAILS LOUD: a raw
   `gh` fallback would silently run GitHub git-Data-API commands for a non-GitHub
   backend ([INV-91]).
-- **Temp-file cleanup is INLINE** (a plain `rm -f` before every return) — the leaf
-  installs NO `trap`. `trap … EXIT` would REPLACE the standalone caller's own EXIT
-  trap and the now-`local` temp vars would expand empty when it fired at caller
-  exit (reproduced on-box: caller trap clobbered + `unbound variable`). A
-  `trap … RETURN` is no safer: it is NOT cleared at leaf return, so it PERSISTS and
-  fires AGAIN when the `chp_commit_file` shim returns into the caller, by then the
-  leaf's `local` `$json_tmpfile`/`$upload_response_file` are out of scope →
-  `unbound variable` under the caller's `set -u` (also reproduced on-box, the
-  shim-dispatch path). Inline cleanup sidesteps both.
+- **Temp-file cleanup uses a SELF-DISARMING function-scoped `trap … RETURN`**
+  (issue #330 AC2's literal contract):
+  `trap 'rm -f "$json_tmpfile" "$upload_response_file"; trap - RETURN' RETURN`.
+  `trap … EXIT` would REPLACE the standalone caller's own EXIT trap and the
+  now-`local` temp vars would expand empty when it fired at caller exit
+  (reproduced on-box: caller trap clobbered + `unbound variable`). A BARE
+  `trap … RETURN` (no self-disarm) is no safer: it is NOT cleared at leaf return,
+  so it PERSISTS on the trap table and fires AGAIN when the `chp_commit_file`
+  shim itself returns into the caller, by then the leaf's `local`
+  `$json_tmpfile`/`$upload_response_file` are out of scope → `unbound variable`
+  under the caller's `set -u` (also reproduced on-box, the shim-dispatch path).
+  The fix keeps the RETURN trap but has its own body's LAST ACTION be
+  `trap - RETURN`, clearing itself the instant it fires for the current
+  invocation — so it fires exactly once and never lingers to fire a second time
+  on the shim's own return. Verified on-box across normal completion, both
+  early `return 1` paths, and TWO repeated shim-mediated calls in the same
+  process (each call re-installs its own trap fresh).
 
 The migration shrinks the [INV-91] cutover baseline by **8 occurrences / 7
 signatures** (the get-ref signature appears twice; 60→52 occurrences, 54→47
@@ -5029,9 +5037,10 @@ cutover scan).
 
 **Test**: `tests/unit/test-chp-commit-file.sh` — golden whole-op (branch-absent
 create, branch-present update, new-file create, put-fail, branch-create-fail) via
-a stateful per-endpoint `gh` stub; the no-trap source-shape + the behavioral
-through-the-shim `set -euo` repro (caller EXIT trap survives, no `unbound
-variable`); the REPO-from-arg pin; the source-shape (zero raw `gh api`
+a stateful per-endpoint `gh` stub; the self-disarming-RETURN-trap source-shape +
+the behavioral through-the-shim `set -euo` repro driving TWO repeated
+shim-mediated calls (caller EXIT trap survives both, no `unbound variable` on
+either); the REPO-from-arg pin; the source-shape (zero raw `gh api`
 git/contents, guard stays, leaf+shim+verb present, baseline −8); the self-guarding
 shim (degraded fixture → WARN + non-zero).
 

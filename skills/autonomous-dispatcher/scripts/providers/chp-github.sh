@@ -379,19 +379,23 @@ chp_github_count_reviews_by_login() {
 #     standalone util that resolves its own $REPO from autonomous.conf and never
 #     sources the wrapper env, so threading it as an arg keeps a stray ambient
 #     $REPO from silently winning (the #324 dropped-repo-arg lesson).
-#   - the temp-file cleanup is INLINE at each return path — NEITHER the script's
-#     `trap … EXIT` NOR a `trap … RETURN`. A sourced function's `trap … EXIT`
-#     REPLACES the caller's EXIT trap, and the now-local temp vars expand empty
-#     when it fires at caller exit (reproduced on-box: caller trap clobbered +
-#     `unbound variable` crash). A `trap … RETURN` has its OWN hazard: it is NOT
-#     cleared when the leaf returns, so it PERSISTS and fires AGAIN when the
-#     calling `chp_commit_file` shim returns — by then the leaf's `local`
-#     `$json_tmpfile` is out of scope → `unbound variable` under the caller's
-#     `set -u` (reproduced on-box: the shim-dispatch path crashes). So the leaf
-#     `rm -f`s its temps INLINE before every return — no trap manipulation at all,
-#     the caller's EXIT trap is untouched, and nothing dangling references the
-#     leaf's locals after it returns. (The orphan-branch-create failure returns
-#     BEFORE the temps are created, so it needs no cleanup.)
+#   - the temp-file cleanup uses a **function-scoped, SELF-DISARMING**
+#     `trap '…; trap - RETURN' RETURN` (issue #330 AC2) — NOT the script's
+#     `trap … EXIT`. A sourced function's `trap … EXIT` REPLACES the caller's
+#     EXIT trap, and the now-local temp vars expand empty when it fires at caller
+#     exit (reproduced on-box: caller trap clobbered + `unbound variable` crash).
+#     A BARE `trap … RETURN` (no self-disarm) has its OWN hazard: it is NOT
+#     cleared when the leaf returns, so it PERSISTS on the trap table and fires
+#     AGAIN when the calling `chp_commit_file` shim itself returns — by then the
+#     leaf's `local` `$json_tmpfile` is out of scope → `unbound variable` under
+#     the caller's `set -u` (reproduced on-box: the shim-dispatch path crashes).
+#     The fix keeps the RETURN trap (satisfying AC2's function-scoped-RETURN
+#     contract) but has the trap body its OWN LAST ACTION be `trap - RETURN` —
+#     clearing itself the moment it fires for THIS invocation, so it never
+#     lingers to fire a second time on the shim's own return. Verified on-box:
+#     the trap cleans the leaf's temps at every return path (normal AND the
+#     early `return 1`s) exactly once, across repeated shim-mediated calls, with
+#     the caller's own EXIT trap firing normally afterward.
 #
 # Caller-side (provider-neutral, stays in upload-screenshot.sh): the local
 # file-read + `base64 -w0` encode (CONTENT_BASE64 is the provider-neutral
@@ -452,6 +456,12 @@ chp_github_commit_file() {
   local json_tmpfile upload_response_file
   json_tmpfile=$(mktemp /tmp/screenshot-upload-XXXXXX.json)
   upload_response_file=$(mktemp /tmp/screenshot-response-XXXXXX.json)
+  # Self-disarming function-scoped RETURN trap (#330 AC2 — see the header note):
+  # cleans these temps at THIS invocation's return, then immediately clears
+  # itself so it does NOT persist to fire again on the chp_commit_file shim's
+  # own return (the bare-RETURN hazard reproduced on-box). The caller's EXIT
+  # trap is never touched.
+  trap 'rm -f "$json_tmpfile" "$upload_response_file"; trap - RETURN' RETURN
 
   {
     printf '{"message":"%s","content":"' "$message"
@@ -470,11 +480,8 @@ chp_github_commit_file() {
 
   local upload_sha
   upload_sha=$(jq -r '.content.sha // empty' "$upload_response_file" 2>/dev/null || true)
-
-  # INLINE cleanup (no trap — see the header note): rm the temps before EVERY
-  # return so neither the caller's EXIT trap nor a persistent RETURN trap is
-  # involved (#330 [INV-99] P3 fix).
-  rm -f "$json_tmpfile" "$upload_response_file"
+  # (temp cleanup happens via the self-disarming RETURN trap installed above,
+  # at whichever of the two return paths below fires — #330 [INV-99] AC2 fix)
 
   [[ -n "$upload_sha" ]] || { echo "Error: GitHub API upload failed for ${file_path}" >&2; return 1; }
 

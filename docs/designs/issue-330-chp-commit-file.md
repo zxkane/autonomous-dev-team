@@ -93,7 +93,7 @@ backend — never silently fall through; [INV-91]).
 the project-side symlink topology — no project-side symlink, no installer re-run
 (Step-1 `npx skills update -g` suffices).
 
-## The load-bearing fix — NO trap, INLINE cleanup (P3, reproduced on-box)
+## The load-bearing fix — a SELF-DISARMING `trap … RETURN` (P3/AC2, reproduced on-box)
 
 The script's line-116 `trap 'rm -f "$JSON_TMPFILE" "$UPLOAD_RESPONSE_FILE"' EXIT`
 MUST NOT move verbatim into the sourced leaf. A sourced function's `trap … EXIT`
@@ -101,20 +101,25 @@ MUST NOT move verbatim into the sourced leaf. A sourced function's `trap … EXI
 (now leaf-locals) expand empty when the inherited trap fires at *caller* exit
 (reproduced on-box: caller trap clobbered + `unbound variable` crash).
 
-The issue's stated alternative — a **function-scoped `trap '…' RETURN`** — was
-found on-box to crash too: a `RETURN` trap is NOT cleared when the leaf returns, so
-it **persists and re-fires** when the `chp_commit_file` shim returns into the
-caller. By then the leaf's `local` `$json_tmpfile`/`$upload_response_file` are out
-of scope, so the trap body expands them empty → `unbound variable` under the
-caller's `set -u` (reproduced on-box via the shim-dispatch path: `leaf(){ local
-t=$(mktemp); trap 'rm -f "$t"' RETURN; }; shim(){ leaf; }; shim` crashes on the
-shim's return).
+Issue #330 AC2 requires a **function-scoped `trap … RETURN`**. A BARE
+`trap '…' RETURN` (no self-disarm) was found on-box to crash too: a RETURN trap is
+NOT cleared when the leaf returns, so it **persists on the trap table and fires
+AGAIN** when the `chp_commit_file` shim itself returns into the caller. By then
+the leaf's `local` `$json_tmpfile`/`$upload_response_file` are out of scope, so
+the trap body expands them empty → `unbound variable` under the caller's `set -u`
+(reproduced on-box via the shim-dispatch path: `leaf(){ local t=$(mktemp); trap
+'rm -f "$t"' RETURN; }; shim(){ leaf; }; shim` crashes on the shim's return).
 
-Fix (the issue's other stated alternative): the leaf installs **NO trap at all**
-and `rm -f`s its temps **INLINE** before every return path. The caller's EXIT trap
-is untouched, nothing dangling references the leaf's locals after it returns, and
-both crash modes are sidestepped. (The orphan-branch-create failure returns BEFORE
-the temps are created, so it needs no cleanup.)
+Fix: keep the RETURN trap (satisfying AC2's literal contract) but make it
+**self-disarming** — its own last action clears itself:
+`trap 'rm -f "$json_tmpfile" "$upload_response_file"; trap - RETURN' RETURN`.
+The trap fires exactly once per invocation (cleaning the temps, then
+immediately un-installing itself before the RETURN completes), so it never
+lingers to fire a second time when the caller/shim frame returns. Verified
+on-box across: normal completion, both early `return 1` paths, repeated
+shim-mediated calls (two invocations in the same process), and with the
+caller's own `trap … EXIT` installed alongside — the caller's EXIT trap fires
+normally afterward, untouched.
 
 ## REPO threaded explicitly ($1, not a global) — the #324 lesson
 

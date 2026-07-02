@@ -13,12 +13,15 @@
 #      argv-recorder writes nothing to stdout and would break the orchestration,
 #      [P3 F2]). Covers branch-absent (create path), branch-present (update path),
 #      new-file (create), and the fail paths (leaf returns non-zero → caller fail).
-#   2. Trap-hazard regression (AC2) — the leaf installs NO `trap` (neither `… EXIT`
-#      which clobbers the caller's trap, nor a persistent `… RETURN` which re-fires
-#      on the chp_commit_file shim's return with the leaf's locals out of scope →
-#      `unbound variable` under set -u) and cleans its temps INLINE; a caller's OWN
-#      EXIT trap is NOT clobbered + its temp survives to fire at caller-exit (the
-#      on-box repro, pinned, driven THROUGH the shim).
+#   2. Trap-hazard regression (AC2) — the leaf uses a function-scoped, SELF-
+#      DISARMING `trap '…; trap - RETURN' RETURN` (NOT `… EXIT`, which clobbers
+#      the caller's trap; a BARE `… RETURN` with no self-disarm PERSISTS and
+#      re-fires on the chp_commit_file shim's own return with the leaf's locals
+#      out of scope → `unbound variable` under set -u, reproduced on-box). The
+#      self-disarm keeps the RETURN-trap contract (AC2) while firing exactly
+#      once per invocation; a caller's OWN EXIT trap is NOT clobbered + its temp
+#      survives to fire at caller-exit (the on-box repro, pinned, driven THROUGH
+#      the shim, across repeated calls).
 #   3. REPO threaded from $1 (AC3) — a different global $REPO does NOT win.
 #   4. SOURCE-SHAPE (AC4) — zero raw `gh api …git/…`/`…contents/…` in
 #      upload-screenshot.sh; the `command -v gh` guard stays; new leaf+shim
@@ -208,36 +211,50 @@ rm -f "$argv5"
 # ===========================================================================
 # 2. Trap-hazard regression (AC2 — the load-bearing fix)
 # ===========================================================================
-echo "=== AC2: leaf installs NO trap (no EXIT clobber, no persistent RETURN); caller EXIT trap untouched, no unbound-var crash ==="
+echo "=== AC2: leaf uses a SELF-DISARMING function-scoped trap … RETURN (no EXIT clobber, no persistent re-fire); caller EXIT trap untouched, no unbound-var crash ==="
 
-# TC-CCF-010 — SOURCE-SHAPE: chp_github_commit_file MUST NOT use ANY `trap …` in
-# its body (neither `… EXIT` — which clobbers the caller's EXIT trap — nor a
-# persistent `… RETURN` — which is NOT cleared at leaf return and fires AGAIN when
-# the chp_commit_file shim returns, by then the leaf's `local` temps are gone →
-# `unbound variable` under set -u). It cleans its temps INLINE (a plain `rm -f`)
-# before every return. Extract the function body, STRIP comment lines (a comment
-# mentioning "trap" is prose, not a call site), then grep the CODE.
+# TC-CCF-010 — SOURCE-SHAPE: chp_github_commit_file uses a function-scoped
+# `trap … RETURN` (AC2's literal contract) that DISARMS itself in its own body
+# (`trap - RETURN`) — never a bare `trap … EXIT` (which clobbers the caller's
+# EXIT trap) and never a bare/non-self-disarming `trap … RETURN` (which is NOT
+# cleared at leaf return and fires AGAIN when the chp_commit_file shim itself
+# returns, by then the leaf's `local` temps are gone → `unbound variable` under
+# set -u). Extract the function body, STRIP comment lines (a comment mentioning
+# "trap" is prose, not a call site), then grep the CODE.
 fn_code=$(awk '/^chp_github_commit_file\(\)/{f=1} f{print} /^}/{if(f) exit}' "$CHP_GITHUB" \
           | grep -vE '^[[:space:]]*#')
-if grep -qE '\btrap\b' <<<"$fn_code"; then
-  fail "TC-CCF-010 chp_github_commit_file MUST NOT install ANY trap (EXIT clobbers caller; RETURN persists into the shim's return → unbound-var crash)"
+if grep -qE "trap[[:space:]]+'[^']*'[[:space:]]+RETURN" <<<"$fn_code"; then
+  pass "TC-CCF-010 chp_github_commit_file installs a function-scoped trap … RETURN (AC2 literal contract)"
 else
-  pass "TC-CCF-010 chp_github_commit_file installs NO trap (caller EXIT trap untouched; no persistent RETURN trap)"
+  fail "TC-CCF-010 chp_github_commit_file does NOT install a function-scoped trap … RETURN"
 fi
-if grep -qE 'rm -f .*json_tmpfile|rm -f .*upload_response_file' <<<"$fn_code"; then
-  pass "TC-CCF-010b chp_github_commit_file cleans its temps INLINE (rm -f, no trap)"
+if grep -qE '\btrap\b.*\bEXIT\b' <<<"$fn_code"; then
+  fail "TC-CCF-010a chp_github_commit_file MUST NOT install a trap … EXIT (clobbers the caller's own EXIT trap)"
 else
-  fail "TC-CCF-010b chp_github_commit_file does NOT clean its temps inline"
+  pass "TC-CCF-010a chp_github_commit_file installs no trap … EXIT"
+fi
+if grep -qE "trap[[:space:]]+'[^']*trap - RETURN[^']*'[[:space:]]+RETURN" <<<"$fn_code"; then
+  pass "TC-CCF-010b the RETURN trap SELF-DISARMS ('trap - RETURN' is its own last action)"
+else
+  fail "TC-CCF-010b the RETURN trap does NOT self-disarm — it will persist and re-fire on the shim's return"
+fi
+if grep -qE "trap[[:space:]]+'rm -f \"\\\$json_tmpfile\" \"\\\$upload_response_file\"" <<<"$fn_code"; then
+  pass "TC-CCF-010c the RETURN trap body cleans json_tmpfile + upload_response_file"
+else
+  fail "TC-CCF-010c the RETURN trap body does NOT clean the expected temps"
 fi
 
 # TC-CCF-011 — BEHAVIORAL on-box repro, the PRODUCTION crash path: a CALLER under
 # `set -euo pipefail` (upload-screenshot.sh's shell options) with its OWN
-# `trap … EXIT` sources the FULL lib-code-host.sh and calls the verb THROUGH the
-# `chp_commit_file` SHIM (NOT the leaf directly — the shim→leaf return is exactly
-# what makes a persistent RETURN trap re-fire with the leaf's locals out of scope).
-# After the verb returns, the caller must reach PRE_EXIT_OK (no crash) AND on exit
-# its OWN EXIT trap must fire (not clobbered) AND there must be NO `unbound
-# variable`. This is the bug the issue's P3 fix exists to prevent.
+# `trap … EXIT` sources the FULL lib-code-host.sh and calls the verb TWICE
+# THROUGH the `chp_commit_file` SHIM (NOT the leaf directly — the shim→leaf
+# return is exactly what makes a NON-self-disarming RETURN trap re-fire with the
+# leaf's locals out of scope; calling twice additionally proves the self-disarm
+# doesn't leave the trap dead for the SECOND invocation either — each call
+# re-installs its own trap fresh). After both verb calls return, the caller must
+# reach PRE_EXIT_OK (no crash) AND on exit its OWN EXIT trap must fire (not
+# clobbered) AND there must be NO `unbound variable`. This is the bug the
+# issue's P3 fix (as amended for AC2) exists to prevent.
 caller_marker="$(mktemp)"; rm -f "$caller_marker"      # path the caller's EXIT trap creates
 caller_tmp_probe="$(mktemp)"; rm -f "$caller_tmp_probe" # caller records its own temp path here
 trap_out=$(
@@ -250,17 +267,22 @@ trap_out=$(
     # the caller installs its OWN EXIT trap BEFORE sourcing/calling the verb
     trap '\''printf done > "$CALLER_MARKER"; rm -f "$CALLER_TMP"'\'' EXIT
     source "'"$CHP_LIB"'" 2>/dev/null
-    # call THROUGH the shim (the production path); both branch-present (update) and
-    # the put-success path so the verb returns 0 and the shim returns into the caller.
-    sha=$(STUB_BRANCH_PRESENT=1 STUB_FILE_PRESENT=1 \
+    # call THROUGH the shim (the production path) TWICE — both branch-present
+    # (update) and the put-success path so the verb returns 0 each time and the
+    # shim returns into the caller each time (the re-fire hazard site).
+    sha1=$(STUB_BRANCH_PRESENT=1 STUB_FILE_PRESENT=1 \
             chp_commit_file "$REPO" screenshots "pr-1/T.png" "B64" "msg") || true
-    echo "VERB_SHA=$sha"
+    echo "VERB_SHA_1=$sha1"
+    sha2=$(STUB_BRANCH_PRESENT=1 STUB_FILE_PRESENT=1 \
+            chp_commit_file "$REPO" screenshots "pr-2/T.png" "B64" "msg2") || true
+    echo "VERB_SHA_2=$sha2"
     echo "PRE_EXIT_OK"
   ' 2>&1
 )
-assert_contains "TC-CCF-011 verb-through-shim ran to completion (no crash before caller exit)" "PRE_EXIT_OK" "$trap_out"
-assert_contains "TC-CCF-011b verb-through-shim returned the SHA (shim→leaf path works)" "VERB_SHA=uploadedsha555" "$trap_out"
-assert_not_contains "TC-CCF-011c NO 'unbound variable' (no persistent RETURN trap, no EXIT clobber)" "unbound variable" "$trap_out"
+assert_contains "TC-CCF-011 verb-through-shim ran to completion TWICE (no crash before caller exit)" "PRE_EXIT_OK" "$trap_out"
+assert_contains "TC-CCF-011b first shim call returned the SHA" "VERB_SHA_1=uploadedsha555" "$trap_out"
+assert_contains "TC-CCF-011b2 SECOND shim call ALSO returned the SHA (self-disarm didn't kill the trap for call #2)" "VERB_SHA_2=uploadedsha555" "$trap_out"
+assert_not_contains "TC-CCF-011c NO 'unbound variable' (self-disarming RETURN trap never re-fires stale)" "unbound variable" "$trap_out"
 # the caller's OWN EXIT trap fired → not clobbered by the leaf
 if [[ -f "$caller_marker" && "$(cat "$caller_marker")" == "done" ]]; then
   pass "TC-CCF-011d caller's own EXIT trap STILL fires (leaf installed no EXIT trap)"
