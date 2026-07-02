@@ -818,6 +818,13 @@ extract_dev_session_id() {
 # normal stale-detection path (Step 5b) instead of this gate. That's a
 # correct degradation — slower recovery (one full tick cycle) but no risk
 # of false-positive auto-recovery on a CLI whose JSON we haven't observed.
+#
+# [INV-100] (#356) Backend seam: the log this function reads lives on the
+# box that runs the dev wrapper, NOT necessarily the box running this tick.
+# Under `EXECUTION_BACKEND=remote-aws-ssm` the read is dispatched to the
+# execution host via `_remote_session_log_probe` (mirrors [INV-30]'s
+# `pid_alive` shape). The local branch below is BYTE-IDENTICAL to the
+# pre-#356 implementation.
 is_session_completed() {
   local issue_num="$1"
   local reason_var="${2:-}"
@@ -829,19 +836,32 @@ is_session_completed() {
   local _dev_cmd="${AGENT_DEV_CMD:-${AGENT_CMD:-claude}}"
   [ "$_dev_cmd" = "claude" ] || return 1
 
-  local log_file="/tmp/agent-${PROJECT_ID}-issue-${issue_num}.log"
-  [ -r "$log_file" ] || return 1
+  local last_line log_file _end_epoch=""
+  if [ "${EXECUTION_BACKEND:-local}" = "remote-aws-ssm" ]; then
+    # [INV-100] Remote branch: the log lives on the execution host. The
+    # driver echoes the last `{"type":"result"...}` line on stdout line 1
+    # and (only when line 1 is non-empty) the log's mtime as a Unix epoch
+    # on line 2. SSM error/timeout/no-match all collapse to empty output —
+    # fail-closed, never fabricate a completed state (see the driver's own
+    # contract comment).
+    local _probe_out
+    _probe_out=$(_remote_session_log_probe "$issue_num")
+    last_line=$(printf '%s\n' "$_probe_out" | sed -n '1p')
+    _end_epoch=$(printf '%s\n' "$_probe_out" | sed -n '2p')
+  else
+    log_file="/tmp/agent-${PROJECT_ID}-issue-${issue_num}.log"
+    [ -r "$log_file" ] || return 1
 
-  # Claude --output-format json emits one full JSON object per line, including
-  # a final `{"type":"result", ...}` with stop_reason and terminal_reason on
-  # clean exit. We must NOT regex-truncate this object — it contains nested
-  # objects (`usage`) and the model's `result` string (which routinely
-  # contains `}` inside markdown / code blocks). Instead grab the whole last
-  # `result` line and let jq parse it.
-  #
-  # Multiple result objects are possible (resume cycles): the LAST line wins.
-  local last_line
-  last_line=$(grep '^{"type":"result"' "$log_file" 2>/dev/null | tail -1)
+    # Claude --output-format json emits one full JSON object per line, including
+    # a final `{"type":"result", ...}` with stop_reason and terminal_reason on
+    # clean exit. We must NOT regex-truncate this object — it contains nested
+    # objects (`usage`) and the model's `result` string (which routinely
+    # contains `}` inside markdown / code blocks). Instead grab the whole last
+    # `result` line and let jq parse it.
+    #
+    # Multiple result objects are possible (resume cycles): the LAST line wins.
+    last_line=$(grep '^{"type":"result"' "$log_file" 2>/dev/null | tail -1)
+  fi
   [ -n "$last_line" ] || return 1
 
   local fields
@@ -858,13 +878,90 @@ is_session_completed() {
       # claude result-JSON itself does not carry a date. Empty on date(1)
       # failure — the caller treats empty as "no time filter", which is
       # safe (we surface ALL bot comments rather than miss a recent one).
-      local _mtime_iso
-      _mtime_iso=$(date -u -r "$log_file" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "")
+      local _mtime_iso=""
+      if [ "${EXECUTION_BACKEND:-local}" = "remote-aws-ssm" ]; then
+        [ -n "$_end_epoch" ] && _mtime_iso=$(_epoch_to_iso "$_end_epoch")
+      else
+        _mtime_iso=$(date -u -r "$log_file" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "")
+      fi
       printf -v "$end_ts_var" '%s' "$_mtime_iso"
     fi
     return 0
   fi
   return 1
+}
+
+# _epoch_to_iso <epoch> — Unix epoch seconds → ISO-8601 UTC. Empty on
+# failure. Used by is_session_completed's remote branch to convert the
+# execution host's log mtime (fetched as an epoch over SSM, since we can't
+# `stat` a remote path from here) into the same ISO-8601 shape the local
+# branch derives via `date -u -r`.
+_epoch_to_iso() {
+  local epoch="$1"
+  [[ "$epoch" =~ ^[0-9]+$ ]] || { echo ""; return; }
+  date -u -d "@${epoch}" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null \
+    || date -u -r "${epoch}" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null \
+    || echo ""
+}
+
+# _session_log_probe_driver_path — resolves the session-log-probe driver
+# script path via parameter expansion (no `dirname`, PATH-scrubbed-safe),
+# honoring the test override (`_SESSION_LOG_PROBE_DRIVER_OVERRIDE`). Shared
+# by `_remote_session_log_probe` and `_reset_session_log` so the resolution
+# logic (mirroring `_remote_pid_alive_query`'s shape) lives in one place.
+_session_log_probe_driver_path() {
+  if [ -n "${_SESSION_LOG_PROBE_DRIVER_OVERRIDE:-}" ]; then
+    printf '%s\n' "$_SESSION_LOG_PROBE_DRIVER_OVERRIDE"
+  else
+    local _src="${BASH_SOURCE[0]:-$0}"
+    printf '%s\n' "${_src%/*}/session-log-probe-remote-aws-ssm.sh"
+  fi
+}
+
+# _remote_session_log_probe <issue_num> — [INV-100] (#356). Synchronous SSM
+# query into the dev wrapper's per-issue log on the execution host.
+#
+# ALWAYS returns 0 — driver failure (rc≠0: SSM transport fault, timeout,
+# validation error) collapses to empty stdout, exactly like "log not found /
+# no result line yet". The caller (is_session_completed) treats empty
+# identically in both cases: not completed, fail-closed to the existing
+# residual park. This is deliberately asymmetric with [INV-30]'s ALIVE-bias
+# on indeterminate — there, deferring a crash declaration is the safe
+# default; here, NOT fabricating a completed/terminal state is the safe
+# default (a false "completed" could route a live/crashed session through
+# the wrong branch).
+_remote_session_log_probe() {
+  local issue_num="$1"
+  local driver
+  driver="$(_session_log_probe_driver_path)"
+
+  local out rc
+  out=$(bash "$driver" --probe "$issue_num" 2>/dev/null)
+  rc=$?
+  [ "$rc" -eq 0 ] && printf '%s\n' "$out"
+  return 0
+}
+
+# _reset_session_log <issue_num> — [INV-100] (#356) backend-aware truncate.
+# Companion seam to `_remote_session_log_probe`: once a remote session
+# becomes detectable as completed/PTL, the two existing recovery-truncate
+# call sites (`handle_completed_session_routing`'s failed-substantive
+# branch, and the tick's INV-12 PTL branch) must reset the log ON THE SAME
+# HOST the probe read it from — a controller-side bare `: > <path>` would
+# create/truncate the WRONG file while the execution host's stale result
+# line survives, turning the park into an infinite dev-new loop (worse than
+# today's deadlock). Returns 0 on success, non-zero on failure; callers keep
+# their existing fail-closed skip-dispatch behavior on non-zero.
+_reset_session_log() {
+  local issue_num="$1"
+  if [ "${EXECUTION_BACKEND:-local}" = "remote-aws-ssm" ]; then
+    local driver
+    driver="$(_session_log_probe_driver_path)"
+    bash "$driver" --truncate "$issue_num" >/dev/null 2>&1
+    return $?
+  fi
+  local _log_file="/tmp/agent-${PROJECT_ID}-issue-${issue_num}.log"
+  : > "$_log_file" 2>/dev/null
 }
 
 # ---------------------------------------------------------------------------
@@ -1210,11 +1307,26 @@ handle_completed_session_routing() {
       # truncate fails, the next tick would re-read the same stale log
       # line, the idempotency marker would suppress a fresh notice, and
       # we'd silently dispatch dev-new every tick forever.
-      local _log_file="/tmp/agent-${PROJECT_ID}-issue-${issue_num}.log"
-      if ! : > "$_log_file" 2>/dev/null; then
-        log "  ERROR: failed to truncate ${_log_file} (perm/disk?). Skipping INV-35 dev-new dispatch to avoid re-detection loop."
+      #
+      # [INV-100] (#356): the truncate routes through `_reset_session_log`,
+      # which is backend-aware — under EXECUTION_BACKEND=remote-aws-ssm it
+      # resets the log ON THE EXECUTION HOST via SSM (the same host
+      # `_remote_session_log_probe` read from), not a controller-local path.
+      # The error text below reflects whichever path was actually touched
+      # (or attempted) so an operator debugging a remote-SSM project isn't
+      # sent to inspect a controller-local file the reset never wrote to.
+      local _log_file _log_location
+      if [ "${EXECUTION_BACKEND:-local}" = "remote-aws-ssm" ]; then
+        _log_file="/tmp/agent-${SSM_REMOTE_PROJECT_ID:-?}-issue-${issue_num}.log"
+        _log_location="${_log_file} on the execution host (SSM_INSTANCE_ID=${SSM_INSTANCE_ID:-?})"
+      else
+        _log_file="/tmp/agent-${PROJECT_ID}-issue-${issue_num}.log"
+        _log_location="${_log_file}"
+      fi
+      if ! _reset_session_log "$issue_num"; then
+        log "  ERROR: failed to truncate ${_log_location} (perm/disk/SSM?). Skipping INV-35 dev-new dispatch to avoid re-detection loop."
         itp_post_comment "$issue_num" \
-          "Could not reset agent log at \`${_log_file}\` for fresh INV-35 dispatch (permission or disk error). Operator: please clear the log file and retry. Skipping dispatch to prevent a silent retry loop." 2>/dev/null || true
+          "Could not reset agent log at \`${_log_location}\` for fresh INV-35 dispatch (permission, disk, or SSM transport error). Operator: please clear the log file and retry. Skipping dispatch to prevent a silent retry loop." 2>/dev/null || true
         return 0
       fi
       label_swap "$issue_num" "pending-dev" "in-progress"

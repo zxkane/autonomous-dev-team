@@ -258,18 +258,32 @@ echo "=== TC-LOGRET-7: INV-12 / INV-35 deliberate recovery-truncates preserved =
 # Guard against an over-broad fix that disables the intentional recovery-truncate.
 LIB_DISPATCH="$DISPATCHER_SCRIPTS/lib-dispatch.sh"
 TICK="$DISPATCHER_SCRIPTS/dispatcher-tick.sh"
-if grep -Eq ':[[:space:]]*>[[:space:]]*"\$_log_file"' "$LIB_DISPATCH"; then
-  echo -e "  ${GREEN}PASS${NC}: INV-35 recovery-truncate ': > \"\$_log_file\"' survives in lib-dispatch.sh"
+# [INV-100] (#356): both recovery-truncate sites now route through the
+# backend-aware `_reset_session_log` seam (lib-dispatch.sh) instead of a
+# bare `: > "$path"` at each call site — the remote-aws-ssm backend must
+# reset the log on the EXECUTION host via SSM, not the controller's
+# filesystem. The literal local-backend truncate still lives inside
+# `_reset_session_log` itself; the two ORIGINAL call sites now assert they
+# route through the seam rather than duplicating the truncate inline.
+if grep -Eq ':[[:space:]]*>[[:space:]]*"\$_log_file"[[:space:]]*2>/dev/null[[:space:]]*$' "$LIB_DISPATCH"; then
+  echo -e "  ${GREEN}PASS${NC}: INV-35/INV-100 local-backend recovery-truncate ': > \"\$_log_file\"' survives inside _reset_session_log in lib-dispatch.sh"
   PASS=$((PASS + 1))
 else
-  echo -e "  ${RED}FAIL${NC}: INV-35 recovery-truncate missing from lib-dispatch.sh"
+  echo -e "  ${RED}FAIL${NC}: INV-35/INV-100 local-backend recovery-truncate missing from lib-dispatch.sh"
   FAIL=$((FAIL + 1))
 fi
-if grep -Eq ':[[:space:]]*>[[:space:]]*"\$_ptl_log"' "$TICK"; then
-  echo -e "  ${GREEN}PASS${NC}: INV-12 PTL recovery-truncate ': > \"\$_ptl_log\"' survives in dispatcher-tick.sh"
+if grep -Eq '_reset_session_log[[:space:]]+"\$issue_num"' "$LIB_DISPATCH"; then
+  echo -e "  ${GREEN}PASS${NC}: INV-35 handle_completed_session_routing routes its recovery-truncate through _reset_session_log"
   PASS=$((PASS + 1))
 else
-  echo -e "  ${RED}FAIL${NC}: INV-12 PTL recovery-truncate missing from dispatcher-tick.sh"
+  echo -e "  ${RED}FAIL${NC}: INV-35 recovery-truncate no longer routes through _reset_session_log in lib-dispatch.sh"
+  FAIL=$((FAIL + 1))
+fi
+if grep -Eq '_reset_session_log[[:space:]]+"\$issue_num"' "$TICK"; then
+  echo -e "  ${GREEN}PASS${NC}: INV-12 PTL recovery-truncate routes through _reset_session_log in dispatcher-tick.sh"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: INV-12 PTL recovery-truncate no longer routes through _reset_session_log in dispatcher-tick.sh"
   FAIL=$((FAIL + 1))
 fi
 

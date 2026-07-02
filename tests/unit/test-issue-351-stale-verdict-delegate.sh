@@ -130,6 +130,13 @@ dev_report_bot_unfixable() { return "$_MOCK_BOT_UNFIXABLE"; }
 post_dispatch_token()      { _rec post_dispatch_token "$@"; }
 dispatch()                 { _rec dispatch "$@"; }
 mark_stalled()             { _rec mark_stalled "$@"; }
+# [INV-100] (#356): handle_completed_session_routing's Branch C truncate now
+# routes through _reset_session_log (real impl is backend-aware — local
+# bare truncate vs remote SSM driver). Mocked here so this suite continues
+# to exercise ONLY the delegation/routing logic, not truncate mechanics
+# (covered by test-is-session-completed-remote.sh and
+# test-handle-completed-session-routing.sh).
+_reset_session_log()       { _rec _reset_session_log "$@"; return 0; }
 log() { :; }
 
 # ---------------------------------------------------------------------------
@@ -316,6 +323,27 @@ handle_pending_dev_pr_exists 99
 rc=$?
 assert_eq   "TC-351-DELEG-9 returns 1" "1" "$rc"
 assert_eq   "TC-351-DELEG-9 no verbs recorded past fetch" "fetch_pr_for_issue" "$(_trace_verbs | paste -sd, -)"
+
+# ===================================================================
+echo
+echo "=== TC-351-DELEG-REMOTE-1: same-HEAD completed delegation under EXECUTION_BACKEND=remote-aws-ssm ==="
+# [INV-100] (#356): handle_pending_dev_pr_exists's delegation logic is
+# backend-agnostic — it only consumes is_session_completed's return value
+# (mocked in this suite via _MOCK_COMPLETED_RC), never the log file
+# directly. This proves the #351 delegation shape is unaffected by
+# EXECUTION_BACKEND: is_session_completed's own backend-blindness (the #356
+# bug) is covered in isolation by test-is-session-completed-remote.sh; this
+# test is the golden-trace proof that ONCE is_session_completed correctly
+# returns "completed" for a remote-SSM project, Step 4a.5 delegates exactly
+# like the local case.
+_reset; _same_head_completed
+_MOCK_VERDICT='failed-substantive'; _MOCK_DEV_ACTIONABLE='true'
+_MOCK_ATTEMPT_PRESENT=0
+EXECUTION_BACKEND=remote-aws-ssm SSM_REMOTE_PROJECT_ID='remote-proj' handle_pending_dev_pr_exists 99
+rc=$?
+assert_eq   "TC-351-DELEG-REMOTE-1 returns 0" "0" "$rc"
+assert_match "TC-351-DELEG-REMOTE-1 dispatched exactly one dev-new" "^dispatch${US}dev-new${US}99$" "$(_trace_all)"
+assert_no_match "TC-351-DELEG-REMOTE-1 NO stale-verdict park notice posted" "stale-verdict:" "$(_trace_all)"
 
 echo
 echo "=== Summary ==="

@@ -463,11 +463,24 @@ for i in $(seq 0 $((pd_count - 1))); do
       # (it's keyed on the old session_id), and we'd silently dispatch
       # dev-new every tick forever. Stay in pending-dev so the operator
       # sees the issue accumulating retries via mark_stalled instead.
-      _ptl_log="/tmp/agent-${PROJECT_ID}-issue-${issue_num}.log"
-      if ! : > "$_ptl_log" 2>/dev/null; then
-        log "  ERROR: failed to truncate ${_ptl_log} (perm/disk?). Skipping PTL dev-new dispatch to avoid re-detection loop."
+      #
+      # [INV-100] (#356): routes through `_reset_session_log` (lib-dispatch.sh)
+      # — backend-aware, so under EXECUTION_BACKEND=remote-aws-ssm the reset
+      # happens on the execution host via SSM (the same host
+      # `is_session_completed`'s remote probe read the stale line from),
+      # never a controller-local path. The error text below reflects
+      # whichever path was actually touched (or attempted).
+      if [ "${EXECUTION_BACKEND:-local}" = "remote-aws-ssm" ]; then
+        _ptl_log="/tmp/agent-${SSM_REMOTE_PROJECT_ID:-?}-issue-${issue_num}.log"
+        _ptl_log_location="${_ptl_log} on the execution host (SSM_INSTANCE_ID=${SSM_INSTANCE_ID:-?})"
+      else
+        _ptl_log="/tmp/agent-${PROJECT_ID}-issue-${issue_num}.log"
+        _ptl_log_location="${_ptl_log}"
+      fi
+      if ! _reset_session_log "$issue_num"; then
+        log "  ERROR: failed to truncate ${_ptl_log_location} (perm/disk/SSM?). Skipping PTL dev-new dispatch to avoid re-detection loop."
         itp_post_comment "$issue_num" \
-          "Could not reset prompt-too-long log at \`${_ptl_log}\` for fresh dispatch (permission or disk error). Operator: please clear the log file and retry. Skipping dispatch to prevent a silent retry loop." 2>/dev/null || true
+          "Could not reset prompt-too-long log at \`${_ptl_log_location}\` for fresh dispatch (permission, disk, or SSM transport error). Operator: please clear the log file and retry. Skipping dispatch to prevent a silent retry loop." 2>/dev/null || true
         continue
       fi
       log "  dispatching dev-new for issue #${issue_num} (fresh after prompt_too_long)"
