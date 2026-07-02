@@ -499,15 +499,29 @@ drain_agent_pr_create() {
   # byte-identical to the prior `gh pr create --repo "$repo" --head … --title …
   # --body …`. ALL of the INV-79 broker logic above (token scoping, file parse,
   # head resolution, the no-PR-yet idempotency guard) is unchanged. `$REPO` is the
-  # wrapper's required env (the broker's `$repo` arg always equals it). Falls back
-  # to the raw `gh pr create` if the provider LEAF is unavailable (guard on
-  # chp_has_leaf, NOT `declare -F chp_create_pr` — the shim is always defined once
-  # lib-code-host is sourced, so that would dispatch to an undefined leaf and abort
-  # under set -e on a backend without it; #282 review round 4 [P1]).
+  # wrapper's required env (the broker's `$repo` arg always equals it). The leaf
+  # guard is `chp_has_leaf`, NOT `declare -F chp_create_pr` — the shim is always
+  # defined once lib-code-host is sourced, so that would dispatch to an undefined
+  # leaf and abort under set -e on a backend without it (#282 review round 4 [P1]).
+  #
+  # [INV-91] (#346) fail-loud disposition for the leaf-absent case: the raw
+  # `gh pr create` fallback is retained ONLY under an explicit `CODE_HOST == github`
+  # guard (spec-sanctioned github-gated residue). A non-GitHub backend that omits
+  # the `create_pr` leaf must NOT silently open a GitHub PR — it fails LOUD (the
+  # #303/B1 + #327 no-silent-fallback pattern) and creates no PR. `${CODE_HOST:-github}`
+  # (the #327 precedent): an unset CODE_HOST — lib-code-host.sh not sourced because
+  # chp_create_pr was already defined, or the lib was unreadable — defaults to
+  # `github`, i.e. today's exact behavior; the raw path is retained. Zero behavior
+  # change on the github/github topology (the raw `gh pr create` line is byte-
+  # identical to the pre-#346 fallback, so its cutover baseline signature is unchanged).
   if declare -F chp_has_leaf >/dev/null 2>&1 && chp_has_leaf create_pr; then
     _pr_create_ok() { chp_create_pr --head "$branch" --title "$title" --body "$body" >/dev/null 2>&1; }
-  else
+  elif [[ "${CODE_HOST:-github}" == "github" ]]; then
     _pr_create_ok() { gh pr create --repo "$repo" --head "$branch" --title "$title" --body "$body" >/dev/null 2>&1; }
+  else
+    echo "ERROR: [INV-79]/[INV-91] brokered PR create for issue #${issue_number} (head=${branch}): CODE_HOST='${CODE_HOST:-github}' has no chp_create_pr leaf — refusing to open a GitHub PR on a non-GitHub backend. NO PR created; the success path's no-PR retry will re-queue the issue to pending-dev." >&2
+    unset -f _pr_create_ok 2>/dev/null || true
+    return 0
   fi
   if _pr_create_ok; then
     echo "[INV-79] wrapper brokered the PR create for issue #${issue_number} (head=${branch}, agent wrote ${AGENT_PR_CREATE_FILE})." >&2
@@ -571,12 +585,6 @@ drain_agent_bot_triggers() {
     return 0
   fi
 
-  local gh_as_user="${_LIB_AUTH_DIR}/gh-as-user.sh"
-  if [[ ! -f "$gh_as_user" ]]; then
-    echo "WARN: [INV-79] agent requested bot triggers but ${gh_as_user} is absent — skipping (project has no gh-as-user.sh)." >&2
-    return 0
-  fi
-
   # Resolve the PR number for this issue (same body-#N selector as PR_EXISTS).
   # [INV-87]/[INV-91] (#296 B3, #308) routes through chp_pr_list (verb prepends
   # `--repo "$REPO"`; `$repo == $REPO` here — see the autonomous-{dev,review}.sh
@@ -588,6 +596,33 @@ drain_agent_bot_triggers() {
     -q "[.[] | select(.body | test(\"#${issue_number}[^0-9]\") or test(\"#${issue_number}\$\"))] | (.[0].number // empty)" 2>/dev/null || true)
   if ! [[ "$pr_number" =~ ^[0-9]+$ ]]; then
     echo "WARN: [INV-79] agent requested bot triggers but no open PR found for issue #${issue_number} — skipping." >&2
+    return 0
+  fi
+
+  # [INV-91] (#346) fail-loud disposition for the leaf-absent case. The per-line
+  # raw `gh-as-user.sh` fallback below is retained ONLY under `CODE_HOST == github`
+  # (spec-sanctioned github-gated residue): a non-GitHub backend that omits the
+  # `trigger_bot` leaf must NOT silently post a GitHub-user comment. The backend
+  # decision is identity-based, not per-line, so it is gated ONCE here — before the
+  # gh-as-user.sh existence check below AND before the posting loop (#346 review
+  # [P1]: it must run BEFORE that existence check, or a non-GitHub project that
+  # simply has no gh-as-user.sh file hits the old WARN/skip path instead of this
+  # ERROR) — so a non-GitHub + leaf-absent broker emits one loud error and posts
+  # nothing, regardless of whether gh-as-user.sh happens to be present on disk.
+  # `${CODE_HOST:-github}` (the #327 precedent): an unset CODE_HOST defaults to
+  # `github`, i.e. today's exact behavior — the raw path is retained on the
+  # github/github topology with zero behavior change. (A `review_bots=0` backend
+  # already short-circuited above; this gate covers a `review_bots=1` non-GitHub
+  # backend whose provider omits the trigger_bot leaf.)
+  if { ! declare -F chp_has_leaf >/dev/null 2>&1 || ! chp_has_leaf trigger_bot; } \
+     && [[ "${CODE_HOST:-github}" != "github" ]]; then
+    echo "ERROR: [INV-79]/[INV-91] agent requested bot triggers on PR #${pr_number} but CODE_HOST='${CODE_HOST:-github}' has no chp_trigger_bot leaf — refusing to post a GitHub-user comment on a non-GitHub backend. NO bot triggers posted." >&2
+    return 0
+  fi
+
+  local gh_as_user="${_LIB_AUTH_DIR}/gh-as-user.sh"
+  if [[ ! -f "$gh_as_user" ]]; then
+    echo "WARN: [INV-79] agent requested bot triggers but ${gh_as_user} is absent — skipping (project has no gh-as-user.sh)." >&2
     return 0
   fi
 
@@ -615,6 +650,10 @@ drain_agent_bot_triggers() {
     # Falls back to the raw `bash "$gh_as_user" …` call if the provider LEAF is
     # unavailable (guard on chp_has_leaf, NOT `declare -F chp_trigger_bot` — the
     # shim is always defined once lib-code-host is sourced; #282 review round 4 [P1]).
+    # [INV-91] (#346) the else-branch raw call is now reachable ONLY on
+    # `CODE_HOST == github` — a non-GitHub + leaf-absent broker already returned
+    # loud above, so this is spec-sanctioned github-gated residue, not a silent
+    # cross-backend fallback.
     if declare -F chp_has_leaf >/dev/null 2>&1 && chp_has_leaf trigger_bot; then
       _bot_post_ok() { chp_trigger_bot "$pr_number" "$line" >/dev/null 2>&1; }
     else
