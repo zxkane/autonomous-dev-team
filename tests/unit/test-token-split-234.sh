@@ -1454,6 +1454,32 @@ GHSTUB
   fi
 
   # -------------------------------------------------------------------------
+  # TC-FBDISP-012 (#346 review [P1]): non-github + trigger_bot leaf ABSENT +
+  # gh-as-user.sh ALSO ABSENT from the project dir → the fail-loud [INV-91] guard
+  # must still fire, not the older WARN/skip "project has no gh-as-user.sh" path.
+  # Reproduces the exact review repro (CODE_HOST=fbdispnoleaf, no gh-as-user.sh):
+  # before the fix, the gh-as-user.sh existence check ran FIRST and short-circuited
+  # with a WARN, so the ERROR message never fired even though nothing was posted.
+  SBN3=$(fbdisp_sandbox); rm -f "$SBN3/gh-as-user.sh"
+  GHN3="$TMPROOT/fbdisp-ghn3"; mkdir -p "$GHN3"
+  TRIPN3="$TMPROOT/fbdisp-tripn3.log"; : > "$TRIPN3"
+  printf '#!/bin/bash\nprintf "GH_TRIPWIRE %%s\\n" "$*" >> "%s"\nexit 0\n' "$TRIPN3" > "$GHN3/gh"; chmod +x "$GHN3/gh"
+  BTFN3="$TMPROOT/fbdisp-btn3"; printf '/q review\n' > "$BTFN3"
+  out_n3=$(env -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR PATH="$GHN3:/usr/bin:/bin" REPO="owner/repo" \
+    AUTONOMOUS_CONF_DIR="$SBN3" CHP_FBDISP_PR_BODY="closes #346" \
+    CODE_HOST=fbdispnoleaf AUTONOMOUS_PROVIDERS_DIR="$FBDISP_NOLEAF" bash -c "
+    source '$SBN3/lib-auth.sh'
+    AGENT_GH_TOKEN_FILE='/scoped'; AGENT_BOT_TRIGGER_FILE='$BTFN3'
+    drain_agent_bot_triggers 346 owner/repo '/q review'
+  " 2>&1)
+  if [[ ! -s "$TRIPN3" ]] && printf '%s' "$out_n3" | grep -qF 'refusing to post a GitHub-user comment on a non-GitHub backend' \
+     && ! printf '%s' "$out_n3" | grep -qF 'project has no gh-as-user.sh'; then
+    assert_pass "TC-FBDISP-012 non-github + leaf-absent + gh-as-user.sh ALSO absent: fail-loud [INV-91] guard still fires (not the old WARN/skip)"
+  else
+    assert_fail "TC-FBDISP-012 hit the old WARN/skip instead of the fail-loud guard (out=$out_n3)"
+  fi
+
+  # -------------------------------------------------------------------------
   # TC-FBDISP-020: non-github + create_pr leaf PRESENT → the VERB path is taken
   # (no raw gh). AC2 verb-present.
   SBL1=$(fbdisp_sandbox)

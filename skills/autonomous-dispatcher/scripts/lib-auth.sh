@@ -585,12 +585,6 @@ drain_agent_bot_triggers() {
     return 0
   fi
 
-  local gh_as_user="${_LIB_AUTH_DIR}/gh-as-user.sh"
-  if [[ ! -f "$gh_as_user" ]]; then
-    echo "WARN: [INV-79] agent requested bot triggers but ${gh_as_user} is absent — skipping (project has no gh-as-user.sh)." >&2
-    return 0
-  fi
-
   # Resolve the PR number for this issue (same body-#N selector as PR_EXISTS).
   # [INV-87]/[INV-91] (#296 B3, #308) routes through chp_pr_list (verb prepends
   # `--repo "$REPO"`; `$repo == $REPO` here — see the autonomous-{dev,review}.sh
@@ -610,15 +604,25 @@ drain_agent_bot_triggers() {
   # (spec-sanctioned github-gated residue): a non-GitHub backend that omits the
   # `trigger_bot` leaf must NOT silently post a GitHub-user comment. The backend
   # decision is identity-based, not per-line, so it is gated ONCE here — before the
-  # posting loop — and a non-GitHub + leaf-absent broker emits one loud error and
-  # posts nothing. `${CODE_HOST:-github}` (the #327 precedent): an unset CODE_HOST
-  # defaults to `github`, i.e. today's exact behavior — the raw path is retained on
-  # the github/github topology with zero behavior change. (A `review_bots=0` backend
+  # gh-as-user.sh existence check below AND before the posting loop (#346 review
+  # [P1]: it must run BEFORE that existence check, or a non-GitHub project that
+  # simply has no gh-as-user.sh file hits the old WARN/skip path instead of this
+  # ERROR) — so a non-GitHub + leaf-absent broker emits one loud error and posts
+  # nothing, regardless of whether gh-as-user.sh happens to be present on disk.
+  # `${CODE_HOST:-github}` (the #327 precedent): an unset CODE_HOST defaults to
+  # `github`, i.e. today's exact behavior — the raw path is retained on the
+  # github/github topology with zero behavior change. (A `review_bots=0` backend
   # already short-circuited above; this gate covers a `review_bots=1` non-GitHub
   # backend whose provider omits the trigger_bot leaf.)
   if { ! declare -F chp_has_leaf >/dev/null 2>&1 || ! chp_has_leaf trigger_bot; } \
      && [[ "${CODE_HOST:-github}" != "github" ]]; then
     echo "ERROR: [INV-79]/[INV-91] agent requested bot triggers on PR #${pr_number} but CODE_HOST='${CODE_HOST:-github}' has no chp_trigger_bot leaf — refusing to post a GitHub-user comment on a non-GitHub backend. NO bot triggers posted." >&2
+    return 0
+  fi
+
+  local gh_as_user="${_LIB_AUTH_DIR}/gh-as-user.sh"
+  if [[ ! -f "$gh_as_user" ]]; then
+    echo "WARN: [INV-79] agent requested bot triggers but ${gh_as_user} is absent — skipping (project has no gh-as-user.sh)." >&2
     return 0
   fi
 
