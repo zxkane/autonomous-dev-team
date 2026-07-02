@@ -5663,8 +5663,19 @@ commits since last review at `<head>`)…"), which fires exactly once per comple
 zero-commit round and embeds the frozen head. #297 writes NO per-round breadcrumb
 of its own — a new per-round write on a NON-trip round would reintroduce an
 orphan-artifact TOCTOU. `_frozen_convergence_rounds_json` scans the already-emitted
-comments, filtered to `head == current_head` (rounds since the head last advanced),
-and **joins each round to the review VERDICT it was reacting to** — the newest
+comments, filtered to `head == current_head` (rounds since the head last advanced).
+A round comment is recognized ONLY when it is **authentic** (round-7 review [P1]:
+a human/reviewer comment QUOTING the Step-5b status line must not count): the
+comment's normalized `authorKind != "human"` (spec §3.3 [M5] — the dispatcher
+posts the round comment via `itp_post_comment` under the pipeline's own token;
+the author filter is GATED on `BOT_LOGIN` being set — with it EMPTY (the
+GH_AUTH_MODE=token topology, where the provider cannot derive `self` and
+normalizes the dispatcher's own comments to `human`) the filter is dropped and
+the `startswith` anchor alone applies, so genuine rounds are never excluded)
+AND the body `startswith("Dev process exited (no new commits since last review
+at \`<head>\`)")` — a quote embedded mid-comment fails the anchor even when
+machine-authored. Each authentic round is then **joined to the review VERDICT it
+was reacting to** — the newest
 `<!-- review-verdict: … -->` trailer comment strictly BEFORE the round comment —
 counting the round **only when that verdict's canonical
 `{verdict}|{cause}|{dev-actionable}` equals the ACTIVE case's canonical**

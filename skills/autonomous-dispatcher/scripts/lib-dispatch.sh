@@ -1226,6 +1226,20 @@ convergence_trailer_hash() {
 # #298-marker zero-out needed (a false round is handled by Branch B′ precedence for
 # the CURRENT round, and excluded from the count for PRIOR rounds).
 #
+# ROUND-COMMENT AUTHENTICITY (review round-7 [P1]): a bare `contains()` over the
+# status phrase counted ANY comment quoting it — a human/reviewer comment that
+# quotes the Step-5b line ("Dev process exited (no new commits since last review
+# at `<head>`)…") inflated the round count and could trip the breaker early on a
+# still-converging issue. Two filters restore authenticity, both matching how
+# the round comment is actually emitted (dispatcher-tick.sh Step 5b via
+# itp_post_comment under the pipeline's own token ⇒ normalized authorKind=self;
+# a resumed/legacy tick posting as a [bot] is authorKind=bot — still machine):
+#   1. `authorKind != "human"` — spec §3.3 [M5] discriminator; a human quoting
+#      the line is excluded regardless of wording.
+#   2. `startswith("Dev process exited (…")` — the round comment BEGINS with the
+#      sentence; a quote embedded mid-comment (reply context, code fence) fails
+#      the anchor even when machine-authored.
+#
 # Fail-closed toward NOT tripping: an empty/error fetch yields `[]` (biases to
 # MISS per R4). The trailer parse mirrors classify_recent_review_verdict: verdict
 # = first `[a-z-]+` token; cause captured ONLY for failed-non-substantive; absent
@@ -1240,6 +1254,19 @@ _frozen_convergence_rounds_json() {
   local _comments
   _comments=$(itp_list_comments "$issue_num" 2>/dev/null) || { printf '%s' "[]"; return 0; }
 
+  # authorKind strictness gate: the normalized authorKind is only meaningful
+  # when BOT_LOGIN is set (providers derive `self` from author==BOT_LOGIN;
+  # with it EMPTY, a token-mode dispatcher's own comments normalize to
+  # `human` and the author filter would exclude GENUINE rounds — breaker
+  # dead in GH_AUTH_MODE=token). Mirror the sibling verdict scan's
+  # empty-BOT_LOGIN branching (classify path ~:965): with BOT_LOGIN empty,
+  # drop the author filter and rely on the startswith() anchor alone
+  # (mid-body quotes still excluded; a human pasting the EXACT line at
+  # offset 0 is accepted — the pre-existing exposure, strictly better than
+  # the old contains() which accepted any placement).
+  local _strict_author=1
+  [ -n "${BOT_LOGIN:-}" ] || _strict_author=0
+
   # jq program:
   #  - `canon(body)`: parse the review-verdict trailer into the canonical
   #    `{verdict}|{cause}|{dev-actionable}`, mirroring classify_recent_review_verdict
@@ -1247,7 +1274,7 @@ _frozen_convergence_rounds_json() {
   #  - For each round comment on the frozen head, find the newest verdict trailer
   #    comment with createdAt < the round's, compute its canonical, keep the round
   #    iff that canonical == $ac. Emit the matched rounds' {createdAt}, sorted.
-  jq -c --arg head "$frozen_head" --arg ac "$active_canonical" '
+  jq -c --arg head "$frozen_head" --arg ac "$active_canonical" --arg strict_author "$_strict_author" '
     def trailer($b):
       ($b | capture("<!--[[:space:]]*review-verdict:[[:space:]]*(?<v>[a-z-]+)(?<rest>[^>]*)-->"; "g") ) // null;
     def canon($b):
@@ -1262,7 +1289,8 @@ _frozen_convergence_rounds_json() {
         end;
     ( [ .[] | select(.body | type == "string") ] | sort_by(.createdAt) ) as $all
     | [ $all[]
-        | select(.body | contains("no new commits since last review at `" + $head + "`"))
+        | select(($strict_author == "0") or (.authorKind != "human"))
+        | select(.body | startswith("Dev process exited (no new commits since last review at `" + $head + "`)"))
         | . as $round
         | ( [ $all[] | select((.createdAt < $round.createdAt) and (canon(.body) != null)) ]
             | last ) as $pv

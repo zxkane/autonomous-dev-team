@@ -134,6 +134,15 @@ itp_list_comments() {
   if [[ "$_MOCK_NONACT_MARKER_PRESENT" != "0" ]]; then
     _bodies+=("non-actionable-finding:${_MOCK_PR_HEAD} prior escalation")
   fi
+  # Round-7 [P1] regression: a HUMAN comment QUOTING the Step-5b status line
+  # (and one embedding it mid-body) must NOT count as rounds. Injected AFTER the
+  # active rounds so a naive contains() scan would count them.
+  for ((i = 0; i < ${_MOCK_HUMAN_QUOTE_COMMENTS:-0}; i++)); do
+    _bodies+=("HUMANQUOTE:> ${_round}")
+  done
+  for ((i = 0; i < ${_MOCK_MACHINE_MIDBODY_QUOTES:-0}; i++)); do
+    _bodies+=("Re-checking the prior status: ${_round} — investigating.")
+  done
   if [[ "$_MOCK_CB_MARKER_PRESENT" != "0" ]]; then
     _bodies+=("<!-- dispatcher-convergence-breaker: issue=100 head=${_MOCK_PR_HEAD} trailer=${_MOCK_CB_MARKER_HASH} -->")
   fi
@@ -147,10 +156,13 @@ itp_list_comments() {
     # Author: verdict trailers are BOT-authored (kane-review-agent); everything
     # else is self/dispatcher (my-claw). The join keys on the trailer TEXT, not
     # the author, but keep authors realistic.
-    local _author="my-claw"
-    [[ "$b" == *"review-verdict:"* ]] && _author="kane-review-agent"
-    _json=$(jq -c --arg b "$b" --arg a "$_author" --arg ts "$_tsiso" --argjson id "$(( 100 + _ts ))" \
-      '. + [{id:$id, author:$a, authorKind:"self", body:$b, createdAt:$ts}]' <<<"$_json")
+    local _author="my-claw" _akind="${_MOCK_ROUNDS_AUTHORKIND:-self}"
+    [[ "$b" == *"review-verdict:"* ]] && { _author="kane-review-agent"; _akind="bot"; }
+    if [[ "$b" == HUMANQUOTE:* ]]; then
+      _author="zxkane"; _akind="human"; b="${b#HUMANQUOTE:}"
+    fi
+    _json=$(jq -c --arg b "$b" --arg a "$_author" --arg k "$_akind" --arg ts "$_tsiso" --argjson id "$(( 100 + _ts ))" \
+      '. + [{id:$id, author:$a, authorKind:$k, body:$b, createdAt:$ts}]' <<<"$_json")
     _ts=$((_ts + 1))
   done
   printf '%s' "$_json"
@@ -172,6 +184,9 @@ reset_mocks() {
   _MOCK_POST_TOKEN_CALLS=""
   _MOCK_MARK_STALLED_CALLS=""
   _MOCK_COMMENT_COUNT=0
+  _MOCK_HUMAN_QUOTE_COMMENTS=0
+  _MOCK_MACHINE_MIDBODY_QUOTES=0
+  _MOCK_ROUNDS_AUTHORKIND="self"
   _MOCK_LAST_COMMENT_BODY=""
   _MOCK_FULL_COMMENT_LOG=""
   _MOCK_PR_HEAD=""
@@ -285,6 +300,56 @@ assert_eq "CB-COUNT-009c: non-matching active canonical → 0" "0" "$(count_froz
 
 assert_eq "empty head → 0" "0" "$(count_frozen_convergence_rounds 100 "" "$AC_SUB")"
 assert_eq "empty canonical → 0" "0" "$(count_frozen_convergence_rounds 100 deadbeef "")"
+
+# CB-COUNT-009d (round-7 [P1] regression): comments QUOTING the round line are
+# excluded — a human quote (authorKind=human) and a machine comment embedding the
+# line MID-BODY both fail the authenticity filters; only the 2 genuine dispatcher
+# rounds count. A naive contains() scan would return 4 here (the reviewer
+# reproduced 3-with-only-2-real on live data).
+reset_mocks
+_MOCK_PR_HEAD="deadbeef"
+_MOCK_FROZEN_ROUND_COMMENTS=2
+_MOCK_HUMAN_QUOTE_COMMENTS=1
+_MOCK_MACHINE_MIDBODY_QUOTES=1
+assert_eq "CB-COUNT-009d: human quote + mid-body machine quote excluded (2 counted, not 4)" "2" "$(count_frozen_convergence_rounds 100 deadbeef "$AC_SUB")"
+
+# CB-COUNT-009f (token-mode / empty BOT_LOGIN): with BOT_LOGIN unset the provider
+# has no self identity to match, so it normalizes the dispatcher's OWN comments
+# to authorKind=human — the strict author filter would exclude GENUINE rounds
+# and kill the breaker in GH_AUTH_MODE=token. The strictness gate drops the
+# author filter when BOT_LOGIN is empty (rounds counted via the startswith
+# anchor alone); the mid-body machine quote stays excluded by the anchor.
+# _MOCK_ROUNDS_AUTHORKIND=human simulates the token-mode normalization.
+reset_mocks
+_MOCK_PR_HEAD="deadbeef"
+_MOCK_FROZEN_ROUND_COMMENTS=3
+_MOCK_MACHINE_MIDBODY_QUOTES=1
+_MOCK_ROUNDS_AUTHORKIND="human"
+_saved_bot_login="$BOT_LOGIN"; BOT_LOGIN=""
+assert_eq "CB-COUNT-009f: empty BOT_LOGIN (token mode) — genuine rounds (normalized human) still counted (3), mid-body quote still excluded" \
+  "3" "$(count_frozen_convergence_rounds 100 deadbeef "$AC_SUB")"
+BOT_LOGIN="$_saved_bot_login"
+
+# CB-COUNT-009g: the strictness gate is gated on BOT_LOGIN — with it SET, the
+# same human-authorKind rounds ARE excluded (proves 009f's acceptance flows from
+# the gate, not from a hole in the author filter).
+assert_eq "CB-COUNT-009g: BOT_LOGIN set — human-authorKind rounds excluded (0)" \
+  "0" "$(count_frozen_convergence_rounds 100 deadbeef "$AC_SUB")"
+
+# CB-COUNT-009e: the quote exclusions must not FLIP a below-threshold case above
+# it — 2 real + 2 quotes stays 2 (< threshold 3) so the breaker does not trip
+# (routing proceeds without a convergence halt).
+reset_mocks
+_MOCK_PR_HEAD="deadbeef"
+_MOCK_LAST_REVIEWED_HEAD="deadbeef"
+_MOCK_FROZEN_ROUND_COMMENTS=2
+_MOCK_HUMAN_QUOTE_COMMENTS=2
+_MOCK_PID_ALIVE=1
+prepare_log 100
+handle_completed_session_routing 100 "sid-cb009e" "2026-05-21T03:18:00Z"
+assert_not_contains "CB-COUNT-009e: 2 real + 2 quoted rounds does NOT trip the breaker" \
+  "reason=non-convergence" "$_MOCK_FULL_COMMENT_LOG"
+assert_not_contains "CB-COUNT-009e: no stalled transition" "pending-dev:stalled" "$_MOCK_LABEL_SWAPS"
 
 # ===========================================================================
 echo ""
