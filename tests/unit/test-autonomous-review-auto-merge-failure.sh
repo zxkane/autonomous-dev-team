@@ -100,10 +100,14 @@ assert_not_grep "no '--state closed' on gh issue edit" \
 echo ""
 echo "=== TC-AMF-002: auto-merge failure branch flips issue to pending-dev ==="
 # ---------------------------------------------------------------------------
-# The auto-merge failure branch must add pending-dev (not approved) so the
-# dispatcher's Step 4 picks the issue up for re-dispatch.
-assert_grep "auto-merge failure branch references pending-dev" \
-  'add-label +.?pending-dev' "$WRAPPER_CODE"
+# The auto-merge failure branch must flip the issue to pending-dev (not approved)
+# so the dispatcher's Step 4 picks the issue up for re-dispatch. As of #331
+# ([INV-97]) this routes through the ITP verb `itp_transition_state … "pending-dev"`
+# (single-remove `reviewing` → add `pending-dev`) rather than a raw
+# `gh issue edit --add-label pending-dev`; accept either the migrated verb form
+# or the legacy raw flag.
+assert_grep "auto-merge failure branch references pending-dev (itp_transition_state or raw add-label)" \
+  'itp_transition_state +.?\$ISSUE_NUMBER.?[^)]*pending-dev|add-label +.?pending-dev' "$WRAPPER_CODE"
 
 # The auto-merge failure branch must NOT remove the autonomous label —
 # pending-dev without autonomous is invisible to the dispatcher's

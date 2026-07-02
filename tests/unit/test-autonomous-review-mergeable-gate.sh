@@ -118,8 +118,12 @@ assert_grep "TC-MG-SRC-07 CONFLICTING path emits failed-substantive trailer" \
   'emit_verdict_trailer .*"failed-substantive"' "$WRAPPER"
 assert_grep "TC-MG-SRC-08 UNKNOWN path emits failed-non-substantive mergeable-unknown" \
   'emit_verdict_trailer .*"failed-non-substantive" "mergeable-unknown"' "$WRAPPER"
-assert_grep "TC-MG-SRC-09 block paths flip -reviewing +pending-dev" \
-  'add-label "pending-dev"' "$WRAPPER"
+# As of #331 ([INV-97]) the last raw `gh issue edit --add-label "pending-dev"` flip
+# (the auto-merge-fail re-queue) was migrated to the ITP verb, so EVERY
+# reviewing→pending-dev flip in the wrapper — including the mergeable-gate block
+# paths — now routes through `itp_transition_state … "reviewing" "pending-dev"`.
+assert_grep "TC-MG-SRC-09 block paths flip -reviewing +pending-dev (via itp_transition_state)" \
+  'itp_transition_state "\$ISSUE_NUMBER" "reviewing" "pending-dev"' "$WRAPPER"
 assert_grep "TC-MG-SRC-10 UNKNOWN retry loop reads MERGEABLE_RETRIES" \
   'MERGEABLE_RETRIES' "$WRAPPER"
 

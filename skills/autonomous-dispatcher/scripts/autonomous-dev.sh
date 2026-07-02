@@ -832,9 +832,9 @@ EOF
   if [[ $exit_code -eq 0 ]]; then
     if [[ "$PR_EXISTS" -gt 0 ]]; then
       # PR found: move to pending-review for the review agent
-      gh issue edit "$ISSUE_NUMBER" --repo "$REPO" \
-        --remove-label "in-progress" --remove-label "pending-dev" \
-        --add-label "pending-review" || log "WARNING: Failed to update issue labels"
+      # [INV-97] CSV multi-remove: route the atomic 2-remove+1-add flip through
+      # the ITP verb (REMOVE is a comma-separated list). Byte-identical edit.
+      itp_transition_state "$ISSUE_NUMBER" "in-progress,pending-dev" "pending-review" || log "WARNING: Failed to update issue labels"
     else
       # Agent exited 0 but no PR was created — retry development
       log "WARNING: Agent exited 0 but no PR was created for issue #${ISSUE_NUMBER}"

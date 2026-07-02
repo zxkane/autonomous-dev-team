@@ -29,11 +29,6 @@
     {
       "count": 1,
       "file": "autonomous-dev.sh",
-      "content": "gh issue edit \"$ISSUE_NUMBER\" --repo \"$REPO\" \\"
-    },
-    {
-      "count": 1,
-      "file": "autonomous-dev.sh",
       "content": "if [[ -n \"${ISSUE_NUMBER:-}\" ]] && command -v gh &>/dev/null; then"
     },
     {
@@ -114,11 +109,6 @@
     {
       "count": 1,
       "file": "autonomous-review.sh",
-      "content": "gh issue edit \"$ISSUE_NUMBER\" --repo \"$REPO\" \\"
-    },
-    {
-      "count": 1,
-      "file": "autonomous-review.sh",
       "content": "gh issue view ${ISSUE_NUMBER} --repo ${REPO} --json comments \\\\"
     },
     {
@@ -140,11 +130,6 @@
       "count": 1,
       "file": "autonomous-review.sh",
       "content": "if ! _comment_err=$(gh pr comment \"$PR_NUMBER\" --repo \"$REPO\" \\"
-    },
-    {
-      "count": 1,
-      "file": "autonomous-review.sh",
-      "content": "if ! _edit_err=$(gh issue edit \"$ISSUE_NUMBER\" --repo \"$REPO\" \\"
     },
     {
       "count": 1,
@@ -190,11 +175,6 @@
       "count": 1,
       "file": "lib-auth.sh",
       "content": "if ! command -v gh &>/dev/null || ! gh auth status &>/dev/null 2>&1; then"
-    },
-    {
-      "count": 1,
-      "file": "lib-dispatch.sh",
-      "content": "gh \"${args[@]}\" 2>/dev/null || true"
     },
     {
       "count": 1,
