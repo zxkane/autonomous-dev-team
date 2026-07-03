@@ -108,7 +108,7 @@ label_swap() {
 mark_stalled() { _MOCK_MARK_STALLED_CALLS+="${1} "; }
 post_dispatch_token() { _MOCK_POST_TOKEN_CALLS+="${1}:${2} "; }
 dispatch() { _MOCK_DISPATCH_CALLS+="${1}:${2} "; }
-# [INV-106] (#361): this suite exercises handle_completed_session_routing's
+# [INV-108] (#361): this suite exercises handle_completed_session_routing's
 # OWN dispatch decisions, not the controller-side dedup marker (that is
 # test-controller-dispatch-dedup-361.sh's job) — stub it to always acquire so
 # repeated calls against the same issue #100 across cases never collide on a

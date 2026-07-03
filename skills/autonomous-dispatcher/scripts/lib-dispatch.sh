@@ -76,7 +76,7 @@ if ! declare -F chp_ci_status >/dev/null 2>&1; then
   unset _ld_self _ld_dir
 fi
 
-# [INV-106] (302b, #361): pid_dir_for_project() (lib-config.sh) is the shared
+# [INV-108] (302b, #361): pid_dir_for_project() (lib-config.sh) is the shared
 # per-user runtime-dir resolver the controller-side dispatch marker (below)
 # reuses — same idempotent, symlink-defended directory `acquire_pid_guard`
 # already writes PID/heartbeat files into. dispatcher-tick.sh sources
@@ -1918,13 +1918,13 @@ CBREPORT
       # bounds dev-new to exactly one attempt per unchanged HEAD (#274 proposal
       # #2, N=1) only once a fresh session is actually launched.
       #
-      # [INV-106] (302b, #361 R1): acquire BEFORE any side effect of this
+      # [INV-108] (302b, #361 R1): acquire BEFORE any side effect of this
       # branch. This router has two entry points (Step 4b.5.1 directly, and
       # Step 4a.5's same-HEAD delegation, [INV-98]) — a concurrent tick racing
       # either path for the same issue must be caught here, not just at a
       # single dispatcher-tick.sh call site.
       if ! acquire_dispatch_marker "$issue_num" "dev-new"; then
-        log "  issue #${issue_num} dev-new dispatch marker held by a concurrent tick — skipping INV-35 fresh-dev ([INV-106])"
+        log "  issue #${issue_num} dev-new dispatch marker held by a concurrent tick — skipping INV-35 fresh-dev ([INV-108])"
         return 0
       fi
       log "  issue #${issue_num} substantive review failure on completed session ${session_id} — minting fresh dev session"
@@ -1961,7 +1961,7 @@ CBREPORT
         log "  ERROR: failed to truncate ${_log_location} (perm/disk/SSM?). Skipping INV-35 dev-new dispatch to avoid re-detection loop."
         itp_post_comment "$issue_num" \
           "Could not reset agent log at \`${_log_location}\` for fresh INV-35 dispatch (permission, disk, or SSM transport error). Operator: please clear the log file and retry. Skipping dispatch to prevent a silent retry loop." 2>/dev/null || true
-        # [INV-106] (#361 review [P1]): no wrapper will launch this tick for
+        # [INV-108] (#361 review [P1]): no wrapper will launch this tick for
         # this (issue, mode) — release NOW rather than let it sit for the
         # full TTL. MAX_RETRIES still bounds the retry budget; this only
         # controls how soon the NEXT tick is allowed to try again.
@@ -1971,7 +1971,7 @@ CBREPORT
       label_swap "$issue_num" "pending-dev" "in-progress"
       post_dispatch_token "$issue_num" "dev-new"
       dispatch dev-new "$issue_num"
-      # [INV-106] (#361 review [P1]): dispatch() returned — a wrapper is
+      # [INV-108] (#361 review [P1]): dispatch() returned — a wrapper is
       # confirmed launched. Confirm so the tick-level EXIT trap leaves this
       # marker alone; it lives out its normal TTL.
       dispatch_marker_confirm_launched "$issue_num" "dev-new"
@@ -2036,7 +2036,7 @@ CBREPORT
 #   <!-- dispatcher-token: <uuid> at <iso8601> mode=<dev-new|dev-resume|review> run=<run-id> -->
 #   Dispatching autonomous development...
 #
-# The `run=<run-id>` field is [INV-106] (302b, #361) — optional in the regex
+# The `run=<run-id>` field is [INV-108] (302b, #361) — optional in the regex
 # for backward compat with pre-#361 marker comments that lack it. The HTML
 # comment is machine-parseable; the human-readable line preserves the
 # existing wording for backward compat. Three roles:
@@ -2053,7 +2053,7 @@ CBREPORT
 #      dispatch this?" — which used to fail when the agent crashed before
 #      its EXIT trap.
 #
-#   3. Forensic attribution ([INV-106], #361). `run=` carries the dispatching
+#   3. Forensic attribution ([INV-108], #361). `run=` carries the dispatching
 #      tick's run id (or a pid+start-ts fallback — see `_dispatcher_run_id`),
 #      so a duplicate pair of tokens on one issue (the #298 incident: two
 #      overlapping controller ticks each dispatched the same (issue, mode))
@@ -2088,7 +2088,7 @@ _iso_age_seconds() {
 # stat fails. Cross-platform (GNU `stat -c %Y` vs BSD `stat -f %m`). Shared by
 # pid_alive's tier-2/tier-3 mtime checks and acquire_dispatch_marker's TTL
 # comparison — the same one-liner was duplicated three times before this
-# extraction (INV-106, #361 review).
+# extraction (INV-108, #361 review).
 _mtime_epoch() {
   stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo ""
 }
@@ -2110,7 +2110,7 @@ is_within_grace_period() {
 }
 
 # Echoes a stable identifier for THIS dispatcher tick process, for the
-# dispatch-token's `run=` field ([INV-106], #361 R2). Honors an externally
+# dispatch-token's `run=` field ([INV-108], #361 R2). Honors an externally
 # injected `DISPATCHER_RUN_ID` (e.g. the orchestration layer that schedules
 # ticks — OpenClaw's cron run id, or a future multi-tick per-project id) when
 # present; otherwise mints `$$-<epoch-seconds>` (pid + this process's start
@@ -2157,7 +2157,7 @@ post_dispatch_token() {
   # like every other marker. The `<!-- dispatcher-token: … -->` HTML marker text is
   # composed CALLER-side and passed verbatim as the BODY (GitHub's html channel
   # round-trips it unchanged; the read-side capture() depends on it surviving).
-  # [INV-106] (#361 R2): `run=${run_id}` is APPENDED after `mode=` — the comment
+  # [INV-108] (#361 R2): `run=${run_id}` is APPENDED after `mode=` — the comment
   # format stays backward-compatible (existing `capture()`/`test()` readers key
   # on the `dispatcher-token:` prefix and `mode=` token, never on what follows).
   itp_post_comment "$issue_num" "<!-- dispatcher-token: ${token} at ${now} mode=${mode} run=${run_id} -->
@@ -2165,7 +2165,7 @@ ${human}"
 }
 
 # ---------------------------------------------------------------------------
-# Controller-side per-(issue,mode) dispatch dedup marker ([INV-106], 302b, #361)
+# Controller-side per-(issue,mode) dispatch dedup marker ([INV-108], 302b, #361)
 # ---------------------------------------------------------------------------
 #
 # Closes the #298 incident: two overlapping controller ticks (e.g. a slow
@@ -2248,7 +2248,7 @@ acquire_dispatch_marker() {
     # full, etc.) — fail OPEN. 302a's wrapper-host atomic lock is the
     # definitive second line of defense; a controller-side infra hiccup must
     # never freeze the whole pipeline's dispatch.
-    echo "[lib-dispatch] WARN: acquire_dispatch_marker could not resolve pid_dir_for_project — proceeding without controller-side dedup for issue #${issue_num} mode=${mode} (302a wrapper-host lock remains) [INV-106]" >&2
+    echo "[lib-dispatch] WARN: acquire_dispatch_marker could not resolve pid_dir_for_project — proceeding without controller-side dedup for issue #${issue_num} mode=${mode} (302a wrapper-host lock remains) [INV-108]" >&2
     return 0
   fi
 
@@ -2259,7 +2259,7 @@ acquire_dispatch_marker() {
   # Symlink defense-in-depth, same posture as [INV-02]'s PID-file check —
   # fail OPEN (a planted symlink must not be able to block dispatch entirely).
   if [ -L "$marker_dir" ]; then
-    echo "[lib-dispatch] WARN: dispatch marker path is a symlink — refusing to use it (issue #${issue_num} mode=${mode}) [INV-106]" >&2
+    echo "[lib-dispatch] WARN: dispatch marker path is a symlink — refusing to use it (issue #${issue_num} mode=${mode}) [INV-108]" >&2
     return 0
   fi
 
@@ -2289,7 +2289,7 @@ acquire_dispatch_marker() {
       return 0
     fi
     if [ ! -e "$marker_dir" ] && [ ! -L "$marker_dir" ]; then
-      echo "[lib-dispatch] WARN: dispatch-marker creation failed twice (non-EEXIST: permissions/ENOSPC?) — proceeding without controller-side dedup for issue #${issue_num} mode=${mode} (302a wrapper-host lock remains) [INV-106]" >&2
+      echo "[lib-dispatch] WARN: dispatch-marker creation failed twice (non-EEXIST: permissions/ENOSPC?) — proceeding without controller-side dedup for issue #${issue_num} mode=${mode} (302a wrapper-host lock remains) [INV-108]" >&2
       return 0
     fi
     # Path appeared between retry-mkdir and re-check — a concurrent acquire
@@ -2329,7 +2329,7 @@ acquire_dispatch_marker() {
 }
 
 # ---------------------------------------------------------------------------
-# Auto-release on pre-spawn failure ([INV-106] follow-up, #361 review [P1])
+# Auto-release on pre-spawn failure ([INV-108] follow-up, #361 review [P1])
 # ---------------------------------------------------------------------------
 #
 # codex finding: `acquire_dispatch_marker` runs before label edits, notice

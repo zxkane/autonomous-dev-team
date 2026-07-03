@@ -108,11 +108,11 @@ pid_alive() { return 1; }
 get_pid() { echo ""; }
 label_swap() { :; }
 was_just_dispatched() { return 1; }
-# [INV-106] (#361): dispatcher-tick.sh's Step 2/3/4 dispatch sites now gate on
+# [INV-108] (#361): dispatcher-tick.sh's Step 2/3/4 dispatch sites now gate on
 # acquire_dispatch_marker before dispatching; this sandbox's auth-block tests
 # don't exercise controller-side dedup, so always acquire.
 acquire_dispatch_marker() { return 0; }
-# [INV-106] (#361 review [P1]): dispatcher-tick.sh installs a `trap
+# [INV-108] (#361 review [P1]): dispatcher-tick.sh installs a `trap
 # _dispatch_marker_release_pending EXIT` right after sourcing lib-dispatch.sh
 # (real function), and Step 2/3/4 call `dispatch_marker_confirm_launched`
 # after a successful dispatch() — both are unconditional call sites (not

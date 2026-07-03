@@ -1,9 +1,9 @@
-# Design — controller-side per-(issue,mode) dispatch dedup + run-id attribution (#361, 302b, INV-106)
+# Design — controller-side per-(issue,mode) dispatch dedup + run-id attribution (#361, 302b, INV-108)
 
 > 302b of the #302 pair. 302a (#360/INV-103) closed the wrapper-HOST start race with a
 > kernel-held `flock`; this half closes the controller-side tick-vs-tick race that let two
 > overlapping dispatcher ticks each dispatch the same `(issue, mode)` — the #298 incident
-> (three duplicate `dispatcher-token` pairs ~1s apart). Full normative contract: INV-106
+> (three duplicate `dispatcher-token` pairs ~1s apart). Full normative contract: INV-108
 > in `docs/pipeline/invariants.md` (this canvas is the narrative; the invariant is the spec).
 
 ## Problem
@@ -58,4 +58,4 @@ Step 2/3/4 dispatch site (×4 in dispatcher-tick.sh)
 10-way mkdir race; TTL block/reclaim; the three fail-open classes + plain-file boundary
 control; run= format/override/cache + backward compat; verbatim-extracted guard blocks
 executed against the real functions (mutation-tested); acquire/confirm call-count parity
-in BOTH files; EXIT-trap installation. Full per-TC inventory: INV-106 **Test** section.
+in BOTH files; EXIT-trap installation. Full per-TC inventory: INV-108 **Test** section.

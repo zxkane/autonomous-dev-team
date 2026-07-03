@@ -77,7 +77,7 @@ dispatch() {
   _MOCK_DISPATCH_CALLS+="${1}:${2} "
 }
 
-# [INV-106] (#361): handle_completed_session_routing's own INV-35 fresh-dev
+# [INV-108] (#361): handle_completed_session_routing's own INV-35 fresh-dev
 # branch now gates on acquire_dispatch_marker before dispatching; this suite
 # exercises the routing decision itself, not controller-side dedup, so always
 # acquire.
@@ -137,7 +137,7 @@ dispatch() {
   _MOCK_DISPATCH_CALLS+="${1}:${2} "
 }
 
-# [INV-106] (#361): handle_completed_session_routing's own INV-35 fresh-dev
+# [INV-108] (#361): handle_completed_session_routing's own INV-35 fresh-dev
 # branch now gates on acquire_dispatch_marker before dispatching; this suite
 # exercises the routing decision itself, not controller-side dedup, so always
 # acquire.

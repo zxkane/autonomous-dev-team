@@ -79,7 +79,7 @@ unset _req
 # shellcheck source=lib-dispatch.sh
 source "${LIB_DIR}/lib-dispatch.sh"
 
-# [INV-106] (#361 review [P1]): release any controller-side dispatch marker
+# [INV-108] (#361 review [P1]): release any controller-side dispatch marker
 # that was acquired but never confirmed launched, no matter how this tick
 # process ends. `acquire_dispatch_marker` runs before label edits, notice
 # comments, log resets, token posting, and `dispatch()` itself — every one of
@@ -305,12 +305,12 @@ for i in $(seq 0 $((new_count - 1))); do
     continue
   fi
 
-  # [INV-106] (302b, #361 R1): acquire the controller-side per-(issue,mode)
+  # [INV-108] (302b, #361 R1): acquire the controller-side per-(issue,mode)
   # dispatch marker BEFORE any side effect (label edit / token / dispatch) for
   # this issue. A losing acquire means a concurrent tick already owns this
   # dispatch — skip cleanly, no error, no label edit, no dispatch() call.
   if ! acquire_dispatch_marker "$issue_num" "dev-new"; then
-    log "  issue #${issue_num} dev-new dispatch marker held by a concurrent tick — skipping ([INV-106])"
+    log "  issue #${issue_num} dev-new dispatch marker held by a concurrent tick — skipping ([INV-108])"
     continue
   fi
 
@@ -359,7 +359,7 @@ for i in $(seq 0 $((new_count - 1))); do
   # grace window before classifying the wrapper as crashed.
   post_dispatch_token "$issue_num" "dev-new"
   dispatch dev-new "$issue_num"
-  # [INV-106] (#361 review [P1]): dispatch() returned — a wrapper is
+  # [INV-108] (#361 review [P1]): dispatch() returned — a wrapper is
   # confirmed launched. Confirm so the EXIT-trap release above leaves this
   # marker alone; it lives out its normal TTL.
   dispatch_marker_confirm_launched "$issue_num" "dev-new"
@@ -383,9 +383,9 @@ for i in $(seq 0 $((pr_count - 1))); do
 
   issue_num=$(jq -r ".[$i].number" <<<"$pending_review")
 
-  # [INV-106] (302b, #361 R1) — see the Step 2 comment above.
+  # [INV-108] (302b, #361 R1) — see the Step 2 comment above.
   if ! acquire_dispatch_marker "$issue_num" "review"; then
-    log "  issue #${issue_num} review dispatch marker held by a concurrent tick — skipping ([INV-106])"
+    log "  issue #${issue_num} review dispatch marker held by a concurrent tick — skipping ([INV-108])"
     continue
   fi
 
@@ -393,7 +393,7 @@ for i in $(seq 0 $((pr_count - 1))); do
   label_swap "$issue_num" "pending-review" "reviewing"
   post_dispatch_token "$issue_num" "review"
   dispatch review "$issue_num"
-  # [INV-106] (#361 review [P1]) — see the Step 2 confirm comment above.
+  # [INV-108] (#361 review [P1]) — see the Step 2 confirm comment above.
   dispatch_marker_confirm_launched "$issue_num" "review"
   JUST_DISPATCHED+=("$issue_num")
 done
@@ -475,12 +475,12 @@ for i in $(seq 0 $((pd_count - 1))); do
   _session_end_iso=""
   if [ -n "$session_id" ] && is_session_completed "$issue_num" _session_terminal_reason _session_end_iso; then
     if [ "$_session_terminal_reason" = "prompt_too_long" ]; then
-      # [INV-106] (302b, #361 R1): acquire BEFORE any side effect of this
+      # [INV-108] (302b, #361 R1): acquire BEFORE any side effect of this
       # branch (notice post, log truncate, dispatch) — all of it leads to a
       # dev-new dispatch for this issue, so a concurrent tick already owning
       # it must short-circuit the whole branch, not just the final dispatch().
       if ! acquire_dispatch_marker "$issue_num" "dev-new"; then
-        log "  issue #${issue_num} dev-new dispatch marker held by a concurrent tick — skipping PTL recovery ([INV-106])"
+        log "  issue #${issue_num} dev-new dispatch marker held by a concurrent tick — skipping PTL recovery ([INV-108])"
         continue
       fi
       log "  issue #${issue_num} session ${session_id} hit prompt_too_long — clearing for fresh dispatch"
@@ -527,7 +527,7 @@ for i in $(seq 0 $((pd_count - 1))); do
         log "  ERROR: failed to truncate ${_ptl_log_location} (perm/disk/SSM?). Skipping PTL dev-new dispatch to avoid re-detection loop."
         itp_post_comment "$issue_num" \
           "Could not reset prompt-too-long log at \`${_ptl_log_location}\` for fresh dispatch (permission, disk, or SSM transport error). Operator: please clear the log file and retry. Skipping dispatch to prevent a silent retry loop." 2>/dev/null || true
-        # [INV-106] (#361 review [P1]): no wrapper will launch this tick for
+        # [INV-108] (#361 review [P1]): no wrapper will launch this tick for
         # this (issue, mode) — release NOW rather than let it sit for the
         # full TTL. MAX_RETRIES still bounds the retry budget; this only
         # controls how soon the NEXT tick is allowed to try again.
@@ -538,7 +538,7 @@ for i in $(seq 0 $((pd_count - 1))); do
       label_swap "$issue_num" "pending-dev" "in-progress"
       post_dispatch_token "$issue_num" "dev-new"
       dispatch dev-new "$issue_num"
-      # [INV-106] (#361 review [P1]) — see the Step 2 confirm comment above.
+      # [INV-108] (#361 review [P1]) — see the Step 2 confirm comment above.
       dispatch_marker_confirm_launched "$issue_num" "dev-new"
       JUST_DISPATCHED+=("$issue_num")
       continue
@@ -556,9 +556,9 @@ for i in $(seq 0 $((pd_count - 1))); do
     continue
   fi
 
-  # [INV-106] (302b, #361 R1) — see the Step 2 comment above.
+  # [INV-108] (302b, #361 R1) — see the Step 2 comment above.
   if ! acquire_dispatch_marker "$issue_num" "dev-resume"; then
-    log "  issue #${issue_num} dev-resume dispatch marker held by a concurrent tick — skipping ([INV-106])"
+    log "  issue #${issue_num} dev-resume dispatch marker held by a concurrent tick — skipping ([INV-108])"
     continue
   fi
 
@@ -566,7 +566,7 @@ for i in $(seq 0 $((pd_count - 1))); do
   label_swap "$issue_num" "pending-dev" "in-progress"
   post_dispatch_token "$issue_num" "dev-resume"
   dispatch dev-resume "$issue_num" "$session_id"
-  # [INV-106] (#361 review [P1]) — see the Step 2 confirm comment above.
+  # [INV-108] (#361 review [P1]) — see the Step 2 confirm comment above.
   dispatch_marker_confirm_launched "$issue_num" "dev-resume"
   JUST_DISPATCHED+=("$issue_num")
 done

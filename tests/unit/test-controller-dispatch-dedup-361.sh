@@ -1,5 +1,5 @@
 #!/bin/bash
-# test-controller-dispatch-dedup-361.sh — [INV-106] / issue #361 (302b).
+# test-controller-dispatch-dedup-361.sh — [INV-108] / issue #361 (302b).
 #
 # Unit tests for the controller-side per-(issue,mode) dispatch dedup marker
 # (acquire_dispatch_marker, lib-dispatch.sh) and the dispatch-token run= field
@@ -162,7 +162,7 @@ acquire_dispatch_marker 502 dev-new
 assert_true "TC-DEDUP-361-003 first acquire for (502, dev-new) succeeds" $?
 
 acquire_dispatch_marker 502 dev-new
-assert_false "TC-DEDUP-361-003 second acquire for SAME (502, dev-new) within grace fails cleanly (rc 1)" $?
+assert_false "TC-DEDUP-361-004 second acquire for SAME (502, dev-new) within grace fails cleanly (rc 1)" $?
 
 # ---------------------------------------------------------------------------
 echo ""
