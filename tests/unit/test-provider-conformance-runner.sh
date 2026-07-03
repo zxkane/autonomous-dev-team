@@ -188,12 +188,23 @@ echo "=== AC4/AC5 sanity: this issue changed no wrapper/provider-leaf/caps-branc
 # itp-github.sh / chp-github.sh are UNTOUCHED by this PR (the design's explicit
 # non-goal) — a byte-diff-free sanity check that this test file did not drift
 # from that promise while iterating.
+#
+# Must NOT rely on the ambient checkout's 'origin/main' resolving: the
+# hermetic-unit CI job (which runs this file via the tests/unit/test-*.sh loop)
+# uses the DEFAULT (shallow, no origin/main) checkout — only the dedicated
+# spec-drift job fetches with fetch-depth: 0 (see check-provider-cutover.sh's
+# --require-trusted-ref, and TC-FINALBATCH-010 in test-provider-cutover.sh for
+# the same CI-topology note). A hard FAIL here on an unresolvable ref would be a
+# red herring unrelated to this PR's diff, so degrade to a SKIP instead.
 gh_itp_leaf="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/providers/itp-github.sh"
 gh_chp_leaf="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/providers/chp-github.sh"
-if git -C "$PROJECT_ROOT" diff --quiet origin/main -- "$gh_itp_leaf" "$gh_chp_leaf" 2>/dev/null; then
-  ok "AC4/AC5: itp-github.sh/chp-github.sh unchanged vs origin/main (no behavior change)"
+trusted_ref="${CUTOVER_TRUSTED_REF:-origin/main}"
+if ! git -C "$PROJECT_ROOT" rev-parse --verify --quiet "$trusted_ref" >/dev/null 2>&1; then
+  echo "  SKIP: AC4/AC5 unchanged-leaf check — trusted ref '$trusted_ref' not resolvable here (shallow/forked checkout)"
+elif git -C "$PROJECT_ROOT" diff --quiet "$trusted_ref" -- "$gh_itp_leaf" "$gh_chp_leaf" 2>/dev/null; then
+  ok "AC4/AC5: itp-github.sh/chp-github.sh unchanged vs $trusted_ref (no behavior change)"
 else
-  bad "AC4/AC5: itp-github.sh/chp-github.sh DIFFER from origin/main — this issue must not change GitHub leaf behavior"
+  bad "AC4/AC5: itp-github.sh/chp-github.sh DIFFER from $trusted_ref — this issue must not change GitHub leaf behavior"
 fi
 
 # ===========================================================================
