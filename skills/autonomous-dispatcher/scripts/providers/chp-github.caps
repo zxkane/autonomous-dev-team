@@ -1,7 +1,7 @@
 # providers/chp-github.caps — GitHub Code-Host Provider capability manifest.
 #
 # Declarative key=value, PARSED (never sourced) by the chp_caps reader in
-# lib-code-host.sh ([INV-88], spec §4 / §10 Q1). Describes EXACTLY today's
+# lib-code-host.sh ([INV-88], spec §4). Describes EXACTLY today's
 # GitHub behavior — the no-behavior-change anchor. native_issue_pr_link=0 is
 # GitHub honestly declared (GitHub has NO native issue↔PR link and greps the PR
 # body for #N; GitLab is stronger here), NOT all-ones. Spec §4 / §4.2 / §4.3.

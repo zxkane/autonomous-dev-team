@@ -5,17 +5,19 @@
 # Mirrors tests/unit/test-cli-adapters.sh (the [INV-75] adapter precedent):
 #   - dispatch routing: itp_<verb> → itp_${ISSUE_PROVIDER}_<verb>,
 #     chp_<verb> → chp_${CODE_HOST}_<verb> (default provider = github);
-#   - all 14 ITP + 12 CHP shims defined after sourcing (declare -F), like
-#     TC-ADAPTER-EXTRACT-013;
+#   - all spec-derived ITP + CHP shims defined after sourcing (declare -F), like
+#     TC-ADAPTER-EXTRACT-013 (#367 R2: the verb sets are DERIVED from
+#     docs/pipeline/provider-spec.md §3.1/§3.2, not a hardcoded literal array —
+#     a new shim minted without a matching spec row, or a new spec row without a
+#     shipped shim, turns TC-001/002 or TC-050/051 red);
 #   - the readlink -f-of-BASH_SOURCE skill-tree resolution ([INV-14]/[INV-65]);
-#   - the .caps reader parses key=value and NEVER sources the manifest (§4/§10);
+#   - the .caps reader parses key=value and NEVER sources the manifest (§4);
 #   - the named degraded fake fixture provider exercises every caps=0 branch;
 #   - the fake-skill-tree fixture rule extends cp -r adapters/ to cp -r
 #     providers/.
 #
-# NO golden-trace test: no verb leaf carries a real `gh` argv in this PR (no
-# leaf is migrated — scaffolds are empty of verb bodies), so there is no argv to
-# pin (spec §7.2). Golden-trace lands in the leaf-migration siblings.
+# GitHub leaf migration is COMPLETE (#281-#284, #296 second-tier) — see
+# TC-PROVIDER-DISPATCH-020..022 below for the migrated-leaf assertions.
 #
 # IDs: TC-PROVIDER-DISPATCH-NNN.
 #
@@ -27,6 +29,7 @@ PASS=0
 FAIL=0
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+SPEC="$PROJECT_ROOT/docs/pipeline/provider-spec.md"
 SCRIPTS="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts"
 ITP_LIB="$SCRIPTS/lib-issue-provider.sh"
 CHP_LIB="$SCRIPTS/lib-code-host.sh"
@@ -41,22 +44,43 @@ assert_eq() { local d="$1" e="$2" a="$3"; if [[ "$e" == "$a" ]]; then ok "$d"; e
 assert_contains() { local d="$1" n="$2" h="$3"; if [[ "$h" == *"$n"* ]]; then ok "$d"; else bad "$d"; echo "      needle='$n'"; echo "      haystack='${h:0:300}'"; fi; }
 assert_not_contains() { local d="$1" n="$2" h="$3"; if [[ "$h" != *"$n"* ]]; then ok "$d"; else bad "$d"; echo "      should not contain: '$n'"; fi; }
 
-# The 14 ITP verbs (spec §3.1) and 12 CHP verbs (spec §3.2), verbatim.
-# (itp_label_event_ts is the #323 second-tier observe-only TTHW verb.)
-ITP_VERBS=(
-  itp_list_by_state itp_count_by_state itp_list_forbidden_combos
-  itp_transition_state itp_read_task itp_post_comment itp_edit_comment
-  itp_list_comments itp_resolve_dep itp_mark_checkbox itp_provision_states
-  itp_begin_tick itp_label_event_ts itp_caps
-)
-CHP_VERBS=(
-  chp_find_pr_for_issue chp_ci_status chp_mergeable chp_create_pr chp_approve
-  chp_request_changes chp_merge chp_review_threads chp_resolve_thread
-  chp_trigger_bot chp_close_keyword chp_caps
-)
+# spec_verbs <section-start-re> <section-end-re> <prefix> <spec-file> — DERIVE the
+# verb set from the spec's §3.1/§3.2 tables (#367 R2), mirroring
+# test-provider-spec.sh's derivation so both suites self-pin to the same ground
+# truth. One row (chp_review_threads/chp_resolve_thread) names two verbs.
+spec_verbs() {
+  local start_re="$1" end_re="$2" prefix="$3" file="$4"
+  awk -v start="$start_re" -v end="$end_re" -v pfx="$prefix" '
+    $0 ~ start { f = 1; next }
+    $0 ~ end   { f = 0 }
+    f && /^\|/ {
+      n = split($0, parts, "|")
+      col = parts[2]
+      pat = "`" pfx "_[a-zA-Z_]+"
+      while (match(col, pat)) {
+        print substr(col, RSTART + 1, RLENGTH - 1)
+        col = substr(col, RSTART + RLENGTH)
+      }
+    }
+  ' "$file" | sort -u
+}
+# shipped_shims <lib-file> <prefix> — the ACTUAL shipped dispatch shims, the other
+# half of the derive-from-spec cross-check. chp_has_leaf is EXCLUDED (documented in
+# provider-spec.md §3.2 as a caller-side guard helper, not a verb).
+shipped_shims() {
+  local file="$1" prefix="$2"
+  grep -oE "^${prefix}_[a-zA-Z_]+\\(\\)" "$file" 2>/dev/null \
+    | sed -E 's/\(\)$//' | grep -v "^${prefix}_has_leaf$" | sort -u
+}
+
+# The ITP verbs (spec §3.1) and CHP verbs (spec §3.2), DERIVED from the spec's own
+# tables — not a hardcoded count. (itp_label_event_ts is the #323 second-tier
+# observe-only TTHW verb.)
+mapfile -t ITP_VERBS < <(spec_verbs '^### 3\.1' '^### 3\.2' itp "$SPEC")
+mapfile -t CHP_VERBS < <(spec_verbs '^### 3\.2' '^### 3\.3' chp "$SPEC")
 
 # ---------------------------------------------------------------------------
-echo "=== TC-PROVIDER-DISPATCH-001: all 14 ITP shims defined after sourcing lib-issue-provider.sh ==="
+echo "=== TC-PROVIDER-DISPATCH-001: all spec-derived ITP shims defined after sourcing lib-issue-provider.sh (${#ITP_VERBS[@]} found in spec §3.1) ==="
 # ---------------------------------------------------------------------------
 itp_defined=$(
   env -u ISSUE_PROVIDER -u AUTONOMOUS_CONF -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR \
@@ -69,7 +93,7 @@ done
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== TC-PROVIDER-DISPATCH-002: all 12 CHP shims defined after sourcing lib-code-host.sh ==="
+echo "=== TC-PROVIDER-DISPATCH-002: all spec-derived CHP shims defined after sourcing lib-code-host.sh (${#CHP_VERBS[@]} found in spec §3.2) ==="
 # ---------------------------------------------------------------------------
 chp_defined=$(
   env -u CODE_HOST -u AUTONOMOUS_CONF -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR \
@@ -195,7 +219,7 @@ assert_eq "reader skips # comments and blank lines, returns the value" "1" "$com
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== TC-PROVIDER-DISPATCH-016: .caps reader is parsed-NEVER-sourced (§4/§10 Q1) ==="
+echo "=== TC-PROVIDER-DISPATCH-016: .caps reader is parsed-NEVER-sourced (§4) ==="
 # ---------------------------------------------------------------------------
 # The reader body must NOT `source` / `.` the .caps path; it must use a parse
 # loop. Inspect the reader function source (strip comments first so a comment
@@ -378,6 +402,53 @@ e2e_fixture="$SCRIPT_DIR/test-entry-point-startup-e2e.sh"
 e2e_src=$(cat "$e2e_fixture")
 assert_contains "entry-point startup E2E fixture copies adapters/" 'cp -r "$DISPATCHER_SCRIPTS/adapters"' "$e2e_src"
 assert_contains "entry-point startup E2E fixture also copies providers/" 'cp -r "$DISPATCHER_SCRIPTS/providers"' "$e2e_src"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-PROVIDER-DISPATCH-050: spec §3.1 ITP verb set == shipped lib-issue-provider.sh shim set (derive-from-spec, #367 R2) ==="
+# ---------------------------------------------------------------------------
+mapfile -t ITP_SHIMS < <(shipped_shims "$ITP_LIB" itp)
+itp_spec_joined=$(printf '%s\n' "${ITP_VERBS[@]}")
+itp_shim_joined=$(printf '%s\n' "${ITP_SHIMS[@]}")
+if [[ "$itp_spec_joined" == "$itp_shim_joined" ]]; then
+  ok "spec §3.1 ITP verb set (${#ITP_VERBS[@]}) == shipped lib-issue-provider.sh shims (${#ITP_SHIMS[@]})"
+else
+  bad "spec §3.1 ITP verb set != shipped shims"
+  comm -3 <(printf '%s\n' "${ITP_VERBS[@]}") <(printf '%s\n' "${ITP_SHIMS[@]}") | sed 's/^/      diff: /'
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-PROVIDER-DISPATCH-051: spec §3.2 CHP verb set == shipped lib-code-host.sh shim set (derive-from-spec, #367 R2) ==="
+# ---------------------------------------------------------------------------
+mapfile -t CHP_SHIMS < <(shipped_shims "$CHP_LIB" chp)
+chp_spec_joined=$(printf '%s\n' "${CHP_VERBS[@]}")
+chp_shim_joined=$(printf '%s\n' "${CHP_SHIMS[@]}")
+if [[ "$chp_spec_joined" == "$chp_shim_joined" ]]; then
+  ok "spec §3.2 CHP verb set (${#CHP_VERBS[@]}) == shipped lib-code-host.sh shims (${#CHP_SHIMS[@]})"
+else
+  bad "spec §3.2 CHP verb set != shipped shims"
+  comm -3 <(printf '%s\n' "${CHP_VERBS[@]}") <(printf '%s\n' "${CHP_SHIMS[@]}") | sed 's/^/      diff: /'
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-PROVIDER-DISPATCH-052: NEGATIVE proof — a shim added to a SCRATCH COPY without a spec row turns TC-051 RED ==="
+# ---------------------------------------------------------------------------
+# Mirrors the guard's scratch-copy pattern (test-provider-cutover.sh::fresh_scratch)
+# — never mutates the committed tree. The automated demonstration AC1 requires.
+NEG_WORK=$(mktemp -d)
+scratch_chp_lib="$NEG_WORK/lib-code-host.sh"
+cp "$CHP_LIB" "$scratch_chp_lib"
+printf '\nchp_frobnicate_unlisted() { chp_${CODE_HOST}_frobnicate_unlisted "$@"; }\n' >> "$scratch_chp_lib"
+mapfile -t chp_scratch_shims < <(shipped_shims "$scratch_chp_lib" chp)
+scratch_joined=$(printf '%s\n' "${chp_scratch_shims[@]}")
+if [[ "$scratch_joined" != "$chp_spec_joined" ]] && grep -qx "chp_frobnicate_unlisted" <<<"$scratch_joined"; then
+  ok "scratch shim WITHOUT a spec row (chp_frobnicate_unlisted) makes the derive-from-spec reconciliation RED"
+else
+  bad "scratch shim injection did not turn the reconciliation red — the derive-from-spec assertion is not catching an unlisted shim"
+fi
+rm -rf "$NEG_WORK"
 
 echo ""
 echo "=== SUMMARY: $PASS passed, $FAIL failed ==="
