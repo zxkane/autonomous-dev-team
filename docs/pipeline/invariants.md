@@ -5975,6 +5975,77 @@ behavior byte-identical after the factoring.
 - [INV-26](#inv-26-stall-decision-excludes-dispatcher-induced-terminations-and-defers-on-live-wrappers) — the live-PID deferral whose predicate is now the shared `may_stall_now` helper both this and `mark_stalled` call.
 - [`dispatcher-flow.md`](dispatcher-flow.md) § Step 4b.5.1 — the completed-session routing table this breaker's row extends.
 
+## INV-106: provider conformance is spec-defined and regression-pinned by a hermetic, provider-parameterized runner — any `itp-<name>.sh`/`chp-<name>.sh` + `.caps` pair must clear it
+
+_Triage (issue #236): [machine-checked: tests/unit/test-provider-conformance-runner.sh]_
+
+**Rule**: `tests/provider-conformance/run-provider-conformance.sh --itp <name>
+--chp <name>` asserts, per verb, the [`provider-spec.md`](provider-spec.md)
+§3.1/§3.2 contract for the provider-neutral subset of ITP/CHP verbs (§4.4's
+`ASSERTED` set) — output shape, fail-closed rc, sort stability, and each
+verb's documented failure contract (fail-closed for most write verbs; the
+spec-marked fail-SOFT observe/lookup verbs, e.g. `itp_label_event_ts`, keep
+their documented empty-rc-0 contract instead — asserting fail-closed there
+would contradict shipped behavior). It runs against BOTH the `github`
+reference provider and the `degraded` capability-limited fixture in CI; the
+`degraded` run's PASS semantics are caps-aware — a verb whose governing
+capability (§4.4's verb→cap map) reads `0`/absent is a `SKIP <verb> (cap:
+<name>)` line, never a `FAIL`, never silent — and a deliberately-broken
+third fixture provider proves the runner FAILs loud (one `FAIL` line per
+violated clause) on a wrong-shape, rc-0-on-error, missing-verb-function, or
+non-array-output leaf.
+
+The 13 gh-argv-passthrough verbs not yet given a provider-neutral
+conformance check (the W1 backlog — `itp_list_by_state`,
+`itp_count_by_state`, `itp_list_forbidden_combos`, `itp_read_task`,
+`chp_find_pr_for_issue`, `chp_ci_status`, `chp_mergeable`, `chp_pr_view`,
+`chp_pr_list`, `chp_list_inline_comments`, `chp_create_pr`, `chp_approve`,
+`chp_merge`) are honestly listed `CONTRACT-PENDING` in their spec rows and
+`pending` in the runner's `coverage.conf` — a tripwire set-diff (grep, not
+markdown parsing) FAILs the moment those two sets diverge, so a W1 slice that
+implements one of these verbs' contract MUST remove the spec token AND flip
+the runner's coverage line in the SAME PR (no verb can silently go from
+"conformance-checked" back to "not," and no PENDING verb can silently gain
+coverage that the spec doesn't reflect).
+
+**Why**: [`provider-spec.md`](provider-spec.md) promises "each normative
+clause maps 1:1 to a conformance check" — untrue before this invariant.
+Provider tests were GitHub-hardcoded golden traces
+(`tests/unit/test-itp-read-leaves.sh`,
+`tests/unit/test-itp-write-leaves.sh`, `tests/unit/test-chp-pr-lifecycle.sh`)
+that pin today's GitHub behavior but give no *backend-agnostic* acceptance
+gate — nothing proves a future `itp-gitlab.sh`/`chp-gitlab.sh` conforms to
+the spec rather than merely resembling GitHub's shape. This is [#347](https://github.com/zxkane/autonomous-dev-team/issues/347)'s
+W2 workstream: the parameterized runner lands now so later per-verb
+error-path/pagination fixtures (each W1 slice) have an executable definition
+of "conforms" to slot into, and phase-3 (a real GitLab provider) has a
+concrete acceptance gate rather than a hand-reviewed approximation.
+
+**Producer**: the runner's own helpers
+(`tests/provider-conformance/lib-provider-conformance.sh`) — caps parsing,
+provider-dir resolution, the scratch-provider-dir materialization that makes
+`--itp`/`--chp` two INDEPENDENT selection axes despite
+`lib-issue-provider.sh`/`lib-code-host.sh` both reading the single
+`AUTONOMOUS_PROVIDERS_DIR` env var at source time, and the shape/argv
+assertion primitives.
+**Consumer**: the CI `unit` job (`tests/unit/test-provider-conformance-runner.sh`,
+auto-discovered by the existing `for test in tests/unit/test-*.sh` loop — no
+`ci.yml` edit needed, mirroring [INV-91]'s scoped-token accommodation); any
+future issue implementing a new ITP/CHP backend, which MUST clear
+`--itp <name> --chp <name>` before merging.
+**Status**: **ENFORCED**.
+**Test**: `tests/unit/test-provider-conformance-runner.sh` — drives the
+runner against `github`/`github`, `github`/`degraded`, and the
+deliberately-broken `broken`/`broken` fixture; asserts the CONTRACT-PENDING
+tripwire fires when the spec/coverage sets diverge.
+
+**Cross-references**:
+- [INV-87](#inv-87-provider-dispatch-is-spec-defined--callers-route-every-issuecode-host-op-through-itp_chp_-never-a-raw-gh-in-the-caller-layer) — provider dispatch is spec-defined; this invariant is its conformance-gate counterpart.
+- [INV-88](#inv-88-the-github-caps-manifests-describe-current-behavior-exactly-the-no-behavior-change-anchor--honestly-declared-not-all-ones) — the `.caps` no-behavior-change anchor this runner's caps-aware SKIP logic reads.
+- [INV-90](#inv-90-the-normalized-issue-comment-shape-is-id-author-body-createdat-sorted-ascending-by-createdat-with-author-a-machine-handle-for-exact-equality) — the `itp_list_comments` normalized shape this runner asserts.
+- [INV-91](#inv-91-the-provider-neutral-caller-layer-routes-all-host-io-through-itp_chp_-verbs--a-new-raw-gh-outside-providers-is-a-ci-failing-cutover-regression-baseline-anchored) — the sibling anti-regression guard for the caller layer (raw-`gh` cutover); this invariant is the sibling guard for the provider LEAVES themselves.
+- [`provider-spec.md`](provider-spec.md) §10 — the per-verb `TC-PCONF-NNN` checklist this invariant's test satisfies.
+
 ## INV-107: dev-agent Step 5 verification runs as one synchronous command with a generous timeout — never backgrounded and polled across turns
 
 _Triage (issue #236): [design-rationale]_

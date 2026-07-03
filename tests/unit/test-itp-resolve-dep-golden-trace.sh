@@ -423,11 +423,17 @@ echo "=== TC-RDGT-010: check_deps_resolved skips dep-gating (no abort) for a pro
 # provider — never aborts, never spuriously blocks. GitHub DEFINES the leaf, so
 # production dep-gating is unaffected.
 #
-# (a) degraded provider (cross_ref_shorthand=0, no resolve_dep leaf) + a same-repo
-# `#N` dep under set -e → resolved, no abort, no `command not found`.
+# (a) a provider with genuinely NO resolve_dep leaf. (Issue #370 added
+# itp_degraded_resolve_dep to the degraded fixture so the provider-conformance
+# runner has a real body to assert against, so this regression pin now uses
+# its OWN leaf-less scratch provider dir — a bare .caps with no matching .sh —
+# to keep testing "leaf absent", not "leaf present and happens to resolve".)
+# + a same-repo `#N` dep under set -e → resolved, no abort, no `command not found`.
+noleaf_dir=$(mktemp -d)
+cp "$FAKE_PROVIDER/itp-degraded.caps" "$noleaf_dir/itp-noleaf.caps"
 deps_guard_out=$(
   env -u ISSUE_PROVIDER -u AUTONOMOUS_CONF -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR \
-      ISSUE_PROVIDER=degraded AUTONOMOUS_PROVIDERS_DIR="$FAKE_PROVIDER" \
+      ISSUE_PROVIDER=noleaf AUTONOMOUS_PROVIDERS_DIR="$noleaf_dir" \
       REPO="$REPO" REPO_OWNER="$REPO_OWNER" PROJECT_ID="$PROJECT_ID" MAX_RETRIES=3 MAX_CONCURRENT=5 \
   bash -c '
     set -euo pipefail
@@ -439,6 +445,7 @@ deps_guard_out=$(
     echo "REACHED-END"
   ' 2>&1
 )
+rm -rf "$noleaf_dir"
 assert_contains "no-resolve_dep-leaf provider + same-repo #N dep: check_deps_resolved did NOT abort under set -e" "REACHED-END" "$deps_guard_out"
 assert_contains "no-resolve_dep-leaf provider: dep-gating skipped → resolved (rc 0), not a spurious block" "DEPS-RC=0" "$deps_guard_out"
 assert_not_contains "no 'command not found' from an undefined provider resolve_dep leaf" "command not found" "$deps_guard_out"

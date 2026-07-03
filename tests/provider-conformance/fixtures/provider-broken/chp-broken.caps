@@ -1,0 +1,7 @@
+# chp-broken.caps — deliberately-broken fixture provider (issue #370 AC2).
+# Every cap is 1 so NOTHING legitimately SKIPs.
+
+native_issue_pr_link=1
+rest_request_changes=1
+review_bots=1
+merge_closes_issue=1

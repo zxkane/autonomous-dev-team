@@ -1,0 +1,46 @@
+{
+  "data": {
+    "repository": {
+      "pullRequest": {
+        "reviewThreads": {
+          "nodes": [
+            {
+              "id": "PRRT_1",
+              "isResolved": false,
+              "comments": {
+                "nodes": [
+                  {
+                    "databaseId": 200001,
+                    "path": "src/foo.sh",
+                    "line": 12,
+                    "originalLine": 12,
+                    "author": { "login": "codex[bot]" },
+                    "body": "fix this",
+                    "createdAt": "2026-01-01T00:00:00Z"
+                  }
+                ]
+              }
+            },
+            {
+              "id": "PRRT_2",
+              "isResolved": true,
+              "comments": {
+                "nodes": [
+                  {
+                    "databaseId": 200002,
+                    "path": "src/bar.sh",
+                    "line": 3,
+                    "originalLine": 3,
+                    "author": { "login": "zxkane" },
+                    "body": "looks good now",
+                    "createdAt": "2026-01-01T00:05:00Z"
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}
