@@ -390,16 +390,73 @@ v=""; c=""
 classify_recent_review_verdict 100 "$SESSION_END" v c
 assert_eq "TC-389-009 trailing newline tolerated" "failed-substantive" "$v"
 
-# TC-389-010: TWO trailers concatenated on one line are rejected. The anchor's
-# middle `[^>]*` cannot cross the first `-->`, so the second trailer trips the
-# `[[:space:]]*$` tail. Pins the mechanism against a future loosening of the
-# middle to `.*` (which would silently authenticate multi-trailer forgeries).
+# TC-389-010: TWO trailers concatenated on one line are rejected (the second
+# trailer trips the `[[:space:]]*$` tail). Pins the mechanism against a future
+# loosening that would silently authenticate multi-trailer forgeries.
 _MOCK_COMMENTS_JSON=$(jq -n \
   --argjson c1 "$(mkc "operator-user" "2026-05-21T05:30:00Z" "<!-- review-verdict: passed --><!-- review-verdict: failed-substantive -->")" \
   '[$c1]')
 v=""; c=""
 classify_recent_review_verdict 100 "$SESSION_END" v c
 assert_eq "TC-389-010 concatenated double trailer rejected" "none" "$v"
+
+# TC-389-011: unknown VERDICT token in an otherwise-bare trailer → none. The
+# no-signal grammar whitelists the three verdicts, so an anchored-but-unknown
+# body never becomes a candidate — the legacy `case *)`→failed-substantive arm
+# is unreachable under this branch (a forger cannot invent verdict vocabulary).
+_MOCK_COMMENTS_JSON=$(jq -n \
+  --argjson c1 "$(mkc "operator-user" "2026-05-21T05:30:00Z" "<!-- review-verdict: garbage-verdict-token -->")" \
+  '[$c1]')
+v=""; c=""
+classify_recent_review_verdict 100 "$SESSION_END" v c
+assert_eq "TC-389-011 unknown verdict token rejected" "none" "$v"
+
+# TC-389-012: unknown KEY token after a valid verdict → none (exact grammar:
+# only cause=/dev-actionable= may follow; mirrors the downstream trailer grep
+# so the legacy no-trailer fallback is unreachable under this branch too).
+_MOCK_COMMENTS_JSON=$(jq -n \
+  --argjson c1 "$(mkc "operator-user" "2026-05-21T05:30:00Z" "<!-- review-verdict: passed unknown=xxx -->")" \
+  '[$c1]')
+v=""; c=""
+classify_recent_review_verdict 100 "$SESSION_END" v c
+assert_eq "TC-389-012 unknown key token rejected" "none" "$v"
+
+# TC-389-013 (residual pin, token mode): a HUMAN author's byte-for-byte bare
+# trailer IS accepted when GH_AUTH_MODE != app. This is the documented,
+# accepted residual (round-13: token-mode genuine verdicts normalize to
+# authorKind=human, so an author gate would reject every genuine verdict).
+# Pinned so a future tightening changes this consciously, not silently.
+export GH_AUTH_MODE="token"
+_MOCK_COMMENTS_JSON=$(jq -n \
+  --argjson c1 "$(mkc "some-random-human" "2026-05-21T05:30:00Z" "<!-- review-verdict: failed-substantive -->")" \
+  '[$c1]')
+v=""; c=""
+classify_recent_review_verdict 100 "$SESSION_END" v c
+assert_eq "TC-389-013 token mode: human bare trailer accepted (documented residual)" "failed-substantive" "$v"
+
+# TC-389-014 (app-mode gate): the SAME human bare trailer is rejected under
+# GH_AUTH_MODE=app — the genuine wrapper posts under an App identity
+# (`…[bot]` ⇒ authorKind=bot), so human authors are excluded from the
+# no-signal candidate set entirely.
+export GH_AUTH_MODE="app"
+_MOCK_COMMENTS_JSON=$(jq -n \
+  --argjson c1 "$(mkc "some-random-human" "2026-05-21T05:30:00Z" "<!-- review-verdict: failed-substantive -->")" \
+  '[$c1]')
+v=""; c=""
+classify_recent_review_verdict 100 "$SESSION_END" v c
+assert_eq "TC-389-014 app mode: human bare trailer rejected" "none" "$v"
+
+# TC-389-015 (app-mode fleet fix preserved): a [bot] author's bare trailer
+# still classifies under the app-mode gate — the fleet-park regression stays
+# fixed with the stronger authentication in place.
+_MOCK_COMMENTS_JSON=$(jq -n \
+  --argjson c1 "$(mkc "kane-review-agent[bot]" "2026-05-21T05:30:00Z" "<!-- review-verdict: failed-non-substantive cause=bot-timeout -->")" \
+  '[$c1]')
+v=""; c=""
+classify_recent_review_verdict 100 "$SESSION_END" v c
+assert_eq "TC-389-015 app mode: bot bare trailer classified" "failed-non-substantive" "$v"
+assert_eq "TC-389-015 cause" "bot-timeout" "$c"
+unset GH_AUTH_MODE
 
 export BOT_LOGIN="$BOT"
 

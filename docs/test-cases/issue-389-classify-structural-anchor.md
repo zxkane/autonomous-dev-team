@@ -33,3 +33,8 @@ must stay green (BOT_LOGIN-set and FALLBACK_SESSION_ID-set paths untouched).
 - Park-comment guidance corrected (unpark recipe, not the stale-verdict-guard
   violating pending-review flip).
 | TC-389-010 | two trailers concatenated on one line | `none` (`[^>]*` non-crossing pin) |
+| TC-389-011 | unknown verdict token, bare body | `none` (verdict whitelist; forger can't invent vocabulary) |
+| TC-389-012 | unknown key after valid verdict | `none` (exact token grammar; legacy fallback unreachable) |
+| TC-389-013 | token mode: human author, bare trailer | classified (documented residual, pinned) |
+| TC-389-014 | app mode: human author, bare trailer | `none` (authorKind gate) |
+| TC-389-015 | app mode: [bot] author, bare trailer | classified (fleet fix preserved under gate) |

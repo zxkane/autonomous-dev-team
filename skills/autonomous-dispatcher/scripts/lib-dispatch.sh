@@ -1075,25 +1075,44 @@ classify_recent_review_verdict() {
   # codebase — so the pre-#389 refuse-to-classify branch below was the
   # UNCONDITIONAL path in every real deployment, parking every
   # completed-session pending-dev issue at INV-12 even with a genuine
-  # verdict trailer present. Fix: adopt the same STRUCTURAL anchor the
-  # convergence breaker uses (`authentic_verdict`, round-14 posture) — a
+  # verdict trailer present. Fix: STRUCTURAL authentication (the
+  # convergence breaker's `authentic_verdict` round-14 posture) — a
   # genuine `emit_verdict_trailer` comment's ENTIRE body is the bare
-  # trailer line, so an end-to-end anchored whole-body match
-  # authenticates authorship-independently. Any leading or trailing
-  # content fails the anchor (forged quote/prose rejected); the residual
-  # — a human posting a byte-for-byte bare trailer as their whole
-  # comment — is the same documented, accepted exposure as at the two
-  # sibling sites. Note: under this branch the legacy
-  # no-trailer→failed-substantive fallback is unreachable BY DESIGN
-  # (only anchored trailer bodies qualify as candidates at all), so a
-  # verdict-less completed session still parks at INV-12.
+  # trailer line, so an end-to-end anchored whole-body match works
+  # without an actor signal. Two hardenings beyond the breaker's anchor,
+  # because HERE the match drives dispatch (a forged `failed-substantive`
+  # burns a MAX_RETRIES slot; at the breaker it can only trip/shield a
+  # stall):
+  #   1. EXACT grammar, not `[^>]*`: verdict is whitelisted
+  #      (passed|failed-substantive|failed-non-substantive) and only the
+  #      known `cause=`/`dev-actionable=` tokens may follow — mirroring
+  #      the downstream trailer_line grep, so under this branch neither
+  #      the legacy no-trailer fallback nor the unknown-verdict `case *)`
+  #      arm is reachable (an anchored-but-unknown body never becomes a
+  #      candidate; it stays verdict=none → INV-12 park).
+  #   2. In GH_AUTH_MODE=app, additionally require
+  #      `authorKind != "human"` — the genuine review wrapper posts under
+  #      a GitHub App identity (`…[bot]` login ⇒ authorKind=bot), so this
+  #      shrinks the forgery surface from "anyone who can comment" to
+  #      "bot/App actors on the repo". Deliberately NOT applied in token
+  #      mode: the round-13 BLOCKING finding proved a genuine token-mode
+  #      verdict is posted under the shared PAT identity and normalizes
+  #      to authorKind=human — an unconditional gate would reject every
+  #      genuine verdict and reintroduce the fleet-wide park this fix
+  #      removes. Token-mode residual (a human posting a byte-for-byte
+  #      bare trailer as their whole comment) is the same documented,
+  #      accepted exposure as at the breaker's call sites.
+  local _anchored_trailer_re='^<!--[[:space:]]*review-verdict:[[:space:]]*(passed|failed-substantive|failed-non-substantive)([[:space:]]+(cause=[a-zA-Z0-9_-]+|dev-actionable=[a-z]+))*[[:space:]]*-->[[:space:]]*$'
   local actor_predicate
   if [ -n "${BOT_LOGIN:-}" ]; then
     actor_predicate=".author == \"${BOT_LOGIN}\""
   elif [ -n "${FALLBACK_SESSION_ID:-}" ]; then
     actor_predicate="(.body | test(\"Review Session.*${FALLBACK_SESSION_ID}\"))"
   else
-    actor_predicate="(.body | test(\"^<!--[[:space:]]*review-verdict:[[:space:]]*[a-z-]+[^>]*-->[[:space:]]*\$\"))"
+    actor_predicate="(.body | test(\"${_anchored_trailer_re}\"))"
+    if [ "${GH_AUTH_MODE:-token}" = "app" ]; then
+      actor_predicate="((.authorKind // \"human\") != \"human\") and ${actor_predicate}"
+    fi
   fi
 
   # Pull the newest qualifying comment body. Strict `>` on createdAt
