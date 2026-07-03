@@ -334,6 +334,40 @@ OUT4MAC=$(cat "$TMPROOT/tc04mac.out")
 assert_contains "TC-LGC2-044: macOS path — matching WRAPPER_FINGERPRINT is live" "MATCH:live" "$OUT4MAC"
 assert_contains "TC-LGC2-045: macOS path — mismatched WRAPPER_FINGERPRINT is dead" "MISMATCH:dead" "$OUT4MAC"
 
+# TC-LGC2-046 (regression): the fingerprint MUST be recomputed from the
+# RECORDED WRAPPER_PPID, never a live re-probe of the process's CURRENT ppid.
+# dispatch-local.sh spawns the wrapper via `nohup … &` and exits almost
+# immediately, reparenting the still-running wrapper to init (ppid -> 1)
+# within milliseconds of mint — a live-ppid recompute would misclassify a
+# genuinely live wrapper as `dead` the instant that reparenting completes,
+# which is exactly the false-positive-kill principle 5 forbids. Simulate by
+# minting normally, then confirming lane_probe's fingerprint recompute reads
+# WRAPPER_PPID (a STABLE recorded field), not a live `ps -o ppid=` of $pid —
+# proven by corrupting the recorded WRAPPER_PPID and confirming that alone
+# (with nothing else touched) flips a live probe to dead, i.e. the recorded
+# field, not any live signal, is what drives the recompute.
+bash -c '
+  set -u
+  export ADT_STATE_ROOT="'"$TMPROOT"'/state-mac2"
+  export _LANE_UNAME_OVERRIDE="Darwin"
+  source "'"$LIB_LANE"'"
+  LANE_ID=$(lane_mint myproj dev 1)
+  LANE_DIR=$(lane_install myproj "$LANE_ID")
+  # Baseline: unmodified lane (recorded PPID matches what minted the fingerprint).
+  echo "BASELINE:$(lane_probe "$LANE_DIR")"
+  # Corrupt ONLY the recorded WRAPPER_PPID (leave WRAPPER_FINGERPRINT as-is).
+  # If lane_probe recomputed from a LIVE ppid re-probe (the pre-fix bug), this
+  # edit would have NO effect (live ppid is unrelated to this file edit) and
+  # the probe would incorrectly stay "live". Post-fix, the recompute reads
+  # the (now-corrupted) recorded WRAPPER_PPID, so the fingerprint mismatches
+  # and the probe correctly flips to "dead".
+  sed -i "s/^WRAPPER_PPID=.*/WRAPPER_PPID=999999/" "$LANE_DIR/lane"
+  echo "CORRUPTED-PPID:$(lane_probe "$LANE_DIR")"
+' > "$TMPROOT/tc046.out" 2>&1
+OUT046=$(cat "$TMPROOT/tc046.out")
+assert_contains "TC-LGC2-046a: baseline (untouched recorded fields) probes live" "BASELINE:live" "$OUT046"
+assert_contains "TC-LGC2-046b: corrupting ONLY the recorded WRAPPER_PPID flips the probe to dead — proves the recompute reads the recorded field, not a live re-probe" "CORRUPTED-PPID:dead" "$OUT046"
+
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== TC-LGC2-050/051/052/053: lane_kill escalation ==="
@@ -541,11 +575,25 @@ bash -c '
 
   lane_set "$LANE_DIR" BRAND_NEW_KEY "hello"
   echo "NEWKEY:$(lane_get "$LANE_DIR" BRAND_NEW_KEY)"
+
+  # TC-LGC2-074 (regression): a value containing a LITERAL backslash-escape
+  # SEQUENCE (two chars: backslash + n/t, NOT an actual newline/tab byte) must
+  # survive verbatim. awk -v VAR=value interprets C-style backslash escapes
+  # in the assignment text itself (POSIX awk behavior) — a value like this
+  # one is exactly what a sha256 hex/path could never produce by accident,
+  # but IS exactly the shape a caller could pass; the pre-fix code turned the
+  # two-char \n into a real newline, truncating the value AND corrupting the
+  # lane file with a bogus injected line.
+  lane_set "$LANE_DIR" CHROME_PROFILE_HINT "foo\nbar\tbaz"
+  echo "ESCAPES:$(lane_get "$LANE_DIR" CHROME_PROFILE_HINT)"
+  echo "LANE-LINE-COUNT:$(wc -l < "$LANE_DIR/lane")"
 ' > "$TMPROOT/tc07x.out" 2>&1
 OUT7X=$(cat "$TMPROOT/tc07x.out")
 assert_contains "TC-LGC2-070: lane_set/lane_get round-trips a value containing '/'" "SLASH:/tmp/foo/chrome-profile-XXXXXX" "$OUT7X"
 assert_contains "TC-LGC2-071: lane_set/lane_get round-trips '&[]*' without corruption" "SPECIAL:abc&foo*bar[baz]123" "$OUT7X"
 assert_contains "TC-LGC2-072: lane_set appends a previously-absent key" "NEWKEY:hello" "$OUT7X"
+assert_contains "TC-LGC2-074: lane_set/lane_get preserves a literal backslash-escape sequence verbatim (no awk -v escape interpretation)" "ESCAPES:foo\nbar\tbaz" "$OUT7X"
+assert_contains "TC-LGC2-074b: the lane file is not corrupted with a bogus injected line" "LANE-LINE-COUNT:17" "$OUT7X"
 
 # TC-073: concurrent lane_set calls never corrupt the file.
 bash -c '

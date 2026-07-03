@@ -62,7 +62,7 @@ source "${LIB_DIR}/lib-metrics.sh" 2>/dev/null || true
 # never aborts the wrapper, so the source is guarded.
 # shellcheck source=lib-run-artifacts.sh
 source "${LIB_DIR}/lib-run-artifacts.sh" 2>/dev/null || true
-# [INV-107] Lane identity + durable registry (Lane-GC PR-2). Guarded: a
+# [INV-109] Lane identity + durable registry (Lane-GC PR-2). Guarded: a
 # missing/broken lib-lane.sh degrades to "no lane registry this run" (every
 # lane_* call below is declare -F-gated), never aborts the wrapper — the
 # registry is additive to the pre-existing PID-file/heartbeat contracts.
@@ -132,7 +132,7 @@ for _req in PROJECT_ID REPO REPO_OWNER REPO_NAME PROJECT_DIR; do
 done
 
 # ---------------------------------------------------------------------------
-# [INV-107] Lane identity + atomic registry mint (Lane-GC PR-2).
+# [INV-109] Lane identity + atomic registry mint (Lane-GC PR-2).
 #
 # MUST run BEFORE setup_github_auth below — the token daemon it spawns is one
 # of the two background-child classes the invariant explicitly names ("before
@@ -243,7 +243,7 @@ if ! [[ "$ISSUE_NUMBER" =~ ^[0-9]+$ ]]; then
   exit 1
 fi
 
-# [INV-107] Now that --mode is known, correct the registry's MODE field from
+# [INV-109] Now that --mode is known, correct the registry's MODE field from
 # lane_install's "new" default (minted before arg-parsing ran — see the mint
 # block above). Cosmetic/diagnostic only — MODE never drives lane liveness.
 if [[ -n "$ADT_LANE_DIR" ]] && declare -F lane_set >/dev/null 2>&1; then
@@ -709,7 +709,7 @@ POSTAPPROVAL
 cleanup() {
   local exit_code=$?
 
-  # [INV-107] STATE=cleaning: the lane registry's graceful-exit transition.
+  # [INV-109] STATE=cleaning: the lane registry's graceful-exit transition.
   # PR-2 (this PR) wires the STATE marker only — the actual registry-recorded-
   # pgid reap + reap.lock choreography is PR-3 (kill-path hardening); until
   # then this cleanup() continues to rely on the pre-existing heartbeat/PID-
@@ -800,7 +800,7 @@ EOF
     if declare -F run_artifacts_finalize >/dev/null 2>&1; then
       run_artifacts_finalize "${RUN_DIR:-}" "$exit_code" || true
     fi
-    # [INV-107] STATE=clean-exit: this early-return path is still a GRACEFUL
+    # [INV-109] STATE=clean-exit: this early-return path is still a GRACEFUL
     # wrapper exit (the agent simply never ran) — the lane completed its
     # lifecycle without crashing, so it promotes past `cleaning` rather than
     # being left for a future GC pass to reclaim as if it died non-gracefully.
@@ -942,7 +942,7 @@ EOF
     run_artifacts_finalize "${RUN_DIR:-}" "$exit_code" || true
   fi
 
-  # [INV-107] STATE=clean-exit: the lane completed its full lifecycle
+  # [INV-109] STATE=clean-exit: the lane completed its full lifecycle
   # gracefully (this cleanup() ran to the end, not via a non-graceful
   # SIGKILL/OOM death). A future GC pass (later Lane-GC PR) age-collects
   # terminal-state lane dirs after 24h; PR-2 only wires the marker.

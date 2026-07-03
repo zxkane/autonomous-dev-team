@@ -79,6 +79,7 @@ Test runner: `bash tests/unit/test-lib-lane.sh` (auto-discovered by the CI
 | TC-LGC2-043 | Lane file missing or unparseable (no `WRAPPER_PID` key) | `unknown` + rc 1 (fail toward "don't know", never a false `dead`/`live`) |
 | TC-LGC2-044 | Non-Linux path (`_LANE_UNAME_OVERRIDE=Darwin` test seam): `WRAPPER_FINGERPRINT` populated at mint, matches at probe time | `live` |
 | TC-LGC2-045 | Non-Linux path: `WRAPPER_FINGERPRINT` recorded but does NOT match at probe time (simulated PID-recycle with matching lstart-second) | `dead` — the fingerprint conjunct catches what lstart-only matching would miss |
+| TC-LGC2-046 | **Regression (review-caught, pre-fix reproduced live):** the fingerprint recompute at probe time must use the RECORDED `WRAPPER_PPID`, never a live re-probe of the process's current ppid — `dispatch-local.sh` spawns the wrapper via `nohup … &` and exits almost immediately, reparenting the still-running wrapper to init within milliseconds of mint. Corrupt ONLY the recorded `WRAPPER_PPID` (leave everything else untouched) | probe flips from `live` to `dead` — proving the recompute reads the recorded field (which this edit changed), not a live re-probe (which this edit cannot affect) |
 
 ## `lane_kill` escalation
 
@@ -107,6 +108,7 @@ Test runner: `bash tests/unit/test-lib-lane.sh` (auto-discovered by the CI
 | TC-LGC2-071 | `lane_set` a value containing `&`, `[`, `]`, `*` | `lane_get` returns the value verbatim (awk literal-print, not sed substitution) |
 | TC-LGC2-072 | `lane_set` a key not yet present in the `lane` file | key is appended; `lane_get` finds it |
 | TC-LGC2-073 | Concurrent `lane_set` calls against the same lane file | `flock`-serialized — no lost update, no corrupted file (each writer's rewrite-then-mv is atomic) |
+| TC-LGC2-074 | **Regression (review-caught, pre-fix reproduced live):** `lane_set` a value containing a LITERAL backslash-escape sequence (two chars, e.g. `\n`/`\t` — not an actual newline/tab byte) | `lane_get` returns the value byte-for-byte verbatim; the lane file's line count is unchanged (no bogus injected line from a collapsed escape) — passed via awk `ENVIRON[]`, never awk `-v` (which interprets C-style backslash escapes in the assignment text per POSIX) |
 
 ## E2E
 

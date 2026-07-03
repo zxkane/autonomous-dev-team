@@ -196,7 +196,7 @@ source "${LIB_DIR}/lib-metrics.sh" 2>/dev/null || true
 # lib-metrics — a load failure never aborts the review wrapper.
 # shellcheck source=lib-run-artifacts.sh
 source "${LIB_DIR}/lib-run-artifacts.sh" 2>/dev/null || true
-# [INV-107] Lane identity + durable registry (Lane-GC PR-2). Guarded — every
+# [INV-109] Lane identity + durable registry (Lane-GC PR-2). Guarded — every
 # lane_* call site below is declare -F-gated, so a load failure degrades to
 # "no lane registry this run" rather than aborting the review wrapper.
 # shellcheck source=lib-lane.sh
@@ -360,7 +360,7 @@ if [[ -n "$REVIEW_BOTS_VALIDATED" ]] && declare -F chp_caps >/dev/null 2>&1 \
 fi
 
 # ---------------------------------------------------------------------------
-# [INV-107] Lane identity + atomic registry mint (Lane-GC PR-2).
+# [INV-109] Lane identity + atomic registry mint (Lane-GC PR-2).
 #
 # MUST run BEFORE setup_github_auth below — the token daemon it spawns is one
 # of the two background-child classes the invariant explicitly names ("before
@@ -755,7 +755,7 @@ RESULT_PARSED=false
 cleanup() {
   local exit_code=$?
 
-  # [INV-107] STATE=cleaning: the lane registry's graceful-exit transition.
+  # [INV-109] STATE=cleaning: the lane registry's graceful-exit transition.
   # PR-2 (this PR) wires the STATE marker only — the actual registry-recorded-
   # pgid reap + reap.lock choreography is PR-3 (kill-path hardening); until
   # then this cleanup() continues to rely on the pre-existing heartbeat/PID-
@@ -821,7 +821,7 @@ cleanup() {
     run_artifacts_finalize "${RUN_DIR:-}" "$exit_code" || true
   fi
 
-  # [INV-107] STATE=clean-exit: fires for BOTH the normal (RESULT_PARSED) and
+  # [INV-109] STATE=clean-exit: fires for BOTH the normal (RESULT_PARSED) and
   # crash paths, same placement rationale as wrapper_end/run_artifacts_finalize
   # above — cleanup() reaching this line (as opposed to never running, i.e. a
   # non-graceful SIGKILL/OOM death) always means the lane completed its
@@ -1579,11 +1579,11 @@ if [[ "${E2E_ACTIVE:-false}" == "true" ]]; then
       (
         AGENT_TIMEOUT="$E2E_BROWSER_TIMEOUT_SECONDS"
         AGENT_PID_FILE="${_E2E_LANE_DIR}/e2e.pgid"
-        # [INV-108] Sub-lane role tag (diagnostic only — ADT_LANE_ID/
+        # [INV-110] Sub-lane role tag (diagnostic only — ADT_LANE_ID/
         # ADT_LANE_DIR are already inherited from the wrapper's top-level
         # export).
         export ADT_LANE_ROLE="e2e:browser"
-        # [INV-108] TMPDIR lane-scratch redirect: Chrome mains clobber their own
+        # [INV-110] TMPDIR lane-scratch redirect: Chrome mains clobber their own
         # environ region (0 readable env lines post-launch), so env-tag matching
         # cannot reach a Chrome process directly — argv is the only channel.
         # Redirecting TMPDIR under the lane's own dir means puppeteer/Chrome
@@ -1791,7 +1791,7 @@ if [[ "${REVIEW_SMOKE_ENABLED:-false}" == "true" ]]; then
       # wrapper. AGENT_PID_FILE stays unset so smoke_agent's run_agent skips the
       # PID write and the shared review-N.pid is untouched.
       unset AGENT_PID_FILE
-      # [INV-108] Smoke probes previously carried zero lane marker (design
+      # [INV-110] Smoke probes previously carried zero lane marker (design
       # §4-C2's explicit gap). ADT_LANE_ID/ADT_LANE_DIR are already inherited
       # from the wrapper's top-level export; tag the role only so a smoke
       # probe's pgids-file entry is diagnostically distinguishable from a real
@@ -2161,7 +2161,7 @@ for _agent in "${REVIEW_AGENTS_LIST[@]}"; do
     # resolution. Scope is THIS subshell only — never leaks to a sibling
     # agent's subshell or the dev side.
     export ADT_FANOUT_LANE_MARKER="$_agent_session_id"
-    # [INV-108] Sub-lane role tag for THIS fan-out member. ADT_LANE_ID/
+    # [INV-110] Sub-lane role tag for THIS fan-out member. ADT_LANE_ID/
     # ADT_LANE_DIR are already inherited from the wrapper's top-level export
     # (Lane-GC PR-2) — every descendant of this subshell, including the CLI
     # and any MCP children it spawns, carries the SAME lane id as the review

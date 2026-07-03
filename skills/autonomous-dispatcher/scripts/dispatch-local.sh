@@ -52,7 +52,7 @@ PROJECT_DIR="${PROJECT_DIR:?Set PROJECT_DIR in autonomous.conf}"
 # is in scope — the helper enforces it via : "${PROJECT_ID:?...}".
 # shellcheck source=lib-config.sh
 source "${LIB_DIR}/lib-config.sh"
-# [Lane-GC PR-2 / INV-107] Guarded: a missing/broken lib-lane.sh degrades
+# [Lane-GC PR-2 / INV-109] Guarded: a missing/broken lib-lane.sh degrades
 # kill_stale_wrapper's delegate below to a clean no-op (declare -F-gated),
 # never aborts the dispatch.
 # shellcheck source=lib-lane.sh
@@ -139,7 +139,7 @@ kill_stale_wrapper() {
     return 1
   fi
 
-  # [Lane-GC PR-2 / INV-107] Registry-authoritative delegate. When a
+  # [Lane-GC PR-2 / INV-109] Registry-authoritative delegate. When a
   # parseable, currently-DEAD lane exists for this (role, issue), reap its
   # FULL recorded pgid set via lane_kill BEFORE the legacy old_pid-only path
   # below runs — this reaches fan-out sidecars, the E2E lane, and smoke

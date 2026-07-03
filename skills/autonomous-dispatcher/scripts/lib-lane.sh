@@ -1,7 +1,9 @@
 #!/bin/bash
 # lib-lane.sh — Lane-GC PR-2: lane identity, durable registry, atomic mint,
 # and universal ADT_LANE_ID tagging (design: docs/designs/lane-containment-gc.md
-# §4-C1/§4-C2; INV-107/INV-108).
+# §4-C1/§4-C2; shipped as INV-109/INV-110 — the design doc's drafted INV-107/
+# INV-108 collided with #375's shipped INV-108, renumbered at PR-open per the
+# design's own "re-verify numbering against invariants.md HEAD" note).
 #
 # A "lane" is the unit of ownership for one wrapper run (one dev-new/dev-resume
 # or one review dispatch). This lib gives every wrapper a durable, atomically-
@@ -268,6 +270,17 @@ lane_mint() {
 # granularity there, so lstart-only match can false-positive an unrelated
 # operator process as the dead lane. Unused on Linux (the /proc starttime
 # tick fast path is µs-granularity and doesn't need it).
+#
+# <ppid> MUST be the value RECORDED at mint time (lane_install's WRAPPER_PPID
+# field), never the process's LIVE current ppid. dispatch-local.sh spawns the
+# wrapper via `nohup … &` and exits almost immediately, which reparents the
+# still-running wrapper to init (ppid → 1) within milliseconds of mint. If
+# lane_probe recomputed the fingerprint from the CURRENT ppid, every probe
+# after that reparenting would permanently mismatch a genuinely live wrapper
+# — the exact false-positive-kill the design's principle 5 forbids. Passing
+# the mint-time-recorded ppid at both ends makes the fingerprint's only live
+# check `comm` (does this PID still look like the same process?), which is
+# the actual PID-recycle signal beyond the already-checked lstart match.
 _wrapper_fingerprint() {
   local pid="$1" ppid="$2" lstart="$3" comm
   comm="$(ps -o comm= -p "$pid" 2>/dev/null | tr -d '[:space:]')"
@@ -309,10 +322,10 @@ lane_install() {
   local role issue
   IFS=: read -r _ role issue _ _ <<<"$lane_id"
 
-  local wrapper_pid="$$" wrapper_start wrapper_fingerprint="-"
+  local wrapper_pid="$$" wrapper_ppid="$PPID" wrapper_start wrapper_fingerprint="-"
   wrapper_start="$(proc_start_time "$wrapper_pid")"
   if [[ "$(_lane_uname)" != "Linux" ]]; then
-    wrapper_fingerprint="$(_wrapper_fingerprint "$wrapper_pid" "$PPID" "$wrapper_start")"
+    wrapper_fingerprint="$(_wrapper_fingerprint "$wrapper_pid" "$wrapper_ppid" "$wrapper_start")"
     [[ -n "$wrapper_fingerprint" ]] || wrapper_fingerprint="-"
   fi
 
@@ -331,6 +344,7 @@ lane_install() {
     printf 'BACKEND=pgid\n'
     printf 'UNIT=-\n'
     printf 'WRAPPER_PID=%s\n' "$wrapper_pid"
+    printf 'WRAPPER_PPID=%s\n' "$wrapper_ppid"
     printf 'WRAPPER_START=%s\n' "$wrapper_start"
     printf 'WRAPPER_FINGERPRINT=%s\n' "$wrapper_fingerprint"
     printf 'GUARDIAN_PID=-\n'
@@ -380,10 +394,16 @@ lane_set() {
   tmp="$(mktemp "${lane_dir}/.lane.XXXXXX" 2>/dev/null)" || { exec {lock_fd}>&-; return 1; }
   # awk (not sed) line-replace: the replacement VALUE may contain arbitrary
   # bytes (a filesystem path, a sha256 hex, `-`) that would collide with
-  # sed's own delimiter/regex metacharacters. awk's `k"="v` is a literal
-  # string comparison + literal print — no substitution-side escaping needed.
-  if awk -v k="${key}=" 'index($0,k)==1{found=1} END{exit !found}' "$f" 2>/dev/null; then
-    awk -v k="$key" -v v="$value" 'BEGIN{p=k"="} index($0,p)==1 {print k"="v; next} {print}' "$f" > "$tmp" 2>/dev/null
+  # sed's own delimiter/regex metacharacters. Passed via ENVIRON, NOT `-v` —
+  # POSIX awk's `-v var=value` interprets C-style backslash escapes in the
+  # assignment text itself (a literal two-character `\n` in the value becomes
+  # an actual newline, silently truncating/corrupting the line and, for a
+  # value that then looks like `KEY2=...`, injecting a bogus extra KV line).
+  # `ENVIRON[]` reads the raw environment string verbatim — no escape
+  # interpretation — so this is the only awk-side channel safe for arbitrary
+  # bytes.
+  if LANE_SET_V="$value" awk -v k="${key}=" 'index($0,k)==1{found=1} END{exit !found}' "$f" 2>/dev/null; then
+    LANE_SET_V="$value" awk -v k="$key" 'BEGIN{p=k"="; v=ENVIRON["LANE_SET_V"]} index($0,p)==1 {print k"="v; next} {print}' "$f" > "$tmp" 2>/dev/null
   else
     cp "$f" "$tmp" 2>/dev/null
     printf '%s=%s\n' "$key" "$value" >> "$tmp"
@@ -444,10 +464,17 @@ lane_probe() {
   fi
 
   if [[ "$(_lane_uname)" != "Linux" ]]; then
-    local recorded_fp now_fp
+    local recorded_fp now_fp recorded_ppid
     recorded_fp="$(lane_get "$lane_dir" WRAPPER_FINGERPRINT)" || recorded_fp="-"
     if [[ -n "$recorded_fp" && "$recorded_fp" != "-" ]]; then
-      now_fp="$(_wrapper_fingerprint "$pid" "$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')" "$now_start")"
+      # Recompute with the RECORDED ppid (WRAPPER_PPID), never the process's
+      # LIVE current ppid: dispatch-local.sh spawns the wrapper via `nohup … &`
+      # and exits almost immediately, reparenting the still-running wrapper to
+      # init (ppid -> 1) within milliseconds of mint. A live-ppid recompute
+      # would permanently mismatch a genuinely live wrapper the instant that
+      # reparenting happens — the false-positive-kill principle 5 forbids.
+      recorded_ppid="$(lane_get "$lane_dir" WRAPPER_PPID)" || recorded_ppid=""
+      now_fp="$(_wrapper_fingerprint "$pid" "$recorded_ppid" "$now_start")"
       [[ "$now_fp" == "$recorded_fp" ]] || { echo "dead"; return 0; }
     fi
   fi

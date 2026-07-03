@@ -372,7 +372,7 @@ _run_with_timeout() {
   "${launcher[@]}" "${cmd[@]}" &
   _AGENT_RUN_PID=$!
 
-  # [Lane-GC PR-2 / INV-107] Append this spawn's PGID to the lane registry
+  # [Lane-GC PR-2 / INV-110] Append this spawn's PGID to the lane registry
   # (durable — survives ANY sidecar tmpdir being rm -rf'd, unlike
   # AGENT_PID_FILE above). ADT_LANE_DIR is exported by the wrapper after
   # lane_install; every _run_with_timeout call site (dev run_agent/

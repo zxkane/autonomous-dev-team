@@ -440,7 +440,7 @@ _run_command_e2e_verify() {
 
   "${_setsid[@]}" "${_to_cmd[@]}" bash -c "${E2E_COMMAND_RENDERED}" &
   _E2E_LANE_PGID=$!
-  # [Lane-GC PR-2 / INV-107] This lane bypasses _run_with_timeout (it is a
+  # [Lane-GC PR-2 / INV-110] This lane bypasses _run_with_timeout (it is a
   # pure shell subshell, not an agent CLI spawn), so it records its own PGID
   # into the durable registry directly. Best-effort: no-op on a missing lane
   # dir/lib (same degrade as every other lane_record_pgid call site).
