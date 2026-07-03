@@ -68,9 +68,9 @@ ITP_NAME="${ITP_UNDER_TEST:-github}"
 CHP_NAME="${CHP_UNDER_TEST:-github}"
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --itp) ITP_NAME="${2:-}"; shift 2 ;;
+    --itp) [[ $# -ge 2 ]] || { log "FATAL: --itp requires a value"; exit 2; }; ITP_NAME="$2"; shift 2 ;;
     --itp=*) ITP_NAME="${1#*=}"; shift ;;
-    --chp) CHP_NAME="${2:-}"; shift 2 ;;
+    --chp) [[ $# -ge 2 ]] || { log "FATAL: --chp requires a value"; exit 2; }; CHP_NAME="$2"; shift 2 ;;
     --chp=*) CHP_NAME="${1#*=}"; shift ;;
     -h|--help) grep -E '^#( |$)' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) log "FATAL: unknown argument: $1"; exit 2 ;;
@@ -187,6 +187,7 @@ _cap_read() {
   seam="$(_seam_for "$verb")"
   env -u AUTONOMOUS_CONF -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR \
       ISSUE_PROVIDER="$ITP_NAME" CODE_HOST="$CHP_NAME" AUTONOMOUS_PROVIDERS_DIR="$SCRATCH_DIR" \
+      PATH="$ISOLATED_PATH" \
   bash -c '
     source "'"$ITP_LIB"'" 2>/dev/null
     source "'"$CHP_LIB"'" 2>/dev/null
@@ -356,8 +357,9 @@ _assert_verb() {
   local verb="$1"
   local cap; cap="$(pcf_conf_value "$CAP_MAP_CONF" "$verb")" || cap="-"
   if [[ "$cap" != "-" ]]; then
-    local val; val="$(_cap_read "$verb" "$cap")"
-    if [[ "$val" == "0" || -z "$val" ]]; then
+    local val rc
+    val="$(_cap_read "$verb" "$cap")"; rc=$?
+    if [[ "$rc" -eq 0 && "$val" == "0" ]]; then
       emit SKIP "$verb" "$cap"
       return
     fi
