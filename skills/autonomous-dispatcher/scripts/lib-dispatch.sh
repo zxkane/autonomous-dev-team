@@ -1977,7 +1977,9 @@ CBREPORT
       # phantom per-HEAD attempt marker posted below. Guard each step
       # explicitly: on failure, release the marker (owned — acquire appended
       # it) and bail; the next tick retries under MAX_RETRIES.
-      if ! label_swap "$issue_num" "pending-dev" "in-progress"          || ! post_dispatch_token "$issue_num" "dev-new"          || ! dispatch dev-new "$issue_num"; then
+      if ! label_swap "$issue_num" "pending-dev" "in-progress" ||
+         ! post_dispatch_token "$issue_num" "dev-new" ||
+         ! dispatch dev-new "$issue_num"; then
         log "  ERROR: INV-35 fresh-dev pre-spawn step failed for issue #${issue_num} (label/token/dispatch) — releasing the dispatch marker; next tick retries ([INV-108])."
         release_dispatch_marker "$issue_num" "dev-new"
         return 0
