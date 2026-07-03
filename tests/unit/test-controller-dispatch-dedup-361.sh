@@ -237,6 +237,46 @@ rm -f "$TMPDIR/dispatch-marker-506-dev-new"
 
 # ---------------------------------------------------------------------------
 echo ""
+echo "=== TC-DEDUP-361-010b/c: marker-CREATION failure (non-EEXIST) fails OPEN (#361 round-6 [P1]) ==="
+# ---------------------------------------------------------------------------
+# pid_dir_for_project succeeds but the mkdir of the marker itself fails for a
+# non-EEXIST reason (permissions drift / ENOSPC after the base dir resolved).
+# Pre-fix, acquire fell through to _mtime_epoch on a NONEXISTENT path → rc 1 →
+# every caller skipped the issue as "held" with no marker to ever expire.
+# Simulate by making the base dir read-only so mkdir fails EACCES.
+_RO_BASE="$TMPDIR/ro-marker-base"
+mkdir -p "$_RO_BASE"
+chmod 0555 "$_RO_BASE"
+if mkdir "$_RO_BASE/probe" 2>/dev/null; then
+  # Running as root or on a perm-ignoring FS — the EACCES simulation cannot
+  # work; skip LOUDLY rather than asserting a vacuous pass.
+  rmdir "$_RO_BASE/probe"
+  echo "  SKIP: TC-DEDUP-361-010b/c cannot simulate EACCES (perms not enforced here)"
+else
+  (
+    pid_dir_for_project() { echo "$_RO_BASE"; }
+    acquire_dispatch_marker 507 dev-new 2>/dev/null
+  )
+  assert_true "TC-DEDUP-361-010b marker-creation failure (EACCES) fails OPEN (rc 0), not held" $?
+  (
+    pid_dir_for_project() { echo "$_RO_BASE"; }
+    acquire_dispatch_marker 507 dev-new 2>&1 | grep -q 'dispatch-marker creation failed'
+  )
+  assert_true "TC-DEDUP-361-010c marker-creation failure emits the WARN naming the fail-open" $?
+fi
+chmod 0755 "$_RO_BASE"; rm -rf "$_RO_BASE"
+
+# TC-DEDUP-361-010d: a plain-FILE obstruction at the marker path is NOT the
+# creation-failure class — it exists, so it takes the mtime path (fresh file
+# → held, rc 1). Pins the [ ! -e ] guard's boundary.
+rm -rf "$TMPDIR/dispatch-marker-508-dev-new"
+touch "$TMPDIR/dispatch-marker-508-dev-new"
+acquire_dispatch_marker 508 dev-new 2>/dev/null
+assert_false "TC-DEDUP-361-010d plain-file obstruction (fresh mtime) is treated as held (rc 1), not fail-open" $?
+rm -f "$TMPDIR/dispatch-marker-508-dev-new"
+
+# ---------------------------------------------------------------------------
+echo ""
 echo "=== TC-DEDUP-361-011..014: post_dispatch_token run= field (R2) ==="
 # ---------------------------------------------------------------------------
 _MOCK_LAST_COMMENT_BODY=""

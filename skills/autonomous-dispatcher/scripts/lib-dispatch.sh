@@ -2262,14 +2262,42 @@ acquire_dispatch_marker() {
     return 0   # acquired fresh
   fi
 
+  # mkdir failed. Distinguish the dedup-hit path (marker EXISTS — EEXIST)
+  # from a marker-CREATION failure (non-EEXIST: permissions drift or ENOSPC
+  # after the base dir already resolved). The latter is the same
+  # marker-infrastructure class as the pid_dir_for_project failure above and
+  # must fail OPEN — no marker was created, so treating it as "held by a
+  # concurrent tick" would silently stall every retry for the TTL with
+  # nothing to expire (#361 review round-6 [P1]). `-e`/`-L` together also
+  # catch a non-dir obstruction (a plain file or dangling symlink planted at
+  # the path), which the mtime path below handles as an existing marker.
+  if [ ! -e "$marker_dir" ] && [ ! -L "$marker_dir" ]; then
+    # One retry before failing open: "nothing at the path" is ALSO reachable
+    # when the holder's release (rm -rf) landed between our failed mkdir and
+    # the existence check — not a creation failure at all. The retry either
+    # acquires properly (release-race case: dedup stays airtight) or fails
+    # with the path still absent (genuine EACCES/ENOSPC: fall through to
+    # fail-open; a real infra failure repeats deterministically).
+    if mkdir "$marker_dir" 2>/dev/null; then
+      _dispatch_marker_pending_add "$issue_num" "$mode"
+      return 0
+    fi
+    if [ ! -e "$marker_dir" ] && [ ! -L "$marker_dir" ]; then
+      echo "[lib-dispatch] WARN: dispatch-marker creation failed twice (non-EEXIST: permissions/ENOSPC?) — proceeding without controller-side dedup for issue #${issue_num} mode=${mode} (302a wrapper-host lock remains) [INV-106]" >&2
+      return 0
+    fi
+    # Path appeared between retry-mkdir and re-check — a concurrent acquire
+    # won the retry race; fall through to the mtime/TTL path below.
+  fi
+
   # Marker already exists. If it's fresh (age < TTL), a concurrent tick holds
   # it — fail cleanly (R1: not an error, the concurrent tick owns this issue).
   local mtime now age
   mtime=$(_mtime_epoch "$marker_dir")
   if [ -z "$mtime" ]; then
-    # Can't stat it (TOCTOU: vanished between mkdir-fail and stat, or a
-    # permissions issue) — treat conservatively as held; the next tick
-    # re-evaluates from scratch.
+    # Existed at the check above but can't be stat'ed now (true TOCTOU:
+    # vanished between the existence check and stat) — treat conservatively
+    # as held; the next tick re-evaluates from scratch.
     return 1
   fi
   now=$(date -u +%s)
