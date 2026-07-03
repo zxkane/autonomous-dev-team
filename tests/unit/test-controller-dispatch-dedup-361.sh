@@ -225,6 +225,20 @@ echo "=== TC-DEDUP-361-009: fail-open when the marker directory cannot be resolv
 )
 assert_true "TC-DEDUP-361-009 acquire_dispatch_marker fails OPEN (rc 0) when pid_dir_for_project is unavailable" $?
 
+# TC-DEDUP-361-009b (#361 round-7 [P1]): the fail-open must hold with `set -e`
+# ACTIVE and the call NOT in a condition context. A bare `var=$(cmd)` assignment
+# propagates cmd's rc, so without the `|| base_dir=""` guard the subshell below
+# dies at the assignment line (exit 1) before the fail-open branch — the exact
+# whole-tick-abort the finding describes. The marker echo after the call proves
+# the function RETURNED (fail-open) rather than the shell aborting.
+_R=$(
+  set -e
+  pid_dir_for_project() { return 1; }
+  acquire_dispatch_marker 505 dev-new 2>/dev/null
+  echo "SURVIVED:$?"
+)
+assert_eq "TC-DEDUP-361-009b fail-open survives set -e outside a condition context (no tick abort)" "SURVIVED:0" "$_R"
+
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== TC-DEDUP-361-010: symlinked marker path is rejected (fails open, not a hard error) ==="

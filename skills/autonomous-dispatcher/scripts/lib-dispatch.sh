@@ -2236,7 +2236,13 @@ ${human}"
 acquire_dispatch_marker() {
   local issue_num="$1" mode="$2"
   local base_dir
-  base_dir=$(pid_dir_for_project 2>/dev/null)
+  # `|| base_dir=""` keeps the fail-open guarantee independent of caller
+  # context (#361 round-7 [P1]): a bare `var=$(cmd)` assignment propagates
+  # cmd's non-zero rc, and under `set -e` OUTSIDE a condition context that
+  # aborts the whole tick BEFORE the fail-open branch below can run. Today's
+  # call sites are all `if ! acquire_dispatch_marker ...` (set -e suspended),
+  # but the function must not rely on that posture.
+  base_dir=$(pid_dir_for_project 2>/dev/null) || base_dir=""
   if [ -z "$base_dir" ]; then
     # Marker infrastructure unavailable (HOME/XDG_RUNTIME_DIR unset, disk
     # full, etc.) — fail OPEN. 302a's wrapper-host atomic lock is the
