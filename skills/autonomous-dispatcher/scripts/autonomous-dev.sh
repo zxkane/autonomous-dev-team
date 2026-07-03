@@ -62,6 +62,12 @@ source "${LIB_DIR}/lib-metrics.sh" 2>/dev/null || true
 # never aborts the wrapper, so the source is guarded.
 # shellcheck source=lib-run-artifacts.sh
 source "${LIB_DIR}/lib-run-artifacts.sh" 2>/dev/null || true
+# [INV-107] Lane identity + durable registry (Lane-GC PR-2). Guarded: a
+# missing/broken lib-lane.sh degrades to "no lane registry this run" (every
+# lane_* call below is declare -F-gated), never aborts the wrapper — the
+# registry is additive to the pre-existing PID-file/heartbeat contracts.
+# shellcheck source=lib-lane.sh
+source "${LIB_DIR}/lib-lane.sh" 2>/dev/null || true
 # [INV-87] Issue-Tracker Provider dispatch — provides the itp_read_task verb the
 # resume-fallback issue re-fetch (below) routes through. Load-bearing (the read
 # must succeed), so sourced UNGUARDED from the skill tree like lib-agent.sh.
@@ -124,6 +130,39 @@ for _req in PROJECT_ID REPO REPO_OWNER REPO_NAME PROJECT_DIR; do
     exit 1
   fi
 done
+
+# ---------------------------------------------------------------------------
+# [INV-107] Lane identity + atomic registry mint (Lane-GC PR-2).
+#
+# MUST run BEFORE setup_github_auth below — the token daemon it spawns is one
+# of the two background-child classes the invariant explicitly names ("before
+# ANY background child is spawned, including token daemons at
+# lib-auth.sh:128,:255-258, heartbeat, and pre-agent utilities"). PROJECT_ID is
+# guaranteed non-empty here (the required-config loop above already validated
+# it). ISSUE_NUMBER may still be the `-` dispatcher-alert sentinel on a
+# malformed direct invocation — lane_mint tolerates a non-numeric issue field
+# (it is opaque to the registry; only WRAPPER_PID/START/CREATED_EPOCH/STATE
+# drive liveness), so we mint unconditionally rather than special-casing it.
+#
+# MODE is not yet parsed (the authoritative --mode arg-parse loop is below,
+# after auth setup — unchanged ordering) — lane_install defaults the KV's MODE
+# field to "new" and the arg-parse loop corrects it in place once known,
+# exactly as it corrects ISSUE_NUMBER/SESSION_ID from their own early-peek
+# defaults. Guarded on lane_mint existing so a lib-lane.sh source failure
+# above degrades to "no registry" rather than aborting the wrapper.
+# ---------------------------------------------------------------------------
+ADT_LANE_DIR=""
+if declare -F lane_mint >/dev/null 2>&1; then
+  ADT_LANE_ID="$(lane_mint "$PROJECT_ID" dev "$ISSUE_NUMBER")"
+  ADT_LANE_DIR="$(lane_install "$PROJECT_ID" "$ADT_LANE_ID" "$PROJECT_DIR")" || ADT_LANE_DIR=""
+  if [[ -n "$ADT_LANE_DIR" ]]; then
+    export ADT_LANE_ID ADT_LANE_DIR
+  else
+    # NOTE: `log()` is not defined until later in the file — bare `echo >&2`
+    # (matching its format) so a missing `log` can't abort the wrapper.
+    echo "[autonomous-dev] WARNING: lane_install failed — proceeding without a lane registry entry for this run (dev-side reap/tagging degrades to the pre-Lane-GC behavior)." >&2
+  fi
+fi
 
 # ---------------------------------------------------------------------------
 # GitHub authentication
@@ -202,6 +241,13 @@ fi
 if ! [[ "$ISSUE_NUMBER" =~ ^[0-9]+$ ]]; then
   echo "Error: --issue must be a positive integer, got '$ISSUE_NUMBER'" >&2
   exit 1
+fi
+
+# [INV-107] Now that --mode is known, correct the registry's MODE field from
+# lane_install's "new" default (minted before arg-parsing ran — see the mint
+# block above). Cosmetic/diagnostic only — MODE never drives lane liveness.
+if [[ -n "$ADT_LANE_DIR" ]] && declare -F lane_set >/dev/null 2>&1; then
+  lane_set "$ADT_LANE_DIR" MODE "$MODE" || true
 fi
 
 # Ensure we're in the project directory (needed when called directly, not just via SSM)
@@ -663,6 +709,16 @@ POSTAPPROVAL
 cleanup() {
   local exit_code=$?
 
+  # [INV-107] STATE=cleaning: the lane registry's graceful-exit transition.
+  # PR-2 (this PR) wires the STATE marker only — the actual registry-recorded-
+  # pgid reap + reap.lock choreography is PR-3 (kill-path hardening); until
+  # then this cleanup() continues to rely on the pre-existing heartbeat/PID-
+  # file teardown below, unchanged. Best-effort: lane_set_state no-ops on a
+  # missing lane dir (no registry entry for this run) or a missing lib.
+  if [[ -n "${ADT_LANE_DIR:-}" ]] && declare -F lane_set_state >/dev/null 2>&1; then
+    lane_set_state "$ADT_LANE_DIR" cleaning || true
+  fi
+
   # [INV-70] Metrics: wrapper_end. Defined as a closure so both the early-return
   # (agent-never-ran) path and the normal path emit it with the FINAL exit_code
   # (after the SIGTERM rewrite below). Best-effort, observe-only.
@@ -743,6 +799,13 @@ EOF
     # [INV-81] Write the run end marker (rc + timing) to meta.json. Best-effort.
     if declare -F run_artifacts_finalize >/dev/null 2>&1; then
       run_artifacts_finalize "${RUN_DIR:-}" "$exit_code" || true
+    fi
+    # [INV-107] STATE=clean-exit: this early-return path is still a GRACEFUL
+    # wrapper exit (the agent simply never ran) — the lane completed its
+    # lifecycle without crashing, so it promotes past `cleaning` rather than
+    # being left for a future GC pass to reclaim as if it died non-gracefully.
+    if [[ -n "${ADT_LANE_DIR:-}" ]] && declare -F lane_set_state >/dev/null 2>&1; then
+      lane_set_state "$ADT_LANE_DIR" clean-exit || true
     fi
     cleanup_github_auth
     return
@@ -877,6 +940,14 @@ EOF
   # observe-only — never affects the rc or the label transitions above.
   if declare -F run_artifacts_finalize >/dev/null 2>&1; then
     run_artifacts_finalize "${RUN_DIR:-}" "$exit_code" || true
+  fi
+
+  # [INV-107] STATE=clean-exit: the lane completed its full lifecycle
+  # gracefully (this cleanup() ran to the end, not via a non-graceful
+  # SIGKILL/OOM death). A future GC pass (later Lane-GC PR) age-collects
+  # terminal-state lane dirs after 24h; PR-2 only wires the marker.
+  if [[ -n "${ADT_LANE_DIR:-}" ]] && declare -F lane_set_state >/dev/null 2>&1; then
+    lane_set_state "$ADT_LANE_DIR" clean-exit || true
   fi
 
   cleanup_github_auth

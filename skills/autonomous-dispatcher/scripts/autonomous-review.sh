@@ -196,6 +196,11 @@ source "${LIB_DIR}/lib-metrics.sh" 2>/dev/null || true
 # lib-metrics — a load failure never aborts the review wrapper.
 # shellcheck source=lib-run-artifacts.sh
 source "${LIB_DIR}/lib-run-artifacts.sh" 2>/dev/null || true
+# [INV-107] Lane identity + durable registry (Lane-GC PR-2). Guarded — every
+# lane_* call site below is declare -F-gated, so a load failure degrades to
+# "no lane registry this run" rather than aborting the review wrapper.
+# shellcheck source=lib-lane.sh
+source "${LIB_DIR}/lib-lane.sh" 2>/dev/null || true
 # [INV-87]/[INV-89] Issue-Tracker Provider dispatch. The review wrapper's own
 # issue-level machine markers (verdict/progress/diagnostic comments) post through
 # itp_post_comment (the marker_channel choke-point), so a non-GitHub / text-channel
@@ -352,6 +357,30 @@ if [[ -n "$REVIEW_BOTS_VALIDATED" ]] && declare -F chp_caps >/dev/null 2>&1 \
   # abort the wrapper.
   echo "[autonomous-review] Code host review_bots=0 — disabling bot-review enforcement (REVIEW_BOTS='${REVIEW_BOTS_VALIDATED}' has no effect: the backend has no slash-command registry, so the prompt's bot-review section, the trigger broker, and the post-run wait are all suppressed)." >&2
   REVIEW_BOTS_VALIDATED=""
+fi
+
+# ---------------------------------------------------------------------------
+# [INV-107] Lane identity + atomic registry mint (Lane-GC PR-2).
+#
+# MUST run BEFORE setup_github_auth below — the token daemon it spawns is one
+# of the two background-child classes the invariant explicitly names ("before
+# ANY background child is spawned, including token daemons at
+# lib-auth.sh:128,:255-258, heartbeat, and pre-agent utilities"). PROJECT_ID is
+# guaranteed non-empty here (the required-config loop above already validated
+# it). Guarded on lane_mint existing so a lib-lane.sh source failure above
+# degrades to "no registry" rather than aborting the wrapper.
+# ---------------------------------------------------------------------------
+ADT_LANE_DIR=""
+if declare -F lane_mint >/dev/null 2>&1; then
+  ADT_LANE_ID="$(lane_mint "$PROJECT_ID" review "$ISSUE_NUMBER")"
+  ADT_LANE_DIR="$(lane_install "$PROJECT_ID" "$ADT_LANE_ID" "$PROJECT_DIR")" || ADT_LANE_DIR=""
+  if [[ -n "$ADT_LANE_DIR" ]]; then
+    export ADT_LANE_ID ADT_LANE_DIR
+  else
+    # NOTE: `log()` is not defined until later in the file — bare `echo >&2`
+    # (matching its format) so a missing `log` can't abort the wrapper.
+    echo "[autonomous-review] WARNING: lane_install failed — proceeding without a lane registry entry for this run (review-side reap/tagging degrades to the pre-Lane-GC behavior)." >&2
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -726,6 +755,16 @@ RESULT_PARSED=false
 cleanup() {
   local exit_code=$?
 
+  # [INV-107] STATE=cleaning: the lane registry's graceful-exit transition.
+  # PR-2 (this PR) wires the STATE marker only — the actual registry-recorded-
+  # pgid reap + reap.lock choreography is PR-3 (kill-path hardening); until
+  # then this cleanup() continues to rely on the pre-existing heartbeat/PID-
+  # file/fan-out teardown below, unchanged. Best-effort: lane_set_state no-ops
+  # on a missing lane dir (no registry entry for this run) or a missing lib.
+  if [[ -n "${ADT_LANE_DIR:-}" ]] && declare -F lane_set_state >/dev/null 2>&1; then
+    lane_set_state "$ADT_LANE_DIR" cleaning || true
+  fi
+
   # Tear down the heartbeat loop fast (parent-pid watchdog would also
   # take it down within HEARTBEAT_INTERVAL_SECONDS, but explicit is
   # cheaper). The kill is allowed to fail — the loop may already have
@@ -780,6 +819,16 @@ cleanup() {
   # like wrapper_end. Best-effort, observe-only.
   if declare -F run_artifacts_finalize >/dev/null 2>&1; then
     run_artifacts_finalize "${RUN_DIR:-}" "$exit_code" || true
+  fi
+
+  # [INV-107] STATE=clean-exit: fires for BOTH the normal (RESULT_PARSED) and
+  # crash paths, same placement rationale as wrapper_end/run_artifacts_finalize
+  # above — cleanup() reaching this line (as opposed to never running, i.e. a
+  # non-graceful SIGKILL/OOM death) always means the lane completed its
+  # lifecycle. A future GC pass (later Lane-GC PR) age-collects terminal-state
+  # lane dirs after 24h; PR-2 only wires the marker.
+  if [[ -n "${ADT_LANE_DIR:-}" ]] && declare -F lane_set_state >/dev/null 2>&1; then
+    lane_set_state "$ADT_LANE_DIR" clean-exit || true
   fi
 
   # If result was already parsed by the main script, labels are handled there
@@ -1530,6 +1579,25 @@ if [[ "${E2E_ACTIVE:-false}" == "true" ]]; then
       (
         AGENT_TIMEOUT="$E2E_BROWSER_TIMEOUT_SECONDS"
         AGENT_PID_FILE="${_E2E_LANE_DIR}/e2e.pgid"
+        # [INV-108] Sub-lane role tag (diagnostic only — ADT_LANE_ID/
+        # ADT_LANE_DIR are already inherited from the wrapper's top-level
+        # export).
+        export ADT_LANE_ROLE="e2e:browser"
+        # [INV-108] TMPDIR lane-scratch redirect: Chrome mains clobber their own
+        # environ region (0 readable env lines post-launch), so env-tag matching
+        # cannot reach a Chrome process directly — argv is the only channel.
+        # Redirecting TMPDIR under the lane's own dir means puppeteer/Chrome
+        # DevTools MCP's `--user-data-dir` (which defaults under $TMPDIR) lands
+        # at a lane-unique path, so Chrome's OWN argv carries a matchable marker
+        # for a future GC pass. CHROME_PROFILE_HINT is recorded into the
+        # registry (best-effort) so that future pass doesn't have to reverse-
+        # engineer the exact puppeteer subpath from TMPDIR alone.
+        if [[ -n "${ADT_LANE_DIR:-}" ]]; then
+          mkdir -p "${ADT_LANE_DIR}/tmp" 2>/dev/null && export TMPDIR="${ADT_LANE_DIR}/tmp"
+          if declare -F lane_set >/dev/null 2>&1; then
+            lane_set "$ADT_LANE_DIR" CHROME_PROFILE_HINT "${TMPDIR:-}/puppeteer_dev_chrome_profile-" || true
+          fi
+        fi
         run_agent "$_e2e_session_id" "$_e2e_prompt" "${AGENT_REVIEW_MODEL:-sonnet}" \
           "review-e2e-pr-${PR_NUMBER}-issue-${ISSUE_NUMBER}" >>"$_e2e_log" 2>&1
       ) || _e2e_rc=$?
@@ -1723,6 +1791,12 @@ if [[ "${REVIEW_SMOKE_ENABLED:-false}" == "true" ]]; then
       # wrapper. AGENT_PID_FILE stays unset so smoke_agent's run_agent skips the
       # PID write and the shared review-N.pid is untouched.
       unset AGENT_PID_FILE
+      # [INV-108] Smoke probes previously carried zero lane marker (design
+      # §4-C2's explicit gap). ADT_LANE_ID/ADT_LANE_DIR are already inherited
+      # from the wrapper's top-level export; tag the role only so a smoke
+      # probe's pgids-file entry is diagnostically distinguishable from a real
+      # fan-out member's.
+      export ADT_LANE_ROLE="smoke:${_smoke_agent}"
       _classify_smoke_state "$_smoke_agent" "$_smoke_model" "$_SMOKE_TIMEOUT" \
         "$_smoke_state_file" "$_smoke_evidence_file"
     ) &
@@ -2087,6 +2161,14 @@ for _agent in "${REVIEW_AGENTS_LIST[@]}"; do
     # resolution. Scope is THIS subshell only — never leaks to a sibling
     # agent's subshell or the dev side.
     export ADT_FANOUT_LANE_MARKER="$_agent_session_id"
+    # [INV-108] Sub-lane role tag for THIS fan-out member. ADT_LANE_ID/
+    # ADT_LANE_DIR are already inherited from the wrapper's top-level export
+    # (Lane-GC PR-2) — every descendant of this subshell, including the CLI
+    # and any MCP children it spawns, carries the SAME lane id as the review
+    # wrapper itself; ADT_LANE_ROLE is diagnostic-only (distinguishes which
+    # spawner recorded a given pgids-file line). _run_with_timeout
+    # (lib-agent.sh) reads it when appending to the registry's pgids file.
+    export ADT_LANE_ROLE="fanout:${_agent}"
     # INV-42 (#173): per-agent launcher resolution. If the operator set an
     # AGENT_REVIEW_LAUNCHER_<AGENT> key (suffix = uppercased name with every
     # non-alphanumeric char → `_`, same transform as the model/extra-args

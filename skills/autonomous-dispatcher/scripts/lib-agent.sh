@@ -372,6 +372,20 @@ _run_with_timeout() {
   "${launcher[@]}" "${cmd[@]}" &
   _AGENT_RUN_PID=$!
 
+  # [Lane-GC PR-2 / INV-107] Append this spawn's PGID to the lane registry
+  # (durable — survives ANY sidecar tmpdir being rm -rf'd, unlike
+  # AGENT_PID_FILE above). ADT_LANE_DIR is exported by the wrapper after
+  # lane_install; every _run_with_timeout call site (dev run_agent/
+  # resume_agent, each review fan-out subshell, smoke probes, the browser E2E
+  # lane) therefore gets covered from this ONE chokepoint with no per-call-site
+  # plumbing. ADT_LANE_ROLE defaults to "agent" (the dev-side / single-lane
+  # case); fan-out/smoke/E2E subshells override it before calling run_agent.
+  # Best-effort: lane_record_pgid itself already no-ops on a missing/unset
+  # lane dir, so this never affects _run_with_timeout's own contract.
+  if declare -F lane_record_pgid >/dev/null 2>&1; then
+    lane_record_pgid "${ADT_LANE_DIR:-}" "$_AGENT_RUN_PID" "${ADT_LANE_ROLE:-agent}"
+  fi
+
   if [[ -n "${AGENT_PID_FILE:-}" && ! -L "$AGENT_PID_FILE" ]]; then
     # Symlink-defence (CWE-59): refuse to follow a symlink. We don't
     # remove it either — acquire_pid_guard rejects symlinks at entry, so
