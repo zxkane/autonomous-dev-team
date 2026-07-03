@@ -295,7 +295,7 @@ assert_contains "TC-LCS-010 remote inner-cmd derives PID file via \${KIND}-\${N}
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== TC-LCS-011: argv carries --timeout-seconds 10 by default ==="
+echo "=== TC-LCS-011: argv carries --timeout-seconds 30 by default (#369) ==="
 # ---------------------------------------------------------------------------
 reset_recorder
 PATH="$STUB_BIN:$PATH" \
@@ -305,8 +305,10 @@ AWS_GET_STDOUT="ALIVE" \
 bash "$DRIVER" issue 99 >/dev/null 2>&1
 argv=$(cat "$TMPROOT/aws-record")
 assert_contains "TC-LCS-011 argv contains --timeout-seconds" "--timeout-seconds" "$argv"
-# 10 is the default per Finding 1.B.
-assert_contains "TC-LCS-011 default timeout value is 10" $'--timeout-seconds\n10' "$argv"
+# 30 is AWS ssm send-command's hard API minimum for --timeout-seconds
+# (#369); the prior default of 10 was rejected transport-side on every
+# unset-env call (ParamValidation: valid min value: 30).
+assert_contains "TC-LCS-011 default timeout value is 30" $'--timeout-seconds\n30' "$argv"
 
 # Also test override:
 reset_recorder

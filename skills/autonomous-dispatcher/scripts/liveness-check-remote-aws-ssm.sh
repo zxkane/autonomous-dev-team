@@ -34,7 +34,8 @@
 #   SSM_REMOTE_SHELL   (default: bash)
 #   SSM_REMOTE_PROFILE (default: empty, no source)
 #   HEARTBEAT_INTERVAL_SECONDS (default: 120; sized for INV-29)
-#   SSM_COMMAND_TIMEOUT_SECONDS — SSM-side cap (default 10, lib-ssm.sh)
+#   SSM_COMMAND_TIMEOUT_SECONDS — SSM-side cap (default 30, lib-ssm.sh;
+#                                  AWS's --timeout-seconds hard minimum)
 #   REMOTE_LIVENESS_CHECK_TIMEOUT_SECONDS — dispatcher-side poll cap
 #                                            (default 8, lib-ssm.sh)
 #

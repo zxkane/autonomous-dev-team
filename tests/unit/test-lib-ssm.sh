@@ -66,6 +66,20 @@ case "$*" in
       echo "stub aws: send-command failure" >&2
       exit "${AWS_SEND_FAIL:-1}"
     fi
+    # AWS_ENFORCE_MIN_TIMEOUT: reproduce the REAL AWS API's ParamValidation
+    # rejection for --timeout-seconds < 30 (#369 TC-LSSM-009), instead of
+    # the generic AWS_SEND_FAIL failure above.
+    if [[ "${AWS_ENFORCE_MIN_TIMEOUT:-0}" != "0" ]]; then
+      prev="" ts=""
+      for a in "$@"; do
+        [[ "$prev" == "--timeout-seconds" ]] && ts="$a"
+        prev="$a"
+      done
+      if [[ "$ts" =~ ^[0-9]+$ ]] && [[ "$ts" -lt 30 ]]; then
+        echo "Parameter validation failed: Invalid value for parameter TimeoutSeconds, value: $ts, valid min value: 30" >&2
+        exit 255
+      fi
+    fi
     echo "{\"Command\":{\"CommandId\":\"stub-cmd-1\",\"Status\":\"Pending\"}}"
     ;;
   *get-command-invocation*)
@@ -215,6 +229,79 @@ else
   echo -e "  ${RED}FAIL${NC}: TC-LSSM-006 wall-clock cap not honored (elapsed=${elapsed}s, expected <=4s)"
   FAIL=$((FAIL + 1))
 fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-LSSM-007: default cmd_timeout (env unset) is >= 30 (#369) ==="
+# ---------------------------------------------------------------------------
+# AWS ssm send-command's hard API minimum for --timeout-seconds is 30; the
+# prior default of 10 guaranteed a transport-side ParamValidation rejection
+# on every unset-env call. This is the unset-env default path.
+reset_recorder
+PATH="$STUB_BIN:$PATH" \
+AWS_RECORD_FILE="$TMPROOT/aws-record" \
+AWS_GET_STATUS="Success" \
+bash -c "unset SSM_COMMAND_TIMEOUT_SECONDS; source '$LIB'; _ssm_run_remote_command i-test ap-southeast-1 'echo hi'" >/dev/null
+argv=$(cat "$TMPROOT/aws-record")
+assert_contains "TC-LSSM-007 default --timeout-seconds is >= 30 (unset-env path)" $'--timeout-seconds\n30' "$argv"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-LSSM-008: non-numeric SSM_COMMAND_TIMEOUT_SECONDS guard fallback is >= 30 (#369) ==="
+# ---------------------------------------------------------------------------
+# lib-ssm.sh:80's non-numeric guard has its OWN literal fallback, separate
+# from the unset-env default on line 78. Both must be >= 30 or a garbage
+# env value still produces the rejected value.
+reset_recorder
+PATH="$STUB_BIN:$PATH" \
+AWS_RECORD_FILE="$TMPROOT/aws-record" \
+AWS_GET_STATUS="Success" \
+SSM_COMMAND_TIMEOUT_SECONDS="not-a-number" \
+bash -c "source '$LIB'; _ssm_run_remote_command i-test ap-southeast-1 'echo hi'" >/dev/null
+argv=$(cat "$TMPROOT/aws-record")
+assert_contains "TC-LSSM-008 non-numeric-guard fallback --timeout-seconds is >= 30" $'--timeout-seconds\n30' "$argv"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-LSSM-009: stubbed real AWS ParamValidation rejection for --timeout-seconds < 30 ==="
+# ---------------------------------------------------------------------------
+# Reproduces the ACTUAL AWS CLI rejection observed in #369 (ParamValidation:
+# valid min value: 30) via the shared stub's AWS_ENFORCE_MIN_TIMEOUT knob,
+# rather than a generic AWS_SEND_FAIL failure, and proves the fixed default
+# (unset env) never hits it.
+reset_recorder
+rc_default=$(
+  PATH="$STUB_BIN:$PATH" \
+  AWS_RECORD_FILE="$TMPROOT/aws-record" \
+  AWS_ENFORCE_MIN_TIMEOUT=1 \
+  bash -c "unset SSM_COMMAND_TIMEOUT_SECONDS; source '$LIB'; _ssm_run_remote_command i-test ap-southeast-1 'echo hi'" \
+  >/dev/null 2>"$TMPROOT/stderr-default"
+  echo $?
+)
+assert_rc "TC-LSSM-009 fixed default (unset env) avoids the real ParamValidation rejection" 0 "$rc_default"
+stderr_default=$(cat "$TMPROOT/stderr-default")
+if [[ "$stderr_default" != *"ParamValidation"* ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-LSSM-009 fixed-default stderr does not mention ParamValidation"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-LSSM-009 fixed-default stderr unexpectedly mentions ParamValidation: $stderr_default"
+  FAIL=$((FAIL + 1))
+fi
+
+# Demonstrate the OLD (pre-fix) value of 10 DOES reproduce the real rejection
+# against this same stub, proving the stub faithfully models the AWS API and
+# that this test would have failed before the fix.
+reset_recorder
+rc_pre_fix=$(
+  PATH="$STUB_BIN:$PATH" \
+  AWS_RECORD_FILE="$TMPROOT/aws-record" \
+  AWS_ENFORCE_MIN_TIMEOUT=1 \
+  SSM_COMMAND_TIMEOUT_SECONDS=10 \
+  bash -c "source '$LIB'; _ssm_run_remote_command i-test ap-southeast-1 'echo hi'" \
+  >/dev/null 2>"$TMPROOT/stderr-prefix"
+  echo $?
+)
+assert_rc "TC-LSSM-009 pre-fix value (10) DOES hit the real ParamValidation rejection (proves the stub is faithful)" 2 "$rc_pre_fix"
 
 echo ""
 echo "==============================================="

@@ -15,6 +15,13 @@
 # Source guard: idempotent re-source is safe; helpers are pure functions.
 # shellcheck shell=bash
 
+# AWS ssm send-command's hard API minimum for --timeout-seconds. Any lower
+# value is rejected transport-side with ParamValidation on EVERY call, not
+# flakily (#369). Referenced by both defaulting paths in
+# _ssm_run_remote_command below so they can't drift apart. `:=` (not a
+# plain assignment) keeps re-sourcing this file idempotent.
+: "${_SSM_MIN_COMMAND_TIMEOUT_SECONDS:=30}"
+
 # _has_shell_metachar <value>
 #
 # Returns 0 if <value> contains any of the metachars that can break out
@@ -56,10 +63,15 @@ _has_shell_metachar() {
 #
 # Optional env (with defaults):
 #   SSM_COMMAND_TIMEOUT_SECONDS — SSM-side timeout for the remote
-#                                 command (default 10; ALSO appears as
-#                                 --timeout-seconds in send-command argv
-#                                 so a hung remote shell can't tie up
-#                                 an SSM slot for the default 600s).
+#                                 command (default 30 — AWS ssm
+#                                 send-command's documented hard API
+#                                 minimum for --timeout-seconds; any
+#                                 lower value is rejected transport-side
+#                                 with ParamValidation, #369). ALSO
+#                                 appears as --timeout-seconds in
+#                                 send-command argv so a hung remote
+#                                 shell can't tie up an SSM slot for the
+#                                 default 600s.
 #   REMOTE_LIVENESS_CHECK_TIMEOUT_SECONDS — wall-clock cap on the
 #                                 dispatcher-side polling loop
 #                                 (default 8). Protects the dispatcher
@@ -75,9 +87,9 @@ _ssm_run_remote_command() {
   command -v aws >/dev/null 2>&1 || { echo "[lib-ssm] ERROR: aws CLI not found" >&2; return 2; }
   command -v jq  >/dev/null 2>&1 || { echo "[lib-ssm] ERROR: jq not found" >&2;  return 2; }
 
-  local cmd_timeout="${SSM_COMMAND_TIMEOUT_SECONDS:-10}"
+  local cmd_timeout="${SSM_COMMAND_TIMEOUT_SECONDS:-$_SSM_MIN_COMMAND_TIMEOUT_SECONDS}"
   local poll_timeout="${REMOTE_LIVENESS_CHECK_TIMEOUT_SECONDS:-8}"
-  [[ "$cmd_timeout"  =~ ^[0-9]+$ ]] || cmd_timeout=10
+  [[ "$cmd_timeout"  =~ ^[0-9]+$ ]] || cmd_timeout="$_SSM_MIN_COMMAND_TIMEOUT_SECONDS"
   [[ "$poll_timeout" =~ ^[0-9]+$ ]] || poll_timeout=8
 
   # Build commands JSON safely via jq -n --arg (CWE-78).
