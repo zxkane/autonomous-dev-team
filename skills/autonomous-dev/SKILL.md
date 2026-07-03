@@ -227,11 +227,24 @@ Before writing any implementation code:
 Execute in your terminal:
 
 ```bash
-npm run build
-npm run test
+timeout 1800 bash -lc 'npm run build && npm run test' > /tmp/verify.log 2>&1; rc=$?; [ $rc -ne 0 ] && tail -100 /tmp/verify.log; exit $rc
 ```
 
 Fix any failures before proceeding. Deploy and verify locally if applicable.
+
+### How to run long verification
+
+Run your project's build/test suite as **one synchronous command with a generous timeout** — never background it and poll across turns:
+
+1. **Run the top-level suite command synchronously with an explicit generous timeout.** One blocking call (or a few sequential blocking calls, e.g. build then test) that returns the full result within the turn. Capture output and replay only the tail on failure:
+   ```bash
+   timeout 1800 bash -lc '<your project's build & test command>' > /tmp/verify.log 2>&1; rc=$?; [ $rc -ne 0 ] && tail -100 /tmp/verify.log; exit $rc
+   ```
+2. **Never background the top-level suite** (no `&`, no background task mode — whatever the host CLI calls it, e.g. `run_in_background`) and then poll its log across agent turns. Each poll is a full model round-trip; collective polling cost can exceed the suite's own runtime by orders of magnitude.
+3. If the tool's max timeout genuinely cannot cover the suite, split by directory/prefix into a few sequential synchronous calls — still no polling.
+4. Prefer a project-provided parallel runner when one exists.
+
+**Scope**: the ban is on backgrounding the TOP-LEVEL verification command. Tests/scripts that internally spawn child processes or local servers are unaffected, as are genuinely event-driven waits (CI checks in Step 9, bot reviews in Steps 10-11).
 
 ---
 

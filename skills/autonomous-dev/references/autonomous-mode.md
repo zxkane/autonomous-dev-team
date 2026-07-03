@@ -191,6 +191,10 @@ done
 
 If bot review does not appear within 3 minutes, proceed without it -- the review agent will re-trigger bot review during its verification step.
 
+## Running Verification Suites Synchronously
+
+Unattended sessions are where background+poll waste actually happens — an idle agent has nothing else to do but keep checking, so it drifts into tailing a log across many turns instead of blocking on one call. When running Step 5's build/test suite (or any other long verification command) in autonomous mode, run the top-level command as **one synchronous call with a generous `timeout`** and let it return the full result within the turn; do **not** background the suite (no `&`, no background task mode) and then poll its log on subsequent turns — each poll is a full model round-trip, and 14 turns of polling a 5-minute suite is strictly worse than one blocking call. If the suite genuinely exceeds the tool's max timeout, split it into a few sequential synchronous calls (by directory/prefix) rather than backgrounding it. This does not apply to event-driven waits that are inherent to the pipeline, like Step 9's CI checks or Step 10-11's bot review polling — those are legitimately asynchronous external processes, not a suite you could otherwise just block on.
+
 ## Local E2E Verification (Before Push)
 
 Before pushing changes that modify E2E tests or UI components, verify the changes are sound:
