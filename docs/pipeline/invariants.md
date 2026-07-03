@@ -5615,6 +5615,365 @@ untouched).
 - [INV-103](#inv-103-acquire_pid_guard-acquires-the-per-issue-mode-start-slot-atomically--no-check-then-write-toctou-window) — the sibling half of the #360/302a fix (the atomic start lock) closing the same incident's first mechanism.
 - [`review-agent-flow.md` § Fan-out reap (INV-43)](review-agent-flow.md#multi-agent-fan-out-inv-40) — runtime walkthrough of the reap call site.
 
+
+
+## INV-105: a non-converging dev↔review loop (a `failed-substantive`+`dev-actionable=true` verdict that churns ≥N completed zero-commit dev-resume rounds against a FROZEN PR head) is detected and HALTED — the breaker transitions to `stalled` then posts ONE structured `reason=non-convergence` report, gated behind the shared `may_stall_now` live-PID pre-gate, idempotent per `{issue, head, trailer-hash, session_id}`
+
+_Triage (issue #236): [machine-checked: tests/unit/test-convergence-breaker.sh]_
+
+> Note: originally minted as INV-97 by #297; renumbered to INV-102 on a rebase
+> after main independently claimed INV-97..101 (INV-100 #355, INV-101 #356) in
+> the interim; renumbered to INV-103 when #337 (`chp_pr_comment`) claimed
+> INV-102 through a second mid-flight collision; renumbered a THIRD time to
+> INV-105 (this heading) when #365 (atomic PID guard + fan-out reap hardening)
+> landed first and claimed both INV-103 and INV-104. Next-free-slot
+> renumbering follows the documented first-merged-keeps-its-number convention;
+> the design doc's lineage note records the full 97→102→103→105 history.
+
+**Rule**: the dispatcher detects a **non-converging** dev↔review loop and halts it
+automatically instead of burning tokens in an infinite `dev-resume` loop. The
+motivating case is #286: CI-green-but-`failed-substantive` for 6+ rounds against a
+self-contradictory acceptance spec, with zero human intervention — the dispatcher
+kept re-dispatching a dev agent that could never satisfy a malformed spec. The
+breaker is the **belt** to [INV-85]'s single-shot-marker **suspenders**: INV-85
+bounds the `failed-substantive` route to ONE `dev-new` per unchanged HEAD via a
+per-HEAD attempt marker, but that marker resets on every log-truncating `dev-new`
+and can be missed when the crash-recovery path (`dispatcher-tick.sh` Step 5b)
+re-routes without writing it. INV-105 counts the DURABLE per-round evidence and
+trips deterministically after ≥N rounds.
+
+**Where** (single insertion point): `handle_completed_session_routing`'s
+`failed-substantive` case, as **Branch B″** — AFTER Branch A (bot-unfixable 403),
+Branch B ([INV-85] no-progress marker), and Branch B′ ([INV-92]
+`dev-actionable=false` → #298), and BEFORE Branch C (`dev-new`). Only a
+`failed-substantive` + `dev-actionable=true` verdict that survives A/B/B′ reaches
+the breaker. `scan-pending-dev` merely SKIPS an already-`stalled` issue (Step 0
+hygiene + label gating). This is the single existing SHA-comparison site (reuses
+`_np_current_head`/`_np_last_head`); the dev session-end timestamp is in scope
+(`session_end_iso`, passed to `classify_recent_review_verdict` arg 2).
+
+**#298 precedence** (an ordering at the same site): a `dev-actionable=false`
+verdict is owned by [INV-92]'s Branch B′ and returns via `mark_stalled` BEFORE the
+breaker — so a non-actionable round never runs OR accretes #297 history.
+
+**PRIMARY trip signal** — the PR head SHA is **FROZEN** across **≥
+`CONVERGENCE_STALL_THRESHOLD` (default 3)** COMPLETED zero-commit dev-resume
+rounds **belonging to the ACTIVE convergence case**. A "completed zero-commit
+round" is DERIVED from the pre-existing per-round dispatcher comment
+(`dispatcher-tick.sh` Step 5b — the [INV-06]-guarded "Dev process exited (no new
+commits since last review at `<head>`)…"), which fires exactly once per completed
+zero-commit round and embeds the frozen head. #297 writes NO per-round breadcrumb
+of its own — a new per-round write on a NON-trip round would reintroduce an
+orphan-artifact TOCTOU. `_frozen_convergence_rounds_json` scans the already-emitted
+comments, filtered to `head == current_head` (rounds since the head last advanced).
+A round comment is recognized ONLY when it is **authentic** (round-7 review [P1],
+tightened round-15 [BLOCKING]: a human/reviewer comment QUOTING the Step-5b
+status line must not count): the comment's normalized `authorKind != "human"`
+(spec §3.3 [M5] — the dispatcher posts the round comment via `itp_post_comment`
+under the pipeline's own token; the author filter is GATED on `BOT_LOGIN` being
+set — with it EMPTY (the PERMANENT topology at this call site, not a rare edge
+case — `BOT_LOGIN` is never set in the dispatcher's own process in ANY
+`GH_AUTH_MODE`, since the provider cannot derive `self` and normalizes the
+dispatcher's own comments to `human`) the filter is dropped so genuine rounds
+are never excluded) AND the body is EXACTLY EQUAL to the fixed
+`"Dev process exited (no new commits since last review at \`<head>\`). Moving
+to pending-dev for retry."` literal `dispatcher-tick.sh` Step 5b emits — **not
+merely `startswith`** (round-15 [BLOCKING]: the prior `startswith` anchor
+authenticated any comment BEGINNING with the exact sentence, including a
+human's genuine quote with commentary appended after it; since the author
+filter is UNCONDITIONALLY dropped in this topology, `startswith` alone was the
+entire gate, and such a forgery could inflate the round count toward tripping
+the breaker on fewer than the required N genuine rounds. The round comment's
+ENTIRE body is this one fixed sentence with no free-text suffix, so exact
+equality is the correct, tighter anchor — it authenticates the genuine comment
+exactly and rejects any quote with even one extra trailing character, with no
+actor signal required). Each authentic round is then **joined to the review VERDICT it
+was reacting to** — the newest **AUTHENTICATED** `<!-- review-verdict: … -->`
+trailer comment strictly BEFORE the round comment — counting the round **only
+when that verdict's canonical `{verdict}|{cause}|{dev-actionable}` equals the
+ACTIVE case's canonical** (`failed-substantive|<cause>|true` here).
+`count_frozen_convergence_rounds` is its length; the SAME matched-rounds JSON
+supplies the report's per-round timestamps.
+
+**PRECEDING-VERDICT AUTHENTICITY (round-11 [BLOCKING] [P1], corrected round-13
+[BLOCKING] [P1], tightened round-14 [Critical]):** the round comment was authenticated (above), but the
+CANDIDATE VERDICT it is joined against was not — any comment whose body merely
+CONTAINED a `<!-- review-verdict: … -->`-shaped string, however posted, could
+be selected as "the verdict this round reacted to". A maintainer/reviewer
+comment quoting a past trailer for discussion, posted between the genuine bot
+verdict and the Step-5b round comment, would win the unauthenticated
+`last`-before-round selection over the real trailer — letting arbitrary
+discussion comments TRIP or SUPPRESS the breaker.
+
+round-11's first fix gated the candidate-verdict set the SAME way [INV-20]
+gates verdict authentication elsewhere: with `BOT_LOGIN` set, require the exact
+actor binding `.author == BOT_LOGIN`; with `BOT_LOGIN` empty, **fall back to
+the coarse `authorKind != "human"` bound**. **That fallback was itself wrong
+(round-13 [BLOCKING] [P1]):** `BOT_LOGIN` is resolved ONLY inside
+`autonomous-review.sh`'s own separate process (`gh api user --jq .login`) — it
+is NEVER set in the dispatcher's own process (`dispatcher-tick.sh`,
+`lib-dispatch.sh`, `lib-auth.sh`) in ANY `GH_AUTH_MODE`, so the
+"`BOT_LOGIN`-empty fallback" is not a rare edge case — it is the ALWAYS-TAKEN
+branch here. In `GH_AUTH_MODE=token`, dev/dispatcher/review wrappers share one
+PAT identity, so the provider cannot derive `self` and normalizes even the
+review wrapper's OWN genuine verdict trailer to `authorKind=human` — the
+`authorKind != "human"` fallback rejected it outright, so
+`count_frozen_convergence_rounds` stayed 0 forever and Branch B″ was dead code
+in this (the officially supported) topology.
+
+**Fix**: use the SAME structural signal `recent_review_verdict_body`'s own
+`exclude_predicate` already relies on — `emit_verdict_trailer`
+(`lib-review-verdict.sh`) posts the verdict trailer as a **separate bare
+comment whose body is JUST the trailer line** (`<!-- review-verdict: … -->`,
+no human text). A structural body match is therefore authorship-independent:
+TRUE for the genuine wrapper-emitted comment, FALSE for a human's "Just
+quoting for context: `<!-- review-verdict: … -->`" (prose precedes the
+anchor) regardless of that human's `authorKind`. This structural check is now
+the PRIMARY, always-required gate. `.author == BOT_LOGIN` is retained as an
+ADDITIONAL, strictly-stronger AND-condition for the rare path where
+`BOT_LOGIN` happens to be set (defense in depth against a different bot/App
+sharing the structural shape) — it is layered on TOP of the structural check,
+never a standalone/sole gate, and the broken `authorKind != "human"` fallback
+is gone entirely. A round whose only candidate verdict fails this gate has no
+authenticated preceding verdict and is excluded — fail-closed toward NOT
+tripping (R4).
+
+**Tightened (round-14 [Critical]):** the round-13 fix's structural check was
+`startswith("<!-- review-verdict:")` — satisfied by ANY body merely
+BEGINNING with the trailer text, so a forged comment that pastes the genuine
+trailer verbatim and then appends MORE content after it (e.g. trailing prose,
+or a second concatenated trailer) also authenticated. With `BOT_LOGIN` empty
+— the permanent reality at this call site, not a rare fallback — that
+`startswith` check was the ENTIRE gate, so this forgery shape could
+manufacture a false trip or shadow a genuine trailer via the
+`last`-before-round selection, reopening a round-11-shaped hole for a
+different forgery. Fixed by anchoring the match at BOTH ends
+(`^<!--[[:space:]]*review-verdict:[[:space:]]*[a-z-]+[^>]*-->[[:space:]]*$`):
+`emit_verdict_trailer` never posts anything else in the comment body, so a
+genuine trailer always matches exactly, while ANY extra leading or trailing
+content fails. This does not (and cannot, absent an actor signal) defend
+against a human posting a byte-for-byte copy of a genuine bare trailer with
+nothing else in the comment — the same residual, already-documented exposure
+the sibling round-comment check accepts ("a human pasting the EXACT line at
+offset 0 is accepted").
+
+The per-round trailer JOIN (the [P1] round-1 review fix) is load-bearing:
+counting **every** frozen-head zero-commit comment would (a) let stale
+`failed-non-substantive` or `dev-actionable=false` history on the SAME SHA (from an
+earlier, now-resolved case) TRIP the breaker EARLY, and (b) — via the old blanket
+`non-actionable-finding:<head>` zero-out — SUPPRESS a genuine later
+`dev-actionable=true` non-convergence on that SHA FOREVER. Joining to the
+per-round verdict windows the count to the active `{head, trailer}` case: a
+`dev-actionable=false` round's canonical (`…|false`) or a non-substantive round's
+(`failed-non-substantive|…`) never matches and is excluded — no separate #298-marker
+zero-out is needed (a `dev-actionable=false` CURRENT round is handled by Branch B′
+precedence; PRIOR ones are simply not counted). The frozen-head gate
+(`current_head == last_reviewed_head`, both non-empty) is the SAME gate INV-85
+Branch A/B use, so it never fires when HEAD advanced or no PR exists.
+
+**SECONDARY gate + report/idempotency key** — the normalized **trailer-hash** =
+`convergence_trailer_hash` of the canonical `{verdict}|{cause}|{dev-actionable}`
+(via `convergence_canonical`, the SINGLE source of truth the per-round JOIN and the
+marker key share) from the `classify_recent_review_verdict` OUT-VARS (NOT body
+text). All counted rounds share the active canonical by construction, so the hash is
+stable across the window; it is part of the report + idempotency key. **Match key =
+`{issue, head, trailer-hash, session_id}`** (round-12 [BLOCKING] corrected the
+original `{head, trailer-hash}`-only key — see below). `review-comment-id` is
+EVIDENCE never the key (fresh per round, so including it would make strict
+key-equality never match). **The counted rounds' per-round timestamps ARE surfaced
+in the report's evidence block** (the [P1] round-1 review fix — the halted report
+names exactly which completed dev-resume rounds were used), sourced from the same
+matched-rounds JSON, but are still never part of the match key.
+
+**Session-scoped idempotency + marker authenticity (round-12 [BLOCKING]):** the
+ORIGINAL `{head, trailer-hash}`-only key made the breaker **one-shot per
+frozen-head case, forever** — once tripped, the marker persists on the issue
+indefinitely (comments are never deleted), so if an operator followed the
+documented resume step (removed `stalled`, per [INV-05]) and the SAME
+`{head, trailer-hash}` case genuinely recurred in a NEW dev session, the STALE
+marker from the prior, already-resolved trip would still match and silently
+suppress the fresh halt — the issue would sit `pending-dev` forever with no
+report and no `stalled` transition. Fix: the marker now embeds
+`session=${session_id}` — `handle_completed_session_routing` runs AT MOST ONCE
+per completed dev session (Step 4 gates on `is_session_completed`), and a re-arm
+mints a brand-new `session_id` (the INV-35 PTL/fresh-dev pattern), so a genuinely
+NEW episode carries a DIFFERENT marker and is never suppressed by a prior trip's
+marker. Within the SAME session (the intended idempotency case — e.g. a tight
+re-tick before the label transition is externally visible), the marker is
+identical and the dedupe still correctly fires.
+
+The dedupe READ is additionally gated on `authorKind != "human"` — the marker is
+ALWAYS posted via `itp_post_comment` under the dispatcher's own machine identity
+(the SAME actor that posts the Step-5b round comment; mirrors the round-7
+round-comment authenticity check, NOT the round-11 `.author == BOT_LOGIN` exact
+binding, which authenticates a REVIEW-BOT comment specifically and is the wrong
+predicate for the dispatcher's OWN comment — the dispatcher's identity and the
+review agent's `BOT_LOGIN` can be, and in `GH_AUTH_MODE=app` typically ARE, two
+distinct accounts). Without this gate, a human comment merely QUOTING the marker
+text (e.g. copy-pasting the report while discussing the incident) would also
+suppress a genuine halt while the issue is still `pending-dev`.
+
+**Distinct convergence counter, NOT `retry_count`**: the ≥N count is #297's OWN
+signal (frozen-head zero-commit rounds), distinct from the `MAX_RETRIES`
+`retry_count` `mark_stalled` uses — `retry_count` counts agent-failures +
+dispatcher-crashes (#99) and is moved by `dev-actionable=false` rounds. The count
+is persisted across ticks via the pre-existing per-round comment scan (not a
+dedicated marker), and resets when the head advances OR the trailer-hash changes.
+The #297 threshold is independent of `MAX_RETRIES`.
+
+**Eligibility pre-gate — shared `may_stall_now` (no live-PID false-trip)**:
+`label_swap` is a plain `itp_transition_state` wrapper with NO live-PID deferral
+(the [INV-26] deferral lives inside `mark_stalled`). Routing the breaker THROUGH
+`mark_stalled` would dual-post its "retry exhausted @owner" comment alongside the
+#297 report. So the [INV-26] liveness PREDICATE (the `pid_alive` probe + the
+local-backend empty-PID→DEAD narrowing) is **factored into a shared
+`may_stall_now <issue>` helper** — the liveness/eligibility predicate ONLY, with
+NO comment side-effect. BOTH `mark_stalled` (whose own `INV-26-stall-deferral`
+operator comment STAYS in `mark_stalled` — its deferral behavior is byte-identical
+before/after) AND the #297 breaker call it. The breaker calls `may_stall_now`
+WITHOUT `--at-cap` (it is not retry-exhausted; an indeterminate remote-SSM verdict
+biases ALIVE→defer = a MISS). The gate runs FIRST (a TOCTOU fix): only if the
+terminal transition WILL proceed this tick do we post the report + marker + do the
+transition — one eligibility-gated unit. A live dev PID → post NOTHING, mark
+NOTHING, defer to next tick (no orphan report/marker).
+
+**Terminal action — exactly ONE comment, declared movement, ATOMIC ordering**:
+the terminal transition via the plain declared `pending-dev → stalled`
+`label_swap` runs **FIRST** — the SAME movement `mark_stalled` uses, and the
+SAME ordering `mark_stalled` already follows (transition, then comment).
+`autonomous` is NEVER removed by this move (or by `mark_stalled`'s identical
+movement) — it is retained throughout the issue's entire active lifecycle,
+including while `stalled`; halting autonomy is achieved by `stalled` itself
+being terminal (Step 2 `scan-new` only dispatches `autonomous`-only issues), not
+by removing `autonomous`. Only AFTER the transition has landed does the breaker
+post ONE structured `reason=non-convergence` report carrying the PR ref + frozen
+head SHA + the round count + the verbatim repeated finding
+(`recent_review_verdict_body` — round-15 [BLOCKING]: this helper returned
+EMPTY unconditionally whenever neither `BOT_LOGIN` nor `FALLBACK_SESSION_ID`
+was set, which — like the preceding-verdict join above — is the PERMANENT
+reality in the dispatcher's own process, so the evidence excerpt was
+"(verdict body unavailable...)" in every real deployment. Fixed by adding a
+structural fallback: a genuine review-wrapper verdict/findings comment always
+STARTS WITH the literal `Review findings:` or `Review PASSED` — the canonical
+first-line prefix `post-verdict.sh` and `lib-review-artifact.sh` always emit
+— so this is checked, author-independent, when no actor signal is available)
++ the `cause=`/`dev-actionable` hint + a
+human-action checklist + the explicit "**To resume: fix per the checklist, then
+REMOVE the `stalled` label (`autonomous` is retained; removal re-arms via Step 2
+and resets the retry counter, INV-05).**" instruction + the idempotency marker
+`<!-- dispatcher-convergence-breaker: issue=<N> head=<sha> trailer=<hash> -->`.
+**Atomicity (round-10 [P1] BLOCKING finding 1):** posting the marker BEFORE the
+transition landed was a TOCTOU — a transient `label_swap` failure (e.g. a `gh
+issue edit` transport error) would leave the marker on the issue while it was
+still `pending-dev`, and the idempotency check (keyed on the marker alone) would
+then suppress every subsequent retry forever. Transition-first closes this: a
+`label_swap` failure aborts the unguarded statement under the dispatcher's `set
+-euo pipefail` BEFORE the marker is ever posted, so the next tick re-evaluates
+this issue from scratch and retries — self-healing, and consistent with
+`mark_stalled`'s own (equally unguarded) `label_swap` call. This yields exactly
+ONE terminal comment (the #297 report — NOT `mark_stalled`'s "@owner retry
+exhausted"), plus the live-PID deferral (via the shared `may_stall_now`), plus NO
+new declared label edge (passes `check-spec-drift.sh` Check C.2 — no
+`transitions.json` / `state-machine.md` edit for a NEW edge; the movement itself
+is declared as its own `dispatch-stalled-convergence` transition row, see below).
+`stalled` is REUSED — no new `deadlocked` label ([INV-105] does not fork one;
+the recovery action is "read report, fix, remove `stalled`").
+
+**Idempotency**: before posting, grep machine-authored comments
+(`authorKind != "human"`) for the exact `{issue, head, trailer-hash, session_id}`
+marker; a re-run on the SAME case is suppressed (post NOTHING, do NOT
+re-transition), while a genuinely NEW non-convergence case (a new trailer-hash OR
+a new session on the same frozen head — e.g. after an operator re-arm) has a
+DIFFERENT marker and is re-evaluated. A human comment merely quoting the marker
+text is excluded from the dedupe read and can never suppress a genuine halt.
+
+**Bias to MISS**: < N rounds, any head advance, any trailer-hash change, or a live
+dev PID → do NOT trip. `MAX_RETRIES` → `mark_stalled` remains the cheap backstop
+for everything the breaker misses — a false-trip discards a converging loop's work
++ removes autonomy (expensive on an unattended pipeline); a missed trip is caught
+by `MAX_RETRIES` (cheap).
+
+**Producer/Consumer**: `lib-dispatch.sh` — `handle_completed_session_routing`
+Branch B″ (the detect + eligibility-gate + report + transition), plus the helpers
+`may_stall_now` (shared liveness predicate), `convergence_trailer_hash`,
+`count_frozen_convergence_rounds`, `recent_review_verdict_body`. The per-round
+"no new commits" comment it counts is produced by `dispatcher-tick.sh` Step 5b
+(pre-existing, unchanged).
+
+**Why** (#297): follow-up to the #286 deadlock retrospective; sibling of #298
+([INV-92]), which proactively escalates a `dev-actionable=false` verdict. #297
+owns the separate detect-non-convergence + halt mechanism for a genuinely
+`dev-actionable=true` verdict the dev agent still cannot satisfy. The design went
+through four rounds of standard review (the original fuzzy-token-overlap detector
+was UNANIMOUS-BLOCKED as unbuildable; the deterministic frozen-head + trailer-hash
+design is what ships).
+
+**Status**: **ENFORCED** as of #297. Delta on top of
+[INV-35](#inv-35-review-aware-resume-routing-for-completed-sessions),
+[INV-85](#inv-85-the-completed-session-failed-substantive-route-is-bounded-to-one-dev-new-per-unchanged-head-a-no-progress-or-bot-unfixable-finding-escalates-to-stalled-never-loops),
+[INV-92](#inv-92-a-review-blocking-finding-the-dev-agent-provably-cannot-act-on-protected-path--missing-token-scope-is-not-routed-to-dev-resume--the-wrapper-classifies-each-findings-actionability-and-the-dispatcher-escalates-a-non-actionable-verdict-to-stalled),
+and [INV-26](#inv-26-stall-decision-excludes-dispatcher-induced-terminations-and-defers-on-live-wrappers). No `state-machine.md` label edit
+(reuses `stalled`). Design recorded in
+`docs/designs/issue-297-convergence-breaker.md`; test plan in
+`docs/test-cases/convergence-breaker.md`.
+
+**Tests**: `tests/unit/test-convergence-breaker.sh` — `convergence_trailer_hash`
+determinism (keyed on verdict|cause|dev-actionable); the trailer-joined
+`count_frozen_convergence_rounds` (CB-COUNT-009a stale non-substantive rounds on the
+same SHA EXCLUDED — no early trip; CB-COUNT-009b a prior `dev-actionable=false`
+round EXCLUDED without zeroing the genuine active rounds — no forever-suppression;
+CB-COUNT-009c a non-matching active canonical → 0; CB-COUNT-009h/i a human/other-bot
+comment QUOTING a matching trailer is REJECTED so the genuine non-matching verdict
+is used and the round is excluded — round-11 [P1]; CB-COUNT-009j the genuine
+trailer is still counted despite an unrelated quote present; CB-COUNT-009k the
+BOT_LOGIN-empty fallback also rejects the quote via the structural anchor;
+round-13 [BLOCKING]: CB-COUNT-009l the REAL `GH_AUTH_MODE=token` topology
+(`BOT_LOGIN` empty AND the genuine verdict trailer's `authorKind=human`, shared
+PAT identity) still counts the genuine rounds, CB-COUNT-009m the same topology
+trips end-to-end, CB-COUNT-009n the round-11 prose-prefixed-quote rejection still
+holds under the same topology; round-14 [Critical]: CB-COUNT-009o a forged
+trailer with content TRAILING the genuine trailer text is rejected by the
+end-anchored match (the bare `startswith` round-13 first shipped would have
+accepted it); round-15 [BLOCKING]: CB-COUNT-009p a verbatim round-line quote
+with a leading `> ` prefix is still rejected, CB-COUNT-009q the exact forgery
+shape the finding described — a verbatim round-line quote with NO leading
+prose and commentary APPENDED after it (the shape that DID pass the pre-fix
+`startswith` round-comment anchor) is rejected by the round-15 exact-equality
+tightening); the trip (CB-TRIP-001: ≥3 frozen
++ `dev-actionable=true` + eligible → ONE report + marker + `pending-dev → stalled`,
+NO `mark_stalled`, NO dev-new, log intact); the report content (CB-REPORT-008: PR
+ref + frozen SHA + resume instruction + count + verbatim finding + the **per-round
+timestamps** of the counted rounds — [P1] round-1 review fix); the misses
+(CB-MISS-002 head advanced, CB-MISS-003 < threshold);
+#298-precedence (CB-PRECEDENCE-004); live-PID defer (CB-LIVE-005: no orphan);
+idempotency (CB-IDEM-006 same key incl. session → no-op, CB-IDEM-007 new hash
+same session → re-evaluate; round-12: CB-IDEM-015 a STALE marker from a PRIOR
+session does NOT suppress a fresh re-arm trip, CB-IDEM-016/017 a human quote of
+the marker — with BOT_LOGIN set/empty respectively — does NOT suppress the halt,
+CB-IDEM-018 a genuine same-session marker still suppresses [regression guard]);
+threshold override (CB-THRESH-012); the source-of-truth pins (CB-SHARED-010: both
+`mark_stalled` and the breaker call `may_stall_now`; the empty-PID→DEAD narrowing
+lives in exactly one place); `recent_review_verdict_body` against the REAL
+implementation, not a mock (RRVB-001..005: returns the agent's findings body
+rather than the newest trailer/Reviewed-HEAD metadata comment, excludes both
+structurally, a real findings body merely MENTIONING the excluded phrases
+mid-body is not excluded; round-15 [BLOCKING]: RRVB-006 with `BOT_LOGIN` empty
+— the permanent dispatcher-process topology, NOT exercised by RRVB-001..005,
+which all run under the file-global `BOT_LOGIN` export — the genuine findings
+body is still returned via the structural `Review findings:`/`Review PASSED`
+fallback, RRVB-007 a human comment merely mentioning the prefix mid-sentence is
+still rejected [regression guard]). `tests/unit/test-mark-stalled-liveness.sh` (extended)
+— `may_stall_now` predicate (TC-MSL-011..013: alive→DEFER side-effect-free,
+absent→ELIGIBLE, remote-indeterminate ALIVE-bias without `--at-cap` / DEAD with),
+and the UNCHANGED TC-MSL-001..010 that pin `mark_stalled`'s deferral-comment
+behavior byte-identical after the factoring.
+
+**Cross-references**:
+- [INV-85](#inv-85-the-completed-session-failed-substantive-route-is-bounded-to-one-dev-new-per-unchanged-head-a-no-progress-or-bot-unfixable-finding-escalates-to-stalled-never-loops) — the reactive single-shot no-progress guard this breaker is the deterministic ≥N belt to.
+- [INV-92](#inv-92-a-review-blocking-finding-the-dev-agent-provably-cannot-act-on-protected-path--missing-token-scope-is-not-routed-to-dev-resume--the-wrapper-classifies-each-findings-actionability-and-the-dispatcher-escalates-a-non-actionable-verdict-to-stalled) — the #298 sibling whose Branch B′ takes precedence at the same site.
+- [INV-26](#inv-26-stall-decision-excludes-dispatcher-induced-terminations-and-defers-on-live-wrappers) — the live-PID deferral whose predicate is now the shared `may_stall_now` helper both this and `mark_stalled` call.
+- [`dispatcher-flow.md`](dispatcher-flow.md) § Step 4b.5.1 — the completed-session routing table this breaker's row extends.
+
 ## Adding a new invariant
 
 When fixing a pipeline bug, after locating the bug on the state machine + flow docs:
