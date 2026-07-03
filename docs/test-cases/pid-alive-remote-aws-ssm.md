@@ -32,7 +32,7 @@ bash tests/unit/test-dev-near-success.sh   # signal-4 parity
 bash tests/unit/test-ssm-timeout-sweep.sh  # #369 grep-sweep
 ```
 
-## TC-LSSM-001..009 — `lib-ssm.sh` (extracted from `dispatch-remote-aws-ssm.sh`)
+## TC-LSSM-001..010 — `lib-ssm.sh` (extracted from `dispatch-remote-aws-ssm.sh`)
 
 ### TC-LSSM-001 — `_has_shell_metachar` truth table
 **Intent**: pin the CWE-78 validator so a refactor extraction doesn't
@@ -119,6 +119,20 @@ non-`Command.CommandId`-bearing failure when it is `< 30`.
 **Expected**: fixed default (env unset) → rc=0, no `ParamValidation` in
 stderr. Pre-fix value (`SSM_COMMAND_TIMEOUT_SECONDS=10`) → rc=2.
 
+### TC-LSSM-010 — inherited/exported `_SSM_MIN_COMMAND_TIMEOUT_SECONDS` below 30 does NOT win (2026-07-03 review)
+**Intent**: codex review finding on #369 — the constant was originally
+`: "${_SSM_MIN_COMMAND_TIMEOUT_SECONDS:=30}"` (default-if-unset), which
+lets an inherited/exported value from the caller's environment win over
+the constant, silently recreating the rejection via a different
+variable. Fixed by making it a plain assignment, always reset on source.
+
+**Setup**: `_SSM_MIN_COMMAND_TIMEOUT_SECONDS=20` exported into the
+sourcing shell BEFORE `lib-ssm.sh` is sourced; `SSM_COMMAND_TIMEOUT_SECONDS`
+unset.
+
+**Expected**: recorded send-command argv still contains
+`--timeout-seconds 30` (the inherited `20` does not win).
+
 ## TC-SWEEP-001..005 — `test-ssm-timeout-sweep.sh` (repo-wide grep-sweep, #369)
 
 Sweeps all four SSM transport files
@@ -138,8 +152,12 @@ wall-clock polling cap, unrelated to AWS's `--timeout-seconds` API
 minimum.
 ### TC-SWEEP-004 — no hardcoded `--timeout-seconds` literal below 30 in argv
 ### TC-SWEEP-005 — `lib-ssm.sh` source-of-truth pin (load-bearing, mirrors TC-RPA-010's style)
+### TC-SWEEP-005c — constant is a plain assignment, not an overridable `:=` default (2026-07-03 review)
+**Intent**: pins the codex review finding's fix at the static level —
+a reflexive cleanup PR reintroducing `: "${_SSM_MIN_COMMAND_TIMEOUT_SECONDS:=30}"`
+is caught by grep even without running the runtime TC-LSSM-010 case.
 
-## TC-LCS-001..011 — `liveness-check-remote-aws-ssm.sh`
+## TC-LCS-001..012 — `liveness-check-remote-aws-ssm.sh`
 
 ### TC-LCS-001 — missing `SSM_INSTANCE_ID` → rc=1, no aws invocation
 **Setup**: unset `SSM_INSTANCE_ID`; valid other env.
@@ -187,6 +205,19 @@ referencing `${KIND}-${ISSUE_NUM}.pid` path.
 (AWS ssm send-command's hard API minimum for `--timeout-seconds` — any
 value below 30 is rejected transport-side with `ParamValidation` on
 every call, producing a permanent indeterminate liveness verdict).
+
+### TC-LCS-012 — driver-level fixture reproduces the real `ParamValidation` rejection (2026-07-03 review)
+**Intent**: TC-LSSM-009 (`test-lib-ssm.sh`) already proves this at the
+`lib-ssm.sh` helper level; this reproduces it through the ACTUAL
+`liveness-check-remote-aws-ssm.sh` driver entrypoint, per the 2026-07-03
+review finding that only a helper-level regression existed.
+
+**Setup**: stub `aws send-command` inspects `--timeout-seconds` in argv
+and emits the real `ParamValidation` error text when it is `< 30`.
+
+**Expected**: fixed default (env unset) → rc=0, definitive `ALIVE`
+verdict, no `ParamValidation` in stderr. Pre-fix value
+(`SSM_COMMAND_TIMEOUT_SECONDS=10`) → rc=2.
 
 ## TC-RPA-001..010 — `pid_alive` remote-backend integration
 

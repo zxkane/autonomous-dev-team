@@ -713,9 +713,9 @@ Accepted residual trade-off (documented, not fixed): at MAX_RETRIES a genuinely-
 
 **Test**:
 - `tests/unit/test-pid-alive-remote-aws-ssm.sh` (13 cases) — TC-RPA-001..010 cover ALIVE / DEAD / indeterminate / EXECUTION_BACKEND=local no-call regression / `REMOTE_LIVENESS_CHECK_DISABLE=true` / missing env / `mark_stalled` integration / WARN-counter modulo / source-of-truth grep on the indeterminate→ALIVE branch (load-bearing).
-- `tests/unit/test-liveness-check-remote-aws-ssm.sh` (28 cases) — TC-LCS-001..011 cover the SSM driver in isolation with stubbed `aws`.
-- `tests/unit/test-lib-ssm.sh` (31 cases) — TC-LSSM-001..009 cover the shared SSM helpers extracted from `dispatch-remote-aws-ssm.sh`; TC-LSSM-007..009 (#369) pin the `>= 30` default on both the unset-env and non-numeric-guard-fallback paths, including a stubbed real AWS `ParamValidation` reproduction.
-- `tests/unit/test-ssm-timeout-sweep.sh` (6 cases) — TC-SWEEP-001..005 (#369) grep-sweep all four SSM transport scripts for any other hardcoded/defaulted `--timeout-seconds` value below AWS's hard API minimum of 30.
+- `tests/unit/test-liveness-check-remote-aws-ssm.sh` (32 cases) — TC-LCS-001..012 cover the SSM driver in isolation with stubbed `aws`; TC-LCS-012 (#369) reproduces the real AWS `ParamValidation` rejection through the actual driver entrypoint.
+- `tests/unit/test-lib-ssm.sh` (32 cases) — TC-LSSM-001..010 cover the shared SSM helpers extracted from `dispatch-remote-aws-ssm.sh`; TC-LSSM-007..009 (#369) pin the `>= 30` default on both the unset-env and non-numeric-guard-fallback paths, including a stubbed real AWS `ParamValidation` reproduction; TC-LSSM-010 (2026-07-03 review) proves an inherited/exported `_SSM_MIN_COMMAND_TIMEOUT_SECONDS` below 30 cannot win over the plain-assignment constant.
+- `tests/unit/test-ssm-timeout-sweep.sh` (7 cases) — TC-SWEEP-001..005 (#369) grep-sweep all four SSM transport scripts for any other hardcoded/defaulted `--timeout-seconds` value below AWS's hard API minimum of 30; TC-SWEEP-005c (2026-07-03 review) pins that the shared minimum constant is a plain assignment, not an env-overridable `:=` default.
 
 **Cross-reference**: [`docs/pipeline/remote-backend.md`](remote-backend.md) for the full backend-interface contract.
 
