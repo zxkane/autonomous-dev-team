@@ -1067,26 +1067,69 @@ classify_recent_review_verdict() {
   # (spec §3.3: `user.login` incl `[bot]` verbatim), so the actor binding is a
   # flat `.author == BOT_LOGIN` exact-eq — equivalent to the pre-refactor
   # `.author.login == BOT_LOGIN` over the raw `.comments[]`.
+  #
+  # #389 (4th occurrence of the BOT_LOGIN-empty class; siblings fixed in
+  # #341 rounds 13/15): BOT_LOGIN is NEVER set in the dispatcher's own
+  # process (it is resolved only inside autonomous-review.sh's SEPARATE
+  # process) and FALLBACK_SESSION_ID is never assigned anywhere in this
+  # codebase — so the pre-#389 refuse-to-classify branch below was the
+  # UNCONDITIONAL path in every real deployment, parking every
+  # completed-session pending-dev issue at INV-12 even with a genuine
+  # verdict trailer present. Fix: STRUCTURAL authentication (the
+  # convergence breaker's `authentic_verdict` round-14 posture) — a
+  # genuine `emit_verdict_trailer` comment's ENTIRE body is the bare
+  # trailer line, so an end-to-end anchored whole-body match works
+  # without an actor signal. Two hardenings beyond the breaker's anchor,
+  # because HERE the match drives dispatch (a forged `failed-substantive`
+  # burns a MAX_RETRIES slot; at the breaker it can only trip/shield a
+  # stall):
+  #   1. EXACT grammar, not `[^>]*`: verdict is whitelisted
+  #      (passed|failed-substantive|failed-non-substantive) and only the
+  #      known `cause=`/`dev-actionable=` tokens may follow — mirroring
+  #      the downstream trailer_line grep, so under this branch neither
+  #      the legacy no-trailer fallback nor the unknown-verdict `case *)`
+  #      arm is reachable (an anchored-but-unknown body never becomes a
+  #      candidate; it stays verdict=none → INV-12 park). Whitespace
+  #      INSIDE the trailer is `[ \t]` (horizontal only), NOT
+  #      `[[:space:]]`: Oniguruma `[[:space:]]` matches `\n`, so an
+  #      embedded-newline body would pass this predicate yet fail the
+  #      line-oriented downstream grep and drop into the legacy
+  #      fallback — exactly the unreachability hole the exact grammar
+  #      exists to close (codex review, PR #390). Only the post-`-->`
+  #      tail keeps `[[:space:]]*` (trailing-newline tolerance).
+  #   2. In GH_AUTH_MODE=app, additionally require
+  #      `authorKind != "human"` — the genuine review wrapper posts under
+  #      a GitHub App identity (`…[bot]` login ⇒ authorKind=bot), so this
+  #      shrinks the forgery surface from "anyone who can comment" to
+  #      "bot/App actors on the repo". Deliberately NOT applied in token
+  #      mode: the round-13 BLOCKING finding proved a genuine token-mode
+  #      verdict is posted under the shared PAT identity and normalizes
+  #      to authorKind=human — an unconditional gate would reject every
+  #      genuine verdict and reintroduce the fleet-wide park this fix
+  #      removes. Token-mode residual (a human posting a byte-for-byte
+  #      bare trailer as their whole comment) is the same documented,
+  #      accepted exposure as at the breaker's call sites.
+  local _anchored_trailer_re='^<!--[ \t]*review-verdict:[ \t]*(passed|failed-substantive|failed-non-substantive)([ \t]+(cause=[a-zA-Z0-9_-]+|dev-actionable=[a-z]+))*[ \t]*-->[[:space:]]*$'
   local actor_predicate
   if [ -n "${BOT_LOGIN:-}" ]; then
     actor_predicate=".author == \"${BOT_LOGIN}\""
   elif [ -n "${FALLBACK_SESSION_ID:-}" ]; then
     actor_predicate="(.body | test(\"Review Session.*${FALLBACK_SESSION_ID}\"))"
   else
-    # Without an actor signal AND without a session-id fallback, refuse to
-    # classify — surface no verdict so the caller falls back to the safe
-    # INV-12-completed branch (operator handoff). This is conservative:
-    # emitting a verdict without authenticity binding could route on a
-    # comment posted by an unrelated user.
-    return 0
+    actor_predicate="(.body | test(\"${_anchored_trailer_re}\"))"
+    if [ "${GH_AUTH_MODE:-token}" = "app" ]; then
+      actor_predicate="((.authorKind // \"human\") != \"human\") and ${actor_predicate}"
+    fi
   fi
 
   # Pull the newest qualifying comment body. Strict `>` on createdAt
   # excludes a comment timestamped exactly at session end (rare, but the
-  # design pins this for determinism).
+  # design pins this for determinism). `.id` tie-breaks same-second
+  # comments (monotonic per issue; mirrors the sibling breaker's
+  # `sort_by(.createdAt // "", .id // 0)` — codex review, PR #390).
   local newest_body
   newest_body=$(itp_list_comments "$issue_num" 2>/dev/null \
-    | jq -r "[.[] | select(${actor_predicate} and (.createdAt > \"${session_end}\"))] | sort_by(.createdAt) | last | .body // empty" \
+    | jq -r "[.[] | select(${actor_predicate} and (.createdAt > \"${session_end}\"))] | sort_by(.createdAt // \"\", .id // 0) | last | .body // empty" \
     2>/dev/null)
 
   [ -n "$newest_body" ] || return 0
@@ -1532,7 +1575,7 @@ handle_completed_session_routing() {
           | jq -r "[.[].body | select(contains(\"${_notice_marker}\"))] | length" \
           2>/dev/null | grep -q '^0$'; then
         itp_post_comment "$issue_num" \
-          "Session \`${session_id}\` already ended (stop_reason=end_turn, terminal_reason=completed). Resume would hang on idle SSE — skipping. Manually transition to \`pending-review\` if a PR exists, or close the issue if work is done. (\`${_notice_marker}\`)"
+          "Session \`${session_id}\` already ended (stop_reason=end_turn, terminal_reason=completed) and no post-session review verdict was found. Resume would hang on idle SSE — skipping. If review findings exist, unpark by flipping to \`in-progress\` + posting a dispatcher-token comment + running \`dispatch-local.sh dev-resume <issue>\` (a fresh session re-reads the issue and findings; do NOT flip to \`pending-review\` — the stale-verdict guard rejects an already-reviewed HEAD). Close the issue if the work is done. (\`${_notice_marker}\`)"
       fi
       return 0
       ;;
