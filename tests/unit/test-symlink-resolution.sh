@@ -42,6 +42,11 @@ assert_contains() {
 TMPDIR=$(mktemp -d)
 trap 'rm -rf "$TMPDIR"' EXIT
 
+# PID-scoped issue number for the INV-14 dispatch-chain fixtures below — a
+# fixed "1" would let a concurrently-running sibling test's dispatch-local.sh
+# invocation collide on the shared /tmp/agent-*-issue-1.log glob.
+_INV14_ISSUE="$$"
+
 DISPATCHER_SCRIPTS="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts"
 
 # ===========================================================================
@@ -470,11 +475,11 @@ _inv14_run_dispatch() {
   local proj="$1" entry="$2"
   local capture_dir
   capture_dir=$(mktemp -d)
-  ( cd "$proj" && bash "$entry" dev-new 1 >/dev/null 2>"$capture_dir/stderr" ) || true
+  ( cd "$proj" && bash "$entry" dev-new "$_INV14_ISSUE" >/dev/null 2>"$capture_dir/stderr" ) || true
   # Wait briefly for nohup'd stub to write its log
   local found=""
   for _ in 1 2 3 4 5 6 7 8 9 10; do
-    found=$(grep -lh '^PROJECT_ID=' /tmp/agent-*-issue-1.log 2>/dev/null | head -1)
+    found=$(grep -lh '^PROJECT_ID=' "/tmp/agent-"*"-issue-${_INV14_ISSUE}.log" 2>/dev/null | head -1)
     [[ -n "$found" ]] && break
     sleep 0.1
   done
@@ -620,9 +625,9 @@ chmod +x "$PROJ5/scripts/autonomous-dev.sh"
 
 # Run dispatch-local.sh from the shared install. Capture the wrapper's
 # log to verify both env vars propagated.
-LOG5="/tmp/agent-marker-e2e-issue-1.log"
+LOG5="/tmp/agent-marker-e2e-issue-${_INV14_ISSUE}.log"
 : > "$LOG5"
-( cd "$PROJ5" && PROJECT_DIR="$PROJ5" bash "$PROJ5/scripts/dispatch-local.sh" dev-new 1 >/dev/null 2>&1 ) || true
+( cd "$PROJ5" && PROJECT_DIR="$PROJ5" bash "$PROJ5/scripts/dispatch-local.sh" dev-new "$_INV14_ISSUE" >/dev/null 2>&1 ) || true
 for _ in 1 2 3 4 5 6 7 8 9 10; do
   if grep -q 'PROJECT_ID=' "$LOG5" 2>/dev/null; then break; fi
   sleep 0.1
