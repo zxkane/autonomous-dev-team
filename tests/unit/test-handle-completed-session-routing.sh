@@ -77,6 +77,12 @@ dispatch() {
   _MOCK_DISPATCH_CALLS+="${1}:${2} "
 }
 
+# [INV-108] (#361): handle_completed_session_routing's own INV-35 fresh-dev
+# branch now gates on acquire_dispatch_marker before dispatching; this suite
+# exercises the routing decision itself, not controller-side dedup, so always
+# acquire.
+acquire_dispatch_marker() { return 0; }
+
 gh() {
   local cmd="${1:-}"
   local sub="${2:-}"
@@ -130,6 +136,12 @@ post_dispatch_token() {
 dispatch() {
   _MOCK_DISPATCH_CALLS+="${1}:${2} "
 }
+
+# [INV-108] (#361): handle_completed_session_routing's own INV-35 fresh-dev
+# branch now gates on acquire_dispatch_marker before dispatching; this suite
+# exercises the routing decision itself, not controller-side dedup, so always
+# acquire.
+acquire_dispatch_marker() { return 0; }
 gh() {
   local cmd="${1:-}"
   local sub="${2:-}"
