@@ -41,13 +41,18 @@ wait_for_file() {
 echo ""
 echo "=== TC-LGC1-040: design doc committed byte-identical to the prework branch ==="
 # ---------------------------------------------------------------------------
+# Pinned against commit 4e23c72 (docs/lane-gc-design-prework) rather than the
+# branch ref itself: GitHub Actions checkouts are shallow / single-ref, so a
+# `git show <branch>:<path>` or even a commit-SHA lookup can 404 there even
+# though the file is correct (that branch/commit is not fetched).
 DESIGN_DOC="$PROJECT_ROOT/docs/designs/lane-containment-gc.md"
+DESIGN_DOC_SHA256="2c65e5363e43db3edabb0102d1c34da976426f1d4fab68d8b81f4158f9c3f2db"
 if [[ -f "$DESIGN_DOC" ]]; then
-  if git -C "$PROJECT_ROOT" show docs/lane-gc-design-prework:docs/designs/lane-containment-gc.md 2>/dev/null \
-      | diff -q - "$DESIGN_DOC" >/dev/null 2>&1; then
-    assert_pass "docs/designs/lane-containment-gc.md is byte-identical to the prework branch copy"
+  ACTUAL_SHA256="$(sha256sum "$DESIGN_DOC" | awk '{print $1}')"
+  if [[ "$ACTUAL_SHA256" == "$DESIGN_DOC_SHA256" ]]; then
+    assert_pass "docs/designs/lane-containment-gc.md is byte-identical to the prework branch copy (commit 4e23c72)"
   else
-    assert_fail "docs/designs/lane-containment-gc.md diverges from the prework branch copy"
+    assert_fail "docs/designs/lane-containment-gc.md diverges from the prework branch copy (commit 4e23c72)"
   fi
 else
   assert_fail "docs/designs/lane-containment-gc.md missing"
