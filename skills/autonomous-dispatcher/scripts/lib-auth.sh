@@ -101,6 +101,18 @@ _ensure_gh_wrapper_dir() {
   fi
 }
 
+# [Lane-GC PR-1] Background-spawn gh-token-refresh-daemon.sh with GH token
+# VALUES scrubbed from its env (it only needs GH_TOKEN_FILE paths, passed as
+# argv below) — shared by both the wrapper-token and agent-scoped-token spawn
+# sites so the scrub prefix has one point of truth. GITHUB_TOKEN is included
+# alongside the other three because gh-as-user.sh already treats it as a
+# scrub-worthy gh-CLI-recognized token var. Echoes $! via the caller's own
+# `$!` (backgrounds in the caller's shell via `&`, same as a bare `bash …&`).
+_spawn_token_daemon() {
+  env -u GH_TOKEN -u GITHUB_TOKEN -u GITHUB_PERSONAL_ACCESS_TOKEN -u GH_USER_PAT \
+    bash "${_LIB_AUTH_DIR}/gh-token-refresh-daemon.sh" "$@" &
+}
+
 # Setup GitHub authentication based on GH_AUTH_MODE.
 # For "app" mode, caller must pass app_id and app_pem.
 # Args: $1=app_id (for app mode), $2=app_pem (for app mode)
@@ -125,8 +137,7 @@ setup_github_auth() {
     _ensure_gh_wrapper_dir
     GH_TOKEN_FILE="${GH_WRAPPER_DIR}/token"
 
-    bash "${_LIB_AUTH_DIR}/gh-token-refresh-daemon.sh" \
-      "$GH_TOKEN_FILE" "$app_id" "$app_pem" "$REPO_OWNER" "$REPO_NAME" &
+    _spawn_token_daemon "$GH_TOKEN_FILE" "$app_id" "$app_pem" "$REPO_OWNER" "$REPO_NAME"
     TOKEN_DAEMON_PID=$!
 
     # Poll for token file (token generation involves multiple API calls and
@@ -252,9 +263,8 @@ setup_agent_token() {
   _ensure_gh_wrapper_dir
   AGENT_GH_TOKEN_FILE="${GH_WRAPPER_DIR}/agent-token"
 
-  bash "${_LIB_AUTH_DIR}/gh-token-refresh-daemon.sh" \
-    "$AGENT_GH_TOKEN_FILE" "$app_id" "$app_pem" "$REPO_OWNER" "$REPO_NAME" \
-    "$AGENT_TOKEN_PERMISSIONS" &
+  _spawn_token_daemon "$AGENT_GH_TOKEN_FILE" "$app_id" "$app_pem" "$REPO_OWNER" "$REPO_NAME" \
+    "$AGENT_TOKEN_PERMISSIONS"
   AGENT_TOKEN_DAEMON_PID=$!
 
   # Poll for the scoped token file (same budget as the full-token poll).

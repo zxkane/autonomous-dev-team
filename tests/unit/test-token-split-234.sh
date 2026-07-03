@@ -28,7 +28,11 @@ assert_pass() { echo -e "  ${GREEN}PASS${NC}: $1"; PASS=$((PASS + 1)); }
 assert_fail() { echo -e "  ${RED}FAIL${NC}: $1"; FAIL=$((FAIL + 1)); }
 
 TMPROOT=$(mktemp -d)
-trap 'rm -rf "$TMPROOT"' EXIT
+# [Lane-GC PR-1] Kill any stub daemon (or its watchdog) still running out of
+# TMPROOT before removing it — a backstop for the per-test cleanup_github_auth
+# calls below, in case a test is interrupted (SIGTERM/SIGKILL on this harness
+# itself) before its own kill+wait runs.
+trap 'pkill -f "$TMPROOT" 2>/dev/null; rm -rf "$TMPROOT"' EXIT
 
 # ---------------------------------------------------------------------------
 echo "=== TC-TOKEN-SPLIT-001: _build_access_token_body embeds scoped permissions + single repo ==="
@@ -145,11 +149,15 @@ CFG
 get_gh_app_token() { echo "SCOPED-TOKEN-abc123"; }
 get_gh_app_scoped_token() { echo "SCOPED-TOKEN-abc123"; }
 GAT
-  # Stub daemon: write the (stub) token immediately, then sleep forever.
+  # Stub daemon: write the (stub) token immediately, then idle behind a PPID
+  # watchdog (Lane-GC PR-1) instead of `sleep 99999` — a group-killed test run
+  # (the harness's own subshell dying under SIGTERM/SIGKILL) previously orphaned
+  # this sleep for up to 99999s; the watchdog self-expires within 5s of the
+  # parent dying.
   cat > "$d/gh-token-refresh-daemon.sh" <<'DAEMON'
 #!/bin/bash
 echo "SCOPED-TOKEN-abc123" > "$1"
-sleep 99999
+while kill -0 "$PPID" 2>/dev/null; do sleep 5; done
 DAEMON
   echo "$d"
 }

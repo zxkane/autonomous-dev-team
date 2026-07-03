@@ -14,7 +14,7 @@ source "$SCRIPT_DIR/lib.sh"
 # shellcheck source=lib-push.sh
 source "$SCRIPT_DIR/lib-push.sh"
 
-input=$(cat)
+input=$(read_hook_stdin)
 command=$(parse_command "$input")
 
 # Only check git push commands

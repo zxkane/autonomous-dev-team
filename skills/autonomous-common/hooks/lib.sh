@@ -2,6 +2,21 @@
 # Shared utility functions for hook scripts
 # Note: Does not use 'set -e' as this is a library meant to be sourced
 
+# Read the hook's JSON payload from stdin, bounded by a timeout.
+# [Lane-GC PR-1, RC6] A bare `input=$(cat)` spins at ~99% CPU reading from an
+# EOF'd non-blocking stdin (the proximate driver of the load-241 incident: four
+# such hook processes spinning for >10h under a live lane). Bounded via the
+# bash builtin `read -t` (not the external `timeout` binary) so the guard is
+# unconditional — no feature-detection, no host without it, no degraded
+# fallback that could reintroduce the exact spin this closes. `-d ''` reads
+# until NUL/EOF so multi-line JSON payloads come through intact.
+# Usage: input=$(read_hook_stdin)
+read_hook_stdin() {
+  local input
+  IFS= read -r -t 5 -d '' input
+  printf '%s' "$input"
+}
+
 # Resolve main project root (works from worktrees and subdirectories).
 # Git worktrees have their own .git file pointing to the main repo's .git/worktrees/<name>.
 # --git-common-dir returns the main repo's .git directory in both cases.

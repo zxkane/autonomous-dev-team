@@ -59,15 +59,33 @@ if [[ "$REFRESH_INTERVAL" -lt 60 ]]; then
   REFRESH_INTERVAL=60
 fi
 
+# [Lane-GC PR-1, RC5] 60s-chunked, PPID-checked sleep replacing the monolithic
+# `sleep $REFRESH_INTERVAL`. A SIGKILLed daemon's in-flight sleep child would
+# otherwise survive up to REFRESH_INTERVAL (≤45 min default, ≤27.8h with a
+# misconfigured interval); chunking bounds that to ≤60s. The TERM/INT trap
+# reaps the in-flight sleep child so a graceful signal doesn't leave it behind.
+# Returns 1 (instead of exiting directly) when the parent has died mid-sleep,
+# so the caller still runs the TOKEN_FILE cleanup below.
+_chunked_sleep() {
+  local left=$1 _sp
+  trap 'kill "$_sp" 2>/dev/null; exit 0' TERM INT
+  while (( left > 0 )); do
+    kill -0 "$PPID" 2>/dev/null || return 1
+    local chunk=$(( left > 60 ? 60 : left ))
+    sleep "$chunk" & _sp=$!
+    wait "$_sp"
+    left=$(( left - chunk ))
+  done
+  trap - TERM INT
+}
+
 # Refresh loop with failure limit and parent liveness check
 MAX_CONSECUTIVE_FAILURES=10
 FAIL_COUNT=0
 
 while true; do
-  sleep "$REFRESH_INTERVAL"
-
   # Exit if parent process is dead (orphan daemon)
-  if ! kill -0 "$PPID" 2>/dev/null; then
+  if ! _chunked_sleep "$REFRESH_INTERVAL"; then
     log "Parent process ($PPID) is dead. Exiting."
     rm -f "$TOKEN_FILE" 2>/dev/null || true
     exit 0
