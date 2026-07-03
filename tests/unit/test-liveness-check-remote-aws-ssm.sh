@@ -79,6 +79,22 @@ case "$*" in
       echo "stub aws: send-command failure" >&2
       exit "${AWS_SEND_FAIL:-1}"
     fi
+    # AWS_ENFORCE_MIN_TIMEOUT: mirrors test-lib-ssm.sh's stub (#369
+    # TC-LSSM-009) so the driver-level regression (TC-LCS-012) can
+    # reproduce the REAL AWS send-command ParamValidation rejection for
+    # --timeout-seconds < 30, through the actual entrypoint script instead
+    # of only the lib-ssm.sh helper.
+    if [[ "${AWS_ENFORCE_MIN_TIMEOUT:-0}" != "0" ]]; then
+      prev="" ts=""
+      for a in "$@"; do
+        [[ "$prev" == "--timeout-seconds" ]] && ts="$a"
+        prev="$a"
+      done
+      if [[ "$ts" =~ ^[0-9]+$ ]] && [[ "$ts" -lt 30 ]]; then
+        echo "Parameter validation failed: Invalid value for parameter TimeoutSeconds, value: $ts, valid min value: 30" >&2
+        exit 255
+      fi
+    fi
     echo '{"Command":{"CommandId":"stub-1","Status":"Pending"}}'
     ;;
   *get-command-invocation*)
@@ -320,6 +336,45 @@ SSM_COMMAND_TIMEOUT_SECONDS=20 \
 bash "$DRIVER" issue 99 >/dev/null 2>&1
 argv=$(cat "$TMPROOT/aws-record")
 assert_contains "TC-LCS-011 SSM_COMMAND_TIMEOUT_SECONDS=20 override carried" $'--timeout-seconds\n20' "$argv"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-LCS-012: driver-level fixture reproduces the real ParamValidation rejection (#369 review) ==="
+# ---------------------------------------------------------------------------
+# TC-LSSM-009 (test-lib-ssm.sh) already proves this at the lib-ssm.sh helper
+# level; this reproduces it through the ACTUAL remote-aws-ssm driver
+# entrypoint (liveness-check-remote-aws-ssm.sh), per the 2026-07-03 review
+# finding that only the helper-level regression existed.
+reset_recorder
+stdout_default=$(
+  PATH="$STUB_BIN:$PATH" \
+  AWS_RECORD_FILE="$TMPROOT/aws-record" \
+  AWS_ENFORCE_MIN_TIMEOUT=1 \
+  bash "$DRIVER" issue 99 2>"$TMPROOT/stderr-driver-default"
+)
+rc_default=$?
+assert_rc "TC-LCS-012 fixed default (unset env) avoids the real ParamValidation rejection through the driver" 0 "$rc_default"
+assert_eq "TC-LCS-012 fixed-default driver still returns a definitive verdict (ALIVE)" "ALIVE" "$stdout_default"
+stderr_default=$(cat "$TMPROOT/stderr-driver-default")
+if [[ "$stderr_default" != *"ParamValidation"* ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-LCS-012 fixed-default driver stderr does not mention ParamValidation"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-LCS-012 fixed-default driver stderr unexpectedly mentions ParamValidation: $stderr_default"
+  FAIL=$((FAIL + 1))
+fi
+
+# Demonstrate the OLD (pre-fix) value of 10 DOES reproduce the real
+# rejection through the same driver entrypoint, proving this test would
+# have failed before the fix.
+reset_recorder
+PATH="$STUB_BIN:$PATH" \
+AWS_RECORD_FILE="$TMPROOT/aws-record" \
+AWS_ENFORCE_MIN_TIMEOUT=1 \
+SSM_COMMAND_TIMEOUT_SECONDS=10 \
+bash "$DRIVER" issue 99 >/dev/null 2>/dev/null
+rc_pre_fix=$?
+assert_rc "TC-LCS-012 pre-fix value (10) DOES hit the real ParamValidation rejection through the driver (proves the fixture is faithful)" 2 "$rc_pre_fix"
 
 echo ""
 echo "==============================================="

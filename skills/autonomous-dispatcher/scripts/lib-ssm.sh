@@ -18,9 +18,16 @@
 # AWS ssm send-command's hard API minimum for --timeout-seconds. Any lower
 # value is rejected transport-side with ParamValidation on EVERY call, not
 # flakily (#369). Referenced by both defaulting paths in
-# _ssm_run_remote_command below so they can't drift apart. `:=` (not a
-# plain assignment) keeps re-sourcing this file idempotent.
-: "${_SSM_MIN_COMMAND_TIMEOUT_SECONDS:=30}"
+# _ssm_run_remote_command below so they can't drift apart.
+#
+# Plain assignment, NOT `: "${VAR:=30}"` — the default-if-unset form lets
+# an inherited/exported _SSM_MIN_COMMAND_TIMEOUT_SECONDS from the caller's
+# environment (e.g. a stale `export _SSM_MIN_COMMAND_TIMEOUT_SECONDS=20`
+# left over from a prior shell) win over the constant, silently recreating
+# #369. A plain assignment always resets it to 30 on every source, so it
+# is not overridable from the environment, while staying idempotent-safe
+# to re-source (unlike `readonly`, which errors on a second assignment).
+_SSM_MIN_COMMAND_TIMEOUT_SECONDS=30
 
 # _has_shell_metachar <value>
 #

@@ -158,11 +158,20 @@ echo "=== TC-SWEEP-005: lib-ssm.sh source-of-truth — shared minimum constant i
 # both cmd_timeout defaulting sites reference (#369 review DRY fix) so a
 # reflexive cleanup PR can't silently regress it below 30.
 _lib="$SCRIPTS/lib-ssm.sh"
-if grep -qE ': "\$\{_SSM_MIN_COMMAND_TIMEOUT_SECONDS:=3[0-9]\}"' "$_lib" \
-   && ! grep -qE ': "\$\{_SSM_MIN_COMMAND_TIMEOUT_SECONDS:=([12][0-9]|[0-9])\}"' "$_lib"; then
+if grep -qE '^_SSM_MIN_COMMAND_TIMEOUT_SECONDS=3[0-9]$' "$_lib" \
+   && ! grep -qE '^_SSM_MIN_COMMAND_TIMEOUT_SECONDS=([12][0-9]|[0-9])$' "$_lib"; then
   ok "TC-SWEEP-005a lib-ssm.sh's _SSM_MIN_COMMAND_TIMEOUT_SECONDS constant is >= 30"
 else
   bad "TC-SWEEP-005a lib-ssm.sh's _SSM_MIN_COMMAND_TIMEOUT_SECONDS constant is NOT >= 30"
+fi
+# The constant must be a PLAIN assignment, not a `:=`-style default-if-unset
+# expansion — a `:=` form lets an inherited/exported env var below 30 win
+# over the constant, silently recreating #369's rejection (2026-07-03 codex
+# review finding). A plain assignment always resets it on every source.
+if ! grep -qE '_SSM_MIN_COMMAND_TIMEOUT_SECONDS:=' "$_lib"; then
+  ok "TC-SWEEP-005c _SSM_MIN_COMMAND_TIMEOUT_SECONDS is not env-overridable via :="
+else
+  bad "TC-SWEEP-005c _SSM_MIN_COMMAND_TIMEOUT_SECONDS uses an overridable := default"
 fi
 # Both defaulting sites must actually consume the constant (not silently
 # fall back to a re-introduced private literal).

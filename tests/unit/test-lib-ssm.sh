@@ -303,6 +303,26 @@ rc_pre_fix=$(
 )
 assert_rc "TC-LSSM-009 pre-fix value (10) DOES hit the real ParamValidation rejection (proves the stub is faithful)" 2 "$rc_pre_fix"
 
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-LSSM-010: inherited/exported _SSM_MIN_COMMAND_TIMEOUT_SECONDS below 30 does NOT win (2026-07-03 review) ==="
+# ---------------------------------------------------------------------------
+# codex review finding: if _SSM_MIN_COMMAND_TIMEOUT_SECONDS were defined via
+# `: "${_SSM_MIN_COMMAND_TIMEOUT_SECONDS:=30}"` (default-if-unset), an
+# inherited/exported value from the caller's environment (e.g. a stale
+# `export _SSM_MIN_COMMAND_TIMEOUT_SECONDS=20` left over from a prior shell)
+# would win over the constant, silently recreating #369's rejection. The
+# constant must be a PLAIN assignment so sourcing lib-ssm.sh always resets it
+# to 30 regardless of what the environment carries in.
+reset_recorder
+PATH="$STUB_BIN:$PATH" \
+AWS_RECORD_FILE="$TMPROOT/aws-record" \
+AWS_GET_STATUS="Success" \
+_SSM_MIN_COMMAND_TIMEOUT_SECONDS=20 \
+bash -c "unset SSM_COMMAND_TIMEOUT_SECONDS; source '$LIB'; _ssm_run_remote_command i-test ap-southeast-1 'echo hi'" >/dev/null
+argv=$(cat "$TMPROOT/aws-record")
+assert_contains "TC-LSSM-010 inherited _SSM_MIN_COMMAND_TIMEOUT_SECONDS=20 does not lower --timeout-seconds below 30" $'--timeout-seconds\n30' "$argv"
+
 echo ""
 echo "==============================================="
 echo -e "Total: $((PASS + FAIL)) tests, ${GREEN}${PASS} pass${NC}, ${RED}${FAIL} fail${NC}"
