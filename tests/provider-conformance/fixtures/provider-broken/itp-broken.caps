@@ -1,0 +1,14 @@
+# itp-broken.caps — deliberately-broken fixture provider (issue #370 AC2).
+# Every cap is 1 so NOTHING legitimately SKIPs — every ASSERTED verb this
+# fixture defines is exercised for real, so its wrong-shape/rc-0-on-error
+# violations are actually reached.
+
+server_side_state_and=1
+server_side_state_negation=1
+distinct_bot_author=1
+read_after_write_state=1
+cross_ref_shorthand=1
+body_checkbox=1
+edit_comment=1
+label_colors=1
+marker_channel=html

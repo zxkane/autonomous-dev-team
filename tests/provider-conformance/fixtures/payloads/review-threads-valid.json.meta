@@ -1,0 +1,8 @@
+source: hand-authored (issue #370 design — sidecar provenance, no live capture)
+capture_date: 2026-07-03
+shape: raw `gh api graphql` reviewThreads response (pre-transform) — the stub
+  applies the leaf's own `--jq` filter, so this fixture must match the RAW
+  GraphQL shape chp_github_review_threads expects, not the normalized
+  [{thread_id,resolved,comments:[...]}] output.
+notes: one unresolved thread + one resolved thread, exercising both branches
+  of the resolved boolean.

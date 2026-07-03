@@ -1,0 +1,22 @@
+{
+  "comments": [
+    {
+      "author": { "login": "kane-dev-agent[bot]" },
+      "body": "Dev Session ID: `00000000-0000-4000-8000-000000000001`",
+      "createdAt": "2026-01-01T00:00:00Z",
+      "url": "https://github.com/o/r/issues/42#issuecomment-100001"
+    },
+    {
+      "author": { "login": "codex[bot]" },
+      "body": "Review findings: [P1] fix the thing",
+      "createdAt": "2026-01-01T00:05:00Z",
+      "url": "https://github.com/o/r/issues/42#issuecomment-100002"
+    },
+    {
+      "author": { "login": "zxkane" },
+      "body": "LGTM",
+      "createdAt": "2026-01-01T00:10:00Z",
+      "url": "https://github.com/o/r/issues/42#issuecomment-100003"
+    }
+  ]
+}

@@ -8,6 +8,15 @@ with **fixture manifests** replayed against the current classification logic
 using **stub CLIs**. No network, no credentials, no real agent CLIs. Runs on any
 fork's plain GitHub-hosted CI. ([INV-74](../../docs/pipeline/invariants.md#inv-74-adapter-conformance-is-regression-pinned-by-a-hermetic-fixture-manifest-runner).)
 
+> **Not to be confused with [`tests/provider-conformance/`](../provider-conformance/)**
+> — that suite pins the **ITP/CHP provider verb** contract
+> ([`provider-spec.md`](../../docs/pipeline/provider-spec.md),
+> [INV-106](../../docs/pipeline/invariants.md#inv-106-provider-conformance-is-spec-defined-and-regression-pinned-by-a-hermetic-provider-parameterized-runner--any-itp-namesh-chp-namesh--caps-pair-must-clear-it)) —
+> `itp_*`/`chp_*` shape, fail-closed rc, and failure contracts for the
+> `ISSUE_PROVIDER`/`CODE_HOST` backend (GitHub today; GitLab/Asana later).
+> This suite pins the agent-CLI dispatch classification (`AdapterResult`),
+> not the provider seams.
+
 ```
 tests/conformance/
 ├── run-conformance.sh      # the runner

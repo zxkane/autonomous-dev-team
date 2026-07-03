@@ -1,0 +1,8 @@
+source: hand-authored (issue #370 design — sidecar provenance, no live capture)
+capture_date: 2026-07-03
+shape: raw `gh issue view --json comments` object (pre-transform) — the stub
+  applies the leaf's own `-q` filter, so this fixture must match the RAW
+  GitHub REST shape itp_github_list_comments expects, not the normalized
+  [{id,author,authorKind,body,createdAt}] output.
+notes: three entries deliberately ascending by createdAt to exercise the
+  sort-stability assertion after the leaf's own jq transform runs.
