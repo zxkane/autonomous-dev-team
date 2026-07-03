@@ -5974,6 +5974,19 @@ behavior byte-identical after the factoring.
 - [INV-26](#inv-26-stall-decision-excludes-dispatcher-induced-terminations-and-defers-on-live-wrappers) — the live-PID deferral whose predicate is now the shared `may_stall_now` helper both this and `mark_stalled` call.
 - [`dispatcher-flow.md`](dispatcher-flow.md) § Step 4b.5.1 — the completed-session routing table this breaker's row extends.
 
+## INV-107: dev-agent Step 5 verification runs as one synchronous command with a generous timeout — never backgrounded and polled across turns
+
+_Triage (issue #236): [design-rationale]_
+
+**Rule**: `autonomous-dev/SKILL.md` Step 5 (Local Verification) and `references/autonomous-mode.md` MUST instruct the agent to invoke the top-level build/test suite as one synchronous call (or a few sequential synchronous calls) wrapped in an explicit generous `timeout`, capturing output to a file and replaying only the tail on failure. The agent MUST NOT background the top-level suite command (no `&`, no host-CLI background-task mode) and then poll its log across multiple agent turns. Scope: the ban is on the TOP-LEVEL verification invocation only — tests/scripts that internally spawn child processes or local servers are unaffected, and it does not apply to the pipeline's genuinely event-driven waits (Step 9 CI checks, Step 10-11 bot-review polling).
+
+**Why**: Observed on issue #374's motivating incident: a dev session backgrounded the unit suite and then spent 14 separate LLM turns (~3 hours of intermittent polling) tailing the log to "check progress". Each poll is a full model round-trip; the cumulative monitoring cost far exceeded the suite's own runtime (5-6 min in CI). Prior to #374 the skill said only "run npm test / fix failures" and never addressed HOW to invoke long-running verification, so agents improvised the background+poll anti-pattern.
+
+**Producer**: the dev agent, guided by `autonomous-dev/SKILL.md` Step 5 and (in autonomous mode) `references/autonomous-mode.md`'s "Running Verification Suites Synchronously" section.
+**Consumer**: the operator / dispatcher cost and wall-clock budget — each avoided poll turn is a full agent round-trip not spent.
+**Status**: **GUIDANCE-ONLY** (#374). Not code-enforced: a PreToolUse hook cannot reliably classify "the top-level suite run" vs legitimate background work (deliberately out of scope per #374's design notes). A future hook-based heuristic is possible but not planned.
+**Test**: TODO — no direct regression test; this is agent-guidance, not wrapper code. `docs/test-cases/` explicitly waives a test-cases doc for #374 (docs-only change, no runtime surface).
+
 ## Adding a new invariant
 
 When fixing a pipeline bug, after locating the bug on the state machine + flow docs:
