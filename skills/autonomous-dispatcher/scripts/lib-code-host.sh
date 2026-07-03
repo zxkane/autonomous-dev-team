@@ -55,9 +55,10 @@ _LIB_CHP_PROVIDERS_DIR="${AUTONOMOUS_PROVIDERS_DIR:-${_LIB_CHP_REAL_DIR}/provide
 # Seam config: default to the GitHub reference backend (spec §2).
 CODE_HOST="${CODE_HOST:-github}"
 
-# Source the enabled CHP provider's leaf-impl file from the skill tree (EMPTY
-# scaffold in #280). Guarded so a missing provider file degrades gracefully
-# rather than crashing under set -euo pipefail.
+# Source the enabled CHP provider's leaf-impl file from the skill tree. For
+# github this is providers/chp-github.sh, fully leaf-populated since #282/
+# #296-second-tier (see the SCOPE note above). Guarded so a missing provider
+# file degrades gracefully rather than crashing under set -euo pipefail.
 if [[ -f "${_LIB_CHP_PROVIDERS_DIR}/chp-${CODE_HOST}.sh" ]]; then
   # shellcheck source=/dev/null
   source "${_LIB_CHP_PROVIDERS_DIR}/chp-${CODE_HOST}.sh"

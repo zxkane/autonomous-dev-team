@@ -11,7 +11,7 @@
 #     a new shim minted without a matching spec row, or a new spec row without a
 #     shipped shim, turns TC-001/002 or TC-050/051 red);
 #   - the readlink -f-of-BASH_SOURCE skill-tree resolution ([INV-14]/[INV-65]);
-#   - the .caps reader parses key=value and NEVER sources the manifest (§4/§10);
+#   - the .caps reader parses key=value and NEVER sources the manifest (§4);
 #   - the named degraded fake fixture provider exercises every caps=0 branch;
 #   - the fake-skill-tree fixture rule extends cp -r adapters/ to cp -r
 #     providers/.
@@ -219,7 +219,7 @@ assert_eq "reader skips # comments and blank lines, returns the value" "1" "$com
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== TC-PROVIDER-DISPATCH-016: .caps reader is parsed-NEVER-sourced (§4/§10 Q1) ==="
+echo "=== TC-PROVIDER-DISPATCH-016: .caps reader is parsed-NEVER-sourced (§4) ==="
 # ---------------------------------------------------------------------------
 # The reader body must NOT `source` / `.` the .caps path; it must use a parse
 # loop. Inspect the reader function source (strip comments first so a comment

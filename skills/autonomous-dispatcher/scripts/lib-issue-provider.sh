@@ -8,7 +8,9 @@
 # verdict-routing / INV-coupled logic stays in the provider-neutral caller layer
 # — only the leaf I/O moves behind a verb ([INV-87]).
 #
-# CONTRACT (provider-spec.md §3.1, the authoritative spec):
+# CONTRACT (provider-spec.md §3.1, the authoritative spec — the §3.1 table is
+# normative; this header's verb list is a convenience index, not a second
+# source of truth):
 #   ISSUE_PROVIDER ∈ { github (default), gitlab, asana }  (spec §2)
 #   14 ITP verbs, each forwarding to itp_${ISSUE_PROVIDER}_<verb> "$@":
 #     itp_list_by_state itp_count_by_state itp_list_forbidden_combos
@@ -16,11 +18,17 @@
 #     itp_list_comments itp_resolve_dep itp_mark_checkbox itp_provision_states
 #     itp_begin_tick itp_label_event_ts itp_caps
 #
-# SCOPE (#280): this file ships ONLY the dispatch shims + the .caps reader. NO
-# verb leaf is migrated — the itp_github_<verb> bodies are EMPTY scaffolds in
-# providers/itp-github.sh (leaf migration is the downstream itp-reads /
-# itp-writes / itp-deps-begin-tick issues). itp_caps is the sole shim with a
-# real body in this PR: it reads the declarative .caps manifest ([INV-88]).
+# SCOPE (#280 — historical; the leaf migrations below post-date this file's
+# original PR): #280 shipped ONLY the dispatch shims + the .caps reader, with
+# NO verb leaf migrated (empty scaffolds in providers/itp-github.sh). The READ
+# leaves (list_by_state/count_by_state/list_forbidden_combos/read_task/
+# list_comments) were migrated in #281; the WRITE leaves (transition_state/
+# post_comment/edit_comment/mark_checkbox/provision_states) in #283; the
+# dep/tick-lifecycle leaves (resolve_dep/begin_tick) in #284; the observe-only
+# label_event_ts leaf in #323. Every itp_github_<verb> body in
+# providers/itp-github.sh is now DEFINED — no scaffolds remain. itp_caps
+# remains the only shim whose body is a reader, not a leaf-forward: it reads
+# the declarative .caps manifest ([INV-88]).
 #
 # [INV-14]/[INV-65] resolution: providers/itp-${_p}.sh + the .caps manifests are
 # sourced/read from the REAL skill tree via readlink -f of THIS file's own
@@ -46,12 +54,12 @@ _LIB_ITP_PROVIDERS_DIR="${AUTONOMOUS_PROVIDERS_DIR:-${_LIB_ITP_REAL_DIR}/provide
 # read provider-scoped config directly (spec §3.4).
 ISSUE_PROVIDER="${ISSUE_PROVIDER:-github}"
 
-# Source the enabled ITP provider's leaf-impl file from the skill tree. The
-# file is an EMPTY scaffold in #280 (no verb bodies yet) — sourcing it is a
-# no-op now but is the hook the downstream leaf-migration issues populate.
-# Guarded so a missing provider file (e.g. an as-yet-unwritten gitlab/asana
-# backend) degrades to "no leaf functions defined" rather than crashing the
-# dispatcher under set -euo pipefail.
+# Source the enabled ITP provider's leaf-impl file from the skill tree. For
+# github this is providers/itp-github.sh, fully leaf-populated since #281/
+# #283/#284 (see the SCOPE note above). Guarded so a missing provider file
+# (e.g. an as-yet-unwritten gitlab/asana backend) degrades to "no leaf
+# functions defined" rather than crashing the dispatcher under
+# set -euo pipefail.
 if [[ -f "${_LIB_ITP_PROVIDERS_DIR}/itp-${ISSUE_PROVIDER}.sh" ]]; then
   # shellcheck source=/dev/null
   source "${_LIB_ITP_PROVIDERS_DIR}/itp-${ISSUE_PROVIDER}.sh"

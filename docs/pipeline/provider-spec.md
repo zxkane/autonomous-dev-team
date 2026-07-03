@@ -252,7 +252,9 @@ over a bare number, so the next mint does not re-drift the prose.
 | `chp_commit_file REPO BRANCH FILE_PATH CONTENT_BASE64 MESSAGE` | the 8 raw git-Data-API `gh api` calls in `upload-screenshot.sh` (`git/ref` → `git/blobs` → `git/trees` → `git/commits` → `git/refs` → re-`git/ref` verify → `contents` GET → `contents` PUT) | **Whole-op write verb [INV-99]** — commit a single file onto a branch (creating an orphan branch if absent) and echo the committed blob SHA; non-zero on commit failure. GitHub has no single "commit one file to a branch" primitive, so the leaf IS the cohesive op's 8-call implementation (the `chp_review_threads`-wraps-a-whole-GraphQL-walk posture, NOT 8 thin shims); a GitLab backend is ONE Files API call (`POST …/repository/files/:path`, `encoding=base64`). `REPO` is threaded **explicitly** ($1, not a global — `upload-screenshot.sh` is a standalone util resolving its own `$REPO`, the #324 dropped-repo-arg lesson). `CONTENT_BASE64` is the provider-neutral currency (GitLab's Files API also takes `encoding=base64`). The local file-read + `base64 -w0` encode + the `[[ -n "$SHA" ]] \|\| fail` glue + the `/blob/` URL render stay caller-side. The leaf's temp-file cleanup uses a **self-disarming** function-scoped `trap '…; trap - RETURN' RETURN` (no `trap … EXIT` — clobbers the caller's EXIT trap; a BARE `trap … RETURN` — persists and re-fires on the `chp_commit_file` shim's return with the leaf's `local`s out of scope → `unbound variable` under `set -u`; both reproduced on-box — the self-disarm keeps the RETURN-trap contract while firing exactly once). |
 | `chp_caps` | — (new) | Emit the capability map (§4). |
 
-> **Implementation status.** ALL CHP verbs above —
+> **Implementation status (#367 sweep — covers the FULL 18-row/19-verb §3.2
+> surface, not just the original 11-verb PR-lifecycle subset).** The 9
+> golden-traced PR-lifecycle verbs —
 > `chp_find_pr_for_issue`, `chp_ci_status`, `chp_mergeable`, `chp_approve`,
 > `chp_request_changes`, `chp_merge`, `chp_review_threads`,
 > `chp_resolve_thread`, `chp_close_keyword` — are **migrated for the GitHub
@@ -268,16 +270,26 @@ over a bare number, so the next mint does not re-drift the prose.
 > **defined** in `providers/chp-github.sh` (completing the verb contract), and
 > their live executable leaves are the auth-side brokers (`drain_agent_pr_create`
 > / `drain_agent_bot_triggers` in `lib-auth.sh`), which route through the verb
-> (leaf-only swap, guarded on `chp_has_leaf`; byte-identical argv). **Status
-> correction (#367):** the incidental PR reads that no *named lifecycle* verb
-> owns — the issue-keyed body-mention `gh pr list … select(.body|test("#N"))`
-> existence COUNT/number lookups (`autonomous-dev.sh`) and the PR-number-keyed
+> (leaf-only swap, guarded on `chp_has_leaf`; byte-identical argv).
+>
+> **The remaining 8 verbs beyond the 11-verb PR-lifecycle set are ALSO
+> migrated**, each by its own later PR: the 3 general read/write primitives
+> `chp_pr_view` / `chp_pr_list` (#282 review r8) and `chp_pr_comment` (#329,
+> [INV-102]) close the caller layer's incidental PR I/O — the issue-keyed
+> body-mention `gh pr list … select(.body|test("#N"))` existence COUNT/number
+> lookups (`autonomous-dev.sh`), the PR-number-keyed
 > `gh pr view $PR --json comments/state/headRefName/headRefOid/reviews` reads
-> (`autonomous-dev.sh` / `autonomous-review.sh`) are **no longer raw `gh`** —
-> they route through the general read primitives `chp_pr_view` / `chp_pr_list`
-> (§3.2 table above, #282 review r8), and the 7 PR-comment writes route
-> through `chp_pr_comment` (#329, [INV-102]). The caller layer carries zero
-> executable raw `gh pr` (enforced by the cutover guard, §9/[INV-91]).
+> (`autonomous-dev.sh` / `autonomous-review.sh`), and the 7 PR-comment writes
+> are **no longer raw `gh`**. `chp_list_inline_comments` (#328, [INV-95])
+> migrates the dev-resume inline-comment read. `chp_reply_review_comment`
+> (#327, [INV-96]) migrates the review-comment reply POST. `chp_count_reviews_by_login`
+> (#324, [INV-94]) migrates the bot-review hard-gate's review count. `chp_commit_file`
+> (#330, [INV-99]) migrates `upload-screenshot.sh`'s 8-call git-Data-API commit
+> op. `chp_caps` (#280) is the `.caps` capability-map reader, not a leaf-dispatch
+> shim — it has no leaf to migrate. Every named verb in the §3.2 table is
+> therefore DEFINED and, except `chp_caps`'s reader body, leaf-migrated; the
+> caller layer carries zero executable raw `gh pr` (enforced by the cutover
+> guard, §9/[INV-91]).
 >
 > **Caller guard convention (`chp_has_leaf`, #282 review round 4).** A caller that
 > conditionally invokes a CHP verb MUST guard on whether the ENABLED provider

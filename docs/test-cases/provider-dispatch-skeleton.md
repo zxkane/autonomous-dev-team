@@ -82,22 +82,17 @@ falling out of coverage.
 | TC-PROVIDER-DISPATCH-051 | Spec-derived CHP verb set (§3.2) == shipped `lib-code-host.sh` shim set (`chp_has_leaf` excluded — a guard helper, not a verb) | equal, same count |
 | TC-PROVIDER-DISPATCH-052 | **Automated negative proof (AC1):** append a fake shim (`chp_frobnicate_unlisted`) to a SCRATCH COPY of `lib-code-host.sh` (never the committed tree, mirrors `test-provider-cutover.sh::fresh_scratch`); re-run the TC-051 reconciliation against the scratch copy | reconciliation turns RED, naming the unlisted shim — demonstrates the derive-from-spec assertion actually catches drift, not just a passing tautology |
 
-## Explicit NON-tests (documented so a reviewer does not reject the PR)
-
-- **No golden-trace test** — no verb leaf carries a real `gh` argv in this PR
-  (spec §7.2). Golden-trace lands in itp-reads / itp-writes / chp-pr-lifecycle /
-  entangled-orchestrators-golden-trace.
-- **No caller-branch test** — no caller is rewired here; the fixture + reader
-  the future caller branches consume IS tested (TC-030), the branches themselves
-  are downstream.
-
 ## Zero-behavior-change proof (provider-spec.md §7.2 clause 1)
 
 Not a case in `test-provider-dispatch.sh` — a CI-suite expectation: the full
 existing `tests/unit/test-*.sh` glob + the conformance suite MUST pass unchanged
-(file count not reduced). It is necessary-but-sufficient here precisely because
-no caller is rewired (provider-spec.md §7.2 clause 1).
+(file count not reduced). For #280's *original* dispatch-skeleton scope this was
+necessary-but-sufficient because no caller was rewired yet (provider-spec.md
+§7.2 clause 1); the leaf-migration siblings (#281–#330) that DID rewire callers
+carry their own golden-trace / dispatch-routing proofs (`test-itp-read-leaves.sh`,
+`test-itp-write-leaves.sh`, `test-chp-pr-lifecycle.sh`, and the others cited in
+the TC-020..022 section above) — this suite still gates only the plumbing.
 
 | ID | Scenario | Expected |
 |---|---|---|
-| (CI-suite) | Run the full existing `tests/unit/test-*.sh` suite + the conformance suite | passes unchanged (file count not reduced) — necessary-but-sufficient here because no caller is rewired |
+| (CI-suite) | Run the full existing `tests/unit/test-*.sh` suite + the conformance suite | passes unchanged (file count not reduced) |
