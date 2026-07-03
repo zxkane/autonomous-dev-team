@@ -40,7 +40,7 @@ NC='\033[0m'
 # Required env (lib-dispatch.sh enforces these via : "${VAR:?...}")
 export REPO=zxkane/autonomous-dev-team
 export REPO_OWNER=zxkane
-export PROJECT_ID=test-proj
+export PROJECT_ID="test-proj-$$"
 export MAX_RETRIES=3
 export MAX_CONCURRENT=5
 

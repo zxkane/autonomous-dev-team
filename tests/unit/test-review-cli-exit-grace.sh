@@ -179,9 +179,9 @@ if declare -F _run_verdict_poll_loop >/dev/null 2>&1; then
     _run_verdict_poll_loop
     apply_post_window_sweep
     echo "${AGENT_VERDICTS[0]}"
-  ) > /tmp/cxg_loop01.out
+  ) > "$_CXG_TMP/loop01.out"
   assert_eq "TC-CXG-LOOP-01 non-zero rc + verdict on round 2 → pass (NOT dropped)" \
-    "pass" "$(cat /tmp/cxg_loop01.out)"
+    "pass" "$(cat "$_CXG_TMP/loop01.out")"
   assert_ge "TC-CXG-LOOP-01b loop polled at least 2 rounds" "$(cat "$_CXG_TMP/round")" 2
 
   # --- TC-CXG-LOOP-02: non-zero rc, NEVER posts → unavailable at expiry ---
@@ -197,9 +197,9 @@ if declare -F _run_verdict_poll_loop >/dev/null 2>&1; then
     _run_verdict_poll_loop
     apply_post_window_sweep
     echo "${AGENT_VERDICTS[0]}"
-  ) > /tmp/cxg_loop02.out
+  ) > "$_CXG_TMP/loop02.out"
   assert_eq "TC-CXG-LOOP-02 non-zero rc + no verdict by window-expiry → unavailable (terminal, unchanged)" \
-    "unavailable" "$(cat /tmp/cxg_loop02.out)"
+    "unavailable" "$(cat "$_CXG_TMP/loop02.out")"
 
   # --- TC-CXG-LOOP-03: two non-zero-rc agents, B's verdict lands late -----
   (
@@ -223,8 +223,8 @@ if declare -F _run_verdict_poll_loop >/dev/null 2>&1; then
     _run_verdict_poll_loop
     apply_post_window_sweep
     echo "${AGENT_VERDICTS[0]}|${AGENT_VERDICTS[1]}"
-  ) > /tmp/cxg_loop03.out
-  IFS='|' read -r _va _vb < /tmp/cxg_loop03.out
+  ) > "$_CXG_TMP/loop03.out"
+  IFS='|' read -r _va _vb < "$_CXG_TMP/loop03.out"
   assert_eq "TC-CXG-LOOP-03 agent A (verdict round 1) → pass" "pass" "$_va"
   assert_eq "TC-CXG-LOOP-03b agent B (verdict round 3, non-zero rc) → pass (NOT dropped for being slower)" \
     "pass" "$_vb"
@@ -242,9 +242,9 @@ if declare -F _run_verdict_poll_loop >/dev/null 2>&1; then
     _run_verdict_poll_loop
     apply_post_window_sweep
     echo "${AGENT_VERDICTS[0]}"
-  ) > /tmp/cxg_loop04.out
+  ) > "$_CXG_TMP/loop04.out"
   assert_eq "TC-CXG-LOOP-04 clean rc + verdict round 1 → pass (happy path)" \
-    "pass" "$(cat /tmp/cxg_loop04.out)"
+    "pass" "$(cat "$_CXG_TMP/loop04.out")"
 
   # --- TC-CXG-LOOP-05: loop short-circuits once all resolved -------------
   # Budget is 6 but verdict lands round 1 → fetch must NOT be called a 2nd
@@ -267,7 +267,6 @@ if declare -F _run_verdict_poll_loop >/dev/null 2>&1; then
   assert_eq "TC-CXG-LOOP-05 loop short-circuits after all resolved (1 fetch, not 6)" \
     "1" "$(cat "$_CXG_TMP/fetches")"
 
-  rm -f /tmp/cxg_loop0{1,2,3,4}.out 2>/dev/null || true
   rm -rf "$_CXG_TMP" 2>/dev/null || true
 else
   echo -e "  ${RED}FAIL${NC}: _run_verdict_poll_loop not defined — implement first"
