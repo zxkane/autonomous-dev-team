@@ -294,7 +294,7 @@ Common to all backends:
 | `EXECUTION_BACKEND` | `local` | `local` \| `remote-aws-ssm` \| `<future>` |
 | `REMOTE_LIVENESS_CHECK_DISABLE` | `false` | `true` falls back to legacy local-only `pid_alive` (operator escape hatch for transport-blocked deployments) |
 | `REMOTE_LIVENESS_CHECK_TIMEOUT_SECONDS` | `8` | Dispatcher-side bound on synchronous polling (`lib-ssm.sh::_ssm_run_remote_command` honors this) |
-| `SSM_COMMAND_TIMEOUT_SECONDS` | `10` | SSM-side cap (`aws ssm send-command --timeout-seconds`) so a hung remote shell can't tie up an SSM slot for the default 600s |
+| `SSM_COMMAND_TIMEOUT_SECONDS` | `30` | SSM-side cap (`aws ssm send-command --timeout-seconds`) so a hung remote shell can't tie up an SSM slot for the default 600s. 30 is AWS's hard API minimum for this flag (#369) |
 | `HEARTBEAT_INTERVAL_SECONDS` | `120` | Wrapper-side heartbeat cadence; threshold = `× 3 = 360s` (consumed remote-side in the liveness snippet) |
 
 `remote-aws-ssm`-specific (mirrors `dispatch-remote-aws-ssm.sh`):
