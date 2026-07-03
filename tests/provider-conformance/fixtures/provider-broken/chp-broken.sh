@@ -30,7 +30,8 @@ chp_broken_reply_review_comment() {
   gh api "repos/${REPO}/pulls/${pr}/comments" -X POST -f body="$body" -F in_reply_to="$comment_id" \
     --jq '{id: .id, url: .html_url}'
 }
-chp_broken_close_keyword() {
-  local issue="$1"
-  printf 'Closes #%s' "$issue"
-}
+# chp_broken_close_keyword is deliberately OMITTED: the runner's
+# chp_close_keyword assertion never dispatches through a leaf (it evals
+# _render_close_keyword directly against a stubbed chp_caps — see
+# run-provider-conformance.sh's _run_close_keyword_assert), so a leaf here
+# would be dead code.
