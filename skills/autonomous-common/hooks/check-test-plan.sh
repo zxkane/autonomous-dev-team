@@ -6,7 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib.sh"
 STATE_MANAGER="$SCRIPT_DIR/state-manager.sh"
 
-input=$(cat)
+input=$(read_hook_stdin)
 file_path=$(parse_file_path "$input")
 
 # Skip if no file path

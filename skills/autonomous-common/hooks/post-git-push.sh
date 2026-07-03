@@ -5,7 +5,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib.sh"
 
-input=$(cat)
+input=$(read_hook_stdin)
 command=$(parse_command "$input")
 exit_code=$(parse_exit_code "$input")
 

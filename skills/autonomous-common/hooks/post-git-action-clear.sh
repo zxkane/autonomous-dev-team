@@ -24,7 +24,7 @@ if [[ ! "$STATE_TO_CLEAR" =~ ^[a-zA-Z0-9_-]+$ ]]; then
   exit 1
 fi
 
-input=$(cat)
+input=$(read_hook_stdin)
 command=$(parse_command "$input")
 exit_code=$(parse_exit_code "$input")
 
