@@ -288,6 +288,15 @@ for i in $(seq 0 $((new_count - 1))); do
     continue
   fi
 
+  # [INV-106] (302b, #361 R1): acquire the controller-side per-(issue,mode)
+  # dispatch marker BEFORE any side effect (label edit / token / dispatch) for
+  # this issue. A losing acquire means a concurrent tick already owns this
+  # dispatch — skip cleanly, no error, no label edit, no dispatch() call.
+  if ! acquire_dispatch_marker "$issue_num" "dev-new"; then
+    log "  issue #${issue_num} dev-new dispatch marker held by a concurrent tick — skipping ([INV-106])"
+    continue
+  fi
+
   log "  dispatching dev-new for issue #${issue_num}"
   label_swap "$issue_num" "" "in-progress"
   # [INV-70] Metrics: the issue is first picked up for autonomous work — the
@@ -352,6 +361,12 @@ for i in $(seq 0 $((pr_count - 1))); do
   fi
 
   issue_num=$(jq -r ".[$i].number" <<<"$pending_review")
+
+  # [INV-106] (302b, #361 R1) — see the Step 2 comment above.
+  if ! acquire_dispatch_marker "$issue_num" "review"; then
+    log "  issue #${issue_num} review dispatch marker held by a concurrent tick — skipping ([INV-106])"
+    continue
+  fi
 
   log "  dispatching review for issue #${issue_num}"
   label_swap "$issue_num" "pending-review" "reviewing"
@@ -437,6 +452,14 @@ for i in $(seq 0 $((pd_count - 1))); do
   _session_end_iso=""
   if [ -n "$session_id" ] && is_session_completed "$issue_num" _session_terminal_reason _session_end_iso; then
     if [ "$_session_terminal_reason" = "prompt_too_long" ]; then
+      # [INV-106] (302b, #361 R1): acquire BEFORE any side effect of this
+      # branch (notice post, log truncate, dispatch) — all of it leads to a
+      # dev-new dispatch for this issue, so a concurrent tick already owning
+      # it must short-circuit the whole branch, not just the final dispatch().
+      if ! acquire_dispatch_marker "$issue_num" "dev-new"; then
+        log "  issue #${issue_num} dev-new dispatch marker held by a concurrent tick — skipping PTL recovery ([INV-106])"
+        continue
+      fi
       log "  issue #${issue_num} session ${session_id} hit prompt_too_long — clearing for fresh dispatch"
       notice_marker="INV-12-prompt-too-long:${session_id}"
       # [INV-91]/[INV-90] (#321): the idempotency-dedup READ routes through
@@ -500,6 +523,12 @@ for i in $(seq 0 $((pd_count - 1))); do
     # See docs/pipeline/dispatcher-flow.md § Step 4b.5.1 and INV-35.
     handle_completed_session_routing "$issue_num" "$session_id" "$_session_end_iso"
     JUST_DISPATCHED+=("$issue_num")
+    continue
+  fi
+
+  # [INV-106] (302b, #361 R1) — see the Step 2 comment above.
+  if ! acquire_dispatch_marker "$issue_num" "dev-resume"; then
+    log "  issue #${issue_num} dev-resume dispatch marker held by a concurrent tick — skipping ([INV-106])"
     continue
   fi
 

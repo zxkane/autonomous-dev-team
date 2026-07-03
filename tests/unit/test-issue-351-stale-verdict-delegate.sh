@@ -130,6 +130,10 @@ dev_report_bot_unfixable() { return "$_MOCK_BOT_UNFIXABLE"; }
 post_dispatch_token()      { _rec post_dispatch_token "$@"; }
 dispatch()                 { _rec dispatch "$@"; }
 mark_stalled()             { _rec mark_stalled "$@"; }
+# [INV-106] (#361): handle_completed_session_routing's own INV-35 fresh-dev
+# branch now gates on acquire_dispatch_marker before dispatching; this suite
+# exercises delegation/routing, not controller-side dedup, so always acquire.
+acquire_dispatch_marker()  { return 0; }
 # [INV-100] (#356): handle_completed_session_routing's Branch C truncate now
 # routes through _reset_session_log (real impl is backend-aware — local
 # bare truncate vs remote SSM driver). Mocked here so this suite continues

@@ -108,6 +108,10 @@ pid_alive() { return 1; }
 get_pid() { echo ""; }
 label_swap() { :; }
 was_just_dispatched() { return 1; }
+# [INV-106] (#361): dispatcher-tick.sh's Step 2/3/4 dispatch sites now gate on
+# acquire_dispatch_marker before dispatching; this sandbox's auth-block tests
+# don't exercise controller-side dedup, so always acquire.
+acquire_dispatch_marker() { return 0; }
 # Bug 1+2 (#99): dispatcher-tick.sh now calls these in Steps 2/3/4 + Step 5.
 # post_dispatch_token writes a marker comment via `gh issue comment`; the
 # stub mirrors that so the auth-runs-before-first-gh-call test still has a

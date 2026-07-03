@@ -76,6 +76,23 @@ if ! declare -F chp_ci_status >/dev/null 2>&1; then
   unset _ld_self _ld_dir
 fi
 
+# [INV-106] (302b, #361): pid_dir_for_project() (lib-config.sh) is the shared
+# per-user runtime-dir resolver the controller-side dispatch marker (below)
+# reuses — same idempotent, symlink-defended directory `acquire_pid_guard`
+# already writes PID/heartbeat files into. dispatcher-tick.sh sources
+# lib-config.sh itself before this file, so this guard only matters for a
+# standalone unit test that sources lib-dispatch.sh directly. Same
+# readlink -f idiom as the itp/chp sources above; idempotent.
+if ! declare -F pid_dir_for_project >/dev/null 2>&1; then
+  _ld_self="${BASH_SOURCE[0]:-$0}"
+  _ld_dir="$(cd "$(dirname "$(readlink -f "$_ld_self")")" && pwd 2>/dev/null)" || _ld_dir=""
+  if [ -n "$_ld_dir" ] && [ -r "${_ld_dir}/lib-config.sh" ]; then
+    # shellcheck source=lib-config.sh
+    source "${_ld_dir}/lib-config.sh"
+  fi
+  unset _ld_self _ld_dir
+fi
+
 # ---------------------------------------------------------------------------
 # Concurrency
 # ---------------------------------------------------------------------------
@@ -1900,6 +1917,16 @@ CBREPORT
       # for this HEAD when none did — stalling the issue on the next tick. This
       # bounds dev-new to exactly one attempt per unchanged HEAD (#274 proposal
       # #2, N=1) only once a fresh session is actually launched.
+      #
+      # [INV-106] (302b, #361 R1): acquire BEFORE any side effect of this
+      # branch. This router has two entry points (Step 4b.5.1 directly, and
+      # Step 4a.5's same-HEAD delegation, [INV-98]) — a concurrent tick racing
+      # either path for the same issue must be caught here, not just at a
+      # single dispatcher-tick.sh call site.
+      if ! acquire_dispatch_marker "$issue_num" "dev-new"; then
+        log "  issue #${issue_num} dev-new dispatch marker held by a concurrent tick — skipping INV-35 fresh-dev ([INV-106])"
+        return 0
+      fi
       log "  issue #${issue_num} substantive review failure on completed session ${session_id} — minting fresh dev session"
       local _fresh_marker="INV-35-fresh-dev:${session_id}"
       if itp_list_comments "$issue_num" 2>/dev/null \
@@ -1997,11 +2024,13 @@ CBREPORT
 #
 # At dispatch time the dispatcher writes a structured marker to the issue:
 #
-#   <!-- dispatcher-token: <uuid> at <iso8601> mode=<dev-new|dev-resume|review> -->
+#   <!-- dispatcher-token: <uuid> at <iso8601> mode=<dev-new|dev-resume|review> run=<run-id> -->
 #   Dispatching autonomous development...
 #
-# The HTML comment is machine-parseable; the human-readable line preserves
-# the existing wording for backward compat. Two roles:
+# The `run=<run-id>` field is [INV-106] (302b, #361) — optional in the regex
+# for backward compat with pre-#361 marker comments that lack it. The HTML
+# comment is machine-parseable; the human-readable line preserves the
+# existing wording for backward compat. Three roles:
 #
 #   1. Cold-start grace period (Bug 1). Step 5 reads the latest token's age
 #      via latest_dispatch_token_age_seconds and skips stale detection if
@@ -2014,6 +2043,12 @@ CBREPORT
 #      longer relies on the agent's session-id-comment to know "did we just
 #      dispatch this?" — which used to fail when the agent crashed before
 #      its EXIT trap.
+#
+#   3. Forensic attribution ([INV-106], #361). `run=` carries the dispatching
+#      tick's run id (or a pid+start-ts fallback — see `_dispatcher_run_id`),
+#      so a duplicate pair of tokens on one issue (the #298 incident: two
+#      overlapping controller ticks each dispatched the same (issue, mode))
+#      is attributable post-hoc to the two ticks that raced, without journald.
 
 # Echoes seconds since the most recent dispatch-token comment on the issue.
 # Empty if no token comment exists, or if the timestamp is unparseable.
@@ -2021,7 +2056,7 @@ latest_dispatch_token_age_seconds() {
   local issue_num="$1"
   local latest_iso
   latest_iso=$(itp_list_comments "$issue_num" \
-    | jq -r '[.[].body | capture("<!-- dispatcher-token: [a-zA-Z0-9_-]+ at (?<ts>[0-9TZ:-]+) mode=[a-z-]+ -->"; "g") | .ts] | last // empty')
+    | jq -r '[.[].body | capture("<!-- dispatcher-token: [a-zA-Z0-9_-]+ at (?<ts>[0-9TZ:-]+) mode=[a-z-]+( run=[^ ]+)? -->"; "g") | .ts] | last // empty')
   [ -n "$latest_iso" ] || { echo ""; return; }
   _iso_age_seconds "$latest_iso"
 }
@@ -2040,6 +2075,15 @@ _iso_age_seconds() {
   echo $(( now_epoch - epoch ))
 }
 
+# Echoes a path's mtime as a Unix epoch. Empty if the path doesn't exist or
+# stat fails. Cross-platform (GNU `stat -c %Y` vs BSD `stat -f %m`). Shared by
+# pid_alive's tier-2/tier-3 mtime checks and acquire_dispatch_marker's TTL
+# comparison — the same one-liner was duplicated three times before this
+# extraction (INV-106, #361 review).
+_mtime_epoch() {
+  stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo ""
+}
+
 # Returns 0 if the issue's latest dispatch token is younger than
 # DISPATCH_GRACE_PERIOD_SECONDS. Returns 1 otherwise (also when no token
 # exists — backward-compat fallthrough). Strict `<`: at-or-past the
@@ -2056,13 +2100,34 @@ is_within_grace_period() {
   [ "$age" -lt "$grace" ]
 }
 
+# Echoes a stable identifier for THIS dispatcher tick process, for the
+# dispatch-token's `run=` field ([INV-106], #361 R2). Honors an externally
+# injected `DISPATCHER_RUN_ID` (e.g. the orchestration layer that schedules
+# ticks — OpenClaw's cron run id, or a future multi-tick per-project id) when
+# present; otherwise mints `$$-<epoch-seconds>` (pid + this process's start
+# time) on first call and CACHES it, so every `post_dispatch_token` call
+# within the same tick process shares the identical run id (a tick that spans
+# a wall-clock second boundary must not mint two different ids for itself).
+#
+# Sets `_DISPATCHER_RUN_ID_CACHE` as a SIDE EFFECT rather than echoing —
+# callers read the global after calling. A caller that instead captured the
+# result via `$(...)` command substitution would fork a subshell, and the
+# cache assignment inside it would never propagate back to the parent shell:
+# every call would then re-mint a fresh id, defeating the whole point of
+# caching (the exact bug this shape avoids).
+_DISPATCHER_RUN_ID_CACHE=""
+_dispatcher_run_id() {
+  [ -n "$_DISPATCHER_RUN_ID_CACHE" ] && return
+  _DISPATCHER_RUN_ID_CACHE="${DISPATCHER_RUN_ID:-$$-$(date -u +%s)}"
+}
+
 # Post a dispatcher-controlled dispatch-token marker as an issue comment.
 # Args: <issue_num> <mode>   where mode ∈ dev-new|dev-resume|review.
 # Body retains the existing human-readable phrasing, prefixed with the
 # machine-parseable HTML comment.
 post_dispatch_token() {
   local issue_num="$1" mode="$2"
-  local token now human
+  local token now human run_id
   if command -v uuidgen >/dev/null 2>&1; then
     token=$(uuidgen | tr 'A-Z' 'a-z' | tr -d '-' | cut -c1-12)
   else
@@ -2070,6 +2135,8 @@ post_dispatch_token() {
     token=$(od -An -N6 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n' || echo "$$$(date +%s%N)")
   fi
   now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  _dispatcher_run_id
+  run_id="$_DISPATCHER_RUN_ID_CACHE"
   case "$mode" in
     dev-new)     human="Dispatching autonomous development..." ;;
     dev-resume)  human="Resuming autonomous development..." ;;
@@ -2081,8 +2148,137 @@ post_dispatch_token() {
   # like every other marker. The `<!-- dispatcher-token: … -->` HTML marker text is
   # composed CALLER-side and passed verbatim as the BODY (GitHub's html channel
   # round-trips it unchanged; the read-side capture() depends on it surviving).
-  itp_post_comment "$issue_num" "<!-- dispatcher-token: ${token} at ${now} mode=${mode} -->
+  # [INV-106] (#361 R2): `run=${run_id}` is APPENDED after `mode=` — the comment
+  # format stays backward-compatible (existing `capture()`/`test()` readers key
+  # on the `dispatcher-token:` prefix and `mode=` token, never on what follows).
+  itp_post_comment "$issue_num" "<!-- dispatcher-token: ${token} at ${now} mode=${mode} run=${run_id} -->
 ${human}"
+}
+
+# ---------------------------------------------------------------------------
+# Controller-side per-(issue,mode) dispatch dedup marker ([INV-106], 302b, #361)
+# ---------------------------------------------------------------------------
+#
+# Closes the #298 incident: two overlapping controller ticks (e.g. a slow
+# tick still running when the next cron-triggered tick starts) each read the
+# same pre-dispatch issue state and both proceeded to label_swap +
+# post_dispatch_token + dispatch() for the SAME (issue, mode) — the tick-local
+# JUST_DISPATCHED array (an in-memory bash array) only protects the CURRENT
+# tick's own Step 5 pass; it cannot see a second tick racing at Steps 2-4.
+#
+# Scope (the issue's explicit design constraint): dedup is scoped to ticks of
+# ONE controller. The remote-SSM topology runs every project's ticks on a
+# single OpenClaw gateway process, so a controller-local marker is a correct
+# dedup point for tick-vs-tick races; cross-HOST state (SSM/DynamoDB) is not
+# required. Two controllers dispatching one project is out of contract — not
+# defended against here. The definitive second line of defense against
+# anything that slips past this marker is 302a's wrapper-host atomic
+# `acquire_pid_guard` ([INV-103]).
+#
+# acquire_dispatch_marker <issue_num> <mode>
+#
+# Args: mode ∈ dev-new|dev-resume|review (the same vocabulary post_dispatch_token
+# takes) — the marker key is (issue_num, mode), per R1.
+#
+# Returns:
+#   0 — acquired (proceed): either this call created a fresh marker, or the
+#       marker infrastructure itself is unavailable (fails OPEN — see below).
+#       The caller should proceed with label_swap + post_dispatch_token +
+#       dispatch().
+#   1 — a concurrent tick already holds a live marker for this (issue, mode).
+#       The caller MUST skip — no label edit, no token post, no dispatch()
+#       call. This is NOT an error; the concurrent tick owns this dispatch
+#       (R1). The caller is responsible for logging the skip.
+#
+# Atomicity: `mkdir` is a single atomic syscall (EEXIST if the path already
+# exists) — the literal primitive R1 specifies. This is the SAME primitive
+# 302a's FIRST draft used before being replaced by `flock`, because that
+# draft's STALE-marker RECLAIM step (rmdir + mkdir) was itself racy: two
+# callers could each observe the same stale marker and both decide to
+# reclaim, with the second caller's `rmdir` deleting the FIRST caller's
+# freshly-created (non-stale) marker instead of the one it inspected —
+# reopening the double-dispatch hole this function exists to close, just
+# relocated to the reclaim path (see [INV-103]). This function reaches its
+# reclaim branch ONLY for a marker whose mtime age is already >= TTL (R3) — a
+# crashed prior tick's leftover — and reclaims via `mv` (POSIX rename(2),
+# atomic) rather than `rmdir`: the marker directory is renamed to a
+# per-caller-unique temp path FIRST; if a concurrent caller already renamed
+# it away, THIS caller's `mv` fails (ENOENT) and it cleanly loses the reclaim
+# race (falls through to `return 1`) instead of ever deleting a directory it
+# did not itself just claim via the rename — this closes the EXACT #365-
+# documented rmdir double-reclaim hole (two callers both destroying the SAME
+# stale marker; here at most one `mv` of a given source path can ever
+# succeed). It does NOT make the whole acquire+reclaim sequence as airtight
+# as 302a's kernel-held `flock`: between this caller's winning `mv` and its
+# follow-up `mkdir` recreating the path fresh, the path is briefly absent,
+# and a different, unrelated caller doing a plain top-of-function `mkdir`
+# could land in that microsecond window and ALSO acquire. That residual
+# window is exactly what 302a's wrapper-host atomic lock ([INV-103]) exists
+# to backstop — per the issue's own design constraint, this controller-side
+# marker is the belt (dedup within ticks of one controller, using the literal
+# mkdir/O_EXCL primitive R1 specifies), 302a's flock is the suspenders.
+#
+# TTL (R3): parameterized via DISPATCH_MARKER_TTL_SECONDS, default =
+# DISPATCH_GRACE_PERIOD_SECONDS ([INV-18], 600s / 10 min — "the existing
+# just-dispatched grace" the issue names). A marker is never a permanent
+# lock: once its mtime age passes the TTL, the next acquire attempt (a later
+# step in the SAME tick, or a future tick) reclaims and proceeds — a crashed
+# tick's marker never wedges the issue.
+acquire_dispatch_marker() {
+  local issue_num="$1" mode="$2"
+  local base_dir
+  base_dir=$(pid_dir_for_project 2>/dev/null)
+  if [ -z "$base_dir" ]; then
+    # Marker infrastructure unavailable (HOME/XDG_RUNTIME_DIR unset, disk
+    # full, etc.) — fail OPEN. 302a's wrapper-host atomic lock is the
+    # definitive second line of defense; a controller-side infra hiccup must
+    # never freeze the whole pipeline's dispatch.
+    echo "[lib-dispatch] WARN: acquire_dispatch_marker could not resolve pid_dir_for_project — proceeding without controller-side dedup for issue #${issue_num} mode=${mode} (302a wrapper-host lock remains) [INV-106]" >&2
+    return 0
+  fi
+
+  local marker_dir="${base_dir}/dispatch-marker-${issue_num}-${mode}"
+  local ttl="${DISPATCH_MARKER_TTL_SECONDS:-${DISPATCH_GRACE_PERIOD_SECONDS:-600}}"
+  [[ "$ttl" =~ ^[0-9]+$ ]] || ttl=600
+
+  # Symlink defense-in-depth, same posture as [INV-02]'s PID-file check —
+  # fail OPEN (a planted symlink must not be able to block dispatch entirely).
+  if [ -L "$marker_dir" ]; then
+    echo "[lib-dispatch] WARN: dispatch marker path is a symlink — refusing to use it (issue #${issue_num} mode=${mode}) [INV-106]" >&2
+    return 0
+  fi
+
+  if mkdir "$marker_dir" 2>/dev/null; then
+    return 0   # acquired fresh
+  fi
+
+  # Marker already exists. If it's fresh (age < TTL), a concurrent tick holds
+  # it — fail cleanly (R1: not an error, the concurrent tick owns this issue).
+  local mtime now age
+  mtime=$(_mtime_epoch "$marker_dir")
+  if [ -z "$mtime" ]; then
+    # Can't stat it (TOCTOU: vanished between mkdir-fail and stat, or a
+    # permissions issue) — treat conservatively as held; the next tick
+    # re-evaluates from scratch.
+    return 1
+  fi
+  now=$(date -u +%s)
+  age=$(( now - mtime ))
+  if [ "$age" -lt "$ttl" ]; then
+    return 1   # fresh — a concurrent tick owns this (issue, mode)
+  fi
+
+  # Stale (R3) — reclaim via atomic rename (see function header for why this
+  # avoids the #360 double-reclaim race). A losing reclaim attempt returns 1,
+  # same as "someone else holds it" — the next tick re-evaluates (now against
+  # whatever the winner created).
+  local reclaim_tmp="${marker_dir}.reclaim.$$"
+  if ! mv "$marker_dir" "$reclaim_tmp" 2>/dev/null; then
+    return 1
+  fi
+  rm -rf "$reclaim_tmp" 2>/dev/null
+  mkdir "$marker_dir" 2>/dev/null || return 1
+  return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -2278,7 +2474,7 @@ pid_alive() {
   # Tier 2: PID-file mtime (back-compat with pre-INV-29 wrappers that
   # only touch the PID file). Symlink-defended (CWE-59).
   if [ -f "$pid_file" ] && [ ! -L "$pid_file" ]; then
-    mtime=$(stat -c %Y "$pid_file" 2>/dev/null || stat -f %m "$pid_file" 2>/dev/null || echo "")
+    mtime=$(_mtime_epoch "$pid_file")
     if [ -n "$mtime" ] && [ $(( now - mtime )) -lt "$threshold" ]; then
       return 0
     fi
@@ -2287,7 +2483,7 @@ pid_alive() {
   # Tier 3: heartbeat sibling mtime (INV-29). Owned exclusively by the
   # wrapper — survives spurious PID-file deletion. Same symlink defence.
   if [ -f "$hb_file" ] && [ ! -L "$hb_file" ]; then
-    mtime=$(stat -c %Y "$hb_file" 2>/dev/null || stat -f %m "$hb_file" 2>/dev/null || echo "")
+    mtime=$(_mtime_epoch "$hb_file")
     if [ -n "$mtime" ] && [ $(( now - mtime )) -lt "$threshold" ]; then
       return 0
     fi
