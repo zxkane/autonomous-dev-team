@@ -1968,9 +1968,20 @@ CBREPORT
         release_dispatch_marker "$issue_num" "dev-new"
         return 0
       fi
-      label_swap "$issue_num" "pending-dev" "in-progress"
-      post_dispatch_token "$issue_num" "dev-new"
-      dispatch dev-new "$issue_num"
+      # [INV-108] (#361 round-9 [P1]): do NOT rely on ambient `set -e` for the
+      # three pre-confirm steps. This router's Step 4a.5 entry arrives via
+      # `if handle_pending_dev_pr_exists ...` — bash SUPPRESSES errexit inside
+      # a function called in an `if` condition, so an unguarded failure here
+      # would fall through to confirm_launched: ownership dropped while NO
+      # wrapper is running (marker unreleasable until TTL) and, worse, a
+      # phantom per-HEAD attempt marker posted below. Guard each step
+      # explicitly: on failure, release the marker (owned — acquire appended
+      # it) and bail; the next tick retries under MAX_RETRIES.
+      if ! label_swap "$issue_num" "pending-dev" "in-progress"          || ! post_dispatch_token "$issue_num" "dev-new"          || ! dispatch dev-new "$issue_num"; then
+        log "  ERROR: INV-35 fresh-dev pre-spawn step failed for issue #${issue_num} (label/token/dispatch) — releasing the dispatch marker; next tick retries ([INV-108])."
+        release_dispatch_marker "$issue_num" "dev-new"
+        return 0
+      fi
       # [INV-108] (#361 review [P1]): dispatch() returned — a wrapper is
       # confirmed launched. Confirm so the tick-level EXIT trap leaves this
       # marker alone; it lives out its normal TTL.
@@ -2406,18 +2417,26 @@ _dispatch_marker_release_pending() {
 }
 
 # release_dispatch_marker <issue_num> <mode> — removes the on-disk marker
-# `acquire_dispatch_marker` created. Also drops it from the pending list (a
-# caller that releases directly, e.g. a soft-failure branch or a test, must
-# not leave a stale pending entry for the EXIT trap to redundantly re-release
-# later — harmless since `rm -rf` on an absent path is a no-op, but the drop
-# keeps the pending list an accurate reflection of "still needs releasing").
+# `acquire_dispatch_marker` created, GATED on ownership (#361 round-9 [P1]):
+# the on-disk removal runs ONLY when the pair is in _DISPATCH_MARKER_PENDING
+# (i.e. THIS tick's acquire really created/reclaimed the marker). Without the
+# gate, a tick whose acquire fail-opened (infra unavailable — nothing created,
+# nothing pending) could reach a soft-failure branch after the infra
+# recovered and blindly `rm -rf` a live marker a CONCURRENT tick genuinely
+# owns — reopening the duplicate-dispatch race this invariant closes. A
+# not-owned release is a silent no-op; the foreign marker lives out its TTL.
 #
-# Idempotent and best-effort: `rm -rf` on an absent path is a silent no-op
-# (rc 0), and a release failure (e.g. permissions) is swallowed — a marker
-# that fails to release just falls back to the existing TTL-expiry safety
-# net, never a hard error that could abort the tick mid-loop.
+# Idempotent and best-effort: a second release finds the pair already dropped
+# (no-op); a release failure (e.g. permissions) is swallowed — a marker that
+# fails to release just falls back to the existing TTL-expiry safety net,
+# never a hard error that could abort the tick mid-loop.
 release_dispatch_marker() {
   local issue_num="$1" mode="$2"
+  local _key="${issue_num}:${mode}" _entry _owned=0
+  for _entry in "${_DISPATCH_MARKER_PENDING[@]:-}"; do
+    [ "$_entry" = "$_key" ] && { _owned=1; break; }
+  done
+  [ "$_owned" = "1" ] || return 0   # not ours — never touch a foreign marker
   _dispatch_marker_pending_drop "$issue_num" "$mode"
   local base_dir
   base_dir=$(pid_dir_for_project 2>/dev/null) || return 0

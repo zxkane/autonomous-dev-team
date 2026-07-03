@@ -517,6 +517,39 @@ else
 fi
 assert_eq "TC-DEDUP-361-025 release_dispatch_marker also drops the pending entry" "" "${_DISPATCH_MARKER_PENDING[*]:-}"
 
+# TC-DEDUP-361-025b (#361 round-9 [P1]): release is GATED on ownership — a
+# release for a pair NOT in the pending list must NOT touch the on-disk
+# marker. Scenario: THIS tick's acquire fail-opened (infra unavailable →
+# nothing created, nothing pending), infra recovered, a CONCURRENT tick
+# acquired the marker for real, then this tick's soft-failure branch calls
+# release. Pre-fix the blind `rm -rf` deleted the concurrent tick's live
+# marker, reopening the duplicate-dispatch race.
+rm -rf "$TMPDIR/dispatch-marker-803-dev-new"
+mkdir "$TMPDIR/dispatch-marker-803-dev-new"      # the CONCURRENT tick's live marker
+_DISPATCH_MARKER_PENDING=()                       # ours fail-opened: pending is empty
+release_dispatch_marker 803 dev-new
+if [[ -d "$TMPDIR/dispatch-marker-803-dev-new" ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-DEDUP-361-025b not-owned release leaves a foreign live marker untouched"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-DEDUP-361-025b not-owned release DELETED a foreign live marker (dup-dispatch race reopened)"
+  FAIL=$((FAIL + 1))
+fi
+rm -rf "$TMPDIR/dispatch-marker-803-dev-new"
+
+# TC-DEDUP-361-025c: control — an OWNED release (pair in pending) still removes
+# the marker, so the gate does not break the round-4 release-on-failure fix.
+rm -rf "$TMPDIR/dispatch-marker-804-dev-new"
+acquire_dispatch_marker 804 dev-new
+release_dispatch_marker 804 dev-new
+if [[ -d "$TMPDIR/dispatch-marker-804-dev-new" ]]; then
+  echo -e "  ${RED}FAIL${NC}: TC-DEDUP-361-025c owned release failed to remove the marker (gate over-blocks)"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${NC}: TC-DEDUP-361-025c owned release still removes the marker"
+  PASS=$((PASS + 1))
+fi
+
 # TC-DEDUP-361-026: dispatch_marker_confirm_launched drops the pending entry
 # WITHOUT touching the on-disk marker (it must survive to live out its TTL —
 # a wrapper is now actually running and depends on Step 5's grace window).
@@ -687,6 +720,63 @@ else
     PASS=$((PASS + 1))
   fi
   rm -rf "$TMPDIR/dispatch-marker-808-dev-new"
+fi
+
+# TC-DEDUP-361-034 (#361 round-9 [P1] finding 1): the Branch C DELEGATED entry
+# (`if handle_pending_dev_pr_exists ...`) runs the whole router with bash
+# errexit SUPPRESSED (function called in an `if` condition). A dispatch()
+# failure therefore does NOT abort — pre-fix, execution fell through to
+# dispatch_marker_confirm_launched, dropping ownership while NO wrapper ran
+# (marker stuck for full TTL) and posting a phantom per-HEAD attempt marker.
+# Post-fix the explicit `if ! label_swap || ! post_dispatch_token ||
+# ! dispatch` guard releases the marker and bails BEFORE confirm/marker-post.
+# Source-of-truth + behavioral hybrid: extract the guarded block, run it with
+# dispatch stubbed to FAIL under suppressed errexit, assert (a) the marker is
+# gone (released), (b) no attempt marker was posted.
+extract_branch_c_dispatch_block() {
+  awk '
+    /if ! acquire_dispatch_marker "\$issue_num" "dev-new"; then/ { start = 1 }
+    start { print }
+    start && /^      return 0$/ { exit }
+  ' "$LIB"
+}
+BRANCH_C_FULL=$(extract_branch_c_dispatch_block)
+if [[ -z "$BRANCH_C_FULL" ]] || ! grep -q '! dispatch dev-new' <<<"$BRANCH_C_FULL"; then
+  echo -e "  ${RED}FAIL${NC}: TC-DEDUP-361-034 could not extract Branch C's guarded dispatch block (source drifted, or the round-9 explicit guard is missing)"
+  FAIL=$((FAIL + 1))
+else
+  rm -rf "$TMPDIR/dispatch-marker-809-dev-new"
+  _DISPATCH_MARKER_PENDING=()
+  _POSTED_LOG="$TMPDIR/posted-809.log"
+  : > "$_POSTED_LOG"
+  _tc034_runner() {   # function wrapper so `if _tc034_runner` suppresses errexit — the delegated-entry shape
+    local issue_num=809 session_id="sid-809" _np_current_head="deadbeef809"
+    log() { :; }
+    itp_list_comments() { echo '[]'; }
+    itp_post_comment() { echo "$2" >> "$_POSTED_LOG"; }
+    _reset_session_log() { return 0; }
+    label_swap() { return 0; }
+    post_dispatch_token() { return 0; }
+    dispatch() { return 1; }             # the round-9 scenario: spawn fails
+    eval "$BRANCH_C_FULL"
+  }
+  set -e
+  if _tc034_runner; then :; fi
+  set +e
+  _tc034_ok=1
+  if [[ -d "$TMPDIR/dispatch-marker-809-dev-new" ]]; then
+    echo -e "  ${RED}FAIL${NC}: TC-DEDUP-361-034 marker survived a failed dispatch on the delegated (errexit-suppressed) route"
+    FAIL=$((FAIL + 1)); _tc034_ok=0
+  fi
+  if grep -q 'no-progress-substantive-attempt' "$_POSTED_LOG"; then
+    echo -e "  ${RED}FAIL${NC}: TC-DEDUP-361-034 phantom per-HEAD attempt marker posted despite failed dispatch"
+    FAIL=$((FAIL + 1)); _tc034_ok=0
+  fi
+  if [[ "$_tc034_ok" == 1 ]]; then
+    echo -e "  ${GREEN}PASS${NC}: TC-DEDUP-361-034 delegated-route dispatch failure releases the marker and posts no attempt marker"
+    PASS=$((PASS + 1))
+  fi
+  rm -rf "$TMPDIR/dispatch-marker-809-dev-new"
 fi
 
 # TC-DEDUP-361-032: source-of-truth — dispatcher-tick.sh installs the
