@@ -14,10 +14,10 @@ deadlock: any `remote-aws-ssm` project that never overrode
 `SSM_COMMAND_TIMEOUT_SECONDS` (none did) got a permanent transport failure on
 every liveness/session-log probe, so `pid_alive` never returned a definitive
 `DEAD` and `dispatcher-tick.sh`'s Step 5a/5b DEAD-branch label transitions
-never fired. Reproduced live against `zxkane/skills` issue #6
-(`i-0c87da4b7346b86d6`, `ap-southeast-1`) on 2026-07-03 — the dev wrapper had
-already exited and pushed a PR, but the issue sat in `in-progress` for 16+
-hours because every liveness probe transport-failed.
+never fired. Reproduced live against a consumer project's dispatcher on
+2026-07-03 — the dev wrapper had already exited and pushed a PR, but the
+issue sat in `in-progress` for 16+ hours because every liveness probe
+transport-failed.
 
 ## The fix
 
@@ -71,8 +71,8 @@ across all four SSM transport scripts (`lib-ssm.sh`,
 - Validating/clamping/warning a **user-supplied** `SSM_COMMAND_TIMEOUT_SECONDS`
   value below 30 (e.g. an operator exporting `20`) — an explicit operator
   override keeps today's behavior (the native AWS API error).
-- The separate `zxkane/skills` repo's lack of CI (a co-factor in the
-  originally observed deadlock, but a different repo's config).
+- A separate consumer repo's lack of CI (a co-factor in the originally
+  observed deadlock, but a different repo's config).
 - INV-30's ALIVE-bias policy — unchanged, correct.
 - Retroactively unblocking any other already-stuck issues beyond the one
   already manually unblocked.
