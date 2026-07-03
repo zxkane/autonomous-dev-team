@@ -45,14 +45,13 @@ pcf_conf_keys() {
   done < "$file"
 }
 
-# pcf_resolve_provider_dir <project_root> <seam> <name> — resolve a provider
-# NAME to its source directory for the given SEAM (itp|chp). Fixed table
-# (issue #370 design): github -> the real skill tree; degraded -> the
-# existing #280 fixture; broken -> this suite's deliberately-broken fixture.
-# Both seams share the table (a name resolves to the same DIR regardless of
-# seam; the caller picks the itp-<name> or chp-<name> file inside it).
-# Unknown name -> rc 1, no output (the caller treats this as a fatal usage
-# error, not a silent empty provider).
+# pcf_resolve_provider_dir <project_root> <name> — resolve a provider NAME to
+# its source directory. Fixed table (issue #370 design): github -> the real
+# skill tree; degraded -> the existing #280 fixture; broken -> this suite's
+# deliberately-broken fixture. Both seams (ITP/CHP) share this same table — a
+# name resolves to the same DIR regardless of seam; the caller picks the
+# itp-<name> or chp-<name> file inside it. Unknown name -> rc 1, no output
+# (the caller treats this as a fatal usage error, not a silent empty provider).
 pcf_resolve_provider_dir() {
   local root="$1" name="$2"
   case "$name" in

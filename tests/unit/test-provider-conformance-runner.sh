@@ -17,7 +17,6 @@ PCONF_DIR="$PROJECT_ROOT/tests/provider-conformance"
 RUNNER="$PCONF_DIR/run-provider-conformance.sh"
 LIB="$PCONF_DIR/lib-provider-conformance.sh"
 COVERAGE_CONF="$PCONF_DIR/coverage.conf"
-CAP_MAP_CONF="$PCONF_DIR/cap-map.conf"
 SPEC_MD="$PROJECT_ROOT/docs/pipeline/provider-spec.md"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; NC='\033[0m'
@@ -103,8 +102,6 @@ assert_contains "TC-PCONF-040: coverage tripwire PASSes against the real repo" "
 
 # TC-PCONF-041: a coverage.conf pending verb whose spec row lacks the token → FAIL.
 scratch="$(mktemp -d)"
-cp "$COVERAGE_CONF" "$scratch/coverage.conf"
-cp "$CAP_MAP_CONF" "$scratch/cap-map.conf"
 sed 's/itp_read_task=pending/itp_read_task=asserted/' "$COVERAGE_CONF" > "$scratch/coverage-drift1.conf"
 drift1_diff="$(
   spec_pending="$(pcf_spec_pending_verbs "$SPEC_MD")"

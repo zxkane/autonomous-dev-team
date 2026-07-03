@@ -61,20 +61,23 @@ itp_degraded_post_comment() {
 }
 
 # itp_degraded_list_comments ISSUE — mirrors itp_github_list_comments' normalized
-# [INV-90] shape. degraded's marker_channel=text / distinct_bot_author=0 do not
-# change this leaf's OWN contract (those are caller-side branches per spec §4.1);
-# the leaf still normalizes to [{id,author,authorKind,body,createdAt}].
+# [INV-90] shape, INCLUDING the authorKind derivation (self/bot/human) — the
+# degraded fixture's own caps (marker_channel=text, distinct_bot_author=0) are
+# caller-side branches (spec §4.1) that do not change this leaf's OWN contract.
 itp_degraded_list_comments() {
   local issue="$1"
-  gh issue view "$issue" --repo "$REPO" --json comments -q '
+  gh issue view "$issue" --repo "$REPO" --json comments -q "
     [ .comments[]
-      | { id: ( ( (.url // "") | capture("issuecomment-(?<n>[0-9]+)$") | .n | tonumber ) // null ),
+      | { id: ( ( (.url // \"\") | capture(\"issuecomment-(?<n>[0-9]+)\$\") | .n | tonumber ) // null ),
           author: (.author.login // null),
-          authorKind: "human",
-          body: (.body // ""),
+          authorKind: ( (.author.login // \"\") as \$a
+                        | if (\$a != \"\" and \$a == \"${BOT_LOGIN:-}\") then \"self\"
+                          elif (\$a | endswith(\"[bot]\")) then \"bot\"
+                          else \"human\" end ),
+          body: (.body // \"\"),
           createdAt: (.createdAt // null) }
-    ] | sort_by(.createdAt // "")
-  '
+    ] | sort_by(.createdAt // \"\")
+  "
 }
 
 # itp_degraded_provision_states NAME COLOR DESCRIPTION — mirrors

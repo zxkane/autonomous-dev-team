@@ -53,7 +53,7 @@ Driven by `tests/unit/test-provider-conformance-runner.sh`
 | TC-PCONF-020 | `--itp broken --chp broken`: `itp_broken_list_comments` returns a bare object, not an array | one `FAIL itp_list_comments … wrong-shape` line |
 | TC-PCONF-021 | `itp_broken_transition_state` always exits 0 even when the stub `gh` fails | one `FAIL itp_transition_state … rc-0-on-error` line |
 | TC-PCONF-022 | `chp_broken_resolve_thread` is not defined | one `FAIL chp_resolve_thread … missing-verb-function` line |
-| TC-PCONF-023 | `chp_broken_review_threads` returns a bare object, not an array | one `FAIL chp_review_threads … non-array-output` line |
+| TC-PCONF-023 | `chp_broken_review_threads` returns a bare object, not an array | one `FAIL chp_review_threads … wrong-shape` line |
 | TC-PCONF-024 | Full `--itp broken --chp broken` run | exits non-zero; `CONFORMANCE-SUMMARY` `fail>0`; exactly one FAIL line per violated clause above (no duplicate/missing FAILs) |
 
 ## Degraded provider — caps-conditioned SKIP (AC per R4)
