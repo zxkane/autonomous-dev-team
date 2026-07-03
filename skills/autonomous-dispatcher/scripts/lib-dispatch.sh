@@ -83,16 +83,12 @@ fi
 # Count issues currently in active state (in-progress or reviewing).
 # Echoes a non-negative integer.
 #
-# [INV-87] The `gh issue list … --json labels -q '… | length'` leaf routes
-# through itp_count_by_state (the GitHub impl forwards the args to `gh issue
-# list --repo "$REPO"` byte-identically; the `… | length` is supplied here so
-# the verb returns the INTEGER the dispatcher-tick concurrency gate compares
-# numerically — spec §3.1 [M3]). The state set + the `| length` projection stay
-# caller-side; only the leaf I/O moved.
+# [INV-87]/[W1a, #371] Routes through the ABSTRACT itp_count_by_state contract:
+# state=open, labels-AND="autonomous", limit=100, any-of="in-progress,reviewing".
+# No gh flags/jq programs cross the seam — the leaf owns the enumeration AND the
+# any-of-label count; only the abstract filter set is caller-side.
 count_active() {
-  itp_count_by_state --state open --limit 100 \
-    --label "autonomous" --json labels \
-    -q '[.[] | select(.labels[].name | IN("in-progress","reviewing"))] | length'
+  itp_count_by_state open "autonomous" 100 "in-progress,reviewing"
 }
 
 # ---------------------------------------------------------------------------
@@ -102,22 +98,16 @@ count_active() {
 # Step 2: issues with `autonomous` label and NO state label.
 # Echoes JSON array of {number, labels, title}.
 #
-# [INV-87] The `gh issue list` enumeration leaf routes through itp_list_by_state
-# (GitHub impl forwards byte-identically); the no-state-label jq subtraction
-# stays caller-side (spec §3.1 note / mapping appendix).
+# [INV-87]/[W1a, #371] The enumeration routes through the ABSTRACT
+# itp_list_by_state contract (state=open, labels-AND="autonomous", limit=100,
+# fields=number,labels,title — normalized `labels` is an array of NAME
+# strings). The no-state-label jq subtraction is re-derived CALLER-side over
+# the normalized array (spec §3.1 note / mapping appendix).
 list_new_issues() {
-  itp_list_by_state --state open --limit 100 \
-    --label "autonomous" --json number,labels,title \
-    -q '[.[] | select(
-      [.labels[].name] | (
-        contains(["in-progress"]) or
-        contains(["pending-review"]) or
-        contains(["reviewing"]) or
-        contains(["pending-dev"]) or
-        contains(["stalled"]) or
-        contains(["approved"])
-      ) | not
-    )]'
+  itp_list_by_state open "autonomous" 100 "number,labels,title" | jq '[.[] | select(
+    (.labels | any(. == "in-progress" or . == "pending-review" or . == "reviewing"
+                   or . == "pending-dev" or . == "stalled" or . == "approved")) | not
+  )]'
 }
 
 # Step 3: issues with `autonomous` + `pending-review` AND NOT `reviewing`.
@@ -132,16 +122,15 @@ list_new_issues() {
 # investigation: original "dev wrapper flips back" hypothesis was wrong;
 # the actual third producer was this missing filter).
 list_pending_review() {
-  # [INV-87] leaf via itp_list_by_state; the [INV-25] terminal-state subtraction
-  # (`reviewing`/`approved`/`stalled` defense-in-depth, #115 Bug C) STAYS
-  # caller-side per spec §3.1 — only the `gh issue list` enumeration moved.
-  itp_list_by_state --state open --limit 100 \
-    --label "autonomous,pending-review" --json number,labels \
-    -q '[.[] | select(
-      ([.labels[].name] | contains(["reviewing"]) | not) and
-      ([.labels[].name] | contains(["approved"]) | not) and
-      ([.labels[].name] | contains(["stalled"]) | not)
-    )]'
+  # [INV-87]/[W1a, #371] leaf via the ABSTRACT itp_list_by_state contract; the
+  # [INV-25] terminal-state subtraction (`reviewing`/`approved`/`stalled`
+  # defense-in-depth, #115 Bug C) STAYS caller-side, re-derived over the
+  # normalized `labels` name-string array.
+  itp_list_by_state open "autonomous,pending-review" 100 "number,labels" | jq '[.[] | select(
+    (.labels | any(. == "reviewing") | not) and
+    (.labels | any(. == "approved") | not) and
+    (.labels | any(. == "stalled") | not)
+  )]'
 }
 
 # Step 4: issues with `autonomous` + `pending-dev`.
@@ -153,15 +142,14 @@ list_pending_review() {
 # against an approved issue — the actual mechanism behind the wedge that
 # motivated this issue.
 list_pending_dev() {
-  # [INV-87] leaf via itp_list_by_state. The `--json number,labels,comments`
-  # field list (incl. `comments`) and the [INV-25] terminal-state subtraction
-  # stay byte-identical / caller-side per spec §3.1.
-  itp_list_by_state --state open --limit 100 \
-    --label "autonomous,pending-dev" --json number,labels,comments \
-    -q '[.[] | select(
-      ([.labels[].name] | contains(["approved"]) | not) and
-      ([.labels[].name] | contains(["stalled"]) | not)
-    )]'
+  # [INV-87]/[W1a, #371] leaf via the ABSTRACT itp_list_by_state contract. The
+  # fields=number,labels,comments field set (comments is the [INV-90]
+  # normalized array) and the [INV-25] terminal-state subtraction stay
+  # caller-side per spec §3.1, re-derived over the normalized shape.
+  itp_list_by_state open "autonomous,pending-dev" 100 "number,labels,comments" | jq '[.[] | select(
+    (.labels | any(. == "approved") | not) and
+    (.labels | any(. == "stalled") | not)
+  )]'
 }
 
 # Step 5: issues currently in active state (in-progress OR reviewing) — same
@@ -175,31 +163,28 @@ list_pending_dev() {
 # active label to `pending-dev`, which re-arms Step 4 on the next tick —
 # infinite loop burning tokens on a terminally-decided issue.
 list_stale_candidates() {
-  # [INV-87] leaf via itp_list_by_state; the active-state selector + the
-  # `approved` subtraction (#115 Bug A) stay caller-side per spec §3.1.
-  itp_list_by_state --state open --limit 100 \
-    --label "autonomous" --json number,labels \
-    -q '[.[] | select(
-      (.labels[].name | IN("in-progress","reviewing")) and
-      ([.labels[].name] | contains(["approved"]) | not)
-    )]'
+  # [INV-87]/[W1a, #371] leaf via the ABSTRACT itp_list_by_state contract; the
+  # active-state selector + the `approved` subtraction (#115 Bug A) stay
+  # caller-side per spec §3.1, re-derived over the normalized `labels` array.
+  itp_list_by_state open "autonomous" 100 "number,labels" | jq '[.[] | select(
+    (.labels | any(. == "in-progress" or . == "reviewing")) and
+    (.labels | any(. == "approved") | not)
+  )]'
 }
 
 # ---------------------------------------------------------------------------
 # Step 0: label hygiene helpers ([INV-25], issue #115 Bug B)
 # ---------------------------------------------------------------------------
 
-# Terminal-label predicate. Pure function over a labels JSON
-# (`[{"name":"foo"},{"name":"bar"},...]`). Returns 0 if the label set
-# contains `approved` or `stalled` (i.e. the issue is in a sticky terminal
-# state); 1 otherwise. Future selectors can use this to subtract terminals
-# without each rewriting the contains([...]) algebra.
-#
-# The four existing list_* selectors already inline their own approved
-# subtraction; deliberately not refactored to keep this PR low-risk.
+# Terminal-label predicate. Pure function over a labels JSON — a NORMALIZED
+# array of NAME strings (`["foo","bar",...]`, the [W1a, #371] itp_list_by_state
+# / itp_list_forbidden_combos shape). Returns 0 if the label set contains
+# `approved` or `stalled` (i.e. the issue is in a sticky terminal state); 1
+# otherwise. Future selectors can use this to subtract terminals without each
+# rewriting the contains([...]) algebra.
 _has_terminal_label() {
   local labels_json="$1"
-  jq -e '[.[].name] | (contains(["approved"]) or contains(["stalled"]))' \
+  jq -e '(contains(["approved"]) or contains(["stalled"]))' \
     <<<"$labels_json" >/dev/null
 }
 
@@ -210,21 +195,11 @@ _has_terminal_label() {
 # Returns a JSON array of {number, labels:[{name}]}. Empty array when no
 # residue exists (the steady state).
 list_hygiene_residue() {
-  # [INV-87] leaf via itp_list_forbidden_combos (spec §3.1 [M3]): the 2-axis
-  # (terminal AND transitional) [INV-25] forbidden-combo predicate STAYS
-  # caller-side — only the `gh issue list` enumeration moved behind the verb.
-  itp_list_forbidden_combos --state open --limit 100 \
-    --label "autonomous" --json number,labels \
-    -q '[.[] | select(
-      ([.labels[].name] | (contains(["approved"]) or contains(["stalled"])))
-      and
-      ([.labels[].name] | (
-        contains(["in-progress"]) or
-        contains(["reviewing"]) or
-        contains(["pending-review"]) or
-        contains(["pending-dev"])
-      ))
-    )]'
+  # [INV-87]/[W1a, #371] leaf via the ABSTRACT itp_list_forbidden_combos
+  # contract: the 2-axis (terminal AND transitional) [INV-25] forbidden-combo
+  # predicate MOVED INTO THE LEAF (spec R1's one deliberate exception to
+  # "predicates stay caller-side") — this caller is now a thin pass-through.
+  itp_list_forbidden_combos open "autonomous" 100
 }
 
 # Strip transitional labels from an issue that also carries a terminal
@@ -236,10 +211,11 @@ hygiene_strip_residual_labels() {
   local issue_num="$1"
   local labels_json="$2"
 
-  # Build the list of transitional labels actually present.
+  # Build the list of transitional labels actually present. labels_json is the
+  # [W1a, #371] normalized array of NAME strings (not {name} objects).
   local stripped
   stripped=$(jq -r '
-    [.[].name] as $names
+    . as $names
     | ["in-progress","reviewing","pending-review","pending-dev"]
     | map(select(. as $t | $names | index($t)))
     | join(" ")
@@ -340,7 +316,8 @@ run_hygiene_pass() {
 
     # Determine which terminal label drove the residue (approved wins
     # when both are present — caller can audit further from the comment).
-    if jq -e '[.[].name] | contains(["approved"])' <<<"$labels_json" >/dev/null; then
+    # labels_json is the [W1a, #371] normalized array of NAME strings.
+    if jq -e 'contains(["approved"])' <<<"$labels_json" >/dev/null; then
       terminal="approved"
     else
       terminal="stalled"

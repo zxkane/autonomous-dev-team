@@ -142,12 +142,15 @@ assert_no_match() {
 }
 
 mklabels_json() {
-  # mklabels_json foo bar -> [{"name":"foo"},{"name":"bar"}]
+  # mklabels_json foo bar -> ["foo","bar"] — the [W1a, #371] normalized
+  # itp_list_by_state/itp_list_forbidden_combos label shape (array of NAME
+  # strings), which _has_terminal_label / hygiene_strip_residual_labels now
+  # consume (they used to take the raw gh `[{"name":...}]` object shape).
   local out="["
   local first=1
   for n in "$@"; do
     if [[ $first -eq 1 ]]; then first=0; else out+=","; fi
-    out+="{\"name\":\"$n\"}"
+    out+="\"$n\""
   done
   out+="]"
   printf '%s' "$out"

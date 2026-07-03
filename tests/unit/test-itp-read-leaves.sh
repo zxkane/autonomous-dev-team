@@ -2,19 +2,28 @@
 # test-itp-read-leaves.sh — #281: ITP READ-leaf migration.
 #
 # Proves the READ half of the ITP contract (provider-spec.md §3.1/§3.3/§3.5,
-# [INV-87]/[INV-88]/[INV-90]) is a zero-behavior-change GitHub refactor:
+# [INV-87]/[INV-88]/[INV-90]) is a zero-behavior-change GitHub refactor for
+# itp_read_task / itp_list_comments:
 #
-#   1. Golden-trace argv — the state-list / read_task leaves emit BYTE-IDENTICAL
-#      `gh` argv (+ --json field list) after routing through the verb, and the
-#      28 inline `gh issue view --json comments` scanners are consolidated to
-#      exactly ZERO inline calls (the comment-fetch trace is anchored on the
-#      28-site count, not per-site argv — they deliberately collapse to one verb).
+#   1. Golden-trace argv — the read_task leaf emits BYTE-IDENTICAL `gh` argv
+#      (+ --json field list) after routing through the verb, and the 28 inline
+#      `gh issue view --json comments` scanners are consolidated to exactly
+#      ZERO inline calls (the comment-fetch trace is anchored on the 28-site
+#      count, not per-site argv — they deliberately collapse to one verb).
 #   2. Dispatch routing — each itp_<verb> dispatches to itp_github_<verb>.
 #   3. .caps parse — server_side_state_and=1 / server_side_state_negation=0.
 #   4. Normalized comment shape — [{id,author,authorKind,body,createdAt}] sorted
 #      ascending by createdAt; INV-85 exact-eq + INV-05 cutoff behavior preserved.
 #   5. Capability-branch via the named degraded fake provider (read-side caps=0).
 #   6. Conformance fixture rule (INV-75) + function-mock-shim audit (§7.3 m3).
+#
+# NOTE (#371, W1a): itp_list_by_state / itp_count_by_state /
+# itp_list_forbidden_combos are NO LONGER byte-identical gh-argv pass-throughs
+# — #371 converted them to the abstract state-read contract (no gh flags/jq
+# programs cross the seam). Their golden-trace coverage moved to
+# tests/unit/test-w1a-state-read-contracts.sh (leaf-level argv/shape) and
+# tests/unit/test-w1a-state-read-parity.sh (decision-level parity vs the OLD
+# byte-identical behavior, per issue #371 R5).
 #
 # Run: bash tests/unit/test-itp-read-leaves.sh
 set -uo pipefail
@@ -107,36 +116,6 @@ set +e
 # one arg per line; paste -sd' ' joins them with single spaces and DROPs the
 # trailing newline (no trailing space artifact).
 recorded_argv() { paste -sd' ' "$_GH_ARGV_FILE"; }
-
-echo "=== GOLDEN-TRACE: state-list / count / forbidden-combos argv byte-identical ==="
-
-count_active >/dev/null
-assert_eq "TC-GT-COUNT count_active argv" \
-  "issue list --repo $REPO --state open --limit 100 --label autonomous --json labels -q [.[] | select(.labels[].name | IN(\"in-progress\",\"reviewing\"))] | length" \
-  "$(recorded_argv)"
-
-list_new_issues >/dev/null
-assert_contains "TC-GT-NEW list_new_issues --json number,labels,title" \
-  "issue list --repo $REPO --state open --limit 100 --label autonomous --json number,labels,title -q" "$(recorded_argv)"
-
-list_pending_review >/dev/null
-assert_contains "TC-GT-PREV list_pending_review --label autonomous,pending-review --json number,labels" \
-  "--label autonomous,pending-review --json number,labels -q" "$(recorded_argv)"
-
-list_pending_dev >/dev/null
-assert_contains "TC-GT-PDEV list_pending_dev --json number,labels,comments (incl. comments)" \
-  "--label autonomous,pending-dev --json number,labels,comments -q" "$(recorded_argv)"
-
-list_stale_candidates >/dev/null
-assert_contains "TC-GT-STALE list_stale_candidates argv" \
-  "--label autonomous --json number,labels -q" "$(recorded_argv)"
-
-list_hygiene_residue >/dev/null
-hyg_argv="$(recorded_argv)"
-assert_contains "TC-GT-HYG list_hygiene_residue routes issue list --json number,labels" \
-  "issue list --repo $REPO --state open --limit 100 --label autonomous --json number,labels -q" "$hyg_argv"
-assert_contains "TC-GT-HYG forbidden-combo 2-axis predicate preserved (terminal AND transitional)" \
-  'contains(["approved"]) or contains(["stalled"])' "$hyg_argv"
 
 echo "=== GOLDEN-TRACE: itp_read_task argv byte-identical per field ==="
 itp_read_task 42 title >/dev/null

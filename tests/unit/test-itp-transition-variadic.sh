@@ -155,8 +155,11 @@ source "$LIB_DISPATCH" >/dev/null 2>&1
 set +e
 
 # TC-ITV-031: terminal (approved) + two transitional → one atomic verb call
+# labels_json is the [W1a, #371] normalized array of NAME strings (not the raw
+# gh `[{"name":...}]` object shape) — the shape hygiene_strip_residual_labels
+# now consumes since list_hygiene_residue routes through itp_list_forbidden_combos.
 : > "$_HYG_GH_LOG"
-labels='[{"name":"approved"},{"name":"in-progress"},{"name":"pending-dev"}]'
+labels='["approved","in-progress","pending-dev"]'
 out=$(hygiene_strip_residual_labels 200 "$labels")
 edit_calls=$(grep -E '^issue edit' "$_HYG_GH_LOG" || true)
 edit_count=$(grep -cE '^issue edit' "$_HYG_GH_LOG" || true)
@@ -168,14 +171,14 @@ assert_eq "TC-ITV-031 echoes the space-separated stripped list unchanged" "in-pr
 
 # TC-ITV-030 (≡ TC-HYG-006): already-clean (no transitional) → ZERO verb calls
 : > "$_HYG_GH_LOG"
-out=$(hygiene_strip_residual_labels 201 '[{"name":"approved"}]')
+out=$(hygiene_strip_residual_labels 201 '["approved"]')
 edit_count=$(grep -cE '^issue edit' "$_HYG_GH_LOG" || true)
 assert_eq "TC-ITV-030 already-clean issue → ZERO edit calls (early-return)" "0" "$edit_count"
 assert_eq "TC-ITV-030 already-clean issue → empty stripped return" "" "$out"
 
 # TC-ITV-032: transitional-only (no terminal) → defensive early-return, ZERO calls
 : > "$_HYG_GH_LOG"
-out=$(hygiene_strip_residual_labels 202 '[{"name":"in-progress"}]')
+out=$(hygiene_strip_residual_labels 202 '["in-progress"]')
 edit_count=$(grep -cE '^issue edit' "$_HYG_GH_LOG" || true)
 assert_eq "TC-ITV-032 non-terminal issue → ZERO edit calls (_has_terminal_label miss)" "0" "$edit_count"
 

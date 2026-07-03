@@ -58,3 +58,58 @@ itp_broken_label_event_ts() {
     --jq "map(select(.event == \"labeled\" and .label.name == \"${label}\")) | (.[0].created_at // empty)" \
     2>/dev/null || true
 }
+# Correct leaves for the #371 W1a abstract state-read verbs (not targeted by
+# a deliberate violation — kept correct so the broken run's FAIL count stays
+# exactly the 4 deliberate violations, never more).
+_itp_broken_state_read() {
+  local state="$1" labels_csv="$2" limit="$3"
+  local -a args=(issue list --repo "$REPO" --state "$state" --limit "$limit")
+  [[ -n "$labels_csv" ]] && args+=(--label "$labels_csv")
+  args+=(--json number,title,labels,comments)
+  gh "${args[@]}" | jq --arg bot "${BOT_LOGIN:-}" '
+    [ .[] | {
+        number: .number,
+        title: (.title // ""),
+        labels: [ (.labels // [])[].name ],
+        comments: [ (.comments // [])[]
+          | { id: ( ( (.url // "") | capture("issuecomment-(?<n>[0-9]+)$") | .n | tonumber ) // null ),
+              author: (.author.login // null),
+              authorKind: ( (.author.login // "") as $a
+                            | if ($a != "" and $a == $bot) then "self"
+                              elif ($a | endswith("[bot]")) then "bot"
+                              else "human" end ),
+              body: (.body // ""),
+              createdAt: (.createdAt // null) }
+          ] | sort_by(.createdAt // "")
+      }
+    ] | sort_by(.number)
+  '
+}
+itp_broken_list_by_state() {
+  local state="$1" labels_csv="$2" limit="$3" fields_csv="$4" fields_json
+  fields_json=$(printf '%s' "$fields_csv" | jq -R -s -c 'split(",") | map(select(length > 0))')
+  _itp_broken_state_read "$state" "$labels_csv" "$limit" \
+    | jq --argjson fields "$fields_json" '[ .[] | . as $o | ($fields | map({(.): $o[.]}) | add // {}) ]'
+}
+itp_broken_count_by_state() {
+  local state="$1" labels_csv="$2" limit="$3" any_of_csv="$4" any_of_json
+  any_of_json=$(printf '%s' "$any_of_csv" | jq -R -s -c 'split(",") | map(select(length > 0))')
+  _itp_broken_state_read "$state" "$labels_csv" "$limit" | jq --argjson anyof "$any_of_json" '
+    [ .[] | select(
+        ($anyof | length) == 0
+        or ( .labels as $ls | $anyof | any(. as $a | $ls | index($a) != null) )
+      )
+    ] | length
+  '
+}
+itp_broken_list_forbidden_combos() {
+  local state="$1" labels_csv="$2" limit="$3"
+  _itp_broken_state_read "$state" "$labels_csv" "$limit" | jq '
+    [ .[] | select(
+        (.labels | any(. == "approved" or . == "stalled"))
+        and
+        (.labels | any(. == "in-progress" or . == "reviewing" or . == "pending-review" or . == "pending-dev"))
+      ) | {number, labels}
+    ]
+  '
+}

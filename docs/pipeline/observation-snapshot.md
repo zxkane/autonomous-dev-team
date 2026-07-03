@@ -35,9 +35,9 @@ issue carries `autonomous` plus **at most one** active/terminal state label.
 
 | Field | Source | How read |
 |---|---|---|
-| `labels.all` / `labels.active_state` | `lib-dispatch.sh:48-59` `list_new_issues`; `:73-80` `list_pending_review`; `:91-97` `list_pending_dev`; `:110-117` `list_stale_candidates` | `gh issue list --label … --json number,labels` + jq `contains([...])` membership filters |
-| `labels.active_state` (Step 5 branch) | `dispatcher-tick.sh:480-483` | `grep -q "^in-progress$"` / `grep -q "^reviewing$"` over the label list |
-| (active count) | `lib-dispatch.sh:35-39` `count_active` | `gh issue list --label autonomous --json labels` + jq `IN("in-progress","reviewing")` |
+| `labels.all` / `labels.active_state` | `lib-dispatch.sh` `list_new_issues`; `list_pending_review`; `list_pending_dev`; `list_stale_candidates` | `itp_list_by_state` (abstract state-read contract, #371 W1a) + jq `any(...)` membership filters over the normalized name-string `labels` array |
+| `labels.active_state` (Step 5 branch) | `dispatcher-tick.sh` | `grep -q "^in-progress$"` / `grep -q "^reviewing$"` over the label list |
+| (active count) | `lib-dispatch.sh` `count_active` | `itp_count_by_state` (abstract any-of-labels count, #371 W1a) |
 | `labels.no_auto_close` | `autonomous-review.sh` (PASS branch) | reads `no-auto-close` membership to gate auto-merge skip |
 
 Guards grounded here: `only-autonomous-label`, `still-reviewing`,

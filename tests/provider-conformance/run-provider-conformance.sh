@@ -275,9 +275,9 @@ _run_failsoft_assert() {
 }
 
 # _run_shape_assert <verb> <invoke_snippet> <payload_file> <check_ascending> —
-# invoke VERB with a VALID canned payload, assert JSON-array shape (+
-# ascending createdAt when check_ascending=1); then invoke with a MALFORMED
-# payload and assert graceful (empty, no crash) output.
+# invoke VERB with a VALID canned payload, assert JSON-array shape (+ ascending
+# order when check_ascending is "createdAt" or "number"); then invoke with a
+# MALFORMED payload and assert graceful (empty, no crash) output.
 _run_shape_assert() {
   local verb="$1" invoke_snippet="$2" payload_file="$3" check_ascending="${4:-0}"
   local argv_file="$work_root/.argv-$verb.json"
@@ -292,8 +292,12 @@ _run_shape_assert() {
     emit FAIL "$verb" "wrong-shape (output is not a JSON array: ${out:0:200})"
     return
   fi
-  if [[ "$check_ascending" == "1" ]] && ! pcf_is_ascending_by_created_at "$out"; then
+  if [[ "$check_ascending" == "1" || "$check_ascending" == "createdAt" ]] && ! pcf_is_ascending_by_created_at "$out"; then
     emit FAIL "$verb" "not sorted ascending by createdAt"
+    return
+  fi
+  if [[ "$check_ascending" == "number" ]] && ! pcf_is_ascending_by_number "$out"; then
+    emit FAIL "$verb" "not sorted ascending by number"
     return
   fi
 
@@ -306,6 +310,34 @@ _run_shape_assert() {
   # only a non-empty valid array is a real bug).
   if pcf_is_json_array "$out" && [[ -n "${out//[[:space:]]/}" ]] && [[ "$out" != "[]" ]]; then
     emit FAIL "$verb" "malformed-JSON input produced a non-empty array (should fail gracefully)"
+    return
+  fi
+  emit PASS "$verb"
+}
+
+# _run_count_assert <verb> <invoke_snippet> <payload_file> — invoke VERB (which
+# returns a bare non-negative integer, not an array — itp_count_by_state) with
+# a VALID canned payload and assert the output is a bare integer + rc 0; then
+# invoke with the stub gh FAILING and assert rc != 0 (fail-closed, no partial
+# output — the [M3] int-return distinction, spec §3.1).
+_run_count_assert() {
+  local verb="$1" invoke_snippet="$2" payload_file="$3"
+  local argv_file="$work_root/.argv-$verb.json"
+  local out rc
+
+  out="$(_invoke _PCF_GH_MODE="ok" _PCF_GH_PAYLOAD="$payload_file" _PCF_ARGV_FILE="$argv_file" "$invoke_snippet" 2>&1)"; rc=$?
+  if [[ "$rc" != "0" ]]; then
+    emit FAIL "$verb" "wrong-shape (non-zero rc on a valid payload: $rc, output: ${out:0:200})"
+    return
+  fi
+  if ! [[ "$out" =~ ^[0-9]+$ ]]; then
+    emit FAIL "$verb" "wrong-shape (output is not a bare non-negative integer: '${out:0:200}')"
+    return
+  fi
+
+  out="$(_invoke _PCF_GH_MODE="fail" _PCF_ARGV_FILE="$argv_file" "$invoke_snippet" 2>&1)"; rc=$?
+  if [[ "$rc" == "0" ]]; then
+    emit FAIL "$verb" "rc-0-on-error (stub gh failed but verb still returned 0)"
     return
   fi
   emit PASS "$verb"
@@ -391,6 +423,18 @@ _assert_verb() {
       ;;
     itp_label_event_ts)
       _run_failsoft_assert "$verb" 'itp_label_event_ts 42 autonomous' '^$'
+      ;;
+    itp_list_by_state)
+      _run_shape_assert "$verb" 'itp_list_by_state open autonomous 100 number,title,labels,comments' \
+        "$PAYLOADS/issue-list-valid.json" number
+      ;;
+    itp_count_by_state)
+      _run_count_assert "$verb" 'itp_count_by_state open autonomous 100 in-progress' \
+        "$PAYLOADS/issue-list-valid.json"
+      ;;
+    itp_list_forbidden_combos)
+      _run_shape_assert "$verb" 'itp_list_forbidden_combos open autonomous 100' \
+        "$PAYLOADS/issue-list-valid.json" number
       ;;
     chp_review_threads)
       _run_shape_assert "$verb" 'chp_review_threads 42' "$PAYLOADS/review-threads-valid.json" 0

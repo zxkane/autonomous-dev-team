@@ -2,10 +2,11 @@
 # providers/itp-github.sh — GitHub Issue-Tracker Provider (ITP) reference impl.
 #
 # Establishes the provider-prefix convention (#280) and migrates the ITP READ
-# leaves (#281), the WRITE leaves (#283), and the dependency-resolution +
-# tick-lifecycle leaves (#284, [INV-83]). Each ITP verb's GitHub leaf is a
-# function named itp_github_<verb>; lib-issue-provider.sh's `itp_<verb>` shim
-# forwards "$@" to it when ISSUE_PROVIDER=github (the default), per the
+# leaves (#281), the WRITE leaves (#283), the dependency-resolution +
+# tick-lifecycle leaves (#284, [INV-83]), and the W1a abstract state-read
+# contracts (#371, #347 phase-2). Each ITP verb's GitHub leaf is a function
+# named itp_github_<verb>; lib-issue-provider.sh's `itp_<verb>` shim forwards
+# "$@" to it when ISSUE_PROVIDER=github (the default), per the
 # verb↔current-function mapping appendix in docs/pipeline/provider-spec.md.
 #
 # CONVENTION (so the downstream migrations slot in mechanically):
@@ -22,8 +23,8 @@
 # environment (lib-dispatch.sh's required env).
 #
 # 14 ITP verbs (spec §3.1):
-#   itp_github_list_by_state       itp_github_count_by_state        [#281 READ]
-#   itp_github_list_forbidden_combos                                [#281 READ]
+#   itp_github_list_by_state       itp_github_count_by_state        [#371 W1a]
+#   itp_github_list_forbidden_combos                                [#371 W1a]
 #   itp_github_read_task           itp_github_list_comments         [#281 READ]
 #   itp_github_transition_state    itp_github_post_comment          [itp-writes]
 #   itp_github_edit_comment        itp_github_mark_checkbox         [itp-writes]
@@ -33,45 +34,109 @@
 # (itp_caps reads the .caps manifest in the dispatcher, not a function here.)
 
 # ---------------------------------------------------------------------------
-# itp_github_list_by_state — state-filtered issue enumeration leaf.
+# W1a abstract state-read contracts (#371, #347 phase-2). Unlike the other ITP
+# leaves in this file (byte-identical gh-argv pass-throughs, #281), these three
+# verbs are a deliberate SHAPE change: NO gh flags and NO jq programs cross the
+# seam (docs/pipeline/provider-spec.md §3.1). The caller passes abstract
+# filters (state, label-AND set, limit, field set); this leaf owns the
+# `--state/--label/--limit/--json` mapping AND the normalization jq. Caller-side
+# predicates (the [INV-25] terminal-state subtraction, negation) are re-derived
+# by the caller by filtering the returned NORMALIZED array — see
+# lib-dispatch.sh's list_* selectors.
+# ---------------------------------------------------------------------------
+
+# _itp_github_state_read <state> <labels-and-csv> <limit> — internal helper
+# shared by list_by_state/count_by_state/list_forbidden_combos: runs the
+# server-side state+label-AND+limit enumeration and normalizes to the full
+# {number, title, labels, comments} shape (comments per [INV-90]/§3.3), sorted
+# ascending by number. <labels-and-csv> empty → no --label flag. Fail-closed:
+# a `gh` failure propagates its non-zero rc with no partial stdout (no `|| true`
+# anywhere in this chain).
+_itp_github_state_read() {
+  local state="$1" labels_csv="$2" limit="$3"
+  local -a args=(issue list --repo "$REPO" --state "$state" --limit "$limit")
+  [[ -n "$labels_csv" ]] && args+=(--label "$labels_csv")
+  args+=(--json number,title,labels,comments)
+  gh "${args[@]}" | jq --arg bot "${BOT_LOGIN:-}" '
+    [ .[] | {
+        number: .number,
+        title: (.title // ""),
+        labels: [ (.labels // [])[].name ],
+        comments: [ (.comments // [])[]
+          | { id: ( ( (.url // "") | capture("issuecomment-(?<n>[0-9]+)$") | .n | tonumber ) // null ),
+              author: (.author.login // null),
+              authorKind: ( (.author.login // "") as $a
+                            | if ($a != "" and $a == $bot) then "self"
+                              elif ($a | endswith("[bot]")) then "bot"
+                              else "human" end ),
+              body: (.body // ""),
+              createdAt: (.createdAt // null) }
+          ] | sort_by(.createdAt // "")
+      }
+    ] | sort_by(.number)
+  '
+}
+
+# _itp_github_project_fields <fields-csv> — internal helper: reads the full
+# normalized array on stdin and projects down to EXACTLY the requested fields
+# (spec R1). <fields-csv> ⊆ number,title,labels,comments.
+_itp_github_project_fields() {
+  local fields_csv="$1" fields_json
+  fields_json=$(printf '%s' "$fields_csv" | jq -R -s -c 'split(",") | map(select(length > 0))')
+  jq --argjson fields "$fields_json" 'map(. as $o | ($fields | map({(.): $o[.]}) | add // {}))'
+}
+
+# itp_github_list_by_state <state> <labels-and-csv> <limit> <fields-csv> —
+# abstract state-filtered issue enumeration leaf (spec §3.1, R1).
 #
-# Spec §3.1: enumerate tasks matching an abstract state set. On GitHub a
-# pipeline state IS a label, so the GitHub leaf is a faithful pass-through:
-# the caller passes the exact `gh issue list` argument tail it emits today
-# (`--state open --limit 100 --label … --json … -q '<INV-25 subtraction>'`)
-# and the leaf forwards it to `gh issue list --repo "$REPO" "$@"`. This keeps
-# the emitted argv + `--json` field list BYTE-IDENTICAL to the pre-refactor
-# call (the no-behavior-change golden-trace anchor, spec §7.1(a)/§7.2) while
-# routing the leaf through the verb ([INV-87]). The [INV-25] terminal-state jq
-# subtraction is authored in the CALLER's body and travels as the `-q` arg — it
-# is NOT logic this provider-neutral leaf knows about (spec §3.1 note).
-#
-# §3.5: `gh`'s transparent `--json` auto-pagination + secondary-rate-limit retry
-# return the COMPLETE set with zero added page-walk code (today's behavior).
+# <state> ∈ open|closed|all. <labels-and-csv> comma-separated label names,
+# AND semantics (gh's own --label comma behavior), empty = no filter.
+# <limit> applied SERVER-SIDE (gh --limit) before any caller-side subtraction.
+# <fields-csv> ⊆ number,title,labels,comments. No matches → `[]`.
 itp_github_list_by_state() {
-  gh issue list --repo "$REPO" "$@"
+  local state="$1" labels_csv="$2" limit="$3" fields_csv="$4"
+  _itp_github_state_read "$state" "$labels_csv" "$limit" | _itp_github_project_fields "$fields_csv"
 }
 
-# itp_github_count_by_state — server-side COUNT leaf (returns an INTEGER).
+# itp_github_count_by_state <state> <labels-and-csv> <limit> <any-of-labels-csv>
+# — server-side COUNT leaf (spec §3.1 [M3]; bare non-negative INTEGER).
 #
-# Spec §3.1 [M3]: distinct from list_by_state because `count_active` returns an
-# int the dispatcher compares numerically (the concurrency gate at
-# dispatcher-tick.sh:249/264/318/342). The caller supplies the `-q '… | length'`
-# that collapses the list to a count via gh's jq; forwarding `"$@"` keeps that
-# argv byte-identical and preserves the integer return semantics.
+# Same enumeration point as list_by_state; the RETURN is the count of matches
+# that additionally carry AT LEAST ONE label from <any-of-labels-csv> (empty
+# any-of = count all AND-matches). Distinct verb because count_active returns
+# an int the dispatcher compares numerically — enumerate+count would lose the
+# server-side count semantics and could silently change failure behavior.
 itp_github_count_by_state() {
-  gh issue list --repo "$REPO" "$@"
+  local state="$1" labels_csv="$2" limit="$3" any_of_csv="$4" any_of_json
+  any_of_json=$(printf '%s' "$any_of_csv" | jq -R -s -c 'split(",") | map(select(length > 0))')
+  _itp_github_state_read "$state" "$labels_csv" "$limit" | jq --argjson anyof "$any_of_json" '
+    [ .[] | select(
+        ($anyof | length) == 0
+        or ( .labels as $ls | $anyof | any(. as $a | $ls | index($a) != null) )
+      )
+    ] | length
+  '
 }
 
-# itp_github_list_forbidden_combos — [INV-25] forbidden-label-combination leaf.
+# itp_github_list_forbidden_combos <state> <labels-and-csv> <limit> —
+# [INV-25] forbidden-label-combination leaf (spec §3.1 [M3]).
 #
-# Spec §3.1 [M3]: returns tasks carrying a terminal-AND-transitional label
-# combination (a 2-axis predicate, NOT a single state set). The caller
-# (`list_hygiene_residue`) supplies the 2-axis `-q` predicate; the leaf forwards
-# it byte-identically. Kept a DISTINCT verb because `STATE...` cannot express an
-# intersection-of-incompatible-states query.
+# The LEAF owns the combo filter (server-side-optimizable for providers with
+# query languages): terminal set = {approved, stalled}; transitional set =
+# {in-progress, reviewing, pending-review, pending-dev}; forbidden = terminal
+# AND transitional (per [INV-25]). Returns the normalized array shape with
+# fields number,labels, already filtered to the forbidden combos — the caller
+# (list_hygiene_residue) is a thin pass-through.
 itp_github_list_forbidden_combos() {
-  gh issue list --repo "$REPO" "$@"
+  local state="$1" labels_csv="$2" limit="$3"
+  _itp_github_state_read "$state" "$labels_csv" "$limit" | jq '
+    [ .[] | select(
+        (.labels | any(. == "approved" or . == "stalled"))
+        and
+        (.labels | any(. == "in-progress" or . == "reviewing" or . == "pending-review" or . == "pending-dev"))
+      ) | {number, labels}
+    ]
+  '
 }
 
 # itp_github_read_task ISSUE FIELD [extra gh args…] — single-task field read.
