@@ -37,7 +37,7 @@ The dispatcher does not invoke `autonomous-dev.sh` directly — it goes through 
 
 1. **Input validation.** `<issue>` must be a positive integer; `<session-id>` (resume only) must match `[a-zA-Z0-9_-]+`.
 2. **Pre-create log file 0600.** `install -m 600 /dev/null /tmp/agent-${PROJECT_ID}-issue-N.log`. Agent output may contain secrets.
-3. **`kill_stale_wrapper`.** Group-kill any wrapper still holding `<pid-file>` via `kill -TERM -- -<pid>` (the PID written by `_run_with_timeout` is the agent's session leader = PGID, [INV-23](invariants.md#inv-23-pid_file-points-at-a-process-whose-death-reaps-the-entire-agent-subtree)), wait up to 5s for the trap to clean up, escalate to SIGKILL on the group if SIGTERM is ignored, then refuse to spawn if the leader PID is *still* alive after a 1s grace. As a defence-in-depth pass, also `pgrep -f -- '--issue ${ISSUE_NUM}\b'` and group-kill any orphan trees not reachable through PID_FILE — catches escaped subtrees from pre-fix wrappers and races where the wrapper died after `acquire_pid_guard` but before `_run_with_timeout` overwrote PID_FILE. Disable via `KILL_STALE_PGREP_FALLBACK=false` if the heuristic over-matches.
+3. **`kill_stale_wrapper`.** **[Lane-GC PR-2] Registry delegate first**: if a parseable lane exists for this `(role, issue)` ([INV-109](invariants.md#inv-109-every-wrapper-run-mints-and-atomically-installs-a-durable-lane-registry-entry-before-spawning-any-background-child-including-token-daemons-and-heartbeat)) and `lane_probe` reports it `dead`, `lane_kill` reaps its FULL recorded `pgids` set (every registered spawn — the agent, any fan-out/E2E/smoke subshells — not just the single PID in `<pid-file>`) before the legacy path runs. A `live` or unparseable/`unknown` result, or no matching lane at all, falls straight through unchanged. Then the pre-existing legacy path: group-kill any wrapper still holding `<pid-file>` via `kill -TERM -- -<pid>` (the PID written by `_run_with_timeout` is the agent's session leader = PGID, [INV-23](invariants.md#inv-23-pid_file-points-at-a-process-whose-death-reaps-the-entire-agent-subtree)), wait up to 5s for the trap to clean up, escalate to SIGKILL on the group if SIGTERM is ignored, then refuse to spawn if the leader PID is *still* alive after a 1s grace. As a defence-in-depth pass, also `pgrep -f -- '--issue ${ISSUE_NUM}\b'` and group-kill any orphan trees not reachable through PID_FILE — catches escaped subtrees from pre-fix wrappers and races where the wrapper died after `acquire_pid_guard` but before `_run_with_timeout` overwrote PID_FILE. Disable via `KILL_STALE_PGREP_FALLBACK=false` if the heuristic over-matches.
 
 The kill-stale step (added in #57) is what actually solves the "two wrappers oscillating on one issue" failure mode that #55 originally reported. The earlier `acquire_pid_guard` defense was insufficient: the second wrapper would `exit 0` silently, leaving the first wrapper's stale state intact.
 
@@ -59,6 +59,26 @@ The PID file naming is fixed by [INV-01](invariants.md#inv-01-pid-file-naming):
 - review → `${PID_DIR}/review-<N>.pid` (different basename so dev and review for the same issue don't collide).
 
 `${PID_DIR}` is the per-user runtime directory returned by `lib-config.sh::pid_dir_for_project` (`$XDG_RUNTIME_DIR/autonomous-${PROJECT_ID}` or `$HOME/.local/state/autonomous-${PROJECT_ID}`, mode 0700). PR-7 moved PID files out of `/tmp` to close CWE-377 (#72).
+
+## Lane registry mint ([Lane-GC PR-2], `lib-lane.sh`, [INV-109](invariants.md#inv-109-every-wrapper-run-mints-and-atomically-installs-a-durable-lane-registry-entry-before-spawning-any-background-child-including-token-daemons-and-heartbeat)/[INV-110](invariants.md#inv-110-adt_lane_id-is-exported-before-any-child-spawn-and-every-_run_with_timeout-spawn-appends-its-pgid-to-the-durable-registry))
+
+Immediately after the required-config validation loop — **before** the `GH_AUTH_MODE` branch below (auth spawns the token daemon, the first background child) — the wrapper mints `ADT_LANE_ID=<PROJECT_ID>:dev:<issue>:<start-epoch>:<rand4>` and atomically installs its registry directory:
+
+```
+${ADT_STATE_ROOT}/autonomous-<PROJECT_ID>/lanes/<lane_id_fs>/
+├── lane      # KV: LANE_ID, PROJECT_ID, ISSUE, ROLE, MODE, WRAPPER_PID,
+│             #     WRAPPER_START, WRAPPER_FINGERPRINT, CREATED_EPOCH, STATE
+├── pgids     # append-only: "<pgid> <role> <epoch>" per spawn
+└── reap.lock # reserved for a later Lane-GC PR (guardian/GC reap serialization)
+```
+
+Installation is atomic: the KV + sidecars are fully written inside `lanes/.pending-<id_fs>/`, then the directory is renamed into its final `lanes/<id_fs>/` path (`mv -T`) — a half-written lane directory under its final name is never observable. `ADT_STATE_ROOT` defaults to `$HOME/.local/state` and deliberately ignores `XDG_STATE_HOME` (unlike `lib-metrics.sh`/`lib-run-artifacts.sh`, which DO honor it) — the registry needs one canonical anchor that a future box-wide GC timer can rely on regardless of which shell minted a given lane.
+
+On success, `ADT_LANE_ID`/`ADT_LANE_DIR` are exported into the wrapper's own shell, so the token daemon, the heartbeat subshell, and the agent CLI all inherit the tag via ordinary environment inheritance — no per-spawn-site plumbing needed for the tag itself. `_run_with_timeout` (`lib-agent.sh`) additionally appends every spawn's PGID to `${ADT_LANE_DIR}/pgids` via `lane_record_pgid`, reading the diagnostic role tag from `ADT_LANE_ROLE` (default `agent`).
+
+A `lane_install` failure (disk full, permissions) degrades to "no registry entry this run" — every consumer is guarded on `ADT_LANE_DIR` being non-empty, so a registry outage never blocks or fails the wrapper.
+
+The exit trap ([below](#exit-trap-cleanup)) sets `STATE=cleaning` at entry and `STATE=clean-exit` once cleanup completes. This PR wires the registry + STATE markers only; the guardian sidecar and periodic GC that would actually reclaim residue using this registry are later Lane-GC PRs.
 
 ## Auth setup (`lib-auth.sh`)
 
@@ -256,9 +276,11 @@ The trap is the wrapper's actual contract with the dispatcher — it runs on eve
 
 ```mermaid
 flowchart TD
-    enter([trap fires]) --> rm_pid[rm -f PID_FILE]
+    enter([trap fires]) --> lane_cleaning[lane_set_state cleaning]
+    lane_cleaning --> rm_pid[rm -f PID_FILE]
     rm_pid --> ran{AGENT_RAN?}
-    ran -- false --> auth_done[cleanup_github_auth]
+    ran -- false --> lane_clean1[lane_set_state clean-exit]
+    lane_clean1 --> auth_done[cleanup_github_auth]
     auth_done --> done([exit])
 
     ran -- true --> refresh[refresh App token]
@@ -275,9 +297,10 @@ flowchart TD
 
     exit_branch -- no --> to_dev_fail[set pending-dev fail]
 
-    to_review --> auth_done
-    to_dev_no_pr --> auth_done
-    to_dev_fail --> auth_done
+    to_review --> lane_clean2[lane_set_state clean-exit]
+    to_dev_no_pr --> lane_clean2
+    to_dev_fail --> lane_clean2
+    lane_clean2 --> auth_done
 ```
 
 ### Trap contract details
@@ -287,6 +310,7 @@ flowchart TD
   - **If the wrapper exits before `ISSUE_NUMBER` is parsed** (very early arg-parse error or pre-auth failure), the trap stays silent — there's nowhere to post and no PID context to clean up. The dispatcher's Step 5b sees DEAD-no-PR and increments the crash counter as a last-resort safety net.
 - **PR existence verification on exit-0**: added in #40. Without it, an agent that exits 0 without creating a PR (e.g. errored after partial work, decided no change needed) would push the issue to `pending-review` and confuse the review wrapper, which would then fail with "no PR found" and bounce it back to `pending-dev` anyway. The verification short-circuits that round-trip.
 - **Session Report format**: see [INV-03](invariants.md#inv-03-dev-session-report-comment-format). The dispatcher's Step 4a parses these to count agent failures.
+- **Lane registry STATE transitions** ([Lane-GC PR-2](invariants.md#inv-109-every-wrapper-run-mints-and-atomically-installs-a-durable-lane-registry-entry-before-spawning-any-background-child-including-token-daemons-and-heartbeat)): the trap sets `STATE=cleaning` at entry (before the PID-file removal) and `STATE=clean-exit` on every path that reaches the end of `cleanup()` — both the `AGENT_RAN=false` early-return and the normal end-of-trap. Reaching `clean-exit` at all is itself the signal that this run died gracefully (a SIGKILL/OOM death never reaches this trap body). No-op when `lane_install` never produced a registry entry for this run (a degraded-but-still-correct wrapper run).
 - **Token refresh inside trap**: the trap might run hours after `setup_github_auth`; the App token is only valid for 1 hour. The trap proactively refreshes (best-effort — failure is logged but doesn't block label updates from being attempted).
 - **Idempotent against label state** ([INV-08](invariants.md#inv-08-wrapper-exit-trap-is-idempotent-against-label-state)): the trap uses `--remove-label X --add-label Y` in single calls (no temporary "neither label" window for any single side). However, the trap and the dispatcher can target **different** final states — see the next bullet. INV-08 is about the per-edit atomicity, not about cross-actor convergence.
 - **SIGTERM convergence on `pending-review`** ([INV-15](invariants.md#inv-15-step-5a-sigterm-race-is-non-deterministic)) — fixed in PR-6, hardened for #109: the wrapper installs the SIGTERM trap via `lib-agent.sh::install_agent_sigterm_trap` (the helper that also powers the review wrapper). The trap sets `RECEIVED_SIGTERM=1`, group-kills the agent's process group via `kill -TERM -- -${_AGENT_RUN_PID}` ([INV-23](invariants.md#inv-23-pid_file-points-at-a-process-whose-death-reaps-the-entire-agent-subtree)), and ALSO does `pkill -TERM -P $$` for the pre-spawn race window. In `cleanup()`, when `RECEIVED_SIGTERM=1 && PR_EXISTS>0`, the trap rewrites `exit_code 143 → 0` so it routes through the success branch to `+pending-review`, converging with the dispatcher's Step 5a edit. SIGTERM with no PR keeps `exit_code=143` → `+pending-dev` (covers operator-kill / orphan cases). Step 5a still writes its own label edit as belt-and-suspenders against SIGKILL escalation; both writers now agree on the target.

@@ -179,6 +179,7 @@ jobs:
             skills/autonomous-dispatcher/scripts/dispatch-local.sh \
             skills/autonomous-dispatcher/scripts/dispatcher-tick.sh \
             skills/autonomous-dispatcher/scripts/lib-agent.sh \
+            skills/autonomous-dispatcher/scripts/lib-lane.sh \
             skills/autonomous-dispatcher/scripts/adapters/claude.sh \
             skills/autonomous-dispatcher/scripts/adapters/codex.sh \
             skills/autonomous-dispatcher/scripts/adapters/gemini.sh \
