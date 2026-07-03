@@ -458,6 +458,18 @@ assert_eq "TC-389-015 app mode: bot bare trailer classified" "failed-non-substan
 assert_eq "TC-389-015 cause" "bot-timeout" "$c"
 unset GH_AUTH_MODE
 
+# TC-389-016: newline INSIDE the trailer → none. Oniguruma [[:space:]]
+# matches \n, so a `[[:space:]]`-based inner grammar would accept this body
+# while the line-oriented downstream grep extracts no trailer → legacy
+# failed-substantive fallback — the exact unreachability hole the grammar
+# claims to close (codex review, PR #390). Inner whitespace is [ \t] only.
+_MOCK_COMMENTS_JSON=$(jq -n \
+  --argjson c1 "$(mkc "operator-user" "2026-05-21T05:30:00Z" $'<!-- review-verdict:\npassed -->')" \
+  '[$c1]')
+v=""; c=""
+classify_recent_review_verdict 100 "$SESSION_END" v c
+assert_eq "TC-389-016 embedded-newline trailer rejected (no legacy fallback)" "none" "$v"
+
 export BOT_LOGIN="$BOT"
 
 # ---------------------------------------------------------------------------

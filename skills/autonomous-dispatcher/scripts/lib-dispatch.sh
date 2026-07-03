@@ -1089,7 +1089,14 @@ classify_recent_review_verdict() {
   #      the downstream trailer_line grep, so under this branch neither
   #      the legacy no-trailer fallback nor the unknown-verdict `case *)`
   #      arm is reachable (an anchored-but-unknown body never becomes a
-  #      candidate; it stays verdict=none → INV-12 park).
+  #      candidate; it stays verdict=none → INV-12 park). Whitespace
+  #      INSIDE the trailer is `[ \t]` (horizontal only), NOT
+  #      `[[:space:]]`: Oniguruma `[[:space:]]` matches `\n`, so an
+  #      embedded-newline body would pass this predicate yet fail the
+  #      line-oriented downstream grep and drop into the legacy
+  #      fallback — exactly the unreachability hole the exact grammar
+  #      exists to close (codex review, PR #390). Only the post-`-->`
+  #      tail keeps `[[:space:]]*` (trailing-newline tolerance).
   #   2. In GH_AUTH_MODE=app, additionally require
   #      `authorKind != "human"` — the genuine review wrapper posts under
   #      a GitHub App identity (`…[bot]` login ⇒ authorKind=bot), so this
@@ -1102,7 +1109,7 @@ classify_recent_review_verdict() {
   #      removes. Token-mode residual (a human posting a byte-for-byte
   #      bare trailer as their whole comment) is the same documented,
   #      accepted exposure as at the breaker's call sites.
-  local _anchored_trailer_re='^<!--[[:space:]]*review-verdict:[[:space:]]*(passed|failed-substantive|failed-non-substantive)([[:space:]]+(cause=[a-zA-Z0-9_-]+|dev-actionable=[a-z]+))*[[:space:]]*-->[[:space:]]*$'
+  local _anchored_trailer_re='^<!--[ \t]*review-verdict:[ \t]*(passed|failed-substantive|failed-non-substantive)([ \t]+(cause=[a-zA-Z0-9_-]+|dev-actionable=[a-z]+))*[ \t]*-->[[:space:]]*$'
   local actor_predicate
   if [ -n "${BOT_LOGIN:-}" ]; then
     actor_predicate=".author == \"${BOT_LOGIN}\""
@@ -1117,10 +1124,12 @@ classify_recent_review_verdict() {
 
   # Pull the newest qualifying comment body. Strict `>` on createdAt
   # excludes a comment timestamped exactly at session end (rare, but the
-  # design pins this for determinism).
+  # design pins this for determinism). `.id` tie-breaks same-second
+  # comments (monotonic per issue; mirrors the sibling breaker's
+  # `sort_by(.createdAt // "", .id // 0)` — codex review, PR #390).
   local newest_body
   newest_body=$(itp_list_comments "$issue_num" 2>/dev/null \
-    | jq -r "[.[] | select(${actor_predicate} and (.createdAt > \"${session_end}\"))] | sort_by(.createdAt) | last | .body // empty" \
+    | jq -r "[.[] | select(${actor_predicate} and (.createdAt > \"${session_end}\"))] | sort_by(.createdAt // \"\", .id // 0) | last | .body // empty" \
     2>/dev/null)
 
   [ -n "$newest_body" ] || return 0
