@@ -2314,9 +2314,16 @@ acquire_dispatch_marker() {
   local mtime now age
   mtime=$(_mtime_epoch "$marker_dir")
   if [ -z "$mtime" ]; then
-    # Existed at the check above but can't be stat'ed now (true TOCTOU:
-    # vanished between the existence check and stat) — treat conservatively
-    # as held; the next tick re-evaluates from scratch.
+    # Can't stat it. Discriminate (#361 round-12 local review [P2]): if the
+    # path VANISHED, this is the true TOCTOU race — treat as held for one
+    # tick (rc 1), the next tick re-evaluates. But if the path is STILL
+    # PRESENT and merely unstattable (stat broken/missing, persistent fs
+    # error), rc 1 would repeat deterministically forever — the same
+    # infra-wedge class as the other fail-open branches. Fail OPEN.
+    if [ -e "$marker_dir" ] || [ -L "$marker_dir" ]; then
+      echo "[lib-dispatch] WARN: dispatch marker present but unstattable (stat broken/fs error?) — proceeding without controller-side dedup for issue #${issue_num} mode=${mode} [INV-108]" >&2
+      return 0
+    fi
     return 1
   fi
   now=$(date -u +%s)
@@ -2331,10 +2338,41 @@ acquire_dispatch_marker() {
   # whatever the winner created).
   local reclaim_tmp="${marker_dir}.reclaim.$$"
   if ! mv "$marker_dir" "$reclaim_tmp" 2>/dev/null; then
+    # mv failed: EITHER a concurrent reclaimer won the rename race (its mv
+    # took the path; whatever exists now is ITS fresh marker) — legitimate
+    # rc 1 — OR a NON-race infra failure (parent-dir permission drift,
+    # read-only runtime fs): the stale marker is still sitting there
+    # untouched, and without this branch every future tick would loop here
+    # forever, wedging dispatch until an operator fixes the fs (#361
+    # round-12 [P1] — violates the fail-open contract). Discriminate by
+    # re-reading the marker's age: still-present AND still-stale means
+    # nothing raced us ⇒ infra failure ⇒ fail OPEN (WARN, no marker owned).
+    local _post_mtime
+    _post_mtime=$(_mtime_epoch "$marker_dir")
+    if [ -n "$_post_mtime" ] && [ $(( $(date -u +%s) - _post_mtime )) -ge "$ttl" ]; then
+      echo "[lib-dispatch] WARN: stale-marker reclaim rename failed (permissions/read-only fs?) — proceeding without controller-side dedup for issue #${issue_num} mode=${mode} (302a wrapper-host lock remains) [INV-108]" >&2
+      return 0
+    fi
+    # Empty post-mtime: absent path = the winner released / true vanish —
+    # legitimate one-tick rc 1. Present-but-unstattable = the same
+    # deterministic infra-wedge as above → fail OPEN (round-12 [P2]).
+    if [ -z "$_post_mtime" ] && { [ -e "$marker_dir" ] || [ -L "$marker_dir" ]; }; then
+      echo "[lib-dispatch] WARN: post-reclaim marker present but unstattable — proceeding without controller-side dedup for issue #${issue_num} mode=${mode} [INV-108]" >&2
+      return 0
+    fi
     return 1
   fi
   rm -rf "$reclaim_tmp" 2>/dev/null
   if ! mkdir "$marker_dir" 2>/dev/null; then
+    # Re-create after a successful reclaim failed: EEXIST (a concurrent
+    # acquirer recreated it first — it owns the dispatch, rc 1) vs a
+    # non-EEXIST creation failure (nothing at the path — the same
+    # marker-infrastructure class as the creation-failure branch above:
+    # fail OPEN rather than reading an absent marker as "held").
+    if [ ! -e "$marker_dir" ] && [ ! -L "$marker_dir" ]; then
+      echo "[lib-dispatch] WARN: marker re-create after stale reclaim failed (non-EEXIST) — proceeding without controller-side dedup for issue #${issue_num} mode=${mode} [INV-108]" >&2
+      return 0
+    fi
     return 1
   fi
   _dispatch_marker_pending_add "$issue_num" "$mode"

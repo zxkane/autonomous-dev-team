@@ -722,6 +722,77 @@ else
   rm -rf "$TMPDIR/dispatch-marker-808-dev-new"
 fi
 
+# TC-DEDUP-361-035 (#361 round-12 [P1]): a NON-race stale-reclaim rename
+# failure (parent dir read-only — the marker is still there, still stale,
+# nobody raced us) must fail OPEN (rc 0, WARN), not loop "held" forever.
+# TC-035b control: a rename failure where the path was RE-CREATED FRESH by a
+# concurrent winner stays rc 1 (that race is legitimate hold semantics).
+_RO_PARENT="$TMPDIR/ro-reclaim-parent"
+rm -rf "$_RO_PARENT"; mkdir -p "$_RO_PARENT/dispatch-marker-810-dev-new"
+# backdate the stale marker beyond TTL
+touch -d '2020-01-01' "$_RO_PARENT/dispatch-marker-810-dev-new" 2>/dev/null || touch -t 202001010000 "$_RO_PARENT/dispatch-marker-810-dev-new"
+chmod 0555 "$_RO_PARENT"
+if rmdir "$_RO_PARENT/dispatch-marker-810-dev-new" 2>/dev/null; then
+  mkdir -p "$_RO_PARENT/dispatch-marker-810-dev-new"  # restore; perms not enforced (root)
+  echo "  SKIP: TC-DEDUP-361-035 cannot simulate read-only parent (perms not enforced here)"
+else
+  (
+    pid_dir_for_project() { echo "$_RO_PARENT"; }
+    acquire_dispatch_marker 810 dev-new 2>/dev/null
+  )
+  assert_true "TC-DEDUP-361-035 non-race stale-reclaim rename failure fails OPEN (rc 0)" $?
+  (
+    pid_dir_for_project() { echo "$_RO_PARENT"; }
+    acquire_dispatch_marker 810 dev-new 2>&1 | grep -q 'stale-marker reclaim rename failed'
+  )
+  assert_true "TC-DEDUP-361-035c the reclaim fail-open emits its WARN" $?
+fi
+chmod 0755 "$_RO_PARENT" 2>/dev/null; rm -rf "$_RO_PARENT"
+
+# TC-DEDUP-361-035b: rename-race control — mv fails because a concurrent
+# winner already renamed-and-recreated a FRESH marker at the path. Simulated
+# by overriding _mtime_epoch's second read to report FRESH (the marker at the
+# path post-mv-failure is the winner's new one). Expected: rc 1 (held).
+rm -rf "$TMPDIR/dispatch-marker-811-dev-new"
+mkdir "$TMPDIR/dispatch-marker-811-dev-new"
+_MT_COUNTER="$TMPDIR/mt-calls-811"
+: > "$_MT_COUNTER"
+(
+  # _mtime_epoch is invoked via $(...) — in-memory counters don't propagate
+  # out of command substitution, so count calls through a FILE.
+  _mtime_epoch() {
+    echo x >> "$_MT_COUNTER"
+    if [ "$(wc -l < "$_MT_COUNTER")" -le 1 ]; then echo 1000000000; else date -u +%s; fi  # stale 1st read, fresh 2nd
+  }
+  mv() { return 1; }   # rename always loses
+  acquire_dispatch_marker 811 dev-new 2>/dev/null
+)
+assert_false "TC-DEDUP-361-035b rename-race with a FRESH recreated marker stays held (rc 1)" $?
+rm -rf "$TMPDIR/dispatch-marker-811-dev-new"
+
+# TC-DEDUP-361-036 (round-12 local review [P2]): a marker that EXISTS but is
+# UNSTATTABLE (stat broken — simulated by overriding _mtime_epoch to empty)
+# must fail OPEN, not repeat rc-1 "held" deterministically forever.
+rm -rf "$TMPDIR/dispatch-marker-812-dev-new"; mkdir "$TMPDIR/dispatch-marker-812-dev-new"
+(
+  _mtime_epoch() { echo ""; }
+  acquire_dispatch_marker 812 dev-new 2>/dev/null
+)
+assert_true "TC-DEDUP-361-036 present-but-unstattable marker fails OPEN (rc 0)" $?
+rm -rf "$TMPDIR/dispatch-marker-812-dev-new"
+
+# TC-DEDUP-361-036b control: empty mtime because the path VANISHED (true
+# TOCTOU) stays rc 1 — one-tick hold, next tick re-evaluates. Simulated by a
+# marker that exists for the top-of-function checks but is deleted before
+# the stat (a _mtime_epoch override that deletes then reports empty).
+rm -rf "$TMPDIR/dispatch-marker-813-dev-new"; mkdir "$TMPDIR/dispatch-marker-813-dev-new"
+(
+  _mtime_epoch() { command rm -rf "$TMPDIR/dispatch-marker-813-dev-new"; echo ""; }
+  acquire_dispatch_marker 813 dev-new 2>/dev/null
+)
+assert_false "TC-DEDUP-361-036b vanished-during-stat (true TOCTOU) stays held for one tick (rc 1)" $?
+rm -rf "$TMPDIR/dispatch-marker-813-dev-new"
+
 # TC-DEDUP-361-034 (#361 round-9 [P1] finding 1): the Branch C DELEGATED entry
 # (`if handle_pending_dev_pr_exists ...`) runs the whole router with bash
 # errexit SUPPRESSED (function called in an `if` condition). A dispatch()
