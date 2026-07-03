@@ -1961,11 +1961,20 @@ CBREPORT
         log "  ERROR: failed to truncate ${_log_location} (perm/disk/SSM?). Skipping INV-35 dev-new dispatch to avoid re-detection loop."
         itp_post_comment "$issue_num" \
           "Could not reset agent log at \`${_log_location}\` for fresh INV-35 dispatch (permission, disk, or SSM transport error). Operator: please clear the log file and retry. Skipping dispatch to prevent a silent retry loop." 2>/dev/null || true
+        # [INV-106] (#361 review [P1]): no wrapper will launch this tick for
+        # this (issue, mode) — release NOW rather than let it sit for the
+        # full TTL. MAX_RETRIES still bounds the retry budget; this only
+        # controls how soon the NEXT tick is allowed to try again.
+        release_dispatch_marker "$issue_num" "dev-new"
         return 0
       fi
       label_swap "$issue_num" "pending-dev" "in-progress"
       post_dispatch_token "$issue_num" "dev-new"
       dispatch dev-new "$issue_num"
+      # [INV-106] (#361 review [P1]): dispatch() returned — a wrapper is
+      # confirmed launched. Confirm so the tick-level EXIT trap leaves this
+      # marker alone; it lives out its normal TTL.
+      dispatch_marker_confirm_launched "$issue_num" "dev-new"
       # Record the per-HEAD attempt marker ONLY now that the fresh dev-new has
       # actually been dispatched (the marker means "a dev-new ran for this
       # HEAD"; writing it before dispatch would leave a phantom marker on an
@@ -2249,6 +2258,7 @@ acquire_dispatch_marker() {
   fi
 
   if mkdir "$marker_dir" 2>/dev/null; then
+    _dispatch_marker_pending_add "$issue_num" "$mode"
     return 0   # acquired fresh
   fi
 
@@ -2277,8 +2287,108 @@ acquire_dispatch_marker() {
     return 1
   fi
   rm -rf "$reclaim_tmp" 2>/dev/null
-  mkdir "$marker_dir" 2>/dev/null || return 1
+  if ! mkdir "$marker_dir" 2>/dev/null; then
+    return 1
+  fi
+  _dispatch_marker_pending_add "$issue_num" "$mode"
   return 0
+}
+
+# ---------------------------------------------------------------------------
+# Auto-release on pre-spawn failure ([INV-106] follow-up, #361 review [P1])
+# ---------------------------------------------------------------------------
+#
+# codex finding: `acquire_dispatch_marker` runs before label edits, notice
+# comments, log resets, token posting, and the `dispatch()` launcher call —
+# but nothing released it when one of THOSE steps aborted before a wrapper
+# was actually running. Every failure mode in that window (a transient
+# GitHub API error from `label_swap`/`post_dispatch_token`/`itp_post_comment`,
+# an SSM transport fault from `_reset_session_log`, or `dispatch()` itself
+# failing to background the wrapper) is a BARE command in `dispatcher-tick.sh`
+# — under the script's own `set -euo pipefail`, any one of them aborts the
+# ENTIRE tick immediately. Without a fix, the freshly-created marker then
+# survives on disk for the full TTL (default 600s): the very next tick — which
+# would otherwise retry right away — instead reads a fresh, unexpired marker
+# and skips the issue as "held by a concurrent tick", turning one transient
+# hiccup into a ~10 minute false stall.
+#
+# Design: a tick-local pending list (mirrors the existing `JUST_DISPATCHED`
+# array pattern in dispatcher-tick.sh). `acquire_dispatch_marker` appends
+# `(issue_num, mode)` here on every REAL acquire (never on the fail-open path,
+# where no marker was created to release). The caller confirms via
+# `dispatch_marker_confirm_launched` immediately after `dispatch()` itself
+# returns successfully — the ONE signal that a wrapper is actually running
+# and the marker should now live out its TTL undisturbed (protecting Step 5's
+# cold-start grace window, [INV-18]). `dispatcher-tick.sh` installs
+# `_dispatch_marker_release_pending` as a script-level `trap ... EXIT` right
+# after sourcing this file: whether the tick ends normally (an explicit
+# `continue`/`return` past a soft failure, e.g. the existing PTL/INV-35
+# log-truncate-failure branches) or is torn down mid-loop by `set -e`, every
+# `(issue_num, mode)` that never reached `dispatch_marker_confirm_launched`
+# gets released before the tick process exits — so ONLY a wrapper that
+# actually launched consumes the dedup window, exactly the codex finding's ask.
+_DISPATCH_MARKER_PENDING=()
+
+_dispatch_marker_pending_add() {
+  _DISPATCH_MARKER_PENDING+=("$1:$2")
+}
+
+# Removes `<issue_num>:<mode>` from the pending list, if present. Shared by
+# `dispatch_marker_confirm_launched` (marker should NOT be touched — it lives
+# out its TTL) and `release_dispatch_marker` (marker IS being removed right
+# now — so the EXIT trap must not redundantly try again later).
+_dispatch_marker_pending_drop() {
+  local key="$1:$2" kept=() entry
+  for entry in "${_DISPATCH_MARKER_PENDING[@]:-}"; do
+    [ -n "$entry" ] || continue
+    [ "$entry" = "$key" ] || kept+=("$entry")
+  done
+  _DISPATCH_MARKER_PENDING=("${kept[@]:-}")
+}
+
+# dispatch_marker_confirm_launched <issue_num> <mode> — call ONLY after
+# `dispatch()` itself has returned successfully (a wrapper is confirmed
+# launched). Drops the pair from the pending list so the EXIT-trap release
+# below leaves this marker alone on disk; it lives out its normal TTL.
+dispatch_marker_confirm_launched() {
+  _dispatch_marker_pending_drop "$1" "$2"
+}
+
+# _dispatch_marker_release_pending — the EXIT-trap handler. Releases every
+# marker still in the pending list (never confirmed) and clears the list.
+# Idempotent (a second call sees an empty list and no-ops); never propagates
+# a non-zero status — an EXIT trap that itself fails would clobber the
+# script's real exit code.
+_dispatch_marker_release_pending() {
+  local entry issue mode
+  for entry in "${_DISPATCH_MARKER_PENDING[@]:-}"; do
+    [ -n "$entry" ] || continue
+    issue="${entry%%:*}"
+    mode="${entry#*:}"
+    release_dispatch_marker "$issue" "$mode"
+  done
+  _DISPATCH_MARKER_PENDING=()
+  return 0
+}
+
+# release_dispatch_marker <issue_num> <mode> — removes the on-disk marker
+# `acquire_dispatch_marker` created. Also drops it from the pending list (a
+# caller that releases directly, e.g. a soft-failure branch or a test, must
+# not leave a stale pending entry for the EXIT trap to redundantly re-release
+# later — harmless since `rm -rf` on an absent path is a no-op, but the drop
+# keeps the pending list an accurate reflection of "still needs releasing").
+#
+# Idempotent and best-effort: `rm -rf` on an absent path is a silent no-op
+# (rc 0), and a release failure (e.g. permissions) is swallowed — a marker
+# that fails to release just falls back to the existing TTL-expiry safety
+# net, never a hard error that could abort the tick mid-loop.
+release_dispatch_marker() {
+  local issue_num="$1" mode="$2"
+  _dispatch_marker_pending_drop "$issue_num" "$mode"
+  local base_dir
+  base_dir=$(pid_dir_for_project 2>/dev/null) || return 0
+  [ -n "$base_dir" ] || return 0
+  rm -rf "${base_dir}/dispatch-marker-${issue_num}-${mode}" 2>/dev/null || true
 }
 
 # ---------------------------------------------------------------------------

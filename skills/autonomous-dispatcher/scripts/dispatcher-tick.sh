@@ -79,6 +79,23 @@ unset _req
 # shellcheck source=lib-dispatch.sh
 source "${LIB_DIR}/lib-dispatch.sh"
 
+# [INV-106] (#361 review [P1]): release any controller-side dispatch marker
+# that was acquired but never confirmed launched, no matter how this tick
+# process ends. `acquire_dispatch_marker` runs before label edits, notice
+# comments, log resets, token posting, and `dispatch()` itself — every one of
+# those is a BARE command below, so under this script's own `set -euo
+# pipefail` a transient failure in ANY of them aborts the whole tick
+# immediately, well before a normal `continue`/`return` could release the
+# marker by hand. Without this trap the freshly-created marker would then
+# survive on disk for the full TTL, and the very next tick — which would
+# otherwise retry the issue right away — reads a fresh, unexpired marker and
+# skips it as "held by a concurrent tick", turning one transient hiccup into
+# a ~10 minute false stall. `_dispatch_marker_release_pending` is idempotent
+# and never propagates a non-zero status, so it cannot itself clobber the
+# script's real exit code (verified: bash preserves the pre-trap `$?` through
+# an EXIT trap unless the trap body explicitly returns/exits non-zero).
+trap _dispatch_marker_release_pending EXIT
+
 # [INV-70] Observe-only metrics emitter. Guarded so a load failure never aborts
 # the tick. Provides metrics_emit.
 # shellcheck source=lib-metrics.sh
@@ -342,6 +359,10 @@ for i in $(seq 0 $((new_count - 1))); do
   # grace window before classifying the wrapper as crashed.
   post_dispatch_token "$issue_num" "dev-new"
   dispatch dev-new "$issue_num"
+  # [INV-106] (#361 review [P1]): dispatch() returned — a wrapper is
+  # confirmed launched. Confirm so the EXIT-trap release above leaves this
+  # marker alone; it lives out its normal TTL.
+  dispatch_marker_confirm_launched "$issue_num" "dev-new"
   JUST_DISPATCHED+=("$issue_num")
 done
 
@@ -372,6 +393,8 @@ for i in $(seq 0 $((pr_count - 1))); do
   label_swap "$issue_num" "pending-review" "reviewing"
   post_dispatch_token "$issue_num" "review"
   dispatch review "$issue_num"
+  # [INV-106] (#361 review [P1]) — see the Step 2 confirm comment above.
+  dispatch_marker_confirm_launched "$issue_num" "review"
   JUST_DISPATCHED+=("$issue_num")
 done
 
@@ -504,12 +527,19 @@ for i in $(seq 0 $((pd_count - 1))); do
         log "  ERROR: failed to truncate ${_ptl_log_location} (perm/disk/SSM?). Skipping PTL dev-new dispatch to avoid re-detection loop."
         itp_post_comment "$issue_num" \
           "Could not reset prompt-too-long log at \`${_ptl_log_location}\` for fresh dispatch (permission, disk, or SSM transport error). Operator: please clear the log file and retry. Skipping dispatch to prevent a silent retry loop." 2>/dev/null || true
+        # [INV-106] (#361 review [P1]): no wrapper will launch this tick for
+        # this (issue, mode) — release NOW rather than let it sit for the
+        # full TTL. MAX_RETRIES still bounds the retry budget; this only
+        # controls how soon the NEXT tick is allowed to try again.
+        release_dispatch_marker "$issue_num" "dev-new"
         continue
       fi
       log "  dispatching dev-new for issue #${issue_num} (fresh after prompt_too_long)"
       label_swap "$issue_num" "pending-dev" "in-progress"
       post_dispatch_token "$issue_num" "dev-new"
       dispatch dev-new "$issue_num"
+      # [INV-106] (#361 review [P1]) — see the Step 2 confirm comment above.
+      dispatch_marker_confirm_launched "$issue_num" "dev-new"
       JUST_DISPATCHED+=("$issue_num")
       continue
     fi
@@ -536,6 +566,8 @@ for i in $(seq 0 $((pd_count - 1))); do
   label_swap "$issue_num" "pending-dev" "in-progress"
   post_dispatch_token "$issue_num" "dev-resume"
   dispatch dev-resume "$issue_num" "$session_id"
+  # [INV-106] (#361 review [P1]) — see the Step 2 confirm comment above.
+  dispatch_marker_confirm_launched "$issue_num" "dev-resume"
   JUST_DISPATCHED+=("$issue_num")
 done
 

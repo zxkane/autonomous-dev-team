@@ -431,6 +431,167 @@ assert_true "TC-DEDUP-361-023 control — fresh acquire (no held marker) DOES re
 
 # ---------------------------------------------------------------------------
 echo ""
+echo "=== TC-DEDUP-361-024..032: release on pre-spawn failure (codex review [P1], #361) ==="
+# ---------------------------------------------------------------------------
+# codex finding: acquire_dispatch_marker runs before label edits, notice
+# comments, log resets, and the dispatch() call, but nothing released it when
+# one of THOSE steps aborted before a wrapper actually launched — a marker
+# then sits for the full TTL even though no wrapper is running, turning a
+# transient failure into a ~10 minute false stall. This section proves the
+# fix: acquire_dispatch_marker now tracks every real acquire in a pending
+# list; dispatch_marker_confirm_launched drops an entry (marker lives out its
+# TTL); release_dispatch_marker removes the on-disk marker directly AND drops
+# the pending entry; _dispatch_marker_release_pending (the tick's EXIT-trap
+# handler) sweeps everything still pending.
+
+# TC-DEDUP-361-024: acquiring populates the pending list.
+rm -rf "$TMPDIR/dispatch-marker-801-dev-new"
+_DISPATCH_MARKER_PENDING=()
+acquire_dispatch_marker 801 dev-new
+assert_eq "TC-DEDUP-361-024 acquire adds (issue,mode) to the pending list" "801:dev-new" "${_DISPATCH_MARKER_PENDING[*]:-}"
+
+# TC-DEDUP-361-025: release_dispatch_marker removes the on-disk marker AND
+# drops the pending entry (so the later EXIT-trap sweep doesn't redundantly
+# try again).
+release_dispatch_marker 801 dev-new
+if [[ -d "$TMPDIR/dispatch-marker-801-dev-new" ]]; then
+  echo -e "  ${RED}FAIL${NC}: TC-DEDUP-361-025 release_dispatch_marker did not remove the on-disk marker"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${NC}: TC-DEDUP-361-025 release_dispatch_marker removes the on-disk marker"
+  PASS=$((PASS + 1))
+fi
+assert_eq "TC-DEDUP-361-025 release_dispatch_marker also drops the pending entry" "" "${_DISPATCH_MARKER_PENDING[*]:-}"
+
+# TC-DEDUP-361-026: dispatch_marker_confirm_launched drops the pending entry
+# WITHOUT touching the on-disk marker (it must survive to live out its TTL —
+# a wrapper is now actually running and depends on Step 5's grace window).
+rm -rf "$TMPDIR/dispatch-marker-802-dev-new"
+_DISPATCH_MARKER_PENDING=()
+acquire_dispatch_marker 802 dev-new
+dispatch_marker_confirm_launched 802 dev-new
+assert_eq "TC-DEDUP-361-026 confirm drops the pending entry" "" "${_DISPATCH_MARKER_PENDING[*]:-}"
+if [[ -d "$TMPDIR/dispatch-marker-802-dev-new" ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-DEDUP-361-026 confirm leaves the on-disk marker in place (lives out its TTL)"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-DEDUP-361-026 confirm should NOT remove the on-disk marker"
+  FAIL=$((FAIL + 1))
+fi
+rm -rf "$TMPDIR/dispatch-marker-802-dev-new"
+
+# TC-DEDUP-361-027: the EXIT-trap handler releases an unconfirmed marker...
+rm -rf "$TMPDIR/dispatch-marker-803-review"
+_DISPATCH_MARKER_PENDING=()
+acquire_dispatch_marker 803 review
+_dispatch_marker_release_pending
+if [[ -d "$TMPDIR/dispatch-marker-803-review" ]]; then
+  echo -e "  ${RED}FAIL${NC}: TC-DEDUP-361-027 unconfirmed marker survived the EXIT-trap sweep"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${NC}: TC-DEDUP-361-027 unconfirmed marker is released by the EXIT-trap sweep"
+  PASS=$((PASS + 1))
+fi
+assert_eq "TC-DEDUP-361-027 pending list is empty after the sweep" "" "${_DISPATCH_MARKER_PENDING[*]:-}"
+
+# TC-DEDUP-361-028: ...but a CONFIRMED marker survives the same sweep (mixed
+# pending list — one confirmed, one not — proves the trap discriminates
+# correctly rather than sweeping everything indiscriminately).
+rm -rf "$TMPDIR/dispatch-marker-804-dev-new" "$TMPDIR/dispatch-marker-805-review"
+_DISPATCH_MARKER_PENDING=()
+acquire_dispatch_marker 804 dev-new
+acquire_dispatch_marker 805 review
+dispatch_marker_confirm_launched 804 dev-new    # 804 confirmed; 805 left pending
+_dispatch_marker_release_pending
+if [[ -d "$TMPDIR/dispatch-marker-804-dev-new" ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-DEDUP-361-028 confirmed marker (804) survives the EXIT-trap sweep"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-DEDUP-361-028 confirmed marker (804) was wrongly swept"
+  FAIL=$((FAIL + 1))
+fi
+if [[ -d "$TMPDIR/dispatch-marker-805-review" ]]; then
+  echo -e "  ${RED}FAIL${NC}: TC-DEDUP-361-028 unconfirmed marker (805) survived the sweep"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${NC}: TC-DEDUP-361-028 unconfirmed marker (805) was correctly swept"
+  PASS=$((PASS + 1))
+fi
+rm -rf "$TMPDIR/dispatch-marker-804-dev-new"
+
+# TC-DEDUP-361-029: after release, an immediate re-acquire for the SAME
+# (issue,mode) succeeds (rc 0) — proving the whole point of releasing early:
+# the NEXT tick (or, here, an immediate retry) is not blocked for the TTL.
+rm -rf "$TMPDIR/dispatch-marker-806-dev-new"
+_DISPATCH_MARKER_PENDING=()
+acquire_dispatch_marker 806 dev-new
+release_dispatch_marker 806 dev-new
+acquire_dispatch_marker 806 dev-new
+assert_true "TC-DEDUP-361-029 re-acquire immediately after release succeeds (no ~10min false stall)" $?
+release_dispatch_marker 806 dev-new
+
+# TC-DEDUP-361-030 (behavioral, real code): extract the PTL branch's
+# log-truncate-failure path VERBATIM from dispatcher-tick.sh (the exact
+# codex-flagged branch) and run it for real, with _reset_session_log stubbed
+# to fail. Assert the marker acquired at the top of the branch does NOT
+# survive — this is the literal P1 scenario, executed against shipped code,
+# not a reimplementation.
+extract_ptl_failure_block() {
+  awk '
+    /if ! acquire_dispatch_marker "\$issue_num" "dev-new"; then/ { n++; if (n == 2) start = 1 }
+    start { print }
+    start && /^        continue$/ { c++; if (c == 2) { getline; print; exit } }
+  ' "$TICK"
+}
+PTL_BLOCK=$(extract_ptl_failure_block)
+if [[ -z "$PTL_BLOCK" ]]; then
+  echo -e "  ${RED}FAIL${NC}: TC-DEDUP-361-030 could not extract the PTL branch from dispatcher-tick.sh (source drifted?)"
+  FAIL=$((FAIL + 1))
+else
+  rm -rf "$TMPDIR/dispatch-marker-807-dev-new"
+  _DISPATCH_MARKER_PENDING=()
+  (
+    issue_num=807
+    session_id="sid-807"
+    log() { :; }
+    itp_list_comments() { echo '[]'; }
+    itp_post_comment() { :; }
+    _reset_session_log() { return 1; }   # force the truncate-failure branch
+    for _once in 1; do
+      eval "$PTL_BLOCK"
+    done
+  ) 2>/dev/null
+  if [[ -d "$TMPDIR/dispatch-marker-807-dev-new" ]]; then
+    echo -e "  ${RED}FAIL${NC}: TC-DEDUP-361-030 marker survived a real (extracted) PTL log-truncate failure — the #361 review [P1] regression"
+    FAIL=$((FAIL + 1))
+  else
+    echo -e "  ${GREEN}PASS${NC}: TC-DEDUP-361-030 real PTL branch releases the marker on a log-truncate failure"
+    PASS=$((PASS + 1))
+  fi
+  rm -rf "$TMPDIR/dispatch-marker-807-dev-new"
+fi
+
+# TC-DEDUP-361-031: source-of-truth — every acquire_dispatch_marker call site
+# in dispatcher-tick.sh has a corresponding dispatch_marker_confirm_launched
+# call site (same file), so a future call site cannot forget to confirm.
+acquire_count=$(grep -c "acquire_dispatch_marker \"\$issue_num\"" "$TICK")
+confirm_count=$(grep -c "dispatch_marker_confirm_launched \"\$issue_num\"" "$TICK")
+assert_eq "TC-DEDUP-361-031 dispatcher-tick.sh: acquire_dispatch_marker and dispatch_marker_confirm_launched call counts match" \
+  "$acquire_count" "$confirm_count"
+
+# TC-DEDUP-361-032: source-of-truth — dispatcher-tick.sh installs the
+# EXIT-trap handler (the backstop for any bare-command set -e abort between
+# acquire and confirm that an explicit release call cannot reach).
+if grep -qE '^trap _dispatch_marker_release_pending EXIT' "$TICK"; then
+  echo -e "  ${GREEN}PASS${NC}: TC-DEDUP-361-032 dispatcher-tick.sh installs the _dispatch_marker_release_pending EXIT trap"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-DEDUP-361-032 dispatcher-tick.sh is missing the EXIT trap — a set -e abort between acquire and confirm would leak the marker for the full TTL"
+  FAIL=$((FAIL + 1))
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
 echo "=== Summary ==="
 echo "  PASS: $PASS"
 echo "  FAIL: $FAIL"
