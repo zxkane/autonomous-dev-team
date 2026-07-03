@@ -579,6 +579,62 @@ confirm_count=$(grep -c "dispatch_marker_confirm_launched \"\$issue_num\"" "$TIC
 assert_eq "TC-DEDUP-361-031 dispatcher-tick.sh: acquire_dispatch_marker and dispatch_marker_confirm_launched call counts match" \
   "$acquire_count" "$confirm_count"
 
+# TC-DEDUP-361-031b (PR review follow-up): the SAME parity check for
+# lib-dispatch.sh's own Branch C site (handle_completed_session_routing) —
+# TC-031 only covers dispatcher-tick.sh, so a removed confirm call in
+# lib-dispatch.sh would slip past it silently. Verified by mutation testing:
+# deleting the dispatch_marker_confirm_launched call at Branch C left the
+# full suite green before this check existed.
+lib_acquire_count=$(grep -c "acquire_dispatch_marker \"\$issue_num\"" "$LIB")
+lib_confirm_count=$(grep -c "dispatch_marker_confirm_launched \"\$issue_num\"" "$LIB")
+assert_eq "TC-DEDUP-361-031b lib-dispatch.sh: acquire_dispatch_marker and dispatch_marker_confirm_launched call counts match" \
+  "$lib_acquire_count" "$lib_confirm_count"
+
+# TC-DEDUP-361-033 (PR review follow-up, behavioral, real code): the sibling
+# of TC-030 for lib-dispatch.sh's OWN Branch C release-on-failure path.
+# TC-030 only extracts and exercises the dispatcher-tick.sh PTL branch;
+# Branch C's release_dispatch_marker call (handle_completed_session_routing,
+# on _reset_session_log failure) had NO behavioral coverage — verified by
+# mutation testing: deleting that release call left the full suite green.
+# Extracts the real Branch C failure block verbatim (from the acquire guard
+# through the failure-branch's `return 0`) and runs it against the REAL
+# acquire_dispatch_marker/release_dispatch_marker with _reset_session_log
+# stubbed to fail.
+extract_branch_c_failure_block() {
+  awk '
+    /if ! acquire_dispatch_marker "\$issue_num" "dev-new"; then/ { start = 1 }
+    start { print }
+    start && /^        return 0$/ { c++; if (c == 2) { getline; print; exit } }
+  ' "$LIB"
+}
+BRANCH_C_BLOCK=$(extract_branch_c_failure_block)
+if [[ -z "$BRANCH_C_BLOCK" ]]; then
+  echo -e "  ${RED}FAIL${NC}: TC-DEDUP-361-033 could not extract Branch C's failure block from lib-dispatch.sh (source drifted?)"
+  FAIL=$((FAIL + 1))
+else
+  rm -rf "$TMPDIR/dispatch-marker-808-dev-new"
+  _DISPATCH_MARKER_PENDING=()
+  (
+    issue_num=808
+    session_id="sid-808"
+    log() { :; }
+    itp_list_comments() { echo '[]'; }
+    itp_post_comment() { :; }
+    _reset_session_log() { return 1; }   # force the truncate-failure branch
+    for _once in 1; do
+      eval "$BRANCH_C_BLOCK"
+    done
+  ) 2>/dev/null
+  if [[ -d "$TMPDIR/dispatch-marker-808-dev-new" ]]; then
+    echo -e "  ${RED}FAIL${NC}: TC-DEDUP-361-033 marker survived a real (extracted) Branch C log-truncate failure"
+    FAIL=$((FAIL + 1))
+  else
+    echo -e "  ${GREEN}PASS${NC}: TC-DEDUP-361-033 real Branch C releases the marker on a log-truncate failure"
+    PASS=$((PASS + 1))
+  fi
+  rm -rf "$TMPDIR/dispatch-marker-808-dev-new"
+fi
+
 # TC-DEDUP-361-032: source-of-truth — dispatcher-tick.sh installs the
 # EXIT-trap handler (the backstop for any bare-command set -e abort between
 # acquire and confirm that an explicit release call cannot reach).
