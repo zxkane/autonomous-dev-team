@@ -770,6 +770,44 @@ _MT_COUNTER="$TMPDIR/mt-calls-811"
 assert_false "TC-DEDUP-361-035b rename-race with a FRESH recreated marker stays held (rc 1)" $?
 rm -rf "$TMPDIR/dispatch-marker-811-dev-new"
 
+# TC-DEDUP-361-037 (#361 round-13 [P1]): DISPATCH_GRACE_PERIOD_SECONDS=0 (the
+# documented "disable cold-start grace" setting) must NOT cascade into a 0s
+# marker TTL — with ttl=0 a fresh marker is instantly stale and a second
+# overlapping acquire immediately reclaims it (dup dispatch reopened).
+rm -rf "$TMPDIR/dispatch-marker-814-dev-new"
+(
+  DISPATCH_GRACE_PERIOD_SECONDS=0
+  unset DISPATCH_MARKER_TTL_SECONDS
+  acquire_dispatch_marker 814 dev-new >/dev/null 2>&1
+  acquire_dispatch_marker 814 dev-new 2>/dev/null
+)
+assert_false "TC-DEDUP-361-037 GRACE=0 does not zero the marker TTL — second acquire still held (rc 1)" $?
+rm -rf "$TMPDIR/dispatch-marker-814-dev-new"
+
+# TC-DEDUP-361-037b: an EXPLICIT DISPATCH_MARKER_TTL_SECONDS=0 is clamped to
+# the default too (a 0s dedup window is never a coherent request).
+rm -rf "$TMPDIR/dispatch-marker-815-dev-new"
+(
+  DISPATCH_MARKER_TTL_SECONDS=0
+  acquire_dispatch_marker 815 dev-new >/dev/null 2>&1
+  acquire_dispatch_marker 815 dev-new 2>/dev/null
+)
+assert_false "TC-DEDUP-361-037b explicit TTL=0 clamps to default — second acquire held (rc 1)" $?
+rm -rf "$TMPDIR/dispatch-marker-815-dev-new"
+
+# TC-DEDUP-361-037c (round-13 local review [P2]): a HUGE TTL (would make the
+# marker effectively permanent, violating R3) clamps to the default — a
+# backdated-stale marker is still reclaimable.
+rm -rf "$TMPDIR/dispatch-marker-816-dev-new"
+(
+  DISPATCH_MARKER_TTL_SECONDS=2147483647
+  acquire_dispatch_marker 816 dev-new >/dev/null 2>&1
+  touch -t 200001010000.00 "$TMPDIR/dispatch-marker-816-dev-new"
+  acquire_dispatch_marker 816 dev-new 2>/dev/null
+)
+assert_true "TC-DEDUP-361-037c huge TTL clamps to default — backdated marker still reclaimed (rc 0)" $?
+rm -rf "$TMPDIR/dispatch-marker-816-dev-new"
+
 # TC-DEDUP-361-036 (round-12 local review [P2]): a marker that EXISTS but is
 # UNSTATTABLE (stat broken — simulated by overriding _mtime_epoch to empty)
 # must fail OPEN, not repeat rc-1 "held" deterministically forever.

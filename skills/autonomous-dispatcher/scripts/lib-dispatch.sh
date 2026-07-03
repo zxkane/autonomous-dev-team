@@ -2266,8 +2266,25 @@ acquire_dispatch_marker() {
   fi
 
   local marker_dir="${base_dir}/dispatch-marker-${issue_num}-${mode}"
-  local ttl="${DISPATCH_MARKER_TTL_SECONDS:-${DISPATCH_GRACE_PERIOD_SECONDS:-600}}"
-  [[ "$ttl" =~ ^[0-9]+$ ]] || ttl=600
+  # TTL derivation (#361 round-13 [P1]): inherit DISPATCH_GRACE_PERIOD_SECONDS
+  # only when it is a USABLE ttl (> 0). The documented GRACE=0 setting means
+  # "disable Step 5's cold-start grace" — it must NOT cascade into a 0s marker
+  # TTL, which would make every fresh marker instantly stale (age >= 0 always
+  # holds) and let an overlapping tick immediately reclaim it — reintroducing
+  # the duplicate dispatch this invariant closes. An EXPLICIT
+  # DISPATCH_MARKER_TTL_SECONDS is clamped the same way (0 → default): a 0s
+  # dedup window is never a coherent request for a dedup mechanism.
+  # Bounds: > 0 (a 0s dedup window disables dedup — the round-13 bug) and
+  # <= 86400 (24h; a multi-year TTL from a pathological value would make the
+  # marker effectively permanent, violating R3 "never wedging the issue" —
+  # round-13 local review [P2]). Out-of-range or non-numeric → 600s default.
+  # 2>/dev/null on the -gt/-le tests: an overflow-sized digit string passes
+  # the regex but trips bash's integer parser ("integer expression
+  # expected") — clamp quietly instead of spamming stderr every tick.
+  local _grace_default="${DISPATCH_GRACE_PERIOD_SECONDS:-600}"
+  { [[ "$_grace_default" =~ ^[0-9]+$ ]] && [ "$_grace_default" -gt 0 ] 2>/dev/null && [ "$_grace_default" -le 86400 ] 2>/dev/null; } || _grace_default=600
+  local ttl="${DISPATCH_MARKER_TTL_SECONDS:-$_grace_default}"
+  { [[ "$ttl" =~ ^[0-9]+$ ]] && [ "$ttl" -gt 0 ] 2>/dev/null && [ "$ttl" -le 86400 ] 2>/dev/null; } || ttl=600
 
   # Symlink defense-in-depth, same posture as [INV-02]'s PID-file check —
   # fail OPEN (a planted symlink must not be able to block dispatch entirely).
