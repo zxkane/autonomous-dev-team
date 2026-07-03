@@ -1067,18 +1067,33 @@ classify_recent_review_verdict() {
   # (spec §3.3: `user.login` incl `[bot]` verbatim), so the actor binding is a
   # flat `.author == BOT_LOGIN` exact-eq — equivalent to the pre-refactor
   # `.author.login == BOT_LOGIN` over the raw `.comments[]`.
+  #
+  # #389 (4th occurrence of the BOT_LOGIN-empty class; siblings fixed in
+  # #341 rounds 13/15): BOT_LOGIN is NEVER set in the dispatcher's own
+  # process (it is resolved only inside autonomous-review.sh's SEPARATE
+  # process) and FALLBACK_SESSION_ID is never assigned anywhere in this
+  # codebase — so the pre-#389 refuse-to-classify branch below was the
+  # UNCONDITIONAL path in every real deployment, parking every
+  # completed-session pending-dev issue at INV-12 even with a genuine
+  # verdict trailer present. Fix: adopt the same STRUCTURAL anchor the
+  # convergence breaker uses (`authentic_verdict`, round-14 posture) — a
+  # genuine `emit_verdict_trailer` comment's ENTIRE body is the bare
+  # trailer line, so an end-to-end anchored whole-body match
+  # authenticates authorship-independently. Any leading or trailing
+  # content fails the anchor (forged quote/prose rejected); the residual
+  # — a human posting a byte-for-byte bare trailer as their whole
+  # comment — is the same documented, accepted exposure as at the two
+  # sibling sites. Note: under this branch the legacy
+  # no-trailer→failed-substantive fallback is unreachable BY DESIGN
+  # (only anchored trailer bodies qualify as candidates at all), so a
+  # verdict-less completed session still parks at INV-12.
   local actor_predicate
   if [ -n "${BOT_LOGIN:-}" ]; then
     actor_predicate=".author == \"${BOT_LOGIN}\""
   elif [ -n "${FALLBACK_SESSION_ID:-}" ]; then
     actor_predicate="(.body | test(\"Review Session.*${FALLBACK_SESSION_ID}\"))"
   else
-    # Without an actor signal AND without a session-id fallback, refuse to
-    # classify — surface no verdict so the caller falls back to the safe
-    # INV-12-completed branch (operator handoff). This is conservative:
-    # emitting a verdict without authenticity binding could route on a
-    # comment posted by an unrelated user.
-    return 0
+    actor_predicate="(.body | test(\"^<!--[[:space:]]*review-verdict:[[:space:]]*[a-z-]+[^>]*-->[[:space:]]*\$\"))"
   fi
 
   # Pull the newest qualifying comment body. Strict `>` on createdAt
@@ -1532,7 +1547,7 @@ handle_completed_session_routing() {
           | jq -r "[.[].body | select(contains(\"${_notice_marker}\"))] | length" \
           2>/dev/null | grep -q '^0$'; then
         itp_post_comment "$issue_num" \
-          "Session \`${session_id}\` already ended (stop_reason=end_turn, terminal_reason=completed). Resume would hang on idle SSE — skipping. Manually transition to \`pending-review\` if a PR exists, or close the issue if work is done. (\`${_notice_marker}\`)"
+          "Session \`${session_id}\` already ended (stop_reason=end_turn, terminal_reason=completed) and no post-session review verdict was found. Resume would hang on idle SSE — skipping. If review findings exist, unpark by flipping to \`in-progress\` + posting a dispatcher-token comment + running \`dispatch-local.sh dev-resume <issue>\` (a fresh session re-reads the issue and findings; do NOT flip to \`pending-review\` — the stale-verdict guard rejects an already-reviewed HEAD). Close the issue if the work is done. (\`${_notice_marker}\`)"
       fi
       return 0
       ;;

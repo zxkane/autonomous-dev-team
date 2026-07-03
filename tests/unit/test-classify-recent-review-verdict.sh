@@ -295,6 +295,116 @@ assert_eq "TC-INV92-CL-006 4-arg legacy verdict still correct" "failed-substanti
 
 # ---------------------------------------------------------------------------
 echo ""
+echo "=== #389: no-actor-signal structural anchor ==="
+# ---------------------------------------------------------------------------
+# In the dispatcher's own process BOT_LOGIN is NEVER set (resolved only inside
+# autonomous-review.sh's separate process) and FALLBACK_SESSION_ID is never
+# assigned anywhere in the codebase — so pre-fix the no-signal branch refused
+# to classify and every completed-session pending-dev issue parked at INV-12
+# even with a genuine bare verdict trailer present (fleet-wide 2026-07-03).
+# The fix mirrors the convergence breaker's round-13/round-14 structural
+# anchor: a genuine emit_verdict_trailer comment's ENTIRE body is the trailer
+# line, so an anchored whole-body match authenticates authorship-independently.
+
+export BOT_LOGIN=""
+unset FALLBACK_SESSION_ID 2>/dev/null || true
+
+# TC-389-001: bare whole-body trailer, no actor signal → classified.
+# (Pre-fix: returns none → INV-12 park. This is the fleet-wide regression.)
+_MOCK_COMMENTS_JSON=$(jq -n \
+  --argjson c1 "$(mkc "kane-review-agent[bot]" "2026-05-21T05:30:00Z" "<!-- review-verdict: failed-substantive -->")" \
+  '[$c1]')
+v=""; c=""
+classify_recent_review_verdict 100 "$SESSION_END" v c
+assert_eq "TC-389-001 bare trailer classified with no actor signal" "failed-substantive" "$v"
+
+# TC-389-002: bare trailer with cause token → failed-non-substantive + cause.
+_MOCK_COMMENTS_JSON=$(jq -n \
+  --argjson c1 "$(mkc "kane-review-agent[bot]" "2026-05-21T05:30:00Z" "<!-- review-verdict: failed-non-substantive cause=bot-timeout -->")" \
+  '[$c1]')
+v=""; c=""
+classify_recent_review_verdict 100 "$SESSION_END" v c
+assert_eq "TC-389-002 verdict" "failed-non-substantive" "$v"
+assert_eq "TC-389-002 cause" "bot-timeout" "$c"
+
+# TC-389-003: trailer embedded in prose is NOT authenticated (anchored match;
+# round-14 forgery posture: any leading content fails the anchor).
+_MOCK_COMMENTS_JSON=$(jq -n \
+  --argjson c1 "$(mkc "operator-user" "2026-05-21T05:30:00Z" "Just quoting for context: <!-- review-verdict: passed -->")" \
+  '[$c1]')
+v=""; c=""
+classify_recent_review_verdict 100 "$SESSION_END" v c
+assert_eq "TC-389-003 prose-embedded trailer rejected" "none" "$v"
+
+# TC-389-004: trailing prose after the trailer also fails the anchor.
+_MOCK_COMMENTS_JSON=$(jq -n \
+  --argjson c1 "$(mkc "operator-user" "2026-05-21T05:30:00Z" $'<!-- review-verdict: passed -->\nextra text after')" \
+  '[$c1]')
+v=""; c=""
+classify_recent_review_verdict 100 "$SESSION_END" v c
+assert_eq "TC-389-004 trailing-prose trailer rejected" "none" "$v"
+
+# TC-389-005: prose comment with no trailer at all, no actor signal → none.
+# The legacy no-trailer→failed-substantive fallback stays gated to
+# actor-authenticated comments; without a signal a prose comment is not a
+# verdict candidate at all (INV-12 park preserved for verdict-less sessions).
+_MOCK_COMMENTS_JSON=$(jq -n \
+  --argjson c1 "$(mkc "operator-user" "2026-05-21T05:30:00Z" "Review FAILED — found 3 issues.")" \
+  '[$c1]')
+v=""; c=""
+classify_recent_review_verdict 100 "$SESSION_END" v c
+assert_eq "TC-389-005 prose-only comment not classified without actor signal" "none" "$v"
+
+# TC-389-006: newest anchored trailer wins (createdAt ordering preserved).
+_MOCK_COMMENTS_JSON=$(jq -n \
+  --argjson old "$(mkc "kane-review-agent[bot]" "2026-05-21T04:00:00Z" "<!-- review-verdict: passed -->")" \
+  --argjson newer "$(mkc "kane-review-agent[bot]" "2026-05-21T05:00:00Z" "<!-- review-verdict: failed-substantive -->")" \
+  '[$old,$newer]')
+v=""; c=""
+classify_recent_review_verdict 100 "$SESSION_END" v c
+assert_eq "TC-389-006 newest anchored trailer wins" "failed-substantive" "$v"
+
+# TC-389-007: whole-body trailer BEFORE session end → none (time gate holds).
+_MOCK_COMMENTS_JSON=$(jq -n \
+  --argjson c1 "$(mkc "kane-review-agent[bot]" "2026-05-21T02:00:00Z" "<!-- review-verdict: failed-substantive -->")" \
+  '[$c1]')
+v=""; c=""
+classify_recent_review_verdict 100 "$SESSION_END" v c
+assert_eq "TC-389-007 pre-session-end trailer ignored" "none" "$v"
+
+# TC-389-008: dev-actionable token parsed through the anchored path.
+_MOCK_COMMENTS_JSON=$(jq -n \
+  --argjson c1 "$(mkc "kane-review-agent[bot]" "2026-05-21T05:30:00Z" "<!-- review-verdict: failed-substantive dev-actionable=false -->")" \
+  '[$c1]')
+v=""; c=""; da=""
+classify_recent_review_verdict 100 "$SESSION_END" v c da
+assert_eq "TC-389-008 verdict via anchor" "failed-substantive" "$v"
+assert_eq "TC-389-008 dev-actionable=false honored" "false" "$da"
+
+# TC-389-009: trailing whitespace/newline after the trailer is tolerated
+# (mirrors the breaker's anchored pattern `-->[[:space:]]*$`).
+_MOCK_COMMENTS_JSON=$(jq -n \
+  --argjson c1 "$(mkc "kane-review-agent[bot]" "2026-05-21T05:30:00Z" $'<!-- review-verdict: failed-substantive -->\n')" \
+  '[$c1]')
+v=""; c=""
+classify_recent_review_verdict 100 "$SESSION_END" v c
+assert_eq "TC-389-009 trailing newline tolerated" "failed-substantive" "$v"
+
+# TC-389-010: TWO trailers concatenated on one line are rejected. The anchor's
+# middle `[^>]*` cannot cross the first `-->`, so the second trailer trips the
+# `[[:space:]]*$` tail. Pins the mechanism against a future loosening of the
+# middle to `.*` (which would silently authenticate multi-trailer forgeries).
+_MOCK_COMMENTS_JSON=$(jq -n \
+  --argjson c1 "$(mkc "operator-user" "2026-05-21T05:30:00Z" "<!-- review-verdict: passed --><!-- review-verdict: failed-substantive -->")" \
+  '[$c1]')
+v=""; c=""
+classify_recent_review_verdict 100 "$SESSION_END" v c
+assert_eq "TC-389-010 concatenated double trailer rejected" "none" "$v"
+
+export BOT_LOGIN="$BOT"
+
+# ---------------------------------------------------------------------------
+echo ""
 echo "=== Summary ==="
 echo "  PASS: $PASS"
 echo "  FAIL: $FAIL"
