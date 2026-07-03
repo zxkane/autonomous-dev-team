@@ -888,6 +888,47 @@ else
   rm -rf "$TMPDIR/dispatch-marker-809-dev-new"
 fi
 
+# TC-DEDUP-361-038 (#361 round-14 [P1]): every held-marker skip in
+# dispatcher-tick.sh must ALSO protect the concurrent winner from THIS tick's
+# Step 5 stale detection (JUST_DISPATCHED append) — the winner may have
+# label-swapped but not yet posted its token/PID, and without the append the
+# losing tick's Step 5 could classify it as crashed and flip the issue back
+# (next tick then double-dispatches in a DIFFERENT mode, which the
+# per-(issue,mode) marker cannot catch). Source-of-truth: each of the 4 guard
+# blocks carries the append between the held-marker log line and `continue`.
+_guard_count=$(grep -c 'dispatch marker held by a concurrent tick — skipping' "$TICK")
+_protected_count=$(awk '
+  /dispatch marker held by a concurrent tick — skipping/ { inblock=1 }
+  inblock && /JUST_DISPATCHED\+=/ { protected++; inblock=0 }
+  inblock && /continue/ { inblock=0 }
+  END { print protected+0 }
+' "$TICK")
+assert_eq "TC-DEDUP-361-038 all ${_guard_count} held-marker skips append JUST_DISPATCHED before continue" \
+  "$_guard_count" "$_protected_count"
+
+# TC-DEDUP-361-039 (round-14 local review NO-GO): may_stall_now must DEFER
+# (rc 1) while a FRESH dispatch marker exists for the issue in ANY mode — the
+# cold-start window where the winner's wrapper hasn't written its PID yet.
+rm -rf "$TMPDIR/dispatch-marker-820-dev-new"
+mkdir "$TMPDIR/dispatch-marker-820-dev-new"     # fresh marker (mtime = now)
+(
+  pid_alive() { return 1; }                      # probe says DEAD (no PID yet)
+  get_pid() { echo ""; }
+  may_stall_now 820 2>/dev/null
+)
+assert_false "TC-DEDUP-361-039 fresh dispatch marker defers may_stall_now (rc 1) despite DEAD pid probe" $?
+
+# TC-DEDUP-361-039b control: an EXPIRED marker does not defer — stall
+# eligibility is restored once the TTL passes (never wedges stalling).
+touch -t 200001010000.00 "$TMPDIR/dispatch-marker-820-dev-new"
+(
+  pid_alive() { return 1; }
+  get_pid() { echo ""; }
+  may_stall_now 820 2>/dev/null
+)
+assert_true "TC-DEDUP-361-039b expired marker does not defer — stall eligible again (rc 0)" $?
+rm -rf "$TMPDIR/dispatch-marker-820-dev-new"
+
 # TC-DEDUP-361-032: source-of-truth — dispatcher-tick.sh installs the
 # EXIT-trap handler (the backstop for any bare-command set -e abort between
 # acquire and confirm that an explicit release call cannot reach).

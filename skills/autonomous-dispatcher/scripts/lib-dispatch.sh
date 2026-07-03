@@ -678,6 +678,17 @@ may_stall_now() {
   if [ "${1:-}" = "--at-cap" ]; then at_cap=true; shift; fi
   local issue_num="$1"
 
+  # [INV-108] (#361 round-14 local review): a FRESH dispatch marker (any mode,
+  # age < TTL) means a wrapper for this issue was dispatched moments ago and
+  # may not have written its PID file yet — the cold-start window pid_alive
+  # cannot see. Stalling in that window would add `stalled` to a healthy
+  # just-started winner (observed shape: Branch B keys on a no-progress
+  # attempt marker the concurrent winner posted right after ITS dispatch).
+  # Defer; the marker expires via TTL, so this can never wedge stalling.
+  if _dispatch_marker_recent "$issue_num"; then
+    return 1   # defer (a dispatch is in flight / cold-starting)
+  fi
+
   local _alive
   if [ "$at_cap" = true ]; then
     pid_alive --at-cap issue "$issue_num" && _alive=0 || _alive=1
@@ -2246,6 +2257,53 @@ ${human}"
 # lock: once its mtime age passes the TTL, the next acquire attempt (a later
 # step in the SAME tick, or a future tick) reclaims and proceeds — a crashed
 # tick's marker never wedges the issue.
+# _dispatch_marker_ttl — the ONE TTL derivation both `acquire_dispatch_marker`
+# and `_dispatch_marker_recent` use. Inherits DISPATCH_GRACE_PERIOD_SECONDS
+# only when USABLE (#361 round-13 [P1]): the documented GRACE=0 setting
+# (disable Step 5's cold-start grace) must NOT cascade into a 0s marker TTL —
+# every fresh marker would be instantly stale (age >= 0 always) and an
+# overlapping tick would immediately reclaim it, reintroducing the duplicate
+# dispatch. An EXPLICIT DISPATCH_MARKER_TTL_SECONDS=0 clamps the same way (a
+# 0s dedup window is never a coherent request). Bounds: > 0 and <= 86400
+# (24h; a pathological multi-year TTL would make the marker effectively
+# permanent, violating R3 — round-13 local review [P2]). 2>/dev/null on the
+# integer tests: an overflow-sized digit string passes the regex but trips
+# bash's parser — clamp quietly instead of spamming stderr every tick.
+_dispatch_marker_ttl() {
+  local _grace_default="${DISPATCH_GRACE_PERIOD_SECONDS:-600}"
+  { [[ "$_grace_default" =~ ^[0-9]+$ ]] && [ "$_grace_default" -gt 0 ] 2>/dev/null && [ "$_grace_default" -le 86400 ] 2>/dev/null; } || _grace_default=600
+  local _ttl="${DISPATCH_MARKER_TTL_SECONDS:-$_grace_default}"
+  { [[ "$_ttl" =~ ^[0-9]+$ ]] && [ "$_ttl" -gt 0 ] 2>/dev/null && [ "$_ttl" -le 86400 ] 2>/dev/null; } || _ttl=600
+  echo "$_ttl"
+}
+
+# _dispatch_marker_recent <issue_num> — rc 0 iff ANY mode's dispatch marker
+# for this issue is FRESH (age < TTL). Read-only probe (never acquires,
+# never mutates). Consumed by `may_stall_now` (#361 round-14 local review
+# NO-GO finding): a fresh marker means a wrapper was dispatched < TTL ago
+# and may not have written its PID file yet (the cold-start window) — a
+# stall decision in that window would add `stalled` to a healthy
+# just-started winner whose attempt marker / labels the decision keyed on.
+# Fail toward NOT-recent (rc 1) on any infra failure: this probe only ever
+# DEFERS a stall; failing closed here would wedge stalling entirely.
+_dispatch_marker_recent() {
+  local issue_num="$1" base_dir mode m mtime age ttl
+  base_dir=$(pid_dir_for_project 2>/dev/null) || return 1
+  [ -n "$base_dir" ] || return 1
+  ttl=$(_dispatch_marker_ttl)
+  local now
+  now=$(date -u +%s)
+  for mode in dev-new dev-resume review; do
+    m="${base_dir}/dispatch-marker-${issue_num}-${mode}"
+    [ -e "$m" ] || continue
+    mtime=$(_mtime_epoch "$m")
+    [ -n "$mtime" ] || continue
+    age=$(( now - mtime ))
+    [ "$age" -lt "$ttl" ] && return 0
+  done
+  return 1
+}
+
 acquire_dispatch_marker() {
   local issue_num="$1" mode="$2"
   local base_dir
@@ -2266,25 +2324,8 @@ acquire_dispatch_marker() {
   fi
 
   local marker_dir="${base_dir}/dispatch-marker-${issue_num}-${mode}"
-  # TTL derivation (#361 round-13 [P1]): inherit DISPATCH_GRACE_PERIOD_SECONDS
-  # only when it is a USABLE ttl (> 0). The documented GRACE=0 setting means
-  # "disable Step 5's cold-start grace" — it must NOT cascade into a 0s marker
-  # TTL, which would make every fresh marker instantly stale (age >= 0 always
-  # holds) and let an overlapping tick immediately reclaim it — reintroducing
-  # the duplicate dispatch this invariant closes. An EXPLICIT
-  # DISPATCH_MARKER_TTL_SECONDS is clamped the same way (0 → default): a 0s
-  # dedup window is never a coherent request for a dedup mechanism.
-  # Bounds: > 0 (a 0s dedup window disables dedup — the round-13 bug) and
-  # <= 86400 (24h; a multi-year TTL from a pathological value would make the
-  # marker effectively permanent, violating R3 "never wedging the issue" —
-  # round-13 local review [P2]). Out-of-range or non-numeric → 600s default.
-  # 2>/dev/null on the -gt/-le tests: an overflow-sized digit string passes
-  # the regex but trips bash's integer parser ("integer expression
-  # expected") — clamp quietly instead of spamming stderr every tick.
-  local _grace_default="${DISPATCH_GRACE_PERIOD_SECONDS:-600}"
-  { [[ "$_grace_default" =~ ^[0-9]+$ ]] && [ "$_grace_default" -gt 0 ] 2>/dev/null && [ "$_grace_default" -le 86400 ] 2>/dev/null; } || _grace_default=600
-  local ttl="${DISPATCH_MARKER_TTL_SECONDS:-$_grace_default}"
-  { [[ "$ttl" =~ ^[0-9]+$ ]] && [ "$ttl" -gt 0 ] 2>/dev/null && [ "$ttl" -le 86400 ] 2>/dev/null; } || ttl=600
+  local ttl
+  ttl=$(_dispatch_marker_ttl)
 
   # Symlink defense-in-depth, same posture as [INV-02]'s PID-file check —
   # fail OPEN (a planted symlink must not be able to block dispatch entirely).

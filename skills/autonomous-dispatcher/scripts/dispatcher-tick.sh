@@ -311,6 +311,12 @@ for i in $(seq 0 $((new_count - 1))); do
   # dispatch — skip cleanly, no error, no label edit, no dispatch() call.
   if ! acquire_dispatch_marker "$issue_num" "dev-new"; then
     log "  issue #${issue_num} dev-new dispatch marker held by a concurrent tick — skipping ([INV-108])"
+    # Held marker ⇒ a concurrent tick OWNS this issue mid-dispatch. Protect it
+    # from THIS tick's Step 5 stale detection too (#361 round-14 [P1]): the
+    # winner may have label-swapped but not yet posted its token/PID — without
+    # this, Step 5 could classify the winner as crashed and flip the issue
+    # back, letting a next tick double-dispatch in a DIFFERENT mode.
+    JUST_DISPATCHED+=("$issue_num")
     continue
   fi
 
@@ -386,6 +392,8 @@ for i in $(seq 0 $((pr_count - 1))); do
   # [INV-108] (302b, #361 R1) — see the Step 2 comment above.
   if ! acquire_dispatch_marker "$issue_num" "review"; then
     log "  issue #${issue_num} review dispatch marker held by a concurrent tick — skipping ([INV-108])"
+    # Step-5 protection for the concurrent winner — see the Step 2 comment.
+    JUST_DISPATCHED+=("$issue_num")
     continue
   fi
 
@@ -481,6 +489,8 @@ for i in $(seq 0 $((pd_count - 1))); do
       # it must short-circuit the whole branch, not just the final dispatch().
       if ! acquire_dispatch_marker "$issue_num" "dev-new"; then
         log "  issue #${issue_num} dev-new dispatch marker held by a concurrent tick — skipping PTL recovery ([INV-108])"
+        # Step-5 protection for the concurrent winner — see the Step 2 comment.
+        JUST_DISPATCHED+=("$issue_num")
         continue
       fi
       log "  issue #${issue_num} session ${session_id} hit prompt_too_long — clearing for fresh dispatch"
@@ -559,6 +569,8 @@ for i in $(seq 0 $((pd_count - 1))); do
   # [INV-108] (302b, #361 R1) — see the Step 2 comment above.
   if ! acquire_dispatch_marker "$issue_num" "dev-resume"; then
     log "  issue #${issue_num} dev-resume dispatch marker held by a concurrent tick — skipping ([INV-108])"
+    # Step-5 protection for the concurrent winner — see the Step 2 comment.
+    JUST_DISPATCHED+=("$issue_num")
     continue
   fi
 
