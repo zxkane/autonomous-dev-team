@@ -1,0 +1,25 @@
+# decision-golden.json.meta — provenance sidecar for decision-golden.json (issue #371, R5).
+#
+# Captured by running the PRE-CHANGE (byte-identical-passthrough) callers —
+# count_active, list_new_issues, list_pending_review, list_pending_dev,
+# list_stale_candidates, list_hygiene_residue — against a stubbed `gh` serving
+# each of the four fixture classes named below, on the FIRST TDD commit of the
+# #371 W1a branch (before the abstract-contract rewrite landed). Values are
+# `[.[].number] | sort` (order-insensitive number sets) for the five list
+# selectors and a bare integer for count_active.
+#
+# Fixture classes (each caller run once per class):
+#   normal      — one issue matching the caller's selector.
+#   empty       — zero issues.
+#   overlimit   — 120 issues (exceeds the caller's --limit 100 in production;
+#                 the stub here does not enforce server-side --limit, so this
+#                 class exercises the caller's OWN jq logic over a large set —
+#                 the leaf's --limit application is proven separately by the
+#                 leaf-level golden-trace, not this decision-level fixture).
+#   residue     — includes an `approved`/`stalled` terminal-label residue
+#                 issue alongside a clean one, per fixture per caller.
+#
+# Regenerate (only if the OLD pre-#371 selector semantics are ever in dispute):
+# checkout the commit immediately before #371's leaf rewrite, source
+# lib-dispatch.sh under the fixture harness in
+# tests/unit/test-w1a-state-read-parity.sh, and re-run.

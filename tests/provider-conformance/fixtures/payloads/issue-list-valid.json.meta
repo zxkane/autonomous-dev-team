@@ -1,0 +1,11 @@
+source: hand-authored (issue #371 W1a — sidecar provenance, no live capture)
+capture_date: 2026-07-04
+shape: raw `gh issue list --json number,title,labels,comments` object array
+  (pre-transform) — the stub applies the leaf's own jq normalization, so this
+  fixture matches the RAW GitHub REST shape itp_github_list_by_state /
+  itp_github_count_by_state / itp_github_list_forbidden_combos expect, not
+  the normalized {number,title,labels,comments} output.
+notes: two entries deliberately out-of-order by number (5 before 3) to
+  exercise the leaf's `sort_by(.number)` canonical-sort assertion; #5 carries
+  `in-progress` (a transitional label) and #3 carries `approved` (a terminal
+  label) so the same fixture also serves itp_list_forbidden_combos.

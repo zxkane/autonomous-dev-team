@@ -525,7 +525,9 @@ log "  $cand_count active issue(s) to evaluate"
 
 for i in $(seq 0 $((cand_count - 1))); do
   issue_num=$(jq -r ".[$i].number" <<<"$candidates")
-  labels=$(jq -r ".[$i].labels[].name" <<<"$candidates")
+  # [W1a, #371] list_stale_candidates now returns the NORMALIZED itp_list_by_state
+  # shape — `labels` is already an array of NAME strings, not `{name}` objects.
+  labels=$(jq -r ".[$i].labels[]" <<<"$candidates")
 
   # Skip freshly dispatched ([INV-09]).
   if was_just_dispatched "$issue_num"; then

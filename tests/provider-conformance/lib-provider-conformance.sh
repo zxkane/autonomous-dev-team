@@ -146,3 +146,17 @@ pcf_is_ascending_by_created_at() {
     | ([range(0; $n - 1) | ($ts[.] <= $ts[. + 1])] | all)
   ' >/dev/null 2>&1 <<<"$text"
 }
+
+# pcf_is_ascending_by_number <json_array_text> — rc 0 iff every element's
+# `.number` is numerically >= the previous one's (issue #371 W1a's normative
+# canonical-sort MUST for itp_list_by_state / itp_count_by_state /
+# itp_list_forbidden_combos). An empty array or a single-element array is
+# trivially ascending (rc 0).
+pcf_is_ascending_by_number() {
+  local text="$1"
+  jq -e '
+    [.[].number] as $ns
+    | ($ns | length) as $n
+    | ([range(0; $n - 1) | ($ns[.] <= $ns[. + 1])] | all)
+  ' >/dev/null 2>&1 <<<"$text"
+}

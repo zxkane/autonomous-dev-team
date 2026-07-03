@@ -33,13 +33,13 @@ command -v jq >/dev/null 2>&1 || { echo "jq required"; exit 1; }
 source "$LIB"
 
 # ===========================================================================
-echo "=== TC-PCONF-014: --itp github --chp github exits 0, 13 PASS, CONFORMANCE-SUMMARY fail=0 ==="
+echo "=== TC-PCONF-014: --itp github --chp github exits 0, 16 PASS, CONFORMANCE-SUMMARY fail=0 ==="
 # ===========================================================================
 gh_out="$(bash "$RUNNER" --itp github --chp github 2>&1)"; gh_rc=$?
 assert_eq "AC1: github/github exits 0" "0" "$gh_rc"
 gh_pass_count="$(grep -c '^CONFORMANCE-PCONF github/github .* PASS$' <<<"$gh_out")"
-assert_eq "AC1: 13 ASSERTED verbs PASS on github/github" "13" "$gh_pass_count"
-assert_contains "AC1: CONFORMANCE-SUMMARY line present with fail=0" "CONFORMANCE-SUMMARY total=26 pass=13 fail=0 skip=0 pending=13" "$gh_out"
+assert_eq "AC1: 16 ASSERTED verbs PASS on github/github" "16" "$gh_pass_count"
+assert_contains "AC1: CONFORMANCE-SUMMARY line present with fail=0" "CONFORMANCE-SUMMARY total=26 pass=16 fail=0 skip=0 pending=10" "$gh_out"
 
 # ===========================================================================
 echo ""
@@ -57,7 +57,7 @@ assert_contains "TC-PCONF-022: chp_resolve_thread FAIL names the missing functio
 assert_contains "TC-PCONF-023: chp_review_threads FAILs non-array-output" "chp_review_threads FAIL wrong-shape" "$broken_fail_lines"
 # Every OTHER asserted verb must still PASS (no false-positive FAILs beyond the 4).
 broken_pass_count="$(grep -c '^CONFORMANCE-PCONF broken/broken .* PASS$' <<<"$broken_out")"
-assert_eq "AC2: the 9 non-targeted verbs still PASS" "9" "$broken_pass_count"
+assert_eq "AC2: the 12 non-targeted verbs still PASS" "12" "$broken_pass_count"
 
 # ===========================================================================
 echo ""
@@ -73,7 +73,7 @@ assert_eq "R4: zero FAIL on the degraded run" "0" "$deg_fail_count"
 deg_skip_count="$(grep -c '^CONFORMANCE-PCONF degraded/degraded .* SKIP' <<<"$deg_out")"
 assert_eq "TC-PCONF-034: exactly 3 SKIPs" "3" "$deg_skip_count"
 deg_pass_count="$(grep -c '^CONFORMANCE-PCONF degraded/degraded .* PASS$' <<<"$deg_out")"
-assert_eq "TC-PCONF-033: the 10 remaining ASSERTED verbs PASS" "10" "$deg_pass_count"
+assert_eq "TC-PCONF-033: the 13 remaining ASSERTED verbs PASS" "13" "$deg_pass_count"
 
 # ===========================================================================
 echo ""
@@ -111,14 +111,16 @@ drift1_diff="$(
 assert_contains "TC-PCONF-041: coverage.conf missing a spec-tokened verb → diff names it" "itp_read_task" "$drift1_diff"
 
 # TC-PCONF-042: a spec row carrying the token whose verb is NOT pending in coverage.conf → FAIL.
+# (itp_read_task, not itp_count_by_state — #371 W1a flipped itp_count_by_state's
+# spec row to asserted, so it no longer carries CONTRACT-PENDING to remove.)
 scratch_spec="$scratch/provider-spec-drift2.md"
-sed '/`itp_count_by_state STATE/s/CONTRACT-PENDING//' "$SPEC_MD" > "$scratch_spec"
+sed '/`itp_read_task ISSUE/s/CONTRACT-PENDING//' "$SPEC_MD" > "$scratch_spec"
 drift2_diff="$(
   spec_pending="$(pcf_spec_pending_verbs "$scratch_spec")"
   cov_pending="$(awk -F= '/=pending$/{print $1}' "$COVERAGE_CONF" | sort -u)"
   diff <(printf '%s\n' "$spec_pending") <(printf '%s\n' "$cov_pending")
 )"
-assert_contains "TC-PCONF-042: removing a spec token leaves coverage.conf with an orphaned pending verb → diff names it" "itp_count_by_state" "$drift2_diff"
+assert_contains "TC-PCONF-042: removing a spec token leaves coverage.conf with an orphaned pending verb → diff names it" "itp_read_task" "$drift2_diff"
 rm -rf "$scratch"
 
 # ===========================================================================
@@ -183,11 +185,17 @@ if pcf_is_ascending_by_created_at '[]'; then ok "TC-PCONF-055: empty array is tr
 
 # ===========================================================================
 echo ""
-echo "=== AC4/AC5 sanity: this issue changed no wrapper/provider-leaf/caps-branch behavior ==="
+echo "=== AC4/AC5 sanity: this issue changed no CHP wrapper/provider-leaf/caps-branch behavior ==="
 # ===========================================================================
-# itp-github.sh / chp-github.sh are UNTOUCHED by this PR (the design's explicit
-# non-goal) — a byte-diff-free sanity check that this test file did not drift
-# from that promise while iterating.
+# chp-github.sh is UNTOUCHED by this PR (out of scope — #371/W1a is ITP-only) —
+# a byte-diff-free sanity check that this test file did not drift from that
+# promise while iterating. itp-github.sh is DELIBERATELY EXCLUDED from this
+# check: #371 (W1a) is a deliberate, IN-SCOPE behavior/shape change to its
+# itp_github_list_by_state/count_by_state/list_forbidden_combos leaves (the
+# byte-identical constraint is explicitly lifted for these three verbs per
+# issue #371) — asserting itp-github.sh unchanged here would contradict the
+# PR it ships in. See tests/unit/test-w1a-state-read-parity.sh for the
+# decision-level parity proof that replaces this byte-diff check for ITP.
 #
 # Must NOT rely on the ambient checkout's 'origin/main' resolving: the
 # hermetic-unit CI job (which runs this file via the tests/unit/test-*.sh loop)
@@ -196,15 +204,14 @@ echo "=== AC4/AC5 sanity: this issue changed no wrapper/provider-leaf/caps-branc
 # --require-trusted-ref, and TC-FINALBATCH-010 in test-provider-cutover.sh for
 # the same CI-topology note). A hard FAIL here on an unresolvable ref would be a
 # red herring unrelated to this PR's diff, so degrade to a SKIP instead.
-gh_itp_leaf="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/providers/itp-github.sh"
 gh_chp_leaf="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/providers/chp-github.sh"
 trusted_ref="${CUTOVER_TRUSTED_REF:-origin/main}"
 if ! git -C "$PROJECT_ROOT" rev-parse --verify --quiet "$trusted_ref" >/dev/null 2>&1; then
   echo "  SKIP: AC4/AC5 unchanged-leaf check — trusted ref '$trusted_ref' not resolvable here (shallow/forked checkout)"
-elif git -C "$PROJECT_ROOT" diff --quiet "$trusted_ref" -- "$gh_itp_leaf" "$gh_chp_leaf" 2>/dev/null; then
-  ok "AC4/AC5: itp-github.sh/chp-github.sh unchanged vs $trusted_ref (no behavior change)"
+elif git -C "$PROJECT_ROOT" diff --quiet "$trusted_ref" -- "$gh_chp_leaf" 2>/dev/null; then
+  ok "AC4/AC5: chp-github.sh unchanged vs $trusted_ref (no behavior change)"
 else
-  bad "AC4/AC5: itp-github.sh/chp-github.sh DIFFER from $trusted_ref — this issue must not change GitHub leaf behavior"
+  bad "AC4/AC5: chp-github.sh DIFFERS from $trusted_ref — this issue must not change CHP GitHub leaf behavior"
 fi
 
 # ===========================================================================
