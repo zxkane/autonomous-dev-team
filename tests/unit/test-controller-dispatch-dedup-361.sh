@@ -208,11 +208,22 @@ echo "=== TC-DEDUP-361-009: fail-open when the marker directory cannot be resolv
 # pid_dir_for_project echoes empty + rc 1 when it cannot create the dir (e.g.
 # a stale symlink at the resolved path). Simulate that by overriding the
 # function directly (same technique test-mark-stalled-liveness.sh uses).
-pid_dir_for_project() { return 1; }
-export -f pid_dir_for_project
-acquire_dispatch_marker 505 dev-new 2>/dev/null
+#
+# Deliberately NOT `export -f` + `unset -f`: bash's `unset -f` on a
+# previously-exported function does not restore the ORIGINAL definition —
+# once a function is redefined at global scope, the redefinition is
+# permanent for the rest of the process (and its subshells); `unset -f` only
+# deletes it outright, leaving `pid_dir_for_project` undefined for every
+# later test in this file (a real bug this suite hit and fixed — the
+# corruption silently broke TC-019..023 below, which call the real function
+# from a subshell). Running the override + call in a SUBSHELL confines the
+# redefinition to that subshell's own function table; the parent shell's
+# `pid_dir_for_project` (sourced from lib-config.sh) is never touched.
+(
+  pid_dir_for_project() { return 1; }
+  acquire_dispatch_marker 505 dev-new 2>/dev/null
+)
 assert_true "TC-DEDUP-361-009 acquire_dispatch_marker fails OPEN (rc 0) when pid_dir_for_project is unavailable" $?
-unset -f pid_dir_for_project
 
 # ---------------------------------------------------------------------------
 echo ""
@@ -338,6 +349,85 @@ else
   echo -e "  ${RED}FAIL${NC}: TC-DEDUP-361-018 lib-dispatch.sh has no acquire_dispatch_marker guard"
   FAIL=$((FAIL + 1))
 fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-DEDUP-361-019..022: skip-path is actually taken through the REAL guard text (not a stub) ==="
+# ---------------------------------------------------------------------------
+# TC-DEDUP-361-017/018 above only prove the guard TEXT exists (grep -c on the
+# source); they never execute it. This section extracts each real
+# `if ! acquire_dispatch_marker "$issue_num" "<mode>"; then ... fi` block
+# verbatim out of dispatcher-tick.sh (same technique
+# test-dispatcher-tick-router.sh uses for dispatch()) and runs it against
+# the REAL acquire_dispatch_marker sourced above, with a pre-planted HELD
+# marker — proving the shipped code actually takes the skip branch (`continue`,
+# no side effect) rather than merely containing the guard's text. Guards
+# a future accidental inversion (`if acquire_dispatch_marker ...; then continue; fi`)
+# that grep -c alone cannot catch.
+extract_guard_block() {
+  local mode="$1" occurrence="$2"
+  awk -v mode="$mode" -v occ="$occurrence" '
+    BEGIN { count = 0; in_block = 0 }
+    $0 ~ ("acquire_dispatch_marker \"\\$issue_num\" \"" mode "\"") {
+      count++
+      if (count == occ) { in_block = 1 }
+    }
+    in_block { print; if ($0 ~ /^[ \t]*fi[ \t]*$/) { in_block = 0; exit } }
+  ' "$TICK"
+}
+
+# `continue` is only meaningful inside an actual `for`/`while`/`until` loop —
+# outside one it's a bash no-op (with a stderr warning) and execution falls
+# through to the next statement regardless. The real guard block always
+# lives inside dispatcher-tick.sh's `for i in $(seq ...); do ... done` loops,
+# so the harness MUST wrap the eval'd block in a real `for` loop too, or this
+# test would report "skip" even when the guard's `continue` did nothing.
+#
+# Args: <block> <issue> <mode> <plant_marker: 0|1>
+# Returns: 0 if code AFTER the guard was reached, 1 if it was NOT reached.
+run_guard_block() {
+  local block="$1" issue="$2" mode="$3" plant_marker="$4"
+  rm -rf "$TMPDIR/dispatch-marker-${issue}-${mode}"
+  [[ "$plant_marker" = "1" ]] && mkdir "$TMPDIR/dispatch-marker-${issue}-${mode}"
+  rm -f "$TMPDIR/reached-${issue}-${mode}"
+  (
+    issue_num="$issue"
+    log() { :; }
+    set +e
+    for _once in 1; do
+      eval "$block"
+      echo "REACHED_AFTER_GUARD" > "$TMPDIR/reached-${issue}-${mode}"
+    done
+  )
+  local reached=1
+  [[ -f "$TMPDIR/reached-${issue}-${mode}" ]] && reached=0
+  rm -f "$TMPDIR/reached-${issue}-${mode}"
+  rm -rf "$TMPDIR/dispatch-marker-${issue}-${mode}"
+  return "$reached"
+}
+
+DEV_NEW_BLOCK_1=$(extract_guard_block "dev-new" 1)
+run_guard_block "$DEV_NEW_BLOCK_1" 701 "dev-new" 1
+assert_false "TC-DEDUP-361-019 Step 2 (dev-new) real guard: held marker → continue fires, code after the guard is NOT reached" $?
+
+REVIEW_BLOCK_1=$(extract_guard_block "review" 1)
+run_guard_block "$REVIEW_BLOCK_1" 702 "review" 1
+assert_false "TC-DEDUP-361-020 Step 3 (review) real guard: held marker → continue fires, code after the guard is NOT reached" $?
+
+DEV_NEW_BLOCK_2=$(extract_guard_block "dev-new" 2)
+run_guard_block "$DEV_NEW_BLOCK_2" 703 "dev-new" 1
+assert_false "TC-DEDUP-361-021 Step 4 PTL (dev-new) real guard: held marker → continue fires, code after the guard is NOT reached" $?
+
+DEV_RESUME_BLOCK_1=$(extract_guard_block "dev-resume" 1)
+run_guard_block "$DEV_RESUME_BLOCK_1" 704 "dev-resume" 1
+assert_false "TC-DEDUP-361-022 Step 4c (dev-resume) real guard: held marker → continue fires, code after the guard is NOT reached" $?
+
+# TC-DEDUP-361-023 (control): the SAME extracted block, with NO pre-planted
+# marker (fresh acquire succeeds), DOES reach past the guard — proving
+# TC-019..022's negative result is the guard actually firing, not a broken
+# harness that always suppresses execution.
+run_guard_block "$DEV_NEW_BLOCK_1" 705 "dev-new" 0
+assert_true "TC-DEDUP-361-023 control — fresh acquire (no held marker) DOES reach past the guard" $?
 
 # ---------------------------------------------------------------------------
 echo ""
