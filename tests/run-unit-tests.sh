@@ -52,7 +52,7 @@ _default_jobs() {
   [[ "$half" -lt 8 ]] && echo "$half" || echo 8
 }
 
-if ! [[ "${UNIT_TEST_JOBS:-}" =~ ^[0-9]+$ ]] || [[ "${UNIT_TEST_JOBS:-0}" -eq 0 ]]; then
+if ! [[ "${UNIT_TEST_JOBS:-}" =~ ^[0-9]+$ ]] || [[ "${UNIT_TEST_JOBS:-0}" =~ ^0+$ ]]; then
   JOBS="$(_default_jobs)"
 else
   JOBS="$UNIT_TEST_JOBS"
