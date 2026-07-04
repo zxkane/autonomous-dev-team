@@ -964,14 +964,9 @@ EOF
       log "WARNING: Agent exited 0 but no PR was created for issue #${ISSUE_NUMBER}"
       itp_post_comment "$ISSUE_NUMBER" \
         "Agent exited successfully but no PR was created. Moving to pending-dev for retry.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
-      # [INV-111] (#402 review round-3 [P1]) re-arm AGAIN between the retry
-      # comment and the label flip: the comment above is itself a gh call —
-      # a successful run re-hashes `gh` back to the shim path, so a shim
-      # vanish in the window between these two writes would strand the
-      # LOAD-BEARING flip (issue stuck in `in-progress`) while the earlier
-      # rearm already passed. Every gh-touching write that FOLLOWS another
-      # gh call needs its own preceding rearm; the flip is the one write
-      # this function must never lose.
+      # [INV-111] (#402 r3 [P1]) re-arm between the two writes: the comment
+      # above re-hashes `gh` to the shim path; a vanish here would strand the
+      # flip. (Short: the C.5 anchor above must stay within ±8 of the flip.)
       rearm_gh_resolution
       itp_transition_state "$ISSUE_NUMBER" "in-progress" "pending-dev" || log "WARNING: Failed to update issue labels"
     fi
