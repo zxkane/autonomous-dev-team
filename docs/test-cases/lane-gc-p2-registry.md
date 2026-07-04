@@ -90,6 +90,13 @@ Test runner: `bash tests/unit/test-lib-lane.sh` (auto-discovered by the CI
 | TC-LGC2-052 | `lane_kill` against a lane with multiple recorded PGIDs (fan-out-style) | every recorded PGID is signaled; duplicate lines for the same PGID are de-duplicated (signaled once) |
 | TC-LGC2-053 | `lane_kill` against a lane with an empty/missing `pgids` file | clean no-op, rc 0 |
 
+## `lane_find_latest` ordering robustness
+
+| ID | Scenario | Expected |
+|----|----------|----------|
+| TC-LGC2-054 | **Regression (review-caught, pre-fix reproduced live):** an OLDER lane with an intact/parseable `lane` file coexists with a NEWER lane for the SAME `(project, role, issue)` whose `lane` file is entirely unparseable (garbage content) | `lane_find_latest` selects the NEWER lane (by directory-basename mint-epoch, never by `CREATED_EPOCH` read out of the file) — never silently falls back to the older, intact sibling |
+| TC-LGC2-055 | End-to-end: same setup as TC-LGC2-054, but the OLDER lane also has a live recorded pgid | `lane_probe` on the selected (newer, corrupted) lane resolves `unknown`; the older lane's pgid is left untouched — a caller (e.g. the `kill_stale_wrapper` delegate) never reaps the wrong lane |
+
 ## `kill_stale_wrapper` delegate (AC7)
 
 | ID | Scenario | Expected |

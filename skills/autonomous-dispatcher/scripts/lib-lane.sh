@@ -210,8 +210,8 @@ lane_dir() {
 }
 
 # lane_find_latest <project_id> <role> <issue> — echo the most-recently-
-# CREATED_EPOCH lane dir matching (role, issue) under this project's registry,
-# or nothing + rc 1 when none exists. A caller that only knows
+# minted lane dir matching (role, issue) under this project's registry, or
+# nothing + rc 1 when none exists. A caller that only knows
 # (project, role, issue) — e.g. the `kill_stale_wrapper` delegate in
 # dispatch-local.sh, which has no lane id to hand (the wrapper it's about to
 # replace minted its OWN id) — uses this to find the CURRENT lane before
@@ -219,25 +219,46 @@ lane_dir() {
 # stale terminal-state lane for the SAME (role, issue) can outlive its wrapper
 # by up to 24h (age-collected by a future GC pass, not this PR) — the newest
 # one is always the one that might still be live.
+#
+# Match + ordering are derived SOLELY from the directory BASENAME
+# (`<project_id_fs>.<role>.<issue>.<epoch>.<rand4>`) — written once,
+# atomically, at mint (`lane_install`'s `mv -T` into place) and never
+# rewritten — never from the `lane` FILE's content. A prior version matched/
+# ordered via `lane_get … ROLE/ISSUE/CREATED_EPOCH`, which made a NEWER lane
+# whose `lane` file later became corrupted/unparseable (a plausible failure
+# independent of the directory's own identity) INVISIBLE to the scan — an
+# OLDER, still-parseable sibling then won by default, so `kill_stale_wrapper`
+# could reap the wrong lane instead of correctly falling through to the
+# legacy path when the newest lane can't be probed (codex review, #378).
+# Deriving everything from the immutable basename means the newest MATCHING
+# lane is always selected regardless of its file's later parseability; the
+# caller's own `lane_probe` (called on the returned dir) then correctly
+# resolves `unknown` for an unparseable file and falls through untouched —
+# exactly the desired behavior.
 lane_find_latest() {
   local project_id="$1" role="$2" issue="$3"
   local root
   root="$(_lanes_root "$project_id")"
   local best="" best_epoch=-1
-  local d
+  local d base
+  # ^(project_id_fs).(role).(issue).(epoch).(rand4)$ — anchored end-to-end so
+  # a malformed/foreign basename never partially matches. project_id_fs is
+  # matched greedily (it may itself contain literal dots); role is any
+  # dot-free token; issue is either the `-` dispatcher-alert sentinel or
+  # digits; epoch is digits (lane_mint's `date +%s`); rand4 is exactly 4
+  # lowercase hex chars (lane_mint's openssl/urandom/RANDOM fallback chain).
+  local pat='^(.+)\.([^.]+)\.(-|[0-9]+)\.([0-9]+)\.([0-9a-f]{4})$'
   for d in "$root"/*/; do
     [[ -d "$d" ]] || continue
     d="${d%/}"
-    [[ "$(basename "$d")" == .pending-* ]] && continue
-    local r i e
-    r="$(lane_get "$d" ROLE)" || continue
-    [[ "$r" == "$role" ]] || continue
-    i="$(lane_get "$d" ISSUE)" || continue
-    [[ "$i" == "$issue" ]] || continue
-    e="$(lane_get "$d" CREATED_EPOCH)" || e=0
-    [[ "$e" =~ ^[0-9]+$ ]] || e=0
-    if [[ "$e" -gt "$best_epoch" ]]; then
-      best_epoch="$e"
+    base="$(basename "$d")"
+    [[ "$base" == .pending-* ]] && continue
+    [[ "$base" =~ $pat ]] || continue
+    [[ "${BASH_REMATCH[2]}" == "$role" ]] || continue
+    [[ "${BASH_REMATCH[3]}" == "$issue" ]] || continue
+    local epoch="${BASH_REMATCH[4]}"
+    if [[ "$epoch" -gt "$best_epoch" ]]; then
+      best_epoch="$epoch"
       best="$d"
     fi
   done

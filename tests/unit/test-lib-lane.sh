@@ -432,6 +432,87 @@ assert_contains "TC-LGC2-053: lane_kill against a missing pgids file is a clean 
 
 # ---------------------------------------------------------------------------
 echo ""
+echo "=== TC-LGC2-054/055: lane_find_latest ordering survives a corrupted newer lane ==="
+# ---------------------------------------------------------------------------
+# Regression (codex review [P1], #378): lane_find_latest previously ordered
+# candidates by CREATED_EPOCH read out of each lane's `lane` FILE — a newer
+# lane whose file later became corrupted/unparseable (a failure independent
+# of the directory's own identity) lost the comparison to an older,
+# still-parseable sibling and was silently skipped. The fix derives BOTH the
+# (role, issue) match AND the ordering from the immutable directory BASENAME
+# (written once at mint, never rewritten), so file corruption can never
+# demote a structurally-newer lane below an older one.
+bash -c '
+  set -u
+  export ADT_STATE_ROOT="'"$TMPROOT"'/state54"
+  source "'"$LIB_LANE"'"
+
+  LANE_ID_OLD=$(lane_mint myproj dev 1)
+  LANE_DIR_OLD=$(lane_install myproj "$LANE_ID_OLD")
+  sed -i "s/^CREATED_EPOCH=.*/CREATED_EPOCH=1000/" "$LANE_DIR_OLD/lane"
+
+  sleep 1
+  LANE_ID_NEW=$(lane_mint myproj dev 1)
+  LANE_DIR_NEW=$(lane_install myproj "$LANE_ID_NEW")
+  # Corrupt the NEWER lanes file entirely (unparseable) — its DIRECTORY name
+  # still correctly encodes it as the newer mint.
+  echo "totally-unparseable-garbage" > "$LANE_DIR_NEW/lane"
+
+  RESULT=$(lane_find_latest myproj dev 1)
+  echo "OLD_DIR:$LANE_DIR_OLD"
+  echo "NEW_DIR:$LANE_DIR_NEW"
+  echo "SELECTED:$RESULT"
+' > "$TMPROOT/tc054.out" 2>&1
+OUT054=$(cat "$TMPROOT/tc054.out")
+OLD_DIR_054=$(printf '%s' "$OUT054" | grep '^OLD_DIR:' | cut -d: -f2-)
+NEW_DIR_054=$(printf '%s' "$OUT054" | grep '^NEW_DIR:' | cut -d: -f2-)
+SELECTED_054=$(printf '%s' "$OUT054" | grep '^SELECTED:' | cut -d: -f2-)
+if [[ "$SELECTED_054" == "$NEW_DIR_054" && -n "$NEW_DIR_054" ]]; then
+  assert_pass "TC-LGC2-054: lane_find_latest selects the structurally-newer lane even though its file is unparseable (not the older, intact sibling)"
+else
+  assert_fail "TC-LGC2-054: selected [$SELECTED_054], expected the NEWER dir [$NEW_DIR_054] (OLD was [$OLD_DIR_054])"
+fi
+
+# TC-LGC2-055: end-to-end — once the newer-but-corrupted lane is selected,
+# lane_probe must resolve it to `unknown` (never a false live/dead), so a
+# caller like kill_stale_wrapper's delegate correctly falls through WITHOUT
+# ever touching the older lane's still-relevant pgids.
+bash -c '
+  set -u
+  export ADT_STATE_ROOT="'"$TMPROOT"'/state55"
+  source "'"$LIB_LANE"'"
+
+  LANE_ID_OLD=$(lane_mint myproj dev 2)
+  LANE_DIR_OLD=$(lane_install myproj "$LANE_ID_OLD")
+  ( exit 0 ) & DEADPID=$!; wait "$DEADPID" 2>/dev/null
+  sed -i "s/^WRAPPER_PID=.*/WRAPPER_PID=$DEADPID/" "$LANE_DIR_OLD/lane"
+  setsid sleep 30 & OLD_PG=$!
+  lane_record_pgid "$LANE_DIR_OLD" "$OLD_PG" agent
+
+  sleep 1
+  LANE_ID_NEW=$(lane_mint myproj dev 2)
+  LANE_DIR_NEW=$(lane_install myproj "$LANE_ID_NEW")
+  echo "totally-unparseable-garbage" > "$LANE_DIR_NEW/lane"
+
+  SELECTED=$(lane_find_latest myproj dev 2)
+  PROBE=$(lane_probe "$SELECTED")
+  echo "PROBE:$PROBE"
+  echo "OLD_PG:$OLD_PG"
+' > "$TMPROOT/tc055.out" 2>&1
+OUT055=$(cat "$TMPROOT/tc055.out")
+PROBE_055=$(printf '%s' "$OUT055" | grep '^PROBE:' | cut -d: -f2-)
+OLDPG_055=$(printf '%s' "$OUT055" | grep '^OLD_PG:' | cut -d: -f2-)
+assert_contains "TC-LGC2-055a: lane_probe on the selected (newer, corrupted) lane resolves unknown" "unknown" "$PROBE_055"
+sleep 0.3
+if [[ -n "$OLDPG_055" ]] && kill -0 "$OLDPG_055" 2>/dev/null; then
+  assert_pass "TC-LGC2-055b: the OLDER lane's live pgid is untouched — the delegate never reaps the wrong lane"
+else
+  assert_fail "TC-LGC2-055b: the OLDER lane's pgid was reaped even though the selected (newer) lane was unknown, not dead"
+fi
+kill -9 "$OLDPG_055" 2>/dev/null || true
+
+# ---------------------------------------------------------------------------
+echo ""
 echo "=== TC-LGC2-060..064: kill_stale_wrapper's lane_kill delegate ==="
 # ---------------------------------------------------------------------------
 DISPATCH_LOCAL="$SCRIPTS/dispatch-local.sh"
