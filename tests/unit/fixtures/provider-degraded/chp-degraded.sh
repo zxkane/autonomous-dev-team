@@ -30,6 +30,14 @@
 # test.
 
 # chp_degraded_review_threads PR — mirrors chp_github_review_threads' M8 shape.
+#
+# #401 / #347 W1f: intentionally SHAPE-ONLY (single-page). The GitHub leaf
+# walks BOTH GraphQL pagination levels internally; the degraded fixture is
+# scoped to prove the M8 shape + leaf-presence for chp_has_leaf branching, not
+# completeness — which is per-provider per provider-spec.md §3.2 cell + §4.4.
+# The runner's chp_review_threads multi-page-completeness assertion is gated
+# to `--chp github` (`_run_review_threads_completeness_assert` in
+# tests/provider-conformance/run-provider-conformance.sh).
 chp_degraded_review_threads() {
   local pr="$1"
   local owner="${REPO%%/*}" name="${REPO##*/}"

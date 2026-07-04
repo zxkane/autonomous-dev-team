@@ -229,7 +229,6 @@ visibly enumerates the W1 backlog per R3.
 ## Non-goals (Out of Scope, unchanged)
 
 No WAIVED→LIVE caps wiring; no error-path/pagination fixtures for the 13
-`CONTRACT-PENDING` verbs; no `chp_review_threads` pagination-completeness
-assertion (shape only); no wrapper/provider-leaf behavior change (this PR adds
+`CONTRACT-PENDING` verbs; no wrapper/provider-leaf behavior change (this PR adds
 tests + a governing-cap DATA file + degraded leaf bodies that fail closed —
 `itp-github.sh`/`chp-github.sh` are untouched).

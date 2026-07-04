@@ -127,12 +127,45 @@ _STUB_GH="$STUB_DIR/gh"
 cat > "$_STUB_GH" <<'STUB'
 #!/bin/bash
 # Hermetic stub for `gh` (provider-conformance verb replay).
+#
+# Two payload-selection modes (invocation-count keyed, not argv-keyed — argv-
+# keyed selection is a re-implementation of the leaf's own cursor logic and
+# would defeat the completeness assertion):
+#
+#   $_PCF_GH_PAYLOAD          single canned payload file (legacy shape used
+#                             by every existing verb assertion).
+#   $_PCF_GH_PAYLOAD_SEQ      colon-separated list of payload files served
+#                             in invocation order (payload #1 on first
+#                             invocation, #2 on second, …, LAST cycled on
+#                             exhaustion). Invocation-count state lives in
+#                             $_PCF_GH_SEQ_STATE (a file the stub increments
+#                             on each call). $_PCF_GH_PAYLOAD wins if BOTH
+#                             are set (backward compatibility).
+#
+#   $_PCF_GH_FAIL_AT          "N" — force this invocation (1-indexed) to
+#                             fail. Non-matching invocations honor
+#                             $_PCF_GH_MODE. Drives the mid-walk-failure
+#                             assertion for multi-page leaves.
+#
+# Legacy $_PCF_GH_MODE=fail forces ALL invocations to fail.
 printf '%s\n' "$@" > "${_PCF_ARGV_FILE:?}"
 for _a in "$@"; do
   case "$_a" in
     */labels/*) exit 1 ;;   # force the itp_provision_states existence probe not-found
   esac
 done
+
+_inv=0
+if [[ -n "${_PCF_GH_SEQ_STATE:-}" && -f "$_PCF_GH_SEQ_STATE" ]]; then
+  _inv=$(<"$_PCF_GH_SEQ_STATE")
+fi
+_inv=$((_inv + 1))
+[[ -n "${_PCF_GH_SEQ_STATE:-}" ]] && printf '%s' "$_inv" > "$_PCF_GH_SEQ_STATE"
+
+if [[ -n "${_PCF_GH_FAIL_AT:-}" && "$_PCF_GH_FAIL_AT" == "$_inv" ]]; then
+  printf 'stub-gh: simulated failure at invocation %d (fail-at)\n' "$_inv" >&2
+  exit 1
+fi
 if [[ "${_PCF_GH_MODE:-ok}" == "fail" ]]; then
   printf 'stub-gh: simulated failure\n' >&2
   exit 1
@@ -153,7 +186,16 @@ if [[ "${1:-}" == "api" && "${2:-}" == "--paginate" ]]; then
   fi
   exit 0
 fi
+
 _payload="${_PCF_GH_PAYLOAD:-}"
+if [[ -z "$_payload" && -n "${_PCF_GH_PAYLOAD_SEQ:-}" ]]; then
+  # Pick the $_inv-th `:`-separated file (1-indexed; clamp to LAST on overflow).
+  IFS=':' read -r -a _seq <<< "$_PCF_GH_PAYLOAD_SEQ"
+  _n=${#_seq[@]}
+  _idx=$((_inv - 1))
+  (( _idx >= _n )) && _idx=$((_n - 1))
+  _payload="${_seq[$_idx]}"
+fi
 [[ -n "$_payload" && -f "$_payload" ]] || { printf ''; exit 0; }
 _q=""
 _prev=""
@@ -886,6 +928,76 @@ _run_prlist_assert() {
   emit PASS "$verb"
 }
 
+# _run_review_threads_completeness_assert — #401 / #347 W1f.
+#
+# Drives chp_review_threads through the payload-sequence stub-gh mode and
+# asserts:
+#   (a) a 2-page thread walk yields a MERGED M8 array of length 4 (all page-1
+#       + page-2 threads present, in arrival order).
+#   (b) a mid-walk failure (page 2 fails) yields rc != 0 with NO partial
+#       stdout — fail-closed contract.
+#
+# Emits ONE additional CONFORMANCE-PCONF line for chp_review_threads
+# ("PASS completeness" / "FAIL …") — the shape assertion has already emitted
+# its own PASS/FAIL earlier in the case arm. Runs only for --chp github; the
+# degraded provider is single-page-by-design (§3.2 cell / §4.4).
+_run_review_threads_completeness_assert() {
+  local verb="chp_review_threads"
+  local argv_file="$work_root/.argv-$verb-mp.json"
+  local seq_state="$work_root/.seq-$verb.state"
+  local p1="$PAYLOADS/review-threads-multipage-p1.json"
+  local p2="$PAYLOADS/review-threads-multipage-p2.json"
+  [[ -f "$p1" && -f "$p2" ]] || {
+    emit FAIL "$verb" "multi-page fixtures missing (expected $p1 + $p2)"
+    return
+  }
+
+  # (a) Successful 2-page walk: length 4, arrival order preserved.
+  : > "$seq_state"
+  local out rc
+  out="$(_invoke \
+      _PCF_GH_MODE="ok" _PCF_ARGV_FILE="$argv_file" \
+      _PCF_GH_PAYLOAD_SEQ="$p1:$p2" _PCF_GH_SEQ_STATE="$seq_state" \
+      "$verb 42" 2>&1)"; rc=$?
+  if [[ "$rc" != "0" ]]; then
+    emit FAIL "$verb" "completeness: expected rc 0 on 2-page walk, got rc=$rc (out: ${out:0:200})"
+    return
+  fi
+  if ! pcf_is_json_array "$out"; then
+    emit FAIL "$verb" "completeness: 2-page walk did not produce a JSON array (out: ${out:0:200})"
+    return
+  fi
+  local n; n=$(jq 'length' <<<"$out" 2>/dev/null || echo 0)
+  if [[ "$n" != "4" ]]; then
+    emit FAIL "$verb" "completeness: expected 4 merged threads, got $n (arrival-order merge failed; out: ${out:0:200})"
+    return
+  fi
+  local order
+  order=$(jq -r '[.[].thread_id] | join(",")' <<<"$out" 2>/dev/null || echo "")
+  if [[ "$order" != "PRRT_P1_A,PRRT_P1_B,PRRT_P2_A,PRRT_P2_B" ]]; then
+    emit FAIL "$verb" "completeness: arrival order violated (got: $order)"
+    return
+  fi
+
+  # (b) Mid-walk failure: page 1 OK, page 2 FAILs → rc != 0, empty stdout.
+  : > "$seq_state"
+  out="$(_invoke \
+      _PCF_GH_MODE="ok" _PCF_ARGV_FILE="$argv_file" \
+      _PCF_GH_PAYLOAD_SEQ="$p1:$p2" _PCF_GH_SEQ_STATE="$seq_state" \
+      _PCF_GH_FAIL_AT="2" \
+      "$verb 42" 2>/dev/null)"; rc=$?
+  if [[ "$rc" == "0" ]]; then
+    emit FAIL "$verb" "completeness: mid-walk failure did not surface (rc=0; out: ${out:0:200})"
+    return
+  fi
+  if [[ -n "${out//[[:space:]]/}" ]]; then
+    emit FAIL "$verb" "completeness: mid-walk failure produced partial stdout (fail-closed violated; out: ${out:0:200})"
+    return
+  fi
+
+  emit PASS "$verb" "multi-page completeness (2-page walk + mid-walk fail-closed)"
+}
+
 # ---------------------------------------------------------------------------
 # Drive each ASSERTED verb per cap-map.conf.
 # ---------------------------------------------------------------------------
@@ -957,6 +1069,12 @@ _assert_verb() {
       ;;
     chp_review_threads)
       _run_shape_assert "$verb" 'chp_review_threads 42' "$PAYLOADS/review-threads-valid.json" 0
+      # #401 / #347 W1f — multi-page COMPLETENESS is asserted for --chp github
+      # only (the degraded fixture is single-page-by-design; completeness is
+      # per-provider per §3.2 cell + §4.4). Skip cleanly on any non-github CHP.
+      if [[ "$CHP_NAME" == "github" ]]; then
+        _run_review_threads_completeness_assert
+      fi
       ;;
     chp_resolve_thread)
       _run_write_assert "$verb" "graphql -F threadId=TID" "TID"

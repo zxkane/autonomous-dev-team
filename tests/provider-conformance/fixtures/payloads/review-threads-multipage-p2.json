@@ -1,0 +1,49 @@
+{
+  "data": {
+    "repository": {
+      "pullRequest": {
+        "reviewThreads": {
+          "pageInfo": { "hasNextPage": false, "endCursor": null },
+          "nodes": [
+            {
+              "id": "PRRT_P2_A",
+              "isResolved": false,
+              "comments": {
+                "pageInfo": { "hasNextPage": false, "endCursor": null },
+                "nodes": [
+                  {
+                    "databaseId": 200001,
+                    "path": "src/c.sh",
+                    "line": 33,
+                    "originalLine": 33,
+                    "author": { "login": "kane-review-agent" },
+                    "body": "p2-a",
+                    "createdAt": "2026-01-01T01:00:00Z"
+                  }
+                ]
+              }
+            },
+            {
+              "id": "PRRT_P2_B",
+              "isResolved": false,
+              "comments": {
+                "pageInfo": { "hasNextPage": false, "endCursor": null },
+                "nodes": [
+                  {
+                    "databaseId": 200002,
+                    "path": "src/d.sh",
+                    "line": 44,
+                    "originalLine": 44,
+                    "author": { "login": "alice" },
+                    "body": "p2-b",
+                    "createdAt": "2026-01-01T01:05:00Z"
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

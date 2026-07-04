@@ -1,0 +1,49 @@
+{
+  "data": {
+    "repository": {
+      "pullRequest": {
+        "reviewThreads": {
+          "pageInfo": { "hasNextPage": true, "endCursor": "TCURSOR_1" },
+          "nodes": [
+            {
+              "id": "PRRT_P1_A",
+              "isResolved": false,
+              "comments": {
+                "pageInfo": { "hasNextPage": false, "endCursor": null },
+                "nodes": [
+                  {
+                    "databaseId": 100001,
+                    "path": "src/a.sh",
+                    "line": 11,
+                    "originalLine": 11,
+                    "author": { "login": "codex[bot]" },
+                    "body": "p1-a",
+                    "createdAt": "2026-01-01T00:00:00Z"
+                  }
+                ]
+              }
+            },
+            {
+              "id": "PRRT_P1_B",
+              "isResolved": true,
+              "comments": {
+                "pageInfo": { "hasNextPage": false, "endCursor": null },
+                "nodes": [
+                  {
+                    "databaseId": 100002,
+                    "path": "src/b.sh",
+                    "line": 22,
+                    "originalLine": 22,
+                    "author": { "login": "zxkane" },
+                    "body": "p1-b",
+                    "createdAt": "2026-01-01T00:05:00Z"
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

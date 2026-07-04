@@ -1,0 +1,5 @@
+Source: docs/test-cases/w1f-review-threads-pagination.md (TC-W1F-001 — thread-level page 1).
+Origin: synthetic; pageInfo.hasNextPage=true with endCursor "TCURSOR_1"; 2 threads.
+Provenance: authored 2026-07-04 for #401 (#347 W1f). Not from live GitHub.
+Notes: Paired with review-threads-multipage-p2.json — served in invocation
+order by the runner's _PCF_GH_PAYLOAD_SEQ mode.

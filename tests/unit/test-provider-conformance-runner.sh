@@ -33,20 +33,25 @@ command -v jq >/dev/null 2>&1 || { echo "jq required"; exit 1; }
 source "$LIB"
 
 # ===========================================================================
-echo "=== TC-PCONF-014: --itp github --chp github exits 0, all asserted verbs PASS, CONFORMANCE-SUMMARY fail=0 (post-W1e = no pending) ==="
+echo "=== TC-PCONF-014: --itp github --chp github exits 0, all asserted verbs PASS, CONFORMANCE-SUMMARY fail=0 (post-W1e = no pending; +1 for W1f completeness) ==="
 # ===========================================================================
 gh_out="$(bash "$RUNNER" --itp github --chp github 2>&1)"; gh_rc=$?
 assert_eq "AC1: github/github exits 0" "0" "$gh_rc"
 gh_pass_count="$(grep -c '^CONFORMANCE-PCONF github/github .* PASS$' <<<"$gh_out")"
 # Runner emits N PASS lines: 26 asserted verbs, + 1 for the #393 itp_list_comments
 # anti-false-green field/authorKind assertion, + 3 W1c2/W1d extra assertion lines
-# (chp_ci_status runs 3 = all-success/mixed-failure/empty; chp_mergeable runs 1).
+# (chp_ci_status runs 3 = all-success/mixed-failure/empty; chp_mergeable runs 1),
+# + 1 for the #401 W1f chp_review_threads multi-page completeness assertion
+# (payload-sequence stub-gh mode emits its OWN CONFORMANCE-PCONF PASS line
+# separately from the shape assertion).
 # Post-#400 pending=0 (every CHP verb landed through the asserted set).
 # Trust the runner output — VERIFY with `bash tests/provider-conformance/run-provider-conformance.sh`.
-assert_eq "AC1: 30 PASS lines on github/github (26 asserted verbs + #393 list_comments field + W1c2/W1d extra assertion lines)" "30" "$gh_pass_count"
-assert_contains "AC1: CONFORMANCE-SUMMARY line present with fail=0 and pending=0" "CONFORMANCE-SUMMARY total=30 pass=30 fail=0 skip=0 pending=0" "$gh_out"
+assert_eq "AC1: 31 PASS lines on github/github (26 asserted verbs + #393 list_comments field + W1c2/W1d extra + #401 completeness)" "31" "$gh_pass_count"
+assert_contains "AC1: CONFORMANCE-SUMMARY line present with fail=0 and pending=0" "CONFORMANCE-SUMMARY total=31 pass=31 fail=0 skip=0 pending=0" "$gh_out"
 assert_contains "TC-PCONF-043: itp_read_task (github) PASSes the object-shape/fields-subset/fail-closed assertion" \
   "CONFORMANCE-PCONF github/github itp_read_task PASS" "$gh_out"
+# #401: multi-page completeness assertion emitted its own PASS line.
+assert_contains "TC-W1F-008: chp_review_threads completeness PASS emitted on github" "chp_review_threads PASS" "$gh_out"
 
 # ===========================================================================
 echo ""
@@ -235,7 +240,7 @@ if pcf_is_json_object ''; then bad "TC-PCONF-056: empty text should be false"; e
 
 # ===========================================================================
 echo ""
-echo "=== AC4/AC5 sanity: this issue changed no CHP wrapper/provider-leaf/caps-branch behavior (byte-diff pin lifted for W1c1 + W1c2 + W1d + W1e) ==="
+echo "=== AC4/AC5 sanity: this issue changed no CHP wrapper/provider-leaf/caps-branch behavior (byte-diff pin lifted for W1c1 + W1c2 + W1d + W1e + W1f) ==="
 # ===========================================================================
 # chp-github.sh was previously UNTOUCHED by the #370/W1a-adjacent slice — a
 # byte-diff-free sanity check pinned that promise. Subsequent explicit W1
@@ -256,11 +261,19 @@ echo "=== AC4/AC5 sanity: this issue changed no CHP wrapper/provider-leaf/caps-b
 #     own their gh flag-tails). Parity anchor:
 #     `tests/unit/test-w1e-chp-write-parity.sh` (decision + seam-trace +
 #     strict live-wrapper source pins).
+#   - W1f (#401) — `chp_github_review_threads` converted to a two-level
+#     GraphQL cursor walk (thread + per-thread comment level) with
+#     fail-closed validation of every page response (rejects `.errors`,
+#     requires the connection paths non-null). Regression + completeness
+#     proofs: `tests/unit/test-chp-pr-lifecycle.sh`'s TC-CHP-THREAD-SHAPE
+#     + TC-CHP-THREADS-MULTIPAGE-* (TC-W1F-001..006 + 003a..c) +
+#     `tests/provider-conformance/run-provider-conformance.sh`'s
+#     `_run_review_threads_completeness_assert`.
 #
 # The byte-diff check on chp-github.sh is retired as redundant with the
 # decision-level parity suites that back each rewrite. The itp-github.sh
-# byte-diff check likewise stays off (already lifted by W1a).
-ok "AC4/AC5: byte-diff pin on chp-github.sh LIFTED for W1c1 (#397) + W1c2 (#398) + W1d (#399) + W1e (#400) — parity proofs live in the four per-slice parity suites"
+# byte-diff check likewise stays off (already lifted by W1a + W1b).
+ok "AC4/AC5: byte-diff pin on chp-github.sh LIFTED for W1c1 (#397) + W1c2 (#398) + W1d (#399) + W1e (#400) + W1f (#401) — parity proofs live in the five per-slice parity suites"
 
 # ===========================================================================
 echo ""

@@ -553,38 +553,58 @@ chp_github_merge() {
   gh pr merge "$pr" --repo "$REPO" --squash --delete-branch
 }
 
-# chp_github_review_threads PR — unresolved review threads, M8 thread shape.
+# chp_github_review_threads PR — COMPLETE review-thread set, M8 shape.
 #
-# Spec §3.2 [M8]: the reviewThreads GraphQL list (resolve-threads.sh). Emits the
-# CHP thread shape, DISTINCT from the ITP issue-comment shape (itp_list_comments):
+# Spec §3.2 [M8] / §3.5: walks BOTH GraphQL pagination levels internally and
+# returns the CHP thread shape — DISTINCT from the ITP issue-comment shape
+# ([INV-90]):
 #   [{thread_id, resolved, comments:[{id, path, line, author, body, createdAt}]}]
-# The inline `.path`/`.line` fields are CHP-owned and NEVER appear in the ITP
-# shape. `$REPO` is split into owner/name for the GraphQL query (the historical
-# resolve-threads.sh CLI took owner+repo as separate args; here we derive both
-# from $REPO so the verb signature is provider-neutral `PR`).
+# `.path`/`.line` are CHP-owned and never appear in the ITP shape. `$REPO` is
+# split into owner/name for the query (the historical resolve-threads.sh CLI
+# took owner+repo as separate args; the verb signature is provider-neutral `PR`).
 #
-# Today's resolve-threads.sh selects only UNRESOLVED thread ids
-# (`select(.isResolved==false).id`); this verb returns the FULL thread set with
-# the per-thread `resolved` flag + inline comments, so the caller can select
-# unresolved (`.[]|select(.resolved==false).thread_id`) byte-identically while
-# also having the richer shape the spec mandates. §3.5: the GraphQL `first:100`
-# walk mirrors today's behavior (resolve-threads.sh:46) and returns the set.
+# Sole caller: skills/autonomous-common/scripts/resolve-threads.sh (selects
+# `.[]|select(.resolved==false).thread_id` for the resolveReviewThread mutation).
+#
+# Pagination (#401 / #347 W1f). `gh api graphql` is NOT auto-paginated, so
+# §3.5's complete-set MUST is implemented in the leaf itself:
+#
+#   1. Thread level — reviewThreads(first: 100, after: $threadCursor) with
+#      pageInfo{hasNextPage,endCursor}; loop while hasNextPage, appending
+#      nodes in arrival order.
+#   2. Comment level — each thread's comments(first: 100) selects its own
+#      pageInfo; a thread whose hasNextPage=true gets a follow-up
+#      node(id: $threadId) query walking comments(after: $commentCursor)
+#      the same way. Additional nodes append to that thread in arrival order.
+#
+# Pages merge BEFORE the jq normalization so the output stays byte-compatible
+# with the pre-#401 single-page contract when the PR fits in one page.
+#
+# Bounded walk: PAGE_CAP=50 pages per level (≈5000 threads or 5000 comments in
+# one thread) guards a pathological/hostile backend against a wrapper-lane hang.
+# Cap-hit is loud rc != 0 — never silent truncation.
+#
+# Fail-closed [#401 R2]: every `gh api graphql` call is captured and its exit
+# checked BEFORE merging. Any mid-walk failure discards the accumulator and
+# returns rc != 0 with NO partial stdout — a partial thread set would recreate
+# the silent-truncation bug under a different name. Mirrors
+# chp_github_count_reviews_by_login's capture-check-sum pattern ([INV-94]).
 chp_github_review_threads() {
   local pr="$1"
   local owner="${REPO%%/*}" name="${REPO##*/}"
-  gh api graphql \
-    -F owner="$owner" \
-    -F repo="$name" \
-    -F prNumber="$pr" \
-    -f query='
-query($owner: String!, $repo: String!, $prNumber: Int!) {
+  local page_cap=50
+
+  local thread_query='
+query($owner: String!, $repo: String!, $prNumber: Int!, $threadCursor: String) {
   repository(owner: $owner, name: $repo) {
     pullRequest(number: $prNumber) {
-      reviewThreads(first: 100) {
+      reviewThreads(first: 100, after: $threadCursor) {
+        pageInfo { hasNextPage endCursor }
         nodes {
           id
           isResolved
           comments(first: 100) {
+            pageInfo { hasNextPage endCursor }
             nodes {
               databaseId
               path
@@ -599,17 +619,134 @@ query($owner: String!, $repo: String!, $prNumber: Int!) {
       }
     }
   }
-}' --jq '
-    [ .data.repository.pullRequest.reviewThreads.nodes[]
-      | { thread_id: .id,
-          resolved: .isResolved,
-          comments: [ .comments.nodes[]
-                      | { id: .databaseId,
-                          path: .path,
-                          line: (.line // .originalLine),
-                          author: (.author.login // null),
-                          body: (.body // ""),
-                          createdAt: .createdAt } ] } ]'
+}'
+
+  # Accumulator of raw thread nodes (JSON per line) — merged in arrival order.
+  local acc_threads='[]'
+  local thread_cursor='' page_out has_next end_cursor page=0 rc
+  while : ; do
+    page=$((page + 1))
+    if [ "$page" -gt "$page_cap" ]; then
+      echo "chp_github_review_threads: page cap ($page_cap) exceeded (thread level, PR #$pr)" >&2
+      return 1
+    fi
+    if [ -z "$thread_cursor" ]; then
+      page_out=$(gh api graphql \
+        -F owner="$owner" -F repo="$name" -F "prNumber=$pr" \
+        -f query="$thread_query")
+    else
+      page_out=$(gh api graphql \
+        -F owner="$owner" -F repo="$name" -F "prNumber=$pr" \
+        -F threadCursor="$thread_cursor" \
+        -f query="$thread_query")
+    fi
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+      echo "chp_github_review_threads: gh api graphql failed at thread page $page (rc=$rc, PR #$pr)" >&2
+      return "$rc"
+    fi
+    # Merge this page's nodes into the accumulator (fail-closed on jq errors).
+    if ! acc_threads=$(jq -c --argjson acc "$acc_threads" \
+      '$acc + (.data.repository.pullRequest.reviewThreads.nodes // [])' \
+      <<<"$page_out"); then
+      echo "chp_github_review_threads: jq merge failed at thread page $page (PR #$pr)" >&2
+      return 1
+    fi
+    has_next=$(jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage // false' <<<"$page_out")
+    end_cursor=$(jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.endCursor // ""' <<<"$page_out")
+    if [ "$has_next" != "true" ]; then
+      break
+    fi
+    if [ -z "$end_cursor" ] || [ "$end_cursor" = "null" ]; then
+      echo "chp_github_review_threads: hasNextPage=true but endCursor empty (thread level, PR #$pr)" >&2
+      return 1
+    fi
+    thread_cursor="$end_cursor"
+  done
+
+  # Comment-level walk for any thread reporting comments.pageInfo.hasNextPage.
+  local comment_query='
+query($threadId: ID!, $commentCursor: String) {
+  node(id: $threadId) {
+    ... on PullRequestReviewThread {
+      comments(first: 100, after: $commentCursor) {
+        pageInfo { hasNextPage endCursor }
+        nodes {
+          databaseId
+          path
+          line
+          originalLine
+          author { login }
+          body
+          createdAt
+        }
+      }
+    }
+  }
+}'
+  local idx count thread_id start_cursor comment_page comment_out
+  count=$(jq 'length' <<<"$acc_threads")
+  idx=0
+  while [ "$idx" -lt "$count" ]; do
+    if [ "$(jq -r ".[$idx].comments.pageInfo.hasNextPage // false" <<<"$acc_threads")" = "true" ]; then
+      thread_id=$(jq -r ".[$idx].id" <<<"$acc_threads")
+      start_cursor=$(jq -r ".[$idx].comments.pageInfo.endCursor // \"\"" <<<"$acc_threads")
+      if [ -z "$start_cursor" ] || [ "$start_cursor" = "null" ]; then
+        echo "chp_github_review_threads: comments.hasNextPage=true but endCursor empty (thread $thread_id, PR #$pr)" >&2
+        return 1
+      fi
+      local cur="$start_cursor"
+      comment_page=0
+      while : ; do
+        comment_page=$((comment_page + 1))
+        if [ "$comment_page" -gt "$page_cap" ]; then
+          echo "chp_github_review_threads: page cap ($page_cap) exceeded (comment level, thread $thread_id, PR #$pr)" >&2
+          return 1
+        fi
+        comment_out=$(gh api graphql \
+          -F "threadId=$thread_id" \
+          -F commentCursor="$cur" \
+          -f query="$comment_query")
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+          echo "chp_github_review_threads: gh api graphql failed at comment page $comment_page (thread $thread_id, PR #$pr, rc=$rc)" >&2
+          return "$rc"
+        fi
+        if ! acc_threads=$(jq -c --argjson pageResp "$comment_out" --argjson i "$idx" '
+          .[$i].comments.nodes += ($pageResp.data.node.comments.nodes // [])
+          | .[$i].comments.pageInfo = ($pageResp.data.node.comments.pageInfo // {"hasNextPage":false,"endCursor":null})
+        ' <<<"$acc_threads"); then
+          echo "chp_github_review_threads: jq merge failed at comment page $comment_page (thread $thread_id, PR #$pr)" >&2
+          return 1
+        fi
+        has_next=$(jq -r '.data.node.comments.pageInfo.hasNextPage // false' <<<"$comment_out")
+        if [ "$has_next" != "true" ]; then
+          break
+        fi
+        cur=$(jq -r '.data.node.comments.pageInfo.endCursor // ""' <<<"$comment_out")
+        if [ -z "$cur" ] || [ "$cur" = "null" ]; then
+          echo "chp_github_review_threads: comments.hasNextPage=true but endCursor empty (thread $thread_id, PR #$pr, page $comment_page)" >&2
+          return 1
+        fi
+      done
+    fi
+    idx=$((idx + 1))
+  done
+
+  # Normalize the assembled COMPLETE tree once. Shape byte-compatible with
+  # today's single-page output (the pre-#401 --jq filter, applied to the
+  # merged accumulator).
+  jq -c '
+    [ .[] | { thread_id: .id,
+              resolved: .isResolved,
+              comments: [ .comments.nodes[]
+                          | { id: .databaseId,
+                              path: .path,
+                              line: (.line // .originalLine),
+                              author: (.author.login // null),
+                              body: (.body // ""),
+                              createdAt: .createdAt } ] } ]
+  ' <<<"$acc_threads"
 }
 
 # chp_github_resolve_thread THREAD_ID — resolve one review thread.

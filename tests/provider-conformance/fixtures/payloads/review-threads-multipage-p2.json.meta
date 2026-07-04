@@ -1,0 +1,4 @@
+Source: docs/test-cases/w1f-review-threads-pagination.md (TC-W1F-001 — thread-level page 2).
+Origin: synthetic; pageInfo.hasNextPage=false; 2 threads terminating the walk.
+Provenance: authored 2026-07-04 for #401 (#347 W1f). Not from live GitHub.
+Notes: Paired with review-threads-multipage-p1.json.

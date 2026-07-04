@@ -89,6 +89,12 @@ lifecycle verbs are now asserted; no `CONTRACT-PENDING` remains):
   payload. `chp_list_inline_comments` (W1c2, #398) additionally asserts the
   leaf-side `line // original_line // null` fold + fail-CLOSED on any page
   fail AND on rc-0 empty stdout (a real zero-comment PR emits literal `[]`).
+  **`chp_review_threads` (W1f, #401) also asserts multi-page completeness**:
+  the payload-sequence stub-gh mode drives the leaf against a 2-page thread
+  fixture (and a nested >first-page comments fixture) and asserts a full
+  merged M8 array (both pages present); a mid-walk-failure fixture asserts
+  rc != 0 with no partial output. The degraded provider asserts SHAPE ONLY
+  here — completeness is per-provider, scoped to `--chp github`.
 - **Single-object shape + fields-subset + fail-closed** (`itp_read_task`,
   W1b #396; `chp_pr_view`, W1c2 #398) — the normalized-object shape, a
   fields-subset request returning EXACTLY the requested keys, and fail-CLOSED
@@ -162,9 +168,10 @@ for the full table.
   provider-neutral ITP/CHP verb contract.
 - **Out of scope**: WAIVED→LIVE caps wiring (that's `test-provider-caps-branches.sh`'s
   tripwire); error-path/pagination fixtures for the residual `CONTRACT-PENDING`
-  verbs (arrive per W1 slice); `chp_review_threads` pagination-COMPLETENESS
-  (shape only — see `provider-spec.md` §3.2's known cut-line); any wrapper,
-  provider-leaf, or dispatcher behavior change.
+  verbs (arrive per W1 slice); any wrapper, provider-leaf, or dispatcher
+  behavior change. (`chp_review_threads` pagination-completeness moved
+  IN scope in #401 / #347 W1f, per the "Shape + malformed-JSON handling"
+  bullet above; the degraded provider still asserts shape only.)
 
 ## CI placement
 
