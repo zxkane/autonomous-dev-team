@@ -784,11 +784,21 @@ chp_github_list_inline_comments() {
   # PR_REVIEW_COMMENTS, matching the shim's own leaf-absent WARN + rc 1
   # convention.
   [[ -n "$raw" ]] || return 1
-  # Slurp the concatenated page arrays into ONE array; then normalize +
-  # ascending sort. jq's --slurp folds the concatenated arrays into a
-  # flat array-of-arrays; `add // []` merges them (a real zero-comment PR
-  # emits `[]` — one empty array, still slurped into a 1-element array-of-
-  # arrays whose `add` is `[]`, distinct from the rejected empty-stdout case).
+  # Non-array page rejection (online-review r2, blocking): validate BEFORE the
+  # merge/normalize pass. `gh api --paginate` returning any rc-0 JSON OBJECT
+  # (e.g. `{}` on an unexpected shape, or `{"message":"Not Found"}` on a
+  # permission failure that gh's error path fell through — reproduced on-box)
+  # would previously slip through as `[]` (`add // []` on a non-array `add`
+  # picks the alt), fail-open into "no inline comments" in the dev-resume
+  # prompt, silently dropping review feedback. Two-stage guard: (1) slurp the
+  # concatenated page stream into an array-of-pages and check every page has
+  # `type == "array"`; if not, exit with rc 1 and no stdout. (2) Only when
+  # every page IS an array, run the real merge+normalize pass. A real
+  # zero-comment PR emits `[]` on each page (still passes `type == "array"`),
+  # so the empty-response contract is preserved (rc 0 + `[]`).
+  local _pages_ok
+  _pages_ok=$(jq -r --slurp 'all(type == "array")' <<<"$raw" 2>/dev/null) || return 1
+  [[ "$_pages_ok" == "true" ]] || return 1
   jq -c --slurp '
     (add // []) |
     [ .[]? | {

@@ -76,12 +76,16 @@ chp_broken_pr_view() {
   jq -c "{ ${_obj_body} }" <<<"$raw"
 }
 # Correct chp_list_inline_comments leaf (#398 W1c2) — page-walk + normalize +
-# empty-stdout fail-CLOSED (P2-3 codex fix).
+# empty-stdout fail-CLOSED (P2-3 codex fix) + non-array-page fail-CLOSED
+# (online-review r2 fix).
 chp_broken_list_inline_comments() {
   local pr="$1"
   local raw
   raw=$(gh api "repos/${REPO}/pulls/${pr}/comments" --paginate 2>/dev/null) || return 1
   [[ -n "$raw" ]] || return 1
+  local _pages_ok
+  _pages_ok=$(jq -r --slurp 'all(type == "array")' <<<"$raw" 2>/dev/null) || return 1
+  [[ "$_pages_ok" == "true" ]] || return 1
   jq -c --slurp '
     (add // []) |
     [ .[]? | {

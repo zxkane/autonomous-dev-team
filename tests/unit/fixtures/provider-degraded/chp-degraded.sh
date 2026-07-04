@@ -200,12 +200,16 @@ chp_degraded_pr_view() {
 
 # chp_degraded_list_inline_comments PR — mirrors chp_github_list_inline_comments
 # (#398 W1c2): page-walk + slurp/merge/sort/normalize; fail-CLOSED on failure
-# (rc≠0 propagation AND rc-0 empty-stdout rejection, P2-3 codex fix).
+# (rc≠0 propagation AND rc-0 empty-stdout rejection, P2-3 codex fix; AND
+# non-array-page rejection, online-review r2 fix).
 chp_degraded_list_inline_comments() {
   local pr="$1"
   local raw
   raw=$(gh api "repos/${REPO}/pulls/${pr}/comments" --paginate 2>/dev/null) || return 1
   [[ -n "$raw" ]] || return 1
+  local _pages_ok
+  _pages_ok=$(jq -r --slurp 'all(type == "array")' <<<"$raw" 2>/dev/null) || return 1
+  [[ "$_pages_ok" == "true" ]] || return 1
   jq -c --slurp '
     (add // []) |
     [ .[]? | {

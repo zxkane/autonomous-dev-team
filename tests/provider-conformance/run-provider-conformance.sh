@@ -615,6 +615,29 @@ _run_list_inline_comments_assert() {
     emit FAIL "$verb" "malformed-JSON page produced a non-empty array (should fail-CLOSED)"
     return
   fi
+
+  # W1c2 online-review r2 (blocking): non-array page → fail-CLOSED, NEVER `[]`.
+  # `gh api --paginate` returning ANY rc-0 JSON object (e.g. `{}` on an
+  # unexpected shape, or `{"message":"..."}` on a permission failure that
+  # gh's error path fell through) MUST reject — otherwise `add // []`
+  # collapses it to `[]` rc 0, indistinguishable from a real zero-comment PR
+  # and silently drops review feedback from autonomous-dev.sh's dev-resume
+  # prompt. This certifies a compliant provider gates on `type == "array"`.
+  local nonarr="$work_root/.nonarr-$verb.json"
+  printf '%s' '{}' > "$nonarr"
+  out="$(_invoke _PCF_GH_MODE="ok" _PCF_GH_PAYLOAD="$nonarr" _PCF_ARGV_FILE="$argv_file" "$invoke" 2>/dev/null)"; rc=$?
+  if [[ "$rc" == "0" || "$out" == "[]" ]]; then
+    emit FAIL "$verb" "non-array-page gate missing: rc-0 '{}' page accepted (must be rejected — W1c2 online-review r2)"
+    return
+  fi
+  # Also test the error-shaped object case explicitly.
+  local errobj="$work_root/.errobj-$verb.json"
+  printf '%s' '{"message":"Not Found"}' > "$errobj"
+  out="$(_invoke _PCF_GH_MODE="ok" _PCF_GH_PAYLOAD="$errobj" _PCF_ARGV_FILE="$argv_file" "$invoke" 2>/dev/null)"; rc=$?
+  if [[ "$rc" == "0" || "$out" == "[]" ]]; then
+    emit FAIL "$verb" "non-array-page gate missing: error-shaped object accepted (must be rejected — W1c2 online-review r2)"
+    return
+  fi
   emit PASS "$verb"
 }
 

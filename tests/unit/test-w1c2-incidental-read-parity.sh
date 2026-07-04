@@ -393,6 +393,91 @@ EOF_PAYLOAD
   else
     bad "r1-VOCAB-4 chp_github_list_inline_comments extra-arg passthrough hazard (rc=$rc out=[$out])"
   fi
+
+  # =======================================================================
+  # W1c2 online-review r2 (blocking): `chp_github_list_inline_comments` MUST
+  # validate every slurped page is a JSON ARRAY before merging/normalizing.
+  # Pre-r2 fail-open: `gh api --paginate` returning ANY rc-0 JSON object
+  # (e.g. `{}` on an unexpected shape, or `{"message":"Not Found"}` on a
+  # permission failure that gh's error path fell through) collapsed through
+  # `add // []` to `[]` rc 0 — indistinguishable from a real zero-comment PR.
+  # Autonomous-dev.sh would silently drop review feedback from the dev-resume
+  # prompt. Fix: `jq --slurp 'all(type == "array")'` gate; non-array page
+  # → rc≠0, no stdout. Real zero-comment PR (each page is `[]`, still an
+  # array) preserves rc 0 + `[]`.
+  # =======================================================================
+
+  # TC-R2-INLINE-1: `{}` from gh → rc≠0, no partial stdout.
+  rc=0; out=""
+  out=$(REPO=owner/repo bash -c '
+    source "'"$CHP_GITHUB"'"
+    gh() { echo "{}"; }
+    chp_github_list_inline_comments 42
+  ' 2>/dev/null) || rc=$?
+  if [[ "$rc" != "0" && -z "$out" ]]; then
+    ok "r2-INLINE-1 chp_github_list_inline_comments: gh returns '{}' (non-array) → fail-CLOSED (rc≠0, no stdout)"
+  else
+    bad "r2-INLINE-1 fail-OPEN on '{}' payload (rc=$rc out=[$out])"
+  fi
+
+  # TC-R2-INLINE-2: error-shaped object `{"message":"Not Found"}` → rc≠0.
+  # Models a permission failure that gh's error path swallowed to rc 0.
+  rc=0; out=""
+  out=$(REPO=owner/repo bash -c '
+    source "'"$CHP_GITHUB"'"
+    gh() { echo "{\"message\":\"Not Found\"}"; }
+    chp_github_list_inline_comments 42
+  ' 2>/dev/null) || rc=$?
+  if [[ "$rc" != "0" && -z "$out" ]]; then
+    ok "r2-INLINE-2 chp_github_list_inline_comments: gh returns error-shaped object → fail-CLOSED"
+  else
+    bad "r2-INLINE-2 fail-OPEN on error-shaped object (rc=$rc out=[$out])"
+  fi
+
+  # TC-R2-INLINE-3: mixed pages — one array followed by one object → rc≠0.
+  # Even a legitimate first page is dropped if any later page fails.
+  rc=0; out=""
+  out=$(REPO=owner/repo bash -c '
+    source "'"$CHP_GITHUB"'"
+    gh() { printf "%s" "[{\"id\":1,\"path\":\"a\",\"line\":1,\"body\":\"x\",\"created_at\":\"2026-06-27T09:00:00Z\",\"user\":{\"login\":\"a\"}}]{\"message\":\"err\"}"; }
+    chp_github_list_inline_comments 42
+  ' 2>/dev/null) || rc=$?
+  if [[ "$rc" != "0" && -z "$out" ]]; then
+    ok "r2-INLINE-3 chp_github_list_inline_comments: mixed [array,object] pages → fail-CLOSED (partial merge forbidden)"
+  else
+    bad "r2-INLINE-3 mixed pages leaked partial merge (rc=$rc out=[$out])"
+  fi
+
+  # TC-R2-INLINE-4: real zero-comment PR (gh emits literal `[]`) stays
+  # distinguishable — rc 0 + `[]`. This is the load-bearing case the r2
+  # fix must NOT regress (a zero-comment PR must still work).
+  rc=0; out=""
+  out=$(REPO=owner/repo bash -c '
+    source "'"$CHP_GITHUB"'"
+    gh() { echo "[]"; }
+    chp_github_list_inline_comments 42
+  ' 2>/dev/null) || rc=$?
+  if [[ "$rc" == "0" && "$out" == "[]" ]]; then
+    ok "r2-INLINE-4 chp_github_list_inline_comments: real zero-comment PR ([] page) → rc 0 + [] (still distinguishable from non-array failure)"
+  else
+    bad "r2-INLINE-4 zero-comment PR case regressed (rc=$rc out=[$out])"
+  fi
+
+  # TC-R2-INLINE-5: multi-page arrays still merge complete. Two
+  # concatenated array-pages yield one merged/normalized array with both
+  # elements — the r2 fix must not break the load-bearing completeness fix.
+  rc=0; out=""
+  out=$(REPO=owner/repo bash -c '
+    source "'"$CHP_GITHUB"'"
+    gh() { printf "%s" "[{\"id\":1,\"path\":\"a\",\"line\":1,\"body\":\"x\",\"created_at\":\"2026-06-27T09:00:00Z\",\"user\":{\"login\":\"a\"}}][{\"id\":2,\"path\":\"b\",\"line\":2,\"body\":\"y\",\"created_at\":\"2026-06-28T09:00:00Z\",\"user\":{\"login\":\"b\"}}]"; }
+    chp_github_list_inline_comments 42
+  ' 2>/dev/null) || rc=$?
+  local _n; _n=$(jq -c length 2>/dev/null <<<"$out")
+  if [[ "$rc" == "0" && "$_n" == "2" ]]; then
+    ok "r2-INLINE-5 chp_github_list_inline_comments: multi-page arrays merge complete (2 pages → 2 elements)"
+  else
+    bad "r2-INLINE-5 multi-page merge regressed (rc=$rc n=$_n out=[$out])"
+  fi
 else
   bad "codex-regression: chp-github.sh not found at $CHP_GITHUB"
 fi
