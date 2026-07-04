@@ -525,6 +525,90 @@ kill -9 "$OLDPG_055" 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
 echo ""
+echo "=== TC-LGC2-056/057: lane_find_latest same-second tie-break (install order) ==="
+# ---------------------------------------------------------------------------
+# Regression (codex review [P1] round 3, #378): lane_mint's epoch is
+# `date +%s`, so two quick redispatches for the same (project, role, issue)
+# can share the SAME epoch. The pre-fix comparison (`epoch -gt best_epoch`
+# only) kept whichever basename the glob scanned FIRST — i.e. the lexically
+# smallest — regardless of which lane was actually installed later. The fix
+# breaks epoch ties by the lane DIRECTORY's immutable birth time (created at
+# `.pending-*` mkdir, preserved across lane_install's rename), falling back
+# to the lexically-greater basename only where birth time is unavailable.
+#
+# TC-LGC2-056 — proven to FAIL against the pre-fix code: the OLDER lane's
+# rand4 sorts lexically FIRST, so the pre-fix first-scanned-wins picked the
+# older lane; install order must win.
+bash -c '
+  set -u
+  export ADT_STATE_ROOT="'"$TMPROOT"'/state56"
+  source "'"$LIB_LANE"'"
+
+  EPOCH=1700000000
+  LANE_DIR_OLD=$(lane_install myproj "myproj:dev:3:${EPOCH}:00aa")
+  sleep 0.1
+  LANE_DIR_NEW=$(lane_install myproj "myproj:dev:3:${EPOCH}:ffee")
+
+  RESULT=$(lane_find_latest myproj dev 3)
+  RESULT2=$(lane_find_latest myproj dev 3)
+  echo "NEW_DIR:$LANE_DIR_NEW"
+  echo "SELECTED:$RESULT"
+  [[ "$RESULT" == "$RESULT2" ]] && echo "DETERMINISTIC:yes" || echo "DETERMINISTIC:no"
+' > "$TMPROOT/tc056.out" 2>&1
+OUT056=$(cat "$TMPROOT/tc056.out")
+NEW_DIR_056=$(printf '%s' "$OUT056" | grep '^NEW_DIR:' | cut -d: -f2-)
+SELECTED_056=$(printf '%s' "$OUT056" | grep '^SELECTED:' | cut -d: -f2-)
+if [[ -n "$NEW_DIR_056" && "$SELECTED_056" == "$NEW_DIR_056" ]]; then
+  assert_pass "TC-LGC2-056: same-epoch tie resolves to the LATER-installed lane (pre-fix code returned the first-scanned older sibling)"
+else
+  assert_fail "TC-LGC2-056: selected [$SELECTED_056], expected the later-installed [$NEW_DIR_056]"
+fi
+assert_contains "TC-LGC2-056b: repeated scans converge on the same winner" "DETERMINISTIC:yes" "$OUT056"
+
+# TC-LGC2-057 — the tie-break is INSTALL ORDER, not basename lexicographics:
+# here the LATER-installed lane's rand4 sorts lexically FIRST, so a
+# lex-only backstop would pick the older sibling; only the dir-birth-time
+# key selects correctly. Skipped (with a pass note) where the filesystem
+# reports no usable birth time OR only 1-second granularity (macOS/BSD
+# `stat -f %B` — two installs 0.1s apart usually share a birth second, so
+# the documented lexical backstop legitimately decides there and this
+# install-order assertion would flake).
+bash -c '
+  set -u
+  export ADT_STATE_ROOT="'"$TMPROOT"'/state57"
+  source "'"$LIB_LANE"'"
+
+  PROBE_DIR="'"$TMPROOT"'/state57"; mkdir -p "$PROBE_DIR"
+  PROBE_KEY="$(_lane_birth_key "$PROBE_DIR")"
+  if [[ "$PROBE_KEY" == "$(printf "%020d.%s" 0 000000000)" || "$PROBE_KEY" == *.000000000 ]]; then
+    echo "SKIP:no-subsecond-birth-time"
+    exit 0
+  fi
+
+  EPOCH=1700000000
+  LANE_DIR_OLD=$(lane_install myproj "myproj:dev:4:${EPOCH}:ffee")
+  sleep 0.1
+  LANE_DIR_NEW=$(lane_install myproj "myproj:dev:4:${EPOCH}:00aa")
+
+  RESULT=$(lane_find_latest myproj dev 4)
+  echo "NEW_DIR:$LANE_DIR_NEW"
+  echo "SELECTED:$RESULT"
+' > "$TMPROOT/tc057.out" 2>&1
+OUT057=$(cat "$TMPROOT/tc057.out")
+if [[ "$OUT057" == *"SKIP:no-subsecond-birth-time"* ]]; then
+  assert_pass "TC-LGC2-057: skipped — no sub-second birth time on this filesystem (macOS/BSD 1s granularity or none); lexical backstop is the documented behavior there"
+else
+  NEW_DIR_057=$(printf '%s' "$OUT057" | grep '^NEW_DIR:' | cut -d: -f2-)
+  SELECTED_057=$(printf '%s' "$OUT057" | grep '^SELECTED:' | cut -d: -f2-)
+  if [[ -n "$NEW_DIR_057" && "$SELECTED_057" == "$NEW_DIR_057" ]]; then
+    assert_pass "TC-LGC2-057: same-epoch tie follows dir birth time (install order), even against a lexically-smaller basename"
+  else
+    assert_fail "TC-LGC2-057: selected [$SELECTED_057], expected the later-installed [$NEW_DIR_057] (birth-time key must beat lex order)"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
 echo "=== TC-LGC2-060..064: kill_stale_wrapper's lane_kill delegate ==="
 # ---------------------------------------------------------------------------
 DISPATCH_LOCAL="$SCRIPTS/dispatch-local.sh"

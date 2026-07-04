@@ -235,11 +235,29 @@ lane_dir() {
 # caller's own `lane_probe` (called on the returned dir) then correctly
 # resolves `unknown` for an unparseable file and falls through untouched —
 # exactly the desired behavior.
+#
+# SAME-SECOND ties (codex review [P1] round 3, #378): lane_mint's epoch is
+# `date +%s` (1s granularity), so two quick redispatches for the same
+# (project, role, issue) can legitimately share an epoch — the basename alone
+# then cannot encode which lane was actually installed later. The tie-break
+# must still be structural (never the `lane` FILE's content, per the
+# corruption rationale above), so equal-epoch candidates are ordered by the
+# lane DIRECTORY's own birth time (`_lane_birth_key`): the dir inode is
+# created once (as `.pending-<id>/`) and `lane_install`'s rename into place
+# keeps the same inode, so its birth timestamp is immutable and exactly
+# records install order at nanosecond granularity on Linux. Where the
+# filesystem/stat cannot report birth time (key collapses to the zero
+# constant) or two births genuinely compare equal (macOS 1s granularity),
+# the final backstop is the lexically-greater basename — arbitrary but
+# DETERMINISTIC, so repeated scans always converge on the same lane.
 lane_find_latest() {
   local project_id="$1" role="$2" issue="$3"
+  # C collation for the composite-key `>` compare below — locale-dependent
+  # strcoll() ordering of `.`/digits must not change which lane wins.
+  local LC_ALL=C LC_COLLATE=C
   local root
   root="$(_lanes_root "$project_id")"
-  local best="" best_epoch=-1
+  local best="" best_key=""
   local d base
   # ^(project_id_fs).(role).(issue).(epoch).(rand4)$ — anchored end-to-end so
   # a malformed/foreign basename never partially matches. project_id_fs is
@@ -256,14 +274,48 @@ lane_find_latest() {
     [[ "$base" =~ $pat ]] || continue
     [[ "${BASH_REMATCH[2]}" == "$role" ]] || continue
     [[ "${BASH_REMATCH[3]}" == "$issue" ]] || continue
-    local epoch="${BASH_REMATCH[4]}"
-    if [[ "$epoch" -gt "$best_epoch" ]]; then
-      best_epoch="$epoch"
+    # Composite ordering key: zero-padded mint epoch (primary, basename),
+    # then dir birth time (same-second tie-break, install order), then the
+    # basename itself (determinism backstop). Fixed-width numeric fields make
+    # plain string `>` a correct total order. `10#` pins decimal — a
+    # leading-zero epoch in a (foreign) basename must not flip printf/((...))
+    # into octal.
+    local key
+    key="$(printf '%020d' "$((10#${BASH_REMATCH[4]}))" 2>/dev/null).$(_lane_birth_key "$d").${base}"
+    if [[ -z "$best" || "$key" > "$best_key" ]]; then
+      best_key="$key"
       best="$d"
     fi
   done
   [[ -n "$best" ]] || return 1
   printf '%s\n' "$best"
+}
+
+# _lane_birth_key <dir> — echo a fixed-width, string-comparable form of the
+# directory inode's birth (creation) timestamp: `<secs%020d>.<frac-9-digits>`.
+# Linux: `stat -c %.W` (nanosecond-fractional birth via statx; coreutils
+# ≥8.31); macOS/BSD: `stat -f %B` (integer seconds). The dir inode is created
+# exactly once — `lane_install` renames `.pending-<id>/` into place, which
+# preserves the inode — so this timestamp is immutable install-order ground
+# truth, unlike the dir's mtime (mutated by `lane_set`'s tmp-file churn) or
+# any file's content/mtime inside it. Filesystems that don't record birth
+# make stat report 0 (GNU convention) — normalized here to the all-zeros
+# constant so both tie candidates compare equal and the caller falls through
+# to its basename backstop instead of trusting a bogus timestamp.
+_lane_birth_key() {
+  local d="$1" b sec frac
+  # LC_ALL=C: the fractional separator must be `.` (a locale comma would
+  # fail the format regex below and demote a real birth time to the zero key).
+  b="$(LC_ALL=C stat -c %.W "$d" 2>/dev/null)" || b="$(LC_ALL=C stat -f %B "$d" 2>/dev/null)" || b=""
+  sec="${b%%.*}"
+  if [[ ! "$b" =~ ^[0-9]+(\.[0-9]+)?$ ]] || [[ "$sec" =~ ^0+$ ]]; then
+    printf '%020d.%s' 0 000000000
+    return 0
+  fi
+  frac=""
+  [[ "$b" == *.* ]] && frac="${b#*.}"
+  frac="${frac}000000000"
+  printf '%020d.%s' "$((10#$sec))" "${frac:0:9}"
 }
 
 # lane_mint <project_id> <role> <issue> — echo a fresh

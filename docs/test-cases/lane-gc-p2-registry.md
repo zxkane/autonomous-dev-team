@@ -97,6 +97,8 @@ Test runner: `bash tests/unit/test-lib-lane.sh` (auto-discovered by the CI
 |----|----------|----------|
 | TC-LGC2-054 | **Regression (review-caught, pre-fix reproduced live):** an OLDER lane with an intact/parseable `lane` file coexists with a NEWER lane for the SAME `(project, role, issue)` whose `lane` file is entirely unparseable (garbage content) | `lane_find_latest` selects the NEWER lane (by directory-basename mint-epoch, never by `CREATED_EPOCH` read out of the file) — never silently falls back to the older, intact sibling |
 | TC-LGC2-055 | End-to-end: same setup as TC-LGC2-054, but the OLDER lane also has a live recorded pgid | `lane_probe` on the selected (newer, corrupted) lane resolves `unknown`; the older lane's pgid is left untouched — a caller (e.g. the `kill_stale_wrapper` delegate) never reaps the wrong lane |
+| TC-LGC2-056 | **Regression (codex review [P1] round 3):** two lanes for the SAME `(project, role, issue)` share the SAME mint epoch (`date +%s` granularity — quick redispatch), older lane's rand4 sorts lexically first | the LATER-installed lane wins (dir birth-time tie-break); repeated scans return the same winner (deterministic). Proven to FAIL against the pre-fix `epoch -gt` — it kept the first-scanned (older) sibling |
+| TC-LGC2-057 | Same-epoch tie where the LATER-installed lane's rand4 sorts lexically FIRST (install order and lexical order disagree) | install order still wins — the dir birth-time key decides, not basename lexicographics (skipped, documented, where the filesystem records no birth time — there the lexical backstop is the defined behavior) |
 
 ## `kill_stale_wrapper` delegate (AC7)
 
