@@ -87,13 +87,31 @@ argv=$(run_trace chp_ci_status 42 --json state -q '[.[].state]')
 assert_eq "TC-CHP-CI chp_ci_status byte-identical gh pr checks argv" \
   "pr checks 42 --repo $REPO --json state -q [.[].state] " "$argv"
 
-# TC-CHP-FINDPR — resolve_pr_for_issue's `gh pr list --json $FIELDS -q $q`. FIELDS
-# forwarded byte-identically (#148: `body` must survive in FIELDS; #274).
-argv=$(run_trace chp_find_pr_for_issue 282 "number,headRefOid,body" -q '.[0]')
-assert_eq "TC-CHP-FINDPR chp_find_pr_for_issue byte-identical gh pr list argv (FIELDS forwarded, M1)" \
-  "pr list --repo $REPO --state open --json number,headRefOid,body -q .[0] " "$argv"
+# TC-CHP-FINDPR — chp_find_pr_for_issue's ABSTRACT contract (W1c1 #397): the
+# leaf emits `gh api graphql -F owner=… -F repo=… -f query=…` with a cursor
+# page-walk (§3.5). No `--json`/`-q`/`--limit` cross the seam — pagination
+# lives in the leaf's own loop, not in gh's `--limit N` flag (which returns
+# partial rc 0 at N+1 candidates, the pre-#397 hazard #397 R1 explicitly
+# forbids). FIELDS-CSV is a REQUIRED positional; the leaf projects EXACTLY
+# the requested vocabulary keys plus the resolver keys (P1-1 fix). We assert
+# the observable gh argv shape: api graphql + owner/repo binds + query
+# carries pullRequests(first:100) + states filter + pageInfo cursor +
+# selects body (#148 anchor).
+argv=$(run_trace chp_find_pr_for_issue 282 "number,headRefOid,body")
+assert_contains "TC-CHP-FINDPR chp_find_pr_for_issue emits gh api graphql (not gh pr list, W1c1)" "api graphql" "$argv"
+assert_contains "TC-CHP-FINDPR chp_find_pr_for_issue -F owner=zxkane"                   "owner=zxkane" "$argv"
+assert_contains "TC-CHP-FINDPR chp_find_pr_for_issue -F repo=autonomous-dev-team"       "repo=autonomous-dev-team" "$argv"
+assert_contains "TC-CHP-FINDPR chp_find_pr_for_issue query carries pullRequests(first:100" "pullRequests(first: 100" "$argv"
+assert_contains "TC-CHP-FINDPR chp_find_pr_for_issue states filter present"             "states: [OPEN]" "$argv"
+assert_contains "TC-CHP-FINDPR chp_find_pr_for_issue pageInfo cursor present (§3.5)"    "pageInfo { endCursor hasNextPage" "$argv"
+assert_contains "TC-CHP-FINDPR chp_find_pr_for_issue query selects body (#148 anchor)"  " body " "$argv"
+if [[ "$argv" != *" -q "* ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-CHP-FINDPR no -q crosses the seam (jq is caller-side, W1c1 shape)"; PASS=$((PASS+1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-CHP-FINDPR -q leaked into gh argv: $argv"; FAIL=$((FAIL+1))
+fi
 
-# TC-CHP-FINDPR-FIELDS-REQUIRED — calling without FIELDS is an error (M1).
+# TC-CHP-FINDPR-FIELDS-REQUIRED — calling without FIELDS-CSV is an error (M1).
 rc=0
 env REPO="$REPO" bash -c 'gh(){ :; }; source "'"$CHP_LIB"'" 2>/dev/null; chp_find_pr_for_issue 282' >/dev/null 2>&1 || rc=$?
 [[ "$rc" -ne 0 ]] && { echo -e "  ${GREEN}PASS${NC}: TC-CHP-FINDPR-FIELDS-REQUIRED missing FIELDS errors (rc=$rc)"; PASS=$((PASS+1)); } \
@@ -142,12 +160,36 @@ assert_contains "TC-CHP-RESOLVE -F threadId forwards the thread id" "threadId=PR
 argv=$(run_trace chp_pr_view 42 --json state -q '.state')
 assert_eq "TC-CHP-PRVIEW chp_pr_view byte-identical gh pr view argv" \
   "pr view 42 --repo $REPO --json state -q .state " "$argv"
-argv=$(run_trace chp_pr_list --state open --json body -q '.[0]')
-assert_eq "TC-CHP-PRLIST chp_pr_list byte-identical gh pr list argv (--state forwarded, no hardcode)" \
-  "pr list --repo $REPO --state open --json body -q .[0] " "$argv"
-argv=$(run_trace chp_pr_list --state all --json createdAt,body -q 'X')
-assert_eq "TC-CHP-PRLIST-ALL chp_pr_list forwards --state all byte-identically (metrics #228 anchor)" \
-  "pr list --repo $REPO --state all --json createdAt,body -q X " "$argv"
+# TC-CHP-PRLIST — chp_pr_list's ABSTRACT contract (W1c1 #397): positional
+# STATE + FIELDS-CSV; leaf owns argv via `gh api graphql`. No `--limit`,
+# `--json`, `-q` cross the seam — pagination lives in the leaf's cursor
+# walker (§3.5). STATE maps to a GraphQL PullRequestState filter.
+argv=$(run_trace chp_pr_list open body)
+assert_contains "TC-CHP-PRLIST chp_pr_list emits gh api graphql (not gh pr list)" "api graphql" "$argv"
+assert_contains "TC-CHP-PRLIST chp_pr_list pullRequests(first:100" "pullRequests(first: 100" "$argv"
+assert_contains "TC-CHP-PRLIST chp_pr_list states=[OPEN] (positional STATE forwarded)" "states: [OPEN]" "$argv"
+assert_contains "TC-CHP-PRLIST chp_pr_list pageInfo cursor present (§3.5 exhaustion)" "pageInfo { endCursor hasNextPage" "$argv"
+assert_contains "TC-CHP-PRLIST chp_pr_list query selects body"       " body " "$argv"
+if [[ "$argv" != *" -q "* ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-CHP-PRLIST no -q crosses the seam (W1c1 shape)"; PASS=$((PASS+1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-CHP-PRLIST -q leaked into gh argv: $argv"; FAIL=$((FAIL+1))
+fi
+
+argv=$(run_trace chp_pr_list all "createdAt,body")
+assert_contains "TC-CHP-PRLIST-ALL chp_pr_list forwards STATE=all as states=[OPEN,CLOSED,MERGED] (metrics #228 anchor)" \
+  "states: [OPEN,CLOSED,MERGED]" "$argv"
+
+# TC-CHP-PRLIST-STATE-REQUIRED / TC-CHP-PRLIST-FIELDS-REQUIRED — both positional
+# args are required under the abstract contract; missing → rc != 0.
+rc=0
+env REPO="$REPO" bash -c 'gh(){ :; }; source "'"$CHP_LIB"'" 2>/dev/null; chp_pr_list' >/dev/null 2>&1 || rc=$?
+[[ "$rc" -ne 0 ]] && { echo -e "  ${GREEN}PASS${NC}: TC-CHP-PRLIST-STATE-REQUIRED missing STATE errors (rc=$rc)"; PASS=$((PASS+1)); } \
+                  || { echo -e "  ${RED}FAIL${NC}: TC-CHP-PRLIST-STATE-REQUIRED missing STATE did NOT error"; FAIL=$((FAIL+1)); }
+rc=0
+env REPO="$REPO" bash -c 'gh(){ :; }; source "'"$CHP_LIB"'" 2>/dev/null; chp_pr_list open' >/dev/null 2>&1 || rc=$?
+[[ "$rc" -ne 0 ]] && { echo -e "  ${GREEN}PASS${NC}: TC-CHP-PRLIST-FIELDS-REQUIRED missing FIELDS errors (rc=$rc)"; PASS=$((PASS+1)); } \
+                  || { echo -e "  ${RED}FAIL${NC}: TC-CHP-PRLIST-FIELDS-REQUIRED missing FIELDS did NOT error"; FAIL=$((FAIL+1)); }
 
 # ===========================================================================
 # 2. M8 review-thread shape — {thread_id, resolved, comments:[{id,path,line,…}]}.
@@ -245,7 +287,14 @@ if [[ -d "$FAKE_PROVIDER" ]]; then
       BTFILE="$btfile0" SENTINEL="$bt_sentinel0" \
     bash -c '
       log() { :; }
-      gh() { [[ "$1 $2" == "pr list" ]] && { echo 99; return 0; }; return 0; }
+      # W1c1 (#397): return a GraphQL envelope with one PR body-mentioning #282.
+      gh() {
+        if [[ "$1 $2" == "api graphql" ]]; then
+          printf %s "{\"data\":{\"repository\":{\"pullRequests\":{\"pageInfo\":{\"endCursor\":null,\"hasNextPage\":false},\"nodes\":[{\"number\":99,\"body\":\"Closes #282\"}]}}}}"
+          return 0
+        fi
+        return 0
+      }
       source "'"$CHP_LIB"'" 2>/dev/null
       chp_trigger_bot() { echo "TRIGGER_HIT:$*" >> "$SENTINEL"; }   # MUST NOT be reached on review_bots=0
       source "'"$SCRIPTS"'/lib-auth.sh" 2>/dev/null
@@ -437,15 +486,24 @@ assert_contains "TC-CHP-SHIM-NORENAME fetch_pr_for_issue keeps its exact name (f
 assert_contains "TC-CHP-SHIM resolve_pr_for_issue still defined" "RESOLVE_PRESENT" "$audit"
 assert_contains "TC-CHP-SHIM chp_find_pr_for_issue verb reachable from lib-dispatch.sh" "CHP_VERB_PRESENT" "$audit"
 
-# resolve_pr_for_issue reaches chp_find_pr_for_issue (stub the verb, observe the hit).
+# resolve_pr_for_issue reaches chp_find_pr_for_issue (stub the verb, observe the
+# hit). Under W1c1 (#397) the verb returns a normalized JSON ARRAY and the
+# caller-side jq runs a resolution filter over it, so the stub records its
+# received argv to a SIDE-CHANNEL FILE and returns a canned array — the
+# delegation trace comes from the sidecar, not the verb's stdout (which now
+# feeds a real jq).
+_delegate_trace=$(mktemp)
 delegated=$(
   env -u PROJECT_DIR REPO="$REPO" REPO_OWNER="$REPO_OWNER" PROJECT_ID=test-chp-$$ MAX_RETRIES=3 MAX_CONCURRENT=5 \
+    TRACE_FILE="$_delegate_trace" \
   bash -c '
     source "'"$SCRIPTS"'/lib-dispatch.sh" 2>/dev/null
-    chp_find_pr_for_issue() { echo "VERB_HIT:$2"; }   # override the github leaf
-    resolve_pr_for_issue 282 "number,body"
+    chp_find_pr_for_issue() { echo "VERB_HIT:$2" >> "$TRACE_FILE"; printf "[]"; }
+    resolve_pr_for_issue 282 "number,body" >/dev/null 2>&1
+    cat "$TRACE_FILE"
   '
 )
+rm -f "$_delegate_trace"
 assert_contains "TC-CHP-SHIM-DELEGATES resolve_pr_for_issue routes the leaf through chp_find_pr_for_issue" "VERB_HIT:number,body" "$delegated"
 
 # ===========================================================================
@@ -463,7 +521,16 @@ pr_sentinel=$(mktemp)
 env -u PROJECT_DIR REPO="$REPO" PRFILE="$prfile" SENTINEL="$pr_sentinel" \
   bash -c '
     log() { :; }
-    gh() { [[ "$1 $2" == "pr list" ]] && { echo 0; return 0; }; echo "RAW_GH_PR_CREATE:$*" >> "$SENTINEL"; }  # no existing PR; raw create MUST NOT be hit
+    # W1c1 (#397): chp_pr_list now emits `gh api graphql …` (cursor page walk).
+    # Return the empty-PR GraphQL envelope so the caller-side jq counts 0
+    # (no existing PR — the broker should then invoke chp_create_pr).
+    gh() {
+      if [[ "$1 $2" == "api graphql" ]]; then
+        printf %s "{\"data\":{\"repository\":{\"pullRequests\":{\"pageInfo\":{\"endCursor\":null,\"hasNextPage\":false},\"nodes\":[]}}}}"
+        return 0
+      fi
+      echo "RAW_GH_PR_CREATE:$*" >> "$SENTINEL"   # raw create MUST NOT be hit
+    }
     source "'"$CHP_LIB"'" 2>/dev/null
     chp_create_pr() { echo "CHP_CREATE_PR:$*" >> "$SENTINEL"; }   # override the github leaf
     source "'"$SCRIPTS"'/lib-auth.sh" 2>/dev/null
@@ -482,12 +549,22 @@ fi
 
 # drain_agent_bot_triggers: stub the verb + a trigger file + an allow-listed
 # phrase, assert the broker hits chp_trigger_bot (NOT a raw gh-as-user.sh).
+# Under W1c1 (#397) chp_pr_list is an ABSTRACT contract returning a normalized
+# JSON array; the gh stub returns a canned array containing PR #99 with a body
+# mentioning #282, so the caller-side jq selector resolves pr_number=99.
 btfile=$(mktemp); printf '/q review\n' > "$btfile"
 bt_sentinel=$(mktemp)
 env -u PROJECT_DIR REPO="$REPO" AUTONOMOUS_CONF_DIR="$COMMON_SCRIPTS" BTFILE="$btfile" SENTINEL="$bt_sentinel" \
   bash -c '
     log() { :; }
-    gh() { [[ "$1 $2" == "pr list" ]] && { echo 99; return 0; }; return 0; }  # PR #99 exists
+    # W1c1 (#397): return a GraphQL envelope with one node whose body mentions #282.
+    gh() {
+      if [[ "$1 $2" == "api graphql" ]]; then
+        printf %s "{\"data\":{\"repository\":{\"pullRequests\":{\"pageInfo\":{\"endCursor\":null,\"hasNextPage\":false},\"nodes\":[{\"number\":99,\"body\":\"Closes #282\"}]}}}}"
+        return 0
+      fi
+      return 0
+    }
     source "'"$CHP_LIB"'" 2>/dev/null
     chp_trigger_bot() { echo "CHP_TRIGGER_BOT:$*" >> "$SENTINEL"; }   # override the github leaf (broker discards its stdout)
     source "'"$SCRIPTS"'/lib-auth.sh" 2>/dev/null

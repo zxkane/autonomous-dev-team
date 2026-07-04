@@ -252,7 +252,7 @@ over a bare number, so the next mint does not re-drift the prose.
 
 | Verb | Replaces | Contract |
 |---|---|---|
-| `chp_find_pr_for_issue ISSUE FIELDS` | `fetch_pr_for_issue` (`lib-dispatch.sh:1471`, signature is `(issue_num, FIELDS)`) | Return PR JSON projected to the **caller-supplied `FIELDS`** field list, or empty. **`FIELDS` is a REQUIRED arg [M1]** — every caller varies it (`number,headRefOid,body`; `number,mergedAt,reviews`; `number,headRefOid`; `number,body,updatedAt` / `number,body,headRefOid` in `dispatcher-tick.sh`; `number,reviewDecision,mergeable,state,body` in `status.sh`). The GitHub impl forwards `FIELDS` to `gh pr list --json $FIELDS` **byte-identically**. The documented field vocabulary MUST include `reviewDecision`, `mergeable`, `state`. Regression anchors: #148 (omitting `body` silently breaks the `select(.body\|test("#N"))` filter), #274. **CONTRACT-PENDING** (#370). |
+| `chp_find_pr_for_issue ISSUE FIELDS-CSV` | `fetch_pr_for_issue` (`lib-dispatch.sh:2778`, signature is `(issue_num, FIELDS)`; delegates to `resolve_pr_for_issue` in `lib-pr-linkage.sh:69` under [INV-86]) | **Abstract contract (W1c1, #397)**: return a **NORMALIZED JSON ARRAY** of candidate open PRs projected to the caller's `FIELDS-CSV` ∪ the [INV-86] resolution keys (`number,closingIssueNumbers,headRefName`). **No gh flags and no jq programs cross the seam** — the caller passes only positional args and gets a normalized array; the leaf owns the gh argv + normalization jq. `ISSUE` is a **narrowing hint** the provider MAY use to prune candidates (but only when no true candidate can be excluded); the GitHub leaf documents but IGNORES the hint today (GraphQL/`gh` returns all open PRs and the caller narrows client-side). **Completeness [§3.5]:** the leaf walks pagination to exhaustion, bounded at `CHP_GITHUB_PR_LIST_PAGE_CAP` pages (default 20 → 2000 open PRs); cap-hit is **fail-CLOSED** (rc≠0, no partial array). A fixed `--limit N` is NOT acceptable — the whole point of W1c1 is closing the silent `--limit 30` truncation hazard. Empty result set → `[]` (never null). Fail-closed on any transport / auth / API failure. Regression anchors: #148 (`body` normalization to `""` fixes the null-body hazard for downstream body-mention tests); #274 (`body` is retained in the union); #277/[INV-86] (close-linkage beats body-mention — resolution jq stays caller-side, [`lib-pr-linkage.sh`](../../skills/autonomous-dispatcher/scripts/lib-pr-linkage.sh)); **W1c1** (the >30-candidate silent-truncation hazard). Normalized vocabulary: see §3.2.1 below. |
 | `chp_ci_status PR [extra gh args…]` | `ci_is_green` (`lib-dispatch.sh`) | **Current shipped contract (#367 correction):** a **focused-raw** leaf, the `chp_mergeable` shape — the caller supplies the `--json state -q '[.[].state]'` tail and the leaf forwards it byte-identically to `gh pr checks PR --repo $REPO "$@"`, returning the RAW per-check state array (e.g. `["SUCCESS","SUCCESS"]`). The `length>0 and all(.=="SUCCESS")` boolean gate that `ci_is_green` applies to that array **stays caller-side**; `ci_is_green` itself returns a boolean (`rc 0`/`1`), never a string. **Target contract — W1(d) (out of scope here):** normalizing the leaf itself to return one of `green`/`pending`/`failed`/`none` — the tokens this cell previously (incorrectly) claimed are produced today — is the still-open W1(d) slice; see the Mapping appendix row below for the as-shipped cut line. **CONTRACT-PENDING** (#370). |
 | `chp_mergeable PR [extra gh args…]` | **`autonomous-review.sh`** (`gh pr view … --json mergeable`), **NOT** `lib-review-mergeable.sh` | **Focused-raw** leaf: the caller supplies the `--json mergeable -q '.mergeable'`(or similar) tail and the leaf forwards it byte-identically to `gh pr view PR --repo $REPO "$@"`, returning the **raw backend `mergeable` token** (`MERGEABLE`/`CONFLICTING`/`UNKNOWN`/empty). **[M2]** `lib-review-mergeable.sh` is PURE classifiers (`_classify_mergeable_gate`, `_pr_open_gate`, [INV-44]/[INV-54]) doing zero gh I/O — its own header says the query "stays in the wrapper". Those classifiers **stay in the provider-neutral caller layer** and consume the verb's raw token; only the `gh pr view` leaf moves behind the verb. **CONTRACT-PENDING** (#370). |
 | `chp_create_pr …` | `gh pr create` site(s) | Create PR/MR. **CONTRACT-PENDING** (#370). |
@@ -262,7 +262,7 @@ over a bare number, so the next mint does not re-drift the prose.
 | `chp_review_threads PR` / `chp_resolve_thread …` | `resolve-threads.sh`, `lib-review-resolve.sh` | Review-thread I/O. **Separate shape from `itp_list_comments` [M8]:** `{thread_id, resolved, comments:[{id, path, line, author, body, createdAt}]}`. `resolve-threads.sh` selects GraphQL `reviewThreads.nodes[]\|select(.isResolved==false).id` and resolves by `threadId`; inline fields (`.path`/`.line`/`.original_line`, `autonomous-dev.sh`) are CHP-owned, never folded into the ITP issue-comment shape. **Known cut-line (§3.5):** the GitHub leaf's GraphQL walk is `reviewThreads(first: 100)` with no cursor pagination — §3.5 mandates the COMPLETE set; a PR with >100 threads is under-covered on GitHub today. Fixing the cursor walk is **W1(f)**, out of scope here — this cell only documents the known gap so the spec stops overclaiming completeness for this one leaf. **Asserted** (shape only, NOT pagination completeness) by `tests/provider-conformance/run-provider-conformance.sh` (#370). |
 | `chp_list_inline_comments PR` | the dev-resume `PR_REVIEW_COMMENTS` read (`autonomous-dev.sh`, the flat REST `gh api repos/$REPO/pulls/$PR/comments`) | Return the PR's **inline (file-anchored) review comments** — the comments the dev agent is told to address + reply-to + resolve. **New verb [INV-95]** (#296 second-tier, #328). **Separate shape** from `chp_review_threads` (GraphQL thread tree), `chp_pr_view` (no `pulls/N/comments` sub-resource), and `itp_list_comments` (issue-level normalized): the flat `.path`/`.line`/`.original_line` inline fields are **CHP-owned**, never folded into the ITP issue-comment shape. **Focused-raw** (#281): the leaf does no formatting; the caller threads its own `--jq` formatter (the `- **path:line** — body` prompt rendering) via `"$@"` byte-identically. **Self-guarding shim** (#282 convention, like `chp_pr_view`/`chp_pr_list`): invoked unguarded in a `$(… 2>/dev/null \|\| true)` site, so leaf-absent → WARN + `return 1` (degrades to empty), never a `set -e` abort. No `--paginate` today. **CONTRACT-PENDING** (#370). |
 | `chp_pr_view PR [--json … -q …]` | the PR-number-keyed incidental reads (`autonomous-dev.sh` / `autonomous-review.sh`, e.g. `gh pr view $PR --json comments/state/headRefName/headRefOid/reviews`) | **General READ primitive** — NOT one of the named PR-lifecycle verbs above; added so the caller layer carries zero executable raw `gh pr view`. Forwards to `gh pr view PR --repo $REPO "$@"`; the caller keeps its own `--json`/`-q` projection, byte-identical. **Self-guarding shim** (#282 review round 9): invoked unguarded by the incidental-read call sites — leaf-absent → WARN + `return 1` (degrades to empty read), never a `set -e` abort. **MIGRATED #282 (review r8).** **CONTRACT-PENDING** (#370). |
-| `chp_pr_list [--state … --json … -q …]` | the issue-keyed body-mention existence/number lookups (`autonomous-dev.sh`, e.g. `gh pr list … select(.body\|test("#N"))`) | **General READ primitive** — the loose body-mention PR list/existence lookup, DISTINCT from `chp_find_pr_for_issue` (the [INV-86] close-linkage resolver, which takes a REQUIRED `FIELDS` arg). Forwards to `gh pr list --repo $REPO "$@"`; caller keeps its own `--state`/`--json`/`-q`. Self-guarding shim, same convention as `chp_pr_view`. **MIGRATED #282 (review r8).** **CONTRACT-PENDING** (#370). |
+| `chp_pr_list STATE FIELDS-CSV` | the issue-keyed body-mention existence/number lookups (6 sites: `autonomous-dev.sh` `needs_open_pr_only`/`PR_EXISTS`/`_pr_created_at`/`PR_NUM`; `lib-auth.sh` `drain_agent_pr_create` existence-read / `drain_agent_bot_triggers` PR-number-read) | **Abstract contract (W1c1, #397)**: general PR-list READ primitive returning a **NORMALIZED JSON ARRAY**, DISTINCT from `chp_find_pr_for_issue` (no forced union with resolution keys, no issue-narrowing hint). `STATE` ∈ `open|closed|merged|all` — **DISJOINT enums** (`closed` returns ONLY closed-unmerged, `merged` returns ONLY merged; `all` = union of all three). This DIVERGES from `gh pr list --state closed` (which INCLUDES merged in gh's CLI meaning); the divergence is deliberate — a provider-neutral verb has one state per PR-state, not overlapping ones. `FIELDS-CSV` is projected using the normalized vocabulary (§3.2.1). **No gh flags and no jq programs cross the seam** — the caller passes only positional args. The body-mention `#N`-boundary `test()` stays caller-side; each of the 6 sites keeps its own regex over the normalized `body` string. Empty match set → `[]` (never null; the #148 hazard fix). **Completeness [§3.5]:** same bounded cursor page-walk as `chp_find_pr_for_issue` (default 20 pages / 2000 PRs); cap-hit is fail-CLOSED. Self-guarding shim, same convention as `chp_pr_view`. **MIGRATED #282 (review r8), REWRITTEN as ABSTRACT #397 (W1c1).** |
 | `chp_pr_comment PR [--body … \| extra args]` | the 7 PR-comment writes (`gh pr comment $PR` — auto-merge markers `autonomous-review.sh`, E2E-failure reports + the [INV-79] brokered E2E report `lib-review-e2e.sh`) | **General WRITE primitive** — the PR-comment sibling of `chp_pr_view`/`chp_pr_list`; DISTINCT from `itp_post_comment` (the ISSUE-level marker choke-point), different seam owner for a split-backend topology. Forwards to `gh pr comment PR --repo $REPO "$@"`; the caller keeps its own redirect/capture/gating framing (4 forms observed: `… 2>/dev/null \|\| true`, `if ! _err=$(… 2>&1 >/dev/null)`, `… 2>/dev/null \|\| rc=$?`, broker `… >/dev/null 2>&1`) — the leaf adds none. Self-guarding shim. **MIGRATED #329 (#296 second-tier), [INV-102].** |
 | `chp_trigger_bot PR TRIGGER` | `lib-review-bots.sh` | Post a bot trigger. Capability-gated (§4: `review_bots`). |
 | `chp_close_keyword ISSUE` | the `Closes #${ISSUE_NUMBER}` literal in the PR-body prompt (`autonomous-dev.sh:851/866/914/1151`) | Render the backend's PR-body auto-close keyword for the prompt builder to interpolate. **New verb [M4]** — the keyword was hardcoded GitHub-specific prompt text; a GitLab/Asana prompt builder would otherwise emit a non-functional `Closes #N`. GitHub returns `Closes #<n>`; a backend with `merge_closes_issue=0` returns empty (caller transitions explicitly post-merge). **Asserted** — the caller-side `_render_close_keyword` render contract (all 3 `merge_closes_issue`/`native_issue_pr_link` branches), not the leaf dispatch — by `tests/provider-conformance/run-provider-conformance.sh` (#370). |
@@ -363,6 +363,51 @@ over a bare number, so the next mint does not re-drift the prose.
 > raw calls stay baselined ([INV-91]) as residue with an explicit guard, so the
 > cutover baseline neither grows nor shrinks for #346.
 
+#### 3.2.1 The normalized PR-field vocabulary (W1c1, #397)
+
+The three CHP verbs that return normalized PR JSON arrays or objects — the
+W1c1 pair `chp_find_pr_for_issue` / `chp_pr_list` (this issue) and the sibling
+W1c2 `chp_pr_view` / `chp_list_inline_comments` — project every PR to the
+following normalized field vocabulary. **`FIELDS-CSV` selects a subset of these
+names**; the provider emits each requested field with the normalized type/
+value below and omits nothing the caller asked for. The two W1c1 verbs
+additionally emit the three [INV-86] selection keys unconditionally
+(`number,closingIssueNumbers,headRefName`) so callers never re-request them.
+
+| Field                 | Type                       | Normalization contract |
+|-----------------------|----------------------------|-------------------------|
+| `number`              | int                        | provider-native PR/MR number.
+| `state`               | `OPEN\|CLOSED\|MERGED`     | uppercase enum; empty string on unknown backends.
+| `title`               | string                     | verbatim; empty string on missing.
+| `body`                | string                     | verbatim; **`null` → `""`** (the #148 hazard fix; body-mention `test()` regexes on the caller-side are safe).
+| `createdAt`           | ISO-8601 string / `null`   | issue-comment idiom.
+| `updatedAt`           | ISO-8601 string / `null`   | ISO-8601 UTC.
+| `mergedAt`            | ISO-8601 string / `null`   | `null` for unmerged / open PRs.
+| `headRefName`         | string                     | branch name; empty string on missing.
+| `headRefOid`          | string                     | commit SHA; empty string on missing.
+| `reviewDecision`      | raw provider token / `""`  | GitHub: `APPROVED\|CHANGES_REQUESTED\|REVIEW_REQUIRED\|""`. W1(c-f) may re-pin.
+| `mergeable`           | raw provider token / `""`  | GitHub: `MERGEABLE\|CONFLICTING\|UNKNOWN\|""`. W1(d) re-pins to a normalized enum.
+| `closingIssueNumbers` | array of ints              | normalized from GitHub's `closingIssuesReferences[].number` (GraphQL node objects flattened to ints). The single ints-array is the [INV-86] resolution key: `contains([N])` replaces the pre-W1c1 `any(.[]?; .number == N)` expression.
+| `comments`            | see §3.3 / per-verb        | normalized issue-comment array (`[{id,author,body,createdAt}]`, ascending by `createdAt`). **Per-verb support** (matrix below): the W1c1 pair REJECTS `comments` (rc≠0, loud) — never fabricated.
+| `reviews`             | normalized array           | `[{author, state, submittedAt}]` ascending by `submittedAt`; populated only when the caller requests `reviews`.
+
+**Per-verb field support.** Not every verb can deliver every vocabulary member
+from its native data source; a verb MUST reject (rc≠0, no output) a requested
+field it cannot deliver — fabricating an empty value is forbidden (the
+data-source-honesty rule: a field a provider emits MUST be derivable from the
+data source it actually reads). Support matrix:
+
+| Verb | Supports | Rejects (rc≠0, loud) |
+|------|----------|----------------------|
+| `chp_find_pr_for_issue` (W1c1) | every field except `comments` | `comments` — the GraphQL `pullRequests` list walk cannot deliver complete per-PR comment arrays without nested per-node pagination; PR-level comment reads are the W1c2 `chp_pr_view` verb's contract, issue-level comments are `itp_list_comments`. No caller requests `comments` through this verb (verified W1c1; the rejection is pinned by TC-PCONF-044 and the unsupported-field unit case). |
+| `chp_pr_list` (W1c1) | every field except `comments` | `comments` — same rationale; pinned by TC-PCONF-045. |
+| `chp_pr_view` / `chp_list_inline_comments` (W1c2) | pins its own subset at W1c2 time | — |
+
+`chp_find_pr_for_issue` returns a JSON array of PRs each projected to
+`FIELDS-CSV ∪ {number, closingIssueNumbers, headRefName}`; empty candidate set
+→ `[]` (never null). `chp_pr_list` returns the same projected JSON array
+without the resolution-key union — caller selects the fields it wants.
+
 ### 3.3 The normalized comment-JSON contract (load-bearing)
 
 Today 28 marker-scanners (`extract_dev_session_id`, `last_reviewed_head`,
@@ -407,10 +452,15 @@ namespace. New providers read their own keys (`GITLAB_PROJECT`, `GITLAB_HOST`,
 ### 3.5 List completeness, pagination & retry
 
 Every list-returning verb (`itp_list_by_state`, `itp_count_by_state`,
-`itp_list_forbidden_combos`, `itp_list_comments`, `chp_review_threads`) **MUST
-return the COMPLETE set** — the provider walks backend pagination internally. The
-GitHub impl relies on `gh`'s transparent `--json` auto-pagination + secondary-
-rate-limit retry (today's behavior, zero change); a `curl`-based provider
+`itp_list_forbidden_combos`, `itp_list_comments`, `chp_review_threads`,
+`chp_find_pr_for_issue`, `chp_pr_list`) **MUST return the COMPLETE set** —
+the provider walks backend pagination internally. The GitHub impl for the
+ITP READ leaves relies on `gh`'s transparent `--json` auto-pagination +
+secondary-rate-limit retry (today's behavior, zero change). The two W1c1
+CHP verbs use a **bounded** page-walk with a fail-CLOSED cap (`CHP_GITHUB_PR_LIST_PAGE_CAP`,
+default 20 pages / 2000 open PRs) — cap-hit → rc≠0, no partial array; the
+whole purpose of W1c1 (#397) was closing the pre-existing silent-truncation
+hazard where `gh pr list` capped at 30 by default. A `curl`-based provider
 (GitLab keyset/offset, Asana cursors) implements page-walking and `429` /
 `Retry-After` backoff **inside the provider**. **Rate-limit/retry ownership is
 provider-internal** — callers never see a partial page or a 429.
@@ -938,8 +988,8 @@ enforced regardless of checkout depth even before #295 lands the dedicated step.
 `tests/provider-conformance/run-provider-conformance.sh` ([INV-106]) makes
 the spec's "each normative clause maps 1:1 to a conformance check" promise
 (§0/§introduction) true for the **implemented** subset (§4.4's ASSERTED
-verbs) and explicitly lists the **pending** subset (the 9
-`CONTRACT-PENDING`-tokened verbs, §3.1/§3.2). Each row below is one `TC-PCONF`
+verbs) and explicitly lists the **pending** subset (the 7
+`CONTRACT-PENDING`-tokened verbs, §3.1/§3.2 — post-W1a/W1b/W1c1). Each row below is one `TC-PCONF`
 id in [`docs/test-cases/provider-conformance-runner.md`](../test-cases/provider-conformance-runner.md).
 
 | Normative clause | Verb | `TC-PCONF` |
@@ -958,6 +1008,8 @@ id in [`docs/test-cases/provider-conformance-runner.md`](../test-cases/provider-
 | §3.2 reply POST, `{id,url}` echo | `chp_reply_review_comment` | TC-PCONF-012 |
 | §3.2 [M4] close-keyword render (3 branches) | `chp_close_keyword` | TC-PCONF-013 |
 | §3.1 single-object shape, fields-subset, fail-closed ([W1b], #396) | `itp_read_task` | TC-PCONF-043 |
+| §3.2.1 W1c1 normalized-shape + fail-CLOSED + FIELDS-CSV projection + value-check | `chp_find_pr_for_issue` | TC-PCONF-044 |
+| §3.2.1 W1c1 normalized-shape + STATE/FIELDS positional + `[]`-not-null + fail-CLOSED + projection-only value-check | `chp_pr_list` | TC-PCONF-045 |
 | Deliberately-broken fixture: wrong shape | `itp_list_comments` (broken) | TC-PCONF-020 |
 | Deliberately-broken fixture: rc-0-on-error | `itp_transition_state` (broken) | TC-PCONF-021 |
 | Deliberately-broken fixture: missing verb function | `chp_resolve_thread` (broken) | TC-PCONF-022 |
@@ -965,8 +1017,12 @@ id in [`docs/test-cases/provider-conformance-runner.md`](../test-cases/provider-
 | §4.4 caps-conditioned SKIP, annotated cap | `itp_edit_comment`/`itp_mark_checkbox`/`chp_request_changes` (degraded) | TC-PCONF-030 |
 | R3 CONTRACT-PENDING tripwire (spec↔runner set-diff) | (coverage-table meta-check) | TC-PCONF-040 |
 
-Pending subset (§4's the 9 `CONTRACT-PENDING` verbs) carries no `TC-PCONF`
-row — each gets one when its W1 slice lands (removing the spec token and
+Pending subset (§4's residual `CONTRACT-PENDING` verbs, currently **7** on
+this branch after W1a=#371 + W1b=#396 + W1c1=#397 landed — the runner
+reports `pending=7` via `tests/provider-conformance/run-provider-conformance.sh`):
+`chp_ci_status`, `chp_mergeable`, `chp_pr_view`, `chp_list_inline_comments`,
+`chp_create_pr`, `chp_approve`, `chp_merge`. Each carries no `TC-PCONF`
+row — a row is added when its W1 slice lands (removing the spec token and
 flipping `coverage.conf`'s line to `asserted` in the same PR, per R3).
 
 ---
@@ -993,7 +1049,7 @@ becomes a verb, the surrounding INV-coupled logic stays caller-side.
 | `post_dispatch_token` (`lib-dispatch.sh`) | `itp_post_comment` | (a) separable-leaf | the [INV-18] dispatcher-marker comment write — routes through the ITP choke-point ([INV-89]) — **migrated #283** (marker BODY composed caller-side, verbatim) |
 | `_dep_block_comment` (`lib-dispatch.sh`) | `itp_post_comment` | (a) separable-leaf | the [INV-39] dependency-block dispatcher-marker comment write — **migrated #283** (the dedup READ stays on `itp_list_comments`) |
 | `dispatcher-tick.sh` Step-2 TTHW timeline read (`gh api …/issues/<n>/timeline --jq …`, [INV-70] `labeled_at`) | `itp_label_event_ts` | (a) separable-leaf | **migrated #323** ([INV-93], observe-only): the GitHub-internal timeline `gh api …--jq …` leaf moves to `itp_github_label_event_ts` (JSON-encoding the label, injection-safe) and returns the first-`labeled` timestamp scalar; the TTHW math, the `issue_labeled` emit, and the `labeled_at`-vs-`ts` preference stay caller-side. Guarded on the bare `itp_${ISSUE_PROVIDER}_label_event_ts` (leaf-absent / any failure → empty → fall back to `ts`, never blocks dispatch). Closes `dispatcher-tick.sh` as a raw-`gh` caller (cutover baseline 67 → 66). |
-| `resolve_pr_for_issue` (`lib-pr-linkage.sh:73`) + `verify_pr_closes_issue` (`:99`); `fetch_pr_for_issue` (`lib-dispatch.sh`) is the kept same-named delegate shim | `chp_find_pr_for_issue` | (b) entangled | the `gh pr list --json $FIELDS` leaf moves with `FIELDS` forwarded byte-identically ([M1]); the [INV-86] close-linkage/branch resolution + projection `$q` stay caller-side. **MIGRATED #282.** (Post-#277 `fetch_pr_for_issue` is a pure delegate to `resolve_pr_for_issue` — that delegate stays as the function-mock shim, §7.2 m3.) |
+| `resolve_pr_for_issue` (`lib-pr-linkage.sh:69`) + `verify_pr_closes_issue` (`:120`); `fetch_pr_for_issue` (`lib-dispatch.sh:2778`) is the kept same-named delegate shim | `chp_find_pr_for_issue` | (b) entangled | **W1c1, #397**: the leaf is now the ABSTRACT contract `chp_find_pr_for_issue ISSUE FIELDS-CSV → normalized JSON candidate ARRAY` (§3.2/§3.2.1) — no gh flags cross the seam. The [INV-86] close-linkage/branch resolution is pure jq over the normalized array (`closingIssueNumbers` as ints), caller-side (`lib-pr-linkage.sh`). Fail-CLOSED under transport error, page-cap-hit, or `--limit`-N> silent truncation (§3.5). **MIGRATED #282 (gh-argv passthrough); REWRITTEN as ABSTRACT #397 (W1c1).** (Post-#277 `fetch_pr_for_issue` is a pure delegate to `resolve_pr_for_issue` — that delegate stays as the function-mock shim, §7.2 m3.) |
 | `ci_is_green` (`lib-dispatch.sh`) | `chp_ci_status` | (a) separable-leaf | the `gh pr checks --json state -q '[.[].state]'` leaf moves, forwarding the caller's `--json`/`-q` byte-identically and returning the raw per-check state array; the `length>0 and all(.=="SUCCESS")` boolean gate stays caller-side (`ci_is_green` returns rc 0/1, not a `green`/`pending`/`failed`/`none` string — normalizing the leaf itself to those tokens is the open W1(d) slice, §3.2). **MIGRATED #282.** |
 | `autonomous-review.sh` mergeable poll (`gh pr view … --json mergeable`) | `chp_mergeable` | (b) entangled | only the `gh pr view --json mergeable` leaf moves ([M2]); the UNKNOWN-retry loop + `_classify_mergeable_gate`/`_pr_open_gate` ([INV-44]/[INV-54], `lib-review-mergeable.sh` byte-unchanged) stay caller-side. **MIGRATED #282.** |
 | `gh pr create` (the broker `drain_agent_pr_create`, `lib-auth.sh`) | `chp_create_pr` | (a) separable-leaf | the `gh pr create --head/--title/--body` leaf; the broker routes through the verb (leaf-only swap, no INV-79 change). **MIGRATED #282.** **Leaf-absent disposition #346:** the retained raw `gh pr create` fallback is github-gated (`${CODE_HOST:-github} == "github"`) — a non-GitHub backend without the leaf fails LOUD (no PR created), never a silent GitHub PR. Spec-sanctioned [INV-91] residue (byte-identical, baseline unchanged). |
@@ -1002,7 +1058,7 @@ becomes a verb, the surrounding INV-coupled logic stays caller-side.
 | `gh pr merge` (`autonomous-review.sh` merge path) | `chp_merge` | (a) separable-leaf | the `--squash --delete-branch` leaf. [M4]/[INV-33]: `merge_closes_issue=1` (GitHub) means the wrapper MUST NOT transition post-merge; a `merge_closes_issue=0` backend transitions via `itp_transition_state` (else github-gated `gh issue close`). **MIGRATED #282.** |
 | `resolve-threads.sh` reviewThreads list + `resolveReviewThread` mutation | `chp_review_threads` / `chp_resolve_thread` | (a) separable-leaf | the two `gh api graphql` leaves → the M8 thread shape `{thread_id, resolved, comments:[{id, path, line, …}]}`; the select-unresolved + resolved/failed tally stay caller-side. **MIGRATED #282.** |
 | bot-trigger post (the broker `drain_agent_bot_triggers`, `lib-auth.sh`; `gh-as-user.sh pr comment`) | `chp_trigger_bot` | (a) separable-leaf | the real-user trigger post, gated by `review_bots` (§4.2); `parse_review_bots`/login mapping + allow-list stay caller-side; the broker routes through the verb. **MIGRATED #282.** **Leaf-absent disposition #346:** the retained raw `gh-as-user.sh pr comment` fallback is github-gated (`${CODE_HOST:-github} == "github"`, checked once before the posting loop) — a non-GitHub backend without the leaf fails LOUD (no triggers posted), never a silent GitHub-user comment. The `gh-as-user.sh` transport wrapper is allowlisted so this residue carries no cutover-baseline entry ([INV-91]). |
-| incidental `gh pr view $PR --json …` reads + body-mention `gh pr list … select(.body\|test("#N"))` lookups (`autonomous-dev.sh` / `autonomous-review.sh`) | `chp_pr_view` / `chp_pr_list` (general read primitives) | (a) separable-leaf | the PR-number-keyed `gh pr view` + loose body-mention `gh pr list` leaves; caller keeps its `--json`/`-q`. NOT named §3.2 lifecycle verbs — added so the caller layer carries zero executable raw `gh pr`. **MIGRATED #282 (review r8).** |
+| incidental `gh pr view $PR --json …` reads + body-mention `gh pr list … select(.body\|test("#N"))` lookups (`autonomous-dev.sh` / `autonomous-review.sh` / `lib-auth.sh`) | `chp_pr_view` / `chp_pr_list` (general read primitives) | (a) separable-leaf | the PR-number-keyed `gh pr view` + body-mention `chp_pr_list` reads. `chp_pr_view` is the byte-identical gh-argv passthrough (W1c2 rewrites it). `chp_pr_list` is the ABSTRACT `STATE FIELDS-CSV → normalized array` contract (§3.2/§3.2.1) — the six body-mention `#N`-boundary regexes stay caller-side over the normalized `body` string. NOT named §3.2 lifecycle verbs — added so the caller layer carries zero executable raw `gh pr`. **MIGRATED #282 (review r8); `chp_pr_list` REWRITTEN as ABSTRACT #397 (W1c1).** |
 | dev-resume `PR_REVIEW_COMMENTS` inline-comment read (`autonomous-dev.sh`, the flat REST `gh api repos/$REPO/pulls/$PR/comments --jq <fmt>`) | `chp_list_inline_comments` | (a) separable-leaf | the PR-number-keyed `gh api …/pulls/N/comments` leaf; caller keeps its `--jq` `- **path:line** — body` formatter ([#281] jq-stays-caller). Self-guarding shim ([#282] convention). **MIGRATED #296 second-tier (#328), [INV-95].** The distinct `:1093` `issues/N/comments` AUTO_MERGE-marker read this issue had scoped OUT was migrated independently behind `itp_list_comments` by #334. |
 | the 7 PR-comment writes (`gh pr comment $PR` — auto-merge markers `autonomous-review.sh`, E2E-failure reports + the [INV-79] brokered E2E report `lib-review-e2e.sh`) | `chp_pr_comment` (general write primitive) | (a) separable-leaf | the PR-number-keyed `gh pr comment` write leaf; the caller keeps its own redirect/capture/gating framing (4 forms: `… 2>/dev/null \|\| true`, `if ! _err=$(… 2>&1 >/dev/null)`, `… 2>/dev/null \|\| rc=$?`, broker `… >/dev/null 2>&1`) — the leaf adds NONE. The PR-comment sibling of `chp_pr_view`/`chp_pr_list`; DISTINCT from `itp_post_comment` (the ISSUE-level marker choke-point), different seam owner for a split-backend topology. **MIGRATED #329 (#296 second-tier), [INV-102] (renumbered from INV-95, then INV-101, on successive rebases — see the note under the INV-102 heading).** |
 | `setup-labels.sh:47` `gh label create` | `itp_provision_states` | (a) separable-leaf | the state-primitive provisioning leaf; hex color gated by `label_colors` — **migrated #283** (the 9-label table stays caller-side). **[#362]**: the #283 migration byte-identically preserved a PRE-EXISTING bug — the existence check called `gh label view`, a subcommand that does not exist on real `gh` (only `clone/create/delete/edit/list`), so it always fell through to `gh label create` and aborted under `set -e` on the first pre-existing label. Fixed by replacing the check with a REST existence probe (`gh api repos/<repo>/labels/<name> --silent`); the create-branch argv is unchanged. |

@@ -31,27 +31,294 @@
 # (chp_caps reads the .caps manifest in the dispatcher, not a function here.)
 
 # ---------------------------------------------------------------------------
-# chp_github_find_pr_for_issue ISSUE FIELDS [extra gh args…] — projected PR fetch.
+# W1c1 (#397) PR-read leaf machinery, shared by chp_github_find_pr_for_issue
+# and chp_github_pr_list.
 #
-# Spec §3.2 [M1]: return the open PR bound to ISSUE, projected to the
-# caller-supplied FIELDS `--json` list. FIELDS is a REQUIRED 2nd positional arg —
-# every caller varies it (`number,headRefOid,body`; `number,mergedAt,reviews`;
-# `number,reviewDecision,mergeable,state,body`; …). The leaf forwards FIELDS to
-# `gh pr list --json $FIELDS` BYTE-IDENTICALLY; the [INV-86] close-linkage /
-# branch-name resolution AND the projection live in the caller's `-q` (a 3rd arg
-# the caller passes through verbatim). Calling without FIELDS is an error (the
-# empty `--json` would abort `gh`), matching the resolve_pr_for_issue contract.
+# Design:
+#   (a) TRUE page walk with exhaustion detection — `gh api graphql` with
+#       cursor pagination (`pullRequests(first:100, after:$cursor)`, reads
+#       `pageInfo.{endCursor,hasNextPage}`), NOT `--limit N` (which returns
+#       partial rc 0 at N+1 candidates — the pre-#397 truncation hazard #397 R1
+#       explicitly forbids).
+#   (b) FAIL-CLOSED on cap-hit — reaching CHP_GITHUB_PR_LIST_PAGE_CAP pages
+#       before `hasNextPage=false` → rc≠0, no partial output. Callers with
+#       `|| return 1` refuse the pushed-no-PR classification.
+#   (c) FAIL-CLOSED on empty stdout — if `gh api graphql` returns nothing / a
+#       non-array / non-JSON, rc≠0. Guards the codex-flagged fail-open where
+#       an empty stdout rc 0 flows through jq into "no candidates".
+#   (d) PROJECTION-ONLY normalizer — emit EXACTLY the caller's requested
+#       fields (plus the resolver keys for find_pr_for_issue). No fabricated
+#       `closingIssueNumbers:[]`/`mergeable:""` on non-requested fields.
+#   (e) `comments`/`reviews` are in the shared §3.2.1 vocabulary (populated by
+#       the sibling W1c2 chp_pr_view leaf) but `gh pullRequests(first:100)`
+#       cannot deliver them here — the leaf REJECTS them with rc≠0 loudly.
 #
-# Regression anchors: #148 (omitting `body` from FIELDS silently hides the PR),
-# #274. The `gh pr list` argv is the no-behavior-change golden-trace anchor
-# (spec §7.2). $REPO is from the caller env.
+# Field vocabulary supported by these two leaves (SUBSET of §3.2.1): number,
+# state, title, body, createdAt, updatedAt, mergedAt, headRefName, headRefOid,
+# reviewDecision, mergeable, closingIssueNumbers. Requesting `comments` or
+# `reviews` → rc 2.
+
+# _chp_github_pr_fields_supported and _chp_github_pr_fields_unsupported —
+# the vocabulary split. Bare-string CSVs to keep grep-anchor semantics simple.
+# `reviews` IS delivered by the GraphQL page walker (pullRequests { reviews }
+# connection, capped at first 100 per PR — sufficient for every current
+# `_pgid_has_recent_success` / near-success signal-2 caller which only reads
+# the newest APPROVED submittedAt). `comments` is NOT delivered: it lives on
+# the ISSUE (itp_list_comments) and folding it in here would cross the
+# ITP/CHP seam — callers that need comments use itp_list_comments; callers
+# that need PR REVIEW-thread inline comments use chp_review_threads.
+#
+# Guarded `readonly` (`declare -p … 2>/dev/null || readonly …`): the wrappers
+# self-source `lib-code-host.sh` (which sources this file) more than once
+# through the transitive lib graph (`lib-review-e2e.sh`, `lib-auth.sh` all
+# self-source the CHP seam via `readlink -f`, so a re-source is normal). A
+# bare `readonly ...=` on the second source aborts under `set -e` with
+# `readonly variable`; the guard makes the assignment idempotent.
+declare -p _CHP_GITHUB_PR_FIELDS_SUPPORTED >/dev/null 2>&1 || \
+  readonly _CHP_GITHUB_PR_FIELDS_SUPPORTED="number,state,title,body,createdAt,updatedAt,mergedAt,headRefName,headRefOid,reviewDecision,mergeable,closingIssueNumbers,reviews"
+declare -p _CHP_GITHUB_PR_FIELDS_UNSUPPORTED >/dev/null 2>&1 || \
+  readonly _CHP_GITHUB_PR_FIELDS_UNSUPPORTED="comments"
+
+# _chp_github_pr_parse_fields <fields-csv> [forced-extra-fields...] — parse
+# CSV, dedupe, validate against the supported/unsupported vocabulary. Rejects
+# unsupported fields (rc 2, LOUD stderr) and unknown-name fields (rc 2). Sets
+# global `_CHP_PARSED_FIELDS` to a comma-separated list of validated
+# normalized field names.
+_chp_github_pr_parse_fields() {
+  local fields="$1"; shift
+  _CHP_PARSED_FIELDS=""
+  local seen="," f
+  local IFS_SAVE=$IFS; IFS=','
+  # shellcheck disable=SC2206
+  local -a _caller=(${fields})
+  IFS="$IFS_SAVE"
+  local -a _all=("${_caller[@]}" "$@")
+  for f in "${_all[@]}"; do
+    [ -n "$f" ] || continue
+    # Reject the ONE §3.2.1 vocabulary field these two verbs deliberately
+    # don't deliver: `comments` (issue-level; owned by itp_list_comments —
+    # crossing the ITP/CHP seam here would double-source that data).
+    case ",${_CHP_GITHUB_PR_FIELDS_UNSUPPORTED}," in
+      *",$f,"*)
+        echo "ERROR: chp_github pr_list/find_pr_for_issue: field '$f' is not delivered by these two verbs (issue-comments live on the ITP seam — use itp_list_comments)" >&2
+        return 2 ;;
+    esac
+    # Reject unknown field names (typo / non-vocabulary).
+    case ",${_CHP_GITHUB_PR_FIELDS_SUPPORTED}," in
+      *",$f,"*) : ;;
+      *) echo "ERROR: chp_github pr_list/find_pr_for_issue: field '$f' is not in the §3.2.1 supported vocabulary ($_CHP_GITHUB_PR_FIELDS_SUPPORTED)" >&2; return 2 ;;
+    esac
+    case "$seen" in
+      *",$f,"*) : ;;
+      *) seen="$seen$f,"; _CHP_PARSED_FIELDS="${_CHP_PARSED_FIELDS:+$_CHP_PARSED_FIELDS,}$f" ;;
+    esac
+  done
+  return 0
+}
+
+# _chp_github_pr_gh_fields <normalized-csv> — map validated normalized fields
+# to the gh-native GraphQL field list. `closingIssueNumbers` maps to
+# `closingIssuesReferences`; other names pass through. Emits the gh-native
+# GraphQL selection body (space-separated for the query).
+_chp_github_pr_gh_fields() {
+  local fields="$1" out="" f
+  local IFS_SAVE=$IFS; IFS=','
+  # shellcheck disable=SC2206
+  local -a _fields=(${fields})
+  IFS="$IFS_SAVE"
+  for f in "${_fields[@]}"; do
+    case "$f" in
+      closingIssueNumbers) out+=" closingIssuesReferences(first:100){nodes{number}}" ;;
+      headRefName)         out+=" headRefName" ;;
+      headRefOid)          out+=" headRefOid" ;;
+      number)              out+=" number" ;;
+      state)               out+=" state" ;;
+      title)               out+=" title" ;;
+      body)                out+=" body" ;;
+      createdAt)           out+=" createdAt" ;;
+      updatedAt)           out+=" updatedAt" ;;
+      mergedAt)            out+=" mergedAt" ;;
+      reviewDecision)      out+=" reviewDecision" ;;
+      mergeable)           out+=" mergeable" ;;
+      reviews)             out+=" reviews(first:100){nodes{author{login},state,submittedAt}}" ;;
+    esac
+  done
+  # number is always safe to include for internal identification (deduped),
+  # but the OUTPUT projection is driven by _CHP_PARSED_FIELDS so we don't
+  # fabricate it if the caller didn't ask.
+  case " $out " in
+    *" number "*) : ;;
+    *) out=" number$out" ;;
+  esac
+  # Also always fetch pageInfo — required for cursor exhaustion detection.
+  printf '%s' "$out"
+}
+
+# _chp_github_pr_projection_jq <normalized-csv> — build the jq projection
+# that emits EXACTLY the requested normalized fields (no fabrication). Uses
+# the pattern `if input has KEY then {KEY: fn(...)} else {} end + …` to
+# assemble ONLY the caller-requested keys into each output object.
+_chp_github_pr_projection_jq() {
+  local fields="$1" out="{}"
+  local IFS_SAVE=$IFS; IFS=','
+  # shellcheck disable=SC2206
+  local -a _fields=(${fields})
+  IFS="$IFS_SAVE"
+  local f
+  for f in "${_fields[@]}"; do
+    case "$f" in
+      number)              out+=' + {number: .number}' ;;
+      state)               out+=' + {state: (.state // "")}' ;;
+      title)               out+=' + {title: (.title // "")}' ;;
+      body)                out+=' + {body: (.body // "")}' ;;
+      createdAt)           out+=' + {createdAt: (.createdAt // null)}' ;;
+      updatedAt)           out+=' + {updatedAt: (.updatedAt // null)}' ;;
+      mergedAt)            out+=' + {mergedAt: (.mergedAt // null)}' ;;
+      headRefName)         out+=' + {headRefName: (.headRefName // "")}' ;;
+      headRefOid)          out+=' + {headRefOid: (.headRefOid // "")}' ;;
+      reviewDecision)      out+=' + {reviewDecision: (.reviewDecision // "")}' ;;
+      mergeable)           out+=' + {mergeable: (.mergeable // "")}' ;;
+      closingIssueNumbers) out+=' + {closingIssueNumbers: ([ (.closingIssuesReferences.nodes // [])[]?.number ])}' ;;
+      reviews)             out+=' + {reviews: ([ (.reviews.nodes // [])[]? | {author: (.author.login // ""), state: (.state // ""), submittedAt: (.submittedAt // null)} ])}' ;;
+    esac
+  done
+  printf '[ .[] | %s ]' "$out"
+}
+
+# _chp_github_pr_state_filter <normalized-state> — map open|closed|merged|all
+# to GraphQL PullRequestState list (states: [OPEN]/[CLOSED]/[MERGED]/[OPEN,CLOSED,MERGED]).
+_chp_github_pr_state_filter() {
+  case "$1" in
+    open)   printf '[OPEN]' ;;
+    closed) printf '[CLOSED]' ;;
+    merged) printf '[MERGED]' ;;
+    all)    printf '[OPEN,CLOSED,MERGED]' ;;
+  esac
+}
+
+# _chp_github_pr_page_cap — read-and-clamp the CHP_GITHUB_PR_LIST_PAGE_CAP env
+# override. Default 20 pages (100 PRs/page → 2000 PRs, a comfortable upper
+# bound). Cap-hit before pagination exhaustion is fail-CLOSED (leaf rc 1).
+_chp_github_pr_page_cap() {
+  local cap="${CHP_GITHUB_PR_LIST_PAGE_CAP:-20}"
+  [[ "$cap" =~ ^[0-9]+$ ]] && (( cap > 0 )) || cap=20
+  printf '%s' "$cap"
+}
+
+# _chp_github_pr_fetch_all <state-graphql> <gh-fields-selection> — page-walk
+# `pullRequests(first:100, states:<state>, after:$cursor)` via `gh api graphql`
+# until `pageInfo.hasNextPage == false`. Returns the concatenated node array
+# (raw GraphQL PR objects) on stdout, rc 0. Fail-CLOSED on any page fetch
+# error, empty stdout, non-JSON, non-array, or cap-hit before exhaustion.
+_chp_github_pr_fetch_all() {
+  local state_filter="$1" gh_fields="$2"
+  local owner="${REPO%%/*}" name="${REPO##*/}"
+  local page_cap; page_cap="$(_chp_github_pr_page_cap)"
+  local cursor="null" pages=0
+  local -a accumulated=()
+  local page_json nodes has_next
+  local query
+  # GraphQL query template: STATES/FIELDS are shell-spliced (both come from
+  # our validated allowlists — state from _chp_github_pr_state_filter, fields
+  # from _chp_github_pr_gh_fields — neither is user-controlled).
+  while (( pages < page_cap )); do
+    query="query(\$owner: String!, \$repo: String!, \$cursor: String) {
+      repository(owner: \$owner, name: \$repo) {
+        pullRequests(first: 100, states: $state_filter, after: \$cursor, orderBy: {field: CREATED_AT, direction: DESC}) {
+          pageInfo { endCursor hasNextPage }
+          nodes { $gh_fields }
+        }
+      }
+    }"
+    if [[ "$cursor" == "null" ]]; then
+      page_json="$(gh api graphql -F owner="$owner" -F repo="$name" -f query="$query" 2>/dev/null)" || return 1
+    else
+      page_json="$(gh api graphql -F owner="$owner" -F repo="$name" -F cursor="$cursor" -f query="$query" 2>/dev/null)" || return 1
+    fi
+    # Capture-then-check: empty stdout / non-JSON / missing pullRequests →
+    # fail-CLOSED (rc≠0, no partial). The pre-#397 leaf silently returned
+    # []; the codex-flagged empty-stdout fail-open branch is closed here.
+    [[ -n "$page_json" ]] || return 1
+    jq -e '.data.repository.pullRequests.nodes | type == "array"' >/dev/null 2>&1 <<<"$page_json" || return 1
+    nodes="$(jq -c '.data.repository.pullRequests.nodes' <<<"$page_json")" || return 1
+    accumulated+=("$nodes")
+    has_next="$(jq -r '.data.repository.pullRequests.pageInfo.hasNextPage' <<<"$page_json" 2>/dev/null)" || return 1
+    if [[ "$has_next" != "true" ]]; then
+      # Exhaustion. Merge accumulated arrays and emit.
+      printf '%s\n' "${accumulated[@]}" | jq -c -s 'add // []'
+      return 0
+    fi
+    cursor="$(jq -r '.data.repository.pullRequests.pageInfo.endCursor' <<<"$page_json" 2>/dev/null)" || return 1
+    [[ -n "$cursor" && "$cursor" != "null" ]] || return 1
+    pages=$(( pages + 1 ))
+  done
+  # Cap-hit before exhaustion → fail-CLOSED per §3.5 (spec explicitly
+  # forbids returning a partial candidate set).
+  echo "ERROR: chp_github pr_list/find_pr_for_issue: page cap ${page_cap} reached before pagination exhaustion — set CHP_GITHUB_PR_LIST_PAGE_CAP higher (each page = 100 PRs)" >&2
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# chp_github_find_pr_for_issue ISSUE FIELDS-CSV — normalized candidate PR fetch.
+#
+# Spec §3.2 [M1] (W1c1, #397): return a NORMALIZED JSON ARRAY of open PR
+# candidates for close-linkage-resolution by the caller. Each candidate is
+# projected to the caller-supplied FIELDS-CSV ∪ the three selection keys
+# (`number,closingIssueNumbers,headRefName`). PROJECTION-ONLY — no
+# fabricated `closingIssueNumbers:[]`/`mergeable:""` for unrequested fields;
+# see `_chp_github_pr_projection_jq` above. Vocabulary is §3.2.1 minus the
+# `comments`/`reviews` fields (which the sibling W1c2 chp_pr_view leaf owns
+# — `pullRequests(first:100)` cannot deliver them here; requesting them → rc 2
+# loudly). `body` is normalized to a string (`null` → `""`, the #148 hazard
+# fix); `closingIssueNumbers` is an int-array flattened from GitHub's
+# `closingIssuesReferences.nodes[].number`.
+#
+# No `gh` flags or `jq` programs cross the seam — the caller's [INV-86]
+# two-tier resolution (close-linkage beats branch-name, boundary-anchored
+# branch match, deterministic PR-number tie-break) lives in `lib-pr-linkage.sh`
+# as pure jq over the returned array (mirrors INV-44 classifiers-stay-caller-side).
+#
+# The ISSUE positional stops being dead: it is a NARROWING HINT the provider
+# MAY use to prune the candidate set — but ONLY when no true candidate can be
+# excluded. GitHub has no server-side "PR that closes issue N" filter today,
+# so the ISSUE arg is documented but IGNORED here; GraphQL returns all open
+# PRs (paginated by cursor) and the caller narrows client-side.
+#
+# COMPLETE-set (§3.5): TRUE cursor page walk via `pullRequests(first:100,
+# after:$endCursor)` until `pageInfo.hasNextPage == false`, bounded by
+# `CHP_GITHUB_PR_LIST_PAGE_CAP` pages (default 20 → 2000 open PRs). A fixed
+# `--limit N` is NOT acceptable — it just moves the silent-truncation
+# threshold (the pre-W1c1 hazard #397 R1 explicitly forbids). Cap-hit before
+# exhaustion is FAIL-CLOSED: rc≠0 and no partial output.
+#
+# Fail-closed on `gh` error / empty stdout / non-JSON / non-array — capture-
+# then-check gate inside `_chp_github_pr_fetch_all`, so an empty gh stdout rc 0
+# (the pre-W1c1 fail-open hazard) → the caller's `|| return 1` refuses the
+# classification.
+#
+# Regression anchors: #148 (null-body PRs no longer hide close-linked
+# matches); #277/[INV-86] (close-linkage beats body-mention); silent
+# `--limit 30` truncation the pre-#397 leaf inherited from gh's default.
 chp_github_find_pr_for_issue() {
   # `${2:-}` (not `$2`) so the missing-FIELDS guard is reachable under `set -u`
   # rather than aborting on an unbound `$2`.
-  local fields="${2:-}"
-  [ -n "$fields" ] || { echo "ERROR: chp_github_find_pr_for_issue requires FIELDS (2nd arg) [M1]" >&2; return 2; }
-  shift 2
-  gh pr list --repo "$REPO" --state open --json "$fields" "$@"
+  local _issue="${1:-}" fields="${2:-}"
+  [ -n "$fields" ] || { echo "ERROR: chp_github_find_pr_for_issue requires FIELDS-CSV (2nd arg) [M1]" >&2; return 2; }
+  # Parse + validate + union the caller's fields with the three [INV-86]
+  # resolution keys (number, closingIssueNumbers, headRefName). The parser
+  # rejects unsupported vocabulary (comments/reviews → rc 2 loudly) and
+  # unknown-name fields — sets `_CHP_PARSED_FIELDS`.
+  local _CHP_PARSED_FIELDS
+  _chp_github_pr_parse_fields "$fields" number closingIssueNumbers headRefName || return $?
+  local gh_fields projection nodes
+  gh_fields="$(_chp_github_pr_gh_fields "$_CHP_PARSED_FIELDS")"
+  # Real page walk with exhaustion detection (§3.5, W1c1 R1). Fail-CLOSED on
+  # empty stdout / non-JSON / non-array / cap-hit-before-exhaustion.
+  nodes="$(_chp_github_pr_fetch_all "$(_chp_github_pr_state_filter open)" "$gh_fields")" || return 1
+  # PROJECT-ONLY the caller's requested fields (∪ the resolver keys). NO
+  # fabrication of unrequested vocabulary members.
+  projection="$(_chp_github_pr_projection_jq "$_CHP_PARSED_FIELDS")"
+  jq -c "$projection" <<<"$nodes"
 }
 
 # chp_github_ci_status PR [extra gh args…] — CI check-state leaf.
@@ -294,18 +561,52 @@ chp_github_pr_view() {
   gh pr view "$pr" --repo "$REPO" "$@"
 }
 
-# chp_github_pr_list [extra gh args…] — general PR list read leaf (#282 review r8).
+# chp_github_pr_list STATE FIELDS-CSV — normalized PR-list read leaf.
 #
-# The provider-neutral `gh pr list` primitive the caller layer's INCIDENTAL
-# body-mention existence lookups use (needs_open_pr_only / cleanup PR_EXISTS /
-# metrics / resume PR_NUM in autonomous-dev.sh). DISTINCT from
-# chp_find_pr_for_issue (the [INV-86] close-linkage resolver): this is the loose
-# `select(.body|test("#N"))` body-mention form these pre-#277 lookups deliberately
-# keep. The caller supplies the full tail (`--state open|all --json … -q …`) via
-# "$@"; the leaf forwards it byte-identically (no `--state` hardcoded, so a
-# `--state all` caller is byte-identical too).
+# Spec §3.2 (W1c1, #397): return a NORMALIZED JSON ARRAY of PRs in STATE,
+# PROJECTION-ONLY to the caller-supplied FIELDS-CSV. STATE ∈
+# `open|closed|merged|all` (case-insensitive at the seam; the GitHub leaf
+# maps to GraphQL `PullRequestState` list). Vocabulary is §3.2.1 minus the
+# `comments`/`reviews` fields (owned by the sibling W1c2 chp_pr_view leaf —
+# `pullRequests(first:100)` cannot deliver them here; requesting them → rc 2
+# loudly). No fabricated fields — see `_chp_github_pr_projection_jq`.
+#
+# DISTINCT from `chp_find_pr_for_issue`: no issue-narrowing hint, no forced
+# union with the resolution keys. The body-mention `#N`-boundary `test()` is
+# caller-side (each of the six body-mention sites keeps its own regex over
+# the normalized `body` string). Empty match set → `[]` (NEVER null; the #148
+# hazard fix — `body:null` sibling PR is normalized to `body:""` here so the
+# caller's `.body | test(…)` never aborts).
+#
+# COMPLETE-set (§3.5): same TRUE cursor page walk as `chp_find_pr_for_issue`
+# via `_chp_github_pr_fetch_all` (`pullRequests(first:100, after:$cursor)`
+# until `pageInfo.hasNextPage=false`, bounded by
+# `CHP_GITHUB_PR_LIST_PAGE_CAP`, default 20 pages / 2000 PRs). Cap-hit before
+# exhaustion → rc≠0 no output. Fail-CLOSED on `gh` transport error / empty
+# stdout / non-JSON / non-array. Closes the pre-W1c1 silent `--limit 30`
+# truncation hazard that could make `needs_open_pr_only` misclassify a
+# >30-open-PR repo.
 chp_github_pr_list() {
-  gh pr list --repo "$REPO" "$@"
+  local state="${1:-}" fields="${2:-}"
+  [ -n "$state" ]  || { echo "ERROR: chp_github_pr_list requires STATE (1st arg)" >&2; return 2; }
+  [ -n "$fields" ] || { echo "ERROR: chp_github_pr_list requires FIELDS-CSV (2nd arg)" >&2; return 2; }
+  local state_lc
+  state_lc="$(printf '%s' "$state" | tr '[:upper:]' '[:lower:]')"
+  case "$state_lc" in
+    open|closed|merged|all) : ;;
+    *) echo "ERROR: chp_github_pr_list STATE must be one of open|closed|merged|all (got '$state')" >&2; return 2 ;;
+  esac
+  # Parse + validate the caller's fields. Rejects `comments`/`reviews` (rc 2
+  # loud — the sibling W1c2 chp_pr_view handles those); no forced resolver-
+  # key union (this is the general body-mention list read, not the linkage
+  # resolver).
+  local _CHP_PARSED_FIELDS
+  _chp_github_pr_parse_fields "$fields" || return $?
+  local gh_fields projection nodes
+  gh_fields="$(_chp_github_pr_gh_fields "$_CHP_PARSED_FIELDS")"
+  nodes="$(_chp_github_pr_fetch_all "$(_chp_github_pr_state_filter "$state_lc")" "$gh_fields")" || return 1
+  projection="$(_chp_github_pr_projection_jq "$_CHP_PARSED_FIELDS")"
+  jq -c "$projection" <<<"$nodes"
 }
 
 # chp_github_list_inline_comments PR [extra gh args…] — PR inline (file-anchored)

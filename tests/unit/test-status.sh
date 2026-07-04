@@ -51,11 +51,12 @@ cat > "$BIN/gh" <<'GH'
 #!/bin/bash
 echo "gh $*" >> "${GH_CALLS:-/dev/null}"
 fixture="${GH_FIXTURE:-}"
-# Parse out a -q expression if present (fetch_pr_for_issue uses -q).
+# Parse out a -q expression if present (legacy pre-W1c1 pr-list path).
 q=""; want=""
 args=("$@")
 for ((i=0; i<${#args[@]}; i++)); do
   case "${args[$i]}" in
+    api)   [[ "${args[$((i+1))]:-}" == "graphql" ]] && want="graphql" ;;
     issue) [[ "${args[$((i+1))]:-}" == "view" ]] && want="issue" ;;
     pr)    [[ "${args[$((i+1))]:-}" == "list" ]] && want="pr"
            [[ "${args[$((i+1))]:-}" == "view" ]] && want="prview" ;;
@@ -65,8 +66,23 @@ done
 [[ -f "$fixture" ]] || { echo ""; exit 0; }
 case "$want" in
   issue)  jq -c '.issue // {}' "$fixture" ;;
+  graphql)
+    # W1c1 (#397): chp_github_find_pr_for_issue now uses `gh api graphql`'s
+    # cursor page-walker. Reshape the fixture's flat `.pr` array into the
+    # GraphQL `.data.repository.pullRequests.{pageInfo,nodes}` envelope, with
+    # each PR's `closingIssuesReferences` moved under `.nodes` so the leaf's
+    # projection jq `(.closingIssuesReferences.nodes // [])[]?.number`
+    # resolves. Single-page (hasNextPage:false) — the fixture fits in one
+    # page.
+    jq -c '.pr // []
+      | map(. + {closingIssuesReferences: {nodes: (.closingIssuesReferences // [])}})
+      | {data:{repository:{pullRequests:{
+          pageInfo:{endCursor:null,hasNextPage:false},
+          nodes: .
+        }}}}' "$fixture" ;;
   pr)
-    # fetch_pr_for_issue: gh pr list --json ... -q '[...] | .[0] // empty'
+    # Legacy pre-W1c1 pr-list path (kept for pre-existing pr-view fixtures
+    # that still stub at this level; W1c1 leaves route through `api graphql`).
     if [[ -n "$q" ]]; then jq -c '.pr // []' "$fixture" | jq -c "$q" 2>/dev/null || echo ""
     else jq -c '.pr // []' "$fixture"; fi ;;
   *) echo "" ;;

@@ -490,6 +490,147 @@ _run_close_keyword_assert() {
   emit PASS "$verb"
 }
 
+# _run_findpr_assert / _run_prlist_assert — W1c1 (#397) abstract-contract
+# assertions for chp_find_pr_for_issue / chp_pr_list. Both verbs return a
+# NORMALIZED JSON ARRAY projected to a FIELDS-CSV positional arg. The runner:
+#   1. drives the verb against a canned PR-list payload with the stub gh
+#      succeeding — asserts rc 0, output is an array, each element has the
+#      normalized body-is-a-string contract (`body:null → body:""`) and the
+#      closingIssueNumbers array-of-ints contract;
+#   2. drives it again with the stub gh failing — asserts rc != 0 (fail-CLOSED,
+#      no partial output).
+# The [INV-86] close-linkage RESOLUTION jq is caller-side (`lib-pr-linkage.sh`)
+# — this suite exercises the LEAF's contract, not the caller's selection.
+_run_findpr_assert() {
+  local verb="chp_find_pr_for_issue"
+  local argv_file="$work_root/.argv-$verb.json"
+  local out rc
+
+  out="$(_invoke _PCF_GH_MODE="ok" _PCF_GH_PAYLOAD="$PAYLOADS/pr-list-valid.json" _PCF_ARGV_FILE="$argv_file" 'chp_find_pr_for_issue 42 "number,body,headRefOid"' 2>&1)"; rc=$?
+  if [[ "$rc" != "0" ]]; then
+    emit FAIL "$verb" "expected rc 0 on stub-success, got rc=$rc (output: ${out:0:200})"
+    return
+  fi
+  if ! pcf_is_json_array "$out"; then
+    emit FAIL "$verb" "wrong-shape (output is not a JSON array: ${out:0:200})"
+    return
+  fi
+  # body is a STRING (not null) for every element (the #148 normalization).
+  if ! jq -e 'all(.[]; (.body | type == "string"))' >/dev/null 2>&1 <<<"$out"; then
+    emit FAIL "$verb" "body not normalized to string across all elements (found null): ${out:0:200}"
+    return
+  fi
+  # closingIssueNumbers is an array of ints (the [INV-86] resolution key).
+  if ! jq -e 'all(.[]; (.closingIssueNumbers | type == "array") and all(.closingIssueNumbers[]?; type == "number"))' >/dev/null 2>&1 <<<"$out"; then
+    emit FAIL "$verb" "closingIssueNumbers not normalized to array-of-ints: ${out:0:200}"
+    return
+  fi
+  # FIELDS-CSV projection: every element MUST carry the requested caller fields
+  # (`number`, `body`, `headRefOid`) AND the resolution keys.
+  if ! jq -e 'all(.[]; has("number") and has("body") and has("headRefOid") and has("closingIssueNumbers") and has("headRefName"))' >/dev/null 2>&1 <<<"$out"; then
+    emit FAIL "$verb" "FIELDS-CSV projection missing a requested field: ${out:0:200}"
+    return
+  fi
+  # VALUE assertion (P2-2, review r3 class): the pre-r3 helper only checked
+  # shape — a provider returning fabricated empty `closingIssueNumbers:[]` and
+  # blanked bodies for every element passed silently. Pin the actual values
+  # against the fixture (pr-list-valid.json): PR#7's body carries #42, its
+  # closingIssueNumbers flattens to [42]; PR#8's null body normalizes to ""
+  # and its empty closingIssueNumbers stays [] — proving the leaf actually
+  # walked the GraphQL envelope, not fabricated the shape.
+  if ! jq -e '
+    (length == 2) and
+    (.[0].number == 7) and (.[1].number == 8) and
+    (.[0].body == "Closes #42") and (.[1].body == "") and
+    (.[0].closingIssueNumbers == [42]) and (.[1].closingIssueNumbers == []) and
+    (.[0].headRefName == "feat/issue-42-thing") and (.[1].headRefName == "fix/other") and
+    (.[0].headRefOid == "aaaa") and (.[1].headRefOid == "bbbb")
+  ' >/dev/null 2>&1 <<<"$out"; then
+    emit FAIL "$verb" "fixture-values mismatch (fabricated shape?): ${out:0:200}"
+    return
+  fi
+
+  # Fail-CLOSED on gh transport error.
+  out="$(_invoke _PCF_GH_MODE="fail" _PCF_ARGV_FILE="$argv_file" 'chp_find_pr_for_issue 42 "number,body,headRefOid" 2>/dev/null' 2>&1)"; rc=$?
+  if [[ "$rc" == "0" ]]; then
+    emit FAIL "$verb" "rc-0-on-error (stub gh failed but verb still returned 0, W1c1 fail-CLOSED contract)"
+    return
+  fi
+  emit PASS "$verb"
+}
+
+_run_prlist_assert() {
+  local verb="chp_pr_list"
+  local argv_file="$work_root/.argv-$verb.json"
+  local out rc
+
+  out="$(_invoke _PCF_GH_MODE="ok" _PCF_GH_PAYLOAD="$PAYLOADS/pr-list-valid.json" _PCF_ARGV_FILE="$argv_file" 'chp_pr_list open "body,number"' 2>&1)"; rc=$?
+  if [[ "$rc" != "0" ]]; then
+    emit FAIL "$verb" "expected rc 0 on stub-success, got rc=$rc (output: ${out:0:200})"
+    return
+  fi
+  if ! pcf_is_json_array "$out"; then
+    emit FAIL "$verb" "wrong-shape (output is not a JSON array: ${out:0:200})"
+    return
+  fi
+  # body normalized to string (null → "").
+  if ! jq -e 'all(.[]; (.body | type == "string"))' >/dev/null 2>&1 <<<"$out"; then
+    emit FAIL "$verb" "body not normalized to string across all elements: ${out:0:200}"
+    return
+  fi
+  # Field-subset projection: `body` and `number` MUST be present in each element.
+  if ! jq -e 'all(.[]; has("body") and has("number"))' >/dev/null 2>&1 <<<"$out"; then
+    emit FAIL "$verb" "FIELDS-CSV projection missing requested field (body/number): ${out:0:200}"
+    return
+  fi
+  # VALUE assertion (P2-2, review r3 class): pin actual values against the
+  # fixture — proves the leaf walked the GraphQL envelope, not fabricated
+  # the shape. PR#7 body="Closes #42", PR#8 body normalizes null→"", order
+  # is GraphQL-node order (descending createdAt in the leaf's ORDER BY but
+  # the fixture's node array is authored to be 7,8 — the test asserts the
+  # leaf preserves that order without reshuffling).
+  if ! jq -e '
+    (length == 2) and
+    (.[0].number == 7) and (.[1].number == 8) and
+    (.[0].body == "Closes #42") and (.[1].body == "")
+  ' >/dev/null 2>&1 <<<"$out"; then
+    emit FAIL "$verb" "fixture-values mismatch (fabricated shape?): ${out:0:200}"
+    return
+  fi
+  # Field-subset ONLY (P1-1 projection-only contract): the caller asked for
+  # `body,number` — the response must NOT carry unrequested vocabulary members
+  # like `closingIssueNumbers` / `headRefName` / `mergeable`.
+  if jq -e 'any(.[]; has("closingIssueNumbers") or has("headRefName") or has("mergeable") or has("state") or has("createdAt") or has("headRefOid") or has("reviewDecision") or has("updatedAt") or has("mergedAt") or has("title") or has("reviews"))' >/dev/null 2>&1 <<<"$out"; then
+    emit FAIL "$verb" "projection-only violated (fabricated field beyond FIELDS=body,number): ${out:0:200}"
+    return
+  fi
+
+  # Empty-match convention: the leaf emits `[]` (never null) — feed an empty
+  # GraphQL envelope (nodes:[], hasNextPage:false) to prove it.
+  local empty_pl="$work_root/.pr-list-empty.json"
+  printf '%s' '{"data":{"repository":{"pullRequests":{"pageInfo":{"endCursor":null,"hasNextPage":false},"nodes":[]}}}}' > "$empty_pl"
+  out="$(_invoke _PCF_GH_MODE="ok" _PCF_GH_PAYLOAD="$empty_pl" _PCF_ARGV_FILE="$argv_file" 'chp_pr_list open "body,number"' 2>&1)"; rc=$?
+  if [[ "$rc" != "0" || "$out" != "[]" ]]; then
+    emit FAIL "$verb" "empty match should emit '[]' rc 0; got rc=$rc out=${out:0:200}"
+    return
+  fi
+
+  # STATE / FIELDS positional args are REQUIRED; missing them → rc != 0.
+  out="$(_invoke _PCF_GH_MODE="ok" _PCF_ARGV_FILE="$argv_file" 'chp_pr_list 2>/dev/null' 2>&1)"; rc=$?
+  if [[ "$rc" == "0" ]]; then
+    emit FAIL "$verb" "missing STATE did not error"
+    return
+  fi
+
+  # Fail-CLOSED on gh transport error.
+  out="$(_invoke _PCF_GH_MODE="fail" _PCF_ARGV_FILE="$argv_file" 'chp_pr_list open "body,number" 2>/dev/null' 2>&1)"; rc=$?
+  if [[ "$rc" == "0" ]]; then
+    emit FAIL "$verb" "rc-0-on-error (stub gh failed but verb still returned 0)"
+    return
+  fi
+  emit PASS "$verb"
+}
+
 # ---------------------------------------------------------------------------
 # Drive each ASSERTED verb per cap-map.conf.
 # ---------------------------------------------------------------------------
@@ -573,6 +714,20 @@ _assert_verb() {
       ;;
     chp_close_keyword)
       _run_close_keyword_assert
+      ;;
+    chp_find_pr_for_issue)
+      # W1c1 (#397) abstract contract: normalized JSON array of candidates,
+      # projected to FIELDS-CSV ∪ {number, closingIssueNumbers, headRefName}.
+      # body → string (null → ""), closingIssueNumbers → int-array. Fail-CLOSED
+      # on gh transport error (rc != 0, no partial output).
+      _run_findpr_assert
+      ;;
+    chp_pr_list)
+      # W1c1 (#397) abstract contract: normalized JSON array projected to
+      # caller's FIELDS-CSV; body → string; empty match → `[]` (never null).
+      # Self-guarding shim (leaf-absent → return 1); fail-CLOSED on transport
+      # error / cap-hit.
+      _run_prlist_assert
       ;;
     *)
       emit FAIL "$verb" "no assertion wired for this verb (runner bug)"

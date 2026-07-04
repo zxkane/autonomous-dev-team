@@ -26,12 +26,16 @@
 # can't abort the jq filter and silently hide a match (parity with the #148
 # null-body guard).
 #
-# [INV-87] (#282) The innermost `gh pr list` leaf both resolvers run is the CHP
-# `chp_find_pr_for_issue` verb (provider-spec.md §3.2 [M1]) — the resolution +
-# projection jq (`$q`) stays HERE (caller-side, provider-neutral) and travels as
-# the `-q` arg; only the `gh pr list --json $FIELDS` primitive moves behind the
-# verb. Sourced from the REAL skill tree via readlink -f (the lib-dispatch.sh
-# idiom) so a standalone unit test that sources only this lib still gets the verb.
+# [INV-87] (#282, W1c1 #397) The CHP `chp_find_pr_for_issue` verb is an
+# ABSTRACT contract (spec §3.2 [M1]): positional args `<issue> <fields-csv>`,
+# returning a NORMALIZED JSON array of candidate PRs with `closingIssueNumbers`
+# as ints and `body` pinned to a string (null → "") — no gh flags and no jq
+# programs cross the seam. The [INV-86] two-tier resolution + projection stays
+# HERE as pure jq over the normalized array (caller-side, provider-neutral;
+# mirrors INV-44 classifiers-stay-caller-side). The complete-set walk
+# ([`provider-spec.md`](provider-spec.md) §3.5) is the leaf's responsibility.
+# Sourced from the REAL skill tree via readlink -f (the lib-dispatch.sh idiom)
+# so a standalone unit test that sources only this lib still gets the verb.
 # Idempotent (the shims + .caps reader guard their own redefinition).
 if ! declare -F chp_find_pr_for_issue >/dev/null 2>&1; then
   _lpl_self="${BASH_SOURCE[0]:-$0}"
@@ -64,32 +68,41 @@ fi
 # resolution fields; the `-q` does resolution AND projection in jq.
 resolve_pr_for_issue() {
   local issue_num="$1" fields="${2:-number}"
-  local all_fields q
-  all_fields=$(_pr_field_union "$fields" "number,closingIssuesReferences,headRefName")
-  # Both `$closes` and `$branch` bind from the SAME original input array `$prs`
-  # (chained off `. as $prs`, so neither rewrites `.` for the other) — close
-  # linkage first, branch-name fallback second. Boundary-anchored branch match:
-  # `issue-273` must not match `issue-2730`.
+  # W1c1 (#397): fetch the normalized candidate array, then run the resolution
+  # jq over it caller-side. The leaf owns the union with `number,
+  # closingIssueNumbers, headRefName` (the resolution keys) — so we pass the
+  # caller's fields verbatim and trust the leaf's field-union. Fail-closed on
+  # a transport error (`|| return 1`) — the pushed-no-PR classification MUST
+  # NOT proceed under a failed read.
+  local candidates
+  candidates=$(chp_find_pr_for_issue "$issue_num" "$fields") || return 1
+  [ -n "$candidates" ] || return 0
+  # Both `$closes` and `$branch` bind from the SAME normalized candidate array
+  # — close linkage first, branch-name fallback second. Boundary-anchored
+  # branch match: `issue-273` must not match `issue-2730`.
   #
-  # The branch tier ALSO requires the candidate to carry NO close linkage at all
-  # (`closingIssuesReferences` empty) — this keeps it SYMMETRIC with
-  # verify_pr_closes_issue's branch clause (#277 review [P1] finding 1): a PR on
-  # an `issue-N` branch that actually `Closes #OTHER` would otherwise be sorted
-  # into the branch candidates and could shadow the real close-keyword-less
-  # partial-fix PR for this issue, only to be REJECTED by the guard → a spurious
-  # abort even though a valid PR exists. (A PR that closes THIS issue is already
-  # handled by the authoritative `$closes` tier, so excluding all close-linked
-  # PRs from the branch tier never drops a real match.)
+  # The branch tier ALSO requires the candidate to carry NO close linkage at
+  # all (`closingIssueNumbers` empty) — this keeps it SYMMETRIC with
+  # verify_pr_closes_issue's branch clause (#277 review [P1] finding 1): a PR
+  # on an `issue-N` branch that actually `Closes #OTHER` would otherwise be
+  # sorted into the branch candidates and could shadow the real close-keyword-
+  # less partial-fix PR for this issue, only to be REJECTED by the guard → a
+  # spurious abort even though a valid PR exists. (A PR that closes THIS issue
+  # is already handled by the authoritative `$closes` tier, so excluding all
+  # close-linked PRs from the branch tier never drops a real match.)
+  #
+  # `closingIssueNumbers` is normalized as an array of INTS by the leaf
+  # (W1c1 #397), so `contains([<issue>])` is the correct membership test —
+  # simpler than the pre-#397 `any(.closingIssuesReferences[]?; .number == N)`.
+  local q
   q="$(cat <<JQ
 . as \$prs
-| ([\$prs[] | select(any(.closingIssuesReferences[]?; .number == ${issue_num}))] | sort_by(.number)) as \$closes
-| ([\$prs[] | select(((.closingIssuesReferences // []) | length) == 0 and ((.headRefName // "") | test("(^|[^0-9])issue-${issue_num}([^0-9]|\$)")))] | sort_by(.number)) as \$branch
+| ([\$prs[] | select((.closingIssueNumbers // []) | contains([${issue_num}]))] | sort_by(.number)) as \$closes
+| ([\$prs[] | select(((.closingIssueNumbers // []) | length) == 0 and ((.headRefName // "") | test("(^|[^0-9])issue-${issue_num}([^0-9]|\$)")))] | sort_by(.number)) as \$branch
 | (if (\$closes | length) > 0 then \$closes[0] elif (\$branch | length) > 0 then \$branch[0] else empty end)
 JQ
 )"
-  # [INV-87] leaf moves behind the CHP verb; FIELDS ($all_fields) forwarded
-  # byte-identically, the resolution+projection `$q` stays caller-side ([M1]).
-  chp_find_pr_for_issue "$issue_num" "$all_fields" -q "$q"
+  jq -c "$q" <<<"$candidates"
 }
 
 # verify_pr_closes_issue <pr_num> <issue_num>
@@ -107,36 +120,28 @@ JQ
 verify_pr_closes_issue() {
   local pr_num="$1" issue_num="$2"
   [ -n "$pr_num" ] && [ -n "$issue_num" ] || return 1
-  local q hit
+  # W1c1 (#397): fetch the normalized candidate array once, then run the guard
+  # jq caller-side. The leaf's field-union already includes number,
+  # closingIssueNumbers, headRefName, so we pass an empty field list (only the
+  # resolution keys are needed — but the leaf normalizes the full vocabulary
+  # regardless, so requesting `number` is enough).
+  local candidates hit
+  candidates=$(chp_find_pr_for_issue "$issue_num" "number" 2>/dev/null) || return 1
+  [ -n "$candidates" ] || return 1
+  local q
   q="$(cat <<JQ
 [.[] | select(.number == ${pr_num})
-  | select((any(.closingIssuesReferences[]?; .number == ${issue_num}))
+  | select(((.closingIssueNumbers // []) | contains([${issue_num}]))
            or (((.headRefName // "") | test("(^|[^0-9])issue-${issue_num}([^0-9]|\$)"))
-               and ((.closingIssuesReferences // []) | length) == 0))] | length
+               and ((.closingIssueNumbers // []) | length) == 0))] | length
 JQ
 )"
-  # [INV-87] leaf moves behind the CHP verb; the fixed FIELDS list + guard `$q`
-  # stay caller-side. Same byte-identical `gh pr list --json …` argv as before.
-  hit=$(chp_find_pr_for_issue "$issue_num" "number,closingIssuesReferences,headRefName" -q "$q" 2>/dev/null) || return 1
+  hit=$(jq -r "$q" <<<"$candidates" 2>/dev/null) || return 1
   [ -n "$hit" ] && [ "$hit" != "0" ]
 }
 
-# _pr_field_union <primary> <extra>
-#
-# Echoes a comma-separated union of two field lists (order: every field of
-# <primary>, then any field of <extra> not already present). Keeps the caller's
-# requested fields AND guarantees the resolution fields are fetched, without
-# duplicate `--json` entries.
-_pr_field_union() {
-  local primary="$1" extra="$2"
-  local out="$primary" f
-  local _extra_arr
-  IFS=',' read -ra _extra_arr <<<"$extra"
-  for f in "${_extra_arr[@]}"; do
-    case ",${out}," in
-      *",${f},"*) : ;;            # already present
-      *) out="${out},${f}" ;;
-    esac
-  done
-  echo "$out"
-}
+# _pr_field_union is retired in W1c1 (#397): the leaf owns the union with the
+# resolution keys (number, closingIssueNumbers, headRefName) so callers pass
+# their bare requested fields directly to `chp_find_pr_for_issue`. If a
+# consumer test still references it, they should switch to the abstract
+# contract.

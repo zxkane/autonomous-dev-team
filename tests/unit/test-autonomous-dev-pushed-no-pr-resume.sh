@@ -89,9 +89,30 @@ mkdir -p "$STUB_DIR"
 
 cat > "$STUB_DIR/gh" <<'EOF'
 #!/bin/bash
-# Only `gh pr list ...` is exercised by the helper.
+# Only `gh pr list ...` is exercised by the helper. Under W1c1 (#397) the
+# chp_pr_list leaf runs its own jq normalization outside the gh call, so this
+# stub emits a small canned array of body-mention PRs sized so the caller-side
+# selector produces GH_PR_COUNT. For the pre-W1c1 shape (which called `gh -q`)
+# the stub still honors any -q argv the caller passes.
 case "$*" in
-  *"pr list"*) echo "${GH_PR_COUNT:-0}" ;;
+  *"pr list"*)
+    if [[ "${GH_PR_COUNT:-0}" -gt 0 ]]; then
+      # Emit GH_PR_COUNT rich body-mention PRs; the caller's selector counts them.
+      out="["
+      first=1
+      for i in $(seq 1 "${GH_PR_COUNT:-1}"); do
+        [[ $first -eq 1 ]] && first=0 || out+=","
+        out+="{\"number\":$((100+i)),\"body\":\"related to #178 (mock)\"}"
+      done
+      out+="]"
+      # If a -q filter was passed (pre-W1c1 leaf), pipe through jq.
+      qf=""; prev=""; for a in "$@"; do [[ "$prev" == "-q" ]] && qf="$a" && break; prev="$a"; done
+      if [[ -n "$qf" ]]; then jq -r "$qf" <<<"$out"; else printf '%s' "$out"; fi
+    else
+      # Zero PRs: emit `[]` so the caller-side selector counts to 0.
+      echo "[]"
+    fi
+    ;;
   *) echo "" ;;
 esac
 exit 0
@@ -132,12 +153,18 @@ run_helper() {
     bash -c "
       set +e
       log() { :; }
-      # [INV-87] (#282) needs_open_pr_only now routes its body-mention existence
-      # lookup through chp_pr_list (the general read primitive). The real leaf is
-      # \`gh pr list --repo \$REPO \"\$@\"\`; define the same thin shim here so this
-      # isolation harness (which stubs the gh binary on PATH and extracts only
-      # needs_open_pr_only) resolves the verb and still exercises the gh stub.
-      chp_pr_list() { gh pr list --repo \"\$REPO\" \"\$@\"; }
+      # [INV-87] (W1c1, #397) needs_open_pr_only routes its body-mention
+      # existence lookup through the ABSTRACT chp_pr_list contract (STATE +
+      # FIELDS-CSV → normalized JSON array). Define a minimal in-process shim
+      # that mirrors the leaf's key behavior: run gh pr list, then run the
+      # normalization projection (body // \"\") so the caller's own jq
+      # selector operates on a normalized body string (the W1c1 shape).
+      chp_pr_list() {
+        local state=\"\$1\" fields=\"\$2\"
+        local raw
+        raw=\$(gh pr list --repo \"\$REPO\" --state \"\$state\" --limit 2000 --json \"\$fields\") || return 1
+        jq -c '[ .[] | { number: .number, body: (.body // \"\"), createdAt: (.createdAt // null) } ]' <<<\"\$raw\"
+      }
       $HELPER_FN
       needs_open_pr_only '$issue'
     "

@@ -428,11 +428,15 @@ needs_open_pr_only() {
 
   # (1) No open PR for this issue. Reuse the same body-reference selector the
   # cleanup trap uses. Any non-zero count means a PR exists → not our state.
-  # [INV-87] (#282 r8) body-mention existence lookup → chp_pr_list (general read
-  # leaf); the `--state open --json body -q …` tail is forwarded byte-identically.
-  local pr_count
-  pr_count=$(chp_pr_list --state open --json body \
-    -q "[.[] | select(.body != null and ((.body | test(\"#${issue_num}[^0-9]\")) or (.body | test(\"#${issue_num}$\"))))] | length" 2>/dev/null) || return 1
+  # [INV-87] (W1c1, #397) body-mention existence lookup → chp_pr_list abstract
+  # contract (STATE + FIELDS-CSV → normalized JSON array; body pinned to a
+  # string, closingIssueNumbers int-array). The #N-boundary regex stays here
+  # over the normalized `body` string; the `.body != null` guard is redundant
+  # under normalization (the #148-class fix). Fail-CLOSED on read error
+  # (`|| return 1`): a failed pushed-no-PR classification is a hazard.
+  local pr_list pr_count
+  pr_list=$(chp_pr_list open "body") || return 1
+  pr_count=$(jq -r "[.[] | select((.body | test(\"#${issue_num}[^0-9]\")) or (.body | test(\"#${issue_num}\$\")))] | length" <<<"$pr_list" 2>/dev/null) || return 1
   [[ "$pr_count" =~ ^[0-9]+$ ]] || return 1
   [ "$pr_count" -eq 0 ] || return 1
 
@@ -832,10 +836,19 @@ EOF
   drain_agent_pr_create "$ISSUE_NUMBER" "$REPO" || true
 
   # Look up PR-exists state once (used by SIGTERM rewrite and the success path).
-  # [INV-87] (#282 r8) body-mention existence lookup → chp_pr_list.
+  # [INV-87] (W1c1, #397) body-mention existence lookup → chp_pr_list abstract
+  # contract. Body is normalized to a string so the `.body != null` guard is
+  # gone (the #148-class fix). Fail-soft (`|| echo "0"`): a transient read
+  # error keeps the success path routing conservative (no PR ⇒ retry dev).
+  local _pr_list_e
+  _pr_list_e=$(chp_pr_list open "body" 2>/dev/null) || _pr_list_e=""
   local PR_EXISTS
-  PR_EXISTS=$(chp_pr_list --state open --json body \
-    -q "[.[] | select(.body | test(\"#${ISSUE_NUMBER}[^0-9]\") or test(\"#${ISSUE_NUMBER}$\"))] | length" 2>/dev/null || echo "0")
+  if [[ -n "$_pr_list_e" ]]; then
+    PR_EXISTS=$(jq -r "[.[] | select((.body | test(\"#${ISSUE_NUMBER}[^0-9]\")) or (.body | test(\"#${ISSUE_NUMBER}\$\")))] | length" <<<"$_pr_list_e" 2>/dev/null || echo "0")
+  else
+    PR_EXISTS="0"
+  fi
+  unset _pr_list_e
 
   # [INV-79] Bot-trigger broker: if the scoped agent token is armed and the agent
   # wrote bot-trigger phrase(s) (it cannot post them itself — GH_USER_PAT is scrubbed
@@ -922,12 +935,18 @@ EOF
     # `createdAt` and emit it as `pr_opened_at`; the aggregator prefers it over
     # `ts` (mirrors the issue_labeled→labeled_at fix). On any gh failure the
     # field is omitted and the aggregator falls back to `ts` (#228 review).
-    # [INV-87] (#282 r8) body-mention metrics lookup → chp_pr_list; note `--state
-    # all` (NOT open) is forwarded byte-identically (the general leaf hardcodes no
-    # --state, unlike chp_find_pr_for_issue).
-    _pr_created_at="$(chp_pr_list --state all --json createdAt,body \
-      -q "[.[] | select(.body != null and ((.body | test(\"#${ISSUE_NUMBER}[^0-9]\")) or (.body | test(\"#${ISSUE_NUMBER}\$\"))))] | sort_by(.createdAt) | (.[0].createdAt // empty)" \
-      2>/dev/null || true)"
+    # [INV-87] (W1c1, #397) body-mention metrics lookup → chp_pr_list abstract
+    # contract with STATE=all (matches merged/closed PRs the metrics aggregator
+    # cares about). The #N-boundary regex over normalized `body` stays here;
+    # the `.body != null` guard is redundant (normalization pins body to "").
+    local _pr_list_m
+    _pr_list_m=$(chp_pr_list all "createdAt,body" 2>/dev/null || true)
+    if [[ -n "${_pr_list_m:-}" ]]; then
+      _pr_created_at="$(jq -r "[.[] | select((.body | test(\"#${ISSUE_NUMBER}[^0-9]\")) or (.body | test(\"#${ISSUE_NUMBER}\$\")))] | sort_by(.createdAt) | (.[0].createdAt // empty)" <<<"$_pr_list_m" 2>/dev/null || true)"
+    else
+      _pr_created_at=""
+    fi
+    unset _pr_list_m
     if [[ -n "${_pr_created_at:-}" ]]; then
       metrics_emit pr_opened side=dev "issue=${ISSUE_NUMBER:-}" "pr_opened_at=${_pr_created_at}" "run_id=${RUN_ID:-}" || true
     else
@@ -1149,9 +1168,16 @@ elif [[ "$MODE" = "resume" ]]; then
   REVIEW_COMMENTS=$(itp_list_comments "$ISSUE_NUMBER" 2>/dev/null | jq -r '[.[] | select((.body | startswith("Review findings")) or (.body | startswith("Review PASSED")) or ((.body | test("(?i:(^|[^A-Za-z-])BLOCKING)($|[^A-Za-z0-9_])|(?i:\\[P1\\])")) and ((.body | test("^[ \\t\\r\\n\\f]*(?i:Review PASSED|Review APPROVED|#+\\s*✅|\\*\\*Agent Session Report|Agent Session Report|Multi-agent review|Reviewed HEAD|<!--|Dispatching|Resuming|Moving to|Implementation complete)")) | not)))] | last // empty')
 
   # Fetch PR number linked to this issue for inline review comments.
-  # [INV-87] (#282 r8) body-mention lookup → chp_pr_list.
-  PR_NUM=$(chp_pr_list --state open --json number,body \
-    -q "[.[] | select(.body | test(\"#${ISSUE_NUMBER}[^0-9]\") or test(\"#${ISSUE_NUMBER}$\"))] | .[0].number // empty" 2>/dev/null || true)
+  # [INV-87] (W1c1, #397) body-mention lookup → chp_pr_list abstract contract.
+  # Fail-soft (`|| true`) — the PR-inline-comments block below is optional; a
+  # transient read error just skips the enrichment.
+  _pr_list_n=$(chp_pr_list open "number,body" 2>/dev/null || true)
+  if [[ -n "$_pr_list_n" ]]; then
+    PR_NUM=$(jq -r "[.[] | select((.body | test(\"#${ISSUE_NUMBER}[^0-9]\")) or (.body | test(\"#${ISSUE_NUMBER}\$\")))] | .[0].number // empty" <<<"$_pr_list_n" 2>/dev/null || true)
+  else
+    PR_NUM=""
+  fi
+  unset _pr_list_n
 
   # Fetch PR inline review comments if PR exists
   PR_REVIEW_COMMENTS=""

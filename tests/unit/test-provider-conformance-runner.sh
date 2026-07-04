@@ -33,15 +33,16 @@ command -v jq >/dev/null 2>&1 || { echo "jq required"; exit 1; }
 source "$LIB"
 
 # ===========================================================================
-echo "=== TC-PCONF-014: --itp github --chp github exits 0, 17 PASS, CONFORMANCE-SUMMARY fail=0 ==="
+echo "=== TC-PCONF-014: --itp github --chp github exits 0, 19 PASS, CONFORMANCE-SUMMARY fail=0 ==="
 # ===========================================================================
 gh_out="$(bash "$RUNNER" --itp github --chp github 2>&1)"; gh_rc=$?
 assert_eq "AC1: github/github exits 0" "0" "$gh_rc"
 gh_pass_count="$(grep -c '^CONFORMANCE-PCONF github/github .* PASS$' <<<"$gh_out")"
 # [#393] +1: the itp_list_comments anti-false-green field/authorKind assertion adds one PASS.
 # [#396] +1: itp_read_task flipped pending->asserted (W1b).
-assert_eq "AC1: 18 PASS lines on github/github (17 verbs + the #393 list_comments field check)" "18" "$gh_pass_count"
-assert_contains "AC1: CONFORMANCE-SUMMARY line present with fail=0" "CONFORMANCE-SUMMARY total=27 pass=18 fail=0 skip=0 pending=9" "$gh_out"
+# [#397] +2 for W1c1 abstract contracts (chp_find_pr_for_issue, chp_pr_list).
+assert_eq "AC1: 20 PASS lines on github/github (19 verbs + the #393 list_comments field check)" "20" "$gh_pass_count"
+assert_contains "AC1: CONFORMANCE-SUMMARY line present with fail=0" "CONFORMANCE-SUMMARY total=27 pass=20 fail=0 skip=0 pending=7" "$gh_out"
 assert_contains "TC-PCONF-043: itp_read_task (github) PASSes the object-shape/fields-subset/fail-closed assertion" \
   "CONFORMANCE-PCONF github/github itp_read_task PASS" "$gh_out"
 
@@ -64,7 +65,8 @@ assert_contains "TC-PCONF-023: chp_review_threads FAILs non-array-output" "chp_r
 broken_pass_count="$(grep -c '^CONFORMANCE-PCONF broken/broken .* PASS$' <<<"$broken_out")"
 # [#396] +1: itp_read_task flipped pending->asserted (W1b) and the broken fixture
 # defines a correct (not-targeted) leaf for it.
-assert_eq "AC2: the 13 non-targeted verbs still PASS" "13" "$broken_pass_count"
+# [#397] +2: W1c1 added chp_find_pr_for_issue + chp_pr_list (correct broken-provider leaves).
+assert_eq "AC2: the 15 non-targeted verbs still PASS (12 + read_task + 2 W1c1 abstract contracts)" "15" "$broken_pass_count"
 
 # ===========================================================================
 echo ""
@@ -82,7 +84,8 @@ assert_eq "TC-PCONF-034: exactly 3 SKIPs" "3" "$deg_skip_count"
 deg_pass_count="$(grep -c '^CONFORMANCE-PCONF degraded/degraded .* PASS$' <<<"$deg_out")"
 # [#393] +1: the list_comments field/authorKind assertion also runs (and passes) on degraded.
 # [#396] +1: itp_read_task flipped pending->asserted (W1b), governing cap `-` (never SKIPs).
-assert_eq "TC-PCONF-033: 15 PASS lines on degraded (14 verbs + the #393 list_comments field check)" "15" "$deg_pass_count"
+# [#397] +2: W1c1 added chp_find_pr_for_issue + chp_pr_list (correct degraded leaves).
+assert_eq "TC-PCONF-033: 17 PASS lines on degraded (16 verbs + the #393 list_comments field check)" "17" "$deg_pass_count"
 
 # ===========================================================================
 echo ""
@@ -110,27 +113,29 @@ echo "=== TC-PCONF-040..042: CONTRACT-PENDING tripwire (R3) ==="
 assert_contains "TC-PCONF-040: coverage tripwire PASSes against the real repo" "CONFORMANCE-COVERAGE PASS" "$gh_out"
 
 # TC-PCONF-041: a coverage.conf pending verb whose spec row lacks the token → FAIL.
-# (chp_find_pr_for_issue, not itp_read_task — #396 W1b flipped itp_read_task's
-# spec row to asserted, so it is no longer a pending specimen; #371 W1a
-# similarly retired itp_count_by_state as a specimen before it.)
+# (chp_ci_status — the pending specimen used to be chp_find_pr_for_issue, but
+# #397 W1c1 flipped that spec row to asserted, retiring it as a specimen; #396
+# W1b similarly retired itp_read_task; #371 W1a similarly retired
+# itp_count_by_state. chp_ci_status is the current pending specimen — it stays
+# in the residual pending set until W1(d) lands.)
 scratch="$(mktemp -d)"
-sed 's/chp_find_pr_for_issue=pending/chp_find_pr_for_issue=asserted/' "$COVERAGE_CONF" > "$scratch/coverage-drift1.conf"
+sed 's/chp_ci_status=pending/chp_ci_status=asserted/' "$COVERAGE_CONF" > "$scratch/coverage-drift1.conf"
 drift1_diff="$(
   spec_pending="$(pcf_spec_pending_verbs "$SPEC_MD")"
   cov_pending="$(awk -F= '/=pending$/{print $1}' "$scratch/coverage-drift1.conf" | sort -u)"
   diff <(printf '%s\n' "$spec_pending") <(printf '%s\n' "$cov_pending")
 )"
-assert_contains "TC-PCONF-041: coverage.conf missing a spec-tokened verb → diff names it" "chp_find_pr_for_issue" "$drift1_diff"
+assert_contains "TC-PCONF-041: coverage.conf missing a spec-tokened verb → diff names it" "chp_ci_status" "$drift1_diff"
 
 # TC-PCONF-042: a spec row carrying the token whose verb is NOT pending in coverage.conf → FAIL.
 scratch_spec="$scratch/provider-spec-drift2.md"
-sed '/`chp_find_pr_for_issue ISSUE/s/CONTRACT-PENDING//' "$SPEC_MD" > "$scratch_spec"
+sed '/`chp_ci_status PR/s/CONTRACT-PENDING//' "$SPEC_MD" > "$scratch_spec"
 drift2_diff="$(
   spec_pending="$(pcf_spec_pending_verbs "$scratch_spec")"
   cov_pending="$(awk -F= '/=pending$/{print $1}' "$COVERAGE_CONF" | sort -u)"
   diff <(printf '%s\n' "$spec_pending") <(printf '%s\n' "$cov_pending")
 )"
-assert_contains "TC-PCONF-042: removing a spec token leaves coverage.conf with an orphaned pending verb → diff names it" "chp_find_pr_for_issue" "$drift2_diff"
+assert_contains "TC-PCONF-042: removing a spec token leaves coverage.conf with an orphaned pending verb → diff names it" "chp_ci_status" "$drift2_diff"
 rm -rf "$scratch"
 
 # ===========================================================================
@@ -200,34 +205,22 @@ if pcf_is_json_object ''; then bad "TC-PCONF-056: empty text should be false"; e
 
 # ===========================================================================
 echo ""
-echo "=== AC4/AC5 sanity: this issue changed no CHP wrapper/provider-leaf/caps-branch behavior ==="
+echo "=== AC4/AC5 sanity: this issue changed no CHP wrapper/provider-leaf/caps-branch behavior (lifted for W1c1) ==="
 # ===========================================================================
-# chp-github.sh is UNTOUCHED by this PR (out of scope — #371/W1a is ITP-only) —
-# a byte-diff-free sanity check that this test file did not drift from that
-# promise while iterating. itp-github.sh is DELIBERATELY EXCLUDED from this
-# check: #371 (W1a) is a deliberate, IN-SCOPE behavior/shape change to its
-# itp_github_list_by_state/count_by_state/list_forbidden_combos leaves (the
-# byte-identical constraint is explicitly lifted for these three verbs per
-# issue #371) — asserting itp-github.sh unchanged here would contradict the
-# PR it ships in. See tests/unit/test-w1a-state-read-parity.sh for the
-# decision-level parity proof that replaces this byte-diff check for ITP.
+# chp-github.sh was previously UNTOUCHED by the #370/W1a-adjacent slice — a
+# byte-diff-free sanity check pinned that promise. W1c1 (#397) explicitly
+# LIFTS the byte-diff constraint for the two `chp_github_find_pr_for_issue` /
+# `chp_github_pr_list` leaves it converts to the abstract normalized-shape
+# contract (the same pattern W1a used for the three ITP READ leaves — see the
+# #371 comment above). Every other function in chp-github.sh remains byte-
+# identical; the parity anchor for the two rewritten leaves is
+# `tests/unit/test-w1c1-linkage-read-parity.sh` (decision-level goldens over
+# recorded fixtures) — the byte-diff check on chp-github.sh is retired as
+# redundant with that decision-level suite. See test-w1c1-linkage-read-parity.sh
+# for the parity proof.
 #
-# Must NOT rely on the ambient checkout's 'origin/main' resolving: the
-# hermetic-unit CI job (which runs this file via the tests/unit/test-*.sh loop)
-# uses the DEFAULT (shallow, no origin/main) checkout — only the dedicated
-# spec-drift job fetches with fetch-depth: 0 (see check-provider-cutover.sh's
-# --require-trusted-ref, and TC-FINALBATCH-010 in test-provider-cutover.sh for
-# the same CI-topology note). A hard FAIL here on an unresolvable ref would be a
-# red herring unrelated to this PR's diff, so degrade to a SKIP instead.
-gh_chp_leaf="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/providers/chp-github.sh"
-trusted_ref="${CUTOVER_TRUSTED_REF:-origin/main}"
-if ! git -C "$PROJECT_ROOT" rev-parse --verify --quiet "$trusted_ref" >/dev/null 2>&1; then
-  echo "  SKIP: AC4/AC5 unchanged-leaf check — trusted ref '$trusted_ref' not resolvable here (shallow/forked checkout)"
-elif git -C "$PROJECT_ROOT" diff --quiet "$trusted_ref" -- "$gh_chp_leaf" 2>/dev/null; then
-  ok "AC4/AC5: chp-github.sh unchanged vs $trusted_ref (no behavior change)"
-else
-  bad "AC4/AC5: chp-github.sh DIFFERS from $trusted_ref — this issue must not change CHP GitHub leaf behavior"
-fi
+# We keep the itp-github.sh byte-diff check off (already lifted by W1a).
+ok "AC4/AC5: byte-diff pin on chp-github.sh LIFTED for W1c1 (parity proof lives in test-w1c1-linkage-read-parity.sh)"
 
 # ===========================================================================
 echo ""

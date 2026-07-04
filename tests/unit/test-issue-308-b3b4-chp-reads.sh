@@ -93,12 +93,16 @@ gh() {
   local n; n=$(cat "$REC_DIR/.count" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$REC_DIR/.count"
   : > "$REC_DIR/call-$n"
   printf "%s\0" "$@" >> "$REC_DIR/call-$n"
-  # Tag the verb (first two args) so the harness can find the pr-list/pr-view call.
+  # Tag the verb (first two args) so the harness can find the api-graphql/
+  # pr-view call.
   printf "%s %s\n" "${1:-}" "${2:-}" >> "$REC_DIR/.verbs"
-  # Benign payloads: pr list → "0" (no PR) / empty number; pr view → empty body;
-  # else 0. (#316 removed the lib-auth `gh repo view` head-resolution fallback —
-  # Option A trusts `origin` directly — so no `repo view` stub branch is needed.)
-  if [[ "${1:-}" == "pr" && "${2:-}" == "list" ]]; then printf ""; return 0; fi
+  # W1c1 (#397): chp_pr_list now emits `gh api graphql` (cursor page walk).
+  # Return the empty-PR envelope so the caller-side jq counts 0 (no PR).
+  # pr view stays byte-identical (chp_pr_view is unchanged at W1c1).
+  if [[ "${1:-}" == "api" && "${2:-}" == "graphql" ]]; then
+    printf %s "{\"data\":{\"repository\":{\"pullRequests\":{\"pageInfo\":{\"endCursor\":null,\"hasNextPage\":false},\"nodes\":[]}}}}"
+    return 0
+  fi
   if [[ "${1:-}" == "pr" && "${2:-}" == "view" ]]; then printf ""; return 0; fi
   return 0
 }
@@ -146,23 +150,29 @@ env -u CODE_HOST -u AUTONOMOUS_CONF -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR \
     drain_agent_pr_create $issue \"\$REPO\"
   " >/dev/null 2>&1
 
-if [[ -f "$REC1/.verbs" ]] && grep -qx "pr list" "$REC1/.verbs"; then
-  pass "S1 seam-reachability: stub OBSERVED a 'gh pr list' call through chp_pr_list (exercised, not just reachable)"
-  cn=$(call_for_verb "$REC1" pr list) && read_call "$REC1" "$cn"
-  # argc: pr list --repo $REPO --state open --json body -q <selector> = 10 args
-  assert_eq "S1 golden-trace argc (boundaries preserved)" "10" "${#CALL_ARGV[@]}"
-  assert_eq "S1 argv[0]=pr" "pr" "${CALL_ARGV[0]:-}"
-  assert_eq "S1 argv[1]=list" "list" "${CALL_ARGV[1]:-}"
-  assert_eq "S1 argv[2]=--repo" "--repo" "${CALL_ARGV[2]:-}"
-  assert_eq "S1 argv[3]=\$REPO (verb supplies global REPO)" "$REPO" "${CALL_ARGV[3]:-}"
-  assert_eq "S1 argv[4]=--state" "--state" "${CALL_ARGV[4]:-}"
-  assert_eq "S1 argv[5]=open" "open" "${CALL_ARGV[5]:-}"
-  assert_eq "S1 argv[6]=--json" "--json" "${CALL_ARGV[6]:-}"
-  assert_eq "S1 argv[7]=body" "body" "${CALL_ARGV[7]:-}"
-  assert_eq "S1 argv[8]=-q" "-q" "${CALL_ARGV[8]:-}"
-  assert_eq "S1 argv[9]=<verbatim existence selector, single element>" "$SEL_EXISTS" "${CALL_ARGV[9]:-}"
+if [[ -f "$REC1/.verbs" ]] && grep -qx "api graphql" "$REC1/.verbs"; then
+  pass "S1 seam-reachability: stub OBSERVED a 'gh api graphql' call through chp_pr_list (exercised, not just reachable)"
+  cn=$(call_for_verb "$REC1" api graphql) && read_call "$REC1" "$cn"
+  # W1c1 (#397) reshape: the leaf now emits `gh api graphql` with cursor
+  # pagination (§3.5). No `--limit`/`--json`/`-q` cross the seam. Positional
+  # STATE + FIELDS-CSV live on the CALLER side. Assert the structural argv:
+  # api graphql, owner/repo binds, query carries pullRequests + states +
+  # pageInfo + body selection.
+  argv_joined="${CALL_ARGV[*]:-}"
+  assert_eq "S1 argv[0..1]=api graphql" "api graphql" "${CALL_ARGV[0]:-} ${CALL_ARGV[1]:-}"
+  assert_contains "S1 -F owner=zxkane present"            "owner=zxkane" "$argv_joined"
+  assert_contains "S1 -F repo=autonomous-dev-team present" "repo=autonomous-dev-team" "$argv_joined"
+  assert_contains "S1 query carries pullRequests(first:100" "pullRequests(first: 100" "$argv_joined"
+  assert_contains "S1 states filter (states:[OPEN])"        "states: [OPEN]" "$argv_joined"
+  assert_contains "S1 pageInfo cursor present (§3.5 exhaustion)" "pageInfo { endCursor hasNextPage" "$argv_joined"
+  assert_contains "S1 query selects body"                    " body " "$argv_joined"
+  if [[ "$argv_joined" != *" -q "* ]]; then
+    pass "S1 no -q crosses the seam (W1c1 abstract contract)"
+  else
+    fail "S1 -q leaked into gh argv (W1c1 regression): $argv_joined"
+  fi
 else
-  fail "S1 seam-reachability: stub did NOT observe a 'gh pr list' — chp_pr_list not exercised (fail-soft hazard)"
+  fail "S1 seam-reachability: stub did NOT observe a 'gh api graphql' — chp_pr_list not exercised (fail-soft hazard)"
 fi
 rm -rf "$RUNDIR"
 
@@ -187,19 +197,29 @@ env -u CODE_HOST -u AUTONOMOUS_CONF -u PROJECT_DIR \
     drain_agent_bot_triggers $issue \"\$REPO\" '/q review'
   " >/dev/null 2>&1
 
-if [[ -f "$REC2/.verbs" ]] && grep -qx "pr list" "$REC2/.verbs"; then
-  pass "S2 seam-reachability: stub OBSERVED a 'gh pr list' call through chp_pr_list"
-  cn=$(call_for_verb "$REC2" pr list) && read_call "$REC2" "$cn"
-  # argc: pr list --repo $REPO --state open --json number,body -q <selector> = 10 args
-  assert_eq "S2 golden-trace argc (boundaries preserved)" "10" "${#CALL_ARGV[@]}"
-  assert_eq "S2 argv[0..1]=pr list" "pr list" "${CALL_ARGV[0]:-} ${CALL_ARGV[1]:-}"
-  assert_eq "S2 argv[2..3]=--repo \$REPO" "--repo $REPO" "${CALL_ARGV[2]:-} ${CALL_ARGV[3]:-}"
-  assert_eq "S2 argv[4..5]=--state open" "--state open" "${CALL_ARGV[4]:-} ${CALL_ARGV[5]:-}"
-  assert_eq "S2 argv[6..7]=--json number,body" "--json number,body" "${CALL_ARGV[6]:-} ${CALL_ARGV[7]:-}"
-  assert_eq "S2 argv[8]=-q" "-q" "${CALL_ARGV[8]:-}"
-  assert_eq "S2 argv[9]=<verbatim number selector, single element>" "$SEL_PRNUM" "${CALL_ARGV[9]:-}"
+if [[ -f "$REC2/.verbs" ]] && grep -qx "api graphql" "$REC2/.verbs"; then
+  pass "S2 seam-reachability: stub OBSERVED a 'gh api graphql' call through chp_pr_list"
+  cn=$(call_for_verb "$REC2" api graphql) && read_call "$REC2" "$cn"
+  # W1c1 (#397) reshape: same rationale as S1 above — `gh api graphql` +
+  # cursor page walk (§3.5). No `--limit`/`--json`/`-q` cross the seam.
+  # STATE=open maps to states:[OPEN]; FIELDS-CSV=number,body selects both
+  # `number` and `body` in the GraphQL query.
+  argv_joined="${CALL_ARGV[*]:-}"
+  assert_eq "S2 argv[0..1]=api graphql" "api graphql" "${CALL_ARGV[0]:-} ${CALL_ARGV[1]:-}"
+  assert_contains "S2 -F owner=zxkane present"            "owner=zxkane" "$argv_joined"
+  assert_contains "S2 -F repo=autonomous-dev-team present" "repo=autonomous-dev-team" "$argv_joined"
+  assert_contains "S2 query carries pullRequests(first:100" "pullRequests(first: 100" "$argv_joined"
+  assert_contains "S2 states filter (states:[OPEN])"        "states: [OPEN]" "$argv_joined"
+  assert_contains "S2 pageInfo cursor present (§3.5 exhaustion)" "pageInfo { endCursor hasNextPage" "$argv_joined"
+  assert_contains "S2 query selects number"                 " number " "$argv_joined"
+  assert_contains "S2 query selects body"                   " body " "$argv_joined"
+  if [[ "$argv_joined" != *" -q "* ]]; then
+    pass "S2 no -q crosses the seam (W1c1 abstract contract)"
+  else
+    fail "S2 -q leaked into gh argv (W1c1 regression): $argv_joined"
+  fi
 else
-  fail "S2 seam-reachability: stub did NOT observe a 'gh pr list' — chp_pr_list not exercised"
+  fail "S2 seam-reachability: stub did NOT observe a 'gh api graphql' — chp_pr_list not exercised"
 fi
 rm -rf "$RUNDIR"
 
@@ -290,7 +310,7 @@ n_selfsource=$(awk '{s=$0;sub(/^[[:space:]]+/,"",s); if(substr(s,1,1)=="#")next;
 assert_eq "TC-308-SRC-NO-SELFSOURCE lib-review-e2e.sh did NOT add an executable lib-code-host.sh self-source" "0" "$n_selfsource"
 # Both migrated calls invoke the verb at exactly the migrated read positions.
 assert_eq "TC-308-SRC-AUTH-VERB lib-auth.sh invokes chp_pr_list at both read sites (×2)" \
-  "2" "$(grep -c 'chp_pr_list --state open' "$AUTH_LIB" || true)"
+  "2" "$(grep -cE 'chp_pr_list open "(body|number,body)"' "$AUTH_LIB" || true)"
 assert_eq "TC-308-SRC-E2E-VERB lib-review-e2e.sh invokes chp_pr_view at the SHA-evidence read (×1)" \
   "1" "$(grep -c 'chp_pr_view "\$PR_NUMBER" --json comments' "$E2E_LIB" || true)"
 

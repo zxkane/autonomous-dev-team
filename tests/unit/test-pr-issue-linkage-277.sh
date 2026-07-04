@@ -45,22 +45,19 @@ export PROJECT_ID=test-proj
 export MAX_RETRIES=3
 export MAX_CONCURRENT=5
 
-# Mock `gh pr list --repo R --state open --json F -q EXPR` by piping the fixture
-# JSON through jq with the captured -q expression. The resolver issues exactly
-# one `gh pr list` call (single superset fetch); the fixture is the full PR set.
-# Stderr is preserved so a jq abort (e.g. null-body) is visible during runs.
+# Mock `gh api graphql …` by wrapping the flat fixture array in the GraphQL
+# `.data.repository.pullRequests.{pageInfo, nodes}` envelope the W1c1 (#397)
+# leaf reads. Fixtures use the flat `closingIssuesReferences:[{number:N}]`
+# form; the mock reshapes it into the GraphQL `.nodes[]` form the leaf's
+# projection jq consumes. Single-page (`hasNextPage:false`) is enough — the
+# fixtures fit in one page.
 _MOCK_PR_LIST_JSON=""
 gh() {
-  local q_expr=""
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      -q) q_expr="$2"; shift 2 ;;
-      *) shift ;;
-    esac
-  done
-  if [[ -n "$q_expr" && -n "$_MOCK_PR_LIST_JSON" ]]; then
-    jq -r "$q_expr" <<<"$_MOCK_PR_LIST_JSON"
-  fi
+  local flat="${_MOCK_PR_LIST_JSON:-[]}"
+  local reshaped
+  reshaped=$(jq -c '[.[] | . + {closingIssuesReferences: {nodes: (.closingIssuesReferences // [])}}]' <<<"$flat" 2>/dev/null || printf '[]')
+  jq -c --argjson nodes "$reshaped" \
+       '{data:{repository:{pullRequests:{pageInfo:{endCursor:null,hasNextPage:false}, nodes:$nodes}}}}' <<<"{}"
 }
 export -f gh
 
@@ -135,12 +132,12 @@ echo "=== resolve_pr_for_issue: authoritative close linkage (INV-86) ==="
 # TC-XWIRE-001: issue 273 must resolve to PR-A (closes 273), NOT PR-B (body
 # mentions #273). FAILS before the fix (loose body match picks a mentioning PR).
 _MOCK_PR_LIST_JSON="$FIX_CLOSES"
-out=$(resolve_pr_for_issue 273 "number,closingIssuesReferences,headRefName,body" 2>/dev/null)
+out=$(resolve_pr_for_issue 273 "number,closingIssueNumbers,headRefName,body" 2>/dev/null)
 assert_eq "TC-XWIRE-001 issue 273 → PR-A (close-linked), not PR-B (mentions #273)" "10" "$(extract_number "$out")"
 
 # Symmetric: issue 274 → PR-B.
 _MOCK_PR_LIST_JSON="$FIX_CLOSES"
-out=$(resolve_pr_for_issue 274 "number,closingIssuesReferences,headRefName,body" 2>/dev/null)
+out=$(resolve_pr_for_issue 274 "number,closingIssueNumbers,headRefName,body" 2>/dev/null)
 assert_eq "TC-XWIRE-001b issue 274 → PR-B (close-linked)" "11" "$(extract_number "$out")"
 
 # TC-XWIRE-003: fetch_pr_for_issue (shared helper, the dispatcher side) exhibits
