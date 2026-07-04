@@ -3306,10 +3306,65 @@ handle_pending_dev_pr_exists() {
       return 0
     fi
 
-    # Residual park: no resolvable session id, or a session that is not
-    # `completed` per `is_session_completed` (a live/crashed wrapper — Step 5
-    # owns liveness — or a non-claude dev CLI whose log has no `{"type":"result"}`
-    # line, which returns false BY DESIGN). Surface the stale verdict and keep
+    # [INV-111] (#402) Self-heal: a review-FAIL against this HEAD with NO
+    # resolvable session id at all is the exact signature of a dev wrapper
+    # that lost its `Dev Session ID:` / session-report comment mid-cleanup
+    # (e.g. its per-run auth shim dir vanished before the report post —
+    # see [INV-111] in autonomous-dev.sh's cleanup()). Without a session id,
+    # the INV-98 delegation above can never fire (it requires one to call
+    # `is_session_completed`/`handle_completed_session_routing`), so the
+    # residual park below would hold this issue in `pending-dev` forever —
+    # every 5-minute tick a silent no-op.
+    #
+    # Only engage when NO dev wrapper is alive for this issue (`may_stall_now`
+    # — the shared [INV-24]/[INV-26]-style `pid_alive`-miss + no-fresh-
+    # dispatch-marker predicate): a live wrapper may still be about to post
+    # its own session id, and this must never race a healthy wrapper into a
+    # duplicate dev-new. A session id THAT DID resolve but whose session is
+    # not `completed` (a live/crashed wrapper with a normally-posted id) is
+    # a different bug shape and stays on the pre-existing residual-park path
+    # below, unchanged.
+    #
+    # Bounded per-HEAD via a persistent marker (INV-85 pattern), posted only
+    # AFTER a dev-new is actually dispatched — never up-front — so an
+    # aborted dispatch attempt can't leave a phantom marker that stalls the
+    # NEXT tick's retry. [INV-108] gates the dispatch itself so a concurrent
+    # tick racing this same (issue, dev-new) can't double-dispatch.
+    if [ -z "$_sid" ] && may_stall_now "$issue_num"; then
+      local _sh_marker="self-heal-lost-session:${current_head}"
+      local _sh_present
+      _sh_present=$(itp_list_comments "$issue_num" 2>/dev/null \
+        | jq -r "[.[].body | select(contains(\"${_sh_marker}\"))] | length" 2>/dev/null)
+      if [ "${_sh_present:-1}" = "0" ]; then
+        if ! acquire_dispatch_marker "$issue_num" "dev-new"; then
+          log "  issue #${issue_num} self-heal dev-new dispatch marker held by a concurrent tick — skipping ([INV-108])"
+        else
+          log "  issue #${issue_num} PR ${pr_ref} HEAD \`${current_head}\` reviewed FAILED with NO resolvable session id and no live wrapper — self-healing with a fresh dev-new ([INV-111])"
+          if ! label_swap "$issue_num" "pending-dev" "in-progress" ||
+             ! post_dispatch_token "$issue_num" "dev-new" ||
+             ! dispatch dev-new "$issue_num"; then
+            log "  ERROR: self-heal dev-new pre-spawn step failed for issue #${issue_num} (label/token/dispatch) — releasing the dispatch marker; next tick retries ([INV-108])."
+            release_dispatch_marker "$issue_num" "dev-new"
+            return 0
+          fi
+          dispatch_marker_confirm_launched "$issue_num" "dev-new"
+          itp_post_comment "$issue_num" \
+            "PR ${pr_ref} HEAD \`${current_head}\` was reviewed with a FAILED verdict, but no \`Dev Session ID:\` could be resolved for the prior dev session (its session-report comment was likely lost — e.g. a mid-cleanup auth-teardown race) and no dev wrapper is currently running. Self-healing: dispatching a fresh dev session rather than parking indefinitely. (\`${_sh_marker}\`)"
+          return 0
+        fi
+      fi
+      # Marker already present (a self-heal dev-new already ran for this
+      # HEAD and made no progress) — fall through to the residual park below
+      # so MAX_RETRIES remains the eventual backstop instead of looping
+      # self-heal dev-new forever against an unchanged HEAD.
+    fi
+
+    # Residual park: no resolvable session id (self-heal above either does
+    # not apply — a wrapper is alive — or already made its one bounded
+    # attempt for this HEAD), or a session that is not `completed` per
+    # `is_session_completed` (a live/crashed wrapper — Step 5 owns liveness
+    # — or a non-claude dev CLI whose log has no `{"type":"result"}` line,
+    # which returns false BY DESIGN). Surface the stale verdict and keep
     # pending-dev.
     #
     # Idempotency check uses `grep -q '^0$'` (fail-closed): a transient

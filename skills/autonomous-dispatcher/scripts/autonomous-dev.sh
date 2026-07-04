@@ -828,6 +828,71 @@ EOF
     fi
   fi
 
+  # [INV-111] (#402) `gh`-resolution resilience: if the per-run auth shim dir
+  # (GH_WRAPPER_DIR, prepended to PATH in setup_github_auth) vanished mid-run
+  # (external deletion, a racing cleanup — the deleter is unidentified and
+  # this fix is deliberately deleter-agnostic), bash's command hash for `gh`
+  # still points at the now-dead symlink: PATH is only re-searched when
+  # there is NO cached location, never when a cached location stops
+  # existing. Every subsequent bare `gh` call in THIS shell (the session
+  # report post, the brokers, the PR-exists lookup, the label flip) would
+  # then fail rc=127 regardless of how healthy the rest of auth is. Detect
+  # the vanished shim once, here — before any of those calls — drop the
+  # stale hash, and strip the dead entry from PATH so resolution falls back
+  # to the system `gh` using the GH_TOKEN just refreshed above. A no-op
+  # (and harmless) when the shim is still intact.
+  if [[ -n "${GH_WRAPPER_DIR:-}" ]] && [[ ! -x "${GH_WRAPPER_DIR}/gh" ]]; then
+    log "WARNING: [INV-111] GH_WRAPPER_DIR (${GH_WRAPPER_DIR}) is gone — dropping the stale 'gh' command hash and PATH entry so cleanup's gh calls fall back to the system gh."
+    hash -d gh 2>/dev/null || true
+    if declare -F _strip_path_entry >/dev/null 2>&1; then
+      PATH="$(_strip_path_entry "$PATH" "$GH_WRAPPER_DIR")"
+      export PATH
+    fi
+  fi
+
+  # [INV-111] (#402) Post the Agent Session Report FIRST — before the
+  # INV-79 brokers and the PR-exists lookup below. This is the dispatcher's
+  # ONLY cross-box session-identity channel (the `Dev Session ID:` marker);
+  # losing it parks the issue in the dispatcher's stale-verdict residual
+  # branch forever (extract_dev_session_id has nothing to extract). The
+  # report needs only itp_post_comment + $SESSION_ID + the exit code already
+  # known at cleanup entry — none of that is produced by the broker steps
+  # below, so there is no ordering reason to post it any later.
+  #
+  # The `Exit code:` value here is deliberately the RAW exit code, BEFORE
+  # the SIGTERM+PR_EXISTS convergence rewrite further down (which needs
+  # drain_agent_pr_create's PR to exist first) — so a SIGTERM+PR-ready
+  # handoff renders `Exit code: 143` in the report even though the label
+  # transition below correctly routes to pending-review. This does not
+  # regress any consumer: count_agent_failures already excludes 143/137
+  # unconditionally, and dev_near_success's "Exit code: 0" signal is only
+  # consulted on the no-PR branch — which a SIGTERM+PR-ready handoff never
+  # reaches (a PR exists).
+  #
+  # `${AGENT_DEV_MODEL:-<default>}` uses the colon-minus operator so that
+  # both unset and set-but-empty render `<default>`. `lib-agent.sh:42`
+  # defaults `AGENT_DEV_MODEL=""` (empty), which is the dominant
+  # operator-side case — without the colon the trailer would print
+  # `Model:` with an empty value for every default-configured deployment.
+  # The companion run_cleanup harness in
+  # tests/unit/test-autonomous-dev-cleanup-startup-failure.sh uses the
+  # *non*-colon `${6-claude}` form for its positionals so a missing arg
+  # (test author's intent: "use the default") and an explicit `""` arg
+  # (test author's intent: "exercise the empty-string path") stay
+  # distinguishable. The two `-` vs `:-` choices are load-bearing in
+  # opposite directions; don't unify them. (#128, TC-CL-006)
+  itp_post_comment "$ISSUE_NUMBER" "$(cat <<EOF
+**Agent Session Report (Dev)**
+- Dev Session ID: \`${SESSION_ID}\`
+- Exit code: ${exit_code}
+- Mode: ${MODE}
+- Agent: ${AGENT_CMD:-claude}
+- Model: ${AGENT_DEV_MODEL:-<default>}
+- Timestamp: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
+- Log: \`${LOG_FILE}\`$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)
+EOF
+)" || log "WARNING: Failed to post session report comment"
+
   # [INV-79] PR-create broker: if the scoped agent token is armed and the agent
   # wrote a PR title+body (it cannot `gh pr create` with pull_requests:read),
   # open the PR now with the wrapper's full-write token — BEFORE the PR_EXISTS
@@ -877,32 +942,6 @@ EOF
       log "Caught SIGTERM with no PR; keeping exit_code ${exit_code} (will route to pending-dev)."
     fi
   fi
-
-  # Post session report.
-  #
-  # `${AGENT_DEV_MODEL:-<default>}` uses the colon-minus operator so that
-  # both unset and set-but-empty render `<default>`. `lib-agent.sh:42`
-  # defaults `AGENT_DEV_MODEL=""` (empty), which is the dominant
-  # operator-side case — without the colon the trailer would print
-  # `Model:` with an empty value for every default-configured deployment.
-  # The companion run_cleanup harness in
-  # tests/unit/test-autonomous-dev-cleanup-startup-failure.sh uses the
-  # *non*-colon `${6-claude}` form for its positionals so a missing arg
-  # (test author's intent: "use the default") and an explicit `""` arg
-  # (test author's intent: "exercise the empty-string path") stay
-  # distinguishable. The two `-` vs `:-` choices are load-bearing in
-  # opposite directions; don't unify them. (#128, TC-CL-006)
-  itp_post_comment "$ISSUE_NUMBER" "$(cat <<EOF
-**Agent Session Report (Dev)**
-- Dev Session ID: \`${SESSION_ID}\`
-- Exit code: ${exit_code}
-- Mode: ${MODE}
-- Agent: ${AGENT_CMD:-claude}
-- Model: ${AGENT_DEV_MODEL:-<default>}
-- Timestamp: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
-- Log: \`${LOG_FILE}\`$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)
-EOF
-)" || log "WARNING: Failed to post session report comment"
 
   # Transition labels based on whether agent succeeded or failed
   if [[ $exit_code -eq 0 ]]; then

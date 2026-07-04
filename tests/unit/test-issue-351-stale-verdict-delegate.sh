@@ -91,11 +91,13 @@ set +e
 # greps `stale-verdict:<head>`; the router greps INV-12-completed / no-progress /
 # INV-35-fresh-dev / no-progress-substantive-attempt. Echo the tokens the
 # per-test knobs enable.
+_MOCK_SELF_HEAL_PRESENT=0
 itp_list_comments() {
   _rec itp_list_comments "$@"
   local body="baseline comment"
   [ "$_MOCK_NOTICE_PRESENT" = "1" ] && body+=" stale-verdict:${_MOCK_CURRENT_HEAD} INV-12-completed:${_MOCK_SESSION_ID:-sid} no-progress-substantive:${_MOCK_CURRENT_HEAD} INV-35-fresh-dev:${_MOCK_SESSION_ID:-sid}"
   [ "$_MOCK_ATTEMPT_PRESENT" = "1" ] && body+=" no-progress-substantive-attempt:${_MOCK_CURRENT_HEAD}"
+  [ "$_MOCK_SELF_HEAL_PRESENT" = "1" ] && body+=" self-heal-lost-session:${_MOCK_CURRENT_HEAD}"
   printf '%s\n' "[{\"body\":\"${body}\"}]"
 }
 itp_post_comment()    { _rec itp_post_comment "$@"; }
@@ -134,6 +136,14 @@ mark_stalled()             { _rec mark_stalled "$@"; }
 # branch now gates on acquire_dispatch_marker before dispatching; this suite
 # exercises delegation/routing, not controller-side dedup, so always acquire.
 acquire_dispatch_marker()  { return 0; }
+dispatch_marker_confirm_launched() { _rec dispatch_marker_confirm_launched "$@"; }
+release_dispatch_marker()          { _rec release_dispatch_marker "$@"; }
+# [INV-111] (#402): the self-heal branch's liveness gate. Default: no live
+# wrapper (eligible) — TC-351-DELEG-7a (pre-existing, no-session-id park)
+# now exercises self-heal by default; a dedicated case flips this to
+# simulate a live wrapper deferring self-heal.
+_MOCK_MAY_STALL_NOW=0
+may_stall_now()            { return "$_MOCK_MAY_STALL_NOW"; }
 # [INV-100] (#356): handle_completed_session_routing's Branch C truncate now
 # routes through _reset_session_log (real impl is backend-aware — local
 # bare truncate vs remote SSM driver). Mocked here so this suite continues
@@ -169,6 +179,7 @@ _reset() {
   _MOCK_VERDICT='none'; _MOCK_CAUSE=''; _MOCK_DEV_ACTIONABLE='true'
   _MOCK_FLIP_COUNT=0; _MOCK_CURRENT_HEAD='sha-A'
   _MOCK_BOT_UNFIXABLE=1; _MOCK_NOTICE_PRESENT=0; _MOCK_ATTEMPT_PRESENT=0
+  _MOCK_MAY_STALL_NOW=0; _MOCK_SELF_HEAL_PRESENT=0
 }
 
 # Configure a same-HEAD PR-exists scenario with a completed dev session.
@@ -267,15 +278,48 @@ assert_no_match "TC-351-DELEG-6 no delegation label move" "pending-dev${US}in-pr
 
 # ===================================================================
 echo
-echo "=== TC-351-DELEG-7a: residual park — no session id ==="
+echo "=== TC-351-DELEG-7a: no session id + a dev wrapper IS alive → residual park (self-heal deferred) ==="
 _reset; _same_head_completed
 _MOCK_SESSION_ID=''         # cannot resolve session → park
 _MOCK_COMPLETED_RC=0; _MOCK_TERMINAL_REASON='completed'
+_MOCK_MAY_STALL_NOW=1       # [INV-111] a wrapper is alive — may_stall_now defers
 handle_pending_dev_pr_exists 99
 rc=$?
 assert_eq   "TC-351-DELEG-7a returns 0 (park)" "0" "$rc"
 assert_match "TC-351-DELEG-7a posts stale-verdict residual park" "stale-verdict:sha-A" "$(_trace_all)"
 assert_eq   "TC-351-DELEG-7a ZERO dev-new" "0" "$(_trace_verbs | grep -c '^dispatch$')"
+assert_no_match "TC-351-DELEG-7a no self-heal marker posted" "self-heal-lost-session:" "$(_trace_all)"
+
+# ===================================================================
+echo
+echo "=== TC-351-DELEG-7a-SELFHEAL: no session id + NO live wrapper → [INV-111] self-heal dev-new, no park ==="
+_reset; _same_head_completed
+_MOCK_SESSION_ID=''         # cannot resolve session
+_MOCK_COMPLETED_RC=0; _MOCK_TERMINAL_REASON='completed'
+_MOCK_MAY_STALL_NOW=0       # [INV-111] no live wrapper — eligible to self-heal
+handle_pending_dev_pr_exists 99
+rc=$?
+assert_eq   "TC-351-DELEG-7a-SELFHEAL returns 0" "0" "$rc"
+assert_match "TC-351-DELEG-7a-SELFHEAL dispatched exactly one self-heal dev-new" "^dispatch${US}dev-new${US}99$" "$(_trace_all)"
+assert_eq   "TC-351-DELEG-7a-SELFHEAL dev-new dispatched exactly once" "1" "$(_trace_verbs | grep -c '^dispatch$')"
+assert_match "TC-351-DELEG-7a-SELFHEAL label_swap pending-dev → in-progress" "itp_transition_state${US}99${US}pending-dev${US}in-progress" "$(_trace_all)"
+assert_match "TC-351-DELEG-7a-SELFHEAL posts self-heal marker" "self-heal-lost-session:sha-A" "$(_trace_all)"
+assert_match "TC-351-DELEG-7a-SELFHEAL confirms the dispatch marker launched" "^dispatch_marker_confirm_launched" "$(_trace_all)"
+assert_no_match "TC-351-DELEG-7a-SELFHEAL NO stale-verdict park notice posted" "stale-verdict:" "$(_trace_all)"
+
+# ===================================================================
+echo
+echo "=== TC-351-DELEG-7a-SELFHEAL-BOUND: self-heal marker already present for this HEAD → no 2nd dev-new, falls to residual park ==="
+_reset; _same_head_completed
+_MOCK_SESSION_ID=''
+_MOCK_COMPLETED_RC=0; _MOCK_TERMINAL_REASON='completed'
+_MOCK_MAY_STALL_NOW=0
+_MOCK_SELF_HEAL_PRESENT=1   # a self-heal dev-new already ran for this HEAD
+handle_pending_dev_pr_exists 99
+rc=$?
+assert_eq   "TC-351-DELEG-7a-SELFHEAL-BOUND returns 0" "0" "$rc"
+assert_eq   "TC-351-DELEG-7a-SELFHEAL-BOUND ZERO dev-new (bounded)" "0" "$(_trace_verbs | grep -c '^dispatch$')"
+assert_match "TC-351-DELEG-7a-SELFHEAL-BOUND falls to residual stale-verdict park" "stale-verdict:sha-A" "$(_trace_all)"
 
 # ===================================================================
 echo

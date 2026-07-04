@@ -140,6 +140,16 @@ label_swap() {
   _MOCK_LABEL_SWAPS+="${issue_num}:${remove}:${add} "
 }
 
+# [INV-111] (#402): the same-HEAD branch now tries a bounded self-heal
+# dev-new when NO session id resolves AND no dev wrapper is alive
+# (may_stall_now). This suite's documented scope is the RESIDUAL park path
+# (see the file header) — a wrapper is alive here (return 1 = defer) so
+# every same-HEAD/no-session-id case in this file exercises the unchanged
+# park behavior. The self-heal branch itself (may_stall_now eligible) is
+# covered by test-issue-402-dispatcher-self-heal.sh and
+# test-issue-351-stale-verdict-delegate.sh.
+may_stall_now() { return 1; }
+
 reset_mocks() {
   _MOCK_PR_INFO=""
   _MOCK_LAST_REVIEWED=""

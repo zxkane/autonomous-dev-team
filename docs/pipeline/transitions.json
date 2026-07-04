@@ -322,6 +322,19 @@
       "note": "If a PR already references the issue, skip re-dispatching dev and route straight to review."
     },
     {
+      "id": "dispatch-pending-dev-selfheal-lost-session",
+      "from": "pending_dev",
+      "to": "in_progress",
+      "event": "dispatcher-step4a5-selfheal-lost-session",
+      "actor": "dispatcher",
+      "guards": ["concurrency-below-cap", "same-head-reviewed-failed", "no-session-id-resolvable", "no-live-dev-wrapper"],
+      "actions": ["remove-label:pending-dev", "add-label:in-progress", "comment:self-heal-lost-session"],
+      "code_site": "lib-dispatch.sh handle_pending_dev_pr_exists(): self-healing with a fresh dev-new",
+      "mermaid": "pending_dev --> in_progress: Step 4a.5 self-heal (same-HEAD FAILED verdict + no resolvable session id + no live wrapper -> bounded dev-new) [INV-111]",
+      "inv_refs": ["INV-111"],
+      "note": "Session-report comment was lost (e.g. auth-shim teardown race, #402) so extract_dev_session_id is empty and INV-98's delegation can never fire. Bounded to ONE dev-new per unchanged HEAD via the self-heal-lost-session:<head> marker; falls back to the residual stale-verdict park if already attempted or a wrapper is alive."
+    },
+    {
       "id": "dispatch-stalled-retries",
       "from": "pending_dev",
       "to": "stalled",

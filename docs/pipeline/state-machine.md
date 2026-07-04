@@ -55,6 +55,7 @@ pending_dev --> in_progress: Dispatcher Step 4 scan-pending-dev (retries below M
 pending_dev --> in_progress: Step 4 review-aware (completed session + substantive review failure → dev-new) [INV-35]
 pending_dev --> pending_review: Step 4 review-aware (completed session + non-substantive review failure, under retry cap) [INV-35]
 pending_dev --> pending_review: Step 4 PR-exists short-circuit (a PR already references this issue)
+pending_dev --> in_progress: Step 4a.5 self-heal (same-HEAD FAILED verdict + no resolvable session id + no live wrapper -> bounded dev-new) [INV-111]
 pending_dev --> stalled: Dispatcher Step 4 (retries at MAX)
 pending_dev --> stalled: Step 4 review-aware (non-substantive review-retry cap reached) [INV-35]
 pending_dev --> stalled: Step 4 review-aware (completed session + substantive review failure, no HEAD progress or bot-unfixable) [INV-85]
