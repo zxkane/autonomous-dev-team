@@ -30,6 +30,75 @@ chp_broken_reply_review_comment() {
   gh api "repos/${REPO}/pulls/${pr}/comments" -X POST -f body="$body" -F in_reply_to="$comment_id" \
     --jq '{id: .id, url: .html_url}'
 }
+# Correct chp_pr_view leaf mirroring the GitHub implementation (#398 W1c2) —
+# kept correct so it PASSes and only the two violations above surface as FAILs.
+chp_broken_pr_view() {
+  local pr="$1" fields_csv="${2:-}"
+  [ -n "$fields_csv" ] || { echo "ERROR: chp_broken_pr_view requires FIELDS_CSV (2nd arg) [W1c2]" >&2; return 2; }
+  # W1c2 online-review r1 mirror: same vocabulary gate as chp_github_pr_view.
+  local _CHP_BRK_PRV_VOCAB="number,state,title,body,createdAt,updatedAt,mergedAt,headRefName,headRefOid,reviewDecision,mergeable,closingIssueNumbers,comments,reviews"
+  local gh_fields="" _obj_body="" first=1 f out_field _seen_map=""
+  local IFS_SAVED="$IFS"; IFS=','
+  # shellcheck disable=SC2206
+  local requested=($fields_csv)
+  IFS="$IFS_SAVED"
+  for f in "${requested[@]}"; do
+    f="${f#"${f%%[![:space:]]*}"}"; f="${f%"${f##*[![:space:]]}"}"
+    [ -z "$f" ] && continue
+    case ",${_CHP_BRK_PRV_VOCAB}," in
+      *",$f,"*) : ;;
+      *) echo "ERROR: chp_broken_pr_view: field '$f' is not in the §3.2.1 vocabulary" >&2; return 2 ;;
+    esac
+    case "$f" in
+      closingIssueNumbers) out_field="closingIssuesReferences" ;;
+      *)                   out_field="$f" ;;
+    esac
+    if [[ ",${_seen_map}," != *",${out_field},"* ]]; then
+      _seen_map="${_seen_map:+${_seen_map},}${out_field}"
+      gh_fields+="${gh_fields:+,}${out_field}"
+    fi
+    local expr
+    case "$f" in
+      body)                expr='body: (.body // "")' ;;
+      comments)            expr='comments: ([ .comments[]? | { id: (.id // null), author: ((.author | if type == "object" then .login else . end) // null), body: (.body // ""), createdAt: (.createdAt // null) } ] | sort_by(.createdAt // "", .id // 0))' ;;
+      reviews)             expr='reviews: ([ .reviews[]? | { author: ((.author | if type == "object" then .login else . end) // null), state: (.state // null), submittedAt: (.submittedAt // null) } ] | sort_by(.submittedAt // ""))' ;;
+      closingIssueNumbers) expr='closingIssueNumbers: ([ ((.closingIssuesReferences // []) | (if type == "object" then (.nodes // []) else . end))[]? | .number ])' ;;
+      *)                   expr="${f}: .${f}" ;;
+    esac
+    if [[ $first -eq 1 ]]; then first=0; else _obj_body+=", "; fi
+    _obj_body+="$expr"
+  done
+  # Capture-then-check (P1-2 mirror of chp_github_pr_view).
+  local raw
+  raw=$(gh pr view "$pr" --repo "$REPO" --json "$gh_fields") || return 1
+  [[ -n "$raw" ]] || return 1
+  jq -e 'type == "object"' >/dev/null 2>&1 <<<"$raw" || return 1
+  jq -c "{ ${_obj_body} }" <<<"$raw"
+}
+# Correct chp_list_inline_comments leaf (#398 W1c2) — page-walk + normalize +
+# empty-stdout fail-CLOSED (P2-3 codex fix) + non-array-page fail-CLOSED
+# (online-review r2 fix).
+chp_broken_list_inline_comments() {
+  local pr="$1"
+  local raw
+  raw=$(gh api "repos/${REPO}/pulls/${pr}/comments" --paginate 2>/dev/null) || return 1
+  [[ -n "$raw" ]] || return 1
+  local _pages_ok
+  _pages_ok=$(jq -r --slurp 'all(type == "array")' <<<"$raw" 2>/dev/null) || return 1
+  [[ "$_pages_ok" == "true" ]] || return 1
+  jq -c --slurp '
+    (add // []) |
+    [ .[]? | {
+        id: (.id // null),
+        path: (.path // null),
+        line: (.line // .original_line),
+        author: ((.user | if type == "object" then .login else . end) // null),
+        body: (.body // ""),
+        createdAt: (.created_at // null)
+      } ] |
+    sort_by(.createdAt // "", .id // 0)
+  ' <<<"$raw"
+}
 # chp_broken_close_keyword is deliberately OMITTED: the runner's
 # chp_close_keyword assertion never dispatches through a leaf (it evals
 # _render_close_keyword directly against a stubbed chp_caps — see

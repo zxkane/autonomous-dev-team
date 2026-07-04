@@ -1,0 +1,12 @@
+{
+  "comments": [
+    {"body": "Feedback from https://preview-1.example.com/, look OK.",       "createdAt": "2026-06-01T09:00:00Z"},
+    {"body": "Preview deployed at https://preview-2.example.com/pr-42/",     "createdAt": "2026-06-02T09:00:00Z"},
+    {"body": "Preview: https://preview-42-final.example.com/",                "createdAt": "2026-06-03T09:00:00Z"},
+    {"body": "unrelated chatter",                                              "createdAt": "2026-06-04T09:00:00Z"},
+    {"body": "bot-review-wait sha=\"deadbee\"",                              "createdAt": "2026-06-05T09:00:00Z"},
+    {"body": "bot-review-wait sha=\"deadbee\" round=2",                      "createdAt": "2026-06-06T09:00:00Z"},
+    {"body": "e2e-evidence: complete sha=\"deadbee\"\nfoo bar\nline three",  "createdAt": "2026-06-07T09:00:00Z"},
+    {"body": "e2e-evidence: complete sha=\"deadbee\"\nlatest evidence body\nline b\nline c", "createdAt": "2026-06-08T09:00:00Z"}
+  ]
+}

@@ -252,15 +252,16 @@ _fetch_sha_evidence() {
     # `last`: take the most recent SHA-matching comment, full body (NOT
     # head -1 — a multiline evidence block must survive intact for the reuse
     # path). select-into-array + last avoids truncating a multi-line body.
-    # [INV-87]/[INV-91] (#296 B4, #308) the SHA-evidence read routes through
-    # chp_pr_view (the verb prepends `--repo "$REPO"`). Byte-identical to the
-    # prior `gh pr view "$PR_NUMBER" --repo "$REPO" --json comments --jq …`. The
-    # review wrapper sources lib-code-host.sh before this lib, so chp_pr_view is
-    # defined; we deliberately do NOT self-source it here (a 3-line read must not
-    # touch the production source graph — the isolation tests source the seam).
-    # The `2>/dev/null || true` keeps the read fail-soft.
-    _body=$(chp_pr_view "$PR_NUMBER" --json comments \
-      --jq "[.comments[] | select(.body | contains(\"e2e-evidence: complete sha=\\\"${PR_HEAD_SHA}\\\"\")) | .body] | last // empty" 2>/dev/null \
+    # [INV-87]/[W1c2] (#398): the SHA-evidence read routes through
+    # chp_pr_view <PR> "comments" (normalized-shape contract); the leaf returns
+    # `{comments:[{id,author,body,createdAt}]}` ascending, and the caller runs
+    # plain jq over that shape — no `--jq` / `-q` crosses the seam. The review
+    # wrapper sources lib-code-host.sh before this lib, so chp_pr_view is
+    # defined; we deliberately do NOT self-source it here (a 3-line read must
+    # not touch the production source graph — the isolation tests source the
+    # seam). The `2>/dev/null || true` keeps the read fail-soft.
+    _body=$(chp_pr_view "$PR_NUMBER" "comments" 2>/dev/null \
+      | jq -r "[.comments[] | select(.body | contains(\"e2e-evidence: complete sha=\\\"${PR_HEAD_SHA}\\\"\")) | .body] | last // empty" 2>/dev/null \
       || true)
     if [[ -n "$_body" ]]; then
       printf '%s\n' "$_body"

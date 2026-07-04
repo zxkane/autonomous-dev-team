@@ -963,9 +963,14 @@ if [[ "${E2E_ACTIVE:-false}" == "true" && -n "${E2E_PREVIEW_URL_PATTERN:-}" ]]; 
   # Build expected URL from config, replacing {N} with PR number
   PREVIEW_URL="${E2E_PREVIEW_URL_PATTERN//\{N\}/$PR_NUMBER}"
 
-  # Also try to extract from PR comments (may contain a more specific URL)
-  COMMENT_URL=$(chp_pr_view "$PR_NUMBER" --json comments \
-    -q '[.comments[].body | select(contains("Preview"))] | last' 2>/dev/null \
+  # Also try to extract from PR comments (may contain a more specific URL).
+  # [INV-87]/[W1c2]: chp_pr_view <PR> "comments" (normalized-shape contract per
+  # #398) returns `{comments:[{id,author,body,createdAt}]}` ascending; caller
+  # runs plain jq over that shape (`-q` no longer crosses the seam). The URL
+  # scrape (`grep -oP … | head -1`) stays caller-side; fail-soft `|| true` is
+  # preserved.
+  COMMENT_URL=$(chp_pr_view "$PR_NUMBER" "comments" 2>/dev/null \
+    | jq -r '[.comments[].body | select(contains("Preview"))] | last' 2>/dev/null \
     | grep -oP 'https://[^\s"]+' | head -1 || true)
   PREVIEW_URL="${COMMENT_URL:-$PREVIEW_URL}"
 
@@ -994,8 +999,10 @@ fi
 # ---------------------------------------------------------------------------
 # Build review prompt
 # ---------------------------------------------------------------------------
-PR_BRANCH=$(chp_pr_view "$PR_NUMBER" --json headRefName -q '.headRefName' 2>/dev/null || true)
-PR_HEAD_SHA=$(chp_pr_view "$PR_NUMBER" --json headRefOid -q '.headRefOid' 2>/dev/null || true)
+# [INV-87]/[W1c2]: normalized-shape contract per #398 — chp_pr_view <PR>
+# "<field>" returns `{<field>: <value>}`; caller runs plain jq to project.
+PR_BRANCH=$(chp_pr_view "$PR_NUMBER" "headRefName" 2>/dev/null | jq -r '.headRefName' 2>/dev/null || true)
+PR_HEAD_SHA=$(chp_pr_view "$PR_NUMBER" "headRefOid" 2>/dev/null | jq -r '.headRefOid' 2>/dev/null || true)
 log "PR branch: ${PR_BRANCH:-UNKNOWN} (HEAD: ${PR_HEAD_SHA:0:7})"
 
 # Verdict-detection bindings: actor + time window + body-trailer
@@ -1656,7 +1663,10 @@ if [[ "${E2E_ACTIVE:-false}" == "true" ]]; then
   # Best-effort / non-fatal: a failed `gh` query → "UNKNOWN" → skip (conservative;
   # we never add pending-dev when PR state is in doubt, matching the INV-54 guard).
   if [[ "$E2E_GATE" == "fail" || "$E2E_GATE" == "block-nonsubstantive" ]]; then
-    E2E_PR_STATE=$(chp_pr_view "$PR_NUMBER" --json state -q '.state' 2>/dev/null || echo "UNKNOWN")
+    # [INV-87]/[W1c2] normalized-shape (#398): chp_pr_view <PR> "state" returns
+    # `{state:"OPEN"|"CLOSED"|"MERGED"}`; _pr_open_gate consumes the raw
+    # OPEN-token semantics unchanged (vocabulary state values match gh's).
+    E2E_PR_STATE=$(chp_pr_view "$PR_NUMBER" "state" 2>/dev/null | jq -r '.state' 2>/dev/null || echo "UNKNOWN")
     if [[ "$(_pr_open_gate "$E2E_PR_STATE")" == "skip" ]]; then
       log "PR #${PR_NUMBER} is no longer open (state: ${E2E_PR_STATE}) at the E2E hard gate. Skipping the pending-dev flip — another review/merge likely completed first."
       itp_transition_state "$ISSUE_NUMBER" "reviewing" "" 2>/dev/null || true
@@ -3391,7 +3401,8 @@ if [[ "$PASSED_VERDICT" == "true" ]]; then
   # Best-effort / non-fatal: a failed `gh` query → "UNKNOWN" → skip (conservative;
   # we never add pending-dev when PR state is in doubt — matches the prior PASS
   # guard which treated a failed query as non-OPEN).
-  PR_STATE=$(chp_pr_view "$PR_NUMBER" --json state -q '.state' 2>/dev/null || echo "UNKNOWN")
+  # [INV-87]/[W1c2] normalized-shape (#398): see the E2E-lane sibling above.
+  PR_STATE=$(chp_pr_view "$PR_NUMBER" "state" 2>/dev/null | jq -r '.state' 2>/dev/null || echo "UNKNOWN")
   if [[ "$(_pr_open_gate "$PR_STATE")" == "skip" ]]; then
     log "PR #${PR_NUMBER} is no longer open (state: ${PR_STATE}). Skipping mergeable gate + approve/merge — another review/merge likely completed first."
     itp_transition_state "$ISSUE_NUMBER" "reviewing" "" 2>/dev/null || true
@@ -3436,8 +3447,12 @@ if [[ "$PASSED_VERDICT" == "true" ]]; then
       # waiting and route to pending-dev as a substantive FAIL so a human/dev
       # investigates the missing bot.
       _wait_marker="<!-- bot-review-wait sha=\"${PR_HEAD_SHA:-unknown}\" -->"
-      _wait_count=$(chp_pr_view "$PR_NUMBER" --json comments \
-        --jq "[.comments[] | select(.body | contains(\"bot-review-wait sha=\\\"${PR_HEAD_SHA:-unknown}\\\"\"))] | length" 2>/dev/null || echo 0)
+      # [INV-87]/[W1c2] normalized-shape (#398): chp_pr_view <PR> "comments"
+      # returns `{comments:[{id,author,body,createdAt}]}` ascending; caller
+      # runs plain jq (no `-q`/`--jq` crosses the seam). `.comments[]` iterates
+      # the normalized array (same access-path as gh's `.comments[]`).
+      _wait_count=$(chp_pr_view "$PR_NUMBER" "comments" 2>/dev/null \
+        | jq -r "[.comments[] | select(.body | contains(\"bot-review-wait sha=\\\"${PR_HEAD_SHA:-unknown}\\\"\"))] | length" 2>/dev/null || echo 0)
       [[ "$_wait_count" =~ ^[0-9]+$ ]] || _wait_count=0
       if [[ "$_wait_count" -ge "${BOT_REVIEW_WAIT_MAX:-3}" ]]; then
         log "Mandatory-bot-review gate: bot review(s) [${MISSING_BOTS}] still missing after ${_wait_count} wait(s) on HEAD ${PR_HEAD_SHA:0:7} — giving up, routing to pending-dev (substantive)."

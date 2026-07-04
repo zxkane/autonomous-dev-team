@@ -1,0 +1,22 @@
+{
+  "state": "OPEN",
+  "title": "Test PR",
+  "body": null,
+  "number": 42,
+  "createdAt": "2026-06-27T09:00:00Z",
+  "updatedAt": "2026-06-28T09:00:00Z",
+  "mergedAt": null,
+  "headRefName": "feat/issue-42",
+  "headRefOid": "cafefeed1234567890abcdefdeadbee0deadbeef",
+  "reviewDecision": "REVIEW_REQUIRED",
+  "mergeable": "MERGEABLE",
+  "comments": [
+    {"id": "IC_11", "author": {"login": "alice"}, "body": "second in time", "createdAt": "2026-06-28T09:00:00Z"},
+    {"id": "IC_10", "author": {"login": "bob"},   "body": "first in time",  "createdAt": "2026-06-27T09:00:00Z"}
+  ],
+  "reviews": [
+    {"author": {"login": "cathy"}, "state": "APPROVED",          "submittedAt": "2026-06-28T09:00:00Z"},
+    {"author": {"login": "dan"},   "state": "CHANGES_REQUESTED", "submittedAt": "2026-06-27T09:00:00Z"}
+  ],
+  "closingIssuesReferences": [ {"number": 42}, {"number": 41} ]
+}

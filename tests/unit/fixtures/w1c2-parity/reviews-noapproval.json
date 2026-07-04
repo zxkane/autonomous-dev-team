@@ -1,0 +1,6 @@
+{
+  "reviews": [
+    {"state": "COMMENTED", "submittedAt": "2026-06-01T09:00:00Z"},
+    {"state": "CHANGES_REQUESTED", "submittedAt": "2026-06-02T09:00:00Z"}
+  ]
+}

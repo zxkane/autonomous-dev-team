@@ -1,0 +1,23 @@
+# pr-view-valid.json.meta — provenance sidecar (#347 W1c2, #398).
+#
+# Canonical `gh pr view --json <fields>` payload shape carrying the full W1c1
+# vocabulary — the runner drives `chp_pr_view` with various FIELDS_CSV subsets
+# to prove:
+#
+#   - normalized-shape projection: EXACTLY the requested fields appear in
+#     stdout; unrequested vocabulary fields are ABSENT (not silently promoted).
+#   - `comments` normalizes to `[{id,author,body,createdAt}]` ascending by
+#     createdAt (fixture is intentionally OUT-OF-ORDER to prove the leaf sorts).
+#   - `reviews` normalizes to `[{author,state,submittedAt}]` ascending by
+#     submittedAt (fixture out-of-order likewise).
+#   - `closingIssueNumbers` folds the raw `closingIssuesReferences` collection
+#     to an int array (the GitHub-internal shape does NOT cross the seam). The
+#     fixture uses the FLAT `[{number}]` array shape real `gh pr view --json
+#     closingIssuesReferences` returns (the pre-existing repo-wide idiom, see
+#     `lib-pr-linkage.sh:85` which selects `.closingIssuesReferences[]?`); the
+#     leaf's `(A.nodes // A // [])` fold also accepts the GraphQL cursor
+#     `{nodes:[…]}` shape some queries emit, so both are supported. The unit
+#     parity suite (test-w1c2-incidental-read-parity.sh) exercises the cursor
+#     shape too.
+#   - `body: null` normalizes to `""` per the vocabulary.
+#   - Fail-CLOSED: gh-stub failure → verb rc≠0 with no partial stdout.

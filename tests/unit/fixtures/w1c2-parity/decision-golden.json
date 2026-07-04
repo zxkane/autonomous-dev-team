@@ -1,0 +1,19 @@
+{
+  "site1_approved_at.mixed":       "2026-06-04T09:00:00Z",
+  "site1_approved_at.no_approval": "",
+
+  "site2_preview_url.mixed":       "https://preview-42-final.example.com/",
+
+  "site3_head_ref_name":           "feat/issue-398-x",
+  "site4_head_ref_oid":            "deadbeefcafefeed1234567890abcdefdeadbee0",
+
+  "site5_state.open":              "OPEN",
+  "site6_state.open":              "OPEN",
+
+  "site7_wait_count.two":          2,
+
+  "site8_evidence_body.mixed":     "e2e-evidence: complete sha=\"deadbee\"\nlatest evidence body\nline b\nline c",
+
+  "site9_inline_comments.page1":   "- **src/a.ts:12** — fix this\n- **src/b.ts:7** — originalLine only\n- **src/c.ts:N/A** — no line",
+  "site9_inline_comments.combined": "- **src/a.ts:12** — fix this\n- **src/b.ts:7** — originalLine only\n- **src/c.ts:N/A** — no line\n- **src/d.ts:42** — page 2 comment 1\n- **src/e.ts:9** — page 2 comment 2"
+}
