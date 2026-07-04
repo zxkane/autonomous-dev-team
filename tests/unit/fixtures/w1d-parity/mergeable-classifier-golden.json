@@ -1,0 +1,11 @@
+{
+  "MERGEABLE": "proceed",
+  "mergeable": "proceed",
+  "CONFLICTING": "block-substantive",
+  "conflicting": "block-substantive",
+  "UNKNOWN": "block-nonsubstantive",
+  "": "block-nonsubstantive",
+  "garbage": "block-nonsubstantive",
+  "CLEAN": "block-nonsubstantive",
+  "BEHIND": "block-nonsubstantive"
+}

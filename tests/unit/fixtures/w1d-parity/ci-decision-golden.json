@@ -1,0 +1,97 @@
+{
+  "all_success_one": {
+    "gh_stdout": "[{\"state\":\"SUCCESS\"}]",
+    "gh_rc": 0,
+    "old_ci_is_green_rc": 0,
+    "new_ci_is_green_rc": 0,
+    "new_token": "green"
+  },
+  "all_success_many": {
+    "gh_stdout": "[{\"state\":\"SUCCESS\"},{\"state\":\"SUCCESS\"},{\"state\":\"SUCCESS\"}]",
+    "gh_rc": 0,
+    "old_ci_is_green_rc": 0,
+    "new_ci_is_green_rc": 0,
+    "new_token": "green"
+  },
+  "mixed_pending": {
+    "gh_stdout": "[{\"state\":\"SUCCESS\"},{\"state\":\"PENDING\"}]",
+    "gh_rc": 1,
+    "old_ci_is_green_rc": 1,
+    "new_ci_is_green_rc": 1,
+    "new_token": "pending"
+  },
+  "mixed_failure": {
+    "gh_stdout": "[{\"state\":\"SUCCESS\"},{\"state\":\"FAILURE\"}]",
+    "gh_rc": 1,
+    "old_ci_is_green_rc": 1,
+    "new_ci_is_green_rc": 1,
+    "new_token": "failed"
+  },
+  "skipped_success": {
+    "gh_stdout": "[{\"state\":\"SKIPPED\"},{\"state\":\"SUCCESS\"}]",
+    "gh_rc": 0,
+    "old_ci_is_green_rc": 1,
+    "new_ci_is_green_rc": 1,
+    "new_token": "pending"
+  },
+  "empty_array": {
+    "gh_stdout": "[]",
+    "gh_rc": 0,
+    "old_ci_is_green_rc": 1,
+    "new_ci_is_green_rc": 1,
+    "new_token": "none"
+  },
+  "transport_error": {
+    "gh_stdout": "",
+    "gh_rc": 1,
+    "old_ci_is_green_rc": 1,
+    "new_ci_is_green_rc": 1,
+    "new_token": ""
+  },
+  "failure_and_skipped": {
+    "gh_stdout": "[{\"state\":\"FAILURE\"},{\"state\":\"SKIPPED\"}]",
+    "gh_rc": 1,
+    "old_ci_is_green_rc": 1,
+    "new_ci_is_green_rc": 1,
+    "new_token": "failed"
+  },
+  "cancelled_and_pending": {
+    "gh_stdout": "[{\"state\":\"CANCELLED\"},{\"state\":\"PENDING\"}]",
+    "gh_rc": 1,
+    "old_ci_is_green_rc": 1,
+    "new_ci_is_green_rc": 1,
+    "new_token": "failed"
+  },
+  "in_progress_only": {
+    "gh_stdout": "[{\"state\":\"IN_PROGRESS\"}]",
+    "gh_rc": 1,
+    "old_ci_is_green_rc": 1,
+    "new_ci_is_green_rc": 1,
+    "new_token": "pending"
+  },
+  "rc_nonzero_valid_json_success": {
+    "gh_stdout": "[{\"state\":\"SUCCESS\"}]",
+    "gh_rc": 1,
+    "old_ci_is_green_rc": 1,
+    "new_ci_is_green_rc": 0,
+    "new_token": "green",
+    "_intentional_decision_change": true,
+    "_note": "R2 gh rc-quirk: gh pr checks exits non-zero even when the JSON payload is well-formed (failing/pending/no-checks case). PRE-#399 the caller's `if ci_states=$(chp_ci_status ...); then` failed → ci_states='[]' → gate rc 1 (false-negative not-green). POST-#399 the leaf inspects stdout, derives 'green' from the parseable all-SUCCESS payload → ci_is_green rc 0 (correct-green). This is the ONE documented decision change in the W1d parity contract — old=1, new=0 asserted explicitly by the parity harness."
+  },
+  "rc_nonzero_garbage_stdout": {
+    "gh_stdout": "some garbage error",
+    "gh_rc": 1,
+    "old_ci_is_green_rc": 1,
+    "new_ci_is_green_rc": 1,
+    "new_token": "",
+    "_note": "Non-JSON stdout + non-zero rc = genuine transport failure; leaf rc != 0. Both OLD and NEW paths funnel this into rc 1 — parity preserved for the genuine-error case."
+  },
+  "rc_nonzero_empty_array": {
+    "gh_stdout": "[]",
+    "gh_rc": 1,
+    "old_ci_is_green_rc": 1,
+    "new_ci_is_green_rc": 1,
+    "new_token": "none",
+    "_note": "R2 gh rc-quirk: `gh pr checks` exits non-zero when a PR has ZERO checks configured while emitting a parseable empty array on stdout. Pre-#399 caller's `if ci_states=$(chp_ci_status …)` failed on rc 1 → else-branch → ci_states='[]' → gate rc 1 (not-green). Post-#399 the leaf inspects stdout, derives 'none' from the parseable empty-array payload → `ci_is_green` compares 'none' != 'green' → rc 1 (not-green). old=1/new=1 — genuine parity, NO decision change for this class (unlike rc_nonzero_valid_json_success which is the ONE documented decision change). This fixture certifies the real-GitHub zero-checks path is exercised end-to-end (online-review r1 blocking finding on PR #410)."
+  }
+}

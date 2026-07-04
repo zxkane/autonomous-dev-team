@@ -134,32 +134,59 @@ else
 fi
 
 # ============================================================================
-# TC-DSAP-004: jq CI-green predicate works as documented
+# TC-DSAP-004: chp_ci_status normalized-token decision (post-#399 W1d)
 # ============================================================================
 echo
-echo "=== TC-DSAP-004: jq CI-green predicate ==="
+echo "=== TC-DSAP-004: chp_ci_status token decision (W1d normalized leaf) ==="
 echo
+# The pre-#399 caller-side `length > 0 and all(. == "SUCCESS")` predicate lives
+# INSIDE the leaf now (#399 W1d [INV-87]). This test used to drive that jq
+# fragment directly; migrated here to the leaf-token contract — each fixture
+# class maps to a single `green|pending|failed|none` token per spec §3.2 /
+# provider-spec.md's Mapping appendix.
+#
+# The full rc-quirk / SKIPPED-mix / rule-2-beats-rule-3 matrix is exercised by
+# tests/unit/test-w1d-ci-status-mergeable-parity.sh (TC-W1D-PARITY-CI); this
+# stub is the pinned narrow decision-parity subset the DSAP suite historically
+# owned, kept intact so a future rewrite of the fixture set trips this file.
 
 if ! command -v jq >/dev/null 2>&1; then
   echo -e "  ${RED}SKIP${NC}: jq not installed"
 else
-  predicate='length > 0 and all(. == "SUCCESS")'
+  # A per-fixture "state array → expected token" table. Drives the leaf via
+  # the same in-shell stub the parity harness uses (see the parity file for
+  # the full contract; here we keep the historical fixture classes so the
+  # DSAP suite still names them).
+  _dsap004_token() {
+    local states_json="$1"
+    # gh's `--json state` returns `[{state:"…"},…]`; the leaf projects that
+    # to a state array then buckets per §3.2's decision order. We inline the
+    # same jq the leaf uses to avoid re-sourcing lib-code-host.sh here.
+    jq -r '
+      if length == 0 then "none"
+      elif any(. == "FAILURE" or . == "ERROR" or . == "CANCELLED" or . == "TIMED_OUT") then "failed"
+      elif all(. == "SUCCESS") then "green"
+      else "pending"
+      end
+    ' <<<"$states_json"
+  }
+
   declare -A FIXTURES=(
-    ["[]"]="false"
-    ['["SUCCESS"]']="true"
-    ['["SUCCESS","SUCCESS","SUCCESS"]']="true"
-    ['["SUCCESS","PENDING"]']="false"
-    ['["SUCCESS","FAILURE"]']="false"
-    ['["SKIPPED","SUCCESS"]']="false"
+    ["[]"]="none"
+    ['["SUCCESS"]']="green"
+    ['["SUCCESS","SUCCESS","SUCCESS"]']="green"
+    ['["SUCCESS","PENDING"]']="pending"
+    ['["SUCCESS","FAILURE"]']="failed"
+    ['["SKIPPED","SUCCESS"]']="pending"
   )
   for input in "${!FIXTURES[@]}"; do
     expected="${FIXTURES[$input]}"
-    got=$(jq "$predicate" <<<"$input")
+    got=$(_dsap004_token "$input")
     if [[ "$got" == "$expected" ]]; then
-      echo -e "  ${GREEN}PASS${NC}: predicate($input) = $expected"
+      echo -e "  ${GREEN}PASS${NC}: chp_ci_status token for $input = $expected"
       PASS=$((PASS+1))
     else
-      echo -e "  ${RED}FAIL${NC}: predicate($input) expected $expected, got $got"
+      echo -e "  ${RED}FAIL${NC}: chp_ci_status token for $input expected $expected, got $got"
       FAIL=$((FAIL+1))
     fi
   done

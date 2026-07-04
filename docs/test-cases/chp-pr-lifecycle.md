@@ -10,12 +10,12 @@ asserts it matches the pre-refactor call.
 
 | ID | Verb / leaf | Assertion |
 |---|---|---|
-| TC-CHP-CI | `chp_github_ci_status PR` | argv == `pr checks <PR> --repo <REPO> --json state -q [.[].state]` (anchors `ci_is_green`) |
+| TC-CHP-CI | `chp_github_ci_status PR` | argv == `pr checks <PR> --repo <REPO> --json state` (post-#399 W1d: the leaf owns the projection; the `-q '[.[].state]'` tail no longer crosses the seam — the leaf normalizes to a single token `green\|pending\|failed\|none` internally per spec §3.2's decision order) |
 | TC-CHP-FINDPR | `chp_github_find_pr_for_issue ISSUE FIELDS-CSV` | **W1c1 (#397, ABSTRACT contract)**: argv is `api graphql -F owner=<owner> -F repo=<repo> -f query=…` with a cursor-page-walker query (`pullRequests(first:100, states:[OPEN], after:$cursor)` + `pageInfo{endCursor,hasNextPage}`). NO `--limit`/`--json`/`-q` crosses the seam (§3.5). Query selects the caller's FIELDS-CSV plus the [INV-86] resolver keys (number, closingIssueNumbers→`closingIssuesReferences.nodes.number`, headRefName); `body` in FIELDS-CSV survives (#148 anchor). |
 | TC-CHP-FINDPR-FIELDS-REQUIRED | `chp_github_find_pr_for_issue` w/o FIELDS-CSV | errors rc≠0 (FIELDS-CSV is REQUIRED, [M1]) |
 | TC-CHP-PRLIST | `chp_github_pr_list STATE FIELDS-CSV` | **W1c1 (#397, ABSTRACT contract)**: same `api graphql` cursor walker; STATE maps to the GraphQL `PullRequestState` filter (`open→[OPEN]`, `closed→[CLOSED]`, `merged→[MERGED]`, `all→[OPEN,CLOSED,MERGED]` — `closed` and `merged` are DISJOINT, diverges from `gh pr list --state closed`). Projection-only (P1-1): output carries EXACTLY the requested keys plus `number`. Empty result → `[]` (never null). |
 | TC-CHP-PRLIST-STATE-REQUIRED / -FIELDS-REQUIRED | `chp_github_pr_list` w/o STATE or w/o FIELDS-CSV | errors rc≠0 (both positional args required) |
-| TC-CHP-MERGEABLE | `chp_github_mergeable PR` | argv == `pr view <PR> --repo <REPO> --json mergeable -q .mergeable`; returns raw token |
+| TC-CHP-MERGEABLE | `chp_github_mergeable PR` | argv == `pr view <PR> --repo <REPO> --json mergeable -q .mergeable`; returns one raw token from `MERGEABLE\|CONFLICTING\|UNKNOWN` (post-#399 W1d: leaf absorbs the `-q '.mergeable'` projection, caller passes only the PR positional; rc≠0 on empty / unknown / query failure closes the fail-open hole — see P2-3 in the #399 review-round) |
 | TC-CHP-APPROVE | `chp_github_approve PR BODY` | argv == `pr review <PR> --repo <REPO> --approve --body <BODY>` |
 | TC-CHP-REQCHANGES | `chp_github_request_changes PR BODY` | argv == `pr review <PR> --repo <REPO> --request-changes --body <BODY>` |
 | TC-CHP-MERGE | `chp_github_merge PR` | argv == `pr merge <PR> --repo <REPO> --squash --delete-branch` |

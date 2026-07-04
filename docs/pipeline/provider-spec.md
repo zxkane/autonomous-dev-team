@@ -253,8 +253,8 @@ over a bare number, so the next mint does not re-drift the prose.
 | Verb | Replaces | Contract |
 |---|---|---|
 | `chp_find_pr_for_issue ISSUE FIELDS-CSV` | `fetch_pr_for_issue` (`lib-dispatch.sh:2778`, signature is `(issue_num, FIELDS)`; delegates to `resolve_pr_for_issue` in `lib-pr-linkage.sh:69` under [INV-86]) | **Abstract contract (W1c1, #397)**: return a **NORMALIZED JSON ARRAY** of candidate open PRs projected to the caller's `FIELDS-CSV` ∪ the [INV-86] resolution keys (`number,closingIssueNumbers,headRefName`). **No gh flags and no jq programs cross the seam** — the caller passes only positional args and gets a normalized array; the leaf owns the gh argv + normalization jq. `ISSUE` is a **narrowing hint** the provider MAY use to prune candidates (but only when no true candidate can be excluded); the GitHub leaf documents but IGNORES the hint today (GraphQL/`gh` returns all open PRs and the caller narrows client-side). **Completeness [§3.5]:** the leaf walks pagination to exhaustion, bounded at `CHP_GITHUB_PR_LIST_PAGE_CAP` pages (default 20 → 2000 open PRs); cap-hit is **fail-CLOSED** (rc≠0, no partial array). A fixed `--limit N` is NOT acceptable — the whole point of W1c1 is closing the silent `--limit 30` truncation hazard. Empty result set → `[]` (never null). Fail-closed on any transport / auth / API failure. Regression anchors: #148 (`body` normalization to `""` fixes the null-body hazard for downstream body-mention tests); #274 (`body` is retained in the union); #277/[INV-86] (close-linkage beats body-mention — resolution jq stays caller-side, [`lib-pr-linkage.sh`](../../skills/autonomous-dispatcher/scripts/lib-pr-linkage.sh)); **W1c1** (the >30-candidate silent-truncation hazard). Normalized vocabulary: see §3.2.1 below. |
-| `chp_ci_status PR [extra gh args…]` | `ci_is_green` (`lib-dispatch.sh`) | **Current shipped contract (#367 correction):** a **focused-raw** leaf, the `chp_mergeable` shape — the caller supplies the `--json state -q '[.[].state]'` tail and the leaf forwards it byte-identically to `gh pr checks PR --repo $REPO "$@"`, returning the RAW per-check state array (e.g. `["SUCCESS","SUCCESS"]`). The `length>0 and all(.=="SUCCESS")` boolean gate that `ci_is_green` applies to that array **stays caller-side**; `ci_is_green` itself returns a boolean (`rc 0`/`1`), never a string. **Target contract — W1(d) (out of scope here):** normalizing the leaf itself to return one of `green`/`pending`/`failed`/`none` — the tokens this cell previously (incorrectly) claimed are produced today — is the still-open W1(d) slice; see the Mapping appendix row below for the as-shipped cut line. **CONTRACT-PENDING** (#370). |
-| `chp_mergeable PR [extra gh args…]` | **`autonomous-review.sh`** (`gh pr view … --json mergeable`), **NOT** `lib-review-mergeable.sh` | **Focused-raw** leaf: the caller supplies the `--json mergeable -q '.mergeable'`(or similar) tail and the leaf forwards it byte-identically to `gh pr view PR --repo $REPO "$@"`, returning the **raw backend `mergeable` token** (`MERGEABLE`/`CONFLICTING`/`UNKNOWN`/empty). **[M2]** `lib-review-mergeable.sh` is PURE classifiers (`_classify_mergeable_gate`, `_pr_open_gate`, [INV-44]/[INV-54]) doing zero gh I/O — its own header says the query "stays in the wrapper". Those classifiers **stay in the provider-neutral caller layer** and consume the verb's raw token; only the `gh pr view` leaf moves behind the verb. **CONTRACT-PENDING** (#370). |
+| `chp_ci_status PR` | `ci_is_green` (`lib-dispatch.sh`) | **Normalized-token leaf (#399 W1d, [INV-87]):** the leaf owns the FULL `gh pr checks --json state` argv AND the per-check-state → single-token projection; the caller passes only the PR positional (`chp_ci_status "$pr_num"`), receives exactly one token on stdout, and tests `[[ "$token" == "green" ]]`. **No `gh` flags and no jq programs cross the seam.** Output token derived from the per-check state multiset by this decision order: (1) zero checks → `none`; (2) any check ∈ {`FAILURE`,`ERROR`,`CANCELLED`,`TIMED_OUT`} → `failed`; (3) any check ∈ {`PENDING`,`QUEUED`,`IN_PROGRESS`,`EXPECTED`,`SKIPPED`} or any state not otherwise listed → `pending`; (4) else (all `SUCCESS`, ≥1) → `green`. Rule 2 beats rule 3 (a FAILURE+SKIPPED set is `failed`); SKIPPED lands in `pending` (a `SKIPPED` check is NOT a `SUCCESS`, and the old `all(=="SUCCESS")` gate already treated skipped-mix as not-green). **gh rc-quirk:** `gh pr checks` exits non-zero for failing/pending/no-check cases even with a well-formed JSON payload — the leaf inspects stdout (parseable JSON array → derive the token regardless of gh's rc; no parseable JSON → leaf rc≠0). `ci_is_green` remains a documented mock seam (spec §7.3.3) and returns `rc 0`/`1`; the WARN-on-transport-failure diagnostic path (TC-DSAP-014/015) is preserved via the caller's mktemp stderr capture. See the Mapping appendix row for the deliberate SHAPE change (byte-identical constraint explicitly LIFTED for this verb). Asserted (token-set + green-predicate + fail-closed) by `tests/provider-conformance/run-provider-conformance.sh` (#399). |
+| `chp_mergeable PR` | **`autonomous-review.sh`** (`gh pr view … --json mergeable`), **NOT** `lib-review-mergeable.sh` | **Pinned-token leaf [M2] (#399 W1d):** the leaf owns BOTH the `gh pr view --json mergeable` query AND the `-q '.mergeable'` projection the caller previously supplied. Emitted argv is `gh pr view PR --repo $REPO --json mergeable -q '.mergeable'`. Stdout is exactly one token from `MERGEABLE|CONFLICTING|UNKNOWN` — byte-identical to GitHub's raw `mergeable` values, so `_classify_mergeable_gate` / `_pr_open_gate` (INV-44/INV-54, `lib-review-mergeable.sh`) ship byte-unchanged and consume the token directly. rc≠0 on ANY of empty stdout, unknown token, or query failure — the caller's existing `\|\| echo ""` failure wrapper maps rc≠0 to the classifier's empty-string→`block-nonsubstantive` branch. **No `gh` flags and no jq programs cross the seam** (a GitLab leaf's `detailed_merge_status` ≈20-value normalization stays inside the GitLab leaf too). Asserted (token-set + fail-closed) by `tests/provider-conformance/run-provider-conformance.sh` (#399). |
 | `chp_create_pr …` | `gh pr create` site(s) | Create PR/MR. **CONTRACT-PENDING** (#370). |
 | `chp_approve PR` | `gh pr review --approve` | Approve. **CONTRACT-PENDING** (#370). |
 | `chp_request_changes PR` | `gh pr review --request-changes` | Request changes. Capability-gated (§4: `rest_request_changes`). **Asserted** (gh-only; SKIPped when `rest_request_changes=0`) by `tests/provider-conformance/run-provider-conformance.sh` (#370). |
@@ -633,8 +633,14 @@ AND (`labels=A,B`) and negation (`not[labels]=Y`, no jq post-filter); atomic
 `add_labels`+`remove_labels` transition; native issue↔MR link (`/closed_by`);
 discussion-resolve by `discussion_id`. Field renames the adapter maps:
 body→`description`, comments→`notes`, `user.login`→`author.username`, PR→MR,
-`pipeline.status`→`head_pipeline.status` (null = no CI → `none`),
-mergeable→`detailed_merge_status` (≈20-value enum; `merge_status` is deprecated).
+`pipeline.status`→`head_pipeline.status` (null = no CI → `none`; the
+`chp_ci_status` §3.2 normalized-token contract (#399 W1d) makes this the
+GitLab side of the SAME `green|pending|failed|none` decision the GitHub
+leaf produces — the GitLab leaf maps its own status vocabulary internally,
+no jq crosses the seam), mergeable→`detailed_merge_status` (≈20-value enum;
+`merge_status` is deprecated; the GitLab leaf normalizes to the
+`chp_mergeable` §3.2 pinned token set `MERGEABLE|CONFLICTING|UNKNOWN`
+inside the leaf, keeping `_classify_mergeable_gate` byte-unchanged).
 **The one genuine gap → `chp_request_changes`:** GitLab has **no REST verb** to
 submit "request changes" — `rest_request_changes=0` gates the quick-action-note
 workaround. CLI: `glab` (the official `gh` analog) for green-path verbs + raw
@@ -990,9 +996,9 @@ enforced regardless of checkout depth even before #295 lands the dedicated step.
 the spec's "each normative clause maps 1:1 to a conformance check" promise
 (§0/§introduction) true for the **implemented** subset (§4.4's ASSERTED
 verbs) and explicitly lists the **pending** subset (the residual
-`CONTRACT-PENDING`-tokened verbs, §3.1/§3.2 — currently **5** on this branch
-after W1a=#371 + W1b=#396 + W1c1=#397 + W1c2=#398 landed: the runner reports
-`pending=5`). Each row below is one `TC-PCONF`
+`CONTRACT-PENDING`-tokened verbs, §3.1/§3.2 — currently **3** on this branch
+after W1a=#371 + W1b=#396 + W1c1=#397 + W1c2=#398 + W1d=#399 landed: the
+runner reports `pending=3`). Each row below is one `TC-PCONF`
 id in [`docs/test-cases/provider-conformance-runner.md`](../test-cases/provider-conformance-runner.md).
 
 | Normative clause | Verb | `TC-PCONF` |
@@ -1015,6 +1021,8 @@ id in [`docs/test-cases/provider-conformance-runner.md`](../test-cases/provider-
 | §3.2.1 W1c1 normalized-shape + STATE/FIELDS positional + `[]`-not-null + fail-CLOSED + projection-only value-check | `chp_pr_list` | TC-PCONF-045 |
 | §3.2/§3.2.1 W1c2 normalized-object subset projection (every-vocabulary-field support) + capture-then-check fail-CLOSED + `closingIssueNumbers` dual-shape fold | `chp_pr_view` | TC-PCONF-046 |
 | §3.2 W1c2 normalized flat inline array + `line // original_line` leaf-side fold + `--paginate` slurp/merge/sort + empty-stdout fail-CLOSED | `chp_list_inline_comments` | TC-PCONF-047 |
+| §3.2 W1d normalized token (`green\|pending\|failed\|none`) + green-predicate + fail-closed (#399) | `chp_ci_status` | TC-PCONF-048 |
+| §3.2 W1d pinned token (`MERGEABLE\|CONFLICTING\|UNKNOWN`) + fail-closed (#399) | `chp_mergeable` | TC-PCONF-049 |
 | Deliberately-broken fixture: wrong shape | `itp_list_comments` (broken) | TC-PCONF-020 |
 | Deliberately-broken fixture: rc-0-on-error | `itp_transition_state` (broken) | TC-PCONF-021 |
 | Deliberately-broken fixture: missing verb function | `chp_resolve_thread` (broken) | TC-PCONF-022 |
@@ -1022,13 +1030,15 @@ id in [`docs/test-cases/provider-conformance-runner.md`](../test-cases/provider-
 | §4.4 caps-conditioned SKIP, annotated cap | `itp_edit_comment`/`itp_mark_checkbox`/`chp_request_changes` (degraded) | TC-PCONF-030 |
 | R3 CONTRACT-PENDING tripwire (spec↔runner set-diff) | (coverage-table meta-check) | TC-PCONF-040 |
 
-Pending subset (§4's residual `CONTRACT-PENDING` verbs, currently **5** on
-this branch after W1a=#371 + W1b=#396 + W1c1=#397 + W1c2=#398 landed — the
-runner reports `pending=5` via `tests/provider-conformance/run-provider-conformance.sh`):
-`chp_ci_status`, `chp_mergeable`, `chp_create_pr`, `chp_approve`,
-`chp_merge`. Each carries no `TC-PCONF` row — a row is added when its W1
-slice lands (removing the spec token and flipping `coverage.conf`'s line to
-`asserted` in the same PR, per R3).
+Pending subset (§4's residual `CONTRACT-PENDING` verbs, currently **3** on
+this branch after W1a=#371 + W1b=#396 + W1c1=#397 + W1c2=#398 + W1d=#399
+landed — the runner reports `pending=3` via
+`tests/provider-conformance/run-provider-conformance.sh`):
+`chp_create_pr`, `chp_approve`, `chp_merge`. Each carries no `TC-PCONF`
+row — a row is added when its W1 slice lands (removing the spec token and
+flipping `coverage.conf`'s line to `asserted` in the same PR, per R3).
+#399 W1d landed TC-PCONF-048/049 by flipping `chp_ci_status` /
+`chp_mergeable` off the pending list; W1(e) and W1(f) close the rest.
 
 ---
 
@@ -1055,8 +1065,8 @@ becomes a verb, the surrounding INV-coupled logic stays caller-side.
 | `_dep_block_comment` (`lib-dispatch.sh`) | `itp_post_comment` | (a) separable-leaf | the [INV-39] dependency-block dispatcher-marker comment write — **migrated #283** (the dedup READ stays on `itp_list_comments`) |
 | `dispatcher-tick.sh` Step-2 TTHW timeline read (`gh api …/issues/<n>/timeline --jq …`, [INV-70] `labeled_at`) | `itp_label_event_ts` | (a) separable-leaf | **migrated #323** ([INV-93], observe-only): the GitHub-internal timeline `gh api …--jq …` leaf moves to `itp_github_label_event_ts` (JSON-encoding the label, injection-safe) and returns the first-`labeled` timestamp scalar; the TTHW math, the `issue_labeled` emit, and the `labeled_at`-vs-`ts` preference stay caller-side. Guarded on the bare `itp_${ISSUE_PROVIDER}_label_event_ts` (leaf-absent / any failure → empty → fall back to `ts`, never blocks dispatch). Closes `dispatcher-tick.sh` as a raw-`gh` caller (cutover baseline 67 → 66). |
 | `resolve_pr_for_issue` (`lib-pr-linkage.sh:69`) + `verify_pr_closes_issue` (`:120`); `fetch_pr_for_issue` (`lib-dispatch.sh:2778`) is the kept same-named delegate shim | `chp_find_pr_for_issue` | (b) entangled | **W1c1, #397**: the leaf is now the ABSTRACT contract `chp_find_pr_for_issue ISSUE FIELDS-CSV → normalized JSON candidate ARRAY` (§3.2/§3.2.1) — no gh flags cross the seam. The [INV-86] close-linkage/branch resolution is pure jq over the normalized array (`closingIssueNumbers` as ints), caller-side (`lib-pr-linkage.sh`). Fail-CLOSED under transport error, page-cap-hit, or `--limit`-N> silent truncation (§3.5). **MIGRATED #282 (gh-argv passthrough); REWRITTEN as ABSTRACT #397 (W1c1).** (Post-#277 `fetch_pr_for_issue` is a pure delegate to `resolve_pr_for_issue` — that delegate stays as the function-mock shim, §7.2 m3.) |
-| `ci_is_green` (`lib-dispatch.sh`) | `chp_ci_status` | (a) separable-leaf | the `gh pr checks --json state -q '[.[].state]'` leaf moves, forwarding the caller's `--json`/`-q` byte-identically and returning the raw per-check state array; the `length>0 and all(.=="SUCCESS")` boolean gate stays caller-side (`ci_is_green` returns rc 0/1, not a `green`/`pending`/`failed`/`none` string — normalizing the leaf itself to those tokens is the open W1(d) slice, §3.2). **MIGRATED #282.** |
-| `autonomous-review.sh` mergeable poll (`gh pr view … --json mergeable`) | `chp_mergeable` | (b) entangled | only the `gh pr view --json mergeable` leaf moves ([M2]); the UNKNOWN-retry loop + `_classify_mergeable_gate`/`_pr_open_gate` ([INV-44]/[INV-54], `lib-review-mergeable.sh` byte-unchanged) stay caller-side. **MIGRATED #282.** |
+| `ci_is_green` (`lib-dispatch.sh`) | `chp_ci_status` | (a) separable-leaf | **NORMALIZED-TOKEN LEAF (#399 W1d):** the leaf owns the FULL `gh pr checks --json state` argv AND the per-check-state → single-token projection (`green\|pending\|failed\|none`); the caller passes only the PR positional and tests `[[ "$token" == "green" ]]`. The old byte-identical-argv anchor is explicitly LIFTED for this verb — no `gh` flags or jq programs cross the seam. See the §5.1 GitLab mapping row (`head_pipeline.status` null → `none`) for the mirror-side implementation this normalization enables. `ci_is_green` stays the documented mock seam (§7.3.3) with rc 0/1. **MIGRATED #282; NORMALIZED #399.** |
+| `autonomous-review.sh` mergeable poll (`gh pr view … --json mergeable`) | `chp_mergeable` | (b) entangled | **PINNED-TOKEN LEAF (#399 W1d [M2]):** the leaf owns BOTH `gh pr view --json mergeable` AND the `-q '.mergeable'` projection; stdout is exactly one token `MERGEABLE\|CONFLICTING\|UNKNOWN` (byte-identical to GitHub's raw values, so `_classify_mergeable_gate`/`_pr_open_gate` ([INV-44]/[INV-54], `lib-review-mergeable.sh`) are byte-unchanged). The UNKNOWN-retry loop stays caller-side. **MIGRATED #282; NORMALIZED #399.** |
 | `gh pr create` (the broker `drain_agent_pr_create`, `lib-auth.sh`) | `chp_create_pr` | (a) separable-leaf | the `gh pr create --head/--title/--body` leaf; the broker routes through the verb (leaf-only swap, no INV-79 change). **MIGRATED #282.** **Leaf-absent disposition #346:** the retained raw `gh pr create` fallback is github-gated (`${CODE_HOST:-github} == "github"`) — a non-GitHub backend without the leaf fails LOUD (no PR created), never a silent GitHub PR. Spec-sanctioned [INV-91] residue (byte-identical, baseline unchanged). |
 | `gh pr review --approve` (`autonomous-review.sh` PASS path) | `chp_approve` | (a) separable-leaf | the `--approve --body …` leaf; the [INV-52]/[INV-79] wrapper-owns-approve ownership + PASS-gate chain stay caller-side. **MIGRATED #282.** |
 | `gh pr review --request-changes` (`submit_request_changes`, `lib-review-request-changes.sh`) | `chp_request_changes` | (b) entangled | the `--request-changes --body $body` leaf; gated by `rest_request_changes` (§4.2). The best-effort return-0 + token-refresh glue stays caller-side. **MIGRATED #282.** |

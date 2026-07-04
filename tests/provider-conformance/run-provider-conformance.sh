@@ -641,6 +641,44 @@ _run_list_inline_comments_assert() {
   emit PASS "$verb"
 }
 
+# _run_token_assert <verb> <invoke_snippet> <payload_file> <expected_token> —
+# invoke VERB with a VALID canned payload (a raw `gh` JSON blob the stub-gh
+# echoes verbatim, unless the leaf passes -q/--jq — see the stub-gh header)
+# and assert stdout is exactly EXPECTED_TOKEN + rc 0; then invoke with the
+# stub gh FAILING and assert rc≠0 (strict fail-closed per P2-3 review-round:
+# rc-0-empty-stdout is a fail-open latch — a passthrough blindly emitting
+# empty at rc 0 would slip past a lax check).
+#
+# W1d (#399): drives chp_ci_status / chp_mergeable end-to-end through their
+# normalized-token contracts.
+_run_token_assert() {
+  local verb="$1" invoke_snippet="$2" payload_file="$3" expected_token="$4"
+  local argv_file="$work_root/.argv-$verb.json"
+  local out rc
+
+  out="$(_invoke _PCF_GH_MODE="ok" _PCF_GH_PAYLOAD="$payload_file" _PCF_ARGV_FILE="$argv_file" "$invoke_snippet" 2>&1)"; rc=$?
+  if [[ "$rc" != "0" ]]; then
+    emit FAIL "$verb" "unexpected non-zero rc on valid payload: $rc (output: ${out:0:200})"
+    return
+  fi
+  if [[ "$out" != "$expected_token" ]]; then
+    emit FAIL "$verb" "token mismatch (expected '$expected_token', got '${out:0:200}')"
+    return
+  fi
+
+  # Fail-closed (strict): stub gh returns rc≠0 with nothing on stdout — the
+  # leaf MUST return rc≠0 too. Any rc 0 (even with empty stdout) is a
+  # fail-open contract violation: chp_ci_status now returns rc≠0 on no
+  # parseable JSON, and chp_mergeable now returns rc≠0 on empty / unknown
+  # token, so both leaves have crisp non-zero rc on transport failure.
+  out="$(_invoke _PCF_GH_MODE="fail" _PCF_ARGV_FILE="$argv_file" "$invoke_snippet" 2>/dev/null)"; rc=$?
+  if [[ "$rc" == "0" ]]; then
+    emit FAIL "$verb" "fail-closed violation: rc 0 on stub-failure (stdout: '${out:0:120}') — leaf must return rc≠0 on genuine transport failure"
+    return
+  fi
+  emit PASS "$verb"
+}
+
 # _run_close_keyword_assert — render-only assertion (no gh call, no leaf
 # dispatch — see provider-spec.md §4.4 / docs/designs/provider-conformance-runner.md).
 _run_close_keyword_assert() {
@@ -933,6 +971,46 @@ _assert_verb() {
       # `line // original_line // null` fold. Page-walk complete; fail-CLOSED
       # on any page fetch failure AND on rc-0 empty stdout.
       _run_list_inline_comments_assert
+      ;;
+    chp_ci_status)
+      # W1d (#399): normalized-token leaf. Drive against three canned raw
+      # `gh pr checks --json state` payloads (all-success, mixed-failure,
+      # empty) and assert the leaf emits exactly `green`/`failed`/`none`.
+      # The green-predicate is the normative half — a stub gh serving
+      # all-success MUST yield `green`; a mixed-failure MUST yield `failed`
+      # (rule 2 over rule 3); an empty array MUST yield `none`. Then a
+      # stub-gh failure MUST fail-closed (leaf returns rc≠0).
+      _run_token_assert "$verb" 'chp_ci_status 42' \
+        "$PAYLOADS/ci-status-all-success.json" "green"
+      _run_token_assert "$verb" 'chp_ci_status 42' \
+        "$PAYLOADS/ci-status-mixed-failure.json" "failed"
+      _run_token_assert "$verb" 'chp_ci_status 42' \
+        "$PAYLOADS/ci-status-empty.json" "none"
+      # Payload-type gate (post-#399 review-round finding): a rc-0 JSON
+      # OBJECT payload `{}` must be REJECTED, not misread as "no checks
+      # configured" ("none"). Without the array-type gate the leaf's
+      # `jq '[.[].state]'` iterates the object's (empty) values and
+      # produces `[]` → bucket→`none` → silent fail-open. Drive the
+      # object payload and assert rc≠0 with no partial stdout.
+      _argv_file="$work_root/.argv-ci-obj.json"
+      _out_obj="$(_invoke _PCF_GH_MODE="ok" _PCF_GH_PAYLOAD="$PAYLOADS/ci-status-object-payload.json" _PCF_ARGV_FILE="$_argv_file" 'chp_ci_status 42' 2>/dev/null)"; _rc_obj=$?
+      if [[ "$_rc_obj" == "0" ]]; then
+        emit FAIL "$verb" "payload-type gate missing: rc-0 object payload {} accepted (out: '${_out_obj:0:120}') — must reject non-array"
+      else
+        emit PASS "$verb"
+      fi
+      ;;
+    chp_mergeable)
+      # W1d (#399): absorbs `-q '.mergeable'` into the leaf. Drive against a
+      # canned `{"mergeable":"MERGEABLE"}` payload — the stub gh applies the
+      # leaf's own `-q '.mergeable'` filter, so the leaf emits exactly the
+      # raw token `MERGEABLE`. Fail-closed: stub-fail → leaf rc≠0 (empty /
+      # unknown / query failure all yield non-zero; the caller's
+      # `|| echo ""` then maps to `_classify_mergeable_gate`'s
+      # empty-string → block-nonsubstantive branch, exercised by the wrapper
+      # tests, not this focused verb check).
+      _run_token_assert "$verb" 'chp_mergeable 42' \
+        "$PAYLOADS/mergeable-token.json" "MERGEABLE"
       ;;
     *)
       emit FAIL "$verb" "no assertion wired for this verb (runner bug)"

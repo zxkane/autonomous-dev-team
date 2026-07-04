@@ -118,6 +118,7 @@ WAIVERS=(
   "test-issue-353-verdict-body-namespace.sh:dynamic-source:_FN_SLICE is a mktemp function-slice fixture (build_review_prompt extracted from the wrapper)"
   "test-issue-355-lane-scratch-namespace.sh:dynamic-source:_FN_SLICE/_FN_SLICE2 are mktemp function-slice fixtures (build_review_prompt extracted from the wrapper)"
   "test-lib-lane.sh:dynamic-source:KSW_SLICE is a mktemp function-slice fixture (kill_stale_wrapper extracted from dispatch-local.sh)"
+  "test-w1d-ci-status-mergeable-parity.sh:dynamic-source:_W1D_LIB_DISPATCH is env-threaded from the harness's literal \$SCRIPTS/lib-dispatch.sh binding; the gh stub is defined in the SAME bash -c scope BEFORE the source (seam precedes source)"
 )
 is_waived() { # <harness> <lib-or-pseudo-lib>
   local h="$1" l="$2" e key rest elib

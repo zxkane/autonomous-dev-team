@@ -51,9 +51,9 @@ Output is one line per verb plus a summary:
 ```
 CONFORMANCE-PCONF github/github itp_list_comments PASS
 CONFORMANCE-PCONF degraded/degraded itp_edit_comment SKIP (cap: edit_comment)
-CONFORMANCE-PCONF github/github chp_ci_status PENDING (coverage.conf)
-CONFORMANCE-COVERAGE PASS (spec CONTRACT-PENDING set == coverage.conf pending set, 5 verbs)
-CONFORMANCE-SUMMARY total=27 pass=22 fail=0 skip=0 pending=5
+CONFORMANCE-PCONF github/github chp_create_pr PENDING (coverage.conf)
+CONFORMANCE-COVERAGE PASS (spec CONTRACT-PENDING set == coverage.conf pending set, 3 verbs)
+CONFORMANCE-SUMMARY total=30 pass=27 fail=0 skip=0 pending=3
 ```
 
 The runner exits **non-zero** on any `FAIL` — a wrong-shape output, an
@@ -65,11 +65,13 @@ never a `FAIL` by themselves.
 ## What this suite asserts (§3.1/§3.2's `Asserted` cells)
 
 Per [`provider-spec.md` §10](../../docs/pipeline/provider-spec.md#10-per-verb-conformance-checklist-370)'s
-`TC-PCONF-NNN` checklist — the 21 provider-neutral verbs whose contract is
+`TC-PCONF-NNN` checklist — the 23 provider-neutral verbs whose contract is
 already committed (W1a=#371 landed the three ITP state-reads as normalized
-shapes; W1b=#396 landed `itp_read_task`; W1c1=#397 adds
-`chp_find_pr_for_issue` and `chp_pr_list`; W1c2=#398 adds `chp_pr_view` and
-`chp_list_inline_comments`):
+shapes; W1b=#396 landed `itp_read_task`; W1c1=#397 added
+`chp_find_pr_for_issue` and `chp_pr_list`; W1c2=#398 added `chp_pr_view`
+and `chp_list_inline_comments`; W1d=#399 adds `chp_ci_status` and
+`chp_mergeable` as normalized-token leaves — 23 asserted rows in
+`coverage.conf`):
 
 - **Fail-closed writes** (`itp_transition_state`, `itp_post_comment`,
   `itp_edit_comment`, `itp_mark_checkbox`, `itp_provision_states`,
@@ -106,21 +108,32 @@ shapes; W1b=#396 landed `itp_read_task`; W1c1=#397 adds
 - **State-read leaves** (`itp_list_by_state`, `itp_count_by_state`,
   `itp_list_forbidden_combos`) — the W1a-normalized shape and ascending-by-
   `number` sort.
+- **Normalized-token CI + mergeable** (`chp_ci_status`, `chp_mergeable`, W1d
+  #399) — `chp_ci_status` derives exactly one token from
+  `green|pending|failed|none` per the R1 decision order (rule 2 beats rule 3);
+  `chp_mergeable` returns exactly one raw GitHub token from
+  `MERGEABLE|CONFLICTING|UNKNOWN` (the caller's `-q '.mergeable'` absorbed
+  into the leaf). Assertions: token-set membership on canned payloads
+  (all-success, mixed-failure, empty for `chp_ci_status`; `MERGEABLE` for
+  `chp_mergeable`); the green-predicate on the all-success payload;
+  fail-closed on stub-gh failure (rc≠0, no partial output — the leaves
+  themselves reject empty stdout / unknown mergeable tokens).
 
-## The 5 `CONTRACT-PENDING` verbs (R3, post-W1a/W1b/W1c1/W1c2)
+## The 3 `CONTRACT-PENDING` verbs (R3, post-W1a/W1b/W1c1/W1c2/W1d)
 
-The residual gh-argv passthrough verbs (`chp_ci_status`, `chp_mergeable`,
-`chp_create_pr`, `chp_approve`, `chp_merge`) have no conformance check
-yet — `provider-spec.md` tokens their rows `CONTRACT-PENDING` and
-`coverage.conf` lists them `pending`. Landed W1 slices (W1a=#371 for the
-three ITP state-reads, W1b=#396 for `itp_read_task`, W1c1=#397 for the two
-CHP linkage-reads, W1c2=#398 for `chp_pr_view` and `chp_list_inline_comments`)
-each removed their own spec tokens and flipped `coverage.conf` in the same
-PR. A future W1 slice does the same — the runner's `CONFORMANCE-COVERAGE`
-check is a set-diff tripwire that FAILs on any asymmetry between the two.
-All four ITP READ verbs and all four CHP incidental/linkage read verbs are
-now asserted, leaving only the CHP PR-lifecycle (approve/merge/create) and
-CI-status/mergeable primitives pending.
+The residual gh-argv passthrough verbs (`chp_create_pr`, `chp_approve`,
+`chp_merge`) have no conformance check yet — `provider-spec.md` tokens
+their rows `CONTRACT-PENDING` and `coverage.conf` lists them `pending`.
+Landed W1 slices (W1a=#371 for the three ITP state-reads, W1b=#396 for
+`itp_read_task`, W1c1=#397 for the two CHP linkage-reads, W1c2=#398 for
+`chp_pr_view` + `chp_list_inline_comments`, W1d=#399 for `chp_ci_status` +
+`chp_mergeable`) each removed their own spec tokens and flipped
+`coverage.conf` in the same PR. A future W1 slice does the same — the
+runner's `CONFORMANCE-COVERAGE` check is a set-diff tripwire that FAILs
+on any asymmetry between the two. All four ITP READ verbs, all four CHP
+incidental/linkage read verbs, and the two CI/mergeable-status leaves
+are now asserted, leaving only the CHP PR-lifecycle write verbs
+(`chp_create_pr` / `chp_approve` / `chp_merge`) pending.
 
 ## Governing capability map (R4)
 

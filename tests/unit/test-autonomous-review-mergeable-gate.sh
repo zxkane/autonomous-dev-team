@@ -97,11 +97,12 @@ echo "=== TC-MG-SRC: wrapper structure (source-of-truth greps) ==="
 # ---------------------------------------------------------------------------
 assert_grep "TC-MG-SRC-01 wrapper sources lib-review-mergeable.sh" \
   'source "\$\{LIB_DIR\}/lib-review-mergeable.sh"' "$WRAPPER"
-# [INV-87] (#282): the `gh pr view --json mergeable` leaf moved behind the CHP
-# verb chp_mergeable; the gate still consumes the raw `.mergeable` token via the
-# verb ([M2], lib-review-mergeable.sh classifiers byte-unchanged caller-side).
-assert_grep "TC-MG-SRC-02 gate queries mergeable via chp_mergeable" \
-  'chp_mergeable "\$PR_NUMBER" -q '\''\.mergeable'\''' "$WRAPPER"
+# [INV-87] W1d (#399): chp_mergeable now absorbs the `-q '.mergeable'`
+# projection into the leaf — the caller passes ONLY the PR positional and
+# consumes the returned raw token (MERGEABLE|CONFLICTING|UNKNOWN) via
+# `_classify_mergeable_gate` (byte-unchanged, lib-review-mergeable.sh untouched).
+assert_grep "TC-MG-SRC-02 gate queries mergeable via chp_mergeable positional (W1d absorbed the projection)" \
+  'chp_mergeable "\$PR_NUMBER" 2>/dev/null \|\| echo ""' "$WRAPPER"
 assert_grep "TC-MG-SRC-03 gate calls _classify_mergeable_gate" \
   '_classify_mergeable_gate' "$WRAPPER"
 # The gate must only run when the aggregate PASSed — a fail/all-unavailable

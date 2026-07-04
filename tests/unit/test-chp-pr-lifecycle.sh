@@ -82,10 +82,14 @@ run_trace() {
   tr "\n" " " < "$_GH_ARGV_FILE"
 }
 
-# TC-CHP-CI — ci_is_green's `gh pr checks … --json state -q '[.[].state]'`.
-argv=$(run_trace chp_ci_status 42 --json state -q '[.[].state]')
-assert_eq "TC-CHP-CI chp_ci_status byte-identical gh pr checks argv" \
-  "pr checks 42 --repo $REPO --json state -q [.[].state] " "$argv"
+# TC-CHP-CI — chp_ci_status now owns the FULL argv (#399 W1d): the leaf emits
+# `gh pr checks PR --repo $REPO --json state`; the per-check-state → single-
+# token projection lives INSIDE the leaf, so the caller passes only the PR.
+# The `-q '[.[].state]'` tail the pre-#399 caller supplied is GONE from the
+# seam — the token normalization is the whole point of W1d.
+argv=$(run_trace chp_ci_status 42)
+assert_eq "TC-CHP-CI chp_ci_status emits gh pr checks argv (W1d normalized-token leaf)" \
+  "pr checks 42 --repo $REPO --json state " "$argv"
 
 # TC-CHP-FINDPR — chp_find_pr_for_issue's ABSTRACT contract (W1c1 #397): the
 # leaf emits `gh api graphql -F owner=… -F repo=… -f query=…` with a cursor
@@ -117,9 +121,13 @@ env REPO="$REPO" bash -c 'gh(){ :; }; source "'"$CHP_LIB"'" 2>/dev/null; chp_fin
 [[ "$rc" -ne 0 ]] && { echo -e "  ${GREEN}PASS${NC}: TC-CHP-FINDPR-FIELDS-REQUIRED missing FIELDS errors (rc=$rc)"; PASS=$((PASS+1)); } \
                   || { echo -e "  ${RED}FAIL${NC}: TC-CHP-FINDPR-FIELDS-REQUIRED missing FIELDS did NOT error"; FAIL=$((FAIL+1)); }
 
-# TC-CHP-MERGEABLE — autonomous-review.sh's `gh pr view … --json mergeable -q .mergeable` (M2).
-argv=$(run_trace chp_mergeable 42 -q '.mergeable')
-assert_eq "TC-CHP-MERGEABLE chp_mergeable byte-identical gh pr view --json mergeable argv (M2)" \
+# TC-CHP-MERGEABLE — chp_mergeable now absorbs `-q '.mergeable'` into the
+# leaf (#399 W1d [M2]): the caller passes only the PR positional. Emitted argv
+# is `gh pr view PR --repo $REPO --json mergeable -q .mergeable`; the leaf
+# returns the raw backend token (MERGEABLE|CONFLICTING|UNKNOWN) directly, so
+# `lib-review-mergeable.sh` (INV-44/INV-54 classifiers) ships byte-unchanged.
+argv=$(run_trace chp_mergeable 42)
+assert_eq "TC-CHP-MERGEABLE chp_mergeable emits gh pr view --json mergeable -q .mergeable argv (W1d absorbs the projection)" \
   "pr view 42 --repo $REPO --json mergeable -q .mergeable " "$argv"
 
 # TC-CHP-CREATE — drain_agent_pr_create's `gh pr create --head … --title … --body …`.

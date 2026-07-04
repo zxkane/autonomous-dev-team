@@ -99,6 +99,51 @@ chp_broken_list_inline_comments() {
     sort_by(.createdAt // "", .id // 0)
   ' <<<"$raw"
 }
+# Correct chp_broken_ci_status / chp_broken_mergeable (#399 W1d) — kept correct
+# so only this fixture's pre-existing violations (chp_broken_review_threads,
+# chp_broken_resolve_thread) surface as FAILs; the new W1d asserted verbs must
+# not spuriously extend the count. Include the P2-3 fail-closed guards (empty
+# stdout / unknown mergeable token → rc!=0) mirroring the github leaf.
+chp_broken_ci_status() {
+  local pr="$1"
+  local raw gh_err states token
+  gh_err="$(mktemp)"
+  raw="$(gh pr checks "$pr" --repo "$REPO" --json state 2>"$gh_err" || true)"
+  if [[ -z "$raw" ]]; then
+    [ -s "$gh_err" ] && cat "$gh_err" >&2
+    rm -f "$gh_err"
+    return 1
+  fi
+  jq -e 'type == "array"' >/dev/null 2>&1 <<<"$raw" || {
+    [ -s "$gh_err" ] && cat "$gh_err" >&2
+    rm -f "$gh_err"
+    return 1
+  }
+  states="$(printf '%s' "$raw" | jq -er '[.[].state]' 2>/dev/null)" || {
+    [ -s "$gh_err" ] && cat "$gh_err" >&2
+    rm -f "$gh_err"
+    return 1
+  }
+  rm -f "$gh_err"
+  token="$(jq -r '
+    if length == 0 then "none"
+    elif any(. == "FAILURE" or . == "ERROR" or . == "CANCELLED" or . == "TIMED_OUT") then "failed"
+    elif all(. == "SUCCESS") then "green"
+    else "pending"
+    end
+  ' <<<"$states" 2>/dev/null)" || return 1
+  [[ -n "$token" ]] || return 1
+  printf '%s' "$token"
+}
+chp_broken_mergeable() {
+  local pr="$1"
+  local raw
+  raw="$(gh pr view "$pr" --repo "$REPO" --json mergeable -q '.mergeable' 2>/dev/null)" || return 1
+  case "${raw^^}" in
+    MERGEABLE|CONFLICTING|UNKNOWN) printf '%s' "$raw" ;;
+    *) return 1 ;;
+  esac
+}
 # chp_broken_close_keyword is deliberately OMITTED: the runner's
 # chp_close_keyword assertion never dispatches through a leaf (it evals
 # _render_close_keyword directly against a stubbed chp_caps — see
