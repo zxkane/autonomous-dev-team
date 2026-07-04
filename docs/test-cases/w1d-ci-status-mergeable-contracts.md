@@ -97,8 +97,15 @@ contract:
 
 ## Provider-conformance runner counts
 
-The runner emits `CONFORMANCE-SUMMARY total=30 pass=21 fail=0 skip=0 pending=8`
+The runner emits `CONFORMANCE-SUMMARY total=29 pass=21 fail=0 skip=0 pending=8`
 on `--itp github --chp github` (`pass=21` = 17 pre-#399 pass lines + 3
 `chp_ci_status` PASS + 1 `chp_mergeable` PASS; `pending=8` = 10 pre-#399 −
-2 flipped by #399). Runner README's example output block is updated in the
-same PR (R5 SAME-PR tripwire).
+2 flipped by #399; `total` counts one emit line per asserted-verb-check plus
+one per pending verb — the `CONFORMANCE-COVERAGE PASS` line does NOT
+increment total, so `total = pass + skip + pending` when there are zero
+fails). Degraded/degraded: `total=29 pass=18 fail=0 skip=3 pending=8`.
+Broken/broken: `total=29 pass=16 fail=5 pending=8` (the 5 pre-existing
+broken-fixture violations; the new W1d asserted verbs stay PASS because the
+broken fixture ships correct `chp_broken_ci_status`/`chp_broken_mergeable`).
+Runner README's example output block is updated in the same PR (R5 SAME-PR
+tripwire).

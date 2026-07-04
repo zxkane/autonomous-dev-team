@@ -358,6 +358,16 @@ chp_github_ci_status() {
   # TC-DSAP-014/015 pins the WARN wording that surfaces the diagnostic).
   gh_err="$(mktemp)"
   raw="$(gh pr checks "$pr" --repo "$REPO" --json state 2>"$gh_err" || true)"
+  # Empty stdout is UNCONDITIONALLY a transport failure — jq on empty input
+  # returns rc 0 with no output, which would otherwise fall through the rest
+  # of the pipeline as empty `states=""` / empty `token=""` and echo "" at
+  # rc 0 (the P2-3 fail-open latch the conformance runner's strict
+  # fail-closed pin catches). Reject empty raw stdout first.
+  if [[ -z "$raw" ]]; then
+    [ -s "$gh_err" ] && cat "$gh_err" >&2
+    rm -f "$gh_err"
+    return 1
+  fi
   states="$(printf '%s' "$raw" | jq -er '[.[].state]' 2>/dev/null)" || {
     # No parseable JSON on stdout → forward gh's own error and return non-zero.
     [ -s "$gh_err" ] && cat "$gh_err" >&2
@@ -374,6 +384,9 @@ chp_github_ci_status() {
     else "pending"
     end
   ' <<<"$states" 2>/dev/null)" || return 1
+  # Belt-and-suspenders: an empty token would slip past the "" gate under an
+  # unforeseen jq quirk. Empty token = fail-closed, rc≠0.
+  [[ -n "$token" ]] || return 1
   printf '%s' "$token"
 }
 
@@ -381,16 +394,36 @@ chp_github_ci_status() {
 #
 # Spec §3.2: the leaf owns BOTH the `gh pr view --json mergeable` query AND
 # the `-q '.mergeable'` projection the caller previously supplied. Stdout is
-# exactly one token from `MERGEABLE|CONFLICTING|UNKNOWN` (empty string is
-# permitted only via the caller's existing `|| echo ""` failure wrapper —
-# this leaf never emits empty on success). The token set matches GitHub's
-# RAW `mergeable` values verbatim so `_classify_mergeable_gate` /
-# `_pr_open_gate` (INV-44/INV-54, `lib-review-mergeable.sh`) ship
-# byte-unchanged. rc≠0 on query failure (the caller's `|| echo ""` maps that
-# to the classifier's empty-string branch → `block-nonsubstantive`).
+# exactly one token from `MERGEABLE|CONFLICTING|UNKNOWN` on success
+# (case-insensitively matched — `_classify_mergeable_gate` upper-cases before
+# compare); rc≠0 on ANY of: gh query failure, empty stdout, or a token
+# outside the pinned set. The token set matches GitHub's RAW `mergeable`
+# values verbatim so `lib-review-mergeable.sh`'s classifiers ship
+# byte-unchanged.
+#
+# P2-3 (adversarial-review round): the pre-fix leaf forwarded gh's `-q`
+# output blindly. On an empty `.mergeable` field (missing-schema regression /
+# `gh --jq` quirk) that produces empty stdout at rc 0, and the caller's
+# `|| echo ""` fallback would NOT trigger, so an empty MERGEABLE_STATUS fell
+# straight into `_classify_mergeable_gate ""` → `block-nonsubstantive`
+# silently — a single-shot degradation with no retry. Now the leaf returns
+# rc≠0 on empty/unknown; the caller's `MERGEABLE_STATUS=$(chp_mergeable ... ||
+# echo "")` maps that to empty, the UNKNOWN-retry loop retries per its usual
+# rules, and after `MERGEABLE_RETRIES` the classifier still routes to
+# block-nonsubstantive — the SAME final gate, but reached HONESTLY through
+# retry rather than silently on the first attempt.
 chp_github_mergeable() {
   local pr="$1"
-  gh pr view "$pr" --repo "$REPO" --json mergeable -q '.mergeable'
+  local raw
+  raw="$(gh pr view "$pr" --repo "$REPO" --json mergeable -q '.mergeable' 2>/dev/null)" || return 1
+  # Reject empty / anything outside the pinned set. Case-insensitive check
+  # (via upper-case fold) so `mergeable`/`Mergeable`/etc. are accepted; we
+  # forward the ORIGINAL casing verbatim so the classifier's byte-compare
+  # sees exactly what gh returned.
+  case "${raw^^}" in
+    MERGEABLE|CONFLICTING|UNKNOWN) printf '%s' "$raw" ;;
+    *) return 1 ;;
+  esac
 }
 
 # chp_github_create_pr [gh pr create args…] — open a PR.

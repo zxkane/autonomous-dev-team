@@ -96,6 +96,14 @@ chp_degraded_ci_status() {
   local raw gh_err states token
   gh_err="$(mktemp)"
   raw="$(gh pr checks "$pr" --repo "$REPO" --json state 2>"$gh_err" || true)"
+  # P2-3 fail-closed guard — empty stdout → rc≠0 (jq on empty input returns
+  # rc 0 with no output, which would otherwise fall through as an empty
+  # token at rc 0).
+  if [[ -z "$raw" ]]; then
+    [ -s "$gh_err" ] && cat "$gh_err" >&2
+    rm -f "$gh_err"
+    return 1
+  fi
   states="$(printf '%s' "$raw" | jq -er '[.[].state]' 2>/dev/null)" || {
     [ -s "$gh_err" ] && cat "$gh_err" >&2
     rm -f "$gh_err"
@@ -109,15 +117,23 @@ chp_degraded_ci_status() {
     else "pending"
     end
   ' <<<"$states" 2>/dev/null)" || return 1
+  [[ -n "$token" ]] || return 1
   printf '%s' "$token"
 }
 
 # chp_degraded_mergeable PR — mirrors chp_github_mergeable' pinned-token
 # contract (#399 W1d). Absorbs the `-q '.mergeable'` projection into the leaf;
-# emits one raw GitHub-compatible token MERGEABLE|CONFLICTING|UNKNOWN.
+# emits one raw GitHub-compatible token MERGEABLE|CONFLICTING|UNKNOWN on
+# success (case-insensitive check); rc≠0 on empty / unknown / query failure
+# (P2-3: closes the fail-open hole a blind passthrough would leave).
 chp_degraded_mergeable() {
   local pr="$1"
-  gh pr view "$pr" --repo "$REPO" --json mergeable -q '.mergeable'
+  local raw
+  raw="$(gh pr view "$pr" --repo "$REPO" --json mergeable -q '.mergeable' 2>/dev/null)" || return 1
+  case "${raw^^}" in
+    MERGEABLE|CONFLICTING|UNKNOWN) printf '%s' "$raw" ;;
+    *) return 1 ;;
+  esac
 }
 
 # chp_degraded_reply_review_comment PR COMMENT_ID BODY — mirrors

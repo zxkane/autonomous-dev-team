@@ -1,14 +1,23 @@
 # ci-decision-golden.json.meta — provenance sidecar for ci-decision-golden.json (#399 W1d, R4).
 #
-# Captures decision-level parity between the PRE-#399 ci_is_green (byte-identical
-# gh-argv passthrough where the caller's `--json state -q '[.[].state]'` returned a
-# per-check state array and the caller applied `length>0 and all(.=="SUCCESS")`
-# on that array) and the POST-#399 ci_is_green (which captures the new
-# `chp_ci_status`'s single normalized token `green|pending|failed|none` and
-# tests `[[ "$token" == "green" ]]`).
+# Captures decision-level rc trajectories for the PRE-#399 ci_is_green (byte-
+# identical gh-argv passthrough where the caller's `--json state -q '[.[].state]'`
+# returned a per-check state array and the caller applied `length>0 and
+# all(.=="SUCCESS")` on that array — captured in `old_ci_is_green_rc`) AND
+# the POST-#399 ci_is_green (which captures the new `chp_ci_status`'s single
+# normalized token `green|pending|failed|none` and tests
+# `[[ "$token" == "green" ]]` — captured in `new_ci_is_green_rc` +
+# `new_token`).
 #
-# Rows are the six TC-DSAP-004 fixture classes PLUS the four gh rc-quirk cases
-# R2 pins:
+# The gh_stdout field is the RAW `gh pr checks --json state` payload (the
+# NEW-leaf shape, `[{"state":"..."}]`). The OLD passthrough shim in the
+# parity harness (tests/unit/test-w1d-ci-status-mergeable-parity.sh's
+# `_drive_ci_is_green_old`) re-applies the pre-#399 caller's `-q
+# '[.[].state]'` filter so the OLD ci_is_green sees the state-string array
+# it historically consumed — matching production exactly.
+#
+# Rows are the six TC-DSAP-004 fixture classes PLUS four gh rc-quirk /
+# rule-2-over-rule-3 / SKIPPED cases R2 pins:
 #
 #   all_success_one, all_success_many        — ≥1 SUCCESS, no other state → green (rc 0)
 #   mixed_pending                            — SUCCESS + PENDING → pending (rc 1)
@@ -22,18 +31,24 @@
 #   rc_nonzero_valid_json_success            — gh rc-quirk: rc≠0 with parseable JSON → derive token from stdout
 #   rc_nonzero_garbage_stdout                — genuine transport failure: rc≠0 + non-JSON → leaf rc≠0
 #
-# For every row, `old_ci_is_green_rc == new_ci_is_green_rc` — this file IS the
-# decision-parity contract R4 pins. The rc-quirk cases were not exercised by
-# the pre-#399 caller because the OLD leaf's argv `--json state -q '[.[].state]'`
-# would emit `[]` on stdout for the "failing checks" rc-quirk (gh's -q filter
-# still runs) — for those pre-existing quirk shapes both OLD and NEW ended in
-# rc 1 anyway (empty state array is not `all=="SUCCESS"`); the NEW leaf makes
-# the distinction between "rc-quirk with data" and "genuine transport failure"
-# via the R2 stdout-parseable-JSON test.
+# INTENTIONAL DECISION CHANGE (single documented row):
+#
+#   rc_nonzero_valid_json_success — pre-#399 old_rc=1, post-#399 new_rc=0.
+#   `gh pr checks` exits non-zero for the "some checks failing/pending" case
+#   even when the JSON payload is well-formed. The OLD caller's
+#   `if ci_states=$(chp_ci_status ...); then` fell into its else-branch,
+#   ci_states='[]', gate rc 1 (false-negative not-green). The NEW leaf
+#   inspects stdout, derives `green` from the parseable all-SUCCESS
+#   payload → ci_is_green rc 0 (correct-green — this is what a human reading
+#   the payload would say). The parity harness explicitly asserts old=1 AND
+#   new=0 for this row, and the fixture's `_intentional_decision_change`
+#   flag documents the divergence in-band. This is the ONE intentional
+#   decision change in the W1d parity contract; every other row asserts
+#   old_rc == new_rc.
 #
 # Regenerate (only if the OLD ci_is_green semantics are ever in dispute):
-# checkout the commit immediately before #399's leaf rewrite, source
-# lib-dispatch.sh under the fixture harness in
-# tests/unit/test-w1d-ci-status-mergeable-parity.sh, feed each row's
-# `gh_stdout` / `gh_rc` through a stub `chp_ci_status`, and record the
-# resulting ci_is_green rc.
+# checkout the commit immediately before #399's leaf rewrite (b13ef4b~1 or
+# origin/main from the #399 base-commit era), source lib-dispatch.sh under
+# the fixture harness in tests/unit/test-w1d-ci-status-mergeable-parity.sh,
+# feed each row's `gh_stdout` / `gh_rc` through the passthrough
+# chp_ci_status shim, and record the resulting ci_is_green rc.

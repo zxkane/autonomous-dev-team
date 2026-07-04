@@ -72,10 +72,11 @@
   "rc_nonzero_valid_json_success": {
     "gh_stdout": "[{\"state\":\"SUCCESS\"}]",
     "gh_rc": 1,
-    "old_ci_is_green_rc": 0,
+    "old_ci_is_green_rc": 1,
     "new_ci_is_green_rc": 0,
     "new_token": "green",
-    "_note": "gh rc-quirk: gh pr checks may exit non-zero even when the JSON payload is valid; the leaf derives the token from stdout, not gh's rc."
+    "_intentional_decision_change": true,
+    "_note": "R2 gh rc-quirk: gh pr checks exits non-zero even when the JSON payload is well-formed (failing/pending/no-checks case). PRE-#399 the caller's `if ci_states=$(chp_ci_status ...); then` failed → ci_states='[]' → gate rc 1 (false-negative not-green). POST-#399 the leaf inspects stdout, derives 'green' from the parseable all-SUCCESS payload → ci_is_green rc 0 (correct-green). This is the ONE documented decision change in the W1d parity contract — old=1, new=0 asserted explicitly by the parity harness."
   },
   "rc_nonzero_garbage_stdout": {
     "gh_stdout": "some garbage error",
@@ -83,6 +84,6 @@
     "old_ci_is_green_rc": 1,
     "new_ci_is_green_rc": 1,
     "new_token": "",
-    "_note": "Non-JSON stdout + non-zero rc = genuine transport failure; leaf rc != 0."
+    "_note": "Non-JSON stdout + non-zero rc = genuine transport failure; leaf rc != 0. Both OLD and NEW paths funnel this into rc 1 — parity preserved for the genuine-error case."
   }
 }
