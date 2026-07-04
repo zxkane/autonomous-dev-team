@@ -323,28 +323,74 @@ chp_github_find_pr_for_issue() {
   jq -c "$projection" <<<"$nodes"
 }
 
-# chp_github_ci_status PR [extra gh args…] — CI check-state leaf.
+# chp_github_ci_status PR — normalized CI-status token (#399 W1d, [INV-87]).
 #
-# Spec §3.2: the `gh pr checks` status query for `ci_is_green`. The caller
-# supplies the `--json state -q '[.[].state]'` tail; the leaf forwards it
-# byte-identically. The jq `length>0 and all(.=="SUCCESS")` gate that turns the
-# state array into green/pending/failed/none STAYS caller-side in `ci_is_green`.
+# Spec §3.2: the leaf owns the FULL `gh pr checks` argv AND the per-check-state
+# → single-token projection; the caller's old `--json state -q '[.[].state]'`
+# tail + the `length>0 and all(.=="SUCCESS")` gate move HERE. Stdout is exactly
+# one of `green|pending|failed|none`, derived by this decision order over the
+# per-check state multiset (every `gh pr checks` state token is bucketed):
+#
+#   (1) zero checks                              → `none`
+#   (2) any ∈ {FAILURE,ERROR,CANCELLED,TIMED_OUT} → `failed`
+#   (3) any ∈ {PENDING,QUEUED,IN_PROGRESS,EXPECTED,SKIPPED} or any state not
+#       otherwise listed                          → `pending`
+#   (4) else (all SUCCESS, ≥1)                    → `green`
+#
+# Rule 2 beats rule 3 (a FAILURE+SKIPPED set is `failed`); SKIPPED deliberately
+# lands in `pending` — a `SKIPPED` check is NOT a `SUCCESS`, and the old gate
+# was `all(=="SUCCESS")` so a skipped-mix was already not-green.
+#
+# gh rc-quirk (R2): `gh pr checks` exits non-zero for failing/pending/no-checks
+# cases even when the JSON payload is well-formed. The leaf inspects stdout —
+# a parseable JSON array present → derive the token from it regardless of gh's
+# rc (empty array → `none`); no parseable JSON on stdout (genuine query/
+# transport failure) → the leaf itself exits non-zero with stdout empty. The
+# caller (`ci_is_green`) treats any leaf rc≠0 as not-green + WARN via its
+# existing mktemp/stderr-capture transport-failure path (TC-DSAP-014/015).
 chp_github_ci_status() {
-  local pr="$1"; shift
-  gh pr checks "$pr" --repo "$REPO" "$@"
+  local pr="$1"
+  local raw gh_err states token
+  # Capture stderr to a scratch file so we can (a) discard it when the payload
+  # is parseable JSON (gh's rc-quirk emits noise on stderr even for a valid
+  # payload) and (b) forward it to OUR stderr when the payload is not
+  # parseable (genuine transport failure — the caller's mktemp/WARN path
+  # TC-DSAP-014/015 pins the WARN wording that surfaces the diagnostic).
+  gh_err="$(mktemp)"
+  raw="$(gh pr checks "$pr" --repo "$REPO" --json state 2>"$gh_err" || true)"
+  states="$(printf '%s' "$raw" | jq -er '[.[].state]' 2>/dev/null)" || {
+    # No parseable JSON on stdout → forward gh's own error and return non-zero.
+    [ -s "$gh_err" ] && cat "$gh_err" >&2
+    rm -f "$gh_err"
+    return 1
+  }
+  rm -f "$gh_err"
+  # Bucket the state multiset per the R1 decision order. jq owns the mapping;
+  # no per-token bash iteration.
+  token="$(jq -r '
+    if length == 0 then "none"
+    elif any(. == "FAILURE" or . == "ERROR" or . == "CANCELLED" or . == "TIMED_OUT") then "failed"
+    elif all(. == "SUCCESS") then "green"
+    else "pending"
+    end
+  ' <<<"$states" 2>/dev/null)" || return 1
+  printf '%s' "$token"
 }
 
-# chp_github_mergeable PR [extra gh args…] — raw backend mergeable token.
+# chp_github_mergeable PR — normalized mergeable token (#399 W1d, [M2]).
 #
-# Spec §3.2 [M2]: wraps ONLY the `gh pr view … --json mergeable` leaf
-# (autonomous-review.sh's mergeable poll). Returns the RAW backend `mergeable`
-# token (MERGEABLE / CONFLICTING / UNKNOWN / "" ). The [INV-44]/[INV-54]
-# classifiers (`_classify_mergeable_gate`, `_pr_open_gate`,
-# lib-review-mergeable.sh) STAY caller-side and consume this raw token —
-# lib-review-mergeable.sh is byte-for-byte unchanged.
+# Spec §3.2: the leaf owns BOTH the `gh pr view --json mergeable` query AND
+# the `-q '.mergeable'` projection the caller previously supplied. Stdout is
+# exactly one token from `MERGEABLE|CONFLICTING|UNKNOWN` (empty string is
+# permitted only via the caller's existing `|| echo ""` failure wrapper —
+# this leaf never emits empty on success). The token set matches GitHub's
+# RAW `mergeable` values verbatim so `_classify_mergeable_gate` /
+# `_pr_open_gate` (INV-44/INV-54, `lib-review-mergeable.sh`) ship
+# byte-unchanged. rc≠0 on query failure (the caller's `|| echo ""` maps that
+# to the classifier's empty-string branch → `block-nonsubstantive`).
 chp_github_mergeable() {
-  local pr="$1"; shift
-  gh pr view "$pr" --repo "$REPO" --json mergeable "$@"
+  local pr="$1"
+  gh pr view "$pr" --repo "$REPO" --json mergeable -q '.mergeable'
 }
 
 # chp_github_create_pr [gh pr create args…] — open a PR.

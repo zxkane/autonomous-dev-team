@@ -124,6 +124,31 @@ while IFS= read -r row; do
 done < <(jq -r 'to_entries[] | "\(.key)|\(.value.gh_stdout)|\(.value.gh_rc)|\(.value.new_token)|\(.value.new_ci_is_green_rc)"' "$CI_GOLDEN")
 
 echo
+echo "=== TC-W1D-ARGV-SRC: no --json / -q on chp_ci_status / chp_mergeable caller lines outside providers/ (AC2) ==="
+
+# AC2 secondary guard: grep the CALLER-layer files (everything under
+# skills/autonomous-dispatcher/scripts/ EXCEPT providers/) for
+# `chp_ci_status ` / `chp_mergeable ` lines and assert none carry `--json`
+# or a `-q ` flag past the verb. A backslid caller-side jq re-emerging on
+# the seam would fail this check.
+_scan_dir="$SCRIPTS"
+_offenders="$(
+  grep -rEn '(chp_ci_status|chp_mergeable) ' "$_scan_dir" \
+    --include='*.sh' \
+    --exclude-dir=providers 2>/dev/null \
+  | grep -E '(chp_ci_status|chp_mergeable) [^#\n]*(-{2}json|-q )' \
+  || true
+)"
+if [[ -z "$_offenders" ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-W1D-ARGV-SRC no caller line passes --json / -q to chp_ci_status or chp_mergeable"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-W1D-ARGV-SRC caller-side --json/-q leak into chp_ci_status/chp_mergeable"
+  echo "$_offenders" | sed 's/^/      /'
+  FAIL=$((FAIL + 1))
+fi
+
+echo
 echo "=== TC-W1D-PARITY-MG: _classify_mergeable_gate matches the golden on the full input table ==="
 
 # The classifier is byte-unchanged; source lib-review-mergeable.sh and diff.

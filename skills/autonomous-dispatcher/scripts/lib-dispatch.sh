@@ -2780,19 +2780,27 @@ fetch_pr_for_issue() {
   resolve_pr_for_issue "$issue_num" "$fields"
 }
 
-# Step 5a: returns 0 if every CI check is SUCCESS (and at least one exists).
-# Returns 1 on any other state (pending, failing, empty, transport error).
-# Captures stderr to a mktemp file so transport errors can be diagnosed
-# without coupling concurrent dispatcher instances to a shared /tmp path
-# (CWE-377 mitigation).
+# Step 5a: returns 0 if the PR's CI is fully green (all checks SUCCESS, ≥1
+# check present). Returns 1 on any other outcome (pending, failing, no checks,
+# transport error). Documented mock seam
+# (test-dispatcher-tick-app-auth.sh:104 function-mocks it) — the NAME +
+# rc-boolean contract is stable regardless of the leaf shape.
+#
+# [INV-87] W1d (#399): `chp_ci_status` now returns exactly one normalized
+# token `green|pending|failed|none` on rc 0 (or rc≠0 on genuine transport
+# failure); the leaf owns the full `gh pr checks --json state` argv AND the
+# green-predicate + rule-2-beats-rule-3 projection that used to live here.
+# This function keeps its existing capture-then-test structure — assign the
+# leaf's token under the existing mktemp/WARN transport-failure path
+# (TC-DSAP-014 pins the WARN wording; a failed query logs the WARN and
+# yields not-green), THEN compare `[[ "$token" == "green" ]]`. Do NOT inline
+# the command substitution into the comparison — that discards the
+# stderr-capture / WARN path.
 ci_is_green() {
   local pr_num="$1"
-  local ci_states ci_err_file ci_err_content
+  local ci_token ci_err_file ci_err_content
   ci_err_file=$(mktemp)
-  # [INV-87] the `gh pr checks --json state` leaf moves behind chp_ci_status; the
-  # `-q '[.[].state]'` projection + the green/pending/failed/none gate below stay
-  # caller-side (provider-neutral). Byte-identical argv (spec §3.2).
-  if ci_states=$(chp_ci_status "$pr_num" --json state -q '[.[].state]' 2>"$ci_err_file"); then
+  if ci_token=$(chp_ci_status "$pr_num" 2>"$ci_err_file"); then
     rm -f "$ci_err_file"
   else
     ci_err_content=$(cat "$ci_err_file")
@@ -2800,9 +2808,9 @@ ci_is_green() {
     if [ -n "$ci_err_content" ]; then
       echo "WARN: CI-status query (chp_ci_status) failed for PR #${pr_num}: ${ci_err_content}" >&2
     fi
-    ci_states='[]'
+    ci_token=""
   fi
-  jq -e 'length > 0 and all(. == "SUCCESS")' <<<"$ci_states" >/dev/null 2>&1
+  [[ "$ci_token" == "green" ]]
 }
 
 # Step 5a: echoes seconds since PR.updatedAt. Empty on parse failure

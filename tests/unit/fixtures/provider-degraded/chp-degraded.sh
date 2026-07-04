@@ -86,6 +86,40 @@ mutation($threadId: ID!) {
 }' --jq '.data.resolveReviewThread.thread.isResolved'
 }
 
+# chp_degraded_ci_status PR — mirrors chp_github_ci_status' normalized-token
+# contract (#399 W1d). Real provider-neutral body per R4: derive a single
+# `green|pending|failed|none` token from a `gh pr checks --json state` payload.
+# Structurally identical to the GitHub leaf so the conformance runner has a
+# genuine body to assert against on `--chp degraded` runs.
+chp_degraded_ci_status() {
+  local pr="$1"
+  local raw gh_err states token
+  gh_err="$(mktemp)"
+  raw="$(gh pr checks "$pr" --repo "$REPO" --json state 2>"$gh_err" || true)"
+  states="$(printf '%s' "$raw" | jq -er '[.[].state]' 2>/dev/null)" || {
+    [ -s "$gh_err" ] && cat "$gh_err" >&2
+    rm -f "$gh_err"
+    return 1
+  }
+  rm -f "$gh_err"
+  token="$(jq -r '
+    if length == 0 then "none"
+    elif any(. == "FAILURE" or . == "ERROR" or . == "CANCELLED" or . == "TIMED_OUT") then "failed"
+    elif all(. == "SUCCESS") then "green"
+    else "pending"
+    end
+  ' <<<"$states" 2>/dev/null)" || return 1
+  printf '%s' "$token"
+}
+
+# chp_degraded_mergeable PR — mirrors chp_github_mergeable' pinned-token
+# contract (#399 W1d). Absorbs the `-q '.mergeable'` projection into the leaf;
+# emits one raw GitHub-compatible token MERGEABLE|CONFLICTING|UNKNOWN.
+chp_degraded_mergeable() {
+  local pr="$1"
+  gh pr view "$pr" --repo "$REPO" --json mergeable -q '.mergeable'
+}
+
 # chp_degraded_reply_review_comment PR COMMENT_ID BODY — mirrors
 # chp_github_reply_review_comment.
 chp_degraded_reply_review_comment() {

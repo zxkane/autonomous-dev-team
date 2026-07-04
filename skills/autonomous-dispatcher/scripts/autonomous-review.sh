@@ -3500,10 +3500,14 @@ Findings->Decision Gate: 1 blocking finding(s) -- FAIL.
   MERGEABLE_RETRIES="${MERGEABLE_RETRIES:-3}"
   MERGEABLE_STATUS=""
   for _mg_attempt in $(seq 1 "$MERGEABLE_RETRIES"); do
-    # [INV-87] (#282) the `gh pr view --json mergeable` leaf moves behind chp_mergeable
-    # ([M2]); the raw token + the `-q '.mergeable'` projection are consumed here. The
-    # UNKNOWN-retry loop + _classify_mergeable_gate (INV-44/INV-54) stay caller-side.
-    MERGEABLE_STATUS=$(chp_mergeable "$PR_NUMBER" -q '.mergeable' 2>/dev/null || echo "")
+    # [INV-87] W1d (#399): chp_mergeable now owns the `gh pr view --json
+    # mergeable` argv AND the `-q '.mergeable'` projection — the leaf returns
+    # exactly one normalized token `MERGEABLE|CONFLICTING|UNKNOWN` (byte-
+    # identical to GitHub's raw values, so `_classify_mergeable_gate` /
+    # `_pr_open_gate` (INV-44/INV-54, lib-review-mergeable.sh) ship byte-
+    # unchanged). The `|| echo ""` failure wrapper stays here — a leaf rc≠0
+    # maps to the classifier's empty-string branch → `block-nonsubstantive`.
+    MERGEABLE_STATUS=$(chp_mergeable "$PR_NUMBER" 2>/dev/null || echo "")
     [[ "${MERGEABLE_STATUS^^}" != "UNKNOWN" && -n "$MERGEABLE_STATUS" ]] && break
     # Only sleep when another attempt will follow — no point waiting after the
     # final probe (the loop is about to exit and classify the settled value).
