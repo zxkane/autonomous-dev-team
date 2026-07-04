@@ -81,15 +81,20 @@ source-of-truth grep on `autonomous-review.sh`.
 |----|----------|----------|
 | TC-RSG-004 | a controller subshell is reaped (Layer 2) BEFORE it wrote its `.rc` sidecar | the wrapper's existing sidecar-missing branch (`AGENT_LAUNCH_RC["$_sid"]=1`, `autonomous-review.sh` around the `_rc_file` read) classifies it gracefully — no crash/hang; verdict resolution for OTHER agents is unaffected (this is pre-existing code, pinned as a regression guard, not new behavior) |
 
-## E2E (existing wrapper dry-run harness)
+## E2E (TC-E2E-406, `tests/unit/test-codex-rerun-orphan-containment.sh`)
 
-Full review-wrapper dry run (fixture codex adapter writing a verdict artifact
-mid-run, matching this repo's existing wrapper dry-run fixtures): 5s after
-"Review complete" is logged, no process on the host carries THIS RUN's
-fixture session-id/marker (`ADT_FANOUT_LANE_MARKER=<this run's session id>`) —
-scoped to the fixture's own IDs (never a global process-name sweep, so
-parallel CI jobs cannot flake each other); the log contains no rc-file "No
-such file or directory" error line for this run.
+Drives the REAL production fan-out subshell + post-resolution reap sequence
+end to end against a real (fixture) `codex` process — sourcing
+`adapters/codex.sh::_run_codex_review` and all three
+`lib-review-poll.sh` reapers directly, in the same call order
+`autonomous-review.sh` uses, rather than reimplementing them:
+
+| ID | Scenario | Expected |
+|----|----------|----------|
+| TC-E2E-406a | 5s after the reap sequence completes | zero processes on the host carry THIS RUN's fixture `ADT_FANOUT_LANE_MARKER` value — scoped to a per-run random marker (never a global process-name sweep, so parallel CI jobs cannot flake each other) |
+| TC-E2E-406b | fixture `codex` invocation count | exactly ONE (proven to FAIL pre-fix: reverting the loop-break condition to the enumerated `-eq 124 \|\| -eq 137` form reproduces 3 invocations — the orphan this issue reports) |
+| TC-E2E-406c | controller's return code | 143 (loop-terminal signal-death, not a re-run) |
+| TC-E2E-406d | controller's stderr log | no "No such file or directory" rc-sidecar error line |
 
 ## Acceptance-criteria cross-check (non-regression)
 

@@ -308,6 +308,120 @@ assert_grep "TC-RSG-004 wrapper's rc-file read has a missing-sidecar fallback (A
   'AGENT_LAUNCH_RC\["\$_sid"\]=1' "$WRAPPER"
 
 # ============================================================================
+# TC-E2E-406: full wrapper dry run — reproduces the production fan-out
+# subshell + post-resolution reap sequence end to end against a REAL codex
+# stub process, using the REAL production functions (lib-agent.sh's
+# _run_with_timeout via adapters/codex.sh's _run_codex_review, and
+# lib-review-poll.sh's three reapers) rather than reimplementing them. Proves
+# the issue's second acceptance criterion: 5s after the reap sequence
+# completes, no process on the host carries THIS RUN's
+# ADT_FANOUT_LANE_MARKER, and the controller returns rc 143 (loop-terminal,
+# no orphaned re-run) rather than spawning a second `codex review`. Scoped to
+# a per-run random marker value (never a global process-name sweep), so
+# parallel CI jobs cannot flake each other.
+# ============================================================================
+echo
+echo "=== TC-E2E-406: wrapper dry run — zero marker-scoped survivors 5s after reap, no orphan re-run ==="
+echo
+
+E2E_TMPROOT=$(mktemp -d)
+E2E_MARKER="e2e406-$$-${RANDOM}${RANDOM}"
+E2E_BIN="$E2E_TMPROOT/bin"; mkdir -p "$E2E_BIN"
+E2E_RUNLOG="$E2E_TMPROOT/runs.log"; : > "$E2E_RUNLOG"
+E2E_FANOUT_DIR=$(mktemp -d "$E2E_TMPROOT/fanout-XXXXXX")
+
+# Fixture codex: records its own pid, then blocks (stands in for an in-flight
+# `codex review` whose verdict has ALREADY resolved via a sibling agent — the
+# exact moment the wrapper's post-resolution reap fires against it).
+cat > "$E2E_BIN/codex" <<'CODEX_STUB'
+#!/bin/bash
+echo "run $$" >> "$RUNLOG"
+sleep 120
+CODEX_STUB
+chmod +x "$E2E_BIN/codex"
+
+(
+  export PATH="$E2E_BIN:$PATH" RUNLOG="$E2E_RUNLOG"
+  export AUTONOMOUS_CONF_DIR="$E2E_TMPROOT" PROJECT_DIR="$E2E_TMPROOT" PROJECT_ID=e2e406
+  export AGENT_CMD=codex AGENT_REVIEW_TIMEOUT=1h CODEX_REVIEW_MAX_RERUNS=3
+  # [INV-43 hardened] the SAME marker export the production fan-out subshell
+  # does BEFORE launch (autonomous-review.sh: `export ADT_FANOUT_LANE_MARKER=...`).
+  export ADT_FANOUT_LANE_MARKER="$E2E_MARKER"
+  # shellcheck disable=SC1090
+  source "$CODEX_ADAPTER" 2>/dev/null
+  # shellcheck disable=SC1090
+  source "$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-agent.sh" 2>/dev/null
+  _run_codex_review "review this" "sonnet" "$E2E_TMPROOT/stdout.txt" "" "$E2E_FANOUT_DIR" >/dev/null 2>"$E2E_TMPROOT/controller-stderr.log"
+  echo "RC=$?" > "$E2E_TMPROOT/controller-rc.log"
+) &
+E2E_CONTROLLER_PID=$!
+
+# Wait for the fixture codex to actually start (bounded poll, not a fixed sleep).
+_e2e_started=0
+for _ in $(seq 1 50); do
+  if grep -q '^run ' "$E2E_RUNLOG" 2>/dev/null; then _e2e_started=1; break; fi
+  sleep 0.1
+done
+
+if [[ "$_e2e_started" -eq 1 ]]; then
+  E2E_CODEX_PID=$(grep '^run ' "$E2E_RUNLOG" | tail -1 | awk '{print $2}')
+  E2E_CODEX_PGID=$(ps -o pgid= -p "$E2E_CODEX_PID" 2>/dev/null | tr -d ' ')
+
+  # --- Drive the REAL post-resolution reap sequence (mirrors
+  # autonomous-review.sh's call site byte-for-byte, INV-111 order) ---
+  (
+    # shellcheck disable=SC1090
+    source "$POLL_LIB"
+    log() { :; }
+    _reap_fanout_processes "${E2E_CODEX_PGID:-0}"
+    _reap_fanout_recorded_descendants "ADT_FANOUT_LANE_MARKER" "$E2E_MARKER"
+    _reap_fanout_controller_subshells "$E2E_CONTROLLER_PID"
+    _reap_fanout_recorded_descendants "ADT_FANOUT_LANE_MARKER" "$E2E_MARKER"
+  )
+
+  wait "$E2E_CONTROLLER_PID" 2>/dev/null
+  sleep 5
+
+  # AC: no process on the host carries THIS RUN's marker, 5s after the reap.
+  E2E_SURVIVORS=0
+  for _p in /proc/[0-9]*; do
+    _p="${_p#/proc/}"
+    [[ "$_p" =~ ^[0-9]+$ ]] || continue
+    [[ -r "/proc/$_p/environ" ]] || continue
+    if grep -zaFxq "ADT_FANOUT_LANE_MARKER=${E2E_MARKER}" "/proc/$_p/environ" 2>/dev/null; then
+      E2E_SURVIVORS=$((E2E_SURVIVORS + 1))
+    fi
+  done
+  assert_eq "TC-E2E-406a zero processes carry this run's fixture marker 5s after the reap sequence" \
+    "0" "$E2E_SURVIVORS"
+
+  E2E_RUNS=$(grep -c '^run ' "$E2E_RUNLOG" 2>/dev/null || echo 0)
+  assert_eq "TC-E2E-406b exactly ONE codex invocation (no orphaned re-run after the reap's SIGTERM)" \
+    "1" "$E2E_RUNS"
+
+  E2E_CTRL_RC=$(grep '^RC=' "$E2E_TMPROOT/controller-rc.log" 2>/dev/null | cut -d= -f2)
+  assert_eq "TC-E2E-406c controller returns rc 143 (loop-terminal signal-death, not re-run)" \
+    "143" "${E2E_CTRL_RC:-}"
+
+  if [[ -s "$E2E_TMPROOT/controller-stderr.log" ]] && grep -qi 'no such file or directory' "$E2E_TMPROOT/controller-stderr.log"; then
+    echo -e "  ${RED}FAIL${NC}: TC-E2E-406d no rc-file 'No such file or directory' error line in the controller's log"
+    FAIL=$((FAIL + 1))
+  else
+    echo -e "  ${GREEN}PASS${NC}: TC-E2E-406d no rc-file 'No such file or directory' error line in the controller's log"
+    PASS=$((PASS + 1))
+  fi
+else
+  echo -e "  ${RED}FAIL${NC}: TC-E2E-406 setup error — fixture codex never started (RUNLOG empty)"
+  FAIL=$((FAIL + 1))
+  # The controller subshell may still be alive (e.g. stuck before launch) —
+  # kill it directly so this failure path doesn't itself leak an orphan.
+  kill -9 "$E2E_CONTROLLER_PID" 2>/dev/null || true
+  wait "$E2E_CONTROLLER_PID" 2>/dev/null || true
+fi
+
+rm -rf "$E2E_TMPROOT" 2>/dev/null || true
+
+# ============================================================================
 # Doc presence (test-cases doc referenced by the issue)
 # ============================================================================
 echo
