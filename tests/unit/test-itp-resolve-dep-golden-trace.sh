@@ -438,7 +438,10 @@ deps_guard_out=$(
   bash -c '
     set -euo pipefail
     gh() { local m=""; while [[ $# -gt 0 ]]; do case "$1" in --json) m="$2"; shift 2;; *) shift;; esac; done
-          case "$m" in body) printf "## Dependencies\n- #42\n";; state) printf CLOSED;; esac; }
+          case "$m" in
+            title,body,state,labels) printf %s "{\"title\":\"t\",\"body\":\"## Dependencies\\n- #42\\n\",\"state\":\"OPEN\",\"labels\":[]}";;
+            body) printf "## Dependencies\n- #42\n";;
+            state) printf CLOSED;; esac; }
     export -f gh
     source "'"$LIB"'" 2>/dev/null
     check_deps_resolved 99 && echo "DEPS-RC=0" || echo "DEPS-RC=$?"
@@ -460,7 +463,10 @@ gh_gate_out=$(
   bash -c '
     set -uo pipefail
     gh() { local m="" num=""; while [[ $# -gt 0 ]]; do case "$1" in view) num="$2"; shift 2;; --json) m="$2"; shift 2;; *) shift;; esac; done
-          case "$m" in body) printf "## Dependencies\n- #42\n";; state) [ "$num" = 42 ] && printf OPEN || printf CLOSED;; esac; }
+          case "$m" in
+            title,body,state,labels) printf %s "{\"title\":\"t\",\"body\":\"## Dependencies\\n- #42\\n\",\"state\":\"OPEN\",\"labels\":[]}";;
+            body) printf "## Dependencies\n- #42\n";;
+            state) [ "$num" = 42 ] && printf OPEN || printf CLOSED;; esac; }
     export -f gh
     source "'"$LIB"'" 2>/dev/null
     set +e

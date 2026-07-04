@@ -1,0 +1,45 @@
+# decision-golden.json.meta — provenance sidecar for decision-golden.json (issue #396, R5).
+#
+# Captured by running the PRE-CHANGE (byte-identical-passthrough) code —
+# `check_deps_resolved` (lib-dispatch.sh), `mark-issue-checkbox.sh`, the
+# `autonomous-review.sh` no-auto-close gate logic, the `status.sh` state/labels
+# read, and the `autonomous-dev.sh` issue-body fetch — against a stubbed `gh`
+# serving each scenario below, on the FIRST TDD commit of the #396 W1b branch
+# (before the abstract-contract rewrite landed). Sourced files: the pre-#396
+# `git show main:...` snapshots of lib-dispatch.sh, lib-issue-provider.sh,
+# providers/itp-github.sh, and mark-issue-checkbox.sh.
+#
+# Scenarios captured:
+#   check_deps_resolved:
+#     normal_closed — body has `## Dependencies\n- #42\n`, dep #42 state CLOSED
+#       → rc 0 (resolved).
+#     open_blocks — same body, dep #42 state OPEN → rc 1 (blocked).
+#     no_deps_section — body has no `## Dependencies` heading → rc 0 (no-op).
+#   mark_checkbox (real `mark-issue-checkbox.sh` subprocess, symlink-sandboxed
+#     per the test-itp-write-leaves.sh convention so `readlink -f` resolves the
+#     provider seam):
+#     happy_rewrite — body has `- [ ] Do the thing` unchecked → rc 0, stdout
+#       "Checked: Do the thing", PATCH body carries `- [x] Do the thing`.
+#     already_checked — body has `- [x] Do the thing` already → rc 0, stdout
+#       "Already checked: Do the thing", no PATCH call.
+#   no_auto_close (autonomous-review.sh's `HAS_NO_AUTO_CLOSE` derivation):
+#     present — labels include `no-auto-close` → "true".
+#     absent — labels exclude `no-auto-close` → "false".
+#   status_next_action (status.sh's ISSUE_STATE/LABELS read + `_next_action`-
+#     relevant branch, reproduced inline since `_next_action` itself is a
+#     status.sh-internal function):
+#     open — state OPEN, labels `pending-dev` → "OPEN:LABELS=pending-dev"
+#       (not terminal branch).
+#     closed — state CLOSED, labels `approved` → "TERMINAL:CLOSED:LABELS=approved"
+#       (terminal branch).
+#   dev_fetch (autonomous-dev.sh's ISSUE_BODY capture — the raw gh payload
+#     forwarded through `-q '.'`, textual title/body parity only per R5; the
+#     labels/comments SHAPE change is documented, not parity-pinned):
+#     title_body_comments — the primary fetch (`title,body,comments -q '.'`).
+#     resume_title_body — the resume-fallback fetch (`title,body -q '.'`).
+#
+# Regenerate (only if the OLD pre-#396 semantics are ever in dispute): checkout
+# the commit immediately before #396's leaf rewrite (`main` at the time this
+# file was authored), extract lib-dispatch.sh / lib-issue-provider.sh /
+# providers/itp-github.sh / mark-issue-checkbox.sh via `git show`, and re-run
+# each scenario's stub-gh harness described above.

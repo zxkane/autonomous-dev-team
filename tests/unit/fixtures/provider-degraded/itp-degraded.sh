@@ -14,9 +14,15 @@
 # directly. A downstream caps-branch test that wants leaf dispatch live can stub
 # the itp_degraded_<verb> leaves it needs here.
 
-# itp_degraded_read_task ISSUE FIELD [extra gh args…] — task-body READ leaf (#296).
+# itp_degraded_read_task ISSUE FIELDS_CSV — task READ leaf (#296; [W1b] #396
+# ABSTRACT contract). [#396 review r2/r3] Mirrors the REST-sourced-comments
+# split of itp_github_read_task: the conformance runner's normalized-comments
+# assert NOW exercises the comments path against this fixture (the earlier
+# "driven only by mark-issue-checkbox.sh, comments never exercised" claim is
+# obsolete), so a GraphQL-sourced comments shape here fails the runner's
+# bot-classification tripwire exactly like a regressed real provider would.
 #
-# mark-issue-checkbox.sh now fetches the issue body via itp_read_task BEFORE it
+# mark-issue-checkbox.sh fetches the issue body via itp_read_task BEFORE it
 # evaluates the body_checkbox capability. Under ISSUE_PROVIDER=degraded that read
 # routes here, so without this leaf the script would die at
 # `itp_degraded_read_task: command not found` and never reach the body_checkbox=0
@@ -25,12 +31,43 @@
 #
 # The read must SUCCEED and return a body containing the target checkbox so the
 # caller's awk rewrite runs and the body_checkbox=0 native-subtask remap is the
-# branch reached (NOT a "no body" early-exit). The body is served by the test's
-# binary `gh` stub on PATH; this leaf forwards to it byte-identically to the
-# github leaf so the gh-stub `gh issue view … --json body` shape is what runs.
+# branch reached (NOT a "no body" early-exit). The normalized object is served
+# by the test's binary `gh` stub on PATH (which must return the GitHub
+# `--json title,body,state,labels,comments` shape now that this leaf owns the
+# normalization jq).
 itp_degraded_read_task() {
-  local issue="$1" field="$2"; shift 2
-  gh issue view "$issue" --repo "$REPO" --json "$field" "$@"
+  local issue="$1" fields_csv="$2" fields_json raw comments_json='[]'
+  fields_json=$(printf '%s' "$fields_csv" | jq -R -s -c 'split(",") | map(select(length > 0))')
+  raw=$(gh issue view "$issue" --repo "$REPO" --json title,body,state,labels) || return 1
+  [[ -n "$raw" ]] || return 1
+  case ",${fields_csv}," in
+    *,comments,*)
+      comments_json=$(gh api --paginate --slurp "repos/${REPO}/issues/${issue}/comments" | jq "
+        [ .[][]
+          | { id: (.id // null),
+              author: (.user.login // null),
+              authorKind: ( (.user.login // \"\") as \$a
+                            | ( \$a | sub(\"\\\\[bot\\\\]\$\"; \"\") ) as \$stripped
+                            | if (\$a != \"\" and \"${BOT_LOGIN:-}\" != \"\" and (\$a == \"${BOT_LOGIN:-}\" or \$stripped == \"${BOT_LOGIN:-}\")) then \"self\"
+                              elif ((.user.type // \"\") == \"Bot\") then \"bot\"
+                              else \"human\" end ),
+              body: (.body // \"\"),
+              createdAt: (.created_at // null) }
+        ] | sort_by(.createdAt // \"\", .id // 0)
+      ") || return 1
+      [[ -n "$comments_json" ]] || return 1
+      ;;
+  esac
+  jq --argjson fields "$fields_json" --argjson comments "$comments_json" '
+        {
+          title: (.title // ""),
+          body: (.body // ""),
+          state: (.state // ""),
+          labels: [ (.labels // [])[].name ],
+          comments: $comments
+        } as $norm
+        | ($fields | map({(.): $norm[.]}) | add // {})
+      ' <<<"$raw"
 }
 
 # ---------------------------------------------------------------------------

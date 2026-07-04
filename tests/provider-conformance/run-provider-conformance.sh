@@ -108,6 +108,13 @@ ISOLATED_PATH="$(pcf_isolated_path "$STUB_DIR")"
 # itp_github_list_comments' id-extraction/sort) is genuinely exercised, not
 # bypassed. Without `-q`/`--jq` the raw payload is echoed verbatim.
 #
+# [#396 review r2] `itp_github_read_task` issues a SECOND, distinct `gh api`
+# call (via `itp_github_list_comments`) when `comments` is requested — a
+# different subcommand shape than the primary `gh issue view --json …`
+# payload. `$_PCF_GH_COMMENTS_PAYLOAD` (a separate file path) serves that
+# second call; unset/empty defaults to `[[]]` (an empty REST page set, valid
+# --slurp input) so verbs that don't set it still see a well-shaped reply.
+#
 # The `itp_github_provision_states` existence PROBE (`gh api
 # repos/.../labels/<name> --silent`) is a special case: it is FORCED to fail
 # (not-found) regardless of $_PCF_GH_MODE, so the leaf deterministically
@@ -129,6 +136,22 @@ done
 if [[ "${_PCF_GH_MODE:-ok}" == "fail" ]]; then
   printf 'stub-gh: simulated failure\n' >&2
   exit 1
+fi
+if [[ "${1:-}" == "api" && "${2:-}" == "--paginate" ]]; then
+  # itp_read_task's nested itp_github_list_comments call needs a REST
+  # page-set shape distinct from the primary `issue view` payload — served
+  # from $_PCF_GH_COMMENTS_PAYLOAD when the caller sets it. Callers that
+  # exercise itp_list_comments DIRECTLY (this IS its only gh call) keep
+  # serving it from $_PCF_GH_PAYLOAD, so they need no change.
+  _cpayload="${_PCF_GH_COMMENTS_PAYLOAD:-}"
+  if [[ -n "$_cpayload" && -f "$_cpayload" ]]; then
+    cat "$_cpayload"
+  elif [[ -n "${_PCF_GH_PAYLOAD:-}" && -f "${_PCF_GH_PAYLOAD:-}" ]]; then
+    cat "$_PCF_GH_PAYLOAD"
+  else
+    printf '[[]]'
+  fi
+  exit 0
 fi
 _payload="${_PCF_GH_PAYLOAD:-}"
 [[ -n "$_payload" && -f "$_payload" ]] || { printf ''; exit 0; }
@@ -315,6 +338,91 @@ _run_shape_assert() {
   emit PASS "$verb"
 }
 
+# _run_object_shape_assert <verb> <invoke_snippet> <payload_file> [comments_payload_file] —
+# invoke VERB (which returns a single normalized OBJECT, not an array —
+# itp_read_task, issue #396 W1b) with a VALID canned payload and assert
+# JSON-object shape + rc 0; then invoke with a MALFORMED payload and assert
+# graceful (empty rc≠0, fail-closed per R2) output — NOT the array leaves'
+# "empty/[] is graceful" convention, since a single-task read has no
+# empty-but-valid representation. [#396 review r2] `comments` is sourced via
+# a SEPARATE `gh api` call (`itp_github_list_comments`); COMMENTS_PAYLOAD_FILE
+# (a REST `--paginate --slurp` page-set shape) serves that call — defaults to
+# an empty page set when omitted.
+_run_object_shape_assert() {
+  local verb="$1" invoke_snippet="$2" payload_file="$3" comments_payload_file="${4:-}"
+  local argv_file="$work_root/.argv-$verb.json"
+  local out rc
+
+  out="$(_invoke _PCF_GH_MODE="ok" _PCF_GH_PAYLOAD="$payload_file" _PCF_GH_COMMENTS_PAYLOAD="$comments_payload_file" _PCF_ARGV_FILE="$argv_file" "$invoke_snippet" 2>&1)"; rc=$?
+  if [[ "$rc" != "0" ]]; then
+    emit FAIL "$verb" "wrong-shape (non-zero rc on a valid payload: $rc, output: ${out:0:200})"
+    return
+  fi
+  if ! pcf_is_json_object "$out"; then
+    emit FAIL "$verb" "wrong-shape (output is not a JSON object: ${out:0:200})"
+    return
+  fi
+  if ! jq -e 'has("labels") and (.labels | type == "array") and (.labels | all(type == "string"))' >/dev/null 2>&1 <<<"$out"; then
+    emit FAIL "$verb" "labels not normalized to a name-string array: ${out:0:200}"
+    return
+  fi
+  # Normalized-comments enforcement (#396 review r3): when `comments` is
+  # requested, the INV-90 shape must actually hold — every element carries
+  # {id, author, authorKind, body, createdAt}, authorKind ∈ self|bot|human,
+  # ascending createdAt. Crucially, the REST comments fixture contains
+  # `[bot]`-suffixed logins (`"type": "Bot"`); a provider regressing to a
+  # GraphQL-style comments source (which strips the suffix and exposes no
+  # author type) would classify them authorKind="human" and MUST fail here —
+  # without this check a comments-normalization regression sails through and
+  # AC5 is not enforced for the field that motivated review r2.
+  if ! jq -e '
+      has("comments") and (.comments | type == "array")
+      and (.comments | all(
+            (has("id") and has("author") and has("authorKind") and has("body") and has("createdAt"))
+            and (.authorKind | IN("self","bot","human"))
+          ))
+      and ((.comments | map(.createdAt // "")) as $ts | $ts == ($ts | sort))
+    ' >/dev/null 2>&1 <<<"$out"; then
+    emit FAIL "$verb" "comments not the INV-90 normalized array (keys/authorKind/ascending): ${out:0:300}"
+    return
+  fi
+  # Bot-classification tripwire: the fixture's `[bot]` logins must classify
+  # authorKind="bot" (REST-derived) — never "human" (the GraphQL-source
+  # regression this assert exists to catch).
+  if ! jq -e '[.comments[] | select(.author | tostring | endswith("[bot]"))] | length > 0 and all(.authorKind == "bot")' >/dev/null 2>&1 <<<"$out"; then
+    emit FAIL "$verb" "bot-suffixed comment authors not classified authorKind=bot (GraphQL-source regression): ${out:0:300}"
+    return
+  fi
+
+  # Fields-subset: a body-only request must return EXACTLY {body}.
+  local body_only
+  body_only="$(_invoke _PCF_GH_MODE="ok" _PCF_GH_PAYLOAD="$payload_file" _PCF_ARGV_FILE="$argv_file" 'itp_read_task 42 body' 2>&1)"
+  if [[ "$(jq -r 'keys_unsorted | join(",")' <<<"$body_only" 2>/dev/null)" != "body" ]]; then
+    emit FAIL "$verb" "fields-subset violated: requesting 'body' did not return exactly {body} (got: ${body_only:0:200})"
+    return
+  fi
+
+  # R2 fail-closed: stub gh fails -> leaf rc≠0, no partial output.
+  local fail_rc
+  _invoke _PCF_GH_MODE="fail" _PCF_ARGV_FILE="$argv_file" "$invoke_snippet" >/dev/null 2>&1; fail_rc=$?
+  if [[ "$fail_rc" == "0" ]]; then
+    emit FAIL "$verb" "rc-0-on-error (stub gh failed but verb still returned 0)"
+    return
+  fi
+
+  # Malformed-JSON handling: fail-CLOSED (non-zero rc), unlike the array
+  # leaves' empty/[] convention — a single-task read has no valid "empty" form.
+  local malformed mal_rc
+  malformed="$work_root/.malformed-$verb.json"
+  printf '{ this is not json' > "$malformed"
+  _invoke _PCF_GH_MODE="ok" _PCF_GH_PAYLOAD="$malformed" _PCF_ARGV_FILE="$argv_file" "$invoke_snippet" >/dev/null 2>/dev/null; mal_rc=$?
+  if [[ "$mal_rc" == "0" ]]; then
+    emit FAIL "$verb" "malformed-JSON input produced rc 0 (should fail-closed, non-zero rc)"
+    return
+  fi
+  emit PASS "$verb"
+}
+
 # _run_count_assert <verb> <invoke_snippet> <payload_file> — invoke VERB (which
 # returns a bare non-negative integer, not an array — itp_count_by_state) with
 # a VALID canned payload and assert the output is a bare integer + rc 0; then
@@ -446,6 +554,10 @@ _assert_verb() {
     itp_list_forbidden_combos)
       _run_shape_assert "$verb" 'itp_list_forbidden_combos open autonomous 100' \
         "$PAYLOADS/issue-list-valid.json" number
+      ;;
+    itp_read_task)
+      _run_object_shape_assert "$verb" 'itp_read_task 42 title,body,state,labels,comments' \
+        "$PAYLOADS/issue-view-valid.json" "$PAYLOADS/comments-valid.json"
       ;;
     chp_review_threads)
       _run_shape_assert "$verb" 'chp_review_threads 42' "$PAYLOADS/review-threads-valid.json" 0

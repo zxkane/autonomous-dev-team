@@ -377,13 +377,17 @@ if [[ -d "$FAKE_PROVIDER" ]]; then
   # remap path (defined-not-implemented → clean LOUD error, no missing-leaf crash).
   # Drive the REAL mark-issue-checkbox.sh; stub the gh body-read; capture stderr.
   _CB_STUB="$(mktemp -d)"
-  # The body READ is now `gh issue view <N> --repo <REPO> --json body -q '.body'`
-  # (#296: itp_read_task → itp_degraded_read_task → this shape) — NOT the old
-  # `gh api … --jq .body`. Recognize the new read shape and return the body; a
-  # PATCH must still trip GH_PATCH_CALLED.
+  # The body READ is now `gh issue view <N> --repo <REPO> --json title,body,state,labels`
+  # ([W1b] #396: itp_read_task's ABSTRACT contract — itp_degraded_read_task owns
+  # the normalization jq internally) — NOT the old `gh api … --jq .body` NOR the
+  # #296-era `--json body -q '.body'` passthrough. Serve the full raw-gh shape a
+  # real `gh issue view` would return; a PATCH must still trip GH_PATCH_CALLED.
   cat > "$_CB_STUB/gh" <<'GHEOF'
 #!/bin/bash
-if [[ "$1" == "issue" && "$2" == "view" ]]; then printf '## Requirements\n- [ ] Do the thing\n'; exit 0; fi
+if [[ "$1" == "issue" && "$2" == "view" ]]; then
+  printf '{"title":"","body":"## Requirements\\n- [ ] Do the thing\\n","state":"OPEN","labels":[],"comments":[]}'
+  exit 0
+fi
 echo "GH_PATCH_CALLED $*" >&2; exit 0
 GHEOF
   chmod +x "$_CB_STUB/gh"
@@ -518,11 +522,15 @@ hp_out=$(
       _HP_FILE="$_HP_FILE" \
   bash -c '
     set -uo pipefail
-    # Read arm matches the migrated body-read shape (gh issue view … --json body,
-    # #296); every other call (the PATCH) is recorded as an HP_GH line so the
+    # Read arm matches the ABSTRACT itp_read_task contract ([W1b] #396: gh
+    # issue view … --json title,body,state,labels, normalized by the
+    # leaf); every other call (the PATCH) is recorded as an HP_GH line so the
     # verb-routed write can be asserted.
     gh() {
-      if [[ "$1" == "issue" && "$2" == "view" ]]; then printf "## Requirements\n- [ ] Do the thing\n"; return 0; fi
+      if [[ "$1" == "issue" && "$2" == "view" ]]; then
+        printf "{\"title\":\"\",\"body\":\"## Requirements\\\\n- [ ] Do the thing\\\\n\",\"state\":\"OPEN\",\"labels\":[],\"comments\":[]}"
+        return 0
+      fi
       printf "HP_GH %s\n" "$*" >> "$_HP_FILE"; return 0
     }
     export -f gh
@@ -666,14 +674,18 @@ rm -rf "$_PVSB"
 rm -f "$_GH_ARGV_FILE" "$_GH_CALL_LOG"
 
 # ===========================================================================
-# 7. BEHAVIOR-EQUIVALENCE (#296 mark-checkbox body-read migration). Run the REAL
-#    mark-issue-checkbox.sh as a SUBPROCESS with a binary `gh` stub on PATH (NOT by
-#    calling itp_read_task directly) so the test exercises seam-sourcing + the
-#    `|| { … }` handler + the retry path end-to-end. The migration is shape-
-#    equivalent: the old `gh api repos/$REPO/issues/$N --jq .body` read became
-#    `itp_read_task <N> body -q .body` → `gh issue view <N> --repo <REPO> --json
-#    body -q .body`. The returned body STRING is identical, so the SAME body is
-#    marked and the SAME error handling fires.
+# 7. BEHAVIOR-EQUIVALENCE (#296 mark-checkbox body-read migration; [W1b] #396
+#    ABSTRACT-contract rewrite). Run the REAL mark-issue-checkbox.sh as a
+#    SUBPROCESS with a binary `gh` stub on PATH (NOT by calling itp_read_task
+#    directly) so the test exercises seam-sourcing + the `|| { … }` handler +
+#    the retry path end-to-end. The #396 rewrite is shape-equivalent for THIS
+#    caller: the leaf now requests `--json title,body,state,labels` (this
+#    caller does not request `comments`, so the leaf's [review r2] separate
+#    REST comments-fetch is never triggered) and normalizes internally, and
+#    the call site projects `.body` with a
+#    caller-side `| jq -r '.body'` instead of a forwarded `-q .body` — but the
+#    returned body STRING is identical, so the SAME body is marked and the
+#    SAME error handling fires.
 #
 #    Sandbox trick (conf isolation + seam resolution): the script is invoked via a
 #    SYMLINK in a temp dir. `$0`/SCRIPT_DIR is the symlink dir (so the conf-lookup
@@ -681,19 +693,24 @@ rm -f "$_GH_ARGV_FILE" "$_GH_CALL_LOG"
 #    operator-local conf), while `readlink -f "$BASH_SOURCE"` resolves to the REAL
 #    skill-tree file so the provider seam still sources and itp_read_task is defined.
 # ===========================================================================
-echo "=== BEHAVIOR-EQUIVALENCE: mark-issue-checkbox.sh body-read via itp_read_task (#296) ==="
+echo "=== BEHAVIOR-EQUIVALENCE: mark-issue-checkbox.sh body-read via itp_read_task (#296, [W1b] #396) ==="
 _BE_SANDBOX="$(mktemp -d)"
 ln -s "$COMMON_SCRIPTS/mark-issue-checkbox.sh" "$_BE_SANDBOX/mark-issue-checkbox.sh"
 
-# (a) HAPPY + same body + (b) the READ uses the migrated `gh issue view --json body`
-#     shape (NOT `gh api … --jq`). The binary gh stub records its READ argv and the
-#     PATCHed body; assert the PATCH carries the marked body and the READ shape.
+# (a) HAPPY + same body + (b) the READ uses the ABSTRACT itp_read_task shape
+#     (`gh issue view --json title,body,state,labels` — `comments` omitted
+#     since this caller requests only `body` and [#396 review r2] the leaf
+#     fetches comments via a SEPARATE REST call, `itp_github_list_comments`,
+#     only when `comments` is actually requested), NOT `gh api … --jq` NOR
+#     the #296-era `--json body -q .body` passthrough. The binary gh stub
+#     records its READ argv and the PATCHed body; assert the PATCH carries
+#     the marked body and the READ shape is the new contract's argv.
 _BE_READ_ARGV="$(mktemp)"; _BE_PATCH_BODY="$(mktemp)"
 cat > "$_BE_SANDBOX/gh" <<GHEOF
 #!/bin/bash
 if [[ "\$1" == "issue" && "\$2" == "view" ]]; then
   printf '%s\n' "\$@" > "$_BE_READ_ARGV"
-  printf '## Requirements\n- [ ] Do the thing\n'
+  printf '{"title":"","body":"## Requirements\\\\n- [ ] Do the thing\\\\n","state":"OPEN","labels":[],"comments":[]}'
   exit 0
 fi
 # PATCH write: capture the --field body=… value.
@@ -716,8 +733,8 @@ be_patch_body="$(cat "$_BE_PATCH_BODY")"
   || { echo -e "  ${RED}FAIL${NC}: TC-MCB-EQUIV-HAPPY expected exit 0, got rc=$be_happy_rc (out: ${be_happy:0:200})"; FAIL=$((FAIL+1)); }
 assert_contains "TC-MCB-EQUIV-HAPPY the same body is marked (- [x] Do the thing in the PATCHed body)" \
   "- [x] Do the thing" "$be_patch_body"
-assert_eq "TC-MCB-EQUIV-READSHAPE read uses the migrated gh issue view --json body shape" \
-  "issue view 1 --repo o/r --json body -q .body" "$be_read_argv"
+assert_eq "TC-MCB-EQUIV-READSHAPE read uses the [W1b] ABSTRACT itp_read_task shape (no forwarded -q)" \
+  "issue view 1 --repo o/r --json title,body,state,labels" "$be_read_argv"
 
 # (c) ERROR — the body READ fails (gh issue view exits non-zero); the `|| { … }`
 #     handler must fire identically (Error: Failed to fetch …), non-zero exit, no PATCH.

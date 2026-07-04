@@ -214,11 +214,12 @@ fi
 _bc_tmp="$(mktemp -d)"
 cat >"$_bc_tmp/gh" <<'STUB'
 #!/bin/bash
-# Stub gh: any non-PATCH call (the migrated `gh issue view … --json body` read,
-# #296) returns a body with the target checkbox; a PATCH must NEVER happen on the
-# body_checkbox=0 path (fail loud if it does).
+# Stub gh: any non-PATCH call (the ABSTRACT itp_read_task contract, [W1b]
+# #396 — `gh issue view … --json title,body,state,labels,comments`, normalized
+# by the leaf) returns a body with the target checkbox; a PATCH must NEVER
+# happen on the body_checkbox=0 path (fail loud if it does).
 for a in "$@"; do [ "$a" = "PATCH" ] && { echo "STUB-PATCH-CALLED" >&2; exit 99; }; done
-echo "- [ ] flip me"
+printf '{"title":"","body":"- [ ] flip me","state":"OPEN","labels":[],"comments":[]}'
 STUB
 chmod +x "$_bc_tmp/gh"
 e2e_bc="$(env -u AUTONOMOUS_CONF -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR \

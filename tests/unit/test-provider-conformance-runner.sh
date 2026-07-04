@@ -33,14 +33,17 @@ command -v jq >/dev/null 2>&1 || { echo "jq required"; exit 1; }
 source "$LIB"
 
 # ===========================================================================
-echo "=== TC-PCONF-014: --itp github --chp github exits 0, 16 PASS, CONFORMANCE-SUMMARY fail=0 ==="
+echo "=== TC-PCONF-014: --itp github --chp github exits 0, 17 PASS, CONFORMANCE-SUMMARY fail=0 ==="
 # ===========================================================================
 gh_out="$(bash "$RUNNER" --itp github --chp github 2>&1)"; gh_rc=$?
 assert_eq "AC1: github/github exits 0" "0" "$gh_rc"
 gh_pass_count="$(grep -c '^CONFORMANCE-PCONF github/github .* PASS$' <<<"$gh_out")"
 # [#393] +1: the itp_list_comments anti-false-green field/authorKind assertion adds one PASS.
-assert_eq "AC1: 17 PASS lines on github/github (16 verbs + the #393 list_comments field check)" "17" "$gh_pass_count"
-assert_contains "AC1: CONFORMANCE-SUMMARY line present with fail=0" "CONFORMANCE-SUMMARY total=27 pass=17 fail=0 skip=0 pending=10" "$gh_out"
+# [#396] +1: itp_read_task flipped pending->asserted (W1b).
+assert_eq "AC1: 18 PASS lines on github/github (17 verbs + the #393 list_comments field check)" "18" "$gh_pass_count"
+assert_contains "AC1: CONFORMANCE-SUMMARY line present with fail=0" "CONFORMANCE-SUMMARY total=27 pass=18 fail=0 skip=0 pending=9" "$gh_out"
+assert_contains "TC-PCONF-043: itp_read_task (github) PASSes the object-shape/fields-subset/fail-closed assertion" \
+  "CONFORMANCE-PCONF github/github itp_read_task PASS" "$gh_out"
 
 # ===========================================================================
 echo ""
@@ -59,7 +62,9 @@ assert_contains "TC-PCONF-022: chp_resolve_thread FAIL names the missing functio
 assert_contains "TC-PCONF-023: chp_review_threads FAILs non-array-output" "chp_review_threads FAIL wrong-shape" "$broken_fail_lines"
 # Every OTHER asserted verb must still PASS (no false-positive FAILs beyond the 4).
 broken_pass_count="$(grep -c '^CONFORMANCE-PCONF broken/broken .* PASS$' <<<"$broken_out")"
-assert_eq "AC2: the 12 non-targeted verbs still PASS" "12" "$broken_pass_count"
+# [#396] +1: itp_read_task flipped pending->asserted (W1b) and the broken fixture
+# defines a correct (not-targeted) leaf for it.
+assert_eq "AC2: the 13 non-targeted verbs still PASS" "13" "$broken_pass_count"
 
 # ===========================================================================
 echo ""
@@ -76,7 +81,8 @@ deg_skip_count="$(grep -c '^CONFORMANCE-PCONF degraded/degraded .* SKIP' <<<"$de
 assert_eq "TC-PCONF-034: exactly 3 SKIPs" "3" "$deg_skip_count"
 deg_pass_count="$(grep -c '^CONFORMANCE-PCONF degraded/degraded .* PASS$' <<<"$deg_out")"
 # [#393] +1: the list_comments field/authorKind assertion also runs (and passes) on degraded.
-assert_eq "TC-PCONF-033: 14 PASS lines on degraded (13 verbs + the #393 list_comments field check)" "14" "$deg_pass_count"
+# [#396] +1: itp_read_task flipped pending->asserted (W1b), governing cap `-` (never SKIPs).
+assert_eq "TC-PCONF-033: 15 PASS lines on degraded (14 verbs + the #393 list_comments field check)" "15" "$deg_pass_count"
 
 # ===========================================================================
 echo ""
@@ -104,26 +110,27 @@ echo "=== TC-PCONF-040..042: CONTRACT-PENDING tripwire (R3) ==="
 assert_contains "TC-PCONF-040: coverage tripwire PASSes against the real repo" "CONFORMANCE-COVERAGE PASS" "$gh_out"
 
 # TC-PCONF-041: a coverage.conf pending verb whose spec row lacks the token → FAIL.
+# (chp_find_pr_for_issue, not itp_read_task — #396 W1b flipped itp_read_task's
+# spec row to asserted, so it is no longer a pending specimen; #371 W1a
+# similarly retired itp_count_by_state as a specimen before it.)
 scratch="$(mktemp -d)"
-sed 's/itp_read_task=pending/itp_read_task=asserted/' "$COVERAGE_CONF" > "$scratch/coverage-drift1.conf"
+sed 's/chp_find_pr_for_issue=pending/chp_find_pr_for_issue=asserted/' "$COVERAGE_CONF" > "$scratch/coverage-drift1.conf"
 drift1_diff="$(
   spec_pending="$(pcf_spec_pending_verbs "$SPEC_MD")"
   cov_pending="$(awk -F= '/=pending$/{print $1}' "$scratch/coverage-drift1.conf" | sort -u)"
   diff <(printf '%s\n' "$spec_pending") <(printf '%s\n' "$cov_pending")
 )"
-assert_contains "TC-PCONF-041: coverage.conf missing a spec-tokened verb → diff names it" "itp_read_task" "$drift1_diff"
+assert_contains "TC-PCONF-041: coverage.conf missing a spec-tokened verb → diff names it" "chp_find_pr_for_issue" "$drift1_diff"
 
 # TC-PCONF-042: a spec row carrying the token whose verb is NOT pending in coverage.conf → FAIL.
-# (itp_read_task, not itp_count_by_state — #371 W1a flipped itp_count_by_state's
-# spec row to asserted, so it no longer carries CONTRACT-PENDING to remove.)
 scratch_spec="$scratch/provider-spec-drift2.md"
-sed '/`itp_read_task ISSUE/s/CONTRACT-PENDING//' "$SPEC_MD" > "$scratch_spec"
+sed '/`chp_find_pr_for_issue ISSUE/s/CONTRACT-PENDING//' "$SPEC_MD" > "$scratch_spec"
 drift2_diff="$(
   spec_pending="$(pcf_spec_pending_verbs "$scratch_spec")"
   cov_pending="$(awk -F= '/=pending$/{print $1}' "$COVERAGE_CONF" | sort -u)"
   diff <(printf '%s\n' "$spec_pending") <(printf '%s\n' "$cov_pending")
 )"
-assert_contains "TC-PCONF-042: removing a spec token leaves coverage.conf with an orphaned pending verb → diff names it" "itp_read_task" "$drift2_diff"
+assert_contains "TC-PCONF-042: removing a spec token leaves coverage.conf with an orphaned pending verb → diff names it" "chp_find_pr_for_issue" "$drift2_diff"
 rm -rf "$scratch"
 
 # ===========================================================================
@@ -185,6 +192,11 @@ desc='[{"createdAt":"2026-01-02T00:00:00Z"},{"createdAt":"2026-01-01T00:00:00Z"}
 if pcf_is_ascending_by_created_at "$asc"; then ok "TC-PCONF-055: ascending array is ascending"; else bad "TC-PCONF-055: ascending array should be true"; fi
 if pcf_is_ascending_by_created_at "$desc"; then bad "TC-PCONF-055: descending array should be false"; else ok "TC-PCONF-055: descending array is not ascending"; fi
 if pcf_is_ascending_by_created_at '[]'; then ok "TC-PCONF-055: empty array is trivially ascending"; else bad "TC-PCONF-055: empty array should be true"; fi
+
+# TC-PCONF-056 (issue #396, W1b) — pcf_is_json_object
+if pcf_is_json_object '{"a":1}'; then ok "TC-PCONF-056: pcf_is_json_object true for an object"; else bad "TC-PCONF-056: object should be true"; fi
+if pcf_is_json_object '[1,2,3]'; then bad "TC-PCONF-056: array should be false"; else ok "TC-PCONF-056: pcf_is_json_object false for an array"; fi
+if pcf_is_json_object ''; then bad "TC-PCONF-056: empty text should be false"; else ok "TC-PCONF-056: pcf_is_json_object false for empty text"; fi
 
 # ===========================================================================
 echo ""

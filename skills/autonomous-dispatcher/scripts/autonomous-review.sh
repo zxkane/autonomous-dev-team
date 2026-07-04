@@ -3605,11 +3605,12 @@ if [[ "$PASSED_VERDICT" == "true" ]]; then
   fi
 
   # Check if issue has the 'no-auto-close' label.
-  # [INV-87] via itp_read_task (#296 B7) — the GitHub leaf forwards
-  # `--json labels -q '<selector>'` byte-identically (spec §3.1); the trailing
+  # [INV-87] via itp_read_task (#296 B7; [W1b] #396) — the ABSTRACT contract:
+  # `labels` is normalized to an array of NAME strings (no `.name` projection
+  # needed); the caller-side jq derives the boolean. The trailing
   # `2>/dev/null || echo "false"` guard is unchanged.
   HAS_NO_AUTO_CLOSE=$(itp_read_task "$ISSUE_NUMBER" labels \
-    -q '[.labels[].name] | any(. == "no-auto-close")' 2>/dev/null || echo "false")
+    | jq -r '.labels | any(. == "no-auto-close")' 2>/dev/null || echo "false")
 
   if [[ "$HAS_NO_AUTO_CLOSE" == "true" ]]; then
     log "Issue has 'no-auto-close' label — skipping auto-merge."

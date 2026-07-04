@@ -149,18 +149,51 @@ itp_github_list_forbidden_combos() {
   '
 }
 
-# itp_github_read_task ISSUE FIELD [extra gh args…] — single-task field read.
+# itp_github_read_task ISSUE FIELDS_CSV — single-task ABSTRACT field read
+# ([W1b], #396, #347 phase-2).
 #
-# Spec §3.1: return `title`/`body`/`state` for one task. FIELD is the `--json`
-# field list (`title`, `body`, `state`, or a combination like `title,body`).
-# The leaf forwards the argv byte-identically; the caller projects the returned
-# JSON object (or, for a single field, the bare value via a forwarded `-q`).
-# Trailing args after FIELD (e.g. an explicit `-q '.state'`) are forwarded
-# verbatim so the call site controls raw-object vs single-field projection,
-# keeping the emitted `gh issue view --json <field>` argv byte-identical.
+# Spec §3.1: FIELDS_CSV ⊆ title,body,state,labels,comments. Returns a single
+# JSON object with EXACTLY the requested fields, normalized: title/body as
+# strings (absent body → ""), state passed through as GitHub's own OPEN/CLOSED
+# token (already the provider-neutral vocabulary — deliberate, so status.sh's
+# `_next_action` gate ships byte-unchanged), labels as an array of NAME
+# strings (not `{name}` objects), comments as the [INV-90] normalized array.
+# No gh flags / jq programs cross the seam — this leaf owns the `--json` field
+# mapping AND the normalization jq internally (unlike the pre-#396
+# byte-identical passthrough this replaces). Fail-closed: a `gh` failure or
+# malformed JSON propagates non-zero with no partial stdout.
+# [#396 review r2] `comments` is sourced via `itp_github_list_comments`
+# (REST, [INV-90]) — NOT the GraphQL `gh issue view --json comments` this leaf
+# used pre-r2 — so its `author`/`authorKind` agree with `itp_list_comments`
+# and the §3.1 contract (GraphQL strips the `[bot]` suffix and exposes no
+# author type, which classified every App-authored comment as "human"). Only
+# fetched when `comments` is actually requested, to avoid a second API call
+# for the five callers that don't ask for it.
 itp_github_read_task() {
-  local issue="$1" field="$2"; shift 2
-  gh issue view "$issue" --repo "$REPO" --json "$field" "$@"
+  local issue="$1" fields_csv="$2" fields_json raw comments_json='[]'
+  fields_json=$(printf '%s' "$fields_csv" | jq -R -s -c 'split(",") | map(select(length > 0))')
+  # Fail-closed: capture-then-check. `gh` emitting empty stdout with rc 0
+  # (stub drift, transport oddity) must NOT normalize to `{}` rc 0 — jq on
+  # empty input runs the program zero times and exits 0, which would turn a
+  # failed read into a silent empty object (fail-OPEN at the dep gate).
+  raw=$(gh issue view "$issue" --repo "$REPO" --json title,body,state,labels) || return 1
+  [[ -n "$raw" ]] || return 1
+  case ",${fields_csv}," in
+    *,comments,*)
+      comments_json=$(itp_github_list_comments "$issue") || return 1
+      [[ -n "$comments_json" ]] || return 1
+      ;;
+  esac
+  jq --argjson fields "$fields_json" --argjson comments "$comments_json" '
+        {
+          title: (.title // ""),
+          body: (.body // ""),
+          state: (.state // ""),
+          labels: [ (.labels // [])[].name ],
+          comments: $comments
+        } as $norm
+        | ($fields | map({(.): $norm[.]}) | add // {})
+      ' <<<"$raw"
 }
 
 # itp_github_list_comments ISSUE — the normalized comment array ([INV-90],
