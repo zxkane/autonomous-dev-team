@@ -327,21 +327,64 @@ kill_stale_wrapper() {
       | grep -vw "$$" || true)
     if [[ -n "$orphan_pids" ]]; then
       echo "Found orphan ${TYPE:-?} agent process(es) for issue #${ISSUE_NUM} (project ${PROJECT_ID:-?}): $(tr '\n' ' ' <<<"$orphan_pids")— group-killing" >&2
-      local op
+      # [Lane-GC PR-3 / INV-111] Walk each orphan's DESCENDANT TREE and
+      # collect every distinct PGID BEFORE any signal (codex review round-3
+      # [P1]). Two structural facts break the old `kill -- -${op}` group
+      # form: (a) the pgrep-matched wrapper PID is usually NOT a group
+      # leader — dispatch-local spawns wrappers via `nohup … &`, so a
+      # wrapper INHERITS the spawning shell's pgid — the group numbered
+      # `op` typically doesn't exist (ESRCH), so only the leader-only TERM
+      # fallback ever fired; (b) a wrapper's own children may `setsid` into
+      # their OWN groups with cmdlines the pgrep pattern never matches
+      # (`bash -c 'trap "" TERM; …'`), so no group signal derived from the
+      # wrapper's pid/pgid alone can reach them. A TERM-trapping setsid
+      # child therefore survived with no KILL pass ever addressed to it.
+      # The walk (BFS via pgrep -P, done while the tree is still alive —
+      # a dead parent is unenumerable) resolves the REAL pgid of the
+      # orphan and every descendant; TERM then KILL target that pgid SET.
+      # Self-guard: our own pgid is excluded (ps output is untrusted; the
+      # per-pid TERM below still reaches an orphan that shares it).
+      local op _own_pgid _pg _pid _queue _kids
+      _own_pgid=$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')
+      local -A _sweep_pgids=()
       while IFS= read -r op; do
         [[ -z "$op" ]] && continue
-        kill -TERM -- "-${op}" 2>/dev/null || kill -TERM "$op" 2>/dev/null || true
+        _queue="$op"
+        while [[ -n "$_queue" ]]; do
+          _pid="${_queue%%$'\n'*}"
+          if [[ "$_queue" == *$'\n'* ]]; then _queue="${_queue#*$'\n'}"; else _queue=""; fi
+          [[ "$_pid" =~ ^[0-9]+$ ]] || continue
+          _pg=$(ps -o pgid= -p "$_pid" 2>/dev/null | tr -d ' ')
+          if [[ "$_pg" =~ ^[0-9]+$ && "$_pg" != "$_own_pgid" ]]; then
+            _sweep_pgids["$_pg"]=1
+          fi
+          _kids=$(pgrep -P "$_pid" 2>/dev/null || true)
+          [[ -n "$_kids" ]] && _queue="${_queue:+$_queue$'\n'}$_kids"
+        done
+      done <<<"$orphan_pids"
+      # TERM pass: every collected group, plus every matched pid directly
+      # (covers an orphan whose pgid was excluded by the self-guard).
+      for _pg in "${!_sweep_pgids[@]}"; do
+        kill -TERM -- "-${_pg}" 2>/dev/null || true
+      done
+      while IFS= read -r op; do
+        [[ -z "$op" ]] && continue
+        kill -TERM "$op" 2>/dev/null || true
       done <<<"$orphan_pids"
       sleep 1
-      # Escalate any survivors. [Lane-GC PR-3 / INV-114] Same leader-OR-group
-      # gate as the PID-file path above: `op` was TERMed via its group form
-      # first, so a TERM-trapping member of that group can still be alive
-      # after `op` itself (the leader) has exited — check both forms before
-      # deciding no KILL is needed.
+      # KILL pass: any collected group or matched pid still alive gets
+      # SIGKILL — the gate probes the REAL pgid set from the walk, so a
+      # TERM-trapping member anywhere in the tree (setsid'd or not,
+      # leader-matched or not) is reached even after its parent died.
+      for _pg in "${!_sweep_pgids[@]}"; do
+        if kill -0 -- "-${_pg}" 2>/dev/null; then
+          kill -9 -- "-${_pg}" 2>/dev/null || true
+        fi
+      done
       while IFS= read -r op; do
         [[ -z "$op" ]] && continue
-        if _pid_or_group_alive "$op"; then
-          kill -9 -- "-${op}" 2>/dev/null || kill -9 "$op" 2>/dev/null || true
+        if kill -0 "$op" 2>/dev/null; then
+          kill -9 "$op" 2>/dev/null || true
         fi
       done <<<"$orphan_pids"
     fi

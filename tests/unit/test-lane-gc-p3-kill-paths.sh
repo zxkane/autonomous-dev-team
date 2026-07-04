@@ -384,18 +384,23 @@ OUT023=$(bash -c '
 ' 2>&1 | tail -1)
 assert_contains "TC-LGC3-023: kill_stale_wrapper (PID-file path) reaps the full process group even when the leader alone would have looked dead post-TERM" "GROUP-GONE" "$OUT023"
 
-# TC-LGC3-024 — the SAME leader-dies/member-survives shape through the
-# pgrep-FALLBACK orphan sweep (no PID file at all). The fallback matches on
-# the orphan leader's cmdline (`${PROJECT_DIR}/scripts/autonomous-dev.sh
-# … --issue N`), so the fixture leader must KEEP that cmdline (no exec) while
-# a persistent TERM-trapping member shares its group. PROJECT_DIR is a
-# per-run temp dir, so the pgrep project anchor can never match a real
-# wrapper on this host.
+# TC-LGC3-024 — the leader-dies/member-survives shape through the
+# pgrep-FALLBACK orphan sweep (no PID file at all), in the PRODUCTION spawn
+# shape (codex review round-3 [P1]): the wrapper is launched via `nohup … &`
+# so it is NOT a process-group leader (it inherits the spawning shell's
+# pgid), and its TERM-trapping child lives in its OWN setsid group whose
+# cmdline the pgrep pattern never matches. The old sweep's `kill -- -${op}`
+# was ESRCH (no group numbered op exists) → leader-only TERM → the setsid
+# child never received any KILL pass. The fixed sweep walks the descendant
+# tree at scan time, collects every REAL pgid, and TERM→KILLs that set.
+# PROJECT_DIR is a per-run temp dir, so the pgrep project anchor can never
+# match a real wrapper on this host.
 PROJ024="$TMPROOT/proj024"
 mkdir -p "$PROJ024/scripts"
 cat > "$PROJ024/scripts/autonomous-dev.sh" <<'FIXTURE024'
 #!/bin/bash
-(trap "" TERM; while :; do sleep 1; done) & disown
+setsid bash -c 'trap "" TERM; while :; do sleep 1; done' &
+echo "$!" > "${CHILD_PID_FILE:?}"
 sleep 30
 FIXTURE024
 chmod +x "$PROJ024/scripts/autonomous-dev.sh"
@@ -408,15 +413,24 @@ OUT024=$(bash -c '
   PROJECT_DIR="'"$PROJ024"'"
   KILL_STALE_PGREP_FALLBACK=true
   source "'"$KSW_SLICE"'"
-  setsid bash "'"$PROJ024"'/scripts/autonomous-dev.sh" --issue 240379 & LEADER=$!
-  sleep 0.5
+  export CHILD_PID_FILE="'"$TMPROOT"'/tc024-child.pid"
+  rm -f "$CHILD_PID_FILE"
+  nohup bash "'"$PROJ024"'/scripts/autonomous-dev.sh" --issue 240379 >/dev/null 2>&1 & WRAPPER=$!
+  for _i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    [[ -s "$CHILD_PID_FILE" ]] && break; sleep 0.1
+  done
+  CHILD=$(cat "$CHILD_PID_FILE" 2>/dev/null || true)
   # No PID file — the fallback sweep is the only path that can find this tree.
   kill_stale_wrapper "'"$TMPROOT"'/ksw024-nonexistent.pid"
   sleep 0.3
-  kill -0 -- "-$LEADER" 2>/dev/null && echo "VERDICT:GROUP-ALIVE" || echo "VERDICT:GROUP-GONE"
-  kill -KILL -- "-$LEADER" 2>/dev/null || true
+  WRAPPER_ALIVE=no; CHILD_ALIVE=no
+  kill -0 "$WRAPPER" 2>/dev/null && WRAPPER_ALIVE=yes
+  [[ -n "$CHILD" ]] && kill -0 "$CHILD" 2>/dev/null && CHILD_ALIVE=yes
+  echo "VERDICT:wrapper=$WRAPPER_ALIVE child=$CHILD_ALIVE"
+  [[ -n "$CHILD" ]] && kill -9 -- "-$CHILD" 2>/dev/null
+  kill -9 "$WRAPPER" 2>/dev/null || true
 ' 2>&1 | grep '^VERDICT:')
-assert_contains "TC-LGC3-024: pgrep-fallback sweep reaps the full orphan group even when the leader alone would have looked dead post-TERM" "VERDICT:GROUP-GONE" "$OUT024"
+assert_contains "TC-LGC3-024: pgrep-fallback sweep reaps a nohup-launched (non-leader) wrapper AND its TERM-trapping setsid child (descendant-walk pgid set)" "VERDICT:wrapper=no child=no" "$OUT024"
 rm -f "$KSW_SLICE"
 
 # ===========================================================================
@@ -619,7 +633,13 @@ OUT036=$(bash -c '
   source "'"$LIB_LANE"'"
   LANE_ID=$(lane_mint myproj dev 36)
   LANE_DIR=$(lane_install myproj "$LANE_ID")
-  setsid sleep 30 & PG=$!
+  # TERM-trapping fixture (review-caught: a plain `setsid sleep 30` always
+  # dies on the first TERM, so KILL_CALLS is vacuously 0 regardless of
+  # whether a double-KILL bug exists — the assertion below could never
+  # fail). This group survives the TERM and forces BOTH racing lane_kill
+  # calls to actually reach the escalation branch, so a double-KILL
+  # regression (KILL_CALLS=2) is observable.
+  setsid bash -c "trap \"\" TERM; while :; do sleep 1; done" & PG=$!
   lane_record_pgid "$LANE_DIR" "$PG" agent
 
   COUNTER_FILE="'"$TMPROOT"'/counter036"
@@ -641,12 +661,15 @@ OUT036=$(bash -c '
   P2=$!
   wait "$P1" "$P2" 2>/dev/null
   echo "KILL_CALLS=$(wc -l < "$COUNTER_FILE")"
+  kill -9 -- "-$PG" 2>/dev/null || true
 ' 2>&1)
 # Both concurrent lane_kill calls target the same (single) pgid; the
 # reap.lock should serialize them so the group is TERM-reaped by the first
-# to acquire the lock and the second finds it already gone. Regardless of
-# ordering, this must never emit an error and must complete cleanly.
-assert_contains "TC-LGC3-036: concurrent lane_kill invocations complete without error" "KILL_CALLS=" "$OUT036"
+# to acquire the lock and the second finds it already gone. The numeric
+# count (not merely the string's presence) is the actual invariant: exactly
+# ONE KILL against this pgid, never two (a double-KILL regression) or zero
+# (an escalation that never fired against a TERM-resistant group).
+assert_eq "TC-LGC3-036: concurrent lane_kill invocations issue exactly ONE SIGKILL against the shared pgid (no double-KILL)" "KILL_CALLS=1" "$(grep -o 'KILL_CALLS=[0-9]*' <<<"$OUT036")"
 
 # ===========================================================================
 echo ""
