@@ -49,14 +49,16 @@
 #   (d) PROJECTION-ONLY normalizer — emit EXACTLY the caller's requested
 #       fields (plus the resolver keys for find_pr_for_issue). No fabricated
 #       `closingIssueNumbers:[]`/`mergeable:""` on non-requested fields.
-#   (e) `comments`/`reviews` are in the shared §3.2.1 vocabulary (populated by
-#       the sibling W1c2 chp_pr_view leaf) but `gh pullRequests(first:100)`
-#       cannot deliver them here — the leaf REJECTS them with rc≠0 loudly.
+#   (e) `comments` is in the shared §3.2.1 vocabulary (populated by the
+#       sibling W1c2 chp_pr_view leaf and by itp_list_comments) but is NOT
+#       delivered here — the leaf REJECTS it with rc≠0 loudly. `reviews` IS
+#       delivered by the GraphQL page walker (see the `_CHP_GITHUB_PR_FIELDS_
+#       SUPPORTED` constant below and its explanatory comment).
 #
 # Field vocabulary supported by these two leaves (SUBSET of §3.2.1): number,
 # state, title, body, createdAt, updatedAt, mergedAt, headRefName, headRefOid,
-# reviewDecision, mergeable, closingIssueNumbers. Requesting `comments` or
-# `reviews` → rc 2.
+# reviewDecision, mergeable, closingIssueNumbers, reviews. Requesting
+# `comments` → rc 2 (single unsupported field).
 
 # _chp_github_pr_fields_supported and _chp_github_pr_fields_unsupported —
 # the vocabulary split. Bare-string CSVs to keep grep-anchor semantics simple.
