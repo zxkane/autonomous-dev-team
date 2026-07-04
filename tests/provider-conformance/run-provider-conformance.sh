@@ -986,6 +986,19 @@ _assert_verb() {
         "$PAYLOADS/ci-status-mixed-failure.json" "failed"
       _run_token_assert "$verb" 'chp_ci_status 42' \
         "$PAYLOADS/ci-status-empty.json" "none"
+      # Payload-type gate (post-#399 review-round finding): a rc-0 JSON
+      # OBJECT payload `{}` must be REJECTED, not misread as "no checks
+      # configured" ("none"). Without the array-type gate the leaf's
+      # `jq '[.[].state]'` iterates the object's (empty) values and
+      # produces `[]` → bucket→`none` → silent fail-open. Drive the
+      # object payload and assert rc≠0 with no partial stdout.
+      _argv_file="$work_root/.argv-ci-obj.json"
+      _out_obj="$(_invoke _PCF_GH_MODE="ok" _PCF_GH_PAYLOAD="$PAYLOADS/ci-status-object-payload.json" _PCF_ARGV_FILE="$_argv_file" 'chp_ci_status 42' 2>/dev/null)"; _rc_obj=$?
+      if [[ "$_rc_obj" == "0" ]]; then
+        emit FAIL "$verb" "payload-type gate missing: rc-0 object payload {} accepted (out: '${_out_obj:0:120}') — must reject non-array"
+      else
+        emit PASS "$verb"
+      fi
       ;;
     chp_mergeable)
       # W1d (#399): absorbs `-q '.mergeable'` into the leaf. Drive against a

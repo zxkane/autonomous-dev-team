@@ -114,6 +114,11 @@ chp_broken_ci_status() {
     rm -f "$gh_err"
     return 1
   fi
+  jq -e 'type == "array"' >/dev/null 2>&1 <<<"$raw" || {
+    [ -s "$gh_err" ] && cat "$gh_err" >&2
+    rm -f "$gh_err"
+    return 1
+  }
   states="$(printf '%s' "$raw" | jq -er '[.[].state]' 2>/dev/null)" || {
     [ -s "$gh_err" ] && cat "$gh_err" >&2
     rm -f "$gh_err"

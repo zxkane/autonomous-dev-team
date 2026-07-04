@@ -97,20 +97,23 @@ contract:
 
 ## Provider-conformance runner counts
 
-The runner emits `CONFORMANCE-SUMMARY total=29 pass=26 fail=0 skip=0 pending=3`
+The runner emits `CONFORMANCE-SUMMARY total=30 pass=27 fail=0 skip=0 pending=3`
 on `--itp github --chp github` (post-rebase onto main with
-W1a/W1b/W1c1/W1c2 already landed; `pass=26` = 22 pre-#399 PASS lines
+W1a/W1b/W1c1/W1c2 already landed; `pass=27` = 22 pre-#399 PASS lines
 (20 pre-W1c2 + 2 for chp_pr_view/chp_list_inline_comments emits) + the
-4 new W1d assertion emits (3 chp_ci_status + 1 chp_mergeable);
-`pending=3` = 10 pre-W1 pending set − 3 by W1a − 1 by W1b − 2 by W1c1
-− 2 by W1c2 − 2 by W1d = 0 conflicting verbs (only chp_create_pr,
-chp_approve, chp_merge remain — the CHP PR-lifecycle write verbs). `total`
-counts one emit line per asserted-verb-check plus one per pending verb —
-the `CONFORMANCE-COVERAGE PASS` line does NOT increment total, so
-`total = pass + skip + pending` when there are zero fails.
-Degraded/degraded: `total=29 pass=23 fail=0 skip=3 pending=3`.
-Broken/broken: `total=29 pass=21 fail=5 pending=3` (the 5 pre-existing
-broken-fixture violations; the new W1d asserted verbs stay PASS because the
-broken fixture ships correct `chp_broken_ci_status`/`chp_broken_mergeable`).
+5 new W1d assertion emits (3 chp_ci_status token + 1 chp_mergeable token
++ 1 chp_ci_status payload-type-gate — the review-round fix that rejects
+rc-0 non-array payloads); `pending=3` = 10 pre-W1 pending set − 3 by
+W1a − 1 by W1b − 2 by W1c1 − 2 by W1c2 − 2 by W1d = the residual
+`chp_create_pr`, `chp_approve`, `chp_merge` (CHP PR-lifecycle write
+verbs). `total` counts one emit line per asserted-verb-check plus one
+per pending verb — the `CONFORMANCE-COVERAGE PASS` line does NOT
+increment total, so `total = pass + skip + pending` when there are zero
+fails.
+Degraded/degraded: `total=30 pass=24 fail=0 skip=3 pending=3`.
+Broken/broken: `total=30 pass=22 fail=5 pending=3` (the 5 pre-existing
+broken-fixture violations; the new W1d asserted verbs stay PASS because
+the broken fixture ships correct `chp_broken_ci_status` /
+`chp_broken_mergeable`).
 Runner README's example output block is updated in the same PR (R5 SAME-PR
 tripwire).

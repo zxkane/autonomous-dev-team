@@ -33,7 +33,7 @@ command -v jq >/dev/null 2>&1 || { echo "jq required"; exit 1; }
 source "$LIB"
 
 # ===========================================================================
-echo "=== TC-PCONF-014: --itp github --chp github exits 0, 23 asserted verbs PASS, CONFORMANCE-SUMMARY fail=0 ==="
+echo "=== TC-PCONF-014: --itp github --chp github exits 0, 23 asserted verbs PASS (27 emit lines total), CONFORMANCE-SUMMARY fail=0 ==="
 # ===========================================================================
 gh_out="$(bash "$RUNNER" --itp github --chp github 2>&1)"; gh_rc=$?
 assert_eq "AC1: github/github exits 0" "0" "$gh_rc"
@@ -45,8 +45,8 @@ gh_pass_count="$(grep -c '^CONFORMANCE-PCONF github/github .* PASS$' <<<"$gh_out
 # [#399 W1d] +4: chp_ci_status runs 3 PASS lines (all-success/mixed-failure/
 # empty token assertions) and chp_mergeable runs 1 (MERGEABLE token +
 # fail-closed).
-assert_eq "AC1: 26 PASS lines on github/github (23 asserted verbs + #393 list_comments field + W1c2/W1d extra assertion lines)" "26" "$gh_pass_count"
-assert_contains "AC1: CONFORMANCE-SUMMARY line present with fail=0" "CONFORMANCE-SUMMARY total=29 pass=26 fail=0 skip=0 pending=3" "$gh_out"
+assert_eq "AC1: 27 PASS lines on github/github (23 asserted verbs + #393 list_comments field + W1c2/W1d extra assertion lines incl. #399 payload-type gate)" "27" "$gh_pass_count"
+assert_contains "AC1: CONFORMANCE-SUMMARY line present with fail=0" "CONFORMANCE-SUMMARY total=30 pass=27 fail=0 skip=0 pending=3" "$gh_out"
 assert_contains "TC-PCONF-043: itp_read_task (github) PASSes the object-shape/fields-subset/fail-closed assertion" \
   "CONFORMANCE-PCONF github/github itp_read_task PASS" "$gh_out"
 
@@ -75,7 +75,7 @@ broken_pass_count="$(grep -c '^CONFORMANCE-PCONF broken/broken .* PASS$' <<<"$br
 # [#396] +1: itp_read_task flipped pending->asserted (W1b) and the broken fixture
 # defines a correct (not-targeted) leaf for it.
 # [#397] +2: W1c1 added chp_find_pr_for_issue + chp_pr_list (correct broken-provider leaves).
-assert_eq "AC2: 21 non-targeted PASS lines (12 pre-W1a + read_task + 2 W1c1 + 2 W1c2 + 4 W1d assertion lines)" "21" "$broken_pass_count"
+assert_eq "AC2: 22 non-targeted PASS lines (12 pre-W1a + read_task + 2 W1c1 + 2 W1c2 + 5 W1d assertion lines incl. payload-type gate)" "22" "$broken_pass_count"
 
 # ===========================================================================
 echo ""
@@ -98,7 +98,7 @@ deg_pass_count="$(grep -c '^CONFORMANCE-PCONF degraded/degraded .* PASS$' <<<"$d
 # [#399 W1d] +4: chp_ci_status (3 PASS lines) + chp_mergeable (1) — degraded's
 # leaves mirror GitHub structurally, so they PASS the same token-set/
 # fail-closed assertions.
-assert_eq "TC-PCONF-033: 23 PASS lines on degraded (20 asserted verbs + #393 list_comments + W1c2/W1d extra assertion lines)" "23" "$deg_pass_count"
+assert_eq "TC-PCONF-033: 24 PASS lines on degraded (20 asserted verbs + #393 list_comments + W1c2/W1d extra assertion lines incl. #399 payload-type gate)" "24" "$deg_pass_count"
 
 # ===========================================================================
 echo ""

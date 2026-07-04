@@ -360,17 +360,24 @@ else
   FAIL=$((FAIL + 1))
 fi
 
-# (c): chp_ci_status with rc-0 JSON OBJECT payload (not array). jq -er
-# '[.[].state]' on `{"foo":"bar"}` errors → leaf rc≠0 with no token.
-row="$(_drive_leaf_neg chp_ci_status 42 '{"foo":"bar"}' 0)"
-rc="${row%%|*}"; tok="${row#*|}"
-if [[ "$rc" != "0" && -z "$tok" ]]; then
-  echo -e "  ${GREEN}PASS${NC}: TC-W1D-NEG-SPACE (c) chp_ci_status rc-0 JSON OBJECT rejected (rc=$rc, tok='$tok')"
-  PASS=$((PASS + 1))
-else
-  echo -e "  ${RED}FAIL${NC}: TC-W1D-NEG-SPACE (c) chp_ci_status rc-0 JSON OBJECT accepted (rc=$rc, tok='$tok') — a schema-drift payload must NOT derive a token"
-  FAIL=$((FAIL + 1))
-fi
+# (c) payload-type gate: chp_ci_status MUST reject any non-array payload
+# BEFORE deriving a token. The critical case is rc-0 `{}` — the leaf's
+# `jq '[.[].state]'` iterates OBJECT values (of which `{}` has none) and
+# produces `[]`, which the bucket jq would map to `none`. Without the type
+# gate an error-shaped rc-0 object is misread as "no checks configured"
+# (a #398-class review-round finding — team-lead acceptance probe found
+# this hole open pre-fix).
+for _bad in '{}' '{"message":"Not Found"}' 'null' '42' '"a-string"'; do
+  row="$(_drive_leaf_neg chp_ci_status 42 "$_bad" 0)"
+  rc="${row%%|*}"; tok="${row#*|}"
+  if [[ "$rc" != "0" && -z "$tok" ]]; then
+    echo -e "  ${GREEN}PASS${NC}: TC-W1D-NEG-SPACE (c) chp_ci_status rc-0 non-array payload '$_bad' rejected (rc=$rc, tok='$tok')"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${NC}: TC-W1D-NEG-SPACE (c) chp_ci_status rc-0 non-array payload '$_bad' accepted (rc=$rc, tok='$tok') — payload-type gate missing"
+    FAIL=$((FAIL + 1))
+  fi
+done
 
 # (c) sibling: rc-0 array of objects WITHOUT a .state key. jq extract yields
 # [null] — the bucket jq buckets as `pending` (unlisted state, per R1 rule 3).
@@ -384,6 +391,33 @@ if [[ "$rc" == "0" && "$tok" == "pending" ]]; then
   PASS=$((PASS + 1))
 else
   echo -e "  ${RED}FAIL${NC}: TC-W1D-NEG-SPACE (c) chp_ci_status [{no-state}] mis-derived (rc=$rc, tok='$tok') — expected rc=0 pending"
+  FAIL=$((FAIL + 1))
+fi
+
+# (c) legit-empty preservation: `[]` payload is the LEGITIMATE zero-checks
+# case that MUST stay rc=0 "none" — the type gate must not overreach. This
+# is the counter-example to the object-payload rejection above.
+row="$(_drive_leaf_neg chp_ci_status 42 '[]' 0)"
+rc="${row%%|*}"; tok="${row#*|}"
+if [[ "$rc" == "0" && "$tok" == "none" ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-W1D-NEG-SPACE (c) chp_ci_status [] → none (legit zero-checks preserved by type gate)"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-W1D-NEG-SPACE (c) chp_ci_status [] mis-derived (rc=$rc, tok='$tok') — expected rc=0 none"
+  FAIL=$((FAIL + 1))
+fi
+
+# (c) mergeable payload-type: same class as ci_status. gh returning `{}`
+# on unexpected failure — the token-set membership gate should already
+# reject the empty string that `-q .mergeable` produces on an empty
+# object, but pin it here so a future regression doesn't slip past.
+row="$(_drive_leaf_neg chp_mergeable 42 '{}' 0)"
+rc="${row%%|*}"; tok="${row#*|}"
+if [[ "$rc" != "0" && -z "$tok" ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-W1D-NEG-SPACE (c) chp_mergeable rc-0 {} rejected (rc=$rc, tok='$tok')"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-W1D-NEG-SPACE (c) chp_mergeable rc-0 {} accepted (rc=$rc, tok='$tok')"
   FAIL=$((FAIL + 1))
 fi
 

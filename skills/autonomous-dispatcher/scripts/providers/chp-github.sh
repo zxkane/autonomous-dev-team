@@ -368,6 +368,21 @@ chp_github_ci_status() {
     rm -f "$gh_err"
     return 1
   fi
+  # Payload-type gate (#398-class review-round finding): a rc-0 JSON OBJECT
+  # payload (e.g. `{}` — an error-shaped response some gh backends emit on
+  # unexpected failure, or a schema-drift regression on a future gh release)
+  # would be silently misread as "no checks configured" — `jq '[.[].state]'`
+  # iterates the OBJECT's values (of which `{}` has none) and produces `[]`,
+  # which the bucket jq maps to `none`. Reject any payload that is not a
+  # JSON ARRAY BEFORE deriving the token: `type == "array"` guards `{}`,
+  # `{"message":"Not Found"}`, bare strings, numbers, and null. A well-formed
+  # array (including the legitimate zero-checks `[]` that maps to `none`)
+  # passes.
+  jq -e 'type == "array"' >/dev/null 2>&1 <<<"$raw" || {
+    [ -s "$gh_err" ] && cat "$gh_err" >&2
+    rm -f "$gh_err"
+    return 1
+  }
   states="$(printf '%s' "$raw" | jq -er '[.[].state]' 2>/dev/null)" || {
     # No parseable JSON on stdout → forward gh's own error and return non-zero.
     [ -s "$gh_err" ] && cat "$gh_err" >&2

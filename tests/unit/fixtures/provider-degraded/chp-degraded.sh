@@ -104,6 +104,14 @@ chp_degraded_ci_status() {
     rm -f "$gh_err"
     return 1
   fi
+  # Payload-type gate: reject non-array payloads (`{}`, error-shaped objects,
+  # scalars) before deriving the token — jq iterating an OBJECT would yield
+  # `[]` and mis-derive `none`.
+  jq -e 'type == "array"' >/dev/null 2>&1 <<<"$raw" || {
+    [ -s "$gh_err" ] && cat "$gh_err" >&2
+    rm -f "$gh_err"
+    return 1
+  }
   states="$(printf '%s' "$raw" | jq -er '[.[].state]' 2>/dev/null)" || {
     [ -s "$gh_err" ] && cat "$gh_err" >&2
     rm -f "$gh_err"
