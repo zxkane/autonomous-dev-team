@@ -388,8 +388,20 @@ additionally emit the three [INV-86] selection keys unconditionally
 | `reviewDecision`      | raw provider token / `""`  | GitHub: `APPROVED\|CHANGES_REQUESTED\|REVIEW_REQUIRED\|""`. W1(c-f) may re-pin.
 | `mergeable`           | raw provider token / `""`  | GitHub: `MERGEABLE\|CONFLICTING\|UNKNOWN\|""`. W1(d) re-pins to a normalized enum.
 | `closingIssueNumbers` | array of ints              | normalized from GitHub's `closingIssuesReferences[].number` (GraphQL node objects flattened to ints). The single ints-array is the [INV-86] resolution key: `contains([N])` replaces the pre-W1c1 `any(.[]?; .number == N)` expression.
-| `comments`            | see §3.3                   | normalized issue-comment array (`[{id,author,body,createdAt}]`, ascending by `createdAt`); populated only when the caller requests `comments`.
+| `comments`            | see §3.3 / per-verb        | normalized issue-comment array (`[{id,author,body,createdAt}]`, ascending by `createdAt`). **Per-verb support** (matrix below): the W1c1 pair REJECTS `comments` (rc≠0, loud) — never fabricated.
 | `reviews`             | normalized array           | `[{author, state, submittedAt}]` ascending by `submittedAt`; populated only when the caller requests `reviews`.
+
+**Per-verb field support.** Not every verb can deliver every vocabulary member
+from its native data source; a verb MUST reject (rc≠0, no output) a requested
+field it cannot deliver — fabricating an empty value is forbidden (the
+data-source-honesty rule: a field a provider emits MUST be derivable from the
+data source it actually reads). Support matrix:
+
+| Verb | Supports | Rejects (rc≠0, loud) |
+|------|----------|----------------------|
+| `chp_find_pr_for_issue` (W1c1) | every field except `comments` | `comments` — the GraphQL `pullRequests` list walk cannot deliver complete per-PR comment arrays without nested per-node pagination; PR-level comment reads are the W1c2 `chp_pr_view` verb's contract, issue-level comments are `itp_list_comments`. No caller requests `comments` through this verb (verified W1c1; the rejection is pinned by TC-PCONF-044 and the unsupported-field unit case). |
+| `chp_pr_list` (W1c1) | every field except `comments` | `comments` — same rationale; pinned by TC-PCONF-045. |
+| `chp_pr_view` / `chp_list_inline_comments` (W1c2) | pins its own subset at W1c2 time | — |
 
 `chp_find_pr_for_issue` returns a JSON array of PRs each projected to
 `FIELDS-CSV ∪ {number, closingIssueNumbers, headRefName}`; empty candidate set
