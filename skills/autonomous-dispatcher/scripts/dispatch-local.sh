@@ -328,25 +328,34 @@ kill_stale_wrapper() {
     if [[ -n "$orphan_pids" ]]; then
       echo "Found orphan ${TYPE:-?} agent process(es) for issue #${ISSUE_NUM} (project ${PROJECT_ID:-?}): $(tr '\n' ' ' <<<"$orphan_pids")— group-killing" >&2
       # [Lane-GC PR-3 / INV-111] Walk each orphan's DESCENDANT TREE and
-      # collect every distinct PGID BEFORE any signal (codex review round-3
-      # [P1]). Two structural facts break the old `kill -- -${op}` group
-      # form: (a) the pgrep-matched wrapper PID is usually NOT a group
-      # leader — dispatch-local spawns wrappers via `nohup … &`, so a
-      # wrapper INHERITS the spawning shell's pgid — the group numbered
-      # `op` typically doesn't exist (ESRCH), so only the leader-only TERM
-      # fallback ever fired; (b) a wrapper's own children may `setsid` into
-      # their OWN groups with cmdlines the pgrep pattern never matches
-      # (`bash -c 'trap "" TERM; …'`), so no group signal derived from the
-      # wrapper's pid/pgid alone can reach them. A TERM-trapping setsid
-      # child therefore survived with no KILL pass ever addressed to it.
-      # The walk (BFS via pgrep -P, done while the tree is still alive —
-      # a dead parent is unenumerable) resolves the REAL pgid of the
-      # orphan and every descendant; TERM then KILL target that pgid SET.
-      # Self-guard: our own pgid is excluded (ps output is untrusted; the
-      # per-pid TERM below still reaches an orphan that shares it).
+      # collect every distinct PGID *and* every individual PID BEFORE any
+      # signal (codex review round-3 [P1], round-4 [P1]). Three structural
+      # facts break a group-only kill: (a) the pgrep-matched wrapper PID is
+      # usually NOT a group leader — dispatch-local spawns wrappers via
+      # `nohup … &`, so a wrapper INHERITS the spawning shell's pgid — the
+      # group numbered `op` typically doesn't exist (ESRCH), so only the
+      # leader-only TERM fallback ever fired; (b) a wrapper's own children
+      # may `setsid` into their OWN groups with cmdlines the pgrep pattern
+      # never matches (`bash -c 'trap "" TERM; …'`), so no group signal
+      # derived from the wrapper's pid/pgid alone can reach them; (c) a
+      # descendant spawned WITHOUT its own `setsid` shares dispatch-local.sh's
+      # OWN pgid (the normal shape when the dispatcher's own session has no
+      # setsid boundary between it and the `nohup`-launched wrapper) — the
+      # self-guard that excludes our own pgid from the GROUP-form kill (so we
+      # never suicide our own group) previously dropped that descendant
+      # ENTIRELY, since only pgid-form signals were ever sent. Round-4 fix:
+      # every walked PID (not just the top-level pgrep matches) also gets an
+      # INDIVIDUAL-PID TERM/KILL — `kill -TERM <pid>` targets the process
+      # itself regardless of its pgid, so a same-pgid descendant is reached
+      # even when its group is (rightly) never group-signalled.
+      # The walk (BFS via pgrep -P, done while the tree is still alive — a
+      # dead parent is unenumerable) resolves the REAL pgid set (self-guarded)
+      # and the REAL pid set (unguarded — individual-PID kill is safe against
+      # our own pid/pgid siblings, since it never touches this process itself)
+      # of the orphan and every descendant.
       local op _own_pgid _pg _pid _queue _kids
       _own_pgid=$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')
-      local -A _sweep_pgids=()
+      local -A _sweep_pgids=() _sweep_pids=()
       while IFS= read -r op; do
         [[ -z "$op" ]] && continue
         _queue="$op"
@@ -354,6 +363,7 @@ kill_stale_wrapper() {
           _pid="${_queue%%$'\n'*}"
           if [[ "$_queue" == *$'\n'* ]]; then _queue="${_queue#*$'\n'}"; else _queue=""; fi
           [[ "$_pid" =~ ^[0-9]+$ ]] || continue
+          _sweep_pids["$_pid"]=1
           _pg=$(ps -o pgid= -p "$_pid" 2>/dev/null | tr -d ' ')
           if [[ "$_pg" =~ ^[0-9]+$ && "$_pg" != "$_own_pgid" ]]; then
             _sweep_pgids["$_pg"]=1
@@ -362,31 +372,30 @@ kill_stale_wrapper() {
           [[ -n "$_kids" ]] && _queue="${_queue:+$_queue$'\n'}$_kids"
         done
       done <<<"$orphan_pids"
-      # TERM pass: every collected group, plus every matched pid directly
-      # (covers an orphan whose pgid was excluded by the self-guard).
+      # TERM pass: every collected group, plus every walked pid individually
+      # (covers a descendant whose pgid was excluded by the self-guard).
       for _pg in "${!_sweep_pgids[@]}"; do
         kill -TERM -- "-${_pg}" 2>/dev/null || true
       done
-      while IFS= read -r op; do
-        [[ -z "$op" ]] && continue
-        kill -TERM "$op" 2>/dev/null || true
-      done <<<"$orphan_pids"
+      for _pid in "${!_sweep_pids[@]}"; do
+        kill -TERM "$_pid" 2>/dev/null || true
+      done
       sleep 1
-      # KILL pass: any collected group or matched pid still alive gets
-      # SIGKILL — the gate probes the REAL pgid set from the walk, so a
-      # TERM-trapping member anywhere in the tree (setsid'd or not,
-      # leader-matched or not) is reached even after its parent died.
+      # KILL pass: any collected group or walked pid still alive gets
+      # SIGKILL — the gate probes the REAL pgid set AND the REAL pid set
+      # from the walk, so a TERM-trapping member anywhere in the tree
+      # (setsid'd, same-pgid, leader-matched, or not) is reached even after
+      # its parent died.
       for _pg in "${!_sweep_pgids[@]}"; do
         if kill -0 -- "-${_pg}" 2>/dev/null; then
           kill -9 -- "-${_pg}" 2>/dev/null || true
         fi
       done
-      while IFS= read -r op; do
-        [[ -z "$op" ]] && continue
-        if kill -0 "$op" 2>/dev/null; then
-          kill -9 "$op" 2>/dev/null || true
+      for _pid in "${!_sweep_pids[@]}"; do
+        if kill -0 "$_pid" 2>/dev/null; then
+          kill -9 "$_pid" 2>/dev/null || true
         fi
-      done <<<"$orphan_pids"
+      done
     fi
   fi
 

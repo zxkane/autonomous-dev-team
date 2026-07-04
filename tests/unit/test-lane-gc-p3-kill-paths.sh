@@ -431,6 +431,54 @@ OUT024=$(bash -c '
   kill -9 "$WRAPPER" 2>/dev/null || true
 ' 2>&1 | grep '^VERDICT:')
 assert_contains "TC-LGC3-024: pgrep-fallback sweep reaps a nohup-launched (non-leader) wrapper AND its TERM-trapping setsid child (descendant-walk pgid set)" "VERDICT:wrapper=no child=no" "$OUT024"
+
+# TC-LGC3-024b — codex review round-4 [P1] regression: a descendant spawned
+# WITHOUT its own `setsid` shares dispatch-local.sh's OWN pgid at spawn time
+# (the normal shape when the dispatcher's own session has no setsid boundary
+# between it and the `nohup`-launched wrapper). The round-3 fix's self-guard
+# excludes our own pgid from every GROUP-form kill (so the sweep never
+# suicides its own group) — but round-3 only ever sent GROUP-form signals,
+# so a same-pgid descendant was silently dropped entirely: reproduced
+# against the round-3 code with a nohup-launched wrapper backgrounding a
+# bare (non-setsid) TERM-trapping child — the wrapper died, the child
+# survived (`wrapper=no child=yes`). The round-4 fix adds an INDIVIDUAL-PID
+# kill pass over every walked pid (not just the top-level pgrep matches),
+# which reaches a same-pgid descendant without ever group-signalling our
+# own pgid.
+cat > "$PROJ024/scripts/autonomous-dev.sh" <<'FIXTURE024B'
+#!/bin/bash
+bash -c 'trap "" TERM; while :; do sleep 1; done' &
+echo "$!" > "${CHILD_PID_FILE:?}"
+sleep 30
+FIXTURE024B
+chmod +x "$PROJ024/scripts/autonomous-dev.sh"
+
+OUT024B=$(bash -c '
+  set -uo pipefail
+  ISSUE_NUM="240380"
+  TYPE="dev-new"
+  PROJECT_ID="test024b"
+  PROJECT_DIR="'"$PROJ024"'"
+  KILL_STALE_PGREP_FALLBACK=true
+  source "'"$KSW_SLICE"'"
+  export CHILD_PID_FILE="'"$TMPROOT"'/tc024b-child.pid"
+  rm -f "$CHILD_PID_FILE"
+  nohup bash "'"$PROJ024"'/scripts/autonomous-dev.sh" --issue 240380 >/dev/null 2>&1 & WRAPPER=$!
+  for _i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    [[ -s "$CHILD_PID_FILE" ]] && break; sleep 0.1
+  done
+  CHILD=$(cat "$CHILD_PID_FILE" 2>/dev/null || true)
+  echo "SPAWN_PGIDS: self=$(ps -o pgid= -p $$ | tr -d " ") wrapper=$(ps -o pgid= -p "$WRAPPER" 2>/dev/null | tr -d " ") child=$(ps -o pgid= -p "$CHILD" 2>/dev/null | tr -d " ")" >&2
+  kill_stale_wrapper "'"$TMPROOT"'/ksw024b-nonexistent.pid"
+  sleep 0.3
+  WRAPPER_ALIVE=no; CHILD_ALIVE=no
+  kill -0 "$WRAPPER" 2>/dev/null && WRAPPER_ALIVE=yes
+  [[ -n "$CHILD" ]] && kill -0 "$CHILD" 2>/dev/null && CHILD_ALIVE=yes
+  echo "VERDICT:wrapper=$WRAPPER_ALIVE child=$CHILD_ALIVE"
+  [[ -n "$CHILD" ]] && kill -9 "$CHILD" 2>/dev/null
+  kill -9 "$WRAPPER" 2>/dev/null || true
+' 2>&1 | grep '^VERDICT:')
+assert_contains "TC-LGC3-024b (round-4 regression): pgrep-fallback sweep reaps a same-pgid (non-setsid) TERM-trapping descendant via individual-PID kill, not just group-form" "VERDICT:wrapper=no child=no" "$OUT024B"
 rm -f "$KSW_SLICE"
 
 # ===========================================================================

@@ -61,6 +61,7 @@ suite under `env -u PROJECT_DIR` for CI parity.
 | TC-LGC3-023a | Fixture self-proof: the 023/024 fixture tree (leader `exec sleep` + a persistent `(trap "" TERM; while :; do sleep 1; done)` member in the same pgid) receives a PLAIN group TERM — what the pre-fix leader-only gate effectively ended at | leader dies, the trapping member SURVIVES (`LEADER-DEAD-MEMBER-ALIVE`) — proving the fixture reproduces the leak shape, so 023/024 cannot pass vacuously (review-caught: an earlier fixture's `trap "" TERM &` child exited immediately and left nothing to leak) |
 | TC-LGC3-023 | `kill_stale_wrapper`, legacy PID-file path: old_pid's leader dies right after the initial TERM, but a TERM-trapping member of its group survives | the escalation gate fires (leader-or-group still reports alive) and the group member is SIGKILLed — regression proof for the pre-fix bug (leader-only gate would have skipped SIGKILL and left the member running); verified to FAIL against origin/main's kill_stale_wrapper (`GROUP-ALIVE`) |
 | TC-LGC3-024 | `kill_stale_wrapper`, pgrep-fallback orphan sweep (no PID file), PRODUCTION spawn shape: the wrapper is `nohup … &`-launched (NOT a group leader — it inherits the spawning shell's pgid) and its TERM-trapping child lives in its OWN `setsid` group whose cmdline the pgrep pattern never matches | the sweep walks the orphan's descendant tree at scan time (while it is still enumerable), collects every REAL pgid, and TERM→KILLs that set — wrapper AND setsid child both gone; verified to FAIL against the pre-walk sweep (`kill -- -$op` was ESRCH for a non-leader op → leader-only TERM → the setsid child survived) |
+| TC-LGC3-024b | Round-4 [P1] regression: same shape as TC-LGC3-024, but the TERM-trapping child has NO `setsid` of its own — it shares dispatch-local.sh's OWN pgid at spawn time (the normal shape when the dispatcher's own session has no setsid boundary before the `nohup`-launched wrapper) | the walked descendant is ALSO reached via a per-pid (not just per-pgid) TERM/KILL pass — a same-pgid descendant is never excluded, since the self-guard only ever applies to the GROUP-form kill (which correctly still never signals our own pgid); verified to FAIL against the round-3 sweep (`wrapper=no child=yes` — the self-guard silently dropped the descendant since only group-form signals were sent) |
 | TC-LGC3-025 | Existing behavior preserved: leader alive → normal TERM→grace→KILL sequence unchanged; leader AND group both dead → no spurious SIGKILL attempt | `test-kill-before-spawn.sh` / `test-dispatch-local-pgrep-type-scope.sh` / `test-pid-guard-pgid.sh` / `test-pid-alive-long-running.sh` stay green (extraction snippets updated to capture the new sibling helper) |
 
 ## `cleanup()` reap-first ordering + bounded network calls (AC4)
@@ -88,20 +89,39 @@ suite under `env -u PROJECT_DIR` for CI parity.
 | TC-LGC3-041 | Grep-pin across every kill site this PR touches (`lib-lane.sh::_kill_group_escalate`/`lane_kill`, `lib-agent.sh::_agent_sigterm_handler`, `dispatch-local.sh::kill_stale_wrapper` both sites) | TERM (`kill -TERM`) textually precedes KILL (`kill -KILL`/`kill -9`) in every function body |
 | TC-LGC3-042 | Grep-pin, repo-wide | zero occurrences of `pkill -f 'autonomous-'` (or any `-f`-based wrapper-script-name match) anywhere — the widening the design explicitly forbids (would cross-kill sibling lanes) |
 
+## Fixture-tree E2E (AC2 — dedicated CI job, not the unit job)
+
+`tests/e2e/run-lane-gc-p3-kill-paths-e2e.sh` (auto-discovered as a unit test
+via its thin wrapper `tests/unit/test-lane-gc-p3-kill-paths-e2e.sh`, AND run
+as its own named CI step — `lane-gc-p3 kill-paths E2E (fixture tree)` in
+`ci.yml` — so a regression here is visible as a distinct check, not folded
+into the unit job's aggregate pass/fail). Drives the REAL, unmodified
+`dispatch-local.sh` CLI entry point (not a sourced/extracted function slice
+— TC-LGC3-023/024 above already cover that shape) against a genuine
+process-group fixture tree, exactly as the issue's acceptance criterion
+states: "fixture tree with a TERM-trapping member → tree empty within
+grace+2s".
+
+| ID | Scenario | Expected |
+|----|----------|----------|
+| TC-LGC3-E2E-01 | `dispatch-local.sh dev-new` against a real PID file pointing at a leader that dies on plain TERM, sharing a pgid with a persistent TERM-trapping member | whole process group gone within grace(5s)+2s |
+| TC-LGC3-E2E-02 | Same fixture shape, no PID file — `dispatch-local.sh dev-new` must find it via the pgrep-fallback orphan sweep (leader's cmdline anchors on `${PROJECT_DIR}/scripts/autonomous-dev.sh … --issue N`) | whole process group gone within grace(5s)+2s |
+
+Both scenarios use per-run temp `PROJECT_DIR`/`AUTONOMOUS_PID_DIR` anchors, so
+neither can collide with (or cross-kill) a real wrapper on the host running
+this suite.
+
 ## Acceptance Criteria mapping
 
 - [ ] All unit tests above pass (surface: CI unit job) — TC-LGC3-001..042
 - [ ] Fixture-tree E2E: `kill_stale_wrapper` against a fixture tree with a
-      TERM-trapping member → tree empty within grace+2s (surface: CI unit
-      job — this repo's CI has no separate E2E workflow, so the unit job IS
-      the CI surface for this criterion. TC-LGC3-023 drives the REAL
-      `kill_stale_wrapper` end-to-end against a real process tree — leader
-      dies on TERM, a persistent TERM-trapping member survives in its group
-      — through the PID-file path; TC-LGC3-024 drives the same shape through
-      the pgrep-fallback orphan sweep (no PID file); TC-LGC3-023a is the
-      fixture self-proof that this exact tree LEAKS under a plain group TERM,
-      i.e. under the pre-fix leader-only gate — so 023/024 fail against
-      pre-fix code rather than passing vacuously)
+      TERM-trapping member → tree empty within grace+2s (surface: dedicated
+      CI job `lane-gc-p3 kill-paths E2E (fixture tree)` in `ci.yml`, running
+      `tests/e2e/run-lane-gc-p3-kill-paths-e2e.sh` — TC-LGC3-E2E-01/02 above.
+      TC-LGC3-023/024 remain the sourced-function-slice unit-level regression
+      guards; TC-LGC3-023a is the fixture self-proof that this exact tree
+      LEAKS under a plain group TERM, i.e. under the pre-fix leader-only
+      gate — so neither the unit slices nor the E2E pass vacuously)
 - [ ] `invariants.md` updated (INV-111 + INV-112 + the INV-26 attribution
       sentence), numbering re-verified against HEAD at PR-open, with triage
       markers; `state-machine.md`/flow docs updated same PR (surface: PR
