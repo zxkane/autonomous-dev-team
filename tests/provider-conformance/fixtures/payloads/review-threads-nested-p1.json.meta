@@ -1,0 +1,6 @@
+Source: docs/test-cases/w1f-review-threads-pagination.md (TC-W1F-002 — nested comment page 1).
+Origin: synthetic; ONE thread whose comments.pageInfo.hasNextPage=true, endCursor "CCURSOR_1".
+Provenance: authored 2026-07-04 for #401 (#347 W1f). Not from live GitHub.
+Notes: Paired with review-threads-nested-p2.json (served on the follow-up node(id:)
+walk). Proves the runner exercises the comment-level walk — deleting the
+walk would leave the merged thread with only 2 comments instead of 4.

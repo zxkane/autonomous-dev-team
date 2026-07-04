@@ -585,10 +585,21 @@ chp_github_merge() {
 # Cap-hit is loud rc != 0 — never silent truncation.
 #
 # Fail-closed [#401 R2]: every `gh api graphql` call is captured and its exit
-# checked BEFORE merging. Any mid-walk failure discards the accumulator and
-# returns rc != 0 with NO partial stdout — a partial thread set would recreate
-# the silent-truncation bug under a different name. Mirrors
-# chp_github_count_reviews_by_login's capture-check-sum pattern ([INV-94]).
+# checked BEFORE merging. In addition, EACH page's response is validated:
+#   (a) `.errors` must be absent/empty — GraphQL can return rc=0 with a
+#       populated errors array + partial/null `data`; that is a semantic
+#       failure the walk cannot recover from.
+#   (b) The required connection paths (thread level:
+#       `data.repository.pullRequest.reviewThreads.{nodes,pageInfo,pageInfo.hasNextPage}`;
+#       comment level: `data.node.comments.{nodes,pageInfo,pageInfo.hasNextPage}`)
+#       must exist non-null with the correct jq types. No `// []` / `// false`
+#       defaults on required fields — those exist to paper over exactly this
+#       class of failure. A null pullRequest, missing reviewThreads
+#       connection, or missing pageInfo → rc != 0 with NO partial stdout.
+# Any mid-walk failure discards the accumulator and returns rc != 0 — a
+# partial thread set would recreate the silent-truncation bug under a
+# different name. Mirrors chp_github_count_reviews_by_login's
+# capture-check-sum pattern ([INV-94]).
 chp_github_review_threads() {
   local pr="$1"
   local owner="${REPO%%/*}" name="${REPO##*/}"
@@ -645,14 +656,40 @@ query($owner: String!, $repo: String!, $prNumber: Int!, $threadCursor: String) {
       echo "chp_github_review_threads: gh api graphql failed at thread page $page (rc=$rc, PR #$pr)" >&2
       return "$rc"
     fi
-    # Merge this page's nodes into the accumulator (fail-closed on jq errors).
+    # Fail-closed validation (#401 R2 hardening). GraphQL can return rc=0 with
+    # a populated `errors` array + partial/null `data` — treat that as failure
+    # (no `// []` / `// false` defaults papering over missing required paths).
+    if ! jq -e '.errors == null and (.errors|not or (.errors|length) == 0)' <<<"$page_out" >/dev/null 2>&1; then
+      # (.errors|not) guards against `errors: null`; the length==0 arm covers
+      # `errors: []`. Together: pass only when NO errors are reported.
+      local _err_summary
+      _err_summary=$(jq -r '(.errors // []) | map(.message // "unknown") | join("; ")' <<<"$page_out" 2>/dev/null | head -c 200)
+      echo "chp_github_review_threads: GraphQL errors on thread page $page (PR #$pr): $_err_summary" >&2
+      return 1
+    fi
+    # Every required response path MUST exist (non-null). No defaults — a null
+    # pullRequest, missing reviewThreads connection, or missing pageInfo is a
+    # semantic failure the walk cannot recover from.
+    if ! jq -e '
+      .data                                              != null
+      and .data.repository                               != null
+      and .data.repository.pullRequest                   != null
+      and .data.repository.pullRequest.reviewThreads     != null
+      and (.data.repository.pullRequest.reviewThreads.nodes    | type == "array")
+      and (.data.repository.pullRequest.reviewThreads.pageInfo | type == "object")
+      and (.data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage | type == "boolean")
+    ' <<<"$page_out" >/dev/null 2>&1; then
+      echo "chp_github_review_threads: malformed/incomplete response at thread page $page (PR #$pr; required data.repository.pullRequest.reviewThreads.{nodes,pageInfo} missing/null)" >&2
+      return 1
+    fi
+    # Merge this page's nodes into the accumulator (required path — no default).
     if ! acc_threads=$(jq -c --argjson acc "$acc_threads" \
-      '$acc + (.data.repository.pullRequest.reviewThreads.nodes // [])' \
+      '$acc + .data.repository.pullRequest.reviewThreads.nodes' \
       <<<"$page_out"); then
       echo "chp_github_review_threads: jq merge failed at thread page $page (PR #$pr)" >&2
       return 1
     fi
-    has_next=$(jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage // false' <<<"$page_out")
+    has_next=$(jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage' <<<"$page_out")
     end_cursor=$(jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.endCursor // ""' <<<"$page_out")
     if [ "$has_next" != "true" ]; then
       break
@@ -712,14 +749,34 @@ query($threadId: ID!, $commentCursor: String) {
           echo "chp_github_review_threads: gh api graphql failed at comment page $comment_page (thread $thread_id, PR #$pr, rc=$rc)" >&2
           return "$rc"
         fi
+        # Fail-closed validation (#401 R2 hardening) — no defaults on required
+        # comment-page fields. .errors → rc≠0; null node / missing comments
+        # connection / missing pageInfo → rc≠0.
+        if ! jq -e '.errors == null and (.errors|not or (.errors|length) == 0)' <<<"$comment_out" >/dev/null 2>&1; then
+          local _cerr_summary
+          _cerr_summary=$(jq -r '(.errors // []) | map(.message // "unknown") | join("; ")' <<<"$comment_out" 2>/dev/null | head -c 200)
+          echo "chp_github_review_threads: GraphQL errors on comment page $comment_page (thread $thread_id, PR #$pr): $_cerr_summary" >&2
+          return 1
+        fi
+        if ! jq -e '
+          .data                             != null
+          and .data.node                    != null
+          and .data.node.comments           != null
+          and (.data.node.comments.nodes    | type == "array")
+          and (.data.node.comments.pageInfo | type == "object")
+          and (.data.node.comments.pageInfo.hasNextPage | type == "boolean")
+        ' <<<"$comment_out" >/dev/null 2>&1; then
+          echo "chp_github_review_threads: malformed/incomplete response at comment page $comment_page (thread $thread_id, PR #$pr; required data.node.comments.{nodes,pageInfo} missing/null)" >&2
+          return 1
+        fi
         if ! acc_threads=$(jq -c --argjson pageResp "$comment_out" --argjson i "$idx" '
-          .[$i].comments.nodes += ($pageResp.data.node.comments.nodes // [])
-          | .[$i].comments.pageInfo = ($pageResp.data.node.comments.pageInfo // {"hasNextPage":false,"endCursor":null})
+          .[$i].comments.nodes += $pageResp.data.node.comments.nodes
+          | .[$i].comments.pageInfo = $pageResp.data.node.comments.pageInfo
         ' <<<"$acc_threads"); then
           echo "chp_github_review_threads: jq merge failed at comment page $comment_page (thread $thread_id, PR #$pr)" >&2
           return 1
         fi
-        has_next=$(jq -r '.data.node.comments.pageInfo.hasNextPage // false' <<<"$comment_out")
+        has_next=$(jq -r '.data.node.comments.pageInfo.hasNextPage' <<<"$comment_out")
         if [ "$has_next" != "true" ]; then
           break
         fi

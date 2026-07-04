@@ -1,0 +1,29 @@
+{
+  "data": {
+    "node": {
+      "comments": {
+        "pageInfo": { "hasNextPage": false, "endCursor": null },
+        "nodes": [
+          {
+            "databaseId": 300003,
+            "path": "src/nested.sh",
+            "line": 12,
+            "originalLine": 12,
+            "author": { "login": "codex[bot]" },
+            "body": "nested-c3",
+            "createdAt": "2026-02-01T00:02:00Z"
+          },
+          {
+            "databaseId": 300004,
+            "path": "src/nested.sh",
+            "line": 13,
+            "originalLine": 13,
+            "author": { "login": "codex[bot]" },
+            "body": "nested-c4",
+            "createdAt": "2026-02-01T00:03:00Z"
+          }
+        ]
+      }
+    }
+  }
+}

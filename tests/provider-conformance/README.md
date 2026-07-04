@@ -52,7 +52,7 @@ Output is one line per verb plus a summary:
 CONFORMANCE-PCONF github/github itp_list_comments PASS
 CONFORMANCE-PCONF degraded/degraded itp_edit_comment SKIP (cap: edit_comment)
 CONFORMANCE-COVERAGE PASS (spec CONTRACT-PENDING set == coverage.conf pending set, 0 verbs)
-CONFORMANCE-SUMMARY total=30 pass=30 fail=0 skip=0 pending=0
+CONFORMANCE-SUMMARY total=31 pass=31 fail=0 skip=0 pending=0
 ```
 
 The runner exits **non-zero** on any `FAIL` — a wrong-shape output, an
@@ -138,6 +138,14 @@ verbs `chp_create_pr` / `chp_approve` / `chp_merge`). No spec row carries
 empty) but stays wired so a future new-verb addition with a pending status
 would trigger it.
 
+The pending count shrinks as W1 slices land — the original 13-verb set at
+#370 has already lost `itp_list_by_state` / `itp_count_by_state` /
+`itp_list_forbidden_combos` to #371 (W1a), `itp_read_task` to #396 (W1b),
+and `chp_find_pr_for_issue` / `chp_pr_list` to #397 (W1c1), leaving **7**
+verbs pending as of #401. Prefer citing the exact list above (or the
+runner's live `CONFORMANCE-COVERAGE` line) over a bare number in prose
+elsewhere in the repo so the next slice doesn't re-drift the count.
+
 ## Governing capability map (R4)
 
 `cap-map.conf` maps each asserted verb to its governing `.caps` key (`-` for
@@ -168,10 +176,10 @@ for the full table.
   provider-neutral ITP/CHP verb contract.
 - **Out of scope**: WAIVED→LIVE caps wiring (that's `test-provider-caps-branches.sh`'s
   tripwire); error-path/pagination fixtures for the residual `CONTRACT-PENDING`
-  verbs (arrive per W1 slice); any wrapper, provider-leaf, or dispatcher
-  behavior change. (`chp_review_threads` pagination-completeness moved
-  IN scope in #401 / #347 W1f, per the "Shape + malformed-JSON handling"
-  bullet above; the degraded provider still asserts shape only.)
+  verbs (7 as of #401 — arrive per W1 slice); any wrapper, provider-leaf,
+  or dispatcher behavior change. (`chp_review_threads` pagination-completeness
+  moved IN scope in #401 / #347 W1f, per the "Shape + malformed-JSON
+  handling" bullet above; the degraded provider still asserts shape only.)
 
 ## CI placement
 

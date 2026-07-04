@@ -1,0 +1,40 @@
+{
+  "data": {
+    "repository": {
+      "pullRequest": {
+        "reviewThreads": {
+          "pageInfo": { "hasNextPage": false, "endCursor": null },
+          "nodes": [
+            {
+              "id": "PRRT_NESTED_A",
+              "isResolved": false,
+              "comments": {
+                "pageInfo": { "hasNextPage": true, "endCursor": "CCURSOR_1" },
+                "nodes": [
+                  {
+                    "databaseId": 300001,
+                    "path": "src/nested.sh",
+                    "line": 10,
+                    "originalLine": 10,
+                    "author": { "login": "codex[bot]" },
+                    "body": "nested-c1",
+                    "createdAt": "2026-02-01T00:00:00Z"
+                  },
+                  {
+                    "databaseId": 300002,
+                    "path": "src/nested.sh",
+                    "line": 11,
+                    "originalLine": 11,
+                    "author": { "login": "codex[bot]" },
+                    "body": "nested-c2",
+                    "createdAt": "2026-02-01T00:01:00Z"
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

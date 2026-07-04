@@ -73,8 +73,10 @@ provider dir and stub dir are both `mktemp -d`, cleaned by an `EXIT` trap
 
 ## Coverage table (R3)
 
-`coverage.conf` — one `verb=asserted|pending` line per verb in the 13 R2 verbs
-(`asserted`) and the 13 R3 gh-argv-passthrough verbs (`pending`). The tripwire
+`coverage.conf` — one `verb=asserted|pending` line per verb, split into the
+`asserted` set (13 at #370; grows as W1 slices land — 16 asserted / 10
+pending as of #401) and the `pending` gh-argv-passthrough set (was 13 at
+#370, is 10 as of #401). The tripwire
 test (in the runner, reported as its own `CONFORMANCE-COVERAGE` check) does a
 set-diff against every `CONTRACT-PENDING` token grepped from
 `provider-spec.md` §3.1/§3.2: every `pending` verb here MUST have the token on

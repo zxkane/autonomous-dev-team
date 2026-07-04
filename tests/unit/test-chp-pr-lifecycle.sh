@@ -251,16 +251,16 @@ env REPO="$REPO" bash -c 'gh(){ :; }; source "'"$CHP_LIB"'" 2>/dev/null; chp_pr_
 # 2. M8 review-thread shape — {thread_id, resolved, comments:[{id,path,line,…}]}.
 # ===========================================================================
 # #401 / #347 W1f: the leaf no longer passes `--jq` to `gh api graphql` — the
-# merge + normalize happen in the leaf's own jq pipeline. Missing pageInfo
-# (this single-page fixture omits it deliberately, to prove backward
-# compatibility with the pre-#401 payload shape) evaluates to `false` via
-# `.pageInfo.hasNextPage // false` and terminates the walk after one page.
+# merge + normalize happen in the leaf's own jq pipeline. The fixture MUST
+# include pageInfo{hasNextPage,endCursor} at both the reviewThreads level and
+# each thread's comments level; the #401 hardening rejects any response with
+# a missing required path (fail-closed on malformed/incomplete GraphQL data).
 echo "=== M8 review-thread shape (distinct from the ITP issue-comment shape) ==="
-_GRAPHQL_THREADS='{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[
-  {"id":"T1","isResolved":false,"comments":{"nodes":[
+_GRAPHQL_THREADS='{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[
+  {"id":"T1","isResolved":false,"comments":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[
     {"databaseId":501,"path":"src/a.sh","line":12,"originalLine":10,"author":{"login":"kane-review-agent"},"body":"fix this","createdAt":"2026-06-27T10:00:00Z"}
   ]}},
-  {"id":"T2","isResolved":true,"comments":{"nodes":[
+  {"id":"T2","isResolved":true,"comments":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[
     {"databaseId":502,"path":"src/b.sh","line":null,"originalLine":7,"author":{"login":"alice"},"body":"ok","createdAt":"2026-06-27T11:00:00Z"}
   ]}}
 ]}}}}}'
@@ -403,6 +403,73 @@ else
   echo -e "  ${RED}FAIL${NC}: TC-W1F-002 follow-up query missing threadId key"; FAIL=$((FAIL+1))
 fi
 rm -f "$np_argv_file"
+
+# TC-W1F-003a — GraphQL errors on page 1 → rc != 0, empty stdout.
+# gh returns rc=0 with a populated .errors array + partial/null .data —
+# tolerant defaults (`// []`) would have coerced this to `[]` + rc 0.
+_ERR_RESP='{"data":{"repository":{"pullRequest":null}},"errors":[{"message":"Could not resolve to a PullRequest with the number 42.","type":"NOT_FOUND"}]}'
+ge_out=$(
+  env REPO="$REPO" _MP_PAYLOAD_1="$_ERR_RESP" bash -c "
+    set -uo pipefail
+    $_mp_stub_setup
+    source '$CHP_LIB' 2>/dev/null
+    chp_review_threads 42
+    echo \"|RC=\$?|\"
+  " 2>/dev/null
+)
+ge_rc=$(sed -n 's/.*|RC=\([0-9]*\)|.*/\1/p' <<<"$ge_out")
+ge_body=$(sed -e 's/|RC=[0-9]*|//' <<<"$ge_out" | tr -d '[:space:]')
+if [[ "$ge_rc" != "0" && -z "$ge_body" ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-W1F-003a GraphQL .errors on page 1 → rc=$ge_rc, empty stdout (fail-closed on semantic errors)"; PASS=$((PASS+1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-W1F-003a GraphQL .errors coerced to success (rc=$ge_rc, body=${ge_body:0:120})"; FAIL=$((FAIL+1))
+fi
+
+# TC-W1F-003b — null pullRequest (missing required path) → rc != 0, empty stdout.
+_NULL_PR='{"data":{"repository":{"pullRequest":null}}}'
+np_out=$(
+  env REPO="$REPO" _MP_PAYLOAD_1="$_NULL_PR" bash -c "
+    set -uo pipefail
+    $_mp_stub_setup
+    source '$CHP_LIB' 2>/dev/null
+    chp_review_threads 42
+    echo \"|RC=\$?|\"
+  " 2>/dev/null
+)
+np_rc=$(sed -n 's/.*|RC=\([0-9]*\)|.*/\1/p' <<<"$np_out")
+np_body=$(sed -e 's/|RC=[0-9]*|//' <<<"$np_out" | tr -d '[:space:]')
+if [[ "$np_rc" != "0" && -z "$np_body" ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-W1F-003b null pullRequest → rc=$np_rc, empty stdout (no // [] papering)"; PASS=$((PASS+1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-W1F-003b null pullRequest coerced to success (rc=$np_rc, body=${np_body:0:120})"; FAIL=$((FAIL+1))
+fi
+
+# TC-W1F-003c — comment-page GraphQL errors mid-walk → rc != 0, empty stdout.
+# Page 1 (thread level) succeeds with a thread reporting comments.hasNextPage=true;
+# page 2 (comment level via node(id:)) returns .errors → walk aborts LOUD, no
+# partial thread set surfaces.
+_TP1='{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[
+  {"id":"TE1","isResolved":false,"comments":{"pageInfo":{"hasNextPage":true,"endCursor":"CCURSOR_ERR"},"nodes":[
+    {"databaseId":90,"path":"e.sh","line":1,"originalLine":1,"author":{"login":"u"},"body":"first","createdAt":"2026-01-01T00:00:00Z"}
+  ]}}
+]}}}}}'
+_CE2='{"data":{"node":null},"errors":[{"message":"transient upstream error"}]}'
+ce_out=$(
+  env REPO="$REPO" _MP_PAYLOAD_1="$_TP1" _MP_PAYLOAD_2="$_CE2" bash -c "
+    set -uo pipefail
+    $_mp_stub_setup
+    source '$CHP_LIB' 2>/dev/null
+    chp_review_threads 42
+    echo \"|RC=\$?|\"
+  " 2>/dev/null
+)
+ce_rc=$(sed -n 's/.*|RC=\([0-9]*\)|.*/\1/p' <<<"$ce_out")
+ce_body=$(sed -e 's/|RC=[0-9]*|//' <<<"$ce_out" | tr -d '[:space:]')
+if [[ "$ce_rc" != "0" && -z "$ce_body" ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-W1F-003c comment-page .errors mid-walk → rc=$ce_rc, empty stdout (no partial thread set)"; PASS=$((PASS+1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-W1F-003c comment-page errors coerced to partial (rc=$ce_rc, body=${ce_body:0:120})"; FAIL=$((FAIL+1))
+fi
 
 # TC-W1F-003 — mid-walk page failure → rc != 0, EMPTY stdout (fail-closed).
 fc_out=$(

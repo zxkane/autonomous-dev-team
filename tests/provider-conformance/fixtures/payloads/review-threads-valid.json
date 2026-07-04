@@ -3,11 +3,13 @@
     "repository": {
       "pullRequest": {
         "reviewThreads": {
+          "pageInfo": { "hasNextPage": false, "endCursor": null },
           "nodes": [
             {
               "id": "PRRT_1",
               "isResolved": false,
               "comments": {
+                "pageInfo": { "hasNextPage": false, "endCursor": null },
                 "nodes": [
                   {
                     "databaseId": 200001,
@@ -25,6 +27,7 @@
               "id": "PRRT_2",
               "isResolved": true,
               "comments": {
+                "pageInfo": { "hasNextPage": false, "endCursor": null },
                 "nodes": [
                   {
                     "databaseId": 200002,

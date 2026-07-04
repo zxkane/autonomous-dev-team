@@ -947,8 +947,10 @@ _run_review_threads_completeness_assert() {
   local seq_state="$work_root/.seq-$verb.state"
   local p1="$PAYLOADS/review-threads-multipage-p1.json"
   local p2="$PAYLOADS/review-threads-multipage-p2.json"
-  [[ -f "$p1" && -f "$p2" ]] || {
-    emit FAIL "$verb" "multi-page fixtures missing (expected $p1 + $p2)"
+  local np1="$PAYLOADS/review-threads-nested-p1.json"
+  local np2="$PAYLOADS/review-threads-nested-p2.json"
+  [[ -f "$p1" && -f "$p2" && -f "$np1" && -f "$np2" ]] || {
+    emit FAIL "$verb" "multi-page fixtures missing (expected $p1 + $p2 + $np1 + $np2)"
     return
   }
 
@@ -995,7 +997,42 @@ _run_review_threads_completeness_assert() {
     return
   fi
 
-  emit PASS "$verb" "multi-page completeness (2-page walk + mid-walk fail-closed)"
+  # (c) Nested comment-level completeness: page 1 (thread level) returns ONE
+  # thread with comments.pageInfo.hasNextPage=true and 2 comment nodes; a
+  # follow-up node(id:) query on page 2 returns 2 more comment nodes with
+  # hasNextPage=false. The merged thread MUST carry all 4 comments — deleting
+  # the leaf's comment-level walk would leave the thread with only 2.
+  : > "$seq_state"
+  out="$(_invoke \
+      _PCF_GH_MODE="ok" _PCF_ARGV_FILE="$argv_file" \
+      _PCF_GH_PAYLOAD_SEQ="$np1:$np2" _PCF_GH_SEQ_STATE="$seq_state" \
+      "$verb 42" 2>&1)"; rc=$?
+  if [[ "$rc" != "0" ]]; then
+    emit FAIL "$verb" "nested-completeness: expected rc 0 on nested 2-page walk, got rc=$rc (out: ${out:0:200})"
+    return
+  fi
+  if ! pcf_is_json_array "$out"; then
+    emit FAIL "$verb" "nested-completeness: nested walk did not produce a JSON array (out: ${out:0:200})"
+    return
+  fi
+  local nested_thread_count nested_comment_count nested_comment_order
+  nested_thread_count=$(jq 'length' <<<"$out" 2>/dev/null || echo 0)
+  if [[ "$nested_thread_count" != "1" ]]; then
+    emit FAIL "$verb" "nested-completeness: expected 1 thread, got $nested_thread_count (out: ${out:0:200})"
+    return
+  fi
+  nested_comment_count=$(jq '.[0].comments | length' <<<"$out" 2>/dev/null || echo 0)
+  if [[ "$nested_comment_count" != "4" ]]; then
+    emit FAIL "$verb" "nested-completeness: expected 4 merged comments in the thread (2 from page-1 + 2 from the node(id:) walk), got $nested_comment_count. Deleting the comment-level walk would leave 2. (out: ${out:0:200})"
+    return
+  fi
+  nested_comment_order=$(jq -r '[.[0].comments[].id] | join(",")' <<<"$out" 2>/dev/null || echo "")
+  if [[ "$nested_comment_order" != "300001,300002,300003,300004" ]]; then
+    emit FAIL "$verb" "nested-completeness: comment arrival order violated (got: $nested_comment_order)"
+    return
+  fi
+
+  emit PASS "$verb" "multi-page completeness (2-page thread walk + mid-walk fail-closed + nested comment-level walk)"
 }
 
 # ---------------------------------------------------------------------------
