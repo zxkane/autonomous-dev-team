@@ -52,6 +52,11 @@ PROJECT_DIR="${PROJECT_DIR:?Set PROJECT_DIR in autonomous.conf}"
 # is in scope — the helper enforces it via : "${PROJECT_ID:?...}".
 # shellcheck source=lib-config.sh
 source "${LIB_DIR}/lib-config.sh"
+# [Lane-GC PR-2 / INV-109] Guarded: a missing/broken lib-lane.sh degrades
+# kill_stale_wrapper's delegate below to a clean no-op (declare -F-gated),
+# never aborts the dispatch.
+# shellcheck source=lib-lane.sh
+source "${LIB_DIR}/lib-lane.sh" 2>/dev/null || true
 
 PID_DIR=$(pid_dir_for_project) || { echo "ERROR: cannot resolve PID dir" >&2; exit 1; }
 
@@ -132,6 +137,45 @@ kill_stale_wrapper() {
   if [[ -L "$pid_file" ]]; then
     echo "ERROR: PID file is a symlink, refusing to operate on it: $pid_file" >&2
     return 1
+  fi
+
+  # [Lane-GC PR-2 / INV-109] Registry-authoritative delegate. When a
+  # parseable, currently-DEAD lane exists for this (role, issue), reap its
+  # FULL recorded pgid set via lane_kill BEFORE the legacy old_pid-only path
+  # below runs — this reaches fan-out sidecars, the E2E lane, and smoke
+  # probes that the pre-registry logic never tracked (it only ever knew
+  # about the single PID in $pid_file). Parse-failure / no-match / still-LIVE
+  # falls straight through to the pre-existing behavior unchanged (this is
+  # additive, never a replacement): a torn/legacy lane can never brick a
+  # re-dispatch, per the design's explicit "delegate falls through to the
+  # pre-existing kill_stale_wrapper legacy path" contract.
+  #
+  # dispatch-local.sh's own TYPE (dev-new|dev-resume|review) maps to the
+  # lane's ROLE (dev|review) — both dev-new and dev-resume share one lane
+  # role, matching the shared issue-N.pid PID-file naming already in place.
+  if declare -F lane_find_latest >/dev/null 2>&1; then
+    local _lane_role
+    case "${TYPE:-}" in
+      dev-new|dev-resume) _lane_role="dev" ;;
+      review)             _lane_role="review" ;;
+      *)                  _lane_role="" ;;
+    esac
+    if [[ -n "$_lane_role" ]]; then
+      local _lane_dir _lane_liveness
+      if _lane_dir="$(lane_find_latest "$PROJECT_ID" "$_lane_role" "$ISSUE_NUM" 2>/dev/null)"; then
+        _lane_liveness="$(lane_probe "$_lane_dir" 2>/dev/null || echo unknown)"
+        if [[ "$_lane_liveness" == "dead" ]]; then
+          echo "Lane-GC: found a DEAD lane for issue #${ISSUE_NUM} (${_lane_dir}) — reaping its full recorded pgid set via lane_kill before the legacy PID-file path." >&2
+          lane_kill "$_lane_dir" 5 || true
+        fi
+        # "live" or "unknown" (unparseable): fall through untouched — a live
+        # lane must never be touched here (dispatch-local's own kill-stale
+        # call site only runs when a NEW dispatch for this issue is about to
+        # replace the current holder, so "live" here would be a same-tick
+        # race, not a stale-lane condition; the legacy PID-file path below
+        # remains the authority for that case).
+      fi
+    fi
   fi
 
   if [[ -f "$pid_file" ]]; then
