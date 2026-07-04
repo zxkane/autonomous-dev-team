@@ -486,6 +486,24 @@ OUT033D=$(bash -c '
 ' 2>&1)
 assert_contains "TC-LGC3-033d: _bounded_call does not leak a grandchild forked via command substitution inside the wrapped function (setsid + group-kill on escalation)" "CLEAN" "$OUT033D"
 
+# Regression: `wait`'s own exit status mirrors the waited-on child's — a
+# bare `wait "$cpid"` (not `wait "$cpid" || rc=$?`) for a NON-ZERO-exiting
+# wrapped call would abort the CALLING shell right there under `set -e`
+# (every real _teardown_call site runs inside a `set -euo pipefail`
+# wrapper), before the intended `return "$rc"` line ever executes. Calls
+# `_bounded_call` BARE (no `||`/`if`/`$(...)` guard) so a regression here
+# would abort this test's own subshell before it reaches its `echo`.
+OUT033E=$(bash -c '
+  set -euo pipefail
+  source "'"$LIB_LANE"'"
+  fn_nonzero() { echo "ran"; return 5; }
+  _bounded_call 5 fn_nonzero
+  echo "SCRIPT_RC=$?"
+' 2>&1)
+SCRIPT_EXIT033E=$?
+assert_eq "TC-LGC3-033e: _bounded_call under set -e propagates the wrapped call's real exit code as its OWN return, rather than aborting the caller mid-wait" "5" "$SCRIPT_EXIT033E"
+assert_contains "TC-LGC3-033e-out: wrapped function's stdout still reached the caller before the non-zero return" "ran" "$OUT033E"
+
 # ===========================================================================
 echo ""
 echo "=== TC-LGC3-034: coreutils timeout cannot wrap a bash function directly ==="

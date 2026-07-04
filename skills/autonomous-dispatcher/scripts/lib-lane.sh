@@ -749,7 +749,16 @@ _bounded_call() {
   [[ "$_old_monitor" -eq 0 ]] && set +m
   for ((i = 0; i < secs; i++)); do
     if ! kill -0 "$cpid" 2>/dev/null; then
-      wait "$cpid" 2>/dev/null; rc=$?
+      # `wait`'s own exit status mirrors the waited-on child's — under a
+      # caller's `set -e` (every real call site here runs inside a
+      # `set -euo pipefail` wrapper), a bare `wait "$cpid"` for a
+      # NON-ZERO-exiting wrapped call aborts the CALLING shell right here,
+      # before `rc=$?` ever runs (proven empirically). `|| rc=$?` — never a
+      # bare statement followed by a separate `rc=$?` line — is required on
+      # every `wait` in this function so a wrapped call's real failure exit
+      # code is captured instead of unwinding whatever shell called
+      # `_bounded_call`.
+      rc=0; wait "$cpid" 2>/dev/null || rc=$?
       cat "$outfile"
       cat "$errfile" >&2
       rm -f "$outfile" "$errfile"
@@ -761,7 +770,7 @@ _bounded_call() {
   kill -TERM -- "-${cpid}" 2>/dev/null || true
   sleep 1
   kill -KILL -- "-${cpid}" 2>/dev/null || true
-  wait "$cpid" 2>/dev/null
+  wait "$cpid" 2>/dev/null || true
   cat "$outfile"
   cat "$errfile" >&2
   rm -f "$outfile" "$errfile"
