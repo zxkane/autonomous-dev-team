@@ -281,6 +281,99 @@ assert_contains "TC-STR-011 session report still posted normally" \
 
 # ---------------------------------------------------------------------------
 echo ""
+echo "=== TC-STR-013: shim vanishes DURING the no-PR retry comment → pending-dev flip still lands (round-3 [P1]) ==="
+# ---------------------------------------------------------------------------
+# The no-PR branch (exit 0, PR_EXISTS=0) does itp_post_comment then the
+# LOAD-BEARING itp_transition_state. A successful comment re-hashes `gh`
+# back to the shim path — so a shim vanish in the window BETWEEN those two
+# writes strands the flip (issue stuck `in-progress`) unless a fresh rearm
+# precedes the flip. Simulate the mid-window vanish from INSIDE the gh stub:
+# the retry-comment invocation itself deletes the shim dir after recording.
+run_cleanup_vanish_mid_retry_comment() {
+  local record="$TMPROOT/gh-013.log"
+  local stderr_log="$TMPROOT/stderr-013.log"
+  : > "$record"; : > "$stderr_log"
+  # Recreate the shim as a REAL script (not a symlink): it must delete its
+  # own dir when it sees the retry comment, then still record the call.
+  mkdir -p "$SHIM_DIR"
+  cat > "$SHIM_DIR/gh" <<EOF
+#!/bin/bash
+echo "GH \$*" >> "\$GH_RECORD"
+echo "GH_TOKEN_SEEN=\${GH_TOKEN:-<unset>}" >> "\$GH_RECORD"
+case "\$*" in *"no PR was created"*) rm -rf "$SHIM_DIR" ;; esac
+exit 0
+EOF
+  chmod +x "$SHIM_DIR/gh"
+
+  PATH="$SHIM_DIR:$SYSTEM_DIR:$PATH" \
+  GH_WRAPPER_DIR="$SHIM_DIR" \
+  GH_RECORD="$record" \
+  AGENT_RAN="true" \
+  ISSUE_NUMBER="413" \
+  REPO="acme/widget" \
+  PID_FILE="/dev/null" \
+  SESSION_ID="test-session-013" \
+  LOG_FILE="/tmp/test.log" \
+  GH_AUTH_MODE="token" \
+  RECEIVED_SIGTERM=0 \
+  MODE="new" \
+  AGENT_CMD="claude" \
+  AGENT_DEV_MODEL="sonnet" \
+  GH_TOKEN="fresh-token-013" \
+  bash -c "
+    set +e
+    log() { echo \"[test-log] \$*\" >&2; }
+    cleanup_github_auth() { :; }
+    itp_post_comment() { gh issue comment \"\$1\" --repo \"\$REPO\" --body \"\$2\"; }
+    itp_transition_state() {
+      local args=()
+      [ -n \"\$2\" ] && args+=(--remove-label \"\$2\")
+      [ -n \"\$3\" ] && args+=(--add-label \"\$3\")
+      gh issue edit \"\$1\" --repo \"\$REPO\" \"\${args[@]}\"
+    }
+    chp_pr_list() { gh pr list \"\$@\"; echo 0; }   # 0 = the no-PR branch
+    drain_agent_pr_create() { gh drain-pr-create-probe; return 0; }
+    drain_agent_bot_triggers() { gh drain-bot-triggers-probe; return 0; }
+    _strip_path_entry() {
+      local path=\"\$1\" entry=\"\$2\"
+      [[ -n \"\$entry\" ]] || { printf '%s' \"\$path\"; return 0; }
+      local out='' seg
+      local IFS=':'
+      for seg in \$path; do
+        [[ \"\$seg\" == \"\$entry\" ]] && continue
+        if [[ -z \"\$out\" ]]; then out=\"\$seg\"; else out=\"\${out}:\${seg}\"; fi
+      done
+      printf '%s' \"\$out\"
+    }
+    # Real rearm helper, byte-identical to lib-auth.sh (same rationale as
+    # the TC-STR-002 harness: stub the rest, exercise the REAL rearm).
+    rearm_gh_resolution() {
+      hash -d gh 2>/dev/null || true
+      if [[ -n \"\${GH_WRAPPER_DIR:-}\" ]] && [[ ! -x \"\${GH_WRAPPER_DIR}/gh\" ]]; then
+        echo \"WARN: [INV-111] GH_WRAPPER_DIR (\${GH_WRAPPER_DIR}) is gone — dropped the stale 'gh' command hash and PATH entry so this write falls back to the system 'gh'.\" >&2
+        PATH=\"\$(_strip_path_entry \"\$PATH\" \"\$GH_WRAPPER_DIR\")\"
+        export PATH
+      fi
+    }
+    $CLEANUP_FN
+    # Prime the hash on the SHIM path (mirrors production).
+    gh --help >/dev/null 2>&1
+    (exit 0); cleanup
+  " 2>"$stderr_log"
+  GH_LOG_013=$(cat "$record" 2>/dev/null || true)
+  STDERR_LOG_013=$(cat "$stderr_log")
+}
+run_cleanup_vanish_mid_retry_comment
+
+assert_contains "TC-STR-013 the no-PR retry comment landed (pre-vanish)" \
+  "no PR was created" "$GH_LOG_013"
+assert_contains "TC-STR-013 the pending-dev label flip STILL landed after the mid-window vanish" \
+  "--add-label pending-dev" "$GH_LOG_013"
+assert_not_contains "TC-STR-013 no rc=127 'No such file or directory' on the flip" \
+  "No such file or directory" "$STDERR_LOG_013"
+
+# ---------------------------------------------------------------------------
+echo ""
 echo "=== Summary ==="
 echo "  PASS: $PASS"
 echo "  FAIL: $FAIL"

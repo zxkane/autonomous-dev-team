@@ -15,6 +15,7 @@
 | TC-STR-010 | `GH_WRAPPER_DIR` set, but `${GH_WRAPPER_DIR}/gh` missing (dir vanished) at cleanup entry | `hash -d gh` runs; `PATH` no longer contains `GH_WRAPPER_DIR`; a bare `gh` call resolves to the stub system `gh` |
 | TC-STR-011 | `GH_WRAPPER_DIR` set and `${GH_WRAPPER_DIR}/gh` still present (normal case) | No `hash -d` / `PATH` mutation; behavior unchanged |
 | TC-STR-012 | Fresh-token env (`GH_TOKEN` from the cleanup-time refresh) reaches the system `gh` stub after the fallback | Stub observes `GH_TOKEN` equal to the freshly refreshed value |
+| TC-STR-013 | **(round-3 [P1])** Shim vanishes DURING the no-PR retry comment (the `gh` stub deletes its own shim dir mid-call) — a successful comment has re-hashed `gh` back to the shim path, so the very next write hits the dead hash | The load-bearing `pending-dev` label flip STILL lands (a second `rearm_gh_resolution` sits between the retry comment and the flip); no rc=127 on stderr. Proven to FAIL without the second rearm |
 
 ## Layer 3 — dispatcher self-heal
 
