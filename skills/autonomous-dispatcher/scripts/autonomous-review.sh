@@ -2338,7 +2338,16 @@ for _agent in "${REVIEW_AGENTS_LIST[@]}"; do
     # print a loud, spurious error to the agent's log for a value nobody will
     # ever read again (the wrapper already resolved this agent's rc from the
     # sidecar-missing default). A deleted dir now produces silence, not noise.
-    [[ -d "$_FANOUT_DIR" ]] && printf '%s\n' "$_rc" > "$_agent_rc_file" 2>/dev/null
+    # `2>/dev/null` MUST precede `>` here: bash opens redirects left-to-right,
+    # so `> file 2>/dev/null` still opens `>` first and lets that open's ENOENT
+    # error hit the (still stdout-pointed) stderr before the dup2 to /dev/null
+    # ever applies — it does NOT suppress it. Putting `2>/dev/null` first (or
+    # equivalently wrapping the whole command in `{ ...; } 2>/dev/null`) makes
+    # stderr point at /dev/null before the `>` open is attempted, which is what
+    # actually silences the TOCTOU race window between the `[[ -d ]]` check and
+    # this write (the dir can vanish in between — see the wrapper's `rm -rf
+    # "$_FANOUT_DIR"` below).
+    [[ -d "$_FANOUT_DIR" ]] && printf '%s\n' "$_rc" 2>/dev/null > "$_agent_rc_file"
   ) &
   # Collect THIS subshell's PID so we wait only the fan-out agents below —
   # not the token-refresh daemon / heartbeat (which never exit). See the

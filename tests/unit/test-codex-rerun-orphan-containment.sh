@@ -212,7 +212,7 @@ out_rsg1=$(
   _FANOUT_DIR="$TMPDIR_RSG/gone"
   _agent_rc_file="$TMPDIR_RSG/gone/sid.rc"
   _rc=1
-  [[ -d "$_FANOUT_DIR" ]] && printf '%s\n' "$_rc" > "$_agent_rc_file" 2>/dev/null
+  [[ -d "$_FANOUT_DIR" ]] && printf '%s\n' "$_rc" 2>/dev/null > "$_agent_rc_file"
   echo "wrote=$([[ -f "$_agent_rc_file" ]] && echo yes || echo no)"
 ) 2>"$TMPDIR_RSG/stderr1"
 assert_eq "TC-RSG-001a no write attempted when the fan-out dir is gone" "wrote=no" "$out_rsg1"
@@ -224,12 +224,37 @@ out_rsg2=$(
   _FANOUT_DIR="$TMPDIR_RSG/present"
   _agent_rc_file="$TMPDIR_RSG/present/sid.rc"
   _rc=1
-  [[ -d "$_FANOUT_DIR" ]] && printf '%s\n' "$_rc" > "$_agent_rc_file" 2>/dev/null
+  [[ -d "$_FANOUT_DIR" ]] && printf '%s\n' "$_rc" 2>/dev/null > "$_agent_rc_file"
   echo "wrote=$([[ -f "$_agent_rc_file" ]] && echo yes || echo no)|content=$(cat "$_agent_rc_file" 2>/dev/null)"
 )
 assert_eq "TC-RSG-002 fan-out dir present → write proceeds unchanged" "wrote=yes|content=1" "$out_rsg2"
 
 rm -rf "$TMPDIR_RSG"
+
+# TC-RSG-001c (redirect-order regression): `> file 2>/dev/null` does NOT
+# suppress the `>` open's own ENOENT — bash opens redirects left-to-right, so
+# the file-open error hits stderr BEFORE the dup2-to-/dev/null takes effect.
+# Only `2>/dev/null > file` (stderr redirected first) actually silences it.
+# This is the TOCTOU race the [[ -d ]] check alone cannot close: the check can
+# pass and the dir can still vanish before the printf's `>` open runs.
+TMPDIR_RSG3=$(mktemp -d)
+{
+  out_rsg1c_wrongorder=$(
+    printf '%s\n' 1 > "$TMPDIR_RSG3/missing/sid.rc" 2>/dev/null
+    echo done
+  )
+} 2>"$TMPDIR_RSG3/stderr_wrongorder"
+assert_eq "TC-RSG-001c-control wrong order (> file 2>/dev/null) DOES leak stderr — proves the ordering matters" \
+  "1" "$(grep -c 'No such file or directory' "$TMPDIR_RSG3/stderr_wrongorder")"
+{
+  out_rsg1c_rightorder=$(
+    printf '%s\n' 1 2>/dev/null > "$TMPDIR_RSG3/missing/sid.rc"
+    echo done
+  )
+} 2>"$TMPDIR_RSG3/stderr_rightorder"
+assert_eq "TC-RSG-001c fix order (2>/dev/null > file) suppresses the ENOENT" \
+  "" "$(cat "$TMPDIR_RSG3/stderr_rightorder")"
+rm -rf "$TMPDIR_RSG3"
 
 echo
 echo "=== TC-RSG-003: wrapper wiring — sidecar write gated on the fan-out dir existing ==="
@@ -237,6 +262,9 @@ echo
 
 assert_grep "TC-RSG-003 sidecar printf is gated on \[\[ -d \"\$_FANOUT_DIR\" \]\]" \
   '\[\[ -d "\$_FANOUT_DIR" \]\] && printf' "$WRAPPER"
+
+assert_grep "TC-RSG-003b sidecar printf redirects stderr BEFORE the file open (2>/dev/null precedes >) so a TOCTOU-race ENOENT stays silent" \
+  'printf .%s.n. "\$_rc" 2>/dev/null > "\$_agent_rc_file"' "$WRAPPER"
 
 # ============================================================================
 # TC-RSG-004: missing-rc tolerance (pre-existing code, pinned as a regression

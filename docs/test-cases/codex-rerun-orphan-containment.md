@@ -69,8 +69,10 @@ source-of-truth grep on `autonomous-review.sh`.
 | ID | Scenario | Expected |
 |----|----------|----------|
 | TC-RSG-001 | fan-out dir deleted before the per-agent subshell's rc-sidecar write | no write attempt is made, no stderr "No such file or directory" line |
+| TC-RSG-001c | redirect-order regression: `> file 2>/dev/null` vs `2>/dev/null > file` when the file's parent dir is missing (the TOCTOU race between the `[[ -d ]]` check and the write) | the WRONG order (`>` before `2>/dev/null`) leaks the ENOENT to stderr — bash opens redirects left-to-right, so the `>` open's own error fires before the dup2 to `/dev/null` applies; only stderr-first order actually silences it |
 | TC-RSG-002 | fan-out dir present | write proceeds exactly as before (byte-identical to pre-#406) |
 | TC-RSG-003 | wrapper wiring: the sidecar `printf` is gated on `[[ -d "$_FANOUT_DIR" ]]` | source-of-truth grep |
+| TC-RSG-003b | wrapper wiring: the sidecar `printf` redirects stderr BEFORE the file open (`2>/dev/null` precedes `>`) | source-of-truth grep — closes the TOCTOU race TC-RSG-001c proves exists under the naive order |
 
 ## Missing-rc tolerance (existing contract, pinned here)
 
