@@ -170,6 +170,18 @@ run_cleanup_with_vanished_shim() {
       done
       printf '%s' \"\$out\"
     }
+    # [INV-111] (#402 review round-1 [P1]) same shared helper cleanup() now
+    # calls before EACH load-bearing write — real definition, byte-identical
+    # to lib-auth.sh (this harness stubs lib-auth's OTHER functions but must
+    # exercise the REAL rearm logic to prove the per-write re-arm works).
+    rearm_gh_resolution() {
+      hash -d gh 2>/dev/null || true
+      if [[ -n \"\${GH_WRAPPER_DIR:-}\" ]] && [[ ! -x \"\${GH_WRAPPER_DIR}/gh\" ]]; then
+        echo \"WARN: [INV-111] GH_WRAPPER_DIR (\${GH_WRAPPER_DIR}) is gone — dropped the stale 'gh' command hash and PATH entry so this write falls back to the system 'gh'.\" >&2
+        PATH=\"\$(_strip_path_entry \"\$PATH\" \"\$GH_WRAPPER_DIR\")\"
+        export PATH
+      fi
+    }
     $CLEANUP_FN
     # Prime bash's command hash for 'gh' by resolving it once BEFORE the
     # shim vanishes — mirrors production, where auth setup (setup_github_auth)

@@ -49,6 +49,7 @@
     {"file": "lib-dispatch.sh",     "movement": "pending-dev|pending-review",                             "anchor": "Re-routing to review (last review failed"},
     {"file": "lib-dispatch.sh",     "movement": "pending-dev|in-progress",                                "anchor": "INV-35 fresh-dev pre-spawn step failed"},
     {"file": "lib-dispatch.sh",     "movement": "pending-dev|in-progress",                                "anchor": "self-heal dev-new pre-spawn step failed"},
+    {"file": "lib-dispatch.sh",     "movement": "pending-dev|pending-review",                             "anchor": "self-heal-non-substantive"},
     {"file": "lib-dispatch.sh",     "movement": "pending-dev|pending-review",                             "anchor": "transitioning to pending-review instead of"},
     {"file": "dispatcher-tick.sh",  "movement": "|in-progress",                                           "anchor": "dispatching dev-new for issue #${issue_num}\""},
     {"file": "dispatcher-tick.sh",  "movement": "pending-review|reviewing",                               "anchor": "dispatching review for issue"},

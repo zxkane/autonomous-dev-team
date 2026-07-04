@@ -828,32 +828,21 @@ EOF
     fi
   fi
 
-  # [INV-111] (#402) `gh`-resolution resilience: if the per-run auth shim dir
-  # (GH_WRAPPER_DIR, prepended to PATH in setup_github_auth) vanished mid-run
-  # (external deletion, a racing cleanup — the deleter is unidentified and
-  # this fix is deliberately deleter-agnostic), bash's command hash for `gh`
-  # still points at the now-dead symlink: PATH is only re-searched when
-  # there is NO cached location, never when a cached location stops
-  # existing. Every subsequent bare `gh` call in THIS shell (the session
-  # report post, the brokers, the PR-exists lookup, the label flip) would
-  # then fail rc=127 regardless of how healthy the rest of auth is. Detect
-  # the vanished shim once, here — before any of those calls — drop the
-  # stale hash, and strip the dead entry from PATH so resolution falls back
-  # to the system `gh` using the GH_TOKEN just refreshed above. A no-op
-  # (and harmless) when the shim is still intact.
-  # The quoted 'gh' argument below is deliberate: the [INV-91] cutover guard
-  # scans caller-layer code for raw `gh ` call sites (token + trailing space),
-  # and both `hash -d`'s argument and the WARN text would false-positive as
-  # unbaselined raw-gh — the baseline may only SHRINK for existing files, so
-  # ratifying them is not an option. Quoting is byte-identical to bash.
-  if [[ -n "${GH_WRAPPER_DIR:-}" ]] && [[ ! -x "${GH_WRAPPER_DIR}/gh" ]]; then
-    log "WARNING: [INV-111] GH_WRAPPER_DIR (${GH_WRAPPER_DIR}) is gone — dropping the stale 'gh' command hash and PATH entry so cleanup's 'gh' calls fall back to the system 'gh'."
-    hash -d 'gh' 2>/dev/null || true
-    if declare -F _strip_path_entry >/dev/null 2>&1; then
-      PATH="$(_strip_path_entry "$PATH" "$GH_WRAPPER_DIR")"
-      export PATH
-    fi
-  fi
+  # [INV-111] (#402 review round-1 [P1]) `gh`-resolution resilience: re-arm
+  # resolution via the shared `rearm_gh_resolution` (lib-auth.sh) immediately
+  # before EACH load-bearing `gh`-touching write below — NOT once here at
+  # cleanup entry. The per-run auth shim dir (GH_WRAPPER_DIR, prepended to
+  # PATH in setup_github_auth) can vanish mid-run (external deletion, a
+  # racing cleanup — the deleter is unidentified and this fix is deliberately
+  # deleter-agnostic) at ANY point in this function's lifetime: the incident
+  # proved the dir was alive at a token-daemon refresh and gone nine minutes
+  # later. An entry-time-only probe (the pre-review-round-1 version of this
+  # fix) can pass here and still never re-arm for a write further down —
+  # every `rearm_gh_resolution` call site below closes that gap. A no-op
+  # (and harmless) when the shim is still intact — see the helper's doc
+  # comment in lib-auth.sh for why the two internal steps are safe to run
+  # unconditionally on every call.
+  rearm_gh_resolution
 
   # [INV-111] (#402) Post the Agent Session Report FIRST — before the
   # INV-79 brokers and the PR-exists lookup below. This is the dispatcher's
@@ -898,12 +887,20 @@ EOF
 EOF
 )" || log "WARNING: Failed to post session report comment"
 
+  # [INV-111] (#402 review round-1 [P1]) re-arm before this load-bearing write
+  # (drain_agent_pr_create's own `gh`/chp_create_pr calls) — see the entry-point
+  # rearm_gh_resolution call above for why a per-write re-arm is required.
+  rearm_gh_resolution
+
   # [INV-79] PR-create broker: if the scoped agent token is armed and the agent
   # wrote a PR title+body (it cannot `gh pr create` with pull_requests:read),
   # open the PR now with the wrapper's full-write token — BEFORE the PR_EXISTS
   # lookup below so a brokered create routes the success path to pending-review.
   # No-op when scoping is off or the agent already created the PR directly.
   drain_agent_pr_create "$ISSUE_NUMBER" "$REPO" || true
+
+  # [INV-111] (#402 review round-1 [P1]) re-arm before the PR_EXISTS lookup.
+  rearm_gh_resolution
 
   # Look up PR-exists state once (used by SIGTERM rewrite and the success path).
   # [INV-87] (W1c1, #397) body-mention existence lookup → chp_pr_list abstract
@@ -928,6 +925,9 @@ EOF
   # (#234 review [P1]) restricts the broker to EXACT configured REVIEW_BOTS triggers —
   # only post a line that matches one. Empty/undefined → fail-closed (nothing posted).
   if [[ "${PR_EXISTS:-0}" -gt 0 ]]; then
+    # [INV-111] (#402 review round-1 [P1]) re-arm before drain_agent_bot_triggers'
+    # own `gh`/gh-as-user.sh calls.
+    rearm_gh_resolution
     local _bot_allowlist=""
     if declare -F bot_trigger_allowlist >/dev/null 2>&1; then
       _bot_allowlist=$(bot_trigger_allowlist "${REVIEW_BOTS:-}" 2>/dev/null || true)
@@ -947,6 +947,10 @@ EOF
       log "Caught SIGTERM with no PR; keeping exit_code ${exit_code} (will route to pending-dev)."
     fi
   fi
+
+  # [INV-111] (#402 review round-1 [P1]) re-arm before the label-flip write —
+  # the final load-bearing `gh`-touching write in this function.
+  rearm_gh_resolution
 
   # Transition labels based on whether agent succeeded or failed
   if [[ $exit_code -eq 0 ]]; then

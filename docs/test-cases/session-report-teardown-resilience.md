@@ -20,10 +20,14 @@
 
 | ID | Scenario | Expected |
 |---|---|---|
-| TC-STR-020 | `handle_pending_dev_pr_exists` same-HEAD branch; `extract_dev_session_id` empty; no live wrapper (`may_stall_now` eligible) | Exactly one `dev-new` dispatch + `self-heal-lost-session:<head>` marker comment; NO `stale-verdict:` park |
+| TC-STR-020 | `handle_pending_dev_pr_exists` same-HEAD branch; `extract_dev_session_id` empty; no live wrapper (`may_stall_now` eligible); classified verdict = `failed-substantive` (dev-actionable=true) or `none` | Exactly one `dev-new` dispatch + `self-heal-lost-session:<head>` marker comment; NO `stale-verdict:` park |
 | TC-STR-021 | Same as TC-STR-020, second tick, same HEAD (marker already present) | No-op: zero additional dispatch, park stays bounded |
 | TC-STR-022 | Same as TC-STR-020 but a wrapper IS alive (`may_stall_now` → defer) | NO dispatch; falls through to the existing residual `stale-verdict:` park |
 | TC-STR-023 | Same-HEAD branch with a resolvable session id (existing #351 delegation path) | Unaffected — routes through `handle_completed_session_routing` as before; self-heal never engages when a session id resolves |
+| TC-STR-024 | Self-heal preconditions met (no session id, no live wrapper), classified verdict = `passed` (race) | No-op — no dev-new, no marker, no park; Step 0 hygiene reconciles next tick |
+| TC-STR-025 | Self-heal preconditions met, classified verdict = `failed-non-substantive` | Label-flip `pending-dev → pending-review` + `self-heal-non-substantive:<head>` marker; NO `dev-new` |
+| TC-STR-026 | Same as TC-STR-025, second tick, same HEAD (marker already present) | No second re-review flip; falls through to residual `stale-verdict:` park |
+| TC-STR-027 | Self-heal preconditions met, classified `dev-actionable=false` ([INV-92]) | `mark_stalled` + `self-heal-non-actionable:<head>` marker; NO `dev-new`; NO `stale-verdict:` park |
 
 ## E2E
 

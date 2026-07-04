@@ -404,6 +404,48 @@ _strip_path_entry() {
   printf '%s' "$out"
 }
 
+# [INV-111] (#402 review round-1 [P1]) rearm_gh_resolution — re-arm `gh`
+# resolution against a vanished per-run auth shim dir (GH_WRAPPER_DIR). Call
+# this immediately before EACH load-bearing `gh`-touching write in a cleanup
+# sequence, not once at cleanup entry: the #402 incident proved the shim dir
+# can vanish AT ANY POINT mid-cleanup (alive at a token-daemon refresh, gone
+# nine minutes later) — an entry-time-only probe can pass and never re-arm
+# for a later write in the SAME shell.
+#
+# Two independent, idempotent steps, safe to call unconditionally on every
+# write:
+#   1. `hash -d gh` unconditionally. Bash's command hash caches a resolved
+#      binary's path and is NOT invalidated when that path's file disappears
+#      (PATH is only re-searched when there is no cached location, never
+#      when a cached one stops existing). Dropping the hash is cheap and
+#      harmless even when the shim is alive — the very next `gh` call just
+#      re-resolves via a fresh PATH search and re-hashes the SAME shim path.
+#      `|| true` is load-bearing under `set -euo pipefail`: `hash -d`'s rc on
+#      an unhashed name is version-dependent.
+#   2. Strip the dead GH_WRAPPER_DIR PATH entry — but ONLY when it is
+#      actually dead (`[[ ! -x "${GH_WRAPPER_DIR}/gh" ]]`). Unlike the hash
+#      drop, this step is conditional: stripping a STILL-ALIVE shim entry
+#      would silently downgrade every subsequent `gh` call from the
+#      auto-refreshing shim to a static `GH_TOKEN` snapshot, losing the
+#      shim's whole reason to exist. Skipped entirely when GH_WRAPPER_DIR was
+#      never set (no scoping / no shim armed this run).
+#
+# Command-substitution subshells inherit the parent shell's hash table, so a
+# parent-shell call also covers `$(...)`-invoked `gh` calls and sourced
+# provider functions.
+rearm_gh_resolution() {
+  # Quoted 'gh' argument (not a bare token): the [INV-91] cutover guard
+  # (check-provider-cutover.sh) scans for raw `gh ` call sites (token +
+  # trailing space) tree-wide, and an unquoted `hash -d gh` would false-
+  # positive as an unbaselined raw-gh site. Quoting is byte-identical to bash.
+  hash -d 'gh' 2>/dev/null || true
+  if [[ -n "${GH_WRAPPER_DIR:-}" ]] && [[ ! -x "${GH_WRAPPER_DIR}/gh" ]]; then
+    echo "WARN: [INV-111] GH_WRAPPER_DIR (${GH_WRAPPER_DIR}) is gone — dropped the stale 'gh' command hash and PATH entry so this write falls back to the system 'gh'." >&2
+    PATH="$(_strip_path_entry "$PATH" "$GH_WRAPPER_DIR")"
+    export PATH
+  fi
+}
+
 # [INV-79] drain_agent_pr_create — the narrow PR-CREATE broker. `gh pr create`
 # requires pull_requests:write, which the scoped agent token (pull_requests:read)
 # does NOT have — but the agent must still be able to open its PR. So when the

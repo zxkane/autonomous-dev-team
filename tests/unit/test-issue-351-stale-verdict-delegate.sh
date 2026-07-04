@@ -92,12 +92,14 @@ set +e
 # INV-35-fresh-dev / no-progress-substantive-attempt. Echo the tokens the
 # per-test knobs enable.
 _MOCK_SELF_HEAL_PRESENT=0
+_MOCK_SELF_HEAL_NONSUB_PRESENT=0
 itp_list_comments() {
   _rec itp_list_comments "$@"
   local body="baseline comment"
   [ "$_MOCK_NOTICE_PRESENT" = "1" ] && body+=" stale-verdict:${_MOCK_CURRENT_HEAD} INV-12-completed:${_MOCK_SESSION_ID:-sid} no-progress-substantive:${_MOCK_CURRENT_HEAD} INV-35-fresh-dev:${_MOCK_SESSION_ID:-sid}"
   [ "$_MOCK_ATTEMPT_PRESENT" = "1" ] && body+=" no-progress-substantive-attempt:${_MOCK_CURRENT_HEAD}"
   [ "$_MOCK_SELF_HEAL_PRESENT" = "1" ] && body+=" self-heal-lost-session:${_MOCK_CURRENT_HEAD}"
+  [ "$_MOCK_SELF_HEAL_NONSUB_PRESENT" = "1" ] && body+=" self-heal-non-substantive:${_MOCK_CURRENT_HEAD}"
   printf '%s\n' "[{\"body\":\"${body}\"}]"
 }
 itp_post_comment()    { _rec itp_post_comment "$@"; }
@@ -179,7 +181,7 @@ _reset() {
   _MOCK_VERDICT='none'; _MOCK_CAUSE=''; _MOCK_DEV_ACTIONABLE='true'
   _MOCK_FLIP_COUNT=0; _MOCK_CURRENT_HEAD='sha-A'
   _MOCK_BOT_UNFIXABLE=1; _MOCK_NOTICE_PRESENT=0; _MOCK_ATTEMPT_PRESENT=0
-  _MOCK_MAY_STALL_NOW=0; _MOCK_SELF_HEAL_PRESENT=0
+  _MOCK_MAY_STALL_NOW=0; _MOCK_SELF_HEAL_PRESENT=0; _MOCK_SELF_HEAL_NONSUB_PRESENT=0
 }
 
 # Configure a same-HEAD PR-exists scenario with a completed dev session.
@@ -320,6 +322,86 @@ rc=$?
 assert_eq   "TC-351-DELEG-7a-SELFHEAL-BOUND returns 0" "0" "$rc"
 assert_eq   "TC-351-DELEG-7a-SELFHEAL-BOUND ZERO dev-new (bounded)" "0" "$(_trace_verbs | grep -c '^dispatch$')"
 assert_match "TC-351-DELEG-7a-SELFHEAL-BOUND falls to residual stale-verdict park" "stale-verdict:sha-A" "$(_trace_all)"
+
+# ===================================================================
+echo
+echo "=== TC-351-DELEG-7a-SELFHEAL-PASSED: no session id + no live wrapper + verdict=passed (race) → no-op, NO dev-new, NO park ==="
+# [INV-111] (#402 review round-1 [P1] finding 2): the self-heal branch must
+# classify the verdict before dispatching, mirroring
+# handle_completed_session_routing's own `passed` race branch.
+_reset; _same_head_completed
+_MOCK_SESSION_ID=''
+_MOCK_COMPLETED_RC=0; _MOCK_TERMINAL_REASON='completed'
+_MOCK_MAY_STALL_NOW=0
+_MOCK_VERDICT='passed'
+handle_pending_dev_pr_exists 99
+rc=$?
+assert_eq   "TC-351-DELEG-7a-SELFHEAL-PASSED returns 0" "0" "$rc"
+assert_eq   "TC-351-DELEG-7a-SELFHEAL-PASSED ZERO dev-new" "0" "$(_trace_verbs | grep -c '^dispatch$')"
+assert_no_match "TC-351-DELEG-7a-SELFHEAL-PASSED no self-heal marker posted" "self-heal-lost-session:" "$(_trace_all)"
+assert_no_match "TC-351-DELEG-7a-SELFHEAL-PASSED NO stale-verdict park (race, Step 0 reconciles)" "stale-verdict:" "$(_trace_all)"
+
+# ===================================================================
+echo
+echo "=== TC-351-DELEG-7a-SELFHEAL-NONSUB: no session id + no live wrapper + verdict=failed-non-substantive → pending-review, NO dev-new ==="
+_reset; _same_head_completed
+_MOCK_SESSION_ID=''
+_MOCK_COMPLETED_RC=0; _MOCK_TERMINAL_REASON='completed'
+_MOCK_MAY_STALL_NOW=0
+_MOCK_VERDICT='failed-non-substantive'; _MOCK_CAUSE='bot-timeout'
+handle_pending_dev_pr_exists 99
+rc=$?
+assert_eq   "TC-351-DELEG-7a-SELFHEAL-NONSUB returns 0" "0" "$rc"
+assert_match "TC-351-DELEG-7a-SELFHEAL-NONSUB label_swap pending-dev → pending-review" "itp_transition_state${US}99${US}pending-dev${US}pending-review" "$(_trace_all)"
+assert_eq   "TC-351-DELEG-7a-SELFHEAL-NONSUB ZERO dev-new" "0" "$(_trace_verbs | grep -c '^dispatch$')"
+assert_match "TC-351-DELEG-7a-SELFHEAL-NONSUB posts self-heal-non-substantive marker" "self-heal-non-substantive:sha-A" "$(_trace_all)"
+assert_no_match "TC-351-DELEG-7a-SELFHEAL-NONSUB NO stale-verdict park" "stale-verdict:" "$(_trace_all)"
+
+# ===================================================================
+echo
+echo "=== TC-351-DELEG-7a-SELFHEAL-NONSUB-BOUND: second same-HEAD non-substantive verdict (marker present) → falls to residual park, NOT a second re-review flip ==="
+_reset; _same_head_completed
+_MOCK_SESSION_ID=''
+_MOCK_COMPLETED_RC=0; _MOCK_TERMINAL_REASON='completed'
+_MOCK_MAY_STALL_NOW=0
+_MOCK_VERDICT='failed-non-substantive'; _MOCK_CAUSE='bot-timeout'
+_MOCK_SELF_HEAL_NONSUB_PRESENT=1
+handle_pending_dev_pr_exists 99
+rc=$?
+assert_eq   "TC-351-DELEG-7a-SELFHEAL-NONSUB-BOUND returns 0" "0" "$rc"
+assert_eq   "TC-351-DELEG-7a-SELFHEAL-NONSUB-BOUND ZERO dev-new" "0" "$(_trace_verbs | grep -c '^dispatch$')"
+assert_no_match "TC-351-DELEG-7a-SELFHEAL-NONSUB-BOUND no second pending-review flip" "pending-dev${US}pending-review" "$(_trace_all)"
+assert_match "TC-351-DELEG-7a-SELFHEAL-NONSUB-BOUND falls to residual stale-verdict park" "stale-verdict:sha-A" "$(_trace_all)"
+
+# ===================================================================
+echo
+echo "=== TC-351-DELEG-7a-SELFHEAL-NONACTIONABLE: no session id + no live wrapper + dev-actionable=false ([INV-92]) → mark_stalled, NO dev-new ==="
+_reset; _same_head_completed
+_MOCK_SESSION_ID=''
+_MOCK_COMPLETED_RC=0; _MOCK_TERMINAL_REASON='completed'
+_MOCK_MAY_STALL_NOW=0
+_MOCK_VERDICT='failed-substantive'; _MOCK_DEV_ACTIONABLE='false'
+handle_pending_dev_pr_exists 99
+rc=$?
+assert_eq   "TC-351-DELEG-7a-SELFHEAL-NONACTIONABLE returns 0" "0" "$rc"
+assert_match "TC-351-DELEG-7a-SELFHEAL-NONACTIONABLE mark_stalled fired" "^mark_stalled" "$(_trace_all)"
+assert_eq   "TC-351-DELEG-7a-SELFHEAL-NONACTIONABLE ZERO dev-new" "0" "$(_trace_verbs | grep -c '^dispatch$')"
+assert_match "TC-351-DELEG-7a-SELFHEAL-NONACTIONABLE posts self-heal-non-actionable marker" "self-heal-non-actionable:sha-A" "$(_trace_all)"
+assert_no_match "TC-351-DELEG-7a-SELFHEAL-NONACTIONABLE NO stale-verdict park" "stale-verdict:" "$(_trace_all)"
+
+# ===================================================================
+echo
+echo "=== TC-351-DELEG-7a-SELFHEAL-SUBSTANTIVE: no session id + no live wrapper + verdict=failed-substantive (dev-actionable=true, explicit) → self-heal dev-new (unchanged) ==="
+_reset; _same_head_completed
+_MOCK_SESSION_ID=''
+_MOCK_COMPLETED_RC=0; _MOCK_TERMINAL_REASON='completed'
+_MOCK_MAY_STALL_NOW=0
+_MOCK_VERDICT='failed-substantive'; _MOCK_DEV_ACTIONABLE='true'
+handle_pending_dev_pr_exists 99
+rc=$?
+assert_eq   "TC-351-DELEG-7a-SELFHEAL-SUBSTANTIVE returns 0" "0" "$rc"
+assert_match "TC-351-DELEG-7a-SELFHEAL-SUBSTANTIVE dispatched exactly one self-heal dev-new" "^dispatch${US}dev-new${US}99$" "$(_trace_all)"
+assert_match "TC-351-DELEG-7a-SELFHEAL-SUBSTANTIVE posts self-heal marker" "self-heal-lost-session:sha-A" "$(_trace_all)"
 
 # ===================================================================
 echo

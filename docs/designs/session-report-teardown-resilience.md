@@ -43,15 +43,24 @@ decision itself still uses the rewritten `$exit_code`.
 
 ### Layer 2 — `gh` resolution resilience
 
-Right after the token refresh (and before the now-earlier session-report
-post), detect a vanished `GH_WRAPPER_DIR` (`[[ ! -x
-"${GH_WRAPPER_DIR}/gh" ]]`), drop bash's stale command hash (`hash -d gh`),
-and strip the dead entry from `PATH` (reusing `_strip_path_entry`, already
-defined in `lib-auth.sh`). PATH search skips nonexistent directories, so
-resolution falls back to the system `gh` — using the `GH_TOKEN` the refresh
-step just exported. This protects every subsequent `gh`-touching write in
-`cleanup()` (report, brokers, PR-exists lookup, label flip), not just the
-first one.
+A shared `rearm_gh_resolution` helper (`lib-auth.sh`) is called immediately
+before EACH load-bearing `gh`-touching write in `cleanup()` — the report
+post, `drain_agent_pr_create`, the `PR_EXISTS` lookup, `drain_agent_bot_triggers`,
+and the label flip — not once at cleanup entry. The incident proved the
+vanish can happen at ANY point mid-cleanup (the shim dir was alive at a
+token-daemon refresh and gone nine minutes later); an entry-time-only probe
+can pass and never re-arm for a write further down the same function.
+
+The helper: unconditionally drops bash's stale command hash (`hash -d gh`,
+cheap and harmless even when the shim is alive — the next call just
+re-resolves and re-hashes the same path), then — only when
+`${GH_WRAPPER_DIR}/gh` is actually missing — strips the dead `PATH` entry
+(reusing `_strip_path_entry`, already defined in `lib-auth.sh`). PATH search
+skips nonexistent directories, so resolution falls back to the system `gh`
+using the `GH_TOKEN` the refresh step just exported. `autonomous-review.sh`'s
+own cleanup path can adopt the same helper for its `drain_agent_bot_triggers`
+call site as a follow-up (this PR ships the shared helper; review-wrapper
+wiring is out of scope here).
 
 ### Layer 3 — dispatcher self-heal (INV-98/INV-35 extension)
 
@@ -59,11 +68,33 @@ In `handle_pending_dev_pr_exists`'s same-HEAD residual-park branch: when
 `extract_dev_session_id` returns empty (no session id resolvable at all —
 the exact symptom of a lost session report) AND no dev wrapper is alive for
 the issue (`may_stall_now`, the shared [INV-24]/[INV-26]-style
-`pid_alive`-miss + no-fresh-heartbeat predicate), dispatch ONE fresh
-`dev-new` instead of parking. Bounded per-HEAD via a persistent marker
-comment (`self-heal-lost-session:<head>`, INV-85 pattern) so a dev-new that
-itself crashes before posting its own session id cannot hot-loop. Gated
-behind `acquire_dispatch_marker`/`dispatch_marker_confirm_launched`/
+`pid_alive`-miss + no-fresh-heartbeat predicate), classify the newest
+post-review verdict comment (`classify_recent_review_verdict`, the SAME
+classifier `handle_completed_session_routing` uses — called with an empty
+`session_end_iso`, since there is no session to anchor to; every ISO-8601
+timestamp sorts greater than `""`, so the classifier still returns the
+newest qualifying trailer) BEFORE deciding what to dispatch:
+
+- `passed` (race) → no-op, let Step 0 hygiene reconcile.
+- `failed-non-substantive` → label-flip to `pending-review` (re-review, not
+  a dev-new), bounded per-HEAD via `self-heal-non-substantive:<head>`.
+- `dev-actionable=false` ([INV-92]) → `mark_stalled` with an operator
+  @-mention, bounded per-HEAD via `self-heal-non-actionable:<head>`.
+- `failed-substantive` (dev-actionable=true) or `none` (no classifiable
+  verdict found — fail-open, same posture as the classifier's own
+  legacy-no-trailer fallback) → dispatch ONE fresh `dev-new`, bounded
+  per-HEAD via `self-heal-lost-session:<head>` (INV-85 pattern), so a
+  dev-new that itself crashes before posting its own session id cannot
+  hot-loop.
+
+Without this classification step, a `failed-non-substantive` (bot/CI
+transport hiccup — the code is fine) or a `dev-actionable=false` (every
+blocking finding requires a human/privileged token) verdict would be treated
+exactly like a genuine substantive code failure, wasting a `dev-new` the
+agent can never use to satisfy either.
+
+Every dispatch-bearing branch is gated behind
+`acquire_dispatch_marker`/`dispatch_marker_confirm_launched`/
 `release_dispatch_marker` ([INV-108]) like every other dev-new dispatch site
 in this router, so a concurrent tick can't double-dispatch.
 
