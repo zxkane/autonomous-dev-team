@@ -366,6 +366,33 @@ _run_object_shape_assert() {
     emit FAIL "$verb" "labels not normalized to a name-string array: ${out:0:200}"
     return
   fi
+  # Normalized-comments enforcement (#396 review r3): when `comments` is
+  # requested, the INV-90 shape must actually hold — every element carries
+  # {id, author, authorKind, body, createdAt}, authorKind ∈ self|bot|human,
+  # ascending createdAt. Crucially, the REST comments fixture contains
+  # `[bot]`-suffixed logins (`"type": "Bot"`); a provider regressing to a
+  # GraphQL-style comments source (which strips the suffix and exposes no
+  # author type) would classify them authorKind="human" and MUST fail here —
+  # without this check a comments-normalization regression sails through and
+  # AC5 is not enforced for the field that motivated review r2.
+  if ! jq -e '
+      has("comments") and (.comments | type == "array")
+      and (.comments | all(
+            (has("id") and has("author") and has("authorKind") and has("body") and has("createdAt"))
+            and (.authorKind | IN("self","bot","human"))
+          ))
+      and ((.comments | map(.createdAt // "")) as $ts | $ts == ($ts | sort))
+    ' >/dev/null 2>&1 <<<"$out"; then
+    emit FAIL "$verb" "comments not the INV-90 normalized array (keys/authorKind/ascending): ${out:0:300}"
+    return
+  fi
+  # Bot-classification tripwire: the fixture's `[bot]` logins must classify
+  # authorKind="bot" (REST-derived) — never "human" (the GraphQL-source
+  # regression this assert exists to catch).
+  if ! jq -e '[.comments[] | select(.author | tostring | endswith("[bot]"))] | length > 0 and all(.authorKind == "bot")' >/dev/null 2>&1 <<<"$out"; then
+    emit FAIL "$verb" "bot-suffixed comment authors not classified authorKind=bot (GraphQL-source regression): ${out:0:300}"
+    return
+  fi
 
   # Fields-subset: a body-only request must return EXACTLY {body}.
   local body_only
