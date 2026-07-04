@@ -45,8 +45,8 @@ gh_pass_count="$(grep -c '^CONFORMANCE-PCONF github/github .* PASS$' <<<"$gh_out
 # [#399 W1d] +4: chp_ci_status runs 3 PASS lines (all-success/mixed-failure/
 # empty token assertions) and chp_mergeable runs 1 (MERGEABLE token +
 # fail-closed).
-assert_eq "AC1: __TC_PCONF_014_PASS_COUNT__ PASS lines on github/github (23 asserted verbs + #393 list_comments field + W1c2/W1d extra assertion lines)" "__TC_PCONF_014_PASS_COUNT__" "$gh_pass_count"
-assert_contains "AC1: CONFORMANCE-SUMMARY line present with fail=0" "__TC_PCONF_014_SUMMARY__" "$gh_out"
+assert_eq "AC1: 26 PASS lines on github/github (23 asserted verbs + #393 list_comments field + W1c2/W1d extra assertion lines)" "26" "$gh_pass_count"
+assert_contains "AC1: CONFORMANCE-SUMMARY line present with fail=0" "CONFORMANCE-SUMMARY total=29 pass=26 fail=0 skip=0 pending=3" "$gh_out"
 assert_contains "TC-PCONF-043: itp_read_task (github) PASSes the object-shape/fields-subset/fail-closed assertion" \
   "CONFORMANCE-PCONF github/github itp_read_task PASS" "$gh_out"
 
@@ -75,7 +75,7 @@ broken_pass_count="$(grep -c '^CONFORMANCE-PCONF broken/broken .* PASS$' <<<"$br
 # [#396] +1: itp_read_task flipped pending->asserted (W1b) and the broken fixture
 # defines a correct (not-targeted) leaf for it.
 # [#397] +2: W1c1 added chp_find_pr_for_issue + chp_pr_list (correct broken-provider leaves).
-assert_eq "AC2: __TC_PCONF_BROKEN_PASS_COUNT__ non-targeted PASS lines (12 pre-W1a + read_task + 2 W1c1 + 2 W1c2 + 4 W1d assertion lines)" "__TC_PCONF_BROKEN_PASS_COUNT__" "$broken_pass_count"
+assert_eq "AC2: 21 non-targeted PASS lines (12 pre-W1a + read_task + 2 W1c1 + 2 W1c2 + 4 W1d assertion lines)" "21" "$broken_pass_count"
 
 # ===========================================================================
 echo ""
@@ -98,7 +98,7 @@ deg_pass_count="$(grep -c '^CONFORMANCE-PCONF degraded/degraded .* PASS$' <<<"$d
 # [#399 W1d] +4: chp_ci_status (3 PASS lines) + chp_mergeable (1) — degraded's
 # leaves mirror GitHub structurally, so they PASS the same token-set/
 # fail-closed assertions.
-assert_eq "TC-PCONF-033: __TC_PCONF_DEG_PASS_COUNT__ PASS lines on degraded (20 asserted verbs + #393 list_comments + W1c2/W1d extra assertion lines)" "__TC_PCONF_DEG_PASS_COUNT__" "$deg_pass_count"
+assert_eq "TC-PCONF-033: 23 PASS lines on degraded (20 asserted verbs + #393 list_comments + W1c2/W1d extra assertion lines)" "23" "$deg_pass_count"
 
 # ===========================================================================
 echo ""
@@ -143,7 +143,7 @@ assert_contains "TC-PCONF-041: coverage.conf missing a spec-tokened verb → dif
 
 # TC-PCONF-042: a spec row carrying the token whose verb is NOT pending in coverage.conf → FAIL.
 scratch_spec="$scratch/provider-spec-drift2.md"
-sed '/`chp_create_pr PR/s/CONTRACT-PENDING//' "$SPEC_MD" > "$scratch_spec"
+sed '/`chp_create_pr /s/CONTRACT-PENDING//' "$SPEC_MD" > "$scratch_spec"
 drift2_diff="$(
   spec_pending="$(pcf_spec_pending_verbs "$scratch_spec")"
   cov_pending="$(awk -F= '/=pending$/{print $1}' "$COVERAGE_CONF" | sort -u)"

@@ -53,7 +53,7 @@ CONFORMANCE-PCONF github/github itp_list_comments PASS
 CONFORMANCE-PCONF degraded/degraded itp_edit_comment SKIP (cap: edit_comment)
 CONFORMANCE-PCONF github/github chp_create_pr PENDING (coverage.conf)
 CONFORMANCE-COVERAGE PASS (spec CONTRACT-PENDING set == coverage.conf pending set, 3 verbs)
-CONFORMANCE-SUMMARY total=__RUNNER_TOTAL__ pass=__RUNNER_PASS__ fail=0 skip=0 pending=3
+CONFORMANCE-SUMMARY total=29 pass=26 fail=0 skip=0 pending=3
 ```
 
 The runner exits **non-zero** on any `FAIL` — a wrong-shape output, an

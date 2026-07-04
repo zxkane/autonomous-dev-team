@@ -281,6 +281,136 @@ else
 fi
 
 echo
+echo "=== TC-W1D-NEG-SPACE: negative-space validation (garbage positional args + payload-type mismatches) ==="
+
+# The review-round's three doc-vs-code / negative-space / payload-type lessons
+# from #398. All three must be behaviorally true; drive the REAL leaves.
+#
+#   (a) doc-vs-code consistency: the §3.2 cells claim the leaves reject empty
+#       stdout / unknown mergeable tokens / non-array ci_status payloads with
+#       rc≠0. Prove it by driving the real leaves.
+#   (b) negative-space positional: garbage PR arg (empty, non-numeric) — the
+#       leaves take positional args only (no FIELDS_CSV), so the vocabulary
+#       allowlist class doesn't apply. But garbage MUST NOT silently succeed;
+#       the leaf must return rc≠0 with no fake token.
+#   (c) payload-type validation: a rc-0 JSON OBJECT (not array) from gh
+#       (unexpected shape / schema-drift regression) must NOT derive a bogus
+#       token — the ci_status leaf's `jq -er '[.[].state]'` on an OBJECT
+#       errors → leaf rc≠0; an ARRAY of objects without .state produces
+#       `[null,...]` which the bucket jq maps to `pending` (unlisted state)
+#       per the R1 decision order (not-green, spec-conformant).
+
+_drive_leaf_neg() {
+  # $1 = leaf verb ("chp_ci_status" or "chp_mergeable")
+  # $2 = PR positional (may be empty / bogus)
+  # $3 = _W1D_GH_STDOUT (payload the stub gh emits)
+  # $4 = _W1D_GH_RC (gh's exit code)
+  # Echo "<rc>|<stdout>".
+  local verb="$1" pr="$2" gh_stdout="$3" gh_rc="$4"
+  local out_file; out_file="$(mktemp)"
+  env -u PROJECT_DIR -u AUTONOMOUS_CONF -u AUTONOMOUS_CONF_DIR \
+      REPO=o/r _W1D_GH_STDOUT="$gh_stdout" _W1D_GH_RC="$gh_rc" \
+      _W1D_OUT="$out_file" _W1D_VERB="$verb" _W1D_PR="$pr" \
+      _W1D_CHP_LIB="$SCRIPTS/lib-code-host.sh" \
+  bash -c '
+    gh() {
+      # Honor -q like the runner stub: apply the filter with jq so
+      # chp_mergeable (which forwards -q ".mergeable") sees the filtered
+      # value rather than the raw JSON.
+      local q="" prev=""
+      for a in "$@"; do
+        if [[ "$prev" == "-q" || "$prev" == "--jq" ]]; then q="$a"; break; fi
+        prev="$a"
+      done
+      if [[ -n "$q" && -n "$_W1D_GH_STDOUT" ]]; then
+        printf "%s" "$_W1D_GH_STDOUT" | jq -r "$q" 2>/dev/null || true
+      else
+        printf "%s" "$_W1D_GH_STDOUT"
+      fi
+      return "$_W1D_GH_RC"
+    }
+    source "$_W1D_CHP_LIB" 2>/dev/null
+    tok=$("$_W1D_VERB" "$_W1D_PR" 2>/dev/null); rc=$?
+    printf "%s|%s\n" "$rc" "$tok" > "$_W1D_OUT"
+  '
+  cat "$out_file"
+  rm -f "$out_file"
+}
+
+# (a)+(b): chp_ci_status with garbage positional PR. gh (stubbed with rc≠0
+# and empty stdout, since a real gh with a bogus PR would error) must not
+# yield a token; leaf rc≠0.
+row="$(_drive_leaf_neg chp_ci_status "" "" 1)"
+rc="${row%%|*}"; tok="${row#*|}"
+if [[ "$rc" != "0" && -z "$tok" ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-W1D-NEG-SPACE (a) chp_ci_status \"\" → rc≠0 no token (rc=$rc, tok='$tok')"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-W1D-NEG-SPACE (a) chp_ci_status \"\" silently succeeded (rc=$rc, tok='$tok')"
+  FAIL=$((FAIL + 1))
+fi
+
+row="$(_drive_leaf_neg chp_ci_status "abc-not-a-pr" "" 1)"
+rc="${row%%|*}"; tok="${row#*|}"
+if [[ "$rc" != "0" && -z "$tok" ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-W1D-NEG-SPACE (a) chp_ci_status abc → rc≠0 no token (rc=$rc)"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-W1D-NEG-SPACE (a) chp_ci_status abc silently succeeded (rc=$rc, tok='$tok')"
+  FAIL=$((FAIL + 1))
+fi
+
+# (c): chp_ci_status with rc-0 JSON OBJECT payload (not array). jq -er
+# '[.[].state]' on `{"foo":"bar"}` errors → leaf rc≠0 with no token.
+row="$(_drive_leaf_neg chp_ci_status 42 '{"foo":"bar"}' 0)"
+rc="${row%%|*}"; tok="${row#*|}"
+if [[ "$rc" != "0" && -z "$tok" ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-W1D-NEG-SPACE (c) chp_ci_status rc-0 JSON OBJECT rejected (rc=$rc, tok='$tok')"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-W1D-NEG-SPACE (c) chp_ci_status rc-0 JSON OBJECT accepted (rc=$rc, tok='$tok') — a schema-drift payload must NOT derive a token"
+  FAIL=$((FAIL + 1))
+fi
+
+# (c) sibling: rc-0 array of objects WITHOUT a .state key. jq extract yields
+# [null] — the bucket jq buckets as `pending` (unlisted state, per R1 rule 3).
+# This is spec-conformant fail-CLOSED behavior (pending ≠ green → wrapper
+# treats as not-ready). Documented so a future regression doesn't accidentally
+# start deriving `green` from `[null]`.
+row="$(_drive_leaf_neg chp_ci_status 42 '[{"foo":"bar"}]' 0)"
+rc="${row%%|*}"; tok="${row#*|}"
+if [[ "$rc" == "0" && "$tok" == "pending" ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-W1D-NEG-SPACE (c) chp_ci_status [{no-state}] → pending (unlisted state, rule 3)"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-W1D-NEG-SPACE (c) chp_ci_status [{no-state}] mis-derived (rc=$rc, tok='$tok') — expected rc=0 pending"
+  FAIL=$((FAIL + 1))
+fi
+
+# (a)+(b): chp_mergeable with rc-0 empty stdout (the P2-3 fail-open latch).
+# Fixed in the review round: leaf now returns rc≠0.
+row="$(_drive_leaf_neg chp_mergeable 42 '{"mergeable":""}' 0)"
+rc="${row%%|*}"; tok="${row#*|}"
+if [[ "$rc" != "0" ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-W1D-NEG-SPACE (a) chp_mergeable rc-0 empty .mergeable → rc≠0 (P2-3 fail-closed guard)"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-W1D-NEG-SPACE (a) chp_mergeable rc-0 empty .mergeable silently accepted (rc=$rc, tok='$tok')"
+  FAIL=$((FAIL + 1))
+fi
+
+# (a)+(b): chp_mergeable with rc-0 unknown token (must reject per P2-3).
+row="$(_drive_leaf_neg chp_mergeable 42 '{"mergeable":"WHATEVER"}' 0)"
+rc="${row%%|*}"; tok="${row#*|}"
+if [[ "$rc" != "0" ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-W1D-NEG-SPACE (a) chp_mergeable rc-0 unknown token 'WHATEVER' → rc≠0"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-W1D-NEG-SPACE (a) chp_mergeable rc-0 unknown token accepted (rc=$rc, tok='$tok')"
+  FAIL=$((FAIL + 1))
+fi
+
+echo
 echo "=== TC-W1D-PARITY-MG: _classify_mergeable_gate matches the golden on the full input table ==="
 
 # The classifier is byte-unchanged; source lib-review-mergeable.sh and diff.
