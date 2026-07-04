@@ -6307,7 +6307,7 @@ _Triage (issue #236): [machine-checked: tests/unit/test-issue-402-session-report
 
 ## INV-112: a codex-review signal-death rc (including 143) terminates the re-run loop, and a defense-in-depth reap terminates the fan-out controller subshell itself (#406)
 
-_Triage (issue #406): [machine-checked: tests/unit/test-lib-review-codex.sh, tests/unit/test-codex-rerun-orphan-containment.sh]_
+_Triage (issue #236): [machine-checked: tests/unit/test-lib-review-codex.sh, tests/unit/test-codex-rerun-orphan-containment.sh]_
 
 **Rule**: the review wrapper's post-resolution reap (INV-43/INV-84) MUST NOT leave a codex fan-out member's bounded re-run controller running past "Review complete." Three layers close this, layer 1 primary:
 
