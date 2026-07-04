@@ -36,6 +36,13 @@ log() { :; }
 _MOCK_COMMENTS_JSON='{"comments":[]}'
 
 gh() {
+  # [#393] itp_list_comments reads REST (gh api --paginate --slurp .../comments).
+  # Serve the GraphQL-style fixture converted to REST page shape (type=Bot iff
+  # login ends [bot]; id=ordinal), so authorKind derivation works unchanged.
+  if [[ "${1:-}" == "api" && "${2:-}" == "--paginate" ]]; then
+    jq '(if type == "object" then (.comments // []) else . end) | [ [ .[] | {id: 0, user: {login: (.author.login // ""), type: (if ((.author.login // "") | endswith("[bot]")) then "Bot" else "User" end)}, body: (.body // ""), created_at: (.createdAt // null)} ] | to_entries | map(.value + {id: (.key + 1)}) ]' <<<"${_MOCK_COMMENTS_JSON:-[]}"
+    return 0
+  fi
   # `gh issue view ... --json comments [-q <prog>]`. With `-q`/`--jq` (the
   # dev-login + since_iso lookups), run the program against the fixture. Without
   # it (the bare `--json comments` the hits-scan pipes to a standalone jq), emit

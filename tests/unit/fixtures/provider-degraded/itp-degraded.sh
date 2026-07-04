@@ -66,17 +66,20 @@ itp_degraded_post_comment() {
 # caller-side branches (spec §4.1) that do not change this leaf's OWN contract.
 itp_degraded_list_comments() {
   local issue="$1"
-  gh issue view "$issue" --repo "$REPO" --json comments -q "
-    [ .comments[]
-      | { id: ( ( (.url // \"\") | capture(\"issuecomment-(?<n>[0-9]+)\$\") | .n | tonumber ) // null ),
-          author: (.author.login // null),
-          authorKind: ( (.author.login // \"\") as \$a
-                        | if (\$a != \"\" and \$a == \"${BOT_LOGIN:-}\") then \"self\"
-                          elif (\$a | endswith(\"[bot]\")) then \"bot\"
+  # [#393] mirrors the GitHub leaf's REST source: user.type drives bot,
+  # BOT_LOGIN matches raw or [bot]-stripped for self, author is VERBATIM.
+  gh api --paginate --slurp "repos/${REPO}/issues/${issue}/comments" | jq "
+    [ .[][]
+      | { id: (.id // null),
+          author: (.user.login // null),
+          authorKind: ( (.user.login // \"\") as \$a
+                        | ( \$a | sub(\"\\\\[bot\\\\]\$\"; \"\") ) as \$stripped
+                        | if (\$a != \"\" and \"${BOT_LOGIN:-}\" != \"\" and (\$a == \"${BOT_LOGIN:-}\" or \$stripped == \"${BOT_LOGIN:-}\")) then \"self\"
+                          elif ((.user.type // \"\") == \"Bot\") then \"bot\"
                           else \"human\" end ),
           body: (.body // \"\"),
-          createdAt: (.createdAt // null) }
-    ] | sort_by(.createdAt // \"\")
+          createdAt: (.created_at // null) }
+    ] | sort_by(.createdAt // \"\", .id // 0)
   "
 }
 

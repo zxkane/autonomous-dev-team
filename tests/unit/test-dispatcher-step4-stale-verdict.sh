@@ -76,6 +76,16 @@ label_swap() {
 # the count of contains() matches based on _MOCK_NOTICE_PRESENT) and
 # `gh issue comment ... --body ...` (records body / increments counter).
 gh() {
+  # [#393] itp_list_comments reads REST. THIS test's notice-present fixture is
+  # count-based (_MOCK_NOTICE_PRESENT) — synthesize N REST comments carrying
+  # the exact stale-verdict marker (head from _MOCK_PR_INFO).
+  if [[ "${1:-}" == "api" && "${2:-}" == "--paginate" ]]; then
+    local _rhead; _rhead=$(jq -r '.headRefOid // empty' <<<"${_MOCK_PR_INFO:-{}}" 2>/dev/null)
+    local _rn="${_MOCK_NOTICE_PRESENT:-0}"; [[ "$_rn" =~ ^[0-9]+$ ]] || _rn=0
+    jq -cn --argjson n "$_rn" --arg body "PR #42 HEAD already reviewed (\`stale-verdict:${_rhead}\`)" \
+      '[[range($n) | {id: (.+1), user:{login:"my-claw[bot]", type:"Bot"}, body:$body, created_at:"2026-06-12T00:00:0\(.)Z"}]]'
+    return 0
+  fi
   local cmd="${1:-}"
   local sub="${2:-}"
   if [[ "$cmd" == "issue" && "$sub" == "comment" ]]; then

@@ -103,6 +103,18 @@ get_gh_app_scoped_token() {
 export -f get_gh_app_scoped_token _scoped_sentinel_for
 
 gh() {
+  # [#393] itp_list_comments reads REST (gh api --paginate --slurp .../comments).
+  # THIS test synthesizes per-issue comments from _EXISTING_COMMENTS_COUNT
+  # (keyed repo:issue) — mirror that here, in REST page shape. The issue
+  # number comes from the REST path (arg 4: repos/<owner>/<name>/issues/N/comments).
+  if [[ "${1:-}" == "api" && "${2:-}" == "--paginate" ]]; then
+    local _rest_path="${4:-}" _rest_issue
+    _rest_issue=$(sed -nE 's|.*/issues/([0-9]+)/comments$|\1|p' <<<"$_rest_path")
+    local _rest_key="${REPO}:${_rest_issue}"
+    local _rn="${_EXISTING_COMMENTS_COUNT[$_rest_key]:-0}"; [[ "$_rn" =~ ^[0-9]+$ ]] || _rn=0
+    jq -cn --argjson n "$_rn" --arg body "${_MOCK_DEP_BLOCK_BODY:-}"       '[[range($n) | {id: (.+1), user:{login:"my-claw[bot]", type:"Bot"}, body:$body, created_at:"2026-06-12T00:00:0\(.)Z"}]]'
+    return 0
+  fi
   local mode="" issue_num="" repo="" body="" q=""
   # gh issue comment <num> --repo R --body "..."  (block-visibility post, #269 T5)
   if [[ "$1" == "issue" && "$2" == "comment" ]]; then

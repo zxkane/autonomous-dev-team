@@ -103,10 +103,16 @@ gh() {
     fi
     return 0
   fi
+  # [#393] REST comments read (itp_list_comments' new source): serve the
+  # REST-shaped page set. --slurp wraps pages in an outer array.
+  if [[ "${1:-}" == "api" ]]; then
+    printf '%s' "${_GH_API_COMMENTS_JSON:-[[]]}"
+    return 0
+  fi
   printf ''
 }
 export -f gh
-export _GH_ARGV_FILE _GH_VIEW_COMMENTS_JSON
+export _GH_ARGV_FILE _GH_VIEW_COMMENTS_JSON _GH_API_COMMENTS_JSON
 
 # shellcheck source=../../skills/autonomous-dispatcher/scripts/lib-dispatch.sh
 source "$LIB"
@@ -132,8 +138,11 @@ assert_eq "TC-GT-READTASK state,labels,title (status.sh:85)" "issue view 42 --re
 echo "=== GOLDEN-TRACE: itp_list_comments internal gh argv (fetch leaf preserved) ==="
 itp_list_comments 42 >/dev/null
 lc_argv="$(recorded_argv)"
-assert_contains "TC-GT-COMMENTS itp_list_comments fetches gh issue view --json comments" \
-  "issue view 42 --repo $REPO --json comments -q" "$lc_argv"
+# [#393] the leaf's source moved to REST (GraphQL strips [bot] and exposes no
+# author type — the derivation NEEDS user.type). SHAPE is the contract (§3.3);
+# this argv pin tracks the deliberate leaf-internal change.
+assert_contains "TC-GT-COMMENTS itp_list_comments fetches via REST --paginate --slurp" \
+  "api --paginate --slurp repos/$REPO/issues/42/comments" "$lc_argv"
 
 echo "=== GOLDEN-TRACE: comment-fetch 28-site count anchor — ZERO inline scanners remain ==="
 inline_count=$(grep -cE 'issue view .*--json [a-zA-Z,]*comments' "$LIB")
@@ -190,12 +199,14 @@ assert_contains "TC-CAPS-NEG server_side_state_negation=0 (negation client-side 
 # ===========================================================================
 echo "=== NORMALIZED COMMENT SHAPE via itp_github_list_comments ==="
 # Out-of-order createdAt + [bot]/human/self authors + numeric id in url.
+# [#393] REST-shaped fixture: verbatim [bot] logins + user.type + numeric id +
+# snake_case created_at. Split across TWO pages to pin --slurp flattening.
 export BOT_LOGIN="my-claw"
-_GH_VIEW_COMMENTS_JSON='{"comments":[
-  {"id":"IC_z","url":"https://github.com/o/r/issues/1#issuecomment-300","author":{"login":"dev-bot[bot]"},"body":"newest bot","createdAt":"2026-06-26T12:00:00Z"},
-  {"id":"IC_a","url":"https://github.com/o/r/issues/1#issuecomment-100","author":{"login":"my-claw"},"body":"oldest self","createdAt":"2026-06-26T10:00:00Z"},
-  {"id":"IC_m","url":"https://github.com/o/r/issues/1#issuecomment-200","author":{"login":"alice"},"body":"middle human","createdAt":"2026-06-26T11:00:00Z"}
-]}'
+_GH_API_COMMENTS_JSON='[
+  [ {"id":300,"user":{"login":"dev-bot[bot]","type":"Bot"},"body":"newest bot","created_at":"2026-06-26T12:00:00Z"},
+    {"id":100,"user":{"login":"my-claw[bot]","type":"Bot"},"body":"oldest self","created_at":"2026-06-26T10:00:00Z"} ],
+  [ {"id":200,"user":{"login":"alice","type":"User"},"body":"middle human","created_at":"2026-06-26T11:00:00Z"} ]
+]'
 norm=$(itp_list_comments 1)
 
 # TC-SHAPE-FIELDS — exactly the five keys.
@@ -211,29 +222,45 @@ id0=$(jq -r '.[0].id' <<<"$norm"); id0t=$(jq -r '.[0].id | type' <<<"$norm")
 assert_eq "TC-SHAPE-ID-NUM oldest comment numeric REST id" "100" "$id0"
 assert_eq "TC-SHAPE-ID-NUM id is a number" "number" "$id0t"
 
-# TC-SHAPE-AUTHOR — login incl [bot] verbatim.
+# TC-SHAPE-AUTHOR — login incl [bot] verbatim (REST keeps the suffix; §3.3 [M5]).
 botauthor=$(jq -r '.[] | select(.body=="newest bot") | .author' <<<"$norm")
 assert_eq "TC-SHAPE-AUTHOR bot login incl [bot] verbatim" "dev-bot[bot]" "$botauthor"
 
-# TC-SHAPE-KIND — self / bot / human.
-kself=$(jq -r '.[] | select(.author=="my-claw") | .authorKind' <<<"$norm")
+# TC-SHAPE-KIND — self / bot / human. self matches BOT_LOGIN in raw OR
+# stripped form (fixture: BOT_LOGIN="my-claw" vs REST login "my-claw[bot]").
+kself=$(jq -r '.[] | select(.author=="my-claw[bot]") | .authorKind' <<<"$norm")
 kbot=$(jq -r '.[] | select(.author=="dev-bot[bot]") | .authorKind' <<<"$norm")
 khuman=$(jq -r '.[] | select(.author=="alice") | .authorKind' <<<"$norm")
-assert_eq "TC-SHAPE-KIND author==BOT_LOGIN → self" "self" "$kself"
-assert_eq "TC-SHAPE-KIND login ends [bot] → bot" "bot" "$kbot"
-assert_eq "TC-SHAPE-KIND otherwise → human" "human" "$khuman"
+assert_eq "TC-SHAPE-KIND stripped BOT_LOGIN matches [bot] author → self" "self" "$kself"
+assert_eq "TC-SHAPE-KIND user.type==Bot → bot" "bot" "$kbot"
+assert_eq "TC-SHAPE-KIND user.type==User → human" "human" "$khuman"
+
+# TC-393-APPKIND (the regression this file exists to prevent recurring): an
+# App-authored comment MUST classify as bot even with BOT_LOGIN EMPTY — the
+# dispatcher's own process state. Pre-#393 (GraphQL source) this yielded
+# "human" and inert-ed the #390 app-mode verdict gate.
+_saved_bot="$BOT_LOGIN"; export BOT_LOGIN=""
+k393=$(itp_list_comments 1 | jq -r '.[] | select(.body=="newest bot") | .authorKind')
+assert_eq "TC-393-APPKIND App comment is bot with BOT_LOGIN empty" "bot" "$k393"
+export BOT_LOGIN="$_saved_bot"
 
 # TC-SHAPE-INV85 — exact-eq select((.author)==$dev) over normalized == pre-refactor
 # .author.login==$dev over raw. Build a raw fixture and compare selections.
 echo "=== INV-85 exact-eq + INV-05 cutoff equivalence (pre vs post) ==="
+# [#393] the raw/pre side stays the historical GraphQL record shape (that IS
+# the pre-refactor baseline the equivalence is against); the post side feeds
+# the SAME logical data through the REST fixture shape.
 raw='{"comments":[
   {"url":"https://github.com/o/r/issues/1#issuecomment-1","author":{"login":"dev-bot[bot]"},"body":"403 Resource not accessible by integration on gh pr edit","createdAt":"2026-06-26T11:00:00Z"},
   {"url":"https://github.com/o/r/issues/1#issuecomment-2","author":{"login":"maintainer"},"body":"quoting 403 Resource not accessible by integration","createdAt":"2026-06-26T11:30:00Z"}
 ]}'
 # pre-refactor selection (raw .comments[].author.login):
 pre=$(jq -r '[.comments[] | select((.author.login // "")=="dev-bot[bot]") | .body] | length' <<<"$raw")
-# post-refactor: normalize then select over .author.
-_GH_VIEW_COMMENTS_JSON="$raw"
+# post-refactor: normalize (REST source) then select over .author.
+_GH_API_COMMENTS_JSON='[[
+  {"id":1,"user":{"login":"dev-bot[bot]","type":"Bot"},"body":"403 Resource not accessible by integration on gh pr edit","created_at":"2026-06-26T11:00:00Z"},
+  {"id":2,"user":{"login":"maintainer","type":"User"},"body":"quoting 403 Resource not accessible by integration","created_at":"2026-06-26T11:30:00Z"}
+]]'
 post=$(itp_list_comments 1 | jq -r '[.[] | select((.author // "")=="dev-bot[bot]") | .body] | length')
 assert_eq "TC-SHAPE-INV85 exact-eq selects the dev-bot comment identically (pre=$pre post=$post)" "$pre" "$post"
 

@@ -40,6 +40,16 @@ _GH_CALLS=()
 _MOCK_COMMENTS_JSON=""
 _MOCK_ISSUE_LIST=""
 gh() {
+  # [#393] itp_list_comments reads REST. THIS test's _MOCK_COMMENTS_JSON keeps
+  # its 0-vs-N "marker present?" count semantics (see the issue-view branch
+  # below) — synthesize N REST comments carrying _MOCK_MARKER_BODY.
+  if [[ "${1:-}" == "api" && "${2:-}" == "--paginate" ]]; then
+    local _rn="${_MOCK_COMMENTS_JSON:-0}"
+    [[ "$_rn" =~ ^[0-9]+$ ]] || _rn=0
+    jq -cn --argjson n "$_rn" --arg body "${_MOCK_MARKER_BODY:-}" \
+      '[[range($n) | {id: (.+1), user:{login:"my-claw[bot]", type:"Bot"}, body:$body, created_at:"2026-06-12T00:00:0\(.)Z"}]]'
+    return 0
+  fi
   _GH_CALLS+=("$*")
   # Detect verb shape and serve the matching fixture.
   case "$1" in

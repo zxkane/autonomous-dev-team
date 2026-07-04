@@ -52,6 +52,15 @@
 # ascending by number. <labels-and-csv> empty → no --label flag. Fail-closed:
 # a `gh` failure propagates its non-zero rc with no partial stdout (no `|| true`
 # anywhere in this chain).
+# [#393] state-read comments' authorKind is GraphQL-DERIVED and therefore
+# CANNOT distinguish App bots (GraphQL strips the `[bot]` suffix and exposes
+# no author type): an App-authored comment reports authorKind="human" here.
+# This field MUST NOT be used for authenticity gates — the authoritative
+# per-issue read is `itp_list_comments` (REST-sourced, correct authorKind).
+# Kept GraphQL deliberately: a REST comments call PER ISSUE in the bulk
+# state-read would multiply tick API cost; no shipped caller consumes this
+# field today (list_pending_dev requests `comments` but the tick reads only
+# `.number`). The `self` arm tolerates BOT_LOGIN in raw or stripped form.
 _itp_github_state_read() {
   local state="$1" labels_csv="$2" limit="$3"
   local -a args=(issue list --repo "$REPO" --state "$state" --limit "$limit")
@@ -66,7 +75,8 @@ _itp_github_state_read() {
           | { id: ( ( (.url // "") | capture("issuecomment-(?<n>[0-9]+)$") | .n | tonumber ) // null ),
               author: (.author.login // null),
               authorKind: ( (.author.login // "") as $a
-                            | if ($a != "" and $a == $bot) then "self"
+                            | ($bot | sub("\\[bot\\]$"; "")) as $bstripped
+                            | if ($a != "" and $bot != "" and ($a == $bot or $a == $bstripped)) then "self"
                               elif ($a | endswith("[bot]")) then "bot"
                               else "human" end ),
               body: (.body // ""),
@@ -153,50 +163,41 @@ itp_github_read_task() {
   gh issue view "$issue" --repo "$REPO" --json "$field" "$@"
 }
 
-# itp_github_list_comments ISSUE — ISSUE-level comments, NORMALIZED (spec §3.3).
-#
-# Fetches `gh issue view ISSUE --repo "$REPO" --json comments` (today's leaf,
-# byte-identical) and normalizes to the spec §3.3 / [INV-90] array:
-#   [{id, author, authorKind, body, createdAt}]  sorted ASCENDING by createdAt.
-#
-#   id         — REST numeric comment id (GraphQL node_id stays out; [INV-46]
-#                PATCH needs the numeric id). gh's `--json comments` puts the
-#                GraphQL node_id (`IC_kwD…`) in `.id`; the REST numeric id is the
-#                trailing number of the comment `url`
-#                (`…/issues/<n>#issuecomment-<id>`) — the only numeric id gh
-#                exposes for an issue comment. Null when no parseable url.
-#   author     — `.author.login` INCLUDING any `[bot]` suffix verbatim (a stable
-#                machine handle for EXACT `==`, NOT a display name; [INV-85]).
-#   authorKind — derived enum: `self` when author == $BOT_LOGIN (the pipeline's
-#                own bot identity, env), else `bot` when the login ends `[bot]`,
-#                else `human`. Spec §3.3 [M5]; lets distinct_bot_author=0
-#                backends discriminate self/other without a raw `author==BOT`.
-#   body,createdAt — verbatim. createdAt is gh's ISO-8601 UTC string.
-#
-# The ascending sort is the normative MUST the caller-side `| last` /
-# `sort_by(.createdAt)|last` idioms depend on. ALL marker-parsing (capture /
-# exact-eq / cutoff compare) stays CALLER-side over this array (spec §3.3).
-#
-# The normalization is a single `-q` jq over the raw comments object, so a unit
-# test that stubs the `gh` BINARY and applies the requested `-q` to a
-# `{comments:[…]}` fixture returns the normalized array unchanged — the existing
-# gh-stub tests keep working without a fixture rewrite.
-#
-# §3.5: complete set via gh's transparent `--json` auto-pagination, zero added
-# page-walk code.
+# itp_github_list_comments ISSUE — the normalized comment array ([INV-90],
+# spec §3.3): [{id, author, authorKind, body, createdAt}] sorted ascending by
+# createdAt (id tie-break). [#393] REST-sourced (see the in-function comment):
+# `gh api --paginate --slurp repos/<repo>/issues/N/comments` — user.type drives
+# authorKind, user.login is VERBATIM incl [bot], id is REST's numeric .id.
+# §3.5 complete set via --paginate; --slurp wraps pages, .[][] flattens.
 itp_github_list_comments() {
   local issue="$1"
-  gh issue view "$issue" --repo "$REPO" --json comments -q "
-    [ .comments[]
-      | { id: ( ( (.url // \"\") | capture(\"issuecomment-(?<n>[0-9]+)\$\") | .n | tonumber ) // null ),
-          author: (.author.login // null),
-          authorKind: ( (.author.login // \"\") as \$a
-                        | if (\$a != \"\" and \$a == \"${BOT_LOGIN:-}\") then \"self\"
-                          elif (\$a | endswith(\"[bot]\")) then \"bot\"
+  # [#393] REST, not GraphQL: `gh issue view --json comments` (GraphQL) STRIPS
+  # the `[bot]` suffix from App logins and exposes no author type, so the
+  # authorKind derivation classified every App-authored comment as "human" —
+  # inert-ing the #390 app-mode verdict gate and the INV-105 marker
+  # authenticity check (the 5th BOT_LOGIN-empty-class bug). REST exposes
+  # `user.type == "Bot"` (authoritative, no login sniffing) and the VERBATIM
+  # `user.login` incl `[bot]` — which is what spec §3.3 [M5] required all
+  # along ("user.login including the [bot] suffix verbatim"); the GraphQL
+  # leaf silently violated that contract, and per Pipeline Documentation
+  # Authority the spec wins. `id` is REST's numeric .id (the URL-capture
+  # hack retires). §3.5 complete set: `--paginate --slurp` wraps each page
+  # in an outer array (a plain --paginate would emit concatenated top-level
+  # arrays jq reads as separate documents); `.[][]` flattens. `self`
+  # tolerates BOT_LOGIN in raw or `[bot]`-stripped form (a stripped-form
+  # BOT_LOGIN from a GraphQL-era resolver still matches).
+  gh api --paginate --slurp "repos/${REPO}/issues/${issue}/comments" | jq "
+    [ .[][]
+      | { id: (.id // null),
+          author: (.user.login // null),
+          authorKind: ( (.user.login // \"\") as \$a
+                        | ( \$a | sub(\"\\\\[bot\\\\]\$\"; \"\") ) as \$stripped
+                        | if (\$a != \"\" and \"${BOT_LOGIN:-}\" != \"\" and (\$a == \"${BOT_LOGIN:-}\" or \$stripped == \"${BOT_LOGIN:-}\")) then \"self\"
+                          elif ((.user.type // \"\") == \"Bot\") then \"bot\"
                           else \"human\" end ),
           body: (.body // \"\"),
-          createdAt: (.createdAt // null) }
-    ] | sort_by(.createdAt // \"\")
+          createdAt: (.created_at // null) }
+    ] | sort_by(.createdAt // \"\", .id // 0)
   "
 }
 
