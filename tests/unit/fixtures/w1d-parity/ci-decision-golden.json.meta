@@ -30,6 +30,7 @@
 #   in_progress_only                         — IN_PROGRESS only → pending (rule 3)
 #   rc_nonzero_valid_json_success            — gh rc-quirk: rc≠0 with parseable JSON → derive token from stdout
 #   rc_nonzero_garbage_stdout                — genuine transport failure: rc≠0 + non-JSON → leaf rc≠0
+#   rc_nonzero_empty_array                   — gh rc-quirk: rc≠0 + `[]` (real zero-checks PR path) → token 'none', old=1/new=1 parity (online-review r1 blocking finding on PR #410)
 #
 # INTENTIONAL DECISION CHANGE (single documented row):
 #

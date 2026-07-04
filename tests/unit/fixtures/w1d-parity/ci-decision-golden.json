@@ -85,5 +85,13 @@
     "new_ci_is_green_rc": 1,
     "new_token": "",
     "_note": "Non-JSON stdout + non-zero rc = genuine transport failure; leaf rc != 0. Both OLD and NEW paths funnel this into rc 1 — parity preserved for the genuine-error case."
+  },
+  "rc_nonzero_empty_array": {
+    "gh_stdout": "[]",
+    "gh_rc": 1,
+    "old_ci_is_green_rc": 1,
+    "new_ci_is_green_rc": 1,
+    "new_token": "none",
+    "_note": "R2 gh rc-quirk: `gh pr checks` exits non-zero when a PR has ZERO checks configured while emitting a parseable empty array on stdout. Pre-#399 caller's `if ci_states=$(chp_ci_status …)` failed on rc 1 → else-branch → ci_states='[]' → gate rc 1 (not-green). Post-#399 the leaf inspects stdout, derives 'none' from the parseable empty-array payload → `ci_is_green` compares 'none' != 'green' → rc 1 (not-green). old=1/new=1 — genuine parity, NO decision change for this class (unlike rc_nonzero_valid_json_success which is the ONE documented decision change). This fixture certifies the real-GitHub zero-checks path is exercised end-to-end (online-review r1 blocking finding on PR #410)."
   }
 }
