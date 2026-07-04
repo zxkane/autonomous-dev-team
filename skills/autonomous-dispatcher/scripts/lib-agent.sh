@@ -449,23 +449,97 @@ preflight_agent_binary() {
   return 1
 }
 
+# _agent_sigterm_handler — the trap body install_agent_sigterm_trap installs
+# (kept as a real function, not an inline trap string, so `local` and the
+# backgrounded escalator below both work correctly; a bare trap string runs
+# in the top-level shell context, where `local` is a silent no-op).
+#
+# [Lane-GC PR-3 / INV-114] TERM's target set is every REGISTRY-RECORDED pgid
+# in `${ADT_LANE_DIR}/pgids`, not just `_AGENT_RUN_PID` — this closes the
+# review-side dead arm: the review wrapper's own agents run inside
+# per-fan-out-member `( … ) &` subshells, so `_AGENT_RUN_PID` in the MAIN
+# shell (where this trap fires) is ALWAYS empty on the review side — only
+# each fan-out subshell's OWN local variable was ever set. The durable
+# `pgids` file is the one place every spawn (dev run_agent, every review
+# fan-out member, E2E, smoke) is recorded regardless of which shell spawned
+# it, so reading it here reaches all of them, dev and review alike.
+#
+# Each recorded pgid escalates via the shared `_kill_group_escalate`
+# (lib-lane.sh, INV-106/INV-114) in its OWN backgrounded job — TERM now,
+# KILL after a bounded grace if the group is still reachable — so N groups'
+# grace windows run CONCURRENTLY and the trap handler itself returns
+# immediately (the wrapper's own EXIT-trap cleanup() must never be delayed
+# waiting out an inline grace here). Falls back to an inline TERM+backgrounded-
+# KILL pair when `_kill_group_escalate` is unavailable (lib-lane.sh failed to
+# source, or a unit harness sources lib-agent.sh in isolation) so escalation
+# degrades gracefully rather than silently vanishing.
+#
+# Ordering pin (found empirically while building this trap — a genuine bug,
+# not a style choice): the direct-children `pkill -TERM -P $$` fallback MUST
+# run BEFORE any escalator job is backgrounded, never after. Each backgrounded
+# escalator (`_kill_group_escalate … &`) is itself a direct child of THIS
+# shell (`$$`), so a `pkill -P $$` issued after backgrounding would TERM the
+# escalator subshell mid-grace-wait and silently abort its KILL follow-through
+# — the escalated group would then survive forever past its grace window,
+# defeating the very escalation this trap exists to guarantee.
+_agent_sigterm_handler() {
+  RECEIVED_SIGTERM=1
+
+  # Direct-children fallback for the pre-spawn race window (pre-#109
+  # behavior, unchanged). Pinned narrow to `-P $$` — [INV-111] grep-pin:
+  # NEVER widen to `-f <script-name>` (widening would cross-kill sibling
+  # lanes on a multi-issue/multi-project host sharing the same wrapper
+  # script name). Runs FIRST — see the ordering pin above.
+  pkill -TERM -P $$ 2>/dev/null || true
+
+  local -a _term_pgids=()
+  [[ -n "${_AGENT_RUN_PID:-}" ]] && _term_pgids+=("$_AGENT_RUN_PID")
+  local _pgids_file=""
+  [[ -n "${ADT_LANE_DIR:-}" ]] && _pgids_file="${ADT_LANE_DIR}/pgids"
+  if [[ -n "$_pgids_file" && -f "$_pgids_file" ]]; then
+    local _pg _rest _already _s
+    while read -r _pg _rest; do
+      [[ "$_pg" =~ ^[0-9]+$ ]] || continue
+      _already=0
+      for _s in "${_term_pgids[@]:-}"; do [[ "$_s" == "$_pg" ]] && { _already=1; break; }; done
+      [[ "$_already" -eq 1 ]] && continue
+      _term_pgids+=("$_pg")
+    done < "$_pgids_file"
+  fi
+
+  local _pg
+  if declare -F _kill_group_escalate >/dev/null 2>&1; then
+    for _pg in "${_term_pgids[@]:-}"; do
+      _kill_group_escalate "$_pg" 5 &
+      disown 2>/dev/null || true
+    done
+  else
+    for _pg in "${_term_pgids[@]:-}"; do
+      kill -TERM -- "-${_pg}" 2>/dev/null || true
+    done
+    if [[ "${#_term_pgids[@]}" -gt 0 ]]; then
+      ( sleep 5
+        local _pg2
+        for _pg2 in "${_term_pgids[@]}"; do
+          kill -0 -- "-${_pg2}" 2>/dev/null && kill -KILL -- "-${_pg2}" 2>/dev/null || true
+        done
+      ) &
+      disown 2>/dev/null || true
+    fi
+  fi
+}
+
 # install_agent_sigterm_trap — install the standard SIGTERM-to-PGID trap
 # in the calling wrapper shell (closes #109). Used by autonomous-dev.sh
 # and autonomous-review.sh so the two share the contract: forward TERM
-# to the agent's process group (set by _run_with_timeout) plus a direct-
-# children fallback for the pre-spawn race window.
+# to every registry-recorded process group plus a direct-children fallback
+# for the pre-spawn race window.
 #
 # Callers may set RECEIVED_SIGTERM=0 first if they need to read the flag
 # in their cleanup() trap (autonomous-dev.sh does for INV-15 / #67); the
 # trap installed here writes RECEIVED_SIGTERM=1 either way.
 install_agent_sigterm_trap() {
-  trap '
-    RECEIVED_SIGTERM=1
-    if [[ -n "${_AGENT_RUN_PID:-}" ]]; then
-      kill -TERM -- "-${_AGENT_RUN_PID}" 2>/dev/null || true
-    fi
-    pkill -TERM -P $$ 2>/dev/null || true
-  ' TERM
+  trap '_agent_sigterm_handler' TERM
 }
 
 # install_agent_heartbeat — spawn a background loop that touches

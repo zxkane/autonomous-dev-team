@@ -106,8 +106,10 @@ trap '_reap_decoys; rm -rf "$TMPDIR_T"' EXIT
 # ---------------------------------------------------------------------------
 
 extract_kill_stale_wrapper() {
+  # [Lane-GC PR-3 / INV-111] kill_stale_wrapper now calls the sibling helper
+  # `_pid_or_group_alive` — extract both so the sourced snippet is complete.
   awk '
-    /^kill_stale_wrapper\(\) \{$/ { flag=1 }
+    /^(_pid_or_group_alive|kill_stale_wrapper)\(\) \{$/ { flag=1 }
     flag { print }
     flag && /^\}$/ { flag=0 }
   ' "$DISPATCH_LOCAL"

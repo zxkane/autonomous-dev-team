@@ -755,15 +755,41 @@ RESULT_PARSED=false
 cleanup() {
   local exit_code=$?
 
-  # [INV-109] STATE=cleaning: the lane registry's graceful-exit transition.
-  # PR-2 (this PR) wires the STATE marker only — the actual registry-recorded-
-  # pgid reap + reap.lock choreography is PR-3 (kill-path hardening); until
-  # then this cleanup() continues to rely on the pre-existing heartbeat/PID-
-  # file/fan-out teardown below, unchanged. Best-effort: lane_set_state no-ops
-  # on a missing lane dir (no registry entry for this run) or a missing lib.
-  if [[ -n "${ADT_LANE_DIR:-}" ]] && declare -F lane_set_state >/dev/null 2>&1; then
+  # [Lane-GC PR-3 / INV-114] Reap-first ordering, same contract as the dev
+  # side: acquire reap.lock, STATE=cleaning, reap every registry-recorded
+  # pgid FIRST. This is the review side's CRASH-PATH reap (design §9 PR-3:
+  # "review gains the crash-path reap") — the existing graceful-verdict-path
+  # reap (`_reap_fanout_processes` / `_reap_fanout_recorded_descendants`,
+  # INV-43/INV-104) already runs later in THIS script's main body (after
+  # verdict resolution) and is UNCHANGED by this PR; `lane_reap` here covers
+  # the case that reap never reaches — a wrapper that dies (SIGTERM, SIGKILL,
+  # uncaught error) before the main body gets there, including mid-fan-out.
+  # Since PR-2 already records every fan-out/E2E/smoke PGID into
+  # `${ADT_LANE_DIR}/pgids` regardless of which shell spawned it, this ONE
+  # call reaches all of them. Idempotent with the graceful path: a pgid
+  # `_reap_fanout_processes` already reaped is simply already-dead by the
+  # time `lane_reap` gets here — no double-kill, no error. Best-effort:
+  # `lane_reap` no-ops cleanly on a missing lane dir/lib.
+  if [[ -n "${ADT_LANE_DIR:-}" ]] && declare -F lane_reap >/dev/null 2>&1; then
+    lane_reap "$ADT_LANE_DIR" 5 || true
+  elif [[ -n "${ADT_LANE_DIR:-}" ]] && declare -F lane_set_state >/dev/null 2>&1; then
+    # Degrade path: lane_reap unavailable (stale lib-lane.sh predating PR-3)
+    # but lane_set_state is — still record the STATE transition even though
+    # no reap can run. Matches PR-2's original (reap-less) behavior exactly.
     lane_set_state "$ADT_LANE_DIR" cleaning || true
   fi
+
+  # [Lane-GC PR-3 / INV-114] Bounded network calls: every GitHub-API call
+  # below this point routes through `_teardown_call` (60s bound via
+  # `_bounded_call`, lib-lane.sh) so a hung `gh` invocation can never leave
+  # this EXIT trap parked indefinitely while it still holds lane state.
+  _teardown_call() {
+    if declare -F _bounded_call >/dev/null 2>&1; then
+      _bounded_call 60 "$@"
+    else
+      "$@"
+    fi
+  }
 
   # Tear down the heartbeat loop fast (parent-pid watchdog would also
   # take it down within HEARTBEAT_INTERVAL_SECONDS, but explicit is
@@ -802,7 +828,7 @@ cleanup() {
   # the drain is before it, so refresh here best-effort).
   if declare -F drain_agent_bot_triggers >/dev/null 2>&1; then
     if [[ "$GH_AUTH_MODE" == "app" ]] && command -v get_gh_app_token &>/dev/null; then
-      GH_TOKEN=$(get_gh_app_token "${REVIEW_AGENT_APP_ID}" "${REVIEW_AGENT_APP_PEM}" "$REPO_OWNER" "$REPO_NAME" 2>/dev/null) \
+      GH_TOKEN=$(_teardown_call get_gh_app_token "${REVIEW_AGENT_APP_ID}" "${REVIEW_AGENT_APP_PEM}" "$REPO_OWNER" "$REPO_NAME" 2>/dev/null) \
         && { export GH_TOKEN; export GITHUB_PERSONAL_ACCESS_TOKEN="$GH_TOKEN"; } || true
     fi
     # Allow-list (#234 review [P1]): only EXACT configured REVIEW_BOTS triggers may
@@ -811,7 +837,7 @@ cleanup() {
     if declare -F bot_trigger_allowlist >/dev/null 2>&1; then
       _bot_allowlist=$(bot_trigger_allowlist "${REVIEW_BOTS_VALIDATED:-}" 2>/dev/null || true)
     fi
-    drain_agent_bot_triggers "$ISSUE_NUMBER" "$REPO" "$_bot_allowlist" || true
+    _teardown_call drain_agent_bot_triggers "$ISSUE_NUMBER" "$REPO" "$_bot_allowlist" || true
   fi
 
   # [INV-81] Write the run end marker (rc + timing) to meta.json. Fires for BOTH
@@ -844,7 +870,7 @@ cleanup() {
     # Refresh token for cleanup (app mode)
     if [[ "$GH_AUTH_MODE" == "app" ]]; then
       if command -v get_gh_app_token &>/dev/null; then
-        GH_TOKEN=$(get_gh_app_token "${REVIEW_AGENT_APP_ID}" "${REVIEW_AGENT_APP_PEM}" "$REPO_OWNER" "$REPO_NAME") || {
+        GH_TOKEN=$(_teardown_call get_gh_app_token "${REVIEW_AGENT_APP_ID}" "${REVIEW_AGENT_APP_PEM}" "$REPO_OWNER" "$REPO_NAME") || {
           log "WARNING: Failed to refresh GitHub App token for cleanup"
         }
         export GH_TOKEN
@@ -852,7 +878,7 @@ cleanup() {
       fi
     fi
 
-    itp_post_comment "$ISSUE_NUMBER" \
+    _teardown_call itp_post_comment "$ISSUE_NUMBER" \
       "Review process crashed (exit code: ${exit_code}). Moving back to development for retry.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
     # INV-35: emit verdict trailer so dispatcher Step 4b.5.1 routes a
     # completed-session crash to the substantive recovery path (a wrapper
@@ -860,8 +886,8 @@ cleanup() {
     # dev session, not a re-review).
     # INV-92 (#298): a wrapper crash is ALWAYS dev-actionable (fail-open) — a
     # fresh dev session is the right recovery, never an escalation.
-    emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-substantive" "" "true" 2>/dev/null || true
-    itp_transition_state "$ISSUE_NUMBER" "reviewing" "pending-dev" 2>/dev/null || true
+    _teardown_call emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-substantive" "" "true" 2>/dev/null || true
+    _teardown_call itp_transition_state "$ISSUE_NUMBER" "reviewing" "pending-dev" 2>/dev/null || true
 
     log "Issue #${ISSUE_NUMBER} moved to pending-dev due to crash."
   fi

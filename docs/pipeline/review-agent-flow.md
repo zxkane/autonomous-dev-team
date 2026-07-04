@@ -283,14 +283,14 @@ The fan-out loop appends each subshell's PID (`$!`) to a `_fanout_pids` array an
 
 The result: **exactly one** verdict comment per codex review — codex self-posted, OR the wrapper posted from parsed stdout — never zero, never two. The double-insurance is load-bearing because `codex review` has its own review-output orchestration and may not honor a "call post-verdict.sh" instruction as reliably as `codex exec` (a pure prompt executor) did. Scope is strictly `AGENT_CMD == codex`; the codex **dev** path stays on `codex exec` byte-for-byte and `lib-agent.sh` (the CLI-agnostic plumbing) carries no `codex review` token — the review-only knowledge lives in `adapters/codex.sh` (with the rest of codex's per-CLI behavior, [INV-75](invariants.md#inv-75-all-per-cli-behavior-lives-in-that-clis-adapter--inline-cli-conditionals-in-orchestration-code-are-a-defect)), reached via the `lib-review-codex.sh` shim, so verdict/GitHub semantics never leak into the plumbing.
 
-#### codex re-run orphan containment (INV-112, #406)
+#### codex re-run orphan containment (INV-115, #406)
 
 Post-resolution, `autonomous-review.sh` runs **four** reap calls at the same call site, immediately after verdict resolution (see [Multi-agent fan-out (INV-40)](#multi-agent-fan-out-inv-40) above for the fan-out loop that populates their inputs):
 
 1. `_reap_fanout_processes "${_AGENT_PGIDS[@]:-}" "${_AGENT_PGIDS_E2E:-}"` ([INV-43](invariants.md#inv-43-command-mode-e2e-review-wait-budgets-must-not-be-smaller-than-the-e2e-they-dispatched)) — group-kills each agent's setsid PGID.
 2. `_reap_fanout_recorded_descendants "ADT_FANOUT_LANE_MARKER" "${AGENT_SESSION_IDS[@]:-}"` ([INV-104](invariants.md#inv-104-the-inv-43-fan-out-reap-also-sweeps-recorded-descendants-that-re-parented-out-of-the-agents-process-group)) — env-marker sweep for a re-parented descendant.
 3. `_reap_fanout_controller_subshells "${_fanout_pids[@]:-}"` ([INV-112](invariants.md#inv-112-a-codex-review-signal-death-rc-including-143-terminates-the-re-run-loop-and-a-defense-in-depth-reap-terminates-the-fan-out-controller-subshell-itself-406), new) — direct-PID TERM→KILL of the fan-out CONTROLLER SUBSHELL itself.
-4. `_reap_fanout_recorded_descendants "ADT_FANOUT_LANE_MARKER" "${AGENT_SESSION_IDS[@]:-}"` (same call as 2, repeated) — closes the late-spawn race (INV-112 layer 2, review-round-2 finding): a controller that already committed to a re-run launch before the fan-out dir was removed can fork ONE more marked child in the window between call 2 and call 3, and that child's PGID is never sidecar-recorded. Re-running the marker sweep AFTER the controller kill catches it; idempotent against every PID call 2 already reaped.
+4. `_reap_fanout_recorded_descendants "ADT_FANOUT_LANE_MARKER" "${AGENT_SESSION_IDS[@]:-}"` (same call as 2, repeated) — closes the late-spawn race (INV-115 layer 2, review-round-2 finding): a controller that already committed to a re-run launch before the fan-out dir was removed can fork ONE more marked child in the window between call 2 and call 3, and that child's PGID is never sidecar-recorded. Re-running the marker sweep AFTER the controller kill catches it; idempotent against every PID call 2 already reaped.
 
 Reap 3 exists because a `codex` member's `_run_codex_review` bounded re-run controller runs **inside the fan-out subshell**, not inside the `codex review` process reap 1 targets — one level of process hierarchy reap 1 never reaches, and one that reap 2's environ-marker sweep cannot see either (the marker is exported inside the ALREADY-RUNNING controller subshell, which never rewrites its own `/proc/<pid>/environ`). `_reap_fanout_controller_subshells` uses ONLY a direct `kill "$pid"` / `kill -9 "$pid"` — **never** a group form — because the controller subshell is a plain fork sharing the WRAPPER's own process group (no `setsid`/`set -m`); a group kill here would signal the wrapper itself. Its PIDs (`_fanout_pids`, the same array INV-40 sub-rule 1's `wait` already collects `$!` into) are **never** `lane_record_pgid`'d into the durable lane registry, for the same reason: a later `lane_kill` reading that registry could then kill the live wrapper.
 
@@ -747,22 +747,28 @@ The next dispatcher tick's Step 4 will pick the issue up. Crucially, this `pendi
 
 Different from the dev wrapper's trap — this one's contract is **only** to handle the case where the wrapper crashed *before* the result-parsing block ran. The trap uses `RESULT_PARSED=true` (set on the last line of the script) as the signal that the verdict-handling code already updated labels and the trap should do nothing label-related.
 
+**[Lane-GC PR-3]** The trap's FIRST action is now `lane_reap "$ADT_LANE_DIR" 5` ([INV-115](invariants.md#inv-115-cleanup-reaps-registry-recorded-process-groups-before-any-network-call-under-a-shared-reaplock-with-every-network-call-wall-clock-bounded)) — this is the review side's **crash-path reap**: the existing graceful-verdict-path fan-out reap (`_reap_fanout_processes`/`_reap_fanout_recorded_descendants`, [INV-104](invariants.md#inv-104-the-inv-43-fan-out-reap-also-sweeps-recorded-descendants-that-re-parented-out-of-the-agents-process-group), still described above under "Sequential E2E lane") is unchanged and still runs later in the main body after verdict resolution, but `lane_reap` in `cleanup()` now ALSO covers the case that reap never reaches: a wrapper that dies (SIGTERM, SIGKILL, uncaught error) before the main body gets there, including mid-fan-out. Every fan-out/E2E/smoke PGID is recorded in the registry regardless of which subshell spawned it ([INV-110](invariants.md#inv-110-adt_lane_id-is-exported-before-any-child-spawn-and-every-_run_with_timeout-spawn-appends-its-pgid-to-the-durable-registry)), so this ONE call reaches all of them. The two reaps are idempotent with each other — a pgid the graceful path already reaped is simply already-dead by the time `lane_reap` runs.
+
 ```mermaid
 flowchart TD
-    enter([trap fires<br/>exit_code captured]) --> rm_pid[rm -f PID_FILE]
+    enter([trap fires<br/>exit_code captured]) --> lane_reap["lane_reap ADT_LANE_DIR:<br/>reap.lock, STATE=reaping,<br/>lane_kill over pgids, STATE=cleaning"]
+    lane_reap --> rm_pid[rm -f PID_FILE]
     rm_pid --> parsed{RESULT_PARSED?}
     parsed -- true --> auth_done[cleanup_github_auth]
     auth_done --> done([exit])
 
     parsed -- false --> exit_branch{exit_code != 0?}
     exit_branch -- no --> auth_done
-    exit_branch -- yes --> refresh[refresh GH App token]
-    refresh --> crash_comment[comment 'Review process crashed exit N']
-    crash_comment --> to_dev[remove reviewing<br/>add pending-dev]
+    exit_branch -- yes --> refresh["_teardown_call get_gh_app_token<br/>(bounded 60s)"]
+    refresh --> crash_comment["_teardown_call itp_post_comment<br/>'Review process crashed exit N'<br/>(bounded 60s)"]
+    crash_comment --> verdict_trailer["_teardown_call emit_verdict_trailer<br/>failed-substantive (bounded 60s)"]
+    verdict_trailer --> to_dev["_teardown_call itp_transition_state<br/>remove reviewing, add pending-dev<br/>(bounded 60s)"]
     to_dev --> auth_done
 ```
 
 This means if the script exits 0 (normal completion) but `RESULT_PARSED` was never set (logic bug), the trap silently leaves labels alone — defense-in-depth against a future refactor that forgets to set the flag would manifest as "issue stuck in `reviewing`" rather than "issue corrupted to `pending-dev` for no reason".
+
+**Bounded network calls** ([Lane-GC PR-3, INV-115](invariants.md#inv-115-cleanup-reaps-registry-recorded-process-groups-before-any-network-call-under-a-shared-reaplock-with-every-network-call-wall-clock-bounded)): every GitHub-API call in this trap — `drain_agent_bot_triggers`, `get_gh_app_token`, `itp_post_comment`, `emit_verdict_trailer`, `itp_transition_state` — routes through the same `_teardown_call`/`_bounded_call` (`lib-lane.sh`) 60-second bound the dev wrapper uses, so a hung `gh` invocation in the crash path can never park this trap indefinitely.
 
 ### Observe-only metrics emission ([INV-70](invariants.md#inv-70-metrics-emission-is-observe-only--silent-to-pipeline-loud-to-report))
 

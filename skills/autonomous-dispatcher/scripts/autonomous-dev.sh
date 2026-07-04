@@ -715,15 +715,42 @@ POSTAPPROVAL
 cleanup() {
   local exit_code=$?
 
-  # [INV-109] STATE=cleaning: the lane registry's graceful-exit transition.
-  # PR-2 (this PR) wires the STATE marker only — the actual registry-recorded-
-  # pgid reap + reap.lock choreography is PR-3 (kill-path hardening); until
-  # then this cleanup() continues to rely on the pre-existing heartbeat/PID-
-  # file teardown below, unchanged. Best-effort: lane_set_state no-ops on a
-  # missing lane dir (no registry entry for this run) or a missing lib.
-  if [[ -n "${ADT_LANE_DIR:-}" ]] && declare -F lane_set_state >/dev/null 2>&1; then
+  # [Lane-GC PR-3 / INV-114] Reap-first ordering: acquire reap.lock, set
+  # STATE=cleaning, reap every registry-recorded pgid FIRST — BEFORE any
+  # PID-file/heartbeat teardown or network work below. `lane_reap` (lib-lane.sh)
+  # performs the STATE=cleaning transition itself (it's the first thing it
+  # does after acquiring the lock), so this call subsumes the old bare
+  # `lane_set_state … cleaning` call PR-2 shipped. This is the dev side's
+  # FIRST-EVER post-run reap (design §9 PR-3: "dev side gains its first-ever
+  # post-run reap; review gains the crash-path reap") — pre-PR-3, a dev-side
+  # agent CLI subtree that outlived the wrapper's own `wait` (e.g. an MCP
+  # server the CLI itself failed to reap) had no teardown-time reclamation at
+  # all. Best-effort: lane_reap no-ops cleanly on a missing lane dir/lib (no
+  # registry entry for this run, or lib-lane.sh failed to source).
+  if [[ -n "${ADT_LANE_DIR:-}" ]] && declare -F lane_reap >/dev/null 2>&1; then
+    lane_reap "$ADT_LANE_DIR" 5 || true
+  elif [[ -n "${ADT_LANE_DIR:-}" ]] && declare -F lane_set_state >/dev/null 2>&1; then
+    # Degrade path: lane_reap unavailable (stale lib-lane.sh predating PR-3)
+    # but lane_set_state is — still record the STATE transition even though
+    # no reap can run. Matches PR-2's original (reap-less) behavior exactly.
     lane_set_state "$ADT_LANE_DIR" cleaning || true
   fi
+
+  # [Lane-GC PR-3 / INV-114] Bounded network calls: every GitHub-API call
+  # below this point routes through `_teardown_call`, which delegates to
+  # `_bounded_call` (lib-lane.sh, 60s wall-clock bound, feature-detected —
+  # design §4-C4/§12 R10) so a hung `gh` invocation can never leave this
+  # EXIT trap parked indefinitely while it still holds lane state. Falls
+  # back to an unwrapped call when `_bounded_call` itself is unavailable
+  # (lib-lane.sh failed to source) — same degrade contract as every other
+  # `declare -F` guard in this file.
+  _teardown_call() {
+    if declare -F _bounded_call >/dev/null 2>&1; then
+      _bounded_call 60 "$@"
+    else
+      "$@"
+    fi
+  }
 
   # [INV-70] Metrics: wrapper_end. Defined as a closure so both the early-return
   # (agent-never-ran) path and the normal path emit it with the FINAL exit_code
@@ -781,7 +808,7 @@ cleanup() {
   if [[ "$AGENT_RAN" != "true" ]]; then
     if [[ -n "${ISSUE_NUMBER:-}" ]] && command -v gh &>/dev/null; then
       log "Exiting with code $exit_code (agent never ran). Posting startup-failure report."
-      itp_post_comment "$ISSUE_NUMBER" "$(cat <<EOF
+      _teardown_call itp_post_comment "$ISSUE_NUMBER" "$(cat <<EOF
 **Agent Session Report (Dev)**
 - Dev Session ID: \`${SESSION_ID:-<none>}\`
 - Exit code: ${exit_code}
@@ -796,7 +823,7 @@ not on PATH (set \`REAL_GH\` in autonomous.conf — see #92), missing
 required env, or auth setup failure. Inspect the log file above.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)
 EOF
 )" 2>/dev/null || log "WARNING: Failed to post startup-failure report"
-      itp_transition_state "$ISSUE_NUMBER" "in-progress" "pending-dev" 2>/dev/null \
+      _teardown_call itp_transition_state "$ISSUE_NUMBER" "in-progress" "pending-dev" 2>/dev/null \
         || log "WARNING: Failed to update issue labels on startup failure"
     else
       log "Exiting with code $exit_code (agent never ran, no ISSUE_NUMBER or CLI proxy — silent)."
@@ -822,7 +849,7 @@ EOF
   # Refresh token for cleanup (app mode: generate a fresh token just in case)
   if [[ "$GH_AUTH_MODE" == "app" ]]; then
     if command -v get_gh_app_token &>/dev/null; then
-      GH_TOKEN=$(get_gh_app_token "${DEV_AGENT_APP_ID}" "${DEV_AGENT_APP_PEM}" "$REPO_OWNER" "$REPO_NAME") || {
+      GH_TOKEN=$(_teardown_call get_gh_app_token "${DEV_AGENT_APP_ID}" "${DEV_AGENT_APP_PEM}" "$REPO_OWNER" "$REPO_NAME") || {
         log "WARNING: Failed to refresh GitHub App token for cleanup"
       }
       export GH_TOKEN
@@ -877,7 +904,7 @@ EOF
   # (test author's intent: "exercise the empty-string path") stay
   # distinguishable. The two `-` vs `:-` choices are load-bearing in
   # opposite directions; don't unify them. (#128, TC-CL-006)
-  itp_post_comment "$ISSUE_NUMBER" "$(cat <<EOF
+  _teardown_call itp_post_comment "$ISSUE_NUMBER" "$(cat <<EOF
 **Agent Session Report (Dev)**
 - Dev Session ID: \`${SESSION_ID}\`
 - Exit code: ${exit_code}
@@ -899,7 +926,7 @@ EOF
   # open the PR now with the wrapper's full-write token — BEFORE the PR_EXISTS
   # lookup below so a brokered create routes the success path to pending-review.
   # No-op when scoping is off or the agent already created the PR directly.
-  drain_agent_pr_create "$ISSUE_NUMBER" "$REPO" || true
+  _teardown_call drain_agent_pr_create "$ISSUE_NUMBER" "$REPO" || true
 
   # [INV-111] (#402 review round-1 [P1]) re-arm before the PR_EXISTS lookup.
   rearm_gh_resolution
@@ -910,7 +937,7 @@ EOF
   # gone (the #148-class fix). Fail-soft (`|| echo "0"`): a transient read
   # error keeps the success path routing conservative (no PR ⇒ retry dev).
   local _pr_list_e
-  _pr_list_e=$(chp_pr_list open "body" 2>/dev/null) || _pr_list_e=""
+  _pr_list_e=$(_teardown_call chp_pr_list open "body" 2>/dev/null) || _pr_list_e=""
   local PR_EXISTS
   if [[ -n "$_pr_list_e" ]]; then
     PR_EXISTS=$(jq -r "[.[] | select((.body | test(\"#${ISSUE_NUMBER}[^0-9]\")) or (.body | test(\"#${ISSUE_NUMBER}\$\")))] | length" <<<"$_pr_list_e" 2>/dev/null || echo "0")
@@ -934,7 +961,7 @@ EOF
     if declare -F bot_trigger_allowlist >/dev/null 2>&1; then
       _bot_allowlist=$(bot_trigger_allowlist "${REVIEW_BOTS:-}" 2>/dev/null || true)
     fi
-    drain_agent_bot_triggers "$ISSUE_NUMBER" "$REPO" "$_bot_allowlist" || true
+    _teardown_call drain_agent_bot_triggers "$ISSUE_NUMBER" "$REPO" "$_bot_allowlist" || true
   fi
 
   # SIGTERM convergence (INV-15): Step 5a only kills us when a PR is ready.
@@ -960,21 +987,21 @@ EOF
       # PR found: move to pending-review for the review agent
       # [INV-97] CSV multi-remove: route the atomic 2-remove+1-add flip through
       # the ITP verb (REMOVE is a comma-separated list). Byte-identical edit.
-      itp_transition_state "$ISSUE_NUMBER" "in-progress,pending-dev" "pending-review" || log "WARNING: Failed to update issue labels"
+      _teardown_call itp_transition_state "$ISSUE_NUMBER" "in-progress,pending-dev" "pending-review" || log "WARNING: Failed to update issue labels"
     else
       # Agent exited 0 but no PR was created — retry development
       log "WARNING: Agent exited 0 but no PR was created for issue #${ISSUE_NUMBER}"
-      itp_post_comment "$ISSUE_NUMBER" \
+      _teardown_call itp_post_comment "$ISSUE_NUMBER" \
         "Agent exited successfully but no PR was created. Moving to pending-dev for retry.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
       # [INV-111] (#402 r3 [P1]) re-arm between the two writes: the comment
       # above re-hashes `gh` to the shim path; a vanish here would strand the
       # flip. (Short: the C.5 anchor above must stay within ±8 of the flip.)
       rearm_gh_resolution
-      itp_transition_state "$ISSUE_NUMBER" "in-progress" "pending-dev" || log "WARNING: Failed to update issue labels"
+      _teardown_call itp_transition_state "$ISSUE_NUMBER" "in-progress" "pending-dev" || log "WARNING: Failed to update issue labels"
     fi
   else
     # Failure: move back to pending-dev so dispatcher can retry
-    itp_transition_state "$ISSUE_NUMBER" "in-progress" "pending-dev" || log "WARNING: Failed to update issue labels"
+    _teardown_call itp_transition_state "$ISSUE_NUMBER" "in-progress" "pending-dev" || log "WARNING: Failed to update issue labels"
     log "Agent failed (exit $exit_code). Issue remains in pending-dev for retry."
   fi
 
@@ -994,7 +1021,7 @@ EOF
     # cares about). The #N-boundary regex over normalized `body` stays here;
     # the `.body != null` guard is redundant (normalization pins body to "").
     local _pr_list_m
-    _pr_list_m=$(chp_pr_list all "createdAt,body" 2>/dev/null || true)
+    _pr_list_m=$(_teardown_call chp_pr_list all "createdAt,body" 2>/dev/null || true)
     if [[ -n "${_pr_list_m:-}" ]]; then
       _pr_created_at="$(jq -r "[.[] | select((.body | test(\"#${ISSUE_NUMBER}[^0-9]\")) or (.body | test(\"#${ISSUE_NUMBER}\$\")))] | sort_by(.createdAt) | (.[0].createdAt // empty)" <<<"$_pr_list_m" 2>/dev/null || true)"
     else

@@ -140,7 +140,12 @@ echo "=== TC-MG-SRC-12: emit_verdict_trailer grew by exactly 2 (gate's two block
 # abort); the INV-79 mandatory-bot-review gate (#234) adds two (awaiting-bot-review
 # wait + the max-waits substantive FAIL) → 13. All sit OUTSIDE the per-agent
 # collection loop.
-EMIT_COUNT=$(grep -cE '^\s*emit_verdict_trailer ' "$WRAPPER")
+#
+# [Lane-GC PR-3 / INV-112] The crash-trap call site (inside cleanup()) is now
+# wrapped as `_teardown_call emit_verdict_trailer …` (bounded network call) —
+# the regex tolerates an optional `_teardown_call ` prefix so the call-SITE
+# count stays semantically 13 even though one site's literal text changed.
+EMIT_COUNT=$(grep -cE '^\s*(_teardown_call )?emit_verdict_trailer ' "$WRAPPER")
 assert_eq "TC-MG-SRC-12 emit_verdict_trailer call count is 13 (6 existing + 2 INV-44 gate + 2 INV-46 E2E gate + 1 INV-64 smoke abort + 2 INV-79 bot-review gate)" \
   "13" "$EMIT_COUNT"
 
