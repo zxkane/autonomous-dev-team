@@ -45,10 +45,14 @@ export PROJECT_ID=test-proj
 export MAX_RETRIES=3
 export MAX_CONCURRENT=5
 
-# Mock `gh pr list --repo R --state open --json F -q EXPR` by piping the fixture
-# JSON through jq with the captured -q expression. The resolver issues exactly
-# one `gh pr list` call (single superset fetch); the fixture is the full PR set.
-# Stderr is preserved so a jq abort (e.g. null-body) is visible during runs.
+# Mock `gh pr list --repo R --state open --json F [-q EXPR]` by returning the
+# fixture as the raw array (matching real gh behavior). Under W1c1 (#397) the
+# leaf no longer emits `-q` — it runs its normalization jq pipeline outside
+# the gh call — so this mock stays engine-neutral and yields the RAW fixture
+# to `gh`; the leaf's own jq (and the caller's selection jq) run over it in
+# process. Stderr is preserved so a jq abort is visible during runs. The
+# resolver issues exactly one `gh pr list` call (single superset fetch); the
+# fixture is the full PR set.
 _MOCK_PR_LIST_JSON=""
 gh() {
   local q_expr=""
@@ -60,6 +64,8 @@ gh() {
   done
   if [[ -n "$q_expr" && -n "$_MOCK_PR_LIST_JSON" ]]; then
     jq -r "$q_expr" <<<"$_MOCK_PR_LIST_JSON"
+  elif [[ -n "$_MOCK_PR_LIST_JSON" ]]; then
+    printf '%s' "$_MOCK_PR_LIST_JSON"
   fi
 }
 export -f gh

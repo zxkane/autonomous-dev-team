@@ -36,10 +36,11 @@ export PROJECT_ID=test-proj
 export MAX_RETRIES=3
 export MAX_CONCURRENT=5
 
-# Mock `gh pr list --repo R --state open --json F -q EXPR` by piping the
-# fixture JSON through jq with the captured -q expression. Stderr is
-# preserved so the pre-fix jq error ("null (null) cannot be matched") is
-# visible during test runs against `main`.
+# Mock `gh pr list --repo R --state open --json F [-q EXPR]` by returning the
+# fixture as the raw array. Under W1c1 (#397) the leaf no longer passes `-q`
+# to gh — its normalization jq runs outside — so this mock supports BOTH the
+# `-q`-filtered pre-#397 shape (any legacy leaf still using it) and the
+# raw-passthrough W1c1 shape.
 _MOCK_PR_LIST_JSON=""
 gh() {
   local q_expr=""
@@ -51,6 +52,8 @@ gh() {
   done
   if [[ -n "$q_expr" && -n "$_MOCK_PR_LIST_JSON" ]]; then
     jq -r "$q_expr" <<<"$_MOCK_PR_LIST_JSON"
+  elif [[ -n "$_MOCK_PR_LIST_JSON" ]]; then
+    printf '%s' "$_MOCK_PR_LIST_JSON"
   fi
 }
 export -f gh

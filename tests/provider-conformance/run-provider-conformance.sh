@@ -490,6 +490,108 @@ _run_close_keyword_assert() {
   emit PASS "$verb"
 }
 
+# _run_findpr_assert / _run_prlist_assert — W1c1 (#397) abstract-contract
+# assertions for chp_find_pr_for_issue / chp_pr_list. Both verbs return a
+# NORMALIZED JSON ARRAY projected to a FIELDS-CSV positional arg. The runner:
+#   1. drives the verb against a canned PR-list payload with the stub gh
+#      succeeding — asserts rc 0, output is an array, each element has the
+#      normalized body-is-a-string contract (`body:null → body:""`) and the
+#      closingIssueNumbers array-of-ints contract;
+#   2. drives it again with the stub gh failing — asserts rc != 0 (fail-CLOSED,
+#      no partial output).
+# The [INV-86] close-linkage RESOLUTION jq is caller-side (`lib-pr-linkage.sh`)
+# — this suite exercises the LEAF's contract, not the caller's selection.
+_run_findpr_assert() {
+  local verb="chp_find_pr_for_issue"
+  local argv_file="$work_root/.argv-$verb.json"
+  local out rc
+
+  out="$(_invoke _PCF_GH_MODE="ok" _PCF_GH_PAYLOAD="$PAYLOADS/pr-list-valid.json" _PCF_ARGV_FILE="$argv_file" 'chp_find_pr_for_issue 42 "number,body,headRefOid"' 2>&1)"; rc=$?
+  if [[ "$rc" != "0" ]]; then
+    emit FAIL "$verb" "expected rc 0 on stub-success, got rc=$rc (output: ${out:0:200})"
+    return
+  fi
+  if ! pcf_is_json_array "$out"; then
+    emit FAIL "$verb" "wrong-shape (output is not a JSON array: ${out:0:200})"
+    return
+  fi
+  # body is a STRING (not null) for every element (the #148 normalization).
+  if ! jq -e 'all(.[]; (.body | type == "string"))' >/dev/null 2>&1 <<<"$out"; then
+    emit FAIL "$verb" "body not normalized to string across all elements (found null): ${out:0:200}"
+    return
+  fi
+  # closingIssueNumbers is an array of ints (the [INV-86] resolution key).
+  if ! jq -e 'all(.[]; (.closingIssueNumbers | type == "array") and all(.closingIssueNumbers[]?; type == "number"))' >/dev/null 2>&1 <<<"$out"; then
+    emit FAIL "$verb" "closingIssueNumbers not normalized to array-of-ints: ${out:0:200}"
+    return
+  fi
+  # FIELDS-CSV projection: every element MUST carry the requested caller fields
+  # (`number`, `body`, `headRefOid`) AND the resolution keys.
+  if ! jq -e 'all(.[]; has("number") and has("body") and has("headRefOid") and has("closingIssueNumbers") and has("headRefName"))' >/dev/null 2>&1 <<<"$out"; then
+    emit FAIL "$verb" "FIELDS-CSV projection missing a requested field: ${out:0:200}"
+    return
+  fi
+
+  # Fail-CLOSED on gh transport error.
+  out="$(_invoke _PCF_GH_MODE="fail" _PCF_ARGV_FILE="$argv_file" 'chp_find_pr_for_issue 42 "number,body,headRefOid" 2>/dev/null' 2>&1)"; rc=$?
+  if [[ "$rc" == "0" ]]; then
+    emit FAIL "$verb" "rc-0-on-error (stub gh failed but verb still returned 0, W1c1 fail-CLOSED contract)"
+    return
+  fi
+  emit PASS "$verb"
+}
+
+_run_prlist_assert() {
+  local verb="chp_pr_list"
+  local argv_file="$work_root/.argv-$verb.json"
+  local out rc
+
+  out="$(_invoke _PCF_GH_MODE="ok" _PCF_GH_PAYLOAD="$PAYLOADS/pr-list-valid.json" _PCF_ARGV_FILE="$argv_file" 'chp_pr_list open "body,number"' 2>&1)"; rc=$?
+  if [[ "$rc" != "0" ]]; then
+    emit FAIL "$verb" "expected rc 0 on stub-success, got rc=$rc (output: ${out:0:200})"
+    return
+  fi
+  if ! pcf_is_json_array "$out"; then
+    emit FAIL "$verb" "wrong-shape (output is not a JSON array: ${out:0:200})"
+    return
+  fi
+  # body normalized to string (null → "").
+  if ! jq -e 'all(.[]; (.body | type == "string"))' >/dev/null 2>&1 <<<"$out"; then
+    emit FAIL "$verb" "body not normalized to string across all elements: ${out:0:200}"
+    return
+  fi
+  # Field-subset projection: `body` and `number` MUST be present in each element.
+  if ! jq -e 'all(.[]; has("body") and has("number"))' >/dev/null 2>&1 <<<"$out"; then
+    emit FAIL "$verb" "FIELDS-CSV projection missing requested field (body/number): ${out:0:200}"
+    return
+  fi
+
+  # Empty-match convention: the leaf emits `[]` (never null) — feed an empty
+  # payload to prove it.
+  local empty_pl="$work_root/.pr-list-empty.json"
+  printf '[]' > "$empty_pl"
+  out="$(_invoke _PCF_GH_MODE="ok" _PCF_GH_PAYLOAD="$empty_pl" _PCF_ARGV_FILE="$argv_file" 'chp_pr_list open "body,number"' 2>&1)"; rc=$?
+  if [[ "$rc" != "0" || "$out" != "[]" ]]; then
+    emit FAIL "$verb" "empty match should emit '[]' rc 0; got rc=$rc out=${out:0:200}"
+    return
+  fi
+
+  # STATE / FIELDS positional args are REQUIRED; missing them → rc != 0.
+  out="$(_invoke _PCF_GH_MODE="ok" _PCF_ARGV_FILE="$argv_file" 'chp_pr_list 2>/dev/null' 2>&1)"; rc=$?
+  if [[ "$rc" == "0" ]]; then
+    emit FAIL "$verb" "missing STATE did not error"
+    return
+  fi
+
+  # Fail-CLOSED on gh transport error.
+  out="$(_invoke _PCF_GH_MODE="fail" _PCF_ARGV_FILE="$argv_file" 'chp_pr_list open "body,number" 2>/dev/null' 2>&1)"; rc=$?
+  if [[ "$rc" == "0" ]]; then
+    emit FAIL "$verb" "rc-0-on-error (stub gh failed but verb still returned 0)"
+    return
+  fi
+  emit PASS "$verb"
+}
+
 # ---------------------------------------------------------------------------
 # Drive each ASSERTED verb per cap-map.conf.
 # ---------------------------------------------------------------------------
@@ -573,6 +675,20 @@ _assert_verb() {
       ;;
     chp_close_keyword)
       _run_close_keyword_assert
+      ;;
+    chp_find_pr_for_issue)
+      # W1c1 (#397) abstract contract: normalized JSON array of candidates,
+      # projected to FIELDS-CSV ∪ {number, closingIssueNumbers, headRefName}.
+      # body → string (null → ""), closingIssueNumbers → int-array. Fail-CLOSED
+      # on gh transport error (rc != 0, no partial output).
+      _run_findpr_assert
+      ;;
+    chp_pr_list)
+      # W1c1 (#397) abstract contract: normalized JSON array projected to
+      # caller's FIELDS-CSV; body → string; empty match → `[]` (never null).
+      # Self-guarding shim (leaf-absent → return 1); fail-CLOSED on transport
+      # error / cap-hit.
+      _run_prlist_assert
       ;;
     *)
       emit FAIL "$verb" "no assertion wired for this verb (runner bug)"

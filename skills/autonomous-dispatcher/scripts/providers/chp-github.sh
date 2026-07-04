@@ -31,27 +31,117 @@
 # (chp_caps reads the .caps manifest in the dispatcher, not a function here.)
 
 # ---------------------------------------------------------------------------
-# chp_github_find_pr_for_issue ISSUE FIELDS [extra gh args…] — projected PR fetch.
+# _chp_github_pr_normalize_jq — the jq filter both W1c1 (#397) PR-read leaves
+# apply to gh's raw `pr list --json …` output. Kept as a bare-string constant
+# (not a function) so it splices directly into the jq argv; the leaves then
+# handle their own field-projection / gh call. Vocabulary is spec §3.2.1.
+_CHP_GITHUB_PR_NORMALIZE_JQ='
+  [ .[] | {
+      number: .number,
+      state: (.state // ""),
+      title: (.title // ""),
+      body: (.body // ""),
+      createdAt: (.createdAt // null),
+      updatedAt: (.updatedAt // null),
+      mergedAt: (.mergedAt // null),
+      headRefName: (.headRefName // ""),
+      headRefOid: (.headRefOid // ""),
+      reviewDecision: (.reviewDecision // ""),
+      mergeable: (.mergeable // ""),
+      closingIssueNumbers: ([ (.closingIssuesReferences // [])[]?.number ])
+    }
+  ]'
+
+# _chp_github_pr_page_limit — the bounded page-walk `--limit` value both W1c1
+# leaves pass to gh. `gh pr list --limit N` with N > 100 already page-walks
+# under the hood (undocumented but load-bearing for W1a's list_by_state
+# leaves), so we ask for `--limit (100 * cap)` and rely on gh's internal
+# walker. Cap defaults to 20 pages → 2000 open PRs — comfortable upper bound
+# on any real dispatcher workload. Fail-CLOSED on `gh` transport error
+# (caller's `|| return 1`).
+_chp_github_pr_page_limit() {
+  local page_cap="${CHP_GITHUB_PR_LIST_PAGE_CAP:-20}"
+  [[ "$page_cap" =~ ^[0-9]+$ ]] && (( page_cap > 0 )) || page_cap=20
+  printf '%s' "$(( page_cap * 100 ))"
+}
+
+# _chp_github_pr_gh_fields <normalized-csv> [extra-normalized-fields...] —
+# translate the caller's normalized-vocabulary FIELDS-CSV into the equivalent
+# gh-native --json field list, deduped and unioned with any extra names the
+# caller adds (e.g. the resolution keys for `chp_find_pr_for_issue`). Empty
+# tokens are skipped. `closingIssueNumbers` maps back to gh's
+# `closingIssuesReferences`; every other name is passed through.
+_chp_github_pr_gh_fields() {
+  local fields="$1"; shift
+  local -A _gh_from_normalized=(
+    [closingIssueNumbers]=closingIssuesReferences
+  )
+  local out="" seen="," f gh_f
+  local IFS_SAVE=$IFS; IFS=','
+  # shellcheck disable=SC2206
+  local -a _caller_fields=(${fields})
+  IFS="$IFS_SAVE"
+  local -a _all=("${_caller_fields[@]}" "$@")
+  for f in "${_all[@]}"; do
+    [ -n "$f" ] || continue
+    gh_f="${_gh_from_normalized[$f]:-$f}"
+    case "$seen" in
+      *",$gh_f,"*) : ;;
+      *) seen="$seen$gh_f,"; out="${out:+$out,}$gh_f" ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
+# ---------------------------------------------------------------------------
+# chp_github_find_pr_for_issue ISSUE FIELDS-CSV — normalized candidate PR fetch.
 #
-# Spec §3.2 [M1]: return the open PR bound to ISSUE, projected to the
-# caller-supplied FIELDS `--json` list. FIELDS is a REQUIRED 2nd positional arg —
-# every caller varies it (`number,headRefOid,body`; `number,mergedAt,reviews`;
-# `number,reviewDecision,mergeable,state,body`; …). The leaf forwards FIELDS to
-# `gh pr list --json $FIELDS` BYTE-IDENTICALLY; the [INV-86] close-linkage /
-# branch-name resolution AND the projection live in the caller's `-q` (a 3rd arg
-# the caller passes through verbatim). Calling without FIELDS is an error (the
-# empty `--json` would abort `gh`), matching the resolve_pr_for_issue contract.
+# Spec §3.2 [M1] (W1c1, #397): return a NORMALIZED JSON ARRAY of open PR
+# candidates for close-linkage-resolution by the caller. The array is projected
+# to the caller-supplied FIELDS-CSV UNION the three selection keys
+# (`number,closingIssueNumbers,headRefName`); `closingIssueNumbers` is a
+# normalized array of ints (from GitHub's `closingIssuesReferences[].number`),
+# `body` is normalized to a string (`null` → `""`, the #148 hazard fix), and
+# `state` is one of `OPEN|CLOSED|MERGED`. No `gh` flags or `jq` programs cross
+# the seam — the caller's [INV-86] two-tier resolution (close-linkage beats
+# branch-name, boundary-anchored branch match, deterministic PR-number tie-
+# break) lives in `lib-pr-linkage.sh` as pure jq over the returned array
+# (mirrors INV-44 classifiers-stay-caller-side).
 #
-# Regression anchors: #148 (omitting `body` from FIELDS silently hides the PR),
-# #274. The `gh pr list` argv is the no-behavior-change golden-trace anchor
-# (spec §7.2). $REPO is from the caller env.
+# The ISSUE positional stops being dead: it is a NARROWING HINT the provider
+# MAY use to prune the candidate set — but ONLY when no true candidate can be
+# excluded. GitHub has no server-side "PR that closes issue N" filter today,
+# so the ISSUE arg is documented but IGNORED here; GraphQL/`gh` returns all
+# open PRs and the caller narrows client-side.
+#
+# COMPLETE-set (§3.5): the leaf walks pagination to exhaustion, bounded at
+# `CHP_GITHUB_PR_LIST_PAGE_CAP` pages (default 20; each page 100 PRs, so cap
+# holds 2000 open PRs — a comfortable upper bound on any real dispatcher
+# workload). Cap-hit is FAIL-CLOSED: rc != 0 and no partial array, so the
+# caller's `|| return 1` posture rejects rather than silently drops a
+# candidate. A fixed `--limit N` is NOT acceptable — it just moves the silent
+# truncation threshold; the whole point of #397 is closing that hazard.
+#
+# Fail-closed on `gh` error: transport / auth / API failure → non-zero rc,
+# no partial output (the `needs_open_pr_only` site uses `|| return 1` to
+# refuse the pushed-no-PR classification on a failed read).
+#
+# Regression anchors: #148 (null-body PRs no longer hide close-linked matches);
+# #277/[INV-86] (close-linkage beats body-mention); silent `--limit 30`
+# truncation the pre-#397 leaf inherited from gh's default.
 chp_github_find_pr_for_issue() {
   # `${2:-}` (not `$2`) so the missing-FIELDS guard is reachable under `set -u`
   # rather than aborting on an unbound `$2`.
-  local fields="${2:-}"
-  [ -n "$fields" ] || { echo "ERROR: chp_github_find_pr_for_issue requires FIELDS (2nd arg) [M1]" >&2; return 2; }
-  shift 2
-  gh pr list --repo "$REPO" --state open --json "$fields" "$@"
+  local _issue="${1:-}" fields="${2:-}"
+  [ -n "$fields" ] || { echo "ERROR: chp_github_find_pr_for_issue requires FIELDS-CSV (2nd arg) [M1]" >&2; return 2; }
+  # Union the caller's normalized fields with the three [INV-86] resolution
+  # keys (number, closingIssueNumbers, headRefName). The helper maps
+  # `closingIssueNumbers` back to gh's `closingIssuesReferences` name.
+  local gh_fields
+  gh_fields="$(_chp_github_pr_gh_fields "$fields" number closingIssueNumbers headRefName)"
+  local raw
+  raw="$(gh pr list --repo "$REPO" --state open --limit "$(_chp_github_pr_page_limit)" --json "$gh_fields" 2>/dev/null)" || return 1
+  jq -c "$_CHP_GITHUB_PR_NORMALIZE_JQ" <<<"$raw"
 }
 
 # chp_github_ci_status PR [extra gh args…] — CI check-state leaf.
@@ -294,18 +384,50 @@ chp_github_pr_view() {
   gh pr view "$pr" --repo "$REPO" "$@"
 }
 
-# chp_github_pr_list [extra gh args…] — general PR list read leaf (#282 review r8).
+# chp_github_pr_list STATE FIELDS-CSV — normalized PR-list read leaf.
 #
-# The provider-neutral `gh pr list` primitive the caller layer's INCIDENTAL
-# body-mention existence lookups use (needs_open_pr_only / cleanup PR_EXISTS /
-# metrics / resume PR_NUM in autonomous-dev.sh). DISTINCT from
-# chp_find_pr_for_issue (the [INV-86] close-linkage resolver): this is the loose
-# `select(.body|test("#N"))` body-mention form these pre-#277 lookups deliberately
-# keep. The caller supplies the full tail (`--state open|all --json … -q …`) via
-# "$@"; the leaf forwards it byte-identically (no `--state` hardcoded, so a
-# `--state all` caller is byte-identical too).
+# Spec §3.2 (W1c1, #397): return a NORMALIZED JSON ARRAY of PRs in STATE,
+# projected to the caller-supplied FIELDS-CSV. STATE ∈ `open|closed|merged|all`
+# (case-insensitive at the seam; the GitHub leaf lowercases for `gh --state`).
+# The FIELDS-CSV is projected using the SAME normalized vocabulary as
+# `chp_find_pr_for_issue` — body is a string (`null` → `""`), state is
+# `OPEN|CLOSED|MERGED`, createdAt/updatedAt/mergedAt are ISO-8601 or null,
+# and `closingIssueNumbers` is an array of ints (from
+# `closingIssuesReferences[].number`). No `gh` flags or `jq` programs cross
+# the seam.
+#
+# DISTINCT from `chp_find_pr_for_issue`: no issue-narrowing hint, no forced
+# union with the resolution keys. The body-mention `#N`-boundary `test()` is
+# caller-side (each of the six body-mention sites keeps its own regex over
+# the normalized `body` string). Empty match set → `[]` (NEVER null; the #148
+# hazard fix).
+#
+# COMPLETE-set (§3.5): same bounded page-walk as `chp_find_pr_for_issue`
+# (`CHP_GITHUB_PR_LIST_PAGE_CAP`, default 20 pages / 2000 PRs), fail-CLOSED
+# on cap-hit or `gh` transport error. This closes the silent `--limit 30`
+# truncation that could make `needs_open_pr_only` misclassify a >30-open-PR
+# repo (a real hazard for the linkage read; the six body-mention sites here
+# are decision-consistent, but a `pr_num` result flipped from #102 to "" by
+# truncation is a live regression).
 chp_github_pr_list() {
-  gh pr list --repo "$REPO" "$@"
+  local state="${1:-}" fields="${2:-}"
+  [ -n "$state" ]  || { echo "ERROR: chp_github_pr_list requires STATE (1st arg)" >&2; return 2; }
+  [ -n "$fields" ] || { echo "ERROR: chp_github_pr_list requires FIELDS-CSV (2nd arg)" >&2; return 2; }
+  # Lowercase state for `gh --state` (accepts open/closed/merged/all).
+  local state_lc
+  state_lc="$(printf '%s' "$state" | tr '[:upper:]' '[:lower:]')"
+  case "$state_lc" in
+    open|closed|merged|all) : ;;
+    *) echo "ERROR: chp_github_pr_list STATE must be one of open|closed|merged|all (got '$state')" >&2; return 2 ;;
+  esac
+  # Union caller's normalized fields with `number` (every body-mention site
+  # projects it) but NOT the [INV-86] resolution keys — this verb is the
+  # general body-mention list read, not the linkage resolver.
+  local gh_fields
+  gh_fields="$(_chp_github_pr_gh_fields "$fields" number)"
+  local raw
+  raw="$(gh pr list --repo "$REPO" --state "$state_lc" --limit "$(_chp_github_pr_page_limit)" --json "$gh_fields" 2>/dev/null)" || return 1
+  jq -c "$_CHP_GITHUB_PR_NORMALIZE_JQ" <<<"$raw"
 }
 
 # chp_github_list_inline_comments PR [extra gh args…] — PR inline (file-anchored)

@@ -1,0 +1,13 @@
+# pr-list-valid.json.meta — provenance sidecar (#397, W1c1).
+#
+# Represents `gh pr list --repo <r> --state open --json <fields>`'s RAW output
+# shape — two open PRs, one close-linked to #42 (body-mentions #42 too) and one
+# unrelated null-body sibling. Deliberately covers:
+#   - `body:null` → the leaf's normalization pins to "" (the #148 hazard fix)
+#   - `closingIssuesReferences: [{number}]` → the leaf flattens to
+#     `closingIssueNumbers:[42]` (int array; the [INV-86] resolution key)
+#   - The empty-array `closingIssuesReferences: []` case (branch-name fallback
+#     candidate in real production).
+# The runner drives BOTH `chp_find_pr_for_issue` and `chp_pr_list` against
+# this payload and asserts the normalized array shape (§3.2.1 vocabulary) plus
+# fail-CLOSED on stub-gh failure.

@@ -100,14 +100,15 @@ fetch_pr_for_issue() {
   _rec fetch_pr_for_issue "$@"
   resolve_pr_for_issue "$@"
 }
-# chp_find_pr_for_issue — record the REAL union argv resolve_pr_for_issue emits,
-# and return the single-line projected PR object the orchestrator's
-# `jq -r '.headRefOid // empty'` reads. (resolve's `-q "$q"` would normally do
-# the projection against a PR list; here we shortcut to the already-projected
-# object since the caller only consumes .headRefOid.)
+# chp_find_pr_for_issue — record the FIELDS-CSV positional argv the caller
+# emits, and return a NORMALIZED candidate ARRAY (W1c1, #397 shape) containing
+# one PR whose `closingIssueNumbers` include the issue passed as $1. The real
+# resolve_pr_for_issue jq filter runs over this array caller-side and picks
+# PR #7 — the orchestrator's `.headRefOid` read then finds _MOCK_CURRENT_HEAD.
 chp_find_pr_for_issue() {
   _rec chp_find_pr_for_issue "$@"
-  printf '%s\n' "{\"number\":7,\"headRefOid\":\"${_MOCK_CURRENT_HEAD}\",\"body\":\"b\"}"
+  local issue="${1:-0}"
+  printf '%s\n' "[{\"number\":7,\"headRefOid\":\"${_MOCK_CURRENT_HEAD}\",\"body\":\"b\",\"closingIssueNumbers\":[${issue}],\"headRefName\":\"feat/issue-${issue}-x\"}]"
 }
 
 # Non-host caller-side ops.
@@ -160,7 +161,8 @@ fetch_pr_for_issue() {
 }
 chp_find_pr_for_issue() {
   _rec chp_find_pr_for_issue "$@"
-  printf '%s\n' "{\"number\":7,\"headRefOid\":\"${_MOCK_CURRENT_HEAD}\",\"body\":\"b\"}"
+  local issue="${1:-0}"
+  printf '%s\n' "[{\"number\":7,\"headRefOid\":\"${_MOCK_CURRENT_HEAD}\",\"body\":\"b\",\"closingIssueNumbers\":[${issue}],\"headRefName\":\"feat/issue-${issue}-x\"}]"
 }
 classify_recent_review_verdict() {
   local _i="$1" _t="$2" _v="$3" _c="$4"
@@ -280,18 +282,19 @@ assert_match  "TC-HCGT-009 default post carries INV-12-completed handoff marker"
 echo
 echo "=== TC-HCGT-010..011: #148 + #274/INV-85 anchors ==="
 
-# TC-HCGT-010 — #148 anchor. Two distinct boundaries (the real delegation chain
-# fetch_pr_for_issue → resolve_pr_for_issue → chp_find_pr_for_issue runs LIVE here;
-# only fetch_pr_for_issue and chp_find_pr_for_issue are recorded, resolve is real):
+# TC-HCGT-010 — #148 + W1c1 (#397) anchor. Two distinct boundaries (the real
+# delegation chain fetch_pr_for_issue → resolve_pr_for_issue →
+# chp_find_pr_for_issue runs LIVE here; only fetch_pr_for_issue and
+# chp_find_pr_for_issue are recorded, resolve is real):
 #   (a) the argv the ORCHESTRATOR emits directly is byte-identical
-#       "number,headRefOid,body" (the literal #274 source-pin); AND
-#   (b) at the REAL chp_find_pr_for_issue verb boundary the FIELDS positional arg
-#       is resolve_pr_for_issue's genuine union (caller fields + the [INV-86]
-#       resolution fields number,closingIssuesReferences,headRefName) — which MUST
-#       still CONTAIN `body` (the #148 body-inclusion guarantee at the verb), and
-#       the call carries the `-q` projection. We assert the real union argv
-#       exactly so a regression in resolve's field union (dropping body) is caught
-#       at the verb, not hidden behind a hand-rolled mock forward (#285 review m3).
+#       "number,headRefOid,body" (the literal #274 source-pin) — the wrapper
+#       still asks for `body` even though the leaf normalizes it; AND
+#   (b) at the REAL chp_find_pr_for_issue verb boundary the FIELDS-CSV
+#       positional arg is the CALLER's request VERBATIM (W1c1 shape: no more
+#       union with resolution keys at the caller — the LEAF owns that). It
+#       MUST still include `body` (#148 anchor). NO `-q` crosses the seam
+#       under the W1c1 abstract contract (the resolution jq runs caller-side
+#       over the normalized array).
 _reset_mocks; _MOCK_VERDICT="failed-substantive"; _MOCK_CURRENT_HEAD="headNEW"; _MOCK_LAST_HEAD="headOLD"; _MOCK_SID="sidC"
 handle_completed_session_routing 310 sidC "2026-06-28T00:00:00Z" >/dev/null 2>&1
 assert_eq     "TC-HCGT-010a fetch_pr_for_issue (orchestrator's direct call) FIELDS = number,headRefOid,body (#274 source-pin)" \
@@ -299,11 +302,17 @@ assert_eq     "TC-HCGT-010a fetch_pr_for_issue (orchestrator's direct call) FIEL
 chp_call=$(_trace_nth chp_find_pr_for_issue 1)
 # Positional FIELDS = arg 2 (the 3rd US-separated field: verb, issue, FIELDS, …).
 chp_fields=$(awk -v FS="$US" '{print $3}' <<<"$chp_call")
-assert_eq     "TC-HCGT-010b chp_find_pr_for_issue real union FIELDS (resolve_pr_for_issue, #148 body retained)" \
-              "number,headRefOid,body,closingIssuesReferences,headRefName" "$chp_fields"
+assert_eq     "TC-HCGT-010b chp_find_pr_for_issue receives caller's FIELDS verbatim under W1c1 abstract contract (#148 body retained)" \
+              "number,headRefOid,body" "$chp_fields"
 assert_match  "TC-HCGT-010b chp_find_pr_for_issue FIELDS still includes body (#148 anchor at the verb boundary)" \
               "(^|,)body(,|$)" "$chp_fields"
-assert_match  "TC-HCGT-010b chp_find_pr_for_issue carries the -q projection" "${US}-q${US}" "$chp_call"
+# W1c1 (#397): NO `-q` at the seam — the resolution jq is caller-side over
+# the normalized array. Assert the seam carries POSITIONALS only.
+if [[ "$chp_call" != *"${US}-q${US}"* ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-HCGT-010b chp_find_pr_for_issue no -q crosses the seam (W1c1 abstract contract)"; PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-HCGT-010b chp_find_pr_for_issue -q leaked into seam call: $chp_call"; FAIL=$((FAIL + 1))
+fi
 
 # TC-HCGT-011 — #274/INV-85 anchor: Branch C's attempt-marker post carries the
 # EXACT token no-progress-substantive-attempt:<head> via itp_post_comment.

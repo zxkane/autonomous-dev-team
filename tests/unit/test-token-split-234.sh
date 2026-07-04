@@ -720,7 +720,10 @@ chmod +x "$SBA95/gh-as-user.sh"
 GHSB95="$TMPROOT/bt-gh"; mkdir -p "$GHSB95"
 cat > "$GHSB95/gh" <<'GH'
 #!/bin/bash
-if [[ "$1" == "pr" && "$2" == "list" ]]; then echo 42; exit 0; fi
+# W1c1 (#397): the chp_pr_list leaf runs jq normalization over gh's raw
+# output, so this stub emits a canned JSON array with one PR body-mentioning
+# #234 → the caller-side selector resolves pr_number=42.
+if [[ "$1" == "pr" && "$2" == "list" ]]; then printf '[{"number":42,"body":"Closes #234"}]'; exit 0; fi
 exit 0
 GH
 chmod +x "$GHSB95/gh"
@@ -815,7 +818,8 @@ printf '#!/bin/bash\nget_gh_app_token(){ echo X; }\nget_gh_app_scoped_token(){ e
 DRAIN_POSTS="$TMPROOT/drain-posts.log"; : > "$DRAIN_POSTS"
 printf '#!/bin/bash\nprintf "POST %%s\\n" "$*" >> "%s"\n' "$DRAIN_POSTS" > "$DRAIN_SBA/gh-as-user.sh"; chmod +x "$DRAIN_SBA/gh-as-user.sh"
 DRAIN_GH="$TMPROOT/drain-gh"; mkdir -p "$DRAIN_GH"
-printf '#!/bin/bash\nif [[ "$1" == "pr" && "$2" == "list" ]]; then echo 42; exit 0; fi\nexit 0\n' > "$DRAIN_GH/gh"; chmod +x "$DRAIN_GH/gh"
+# W1c1 (#397): chp_pr_list normalizes gh's raw output; emit a canned array.
+printf '#!/bin/bash\nif [[ "$1" == "pr" && "$2" == "list" ]]; then printf "[{\\"number\\":42,\\"body\\":\\"Closes #234\\"}]"; exit 0; fi\nexit 0\n' > "$DRAIN_GH/gh"; chmod +x "$DRAIN_GH/gh"
 DRAIN_BTF="$TMPROOT/drain-bt"; printf '/q review\n/evil arbitrary comment\n/codex review\n' > "$DRAIN_BTF"
 env -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR PATH="$DRAIN_GH:/usr/bin:/bin" bash -c "
   source '$DRAIN_SBA/lib-code-host.sh'; source '$DRAIN_SBA/lib-auth.sh'; source '$DRAIN_SBA/lib-review-bots.sh'
@@ -1021,13 +1025,19 @@ if [[ -s "$PR_CREATE_LOG" ]] \
 else
   assert_fail "scoping armed: broker did NOT create with --head (log: $(cat "$PR_CREATE_LOG" 2>/dev/null))"
 fi
-# [#296 B3, #308] AC5/AC4: the PR-existence read was OBSERVED through chp_pr_list →
-# `gh pr list --repo owner/repo --state open …`. With the CHP seam now copied into
-# the sandbox (new_auth_sandbox), an UNDEFINED-verb fail-soft can no longer pass
-# this for the wrong reason: the stub must have actually recorded the gh pr list.
+# [#296 B3, #308, W1c1 #397] AC5/AC4: the PR-existence read was OBSERVED through
+# chp_pr_list → `gh pr list --repo owner/repo --state open --limit <N> --json body`.
+# W1c1 (#397) added `--limit <N>` to the leaf's gh argv for the COMPLETE-set
+# guarantee, so the needle checks each flag INDIVIDUALLY (contiguous substring
+# breaks on the added --limit). With the CHP seam now copied into the sandbox
+# (new_auth_sandbox), an UNDEFINED-verb fail-soft can no longer pass this for
+# the wrong reason: the stub must have actually recorded the gh pr list.
 if [[ -s "$PR_LIST_LOG" ]] \
-   && grep -qF -- '--repo owner/repo --state open --json body' "$PR_LIST_LOG"; then
-  assert_pass "scoping armed: existence read OBSERVED through chp_pr_list (gh pr list --repo owner/repo --state open --json body)"
+   && grep -qF -- '--repo owner/repo' "$PR_LIST_LOG" \
+   && grep -qF -- '--state open' "$PR_LIST_LOG" \
+   && grep -qF -- '--limit' "$PR_LIST_LOG" \
+   && grep -qE -- '--json[[:space:]]+([^ ]*,)?body([, ]|$)' "$PR_LIST_LOG"; then
+  assert_pass "scoping armed: existence read OBSERVED through chp_pr_list (--repo owner/repo --state open --limit N --json …body…)"
 else
   assert_fail "existence read NOT observed through chp_pr_list (verb undefined → silent fail-soft?) (log: $(cat "$PR_LIST_LOG" 2>/dev/null))"
 fi
@@ -1332,7 +1342,9 @@ GHSTUB
   GHG2="$TMPROOT/fbdisp-gh2"; mkdir -p "$GHG2"
   cat > "$GHG2/gh" <<'GHSTUB'
 #!/bin/bash
-if [[ "$1" == "pr" && "$2" == "list" ]]; then echo 4242; exit 0; fi
+# W1c1 (#397): chp_pr_list normalizes gh's raw output; emit a canned array
+# body-mentioning #346 → the caller-side selector resolves pr_number=4242.
+if [[ "$1" == "pr" && "$2" == "list" ]]; then printf '[{"number":4242,"body":"Closes #346"}]'; exit 0; fi
 exit 0
 GHSTUB
   chmod +x "$GHG2/gh"
@@ -1399,7 +1411,9 @@ GHSTUB
   GHGN="$TMPROOT/fbdisp-gn-gh"; mkdir -p "$GHGN"
   cat > "$GHGN/gh" <<'GHSTUB'
 #!/bin/bash
-if [[ "$1" == "pr" && "$2" == "list" ]]; then echo 4242; exit 0; fi
+# W1c1 (#397): chp_pr_list normalizes gh's raw output; emit a canned array
+# body-mentioning #346 → the caller-side selector resolves pr_number=4242.
+if [[ "$1" == "pr" && "$2" == "list" ]]; then printf '[{"number":4242,"body":"Closes #346"}]'; exit 0; fi
 exit 0
 GHSTUB
   chmod +x "$GHGN/gh"

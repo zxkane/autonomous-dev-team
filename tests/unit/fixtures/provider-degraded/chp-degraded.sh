@@ -94,3 +94,45 @@ chp_degraded_reply_review_comment() {
     -X POST -f body="$body" -F in_reply_to="$comment_id" \
     --jq '{id: .id, url: .html_url}'
 }
+
+# chp_degraded_find_pr_for_issue ISSUE FIELDS-CSV — mirrors chp_github_find_pr_for_issue's
+# W1c1 (#397) abstract contract: normalized JSON candidate array projected to
+# FIELDS-CSV ∪ resolution-keys. body → string, closingIssueNumbers → int-array.
+# The normalization jq is inlined (not sharing chp-github.sh helpers) so this
+# fixture stays a self-contained CHP file.
+_chp_degraded_pr_normalize_jq='
+  [ .[] | {
+      number: .number,
+      state: (.state // ""),
+      title: (.title // ""),
+      body: (.body // ""),
+      createdAt: (.createdAt // null),
+      updatedAt: (.updatedAt // null),
+      mergedAt: (.mergedAt // null),
+      headRefName: (.headRefName // ""),
+      headRefOid: (.headRefOid // ""),
+      reviewDecision: (.reviewDecision // ""),
+      mergeable: (.mergeable // ""),
+      closingIssueNumbers: ([ (.closingIssuesReferences // [])[]?.number ])
+    }
+  ]'
+chp_degraded_find_pr_for_issue() {
+  local fields="${2:-}"
+  [ -n "$fields" ] || return 2
+  local raw
+  raw="$(gh pr list --repo "$REPO" --state open --limit 2000 --json "number,body,closingIssuesReferences,headRefName" 2>/dev/null)" || return 1
+  jq -c "$_chp_degraded_pr_normalize_jq" <<<"$raw"
+}
+
+# chp_degraded_pr_list STATE FIELDS-CSV — mirrors chp_github_pr_list's W1c1
+# abstract contract: normalized JSON array projected to FIELDS-CSV.
+chp_degraded_pr_list() {
+  local state="${1:-}"
+  [ -n "$state" ] || return 2
+  [ -n "${2:-}" ] || return 2
+  local state_lc
+  state_lc="$(printf '%s' "$state" | tr '[:upper:]' '[:lower:]')"
+  local raw
+  raw="$(gh pr list --repo "$REPO" --state "$state_lc" --limit 2000 --json "number,body,closingIssuesReferences,createdAt" 2>/dev/null)" || return 1
+  jq -c "$_chp_degraded_pr_normalize_jq" <<<"$raw"
+}

@@ -149,18 +149,22 @@ env -u CODE_HOST -u AUTONOMOUS_CONF -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR \
 if [[ -f "$REC1/.verbs" ]] && grep -qx "pr list" "$REC1/.verbs"; then
   pass "S1 seam-reachability: stub OBSERVED a 'gh pr list' call through chp_pr_list (exercised, not just reachable)"
   cn=$(call_for_verb "$REC1" pr list) && read_call "$REC1" "$cn"
-  # argc: pr list --repo $REPO --state open --json body -q <selector> = 10 args
-  assert_eq "S1 golden-trace argc (boundaries preserved)" "10" "${#CALL_ARGV[@]}"
-  assert_eq "S1 argv[0]=pr" "pr" "${CALL_ARGV[0]:-}"
-  assert_eq "S1 argv[1]=list" "list" "${CALL_ARGV[1]:-}"
-  assert_eq "S1 argv[2]=--repo" "--repo" "${CALL_ARGV[2]:-}"
-  assert_eq "S1 argv[3]=\$REPO (verb supplies global REPO)" "$REPO" "${CALL_ARGV[3]:-}"
-  assert_eq "S1 argv[4]=--state" "--state" "${CALL_ARGV[4]:-}"
-  assert_eq "S1 argv[5]=open" "open" "${CALL_ARGV[5]:-}"
-  assert_eq "S1 argv[6]=--json" "--json" "${CALL_ARGV[6]:-}"
-  assert_eq "S1 argv[7]=body" "body" "${CALL_ARGV[7]:-}"
-  assert_eq "S1 argv[8]=-q" "-q" "${CALL_ARGV[8]:-}"
-  assert_eq "S1 argv[9]=<verbatim existence selector, single element>" "$SEL_EXISTS" "${CALL_ARGV[9]:-}"
+  # W1c1 (#397) reshape: the leaf now emits gh's argv without -q; the caller-
+  # side jq runs OUTSIDE the gh call. New shape: `pr list --repo $REPO
+  # --state open --limit <N> --json <fields>` — no -q, positional STATE +
+  # FIELDS-CSV on the CALLER side. Assert the structural argv: pr list,
+  # --repo <REPO>, --state open, --limit present, --json contains body.
+  argv_joined="${CALL_ARGV[*]:-}"
+  assert_eq "S1 argv[0..1]=pr list" "pr list" "${CALL_ARGV[0]:-} ${CALL_ARGV[1]:-}"
+  assert_contains "S1 argv --repo \$REPO present" "--repo $REPO" "$argv_joined"
+  assert_contains "S1 argv --state open present" "--state open" "$argv_joined"
+  assert_contains "S1 argv --limit present (COMPLETE-set)" "--limit" "$argv_joined"
+  assert_contains "S1 argv --json body-inclusive" "body" "$argv_joined"
+  if [[ "$argv_joined" != *" -q "* ]]; then
+    pass "S1 no -q crosses the seam (W1c1 abstract contract)"
+  else
+    fail "S1 -q leaked into gh argv (W1c1 regression): $argv_joined"
+  fi
 else
   fail "S1 seam-reachability: stub did NOT observe a 'gh pr list' — chp_pr_list not exercised (fail-soft hazard)"
 fi
@@ -190,14 +194,23 @@ env -u CODE_HOST -u AUTONOMOUS_CONF -u PROJECT_DIR \
 if [[ -f "$REC2/.verbs" ]] && grep -qx "pr list" "$REC2/.verbs"; then
   pass "S2 seam-reachability: stub OBSERVED a 'gh pr list' call through chp_pr_list"
   cn=$(call_for_verb "$REC2" pr list) && read_call "$REC2" "$cn"
-  # argc: pr list --repo $REPO --state open --json number,body -q <selector> = 10 args
-  assert_eq "S2 golden-trace argc (boundaries preserved)" "10" "${#CALL_ARGV[@]}"
+  # W1c1 (#397) reshape: same rationale as S1 above — no -q, positional
+  # STATE + FIELDS-CSV on the caller side; the leaf's argv is
+  # `pr list --repo $REPO --state open --limit <N> --json <fields>`.
+  argv_joined="${CALL_ARGV[*]:-}"
   assert_eq "S2 argv[0..1]=pr list" "pr list" "${CALL_ARGV[0]:-} ${CALL_ARGV[1]:-}"
-  assert_eq "S2 argv[2..3]=--repo \$REPO" "--repo $REPO" "${CALL_ARGV[2]:-} ${CALL_ARGV[3]:-}"
-  assert_eq "S2 argv[4..5]=--state open" "--state open" "${CALL_ARGV[4]:-} ${CALL_ARGV[5]:-}"
-  assert_eq "S2 argv[6..7]=--json number,body" "--json number,body" "${CALL_ARGV[6]:-} ${CALL_ARGV[7]:-}"
-  assert_eq "S2 argv[8]=-q" "-q" "${CALL_ARGV[8]:-}"
-  assert_eq "S2 argv[9]=<verbatim number selector, single element>" "$SEL_PRNUM" "${CALL_ARGV[9]:-}"
+  assert_contains "S2 argv --repo \$REPO present" "--repo $REPO" "$argv_joined"
+  assert_contains "S2 argv --state open present" "--state open" "$argv_joined"
+  assert_contains "S2 argv --limit present (COMPLETE-set)" "--limit" "$argv_joined"
+  # The lib-auth.sh :605 site requests FIELDS-CSV "number,body"; the leaf
+  # unions it with `number` (idempotent) so the --json arg contains both.
+  assert_contains "S2 argv --json number-inclusive" "number" "$argv_joined"
+  assert_contains "S2 argv --json body-inclusive" "body" "$argv_joined"
+  if [[ "$argv_joined" != *" -q "* ]]; then
+    pass "S2 no -q crosses the seam (W1c1 abstract contract)"
+  else
+    fail "S2 -q leaked into gh argv (W1c1 regression): $argv_joined"
+  fi
 else
   fail "S2 seam-reachability: stub did NOT observe a 'gh pr list' — chp_pr_list not exercised"
 fi
@@ -290,7 +303,7 @@ n_selfsource=$(awk '{s=$0;sub(/^[[:space:]]+/,"",s); if(substr(s,1,1)=="#")next;
 assert_eq "TC-308-SRC-NO-SELFSOURCE lib-review-e2e.sh did NOT add an executable lib-code-host.sh self-source" "0" "$n_selfsource"
 # Both migrated calls invoke the verb at exactly the migrated read positions.
 assert_eq "TC-308-SRC-AUTH-VERB lib-auth.sh invokes chp_pr_list at both read sites (×2)" \
-  "2" "$(grep -c 'chp_pr_list --state open' "$AUTH_LIB" || true)"
+  "2" "$(grep -cE 'chp_pr_list open "(body|number,body)"' "$AUTH_LIB" || true)"
 assert_eq "TC-308-SRC-E2E-VERB lib-review-e2e.sh invokes chp_pr_view at the SHA-evidence read (×1)" \
   "1" "$(grep -c 'chp_pr_view "\$PR_NUMBER" --json comments' "$E2E_LIB" || true)"
 

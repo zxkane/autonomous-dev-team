@@ -1,0 +1,37 @@
+# decision-golden.json.meta — provenance sidecar for decision-golden.json (issue #397, R4/R6).
+#
+# Captured by running `generate-goldens.sh` in this same directory against the
+# PRE-#397 code (this worktree at its first TDD commit, before the W1c1 leaf
+# rewrite lands). The goldens are the DECISION-level outputs the six body-
+# mention chp_pr_list callers and the two lib-pr-linkage.sh resolvers produce
+# for a set of fixture PR arrays. Post-change, `test-w1c1-linkage-read-parity.sh`
+# re-runs the same callers (now over the normalized array via the abstract
+# chp_pr_list / chp_find_pr_for_issue contracts) and asserts EACH decision key
+# still matches — a regression in either the leaf normalization OR any caller's
+# selector shows up as a diff against this frozen golden.
+#
+# Golden-key namespaces:
+#   linkage.resolve.<scenario>       — resolve_pr_for_issue's echoed .number (or "")
+#   linkage.verify.<scenario>        — verify_pr_closes_issue's rc (0=accept, 1=reject)
+#   prlist.<site>.<scenario>         — per-site decision (int length / int number / ISO string / "")
+#
+# The six chp_pr_list caller sites and what they compute:
+#   needs_open_pr_only  autonomous-dev.sh:434   length of #N body-mentions (guarded)
+#   pr_exists           autonomous-dev.sh:774   length of #N body-mentions (drops guard)
+#   pr_created_at       autonomous-dev.sh:865   earliest .createdAt of matches (guarded, metrics)
+#   pr_num              autonomous-dev.sh:1079  first .number of matches (drops guard)
+#   lib_auth_existing   lib-auth.sh:453         length of #N body-mentions (drops guard)
+#   lib_auth_pr_number  lib-auth.sh:605         first .number of matches (drops guard)
+#
+# The four "drops guard" sites currently silently ABORT the jq filter under
+# any null-body candidate PR (the #148 hazard class). The W1c1 rewrite pins
+# body to a string via provider normalization (null → ""), so all six sites
+# converge on the guarded/normalized decision. The goldens record the GUARDED
+# decision for every site (the post-normalization behavior) — the parity test
+# asserts every site post-rewrite matches, making the drop-guard a fix.
+#
+# Regenerate (only if the pre-#397 body-mention selector semantics are
+# disputed): checkout the commit immediately before #397's leaf rewrite, run
+#   env -u PROJECT_DIR bash tests/unit/fixtures/w1c1-parity/generate-goldens.sh
+# and inspect the diff. In normal operation the golden is committed and does
+# not change until a new W1c1 fixture is added.

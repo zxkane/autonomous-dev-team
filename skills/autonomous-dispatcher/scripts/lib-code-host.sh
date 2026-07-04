@@ -97,6 +97,13 @@ fi
 # CHP verb shims (spec §3.2). Each forwards "$@" to chp_${CODE_HOST}_<verb> —
 # byte-for-byte the lib-agent.sh:597 adapter_invoke_"$AGENT_CMD" … "$@" shape.
 # ---------------------------------------------------------------------------
+# chp_find_pr_for_issue ISSUE FIELDS-CSV — spec §3.2 [M1], W1c1 (#397).
+# ABSTRACT: positional args, returns a NORMALIZED JSON array of open PR
+# candidates projected to (FIELDS ∪ {number, closingIssueNumbers, headRefName})
+# with body pinned to a string (null → "") and closingIssueNumbers as an array
+# of ints. The [INV-86] close-linkage / branch-name resolution stays caller-
+# side (lib-pr-linkage.sh) as pure jq over the normalized array. Fail-CLOSED
+# on transport error or page-cap hit (§3.5 COMPLETE-set contract).
 chp_find_pr_for_issue() { chp_${CODE_HOST}_find_pr_for_issue "$@"; }
 chp_ci_status()         { chp_${CODE_HOST}_ci_status "$@"; }
 chp_mergeable()         { chp_${CODE_HOST}_mergeable "$@"; }
@@ -131,15 +138,18 @@ chp_reply_review_comment() { chp_${CODE_HOST}_reply_review_comment "$@"; }
 # byte-identical — as with every other CHP verb; only the innermost primitive moves
 # behind the seam.
 #   chp_pr_view PR  [--json … -q …]     → gh pr view PR  --repo $REPO …
-#   chp_pr_list     [--state … --json … -q …] → gh pr list --repo $REPO …
+#   chp_pr_list STATE FIELDS-CSV        → normalized JSON array (§3.2 W1c1, #397)
 #   chp_pr_comment PR [--body … | extra args] → gh pr comment PR --repo $REPO …
-# (chp_pr_list is the generalized issue-keyed/body-mention list the dispatcher's
-# pre-#277 existence lookups use — distinct from chp_find_pr_for_issue, which is
-# the [INV-86] close-linkage resolver. chp_pr_comment is the PR-comment write the
-# two HOT review files use for auto-merge markers / E2E reports / the [INV-79]
-# brokered report — distinct from itp_post_comment, the ISSUE-level marker
-# choke-point: same GitHub endpoint, different seam owner for a split-backend
-# topology.)
+# (chp_pr_list, since W1c1/#397, is an ABSTRACT positional contract: STATE
+# (open|closed|merged|all) + a normalized field-CSV, returning a COMPLETE
+# JSON array with body normalized to a string and closingIssueNumbers as an
+# int array — no gh flags cross the seam. It is DISTINCT from
+# chp_find_pr_for_issue (the [INV-86] close-linkage resolver, which forces a
+# union with the resolution keys and takes an issue-narrowing hint).
+# chp_pr_comment is the PR-comment write the two HOT review files use for
+# auto-merge markers / E2E reports / the [INV-79] brokered report — distinct
+# from itp_post_comment, the ISSUE-level marker choke-point: same GitHub
+# endpoint, different seam owner for a split-backend topology.)
 #
 # Self-guarding dispatch (#282 review round 9 [P1]): unlike the 11 lifecycle
 # verbs (which callers guard via `chp_has_leaf` + a meaningful fallback), the
