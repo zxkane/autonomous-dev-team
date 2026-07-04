@@ -72,19 +72,22 @@ if [[ -z "$HELPER_FN" ]]; then
 fi
 
 # --- Stub harness -----------------------------------------------------------
-# The helper queries two host shapes (post-#296-B6):
-#   chp_pr_view <pr> ... --json reviews          → approval submittedAt(s)  [gh pr view]
-#   itp_list_comments <issue> | jq -r '<sel>'    → findings comment createdAt + body
+# The helper queries two host shapes (post-#296-B6, updated for #398 W1c2):
+#   chp_pr_view <pr> "reviews" | jq -r '<sel>' → approval submittedAt(s)
+#       [normalized-shape: verb returns `{reviews:[{author,state,submittedAt}]}`
+#        ascending; the caller runs plain jq over that shape — the `-q` no
+#        longer crosses the seam.]
+#   itp_list_comments <issue> | jq -r '<sel>'  → findings comment createdAt + body
 #
-# `chp_pr_view` still resolves to a real `gh pr view`, so we stub `gh` on PATH for
-# the approval query. The findings READ migrated to `itp_list_comments` (the
-# normalized [INV-90] array `[{…,body,createdAt}]`), so we define an
-# `itp_list_comments` shim in run_helper that emits that array from the fixture —
-# the helper pipes it into its OWN `jq -r '<selector>'` (the REAL selector baked
-# into the wrapper, not a test-local re-implementation). Files come from env:
-#   GH_PR_REVIEWS_JSON   → JSON object printed for the `pr view --json reviews` call
-#                          BEFORE the helper's -q jq filter is applied. The stub
-#                          applies the helper's -q expression itself (extracted from $@).
+# `chp_pr_view` (W1c2) internally calls `gh pr view <pr> --repo <REPO> --json
+# reviews --jq "<normalization>"` — the normalization projects to
+# `{reviews:[{author,state,submittedAt}]}` ascending. We stub `gh` on PATH so
+# it returns the fixture (as if the raw `gh` produced the pre-normalization
+# reviews[] shape); the normalization then runs through the real system jq.
+# Files come from env:
+#   GH_PR_REVIEWS_JSON   → JSON object printed for `gh pr view --json reviews`
+#                          BEFORE the leaf's normalization --jq runs. The stub
+#                          applies the leaf's --jq itself (extracted from $@).
 #   GH_ISSUE_COMMENTS_JSON → {comments:[…]} fixture the itp_list_comments shim
 #                          unwraps to the normalized array `.comments`.
 #   GH_FAIL              → if "1", every gh call AND itp_list_comments fails
@@ -92,8 +95,8 @@ fi
 #   GH_PR_VIEW_FAIL=1    → only the approval query (`gh pr view`) fails; the
 #                          findings READ (itp_list_comments) still succeeds.
 #
-# The stub honors the `-q <expr>` the helper passes so the test exercises the
-# REAL jq expressions baked into the wrapper, not a test-local re-implementation.
+# The stub honors the `--jq <expr>` the leaf passes so the test exercises the
+# REAL normalization jq baked into providers/chp-github.sh.
 STUB_DIR="$TMPROOT/bin"
 mkdir -p "$STUB_DIR"
 
@@ -160,6 +163,9 @@ write_comments() {
 run_helper() {
   # run_helper <issue> <pr> KEY=VAL...
   local issue="$1" pr="$2"; shift 2
+  # Real CHP provider path — the shim below sources chp_github_pr_view directly
+  # so the W1c2 normalization jq is exercised, not re-implemented in the test.
+  local CHP_GITHUB="${WRAPPER%/*}/providers/chp-github.sh"
   env \
     PATH="$STUB_DIR:$PATH" \
     REPO="acme/widget" \
@@ -167,17 +173,17 @@ run_helper() {
     bash -c "
       set -euo pipefail
       log() { :; }
-      # [INV-87] (#282) emit_post_approval_findings_block now reads the PR's
-      # reviews via chp_pr_view (the general read primitive). Real leaf:
-      # \`gh pr view \$pr --repo \$REPO \"\$@\"\`; define the same shim so this
-      # isolation harness (PATH-stubbed gh + extracted helper) resolves the verb.
-      chp_pr_view() { local _pr=\"\$1\"; shift; gh pr view \"\$_pr\" --repo \"\${REPO:-acme/widget}\" \"\$@\"; }
-      # [INV-87]/[INV-90] (#296 B6) emit_post_approval_findings_block now reads the
-      # issue comments via itp_list_comments (the normalized array \`[{…,body,createdAt}]\`)
-      # then applies its OWN \`jq -r '<selector>'\`. Shim the verb so this isolation
-      # harness emits that array from the {comments:[…]} fixture. Fail-closed on
-      # GH_FAIL (a verb failure → empty + non-zero so the helper's \`if !\` returns 0);
-      # GH_PR_VIEW_FAIL is NOT honored here (only the approval query fails in that case).
+      # [INV-87]/[W1c2] emit_post_approval_findings_block reads the PR reviews via
+      # chp_pr_view (the general read primitive, normalized-shape contract per
+      # #398). Source the REAL GitHub leaf so this isolation harness exercises
+      # the actual normalization program (leaf runs \`gh pr view \$pr --repo
+      # \$REPO --json reviews --jq <normalize>\`, PATH-stubbed gh returns the
+      # fixture, the leaf's own jq folds it into the normalized shape). Then
+      # shim chp_pr_view → chp_github_pr_view (the CHP seam does exactly that).
+      source \"$CHP_GITHUB\" 2>/dev/null || true
+      chp_pr_view() { chp_github_pr_view \"\$@\"; }
+      # [INV-87]/[INV-90] (#296 B6) findings issue-comment read stays via
+      # itp_list_comments (normalized [INV-90] array). Fail-closed on GH_FAIL.
       itp_list_comments() {
         [[ \"\${GH_FAIL:-0}\" == \"1\" ]] && return 3
         local _src=\"\${GH_ISSUE_COMMENTS_JSON:-}\"

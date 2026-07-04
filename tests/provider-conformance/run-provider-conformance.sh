@@ -451,6 +451,155 @@ _run_count_assert() {
   emit PASS "$verb"
 }
 
+# _run_pr_view_assert — chp_pr_view normalized-object assertion (#347 W1c2,
+# #398). Invokes with a VALID payload; asserts (i) the output is a JSON object
+# (top-level == "object"), (ii) it contains EXACTLY the requested fields (no
+# more, no less — a subset projection contract), (iii) `comments`/`reviews`
+# are ascending arrays with normalized keys, and (iv) fail-CLOSED on stub-gh
+# failure (rc≠0, no partial output). The FIELDS_CSV under test covers every
+# vocabulary branch the leaf normalizes (comments+reviews+closingIssueNumbers+
+# a 1:1 field + body's null→"" fold) in ONE invocation.
+_run_pr_view_assert() {
+  local verb="chp_pr_view"
+  local argv_file="$work_root/.argv-$verb.json"
+  local out rc payload="$PAYLOADS/pr-view-valid.json"
+
+  # Success path — request every vocabulary-covered shape category at once.
+  local fields='state,comments,reviews,closingIssueNumbers,body'
+  local invoke="chp_pr_view 42 '$fields'"
+  out="$(_invoke _PCF_GH_MODE="ok" _PCF_GH_PAYLOAD="$payload" _PCF_ARGV_FILE="$argv_file" "$invoke" 2>&1)"; rc=$?
+  if [[ "$rc" != "0" ]]; then
+    emit FAIL "$verb" "wrong-shape (non-zero rc on a valid payload: $rc, output: ${out:0:200})"
+    return
+  fi
+  local top; top="$(jq -r 'type' <<<"$out" 2>/dev/null)"
+  if [[ "$top" != "object" ]]; then
+    emit FAIL "$verb" "wrong-shape (top-level != object: type=$top, output: ${out:0:200})"
+    return
+  fi
+  # Exact-key projection: keys(out) sorted MUST equal FIELDS_CSV sorted.
+  local expected_keys got_keys
+  expected_keys="$(printf '%s' "$fields" | tr ',' '\n' | sort -u | paste -sd',' -)"
+  got_keys="$(jq -r 'keys | join(",")' <<<"$out" 2>/dev/null)"
+  if [[ "$expected_keys" != "$got_keys" ]]; then
+    emit FAIL "$verb" "field-subset projection mismatch (expected '$expected_keys', got '$got_keys')"
+    return
+  fi
+  # comments/reviews normalization: ascending; expected leaf-side normalized
+  # keys present on every element.
+  if ! jq -e '(.comments | type == "array") and (.reviews | type == "array")' >/dev/null 2>&1 <<<"$out"; then
+    emit FAIL "$verb" "comments/reviews not arrays after normalization"
+    return
+  fi
+  local comments_arr reviews_arr
+  comments_arr="$(jq -c '.comments' <<<"$out")"
+  reviews_arr="$(jq -c '.reviews'  <<<"$out")"
+  if ! pcf_is_ascending_by_created_at "$comments_arr"; then
+    emit FAIL "$verb" "comments[] not ascending by createdAt"
+    return
+  fi
+  if ! jq -e '
+      [.reviews[].submittedAt] as $ts
+      | ($ts|length) as $n
+      | ([range(0;$n-1) | ($ts[.] <= $ts[.+1])] | all)
+    ' >/dev/null 2>&1 <<<"$out"; then
+    emit FAIL "$verb" "reviews[] not ascending by submittedAt"
+    return
+  fi
+  # Comment shape: exactly id/author/body/createdAt keys (a "wrong-shape"
+  # leaf that leaks GitHub internals would fail this).
+  if ! jq -e '[.comments[] | (keys | sort) == ["author","body","createdAt","id"]] | all' >/dev/null 2>&1 <<<"$out"; then
+    emit FAIL "$verb" "comments[] element shape mismatch (expected {id,author,body,createdAt})"
+    return
+  fi
+  if ! jq -e '[.reviews[] | (keys | sort) == ["author","state","submittedAt"]] | all' >/dev/null 2>&1 <<<"$out"; then
+    emit FAIL "$verb" "reviews[] element shape mismatch (expected {author,state,submittedAt})"
+    return
+  fi
+  # closingIssueNumbers: int array folded from the GraphQL nodes shape.
+  if ! jq -e '.closingIssueNumbers | type == "array" and (all(.[]?; type == "number"))' >/dev/null 2>&1 <<<"$out"; then
+    emit FAIL "$verb" "closingIssueNumbers not an int array"
+    return
+  fi
+  # body: null in fixture → "" after normalization.
+  local body_norm; body_norm="$(jq -r '.body' <<<"$out" 2>/dev/null)"
+  if [[ "$body_norm" != "" ]]; then
+    emit FAIL "$verb" "body null did not normalize to empty string (got: '$body_norm')"
+    return
+  fi
+
+  # Fail-CLOSED: stub gh failing → verb rc≠0 with no partial stdout.
+  out="$(_invoke _PCF_GH_MODE="fail" _PCF_ARGV_FILE="$argv_file" "$invoke" 2>&1)"; rc=$?
+  if [[ "$rc" == "0" ]]; then
+    emit FAIL "$verb" "rc-0-on-error (stub gh failed but verb still returned 0)"
+    return
+  fi
+  emit PASS "$verb"
+}
+
+# _run_list_inline_comments_assert — chp_list_inline_comments normalized flat
+# array assertion (#347 W1c2, #398). Invokes with a VALID single-page fixture;
+# asserts (i) top-level is a JSON array, (ii) ascending by createdAt, (iii)
+# `line` is the leaf-side `line // original_line // null` fold (originalLine
+# ABSENT from element shape), (iv) element keys = {id,path,line,author,body,
+# createdAt}, and (v) fail-CLOSED on any page failure. Multi-page completeness
+# is proven by the parity suite tests/unit/test-w1c2-incidental-read-parity.sh
+# (the runner's stub gh does not model multi-page today; W1c2 accepts that as
+# W1f-shared work per R5).
+_run_list_inline_comments_assert() {
+  local verb="chp_list_inline_comments"
+  local argv_file="$work_root/.argv-$verb.json"
+  local out rc payload="$PAYLOADS/inline-comments-valid.json"
+  local invoke="chp_list_inline_comments 42"
+
+  out="$(_invoke _PCF_GH_MODE="ok" _PCF_GH_PAYLOAD="$payload" _PCF_ARGV_FILE="$argv_file" "$invoke" 2>&1)"; rc=$?
+  if [[ "$rc" != "0" ]]; then
+    emit FAIL "$verb" "wrong-shape (non-zero rc on a valid payload: $rc, output: ${out:0:200})"
+    return
+  fi
+  if ! pcf_is_json_array "$out"; then
+    emit FAIL "$verb" "wrong-shape (output is not a JSON array: ${out:0:200})"
+    return
+  fi
+  if ! pcf_is_ascending_by_created_at "$out"; then
+    emit FAIL "$verb" "not sorted ascending by createdAt"
+    return
+  fi
+  # Element shape: exactly {id,path,line,author,body,createdAt}, no original_line.
+  if ! jq -e '[.[] | (keys | sort) == ["author","body","createdAt","id","line","path"]] | all' >/dev/null 2>&1 <<<"$out"; then
+    emit FAIL "$verb" "element shape mismatch (expected {id,path,line,author,body,createdAt}, no original_line)"
+    return
+  fi
+  # leaf-side fold: a row whose input has {line:null, original_line: N} must
+  # emerge with .line == N (originalLine folded in). Our fixture has such a row.
+  if ! jq -e '[.[] | select(.body == "first in time — originalLine-only") | .line == 7] | any' >/dev/null 2>&1 <<<"$out"; then
+    emit FAIL "$verb" "line // original_line // null fold not applied at leaf"
+    return
+  fi
+  # A row with both null must fold to null (caller renders // "N/A").
+  if ! jq -e '[.[] | select(.body == "no line at all") | .line == null] | any' >/dev/null 2>&1 <<<"$out"; then
+    emit FAIL "$verb" "line fold to null missing on all-null row"
+    return
+  fi
+
+  # Fail-CLOSED: stub gh failing → verb rc≠0.
+  out="$(_invoke _PCF_GH_MODE="fail" _PCF_ARGV_FILE="$argv_file" "$invoke" 2>&1)"; rc=$?
+  if [[ "$rc" == "0" ]]; then
+    emit FAIL "$verb" "rc-0-on-error (stub gh failed but verb still returned 0)"
+    return
+  fi
+
+  # Malformed page payload → fail-close (no partial-looking array smuggled).
+  local malformed="$work_root/.malformed-$verb.json"
+  printf '{ not json' > "$malformed"
+  out="$(_invoke _PCF_GH_MODE="ok" _PCF_GH_PAYLOAD="$malformed" _PCF_ARGV_FILE="$argv_file" "$invoke" 2>/dev/null)"
+  if pcf_is_json_array "$out" && [[ -n "${out//[[:space:]]/}" ]] && [[ "$out" != "[]" ]]; then
+    emit FAIL "$verb" "malformed-JSON page produced a non-empty array (should fail-CLOSED)"
+    return
+  fi
+  emit PASS "$verb"
+}
+
 # _run_close_keyword_assert — render-only assertion (no gh call, no leaf
 # dispatch — see provider-spec.md §4.4 / docs/designs/provider-conformance-runner.md).
 _run_close_keyword_assert() {
@@ -728,6 +877,21 @@ _assert_verb() {
       # Self-guarding shim (leaf-absent → return 1); fail-CLOSED on transport
       # error / cap-hit.
       _run_prlist_assert
+      ;;
+    chp_pr_view)
+      # W1c2 (#398) abstract contract: single normalized JSON object projected
+      # to FIELDS-CSV per §3.2.1 vocabulary; supports every vocabulary field
+      # (14 members). closingIssueNumbers folds BOTH flat and cursor shapes.
+      # Capture-then-check fail-CLOSED (rc≠0 on gh failure / empty stdout /
+      # non-object JSON, no partial output).
+      _run_pr_view_assert
+      ;;
+    chp_list_inline_comments)
+      # W1c2 (#398) abstract contract: one merged normalized flat array
+      # `[{id,path,line,author,body,createdAt}]` ascending; leaf-side
+      # `line // original_line // null` fold. Page-walk complete; fail-CLOSED
+      # on any page fetch failure AND on rc-0 empty stdout.
+      _run_list_inline_comments_assert
       ;;
     *)
       emit FAIL "$verb" "no assertion wired for this verb (runner bug)"

@@ -1,0 +1,15 @@
+# inline-comments-valid.json.meta — provenance sidecar (#347 W1c2, #398).
+#
+# Canonical `gh api repos/o/r/pulls/N/comments` REST-page payload shape used to
+# drive `chp_list_inline_comments`. The `--paginate` stub emits this array once
+# (equivalent to a single-page REST response); the leaf's paginate → slurp →
+# normalize pipeline still runs the merge/sort pass, so the normalized-ascending
+# + line // original_line fold assertions exercise identically against a
+# single-page fixture. Multi-page completeness is proven by the parity suite
+# (tests/unit/test-w1c2-incidental-read-parity.sh), not this focused verb
+# check.
+#
+# The fixture is intentionally OUT-OF-ORDER by created_at to prove the leaf
+# sorts, and carries a mix of {line: N}, {line: null, original_line: N}, and
+# {line: null, original_line: null} rows to prove the leaf-side
+# `line // original_line // null` fold at normalization time.

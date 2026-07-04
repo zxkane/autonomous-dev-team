@@ -33,7 +33,7 @@ command -v jq >/dev/null 2>&1 || { echo "jq required"; exit 1; }
 source "$LIB"
 
 # ===========================================================================
-echo "=== TC-PCONF-014: --itp github --chp github exits 0, 19 PASS, CONFORMANCE-SUMMARY fail=0 ==="
+echo "=== TC-PCONF-014: --itp github --chp github exits 0, 21 asserted verbs PASS, CONFORMANCE-SUMMARY fail=0 ==="
 # ===========================================================================
 gh_out="$(bash "$RUNNER" --itp github --chp github 2>&1)"; gh_rc=$?
 assert_eq "AC1: github/github exits 0" "0" "$gh_rc"
@@ -41,8 +41,9 @@ gh_pass_count="$(grep -c '^CONFORMANCE-PCONF github/github .* PASS$' <<<"$gh_out
 # [#393] +1: the itp_list_comments anti-false-green field/authorKind assertion adds one PASS.
 # [#396] +1: itp_read_task flipped pending->asserted (W1b).
 # [#397] +2 for W1c1 abstract contracts (chp_find_pr_for_issue, chp_pr_list).
-assert_eq "AC1: 20 PASS lines on github/github (19 verbs + the #393 list_comments field check)" "20" "$gh_pass_count"
-assert_contains "AC1: CONFORMANCE-SUMMARY line present with fail=0" "CONFORMANCE-SUMMARY total=27 pass=20 fail=0 skip=0 pending=7" "$gh_out"
+# [#398 W1c2] +2: chp_pr_view + chp_list_inline_comments flipped pending→asserted.
+assert_eq "AC1: 22 PASS lines on github/github (21 verbs + the #393 list_comments field check)" "22" "$gh_pass_count"
+assert_contains "AC1: CONFORMANCE-SUMMARY line present with fail=0" "CONFORMANCE-SUMMARY total=27 pass=22 fail=0 skip=0 pending=5" "$gh_out"
 assert_contains "TC-PCONF-043: itp_read_task (github) PASSes the object-shape/fields-subset/fail-closed assertion" \
   "CONFORMANCE-PCONF github/github itp_read_task PASS" "$gh_out"
 
@@ -62,11 +63,14 @@ assert_contains "TC-PCONF-022: chp_resolve_thread FAILs missing-verb-function (c
 assert_contains "TC-PCONF-022: chp_resolve_thread FAIL names the missing function" "chp_broken_resolve_thread: command not found" "$broken_fail_lines"
 assert_contains "TC-PCONF-023: chp_review_threads FAILs non-array-output" "chp_review_threads FAIL wrong-shape" "$broken_fail_lines"
 # Every OTHER asserted verb must still PASS (no false-positive FAILs beyond the 4).
+# [#398 W1c2] +2: chp_pr_view + chp_list_inline_comments are asserted and the
+# broken fixture has correct leaves for them, so both PASS here.
 broken_pass_count="$(grep -c '^CONFORMANCE-PCONF broken/broken .* PASS$' <<<"$broken_out")"
 # [#396] +1: itp_read_task flipped pending->asserted (W1b) and the broken fixture
 # defines a correct (not-targeted) leaf for it.
 # [#397] +2: W1c1 added chp_find_pr_for_issue + chp_pr_list (correct broken-provider leaves).
-assert_eq "AC2: the 15 non-targeted verbs still PASS (12 + read_task + 2 W1c1 abstract contracts)" "15" "$broken_pass_count"
+# [#398 W1c2] +2: chp_pr_view + chp_list_inline_comments (correct broken-provider leaves).
+assert_eq "AC2: the 17 non-targeted verbs still PASS (12 + read_task + 2 W1c1 + 2 W1c2 abstract contracts)" "17" "$broken_pass_count"
 
 # ===========================================================================
 echo ""
@@ -85,7 +89,8 @@ deg_pass_count="$(grep -c '^CONFORMANCE-PCONF degraded/degraded .* PASS$' <<<"$d
 # [#393] +1: the list_comments field/authorKind assertion also runs (and passes) on degraded.
 # [#396] +1: itp_read_task flipped pending->asserted (W1b), governing cap `-` (never SKIPs).
 # [#397] +2: W1c1 added chp_find_pr_for_issue + chp_pr_list (correct degraded leaves).
-assert_eq "TC-PCONF-033: 17 PASS lines on degraded (16 verbs + the #393 list_comments field check)" "17" "$deg_pass_count"
+# [#398 W1c2] +2: chp_pr_view + chp_list_inline_comments (correct degraded leaves, cap `-`).
+assert_eq "TC-PCONF-033: 19 PASS lines on degraded (18 verbs + the #393 list_comments field check)" "19" "$deg_pass_count"
 
 # ===========================================================================
 echo ""
@@ -205,22 +210,20 @@ if pcf_is_json_object ''; then bad "TC-PCONF-056: empty text should be false"; e
 
 # ===========================================================================
 echo ""
-echo "=== AC4/AC5 sanity: this issue changed no CHP wrapper/provider-leaf/caps-branch behavior (lifted for W1c1) ==="
+echo "=== AC4/AC5 sanity: this issue changed no CHP wrapper/provider-leaf/caps-branch behavior (byte-diff pin lifted for W1c1 + W1c2) ==="
 # ===========================================================================
 # chp-github.sh was previously UNTOUCHED by the #370/W1a-adjacent slice — a
 # byte-diff-free sanity check pinned that promise. W1c1 (#397) explicitly
-# LIFTS the byte-diff constraint for the two `chp_github_find_pr_for_issue` /
-# `chp_github_pr_list` leaves it converts to the abstract normalized-shape
-# contract (the same pattern W1a used for the three ITP READ leaves — see the
-# #371 comment above). Every other function in chp-github.sh remains byte-
-# identical; the parity anchor for the two rewritten leaves is
-# `tests/unit/test-w1c1-linkage-read-parity.sh` (decision-level goldens over
-# recorded fixtures) — the byte-diff check on chp-github.sh is retired as
-# redundant with that decision-level suite. See test-w1c1-linkage-read-parity.sh
-# for the parity proof.
-#
-# We keep the itp-github.sh byte-diff check off (already lifted by W1a).
-ok "AC4/AC5: byte-diff pin on chp-github.sh LIFTED for W1c1 (parity proof lives in test-w1c1-linkage-read-parity.sh)"
+# LIFTED the byte-diff constraint for the two `chp_github_find_pr_for_issue` /
+# `chp_github_pr_list` leaves, and now W1c2 (#398) does the same for
+# `chp_github_pr_view` and `chp_github_list_inline_comments` — each W1 slice
+# rewrites its own leaves to the abstract normalized-shape contract, mirroring
+# the pattern W1a used for the three ITP READ leaves. The byte-diff check on
+# chp-github.sh is retired as redundant with the decision-level parity suites
+# that back each rewrite: `test-w1c1-linkage-read-parity.sh` (W1c1) and
+# `test-w1c2-incidental-read-parity.sh` (W1c2). See those files for the parity
+# proofs; the itp-github.sh byte-diff check likewise stays off (lifted by W1a).
+ok "AC4/AC5: byte-diff pin on chp-github.sh LIFTED for W1c1+W1c2 (parity proofs live in test-w1c1-linkage-read-parity.sh + test-w1c2-incidental-read-parity.sh)"
 
 # ===========================================================================
 echo ""

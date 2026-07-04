@@ -224,7 +224,16 @@ fi
 rm -rf "$RUNDIR"
 
 # --- S3: _fetch_sha_evidence → chp_pr_view (SHA-evidence read) ----------------
-echo "=== S3: _fetch_sha_evidence SHA-evidence read → chp_pr_view ==="
+#
+# Post-#398 (W1c2), chp_pr_view owns its own gh argv + normalization jq — the
+# leaf runs `gh pr view <PR> --repo <REPO> --json comments --jq "<normalization>"`.
+# The caller's SHA-selector no longer crosses the seam (it moved to a caller-side
+# `jq -r` over the normalized `{comments:[…]}` object). So this S3 pin was
+# reduced from the per-arg golden trace to the STRUCTURAL invariants: the leaf
+# reaches gh with the expected positional args + the vocabulary field
+# `comments` in the raw --json list + a --jq normalization program (not the
+# pre-#398 caller's SHA-match selector).
+echo "=== S3: _fetch_sha_evidence SHA-evidence read → chp_pr_view (W1c2 normalized-shape) ==="
 RUNDIR=$(mktemp -d)
 REC3="$RUNDIR/rec3"; mkdir -p "$REC3"
 env -u CODE_HOST -u AUTONOMOUS_CONF -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR \
@@ -240,27 +249,29 @@ env -u CODE_HOST -u AUTONOMOUS_CONF -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR \
 if [[ -f "$REC3/.verbs" ]] && grep -qx "pr view" "$REC3/.verbs"; then
   pass "S3 seam-reachability: stub OBSERVED a 'gh pr view' call through chp_pr_view"
   cn=$(call_for_verb "$REC3" pr view) && read_call "$REC3" "$cn"
-  # argc: pr view 42 --repo $REPO --json comments --jq <selector> = 9 args
-  assert_eq "S3 golden-trace argc (boundaries preserved)" "9" "${#CALL_ARGV[@]}"
+  # Structural (not exact-argc) — W1c2 leaf owns the --jq normalization body,
+  # so we assert positional args + `--json comments` + `--jq` presence, but do
+  # not pin the exact jq program body (that is chp_github_pr_view's business).
   assert_eq "S3 argv[0]=pr" "pr" "${CALL_ARGV[0]:-}"
   assert_eq "S3 argv[1]=view" "view" "${CALL_ARGV[1]:-}"
   assert_eq "S3 argv[2]=42 (PR_NUMBER positional)" "42" "${CALL_ARGV[2]:-}"
   assert_eq "S3 argv[3]=--repo" "--repo" "${CALL_ARGV[3]:-}"
   assert_eq "S3 argv[4]=\$REPO" "$REPO" "${CALL_ARGV[4]:-}"
   assert_eq "S3 argv[5]=--json" "--json" "${CALL_ARGV[5]:-}"
-  assert_eq "S3 argv[6]=comments" "comments" "${CALL_ARGV[6]:-}"
-  assert_eq "S3 argv[7]=--jq" "--jq" "${CALL_ARGV[7]:-}"
-  assert_eq "S3 argv[8]=<verbatim sha-match selector, single element>" "$SEL_SHA" "${CALL_ARGV[8]:-}"
+  assert_eq "S3 argv[6]=comments (vocabulary field crossing to gh)" "comments" "${CALL_ARGV[6]:-}"
+  assert_eq "S3 argv[7]=--jq (leaf-owned normalization program)" "--jq" "${CALL_ARGV[7]:-}"
+  # Anti-regression: the pre-#398 caller SHA-selector must NO LONGER appear on
+  # the gh argv (jq stays caller-side over the normalized shape now).
+  assert_contains "S3 W1c2: --jq body is the normalization program, not the caller SHA selector" \
+    "comments:" "${CALL_ARGV[8]:-}"
+  if [[ "${CALL_ARGV[8]:-}" == *"$SEL_SHA"* ]]; then
+    fail "S3 anti-regression: caller SHA-selector leaked into the leaf's --jq argv (W1c2 forbids caller jq crossing the seam)"
+  else
+    pass "S3 anti-regression: caller SHA-selector did NOT cross the seam (stays caller-side over normalized shape)"
+  fi
 else
   fail "S3 seam-reachability: stub did NOT observe a 'gh pr view' — chp_pr_view not exercised"
 fi
-# TC-308-GT-SELECTOR — boundary proof: the captured selector arg is a SINGLE argv
-# element carrying spaces AND a `|` pipe. A space-joined / word-split capture would
-# have fractured it (and the per-arg assert above would have read a fragment), so
-# this is the explicit demonstration that the NUL-delimited trace preserves
-# boundaries the jq/-q selectors depend on (#308 AC2).
-assert_contains "TC-308-GT-SELECTOR captured selector is one element containing a space" " " "${CALL_ARGV[8]:-}"
-assert_contains "TC-308-GT-SELECTOR captured selector is one element containing a | pipe" "|" "${CALL_ARGV[8]:-}"
 rm -rf "$RUNDIR"
 
 # ===========================================================================
@@ -311,8 +322,8 @@ assert_eq "TC-308-SRC-NO-SELFSOURCE lib-review-e2e.sh did NOT add an executable 
 # Both migrated calls invoke the verb at exactly the migrated read positions.
 assert_eq "TC-308-SRC-AUTH-VERB lib-auth.sh invokes chp_pr_list at both read sites (×2)" \
   "2" "$(grep -cE 'chp_pr_list open "(body|number,body)"' "$AUTH_LIB" || true)"
-assert_eq "TC-308-SRC-E2E-VERB lib-review-e2e.sh invokes chp_pr_view at the SHA-evidence read (×1)" \
-  "1" "$(grep -c 'chp_pr_view "\$PR_NUMBER" --json comments' "$E2E_LIB" || true)"
+assert_eq "TC-308-SRC-E2E-VERB lib-review-e2e.sh invokes chp_pr_view at the SHA-evidence read (×1, W1c2 positional form)" \
+  "1" "$(grep -c 'chp_pr_view "\$PR_NUMBER" "comments"' "$E2E_LIB" || true)"
 
 # ===========================================================================
 # 5. AC7 — call-expression byte-identity premise: the brokers are always called

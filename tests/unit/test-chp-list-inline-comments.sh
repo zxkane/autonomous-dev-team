@@ -62,9 +62,12 @@ fail() { echo -e "  ${RED}FAIL${NC}: $1"; FAIL=$((FAIL + 1)); }
 
 export REPO=zxkane/autonomous-dev-team
 
-# The verbatim --jq formatter the :1086 site passes (must survive byte-identically
-# as a SINGLE argv element). Kept here as the golden expectation.
-FORMATTER='[.[] | "- **\(.path):\(.line // .original_line // "N/A")** — \(.body)"] | join("\n")'
+# NEW (#398 W1c2) — the caller-side formatter over the normalized flat array.
+# `original_line` no longer crosses the seam (folded into `line` at
+# normalization time), so the caller renders `.line // "N/A"`. The OLD formatter
+# is kept below for reference in the AC1-cont. rendering equivalence check.
+FORMATTER='[.[] | "- **\(.path):\(.line // "N/A")** — \(.body)"] | join("\n")'
+FORMATTER_OLD='[.[] | "- **\(.path):\(.line // .original_line // "N/A")** — \(.body)"] | join("\n")'
 
 # ===========================================================================
 # Recording `gh` stub — captures every `gh` invocation NUL-delimited so argument
@@ -104,57 +107,75 @@ call_for_verb() {
 }
 
 # ===========================================================================
-# AC1 — GOLDEN-TRACE + SEAM-REACHABILITY. Drive the REAL chp_list_inline_comments
+# AC1 — SEAM-TRACE + PAGE-WALK. Drive the REAL chp_list_inline_comments
 #       (shim → leaf) with the REAL CHP seam sourced and the recording gh stub;
-#       assert the OBSERVED argv is byte-identical, boundaries intact.
+#       assert the OBSERVED argv is the NEW positional form (`api
+#       repos/$REPO/pulls/$PR/comments --paginate`, W1c2 #398 — no caller-side
+#       `--jq` crosses the seam, the leaf owns page-walk + normalization).
 # ===========================================================================
-echo "=== AC1: chp_list_inline_comments golden-trace (gh api repos/\$REPO/pulls/\$PR/comments <--jq>) ==="
+echo "=== AC1: chp_list_inline_comments seam-trace (positional PR, --paginate owned by the leaf) ==="
 RUNDIR=$(mktemp -d)
 REC1="$RUNDIR/rec1"; mkdir -p "$REC1"
 : > "$REC1/.payload"  # AC1 trace path needs no payload
 env -u CODE_HOST -u AUTONOMOUS_CONF -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR \
-    REPO="$REPO" REC_DIR="$REC1" FORMATTER="$FORMATTER" \
+    REPO="$REPO" REC_DIR="$REC1" \
   bash -c "
     set -uo pipefail
     source '$CHP_LIB' 2>/dev/null    # sources providers/chp-github.sh → live shim + leaf
     $GH_STUB_BODY
-    chp_list_inline_comments 42 --jq \"\$FORMATTER\"
+    chp_list_inline_comments 42
   " >/dev/null 2>&1
 
 if [[ -f "$REC1/.verbs" ]] && grep -qx "api repos/zxkane/autonomous-dev-team/pulls/42/comments" "$REC1/.verbs"; then
   pass "AC1 seam-reachability: stub OBSERVED 'gh api repos/\$REPO/pulls/42/comments' through chp_list_inline_comments (exercised)"
   cn=$(call_for_verb "$REC1" api "repos/$REPO/pulls/42/comments") && read_call "$REC1" "$cn"
-  # argc: api repos/$REPO/pulls/42/comments --jq <formatter> = 4 args
-  assert_eq "AC1 golden-trace argc (boundaries preserved)" "4" "${#CALL_ARGV[@]}"
+  # W1c2 argv: `api repos/\$REPO/pulls/\$PR/comments --paginate` = 3 args
+  # (the pre-#398 form had 4 args: the extra was the caller's `--jq <formatter>`).
+  assert_eq "AC1 W1c2 argc (positional PR, leaf owns --paginate + normalization)" "3" "${#CALL_ARGV[@]}"
   assert_eq "AC1 argv[0]=api" "api" "${CALL_ARGV[0]:-}"
-  assert_eq "AC1 argv[1]=repos/\$REPO/pulls/42/comments (verb supplies global REPO + positional PR)" \
+  assert_eq "AC1 argv[1]=repos/\$REPO/pulls/42/comments (leaf supplies global REPO + positional PR)" \
     "repos/$REPO/pulls/42/comments" "${CALL_ARGV[1]:-}"
-  assert_eq "AC1 argv[2]=--jq" "--jq" "${CALL_ARGV[2]:-}"
-  assert_eq "AC1 argv[3]=<verbatim formatter, single element>" "$FORMATTER" "${CALL_ARGV[3]:-}"
-  # Boundary proof: the captured formatter is ONE argv element carrying a space AND a pipe.
-  assert_contains "AC1 captured formatter is one element containing a space" " " "${CALL_ARGV[3]:-}"
-  assert_contains "AC1 captured formatter is one element containing a | pipe" "|" "${CALL_ARGV[3]:-}"
+  assert_eq "AC1 argv[2]=--paginate (leaf-owned page-walk, W1c2)" "--paginate" "${CALL_ARGV[2]:-}"
+  # Anti-regression: no --jq crosses the seam any more (it moved caller-side).
+  if grep -qE 'api .*--jq' "$REC1/.verbs"; then
+    fail "AC1 anti-regression: leaf argv still carries --jq (W1c2 forbids caller jq crossing the seam)"
+  else
+    pass "AC1 anti-regression: no --jq argv on the api call (caller-side jq stays caller-side)"
+  fi
 else
   fail "AC1 seam-reachability: stub did NOT observe the 'gh api …/pulls/42/comments' — chp_list_inline_comments not exercised"
 fi
 rm -rf "$RUNDIR"
 
 # ===========================================================================
-# AC1 (cont.) — the caller's formatter renders IDENTICALLY (jq stays caller-side).
-#   Run the verbatim formatter against a sample pulls/N/comments payload through the
-#   system jq; assert the `- **path:line** — body` rendering incl. the
-#   `.line // .original_line // "N/A"` fallback.
+# AC1 (cont.) — caller-formatter rendering equivalence (#398 W1c2).
+#   The OLD `.line // .original_line // "N/A"` fold (over the raw REST shape)
+#   and the NEW `.line // "N/A"` fold (over the normalized shape, where the
+#   leaf already folded `original_line` into `line`) must produce IDENTICAL
+#   output on a fixture containing both line-populated AND originalLine-only
+#   rows. Proven by running BOTH formatters against BOTH shapes.
 # ===========================================================================
-echo "=== AC1 (cont.): caller formatter renders the same '- **path:line** — body' lines ==="
+echo "=== AC1 (cont.): OLD .line // .original_line // \"N/A\" fold == NEW .line // \"N/A\" fold ==="
 if command -v jq >/dev/null 2>&1; then
-  SAMPLE='[
+  # OLD REST-shape input (what the pre-#398 leaf emitted verbatim).
+  SAMPLE_OLD='[
     {"path":"src/a.ts","line":12,"original_line":10,"body":"fix this"},
     {"path":"src/b.ts","line":null,"original_line":7,"body":"and this"},
     {"path":"src/c.ts","line":null,"original_line":null,"body":"no line"}
   ]'
-  rendered=$(printf '%s' "$SAMPLE" | jq -r "$FORMATTER")
+  # NEW normalized-shape input (what the leaf now emits — line pre-folded).
+  SAMPLE_NEW='[
+    {"path":"src/a.ts","line":12,"body":"fix this","author":"alice","id":501,"createdAt":"2026-06-27T10:00:00Z"},
+    {"path":"src/b.ts","line":7, "body":"and this","author":"bob","id":502,"createdAt":"2026-06-27T11:00:00Z"},
+    {"path":"src/c.ts","line":null,"body":"no line","author":"cat","id":503,"createdAt":"2026-06-27T12:00:00Z"}
+  ]'
+  rendered_old=$(printf '%s' "$SAMPLE_OLD" | jq -r "$FORMATTER_OLD")
+  rendered_new=$(printf '%s' "$SAMPLE_NEW" | jq -r "$FORMATTER")
   EXPECTED=$'- **src/a.ts:12** — fix this\n- **src/b.ts:7** — and this\n- **src/c.ts:N/A** — no line'
-  assert_eq "AC1 formatter rendering byte-identical (.line // .original_line // N/A fallback)" "$EXPECTED" "$rendered"
+  assert_eq "AC1 OLD formatter over REST shape renders the golden" "$EXPECTED" "$rendered_old"
+  assert_eq "AC1 NEW formatter over normalized shape renders the golden" "$EXPECTED" "$rendered_new"
+  assert_eq "AC1 OLD-vs-NEW formatter renderings match (line // original_line fold equivalent by construction)" \
+    "$rendered_old" "$rendered_new"
 else
   fail "AC1 jq not available to verify the caller-formatter rendering"
 fi

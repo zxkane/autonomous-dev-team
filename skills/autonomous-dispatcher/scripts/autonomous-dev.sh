@@ -648,11 +648,13 @@ emit_post_approval_findings_block() {
   # Latest APPROVED review timestamp. FAIL-CLOSED: capture the query's exit
   # status separately so a transient/permission/API failure is NOT mistaken for
   # "no approval" (review finding 1). On failure: emit nothing, return 0.
-  # [INV-87] (#282 r8) PR-number-keyed reviews read → chp_pr_view (general read
-  # leaf); `--json reviews -q …` forwarded byte-identically.
+  # [INV-87]/[W1c2] PR-number-keyed reviews read → chp_pr_view <PR> "reviews"
+  # (normalized-shape contract per #398): the leaf returns
+  # `{reviews:[{author,state,submittedAt}]}` ascending, and the caller runs
+  # plain jq over that shape — no `-q` post-filter crosses the seam.
   local approved_at findings_at
-  if ! approved_at=$(chp_pr_view "$pr_num" --json reviews \
-    -q '[.reviews[]? | select(.state == "APPROVED") | .submittedAt] | sort | last // empty' 2>/dev/null); then
+  if ! approved_at=$(chp_pr_view "$pr_num" "reviews" \
+    | jq -r '[.reviews[]? | select(.state == "APPROVED") | .submittedAt] | sort | last // empty' 2>/dev/null); then
     return 0
   fi
 
@@ -1183,13 +1185,21 @@ elif [[ "$MODE" = "resume" ]]; then
   PR_REVIEW_COMMENTS=""
   AUTO_MERGE_FAILURE_MARKER=""
   if [[ -n "$PR_NUM" ]]; then
-    # [INV-95] (#296 second-tier, #328) PR inline (file-anchored) review-comment
-    # read → chp_list_inline_comments. The `- **path:line** — body` formatter STAYS
-    # caller-side (#281 jq-stays-caller; it's a prompt-rendering decision); the verb
-    # forwards it byte-identically. The self-guarding shim degrades to empty (WARN +
-    # return 1) on a leaf-absent backend, which this `|| true` site already handles.
-    PR_REVIEW_COMMENTS=$(chp_list_inline_comments "$PR_NUM" \
-      --jq '[.[] | "- **\(.path):\(.line // .original_line // "N/A")** — \(.body)"] | join("\n")' 2>/dev/null || true)
+    # [INV-95]/[W1c2] (#398) PR inline (file-anchored) review-comment read →
+    # chp_list_inline_comments <PR>: normalized-shape contract — the leaf
+    # returns ONE merged flat array `[{id,path,line,author,body,createdAt}]`
+    # ascending, page-walk COMPLETE (fixes the pre-#398 silent >30 truncation
+    # documented as the chp-github.sh "No --paginate today" caveat). `line` is
+    # the leaf-side `line // original_line // null` fold — `original_line`
+    # no longer crosses the seam, so the caller renders `.line // "N/A"` over
+    # the normalized field (the OLD `.line // .original_line // "N/A"` fold is
+    # equivalent by construction, proven by the w1c2-parity suite). The
+    # `- **path:line** — body` formatter STAYS caller-side (#281
+    # jq-stays-caller; it's a prompt-rendering decision). The self-guarding
+    # shim degrades to empty (WARN + return 1) on a leaf-absent backend,
+    # which this `|| true` site already handles.
+    PR_REVIEW_COMMENTS=$(chp_list_inline_comments "$PR_NUM" 2>/dev/null \
+      | jq -r '[.[] | "- **\(.path):\(.line // "N/A")** — \(.body)"] | join("\n")' 2>/dev/null || true)
 
     # Detect the auto-merge-failure marker the review wrapper posts when
     # `gh pr merge` fails (#145). A PR IS an issue on GitHub, so its issue-level

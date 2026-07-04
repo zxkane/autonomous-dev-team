@@ -52,8 +52,8 @@ Output is one line per verb plus a summary:
 CONFORMANCE-PCONF github/github itp_list_comments PASS
 CONFORMANCE-PCONF degraded/degraded itp_edit_comment SKIP (cap: edit_comment)
 CONFORMANCE-PCONF github/github chp_ci_status PENDING (coverage.conf)
-CONFORMANCE-COVERAGE PASS (spec CONTRACT-PENDING set == coverage.conf pending set, 7 verbs)
-CONFORMANCE-SUMMARY total=27 pass=20 fail=0 skip=0 pending=7
+CONFORMANCE-COVERAGE PASS (spec CONTRACT-PENDING set == coverage.conf pending set, 5 verbs)
+CONFORMANCE-SUMMARY total=27 pass=22 fail=0 skip=0 pending=5
 ```
 
 The runner exits **non-zero** on any `FAIL` — a wrong-shape output, an
@@ -65,10 +65,11 @@ never a `FAIL` by themselves.
 ## What this suite asserts (§3.1/§3.2's `Asserted` cells)
 
 Per [`provider-spec.md` §10](../../docs/pipeline/provider-spec.md#10-per-verb-conformance-checklist-370)'s
-`TC-PCONF-NNN` checklist — the 19 provider-neutral verbs whose contract is
+`TC-PCONF-NNN` checklist — the 21 provider-neutral verbs whose contract is
 already committed (W1a=#371 landed the three ITP state-reads as normalized
 shapes; W1b=#396 landed `itp_read_task`; W1c1=#397 adds
-`chp_find_pr_for_issue` and `chp_pr_list` to the asserted set):
+`chp_find_pr_for_issue` and `chp_pr_list`; W1c2=#398 adds `chp_pr_view` and
+`chp_list_inline_comments`):
 
 - **Fail-closed writes** (`itp_transition_state`, `itp_post_comment`,
   `itp_edit_comment`, `itp_mark_checkbox`, `itp_provision_states`,
@@ -79,39 +80,47 @@ shapes; W1b=#396 landed `itp_read_task`; W1c1=#397 adds
   rc **0** and an empty value on failure (the documented contract; asserting
   fail-closed here would be a false finding).
 - **Shape + malformed-JSON handling** (`itp_list_comments`,
-  `chp_review_threads`) — the [INV-90] normalized array shape (+ ascending
-  `createdAt` for comments), and graceful (non-crashing, empty) handling of a
-  malformed payload.
+  `chp_review_threads`, `chp_list_inline_comments`) — the [INV-90] / W1c2
+  normalized array shape (+ ascending `createdAt` for issue-level and inline
+  comments), and graceful (non-crashing, empty) handling of a malformed
+  payload. `chp_list_inline_comments` (W1c2, #398) additionally asserts the
+  leaf-side `line // original_line // null` fold + fail-CLOSED on any page
+  fail AND on rc-0 empty stdout (a real zero-comment PR emits literal `[]`).
 - **Single-object shape + fields-subset + fail-closed** (`itp_read_task`,
-  W1b #396) — the normalized-object shape (`labels` as name strings), a
+  W1b #396; `chp_pr_view`, W1c2 #398) — the normalized-object shape, a
   fields-subset request returning EXACTLY the requested keys, and fail-CLOSED
-  (non-zero rc, no partial output) on both a `gh` failure and malformed JSON
-  — unlike the array leaves above, a single-task read has no valid "empty"
-  representation.
-- **Abstract PR-read shape** (`chp_find_pr_for_issue`, `chp_pr_list`, both
-  W1c1 #397) — the [§3.2.1] normalized PR-field vocabulary: `body` pinned to a
-  string (`null` → `""`, #148 hazard fix), `closingIssueNumbers` as an
-  int-array (the [INV-86] resolution key), COMPLETE-set cursor page walk
-  with fail-CLOSED cap-hit, empty match → `[]` (never null). Missing STATE
-  or FIELDS-CSV positional args → rc != 0.
+  (non-zero rc, no partial output) on both a `gh` failure AND rc-0 empty
+  stdout AND malformed JSON (capture-then-check). `chp_pr_view` supports
+  every §3.2.1 vocabulary field and folds `closingIssueNumbers` from BOTH the
+  flat `[{number}]` gh shape AND the GraphQL cursor `{nodes:[…]}` form.
+- **Abstract PR-list-read shape** (`chp_find_pr_for_issue`, `chp_pr_list`,
+  both W1c1 #397) — the [§3.2.1] normalized PR-field vocabulary: `body`
+  pinned to a string (`null` → `""`, #148 hazard fix), `closingIssueNumbers`
+  as an int-array (the [INV-86] resolution key), COMPLETE-set cursor page
+  walk with fail-CLOSED cap-hit, empty match → `[]` (never null). Missing
+  STATE or FIELDS-CSV positional args → rc != 0.
 - **Caller-side render, no leaf dispatch** (`chp_close_keyword`) — the three
   `_render_close_keyword` branches (`Closes #N` / `Related to #N` / empty),
   never `chp_has_leaf close_keyword` — see the design doc's "deliberate
   NON-leaf exception" callout (`../../docs/designs/provider-conformance-runner.md`).
+- **State-read leaves** (`itp_list_by_state`, `itp_count_by_state`,
+  `itp_list_forbidden_combos`) — the W1a-normalized shape and ascending-by-
+  `number` sort.
 
-## The 7 `CONTRACT-PENDING` verbs (R3, post-W1a/W1b/W1c1)
+## The 5 `CONTRACT-PENDING` verbs (R3, post-W1a/W1b/W1c1/W1c2)
 
 The residual gh-argv passthrough verbs (`chp_ci_status`, `chp_mergeable`,
-`chp_pr_view`, `chp_list_inline_comments`, `chp_create_pr`, `chp_approve`,
-`chp_merge`) have no conformance check yet — `provider-spec.md` tokens
-their rows `CONTRACT-PENDING` and `coverage.conf` lists them `pending`.
-Landed W1 slices (W1a=#371 for the three ITP state-reads, W1b=#396 for
-`itp_read_task`, W1c1=#397 for the two CHP linkage-reads) each removed
-their own spec tokens and flipped `coverage.conf` in the same PR. A
-future W1 slice does the same — the runner's `CONFORMANCE-COVERAGE`
-check is a set-diff tripwire that FAILs on any asymmetry between the
-two. All four ITP READ verbs are now asserted, leaving only the CHP
-PR-lifecycle verbs pending.
+`chp_create_pr`, `chp_approve`, `chp_merge`) have no conformance check
+yet — `provider-spec.md` tokens their rows `CONTRACT-PENDING` and
+`coverage.conf` lists them `pending`. Landed W1 slices (W1a=#371 for the
+three ITP state-reads, W1b=#396 for `itp_read_task`, W1c1=#397 for the two
+CHP linkage-reads, W1c2=#398 for `chp_pr_view` and `chp_list_inline_comments`)
+each removed their own spec tokens and flipped `coverage.conf` in the same
+PR. A future W1 slice does the same — the runner's `CONFORMANCE-COVERAGE`
+check is a set-diff tripwire that FAILs on any asymmetry between the two.
+All four ITP READ verbs and all four CHP incidental/linkage read verbs are
+now asserted, leaving only the CHP PR-lifecycle (approve/merge/create) and
+CI-status/mergeable primitives pending.
 
 ## Governing capability map (R4)
 
@@ -130,7 +139,7 @@ for the full table.
 2. Run `bash tests/provider-conformance/run-provider-conformance.sh --itp gitlab --chp gitlab`.
 3. Every `ASSERTED` verb your new backend implements must PASS (or `SKIP`
    honestly per its `.caps`). This is the acceptance gate.
-4. The 7 residual `CONTRACT-PENDING` verbs are not required for THIS gate
+4. The 5 residual `CONTRACT-PENDING` verbs are not required for THIS gate
    (they land with the remaining W1 slices) — but any verb you DO implement
    for the pending set still needs its own conformance check added in that
    slice's PR.

@@ -92,15 +92,16 @@ echo ""
 echo "=== TC-EOG-SRC: wrapper structure (source-of-truth greps) ==="
 # ---------------------------------------------------------------------------
 
-# Line numbers used throughout.
-_e2e_state_line=$(grep -nE 'E2E_PR_STATE=\$\(chp_pr_view "\$PR_NUMBER" --json state' "$WRAPPER" | head -1 | cut -d: -f1)
+# Line numbers used throughout. #398 W1c2 converted `--json state -q '.state'`
+# to the positional `"state"` form; the source-line grep updates likewise.
+_e2e_state_line=$(grep -nE 'E2E_PR_STATE=\$\(chp_pr_view "\$PR_NUMBER" "state"' "$WRAPPER" | head -1 | cut -d: -f1)
 _e2e_gate_cascade_line=$(grep -nE 'if \[\[ "\$E2E_GATE" == "fail" \]\]; then' "$WRAPPER" | head -1 | cut -d: -f1)
 _classify_e2e_line=$(grep -nE 'E2E_GATE=\$\(_classify_e2e_gate' "$WRAPPER" | head -1 | cut -d: -f1)
 
 # TC-EOG-SRC-01: the E2E gate queries PR state into E2E_PR_STATE and feeds
 # _pr_open_gate.
 assert_src "TC-EOG-SRC-01 E2E gate queries PR state (E2E_PR_STATE) and feeds _pr_open_gate" \
-  bash -c 'grep -qE "E2E_PR_STATE=\\\$\(chp_pr_view .* --json state" "$1" && grep -qE "_pr_open_gate \"\\\$E2E_PR_STATE\"" "$1"' _ "$WRAPPER"
+  bash -c 'grep -qE "E2E_PR_STATE=\\\$\(chp_pr_view .* \"state\"" "$1" && grep -qE "_pr_open_gate \"\\\$E2E_PR_STATE\"" "$1"' _ "$WRAPPER"
 
 # TC-EOG-SRC-02: the E2E-gate open-check precedes the fail/block cascade.
 if [[ -n "$_e2e_state_line" && -n "$_e2e_gate_cascade_line" && "$_e2e_state_line" -lt "$_e2e_gate_cascade_line" ]]; then
@@ -130,7 +131,7 @@ fi
 # positive asserts the remove-only transition; the negative keeps proving no
 # `pending-dev` add reaches the skip path.
 _e2e_skip_block=$(awk '
-  /E2E_PR_STATE=\$\(chp_pr_view "\$PR_NUMBER" --json state/ { capture=1 }
+  /E2E_PR_STATE=\$\(chp_pr_view "\$PR_NUMBER" "state"/ { capture=1 }
   capture { print }
   capture && /exit 0/ { exit }
 ' "$WRAPPER")
@@ -143,12 +144,15 @@ else
   FAIL=$((FAIL + 1))
 fi
 
-# TC-EOG-SRC-05: exactly TWO `chp_pr_view ... --json state` queries now exist —
-# the INV-54 hoisted PASS-chain guard + this new E2E-gate guard. Catches both an
-# accidentally-missing guard (count<2) and a stray duplicate (count>2). (The
-# `gh pr view --json state` leaf moved behind chp_pr_view in #282.)
-_state_count=$(grep -cE 'chp_pr_view "\$PR_NUMBER" --json state' "$WRAPPER")
-assert_eq "TC-EOG-SRC-05 exactly two --json state queries (INV-54 hoisted + E2E gate)" \
+# TC-EOG-SRC-05: exactly TWO `chp_pr_view "$PR_NUMBER" "state"` queries now
+# exist — the INV-54 hoisted PASS-chain guard + this new E2E-gate guard.
+# Catches both an accidentally-missing guard (count<2) and a stray duplicate
+# (count>2). (The `gh pr view --json state` leaf moved behind chp_pr_view in
+# #282, and #398 W1c2 converted the caller argv from `--json state -q '.state'`
+# to positional `"state"` with a caller-side `jq -r '.state'` over the
+# normalized shape.)
+_state_count=$(grep -cE 'chp_pr_view "\$PR_NUMBER" "state"' "$WRAPPER")
+assert_eq "TC-EOG-SRC-05 exactly two chp_pr_view <PR> \"state\" queries (INV-54 hoisted + E2E gate)" \
   "2" "$_state_count"
 
 # TC-EOG-SRC-06: the E2E open-check guards the block exits ONLY — it is wedged

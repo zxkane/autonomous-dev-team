@@ -147,3 +147,66 @@ chp_degraded_pr_list() {
   [[ -n "$raw" ]] || return 1
   jq -c "$(_chp_degraded_build_projection "$fields" "number")" <<<"$raw"
 }
+
+# chp_degraded_pr_view PR FIELDS_CSV — mirrors chp_github_pr_view (#398 W1c2)
+# incl. the P1-1 (dual closingIssuesReferences shape) + P1-2 (capture-then-
+# check fail-CLOSED) codex fixes.
+chp_degraded_pr_view() {
+  local pr="$1" fields_csv="${2:-}"
+  [ -n "$fields_csv" ] || { echo "ERROR: chp_degraded_pr_view requires FIELDS_CSV (2nd arg) [W1c2]" >&2; return 2; }
+  local gh_fields="" _obj_body="" first=1 f out_field _seen_map=""
+  local IFS_SAVED="$IFS"; IFS=','
+  # shellcheck disable=SC2206
+  local requested=($fields_csv)
+  IFS="$IFS_SAVED"
+  for f in "${requested[@]}"; do
+    f="${f#"${f%%[![:space:]]*}"}"; f="${f%"${f##*[![:space:]]}"}"
+    [ -z "$f" ] && continue
+    case "$f" in
+      closingIssueNumbers) out_field="closingIssuesReferences" ;;
+      *)                   out_field="$f" ;;
+    esac
+    if [[ ",${_seen_map}," != *",${out_field},"* ]]; then
+      _seen_map="${_seen_map:+${_seen_map},}${out_field}"
+      gh_fields+="${gh_fields:+,}${out_field}"
+    fi
+    local expr
+    case "$f" in
+      body)                expr='body: (.body // "")' ;;
+      comments)            expr='comments: ([ .comments[]? | { id: (.id // null), author: ((.author | if type == "object" then .login else . end) // null), body: (.body // ""), createdAt: (.createdAt // null) } ] | sort_by(.createdAt // "", .id // 0))' ;;
+      reviews)             expr='reviews: ([ .reviews[]? | { author: ((.author | if type == "object" then .login else . end) // null), state: (.state // null), submittedAt: (.submittedAt // null) } ] | sort_by(.submittedAt // ""))' ;;
+      closingIssueNumbers) expr='closingIssueNumbers: ([ ((.closingIssuesReferences // []) | (if type == "object" then (.nodes // []) else . end))[]? | .number ])' ;;
+      *)                   expr="${f}: .${f}" ;;
+    esac
+    if [[ $first -eq 1 ]]; then first=0; else _obj_body+=", "; fi
+    _obj_body+="$expr"
+  done
+  # Capture-then-check (P1-2 codex fix).
+  local raw
+  raw=$(gh pr view "$pr" --repo "$REPO" --json "$gh_fields") || return 1
+  [[ -n "$raw" ]] || return 1
+  jq -e 'type == "object"' >/dev/null 2>&1 <<<"$raw" || return 1
+  jq -c "{ ${_obj_body} }" <<<"$raw"
+}
+
+# chp_degraded_list_inline_comments PR — mirrors chp_github_list_inline_comments
+# (#398 W1c2): page-walk + slurp/merge/sort/normalize; fail-CLOSED on failure
+# incl. rc-0 empty stdout (P2-3 codex fix).
+chp_degraded_list_inline_comments() {
+  local pr="$1"
+  local raw
+  raw=$(gh api "repos/${REPO}/pulls/${pr}/comments" --paginate 2>/dev/null) || return 1
+  [[ -n "$raw" ]] || return 1
+  jq -c --slurp '
+    (add // []) |
+    [ .[]? | {
+        id: (.id // null),
+        path: (.path // null),
+        line: (.line // .original_line),
+        author: ((.user | if type == "object" then .login else . end) // null),
+        body: (.body // ""),
+        createdAt: (.created_at // null)
+      } ] |
+    sort_by(.createdAt // "", .id // 0)
+  ' <<<"$raw"
+}

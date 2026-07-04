@@ -156,10 +156,35 @@ assert_contains "TC-CHP-RESOLVE chp_resolve_thread emits resolveReviewThread mut
 assert_contains "TC-CHP-RESOLVE -F threadId forwards the thread id" "threadId=PRRT_kwABC" "$argv"
 
 # General read primitives (#282 review round 8) — the incidental reads route
-# through these; byte-identical argv (the caller's --json/-q ride via "$@").
-argv=$(run_trace chp_pr_view 42 --json state -q '.state')
-assert_eq "TC-CHP-PRVIEW chp_pr_view byte-identical gh pr view argv" \
-  "pr view 42 --repo $REPO --json state -q .state " "$argv"
+# through these — both W1c-abstract now:
+#   - chp_pr_view (W1c2 #398): positional `PR FIELDS_CSV`; leaf uses
+#     CAPTURE-THEN-CHECK — `raw=$(gh …) || return 1; [[ -n "$raw" ]] || return 1;
+#     jq -e 'type=="object"' … || return 1; jq -c "$norm_program" <<<"$raw"`.
+#     gh argv carries `--json <field>` ONLY; NO `--jq` / `-q` crosses to gh
+#     (the load-bearing invariant of the fail-CLOSED-on-empty-stdout P1-2 fix).
+#     The normalization jq runs downstream in the leaf.
+#   - chp_pr_list (W1c1 #397): positional STATE + FIELDS-CSV; leaf owns argv
+#     via `gh api graphql`. No `--json`/`-q` crosses the seam.
+argv=$(run_trace chp_pr_view 42 state)
+assert_contains "TC-CHP-PRVIEW chp_pr_view <PR> <FIELDS_CSV> forwards to gh pr view <PR> --repo <REPO>" \
+  "pr view 42 --repo $REPO --json " "$argv"
+assert_contains "TC-CHP-PRVIEW leaf emits --json <raw gh fields> (state is 1:1 in the vocabulary)" \
+  "--json state" "$argv"
+# P1-2 anti-regression: the gh call must NOT carry --jq/-q (jq stays inside
+# the leaf, downstream of the raw-stdout capture, so an empty-stdout / bad-JSON
+# silent gh failure fails-CLOSED instead of being masked by gh's own --jq).
+if [[ "$argv" == *"--jq"* ]] || [[ "$argv" == *" -q "* ]]; then
+  echo -e "  ${RED}FAIL${NC}: TC-CHP-PRVIEW-P1-2 gh argv leaks --jq/-q (capture-then-check contract violated)"; FAIL=$((FAIL+1))
+else
+  echo -e "  ${GREEN}PASS${NC}: TC-CHP-PRVIEW-P1-2 gh argv carries NO --jq/-q (normalization runs downstream in the leaf, empty-stdout fail-CLOSED)"; PASS=$((PASS+1))
+fi
+# TC-CHP-PRVIEW-FAILCLOSED — a missing FIELDS_CSV (2nd arg absent) returns rc 2.
+_fc_rc=0
+env -u CODE_HOST -u AUTONOMOUS_CONF -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR \
+    REPO="$REPO" \
+  bash -c "source '$CHP_LIB' 2>/dev/null; chp_pr_view 42 >/dev/null 2>&1" || _fc_rc=$?
+assert_eq "TC-CHP-PRVIEW-FAILCLOSED missing FIELDS_CSV → rc 2 (fail-CLOSED)" "2" "$_fc_rc"
+
 # TC-CHP-PRLIST — chp_pr_list's ABSTRACT contract (W1c1 #397): positional
 # STATE + FIELDS-CSV; leaf owns argv via `gh api graphql`. No `--limit`,
 # `--json`, `-q` cross the seam — pagination lives in the leaf's cursor
@@ -632,38 +657,46 @@ else
   echo -e "  ${GREEN}PASS${NC}: TC-CHP-FINAL-AC no executable resolveReviewThread in resolve-threads.sh"; PASS=$((PASS+1))
 fi
 # Dispatch routing for the two new general read verbs.
+# chp_pr_view: W1c2 positional `PR FIELDS_CSV` argv (# ↔ #398).
 routed=$(
   env -u CODE_HOST -u AUTONOMOUS_CONF -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR bash -c '
     source "'"$CHP_LIB"'" 2>/dev/null
     chp_github_pr_view(){ echo "VIEW-ROUTED:$*"; }
     chp_github_pr_list(){ echo "LIST-ROUTED:$*"; }
-    chp_pr_view 42 --json state
+    chp_pr_view 42 state
     chp_pr_list --state open'
 )
-assert_contains "TC-CHP-PRVIEW-ROUTE chp_pr_view → chp_github_pr_view" "VIEW-ROUTED:42 --json state" "$routed"
+assert_contains "TC-CHP-PRVIEW-ROUTE chp_pr_view → chp_github_pr_view (W1c2 positional argv)" "VIEW-ROUTED:42 state" "$routed"
 assert_contains "TC-CHP-PRLIST-ROUTE chp_pr_list → chp_github_pr_list" "LIST-ROUTED:--state open" "$routed"
 
 # Self-guarding dispatch (#282 review round 9 [P1]): on a backend whose provider
-# omits the pr_view/pr_list leaf (the degraded fixture; any future non-GitHub
-# provider) the shim must NOT `command not found`-abort the caller — it returns 1
-# (clean non-zero) so the caller's `|| echo/true/return` fallback degrades the
-# read to empty. Drive the EXACT needs_open_pr_only caller pattern under set -euo
-# with CODE_HOST=degraded (no chp_degraded_pr_* leaf).
+# omits the pr_view/pr_list leaf (any non-GitHub provider that has not
+# implemented them yet), the shim must NOT `command not found`-abort the caller
+# — it returns 1 (clean non-zero) so the caller's `|| echo/true/return`
+# fallback degrades the read to empty. Drive the EXACT needs_open_pr_only
+# caller pattern under set -euo with CODE_HOST=fakehost (no
+# providers/chp-fakehost.sh exists, so lib-code-host.sh sources nothing and
+# every chp_fakehost_* leaf is undefined — the guaranteed leaf-absent probe).
+# The prior test used the degraded fixture, but #398 W1c2 fleshed out the
+# degraded fixture's chp_degraded_pr_view / list_inline_comments leaves so the
+# shim's leaf-absent branch is no longer reachable through it; the fakehost
+# probe is the direct, stable path (mirrors test-chp-list-inline-comments.sh's
+# AC2 cont. cae).
 if [[ -d "$FAKE_PROVIDER" ]]; then
   guard_out=$(
     env -u AUTONOMOUS_CONF -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR \
-        REPO="$REPO" CODE_HOST=degraded AUTONOMOUS_PROVIDERS_DIR="$FAKE_PROVIDER" \
+        REPO="$REPO" CODE_HOST=fakehost \
     bash -c '
       set -euo pipefail
       source "'"$CHP_LIB"'" 2>/dev/null
       # caller-pattern 1 (needs_open_pr_only): $(...) || return-equiv
       pr_count=$(chp_pr_list --state open --json body -q "X" 2>/dev/null) || pr_count=0
-      # caller-pattern 2 (PR_STATE): $(... || echo UNKNOWN)
-      st=$(chp_pr_view 42 --json state -q ".state" 2>/dev/null || echo "UNKNOWN")
+      # caller-pattern 2 (PR_STATE, W1c2 positional): $(... || echo UNKNOWN)
+      st=$(chp_pr_view 42 "state" 2>/dev/null | jq -r ".state" 2>/dev/null || echo "UNKNOWN")
       echo "REACHED pr_count=[$pr_count] st=[$st]"
     ' 2>/dev/null
   )
-  assert_contains "TC-CHP-PRGUARD degraded (no leaf) → shim returns 1, caller fallback degrades (no set -e abort)" "REACHED pr_count=[0] st=[UNKNOWN]" "$guard_out"
+  assert_contains "TC-CHP-PRGUARD fakehost (no provider) → shim returns 1, caller fallback degrades (no set -e abort)" "REACHED pr_count=[0] st=[UNKNOWN]" "$guard_out"
   # The shim source contains the leaf-existence guard (not a blind dispatch).
   if grep -qE 'declare -F "chp_\$\{CODE_HOST\}_pr_view"' "$CHP_LIB" \
      && grep -qE 'declare -F "chp_\$\{CODE_HOST\}_pr_list"' "$CHP_LIB"; then
