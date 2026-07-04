@@ -1,0 +1,27 @@
+{
+  "check_deps_resolved.normal_closed_rc": 0,
+  "check_deps_resolved.open_blocks_rc": 1,
+  "check_deps_resolved.no_deps_section_rc": 0,
+  "mark_checkbox.happy_rewrite": {
+    "rc": 0,
+    "stdout": "Checked: Do the thing",
+    "patched_body": "## Requirements\n- [x] Do the thing"
+  },
+  "mark_checkbox.already_checked": {
+    "rc": 0,
+    "stdout": "Already checked: Do the thing",
+    "patched": false
+  },
+  "no_auto_close.present": "true",
+  "no_auto_close.absent": "false",
+  "status_next_action.open": "OPEN:LABELS=pending-dev",
+  "status_next_action.closed": "TERMINAL:CLOSED:LABELS=approved",
+  "dev_fetch.title_body_comments": {
+    "title": "Some issue title",
+    "body": "Body text with special chars: quotes \"x\" and a newline\nhere."
+  },
+  "dev_fetch.resume_title_body": {
+    "title": "Resume title",
+    "body": "Resume body text"
+  }
+}

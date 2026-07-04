@@ -3,13 +3,12 @@
 #
 # Proves the READ half of the ITP contract (provider-spec.md §3.1/§3.3/§3.5,
 # [INV-87]/[INV-88]/[INV-90]) is a zero-behavior-change GitHub refactor for
-# itp_read_task / itp_list_comments:
+# itp_list_comments (itp_read_task's coverage moved out — see the NOTE below):
 #
-#   1. Golden-trace argv — the read_task leaf emits BYTE-IDENTICAL `gh` argv
-#      (+ --json field list) after routing through the verb, and the 28 inline
-#      `gh issue view --json comments` scanners are consolidated to exactly
-#      ZERO inline calls (the comment-fetch trace is anchored on the 28-site
-#      count, not per-site argv — they deliberately collapse to one verb).
+#   1. Comment-fetch argv — the 28 inline `gh issue view --json comments`
+#      scanners are consolidated to exactly ZERO inline calls (anchored on the
+#      28-site count, not per-site argv — they deliberately collapse to one
+#      verb) + the itp_list_comments internal `gh api --paginate --slurp` argv.
 #   2. Dispatch routing — each itp_<verb> dispatches to itp_github_<verb>.
 #   3. .caps parse — server_side_state_and=1 / server_side_state_negation=0.
 #   4. Normalized comment shape — [{id,author,authorKind,body,createdAt}] sorted
@@ -24,6 +23,16 @@
 # tests/unit/test-w1a-state-read-contracts.sh (leaf-level argv/shape) and
 # tests/unit/test-w1a-state-read-parity.sh (decision-level parity vs the OLD
 # byte-identical behavior, per issue #371 R5).
+#
+# NOTE (#396, W1b): itp_read_task is NO LONGER a byte-identical gh-argv
+# pass-through either — #396 converted it to the same kind of abstract
+# contract (no gh flags/jq programs cross the seam), following the [W1a]
+# precedent. Its golden-trace argv-per-field pins (the `TC-GT-READTASK` cases)
+# moved to tests/unit/test-w1b-read-task-contracts.sh (leaf-level argv/shape)
+# and tests/unit/test-w1b-read-task-parity.sh (decision-level parity vs the
+# OLD byte-identical behavior, per issue #396 R5). The `TC-RT-READTASK`
+# dispatch-routing case below (the shim forwards "$@" to itp_github_read_task)
+# is UNAFFECTED by the shape change and stays.
 #
 # Run: bash tests/unit/test-itp-read-leaves.sh
 set -uo pipefail
@@ -122,18 +131,6 @@ set +e
 # one arg per line; paste -sd' ' joins them with single spaces and DROPs the
 # trailing newline (no trailing space artifact).
 recorded_argv() { paste -sd' ' "$_GH_ARGV_FILE"; }
-
-echo "=== GOLDEN-TRACE: itp_read_task argv byte-identical per field ==="
-itp_read_task 42 title >/dev/null
-assert_eq "TC-GT-READTASK title" "issue view 42 --repo $REPO --json title" "$(recorded_argv)"
-itp_read_task 42 body -q '.body' >/dev/null
-assert_eq "TC-GT-READTASK body -q .body" "issue view 42 --repo $REPO --json body -q .body" "$(recorded_argv)"
-itp_read_task 42 state -q '.state' >/dev/null
-assert_eq "TC-GT-READTASK state -q .state" "issue view 42 --repo $REPO --json state -q .state" "$(recorded_argv)"
-itp_read_task 42 title,body -q '.' >/dev/null
-assert_eq "TC-GT-READTASK title,body -q . (autonomous-dev.sh:1097)" "issue view 42 --repo $REPO --json title,body -q ." "$(recorded_argv)"
-itp_read_task 42 state,labels,title >/dev/null
-assert_eq "TC-GT-READTASK state,labels,title (status.sh:85)" "issue view 42 --repo $REPO --json state,labels,title" "$(recorded_argv)"
 
 echo "=== GOLDEN-TRACE: itp_list_comments internal gh argv (fetch leaf preserved) ==="
 itp_list_comments 42 >/dev/null

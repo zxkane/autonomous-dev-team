@@ -140,7 +140,7 @@ The *callers* keep their logic; only the leaf `gh` call moves behind a verb.
 | `itp_count_by_state STATE LABELS_AND_CSV LIMIT ANY_OF_LABELS_CSV` | `count_active` (`:35`, returns an **integer**) | **ABSTRACT contract ([W1a], #371).** Same enumeration point as `itp_list_by_state` (state/labels-AND/limit); returns a bare non-negative INTEGER — the count of AND-matches that additionally carry AT LEAST ONE label from `ANY_OF_LABELS_CSV` (empty any-of = count all AND-matches). Distinct verb because `count_active` returns an int the dispatcher compares numerically (`dispatcher-tick.sh` concurrency gate); forcing callers to enumerate+count would lose the server-side count semantics and change failure behavior. **[M3]** **Asserted** by `tests/provider-conformance/run-provider-conformance.sh` (#370, R6). |
 | `itp_list_forbidden_combos STATE LABELS_AND_CSV LIMIT` | `list_hygiene_residue` (`:143`) | **ABSTRACT contract ([W1a], #371).** Same enumeration point as `itp_list_by_state`. Returns the normalized array shape with fields `number,labels`, already filtered to the **[INV-25] forbidden label combination** — the LEAF owns the combo filter (server-side-optimizable for providers with query languages): terminal set = `{approved, stalled}`; transitional set = `{in-progress, reviewing, pending-review, pending-dev}`; forbidden = terminal AND transitional. This is the ONE deliberate exception to "predicates stay caller-side" — `list_hygiene_residue` is now a thin pass-through. Distinct verb because a single `STATE` set cannot express an intersection-of-incompatible-states query. **[M3]** **Asserted** by `tests/provider-conformance/run-provider-conformance.sh` (#370, R6). |
 | `itp_transition_state ISSUE REMOVE ADD` | `label_swap` (`:1986`); the four live-wrapper label-flips (`autonomous-dev.sh` PR-found, `autonomous-review.sh` approved-flip + auto-merge-fail re-queue, `lib-dispatch.sh::hygiene_strip_residual_labels`) — migrated **#331** | Atomic state move (remove REMOVE, add ADD). **REMOVE and ADD are each one label OR a comma-separated LIST** ([INV-97], #331) — a single label is a CSV of length 1, so every 3-positional single-label caller is byte-identical; a CSV emits one `--remove-label`/`--add-label` per non-empty member, an empty member is dropped, an empty side omits its flag. This expresses the multi-`--remove-label` Part-A flips (e.g. `"in-progress,pending-dev"`) atomically ([INV-08]) without a remove-only verb. GitHub: one `gh issue edit --remove-label … [--remove-label …] --add-label …`. **Precondition:** the comma is the member separator — a label name that itself contains `,` is unsupported via this path (it would split); inert for the pipeline (all labels are comma-free; `hygiene_strip`'s CSV is built from a hardcoded comma-free jq allowlist). The split is a pure `IFS=,` shell op on label names fed to argv (not a jq pattern) — no injection. **Note:** the terminal-state jq subtraction in `list_pending_review`/`list_pending_dev` ([INV-25] defense-in-depth) stays **caller-side**, not in this verb. **Asserted** by `tests/provider-conformance/run-provider-conformance.sh` (#370). |
-| `itp_read_task ISSUE FIELD` | `gh issue view --json title,body,state` sites | Return `title` / `body` / `state` for one task. **CONTRACT-PENDING** (#370). |
+| `itp_read_task ISSUE FIELDS_CSV` | `check_deps_resolved` (`lib-dispatch.sh:480`), `autonomous-dev.sh:963`/`:1282`, `autonomous-review.sh:3611`, `status.sh:87`, `mark-issue-checkbox.sh:95` | **ABSTRACT contract ([W1b], #396) — no gh flags and no jq programs cross the seam.** `FIELDS_CSV` ⊆ `title,body,state,labels,comments`. Returns a single JSON object with EXACTLY the requested fields, normalized: `title` (string), `body` (string; absent body → `""`), `state` (provider-neutral UPPERCASE `OPEN`\|`CLOSED` — deliberately matches GitHub's raw tokens so `status.sh`'s `_next_action` gate (`[[ "$ISSUE_STATE" != "OPEN" ]]`) ships byte-unchanged), `labels` (array of label-NAME strings — not `{name}` objects), `comments` (the [INV-90] normalized comment array, ascending by `createdAt`). Task not found / read failure → rc≠0 with NO partial output (fail-closed). This is a deliberate SHAPE change (the byte-identical-argv constraint the pre-#396 leaf satisfied is explicitly LIFTED for this verb, mirroring [W1a]'s #371 precedent) — proven by DECISION-level behavior-parity tests (`tests/unit/test-w1b-read-task-parity.sh`) instead of argv golden traces. **Asserted** (shape/fields-subset/fail-closed) by `tests/provider-conformance/run-provider-conformance.sh` (#396, R6). |
 | `itp_post_comment ISSUE BODY` | every `gh issue comment` site (agent **and** dispatcher — incl. `post_dispatch_token` ([INV-18], `lib-dispatch.sh:1227`), `_dep_block_comment` ([INV-39], `:400`) — see [M6]) | Post a progress / verdict / audit / dispatcher-marker comment **through the provider's declared `marker_channel`** (§4). The single choke-point for ALL machine markers. MAY return the new comment's `id`/`url` (matches `reply-to-comments.sh:44-45`). **Asserted** by `tests/provider-conformance/run-provider-conformance.sh` (#370). |
 | `itp_edit_comment ISSUE COMMENT_ID BODY` | `lib-review-e2e.sh:486` (`gh api -X PATCH …/issues/comments/${id}`, [INV-46] SHA stamp) | Edit a comment in place. **New verb [M5]** — an append-only `itp_post_comment` could not satisfy the [INV-46] evidence-marker stamp, which GETs the last bot comment's `id` then PATCHes it. Capability-gated: a backend without edit (`edit_comment=0`) falls back to re-posting **the full report body WITH the marker appended** as a fresh comment (NOT a marker-only post — `_fetch_sha_evidence` returns the `last` SHA-marked comment's full body, so a marker-only fallback would pass the E2E gate with no report/screenshots/AC; [INV-46]). **Asserted** (gh-only; SKIPped when `edit_comment=0`) by `tests/provider-conformance/run-provider-conformance.sh` (#370). |
 | `itp_list_comments ISSUE` | every issue-level `gh issue view --json comments -q …` site (28 sites) | Return ISSUE-level comments as a **normalized JSON array** `[{id, author, body, createdAt}]`, **sorted ascending by `createdAt` (normative MUST** — the `\| last` / `sort_by(.createdAt)` idioms depend on it). `id`/`author`/`createdAt` contract pinned in §3.3. **Scoped to issue-level comments only** — review-thread / inline-PR comments are a separate CHP shape (§3.2, [M8]). **Asserted** (shape + malformed-JSON handling) by `tests/provider-conformance/run-provider-conformance.sh` (#370). |
@@ -169,7 +169,18 @@ The *callers* keep their logic; only the leaf `gh` call moves behind a verb.
 > Every downstream consumer of the old `.labels[].name` object-array shape
 > (`dispatcher-tick.sh` Step 5, `_has_terminal_label`,
 > `hygiene_strip_residual_labels`) was rewritten in the same PR to consume the
-> new name-string array. **The WRITE leaves —
+> new name-string array. **`itp_read_task` was migrated from a byte-identical
+> gh-argv passthrough (#281/#296/#306/#310/#315) to the ABSTRACT contract above
+> in #396 (W1b, #347 phase-2), following the same [W1a] precedent.** All six
+> `lib-dispatch.sh`/wrapper callers now pass an abstract `FIELDS_CSV` and
+> receive a normalized object (labels as name strings, comments as the
+> [INV-90] array); proven by DECISION-level behavior-parity tests
+> ([`tests/unit/test-w1b-read-task-parity.sh`](../../tests/unit/test-w1b-read-task-parity.sh))
+> instead of argv golden traces — the former golden-trace suites
+> (`test-itp-read-task-b5b7.sh`, `test-itp-read-task-body-golden-trace.sh`) were
+> retired; leaf-level shape/fields-subset/fail-closed coverage lives in
+> [`tests/unit/test-w1b-read-task-contracts.sh`](../../tests/unit/test-w1b-read-task-contracts.sh).
+> **The WRITE leaves —
 > `itp_transition_state`/`itp_post_comment`/`itp_edit_comment`/`itp_mark_checkbox`/
 > `itp_provision_states` — are migrated for the GitHub backend in #283**
 > ([`tests/unit/test-itp-write-leaves.sh`](../../tests/unit/test-itp-write-leaves.sh)):
@@ -927,7 +938,7 @@ enforced regardless of checkout depth even before #295 lands the dedicated step.
 `tests/provider-conformance/run-provider-conformance.sh` ([INV-106]) makes
 the spec's "each normative clause maps 1:1 to a conformance check" promise
 (§0/§introduction) true for the **implemented** subset (§4.4's ASSERTED
-verbs) and explicitly lists the **pending** subset (the 13
+verbs) and explicitly lists the **pending** subset (the 9
 `CONTRACT-PENDING`-tokened verbs, §3.1/§3.2). Each row below is one `TC-PCONF`
 id in [`docs/test-cases/provider-conformance-runner.md`](../test-cases/provider-conformance-runner.md).
 
@@ -946,6 +957,7 @@ id in [`docs/test-cases/provider-conformance-runner.md`](../test-cases/provider-
 | §3.2 request-changes, `rest_request_changes` gate | `chp_request_changes` | TC-PCONF-011 |
 | §3.2 reply POST, `{id,url}` echo | `chp_reply_review_comment` | TC-PCONF-012 |
 | §3.2 [M4] close-keyword render (3 branches) | `chp_close_keyword` | TC-PCONF-013 |
+| §3.1 single-object shape, fields-subset, fail-closed ([W1b], #396) | `itp_read_task` | TC-PCONF-043 |
 | Deliberately-broken fixture: wrong shape | `itp_list_comments` (broken) | TC-PCONF-020 |
 | Deliberately-broken fixture: rc-0-on-error | `itp_transition_state` (broken) | TC-PCONF-021 |
 | Deliberately-broken fixture: missing verb function | `chp_resolve_thread` (broken) | TC-PCONF-022 |
@@ -953,7 +965,7 @@ id in [`docs/test-cases/provider-conformance-runner.md`](../test-cases/provider-
 | §4.4 caps-conditioned SKIP, annotated cap | `itp_edit_comment`/`itp_mark_checkbox`/`chp_request_changes` (degraded) | TC-PCONF-030 |
 | R3 CONTRACT-PENDING tripwire (spec↔runner set-diff) | (coverage-table meta-check) | TC-PCONF-040 |
 
-Pending subset (§4's the 13 `CONTRACT-PENDING` verbs) carries no `TC-PCONF`
+Pending subset (§4's the 9 `CONTRACT-PENDING` verbs) carries no `TC-PCONF`
 row — each gets one when its W1 slice lands (removing the spec token and
 flipping `coverage.conf`'s line to `asserted` in the same PR, per R3).
 

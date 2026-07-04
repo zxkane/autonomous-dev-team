@@ -958,9 +958,12 @@ trap cleanup EXIT
 # Fetch issue context
 # ---------------------------------------------------------------------------
 log "Fetching issue #${ISSUE_NUMBER} details..."
-# [INV-87] via itp_read_task (#296 B5) — the GitHub leaf forwards
-# `--json title,body,comments -q '.'` byte-identically (spec §3.1).
-ISSUE_BODY=$(itp_read_task "$ISSUE_NUMBER" title,body,comments -q '.')
+# [INV-87] via itp_read_task (#296 B5; [W1b] #396) — the ABSTRACT contract:
+# the leaf returns a normalized object (labels as name strings, comments as
+# the [INV-90] array); no gh flags or jq programs cross the seam. The prompt
+# embeds the normalized object text verbatim (agent context, no parser
+# depends on the old raw-gh shape — #347 AC4).
+ISSUE_BODY=$(itp_read_task "$ISSUE_NUMBER" title,body,comments)
 
 # ---------------------------------------------------------------------------
 # Normalize mode: resume without session falls back to new
@@ -1277,9 +1280,9 @@ EOF
     SESSION_ID="$NEW_SESSION_ID"
     SESSION_NAME="dev-issue-${ISSUE_NUMBER}-retry"
 
-    # Re-fetch issue for full context. [INV-87] via itp_read_task — the GitHub
-    # leaf forwards `--json title,body -q '.'` byte-identically (spec §3.1).
-    ISSUE_BODY=$(itp_read_task "$ISSUE_NUMBER" title,body -q '.')
+    # Re-fetch issue for full context. [INV-87] via itp_read_task ([W1b] #396)
+    # — the ABSTRACT contract; see the fetch above for the shape-change note.
+    ISSUE_BODY=$(itp_read_task "$ISSUE_NUMBER" title,body)
 
     FULL_PROMPT="$(cat <<EOF
 You are continuing work on GitHub issue #${ISSUE_NUMBER}. A previous session failed.

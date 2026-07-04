@@ -1,0 +1,8 @@
+source: hand-authored (issue #396 W1b — sidecar provenance, no live capture)
+capture_date: 2026-07-04
+shape: raw `gh issue view --json title,body,state,labels,comments` object
+  (pre-transform) — the stub applies the leaf's own jq normalization, so
+  this fixture matches the RAW GitHub REST shape itp_github_read_task
+  expects, not the normalized {title,body,state,labels,comments} output.
+notes: single comment + two labels so the fields-subset assertion can
+  request `labels` or `comments` independently and see a non-empty result.

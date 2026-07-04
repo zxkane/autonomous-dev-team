@@ -149,18 +149,50 @@ itp_github_list_forbidden_combos() {
   '
 }
 
-# itp_github_read_task ISSUE FIELD [extra gh args…] — single-task field read.
+# itp_github_read_task ISSUE FIELDS_CSV — single-task ABSTRACT field read
+# ([W1b], #396, #347 phase-2).
 #
-# Spec §3.1: return `title`/`body`/`state` for one task. FIELD is the `--json`
-# field list (`title`, `body`, `state`, or a combination like `title,body`).
-# The leaf forwards the argv byte-identically; the caller projects the returned
-# JSON object (or, for a single field, the bare value via a forwarded `-q`).
-# Trailing args after FIELD (e.g. an explicit `-q '.state'`) are forwarded
-# verbatim so the call site controls raw-object vs single-field projection,
-# keeping the emitted `gh issue view --json <field>` argv byte-identical.
+# Spec §3.1: FIELDS_CSV ⊆ title,body,state,labels,comments. Returns a single
+# JSON object with EXACTLY the requested fields, normalized: title/body as
+# strings (absent body → ""), state passed through as GitHub's own OPEN/CLOSED
+# token (already the provider-neutral vocabulary — deliberate, so status.sh's
+# `_next_action` gate ships byte-unchanged), labels as an array of NAME
+# strings (not `{name}` objects), comments as the [INV-90] normalized array.
+# No gh flags / jq programs cross the seam — this leaf owns the `--json` field
+# mapping AND the normalization jq internally (unlike the pre-#396
+# byte-identical passthrough this replaces). Fail-closed: a `gh` failure or
+# malformed JSON propagates non-zero with no partial stdout.
+# [#393] like `_itp_github_state_read`, this leaf's `comments` field is
+# GraphQL-derived and therefore CANNOT distinguish App bots (GraphQL strips
+# the `[bot]` suffix and exposes no author type) — an App-authored comment
+# reports authorKind="human" here. No shipped caller of this verb consumes
+# `comments` for an authenticity gate (the two callers requesting it embed the
+# object as agent-prompt context); the authoritative per-issue read for that
+# purpose remains `itp_list_comments` (REST-sourced, correct authorKind).
 itp_github_read_task() {
-  local issue="$1" field="$2"; shift 2
-  gh issue view "$issue" --repo "$REPO" --json "$field" "$@"
+  local issue="$1" fields_csv="$2" fields_json
+  fields_json=$(printf '%s' "$fields_csv" | jq -R -s -c 'split(",") | map(select(length > 0))')
+  gh issue view "$issue" --repo "$REPO" --json title,body,state,labels,comments \
+    | jq --arg bot "${BOT_LOGIN:-}" --argjson fields "$fields_json" '
+        {
+          title: (.title // ""),
+          body: (.body // ""),
+          state: (.state // ""),
+          labels: [ (.labels // [])[].name ],
+          comments: [ (.comments // [])[]
+            | { id: ( ( (.url // "") | capture("issuecomment-(?<n>[0-9]+)$") | .n | tonumber ) // null ),
+                author: (.author.login // null),
+                authorKind: ( (.author.login // "") as $a
+                              | ($bot | sub("\\[bot\\]$"; "")) as $bstripped
+                              | if ($a != "" and $bot != "" and ($a == $bot or $a == $bstripped)) then "self"
+                                elif ($a | endswith("[bot]")) then "bot"
+                                else "human" end ),
+                body: (.body // ""),
+                createdAt: (.createdAt // null) }
+            ] | sort_by(.createdAt // "")
+        } as $norm
+        | ($fields | map({(.): $norm[.]}) | add // {})
+      '
 }
 
 # itp_github_list_comments ISSUE — the normalized comment array ([INV-90],

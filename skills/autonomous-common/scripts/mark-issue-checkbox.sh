@@ -76,23 +76,22 @@ if [[ "$CHECKBOX_TEXT" =~ $'\n' ]] || [[ "$CHECKBOX_TEXT" =~ $'\r' ]]; then
 fi
 
 mark_checkbox() {
-  # Fetch current issue body via the itp_read_task READ leaf (#296, [INV-87]).
-  # Shape-equivalent (NOT byte-identical) migration: the old raw `gh api
-  # repos/$REPO/issues/$N --jq .body` REST read becomes
-  # `itp_read_task "$ISSUE_NUMBER" body -q '.body'` → itp_github_read_task →
-  # `gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json body -q '.body'`. The
-  # returned body STRING is identical; only the gh subcommand/endpoint differ.
-  # If the provider lib is unavailable itp_read_task stays undefined and this
-  # FAILs LOUD here (earlier than the PATCH-cap branch below) — intentionally,
-  # NOT a raw `gh` fallback ([INV-91]: a hardcoded GitHub read would execute
-  # against GitHub even for a non-GitHub backend; re-adding it would re-introduce
-  # the survivor this migration removes). The `|| { … }` handler is unchanged.
+  # Fetch current issue body via the itp_read_task READ leaf (#296, [INV-87];
+  # [W1b] #396). ABSTRACT contract: no gh flags or jq programs cross the seam
+  # — the leaf returns a normalized object and the caller projects `.body`
+  # with plain jq. The returned body STRING is identical to the pre-#396
+  # shape-equivalent migration; only the seam's own argv changed. If the
+  # provider lib is unavailable itp_read_task stays undefined and this FAILs
+  # LOUD here (earlier than the PATCH-cap branch below) — intentionally, NOT a
+  # raw `gh` fallback ([INV-91]: a hardcoded GitHub read would execute against
+  # GitHub even for a non-GitHub backend; re-adding it would re-introduce the
+  # survivor this migration removes). The `|| { … }` handler is unchanged.
   local body
   if ! declare -F itp_read_task >/dev/null 2>&1; then
     echo "Error: itp_read_task not available (provider lib not loaded; ISSUE_PROVIDER=${ISSUE_PROVIDER:-?}). Cannot fetch issue #${ISSUE_NUMBER}." >&2
     return 1
   fi
-  body=$(itp_read_task "$ISSUE_NUMBER" body -q '.body') || {
+  body=$(itp_read_task "$ISSUE_NUMBER" body | jq -r '.body') || {
     echo "Error: Failed to fetch issue #${ISSUE_NUMBER}" >&2
     return 1
   }

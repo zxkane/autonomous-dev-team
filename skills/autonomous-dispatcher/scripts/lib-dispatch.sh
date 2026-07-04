@@ -472,12 +472,13 @@ check_deps_resolved() {
     return 0
   fi
 
-  # [INV-87] (#296 B2, #306) the issue-BODY read routes through the itp_read_task
-  # verb (GitHub leaf itp_github_read_task → `gh issue view "$issue_num" --repo
-  # "$REPO" --json body -q '.body'`, byte-identical). lib-issue-provider.sh is
-  # already sourced above, so the shim is reachable. The `## Dependencies` sed
-  # extraction + per-ref predicate stay caller-side (spec §3.6).
-  body=$(itp_read_task "$issue_num" body -q '.body')
+  # [INV-87] (#296 B2, #306; [W1b] #396) the issue-BODY read routes through the
+  # ABSTRACT itp_read_task contract (GitHub leaf itp_github_read_task returns a
+  # normalized object; the caller projects `.body` with plain jq — no gh flags
+  # or jq programs cross the seam). lib-issue-provider.sh is already sourced
+  # above, so the shim is reachable. The `## Dependencies` sed extraction + per-
+  # ref predicate stay caller-side (spec §3.6).
+  body=$(itp_read_task "$issue_num" body | jq -r '.body')
   section=$(printf '%s\n' "$body" | sed -n '/^## Dependencies/,/^## /p')
 
   # Stage 1: restrict to list-item lines. `grep -E` exits non-zero when

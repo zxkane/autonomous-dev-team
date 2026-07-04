@@ -51,9 +51,9 @@ Output is one line per verb plus a summary:
 ```
 CONFORMANCE-PCONF github/github itp_list_comments PASS
 CONFORMANCE-PCONF degraded/degraded itp_edit_comment SKIP (cap: edit_comment)
-CONFORMANCE-PCONF github/github itp_read_task PENDING (coverage.conf)
-CONFORMANCE-COVERAGE PASS (spec CONTRACT-PENDING set == coverage.conf pending set, 13 verbs)
-CONFORMANCE-SUMMARY total=26 pass=13 fail=0 skip=0 pending=13
+CONFORMANCE-PCONF github/github chp_find_pr_for_issue PENDING (coverage.conf)
+CONFORMANCE-COVERAGE PASS (spec CONTRACT-PENDING set == coverage.conf pending set, 9 verbs)
+CONFORMANCE-SUMMARY total=27 pass=18 fail=0 skip=0 pending=9
 ```
 
 The runner exits **non-zero** on any `FAIL` — a wrong-shape output, an
@@ -65,7 +65,7 @@ never a `FAIL` by themselves.
 ## What this suite asserts (§3.1/§3.2's `Asserted` cells)
 
 Per [`provider-spec.md` §10](../../docs/pipeline/provider-spec.md#10-per-verb-conformance-checklist-370)'s
-`TC-PCONF-NNN` checklist — the 13 provider-neutral verbs whose contract is
+`TC-PCONF-NNN` checklist — the provider-neutral verbs whose contract is
 already committed:
 
 - **Fail-closed writes** (`itp_transition_state`, `itp_post_comment`,
@@ -80,23 +80,29 @@ already committed:
   `chp_review_threads`) — the [INV-90] normalized array shape (+ ascending
   `createdAt` for comments), and graceful (non-crashing, empty) handling of a
   malformed payload.
+- **Single-object shape + fields-subset + fail-closed** (`itp_read_task`) —
+  the normalized-object shape (`labels` as name strings), a fields-subset
+  request returning EXACTLY the requested keys, and fail-CLOSED (non-zero rc,
+  no partial output) on both a `gh` failure and malformed JSON — unlike the
+  array leaves above, a single-task read has no valid "empty" representation.
 - **Caller-side render, no leaf dispatch** (`chp_close_keyword`) — the three
   `_render_close_keyword` branches (`Closes #N` / `Related to #N` / empty),
   never `chp_has_leaf close_keyword` — see the design doc's "deliberate
   NON-leaf exception" callout (`../../docs/designs/provider-conformance-runner.md`).
 
-## The 13 `CONTRACT-PENDING` verbs (R3)
+## The 9 `CONTRACT-PENDING` verbs (R3)
 
-The gh-argv passthrough verbs (`itp_list_by_state`, `itp_count_by_state`,
-`itp_list_forbidden_combos`, `itp_read_task`, `chp_find_pr_for_issue`,
-`chp_ci_status`, `chp_mergeable`, `chp_pr_view`, `chp_pr_list`,
-`chp_list_inline_comments`, `chp_create_pr`, `chp_approve`, `chp_merge`) have
-no conformance check yet — `provider-spec.md` tokens their rows
-`CONTRACT-PENDING` and `coverage.conf` lists them `pending`. A W1 slice that
-implements one of these contracts MUST remove the spec token AND flip
-`coverage.conf`'s line to `asserted` in the **same PR** — the runner's
-`CONFORMANCE-COVERAGE` check is a set-diff tripwire that FAILs on any
-asymmetry between the two.
+The gh-argv passthrough verbs (`chp_find_pr_for_issue`, `chp_ci_status`,
+`chp_mergeable`, `chp_pr_view`, `chp_pr_list`, `chp_list_inline_comments`,
+`chp_create_pr`, `chp_approve`, `chp_merge`) have no conformance check yet —
+`provider-spec.md` tokens their rows `CONTRACT-PENDING` and `coverage.conf`
+lists them `pending`. A W1 slice that implements one of these contracts MUST
+remove the spec token AND flip `coverage.conf`'s line to `asserted` in the
+**same PR** — the runner's `CONFORMANCE-COVERAGE` check is a set-diff
+tripwire that FAILs on any asymmetry between the two. (`itp_list_by_state`,
+`itp_count_by_state`, `itp_list_forbidden_combos` were flipped to `asserted`
+in #371 W1a; `itp_read_task` in #396 W1b — all four ITP READ verbs are now
+asserted, leaving only the CHP PR-lifecycle verbs pending.)
 
 ## Governing capability map (R4)
 

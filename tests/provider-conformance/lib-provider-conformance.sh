@@ -121,6 +121,16 @@ pcf_is_json_array() {
   jq -e 'type == "array"' >/dev/null 2>&1 <<<"$text"
 }
 
+# pcf_is_json_object <text> — rc 0 iff TEXT parses as JSON and its top-level
+# value is an object (issue #396, W1b — itp_read_task returns a single
+# normalized object, not an array). Same empty-text convention as
+# pcf_is_json_array.
+pcf_is_json_object() {
+  local text="$1"
+  [[ -n "${text//[[:space:]]/}" ]] || return 1
+  jq -e 'type == "object"' >/dev/null 2>&1 <<<"$text"
+}
+
 # pcf_spec_pending_verbs <spec_md> — print, one per line sorted+deduped, the
 # verb name of every provider-spec.md §3.1/§3.2 table row carrying the literal
 # `CONTRACT-PENDING` token. Plain grep/sed anchored on the `| \`<verb>` row

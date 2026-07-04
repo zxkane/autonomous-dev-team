@@ -113,3 +113,31 @@ itp_broken_list_forbidden_combos() {
     ]
   '
 }
+
+# Correct leaf for the #396 W1b abstract itp_read_task verb (not targeted by
+# a deliberate violation — kept correct so the broken run's FAIL count stays
+# exactly the deliberate violations, never more).
+itp_broken_read_task() {
+  local issue="$1" fields_csv="$2" fields_json
+  fields_json=$(printf '%s' "$fields_csv" | jq -R -s -c 'split(",") | map(select(length > 0))')
+  gh issue view "$issue" --repo "$REPO" --json title,body,state,labels,comments \
+    | jq --arg bot "${BOT_LOGIN:-}" --argjson fields "$fields_json" '
+        {
+          title: (.title // ""),
+          body: (.body // ""),
+          state: (.state // ""),
+          labels: [ (.labels // [])[].name ],
+          comments: [ (.comments // [])[]
+            | { id: ( ( (.url // "") | capture("issuecomment-(?<n>[0-9]+)$") | .n | tonumber ) // null ),
+                author: (.author.login // null),
+                authorKind: ( (.author.login // "") as $a
+                              | if ($a != "" and $a == $bot) then "self"
+                                elif ($a | endswith("[bot]")) then "bot"
+                                else "human" end ),
+                body: (.body // ""),
+                createdAt: (.createdAt // null) }
+            ] | sort_by(.createdAt // "")
+        } as $norm
+        | ($fields | map({(.): $norm[.]}) | add // {})
+      '
+}

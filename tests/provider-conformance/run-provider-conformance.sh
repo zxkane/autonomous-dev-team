@@ -315,6 +315,60 @@ _run_shape_assert() {
   emit PASS "$verb"
 }
 
+# _run_object_shape_assert <verb> <invoke_snippet> <payload_file> — invoke
+# VERB (which returns a single normalized OBJECT, not an array — itp_read_task,
+# issue #396 W1b) with a VALID canned payload and assert JSON-object shape +
+# rc 0; then invoke with a MALFORMED payload and assert graceful (empty rc≠0,
+# fail-closed per R2) output — NOT the array leaves' "empty/[] is graceful"
+# convention, since a single-task read has no empty-but-valid representation.
+_run_object_shape_assert() {
+  local verb="$1" invoke_snippet="$2" payload_file="$3"
+  local argv_file="$work_root/.argv-$verb.json"
+  local out rc
+
+  out="$(_invoke _PCF_GH_MODE="ok" _PCF_GH_PAYLOAD="$payload_file" _PCF_ARGV_FILE="$argv_file" "$invoke_snippet" 2>&1)"; rc=$?
+  if [[ "$rc" != "0" ]]; then
+    emit FAIL "$verb" "wrong-shape (non-zero rc on a valid payload: $rc, output: ${out:0:200})"
+    return
+  fi
+  if ! pcf_is_json_object "$out"; then
+    emit FAIL "$verb" "wrong-shape (output is not a JSON object: ${out:0:200})"
+    return
+  fi
+  if ! jq -e 'has("labels") and (.labels | type == "array") and (.labels | all(type == "string"))' >/dev/null 2>&1 <<<"$out"; then
+    emit FAIL "$verb" "labels not normalized to a name-string array: ${out:0:200}"
+    return
+  fi
+
+  # Fields-subset: a body-only request must return EXACTLY {body}.
+  local body_only
+  body_only="$(_invoke _PCF_GH_MODE="ok" _PCF_GH_PAYLOAD="$payload_file" _PCF_ARGV_FILE="$argv_file" 'itp_read_task 42 body' 2>&1)"
+  if [[ "$(jq -r 'keys_unsorted | join(",")' <<<"$body_only" 2>/dev/null)" != "body" ]]; then
+    emit FAIL "$verb" "fields-subset violated: requesting 'body' did not return exactly {body} (got: ${body_only:0:200})"
+    return
+  fi
+
+  # R2 fail-closed: stub gh fails -> leaf rc≠0, no partial output.
+  local fail_rc
+  _invoke _PCF_GH_MODE="fail" _PCF_ARGV_FILE="$argv_file" "$invoke_snippet" >/dev/null 2>&1; fail_rc=$?
+  if [[ "$fail_rc" == "0" ]]; then
+    emit FAIL "$verb" "rc-0-on-error (stub gh failed but verb still returned 0)"
+    return
+  fi
+
+  # Malformed-JSON handling: fail-CLOSED (non-zero rc), unlike the array
+  # leaves' empty/[] convention — a single-task read has no valid "empty" form.
+  local malformed mal_rc
+  malformed="$work_root/.malformed-$verb.json"
+  printf '{ this is not json' > "$malformed"
+  _invoke _PCF_GH_MODE="ok" _PCF_GH_PAYLOAD="$malformed" _PCF_ARGV_FILE="$argv_file" "$invoke_snippet" >/dev/null 2>/dev/null; mal_rc=$?
+  if [[ "$mal_rc" == "0" ]]; then
+    emit FAIL "$verb" "malformed-JSON input produced rc 0 (should fail-closed, non-zero rc)"
+    return
+  fi
+  emit PASS "$verb"
+}
+
 # _run_count_assert <verb> <invoke_snippet> <payload_file> — invoke VERB (which
 # returns a bare non-negative integer, not an array — itp_count_by_state) with
 # a VALID canned payload and assert the output is a bare integer + rc 0; then
@@ -446,6 +500,10 @@ _assert_verb() {
     itp_list_forbidden_combos)
       _run_shape_assert "$verb" 'itp_list_forbidden_combos open autonomous 100' \
         "$PAYLOADS/issue-list-valid.json" number
+      ;;
+    itp_read_task)
+      _run_object_shape_assert "$verb" 'itp_read_task 42 title,body,state,labels,comments' \
+        "$PAYLOADS/issue-view-valid.json"
       ;;
     chp_review_threads)
       _run_shape_assert "$verb" 'chp_review_threads 42' "$PAYLOADS/review-threads-valid.json" 0

@@ -82,12 +82,14 @@ MAX_RETRIES="${MAX_RETRIES:-3}"
 # ---------------------------------------------------------------------------
 # Gather state (read-only gh + lib predicates)
 # ---------------------------------------------------------------------------
-# [INV-87] issue-level task read routes through itp_read_task; the GitHub leaf
-# forwards `--json state,labels,title` byte-identically (spec §3.1 read_task).
+# [INV-87] issue-level task read routes through itp_read_task ([W1b] #396) —
+# the ABSTRACT contract: `labels` is normalized to an array of NAME strings
+# (no `.name` projection), `state` passes through as GitHub's own OPEN/CLOSED
+# token unchanged (the `_next_action` gate below ships byte-unchanged).
 ISSUE_JSON="$(itp_read_task "$ISSUE_NUMBER" state,labels,title 2>/dev/null || echo '{}')"
 ISSUE_STATE="$(jq -r '.state // "UNKNOWN"' <<<"$ISSUE_JSON")"
 ISSUE_TITLE="$(jq -r '.title // ""' <<<"$ISSUE_JSON")"
-LABELS="$(jq -r '[.labels[].name] | join(" ")' <<<"$ISSUE_JSON" 2>/dev/null || echo "")"
+LABELS="$(jq -r '[.labels[]] | join(" ")' <<<"$ISSUE_JSON" 2>/dev/null || echo "")"
 has_label() { [[ " $LABELS " == *" $1 "* ]]; }
 
 # Open PR + reviewDecision (via the dispatcher's own fetch_pr_for_issue helper).
