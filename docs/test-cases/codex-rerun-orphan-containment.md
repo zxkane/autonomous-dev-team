@@ -12,11 +12,10 @@ Three layers, layer 1 primary:
    re-checks the wrapper's fan-out dir exists before every fresh launch, and
    the post-loop rc-sidecar write is guarded on the same dir existing.
 
-All unit tests live in `tests/unit/test-codex-rerun-orphan-containment.md`'s
-companion script `tests/unit/test-codex-rerun-orphan-containment.sh`, plus
-regression additions to `tests/unit/test-lib-review-codex.sh` (the existing
-`_run_codex_review` re-run harness) and `tests/unit/test-reap-recorded-descendants.sh`
-(the existing reap-call-site source-of-truth suite).
+All new unit tests live in `tests/unit/test-codex-rerun-orphan-containment.sh`,
+plus regression additions to `tests/unit/test-lib-review-codex.sh` (the existing
+`_run_codex_review` re-run harness). `tests/unit/test-reap-recorded-descendants.sh`
+(the existing reap-call-site source-of-truth suite) is unchanged and stays green.
 
 ## Layer 1 — `_run_codex_review` treats rc >= 128 as terminal (PRIMARY fix)
 
