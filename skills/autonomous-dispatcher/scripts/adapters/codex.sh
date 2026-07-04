@@ -586,7 +586,7 @@ _codex_review_cleanup_worktree() {
   return 0
 }
 
-# _run_codex_review <prompt> <model> <stdout-file> [<pr-workdir>]
+# _run_codex_review <prompt> <model> <stdout-file> [<pr-workdir>] [<fanout-liveness-dir>]
 #
 # The review-codex launch + bounded re-run controller. Runs `codex review
 # "<prompt>"` once under the shared _run_with_timeout (so PGID/timeout/PID-file
@@ -604,23 +604,59 @@ _codex_review_cleanup_worktree() {
 # current cwd and logs a loud warning (degraded — the diff may be wrong/empty, but
 # the wrapper does not crash).
 #
+# <fanout-liveness-dir> (#406, optional 5th arg): the wrapper's per-run fan-out
+# scratch dir (`_FANOUT_DIR`) — the SAME dir that holds this agent's `.rc`/
+# `.pgid` sidecars. It is unrelated to <pr-workdir>; it exists ONLY so a RE-RUN
+# iteration (never the first run) can tell "has the wrapper already resolved
+# verdicts and torn down?" before spawning a fresh `codex review` that nobody
+# will ever collect. The wrapper removes this dir right after reading every
+# agent's launch-rc sidecar (`rm -rf "$_FANOUT_DIR"`), BEFORE the post-resolution
+# reap — so a re-run loop that checks it immediately before each fresh launch
+# sees the deletion in time. When empty/unset (every existing 3-4-arg call site,
+# including every unit test in tests/unit/test-lib-review-codex.sh), the gate is
+# a pure no-op and the loop's behavior is byte-for-byte unchanged — this is
+# deliberate: `_run_codex_review` must stay callable standalone (a unit test, a
+# future non-wrapper caller) without requiring wrapper-internal plumbing.
+#
 # Return code: the exit code of the LAST `codex review` invocation. A 124
-# (coreutils timeout TERM-expiry) or 137 (--kill-after SIGKILL) from ANY run STOPS
-# the re-run loop IMMEDIATELY and is returned — the loop is for transient stream
-# errors, not the per-run timeout cap, so a wall-clock-capped run never triggers a
-# re-run (#218 review finding 4; see the loop comment below). Because a timeout
-# terminates the loop, no later run can overwrite the veto rc, so the 124/137 is
+# (coreutils `timeout`'s OWN TERM-expiry exit code), 137 (128+SIGKILL, the
+# --kill-after escalation), or ANY OTHER 128+N signal-death rc (see #406
+# below) from ANY run STOPS the re-run loop IMMEDIATELY and is returned — the
+# loop is for transient stream errors, not a process-level kill, so a
+# wall-clock-capped OR externally-terminated run never triggers a re-run
+# (#218 review finding 4; see the loop comment below). Because a terminal rc
+# terminates the loop, no later run can overwrite the veto rc, so it is
 # returned without any further re-runs. This is load-bearing for the INV-48
-# timeout-veto: the wrapper's post-window sweep maps a no-verdict rc 124/137 to
-# `timed-out` (a deciding FAIL that VETOES the merge). The comment poller is the
-# authoritative verdict gate after this returns; on non-timeout exhaustion with no
-# verdict, codex is resolved `unavailable` (or `timed-out` for a 124/137 return).
+# timeout-veto: the wrapper's post-window sweep maps a no-verdict rc 124/137
+# to `timed-out` (a deciding FAIL that VETOES the merge). The comment poller
+# is the authoritative verdict gate after this returns; on non-timeout
+# exhaustion with no verdict, codex is resolved `unavailable` (or `timed-out`
+# for a 124/137 return).
+#
+# #406: rc 143 (SIGTERM, 128+15) is ALSO signal-death, not a transient stream
+# blip. The review wrapper's own post-resolution reap (INV-43/INV-84,
+# `_reap_fanout_processes` / `_reap_fanout_recorded_descendants`) delivers
+# SIGTERM to a still-running codex review whose verdict already resolved via a
+# sibling agent or an early artifact land — the in-flight `codex review` then
+# exits 143. Pre-fix, 143 fell through to the #209 "transient stream blip" arm
+# below and scheduled a FRESH `codex review`, which the wrapper's reap could not
+# reach (the fan-out controller subshell that runs THIS loop is not itself in
+# any recorded PGID/marker set — see autonomous-review.sh's post-resolution reap
+# call site) — an orphaned re-run controller that outlives "Review complete" and
+# posts a stale duplicate verdict 10+ minutes later. Generalizing to "any
+# rc >= 128 is signal-death" (not just 124/137/143) covers every
+# `_run_with_timeout`-delivered kill uniformly: the ONLY sources of a 128+
+# exit here are the wrapper's own reap, the operator, or system shutdown —
+# re-running against any of them is wrong. `_one_codex_review_run`'s call
+# tree is exactly ONE process substitution deep (no pipeline stage before the
+# CLI) so `$?` is codex's own signal-death rc, never a SIGPIPE artifact from an
+# upstream stage.
 #
 # The CLEAN stdout (only codex review's output, NOT the wrapper's log noise) is
 # written to <stdout-file> so the wrapper's stdout→verdict fallback and the
 # stream-error drop-reason scan read codex's actual review text.
 _run_codex_review() {
-  local prompt="$1" model="$2" stdout_file="$3" pr_workdir="${4:-}"
+  local prompt="$1" model="$2" stdout_file="$3" pr_workdir="${4:-}" fanout_liveness_dir="${5:-}"
   local max="${CODEX_REVIEW_MAX_RERUNS:-3}"
 
   # [INV-72] Preflight the codex review binary BEFORE launching it. The codex
@@ -746,8 +782,20 @@ _run_codex_review() {
   _recompute_malformed_rc0
 
   while true; do
-    # Stop on a wall-clock-cap kill (a deciding INV-48 veto, not a blip).
-    [[ "$last_run_rc" -eq 124 || "$last_run_rc" -eq 137 ]] && break
+    # Stop on ANY signal-death rc (a deciding INV-48 veto, not a blip). 124 is
+    # coreutils `timeout`'s OWN exit code for a TERM-expiry (NOT 128+signal —
+    # `timeout` itself exits 124, distinct from the child dying); 137
+    # (128+SIGKILL) is the --kill-after escalation; 143 (128+SIGTERM) is the
+    # wrapper's own post-resolution reap terminating a still-running codex
+    # review whose verdict already resolved (#406) — treating it as terminal,
+    # not a #209 transient blip, is what stops the orphaned re-run controller.
+    # Generalize the SIGNAL-DEATH half to rc >= 128 (128+N, any signal) rather
+    # than enumerating each one: the ONLY sources of a 128+ exit here are the
+    # wrapper's own reap, the operator, or system shutdown — re-running
+    # against any of them is wrong. 124 is kept as its own explicit disjunct
+    # (it is coreutils' cap-expiry code, not a signal-death rc, so it does not
+    # fall under the >= 128 generalization).
+    [[ "$last_run_rc" -eq 124 || "$last_run_rc" -ge 128 ]] && break
     # Stop on a clean run that produced a REAL review (verdict produced — hand off
     # to the poller + the stdout fallback). A clean run whose capture is a malformed
     # prompt-echo (INV-73 / #252) does NOT break here — it falls through to the
@@ -795,6 +843,17 @@ _run_codex_review() {
     now=$(_codex_now_seconds)
     if (( now >= deadline )); then
       echo "[lib-review-codex] codex review hit the ${budget}s wall-clock deadline (AGENT_REVIEW_TIMEOUT) after ${reruns} re-run(s) with a non-zero/malformed result; falling back to the wrapper poller." >&2
+      break
+    fi
+    # Bound 3 (#406): the wrapper's fan-out liveness dir was removed → verdict
+    # resolution + reap already happened, and NOBODY will ever collect a fresh
+    # `codex review`'s rc/stdout from here on. Checked immediately before every
+    # re-run launch (not just once) because the dir can disappear WHILE this
+    # loop is mid-re-run (INV-84 early resolution races the re-run controller).
+    # A no-op when the caller passed no liveness dir (standalone/unit calls) —
+    # `-n` on an empty string is false, so an unset 5th arg never breaks here.
+    if [[ -n "$fanout_liveness_dir" && ! -d "$fanout_liveness_dir" ]]; then
+      echo "[lib-review-codex] codex review fan-out dir '${fanout_liveness_dir}' no longer exists — the wrapper already resolved verdicts and reaped; NOT launching a re-run (#406, prevents an orphaned re-run controller)." >&2
       break
     fi
 

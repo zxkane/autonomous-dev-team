@@ -2307,7 +2307,16 @@ for _agent in "${REVIEW_AGENTS_LIST[@]}"; do
         log "ERROR: INV-62/#218 could not prepare a PR-branch worktree for codex review (branch '${PR_BRANCH}'). FAILING CLOSED: skipping the codex review (resolves \`unavailable\`) rather than voting on PROJECT_DIR's wrong/empty diff."
       fi
       if [[ "$_cx_wt_ready" == true ]]; then
-        _run_codex_review "$_agent_prompt" "${_agent_model:-sonnet}" "$_agent_codex_stdout" "$_cx_pr_workdir" \
+        # #406 (Layer 3, defense-in-depth): pass the wrapper's fan-out scratch
+        # dir as the liveness dir. `_run_codex_review`'s re-run loop re-checks
+        # this dir exists before EVERY re-run launch (not just the first run)
+        # and breaks instead of spawning once the wrapper has removed it (i.e.
+        # verdict resolution + reap already happened — see the `rm -rf
+        # "$_FANOUT_DIR"` below). This is a no-op for a fresh/never-re-run
+        # invocation; it only matters for a re-run iteration that fires after
+        # this agent's own controller has outlived the observe loop's INV-84
+        # early exit.
+        _run_codex_review "$_agent_prompt" "${_agent_model:-sonnet}" "$_agent_codex_stdout" "$_cx_pr_workdir" "$_FANOUT_DIR" \
           >>"$_agent_log" 2>&1 || _rc=$?
         _codex_review_cleanup_worktree "$_cx_pr_workdir"
       else
@@ -2321,7 +2330,15 @@ for _agent in "${REVIEW_AGENTS_LIST[@]}"; do
       run_agent "$_agent_session_id" "$_agent_prompt" "${_agent_model:-sonnet}" "$_agent_session_name" \
         >>"$_agent_log" 2>&1 || _rc=$?
     fi
-    printf '%s\n' "$_rc" > "$_agent_rc_file"
+    # #406 (Layer 3b): guard the rc-sidecar write on the fan-out dir still
+    # existing. The wrapper `rm -rf`s `_FANOUT_DIR` (see below) once it has
+    # read every agent's sidecar — for an agent whose subshell is STILL
+    # RUNNING at that point (the INV-84 early-exit race this issue is about),
+    # a late write here would otherwise hit "No such file or directory" and
+    # print a loud, spurious error to the agent's log for a value nobody will
+    # ever read again (the wrapper already resolved this agent's rc from the
+    # sidecar-missing default). A deleted dir now produces silence, not noise.
+    [[ -d "$_FANOUT_DIR" ]] && printf '%s\n' "$_rc" > "$_agent_rc_file" 2>/dev/null
   ) &
   # Collect THIS subshell's PID so we wait only the fan-out agents below —
   # not the token-refresh daemon / heartbeat (which never exit). See the
@@ -2861,6 +2878,24 @@ _reap_fanout_processes "${_AGENT_PGIDS[@]:-}" "${_AGENT_PGIDS_E2E:-}"
 # lib-review-poll.sh::_reap_fanout_recorded_descendants doc comment) — this
 # sweep does not claim to reach it.
 _reap_fanout_recorded_descendants "ADT_FANOUT_LANE_MARKER" "${AGENT_SESSION_IDS[@]:-}"
+
+# [#406 defense-in-depth]: TERM->KILL each fan-out CONTROLLER SUBSHELL PID
+# directly. Neither reap above reaches it: `_reap_fanout_processes` kills the
+# AGENT's setsid PGID (one level below the controller); the marker sweep
+# cannot see it (the marker is exported inside this ALREADY-RUNNING subshell,
+# which never rewrites its own /proc/<pid>/environ). Layer 1 (the adapter's
+# rc>=128 terminal break) is the PRIMARY fix for the observed incidents — once
+# `_reap_fanout_processes` above SIGTERMs a still-running `codex review`, the
+# adapter's re-run loop now breaks on that 143 and the controller subshell
+# runs off its own end. This sweep is the belt-and-suspenders backstop for a
+# path where the recorded-PGID kill missed (e.g. the `.pgid` sidecar was never
+# written) and the controller subshell is consequently still alive here.
+# Direct PID kill ONLY (never a group form `kill -- -$pid`) — see
+# lib-review-poll.sh::_reap_fanout_controller_subshells for why a group kill
+# here would target the WRAPPER's own pgid, and why these PIDs are never
+# lane_record_pgid'd (a later Lane-GC lane_kill on this pgid would kill the
+# live wrapper).
+_reap_fanout_controller_subshells "${_fanout_pids[@]:-}"
 
 # Aggregate under the unanimous-PASS rule (INV-40). Map the aggregate onto the
 # existing PASSED_VERDICT / LATEST_COMMENT / AGENT_EXIT variables so the
