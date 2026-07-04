@@ -564,9 +564,23 @@ chp_github_reply_review_comment() {
 # `reviewDecision`, `mergeable`) are projected verbatim. `comments` normalizes
 # to `[{id, author, body, createdAt}]` ascending by `createdAt`, `reviews` to
 # `[{author, state, submittedAt}]` ascending by `submittedAt`, and
-# `closingIssueNumbers` folds `closingIssuesReferences.nodes[].number` to an
-# int array (the GitHub-internal cursor shape does not cross the seam). `body`
+# `closingIssueNumbers` folds the raw `closingIssuesReferences` collection to
+# an int array (the GitHub-internal shape does not cross the seam). `body`
 # is normalized from null → "" per the vocabulary.
+#
+# `closingIssuesReferences` accepts BOTH shapes gh can produce: the FLAT array
+# `[{number}]` that real `gh pr view --json closingIssuesReferences` returns
+# (verified against lib-pr-linkage.sh:85 which selects `.closingIssuesReferences[]?
+# | .number` — the pre-existing repo-wide idiom), AND the GraphQL cursor shape
+# `{nodes:[{number}]}` some raw queries emit. The `(.…nodes // .… // [])` fold
+# picks whichever is present; a null / absent field folds to `[]`.
+#
+# Fail-CLOSED (P1-2, codex pre-review): captures gh stdout, checks BOTH its
+# exit status AND that stdout is non-empty AND parses as a JSON object BEFORE
+# projecting. An empty rc-0 stdout (transient/permission failure that gh
+# silently swallows without emitting an error) becomes rc≠0 with no partial
+# output — the caller's `|| true` / `|| echo UNKNOWN` framing degrades to
+# empty/UNKNOWN, never treats a silent gh failure as a real answer.
 #
 # Rationale (spec §3.2): the caller layer's incidental PR reads
 # (preview-URL/headRefName/headRefOid/state/comments/reviews projections at
@@ -580,14 +594,14 @@ chp_github_pr_view() {
   # Map requested vocabulary fields to gh raw fields. Most map 1:1; the two
   # non-1:1 fields are closingIssueNumbers (raw: closingIssuesReferences) and
   # body (raw: body, null→"" at the jq level).
-  local gh_fields="" out_field norm_program="" first=1
+  local gh_fields="" out_field first=1
   # Build the raw --json list and the jq object body.
   local IFS_SAVED="$IFS"; IFS=','
   # shellcheck disable=SC2206
   local requested=(${fields_csv})
   IFS="$IFS_SAVED"
 
-  local f raw_seen="" _seen_map=""
+  local f _seen_map=""
   local _obj_body=""
   for f in "${requested[@]}"; do
     f="${f#"${f%%[![:space:]]*}"}"; f="${f%"${f##*[![:space:]]}"}"   # trim
@@ -615,7 +629,13 @@ chp_github_pr_view() {
         expr='reviews: ([ .reviews[]? | { author: ((.author | if type == "object" then .login else . end) // null), state: (.state // null), submittedAt: (.submittedAt // null) } ] | sort_by(.submittedAt // ""))'
         ;;
       closingIssueNumbers)
-        expr='closingIssueNumbers: ([ (.closingIssuesReferences.nodes // [])[] | .number ])'
+        # Accept BOTH the flat `.closingIssuesReferences[]` gh shape (the pre-
+        # existing repo-wide idiom, lib-pr-linkage.sh:85 anchor) AND the
+        # `{nodes:[…]}` cursor shape some GraphQL paths emit. `if type ==
+        # "object" then .nodes else . end` picks the right form without ever
+        # dereferencing `.nodes` on an array (which raises jq's "Cannot index
+        # array with string" — P1-1 codex fix). Null/absent → `[]`.
+        expr='closingIssueNumbers: ([ ((.closingIssuesReferences // []) | (if type == "object" then (.nodes // []) else . end))[]? | .number ])'
         ;;
       *)
         # 1:1 vocabulary field — emit `name: .name`.
@@ -625,9 +645,22 @@ chp_github_pr_view() {
     if [[ $first -eq 1 ]]; then first=0; else _obj_body+=", "; fi
     _obj_body+="$expr"
   done
-  norm_program="{ ${_obj_body} }"
+  local norm_program="{ ${_obj_body} }"
 
-  gh pr view "$pr" --repo "$REPO" --json "$gh_fields" --jq "$norm_program"
+  # P1-2 (codex pre-review): capture-then-check. gh's own `--jq` filter is NOT
+  # applied here — we bring the raw JSON back into the leaf so we can validate
+  # non-empty + valid-object shape BEFORE handing bad input to jq (which would
+  # otherwise emit its own error and rc≠0 with no context). A real "no such PR"
+  # / permission failure from gh returns rc≠0, which the `|| return 1`
+  # propagates. A rc-0 empty stdout (silent gh failure — reproducible via
+  # `gh(){ return 0; }`) is caught by the `-n` and the `jq -e … type=="object"`
+  # guard: any of the three failure modes yields rc≠0 with empty stdout, so the
+  # caller's fail-soft framing degrades correctly.
+  local raw
+  raw=$(gh pr view "$pr" --repo "$REPO" --json "$gh_fields") || return 1
+  [[ -n "$raw" ]] || return 1
+  jq -e 'type == "object"' >/dev/null 2>&1 <<<"$raw" || return 1
+  jq -c "$norm_program" <<<"$raw"
 }
 
 # chp_github_pr_list STATE FIELDS-CSV — normalized PR-list read leaf.
@@ -711,9 +744,21 @@ chp_github_list_inline_comments() {
   # partial-pagination stream through.
   local raw
   raw=$(gh api "repos/${REPO}/pulls/${pr}/comments" --paginate 2>/dev/null) || return 1
+  # P2-3 (codex pre-review) fail-CLOSED on empty stdout: a real
+  # zero-comment PR emits the literal JSON `[]` from `gh api`, NOT an empty
+  # string. Empty stdout with rc=0 (reproducible via `gh(){ return 0; }`) is a
+  # silent gh failure the caller must distinguish from "no inline comments" —
+  # otherwise the dev-resume prompt would treat a broken fetch as "nothing to
+  # address" and skip the entire review-feedback block. Reject empty raw
+  # stdout here so the caller's `|| true` framing degrades to empty
+  # PR_REVIEW_COMMENTS, matching the shim's own leaf-absent WARN + rc 1
+  # convention.
+  [[ -n "$raw" ]] || return 1
   # Slurp the concatenated page arrays into ONE array; then normalize +
   # ascending sort. jq's --slurp folds the concatenated arrays into a
-  # flat array-of-arrays; `add // []` merges them (empty stream → `[]`).
+  # flat array-of-arrays; `add // []` merges them (a real zero-comment PR
+  # emits `[]` — one empty array, still slurped into a 1-element array-of-
+  # arrays whose `add` is `[]`, distinct from the rejected empty-stdout case).
   jq -c --slurp '
     (add // []) |
     [ .[]? | {

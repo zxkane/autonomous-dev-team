@@ -56,19 +56,26 @@ chp_broken_pr_view() {
       body)                expr='body: (.body // "")' ;;
       comments)            expr='comments: ([ .comments[]? | { id: (.id // null), author: ((.author | if type == "object" then .login else . end) // null), body: (.body // ""), createdAt: (.createdAt // null) } ] | sort_by(.createdAt // "", .id // 0))' ;;
       reviews)             expr='reviews: ([ .reviews[]? | { author: ((.author | if type == "object" then .login else . end) // null), state: (.state // null), submittedAt: (.submittedAt // null) } ] | sort_by(.submittedAt // ""))' ;;
-      closingIssueNumbers) expr='closingIssueNumbers: ([ (.closingIssuesReferences.nodes // [])[] | .number ])' ;;
+      closingIssueNumbers) expr='closingIssueNumbers: ([ ((.closingIssuesReferences // []) | (if type == "object" then (.nodes // []) else . end))[]? | .number ])' ;;
       *)                   expr="${f}: .${f}" ;;
     esac
     if [[ $first -eq 1 ]]; then first=0; else _obj_body+=", "; fi
     _obj_body+="$expr"
   done
-  gh pr view "$pr" --repo "$REPO" --json "$gh_fields" --jq "{ ${_obj_body} }"
+  # Capture-then-check (P1-2 mirror of chp_github_pr_view).
+  local raw
+  raw=$(gh pr view "$pr" --repo "$REPO" --json "$gh_fields") || return 1
+  [[ -n "$raw" ]] || return 1
+  jq -e 'type == "object"' >/dev/null 2>&1 <<<"$raw" || return 1
+  jq -c "{ ${_obj_body} }" <<<"$raw"
 }
-# Correct chp_list_inline_comments leaf (#398 W1c2) — page-walk + normalize.
+# Correct chp_list_inline_comments leaf (#398 W1c2) — page-walk + normalize +
+# empty-stdout fail-CLOSED (P2-3 codex fix).
 chp_broken_list_inline_comments() {
   local pr="$1"
   local raw
   raw=$(gh api "repos/${REPO}/pulls/${pr}/comments" --paginate 2>/dev/null) || return 1
+  [[ -n "$raw" ]] || return 1
   jq -c --slurp '
     (add // []) |
     [ .[]? | {

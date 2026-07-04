@@ -166,6 +166,12 @@ assert_contains "TC-CHP-RESOLVE -F threadId forwards the thread id" "threadId=PR
 #   - chp_pr_list (W1c1 #397): positional STATE + FIELDS-CSV; leaf owns argv
 #     via `gh api graphql`. No `--json`/`-q` crosses the seam.
 argv=$(run_trace chp_pr_view 42 state)
+# The leaf emits `gh pr view 42 --repo $REPO --json state` (no --jq crosses
+# to gh — the normalization jq runs inside the leaf on the captured raw JSON).
+# We assert the STRUCTURAL invariants (positional args + `--json <field>` +
+# NO `-q`/`--jq` leaking to gh) rather than pinning the leaf's downstream jq
+# program body — a leaf-internal formatting refactor should not break this
+# trace test.
 assert_contains "TC-CHP-PRVIEW chp_pr_view <PR> <FIELDS_CSV> forwards to gh pr view <PR> --repo <REPO>" \
   "pr view 42 --repo $REPO --json " "$argv"
 assert_contains "TC-CHP-PRVIEW leaf emits --json <raw gh fields> (state is 1:1 in the vocabulary)" \
@@ -178,7 +184,8 @@ if [[ "$argv" == *"--jq"* ]] || [[ "$argv" == *" -q "* ]]; then
 else
   echo -e "  ${GREEN}PASS${NC}: TC-CHP-PRVIEW-P1-2 gh argv carries NO --jq/-q (normalization runs downstream in the leaf, empty-stdout fail-CLOSED)"; PASS=$((PASS+1))
 fi
-# TC-CHP-PRVIEW-FAILCLOSED — a missing FIELDS_CSV (2nd arg absent) returns rc 2.
+# TC-CHP-PRVIEW-FAILCLOSED — a missing FIELDS_CSV (2nd arg absent) returns rc 2
+# (fail-CLOSED per W1c2 R2, mirroring chp_github_find_pr_for_issue's [M1]).
 _fc_rc=0
 env -u CODE_HOST -u AUTONOMOUS_CONF -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR \
     REPO="$REPO" \

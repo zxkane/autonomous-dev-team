@@ -199,6 +199,123 @@ assert_eq_golden "site9 combined (page-walk completeness, >1-page content preser
   "site9_inline_comments.combined" "$s9_comb"
 
 # =========================================================================
+# Codex pre-review regression cases (P1-1 / P1-2 / P2-3) — proven directly
+# against the real GitHub leaf. Source `chp-github.sh` so we drive the actual
+# `chp_github_pr_view` / `chp_github_list_inline_comments`, then override the
+# `gh` builtin in the SAME shell to model each edge case.
+# =========================================================================
+echo ""
+echo "=== W1c2 codex-regression: leaf-level edge cases ==="
+
+CHP_GITHUB="$SCRIPT_DIR/../../skills/autonomous-dispatcher/scripts/providers/chp-github.sh"
+if [[ -f "$CHP_GITHUB" ]]; then
+  # Isolate the leaf's `gh` override to a subshell so it doesn't leak into
+  # earlier assertions (which run without a stubbed gh).
+
+  # P1-2: chp_github_pr_view rc-0 empty stdout → fail-CLOSED (rc≠0, no stdout).
+  # Reproduces the codex finding: gh returning rc 0 + empty stdout was
+  # previously mis-read as a valid "state=UNKNOWN"-like answer by the caller,
+  # letting a silent gh failure look like a real value.
+  rc=0; out=""
+  out=$(REPO=owner/repo bash -c '
+    source "'"$CHP_GITHUB"'"
+    gh() { return 0; }   # rc 0, empty stdout (silent gh failure)
+    chp_github_pr_view 42 state
+  ' 2>&1) || rc=$?
+  if [[ "$rc" != "0" && -z "$out" ]]; then
+    ok "P1-2 chp_github_pr_view: gh rc-0 empty stdout → fail-CLOSED (rc≠0, no partial stdout)"
+  else
+    bad "P1-2 chp_github_pr_view fail-OPEN on empty stdout (rc=$rc out=[$out])"
+  fi
+
+  # P1-2 companion: gh emits non-JSON on rc 0 → also fail-CLOSED (jq -e
+  # object-shape guard).
+  rc=0; out=""
+  out=$(REPO=owner/repo bash -c '
+    source "'"$CHP_GITHUB"'"
+    gh() { echo "not valid json"; }
+    chp_github_pr_view 42 state
+  ' 2>&1) || rc=$?
+  if [[ "$rc" != "0" ]]; then
+    ok "P1-2 chp_github_pr_view: gh rc-0 non-JSON stdout → fail-CLOSED (rc≠0)"
+  else
+    bad "P1-2 chp_github_pr_view accepted non-JSON stdout (rc=$rc out=[$out])"
+  fi
+
+  # P1-1: closingIssueNumbers accepts the FLAT `[{number}]` shape real gh
+  # emits (the pre-existing repo-wide idiom, lib-pr-linkage.sh:85 anchor).
+  out=$(REPO=owner/repo bash -c '
+    source "'"$CHP_GITHUB"'"
+    gh() { echo "{\"closingIssuesReferences\":[{\"number\":42},{\"number\":41}]}"; }
+    chp_github_pr_view 42 closingIssueNumbers
+  ' 2>&1)
+  if [[ "$out" == "{\"closingIssueNumbers\":[42,41]}" ]]; then
+    ok "P1-1 closingIssueNumbers accepts FLAT [{number}] gh shape (real gh pr view --json output)"
+  else
+    bad "P1-1 closingIssueNumbers FLAT shape not accepted: got [$out]"
+  fi
+
+  # P1-1: closingIssueNumbers also accepts the {nodes:[…]} cursor shape
+  # (backwards-compat with any GraphQL path that emits the cursor form).
+  out=$(REPO=owner/repo bash -c '
+    source "'"$CHP_GITHUB"'"
+    gh() { echo "{\"closingIssuesReferences\":{\"nodes\":[{\"number\":100}]}}"; }
+    chp_github_pr_view 42 closingIssueNumbers
+  ' 2>&1)
+  if [[ "$out" == "{\"closingIssueNumbers\":[100]}" ]]; then
+    ok "P1-1 closingIssueNumbers accepts CURSOR {nodes:[…]} shape too (dual-form fold)"
+  else
+    bad "P1-1 closingIssueNumbers CURSOR shape not accepted: got [$out]"
+  fi
+
+  # P1-1: null/absent closingIssuesReferences → empty int array (never crash).
+  for missing in '{"closingIssuesReferences":null}' '{}'; do
+    out=$(REPO=owner/repo bash -c '
+      source "'"$CHP_GITHUB"'"
+      gh() { echo '"'$missing'"'; }
+      chp_github_pr_view 42 closingIssueNumbers
+    ' 2>&1)
+    if [[ "$out" == "{\"closingIssueNumbers\":[]}" ]]; then
+      ok "P1-1 closingIssueNumbers null/absent → [] (missing input: $missing)"
+    else
+      bad "P1-1 closingIssueNumbers missing-input not handled: input=$missing got=[$out]"
+    fi
+  done
+
+  # P2-3: chp_github_list_inline_comments rc-0 empty stdout → fail-CLOSED.
+  # A real zero-comment PR emits the literal `[]` from gh; empty stdout means
+  # a silent gh failure the caller MUST distinguish (otherwise the dev-resume
+  # prompt would treat a broken fetch as "no inline comments to address").
+  rc=0; out=""
+  out=$(REPO=owner/repo bash -c '
+    source "'"$CHP_GITHUB"'"
+    gh() { return 0; }
+    chp_github_list_inline_comments 42
+  ' 2>&1) || rc=$?
+  if [[ "$rc" != "0" && -z "$out" ]]; then
+    ok "P2-3 chp_github_list_inline_comments: gh rc-0 empty stdout → fail-CLOSED (rc≠0, no partial stdout)"
+  else
+    bad "P2-3 chp_github_list_inline_comments fail-OPEN on empty stdout (rc=$rc out=[$out])"
+  fi
+
+  # P2-3 companion: a real zero-comment PR (gh emits literal `[]`) is
+  # distinguishable — rc 0 + `[]` normalized output.
+  rc=0
+  out=$(REPO=owner/repo bash -c '
+    source "'"$CHP_GITHUB"'"
+    gh() { echo "[]"; }
+    chp_github_list_inline_comments 42
+  ' 2>&1) || rc=$?
+  if [[ "$rc" == "0" && "$out" == "[]" ]]; then
+    ok "P2-3 chp_github_list_inline_comments: real zero-comment PR ([] from gh) distinguishable from empty-stdout failure"
+  else
+    bad "P2-3 chp_github_list_inline_comments: zero-comment case not distinguishable (rc=$rc out=[$out])"
+  fi
+else
+  bad "codex-regression: chp-github.sh not found at $CHP_GITHUB"
+fi
+
+# =========================================================================
 echo ""
 echo "=== Summary ==="
 echo -e "  ${GREEN}PASS${NC}: $PASS"

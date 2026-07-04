@@ -18,7 +18,5 @@
     {"author": {"login": "cathy"}, "state": "APPROVED",          "submittedAt": "2026-06-28T09:00:00Z"},
     {"author": {"login": "dan"},   "state": "CHANGES_REQUESTED", "submittedAt": "2026-06-27T09:00:00Z"}
   ],
-  "closingIssuesReferences": {
-    "nodes": [ {"number": 42}, {"number": 41} ]
-  }
+  "closingIssuesReferences": [ {"number": 42}, {"number": 41} ]
 }

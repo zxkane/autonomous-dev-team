@@ -181,7 +181,7 @@ chp_degraded_pr_view() {
     if [[ $first -eq 1 ]]; then first=0; else _obj_body+=", "; fi
     _obj_body+="$expr"
   done
-  # Capture-then-check (P1-2 codex fix).
+  # Capture-then-check (P1-2 codex fix, mirror of chp_github_pr_view).
   local raw
   raw=$(gh pr view "$pr" --repo "$REPO" --json "$gh_fields") || return 1
   [[ -n "$raw" ]] || return 1
@@ -191,7 +191,7 @@ chp_degraded_pr_view() {
 
 # chp_degraded_list_inline_comments PR — mirrors chp_github_list_inline_comments
 # (#398 W1c2): page-walk + slurp/merge/sort/normalize; fail-CLOSED on failure
-# incl. rc-0 empty stdout (P2-3 codex fix).
+# (rc≠0 propagation AND rc-0 empty-stdout rejection, P2-3 codex fix).
 chp_degraded_list_inline_comments() {
   local pr="$1"
   local raw

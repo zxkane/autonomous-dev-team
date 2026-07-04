@@ -44,22 +44,44 @@ The 1 `chp_list_inline_comments` site:
 
 ## Normalization jq (leaf-owned)
 
-The GitHub leaf runs one `gh` invocation per verb call, with `--json <raw-gh-fields> --jq <normalization>`:
+The GitHub leaf runs one `gh` invocation per verb call. jq runs INSIDE the
+leaf on the captured raw JSON, NOT via gh's inline `--jq` — the load-bearing
+distinction that makes fail-CLOSED-on-empty-stdout reachable (see below).
 
 - `chp_github_pr_view` maps each vocabulary field to its raw gh counterpart
   (mostly 1:1; `closingIssueNumbers` ↔ `closingIssuesReferences`) then emits
   a single JSON object carrying EXACTLY the requested fields. `comments` and
-  `reviews` are normalized to `[{id,author,body,createdAt}]` / `[{author,state,submittedAt}]`
-  ascending; `body: null` → `""`; `closingIssueNumbers` folds the GraphQL
-  cursor shape to an int array; `author` handles both object (`.author.login`)
-  and scalar (already-a-string author) inputs via `if type == "object" then
-  .login else . end` — the fixture-vs-real-gh divergence caught in review.
+  `reviews` are normalized to `[{id,author,body,createdAt}]` /
+  `[{author,state,submittedAt}]` ascending; `body: null` → `""`;
+  `closingIssueNumbers` accepts BOTH the flat `[{number}]` shape real `gh pr
+  view --json closingIssuesReferences` returns (the pre-existing repo-wide
+  idiom, `lib-pr-linkage.sh:85` anchor) AND the GraphQL cursor `{nodes:[…]}`
+  form via `((.closingIssuesReferences // []) | (if type == "object" then
+  (.nodes // []) else . end))` — **P1-1 codex pre-review fix**. `author`
+  handles both object (`.author.login`) and scalar (already-a-string author)
+  inputs via `if type == "object" then .login else . end`.
+
+  **Fail-CLOSED (P1-2 codex pre-review)**: the leaf uses CAPTURE-THEN-CHECK,
+  NOT gh's inline `--jq`. `raw=$(gh pr view $PR --repo $REPO --json …) ||
+  return 1` propagates gh rc; `[[ -n "$raw" ]] || return 1` rejects a
+  silent rc-0 empty-stdout failure; `jq -e 'type == "object"' … || return 1`
+  rejects malformed JSON. Only then does the normalization jq run
+  (`jq -c "$norm_program" <<<"$raw"`). This is a hard requirement — with
+  gh's own `--jq` the empty-stdout case was silently swallowed and callers'
+  `|| true` framing turned it into a real-looking "no answer" (reproduced
+  on-box: `gh(){ return 0; }` → rc=0 empty out, which callers took as
+  "state=UNKNOWN"). Now the same case yields rc≠0 empty out, and the
+  caller's `|| echo UNKNOWN` degrades correctly.
 
 - `chp_github_list_inline_comments` uses `gh api --paginate` which emits one
   ARRAY PER PAGE (the trap the issue body flags). The leaf captures the raw
   concatenated stream then runs `jq -c --slurp '(add // []) | […] |
   sort_by(.createdAt // "", .id // 0)'` in a single pass — one normalization,
-  one merged array. Fail-CLOSED (rc≠0, no partial stdout) if any page fails.
+  one merged array. Fail-CLOSED on ANY page fetch failure (rc propagation)
+  AND on rc-0 empty stdout (**P2-3 codex pre-review fix** — a real
+  zero-comment PR emits the literal `[]` from `gh api`, so empty stdout can
+  only mean a silent gh failure that must degrade to WARN + rc 1 via the
+  shim, not smuggle a `[]` back to the dev-resume prompt).
 
 ## Deliberate SHAPE change per W1
 

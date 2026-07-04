@@ -249,9 +249,11 @@ env -u CODE_HOST -u AUTONOMOUS_CONF -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR \
 if [[ -f "$REC3/.verbs" ]] && grep -qx "pr view" "$REC3/.verbs"; then
   pass "S3 seam-reachability: stub OBSERVED a 'gh pr view' call through chp_pr_view"
   cn=$(call_for_verb "$REC3" pr view) && read_call "$REC3" "$cn"
-  # Structural (not exact-argc) — W1c2 leaf owns the --jq normalization body,
-  # so we assert positional args + `--json comments` + `--jq` presence, but do
-  # not pin the exact jq program body (that is chp_github_pr_view's business).
+  # Structural — W1c2 P1-2 codex fix: the leaf uses capture-then-check
+  # (`raw=$(gh …) || return 1; jq -c "$norm_program" <<<"$raw"`), so gh is
+  # invoked with `--json <field>` ONLY — no `--jq` crosses to gh. The
+  # normalization jq runs downstream on the captured raw JSON. Assert
+  # positional args + `--json comments` present + NO `--jq`/`-q` crossing.
   assert_eq "S3 argv[0]=pr" "pr" "${CALL_ARGV[0]:-}"
   assert_eq "S3 argv[1]=view" "view" "${CALL_ARGV[1]:-}"
   assert_eq "S3 argv[2]=42 (PR_NUMBER positional)" "42" "${CALL_ARGV[2]:-}"
@@ -259,13 +261,20 @@ if [[ -f "$REC3/.verbs" ]] && grep -qx "pr view" "$REC3/.verbs"; then
   assert_eq "S3 argv[4]=\$REPO" "$REPO" "${CALL_ARGV[4]:-}"
   assert_eq "S3 argv[5]=--json" "--json" "${CALL_ARGV[5]:-}"
   assert_eq "S3 argv[6]=comments (vocabulary field crossing to gh)" "comments" "${CALL_ARGV[6]:-}"
-  assert_eq "S3 argv[7]=--jq (leaf-owned normalization program)" "--jq" "${CALL_ARGV[7]:-}"
-  # Anti-regression: the pre-#398 caller SHA-selector must NO LONGER appear on
-  # the gh argv (jq stays caller-side over the normalized shape now).
-  assert_contains "S3 W1c2: --jq body is the normalization program, not the caller SHA selector" \
-    "comments:" "${CALL_ARGV[8]:-}"
-  if [[ "${CALL_ARGV[8]:-}" == *"$SEL_SHA"* ]]; then
-    fail "S3 anti-regression: caller SHA-selector leaked into the leaf's --jq argv (W1c2 forbids caller jq crossing the seam)"
+  assert_eq "S3 argv-count = 7 (no --jq crossing to gh — jq runs downstream in the leaf, P1-2 capture-then-check)" \
+    "7" "${#CALL_ARGV[@]}"
+  # Anti-regression: neither `--jq` nor the caller's SHA-selector may cross
+  # to gh. jq stays inside the leaf (over the captured raw stdout), and the
+  # caller's own SHA-match selector stays caller-side over the normalized
+  # output of chp_pr_view.
+  _joined="${CALL_ARGV[*]}"
+  if [[ "$_joined" == *"--jq"* ]] || [[ "$_joined" == *" -q "* ]]; then
+    fail "S3 anti-regression: --jq/-q leaked to gh (P1-2 capture-then-check violated)"
+  else
+    pass "S3 anti-regression: no --jq / -q on the gh argv (P1-2 capture-then-check honored)"
+  fi
+  if [[ "$_joined" == *"$SEL_SHA"* ]]; then
+    fail "S3 anti-regression: caller SHA-selector leaked to gh (W1c2 forbids caller jq crossing the seam)"
   else
     pass "S3 anti-regression: caller SHA-selector did NOT cross the seam (stays caller-side over normalized shape)"
   fi
