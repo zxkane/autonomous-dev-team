@@ -458,10 +458,19 @@ chp_github_mergeable() {
 # the PR and still fail the response (transport); the broker's pre-create
 # existence check (lib-auth.sh:452-455 via chp_pr_list) makes it idempotent.
 #
+# Positional validation (mirrors the W1a/W1c1 read-verb pattern): each of
+# HEAD_BRANCH / TITLE / BODY must be non-empty. Missing/empty → rc 2, loud
+# stderr naming the offending arg, NO gh call — a real gh with `--head ""`
+# would emit a confusing "must be specified" error at best and create an
+# unintended PR at worst; failing fast at the seam is safer.
+#
 # PAT-mode / app-mode-without-scoping creates the PR via the agent directly
 # (prompt-driven `gh pr create`), unchanged.
 chp_github_create_pr() {
-  local head_branch="$1" title="$2" body="$3"
+  local head_branch="${1:-}" title="${2:-}" body="${3:-}"
+  [ -n "$head_branch" ] || { echo "ERROR: chp_github_create_pr requires HEAD_BRANCH (1st arg, non-empty)" >&2; return 2; }
+  [ -n "$title" ]       || { echo "ERROR: chp_github_create_pr requires TITLE (2nd arg, non-empty)" >&2; return 2; }
+  [ -n "$body" ]        || { echo "ERROR: chp_github_create_pr requires BODY (3rd arg, non-empty)" >&2; return 2; }
   gh pr create --repo "$REPO" --head "$head_branch" --title "$title" --body "$body"
 }
 
@@ -476,8 +485,15 @@ chp_github_create_pr() {
 # the manual-review notification + reviewing→approved fallback off rc). The
 # [INV-52]/[INV-79] wrapper-owns-approve ownership + PASS-gate chain (mergeable,
 # no-auto-close, PR-open) STAY caller-side.
+#
+# Positional validation: PR must be a non-empty numeric identifier
+# (`^[0-9]+$`, matching the repo's `chp_count_reviews_by_login`/`itp_read_task`
+# guard idiom); BODY must be non-empty. Missing/empty/non-numeric PR → rc 2,
+# loud stderr, NO gh call.
 chp_github_approve() {
-  local pr="$1" body="$2"
+  local pr="${1:-}" body="${2:-}"
+  [[ "$pr" =~ ^[0-9]+$ ]] || { echo "ERROR: chp_github_approve requires PR (1st arg, non-empty numeric): got '${pr}'" >&2; return 2; }
+  [ -n "$body" ]           || { echo "ERROR: chp_github_approve requires BODY (2nd arg, non-empty)" >&2; return 2; }
   gh pr review "$pr" --repo "$REPO" --approve --body "$body"
 }
 
@@ -509,6 +525,13 @@ chp_github_request_changes() {
 # failure PR-comment excerpt (#145 rebase-marker path). Diagnostics are
 # PRESERVED through the seam (no redirection here).
 #
+# Positional validation: PR must be a non-empty numeric identifier
+# (`^[0-9]+$`). Missing/empty/non-numeric → rc 2, loud stderr, NO gh call —
+# `gh pr merge ""` or `gh pr merge abc` would emit a confusing error at best
+# and MERGE THE WRONG PR at worst (a numeric parse of `abc` yielding 0 would
+# be catastrophic on a repo with PR #0-adjacent numbering); failing fast at
+# the seam is the only safe posture on the highest-blast-radius verb.
+#
 # Cross-seam coupling ([M4]/[INV-33], merge_closes_issue=1 for GitHub): merging a
 # PR whose body carries `Closes #N` auto-transitions the issue to its terminal
 # state as a SIDE EFFECT, so the wrapper MUST NOT call itp_transition_state (nor
@@ -516,7 +539,8 @@ chp_github_request_changes() {
 # transition explicitly post-merge. This is a CALLER-side decision branched on
 # `chp_caps merge_closes_issue`; the leaf itself only performs the merge.
 chp_github_merge() {
-  local pr="$1"
+  local pr="${1:-}"
+  [[ "$pr" =~ ^[0-9]+$ ]] || { echo "ERROR: chp_github_merge requires PR (1st arg, non-empty numeric): got '${pr}'" >&2; return 2; }
   gh pr merge "$pr" --repo "$REPO" --squash --delete-branch
 }
 

@@ -294,7 +294,14 @@ chp_degraded_list_inline_comments() {
 # directly (defaults to /dev/null so a plain source of this file is a benign
 # no-op).
 chp_degraded_create_pr() {
-  local head_branch="$1" title="$2" body="$3"
+  local head_branch="${1:-}" title="${2:-}" body="${3:-}"
+  # W1e positional-validation mirror of chp_github_create_pr (#400 review
+  # follow-up): empty/missing positionals → rc 2 + loud stderr + no gh call.
+  # Keeps the degraded axis exercising the same fail-loud contract the
+  # GitHub leaf ships.
+  [ -n "$head_branch" ] || { echo "ERROR: chp_degraded_create_pr requires HEAD_BRANCH (1st arg, non-empty)" >&2; return 2; }
+  [ -n "$title" ]       || { echo "ERROR: chp_degraded_create_pr requires TITLE (2nd arg, non-empty)" >&2; return 2; }
+  [ -n "$body" ]        || { echo "ERROR: chp_degraded_create_pr requires BODY (3rd arg, non-empty)" >&2; return 2; }
   printf 'DEG_CREATE_PR %s %s %s\n' "$head_branch" "$title" "$body" \
     >> "${CHP_DEGRADED_LEAF_LOG:-/dev/null}"
   gh pr create --repo "$REPO" --head "$head_branch" --title "$title" --body "$body"
@@ -305,7 +312,10 @@ chp_degraded_create_pr() {
 # rc-only positional contract mirror of chp_github_approve. Same argv shape as
 # GitHub so the conformance runner's write-assert passes against BOTH.
 chp_degraded_approve() {
-  local pr="$1" body="$2"
+  local pr="${1:-}" body="${2:-}"
+  # W1e positional-validation mirror of chp_github_approve.
+  [[ "$pr" =~ ^[0-9]+$ ]] || { echo "ERROR: chp_degraded_approve requires PR (1st arg, non-empty numeric): got '${pr}'" >&2; return 2; }
+  [ -n "$body" ]           || { echo "ERROR: chp_degraded_approve requires BODY (2nd arg, non-empty)" >&2; return 2; }
   printf 'DEG_APPROVE %s %s\n' "$pr" "$body" \
     >> "${CHP_DEGRADED_LEAF_LOG:-/dev/null}"
   gh pr review "$pr" --repo "$REPO" --approve --body "$body"
@@ -321,7 +331,9 @@ chp_degraded_approve() {
 # doing the explicit `itp_transition_state`, never the fixture inferring
 # GitHub auto-close semantics from a leaf-side transition (R4).
 chp_degraded_merge() {
-  local pr="$1"
+  local pr="${1:-}"
+  # W1e positional-validation mirror of chp_github_merge.
+  [[ "$pr" =~ ^[0-9]+$ ]] || { echo "ERROR: chp_degraded_merge requires PR (1st arg, non-empty numeric): got '${pr}'" >&2; return 2; }
   printf 'DEG_MERGE %s\n' "$pr" \
     >> "${CHP_DEGRADED_LEAF_LOG:-/dev/null}"
   gh pr merge "$pr" --repo "$REPO" --squash --delete-branch

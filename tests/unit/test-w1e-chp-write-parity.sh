@@ -484,6 +484,91 @@ _pin "TC-W1E-331 broker: github-gated raw gh pr create fallback line stays byte-
   '_pr_create_ok() { gh pr create --repo "$repo" --head "$branch" --title "$title" --body "$body" >/dev/null 2>&1; }' "$LIB_AUTH"
 
 # ---------------------------------------------------------------------------
+# 6. POSITIONAL-ARG VALIDATION (review follow-up: negative-space gate) —
+#    each empty/missing/malformed positional must rc 2 with no gh call.
+#    Mirrors the fail-loud contract the W1a/W1c1 read verbs already ship
+#    (find_pr_for_issue rejects missing FIELDS-CSV with rc 2, etc.).
+# ---------------------------------------------------------------------------
+echo "=== TC-W1E-400..441: positional-arg validation (rc 2 + no gh call) ==="
+
+_assert_rejects() {
+  # $1: verb, $2: label, $3+: args to pass. Fails if gh was called or if rc==0.
+  local verb="$1" label="$2"; shift 2
+  local out rc gh_leak
+  gh_leak="$(mktemp)"
+  # Use env -N to nul-preserve positional args and detect leakage.
+  out="$(env -u PROJECT_DIR REPO="$REPO" GHLEAK="$gh_leak" bash -c '
+    gh() { printf "GH_LEAK:%s\n" "$@" > "$GHLEAK"; return 0; }
+    source "'"$SCRIPTS"'/lib-code-host.sh" 2>/dev/null
+    "$@"
+  ' _ "$verb" "$@" 2>&1)"
+  rc=$?
+  local leaked; leaked="$(cat "$gh_leak" 2>/dev/null)"
+  rm -f "$gh_leak"
+  if [[ "$rc" -ne 2 ]]; then
+    bad "$label expected rc 2 got rc=$rc (out: ${out:0:120})"
+    return
+  fi
+  if [[ -n "$leaked" ]]; then
+    bad "$label leaked gh call: $leaked"
+    return
+  fi
+  ok "$label rc=2 no gh call"
+}
+
+# 6a. chp_create_pr — each of 3 positionals must be non-empty.
+_assert_rejects chp_create_pr "TC-W1E-400 create_pr: empty head-branch rejected" ""       TITLE BODY
+_assert_rejects chp_create_pr "TC-W1E-401 create_pr: empty title rejected"       feat/x   ""    BODY
+_assert_rejects chp_create_pr "TC-W1E-402 create_pr: empty body rejected"        feat/x   TITLE ""
+_assert_rejects chp_create_pr "TC-W1E-403 create_pr: missing all args rejected"
+_assert_rejects chp_create_pr "TC-W1E-404 create_pr: missing 2 args rejected"    feat/x
+_assert_rejects chp_create_pr "TC-W1E-405 create_pr: missing 1 arg rejected"     feat/x   TITLE
+
+# 6b. chp_approve — PR must be non-empty numeric; BODY must be non-empty.
+_assert_rejects chp_approve "TC-W1E-410 approve: empty PR rejected"       ""  msg
+_assert_rejects chp_approve "TC-W1E-411 approve: non-numeric PR rejected" abc msg
+_assert_rejects chp_approve "TC-W1E-412 approve: empty body rejected"     42  ""
+_assert_rejects chp_approve "TC-W1E-413 approve: missing all args rejected"
+_assert_rejects chp_approve "TC-W1E-414 approve: missing body rejected"   42
+
+# 6c. chp_merge — PR must be non-empty numeric.
+_assert_rejects chp_merge "TC-W1E-420 merge: empty PR rejected"       ""
+_assert_rejects chp_merge "TC-W1E-421 merge: non-numeric PR rejected" abc
+_assert_rejects chp_merge "TC-W1E-422 merge: PR with letters rejected" 42abc
+_assert_rejects chp_merge "TC-W1E-423 merge: missing PR rejected"
+
+# 6d. Valid args continue to pass rc 0 — regression pin so a future
+# over-tightening (e.g. rejecting a valid non-numeric HEAD_BRANCH) surfaces.
+_assert_valid() {
+  local verb="$1" label="$2"; shift 2
+  local rc argf; argf="$(mktemp)"
+  env -u PROJECT_DIR REPO="$REPO" ARGF="$argf" bash -c '
+    gh() { printf "%s\n" "$@" > "$ARGF"; return 0; }
+    source "'"$SCRIPTS"'/lib-code-host.sh" 2>/dev/null
+    "$@"
+  ' _ "$verb" "$@" >/dev/null 2>&1
+  rc=$?
+  local argv; argv="$(paste -sd' ' "$argf" 2>/dev/null)"
+  rm -f "$argf"
+  if [[ "$rc" -eq 0 && -n "$argv" ]]; then
+    ok "$label rc=0 argv=$argv"
+  else
+    bad "$label expected rc 0 + gh called; got rc=$rc argv=$argv"
+  fi
+}
+_assert_valid chp_create_pr "TC-W1E-430 create_pr: valid 3-positional args pass"   feat/issue-400-x "feat: title" "body text"
+_assert_valid chp_approve   "TC-W1E-431 approve: valid numeric PR + body pass"     42               "looks good"
+_assert_valid chp_merge     "TC-W1E-432 merge: valid numeric PR passes"            42
+
+# 6e. Source-shape pin: the leaves carry the validation lines that fail rc 2.
+_pin "TC-W1E-440 create_pr leaf carries the HEAD_BRANCH validation" \
+  'chp_github_create_pr requires HEAD_BRANCH' "$SCRIPTS/providers/chp-github.sh"
+_pin "TC-W1E-441 approve leaf carries the numeric-PR validation regex" \
+  '"$pr" =~ ^[0-9]+$' "$SCRIPTS/providers/chp-github.sh"
+_pin "TC-W1E-442 merge leaf carries the numeric-PR validation regex" \
+  'chp_github_merge requires PR' "$SCRIPTS/providers/chp-github.sh"
+
+# ---------------------------------------------------------------------------
 echo ""
 echo "=== Summary ==="
 echo "  PASS: $PASS"
