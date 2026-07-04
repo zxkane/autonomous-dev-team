@@ -64,7 +64,7 @@ while [[ $# -gt 0 ]]; do
     issue|view) shift ;;
     comment) shift ;;
     --repo) repo="$2"; shift 2 ;;
-    --json) case "$2" in body) mode=body;; state) mode=state;; title,body,state,labels,comments) mode=fullread;; esac; shift 2 ;;
+    --json) case "$2" in body) mode=body;; state) mode=state;; title,body,state,labels) mode=fullread;; esac; shift 2 ;;
     -q) shift 2 ;;
     [0-9]*) num="$1"; shift ;;
     *) shift ;;
@@ -72,9 +72,9 @@ while [[ $# -gt 0 ]]; do
 done
 case "$mode" in
   fullread)
-    # [W1b] the abstract itp_read_task leaf reads the FULL field set and
+    # [W1b] the abstract itp_read_task leaf reads title/body/state/labels and
     # normalizes; serve the dep body inside a minimal raw payload.
-    printf '{"title":"t","body":%s,"state":"OPEN","labels":[],"comments":[]}' \
+    printf '{"title":"t","body":%s,"state":"OPEN","labels":[]}' \
       "$(jq -R -s '.' < "$BODY_FILE" 2>/dev/null || printf '""')" ;;
   body) cat "$BODY_FILE" 2>/dev/null ;;
   state)

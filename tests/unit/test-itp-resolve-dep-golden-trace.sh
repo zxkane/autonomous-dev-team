@@ -439,7 +439,7 @@ deps_guard_out=$(
     set -euo pipefail
     gh() { local m=""; while [[ $# -gt 0 ]]; do case "$1" in --json) m="$2"; shift 2;; *) shift;; esac; done
           case "$m" in
-            title,body,state,labels,comments) printf %s "{\"title\":\"t\",\"body\":\"## Dependencies\\n- #42\\n\",\"state\":\"OPEN\",\"labels\":[],\"comments\":[]}";;
+            title,body,state,labels) printf %s "{\"title\":\"t\",\"body\":\"## Dependencies\\n- #42\\n\",\"state\":\"OPEN\",\"labels\":[]}";;
             body) printf "## Dependencies\n- #42\n";;
             state) printf CLOSED;; esac; }
     export -f gh
@@ -464,7 +464,7 @@ gh_gate_out=$(
     set -uo pipefail
     gh() { local m="" num=""; while [[ $# -gt 0 ]]; do case "$1" in view) num="$2"; shift 2;; --json) m="$2"; shift 2;; *) shift;; esac; done
           case "$m" in
-            title,body,state,labels,comments) printf %s "{\"title\":\"t\",\"body\":\"## Dependencies\\n- #42\\n\",\"state\":\"OPEN\",\"labels\":[],\"comments\":[]}";;
+            title,body,state,labels) printf %s "{\"title\":\"t\",\"body\":\"## Dependencies\\n- #42\\n\",\"state\":\"OPEN\",\"labels\":[]}";;
             body) printf "## Dependencies\n- #42\n";;
             state) [ "$num" = 42 ] && printf OPEN || printf CLOSED;; esac; }
     export -f gh

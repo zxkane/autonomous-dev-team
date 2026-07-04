@@ -12,12 +12,13 @@
 #     to itp_github_resolve_dep and the tick-boundary reset is itp_begin_tick.
 #
 # `check_deps_resolved` makes multiple gh calls in sequence:
-#   1. `gh issue view N --repo $REPO --json title,body,state,labels,comments`
-#      ([W1b] #396 ABSTRACT itp_read_task contract — the leaf requests the
-#      FULL field set and normalizes; the caller-side `| jq -r '.body'`
-#      projects down to the body string it needs, byte-identical result to
-#      the pre-#396 `-q .body` passthrough for THIS caller since it only ever
-#      consumed `.body`).
+#   1. `gh issue view N --repo $REPO --json title,body,state,labels`
+#      ([W1b] #396 ABSTRACT itp_read_task contract — this caller requests only
+#      `body`, so the leaf's [review r2] separate REST comments-fetch never
+#      fires; the leaf still reads the full title/body/state/labels set and
+#      normalizes, and the caller-side `| jq -r '.body'` projects down to the
+#      body string it needs, byte-identical result to the pre-#396 `-q .body`
+#      passthrough for THIS caller since it only ever consumed `.body`).
 #   2. for each dep: `gh issue view M --repo <repo> --json state -q .state`
 #      — this leaf now lives in providers/itp-github.sh::itp_github_resolve_dep,
 #      but it emits the SAME argv, so the gh BINARY mock below applies unchanged.
@@ -141,7 +142,7 @@ gh() {
       --repo) repo="$2"; shift 2 ;;
       --json)
         case "$2" in
-          title,body,state,labels,comments) mode="read_task" ;;
+          title,body,state,labels) mode="read_task" ;;
           body) mode="body" ;;
           state) mode="state" ;;
           comments) mode="comments" ;;
@@ -153,11 +154,11 @@ gh() {
     esac
   done
   case "$mode" in
-    # [W1b] #396 — itp_github_read_task always requests the FULL field set and
+    # [W1b] #396 — itp_github_read_task requests title/body/state/labels and
     # normalizes; this caller's `| jq -r '.body'` then projects down to the
     # body string, so serving _MOCK_BODY here (with the other fields defaulted)
     # reproduces the same captured body this test asserts on.
-    read_task) jq -cn --arg body "$_MOCK_BODY" '{title:"",body:$body,state:"OPEN",labels:[],comments:[]}' ;;
+    read_task) jq -cn --arg body "$_MOCK_BODY" '{title:"",body:$body,state:"OPEN",labels:[]}' ;;
     body)  printf '%s' "$_MOCK_BODY" ;;
     state)
       local s="${_MOCK_STATES[${repo}:${issue_num}]:-OPEN}"

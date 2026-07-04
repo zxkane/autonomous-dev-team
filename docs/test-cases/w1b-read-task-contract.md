@@ -48,6 +48,8 @@ that golden.
 | state passthrough | gh payload `state: "OPEN"` / `"CLOSED"` | returned verbatim (provider-neutral tokens already match) |
 | labels shape | gh payload with `{name}` label objects | `labels` is an array of NAME strings, not objects |
 | comments shape | gh payload with one comment | `comments` is the [INV-90] normalized array |
+| comments source (review r2) | `comments` requested | leaf fetches `comments` via `itp_github_list_comments` (REST, [INV-90]) — a SEPARATE call from the primary `title,body,state,labels` `gh issue view`, NOT the same GraphQL response — so `author`/`authorKind` agree with `itp_list_comments` |
+| comments source, gh api failure (review r2) | primary `gh issue view` succeeds, the REST comments call fails | leaf rc≠0, no partial stdout (fail-closed even though the primary call succeeded) |
 | fields-subset (single) | `FIELDS_CSV=body` | output carries EXACTLY `body` |
 | fields-subset (multi) | `FIELDS_CSV=state,labels,title` | output carries EXACTLY those three keys |
 | empty fields-csv | `FIELDS_CSV=""` | output is `{}` |

@@ -162,39 +162,35 @@ itp_github_list_forbidden_combos() {
 # mapping AND the normalization jq internally (unlike the pre-#396
 # byte-identical passthrough this replaces). Fail-closed: a `gh` failure or
 # malformed JSON propagates non-zero with no partial stdout.
-# [#393] like `_itp_github_state_read`, this leaf's `comments` field is
-# GraphQL-derived and therefore CANNOT distinguish App bots (GraphQL strips
-# the `[bot]` suffix and exposes no author type) — an App-authored comment
-# reports authorKind="human" here. No shipped caller of this verb consumes
-# `comments` for an authenticity gate (the two callers requesting it embed the
-# object as agent-prompt context); the authoritative per-issue read for that
-# purpose remains `itp_list_comments` (REST-sourced, correct authorKind).
+# [#396 review r2] `comments` is sourced via `itp_github_list_comments`
+# (REST, [INV-90]) — NOT the GraphQL `gh issue view --json comments` this leaf
+# used pre-r2 — so its `author`/`authorKind` agree with `itp_list_comments`
+# and the §3.1 contract (GraphQL strips the `[bot]` suffix and exposes no
+# author type, which classified every App-authored comment as "human"). Only
+# fetched when `comments` is actually requested, to avoid a second API call
+# for the five callers that don't ask for it.
 itp_github_read_task() {
-  local issue="$1" fields_csv="$2" fields_json raw
+  local issue="$1" fields_csv="$2" fields_json raw comments_json='[]'
   fields_json=$(printf '%s' "$fields_csv" | jq -R -s -c 'split(",") | map(select(length > 0))')
   # Fail-closed: capture-then-check. `gh` emitting empty stdout with rc 0
   # (stub drift, transport oddity) must NOT normalize to `{}` rc 0 — jq on
   # empty input runs the program zero times and exits 0, which would turn a
   # failed read into a silent empty object (fail-OPEN at the dep gate).
-  raw=$(gh issue view "$issue" --repo "$REPO" --json title,body,state,labels,comments) || return 1
+  raw=$(gh issue view "$issue" --repo "$REPO" --json title,body,state,labels) || return 1
   [[ -n "$raw" ]] || return 1
-  jq --arg bot "${BOT_LOGIN:-}" --argjson fields "$fields_json" '
+  case ",${fields_csv}," in
+    *,comments,*)
+      comments_json=$(itp_github_list_comments "$issue") || return 1
+      [[ -n "$comments_json" ]] || return 1
+      ;;
+  esac
+  jq --argjson fields "$fields_json" --argjson comments "$comments_json" '
         {
           title: (.title // ""),
           body: (.body // ""),
           state: (.state // ""),
           labels: [ (.labels // [])[].name ],
-          comments: [ (.comments // [])[]
-            | { id: ( ( (.url // "") | capture("issuecomment-(?<n>[0-9]+)$") | .n | tonumber ) // null ),
-                author: (.author.login // null),
-                authorKind: ( (.author.login // "") as $a
-                              | ($bot | sub("\\[bot\\]$"; "")) as $bstripped
-                              | if ($a != "" and $bot != "" and ($a == $bot or $a == $bstripped)) then "self"
-                                elif ($a | endswith("[bot]")) then "bot"
-                                else "human" end ),
-                body: (.body // ""),
-                createdAt: (.createdAt // null) }
-            ] | sort_by(.createdAt // "")
+          comments: $comments
         } as $norm
         | ($fields | map({(.): $norm[.]}) | add // {})
       ' <<<"$raw"

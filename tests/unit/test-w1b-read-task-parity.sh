@@ -76,14 +76,14 @@ run_deps() {
       local mode="" q="" i j
       for ((i=1;i<=$#;i++)); do
         if [[ "${!i}" == "--json" ]]; then j=$((i+1)); case "${!j}" in
-          title,body,state,labels,comments) mode=read_task ;;
+          title,body,state,labels) mode=read_task ;;
           state) mode=state ;;
           comments) mode=comments ;;
         esac; fi
         if [[ "${!i}" == "-q" || "${!i}" == "--jq" ]]; then j=$((i+1)); q="${!j}"; fi
       done
       case "$mode" in
-        read_task) jq -cn --arg body "$_BODY" "{title:\"\",body:\$body,state:\"OPEN\",labels:[],comments:[]}" ;;
+        read_task) jq -cn --arg body "$_BODY" "{title:\"\",body:\$body,state:\"OPEN\",labels:[]}" ;;
         state) printf "%s" "$_DEP_STATE" ;;
         comments) printf "[]" ;;
       esac
@@ -204,7 +204,8 @@ run_dev_fetch() {
   bash -c '
     set -uo pipefail
     gh() {
-      jq -cn --arg t "$_TITLE" --arg b "$_BODY" "{title:\$t,body:\$b,state:\"OPEN\",labels:[],comments:[]}"
+      if [[ "${1:-}" == "api" ]]; then printf "[[]]"; return 0; fi
+      jq -cn --arg t "$_TITLE" --arg b "$_BODY" "{title:\$t,body:\$b,state:\"OPEN\",labels:[]}"
     }
     export -f gh
     source "'"$SCRIPTS"'/lib-issue-provider.sh" 2>/dev/null

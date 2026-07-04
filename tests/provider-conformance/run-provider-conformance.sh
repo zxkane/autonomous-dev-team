@@ -108,6 +108,13 @@ ISOLATED_PATH="$(pcf_isolated_path "$STUB_DIR")"
 # itp_github_list_comments' id-extraction/sort) is genuinely exercised, not
 # bypassed. Without `-q`/`--jq` the raw payload is echoed verbatim.
 #
+# [#396 review r2] `itp_github_read_task` issues a SECOND, distinct `gh api`
+# call (via `itp_github_list_comments`) when `comments` is requested — a
+# different subcommand shape than the primary `gh issue view --json …`
+# payload. `$_PCF_GH_COMMENTS_PAYLOAD` (a separate file path) serves that
+# second call; unset/empty defaults to `[[]]` (an empty REST page set, valid
+# --slurp input) so verbs that don't set it still see a well-shaped reply.
+#
 # The `itp_github_provision_states` existence PROBE (`gh api
 # repos/.../labels/<name> --silent`) is a special case: it is FORCED to fail
 # (not-found) regardless of $_PCF_GH_MODE, so the leaf deterministically
@@ -129,6 +136,22 @@ done
 if [[ "${_PCF_GH_MODE:-ok}" == "fail" ]]; then
   printf 'stub-gh: simulated failure\n' >&2
   exit 1
+fi
+if [[ "${1:-}" == "api" && "${2:-}" == "--paginate" ]]; then
+  # itp_read_task's nested itp_github_list_comments call needs a REST
+  # page-set shape distinct from the primary `issue view` payload — served
+  # from $_PCF_GH_COMMENTS_PAYLOAD when the caller sets it. Callers that
+  # exercise itp_list_comments DIRECTLY (this IS its only gh call) keep
+  # serving it from $_PCF_GH_PAYLOAD, so they need no change.
+  _cpayload="${_PCF_GH_COMMENTS_PAYLOAD:-}"
+  if [[ -n "$_cpayload" && -f "$_cpayload" ]]; then
+    cat "$_cpayload"
+  elif [[ -n "${_PCF_GH_PAYLOAD:-}" && -f "${_PCF_GH_PAYLOAD:-}" ]]; then
+    cat "$_PCF_GH_PAYLOAD"
+  else
+    printf '[[]]'
+  fi
+  exit 0
 fi
 _payload="${_PCF_GH_PAYLOAD:-}"
 [[ -n "$_payload" && -f "$_payload" ]] || { printf ''; exit 0; }
@@ -315,18 +338,22 @@ _run_shape_assert() {
   emit PASS "$verb"
 }
 
-# _run_object_shape_assert <verb> <invoke_snippet> <payload_file> — invoke
-# VERB (which returns a single normalized OBJECT, not an array — itp_read_task,
-# issue #396 W1b) with a VALID canned payload and assert JSON-object shape +
-# rc 0; then invoke with a MALFORMED payload and assert graceful (empty rc≠0,
-# fail-closed per R2) output — NOT the array leaves' "empty/[] is graceful"
-# convention, since a single-task read has no empty-but-valid representation.
+# _run_object_shape_assert <verb> <invoke_snippet> <payload_file> [comments_payload_file] —
+# invoke VERB (which returns a single normalized OBJECT, not an array —
+# itp_read_task, issue #396 W1b) with a VALID canned payload and assert
+# JSON-object shape + rc 0; then invoke with a MALFORMED payload and assert
+# graceful (empty rc≠0, fail-closed per R2) output — NOT the array leaves'
+# "empty/[] is graceful" convention, since a single-task read has no
+# empty-but-valid representation. [#396 review r2] `comments` is sourced via
+# a SEPARATE `gh api` call (`itp_github_list_comments`); COMMENTS_PAYLOAD_FILE
+# (a REST `--paginate --slurp` page-set shape) serves that call — defaults to
+# an empty page set when omitted.
 _run_object_shape_assert() {
-  local verb="$1" invoke_snippet="$2" payload_file="$3"
+  local verb="$1" invoke_snippet="$2" payload_file="$3" comments_payload_file="${4:-}"
   local argv_file="$work_root/.argv-$verb.json"
   local out rc
 
-  out="$(_invoke _PCF_GH_MODE="ok" _PCF_GH_PAYLOAD="$payload_file" _PCF_ARGV_FILE="$argv_file" "$invoke_snippet" 2>&1)"; rc=$?
+  out="$(_invoke _PCF_GH_MODE="ok" _PCF_GH_PAYLOAD="$payload_file" _PCF_GH_COMMENTS_PAYLOAD="$comments_payload_file" _PCF_ARGV_FILE="$argv_file" "$invoke_snippet" 2>&1)"; rc=$?
   if [[ "$rc" != "0" ]]; then
     emit FAIL "$verb" "wrong-shape (non-zero rc on a valid payload: $rc, output: ${out:0:200})"
     return
@@ -503,7 +530,7 @@ _assert_verb() {
       ;;
     itp_read_task)
       _run_object_shape_assert "$verb" 'itp_read_task 42 title,body,state,labels,comments' \
-        "$PAYLOADS/issue-view-valid.json"
+        "$PAYLOADS/issue-view-valid.json" "$PAYLOADS/comments-valid.json"
       ;;
     chp_review_threads)
       _run_shape_assert "$verb" 'chp_review_threads 42' "$PAYLOADS/review-threads-valid.json" 0

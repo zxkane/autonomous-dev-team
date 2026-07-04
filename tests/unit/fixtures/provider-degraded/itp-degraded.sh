@@ -15,11 +15,13 @@
 # the itp_degraded_<verb> leaves it needs here.
 
 # itp_degraded_read_task ISSUE FIELDS_CSV — task READ leaf (#296; [W1b] #396
-# ABSTRACT contract). Mirrors itp_github_read_task structurally (same
-# --json field read + normalization jq), stripped of nothing — the W1b
-# contract itself is already provider-neutral, so there is no GitHub-specific
-# entanglement to strip here (same rationale as the list_by_state/count_by_state/
-# list_forbidden_combos trio below).
+# ABSTRACT contract). Structurally mirrors the PRE-review-r2 shape of
+# itp_github_read_task (single `gh issue view --json …` call, comments
+# GraphQL-sourced inline) — this fixture is driven ONLY by
+# mark-issue-checkbox.sh, which requests `body` alone, so the comments path
+# below is never exercised and the [#396 review r2] REST-sourced-comments
+# fix (delegating to itp_github_list_comments) has no observable fixture
+# behavior to mirror; kept structurally simple rather than updated in lockstep.
 #
 # mark-issue-checkbox.sh fetches the issue body via itp_read_task BEFORE it
 # evaluates the body_checkbox capability. Under ISSUE_PROVIDER=degraded that read

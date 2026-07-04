@@ -218,10 +218,17 @@ grep -qF 'ISSUE_JSON="$(itp_read_task "$ISSUE_NUMBER" state,labels,title 2>/dev/
 echo ""
 echo "=== LEAF SHAPE: itp_github_read_task normalization ==="
 
-_GH_PAYLOAD='{"title":"T","body":"B","state":"OPEN","labels":[{"name":"autonomous"},{"name":"no-auto-close"}],"comments":[{"url":"https://x/issues/3#issuecomment-7","author":{"login":"alice"},"body":"hi","createdAt":"2026-01-01T00:00:00Z"}]}'
-gh() { printf '%s' "$_GH_PAYLOAD"; }
+# [#396 review r2] the leaf now issues TWO gh calls when `comments` is
+# requested: `issue view --json title,body,state,labels` (GraphQL, unchanged
+# fields) and, via itp_github_list_comments, `api --paginate --slurp
+# .../comments` (REST, [INV-90]) — so the stub must switch on subcommand.
+_GH_VIEW_PAYLOAD='{"title":"T","body":"B","state":"OPEN","labels":[{"name":"autonomous"},{"name":"no-auto-close"}]}'
+_GH_COMMENTS_PAYLOAD='[[{"id":7,"user":{"login":"alice","type":"User"},"body":"hi","created_at":"2026-01-01T00:00:00Z"}]]'
+gh() {
+  if [[ "${1:-}" == "api" ]]; then printf '%s' "$_GH_COMMENTS_PAYLOAD"; else printf '%s' "$_GH_VIEW_PAYLOAD"; fi
+}
 export -f gh
-export _GH_PAYLOAD BOT_LOGIN=my-claw
+export _GH_VIEW_PAYLOAD _GH_COMMENTS_PAYLOAD BOT_LOGIN=my-claw
 # shellcheck source=../../skills/autonomous-dispatcher/scripts/providers/itp-github.sh
 source "$ITP_GITHUB"
 set +e
@@ -229,18 +236,18 @@ set +e
 out="$(itp_github_read_task 42 "title,body,state,labels,comments")"
 assert_eq "leaf normalizes labels to a name-string array (not {name} objects)" \
   '["autonomous","no-auto-close"]' "$(jq -c '.labels' <<<"$out")"
-assert_eq "leaf normalizes comments to the INV-90 array shape" \
+assert_eq "leaf sources comments via itp_github_list_comments (REST, INV-90)" \
   "alice" "$(jq -r '.comments[0].author' <<<"$out")"
 assert_eq "leaf passes state through verbatim" "OPEN" "$(jq -r '.state' <<<"$out")"
 assert_eq "leaf title/body as plain strings" "T B" "$(jq -r '.title + " " + .body' <<<"$out")"
 
-_GH_PAYLOAD='{"title":"T","state":"CLOSED","labels":[],"comments":[]}'
+_GH_VIEW_PAYLOAD='{"title":"T","state":"CLOSED","labels":[]}'
 out="$(itp_github_read_task 42 body)"
 assert_eq "absent body -> empty string (never null)" '{"body":""}' "$(jq -c . <<<"$out")"
 
 echo ""
 echo "=== LEAF FIELD PROJECTION: FIELDS_CSV controls exactly the returned keys ==="
-_GH_PAYLOAD='{"title":"t","body":"b","state":"OPEN","labels":[{"name":"autonomous"}],"comments":[]}'
+_GH_VIEW_PAYLOAD='{"title":"t","body":"b","state":"OPEN","labels":[{"name":"autonomous"}]}'
 out="$(itp_github_read_task 42 "state,labels,title")"
 assert_eq "fields=state,labels,title -> exactly those three keys" "state,labels,title" "$(jq -r 'keys_unsorted | join(",")' <<<"$out")"
 out="$(itp_github_read_task 42 body)"
@@ -265,6 +272,14 @@ gh() { printf '{ not json'; return 0; }
 export -f gh
 out="$(itp_github_read_task 42 title 2>/dev/null)"; rc=$?
 assert_eq "malformed gh JSON -> non-zero rc (fail-closed)" "1" "$([[ $rc -ne 0 ]] && echo 1 || echo 0)"
+
+# The comments-fetch (itp_github_list_comments, REST) failing must ALSO
+# fail-closed even though the primary `issue view` call succeeded.
+gh() { if [[ "${1:-}" == "api" ]]; then echo "stub-gh: simulated failure" >&2; return 1; else printf '{"title":"T","body":"B","state":"OPEN","labels":[]}'; fi; }
+export -f gh
+out="$(itp_github_read_task 42 "title,comments" 2>/dev/null)"; rc=$?
+assert_eq "itp_github_read_task: comments-fetch gh failure -> non-zero rc" "1" "$([[ $rc -ne 0 ]] && echo 1 || echo 0)"
+assert_eq "itp_github_read_task: comments-fetch gh failure -> no partial stdout" "" "$out"
 
 # ===========================================================================
 echo ""
