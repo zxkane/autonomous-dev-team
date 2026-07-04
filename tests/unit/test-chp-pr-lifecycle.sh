@@ -471,6 +471,62 @@ else
   echo -e "  ${RED}FAIL${NC}: TC-W1F-003c comment-page errors coerced to partial (rc=$ce_rc, body=${ce_body:0:120})"; FAIL=$((FAIL+1))
 fi
 
+# TC-W1F-VALIDATE — positional-arg validation for chp_review_threads /
+# chp_resolve_thread (W1e convention, #400): missing/empty/non-numeric PR
+# and missing/empty THREAD_ID must return rc 2 with loud stderr and NO gh
+# call. resolve-threads.sh (sole caller) sanitizes PR via
+# `printf '%d' "$3"` and gates thread_id with `[ -n "$thread_id" ]`, so
+# reaching the leaf with an invalid positional is operator misuse (safe to
+# validate; the #400 caller-legitimacy rule holds).
+_assert_w1f_rejects() {
+  local label="$1"; shift
+  local verb="$1"; shift
+  local gh_leak; gh_leak="$(mktemp)"
+  local out rc leaked
+  out="$(env -u PROJECT_DIR REPO="$REPO" GHLEAK="$gh_leak" bash -c '
+    gh() { printf "GH_LEAK:%s\n" "$@" > "$GHLEAK"; return 0; }
+    source "'"$CHP_LIB"'" 2>/dev/null
+    "$@"
+  ' _ "$verb" "$@" 2>&1)"
+  rc=$?
+  leaked="$(cat "$gh_leak" 2>/dev/null)"
+  rm -f "$gh_leak"
+  if [[ "$rc" -ne 2 ]]; then
+    echo -e "  ${RED}FAIL${NC}: $label expected rc 2 got rc=$rc (out: ${out:0:120})"; FAIL=$((FAIL+1))
+    return
+  fi
+  if [[ -n "$leaked" ]]; then
+    echo -e "  ${RED}FAIL${NC}: $label leaked gh call: $leaked"; FAIL=$((FAIL+1))
+    return
+  fi
+  echo -e "  ${GREEN}PASS${NC}: $label rc=2 no gh call"; PASS=$((PASS+1))
+}
+_assert_w1f_rejects "TC-W1F-VALIDATE-100 review_threads: missing PR rejected"     chp_review_threads
+_assert_w1f_rejects "TC-W1F-VALIDATE-101 review_threads: empty PR rejected"       chp_review_threads ""
+_assert_w1f_rejects "TC-W1F-VALIDATE-102 review_threads: non-numeric PR rejected" chp_review_threads abc
+_assert_w1f_rejects "TC-W1F-VALIDATE-103 review_threads: PR with trailing letters rejected" chp_review_threads 42abc
+_assert_w1f_rejects "TC-W1F-VALIDATE-110 resolve_thread: missing THREAD_ID rejected" chp_resolve_thread
+_assert_w1f_rejects "TC-W1F-VALIDATE-111 resolve_thread: empty THREAD_ID rejected"   chp_resolve_thread ""
+
+# TC-W1F-VALIDATE-120 — valid args still pass rc 0. Regression pin so a
+# future over-tightening (e.g. requiring PR≥1000 or a specific GraphQL id
+# format) surfaces here rather than silently breaking the live caller.
+_valid_argv=$(
+  env -u PROJECT_DIR REPO="$REPO" bash -c "
+    _PL='{\"data\":{\"repository\":{\"pullRequest\":{\"reviewThreads\":{\"pageInfo\":{\"hasNextPage\":false,\"endCursor\":null},\"nodes\":[]}}}}}'
+    gh() { printf %s \"\$_PL\"; }
+    source '$CHP_LIB' 2>/dev/null
+    chp_review_threads 42
+    echo \"|RC=\$?|\"
+  " 2>&1
+)
+_valid_rc=$(sed -n 's/.*|RC=\([0-9]*\)|.*/\1/p' <<<"$_valid_argv")
+if [[ "$_valid_rc" == "0" ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-W1F-VALIDATE-120 valid numeric PR still passes rc 0 (regression pin)"; PASS=$((PASS+1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-W1F-VALIDATE-120 valid numeric PR blocked rc=$_valid_rc"; FAIL=$((FAIL+1))
+fi
+
 # TC-W1F-003 — mid-walk page failure → rc != 0, EMPTY stdout (fail-closed).
 fc_out=$(
   env REPO="$REPO" _MP_PAYLOAD_1="$_P1" _MP_PAYLOAD_2="$_P2" _MP_FAIL_AT=2 bash -c "

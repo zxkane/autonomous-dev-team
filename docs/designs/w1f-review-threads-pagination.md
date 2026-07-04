@@ -74,6 +74,21 @@ wrapper lane. The pipeline's chunked-sleep/watchdog lessons apply
 (`docs/pipeline/invariants.md::INV-*` fixture-watchdog family). Cap-hit is
 loud rc != 0 — never silent truncation.
 
+### Positional validation (W1e convention, #400)
+
+`chp_github_review_threads` and `chp_github_resolve_thread` validate their
+positionals at the seam — `PR` must match `^[0-9]+$`, `THREAD_ID` must be
+non-empty. Malformed → rc 2, loud stderr, NO gh call. This mirrors the W1e
+write leaves' pattern (`chp_github_{create_pr,approve,merge}`) and closes
+the negative-space gap where `chp_review_threads ""` silently reached gh.
+`resolve-threads.sh` (the sole caller) already sanitizes `PR_NUMBER` via
+`printf '%d' "$3"` and gates thread_id on non-empty before dispatch, so an
+invalid positional reaching the leaf is operator misuse — validation
+rejects nothing a legitimate caller passes (per the #400 caller-legitimacy
+rule that broke the too-broad body-empty gate). The degraded fixture's
+`chp_degraded_review_threads` / `chp_degraded_resolve_thread` mirror the
+same validation so `--chp degraded` conformance runs exercise the contract.
+
 ### Degraded fixture posture
 
 `chp_degraded_review_threads` (`tests/unit/fixtures/provider-degraded/chp-degraded.sh`)

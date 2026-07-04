@@ -1112,9 +1112,20 @@ _assert_verb() {
       if [[ "$CHP_NAME" == "github" ]]; then
         _run_review_threads_completeness_assert
       fi
+      # Positional-validation gate (#401 review r2, W1e convention #400): PR
+      # must be non-empty numeric — missing/empty/non-numeric → rc 2 + no gh
+      # call. resolve-threads.sh (sole caller) sanitizes via `printf '%d'`, so
+      # reaching the leaf with a bad arg is operator misuse (safe to validate
+      # per the #400 caller-legitimacy rule).
+      _run_positional_reject "$verb" 'chp_review_threads ""'
+      _run_positional_reject "$verb" 'chp_review_threads abc'
       ;;
     chp_resolve_thread)
       _run_write_assert "$verb" "graphql -F threadId=TID" "TID"
+      # Positional-validation gate (#401 review r2): THREAD_ID must be
+      # non-empty — resolve-threads.sh gates on `[ -n "$thread_id" ]`, so an
+      # empty positional here is operator misuse.
+      _run_positional_reject "$verb" 'chp_resolve_thread ""'
       ;;
     chp_request_changes)
       _run_write_assert "$verb" "pr review 42 --repo o/r --request-changes --body msg" "42 msg"

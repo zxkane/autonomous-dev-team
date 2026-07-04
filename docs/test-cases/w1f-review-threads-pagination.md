@@ -103,6 +103,24 @@ payload-sequence stub mode,
 deliberately configured to serve only page 1 for the completeness assertion
 — gating the runner's own regression.
 
+## TC-W1F-VALIDATE-100..120 — Positional-arg validation (W1e convention, #400 / #401 review r2)
+
+**Given** the W1e convention (`chp_create_pr`/`chp_approve`/`chp_merge`
+validate positionals with rc 2 + loud stderr + no gh call) applied to the
+review-thread verbs,
+**When** an operator invokes `chp_review_threads` with an empty, missing,
+or non-numeric `PR`; or `chp_resolve_thread` with an empty or missing
+`THREAD_ID`,
+**Then** the leaf returns rc 2 with a loud `ERROR:` diagnostic on stderr
+and MUST NOT invoke `gh`. A valid numeric PR still passes rc 0 (regression
+pin against over-tightening). `resolve-threads.sh` (sole caller) sanitizes
+`PR_NUMBER` via `printf '%d' "$3"` and gates thread_id with
+`[ -n "$thread_id" ]` before dispatch, so reaching the leaf with an invalid
+positional is operator misuse and safe to validate (per the #400
+caller-legitimacy rule that broke the too-broad body-empty gate). Mirror
+validation lands in `tests/unit/fixtures/provider-degraded/chp-degraded.sh`
+so the runner's `--chp degraded` pass exercises the same contract.
+
 ## Notes
 
 - `env -u PROJECT_DIR bash …` for CI parity (per project convention).

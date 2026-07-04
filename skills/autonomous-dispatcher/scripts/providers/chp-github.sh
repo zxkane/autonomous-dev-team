@@ -600,8 +600,17 @@ chp_github_merge() {
 # partial thread set would recreate the silent-truncation bug under a
 # different name. Mirrors chp_github_count_reviews_by_login's
 # capture-check-sum pattern ([INV-94]).
+#
+# Positional validation (W1e convention, #400): PR must be a non-empty numeric
+# identifier (`^[0-9]+$`). Missing/empty/non-numeric → rc 2, loud stderr, NO
+# gh call.
 chp_github_review_threads() {
-  local pr="$1"
+  local pr="${1:-}"
+  # Positional validation (W1e convention, #400): PR must be a non-empty numeric
+  # identifier (`^[0-9]+$`). Missing/empty/non-numeric → rc 2, loud stderr, NO
+  # gh call. `resolve-threads.sh` (sole caller) takes PR from its $3 positional
+  # so an empty/non-numeric value is operator misuse, never a legitimate value.
+  [[ "$pr" =~ ^[0-9]+$ ]] || { echo "ERROR: chp_github_review_threads requires PR (1st arg, non-empty numeric): got '${pr}'" >&2; return 2; }
   local owner="${REPO%%/*}" name="${REPO##*/}"
   local page_cap=50
 
@@ -812,8 +821,16 @@ query($threadId: ID!, $commentCursor: String) {
 # Echoes the post-mutation `isResolved` (`true`/`false`) so the caller's
 # resolved/failed tally is byte-identical. THREAD_ID is the GraphQL thread node
 # id (from chp_github_review_threads' `.thread_id`).
+#
+# Positional validation (W1e convention, #400): THREAD_ID must be non-empty.
+# Missing/empty → rc 2, loud stderr, NO gh call. `resolve-threads.sh` (sole
+# caller) already gates on `[ -n "$thread_id" ]` before dispatch, so empty is
+# operator/programming misuse, never a legitimate value. `gh api graphql -F
+# threadId=""` would 400 at the GraphQL layer (`$threadId: ID!` is non-null),
+# but failing fast at the seam is the W1e-convention posture.
 chp_github_resolve_thread() {
-  local thread_id="$1"
+  local thread_id="${1:-}"
+  [ -n "$thread_id" ] || { echo "ERROR: chp_github_resolve_thread requires THREAD_ID (1st arg, non-empty)" >&2; return 2; }
   gh api graphql \
     -F threadId="$thread_id" \
     -f query='

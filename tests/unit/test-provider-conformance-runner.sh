@@ -64,12 +64,16 @@ broken_fail_count="$(grep -c '^CONFORMANCE-PCONF broken/broken .* FAIL' <<<"$bro
 # [#393] +1: the broken provider now also fails the list_comments field check (5 clauses).
 # [#400 W1e] +3: the broken CHP fixture defines no chp_broken_{create_pr,approve,
 # merge} leaves, so each of the three now-asserted W1e verbs FAILs on stub-success
-# with `command not found` — same shape as the #370 chp_resolve_thread FAIL,
-# annotating the missing verb function. Total = 8 clauses.
-# The 5 pre-W1e violated clauses (#370 shape/rc + #393 field + missing-verb) +
-# 3 new W1e ones (broken fixture defines no chp_broken_{create_pr,approve,merge}
-# leaves so each FAILs with `command not found`) = 8 total.
-assert_eq "AC2: exactly 8 FAIL lines (one per violated clause)" "8" "$broken_fail_count"
+# with `command not found`.
+# [#401 W1f review r2] +2: chp_broken_review_threads (defined but lacks
+# positional validation — its `gh api graphql -F prNumber=$pr` accepts empty
+# and non-numeric args, so both `chp_review_threads ""` and `chp_review_threads
+# abc` leak a gh call). These are LEGITIMATE violated-clause FAILs — the
+# broken fixture demonstrates what happens when a leaf omits the W1e
+# positional-validation convention (parallel to the missing-write-verb FAILs
+# above).
+# Total = 5 pre-W1e + 3 W1e + 2 W1f = 10 clauses.
+assert_eq "AC2: exactly 10 FAIL lines (one per violated clause)" "10" "$broken_fail_count"
 assert_contains "TC-PCONF-020: itp_list_comments FAILs wrong-shape" "itp_list_comments FAIL wrong-shape" "$broken_fail_lines"
 assert_contains "TC-PCONF-021: itp_transition_state FAILs rc-0-on-error" "itp_transition_state FAIL rc-0-on-error" "$broken_fail_lines"
 assert_contains "TC-PCONF-022: chp_resolve_thread FAILs missing-verb-function (command not found)" "chp_resolve_thread FAIL" "$broken_fail_lines"
@@ -80,6 +84,10 @@ assert_contains "TC-PCONF-023: chp_review_threads FAILs non-array-output" "chp_r
 assert_contains "TC-PCONF-024a: chp_create_pr FAILs missing-verb-function (command not found)" "chp_broken_create_pr: command not found" "$broken_fail_lines"
 assert_contains "TC-PCONF-024b: chp_approve FAILs missing-verb-function (command not found)" "chp_broken_approve: command not found" "$broken_fail_lines"
 assert_contains "TC-PCONF-024c: chp_merge FAILs missing-verb-function (command not found)" "chp_broken_merge: command not found" "$broken_fail_lines"
+# [#401 W1f review r2] The broken review_threads leaf lacks positional
+# validation → gh gets called on empty/non-numeric PR → positional-reject
+# asserts FAIL. Two probes: empty PR + non-numeric PR.
+assert_contains "TC-PCONF-024d: chp_review_threads FAILs positional-reject (empty/non-numeric PR leaks gh call on the broken fixture)" "chp_review_threads FAIL positional-reject" "$broken_fail_lines"
 # Every OTHER asserted verb must still PASS (no false-positive FAILs beyond
 # the 8 pinned violations). Non-targeted PASS set post-#400 W1e — the runner
 # emits N PASS lines: 22 pre-W1e (12 base + read_task + 2 W1c1 + 2 W1c2 +
