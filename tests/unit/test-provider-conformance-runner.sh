@@ -33,20 +33,18 @@ command -v jq >/dev/null 2>&1 || { echo "jq required"; exit 1; }
 source "$LIB"
 
 # ===========================================================================
-echo "=== TC-PCONF-014: --itp github --chp github exits 0, 23 asserted verbs PASS (27 emit lines total), CONFORMANCE-SUMMARY fail=0 ==="
+echo "=== TC-PCONF-014: --itp github --chp github exits 0, all asserted verbs PASS, CONFORMANCE-SUMMARY fail=0 (post-W1e = no pending) ==="
 # ===========================================================================
 gh_out="$(bash "$RUNNER" --itp github --chp github 2>&1)"; gh_rc=$?
 assert_eq "AC1: github/github exits 0" "0" "$gh_rc"
 gh_pass_count="$(grep -c '^CONFORMANCE-PCONF github/github .* PASS$' <<<"$gh_out")"
-# [#393] +1: the itp_list_comments anti-false-green field/authorKind adds one PASS.
-# [#396] +1: itp_read_task flipped pending->asserted (W1b).
-# [#397] +2: W1c1 abstract contracts (chp_find_pr_for_issue, chp_pr_list).
-# [#398 W1c2] +2: chp_pr_view + chp_list_inline_comments flipped pending→asserted.
-# [#399 W1d] +4: chp_ci_status runs 3 PASS lines (all-success/mixed-failure/
-# empty token assertions) and chp_mergeable runs 1 (MERGEABLE token +
-# fail-closed).
-assert_eq "AC1: 27 PASS lines on github/github (23 asserted verbs + #393 list_comments field + W1c2/W1d extra assertion lines incl. #399 payload-type gate)" "27" "$gh_pass_count"
-assert_contains "AC1: CONFORMANCE-SUMMARY line present with fail=0" "CONFORMANCE-SUMMARY total=30 pass=27 fail=0 skip=0 pending=3" "$gh_out"
+# Runner emits N PASS lines: 26 asserted verbs, + 1 for the #393 itp_list_comments
+# anti-false-green field/authorKind assertion, + 3 W1c2/W1d extra assertion lines
+# (chp_ci_status runs 3 = all-success/mixed-failure/empty; chp_mergeable runs 1).
+# Post-#400 pending=0 (every CHP verb landed through the asserted set).
+# Trust the runner output — VERIFY with `bash tests/provider-conformance/run-provider-conformance.sh`.
+assert_eq "AC1: 30 PASS lines on github/github (26 asserted verbs + #393 list_comments field + W1c2/W1d extra assertion lines)" "30" "$gh_pass_count"
+assert_contains "AC1: CONFORMANCE-SUMMARY line present with fail=0 and pending=0" "CONFORMANCE-SUMMARY total=30 pass=30 fail=0 skip=0 pending=0" "$gh_out"
 assert_contains "TC-PCONF-043: itp_read_task (github) PASSes the object-shape/fields-subset/fail-closed assertion" \
   "CONFORMANCE-PCONF github/github itp_read_task PASS" "$gh_out"
 
@@ -59,23 +57,31 @@ assert_eq "AC2: broken/broken exits non-zero" "1" "$broken_rc"
 broken_fail_lines="$(grep '^CONFORMANCE-PCONF broken/broken .* FAIL' <<<"$broken_out")"
 broken_fail_count="$(grep -c '^CONFORMANCE-PCONF broken/broken .* FAIL' <<<"$broken_out")"
 # [#393] +1: the broken provider now also fails the list_comments field check (5 clauses).
-assert_eq "AC2: exactly 5 FAIL lines (one per violated clause)" "5" "$broken_fail_count"
+# [#400 W1e] +3: the broken CHP fixture defines no chp_broken_{create_pr,approve,
+# merge} leaves, so each of the three now-asserted W1e verbs FAILs on stub-success
+# with `command not found` — same shape as the #370 chp_resolve_thread FAIL,
+# annotating the missing verb function. Total = 8 clauses.
+# The 5 pre-W1e violated clauses (#370 shape/rc + #393 field + missing-verb) +
+# 3 new W1e ones (broken fixture defines no chp_broken_{create_pr,approve,merge}
+# leaves so each FAILs with `command not found`) = 8 total.
+assert_eq "AC2: exactly 8 FAIL lines (one per violated clause)" "8" "$broken_fail_count"
 assert_contains "TC-PCONF-020: itp_list_comments FAILs wrong-shape" "itp_list_comments FAIL wrong-shape" "$broken_fail_lines"
 assert_contains "TC-PCONF-021: itp_transition_state FAILs rc-0-on-error" "itp_transition_state FAIL rc-0-on-error" "$broken_fail_lines"
 assert_contains "TC-PCONF-022: chp_resolve_thread FAILs missing-verb-function (command not found)" "chp_resolve_thread FAIL" "$broken_fail_lines"
 assert_contains "TC-PCONF-022: chp_resolve_thread FAIL names the missing function" "chp_broken_resolve_thread: command not found" "$broken_fail_lines"
 assert_contains "TC-PCONF-023: chp_review_threads FAILs non-array-output" "chp_review_threads FAIL wrong-shape" "$broken_fail_lines"
+# [#400 W1e] the three write verbs FAIL with `command not found` on the broken
+# fixture (no chp_broken_{create_pr,approve,merge} definitions).
+assert_contains "TC-PCONF-024a: chp_create_pr FAILs missing-verb-function (command not found)" "chp_broken_create_pr: command not found" "$broken_fail_lines"
+assert_contains "TC-PCONF-024b: chp_approve FAILs missing-verb-function (command not found)" "chp_broken_approve: command not found" "$broken_fail_lines"
+assert_contains "TC-PCONF-024c: chp_merge FAILs missing-verb-function (command not found)" "chp_broken_merge: command not found" "$broken_fail_lines"
 # Every OTHER asserted verb must still PASS (no false-positive FAILs beyond
-# the pinned violations).
-# [#398 W1c2] +2: chp_pr_view + chp_list_inline_comments — correct broken leaves.
-# [#399 W1d] +4: chp_ci_status (3 assertion PASS lines) + chp_mergeable (1) —
-# the broken fixture ships correct chp_broken_ci_status /
-# chp_broken_mergeable so the new W1d asserted verbs stay PASS.
+# the 8 pinned violations). Non-targeted PASS set post-#400 W1e — the runner
+# emits N PASS lines: 22 pre-W1e (12 base + read_task + 2 W1c1 + 2 W1c2 +
+# 5 W1d incl. payload-type gate) + 0 new (the 3 W1e verbs are the newly-FAILing
+# targets, not new PASSes on the broken fixture) = 22 unchanged.
 broken_pass_count="$(grep -c '^CONFORMANCE-PCONF broken/broken .* PASS$' <<<"$broken_out")"
-# [#396] +1: itp_read_task flipped pending->asserted (W1b) and the broken fixture
-# defines a correct (not-targeted) leaf for it.
-# [#397] +2: W1c1 added chp_find_pr_for_issue + chp_pr_list (correct broken-provider leaves).
-assert_eq "AC2: 22 non-targeted PASS lines (12 pre-W1a + read_task + 2 W1c1 + 2 W1c2 + 5 W1d assertion lines incl. payload-type gate)" "22" "$broken_pass_count"
+assert_eq "AC2: 22 non-targeted PASS lines (12 pre-W1a + read_task + 2 W1c1 + 2 W1c2 + 5 W1d assertion lines)" "22" "$broken_pass_count"
 
 # ===========================================================================
 echo ""
@@ -98,7 +104,10 @@ deg_pass_count="$(grep -c '^CONFORMANCE-PCONF degraded/degraded .* PASS$' <<<"$d
 # [#399 W1d] +4: chp_ci_status (3 PASS lines) + chp_mergeable (1) — degraded's
 # leaves mirror GitHub structurally, so they PASS the same token-set/
 # fail-closed assertions.
-assert_eq "TC-PCONF-033: 24 PASS lines on degraded (20 asserted verbs + #393 list_comments + W1c2/W1d extra assertion lines incl. #399 payload-type gate)" "24" "$deg_pass_count"
+# [#400 W1e] +3: the degraded provider now defines chp_degraded_{create_pr,approve,
+# merge} leaves (R4), each mirroring its GitHub counterpart's argv shape so the
+# runner's write-assert passes against the degraded axis too.
+assert_eq "TC-PCONF-033: 27 PASS lines on degraded (26 asserted verbs minus 3 caps-SKIPs, + #393 list_comments + W1c2/W1d extra assertion lines + W1e write assertions)" "27" "$deg_pass_count"
 
 # ===========================================================================
 echo ""
@@ -126,30 +135,37 @@ echo "=== TC-PCONF-040..042: CONTRACT-PENDING tripwire (R3) ==="
 assert_contains "TC-PCONF-040: coverage tripwire PASSes against the real repo" "CONFORMANCE-COVERAGE PASS" "$gh_out"
 
 # TC-PCONF-041: a coverage.conf pending verb whose spec row lacks the token → FAIL.
-# (chp_create_pr — the pending specimen rotates as each W1 slice retires
-# its predecessor: originally itp_count_by_state; #371 W1a retired that;
-# #396 W1b retired itp_read_task; #397 W1c1 retired chp_find_pr_for_issue;
-# #398 W1c2 retired chp_pr_view; #399 W1d retires chp_ci_status.
-# chp_create_pr is the current pending specimen — it stays in the residual
-# pending set until W1(e) lands.)
+# Post-W1e (#400): every real CHP verb is asserted, so no live specimen exists;
+# we inject a synthetic `chp_synthetic_drift_specimen=pending` line into a
+# scratch coverage.conf and assert the tripwire's diff names it (spec-set is
+# still empty here, so the pending set has one asymmetric entry).
 scratch="$(mktemp -d)"
-sed 's/chp_create_pr=pending/chp_create_pr=asserted/' "$COVERAGE_CONF" > "$scratch/coverage-drift1.conf"
+cat "$COVERAGE_CONF" > "$scratch/coverage-drift1.conf"
+printf 'chp_synthetic_drift_specimen=pending\n' >> "$scratch/coverage-drift1.conf"
 drift1_diff="$(
   spec_pending="$(pcf_spec_pending_verbs "$SPEC_MD")"
   cov_pending="$(awk -F= '/=pending$/{print $1}' "$scratch/coverage-drift1.conf" | sort -u)"
   diff <(printf '%s\n' "$spec_pending") <(printf '%s\n' "$cov_pending")
 )"
-assert_contains "TC-PCONF-041: coverage.conf missing a spec-tokened verb → diff names it" "chp_create_pr" "$drift1_diff"
+assert_contains "TC-PCONF-041: coverage.conf pending specimen with no matching spec token → diff names it (synthetic-injection variant, post-#400 no real pending exists)" \
+  "chp_synthetic_drift_specimen" "$drift1_diff"
 
 # TC-PCONF-042: a spec row carrying the token whose verb is NOT pending in coverage.conf → FAIL.
+# Same post-W1e caveat — inject a synthetic CONTRACT-PENDING row into the
+# scratch spec and confirm the diff names it (coverage set is empty here, so
+# the spec set has one asymmetric entry).
 scratch_spec="$scratch/provider-spec-drift2.md"
-sed '/`chp_create_pr /s/CONTRACT-PENDING//' "$SPEC_MD" > "$scratch_spec"
+{
+  cat "$SPEC_MD"
+  printf '\n| `chp_synthetic_orphan_specimen ARG` | (synthetic) | Drift test row. **CONTRACT-PENDING** (post-#400 synthetic — no real pending verbs exist). |\n'
+} > "$scratch_spec"
 drift2_diff="$(
   spec_pending="$(pcf_spec_pending_verbs "$scratch_spec")"
   cov_pending="$(awk -F= '/=pending$/{print $1}' "$COVERAGE_CONF" | sort -u)"
   diff <(printf '%s\n' "$spec_pending") <(printf '%s\n' "$cov_pending")
 )"
-assert_contains "TC-PCONF-042: removing a spec token leaves coverage.conf with an orphaned pending verb → diff names it" "chp_create_pr" "$drift2_diff"
+assert_contains "TC-PCONF-042: spec row carrying CONTRACT-PENDING with no matching coverage.conf entry → diff names it (synthetic-injection variant, post-#400 no real pending exists)" \
+  "chp_synthetic_orphan_specimen" "$drift2_diff"
 rm -rf "$scratch"
 
 # ===========================================================================
@@ -219,24 +235,32 @@ if pcf_is_json_object ''; then bad "TC-PCONF-056: empty text should be false"; e
 
 # ===========================================================================
 echo ""
-echo "=== AC4/AC5 sanity: this issue changed no CHP wrapper/provider-leaf/caps-branch behavior (byte-diff pin lifted for W1c1 + W1c2 + W1d) ==="
+echo "=== AC4/AC5 sanity: this issue changed no CHP wrapper/provider-leaf/caps-branch behavior (byte-diff pin lifted for W1c1 + W1c2 + W1d + W1e) ==="
 # ===========================================================================
 # chp-github.sh was previously UNTOUCHED by the #370/W1a-adjacent slice — a
-# byte-diff-free sanity check pinned that promise. W1c1 (#397) explicitly
-# LIFTED the byte-diff constraint for the two `chp_github_find_pr_for_issue` /
-# `chp_github_pr_list` leaves. W1c2 (#398) did the same for
-# `chp_github_pr_view` and `chp_github_list_inline_comments`. W1d (#399)
-# rewrites the two remaining focused-raw leaves `chp_github_ci_status` and
-# `chp_github_mergeable` to normalized-token contracts. Each W1 slice
-# rewrites its own leaves to the abstract normalized-shape contract,
-# mirroring the pattern W1a used for the three ITP READ leaves. The
-# byte-diff check on chp-github.sh is retired as redundant with the
-# decision-level parity suites that back each rewrite:
-# `test-w1c1-linkage-read-parity.sh` (W1c1),
-# `test-w1c2-incidental-read-parity.sh` (W1c2), and
-# `test-w1d-ci-status-mergeable-parity.sh` (W1d). The itp-github.sh
-# byte-diff check likewise stays off (lifted by W1a).
-ok "AC4/AC5: byte-diff pin on chp-github.sh LIFTED for W1c1+W1c2+W1d (parity proofs live in test-w1c1-linkage-read-parity.sh + test-w1c2-incidental-read-parity.sh + test-w1d-ci-status-mergeable-parity.sh)"
+# byte-diff-free sanity check pinned that promise. Subsequent explicit W1
+# slices LIFT the byte-diff constraint for the verbs each slice targets, and
+# each slice ships its own decision-level parity proof:
+#
+#   - W1c1 (#397) — `chp_github_find_pr_for_issue` / `chp_github_pr_list`
+#     converted to the abstract normalized-shape contract. Parity anchor:
+#     `tests/unit/test-w1c1-linkage-read-parity.sh`.
+#   - W1c2 (#398) — `chp_github_pr_view` / `chp_github_list_inline_comments`
+#     converted to normalized-shape + page-walk. Parity anchor:
+#     `tests/unit/test-w1c2-incidental-read-parity.sh`.
+#   - W1d (#399) — `chp_github_ci_status` / `chp_github_mergeable` converted
+#     to normalized-token contracts. Parity anchor:
+#     `tests/unit/test-w1d-ci-status-mergeable-parity.sh`.
+#   - W1e (#400) — `chp_github_create_pr` / `chp_github_approve` /
+#     `chp_github_merge` converted to abstract positional contracts (leaves
+#     own their gh flag-tails). Parity anchor:
+#     `tests/unit/test-w1e-chp-write-parity.sh` (decision + seam-trace +
+#     strict live-wrapper source pins).
+#
+# The byte-diff check on chp-github.sh is retired as redundant with the
+# decision-level parity suites that back each rewrite. The itp-github.sh
+# byte-diff check likewise stays off (already lifted by W1a).
+ok "AC4/AC5: byte-diff pin on chp-github.sh LIFTED for W1c1 (#397) + W1c2 (#398) + W1d (#399) + W1e (#400) — parity proofs live in the four per-slice parity suites"
 
 # ===========================================================================
 echo ""

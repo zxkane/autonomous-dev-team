@@ -171,10 +171,13 @@ echo "=== TC-AMF-007: auto-merge failure branch is structurally distinct ==="
 # fall-through where a failed merge bleeds into the close+approved code.
 # We pin on a paired pattern: the merge captures success/failure into a
 # variable that gates the subsequent issue-edit branch. The merge leaf now
-# routes through the CHP verb chp_merge ([INV-87], #282) — still
-# `--squash --delete-branch`, still captured into MERGE_OUT/MERGE_RC.
-assert_grep "wrapper captures merge result for branching (chp_merge)" \
-  'chp_merge.*--squash' "$WRAPPER_CODE"
+# routes through the CHP verb chp_merge ([INV-87], #282, W1e-abstracted #400) —
+# the merge strategy (squash + delete branch) is CONTRACT-FIXED inside the
+# leaf, so the caller line is positional (`chp_merge "$PR_NUMBER"`), the
+# `--squash --delete-branch` flag-tail no longer crosses the seam. Still
+# captured into MERGE_OUT/MERGE_RC under `set +e` (unchanged).
+assert_grep "wrapper captures merge result for branching (chp_merge positional, W1e #400)" \
+  'chp_merge "\$PR_NUMBER" 2>&1' "$WRAPPER_CODE"
 
 # Bash syntax check
 echo ""

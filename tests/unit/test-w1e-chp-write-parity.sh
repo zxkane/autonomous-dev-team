@@ -57,8 +57,6 @@ export PROJECT_ID=test-w1e-parity-$$
 export MAX_RETRIES=3
 export MAX_CONCURRENT=5
 
-g_expect() { jq -r --arg k "$1" '.[$k] | .[$key] // ""' --arg key "$2" "$GOLDEN"; }
-
 # ---------------------------------------------------------------------------
 # 1. chp_create_pr — drain_agent_pr_create broker (lib-auth.sh:527-535).
 #    Success-arm log: "brokered the PR create for issue #<N>".
@@ -70,7 +68,7 @@ _run_create_pr_case() {
   # $1: rc for the stubbed chp_create_pr (0 or 1)
   local rc="$1" prfile
   prfile=$(mktemp); printf 'branch: feat/issue-400-foo\nMy title\nBody.\nCloses #400\n' > "$prfile"
-  env -u PROJECT_DIR REPO="$REPO" _STUB_RC="$rc" PRFILE="$prfile" \
+  env -u PROJECT_DIR REPO="$REPO" PRFILE="$prfile" \
     bash -c '
       set -uo pipefail
       log() { :; }
@@ -80,7 +78,6 @@ _run_create_pr_case() {
       # Override the CHP verb to return the requested rc; the broker consumes
       # rc only (its stdout is >/dev/null 2>&1).
       chp_create_pr() { return '"$rc"'; }
-      # Broker-required internals stubbed by sourcing lib-auth.sh.
       source "'"$SCRIPTS"'/lib-auth.sh" 2>/dev/null
       AGENT_GH_TOKEN_FILE=/dev/null AGENT_PR_CREATE_FILE="$PRFILE" \
         drain_agent_pr_create 400 "'"$REPO"'" 2>&1
@@ -120,7 +117,7 @@ echo "=== TC-W1E-110: chp_approve manual-merge fallback parity ==="
 _run_approve_case() {
   # $1: rc for stubbed chp_approve
   local rc="$1"
-  env -u PROJECT_DIR REPO="$REPO" REPO_OWNER="$REPO_OWNER" _STUB_RC="$rc" \
+  env -u PROJECT_DIR REPO="$REPO" REPO_OWNER="$REPO_OWNER" \
     bash -c '
       set -uo pipefail
       log() { printf "[log] %s\n" "$*"; }
@@ -196,7 +193,7 @@ echo "=== TC-W1E-120: chp_merge success/failure parity ==="
 _run_merge_case() {
   # $1: rc from stubbed chp_merge; $2: stubbed stderr output (mimics gh's own diagnostic).
   local rc="$1" stderr_out="$2"
-  env -u PROJECT_DIR REPO="$REPO" _STUB_RC="$rc" _STUB_OUT="$stderr_out" \
+  env -u PROJECT_DIR REPO="$REPO" _STUB_OUT="$stderr_out" \
     bash -c '
       set -uo pipefail
       log() { printf "[log] %s\n" "$*"; }
@@ -298,6 +295,193 @@ if grep -qF 'TRANSITION:400 reviewing pending-dev' <<<"$out1"; then
 else
   bad "TC-W1E-121 chp_merge rc=1 missing reviewing->pending-dev transition"
 fi
+
+# ---------------------------------------------------------------------------
+# 4. AC2 seam-trace — no `^--` argv element crosses the seam for the three
+#    verbs. Record the arg list a stub verb receives from the LIVE caller and
+#    assert every element is a positional (no leading `--`).
+# ---------------------------------------------------------------------------
+echo "=== TC-W1E-200: AC2 seam-trace — no gh flags cross the seam ==="
+
+_assert_no_dashdash_args() {
+  # $1: verb name; remaining: recorded argv (one arg per line file content)
+  local verb="$1" argv_file="$2" a
+  local recorded=""
+  [[ -f "$argv_file" ]] && recorded="$(cat "$argv_file")"
+  # Check EACH line for a leading `--` — a positional argv should have none.
+  if grep -qE '^--' <<<"$recorded"; then
+    bad "TC-W1E-200 $verb caller passed a --flag through the seam (recorded: ${recorded//$'\n'/ | })"
+  else
+    ok "TC-W1E-200 $verb caller argv is exclusively positional (recorded: ${recorded//$'\n'/ | })"
+  fi
+}
+
+# 4a. chp_create_pr — drive the broker with a leaf that records argv. Record
+# both the arg count (via a NULL-separated sentinel so a body containing \n
+# doesn't inflate the count) and the flag-shape.
+argv_create="$(mktemp)"
+count_file="$(mktemp)"
+# Single-line body so the argv-shape assertions cleanly attribute leading `--`
+# to a stray FLAG, not a body-first-line that happens to begin with `--`. The
+# broker sets body from `tail -n +3` of the PR-create file.
+prfile=$(mktemp); printf 'branch: feat/issue-400-x\nfeat: t\nBody.\n' > "$prfile"
+env -u PROJECT_DIR REPO="$REPO" PRFILE="$prfile" ARGVFILE="$argv_create" COUNTFILE="$count_file" \
+  bash -c '
+    log() { :; }
+    gh() { return 0; }
+    source "'"$SCRIPTS"'/lib-code-host.sh" 2>/dev/null
+    # Record one arg per line for the flag-shape check, AND the arg count to a
+    # separate file so multi-line body values (which contain \n) do not inflate
+    # the line-count.
+    chp_create_pr() { printf "%s\n" "$@" > "$ARGVFILE"; printf "%s" "$#" > "$COUNTFILE"; return 0; }
+    source "'"$SCRIPTS"'/lib-auth.sh" 2>/dev/null
+    AGENT_GH_TOKEN_FILE=/dev/null AGENT_PR_CREATE_FILE="$PRFILE" \
+      drain_agent_pr_create 400 "'"$REPO"'" >/dev/null 2>&1
+  ' >/dev/null 2>&1
+rm -f "$prfile"
+_assert_no_dashdash_args "chp_create_pr" "$argv_create"
+# argv count = 3 (head, title, body) — a stray fourth arg would be a residual
+# flag or a doubled body.
+_n="$(cat "$count_file" 2>/dev/null || echo 0)"
+if [[ "$_n" == "3" ]]; then
+  ok "TC-W1E-201 chp_create_pr caller passes exactly 3 positionals (head, title, body)"
+else
+  bad "TC-W1E-201 chp_create_pr caller argv count = $_n (expected 3)"
+fi
+rm -f "$argv_create" "$count_file"
+
+# 4b. chp_approve — the wrapper's PASS-path call is `chp_approve "$PR_NUMBER"
+# "<body>"`. Source-shape assertion is sufficient here (a live wrapper drive
+# would require reconstructing the full pass-gate chain; the parity block
+# above already covers rc-driven decisions).
+WRAPPER="$SCRIPTS/autonomous-review.sh"
+# Join backslash-continuation lines FIRST so a caller that splits `chp_approve
+# "$PR_NUMBER" \` across a newline with `--approve --body …` on the next line
+# still trips the flag-guard (a line-local grep would miss that shape — codex
+# review round P2-3 gap).
+_wrapper_joined="$(awk '/\\$/{sub(/\\$/,""); printf "%s", $0; next} {print}' "$WRAPPER")"
+if grep -qE 'if chp_approve "\$PR_NUMBER" +"All acceptance criteria verified\.' <<<"$_wrapper_joined"; then
+  ok "TC-W1E-210 chp_approve caller line is positional after line-continuation join"
+else
+  bad "TC-W1E-210 chp_approve caller line not in expected positional shape (post line-join)"
+fi
+if grep -qE 'chp_approve\b[^)]*--approve' <<<"$_wrapper_joined"; then
+  bad "TC-W1E-211 chp_approve caller line still carries a --approve flag on the JOINED line (leaf must own it)"
+else
+  ok "TC-W1E-211 chp_approve caller line does NOT carry a --approve flag on the JOINED line (leaf-owned)"
+fi
+if grep -qE 'chp_approve\b[^)]*--body' <<<"$_wrapper_joined"; then
+  bad "TC-W1E-211b chp_approve caller line still carries a --body flag on the JOINED line (leaf must own it)"
+else
+  ok "TC-W1E-211b chp_approve caller line does NOT carry a --body flag on the JOINED line (leaf-owned)"
+fi
+
+# 4c. chp_merge — the wrapper's merge site is `chp_merge "$PR_NUMBER" 2>&1`.
+if grep -qE 'MERGE_OUT=\$\(chp_merge "\$PR_NUMBER" 2>&1\)' <<<"$_wrapper_joined"; then
+  ok "TC-W1E-220 chp_merge caller line is positional after line-continuation join"
+else
+  bad "TC-W1E-220 chp_merge caller line not in expected positional shape (post line-join)"
+fi
+if grep -qE 'chp_merge\b[^)]*(--squash|--delete-branch|--merge\b|--rebase|--admin|--auto)' <<<"$_wrapper_joined"; then
+  bad "TC-W1E-221 chp_merge caller line still carries a strategy flag on the JOINED line (leaf-owned + contract-fixed)"
+else
+  ok "TC-W1E-221 chp_merge caller line does NOT carry a strategy flag on the JOINED line (leaf-owned + contract-fixed)"
+fi
+
+# 4d. Secondary AC2 guard — a source-grep of the two caller files with line-
+# continuation joined. The github-gated raw `gh pr create` fallback in
+# lib-auth.sh is EXEMPT (it's a `gh pr create` line, not a `chp_create_pr`
+# line — spec-sanctioned INV-91 residue).
+LIB_AUTH="$SCRIPTS/lib-auth.sh"
+_lib_auth_joined="$(awk '/\\$/{sub(/\\$/,""); printf "%s", $0; next} {print}' "$LIB_AUTH")"
+_bad_lines=""
+_bad_lines+=$(grep -nE 'chp_create_pr\b[^)]*--(head|title|body)' <<<"$_lib_auth_joined" || true)
+_bad_lines+=$(grep -nE 'chp_create_pr\b[^)]*--(head|title|body)' <<<"$_wrapper_joined" || true)
+_bad_lines+=$(grep -nE 'chp_approve\b[^)]*--(approve|body)' <<<"$_wrapper_joined" || true)
+_bad_lines+=$(grep -nE 'chp_merge\b[^)]*(--squash|--delete-branch|--merge\b|--rebase|--admin|--auto)' <<<"$_wrapper_joined" || true)
+if [[ -z "$_bad_lines" ]]; then
+  ok "TC-W1E-230 no --head/--title/--body/--approve/--body/--squash/--delete-branch/--rebase/--admin flag on chp_(create_pr|approve|merge) caller lines outside providers/ (line-continuation joined)"
+else
+  bad "TC-W1E-230 gh flag still on a chp_ caller line (post line-join): $_bad_lines"
+fi
+
+# 4e. Line-continuation join regression pin — self-test the awk preprocessor
+# so a future refactor that breaks the join still surfaces (rather than
+# silently passing 4b-4d on a wrapper that later splits the call across lines).
+_join_probe="$(printf 'x \\\ny\nz \\\nw\n' | awk '/\\$/{sub(/\\$/,""); printf "%s", $0; next} {print}')"
+_join_expect=$'x y\nz w'
+if [[ "$_join_probe" == "$_join_expect" ]]; then
+  ok "TC-W1E-232 line-continuation join preprocessor is well-formed (probe: x\\+y → 'x y'; z\\+w → 'z w')"
+else
+  bad "TC-W1E-232 line-continuation join preprocessor broken (got: $_join_probe)"
+fi
+
+# ---------------------------------------------------------------------------
+# 5. STRICT SOURCE PINS (P2-2 fix) — pin the exact live wrapper lines the
+#    parity blocks 2 and 3 synthesize. If the wrapper drops chp_pr_comment,
+#    changes emit_verdict_trailer, alters MERGE_OUT handling, or reshuffles
+#    the manual-merge fallback, these grep pins go red — closing the gap
+#    where the synthesized parity blocks alone would silently keep passing.
+# ---------------------------------------------------------------------------
+echo "=== TC-W1E-300..320: strict source pins for live approve/merge blocks ==="
+
+_pin() {
+  # $1: TC-id + summary; $2: fixed-string needle; $3+: file(s) to grep
+  local tag="$1" needle="$2"; shift 2
+  if grep -qF -- "$needle" "$@"; then
+    ok "$tag"
+  else
+    bad "$tag needle NOT found: $needle"
+  fi
+}
+
+# 5a. approve block — the manual-merge fallback + fall-through log lines are
+# behavior-parity load-bearing.
+_pin "TC-W1E-300 approve: PASS-path chp_approve is called with two positionals + captures stderr" \
+  'if chp_approve "$PR_NUMBER" \' "$WRAPPER"
+_pin "TC-W1E-301 approve: PASS-path success log 'approved successfully'" \
+  'log "PR #${PR_NUMBER} approved successfully."' "$WRAPPER"
+_pin "TC-W1E-302 approve: rc!=0 manual-merge fallback log line" \
+  'log "Falling back to manual review notification."' "$WRAPPER"
+_pin "TC-W1E-303 approve: rc!=0 fallback itp_post_comment (manual-merge notification)" \
+  'itp_post_comment "$ISSUE_NUMBER"' "$WRAPPER"
+_pin "TC-W1E-304 approve: rc!=0 fallback reviewing->approved transition" \
+  'itp_transition_state "$ISSUE_NUMBER" "reviewing" "approved"' "$WRAPPER"
+_pin "TC-W1E-305 approve: rc!=0 fallback exits 0" \
+  'exit 0' "$WRAPPER"
+
+# 5b. merge block — the set +e / MERGE_OUT / MERGE_RC capture + first-500-chars
+# excerpt + failure marker + verdict trailer + pending-dev transition are ALL
+# load-bearing for the parity contract.
+_pin "TC-W1E-310 merge: set +e around chp_merge" \
+  'set +e' "$WRAPPER"
+_pin "TC-W1E-311 merge: MERGE_OUT captures 2>&1 from chp_merge <pr> (positional)" \
+  'MERGE_OUT=$(chp_merge "$PR_NUMBER" 2>&1)' "$WRAPPER"
+_pin "TC-W1E-312 merge: MERGE_RC=\$? immediately after" \
+  'MERGE_RC=$?' "$WRAPPER"
+_pin "TC-W1E-313 merge: success log 'merged successfully'" \
+  'log "PR #${PR_NUMBER} merged successfully."' "$WRAPPER"
+_pin "TC-W1E-314 merge: success metric result=success" \
+  'metrics_emit merge "result=success"' "$WRAPPER"
+_pin "TC-W1E-315 merge: success CSV transition reviewing,autonomous->approved" \
+  'itp_transition_state "$ISSUE_NUMBER" "reviewing,autonomous" "approved"' "$WRAPPER"
+_pin "TC-W1E-316 merge: failure excerpt is first 500 chars of MERGE_OUT" \
+  '_err_excerpt="${MERGE_OUT:0:500}"' "$WRAPPER"
+_pin "TC-W1E-317 merge: failure marker posted via chp_pr_comment (NOT a raw gh pr comment)" \
+  'chp_pr_comment "$PR_NUMBER"' "$WRAPPER"
+_pin "TC-W1E-318 merge: failure metric result=failure + failure_class=infra" \
+  'metrics_emit merge "result=failure" failure_class=infra' "$WRAPPER"
+_pin "TC-W1E-319 merge: failure verdict trailer failed-non-substantive + merge-conflict-unresolvable" \
+  'emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-non-substantive" "merge-conflict-unresolvable"' "$WRAPPER"
+_pin "TC-W1E-320 merge: failure reviewing->pending-dev transition" \
+  'itp_transition_state "$ISSUE_NUMBER" "reviewing" "pending-dev"' "$WRAPPER"
+
+# 5c. Broker block (lib-auth.sh) — the leaf-arm call shape is positional and
+# the github-gated raw fallback line stays byte-identical (INV-91 residue).
+_pin "TC-W1E-330 broker: chp_create_pr called positionally (<branch> <title> <body>)" \
+  'chp_create_pr "$branch" "$title" "$body"' "$LIB_AUTH"
+_pin "TC-W1E-331 broker: github-gated raw gh pr create fallback line stays byte-identical (INV-91 residue)" \
+  '_pr_create_ok() { gh pr create --repo "$repo" --head "$branch" --title "$title" --body "$body" >/dev/null 2>&1; }' "$LIB_AUTH"
 
 # ---------------------------------------------------------------------------
 echo ""

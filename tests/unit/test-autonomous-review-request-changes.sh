@@ -198,16 +198,19 @@ else
   echo -e "  ${RED}FAIL${NC}: TC-RC-SRC-06 an invocation lacks a best-effort guard"; FAIL=$((FAIL + 1))
 fi
 
-# TC-RC-SRC-07: PASS branch still submits --approve (regression pin — the fix
+# TC-RC-SRC-07: PASS branch still submits an approve (regression pin — the fix
 # must NOT remove the existing approve). The leaf now routes through the CHP
-# verb chp_approve ([INV-87], #282) — still `--approve`, wrapper-owned.
-assert_grep "TC-RC-SRC-07 PASS path still submits the approve via chp_approve" \
-  'chp_approve .*--approve' "$WRAPPER_CODE"
+# verb chp_approve ([INV-87], #282, W1e-abstracted #400) — the `--approve` flag
+# moves INTO the leaf under the W1e abstract-positional contract (chp_approve
+# <pr> <body>), so the caller line is positional: `chp_approve "$PR_NUMBER"
+# "<body>"`, wrapper-owned. Pin on the positional call shape.
+assert_grep "TC-RC-SRC-07 PASS path still submits the approve via chp_approve (W1e positional #400)" \
+  'chp_approve "\$PR_NUMBER"' "$WRAPPER_CODE"
 
 # TC-RC-SRC-08: PASS and REQUEST_CHANGES are mutually exclusive — no single
-# logical statement submits both. (Pin: --approve and submit_request_changes
+# logical statement submits both. (Pin: chp_approve and submit_request_changes
 # never appear on the same line.)
-_both=$(grep -E 'submit_request_changes "' "$WRAPPER_CODE" | grep -E -- '--approve' || true)
+_both=$(grep -E 'submit_request_changes "' "$WRAPPER_CODE" | grep -E -- 'chp_approve' || true)
 if [[ -z "$_both" ]]; then
   echo -e "  ${GREEN}PASS${NC}: TC-RC-SRC-08 no line submits both --approve and REQUEST_CHANGES"; PASS=$((PASS + 1))
 else

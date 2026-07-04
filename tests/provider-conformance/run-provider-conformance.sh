@@ -940,6 +940,27 @@ _assert_verb() {
     chp_reply_review_comment)
       _run_write_assert "$verb" "api repos/o/r/pulls/42/comments -X POST" "42 1 hello"
       ;;
+    chp_create_pr)
+      # W1e (#400): abstract positional contract — caller passes <head> <title>
+      # <body>; the GitHub leaf owns `--head/--title/--body`. Under the stub gh
+      # the leaf emits the fixed flag-tail from the positional inputs.
+      _run_write_assert "$verb" "pr create --repo o/r --head feat/x --title t --body b" \
+        "feat/x t b"
+      ;;
+    chp_approve)
+      # W1e (#400): abstract positional contract — caller passes <pr> <body>;
+      # the GitHub leaf owns `--approve --body`. The leaf's emitted argv is
+      # `gh pr review $PR --repo $REPO --approve --body $BODY`.
+      _run_write_assert "$verb" "pr review 42 --repo o/r --approve --body msg" \
+        "42 msg"
+      ;;
+    chp_merge)
+      # W1e (#400): abstract positional contract — caller passes <pr> only;
+      # merge strategy is contract-fixed (squash + delete). The leaf's emitted
+      # argv is `gh pr merge $PR --repo $REPO --squash --delete-branch`.
+      _run_write_assert "$verb" "pr merge 42 --repo o/r --squash --delete-branch" \
+        "42"
+      ;;
     chp_close_keyword)
       _run_close_keyword_assert
       ;;

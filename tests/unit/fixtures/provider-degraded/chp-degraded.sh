@@ -281,3 +281,48 @@ chp_degraded_list_inline_comments() {
     sort_by(.createdAt // "", .id // 0)
   ' <<<"$raw"
 }
+
+# chp_degraded_create_pr HEAD_BRANCH TITLE BODY — W1e (#400) write leaf.
+#
+# Positional contract mirror of chp_github_create_pr. Structurally identical
+# GitHub-shaped `gh` call — the fixture reuses the same argv shape so the
+# provider-conformance runner's write-assert (which observes `gh` via a stub)
+# passes against BOTH github and degraded providers on the same positional
+# input. rc 0 on success; the fixture's `gh` is the runner's stub, so this is
+# hermetic (no real network I/O). The `CHP_DEGRADED_LEAF_LOG` sink is retained
+# as an optional per-argv trace for caller tests that pick up the fixture
+# directly (defaults to /dev/null so a plain source of this file is a benign
+# no-op).
+chp_degraded_create_pr() {
+  local head_branch="$1" title="$2" body="$3"
+  printf 'DEG_CREATE_PR %s %s %s\n' "$head_branch" "$title" "$body" \
+    >> "${CHP_DEGRADED_LEAF_LOG:-/dev/null}"
+  gh pr create --repo "$REPO" --head "$head_branch" --title "$title" --body "$body"
+}
+
+# chp_degraded_approve PR BODY — W1e (#400) write leaf.
+#
+# rc-only positional contract mirror of chp_github_approve. Same argv shape as
+# GitHub so the conformance runner's write-assert passes against BOTH.
+chp_degraded_approve() {
+  local pr="$1" body="$2"
+  printf 'DEG_APPROVE %s %s\n' "$pr" "$body" \
+    >> "${CHP_DEGRADED_LEAF_LOG:-/dev/null}"
+  gh pr review "$pr" --repo "$REPO" --approve --body "$body"
+}
+
+# chp_degraded_merge PR — W1e (#400) write leaf.
+#
+# Positional contract mirror of chp_github_merge. Merge strategy is contract-
+# fixed (squash + delete source branch); the leaf emits the same argv shape
+# as GitHub so the conformance runner's write-assert passes against BOTH.
+# Performs NO issue transition — the degraded `.caps` sets
+# `merge_closes_issue=0`, so the caps=0 caller branch MUST observe the CALLER
+# doing the explicit `itp_transition_state`, never the fixture inferring
+# GitHub auto-close semantics from a leaf-side transition (R4).
+chp_degraded_merge() {
+  local pr="$1"
+  printf 'DEG_MERGE %s\n' "$pr" \
+    >> "${CHP_DEGRADED_LEAF_LOG:-/dev/null}"
+  gh pr merge "$pr" --repo "$REPO" --squash --delete-branch
+}

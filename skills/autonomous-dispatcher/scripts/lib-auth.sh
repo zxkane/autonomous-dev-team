@@ -506,18 +506,21 @@ drain_agent_pr_create() {
     return 0
   fi
 
-  # Explicit --head: the wrapper's cwd (PROJECT_DIR) is on the base branch, so a
+  # Explicit head: the wrapper's cwd (PROJECT_DIR) is on the base branch, so a
   # bare create would infer the wrong head (#234 [P1]).
   #
-  # [INV-87] (#282) the `gh pr create` leaf moves behind chp_create_pr — the verb
-  # prepends `--repo "$REPO"` and forwards the rest, so the emitted argv is
-  # byte-identical to the prior `gh pr create --repo "$repo" --head … --title …
-  # --body …`. ALL of the INV-79 broker logic above (token scoping, file parse,
-  # head resolution, the no-PR-yet idempotency guard) is unchanged. `$REPO` is the
-  # wrapper's required env (the broker's `$repo` arg always equals it). The leaf
-  # guard is `chp_has_leaf`, NOT `declare -F chp_create_pr` — the shim is always
-  # defined once lib-code-host is sourced, so that would dispatch to an undefined
-  # leaf and abort under set -e on a backend without it (#282 review round 4 [P1]).
+  # [INV-87] (#282, W1e-abstracted #400) the `gh pr create` leaf moves behind
+  # chp_create_pr — the verb now takes THREE POSITIONALS `<head-branch> <title>
+  # <body>` (W1e abstract contract, #347/#400); the GitHub leaf owns the
+  # `--head/--title/--body` flags internally. The emitted gh argv is IDENTICAL to
+  # the pre-#400 broker-composed line — the leaf still emits the same flags, but
+  # they no longer cross the seam. ALL of the INV-79 broker logic above (token
+  # scoping, file parse, head resolution, the no-PR-yet idempotency guard) is
+  # unchanged. `$REPO` is the wrapper's required env (the broker's `$repo` arg
+  # always equals it). The leaf guard is `chp_has_leaf`, NOT `declare -F
+  # chp_create_pr` — the shim is always defined once lib-code-host is sourced, so
+  # that would dispatch to an undefined leaf and abort under set -e on a backend
+  # without it (#282 review round 4 [P1]).
   #
   # [INV-91] (#346) fail-loud disposition for the leaf-absent case: the raw
   # `gh pr create` fallback is retained ONLY under an explicit `CODE_HOST == github`
@@ -526,11 +529,11 @@ drain_agent_pr_create() {
   # #303/B1 + #327 no-silent-fallback pattern) and creates no PR. `${CODE_HOST:-github}`
   # (the #327 precedent): an unset CODE_HOST — lib-code-host.sh not sourced because
   # chp_create_pr was already defined, or the lib was unreadable — defaults to
-  # `github`, i.e. today's exact behavior; the raw path is retained. Zero behavior
-  # change on the github/github topology (the raw `gh pr create` line is byte-
-  # identical to the pre-#346 fallback, so its cutover baseline signature is unchanged).
+  # `github`, i.e. today's exact behavior; the raw path is retained BYTE-IDENTICAL
+  # (its cutover-baseline signature is unchanged — a spec-sanctioned [INV-91]
+  # residue, NOT the caller's flag-tail).
   if declare -F chp_has_leaf >/dev/null 2>&1 && chp_has_leaf create_pr; then
-    _pr_create_ok() { chp_create_pr --head "$branch" --title "$title" --body "$body" >/dev/null 2>&1; }
+    _pr_create_ok() { chp_create_pr "$branch" "$title" "$body" >/dev/null 2>&1; }
   elif [[ "${CODE_HOST:-github}" == "github" ]]; then
     _pr_create_ok() { gh pr create --repo "$repo" --head "$branch" --title "$title" --body "$body" >/dev/null 2>&1; }
   else

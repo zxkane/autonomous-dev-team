@@ -69,7 +69,7 @@ Driven by `tests/unit/test-provider-conformance-runner.sh`
 | TC-PCONF-030 | `--itp degraded --chp degraded`: `itp_edit_comment` (governing cap `edit_comment=0`) | `SKIP itp_edit_comment (cap: edit_comment)` — never FAIL |
 | TC-PCONF-031 | `itp_mark_checkbox` (governing cap `body_checkbox=0`) | `SKIP itp_mark_checkbox (cap: body_checkbox)` |
 | TC-PCONF-032 | `chp_request_changes` (governing cap `rest_request_changes=0`) | `SKIP chp_request_changes (cap: rest_request_changes)` |
-| TC-PCONF-033 | The 11 remaining ASSERTED verbs (`-`-governed, incl. `chp_close_keyword`'s render-only path and `itp_read_task` since [W1b] #396) against the degraded leaf bodies | PASS — zero unexpected FAILs |
+| TC-PCONF-033 | The 16 remaining ASSERTED verbs (`-`-governed, incl. `chp_close_keyword`'s render-only path, `itp_read_task` since [W1b] #396, the two W1c1 CHP linkage-reads since #397, and the three W1e CHP write leaves since #400) against the degraded leaf bodies | PASS — zero unexpected FAILs |
 | TC-PCONF-034 | Full `--itp degraded --chp degraded` run | exits 0; every SKIP line is annotated with its governing cap; no FAIL |
 
 ## CONTRACT-PENDING tripwire (R3)
@@ -91,6 +91,17 @@ Driven by `tests/unit/test-provider-conformance-runner.sh`
 | TC-PCONF-054 | `pcf_is_json_array` against an array, an object, and empty text | true/false/false |
 | TC-PCONF-055 | `pcf_is_ascending_by_created_at` against an ascending, a descending, and an empty array | true/false/true |
 | TC-PCONF-056 | `pcf_is_json_object` against an object, an array, and empty text ([W1b] #396) | true/false/false |
+
+## W1e write-verb assertions (issue #400)
+
+| ID | Scenario | Expected |
+|---|---|---|
+| TC-PCONF-060 | `chp_create_pr` positional `<head> <title> <body>` with stub gh set to succeed | PASS; recorded gh argv is `pr create --repo o/r --head feat/x --title t --body b` (leaf owns the flags) |
+| TC-PCONF-060 | `chp_create_pr` positional with stub gh set to FAIL | rc≠0 — fail-closed |
+| TC-PCONF-061 | `chp_approve` positional `<pr> <body>` with stub gh set to succeed | PASS; recorded gh argv is `pr review 42 --repo o/r --approve --body msg` |
+| TC-PCONF-061 | `chp_approve` positional with stub gh set to FAIL | rc≠0 — fail-closed |
+| TC-PCONF-062 | `chp_merge` positional `<pr>` with stub gh set to succeed | PASS; recorded gh argv is `pr merge 42 --repo o/r --squash --delete-branch` (strategy contract-fixed inside the leaf) |
+| TC-PCONF-062 | `chp_merge` positional with stub gh set to FAIL | rc≠0 — fail-closed |
 
 ## E2E
 

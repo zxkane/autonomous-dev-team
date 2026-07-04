@@ -51,9 +51,8 @@ Output is one line per verb plus a summary:
 ```
 CONFORMANCE-PCONF github/github itp_list_comments PASS
 CONFORMANCE-PCONF degraded/degraded itp_edit_comment SKIP (cap: edit_comment)
-CONFORMANCE-PCONF github/github chp_create_pr PENDING (coverage.conf)
-CONFORMANCE-COVERAGE PASS (spec CONTRACT-PENDING set == coverage.conf pending set, 3 verbs)
-CONFORMANCE-SUMMARY total=30 pass=27 fail=0 skip=0 pending=3
+CONFORMANCE-COVERAGE PASS (spec CONTRACT-PENDING set == coverage.conf pending set, 0 verbs)
+CONFORMANCE-SUMMARY total=30 pass=30 fail=0 skip=0 pending=0
 ```
 
 The runner exits **non-zero** on any `FAIL` — a wrong-shape output, an
@@ -65,17 +64,19 @@ never a `FAIL` by themselves.
 ## What this suite asserts (§3.1/§3.2's `Asserted` cells)
 
 Per [`provider-spec.md` §10](../../docs/pipeline/provider-spec.md#10-per-verb-conformance-checklist-370)'s
-`TC-PCONF-NNN` checklist — the 23 provider-neutral verbs whose contract is
+`TC-PCONF-NNN` checklist — the 26 provider-neutral verbs whose contract is
 already committed (W1a=#371 landed the three ITP state-reads as normalized
 shapes; W1b=#396 landed `itp_read_task`; W1c1=#397 added
 `chp_find_pr_for_issue` and `chp_pr_list`; W1c2=#398 added `chp_pr_view`
-and `chp_list_inline_comments`; W1d=#399 adds `chp_ci_status` and
-`chp_mergeable` as normalized-token leaves — 23 asserted rows in
-`coverage.conf`):
+and `chp_list_inline_comments`; W1d=#399 added `chp_ci_status` and
+`chp_mergeable` as normalized-token leaves; W1e=#400 landed the three CHP
+write verbs `chp_create_pr` / `chp_approve` / `chp_merge`. All CHP
+lifecycle verbs are now asserted; no `CONTRACT-PENDING` remains):
 
 - **Fail-closed writes** (`itp_transition_state`, `itp_post_comment`,
   `itp_edit_comment`, `itp_mark_checkbox`, `itp_provision_states`,
-  `chp_resolve_thread`, `chp_reply_review_comment`, `chp_request_changes`) —
+  `chp_resolve_thread`, `chp_reply_review_comment`, `chp_request_changes`,
+  `chp_create_pr`, `chp_approve`, `chp_merge`) —
   rc 0 + the documented `gh` argv shape on success; rc≠0 with no partial
   output on failure.
 - **Fail-soft observe/lookup** (`itp_resolve_dep`, `itp_label_event_ts`) —
@@ -119,21 +120,17 @@ and `chp_list_inline_comments`; W1d=#399 adds `chp_ci_status` and
   fail-closed on stub-gh failure (rc≠0, no partial output — the leaves
   themselves reject empty stdout / unknown mergeable tokens).
 
-## The 3 `CONTRACT-PENDING` verbs (R3, post-W1a/W1b/W1c1/W1c2/W1d)
+## `CONTRACT-PENDING` verbs (R3) — none left (post-W1a/W1b/W1c1/W1c2/W1d/W1e)
 
-The residual gh-argv passthrough verbs (`chp_create_pr`, `chp_approve`,
-`chp_merge`) have no conformance check yet — `provider-spec.md` tokens
-their rows `CONTRACT-PENDING` and `coverage.conf` lists them `pending`.
-Landed W1 slices (W1a=#371 for the three ITP state-reads, W1b=#396 for
-`itp_read_task`, W1c1=#397 for the two CHP linkage-reads, W1c2=#398 for
-`chp_pr_view` + `chp_list_inline_comments`, W1d=#399 for `chp_ci_status` +
-`chp_mergeable`) each removed their own spec tokens and flipped
-`coverage.conf` in the same PR. A future W1 slice does the same — the
-runner's `CONFORMANCE-COVERAGE` check is a set-diff tripwire that FAILs
-on any asymmetry between the two. All four ITP READ verbs, all four CHP
-incidental/linkage read verbs, and the two CI/mergeable-status leaves
-are now asserted, leaving only the CHP PR-lifecycle write verbs
-(`chp_create_pr` / `chp_approve` / `chp_merge`) pending.
+Every CHP-lifecycle verb has now been migrated to its abstract contract by
+W1a=#371 (three ITP state-reads), W1b=#396 (`itp_read_task`), W1c1=#397
+(two CHP linkage-reads), W1c2=#398 (`chp_pr_view` + `chp_list_inline_comments`),
+W1d=#399 (`chp_ci_status` + `chp_mergeable`), and W1e=#400 (three CHP write
+verbs `chp_create_pr` / `chp_approve` / `chp_merge`). No spec row carries
+`CONTRACT-PENDING`; `coverage.conf` has zero `pending` rows. The runner's
+`CONFORMANCE-COVERAGE` set-diff tripwire is vacuously green (both sides
+empty) but stays wired so a future new-verb addition with a pending status
+would trigger it.
 
 ## Governing capability map (R4)
 
@@ -152,10 +149,12 @@ for the full table.
 2. Run `bash tests/provider-conformance/run-provider-conformance.sh --itp gitlab --chp gitlab`.
 3. Every `ASSERTED` verb your new backend implements must PASS (or `SKIP`
    honestly per its `.caps`). This is the acceptance gate.
-4. The 5 residual `CONTRACT-PENDING` verbs are not required for THIS gate
-   (they land with the remaining W1 slices) — but any verb you DO implement
-   for the pending set still needs its own conformance check added in that
-   slice's PR.
+4. There are no residual `CONTRACT-PENDING` verbs to worry about — every
+   §3.2 CHP-lifecycle row is asserted post-W1e (#400). If a future spec
+   change re-adds a `CONTRACT-PENDING` marker, the runner's set-diff
+   tripwire immediately catches an asymmetry between spec and
+   `coverage.conf`; the slice landing that new marker owns adding its
+   conformance check in the same PR.
 
 ## Scope
 
