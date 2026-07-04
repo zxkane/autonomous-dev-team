@@ -296,12 +296,14 @@ chp_degraded_list_inline_comments() {
 chp_degraded_create_pr() {
   local head_branch="${1:-}" title="${2:-}" body="${3:-}"
   # W1e positional-validation mirror of chp_github_create_pr (#400 review
-  # follow-up): empty/missing positionals → rc 2 + loud stderr + no gh call.
-  # Keeps the degraded axis exercising the same fail-loud contract the
-  # GitHub leaf ships.
+  # follow-up r1): HEAD_BRANCH/TITLE empty/missing → rc 2 + loud stderr +
+  # no gh call. BODY MAY be empty by design (title-only brokered create is
+  # legitimate — the caller's `body=$(tail -n +2/+3 …)` yields "" on a
+  # title-only PR-create file, and gh accepts `--body ""`; see the GitHub
+  # leaf's header for the full reasoning).
   [ -n "$head_branch" ] || { echo "ERROR: chp_degraded_create_pr requires HEAD_BRANCH (1st arg, non-empty)" >&2; return 2; }
   [ -n "$title" ]       || { echo "ERROR: chp_degraded_create_pr requires TITLE (2nd arg, non-empty)" >&2; return 2; }
-  [ -n "$body" ]        || { echo "ERROR: chp_degraded_create_pr requires BODY (3rd arg, non-empty)" >&2; return 2; }
+  # BODY may be empty by design — do NOT gate.
   printf 'DEG_CREATE_PR %s %s %s\n' "$head_branch" "$title" "$body" \
     >> "${CHP_DEGRADED_LEAF_LOG:-/dev/null}"
   gh pr create --repo "$REPO" --head "$head_branch" --title "$title" --body "$body"

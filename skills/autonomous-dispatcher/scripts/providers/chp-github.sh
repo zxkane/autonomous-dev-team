@@ -458,11 +458,20 @@ chp_github_mergeable() {
 # the PR and still fail the response (transport); the broker's pre-create
 # existence check (lib-auth.sh:452-455 via chp_pr_list) makes it idempotent.
 #
-# Positional validation (mirrors the W1a/W1c1 read-verb pattern): each of
-# HEAD_BRANCH / TITLE / BODY must be non-empty. Missing/empty → rc 2, loud
-# stderr naming the offending arg, NO gh call — a real gh with `--head ""`
-# would emit a confusing "must be specified" error at best and create an
-# unintended PR at worst; failing fast at the seam is safer.
+# Positional validation (mirrors the W1a/W1c1 read-verb pattern): HEAD_BRANCH
+# and TITLE must be non-empty. Missing/empty → rc 2, loud stderr naming the
+# offending arg, NO gh call — a real gh with `--head ""` would emit a
+# confusing "must be specified" error at best and create an unintended PR
+# at worst; failing fast at the seam is safer.
+#
+# BODY intentionally MAY be empty: the caller (`drain_agent_pr_create`,
+# lib-auth.sh:474/478) derives body from `tail -n +2/+3` of the PR-create
+# file the agent writes — a title-only file yields body="" legitimately,
+# and `gh pr create --body ""` is a valid GitHub PR creation (empty
+# description). Rejecting empty BODY here would turn a legitimate
+# title-only brokered create into rc 2 → the broker treats it as failure,
+# the issue re-queues, and the PR never opens. Review-lane finding on
+# #400 r1 caught this — the empty-body check was overreach.
 #
 # PAT-mode / app-mode-without-scoping creates the PR via the agent directly
 # (prompt-driven `gh pr create`), unchanged.
@@ -470,7 +479,7 @@ chp_github_create_pr() {
   local head_branch="${1:-}" title="${2:-}" body="${3:-}"
   [ -n "$head_branch" ] || { echo "ERROR: chp_github_create_pr requires HEAD_BRANCH (1st arg, non-empty)" >&2; return 2; }
   [ -n "$title" ]       || { echo "ERROR: chp_github_create_pr requires TITLE (2nd arg, non-empty)" >&2; return 2; }
-  [ -n "$body" ]        || { echo "ERROR: chp_github_create_pr requires BODY (3rd arg, non-empty)" >&2; return 2; }
+  # BODY may be empty by design — do NOT gate.
   gh pr create --repo "$REPO" --head "$head_branch" --title "$title" --body "$body"
 }
 

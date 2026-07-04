@@ -516,22 +516,31 @@ _assert_rejects() {
   ok "$label rc=2 no gh call"
 }
 
-# 6a. chp_create_pr — each of 3 positionals must be non-empty.
+# 6a. chp_create_pr — HEAD_BRANCH + TITLE must be non-empty (BODY may be
+# empty by design: caller `drain_agent_pr_create` derives body from `tail
+# -n +2/+3`, yielding "" on a title-only PR-create file; a title-only
+# brokered PR create is a legitimate GitHub op — review-lane finding on
+# #400 r1 caught this).
 _assert_rejects chp_create_pr "TC-W1E-400 create_pr: empty head-branch rejected" ""       TITLE BODY
 _assert_rejects chp_create_pr "TC-W1E-401 create_pr: empty title rejected"       feat/x   ""    BODY
-_assert_rejects chp_create_pr "TC-W1E-402 create_pr: empty body rejected"        feat/x   TITLE ""
 _assert_rejects chp_create_pr "TC-W1E-403 create_pr: missing all args rejected"
-_assert_rejects chp_create_pr "TC-W1E-404 create_pr: missing 2 args rejected"    feat/x
-_assert_rejects chp_create_pr "TC-W1E-405 create_pr: missing 1 arg rejected"     feat/x   TITLE
+_assert_rejects chp_create_pr "TC-W1E-404 create_pr: missing 2 args (empty title) rejected" feat/x
+# TC-W1E-405 (missing BODY) intentionally NOT rejected — empty BODY is
+# legitimate (see TC-W1E-402); a `chp_create_pr feat/x TITLE` invocation
+# is equivalent to `chp_create_pr feat/x TITLE ""` and passes.
 
-# 6b. chp_approve — PR must be non-empty numeric; BODY must be non-empty.
+# 6b. chp_approve — PR must be non-empty numeric; BODY must be non-empty
+# (caller passes the hardcoded "All acceptance criteria verified." template,
+# which is always non-empty — the check catches a caller regression that
+# would send an empty approve comment).
 _assert_rejects chp_approve "TC-W1E-410 approve: empty PR rejected"       ""  msg
 _assert_rejects chp_approve "TC-W1E-411 approve: non-numeric PR rejected" abc msg
 _assert_rejects chp_approve "TC-W1E-412 approve: empty body rejected"     42  ""
 _assert_rejects chp_approve "TC-W1E-413 approve: missing all args rejected"
 _assert_rejects chp_approve "TC-W1E-414 approve: missing body rejected"   42
 
-# 6c. chp_merge — PR must be non-empty numeric.
+# 6c. chp_merge — PR must be non-empty numeric (verb takes only PR — no
+# body-empty-legitimate concern).
 _assert_rejects chp_merge "TC-W1E-420 merge: empty PR rejected"       ""
 _assert_rejects chp_merge "TC-W1E-421 merge: non-numeric PR rejected" abc
 _assert_rejects chp_merge "TC-W1E-422 merge: PR with letters rejected" 42abc
@@ -559,6 +568,13 @@ _assert_valid() {
 _assert_valid chp_create_pr "TC-W1E-430 create_pr: valid 3-positional args pass"   feat/issue-400-x "feat: title" "body text"
 _assert_valid chp_approve   "TC-W1E-431 approve: valid numeric PR + body pass"     42               "looks good"
 _assert_valid chp_merge     "TC-W1E-432 merge: valid numeric PR passes"            42
+# TC-W1E-402: empty BODY is LEGITIMATE for create_pr (review-lane #400 r1
+# caller-regression fix). The broker's `body=$(tail -n +2/+3)` yields "" on
+# a title-only PR-create file; gh accepts `--body ""` and creates the PR
+# with an empty description. Regression pin: rc 0 + gh invoked with the
+# empty --body flag preserved.
+_assert_valid chp_create_pr "TC-W1E-402 create_pr: empty BODY passes (title-only brokered create is legitimate)" \
+                            feat/issue-400-x "feat: title" ""
 
 # 6e. Source-shape pin: the leaves carry the validation lines that fail rc 2.
 _pin "TC-W1E-440 create_pr leaf carries the HEAD_BRANCH validation" \

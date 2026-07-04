@@ -973,12 +973,13 @@ _assert_verb() {
       # the leaf emits the fixed flag-tail from the positional inputs.
       _run_write_assert "$verb" "pr create --repo o/r --head feat/x --title t --body b" \
         "feat/x t b"
-      # Positional-validation gate (#400 review): each empty positional must
-      # rc≠0 with no gh call. The leaf validates each of the three positionals
-      # non-empty before dispatch.
+      # Positional-validation gate (#400 review r1): HEAD_BRANCH and TITLE
+      # empty → rc≠0 + no gh call. BODY MAY be empty by design (caller
+      # `drain_agent_pr_create` derives body from `tail -n +2/+3` yielding
+      # "" on a title-only PR-create file — a legitimate GitHub create),
+      # so empty-BODY is NOT rejected here.
       _run_positional_reject "$verb" 'chp_create_pr "" t b'
       _run_positional_reject "$verb" 'chp_create_pr feat/x "" b'
-      _run_positional_reject "$verb" 'chp_create_pr feat/x t ""'
       ;;
     chp_approve)
       # W1e (#400): abstract positional contract — caller passes <pr> <body>;
