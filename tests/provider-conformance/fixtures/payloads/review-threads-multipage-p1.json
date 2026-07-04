@@ -3,39 +3,39 @@
     "repository": {
       "pullRequest": {
         "reviewThreads": {
-          "pageInfo": { "hasNextPage": false, "endCursor": null },
+          "pageInfo": { "hasNextPage": true, "endCursor": "TCURSOR_1" },
           "nodes": [
             {
-              "id": "PRRT_1",
+              "id": "PRRT_P1_A",
               "isResolved": false,
               "comments": {
                 "pageInfo": { "hasNextPage": false, "endCursor": null },
                 "nodes": [
                   {
-                    "databaseId": 200001,
-                    "path": "src/foo.sh",
-                    "line": 12,
-                    "originalLine": 12,
+                    "databaseId": 100001,
+                    "path": "src/a.sh",
+                    "line": 11,
+                    "originalLine": 11,
                     "author": { "login": "codex[bot]" },
-                    "body": "fix this",
+                    "body": "p1-a",
                     "createdAt": "2026-01-01T00:00:00Z"
                   }
                 ]
               }
             },
             {
-              "id": "PRRT_2",
+              "id": "PRRT_P1_B",
               "isResolved": true,
               "comments": {
                 "pageInfo": { "hasNextPage": false, "endCursor": null },
                 "nodes": [
                   {
-                    "databaseId": 200002,
-                    "path": "src/bar.sh",
-                    "line": 3,
-                    "originalLine": 3,
+                    "databaseId": 100002,
+                    "path": "src/b.sh",
+                    "line": 22,
+                    "originalLine": 22,
                     "author": { "login": "zxkane" },
-                    "body": "looks good now",
+                    "body": "p1-b",
                     "createdAt": "2026-01-01T00:05:00Z"
                   }
                 ]

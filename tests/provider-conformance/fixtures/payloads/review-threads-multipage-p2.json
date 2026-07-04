@@ -6,37 +6,37 @@
           "pageInfo": { "hasNextPage": false, "endCursor": null },
           "nodes": [
             {
-              "id": "PRRT_1",
+              "id": "PRRT_P2_A",
               "isResolved": false,
               "comments": {
                 "pageInfo": { "hasNextPage": false, "endCursor": null },
                 "nodes": [
                   {
                     "databaseId": 200001,
-                    "path": "src/foo.sh",
-                    "line": 12,
-                    "originalLine": 12,
-                    "author": { "login": "codex[bot]" },
-                    "body": "fix this",
-                    "createdAt": "2026-01-01T00:00:00Z"
+                    "path": "src/c.sh",
+                    "line": 33,
+                    "originalLine": 33,
+                    "author": { "login": "kane-review-agent" },
+                    "body": "p2-a",
+                    "createdAt": "2026-01-01T01:00:00Z"
                   }
                 ]
               }
             },
             {
-              "id": "PRRT_2",
-              "isResolved": true,
+              "id": "PRRT_P2_B",
+              "isResolved": false,
               "comments": {
                 "pageInfo": { "hasNextPage": false, "endCursor": null },
                 "nodes": [
                   {
                     "databaseId": 200002,
-                    "path": "src/bar.sh",
-                    "line": 3,
-                    "originalLine": 3,
-                    "author": { "login": "zxkane" },
-                    "body": "looks good now",
-                    "createdAt": "2026-01-01T00:05:00Z"
+                    "path": "src/d.sh",
+                    "line": 44,
+                    "originalLine": 44,
+                    "author": { "login": "alice" },
+                    "body": "p2-b",
+                    "createdAt": "2026-01-01T01:05:00Z"
                   }
                 ]
               }

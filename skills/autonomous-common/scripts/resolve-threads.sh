@@ -49,6 +49,14 @@ export REPO="${OWNER}/${REPO}"
 # in autonomous-dispatcher/scripts/ — so try the own-dir first, then the
 # dispatcher-sibling fallback. (The verbs are the contract — fail loudly rather
 # than silently re-inlining the gh leaves.)
+#
+# [#401 / #347 W1f] The chp_review_threads leaf walks BOTH GraphQL pagination
+# levels internally and returns rc != 0 with no partial stdout on any mid-walk
+# failure. This script's job on this side of the pipe is to (a) capture the
+# leaf's stdout INTO a variable — never pipe into jq without pipefail — and
+# (b) test the leaf's rc BEFORE selecting unresolved thread ids, so a failed
+# multi-page walk aborts the resolve loop LOUD instead of silently reporting
+# "0 resolved, 0 failed" success on an empty stream.
 _rt_self="${BASH_SOURCE[0]:-$0}"
 _rt_dir="$(cd "$(dirname "$(readlink -f "$_rt_self")")" && pwd 2>/dev/null)" || _rt_dir=""
 _rt_chp=""
@@ -71,8 +79,18 @@ echo "Fetching unresolved review threads for PR #$PR_NUMBER..."
 # thread shape ([{thread_id, resolved, comments:[…]}]); select the unresolved
 # thread_ids — byte-equivalent to the prior inline
 # `reviewThreads.nodes[]|select(.isResolved==false).id`.
-THREAD_IDS=$(chp_review_threads "$PR_NUMBER" \
+#
+# [#401 R2] Capture-then-test: pipe-into-jq without pipefail turned a mid-walk
+# leaf failure (empty stdout, non-zero rc) into an empty THREAD_IDS and a false
+# "0 resolved, 0 failed" success. Capture the leaf's stdout and check its exit
+# BEFORE selecting.
+if ! _threads_json=$(chp_review_threads "$PR_NUMBER"); then
+    echo "Error: chp_review_threads failed for PR #$PR_NUMBER (see stderr above)" >&2
+    exit 1
+fi
+THREAD_IDS=$(printf '%s' "$_threads_json" \
   | jq -r '.[] | select(.resolved == false) | .thread_id')
+unset _threads_json
 
 if [ -z "$THREAD_IDS" ]; then
     echo "No unresolved threads found!"

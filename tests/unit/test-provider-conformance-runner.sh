@@ -33,20 +33,25 @@ command -v jq >/dev/null 2>&1 || { echo "jq required"; exit 1; }
 source "$LIB"
 
 # ===========================================================================
-echo "=== TC-PCONF-014: --itp github --chp github exits 0, all asserted verbs PASS, CONFORMANCE-SUMMARY fail=0 (post-W1e = no pending) ==="
+echo "=== TC-PCONF-014: --itp github --chp github exits 0, all asserted verbs PASS, CONFORMANCE-SUMMARY fail=0 (post-W1e = no pending; +1 for W1f completeness) ==="
 # ===========================================================================
 gh_out="$(bash "$RUNNER" --itp github --chp github 2>&1)"; gh_rc=$?
 assert_eq "AC1: github/github exits 0" "0" "$gh_rc"
 gh_pass_count="$(grep -c '^CONFORMANCE-PCONF github/github .* PASS$' <<<"$gh_out")"
 # Runner emits N PASS lines: 26 asserted verbs, + 1 for the #393 itp_list_comments
 # anti-false-green field/authorKind assertion, + 3 W1c2/W1d extra assertion lines
-# (chp_ci_status runs 3 = all-success/mixed-failure/empty; chp_mergeable runs 1).
+# (chp_ci_status runs 3 = all-success/mixed-failure/empty; chp_mergeable runs 1),
+# + 1 for the #401 W1f chp_review_threads multi-page completeness assertion
+# (payload-sequence stub-gh mode emits its OWN CONFORMANCE-PCONF PASS line
+# separately from the shape assertion).
 # Post-#400 pending=0 (every CHP verb landed through the asserted set).
 # Trust the runner output — VERIFY with `bash tests/provider-conformance/run-provider-conformance.sh`.
-assert_eq "AC1: 30 PASS lines on github/github (26 asserted verbs + #393 list_comments field + W1c2/W1d extra assertion lines)" "30" "$gh_pass_count"
-assert_contains "AC1: CONFORMANCE-SUMMARY line present with fail=0 and pending=0" "CONFORMANCE-SUMMARY total=30 pass=30 fail=0 skip=0 pending=0" "$gh_out"
+assert_eq "AC1: 31 PASS lines on github/github (26 asserted verbs + #393 list_comments field + W1c2/W1d extra + #401 completeness)" "31" "$gh_pass_count"
+assert_contains "AC1: CONFORMANCE-SUMMARY line present with fail=0 and pending=0" "CONFORMANCE-SUMMARY total=31 pass=31 fail=0 skip=0 pending=0" "$gh_out"
 assert_contains "TC-PCONF-043: itp_read_task (github) PASSes the object-shape/fields-subset/fail-closed assertion" \
   "CONFORMANCE-PCONF github/github itp_read_task PASS" "$gh_out"
+# #401: multi-page completeness assertion emitted its own PASS line.
+assert_contains "TC-W1F-008: chp_review_threads completeness PASS emitted on github" "chp_review_threads PASS" "$gh_out"
 
 # ===========================================================================
 echo ""
@@ -59,12 +64,16 @@ broken_fail_count="$(grep -c '^CONFORMANCE-PCONF broken/broken .* FAIL' <<<"$bro
 # [#393] +1: the broken provider now also fails the list_comments field check (5 clauses).
 # [#400 W1e] +3: the broken CHP fixture defines no chp_broken_{create_pr,approve,
 # merge} leaves, so each of the three now-asserted W1e verbs FAILs on stub-success
-# with `command not found` — same shape as the #370 chp_resolve_thread FAIL,
-# annotating the missing verb function. Total = 8 clauses.
-# The 5 pre-W1e violated clauses (#370 shape/rc + #393 field + missing-verb) +
-# 3 new W1e ones (broken fixture defines no chp_broken_{create_pr,approve,merge}
-# leaves so each FAILs with `command not found`) = 8 total.
-assert_eq "AC2: exactly 8 FAIL lines (one per violated clause)" "8" "$broken_fail_count"
+# with `command not found`.
+# [#401 W1f review r2] +2: chp_broken_review_threads (defined but lacks
+# positional validation — its `gh api graphql -F prNumber=$pr` accepts empty
+# and non-numeric args, so both `chp_review_threads ""` and `chp_review_threads
+# abc` leak a gh call). These are LEGITIMATE violated-clause FAILs — the
+# broken fixture demonstrates what happens when a leaf omits the W1e
+# positional-validation convention (parallel to the missing-write-verb FAILs
+# above).
+# Total = 5 pre-W1e + 3 W1e + 2 W1f = 10 clauses.
+assert_eq "AC2: exactly 10 FAIL lines (one per violated clause)" "10" "$broken_fail_count"
 assert_contains "TC-PCONF-020: itp_list_comments FAILs wrong-shape" "itp_list_comments FAIL wrong-shape" "$broken_fail_lines"
 assert_contains "TC-PCONF-021: itp_transition_state FAILs rc-0-on-error" "itp_transition_state FAIL rc-0-on-error" "$broken_fail_lines"
 assert_contains "TC-PCONF-022: chp_resolve_thread FAILs missing-verb-function (command not found)" "chp_resolve_thread FAIL" "$broken_fail_lines"
@@ -75,6 +84,10 @@ assert_contains "TC-PCONF-023: chp_review_threads FAILs non-array-output" "chp_r
 assert_contains "TC-PCONF-024a: chp_create_pr FAILs missing-verb-function (command not found)" "chp_broken_create_pr: command not found" "$broken_fail_lines"
 assert_contains "TC-PCONF-024b: chp_approve FAILs missing-verb-function (command not found)" "chp_broken_approve: command not found" "$broken_fail_lines"
 assert_contains "TC-PCONF-024c: chp_merge FAILs missing-verb-function (command not found)" "chp_broken_merge: command not found" "$broken_fail_lines"
+# [#401 W1f review r2] The broken review_threads leaf lacks positional
+# validation → gh gets called on empty/non-numeric PR → positional-reject
+# asserts FAIL. Two probes: empty PR + non-numeric PR.
+assert_contains "TC-PCONF-024d: chp_review_threads FAILs positional-reject (empty/non-numeric PR leaks gh call on the broken fixture)" "chp_review_threads FAIL positional-reject" "$broken_fail_lines"
 # Every OTHER asserted verb must still PASS (no false-positive FAILs beyond
 # the 8 pinned violations). Non-targeted PASS set post-#400 W1e — the runner
 # emits N PASS lines: 22 pre-W1e (12 base + read_task + 2 W1c1 + 2 W1c2 +
@@ -235,7 +248,7 @@ if pcf_is_json_object ''; then bad "TC-PCONF-056: empty text should be false"; e
 
 # ===========================================================================
 echo ""
-echo "=== AC4/AC5 sanity: this issue changed no CHP wrapper/provider-leaf/caps-branch behavior (byte-diff pin lifted for W1c1 + W1c2 + W1d + W1e) ==="
+echo "=== AC4/AC5 sanity: this issue changed no CHP wrapper/provider-leaf/caps-branch behavior (byte-diff pin lifted for W1c1 + W1c2 + W1d + W1e + W1f) ==="
 # ===========================================================================
 # chp-github.sh was previously UNTOUCHED by the #370/W1a-adjacent slice — a
 # byte-diff-free sanity check pinned that promise. Subsequent explicit W1
@@ -256,11 +269,19 @@ echo "=== AC4/AC5 sanity: this issue changed no CHP wrapper/provider-leaf/caps-b
 #     own their gh flag-tails). Parity anchor:
 #     `tests/unit/test-w1e-chp-write-parity.sh` (decision + seam-trace +
 #     strict live-wrapper source pins).
+#   - W1f (#401) — `chp_github_review_threads` converted to a two-level
+#     GraphQL cursor walk (thread + per-thread comment level) with
+#     fail-closed validation of every page response (rejects `.errors`,
+#     requires the connection paths non-null). Regression + completeness
+#     proofs: `tests/unit/test-chp-pr-lifecycle.sh`'s TC-CHP-THREAD-SHAPE
+#     + TC-CHP-THREADS-MULTIPAGE-* (TC-W1F-001..006 + 003a..c) +
+#     `tests/provider-conformance/run-provider-conformance.sh`'s
+#     `_run_review_threads_completeness_assert`.
 #
 # The byte-diff check on chp-github.sh is retired as redundant with the
 # decision-level parity suites that back each rewrite. The itp-github.sh
-# byte-diff check likewise stays off (already lifted by W1a).
-ok "AC4/AC5: byte-diff pin on chp-github.sh LIFTED for W1c1 (#397) + W1c2 (#398) + W1d (#399) + W1e (#400) — parity proofs live in the four per-slice parity suites"
+# byte-diff check likewise stays off (already lifted by W1a + W1b).
+ok "AC4/AC5: byte-diff pin on chp-github.sh LIFTED for W1c1 (#397) + W1c2 (#398) + W1d (#399) + W1e (#400) + W1f (#401) — parity proofs live in the five per-slice parity suites"
 
 # ===========================================================================
 echo ""

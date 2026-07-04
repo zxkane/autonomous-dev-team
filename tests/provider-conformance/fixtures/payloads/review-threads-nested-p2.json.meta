@@ -1,0 +1,4 @@
+Source: docs/test-cases/w1f-review-threads-pagination.md (TC-W1F-002 — nested comment page 2).
+Origin: synthetic; served on the leaf's follow-up node(id: $threadId) query.
+Provenance: authored 2026-07-04 for #401 (#347 W1f). Not from live GitHub.
+Notes: Paired with review-threads-nested-p1.json.

@@ -19,7 +19,7 @@ asserts it matches the pre-refactor call.
 | TC-CHP-APPROVE | `chp_github_approve PR BODY` | argv == `pr review <PR> --repo <REPO> --approve --body <BODY>` |
 | TC-CHP-REQCHANGES | `chp_github_request_changes PR BODY` | argv == `pr review <PR> --repo <REPO> --request-changes --body <BODY>` |
 | TC-CHP-MERGE | `chp_github_merge PR` | argv == `pr merge <PR> --repo <REPO> --squash --delete-branch` |
-| TC-CHP-THREADS | `chp_github_review_threads PR` | `gh api graphql` argv carries `reviewThreads(first: 100)` + the `-F owner/repo/prNumber` vars |
+| TC-CHP-THREADS | `chp_github_review_threads PR` | `gh api graphql` argv carries `reviewThreads(first: 100, after: $threadCursor)` + `pageInfo{hasNextPage,endCursor}` + `comments(first: 100)` + the `-F owner/repo/prNumber` vars (cursor-walk pinned since #401 / #347 W1f). Multi-page merge + fail-closed pins live in TC-W1F-001..003. |
 | TC-CHP-RESOLVE | `chp_github_resolve_thread THREAD_ID` | `gh api graphql` argv carries `resolveReviewThread(input: {threadId: $threadId})` + `-F threadId=` |
 
 ## 2. M8 thread shape

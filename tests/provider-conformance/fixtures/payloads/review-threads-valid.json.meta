@@ -1,8 +1,14 @@
 source: hand-authored (issue #370 design — sidecar provenance, no live capture)
-capture_date: 2026-07-03
-shape: raw `gh api graphql` reviewThreads response (pre-transform) — the stub
-  applies the leaf's own `--jq` filter, so this fixture must match the RAW
-  GraphQL shape chp_github_review_threads expects, not the normalized
-  [{thread_id,resolved,comments:[...]}] output.
+capture_date: 2026-07-03 (updated 2026-07-04 for #401 pageInfo hardening)
+shape: raw `gh api graphql` reviewThreads response (pre-transform) — since #401
+  the leaf owns its own jq merge/normalize pipeline (no `--jq` passed to gh),
+  so this fixture must match the RAW GraphQL shape including the REQUIRED
+  pageInfo{hasNextPage,endCursor} at both the reviewThreads level and each
+  thread's comments level. The #401 hardening rejects any response missing
+  those required paths (fail-closed on malformed/incomplete GraphQL data),
+  which mirrors what a real gh api graphql response always carries.
 notes: one unresolved thread + one resolved thread, exercising both branches
-  of the resolved boolean.
+  of the resolved boolean. Both threads' comments fit in one page
+  (hasNextPage=false), so the leaf's comment-level walk is not exercised
+  by this fixture — the runner's _run_review_threads_completeness_assert
+  drives review-threads-nested-p{1,2}.json for the nested-comment path.

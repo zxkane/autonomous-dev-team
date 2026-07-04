@@ -30,8 +30,18 @@
 # test.
 
 # chp_degraded_review_threads PR — mirrors chp_github_review_threads' M8 shape.
+#
+# #401 / #347 W1f: intentionally SHAPE-ONLY (single-page). The GitHub leaf
+# walks BOTH GraphQL pagination levels internally; the degraded fixture is
+# scoped to prove the M8 shape + leaf-presence for chp_has_leaf branching, not
+# completeness — which is per-provider per provider-spec.md §3.2 cell + §4.4.
+# The runner's chp_review_threads multi-page-completeness assertion is gated
+# to `--chp github` (`_run_review_threads_completeness_assert` in
+# tests/provider-conformance/run-provider-conformance.sh).
 chp_degraded_review_threads() {
-  local pr="$1"
+  local pr="${1:-}"
+  # W1e positional-validation mirror of chp_github_review_threads.
+  [[ "$pr" =~ ^[0-9]+$ ]] || { echo "ERROR: chp_degraded_review_threads requires PR (1st arg, non-empty numeric): got '${pr}'" >&2; return 2; }
   local owner="${REPO%%/*}" name="${REPO##*/}"
   gh api graphql \
     -F owner="$owner" \
@@ -75,7 +85,9 @@ query($owner: String!, $repo: String!, $prNumber: Int!) {
 
 # chp_degraded_resolve_thread THREAD_ID — mirrors chp_github_resolve_thread.
 chp_degraded_resolve_thread() {
-  local thread_id="$1"
+  local thread_id="${1:-}"
+  # W1e positional-validation mirror of chp_github_resolve_thread.
+  [ -n "$thread_id" ] || { echo "ERROR: chp_degraded_resolve_thread requires THREAD_ID (1st arg, non-empty)" >&2; return 2; }
   gh api graphql \
     -F threadId="$thread_id" \
     -f query='
