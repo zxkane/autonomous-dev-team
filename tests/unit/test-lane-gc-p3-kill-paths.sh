@@ -340,23 +340,83 @@ awk '
   in_fn && /^\}$/ { in_fn=0 }
 ' "$DISPATCH_LOCAL" > "$KSW_SLICE"
 
+# Fixture shape (shared by 023a/023): a leader that dies on plain TERM
+# (`exec sleep 30`) plus a PERSISTENT TERM-trapping member in the SAME pgid.
+# The member must be a `while` loop that re-spawns its own sleep — a bare
+# `trap "" TERM &` child installs the trap and exits immediately (its body
+# is empty), leaving nothing behind for the gate to miss; and a
+# `(trap ""; sleep 30)` subshell survives the TERM itself but exits the
+# moment its (untrapped, group-signalled) sleep child dies. Only the
+# respawning loop actually OUTLIVES the group TERM.
+KSW_FIXTURE='setsid bash -c "(trap \"\" TERM; while :; do sleep 1; done) & disown; exec sleep 30" & LEADER=$!'
+
+# TC-LGC3-023a — fixture self-validation (review-caught: the prior fixture
+# never reproduced the scenario, so 023 passed even against the OLD
+# leader-only gate). Prove that a PLAIN group TERM — what the pre-fix code
+# effectively ended at, since its leader-only `kill -0` gate saw the leader
+# dead and skipped SIGKILL — leaves the trapping member running. This is
+# the failing-precondition proof that makes TC-LGC3-023 a real regression
+# gate rather than a vacuous pass.
+OUT023A=$(bash -c '
+  '"$KSW_FIXTURE"'
+  sleep 0.5
+  kill -TERM -- "-$LEADER" 2>/dev/null
+  sleep 1
+  if kill -0 "$LEADER" 2>/dev/null; then echo "LEADER-STILL-ALIVE"
+  elif kill -0 -- "-$LEADER" 2>/dev/null; then echo "LEADER-DEAD-MEMBER-ALIVE"
+  else echo "GROUP-GONE"
+  fi
+  kill -KILL -- "-$LEADER" 2>/dev/null || true
+' 2>&1 | tail -1)
+assert_contains "TC-LGC3-023a (fixture proof): a plain group TERM kills the leader but the trapping member survives — the exact shape the old leader-only gate leaked" "LEADER-DEAD-MEMBER-ALIVE" "$OUT023A"
+
 OUT023=$(bash -c '
   set -uo pipefail
   ISSUE_NUM="test023"
   KILL_STALE_PGREP_FALLBACK=false
   source "'"$KSW_SLICE"'"
-  # Multi-process group: a leader shell backgrounds a TERM-resistant child
-  # into the SAME pgid via setsid, then execs into a bare sleep so the
-  # PID-file PID (the leader) can die on the initial TERM while the child
-  # (recorded nowhere but sharing the pgid) survives and traps TERM.
-  setsid bash -c "trap \"\" TERM & CPID=\$!; disown; exec sleep 30" & LEADER=$!
-  sleep 0.3
+  '"$KSW_FIXTURE"'
+  sleep 0.5
   echo "$LEADER" > "'"$TMPROOT"'/ksw023.pid"
   kill_stale_wrapper "'"$TMPROOT"'/ksw023.pid"
   sleep 0.3
   kill -0 -- "-$LEADER" 2>/dev/null && echo "GROUP-ALIVE" || echo "GROUP-GONE"
 ' 2>&1 | tail -1)
 assert_contains "TC-LGC3-023: kill_stale_wrapper (PID-file path) reaps the full process group even when the leader alone would have looked dead post-TERM" "GROUP-GONE" "$OUT023"
+
+# TC-LGC3-024 — the SAME leader-dies/member-survives shape through the
+# pgrep-FALLBACK orphan sweep (no PID file at all). The fallback matches on
+# the orphan leader's cmdline (`${PROJECT_DIR}/scripts/autonomous-dev.sh
+# … --issue N`), so the fixture leader must KEEP that cmdline (no exec) while
+# a persistent TERM-trapping member shares its group. PROJECT_DIR is a
+# per-run temp dir, so the pgrep project anchor can never match a real
+# wrapper on this host.
+PROJ024="$TMPROOT/proj024"
+mkdir -p "$PROJ024/scripts"
+cat > "$PROJ024/scripts/autonomous-dev.sh" <<'FIXTURE024'
+#!/bin/bash
+(trap "" TERM; while :; do sleep 1; done) & disown
+sleep 30
+FIXTURE024
+chmod +x "$PROJ024/scripts/autonomous-dev.sh"
+
+OUT024=$(bash -c '
+  set -uo pipefail
+  ISSUE_NUM="240379"
+  TYPE="dev-new"
+  PROJECT_ID="test024"
+  PROJECT_DIR="'"$PROJ024"'"
+  KILL_STALE_PGREP_FALLBACK=true
+  source "'"$KSW_SLICE"'"
+  setsid bash "'"$PROJ024"'/scripts/autonomous-dev.sh" --issue 240379 & LEADER=$!
+  sleep 0.5
+  # No PID file — the fallback sweep is the only path that can find this tree.
+  kill_stale_wrapper "'"$TMPROOT"'/ksw024-nonexistent.pid"
+  sleep 0.3
+  kill -0 -- "-$LEADER" 2>/dev/null && echo "VERDICT:GROUP-ALIVE" || echo "VERDICT:GROUP-GONE"
+  kill -KILL -- "-$LEADER" 2>/dev/null || true
+' 2>&1 | grep '^VERDICT:')
+assert_contains "TC-LGC3-024: pgrep-fallback sweep reaps the full orphan group even when the leader alone would have looked dead post-TERM" "VERDICT:GROUP-GONE" "$OUT024"
 rm -f "$KSW_SLICE"
 
 # ===========================================================================

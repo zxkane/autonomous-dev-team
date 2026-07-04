@@ -58,8 +58,9 @@ suite under `env -u PROJECT_DIR` for CI parity.
 | TC-LGC3-020 | `_pid_or_group_alive <pid>` where the pid itself answers `kill -0` | returns 0 (true) via the leader check alone |
 | TC-LGC3-021 | `_pid_or_group_alive <pid>` where the leader is dead but a group member (same pgid) is alive | returns 0 (true) via the group-form check |
 | TC-LGC3-022 | `_pid_or_group_alive <pid>` where neither the leader nor any group member is alive | returns 1 (false) |
-| TC-LGC3-023 | `kill_stale_wrapper`, legacy PID-file path: old_pid's leader dies right after the initial TERM, but a TERM-trapping member of its group survives | the escalation gate fires (leader-or-group still reports alive) and the group member is SIGKILLed — regression proof for the pre-fix bug (leader-only gate would have skipped SIGKILL and left the member running) |
-| TC-LGC3-024 | `kill_stale_wrapper`, pgrep-fallback orphan sweep: an orphan's leader dies after the sweep's initial TERM, member survives | same leader-or-group gate fires in the fallback loop; member is SIGKILLed |
+| TC-LGC3-023a | Fixture self-proof: the 023/024 fixture tree (leader `exec sleep` + a persistent `(trap "" TERM; while :; do sleep 1; done)` member in the same pgid) receives a PLAIN group TERM — what the pre-fix leader-only gate effectively ended at | leader dies, the trapping member SURVIVES (`LEADER-DEAD-MEMBER-ALIVE`) — proving the fixture reproduces the leak shape, so 023/024 cannot pass vacuously (review-caught: an earlier fixture's `trap "" TERM &` child exited immediately and left nothing to leak) |
+| TC-LGC3-023 | `kill_stale_wrapper`, legacy PID-file path: old_pid's leader dies right after the initial TERM, but a TERM-trapping member of its group survives | the escalation gate fires (leader-or-group still reports alive) and the group member is SIGKILLed — regression proof for the pre-fix bug (leader-only gate would have skipped SIGKILL and left the member running); verified to FAIL against origin/main's kill_stale_wrapper (`GROUP-ALIVE`) |
+| TC-LGC3-024 | `kill_stale_wrapper`, pgrep-fallback orphan sweep (no PID file): an orphan tree whose cmdline matches the sweep's project+type+issue anchors; the leader dies after the sweep's initial TERM, the trapping member survives | same leader-or-group gate fires in the fallback loop; member is SIGKILLed; verified to FAIL against origin/main's fallback loop (`GROUP-ALIVE`) |
 | TC-LGC3-025 | Existing behavior preserved: leader alive → normal TERM→grace→KILL sequence unchanged; leader AND group both dead → no spurious SIGKILL attempt | `test-kill-before-spawn.sh` / `test-dispatch-local-pgrep-type-scope.sh` / `test-pid-guard-pgid.sh` / `test-pid-alive-long-running.sh` stay green (extraction snippets updated to capture the new sibling helper) |
 
 ## `cleanup()` reap-first ordering + bounded network calls (AC4)
@@ -91,9 +92,16 @@ suite under `env -u PROJECT_DIR` for CI parity.
 
 - [ ] All unit tests above pass (surface: CI unit job) — TC-LGC3-001..042
 - [ ] Fixture-tree E2E: `kill_stale_wrapper` against a fixture tree with a
-      TERM-trapping member → tree empty within grace+2s (surface: CI E2E
-      job / manual integration check, TC-LGC3-023/024 cover the same
-      contract at unit granularity)
+      TERM-trapping member → tree empty within grace+2s (surface: CI unit
+      job — this repo's CI has no separate E2E workflow, so the unit job IS
+      the CI surface for this criterion. TC-LGC3-023 drives the REAL
+      `kill_stale_wrapper` end-to-end against a real process tree — leader
+      dies on TERM, a persistent TERM-trapping member survives in its group
+      — through the PID-file path; TC-LGC3-024 drives the same shape through
+      the pgrep-fallback orphan sweep (no PID file); TC-LGC3-023a is the
+      fixture self-proof that this exact tree LEAKS under a plain group TERM,
+      i.e. under the pre-fix leader-only gate — so 023/024 fail against
+      pre-fix code rather than passing vacuously)
 - [ ] `invariants.md` updated (INV-111 + INV-112 + the INV-26 attribution
       sentence), numbering re-verified against HEAD at PR-open, with triage
       markers; `state-machine.md`/flow docs updated same PR (surface: PR
