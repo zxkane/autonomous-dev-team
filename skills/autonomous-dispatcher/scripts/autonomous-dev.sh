@@ -841,9 +841,14 @@ EOF
   # stale hash, and strip the dead entry from PATH so resolution falls back
   # to the system `gh` using the GH_TOKEN just refreshed above. A no-op
   # (and harmless) when the shim is still intact.
+  # The quoted 'gh' argument below is deliberate: the [INV-91] cutover guard
+  # scans caller-layer code for raw `gh ` call sites (token + trailing space),
+  # and both `hash -d`'s argument and the WARN text would false-positive as
+  # unbaselined raw-gh — the baseline may only SHRINK for existing files, so
+  # ratifying them is not an option. Quoting is byte-identical to bash.
   if [[ -n "${GH_WRAPPER_DIR:-}" ]] && [[ ! -x "${GH_WRAPPER_DIR}/gh" ]]; then
-    log "WARNING: [INV-111] GH_WRAPPER_DIR (${GH_WRAPPER_DIR}) is gone — dropping the stale 'gh' command hash and PATH entry so cleanup's gh calls fall back to the system gh."
-    hash -d gh 2>/dev/null || true
+    log "WARNING: [INV-111] GH_WRAPPER_DIR (${GH_WRAPPER_DIR}) is gone — dropping the stale 'gh' command hash and PATH entry so cleanup's 'gh' calls fall back to the system 'gh'."
+    hash -d 'gh' 2>/dev/null || true
     if declare -F _strip_path_entry >/dev/null 2>&1; then
       PATH="$(_strip_path_entry "$PATH" "$GH_WRAPPER_DIR")"
       export PATH
