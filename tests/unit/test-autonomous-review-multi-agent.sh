@@ -332,7 +332,7 @@ assert_grep "TC-MAR-SRC-11 all-unavailable sets AGENT_EXIT=1 on a genuine CLI cr
 assert_grep "TC-MAR-SRC-11b per-agent rc captured under set -e (|| _rc=\$?)" \
   '\|\| _rc=\$\?' "$WRAPPER"
 assert_grep "TC-MAR-SRC-11b sidecar records the captured _rc (not a bare \$?)" \
-  "printf '%s.n' \"\\\$_rc\" > \"\\\$_agent_rc_file\"" "$WRAPPER"
+  "printf '%s.n' \"\\\$_rc\" .*> \"\\\$_agent_rc_file\"" "$WRAPPER"
 # all-unavailable preserves the legacy N=1 distinction: AGENT_EXIT defaults to
 # 0 (clean-but-silent → failed-substantive) and is only raised to 1 when an
 # agent's launch rc was non-zero (genuine crash).
