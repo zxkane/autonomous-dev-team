@@ -2906,6 +2906,20 @@ _reap_fanout_recorded_descendants "ADT_FANOUT_LANE_MARKER" "${AGENT_SESSION_IDS[
 # live wrapper).
 _reap_fanout_controller_subshells "${_fanout_pids[@]:-}"
 
+# [#406 review finding, round 2]: repeat the marker sweep AFTER killing the
+# controllers. A controller that passed its liveness-dir check and had
+# already committed to `_one_codex_review_run`'s launch (i.e. it is between
+# the check and the actual `_run_with_timeout` spawn) can still fork ONE more
+# marked `codex review` child in the window between the FIRST marker sweep
+# above and this section's controller-PID kill — that child is born with the
+# marker (it inherits the subshell's exported env) but landed too late for
+# the first sweep to see it, and its PGID was never sidecar-recorded (the
+# fan-out dir is already gone by this point). Re-running the same sweep here
+# catches exactly that child: idempotent against every PID the first pass
+# already reaped (already dead → silent skip) and reaches the late-spawned
+# one the first pass structurally could not see yet.
+_reap_fanout_recorded_descendants "ADT_FANOUT_LANE_MARKER" "${AGENT_SESSION_IDS[@]:-}"
+
 # Aggregate under the unanimous-PASS rule (INV-40). Map the aggregate onto the
 # existing PASSED_VERDICT / LATEST_COMMENT / AGENT_EXIT variables so the
 # downstream PASS / FAIL / crash branches and the six emit_verdict_trailer

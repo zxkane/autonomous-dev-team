@@ -198,6 +198,35 @@ assert_grep "TC-RFCS-008b existing recorded-descendant sweep call site is unchan
   '_reap_fanout_recorded_descendants "ADT_FANOUT_LANE_MARKER" "\$\{AGENT_SESSION_IDS\[@\]:-\}"' "$WRAPPER"
 
 # ============================================================================
+# TC-RFCS-009: review-round-2 finding — a controller that has already
+# committed to a re-run launch can spawn ONE more marked child in the window
+# between the FIRST marker sweep and the controller-PID kill; that child's
+# PGID is never sidecar-recorded (the fan-out dir is already gone), so only a
+# SECOND marker sweep AFTER the controller kill can catch it.
+# ============================================================================
+echo
+echo "=== TC-RFCS-009: marker sweep repeats AFTER the controller-subshell kill (closes the late-spawn race) ==="
+echo
+
+_sweep_count=$(grep -cE '_reap_fanout_recorded_descendants "ADT_FANOUT_LANE_MARKER" "\$\{AGENT_SESSION_IDS\[@\]:-\}"' "$WRAPPER")
+assert_eq "TC-RFCS-009a marker sweep call appears exactly twice (once before, once after the controller kill)" \
+  "2" "$_sweep_count"
+
+_first_sweep_line=$(grep -nE '_reap_fanout_recorded_descendants "ADT_FANOUT_LANE_MARKER" "\$\{AGENT_SESSION_IDS\[@\]:-\}"' "$WRAPPER" | head -1 | cut -d: -f1)
+_controller_kill_line=$(grep -nE '^_reap_fanout_controller_subshells "\$\{_fanout_pids\[@\]:-\}"' "$WRAPPER" | head -1 | cut -d: -f1)
+_second_sweep_line=$(grep -nE '_reap_fanout_recorded_descendants "ADT_FANOUT_LANE_MARKER" "\$\{AGENT_SESSION_IDS\[@\]:-\}"' "$WRAPPER" | tail -1 | cut -d: -f1)
+
+if [[ -n "$_first_sweep_line" && -n "$_controller_kill_line" && -n "$_second_sweep_line" \
+      && "$_first_sweep_line" -lt "$_controller_kill_line" \
+      && "$_controller_kill_line" -lt "$_second_sweep_line" ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-RFCS-009b ordering is first-sweep < controller-kill < second-sweep"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-RFCS-009b ordering is NOT first-sweep < controller-kill < second-sweep (got lines $_first_sweep_line / $_controller_kill_line / $_second_sweep_line)"
+  FAIL=$((FAIL + 1))
+fi
+
+# ============================================================================
 # TC-RSG: Layer 3b — rc-sidecar write guarded on the fan-out dir existing
 # ============================================================================
 echo

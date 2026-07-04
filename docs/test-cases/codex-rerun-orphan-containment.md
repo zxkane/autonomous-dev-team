@@ -48,6 +48,7 @@ New assertions in `tests/unit/test-codex-rerun-orphan-containment.sh`, mirroring
 | TC-RFCS-006 | wrapper wiring: `autonomous-review.sh` calls `_reap_fanout_controller_subshells` at the post-resolution reap call site, fed `${_fanout_pids[@]:-}` | source-of-truth grep |
 | TC-RFCS-007 | wrapper wiring: the call site does NOT `lane_record_pgid` these PIDs | source-of-truth (no `lane_record_pgid.*_fanout_pids` in the wrapper) |
 | TC-RFCS-008 | existing `_reap_fanout_processes` / `_reap_fanout_recorded_descendants` call sites unchanged | source-of-truth (byte-identical substrings still present, mirrors TC-REAP-DESC-005's regression guard) |
+| TC-RFCS-009 (review-round-2 finding) | the marker sweep (`_reap_fanout_recorded_descendants "ADT_FANOUT_LANE_MARKER" ...`) closes the late-spawn race: a controller can fork one more marked child AFTER the first sweep but BEFORE the controller-PID kill, and that child's PGID is never sidecar-recorded | the call appears exactly twice in the wrapper, ordered first-sweep < controller-kill < second-sweep (source-of-truth grep + line-order check) |
 
 ## Layer 3a — fan-out-dir liveness gate (pre-launch)
 
