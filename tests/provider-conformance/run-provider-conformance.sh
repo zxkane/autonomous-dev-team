@@ -248,6 +248,33 @@ _invoke() {
   '
 }
 
+# _run_positional_reject <verb> <invoke_snippet> — drive VERB with malformed
+# positionals (empty / missing / non-numeric-where-required) under the stub
+# `gh`. Assert rc≠0 (specifically rc==2 for the positional-validation gate)
+# AND that gh was NEVER called (empty argv file) — the leaf's validation
+# must fail-loud BEFORE dispatching. Used for the three W1e write verbs
+# (chp_create_pr/approve/merge) whose positional-validation contract is
+# documented in provider-spec.md §3.2. Returns 0/prints PASS or FAIL via
+# emit(). (#400 review-response follow-up: without this the runner had a
+# negative-space gap — an empty positional silently reached gh.)
+_run_positional_reject() {
+  local verb="$1" invoke_snippet="$2"
+  local argv_file="$work_root/.argv-$verb-reject.json"
+  local out rc
+  out="$(_invoke _PCF_GH_MODE="ok" _PCF_ARGV_FILE="$argv_file" "$invoke_snippet" 2>&1)"; rc=$?
+  # gh MUST NOT have been called (validation gate fires before dispatch).
+  if [[ -f "$argv_file" ]]; then
+    emit FAIL "$verb" "positional-reject: gh was called on malformed args (leaked argv: $(_recorded_argv "$argv_file"))"
+    rm -f "$argv_file"
+    return
+  fi
+  # rc must be non-zero (validation gate rejected the call).
+  if [[ "$rc" == "0" ]]; then
+    emit FAIL "$verb" "positional-reject: rc 0 on malformed positional (should fail-loud)"
+    return
+  fi
+}
+
 # _run_write_assert <verb> <argv_pattern> [extra_argv] — drive VERB once with
 # the stub gh succeeding (assert rc 0 + argv matches ARGV_PATTERN, a
 # fixed-string grep needle) and once with the stub failing (assert rc != 0,
@@ -939,6 +966,43 @@ _assert_verb() {
       ;;
     chp_reply_review_comment)
       _run_write_assert "$verb" "api repos/o/r/pulls/42/comments -X POST" "42 1 hello"
+      ;;
+    chp_create_pr)
+      # W1e (#400): abstract positional contract — caller passes <head> <title>
+      # <body>; the GitHub leaf owns `--head/--title/--body`. Under the stub gh
+      # the leaf emits the fixed flag-tail from the positional inputs.
+      _run_write_assert "$verb" "pr create --repo o/r --head feat/x --title t --body b" \
+        "feat/x t b"
+      # Positional-validation gate (#400 review r1): HEAD_BRANCH and TITLE
+      # empty → rc≠0 + no gh call. BODY MAY be empty by design (caller
+      # `drain_agent_pr_create` derives body from `tail -n +2/+3` yielding
+      # "" on a title-only PR-create file — a legitimate GitHub create),
+      # so empty-BODY is NOT rejected here.
+      _run_positional_reject "$verb" 'chp_create_pr "" t b'
+      _run_positional_reject "$verb" 'chp_create_pr feat/x "" b'
+      ;;
+    chp_approve)
+      # W1e (#400): abstract positional contract — caller passes <pr> <body>;
+      # the GitHub leaf owns `--approve --body`. The leaf's emitted argv is
+      # `gh pr review $PR --repo $REPO --approve --body $BODY`.
+      _run_write_assert "$verb" "pr review 42 --repo o/r --approve --body msg" \
+        "42 msg"
+      # Positional-validation gate: PR must be numeric, BODY must be non-empty.
+      _run_positional_reject "$verb" 'chp_approve "" msg'
+      _run_positional_reject "$verb" 'chp_approve abc msg'
+      _run_positional_reject "$verb" 'chp_approve 42 ""'
+      ;;
+    chp_merge)
+      # W1e (#400): abstract positional contract — caller passes <pr> only;
+      # merge strategy is contract-fixed (squash + delete). The leaf's emitted
+      # argv is `gh pr merge $PR --repo $REPO --squash --delete-branch`.
+      _run_write_assert "$verb" "pr merge 42 --repo o/r --squash --delete-branch" \
+        "42"
+      # Positional-validation gate: PR must be non-empty numeric. This is the
+      # highest-blast-radius verb — merging the wrong PR would be catastrophic
+      # so we assert the reject explicitly.
+      _run_positional_reject "$verb" 'chp_merge ""'
+      _run_positional_reject "$verb" 'chp_merge abc'
       ;;
     chp_close_keyword)
       _run_close_keyword_assert

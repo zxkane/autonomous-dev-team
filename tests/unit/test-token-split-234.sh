@@ -1548,8 +1548,12 @@ GHSTUB
     AGENT_GH_TOKEN_FILE='/scoped'; AGENT_PR_CREATE_FILE='$PRFL1'
     drain_agent_pr_create 346 owner/repo
   " >/dev/null 2>&1
-  if grep -qF 'VERB_CREATE_PR --head feat/issue-346-foo --title feat: title --body' "$LEAFLOG1" && [[ ! -s "$TRIPL1" ]]; then
-    assert_pass "TC-FBDISP-020 non-github + leaf-present: drain_agent_pr_create routes through chp_create_pr (no raw gh)"
+  # W1e (#400): abstract positional contract — the broker passes <head> <title>
+  # <body> POSITIONALLY; the non-GitHub leaf records them in the fixture's
+  # VERB_CREATE_PR shape (no `--head/--title/--body` flags, which the seam no
+  # longer carries; they now live inside the GitHub-only leaf).
+  if grep -qF 'VERB_CREATE_PR feat/issue-346-foo feat: title Body.' "$LEAFLOG1" && [[ ! -s "$TRIPL1" ]]; then
+    assert_pass "TC-FBDISP-020 non-github + leaf-present: drain_agent_pr_create routes through chp_create_pr (positional <head> <title> <body>, W1e #400)"
   else
     assert_fail "TC-FBDISP-020 verb path not taken (leaf=$(cat "$LEAFLOG1" 2>/dev/null); raw=$(cat "$TRIPL1" 2>/dev/null))"
   fi

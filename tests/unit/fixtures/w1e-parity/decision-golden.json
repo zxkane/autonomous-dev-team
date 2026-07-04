@@ -1,0 +1,36 @@
+{
+  "chp_create_pr.rc0": {
+    "log_contains": "brokered the PR create for issue #400",
+    "rc": 0
+  },
+  "chp_create_pr.rc1": {
+    "log_contains": "brokered PR create (head=feat/issue-400-foo) failed",
+    "rc": 0
+  },
+  "chp_approve.rc0": {
+    "log_contains": "PR #4242 approved successfully.",
+    "exit_code": null,
+    "transition": null,
+    "notification_posted": false
+  },
+  "chp_approve.rc1": {
+    "log_contains": "Falling back to manual review notification.",
+    "exit_code": 0,
+    "transition": "reviewing->approved",
+    "notification_posted": true
+  },
+  "chp_merge.rc0": {
+    "log_contains": "PR #4242 merged successfully.",
+    "metrics_result": "success",
+    "transition": "reviewing,autonomous->approved",
+    "pr_comment_marker_posted": false,
+    "verdict_trailer_pending_dev": false
+  },
+  "chp_merge.rc1": {
+    "log_contains": "Auto-merge failed (rc=1)",
+    "metrics_result": "failure",
+    "excerpt_first_500_chars_match": true,
+    "pr_comment_marker_posted": true,
+    "verdict_trailer_pending_dev": true
+  }
+}

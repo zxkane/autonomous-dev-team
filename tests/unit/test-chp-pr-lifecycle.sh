@@ -130,14 +130,18 @@ argv=$(run_trace chp_mergeable 42)
 assert_eq "TC-CHP-MERGEABLE chp_mergeable emits gh pr view --json mergeable -q .mergeable argv (W1d absorbs the projection)" \
   "pr view 42 --repo $REPO --json mergeable -q .mergeable " "$argv"
 
-# TC-CHP-CREATE — drain_agent_pr_create's `gh pr create --head … --title … --body …`.
-argv=$(run_trace chp_create_pr --head feat/x --title T --body B)
-assert_eq "TC-CHP-CREATE chp_create_pr byte-identical gh pr create argv" \
+# TC-CHP-CREATE — W1e (#400) abstract positional contract: `chp_create_pr
+# <head-branch> <title> <body>`; the GitHub leaf owns `--head/--title/--body`,
+# so the emitted `gh pr create` argv is IDENTICAL to the pre-#400 caller-
+# composed line but is now driven by three positionals.
+argv=$(run_trace chp_create_pr feat/x T B)
+assert_eq "TC-CHP-CREATE chp_create_pr leaf-emitted gh pr create argv from positional inputs (W1e #400)" \
   "pr create --repo $REPO --head feat/x --title T --body B " "$argv"
 
-# TC-CHP-APPROVE — autonomous-review.sh's `gh pr review … --approve --body …`.
-argv=$(run_trace chp_approve 42 --approve --body OK)
-assert_eq "TC-CHP-APPROVE chp_approve byte-identical gh pr review --approve argv" \
+# TC-CHP-APPROVE — W1e (#400) abstract positional contract: `chp_approve
+# <pr> <body>`; the GitHub leaf owns `--approve --body`.
+argv=$(run_trace chp_approve 42 OK)
+assert_eq "TC-CHP-APPROVE chp_approve leaf-emitted gh pr review --approve argv from positional inputs (W1e #400)" \
   "pr review 42 --repo $REPO --approve --body OK " "$argv"
 
 # TC-CHP-REQCHANGES — lib-review-request-changes.sh's `gh pr review … --request-changes --body …`.
@@ -145,9 +149,12 @@ argv=$(run_trace chp_request_changes 42 "blocking finding")
 assert_eq "TC-CHP-REQCHANGES chp_request_changes byte-identical gh pr review --request-changes argv" \
   "pr review 42 --repo $REPO --request-changes --body blocking finding " "$argv"
 
-# TC-CHP-MERGE — autonomous-review.sh's `gh pr merge … --squash --delete-branch`.
-argv=$(run_trace chp_merge 42 --squash --delete-branch)
-assert_eq "TC-CHP-MERGE chp_merge byte-identical gh pr merge --squash --delete-branch argv" \
+# TC-CHP-MERGE — W1e (#400) abstract positional contract: `chp_merge <pr>`.
+# Merge strategy is CONTRACT-FIXED (squash + delete source branch); the GitHub
+# leaf emits `--squash --delete-branch` internally. The emitted gh argv is
+# IDENTICAL to the pre-#400 caller-composed line.
+argv=$(run_trace chp_merge 42)
+assert_eq "TC-CHP-MERGE chp_merge leaf-emitted gh pr merge --squash --delete-branch argv from positional input (W1e #400)" \
   "pr merge 42 --repo $REPO --squash --delete-branch " "$argv"
 
 # TC-CHP-THREADS — resolve-threads.sh reviewThreads list GraphQL argv carries the query.
@@ -580,7 +587,10 @@ env -u PROJECT_DIR REPO="$REPO" PRFILE="$prfile" SENTINEL="$pr_sentinel" \
       drain_agent_pr_create 282 "'"$REPO"'" >/dev/null 2>&1
   '
 broker_pr=$(cat "$pr_sentinel"); rm -f "$prfile" "$pr_sentinel"
-assert_contains "TC-CHP-BROKER-CREATE drain_agent_pr_create routes through chp_create_pr (--head/--title/--body)" "CHP_CREATE_PR:--head feat/issue-282-foo --title My title --body" "$broker_pr"
+# W1e (#400): broker now passes three POSITIONALS (<head> <title> <body>) — no
+# `--head/--title/--body` on the caller line; the GitHub leaf owns those flags.
+assert_contains "TC-CHP-BROKER-CREATE drain_agent_pr_create routes through chp_create_pr (positional <head> <title> <body>, W1e #400)" \
+  "CHP_CREATE_PR:feat/issue-282-foo My title Body line." "$broker_pr"
 if [[ "$broker_pr" != *"RAW_GH_PR_CREATE"* ]]; then
   echo -e "  ${GREEN}PASS${NC}: TC-CHP-BROKER-CREATE no raw 'gh pr create' fallback when chp_create_pr is defined"; PASS=$((PASS+1))
 else

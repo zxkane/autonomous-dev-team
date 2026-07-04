@@ -1,0 +1,41 @@
+# decision-golden.json.meta — provenance sidecar for decision-golden.json (issue #400, R5).
+#
+# Captured by running the PRE-CHANGE (byte-identical-passthrough) callers —
+# drain_agent_pr_create (lib-auth.sh), the PASS-path chp_approve site
+# (autonomous-review.sh), and the merge path chp_merge site
+# (autonomous-review.sh) — against a stubbed CHP provider with the three write
+# leaves returning controllable rc/output, on the FIRST TDD commit of the #400
+# W1e branch (before the abstract-contract rewrite landed). Values are
+# CALLER-observable DECISIONS (log line substrings, transition edges, whether
+# a manual-merge notification / auto-merge-failure marker / verdict trailer
+# was posted, whether the merge-failure excerpt matched on the first 500
+# chars) — not gh argv (that is proven byte-identical by
+# test-chp-pr-lifecycle.sh's golden trace, which is re-pinned to the NEW
+# leaf-emitted argv in the same PR).
+#
+# Fixture classes (each caller run once per class):
+#   chp_create_pr.rc0 — leaf succeeds; broker logs the success line.
+#   chp_create_pr.rc1 — leaf fails; broker logs the "brokered PR create ...
+#                       failed" WARN, returns 0 (the no-PR retry re-queues).
+#   chp_approve.rc0   — leaf succeeds; wrapper falls through to the merge/
+#                       no-auto-close branching (no manual-merge fallback).
+#   chp_approve.rc1   — leaf fails; wrapper posts manual-merge notification
+#                       + reviewing->approved transition + exit 0.
+#   chp_merge.rc0     — leaf succeeds; wrapper emits merge-success metrics +
+#                       the reviewing,autonomous->approved multi-remove
+#                       transition; NO PR-comment marker, NO pending-dev
+#                       verdict trailer.
+#   chp_merge.rc1     — leaf fails; wrapper captures the first-500-chars
+#                       failure excerpt into a PR comment marker + emits the
+#                       merge-failure metrics + posts the pending-dev
+#                       verdict trailer via the [INV-77] retry channel.
+#                       (excerpt_first_500_chars_match asserts the leaf's
+#                       stdout/stderr is preserved through the seam so the
+#                       excerpt content matches the pre-#400 byte-identical
+#                       leaf output for the same failure text.)
+#
+# Regenerate (only if the OLD pre-#400 semantics are ever in dispute):
+# checkout the commit immediately before #400's leaf rewrite, source
+# lib-auth.sh / autonomous-review.sh under the parity harness in
+# tests/unit/test-w1e-chp-write-parity.sh with the parity fixture's chp_*
+# overrides, and re-run.

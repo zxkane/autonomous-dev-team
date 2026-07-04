@@ -3608,10 +3608,14 @@ if [[ "$PASSED_VERDICT" == "true" ]]; then
     log "ERROR: Token refresh failed — token daemon may have crashed. Attempting approval with current token..."
   fi
   log "Submitting PR approval for PR #${PR_NUMBER}..."
-  # [INV-87] (#282) the `gh pr review --approve` leaf moves behind chp_approve; the
-  # INV-52/INV-79 wrapper-owns-approve ownership + the PASS-gate chain stay caller-side.
-  if chp_approve "$PR_NUMBER" --approve \
-    --body "All acceptance criteria verified.$(if [[ "${E2E_ACTIVE:-false}" == "true" ]]; then echo " E2E verification passed."; fi)" 2>&1; then
+  # [INV-87] (#282, W1e-abstracted #400) the `gh pr review --approve` leaf moves
+  # behind chp_approve — the verb takes TWO POSITIONALS `<pr> <body>` (W1e
+  # abstract contract, #347/#400); the GitHub leaf owns the `--approve --body`
+  # flags internally. The INV-52/INV-79 wrapper-owns-approve ownership + PASS-
+  # gate chain stay caller-side. rc-only contract: gh rc≠0 → leaf rc≠0 drives
+  # the manual-review-notification + reviewing→approved + exit 0 fallback below.
+  if chp_approve "$PR_NUMBER" \
+    "All acceptance criteria verified.$(if [[ "${E2E_ACTIVE:-false}" == "true" ]]; then echo " E2E verification passed."; fi)" 2>&1; then
     log "PR #${PR_NUMBER} approved successfully."
   else
     log "ERROR: Failed to submit PR approval for PR #${PR_NUMBER}."
@@ -3648,11 +3652,19 @@ if [[ "$PASSED_VERDICT" == "true" ]]; then
     # Capture merge stdout+stderr so the failure-path PR comment can
     # surface the merge error to the dev re-dispatch (#145).
     set +e
-    # [INV-87] (#282) the `gh pr merge` leaf moves behind chp_merge; INV-52/INV-79
-    # ownership unchanged. [M4]/[INV-33]: merge_closes_issue=1 (GitHub) means the
+    # [INV-87] (#282, W1e-abstracted #400) the `gh pr merge` leaf moves behind
+    # chp_merge — the verb takes ONE POSITIONAL `<pr>` (W1e abstract contract,
+    # #347/#400); the merge strategy (squash + delete source branch) is CONTRACT-
+    # FIXED, not a caller option (a future strategy is a spec amendment, not a
+    # flag pass-through). The GitHub leaf emits `--squash --delete-branch`
+    # internally; the emitted gh argv is IDENTICAL to the pre-#400 line. INV-52/
+    # INV-79 ownership unchanged. Provider diagnostics are surfaced through the
+    # seam (no leaf-side redirects), so the `2>&1` capture into MERGE_OUT (used
+    # as the first-500-chars auto-merge-failure PR-comment excerpt, #145) is
+    # unchanged. [M4]/[INV-33]: merge_closes_issue=1 (GitHub) means the
     # `Closes #N` PR body auto-transitions the issue on merge — the wrapper MUST NOT
     # call itp_transition_state after merge (it does not; see the INV-33 note below).
-    MERGE_OUT=$(chp_merge "$PR_NUMBER" --squash --delete-branch 2>&1)
+    MERGE_OUT=$(chp_merge "$PR_NUMBER" 2>&1)
     MERGE_RC=$?
     set -e
     [[ -n "$MERGE_OUT" ]] && log "chp_merge output: ${MERGE_OUT}"

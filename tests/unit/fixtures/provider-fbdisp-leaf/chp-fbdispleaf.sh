@@ -21,7 +21,12 @@ chp_fbdispleaf_pr_list() {
 }
 
 chp_fbdispleaf_create_pr() {
-  printf 'VERB_CREATE_PR %s\n' "$*" >> "${CHP_FBDISP_LEAF_LOG:-/dev/null}"
+  # W1e (#400): positional contract — the broker passes <head> <title> <body>,
+  # NOT `--head/--title/--body`. Record all three positionals in the same
+  # single-line VERB_CREATE_PR shape the test asserts against.
+  local head_branch="$1" title="$2" body="$3"
+  printf 'VERB_CREATE_PR %s %s %s\n' "$head_branch" "$title" "$body" \
+    >> "${CHP_FBDISP_LEAF_LOG:-/dev/null}"
 }
 
 chp_fbdispleaf_trigger_bot() {

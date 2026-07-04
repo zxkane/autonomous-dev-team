@@ -214,10 +214,11 @@ visibly enumerates the W1 backlog per R3.
 
 ## Docs (R5/R6, same PR)
 
-- `docs/pipeline/provider-spec.md`: add the `CONTRACT-PENDING` token to the 13
-  gh-argv-passthrough verb rows in §3.1/§3.2 (R3); add the verb→governing-cap
-  table to §4 (R4, mirrors `cap-map.conf`); add a per-verb
-  `TC-PCONF-NNN` checklist section (R5).
+- `docs/pipeline/provider-spec.md`: add the `CONTRACT-PENDING` token to the
+  gh-argv-passthrough verb rows in §3.1/§3.2 (13 rows at #370 landing; #371
+  W1a removed 3 and #400 W1e removed 3, leaving 7 as of writing) (R3); add
+  the verb→governing-cap table to §4 (R4, mirrors `cap-map.conf`); add a
+  per-verb `TC-PCONF-NNN` checklist section (R5).
 - `docs/pipeline/invariants.md`: new `INV-106` — "provider conformance is
   spec-defined and regression-pinned by a hermetic parameterized runner" —
   with the `_Triage (issue #236): [machine-checked: tests/unit/test-provider-conformance-runner.sh]_`
