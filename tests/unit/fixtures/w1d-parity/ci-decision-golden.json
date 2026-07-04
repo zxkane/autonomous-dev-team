@@ -1,0 +1,88 @@
+{
+  "all_success_one": {
+    "gh_stdout": "[{\"state\":\"SUCCESS\"}]",
+    "gh_rc": 0,
+    "old_ci_is_green_rc": 0,
+    "new_ci_is_green_rc": 0,
+    "new_token": "green"
+  },
+  "all_success_many": {
+    "gh_stdout": "[{\"state\":\"SUCCESS\"},{\"state\":\"SUCCESS\"},{\"state\":\"SUCCESS\"}]",
+    "gh_rc": 0,
+    "old_ci_is_green_rc": 0,
+    "new_ci_is_green_rc": 0,
+    "new_token": "green"
+  },
+  "mixed_pending": {
+    "gh_stdout": "[{\"state\":\"SUCCESS\"},{\"state\":\"PENDING\"}]",
+    "gh_rc": 1,
+    "old_ci_is_green_rc": 1,
+    "new_ci_is_green_rc": 1,
+    "new_token": "pending"
+  },
+  "mixed_failure": {
+    "gh_stdout": "[{\"state\":\"SUCCESS\"},{\"state\":\"FAILURE\"}]",
+    "gh_rc": 1,
+    "old_ci_is_green_rc": 1,
+    "new_ci_is_green_rc": 1,
+    "new_token": "failed"
+  },
+  "skipped_success": {
+    "gh_stdout": "[{\"state\":\"SKIPPED\"},{\"state\":\"SUCCESS\"}]",
+    "gh_rc": 0,
+    "old_ci_is_green_rc": 1,
+    "new_ci_is_green_rc": 1,
+    "new_token": "pending"
+  },
+  "empty_array": {
+    "gh_stdout": "[]",
+    "gh_rc": 0,
+    "old_ci_is_green_rc": 1,
+    "new_ci_is_green_rc": 1,
+    "new_token": "none"
+  },
+  "transport_error": {
+    "gh_stdout": "",
+    "gh_rc": 1,
+    "old_ci_is_green_rc": 1,
+    "new_ci_is_green_rc": 1,
+    "new_token": ""
+  },
+  "failure_and_skipped": {
+    "gh_stdout": "[{\"state\":\"FAILURE\"},{\"state\":\"SKIPPED\"}]",
+    "gh_rc": 1,
+    "old_ci_is_green_rc": 1,
+    "new_ci_is_green_rc": 1,
+    "new_token": "failed"
+  },
+  "cancelled_and_pending": {
+    "gh_stdout": "[{\"state\":\"CANCELLED\"},{\"state\":\"PENDING\"}]",
+    "gh_rc": 1,
+    "old_ci_is_green_rc": 1,
+    "new_ci_is_green_rc": 1,
+    "new_token": "failed"
+  },
+  "in_progress_only": {
+    "gh_stdout": "[{\"state\":\"IN_PROGRESS\"}]",
+    "gh_rc": 1,
+    "old_ci_is_green_rc": 1,
+    "new_ci_is_green_rc": 1,
+    "new_token": "pending"
+  },
+  "rc_nonzero_valid_json_success": {
+    "gh_stdout": "[{\"state\":\"SUCCESS\"}]",
+    "gh_rc": 1,
+    "old_ci_is_green_rc": 0,
+    "new_ci_is_green_rc": 0,
+    "new_token": "green",
+    "_note": "gh rc-quirk: gh pr checks may exit non-zero even when the JSON payload is valid; the leaf derives the token from stdout, not gh's rc."
+  },
+  "rc_nonzero_garbage_stdout": {
+    "gh_stdout": "some garbage error",
+    "gh_rc": 1,
+    "old_ci_is_green_rc": 1,
+    "new_ci_is_green_rc": 1,
+    "new_token": "",
+    "_note": "Non-JSON stdout + non-zero rc = genuine transport failure; leaf rc != 0."
+  }
+}

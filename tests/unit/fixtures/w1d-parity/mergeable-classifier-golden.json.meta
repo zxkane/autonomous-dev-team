@@ -1,0 +1,14 @@
+# mergeable-classifier-golden.json.meta — provenance sidecar (#399 W1d, R4).
+#
+# Captures the byte-unchanged `_classify_mergeable_gate` output for the FULL
+# TC-MG-CLS input space (test-autonomous-review-mergeable-gate.sh:87 — MERGEABLE,
+# mergeable, CONFLICTING, conflicting, UNKNOWN, empty, garbage, CLEAN, BEHIND).
+# The classifier does NOT change in #399 — `lib-review-mergeable.sh` ships
+# byte-unchanged; the R4 parity gate is that after `chp_mergeable`'s new pinned
+# token contract (MERGEABLE|CONFLICTING|UNKNOWN raw values, matching GitHub's
+# vocabulary) the classifier gate result on every input is unchanged. Only
+# MERGEABLE / mergeable proceed (2 out of 9), matching TC-MG-CLS-08's pinned
+# stale-UNKNOWN-closed contract.
+#
+# Regenerate: source `lib-review-mergeable.sh` and run
+# `_classify_mergeable_gate "$in"` per row.
