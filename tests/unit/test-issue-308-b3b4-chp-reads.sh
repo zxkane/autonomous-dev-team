@@ -93,12 +93,16 @@ gh() {
   local n; n=$(cat "$REC_DIR/.count" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$REC_DIR/.count"
   : > "$REC_DIR/call-$n"
   printf "%s\0" "$@" >> "$REC_DIR/call-$n"
-  # Tag the verb (first two args) so the harness can find the pr-list/pr-view call.
+  # Tag the verb (first two args) so the harness can find the api-graphql/
+  # pr-view call.
   printf "%s %s\n" "${1:-}" "${2:-}" >> "$REC_DIR/.verbs"
-  # Benign payloads: pr list → "0" (no PR) / empty number; pr view → empty body;
-  # else 0. (#316 removed the lib-auth `gh repo view` head-resolution fallback —
-  # Option A trusts `origin` directly — so no `repo view` stub branch is needed.)
-  if [[ "${1:-}" == "pr" && "${2:-}" == "list" ]]; then printf ""; return 0; fi
+  # W1c1 (#397): chp_pr_list now emits `gh api graphql` (cursor page walk).
+  # Return the empty-PR envelope so the caller-side jq counts 0 (no PR).
+  # pr view stays byte-identical (chp_pr_view is unchanged at W1c1).
+  if [[ "${1:-}" == "api" && "${2:-}" == "graphql" ]]; then
+    printf %s "{\"data\":{\"repository\":{\"pullRequests\":{\"pageInfo\":{\"endCursor\":null,\"hasNextPage\":false},\"nodes\":[]}}}}"
+    return 0
+  fi
   if [[ "${1:-}" == "pr" && "${2:-}" == "view" ]]; then printf ""; return 0; fi
   return 0
 }
@@ -146,27 +150,29 @@ env -u CODE_HOST -u AUTONOMOUS_CONF -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR \
     drain_agent_pr_create $issue \"\$REPO\"
   " >/dev/null 2>&1
 
-if [[ -f "$REC1/.verbs" ]] && grep -qx "pr list" "$REC1/.verbs"; then
-  pass "S1 seam-reachability: stub OBSERVED a 'gh pr list' call through chp_pr_list (exercised, not just reachable)"
-  cn=$(call_for_verb "$REC1" pr list) && read_call "$REC1" "$cn"
-  # W1c1 (#397) reshape: the leaf now emits gh's argv without -q; the caller-
-  # side jq runs OUTSIDE the gh call. New shape: `pr list --repo $REPO
-  # --state open --limit <N> --json <fields>` — no -q, positional STATE +
-  # FIELDS-CSV on the CALLER side. Assert the structural argv: pr list,
-  # --repo <REPO>, --state open, --limit present, --json contains body.
+if [[ -f "$REC1/.verbs" ]] && grep -qx "api graphql" "$REC1/.verbs"; then
+  pass "S1 seam-reachability: stub OBSERVED a 'gh api graphql' call through chp_pr_list (exercised, not just reachable)"
+  cn=$(call_for_verb "$REC1" api graphql) && read_call "$REC1" "$cn"
+  # W1c1 (#397) reshape: the leaf now emits `gh api graphql` with cursor
+  # pagination (§3.5). No `--limit`/`--json`/`-q` cross the seam. Positional
+  # STATE + FIELDS-CSV live on the CALLER side. Assert the structural argv:
+  # api graphql, owner/repo binds, query carries pullRequests + states +
+  # pageInfo + body selection.
   argv_joined="${CALL_ARGV[*]:-}"
-  assert_eq "S1 argv[0..1]=pr list" "pr list" "${CALL_ARGV[0]:-} ${CALL_ARGV[1]:-}"
-  assert_contains "S1 argv --repo \$REPO present" "--repo $REPO" "$argv_joined"
-  assert_contains "S1 argv --state open present" "--state open" "$argv_joined"
-  assert_contains "S1 argv --limit present (COMPLETE-set)" "--limit" "$argv_joined"
-  assert_contains "S1 argv --json body-inclusive" "body" "$argv_joined"
+  assert_eq "S1 argv[0..1]=api graphql" "api graphql" "${CALL_ARGV[0]:-} ${CALL_ARGV[1]:-}"
+  assert_contains "S1 -F owner=zxkane present"            "owner=zxkane" "$argv_joined"
+  assert_contains "S1 -F repo=autonomous-dev-team present" "repo=autonomous-dev-team" "$argv_joined"
+  assert_contains "S1 query carries pullRequests(first:100" "pullRequests(first: 100" "$argv_joined"
+  assert_contains "S1 states filter (states:[OPEN])"        "states: [OPEN]" "$argv_joined"
+  assert_contains "S1 pageInfo cursor present (§3.5 exhaustion)" "pageInfo { endCursor hasNextPage" "$argv_joined"
+  assert_contains "S1 query selects body"                    " body " "$argv_joined"
   if [[ "$argv_joined" != *" -q "* ]]; then
     pass "S1 no -q crosses the seam (W1c1 abstract contract)"
   else
     fail "S1 -q leaked into gh argv (W1c1 regression): $argv_joined"
   fi
 else
-  fail "S1 seam-reachability: stub did NOT observe a 'gh pr list' — chp_pr_list not exercised (fail-soft hazard)"
+  fail "S1 seam-reachability: stub did NOT observe a 'gh api graphql' — chp_pr_list not exercised (fail-soft hazard)"
 fi
 rm -rf "$RUNDIR"
 
@@ -191,28 +197,29 @@ env -u CODE_HOST -u AUTONOMOUS_CONF -u PROJECT_DIR \
     drain_agent_bot_triggers $issue \"\$REPO\" '/q review'
   " >/dev/null 2>&1
 
-if [[ -f "$REC2/.verbs" ]] && grep -qx "pr list" "$REC2/.verbs"; then
-  pass "S2 seam-reachability: stub OBSERVED a 'gh pr list' call through chp_pr_list"
-  cn=$(call_for_verb "$REC2" pr list) && read_call "$REC2" "$cn"
-  # W1c1 (#397) reshape: same rationale as S1 above — no -q, positional
-  # STATE + FIELDS-CSV on the caller side; the leaf's argv is
-  # `pr list --repo $REPO --state open --limit <N> --json <fields>`.
+if [[ -f "$REC2/.verbs" ]] && grep -qx "api graphql" "$REC2/.verbs"; then
+  pass "S2 seam-reachability: stub OBSERVED a 'gh api graphql' call through chp_pr_list"
+  cn=$(call_for_verb "$REC2" api graphql) && read_call "$REC2" "$cn"
+  # W1c1 (#397) reshape: same rationale as S1 above — `gh api graphql` +
+  # cursor page walk (§3.5). No `--limit`/`--json`/`-q` cross the seam.
+  # STATE=open maps to states:[OPEN]; FIELDS-CSV=number,body selects both
+  # `number` and `body` in the GraphQL query.
   argv_joined="${CALL_ARGV[*]:-}"
-  assert_eq "S2 argv[0..1]=pr list" "pr list" "${CALL_ARGV[0]:-} ${CALL_ARGV[1]:-}"
-  assert_contains "S2 argv --repo \$REPO present" "--repo $REPO" "$argv_joined"
-  assert_contains "S2 argv --state open present" "--state open" "$argv_joined"
-  assert_contains "S2 argv --limit present (COMPLETE-set)" "--limit" "$argv_joined"
-  # The lib-auth.sh :605 site requests FIELDS-CSV "number,body"; the leaf
-  # unions it with `number` (idempotent) so the --json arg contains both.
-  assert_contains "S2 argv --json number-inclusive" "number" "$argv_joined"
-  assert_contains "S2 argv --json body-inclusive" "body" "$argv_joined"
+  assert_eq "S2 argv[0..1]=api graphql" "api graphql" "${CALL_ARGV[0]:-} ${CALL_ARGV[1]:-}"
+  assert_contains "S2 -F owner=zxkane present"            "owner=zxkane" "$argv_joined"
+  assert_contains "S2 -F repo=autonomous-dev-team present" "repo=autonomous-dev-team" "$argv_joined"
+  assert_contains "S2 query carries pullRequests(first:100" "pullRequests(first: 100" "$argv_joined"
+  assert_contains "S2 states filter (states:[OPEN])"        "states: [OPEN]" "$argv_joined"
+  assert_contains "S2 pageInfo cursor present (§3.5 exhaustion)" "pageInfo { endCursor hasNextPage" "$argv_joined"
+  assert_contains "S2 query selects number"                 " number " "$argv_joined"
+  assert_contains "S2 query selects body"                   " body " "$argv_joined"
   if [[ "$argv_joined" != *" -q "* ]]; then
     pass "S2 no -q crosses the seam (W1c1 abstract contract)"
   else
     fail "S2 -q leaked into gh argv (W1c1 regression): $argv_joined"
   fi
 else
-  fail "S2 seam-reachability: stub did NOT observe a 'gh pr list' — chp_pr_list not exercised"
+  fail "S2 seam-reachability: stub did NOT observe a 'gh api graphql' — chp_pr_list not exercised"
 fi
 rm -rf "$RUNDIR"
 

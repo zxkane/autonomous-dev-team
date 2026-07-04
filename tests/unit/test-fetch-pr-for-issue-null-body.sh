@@ -36,25 +36,19 @@ export PROJECT_ID=test-proj
 export MAX_RETRIES=3
 export MAX_CONCURRENT=5
 
-# Mock `gh pr list --repo R --state open --json F [-q EXPR]` by returning the
-# fixture as the raw array. Under W1c1 (#397) the leaf no longer passes `-q`
-# to gh — its normalization jq runs outside — so this mock supports BOTH the
-# `-q`-filtered pre-#397 shape (any legacy leaf still using it) and the
-# raw-passthrough W1c1 shape.
+# Mock `gh api graphql …` by wrapping the flat fixture array in the GraphQL
+# `.data.repository.pullRequests.{pageInfo, nodes}` envelope the W1c1 (#397)
+# leaf's cursor page-walker reads. Fixtures use the flat
+# `closingIssuesReferences:[{number:N}]` form; the mock reshapes into GraphQL
+# `.nodes[]`. Single-page (`hasNextPage:false`) suffices — every fixture
+# here fits under 100 PRs.
 _MOCK_PR_LIST_JSON=""
 gh() {
-  local q_expr=""
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      -q) q_expr="$2"; shift 2 ;;
-      *) shift ;;
-    esac
-  done
-  if [[ -n "$q_expr" && -n "$_MOCK_PR_LIST_JSON" ]]; then
-    jq -r "$q_expr" <<<"$_MOCK_PR_LIST_JSON"
-  elif [[ -n "$_MOCK_PR_LIST_JSON" ]]; then
-    printf '%s' "$_MOCK_PR_LIST_JSON"
-  fi
+  local flat="${_MOCK_PR_LIST_JSON:-[]}"
+  local reshaped
+  reshaped=$(jq -c '[.[] | . + {closingIssuesReferences: {nodes: (.closingIssuesReferences // [])}}]' <<<"$flat" 2>/dev/null || printf '[]')
+  jq -c --argjson nodes "$reshaped" \
+       '{data:{repository:{pullRequests:{pageInfo:{endCursor:null,hasNextPage:false}, nodes:$nodes}}}}' <<<"{}"
 }
 export -f gh
 

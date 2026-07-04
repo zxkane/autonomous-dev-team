@@ -11,8 +11,10 @@ asserts it matches the pre-refactor call.
 | ID | Verb / leaf | Assertion |
 |---|---|---|
 | TC-CHP-CI | `chp_github_ci_status PR` | argv == `pr checks <PR> --repo <REPO> --json state -q [.[].state]` (anchors `ci_is_green`) |
-| TC-CHP-FINDPR | `chp_github_find_pr_for_issue ISSUE FIELDS` | argv == `pr list --repo <REPO> --state open --json <FIELDS> -q <q>`; FIELDS forwarded byte-identically (#148 — `body` must survive in FIELDS; #274) |
-| TC-CHP-FINDPR-FIELDS-REQUIRED | `chp_github_find_pr_for_issue` w/o FIELDS | errors / non-zero (FIELDS is REQUIRED, M1) |
+| TC-CHP-FINDPR | `chp_github_find_pr_for_issue ISSUE FIELDS-CSV` | **W1c1 (#397, ABSTRACT contract)**: argv is `api graphql -F owner=<owner> -F repo=<repo> -f query=…` with a cursor-page-walker query (`pullRequests(first:100, states:[OPEN], after:$cursor)` + `pageInfo{endCursor,hasNextPage}`). NO `--limit`/`--json`/`-q` crosses the seam (§3.5). Query selects the caller's FIELDS-CSV plus the [INV-86] resolver keys (number, closingIssueNumbers→`closingIssuesReferences.nodes.number`, headRefName); `body` in FIELDS-CSV survives (#148 anchor). |
+| TC-CHP-FINDPR-FIELDS-REQUIRED | `chp_github_find_pr_for_issue` w/o FIELDS-CSV | errors rc≠0 (FIELDS-CSV is REQUIRED, [M1]) |
+| TC-CHP-PRLIST | `chp_github_pr_list STATE FIELDS-CSV` | **W1c1 (#397, ABSTRACT contract)**: same `api graphql` cursor walker; STATE maps to the GraphQL `PullRequestState` filter (`open→[OPEN]`, `closed→[CLOSED]`, `merged→[MERGED]`, `all→[OPEN,CLOSED,MERGED]` — `closed` and `merged` are DISJOINT, diverges from `gh pr list --state closed`). Projection-only (P1-1): output carries EXACTLY the requested keys plus `number`. Empty result → `[]` (never null). |
+| TC-CHP-PRLIST-STATE-REQUIRED / -FIELDS-REQUIRED | `chp_github_pr_list` w/o STATE or w/o FIELDS-CSV | errors rc≠0 (both positional args required) |
 | TC-CHP-MERGEABLE | `chp_github_mergeable PR` | argv == `pr view <PR> --repo <REPO> --json mergeable -q .mergeable`; returns raw token |
 | TC-CHP-APPROVE | `chp_github_approve PR BODY` | argv == `pr review <PR> --repo <REPO> --approve --body <BODY>` |
 | TC-CHP-REQCHANGES | `chp_github_request_changes PR BODY` | argv == `pr review <PR> --repo <REPO> --request-changes --body <BODY>` |

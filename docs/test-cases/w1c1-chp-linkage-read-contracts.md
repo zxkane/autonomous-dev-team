@@ -58,17 +58,17 @@ the `.body != null` guard applied). Under the new normalized shape all 6
 sites converge on the guarded decision — the four ex-unguarded sites (the
 #148 hazard class) now behave the same as the two ex-guarded sites.
 
-- **TC-W1C1-030..033** `needs_open_pr_only` (autonomous-dev.sh:434):
+- **TC-W1C1-030..033** `needs_open_pr_only` (autonomous-dev.sh:438):
   length across rich / empty / boundary / nullbody fixtures.
-- **TC-W1C1-040..043** `pr_exists` (autonomous-dev.sh:774): same shape;
+- **TC-W1C1-040..043** `pr_exists` (autonomous-dev.sh:844): same shape;
   #148 fix case explicitly.
-- **TC-W1C1-050..052** `_pr_created_at` (autonomous-dev.sh:865): earliest
+- **TC-W1C1-050..052** `_pr_created_at` (autonomous-dev.sh:943): earliest
   matching PR's `createdAt`.
-- **TC-W1C1-060..063** `pr_num` (autonomous-dev.sh:1079): first matching
+- **TC-W1C1-060..063** `pr_num` (autonomous-dev.sh:1174): first matching
   PR's `number`; #148 fix case explicitly.
-- **TC-W1C1-070..072** `lib_auth_existing` (lib-auth.sh:453): length; #148
+- **TC-W1C1-070..072** `lib_auth_existing` (lib-auth.sh:454): length; #148
   fix case explicitly.
-- **TC-W1C1-080..082** `lib_auth_pr_number` (lib-auth.sh:605): first PR
+- **TC-W1C1-080..082** `lib_auth_pr_number` (lib-auth.sh:610): first PR
   number; #148 fix case explicitly.
 
 ### Normalization contract
@@ -96,9 +96,29 @@ Anchor: `tests/provider-conformance/run-provider-conformance.sh` +
 
 Anchor: `tests/unit/test-chp-pr-lifecycle.sh` (TC-CHP-FINDPR, TC-CHP-PRLIST).
 
-- The two rewritten leaves emit `gh pr list --repo <R> --state open --limit <N> --json <fields>` (chp_find_pr_for_issue) or `gh pr list --repo <R> --state <state> --limit <N> --json <fields>` (chp_pr_list); no `-q` at the gh boundary.
+- Both leaves emit `gh api graphql -F owner=<owner> -F repo=<repo> -f query=…`
+  and cursor-page-walk `pullRequests(first:100, after:$cursor)` until
+  `pageInfo.hasNextPage == false`. R1 prohibits a fixed `--limit N` (it
+  just moves the silent-truncation threshold); `--json`/`-q` never cross
+  the gh boundary.
+- `chp_find_pr_for_issue` hardcodes `states:[OPEN]` (open-PR resolver only)
+  and unions the caller's FIELDS-CSV with the [INV-86] resolver keys
+  (`number`, `closingIssueNumbers`, `headRefName`).
+- `chp_pr_list` maps STATE ∈ `open|closed|merged|all` to the corresponding
+  GraphQL `PullRequestState` filter (`[OPEN]`, `[CLOSED]`, `[MERGED]`,
+  `[OPEN,CLOSED,MERGED]`); `closed` and `merged` are DISJOINT (diverges
+  from `gh pr list --state closed` which INCLUDES merged — deliberate,
+  see spec §3.2).
+- Both bounded by `CHP_GITHUB_PR_LIST_PAGE_CAP` (default 20 pages = 2000
+  PRs). Cap-hit before exhaustion is fail-CLOSED (rc≠0, no partial output);
+  every page fetch is capture-then-check gated (empty stdout / non-JSON /
+  non-array → rc≠0). Empty match set → `[]` (never null; the #148 fix).
+- Projection-only (P1-1): each output element carries EXACTLY the caller-
+  requested vocabulary keys (plus, for find_pr_for_issue, the three forced
+  resolver keys). No fabrication of unrequested §3.2.1 members.
 - Both verbs error (rc != 0) when the FIELDS-CSV positional is missing;
-  `chp_pr_list` additionally errors on missing STATE.
+  `chp_pr_list` additionally errors on missing STATE. `comments` in
+  FIELDS-CSV → rc 2 loud (issue-level, owned by `itp_list_comments`).
 
 ### Regression suites that must stay green
 

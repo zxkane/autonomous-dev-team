@@ -95,44 +95,55 @@ chp_degraded_reply_review_comment() {
     --jq '{id: .id, url: .html_url}'
 }
 
-# chp_degraded_find_pr_for_issue ISSUE FIELDS-CSV — mirrors chp_github_find_pr_for_issue's
-# W1c1 (#397) abstract contract: normalized JSON candidate array projected to
-# FIELDS-CSV ∪ resolution-keys. body → string, closingIssueNumbers → int-array.
-# The normalization jq is inlined (not sharing chp-github.sh helpers) so this
-# fixture stays a self-contained CHP file.
-_chp_degraded_pr_normalize_jq='
-  [ .[] | {
-      number: .number,
-      state: (.state // ""),
-      title: (.title // ""),
-      body: (.body // ""),
-      createdAt: (.createdAt // null),
-      updatedAt: (.updatedAt // null),
-      mergedAt: (.mergedAt // null),
-      headRefName: (.headRefName // ""),
-      headRefOid: (.headRefOid // ""),
-      reviewDecision: (.reviewDecision // ""),
-      mergeable: (.mergeable // ""),
-      closingIssueNumbers: ([ (.closingIssuesReferences // [])[]?.number ])
-    }
-  ]'
+# chp_degraded_find_pr_for_issue / chp_degraded_pr_list — mirror
+# chp_github_*'s W1c1 (#397) abstract contract with projection-only
+# (P1-1/P2-2): emit EXACTLY the caller-requested vocabulary keys, plus
+# (for find_pr_for_issue) the three [INV-86] resolver keys unconditionally.
+# The runner's P2-2 projection-only assertion would flag over-projection
+# — this fixture is CORRECT for its non-cap-gated verbs.
+_chp_degraded_build_projection() {
+  local fields="$1" forced="$2"
+  local out="{}"
+  local IFS_SAVE=$IFS; IFS=','
+  # shellcheck disable=SC2206
+  local -a all=(${fields} ${forced})
+  IFS="$IFS_SAVE"
+  local f seen=","
+  for f in "${all[@]}"; do
+    [ -n "$f" ] || continue
+    case "$seen" in *",$f,"*) continue ;; esac
+    seen="$seen$f,"
+    case "$f" in
+      number)              out+=' + {number: .number}' ;;
+      body)                out+=' + {body: (.body // "")}' ;;
+      headRefName)         out+=' + {headRefName: (.headRefName // "")}' ;;
+      headRefOid)          out+=' + {headRefOid: (.headRefOid // "")}' ;;
+      closingIssueNumbers) out+=' + {closingIssueNumbers: ([ (.closingIssuesReferences.nodes // [])[]?.number ])}' ;;
+      state)               out+=' + {state: (.state // "")}' ;;
+      title)               out+=' + {title: (.title // "")}' ;;
+      createdAt)           out+=' + {createdAt: (.createdAt // null)}' ;;
+      updatedAt)           out+=' + {updatedAt: (.updatedAt // null)}' ;;
+      mergedAt)            out+=' + {mergedAt: (.mergedAt // null)}' ;;
+      reviewDecision)      out+=' + {reviewDecision: (.reviewDecision // "")}' ;;
+      mergeable)           out+=' + {mergeable: (.mergeable // "")}' ;;
+    esac
+  done
+  printf '[ .data.repository.pullRequests.nodes[]? | %s ]' "$out"
+}
 chp_degraded_find_pr_for_issue() {
   local fields="${2:-}"
   [ -n "$fields" ] || return 2
   local raw
-  raw="$(gh pr list --repo "$REPO" --state open --limit 2000 --json "number,body,closingIssuesReferences,headRefName" 2>/dev/null)" || return 1
-  jq -c "$_chp_degraded_pr_normalize_jq" <<<"$raw"
+  raw="$(gh api graphql -F owner="${REPO%%/*}" -F repo="${REPO##*/}" -f query='{pullRequests}' 2>/dev/null)" || return 1
+  [[ -n "$raw" ]] || return 1
+  jq -c "$(_chp_degraded_build_projection "$fields" "number,closingIssueNumbers,headRefName")" <<<"$raw"
 }
-
-# chp_degraded_pr_list STATE FIELDS-CSV — mirrors chp_github_pr_list's W1c1
-# abstract contract: normalized JSON array projected to FIELDS-CSV.
 chp_degraded_pr_list() {
-  local state="${1:-}"
+  local state="${1:-}" fields="${2:-}"
   [ -n "$state" ] || return 2
-  [ -n "${2:-}" ] || return 2
-  local state_lc
-  state_lc="$(printf '%s' "$state" | tr '[:upper:]' '[:lower:]')"
+  [ -n "$fields" ] || return 2
   local raw
-  raw="$(gh pr list --repo "$REPO" --state "$state_lc" --limit 2000 --json "number,body,closingIssuesReferences,createdAt" 2>/dev/null)" || return 1
-  jq -c "$_chp_degraded_pr_normalize_jq" <<<"$raw"
+  raw="$(gh api graphql -F owner="${REPO%%/*}" -F repo="${REPO##*/}" -f query='{pullRequests}' 2>/dev/null)" || return 1
+  [[ -n "$raw" ]] || return 1
+  jq -c "$(_chp_degraded_build_projection "$fields" "number")" <<<"$raw"
 }

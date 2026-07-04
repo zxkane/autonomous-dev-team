@@ -27,6 +27,8 @@ Driven by `tests/unit/test-provider-conformance-runner.sh`
 | TC-PCONF-014 | Full `--itp github --chp github` run | exits 0; `CONFORMANCE-SUMMARY` line with `fail=0` |
 | TC-PCONF-043 | `itp_read_task` (github) with a valid canned `issue view` payload, `FIELDS_CSV=title,body,state,labels,comments` | PASS; output is a normalized JSON OBJECT (not array), `labels` an array of NAME strings |
 | TC-PCONF-043b | `itp_read_task` requesting `FIELDS_CSV=body` only | output is exactly `{"body": "…"}` — the fields-subset contract |
+| TC-PCONF-044 | `chp_find_pr_for_issue 42 "number,body,headRefOid"` against `pr-list-valid.json` GraphQL envelope | PASS; length=2, `.[0].number==7`, `.[0].body=="Closes #42"`, `.[0].closingIssueNumbers==[42]`, `.[1].body==""` (null→"" normalization), FIELDS-CSV projection ∪ resolver keys present on every node |
+| TC-PCONF-045 | `chp_pr_list open "body,number"` against the same envelope | PASS; length=2, values pinned as above, and **projection-only**: response MUST NOT carry unrequested vocabulary members (closingIssueNumbers/headRefName/mergeable/state/…). Empty envelope → `[]` rc 0. Missing STATE / missing FIELDS-CSV / stub gh FAIL / `comments` requested → rc≠0 |
 
 ## Fail-closed write verbs — rc propagation (github)
 

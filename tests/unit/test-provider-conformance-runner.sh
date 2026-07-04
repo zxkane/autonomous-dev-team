@@ -113,27 +113,29 @@ echo "=== TC-PCONF-040..042: CONTRACT-PENDING tripwire (R3) ==="
 assert_contains "TC-PCONF-040: coverage tripwire PASSes against the real repo" "CONFORMANCE-COVERAGE PASS" "$gh_out"
 
 # TC-PCONF-041: a coverage.conf pending verb whose spec row lacks the token → FAIL.
-# (chp_find_pr_for_issue, not itp_read_task — #396 W1b flipped itp_read_task's
-# spec row to asserted, so it is no longer a pending specimen; #371 W1a
-# similarly retired itp_count_by_state as a specimen before it.)
+# (chp_ci_status — the pending specimen used to be chp_find_pr_for_issue, but
+# #397 W1c1 flipped that spec row to asserted, retiring it as a specimen; #396
+# W1b similarly retired itp_read_task; #371 W1a similarly retired
+# itp_count_by_state. chp_ci_status is the current pending specimen — it stays
+# in the residual pending set until W1(d) lands.)
 scratch="$(mktemp -d)"
-sed 's/chp_find_pr_for_issue=pending/chp_find_pr_for_issue=asserted/' "$COVERAGE_CONF" > "$scratch/coverage-drift1.conf"
+sed 's/chp_ci_status=pending/chp_ci_status=asserted/' "$COVERAGE_CONF" > "$scratch/coverage-drift1.conf"
 drift1_diff="$(
   spec_pending="$(pcf_spec_pending_verbs "$SPEC_MD")"
   cov_pending="$(awk -F= '/=pending$/{print $1}' "$scratch/coverage-drift1.conf" | sort -u)"
   diff <(printf '%s\n' "$spec_pending") <(printf '%s\n' "$cov_pending")
 )"
-assert_contains "TC-PCONF-041: coverage.conf missing a spec-tokened verb → diff names it" "chp_find_pr_for_issue" "$drift1_diff"
+assert_contains "TC-PCONF-041: coverage.conf missing a spec-tokened verb → diff names it" "chp_ci_status" "$drift1_diff"
 
 # TC-PCONF-042: a spec row carrying the token whose verb is NOT pending in coverage.conf → FAIL.
 scratch_spec="$scratch/provider-spec-drift2.md"
-sed '/`chp_find_pr_for_issue ISSUE/s/CONTRACT-PENDING//' "$SPEC_MD" > "$scratch_spec"
+sed '/`chp_ci_status PR/s/CONTRACT-PENDING//' "$SPEC_MD" > "$scratch_spec"
 drift2_diff="$(
   spec_pending="$(pcf_spec_pending_verbs "$scratch_spec")"
   cov_pending="$(awk -F= '/=pending$/{print $1}' "$COVERAGE_CONF" | sort -u)"
   diff <(printf '%s\n' "$spec_pending") <(printf '%s\n' "$cov_pending")
 )"
-assert_contains "TC-PCONF-042: removing a spec token leaves coverage.conf with an orphaned pending verb → diff names it" "chp_find_pr_for_issue" "$drift2_diff"
+assert_contains "TC-PCONF-042: removing a spec token leaves coverage.conf with an orphaned pending verb → diff names it" "chp_ci_status" "$drift2_diff"
 rm -rf "$scratch"
 
 # ===========================================================================

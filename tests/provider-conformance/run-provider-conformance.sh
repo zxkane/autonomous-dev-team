@@ -531,6 +531,24 @@ _run_findpr_assert() {
     emit FAIL "$verb" "FIELDS-CSV projection missing a requested field: ${out:0:200}"
     return
   fi
+  # VALUE assertion (P2-2, review r3 class): the pre-r3 helper only checked
+  # shape — a provider returning fabricated empty `closingIssueNumbers:[]` and
+  # blanked bodies for every element passed silently. Pin the actual values
+  # against the fixture (pr-list-valid.json): PR#7's body carries #42, its
+  # closingIssueNumbers flattens to [42]; PR#8's null body normalizes to ""
+  # and its empty closingIssueNumbers stays [] — proving the leaf actually
+  # walked the GraphQL envelope, not fabricated the shape.
+  if ! jq -e '
+    (length == 2) and
+    (.[0].number == 7) and (.[1].number == 8) and
+    (.[0].body == "Closes #42") and (.[1].body == "") and
+    (.[0].closingIssueNumbers == [42]) and (.[1].closingIssueNumbers == []) and
+    (.[0].headRefName == "feat/issue-42-thing") and (.[1].headRefName == "fix/other") and
+    (.[0].headRefOid == "aaaa") and (.[1].headRefOid == "bbbb")
+  ' >/dev/null 2>&1 <<<"$out"; then
+    emit FAIL "$verb" "fixture-values mismatch (fabricated shape?): ${out:0:200}"
+    return
+  fi
 
   # Fail-CLOSED on gh transport error.
   out="$(_invoke _PCF_GH_MODE="fail" _PCF_ARGV_FILE="$argv_file" 'chp_find_pr_for_issue 42 "number,body,headRefOid" 2>/dev/null' 2>&1)"; rc=$?
@@ -565,11 +583,32 @@ _run_prlist_assert() {
     emit FAIL "$verb" "FIELDS-CSV projection missing requested field (body/number): ${out:0:200}"
     return
   fi
+  # VALUE assertion (P2-2, review r3 class): pin actual values against the
+  # fixture — proves the leaf walked the GraphQL envelope, not fabricated
+  # the shape. PR#7 body="Closes #42", PR#8 body normalizes null→"", order
+  # is GraphQL-node order (descending createdAt in the leaf's ORDER BY but
+  # the fixture's node array is authored to be 7,8 — the test asserts the
+  # leaf preserves that order without reshuffling).
+  if ! jq -e '
+    (length == 2) and
+    (.[0].number == 7) and (.[1].number == 8) and
+    (.[0].body == "Closes #42") and (.[1].body == "")
+  ' >/dev/null 2>&1 <<<"$out"; then
+    emit FAIL "$verb" "fixture-values mismatch (fabricated shape?): ${out:0:200}"
+    return
+  fi
+  # Field-subset ONLY (P1-1 projection-only contract): the caller asked for
+  # `body,number` — the response must NOT carry unrequested vocabulary members
+  # like `closingIssueNumbers` / `headRefName` / `mergeable`.
+  if jq -e 'any(.[]; has("closingIssueNumbers") or has("headRefName") or has("mergeable") or has("state") or has("createdAt") or has("headRefOid") or has("reviewDecision") or has("updatedAt") or has("mergedAt") or has("title") or has("reviews"))' >/dev/null 2>&1 <<<"$out"; then
+    emit FAIL "$verb" "projection-only violated (fabricated field beyond FIELDS=body,number): ${out:0:200}"
+    return
+  fi
 
   # Empty-match convention: the leaf emits `[]` (never null) — feed an empty
-  # payload to prove it.
+  # GraphQL envelope (nodes:[], hasNextPage:false) to prove it.
   local empty_pl="$work_root/.pr-list-empty.json"
-  printf '[]' > "$empty_pl"
+  printf '%s' '{"data":{"repository":{"pullRequests":{"pageInfo":{"endCursor":null,"hasNextPage":false},"nodes":[]}}}}' > "$empty_pl"
   out="$(_invoke _PCF_GH_MODE="ok" _PCF_GH_PAYLOAD="$empty_pl" _PCF_ARGV_FILE="$argv_file" 'chp_pr_list open "body,number"' 2>&1)"; rc=$?
   if [[ "$rc" != "0" || "$out" != "[]" ]]; then
     emit FAIL "$verb" "empty match should emit '[]' rc 0; got rc=$rc out=${out:0:200}"
