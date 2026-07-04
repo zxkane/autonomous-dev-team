@@ -171,7 +171,10 @@ echo "=== AC2 secondary guard: source grep (caller-layer, outside providers/) ==
 _grep_caller_clean() {
   local file="$1" label="$2"
   local lines; lines="$(grep -n 'itp_read_task' "$file" | grep -v '^\s*[0-9]*:\s*#')"
-  if grep -qE -- 'itp_read_task[^$]*(--json| -q )' <<<"$lines"; then
+  # NOTE: match per-LINE, and never with a `[^$]*` gap — every real call line
+  # contains `"$ISSUE_NUMBER"` so a $-excluding gap can never span it (the
+  # pre-fix regex was inert against all six shipped call sites, r3 finding).
+  if grep -qE -- 'itp_read_task.*(--json| -q |--jq)' <<<"$lines"; then
     bad "AC2 secondary ($label): a caller-layer itp_read_task call site still carries a gh flag: $lines"
   else
     ok "AC2 secondary ($label): zero --json/-q tokens on itp_read_task call sites"
@@ -182,6 +185,32 @@ _grep_caller_clean "$DEV_WRAPPER" "autonomous-dev.sh"
 _grep_caller_clean "$REVIEW_WRAPPER" "autonomous-review.sh"
 _grep_caller_clean "$STATUS_SH" "status.sh"
 _grep_caller_clean "$MCB" "mark-issue-checkbox.sh"
+
+# Sanity: the guard regex must actually FIRE on the pre-W1b call shapes —
+# an inert guard is worse than none (this is the regression the r3 review
+# caught: `[^$]*` cannot cross the literal `$` in `"$ISSUE_NUMBER"`).
+_negcheck='HAS_NO_AUTO_CLOSE=$(itp_read_task "$ISSUE_NUMBER" labels -q '"'"'[.labels[].name]'"'"')'
+if grep -qE -- 'itp_read_task.*(--json| -q |--jq)' <<<"$_negcheck"; then
+  ok "AC2 secondary self-test: guard regex fires on a pre-W1b -q call shape"
+else
+  bad "AC2 secondary self-test: guard regex is INERT against the old -q call shape"
+fi
+
+# SOURCE PINS for the four wrapper call sites whose seam-trace runs snippet
+# copies (r3 finding): pin the exact abstract call line so a revert to the
+# old flag-tail form fails here even though the snippet trace can't see it.
+grep -qF 'ISSUE_BODY=$(itp_read_task "$ISSUE_NUMBER" title,body,comments)' "$DEV_WRAPPER" \
+  && ok "source-pin: autonomous-dev.sh primary fetch is abstract" \
+  || bad "source-pin: autonomous-dev.sh primary fetch drifted from the abstract form"
+grep -qF 'ISSUE_BODY=$(itp_read_task "$ISSUE_NUMBER" title,body)' "$DEV_WRAPPER" \
+  && ok "source-pin: autonomous-dev.sh resume fetch is abstract" \
+  || bad "source-pin: autonomous-dev.sh resume fetch drifted from the abstract form"
+grep -qF 'HAS_NO_AUTO_CLOSE=$(itp_read_task "$ISSUE_NUMBER" labels \' "$REVIEW_WRAPPER" \
+  && ok "source-pin: autonomous-review.sh no-auto-close read is abstract" \
+  || bad "source-pin: autonomous-review.sh no-auto-close read drifted"
+grep -qF 'ISSUE_JSON="$(itp_read_task "$ISSUE_NUMBER" state,labels,title 2>/dev/null || echo '"'"'{}'"'"')"' "$STATUS_SH" \
+  && ok "source-pin: status.sh state/labels/title read is abstract" \
+  || bad "source-pin: status.sh read drifted from the abstract form"
 
 # ===========================================================================
 # LEAF SHAPE: itp_github_read_task normalization.

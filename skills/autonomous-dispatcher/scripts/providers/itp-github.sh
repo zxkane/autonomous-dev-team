@@ -170,10 +170,15 @@ itp_github_list_forbidden_combos() {
 # object as agent-prompt context); the authoritative per-issue read for that
 # purpose remains `itp_list_comments` (REST-sourced, correct authorKind).
 itp_github_read_task() {
-  local issue="$1" fields_csv="$2" fields_json
+  local issue="$1" fields_csv="$2" fields_json raw
   fields_json=$(printf '%s' "$fields_csv" | jq -R -s -c 'split(",") | map(select(length > 0))')
-  gh issue view "$issue" --repo "$REPO" --json title,body,state,labels,comments \
-    | jq --arg bot "${BOT_LOGIN:-}" --argjson fields "$fields_json" '
+  # Fail-closed: capture-then-check. `gh` emitting empty stdout with rc 0
+  # (stub drift, transport oddity) must NOT normalize to `{}` rc 0 — jq on
+  # empty input runs the program zero times and exits 0, which would turn a
+  # failed read into a silent empty object (fail-OPEN at the dep gate).
+  raw=$(gh issue view "$issue" --repo "$REPO" --json title,body,state,labels,comments) || return 1
+  [[ -n "$raw" ]] || return 1
+  jq --arg bot "${BOT_LOGIN:-}" --argjson fields "$fields_json" '
         {
           title: (.title // ""),
           body: (.body // ""),
@@ -192,7 +197,7 @@ itp_github_read_task() {
             ] | sort_by(.createdAt // "")
         } as $norm
         | ($fields | map({(.): $norm[.]}) | add // {})
-      '
+      ' <<<"$raw"
 }
 
 # itp_github_list_comments ISSUE — the normalized comment array ([INV-90],
