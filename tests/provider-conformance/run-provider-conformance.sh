@@ -400,6 +400,17 @@ _assert_verb() {
   case "$verb" in
     itp_list_comments)
       _run_shape_assert "$verb" 'itp_list_comments 42' "$PAYLOADS/comments-valid.json" 1
+      # [#393] anti-false-green: a payload in the WRONG source shape (e.g. the
+      # pre-#393 GraphQL {comments:[…]} object) would pass the array+ascending
+      # checks with every field null. Require non-null id/author/createdAt and
+      # a REST-derived bot authorKind on the known fixture.
+      local _lc_out
+      _lc_out="$(_invoke _PCF_GH_MODE="ok" _PCF_GH_PAYLOAD="$PAYLOADS/comments-valid.json" _PCF_ARGV_FILE="$work_root/.argv-lc-393.json" 'itp_list_comments 42' 2>&1)"
+      if jq -e '(length == 3) and all(.[]; .id != null and .author != null and .createdAt != null) and (.[0].authorKind == "bot") and (.[0].author == "my-claw[bot]")' >/dev/null 2>&1 <<<"$_lc_out"; then
+        emit PASS "$verb" "non-null fields + REST authorKind derivation (#393)"
+      else
+        emit FAIL "$verb" "null fields or wrong authorKind — source-shape mismatch? (${_lc_out:0:160})"
+      fi
       ;;
     itp_transition_state)
       _run_write_assert "$verb" "issue edit 42 --repo o/r --remove-label in-progress --add-label pending-review" \

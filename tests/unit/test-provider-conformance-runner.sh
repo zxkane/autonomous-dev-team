@@ -38,8 +38,9 @@ echo "=== TC-PCONF-014: --itp github --chp github exits 0, 16 PASS, CONFORMANCE-
 gh_out="$(bash "$RUNNER" --itp github --chp github 2>&1)"; gh_rc=$?
 assert_eq "AC1: github/github exits 0" "0" "$gh_rc"
 gh_pass_count="$(grep -c '^CONFORMANCE-PCONF github/github .* PASS$' <<<"$gh_out")"
-assert_eq "AC1: 16 ASSERTED verbs PASS on github/github" "16" "$gh_pass_count"
-assert_contains "AC1: CONFORMANCE-SUMMARY line present with fail=0" "CONFORMANCE-SUMMARY total=26 pass=16 fail=0 skip=0 pending=10" "$gh_out"
+# [#393] +1: the itp_list_comments anti-false-green field/authorKind assertion adds one PASS.
+assert_eq "AC1: 17 PASS lines on github/github (16 verbs + the #393 list_comments field check)" "17" "$gh_pass_count"
+assert_contains "AC1: CONFORMANCE-SUMMARY line present with fail=0" "CONFORMANCE-SUMMARY total=27 pass=17 fail=0 skip=0 pending=10" "$gh_out"
 
 # ===========================================================================
 echo ""
@@ -49,7 +50,8 @@ broken_out="$(bash "$RUNNER" --itp broken --chp broken 2>&1)"; broken_rc=$?
 assert_eq "AC2: broken/broken exits non-zero" "1" "$broken_rc"
 broken_fail_lines="$(grep '^CONFORMANCE-PCONF broken/broken .* FAIL' <<<"$broken_out")"
 broken_fail_count="$(grep -c '^CONFORMANCE-PCONF broken/broken .* FAIL' <<<"$broken_out")"
-assert_eq "AC2: exactly 4 FAIL lines (one per violated clause)" "4" "$broken_fail_count"
+# [#393] +1: the broken provider now also fails the list_comments field check (5 clauses).
+assert_eq "AC2: exactly 5 FAIL lines (one per violated clause)" "5" "$broken_fail_count"
 assert_contains "TC-PCONF-020: itp_list_comments FAILs wrong-shape" "itp_list_comments FAIL wrong-shape" "$broken_fail_lines"
 assert_contains "TC-PCONF-021: itp_transition_state FAILs rc-0-on-error" "itp_transition_state FAIL rc-0-on-error" "$broken_fail_lines"
 assert_contains "TC-PCONF-022: chp_resolve_thread FAILs missing-verb-function (command not found)" "chp_resolve_thread FAIL" "$broken_fail_lines"
@@ -73,7 +75,8 @@ assert_eq "R4: zero FAIL on the degraded run" "0" "$deg_fail_count"
 deg_skip_count="$(grep -c '^CONFORMANCE-PCONF degraded/degraded .* SKIP' <<<"$deg_out")"
 assert_eq "TC-PCONF-034: exactly 3 SKIPs" "3" "$deg_skip_count"
 deg_pass_count="$(grep -c '^CONFORMANCE-PCONF degraded/degraded .* PASS$' <<<"$deg_out")"
-assert_eq "TC-PCONF-033: the 13 remaining ASSERTED verbs PASS" "13" "$deg_pass_count"
+# [#393] +1: the list_comments field/authorKind assertion also runs (and passes) on degraded.
+assert_eq "TC-PCONF-033: 14 PASS lines on degraded (13 verbs + the #393 list_comments field check)" "14" "$deg_pass_count"
 
 # ===========================================================================
 echo ""

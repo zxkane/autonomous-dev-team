@@ -43,6 +43,13 @@ export MAX_CONCURRENT=5
 # mock pipes the fixture through jq with the requested -q expression.
 _MOCK_COMMENTS_JSON=""
 gh() {
+  # [#393] itp_list_comments reads REST (gh api --paginate --slurp .../comments).
+  # Serve the GraphQL-style fixture converted to REST page shape (type=Bot iff
+  # login ends [bot]; id=ordinal), so authorKind derivation works unchanged.
+  if [[ "${1:-}" == "api" && "${2:-}" == "--paginate" ]]; then
+    jq '(if type == "object" then (.comments // []) else . end) | [ [ .[] | {id: 0, user: {login: (.author.login // ""), type: (if ((.author.login // "") | endswith("[bot]")) then "Bot" else "User" end)}, body: (.body // ""), created_at: (.createdAt // null)} ] | to_entries | map(.value + {id: (.key + 1)}) ]' <<<"${_MOCK_COMMENTS_JSON:-[]}"
+    return 0
+  fi
   # Find the -q expression in the args, if any.
   local q_expr=""
   while [[ $# -gt 0 ]]; do

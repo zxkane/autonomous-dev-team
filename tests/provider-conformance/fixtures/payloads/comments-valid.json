@@ -1,22 +1,9 @@
-{
-  "comments": [
-    {
-      "author": { "login": "kane-dev-agent[bot]" },
-      "body": "Dev Session ID: `00000000-0000-4000-8000-000000000001`",
-      "createdAt": "2026-01-01T00:00:00Z",
-      "url": "https://github.com/o/r/issues/42#issuecomment-100001"
-    },
-    {
-      "author": { "login": "codex[bot]" },
-      "body": "Review findings: [P1] fix the thing",
-      "createdAt": "2026-01-01T00:05:00Z",
-      "url": "https://github.com/o/r/issues/42#issuecomment-100002"
-    },
-    {
-      "author": { "login": "zxkane" },
-      "body": "LGTM",
-      "createdAt": "2026-01-01T00:10:00Z",
-      "url": "https://github.com/o/r/issues/42#issuecomment-100003"
-    }
+[
+  [
+    { "id": 100, "user": { "login": "my-claw[bot]", "type": "Bot" }, "body": "oldest bot comment", "created_at": "2026-06-26T10:00:00Z" },
+    { "id": 200, "user": { "login": "alice", "type": "User" }, "body": "middle human comment", "created_at": "2026-06-26T11:00:00Z" }
+  ],
+  [
+    { "id": 300, "user": { "login": "dev-bot[bot]", "type": "Bot" }, "body": "newest bot comment", "created_at": "2026-06-26T12:00:00Z" }
   ]
-}
+]

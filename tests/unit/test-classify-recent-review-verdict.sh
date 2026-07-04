@@ -40,6 +40,15 @@ _MOCK_COMMENTS_JSON='[]'
 gh() {
   local cmd="${1:-}"
   local sub="${2:-}"
+  # [#393] itp_list_comments now reads REST (gh api --paginate --slurp).
+  # Convert the test's GraphQL-style records ({author:{login},createdAt,body})
+  # to REST shape ({id,user:{login,type},created_at,body}) so every existing
+  # fixture keeps working: type=Bot iff login ends [bot] (fixtures use the
+  # verbatim REST-style logins already), id = ordinal.
+  if [[ "$cmd" == "api" ]]; then
+    jq '[ [ .[] | {id: 0, user: {login: (.author.login // ""), type: (if ((.author.login // "") | endswith("[bot]")) then "Bot" else "User" end)}, body: (.body // ""), created_at: (.createdAt // null)} ] | to_entries | map(.value + {id: (.key + 1)}) ]' <<<"$_MOCK_COMMENTS_JSON"
+    return 0
+  fi
   if [[ "$cmd" == "issue" && "$sub" == "view" ]]; then
     # Find the -q (jq) arg and apply it to _MOCK_COMMENTS_JSON.
     local jq_query=""
@@ -72,6 +81,15 @@ set +e
 gh() {
   local cmd="${1:-}"
   local sub="${2:-}"
+  # [#393] itp_list_comments now reads REST (gh api --paginate --slurp).
+  # Convert the test's GraphQL-style records ({author:{login},createdAt,body})
+  # to REST shape ({id,user:{login,type},created_at,body}) so every existing
+  # fixture keeps working: type=Bot iff login ends [bot] (fixtures use the
+  # verbatim REST-style logins already), id = ordinal.
+  if [[ "$cmd" == "api" ]]; then
+    jq '[ [ .[] | {id: 0, user: {login: (.author.login // ""), type: (if ((.author.login // "") | endswith("[bot]")) then "Bot" else "User" end)}, body: (.body // ""), created_at: (.createdAt // null)} ] | to_entries | map(.value + {id: (.key + 1)}) ]' <<<"$_MOCK_COMMENTS_JSON"
+    return 0
+  fi
   if [[ "$cmd" == "issue" && "$sub" == "view" ]]; then
     local jq_query=""
     while [[ $# -gt 0 ]]; do
@@ -456,6 +474,24 @@ v=""; c=""
 classify_recent_review_verdict 100 "$SESSION_END" v c
 assert_eq "TC-389-015 app mode: bot bare trailer classified" "failed-non-substantive" "$v"
 assert_eq "TC-389-015 cause" "bot-timeout" "$c"
+unset GH_AUTH_MODE
+
+# TC-393-001 (the #393 regression): app mode + BOT_LOGIN empty + a verdict
+# authored by a GitHub App. The REAL GitHub GraphQL API strips the [bot]
+# suffix, so the pre-#393 leaf derived authorKind="human" and the #390
+# app-mode gate rejected the genuine verdict → none → INV-12 park (observed
+# live: a verdict landing 19s before the tick still parked the issue for 2h).
+# Post-#393 the leaf reads REST (user.type=Bot is authoritative), so the
+# SAME comment classifies. The stub's REST converter derives type from the
+# login suffix — mirroring real REST, where the App login IS suffixed.
+export GH_AUTH_MODE="app"
+export BOT_LOGIN=""
+_MOCK_COMMENTS_JSON=$(jq -n \
+  --argjson c1 "$(mkc "kane-review-agent[bot]" "2026-05-21T05:30:00Z" "<!-- review-verdict: failed-substantive -->")" \
+  '[$c1]')
+v=""; c=""
+classify_recent_review_verdict 100 "$SESSION_END" v c
+assert_eq "TC-393-001 app mode: App-authored verdict classifies (REST authorKind)" "failed-substantive" "$v"
 unset GH_AUTH_MODE
 
 # TC-389-016: newline INSIDE the trailer → none. Oniguruma [[:space:]]
