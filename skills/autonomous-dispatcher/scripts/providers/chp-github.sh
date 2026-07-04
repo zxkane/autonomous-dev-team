@@ -589,6 +589,21 @@ chp_github_reply_review_comment() {
 # autonomous-dev.sh / autonomous-review.sh / lib-review-e2e.sh) become plain
 # jq over the normalized object; a GitLab leaf can emit the same shape without
 # emulating gh field names.
+#
+# W1c2 online-review r1 fix: FIELDS_CSV is validated against the full §3.2.1
+# PR-field vocabulary (14 members) BEFORE the gh argv is built. Unknown /
+# GitHub-native names (e.g. the raw `closingIssuesReferences` — the internal
+# mapping target of the vocabulary's `closingIssueNumbers`) → rc 2 with a
+# loud stderr naming the offending field. This mirrors the W1c1 pair's
+# `_CHP_GITHUB_PR_FIELDS_SUPPORTED` gate (chp-github.sh:107); unlike W1c1
+# (which rejects `comments`), `chp_pr_view`'s single-PR `gh pr view --json`
+# read delivers every vocabulary member natively, so the supported set here
+# is the FULL 14-member vocabulary. Guarded `readonly` for the same reason
+# as `_CHP_GITHUB_PR_FIELDS_SUPPORTED` — a transitive re-source of
+# lib-code-host.sh must not abort on `readonly variable`.
+declare -p _CHP_GITHUB_PR_VIEW_FIELDS_SUPPORTED >/dev/null 2>&1 || \
+  readonly _CHP_GITHUB_PR_VIEW_FIELDS_SUPPORTED="number,state,title,body,createdAt,updatedAt,mergedAt,headRefName,headRefOid,reviewDecision,mergeable,closingIssueNumbers,comments,reviews"
+
 chp_github_pr_view() {
   local pr="$1" fields_csv="${2:-}"
   [ -n "$fields_csv" ] || { echo "ERROR: chp_github_pr_view requires FIELDS_CSV (2nd arg) [W1c2]" >&2; return 2; }
@@ -608,6 +623,19 @@ chp_github_pr_view() {
   for f in "${requested[@]}"; do
     f="${f#"${f%%[![:space:]]*}"}"; f="${f%"${f##*[![:space:]]}"}"   # trim
     [ -z "$f" ] && continue
+    # W1c2 online-review r1 blocking: gate on the §3.2.1 vocabulary BEFORE
+    # building gh argv. A GitHub-native field name (e.g. `closingIssuesReferences`,
+    # the internal mapping target) or an unknown/typo name must be REJECTED
+    # LOUDLY, never passed through — otherwise a caller can silently depend on
+    # GitHub-only names a non-GitHub provider cannot deliver. Mirrors the W1c1
+    # pair's `_CHP_GITHUB_PR_FIELDS_SUPPORTED` gate at chp-github.sh:107. This
+    # verb's supported set is the FULL §3.2.1 vocabulary (14 members —
+    # `chp_pr_view`'s single-PR `gh pr view --json` read delivers each natively,
+    # unlike the W1c1 list-walk that rejects `comments`).
+    case ",${_CHP_GITHUB_PR_VIEW_FIELDS_SUPPORTED}," in
+      *",$f,"*) : ;;
+      *) echo "ERROR: chp_github_pr_view: field '$f' is not in the §3.2.1 vocabulary ($_CHP_GITHUB_PR_VIEW_FIELDS_SUPPORTED). GitHub-native names (e.g. 'closingIssuesReferences') MUST use the vocabulary name (e.g. 'closingIssueNumbers') so a non-GitHub provider can deliver the same shape." >&2; return 2 ;;
+    esac
     case "$f" in
       closingIssueNumbers) out_field="closingIssuesReferences" ;;
       *)                   out_field="$f" ;;

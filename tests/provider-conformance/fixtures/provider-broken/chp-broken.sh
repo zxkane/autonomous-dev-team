@@ -35,6 +35,8 @@ chp_broken_reply_review_comment() {
 chp_broken_pr_view() {
   local pr="$1" fields_csv="${2:-}"
   [ -n "$fields_csv" ] || { echo "ERROR: chp_broken_pr_view requires FIELDS_CSV (2nd arg) [W1c2]" >&2; return 2; }
+  # W1c2 online-review r1 mirror: same vocabulary gate as chp_github_pr_view.
+  local _CHP_BRK_PRV_VOCAB="number,state,title,body,createdAt,updatedAt,mergedAt,headRefName,headRefOid,reviewDecision,mergeable,closingIssueNumbers,comments,reviews"
   local gh_fields="" _obj_body="" first=1 f out_field _seen_map=""
   local IFS_SAVED="$IFS"; IFS=','
   # shellcheck disable=SC2206
@@ -43,6 +45,10 @@ chp_broken_pr_view() {
   for f in "${requested[@]}"; do
     f="${f#"${f%%[![:space:]]*}"}"; f="${f%"${f##*[![:space:]]}"}"
     [ -z "$f" ] && continue
+    case ",${_CHP_BRK_PRV_VOCAB}," in
+      *",$f,"*) : ;;
+      *) echo "ERROR: chp_broken_pr_view: field '$f' is not in the §3.2.1 vocabulary" >&2; return 2 ;;
+    esac
     case "$f" in
       closingIssueNumbers) out_field="closingIssuesReferences" ;;
       *)                   out_field="$f" ;;

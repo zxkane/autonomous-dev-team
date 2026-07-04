@@ -154,6 +154,11 @@ chp_degraded_pr_list() {
 chp_degraded_pr_view() {
   local pr="$1" fields_csv="${2:-}"
   [ -n "$fields_csv" ] || { echo "ERROR: chp_degraded_pr_view requires FIELDS_CSV (2nd arg) [W1c2]" >&2; return 2; }
+  # W1c2 online-review r1 mirror: gate FIELDS_CSV against the §3.2.1
+  # vocabulary. Same reject list as the github leaf — a fixture that let a
+  # gh-native name through would mask the vocabulary contract the runner
+  # asserts, defeating the whole point of the fixture.
+  local _CHP_DEG_PRV_VOCAB="number,state,title,body,createdAt,updatedAt,mergedAt,headRefName,headRefOid,reviewDecision,mergeable,closingIssueNumbers,comments,reviews"
   local gh_fields="" _obj_body="" first=1 f out_field _seen_map=""
   local IFS_SAVED="$IFS"; IFS=','
   # shellcheck disable=SC2206
@@ -162,6 +167,10 @@ chp_degraded_pr_view() {
   for f in "${requested[@]}"; do
     f="${f#"${f%%[![:space:]]*}"}"; f="${f%"${f##*[![:space:]]}"}"
     [ -z "$f" ] && continue
+    case ",${_CHP_DEG_PRV_VOCAB}," in
+      *",$f,"*) : ;;
+      *) echo "ERROR: chp_degraded_pr_view: field '$f' is not in the §3.2.1 vocabulary" >&2; return 2 ;;
+    esac
     case "$f" in
       closingIssueNumbers) out_field="closingIssuesReferences" ;;
       *)                   out_field="$f" ;;

@@ -311,6 +311,88 @@ if [[ -f "$CHP_GITHUB" ]]; then
   else
     bad "P2-3 chp_github_list_inline_comments: zero-comment case not distinguishable (rc=$rc out=[$out])"
   fi
+
+  # =======================================================================
+  # W1c2 online-review r1 (blocking): `chp_github_pr_view` MUST validate
+  # FIELDS_CSV against the §3.2.1 vocabulary BEFORE building gh argv. A
+  # GitHub-native field name (e.g. `closingIssuesReferences`, the internal
+  # mapping target for the vocabulary's `closingIssueNumbers`) or an
+  # unknown/typo name must be REJECTED LOUDLY with rc 2 — otherwise a
+  # caller can silently depend on GitHub-only names a non-GitHub provider
+  # cannot deliver, and the doc-honesty rule is violated (a field a
+  # provider emits MUST be derivable from the data source it actually
+  # reads, per §3.2.1's per-verb support matrix).
+  # =======================================================================
+
+  # TC-R1-VOCAB-1: raw gh-native name `closingIssuesReferences` → rc 2.
+  # The vocabulary uses `closingIssueNumbers` (leaf maps to the raw name
+  # internally); the raw name itself is NOT a vocabulary member.
+  rc=0; out=""
+  out=$(REPO=owner/repo bash -c '
+    source "'"$CHP_GITHUB"'"
+    gh() { echo "{\"closingIssuesReferences\":[{\"number\":42}]}"; }
+    chp_github_pr_view 42 closingIssuesReferences
+  ' 2>&1) || rc=$?
+  if [[ "$rc" == "2" && "$out" == *"not in the §3.2.1 vocabulary"* ]]; then
+    ok "r1-VOCAB-1 chp_github_pr_view rejects raw gh-native name 'closingIssuesReferences' → rc 2, loud stderr"
+  else
+    bad "r1-VOCAB-1 chp_github_pr_view accepted raw gh-native name (rc=$rc, expected rc 2 with vocabulary error; got stderr=[$out])"
+  fi
+
+  # TC-R1-VOCAB-2: unknown/typo field name → rc 2. Also proves the CSV walk
+  # rejects on the FIRST unsupported field (never silently drops it).
+  rc=0; out=""
+  out=$(REPO=owner/repo bash -c '
+    source "'"$CHP_GITHUB"'"
+    gh() { echo "{}"; }
+    chp_github_pr_view 42 number,bogusField
+  ' 2>&1) || rc=$?
+  if [[ "$rc" == "2" && "$out" == *"bogusField"* && "$out" == *"not in the §3.2.1 vocabulary"* ]]; then
+    ok "r1-VOCAB-2 chp_github_pr_view rejects unknown 'bogusField' → rc 2, stderr names the field"
+  else
+    bad "r1-VOCAB-2 chp_github_pr_view unknown-field rejection wrong (rc=$rc stderr=[$out])"
+  fi
+
+  # TC-R1-VOCAB-3: every vocabulary field accepted (round-trip). Uses a
+  # canned payload carrying every raw gh field the leaf reads, then requests
+  # all 14 vocabulary members in one call and asserts rc 0.
+  rc=0; out=""
+  out=$(REPO=owner/repo bash -c '
+    source "'"$CHP_GITHUB"'"
+    gh() {
+      cat <<EOF_PAYLOAD
+{"state":"OPEN","body":null,"headRefName":"feat/x","headRefOid":"deadbeef","reviewDecision":"APPROVED","mergeable":"MERGEABLE","number":42,"title":"T","createdAt":"2026-06-27T09:00:00Z","updatedAt":"2026-06-28T09:00:00Z","mergedAt":null,"comments":[{"id":"c1","author":{"login":"a"},"body":"hi","createdAt":"2026-06-27T10:00:00Z"}],"reviews":[{"author":{"login":"r"},"state":"APPROVED","submittedAt":"2026-06-27T11:00:00Z"}],"closingIssuesReferences":[{"number":42}]}
+EOF_PAYLOAD
+    }
+    chp_github_pr_view 42 "number,state,title,body,createdAt,updatedAt,mergedAt,headRefName,headRefOid,reviewDecision,mergeable,closingIssueNumbers,comments,reviews"
+  ' 2>&1) || rc=$?
+  if [[ "$rc" == "0" ]]; then
+    # Confirm the normalization produced the expected keys (comments, reviews,
+    # closingIssueNumbers all present in the output object).
+    if jq -e '(keys | contains(["number","state","title","body","createdAt","updatedAt","mergedAt","headRefName","headRefOid","reviewDecision","mergeable","closingIssueNumbers","comments","reviews"]))' >/dev/null 2>&1 <<<"$out"; then
+      ok "r1-VOCAB-3 chp_github_pr_view accepts every §3.2.1 vocabulary field (all 14 members round-trip)"
+    else
+      bad "r1-VOCAB-3 chp_github_pr_view produced wrong shape on all-fields request (out=[$out])"
+    fi
+  else
+    bad "r1-VOCAB-3 chp_github_pr_view rejected a valid all-vocabulary request (rc=$rc stderr=[$out])"
+  fi
+
+  # TC-R1-VOCAB-4: chp_github_list_inline_comments has no FIELDS_CSV surface
+  # — extra args are ignored (`local pr=$1` only). Confirm no analogous
+  # vocabulary hole: an extra "gh-native" positional argument must NOT
+  # affect behavior.
+  rc=0; out=""
+  out=$(REPO=owner/repo bash -c '
+    source "'"$CHP_GITHUB"'"
+    gh() { echo "[]"; }
+    chp_github_list_inline_comments 42 closingIssuesReferences bogusExtra
+  ' 2>&1) || rc=$?
+  if [[ "$rc" == "0" && "$out" == "[]" ]]; then
+    ok "r1-VOCAB-4 chp_github_list_inline_comments immune (no FIELDS_CSV surface — extra positional args ignored, no vocabulary hole)"
+  else
+    bad "r1-VOCAB-4 chp_github_list_inline_comments extra-arg passthrough hazard (rc=$rc out=[$out])"
+  fi
 else
   bad "codex-regression: chp-github.sh not found at $CHP_GITHUB"
 fi

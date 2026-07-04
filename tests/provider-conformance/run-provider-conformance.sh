@@ -534,6 +534,24 @@ _run_pr_view_assert() {
     emit FAIL "$verb" "rc-0-on-error (stub gh failed but verb still returned 0)"
     return
   fi
+
+  # W1c2 online-review r1 (blocking): FIELDS_CSV MUST be validated against the
+  # §3.2.1 vocabulary BEFORE gh is called. A GitHub-native field name (e.g.
+  # `closingIssuesReferences`, the internal mapping target for the vocabulary's
+  # `closingIssueNumbers`) or a bogus name must be REJECTED with rc≠0 — never
+  # passed through. This certifies that a compliant provider cannot silently
+  # accept GitHub-only names a non-GitHub backend would fail to deliver. Mirrors
+  # W1c1's `_CHP_GITHUB_PR_FIELDS_SUPPORTED` gate posture.
+  out="$(_invoke _PCF_GH_MODE="ok" _PCF_GH_PAYLOAD="$payload" _PCF_ARGV_FILE="$argv_file" "chp_pr_view 42 closingIssuesReferences" 2>&1)"; rc=$?
+  if [[ "$rc" == "0" ]]; then
+    emit FAIL "$verb" "vocabulary gate missing: raw gh-native name 'closingIssuesReferences' accepted (must be rejected — W1c2 online-review r1)"
+    return
+  fi
+  out="$(_invoke _PCF_GH_MODE="ok" _PCF_GH_PAYLOAD="$payload" _PCF_ARGV_FILE="$argv_file" "chp_pr_view 42 number,bogusField" 2>&1)"; rc=$?
+  if [[ "$rc" == "0" ]]; then
+    emit FAIL "$verb" "vocabulary gate missing: unknown field 'bogusField' accepted (must be rejected — W1c2 online-review r1)"
+    return
+  fi
   emit PASS "$verb"
 }
 
