@@ -158,16 +158,28 @@ echo ""
 echo "=== TC-LGC2-020: a spawned child's environ carries ADT_LANE_ID (live probe) ==="
 # ---------------------------------------------------------------------------
 if [[ -r "/proc/$$/environ" ]]; then
-  ENVIRON_PROBE=$(bash -c '
+  # Regression (codex review [P1], #378): counting every `^ADT_LANE_` line is
+  # fragile to ambient env pollution — this test suite itself can run INSIDE
+  # a review-agent fan-out subshell that already exports ADT_LANE_ID/
+  # ADT_LANE_DIR (this PR's own wrapper wiring) and/or ADT_LANE_ROLE (the
+  # fan-out/smoke/E2E-browser tagging this PR also adds), inflating the count
+  # past 2 and failing a bare `-eq 2` check in exactly that environment. Fix:
+  # `env -i` starts the subshell with NO inherited environment at all (not
+  # even PATH — restored explicitly), so only the two vars THIS test exports
+  # can possibly appear; then assert the two NAMED values directly rather
+  # than counting lines, so a third unrelated ADT_LANE_* var appearing in a
+  # future PR can never fail this assertion either.
+  ENVIRON_PROBE=$(env -i PATH="$PATH" bash -c '
     export ADT_LANE_ID="myproj:dev:1:12345:abcd"
     export ADT_LANE_DIR="/tmp/fake-lane-dir"
     sleep 0.4 &
     CP=$!
     sleep 0.1
-    tr "\0" "\n" < "/proc/$CP/environ" 2>/dev/null | grep -c "^ADT_LANE_"
+    tr "\0" "\n" < "/proc/$CP/environ" 2>/dev/null
     wait "$CP" 2>/dev/null
   ')
-  assert_eq "TC-LGC2-020: spawned child inherits BOTH ADT_LANE_ID and ADT_LANE_DIR" "2" "$ENVIRON_PROBE"
+  assert_contains "TC-LGC2-020a: spawned child inherits ADT_LANE_ID verbatim" "ADT_LANE_ID=myproj:dev:1:12345:abcd" "$ENVIRON_PROBE"
+  assert_contains "TC-LGC2-020b: spawned child inherits ADT_LANE_DIR verbatim" "ADT_LANE_DIR=/tmp/fake-lane-dir" "$ENVIRON_PROBE"
 else
   assert_pass "TC-LGC2-020: skipped (no /proc/PID/environ on this platform)"
 fi
