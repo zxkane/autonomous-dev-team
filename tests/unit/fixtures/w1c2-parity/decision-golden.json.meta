@@ -1,0 +1,63 @@
+# decision-golden.json.meta — provenance sidecar for decision-golden.json (issue #398, R4).
+#
+# Captured by running the PRE-CHANGE (byte-identical-passthrough) callers —
+# the 9 sites named in the issue body against reviews-mixed.json,
+# reviews-noapproval.json, comments-mixed.json, pr-state-headref.json, and
+# inline-comments-{page1,page2}.json — on the FIRST TDD commit of the #398
+# W1c2 branch (before the abstract-contract rewrite landed). Each golden entry
+# is the exact string a caller extracted from the OLD `chp_pr_view` /
+# `chp_list_inline_comments` byte-identical-passthrough path.
+#
+# Sites (paired with the caller in the issue body's IMPLEMENTATION SCOPE):
+#   site1_approved_at            — autonomous-dev.sh:604 (approved-timestamp,
+#                                  `[.reviews[]? | select(.state=="APPROVED") |
+#                                  .submittedAt] | sort | last // empty` OVER
+#                                  `--json reviews`).
+#   site2_preview_url            — autonomous-review.sh:918 (E2E preview URL,
+#                                  `[.comments[].body | select(contains("Preview"))]
+#                                  | last` OVER `--json comments`, then a caller-side
+#                                  `grep -oP 'https://[^\s"]+' | head -1`).
+#   site3_head_ref_name          — autonomous-review.sh:948 (`.headRefName`).
+#   site4_head_ref_oid           — autonomous-review.sh:949 (`.headRefOid`).
+#   site5_state                  — autonomous-review.sh:1591 (E2E-lane branch,
+#                                  `.state` fed to `_pr_open_gate`).
+#   site6_state                  — autonomous-review.sh:3312 (PASS-chain,
+#                                  `.state` fed to `_pr_open_gate`).
+#   site7_wait_count             — autonomous-review.sh:3357
+#                                  (`[.comments[] | select(.body|contains(
+#                                  "bot-review-wait sha=\"deadbee\""))] | length`).
+#   site8_evidence_body          — lib-review-e2e.sh:262 (`_fetch_sha_evidence`,
+#                                  `[.comments[] | select(.body|contains(
+#                                  "e2e-evidence: complete sha=\"deadbee\"")) |
+#                                  .body] | last // empty`).
+#   site9_inline_comments        — autonomous-dev.sh:1091 (`PR_REVIEW_COMMENTS`,
+#                                  `[.[] | "- **\(.path):\(.line // .original_line
+#                                  // "N/A")** — \(.body)"] | join("\n")` OVER
+#                                  `gh api pulls/N/comments` output).
+#
+# The `.page1` variant proves parity against a single REST page (the pre-#398
+# behavior — `chp_list_inline_comments` today emits one REST page, no
+# `--paginate`); the `.combined` variant proves the >1-page completeness fix
+# R4 mandates: after #398, the NEW leaf page-walks and slurps into ONE array
+# so the same formatter renders BOTH pages. That "more prompt content" is the
+# deliberate behavior improvement the issue body's Design Considerations
+# section flags (the >30-inline-comment silent-truncation the pre-#398 leaf
+# hit, chp-github.sh:323 "No --paginate today" caveat).
+#
+# The `.mixed` inline-comments fixture is REST-shaped
+# (user.login / created_at / original_line) — the pre-#398 shape callers saw
+# UNMODIFIED. The `line // original_line // "N/A"` fold in the OLD formatter
+# is proven equivalent to the NEW `line // "N/A"` over normalized `line`
+# (leaf folds originalLine into `line` at normalization time; R4 mandates
+# both renderings match on a fixture with both line-populated AND
+# originalLine-only rows).
+#
+# Regenerate (only if the OLD passthrough semantics are ever in dispute):
+#   for the 8 pr_view sites, feed each --json payload to its `-q` jq via a
+#   stub `gh pr view` and record stdout (byte-identical to the pre-#398
+#   passthrough). For the inline-comment site, feed the REST page(s) through
+#   the caller's --jq formatter directly (the OLD leaf was raw passthrough,
+#   so `gh api --jq <fmt>` output equals `jq -r <fmt>` over the page). The
+#   FIRST TDD commit records these goldens BEFORE any rewrite; every later
+#   commit re-runs them via tests/unit/test-w1c2-incidental-read-parity.sh
+#   to prove the NEW positional callers produce IDENTICAL values.

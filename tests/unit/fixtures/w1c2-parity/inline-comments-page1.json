@@ -1,0 +1,5 @@
+[
+  {"id":501,"path":"src/a.ts","line":12,   "original_line":10,   "user":{"login":"kane-review-agent"},"body":"fix this",         "created_at":"2026-06-27T10:00:00Z"},
+  {"id":502,"path":"src/b.ts","line":null, "original_line":7,    "user":{"login":"alice"},           "body":"originalLine only", "created_at":"2026-06-27T11:00:00Z"},
+  {"id":503,"path":"src/c.ts","line":null, "original_line":null, "user":{"login":"bob"},             "body":"no line",           "created_at":"2026-06-27T12:00:00Z"}
+]
