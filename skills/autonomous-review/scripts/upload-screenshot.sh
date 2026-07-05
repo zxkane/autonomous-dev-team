@@ -108,8 +108,13 @@ UPLOAD_SHA=$(chp_commit_file "$REPO" "$BRANCH" "$FILE_PATH" "$CONTENT_BASE64" "$
   || fail "GitHub API upload failed for ${FILE_PATH}"
 [[ -n "$UPLOAD_SHA" ]] || fail "GitHub API upload failed for ${FILE_PATH}"
 
-# Output a /blob/ URL — GitHub's web UI renders PNGs natively for authenticated users.
-# This works for both private and public repos (viewers must have repo access for private).
-# raw.githubusercontent.com URLs require auth tokens that expire, so /blob/ is more reliable.
-echo "https://github.com/${REPO}/blob/${BRANCH}/${FILE_PATH}"
+# Output a browser blob URL via the CHP `chp_file_url` verb (#419 R11). The
+# GitHub leaf renders `https://github.com/${REPO}/blob/${BRANCH}/${FILE_PATH}`
+# byte-identically to the pre-#419 hardcode; the GitLab leaf renders the
+# GitLab-native `/-/blob/` shape with the RAW (percent-decoded) project path.
+# Web UIs render PNGs natively for authenticated users; viewers must have repo
+# access for private repos. Explicit REPO/BRANCH/FILE_PATH positionals — the
+# leaf honors REPO (not a global). Self-guarding shim: a leaf-absent backend
+# emits WARN + rc 1 which `|| fail` degrades cleanly.
+chp_file_url "$REPO" "$BRANCH" "$FILE_PATH" || fail "chp_file_url unavailable — file uploaded (SHA=${UPLOAD_SHA}) but URL render failed"
 exit 0

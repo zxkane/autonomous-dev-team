@@ -49,15 +49,31 @@ if ! declare -F _gl_api >/dev/null 2>&1; then
     source "${_CHP_GITLAB_DIR}/lib-gitlab-transport.sh"
 fi
 
-# 7 CHP read verbs implemented here (spec §3.2):
-#   chp_gitlab_ci_status            chp_gitlab_mergeable
-#   chp_gitlab_pr_view              chp_gitlab_pr_list
-#   chp_gitlab_find_pr_for_issue    chp_gitlab_list_inline_comments
-#   chp_gitlab_review_threads
-# The write verbs + `chp_close_keyword`/`chp_trigger_bot`/`chp_request_changes`/
-# `chp_reply_review_comment`/`chp_count_reviews_by_login`/`chp_commit_file`
-# land in P3-4 (serialized-behind-this — same file, avoids the conflict
-# cluster).
+# Unit tests define a test-local `_gl_api` stub BEFORE sourcing this file, so
+# every assertion in test-chp-gitlab-{reads,writes}.sh is leaf-contract-vs-spec
+# (bucket tables, projection, sort, fail-closed) with ZERO live GitLab I/O.
+# The self-source above is short-circuited by the `declare -F _gl_api` guard
+# when the stub is pre-installed.
+#
+# CHP verbs implemented here (spec §3.2), split by phase-3 slice:
+#
+#   READS (P3-3, #418):
+#     chp_gitlab_ci_status            chp_gitlab_mergeable
+#     chp_gitlab_pr_view              chp_gitlab_pr_list
+#     chp_gitlab_find_pr_for_issue    chp_gitlab_list_inline_comments
+#     chp_gitlab_review_threads
+#
+#   WRITES + remaining verbs (P3-4, #419):
+#     chp_gitlab_create_pr            chp_gitlab_approve
+#     chp_gitlab_merge                chp_gitlab_pr_comment
+#     chp_gitlab_reply_review_comment chp_gitlab_resolve_thread
+#     chp_gitlab_close_keyword        chp_gitlab_commit_file
+#     chp_gitlab_trigger_bot          chp_gitlab_count_reviews_by_login
+#     chp_gitlab_file_url
+#
+# `chp_gitlab_request_changes` is DELIBERATELY ABSENT (cap
+# `rest_request_changes=0`, §5.1; the caller's cap=0 branch posts the
+# request-changes marker via `itp_post_comment`).
 
 # _chp_gitlab_require_project — fail-loud rc≠0 when GITLAB_PROJECT is unset or
 # empty. Called from every leaf's entry. Under `set -u` (the way production
@@ -881,4 +897,504 @@ chp_gitlab_review_threads() {
                            createdAt: (.created_at // null) } ]) }
     ]
   ' <<<"$raw" 2>/dev/null || return 1
+}
+
+# ===========================================================================
+# P3-4 WRITE LEAVES (#419) — chp_gitlab_{create_pr, approve, merge, pr_comment,
+# reply_review_comment, resolve_thread, close_keyword, commit_file, trigger_bot,
+# count_reviews_by_login} + chp_gitlab_file_url.
+#
+# EVERY leaf routes HTTP exclusively through _gl_api (frozen #416 contract);
+# NO leaf touches _gl_http. Dynamic path/query components go through
+# _gl_urlencode; the static GITLAB_PROJECT config is stored ALREADY URL-encoded
+# per §3.4 and used verbatim.
+# ===========================================================================
+
+# _chp_gitlab_project_raw — decode GITLAB_PROJECT (or a REPO positional
+# override) to the RAW slash-bearing project path. Used by chp_gitlab_file_url
+# and chp_gitlab_reply_review_comment for browser-facing URL synthesis —
+# browser URLs use the RAW path, NOT the URL-encoded API id (§5.1).
+_chp_gitlab_project_raw() {
+  local encoded="${1:-${GITLAB_PROJECT:-}}"
+  # `jq -rn '$s | @uri | ...` decodes: split on `%`, hex-decode the byte pairs.
+  # Simpler: use printf's URL-decode via a jq pipeline.
+  jq -rn --arg s "$encoded" '
+    $s
+    | split("%")
+    | reduce .[1:][] as $p (.[0];
+        if ($p | length) >= 2 then
+          . + ([( $p[0:2] | ascii_downcase )] | map(
+              if . == "20" then " "
+              elif . == "2f" then "/"
+              elif . == "2e" then "."
+              elif . == "2d" then "-"
+              elif . == "5f" then "_"
+              elif . == "25" then "%"
+              elif . == "3a" then ":"
+              elif . == "40" then "@"
+              else "%" + . end
+            ) | .[0]) + ($p[2:] // "")
+        else . + "%" + $p end)
+  '
+}
+
+# ---------------------------------------------------------------------------
+# chp_gitlab_create_pr HEAD_BRANCH TITLE BODY  (#419 R2)
+#
+# POST /projects/${GITLAB_PROJECT}/merge_requests with body
+# `{source_branch, target_branch:<default_branch>, title, description,
+#   squash:true, remove_source_branch:true}` (CONTRACT-FIXED per W1e).
+# `<default_branch>` resolved by ONE `GET /projects/${GITLAB_PROJECT}` per
+# invocation (no cache — stale-cache hazard).
+#
+# Positional validation mirrors the GitHub leaf: HEAD_BRANCH and TITLE non-empty
+# (rc 2 loud, NO HTTP); BODY MAY be empty (the broker's title-only create is
+# legitimate — the #400 caller-trace lesson).
+#
+# Fail-CLOSED: rc≠0 on the project probe failure OR the POST failure. Success:
+# stdout MAY echo the created MR web_url (callers don't depend on it — mirrors
+# the GitHub leaf's `gh pr create` URL echo which callers discard).
+# ---------------------------------------------------------------------------
+chp_gitlab_create_pr() {
+  local head_branch="${1:-}" title="${2:-}" body="${3:-}"
+  [ -n "$head_branch" ] || { echo "ERROR: chp_gitlab_create_pr requires HEAD_BRANCH (1st arg, non-empty)" >&2; return 2; }
+  [ -n "$title" ]       || { echo "ERROR: chp_gitlab_create_pr requires TITLE (2nd arg, non-empty)" >&2; return 2; }
+  # BODY may be empty by design — do NOT gate.
+
+  # Resolve default branch per invocation.
+  local project_raw default_branch
+  project_raw="$(_gl_api "/projects/${GITLAB_PROJECT}" 2>/dev/null)" || return 1
+  [ -n "$project_raw" ] || return 1
+  default_branch="$(jq -r '.default_branch // ""' <<<"$project_raw" 2>/dev/null)"
+  [ -n "$default_branch" ] || return 1
+
+  # Build MR-create body via jq (injection-safe: title/body/branch names go
+  # through jq --arg, never spliced into a string).
+  local mr_body
+  mr_body="$(jq -cn \
+    --arg src    "$head_branch" \
+    --arg dst    "$default_branch" \
+    --arg title  "$title" \
+    --arg body   "$body" \
+    '{source_branch: $src, target_branch: $dst, title: $title, description: $body, squash: true, remove_source_branch: true}')" || return 1
+
+  local create_response
+  create_response="$(_gl_api --method POST --body "$mr_body" \
+    "/projects/${GITLAB_PROJECT}/merge_requests" 2>/dev/null)" || return 1
+  [ -n "$create_response" ] || return 1
+  # Echo the created MR's web_url (opaque to callers; matches GitHub leaf's
+  # URL echo). Callers don't depend on stdout.
+  jq -r '.web_url // ""' <<<"$create_response" 2>/dev/null || return 1
+}
+
+# ---------------------------------------------------------------------------
+# chp_gitlab_approve PR BODY  (#419 R3)
+#
+# TWO calls, ordering LOAD-BEARING:
+#   1. POST /projects/…/merge_requests/:iid/approve — the load-bearing action;
+#      feeds chp_gitlab_count_reviews_by_login.
+#   2. POST /projects/…/merge_requests/:iid/notes with `{body}` — diagnostic
+#      only.
+#
+# Failure posture:
+#   - approve OK + note FAIL → rc 0 with WARN on stderr (the wrapper's PASS path
+#     tolerates note-only failure).
+#   - approve FAIL → rc≠0, note NOT attempted (a failed approve with a comment
+#     stub is dishonest; the wrapper's manual-review fallback is the correct
+#     terminal).
+#
+# PR ^[0-9]+$ (rc 2 loud NO HTTP); BODY non-empty (rc 2 loud NO HTTP).
+# ---------------------------------------------------------------------------
+chp_gitlab_approve() {
+  local pr="${1:-}" body="${2:-}"
+  [[ "$pr" =~ ^[0-9]+$ ]] || { echo "ERROR: chp_gitlab_approve requires PR (1st arg, non-empty numeric): got '${pr}'" >&2; return 2; }
+  [ -n "$body" ]           || { echo "ERROR: chp_gitlab_approve requires BODY (2nd arg, non-empty)" >&2; return 2; }
+
+  # Call 1: /approve — LOAD-BEARING (approve-FAIL → rc≠0, note NOT attempted).
+  _gl_api --method POST \
+    "/projects/${GITLAB_PROJECT}/merge_requests/${pr}/approve" >/dev/null 2>&1 || return 1
+
+  # Call 2: /notes — DIAGNOSTIC. Approve-OK + note-FAIL → rc 0 with WARN on
+  # stderr (wrapper PASS tolerates note-only failure — parity with GitHub's
+  # `gh pr review --approve --body` where the note is part of the same call and
+  # a body-only failure is not observable; here it is, so we warn but keep
+  # rc 0).
+  local note_body
+  note_body="$(jq -cn --arg b "$body" '{body: $b}')" || return 1
+  if ! _gl_api --method POST --body "$note_body" \
+       "/projects/${GITLAB_PROJECT}/merge_requests/${pr}/notes" >/dev/null 2>&1; then
+    echo "WARN: chp_gitlab_approve: approve OK but note POST failed (non-fatal — PR is approved)." >&2
+  fi
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# chp_gitlab_merge PR  (#419 R4)
+#
+# PUT /projects/…/merge_requests/:iid/merge with body
+# `{squash:true, should_remove_source_branch:true}`. GitLab's not-mergeable
+# error responses (405 / 409 / 422 per the MR-merge API doc) surface AS-IS
+# through _gl_api's fail-closed rc≠0 path — the response `.message` is what
+# the caller's first-500-chars excerpt posts (#145 parity).
+#
+# PR ^[0-9]+$ (rc 2 loud, NO HTTP — highest blast radius). Success rc 0 with
+# response body preserved on stdout; failure rc≠0 with _gl_api's stderr
+# excerpt preserved.
+#
+# [M4]/[INV-33]: GitLab auto-closes `Closes #N` issues on merge-to-default
+# (`merge_closes_issue=1` per caps §5.1). The caller-side cap check is
+# UNCHANGED.
+# ---------------------------------------------------------------------------
+chp_gitlab_merge() {
+  local pr="${1:-}"
+  [[ "$pr" =~ ^[0-9]+$ ]] || { echo "ERROR: chp_gitlab_merge requires PR (1st arg, non-empty numeric): got '${pr}'" >&2; return 2; }
+
+  local merge_body='{"squash":true,"should_remove_source_branch":true}'
+  _gl_api --method PUT --body "$merge_body" \
+    "/projects/${GITLAB_PROJECT}/merge_requests/${pr}/merge"
+}
+
+# ---------------------------------------------------------------------------
+# chp_gitlab_pr_comment PR --body <string>  (#419 R5)
+#
+# AUDITED shape — all 7 GitHub call sites (lib-review-e2e.sh:351/387/394/409/620
+# + autonomous-review.sh:3604/3813) pass `--body <string>`; no --body-file / no
+# --edit-last. The GitLab leaf parses exactly that shape and POSTs `{body}` to
+# /projects/…/merge_requests/:iid/notes. The GitHub leaf stays byte-identical
+# (unchanged this PR).
+#
+# PR ^[0-9]+$ (rc 2 loud); missing/malformed --body → rc 2 loud NO HTTP.
+# ---------------------------------------------------------------------------
+chp_gitlab_pr_comment() {
+  local pr="${1:-}"; shift
+  [[ "$pr" =~ ^[0-9]+$ ]] || { echo "ERROR: chp_gitlab_pr_comment requires PR (1st arg, non-empty numeric): got '${pr}'" >&2; return 2; }
+
+  # Parse the audited `--body <string>` shape. Any other arg pattern fails
+  # loud — the audit result is pinned; a future --body-file/--edit-last caller
+  # would need a leaf update.
+  local body="" have_body=0
+  while (( $# > 0 )); do
+    case "$1" in
+      --body) [[ $# -ge 2 ]] || { echo "ERROR: chp_gitlab_pr_comment: --body requires a value" >&2; return 2; }
+              body="$2"; have_body=1; shift 2 ;;
+      --body=*) body="${1#*=}"; have_body=1; shift ;;
+      *) echo "ERROR: chp_gitlab_pr_comment: unsupported arg '$1' — audit pins --body <string> as the ONLY shape (extend the audit + leaf if a new caller needs another flag)" >&2; return 2 ;;
+    esac
+  done
+  [ "$have_body" = "1" ] || { echo "ERROR: chp_gitlab_pr_comment requires --body <string>" >&2; return 2; }
+
+  local note_body
+  note_body="$(jq -cn --arg b "$body" '{body: $b}')" || return 1
+  _gl_api --method POST --body "$note_body" \
+    "/projects/${GITLAB_PROJECT}/merge_requests/${pr}/notes"
+}
+
+# ---------------------------------------------------------------------------
+# chp_gitlab_reply_review_comment PR COMMENT_ID BODY  (#419 R6, [INV-96])
+#
+# GitLab replies attach to a DISCUSSION, not a bare note id. The leaf resolves
+# COMMENT_ID → its discussion id by page-walking `GET /projects/…/
+# merge_requests/:iid/discussions` (via _gl_api --paginate) and finding the
+# discussion whose `.notes[]` contains `.id == COMMENT_ID`, then POSTs to
+# /projects/…/discussions/:discussion_id/notes with `{body}`.
+#
+# One full walk per reply — unavoidable given GitLab's model (documented cost
+# boundary; the sole caller reply-to-comments.sh already loops per-comment).
+#
+# Echo `{id, url}` parity with GitHub. GitLab's created-note response has `.id`
+# but no `html_url` — SYNTHESIZE
+#   url = "https://${GITLAB_HOST}/<decoded-project-path>/-/merge_requests/${pr}#note_${id}"
+# using the RAW (percent-DECODED) slash-bearing project path (browser URLs use
+# the raw path, NOT the URL-encoded `GITLAB_PROJECT` API id — a URL-encoded
+# browser link is a 404 in the UI).
+#
+# Missing comment-id in the walk → rc≠0; mid-walk failure → rc≠0.
+# ---------------------------------------------------------------------------
+chp_gitlab_reply_review_comment() {
+  local pr="${1:-}" comment_id="${2:-}" body="${3:-}"
+  [[ "$pr" =~ ^[0-9]+$ ]] || { echo "ERROR: chp_gitlab_reply_review_comment requires PR (1st arg, non-empty numeric): got '${pr}'" >&2; return 2; }
+  [ -n "$comment_id" ]     || { echo "ERROR: chp_gitlab_reply_review_comment requires COMMENT_ID (2nd arg, non-empty)" >&2; return 2; }
+  [ -n "$body" ]           || { echo "ERROR: chp_gitlab_reply_review_comment requires BODY (3rd arg, non-empty)" >&2; return 2; }
+
+  # Walk discussions to find the owning discussion id. `_gl_api --paginate`
+  # walks ALL pages; mid-walk failure → rc≠0 EMPTY stdout (frozen #416).
+  local discussions
+  discussions="$(_gl_api --paginate \
+    "/projects/${GITLAB_PROJECT}/merge_requests/${pr}/discussions" \
+    2>/dev/null)" || return 1
+  [ -n "$discussions" ] || return 1
+  jq -e 'type == "array"' >/dev/null 2>&1 <<<"$discussions" || return 1
+
+  local discussion_id
+  discussion_id="$(jq -r --argjson cid "$comment_id" '
+    [ .[] | select( (.notes // []) | any(.id == $cid) ) ][0] | .id // empty
+  ' <<<"$discussions" 2>/dev/null)"
+  [ -n "$discussion_id" ] || {
+    echo "ERROR: chp_gitlab_reply_review_comment: comment id ${comment_id} not found in any discussion on MR ${pr}" >&2
+    return 1
+  }
+
+  # POST the reply.
+  local reply_body
+  reply_body="$(jq -cn --arg b "$body" '{body: $b}')" || return 1
+  local reply_response
+  reply_response="$(_gl_api --method POST --body "$reply_body" \
+    "/projects/${GITLAB_PROJECT}/merge_requests/${pr}/discussions/${discussion_id}/notes" \
+    2>/dev/null)" || return 1
+  [ -n "$reply_response" ] || return 1
+  local note_id
+  note_id="$(jq -r '.id // ""' <<<"$reply_response" 2>/dev/null)"
+  [ -n "$note_id" ] || return 1
+
+  # Synthesize the browser URL using the RAW project path (percent-decoded).
+  local project_raw
+  project_raw="$(_chp_gitlab_project_raw)" || return 1
+  local url="https://${GITLAB_HOST}/${project_raw}/-/merge_requests/${pr}#note_${note_id}"
+  jq -cn --argjson id "$note_id" --arg url "$url" '{id: $id, url: $url}'
+}
+
+# ---------------------------------------------------------------------------
+# chp_gitlab_resolve_thread THREAD_ID  (#419 R7)
+#
+# Decodes the P3-3 compound `<mr-iid>:<discussion-id>` (pinned in §3.2 [M8]).
+# Malformed (no colon / non-numeric iid / empty discussion) → rc 2 loud NO HTTP.
+# PUT /projects/…/merge_requests/:iid/discussions/:discussion_id body
+# `{resolved:true}`. Echo the response `.resolved` bool verbatim (parity with
+# GitHub GraphQL isResolved).
+#
+# The single-positional `chp_resolve_thread <thread-id>` seam contract is
+# PRESERVED — no resolve-threads.sh change (it passes thread_id verbatim).
+# ---------------------------------------------------------------------------
+chp_gitlab_resolve_thread() {
+  local thread_id="${1:-}"
+  [ -n "$thread_id" ] || { echo "ERROR: chp_gitlab_resolve_thread requires THREAD_ID (1st arg, non-empty)" >&2; return 2; }
+  # Decode <mr-iid>:<discussion-id>. `${x%%:*}`/`${x#*:}` doesn't distinguish
+  # a missing colon from an empty tail — check for the colon literal explicitly.
+  case "$thread_id" in
+    *:*) : ;;
+    *) echo "ERROR: chp_gitlab_resolve_thread: malformed THREAD_ID (expected '<mr-iid>:<discussion-id>', got '${thread_id}')" >&2; return 2 ;;
+  esac
+  local pr="${thread_id%%:*}" disc="${thread_id#*:}"
+  [[ "$pr" =~ ^[0-9]+$ ]] || { echo "ERROR: chp_gitlab_resolve_thread: THREAD_ID iid must be numeric (got '${pr}')" >&2; return 2; }
+  [ -n "$disc" ] || { echo "ERROR: chp_gitlab_resolve_thread: THREAD_ID discussion-id must be non-empty (got '${thread_id}')" >&2; return 2; }
+
+  local resp
+  resp="$(_gl_api --method PUT --body '{"resolved":true}' \
+    "/projects/${GITLAB_PROJECT}/merge_requests/${pr}/discussions/${disc}" \
+    2>/dev/null)" || return 1
+  [ -n "$resp" ] || return 1
+  jq -r '.resolved // false' <<<"$resp" 2>/dev/null || return 1
+}
+
+# ---------------------------------------------------------------------------
+# chp_gitlab_close_keyword ISSUE  (#419 R9)
+#
+# Render `Closes #<iid>` — GitLab parses the same keyword; auto-close on merge
+# to the default branch per `merge_closes_issue=1` (caps §5.1). Caller-side
+# `_render_close_keyword` branch logic UNCHANGED.
+# ---------------------------------------------------------------------------
+chp_gitlab_close_keyword() {
+  local issue="$1"
+  printf 'Closes #%s' "$issue"
+}
+
+# ---------------------------------------------------------------------------
+# chp_gitlab_commit_file REPO BRANCH FILE_PATH CONTENT_BASE64 MESSAGE  (#419 R10, [INV-99])
+#
+# Files API single-call collapse of the GitHub 8-call git-Data-API dance:
+# `POST /projects/:id/repository/files/:urlencoded-path` with
+# `{branch, encoding:"base64", content, commit_message}`.
+#
+# Provider-specific bootstrap the leaf owns (parity with the GitHub leaf's
+# orphan-branch block):
+#   1. Preflight branch existence: `_gl_api --tolerate-status 404
+#      …/repository/branches/${branch_urlenc}` invoked with REDIRECT-TO-TEMPFILE
+#      (NOT $(…) capture) so GL_API_STATUS survives — the frozen #416 CONTRACT
+#      NOTE. 404 → probe project's default_branch, then POST
+#      …/repository/branches?branch=…&ref=…; 200 → skip bootstrap.
+#   2. Preflight file existence the same way: 200 → PUT update, 404 → POST
+#      create.
+#   3. Post-commit SHA lookup via GET …/repository/commits?ref_name=…&per_page=1
+#      → `.[0].id` (cheaper than propagating a new success-token convention;
+#      upload-screenshot.sh uses the SHA only for logging).
+#
+# EVERY dynamic path/query component (file path, branch, ref) goes through
+# _gl_urlencode (slash-bearing branches like `feat/x` MUST be encoded per URL
+# path segment).
+#
+# `<repo>` is an explicit $1 (the #324 dropped-arg lesson) mapped to the project
+# path — honor a positional differing from ambient GITLAB_PROJECT.
+#
+# Large-body handling: temp-file + the INV-99 SELF-DISARMING RETURN trap
+# `trap '…; trap - RETURN' RETURN` — verbatim discipline from the GitHub leaf.
+# The #330 lesson: a bare RETURN trap persists into the shim's own return with
+# the leaf's `local`s out of scope → `unbound variable` under `set -u`.
+#
+# Fail-CLOSED on any of the up-to-five calls.
+# ---------------------------------------------------------------------------
+chp_gitlab_commit_file() {
+  local repo="$1" branch="$2" file_path="$3" content_base64="$4" message="$5"
+  local branch_enc path_enc
+  branch_enc="$(_gl_urlencode "$branch")" || return 1
+  path_enc="$(_gl_urlencode "$file_path")" || return 1
+
+  # Step 1: branch existence preflight — redirect-to-tempfile so GL_API_STATUS
+  # survives (frozen #416 CONTRACT NOTE).
+  local status_tmp json_tmpfile
+  status_tmp="$(mktemp)"
+  json_tmpfile="$(mktemp)"
+  # Self-disarming function-scoped RETURN trap (INV-99 discipline): clean these
+  # temps at THIS invocation's return path, then immediately clear the trap so
+  # it does NOT persist to fire again on the shim's own return (the bare-RETURN
+  # hazard reproduced on-box, #330).
+  trap 'rm -f "$status_tmp" "$json_tmpfile"; trap - RETURN' RETURN
+
+  local branch_probe_status branch_exists=0
+  _gl_api --tolerate-status 404 --status-out "$status_tmp" \
+    "/projects/${repo}/repository/branches/${branch_enc}" >/dev/null 2>&1 || {
+      echo "ERROR: chp_gitlab_commit_file: branch existence preflight failed" >&2
+      return 1
+    }
+  branch_probe_status="$(cat "$status_tmp" 2>/dev/null)"
+  if [ "$branch_probe_status" = "200" ]; then
+    branch_exists=1
+  elif [ "$branch_probe_status" = "404" ]; then
+    branch_exists=0
+  else
+    echo "ERROR: chp_gitlab_commit_file: unexpected branch preflight status '${branch_probe_status}'" >&2
+    return 1
+  fi
+
+  # Step 1b: bootstrap the branch if absent (orphan-branch parity with GitHub).
+  if [ "$branch_exists" = "0" ]; then
+    local project_raw default_branch default_branch_enc
+    project_raw="$(_gl_api "/projects/${repo}" 2>/dev/null)" || return 1
+    [ -n "$project_raw" ] || return 1
+    default_branch="$(jq -r '.default_branch // ""' <<<"$project_raw" 2>/dev/null)"
+    [ -n "$default_branch" ] || return 1
+    default_branch_enc="$(_gl_urlencode "$default_branch")" || return 1
+    _gl_api --method POST \
+      "/projects/${repo}/repository/branches?branch=${branch_enc}&ref=${default_branch_enc}" \
+      >/dev/null 2>&1 || return 1
+  fi
+
+  # Step 2: file existence preflight — same redirect-to-tempfile pattern.
+  local file_probe_status file_verb="POST"
+  _gl_api --tolerate-status 404 --status-out "$status_tmp" \
+    "/projects/${repo}/repository/files/${path_enc}?ref=${branch_enc}" \
+    >/dev/null 2>&1 || {
+      echo "ERROR: chp_gitlab_commit_file: file existence preflight failed" >&2
+      return 1
+    }
+  file_probe_status="$(cat "$status_tmp" 2>/dev/null)"
+  if [ "$file_probe_status" = "200" ]; then
+    file_verb="PUT"
+  elif [ "$file_probe_status" = "404" ]; then
+    file_verb="POST"
+  else
+    echo "ERROR: chp_gitlab_commit_file: unexpected file preflight status '${file_probe_status}'" >&2
+    return 1
+  fi
+
+  # Step 3: build the JSON payload via a temp file (large-body handling —
+  # base64 payloads for screenshots can exceed 128KB, breaking ARG_MAX).
+  jq -cn \
+    --arg branch  "$branch" \
+    --arg content "$content_base64" \
+    --arg msg     "$message" \
+    '{branch: $branch, encoding: "base64", content: $content, commit_message: $msg}' \
+    > "$json_tmpfile" 2>/dev/null || return 1
+
+  # Read the file contents into a shell variable so we can pass the JSON body
+  # via --body (the frozen #416 signature takes body-JSON as a positional
+  # string; --body-file is not in the contract).
+  local body_content
+  body_content="$(cat "$json_tmpfile" 2>/dev/null)" || return 1
+
+  _gl_api --method "$file_verb" --body "$body_content" \
+    "/projects/${repo}/repository/files/${path_enc}" \
+    >/dev/null 2>&1 || return 1
+
+  # Step 4: fetch the commit SHA (post-commit lookup — GitLab's Files API
+  # create/update response carries `file_path` + `branch` but NO commit SHA).
+  local commits_json commit_sha
+  commits_json="$(_gl_api \
+    "/projects/${repo}/repository/commits?ref_name=${branch_enc}&per_page=1" \
+    2>/dev/null)" || return 1
+  [ -n "$commits_json" ] || return 1
+  commit_sha="$(jq -r '.[0].id // ""' <<<"$commits_json" 2>/dev/null)"
+  [ -n "$commit_sha" ] || return 1
+  printf '%s\n' "$commit_sha"
+}
+
+# ---------------------------------------------------------------------------
+# chp_gitlab_trigger_bot PR TRIGGER  (#419 R12)
+#
+# `review_bots=0` (caps §5.1) — the caller's `parse_review_bots` short-circuits
+# at cap=0 BEFORE the leaf. The leaf is a safety net: rc 0 with no HTTP.
+# ---------------------------------------------------------------------------
+chp_gitlab_trigger_bot() {
+  # Deliberate no-op — see the header. Do NOT emit stderr; the caller does not
+  # invoke this leaf when review_bots=0, and if reached (misconfig), rc 0 is
+  # safer than a WARN spam.
+  return 0
+}
+
+# ---------------------------------------------------------------------------
+# chp_gitlab_count_reviews_by_login REPO PR LOGIN  (#419 R13, [INV-94])
+#
+# Count from `GET /projects/:repo/merge_requests/:pr/approvals` →
+# `.approved_by[]` where `.user.username == LOGIN`. Data-source honesty
+# (§5.1): GitLab has no review objects; approvals are the closest semantic.
+# `/approvals` is single-page bounded (no --paginate needed).
+#
+# LOGIN JSON-encoded into the jq program (injection-safe — mirrors GitHub leaf).
+# ANY failure → `echo 0; return 0` (parity — the caller's `^[0-9]+$` gate +
+# `-eq 0` MISSING decision expects 0-on-failure, NEVER rc≠0).
+# ---------------------------------------------------------------------------
+chp_gitlab_count_reviews_by_login() {
+  local repo="$1" pr="$2" login="$3" login_json count
+  # Injection-safe: --arg puts LOGIN into a jq variable, then @json emits its
+  # JSON-encoded string literal spliceable into a select() expression.
+  login_json="$(jq -rn --arg loginarg "$login" '$loginarg | @json' 2>/dev/null)" || { echo 0; return 0; }
+  local approvals
+  approvals="$(_gl_api "/projects/${repo}/merge_requests/${pr}/approvals" 2>/dev/null)" || { echo 0; return 0; }
+  [ -n "$approvals" ] || { echo 0; return 0; }
+  count="$(jq -r --argjson _dummy 0 \
+    "[.approved_by[]? | select(.user.username == ${login_json})] | length" \
+    <<<"$approvals" 2>/dev/null)" || { echo 0; return 0; }
+  # Guard against any non-numeric jq output (e.g. `null` if the payload
+  # shape is off) — collapse to 0.
+  [[ "$count" =~ ^[0-9]+$ ]] || { echo 0; return 0; }
+  printf '%s\n' "$count"
+}
+
+# ---------------------------------------------------------------------------
+# chp_gitlab_file_url REPO BRANCH FILE_PATH  (#419 R11)
+#
+# Render the browser blob URL. Pure string render, NO HTTP (parallels
+# chp_close_keyword's render pattern).
+#   https://${GITLAB_HOST}/<decoded-project-path>/-/blob/${BRANCH}/${FILE_PATH}
+#
+# Browser URLs use the RAW slash-bearing project path (NOT the URL-encoded
+# GITLAB_PROJECT API id — a URL-encoded browser link is a UI 404). The leaf
+# percent-DECODES GITLAB_PROJECT (or REPO if the caller passes a non-empty
+# override — mirrors chp_gitlab_commit_file's explicit-repo convention).
+#
+# Sibling of chp_github_file_url — same signature, different host + path shape.
+# The shim `chp_file_url` in lib-code-host.sh forwards "$@".
+# ---------------------------------------------------------------------------
+chp_gitlab_file_url() {
+  local repo="${1:-}" branch="$2" file_path="$3"
+  # Empty REPO → fall back to ambient GITLAB_PROJECT (the standard-repo case;
+  # upload-screenshot.sh threads its own $REPO which is the encoded slug).
+  local project_encoded
+  if [ -n "$repo" ]; then
+    project_encoded="$repo"
+  else
+    project_encoded="${GITLAB_PROJECT:-}"
+  fi
+  local project_raw
+  project_raw="$(_chp_gitlab_project_raw "$project_encoded")" || return 1
+  printf 'https://%s/%s/-/blob/%s/%s' "$GITLAB_HOST" "$project_raw" "$branch" "$file_path"
 }
