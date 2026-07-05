@@ -140,10 +140,80 @@ for _tpa in "${TRANSPORT_PATH_ADD[@]:-}"; do
   fi
 done
 
-ITP_SRC_DIR="$(pcf_resolve_provider_dir "$PROJECT_ROOT" "$ITP_NAME")" \
-  || { log "FATAL: unknown --itp provider '$ITP_NAME'"; exit 2; }
-CHP_SRC_DIR="$(pcf_resolve_provider_dir "$PROJECT_ROOT" "$CHP_NAME")" \
-  || { log "FATAL: unknown --chp provider '$CHP_NAME'"; exit 2; }
+# [#416 P1-5] Decouple logical NAME from source DIR for out-of-tree providers.
+# The flag value may be either:
+#   `<name>`             — well-known name (github/gitlab/degraded/broken) OR
+#                          absolute-path that becomes BOTH the name and the
+#                          dir (legacy behavior — but see NOTE below).
+#   `<name>=<abs-dir>`   — logical <name> (used for filenames + label output)
+#                          + explicit source <abs-dir> (self-certifying
+#                          out-of-tree provider). This is the codex round-1
+#                          [P1-5] shape: pcf_materialize_scratch's
+#                          itp-<name>.sh / chp-<name>.sh filenames use the
+#                          LOGICAL name, so a path like `/tmp/x/y` no longer
+#                          leaks into filenames or function names.
+#
+# NOTE on the legacy absolute-path-only form: the pre-P1-5 shape
+# `--itp /abs/dir` resolved dir=/abs/dir and name=/abs/dir, producing
+# nonsense filenames like `itp-/abs/dir.sh`. That form is now REJECTED
+# with a fatal instructing the operator to use `<name>=/abs/dir` instead.
+_split_itp_chp() {
+  local seam_flag="$1" raw="$2"
+  local name dir
+  if [[ "$raw" == *"="* ]]; then
+    name="${raw%%=*}"
+    dir="${raw#*=}"
+  else
+    name="$raw"
+    dir=""   # dir empty → resolve via the fixed-table.
+  fi
+  # Reject an absolute-path-only value (the pre-P1-5 nonsense-filename case).
+  if [[ -z "$dir" && "$name" == /* ]]; then
+    log "FATAL: --${seam_flag} '$raw' — absolute-path source dir MUST be paired with a logical name: use '--${seam_flag} <name>=<abs-dir>' (e.g. '--${seam_flag} corp=${raw}')"
+    exit 2
+  fi
+  # Reject a NAME containing a slash (nothing legal here).
+  if [[ "$name" == */* ]]; then
+    log "FATAL: --${seam_flag} '$raw' — logical name '$name' must not contain '/'"
+    exit 2
+  fi
+  # Reject an empty name / an empty dir (a stray `=`).
+  if [[ -z "$name" ]]; then
+    log "FATAL: --${seam_flag} '$raw' — empty name before '='"
+    exit 2
+  fi
+  if [[ "$raw" == *"="* && -z "$dir" ]]; then
+    log "FATAL: --${seam_flag} '$raw' — empty dir after '='"
+    exit 2
+  fi
+  printf '%s\t%s\n' "$name" "$dir"
+}
+
+IFS=$'\t' read -r ITP_LOGICAL_NAME ITP_EXPLICIT_DIR < <(_split_itp_chp itp "$ITP_NAME")
+IFS=$'\t' read -r CHP_LOGICAL_NAME CHP_EXPLICIT_DIR < <(_split_itp_chp chp "$CHP_NAME")
+
+# Overwrite ITP_NAME / CHP_NAME with the logical name so all downstream
+# code (label output, filenames, expect-absent leaf-name construction,
+# per-verb SKIP/FAIL messages) sees the clean name — never the abs-path.
+ITP_NAME="$ITP_LOGICAL_NAME"
+CHP_NAME="$CHP_LOGICAL_NAME"
+
+if [[ -n "$ITP_EXPLICIT_DIR" ]]; then
+  # Explicit out-of-tree dir. Validate it via pcf_resolve_provider_dir's
+  # absolute-path arm (checks existence + readability).
+  ITP_SRC_DIR="$(pcf_resolve_provider_dir "$PROJECT_ROOT" "$ITP_EXPLICIT_DIR")" \
+    || { log "FATAL: --itp '$ITP_NAME=$ITP_EXPLICIT_DIR' — dir does not exist or is not readable"; exit 2; }
+else
+  ITP_SRC_DIR="$(pcf_resolve_provider_dir "$PROJECT_ROOT" "$ITP_NAME")" \
+    || { log "FATAL: unknown --itp provider '$ITP_NAME'"; exit 2; }
+fi
+if [[ -n "$CHP_EXPLICIT_DIR" ]]; then
+  CHP_SRC_DIR="$(pcf_resolve_provider_dir "$PROJECT_ROOT" "$CHP_EXPLICIT_DIR")" \
+    || { log "FATAL: --chp '$CHP_NAME=$CHP_EXPLICIT_DIR' — dir does not exist or is not readable"; exit 2; }
+else
+  CHP_SRC_DIR="$(pcf_resolve_provider_dir "$PROJECT_ROOT" "$CHP_NAME")" \
+    || { log "FATAL: unknown --chp provider '$CHP_NAME'"; exit 2; }
+fi
 
 work_root=""
 cleanup() { rm -rf "${work_root:-}" 2>/dev/null || true; }

@@ -321,6 +321,65 @@ rm -rf "$_scratch_abs"
 
 # ===========================================================================
 echo ""
+echo "=== TC-RGH-006..009: name=/abs/dir out-of-tree provider (P1-5 review-response) ==="
+# ===========================================================================
+# [#416 P1-5] Codex round-1 [P1-5]: the pre-fix runner passed an absolute
+# path directly as ITP_NAME/CHP_NAME, so pcf_materialize_scratch built
+# nonsense filenames like `itp-/tmp/x.sh` and function names like
+# `itp_/tmp/x_verb`. Post-fix the flag shape is `--itp <name>=/abs/dir`,
+# decoupling logical NAME (used in filenames) from source DIR.
+
+# Build a REAL fixture out-of-tree provider dir with a working itp_corp.sh
+# leaf that mirrors the degraded provider's shape for a couple of verbs.
+# The runner should be invocable against it via `--itp corp=/tmp/…` and
+# emit `itp_corp_<verb>` function references, not `itp_/tmp/…_<verb>`.
+_extdir="$(mktemp -d)"
+_deg_dir="$PROJECT_ROOT/tests/unit/fixtures/provider-degraded"
+if [[ -f "$_deg_dir/itp-degraded.sh" && -f "$_deg_dir/itp-degraded.caps" ]]; then
+  # Copy the degraded ITP verbatim into the ext dir, renamed to `corp`,
+  # rewriting function names `itp_degraded_*` → `itp_corp_*` and the
+  # `_ITP_NAME=degraded` sentinel if present.
+  sed 's/itp_degraded_/itp_corp_/g; s/_ITP_NAME=degraded/_ITP_NAME=corp/g' \
+    "$_deg_dir/itp-degraded.sh" > "$_extdir/itp-corp.sh"
+  cp "$_deg_dir/itp-degraded.caps" "$_extdir/itp-corp.caps"
+  # Same for chp (so `--chp corp=…` also has something to resolve).
+  sed 's/chp_degraded_/chp_corp_/g; s/_CHP_NAME=degraded/_CHP_NAME=corp/g' \
+    "$_deg_dir/chp-degraded.sh" > "$_extdir/chp-corp.sh"
+  cp "$_deg_dir/chp-degraded.caps" "$_extdir/chp-corp.caps"
+
+  # TC-RGH-006: name=/abs/dir accepted; runner produces `CONFORMANCE-PCONF
+  # corp/corp <verb> …` lines (logical name, NOT the abs path).
+  rgh6_out=$(bash "$RUNNER" --itp "corp=$_extdir" --chp "corp=$_extdir" 2>&1); rgh6_rc=$?
+  assert_contains "TC-RGH-006: label uses LOGICAL name 'corp/corp' (not the abs path)" \
+    "CONFORMANCE-PCONF corp/corp" "$rgh6_out"
+  # And crucially — no `itp_/tmp/` or `chp_/tmp/` function-name pollution.
+  assert_not_contains "TC-RGH-006: no path-based function names leaked" \
+    "itp_/" "$rgh6_out"
+  assert_not_contains "TC-RGH-006: no chp path-based function names leaked" \
+    "chp_/" "$rgh6_out"
+
+  # TC-RGH-007: legacy abs-path-only form is now REJECTED with a fatal
+  # (pre-P1-5 it silently produced nonsense filenames).
+  rgh7_out=$(bash "$RUNNER" --itp "$_extdir" --chp "$_extdir" 2>&1); rgh7_rc=$?
+  assert_eq "TC-RGH-007: legacy abs-path-only --itp → exit 2 (fatal)" "2" "$rgh7_rc"
+  assert_contains "TC-RGH-007: fatal names the required form" "<name>=<abs-dir>" "$rgh7_out"
+
+  # TC-RGH-008: <name>=<non-existent-abs-dir> → fatal.
+  rgh8_out=$(bash "$RUNNER" --itp "corp=/no/such/provider-dir-$$" --chp github 2>&1); rgh8_rc=$?
+  assert_eq "TC-RGH-008: name=/nonexistent → exit 2 (fatal)" "2" "$rgh8_rc"
+
+  # TC-RGH-009: empty name / empty dir on either side of '=' → fatal.
+  rgh9_out=$(bash "$RUNNER" --itp "=$_extdir" --chp github 2>&1); rgh9_rc=$?
+  assert_eq "TC-RGH-009a: empty name before '=' → exit 2" "2" "$rgh9_rc"
+  rgh9b_out=$(bash "$RUNNER" --itp "corp=" --chp github 2>&1); rgh9b_rc=$?
+  assert_eq "TC-RGH-009b: empty dir after '=' → exit 2" "2" "$rgh9b_rc"
+else
+  ok "TC-RGH-006..009: skipped — degraded fixture not found (unexpected in this repo)"
+fi
+rm -rf "$_extdir"
+
+# ===========================================================================
+echo ""
 echo "=== TC-RGH-010..012: --transport-hook passthrough ==="
 # ===========================================================================
 # TC-RGH-010: unreadable hook path → fatal exit 2 with usage error message.
