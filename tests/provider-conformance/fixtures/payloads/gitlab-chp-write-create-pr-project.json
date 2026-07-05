@@ -1,0 +1,8 @@
+{
+  "id": 42,
+  "name": "myProject",
+  "path": "myProject",
+  "path_with_namespace": "myGroup/myProject",
+  "default_branch": "main",
+  "web_url": "https://gitlab.example.test/myGroup/myProject"
+}

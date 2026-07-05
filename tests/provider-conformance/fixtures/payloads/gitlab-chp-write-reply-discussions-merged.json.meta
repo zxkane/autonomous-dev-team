@@ -1,0 +1,7 @@
+# P3-4 R6 — merged 2-page discussions walk fixture.
+#
+# gitlab_version=17.x
+# reference_endpoint=GET /projects/:id/merge_requests/:iid/discussions --paginate
+#
+# `_gl_api --paginate` walks BOTH pages and merges into ONE JSON array; this
+# fixture models the POST-MERGE stdout the stub returns (single-payload mode).

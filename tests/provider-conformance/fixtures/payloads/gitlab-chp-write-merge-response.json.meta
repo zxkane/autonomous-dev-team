@@ -1,0 +1,4 @@
+# P3-4 R4 — chp_gitlab_merge PUT /merge success response.
+#
+# gitlab_version=17.x
+# reference_endpoint=PUT /projects/:id/merge_requests/:iid/merge

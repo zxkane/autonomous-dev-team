@@ -1,0 +1,7 @@
+# P3-4 R7 — chp_gitlab_resolve_thread PUT /discussions/:id success response.
+#
+# gitlab_version=17.x
+# reference_endpoint=PUT /projects/:id/merge_requests/:iid/discussions/:d?resolved=true
+#
+# The leaf echoes response `.resolved` (bool) verbatim — parity with GitHub
+# GraphQL `resolveReviewThread.thread.isResolved` echo.

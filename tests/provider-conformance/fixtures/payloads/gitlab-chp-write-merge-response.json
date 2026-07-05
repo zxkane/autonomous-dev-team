@@ -1,0 +1,13 @@
+{
+  "id": 42,
+  "iid": 42,
+  "project_id": 42,
+  "state": "merged",
+  "title": "feat: sample",
+  "source_branch": "feat/x",
+  "target_branch": "main",
+  "squash": true,
+  "should_remove_source_branch": true,
+  "merged_at": "2026-07-05T11:00:00.000Z",
+  "merge_commit_sha": "abcdef1234567890abcdef1234567890abcdef12"
+}

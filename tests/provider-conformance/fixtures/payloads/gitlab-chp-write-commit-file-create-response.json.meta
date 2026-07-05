@@ -1,0 +1,8 @@
+# P3-4 R10 — chp_gitlab_commit_file Files API create/update response.
+#
+# gitlab_version=17.x
+# reference_endpoint=POST|PUT /projects/:id/repository/files/:path
+#
+# GitLab's Files API create/update response carries file_path + branch but
+# NO commit SHA — the leaf's follow-up GET on /repository/commits fetches
+# the SHA (see commit-file-commits.json).

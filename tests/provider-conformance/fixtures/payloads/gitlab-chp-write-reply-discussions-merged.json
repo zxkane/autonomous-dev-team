@@ -1,0 +1,24 @@
+[
+  {
+    "id": "d001",
+    "individual_note": false,
+    "notes": [
+      {"id": 100001, "body": "first note on d001", "system": false, "resolvable": true, "resolved": false, "author": {"username": "alice"}, "created_at": "2026-07-05T09:00:00Z", "position": {"new_path": "src/a.py", "new_line": 10}}
+    ]
+  },
+  {
+    "id": "d002",
+    "individual_note": true,
+    "notes": [
+      {"id": 100002, "body": "general note", "system": false, "resolvable": false, "author": {"username": "bob"}, "created_at": "2026-07-05T09:01:00Z", "position": null}
+    ]
+  },
+  {
+    "id": "d099",
+    "individual_note": false,
+    "notes": [
+      {"id": 200001, "body": "existing on d099", "system": false, "resolvable": true, "resolved": false, "author": {"username": "cathy"}, "created_at": "2026-07-05T09:10:00Z", "position": {"new_path": "src/b.py", "new_line": 20}},
+      {"id": 200002, "body": "target-comment-id lives here", "system": false, "resolvable": true, "resolved": false, "author": {"username": "cathy"}, "created_at": "2026-07-05T09:11:00Z", "position": {"new_path": "src/b.py", "new_line": 20}}
+    ]
+  }
+]

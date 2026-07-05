@@ -1,0 +1,7 @@
+# P3-4 R6 — chp_gitlab_reply_review_comment POST /discussions/:id/notes response.
+#
+# gitlab_version=17.x
+# reference_endpoint=POST /projects/:id/merge_requests/:iid/discussions/:d/notes
+#
+# GitLab's created-note response has `.id` but no `html_url`; the leaf
+# synthesizes url = "https://${GITLAB_HOST}/<decoded-project-path>/-/merge_requests/${pr}#note_${id}".

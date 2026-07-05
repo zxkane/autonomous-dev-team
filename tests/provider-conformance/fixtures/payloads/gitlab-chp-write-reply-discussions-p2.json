@@ -1,0 +1,10 @@
+[
+  {
+    "id": "d099",
+    "individual_note": false,
+    "notes": [
+      {"id": 200001, "body": "existing on d099", "system": false, "resolvable": true, "resolved": false, "author": {"username": "cathy"}, "created_at": "2026-07-05T09:10:00Z", "position": {"new_path": "src/b.py", "new_line": 20}},
+      {"id": 200002, "body": "target-comment-id lives here", "system": false, "resolvable": true, "resolved": false, "author": {"username": "cathy"}, "created_at": "2026-07-05T09:11:00Z", "position": {"new_path": "src/b.py", "new_line": 20}}
+    ]
+  }
+]

@@ -1,0 +1,4 @@
+# P3-4 R10 — chp_gitlab_commit_file POST /repository/branches bootstrap response.
+#
+# gitlab_version=17.x
+# reference_endpoint=POST /projects/:id/repository/branches?branch=:new&ref=:default

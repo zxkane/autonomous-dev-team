@@ -1,0 +1,7 @@
+# P3-4 R2 — chp_gitlab_create_pr POST /merge_requests response fixture.
+#
+# gitlab_version=17.x
+# reference_endpoint=POST /projects/:id/merge_requests
+# reference_docs=https://docs.gitlab.com/ee/api/merge_requests.html#create-mr
+#
+# Coverage: `.web_url` proves the created-MR echo; `iid`/state confirm shape.

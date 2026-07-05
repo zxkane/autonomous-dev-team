@@ -1,0 +1,7 @@
+# P3-4 R10 — chp_gitlab_commit_file branch-existence preflight (200 arm).
+#
+# gitlab_version=17.x
+# reference_endpoint=GET /projects/:id/repository/branches/:branch
+#
+# Consumed via `_gl_api --tolerate-status 404 …` in a redirect-to-tempfile
+# invocation (NOT $(…) capture) so GL_API_STATUS survives.

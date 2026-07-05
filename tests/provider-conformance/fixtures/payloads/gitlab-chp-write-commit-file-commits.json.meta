@@ -1,0 +1,7 @@
+# P3-4 R10 — chp_gitlab_commit_file post-commit SHA lookup.
+#
+# gitlab_version=17.x
+# reference_endpoint=GET /projects/:id/repository/commits?ref_name=:branch&per_page=1
+#
+# Provides the commit SHA `.[0].id` the leaf echoes for parity with the
+# GitHub leaf's success token (which is a commit SHA).

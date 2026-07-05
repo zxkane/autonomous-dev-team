@@ -1,0 +1,4 @@
+# P3-4 R10 — chp_gitlab_commit_file file-existence preflight (200 arm).
+#
+# gitlab_version=17.x
+# reference_endpoint=GET /projects/:id/repository/files/:path?ref=:branch
