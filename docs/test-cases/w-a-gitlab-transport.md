@@ -4,7 +4,7 @@ Contract-freeze proof for `skills/autonomous-dispatcher/scripts/providers/lib-gi
 
 **Suite**: `tests/unit/test-lib-gitlab-transport.sh` and `tests/unit/test-auth-lifecycle-gating.sh`.
 **Discipline**: hermetic; stub `curl` on `PATH`; no network. bash 4 target. Run under `env -u PROJECT_DIR bash …` for CI parity.
-**INV-113 machine-check target**: `test-lib-gitlab-transport.sh`.
+**INV-116 machine-check target**: `test-lib-gitlab-transport.sh`.
 
 ## Conventions
 
@@ -109,4 +109,4 @@ Contract-freeze proof for `skills/autonomous-dispatcher/scripts/providers/lib-gi
 
 ## Machine-check pin
 
-`test-lib-gitlab-transport.sh` is the INV-113 machine-check target. `docs/pipeline/invariants.md`'s INV-113 entry names this test path in its `_Triage_` line.
+`test-lib-gitlab-transport.sh` is the INV-116 machine-check target. `docs/pipeline/invariants.md`'s INV-116 entry names this test path in its `_Triage_` line.

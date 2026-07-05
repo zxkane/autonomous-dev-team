@@ -1,5 +1,5 @@
 #!/bin/bash
-# test-lib-gitlab-transport.sh — issue #416, INV-113.
+# test-lib-gitlab-transport.sh — issue #416, INV-116.
 #
 # Drives skills/autonomous-dispatcher/scripts/providers/lib-gitlab-transport.sh
 # hermetically via a stubbed `curl` on an isolated PATH. TC IDs per

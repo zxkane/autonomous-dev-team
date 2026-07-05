@@ -77,7 +77,7 @@
 #
 # GITLAB_HOST default: `gitlab.com`. Overridable per-project.
 #
-# See docs/pipeline/provider-spec.md §transport and INV-113.
+# See docs/pipeline/provider-spec.md §transport and INV-116.
 
 # Guard against double-sourcing (idempotent — only defines functions +
 # module-scope state).
@@ -114,32 +114,32 @@ _gl_preflight_check() {
 
   if [[ -n "$hook" ]]; then
     if [[ ! -r "$hook" ]]; then
-      echo "ERROR: [INV-113] GITLAB_TRANSPORT_HOOK='${hook}' is not readable — cannot source the transport override. Set GITLAB_TRANSPORT_HOOK to a readable file that redefines _gl_http, or unset it to use the default curl transport." >&2
+      echo "ERROR: [INV-116] GITLAB_TRANSPORT_HOOK='${hook}' is not readable — cannot source the transport override. Set GITLAB_TRANSPORT_HOOK to a readable file that redefines _gl_http, or unset it to use the default curl transport." >&2
       return 1
     fi
     # Source in the current shell so a redefined _gl_http survives.
     # shellcheck disable=SC1090
     source "$hook" || {
-      echo "ERROR: [INV-113] sourcing GITLAB_TRANSPORT_HOOK='${hook}' failed (non-zero rc from the hook file itself)." >&2
+      echo "ERROR: [INV-116] sourcing GITLAB_TRANSPORT_HOOK='${hook}' failed (non-zero rc from the hook file itself)." >&2
       return 1
     }
     # Post-source: _gl_http must exist and be callable. The hook MAY define
     # private helper functions alongside (operator-trust model, per #414
     # pillar 3); only the public override point is validated.
     if ! declare -F _gl_http >/dev/null 2>&1; then
-      echo "ERROR: [INV-113] GITLAB_TRANSPORT_HOOK='${hook}' did not define _gl_http (the only public override point). Redefine _gl_http with signature: _gl_http <method> <path-or-url> <headers_out_file> [body-json]." >&2
+      echo "ERROR: [INV-116] GITLAB_TRANSPORT_HOOK='${hook}' did not define _gl_http (the only public override point). Redefine _gl_http with signature: _gl_http <method> <path-or-url> <headers_out_file> [body-json]." >&2
       return 1
     fi
   else
     # No hook: default curl transport is in force. GITLAB_TOKEN is required.
     if [[ -z "${GITLAB_TOKEN:-}" ]]; then
-      echo "ERROR: [INV-113] GITLAB_TOKEN is unset and no GITLAB_TRANSPORT_HOOK is armed — the default curl transport requires a PAT. Set GITLAB_TOKEN=<token> (see docs/gitlab-token-setup.md), or set GITLAB_TRANSPORT_HOOK=<path> to a custom transport." >&2
+      echo "ERROR: [INV-116] GITLAB_TOKEN is unset and no GITLAB_TRANSPORT_HOOK is armed — the default curl transport requires a PAT. Set GITLAB_TOKEN=<token> (see docs/gitlab-token-setup.md), or set GITLAB_TRANSPORT_HOOK=<path> to a custom transport." >&2
       return 1
     fi
   fi
 
   _GL_PREFLIGHT_LATCHED=1
-  echo "[INV-113] gitlab-transport preflight OK (hook=${hook:-<none>}, host=${GITLAB_HOST})" >&2
+  echo "[INV-116] gitlab-transport preflight OK (hook=${hook:-<none>}, host=${GITLAB_HOST})" >&2
   return 0
 }
 
@@ -382,11 +382,11 @@ _gl_api() {
   if [[ "$paginate" -eq 0 ]]; then
     _do_request_with_backoff "$path"; rc=$?
     if [[ "$rc" -eq 1 ]]; then
-      echo "ERROR: [INV-113] _gl_api transport failure on '${path}' (curl exit non-zero)." >&2
+      echo "ERROR: [INV-116] _gl_api transport failure on '${path}' (curl exit non-zero)." >&2
       _cleanup; return 1
     fi
     if [[ "$rc" -eq 2 ]]; then
-      echo "ERROR: [INV-113] _gl_api 429 backoff exhausted on '${path}' after ${GL_TRANSPORT_MAX_RETRIES} retries." >&2
+      echo "ERROR: [INV-116] _gl_api 429 backoff exhausted on '${path}' after ${GL_TRANSPORT_MAX_RETRIES} retries." >&2
       _cleanup; return 1
     fi
     # HTTP status classification.
@@ -399,7 +399,7 @@ _gl_api() {
       _cleanup; return 0
     fi
     local body_excerpt; body_excerpt=$(head -c 200 "$body_file" 2>/dev/null)
-    echo "ERROR: [INV-113] _gl_api HTTP ${GL_API_STATUS} on '${path}' (body excerpt: ${body_excerpt})" >&2
+    echo "ERROR: [INV-116] _gl_api HTTP ${GL_API_STATUS} on '${path}' (body excerpt: ${body_excerpt})" >&2
     _cleanup; return 1
   fi
 
@@ -417,9 +417,9 @@ _gl_api() {
     _do_request_with_backoff "$next_url"; local req_rc=$?
     if [[ "$req_rc" -ne 0 ]]; then
       if [[ "$req_rc" -eq 1 ]]; then
-        echo "ERROR: [INV-113] _gl_api transport failure mid-walk on '${next_url}'." >&2
+        echo "ERROR: [INV-116] _gl_api transport failure mid-walk on '${next_url}'." >&2
       else
-        echo "ERROR: [INV-113] _gl_api 429 backoff exhausted mid-walk on '${next_url}'." >&2
+        echo "ERROR: [INV-116] _gl_api 429 backoff exhausted mid-walk on '${next_url}'." >&2
       fi
       walk_rc=1
       break
@@ -433,7 +433,7 @@ _gl_api() {
         _cleanup; return 0
       fi
       local body_excerpt; body_excerpt=$(head -c 200 "$body_file" 2>/dev/null)
-      echo "ERROR: [INV-113] _gl_api mid-walk HTTP ${GL_API_STATUS} on '${next_url}' (body excerpt: ${body_excerpt})" >&2
+      echo "ERROR: [INV-116] _gl_api mid-walk HTTP ${GL_API_STATUS} on '${next_url}' (body excerpt: ${body_excerpt})" >&2
       walk_rc=1
       break
     fi
@@ -464,7 +464,7 @@ _gl_api() {
       break
     fi
     if [[ "$pages_read" -ge "$GL_TRANSPORT_PAGE_CAP" ]]; then
-      echo "ERROR: [INV-113] _gl_api paginate walk hit cap GL_TRANSPORT_PAGE_CAP=${GL_TRANSPORT_PAGE_CAP} (next-page=${next_page}) — fail-CLOSED, no partial output." >&2
+      echo "ERROR: [INV-116] _gl_api paginate walk hit cap GL_TRANSPORT_PAGE_CAP=${GL_TRANSPORT_PAGE_CAP} (next-page=${next_page}) — fail-CLOSED, no partial output." >&2
       walk_rc=1
       break
     fi
@@ -492,7 +492,7 @@ _gl_api() {
   fi
 
   if [[ "$walk_rc" -ne 0 ]]; then
-    echo "ERROR: [INV-113] _gl_api paginate merge failed (invalid JSON in a page body)." >&2
+    echo "ERROR: [INV-116] _gl_api paginate merge failed (invalid JSON in a page body)." >&2
     rm -f "$merged_file" "$merged_file.raw"
     _cleanup; return 1
   fi
