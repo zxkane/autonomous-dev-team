@@ -1,0 +1,7 @@
+{
+  "id": 2001,
+  "body": "posted comment body",
+  "author": {"username": "project_42_bot_abc123"},
+  "system": false,
+  "created_at": "2026-06-01T00:00:00.000Z"
+}

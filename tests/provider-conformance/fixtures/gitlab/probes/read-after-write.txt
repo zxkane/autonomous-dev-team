@@ -1,0 +1,25 @@
+# Probe: read_after_write_state=1
+
+Hand-authored evidence stub for the `.caps` claim
+`read_after_write_state=1`.
+
+## What the probe would capture live
+
+  PUT /projects/:id/issues/:iid  {"add_labels":"pending-review","remove_labels":"in-progress"}
+  → 200 OK, body includes `.labels: ["autonomous","pending-review"]` immediately.
+
+  GET /projects/:id/issues?labels=pending-review  (issued within 1s)
+  → the just-transitioned issue appears in the returned array.
+
+Confirms GitLab has NO Asana-style eventual-consistency lag between
+label transition and label-filtered enumeration. The dispatcher's next-tick
+list_pending_review call sees the transition immediately.
+
+## API-doc citations
+
+- Edit an Issue: https://docs.gitlab.com/api/issues.html#edit-an-issue
+- List Issues:   https://docs.gitlab.com/api/issues.html#list-issues
+
+## Flags
+
+hand_authored: true

@@ -1,0 +1,35 @@
+# Probe: marker_channel=html
+
+Hand-authored evidence stub for the `.caps` claim
+`marker_channel=html`. Backs #417 R2 / #414 AC5.
+
+## What the probe would capture live
+
+GitLab markdown is CommonMark-based and preserves HTML comments verbatim
+inside issue DESCRIPTIONS and NOTES. A note POSTed with body containing:
+
+  <!-- dispatcher-token: abc123 -->
+
+round-trips verbatim in the subsequent `GET /notes` response. The token
+is not stripped, not sanitized, and not rendered. This is the same
+choke-point the dispatcher relies on for [INV-18] dispatch-token and
+[INV-39] dep-block markers on the GitHub side (via `<!-- dispatcher-token
+… -->` HTML comments in `gh issue comment` bodies).
+
+## Contrast — Asana
+
+Asana's `html_text` story field is strict-XML-whitelisted and REJECTS
+`<!-- -->` with HTTP 400 (spec §5.2). Asana therefore hard-pins
+`marker_channel=text` and posts via the plain `text` field instead. GitLab
+has no such restriction; the standard `body` field (which is
+markdown-rendered but preserves HTML) is the marker channel.
+
+## API-doc citations
+
+- GitLab Markdown:      https://docs.gitlab.com/user/markdown.html
+- Inline HTML support:  https://docs.gitlab.com/user/markdown.html#inline-html
+- Notes API:            https://docs.gitlab.com/api/notes.html
+
+## Flags
+
+hand_authored: true

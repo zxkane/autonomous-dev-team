@@ -1,0 +1,8 @@
+{
+  "iid": 42,
+  "id": 500042,
+  "title": "example task",
+  "description": "task body here",
+  "state": "opened",
+  "labels": ["autonomous", "in-progress"]
+}

@@ -1,0 +1,8 @@
+source: hand-authored
+capture_date: 2026-07-05
+gitlab_version: 17.x
+endpoint: GET /projects/:id/issues?…&page=1
+shape: page 1 of a two-page issue list — paired with gitlab-issues-list-p2.json.
+notes: |
+  The transport merges pages into ONE array via `jq -s add` (spec §3.5 /
+  #416). This fixture proves the leaf ingests a merged shape correctly.

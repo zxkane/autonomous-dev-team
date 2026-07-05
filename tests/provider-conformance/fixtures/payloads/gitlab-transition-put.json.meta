@@ -1,0 +1,5 @@
+source: hand-authored
+capture_date: 2026-07-05
+gitlab_version: 17.x
+endpoint: PUT /projects/:id/issues/:iid  (with add_labels/remove_labels body)
+shape: echoed issue after a transition; labels reflect the applied add/remove.

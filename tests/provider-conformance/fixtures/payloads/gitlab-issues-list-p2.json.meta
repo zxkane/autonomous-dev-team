@@ -1,0 +1,5 @@
+source: hand-authored
+capture_date: 2026-07-05
+gitlab_version: 17.x
+endpoint: GET /projects/:id/issues?…&page=2
+shape: page 2 of a two-page issue list — paired with gitlab-issues-list-p1.json.

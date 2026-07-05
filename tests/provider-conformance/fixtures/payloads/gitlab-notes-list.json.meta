@@ -1,0 +1,8 @@
+source: hand-authored
+capture_date: 2026-07-05
+gitlab_version: 17.x
+endpoint: GET /projects/:id/issues/:iid/notes?sort=asc&order_by=created_at
+shape: notes list with mixed authorKinds (human / bot / self) AND ONE system:true note
+notes: |
+  The system:true entry MUST be filtered by the leaf (spec §3.3 discipline).
+  Bot username follows GitLab's project_<n>_bot_<slug> convention.
