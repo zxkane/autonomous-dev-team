@@ -675,6 +675,15 @@ workaround. CLI: `glab` (the official `gh` analog) for green-path verbs + raw
 `curl` REST for the long tail. Auth: no single GitHub-App equivalent — closest is
 a Project/Group Access Token or a Premium/Ultimate Service Account.
 
+> **Implementation status (W-B, #417):** The 14 ITP verbs for GitLab are
+> **migrated behind [`providers/itp-gitlab.sh`](../../skills/autonomous-dispatcher/scripts/providers/itp-gitlab.sh)**
+> + [`providers/itp-gitlab.caps`](../../skills/autonomous-dispatcher/scripts/providers/itp-gitlab.caps),
+> covered by [`tests/unit/test-itp-gitlab.sh`](../../tests/unit/test-itp-gitlab.sh)
+> hermetically (test-local `_gl_api`/`_gl_urlencode` stubs — no live GitLab).
+> Every leaf routes through the FROZEN P3-1 `_gl_api` contract ([INV-113]);
+> JSON bodies use `jq -c -n --arg` (no interpolation). The endpoint-level
+> mapping is pinned in the Mapping-appendix GitLab arm below.
+
 ### 5.2 Asana (issue tracker only) — viable, four capabilities become optional
 
 State primitive = single-select custom field (intrinsically single-valued, one
@@ -1133,6 +1142,34 @@ becomes a verb, the surrounding INV-coupled logic stays caller-side.
 > multi-op orchestrators** — they are the load-bearing examples that "the caller
 > logic doesn't move" is *incomplete*: after the refactor they call 5+ verbs and
 > retain all their non-host ops caller-side.
+
+### GitLab arm — 14 ITP verbs → GitLab REST v4 endpoints (W-B, #417)
+
+Backs `providers/itp-gitlab.sh` (spec §3.1 mapped onto GitLab REST). Every
+leaf routes through the FROZEN P3-1 `_gl_api` / `_gl_urlencode` contract
+(#416, [INV-113]) — leaves never call `curl` or `_gl_http` directly. The
+NORMALIZED OUTPUT matches what the caller layer already consumes (spec
+§3.1/§3.3 verbatim), so no caller-side change lands in the same PR as the
+leaves. See §5.1 for the research summary this arm implements.
+
+| ITP verb | GitLab REST endpoint(s) | Notes |
+|---|---|---|
+| `itp_list_by_state STATE LABELS_AND_CSV LIMIT FIELDS_CSV` | `GET /projects/${GITLAB_PROJECT}/issues?state=<opened\|closed\|all>&labels=<csv>&per_page=100` (paginated to LIMIT via `_gl_api --max-items`) | STATE `open→opened`, `closed→closed`, `all→all`. `labels=A,B` = native AND (spec §5.1). `iid` → `number` (int; NOT `id`). Sort ascending by number. `comments` fetched via a same-tick `itp_gitlab_list_comments` per issue when requested (#396-r2 discipline). `[]` on empty. Fail-CLOSED. |
+| `itp_count_by_state STATE LABELS_AND_CSV LIMIT ANY_OF_LABELS_CSV` | same as list_by_state; jq-count over normalized array | Bare non-negative int. Fail-CLOSED. |
+| `itp_list_forbidden_combos STATE LABELS_AND_CSV LIMIT` | same enumeration; jq combo filter in-leaf (native `not[labels]=X` is insufficient for intersection-of-incompatible-sets) | Output fields: `number,labels`. [INV-25]. Fail-CLOSED. |
+| `itp_transition_state ISSUE REMOVE ADD` | `PUT /projects/${GITLAB_PROJECT}/issues/${ISSUE}` with body `{"add_labels":"<csv>","remove_labels":"<csv>"}` | **Single atomic PUT** — cleaner than GitHub's two-flag flip. Empty side omits its key entirely (behavior-parity with GitHub leaf). Multi-label CSV via `IFS=,` split ([INV-97]). |
+| `itp_read_task ISSUE FIELDS_CSV` | `GET /projects/${GITLAB_PROJECT}/issues/${ISSUE}` (+ `itp_gitlab_list_comments` when `comments` in FIELDS_CSV) | Field renames: `description → body` (null → `""`); `state` `opened\|closed` → provider-neutral `OPEN\|CLOSED` (uppercase, matches the §3.1 W1b tokens `_next_action` consumes byte-unchanged). Labels already name-strings in GitLab. Fail-CLOSED capture-then-check. |
+| `itp_post_comment ISSUE BODY` | `POST /projects/${GITLAB_PROJECT}/issues/${ISSUE}/notes` with `{"body":"…"}` | Marker channel is HTML (§5.1 evidence): GitLab markdown preserves `<!-- marker -->` verbatim in notes. |
+| `itp_edit_comment ISSUE COMMENT_ID BODY` | `PUT /projects/${GITLAB_PROJECT}/issues/${ISSUE}/notes/${COMMENT_ID}` with `{"body":"…"}` | `edit_comment=1` — byte-parity with the [INV-46] SHA-stamp caller (no fallback branch fires). |
+| `itp_list_comments ISSUE` | `GET /projects/${GITLAB_PROJECT}/issues/${ISSUE}/notes?sort=asc&order_by=created_at` (paginated) | [INV-90] normalized array. **System notes (`.system==true`) FILTERED OUT** (audit-trail events, not comments — matches CHP-side discipline). `id`=native numeric (consumed only by `itp_gitlab_edit_comment`); `author`=`.author.username` (§3.3 pin); `authorKind`: `self` iff username==`BOT_LOGIN`, else `bot` iff username matches `^(project\|group)_\d+_bot(_[a-z0-9]+)?$` (GitLab access-token convention — the `distinct_bot_author=1` claim), else `human`. Sort ascending by `createdAt`, `id` tie-break (stable — `\| last` depends on it, #321). |
+| `itp_resolve_dep OWNER_REPO NUM OUT_VAR` | `GET /projects/<_gl_urlencode(OWNER_REPO)>/issues/${NUM}` | Separate positional args (leaf does NOT parse `#`). OWNER_REPO is the (possibly slash-bearing) project path, URL-encoded via `_gl_urlencode` before path composition. `state` `opened\|closed` → `OPEN\|CLOSED`. **Fail-SOFT** — empty out-var on any failure. **[INV-83] simplification**: same `GITLAB_TOKEN` across accessible projects → no per-dep mint, no `_DEP_TOKEN_CACHE`. |
+| `itp_mark_checkbox ISSUE NEW_BODY` | `PUT /projects/${GITLAB_PROJECT}/issues/${ISSUE}` with `{"description":"…"}` | `body_checkbox=1` — caller (mark-issue-checkbox.sh) owns the GET-body / rewrite / exit-code taxonomy. |
+| `itp_provision_states NAME COLOR DESCRIPTION` | probe `GET /projects/${GITLAB_PROJECT}/labels/<_gl_urlencode(NAME)>` (`--tolerate-status 404`) → status 200 = `[skip]`, 404 = create; `POST /projects/${GITLAB_PROJECT}/labels` (`--tolerate-status 409`) with `{"name":…,"color":…,"description":…}` → 409 downgrade to `[skip]` | Uses the P3-1 status channel (`GL_API_STATUS` + `--status-out`). `label_colors=1`. |
+| `itp_label_event_ts ISSUE LABEL` | `GET /projects/${GITLAB_PROJECT}/issues/${ISSUE}/resource_label_events` (paginated) | Endpoint doesn't accept a label filter — jq filter runs in-leaf on `.action == "add" AND .label.name == LABEL`, emits the FIRST (earliest) matching `.created_at`. LABEL is bound via `jq --arg lbl` — the `gh api` jq-binding caveats do NOT apply here (leaf runs a LOCAL jq process). **Fail-SOFT**. |
+| `itp_begin_tick` | (no-op) | Documented no-op: GitLab's single-token cross-project auth removes the [INV-83] `_DEP_TOKEN_CACHE` reason. Verb still exists so the dispatcher shim always resolves. |
+| `itp_caps` | (parsed from `providers/itp-gitlab.caps`) | Same declarative reader as itp-github ([INV-88]). |
+
+**GitLab `.caps` manifest** — all 9 keys evaluate to `1` under the standard REST surface (spec §5.1 research); the 5 WAIVED caps (`server_side_state_{and,negation}`, `distinct_bot_author`, `read_after_write_state`, `marker_channel`) declare `=1` for GitLab with evidence but stay WAIVED because the tripwire keys on caller-side wiring (spec §4.3), not manifest values — a caller branch consuming these caps lands with the Asana slice.
 
 ---
 
