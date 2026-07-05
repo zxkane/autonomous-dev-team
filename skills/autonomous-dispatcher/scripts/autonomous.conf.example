@@ -580,6 +580,57 @@ DISPATCHER_APP_PEM=""
 # logs a one-time WARN. See docs/github-app-setup.md "Two-token split".
 # AGENT_TOKEN_PERMISSIONS='{"contents":"write","issues":"write","pull_requests":"read"}'
 
+# === GitLab provider (ISSUE_PROVIDER=gitlab / CODE_HOST=gitlab) ===
+#
+# Two independent seam-selector envs (spec §2 / §3.4). BOTH default to
+# `github` when unset — a conf with none of the keys below set is byte-
+# identical to a pre-#420 GitHub-only conf. Set to `gitlab` to route the
+# corresponding seam to `providers/{itp,chp}-gitlab.sh`.
+#
+#   ISSUE_PROVIDER — supported values: `github` (default), `gitlab`, `asana`
+#                    (reserved — no leaf ships yet).
+#   CODE_HOST      — supported values: `github` (default), `gitlab`.
+#
+# Consumed by the P3-1 transport lib + the P3-2/P3-3/P3-4 leaves. Setting
+# either to `gitlab` requires the `GITLAB_*` keys below to be populated (or
+# GITLAB_TRANSPORT_HOOK armed) — the transport lib's fail-loud preflight
+# ([INV-116]) rejects a gitlab-selected seam with no PAT and no hook.
+# ISSUE_PROVIDER=""
+# CODE_HOST=""
+#
+# GITLAB_HOST — host that speaks GitLab REST v4. Defaults to `gitlab.com`.
+# Any self-hosted CE/EE instance whose API speaks standard PAT auth against
+# `/api/v4` is a first-class target. Fixtures under
+# `tests/provider-conformance/fixtures/payloads/gitlab-*.json.meta` pin the
+# modeled minimum-supported version at `v17.x`.
+# GITLAB_HOST=""
+#
+# GITLAB_TOKEN — PAT / project access token / group access token
+# (interchangeable — all use the `PRIVATE-TOKEN` header per the P3-1
+# transport contract). Required scope: `api`. GitLab has no GitHub-App
+# equivalent, so the agent's token posture degrades to convention on the
+# gitlab seam (§5.1); the wrapper still holds the write privileges and the
+# scoped-token containment lever (INV-79) is a WARN not an enforced split.
+# See `docs/gitlab-setup.md` for the full token-creation walkthrough.
+# GITLAB_TOKEN=""
+#
+# GITLAB_PROJECT — the project's URL-encoded `namespace/name` (or
+# `group/subgroup/name`). Stored ALREADY-URL-ENCODED per spec §3.4 and used
+# verbatim by every leaf — leaves NEVER re-encode this value; dynamic path
+# segments (label names, file paths, cross-project refs) use `_gl_urlencode`
+# separately. Example: `group%2Fsubgroup%2Fproject`.
+# GITLAB_PROJECT=""
+#
+# GITLAB_TRANSPORT_HOOK — Path to an operator-owned shell file sourced
+# before provider init that MAY replace the default transport function; leave
+# unset for the standard PAT transport. Contract:
+# `docs/pipeline/provider-spec.md` §transport. Trust model: operator-owned
+# local file, same privileges as `autonomous.conf` — explicitly NOT a
+# sandbox. When set the file must be readable and must redefine `_gl_http`
+# only; `_gl_api` stays lib-owned so pagination + backoff + fail-closed
+# cannot be lost by a variant.
+# GITLAB_TRANSPORT_HOOK=""
+
 # Absolute path to the real `gh` CLI binary. Set this when `gh` is installed
 # outside the minimal POSIX PATH (Homebrew, nvm, asdf, ~/bin, /snap/bin,
 # container /opt/gh, etc.) AND the dispatcher/wrappers may be spawned from

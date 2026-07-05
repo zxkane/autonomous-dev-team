@@ -55,6 +55,8 @@ flowchart LR
 
 **Trigger**: Step 4 finds an issue labeled `pending-dev` with retries below `MAX_RETRIES`.
 
+> **Provider-neutral topology note (#420 P3-5).** The `gh issue edit` shown below is the conceptual leaf; the atomic label swap is emitted through the `itp_transition_state` verb. GitHub leaf shown for reference — see [provider-spec.md §3.1](provider-spec.md#31-issue-tracker-provider-itp-verbs) for the provider-neutral verb.
+
 **Producer-side invariants**:
 
 - Atomic label swap `−pending-dev +in-progress` (single `gh issue edit` call).
@@ -123,6 +125,8 @@ flowchart LR
 Two sub-handoffs depending on verdict:
 
 ### H5a: review → approved (verdict PASS)
+
+> **Provider-neutral topology note (#420 P3-5).** The `gh pr review --approve` / `gh pr merge` / `gh issue close` mentions below are the conceptual leaves; the actual emits route through `chp_approve` / `chp_merge` and the (deliberately absent) `chp_close_keyword` render. GitHub leaves shown for reference — see [provider-spec.md §3.2](provider-spec.md#32-code-host-provider-chp-verbs).
 
 **Producer-side invariants**:
 
