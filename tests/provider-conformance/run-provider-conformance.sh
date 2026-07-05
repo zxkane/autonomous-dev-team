@@ -66,15 +66,78 @@ command -v jq >/dev/null 2>&1 || { log "FATAL: jq is required to run the provide
 
 ITP_NAME="${ITP_UNDER_TEST:-github}"
 CHP_NAME="${CHP_UNDER_TEST:-github}"
+# [#416 W-D] --transport-hook <path> — an operator-owned GITLAB_TRANSPORT_HOOK
+# file threaded into every per-verb _invoke subshell (below). Validated once
+# here (readable regular file) or fatal. Empty = no hook.
+TRANSPORT_HOOK=""
+# [#416 W-D] --transport-path-add <dir> — additional dir(s) appended to the
+# isolated PATH computed by pcf_isolated_path, so a transport hook's helper
+# bins (curl, an auth gateway CLI, ...) resolve inside per-verb _invoke
+# subshells despite the pcf-mandated PATH scrub. Multiple flags accumulate;
+# the added dirs never leak into the runner's OWN env (only into _invoke).
+TRANSPORT_PATH_ADD=()
+# [#416 W-D] --expect-absent <seam:verb-csv> — seam-qualified list of verbs
+# whose leaf-absent FAILs downgrade to `SKIP <verb> (expected-absent: ...)`.
+# Format: `chp:create_pr,chp:merge` or `itp:list_by_state`. Seam qualification
+# is load-bearing because ITP/CHP verb names can collide (`resolve_dep` vs
+# `resolve_thread`). Accumulates across multiple flags.
+declare -A EXPECT_ABSENT=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --itp) [[ $# -ge 2 ]] || { log "FATAL: --itp requires a value"; exit 2; }; ITP_NAME="$2"; shift 2 ;;
     --itp=*) ITP_NAME="${1#*=}"; shift ;;
     --chp) [[ $# -ge 2 ]] || { log "FATAL: --chp requires a value"; exit 2; }; CHP_NAME="$2"; shift 2 ;;
     --chp=*) CHP_NAME="${1#*=}"; shift ;;
+    --transport-hook)
+      [[ $# -ge 2 ]] || { log "FATAL: --transport-hook requires a value"; exit 2; }
+      TRANSPORT_HOOK="$2"; shift 2 ;;
+    --transport-hook=*) TRANSPORT_HOOK="${1#*=}"; shift ;;
+    --transport-path-add)
+      [[ $# -ge 2 ]] || { log "FATAL: --transport-path-add requires a value"; exit 2; }
+      TRANSPORT_PATH_ADD+=("$2"); shift 2 ;;
+    --transport-path-add=*) TRANSPORT_PATH_ADD+=("${1#*=}"); shift ;;
+    --expect-absent)
+      [[ $# -ge 2 ]] || { log "FATAL: --expect-absent requires a value"; exit 2; }
+      # Split CSV; each entry is `seam:verb`.
+      _ea_csv="$2"
+      IFS=',' read -ra _ea_list <<< "$_ea_csv"
+      for _ea in "${_ea_list[@]}"; do
+        [[ -n "$_ea" ]] || continue
+        # Sanity check: must contain `:`; verbs without seam qualification are
+        # a usage error (per the "ITP/CHP name-collision safe" contract).
+        [[ "$_ea" == *:* ]] || { log "FATAL: --expect-absent entry '$_ea' missing seam qualification (want 'itp:<verb>' or 'chp:<verb>')"; exit 2; }
+        EXPECT_ABSENT["$_ea"]=1
+      done
+      shift 2 ;;
+    --expect-absent=*)
+      _ea_csv="${1#*=}"
+      IFS=',' read -ra _ea_list <<< "$_ea_csv"
+      for _ea in "${_ea_list[@]}"; do
+        [[ -n "$_ea" ]] || continue
+        [[ "$_ea" == *:* ]] || { log "FATAL: --expect-absent entry '$_ea' missing seam qualification"; exit 2; }
+        EXPECT_ABSENT["$_ea"]=1
+      done
+      shift ;;
     -h|--help) grep -E '^#( |$)' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) log "FATAL: unknown argument: $1"; exit 2 ;;
   esac
+done
+
+# Validate --transport-hook at startup (readable regular file, or empty).
+if [[ -n "$TRANSPORT_HOOK" ]]; then
+  if [[ ! -r "$TRANSPORT_HOOK" ]]; then
+    log "FATAL: --transport-hook '$TRANSPORT_HOOK' is not readable"
+    exit 2
+  fi
+fi
+
+# Validate --transport-path-add entries (each must be an existing directory).
+for _tpa in "${TRANSPORT_PATH_ADD[@]:-}"; do
+  [[ -z "$_tpa" ]] && continue
+  if [[ ! -d "$_tpa" ]]; then
+    log "FATAL: --transport-path-add '$_tpa' is not an existing directory"
+    exit 2
+  fi
 done
 
 ITP_SRC_DIR="$(pcf_resolve_provider_dir "$PROJECT_ROOT" "$ITP_NAME")" \
@@ -94,6 +157,20 @@ mkdir -p "$SCRATCH_DIR" "$STUB_DIR"
 pcf_materialize_scratch "$SCRATCH_DIR" "$ITP_NAME" "$ITP_SRC_DIR" "$CHP_NAME" "$CHP_SRC_DIR"
 
 ISOLATED_PATH="$(pcf_isolated_path "$STUB_DIR")"
+
+# [#416 W-D] Append any --transport-path-add dirs to the isolated PATH used
+# by per-verb _invoke subshells. Scoped: the additions apply ONLY to _invoke
+# (via ISOLATED_PATH substitution below) — the runner's own PATH is
+# untouched. Multiple --transport-path-add entries accumulate; a duplicate
+# entry is silently de-duped.
+if [[ "${#TRANSPORT_PATH_ADD[@]}" -gt 0 ]]; then
+  for _tpa in "${TRANSPORT_PATH_ADD[@]}"; do
+    [[ -z "$_tpa" ]] && continue
+    if [[ ":$ISOLATED_PATH:" != *":$_tpa:"* ]]; then
+      ISOLATED_PATH="${ISOLATED_PATH}:${_tpa}"
+    fi
+  done
+fi
 
 # ---------------------------------------------------------------------------
 # Stub `gh` — control-file driven (per-invocation success/fail), records the
@@ -277,10 +354,19 @@ _cap_read() {
 _invoke() {
   local script="${*: -1}"
   local -a extra_env=("${@:1:$#-1}")
+  # [#416 W-D] Thread GITLAB_TRANSPORT_HOOK into the per-verb subshell despite
+  # the `env -u` scrub. Only exported when non-empty so the github axis is
+  # byte-identical to pre-#416 (empty env var != unset for hermetic reruns,
+  # but the transport lib treats both identically via `${GITLAB_TRANSPORT_HOOK:-}`).
+  local -a hook_env=()
+  if [[ -n "$TRANSPORT_HOOK" ]]; then
+    hook_env=( "GITLAB_TRANSPORT_HOOK=$TRANSPORT_HOOK" )
+  fi
   env -u AUTONOMOUS_CONF -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR \
       ISSUE_PROVIDER="$ITP_NAME" CODE_HOST="$CHP_NAME" AUTONOMOUS_PROVIDERS_DIR="$SCRATCH_DIR" \
       REPO="o/r" REPO_OWNER="o" REPO_NAME="r" \
       PATH="$ISOLATED_PATH" \
+      "${hook_env[@]}" \
       "${extra_env[@]}" \
   bash -c '
     set -euo pipefail
@@ -1038,6 +1124,50 @@ _run_review_threads_completeness_assert() {
 # ---------------------------------------------------------------------------
 # Drive each ASSERTED verb per cap-map.conf.
 # ---------------------------------------------------------------------------
+
+# [#416 W-D] _seam_leaf_file <verb> — the provider-side leaf filename we
+# expect a verb's implementation to live in. Used by the leaf-absent
+# preflight below to name the file that should be added.
+_seam_leaf_file() {
+  local verb="$1"
+  local seam; seam="$(_seam_for "$verb")"
+  case "$seam" in
+    itp) printf '%s\n' "providers/itp-${ITP_NAME}.sh" ;;
+    chp) printf '%s\n' "providers/chp-${CHP_NAME}.sh" ;;
+    *)   printf '%s\n' "providers/<unknown-seam>-${verb}" ;;
+  esac
+}
+
+# [#416 W-D] _leaf_present <verb> — rc 0 iff the provider LEAF (not the
+# always-defined shim) for the currently-selected provider exists. Drives
+# the runner's own subshell of the seam libs and checks
+# `declare -F <seam>_${NAME}_${verb}`. This is the same probe the shim's
+# has-leaf gate uses; a false result here means the runner would abort
+# under `set -e` when the shim dispatches to the absent leaf — we surface
+# it FIRST as a per-verb FAIL / SKIP instead.
+_leaf_present() {
+  local verb="$1" seam name leaf
+  seam="$(_seam_for "$verb")"
+  case "$seam" in
+    itp) name="$ITP_NAME" ;;
+    chp) name="$CHP_NAME" ;;
+    *)   return 1 ;;
+  esac
+  # Strip the seam prefix from the verb: `itp_list_by_state` -> `list_by_state`.
+  local base="${verb#itp_}"
+  base="${base#chp_}"
+  leaf="${seam}_${name}_${base}"
+  # Probe in an isolated subshell so a missing lib doesn't crash the runner.
+  env -u AUTONOMOUS_CONF -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR \
+      ISSUE_PROVIDER="$ITP_NAME" CODE_HOST="$CHP_NAME" \
+      AUTONOMOUS_PROVIDERS_DIR="$SCRATCH_DIR" PATH="$ISOLATED_PATH" \
+  bash -c "
+    source \"$ITP_LIB\" 2>/dev/null
+    source \"$CHP_LIB\" 2>/dev/null
+    declare -F ${leaf} >/dev/null 2>&1
+  "
+}
+
 _assert_verb() {
   local verb="$1"
   local cap; cap="$(pcf_conf_value "$CAP_MAP_CONF" "$verb")" || cap="-"
@@ -1046,6 +1176,49 @@ _assert_verb() {
     val="$(_cap_read "$verb" "$cap")"; rc=$?
     if [[ "$rc" -eq 0 && "$val" == "0" ]]; then
       emit SKIP "$verb" "$cap"
+      return
+    fi
+  fi
+
+  # [#416 W-D] Leaf-absent preflight. If the provider LEAF for this verb is
+  # not defined (e.g. --itp gitlab today on a tree where itp-gitlab.sh does
+  # not yet exist), emit ONE clean per-verb FAIL / SKIP instead of letting
+  # the shim's dispatch crash the runner under `set -e`.
+  #
+  # Exclusions:
+  #   - The `broken` fixture is DELIBERATELY missing leaves as part of its
+  #     contract (it exists to prove the runner FAILs a mis-shaped provider
+  #     cleanly); skip the preflight there so the pre-#416 test-provider-
+  #     conformance-runner expectations for `broken/broken` stay intact.
+  #   - `chp_close_keyword` is a CALLER-SIDE render assertion (see
+  #     `_run_close_keyword_assert` — no leaf dispatch), spec §4.4; the
+  #     provider's `chp_${NAME}_close_keyword` leaf is intentionally absent.
+  local _preflight_skip=0
+  case "$verb" in chp_close_keyword) _preflight_skip=1 ;; esac
+  if [[ "$ITP_NAME" != "broken" && "$CHP_NAME" != "broken" && "$_preflight_skip" -eq 0 ]]; then
+    if ! _leaf_present "$verb"; then
+      local seam; seam="$(_seam_for "$verb")"
+      local ea_key="${seam}:${verb#itp_}"; ea_key="${ea_key/chp_/}"
+      # Correct: strip only the LEADING itp_/chp_ from the verb name.
+      local ea_verb="${verb#itp_}"; ea_verb="${ea_verb#chp_}"
+      ea_key="${seam}:${ea_verb}"
+      local leaf_file; leaf_file="$(_seam_leaf_file "$verb")"
+      local leaf_name="${seam}_"
+      case "$seam" in
+        itp) leaf_name="itp_${ITP_NAME}_${ea_verb}" ;;
+        chp) leaf_name="chp_${CHP_NAME}_${ea_verb}" ;;
+      esac
+      if [[ -n "${EXPECT_ABSENT[$ea_key]:-}" ]]; then
+        # Downgrade to SKIP (expected-absent). Emit our own SKIP-shaped
+        # line since the standard emit() format uses "SKIP (cap: X)" and
+        # this is a distinct disposition.
+        SKIP_N=$((SKIP_N + 1)); TOTAL=$((TOTAL + 1))
+        printf 'CONFORMANCE-PCONF %s/%s %s SKIP (expected-absent: %s)\n' \
+          "$ITP_NAME" "$CHP_NAME" "$verb" "$leaf_file:${leaf_name}"
+        return
+      fi
+      # Genuine FAIL naming the absent leaf file:function.
+      emit FAIL "$verb" "leaf absent: ${leaf_file}:${leaf_name}"
       return
     fi
   fi

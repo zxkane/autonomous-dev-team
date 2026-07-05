@@ -48,16 +48,33 @@ pcf_conf_keys() {
 # pcf_resolve_provider_dir <project_root> <name> — resolve a provider NAME to
 # its source directory. Fixed table (issue #370 design): github -> the real
 # skill tree; degraded -> the existing #280 fixture; broken -> this suite's
-# deliberately-broken fixture. Both seams (ITP/CHP) share this same table — a
-# name resolves to the same DIR regardless of seam; the caller picks the
-# itp-<name> or chp-<name> file inside it. Unknown name -> rc 1, no output
-# (the caller treats this as a fatal usage error, not a silent empty provider).
+# deliberately-broken fixture. #416 W-D adds `gitlab` (real skill tree — the
+# filename prefix `itp-gitlab.*`/`chp-gitlab.*` disambiguates per-seam) AND
+# an ABSOLUTE-PATH form: any `<name>` matching `/*` and pointing to a
+# readable directory resolves to itself (out-of-tree provider
+# self-certification per #414 AC3). Both seams (ITP/CHP) share this same
+# table — a name resolves to the same DIR regardless of seam; the caller
+# picks the itp-<name> or chp-<name> file inside it. Unknown non-path name
+# -> rc 1, no output (the caller treats this as a fatal usage error, not
+# a silent empty provider).
 pcf_resolve_provider_dir() {
   local root="$1" name="$2"
   case "$name" in
     github)   printf '%s\n' "$root/skills/autonomous-dispatcher/scripts/providers" ;;
+    gitlab)   printf '%s\n' "$root/skills/autonomous-dispatcher/scripts/providers" ;;
     degraded) printf '%s\n' "$root/tests/unit/fixtures/provider-degraded" ;;
     broken)   printf '%s\n' "$root/tests/provider-conformance/fixtures/provider-broken" ;;
+    /*)
+      # Absolute-path form (out-of-tree provider dir). Rc 0 iff the path
+      # points at an existing readable directory. Rc 1 otherwise so a typo'd
+      # path (a stale operator config) FAILs loud rather than silently
+      # resolving to an empty provider dir.
+      if [[ -d "$name" && -r "$name" ]]; then
+        printf '%s\n' "$name"
+      else
+        return 1
+      fi
+      ;;
     *)        return 1 ;;
   esac
 }
