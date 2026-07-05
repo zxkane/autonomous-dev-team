@@ -142,5 +142,98 @@ fi
 
 # ---------------------------------------------------------------------------
 echo ""
+echo "=== TC-P36-015/016/017: fixed fragments extract to syntactically valid shell ==="
+# ---------------------------------------------------------------------------
+# Review-round regression pins (PR #428 codex rounds 2-4): render each key with
+# a realistic seed, extract the fenced (or bare, for watch_ci_checks) code, and
+# syntax-check it with `bash -n`. A prose-only render (English sentence spliced
+# where a command is expected) or a mismatched-vocabulary render (case arms
+# that don't match chp_gitlab_mergeable's tokens) would not necessarily trip
+# the K=0 gh/glab greps above, so this is a distinct check.
+_extract_code() {
+  # Strip markdown fences (```bash / ```) if present; otherwise the whole
+  # render IS the code (review.watch_ci_checks renders bare, spliced directly
+  # into the wrapper's own heredoc).
+  local rendered="$1"
+  if printf '%s\n' "$rendered" | grep -qE '^[[:space:]]*```'; then
+    printf '%s\n' "$rendered" | awk '{ t=$0; sub(/^[ \t]*/,"",t); if (t ~ /^```/) { f=!f; next } if (f) print }'
+  else
+    printf '%s\n' "$rendered"
+  fi
+}
+
+_syntax_check_key() {
+  local key="$1"; shift
+  local rendered code err
+  rendered="$(bash -c "source '$LIB'; CODE_HOST=gitlab; ISSUE_PROVIDER=gitlab; provider_prompt_fragment '$key' $(printf "'%s' " "$@")" 2>&1)"
+  code="$(_extract_code "$rendered")"
+  if err="$(bash -n <(printf '%s\n' "$code") 2>&1)"; then
+    ok "TC-P36-015/016/017 $key extracts to syntactically valid shell"
+  else
+    bad "TC-P36-015/016/017 $key does NOT extract to valid shell: $err"
+    echo "$code"
+  fi
+}
+
+_syntax_check_key "review.check_mergeable" "42" "group/proj"
+_syntax_check_key "review.requirement_drift_gh_issue_view" "421" "421" "group/proj"
+_syntax_check_key "review.e2e_fetch_comment" "42" "group/proj"
+_syntax_check_key "review.watch_ci_checks" "42"
+_syntax_check_key "bots.review_count_check" "group/proj" "42" "codex-bot"
+_syntax_check_key "bots.review_count_check_bare" "group/proj" "42" "codex-bot"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-P36-015: review.check_mergeable normalizes to chp_gitlab_mergeable's vocabulary ==="
+# ---------------------------------------------------------------------------
+_MERGEABLE_RENDER="$(bash -c "source '$LIB'; CODE_HOST=gitlab; provider_prompt_fragment review.check_mergeable 42 group/proj" 2>&1)"
+if printf '%s\n' "$_MERGEABLE_RENDER" | grep -q 'STATUS=MERGEABLE' \
+  && printf '%s\n' "$_MERGEABLE_RENDER" | grep -q 'STATUS=CONFLICTING' \
+  && printf '%s\n' "$_MERGEABLE_RENDER" | grep -q 'STATUS=UNKNOWN'; then
+  ok "TC-P36-015 review.check_mergeable renders all three MERGEABLE/CONFLICTING/UNKNOWN tokens"
+else
+  bad "TC-P36-015 review.check_mergeable is missing one or more of MERGEABLE/CONFLICTING/UNKNOWN"
+  echo "$_MERGEABLE_RENDER"
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-P36-016: note-reading fragments actually paginate (x-next-page walk, not just mentioned) ==="
+# ---------------------------------------------------------------------------
+for _key in review.requirement_drift_gh_issue_view review.e2e_fetch_comment; do
+  _RENDER="$(bash -c "
+    source '$LIB'
+    _pp_load_provider gitlab
+    CODE_HOST=gitlab ISSUE_PROVIDER=gitlab
+    _argc=\"\${_PP_GITLAB_ARGC[$_key]:-0}\"
+    _seed=(SEED0 SEED1 SEED2)
+    _args=()
+    for ((i = 0; i < _argc; i++)); do _args+=(\"\${_seed[\$i]}\"); done
+    provider_prompt_fragment '$_key' \"\${_args[@]}\"
+  " 2>&1)"
+  if printf '%s\n' "$_RENDER" | grep -q 'x-next-page' && printf '%s\n' "$_RENDER" | grep -q 'page=' && printf '%s\n' "$_RENDER" | grep -qE 'while|for'; then
+    ok "TC-P36-016 $_key renders an actual pagination loop (x-next-page + page= + a loop construct)"
+  else
+    bad "TC-P36-016 $_key does not render an actual pagination loop"
+    echo "$_RENDER"
+  fi
+done
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-P36-018: bot-review-count fragments use /approvals, not /notes ==="
+# ---------------------------------------------------------------------------
+for _key in bots.review_count_check bots.review_count_check_bare; do
+  _RENDER="$(bash -c "source '$LIB'; CODE_HOST=gitlab; provider_prompt_fragment '$_key' 'group/proj' '42' 'codex-bot'" 2>&1)"
+  if printf '%s\n' "$_RENDER" | grep -q '/approvals' && ! printf '%s\n' "$_RENDER" | grep -q '/notes'; then
+    ok "TC-P36-018 $_key counts via /approvals (not /notes)"
+  else
+    bad "TC-P36-018 $_key does not count via /approvals only"
+    echo "$_RENDER"
+  fi
+done
+
+# ---------------------------------------------------------------------------
+echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

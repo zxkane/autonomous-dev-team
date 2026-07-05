@@ -43,6 +43,23 @@ by the CI `unit` job's `tests/unit/test-*.sh` glob). Run the FULL suite under
 | TC-P36-013 | Per-key argc declared in `_PP_GITHUB_ARGC` vs `_PP_GITLAB_ARGC` | IDENTICAL — a call site fixes ONE positional-arg list regardless of which provider renders it; a gitlab template that needs fewer positionals consumes the rest via `%.0s` |
 | TC-P36-014 | Unknown key fails loud with `CODE_HOST=gitlab` too | rc≠0, stderr `unknown fragment key` |
 
+### Review-round fixes (post-#421 review findings)
+
+Four codex review rounds on PR #428 found that the FIRST gitlab-render pass,
+while satisfying the zero-`gh`/`glab` grep pins above, rendered fragments that
+were either semantically wrong (didn't match the `chp_gitlab_*` leaf
+contracts the review wrapper's control flow depends on) or not actually
+executable when spliced into the wrapper's bash heredoc. Fixed in
+`providers/prompts-gitlab.sh`; pinned here so a regression can't reappear
+silently.
+
+| ID | Scenario | Expected |
+|----|----------|----------|
+| TC-P36-015 | Render `review.check_mergeable`; extract the fenced code block; syntax-check with `bash -n` | valid shell — the `case` on `$DMS` normalizes into `MERGEABLE`/`CONFLICTING`/`UNKNOWN`, the SAME three tokens `chp_gitlab_mergeable` (providers/chp-gitlab.sh) returns and Step 0's branch logic in `autonomous-review.sh` switches on |
+| TC-P36-016 | Render `review.requirement_drift_gh_issue_view` and `review.e2e_fetch_comment`; extract the fenced code block; syntax-check with `bash -n` | valid shell — both loop on the `x-next-page` response header (via `curl -D` + a page-number loop), not a single unpaginated request; a >100-note issue/MR no longer silently drops later comments/evidence |
+| TC-P36-017 | Render `review.watch_ci_checks`; syntax-check with `bash -n` (no fence — this key renders bare, spliced directly into a bash heredoc after `sleep 10` in `autonomous-review.sh`'s Step 0 rebase block) | valid shell — a real poll loop on `.head_pipeline.status`, not an English sentence that would be a syntax error at that splice point |
+| TC-P36-018 | Render `bots.review_count_check` and `bots.review_count_check_bare`; assert the URL contains `/approvals` (not `/notes`) | present — bot-review presence is counted via `/merge_requests/:iid/approvals.approved_by`, the SAME endpoint `chp_gitlab_count_reviews_by_login` uses (providers/chp-gitlab.sh); a bot that approves without leaving a note is no longer read as MISSING forever |
+
 ## Per-wrapper site-removal (R2/R4, AC4)
 
 The (a) prose is GONE from the wrapper files (replaced by
