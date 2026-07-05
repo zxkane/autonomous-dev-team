@@ -1,9 +1,11 @@
 #!/bin/bash
 # adt-gc.sh — Lane-GC series PR-4: periodic, issue-independent garbage
 # collector (design: docs/designs/lane-containment-gc.md §4-C5/§6;
-# docs/designs/lane-gc-p4-adt-gc.md; shipped as INV-116 — the design doc's
-# drafted INV-110 collided with shipped INV-106..115 from unrelated PRs,
-# renumbered at PR-open per the design's own convention).
+# docs/designs/lane-gc-p4-adt-gc.md; shipped as INV-117 — the design doc's
+# drafted INV-110 collided with shipped INV-106..115 from unrelated PRs
+# (renumbered to INV-116 at PR-open), then a rebase pulled in #422's
+# GitLab-transport invariant, which had independently and earlier-mergedly
+# claimed INV-116 for itself — renumbered again to INV-117).
 #
 # Reclaims dead-lane process residue left behind when a wrapper (or its
 # guardian, in a later PR) dies without a clean teardown. Box-wide and

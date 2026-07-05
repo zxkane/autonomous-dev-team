@@ -1,6 +1,6 @@
 #!/bin/bash
 # test-lane-gc-p4-gc.sh — Unit tests for issue #380 (Lane-GC series PR-4,
-# design docs/designs/lane-containment-gc.md §4-C5/§6, INV-116).
+# design docs/designs/lane-containment-gc.md §4-C5/§6, INV-117).
 #
 # Covers adt-gc.sh (all four passes of the §6 decision table, the flock
 # singleton + --quick starvation guard, --doctor, log rotation, the

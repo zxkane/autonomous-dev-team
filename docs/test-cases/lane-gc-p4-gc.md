@@ -1,10 +1,12 @@
 # Test Cases — Lane-GC PR-4: `adt-gc.sh` periodic GC + `install-gc-timer.sh` (#380)
 
 Fourth PR of the Lane-GC series (design: `docs/designs/lane-containment-gc.md`
-§4-C5, §6, §9 PR-4; `docs/designs/lane-gc-p4-adt-gc.md`; INV-116 — renumbered
+§4-C5, §6, §9 PR-4; `docs/designs/lane-gc-p4-adt-gc.md`; INV-117 — renumbered
 from the design's drafted INV-110 after PR-2/PR-3 already claimed
-INV-109/INV-110/INV-114/INV-115). The periodic, issue-independent garbage
-collector plus its per-host timer installer.
+INV-109/INV-110/INV-114/INV-115 (landing first as INV-116, then yielding that
+slot to #422's earlier-merged GitLab-transport invariant on rebase)). The
+periodic, issue-independent garbage collector plus its per-host timer
+installer.
 
 Test runner: `bash tests/unit/test-lane-gc-p4-gc.sh` (auto-discovered by the
 CI `hermetic-unit` job's `tests/unit/test-*.sh` glob). Run the full suite

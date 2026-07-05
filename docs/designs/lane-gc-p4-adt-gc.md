@@ -11,13 +11,21 @@ new design — defer to the parent doc for rationale.
 The parent design assumed head INV-105 and reserved INV-106..113 (§8) for
 the whole series. Since then, PR-2 (#378) shipped INV-109/INV-110 and PR-3
 (#379/#405) shipped INV-114/INV-115 (both already renumbered once — see
-`docs/designs/lane-gc-p3-kill-paths.md`). Current head at this PR's open is
-**INV-115**. This PR ships:
+`docs/designs/lane-gc-p3-kill-paths.md`). Current head at this PR's open was
+**INV-115**, so this PR first claimed **INV-116** (drafted as INV-110 in the
+parent design's normative table; renumbered per the design's own stated
+"first-merged keeps, each INV-adding PR notes the convention" rule).
 
-- **INV-116 — GC safety predicate and periodic reclamation** (drafted as
-  INV-110 in the parent design's normative table; renumbered here to the
-  first free slot, per the design's own stated "first-merged keeps, each
-  INV-adding PR notes the convention" rule).
+A subsequent rebase onto `origin/main` pulled in #422's GitLab-transport
+invariant, which had independently — and, by merge order, earlier — also
+claimed INV-116 for itself (it too was renumbered on a collision, from its
+own drafted INV-113). Per the same repo-wide convention, the already-merged
+GitLab entry keeps INV-116; this PR yields the slot and re-claims the next
+free one:
+
+- **INV-117 — GC safety predicate and periodic reclamation** (drafted as
+  INV-110 → INV-116 → **INV-117**, three renumbers across the design's
+  drafting and two independent merge-order collisions).
 
 ## Scope (this PR)
 

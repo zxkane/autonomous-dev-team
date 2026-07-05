@@ -1,7 +1,7 @@
 #!/bin/bash
 # install-gc-timer.sh — Lane-GC series PR-4: idempotent per-host timer
 # installer for adt-gc.sh (design: docs/designs/lane-containment-gc.md
-# §4-C5/§9 PR-4; docs/designs/lane-gc-p4-adt-gc.md; [INV-116]).
+# §4-C5/§9 PR-4; docs/designs/lane-gc-p4-adt-gc.md; [INV-117]).
 #
 # One timer per HOST, not per project — adt-gc.sh itself scans every
 # project's registry under ${ADT_STATE_ROOT}/autonomous-*/lanes/ in one

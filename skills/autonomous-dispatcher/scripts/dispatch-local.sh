@@ -58,7 +58,7 @@ source "${LIB_DIR}/lib-config.sh"
 # shellcheck source=lib-lane.sh
 source "${LIB_DIR}/lib-lane.sh" 2>/dev/null || true
 
-# [Lane-GC PR-4 / INV-116] Opportunistic quick GC pass: Pass 1 only (no env
+# [Lane-GC PR-4 / INV-117] Opportunistic quick GC pass: Pass 1 only (no env
 # reads, no same-uid process enumeration), so a busy box self-cleans dead-
 # lane residue even with no cron/launchd timer installed. `--quick` uses
 # `flock -w 3` internally (never `-n`) so this never unconditionally bails
