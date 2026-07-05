@@ -620,9 +620,23 @@ lane_kill() {
   done < "$pgids_file"
 
   if [[ "${#seen[@]}" -gt 0 ]]; then
-    local escalate_pids=()
+    # [INV-113] Escalator pgid isolation (review round-8 [P1], same class as
+    # the sigterm-trap escalators): a bare backgrounded escalator is a direct
+    # child sharing the CALLER's pgid — when the caller's own group is later
+    # group-SIGKILLed mid-escalation (kill_stale_wrapper escalating against a
+    # still-alive wrapper whose cleanup()/lane_reap is running this very
+    # function), the escalator dies with it mid-grace and the pending KILL
+    # follow-through for a TERM-resistant recorded group is silently lost.
+    # `setsid` puts each escalator in its own session/pgid so only its target
+    # and its own bounded sleep decide its lifetime. Still a direct CHILD, so
+    # the `wait` below works unchanged; `export -f` carries the (call-free)
+    # primitive across the bash -c boundary. Falls back to the bare form when
+    # setsid is unavailable (non-Linux) — same degraded posture as the trap.
+    local escalate_pids=() _lk_setsid=()
+    command -v setsid >/dev/null 2>&1 && _lk_setsid=(setsid)
+    export -f _kill_group_escalate
     for pg in "${seen[@]}"; do
-      _kill_group_escalate "$pg" "$grace" &
+      "${_lk_setsid[@]}" bash -c '_kill_group_escalate "$1" "$2"' _ "$pg" "$grace" &
       escalate_pids+=("$!")
     done
     wait "${escalate_pids[@]}" 2>/dev/null || true

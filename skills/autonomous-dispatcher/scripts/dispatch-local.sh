@@ -380,7 +380,24 @@ kill_stale_wrapper() {
       for _pid in "${!_sweep_pids[@]}"; do
         kill -TERM "$_pid" 2>/dev/null || true
       done
-      sleep 1
+      # 5s grace poll (review round-8 [P1]: the sweep previously slept only
+      # 1s before SIGKILL, but the issue pins kill_stale_wrapper's grace at
+      # 5s — the same window the PID-file path above honors). Early-exits
+      # the moment nothing in either collected set is still alive.
+      local _sw_i _sw_alive
+      for _sw_i in 1 2 3 4 5; do
+        _sw_alive=0
+        for _pg in "${!_sweep_pgids[@]}"; do
+          kill -0 -- "-${_pg}" 2>/dev/null && { _sw_alive=1; break; }
+        done
+        if [[ "$_sw_alive" -eq 0 ]]; then
+          for _pid in "${!_sweep_pids[@]}"; do
+            kill -0 "$_pid" 2>/dev/null && { _sw_alive=1; break; }
+          done
+        fi
+        [[ "$_sw_alive" -eq 0 ]] && break
+        sleep 1
+      done
       # KILL pass: any collected group or walked pid still alive gets
       # SIGKILL — the gate probes the REAL pgid set AND the REAL pid set
       # from the walk, so a TERM-trapping member anywhere in the tree

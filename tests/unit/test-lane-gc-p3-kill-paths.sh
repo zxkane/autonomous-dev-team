@@ -155,6 +155,38 @@ else
   assert_fail "TC-LGC3-004c: took ${ELAPSED4:-?}s — escalation should run concurrently, not serially"
 fi
 
+# TC-LGC3-005 — lane_kill escalator survives a group-SIGKILL against its
+# CALLER's pgid (review round-8 [P1], the lane_kill instance of the same
+# escalator-isolation class the sigterm-trap fix covers): reproduce the
+# reported scenario — lane_kill running in one setsid shell, the caller's
+# whole group SIGKILLed 1s in (mid-grace) — and require the TERM-resistant
+# recorded pgid to STILL be KILLed once the grace elapses. Pre-fix (bare
+# `_kill_group_escalate … &`), the escalator died with the caller's group
+# and the target survived indefinitely.
+OUT005=$(bash -c '
+  set -u
+  export ADT_STATE_ROOT="'"$TMPROOT"'/state005"
+  source "'"$LIB_LANE"'"
+  LANE_ID=$(lane_mint myproj review 5)
+  LANE_DIR=$(lane_install myproj "$LANE_ID")
+  setsid bash -c "trap \"\" TERM; sleep 30" & PG=$!
+  disown 2>/dev/null || true
+  sleep 0.2
+  lane_record_pgid "$LANE_DIR" "$PG" agent
+  # The caller: its own setsid group runs lane_kill with a 4s grace…
+  # (\$1/\$2 escape the MIDDLE shell so the INNER bash expands its own args)
+  setsid bash -c "source \$1; lane_kill \$2 4" _ "'"$LIB_LANE"'" "$LANE_DIR" & CALLER=$!
+  sleep 1
+  # …and gets group-SIGKILLed mid-grace (the kill_stale_wrapper shape).
+  kill -9 -- "-$CALLER" 2>/dev/null
+  # Wait out the remaining grace + settle; the isolated escalator must
+  # still deliver the follow-up KILL to the TERM-resistant target.
+  sleep 5
+  kill -0 -- "-$PG" 2>/dev/null && echo "VERDICT:TARGET-ALIVE" || echo "VERDICT:TARGET-GONE"
+  kill -9 -- "-$PG" 2>/dev/null || true
+' 2>/dev/null | grep '^VERDICT:')
+assert_contains "TC-LGC3-005: lane_kill escalator survives a group-SIGKILL against its caller mid-grace and still KILLs the TERM-resistant target (pre-fix: target leaked)" "VERDICT:TARGET-GONE" "$OUT005"
+
 # ===========================================================================
 echo ""
 echo "=== TC-LGC3-010/011: wrapper TERM trap iterates registry pgids (review-side dead-arm fix) ==="
