@@ -1384,11 +1384,24 @@ chp_gitlab_trigger_bot() {
 # ---------------------------------------------------------------------------
 chp_gitlab_count_reviews_by_login() {
   local repo="$1" pr="$2" login="$3" login_json count
+  # [#419 review r3] Encode a raw slash-bearing repo positional — the caller
+  # (missing_bot_reviews, lib-review-bots.sh) threads autonomous.conf's RAW
+  # `group/project` REPO, not the pre-encoded GITLAB_PROJECT. Same detect
+  # heuristic as chp_gitlab_commit_file (`%` → pre-encoded pass-through;
+  # `/` → encode; single-segment → verbatim). Without this the
+  # /projects/group/project/... path 404s and the fail-safe `echo 0` makes
+  # every configured review bot read MISSING forever.
+  local repo_enc="$repo"
+  case "$repo" in
+    *%*) : ;;
+    */*) repo_enc="$(_gl_urlencode "$repo")" || { echo 0; return 0; } ;;
+    *)   : ;;
+  esac
   # Injection-safe: --arg puts LOGIN into a jq variable, then @json emits its
   # JSON-encoded string literal spliceable into a select() expression.
   login_json="$(jq -rn --arg loginarg "$login" '$loginarg | @json' 2>/dev/null)" || { echo 0; return 0; }
   local approvals
-  approvals="$(_gl_api "/projects/${repo}/merge_requests/${pr}/approvals" 2>/dev/null)" || { echo 0; return 0; }
+  approvals="$(_gl_api "/projects/${repo_enc}/merge_requests/${pr}/approvals" 2>/dev/null)" || { echo 0; return 0; }
   [ -n "$approvals" ] || { echo 0; return 0; }
   count="$(jq -r --argjson _dummy 0 \
     "[.approved_by[]? | select(.user.username == ${login_json})] | length" \

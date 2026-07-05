@@ -659,6 +659,20 @@ count=$(chp_gitlab_count_reviews_by_login "repo" 42 bot-a); rc=$?
 assert_rc "TC-P34-058 rc 0 (fail-SAFE)" "0" "$rc"
 assert_eq "TC-P34-058 count=0 on failure" "0" "$count"
 
+# TC-P34-058b — [#419 review r3] RAW slash-bearing repo positional (the shape
+# missing_bot_reviews threads from autonomous.conf's REPO) is URL-encoded
+# before hitting /projects/:id — the emitted path carries %2F, never a raw /.
+_reset_stub
+export _GL_API_PAYLOAD="$PAYLOADS/gitlab-chp-write-count-reviews-two.json"
+count=$(chp_gitlab_count_reviews_by_login "myGroup/myProject" 42 bot-a); rc=$?
+assert_rc "TC-P34-058b rc 0" "0" "$rc"
+assert_eq "TC-P34-058b count(bot-a)=1 via raw slug" "1" "$count"
+emitted_path_raw_slug="$(_call_n 1 | awk -F'|' '{print $NF}')"
+case "$emitted_path_raw_slug" in
+  */projects/myGroup%2FmyProject/*) ok "TC-P34-058b emitted path is %2F-encoded" ;;
+  *) bad "TC-P34-058b emitted path NOT encoded: $emitted_path_raw_slug" ;;
+esac
+
 # TC-P34-059 — malformed JSON → echo 0 rc 0
 _reset_stub
 malformed="$RUNDIR/malformed.json"
