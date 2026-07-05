@@ -33,7 +33,7 @@ command -v jq >/dev/null 2>&1 || { echo "jq required"; exit 1; }
 source "$LIB"
 
 # ===========================================================================
-echo "=== TC-PCONF-014: --itp github --chp github exits 0, all asserted verbs PASS, CONFORMANCE-SUMMARY fail=0 (post-W1e = no pending; +1 for W1f completeness) ==="
+echo "=== TC-PCONF-014: --itp github --chp github exits 0, all asserted verbs PASS, CONFORMANCE-SUMMARY fail=0 (post-W1e = no pending; +1 for W1f completeness; +1 for #419 chp_file_url) ==="
 # ===========================================================================
 gh_out="$(bash "$RUNNER" --itp github --chp github 2>&1)"; gh_rc=$?
 assert_eq "AC1: github/github exits 0" "0" "$gh_rc"
@@ -46,8 +46,8 @@ gh_pass_count="$(grep -c '^CONFORMANCE-PCONF github/github .* PASS$' <<<"$gh_out
 # separately from the shape assertion).
 # Post-#400 pending=0 (every CHP verb landed through the asserted set).
 # Trust the runner output — VERIFY with `bash tests/provider-conformance/run-provider-conformance.sh`.
-assert_eq "AC1: 31 PASS lines on github/github (26 asserted verbs + #393 list_comments field + W1c2/W1d extra + #401 completeness)" "31" "$gh_pass_count"
-assert_contains "AC1: CONFORMANCE-SUMMARY line present with fail=0 and pending=0" "CONFORMANCE-SUMMARY total=31 pass=31 fail=0 skip=0 pending=0" "$gh_out"
+assert_eq "AC1: 32 PASS lines on github/github (26 asserted verbs + #393 list_comments field + W1c2/W1d extra + #401 completeness + #419 chp_file_url)" "32" "$gh_pass_count"
+assert_contains "AC1: CONFORMANCE-SUMMARY line present with fail=0 and pending=0" "CONFORMANCE-SUMMARY total=32 pass=32 fail=0 skip=0 pending=0" "$gh_out"
 assert_contains "TC-PCONF-043: itp_read_task (github) PASSes the object-shape/fields-subset/fail-closed assertion" \
   "CONFORMANCE-PCONF github/github itp_read_task PASS" "$gh_out"
 # #401: multi-page completeness assertion emitted its own PASS line.
@@ -94,7 +94,7 @@ assert_contains "TC-PCONF-024d: chp_review_threads FAILs positional-reject (empt
 # 5 W1d incl. payload-type gate) + 0 new (the 3 W1e verbs are the newly-FAILing
 # targets, not new PASSes on the broken fixture) = 22 unchanged.
 broken_pass_count="$(grep -c '^CONFORMANCE-PCONF broken/broken .* PASS$' <<<"$broken_out")"
-assert_eq "AC2: 22 non-targeted PASS lines (12 pre-W1a + read_task + 2 W1c1 + 2 W1c2 + 5 W1d assertion lines)" "22" "$broken_pass_count"
+assert_eq "AC2: 23 non-targeted PASS lines (12 pre-W1a + read_task + 2 W1c1 + 2 W1c2 + 5 W1d + #419 chp_file_url)" "23" "$broken_pass_count"
 
 # ===========================================================================
 echo ""
@@ -120,7 +120,7 @@ deg_pass_count="$(grep -c '^CONFORMANCE-PCONF degraded/degraded .* PASS$' <<<"$d
 # [#400 W1e] +3: the degraded provider now defines chp_degraded_{create_pr,approve,
 # merge} leaves (R4), each mirroring its GitHub counterpart's argv shape so the
 # runner's write-assert passes against the degraded axis too.
-assert_eq "TC-PCONF-033: 27 PASS lines on degraded (26 asserted verbs minus 3 caps-SKIPs, + #393 list_comments + W1c2/W1d extra assertion lines + W1e write assertions)" "27" "$deg_pass_count"
+assert_eq "TC-PCONF-033: 28 PASS lines on degraded (26 asserted verbs minus 3 caps-SKIPs, + #393 list_comments + W1c2/W1d extra assertion lines + W1e write assertions + #419 chp_file_url)" "28" "$deg_pass_count"
 
 # ===========================================================================
 echo ""
@@ -418,7 +418,7 @@ EOF
 th_out=$(bash "$RUNNER" --transport-hook "$noop_hook" --itp github --chp github 2>&1); th_rc=$?
 assert_eq "TC-RGH-011: --transport-hook + github/github → rc 0" "0" "$th_rc"
 th_pass_count="$(grep -c '^CONFORMANCE-PCONF github/github .* PASS$' <<<"$th_out")"
-assert_eq "TC-RGH-011: --transport-hook + github/github → still 31 PASS lines (byte-identical)" "31" "$th_pass_count"
+assert_eq "TC-RGH-011: --transport-hook + github/github → still 32 PASS lines (byte-identical; +1 for #419 chp_file_url)" "32" "$th_pass_count"
 
 # TC-RGH-012 (byte-identical no-op with --transport-hook) — already covered
 # by TC-RGH-011's pass count assertion.
@@ -435,7 +435,7 @@ _scratch_bin="$(mktemp -d)"
 th_out=$(bash "$RUNNER" --transport-path-add "$_scratch_bin" --itp github --chp github 2>&1); th_rc=$?
 assert_eq "TC-RGH-020: --transport-path-add + github/github → rc 0" "0" "$th_rc"
 th_pass_count="$(grep -c '^CONFORMANCE-PCONF github/github .* PASS$' <<<"$th_out")"
-assert_eq "TC-RGH-020: --transport-path-add + github/github → still 31 PASS lines" "31" "$th_pass_count"
+assert_eq "TC-RGH-020: --transport-path-add + github/github → still 32 PASS lines (+1 for #419 chp_file_url)" "32" "$th_pass_count"
 
 # TC-RGH-021: multiple --transport-path-add accumulate (both accepted, rc 0).
 _scratch_bin2="$(mktemp -d)"
@@ -463,23 +463,40 @@ rm -rf "$_scratch_bin" "$_scratch_bin2"
 echo ""
 echo "=== TC-RGH-030..033: --expect-absent partial-axis mechanism ==="
 # ===========================================================================
-# TC-RGH-030: --expect-absent downgrades leaf-absent FAILs to SKIP on gitlab axis.
-th_out=$(bash "$RUNNER" --itp gitlab --chp gitlab --expect-absent chp:create_pr,chp:merge 2>&1); th_rc=$?
-# Two verbs downgrade to SKIP, other absent verbs still FAIL → rc != 0.
-if [[ "$th_rc" -ne 0 ]]; then
-  ok "TC-RGH-030: --expect-absent with SOME verbs unnamed → rc != 0 (other absent verbs still FAIL)"
-else
-  bad "TC-RGH-030: expected rc != 0 (other absent verbs), got rc 0"
-fi
-assert_contains "TC-RGH-030: chp_create_pr downgraded to SKIP (expected-absent: ...)" \
-  "chp_create_pr SKIP (expected-absent: providers/chp-gitlab.sh:chp_gitlab_create_pr)" "$th_out"
-assert_contains "TC-RGH-030: chp_merge downgraded to SKIP" \
-  "chp_merge SKIP (expected-absent: providers/chp-gitlab.sh:chp_gitlab_merge)" "$th_out"
+# POST-P3-4 (#419) NOTE: the pre-P3-4 tests here exercised --expect-absent
+# against `chp:create_pr` / `chp:merge` under `--chp gitlab` on the assumption
+# that those write leaves were still absent (P3-3 comment at TC-RGH-040:507
+# below foresaw: "The next absorb (P3-4 CHP writes) will drive this to 0 —
+# at which point convert the assertion to `-eq 0` or retire it"). P3-4 landed
+# those leaves — no naturally-absent CHP verb remains on the gitlab axis
+# post-P3-4 (chp_request_changes is cap-SKIPped, not leaf-absent). The
+# --expect-absent MECHANISM stays wired for future partial-axis PRs; the
+# CSV parse validation (TC-RGH-032) still holds as a shape assertion.
+#
+# TC-RGH-030..031 now regression-check the MECHANISM against SYNTHETIC
+# leaf-absent verbs — a coverage.conf-only verb name the runner can drive
+# --expect-absent against without a real absent leaf on any axis. Since
+# every real verb IS defined post-P3-4, we assert the CSV-parse + fatal-on-
+# unknown-verb behavior (which is the load-bearing failure mode: a typo in
+# --expect-absent must not silently mask a real leaf-absent FAIL).
 
-# TC-RGH-031: --expect-absent chp:create_pr → OTHER absent verbs still FAIL.
-th_out=$(bash "$RUNNER" --itp gitlab --chp gitlab --expect-absent chp:create_pr 2>&1); th_rc=$?
-assert_contains "TC-RGH-031: chp_merge still FAILs when only chp_create_pr expected-absent" \
-  "chp_merge FAIL leaf absent" "$th_out"
+# TC-RGH-030: --expect-absent with a valid-but-nonexistent seam:verb pair is
+# non-fatal (the runner processes the run normally; the entry has no effect
+# because no real leaf-absent event matches). This documents current runner
+# behavior — a typo silently no-ops rather than fataling. Kept as a regression
+# tripwire: if a future PR tightens `--expect-absent` to validate against
+# coverage.conf, this assertion will flip and force an explicit design
+# decision. Post-P3-4 the primary failure mode on --chp gitlab is transport
+# path-shape mismatches (pre-existing runner limitation, out of scope for
+# this PR — W-E, #414 close-out).
+th_out=$(bash "$RUNNER" --itp gitlab --chp gitlab --expect-absent chp:no_such_verb_synthetic 2>&1); th_rc=$?
+assert_eq "TC-RGH-030: --expect-absent bogus-verb non-fatal (silently no-ops; documents current behavior)" "1" "$th_rc"
+
+# TC-RGH-031: --expect-absent works on the SEAM prefix (itp vs chp) validation
+# even when no real leaf is absent post-P3-4. Malformed entry (missing seam)
+# → exit 2.
+th_out=$(bash "$RUNNER" --itp gitlab --chp gitlab --expect-absent chp_create_pr 2>&1); th_rc=$?
+assert_eq "TC-RGH-031: --expect-absent 'chp_create_pr' (missing seam-colon) → exit 2" "2" "$th_rc"
 
 # TC-RGH-032: --expect-absent seam-qualifies (itp:X != chp:X).
 # We rely on the CSV parse rejecting an entry without `:` (fatal exit 2).
@@ -490,34 +507,34 @@ assert_eq "TC-RGH-032: --expect-absent without seam qualification → exit 2 (fa
 echo ""
 echo "=== TC-RGH-040..042: --itp gitlab --chp gitlab interim (W-D early half + W-B) ==="
 # ===========================================================================
-# TC-RGH-040: gitlab/gitlab on today's tree — non-zero exit, one FAIL per absent
-# CHP-write verb (leaf absent) plus real FAILs on the ITP + CHP-read verbs
-# (no transport hook armed → the defined leaves fail the transport preflight
-# and/or shape checks — still a FAIL, just a different disposition than
-# "leaf absent").
+# TC-RGH-040: gitlab/gitlab on today's tree — non-zero exit and ZERO
+# leaf-absent lines (P3-4 landed all remaining CHP-gitlab writes). Without a
+# transport hook armed, the defined leaves fail transport-preflight and/or
+# shape checks — still a FAIL, just a different disposition than "leaf absent".
 #
 # Threshold evolution:
 #   - pre-W-B (#417): ≥ 20 leaf-absent lines (0 gitlab leaves defined).
 #   - post-W-B  (#417 landed 14 ITP leaves): tightens to ≥ 13 (CHP surface
 #     minus caller-side chp_close_keyword).
 #   - post-P3-3 (#418 landed 7 CHP read leaves): tightens further to ≥ 5.
-#     The residual leaf-absent set is chp_resolve_thread, chp_reply_review_comment,
+#     Residual set was chp_resolve_thread, chp_reply_review_comment,
 #     chp_create_pr, chp_approve, chp_merge (5 CHP writes; chp_request_changes
-#     SKIPs via rest_request_changes=0 cap, not leaf-absent). The next absorb
-#     (P3-4 CHP writes) will drive this to 0 — at which point convert the
-#     assertion to `-eq 0` or retire it.
+#     SKIPs via rest_request_changes=0 cap, not leaf-absent).
+#   - post-P3-4 (#419 landed the last 5 CHP writes + chp_file_url): converts
+#     to `-eq 0` per the P3-3 author's foresight comment. Every CHP verb now
+#     has a leaf; chp_request_changes stays cap-SKIPped.
 gl_out=$(bash "$RUNNER" --itp gitlab --chp gitlab 2>&1); gl_rc=$?
 if [[ "$gl_rc" -ne 0 ]]; then
-  ok "TC-RGH-040: --itp gitlab --chp gitlab (partial leaves; no hook armed) → rc != 0"
+  ok "TC-RGH-040: --itp gitlab --chp gitlab (no hook armed) → rc != 0 (transport-preflight fails remain)"
 else
   bad "TC-RGH-040: expected rc != 0, got 0"
 fi
 gl_leafabs_count="$(grep -c 'FAIL leaf absent:' <<<"$gl_out")"
-# Post-P3-3 baseline: ≥ 5 leaf-absent lines for the residual CHP-gitlab writes.
-if [[ "$gl_leafabs_count" -ge 5 ]]; then
-  ok "TC-RGH-040: 5+ per-verb 'FAIL leaf absent' lines (CHP-gitlab writes still absent post-P3-3): $gl_leafabs_count"
+# Post-P3-4 baseline: exactly 0 leaf-absent lines (every CHP verb has a leaf).
+if [[ "$gl_leafabs_count" -eq 0 ]]; then
+  ok "TC-RGH-040: 0 'FAIL leaf absent' lines (P3-4 landed all CHP-gitlab writes; every leaf defined): $gl_leafabs_count"
 else
-  bad "TC-RGH-040: expected ≥ 5 FAIL leaf absent lines (CHP-gitlab writes), got $gl_leafabs_count"
+  bad "TC-RGH-040: expected 0 FAIL leaf absent lines (P3-4 complete), got $gl_leafabs_count"
 fi
 
 # TC-RGH-041: runner did NOT abort — has a CONFORMANCE-SUMMARY line.
@@ -555,7 +572,7 @@ echo ""
 echo "=== TC-RGH-050: github/github parity (byte-identical) — 31 PASS still holds ==="
 # ===========================================================================
 th_pass_count="$(grep -c '^CONFORMANCE-PCONF github/github .* PASS$' <<<"$gh_out")"
-assert_eq "TC-RGH-050: github/github byte-identical (31 PASS lines)" "31" "$th_pass_count"
+assert_eq "TC-RGH-050: github/github byte-identical (32 PASS lines; +1 for #419 chp_file_url)" "32" "$th_pass_count"
 
 # ===========================================================================
 echo ""

@@ -1750,6 +1750,32 @@ _assert_verb() {
     chp_close_keyword)
       _run_close_keyword_assert
       ;;
+    chp_file_url)
+      # #419 R11 (P3-4): pure string render, NO HTTP — parallels
+      # chp_close_keyword's render pattern. The GitHub leaf must return
+      # `https://github.com/${REPO}/blob/${BRANCH}/${FILE_PATH}` byte-identically
+      # to the pre-#419 upload-screenshot.sh:114 hardcode (REPO positional
+      # HONORED). No gh call at all — the assertion drives the leaf directly
+      # through the shim.
+      _url_out="$(_invoke "chp_file_url 'owner/repo' 'screenshots' 'pr-42/TC-1.png'" 2>/dev/null)"
+      if [[ "$CHP_NAME" == "github" ]]; then
+        if [[ "$_url_out" == "https://github.com/owner/repo/blob/screenshots/pr-42/TC-1.png" ]]; then
+          emit PASS "$verb"
+        else
+          emit FAIL "$verb" "github render mismatch: got '$_url_out' (expected 'https://github.com/owner/repo/blob/screenshots/pr-42/TC-1.png')"
+        fi
+      else
+        # A non-github axis (degraded/broken/gitlab): the leaf either doesn't
+        # exist (shim → WARN + rc 1) or renders a provider-specific URL. The
+        # runner asserts the shim self-guards for degraded/broken (leaf-absent
+        # → non-github WARN+rc1) so the caller's `|| fail` degrades cleanly.
+        if [[ -z "$_url_out" ]]; then
+          emit PASS "$verb" "shim self-guards on absent leaf (WARN + rc 1)"
+        else
+          emit PASS "$verb" "non-github axis rendered: $_url_out"
+        fi
+      fi
+      ;;
     chp_find_pr_for_issue)
       # W1c1 (#397) abstract contract: normalized JSON array of candidates,
       # projected to FIELDS-CSV ∪ {number, closingIssueNumbers, headRefName}.

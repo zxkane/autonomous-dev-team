@@ -352,3 +352,18 @@ chp_degraded_merge() {
     >> "${CHP_DEGRADED_LEAF_LOG:-/dev/null}"
   gh pr merge "$pr" --repo "$REPO" --squash --delete-branch
 }
+
+# chp_degraded_file_url REPO BRANCH FILE_PATH — pure string render, no HTTP.
+#
+# Mirrors chp_github_file_url shape (#419 P3-4). Emits a deterministic
+# non-github URL under the local domain so the conformance runner sees a
+# non-empty stdout distinct from the github render (the P3-4 runner case-arm
+# treats a non-empty degraded/broken/gitlab render as PASS regardless of
+# exact value; a github-shaped stub or an empty output would obscure the
+# provider substitution the seam exists to prove).
+chp_degraded_file_url() {
+  local repo="$1" branch="$2" file_path="$3"
+  printf "%s\n" "DEG_FILE_URL ${repo}/${branch}/${file_path}" \
+    >> "${CHP_DEGRADED_LEAF_LOG:-/dev/null}"
+  printf "https://degraded.local/%s/blob/%s/%s" "$repo" "$branch" "$file_path"
+}
