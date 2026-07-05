@@ -294,13 +294,23 @@ glab_lines_in() {
 }
 
 # [#416 R4] The `/api/v4` curl detector — a `curl ...` line whose argv
-# mentions `/api/v4` (`grep -E 'curl.*[/"]api/v4[/"]'`). Same-line only,
-# matching the existing gh matcher's line-oriented discipline. Multi-line
-# evasion (concatenated argv across shell continuations) is out of scope
-# for a lint; the review gate catches it. Shape-exclusion of gh-app-token
-# sites is automatic — those curl argvs mention `api.github.com/…`, not
-# `/api/v4/…`, so this detector does not match them (no allowlist entry
-# needed for gh-app-token.sh).
+# mentions `/api/v4` (`grep -E 'curl.*[/"]api/v4[/"]'`).
+#
+# BOUND — SAME-LINE-ONLY, DOCUMENTED HONESTLY (codex round-1 [P2-6]):
+# this same-line matcher MISSES a two-line split like
+#   url="https://gitlab.example/api/v4/projects/1/issues"
+#   curl -sS -H "PRIVATE-TOKEN: $tok" "$url"
+# where the URL is stored in a variable on one line and `curl "$url"`
+# fires on another. The review gate is the intended second line of
+# defense — a reviewer eyeballs a NEW curl invocation and its context.
+# `gitlab_api_var_and_curl_lines_in` below adds a best-effort file-level
+# detector for the "same VAR name in both places" subset of that shape.
+# Indirect flows (function args, env-var derivation, arithmetic pieces
+# of the URL) remain bypassable and belong to the review gate.
+#
+# Shape-exclusion of gh-app-token sites is automatic — those curl argvs
+# mention `api.github.com/…`, not `/api/v4/…`, so this detector does
+# not match them (no allowlist entry needed for gh-app-token.sh).
 gitlab_api_curl_lines_in() {
   local path="$1"
   [ -f "$path" ] || return 0
@@ -308,6 +318,52 @@ gitlab_api_curl_lines_in() {
     { s = $0; sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s)
       if (substr(s, 1, 1) == "#") next
       print s }'
+}
+
+# [#416 P2-6] Split-across-lines detector (best-effort, file-level).
+# Fires when the SAME file:
+#   (a) assigns a variable to a string containing `/api/v4/`
+#         — line matches `<VAR>=<value-with-/api/v4/>` (with an optional
+#           leading `local `/`export `/`declare `/`readonly `),
+#   AND
+#   (b) invokes `curl` on `"$<VAR>"`, `${<VAR>}`, or `$<VAR>` on a
+#       DIFFERENT line.
+# Only "same variable NAME literally appears in both places" is required
+# — indirect flows (function args, derived URLs) are NOT covered; this
+# is the documented bound. Emits the CURL LINE (the actual leak site)
+# not the assignment, so failure messages name the right file:line.
+gitlab_api_var_and_curl_lines_in() {
+  local path="$1"
+  [ -f "$path" ] || return 0
+  local var_names
+  # Allow leading whitespace (indented assignments inside functions), an
+  # optional `local`/`export`/`declare`/`readonly ` prefix, and finally the
+  # VAR=<value-with-/api/v4/> shape.
+  var_names=$(grep -aE '^[[:space:]]*(local |export |declare |readonly )?[A-Za-z_][A-Za-z0-9_]*=.*/api/v4/' "$path" 2>/dev/null \
+    | sed -E 's/^[[:space:]]*(local |export |declare |readonly )?([A-Za-z_][A-Za-z0-9_]*)=.*/\2/' \
+    | sort -u)
+  [ -z "$var_names" ] && return 0
+  local var line s
+  while IFS= read -r var; do
+    [ -z "$var" ] && continue
+    # For each var name, grep lines with `curl` + `$VAR` (via a
+    # dynamically-built regex that boundary-anchors the var name so
+    # `foo` doesn't match `foobar`). Skip lines that ALSO carry the
+    # `/api/v4/` literal (same-line case, already handled).
+    local pattern="(^|[^A-Za-z_-])curl .*\\\$\\{?${var}\\}?([^A-Za-z_0-9]|$)"
+    while IFS= read -r line; do
+      [ -z "$line" ] && continue
+      s="$line"
+      s="${s#"${s%%[![:space:]]*}"}"
+      s="${s%"${s##*[![:space:]]}"}"
+      [ "${s:0:1}" = "#" ] && continue
+      # Skip the same-line case (already covered above).
+      case "$s" in
+        *"/api/v4/"*) continue ;;
+      esac
+      printf '%s\n' "$s"
+    done < <(grep -aE "$pattern" "$path" 2>/dev/null)
+  done <<< "$var_names"
 }
 
 # gh_lines_in for a SCRIPTS_DIR-relative file, additionally dropping
@@ -338,6 +394,16 @@ guarded_glab_lines_in() {
 guarded_gitlab_api_curl_lines_in() {
   local rel="$1" path="$2" line
   gitlab_api_curl_lines_in "$path" | while IFS= read -r line; do
+    is_checker_infra_line "$rel" "$line" && continue
+    printf '%s\n' "$line"
+  done
+}
+
+# [#416 P2-6] gitlab_api_var_and_curl_lines_in for a SCRIPTS_DIR-relative
+# file, with the same is_checker_infra_line exemption applied.
+guarded_gitlab_api_var_and_curl_lines_in() {
+  local rel="$1" path="$2" line
+  gitlab_api_var_and_curl_lines_in "$path" | while IFS= read -r line; do
     is_checker_infra_line "$rel" "$line" && continue
     printf '%s\n' "$line"
   done
@@ -666,26 +732,35 @@ done < <(tree_sh_files)
 [ "$_glab_hits" -eq 0 ] && info "no raw \`glab\` token found outside providers/"
 
 echo "=== Check 6: no '/api/v4' curl outside providers/lib-gitlab-transport.sh (#416 R4) ==="
+# Two matchers, both applied to every non-allowlisted tree file:
+#   (a) same-line `curl … /api/v4/…`  — gitlab_api_curl_lines_in
+#   (b) split-across-lines `VAR=…/api/v4/…` + `curl "$VAR"` on a
+#       different line  — gitlab_api_var_and_curl_lines_in (P2-6).
+# (b) is documented BOUND: file-level; matches only "same VAR name in
+# both places"; indirect flows still bypass (review-gate territory).
 _v4_hits=0
 while IFS= read -r rel; do
   [ -z "$rel" ] && continue
-  # providers/lib-gitlab-transport.sh is the legitimate home of the /api/v4
-  # curl call (the default transport). Any other file — including other
-  # providers/ leaves — is a regression: the leaves MUST call _gl_api, not
-  # curl directly (#416 R1 note "LEAVES NEVER call curl or _gl_http
-  # directly").
   case "$rel" in
     providers/lib-gitlab-transport.sh) continue ;;
   esac
   in_list "$rel" "${ALLOWLISTED_FILES[@]}" && continue
+  # (a) same-line
   while IFS= read -r line; do
     [ -z "$line" ] && continue
     _v4_hits=$((_v4_hits + 1))
     locs="$(sites_file_lines "$rel" "$line")"
     fail "raw '/api/v4' curl outside providers/lib-gitlab-transport.sh at ${locs:-$rel:?}: '$line'. Route this GitLab API call through _gl_api (a raw /api/v4 curl bypasses the pagination/backoff/fail-closed choke-point; #416 R1)."
   done < <(guarded_gitlab_api_curl_lines_in "$rel" "$SCRIPTS_DIR/$rel")
+  # (b) split-across-lines (P2-6)
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    _v4_hits=$((_v4_hits + 1))
+    locs="$(sites_file_lines "$rel" "$line")"
+    fail "split-across-lines \`/api/v4\` invocation outside providers/lib-gitlab-transport.sh at ${locs:-$rel:?}: '$line' (file also assigns a var containing the GitLab API path). Route through _gl_api; the pre-P2-6 same-line-only matcher would have MISSED this shape (#416 P2-6)."
+  done < <(guarded_gitlab_api_var_and_curl_lines_in "$rel" "$SCRIPTS_DIR/$rel")
 done < <(tree_sh_files)
-[ "$_v4_hits" -eq 0 ] && info "no '/api/v4' curl found outside providers/lib-gitlab-transport.sh"
+[ "$_v4_hits" -eq 0 ] && info "no '/api/v4' curl (same-line or split-across-lines) found outside providers/lib-gitlab-transport.sh"
 
 # ---------------------------------------------------------------------------
 echo ""

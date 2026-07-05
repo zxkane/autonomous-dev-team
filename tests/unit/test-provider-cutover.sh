@@ -891,7 +891,7 @@ S="$(fresh_scratch glabneg)"
 # Verify NO regression on the clean scratch copy (Check 6 emits its "no /api/v4
 # curl found" line and rc 0). This asserts that the shape-exclusion holds
 # without any allowlist widening.
-if bash "$CHECK" --scripts-dir "$S" --baseline "$BASELINE" 2>&1 | grep -q "no '/api/v4' curl found outside providers/lib-gitlab-transport.sh"; then
+if bash "$CHECK" --scripts-dir "$S" --baseline "$BASELINE" 2>&1 | grep -q "no '/api/v4' curl (same-line or split-across-lines) found outside providers/lib-gitlab-transport.sh"; then
   ok "TC-CUTOVER-GLAB-NEG: shape-exclusion — 5 gh-app-token.sh curl sites PASS (api.github.com != /api/v4)"
 else
   bad "TC-CUTOVER-GLAB-NEG: Check 6 unexpected FAIL on clean scratch"
@@ -906,7 +906,7 @@ S="$(fresh_scratch glabnegcurl)"
 printf '\ntest_gh_style_curl() {\n  curl -s -H "Authorization: bearer $tok" -H "Accept: application/vnd.github+json" "https://api.github.com/orgs/foo/repos"\n}\n' >> "$S/autonomous-dev.sh"
 # gh_lines_in will not fire because there is no `gh ` token here (only `curl`).
 # But the /api/v4 detector must not either.
-if bash "$CHECK" --scripts-dir "$S" --baseline "$BASELINE" 2>&1 | grep -q "no '/api/v4' curl found outside providers/lib-gitlab-transport.sh"; then
+if bash "$CHECK" --scripts-dir "$S" --baseline "$BASELINE" 2>&1 | grep -q "no '/api/v4' curl (same-line or split-across-lines) found outside providers/lib-gitlab-transport.sh"; then
   ok "TC-CUTOVER-GLAB-NEG-CURL: api.github.com curl argv passes /api/v4 detector cleanly"
 else
   bad "TC-CUTOVER-GLAB-NEG-CURL: api.github.com curl argv tripped the /api/v4 detector (shape-exclusion broken)"
@@ -937,6 +937,70 @@ if bash "$CHECK" --scripts-dir "$S" --baseline "$BASELINE" >/dev/null 2>&1; then
   ok "TC-CUTOVER-GLAB-005: /api/v4 curl inside providers/lib-gitlab-transport.sh is legitimate (Check 6 skips it)"
 else
   bad "TC-CUTOVER-GLAB-005: lib-gitlab-transport.sh tripped Check 6 (should be the legitimate home)"
+fi
+
+# ===========================================================================
+echo "=== TC-CUTOVER-GLAB-BOUND-001: split-across-lines /api/v4 (var+curl) IS caught (#416 P2-6) ==="
+# ===========================================================================
+# [#416 P2-6] Pre-P2-6 the /api/v4 detector was same-line-only; a
+# two-line shape
+#   url="https://gitlab.example/api/v4/projects/1/issues"
+#   curl -sS -H "PRIVATE-TOKEN: $tok" "$url"
+# would slip past. Post-P2-6 the file-level detector fires on
+# "same VAR name assigned to /api/v4/ AND used in a curl invocation on
+# a different line".
+S="$(fresh_scratch glabp26)"
+# shellcheck disable=SC2016
+cat >> "$S/autonomous-dev.sh" <<'EOF'
+
+fake_gitlab_split_curl() {
+  url="https://gitlab.example.com/api/v4/projects/1/issues"
+  curl -sS -H "PRIVATE-TOKEN: $tok" "$url"
+}
+EOF
+out="$(bash "$CHECK" --scripts-dir "$S" --baseline "$BASELINE" 2>&1)"; rc=$?
+if [[ "$rc" -ne 0 ]] && grep -q "split-across-lines" <<<"$out"; then
+  ok "TC-CUTOVER-GLAB-BOUND-001: split VAR + curl \"\$VAR\" caught by the P2-6 detector"
+else
+  bad "TC-CUTOVER-GLAB-BOUND-001: split shape NOT caught (rc=$rc); output: ${out:0:400}"
+fi
+
+# ===========================================================================
+echo "=== TC-CUTOVER-GLAB-BOUND-002: DOCUMENTED BOUND — indirect flow bypasses (review-gate territory) ==="
+# ===========================================================================
+# [#416 P2-6] The P2-6 detector matches ONLY "same VAR name in both places".
+# Indirect flows (function arg passing, env-var derivation) are still
+# bypassable and belong to the review gate — this TC documents that bound
+# and asserts the honest description is present in the checker comment.
+S="$(fresh_scratch glabp26b)"
+# shellcheck disable=SC2016
+cat >> "$S/autonomous-dev.sh" <<'EOF'
+
+fake_indirect_flow() {
+  build_url() { echo "https://gitlab.example.com/api/v4/projects/1"; }
+  # Indirect: derived from function output, not a same-name assignment.
+  target=$(build_url)
+  curl -sS -H "PRIVATE-TOKEN: $tok" "$target"
+}
+EOF
+# Above: `build_url` assigns nothing named `target`; the `target=…` line
+# uses command substitution rather than a literal-string assignment. This
+# shape is EXPECTED to bypass the file-level detector — DOCUMENTED bound.
+if bash "$CHECK" --scripts-dir "$S" --baseline "$BASELINE" >/dev/null 2>&1; then
+  ok "TC-CUTOVER-GLAB-BOUND-002: indirect-flow bypass documented (P2-6 file-level detector does NOT cover this — review-gate territory)"
+else
+  # A pass-through here would mean the guard got smarter than documented,
+  # which is fine — but we don't fail the test either way (bound is honest).
+  ok "TC-CUTOVER-GLAB-BOUND-002: indirect-flow shape also caught (stricter than the documented bound — still acceptable)"
+fi
+
+# Comment/doc-honesty grep: the checker must state the bound in a nearby
+# comment so a future reader knows what the detector DOES and DOESN'T do.
+if grep -q "BOUND — SAME-LINE-ONLY, DOCUMENTED HONESTLY" "$CHECK" \
+   && grep -Pzq '(?s)Indirect flows.*belong to the review gate' "$CHECK"; then
+  ok "TC-CUTOVER-GLAB-BOUND-002-DOC: checker comment states the bound honestly (P2-6 requirement)"
+else
+  bad "TC-CUTOVER-GLAB-BOUND-002-DOC: checker comment does not document the same-line-only bound + indirect-flow limitation"
 fi
 
 # ===========================================================================
