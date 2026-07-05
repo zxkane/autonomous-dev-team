@@ -46,8 +46,8 @@ gh_pass_count="$(grep -c '^CONFORMANCE-PCONF github/github .* PASS$' <<<"$gh_out
 # separately from the shape assertion).
 # Post-#400 pending=0 (every CHP verb landed through the asserted set).
 # Trust the runner output — VERIFY with `bash tests/provider-conformance/run-provider-conformance.sh`.
-assert_eq "AC1: 32 PASS lines on github/github (26 asserted verbs + #393 list_comments field + W1c2/W1d extra + #401 completeness + #419 chp_file_url)" "32" "$gh_pass_count"
-assert_contains "AC1: CONFORMANCE-SUMMARY line present with fail=0 and pending=0" "CONFORMANCE-SUMMARY total=32 pass=32 fail=0 skip=0 pending=0" "$gh_out"
+assert_eq "AC1: 36 PASS lines on github/github (26 asserted verbs + #393 list_comments field + W1c2/W1d extra + #401 completeness + #419 chp_file_url + #419-r4 chp_pr_comment/commit_file/count_reviews_by_login/trigger_bot)" "36" "$gh_pass_count"
+assert_contains "AC1: CONFORMANCE-SUMMARY line present with fail=0 and pending=0" "CONFORMANCE-SUMMARY total=36 pass=36 fail=0 skip=0 pending=0" "$gh_out"
 assert_contains "TC-PCONF-043: itp_read_task (github) PASSes the object-shape/fields-subset/fail-closed assertion" \
   "CONFORMANCE-PCONF github/github itp_read_task PASS" "$gh_out"
 # #401: multi-page completeness assertion emitted its own PASS line.
@@ -73,7 +73,7 @@ broken_fail_count="$(grep -c '^CONFORMANCE-PCONF broken/broken .* FAIL' <<<"$bro
 # positional-validation convention (parallel to the missing-write-verb FAILs
 # above).
 # Total = 5 pre-W1e + 3 W1e + 2 W1f = 10 clauses.
-assert_eq "AC2: exactly 10 FAIL lines (one per violated clause)" "10" "$broken_fail_count"
+assert_eq "AC2: exactly 14 FAIL lines (one per violated clause; +4 for #419-r4 chp_pr_comment/commit_file/count_reviews_by_login/trigger_bot leaf-absent on the broken fixture)" "14" "$broken_fail_count"
 assert_contains "TC-PCONF-020: itp_list_comments FAILs wrong-shape" "itp_list_comments FAIL wrong-shape" "$broken_fail_lines"
 assert_contains "TC-PCONF-021: itp_transition_state FAILs rc-0-on-error" "itp_transition_state FAIL rc-0-on-error" "$broken_fail_lines"
 assert_contains "TC-PCONF-022: chp_resolve_thread FAILs missing-verb-function (command not found)" "chp_resolve_thread FAIL" "$broken_fail_lines"
@@ -94,7 +94,7 @@ assert_contains "TC-PCONF-024d: chp_review_threads FAILs positional-reject (empt
 # 5 W1d incl. payload-type gate) + 0 new (the 3 W1e verbs are the newly-FAILing
 # targets, not new PASSes on the broken fixture) = 22 unchanged.
 broken_pass_count="$(grep -c '^CONFORMANCE-PCONF broken/broken .* PASS$' <<<"$broken_out")"
-assert_eq "AC2: 23 non-targeted PASS lines (12 pre-W1a + read_task + 2 W1c1 + 2 W1c2 + 5 W1d + #419 chp_file_url)" "23" "$broken_pass_count"
+assert_eq "AC2: 23 non-targeted PASS lines (12 pre-W1a + read_task + 2 W1c1 + 2 W1c2 + 5 W1d + #419 chp_file_url; #419-r4 verbs go into the FAIL count on broken, not PASS)" "23" "$broken_pass_count"
 
 # ===========================================================================
 echo ""
@@ -108,7 +108,7 @@ assert_contains "TC-PCONF-032: chp_request_changes SKIPped, annotated with its c
 deg_fail_count="$(grep -c '^CONFORMANCE-PCONF degraded/degraded .* FAIL' <<<"$deg_out")"
 assert_eq "R4: zero FAIL on the degraded run" "0" "$deg_fail_count"
 deg_skip_count="$(grep -c '^CONFORMANCE-PCONF degraded/degraded .* SKIP' <<<"$deg_out")"
-assert_eq "TC-PCONF-034: exactly 3 SKIPs" "3" "$deg_skip_count"
+assert_eq "TC-PCONF-034: exactly 4 SKIPs (+1 for #419-r4 chp_trigger_bot review_bots=0 on degraded)" "4" "$deg_skip_count"
 deg_pass_count="$(grep -c '^CONFORMANCE-PCONF degraded/degraded .* PASS$' <<<"$deg_out")"
 # [#393] +1: the list_comments field/authorKind assertion also runs (and passes) on degraded.
 # [#396] +1: itp_read_task flipped pending->asserted (W1b), governing cap `-` (never SKIPs).
@@ -120,7 +120,7 @@ deg_pass_count="$(grep -c '^CONFORMANCE-PCONF degraded/degraded .* PASS$' <<<"$d
 # [#400 W1e] +3: the degraded provider now defines chp_degraded_{create_pr,approve,
 # merge} leaves (R4), each mirroring its GitHub counterpart's argv shape so the
 # runner's write-assert passes against the degraded axis too.
-assert_eq "TC-PCONF-033: 28 PASS lines on degraded (26 asserted verbs minus 3 caps-SKIPs, + #393 list_comments + W1c2/W1d extra assertion lines + W1e write assertions + #419 chp_file_url)" "28" "$deg_pass_count"
+assert_eq "TC-PCONF-033: 31 PASS lines on degraded (asserted verbs minus 4 caps-SKIPs, + #393 list_comments + W1c2/W1d extra + W1e write + #419 chp_file_url + #419-r4 3 new leaves (pr_comment/commit_file/count_reviews_by_login); trigger_bot cap-SKIPs)" "31" "$deg_pass_count"
 
 # ===========================================================================
 echo ""
@@ -418,7 +418,7 @@ EOF
 th_out=$(bash "$RUNNER" --transport-hook "$noop_hook" --itp github --chp github 2>&1); th_rc=$?
 assert_eq "TC-RGH-011: --transport-hook + github/github → rc 0" "0" "$th_rc"
 th_pass_count="$(grep -c '^CONFORMANCE-PCONF github/github .* PASS$' <<<"$th_out")"
-assert_eq "TC-RGH-011: --transport-hook + github/github → still 32 PASS lines (byte-identical; +1 for #419 chp_file_url)" "32" "$th_pass_count"
+assert_eq "TC-RGH-011: --transport-hook + github/github → still 36 PASS lines (byte-identical; +5 for #419 chp_file_url + #419-r4 4 verbs)" "36" "$th_pass_count"
 
 # TC-RGH-012 (byte-identical no-op with --transport-hook) — already covered
 # by TC-RGH-011's pass count assertion.
@@ -435,7 +435,7 @@ _scratch_bin="$(mktemp -d)"
 th_out=$(bash "$RUNNER" --transport-path-add "$_scratch_bin" --itp github --chp github 2>&1); th_rc=$?
 assert_eq "TC-RGH-020: --transport-path-add + github/github → rc 0" "0" "$th_rc"
 th_pass_count="$(grep -c '^CONFORMANCE-PCONF github/github .* PASS$' <<<"$th_out")"
-assert_eq "TC-RGH-020: --transport-path-add + github/github → still 32 PASS lines (+1 for #419 chp_file_url)" "32" "$th_pass_count"
+assert_eq "TC-RGH-020: --transport-path-add + github/github → still 36 PASS lines (+5 for #419 chp_file_url + #419-r4 4 verbs)" "36" "$th_pass_count"
 
 # TC-RGH-021: multiple --transport-path-add accumulate (both accepted, rc 0).
 _scratch_bin2="$(mktemp -d)"
@@ -572,7 +572,7 @@ echo ""
 echo "=== TC-RGH-050: github/github parity (byte-identical) — 31 PASS still holds ==="
 # ===========================================================================
 th_pass_count="$(grep -c '^CONFORMANCE-PCONF github/github .* PASS$' <<<"$gh_out")"
-assert_eq "TC-RGH-050: github/github byte-identical (32 PASS lines; +1 for #419 chp_file_url)" "32" "$th_pass_count"
+assert_eq "TC-RGH-050: github/github byte-identical (36 PASS lines; +5 for #419 chp_file_url + #419-r4 4 verbs)" "36" "$th_pass_count"
 
 # ===========================================================================
 echo ""
@@ -591,11 +591,13 @@ assert_eq "TC-RGH-060: gitlab/gitlab + hook → rc 0 (#414 AC1 pass gate)" "0" "
 gl_hook_fail_count="$(grep -c '^CONFORMANCE-PCONF gitlab/gitlab .* FAIL' <<<"$gl_hook_out")"
 assert_eq "TC-RGH-060: gitlab/gitlab + hook → 0 FAILs (every verb asserts green)" "0" "$gl_hook_fail_count"
 gl_hook_skip_count="$(grep -c '^CONFORMANCE-PCONF gitlab/gitlab .* SKIP' <<<"$gl_hook_out")"
-assert_eq "TC-RGH-060: gitlab/gitlab + hook → 1 SKIP (chp_request_changes, cap: rest_request_changes)" "1" "$gl_hook_skip_count"
+assert_eq "TC-RGH-060: gitlab/gitlab + hook → 2 SKIPs (chp_request_changes rest_request_changes=0 + chp_trigger_bot review_bots=0 #419-r4)" "2" "$gl_hook_skip_count"
 assert_contains "TC-RGH-060: gitlab/gitlab + hook → chp_request_changes SKIP by cap" \
   "chp_request_changes SKIP (cap: rest_request_changes)" "$gl_hook_out"
+assert_contains "TC-RGH-060: gitlab/gitlab + hook → chp_trigger_bot SKIP by cap (#419-r4)" \
+  "chp_trigger_bot SKIP (cap: review_bots)" "$gl_hook_out"
 assert_contains "TC-RGH-060: gitlab/gitlab + hook → CONFORMANCE-SUMMARY line" \
-  "CONFORMANCE-SUMMARY total=30 pass=29 fail=0 skip=1 pending=0" "$gl_hook_out"
+  "CONFORMANCE-SUMMARY total=34 pass=32 fail=0 skip=2 pending=0" "$gl_hook_out"
 
 # ===========================================================================
 echo ""

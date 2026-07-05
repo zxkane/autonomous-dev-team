@@ -367,3 +367,52 @@ chp_degraded_file_url() {
     >> "${CHP_DEGRADED_LEAF_LOG:-/dev/null}"
   printf "https://degraded.local/%s/blob/%s/%s" "$repo" "$branch" "$file_path"
 }
+
+# chp_degraded_pr_comment PR --body <string>  (#419 review-r4)
+#
+# General PR-comment write leaf mirror of chp_github_pr_comment (spec
+# §3.2 [INV-102]). Emits the argv shape github's leaf emits so the
+# conformance runner's write-assert passes against BOTH axes with the
+# same needle.
+chp_degraded_pr_comment() {
+  local pr="$1"; shift
+  printf 'DEG_PR_COMMENT %s %s\n' "$pr" "$*" \
+    >> "${CHP_DEGRADED_LEAF_LOG:-/dev/null}"
+  gh pr comment "$pr" --repo "$REPO" "$@"
+}
+
+# chp_degraded_commit_file REPO BRANCH FILE_PATH CONTENT_BASE64 MESSAGE  (#419 review-r4)
+#
+# Whole-op mirror of chp_github_commit_file [INV-99] — enters the git-Data-API
+# dispatch by calling `gh api repos/${repo}/git/ref/heads/${branch}` first.
+# Under stub gh (single-payload) the 8-call dance's shape check fails after
+# the first call, so this leaf's stdout ends up empty; the runner's github-
+# axis case-arm asserts on the ARGV TRACE only (the first `git/ref/heads/…`
+# reference), not on rc. Mirrors github structurally so the same assertion
+# passes on either provider.
+chp_degraded_commit_file() {
+  local repo="$1" branch="$2" file_path="$3" content_base64="$4" message="$5"
+  printf 'DEG_COMMIT_FILE %s %s %s\n' "$repo" "$branch" "$file_path" \
+    >> "${CHP_DEGRADED_LEAF_LOG:-/dev/null}"
+  gh api "repos/${repo}/git/ref/heads/${branch}" >/dev/null 2>&1 || true
+  # Empty stdout (no upload sha) — the caller's `[[ -n "$SHA" ]] || fail`
+  # is the honest fail-loud path when the git-Data-API dance doesn't
+  # complete under a degraded backend.
+}
+
+# chp_degraded_count_reviews_by_login REPO PR LOGIN  (#419 review-r4, [INV-94])
+#
+# Mirror of chp_github_count_reviews_by_login. Enters the reviews-API path
+# so the argv trace matches github's; fail-SAFE (echo 0 rc 0 on ANY failure)
+# so the caller's `^[0-9]+$` gate + `-eq 0` MISSING decision stays consistent
+# across axes.
+chp_degraded_count_reviews_by_login() {
+  local repo="$1" pr="$2" login="$3" login_json lengths
+  printf 'DEG_COUNT_REVIEWS %s %s %s\n' "$repo" "$pr" "$login" \
+    >> "${CHP_DEGRADED_LEAF_LOG:-/dev/null}"
+  login_json="$(jq -rn --arg loginarg "$login" '$loginarg | @json' 2>/dev/null)" || { echo 0; return 0; }
+  lengths="$(gh api "repos/${repo}/pulls/${pr}/reviews" --paginate \
+    --jq "[.[] | select(.user.login == ${login_json})] | length" 2>/dev/null)" \
+    || { echo 0; return 0; }
+  awk '{s+=$1} END {print s+0}' <<<"$lengths"
+}
