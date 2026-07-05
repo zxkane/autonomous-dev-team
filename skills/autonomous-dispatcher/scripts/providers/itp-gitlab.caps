@@ -1,0 +1,81 @@
+# providers/itp-gitlab.caps — GitLab Issue-Tracker Provider capability manifest.
+#
+# Declarative key=value, PARSED (never sourced) by the itp_caps reader in
+# lib-issue-provider.sh ([INV-88], spec §4). Describes GitLab REST behavior
+# (modeled against GitLab 17.x). Every value is evidence-backed per #414 AC5
+# and #417 R2 — the citation appears in the inline comment (API-doc URL) or
+# names the recorded probe under tests/provider-conformance/fixtures/gitlab/probes/.
+#
+# Spec §5.1 mapping row governs — GitLab is a CLEANER fit than GitHub for
+# server-side label AND / NOT and atomic add+remove transition. All 9 keys
+# below evaluate to `1` on GitLab's standard REST surface. **No WAIVED→LIVE
+# conversion is forced by this slice** — the 5 WAIVED caps (spec §4.3;
+# server_side_state_and / _negation, distinct_bot_author, read_after_write_state,
+# marker_channel) key their tripwire on CALLER-side wiring (grep for
+# `itp_caps <cap>` reads in caller files), NOT on `.caps` values. A value of
+# `1` here does NOT trip TC-CAPS-010..015 — verified against
+# tests/unit/test-provider-caps-branches.sh's `caller_branch_for` grep.
+
+server_side_state_and=1        # GitLab issues API accepts labels=A,B as native AND
+                                # (spec §5.1). Doc: https://docs.gitlab.com/api/issues.html
+                                # (Filter parameters — `labels`). No jq post-filter needed.
+
+server_side_state_negation=1   # GitLab issues API accepts not[labels]=X as native NOT
+                                # (spec §5.1). Doc: https://docs.gitlab.com/api/issues.html
+                                # (Filter parameters — `not`). FIRST provider with =1
+                                # (GitHub's leaf currently declares =0 and post-filters
+                                # in jq). This is a CAP-only claim in this slice — no
+                                # caller branch consumes it; wiring lands with the Asana
+                                # slice per spec §4.3 waiver.
+
+distinct_bot_author=1          # Project / Group Access Tokens post as synthetic bot users
+                                # named `project_<n>_bot_<token_slug>` (and analogously
+                                # `group_<n>_bot_<slug>`) that are distinct from any human
+                                # user in the workspace. Doc:
+                                # https://docs.gitlab.com/user/project/settings/project_access_tokens.html
+                                # (Bot users for projects). CAVEAT — a personal-PAT
+                                # deployment (an operator authenticating with a human user's
+                                # PAT rather than a project/group access token) posts as the
+                                # HUMAN user itself, which degrades this capability to a
+                                # BOT_LOGIN-convention posture (operator-side documentation
+                                # in gitlab-setup.md, W-E). The `.caps=1` claim is scoped to
+                                # the RECOMMENDED project/group access token topology;
+                                # personal-PAT drift is caught by the same manual-review /
+                                # discipline that catches PAT-mode drift on the GitHub side.
+                                # Recorded probe: fixtures/gitlab/probes/distinct-bot-author.txt.
+
+read_after_write_state=1       # `PUT /projects/:id/issues/:iid` with add_labels /
+                                # remove_labels returns the updated resource in the same
+                                # response, AND a follow-up GET / list sees the transition
+                                # immediately (no eventual-consistency lag as on Asana).
+                                # Doc: https://docs.gitlab.com/api/issues.html#edit-an-issue
+                                # Recorded probe: fixtures/gitlab/probes/read-after-write.txt.
+
+cross_ref_shorthand=1          # GitLab renders `group/project#iid` and `group/subgroup/project#iid`
+                                # as a native cross-project link in markdown descriptions
+                                # and notes. Doc:
+                                # https://docs.gitlab.com/user/markdown.html#gitlab-specific-references
+                                # (issue references section).
+
+body_checkbox=1                # GitLab renders markdown `- [x]` and `- [ ]` checkboxes in
+                                # issue descriptions AND notes (same behavior as GitHub for
+                                # `itp_mark_checkbox`). Doc:
+                                # https://docs.gitlab.com/user/markdown.html#task-lists
+
+edit_comment=1                 # `PUT /projects/:id/issues/:iid/notes/:note_id` supports
+                                # in-place edit of an existing note (byte-parity with the
+                                # GitHub comment PATCH endpoint the [INV-46] SHA-stamp
+                                # caller uses). Doc:
+                                # https://docs.gitlab.com/api/notes.html#modify-existing-issue-note
+
+label_colors=1                 # `POST /projects/:id/labels` accepts `color=#RRGGBB` and
+                                # persists it (hex-color parity with GitHub). Doc:
+                                # https://docs.gitlab.com/api/labels.html#create-a-new-label
+
+marker_channel=html            # HTML comments (`<!-- marker -->`) round-trip verbatim in
+                                # BOTH issue descriptions and notes — GitLab's markdown
+                                # preserves HTML comments, so `<!-- dispatcher-token: … -->`
+                                # is a valid marker channel. Doc:
+                                # https://docs.gitlab.com/user/markdown.html#inline-html
+                                # (HTML comments are supported per CommonMark).
+                                # Recorded probe: fixtures/gitlab/probes/marker-channel-html.txt.
