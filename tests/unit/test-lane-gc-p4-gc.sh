@@ -209,6 +209,30 @@ CATLOG2=$(cat "$ST2/adt-gc.log" 2>/dev/null || true)
 assert_contains "TC-LGC4-002: STATE=reaping + live guardian, fresh state age -> rule 1.2 skip" "skip rule=1.2" "$CATLOG2"
 rm -rf "$ST2"
 
+# TC-LGC4-003: STATE=reaping, GUARDIAN_PID alive, state age >= 5min (the
+# tightened bound) -> rule 1.2 does NOT apply (its age gate is `< 300s`);
+# falls through to rule 1.3, which fires because STATE=reaping is a
+# disjunct with the age floor. Age is simulated by backdating the `lane`
+# file's own mtime (_gc_state_age's proxy for "how long in this STATE") via
+# `touch -d "@<epoch>"` rather than a real 5-minute sleep.
+ST3=$(mktemp -d)
+bash -c '
+  source "'"$LIB_LANE"'"
+  export ADT_STATE_ROOT="'"$ST3"'"
+  LANE_ID=$(lane_mint p1 dev 3)
+  LANE_DIR=$(lane_install p1 "$LANE_ID")
+  lane_set "$LANE_DIR" WRAPPER_PID 999999
+  lane_set "$LANE_DIR" STATE reaping
+  sleep 30 & disown
+  lane_set "$LANE_DIR" GUARDIAN_PID "$!"
+  touch -d "@$(( $(date +%s) - 301 ))" "$LANE_DIR/lane"
+'
+run_gc_dry "$ST3" >/dev/null
+CATLOG3=$(cat "$ST3/adt-gc.log" 2>/dev/null || true)
+assert_contains "TC-LGC4-003: STATE=reaping + live guardian, state age>=5min -> rule 1.2 does not apply, rule 1.3 fires" "would-kill rule=1.3" "$CATLOG3"
+assert_not_contains "TC-LGC4-003b: rule 1.2 must NOT fire at this age" "skip rule=1.2" "$CATLOG3"
+rm -rf "$ST3"
+
 # TC-LGC4-006: STATE=reaping, lane age < 600s -> rule 1.3 STILL fires
 # (arithmetic-note regression: state disjunct, not an additional conjunct).
 ST6=$(mktemp -d)
@@ -370,6 +394,12 @@ P2ROOT="$TMPROOT/pass2"
 mkdir -p "$P2ROOT"
 
 # TC-LGC4-020: tagged sleep, lane dead, age>=300s -> would-kill.
+#
+# `-u TERM_PROGRAM`: this test suite may run inside a terminal multiplexer
+# / IDE terminal that exports TERM_PROGRAM (e.g. tmux) — rule 2.2's
+# unconditional skip fires BEFORE rule 2.1's tagged-join check this fixture
+# targets, silently masking the assertion (same ambient-env-pollution class
+# TC-LGC2-020's `env -i` fix in test-lib-lane.sh documents).
 ST20=$(mktemp -d)
 bash -c '
   source "'"$LIB_LANE"'"
@@ -377,7 +407,7 @@ bash -c '
   LANE_ID=$(lane_mint p2 dev 20)
   LANE_DIR=$(lane_install p2 "$LANE_ID")
   lane_set "$LANE_DIR" WRAPPER_PID 999999
-  setsid env ADT_LANE_ID="$LANE_ID" bash -c "sleep 400" &
+  setsid env -u TERM_PROGRAM ADT_LANE_ID="$LANE_ID" bash -c "sleep 400" &
   disown
   echo "$!" > "'"$P2ROOT"'/pid20"
 '
@@ -403,12 +433,14 @@ PROJECT_ID="p2"
 CONF
 # -u ADT_LANE_ID: this test suite itself runs inside a real dev-agent
 # session that already exports ADT_LANE_ID (and AUTONOMOUS_CONF_LOADED_FROM/
-# CC_USER) — the same ambient-env-pollution class test-lib-lane.sh's
-# TC-LGC2-020-regression documents. Without scrubbing it, the inherited
-# ADT_LANE_ID would make rule 2.1's exact-join arm fire (against a foreign,
-# unrelated lane id) instead of exercising the legacy-signature arm this
-# fixture targets.
-setsid env -u ADT_LANE_ID bash -c '
+# CC_USER) and may run inside a terminal multiplexer / IDE terminal that
+# exports TERM_PROGRAM — the same ambient-env-pollution class test-lib-
+# lane.sh's TC-LGC2-020-regression documents. Without scrubbing ADT_LANE_ID,
+# the inherited value would make rule 2.1's exact-join arm fire (against a
+# foreign, unrelated lane id) instead of exercising the legacy-signature arm
+# this fixture targets; without scrubbing TERM_PROGRAM, rule 2.2's
+# unconditional skip fires first and silently masks the assertion below.
+setsid env -u ADT_LANE_ID -u TERM_PROGRAM bash -c '
   export AUTONOMOUS_CONF_LOADED_FROM="'"$P2ROOT"'/autonomous.conf"
   export CC_USER="autonomous-dev-bot"
   exec sleep 700
@@ -466,8 +498,11 @@ kill -9 -- "-$PID23" 2>/dev/null || true
 rm -rf "$ST23"
 
 # TC-LGC4-024: unknown ADT_LANE_ID (absent from any registry) -> skip.
+# `-u TERM_PROGRAM`: this fixture asserts a POSITIVE log line
+# (rule=2.1-unknown-lane-id) — an un-scrubbed ambient TERM_PROGRAM would
+# make rule 2.2 fire first and the expected line never gets written at all.
 ST24=$(mktemp -d)
-setsid env ADT_LANE_ID="ghostproject:dev:9999:1:aaaa" bash -c "sleep 400" &
+setsid env -u TERM_PROGRAM ADT_LANE_ID="ghostproject:dev:9999:1:aaaa" bash -c "sleep 400" &
 disown
 PID24=$!
 SPAWNED_PIDS+=("$PID24")
@@ -496,6 +531,187 @@ CATLOG25=$(cat "$ST25/adt-gc.log" 2>/dev/null || true)
 assert_not_contains "TC-LGC4-025: process tagged with a LIVE lane's id is never swept" "pid=$PID25" "$CATLOG25"
 kill -9 -- "-$PID25" 2>/dev/null || true
 rm -rf "$ST25"
+
+# TC-LGC4-030: rule 2.4 first conjunct — a process eligible via rule 2.1
+# (tagged with a DEAD lane's id) is still skipped when its OWN pgid happens
+# to be recorded in a DIFFERENT, currently-LIVE lane's `pgids` file (e.g. a
+# recycled pgid, or a process that migrated groups). Distinct from rule 2.3
+# (TC-LGC4-029, which checks live WRAPPER-ARGV membership in the pgid, not
+# the registry's own pgids ledger).
+ST30=$(mktemp -d)
+bash -c '
+  source "'"$LIB_LANE"'"
+  export ADT_STATE_ROOT="'"$ST30"'"
+  DEAD_ID=$(lane_mint p2 dev 30)
+  DEAD_DIR=$(lane_install p2 "$DEAD_ID")
+  lane_set "$DEAD_DIR" WRAPPER_PID 999999
+  echo "$DEAD_ID" > "'"$P2ROOT"'/dead30.id"
+  sleep 30 &
+  LIVE_WRAPPER_PID=$!
+  disown
+  echo "$LIVE_WRAPPER_PID" > "'"$P2ROOT"'/live30.pid"
+  LIVE_ID=$(lane_mint p2 dev 31)
+  LIVE_DIR=$(lane_install p2 "$LIVE_ID")
+  lane_set "$LIVE_DIR" WRAPPER_PID "$LIVE_WRAPPER_PID"
+  lane_set "$LIVE_DIR" WRAPPER_START "$(proc_start_time "$LIVE_WRAPPER_PID")"
+  echo "$LIVE_DIR" > "'"$P2ROOT"'/live30.dir"
+'
+DEAD30_ID=$(cat "$P2ROOT/dead30.id")
+LIVE30_WRAPPER_PID=$(cat "$P2ROOT/live30.pid")
+LIVE30_DIR=$(cat "$P2ROOT/live30.dir")
+SPAWNED_PIDS+=("$LIVE30_WRAPPER_PID")
+setsid env -u TERM_PROGRAM ADT_LANE_ID="$DEAD30_ID" bash -c "sleep 400" &
+disown
+PID30=$!
+SPAWNED_PIDS+=("$PID30")
+sleep 0.2
+PG30=$(bash -c 'source "'"$LIB_LANE"'"; proc_pgid "'"$PID30"'"')
+bash -c 'source "'"$LIB_LANE"'"; lane_record_pgid "'"$LIVE30_DIR"'" "'"$PG30"'" agent'
+export "_GC_PROC_AGE_OVERRIDE_${PID30}=301"
+run_gc_dry_full "$ST30" >/dev/null
+unset "_GC_PROC_AGE_OVERRIDE_${PID30}"
+CATLOG30=$(cat "$ST30/adt-gc.log" 2>/dev/null || true)
+assert_not_contains "TC-LGC4-030: pgid recorded in a LIVE lane's pgids file protects an otherwise rule-2.1-eligible process (rule 2.4 first conjunct)" "would-kill rule=2 pid=$PID30" "$CATLOG30"
+kill -9 -- "-$PID30" 2>/dev/null || true
+kill -9 "$LIVE30_WRAPPER_PID" 2>/dev/null || true
+rm -rf "$ST30"
+
+# TC-LGC4-031: rule 2.5 age floor not yet met — a tagged-dead-lane process
+# at age 100s (< the 300s exact-join floor) is never classified, even
+# though rule 2.1's tag-join would otherwise authorize it. Unlike
+# TC-LGC4-024 (unknown lane id), this path produces NO explicit skip log
+# line — `eligible` simply never flips true — so the assertion is a plain
+# absence check.
+ST31=$(mktemp -d)
+bash -c '
+  source "'"$LIB_LANE"'"
+  export ADT_STATE_ROOT="'"$ST31"'"
+  LANE_ID=$(lane_mint p2 dev 31)
+  LANE_DIR=$(lane_install p2 "$LANE_ID")
+  lane_set "$LANE_DIR" WRAPPER_PID 999999
+  setsid env -u TERM_PROGRAM ADT_LANE_ID="$LANE_ID" bash -c "sleep 400" &
+  disown
+  echo "$!" > "'"$P2ROOT"'/pid31"
+'
+PID31=$(cat "$P2ROOT/pid31")
+SPAWNED_PIDS+=("$PID31")
+export "_GC_PROC_AGE_OVERRIDE_${PID31}=100"
+run_gc_dry_full "$ST31" >/dev/null
+unset "_GC_PROC_AGE_OVERRIDE_${PID31}"
+CATLOG31=$(cat "$ST31/adt-gc.log" 2>/dev/null || true)
+assert_not_contains "TC-LGC4-031: tagged-dead-lane process below the 300s age floor is never classified (rule 2.5)" "pid=$PID31" "$CATLOG31"
+kill -9 -- "-$PID31" 2>/dev/null || true
+rm -rf "$ST31"
+
+# TC-LGC4-026: mid-upgrade legacy LIVE wrapper's daemon — a process carrying
+# the legacy signature (AUTONOMOUS_CONF_LOADED_FROM + CC_USER=autonomous-
+# dev-bot, ppid==1 via genuine kernel reparenting through an intermediate
+# that backgrounds it and exits) that shares the STILL-LIVE `autonomous-
+# dev.sh`-argv-matching wrapper's OWN pgid (no `setsid` of its own — the
+# realistic current-pipeline shape: lib-auth.sh's `_spawn_token_daemon`
+# backgrounds its daemon with a bare `bash … &`, no setsid) -> rule 2.4's
+# ancestry gate matches on its FIRST check (`wpg == pg`, no BFS walk
+# needed, since pgid is invariant across reparenting) and skips it, even
+# though rule 2.1's legacy arm would otherwise authorize a kill.
+#
+# `-u TERM_PROGRAM` on BOTH spawns: same ambient-env-pollution guard as
+# every other Pass-2 fixture (see the TC-LGC4-020 note above) — the daemon
+# script also does its own `unset TERM_PROGRAM` defensively since it may
+# inherit through two levels of `bash -c`.
+FAKE_WRAPPER26="$P2ROOT/autonomous-dev.sh"
+DAEMON26_SCRIPT="$P2ROOT/legacy-daemon-26.sh"
+cat > "$DAEMON26_SCRIPT" <<'EOF'
+#!/bin/bash
+export AUTONOMOUS_CONF_LOADED_FROM=/fake/autonomous.conf
+export CC_USER=autonomous-dev-bot
+unset TERM_PROGRAM
+exec -a zzMIDUPGRADE026 sleep 700
+EOF
+chmod +x "$DAEMON26_SCRIPT"
+cat > "$FAKE_WRAPPER26" <<EOF
+#!/bin/bash
+( "$DAEMON26_SCRIPT" & ) &
+sleep 60
+EOF
+chmod +x "$FAKE_WRAPPER26"
+setsid env -u TERM_PROGRAM bash -c "exec -a '$FAKE_WRAPPER26' bash '$FAKE_WRAPPER26'" &
+disown
+WRAP26_PID=$!
+SPAWNED_PIDS+=("$WRAP26_PID")
+sleep 0.8
+DAEMON26_PID=$(ps -eo pid,cmd | grep 'zzMIDUPGRADE026' | grep -v grep | awk '{print $1}' | head -1)
+SPAWNED_PIDS+=("$DAEMON26_PID")
+if [[ -n "$DAEMON26_PID" ]] && [[ "$(bash -c 'source "'"$LIB_LANE"'"; proc_ppid "'"$DAEMON26_PID"'"')" == "1" ]]; then
+  ST26=$(mktemp -d)
+  export "_GC_PROC_AGE_OVERRIDE_${DAEMON26_PID}=601"
+  run_gc_dry_full "$ST26" >/dev/null
+  unset "_GC_PROC_AGE_OVERRIDE_${DAEMON26_PID}"
+  CATLOG26=$(cat "$ST26/adt-gc.log" 2>/dev/null || true)
+  assert_not_contains "TC-LGC4-026: mid-upgrade legacy live wrapper's reparented same-pgid daemon is protected by rule 2.4's ancestry gate (direct pgid match)" "pid=$DAEMON26_PID" "$CATLOG26"
+  rm -rf "$ST26"
+else
+  assert_pass "TC-LGC4-026: skipped — reparenting to init did not occur as expected on this sandbox"
+fi
+kill -9 -- "-$WRAP26_PID" 2>/dev/null || true
+kill -9 "$DAEMON26_PID" 2>/dev/null || true
+
+# TC-LGC4-026b (known residual, NOT a regression gate — documents a real
+# gap found during review): when EVERY intermediate process between the
+# live wrapper and a setsid'd, ppid==1-reparented daemon has ALREADY
+# exited (the steady state for a "background via a subshell that exits
+# immediately" spawn idiom, e.g. `( setsid cmd & ) &`), `pgrep -P`'s BFS
+# can never re-discover the severed parent/child edge — there is no live
+# process anywhere whose ppid points at the vanished intermediate. Rule
+# 2.4's ancestry gate is a documented residual for this narrow shape; it is
+# NOT reachable by any CURRENT-format wrapper (PR-2 onward always records
+# the daemon's pgid in the lane registry via lane_record_pgid, so rule
+# 2.4's FIRST two conjuncts already protect it independently of ancestry).
+# It affects ONLY a legacy/pre-registry checkout with no lane dir at all —
+# exactly the audience `docs/designs/lane-gc-p4-adt-gc.md`'s "interpretation
+# notes" section discusses. Recorded here as `assert_pass` documentation
+# (not `assert_fail`) because fixing it (e.g. session-id correlation via
+# `ps -o sid=`) is a real design change belonging to a follow-up, not a
+# silent fixture adjustment — see the PR report for the full writeup.
+DAEMON26B_SCRIPT="$P2ROOT/legacy-daemon-26b.sh"
+cat > "$DAEMON26B_SCRIPT" <<'EOF'
+#!/bin/bash
+export AUTONOMOUS_CONF_LOADED_FROM=/fake/autonomous.conf
+export CC_USER=autonomous-dev-bot
+unset TERM_PROGRAM
+exec -a zzMIDUPGRADE026B sleep 700
+EOF
+chmod +x "$DAEMON26B_SCRIPT"
+FAKE_WRAPPER26B="$P2ROOT/autonomous-dev-26b.sh"
+cat > "$FAKE_WRAPPER26B" <<EOF
+#!/bin/bash
+( setsid "$DAEMON26B_SCRIPT" & ) &
+sleep 60
+EOF
+chmod +x "$FAKE_WRAPPER26B"
+setsid env -u TERM_PROGRAM bash -c "exec -a '$FAKE_WRAPPER26B' bash '$FAKE_WRAPPER26B'" &
+disown
+WRAP26B_PID=$!
+SPAWNED_PIDS+=("$WRAP26B_PID")
+sleep 0.8
+DAEMON26B_PID=$(ps -eo pid,cmd | grep 'zzMIDUPGRADE026B' | grep -v grep | awk '{print $1}' | head -1)
+SPAWNED_PIDS+=("$DAEMON26B_PID")
+if [[ -n "$DAEMON26B_PID" ]] && [[ "$(bash -c 'source "'"$LIB_LANE"'"; proc_ppid "'"$DAEMON26B_PID"'"')" == "1" ]]; then
+  ST26B=$(mktemp -d)
+  export "_GC_PROC_AGE_OVERRIDE_${DAEMON26B_PID}=601"
+  run_gc_dry_full "$ST26B" >/dev/null
+  unset "_GC_PROC_AGE_OVERRIDE_${DAEMON26B_PID}"
+  CATLOG26B=$(cat "$ST26B/adt-gc.log" 2>/dev/null || true)
+  if [[ "$CATLOG26B" == *"pid=$DAEMON26B_PID"* ]]; then
+    assert_pass "TC-LGC4-026b (documented residual, not a regression gate): fully-detached-intermediate mid-upgrade daemon is NOT protected by the ancestry gate — see PR report; only reachable pre-registry, current-format lanes are protected via the registry pgids join instead"
+  else
+    assert_pass "TC-LGC4-026b: this run happened to protect it (timing-dependent BFS reach) — the residual is non-deterministic, not fixed here"
+  fi
+  rm -rf "$ST26B"
+else
+  assert_pass "TC-LGC4-026b: skipped — reparenting to init did not occur as expected on this sandbox"
+fi
+kill -9 -- "-$WRAP26B_PID" 2>/dev/null || true
+kill -9 "$DAEMON26B_PID" 2>/dev/null || true
 
 # TC-LGC4-029: group-member-has-live-wrapper — a dead-lane-tagged process
 # placed in the SAME pgid as a live wrapper-argv-matching process -> skip
@@ -535,6 +751,80 @@ else
 fi
 kill -9 -- "-$WRAP29_PID" 2>/dev/null || true
 
+# TC-LGC4-027: crashpad-shaped decoy — a process named/argv'd to look like a
+# Chrome crashpad helper, but carrying a FULLY MATCHING tagged-dead-lane env
+# (ADT_LANE_ID) -> judged via Pass 2 (env match), same as any other tagged
+# process, proving classification never keys on the process NAME (design
+# rule 3.5: "judged by intact env via Pass 2, never by ppid/name").
+ST27=$(mktemp -d)
+bash -c '
+  source "'"$LIB_LANE"'"
+  export ADT_STATE_ROOT="'"$ST27"'"
+  LANE_ID=$(lane_mint p2 dev 27)
+  LANE_DIR=$(lane_install p2 "$LANE_ID")
+  lane_set "$LANE_DIR" WRAPPER_PID 999999
+  setsid env -u TERM_PROGRAM ADT_LANE_ID="$LANE_ID" bash -c "exec -a chrome_crashpad_handler sleep 400" &
+  disown
+  echo "$!" > "'"$P2ROOT"'/pid27"
+'
+PID27=$(cat "$P2ROOT/pid27")
+SPAWNED_PIDS+=("$PID27")
+export "_GC_PROC_AGE_OVERRIDE_${PID27}=301"
+run_gc_dry_full "$ST27" >/dev/null
+unset "_GC_PROC_AGE_OVERRIDE_${PID27}"
+CATLOG27=$(cat "$ST27/adt-gc.log" 2>/dev/null || true)
+assert_contains "TC-LGC4-027: crashpad-shaped decoy with a fully-matching tagged-dead-lane env is would-killed via rule 2 (env match), never judged by its crashpad-looking name" "would-kill rule=2 pid=$PID27" "$CATLOG27"
+kill -9 -- "-$PID27" 2>/dev/null || true
+rm -rf "$ST27"
+
+# TC-LGC4-028: launcher-bridge live wrapper — the "wrapper" process's own
+# argv does NOT literally contain `autonomous-dev.sh` (simulating an
+# exec-chain launcher bridge), but a LIVE MEMBER of its OWN process group
+# does. Rule 2.3's `pgrep -g $PG -f 'autonomous-(dev|review)\.sh'` matches
+# on the GROUP, not the single top argv, so a dead-lane-tagged process
+# placed in that SAME group is still protected — this is a direct
+# behavioral rerun of the exact rule-2.3 predicate (not a proxy) against a
+# genuine two-member group where only the SECOND member's argv matches.
+ST28=$(mktemp -d)
+LAUNCHER_BRIDGE_MEMBER="$P2ROOT/autonomous-dev-launcher-member.sh"
+cat > "$LAUNCHER_BRIDGE_MEMBER" <<'EOF'
+#!/bin/bash
+exec -a autonomous-dev.sh sleep 400
+EOF
+chmod +x "$LAUNCHER_BRIDGE_MEMBER"
+bash -c '
+  source "'"$LIB_LANE"'"
+  export ADT_STATE_ROOT="'"$ST28"'"
+  LANE_ID=$(lane_mint p2 dev 28)
+  LANE_DIR=$(lane_install p2 "$LANE_ID")
+  lane_set "$LANE_DIR" WRAPPER_PID 999999
+  # Bridge leader: its OWN argv does NOT contain autonomous-dev.sh (the
+  # "launcher bridge" shape). Backgrounds the tagged candidate, THEN the
+  # real argv-matching member, all in ONE setsid group.
+  setsid bash -c "
+    env -u TERM_PROGRAM ADT_LANE_ID=\"$LANE_ID\" sleep 400 &
+    echo \$! > \"'"$P2ROOT"'/pid28\"
+    \"'"$LAUNCHER_BRIDGE_MEMBER"'\" &
+    wait
+  " &
+  disown
+'
+sleep 0.4
+PID28=$(cat "$P2ROOT/pid28" 2>/dev/null || echo "")
+if [[ -n "$PID28" ]]; then
+  SPAWNED_PIDS+=("$PID28")
+  PG28=$(bash -c 'source "'"$LIB_LANE"'"; proc_pgid "'"$PID28"'"')
+  export "_GC_PROC_AGE_OVERRIDE_${PID28}=301"
+  run_gc_dry_full "$ST28" >/dev/null
+  unset "_GC_PROC_AGE_OVERRIDE_${PID28}"
+  CATLOG28=$(cat "$ST28/adt-gc.log" 2>/dev/null || true)
+  assert_not_contains "TC-LGC4-028: launcher-bridge live wrapper — a dead-lane-tagged process sharing a pgid with a live wrapper-argv MEMBER (not the group leader) is protected by rule 2.3's group-scoped match" "pid=$PID28" "$CATLOG28"
+  kill -9 -- "-$PG28" 2>/dev/null || true
+else
+  assert_pass "TC-LGC4-028: skipped — could not observe the launcher-bridge group's spawned pid on this sandbox"
+fi
+rm -rf "$ST28"
+
 # TC-LGC4-032: banned-key grep-pins.
 BANNED_HIT=$(grep -n 'CLAUDE_CODE_SESSION_ID' "$ADT_GC" || true)
 if [[ -z "$BANNED_HIT" ]]; then
@@ -561,9 +851,28 @@ mkdir -p "$P3ROOT"
 
 # TC-LGC4-040: Chrome lane-scoped — dead lane's CHROME_PROFILE_HINT matches
 # a live process's argv.
+#
+# `exec -a chrome sleep 400 --user-data-dir=$HINT` does NOT put
+# `--user-data-dir=...` into the running process's REAL argv — `exec -a`
+# only renames argv[0] for DISPLAY; the underlying binary is still GNU
+# `sleep`, which parses `--user-data-dir=...` as an invalid time interval
+# and exits immediately (rc 1) before adt-gc.sh ever observes it as live.
+# That fixture shape only ever exercised its own "proc_argv unavailable"
+# skip branch, never rule 3.1 itself. Fix: a small `#!/bin/bash` shim
+# script named `chrome` that calls `sleep` as an ordinary (non-exec'd)
+# command — the shim SCRIPT's own process (not sleep's) stays alive with
+# its own real argv (`/bin/bash <path>/chrome --user-data-dir=…`) visible
+# via /proc/PID/cmdline for the fixture's whole lifetime. `-u TERM_PROGRAM`:
+# rule 3.1 also unconditionally skips on TERM_PROGRAM.
 ST40=$(mktemp -d)
 HINT40="$P3ROOT/chrome-profile-40"
 mkdir -p "$HINT40"
+CHROME_SHIM40="$P3ROOT/chrome"
+cat > "$CHROME_SHIM40" <<'EOF'
+#!/bin/bash
+sleep 400
+EOF
+chmod +x "$CHROME_SHIM40"
 bash -c '
   source "'"$LIB_LANE"'"
   export ADT_STATE_ROOT="'"$ST40"'"
@@ -572,7 +881,7 @@ bash -c '
   lane_set "$LANE_DIR" WRAPPER_PID 999999
   lane_set "$LANE_DIR" CHROME_PROFILE_HINT "'"$HINT40"'"
 '
-setsid bash -c "exec -a chrome sleep 400 --user-data-dir=$HINT40" &
+setsid env -u TERM_PROGRAM "$CHROME_SHIM40" "--user-data-dir=$HINT40" &
 disown
 PID40=$!
 SPAWNED_PIDS+=("$PID40")
@@ -595,12 +904,14 @@ rm -rf "$ST40"
 # 3.3 requires the LITERAL `/tmp/agent-auth-*` prefix (the real auth
 # shim's own path convention) — an arbitrary $TMPROOT-nested path does
 # NOT match, so the fixture must use that exact prefix, not a path under
-# the test's own isolated tmpdir.
+# the test's own isolated tmpdir. `-u TERM_PROGRAM`: rule 3.3 also
+# unconditionally skips on TERM_PROGRAM, so an un-scrubbed ambient value
+# would mask this fixture's positive assertion.
 AUTH_GONE="/tmp/agent-auth-tc4-043-$$"
 AUTH_LIVE="/tmp/agent-auth-tc4-044-$$"
 mkdir -p "$AUTH_LIVE"
 ST43=$(mktemp -d)
-setsid env -u ADT_LANE_ID GH_TOKEN_FILE="${AUTH_GONE}/token" bash -c 'exec -a "gh_pr_checks_--watch" /usr/bin/sleep 400' &
+setsid env -u ADT_LANE_ID -u TERM_PROGRAM GH_TOKEN_FILE="${AUTH_GONE}/token" bash -c 'exec -a "gh_pr_checks_--watch" /usr/bin/sleep 400' &
 disown
 PID43=$!
 SPAWNED_PIDS+=("$PID43")
@@ -623,6 +934,134 @@ assert_not_contains "TC-LGC4-044: wedged gh with an EXISTING auth dir is never s
 kill -9 -- "-$PID44" 2>/dev/null || true
 rm -rf "$AUTH_GONE" "$AUTH_LIVE"
 rm -rf "$ST44"
+
+# TC-LGC4-041/042: Chrome heuristic (rule 3.2) — argv
+# `--user-data-dir=/tmp/puppeteer_dev_chrome_profile-X`, ppid==1 (genuine
+# kernel reparenting via an intermediate that exits, same technique as
+# TC-LGC4-026), age > 2h vs age <= 2h. A `#!/bin/bash` shim script that
+# runs `sleep` as an ORDINARY foreground command (never `exec`s into it)
+# keeps the flag as the SHIM SCRIPT's OWN real, live argv — `exec -a NAME
+# sleep --flag` (the shape that broke TC-LGC4-040 originally) would either
+# (a) drop the flag entirely if `"$@"` isn't forwarded, or (b) pass it to
+# the REAL sleep binary if it IS forwarded, which rejects it as an invalid
+# time interval and exits immediately. Never `exec`ing avoids both: the
+# shim script process itself (not sleep's) stays alive with argv =
+# `/bin/bash <shim-path> --user-data-dir=…`, which is all rule 3.2's
+# substring match needs.
+#
+# Rule 3.2 requires the LITERAL `/tmp/puppeteer_dev_chrome_profile-` prefix
+# (same class of requirement TC-LGC4-043's note documents for
+# `/tmp/agent-auth-*`) — a path under `$P3ROOT` (itself under `$TMPROOT`,
+# which is `/tmp/tmp.XXXXXXXXXX/...`) does NOT match, since the literal
+# prefix isn't a direct `/tmp/` child. Must use a `/tmp/`-rooted hint here,
+# not `$P3ROOT`.
+CHROME_HEUR_HINT="/tmp/puppeteer_dev_chrome_profile-tc4-041-$$"
+mkdir -p "$CHROME_HEUR_HINT"
+CHROME_HEUR_SHIM="$P3ROOT/chrome-heuristic-shim.sh"
+cat > "$CHROME_HEUR_SHIM" <<EOF
+#!/bin/bash
+sleep 400
+EOF
+chmod +x "$CHROME_HEUR_SHIM"
+ST41=$(mktemp -d)
+bash -c "( setsid env -u TERM_PROGRAM '$CHROME_HEUR_SHIM' '--user-data-dir=$CHROME_HEUR_HINT' & ) & sleep 1" &
+disown
+sleep 1.5
+PID41=$(ps -eo pid,cmd | grep -- "--user-data-dir=$CHROME_HEUR_HINT" | grep -v grep | awk '{print $1}' | head -1)
+if [[ -n "$PID41" ]] && [[ "$(bash -c 'source "'"$LIB_LANE"'"; proc_ppid "'"$PID41"'"')" == "1" ]]; then
+  SPAWNED_PIDS+=("$PID41")
+  export "_GC_PROC_AGE_OVERRIDE_${PID41}=7300"
+  run_gc_dry_full "$ST41" >/dev/null
+  unset "_GC_PROC_AGE_OVERRIDE_${PID41}"
+  CATLOG41=$(cat "$ST41/adt-gc.log" 2>/dev/null || true)
+  assert_contains "TC-LGC4-041: Chrome heuristic — reparented puppeteer profile, age>2h -> would-kill rule=3.2" "would-kill rule=3.2 pid=$PID41" "$CATLOG41"
+  kill -9 -- "-$PID41" 2>/dev/null || true
+  kill -9 "$PID41" 2>/dev/null || true
+else
+  assert_pass "TC-LGC4-041: skipped — reparenting to init did not occur as expected on this sandbox"
+fi
+rm -rf "$ST41" "$CHROME_HEUR_HINT"
+
+CHROME_HEUR_HINT42="/tmp/puppeteer_dev_chrome_profile-tc4-042-$$"
+mkdir -p "$CHROME_HEUR_HINT42"
+ST42=$(mktemp -d)
+bash -c "( setsid env -u TERM_PROGRAM '$CHROME_HEUR_SHIM' '--user-data-dir=$CHROME_HEUR_HINT42' & ) & sleep 1" &
+disown
+sleep 1.5
+PID42=$(ps -eo pid,cmd | grep -- "--user-data-dir=$CHROME_HEUR_HINT42" | grep -v grep | awk '{print $1}' | head -1)
+if [[ -n "$PID42" ]] && [[ "$(bash -c 'source "'"$LIB_LANE"'"; proc_ppid "'"$PID42"'"')" == "1" ]]; then
+  SPAWNED_PIDS+=("$PID42")
+  # No age override: a freshly-spawned fixture is well under the 2h floor
+  # by construction, so this exercises the REAL proc_age path (not the
+  # test-only override), proving the age gate itself, not just the seam.
+  run_gc_dry_full "$ST42" >/dev/null
+  CATLOG42=$(cat "$ST42/adt-gc.log" 2>/dev/null || true)
+  assert_not_contains "TC-LGC4-042: Chrome heuristic — reparented puppeteer profile below the 2h age floor is never classified" "pid=$PID42" "$CATLOG42"
+  kill -9 -- "-$PID42" 2>/dev/null || true
+  kill -9 "$PID42" 2>/dev/null || true
+else
+  assert_pass "TC-LGC4-042: skipped — reparenting to init did not occur as expected on this sandbox"
+fi
+rm -rf "$ST42" "$CHROME_HEUR_HINT42"
+
+# TC-LGC4-045/046: E2E server (rule 3.4) — process cwd under a dead lane's
+# recorded WORKTREE path that no longer exists on disk, vs a WORKTREE that
+# still exists.
+E2E_WORKTREE_GONE="$P3ROOT/e2e-worktree-gone-045"
+mkdir -p "$E2E_WORKTREE_GONE"
+ST45=$(mktemp -d)
+LANE45_DIR=$(bash -c '
+  source "'"$LIB_LANE"'"
+  export ADT_STATE_ROOT="'"$ST45"'"
+  LANE_ID=$(lane_mint p3 dev 45)
+  LANE_DIR=$(lane_install p3 "$LANE_ID")
+  lane_set "$LANE_DIR" WRAPPER_PID 999999
+  lane_set "$LANE_DIR" WORKTREE "'"$E2E_WORKTREE_GONE"'"
+  echo "$LANE_DIR"
+')
+(cd "$E2E_WORKTREE_GONE" && setsid env -u TERM_PROGRAM bash -c "sleep 400" &)
+sleep 0.3
+PID45=$(pgrep -f "sleep 400" | while read -r p; do
+  [[ "$(readlink "/proc/$p/cwd" 2>/dev/null)" == "$E2E_WORKTREE_GONE" ]] && echo "$p" && break
+done)
+rmdir "$E2E_WORKTREE_GONE" 2>/dev/null || rm -rf "$E2E_WORKTREE_GONE"
+if [[ -n "$PID45" ]]; then
+  SPAWNED_PIDS+=("$PID45")
+  run_gc_dry_full "$ST45" >/dev/null
+  CATLOG45=$(cat "$ST45/adt-gc.log" 2>/dev/null || true)
+  assert_contains "TC-LGC4-045: E2E server whose recorded WORKTREE no longer exists -> would-kill rule=3.4" "would-kill rule=3.4 pid=$PID45" "$CATLOG45"
+  kill -9 -- "-$PID45" 2>/dev/null || true
+else
+  assert_pass "TC-LGC4-045: skipped — could not observe the fixture's cwd-scoped pid on this sandbox"
+fi
+rm -rf "$ST45"
+
+E2E_WORKTREE_LIVE="$P3ROOT/e2e-worktree-live-046"
+mkdir -p "$E2E_WORKTREE_LIVE"
+ST46=$(mktemp -d)
+bash -c '
+  source "'"$LIB_LANE"'"
+  export ADT_STATE_ROOT="'"$ST46"'"
+  LANE_ID=$(lane_mint p3 dev 46)
+  LANE_DIR=$(lane_install p3 "$LANE_ID")
+  lane_set "$LANE_DIR" WRAPPER_PID 999999
+  lane_set "$LANE_DIR" WORKTREE "'"$E2E_WORKTREE_LIVE"'"
+'
+(cd "$E2E_WORKTREE_LIVE" && setsid env -u TERM_PROGRAM bash -c "sleep 400" &)
+sleep 0.3
+PID46=$(pgrep -f "sleep 400" | while read -r p; do
+  [[ "$(readlink "/proc/$p/cwd" 2>/dev/null)" == "$E2E_WORKTREE_LIVE" ]] && echo "$p" && break
+done)
+if [[ -n "$PID46" ]]; then
+  SPAWNED_PIDS+=("$PID46")
+  run_gc_dry_full "$ST46" >/dev/null
+  CATLOG46=$(cat "$ST46/adt-gc.log" 2>/dev/null || true)
+  assert_not_contains "TC-LGC4-046: E2E server whose recorded WORKTREE still exists is never swept" "pid=$PID46" "$CATLOG46"
+  kill -9 -- "-$PID46" 2>/dev/null || true
+else
+  assert_pass "TC-LGC4-046: skipped — could not observe the fixture's cwd-scoped pid on this sandbox"
+fi
+rm -rf "$ST46" "$E2E_WORKTREE_LIVE"
 
 # ===========================================================================
 echo ""
@@ -669,6 +1108,45 @@ else
 fi
 kill -9 -- "-${BURNER_PID:-0}" 2>/dev/null || true
 rm -rf "$ST50"
+
+# TC-LGC4-052: same high-CPU-under-.worktrees/*/hooks/ shape, but the lane
+# is DEAD (not live) -> Pass 4 does not consider it at all (Pass 4 is
+# explicitly live-lane-only per its own `lane_probe … == "live"` gate). A
+# dead lane's high-CPU member is Pass 2/3's concern, never Pass 4's — this
+# proves the exclusion behaviorally (two ticks, still no alert) rather than
+# just reading the source.
+ST52=$(mktemp -d)
+HOOKS_DIR52="$TMPROOT/pass4-worktree52/.worktrees/feat-x/hooks"
+mkdir -p "$HOOKS_DIR52"
+LANE52_DIR=$(bash -c '
+  source "'"$LIB_LANE"'"
+  export ADT_STATE_ROOT="'"$ST52"'"
+  LANE_ID=$(lane_mint p4 dev 52)
+  LANE_DIR=$(lane_install p4 "$LANE_ID")
+  lane_set "$LANE_DIR" WRAPPER_PID 999999
+  echo "$LANE_DIR"
+')
+( cd "$HOOKS_DIR52" && setsid bash -c 'exec yes >/dev/null' & disown )
+sleep 0.5
+BURNER52_PID=$(pgrep -f '^yes$' | tail -1)
+if [[ -n "$BURNER52_PID" ]]; then
+  SPAWNED_PIDS+=("$BURNER52_PID")
+  BURNER52_PG=$(bash -c 'source "'"$LIB_LANE"'"; proc_pgid "'"$BURNER52_PID"'"')
+  bash -c '
+    source "'"$LIB_LANE"'"
+    lane_record_pgid "'"$LANE52_DIR"'" "'"$BURNER52_PG"'" agent
+  '
+  sleep 1.5
+  ADT_STATE_ROOT="$ST52" bash "$ADT_GC" --dry-run >/dev/null 2>&1
+  sleep 1.5
+  ADT_STATE_ROOT="$ST52" bash "$ADT_GC" --dry-run >/dev/null 2>&1
+  LOG52=$(cat "$ST52/adt-gc.log" 2>/dev/null || true)
+  assert_not_contains "TC-LGC4-052: a DEAD lane's high-CPU member is never alerted by Pass 4 (live-lane-only gate), even across two ticks" "LIVE_BURNER_ALERT" "$LOG52"
+else
+  assert_pass "TC-LGC4-052: skipped — could not isolate the fixture 'yes' pid on this platform"
+fi
+kill -9 -- "-${BURNER52_PID:-0}" 2>/dev/null || true
+rm -rf "$ST52"
 
 # ===========================================================================
 echo ""
@@ -828,6 +1306,24 @@ rm -rf "$ST90"
 
 OUT92=$(ADT_STATE_ROOT="$(mktemp -d)" _LANE_UNAME_OVERRIDE=Darwin bash "$ADT_GC" --doctor 2>&1)
 assert_contains "TC-LGC4-092: --doctor on simulated macOS reports platform=Darwin" "platform=Darwin" "$OUT92"
+
+# TC-LGC4-091: --doctor with a GC cron marker present (Linux) -> reports
+# "[ok] GC timer installed". A stubbed `crontab -l` (PATH-shimmed ahead of
+# the real binary) echoes a line containing the exact marker substring
+# adt-gc.sh's --doctor greps for.
+TIMERBIN91=$(mktemp -d)
+cat > "$TIMERBIN91/crontab" <<'EOF'
+#!/bin/bash
+if [[ "$1" == "-l" ]]; then
+  echo "*/10 * * * * bash /some/path/adt-gc.sh # adt-gc-timer (autonomous-dev-team Lane-GC series, do not edit — managed by install-gc-timer.sh)"
+  exit 0
+fi
+exit 1
+EOF
+chmod +x "$TIMERBIN91/crontab"
+OUT91=$(PATH="$TIMERBIN91:$PATH" ADT_STATE_ROOT="$(mktemp -d)" bash "$ADT_GC" --doctor 2>&1)
+assert_contains "TC-LGC4-091: --doctor with a GC cron marker present reports [ok] GC timer installed" "[ok]   GC timer installed" "$OUT91"
+rm -rf "$TIMERBIN91"
 
 # Build a PATH containing every binary --doctor needs EXCEPT flock (symlink
 # farm, never a real bin dir like /usr/bin — that would still resolve the
