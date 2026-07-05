@@ -117,6 +117,15 @@ _gl_preflight_check() {
       echo "ERROR: [INV-116] GITLAB_TRANSPORT_HOOK='${hook}' is not readable — cannot source the transport override. Set GITLAB_TRANSPORT_HOOK to a readable file that redefines _gl_http, or unset it to use the default curl transport." >&2
       return 1
     fi
+    # [#416 P1-4] Snapshot _gl_http's BODY BEFORE sourcing the hook, so we
+    # can prove the hook actually overrode it after. `declare -F _gl_http`
+    # alone only checks EXISTENCE — but the default is already defined at
+    # this point, so a no-op hook (empty file, syntax error suppressed by
+    # a rogue `|| true`, or a file that just re-exports env vars) would
+    # pass a mere existence check and masquerade as the default transport.
+    # Codex round-1 [P1-4]: capture body pre-source, require CHANGE post.
+    local _pre_body _post_body
+    _pre_body=$(declare -f _gl_http 2>/dev/null || true)
     # Source in the current shell so a redefined _gl_http survives.
     # shellcheck disable=SC1090
     source "$hook" || {
@@ -128,6 +137,17 @@ _gl_preflight_check() {
     # pillar 3); only the public override point is validated.
     if ! declare -F _gl_http >/dev/null 2>&1; then
       echo "ERROR: [INV-116] GITLAB_TRANSPORT_HOOK='${hook}' did not define _gl_http (the only public override point). Redefine _gl_http with signature: _gl_http <method> <path-or-url> <headers_out_file> [body-json]." >&2
+      return 1
+    fi
+    _post_body=$(declare -f _gl_http 2>/dev/null || true)
+    # [#416 P1-4] Loud rejection of a no-op hook: if the body did not
+    # change post-source, the hook is armed but does nothing — either a
+    # typo, a suppressed error, or an operator misconfiguration. Fail
+    # LOUD naming the hook path so the operator can fix it rather than
+    # silently running against the default transport under a hook-armed
+    # config that says "we're on the enterprise gateway".
+    if [[ "$_pre_body" == "$_post_body" ]]; then
+      echo "ERROR: [INV-116] GITLAB_TRANSPORT_HOOK='${hook}' is armed but did NOT redefine _gl_http (body identical pre- and post-source). A no-op hook is a misconfiguration — either the hook file has a syntax error suppressed by a stray '|| true', or it never assigns the function. Redefine _gl_http in the hook, or unset GITLAB_TRANSPORT_HOOK to use the default curl transport." >&2
       return 1
     fi
   else
@@ -349,8 +369,17 @@ _gl_api() {
     local attempt=0 http_rc
     while :; do
       : > "$hdr_file"
-      _gl_http "$method" "$target" "$hdr_file" "$body_json" > "$body_file"
-      http_rc=$?
+      # [#416 P1-3] `set -e`-SAFE _gl_http call: a bare
+      #   `_gl_http … > "$body_file"; http_rc=$?`
+      # would abort the CALLING shell under `set -euo pipefail` on a
+      # transport failure BEFORE http_rc/`_record_status`/`--status-out`
+      # mirroring ran. The `cmd || rc=$?` construct classifies the call
+      # as tested (bash's `set -e` skips exit on tested commands) AND
+      # preserves the ACTUAL non-zero rc (`if ! cmd; then rc=$?` is a
+      # trap — `!` inverts, so `$?` under `then` is 0, not cmd's rc).
+      # Codex round-1 [P1-3].
+      http_rc=0
+      _gl_http "$method" "$target" "$hdr_file" "$body_json" > "$body_file" || http_rc=$?
       if [[ "$http_rc" -ne 0 ]]; then
         return 1
       fi
@@ -380,7 +409,11 @@ _gl_api() {
 
   # Non-paginate path: one request, honor tolerate-status.
   if [[ "$paginate" -eq 0 ]]; then
-    _do_request_with_backoff "$path"; rc=$?
+    # [#416 P1-3] `set -e`-SAFE: `cmd || rc=$?` (see above rationale — the
+    # `if !` pattern DROPS the actual rc because `!` inverts to 0, so
+    # under `then` `$?` is always 0).
+    rc=0
+    _do_request_with_backoff "$path" || rc=$?
     if [[ "$rc" -eq 1 ]]; then
       echo "ERROR: [INV-116] _gl_api transport failure on '${path}' (curl exit non-zero)." >&2
       _cleanup; return 1
@@ -414,7 +447,9 @@ _gl_api() {
   local walk_rc=0
 
   while :; do
-    _do_request_with_backoff "$next_url"; local req_rc=$?
+    # [#416 P1-3] `set -e`-SAFE (paginate loop) — same fix as above.
+    local req_rc=0
+    _do_request_with_backoff "$next_url" || req_rc=$?
     if [[ "$req_rc" -ne 0 ]]; then
       if [[ "$req_rc" -eq 1 ]]; then
         echo "ERROR: [INV-116] _gl_api transport failure mid-walk on '${next_url}'." >&2

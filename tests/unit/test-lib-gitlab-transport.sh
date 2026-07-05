@@ -209,17 +209,34 @@ out=$(_run_with_lib '_gl_api /projects/1/issues/42' 2>&1); rc=$?
 assert_rc_nonzero "TC-GLT-002: unreadable hook path → rc != 0" "$rc"
 assert_contains "TC-GLT-002: message names the unreadable path" "/no/such/gitlab-hook-file.sh" "$out"
 
+# TC-GLT-003 (codex round-1 [P1-4]): a hook that does NOT redefine _gl_http
+# must FAIL preflight, even though the default _gl_http is already defined
+# by the lib. Pre-P1-4 the test masked this by `unset -f _gl_http` before
+# the call — that mask is REMOVED now (the fix must not require an
+# artificial pre-condition to fire). The preflight snapshots the pre-source
+# body and requires the post-source body to differ.
 _reset_control
 hook_no_glhttp="$WORK/hook-no-glhttp.sh"
 cat > "$hook_no_glhttp" <<'EOF'
 # Hook that does NOT redefine _gl_http (defines an unrelated function only).
 _some_unrelated_helper() { echo "helper"; }
 EOF
-# Deliberately UNDEF _gl_http so the default in-lib def doesn't cover this.
 export GITLAB_TRANSPORT_HOOK="$hook_no_glhttp"
-out=$(_run_with_lib 'unset -f _gl_http 2>/dev/null; _gl_api /projects/1/issues/42' 2>&1); rc=$?
-assert_rc_nonzero "TC-GLT-003: hook that fails to define _gl_http → rc != 0" "$rc"
-assert_contains "TC-GLT-003: message names _gl_http" "_gl_http" "$out"
+# NOTE: no `unset -f _gl_http` — the default is left in place, matching
+# the real-world condition the P1-4 fix targets.
+out=$(_run_with_lib '_gl_api /projects/1/issues/42' 2>&1); rc=$?
+assert_rc_nonzero "TC-GLT-003: hook that does NOT redefine _gl_http (default still in place) → rc != 0" "$rc"
+assert_contains "TC-GLT-003: message names the hook path" "$hook_no_glhttp" "$out"
+assert_contains "TC-GLT-003: message explains the no-op-hook failure" "did NOT redefine _gl_http" "$out"
+
+# TC-GLT-003b (P1-4 regression): an empty hook file also fails preflight.
+_reset_control
+hook_empty="$WORK/hook-empty.sh"
+: > "$hook_empty"
+export GITLAB_TRANSPORT_HOOK="$hook_empty"
+out=$(_run_with_lib '_gl_api /projects/1/issues/42' 2>&1); rc=$?
+assert_rc_nonzero "TC-GLT-003b: empty hook file → rc != 0 (no-op hook rejected)" "$rc"
+assert_contains "TC-GLT-003b: message names hook path" "$hook_empty" "$out"
 
 # TC-GLT-004: preflight latched — 2 _gl_api calls emit preflight log once.
 _reset_control
@@ -575,6 +592,73 @@ if jq -e '(type == "array" and .[0].canned == true) or (type == "object" and .ca
   ok "TC-GLT-063: hook + --paginate body preserved (semantic canned:true)"
 else
   bad "TC-GLT-063: hook + --paginate body missing canned:true (out: ${out:0:200})"
+fi
+
+# ===========================================================================
+echo ""
+echo "=== TC-GLT-070..071: set -e safety — transport failure inside _gl_api under set -euo pipefail (P1-3) ==="
+# ===========================================================================
+# [#416 P1-3] Codex round-1 [P1-3]: pre-fix, `_gl_http … > "$body_file"`
+# inside `_do_request_with_backoff` was a bare simple command — under a
+# caller's `set -euo pipefail` a curl-rc-non-zero transport failure aborts
+# the CALLING shell before http_rc/`_record_status`/`--status-out`
+# mirroring runs. Fix: `if ! _gl_http …; then http_rc=$?; else http_rc=0;
+# fi` — bash `set -e` skips exit on tested commands, so the caller shell
+# survives and `_gl_api` returns rc≠0 cleanly.
+
+# TC-GLT-070: source lib + call _gl_api under set -euo pipefail; simulate
+# transport failure (curl rc 6). The caller shell MUST reach the SURVIVED
+# marker AFTER the failing _gl_api call.
+_reset_control
+_CURL_RC=6
+export _CURL_RC
+
+driver_p1_3="$WORK/driver-p1-3-strict.sh"
+cat > "$driver_p1_3" <<DRV
+#!/bin/bash
+set -euo pipefail
+source "$LIB"
+_gl_api /projects/1/issues/42 > /dev/null 2>&1 && rc_captured=0 || rc_captured=\$?
+printf 'rc_captured=%s\n' "\$rc_captured"
+printf 'SURVIVED\n'
+exit 0
+DRV
+out=$(env -u PROJECT_DIR PATH="$ISOLATED_PATH" "GITLAB_TOKEN=$GITLAB_TOKEN" "GITLAB_HOST=$GITLAB_HOST" \
+      "_CURL_ARGV_FILE=$_CURL_ARGV_FILE" "_CURL_STATUS_SEQ=" "_CURL_BODY_SEQ=" "_CURL_HDR_EXTRA_SEQ=" \
+      "_CURL_INVOKE_STATE=$_CURL_INVOKE_STATE" "_CURL_RC=6" "_SLEEP_LOG_FILE=$_SLEEP_LOG_FILE" \
+      bash "$driver_p1_3" 2>&1); rc=$?
+assert_eq "TC-GLT-070: caller shell SURVIVED under set -euo pipefail" "0" "$rc"
+assert_contains "TC-GLT-070: reached the post-failure marker" "SURVIVED" "$out"
+assert_contains "TC-GLT-070: _gl_api returned non-zero to the caller" "rc_captured=1" "$out"
+
+# TC-GLT-071: same shape but with --status-out to prove the mirror-write
+# path is reachable past the bare-command failure point.
+_reset_control
+_CURL_RC=6
+export _CURL_RC
+status_out_p1_3="$WORK/status-out-p1-3.txt"
+: > "$status_out_p1_3"
+
+driver_p1_3b="$WORK/driver-p1-3-status.sh"
+cat > "$driver_p1_3b" <<DRV
+#!/bin/bash
+set -euo pipefail
+source "$LIB"
+_gl_api --status-out "$status_out_p1_3" /projects/1/issues/42 > /dev/null 2>&1 && rc_captured=0 || rc_captured=\$?
+printf 'rc_captured=%s\n' "\$rc_captured"
+printf 'SURVIVED\n'
+exit 0
+DRV
+out=$(env -u PROJECT_DIR PATH="$ISOLATED_PATH" "GITLAB_TOKEN=$GITLAB_TOKEN" "GITLAB_HOST=$GITLAB_HOST" \
+      "_CURL_ARGV_FILE=$_CURL_ARGV_FILE" "_CURL_STATUS_SEQ=" "_CURL_BODY_SEQ=" "_CURL_HDR_EXTRA_SEQ=" \
+      "_CURL_INVOKE_STATE=$_CURL_INVOKE_STATE" "_CURL_RC=6" "_SLEEP_LOG_FILE=$_SLEEP_LOG_FILE" \
+      bash "$driver_p1_3b" 2>&1); rc=$?
+assert_eq "TC-GLT-071: caller SURVIVED with --status-out on transport failure" "0" "$rc"
+assert_contains "TC-GLT-071: post-failure marker reached" "SURVIVED" "$out"
+if [[ -f "$status_out_p1_3" ]]; then
+  ok "TC-GLT-071: --status-out file exists (was reachable past the bare-command failure point)"
+else
+  bad "TC-GLT-071: --status-out file was never created (pre-P1-3 short-circuit?)"
 fi
 
 # ===========================================================================
