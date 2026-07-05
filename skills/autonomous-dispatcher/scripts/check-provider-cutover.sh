@@ -738,11 +738,19 @@ echo "=== Check 6: no '/api/v4' curl outside providers/lib-gitlab-transport.sh (
 #       different line  — gitlab_api_var_and_curl_lines_in (P2-6).
 # (b) is documented BOUND: file-level; matches only "same VAR name in
 # both places"; indirect flows still bypass (review-gate territory).
+#
+# [#421] providers/prompts-gitlab.sh additionally excluded: its `curl
+# .../api/v4/...` lines are AGENT-FACING PROSE (printf template strings
+# inside _PP_GITLAB_FRAGMENT, each explicitly labeled "reference, not a
+# requirement") — never executed by the wrapper. This detector targets
+# EXECUTABLE curl invocations that bypass _gl_api's pagination/backoff/
+# fail-closed choke-point (#416 R1); a string literal an agent may or may
+# not choose to run is not that.
 _v4_hits=0
 while IFS= read -r rel; do
   [ -z "$rel" ] && continue
   case "$rel" in
-    providers/lib-gitlab-transport.sh) continue ;;
+    providers/lib-gitlab-transport.sh|providers/prompts-gitlab.sh) continue ;;
   esac
   in_list "$rel" "${ALLOWLISTED_FILES[@]}" && continue
   # (a) same-line

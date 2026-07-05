@@ -203,6 +203,21 @@ are unchanged), falling back to the raw `gh pr create` if the verb is
 unavailable. The review-bot trigger broker (`drain_agent_bot_triggers`) likewise
 routes through `chp_trigger_bot` ([INV-87], #282).
 
+## Agent-prompt fragments — provider-aware prose (#421, [`provider-spec.md`](provider-spec.md) §prompts)
+
+The prompt builders' agent-facing PROSE (open-PR-fast-path instructions, the
+PR-create credential-broker block, the resume-mode auto-merge-failure rebase
+note, the "read the issue body" instruction) is rendered through
+`provider_prompt_fragment <key> [args...]` (`lib-provider-prompts.sh`, sourced
+BEFORE `lib-review-bots.sh`) instead of hardcoded GitHub English — a
+`gh pr create`/`gh issue view` mention is only correct advice when
+`CODE_HOST`/`ISSUE_PROVIDER` is actually `github`. GitHub rendering is
+byte-identical to the pre-#421 prose (golden-pinned); a non-GitHub backend
+renders API-neutral phrasing from `providers/prompts-gitlab.sh`. This is
+DISTINCT from [INV-91]'s cutover guard above — that guard covers the
+EXECUTABLE `gh` calls the wrapper itself makes; this covers what the wrapper
+TELLS the agent to run.
+
 ## Path resolution lessons (#58)
 
 `lib-agent.sh` and `lib-auth.sh` use `readlink -f $BASH_SOURCE` to find their own dir, which **breaks the symlink-vendor pattern** consumer projects use (symlinking from `<project>/scripts/lib-agent.sh` into `.claude/skills/.../lib-agent.sh`). After `readlink -f`, the script's idea of "its own dir" is the skill installation dir, not the project's `scripts/` — and the autonomous.conf lookup misses.

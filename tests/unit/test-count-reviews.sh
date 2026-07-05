@@ -282,17 +282,27 @@ fi
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== TC-CRBL-030: PRIMARY source-shape — the 3 surviving gh-reviews lines are the PROSE/heredoc ones ==="
+echo "=== TC-CRBL-030: PRIMARY source-shape — the 3 prose gh-reviews lines moved to providers/prompts-github.sh (#421) ==="
 # ---------------------------------------------------------------------------
-# Match the prose context (the heredoc `COUNT=\$(gh api …/reviews` line — the `\$`
-# is a literal backslash-dollar because the prompt block is inside a `cat <<EOF`),
-# NOT a bare grep -c that a code comment would trip. Today there are exactly 3 such
-# heredoc lines (the scoped + unscoped prompt blocks at :231/:273/:284).
-prose_count=$(grep -cE 'COUNT=\\\$\(gh api repos/' "$LIB_BOTS")
-if [[ "$prose_count" -eq 3 ]]; then
-  assert_pass "lib-review-bots.sh keeps exactly the 3 prose heredoc gh-reviews lines (COUNT=\$(gh api …)"
+# #421 (#414 W-F) parameterized the agent-prompt PROSE (including this
+# lib's 3 heredoc `COUNT=$(gh api …/reviews` lines) behind
+# provider_prompt_fragment, moving the literal text OUT of lib-review-bots.sh
+# INTO providers/prompts-github.sh (the migration target, excluded from the
+# cutover-guard scan like every other verb leaf). lib-review-bots.sh now
+# carries ZERO raw-gh lines — it calls the fragment helper instead.
+if ! grep -qE 'COUNT=\$\(gh api repos/|COUNT=\\\$\(gh api repos/' "$LIB_BOTS" \
+   && grep -qF 'provider_prompt_fragment bots.review_count_check' "$LIB_BOTS"; then
+  assert_pass "lib-review-bots.sh no longer carries the literal gh-reviews prose; calls provider_prompt_fragment instead"
 else
-  assert_fail "expected 3 prose heredoc gh-reviews lines, found $prose_count"
+  assert_fail "lib-review-bots.sh still carries the literal prose OR is missing the provider_prompt_fragment call"
+fi
+# The 3 occurrences (fenced + fenced + bare variants, argc=3) live in the
+# github fragment file with the SAME COUNT=$(gh api repos/… shape.
+prose_count=$(grep -cE 'COUNT=\$\(gh api repos/' "$SCRIPTS/providers/prompts-github.sh")
+if [[ "$prose_count" -eq 2 ]]; then
+  assert_pass "providers/prompts-github.sh carries the migrated gh-reviews prose templates (bots.review_count_check + _bare)"
+else
+  assert_fail "expected 2 COUNT=\$(gh api repos/… templates in providers/prompts-github.sh, found $prose_count"
 fi
 
 # ---------------------------------------------------------------------------
@@ -344,30 +354,35 @@ fi
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== TC-CRBL-034: baseline-delta — leaf entry removed, COUNT=3 prose entry intact ==="
+echo "=== TC-CRBL-034: baseline-delta — leaf entry removed AND the prose entry now gone too (#421 fully migrated it) ==="
 # ---------------------------------------------------------------------------
 # Only the migration-ROBUST invariants are pinned here: the migrated leaf's
-# wire-string is GONE, and the 3-prose entry is unchanged. The absolute baseline
-# TOTAL is deliberately NOT pinned (#349/#342 precedent, test-reply-review-comment.sh
-# TC-RRC-033): the total moves with EVERY sibling #296 second-tier migration that
-# independently shrinks the shared baseline, so an absolute pin here goes red on any
-# concurrent shrinking PR — coverage this test does not own and cannot keep current
-# without a re-pin per sibling merge. The total is already guarded, robustly, by
-# check-provider-cutover.sh in the CI `spec-drift` job: Check 1 reconciles the whole
-# tree against the baseline and Check 4 (--require-trusted-ref, strict in CI)
-# enforces shrink-only monotonicity vs origin/main. An absolute-total assertion here
-# would add NO unique coverage.
+# wire-string is GONE. #421 (#414 W-F) additionally migrated the COUNT=3
+# prose entry itself OUT of lib-review-bots.sh (into providers/prompts-github.sh,
+# which is excluded from the baseline scan) — so lib-review-bots.sh now has
+# ZERO surviving baseline entries, not one. The absolute baseline TOTAL is
+# deliberately NOT pinned (#349/#342 precedent, test-reply-review-comment.sh
+# TC-RRC-033): the total moves with EVERY sibling migration that independently
+# shrinks the shared baseline, so an absolute pin here goes red on any
+# concurrent shrinking PR — coverage this test does not own and cannot keep
+# current without a re-pin per sibling merge. The total is already guarded,
+# robustly, by check-provider-cutover.sh in the CI `spec-drift` job: Check 1
+# reconciles the whole tree against the baseline and Check 4
+# (--require-trusted-ref, strict in CI) enforces shrink-only monotonicity vs
+# origin/main. An absolute-total assertion here would add NO unique coverage.
 if ! command -v jq >/dev/null 2>&1; then
   assert_fail "jq required for the baseline-delta pin"
 else
   # The migrated leaf's wire-string (trimmed content key) MUST be absent.
   leaf_entries=$(jq '[.surviving_sites[] | select(.file=="lib-review-bots.sh" and (.content | test("count=\\$\\(gh api")))] | length' "$BASELINE")
-  # The 3-prose entry (count:3) must remain unchanged.
-  prose_entry=$(jq '[.surviving_sites[] | select(.file=="lib-review-bots.sh" and .count==3 and (.content | test("COUNT=")))] | length' "$BASELINE")
-  if [[ "$leaf_entries" -eq 0 && "$prose_entry" -eq 1 ]]; then
-    assert_pass "baseline: leaf entry gone, the COUNT=3 prose entry intact"
+  # #421: the COUNT=3 prose entry is now ALSO gone (fully migrated to
+  # providers/prompts-github.sh) — lib-review-bots.sh carries NO baseline
+  # entries at all.
+  lib_bots_entries=$(jq '[.surviving_sites[] | select(.file=="lib-review-bots.sh")] | length' "$BASELINE")
+  if [[ "$leaf_entries" -eq 0 && "$lib_bots_entries" -eq 0 ]]; then
+    assert_pass "baseline: leaf entry gone AND lib-review-bots.sh has zero surviving entries (#421 fully migrated the prose too)"
   else
-    assert_fail "baseline-delta wrong: leaf_entries=$leaf_entries (want 0) prose_entry=$prose_entry (want 1)"
+    assert_fail "baseline-delta wrong: leaf_entries=$leaf_entries (want 0) lib_bots_entries=$lib_bots_entries (want 0)"
   fi
 fi
 

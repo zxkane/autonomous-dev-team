@@ -29,6 +29,13 @@ NC='\033[0m'
 # seam-source meta-check, test-seam-source-meta.sh).
 # shellcheck source=../../skills/autonomous-dispatcher/scripts/lib-code-host.sh
 source "$SCRIPTS_DIR/lib-code-host.sh"
+# [#421] lib-review-bots.sh's render_bot_review_section() calls
+# provider_prompt_fragment — source it BEFORE lib-review-bots.sh, mirroring
+# the wrappers' own source order.
+# shellcheck source=../../skills/autonomous-dispatcher/scripts/lib-provider-prompts.sh
+source "$SCRIPTS_DIR/lib-provider-prompts.sh"
+CODE_HOST=github
+ISSUE_PROVIDER=github
 # shellcheck source=../../skills/autonomous-dispatcher/scripts/lib-review-bots.sh
 source "$LIB"
 

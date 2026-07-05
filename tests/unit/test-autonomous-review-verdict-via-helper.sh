@@ -75,11 +75,12 @@ assert_grep_count_ge "TC-PVP-01/02 post-verdict.sh referenced for both Decision 
   'scripts/post-verdict\.sh' 2
 
 # TC-PVP-04: the prompt explicitly forbids a bare `gh issue comment` for the
-# verdict. Match loosely on "NOT ... bare `gh issue comment`" (tolerates the
-# markdown bold `**NOT**`, an intervening "use a"/"hand-roll a", and the
-# escaped backticks around `gh issue comment`).
-assert_fn_grep "TC-PVP-04 forbids bare 'gh issue comment' for the verdict" \
-  'NOT.*bare .{0,3}gh issue comment'
+# verdict. #421 moved this prose behind provider_prompt_fragment
+# (review.verdict_no_bare_issue_comment / review.codex_do_not_hand_roll) —
+# assert the SOURCE calls those fragment keys; TC-PVP-06b below asserts the
+# RENDERED text still says "NOT ... bare gh issue comment" for github.
+assert_fn_grep "TC-PVP-04 forbids bare 'gh issue comment' for the verdict (via provider_prompt_fragment)" \
+  'provider_prompt_fragment review\.(verdict_no_bare_issue_comment|codex_do_not_hand_roll)'
 
 # TC-PVP-05: first-line phrasing preserved (poller match unchanged).
 assert_fn_grep "TC-PVP-05a 'Review PASSED' phrasing preserved" 'Review PASSED'
@@ -104,8 +105,15 @@ _RESOLVE_LIB="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-review-reso
 # #355: _verdict_body_lane_dir (the D1 lane-dir provisioner build_review_prompt's
 # legacy-caller fallback calls) lives in lib-review-artifact.sh.
 _ARTIFACT_LIB="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-review-artifact.sh"
+# [#421] build_review_prompt's fragment call sites need provider_prompt_fragment
+# defined + CODE_HOST/ISSUE_PROVIDER set — source the real lib in the sandbox
+# (mirrors the wrappers' own source order, BEFORE lib-review-bots.sh).
+_PROVIDER_PROMPTS_LIB="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-provider-prompts.sh"
 SANDBOX_OUT=$(
   set +e
+  source "$_PROVIDER_PROMPTS_LIB"
+  CODE_HOST=github
+  ISSUE_PROVIDER=github
   render_bot_review_section() { :; }
   _revalidate_ac_coverage_file() { printf ''; }
   gh() {

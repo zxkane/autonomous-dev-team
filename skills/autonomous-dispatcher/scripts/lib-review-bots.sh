@@ -240,10 +240,7 @@ EOF
 
 Steps:
 1. Check if a review by this bot already exists on this PR:
-   \`\`\`bash
-   COUNT=\$(gh api repos/${repo}/pulls/${pr_number}/reviews \\
-     --jq '[.[] | select(.user.login == "${login}")] | length')
-   \`\`\`
+   $(provider_prompt_fragment bots.review_count_check "${repo}" "${pr_number}" "${login}")
 2. If COUNT > 0, the bot already reviewed — read its inline comments and verify
    all threads are resolved, then proceed.
 3. If COUNT is 0, the bot has not reviewed yet. APPEND the trigger phrase to the
@@ -282,10 +279,7 @@ EOF
 
 Steps:
 1. Check if a review by this bot already exists on this PR:
-   \`\`\`bash
-   COUNT=\$(gh api repos/${repo}/pulls/${pr_number}/reviews \\
-     --jq '[.[] | select(.user.login == "${login}")] | length')
-   \`\`\`
+   $(provider_prompt_fragment bots.review_count_check "${repo}" "${pr_number}" "${login}")
 2. If COUNT is 0, trigger the bot via gh-as-user.sh:
    \`\`\`bash
    bash scripts/gh-as-user.sh pr comment ${pr_number} --body "${trigger}"
@@ -294,8 +288,7 @@ Steps:
    \`\`\`bash
    for i in {1..6}; do
      sleep 30
-     COUNT=\$(gh api repos/${repo}/pulls/${pr_number}/reviews \\
-       --jq '[.[] | select(.user.login == "${login}")] | length')
+     $(provider_prompt_fragment bots.review_count_check_bare "${repo}" "${pr_number}" "${login}")
      if [[ "\$COUNT" -gt 0 ]]; then break; fi
    done
    \`\`\`

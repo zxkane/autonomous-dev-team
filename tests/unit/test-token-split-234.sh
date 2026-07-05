@@ -542,8 +542,12 @@ else
   assert_fail "fast path: scoped branch does NOT route through the broker (still bare gh pr create — [P1] #2)"
 fi
 # The unscoped branch still instructs a direct `gh pr create` (PAT / no-scope).
-if awk '/emit_open_pr_fast_path_block\(\)/,/^}/' "$DEV_SH" | grep -q 'run .*gh pr create'; then
-  assert_pass "fast path: unscoped branch keeps direct gh pr create (PAT/no-scope unchanged)"
+# #421: the literal text now renders via provider_prompt_fragment
+# dev.pr_create_direct_step (github: "run `gh pr create` with a generated"),
+# golden-pinned byte-identical by test-provider-prompts-github-golden.sh — the
+# SOURCE line calls the fragment key, not the literal string.
+if awk '/emit_open_pr_fast_path_block\(\)/,/^}/' "$DEV_SH" | grep -q 'provider_prompt_fragment dev\.pr_create_direct_step'; then
+  assert_pass "fast path: unscoped branch keeps direct gh pr create (via provider_prompt_fragment, PAT/no-scope unchanged)"
 else
   assert_fail "fast path: unscoped branch lost its direct gh pr create"
 fi
