@@ -3314,10 +3314,146 @@ handle_pending_dev_pr_exists() {
       return 0
     fi
 
-    # Residual park: no resolvable session id, or a session that is not
-    # `completed` per `is_session_completed` (a live/crashed wrapper — Step 5
-    # owns liveness — or a non-claude dev CLI whose log has no `{"type":"result"}`
-    # line, which returns false BY DESIGN). Surface the stale verdict and keep
+    # [INV-111] (#402) Self-heal: a review-FAIL against this HEAD with NO
+    # resolvable session id at all is the exact signature of a dev wrapper
+    # that lost its `Dev Session ID:` / session-report comment mid-cleanup
+    # (e.g. its per-run auth shim dir vanished before the report post —
+    # see [INV-111] in autonomous-dev.sh's cleanup()). Without a session id,
+    # the INV-98 delegation above can never fire (it requires one to call
+    # `is_session_completed`/`handle_completed_session_routing`), so the
+    # residual park below would hold this issue in `pending-dev` forever —
+    # every 5-minute tick a silent no-op.
+    #
+    # Only engage when NO dev wrapper is alive for this issue (`may_stall_now`
+    # — the shared [INV-24]/[INV-26]-style `pid_alive`-miss + no-fresh-
+    # dispatch-marker predicate): a live wrapper may still be about to post
+    # its own session id, and this must never race a healthy wrapper into a
+    # duplicate dev-new. A session id THAT DID resolve but whose session is
+    # not `completed` (a live/crashed wrapper with a normally-posted id) is
+    # a different bug shape and stays on the pre-existing residual-park path
+    # below, unchanged.
+    #
+    # Bounded per-HEAD via a persistent marker (INV-85 pattern), posted only
+    # AFTER a dev-new is actually dispatched — never up-front — so an
+    # aborted dispatch attempt can't leave a phantom marker that stalls the
+    # NEXT tick's retry. [INV-108] gates the dispatch itself so a concurrent
+    # tick racing this same (issue, dev-new) can't double-dispatch.
+    if [ -z "$_sid" ] && may_stall_now "$issue_num"; then
+      # [INV-111] (#402 review round-1 [P1] finding 2) Verdict-aware routing:
+      # classify the newest post-review verdict comment BEFORE ever
+      # dispatching a self-heal dev-new — without this, a `failed-non-
+      # substantive` (bot/CI/transport hiccup, code is fine) or a
+      # `dev-actionable=false` (every blocking finding needs a human /
+      # privileged token) verdict would be treated exactly like a genuine
+      # substantive code failure, wasting a dev-new the agent can never use
+      # to satisfy either. This is the SAME classifier
+      # `handle_completed_session_routing` uses (the INV-35 router) — the
+      # self-heal branch needs the same verdict-routing semantics, just
+      # without a session id to scope markers/counters to (there is none;
+      # that is the whole reason this branch exists).
+      #
+      # session_end_iso="" (no session to anchor to): every ISO-8601
+      # timestamp string sorts lexicographically greater than "", so the
+      # classifier's `createdAt > session_end` filter admits the full
+      # comment history and returns the newest qualifying verdict trailer —
+      # on this same-HEAD branch, that IS the trailer that put the issue in
+      # `pending-dev` to begin with.
+      local _sh_verdict="" _sh_cause="" _sh_dev_actionable="true"
+      classify_recent_review_verdict "$issue_num" "" _sh_verdict _sh_cause _sh_dev_actionable
+
+      # [INV-92] dev-actionable=false can only accompany a failed-substantive
+      # trailer (classify_recent_review_verdict's own contract), so checking
+      # it ahead of the verdict switch below is behaviorally equivalent to
+      # nesting it inside a `failed-substantive)` arm — same decision, one
+      # fewer branch.
+      if [ "$_sh_dev_actionable" = "false" ]; then
+        local _sh_na_marker="self-heal-non-actionable:${current_head}"
+        log "  issue #${issue_num} self-heal same-HEAD branch: verdict is NOT dev-agent-actionable ([INV-92]) with no resolvable session id — escalating to operator, no dev-new"
+        if itp_list_comments "$issue_num" 2>/dev/null \
+            | jq -r "[.[].body | select(contains(\"${_sh_na_marker}\"))] | length" \
+            2>/dev/null | grep -q '^0$'; then
+          itp_post_comment "$issue_num" \
+            "PR ${pr_ref} HEAD \`${current_head}\` was reviewed with a FAILED verdict that classified every blocking finding as **not resolvable by the autonomous dev agent** (requires a human or a privileged token the agent's scoped token lacks, [INV-92]), and no \`Dev Session ID:\` could be resolved for the prior dev session. Marking stalled — no \`dev-new\` will be dispatched. @${REPO_OWNER} please apply the change manually. (\`${_sh_na_marker}\`)"
+        fi
+        mark_stalled "$issue_num"
+        return 0
+      fi
+
+      case "$_sh_verdict" in
+      passed)
+        # Race: a `passed` verdict landed but the issue is still `pending-dev`
+        # (operator flip / label-edit race). Mirrors
+        # handle_completed_session_routing's own `passed` branch — don't
+        # dispatch anything, let Step 0 hygiene reconcile next tick.
+        log "  WARN: issue #${issue_num} self-heal same-HEAD branch: verdict=passed with no resolvable session id (race) — no-op, Step 0 will reconcile"
+        return 0
+        ;;
+      failed-non-substantive)
+        # The code is fine; the REVIEW side hiccuped (bot timeout / CI
+        # transport). Re-review instead of burning a dev-new. Bounded
+        # per-HEAD (not per-session — there is no session id to scope a
+        # flip-count to): retried at most once for this HEAD; a second
+        # same-HEAD non-substantive verdict with the session id still
+        # unresolved falls through to the residual stale-verdict park below
+        # instead of looping pending-review↔pending-dev forever.
+        local _sh_ns_marker="self-heal-non-substantive:${current_head}"
+        local _sh_ns_present
+        _sh_ns_present=$(itp_list_comments "$issue_num" 2>/dev/null \
+          | jq -r "[.[].body | select(contains(\"${_sh_ns_marker}\"))] | length" 2>/dev/null)
+        if [ "${_sh_ns_present:-1}" = "0" ]; then
+          log "  issue #${issue_num} self-heal same-HEAD branch: non-substantive review failure (cause=${_sh_cause}) with no resolvable session id — re-routing to pending-review, no dev-new"
+          itp_post_comment "$issue_num" \
+            "PR ${pr_ref} HEAD \`${current_head}\` was reviewed with a non-substantive FAILED verdict (cause=\`${_sh_cause}\`), and no \`Dev Session ID:\` could be resolved for the prior dev session. Re-routing to review rather than dispatching a fresh dev session. (\`${_sh_ns_marker}\`)"
+          label_swap "$issue_num" "pending-dev" "pending-review"
+          return 0
+        fi
+        # Marker already present — already retried once; fall through to the
+        # residual stale-verdict park (below, outside this whole `if`), NOT
+        # the dev-new dispatch (a non-substantive verdict is never resolved
+        # by a dev-new).
+        ;;
+      *)
+        # failed-substantive (dev-actionable=true), or "none" (no
+        # classifiable verdict comment found at all — fail OPEN toward the
+        # pre-existing self-heal behavior, same posture
+        # classify_recent_review_verdict's own legacy no-trailer fallback
+        # takes). Proceed with the bounded dev-new self-heal dispatch.
+        local _sh_marker="self-heal-lost-session:${current_head}"
+        local _sh_present
+        _sh_present=$(itp_list_comments "$issue_num" 2>/dev/null \
+          | jq -r "[.[].body | select(contains(\"${_sh_marker}\"))] | length" 2>/dev/null)
+        if [ "${_sh_present:-1}" = "0" ]; then
+          if ! acquire_dispatch_marker "$issue_num" "dev-new"; then
+            log "  issue #${issue_num} self-heal dev-new dispatch marker held by a concurrent tick — skipping ([INV-108])"
+          else
+            log "  issue #${issue_num} PR ${pr_ref} HEAD \`${current_head}\` reviewed FAILED with NO resolvable session id and no live wrapper — self-healing with a fresh dev-new ([INV-111])"
+            if ! label_swap "$issue_num" "pending-dev" "in-progress" ||
+               ! post_dispatch_token "$issue_num" "dev-new" ||
+               ! dispatch dev-new "$issue_num"; then
+              log "  ERROR: self-heal dev-new pre-spawn step failed for issue #${issue_num} (label/token/dispatch) — releasing the dispatch marker; next tick retries ([INV-108])."
+              release_dispatch_marker "$issue_num" "dev-new"
+              return 0
+            fi
+            dispatch_marker_confirm_launched "$issue_num" "dev-new"
+            itp_post_comment "$issue_num" \
+              "PR ${pr_ref} HEAD \`${current_head}\` was reviewed with a FAILED verdict, but no \`Dev Session ID:\` could be resolved for the prior dev session (its session-report comment was likely lost — e.g. a mid-cleanup auth-teardown race) and no dev wrapper is currently running. Self-healing: dispatching a fresh dev session rather than parking indefinitely. (\`${_sh_marker}\`)"
+            return 0
+          fi
+        fi
+        # Marker already present (a self-heal dev-new already ran for this
+        # HEAD and made no progress) — fall through to the residual park below
+        # so MAX_RETRIES remains the eventual backstop instead of looping
+        # self-heal dev-new forever against an unchanged HEAD.
+        ;;
+      esac
+    fi
+
+    # Residual park: no resolvable session id (self-heal above either does
+    # not apply — a wrapper is alive — or already made its one bounded
+    # attempt for this HEAD), or a session that is not `completed` per
+    # `is_session_completed` (a live/crashed wrapper — Step 5 owns liveness
+    # — or a non-claude dev CLI whose log has no `{"type":"result"}` line,
+    # which returns false BY DESIGN). Surface the stale verdict and keep
     # pending-dev.
     #
     # Idempotency check uses `grep -q '^0$'` (fail-closed): a transient

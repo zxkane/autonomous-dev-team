@@ -830,57 +830,40 @@ EOF
     fi
   fi
 
-  # [INV-79] PR-create broker: if the scoped agent token is armed and the agent
-  # wrote a PR title+body (it cannot `gh pr create` with pull_requests:read),
-  # open the PR now with the wrapper's full-write token — BEFORE the PR_EXISTS
-  # lookup below so a brokered create routes the success path to pending-review.
-  # No-op when scoping is off or the agent already created the PR directly.
-  drain_agent_pr_create "$ISSUE_NUMBER" "$REPO" || true
+  # [INV-111] (#402 review round-1 [P1]) `gh`-resolution resilience: re-arm
+  # resolution via the shared `rearm_gh_resolution` (lib-auth.sh) immediately
+  # before EACH load-bearing `gh`-touching write below — NOT once here at
+  # cleanup entry. The per-run auth shim dir (GH_WRAPPER_DIR, prepended to
+  # PATH in setup_github_auth) can vanish mid-run (external deletion, a
+  # racing cleanup — the deleter is unidentified and this fix is deliberately
+  # deleter-agnostic) at ANY point in this function's lifetime: the incident
+  # proved the dir was alive at a token-daemon refresh and gone nine minutes
+  # later. An entry-time-only probe (the pre-review-round-1 version of this
+  # fix) can pass here and still never re-arm for a write further down —
+  # every `rearm_gh_resolution` call site below closes that gap. A no-op
+  # (and harmless) when the shim is still intact — see the helper's doc
+  # comment in lib-auth.sh for why the two internal steps are safe to run
+  # unconditionally on every call.
+  rearm_gh_resolution
 
-  # Look up PR-exists state once (used by SIGTERM rewrite and the success path).
-  # [INV-87] (W1c1, #397) body-mention existence lookup → chp_pr_list abstract
-  # contract. Body is normalized to a string so the `.body != null` guard is
-  # gone (the #148-class fix). Fail-soft (`|| echo "0"`): a transient read
-  # error keeps the success path routing conservative (no PR ⇒ retry dev).
-  local _pr_list_e
-  _pr_list_e=$(chp_pr_list open "body" 2>/dev/null) || _pr_list_e=""
-  local PR_EXISTS
-  if [[ -n "$_pr_list_e" ]]; then
-    PR_EXISTS=$(jq -r "[.[] | select((.body | test(\"#${ISSUE_NUMBER}[^0-9]\")) or (.body | test(\"#${ISSUE_NUMBER}\$\")))] | length" <<<"$_pr_list_e" 2>/dev/null || echo "0")
-  else
-    PR_EXISTS="0"
-  fi
-  unset _pr_list_e
-
-  # [INV-79] Bot-trigger broker: if the scoped agent token is armed and the agent
-  # wrote bot-trigger phrase(s) (it cannot post them itself — GH_USER_PAT is scrubbed
-  # from its subtree), post them now via gh-as-user.sh with the wrapper's GH_USER_PAT.
-  # Runs AFTER drain_agent_pr_create so the PR exists; the helper resolves the PR
-  # number itself and no-ops when scoping is off / no triggers / no PR. The allow-list
-  # (#234 review [P1]) restricts the broker to EXACT configured REVIEW_BOTS triggers —
-  # only post a line that matches one. Empty/undefined → fail-closed (nothing posted).
-  if [[ "${PR_EXISTS:-0}" -gt 0 ]]; then
-    local _bot_allowlist=""
-    if declare -F bot_trigger_allowlist >/dev/null 2>&1; then
-      _bot_allowlist=$(bot_trigger_allowlist "${REVIEW_BOTS:-}" 2>/dev/null || true)
-    fi
-    drain_agent_bot_triggers "$ISSUE_NUMBER" "$REPO" "$_bot_allowlist" || true
-  fi
-
-  # SIGTERM convergence (INV-15): Step 5a only kills us when a PR is ready.
-  # Treat SIGTERM+PR as a successful handoff (exit_code → 0) so the success
-  # branch routes to pending-review instead of the failure branch routing to
-  # pending-dev. SIGTERM without a PR is still a failure (e.g. operator kill).
-  if [[ "$RECEIVED_SIGTERM" -eq 1 ]]; then
-    if [[ "$PR_EXISTS" -gt 0 ]]; then
-      log "Caught SIGTERM with PR present; treating as PR-handoff (exit_code 143 → 0)."
-      exit_code=0
-    else
-      log "Caught SIGTERM with no PR; keeping exit_code ${exit_code} (will route to pending-dev)."
-    fi
-  fi
-
-  # Post session report.
+  # [INV-111] (#402) Post the Agent Session Report FIRST — before the
+  # INV-79 brokers and the PR-exists lookup below. This is the dispatcher's
+  # ONLY cross-box session-identity channel (the `Dev Session ID:` marker);
+  # losing it parks the issue in the dispatcher's stale-verdict residual
+  # branch forever (extract_dev_session_id has nothing to extract). The
+  # report needs only itp_post_comment + $SESSION_ID + the exit code already
+  # known at cleanup entry — none of that is produced by the broker steps
+  # below, so there is no ordering reason to post it any later.
+  #
+  # The `Exit code:` value here is deliberately the RAW exit code, BEFORE
+  # the SIGTERM+PR_EXISTS convergence rewrite further down (which needs
+  # drain_agent_pr_create's PR to exist first) — so a SIGTERM+PR-ready
+  # handoff renders `Exit code: 143` in the report even though the label
+  # transition below correctly routes to pending-review. This does not
+  # regress any consumer: count_agent_failures already excludes 143/137
+  # unconditionally, and dev_near_success's "Exit code: 0" signal is only
+  # consulted on the no-PR branch — which a SIGTERM+PR-ready handoff never
+  # reaches (a PR exists).
   #
   # `${AGENT_DEV_MODEL:-<default>}` uses the colon-minus operator so that
   # both unset and set-but-empty render `<default>`. `lib-agent.sh:42`
@@ -906,6 +889,71 @@ EOF
 EOF
 )" || log "WARNING: Failed to post session report comment"
 
+  # [INV-111] (#402 review round-1 [P1]) re-arm before this load-bearing write
+  # (drain_agent_pr_create's own `gh`/chp_create_pr calls) — see the entry-point
+  # rearm_gh_resolution call above for why a per-write re-arm is required.
+  rearm_gh_resolution
+
+  # [INV-79] PR-create broker: if the scoped agent token is armed and the agent
+  # wrote a PR title+body (it cannot `gh pr create` with pull_requests:read),
+  # open the PR now with the wrapper's full-write token — BEFORE the PR_EXISTS
+  # lookup below so a brokered create routes the success path to pending-review.
+  # No-op when scoping is off or the agent already created the PR directly.
+  drain_agent_pr_create "$ISSUE_NUMBER" "$REPO" || true
+
+  # [INV-111] (#402 review round-1 [P1]) re-arm before the PR_EXISTS lookup.
+  rearm_gh_resolution
+
+  # Look up PR-exists state once (used by SIGTERM rewrite and the success path).
+  # [INV-87] (W1c1, #397) body-mention existence lookup → chp_pr_list abstract
+  # contract. Body is normalized to a string so the `.body != null` guard is
+  # gone (the #148-class fix). Fail-soft (`|| echo "0"`): a transient read
+  # error keeps the success path routing conservative (no PR ⇒ retry dev).
+  local _pr_list_e
+  _pr_list_e=$(chp_pr_list open "body" 2>/dev/null) || _pr_list_e=""
+  local PR_EXISTS
+  if [[ -n "$_pr_list_e" ]]; then
+    PR_EXISTS=$(jq -r "[.[] | select((.body | test(\"#${ISSUE_NUMBER}[^0-9]\")) or (.body | test(\"#${ISSUE_NUMBER}\$\")))] | length" <<<"$_pr_list_e" 2>/dev/null || echo "0")
+  else
+    PR_EXISTS="0"
+  fi
+  unset _pr_list_e
+
+  # [INV-79] Bot-trigger broker: if the scoped agent token is armed and the agent
+  # wrote bot-trigger phrase(s) (it cannot post them itself — GH_USER_PAT is scrubbed
+  # from its subtree), post them now via gh-as-user.sh with the wrapper's GH_USER_PAT.
+  # Runs AFTER drain_agent_pr_create so the PR exists; the helper resolves the PR
+  # number itself and no-ops when scoping is off / no triggers / no PR. The allow-list
+  # (#234 review [P1]) restricts the broker to EXACT configured REVIEW_BOTS triggers —
+  # only post a line that matches one. Empty/undefined → fail-closed (nothing posted).
+  if [[ "${PR_EXISTS:-0}" -gt 0 ]]; then
+    # [INV-111] (#402 review round-1 [P1]) re-arm before drain_agent_bot_triggers'
+    # own `gh`/gh-as-user.sh calls.
+    rearm_gh_resolution
+    local _bot_allowlist=""
+    if declare -F bot_trigger_allowlist >/dev/null 2>&1; then
+      _bot_allowlist=$(bot_trigger_allowlist "${REVIEW_BOTS:-}" 2>/dev/null || true)
+    fi
+    drain_agent_bot_triggers "$ISSUE_NUMBER" "$REPO" "$_bot_allowlist" || true
+  fi
+
+  # SIGTERM convergence (INV-15): Step 5a only kills us when a PR is ready.
+  # Treat SIGTERM+PR as a successful handoff (exit_code → 0) so the success
+  # branch routes to pending-review instead of the failure branch routing to
+  # pending-dev. SIGTERM without a PR is still a failure (e.g. operator kill).
+  if [[ "$RECEIVED_SIGTERM" -eq 1 ]]; then
+    if [[ "$PR_EXISTS" -gt 0 ]]; then
+      log "Caught SIGTERM with PR present; treating as PR-handoff (exit_code 143 → 0)."
+      exit_code=0
+    else
+      log "Caught SIGTERM with no PR; keeping exit_code ${exit_code} (will route to pending-dev)."
+    fi
+  fi
+
+  # [INV-111] (#402 review round-1 [P1]) re-arm before the label-flip write —
+  # the final load-bearing `gh`-touching write in this function.
+  rearm_gh_resolution
+
   # Transition labels based on whether agent succeeded or failed
   if [[ $exit_code -eq 0 ]]; then
     if [[ "$PR_EXISTS" -gt 0 ]]; then
@@ -918,6 +966,10 @@ EOF
       log "WARNING: Agent exited 0 but no PR was created for issue #${ISSUE_NUMBER}"
       itp_post_comment "$ISSUE_NUMBER" \
         "Agent exited successfully but no PR was created. Moving to pending-dev for retry.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
+      # [INV-111] (#402 r3 [P1]) re-arm between the two writes: the comment
+      # above re-hashes `gh` to the shim path; a vanish here would strand the
+      # flip. (Short: the C.5 anchor above must stay within ±8 of the flip.)
+      rearm_gh_resolution
       itp_transition_state "$ISSUE_NUMBER" "in-progress" "pending-dev" || log "WARNING: Failed to update issue labels"
     fi
   else
