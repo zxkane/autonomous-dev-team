@@ -131,18 +131,70 @@ proc_age() {
 # `[ -r ]`, NEVER `[ -s ]` — `stat -c %s /proc/PID/environ` reports 0 even on
 # a readable, non-empty environ (procfs quirk); an `-s` gate would silently
 # treat every live process as "no env" and defeat env-tag matching entirely
-# (design §4-C2 platform:F5). Echoes nothing + rc 1 when unreadable (dead
-# process, permission, or — on macOS with no python3 shim installed — always,
-# by design: this lib does not ship the macOS `sysctl kern.procargs2` shim;
-# that is deferred to the GC PR, so env_of is Linux-only for now and callers
-# must tolerate an empty result on macOS).
+# (design §4-C2 platform:F5). macOS: the `sysctl kern.procargs2` shim
+# (`_procargs2_py`, this PR) when python3 is present — the SAME source of
+# truth `env_readable` consults, deliberately: `env_readable` answering
+# "readable" (via a successful procargs2 probe) while env_of/env_lookup
+# silently returned nothing (the pre-round-3 state — env_of was
+# Linux-only) re-opened on Darwin the exact fail-open hole `env_readable`
+# exists to close: a TERM_PROGRAM-protected operator process probed
+# READABLE, then env_lookup found no TERM_PROGRAM in an EMPTY read, and
+# the candidate fell through to full kill eligibility. The two functions
+# MUST stay source-aligned — any read path added to one must be added to
+# both (review round-3 [P1]). Echoes nothing + rc 1 when unreadable (dead
+# process, permission, or macOS with no python3 shim).
 env_of() {
   local pid="$1"
   if [[ -r "/proc/${pid}/environ" ]]; then
     tr '\0' '\n' < "/proc/${pid}/environ" 2>/dev/null
     return 0
   fi
+  if [[ "$(_lane_uname)" != "Linux" ]] && _lane_procargs2_available; then
+    local out
+    out="$(_procargs2_py "$pid" 2>/dev/null)" || return 1
+    [[ -n "$out" ]] || return 1
+    awk '/^ENV$/{f=1;next} f' <<<"$out"
+    return 0
+  fi
   return 1
+}
+
+# env_readable <pid> — true iff `env_of` can actually READ this process's
+# environment (Linux: `[ -r /proc/PID/environ ]`; macOS: the procargs2 shim
+# is installed AND actually returns data for THIS pid, not merely "python3
+# exists somewhere on PATH" — `_lane_procargs2_available` alone answers a
+# host-wide question, not a per-pid one).
+#
+# [Lane-GC PR-4 review round-2, P1-2] Exists to let a caller distinguish
+# two DIFFERENT reasons `env_lookup`/`_gc_has_term_program`-style callers
+# see "no TERM_PROGRAM found": (a) the environment IS readable and
+# TERM_PROGRAM genuinely is not set — proceed with the rest of the
+# decision table; vs. (b) the environment is UNREADABLE (the process died
+# between the enumeration and the env read, EPERM from a uid mismatch, or
+# macOS with no shim) — the process is UNKNOWABLE, not "known clean", and
+# every kill-authorization path must therefore skip it (fail toward leak,
+# design principle 5), the same posture the design already mandates for
+# TERM_PROGRAM itself. Before this primitive existed, callers could not
+# tell the two cases apart: `env_lookup … TERM_PROGRAM || echo ""` returns
+# an identical empty string for both, so an unreadable-env process
+# (whose true env is entirely unknown) was silently treated the same as
+# an env-clean one and fell through to full kill eligibility — exactly
+# the moment the least is known about a candidate.
+env_readable() {
+  local pid="$1"
+  if [[ "$(_lane_uname)" == "Linux" ]]; then
+    [[ -r "/proc/${pid}/environ" ]]
+    return $?
+  fi
+  # macOS: readable only if the shim is installed AND its LIVE fetch (by
+  # pid, not the synthetic-buffer parser-only test path) actually
+  # succeeds for this specific pid right now — `_procargs2_py`'s own rc
+  # already distinguishes "parsed a real procargs2 buffer" (0) from
+  # "sysctl failed (dead pid / EPERM) or the buffer was too short /
+  # malformed" (1); a dead-pid probe or a permission error both correctly
+  # report unreadable here, never masquerading as "readable, empty env".
+  _lane_procargs2_available || return 1
+  _procargs2_py "$pid" >/dev/null 2>&1
 }
 
 # file_mtime <path> — echo the file's mtime as an epoch integer. Linux
@@ -151,6 +203,172 @@ env_of() {
 file_mtime() {
   local path="$1"
   stat -c %Y "$path" 2>/dev/null || stat -f %m "$path" 2>/dev/null
+}
+
+# ---------------------------------------------------------------------------
+# macOS `sysctl kern.procargs2` shim ([Lane-GC PR-4], design §4-C5/§7
+# platform:F2) — the env_of docstring above deferred this to "the GC PR";
+# this is that PR. `ps eww` is explicitly BANNED for kill authorization (no
+# argv/env delimiter — a value containing a space is indistinguishable from
+# a new argv element); the KERN_PROCARGS2 buffer is argc-DELIMITED (a leading
+# int32 argc, then NUL-terminated exec_path/argv[]/envp[] strings), so it is
+# the only portable way to split argv from envp on Darwin without guessing.
+#
+# Split into a PURE PARSER (`_procargs2_parse_py`, stdin bytes -> ARGV/ENV
+# sections) and a LIVE FETCHER (`_procargs2_py`, ctypes sysctl(3) call by pid
+# -> parser) so the parser is unit-testable on Linux CI against a SYNTHETIC
+# buffer — no macOS runner, no real sysctl call, required (design §11 "macOS
+# ACs decision": PR-4's macOS ACs may be deferred to a follow-up when no
+# runner exists, but must still be unit-tested against mocked output).
+_procargs2_py() {
+  # Writes the script to a TEMP FILE rather than feeding it to `python3 -`
+  # via a heredoc: `python3 -` reads the SCRIPT ITSELF from stdin, which
+  # would consume the fd and leave nothing for the script's own
+  # `sys.stdin.buffer.read()` (the no-pid/parser-test call path) to read —
+  # a real bug caught by TC-LGC4-114 unit-testing this exact path against
+  # a synthetic buffer piped on stdin.
+  local _py_script
+  _py_script="$(mktemp 2>/dev/null)" || return 1
+  cat > "$_py_script" <<'PY'
+import sys, struct
+
+def parse(data):
+    if len(data) < 4:
+        return None
+    argc = struct.unpack('<i', data[0:4])[0]
+    rest = data[4:]
+    # Skip the NUL-terminated exec_path, then any NUL padding before argv[0].
+    idx = rest.find(b'\x00')
+    if idx < 0:
+        return None
+    idx += 1
+    while idx < len(rest) and rest[idx:idx + 1] == b'\x00':
+        idx += 1
+    strings = []
+    cur = idx
+    while cur < len(rest):
+        nul = rest.find(b'\x00', cur)
+        if nul < 0:
+            break
+        strings.append(rest[cur:nul])
+        cur = nul + 1
+    argv = strings[:argc]
+    envp = [e for e in strings[argc:] if e]
+    return argv, envp
+
+def emit(data):
+    parsed = parse(data)
+    if parsed is None:
+        return 1
+    argv, envp = parsed
+    print("ARGV")
+    for a in argv:
+        print(a.decode('utf-8', 'surrogateescape'))
+    print("ENV")
+    for e in envp:
+        print(e.decode('utf-8', 'surrogateescape'))
+    return 0
+
+def fetch(pid):
+    import ctypes, ctypes.util
+    libc_path = ctypes.util.find_library('c')
+    if not libc_path:
+        return None
+    libc = ctypes.CDLL(libc_path, use_errno=True)
+    CTL_KERN, KERN_PROCARGS2 = 1, 49
+    mib = (ctypes.c_int * 3)(CTL_KERN, KERN_PROCARGS2, pid)
+    size = ctypes.c_size_t(0)
+    if libc.sysctl(mib, 3, None, ctypes.byref(size), None, 0) != 0:
+        return None
+    if size.value == 0:
+        return None
+    buf = ctypes.create_string_buffer(size.value)
+    if libc.sysctl(mib, 3, buf, ctypes.byref(size), None, 0) != 0:
+        return None
+    return buf.raw[:size.value]
+
+def main():
+    if len(sys.argv) > 1 and sys.argv[1].isdigit():
+        data = fetch(int(sys.argv[1]))
+        if data is None:
+            return 1
+    else:
+        data = sys.stdin.buffer.read()
+    return emit(data)
+
+sys.exit(main())
+PY
+  python3 "$_py_script" "$@"
+  local _rc=$?
+  rm -f "$_py_script" 2>/dev/null
+  return $_rc
+}
+
+# _lane_procargs2_available — true iff the macOS shim's runtime
+# dependency (python3) is present. Never true on Linux (env_of/proc_argv
+# already have a faster native path there and never call this).
+_lane_procargs2_available() {
+  command -v python3 >/dev/null 2>&1
+}
+
+# proc_argv <pid> — echo the process's argv, one element per line. Linux:
+# `/proc/PID/cmdline` (NUL-delimited). macOS: the procargs2 shim when
+# python3 is present. Echoes nothing + rc 1 when neither source is
+# available — callers must tolerate an empty result (design §7: absent the
+# shim, macOS GC is registry-authoritative only).
+proc_argv() {
+  local pid="$1"
+  if [[ -r "/proc/${pid}/cmdline" ]]; then
+    tr '\0' '\n' < "/proc/${pid}/cmdline" 2>/dev/null
+    return 0
+  fi
+  if [[ "$(_lane_uname)" != "Linux" ]] && _lane_procargs2_available; then
+    local out
+    out="$(_procargs2_py "$pid" 2>/dev/null)" || return 1
+    [[ -n "$out" ]] || return 1
+    awk '/^ARGV$/{f=1;next} /^ENV$/{f=0} f' <<<"$out"
+    return 0
+  fi
+  return 1
+}
+
+# proc_ppid <pid> — echo the process's PARENT pid. Linux: `/proc/PID/stat`
+# field 4 (the fast, subprocess-free path — same field-splitting technique
+# as proc_start_time). macOS/BSD fallback: `ps -o ppid=`.
+proc_ppid() {
+  local pid="$1"
+  if [[ -r "/proc/${pid}/stat" ]]; then
+    local stat_line rest
+    stat_line="$(cat "/proc/${pid}/stat" 2>/dev/null)" || { echo ""; return 1; }
+    rest="${stat_line##*)}"
+    # shellcheck disable=SC2206 # intentional word-split of numeric fields
+    local fields=($rest)
+    if [[ -n "${fields[1]:-}" ]]; then
+      echo "${fields[1]}"
+      return 0
+    fi
+    echo ""
+    return 1
+  fi
+  ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]'
+}
+
+# proc_pgid <pid> — echo the process's process-group id via `ps -o pgid=`
+# (identical on Linux and macOS/BSD — no dual-path needed).
+proc_pgid() {
+  local pid="$1"
+  ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]'
+}
+
+# env_lookup <pid> <KEY> — echo VALUE for the exact KEY from `env_of`'s
+# output, or nothing + rc 1 when absent/unreadable. Centralizes the `KEY=`
+# prefix match every GC decision-table rule needs (ADT_LANE_ID, CC_USER,
+# AUTONOMOUS_CONF_LOADED_FROM, TERM_PROGRAM, GH_TOKEN_FILE) behind one
+# call, so no caller hand-rolls its own grep against env_of's raw lines.
+env_lookup() {
+  local pid="$1" key="$2" line
+  line="$(env_of "$pid" 2>/dev/null | grep -m1 "^${key}=")" || return 1
+  printf '%s\n' "${line#*=}"
 }
 
 # box_health — echo `load1_per_core=<f> mem_available_mb=<n> swap_pct=<n>` for

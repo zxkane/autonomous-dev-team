@@ -233,6 +233,9 @@ jobs:
             tests/e2e/run-run-artifacts-e2e.sh \
             tests/e2e/run-verdict-artifact-fleet-e2e.sh \
             tests/e2e/run-lane-gc-p3-kill-paths-e2e.sh \
+            skills/autonomous-dispatcher/scripts/adt-gc.sh \
+            skills/autonomous-dispatcher/scripts/install-gc-timer.sh \
+            skills/autonomous-dispatcher/scripts/lib-lane.sh \
             tests/conformance/run-conformance.sh \
             tests/conformance/lib-conformance.sh \
             skills/autonomous-dispatcher/scripts/post-verdict.sh \

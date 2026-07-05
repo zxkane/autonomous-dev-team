@@ -126,6 +126,10 @@ A consumer project bootstraps against this skill set by symlinking the dispatche
 
 It also **prunes stale per-lib symlinks** a pre-#227 install left behind (harmless dead weight, since lib sourcing no longer reads `<project>/scripts/`).
 
+## Pre-step: opportunistic lane GC ([INV-117](invariants.md#inv-117-a-periodic-box-wide-gc-reclaims-dead-lane-process-residue-under-a-decision-table-that-fails-toward-leak-never-toward-false-kill--dry-run-by-default), #380)
+
+Before `kill_stale_wrapper` runs, `dispatch-local.sh` opportunistically invokes `adt-gc.sh --quick || true` — Pass 1 (registry-driven) only, flock-guarded (`flock -w 3`, never `-n`, so a quick call queues briefly behind a concurrent full run instead of starving), dry-run by default. This means a busy box self-cleans dead-lane process residue on every dispatch even when no periodic timer (`install-gc-timer.sh`) has been installed on the host. `|| true` — GC is best-effort; a missing/broken `adt-gc.sh` (stale skill tree) never blocks or delays a dispatch.
+
 ## Pre-step: wrapper exec-bit self-heal (closes #97)
 
 Before sourcing config, `dispatcher-tick.sh` self-heals the execute bit on the two scripts that `dispatch-local.sh` invokes directly via `nohup`:
