@@ -287,7 +287,7 @@ gh_lines_in() {
 glab_lines_in() {
   local path="$1"
   [ -f "$path" ] || return 0
-  grep -aE '(^|[^A-Za-z_-])glab ' "$path" 2>/dev/null | awk '
+  grep -aE '(^|[^A-Za-z_-])glab[[:space:]]' "$path" 2>/dev/null | awk '
     { s = $0; sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s)
       if (substr(s, 1, 1) == "#") next
       print s }'
@@ -314,7 +314,7 @@ glab_lines_in() {
 gitlab_api_curl_lines_in() {
   local path="$1"
   [ -f "$path" ] || return 0
-  grep -aE 'curl.*[/"]api/v4[/"]' "$path" 2>/dev/null | awk '
+  grep -aE '(^|[^A-Za-z_-])curl([[:space:]]|$).*[/"]api/v4[/"]|[/"]api/v4[/"].*(^|[^A-Za-z_-])curl([[:space:]]|$)' "$path" 2>/dev/null | awk '
     { s = $0; sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s)
       if (substr(s, 1, 1) == "#") next
       print s }'
@@ -350,7 +350,7 @@ gitlab_api_var_and_curl_lines_in() {
     # dynamically-built regex that boundary-anchors the var name so
     # `foo` doesn't match `foobar`). Skip lines that ALSO carry the
     # `/api/v4/` literal (same-line case, already handled).
-    local pattern="(^|[^A-Za-z_-])curl .*\\\$\\{?${var}\\}?([^A-Za-z_0-9]|$)"
+    local pattern="(^|[^A-Za-z_-])curl[[:space:]].*\\\$\\{?${var}\\}?([^A-Za-z_0-9]|$)"
     while IFS= read -r line; do
       [ -z "$line" ] && continue
       s="$line"

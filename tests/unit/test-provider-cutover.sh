@@ -860,6 +860,30 @@ else
 fi
 
 # ===========================================================================
+echo "=== TC-CUTOVER-GLAB-001b: TAB-separated 'glab<TAB>issue list' FAILs (#416 review round 2) ==="
+# ===========================================================================
+S="$(fresh_scratch glab001b)"
+printf '\nglab_tab() { glab\tissue list; }\n' >> "$S/autonomous-dev.sh"
+out="$(bash "$CHECK" --scripts-dir "$S" --baseline "$BASELINE" 2>&1)"; rc=$?
+if [[ "$rc" -ne 0 ]] && grep -q "raw \`glab\` token" <<<"$out"; then
+  ok "TC-CUTOVER-GLAB-001b: tab-separated raw 'glab' → FAIL (whitespace-class boundary)"
+else
+  bad "TC-CUTOVER-GLAB-001b: tab-separated 'glab' NOT caught (rc=$rc)"
+fi
+
+# ===========================================================================
+echo "=== TC-CUTOVER-GLAB-001c: split-line /api/v4 var + TAB-separated curl FAILs (#416 review round 2) ==="
+# ===========================================================================
+S="$(fresh_scratch glab001c)"
+printf '\nu="https://gitlab.example.com/api/v4/projects/1"\ncurl\t"$u"\n' >> "$S/autonomous-dev.sh"
+out="$(bash "$CHECK" --scripts-dir "$S" --baseline "$BASELINE" 2>&1)"; rc=$?
+if [[ "$rc" -ne 0 ]]; then
+  ok "TC-CUTOVER-GLAB-001c: split-line /api/v4 var consumed by tab-separated curl → FAIL"
+else
+  bad "TC-CUTOVER-GLAB-001c: tab-separated curl of an /api/v4 var NOT caught (rc=$rc)"
+fi
+
+# ===========================================================================
 echo "=== TC-CUTOVER-GLAB-002: 'glab' in a comment does NOT trip ==="
 # ===========================================================================
 S="$(fresh_scratch glab002)"
