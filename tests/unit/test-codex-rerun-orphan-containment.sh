@@ -368,7 +368,7 @@ if [[ "$_e2e_started" -eq 1 ]]; then
   E2E_CODEX_PGID=$(ps -o pgid= -p "$E2E_CODEX_PID" 2>/dev/null | tr -d ' ')
 
   # --- Drive the REAL post-resolution reap sequence (mirrors
-  # autonomous-review.sh's call site byte-for-byte, INV-111 order) ---
+  # autonomous-review.sh's call site byte-for-byte, INV-112 order) ---
   (
     # shellcheck disable=SC1090
     source "$POLL_LIB"
