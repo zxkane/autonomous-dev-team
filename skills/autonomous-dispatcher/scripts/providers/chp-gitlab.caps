@@ -1,0 +1,47 @@
+# providers/chp-gitlab.caps — GitLab Code-Host Provider capability manifest.
+#
+# Declarative key=value, PARSED (never sourced) by the chp_caps reader in
+# lib-code-host.sh ([INV-88], spec §4). Every value is evidence-cited per
+# #418 R11 (parent #414 AC5). Every deviation from chp-github.caps has a
+# spec §5.1 anchor.
+
+# GitLab has native issue<->MR close linkage via /issues/:iid/closed_by and
+# /merge_requests/:iid/closes_issues. `chp_gitlab_find_pr_for_issue` (#418 R6)
+# uses /closed_by as the CLOSE-LINKAGE source (NOT /related_merge_requests —
+# the latter is broader, listing MENTIONING MRs). Scope caveat: the linkage
+# operates within a SINGLE GitLab project (the pipeline's own project); a
+# cross-project link is out of scope and not needed by the caller layer.
+# Evidence: R6 fixtures gitlab-chp-find-pr-*.json prove the /closed_by
+# response shape is the close-linked-MR set for the same-project case.
+native_issue_pr_link=1
+
+# GitLab has NO REST verb to submit "request changes" — the closest analog is
+# a quick-action note on the MR (§5.1 provider-spec.md:648-650). The caller
+# branch (submit_request_changes, lib-review-request-changes.sh) is already
+# tested at cap=0; no `chp_gitlab_request_changes` leaf exists here or in
+# P3-4. The conformance runner emits `SKIP <verb> (cap: rest_request_changes)`
+# for this cap under `--chp gitlab`.
+rest_request_changes=0
+
+# GitLab has no native custom-slash-command review-bot registry (§5.1). The
+# caller relies on the in-process review agent only; no `chp_gitlab_trigger_bot`
+# leaf lands in phase-3.
+review_bots=0
+
+# GitLab auto-transitions an issue via `Closes #N` in the MR description ONLY
+# when the MR merges into the project's DEFAULT branch. The wrapper merges to
+# default so the [M4] `merge_closes_issue` semantics hold; a non-default-target
+# deployment (e.g. merging into a release branch) MUST fall back to explicit
+# `itp_transition_state` to close the linked issue. That fallback is a future
+# concern — documented here so a later audit does not assume unconditional
+# auto-close. Evidence: same as chp-github.caps `merge_closes_issue=1` — the
+# leaf `chp_gitlab_close_keyword` (P3-4) renders the same `Closes #N` prefix
+# once the P3-4 writes land, and the wrapper's caller-side merge_closes_issue
+# check makes the branch identical to GitHub's [INV-33].
+merge_closes_issue=1
+
+# GitLab notes preserve HTML comments (`<!-- marker -->`) verbatim through both
+# the REST notes endpoint and the discussion endpoint — the marker-channel
+# fixtures round-trip the `<!--` prefix without escaping. Matches
+# chp-github.caps and the marker discipline in §3.3.
+marker_channel=html
