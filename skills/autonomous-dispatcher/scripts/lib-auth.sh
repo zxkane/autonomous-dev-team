@@ -91,6 +91,28 @@ AGENT_TOKEN_PERMISSIONS="${AGENT_TOKEN_PERMISSIONS:-{\"contents\":\"write\",\"is
 # One-time PAT-mode WARN latch (INV-79): the degraded-enforcement warning is
 # logged at most once per process, even across repeated setup_agent_token calls.
 _AGENT_TOKEN_PAT_WARNED=""
+# [#416 R2] One-time GITLAB_TOKEN PAT-posture WARN latch — parallel to the
+# existing GitHub PAT-mode WARN. GitLab has no GitHub-App equivalent (§5.1,
+# provider-spec.md:633-651), so agents inherit the wrapper's GITLAB_TOKEN and
+# INV-79 containment degrades to convention on the gitlab seam(s).
+_AGENT_GITLAB_TOKEN_PAT_WARNED=""
+
+# [#416 R2] _github_seam_active — rc 0 iff EITHER seam (ITP or CHP) uses the
+# github provider. When BOTH default to unset, the shell defaults to today's
+# behavior (github/github), so the gate is transparent to the pre-change tree.
+# Read from ISSUE_PROVIDER / CODE_HOST via ${:-github} defaults; the caller
+# layer already threads these vars through every dispatcher/wrapper site.
+#
+# Consumed by setup_github_auth, setup_agent_token, and dispatcher-tick.sh's
+# app-mode credential FATAL — each of those runs ONLY when this returns 0. On
+# a `gitlab`/`gitlab` topology (both vars set to `gitlab`), the whole GitHub
+# auth lifecycle is a clean no-op: no token daemon spawn, no `gh` wrapper
+# symlink, no FATAL. On a mixed `github`/`gitlab` or `gitlab`/`github`
+# topology, at least one seam is github so the gate opens.
+_github_seam_active() {
+  local ip="${ISSUE_PROVIDER:-github}" ch="${CODE_HOST:-github}"
+  [[ "$ip" == "github" || "$ch" == "github" ]]
+}
 
 # Create the per-run GH_WRAPPER_DIR (mode 700) if not already set. Idempotent:
 # both auth modes call this, and a second call is a no-op once the dir exists.
@@ -116,9 +138,22 @@ _spawn_token_daemon() {
 # Setup GitHub authentication based on GH_AUTH_MODE.
 # For "app" mode, caller must pass app_id and app_pem.
 # Args: $1=app_id (for app mode), $2=app_pem (for app mode)
+#
+# [#416 R2] Gated on `_github_seam_active` — either seam (ITP or CHP) using
+# github triggers the whole lifecycle (`gh` wrapper install + token daemon
+# spawn + poll). A `gitlab`/`gitlab` topology returns 0 as a NO-OP (no daemon
+# spawn, no wrapper install, no WARN). Under the default (`github`/`github`,
+# via `${…:-github}`) this is BYTE-IDENTICAL to pre-#416 behavior.
 setup_github_auth() {
   local app_id="${1:-}"
   local app_pem="${2:-}"
+
+  # [#416 R2] Non-github lane — clean no-op. The `gh` wrapper + refresh daemon
+  # exist to serve github leaves; a topology with neither seam on github never
+  # emits a `gh` call (the [INV-91] caller layer routes through the verb seam).
+  if ! _github_seam_active; then
+    return 0
+  fi
 
   if [[ "$GH_AUTH_MODE" == "app" ]]; then
     if [[ -z "$app_id" || -z "$app_pem" ]]; then
@@ -238,6 +273,27 @@ refresh_token_env() {
 setup_agent_token() {
   local app_id="${1:-}"
   local app_pem="${2:-}"
+
+  # [#416 R2] Emit the GitLab PAT-posture WARN once per process when a gitlab
+  # seam is active AND GITLAB_TOKEN is in the wrapper env. GitLab has no
+  # GitHub-App equivalent (§5.1), so agents inherit the wrapper's GITLAB_TOKEN;
+  # INV-79 containment degrades to convention on gitlab, mirroring the PAT-mode
+  # posture the GitHub PAT WARN below documents. Emitted BEFORE the github gate
+  # so a `gitlab`/`gitlab` topology still surfaces it.
+  local _ip="${ISSUE_PROVIDER:-github}" _ch="${CODE_HOST:-github}"
+  if [[ -z "$_AGENT_GITLAB_TOKEN_PAT_WARNED" ]] \
+     && { [[ "$_ip" == "gitlab" ]] || [[ "$_ch" == "gitlab" ]]; } \
+     && [[ -n "${GITLAB_TOKEN:-}" ]]; then
+    echo "WARN: [INV-79]/[#416 R2] GITLAB_TOKEN is present in the wrapper env — GitLab has no GitHub-App equivalent (§5.1), so a scoped agent mint is impossible; agents inherit the wrapper's GITLAB_TOKEN and INV-79 containment degrades to convention on the gitlab seam (parallel to the GH_AUTH_MODE=token PAT posture)." >&2
+    _AGENT_GITLAB_TOKEN_PAT_WARNED=1
+  fi
+
+  # [#416 R2] Non-github lane — no scoped github token to mint, no PAT WARN to
+  # emit. Return 0 as a NO-OP; the gitlab WARN above (if applicable) is the
+  # gitlab-side equivalent.
+  if ! _github_seam_active; then
+    return 0
+  fi
 
   if [[ "$GH_AUTH_MODE" != "app" ]]; then
     if [[ -z "$_AGENT_TOKEN_PAT_WARNED" ]]; then

@@ -155,7 +155,20 @@ fi
 #
 # Fail-fast on misconfig (missing id/pem, token API failure, empty result):
 # silently falling back to user auth is precisely the bug being closed.
-if [[ "${GH_AUTH_MODE:-token}" == "app" ]]; then
+# [#416 R2] Gate the whole GitHub App-mode credential path on
+# `_github_seam_active` (either ISSUE_PROVIDER=github or CODE_HOST=github; the
+# two arms are independent per §auth [M9]). A `gitlab`/`gitlab` topology
+# needs neither GitHub App identity — the FATAL, the token mint, and the
+# subsequent `gh` wrapper install are all skipped. A mixed `github`/`gitlab`
+# or `gitlab`/`github` topology STILL needs it (the active github seam's
+# leaves call `gh`). Under the default (both unset → github/github, via the
+# `${…:-github}` defaults inside `_github_seam_active`) the gate is
+# transparent — byte-identical to pre-#416 behavior.
+_dispatcher_github_seam_active() {
+  local _ip="${ISSUE_PROVIDER:-github}" _ch="${CODE_HOST:-github}"
+  [[ "$_ip" == "github" || "$_ch" == "github" ]]
+}
+if [[ "${GH_AUTH_MODE:-token}" == "app" ]] && _dispatcher_github_seam_active; then
   if [[ -z "${DISPATCHER_APP_ID:-}" || -z "${DISPATCHER_APP_PEM:-}" ]]; then
     error_surface - ADT_AUTH_APP_CREDS_MISSING \
       "GH_AUTH_MODE=app but the dispatcher's App credentials are unset (dispatcher tick)" \
