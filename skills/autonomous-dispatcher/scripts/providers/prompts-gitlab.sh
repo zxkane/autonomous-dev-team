@@ -45,17 +45,21 @@ declare -gA _PP_GITLAB_FRAGMENT=(
   [review.requirement_drift_gh_issue_view]='**Before reading the PR diff**, read ALL comments on issue #%s to detect requirement changes posted after implementation (reference — any equivalent read is fine):
 
 ```bash
-curl -sS -H "PRIVATE-TOKEN: ${GITLAB_TOKEN}" "https://${GITLAB_HOST}/api/v4/projects/${GITLAB_PROJECT}/issues/%s/notes"
+curl -sS -H "PRIVATE-TOKEN: ${GITLAB_TOKEN}" "https://${GITLAB_HOST}/api/v4/projects/${GITLAB_PROJECT}/issues/%s/notes?per_page=100&sort=asc&order_by=created_at"
+# paginated: if the x-next-page response header is set, re-fetch with &page=<n> until exhausted
 ```%.0s'
   [review.watch_ci_checks]='Wait for CI on merge request !%s to finish before proceeding.'
   [review.e2e_fetch_comment]='```bash
-   curl -sS -H "PRIVATE-TOKEN: ${GITLAB_TOKEN}" "https://${GITLAB_HOST}/api/v4/projects/${GITLAB_PROJECT}/merge_requests/%s/notes" | jq -r '"'"'[.[].body | select(test("e2e-evidence: complete"))] | last'"'"'
+   curl -sS -H "PRIVATE-TOKEN: ${GITLAB_TOKEN}" "https://${GITLAB_HOST}/api/v4/projects/${GITLAB_PROJECT}/merge_requests/%s/notes?per_page=100&sort=asc&order_by=created_at" | jq -r '"'"'[.[].body | select(test("e2e-evidence: complete"))] | last'"'"'
+   # paginated: if the x-next-page response header is set, re-fetch with &page=<n> until exhausted (the LAST page holds the newest note)
    ```%.0s'
   [bots.review_count_check]='```bash
-   COUNT=$(curl -sS -H "PRIVATE-TOKEN: ${GITLAB_TOKEN}" "https://${GITLAB_HOST}/api/v4/projects/${GITLAB_PROJECT}/merge_requests/%.0s%s/notes" | jq '"'"'[.[] | select(.author.username == "%s")] | length'"'"')
+   COUNT=$(curl -sS -H "PRIVATE-TOKEN: ${GITLAB_TOKEN}" "https://${GITLAB_HOST}/api/v4/projects/${GITLAB_PROJECT}/merge_requests/%.0s%s/notes?per_page=100" | jq '"'"'[.[] | select(.author.username == "%s")] | length'"'"')
+   # paginated: if x-next-page is set, sum the per-page counts with &page=<n> until exhausted
    ```'
-  [bots.review_count_check_bare]='COUNT=$(curl -sS -H "PRIVATE-TOKEN: ${GITLAB_TOKEN}" "https://${GITLAB_HOST}/api/v4/projects/${GITLAB_PROJECT}/merge_requests/%.0s%s/notes" \
-       | jq '"'"'[.[] | select(.author.username == "%s")] | length'"'"')'
+  [bots.review_count_check_bare]='COUNT=$(curl -sS -H "PRIVATE-TOKEN: ${GITLAB_TOKEN}" "https://${GITLAB_HOST}/api/v4/projects/${GITLAB_PROJECT}/merge_requests/%.0s%s/notes?per_page=100" \
+       | jq '"'"'[.[] | select(.author.username == "%s")] | length'"'"')
+   # paginated: if x-next-page is set, sum the per-page counts with &page=<n> until exhausted'
 )
 
 declare -gA _PP_GITLAB_ARGC=(
