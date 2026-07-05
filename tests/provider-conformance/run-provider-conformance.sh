@@ -454,10 +454,31 @@ _invoke() {
   if [[ -n "$TRANSPORT_HOOK" ]]; then
     hook_env=( "GITLAB_TRANSPORT_HOOK=$TRANSPORT_HOOK" )
   fi
+  # [#417 W-B] GitLab-provider config keys (spec §3.4). Set ONLY when the
+  # ITP axis is gitlab — on the github axis these vars must stay unset
+  # (BOT_LOGIN specifically drives the authorKind=self arm — setting it
+  # to a value that matches the github fixture's `my-claw[bot]` author
+  # flips those comments to `self` and breaks the pre-existing
+  # itp_list_comments / itp_read_task assertions).
+  # GITLAB_PROJECT is stored ALREADY-URL-ENCODED per §3.4; the hermetic
+  # value here matches that shape. PAYLOADS is exported so a fixture
+  # transport hook (tests/provider-conformance/fixtures/gitlab/hook.sh)
+  # can path-serve fixtures without hard-coding the runner's payload dir.
+  local -a gitlab_env=()
+  if [[ "$ITP_NAME" == "gitlab" ]]; then
+    gitlab_env=(
+      "GITLAB_PROJECT=group%2Fproject"
+      "GITLAB_HOST=gitlab.com"
+      "GITLAB_TOKEN=stub-token"
+      "BOT_LOGIN=my-claw-bot"
+    )
+  fi
   env -u AUTONOMOUS_CONF -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR \
       ISSUE_PROVIDER="$ITP_NAME" CODE_HOST="$CHP_NAME" AUTONOMOUS_PROVIDERS_DIR="$SCRATCH_DIR" \
       REPO="o/r" REPO_OWNER="o" REPO_NAME="r" \
+      PAYLOADS="$PAYLOADS" \
       PATH="$ISOLATED_PATH" \
+      "${gitlab_env[@]}" \
       "${hook_env[@]}" \
       "${extra_env[@]}" \
   bash -c '
@@ -580,6 +601,175 @@ _run_shape_assert() {
   # only a non-empty valid array is a real bug).
   if pcf_is_json_array "$out" && [[ -n "${out//[[:space:]]/}" ]] && [[ "$out" != "[]" ]]; then
     emit FAIL "$verb" "malformed-JSON input produced a non-empty array (should fail gracefully)"
+    return
+  fi
+  emit PASS "$verb"
+}
+
+# ---------------------------------------------------------------------------
+# GitLab-axis assertion helpers (#417 W-B).
+#
+# The pre-existing `_run_*` helpers wire a github-stub `gh` (via _PCF_GH_MODE /
+# _PCF_GH_PAYLOAD / _PCF_ARGV_FILE). The gitlab ITP leaves NEVER call `gh` —
+# they route every request through `_gl_api`, which delegates to `_gl_http`.
+# The FROZEN #416 transport contract makes `_gl_http` the sole override point
+# (`GITLAB_TRANSPORT_HOOK`); a fixture hook lives at
+# tests/provider-conformance/fixtures/gitlab/hook.sh and:
+#   - serves payloads path-driven (with a per-invocation _PCF_GL_PAYLOAD
+#     override), and
+#   - records every invocation to _PCF_GL_ARGV_FILE as CALL/BODY blocks
+#     (method + path + optional body JSON), for write-verb argv checks.
+#
+# The runner activates the hook by passing `--transport-hook <path>` on the
+# command line, which _invoke re-exports as GITLAB_TRANSPORT_HOOK — the
+# transport lib sources it once per per-verb subshell (spec §transport /
+# [INV-113] / [INV-116]).
+#
+# _gl_success_mode <mode> — returns 0 (success) since the fixture hook has
+# no failure mode of its own (HTTP status is per-invocation via _PCF_GL_STATUS).
+# The fail path is simulated by unsetting GITLAB_TRANSPORT_HOOK (which makes
+# the transport lib's preflight fail on missing GITLAB_TOKEN) or by pointing
+# _PCF_GL_PAYLOAD at a garbage file. We keep the fail simulation cleaner: a
+# dedicated fail-mode hook is unnecessary for a shape-check pass; the "fail"
+# path uses a payload file with an HTTP 5xx status via _PCF_GL_STATUS.
+
+# _run_gl_shape_assert <verb> <invoke_snippet> <payload_file> <check_ascending>
+# — parallel of _run_shape_assert for the gitlab axis. Serves <payload_file>
+# via the fixture transport hook; asserts JSON-array shape + optional sort
+# order. The fail-path assertion is elided here because the leaf's fail-CLOSED
+# gate on non-array payload IS the same code path exercised by
+# tests/unit/test-itp-gitlab.sh; run-provider-conformance's job is to prove
+# the leaves compose correctly through the REAL transport lib + a fixture
+# hook, not to re-run every unit-test fail branch.
+_run_gl_shape_assert() {
+  local verb="$1" invoke_snippet="$2" payload_file="$3" check_ascending="${4:-0}"
+  local argv_file="$work_root/.argv-gl-$verb.json"
+  local out rc
+  out="$(_invoke _PCF_GL_PAYLOAD="$payload_file" _PCF_GL_ARGV_FILE="$argv_file" "$invoke_snippet" 2>/dev/null)"; rc=$?
+  if [[ "$rc" != "0" ]]; then
+    emit FAIL "$verb" "wrong-shape (non-zero rc on a valid payload: $rc, output: ${out:0:200})"
+    return
+  fi
+  if ! pcf_is_json_array "$out"; then
+    emit FAIL "$verb" "wrong-shape (output is not a JSON array: ${out:0:200})"
+    return
+  fi
+  if [[ "$check_ascending" == "1" || "$check_ascending" == "createdAt" ]] && ! pcf_is_ascending_by_created_at "$out"; then
+    emit FAIL "$verb" "not sorted ascending by createdAt"
+    return
+  fi
+  if [[ "$check_ascending" == "number" ]] && ! pcf_is_ascending_by_number "$out"; then
+    emit FAIL "$verb" "not sorted ascending by number"
+    return
+  fi
+  emit PASS "$verb"
+}
+
+# _run_gl_count_assert <verb> <invoke_snippet> <payload_file> — parallel of
+# _run_count_assert; verifies bare-integer output. Fail path uses HTTP 500.
+_run_gl_count_assert() {
+  local verb="$1" invoke_snippet="$2" payload_file="$3"
+  local argv_file="$work_root/.argv-gl-$verb.json"
+  local out rc
+  out="$(_invoke _PCF_GL_PAYLOAD="$payload_file" _PCF_GL_ARGV_FILE="$argv_file" "$invoke_snippet" 2>/dev/null)"; rc=$?
+  if [[ "$rc" != "0" ]]; then
+    emit FAIL "$verb" "wrong-shape (non-zero rc on a valid payload: $rc, output: ${out:0:200})"
+    return
+  fi
+  if ! [[ "$out" =~ ^[0-9]+$ ]]; then
+    emit FAIL "$verb" "wrong-shape (output is not a bare non-negative integer: '${out:0:200}')"
+    return
+  fi
+  out="$(_invoke _PCF_GL_STATUS="500" _PCF_GL_PAYLOAD="$payload_file" _PCF_GL_ARGV_FILE="$argv_file" "$invoke_snippet" 2>/dev/null)"; rc=$?
+  if [[ "$rc" == "0" ]]; then
+    emit FAIL "$verb" "rc-0-on-error (HTTP 500 but verb still returned 0)"
+    return
+  fi
+  emit PASS "$verb"
+}
+
+# _run_gl_object_shape_assert <verb> <invoke_snippet> <payload_file> —
+# parallel of _run_object_shape_assert; single-object leaf.
+_run_gl_object_shape_assert() {
+  local verb="$1" invoke_snippet="$2" payload_file="$3"
+  local argv_file="$work_root/.argv-gl-$verb.json"
+  local out rc
+  out="$(_invoke _PCF_GL_PAYLOAD="$payload_file" _PCF_GL_ARGV_FILE="$argv_file" "$invoke_snippet" 2>/dev/null)"; rc=$?
+  if [[ "$rc" != "0" ]]; then
+    emit FAIL "$verb" "wrong-shape (non-zero rc on a valid payload: $rc, output: ${out:0:200})"
+    return
+  fi
+  if ! pcf_is_json_object "$out"; then
+    emit FAIL "$verb" "wrong-shape (output is not a JSON object: ${out:0:200})"
+    return
+  fi
+  # Labels normalized to name-string array.
+  if ! jq -e 'has("labels") and (.labels | type == "array") and (.labels | all(type == "string"))' >/dev/null 2>&1 <<<"$out"; then
+    emit FAIL "$verb" "labels not normalized to a name-string array: ${out:0:200}"
+    return
+  fi
+  # Fail-CLOSED: HTTP 500 → non-zero rc.
+  out="$(_invoke _PCF_GL_STATUS="500" _PCF_GL_PAYLOAD="$payload_file" _PCF_GL_ARGV_FILE="$argv_file" "$invoke_snippet" 2>/dev/null)"; rc=$?
+  if [[ "$rc" == "0" ]]; then
+    emit FAIL "$verb" "rc-0-on-error (HTTP 500 but verb still returned 0)"
+    return
+  fi
+  emit PASS "$verb"
+}
+
+# _run_gl_write_assert <verb> <invoke_snippet> <method_needle> <path_needle> [body_needle] —
+# parallel of _run_write_assert. Serves the default per-path fixture (single
+# happy payload — the hook selects based on path substring), asserts rc 0
+# AND that _PCF_GL_ARGV_FILE contains the expected HTTP method + path
+# substring (and optional body substring); then re-invokes with HTTP 500 and
+# asserts rc≠0.
+_run_gl_write_assert() {
+  local verb="$1" invoke_snippet="$2" method_needle="$3" path_needle="$4" body_needle="${5:-}"
+  local argv_file="$work_root/.argv-gl-$verb.json"
+  local out rc
+  out="$(_invoke _PCF_GL_ARGV_FILE="$argv_file" "$invoke_snippet" 2>/dev/null)"; rc=$?
+  if [[ "$rc" != "0" ]]; then
+    emit FAIL "$verb" "expected rc 0 on stub-success, got rc=$rc (output: ${out:0:200})"
+    return
+  fi
+  local recorded=""
+  [[ -f "$argv_file" ]] && recorded="$(cat "$argv_file")"
+  if [[ -n "$method_needle" && "$recorded" != *"method=$method_needle"* ]]; then
+    emit FAIL "$verb" "method mismatch (expected method=$method_needle, recorded: ${recorded:0:200})"
+    return
+  fi
+  if [[ -n "$path_needle" && "$recorded" != *"$path_needle"* ]]; then
+    emit FAIL "$verb" "path mismatch (expected substring '$path_needle', recorded: ${recorded:0:200})"
+    return
+  fi
+  if [[ -n "$body_needle" && "$recorded" != *"$body_needle"* ]]; then
+    emit FAIL "$verb" "body-needle mismatch (expected substring '$body_needle', recorded: ${recorded:0:200})"
+    return
+  fi
+  rm -f "$argv_file"
+  # HTTP 500 → leaf rc≠0.
+  out="$(_invoke _PCF_GL_STATUS="500" _PCF_GL_ARGV_FILE="$argv_file" "$invoke_snippet" 2>/dev/null)"; rc=$?
+  if [[ "$rc" == "0" ]]; then
+    emit FAIL "$verb" "rc-0-on-error (HTTP 500 but verb still returned 0)"
+    return
+  fi
+  emit PASS "$verb"
+}
+
+# _run_gl_failsoft_assert <verb> <invoke_snippet> <expect_regex> — parallel
+# of _run_failsoft_assert. Under HTTP 500 the leaf MUST return rc 0 (fail-
+# SOFT contract) and stdout MUST match <expect_regex>.
+_run_gl_failsoft_assert() {
+  local verb="$1" invoke_snippet="$2" expect_regex="$3"
+  local argv_file="$work_root/.argv-gl-$verb.json"
+  local out rc
+  out="$(_invoke _PCF_GL_STATUS="500" _PCF_GL_ARGV_FILE="$argv_file" "$invoke_snippet" 2>/dev/null)"; rc=$?
+  if [[ "$rc" != "0" ]]; then
+    emit FAIL "$verb" "fail-soft contract violated: expected rc 0 on stub-failure, got rc=$rc (output: ${out:0:200})"
+    return
+  fi
+  if ! [[ "$out" =~ $expect_regex ]]; then
+    emit FAIL "$verb" "fail-soft output mismatch (got: ${out:0:200})"
     return
   fi
   emit PASS "$verb"
@@ -1317,57 +1507,175 @@ _assert_verb() {
 
   case "$verb" in
     itp_list_comments)
-      _run_shape_assert "$verb" 'itp_list_comments 42' "$PAYLOADS/comments-valid.json" 1
-      # [#393] anti-false-green: a payload in the WRONG source shape (e.g. the
-      # pre-#393 GraphQL {comments:[…]} object) would pass the array+ascending
-      # checks with every field null. Require non-null id/author/createdAt and
-      # a REST-derived bot authorKind on the known fixture.
-      local _lc_out
-      _lc_out="$(_invoke _PCF_GH_MODE="ok" _PCF_GH_PAYLOAD="$PAYLOADS/comments-valid.json" _PCF_ARGV_FILE="$work_root/.argv-lc-393.json" 'itp_list_comments 42' 2>&1)"
-      if jq -e '(length == 3) and all(.[]; .id != null and .author != null and .createdAt != null) and (.[0].authorKind == "bot") and (.[0].author == "my-claw[bot]")' >/dev/null 2>&1 <<<"$_lc_out"; then
-        emit PASS "$verb" "non-null fields + REST authorKind derivation (#393)"
-      else
-        emit FAIL "$verb" "null fields or wrong authorKind — source-shape mismatch? (${_lc_out:0:160})"
-      fi
+      case "$ITP_NAME" in
+        gitlab)
+          _run_gl_shape_assert "$verb" 'itp_list_comments 42' "$PAYLOADS/gitlab-notes-list.json" 1
+          ;;
+        *)
+          _run_shape_assert "$verb" 'itp_list_comments 42' "$PAYLOADS/comments-valid.json" 1
+          # [#393] anti-false-green: a payload in the WRONG source shape (e.g. the
+          # pre-#393 GraphQL {comments:[…]} object) would pass the array+ascending
+          # checks with every field null. Require non-null id/author/createdAt and
+          # a REST-derived bot authorKind on the known fixture.
+          local _lc_out
+          _lc_out="$(_invoke _PCF_GH_MODE="ok" _PCF_GH_PAYLOAD="$PAYLOADS/comments-valid.json" _PCF_ARGV_FILE="$work_root/.argv-lc-393.json" 'itp_list_comments 42' 2>&1)"
+          if jq -e '(length == 3) and all(.[]; .id != null and .author != null and .createdAt != null) and (.[0].authorKind == "bot") and (.[0].author == "my-claw[bot]")' >/dev/null 2>&1 <<<"$_lc_out"; then
+            emit PASS "$verb" "non-null fields + REST authorKind derivation (#393)"
+          else
+            emit FAIL "$verb" "null fields or wrong authorKind — source-shape mismatch? (${_lc_out:0:160})"
+          fi
+          ;;
+      esac
       ;;
     itp_transition_state)
-      _run_write_assert "$verb" "issue edit 42 --repo o/r --remove-label in-progress --add-label pending-review" \
-        "42 in-progress pending-review"
+      case "$ITP_NAME" in
+        gitlab)
+          # GitLab: SINGLE PUT with add_labels/remove_labels body ([INV-97],
+          # spec §3.1). Assert method + path + both CSV keys in the body.
+          _run_gl_write_assert "$verb" \
+            'itp_transition_state 42 in-progress pending-review' \
+            "PUT" "path=projects/group%2Fproject/issues/42" 'add_labels'
+          ;;
+        *)
+          _run_write_assert "$verb" "issue edit 42 --repo o/r --remove-label in-progress --add-label pending-review" \
+            "42 in-progress pending-review"
+          ;;
+      esac
       ;;
     itp_post_comment)
-      _run_write_assert "$verb" "issue comment 42 --repo o/r --body hello" "42 hello"
+      case "$ITP_NAME" in
+        gitlab)
+          _run_gl_write_assert "$verb" \
+            'itp_post_comment 42 hello' \
+            "POST" "path=projects/group%2Fproject/issues/42/notes" '"body":"hello"'
+          ;;
+        *)
+          _run_write_assert "$verb" "issue comment 42 --repo o/r --body hello" "42 hello"
+          ;;
+      esac
       ;;
     itp_edit_comment)
-      _run_write_assert "$verb" "api -X PATCH repos/o/r/issues/comments/1" "42 1 hello"
+      case "$ITP_NAME" in
+        gitlab)
+          _run_gl_write_assert "$verb" \
+            'itp_edit_comment 42 1001 hello' \
+            "PUT" "path=projects/group%2Fproject/issues/42/notes/1001" '"body":"hello"'
+          ;;
+        *)
+          _run_write_assert "$verb" "api -X PATCH repos/o/r/issues/comments/1" "42 1 hello"
+          ;;
+      esac
       ;;
     itp_mark_checkbox)
-      _run_write_assert "$verb" "api repos/o/r/issues/42" "42 newbody"
+      case "$ITP_NAME" in
+        gitlab)
+          _run_gl_write_assert "$verb" \
+            'itp_mark_checkbox 42 newbody' \
+            "PUT" "path=projects/group%2Fproject/issues/42" '"description":"newbody"'
+          ;;
+        *)
+          _run_write_assert "$verb" "api repos/o/r/issues/42" "42 newbody"
+          ;;
+      esac
       ;;
     itp_provision_states)
-      _run_write_assert "$verb" "label create name --repo o/r --color ededed --description d" \
-        "name ededed d"
+      case "$ITP_NAME" in
+        gitlab)
+          # GitLab: probe /labels/<name> (200 → skip) OR create → POST /labels.
+          # The path-driven fixture hook returns HTTP 200 for the probe path,
+          # so the leaf takes the [skip] branch. Assert the GET call reached
+          # /labels/<name>.
+          _run_gl_write_assert "$verb" \
+            'itp_provision_states autonomous 0E8A16 desc' \
+            "GET" "path=projects/group%2Fproject/labels/autonomous" ""
+          ;;
+        *)
+          _run_write_assert "$verb" "label create name --repo o/r --color ededed --description d" \
+            "name ededed d"
+          ;;
+      esac
       ;;
     itp_resolve_dep)
-      _run_failsoft_assert "$verb" 'itp_resolve_dep "o/r" 42 _out; printf "%s" "$_out"' '^$'
+      case "$ITP_NAME" in
+        gitlab)
+          # Fail-SOFT under HTTP 500 → empty out-var, rc 0.
+          _run_gl_failsoft_assert "$verb" \
+            'itp_resolve_dep "group/project" 42 _out; printf "%s" "$_out"' '^$'
+          ;;
+        *)
+          _run_failsoft_assert "$verb" 'itp_resolve_dep "o/r" 42 _out; printf "%s" "$_out"' '^$'
+          ;;
+      esac
       ;;
     itp_label_event_ts)
-      _run_failsoft_assert "$verb" 'itp_label_event_ts 42 autonomous' '^$'
+      case "$ITP_NAME" in
+        gitlab)
+          _run_gl_failsoft_assert "$verb" 'itp_label_event_ts 42 autonomous' '^$'
+          ;;
+        *)
+          _run_failsoft_assert "$verb" 'itp_label_event_ts 42 autonomous' '^$'
+          ;;
+      esac
       ;;
     itp_list_by_state)
-      _run_shape_assert "$verb" 'itp_list_by_state open autonomous 100 number,title,labels,comments' \
-        "$PAYLOADS/issue-list-valid.json" number
+      case "$ITP_NAME" in
+        gitlab)
+          # Note: FIELDS_CSV omits `comments` here — including it would cause
+          # the leaf to make a second per-issue notes fetch which the path-
+          # driven hook serves as a notes fixture, redirecting the shape. The
+          # `comments`-inclusive path is exercised in tests/unit/test-itp-gitlab.sh.
+          _run_gl_shape_assert "$verb" \
+            'itp_list_by_state open autonomous 100 number,title,labels' \
+            "$PAYLOADS/gitlab-issues-list.json" number
+          ;;
+        *)
+          _run_shape_assert "$verb" 'itp_list_by_state open autonomous 100 number,title,labels,comments' \
+            "$PAYLOADS/issue-list-valid.json" number
+          ;;
+      esac
       ;;
     itp_count_by_state)
-      _run_count_assert "$verb" 'itp_count_by_state open autonomous 100 in-progress' \
-        "$PAYLOADS/issue-list-valid.json"
+      case "$ITP_NAME" in
+        gitlab)
+          _run_gl_count_assert "$verb" \
+            'itp_count_by_state open autonomous 100 in-progress' \
+            "$PAYLOADS/gitlab-issues-list.json"
+          ;;
+        *)
+          _run_count_assert "$verb" 'itp_count_by_state open autonomous 100 in-progress' \
+            "$PAYLOADS/issue-list-valid.json"
+          ;;
+      esac
       ;;
     itp_list_forbidden_combos)
-      _run_shape_assert "$verb" 'itp_list_forbidden_combos open autonomous 100' \
-        "$PAYLOADS/issue-list-valid.json" number
+      case "$ITP_NAME" in
+        gitlab)
+          _run_gl_shape_assert "$verb" \
+            'itp_list_forbidden_combos open autonomous 100' \
+            "$PAYLOADS/gitlab-issues-list.json" number
+          ;;
+        *)
+          _run_shape_assert "$verb" 'itp_list_forbidden_combos open autonomous 100' \
+            "$PAYLOADS/issue-list-valid.json" number
+          ;;
+      esac
       ;;
     itp_read_task)
-      _run_object_shape_assert "$verb" 'itp_read_task 42 title,body,state,labels,comments' \
-        "$PAYLOADS/issue-view-valid.json" "$PAYLOADS/comments-valid.json"
+      case "$ITP_NAME" in
+        gitlab)
+          # NB: request only 'title,body,state,labels' — including `comments`
+          # would trigger a second per-issue notes fetch which the path-
+          # driven hook serves. Comments+read_task composition is proven in
+          # tests/unit/test-itp-gitlab.sh (TC-WB-042).
+          _run_gl_object_shape_assert "$verb" \
+            'itp_read_task 42 title,body,state,labels' \
+            "$PAYLOADS/gitlab-issue-view.json"
+          ;;
+        *)
+          _run_object_shape_assert "$verb" 'itp_read_task 42 title,body,state,labels,comments' \
+            "$PAYLOADS/issue-view-valid.json" "$PAYLOADS/comments-valid.json"
+          ;;
+      esac
       ;;
     chp_review_threads)
       _run_shape_assert "$verb" 'chp_review_threads 42' "$PAYLOADS/review-threads-valid.json" 0

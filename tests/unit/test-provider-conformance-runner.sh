@@ -488,28 +488,48 @@ assert_eq "TC-RGH-032: --expect-absent without seam qualification → exit 2 (fa
 
 # ===========================================================================
 echo ""
-echo "=== TC-RGH-040..042: --itp gitlab --chp gitlab interim (W-D early half) ==="
+echo "=== TC-RGH-040..042: --itp gitlab --chp gitlab interim (W-D early half + W-B) ==="
 # ===========================================================================
-# TC-RGH-040: gitlab/gitlab on today's tree — non-zero exit, one FAIL per absent verb.
+# TC-RGH-040: gitlab/gitlab on today's tree — non-zero exit, one FAIL per absent
+# CHP verb (leaf absent) plus real FAILs on the ITP verbs (no transport hook
+# armed → the ITP leaves fail the transport preflight and/or shape checks —
+# still a FAIL, just a different disposition than "leaf absent").
+#
+# **W-B (#417) update.** Before #417 all 14 ITP verbs also emitted "leaf
+# absent" lines (itp-gitlab.sh didn't exist), so the pre-W-B count was
+# ≥ 20. Post-#417, the 14 ITP leaves are DEFINED; they now FAIL under the
+# gitlab/gitlab-no-hook config for a different (real) reason. So the
+# leaf-absent bound tightens to ONLY the CHP verbs (13 CHP verbs waiting on
+# W-C1 / W-C2 for their leaves) — an even more precise assertion than the
+# pre-#417 "≥ 20".
 gl_out=$(bash "$RUNNER" --itp gitlab --chp gitlab 2>&1); gl_rc=$?
 if [[ "$gl_rc" -ne 0 ]]; then
-  ok "TC-RGH-040: --itp gitlab --chp gitlab (no leaves) → rc != 0"
+  ok "TC-RGH-040: --itp gitlab --chp gitlab (no leaves for CHP; no hook for ITP) → rc != 0"
 else
   bad "TC-RGH-040: expected rc != 0, got 0"
 fi
 gl_leafabs_count="$(grep -c 'FAIL leaf absent:' <<<"$gl_out")"
-if [[ "$gl_leafabs_count" -ge 20 ]]; then
-  ok "TC-RGH-040: 20+ per-verb 'FAIL leaf absent' lines emitted ($gl_leafabs_count)"
+# CHP-gitlab leaves are still absent → at least 13 "leaf absent" lines
+# (the 14-verb CHP surface minus chp_close_keyword which is a caller-side
+# render assertion and PASSes without a leaf; the exact count may vary as
+# W-C evolves, so we assert the lower bound conservatively).
+if [[ "$gl_leafabs_count" -ge 13 ]]; then
+  ok "TC-RGH-040: 13+ per-verb 'FAIL leaf absent' lines (CHP-gitlab verbs still absent post-W-B): $gl_leafabs_count"
 else
-  bad "TC-RGH-040: expected ≥ 20 FAIL leaf absent lines, got $gl_leafabs_count"
+  bad "TC-RGH-040: expected ≥ 13 FAIL leaf absent lines (CHP-gitlab set), got $gl_leafabs_count"
 fi
 
 # TC-RGH-041: runner did NOT abort — has a CONFORMANCE-SUMMARY line.
 assert_contains "TC-RGH-041: runner completed (has SUMMARY line)" "CONFORMANCE-SUMMARY" "$gl_out"
 
-# TC-RGH-042: --expect-absent covering every absent verb → rc 0.
-# Build the full absent-verb list by extracting them from the FAIL output.
-# For robustness, name every verb we know is absent on today's tree.
+# TC-RGH-042: --expect-absent covering every absent verb → the leaf-absent
+# FAILs downgrade to SKIPs. Under W-B the 14 ITP verbs are no longer leaf-
+# absent (they FAIL on transport-preflight instead) — since --expect-absent
+# only downgrades leaf-absent FAILs and cannot silence other FAILs, this
+# no-hook run STILL exits non-zero once --expect-absent covers only the
+# still-absent CHP verbs. Verify the RUNNER's DOWNGRADE behavior directly:
+# with --expect-absent covering the CHP verbs, ALL leaf-absent lines flip
+# to SKIP (expected-absent), and no leaf-absent FAILs remain.
 _all_absent=""
 while IFS= read -r line; do
   # Grab lines like "CONFORMANCE-PCONF gitlab/gitlab <verb> FAIL leaf absent"
@@ -522,7 +542,12 @@ while IFS= read -r line; do
 done <<<"$gl_out"
 _all_absent="${_all_absent%,}"
 gl_out2=$(bash "$RUNNER" --itp gitlab --chp gitlab --expect-absent "$_all_absent" 2>&1); gl2_rc=$?
-assert_eq "TC-RGH-042: --expect-absent covering every absent verb → rc 0" "0" "$gl2_rc"
+# The ITP verbs still FAIL (no transport hook armed), so the overall rc is
+# still non-zero. The precise assertion here is: zero "FAIL leaf absent"
+# lines remain (every one downgraded to SKIP by --expect-absent).
+gl2_leafabs_count="$(grep -c 'FAIL leaf absent:' <<<"$gl_out2")"
+assert_eq "TC-RGH-042: --expect-absent downgrades every leaf-absent FAIL to SKIP" \
+  "0" "$gl2_leafabs_count"
 
 # ===========================================================================
 echo ""

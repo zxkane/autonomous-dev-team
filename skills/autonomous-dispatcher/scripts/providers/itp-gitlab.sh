@@ -27,8 +27,7 @@
 # GitLab config keys `GITLAB_PROJECT` / `GITLAB_HOST` / `GITLAB_TOKEN`
 # (spec §3.4) are in scope from the caller's environment. Under standalone
 # unit tests, the tests define local `_gl_api` / `_gl_urlencode` stubs BEFORE
-# sourcing this file so the leaves invoke the stubs (no transport lib needed
-# on this PR's branch).
+# sourcing this file so the leaves invoke the stubs.
 #
 # 14 ITP verbs (matches itp-github.sh's set):
 #   itp_gitlab_list_by_state       itp_gitlab_count_by_state        [W1a]
@@ -40,6 +39,26 @@
 #   itp_gitlab_resolve_dep         itp_gitlab_begin_tick            [DEP]
 #   itp_gitlab_label_event_ts                                       [OBSERVE]
 # (itp_caps reads the .caps manifest in the dispatcher, not a function here.)
+#
+# Transport lib self-source. `lib-issue-provider.sh` sources ONLY
+# `itp-<PROVIDER>.sh` (spec §6 / lib-issue-provider.sh:65); the transport lib
+# is a SIBLING file in `providers/`, so the leaf self-sources it here. Guarded
+# on `_gl_api` presence so a unit test that pre-defines local `_gl_api` /
+# `_gl_urlencode` stubs (test-itp-gitlab.sh) keeps its stubs — a re-source
+# that redefined the transport functions would blow the test-local
+# hermeticity away. Under production the guard is trivially false (nothing
+# has defined `_gl_api` yet) so the real transport lib loads. Uses the
+# `readlink -f` idiom the rest of the codebase relies on so a project-side
+# symlink into the skill tree resolves correctly ([INV-14]/[INV-65], spec §6).
+if ! declare -F _gl_api >/dev/null 2>&1; then
+  _ITP_GITLAB_SELF="${BASH_SOURCE[0]:-$0}"
+  _ITP_GITLAB_REAL_DIR="$(cd "$(dirname "$(readlink -f "$_ITP_GITLAB_SELF")")" && pwd 2>/dev/null)" || _ITP_GITLAB_REAL_DIR=""
+  if [[ -n "$_ITP_GITLAB_REAL_DIR" && -r "${_ITP_GITLAB_REAL_DIR}/lib-gitlab-transport.sh" ]]; then
+    # shellcheck source=lib-gitlab-transport.sh
+    source "${_ITP_GITLAB_REAL_DIR}/lib-gitlab-transport.sh"
+  fi
+  unset _ITP_GITLAB_SELF _ITP_GITLAB_REAL_DIR
+fi
 
 # ---------------------------------------------------------------------------
 # Internal helpers. Provider-scoped names (`_itp_gitlab_*`) mirror the GitHub
