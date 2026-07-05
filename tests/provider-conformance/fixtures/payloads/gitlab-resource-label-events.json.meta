@@ -1,0 +1,8 @@
+source: hand-authored
+capture_date: 2026-07-05
+gitlab_version: 17.x
+endpoint: GET /projects/:id/issues/:iid/resource_label_events
+shape: label event array with add/remove actions; leaf filters action=="add" AND label.name==LABEL.
+notes: |
+  Multiple `add` events for the same label — the leaf returns the NEWEST
+  matching created_at.

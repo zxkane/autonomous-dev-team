@@ -1,0 +1,5 @@
+source: hand-authored
+capture_date: 2026-07-05
+gitlab_version: 17.x
+endpoint: GET /projects/:id/issues/:iid
+shape: single issue object; description→body rename covered; state=opened → normalized OPEN.

@@ -1,0 +1,9 @@
+source: hand-authored
+capture_date: 2026-07-05
+gitlab_version: 17.x
+endpoint: GET /projects/:id/issues?state=opened&labels=autonomous&per_page=100
+shape: array of issue objects (single page); .iid used as spec `number`; labels[] as name strings; state ∈ opened|closed
+notes: |
+  Deliberately out of order (iid 5 before iid 3) — the leaf's normalize
+  jq must sort ascending by number regardless of the server's natural
+  order.

@@ -1,0 +1,8 @@
+source: hand-authored
+capture_date: 2026-07-05
+gitlab_version: 17.x
+endpoint: GET /projects/<url-encoded group/subgroup/project>/issues/:iid
+shape: single issue on a cross-project (slash-bearing group path) lookup.
+notes: |
+  Used by itp_gitlab_resolve_dep to prove _gl_urlencode is invoked BEFORE
+  the path is composed.

@@ -1,0 +1,43 @@
+# Probe: distinct_bot_author=1
+
+Hand-authored evidence stub for the `.caps` claim
+`distinct_bot_author=1` (see providers/itp-gitlab.caps). Backs #417 R2 /
+#414 AC5.
+
+## What the probe would capture live
+
+Under a GitLab project or group access token, POSTing a note (or any
+comment-shaped write) records the author as a SYNTHETIC bot user whose
+`author.username` follows the convention:
+
+  project_<project_id>_bot_<random_slug>
+  group_<group_id>_bot_<random_slug>
+
+These synthetic users are DISTINCT from any human user in the workspace
+(the token is bound to the project/group, not to a person). A note POSTed
+by a `project_<n>_bot_*` user shows up in `GET /projects/:id/issues/:iid/notes`
+with `.author.username` matching the convention above.
+
+## Fixture evidence
+
+The recorded shape lives in `fixtures/payloads/gitlab-notes-list.json` —
+the entry with `id: 1003` has `.author.username == "project_42_bot_abc123"`.
+This is the shape `itp_gitlab_list_comments` runs its
+`authorKind = "bot"` regex against
+(`^(project|group)_[0-9]+_bot(_[a-z0-9]+)?$`).
+
+## API-doc citations
+
+- Project Access Tokens: https://docs.gitlab.com/user/project/settings/project_access_tokens.html
+- Group Access Tokens:   https://docs.gitlab.com/user/group/settings/group_access_tokens.html
+
+## Caveat (already stated in the caps comment)
+
+A personal-PAT deployment posts as the HUMAN user itself, which degrades
+this cap to a BOT_LOGIN-convention posture. The `.caps=1` claim is scoped
+to the RECOMMENDED project/group access token topology; operators are
+told to prefer PAT-mode-equivalent tokens in the GitLab setup doc (W-E).
+
+## Flags
+
+hand_authored: true

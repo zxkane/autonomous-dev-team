@@ -1,0 +1,5 @@
+source: hand-authored
+capture_date: 2026-07-05
+gitlab_version: 17.x
+endpoint: POST /projects/:id/labels
+shape: created label echo — GL_API_STATUS=201 on real create, or 409 on concurrent race.

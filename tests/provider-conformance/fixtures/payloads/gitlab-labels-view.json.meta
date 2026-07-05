@@ -1,0 +1,5 @@
+source: hand-authored
+capture_date: 2026-07-05
+gitlab_version: 17.x
+endpoint: GET /projects/:id/labels/:name
+shape: existing label — GL_API_STATUS=200 → itp_gitlab_provision_states emits [skip].
