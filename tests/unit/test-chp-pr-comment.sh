@@ -139,13 +139,19 @@ rm -rf "$RUNDIR"
 #    BEFORE the source-shape block so a degraded path is proven first.
 # ===========================================================================
 echo "=== TC-CPC-020/021: self-guarding shim degrades on leaf-absent, no set -e abort ==="
-DEGRADED_DIR="$PROJECT_ROOT/tests/unit/fixtures/provider-degraded"
+# [#419 P3-4 review-r4] The degraded fixture now defines chp_degraded_pr_comment
+# so the conformance runner can assert coverage on --chp degraded axes. To
+# keep this test's semantic (shim degrades cleanly when the leaf is genuinely
+# absent), we pivot to an empty provider dir + a synthetic CODE_HOST name —
+# the shim's self-guard path is what matters, and it's now isolated from
+# future fixture-leaf additions.
+EMPTY_PROV_DIR="$(mktemp -d)"; trap 'rm -rf "$EMPTY_PROV_DIR"' EXIT
 rc=0
 out=$(env -u AUTONOMOUS_CONF -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR \
-        REPO="$REPO" CODE_HOST=degraded AUTONOMOUS_PROVIDERS_DIR="$DEGRADED_DIR" \
+        REPO="$REPO" CODE_HOST=emptyprov AUTONOMOUS_PROVIDERS_DIR="$EMPTY_PROV_DIR" \
       bash -c "
         set -euo pipefail
-        source '$CHP_LIB' 2>/dev/null    # degraded provider: shim present, leaf ABSENT
+        source '$CHP_LIB' 2>/dev/null    # no chp-emptyprov.sh → leaf ABSENT
         # The '|| true' caller framing must swallow the shim's clean non-zero.
         chp_pr_comment 42 --body 'x' 2>/dev/null || true
         echo POSTGUARD
@@ -158,10 +164,10 @@ assert_eq "TC-CPC-020 self-guarding shim returns clean non-zero when leaf absent
   "yes" "$([[ "$out" == *"SHIM_RC=nonzero"* ]] && echo yes || echo no)"
 # The shim WARNs to stderr naming the missing leaf (loud misconfiguration).
 warn=$(env -u AUTONOMOUS_CONF -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR \
-        REPO="$REPO" CODE_HOST=degraded AUTONOMOUS_PROVIDERS_DIR="$DEGRADED_DIR" \
+        REPO="$REPO" CODE_HOST=emptyprov AUTONOMOUS_PROVIDERS_DIR="$EMPTY_PROV_DIR" \
       bash -c "source '$CHP_LIB' 2>/dev/null; chp_pr_comment 42 --body 'x' 2>&1 >/dev/null" 2>&1 || true)
 assert_eq "TC-CPC-020 shim WARNs naming the missing chp_<host>_pr_comment leaf" \
-  "yes" "$([[ "$warn" == *"chp_degraded_pr_comment"* && "$warn" == *WARN* ]] && echo yes || echo no)"
+  "yes" "$([[ "$warn" == *"chp_emptyprov_pr_comment"* && "$warn" == *WARN* ]] && echo yes || echo no)"
 
 # ===========================================================================
 # 4. SOURCE-SHAPE (AC4) — zero executable raw `gh pr comment`; leaf+shim present;

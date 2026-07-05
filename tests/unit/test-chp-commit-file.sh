@@ -383,24 +383,27 @@ else
   fail "TC-CCF-040 upload-screenshot.sh does NOT resolve lib-code-host.sh via the skill-tree idiom"
 fi
 
-# TC-CCF-041 — self-guarding shim: leaf-absent (degraded fixture, no chp leaves) →
-# chp_commit_file returns non-zero + WARN, does NOT command-not-found-abort.
-if [[ -d "$FAKE_PROVIDER" ]]; then
-  guard_out=$(
-    env -u AUTONOMOUS_CONF -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR \
-        CODE_HOST=degraded AUTONOMOUS_PROVIDERS_DIR="$FAKE_PROVIDER" \
-    bash -c '
-      set -uo pipefail
-      source "'"$CHP_LIB"'" 2>/dev/null
-      chp_commit_file o/r screenshots p/x.png B64 msg 2>&1
-      echo "RC=$?"
-    '
-  )
-  assert_contains "TC-CCF-041 degraded backend: chp_commit_file WARNs leaf-absent" "no chp_degraded_commit_file leaf" "$guard_out"
-  assert_contains "TC-CCF-041b degraded backend: chp_commit_file returns non-zero" "RC=1" "$guard_out"
-else
-  fail "TC-CCF-041 degraded fake provider fixture missing at $FAKE_PROVIDER (expected from #280)"
-fi
+# TC-CCF-041 — self-guarding shim: leaf-absent → chp_commit_file returns
+# non-zero + WARN, does NOT command-not-found-abort.
+# [#419 P3-4 review-r4] The degraded fixture now defines chp_degraded_commit_file
+# so the conformance runner can assert coverage. To keep this test's semantic
+# (shim degrades cleanly when the leaf is genuinely absent), we pivot to an
+# empty provider dir + a synthetic CODE_HOST name — the shim's self-guard
+# path is what matters, and it's now isolated from future fixture-leaf additions.
+EMPTY_PROV_DIR="$(mktemp -d)"
+guard_out=$(
+  env -u AUTONOMOUS_CONF -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR \
+      CODE_HOST=emptyprov AUTONOMOUS_PROVIDERS_DIR="$EMPTY_PROV_DIR" \
+  bash -c '
+    set -uo pipefail
+    source "'"$CHP_LIB"'" 2>/dev/null
+    chp_commit_file o/r screenshots p/x.png B64 msg 2>&1
+    echo "RC=$?"
+  '
+)
+rm -rf "$EMPTY_PROV_DIR"
+assert_contains "TC-CCF-041 leaf-absent backend: chp_commit_file WARNs leaf-absent" "no chp_emptyprov_commit_file leaf" "$guard_out"
+assert_contains "TC-CCF-041b leaf-absent backend: chp_commit_file returns non-zero" "RC=1" "$guard_out"
 
 # ===========================================================================
 echo ""

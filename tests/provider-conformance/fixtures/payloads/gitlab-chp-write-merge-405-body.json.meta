@@ -1,0 +1,9 @@
+# P3-4 R4 — chp_gitlab_merge PUT /merge 405/409/422 error-body shape.
+#
+# gitlab_version=17.x
+# reference_endpoint=PUT /projects/:id/merge_requests/:iid/merge
+#
+# GitLab's not-mergeable error responses surface as-is through the seam;
+# the caller's first-500-chars excerpt posts the response `.message`.
+# `_gl_api` transport surfaces the non-2xx via rc≠0 with the body preserved
+# for tolerated statuses (this fixture models the body).

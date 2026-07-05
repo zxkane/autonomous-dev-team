@@ -1,0 +1,8 @@
+# P3-4 R13 — chp_gitlab_count_reviews_by_login two-approvers fixture.
+#
+# gitlab_version=17.x
+# reference_endpoint=GET /projects/:id/merge_requests/:iid/approvals
+#
+# Data-source honesty (INV-94): GitLab has no review objects — /approvals is
+# the closest semantic (pinned in leaf header + spec §5.1). Single-page bounded
+# (no --paginate needed).

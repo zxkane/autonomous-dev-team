@@ -1,0 +1,12 @@
+{
+  "id": 42,
+  "iid": 42,
+  "project_id": 42,
+  "title": "feat: sample",
+  "state": "opened",
+  "approvals_required": 1,
+  "approvals_left": 0,
+  "approved_by": [
+    {"user": {"id": 100, "username": "reviewer-bot", "name": "Reviewer Bot"}}
+  ]
+}

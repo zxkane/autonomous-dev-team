@@ -1,0 +1,9 @@
+# P3-4 R2 — chp_gitlab_create_pr default-branch probe fixture.
+#
+# gitlab_version=17.x
+# reference_endpoint=GET /projects/:id
+# reference_docs=https://docs.gitlab.com/ee/api/projects.html#get-single-project
+#
+# Coverage: `.default_branch` populated to feed the MR POST body's
+# `target_branch`; the create leaf resolves the default branch ONCE per
+# invocation (no cache — stale-cache hazard).

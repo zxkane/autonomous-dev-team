@@ -1,0 +1,9 @@
+# P3-4 R13 — chp_gitlab_count_reviews_by_login injection-safe login fixture.
+#
+# gitlab_version=17.x
+#
+# Coverage: (a) `github-actions[bot]`-style login matches counted 1; (b) a
+# login literal containing `"` in the payload — a caller passing an evil
+# LOGIN string with `"; injection` must NOT be able to widen the jq selector
+# (JSON-encoded via jq --arg into the program). The leaf's injection-safe
+# encoding pins this.

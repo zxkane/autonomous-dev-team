@@ -241,6 +241,29 @@ chp_commit_file() {
   chp_${CODE_HOST}_commit_file "$@"
 }
 
+# chp_file_url REPO BRANCH FILE_PATH — render the browser blob URL (#419 R11).
+#
+# Pure string render, NO HTTP — parallels chp_close_keyword's render pattern.
+# NEW verb — sibling of chp_commit_file (the write side) that lets the caller
+# echo a link to the just-committed file without dispatching a github-only raw
+# `/blob/` URL. GitHub renders `https://github.com/${REPO}/blob/…` (byte-identical
+# to the pre-#419 upload-screenshot.sh:114 hardcode); GitLab renders
+# `https://${GITLAB_HOST}/<decoded-project-path>/-/blob/…` (browser URLs use
+# the RAW slash-bearing project path, NOT the URL-encoded GITLAB_PROJECT).
+#
+# SELF-GUARDING like chp_commit_file / chp_pr_view: upload-screenshot.sh is
+# standalone and exits non-zero on failure, invoking the verb UNGUARDED — so a
+# leaf-absent enabled provider yields a clean WARN + rc 1 the caller's
+# `chp_file_url … || fail` degrades on, rather than dispatching to an undefined
+# leaf and command-not-found-aborting under set -e.
+chp_file_url() {
+  if ! declare -F "chp_${CODE_HOST}_file_url" >/dev/null 2>&1; then
+    echo "WARN: [INV-99] CODE_HOST='${CODE_HOST}' provider defines no chp_${CODE_HOST}_file_url leaf — file-URL render unavailable." >&2
+    return 1
+  fi
+  chp_${CODE_HOST}_file_url "$@"
+}
+
 # chp_has_leaf <verb> — returns 0 iff the ENABLED provider actually defines the
 # leaf `chp_${CODE_HOST}_<verb>` (e.g. `chp_has_leaf close_keyword`).
 #

@@ -1,0 +1,8 @@
+{
+  "approvals_required": 1,
+  "approvals_left": 0,
+  "approved_by": [
+    {"user": {"id": 100, "username": "bot-a", "name": "Bot A"}},
+    {"user": {"id": 101, "username": "other", "name": "Other"}}
+  ]
+}

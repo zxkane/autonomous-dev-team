@@ -1,0 +1,8 @@
+{
+  "approvals_required": 1,
+  "approvals_left": 0,
+  "approved_by": [
+    {"user": {"id": 999, "username": "github-actions[bot]", "name": "GHA Bot"}},
+    {"user": {"id": 1000, "username": "evil\"; injection", "name": "Attacker"}}
+  ]
+}

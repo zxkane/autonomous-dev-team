@@ -1,0 +1,13 @@
+{
+  "id": 99999,
+  "iid": 99,
+  "project_id": 42,
+  "title": "feat: sample title",
+  "description": "sample body",
+  "state": "opened",
+  "source_branch": "feat/x",
+  "target_branch": "main",
+  "web_url": "https://gitlab.example.test/myGroup/myProject/-/merge_requests/99",
+  "squash": true,
+  "should_remove_source_branch": true
+}

@@ -1332,6 +1332,23 @@ chp_github_commit_file() {
   printf '%s\n' "$upload_sha"
 }
 
+# chp_github_file_url REPO BRANCH FILE_PATH — render the browser blob URL (#419 R11).
+#
+# Spec §3.2: pure string render, NO HTTP — parallels chp_close_keyword's render
+# pattern. Byte-identical to the pre-#419 upload-screenshot.sh:114 hardcode
+# `https://github.com/${REPO}/blob/${BRANCH}/${FILE_PATH}`. The REPO positional
+# is HONORED (not ignored) — the caller threads its own $REPO (mirrors
+# chp_github_commit_file's explicit-$1 convention). No injection surface: pure
+# printf, no jq / no HTTP call.
+#
+# Sibling of chp_gitlab_file_url (see providers/chp-gitlab.sh) — same signature,
+# same render pattern, different host + path shape. The shim `chp_file_url` in
+# lib-code-host.sh forwards "$@" to chp_${CODE_HOST}_file_url.
+chp_github_file_url() {
+  local repo="$1" branch="$2" file_path="$3"
+  printf 'https://github.com/%s/blob/%s/%s' "$repo" "$branch" "$file_path"
+}
+
 # chp_github_pr_comment PR [extra gh args…] — general PR-comment WRITE leaf (#329).
 #
 # The PR-comment-write sibling of the chp_github_pr_view / chp_github_pr_list read

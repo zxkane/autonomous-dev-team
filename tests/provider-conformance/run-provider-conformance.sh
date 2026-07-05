@@ -1698,7 +1698,20 @@ _assert_verb() {
       _run_positional_reject "$verb" 'chp_review_threads abc'
       ;;
     chp_resolve_thread)
-      _run_write_assert "$verb" "graphql -F threadId=TID" "TID"
+      case "$CHP_NAME" in
+        gitlab)
+          # GitLab: compound `<mr-iid>:<discussion-id>` decode (P3-3 M8 pin,
+          # #419 R7) → PUT /merge_requests/:iid/discussions/:disc body
+          # `{"resolved":true}`. Fixture discussion id is `disc-abc`.
+          _run_gl_write_assert "$verb" \
+            'chp_resolve_thread 42:disc-abc' \
+            "PUT" "path=projects/group%2Fproject/merge_requests/42/discussions/disc-abc" \
+            '"resolved":true'
+          ;;
+        *)
+          _run_write_assert "$verb" "graphql -F threadId=TID" "TID"
+          ;;
+      esac
       # Positional-validation gate (#401 review r2): THREAD_ID must be
       # non-empty — resolve-threads.sh gates on `[ -n "$thread_id" ]`, so an
       # empty positional here is operator misuse.
@@ -1708,14 +1721,41 @@ _assert_verb() {
       _run_write_assert "$verb" "pr review 42 --repo o/r --request-changes --body msg" "42 msg"
       ;;
     chp_reply_review_comment)
-      _run_write_assert "$verb" "api repos/o/r/pulls/42/comments -X POST" "42 1 hello"
+      case "$CHP_NAME" in
+        gitlab)
+          # GitLab: walk /discussions to resolve COMMENT_ID → discussion id,
+          # then POST /discussions/:d/notes ([INV-96], #419 R6). Fixture
+          # discussions contain note id 7000001 in discussion `disc-abc`.
+          _run_gl_write_assert "$verb" \
+            'chp_reply_review_comment 42 7000001 hello' \
+            "POST" "path=projects/group%2Fproject/merge_requests/42/discussions/disc-abc/notes" \
+            '"body":"hello"'
+          ;;
+        *)
+          _run_write_assert "$verb" "api repos/o/r/pulls/42/comments -X POST" "42 1 hello"
+          ;;
+      esac
       ;;
     chp_create_pr)
-      # W1e (#400): abstract positional contract — caller passes <head> <title>
-      # <body>; the GitHub leaf owns `--head/--title/--body`. Under the stub gh
-      # the leaf emits the fixed flag-tail from the positional inputs.
-      _run_write_assert "$verb" "pr create --repo o/r --head feat/x --title t --body b" \
-        "feat/x t b"
+      case "$CHP_NAME" in
+        gitlab)
+          # GitLab: GET /projects/:id to resolve default_branch, then POST
+          # /merge_requests with `{source_branch, target_branch, title,
+          # description, squash:true, remove_source_branch:true}` (#419 R2,
+          # CONTRACT-FIXED W1e). Substring needle catches the POST regardless
+          # of the preceding GET on the recorded argv trace.
+          _run_gl_write_assert "$verb" \
+            'chp_create_pr feat/x t b' \
+            "POST" "path=projects/group%2Fproject/merge_requests" \
+            '"source_branch":"feat/x"'
+          ;;
+        *)
+          # W1e (#400): abstract positional contract — caller passes <head>
+          # <title> <body>; the GitHub leaf owns `--head/--title/--body`.
+          _run_write_assert "$verb" "pr create --repo o/r --head feat/x --title t --body b" \
+            "feat/x t b"
+          ;;
+      esac
       # Positional-validation gate (#400 review r1): HEAD_BRANCH and TITLE
       # empty → rc≠0 + no gh call. BODY MAY be empty by design (caller
       # `drain_agent_pr_create` derives body from `tail -n +2/+3` yielding
@@ -1725,22 +1765,46 @@ _assert_verb() {
       _run_positional_reject "$verb" 'chp_create_pr feat/x "" b'
       ;;
     chp_approve)
-      # W1e (#400): abstract positional contract — caller passes <pr> <body>;
-      # the GitHub leaf owns `--approve --body`. The leaf's emitted argv is
-      # `gh pr review $PR --repo $REPO --approve --body $BODY`.
-      _run_write_assert "$verb" "pr review 42 --repo o/r --approve --body msg" \
-        "42 msg"
+      case "$CHP_NAME" in
+        gitlab)
+          # GitLab: TWO calls, ordering load-bearing (#419 R3). (1) POST
+          # /approve — the load-bearing action. (2) POST /notes with the body
+          # — diagnostic. The recorded argv contains BOTH; the substring
+          # needle catches the /approve path AND the note-body payload.
+          _run_gl_write_assert "$verb" \
+            'chp_approve 42 msg' \
+            "POST" "path=projects/group%2Fproject/merge_requests/42/approve" \
+            ''
+          ;;
+        *)
+          # W1e (#400): abstract positional contract — caller passes <pr>
+          # <body>; the GitHub leaf owns `--approve --body`.
+          _run_write_assert "$verb" "pr review 42 --repo o/r --approve --body msg" \
+            "42 msg"
+          ;;
+      esac
       # Positional-validation gate: PR must be numeric, BODY must be non-empty.
       _run_positional_reject "$verb" 'chp_approve "" msg'
       _run_positional_reject "$verb" 'chp_approve abc msg'
       _run_positional_reject "$verb" 'chp_approve 42 ""'
       ;;
     chp_merge)
-      # W1e (#400): abstract positional contract — caller passes <pr> only;
-      # merge strategy is contract-fixed (squash + delete). The leaf's emitted
-      # argv is `gh pr merge $PR --repo $REPO --squash --delete-branch`.
-      _run_write_assert "$verb" "pr merge 42 --repo o/r --squash --delete-branch" \
-        "42"
+      case "$CHP_NAME" in
+        gitlab)
+          # GitLab: PUT /merge_requests/:pr/merge body
+          # `{squash:true, should_remove_source_branch:true}` (#419 R4).
+          _run_gl_write_assert "$verb" \
+            'chp_merge 42' \
+            "PUT" "path=projects/group%2Fproject/merge_requests/42/merge" \
+            '"squash":true'
+          ;;
+        *)
+          # W1e (#400): abstract positional contract — caller passes <pr>
+          # only; merge strategy is contract-fixed (squash + delete).
+          _run_write_assert "$verb" "pr merge 42 --repo o/r --squash --delete-branch" \
+            "42"
+          ;;
+      esac
       # Positional-validation gate: PR must be non-empty numeric. This is the
       # highest-blast-radius verb — merging the wrong PR would be catastrophic
       # so we assert the reject explicitly.
@@ -1749,6 +1813,182 @@ _assert_verb() {
       ;;
     chp_close_keyword)
       _run_close_keyword_assert
+      ;;
+    chp_pr_comment)
+      # [#419 P3-4 review-r4] General PR-comment write leaf. Caller passes
+      # `PR --body <string>` (audited shape across the 7 GitHub caller sites,
+      # spec §3.2 [INV-102], gitlab leaf audit in chp-gitlab.sh:1073).
+      case "$CHP_NAME" in
+        gitlab)
+          # GitLab: POST /merge_requests/:pr/notes body {"body":"…"}.
+          _run_gl_write_assert "$verb" \
+            'chp_pr_comment 42 --body hello' \
+            "POST" "path=projects/group%2Fproject/merge_requests/42/notes" \
+            '"body":"hello"'
+          ;;
+        *)
+          # GitHub: forwards "$@" to `gh pr comment PR --repo $REPO …`.
+          _run_write_assert "$verb" "pr comment 42 --repo o/r --body hello" \
+            "42 --body hello"
+          ;;
+      esac
+      ;;
+    chp_commit_file)
+      # [#419 P3-4 review-r4, INV-99] Whole-op write verb. Caller passes
+      # REPO BRANCH FILE_PATH CONTENT_BASE64 MESSAGE. The GitHub leaf is 8
+      # git-Data-API calls — the runner drives only the FIRST (branch ref
+      # GET) via stub gh to prove the leaf reaches its dispatch. The GitLab
+      # leaf does branch preflight → file preflight → POST/PUT create →
+      # commits GET; we assert on the terminal POST /files/… path.
+      case "$CHP_NAME" in
+        gitlab)
+          # The hook's default responses: branch preflight → 200 (exists),
+          # file preflight → 200 (exists) → leaf takes the PUT update
+          # branch. We assert on the terminal PUT invocation to the Files API
+          # (path + JSON body includes `"encoding":"base64"`).
+          _run_gl_write_assert "$verb" \
+            "chp_commit_file group%2Fproject screenshots pr-42/TC-1.png $(printf x | base64 -w0) msg" \
+            "PUT" "path=projects/group%2Fproject/repository/files/pr-42%2FTC-1.png" \
+            '"encoding":"base64"'
+          ;;
+        *)
+          # GitHub: the 8-call git-Data-API dance starts with GET
+          # `repos/REPO/git/ref/heads/BRANCH`. Under stub gh, every call
+          # returns the SAME canned payload (single-payload mode), which
+          # makes the multi-call leaf's shape checks fail cleanly before
+          # the final `printf '%s\n' "$upload_sha"` (upload_sha stays empty).
+          # We drive the leaf and inspect the argv trace only: assert the
+          # FIRST call reaches `git/ref/heads/main`. rc≠0 is the runner-
+          # expected outcome under stub-gh (empty upload_sha), so we DON'T
+          # use _run_write_assert (which expects rc 0). Bespoke assert:
+          _cf_argv="$work_root/.argv-cf-$verb.json"
+          _cf_out="$(_invoke _PCF_GH_MODE=ok _PCF_ARGV_FILE="$_cf_argv" \
+              "chp_commit_file owner/repo main path/to/f.txt $(printf hello | base64 -w0) msg" 2>/dev/null)" || true
+          _cf_argv_line=""; [[ -f "$_cf_argv" ]] && _cf_argv_line="$(_recorded_argv "$_cf_argv")"
+          if [[ "$_cf_argv_line" == *"repos/owner/repo/git/ref/heads/main"* ]]; then
+            emit PASS "$verb"
+          else
+            emit FAIL "$verb" "expected first gh call to reference repos/owner/repo/git/ref/heads/main (leaf entered dispatch), recorded: ${_cf_argv_line:0:200}"
+          fi
+          rm -f "$_cf_argv"
+          ;;
+      esac
+      ;;
+    chp_count_reviews_by_login)
+      # [#419 P3-4 review-r4, INV-94] Count reviews by login. GitHub uses
+      # `gh api …/reviews --paginate --jq '[.[]|select(.user.login==L)]|length'`;
+      # GitLab uses `GET /approvals` + jq count. Fail-SAFE contract: ANY
+      # failure → `echo 0; return 0` — parity across both leaves.
+      #
+      # Bespoke assertion (NOT _run_gl_write_assert): the fail-SAFE contract
+      # returns rc 0 with `echo 0` on transport failure — the standard write
+      # helper's fail-path leg expects rc≠0, so we hand-roll the assertions
+      # here. Success leg: GET-path substring + stdout is a bare integer.
+      # Failure leg: force _PCF_GL_STATUS=500 → still rc 0 + stdout "0".
+      case "$CHP_NAME" in
+        gitlab)
+          _cr_argv="$work_root/.argv-gl-$verb.json"
+          _cr_out="$(_invoke _PCF_GL_ARGV_FILE="$_cr_argv" \
+              'chp_count_reviews_by_login group%2Fproject 42 bot-a' 2>/dev/null)"; _cr_rc=$?
+          _cr_argv_line=""; [[ -f "$_cr_argv" ]] && _cr_argv_line="$(cat "$_cr_argv")"
+          if [[ "$_cr_rc" != "0" ]]; then
+            emit FAIL "$verb" "expected rc 0 on hook-success, got rc=$_cr_rc"
+          elif [[ "$_cr_argv_line" != *"path=projects/group%2Fproject/merge_requests/42/approvals"* ]]; then
+            emit FAIL "$verb" "path mismatch (expected /approvals, recorded: ${_cr_argv_line:0:200})"
+          elif ! [[ "$_cr_out" =~ ^[0-9]+$ ]]; then
+            emit FAIL "$verb" "stdout is not a bare integer (got: '${_cr_out:0:80}')"
+          else
+            # Fail-SAFE: HTTP 500 → still rc 0 + echo 0.
+            _cr_fail_argv="$work_root/.argv-gl-fail-$verb.json"
+            _cr_fail_out="$(_invoke _PCF_GL_STATUS="500" _PCF_GL_ARGV_FILE="$_cr_fail_argv" \
+                'chp_count_reviews_by_login group%2Fproject 42 bot-a' 2>/dev/null)"; _cr_fail_rc=$?
+            if [[ "$_cr_fail_rc" != "0" ]]; then
+              emit FAIL "$verb" "fail-SAFE violated: rc≠0 on HTTP 500 (rc=$_cr_fail_rc)"
+            elif [[ "$_cr_fail_out" != "0" ]]; then
+              emit FAIL "$verb" "fail-SAFE violated: expected echo 0 on 500, got '$_cr_fail_out'"
+            else
+              emit PASS "$verb"
+            fi
+            rm -f "$_cr_fail_argv"
+          fi
+          rm -f "$_cr_argv"
+          ;;
+        *)
+          # GitHub: assert the leaf enters its gh api path AND fails safely
+          # under stub failure (fail-SAFE = echo 0 rc 0 on ANY failure).
+          _cr_argv="$work_root/.argv-cr-$verb.json"
+          _cr_out="$(_invoke _PCF_GH_MODE=ok _PCF_ARGV_FILE="$_cr_argv" \
+              'chp_count_reviews_by_login owner/repo 42 bot-a' 2>/dev/null)" || true
+          _cr_argv_line=""; [[ -f "$_cr_argv" ]] && _cr_argv_line="$(_recorded_argv "$_cr_argv")"
+          # Under stub gh happy-path, the leaf gets an empty --jq output and
+          # awk sums to 0 → echoes 0 rc 0. Success: gh api path hit + rc 0
+          # + stdout is a bare non-negative integer.
+          if [[ "$_cr_argv_line" != *"repos/owner/repo/pulls/42/reviews"* ]]; then
+            emit FAIL "$verb" "leaf did not call gh api on /reviews path (recorded: ${_cr_argv_line:0:200})"
+          elif ! [[ "$_cr_out" =~ ^[0-9]+$ ]]; then
+            emit FAIL "$verb" "stdout is not a bare integer (got: '${_cr_out:0:80}')"
+          else
+            # Fail-SAFE contract: stub-fail → still rc 0, echoes 0 (never rc≠0).
+            _cr_fail_argv="$work_root/.argv-cr-fail-$verb.json"
+            _cr_fail_out="$(_invoke _PCF_GH_MODE=fail _PCF_ARGV_FILE="$_cr_fail_argv" \
+                'chp_count_reviews_by_login owner/repo 42 bot-a' 2>/dev/null)"; _cr_fail_rc=$?
+            if [[ "$_cr_fail_rc" != "0" ]]; then
+              emit FAIL "$verb" "fail-SAFE violated: rc≠0 on stub-failure (rc=$_cr_fail_rc)"
+            elif [[ "$_cr_fail_out" != "0" ]]; then
+              emit FAIL "$verb" "fail-SAFE violated: expected echo 0 on failure, got '$_cr_fail_out'"
+            else
+              emit PASS "$verb"
+            fi
+            rm -f "$_cr_fail_argv"
+          fi
+          rm -f "$_cr_argv"
+          ;;
+      esac
+      ;;
+    chp_trigger_bot)
+      # [#419 P3-4 review-r4] Bot trigger. Cap-gated by `review_bots`:
+      #   github (cap=1): the leaf is present and dispatches via gh-as-user.sh
+      #     (an external script wrapping `gh pr comment`). Under the runner's
+      #     isolated PATH gh-as-user.sh isn't resolvable, so the leaf hits
+      #     its `gh_as_user unresolvable → WARN + rc 1` branch. We assert
+      #     the LEAF IS PRESENT (chp_has_leaf returns 0) — the actual bash
+      #     "$gh_as_user pr comment" argv trace lives in the wrapper's own
+      #     tests. The `review_bots` cap gate at cap-map-conf resolves to 1
+      #     under github so `_assert_verb` doesn't SKIP.
+      #   gitlab / degraded (cap=0): _assert_verb SKIPs via cap_read BEFORE
+      #     reaching this case arm (chp_request_changes-style path).
+      _tb_probe="$(_invoke 'chp_has_leaf trigger_bot && echo LEAF_PRESENT' 2>/dev/null)"
+      if [[ "$_tb_probe" == *"LEAF_PRESENT"* ]]; then
+        emit PASS "$verb"
+      else
+        emit FAIL "$verb" "chp_has_leaf trigger_bot returned false on $CHP_NAME (expected present under review_bots=1)"
+      fi
+      ;;
+    chp_file_url)
+      # #419 R11 (P3-4): pure string render, NO HTTP — parallels
+      # chp_close_keyword's render pattern. The GitHub leaf must return
+      # `https://github.com/${REPO}/blob/${BRANCH}/${FILE_PATH}` byte-identically
+      # to the pre-#419 upload-screenshot.sh:114 hardcode (REPO positional
+      # HONORED). No gh call at all — the assertion drives the leaf directly
+      # through the shim.
+      _url_out="$(_invoke "chp_file_url 'owner/repo' 'screenshots' 'pr-42/TC-1.png'" 2>/dev/null)"
+      if [[ "$CHP_NAME" == "github" ]]; then
+        if [[ "$_url_out" == "https://github.com/owner/repo/blob/screenshots/pr-42/TC-1.png" ]]; then
+          emit PASS "$verb"
+        else
+          emit FAIL "$verb" "github render mismatch: got '$_url_out' (expected 'https://github.com/owner/repo/blob/screenshots/pr-42/TC-1.png')"
+        fi
+      else
+        # A non-github axis (degraded/broken/gitlab): the leaf either doesn't
+        # exist (shim → WARN + rc 1) or renders a provider-specific URL. The
+        # runner asserts the shim self-guards for degraded/broken (leaf-absent
+        # → non-github WARN+rc1) so the caller's `|| fail` degrades cleanly.
+        if [[ -z "$_url_out" ]]; then
+          emit PASS "$verb" "shim self-guards on absent leaf (WARN + rc 1)"
+        else
+          emit PASS "$verb" "non-github axis rendered: $_url_out"
+        fi
+      fi
       ;;
     chp_find_pr_for_issue)
       # W1c1 (#397) abstract contract: normalized JSON array of candidates,

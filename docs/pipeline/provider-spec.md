@@ -269,6 +269,7 @@ over a bare number, so the next mint does not re-drift the prose.
 | `chp_reply_review_comment PR COMMENT_ID BODY` | `reply-to-comments.sh:41` (`gh api …/pulls/<n>/comments -X POST … in_reply_to=…`) | Reply to one PR **review comment** (`in_reply_to`). GitHub leaf emits `gh api "repos/$REPO/pulls/$PR/comments" -X POST -f body=$BODY -F in_reply_to=$COMMENT_ID --jq '{id, url}'` byte-identically; the caller composes `REPO="$OWNER/$REPO"` for the leaf's scope (owner/repo split + `COMMENT_ID` numeric sanitization stay caller-side). **New verb [INV-96], #327** — the last raw `gh` reply-POST site (the #283-deferred CHP review-thread reply). NOT capability-gated (a core code-host write); no injection pre-encode (`body`/`in_reply_to` are REST `-f`/`-F` fields, the `--jq '{id,url}'` a fixed literal). **Asserted** by `tests/provider-conformance/run-provider-conformance.sh` (#370). |
 | `chp_count_reviews_by_login REPO PR LOGIN` | the inline review-count in `missing_bot_reviews` (`lib-review-bots.sh`, the [INV-79] bot-review hard-gate) | Return the **integer count** of reviews on PR (in REPO) by LOGIN, across ALL pages, or `0` on ANY failure. **[INV-94], #324.** The `--paginate` all-pages sum (`--jq '\|length'` emits one length per page) is a GitHub-transport artifact encapsulated in the leaf, returning a provider-neutral int (mirrors `itp_count_by_state`); the `^[0-9]+$` validation + the `-eq 0` MISSING decision STAY caller-side (mirrors `chp_mergeable`'s raw-token / classify-caller-side split). **REPO is an explicit param** (NOT global `$REPO`) — the caller threads its own `repo`. **Injection-safe**: LOGIN is JSON-encoded into the `--jq` string literal. **Fail-SAFE**: the leaf CAPTURES the read output and CHECKS its exit BEFORE summing, so a partial-pagination stream (page-1 length emitted, page-2 errors) → `0` → bot MISSING (never the pre-#324 fail-open where the swallowed exit summed page-1's count → false PRESENT). The 3 agent-facing prompt-prose `gh api …/reviews` heredoc lines in `lib-review-bots.sh` are NOT migrated (permanent residue). |
 | `chp_commit_file REPO BRANCH FILE_PATH CONTENT_BASE64 MESSAGE` | the 8 raw git-Data-API `gh api` calls in `upload-screenshot.sh` (`git/ref` → `git/blobs` → `git/trees` → `git/commits` → `git/refs` → re-`git/ref` verify → `contents` GET → `contents` PUT) | **Whole-op write verb [INV-99]** — commit a single file onto a branch (creating an orphan branch if absent) and echo the committed blob SHA; non-zero on commit failure. GitHub has no single "commit one file to a branch" primitive, so the leaf IS the cohesive op's 8-call implementation (the `chp_review_threads`-wraps-a-whole-GraphQL-walk posture, NOT 8 thin shims); a GitLab backend is ONE Files API call (`POST …/repository/files/:path`, `encoding=base64`). `REPO` is threaded **explicitly** ($1, not a global — `upload-screenshot.sh` is a standalone util resolving its own `$REPO`, the #324 dropped-repo-arg lesson). `CONTENT_BASE64` is the provider-neutral currency (GitLab's Files API also takes `encoding=base64`). The local file-read + `base64 -w0` encode + the `[[ -n "$SHA" ]] \|\| fail` glue + the `/blob/` URL render stay caller-side. The leaf's temp-file cleanup uses a **self-disarming** function-scoped `trap '…; trap - RETURN' RETURN` (no `trap … EXIT` — clobbers the caller's EXIT trap; a BARE `trap … RETURN` — persists and re-fires on the `chp_commit_file` shim's return with the leaf's `local`s out of scope → `unbound variable` under `set -u`; both reproduced on-box — the self-disarm keeps the RETURN-trap contract while firing exactly once). |
+| `chp_file_url REPO BRANCH FILE_PATH` | `upload-screenshot.sh:114` (the standalone screenshot uploader — the ONLY caller today; a GitLab-lane wrapper would post 404 evidence links without this seam) | **Render-only leaf**, sibling of `chp_commit_file` — same signature (`REPO BRANCH FILE_PATH`), no HTTP. GitHub returns `https://github.com/${REPO}/blob/${BRANCH}/${FILE_PATH}` (byte-identical to the pre-#419 `upload-screenshot.sh:114` hardcode; the REPO positional is HONORED, not ignored). GitLab returns `https://${GITLAB_HOST}/<decoded-project-path>/-/blob/${BRANCH}/${FILE_PATH}` — browser URLs use the **RAW slash-bearing project path**, NOT the URL-encoded `GITLAB_PROJECT` API id (a URL-encoded browser link is a UI 404). The GitLab leaf percent-DECODES `GITLAB_PROJECT` (or the REPO positional when the caller passes an override — mirrors `chp_commit_file`'s explicit-repo convention). Self-guarding shim (leaf-absent → WARN + `return 1`), same posture as `chp_commit_file`. A caller-branch alternative was REJECTED — a github-gated raw URL outside `providers/` accumulates exactly the class this seam exists to remove. **NEW #419 (P3-4)** — one of only two new verbs phase-3 introduces (the other is P3-1's transport hook). |
 | `chp_caps` | — (new) | Emit the capability map (§4). |
 
 > **Implementation status (#367 sweep — covers the FULL 18-row/19-verb §3.2
@@ -482,9 +483,11 @@ provider-internal** — callers never see a partial page or a 429.
 
 The GitLab transport lib (`skills/autonomous-dispatcher/scripts/providers/lib-gitlab-transport.sh`, #416 W-A) is the FROZEN two-layer artifact every W-B / W-C GitLab leaf builds against. It is the load-bearing "single choke-point" (#414 pillar 2) — the pagination walker, `429`/`Retry-After` backoff, and §3.5 fail-CLOSED discipline live HERE, not in each leaf.
 
-**`_gl_http <method> <path-or-url> <headers_out_file> [body-json]`** — SINGLE-REQUEST primitive AND the OUT-OF-TREE HOOK POINT. Default impl uses curl only (no `glab` — a CLI carries its own auth/config state, blurring the standard-auth-only boundary per #414 pillar 2). Sends `PRIVATE-TOKEN: ${GITLAB_TOKEN}` against `https://${GITLAB_HOST}/api/v4/<path>`. A `<path>` that begins with `http` is used VERBATIM (used by `_gl_api`'s pagination walker to pass an absolute next-page URL). Response body → stdout for ALL HTTP statuses (including 4xx/5xx — `_gl_api` needs the body for tolerated statuses and error excerpts; no body-to-stderr split). HTTP status + response headers (at minimum `x-next-page`, `x-total-pages`, `retry-after`) → `<headers_out_file>` in a stable line-oriented format. rc 0 iff TRANSPORT succeeded (request sent, response received — curl exit 0); HTTP-status classification (≥ 400 → error, tolerated statuses, retry triggers) is EXCLUSIVELY `_gl_api`'s job. No retries here. No pagination here.
+**`_gl_http <method> <path-or-url> <headers_out_file> [body-json] [body-file]`** — SINGLE-REQUEST primitive AND the OUT-OF-TREE HOOK POINT. Default impl uses curl only (no `glab` — a CLI carries its own auth/config state, blurring the standard-auth-only boundary per #414 pillar 2). Sends `PRIVATE-TOKEN: ${GITLAB_TOKEN}` against `https://${GITLAB_HOST}/api/v4/<path>`. A `<path>` that begins with `http` is used VERBATIM (used by `_gl_api`'s pagination walker to pass an absolute next-page URL). Response body → stdout for ALL HTTP statuses (including 4xx/5xx — `_gl_api` needs the body for tolerated statuses and error excerpts; no body-to-stderr split). HTTP status + response headers (at minimum `x-next-page`, `x-total-pages`, `retry-after`) → `<headers_out_file>` in a stable line-oriented format. rc 0 iff TRANSPORT succeeded (request sent, response received — curl exit 0); HTTP-status classification (≥ 400 → error, tolerated statuses, retry triggers) is EXCLUSIVELY `_gl_api`'s job. No retries here. No pagination here.
 
-**`_gl_api [--method M] [--paginate] [--body JSON] [--tolerate-status CSV] [--max-items N] [--status-out FILE] <path>`** — the PUBLIC function every GitLab leaf calls. Owns pagination walk (with `--paginate`, loops `x-next-page` until exhausted, merges pages into ONE JSON array via `jq -s add`; page cap `GL_TRANSPORT_PAGE_CAP` default 50 → cap-hit or ANY mid-walk failure = rc ≠ 0 with NO partial output — the §3.5/#401 fail-closed discipline verbatim); `429`/`Retry-After` bounded backoff (default 3 retries per request, cap 60s per sleep); fail-loud error surfacing (HTTP status + response body excerpt). Calls `_gl_http` per request.
+**Body-file channel** (P3-4 additive extension, #419 P1-3): when the 5th positional is a non-empty file path, curl posts its content via `--data-binary @<path>` — the body NEVER lands on curl argv, so arbitrarily large payloads (base64 screenshots, multi-MB commits) do not risk `E2BIG` at the `execve` boundary. When BOTH body-json and body-file are set the FILE wins (json is ignored — the leaf should pick one). **Backward-compatible**: pre-P3-4 hooks that only read `$1..$4` IGNORE the extra positional and continue to serve zero-body responses correctly (pinned by `test-lib-gitlab-transport.sh` TC-GLT-084).
+
+**`_gl_api [--method M] [--paginate] [--body JSON] [--body-file PATH] [--tolerate-status CSV] [--max-items N] [--status-out FILE] <path>`** — the PUBLIC function every GitLab leaf calls. `--body-file` (P3-4 additive extension, #419 P1-3) threads a file path down to `_gl_http` so large bodies stay off argv; the leaf whose body may exceed ARG_MAX (`chp_gitlab_commit_file`, spec §5.1.2 R10 — base64 PNG payloads regularly exceed `getconf ARG_MAX` even though it reads as 2 MB, because the effective per-invocation argv+env budget is smaller) MUST use `--body-file`. Mutually exclusive with `--body` (file wins). File validation is fail-loud: a missing path → rc 2 with no HTTP dispatched. Owns pagination walk (with `--paginate`, loops `x-next-page` until exhausted, merges pages into ONE JSON array via `jq -s add`; page cap `GL_TRANSPORT_PAGE_CAP` default 50 → cap-hit or ANY mid-walk failure = rc ≠ 0 with NO partial output — the §3.5/#401 fail-closed discipline verbatim); `429`/`Retry-After` bounded backoff (default 3 retries per request, cap 60s per sleep); fail-loud error surfacing (HTTP status + response body excerpt). Calls `_gl_http` per request.
 
 **HTTP-status channel (load-bearing for leaf preflights; SUBSHELL-SAFE by design)**: `_gl_api` sets `GL_API_STATUS` (final HTTP status) in the calling shell on EVERY return, and `--tolerate-status 404,409` makes the named statuses return rc 0 with the body on stdout and `GL_API_STATUS` observable. **CONTRACT NOTE — command substitution loses shell variables**: a leaf that needs status discrimination MUST invoke `_gl_api … > "$tmpfile"` directly in the CURRENT shell (redirect, NOT `$( … )` capture) so the `GL_API_STATUS` assignment survives; `_gl_api` ADDITIONALLY mirrors the status into a caller-suppliable `--status-out <file>` for harnesses that must capture stdout. This is how W-B's `provision_states` discriminates 200-probe/404-create/409-race and W-C's `commit_file` runs its branch/file preflights WITHOUT parsing stderr or reaching for `_gl_http`.
 
@@ -750,6 +753,139 @@ Fail contract: `_gl_api` rc≠0, missing `head_pipeline` key, or non-object payl
 - `review_bots=0` (no native custom-slash-command review-bot registry)
 - `merge_closes_issue=1` with the **default-branch-only caveat** stated verbatim in the caps comment (`Closes #N` auto-closes ONLY on merge to the default branch; the wrapper merges to default so [M4] semantics hold; a non-default-target deployment MUST fall back to explicit `itp_transition_state`)
 - `marker_channel=html` (GitLab notes preserve `<!-- -->` verbatim — fixture round-trip evidence)
+
+#### 5.1.2 GitLab CHP write leaves (#419, P3-4) — write contracts + honesty pins
+
+The ten GitLab CHP WRITE leaves land in `providers/chp-gitlab.sh` alongside the
+P3-3 reads. Each routes HTTP exclusively through `_gl_api` (frozen #416); every
+dynamic path/query component goes through `_gl_urlencode`. `chp_gitlab_request_changes`
+is DELIBERATELY ABSENT (cap `rest_request_changes=0`, §5.1) — the caller's
+cap=0 branch posts the request-changes marker via `itp_post_comment`.
+
+**R2 — `chp_gitlab_create_pr HEAD_BRANCH TITLE BODY`.** Default branch resolved
+per invocation via ONE `GET /projects/${GITLAB_PROJECT}` → `.default_branch`
+(no cache — stale-cache hazard). POST body `{source_branch, target_branch:<default>,
+title, description, squash:true, remove_source_branch:true}` (CONTRACT-FIXED per
+W1e). Positional validation: HEAD_BRANCH and TITLE non-empty (rc 2 loud, NO
+HTTP); BODY MAY be empty (the broker's title-only create is legitimate — #400
+caller-trace lesson). Stdout echoes the response `.web_url` (opaque; callers
+don't depend on it — parity with the GitHub `gh pr create` URL echo).
+Fail-CLOSED on either call.
+
+**R3 — `chp_gitlab_approve PR BODY`.** TWO calls, **ordering load-bearing**:
+(1) `POST /projects/…/merge_requests/:iid/approve` — the load-bearing action
+(feeds `chp_gitlab_count_reviews_by_login`); (2) `POST …/notes` with `{body}`
+— diagnostic only. Approve-OK + note-FAIL → rc 0 with WARN on stderr (the
+wrapper's PASS path tolerates note-only failure). Approve-FAIL → rc≠0, note
+NOT attempted (a failed approve with a comment stub is dishonest; the wrapper's
+manual-review fallback is the correct terminal). PR `^[0-9]+$` + BODY non-empty
+(rc 2 loud NO HTTP).
+
+**R4 — `chp_gitlab_merge PR`.** `PUT /projects/…/merge_requests/:iid/merge`
+with body `{squash:true, should_remove_source_branch:true}`. 405/409/422
+error responses surface AS-IS through `_gl_api` — the response `.message` is
+what the caller's first-500-chars excerpt posts (#145 parity). PR `^[0-9]+$`
+(rc 2 loud, NO HTTP — highest-blast-radius verb). [M4]/[INV-33]: GitLab
+auto-closes `Closes #N` issues on merge-to-default (`merge_closes_issue=1`,
+default-branch caveat pinned in §5.1); the caller-side cap check is UNCHANGED.
+
+**R5 — `chp_gitlab_pr_comment PR --body <string>`.** **Audit result** (call
+sites `lib-review-e2e.sh:351/387/394/409/620` + `autonomous-review.sh:3604/3813`):
+all 7 GitHub callers pass `--body <string>`, no `--body-file`, no `--edit-last`.
+The GitLab leaf parses exactly that shape (rc 2 loud on any other arg pattern
+— extensible if a future caller needs a new flag) and POSTs `{body}` (jq-encoded,
+injection-safe) to `/projects/…/merge_requests/:iid/notes`. The GitHub leaf stays
+byte-identical this PR.
+
+**R6 — `chp_gitlab_reply_review_comment PR COMMENT_ID BODY` ([INV-96]).**
+GitLab replies attach to a DISCUSSION, not a bare note id. The leaf resolves
+COMMENT_ID → discussion id by page-walking `GET …/discussions` (via `_gl_api
+--paginate`) and finding the discussion whose `.notes[]` contains `.id ==
+COMMENT_ID`; then POSTs `{body}` to `/projects/…/discussions/:discussion_id/notes`.
+**One full walk per reply** — unavoidable given GitLab's model; the sole caller
+(`reply-to-comments.sh`) already loops per-comment (documented cost boundary
+in the leaf header). Echo `{id, url}` parity with GitHub; **synthesized URL**
+`https://${GITLAB_HOST}/<decoded-project-path>/-/merge_requests/${pr}#note_${id}`
+uses the **RAW slash-bearing project path** — browser URLs percent-DECODE
+`GITLAB_PROJECT` (URL-encoded browser links are UI 404s). Missing comment-id
+→ rc≠0; mid-walk failure (transport rc≠0) → rc≠0.
+
+**R7 — `chp_gitlab_resolve_thread THREAD_ID` — compound-id decode.** Decodes
+the P3-3 M8-pinned compound `<mr-iid>:<discussion-id>`. Malformed (no colon /
+non-numeric iid / empty discussion / empty input) → rc 2 loud NO HTTP. `PUT
+/projects/…/merge_requests/:iid/discussions/:discussion_id` body `{resolved:true}`.
+Echoes response `.resolved` bool verbatim (parity with GitHub GraphQL
+`isResolved`). The phase-2 single-positional `chp_resolve_thread <thread-id>`
+seam contract is PRESERVED — no `resolve-threads.sh` change.
+
+**R8 — `chp_gitlab_request_changes` DELIBERATELY ABSENT.** Cap
+`rest_request_changes=0` gates the caller's cap=0 branch (which posts the
+request-changes marker via `itp_post_comment`); no `chp_gitlab_request_changes`
+leaf ships. `chp_has_leaf request_changes` returns rc≠0 under `CODE_HOST=gitlab`;
+the conformance runner emits `SKIP (cap: rest_request_changes)` for this verb.
+
+**R9 — `chp_gitlab_close_keyword ISSUE`.** Renders `Closes #<iid>` — GitLab
+parses the same keyword; auto-close on merge-to-default per the caps caveat.
+Caller-side `_render_close_keyword` branch logic UNCHANGED.
+
+**R10 — `chp_gitlab_commit_file REPO BRANCH FILE_PATH CONTENT_BASE64 MESSAGE`
+([INV-99]).** Single-call collapse of the GitHub 8-call git-Data-API dance:
+`POST /projects/:id/repository/files/:urlencoded-path` with `{branch, encoding:"base64",
+content, commit_message}`. Provider-specific bootstrap the leaf owns:
+
+1. **Branch existence preflight** — `_gl_api --tolerate-status 404 …/repository/branches/${branch_urlenc}`
+   with **REDIRECT-TO-TEMPFILE** invocation (`--status-out $tmp`, NOT `$(…)`
+   capture — the P3-1 CONTRACT NOTE: command substitution loses shell
+   variables). 404 → probe default-branch, then `POST …/repository/branches?branch=…&ref=…`
+   (both dynamic pieces `_gl_urlencode`'d).
+2. **File existence preflight** the same way — 200 → PUT update, 404 → POST create.
+3. **Body via jq into a temp file** — large-body handling for base64 payloads
+   that exceed ARG_MAX (screenshots regularly do).
+4. **Post-commit SHA lookup** — GitLab's Files API create/update response has
+   `file_path` + `branch` but NO commit SHA, so a `GET …/repository/commits?ref_name=…&per_page=1`
+   → `.[0].id` follow-up fetches the SHA. One extra read, but chosen over
+   propagating a new "success-token" convention through the caller (which
+   uses the SHA only for logging).
+
+**Every dynamic path/query component** — file path, branch (slash-bearing
+`feat/x`!), ref — goes through `_gl_urlencode`. Temp-file cleanup uses the
+**INV-99 SELF-DISARMING RETURN trap**: `trap '…; trap - RETURN' RETURN`
+(verbatim discipline from the GitHub leaf; the #330 lesson — a bare RETURN
+trap persists into the shim's own return with the leaf's `local`s out of
+scope → `unbound variable` under `set -u`). Fail-CLOSED on any of the up-to-5
+calls. REPO is an explicit $1 (the #324 dropped-arg lesson).
+
+**R11 — `chp_file_url REPO BRANCH FILE_PATH` — NEW verb, both leaves.** Pure
+string render, no HTTP (parallels `chp_close_keyword`'s render pattern).
+`chp_github_file_url` returns `https://github.com/${REPO}/blob/${BRANCH}/${FILE_PATH}`
+(byte-identical to the pre-#419 `upload-screenshot.sh:114` hardcode; the REPO
+positional is HONORED). `chp_gitlab_file_url` returns
+`https://${GITLAB_HOST}/<decoded-project-path>/-/blob/${BRANCH}/${FILE_PATH}`
+using the RAW slash-bearing project path (percent-DECODED from `GITLAB_PROJECT`,
+or from the REPO positional when the caller passes an override). Same decoding
+rule applies to R6's synthesized note-anchor URL. The shim `chp_file_url` lives
+in `lib-code-host.sh` (one-line forward, self-guarding leaf-absent → WARN + rc 1),
+and `upload-screenshot.sh:114` is rewritten to `chp_file_url "$REPO" "$BRANCH"
+"$FILE_PATH"`. `upload-screenshot.sh` is ALLOWLISTED in the cutover guard
+(`command -v gh` capability probe survives); the one-line rewrite keeps its
+allowlist entry valid.
+
+**R12 — `chp_gitlab_trigger_bot`.** Cap `review_bots=0` — the caller's
+`parse_review_bots` short-circuits at cap=0 BEFORE the leaf. The leaf itself
+is a safety net: rc 0, no HTTP, no stderr (rc 0 is safer than a WARN spam if
+reached by misconfig).
+
+**R13 — `chp_gitlab_count_reviews_by_login REPO PR LOGIN` ([INV-94]).** Count
+from `GET /projects/:repo/merge_requests/:pr/approvals` → `.approved_by[]`
+where `.user.username == LOGIN`. **Data-source honesty**: GitLab has no review
+objects — approvals are the closest semantic (named as the source in the leaf
+header + this row). `/approvals` is **single-page bounded** (no `--paginate`
+needed). LOGIN JSON-encoded into the jq program (injection-safe — mirrors the
+GitHub leaf). ANY failure → `echo 0; return 0` (parity — the caller's `^[0-9]+$`
+gate + `-eq 0` MISSING decision expects 0-on-failure, NEVER rc≠0).
+
+**Caps additions this PR** (none — the P3-3 caps declared every capability the
+writes consult).
 
 ### 5.2 Asana (issue tracker only) — viable, four capabilities become optional
 
@@ -1205,6 +1341,8 @@ becomes a verb, the surrounding INV-coupled logic stays caller-side.
 | inline review-count in `missing_bot_reviews` (`lib-review-bots.sh`, the [INV-79] bot-review hard-gate) | `chp_count_reviews_by_login REPO PR LOGIN` | (a) separable-leaf | the `--paginate \| --jq '\|length' \| awk` sum leaf → a provider-neutral int; the `^[0-9]+$` validation + `-eq 0` MISSING decision stay caller-side. REPO threaded as a param, LOGIN JSON-encoded (injection-safe), capture-check-sum closes the partial-pagination fail-open ([INV-94]). The 3 agent-facing prompt-prose `gh api …/reviews` heredoc lines stay (permanent residue). **MIGRATED #324.** |
 | `upload-screenshot.sh` 8 raw git-Data-API `gh api` calls (`git/ref`→`git/blobs`→`git/trees`→`git/commits`→`git/refs`→re-`git/ref`→`contents` GET→`contents` PUT) | `chp_commit_file` | (b) entangled → ONE whole-op verb | **migrated #330** ([INV-99]): the WHOLE commit-a-PNG-to-an-orphan-branch op (the 8 calls incl. the orphan-branch create-vs-update branching + the ARG_MAX temp-file JSON build) moves to `chp_github_commit_file` and echoes the committed SHA; the local file-read + `base64 -w0` encode + the `\|\| fail`-on-empty-SHA glue + the `/blob/` URL render stay caller-side. REPO threaded explicitly ($1, not a global — #324). Leaf cleanup uses a SELF-DISARMING function-scoped `trap … RETURN` (AC2) — a bare `trap … EXIT`/non-self-disarming `… RETURN` both crash the standalone caller, reproduced on-box; the self-disarm (`trap - RETURN` as the trap body's own last action) fires exactly once per invocation. The `command -v gh` presence guard stays (residue, not a call site). Shrinks the cutover baseline by 8 occurrences / 7 signatures (60→52 occurrences, 54→47 signatures); `upload-screenshot.sh` now holds ONLY the `command -v gh` survivor. |
 | **GitLab CHP read arms** (`chp_gitlab_ci_status`, `chp_gitlab_mergeable`, `chp_gitlab_pr_view`, `chp_gitlab_pr_list`, `chp_gitlab_find_pr_for_issue`, `chp_gitlab_list_inline_comments`, `chp_gitlab_review_threads`) | same seven `chp_<verb>` names as the GitHub rows above — GitLab arm behind `CODE_HOST=gitlab` | (a) separable-leaf (each) | **MIGRATED #418 (P3-3)** — leaves live in `providers/chp-gitlab.sh`; every leaf routes HTTP exclusively through the frozen #416 `_gl_api` public function and never touches `_gl_http` (single choke-point discipline, #414 pillar 2). Normalization inside the leaf: R2 `head_pipeline.status` → `green\|pending\|failed\|none` bucket; R3 `detailed_merge_status` → `MERGEABLE\|CONFLICTING\|UNKNOWN` bucket; R4 `.iid→number`/`locked→CLOSED`/`.description null→body ""`/`reviewDecision""` unconditional/`/approvals` synthesis for reviews/system-note filter on comments/fetch-cost gates for `/closes_issues`, `/notes`, `/approvals`; R5 DISJOINT state enum + `_gl_api --paginate` page walk + `CHP_GITLAB_PR_LIST_PAGE_CAP` (fail-CLOSED on cap-hit); R6 `/issues/:iid/closed_by` as the CLOSE-linkage source (NOT `/related_merge_requests`) + per-MR `/closes_issues` confirmation + `.state==opened` post-filter; R7 inline-only fold `line // old_line`, `path // old_path`, system-note filter; R8 M8 shape with **compound `thread_id = "<mr-iid>:<discussion.id>"`** (pinned in §3.2 M8 by this PR) + resolvable-only filter + fail-CLOSED on mid-walk. No caller changes — every consumer already routes through the abstract `chp_<verb>` shim (phase-2, #347). See §5.1.1 for the verbatim bucket tables and mapping. |
+| **GitLab CHP write arms** (`chp_gitlab_create_pr`, `chp_gitlab_approve`, `chp_gitlab_merge`, `chp_gitlab_pr_comment`, `chp_gitlab_reply_review_comment`, `chp_gitlab_resolve_thread`, `chp_gitlab_close_keyword`, `chp_gitlab_commit_file`, `chp_gitlab_trigger_bot`, `chp_gitlab_count_reviews_by_login`) | same ten `chp_<verb>` names as the GitHub rows above — GitLab arm behind `CODE_HOST=gitlab`; `chp_gitlab_request_changes` is DELIBERATELY ABSENT (cap `rest_request_changes=0`) | (a) separable-leaf (each) | **MIGRATED #419 (P3-4)** — leaves complete `providers/chp-gitlab.sh`; every leaf routes HTTP exclusively through `_gl_api`. Contract highlights: R2 `chp_gitlab_create_pr` resolves default-branch per invocation + POSTs `{squash:true, remove_source_branch:true}` MR body (empty BODY legitimate — #400); R3 `chp_gitlab_approve` = TWO calls (approve then note, ordering LOAD-BEARING; approve-FAIL → rc≠0 + note NOT attempted; approve-OK + note-FAIL → rc 0 + WARN); R4 `chp_gitlab_merge` = `PUT …/merge` with `{squash, should_remove_source_branch}` (405/409/422 surface as-is); R5 `chp_gitlab_pr_comment` audits the `--body <string>` shape across all 7 GitHub call sites and posts `/notes`; R6 `chp_gitlab_reply_review_comment` walks `/discussions` (one full walk per reply — documented cost boundary), synthesizes a note-anchor URL with the RAW percent-decoded project path; R7 `chp_gitlab_resolve_thread` decodes P3-3's compound `<mr-iid>:<discussion-id>` (malformed → rc 2 loud NO HTTP); R9 `chp_gitlab_close_keyword` renders `Closes #N` (default-branch caveat per caps); R10 `chp_gitlab_commit_file` collapses the GitHub 8-call dance to Files API + orphan-branch bootstrap + REDIRECT-TO-TEMPFILE `--tolerate-status` preflights + INV-99 self-disarming RETURN trap + `_gl_urlencode` on every dynamic component; R12 `chp_gitlab_trigger_bot` is a no-op safety net (cap `review_bots=0` short-circuits caller-side); R13 `chp_gitlab_count_reviews_by_login` counts `/approvals.approved_by[].user.username == LOGIN` (single-page bounded — no `--paginate`; LOGIN JSON-encoded injection-safe; ANY failure → `echo 0; return 0`). No caller changes; every consumer routes through the abstract `chp_<verb>` shim (phase-2, #347). See §5.1.2 for the full contract text. |
+| `upload-screenshot.sh:114` (the standalone screenshot uploader — hardcoded `https://github.com/${REPO}/blob/…`) | `chp_file_url` (NEW verb + both leaves) | (a) separable-leaf | **NEW + MIGRATED #419**: introduces `chp_file_url REPO BRANCH FILE_PATH` as a sibling of `chp_commit_file` — pure string render, no HTTP. `chp_github_file_url` byte-identical to the pre-#419 hardcode (REPO positional HONORED); `chp_gitlab_file_url` renders `https://${GITLAB_HOST}/<decoded-project-path>/-/blob/${BRANCH}/${FILE_PATH}` using the RAW slash-bearing project path (percent-DECODED from `GITLAB_PROJECT`; URL-encoded browser URLs are UI 404s). The shim in `lib-code-host.sh` self-guards (leaf-absent → WARN + rc 1). `upload-screenshot.sh:114` rewritten to `chp_file_url "$REPO" "$BRANCH" "$FILE_PATH"` — one-line rewrite; the caller keeps `command -v gh` (allowlisted). A caller-branch alternative was REJECTED — a github-gated raw URL outside `providers/` would accumulate the class this seam exists to remove. `upload-screenshot.sh` cutover-baseline entry unchanged. |
 
 > `mark_stalled` and `handle_completed_session_routing` are explicitly **entangled
 > multi-op orchestrators** — they are the load-bearing examples that "the caller

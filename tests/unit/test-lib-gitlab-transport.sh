@@ -663,5 +663,105 @@ fi
 
 # ===========================================================================
 echo ""
+echo "=== TC-GLT-080..085: --body-file channel (#419 P1-3) ==="
+# ===========================================================================
+# TC-GLT-080: --body-file <path> threads the file through _gl_api → _gl_http.
+# The default _gl_http (curl-based) calls `curl … --data-binary @<path> <url>`.
+# Stub-curl records the argv; assert `--data-binary @<file>` is present and
+# the file path is the temp file the caller supplied.
+_reset_control
+export _CURL_STATUS_SEQ="201"
+_bf="$WORK/small-body.json"
+printf '%s' '{"branch":"main","content":"aGVsbG8=","commit_message":"m"}' > "$_bf"
+out=$(_run_with_lib "_gl_api --method POST --body-file '$_bf' /projects/42/repository/files/f" 2>&1); rc=$?
+assert_eq "TC-GLT-080: --body-file rc 0 on 2xx" "0" "$rc"
+assert_contains "TC-GLT-080: curl argv carries --data-binary @<path>" "--data-binary" "$(cat "$_CURL_ARGV_FILE")"
+assert_contains "TC-GLT-080: --data-binary references the file path (with @-prefix)" "@${_bf}" "$(cat "$_CURL_ARGV_FILE")"
+# The body content MUST NOT appear on curl argv (it's read from the file by curl).
+if grep -qF 'aGVsbG8=' "$_CURL_ARGV_FILE"; then
+  bad "TC-GLT-080: body content leaked onto curl argv (should be @-file only)"
+else
+  ok "TC-GLT-080: body content STAYS OFF curl argv (file-only channel)"
+fi
+
+# TC-GLT-081: missing --body-file → rc 2 loud (no curl invocation).
+_reset_control
+out=$(_run_with_lib "_gl_api --method POST --body-file '/nope/not-a-file.json' /projects/42/repository/files/f 2>&1" 2>&1); rc=$?
+assert_eq "TC-GLT-081: missing --body-file → rc 2 (fatal validation)" "2" "$rc"
+assert_contains "TC-GLT-081: error names --body-file" "--body-file" "$out"
+assert_eq "TC-GLT-081: no curl invocation on validation fail" "0" "$(_curl_inv_count "$_CURL_ARGV_FILE")"
+
+# TC-GLT-082: --body-file WINS over --body (both set → file takes precedence).
+_reset_control
+export _CURL_STATUS_SEQ="200"
+_bf="$WORK/prefer-file.json"
+printf '%s' '{"chosen":"file"}' > "$_bf"
+out=$(_run_with_lib "_gl_api --method POST --body '{\"chosen\":\"json\"}' --body-file '$_bf' /projects/42/y" 2>&1); rc=$?
+assert_eq "TC-GLT-082: mutually-exclusive → file wins, rc 0" "0" "$rc"
+assert_contains "TC-GLT-082: curl argv carries file @-ref (not inline json)" "@${_bf}" "$(cat "$_CURL_ARGV_FILE")"
+if grep -qF '"chosen":"json"' "$_CURL_ARGV_FILE"; then
+  bad "TC-GLT-082: inline body-json leaked to argv when file was set"
+else
+  ok "TC-GLT-082: inline body-json REJECTED when --body-file set (file-wins contract)"
+fi
+
+# TC-GLT-083: large-body ARG_MAX safety — 200KB payload goes through cleanly.
+_reset_control
+export _CURL_STATUS_SEQ="200"
+_big="$WORK/big-body.json"
+# Build a >200KB JSON body straight into the file (no argv splice).
+{
+  printf '{"content":"'
+  head -c 204800 /dev/urandom | base64 -w0
+  printf '","commit_message":"m"}'
+} > "$_big"
+_big_size=$(wc -c < "$_big" | tr -d '[:space:]')
+out=$(_run_with_lib "_gl_api --method POST --body-file '$_big' /projects/42/repository/files/f" 2>&1); rc=$?
+assert_eq "TC-GLT-083: >200KB body via --body-file → rc 0" "0" "$rc"
+if [[ "$_big_size" -ge 204800 ]]; then
+  ok "TC-GLT-083: body file was ${_big_size} bytes (well past ARG_MAX threshold)"
+else
+  bad "TC-GLT-083: body file only ${_big_size} bytes (expected ≥200KB)"
+fi
+
+# TC-GLT-084: backward compatibility — a pre-P1-3 hook that only reads $1..$4
+# STILL WORKS (the 5th positional is IGNORED, and since the hook has no body
+# to send, it just serves the response). We simulate a "pre-P1-3 hook" by
+# defining a hook that reads exactly 4 args and ignores the rest.
+_reset_control
+_legacy_hook="$WORK/legacy-hook.sh"
+cat > "$_legacy_hook" <<'LEGACY'
+# Pre-P1-3 hook: only reads $1..$4. The transport's _gl_api will pass a 5th
+# positional for --body-file, but this hook IGNORES it (no read of $5).
+_gl_http() {
+  local method="$1" path="$2" hdrs="$3" body_json="${4:-}"
+  printf 'HTTP/1.1 200 OK\r\n\r\n' > "$hdrs"
+  printf '{"ok":true,"echoed":%s}' "$(jq -Rn --arg m "$method" --arg p "$path" '{method:$m, path:$p}')"
+}
+LEGACY
+_bf="$WORK/hook-body.json"
+printf '%s' '{"branch":"main"}' > "$_bf"
+export GITLAB_TRANSPORT_HOOK="$_legacy_hook"
+out=$(_run_with_lib "_gl_api --method POST --body-file '$_bf' /projects/42/y" 2>&1); rc=$?
+assert_eq "TC-GLT-084: legacy-shape hook (reads \$1..\$4 only) + --body-file → rc 0 (backward-compatible)" "0" "$rc"
+assert_contains "TC-GLT-084: legacy hook response reached caller" '"ok":true' "$out"
+unset GITLAB_TRANSPORT_HOOK
+
+# TC-GLT-085: an ARG_MAX-adjacent body (128KB — the pre-P1-3 hazard threshold)
+# succeeds cleanly under --body-file.
+_reset_control
+export _CURL_STATUS_SEQ="200"
+_boundary="$WORK/arg-max-boundary.json"
+{
+  printf '{"content":"'
+  head -c 98304 /dev/urandom | base64 -w0
+  printf '"}'
+} > "$_boundary"
+_boundary_size=$(wc -c < "$_boundary" | tr -d '[:space:]')
+out=$(_run_with_lib "_gl_api --method POST --body-file '$_boundary' /projects/42/y" 2>&1); rc=$?
+assert_eq "TC-GLT-085: ARG_MAX-boundary body (~128KB) via --body-file → rc 0" "0" "$rc"
+
+# ===========================================================================
+echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 [[ "$FAIL" -eq 0 ]] && exit 0 || exit 1

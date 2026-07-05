@@ -1,0 +1,5 @@
+# P3-4 R3 — chp_gitlab_approve POST /approve success response.
+#
+# gitlab_version=17.x
+# reference_endpoint=POST /projects/:id/merge_requests/:iid/approve
+# reference_docs=https://docs.gitlab.com/ee/api/merge_request_approvals.html

@@ -1,0 +1,10 @@
+{
+  "id": 500001,
+  "type": null,
+  "body": "sample approval note",
+  "author": {"id": 100, "username": "reviewer-bot"},
+  "created_at": "2026-07-05T10:00:00.000Z",
+  "system": false,
+  "noteable_id": 42,
+  "noteable_type": "MergeRequest"
+}

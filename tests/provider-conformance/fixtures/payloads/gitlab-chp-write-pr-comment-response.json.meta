@@ -1,0 +1,4 @@
+# P3-4 R5 — chp_gitlab_pr_comment POST /notes success response.
+#
+# gitlab_version=17.x
+# reference_endpoint=POST /projects/:id/merge_requests/:iid/notes
