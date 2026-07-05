@@ -386,37 +386,49 @@ fi
 # ---------------------------------------------------------------------------
 # GitHub authentication
 # ---------------------------------------------------------------------------
-if [[ "$GH_AUTH_MODE" == "app" ]]; then
-  if [[ -z "${REVIEW_AGENT_APP_ID:-}" || -z "${REVIEW_AGENT_APP_PEM:-}" ]]; then
-    # [INV-72] auth-class config failure → surface on the issue when known.
-    error_surface "$ISSUE_NUMBER" ADT_AUTH_APP_CREDS_MISSING \
-      "GH_AUTH_MODE=app but the review agent's App credentials are unset" \
-      "REVIEW_AGENT_APP_ID and/or REVIEW_AGENT_APP_PEM is empty in autonomous.conf" \
-      "Set REVIEW_AGENT_APP_ID and REVIEW_AGENT_APP_PEM (see docs/github-app-setup.md), then re-dispatch" \
-      "docs/pipeline/errors.md#authentication-class-class-auth" auth
-    echo "Error: GH_AUTH_MODE=app requires REVIEW_AGENT_APP_ID and REVIEW_AGENT_APP_PEM" >&2
-    exit 1
+# [#416 R2 P1-2] Wrapper-level app-mode credential FATAL gated on the shared
+# `github_seam_active` predicate (lib-auth.sh). SAME shape as autonomous-dev.sh
+# — see that file for the design rationale. A `gitlab`/`gitlab` topology
+# skips the entire block; mixed topologies still run it.
+if github_seam_active; then
+  if [[ "$GH_AUTH_MODE" == "app" ]]; then
+    if [[ -z "${REVIEW_AGENT_APP_ID:-}" || -z "${REVIEW_AGENT_APP_PEM:-}" ]]; then
+      # [INV-72] auth-class config failure → surface on the issue when known.
+      error_surface "$ISSUE_NUMBER" ADT_AUTH_APP_CREDS_MISSING \
+        "GH_AUTH_MODE=app but the review agent's App credentials are unset" \
+        "REVIEW_AGENT_APP_ID and/or REVIEW_AGENT_APP_PEM is empty in autonomous.conf" \
+        "Set REVIEW_AGENT_APP_ID and REVIEW_AGENT_APP_PEM (see docs/github-app-setup.md), then re-dispatch" \
+        "docs/pipeline/errors.md#authentication-class-class-auth" auth
+      echo "Error: GH_AUTH_MODE=app requires REVIEW_AGENT_APP_ID and REVIEW_AGENT_APP_PEM" >&2
+      exit 1
+    fi
+    if ! setup_github_auth "${REVIEW_AGENT_APP_ID}" "${REVIEW_AGENT_APP_PEM}"; then
+      # [INV-72] token-mint failure (auth-class) → surface on the issue when known
+      # (the proxy may have no valid token, so this likely degrades to log-only —
+      # the correct best-effort behavior).
+      error_surface "$ISSUE_NUMBER" ADT_AUTH_TOKEN_MINT_FAILED \
+        "The review agent's GitHub App installation token could not be minted" \
+        "The token-refresh daemon never wrote an initial token (see lib-auth.sh FATAL above)" \
+        "Verify REVIEW_AGENT_APP_ID, the installation id, and REVIEW_AGENT_APP_PEM on the execution host and that the App has the required repo permissions; check the token-daemon log, then re-dispatch" \
+        "docs/pipeline/errors.md#authentication-class-class-auth" auth
+      exit 1
+    fi
+    # [INV-79] Mint the SECOND, scoped token for the review-agent subtree (reuses
+    # the review App credentials). Review agents only READ the PR + post comments /
+    # the E2E report — none need pull_requests:write, so the same scoped profile
+    # fits. Best-effort: a mint failure WARNs and leaves agents on the full-write
+    # credential (no scrub) rather than blocking the review.
+    setup_agent_token "${REVIEW_AGENT_APP_ID}" "${REVIEW_AGENT_APP_PEM}"
+  else
+    setup_github_auth
+    # [INV-79] PAT mode: no second token possible — logs a one-time WARN.
+    setup_agent_token
   fi
-  if ! setup_github_auth "${REVIEW_AGENT_APP_ID}" "${REVIEW_AGENT_APP_PEM}"; then
-    # [INV-72] token-mint failure (auth-class) → surface on the issue when known
-    # (the proxy may have no valid token, so this likely degrades to log-only —
-    # the correct best-effort behavior).
-    error_surface "$ISSUE_NUMBER" ADT_AUTH_TOKEN_MINT_FAILED \
-      "The review agent's GitHub App installation token could not be minted" \
-      "The token-refresh daemon never wrote an initial token (see lib-auth.sh FATAL above)" \
-      "Verify REVIEW_AGENT_APP_ID, the installation id, and REVIEW_AGENT_APP_PEM on the execution host and that the App has the required repo permissions; check the token-daemon log, then re-dispatch" \
-      "docs/pipeline/errors.md#authentication-class-class-auth" auth
-    exit 1
-  fi
-  # [INV-79] Mint the SECOND, scoped token for the review-agent subtree (reuses
-  # the review App credentials). Review agents only READ the PR + post comments /
-  # the E2E report — none need pull_requests:write, so the same scoped profile
-  # fits. Best-effort: a mint failure WARNs and leaves agents on the full-write
-  # credential (no scrub) rather than blocking the review.
-  setup_agent_token "${REVIEW_AGENT_APP_ID}" "${REVIEW_AGENT_APP_PEM}"
 else
-  setup_github_auth
-  # [INV-79] PAT mode: no second token possible — logs a one-time WARN.
+  # [#416 R2] gitlab/gitlab (or any non-github topology): no GitHub App
+  # identity needed. Call setup_agent_token so the GitLab PAT-posture WARN
+  # still fires; setup_agent_token is a no-op past that WARN when the github
+  # seam is inactive.
   setup_agent_token
 fi
 

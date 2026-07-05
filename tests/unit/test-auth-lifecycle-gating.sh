@@ -181,69 +181,177 @@ assert_eq "TC-AUTH-007: GitLab PAT WARN emitted ONCE (latched across 2 calls)" "
 assert_contains "TC-AUTH-007: WARN mentions INV-79 posture" "INV-79" "$out"
 
 # ===========================================================================
-echo "=== TC-AUTH-008..010: dispatcher-tick.sh app-mode credential FATAL gating ==="
+echo "=== TC-AUTH-008..010: REAL dispatcher-tick.sh app-mode FATAL segment (P1-2 review-response) ==="
 # ===========================================================================
-# We can't easily source dispatcher-tick.sh (it's the whole entry point). We
-# instead assert the gate LOGIC via a snippet that mirrors what the file
-# does — the gate is a plain `if _dispatcher_github_seam_active; then`
-# structural addition.
-_drive_dispatcher_gate() {
+# [P1-2] Drive the REAL segment sourced from dispatcher-tick.sh — not a copy
+# of the gate expression, so a future edit to the seam predicate is
+# regression-tested against the FILE, not a fixture. We extract the segment
+# from `if [[ "${GH_AUTH_MODE:-token}" == "app" ]] && github_seam_active` up
+# to (but not including) the `get_gh_app_token` mint call via awk anchor,
+# and eval it inside a subshell that has sourced lib-auth.sh (which supplies
+# the shared `github_seam_active` predicate) + a stubbed `error_surface`.
+DISP_TICK="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/dispatcher-tick.sh"
+[[ -f "$DISP_TICK" ]] || { echo "FATAL: dispatcher-tick.sh not found at $DISP_TICK"; exit 2; }
+
+DISP_SEGMENT=$(awk '
+  /^if \[\[ "\$\{GH_AUTH_MODE:-token\}" == "app" \]\] && github_seam_active; then$/ { grab=1 }
+  # Exit BEFORE printing the token-mint line so the extracted segment ends
+  # cleanly at the `source gh-app-token.sh` step (well past the FATAL block
+  # under test) — including the `_dispatcher_token=$(get_gh_app_token \`
+  # line would leave an unbalanced `$(` since we stop mid-expression.
+  /^  _dispatcher_token=/ { exit }
+  grab { print }
+' "$DISP_TICK")
+# Append a synthetic `fi` to close the outer `if` (the extracted segment
+# stops mid-body, so bash would otherwise die on `unexpected EOF while
+# looking for matching fi`). The extracted segment's own inner `if [[ -z
+# ... ]]; then ... fi` closes cleanly before the exit; only the OUTER
+# `if [[ GH_AUTH_MODE ... ]] && github_seam_active; then` needs closing.
+DISP_SEGMENT+=$'\nfi'
+if [[ -z "$DISP_SEGMENT" ]]; then
+  bad "TC-AUTH-008..010: could not extract dispatcher-tick app-mode segment (awk anchor missing? file drift?)"
+fi
+
+_drive_real_dispatcher_gate() {
   local ip="$1" ch="$2"
+  local driver="$WORK/drive-real-dispatcher.sh"
+  cat > "$driver" <<DRV
+# Stub error_surface (dispatcher-tick calls it before its own exit 1).
+error_surface() { echo "[stub error_surface] \$@" >&2; }
+source "$LIB_AUTH"
+$DISP_SEGMENT
+# If we got here without exit 1, the gate skipped or App creds were fine.
+echo "no-fatal-reached"
+exit 0
+DRV
   env -u PROJECT_DIR PATH="$PATH" \
       ISSUE_PROVIDER="$ip" CODE_HOST="$ch" GH_AUTH_MODE="app" \
+      AUTONOMOUS_CONF_DIR="$FAKE_PROJECT_DIR" \
+      REPO="test/repo" REPO_OWNER="test" REPO_NAME="repo" \
       DISPATCHER_APP_ID="" DISPATCHER_APP_PEM="" \
-      bash -c "
-        _dispatcher_github_seam_active() {
-          local _ip=\${ISSUE_PROVIDER:-github} _ch=\${CODE_HOST:-github}
-          [[ \"\$_ip\" == \"github\" || \"\$_ch\" == \"github\" ]]
-        }
-        if [[ \"\${GH_AUTH_MODE:-token}\" == \"app\" ]] && _dispatcher_github_seam_active; then
-          if [[ -z \"\${DISPATCHER_APP_ID:-}\" || -z \"\${DISPATCHER_APP_PEM:-}\" ]]; then
-            echo 'FATAL: GH_AUTH_MODE=app requires DISPATCHER_APP_ID and DISPATCHER_APP_PEM' >&2
-            exit 1
-          fi
-        fi
-        echo 'no-fatal-reached'
-        exit 0
-      "
+      LIB_DIR="$(dirname "$LIB_AUTH")" \
+      bash "$driver"
 }
 
-# TC-AUTH-008: gitlab/gitlab app-mode — NO FATAL.
-out=$(_drive_dispatcher_gate gitlab gitlab 2>&1); rc=$?
-assert_eq "TC-AUTH-008: gitlab/gitlab app-mode → rc 0 (no FATAL)" "0" "$rc"
+# TC-AUTH-008: gitlab/gitlab app-mode against the REAL segment — NO FATAL.
+out=$(_drive_real_dispatcher_gate gitlab gitlab 2>&1); rc=$?
+assert_eq "TC-AUTH-008: gitlab/gitlab REAL dispatcher-tick segment → rc 0 (no FATAL)" "0" "$rc"
 assert_contains "TC-AUTH-008: reaches past the gate (no-fatal-reached)" "no-fatal-reached" "$out"
 
-# TC-AUTH-009: github/gitlab (mixed) app-mode → FATAL fires.
-out=$(_drive_dispatcher_gate github gitlab 2>&1); rc=$?
+# TC-AUTH-009: github/gitlab (mixed) app-mode → REAL segment FATAL.
+out=$(_drive_real_dispatcher_gate github gitlab 2>&1); rc=$?
 if [[ "$rc" -ne 0 ]]; then
-  ok "TC-AUTH-009: github/gitlab mixed app-mode → FATAL (rc 1)"
+  ok "TC-AUTH-009: github/gitlab mixed → REAL dispatcher-tick FATAL (rc 1)"
 else
   bad "TC-AUTH-009: github/gitlab did NOT FATAL (rc $rc)"
 fi
 assert_contains "TC-AUTH-009: FATAL message mentions DISPATCHER_APP_ID" "DISPATCHER_APP_ID" "$out"
 
-# TC-AUTH-010: default (unset) → github/github via defaults → FATAL fires.
+# TC-AUTH-010: default unset → github/github via defaults → REAL segment FATAL.
+_driver_default="$WORK/drive-real-dispatcher-default.sh"
+cat > "$_driver_default" <<DRV
+error_surface() { echo "[stub error_surface] \$@" >&2; }
+source "$LIB_AUTH"
+$DISP_SEGMENT
+echo "no-fatal-reached"
+exit 0
+DRV
 out=$(env -u PROJECT_DIR -u ISSUE_PROVIDER -u CODE_HOST PATH="$PATH" \
-      GH_AUTH_MODE="app" DISPATCHER_APP_ID="" DISPATCHER_APP_PEM="" \
-      bash -c "
-        _dispatcher_github_seam_active() {
-          local _ip=\${ISSUE_PROVIDER:-github} _ch=\${CODE_HOST:-github}
-          [[ \"\$_ip\" == \"github\" || \"\$_ch\" == \"github\" ]]
-        }
-        if [[ \"\${GH_AUTH_MODE:-token}\" == \"app\" ]] && _dispatcher_github_seam_active; then
-          if [[ -z \"\${DISPATCHER_APP_ID:-}\" || -z \"\${DISPATCHER_APP_PEM:-}\" ]]; then
-            echo 'FATAL: GH_AUTH_MODE=app requires DISPATCHER_APP_ID and DISPATCHER_APP_PEM' >&2
-            exit 1
-          fi
-        fi
-        exit 0
-      " 2>&1); rc=$?
+      GH_AUTH_MODE="app" AUTONOMOUS_CONF_DIR="$FAKE_PROJECT_DIR" \
+      REPO="test/repo" REPO_OWNER="test" REPO_NAME="repo" \
+      DISPATCHER_APP_ID="" DISPATCHER_APP_PEM="" \
+      LIB_DIR="$(dirname "$LIB_AUTH")" \
+      bash "$_driver_default" 2>&1); rc=$?
 if [[ "$rc" -ne 0 ]]; then
-  ok "TC-AUTH-010: default unset → github/github → FATAL (rc 1, byte-identical to pre-#416)"
+  ok "TC-AUTH-010: default unset → github/github → REAL segment FATAL (byte-identical to pre-#416)"
 else
-  bad "TC-AUTH-010: default unset did NOT FATAL — regression!"
+  bad "TC-AUTH-010: default unset did NOT FATAL against the REAL segment — regression!"
 fi
 assert_contains "TC-AUTH-010: FATAL message present" "FATAL" "$out"
+
+# ===========================================================================
+echo "=== TC-AUTH-011..014: REAL wrapper startup segments (autonomous-{dev,review}.sh) — P1-2 ==="
+# ===========================================================================
+# [P1-2] Codex found the pre-fix code checked `GH_AUTH_MODE=app + require App
+# creds` at autonomous-dev.sh:~170 and autonomous-review.sh:~389 BEFORE the
+# gated setup_github_auth ran — so gitlab/gitlab still FATALed at the
+# wrapper level. Post-fix, both wrappers wrap the whole auth block in
+# `if github_seam_active; then …; fi`. Drive the REAL blocks (extracted
+# from the FILEs, not copied) under both topologies.
+DEV_SH="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/autonomous-dev.sh"
+REVIEW_SH="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/autonomous-review.sh"
+
+_extract_wrapper_auth_block() {
+  local sh="$1"
+  # Grab from `if github_seam_active; then` to the OUTER `fi` (the one
+  # ending the whole gated block).
+  awk '
+    /^if github_seam_active; then$/ { grab=1; depth=1; print; next }
+    grab {
+      print
+      # Track nesting so we stop at the OUTER fi. Only lines that are a
+      # bare `if …; then` or bare `fi` shift depth.
+      if ($0 ~ /^[[:space:]]*if [^;]*; then$|^[[:space:]]*if [[]/) depth++
+      if ($0 ~ /^[[:space:]]*fi$/) { depth--; if (depth==0) exit }
+    }
+  ' "$sh"
+}
+
+DEV_BLOCK=$(_extract_wrapper_auth_block "$DEV_SH")
+REVIEW_BLOCK=$(_extract_wrapper_auth_block "$REVIEW_SH")
+[[ -n "$DEV_BLOCK" ]]    || bad "TC-AUTH-011: could not extract auth block from autonomous-dev.sh"
+[[ -n "$REVIEW_BLOCK" ]] || bad "TC-AUTH-013: could not extract auth block from autonomous-review.sh"
+
+_drive_wrapper_block() {
+  local block="$1" ip="$2" ch="$3" mode="${4:-app}"
+  local driver="$WORK/drive-wrapper.sh"
+  cat > "$driver" <<DRV
+# Stubs for wrapper-scope symbols the extracted block references.
+error_surface() { echo "[stub error_surface] \$@" >&2; }
+ISSUE_NUMBER=42
+source "$LIB_AUTH"
+$block
+echo "no-fatal-reached"
+exit 0
+DRV
+  env -u PROJECT_DIR PATH="$PATH" \
+      ISSUE_PROVIDER="$ip" CODE_HOST="$ch" GH_AUTH_MODE="$mode" \
+      AUTONOMOUS_CONF_DIR="$FAKE_PROJECT_DIR" \
+      REPO="test/repo" REPO_OWNER="test" REPO_NAME="repo" \
+      DEV_AGENT_APP_ID="" DEV_AGENT_APP_PEM="" \
+      REVIEW_AGENT_APP_ID="" REVIEW_AGENT_APP_PEM="" \
+      bash "$driver"
+}
+
+# TC-AUTH-011: autonomous-dev.sh REAL block, gitlab/gitlab app-mode → NO FATAL.
+out=$(_drive_wrapper_block "$DEV_BLOCK" gitlab gitlab app 2>&1); rc=$?
+assert_eq "TC-AUTH-011: autonomous-dev.sh REAL block on gitlab/gitlab app-mode → rc 0" "0" "$rc"
+assert_contains "TC-AUTH-011: dev-wrapper block reaches past the gate" "no-fatal-reached" "$out"
+assert_not_contains "TC-AUTH-011: no DEV_AGENT_APP_ID FATAL on gitlab/gitlab" "requires DEV_AGENT_APP_ID" "$out"
+
+# TC-AUTH-012: autonomous-dev.sh REAL block, github/gitlab mixed app-mode → FATAL.
+out=$(_drive_wrapper_block "$DEV_BLOCK" github gitlab app 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]]; then
+  ok "TC-AUTH-012: autonomous-dev.sh github/gitlab mixed → real block FATAL (rc 1)"
+else
+  bad "TC-AUTH-012: github/gitlab mixed did NOT FATAL (rc $rc)"
+fi
+assert_contains "TC-AUTH-012: FATAL message names DEV_AGENT_APP_ID" "DEV_AGENT_APP_ID" "$out"
+
+# TC-AUTH-013: autonomous-review.sh REAL block, gitlab/gitlab app-mode → NO FATAL.
+out=$(_drive_wrapper_block "$REVIEW_BLOCK" gitlab gitlab app 2>&1); rc=$?
+assert_eq "TC-AUTH-013: autonomous-review.sh REAL block on gitlab/gitlab app-mode → rc 0" "0" "$rc"
+assert_contains "TC-AUTH-013: review-wrapper block reaches past the gate" "no-fatal-reached" "$out"
+assert_not_contains "TC-AUTH-013: no REVIEW_AGENT_APP_ID FATAL on gitlab/gitlab" "requires REVIEW_AGENT_APP_ID" "$out"
+
+# TC-AUTH-014: autonomous-review.sh REAL block, github/gitlab mixed app-mode → FATAL.
+out=$(_drive_wrapper_block "$REVIEW_BLOCK" github gitlab app 2>&1); rc=$?
+if [[ "$rc" -ne 0 ]]; then
+  ok "TC-AUTH-014: autonomous-review.sh github/gitlab mixed → real block FATAL"
+else
+  bad "TC-AUTH-014: review github/gitlab mixed did NOT FATAL"
+fi
+assert_contains "TC-AUTH-014: FATAL message names REVIEW_AGENT_APP_ID" "REVIEW_AGENT_APP_ID" "$out"
 
 # ===========================================================================
 echo ""

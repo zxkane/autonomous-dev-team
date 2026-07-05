@@ -101,6 +101,14 @@ trap _dispatch_marker_release_pending EXIT
 # shellcheck source=lib-metrics.sh
 source "${LIB_DIR}/lib-metrics.sh" 2>/dev/null || true
 
+# [#416 R2] lib-auth.sh — provides the shared `github_seam_active` /
+# `gitlab_seam_active` predicates the app-mode credential FATAL below gates
+# on. lib-auth.sh's top-level runs `load_autonomous_conf` (fail-safe `|| true`)
+# and defines its own functions; sourcing here is idempotent w.r.t. any later
+# per-project source in tick_inline_project.
+# shellcheck source=lib-auth.sh
+source "${LIB_DIR}/lib-auth.sh"
+
 # [INV-72] PROJECT_DIR (+ REPO/REPO_OWNER/PROJECT_ID) are already validated by
 # the required-key preflight ABOVE (before sourcing lib-dispatch.sh), which
 # surfaces ADT_CFG_MISSING_KEY instead of a raw `: "${VAR:?}"` abort — so no
@@ -155,20 +163,17 @@ fi
 #
 # Fail-fast on misconfig (missing id/pem, token API failure, empty result):
 # silently falling back to user auth is precisely the bug being closed.
-# [#416 R2] Gate the whole GitHub App-mode credential path on
-# `_github_seam_active` (either ISSUE_PROVIDER=github or CODE_HOST=github; the
-# two arms are independent per §auth [M9]). A `gitlab`/`gitlab` topology
-# needs neither GitHub App identity — the FATAL, the token mint, and the
-# subsequent `gh` wrapper install are all skipped. A mixed `github`/`gitlab`
-# or `gitlab`/`github` topology STILL needs it (the active github seam's
-# leaves call `gh`). Under the default (both unset → github/github, via the
-# `${…:-github}` defaults inside `_github_seam_active`) the gate is
-# transparent — byte-identical to pre-#416 behavior.
-_dispatcher_github_seam_active() {
-  local _ip="${ISSUE_PROVIDER:-github}" _ch="${CODE_HOST:-github}"
-  [[ "$_ip" == "github" || "$_ch" == "github" ]]
-}
-if [[ "${GH_AUTH_MODE:-token}" == "app" ]] && _dispatcher_github_seam_active; then
+# [#416 R2] Gate the whole GitHub App-mode credential path on the shared
+# `github_seam_active` helper (lib-auth.sh) — either ISSUE_PROVIDER=github or
+# CODE_HOST=github (the two arms are independent per §auth [M9]). A
+# `gitlab`/`gitlab` topology needs neither GitHub App identity — the FATAL,
+# the token mint, and the subsequent `gh` wrapper install are all skipped. A
+# mixed `github`/`gitlab` or `gitlab`/`github` topology STILL needs it (the
+# active github seam's leaves call `gh`). Under the default (both unset →
+# github/github via the `${…:-github}` defaults inside `github_seam_active`)
+# the gate is transparent — byte-identical to pre-#416 behavior.
+#
+if [[ "${GH_AUTH_MODE:-token}" == "app" ]] && github_seam_active; then
   if [[ -z "${DISPATCHER_APP_ID:-}" || -z "${DISPATCHER_APP_PEM:-}" ]]; then
     error_surface - ADT_AUTH_APP_CREDS_MISSING \
       "GH_AUTH_MODE=app but the dispatcher's App credentials are unset (dispatcher tick)" \

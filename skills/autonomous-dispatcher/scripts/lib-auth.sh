@@ -97,21 +97,47 @@ _AGENT_TOKEN_PAT_WARNED=""
 # INV-79 containment degrades to convention on the gitlab seam(s).
 _AGENT_GITLAB_TOKEN_PAT_WARNED=""
 
-# [#416 R2] _github_seam_active — rc 0 iff EITHER seam (ITP or CHP) uses the
-# github provider. When BOTH default to unset, the shell defaults to today's
-# behavior (github/github), so the gate is transparent to the pre-change tree.
+# [#416 R2] github_seam_active — rc 0 iff EITHER seam (ITP or CHP) uses the
+# github provider. When BOTH vars are unset the shell defaults them to
+# `github`, so the gate is transparent to the pre-change tree.
 # Read from ISSUE_PROVIDER / CODE_HOST via ${:-github} defaults; the caller
 # layer already threads these vars through every dispatcher/wrapper site.
 #
-# Consumed by setup_github_auth, setup_agent_token, and dispatcher-tick.sh's
-# app-mode credential FATAL — each of those runs ONLY when this returns 0. On
-# a `gitlab`/`gitlab` topology (both vars set to `gitlab`), the whole GitHub
-# auth lifecycle is a clean no-op: no token daemon spawn, no `gh` wrapper
-# symlink, no FATAL. On a mixed `github`/`gitlab` or `gitlab`/`github`
-# topology, at least one seam is github so the gate opens.
-_github_seam_active() {
+# CONSUMERS (post-P1-2, all four gated by this ONE predicate — no duplicated
+# expression anywhere):
+#   1. setup_github_auth (below) — the `gh` wrapper install + refresh-daemon
+#      spawn + token poll lifecycle.
+#   2. setup_agent_token (below) — the scoped agent-token mint / PAT WARN.
+#   3. dispatcher-tick.sh — the app-mode DISPATCHER_APP_ID/PEM FATAL.
+#   4. autonomous-dev.sh / autonomous-review.sh — the wrapper-level
+#      DEV_AGENT_APP_ID / REVIEW_AGENT_APP_ID FATAL, which runs BEFORE
+#      setup_github_auth (so the seam gate has to sit at the wrapper's
+#      startup site too, not only inside lib-auth.sh — that's what codex
+#      round-1 [P1-2] flagged).
+#
+# On a `gitlab`/`gitlab` topology (both vars set to `gitlab`), the whole
+# GitHub auth lifecycle is a clean no-op: no token daemon spawn, no `gh`
+# wrapper symlink, no FATAL at any of the four sites. On a mixed
+# `github`/`gitlab` or `gitlab`/`github` topology, at least one seam is
+# github so the gate opens at every consumer identically.
+github_seam_active() {
   local ip="${ISSUE_PROVIDER:-github}" ch="${CODE_HOST:-github}"
   [[ "$ip" == "github" || "$ch" == "github" ]]
+}
+
+# Back-compat alias for the pre-P1-2 name (`_github_seam_active`) — kept so
+# a stale sibling worktree sourcing this lib still resolves the predicate.
+# New call sites use the public name.
+_github_seam_active() { github_seam_active; }
+
+# [#416 R2] gitlab_seam_active — rc 0 iff EITHER seam (ITP or CHP) uses the
+# gitlab provider. Distinct from github_seam_active (an OR of EQUAL-`github`)
+# — a mixed `github`/`gitlab` topology has BOTH `github_seam_active` and
+# `gitlab_seam_active` returning true simultaneously. Used by setup_agent_token
+# to gate the GitLab PAT-posture WARN.
+gitlab_seam_active() {
+  local ip="${ISSUE_PROVIDER:-github}" ch="${CODE_HOST:-github}"
+  [[ "$ip" == "gitlab" || "$ch" == "gitlab" ]]
 }
 
 # Create the per-run GH_WRAPPER_DIR (mode 700) if not already set. Idempotent:
@@ -151,7 +177,7 @@ setup_github_auth() {
   # [#416 R2] Non-github lane — clean no-op. The `gh` wrapper + refresh daemon
   # exist to serve github leaves; a topology with neither seam on github never
   # emits a `gh` call (the [INV-91] caller layer routes through the verb seam).
-  if ! _github_seam_active; then
+  if ! github_seam_active; then
     return 0
   fi
 
@@ -280,9 +306,8 @@ setup_agent_token() {
   # INV-79 containment degrades to convention on gitlab, mirroring the PAT-mode
   # posture the GitHub PAT WARN below documents. Emitted BEFORE the github gate
   # so a `gitlab`/`gitlab` topology still surfaces it.
-  local _ip="${ISSUE_PROVIDER:-github}" _ch="${CODE_HOST:-github}"
   if [[ -z "$_AGENT_GITLAB_TOKEN_PAT_WARNED" ]] \
-     && { [[ "$_ip" == "gitlab" ]] || [[ "$_ch" == "gitlab" ]]; } \
+     && gitlab_seam_active \
      && [[ -n "${GITLAB_TOKEN:-}" ]]; then
     echo "WARN: [INV-79]/[#416 R2] GITLAB_TOKEN is present in the wrapper env — GitLab has no GitHub-App equivalent (§5.1), so a scoped agent mint is impossible; agents inherit the wrapper's GITLAB_TOKEN and INV-79 containment degrades to convention on the gitlab seam (parallel to the GH_AUTH_MODE=token PAT posture)." >&2
     _AGENT_GITLAB_TOKEN_PAT_WARNED=1
@@ -291,7 +316,7 @@ setup_agent_token() {
   # [#416 R2] Non-github lane — no scoped github token to mint, no PAT WARN to
   # emit. Return 0 as a NO-OP; the gitlab WARN above (if applicable) is the
   # gitlab-side equivalent.
-  if ! _github_seam_active; then
+  if ! github_seam_active; then
     return 0
   fi
 
