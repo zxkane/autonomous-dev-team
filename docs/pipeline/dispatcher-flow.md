@@ -223,6 +223,8 @@ The issue is now in `in-progress`; the dev wrapper is launching via `nohup`. Ste
 
 Implementation: `lib-dispatch.sh::list_pending_review`, `label_swap`.
 
+> **Provider-neutral topology note (#420 P3-5).** The `gh issue edit` shown below is the conceptual leaf; the atomic label swap is emitted by the `itp_transition_state` verb. GitHub leaf shown for reference — see [provider-spec.md §3.4](provider-spec.md#34-repo-stays--as-the-github-providers-config-namespace) for the config-namespace surface behind the seam.
+
 Find issues labeled `autonomous` AND `pending-review` AND NOT (`reviewing` OR `approved` OR `stalled`). The `approved`/`stalled` exclusion is defense-in-depth on top of [INV-25](invariants.md#inv-25-terminal-labels-approved-stalled-are-sticky-transitional-residue-is-healed-at-tick-start) Step 0 hygiene — Step 0 strips `pending-review` from terminal issues at tick start, but if Step 0 fails (rate-limit, API outage), the inline filter still keeps the selector from spawning a review against an already-approved/stalled issue.
 
 For each match, in order:
@@ -416,6 +418,8 @@ For each match:
 ### Step 5a: ALIVE in-progress + PR ready for review (#54, #56)
 
 The dev wrapper might have finished its real work — pushed a passing CI build — and then hung in some auxiliary code (polling loop, stuck stdio). Without intervention the issue stays `in-progress` forever and no review fires.
+
+> **Provider-neutral topology note (#420 P3-5).** The `gh pr list` / `gh pr checks` / `gh issue edit` shown in the gates table below are the conceptual leaves; the actual emits route through `chp_find_pr_for_issue` / `chp_ci_status` / `itp_transition_state`. GitHub leaves shown for reference — see [provider-spec.md §3.2](provider-spec.md#32-code-host-provider-chp-verbs) for the provider-neutral verb surface behind the seam.
 
 All these gates must hold before sending SIGTERM (any one failing → leave alone):
 

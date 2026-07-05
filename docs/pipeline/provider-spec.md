@@ -446,9 +446,29 @@ in-place-edit backend.
 
 `REPO` / `REPO_OWNER` / `REPO_NAME` and the `GH_AUTH_MODE` / `*_APP_ID` /
 `*_APP_PEM` keys are **not removed** — they become the GitHub provider's config
-namespace. New providers read their own keys (`GITLAB_PROJECT`, `GITLAB_HOST`,
-`GITLAB_TOKEN`; `ASANA_WORKSPACE_GID`, `ASANA_STATE_FIELD_GID`,
-`ASANA_PROJECT_GID`). Callers never read provider-scoped config directly. See the
+namespace. New providers read their own keys.
+
+**GitLab config keys — CONSUMED (post-P3-1..P3-5, #420).** `GITLAB_PROJECT`
+(URL-encoded per §3.4 shape), `GITLAB_HOST` (default `gitlab.com`),
+`GITLAB_TOKEN` (PAT / project / group token; scope `api`), and
+`GITLAB_TRANSPORT_HOOK` (operator-owned local file; §transport override
+point) are the LIVE gitlab-lane config surface — consumed by the P3-1
+transport lib (`skills/autonomous-dispatcher/scripts/providers/lib-gitlab-transport.sh`)
+and every itp-gitlab / chp-gitlab leaf (P3-2..P3-4). The operator surface
+for these keys is the commented-out `# === GitLab provider … ===` block in
+`skills/autonomous-dispatcher/scripts/autonomous.conf.example`; the full
+walkthrough (token classes, self-hosted host configuration, transport-hook
+trust model, git-remote-auth is operator-owned) lives at
+[`docs/gitlab-setup.md`](../gitlab-setup.md). The pre-P3 `RESERVED`
+framing on these keys is retired — a §3.4-listed GitLab key with no
+consumer would now be a bug, not a placeholder.
+
+**Asana config keys — RESERVED.** `ASANA_WORKSPACE_GID`,
+`ASANA_STATE_FIELD_GID`, `ASANA_PROJECT_GID` stay in this namespace as
+placeholders for a future `itp-asana.sh` slice (§5.2); no leaf consumes
+them today.
+
+Callers never read provider-scoped config directly. See the
 [§auth](#auth--per-seam-ownership-boundary-m9) section for the per-seam auth-context cut.
 
 ### 3.5 List completeness, pagination & retry

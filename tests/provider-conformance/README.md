@@ -37,6 +37,17 @@ bash tests/provider-conformance/run-provider-conformance.sh --itp github --chp g
 bash tests/provider-conformance/run-provider-conformance.sh --itp degraded --chp degraded
 bash tests/provider-conformance/run-provider-conformance.sh --itp github --chp degraded
 
+# Full GitLab axis with the fixture transport hook (#420 P3-5 how-to;
+# runner-test coverage: TC-RGH-060, #419). The same hook file serves ITP
+# endpoints (/issues, /notes, /labels, resource-label-events) and CHP
+# endpoints (/merge_requests, /discussions, /approvals, files/branches
+# for chp_gitlab_commit_file). `--transport-hook` is exactly ONE arg
+# (spec [INV-116]). Expected SUMMARY: fail=0 pending=0, 2 SKIPs
+# (chp_request_changes rest_request_changes=0 + chp_trigger_bot review_bots=0).
+bash tests/provider-conformance/run-provider-conformance.sh \
+  --itp gitlab --chp gitlab \
+  --transport-hook tests/provider-conformance/fixtures/gitlab-hook/gitlab-transport-hook.sh
+
 # env fallback (used when a flag is omitted):
 ITP_UNDER_TEST=degraded CHP_UNDER_TEST=degraded bash tests/provider-conformance/run-provider-conformance.sh
 ```
