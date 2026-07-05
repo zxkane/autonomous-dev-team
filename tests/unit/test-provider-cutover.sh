@@ -847,6 +847,99 @@ else
 fi
 
 # ===========================================================================
+echo "=== TC-CUTOVER-GLAB-001: injected raw 'glab issue create' in scratch autonomous-dev.sh FAILs (#416 R4) ==="
+# ===========================================================================
+S="$(fresh_scratch glab001)"
+# shellcheck disable=SC2016
+printf '\nglab_direct() { glab issue create --title inj; }\n' >> "$S/autonomous-dev.sh"
+out="$(bash "$CHECK" --scripts-dir "$S" --baseline "$BASELINE" 2>&1)"; rc=$?
+if [[ "$rc" -ne 0 ]] && grep -q "raw \`glab\` token" <<<"$out"; then
+  ok "TC-CUTOVER-GLAB-001: raw 'glab' in caller layer → FAIL naming the site"
+else
+  bad "TC-CUTOVER-GLAB-001: injected raw 'glab' NOT caught (rc=$rc)"
+fi
+
+# ===========================================================================
+echo "=== TC-CUTOVER-GLAB-002: 'glab' in a comment does NOT trip ==="
+# ===========================================================================
+S="$(fresh_scratch glab002)"
+# shellcheck disable=SC2016
+printf '\n# This comment mentions glab in prose — must not trip the detector.\n' >> "$S/autonomous-dev.sh"
+if bash "$CHECK" --scripts-dir "$S" --baseline "$BASELINE" >/dev/null 2>&1; then
+  ok "TC-CUTOVER-GLAB-002: prose 'glab' in a comment line does NOT trip"
+else
+  bad "TC-CUTOVER-GLAB-002: comment prose 'glab' tripped the lint (should not)"
+fi
+
+# ===========================================================================
+echo "=== TC-CUTOVER-GLAB-003: 'glabber' / '_glab' / '-glab' do NOT trip (word-boundary) ==="
+# ===========================================================================
+S="$(fresh_scratch glab003)"
+# shellcheck disable=SC2016
+printf '\nfake_fn() { local _glab=1; echo "$_glab glabber -glab"; }\n' >> "$S/autonomous-dev.sh"
+if bash "$CHECK" --scripts-dir "$S" --baseline "$BASELINE" >/dev/null 2>&1; then
+  ok "TC-CUTOVER-GLAB-003: word-boundary rejects '_glab' / 'glabber' / '-glab'"
+else
+  bad "TC-CUTOVER-GLAB-003: word-boundary letter false-positive"
+fi
+
+# ===========================================================================
+echo "=== TC-CUTOVER-GLAB-NEG: the 5 gh-app-token.sh curl argvs PASS (shape-exclusion) ==="
+# ===========================================================================
+S="$(fresh_scratch glabneg)"
+# The gh-app-token.sh curl argvs mention api.github.com endpoints — no /api/v4.
+# Verify NO regression on the clean scratch copy (Check 6 emits its "no /api/v4
+# curl found" line and rc 0). This asserts that the shape-exclusion holds
+# without any allowlist widening.
+if bash "$CHECK" --scripts-dir "$S" --baseline "$BASELINE" 2>&1 | grep -q "no '/api/v4' curl found outside providers/lib-gitlab-transport.sh"; then
+  ok "TC-CUTOVER-GLAB-NEG: shape-exclusion — 5 gh-app-token.sh curl sites PASS (api.github.com != /api/v4)"
+else
+  bad "TC-CUTOVER-GLAB-NEG: Check 6 unexpected FAIL on clean scratch"
+fi
+
+# Explicit sanity: inject a canonical gh-app-token.sh-shape curl argv into a
+# scratch file that is NOT allowlisted and verify it still passes (does NOT
+# match the /api/v4 detector — proves the shape-exclusion is content-based,
+# not file-scoped).
+S="$(fresh_scratch glabnegcurl)"
+# shellcheck disable=SC2016
+printf '\ntest_gh_style_curl() {\n  curl -s -H "Authorization: bearer $tok" -H "Accept: application/vnd.github+json" "https://api.github.com/orgs/foo/repos"\n}\n' >> "$S/autonomous-dev.sh"
+# gh_lines_in will not fire because there is no `gh ` token here (only `curl`).
+# But the /api/v4 detector must not either.
+if bash "$CHECK" --scripts-dir "$S" --baseline "$BASELINE" 2>&1 | grep -q "no '/api/v4' curl found outside providers/lib-gitlab-transport.sh"; then
+  ok "TC-CUTOVER-GLAB-NEG-CURL: api.github.com curl argv passes /api/v4 detector cleanly"
+else
+  bad "TC-CUTOVER-GLAB-NEG-CURL: api.github.com curl argv tripped the /api/v4 detector (shape-exclusion broken)"
+fi
+
+# ===========================================================================
+echo "=== TC-CUTOVER-GLAB-004: injected '/api/v4' curl in scratch autonomous-dev.sh FAILs ==="
+# ===========================================================================
+S="$(fresh_scratch glab004)"
+# shellcheck disable=SC2016
+printf '\nfake_gitlab_curl() {\n  curl -s -H "PRIVATE-TOKEN: $tok" "https://gitlab.com/api/v4/projects/1/issues"\n}\n' >> "$S/autonomous-dev.sh"
+out="$(bash "$CHECK" --scripts-dir "$S" --baseline "$BASELINE" 2>&1)"; rc=$?
+if [[ "$rc" -ne 0 ]] && grep -q "raw '/api/v4' curl outside" <<<"$out"; then
+  ok "TC-CUTOVER-GLAB-004: raw /api/v4 curl in a caller-layer file → FAIL"
+else
+  bad "TC-CUTOVER-GLAB-004: /api/v4 curl NOT caught (rc=$rc)"
+fi
+
+# ===========================================================================
+echo "=== TC-CUTOVER-GLAB-005: '/api/v4' curl inside providers/lib-gitlab-transport.sh PASSES ==="
+# ===========================================================================
+S="$(fresh_scratch glab005)"
+# The scratch fresh_scratch copies providers/ recursively — including
+# lib-gitlab-transport.sh with its curl call. Verify it passes without
+# error. (Any hit inside providers/lib-gitlab-transport.sh is legitimately
+# skipped by Check 6.)
+if bash "$CHECK" --scripts-dir "$S" --baseline "$BASELINE" >/dev/null 2>&1; then
+  ok "TC-CUTOVER-GLAB-005: /api/v4 curl inside providers/lib-gitlab-transport.sh is legitimate (Check 6 skips it)"
+else
+  bad "TC-CUTOVER-GLAB-005: lib-gitlab-transport.sh tripped Check 6 (should be the legitimate home)"
+fi
+
+# ===========================================================================
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 [[ "$FAIL" -eq 0 ]] && exit 0 || exit 1

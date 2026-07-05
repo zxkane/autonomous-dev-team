@@ -210,7 +210,8 @@ is_checker_infra_line() {
   [ "$rel" = "$CHECKER_SELF" ] || return 1
   case "$content" in
     'ALLOWLISTED_FILES=('*)          return 0 ;;   # (a) allowlist array declaration
-    "grep -aE '(^|[^A-Za-z_-])"*)    return 0 ;;   # (b) the primary matcher line
+    "grep -aE '(^|[^A-Za-z_-])"*)    return 0 ;;   # (b) primary matcher line
+    "grep -aE 'curl.*"*)             return 0 ;;   # (d) [#416 R4] /api/v4 curl matcher
     '_comment:'*)                    return 0 ;;   # (c) the generated _comment template
   esac
   return 1
@@ -279,6 +280,36 @@ gh_lines_in() {
       print s }'
 }
 
+# [#416 R4] The raw-glab detector — parallel to gh_lines_in, using the same
+# RE2-safe consuming boundary `(^|[^A-Za-z_-])glab ` so `_glab `/`slab
+# `/`glabber ` etc. do NOT match. Emits the trimmed content of each non-comment
+# line carrying a raw `glab ` token, one per line. Applied to ONE file.
+glab_lines_in() {
+  local path="$1"
+  [ -f "$path" ] || return 0
+  grep -aE '(^|[^A-Za-z_-])glab ' "$path" 2>/dev/null | awk '
+    { s = $0; sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s)
+      if (substr(s, 1, 1) == "#") next
+      print s }'
+}
+
+# [#416 R4] The `/api/v4` curl detector — a `curl ...` line whose argv
+# mentions `/api/v4` (`grep -E 'curl.*[/"]api/v4[/"]'`). Same-line only,
+# matching the existing gh matcher's line-oriented discipline. Multi-line
+# evasion (concatenated argv across shell continuations) is out of scope
+# for a lint; the review gate catches it. Shape-exclusion of gh-app-token
+# sites is automatic — those curl argvs mention `api.github.com/…`, not
+# `/api/v4/…`, so this detector does not match them (no allowlist entry
+# needed for gh-app-token.sh).
+gitlab_api_curl_lines_in() {
+  local path="$1"
+  [ -f "$path" ] || return 0
+  grep -aE 'curl.*[/"]api/v4[/"]' "$path" 2>/dev/null | awk '
+    { s = $0; sub(/^[[:space:]]+/, "", s); sub(/[[:space:]]+$/, "", s)
+      if (substr(s, 1, 1) == "#") next
+      print s }'
+}
+
 # gh_lines_in for a SCRIPTS_DIR-relative file, additionally dropping
 # check-provider-cutover.sh's OWN structurally-exempt infrastructure lines
 # (#286-amendment, #343 — is_checker_infra_line). Used by BOTH the working-tree scan
@@ -287,6 +318,26 @@ gh_lines_in() {
 guarded_gh_lines_in() {
   local rel="$1" path="$2" line
   gh_lines_in "$path" | while IFS= read -r line; do
+    is_checker_infra_line "$rel" "$line" && continue
+    printf '%s\n' "$line"
+  done
+}
+
+# [#416 R4] glab_lines_in for a SCRIPTS_DIR-relative file, with the same
+# is_checker_infra_line exemption applied.
+guarded_glab_lines_in() {
+  local rel="$1" path="$2" line
+  glab_lines_in "$path" | while IFS= read -r line; do
+    is_checker_infra_line "$rel" "$line" && continue
+    printf '%s\n' "$line"
+  done
+}
+
+# [#416 R4] gitlab_api_curl_lines_in for a SCRIPTS_DIR-relative file, with
+# the same is_checker_infra_line exemption applied.
+guarded_gitlab_api_curl_lines_in() {
+  local rel="$1" path="$2" line
+  gitlab_api_curl_lines_in "$path" | while IFS= read -r line; do
     is_checker_infra_line "$rel" "$line" && continue
     printf '%s\n' "$line"
   done
@@ -582,6 +633,59 @@ else
   [ "$_grew_real" = "0" ] && info "baseline did not grow vs $_trusted_src for any file present on the trusted ref -- no new raw-gh ratified in existing code"
   rm -f "$TRUSTED_SET" "$TRUSTED_RAW"
 fi
+
+# ---------------------------------------------------------------------------
+# [#416 R4] Check 5 — GitLab host-API token class. Two matchers, both
+# strict-from-zero on the gitlab axis (no baseline entries — there is no
+# legacy gitlab code to grandfather):
+#   (a) raw `glab ` outside providers/ and the allowlist = FAIL.
+#   (b) `curl` mentioning `/api/v4` outside providers/lib-gitlab-transport.sh
+#       and the allowlist = FAIL. Shape-exclusion: the 5 gh-app-token.sh
+#       curl sites hit `api.github.com/…`, not `/api/v4/…`, so they don't
+#       match — no allowlist entry needed for gh-app-token.sh.
+# The guard's OWN matcher literal lines are exempted by is_checker_infra_line
+# (`grep -aE 'curl.*` anchor added above).
+# ---------------------------------------------------------------------------
+echo "=== Check 5: no raw \`glab\` outside providers/ (#416 R4, GitLab host-API token class) ==="
+GITLAB_TRANSPORT_ALLOWLIST=(lib-gitlab-transport.sh)
+_glab_hits=0
+while IFS= read -r rel; do
+  [ -z "$rel" ] && continue
+  case "$rel" in providers/*) continue ;; esac
+  in_list "$rel" "${ALLOWLISTED_FILES[@]}" && continue
+  # Also skip files in the GitLab-transport-allowlist (curl-in-lib is the
+  # legitimate home; enforced by the /api/v4 matcher exemption below).
+  in_list "$rel" "${GITLAB_TRANSPORT_ALLOWLIST[@]}" && continue
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    _glab_hits=$((_glab_hits + 1))
+    locs="$(sites_file_lines "$rel" "$line")"
+    fail "raw \`glab\` token outside providers/ at ${locs:-$rel:?}: '$line'. Route this host I/O through a chp_*/itp_* verb (a raw \`glab\` is an [INV-91] cutover regression on the GitLab axis)."
+  done < <(guarded_glab_lines_in "$rel" "$SCRIPTS_DIR/$rel")
+done < <(tree_sh_files)
+[ "$_glab_hits" -eq 0 ] && info "no raw \`glab\` token found outside providers/"
+
+echo "=== Check 6: no '/api/v4' curl outside providers/lib-gitlab-transport.sh (#416 R4) ==="
+_v4_hits=0
+while IFS= read -r rel; do
+  [ -z "$rel" ] && continue
+  # providers/lib-gitlab-transport.sh is the legitimate home of the /api/v4
+  # curl call (the default transport). Any other file — including other
+  # providers/ leaves — is a regression: the leaves MUST call _gl_api, not
+  # curl directly (#416 R1 note "LEAVES NEVER call curl or _gl_http
+  # directly").
+  case "$rel" in
+    providers/lib-gitlab-transport.sh) continue ;;
+  esac
+  in_list "$rel" "${ALLOWLISTED_FILES[@]}" && continue
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    _v4_hits=$((_v4_hits + 1))
+    locs="$(sites_file_lines "$rel" "$line")"
+    fail "raw '/api/v4' curl outside providers/lib-gitlab-transport.sh at ${locs:-$rel:?}: '$line'. Route this GitLab API call through _gl_api (a raw /api/v4 curl bypasses the pagination/backoff/fail-closed choke-point; #416 R1)."
+  done < <(guarded_gitlab_api_curl_lines_in "$rel" "$SCRIPTS_DIR/$rel")
+done < <(tree_sh_files)
+[ "$_v4_hits" -eq 0 ] && info "no '/api/v4' curl found outside providers/lib-gitlab-transport.sh"
 
 # ---------------------------------------------------------------------------
 echo ""
