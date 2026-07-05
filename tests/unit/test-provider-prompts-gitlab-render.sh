@@ -179,6 +179,17 @@ _syntax_check_key "review.check_mergeable" "42" "group/proj"
 _syntax_check_key "review.requirement_drift_gh_issue_view" "421" "421" "group/proj"
 _syntax_check_key "review.e2e_fetch_comment" "42" "group/proj"
 _syntax_check_key "review.watch_ci_checks" "42"
+
+# TC-P36-018 (review r5): `none` is NOT terminal in watch_ci_checks — a
+# force-push rebase attaches the replacement pipeline with a delay, so the
+# poll loop must ride through `none` for a grace window instead of breaking
+# on the first no-pipeline read.
+wcc_render="$(bash -c "source '$LIB'; CODE_HOST=gitlab; ISSUE_PROVIDER=gitlab; provider_prompt_fragment review.watch_ci_checks 42")"
+if grep -q 'NONE_GRACE' <<<"$wcc_render" && ! grep -qE 'success\|failed\|canceled\|skipped\|none\)' <<<"$wcc_render"; then
+  ok "TC-P36-018: none rides a grace window, not instant-terminal"
+else
+  bad "TC-P36-018: watch_ci_checks treats none as instantly terminal"
+fi
 _syntax_check_key "bots.review_count_check" "group/proj" "42" "codex-bot"
 _syntax_check_key "bots.review_count_check_bare" "group/proj" "42" "codex-bot"
 

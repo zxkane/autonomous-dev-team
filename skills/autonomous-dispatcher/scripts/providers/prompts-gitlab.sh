@@ -81,11 +81,17 @@ done
 echo "$NOTES" | jq -r '"'"'.[] | "\(.author.username) [\(.created_at)]: \(.body[0:500])"'"'"'
 ```%.0s'
   [review.watch_ci_checks]='MR_IID=%s
-   # Poll CI status for merge request !${MR_IID} (reference — any equivalent read is fine):
+   # Poll CI status for merge request !${MR_IID} (reference — any equivalent read is fine).
+   # NOTE `none` (no pipeline attached) is NOT terminal right after a force-push
+   # rebase: GitLab attaches the replacement pipeline with a delay. Keep polling
+   # through `none` for a grace window (10 min) before treating it as
+   # genuinely-no-CI; real statuses terminate as usual.
+   NONE_GRACE=20   # 20 polls x 30s = 10 min
    while :; do
      STATUS=$(curl -sS -H "PRIVATE-TOKEN: ${GITLAB_TOKEN}" "https://${GITLAB_HOST}/api/v4/projects/${GITLAB_PROJECT}/merge_requests/${MR_IID}" | jq -r '"'"'.head_pipeline.status // "none"'"'"')
      case "$STATUS" in
-       success|failed|canceled|skipped|none) break ;;  # skipped IS terminal on GitLab — see chp_gitlab_ci_status'"'"'s bucket table
+       success|failed|canceled|skipped) break ;;  # skipped IS terminal on GitLab — see chp_gitlab_ci_status'"'"'s bucket table
+       none) NONE_GRACE=$((NONE_GRACE - 1)); [ "$NONE_GRACE" -le 0 ] && break; sleep 30 ;;
        *) sleep 30 ;;
      esac
    done
