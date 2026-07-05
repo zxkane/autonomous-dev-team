@@ -1,13 +1,11 @@
-# #414 AC evidence sweep — DRAFT (operator-posts after merge)
+# #414 AC evidence sweep — POSTED (review round 1)
 
-**Purpose.** #420 R6 requires the P3-5 dev agent to author the final
-`## Phase-3 AC evidence sweep` comment for parent #414. This file is the
-DRAFT the operator posts to #414 after this PR merges — merge-SHA-dependent
-CI links are computed post-merge and swapped into the placeholders below.
-
-Do **not** post this comment pre-merge. Ship it in the PR body as the
-"AC-sweep comment URL — pending merge" cross-reference (per #420 R6's
-"Capture the comment URL in this issue's PR body" clause).
+**Status.** The final `## Phase-3 AC evidence sweep` comment is POSTED on #414:
+<https://github.com/zxkane/autonomous-dev-team/issues/414#issuecomment-4886238204>
+(#420 R6/AC6). Every load-bearing evidence artifact was already on main via
+PR #422/#423/#424/#425 at post time, so the sweep is reviewer-verifiable on
+this branch; the AC1 CI link cites the green main run at merge-of-#419
+(ec99dfb). This file remains as the in-repo record of the posted content.
 
 ---
 

@@ -88,7 +88,7 @@ the suite can reproduce the axis outside CI.
 | ID | Assertion | Verifier |
 |----|-----------|----------|
 | TC-P35-030 | The fixture transport hook exists and is bash-parseable. | `test -f tests/provider-conformance/fixtures/gitlab-hook/gitlab-transport-hook.sh` AND `bash -n <file>` rc 0. |
-| TC-P35-031 | TC-RGH-060 (sibling, #419) covers the full gitlab/gitlab axis; P3-5 relies on that assertion rather than adding a duplicate `TC-PCONF-070`. | `grep -q 'TC-RGH-060' tests/unit/test-provider-conformance-runner.sh` AND the merged runner-test's SUMMARY assertion pins `CONFORMANCE-SUMMARY total=34 pass=32 fail=0 skip=2 pending=0`. |
+| TC-P35-031 | `TC-PCONF-070` (the #420 R3-named gate) asserts the gitlab/gitlab axis outcome — rc 0, `fail=0`, `pending=0` — on the same captured run TC-RGH-060 (#419) drives; the two are complementary (per-verb detail vs issue-named summary gate), one runner invocation. | `grep -q 'TC-PCONF-070' tests/unit/test-provider-conformance-runner.sh` AND the case asserts rc 0 + `fail=0`/`pending=0` on the gitlab/gitlab summary. |
 | TC-P35-032 | `tests/provider-conformance/README.md` "How to run" block names the gitlab-axis invocation, arming the same hook TC-RGH-060 arms — reproducibility from an operator shell without editing tests. | `grep -qE 'run-provider-conformance\.sh --itp gitlab --chp gitlab' tests/provider-conformance/README.md` AND the block references `fixtures/gitlab-hook/gitlab-transport-hook.sh`. |
 | TC-P35-033 | The runner test file's top-level `main` passes end-to-end under `env -u PROJECT_DIR bash tests/unit/test-provider-conformance-runner.sh`. | Final `Results: N passed, 0 failed`; exit 0. |
 

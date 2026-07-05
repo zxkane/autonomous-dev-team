@@ -601,5 +601,22 @@ assert_contains "TC-RGH-060: gitlab/gitlab + hook → CONFORMANCE-SUMMARY line" 
 
 # ===========================================================================
 echo ""
+echo "=== TC-PCONF-070: gitlab/gitlab axis is the #420 R3 CI gate (issue-named case) ==="
+# ===========================================================================
+# #420 R3/AC3 names TC-PCONF-070 as the gitlab-axis CI gate this repo runs on
+# every PR. TC-RGH-060 above (from #419) drives the identical invocation and
+# pins the per-verb detail; THIS case is the issue-named summary gate — it
+# re-asserts the load-bearing outcome (rc 0, fail=0, pending=0) on the SAME
+# captured output so the gate survives even if TC-RGH-060's per-verb pins are
+# later reshaped. Reuses gl_hook_out (no second runner invocation).
+assert_eq "TC-PCONF-070: gitlab/gitlab axis rc 0 (#420 R3/AC3 gate)" "0" "$gl_hook_rc"
+tcp70_summary="$(grep '^CONFORMANCE-SUMMARY' <<<"$gl_hook_out")"
+case "$tcp70_summary" in
+  *"fail=0"*"pending=0"*) ok "TC-PCONF-070: summary carries fail=0 pending=0 ($tcp70_summary)" ;;
+  *) bad "TC-PCONF-070: summary NOT fail=0/pending=0: $tcp70_summary" ;;
+esac
+
+# ===========================================================================
+echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 [[ "$FAIL" -eq 0 ]] && exit 0 || exit 1
