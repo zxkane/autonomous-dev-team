@@ -1,0 +1,1 @@
+{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"isResolved":true,"isOutdated":false,"path":"src/a.sh","comments":{"nodes":[{"author":{"login":"reviewer"},"body":"looks good"}]}}]}}}}}

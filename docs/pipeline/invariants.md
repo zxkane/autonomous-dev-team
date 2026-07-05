@@ -6340,3 +6340,26 @@ _Triage (issue #236): [machine-checked: tests/unit/test-lib-review-codex.sh, tes
 
 ---
 
+## INV-113: verify-completion.sh fails closed when the reviewThreads page is truncated — hasNextPage:true yields the `truncated` sentinel and a blocking message, never a page-1 count
+
+_Triage (issue #236): [machine-checked: tests/unit/test-verify-completion-pagination.sh]_
+
+**Rule**: the Stop hook's unresolved-review-thread check (`check_unresolved_reviews` in `skills/autonomous-common/hooks/verify-completion.sh`) reads a single `reviewThreads(first: 100)` page by design — a cursor walk here would duplicate the CHP seam's `chp_review_threads` logic (#401) outside the seam, and hooks stay provider-lib-free. Both GraphQL queries therefore request `pageInfo { hasNextPage }`, and when it is `true` the function MUST print the sentinel `truncated` instead of a count; the caller MUST handle that sentinel BEFORE the numeric `-gt` comparison and block with a distinct message (PR has >100 review threads, hook cannot verify completeness, verify manually) that claims no specific count. `hasNextPage:false` and pageInfo-less (old-shape) responses are byte-identical to the pre-#412 behavior, and a failed GraphQL read keeps its pre-existing fail-open `echo "0"` (explicitly out of scope for #412).
+
+**Sentinel-before-`-gt` is load-bearing**: bash `[[ ]]` arithmetic-evaluates `-gt` operands, so `[[ "truncated" -gt 0 ]]` resolves the string as an unset-variable lookup → 0 → false, **silently, rc 0** — a missed sentinel would not error under `set -e`; it would silently un-block, which is exactly the false-unblock this invariant exists to prevent. The guard must stay ahead of the numeric comparison.
+
+**Why**: pre-#412 the two reads carried `reviewThreads(first: 100)` with no page awareness — on a PR with >100 review threads, unresolved threads beyond page 1 were invisible and the completion gate silently stopped blocking (the hook-side sibling of the silent-truncation class #401 / #347 W1f closed in the CHP seam). The accepted trade-off: a >100-thread PR whose threads are ALL resolved is blocked up to the Stop-hook block cap and then force-released with a warning — bounded annoyance in an extreme-outlier scenario, in exchange for eliminating a silent false-unblock.
+
+**Producer**: `check_unresolved_reviews` (the sentinel) and the CI-passed branch of `verify-completion.sh` (the sentinel-first block).
+
+**Consumer**: the dev agent's Stop-time completion attempt — the truncation block directs it (or the operator) to manual verification instead of letting it finish with unverifiable thread state.
+
+**Status**: **ENFORCED** (closes #412).
+
+**Test**: `tests/unit/test-verify-completion-pagination.sh` — TC-VCP-001/001b/001c (truncated + all page-1 threads resolved still blocks with the truncation message and no fabricated count; **proven to FAIL pre-fix**), TC-VCP-002 (sentinel wins even when page 1 has unresolved threads), TC-VCP-003/004 (single-page behavior byte-preserved), TC-VCP-005 (query-failure fail-open unchanged), TC-VCP-006a/b (pageInfo-less old shape degrades to single-page), TC-VCP-007 (source-shape pin: both queries carry `pageInfo { hasNextPage }`). Test plan: `docs/test-cases/verify-completion-pagination-guard.md`.
+
+**Cross-references**:
+- [INV-94](#inv-94-chp_count_reviews_by_login-is-a-single-choke-point-leaf-with-capture-check-sum-pagination) / the §3.5 completeness family — the no-silent-caps posture this hook-side guard extends to the one raw GraphQL read outside the provider seam.
+
+---
+

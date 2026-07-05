@@ -50,6 +50,11 @@ output_block_response() {
 }
 
 # Function to check unresolved review threads
+# Prints a count, or the sentinel "truncated" when the thread list exceeds one
+# page (#412): the query reads a single 100-thread page by design (a cursor
+# walk would duplicate the CHP seam's chp_review_threads logic), so when
+# pageInfo.hasNextPage is true the hook cannot prove all threads are resolved
+# and must fail CLOSED — the caller keeps blocking with a truncation message.
 check_unresolved_reviews() {
   if [[ -z "$pr_number" ]]; then
     echo "0"
@@ -68,13 +73,20 @@ check_unresolved_reviews() {
   local repo="${repo_info##*/}"
 
   # Query unresolved review threads using GraphQL
-  local query='query($owner: String!, $repo: String!, $pr_number: Int!) { repository(owner: $owner, name: $repo) { pullRequest(number: $pr_number) { reviewThreads(first: 100) { nodes { isResolved isOutdated comments(first: 1) { nodes { author { login } } } } } } } }'
+  local query='query($owner: String!, $repo: String!, $pr_number: Int!) { repository(owner: $owner, name: $repo) { pullRequest(number: $pr_number) { reviewThreads(first: 100) { pageInfo { hasNextPage } nodes { isResolved isOutdated comments(first: 1) { nodes { author { login } } } } } } } }'
 
   local result
   result=$(gh api graphql -f query="$query" -f owner="$owner" -f repo="$repo" -F pr_number="$pr_number" 2>/dev/null || echo '{"data":null}')
 
   if [[ $(echo "$result" | jq -r '.data') == "null" ]]; then
     echo "0"
+    return
+  fi
+
+  # Fail closed on truncation (#412): more pages exist, so any count from
+  # page 1 alone could under-count. Report the sentinel instead of a number.
+  if [[ $(echo "$result" | jq -r '.data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage // false') == "true" ]]; then
+    echo "truncated"
     return
   fi
 
@@ -97,7 +109,7 @@ get_unresolved_review_details() {
   local owner="${repo_info%%/*}"
   local repo="${repo_info##*/}"
 
-  local query='query($owner: String!, $repo: String!, $pr_number: Int!) { repository(owner: $owner, name: $repo) { pullRequest(number: $pr_number) { reviewThreads(first: 100) { nodes { isResolved isOutdated path comments(first: 1) { nodes { author { login } body } } } } } } }'
+  local query='query($owner: String!, $repo: String!, $pr_number: Int!) { repository(owner: $owner, name: $repo) { pullRequest(number: $pr_number) { reviewThreads(first: 100) { pageInfo { hasNextPage } nodes { isResolved isOutdated path comments(first: 1) { nodes { author { login } body } } } } } } }'
 
   local result
   result=$(gh api graphql -f query="$query" -f owner="$owner" -f repo="$repo" -F pr_number="$pr_number" 2>/dev/null || echo '{"data":null}')
@@ -142,6 +154,25 @@ fi
 if [[ "$status" == "completed" && "$conclusion" == "success" ]]; then
   # Check for unresolved review comments
   unresolved_count=$(check_unresolved_reviews)
+
+  # Truncation sentinel must be handled BEFORE the numeric comparison: bash
+  # [[ -gt ]] arithmetic-evaluates the string to 0 (unset-variable lookup),
+  # so a missed sentinel silently un-blocks — no error under set -e. Fail
+  # closed: the hook cannot verify completeness, so it must not claim the
+  # threads are resolved.
+  if [[ "$unresolved_count" == "truncated" ]]; then
+    output_block_response "## ⛔ BLOCKED - Review Threads Exceed One Page
+
+PR #$pr_number has more than 100 review threads. This hook reads a single
+page and cannot verify that every thread is resolved.
+
+### Required Steps:
+1. Verify all review threads are resolved manually: \`gh pr view $pr_number --web\`
+2. Resolve any remaining conversations
+3. Retry task completion
+
+**Cannot verify review-thread completion automatically on this PR.**"
+  fi
 
   if [[ "$unresolved_count" -gt 0 ]]; then
     review_details=$(get_unresolved_review_details)
