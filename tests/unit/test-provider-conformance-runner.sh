@@ -358,11 +358,26 @@ if [[ -f "$_deg_dir/itp-degraded.sh" && -f "$_deg_dir/itp-degraded.caps" ]]; the
   assert_not_contains "TC-RGH-006: no chp path-based function names leaked" \
     "chp_/" "$rgh6_out"
 
-  # TC-RGH-007: legacy abs-path-only form is now REJECTED with a fatal
-  # (pre-P1-5 it silently produced nonsense filenames).
+  # TC-RGH-007: bare abs-path form (#416 R3/AC4 out-of-tree self-certification)
+  # derives the logical name from the dir's single <seam>-<name>.sh file —
+  # `--itp /abs/dir` with exactly one itp-corp.sh inside resolves to name
+  # `corp`, dir `/abs/dir`; NO path-based filename/function pollution.
   rgh7_out=$(bash "$RUNNER" --itp "$_extdir" --chp "$_extdir" 2>&1); rgh7_rc=$?
-  assert_eq "TC-RGH-007: legacy abs-path-only --itp → exit 2 (fatal)" "2" "$rgh7_rc"
-  assert_contains "TC-RGH-007: fatal names the required form" "<name>=<abs-dir>" "$rgh7_out"
+  assert_contains "TC-RGH-007: bare abs-path derives LOGICAL name 'corp/corp'" \
+    "CONFORMANCE-PCONF corp/corp" "$rgh7_out"
+  assert_not_contains "TC-RGH-007: bare abs-path — no path-based function names leaked" \
+    "itp_/" "$rgh7_out"
+  # TC-RGH-007b: an AMBIGUOUS dir (two itp-*.sh files) → fatal naming the
+  # name=dir disambiguation form.
+  _ambig="$(mktemp -d)"
+  cp "$_extdir/itp-corp.sh" "$_ambig/itp-corp.sh"
+  cp "$_extdir/itp-corp.sh" "$_ambig/itp-other.sh"
+  cp "$_extdir/chp-corp.sh" "$_ambig/chp-corp.sh"
+  cp "$_extdir/itp-corp.caps" "$_ambig/itp-corp.caps" 2>/dev/null || true
+  rgh7b_out=$(bash "$RUNNER" --itp "$_ambig" --chp github 2>&1); rgh7b_rc=$?
+  assert_eq "TC-RGH-007b: ambiguous multi-provider dir → exit 2 (fatal)" "2" "$rgh7b_rc"
+  assert_contains "TC-RGH-007b: fatal names the disambiguation form" "<name>=<abs-dir>" "$rgh7b_out"
+  rm -rf "$_ambig"
 
   # TC-RGH-008: <name>=<non-existent-abs-dir> → fatal.
   rgh8_out=$(bash "$RUNNER" --itp "corp=/no/such/provider-dir-$$" --chp github 2>&1); rgh8_rc=$?

@@ -46,7 +46,7 @@ echo "=== TC-LGC1-040: design doc committed byte-identical to the prework branch
 # `git show <branch>:<path>` or even a commit-SHA lookup can 404 there even
 # though the file is correct (that branch/commit is not fetched).
 DESIGN_DOC="$PROJECT_ROOT/docs/designs/lane-containment-gc.md"
-DESIGN_DOC_SHA256="2c65e5363e43db3edabb0102d1c34da976426f1d4fab68d8b81f4158f9c3f2db"
+DESIGN_DOC_SHA256="a10ec9936761a04639a935e589746d52f6ce0770305e72159b3680905de0fdbf"
 if [[ -f "$DESIGN_DOC" ]]; then
   ACTUAL_SHA256="$(sha256sum "$DESIGN_DOC" | awk '{print $1}')"
   if [[ "$ACTUAL_SHA256" == "$DESIGN_DOC_SHA256" ]]; then

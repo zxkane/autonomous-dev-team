@@ -153,10 +153,13 @@ done
 #                          LOGICAL name, so a path like `/tmp/x/y` no longer
 #                          leaks into filenames or function names.
 #
-# NOTE on the legacy absolute-path-only form: the pre-P1-5 shape
-# `--itp /abs/dir` resolved dir=/abs/dir and name=/abs/dir, producing
-# nonsense filenames like `itp-/abs/dir.sh`. That form is now REJECTED
-# with a fatal instructing the operator to use `<name>=/abs/dir` instead.
+# NOTE on the bare absolute-path form (#416 R3/AC4): the pre-P1-5 shape
+# `--itp /abs/dir` resolved dir=/abs/dir AND name=/abs/dir, producing
+# nonsense filenames like `itp-/abs/dir.sh`. Post-P1-5 the bare form is
+# SUPPORTED by deriving the logical name from the dir's own provider file
+# (`<seam>-<name>.sh`): exactly ONE such file must exist in the dir, else
+# fatal naming the ambiguity — the explicit `<name>=/abs/dir` form remains
+# for multi-provider dirs.
 _split_itp_chp() {
   local seam_flag="$1" raw="$2"
   local name dir
@@ -167,10 +170,29 @@ _split_itp_chp() {
     name="$raw"
     dir=""   # dir empty → resolve via the fixed-table.
   fi
-  # Reject an absolute-path-only value (the pre-P1-5 nonsense-filename case).
+  # Bare absolute-path form: derive the logical name from the single
+  # <seam>-<name>.sh provider file inside the dir (#416 R3/AC4).
   if [[ -z "$dir" && "$name" == /* ]]; then
-    log "FATAL: --${seam_flag} '$raw' — absolute-path source dir MUST be paired with a logical name: use '--${seam_flag} <name>=<abs-dir>' (e.g. '--${seam_flag} corp=${raw}')"
-    exit 2
+    local abs_dir="$name" candidates=() f base
+    if [[ ! -d "$abs_dir" ]]; then
+      log "FATAL: --${seam_flag} '$raw' — directory not found"
+      exit 2
+    fi
+    for f in "$abs_dir/${seam_flag}-"*.sh; do
+      [[ -f "$f" ]] && candidates+=("$f")
+    done
+    if [[ ${#candidates[@]} -eq 0 ]]; then
+      log "FATAL: --${seam_flag} '$raw' — no ${seam_flag}-<name>.sh provider file in the dir"
+      exit 2
+    fi
+    if [[ ${#candidates[@]} -gt 1 ]]; then
+      log "FATAL: --${seam_flag} '$raw' — multiple ${seam_flag}-*.sh files (ambiguous); use '--${seam_flag} <name>=<abs-dir>' to pick one"
+      exit 2
+    fi
+    base="${candidates[0]##*/}"          # <seam>-<name>.sh
+    name="${base#"${seam_flag}"-}"
+    name="${name%.sh}"
+    dir="$abs_dir"
   fi
   # Reject a NAME containing a slash (nothing legal here).
   if [[ "$name" == */* ]]; then
