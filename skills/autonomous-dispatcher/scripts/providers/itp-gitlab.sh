@@ -323,9 +323,25 @@ itp_gitlab_edit_comment() {
 #       - `human` otherwise.
 #   - `body` = `.body // ""`. `createdAt` = `.created_at`.
 itp_gitlab_list_comments() {
-  local issue="$1"
-  _gl_api --paginate "/projects/${GITLAB_PROJECT}/issues/${issue}/notes?sort=asc&order_by=created_at" \
-    | jq --arg bot "${BOT_LOGIN:-}" '
+  local issue="$1" raw
+  # Fail-CLOSED capture-then-check (spec §3.5 discipline, matches
+  # itp_read_task's posture): a bare `_gl_api … | jq …` pipe under
+  # pipefail catches an _gl_api non-zero rc, but rc-0 with EMPTY stdout
+  # (transport oddity, stub drift) would let jq iterate zero elements and
+  # emit `[]` — a real "no comments" and a silent failure become
+  # indistinguishable. Callers of list_comments (`_fetch_agent_verdict_body`
+  # #321, [INV-105] marker breaker, INV-46 SHA-stamp lookup) test for
+  # empty-array to mean "no matching bot comment yet" — a fail-OPEN empty
+  # array would misdrive the verdict / marker / stamp paths silently. So
+  # capture, check rc, check non-empty, then jq.
+  raw=$(_gl_api --paginate "/projects/${GITLAB_PROJECT}/issues/${issue}/notes?sort=asc&order_by=created_at") || return 1
+  [[ -n "$raw" ]] || return 1
+  # Reject rc-0 non-array shapes (matches the W1c2 online-review r2
+  # discipline on the CHP side): a `{}` or `{"message":"..."}` payload from
+  # a transport-hook oddity would slip past jq's `.[]` with a hard error
+  # under set -e, but the graceful pattern is to fail-CLOSED loud here.
+  printf '%s' "$raw" | jq -e 'type == "array"' >/dev/null 2>&1 || return 1
+  printf '%s' "$raw" | jq --arg bot "${BOT_LOGIN:-}" '
         [ .[]
           | select((.system // false) == false)
           | (.author.username // "") as $a
@@ -411,6 +427,18 @@ itp_gitlab_mark_checkbox() {
 itp_gitlab_provision_states() {
   local name="$1" color="$2" description="$3"
   local encoded status_file req_body
+  # Color-format normalization: the pipeline's `setup-labels.sh` caller
+  # passes a 6-hex color WITHOUT the `#` sigil (`0E8A16`, `D93F0B`, …) —
+  # byte-identical to what `gh label create --color` accepts. GitLab's
+  # `/labels` API requires the `#`-prefixed CSS form (`#0E8A16`); posting
+  # the bare hex yields HTTP 400 with `color is invalid`. Normalize IN-LEAF
+  # so callers stay provider-neutral (they emit ONE color string, we adapt
+  # it per provider). Only prefix a bare 6-hex; passthrough anything else
+  # (already-prefixed, CSS names) so a caller that has already conformed to
+  # GitLab's shape isn't mangled.
+  if [[ "$color" =~ ^[0-9A-Fa-f]{6}$ ]]; then
+    color="#${color}"
+  fi
   encoded=$(_gl_urlencode "$name") || return 1
   # Probe. GL_API_STATUS lands in the caller's shell because we invoke via
   # redirect (`>/dev/null`), not command substitution.

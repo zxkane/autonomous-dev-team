@@ -564,6 +564,41 @@ out=$(itp_gitlab_list_comments 42) || true
 assert_eq "TC-WB-074 tie-break by ascending id" "100 200" "$(jq -r '[.[].id] | join(" ")' <<<"$out")"
 rm -f "$tie"
 
+# TC-WB-075 fail-CLOSED on rc-0 EMPTY stdout — a bare `_gl_api | jq` pipe
+# would let jq emit `[]` on empty input (real "no comments" and silent
+# transport failure become indistinguishable). Leaf must capture-then-check.
+_gl_stub_reset
+empty=$(mktemp); : > "$empty"
+_GL_STUB_PAYLOAD="$empty"
+out=$(itp_gitlab_list_comments 42 2>/dev/null); rc=$?
+assert_eq "TC-WB-075 rc-0 empty stdout → non-zero rc (fail-CLOSED, not silent [])" \
+  "1" "$([[ $rc -ne 0 ]] && echo 1 || echo 0)"
+assert_eq "TC-WB-075 rc-0 empty stdout → no partial stdout" "" "$out"
+rm -f "$empty"
+
+# TC-WB-076 fail-CLOSED on rc-0 NON-ARRAY shape — a transport-hook oddity
+# returning `{}` or an error-shaped object must not slip past jq's `.[]` as
+# a silent `[]`. Matches the W1c2 online-review r2 discipline on the CHP
+# side (chp_list_inline_comments non-array-page gate).
+_gl_stub_reset
+obj=$(mktemp); echo '{"message":"Not Found"}' > "$obj"
+_GL_STUB_PAYLOAD="$obj"
+out=$(itp_gitlab_list_comments 42 2>/dev/null); rc=$?
+assert_eq "TC-WB-076 rc-0 object payload → non-zero rc" \
+  "1" "$([[ $rc -ne 0 ]] && echo 1 || echo 0)"
+assert_eq "TC-WB-076 rc-0 object payload → no partial stdout" "" "$out"
+rm -f "$obj"
+
+# The literal empty-array `[]` payload is a LEGITIMATE "zero comments"
+# response and MUST NOT trip fail-CLOSED — leaf returns `[]` rc 0.
+_gl_stub_reset
+empty_arr=$(mktemp); echo '[]' > "$empty_arr"
+_GL_STUB_PAYLOAD="$empty_arr"
+out=$(itp_gitlab_list_comments 42); rc=$?
+assert_eq "TC-WB-076b legitimate empty-array → rc 0" "0" "$rc"
+assert_eq "TC-WB-076b legitimate empty-array → []" "[]" "$out"
+rm -f "$empty_arr"
+
 echo ""
 echo "==================================================================="
 echo "=== TC-WB-080..082: itp_gitlab_resolve_dep"
@@ -674,6 +709,29 @@ assert_eq "TC-WB-101 exactly two calls (probe + create)" "2" "$call_count"
 argv=$(cat "$_GL_STUB_ARGV_FILE")
 assert_contains "TC-WB-101 create is POST" "ARG:POST" "$argv"
 assert_contains "TC-WB-101 create has --tolerate-status 409" "ARG:409" "$argv"
+# Color-format normalization: `setup-labels.sh` passes bare 6-hex (`ededed`),
+# but GitLab's /labels API rejects it with HTTP 400. The leaf normalizes to
+# `#ededed` in the POSTED body. Assert the recorded --body arg carries the
+# `#`-prefixed form (the second `ARG:--body` in the argv trace — the first
+# is the probe which has NO --body).
+create_body_line=$(awk '/^CALL 2$/,/^$/{ if (prev=="ARG:--body") { print; exit } prev=$0 }' "$_GL_STUB_ARGV_FILE")
+create_body_json="${create_body_line#ARG:}"
+assert_eq "TC-WB-101 posted color is #-prefixed (GitLab /labels requires #RRGGBB)" \
+  "#ededed" "$(jq -r '.color' <<<"$create_body_json")"
+rm -f "$missing"
+
+# TC-WB-101b already-#-prefixed color passes through unchanged (idempotent
+# normalizer — a caller that already conformed to GitLab's shape isn't
+# mangled).
+_gl_stub_reset
+missing=$(mktemp); echo '{"message":"404 Label Not Found"}' > "$missing"
+_GL_STUB_PAYLOAD_SEQ="$missing:$PAYLOADS/gitlab-labels-create.json"
+_GL_STUB_STATUS_SEQ="404:201"
+out=$(itp_gitlab_provision_states "new-label" "#0E8A16" "d"); rc=$?
+create_body_line=$(awk '/^CALL 2$/,/^$/{ if (prev=="ARG:--body") { print; exit } prev=$0 }' "$_GL_STUB_ARGV_FILE")
+create_body_json="${create_body_line#ARG:}"
+assert_eq "TC-WB-101b already-#-prefixed color passes through" \
+  "#0E8A16" "$(jq -r '.color' <<<"$create_body_json")"
 rm -f "$missing"
 
 # TC-WB-102 concurrent race — 404 probe, 409 create → downgrade to [skip].

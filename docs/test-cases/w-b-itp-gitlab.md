@@ -141,6 +141,15 @@ true` in its `.meta`).
 - **TC-WB-074**: sort tie-break — two notes with identical `createdAt`
   preserve ascending `id` order (matches
   `_fetch_agent_verdict_body`'s `| last` reliance, #321).
+- **TC-WB-075**: fail-CLOSED on `_gl_api` rc-0 with EMPTY stdout — a bare
+  `_gl_api | jq` pipe would let jq emit `[]` on empty input, so a real
+  "no comments" and a silent transport failure become indistinguishable.
+  Leaf captures then checks non-empty BEFORE piping to jq.
+- **TC-WB-076**: fail-CLOSED on `_gl_api` rc-0 with a NON-ARRAY payload
+  (e.g. `{}` or `{"message":"Not Found"}`) — leaf gates on
+  `jq -e 'type == "array"'`. The literal empty-array `[]` is a legitimate
+  "zero comments" response and MUST NOT trip fail-CLOSED (leaf returns
+  `[]` rc 0 — TC-WB-076b).
 
 ### `itp_gitlab_resolve_dep OWNER_REPO NUM OUT_VAR`
 
@@ -169,7 +178,13 @@ true` in its `.meta`).
 - **TC-WB-101**: `GL_API_STATUS=404` → follow-up
   `--method POST --tolerate-status 409 /projects/${GITLAB_PROJECT}/labels`
   with `{"name":…,"color":…,"description":…}` body. Emit
-  `  [created] '<NAME>'`.
+  `  [created] '<NAME>'`. The posted `color` is `#`-prefixed even though
+  `setup-labels.sh` passes bare 6-hex (`ededed`) — the leaf normalizes
+  `^[0-9A-Fa-f]{6}$` → `#…` in-leaf so callers stay provider-neutral
+  (GitLab's `/labels` API rejects bare hex with HTTP 400).
+- **TC-WB-101b**: already-`#`-prefixed color passes through unchanged
+  (idempotent normalizer — a caller that already conformed to GitLab's
+  shape isn't mangled).
 - **TC-WB-102**: `GL_API_STATUS=409` on create (concurrent-provisioner race)
   → downgrade to `[skip]`, leaf rc 0.
 - **TC-WB-103**: `_gl_api` rc≠0 (transport-level, not tolerated-status) →
@@ -181,13 +196,17 @@ true` in its `.meta`).
 
 - **TC-WB-110**: paginated read over `/projects/:id/issues/:iid/resource_label_events`;
   leaf's in-process jq filter selects `action == "add" AND label.name == LABEL`
-  and emits the newest `.created_at` string. `--arg` bind is used to keep the
-  label-name injection-safe.
+  and emits the FIRST matching `.created_at` string — spec §3.1 [m] pins the
+  order: "the ISO-8601 UTC `created_at` of the FIRST `labeled` event", matching
+  `itp_github_label_event_ts`'s `.[0].created_at` on the reference side.
+  `--arg` bind is used to keep the label-name injection-safe.
 - **TC-WB-111**: no matching event → empty stdout, leaf rc 0 (fail-SOFT
   contract).
 - **TC-WB-112**: fail-SOFT on `_gl_api` rc≠0 → empty stdout, rc 0.
-- **TC-WB-113**: multi-page walk — newest matching event sits on page 2 and
-  is returned correctly (proves the leaf uses `--paginate`).
+- **TC-WB-113**: multi-page walk — a matching event on page 2 is returned
+  correctly (proves the leaf uses `--paginate`). Because the fixture holds
+  ONE matching event across the two pages, this asserts the merge shape,
+  not an ordering choice (which is pinned by TC-WB-110).
 
 ### `itp_gitlab_begin_tick`
 
