@@ -1267,6 +1267,81 @@ enforced regardless of checkout depth even before #295 lands the dedicated step.
 
 ---
 
+## §prompts — provider-aware agent-prompt fragments (#421, #414 W-F)
+
+[INV-91]'s guard covers **executable** raw-`gh` sites — what the wrappers
+themselves CALL. It does not cover agent-facing **prompt PROSE** — heredoc
+text telling the dev/review agent which command to run or what to expect.
+Pre-#421 that prose was hardcoded GitHub English even under a non-GitHub
+`CODE_HOST`/`ISSUE_PROVIDER`: a gitlab-lane review agent was told to run
+`` `gh pr view ...` `` against a project where `gh` cannot see the GitLab MR.
+#421 splits the 33 pre-migration `cutover-baseline.json` sites into (a) 20
+parameterizable prompt-prose sites (migrated here) and (b) 13 executable
+github-gated residue sites that stay baselined (`lib-auth.sh` ×5,
+`check-provider-cutover.sh` ×3, plus 5 sites inside the two wrappers that are
+themselves executable: `autonomous-dev.sh`'s `command -v gh` presence probe,
+and `autonomous-review.sh`'s `gh api user` bot-login-fallback assignment + its
+2 WARN diagnostics + the [INV-33] sanctioned interim `gh issue close`).
+
+**Helper**: `scripts/lib-provider-prompts.sh` exposes
+`provider_prompt_fragment <key> [args...]`, sourced by both wrappers (BEFORE
+`lib-review-bots.sh`, whose `render_bot_review_section` also calls it) and by
+`lib-review-bots.sh` itself at call time. It resolves the provider from
+`FRAGMENT_AXIS[<key>]` — `code_host` keys read `$CODE_HOST`, `issue_provider`
+keys read `$ISSUE_PROVIDER` (both default `github`, §2) — then renders the
+matching printf(1) template from `scripts/providers/prompts-<provider>.sh`.
+**Unknown key OR unknown provider fails LOUD** (rc≠0, stderr) — a missing
+fragment is a bug, never a silently-degraded rendering. An arg-count mismatch
+against the key's declared `_PP_<PROVIDER>_ARGC` entry also fails loud, so a
+caller/template drift is caught at render time, not by a wrong-looking prompt
+in production. Fragment keys are stable descriptive names per site
+(`dev.read_issue_body`, `review.check_mergeable`, …) — chosen once, before the
+golden pin landed, because a rename after is pure churn.
+
+**GitHub rendering is byte-identical** to the pre-#421 hardcoded prose — this
+migration is a RENAME, not a rewrite. Golden-pinned by
+`tests/unit/test-provider-prompts-github-golden.sh` against the checked-in
+fixture `tests/unit/fixtures/provider-prompts-github/golden.txt` (regenerate
+ONLY as a deliberate, reviewed prose edit: `bash
+tests/unit/test-provider-prompts-github-golden.sh --generate`).
+
+**GitLab rendering defaults to API-neutral phrasing** ("the wrapper opens the
+merge request for you" / "check that CI is passing") rather than naming a
+concrete CLI — prompt text is decoupled from the pipeline's actual transport
+(#414 pillar 2: the in-tree GitLab transport is curl-only, no `glab`
+dependency). Where a command is genuinely load-bearing, the gitlab fragment
+gives a `curl .../api/v4/...` example labeled "reference, not a requirement".
+`tests/unit/test-provider-prompts-gitlab-render.sh` pins ZERO bare `gh ` tokens
+and at most K explicitly-listed `glab ` tokens (default K=0 — introducing one
+is a deliberate, documented, reviewed exception, never a default) in the
+rendered gitlab text, using the SAME RE2-safe consuming-boundary regexes
+`check-provider-cutover.sh`'s `gh_lines_in`/`glab_lines_in` use. It also pins
+that github and gitlab declare IDENTICAL argc per key — a call site fixes ONE
+positional-arg list regardless of which provider ends up rendering it; a
+gitlab template needing fewer positionals consumes the rest via printf's
+`%.0s` (discard-without-printing) rather than diverging the contract.
+
+Since `providers/prompts-gitlab.sh` carries agent-facing PROSE `curl
+.../api/v4/...` examples inside printf templates (never executed by the
+wrapper), it is excluded from `check-provider-cutover.sh` Check 6 alongside
+`providers/lib-gitlab-transport.sh` — Check 6 targets EXECUTABLE curl
+invocations that bypass `_gl_api`'s pagination/backoff/fail-closed
+choke-point; a string literal an agent may or may not choose to run is not
+that.
+
+The cutover baseline shrank from 33 → 13 sites (exactly the 20 migrated (a)
+sites) in the same PR as this migration — [INV-91]'s "a migration PR that
+removes a `gh` leaf MUST shrink the baseline in the same PR" applies to
+prompt-prose sites too, since they are also raw-`gh` tokens the guard's Check
+1 scans (`providers/` is excluded from the scan, so moving the prose INTO
+`providers/prompts-github.sh` is what shrinks it — the same mechanism as a
+verb-leaf migration). See `docs/test-cases/p3-6-provider-prompts.md`
+(TC-P36-NNN) for the full test matrix and `invariants.md`'s [INV-91] migration
+log for this migration's entry (no new `INV-NN` — prose parameterization is a
+migration-log entry, not a new invariant).
+
+---
+
 ## 10. Per-verb conformance checklist (#370)
 
 `tests/provider-conformance/run-provider-conformance.sh` ([INV-106]) makes

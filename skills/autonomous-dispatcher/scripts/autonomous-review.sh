@@ -36,6 +36,12 @@ export AUTONOMOUS_CONF_DIR="$SCRIPT_DIR"
 source "${LIB_DIR}/lib-error.sh"
 source "${LIB_DIR}/lib-agent.sh"
 source "${LIB_DIR}/lib-auth.sh"
+# [#421] provider_prompt_fragment — sourced BEFORE lib-review-bots.sh, whose
+# render_bot_review_section() calls it, and before build_review_prompt's own
+# call sites below. Every call site renders load-bearing agent instruction
+# text, so sourced UNGUARDED (a missing lib must crash the wrapper loudly).
+# shellcheck source=lib-provider-prompts.sh
+source "${LIB_DIR}/lib-provider-prompts.sh"
 # shellcheck source=lib-review-bots.sh
 source "${LIB_DIR}/lib-review-bots.sh"
 # shellcheck source=lib-review-verdict.sh
@@ -1227,12 +1233,12 @@ $(if [[ "${_agent_name}" == "codex" ]]; then
 
 The PR diff is already SCOPED to this PR's merge target and available to you —
 \`codex review\` fetches it for you. You do NOT need to run \`git diff\` or
-\`gh pr diff\` to reconstruct the review range; review the diff codex gave you.
+$(provider_prompt_fragment review.codex_gh_pr_diff_reconstruct)
 
 Prefix EACH blocking finding with \`[P1]\` (priority 1). Non-blocking observations
 may use \`[P2]\`/\`[P3]\`. After your analysis, post your verdict via
 \`bash scripts/post-verdict.sh\` (the helper described in the Decision section
-below — do NOT hand-roll a bare \`gh issue comment\` for the verdict): a FAIL when
+$(provider_prompt_fragment review.codex_do_not_hand_roll)
 you raised any \`[P1]\`, a PASS otherwise.
 CODEX_REVIEW_NOTE
 fi)
@@ -1242,7 +1248,7 @@ fi)
 Before doing anything else, check the PR mergeable status and rebase if needed.
 
 Quick reference:
-1. Check: \`gh pr view ${PR_NUMBER} --repo ${REPO} --json mergeable -q '.mergeable'\`
+$(provider_prompt_fragment review.check_mergeable "${PR_NUMBER}" "${REPO}")
 2. If "MERGEABLE" — proceed to the review checklist below
 3. If "CONFLICTING" — rebase the PR branch onto main:
    \`\`\`bash
@@ -1260,7 +1266,7 @@ Quick reference:
    git worktree remove /tmp/rebase-${PROJECT_ID}-${_agent_name}-pr-${PR_NUMBER}
    # Wait for CI to restart
    sleep 10
-   gh pr checks ${PR_NUMBER} --watch --interval 30
+   $(provider_prompt_fragment review.watch_ci_checks "${PR_NUMBER}")
    \`\`\`
 4. If rebase fails (conflicts) — FAIL the review with "[BLOCKING] Merge conflict with main".
    Include the list of conflicting files and step-by-step instructions for the dev agent:
@@ -1270,12 +1276,7 @@ Quick reference:
 
 ## Step 0.5: Requirement Drift Detection — MANDATORY PRE-REVIEW
 
-**Before reading the PR diff**, read ALL comments on issue #${ISSUE_NUMBER} to detect requirement changes posted after implementation:
-
-\`\`\`bash
-gh issue view ${ISSUE_NUMBER} --repo ${REPO} --json comments \\
-  -q '.comments[] | "\\(.author.login) [\\(.createdAt)]: \\(.body[0:500])"'
-\`\`\`
+$(provider_prompt_fragment review.requirement_drift_gh_issue_view "${ISSUE_NUMBER}" "${ISSUE_NUMBER}" "${REPO}")
 
 Look for:
 - Scope changes ("remove", "no longer", "drop", "don't support", "instead of")
@@ -1318,9 +1319,9 @@ Read the issue body for an \`## Acceptance Criteria\` section. For EACH criterio
 ## Review Process
 1. Read the issue body to understand requirements
 2. Read ALL issue comments to detect requirement changes (Step 0.5 above)
-3. $(if [[ "${_agent_name}" == "codex" ]]; then echo "Review the PR diff \`codex review\` already scoped for you (its merge-target diff) — do NOT re-run \`git diff\`/\`gh pr diff\` to reconstruct it (INV-62)"; else echo "Read the PR diff to verify implementation"; fi)
+3. $(if [[ "${_agent_name}" == "codex" ]]; then provider_prompt_fragment review.codex_diff_step; else echo "Read the PR diff to verify implementation"; fi)
 4. Verify acceptance criteria (see above)
-5. Check that CI checks are passing: gh pr checks ${PR_NUMBER}
+$(provider_prompt_fragment review.check_ci_checks "${PR_NUMBER}")
 6. Verify test coverage and quality
 7. Check for security issues, code quality, and best practices
 8. Trigger and verify configured review bots (see below)$(if [[ -z "$REVIEW_BOTS_VALIDATED" ]]; then printf '\n   (REVIEW_BOTS is empty — bot-review enforcement is disabled for this project.)'; fi)
@@ -1365,17 +1366,14 @@ ${_ac_map}
    finding; \`"pass"\` is covered.
 2. If an acceptance criterion is NOT present as a key in the map, fall back to
    cross-checking it against the posted free-form evidence comment:
-   \`\`\`bash
-   gh pr view ${PR_NUMBER} --repo ${REPO} --json comments \\
-     -q '[.comments[].body | select(test("e2e-evidence: complete"))] | last'
-   \`\`\`
+   $(provider_prompt_fragment review.e2e_fetch_comment "${PR_NUMBER}" "${REPO}")
 3. Do NOT FAIL the review merely because you cannot re-run E2E yourself — the
    wrapper's E2E hard gate (INV-46) already decided pass/fail, and a gate FAIL
    would have prevented this review from running. Treat the map + evidence as
    authoritative input; raise findings only for a \`"fail"\` entry, an
    uncovered-and-contradicted criterion, or code-quality / requirement-drift.
 E2E_AC_STRUCTURED
-  else cat <<'E2E_EVIDENCE_INPUT'
+  else cat <<E2E_EVIDENCE_INPUT
 ## E2E Evidence — READ AS INPUT (the wrapper already ran E2E once, INV-46)
 
 **You do NOT run E2E.** The wrapper ran the project's E2E verification ONCE in a
@@ -1385,10 +1383,7 @@ acceptance criteria — not to re-run any build, deploy, verify command, or
 browser flow.
 
 1. Fetch the posted E2E evidence comment from the PR:
-   \`\`\`bash
-   gh pr view ${PR_NUMBER} --repo ${REPO} --json comments \\
-     -q '[.comments[].body | select(test("e2e-evidence: complete"))] | last'
-   \`\`\`
+   $(provider_prompt_fragment review.e2e_fetch_comment "${PR_NUMBER}" "${REPO}")
 2. Cross-check the evidence's results table against EACH \`## Acceptance Criteria\`
    item in the issue body. If a criterion that names a verifiable artifact
    (file path, S3 key, DDB row state, log line, count, screenshot) is NOT
@@ -1481,7 +1476,7 @@ also work, but stick to the canonical form when possible.
 
 **CRITICAL — how to post the verdict (INV-56)**: post your verdict comment
 **only** through the deterministic helper \`bash scripts/post-verdict.sh\`.
-Do **NOT** use a bare \`gh issue comment\` for the verdict — a hand-rolled
+$(provider_prompt_fragment review.verdict_no_bare_issue_comment)
 multi-line \`--body\` is mis-escaped by some CLIs and the comment silently
 never lands, which makes the wrapper drop you as \`unavailable\`. The helper
 forms the \`gh\` call itself from a body FILE, so multi-line findings with
@@ -1508,7 +1503,7 @@ variable is set — copy the concrete path below verbatim, never a template with
 \`\${...}\` tokens in it.
 
 Helper usage (verdict comment ONLY — keep using bare \`gh\` for reads like
-\`gh pr view\` / \`gh pr checks\`):
+$(provider_prompt_fragment review.gh_pr_view_checks_parenthetical)
 \`\`\`bash
 # Write your verdict body to a file (a FILE avoids shell-quoting mangling):
 cat > ${_verdict_body_path} <<'VERDICT'

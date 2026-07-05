@@ -296,8 +296,17 @@ assert_grep "TC-CR-010: fast-path block names the open-PR-only fast path" \
   'Open-PR-only fast path' "$TMPROOT/fastpath-block.txt"
 assert_grep "TC-CR-010: fast-path block instructs skipping design/test/implement" \
   '[Ss][Kk][Ii][Pp].*(design|test|implement)' "$TMPROOT/fastpath-block.txt"
-assert_grep "TC-CR-010: fast-path block points at gh pr create / open-PR step" \
-  'gh pr create' "$TMPROOT/fastpath-block.txt"
+# #421: the open-PR step text (including the literal `gh pr create` mention)
+# now renders via provider_prompt_fragment (dev.pr_create_direct_step /
+# dev.pr_create_write_to_file), computed into `open_pr_step` BEFORE the
+# `cat <<FASTPATH` heredoc (only the `${open_pr_step}` REFERENCE is inside the
+# heredoc body) — so this assertion checks the WHOLE
+# emit_open_pr_fast_path_block function, not just the extracted heredoc body.
+# The rendered github text still says `gh pr create` (pinned byte-identical by
+# test-provider-prompts-github-golden.sh).
+FASTPATH_FN_BLOCK=$(awk '/^emit_open_pr_fast_path_block\(\)/{p=1} p{print} p&&/^}$/{exit}' "$WRAPPER")
+assert_grep "TC-CR-010: fast-path block points at the open-PR step (via provider_prompt_fragment)" \
+  'provider_prompt_fragment dev\.(pr_create_direct_step|pr_create_write_to_file)' <(printf '%s' "$FASTPATH_FN_BLOCK")
 assert_no_grep "TC-CR-011: fast-path block has no 'Task appears to have crashed'" \
   'Task appears to have crashed' "$TMPROOT/fastpath-block.txt"
 assert_no_grep "TC-CR-011: fast-path block has no 'process not found'" \

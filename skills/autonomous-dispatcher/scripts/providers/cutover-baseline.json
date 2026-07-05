@@ -4,72 +4,7 @@
     {
       "count": 1,
       "file": "autonomous-dev.sh",
-      "content": "1. Read the issue body to understand the full requirements: \\`gh issue view ${ISSUE_NUMBER} --repo ${REPO} --json body -q '.body'\\`"
-    },
-    {
-      "count": 1,
-      "file": "autonomous-dev.sh",
-      "content": "The WRAPPER will run \\`gh pr create --head <your-branch>\\` for you after you finish."
-    },
-    {
-      "count": 1,
-      "file": "autonomous-dev.sh",
-      "content": "\\`gh pr create\\` — instead WRITE the PR to \\`\\$(printenv AGENT_PR_CREATE_FILE)\\`"
-    },
-    {
-      "count": 1,
-      "file": "autonomous-dev.sh",
-      "content": "ahead of the base branch, but was interrupted before \\`gh pr create\\` completed."
-    },
-    {
-      "count": 1,
-      "file": "autonomous-dev.sh",
-      "content": "approve or merge PRs, and it cannot run \\`gh pr create\\`). To open the PR, do NOT"
-    },
-    {
-      "count": 1,
-      "file": "autonomous-dev.sh",
       "content": "if [[ -n \"${ISSUE_NUMBER:-}\" ]] && command -v gh &>/dev/null; then"
-    },
-    {
-      "count": 1,
-      "file": "autonomous-dev.sh",
-      "content": "means the review verdict was PASS but \\`gh pr merge\\` failed (likely a merge"
-    },
-    {
-      "count": 1,
-      "file": "autonomous-dev.sh",
-      "content": "open_pr_step=\"3. Go STRAIGHT to the open-PR step: run \\`gh pr create\\` with a generated"
-    },
-    {
-      "count": 1,
-      "file": "autonomous-dev.sh",
-      "content": "run \\`gh pr create\\`. Instead, AFTER you have pushed your feature branch with"
-    },
-    {
-      "count": 1,
-      "file": "autonomous-dev.sh",
-      "content": "verdict was PASS but \\`gh pr merge\\` failed). Rebase the PR branch onto"
-    },
-    {
-      "count": 1,
-      "file": "autonomous-review.sh",
-      "content": "1. Check: \\`gh pr view ${PR_NUMBER} --repo ${REPO} --json mergeable -q '.mergeable'\\`"
-    },
-    {
-      "count": 1,
-      "file": "autonomous-review.sh",
-      "content": "3. $(if [[ \"${_agent_name}\" == \"codex\" ]]; then echo \"Review the PR diff \\`codex review\\` already scoped for you (its merge-target diff) — do NOT re-run \\`git diff\\`/\\`gh pr diff\\` to reconstruct it (INV-62)\"; else echo \"Read the PR diff to verify implementation\"; fi)"
-    },
-    {
-      "count": 1,
-      "file": "autonomous-review.sh",
-      "content": "5. Check that CI checks are passing: gh pr checks ${PR_NUMBER}"
-    },
-    {
-      "count": 1,
-      "file": "autonomous-review.sh",
-      "content": "Do **NOT** use a bare \\`gh issue comment\\` for the verdict — a hand-rolled"
     },
     {
       "count": 1,
@@ -79,42 +14,12 @@
     {
       "count": 1,
       "file": "autonomous-review.sh",
-      "content": "\\`gh pr diff\\` to reconstruct the review range; review the diff codex gave you."
-    },
-    {
-      "count": 1,
-      "file": "autonomous-review.sh",
-      "content": "\\`gh pr view\\` / \\`gh pr checks\\`):"
-    },
-    {
-      "count": 1,
-      "file": "autonomous-review.sh",
       "content": "_bot_login_raw=$(gh api user --jq '.login' 2>&1) && BOT_LOGIN=\"$_bot_login_raw\" || {"
     },
     {
       "count": 1,
       "file": "autonomous-review.sh",
-      "content": "below — do NOT hand-roll a bare \\`gh issue comment\\` for the verdict): a FAIL when"
-    },
-    {
-      "count": 1,
-      "file": "autonomous-review.sh",
       "content": "gh issue close \"$ISSUE_NUMBER\" --repo \"$REPO\" --reason completed 2>/dev/null \\"
-    },
-    {
-      "count": 1,
-      "file": "autonomous-review.sh",
-      "content": "gh issue view ${ISSUE_NUMBER} --repo ${REPO} --json comments \\\\"
-    },
-    {
-      "count": 1,
-      "file": "autonomous-review.sh",
-      "content": "gh pr checks ${PR_NUMBER} --watch --interval 30"
-    },
-    {
-      "count": 2,
-      "file": "autonomous-review.sh",
-      "content": "gh pr view ${PR_NUMBER} --repo ${REPO} --json comments \\\\"
     },
     {
       "count": 1,
@@ -160,11 +65,6 @@
       "count": 1,
       "file": "lib-auth.sh",
       "content": "if ! command -v gh &>/dev/null || ! gh auth status &>/dev/null 2>&1; then"
-    },
-    {
-      "count": 3,
-      "file": "lib-review-bots.sh",
-      "content": "COUNT=\\$(gh api repos/${repo}/pulls/${pr_number}/reviews \\\\"
     }
   ]
 }

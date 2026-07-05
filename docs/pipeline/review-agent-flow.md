@@ -486,6 +486,22 @@ Major prompt sections:
 
 The `Review Session:` trailer (presence) + the `Review Agent: <name>` discriminator (per-agent) are how the wrapper identifies which comment is each agent's verdict — see [Verdict polling](#verdict-polling) below.
 
+**Provider-aware prompt fragments (#421, [`provider-spec.md`](provider-spec.md)
+§prompts).** The table above shows GitHub-flavored prose (`gh pr view
+--json mergeable`, `gh issue view`, `gh-as-user.sh`) because that is what the
+guide renders under the default `CODE_HOST=github`/`ISSUE_PROVIDER=github`.
+Every one of those mentions is actually rendered through
+`provider_prompt_fragment <key> [args...]` (`lib-provider-prompts.sh`, sourced
+before `lib-review-bots.sh`) — under a non-GitHub backend the SAME prompt
+section instead reads API-neutral phrasing ("check the merge request's
+detailed merge status", "wait for CI to finish") with a `curl .../api/v4/...`
+reference example where a command is genuinely load-bearing, never a bare
+`gh`/`glab` invocation. GitHub rendering is golden-pinned byte-identical to
+the pre-#421 hardcoded prose. This is distinct from [INV-91]'s cutover guard:
+that guard covers the EXECUTABLE `gh` calls this wrapper itself makes (`gh api
+user` for bot-login detection, the [INV-33] interim `gh issue close`); this
+covers what the wrapper TELLS the review agent to run.
+
 ## Verdict posting (INV-56)
 
 Each review agent posts its verdict comment through the deterministic, wrapper-provided helper `scripts/post-verdict.sh` — **not** a hand-rolled bare `gh issue comment`. `build_review_prompt` routes ALL THREE verdict-post spots through the helper (the generic Helper-usage example, the Decision PASS branch, and the Decision FAIL branch) and explicitly forbids bare `gh issue comment` for the verdict. The verdict-post instruction is identical for every CLI — there is no per-CLI branch for the verdict post (the only codex-specific prompt difference is the [INV-62](invariants.md#inv-62-the-codex-review-lane-runs-the-codex-review-subcommand-auto-scoped-prompt-carried-gate-with-a-stdout-verdict-fallback) "you are inside `codex review`, the diff is already scoped, do NOT re-run `git diff`" note). For codex, [INV-62](invariants.md#inv-62-the-codex-review-lane-runs-the-codex-review-subcommand-auto-scoped-prompt-carried-gate-with-a-stdout-verdict-fallback) ALSO has the wrapper post the verdict from parsed stdout as a fallback if codex did not self-post — still through `post-verdict.sh`, so the deterministic chokepoint holds.
