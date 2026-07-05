@@ -128,6 +128,24 @@ jobs:
             exit 1
           }
 
+      # Lane-GC PR-3 kill-path fixture-tree E2E (issue #379, INV-111): drives
+      # the REAL, unmodified dispatch-local.sh CLI entry point against a
+      # genuine process-group fixture (leader dies on TERM, a persistent
+      # TERM-trapping member shares its pgid) through BOTH kill_stale_wrapper
+      # escalation sites (legacy PID-file path + pgrep-fallback orphan
+      # sweep). This is the issue's stated fixture-tree E2E acceptance
+      # criterion — "tree empty within grace+2s" — surfaced as its own CI
+      # job so a regression here is visible independent of the unit suite.
+      # No network / credentials — always-on hermetic tier.
+      - name: lane-gc-p3 kill-paths E2E (fixture tree)
+        run: |
+          out=$(bash tests/e2e/run-lane-gc-p3-kill-paths-e2e.sh)
+          echo "$out"
+          echo "$out" | grep -q 'LANE-GC-P3-KILL-PATHS-E2E-SUMMARY pass=2 fail=0' || {
+            echo "::error::lane-gc-p3 kill-paths E2E did not produce the expected summary"
+            exit 1
+          }
+
   # Executable-spec gate (INV-80, #236): the issue-label state machine is encoded
   # in docs/pipeline/transitions.json; the mermaid diagram is GENERATED from it,
   # and every guard/action + every dispatcher label-write must be declared. This
@@ -214,6 +232,7 @@ jobs:
             tests/e2e/run-error-envelope-e2e.sh \
             tests/e2e/run-run-artifacts-e2e.sh \
             tests/e2e/run-verdict-artifact-fleet-e2e.sh \
+            tests/e2e/run-lane-gc-p3-kill-paths-e2e.sh \
             tests/conformance/run-conformance.sh \
             tests/conformance/lib-conformance.sh \
             skills/autonomous-dispatcher/scripts/post-verdict.sh \

@@ -555,16 +555,58 @@ lane_probe() {
   echo "live"
 }
 
+# _kill_group_escalate <pgid> [grace_secs] — the minimal-diff TERM→grace→KILL
+# primitive (design §4-C4, adopted verbatim as the shared building block).
+# Completion is gated on the GROUP being unreachable (`kill -0 -- -pgid`
+# failing), never on any single leader PID's liveness — this is the exact
+# distinction INV-106/INV-114 requires: a TERM-trapping member whose leader
+# already died must still get the KILL pass. A miss on the initial TERM
+# (group already gone) short-circuits to a clean return without waiting out
+# the grace window.
+_kill_group_escalate() {
+  local pg="$1" g="${2:-5}" i
+  kill -TERM -- "-${pg}" 2>/dev/null || return 0
+  for ((i = 0; i < g; i++)); do
+    kill -0 -- "-${pg}" 2>/dev/null || return 0
+    sleep 1
+  done
+  kill -KILL -- "-${pg}" 2>/dev/null || true
+  return 0
+}
+
 # lane_kill <lane_dir> [grace_secs] — registry-authoritative TERM→grace→KILL
-# over every pgid recorded in <lane_dir>/pgids. Does NOT consult lane_probe —
-# callers (the future kill_stale_wrapper delegate, PR-3) decide liveness
-# first; this function only performs the escalation once a caller has
-# decided a lane's pgids should die. Idempotent: an already-empty/missing
+# over every DISTINCT pgid recorded in <lane_dir>/pgids. Does NOT consult
+# lane_probe — callers (the kill_stale_wrapper delegate, guardian, GC) decide
+# liveness first; this function only performs the escalation once a caller
+# has decided a lane's pgids should die. Idempotent: an already-empty/missing
 # pgids file is a clean no-op.
+#
+# Serialized on the lane's own `reap.lock` (design §4-C4/INV-114 selfdefeat
+# F3) — shared with `cleanup()`'s own reap so a re-dispatch's delegate call
+# and the outgoing wrapper's own graceful teardown can never issue
+# overlapping KILLs against the same pgid. A missing/unwritable lock file
+# degrades to unlocked (best-effort — a lock outage must never block a kill
+# that's otherwise authorized). Bounded `flock -w 10` rather than an
+# indefinite wait: flock's advisory lock is released by the kernel the
+# instant the holding process dies (no separate reclaim logic needed, unlike
+# a mkdir-based lock — see the #360 double-reclaim lesson), so a 10s bound is
+# purely defensive against an implausible pathological hold, not a real
+# recovery mechanism.
+#
+# Each distinct pgid escalates via `_kill_group_escalate` in its OWN
+# backgrounded job so N pgids run their grace windows CONCURRENTLY — total
+# wall-clock stays ~grace regardless of how many groups are recorded, not
+# grace*N.
 lane_kill() {
   local lane_dir="$1" grace="${2:-10}"
   local pgids_file="${lane_dir}/pgids"
   [[ -f "$pgids_file" ]] || return 0
+
+  local lock_fd=""
+  if [[ -f "${lane_dir}/reap.lock" ]]; then
+    exec {lock_fd}>>"${lane_dir}/reap.lock" 2>/dev/null || lock_fd=""
+    [[ -n "$lock_fd" ]] && { flock -w 10 "$lock_fd" 2>/dev/null || true; }
+  fi
 
   local seen=() pg
   while read -r pg _rest; do
@@ -575,25 +617,178 @@ lane_kill() {
     for s in "${seen[@]:-}"; do [[ "$s" == "$pg" ]] && { already=1; break; }; done
     [[ "$already" -eq 1 ]] && continue
     seen+=("$pg")
-    kill -TERM -- "-${pg}" 2>/dev/null || true
   done < "$pgids_file"
 
-  [[ "${#seen[@]}" -gt 0 ]] || return 0
-
-  local i
-  for ((i = 0; i < grace; i++)); do
-    local any_alive=0
+  if [[ "${#seen[@]}" -gt 0 ]]; then
+    # [INV-114] Escalator pgid isolation (review round-8 [P1], same class as
+    # the sigterm-trap escalators): a bare backgrounded escalator is a direct
+    # child sharing the CALLER's pgid — when the caller's own group is later
+    # group-SIGKILLed mid-escalation (kill_stale_wrapper escalating against a
+    # still-alive wrapper whose cleanup()/lane_reap is running this very
+    # function), the escalator dies with it mid-grace and the pending KILL
+    # follow-through for a TERM-resistant recorded group is silently lost.
+    # `setsid` puts each escalator in its own session/pgid so only its target
+    # and its own bounded sleep decide its lifetime. Still a direct CHILD, so
+    # the `wait` below works unchanged; `export -f` carries the (call-free)
+    # primitive across the bash -c boundary. Falls back to the bare form when
+    # setsid is unavailable (non-Linux) — same degraded posture as the trap.
+    local escalate_pids=() _lk_setsid=()
+    command -v setsid >/dev/null 2>&1 && _lk_setsid=(setsid)
+    export -f _kill_group_escalate
     for pg in "${seen[@]}"; do
-      kill -0 -- "-${pg}" 2>/dev/null && any_alive=1
+      "${_lk_setsid[@]}" bash -c '_kill_group_escalate "$1" "$2"' _ "$pg" "$grace" &
+      escalate_pids+=("$!")
     done
-    [[ "$any_alive" -eq 0 ]] && return 0
+    wait "${escalate_pids[@]}" 2>/dev/null || true
+  fi
+
+  [[ -n "$lock_fd" ]] && exec {lock_fd}>&-
+  return 0
+}
+
+# lane_reap <lane_dir> [grace_secs] — the exact reap-first primitive
+# `cleanup()` uses in both wrappers ([Lane-GC PR-3], INV-114 row 2): acquires
+# `reap.lock`, records `STATE=reaping` while the escalation runs (so a
+# concurrent GC/guardian/delegate scan — later PRs — sees "someone is already
+# reaping this lane" rather than double-dispatching a second reap), calls
+# `lane_kill` (which itself re-acquires the SAME `reap.lock` — `flock` on an
+# already-held fd by the SAME process is a re-entrant no-op-wait, never a
+# self-deadlock, because both acquisitions happen inside the SAME shell
+# process and flock's advisory lock is per-fd/per-process, not per-call), then
+# restores `STATE=cleaning` (the caller's own state — `lane_reap` never sets
+# the terminal `clean-exit`; that transition belongs to the caller's own
+# lifecycle, not this helper). Best-effort: a missing/degraded lane dir is a
+# silent no-op, matching every other lane_* consumer-side guard.
+lane_reap() {
+  local lane_dir="$1" grace="${2:-5}"
+  [[ -n "$lane_dir" && -d "$lane_dir" ]] || return 0
+  declare -F lane_set_state >/dev/null 2>&1 && lane_set_state "$lane_dir" reaping || true
+  lane_kill "$lane_dir" "$grace"
+  declare -F lane_set_state >/dev/null 2>&1 && lane_set_state "$lane_dir" cleaning || true
+  return 0
+}
+
+# _bounded_call <secs> <cmd...> — run "$@" with a wall-clock bound of <secs>
+# seconds so a teardown-path network call (GitHub API, PR create, comment
+# post) can never hang a `cleanup()` EXIT trap indefinitely while it holds
+# lane state ([Lane-GC PR-3], INV-114 row 2 — design §4-C4/§12 R10's 60s
+# network-call bound).
+#
+# Deliberately does NOT delegate to coreutils `timeout` (unlike
+# `_run_with_timeout` in lib-agent.sh, which bounds an exec'd CLI BINARY):
+# every teardown call site this wraps (`itp_post_comment`, `chp_pr_list`,
+# `drain_agent_pr_create`, `get_gh_app_token`, …) is a bash FUNCTION already
+# sourced into the wrapper's own shell, and `timeout <secs> <bash-function>`
+# fails outright (`exec` cannot resolve a shell function as a binary — proven
+# empirically: `timeout 2 myfunc` → "failed to run command … No such file or
+# directory", rc 127) — coreutils `timeout` can only ever bound a real
+# exec'd program, never a function in the calling shell.
+#
+# Implementation: temporarily enable job control (`set -m`) around the
+# background spawn, so the wrapped call gets its OWN process group (PID ==
+# PGID), then restore the caller's prior monitor-mode setting immediately
+# after capturing `$!` — the child's pgid assignment is a property fixed at
+# fork time, so toggling `set -m` back off right away never affects it. This
+# is load-bearing, not cosmetic: a GitHub-API helper that itself does
+# `out=$(some_long_curl_command)` forks a GRANDCHILD via command
+# substitution — a plain (job-control-disabled) background job shares the
+# calling shell's own PGID, so a plain `kill -TERM "$cpid"` reaches only the
+# direct child, never that grandchild, leaking it past the wrapper's own
+# exit (verified empirically: a wrapped function forking a `sleep 20`
+# grandchild survived a "plain kill" implementation indefinitely). A
+# group-form kill on ESCALATION reaches the whole subtree, the same
+# `_kill_group_escalate` guarantee this file already gives every OTHER kill
+# path.
+#
+# Rejected alternative: `export -f "$1"` + `setsid bash -c '"$@"' _ "$@"`
+# (a nested shell, matching `_kill_group_escalate`'s pgid semantics via
+# `setsid` instead of `set -m`). Rejected because `export -f` only exports
+# the ONE named function — every real call site here (`itp_post_comment`,
+# `chp_pr_list`, …) internally calls OTHER functions (`itp_post_comment` →
+# `itp_${ISSUE_PROVIDER}_post_comment`) that would NOT be exported, so the
+# nested `bash -c` subshell would fail with "command not found" on the
+# very first internal call (verified empirically). `set -m` backgrounds the
+# call in THIS SAME shell (no new bash process, no export step), so every
+# function already sourced into the caller stays naturally visible — no
+# additional plumbing needed.
+#
+# Poll loop uses a PLAIN (non-group) `kill -0 "$cpid"` — never `-- "-$cpid"`
+# — for the liveness check: `set -m`'s pgid assignment IS synchronous with
+# `&` (unlike `setsid`, which asynchronously calls `setsid(2)` inside the
+# forked child — verified empirically to intermittently ESRCH-miss a
+# same-tick group probe), so there is no race here; the plain-PID form is
+# simply the minimal-diff choice matching pre-PR-3 behavior for the common
+# (no-timeout) path. By escalation time several seconds have already
+# elapsed regardless, so the group form is unambiguously safe (and
+# necessary, to reach the grandchild) there.
+#
+# stdout and stderr are captured to TWO SEPARATE private tmpfiles and
+# replayed to their own fds — so the caller's own `2>/dev/null`/`2>&1` on the
+# `_bounded_call` invocation itself still works exactly as if the wrapped
+# call had run inline. A single merged tmpfile was tried first and rejected:
+# several real call sites (e.g. `chp_pr_list --state open … 2>/dev/null ||
+# echo "0"`) rely on THEIR OWN outer `2>/dev/null` to drop stderr before the
+# value is used in an arithmetic/string comparison — a merged capture
+# defeats that redirection (proven empirically: a wrapped function that logs
+# one benign stderr line before printing its real stdout value corrupts the
+# captured variable into a multi-line string even though the caller wrote
+# `2>/dev/null`), which can trip `set -euo pipefail`'s unbound-
+# variable/arithmetic-comparison guards downstream and abort `cleanup()`
+# before it finishes label transitions.
+#
+# `Feature-detected; unwrapped+WARN without` (per the design's own wording)
+# is satisfied by falling back to a plain unwrapped call whenever EITHER
+# tmpfile can't be created (e.g. /tmp unwritable) — the design's escape
+# hatch is for a MISSING BOUNDING MECHANISM, and background+poll needs no
+# external tool, so that fallback triggers only on this narrow I/O failure.
+_bounded_call() {
+  local secs="$1"; shift
+  local outfile errfile
+  outfile="$(mktemp 2>/dev/null)" && errfile="$(mktemp 2>/dev/null)" || {
+    echo "[lib-lane] WARN: cannot create tmpfile for bounded call; running teardown call unbounded (may hang): $*" >&2
+    rm -f "${outfile:-}" "${errfile:-}" 2>/dev/null || true
+    "$@"
+    return $?
+  }
+  local _old_monitor=0
+  case "$-" in *m*) _old_monitor=1 ;; esac
+  set -m
+  "$@" > "$outfile" 2> "$errfile" &
+  local cpid=$! i rc
+  # Restore the caller's monitor-mode setting immediately — the child's
+  # pgid is already fixed at this point (fork-time property), so this
+  # never affects it, and the caller's own `set -m`/job-control state
+  # (e.g. `set -euo pipefail` scripts that never enable it) is never
+  # permanently altered by a call into this helper.
+  [[ "$_old_monitor" -eq 0 ]] && set +m
+  for ((i = 0; i < secs; i++)); do
+    if ! kill -0 "$cpid" 2>/dev/null; then
+      # `wait`'s own exit status mirrors the waited-on child's — under a
+      # caller's `set -e` (every real call site here runs inside a
+      # `set -euo pipefail` wrapper), a bare `wait "$cpid"` for a
+      # NON-ZERO-exiting wrapped call aborts the CALLING shell right here,
+      # before `rc=$?` ever runs (proven empirically). `|| rc=$?` — never a
+      # bare statement followed by a separate `rc=$?` line — is required on
+      # every `wait` in this function so a wrapped call's real failure exit
+      # code is captured instead of unwinding whatever shell called
+      # `_bounded_call`.
+      rc=0; wait "$cpid" 2>/dev/null || rc=$?
+      cat "$outfile"
+      cat "$errfile" >&2
+      rm -f "$outfile" "$errfile"
+      return "$rc"
+    fi
     sleep 1
   done
-
-  for pg in "${seen[@]}"; do
-    kill -KILL -- "-${pg}" 2>/dev/null || true
-  done
-  return 0
+  echo "[lib-lane] WARN: teardown call exceeded ${secs}s bound; terminating: $*" >&2
+  kill -TERM -- "-${cpid}" 2>/dev/null || true
+  sleep 1
+  kill -KILL -- "-${cpid}" 2>/dev/null || true
+  wait "$cpid" 2>/dev/null || true
+  cat "$outfile"
+  cat "$errfile" >&2
+  rm -f "$outfile" "$errfile"
+  return 124
 }
 
 # lane_spawn <lane_dir> <role> -- <cmd...> — pgid-backend spawn (the ONLY

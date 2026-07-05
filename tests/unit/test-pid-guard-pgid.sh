@@ -391,10 +391,11 @@ echo "=== TC-PGID-005: pgrep fallback catches escaped trees ==="
 echo
 
 # Source kill_stale_wrapper from dispatch-local.sh (same extraction trick
-# as test-kill-before-spawn.sh).
+# as test-kill-before-spawn.sh). [Lane-GC PR-3 / INV-111]: also extract the
+# sibling `_pid_or_group_alive` helper kill_stale_wrapper now calls.
 EXTRACT_FILE=$(mktemp)
 awk '
-  /^kill_stale_wrapper\(\) \{$/ { in_fn=1 }
+  /^(_pid_or_group_alive|kill_stale_wrapper)\(\) \{$/ { in_fn=1 }
   in_fn { print }
   in_fn && /^\}$/ { in_fn=0 }
 ' "$DISPATCH_SCRIPT" > "$EXTRACT_FILE"

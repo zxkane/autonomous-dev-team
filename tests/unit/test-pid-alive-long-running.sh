@@ -80,11 +80,14 @@ set -u
 # Source kill_stale_wrapper as a function. dispatch-local.sh runs
 # top-level statements when sourced; we need the function only.
 # Extract just the function definition into a temp file and source it.
+# [Lane-GC PR-3 / INV-111]: kill_stale_wrapper now calls the sibling helper
+# `_pid_or_group_alive` — capture both function bodies (no early `exit` on
+# the first closing brace, so the second definition is also captured).
 KILL_FN_FILE=$(mktemp)
 awk '
-  /^kill_stale_wrapper\(\) \{/ { capturing = 1 }
+  /^(_pid_or_group_alive|kill_stale_wrapper)\(\) \{/ { capturing = 1 }
   capturing { print }
-  capturing && /^\}/ { capturing = 0; exit }
+  capturing && /^\}/ { capturing = 0 }
 ' "$SCRIPTS_DIR/dispatch-local.sh" >"$KILL_FN_FILE"
 # shellcheck disable=SC1090
 source "$KILL_FN_FILE"

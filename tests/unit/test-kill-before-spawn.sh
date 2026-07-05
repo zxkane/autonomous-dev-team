@@ -150,9 +150,14 @@ assert_match "Stderr log on found wrapper" \
 # function — no replica drift. Strategy: extract the function definition from
 # dispatch-local.sh into a temp file and source it. ISSUE_NUM is required by
 # the function's log messages, so set a placeholder.
+#
+# [Lane-GC PR-3 / INV-111] kill_stale_wrapper now calls the sibling helper
+# `_pid_or_group_alive` (the leader-OR-group liveness probe) — extract BOTH
+# function definitions so the harness sources the real implementation, not a
+# partial extraction that leaves the helper undefined.
 EXTRACT_FILE=$(mktemp)
 awk '
-  /^kill_stale_wrapper\(\) \{$/ { in_fn=1 }
+  /^(_pid_or_group_alive|kill_stale_wrapper)\(\) \{$/ { in_fn=1 }
   in_fn { print }
   in_fn && /^\}$/ { in_fn=0 }
 ' "$DISPATCH_SCRIPT" > "$EXTRACT_FILE"

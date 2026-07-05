@@ -356,7 +356,12 @@ assert_grep "TC-RTO-VAL-12c startup log line shows resolved review cap" \
 # the 1 INV-64 Phase-A.5 smoke-FAIL abort site (#224) PLUS the 2 INV-79
 # mandatory-bot-review gate sites (#234: awaiting-bot-review wait + max-waits
 # substantive FAIL) — the veto itself still contributes none.
-EMIT_COUNT=$(grep -cE '^\s*emit_verdict_trailer ' "$WRAPPER")
+#
+# [Lane-GC PR-3 / INV-112] The crash-trap call site (inside cleanup()) is now
+# wrapped as `_teardown_call emit_verdict_trailer …` (bounded network call) —
+# the regex tolerates an optional `_teardown_call ` prefix so the call-SITE
+# count stays semantically 13 even though one site's literal text changed.
+EMIT_COUNT=$(grep -cE '^\s*(_teardown_call )?emit_verdict_trailer ' "$WRAPPER")
 assert_eq "TC-RTO-SRC-06 emit_verdict_trailer count is 13 (veto adds none; INV-64 smoke abort + INV-79 bot-review gate x2 are the new sites)" "13" "$EMIT_COUNT"
 # Post-window sweep classifies a no-verdict agent via _classify_noverdict_agent.
 assert_grep "TC-RTO-VETO-11 post-window sweep uses _classify_noverdict_agent on launch rc" \

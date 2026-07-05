@@ -107,6 +107,23 @@ prepare_agent_log() {
   install -m 600 /dev/null "$log" 2>/dev/null || true
 }
 
+# _pid_or_group_alive <pid> — leader-OR-group liveness probe ([Lane-GC PR-3 /
+# INV-114], design §4-C4 row 4). A bare `kill -0 <pid>` gates escalation on
+# the SESSION LEADER alone — but a TERM-trapping member of that process
+# group can still be fully alive after its leader has already died (the
+# group doesn't disappear when its leader exits), and the old leader-only
+# gate would then skip the SIGKILL pass entirely, leaving the trapping
+# member to survive indefinitely (RC2 in the design's forensic writeup).
+# Checking BOTH the individual pid and the negative-pid (whole process
+# group) form closes that gap without ever narrowing the pre-existing
+# leader-liveness check — it can only widen "still alive" from what the
+# leader-only check already reported.
+_pid_or_group_alive() {
+  local pid="$1"
+  kill -0 "$pid" 2>/dev/null && return 0
+  kill -0 -- "-${pid}" 2>/dev/null
+}
+
 LOG_PREFIX="/tmp/agent-${PROJECT_ID}"
 case "$TYPE" in
   dev-new|dev-resume) prepare_agent_log "${LOG_PREFIX}-issue-${ISSUE_NUM}.log" ;;
@@ -189,7 +206,7 @@ kill_stale_wrapper() {
     local old_pid killed=0
     old_pid=$(cat "$pid_file" 2>/dev/null)
 
-    if [[ -n "$old_pid" ]] && kill -0 "$old_pid" 2>/dev/null; then
+    if [[ -n "$old_pid" ]] && _pid_or_group_alive "$old_pid"; then
       echo "Found existing wrapper for issue #${ISSUE_NUM} (PID ${old_pid}); sending SIGTERM..." >&2
       # Group-kill (closes #109): old_pid was written by _run_with_timeout
       # under setsid, so it's the session-leader PID == PGID. `kill -- -<pid>`
@@ -212,11 +229,19 @@ kill_stale_wrapper() {
       }
       local _i
       for _i in 1 2 3 4 5; do
-        kill -0 "$old_pid" 2>/dev/null || break
+        _pid_or_group_alive "$old_pid" || break
         sleep 1
       done
-      if kill -0 "$old_pid" 2>/dev/null; then
-        echo "WARNING: PID ${old_pid} ignored SIGTERM after 5s; escalating to SIGKILL (group)" >&2
+      # [Lane-GC PR-3 / INV-114] Escalation gate: leader-OR-group, never
+      # leader-only. A member that traps TERM (e.g. a `setsid bash -c 'trap
+      # "" TERM; …'`-style child) can outlive its own session leader — the
+      # OLD leader-only `kill -0 "$old_pid"` gate would then see the leader
+      # gone, skip SIGKILL entirely, and leave the trapping member running
+      # forever. `_pid_or_group_alive` additionally probes the negative-pid
+      # (whole-group) form so the KILL pass fires whenever ANY member of the
+      # group is still reachable, not just the (possibly already-dead) leader.
+      if _pid_or_group_alive "$old_pid"; then
+        echo "WARNING: PID ${old_pid} (or a group member) ignored SIGTERM after 5s; escalating to SIGKILL (group)" >&2
         kill -9 -- "-${old_pid}" 2>/dev/null || true
         local kill_err
         kill_err=$(kill -9 "$old_pid" 2>&1) || {
@@ -226,8 +251,8 @@ kill_stale_wrapper() {
         }
         sleep 1
         # Final liveness check — if still alive, we cannot safely spawn.
-        if kill -0 "$old_pid" 2>/dev/null; then
-          echo "ERROR: PID ${old_pid} survived SIGKILL+1s grace; refusing to spawn alongside it" >&2
+        if _pid_or_group_alive "$old_pid"; then
+          echo "ERROR: PID ${old_pid} (or a group member) survived SIGKILL+1s grace; refusing to spawn alongside it" >&2
           return 1
         fi
       fi
@@ -240,11 +265,12 @@ kill_stale_wrapper() {
     # acquire_pid_guard, OR (b) the file content is empty / non-numeric —
     # there's nothing useful to keep fresh.
     #
-    # If we hit the `kill -0` miss path (PID is non-empty, numeric, but
-    # `kill -0` returned failure), do NOT delete the file. The agent's
-    # session-leader PID can drift out of `kill -0` reachability while the
-    # underlying process group is still ticking (observed under
-    # AGENT_LAUNCHER `bash -c "..."` indirection); the wrapper's
+    # If we hit the `_pid_or_group_alive` miss path (PID is non-empty,
+    # numeric, but neither the leader nor the group answers `kill -0`), do
+    # NOT delete the file. The agent's session-leader PID can drift out of
+    # `kill -0` reachability while the underlying process group is still
+    # ticking (observed under AGENT_LAUNCHER `bash -c "..."` indirection);
+    # the wrapper's
     # `install_agent_heartbeat` loop relies on the file existing so its
     # `touch` keeps the mtime fresh. Deleting it strands the dispatcher's
     # `pid_alive` mtime fallback (#111 Part B) and re-creates the
@@ -301,19 +327,92 @@ kill_stale_wrapper() {
       | grep -vw "$$" || true)
     if [[ -n "$orphan_pids" ]]; then
       echo "Found orphan ${TYPE:-?} agent process(es) for issue #${ISSUE_NUM} (project ${PROJECT_ID:-?}): $(tr '\n' ' ' <<<"$orphan_pids")— group-killing" >&2
-      local op
+      # [Lane-GC PR-3 / INV-111] Walk each orphan's DESCENDANT TREE and
+      # collect every distinct PGID *and* every individual PID BEFORE any
+      # signal (codex review round-3 [P1], round-4 [P1]). Three structural
+      # facts break a group-only kill: (a) the pgrep-matched wrapper PID is
+      # usually NOT a group leader — dispatch-local spawns wrappers via
+      # `nohup … &`, so a wrapper INHERITS the spawning shell's pgid — the
+      # group numbered `op` typically doesn't exist (ESRCH), so only the
+      # leader-only TERM fallback ever fired; (b) a wrapper's own children
+      # may `setsid` into their OWN groups with cmdlines the pgrep pattern
+      # never matches (`bash -c 'trap "" TERM; …'`), so no group signal
+      # derived from the wrapper's pid/pgid alone can reach them; (c) a
+      # descendant spawned WITHOUT its own `setsid` shares dispatch-local.sh's
+      # OWN pgid (the normal shape when the dispatcher's own session has no
+      # setsid boundary between it and the `nohup`-launched wrapper) — the
+      # self-guard that excludes our own pgid from the GROUP-form kill (so we
+      # never suicide our own group) previously dropped that descendant
+      # ENTIRELY, since only pgid-form signals were ever sent. Round-4 fix:
+      # every walked PID (not just the top-level pgrep matches) also gets an
+      # INDIVIDUAL-PID TERM/KILL — `kill -TERM <pid>` targets the process
+      # itself regardless of its pgid, so a same-pgid descendant is reached
+      # even when its group is (rightly) never group-signalled.
+      # The walk (BFS via pgrep -P, done while the tree is still alive — a
+      # dead parent is unenumerable) resolves the REAL pgid set (self-guarded)
+      # and the REAL pid set (unguarded — individual-PID kill is safe against
+      # our own pid/pgid siblings, since it never touches this process itself)
+      # of the orphan and every descendant.
+      local op _own_pgid _pg _pid _queue _kids
+      _own_pgid=$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')
+      local -A _sweep_pgids=() _sweep_pids=()
       while IFS= read -r op; do
         [[ -z "$op" ]] && continue
-        kill -TERM -- "-${op}" 2>/dev/null || kill -TERM "$op" 2>/dev/null || true
+        _queue="$op"
+        while [[ -n "$_queue" ]]; do
+          _pid="${_queue%%$'\n'*}"
+          if [[ "$_queue" == *$'\n'* ]]; then _queue="${_queue#*$'\n'}"; else _queue=""; fi
+          [[ "$_pid" =~ ^[0-9]+$ ]] || continue
+          _sweep_pids["$_pid"]=1
+          _pg=$(ps -o pgid= -p "$_pid" 2>/dev/null | tr -d ' ')
+          if [[ "$_pg" =~ ^[0-9]+$ && "$_pg" != "$_own_pgid" ]]; then
+            _sweep_pgids["$_pg"]=1
+          fi
+          _kids=$(pgrep -P "$_pid" 2>/dev/null || true)
+          [[ -n "$_kids" ]] && _queue="${_queue:+$_queue$'\n'}$_kids"
+        done
       done <<<"$orphan_pids"
-      sleep 1
-      # Escalate any survivors
-      while IFS= read -r op; do
-        [[ -z "$op" ]] && continue
-        if kill -0 "$op" 2>/dev/null; then
-          kill -9 -- "-${op}" 2>/dev/null || kill -9 "$op" 2>/dev/null || true
+      # TERM pass: every collected group, plus every walked pid individually
+      # (covers a descendant whose pgid was excluded by the self-guard).
+      for _pg in "${!_sweep_pgids[@]}"; do
+        kill -TERM -- "-${_pg}" 2>/dev/null || true
+      done
+      for _pid in "${!_sweep_pids[@]}"; do
+        kill -TERM "$_pid" 2>/dev/null || true
+      done
+      # 5s grace poll (review round-8 [P1]: the sweep previously slept only
+      # 1s before SIGKILL, but the issue pins kill_stale_wrapper's grace at
+      # 5s — the same window the PID-file path above honors). Early-exits
+      # the moment nothing in either collected set is still alive.
+      local _sw_i _sw_alive
+      for _sw_i in 1 2 3 4 5; do
+        _sw_alive=0
+        for _pg in "${!_sweep_pgids[@]}"; do
+          kill -0 -- "-${_pg}" 2>/dev/null && { _sw_alive=1; break; }
+        done
+        if [[ "$_sw_alive" -eq 0 ]]; then
+          for _pid in "${!_sweep_pids[@]}"; do
+            kill -0 "$_pid" 2>/dev/null && { _sw_alive=1; break; }
+          done
         fi
-      done <<<"$orphan_pids"
+        [[ "$_sw_alive" -eq 0 ]] && break
+        sleep 1
+      done
+      # KILL pass: any collected group or walked pid still alive gets
+      # SIGKILL — the gate probes the REAL pgid set AND the REAL pid set
+      # from the walk, so a TERM-trapping member anywhere in the tree
+      # (setsid'd, same-pgid, leader-matched, or not) is reached even after
+      # its parent died.
+      for _pg in "${!_sweep_pgids[@]}"; do
+        if kill -0 -- "-${_pg}" 2>/dev/null; then
+          kill -9 -- "-${_pg}" 2>/dev/null || true
+        fi
+      done
+      for _pid in "${!_sweep_pids[@]}"; do
+        if kill -0 "$_pid" 2>/dev/null; then
+          kill -9 "$_pid" 2>/dev/null || true
+        fi
+      done
     fi
   fi
 
