@@ -71,16 +71,32 @@ command -v jq >/dev/null 2>&1 || { echo "FATAL: jq required"; exit 2; }
 #   _GL_API_CALL_LOG         file — every invocation appends one line
 #                            "<argv joined by |>"; the test asserts against it.
 #   _GL_API_INV_STATE        file — invocation-count state (auto-managed)
+#   _GL_API_PAGES_REQUIRED   int — a `--paginate` call needs this many pages
+#                            to walk to exhaustion. When set AND
+#                            `GL_TRANSPORT_PAGE_CAP` is set AND
+#                            `GL_TRANSPORT_PAGE_CAP < _GL_API_PAGES_REQUIRED`,
+#                            the stub returns rc≠0 EMPTY stdout — modeling the
+#                            frozen #416 transport cap-hit fail-CLOSED contract.
+#                            (When the call has `--paginate` but no
+#                            `_GL_API_PAGES_REQUIRED` is set, the stub returns
+#                            the payload as if the walk fit within any cap.)
+#   _GL_API_CAP_LOG          file — every `_gl_api --paginate` call records the
+#                            observed `GL_TRANSPORT_PAGE_CAP` value (or `-` for
+#                            unset) — the test asserts against this to prove
+#                            the leaf actually scoped the env var per call.
 # ============================================================================
 _reset_stub() {
   export _GL_API_PAYLOAD=""
   export _GL_API_PAYLOAD_SEQ=""
   export _GL_API_FAIL_AT=""
   export _GL_API_STATUS="200"
+  export _GL_API_PAGES_REQUIRED=""
   export _GL_API_CALL_LOG="$RUNDIR/call.log"
   export _GL_API_INV_STATE="$RUNDIR/inv.state"
+  export _GL_API_CAP_LOG="$RUNDIR/cap.log"
   : > "$_GL_API_CALL_LOG"
   : > "$_GL_API_INV_STATE"
+  : > "$_GL_API_CAP_LOG"
 }
 
 _gl_api() {
@@ -92,8 +108,30 @@ _gl_api() {
   printf '%s' "$inv" > "$_GL_API_INV_STATE"
   # Simulate the transport-status channel.
   GL_API_STATUS="$_GL_API_STATUS"
+  # Detect --paginate in argv (the cap-hit gate applies only to page-walk calls).
+  local paginate=0 a
+  for a in "$@"; do
+    [ "$a" = "--paginate" ] && paginate=1
+  done
+  # Record the leaf-scoped GL_TRANSPORT_PAGE_CAP env observation for
+  # `--paginate` calls (proves the leaf actually scoped the env var per call).
+  if [ "$paginate" = "1" ]; then
+    printf '%s\n' "${GL_TRANSPORT_PAGE_CAP:--}" >> "$_GL_API_CAP_LOG"
+  fi
   # Forced-failure hook.
   if [ -n "$_GL_API_FAIL_AT" ] && [ "$_GL_API_FAIL_AT" = "$inv" ]; then
+    return 1
+  fi
+  # Cap-hit fail-CLOSED (frozen #416 contract): if a `--paginate` call
+  # requires more pages than the caller-scoped `GL_TRANSPORT_PAGE_CAP`,
+  # return rc≠0 EMPTY stdout. Absent `_GL_API_PAGES_REQUIRED` the walk is
+  # assumed to fit; absent `GL_TRANSPORT_PAGE_CAP` the transport default
+  # applies (modeled as "no cap-hit" in the stub — the real transport has
+  # its own default 50 which is well beyond any test fixture).
+  if [ "$paginate" = "1" ] \
+     && [ -n "${_GL_API_PAGES_REQUIRED:-}" ] \
+     && [ -n "${GL_TRANSPORT_PAGE_CAP:-}" ] \
+     && [ "$GL_TRANSPORT_PAGE_CAP" -lt "$_GL_API_PAGES_REQUIRED" ]; then
     return 1
   fi
   # Choose the payload for this invocation.
@@ -512,18 +550,73 @@ out=$(chp_gitlab_pr_list open "number,body" 2>/dev/null); rc=$?
 assert_rc_nz "TC-P33-090 mid-walk _gl_api rc≠0 → leaf rc≠0" "$rc"
 assert_empty "TC-P33-090 no partial stdout" "$out"
 
-# TC-P33-091 — page-cap (documented deferral):
-# CHP_GITLAB_PR_LIST_PAGE_CAP is forwarded to `_gl_api --max-items` as a
-# transport-side bound. The frozen #416 contract makes the transport itself
-# fail-CLOSED on cap-hit with rc≠0 empty stdout — the leaf just passes rc≠0
-# through. Our test-local stub does not model the transport's page-cap, so we
-# simulate it by making the stub fail rc≠0 (which is what the transport
-# would emit on a cap-hit).
+# TC-P33-091 — REAL page-cap-hit through the frozen #416 GL_TRANSPORT_PAGE_CAP
+# knob. The leaf forwards CHP_GITLAB_PR_LIST_PAGE_CAP as GL_TRANSPORT_PAGE_CAP
+# scoped per _gl_api call; the stub reads that env var, compares against a
+# fixture "pages required" count, and returns rc≠0 EMPTY stdout on cap-hit
+# (modeling the transport's fail-CLOSED cap-hit semantics). Two rows:
+#   (a) cap < pages-required → leaf rc≠0 EMPTY stdout;
+#   (b) the leaf actually SCOPED the env var per call (cap-log captured it).
 _reset_stub
-_GL_API_FAIL_AT=1
+export _GL_API_PAGES_REQUIRED=3
+export _GL_API_PAYLOAD="$PAYLOADS/gitlab-chp-pr-list-p1.json"
 CHP_GITLAB_PR_LIST_PAGE_CAP=2 out=$(chp_gitlab_pr_list open "number,body" 2>/dev/null); rc=$?
-assert_rc_nz "TC-P33-091 page-cap-hit (simulated as transport rc≠0) → leaf rc≠0" "$rc"
-assert_empty "TC-P33-091 no partial stdout" "$out"
+assert_rc_nz "TC-P33-091 REAL page-cap-hit (cap=2 < pages_required=3) → leaf rc≠0" "$rc"
+assert_empty "TC-P33-091 no partial stdout on cap-hit" "$out"
+# TC-P33-091b — the leaf actually scoped GL_TRANSPORT_PAGE_CAP=2 for this call
+# (proves --max-items is NOT what's being passed; the transport's fail-CLOSED
+# knob IS what's being threaded).
+observed_cap="$(head -1 "$_GL_API_CAP_LOG" 2>/dev/null)"
+assert_eq "TC-P33-091b leaf passes GL_TRANSPORT_PAGE_CAP=CHP_GITLAB_PR_LIST_PAGE_CAP per call" "2" "$observed_cap"
+# TC-P33-091c — argv is CLEAN of --max-items (the earlier partial-by-design
+# item bound must never re-appear).
+if grep -q -- '--max-items' "$_GL_API_CALL_LOG"; then
+  bad "TC-P33-091c leaf still passes --max-items (must use GL_TRANSPORT_PAGE_CAP)"
+else
+  ok "TC-P33-091c leaf argv carries no --max-items (fail-CLOSED cap knob is env-scoped)"
+fi
+# TC-P33-091d — when cap >= pages_required, the walk succeeds (proof that the
+# gate is precise, not always-fail).
+_reset_stub
+export _GL_API_PAGES_REQUIRED=2
+export _GL_API_PAYLOAD="$PAYLOADS/gitlab-chp-pr-list-p1.json"
+CHP_GITLAB_PR_LIST_PAGE_CAP=5 out=$(chp_gitlab_pr_list open "number,body"); rc=$?
+assert_eq "TC-P33-091d cap=5 >= pages_required=2 → leaf rc=0" "0" "$rc"
+assert_jq_true "TC-P33-091d succeeds with non-empty result" 'length >= 1' "$out"
+
+# P2-1 (codex round-6 finding): pr_list must support `closingIssueNumbers`
+# via per-MR /closes_issues fetch (matches GitHub's list-embedded
+# closingIssuesReferences sub-selection), not fabricate `[]` per MR. The
+# invariant is: (i) when the field IS requested, per-MR fetches happen and
+# real numbers land in the array; (ii) when NOT requested, ZERO extra
+# /closes_issues calls happen (fetch-cost gate); (iii) a sub-resource failure
+# on the REQUESTED field fails the leaf rc≠0 EMPTY stdout (data-source
+# honesty — same posture as the reviews branch).
+# TC-P33-091e — real numbers when requested. Fixture: list p1 (2 opened MRs
+# iid=7,8), followed by 2 /closes_issues payloads returning [{iid:42}] each.
+_reset_stub
+export _GL_API_PAYLOAD_SEQ="$PAYLOADS/gitlab-chp-pr-list-p1.json:$PAYLOADS/gitlab-chp-find-pr-closes-mr7.json:$PAYLOADS/gitlab-chp-find-pr-closes-mr7.json"
+out=$(chp_gitlab_pr_list open "number,closingIssueNumbers"); rc=$?
+assert_eq "TC-P33-091e pr_list closingIssueNumbers rc=0" "0" "$rc"
+assert_jq_true "TC-P33-091e all elements carry closingIssueNumbers with real ids from /closes_issues" 'all(.[]; .closingIssueNumbers == [42])' "$out"
+# TC-P33-091f — fetch-cost gate: closingIssueNumbers NOT requested → no
+# /closes_issues call. Base list = 1 call; ZERO per-MR /closes_issues calls.
+_reset_stub
+export _GL_API_PAYLOAD="$PAYLOADS/gitlab-chp-pr-list-p1.json"
+out=$(chp_gitlab_pr_list open "number,body")
+if grep -q '/closes_issues' "$_GL_API_CALL_LOG"; then
+  bad "TC-P33-091f /closes_issues fetched despite closingIssueNumbers not requested"
+else
+  ok "TC-P33-091f fetch-cost gate: no /closes_issues call when field not requested"
+fi
+# TC-P33-091g — REQUESTED-field sub-resource failure → leaf rc≠0 EMPTY stdout
+# (data-source honesty; a `[]`-on-failure would lie about the linkage).
+_reset_stub
+export _GL_API_PAYLOAD_SEQ="$PAYLOADS/gitlab-chp-pr-list-p1.json:$PAYLOADS/gitlab-chp-find-pr-closes-mr7.json"
+_GL_API_FAIL_AT=2
+out=$(chp_gitlab_pr_list open "number,closingIssueNumbers" 2>/dev/null); rc=$?
+assert_rc_nz "TC-P33-091g /closes_issues rc≠0 on requested closingIssueNumbers → leaf rc≠0" "$rc"
+assert_empty "TC-P33-091g no partial stdout" "$out"
 
 # TC-P33-092 — empty match → []
 _reset_stub
@@ -713,12 +806,22 @@ out=$(chp_gitlab_review_threads 42)
 # (xyz unresolved) — total 3.
 assert_jq_true "TC-P33-145 merged length == 3 (p1: 2 resolvable + p2: 1 resolvable)" 'length == 3' "$out"
 
-# TC-P33-146 — page-cap simulated via _gl_api rc≠0 (transport owns cap)
+# TC-P33-146 — REAL page-cap-hit through GL_TRANSPORT_PAGE_CAP (same
+# discipline as TC-P33-091). Stub reads GL_TRANSPORT_PAGE_CAP scoped per
+# call, returns rc≠0 EMPTY stdout when pages_required exceeds the cap.
 _reset_stub
-_GL_API_FAIL_AT=1
+export _GL_API_PAGES_REQUIRED=2
+export _GL_API_PAYLOAD="$PAYLOADS/gitlab-chp-review-threads-p1.json"
 CHP_GITLAB_REVIEW_THREADS_PAGE_CAP=1 out=$(chp_gitlab_review_threads 42 2>/dev/null); rc=$?
-assert_rc_nz "TC-P33-146 page-cap hit (simulated) → leaf rc≠0" "$rc"
-assert_empty "TC-P33-146 no partial stdout" "$out"
+assert_rc_nz "TC-P33-146 REAL cap-hit (cap=1 < pages_required=2) → leaf rc≠0" "$rc"
+assert_empty "TC-P33-146 no partial stdout on cap-hit" "$out"
+observed_cap="$(head -1 "$_GL_API_CAP_LOG" 2>/dev/null)"
+assert_eq "TC-P33-146b leaf passes GL_TRANSPORT_PAGE_CAP=CHP_GITLAB_REVIEW_THREADS_PAGE_CAP per call" "1" "$observed_cap"
+if grep -q -- '--max-items' "$_GL_API_CALL_LOG"; then
+  bad "TC-P33-146c leaf still passes --max-items (must use GL_TRANSPORT_PAGE_CAP)"
+else
+  ok "TC-P33-146c leaf argv carries no --max-items"
+fi
 
 # TC-P33-147 — mid-walk failure (the MANDATORY R8/R12 failure fixture)
 _reset_stub

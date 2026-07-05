@@ -191,9 +191,25 @@ page-walked internally via `_gl_api --paginate`. State enum is DISJOINT:
   of length 4 (2 per page, arrival order preserved).
 - TC-P33-090 — mid-walk failure: `_gl_api --paginate` rc≠0 on page 2 → leaf
   rc≠0 with EMPTY stdout (fail-CLOSED §3.5).
-- TC-P33-091 — page cap: `CHP_GITLAB_PR_LIST_PAGE_CAP=2` while the fixture
-  reports a 3rd page → leaf rc≠0 with EMPTY stdout, loud stderr naming the
-  cap-hit.
+- TC-P33-091 — REAL page-cap-hit through the frozen #416 transport contract:
+  the leaf forwards `CHP_GITLAB_PR_LIST_PAGE_CAP` as `GL_TRANSPORT_PAGE_CAP`
+  scoped **per `_gl_api` call**; the stub reads that env var, compares against
+  a fixture `_GL_API_PAGES_REQUIRED` count, and returns rc≠0 EMPTY stdout on
+  cap-hit. TC-P33-091b asserts the cap-log captured `2` (proves the env was
+  scoped, not passed as `--max-items`); TC-P33-091c asserts the leaf argv
+  carries NO `--max-items` string; TC-P33-091d asserts a `cap ≥ pages_required`
+  walk succeeds normally (the gate is precise, not always-fail).
+- TC-P33-091e — `closingIssueNumbers` supported via per-MR
+  `/merge_requests/N/closes_issues` fetch when requested (mirrors GitHub's
+  list-embedded `closingIssuesReferences(first:100){nodes{number}}`
+  sub-selection). Fixture: list page 1 (2 opened MRs) + 2 per-MR
+  `/closes_issues` responses returning `[{iid:42}]` each → every element has
+  `closingIssueNumbers == [42]` (REAL numbers, never fabricated `[]`).
+- TC-P33-091f — fetch-cost gate: `closingIssueNumbers` NOT requested → ZERO
+  extra `/closes_issues` calls (proves the leaf does not eagerly fetch).
+- TC-P33-091g — REQUESTED-field sub-resource failure: `/closes_issues` rc≠0
+  on the first per-MR follow-up → leaf rc≠0 EMPTY stdout (data-source honesty
+  — a `[]`-on-failure would lie about the linkage).
 - TC-P33-092 — empty match → `[]` rc 0 (never `null`).
 - TC-P33-093 — projection-only: `chp_gitlab_pr_list open body,number` returns
   elements with EXACTLY `{body,number}` keys; unrequested vocabulary members
@@ -280,8 +296,13 @@ discussion excluded.
   discussion in ONE response, so ONE pagination level suffices; this is
   simpler than the GitHub W1f two-level walk). 2-page discussion list → merged
   array in arrival order.
-- TC-P33-146 — page cap: `CHP_GITLAB_REVIEW_THREADS_PAGE_CAP=1` while the
-  fixture reports a 2nd page → rc≠0 EMPTY stdout, loud stderr.
+- TC-P33-146 — REAL page-cap-hit through `GL_TRANSPORT_PAGE_CAP` (same
+  discipline as TC-P33-091): the leaf forwards
+  `CHP_GITLAB_REVIEW_THREADS_PAGE_CAP` as `GL_TRANSPORT_PAGE_CAP` scoped per
+  call; stub `_GL_API_PAGES_REQUIRED=2` with `CHP_GITLAB_REVIEW_THREADS_PAGE_CAP=1`
+  produces cap-hit → leaf rc≠0 EMPTY stdout. TC-P33-146b asserts the
+  cap-log observed `1` (env scoped, not `--max-items`); TC-P33-146c asserts
+  leaf argv carries NO `--max-items`.
 - TC-P33-147 — mid-walk failure: page 1 OK, page 2 `_gl_api` rc≠0 → leaf
   rc≠0 EMPTY stdout (the assigned mandatory failure fixture — mirrors #401's
   fail-CLOSED discipline for the GitHub W1f leaf).

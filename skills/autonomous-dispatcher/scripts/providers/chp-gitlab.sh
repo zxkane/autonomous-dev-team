@@ -476,18 +476,17 @@ chp_gitlab_pr_list() {
   local _CHP_GL_PARSED_FIELDS
   _chp_gitlab_parse_pr_fields "$fields" "list" || return $?
 
-  # Page-walk. `_gl_api --paginate` owns the walk, the 429 backoff, and the
-  # merge-into-one-array — fail-CLOSED per §3.5. The env var
-  # CHP_GITLAB_PR_LIST_PAGE_CAP maps onto `--max-items` at #416's discretion,
-  # but the transport's own cap is the authoritative one; we forward the
-  # env var as a MAX-ITEMS bound so a caller cap-hit is loud rc≠0.
+  # Page-walk via the frozen #416 transport contract. `_gl_api --paginate`
+  # owns the walk, the 429 backoff, and the merge-into-one-array — fail-CLOSED
+  # per §3.5. The leaf-scoped `GL_TRANSPORT_PAGE_CAP=<n>` env var narrows the
+  # transport's own page cap for THIS call, so a caller cap-hit is loud rc≠0
+  # with EMPTY stdout (NEVER a partial `--max-items`-bounded rc-0 array — the
+  # earlier `--max-items` approach was an ITEM bound with rc-0 partial-by-design
+  # semantics, not the fail-CLOSED cap the R5 spec pins). #416 R1 pins
+  # `GL_TRANSPORT_PAGE_CAP` as the fail-CLOSED knob.
   local page_cap; page_cap="$(_chp_gitlab_pr_list_page_cap)"
   local raw_list
-  # NOTE: `_gl_api --paginate --max-items <N>` bounds the merged item count
-  # (a LIMIT-bounded list verb cannot spuriously hit the transport's own
-  # page cap on a large project — §3.5 R1). The transport itself fails
-  # rc≠0 on mid-walk failure with empty stdout.
-  raw_list="$(_gl_api --paginate --max-items "$((page_cap * 100))" \
+  raw_list="$(GL_TRANSPORT_PAGE_CAP="$page_cap" _gl_api --paginate \
     "/projects/${GITLAB_PROJECT}/merge_requests?state=${gitlab_state}&order_by=created_at&sort=desc" \
     2>/dev/null)" || return 1
   [ -n "$raw_list" ] || return 1
@@ -503,33 +502,51 @@ chp_gitlab_pr_list() {
     filtered="$(jq -c --arg s "$gitlab_state" 'map(select((.state // "") == $s))' <<<"$raw_list" 2>/dev/null)" || return 1
   fi
 
-  # Reviews synthesis (per-MR /approvals when `reviews` is in the field set).
-  # This is a fetch-cost per candidate; we ONLY do it when reviews is
-  # requested. Empty candidate set → skip.
-  local need_reviews=0
-  case ",${_CHP_GL_PARSED_FIELDS}," in
-    *",reviews,"*) need_reviews=1 ;;
-  esac
+  # Per-candidate sub-resource fetches (fetch-cost gates). The GitHub
+  # reference leaf (`chp_github_pr_list`) delivers `closingIssueNumbers` via
+  # its GraphQL sub-selection `closingIssuesReferences(first:100){nodes{number}}`
+  # — a caller that requests the field gets REAL numbers, never a fabricated
+  # `[]`. GitLab has no equivalent list-embedded field, so we mirror the
+  # semantic by fetching `/merge_requests/N/closes_issues` per candidate ONLY
+  # when the field is requested (a bounded per-MR extra call; `pr_list` callers
+  # requesting closingIssueNumbers are rare — the linkage-resolution primary is
+  # `chp_find_pr_for_issue`, which already does the per-MR walk). Same for
+  # `reviews` via `/approvals`. One combined loop so an N-MR list makes ≤2N
+  # extra requests total. Fail-CLOSED on any REQUESTED-field sub-resource
+  # fetch failure (data-source honesty — a `[]`-on-failure would be a lie the
+  # caller cannot distinguish from a real empty closing/approvals set).
+  local need_reviews=0 need_closes=0
+  case ",${_CHP_GL_PARSED_FIELDS}," in *",reviews,"*)             need_reviews=1 ;; esac
+  case ",${_CHP_GL_PARSED_FIELDS}," in *",closingIssueNumbers,"*) need_closes=1  ;; esac
   local candidates_with_reviews="$filtered"
-  if [ "$need_reviews" = "1" ]; then
-    # Walk each candidate; fetch /approvals; splice into a `.approvals`
-    # sidecar on the record. If any fetch rc≠0 → leaf rc≠0 (data-source
-    # honesty on REQUESTED reviews).
-    local n i iid ap
+  if [ "$need_reviews" = "1" ] || [ "$need_closes" = "1" ]; then
+    local n i iid record
     n="$(jq 'length' <<<"$filtered" 2>/dev/null)" || return 1
-    local -a with_ap=()
+    local -a with_side=()
     for ((i=0; i<n; i++)); do
       iid="$(jq -r ".[${i}].iid // empty" <<<"$filtered" 2>/dev/null)" || return 1
       [ -n "$iid" ] || return 1
-      ap="$(_gl_api "/projects/${GITLAB_PROJECT}/merge_requests/${iid}/approvals" 2>/dev/null)" || return 1
-      [ -n "$ap" ] || return 1
-      jq -e 'type == "object"' >/dev/null 2>&1 <<<"$ap" || return 1
-      with_ap+=("$(jq -c --argjson ap "$ap" ".[${i}] + {_gl_approvals: \$ap}" <<<"$filtered" 2>/dev/null)") || return 1
+      record="$(jq -c ".[${i}]" <<<"$filtered" 2>/dev/null)" || return 1
+      if [ "$need_closes" = "1" ]; then
+        local ci_json
+        ci_json="$(_gl_api "/projects/${GITLAB_PROJECT}/merge_requests/${iid}/closes_issues" 2>/dev/null)" || return 1
+        [ -n "$ci_json" ] || return 1
+        jq -e 'type == "array"' >/dev/null 2>&1 <<<"$ci_json" || return 1
+        record="$(jq -c --argjson ci "$ci_json" '. + {_gl_closes: $ci}' <<<"$record" 2>/dev/null)" || return 1
+      fi
+      if [ "$need_reviews" = "1" ]; then
+        local ap
+        ap="$(_gl_api "/projects/${GITLAB_PROJECT}/merge_requests/${iid}/approvals" 2>/dev/null)" || return 1
+        [ -n "$ap" ] || return 1
+        jq -e 'type == "object"' >/dev/null 2>&1 <<<"$ap" || return 1
+        record="$(jq -c --argjson ap "$ap" '. + {_gl_approvals: $ap}' <<<"$record" 2>/dev/null)" || return 1
+      fi
+      with_side+=("$record")
     done
     if [ "$n" = "0" ]; then
       candidates_with_reviews='[]'
     else
-      candidates_with_reviews="$(printf '%s\n' "${with_ap[@]}" | jq -s -c '.')" || return 1
+      candidates_with_reviews="$(printf '%s\n' "${with_side[@]}" | jq -s -c '.')" || return 1
     fi
   fi
 
@@ -568,11 +585,13 @@ chp_gitlab_pr_list() {
               ) as $mg
             | . + {mergeable: $mg}
           elif $f == "closingIssueNumbers" then
-            # In the list-read, `closingIssueNumbers` is NOT populated (the
-            # per-MR /closes_issues fetch would be N sub-requests — a
-            # different verb, `chp_find_pr_for_issue`, owns that). Emit `[]`
-            # honestly (list-side never fabricates non-empty issue linkage).
-            . + {closingIssueNumbers: []}
+            # Populated from the per-MR /closes_issues sidecar spliced by the
+            # bash loop above (fetched ONLY when this field is requested —
+            # fetch-cost gate mirrors the GitHub list-embedded
+            # closingIssuesReferences sub-selection). Empty-200 → []; a
+            # transport/API failure on the sub-resource already failed the
+            # leaf rc≠0 with EMPTY stdout above (data-source honesty).
+            . + {closingIssueNumbers: ([ ($m._gl_closes // [])[]? | (.iid // empty) ])}
           elif $f == "reviews"         then
             (($m._gl_approvals // {}) | .approved_at // null) as $submitted
             | . + {reviews:
@@ -797,11 +816,14 @@ chp_gitlab_review_threads() {
     return 2
   }
   local page_cap; page_cap="$(_chp_gitlab_review_threads_page_cap)"
-  # Forward the per-verb cap to `_gl_api` as a --max-items bound. Each page
-  # is typically 20 discussions (GitLab REST default); we bound at
-  # page_cap * 100 items for safety.
+  # Forward the per-verb cap to the transport as its own PAGE-CAP env var
+  # (#416 R1: `GL_TRANSPORT_PAGE_CAP` scoped per call). This is the
+  # fail-CLOSED cap-hit knob — cap-hit → rc≠0 with EMPTY stdout, matching
+  # the R8 mandatory-failure fixture semantics. `--max-items` is deliberately
+  # NOT used here: it is an ITEM bound with rc-0 partial-by-design return,
+  # which would violate §3.5's fail-CLOSED-on-cap-hit MUST.
   local raw
-  raw="$(_gl_api --paginate --max-items "$((page_cap * 100))" \
+  raw="$(GL_TRANSPORT_PAGE_CAP="$page_cap" _gl_api --paginate \
     "/projects/${GITLAB_PROJECT}/merge_requests/${pr}/discussions" \
     2>/dev/null)" || return 1
   [ -n "$raw" ] || return 1
