@@ -385,7 +385,7 @@ additionally emit the three [INV-86] selection keys unconditionally
 | `mergedAt`            | ISO-8601 string / `null`   | `null` for unmerged / open PRs.
 | `headRefName`         | string                     | branch name; empty string on missing.
 | `headRefOid`          | string                     | commit SHA; empty string on missing.
-| `reviewDecision`      | raw provider token / `""`  | GitHub: `APPROVED\|CHANGES_REQUESTED\|REVIEW_REQUIRED\|""`. W1(c-f) may re-pin.
+| `reviewDecision`      | raw provider token / `""`  | GitHub: `APPROVED\|CHANGES_REQUESTED\|REVIEW_REQUIRED\|""`. GitLab (#418, P3-3): **always `""` — data-source-honesty**. GitLab has NO single-token review-decision REST field; a synthesized token would misrepresent the source of truth. The wrapper's approve/merge gate consults `chp_ci_status`/`chp_review_threads`/the verdict trailer directly rather than any synthesized `reviewDecision`. Any future backend that gains a native single-token decision is a spec amendment.
 | `mergeable`           | raw provider token / `""`  | GitHub: `MERGEABLE\|CONFLICTING\|UNKNOWN\|""`. W1(d) re-pins to a normalized enum.
 | `closingIssueNumbers` | array of ints              | normalized from GitHub's `closingIssuesReferences[].number` (GraphQL node objects flattened to ints). The single ints-array is the [INV-86] resolution key: `contains([N])` replaces the pre-W1c1 `any(.[]?; .number == N)` expression.
 | `comments`            | see §3.3 / per-verb        | normalized issue-comment array (`[{id,author,body,createdAt}]`, ascending by `createdAt`). **Per-verb support** (matrix below): the W1c1 pair REJECTS `comments` (rc≠0, loud) — never fabricated.
@@ -500,6 +500,17 @@ The GitLab transport lib (`skills/autonomous-dispatcher/scripts/providers/lib-gi
 
 The two-layer contract is normatively pinned by [INV-116](invariants.md#inv-116-the-gitlab-transport-is-a-two-layer-choke-point-_gl_http-request-primitive--_gl_api-public-function-pagination--backoff--fail-closed-live-in-_gl_api-the-override-hook-may-redefine-_gl_http-only). A future amendment (spec + INV entry + code) is the ONLY way to change it — a W-B slice cannot redesign it silently.
 
+> **GitLab CHP read leaves (#418, P3-3) walk pagination via `_gl_api --paginate`.**
+> Every list-returning GitLab leaf (`chp_gitlab_pr_list`,
+> `chp_gitlab_find_pr_for_issue`, `chp_gitlab_list_inline_comments`,
+> `chp_gitlab_review_threads`) calls `_gl_api --paginate` and never touches
+> `_gl_http` — the choke-point discipline above (#416 W-A / [INV-116]) covers
+> it at the shared transport layer rather than in each leaf. Per-leaf page
+> caps are scoped through `GL_TRANSPORT_PAGE_CAP=<n>` per call (see §5.1.1 R5
+> and R8 for the `CHP_GITLAB_PR_LIST_PAGE_CAP` / `CHP_GITLAB_REVIEW_THREADS_PAGE_CAP`
+> mapping). GitLab's discussion endpoint returns all notes per discussion in
+> ONE response, so `chp_gitlab_review_threads` uses ONE pagination level
+> (simpler than the GitHub W1f two-level walk).
 ### 3.6 Tick lifecycle hook (`itp_begin_tick`)
 
 The cross-repo dependency lookup mints a **target-repo-scoped** GitHub-App token
@@ -683,6 +694,62 @@ a Project/Group Access Token or a Premium/Ultimate Service Account.
 > Every leaf routes through the FROZEN P3-1 `_gl_api` contract ([INV-113]);
 > JSON bodies use `jq -c -n --arg` (no interpolation). The endpoint-level
 > mapping is pinned in the Mapping-appendix GitLab arm below.
+
+#### 5.1.1 GitLab CHP read leaves (#418, P3-3) — bucket tables + honesty pins
+
+The seven GitLab CHP READ leaves land in `providers/chp-gitlab.sh` behind
+`chp_<verb>` when `CODE_HOST=gitlab`. Each routes HTTP exclusively through the
+frozen #416 `_gl_api` public function — no leaf touches `_gl_http`. The
+provider-neutral §3.2 return shapes (byte-identical to the GitHub side) are
+built INSIDE the leaf; the caller layer stays unchanged (phase-2, #347).
+
+**R2 — `chp_gitlab_ci_status`: `head_pipeline.status` → `green|pending|failed|none`** (verbatim):
+
+| GitLab `.head_pipeline.status` | Normalized token |
+|-------------------------------|------------------|
+| `head_pipeline == null` (no pipeline) | `none` |
+| `success` | `green` |
+| `failed` | `failed` |
+| `canceled` | `failed` (terminal not-green; parity with GitHub `CANCELLED → failed`) |
+| `skipped` | `pending` (mirrors GitHub `SKIPPED → pending`; NOTE skipped IS terminal on GitLab — a deliberately-skipped-pipeline project would never read `green`; accepted for parity, revisit only if a real deployment hits it) |
+| `manual`, `created`, `waiting_for_resource`, `preparing`, `pending`, `running`, `scheduled` | `pending` |
+| any unrecognized future status | `pending` (conservative not-green not-terminal; matches the GitHub leaf's decision order) |
+
+Fail contract: `_gl_api` rc≠0, missing `head_pipeline` key, or non-object payload → leaf rc≠0 EMPTY stdout (payload-type gate).
+
+**R3 — `chp_gitlab_mergeable`: `detailed_merge_status` → `MERGEABLE|CONFLICTING|UNKNOWN`** (verbatim; `merge_status` deprecated ≥15.6 and NOT read):
+
+| GitLab `.detailed_merge_status` | Normalized token |
+|--------------------------------|------------------|
+| `mergeable` | `MERGEABLE` |
+| `conflict`, `need_rebase`, `commits_status`, `broken_status` | `CONFLICTING` (structural inability to merge — matches `_classify_mergeable_gate`'s CONFLICTING semantics) |
+| `checking`, `unchecked`, `preparing`, `approvals_syncing` | `UNKNOWN` (server still computing — the gate's UNKNOWN-retry loop is the honest path) |
+| `not_open` | `UNKNOWN` (the caller's `_pr_open_gate` is the correct decider; this leaf stays out of state-gating it doesn't own) |
+| `ci_must_pass`, `ci_still_running`, `not_approved`, `requested_changes`, `merge_request_blocked`, `discussions_not_resolved`, `draft_status`, `status_checks_must_pass`, `jira_association_missing`, `merge_time`, `security_policy_violations`, `security_policy_pipeline_check`, `locked_paths`, `locked_lfs_files`, `title_regex` | `UNKNOWN` (POLICY blocks orthogonal to structural mergeability; the wrapper owns approve/merge and consults `chp_ci_status`/`chp_review_threads`/the verdict trailer separately — surfacing these as CONFLICTING would double-count the gate) |
+| any unrecognized future token | `UNKNOWN` |
+
+**R4 — `chp_gitlab_pr_view <pr> <fields-csv>` — MR view + fetch-cost-gated sub-resources.** The base `GET /projects/…/merge_requests/:iid` is always fetched; `/closes_issues`, `/notes?sort=asc&order_by=created_at` (paginated), and `/approvals` are fetched **only when** `closingIssueNumbers`, `comments`, or `reviews` respectively are in the requested fields — an unrequested sub-resource NEVER incurs an HTTP call (fetch-cost gate; a transport/API failure on a REQUESTED field fails the leaf rc≠0, data-source honesty). Mapping: `number ← .iid` (NOT `.id` — iid is the project-scoped identifier every `#N` reference uses); `state` from `.state` mapped `opened→OPEN, closed→CLOSED, merged→MERGED, locked→CLOSED` (accepted asymmetry — see the R5 note below on `state=closed` list filtering); `body ← .description` (null → `""`, the #148 hazard fix); `headRefName ← .source_branch`; `headRefOid ← .sha`; `reviewDecision → ""` unconditional (§3.2.1 GitLab arm); `mergeable ← R3's normalized token`; `closingIssueNumbers ← [/closes_issues[].iid]` (empty-200 → `[]`); `comments ← [/notes with .system==false]` normalized `[{id, author, body, createdAt}]` ascending (system audit-trail notes filtered — they would poison the [INV-90] marker-scanning reads); `reviews ← synthesized [{author, state:"APPROVED", submittedAt}]` from `/approvals.approved_by[].user.username` with `submittedAt` from the top-level `.approved_at` (v17.x recorded probe — GitLab has no per-approver timestamp on the current endpoint; a future tighter mapping is a spec amendment).
+
+**R5 — `chp_gitlab_pr_list <state> <fields-csv>` — MR list, DISJOINT state enum.** State mapping: `open→opened`, `closed→closed`, `merged→merged`, `all→all`; a leaf-side post-filter guarantees disjointness (GitLab natively excludes `merged` from `state=closed`, but the leaf filters regardless). **Documented asymmetry:** GitLab's `state=closed` list EXCLUDES `locked` MRs — a locked MR is invisible to `chp_gitlab_pr_list closed`. Accepted since `locked` is a transient lock-during-merge state (the R4 `locked→CLOSED` view mapping is honest about the MR's terminal state; the list-side asymmetry is a natural GitLab behavior we do not paper over). Fields: `comments` REJECTED (rc≠0 loud; issue-level comments live behind `itp_list_comments`); `reviews` supported via per-MR `/approvals` synthesis (fetched only when requested — fetch-cost gate per candidate). Complete-set (§3.5): `_gl_api --paginate` walk + `CHP_GITLAB_PR_LIST_PAGE_CAP` (default 20 pages) forwarded as `--max-items` — cap-hit loud rc≠0 no partial output. Empty → `[]`.
+
+**R6 — `chp_gitlab_find_pr_for_issue <issue> <fields-csv>` — CLOSE-linkage source.** Uses `GET /projects/…/issues/:iid/closed_by`, NOT `/related_merge_requests` (the latter is broader — it lists MENTIONING MRs, not closing ones; binding a non-closing MR would let the wrapper mutate the wrong MR). Post-filters `.state == "opened"` in-leaf. Projects to `FIELDS-CSV ∪ {number, closingIssueNumbers, headRefName}` per W1c1. Per-candidate `closingIssueNumbers` is confirmed via `/merge_requests/:iid/closes_issues` (data-source honesty on the [INV-86] resolution key — we NEVER fabricate `closingIssueNumbers` even when the caller could infer it from the issue arg). Rejects `comments` in the field set (rc≠0 loud). `native_issue_pr_link=1` is pinned as **same-project scope** in the caps comment: the pipeline links issue↔MR within one GitLab project, which is sufficient for every current caller.
+
+**R7 — `chp_gitlab_list_inline_comments <pr>` — INLINE-only flat array.** `GET …/merge_requests/:iid/discussions` page-walked via `_gl_api --paginate`, FLATTENED to `[{id, path, line, author, body, createdAt}]` ascending. Filters: `.position == null` notes are non-inline (general MR notes; inline-only per the W1c2 contract) and `.system == true` notes are audit-trail entries — both filtered. Position folds: `path ← note.position.new_path // note.position.old_path // null`; `line ← note.position.new_line // note.position.old_line // null` (same fold discipline as the GitHub leaf's `line // originalLine`).
+
+**R8 — `chp_gitlab_review_threads <pr>` — COMPLETE M8 shape, ONE pagination level, compound `thread_id`.** GitLab returns all notes per discussion in ONE response, so ONE pagination level suffices — simpler than the GitHub W1f two-level walk (§3.5). M8 shape:
+
+- `thread_id ← "<mr-iid>:<discussion.id>"` — a **COMPOUND string encoding**, because GitLab's discussion-resolve endpoint needs the MR iid in the URL path AND the discussion id, but the phase-2 `chp_resolve_thread <thread-id>` contract takes ONE opaque positional. The GitHub `thread_id` is an opaque GraphQL node id the caller never parses (`resolve-threads.sh` passes it verbatim); a compound string preserves the seam shape. P3-4's `chp_gitlab_resolve_thread` decodes it. **Pinned in the §3.2 [M8] cell by this PR** — the shape originates here.
+- `resolved` ← discussion is resolved iff its first note is `resolvable == true` AND `resolved == true`; the leaf **FILTERS to resolvable discussions only** (non-resolvable general notes MUST NOT reach `resolve-threads.sh`'s mutation loop — a mutation on a non-resolvable discussion would 400 at the GitLab API).
+- `comments[]` ← R7 element mapping (same position fold + system-note filter).
+- Bounded walk `CHP_GITLAB_REVIEW_THREADS_PAGE_CAP` default 50; cap-hit loud rc≠0 no partial output; **mid-walk failure fail-CLOSED** (the mandatory R12 failure fixture — mirrors #401's fail-CLOSED discipline).
+
+**Caps manifest (`providers/chp-gitlab.caps`)** — every value evidence-cited (#414 AC5, #418 R11):
+
+- `native_issue_pr_link=1` (same-project scope; evidence: R6 `/closed_by` fixtures)
+- `rest_request_changes=0` (GitLab has NO REST request-changes verb; the caller's cap=0 branch is tested; no `chp_gitlab_request_changes` leaf in phase-3)
+- `review_bots=0` (no native custom-slash-command review-bot registry)
+- `merge_closes_issue=1` with the **default-branch-only caveat** stated verbatim in the caps comment (`Closes #N` auto-closes ONLY on merge to the default branch; the wrapper merges to default so [M4] semantics hold; a non-default-target deployment MUST fall back to explicit `itp_transition_state`)
+- `marker_channel=html` (GitLab notes preserve `<!-- -->` verbatim — fixture round-trip evidence)
 
 ### 5.2 Asana (issue tracker only) — viable, four capabilities become optional
 
@@ -1137,6 +1204,7 @@ becomes a verb, the surrounding INV-coupled logic stays caller-side.
 | `Closes #${issue_num}` literals (`autonomous-dev.sh` PR-body prompts) | `chp_close_keyword` | (a) separable-leaf | the hardcoded auto-close keyword becomes a verb-rendered string ([M4]); caps-aware `_render_close_keyword` renders `Related to #N` (non-closing) when `merge_closes_issue=0`+`native_issue_pr_link=0`. **MIGRATED #282.** |
 | inline review-count in `missing_bot_reviews` (`lib-review-bots.sh`, the [INV-79] bot-review hard-gate) | `chp_count_reviews_by_login REPO PR LOGIN` | (a) separable-leaf | the `--paginate \| --jq '\|length' \| awk` sum leaf → a provider-neutral int; the `^[0-9]+$` validation + `-eq 0` MISSING decision stay caller-side. REPO threaded as a param, LOGIN JSON-encoded (injection-safe), capture-check-sum closes the partial-pagination fail-open ([INV-94]). The 3 agent-facing prompt-prose `gh api …/reviews` heredoc lines stay (permanent residue). **MIGRATED #324.** |
 | `upload-screenshot.sh` 8 raw git-Data-API `gh api` calls (`git/ref`→`git/blobs`→`git/trees`→`git/commits`→`git/refs`→re-`git/ref`→`contents` GET→`contents` PUT) | `chp_commit_file` | (b) entangled → ONE whole-op verb | **migrated #330** ([INV-99]): the WHOLE commit-a-PNG-to-an-orphan-branch op (the 8 calls incl. the orphan-branch create-vs-update branching + the ARG_MAX temp-file JSON build) moves to `chp_github_commit_file` and echoes the committed SHA; the local file-read + `base64 -w0` encode + the `\|\| fail`-on-empty-SHA glue + the `/blob/` URL render stay caller-side. REPO threaded explicitly ($1, not a global — #324). Leaf cleanup uses a SELF-DISARMING function-scoped `trap … RETURN` (AC2) — a bare `trap … EXIT`/non-self-disarming `… RETURN` both crash the standalone caller, reproduced on-box; the self-disarm (`trap - RETURN` as the trap body's own last action) fires exactly once per invocation. The `command -v gh` presence guard stays (residue, not a call site). Shrinks the cutover baseline by 8 occurrences / 7 signatures (60→52 occurrences, 54→47 signatures); `upload-screenshot.sh` now holds ONLY the `command -v gh` survivor. |
+| **GitLab CHP read arms** (`chp_gitlab_ci_status`, `chp_gitlab_mergeable`, `chp_gitlab_pr_view`, `chp_gitlab_pr_list`, `chp_gitlab_find_pr_for_issue`, `chp_gitlab_list_inline_comments`, `chp_gitlab_review_threads`) | same seven `chp_<verb>` names as the GitHub rows above — GitLab arm behind `CODE_HOST=gitlab` | (a) separable-leaf (each) | **MIGRATED #418 (P3-3)** — leaves live in `providers/chp-gitlab.sh`; every leaf routes HTTP exclusively through the frozen #416 `_gl_api` public function and never touches `_gl_http` (single choke-point discipline, #414 pillar 2). Normalization inside the leaf: R2 `head_pipeline.status` → `green\|pending\|failed\|none` bucket; R3 `detailed_merge_status` → `MERGEABLE\|CONFLICTING\|UNKNOWN` bucket; R4 `.iid→number`/`locked→CLOSED`/`.description null→body ""`/`reviewDecision""` unconditional/`/approvals` synthesis for reviews/system-note filter on comments/fetch-cost gates for `/closes_issues`, `/notes`, `/approvals`; R5 DISJOINT state enum + `_gl_api --paginate` page walk + `CHP_GITLAB_PR_LIST_PAGE_CAP` (fail-CLOSED on cap-hit); R6 `/issues/:iid/closed_by` as the CLOSE-linkage source (NOT `/related_merge_requests`) + per-MR `/closes_issues` confirmation + `.state==opened` post-filter; R7 inline-only fold `line // old_line`, `path // old_path`, system-note filter; R8 M8 shape with **compound `thread_id = "<mr-iid>:<discussion.id>"`** (pinned in §3.2 M8 by this PR) + resolvable-only filter + fail-CLOSED on mid-walk. No caller changes — every consumer already routes through the abstract `chp_<verb>` shim (phase-2, #347). See §5.1.1 for the verbatim bucket tables and mapping. |
 
 > `mark_stalled` and `handle_completed_session_routing` are explicitly **entangled
 > multi-op orchestrators** — they are the load-bearing examples that "the caller
