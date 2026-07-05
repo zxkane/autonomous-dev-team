@@ -1,0 +1,20 @@
+[
+  {
+    "id": 900007,
+    "iid": 7,
+    "state": "opened",
+    "title": "MR 7",
+    "description": "Closes #42",
+    "source_branch": "feat/issue-42-thing",
+    "sha": "aaaa"
+  },
+  {
+    "id": 900008,
+    "iid": 8,
+    "state": "opened",
+    "title": "MR 8",
+    "description": null,
+    "source_branch": "fix/other",
+    "sha": "bbbb"
+  }
+]

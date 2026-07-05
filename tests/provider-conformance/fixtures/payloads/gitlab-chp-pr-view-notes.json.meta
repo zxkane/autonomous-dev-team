@@ -1,0 +1,12 @@
+# P3-3 R4 — chp_gitlab_pr_view /notes sub-resource fixture.
+#
+# gitlab_version=17.x
+# reference_endpoint=GET /projects/:id/merge_requests/:iid/notes?sort=asc&order_by=created_at
+# reference_docs=https://docs.gitlab.com/ee/api/notes.html
+#
+# Coverage:
+#   - 3 notes total: 2 with `.system == false` (user comments — alice, bob)
+#     and 1 with `.system == true` (`assigned to @alice` — audit trail).
+#   - The leaf FILTERS the system note, so the normalized `comments` array
+#     has EXACTLY 2 elements ascending by createdAt.
+#   - `author = .author.username` mapping is exercised.

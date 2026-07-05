@@ -491,32 +491,33 @@ echo ""
 echo "=== TC-RGH-040..042: --itp gitlab --chp gitlab interim (W-D early half + W-B) ==="
 # ===========================================================================
 # TC-RGH-040: gitlab/gitlab on today's tree — non-zero exit, one FAIL per absent
-# CHP verb (leaf absent) plus real FAILs on the ITP verbs (no transport hook
-# armed → the ITP leaves fail the transport preflight and/or shape checks —
-# still a FAIL, just a different disposition than "leaf absent").
+# CHP-write verb (leaf absent) plus real FAILs on the ITP + CHP-read verbs
+# (no transport hook armed → the defined leaves fail the transport preflight
+# and/or shape checks — still a FAIL, just a different disposition than
+# "leaf absent").
 #
-# **W-B (#417) update.** Before #417 all 14 ITP verbs also emitted "leaf
-# absent" lines (itp-gitlab.sh didn't exist), so the pre-W-B count was
-# ≥ 20. Post-#417, the 14 ITP leaves are DEFINED; they now FAIL under the
-# gitlab/gitlab-no-hook config for a different (real) reason. So the
-# leaf-absent bound tightens to ONLY the CHP verbs (13 CHP verbs waiting on
-# W-C1 / W-C2 for their leaves) — an even more precise assertion than the
-# pre-#417 "≥ 20".
+# Threshold evolution:
+#   - pre-W-B (#417): ≥ 20 leaf-absent lines (0 gitlab leaves defined).
+#   - post-W-B  (#417 landed 14 ITP leaves): tightens to ≥ 13 (CHP surface
+#     minus caller-side chp_close_keyword).
+#   - post-P3-3 (#418 landed 7 CHP read leaves): tightens further to ≥ 5.
+#     The residual leaf-absent set is chp_resolve_thread, chp_reply_review_comment,
+#     chp_create_pr, chp_approve, chp_merge (5 CHP writes; chp_request_changes
+#     SKIPs via rest_request_changes=0 cap, not leaf-absent). The next absorb
+#     (P3-4 CHP writes) will drive this to 0 — at which point convert the
+#     assertion to `-eq 0` or retire it.
 gl_out=$(bash "$RUNNER" --itp gitlab --chp gitlab 2>&1); gl_rc=$?
 if [[ "$gl_rc" -ne 0 ]]; then
-  ok "TC-RGH-040: --itp gitlab --chp gitlab (no leaves for CHP; no hook for ITP) → rc != 0"
+  ok "TC-RGH-040: --itp gitlab --chp gitlab (partial leaves; no hook armed) → rc != 0"
 else
   bad "TC-RGH-040: expected rc != 0, got 0"
 fi
 gl_leafabs_count="$(grep -c 'FAIL leaf absent:' <<<"$gl_out")"
-# CHP-gitlab leaves are still absent → at least 13 "leaf absent" lines
-# (the 14-verb CHP surface minus chp_close_keyword which is a caller-side
-# render assertion and PASSes without a leaf; the exact count may vary as
-# W-C evolves, so we assert the lower bound conservatively).
-if [[ "$gl_leafabs_count" -ge 13 ]]; then
-  ok "TC-RGH-040: 13+ per-verb 'FAIL leaf absent' lines (CHP-gitlab verbs still absent post-W-B): $gl_leafabs_count"
+# Post-P3-3 baseline: ≥ 5 leaf-absent lines for the residual CHP-gitlab writes.
+if [[ "$gl_leafabs_count" -ge 5 ]]; then
+  ok "TC-RGH-040: 5+ per-verb 'FAIL leaf absent' lines (CHP-gitlab writes still absent post-P3-3): $gl_leafabs_count"
 else
-  bad "TC-RGH-040: expected ≥ 13 FAIL leaf absent lines (CHP-gitlab set), got $gl_leafabs_count"
+  bad "TC-RGH-040: expected ≥ 5 FAIL leaf absent lines (CHP-gitlab writes), got $gl_leafabs_count"
 fi
 
 # TC-RGH-041: runner did NOT abort — has a CONFORMANCE-SUMMARY line.

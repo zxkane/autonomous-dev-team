@@ -1,0 +1,4 @@
+# P3-3 R6 — per-MR /closes_issues confirmation fixture for MR 7.
+#
+# gitlab_version=17.x
+# reference_endpoint=GET /projects/:id/merge_requests/:iid/closes_issues

@@ -454,24 +454,28 @@ _invoke() {
   if [[ -n "$TRANSPORT_HOOK" ]]; then
     hook_env=( "GITLAB_TRANSPORT_HOOK=$TRANSPORT_HOOK" )
   fi
-  # [#417 W-B] GitLab-provider config keys (spec §3.4). Set ONLY when the
-  # ITP axis is gitlab — on the github axis these vars must stay unset
-  # (BOT_LOGIN specifically drives the authorKind=self arm — setting it
-  # to a value that matches the github fixture's `my-claw[bot]` author
-  # flips those comments to `self` and breaks the pre-existing
-  # itp_list_comments / itp_read_task assertions).
+  # [#417 W-B / #418 review round 1] GitLab-provider config keys (spec §3.4).
+  # Set when EITHER seam axis is gitlab — the mixed `--itp github --chp gitlab`
+  # axis (the P3-3 interim topology) needs GITLAB_PROJECT/HOST/TOKEN for the
+  # CHP leaves' config guard just as much as the full gitlab/gitlab axis.
+  # BOT_LOGIN stays ITP-gitlab-scoped: it drives the authorKind=self arm, and
+  # on a github ITP axis a set BOT_LOGIN that matches the github fixture's
+  # `my-claw[bot]` author would flip those comments to `self` and break the
+  # pre-existing itp_list_comments / itp_read_task assertions.
   # GITLAB_PROJECT is stored ALREADY-URL-ENCODED per §3.4; the hermetic
   # value here matches that shape. PAYLOADS is exported so a fixture
   # transport hook (tests/provider-conformance/fixtures/gitlab/hook.sh)
   # can path-serve fixtures without hard-coding the runner's payload dir.
   local -a gitlab_env=()
-  if [[ "$ITP_NAME" == "gitlab" ]]; then
+  if [[ "$ITP_NAME" == "gitlab" || "$CHP_NAME" == "gitlab" ]]; then
     gitlab_env=(
       "GITLAB_PROJECT=group%2Fproject"
       "GITLAB_HOST=gitlab.com"
       "GITLAB_TOKEN=stub-token"
-      "BOT_LOGIN=my-claw-bot"
     )
+  fi
+  if [[ "$ITP_NAME" == "gitlab" ]]; then
+    gitlab_env+=( "BOT_LOGIN=my-claw-bot" )
   fi
   env -u AUTONOMOUS_CONF -u AUTONOMOUS_CONF_DIR -u PROJECT_DIR \
       ISSUE_PROVIDER="$ITP_NAME" CODE_HOST="$CHP_NAME" AUTONOMOUS_PROVIDERS_DIR="$SCRATCH_DIR" \

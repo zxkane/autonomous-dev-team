@@ -1,0 +1,24 @@
+{
+  "id": 42,
+  "iid": 42,
+  "approved": true,
+  "approvals_required": 1,
+  "approvals_left": 0,
+  "approved_at": "2026-01-03T09:00:00Z",
+  "approved_by": [
+    {
+      "user": {
+        "id": 100,
+        "username": "reviewer-a",
+        "name": "Reviewer A"
+      }
+    },
+    {
+      "user": {
+        "id": 101,
+        "username": "reviewer-b",
+        "name": "Reviewer B"
+      }
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "id": 700042,
+  "iid": 42,
+  "state": "opened",
+  "title": "hook MR",
+  "description": null,
+  "created_at": "2026-01-01T10:00:00Z",
+  "updated_at": "2026-01-02T11:00:00Z",
+  "merged_at": null,
+  "source_branch": "feat/x",
+  "sha": "aaaa",
+  "detailed_merge_status": "mergeable",
+  "head_pipeline": {
+    "id": 900042,
+    "status": "success",
+    "ref": "feat/x",
+    "sha": "aaaa"
+  }
+}

@@ -1,0 +1,28 @@
+[
+  {
+    "id": 900007,
+    "iid": 7,
+    "state": "opened",
+    "title": "MR 7 opened",
+    "description": "Closes #42",
+    "created_at": "2026-01-05T10:00:00Z",
+    "updated_at": "2026-01-05T10:00:00Z",
+    "merged_at": null,
+    "source_branch": "feat/issue-42-thing",
+    "sha": "aaaa",
+    "detailed_merge_status": "mergeable"
+  },
+  {
+    "id": 900008,
+    "iid": 8,
+    "state": "opened",
+    "title": "MR 8 opened",
+    "description": null,
+    "created_at": "2026-01-04T10:00:00Z",
+    "updated_at": "2026-01-04T10:00:00Z",
+    "merged_at": null,
+    "source_branch": "fix/other",
+    "sha": "bbbb",
+    "detailed_merge_status": "mergeable"
+  }
+]

@@ -1,0 +1,59 @@
+[
+  {
+    "id": "disc-inline-a",
+    "individual_note": false,
+    "notes": [
+      {
+        "id": 6000001,
+        "type": "DiffNote",
+        "body": "inline comment on new line",
+        "author": { "id": 10, "username": "alice", "name": "Alice" },
+        "created_at": "2026-01-01T10:00:00Z",
+        "system": false,
+        "resolvable": true,
+        "resolved": false,
+        "position": {
+          "new_path": "src/foo.py",
+          "old_path": "src/foo.py",
+          "new_line": 5,
+          "old_line": null
+        }
+      }
+    ]
+  },
+  {
+    "id": "disc-general",
+    "individual_note": true,
+    "notes": [
+      {
+        "id": 6000002,
+        "type": null,
+        "body": "general MR note (non-inline)",
+        "author": { "id": 11, "username": "bob", "name": "Bob" },
+        "created_at": "2026-01-01T10:01:00Z",
+        "system": false,
+        "resolvable": false,
+        "position": null
+      }
+    ]
+  },
+  {
+    "id": "disc-system",
+    "individual_note": true,
+    "notes": [
+      {
+        "id": 6000003,
+        "type": null,
+        "body": "audit trail auto-note",
+        "author": { "id": 12, "username": "gitlab-system", "name": "GitLab System" },
+        "created_at": "2026-01-01T09:59:00Z",
+        "system": true,
+        "resolvable": false,
+        "position": {
+          "new_path": "src/foo.py",
+          "new_line": 5
+        }
+      }
+    ]
+  }
+]

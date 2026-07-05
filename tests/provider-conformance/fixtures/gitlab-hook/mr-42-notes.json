@@ -1,0 +1,18 @@
+[
+  {
+    "id": 5000001,
+    "type": null,
+    "body": "first comment",
+    "author": {"id": 11, "username": "alice", "name": "Alice"},
+    "created_at": "2026-01-01T10:05:00Z",
+    "system": false
+  },
+  {
+    "id": 5000002,
+    "type": null,
+    "body": "later comment",
+    "author": {"id": 22, "username": "bob", "name": "Bob"},
+    "created_at": "2026-01-01T10:10:00Z",
+    "system": false
+  }
+]

@@ -1,0 +1,5 @@
+# P3-3 R7 — chp_gitlab_list_inline_comments 2-page walk, page 1 of 2.
+#
+# gitlab_version=17.x
+# reference_endpoint=GET /projects/:id/merge_requests/:iid/discussions
+# Covers inline note + non-inline general note + system audit note.

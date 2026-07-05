@@ -1,0 +1,5 @@
+# P3-3 R5 — chp_gitlab_pr_list 2-page walk, page 1 of 2.
+#
+# gitlab_version=17.x
+# reference_endpoint=GET /projects/:id/merge_requests?state=opened&order_by=created_at&sort=desc
+# reference_docs=https://docs.gitlab.com/ee/api/merge_requests.html
