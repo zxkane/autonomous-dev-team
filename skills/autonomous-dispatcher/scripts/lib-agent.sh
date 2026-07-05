@@ -486,7 +486,7 @@ _agent_sigterm_handler() {
   RECEIVED_SIGTERM=1
 
   # Direct-children fallback for the pre-spawn race window (pre-#109
-  # behavior, unchanged). Pinned narrow to `-P $$` — [INV-111] grep-pin:
+  # behavior, unchanged). Pinned narrow to `-P $$` — [INV-113] grep-pin:
   # NEVER widen to `-f <script-name>` (widening would cross-kill sibling
   # lanes on a multi-issue/multi-project host sharing the same wrapper
   # script name). Runs FIRST — see the ordering pin above.
@@ -507,10 +507,44 @@ _agent_sigterm_handler() {
     done < "$_pgids_file"
   fi
 
+  # [Lane-GC PR-3 / INV-113] Escalator process-group isolation (codex review
+  # round-5 [P1], reproduced empirically): a backgrounded escalator that is a
+  # DIRECT CHILD of this trap's own shell — with no `setsid` of its own —
+  # shares THIS WRAPPER's own pgid. That is fatal to the escalator's own
+  # grace window whenever the wrapper's OWN pgid later receives a group-form
+  # signal from someone else while the escalator is still asleep — and that
+  # happens routinely in production: a wrapper can legitimately receive a
+  # SECOND TERM (kill_stale_wrapper's legacy PID-file path always sends
+  # group-form then individual-form TERM to the same old_pid; the
+  # dispatcher's Step 5a SIGTERM race, [INV-15], is another), and if the
+  # wrapper's main body still hasn't exited after ITS OWN grace,
+  # kill_stale_wrapper escalates to a GROUP-FORM SIGKILL against old_pid's
+  # pgid — the same pgid an unisolated escalator still lives in. That
+  # SIGKILL collaterally kills the escalator mid-grace, permanently
+  # discarding its pending SIGKILL follow-through for any TERM-resistant
+  # registry member — a real, reproducible leak (verified: a TERM-trapping
+  # registry pgid survived indefinitely past this exact sequence, with no
+  # escalator ever completing; a plain `trap '' TERM` on the escalator does
+  # NOT fix this, since SIGKILL cannot be trapped — the escalator must be
+  # OUT of the reachable pgid entirely). Each pgid escalates in its OWN
+  # `setsid`-isolated subshell (one per pgid, so N groups' grace windows
+  # still run CONCURRENTLY — the pre-existing per-pgid-backgrounded-job
+  # shape is preserved) — no signal aimed at the wrapper's pgid (or any
+  # OTHER kill site's pgid) can ever reach an isolated escalator; only the
+  # target pgid it's escalating against, and its own bounded
+  # sleep-then-KILL sequence, decide its lifetime. `_kill_group_escalate`
+  # itself has no internal function calls, so (unlike `_bounded_call`,
+  # whose own doc comment rejects `export -f` for exactly this reason)
+  # `export -f` safely carries it across the `setsid bash -c` boundary —
+  # the shared primitive stays the single source of truth for the
+  # TERM→grace→KILL body rather than a second inlined copy of it.
+  local _setsid=()
+  command -v setsid >/dev/null 2>&1 && _setsid=(setsid)
   local _pg
   if declare -F _kill_group_escalate >/dev/null 2>&1; then
+    export -f _kill_group_escalate
     for _pg in "${_term_pgids[@]:-}"; do
-      _kill_group_escalate "$_pg" 5 &
+      "${_setsid[@]}" bash -c '_kill_group_escalate "$1" "$2"' _ "$_pg" 5 &
       disown 2>/dev/null || true
     done
   else
@@ -518,12 +552,12 @@ _agent_sigterm_handler() {
       kill -TERM -- "-${_pg}" 2>/dev/null || true
     done
     if [[ "${#_term_pgids[@]}" -gt 0 ]]; then
-      ( sleep 5
-        local _pg2
-        for _pg2 in "${_term_pgids[@]}"; do
-          kill -0 -- "-${_pg2}" 2>/dev/null && kill -KILL -- "-${_pg2}" 2>/dev/null || true
+      "${_setsid[@]}" bash -c '
+        sleep 5
+        for pg in "$@"; do
+          kill -0 -- "-${pg}" 2>/dev/null && kill -KILL -- "-${pg}" 2>/dev/null || true
         done
-      ) &
+      ' _ "${_term_pgids[@]}" &
       disown 2>/dev/null || true
     fi
   fi

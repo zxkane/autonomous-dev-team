@@ -220,7 +220,11 @@ echo "=== TC-LGC3-012: ordering pin — pkill -P \$\$ precedes escalator backgro
 # ===========================================================================
 HANDLER_SRC=$(awk '/^_agent_sigterm_handler\(\) \{$/,/^}$/' "$LIB_AGENT")
 PKILL_LINE=$(grep -n 'pkill -TERM -P \$\$' <<<"$HANDLER_SRC" | head -1 | cut -d: -f1)
-ESCALATE_LINE=$(grep -n '_kill_group_escalate "\$_pg" 5 &' <<<"$HANDLER_SRC" | head -1 | cut -d: -f1)
+# The escalator is backgrounded inside a setsid-isolated `bash -c` (round-5
+# [P1]: an unisolated escalator shares the wrapper's pgid and a group-form
+# SIGKILL aimed there collaterally kills it mid-grace) — pin on the
+# single-quoted _kill_group_escalate body inside that isolation wrapper.
+ESCALATE_LINE=$(grep -n "bash -c '_kill_group_escalate" <<<"$HANDLER_SRC" | head -1 | cut -d: -f1)
 if [[ -n "$PKILL_LINE" && -n "$ESCALATE_LINE" && "$PKILL_LINE" -lt "$ESCALATE_LINE" ]]; then
   assert_pass "TC-LGC3-012: source-of-truth — pkill -P \$\$ (line $PKILL_LINE) precedes the escalator backgrounding loop (line $ESCALATE_LINE)"
 else
