@@ -1,0 +1,1 @@
+{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false},"nodes":[{"isResolved":false,"isOutdated":false,"path":"src/a.sh","comments":{"nodes":[{"author":{"login":"reviewer"},"body":"fix this"}]}},{"isResolved":false,"isOutdated":false,"path":"src/b.sh","comments":{"nodes":[{"author":{"login":"reviewer"},"body":"and this"}]}}]}}}}}

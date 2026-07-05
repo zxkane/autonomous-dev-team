@@ -47,7 +47,7 @@ IDEs without hook support (Cursor, Windsurf, Gemini CLI, etc.) rely on skill ins
 | `check-rebase-before-push.sh` | PreToolUse | Bash | Blocks push if branch is behind origin/main |
 | `post-git-action-clear.sh` | PostToolUse | Bash | Clears state after git actions |
 | `post-git-push.sh` | PostToolUse | Bash | Post-push reminder for CI/E2E |
-| `verify-completion.sh` | Stop | All | Blocks task completion until CI/E2E pass |
+| `verify-completion.sh` | Stop | All | Blocks task completion until CI/E2E pass and review threads resolve; fails closed on >100-thread PRs (single-page read cannot verify completeness, #412) |
 | `lib.sh` | Library | N/A | Shared utility functions |
 | `state-manager.sh` | Library | N/A | Workflow state management |
 
