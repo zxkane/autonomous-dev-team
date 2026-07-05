@@ -444,6 +444,238 @@ run07d=$(
 assert_eq "TC-CXRS-RUN-07d stream-error then re-run TIMES OUT → stops at the timeout, 2 runs, rc 124" \
   "rc=124|runs=2" "$run07d"
 
+# ---------------------------------------------------------------------------
+# #406: rc 143 (SIGTERM, 128+15) — and any other signal-death rc >= 128 — is
+# ALSO terminal, not a #209 transient blip. Pre-fix, only 124/137 were treated
+# as terminal, so a SIGTERM delivered by the wrapper's own post-resolution reap
+# (INV-43/INV-84) fell through to the transient-retry arm and scheduled a
+# FRESH `codex review` from an already-resolved review round — the orphaned
+# re-run controller this issue reports.
+# ---------------------------------------------------------------------------
+
+# TC-CXRS-RUN-09 (regression, fails pre-fix) — turn-1 rc 143 → breaks
+# immediately, 1 run, returns 143. Mirrors RUN-07/07c exactly, for 143.
+run09=$(
+  set -uo pipefail
+  source "$LIB"
+  sandbox=$(mktemp -d); : > "$sandbox/runs"
+  _run_with_timeout() { echo run >> "$sandbox/runs"; echo x; return 143; }
+  _codex_now_seconds() { printf '%s\n' 0; }
+  CODEX_REVIEW_MAX_RERUNS=3 AGENT_REVIEW_TIMEOUT=1h AGENT_CMD=codex \
+    _run_codex_review p m "$sandbox/cap.txt"; rc=$?
+  runs=$(grep -c '^run$' "$sandbox/runs" 2>/dev/null) || runs=0
+  echo "rc=${rc}|runs=${runs}"
+  rm -rf "$sandbox"
+)
+assert_eq "TC-CXRS-RUN-09 turn-1 SIGTERM (143) → breaks immediately, 1 run, returns 143 (#406, proven to FAIL pre-fix: pre-fix code re-runs to a 2nd invocation)" \
+  "rc=143|runs=1" "$run09"
+
+# TC-CXRS-RUN-09b — the bug scenario directly: turn-1 143, then (had the loop
+# continued) a CLEAN run. Correct behavior is exactly ONE run.
+run09b=$(
+  set -uo pipefail
+  source "$LIB"
+  sandbox=$(mktemp -d); ri=0; : > "$sandbox/runs"
+  _run_with_timeout() { ri=$((ri+1)); echo run >> "$sandbox/runs"; echo x; [[ $ri -eq 1 ]] && return 143 || return 0; }
+  _codex_now_seconds() { printf '%s\n' 0; }
+  CODEX_REVIEW_MAX_RERUNS=3 AGENT_REVIEW_TIMEOUT=1h AGENT_CMD=codex \
+    _run_codex_review p m "$sandbox/cap.txt"; rc=$?
+  runs=$(grep -c '^run$' "$sandbox/runs" 2>/dev/null) || runs=0
+  echo "rc=${rc}|runs=${runs}"
+  rm -rf "$sandbox"
+)
+assert_eq "TC-CXRS-RUN-09b SIGTERM-then-(would-be-clean) → NO extra re-run; 1 run, rc 143 (no orphaned re-run controller)" \
+  "rc=143|runs=1" "$run09b"
+
+# TC-CXRS-RUN-10 — a re-run that itself gets SIGTERM after an initial transient
+# rc 1 still stops (2 runs total), rc 143. Mirrors RUN-07d for 143.
+run10=$(
+  set -uo pipefail
+  source "$LIB"
+  sandbox=$(mktemp -d); ri=0; : > "$sandbox/runs"
+  _run_with_timeout() { ri=$((ri+1)); echo run >> "$sandbox/runs"; echo x; [[ $ri -eq 1 ]] && return 1 || return 143; }
+  _codex_now_seconds() { printf '%s\n' 0; }
+  CODEX_REVIEW_MAX_RERUNS=3 AGENT_REVIEW_TIMEOUT=1h AGENT_CMD=codex \
+    _run_codex_review p m "$sandbox/cap.txt"; rc=$?
+  runs=$(grep -c '^run$' "$sandbox/runs" 2>/dev/null) || runs=0
+  echo "rc=${rc}|runs=${runs}"
+  rm -rf "$sandbox"
+)
+assert_eq "TC-CXRS-RUN-10 stream-error then re-run gets SIGTERM (143) → stops at the SIGTERM, 2 runs, rc 143" \
+  "rc=143|runs=2" "$run10"
+
+# TC-CXRS-RUN-11 — rc 137 (SIGKILL) unaffected by the rc>=128 generalization
+# (byte-identical to the pre-existing RUN-07c).
+run11=$(
+  set -uo pipefail
+  source "$LIB"
+  sandbox=$(mktemp -d); : > "$sandbox/runs"
+  _run_with_timeout() { echo run >> "$sandbox/runs"; echo x; return 137; }
+  _codex_now_seconds() { printf '%s\n' 0; }
+  CODEX_REVIEW_MAX_RERUNS=3 AGENT_REVIEW_TIMEOUT=1h AGENT_CMD=codex \
+    _run_codex_review p m "$sandbox/cap.txt"; rc=$?
+  runs=$(grep -c '^run$' "$sandbox/runs" 2>/dev/null) || runs=0
+  echo "rc=${rc}|runs=${runs}"
+  rm -rf "$sandbox"
+)
+assert_eq "TC-CXRS-RUN-11 rc 137 unaffected by the rc>=128 generalization (still 1 run, rc 137)" \
+  "rc=137|runs=1" "$run11"
+
+# TC-CXRS-RUN-12 — rc 124 (timeout) unaffected (byte-identical to RUN-07).
+run12=$(
+  set -uo pipefail
+  source "$LIB"
+  sandbox=$(mktemp -d); : > "$sandbox/runs"
+  _run_with_timeout() { echo run >> "$sandbox/runs"; echo x; return 124; }
+  _codex_now_seconds() { printf '%s\n' 0; }
+  CODEX_REVIEW_MAX_RERUNS=3 AGENT_REVIEW_TIMEOUT=1h AGENT_CMD=codex \
+    _run_codex_review p m "$sandbox/cap.txt"; rc=$?
+  runs=$(grep -c '^run$' "$sandbox/runs" 2>/dev/null) || runs=0
+  echo "rc=${rc}|runs=${runs}"
+  rm -rf "$sandbox"
+)
+assert_eq "TC-CXRS-RUN-12 rc 124 unaffected by the rc>=128 generalization (still 1 run, rc 124, INV-48 veto)" \
+  "rc=124|runs=1" "$run12"
+
+# TC-CXRS-RUN-13 — rc 1 (genuine transient, #209) still re-runs; 1 < 128 so the
+# new gate never fires for it.
+assert_eq "TC-CXRS-RUN-13 rc 1 transient still re-runs (#209 unregressed by the rc>=128 gate)" \
+  "0|2" "$(run_codex_review_case $'1\n0' 3 $'0\n10\n20\n30')"
+
+# TC-CXRS-RUN-14 — INV-73 malformed-rc0 (rc 0, prompt-echo capture) still
+# re-runs; 0 < 128 so the new gate never fires for it.
+run14=$(
+  set -uo pipefail
+  source "$LIB"
+  sandbox=$(mktemp -d); ri=0; : > "$sandbox/runs"
+  _run_with_timeout() {
+    ri=$((ri+1)); echo run >> "$sandbox/runs"
+    if [[ $ri -eq 1 ]]; then echo "codex-cli 0.137.0"; else echo "review output line"; fi
+    return 0
+  }
+  _codex_review_stdout_is_malformed() { [[ "$ri" -eq 1 ]]; }
+  _codex_now_seconds() { printf '%s\n' 0; }
+  CODEX_REVIEW_MAX_RERUNS=3 AGENT_REVIEW_TIMEOUT=1h AGENT_CMD=codex \
+    _run_codex_review p m "$sandbox/cap.txt"; rc=$?
+  runs=$(grep -c '^run$' "$sandbox/runs" 2>/dev/null) || runs=0
+  echo "rc=${rc}|runs=${runs}"
+  rm -rf "$sandbox"
+)
+assert_eq "TC-CXRS-RUN-14 INV-73 malformed-rc0 still re-runs (unregressed by the rc>=128 gate)" \
+  "rc=0|runs=2" "$run14"
+
+# TC-CXRS-RUN-15 — rc 130 (SIGINT, 128+2) — an UN-enumerated signal-death rc —
+# is ALSO terminal. Proves the fix is a genuine `rc >= 128` generalization, not
+# an enumerated allowlist of {124,137,143}.
+run15=$(
+  set -uo pipefail
+  source "$LIB"
+  sandbox=$(mktemp -d); : > "$sandbox/runs"
+  _run_with_timeout() { echo run >> "$sandbox/runs"; echo x; return 130; }
+  _codex_now_seconds() { printf '%s\n' 0; }
+  CODEX_REVIEW_MAX_RERUNS=3 AGENT_REVIEW_TIMEOUT=1h AGENT_CMD=codex \
+    _run_codex_review p m "$sandbox/cap.txt"; rc=$?
+  runs=$(grep -c '^run$' "$sandbox/runs" 2>/dev/null) || runs=0
+  echo "rc=${rc}|runs=${runs}"
+  rm -rf "$sandbox"
+)
+assert_eq "TC-CXRS-RUN-15 rc 130 (SIGINT, un-enumerated signal-death) is ALSO terminal — 1 run, rc 130" \
+  "rc=130|runs=1" "$run15"
+
+# TC-CXRS-RUN-16 — rc 2 with a clap-rejection capture (#223 config-error) is
+# gated on the rc-2 arm, checked BEFORE the rc>=128 gate; 2 < 128 so it never
+# reaches the new gate — the #223 early-break is unaffected.
+run16=$(
+  set -uo pipefail
+  source "$LIB"
+  sandbox=$(mktemp -d); : > "$sandbox/runs"
+  _run_with_timeout() { echo run >> "$sandbox/runs"; echo "error: unexpected argument '-s' found"; return 2; }
+  _codex_now_seconds() { printf '%s\n' 0; }
+  CODEX_REVIEW_MAX_RERUNS=3 AGENT_REVIEW_TIMEOUT=1h AGENT_CMD=codex \
+    _run_codex_review p m "$sandbox/cap.txt"; rc=$?
+  runs=$(grep -c '^run$' "$sandbox/runs" 2>/dev/null) || runs=0
+  echo "rc=${rc}|runs=${runs}"
+  rm -rf "$sandbox"
+)
+assert_eq "TC-CXRS-RUN-16 rc 2 clap-rejection still breaks on the rc-2 gate (#223 unregressed; 2 never reaches rc>=128)" \
+  "rc=2|runs=1" "$run16"
+
+# ---------------------------------------------------------------------------
+# #406 Layer 3a: optional 5th arg <fanout-liveness-dir> — a re-run iteration
+# re-checks this dir still exists before every fresh launch and breaks (no
+# spawn) once it is gone. Omitted/empty (every pre-#406 call above) is a
+# byte-identical no-op.
+# ---------------------------------------------------------------------------
+
+# TC-CXRS-LIVE-01 — liveness dir REMOVED between the first (transient) run and
+# the scheduled re-run → loop breaks with a log line, NO second invocation.
+run_live01=$(
+  set -uo pipefail
+  source "$LIB"
+  sandbox=$(mktemp -d); livedir=$(mktemp -d); : > "$sandbox/runs"
+  _run_with_timeout() {
+    echo run >> "$sandbox/runs"
+    echo x
+    rmdir "$livedir" 2>/dev/null || rm -rf "$livedir"
+    return 1
+  }
+  _codex_now_seconds() { printf '%s\n' 0; }
+  CODEX_REVIEW_MAX_RERUNS=3 AGENT_REVIEW_TIMEOUT=1h AGENT_CMD=codex \
+    _run_codex_review p m "$sandbox/cap.txt" "" "$livedir" 2>"$sandbox/err"; rc=$?
+  runs=$(grep -c '^run$' "$sandbox/runs" 2>/dev/null) || runs=0
+  loglines=$(grep -c "fan-out dir '.*' no longer exists" "$sandbox/err" 2>/dev/null) || loglines=0
+  echo "rc=${rc}|runs=${runs}|log=${loglines}"
+  rm -rf "$sandbox"
+)
+assert_eq "TC-CXRS-LIVE-01 fan-out dir removed before the re-run → breaks with a log line, no 2nd invocation" \
+  "rc=1|runs=1|log=1" "$run_live01"
+
+# TC-CXRS-LIVE-02 — liveness dir present throughout → re-run proceeds normally
+# (byte-identical to TC-CXRS-RUN-02's transient-then-clean shape).
+run_live02=$(
+  set -uo pipefail
+  source "$LIB"
+  sandbox=$(mktemp -d); livedir=$(mktemp -d); ri=0; : > "$sandbox/runs"
+  _run_with_timeout() { ri=$((ri+1)); echo run >> "$sandbox/runs"; echo x; [[ $ri -eq 1 ]] && return 1 || return 0; }
+  _codex_now_seconds() { printf '%s\n' 0; }
+  CODEX_REVIEW_MAX_RERUNS=3 AGENT_REVIEW_TIMEOUT=1h AGENT_CMD=codex \
+    _run_codex_review p m "$sandbox/cap.txt" "" "$livedir"; rc=$?
+  runs=$(grep -c '^run$' "$sandbox/runs" 2>/dev/null) || runs=0
+  echo "rc=${rc}|runs=${runs}"
+  rm -rf "$sandbox" "$livedir"
+)
+assert_eq "TC-CXRS-LIVE-02 liveness dir present throughout → re-run proceeds (2 runs, rc 0)" \
+  "rc=0|runs=2" "$run_live02"
+
+# TC-CXRS-LIVE-03 — liveness dir arg OMITTED (the 4-arg call shape every
+# existing caller/test above uses) → gate is a pure no-op, byte-identical to
+# pre-#406 (TC-CXRS-RUN-02's exact scenario, re-asserted with the new code path
+# active to prove the no-op guarantee holds end-to-end).
+assert_eq "TC-CXRS-LIVE-03 liveness-dir arg omitted → byte-identical no-op (standalone-call safety)" \
+  "0|2" "$(run_codex_review_case $'1\n0' 3 $'0\n10\n20\n30')"
+
+# TC-CXRS-LIVE-04 — liveness dir present for run 1's post-run gate check, then
+# removed before run 2 would launch (rc sequence: 1 → 1 → would-be-0). Breaks
+# before the run-2 (2nd re-run) launch: 2 total runs, not 3.
+run_live04=$(
+  set -uo pipefail
+  source "$LIB"
+  sandbox=$(mktemp -d); livedir=$(mktemp -d); ri=0; : > "$sandbox/runs"
+  _run_with_timeout() {
+    ri=$((ri+1)); echo run >> "$sandbox/runs"; echo x
+    if [[ $ri -eq 2 ]]; then rm -rf "$livedir"; fi
+    [[ $ri -lt 3 ]] && return 1 || return 0
+  }
+  _codex_now_seconds() { printf '%s\n' 0; }
+  CODEX_REVIEW_MAX_RERUNS=3 AGENT_REVIEW_TIMEOUT=1h AGENT_CMD=codex \
+    _run_codex_review p m "$sandbox/cap.txt" "" "$livedir"; rc=$?
+  runs=$(grep -c '^run$' "$sandbox/runs" 2>/dev/null) || runs=0
+  echo "rc=${rc}|runs=${runs}"
+  rm -rf "$sandbox"
+)
+assert_eq "TC-CXRS-LIVE-04 liveness dir removed mid-loop → breaks before the next launch (2 runs, rc 1)" \
+  "rc=1|runs=2" "$run_live04"
+
 # TC-CXRS-RUN-08 — the capture file holds codex review's clean stdout
 run08=$(
   set -uo pipefail

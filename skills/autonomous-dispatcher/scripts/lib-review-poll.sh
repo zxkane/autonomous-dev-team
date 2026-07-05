@@ -533,3 +533,71 @@ _reap_fanout_recorded_descendants() {
   done
   return 0
 }
+
+# _reap_fanout_controller_subshells <pid...> — #406 defense-in-depth: TERM->KILL
+# each fan-out CONTROLLER SUBSHELL PID directly, so no `( … ) &` fork of
+# autonomous-review.sh survives verdict resolution even on a path where the
+# recorded-PGID kill (`_reap_fanout_processes`) misses (e.g. the per-agent
+# `.pgid` sidecar was never written — the agent died before its setsid spawn).
+#
+# What this reaps, and why it needs its OWN mechanism (neither existing reaper
+# reaches it): a codex fan-out member's `_run_codex_review` re-run CONTROLLER
+# runs INSIDE the `( … ) &` subshell the wrapper's fan-out loop backgrounds
+# (autonomous-review.sh, `_fanout_pids`) — NOT inside the `codex review`
+# process itself.
+#   - `_reap_fanout_processes` group-kills the agent's setsid PGID — that is
+#     `codex review`'s OWN process group, one level BELOW the controller. It
+#     never touches the shell loop that DECIDES whether to launch another
+#     `codex review`.
+#   - `_reap_fanout_recorded_descendants` matches on `ADT_FANOUT_LANE_MARKER`
+#     via `/proc/<pid>/environ` — but the marker is `export`ed INSIDE the
+#     already-running subshell (see the fan-out loop), which does not rewrite
+#     that process's OWN already-execve'd environ (verified empirically: a
+#     shell's `export` mutates its in-memory environment table, but nothing
+#     re-writes /proc/<pid>/environ for the CURRENTLY RUNNING shell process
+#     itself — only a subsequent exec/fork snapshot picks it up). So the
+#     controller subshell's own /proc entry never carries the marker, and this
+#     sweep is structurally invisible to it. A marker-based variant of THIS
+#     reaper would therefore be a no-op by construction — not attempted.
+# The subshell is a plain fork with NO `setsid` / `set -m` of its own — it
+# shares the WRAPPER's process group. Two hazards that shape this function:
+#   (a) a GROUP-form kill (`kill -- -$pid`) would target the wrapper's OWN
+#       pgid (the subshell has no group of its own to target) — this function
+#       therefore uses ONLY a direct, non-group `kill "$pid"` / `kill -9 "$pid"`.
+#   (b) recording these PIDs into the durable lane registry via
+#       `lane_record_pgid` would be WRONG — a later `lane_kill` (the Lane-GC
+#       delegate) reading that registry could then kill the WRAPPER itself
+#       (the subshell's pgid IS the wrapper's pgid). These PIDs are therefore
+#       NEVER lane_record_pgid'd; they are collected directly from
+#       `_fanout_pids` (the array the fan-out loop already appends `$!` to)
+#       and passed to this function ONLY, at the SAME reap call site as the
+#       other two reapers, immediately after verdict resolution.
+#
+# Idempotent / fail-safe: a PID that already exited is silently skipped (no
+# error). Uses `log` if the caller defined it (the wrapper does); otherwise
+# falls back to the same stderr logger the other reapers use.
+_reap_fanout_controller_subshells() {
+  local _pid _signaled=0
+  local _emit
+  if declare -F log >/dev/null 2>&1; then _emit=log; else _emit=_reap_log_stderr; fi
+
+  for _pid in "$@"; do
+    [[ "$_pid" =~ ^[0-9]+$ ]] && [[ "$_pid" -gt 0 ]] || continue
+    if kill -0 "$_pid" 2>/dev/null; then
+      "$_emit" "#406: reaping lingering fan-out controller subshell (pid=$_pid) — direct PID kill, NOT a group kill (the subshell shares the wrapper's pgid)"
+      kill -TERM "$_pid" 2>/dev/null || true
+      _signaled=1
+    fi
+  done
+  if [[ "$_signaled" -eq 1 ]]; then
+    sleep 2
+    for _pid in "$@"; do
+      [[ "$_pid" =~ ^[0-9]+$ ]] && [[ "$_pid" -gt 0 ]] || continue
+      if kill -0 "$_pid" 2>/dev/null; then
+        "$_emit" "#406: escalating to KILL for lingering fan-out controller subshell (pid=$_pid)"
+        kill -KILL "$_pid" 2>/dev/null || true
+      fi
+    done
+  fi
+  return 0
+}
