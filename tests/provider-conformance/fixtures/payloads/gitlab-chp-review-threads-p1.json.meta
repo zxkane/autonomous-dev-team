@@ -1,0 +1,5 @@
+# P3-3 R8 — chp_gitlab_review_threads 2-page walk, page 1.
+#
+# gitlab_version=17.x
+# reference_endpoint=GET /projects/:id/merge_requests/:iid/discussions
+# Covers: resolvable+unresolved, resolvable+resolved, non-resolvable (excluded).

@@ -1,0 +1,11 @@
+# P3-3 R2 — GitLab CHP chp_gitlab_ci_status bucket-table fixtures.
+#
+# Every bucket row in the R2 table (`success→green`, `failed→failed`, ...)
+# has one payload in this suite. The payloads share the shape a raw GitLab
+# MR view returns; only the `.head_pipeline.status` field varies. The unit
+# test drives one _gl_api stub call per row and asserts the leaf's stdout
+# is exactly the bucket token.
+#
+# gitlab_version=17.x
+# reference_endpoint=GET /projects/:id/merge_requests/:iid
+# reference_docs=https://docs.gitlab.com/ee/api/merge_requests.html

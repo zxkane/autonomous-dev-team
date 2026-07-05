@@ -1,0 +1,10 @@
+# P3-3 R3 — GitLab CHP chp_gitlab_mergeable bucket-table fixtures.
+#
+# gitlab_version=17.x
+# reference_endpoint=GET /projects/:id/merge_requests/:iid
+# reference_field=.detailed_merge_status
+# reference_docs=https://docs.gitlab.com/ee/api/merge_requests.html
+#
+# The R3 table lists 20+ tokens; the harness drives all of them by
+# rewriting the fixture's .detailed_merge_status field in-place per case.
+# The base fixture below carries `mergeable` for the happy path.

@@ -1,0 +1,9 @@
+# P3-3 R4 — chp_gitlab_pr_view full-vocabulary MR fixture.
+#
+# gitlab_version=17.x
+# reference_endpoint=GET /projects/:id/merge_requests/:iid
+# reference_docs=https://docs.gitlab.com/ee/api/merge_requests.html
+#
+# Coverage: number/state/title/body/timestamps/branch/sha/mergeable/head_pipeline
+# all present with realistic values. Sub-resource fixtures live in
+# gitlab-chp-pr-view-{closes,notes,approvals}.json.

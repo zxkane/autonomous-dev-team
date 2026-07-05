@@ -1,0 +1,68 @@
+[
+  {
+    "id": "disc-abc",
+    "individual_note": false,
+    "notes": [
+      {
+        "id": 7000001,
+        "body": "unresolved thread first note",
+        "author": { "id": 30, "username": "alice", "name": "Alice" },
+        "created_at": "2026-01-02T10:00:00Z",
+        "system": false,
+        "resolvable": true,
+        "resolved": false,
+        "position": {
+          "new_path": "src/a.py",
+          "new_line": 1
+        }
+      },
+      {
+        "id": 7000002,
+        "body": "unresolved thread reply",
+        "author": { "id": 31, "username": "bob", "name": "Bob" },
+        "created_at": "2026-01-02T10:05:00Z",
+        "system": false,
+        "resolvable": true,
+        "resolved": false,
+        "position": {
+          "new_path": "src/a.py",
+          "new_line": 1
+        }
+      }
+    ]
+  },
+  {
+    "id": "disc-def",
+    "individual_note": false,
+    "notes": [
+      {
+        "id": 7000010,
+        "body": "resolved thread first note",
+        "author": { "id": 40, "username": "carol", "name": "Carol" },
+        "created_at": "2026-01-02T11:00:00Z",
+        "system": false,
+        "resolvable": true,
+        "resolved": true,
+        "position": {
+          "new_path": "src/b.py",
+          "new_line": 2
+        }
+      }
+    ]
+  },
+  {
+    "id": "disc-general",
+    "individual_note": true,
+    "notes": [
+      {
+        "id": 7000020,
+        "body": "not resolvable — general MR note",
+        "author": { "id": 50, "username": "dave", "name": "Dave" },
+        "created_at": "2026-01-02T09:00:00Z",
+        "system": false,
+        "resolvable": false,
+        "position": null
+      }
+    ]
+  }
+]

@@ -1,0 +1,40 @@
+[
+  {
+    "id": "disc-inline-b",
+    "individual_note": false,
+    "notes": [
+      {
+        "id": 6000010,
+        "type": "DiffNote",
+        "body": "inline comment on OLD line only",
+        "author": { "id": 20, "username": "carol", "name": "Carol" },
+        "created_at": "2026-01-01T11:00:00Z",
+        "system": false,
+        "resolvable": true,
+        "resolved": false,
+        "position": {
+          "new_path": null,
+          "old_path": "src/legacy.py",
+          "new_line": null,
+          "old_line": 7
+        }
+      },
+      {
+        "id": 6000011,
+        "type": "DiffNote",
+        "body": "reply with BOTH null positions",
+        "author": { "id": 21, "username": "dave", "name": "Dave" },
+        "created_at": "2026-01-01T11:05:00Z",
+        "system": false,
+        "resolvable": true,
+        "resolved": false,
+        "position": {
+          "new_path": null,
+          "old_path": null,
+          "new_line": null,
+          "old_line": null
+        }
+      }
+    ]
+  }
+]

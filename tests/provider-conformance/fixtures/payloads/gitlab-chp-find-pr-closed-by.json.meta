@@ -1,0 +1,5 @@
+# P3-3 R6 — chp_gitlab_find_pr_for_issue /closed_by response fixture.
+#
+# gitlab_version=17.x
+# reference_endpoint=GET /projects/:id/issues/:iid/closed_by
+# reference_docs=https://docs.gitlab.com/ee/api/issues.html#list-merge-requests-that-will-close-issue-on-merge
