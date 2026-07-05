@@ -146,6 +146,24 @@ jobs:
             exit 1
           }
 
+      # Lane-GC PR-5 guardian sidecar E2E (issue #381, INV-118): drives the
+      # REAL, unmodified autonomous-dev.sh CLI entry point (fixture gh +
+      # fixture claude on PATH) far enough to install its lane registry AND
+      # the guardian sidecar, then SIGKILLs the entire wrapper session — the
+      # non-graceful death class no in-process trap survives — and asserts
+      # the fixture agent process is gone within grace+2s and the lane's
+      # STATE promoted to reaped-by-guardian (proving the guardian, not an
+      # incidental OS reap, performed the teardown). No network /
+      # credentials — always-on hermetic tier.
+      - name: lane-gc-p5 guardian sidecar E2E (real wrapper, fixture CLI)
+        run: |
+          out=$(bash tests/e2e/run-lane-gc-p5-guardian-e2e.sh)
+          echo "$out"
+          echo "$out" | grep -q 'LANE-GC-P5-GUARDIAN-E2E-SUMMARY pass=5 fail=0' || {
+            echo "::error::lane-gc-p5 guardian E2E did not produce the expected summary"
+            exit 1
+          }
+
   # Executable-spec gate (INV-80, #236): the issue-label state machine is encoded
   # in docs/pipeline/transitions.json; the mermaid diagram is GENERATED from it,
   # and every guard/action + every dispatcher label-write must be declared. This
@@ -236,6 +254,8 @@ jobs:
             skills/autonomous-dispatcher/scripts/adt-gc.sh \
             skills/autonomous-dispatcher/scripts/install-gc-timer.sh \
             skills/autonomous-dispatcher/scripts/lib-lane.sh \
+            tests/e2e/run-lane-gc-p5-guardian-e2e.sh \
+            skills/autonomous-dispatcher/scripts/lib-guardian.sh \
             tests/conformance/run-conformance.sh \
             tests/conformance/lib-conformance.sh \
             skills/autonomous-dispatcher/scripts/post-verdict.sh \

@@ -256,7 +256,11 @@ PKILL_LINE=$(grep -n 'pkill -TERM -P \$\$' <<<"$HANDLER_SRC" | head -1 | cut -d:
 # [P1]: an unisolated escalator shares the wrapper's pgid and a group-form
 # SIGKILL aimed there collaterally kills it mid-grace) — pin on the
 # single-quoted _kill_group_escalate body inside that isolation wrapper.
-ESCALATE_LINE=$(grep -n "bash -c '_kill_group_escalate" <<<"$HANDLER_SRC" | head -1 | cut -d: -f1)
+# [Lane-GC PR-5] The single-quoted body now carries a leading FD-hygiene
+# guard (`[[ -n "${ADT_GUARD_FD:-}" ]] && exec {ADT_GUARD_FD}>&-;`) before
+# the `_kill_group_escalate` call — match on the CALL substring wherever it
+# lands in the quoted body rather than requiring it to open the string.
+ESCALATE_LINE=$(grep -n "bash -c '.*_kill_group_escalate" <<<"$HANDLER_SRC" | head -1 | cut -d: -f1)
 if [[ -n "$PKILL_LINE" && -n "$ESCALATE_LINE" && "$PKILL_LINE" -lt "$ESCALATE_LINE" ]]; then
   assert_pass "TC-LGC3-012: source-of-truth — pkill -P \$\$ (line $PKILL_LINE) precedes the escalator backgrounding loop (line $ESCALATE_LINE)"
 else
