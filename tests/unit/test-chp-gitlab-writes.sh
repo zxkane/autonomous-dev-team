@@ -66,8 +66,14 @@ _reset_stub() {
   export _GL_API_FAIL_AT=""
   export _GL_API_CALL_LOG="$RUNDIR/call.log"
   export _GL_API_INV_STATE="$RUNDIR/inv.state"
+  # [#419 P1-3] --body-file sidecar log — one line per --body-file call:
+  # `inv=<N> body_file=<path> size=<bytes>`. Tests assert against this to
+  # prove file-mode was used (path recorded) AND the body's size (never
+  # truncated / ARG_MAX-adjacent bounds).
+  export _GL_API_BODY_FILE_LOG="$RUNDIR/body-file.log"
   : > "$_GL_API_CALL_LOG"
   : > "$_GL_API_INV_STATE"
+  : > "$_GL_API_BODY_FILE_LOG"
 }
 
 _gl_api() {
@@ -78,17 +84,37 @@ _gl_api() {
   printf '%s' "$inv" > "$_GL_API_INV_STATE"
 
   # Status-code channel: pick from --status-out flag or _GL_API_STATUS_SEQ.
-  local status_out_file="" status_code="200" a next=""
+  # [#419 P1-3] Also parse --body-file so a mock can PROVE the body arrived
+  # via file-mode (never touching argv). We validate the file exists here to
+  # mirror the real transport's up-front check.
+  local status_out_file="" status_code="200" body_file="" a next=""
   local args=("$@")
   local i=0
   while [ $i -lt $# ]; do
     a="${args[$i]}"
     case "$a" in
-      --status-out) i=$((i + 1)); status_out_file="${args[$i]}"; ;;
+      --status-out)   i=$((i + 1)); status_out_file="${args[$i]}"; ;;
       --status-out=*) status_out_file="${a#*=}" ;;
+      --body-file)    i=$((i + 1)); body_file="${args[$i]}"; ;;
+      --body-file=*)  body_file="${a#*=}" ;;
     esac
     i=$((i + 1))
   done
+  # [#419 P1-3] --body-file validation mirror of the real _gl_api (rc 2 loud
+  # on missing / non-file). Records the file path AND size into a sidecar so
+  # tests can assert size-boundary + file-mode invariants without re-parsing
+  # the call log.
+  if [ -n "$body_file" ]; then
+    if [ ! -f "$body_file" ]; then
+      echo "ERROR: _gl_api stub: --body-file '$body_file' not found" >&2
+      return 2
+    fi
+    if [ -n "${_GL_API_BODY_FILE_LOG:-}" ]; then
+      local sz; sz=$(wc -c < "$body_file" 2>/dev/null | tr -d '[:space:]')
+      printf 'inv=%s body_file=%s size=%s\n' "$inv" "$body_file" "${sz:-0}" \
+        >> "$_GL_API_BODY_FILE_LOG"
+    fi
+  fi
   if [ -n "$_GL_API_STATUS_SEQ" ]; then
     local IFS_SAVE=$IFS; IFS=':'
     # shellcheck disable=SC2206
@@ -646,6 +672,166 @@ assert_eq "TC-P34-059 count=0 on malformed" "0" "$count"
 _reset_stub
 export _GL_API_PAYLOAD="$PAYLOADS/gitlab-chp-write-count-reviews-empty.json"
 assert_eq "TC-P34-060 count(empty approved_by)=0" "0" "$(chp_gitlab_count_reviews_by_login "repo" 42 bot-a)"
+
+# ============================================================================
+# #419 P1-2: chp_gitlab_commit_file — repo positional URL-encoding
+# ============================================================================
+echo "=== P1-2 (#419): chp_gitlab_commit_file repo-arg encoding ==="
+
+# Helper: extract the emitted `/projects/…` path from call #1's recorded argv
+# (the branch-existence preflight, which is the FIRST _gl_api call).
+_emitted_project_path() {
+  # Call log lines are pipe-joined argv; the path is the LAST |-field.
+  _call_n 1 | awk -F'|' '{print $NF}'
+}
+
+# Pre-encoded repo (`group%2Fproject`) is passed through verbatim (single-
+# encoding — a double-encode would produce `group%252Fproject` and GitLab 404s).
+_reset_stub
+export _GL_API_PAYLOAD_SEQ="$PAYLOADS/gitlab-chp-write-commit-file-branch-exists.json:$PAYLOADS/gitlab-chp-write-commit-file-file-exists.json:$PAYLOADS/gitlab-chp-write-commit-file-create-response.json:$PAYLOADS/gitlab-chp-write-commit-file-commits.json"
+export _GL_API_STATUS_SEQ="200:200:200:200"
+chp_gitlab_commit_file "group%2Fproject" "screenshots" "pr-42/TC-1.png" "$(printf 'x' | base64 -w0)" "m" >/dev/null 2>&1
+assert_contains "TC-P34-069a pre-encoded repo passes through (no double-encode)" \
+  "/projects/group%2Fproject/repository/branches/screenshots" "$(_emitted_project_path)"
+
+# Raw repo with `/` (`group/project`) — the leaf detects and encodes.
+_reset_stub
+export _GL_API_PAYLOAD_SEQ="$PAYLOADS/gitlab-chp-write-commit-file-branch-exists.json:$PAYLOADS/gitlab-chp-write-commit-file-file-exists.json:$PAYLOADS/gitlab-chp-write-commit-file-create-response.json:$PAYLOADS/gitlab-chp-write-commit-file-commits.json"
+export _GL_API_STATUS_SEQ="200:200:200:200"
+chp_gitlab_commit_file "group/project" "screenshots" "pr-42/TC-1.png" "$(printf 'x' | base64 -w0)" "m" >/dev/null 2>&1
+assert_contains "TC-P34-069b raw slash-bearing repo → encoded to %2F" \
+  "/projects/group%2Fproject/repository/branches/screenshots" "$(_emitted_project_path)"
+
+# Nested slash-bearing repo (`group/sub/project`) — encodes ALL slashes.
+_reset_stub
+export _GL_API_PAYLOAD_SEQ="$PAYLOADS/gitlab-chp-write-commit-file-branch-exists.json:$PAYLOADS/gitlab-chp-write-commit-file-file-exists.json:$PAYLOADS/gitlab-chp-write-commit-file-create-response.json:$PAYLOADS/gitlab-chp-write-commit-file-commits.json"
+export _GL_API_STATUS_SEQ="200:200:200:200"
+chp_gitlab_commit_file "group/sub/project" "screenshots" "pr-42/TC-1.png" "$(printf 'x' | base64 -w0)" "m" >/dev/null 2>&1
+assert_contains "TC-P34-069c nested-slash raw repo → group%2Fsub%2Fproject" \
+  "/projects/group%2Fsub%2Fproject/repository/branches/screenshots" "$(_emitted_project_path)"
+
+# Single-segment repo (no slash) — passthrough (a project id like `42` or
+# a bare name a self-hosted GitLab uses for personal projects).
+_reset_stub
+export _GL_API_PAYLOAD_SEQ="$PAYLOADS/gitlab-chp-write-commit-file-branch-exists.json:$PAYLOADS/gitlab-chp-write-commit-file-file-exists.json:$PAYLOADS/gitlab-chp-write-commit-file-create-response.json:$PAYLOADS/gitlab-chp-write-commit-file-commits.json"
+export _GL_API_STATUS_SEQ="200:200:200:200"
+chp_gitlab_commit_file "42" "screenshots" "pr-42/TC-1.png" "$(printf 'x' | base64 -w0)" "m" >/dev/null 2>&1
+assert_contains "TC-P34-069d single-segment repo (project id) passes through" \
+  "/projects/42/repository/branches/screenshots" "$(_emitted_project_path)"
+
+# ============================================================================
+# #419 P1-3: --body-file channel (large-body / ARG_MAX safety)
+# ============================================================================
+echo "=== P1-3 (#419): --body-file channel — large bodies stay off argv ==="
+
+# Small-body case: leaf uses --body-file, stub records it. Any body-file call
+# must land a matching row in _GL_API_BODY_FILE_LOG.
+_reset_stub
+export _GL_API_PAYLOAD_SEQ="$PAYLOADS/gitlab-chp-write-commit-file-branch-exists.json:$PAYLOADS/gitlab-chp-write-commit-file-file-exists.json:$PAYLOADS/gitlab-chp-write-commit-file-create-response.json:$PAYLOADS/gitlab-chp-write-commit-file-commits.json"
+export _GL_API_STATUS_SEQ="200:200:200:200"
+chp_gitlab_commit_file "group%2Fproject" "screenshots" "pr-42/TC-1.png" "$(printf 'small-body' | base64 -w0)" "m" >/dev/null 2>&1
+bfl_count=$(wc -l < "$_GL_API_BODY_FILE_LOG" | tr -d '[:space:]')
+assert_eq "TC-P34-070 small body routed via --body-file (1 body-file row)" "1" "$bfl_count"
+# The recorded row is invocation #3 (branch-preflight, file-preflight, POST create, commits GET).
+assert_contains "TC-P34-070 --body-file recorded at invocation 3 (POST create)" \
+  "inv=3" "$(cat "$_GL_API_BODY_FILE_LOG")"
+
+# Large-body case: a > 200KB base64 payload. The pre-P1-3 code would land it
+# on _gl_api's argv (--body <giant>) and the stub's `printf '%s\n' "$*"`
+# would try to log the whole thing. Under --body-file the argv contains
+# ONLY the path — the body stays off argv entirely.
+_reset_stub
+export _GL_API_PAYLOAD_SEQ="$PAYLOADS/gitlab-chp-write-commit-file-branch-exists.json:$PAYLOADS/gitlab-chp-write-commit-file-file-exists.json:$PAYLOADS/gitlab-chp-write-commit-file-create-response.json:$PAYLOADS/gitlab-chp-write-commit-file-commits.json"
+export _GL_API_STATUS_SEQ="200:200:200:200"
+# 200KB of raw bytes → ~272KB base64 (comfortably over the pre-P1-3 argv
+# hazard threshold).
+LARGE_RAW="$(head -c 204800 /dev/urandom | base64 -w0)"
+chp_gitlab_commit_file "group%2Fproject" "screenshots" "pr-42/TC-1.png" "$LARGE_RAW" "m" >/dev/null 2>&1
+rc_large=$?
+assert_rc "TC-P34-071 large body (~272KB base64) succeeds via --body-file" "0" "$rc_large"
+# Prove the body reached the stub via file-mode: exactly one body-file row.
+bfl_count=$(wc -l < "$_GL_API_BODY_FILE_LOG" | tr -d '[:space:]')
+assert_eq "TC-P34-071 exactly 1 body-file row on large-body invocation" "1" "$bfl_count"
+# Prove the recorded size is >= 200KB (the body content, not truncated).
+bfl_size=$(awk -F'size=' '{print $2}' "$_GL_API_BODY_FILE_LOG" | head -1)
+if [ -n "$bfl_size" ] && [ "$bfl_size" -ge 204800 ]; then
+  ok "TC-P34-071 body-file size ≥ 200KB (${bfl_size} bytes) — full payload delivered"
+else
+  bad "TC-P34-071 body-file size < 200KB (got '${bfl_size}') — body truncated?"
+fi
+# Prove the argv trace does NOT contain the giant body content (the call log
+# line for invocation 3 must be short — path + flags only, no base64 blob).
+inv3_len=$(_call_n 3 | wc -c | tr -d '[:space:]')
+if [ "$inv3_len" -lt 8192 ]; then
+  ok "TC-P34-071 argv trace stays small (${inv3_len} bytes) — body OFF argv"
+else
+  bad "TC-P34-071 argv trace bloated (${inv3_len} bytes) — body leaked to argv?"
+fi
+
+# Size-boundary case at 128KB (Linux ARG_MAX threshold): the pre-P1-3 code
+# blew past ARG_MAX here; --body-file must still land the body.
+_reset_stub
+export _GL_API_PAYLOAD_SEQ="$PAYLOADS/gitlab-chp-write-commit-file-branch-exists.json:$PAYLOADS/gitlab-chp-write-commit-file-file-exists.json:$PAYLOADS/gitlab-chp-write-commit-file-create-response.json:$PAYLOADS/gitlab-chp-write-commit-file-commits.json"
+export _GL_API_STATUS_SEQ="200:200:200:200"
+# 96KB raw → ~128KB base64 (at the ARG_MAX boundary).
+BOUNDARY_RAW="$(head -c 98304 /dev/urandom | base64 -w0)"
+chp_gitlab_commit_file "group%2Fproject" "screenshots" "pr-42/TC-1.png" "$BOUNDARY_RAW" "m" >/dev/null 2>&1
+rc_b=$?
+assert_rc "TC-P34-072 ARG_MAX-boundary body (~128KB) succeeds" "0" "$rc_b"
+bfl_count=$(wc -l < "$_GL_API_BODY_FILE_LOG" | tr -d '[:space:]')
+assert_eq "TC-P34-072 exactly 1 body-file row at 128KB boundary" "1" "$bfl_count"
+
+# ============================================================================
+# #419 P1-1: upload-screenshot.sh per-lane preflight
+# ============================================================================
+echo "=== P1-1 (#419): upload-screenshot.sh preflight branches on CODE_HOST ==="
+
+UPLOAD_SH="$PROJECT_ROOT/skills/autonomous-review/scripts/upload-screenshot.sh"
+[ -f "$UPLOAD_SH" ] || { bad "upload-screenshot.sh missing"; exit 2; }
+
+# TC-P34-073: on gitlab lane, GH_TOKEN + gh MUST NOT be required.
+# We probe by running the script with invalid args (`missing.png`) so it
+# fails inside the file-existence check — the point is that the earlier
+# GH_TOKEN preflight does NOT fatal first. We unset GH_TOKEN, set
+# CODE_HOST=gitlab + GITLAB_TOKEN, and expect the fail to name "File not
+# found" (the check AFTER preflight) rather than the pre-P1-1 "GH_TOKEN
+# environment variable is required".
+missing_png="$RUNDIR/does-not-exist.png"
+out_gl=$(env -u PROJECT_DIR -u GH_TOKEN CODE_HOST=gitlab GITLAB_TOKEN=x GITLAB_PROJECT="group%2Fproject" \
+  bash "$UPLOAD_SH" "$missing_png" 42 TC-1 2>&1 || true)
+if echo "$out_gl" | grep -q "GH_TOKEN"; then
+  bad "TC-P34-073 gitlab lane still required GH_TOKEN (pre-P1-1 regression)"
+elif echo "$out_gl" | grep -qE "File not found|gitlab lane"; then
+  ok "TC-P34-073 gitlab lane preflight does NOT require GH_TOKEN (fatals later, correctly)"
+else
+  bad "TC-P34-073 unexpected fatal on gitlab lane: |${out_gl:0:200}|"
+fi
+
+# TC-P34-074: gitlab lane without GITLAB_TOKEN AND without
+# GITLAB_TRANSPORT_HOOK → clear preflight fail naming the required env.
+out_gl2=$(env -u PROJECT_DIR -u GH_TOKEN -u GITLAB_TOKEN -u GITLAB_TRANSPORT_HOOK \
+  CODE_HOST=gitlab bash "$UPLOAD_SH" "$missing_png" 42 TC-1 2>&1 || true)
+if echo "$out_gl2" | grep -q "GITLAB_TOKEN or GITLAB_TRANSPORT_HOOK"; then
+  ok "TC-P34-074 gitlab lane rejects missing GITLAB_TOKEN + no hook"
+else
+  bad "TC-P34-074 expected gitlab-lane preflight error, got: |${out_gl2:0:200}|"
+fi
+
+# TC-P34-075: github lane preflight preserved — GH_TOKEN still required.
+out_gh=$(env -u PROJECT_DIR -u GH_TOKEN CODE_HOST=github bash "$UPLOAD_SH" "$missing_png" 42 TC-1 2>&1 || true)
+if echo "$out_gh" | grep -q "GH_TOKEN environment variable is required on the github lane"; then
+  ok "TC-P34-075 github lane still requires GH_TOKEN (preflight preserved)"
+else
+  bad "TC-P34-075 expected GH_TOKEN preflight on github lane, got: |${out_gh:0:200}|"
+fi
+
+# TC-P34-076: unsupported CODE_HOST rejected loud.
+out_bad=$(env -u PROJECT_DIR -u GH_TOKEN CODE_HOST=bogus bash "$UPLOAD_SH" "$missing_png" 42 TC-1 2>&1 || true)
+if echo "$out_bad" | grep -q "unsupported CODE_HOST"; then
+  ok "TC-P34-076 unsupported CODE_HOST rejected"
+else
+  bad "TC-P34-076 expected CODE_HOST validation, got: |${out_bad:0:200}|"
+fi
 
 # ============================================================================
 # Report

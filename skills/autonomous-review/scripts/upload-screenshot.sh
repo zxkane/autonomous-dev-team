@@ -1,20 +1,35 @@
 #!/bin/bash
-# upload-screenshot.sh — Upload a screenshot to GitHub for linking in PR comments.
+# upload-screenshot.sh — Upload a screenshot to the code-host for linking in PR comments.
 #
-# Pushes the image to an orphan `screenshots` branch in the repo,
-# then outputs a GitHub blob URL that authenticated users can view in the web UI.
-# For private repos, raw.githubusercontent.com URLs return 404 without auth,
-# but /blob/ URLs render images natively for any user with repo access.
+# Pushes the image to an orphan `screenshots` branch in the repo, then outputs
+# a blob URL that authenticated users can view in the web UI. For private
+# repos, raw content URLs return 404 without auth, but /blob/ (github) or
+# /-/blob/ (gitlab) URLs render images natively for any user with repo access.
+#
+# The whole write op + URL render route through the provider-neutral CHP
+# verbs `chp_commit_file` and `chp_file_url` (#419 P1-1 P3-4). CODE_HOST
+# selects the leaf:
+#   - github (default): the 8-call git-Data-API dance + github.com/…/blob/…
+#   - gitlab:            the Files API + ${GITLAB_HOST}/…/-/blob/…
 #
 # Usage:
 #   scripts/upload-screenshot.sh <png-path> <pr-number> <test-case-id>
 #
-# Environment:
-#   GH_TOKEN  — GitHub token with repo write access (required)
-#   REPO      — owner/repo (default: owner/repo, override via autonomous.conf)
+# Environment (per lane):
+#   github lane:
+#     GH_TOKEN  — GitHub token with repo write access (required)
+#     REPO      — owner/repo (default: owner/repo, override via autonomous.conf)
+#   gitlab lane (CODE_HOST=gitlab):
+#     GITLAB_TOKEN  — GitLab PAT/deploy-token with repo write access
+#                     (required unless GITLAB_TRANSPORT_HOOK is armed)
+#     GITLAB_TRANSPORT_HOOK — operator-owned transport hook path (alternative
+#                             to GITLAB_TOKEN; owns its own auth)
+#     GITLAB_PROJECT — url-encoded project path (e.g. group%2Fproject),
+#                      override via autonomous.conf
+#     REPO      — repo positional threaded into chp_commit_file / chp_file_url
 #
 # Output (stdout):
-#   On success: https://github.com/{owner}/{repo}/blob/screenshots/pr-{N}/{TC-ID}.png
+#   On success: <blob URL — github or gitlab shape per CODE_HOST>
 #   On failure: UPLOAD_FAILED
 #
 # Exit codes:
@@ -82,12 +97,37 @@ if [[ -z "$PNG_PATH" || -z "$PR_NUMBER" || -z "$TC_ID" ]]; then
   exit 1
 fi
 
+# [#419 P1-1] Environment preflight runs FIRST (before the file/PR/TC-ID
+# checks) so mis-configured lanes fail loud without leaking a file-not-found
+# error on top of a missing-token error. Per-lane branching:
+#   - github lane (CODE_HOST=github, the default): require GH_TOKEN + gh (the
+#     `command -v gh` staying is allowlisted in the cutover guard — the point
+#     is the EARLY EXIT must not fire on a gitlab lane).
+#   - gitlab lane (CODE_HOST=gitlab): require GITLAB_TOKEN OR
+#     GITLAB_TRANSPORT_HOOK (the operator-owned hook path). `gh` is NOT
+#     required — the GitLab leaves route through _gl_api → curl.
+#   - any other value: fatal (mistyped CODE_HOST is safer to reject loud than
+#     to silently take the github preflight path).
+# jq is required on BOTH lanes (transport uses it for @uri encoding + shape gates).
+command -v jq >/dev/null 2>&1 || fail "jq is required but not found in PATH"
+case "${CODE_HOST:-github}" in
+  github)
+    [[ -n "${GH_TOKEN:-}" ]] || fail "GH_TOKEN environment variable is required on the github lane"
+    command -v gh >/dev/null 2>&1 || fail "gh CLI is required on the github lane but not found in PATH"
+    ;;
+  gitlab)
+    if [[ -z "${GITLAB_TOKEN:-}" && -z "${GITLAB_TRANSPORT_HOOK:-}" ]]; then
+      fail "GITLAB_TOKEN or GITLAB_TRANSPORT_HOOK is required on the gitlab lane (see docs/gitlab-setup.md)"
+    fi
+    ;;
+  *)
+    fail "unsupported CODE_HOST='${CODE_HOST}' (expected 'github' or 'gitlab')"
+    ;;
+esac
+
 [[ -f "$PNG_PATH" ]] || fail "File not found: $PNG_PATH"
 [[ "$PR_NUMBER" =~ ^[0-9]+$ ]] || fail "PR number must be a positive integer, got '$PR_NUMBER'"
 [[ "$TC_ID" =~ ^[a-zA-Z0-9_-]+$ ]] || fail "Test case ID must be alphanumeric with hyphens/underscores, got '$TC_ID'"
-[[ -n "${GH_TOKEN:-}" ]] || fail "GH_TOKEN environment variable is required"
-command -v gh >/dev/null 2>&1 || fail "gh CLI is required but not found in PATH"
-command -v jq >/dev/null 2>&1 || fail "jq is required but not found in PATH"
 
 # ---------------------------------------------------------------------------
 # Upload via the CHP whole-op verb (commit the PNG on the orphan branch)
@@ -105,8 +145,8 @@ CONTENT_BASE64=$(base64 -w0 "$PNG_PATH" 2>/dev/null || base64 -i "$PNG_PATH" 2>/
 [[ -n "$CONTENT_BASE64" ]] || fail "Failed to base64-encode $PNG_PATH"
 
 UPLOAD_SHA=$(chp_commit_file "$REPO" "$BRANCH" "$FILE_PATH" "$CONTENT_BASE64" "$COMMIT_MESSAGE") \
-  || fail "GitHub API upload failed for ${FILE_PATH}"
-[[ -n "$UPLOAD_SHA" ]] || fail "GitHub API upload failed for ${FILE_PATH}"
+  || fail "code-host commit-file upload failed for ${FILE_PATH}"
+[[ -n "$UPLOAD_SHA" ]] || fail "code-host commit-file upload failed for ${FILE_PATH}"
 
 # Output a browser blob URL via the CHP `chp_file_url` verb (#419 R11). The
 # GitHub leaf renders `https://github.com/${REPO}/blob/${BRANCH}/${FILE_PATH}`

@@ -1234,6 +1234,25 @@ chp_gitlab_close_keyword() {
 # ---------------------------------------------------------------------------
 chp_gitlab_commit_file() {
   local repo="$1" branch="$2" file_path="$3" content_base64="$4" message="$5"
+
+  # [#419 P1-2] Encode the repo positional when it contains a raw `/`. The
+  # caller may pass EITHER a pre-encoded slug (`group%2Fproject` — mirrors
+  # the ambient GITLAB_PROJECT convention, §3.4) OR a RAW path
+  # (`group/project` — the natural shape upload-screenshot.sh threads from
+  # autonomous.conf's REPO). Detect: a `/` in the value means raw → encode.
+  # A `%` in the value is treated as already-encoded pass-through (encoding
+  # `%2F` would double-encode to `%252F`, which GitLab 404s on). This means
+  # the ONE edge case a caller passing literal `%` in a project path lands
+  # on the pass-through branch — GitLab project paths cannot contain `%` in
+  # practice (path components are `[a-zA-Z0-9_.-]`), so the heuristic is
+  # safe. Pinned by TC-P34-069 / test-chp-gitlab-writes.sh.
+  local repo_enc="$repo"
+  case "$repo" in
+    *%*) : ;;                                     # pre-encoded → pass-through
+    */*)  repo_enc="$(_gl_urlencode "$repo")" || return 1 ;;
+    *)   : ;;                                     # single-segment (no slash) → verbatim
+  esac
+
   local branch_enc path_enc
   branch_enc="$(_gl_urlencode "$branch")" || return 1
   path_enc="$(_gl_urlencode "$file_path")" || return 1
@@ -1251,7 +1270,7 @@ chp_gitlab_commit_file() {
 
   local branch_probe_status branch_exists=0
   _gl_api --tolerate-status 404 --status-out "$status_tmp" \
-    "/projects/${repo}/repository/branches/${branch_enc}" >/dev/null 2>&1 || {
+    "/projects/${repo_enc}/repository/branches/${branch_enc}" >/dev/null 2>&1 || {
       echo "ERROR: chp_gitlab_commit_file: branch existence preflight failed" >&2
       return 1
     }
@@ -1268,20 +1287,20 @@ chp_gitlab_commit_file() {
   # Step 1b: bootstrap the branch if absent (orphan-branch parity with GitHub).
   if [ "$branch_exists" = "0" ]; then
     local project_raw default_branch default_branch_enc
-    project_raw="$(_gl_api "/projects/${repo}" 2>/dev/null)" || return 1
+    project_raw="$(_gl_api "/projects/${repo_enc}" 2>/dev/null)" || return 1
     [ -n "$project_raw" ] || return 1
     default_branch="$(jq -r '.default_branch // ""' <<<"$project_raw" 2>/dev/null)"
     [ -n "$default_branch" ] || return 1
     default_branch_enc="$(_gl_urlencode "$default_branch")" || return 1
     _gl_api --method POST \
-      "/projects/${repo}/repository/branches?branch=${branch_enc}&ref=${default_branch_enc}" \
+      "/projects/${repo_enc}/repository/branches?branch=${branch_enc}&ref=${default_branch_enc}" \
       >/dev/null 2>&1 || return 1
   fi
 
   # Step 2: file existence preflight — same redirect-to-tempfile pattern.
   local file_probe_status file_verb="POST"
   _gl_api --tolerate-status 404 --status-out "$status_tmp" \
-    "/projects/${repo}/repository/files/${path_enc}?ref=${branch_enc}" \
+    "/projects/${repo_enc}/repository/files/${path_enc}?ref=${branch_enc}" \
     >/dev/null 2>&1 || {
       echo "ERROR: chp_gitlab_commit_file: file existence preflight failed" >&2
       return 1
@@ -1296,30 +1315,41 @@ chp_gitlab_commit_file() {
     return 1
   fi
 
-  # Step 3: build the JSON payload via a temp file (large-body handling —
-  # base64 payloads for screenshots can exceed 128KB, breaking ARG_MAX).
+  # Step 3: build the JSON payload into a TEMP FILE and pass it via the P3-4
+  # `--body-file` channel (#419 P1-3) — the base64 body for screenshots can
+  # exceed ARG_MAX (`E2BIG` at ~270KB on typical Linux boxes, reproduced
+  # on-box), so we NEVER read it back into a shell variable. Additionally we
+  # stage the base64 content on disk FIRST and let jq slurp it with
+  # `--rawfile` (also file-mediated, no argv splice) — the pre-P1-3 code
+  # used `--arg content "$content_base64"` which itself blew the argv on
+  # large payloads. Two file hops (content → jq stdin, then json → curl)
+  # keep the whole path ARG_MAX-safe. `_gl_http` streams `--data-binary
+  # @<path>` to curl directly.
+  local content_tmpfile
+  content_tmpfile="$(mktemp)"
+  printf '%s' "$content_base64" > "$content_tmpfile" || {
+    rm -f "$content_tmpfile"
+    return 1
+  }
   jq -cn \
-    --arg branch  "$branch" \
-    --arg content "$content_base64" \
-    --arg msg     "$message" \
+    --arg branch     "$branch" \
+    --rawfile content "$content_tmpfile" \
+    --arg msg        "$message" \
     '{branch: $branch, encoding: "base64", content: $content, commit_message: $msg}' \
-    > "$json_tmpfile" 2>/dev/null || return 1
+    > "$json_tmpfile" 2>/dev/null
+  local jq_rc=$?
+  rm -f "$content_tmpfile"
+  [ "$jq_rc" -eq 0 ] || return 1
 
-  # Read the file contents into a shell variable so we can pass the JSON body
-  # via --body (the frozen #416 signature takes body-JSON as a positional
-  # string; --body-file is not in the contract).
-  local body_content
-  body_content="$(cat "$json_tmpfile" 2>/dev/null)" || return 1
-
-  _gl_api --method "$file_verb" --body "$body_content" \
-    "/projects/${repo}/repository/files/${path_enc}" \
+  _gl_api --method "$file_verb" --body-file "$json_tmpfile" \
+    "/projects/${repo_enc}/repository/files/${path_enc}" \
     >/dev/null 2>&1 || return 1
 
   # Step 4: fetch the commit SHA (post-commit lookup — GitLab's Files API
   # create/update response carries `file_path` + `branch` but NO commit SHA).
   local commits_json commit_sha
   commits_json="$(_gl_api \
-    "/projects/${repo}/repository/commits?ref_name=${branch_enc}&per_page=1" \
+    "/projects/${repo_enc}/repository/commits?ref_name=${branch_enc}&per_page=1" \
     2>/dev/null)" || return 1
   [ -n "$commits_json" ] || return 1
   commit_sha="$(jq -r '.[0].id // ""' <<<"$commits_json" 2>/dev/null)"

@@ -2,7 +2,7 @@
 # lib-gitlab-transport.sh — GitLab transport contract (issue #416, phase-3 #414
 # W-A). Two-layer FROZEN contract:
 #
-#   _gl_http <method> <path-or-url> <headers_out_file> [body-json]
+#   _gl_http <method> <path-or-url> <headers_out_file> [body-json] [body-file]
 #       SINGLE-REQUEST primitive AND out-of-tree hook point. Default impl uses
 #       curl only (no glab — a CLI carries its own auth/config state, blurring
 #       the standard-auth-only boundary per #414 pillar 2). Sends
@@ -16,9 +16,24 @@
 #       TRANSPORT succeeded (curl exit 0); HTTP status classification is
 #       _gl_api's job. No retries here; no pagination here.
 #
-#   _gl_api [--method M] [--paginate] [--body JSON] [--tolerate-status CSV]
-#           [--max-items N] [--status-out FILE] <path>
-#       The PUBLIC function every GitLab leaf calls. Owns pagination walk
+#       Body-file channel (P3-4 additive extension, #419 P1-3): when the 5th
+#       positional is a non-empty file path, curl posts its content via
+#       `--data-binary @<path>` — the body NEVER lands on curl argv, so
+#       arbitrarily large payloads (base64 screenshots, multi-MB commits) do
+#       not risk ARG_MAX. When BOTH body-json and body-file are set the FILE
+#       wins (json is ignored; the leaf should pick one — the file path
+#       already reflects the intended body). Backward-compatible: pre-P3-4
+#       hooks that only read $1..$4 IGNORE the extra positional and continue
+#       to serve zero-body responses correctly.
+#
+#   _gl_api [--method M] [--paginate] [--body JSON] [--body-file PATH]
+#           [--tolerate-status CSV] [--max-items N] [--status-out FILE] <path>
+#       The PUBLIC function every GitLab leaf calls. `--body-file` (P3-4
+#       additive extension, #419 P1-3) threads a file path down to `_gl_http`
+#       so large bodies stay off argv. Mutually exclusive with `--body` (last
+#       one wins in the arg parser); the leaf whose body may exceed ARG_MAX
+#       (chp_gitlab_commit_file, spec §5.1.2 R10) MUST use `--body-file`.
+#       Owns pagination walk
 #       (--paginate loops x-next-page until exhausted, merges pages into ONE
 #       JSON array via `jq -s add`, page cap GL_TRANSPORT_PAGE_CAP default 50
 #       -> cap-hit or ANY mid-walk failure = rc != 0 with NO partial output —
@@ -178,7 +193,7 @@ _gl_urlencode() {
 #   rc 0 iff curl transport succeeded (request sent + response received —
 #   curl exit 0). HTTP status classification is EXCLUSIVELY _gl_api's job.
 _gl_http() {
-  local method="$1" path_or_url="$2" headers_out_file="$3" body_json="${4:-}"
+  local method="$1" path_or_url="$2" headers_out_file="$3" body_json="${4:-}" body_file="${5:-}"
   local url
 
   if [[ "$path_or_url" == http* ]]; then
@@ -193,7 +208,11 @@ _gl_http() {
   #   -X <M>    — HTTP method.
   #   -H ...    — PRIVATE-TOKEN auth header (GitLab convention).
   #   -D <f>    — dump response headers (incl. HTTP status line) to file.
-  #   --data-binary <body> — body-json, for POST/PUT/PATCH.
+  #   --data-binary <body>       — body-json inline (for small payloads).
+  #   --data-binary @<path>      — body-file (P3-4 additive, #419 P1-3):
+  #     curl streams the file content off the argv, so ARG_MAX cannot be hit
+  #     regardless of body size. When BOTH body-json and body-file are set,
+  #     the FILE wins (documented in the lib header).
   #
   # We MUST NOT pass `-f/--fail` — that would make curl exit non-zero on
   # HTTP >=400 and suppress the body, but the contract requires:
@@ -207,7 +226,12 @@ _gl_http() {
     -D "$headers_out_file"
   )
 
-  if [[ -n "$body_json" ]]; then
+  if [[ -n "$body_file" ]]; then
+    curl_argv+=(
+      -H "Content-Type: application/json"
+      --data-binary "@${body_file}"
+    )
+  elif [[ -n "$body_json" ]]; then
     curl_argv+=(
       -H "Content-Type: application/json"
       --data-binary "$body_json"
@@ -288,6 +312,7 @@ _gl_api() {
   local method="GET"
   local paginate=0
   local body_json=""
+  local body_file=""
   local tolerate_status_csv=""
   local max_items=""
   local status_out_file=""
@@ -300,6 +325,8 @@ _gl_api() {
       --paginate)        paginate=1; shift ;;
       --body)            body_json="$2"; shift 2 ;;
       --body=*)          body_json="${1#*=}"; shift ;;
+      --body-file)       body_file="$2"; shift 2 ;;
+      --body-file=*)     body_file="${1#*=}"; shift ;;
       --tolerate-status) tolerate_status_csv="$2"; shift 2 ;;
       --tolerate-status=*) tolerate_status_csv="${1#*=}"; shift ;;
       --max-items)       max_items="$2"; shift 2 ;;
@@ -311,6 +338,17 @@ _gl_api() {
       *)                 path="$1"; shift; break ;;
     esac
   done
+
+  # [#419 P1-3] Body-file channel — mutually exclusive with --body (file
+  # wins). Validate the file exists BEFORE any HTTP dispatch so a caller
+  # typo fails loud rather than curl streaming an empty file (which some
+  # curl versions treat as an empty body silently).
+  if [[ -n "$body_file" ]]; then
+    if [[ ! -f "$body_file" ]]; then
+      echo "ERROR: _gl_api: --body-file '$body_file' not found or not a regular file" >&2
+      return 2
+    fi
+  fi
 
   if [[ -z "$path" ]]; then
     echo "ERROR: _gl_api: missing <path> argument" >&2
@@ -330,13 +368,16 @@ _gl_api() {
     read -ra tolerate <<< "$tolerate_status_csv"
   fi
 
-  local hdr_file body_file
+  # [#419 P1-3] Response-body scratch file is named `resp_body_file` to
+  # disambiguate from the user's `--body-file` request-body input (both were
+  # `body_file` pre-P1-3; the rename is mechanical).
+  local hdr_file resp_body_file
   hdr_file=$(mktemp)
-  body_file=$(mktemp)
+  resp_body_file=$(mktemp)
   local rc=0
 
   # _cleanup — remove per-call scratch files. Idempotent.
-  _cleanup() { rm -f "$hdr_file" "$body_file" 2>/dev/null || true; }
+  _cleanup() { rm -f "$hdr_file" "$resp_body_file" 2>/dev/null || true; }
 
   # _record_status — echo the extracted status into GL_API_STATUS and the
   # --status-out file (if any). Called after every _gl_http invocation.
@@ -379,7 +420,7 @@ _gl_api() {
       # trap — `!` inverts, so `$?` under `then` is 0, not cmd's rc).
       # Codex round-1 [P1-3].
       http_rc=0
-      _gl_http "$method" "$target" "$hdr_file" "$body_json" > "$body_file" || http_rc=$?
+      _gl_http "$method" "$target" "$hdr_file" "$body_json" "$body_file" > "$resp_body_file" || http_rc=$?
       if [[ "$http_rc" -ne 0 ]]; then
         return 1
       fi
@@ -424,14 +465,14 @@ _gl_api() {
     fi
     # HTTP status classification.
     if [[ "$GL_API_STATUS" -ge 200 && "$GL_API_STATUS" -lt 300 ]]; then
-      cat "$body_file"
+      cat "$resp_body_file"
       _cleanup; return 0
     fi
     if _is_toleratable; then
-      cat "$body_file"
+      cat "$resp_body_file"
       _cleanup; return 0
     fi
-    local body_excerpt; body_excerpt=$(head -c 200 "$body_file" 2>/dev/null)
+    local body_excerpt; body_excerpt=$(head -c 200 "$resp_body_file" 2>/dev/null)
     echo "ERROR: [INV-116] _gl_api HTTP ${GL_API_STATUS} on '${path}' (body excerpt: ${body_excerpt})" >&2
     _cleanup; return 1
   fi
@@ -463,11 +504,11 @@ _gl_api() {
       if _is_toleratable && [[ "$pages_read" -eq 0 ]]; then
         # Tolerated status on the first page — return the body as-is (no
         # pagination merge; pagination on a tolerated non-2xx makes no sense).
-        cat "$body_file"
+        cat "$resp_body_file"
         rm -f "$merged_file"
         _cleanup; return 0
       fi
-      local body_excerpt; body_excerpt=$(head -c 200 "$body_file" 2>/dev/null)
+      local body_excerpt; body_excerpt=$(head -c 200 "$resp_body_file" 2>/dev/null)
       echo "ERROR: [INV-116] _gl_api mid-walk HTTP ${GL_API_STATUS} on '${next_url}' (body excerpt: ${body_excerpt})" >&2
       walk_rc=1
       break
@@ -477,17 +518,17 @@ _gl_api() {
     # array, treat the first-page as a single-page response (return
     # verbatim) — pagination on a non-array body is a no-op degradation.
     if [[ "$pages_read" -eq 0 ]]; then
-      if ! jq -e 'type == "array"' >/dev/null 2>&1 < "$body_file"; then
-        cat "$body_file"
+      if ! jq -e 'type == "array"' >/dev/null 2>&1 < "$resp_body_file"; then
+        cat "$resp_body_file"
         rm -f "$merged_file"
         _cleanup; return 0
       fi
     fi
-    cat "$body_file" >> "$merged_file.raw"
+    cat "$resp_body_file" >> "$merged_file.raw"
     pages_read=$((pages_read + 1))
 
     if [[ -n "$max_items" ]]; then
-      local page_len; page_len=$(jq 'length' < "$body_file" 2>/dev/null || echo 0)
+      local page_len; page_len=$(jq 'length' < "$resp_body_file" 2>/dev/null || echo 0)
       total_items=$((total_items + page_len))
       if [[ "$total_items" -ge "$max_items" ]]; then
         break

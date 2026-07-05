@@ -60,24 +60,40 @@ _hook_headers() {
   } > "$out"
 }
 
-# _hook_record <method> <path> [body]
-# Append one line to _PCF_GL_ARGV_FILE in the runner's expected shape.
-# `body` is passed verbatim; embedded newlines are stripped so each invocation
-# stays on one line.
+# _hook_record <method> <path> [body-json] [body-file]
+# Append one line to _PCF_GL_ARGV_FILE. `body` inline OR body_file path
+# (5th positional to _gl_http, #419 P1-3). Both are recorded so the runner
+# can assert (a) actual body content via `body=…` substring, AND (b) whether
+# the body arrived via file — `body_file=<path>` present (never `-`) proves
+# the payload did NOT hit curl argv.
 _hook_record() {
-  local method="$1" path="$2" body="${3:-}"
+  local method="$1" path="$2" body="${3:-}" body_file="${4:-}"
   [[ -n "${_PCF_GL_ARGV_FILE:-}" ]] || return 0
-  local body_line
-  if [[ -n "$body" ]]; then
+  local body_line body_file_line
+  if [[ -n "$body_file" ]]; then
+    # [#419 P1-3] --body-file channel: inline the file's content into the
+    # recorded `body=` field (so the runner's substring needle matches on
+    # actual JSON — e.g. `"branch":"screenshots"` — regardless of channel).
+    # `body_file=<path>` presence proves file-mode was used.
+    if [[ -f "$body_file" ]]; then
+      body_line="$(tr -d '\n\r' < "$body_file")"
+    else
+      body_line="<missing-body-file>"
+    fi
+    body_file_line="$body_file"
+  elif [[ -n "$body" ]]; then
     body_line="$(printf '%s' "$body" | tr -d '\n\r')"
+    body_file_line="-"
   else
     body_line="-"
+    body_file_line="-"
   fi
-  # Strip the leading `/` from the path so recorded value matches the
-  # runner's needle shape (`path=projects/…`, no leading slash — the runner's
+  # Strip the leading `/` from the path so recorded value matches the runner's
+  # needle shape (`path=projects/…`, no leading slash — the runner's
   # _run_gl_write_assert needles are written that way).
   local rec_path="${path#/}"
-  printf 'method=%s path=%s body=%s\n' "$method" "$rec_path" "$body_line" \
+  printf 'method=%s path=%s body=%s body_file=%s\n' \
+    "$method" "$rec_path" "$body_line" "$body_file_line" \
     >> "$_PCF_GL_ARGV_FILE"
 }
 
@@ -138,10 +154,13 @@ _hook_looks_bare_object() {
   ' >/dev/null 2>&1 < "$f"
 }
 
-# _gl_http <method> <path> <headers_out> [body-json]
-# Argv-recording, payload-first, path-fallback dispatcher.
+# _gl_http <method> <path> <headers_out> [body-json] [body-file]
+# Argv-recording, payload-first, path-fallback dispatcher. The 5th positional
+# (body_file, #419 P1-3) is the P3-4-added body-file channel: when set,
+# curl's `--data-binary @<path>` streams the file. We record it verbatim for
+# the runner's body-file argv assertion.
 _gl_http() {
-  local method="$1" path="$2" headers_out="$3" body_json="${4:-}"
+  local method="$1" path="$2" headers_out="$3" body_json="${4:-}" body_file="${5:-}"
 
   # Strip query string for pattern matching; keep the full path for recording.
   local bare_path="${path%%\?*}"
@@ -150,7 +169,7 @@ _gl_http() {
   # AFTER the invocation; a leaf that fails positional validation returns
   # rc 2 without calling _gl_http, and the argv file stays empty in that
   # case — which the runner reports as a leaf-not-calling-hook FAIL).
-  _hook_record "$method" "$path" "$body_json"
+  _hook_record "$method" "$path" "$body_json" "$body_file"
 
   # Explicit status override: _PCF_GL_STATUS forces this response's status
   # regardless of route. Used by the _run_gl_*_assert helpers' fail-path leg.
