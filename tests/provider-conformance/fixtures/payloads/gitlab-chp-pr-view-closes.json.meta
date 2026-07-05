@@ -1,0 +1,10 @@
+# P3-3 R4/R5 — chp_gitlab_pr_view + chp_gitlab_pr_list /closes_issues fixture.
+#
+# gitlab_version=17.x
+# reference_endpoint=GET /projects/:id/merge_requests/:iid/closes_issues
+# reference_docs=https://docs.gitlab.com/ee/api/merge_requests.html#list-issues-that-will-close-on-merge
+#
+# Coverage: one close-linked issue (`iid=7`) — the R4/R5 fetch-cost-gated
+# sub-resource fetched only when the caller requests `closingIssueNumbers`.
+# After P2-1 (codex round-6 fix) this fixture also drives chp_gitlab_pr_list's
+# per-MR /closes_issues confirmation loop.

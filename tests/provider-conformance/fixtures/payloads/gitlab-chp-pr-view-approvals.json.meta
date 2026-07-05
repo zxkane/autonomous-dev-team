@@ -1,0 +1,13 @@
+# P3-3 R4 — chp_gitlab_pr_view /approvals sub-resource fixture.
+#
+# gitlab_version=17.x
+# reference_endpoint=GET /projects/:id/merge_requests/:iid/approvals
+# reference_docs=https://docs.gitlab.com/ee/api/merge_request_approvals.html
+#
+# Coverage:
+#   - `.approved` == true, `.approved_by[]` has 2 approvers (reviewer-a,
+#     reviewer-b) so the reviews-synthesis loop projects 2 elements with
+#     state:"APPROVED".
+#   - top-level `.approved_at` = "2026-01-03T09:00:00Z" — the v17.x recorded
+#     probe pinned in R4/§5.1.1 as the source of `reviews[].submittedAt`
+#     (GitLab has no per-approver timestamp on this endpoint today).
