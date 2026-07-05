@@ -507,7 +507,7 @@ _agent_sigterm_handler() {
     done < "$_pgids_file"
   fi
 
-  # [Lane-GC PR-3 / INV-113] Escalator process-group isolation (codex review
+  # [Lane-GC PR-3 / INV-113] Escalator process-group isolation (review
   # round-5 [P1], reproduced empirically): a backgrounded escalator that is a
   # DIRECT CHILD of this trap's own shell — with no `setsid` of its own —
   # shares THIS WRAPPER's own pgid. That is fatal to the escalator's own
