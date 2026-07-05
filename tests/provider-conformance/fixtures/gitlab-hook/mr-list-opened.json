@@ -1,0 +1,22 @@
+[
+  {
+    "id": 900007,
+    "iid": 7,
+    "state": "opened",
+    "title": "MR 7 opened",
+    "description": "Closes #42",
+    "source_branch": "feat/issue-42-thing",
+    "sha": "aaaa",
+    "detailed_merge_status": "mergeable"
+  },
+  {
+    "id": 900008,
+    "iid": 8,
+    "state": "opened",
+    "title": "MR 8 opened",
+    "description": null,
+    "source_branch": "fix/other",
+    "sha": "bbbb",
+    "detailed_merge_status": "mergeable"
+  }
+]

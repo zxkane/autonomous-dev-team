@@ -29,12 +29,26 @@
 # leaves use it for dynamic project refs, label names, file paths only; the
 # static `GITLAB_PROJECT` is already encoded.
 #
-# INTERIM (P3-3 pre-merge, this branch): `lib-gitlab-transport.sh` does NOT
-# yet exist on this branch (#416 is a concurrent PR). Unit tests define a
-# test-local `_gl_api` stub BEFORE sourcing this file, so every assertion here
-# is leaf-contract-vs-spec (bucket tables, projection, sort, fail-closed) with
-# ZERO live GitLab I/O. Production readiness rides #416 landing.
-#
+# TRANSPORT-LIB SELF-SOURCE: `_gl_api` and `_gl_urlencode` live in
+# `lib-gitlab-transport.sh` (a sibling file in `providers/`, #416). We source it
+# from this leaf so a caller that sources ONLY `lib-code-host.sh` (which sources
+# `chp-gitlab.sh` per CODE_HOST=gitlab) gets the transport contract without a
+# separate wire-up. GUARDED on `declare -F _gl_api`: if `_gl_api` is already
+# defined (unit test with a test-local stub, or an operator's out-of-tree hook
+# already installed pre-source) we DO NOT re-source — a re-source would overwrite
+# the stub/override. Resolve the sibling via `readlink -f` of this file's own
+# BASH_SOURCE so a symlinked skill-tree resolves the real file (matches the
+# lib-code-host.sh idiom line 39). Sourcing failure is FATAL under `set -e` —
+# a missing transport lib on a gitlab-active axis is a config bug, not a soft
+# degradation.
+if ! declare -F _gl_api >/dev/null 2>&1; then
+  _CHP_GITLAB_SELF="${BASH_SOURCE[0]:-$0}"
+  _CHP_GITLAB_DIR="$(cd "$(dirname "$(readlink -f "$_CHP_GITLAB_SELF")")" && pwd)"
+  # shellcheck source=/dev/null
+  [[ -f "${_CHP_GITLAB_DIR}/lib-gitlab-transport.sh" ]] && \
+    source "${_CHP_GITLAB_DIR}/lib-gitlab-transport.sh"
+fi
+
 # 7 CHP read verbs implemented here (spec §3.2):
 #   chp_gitlab_ci_status            chp_gitlab_mergeable
 #   chp_gitlab_pr_view              chp_gitlab_pr_list
@@ -44,6 +58,20 @@
 # `chp_reply_review_comment`/`chp_count_reviews_by_login`/`chp_commit_file`
 # land in P3-4 (serialized-behind-this — same file, avoids the conflict
 # cluster).
+
+# _chp_gitlab_require_project — fail-loud rc≠0 when GITLAB_PROJECT is unset or
+# empty. Called from every leaf's entry. Under `set -u` (the way production
+# callers and the conformance runner both run) a bare `${GITLAB_PROJECT:-}`
+# splice would abort with an obscure "unbound variable" — this guard surfaces
+# a clear diagnostic instead (matches the auth-lib WARN-latch pattern in
+# spirit, though this is fail-loud not latched-once since a leaf that gets
+# called with GITLAB_PROJECT unset is a real config bug, not a transient).
+_chp_gitlab_require_project() {
+  if [[ -z "${GITLAB_PROJECT:-}" ]]; then
+    echo "ERROR: chp_gitlab_${1:-<verb>}: GITLAB_PROJECT env var required (unset or empty). Set GITLAB_PROJECT=<url-encoded project path> in autonomous.conf — see §3.4 / docs/gitlab-token-setup.md." >&2
+    return 1
+  fi
+}
 
 # ---------------------------------------------------------------------------
 # Shared vocabulary constants (guarded `readonly` so a transitive re-source
@@ -166,7 +194,7 @@ _chp_gitlab_parse_pr_fields() {
 # chp_gitlab_ci_status PR — normalized CI-status token (#418 R2).
 #
 # Spec cell: §3.2 (green|pending|failed|none), §5.1 GitLab CHP reads row.
-# Endpoint: GET /projects/${GITLAB_PROJECT}/merge_requests/<pr> — reads
+# Endpoint: GET /projects/${GITLAB_PROJECT:-}/merge_requests/<pr> — reads
 # `.head_pipeline.status`.
 # Fail contract: `_gl_api` rc≠0, missing `head_pipeline` key, or non-object
 # payload → leaf rc≠0 with EMPTY stdout (payload-type gate; the caller's
@@ -195,8 +223,9 @@ chp_gitlab_ci_status() {
     echo "ERROR: chp_gitlab_ci_status requires PR (1st arg, non-empty numeric): got '${pr}'" >&2
     return 2
   }
+  _chp_gitlab_require_project ci_status || return 1
   local raw
-  raw="$(_gl_api "/projects/${GITLAB_PROJECT}/merge_requests/${pr}" 2>/dev/null)" || return 1
+  raw="$(_gl_api "/projects/${GITLAB_PROJECT:-}/merge_requests/${pr}" 2>/dev/null)" || return 1
   [ -n "$raw" ] || return 1
   # Payload-type gate. `type == "object"` guards `[]`, bare strings, bare
   # numbers, and null; a well-formed MR view passes.
@@ -231,7 +260,7 @@ chp_gitlab_ci_status() {
 # chp_gitlab_mergeable PR — normalized mergeable token (#418 R3).
 #
 # Spec cell: §3.2 (MERGEABLE|CONFLICTING|UNKNOWN), §5.1 GitLab CHP reads row.
-# Endpoint: GET /projects/${GITLAB_PROJECT}/merge_requests/<pr> — reads
+# Endpoint: GET /projects/${GITLAB_PROJECT:-}/merge_requests/<pr> — reads
 # `.detailed_merge_status` (GitLab ≥15.6; `merge_status` is deprecated and
 # NOT read).
 # Fail contract: MR fetch rc≠0 → leaf rc≠0 EMPTY stdout.
@@ -266,8 +295,9 @@ chp_gitlab_mergeable() {
     echo "ERROR: chp_gitlab_mergeable requires PR (1st arg, non-empty numeric): got '${pr}'" >&2
     return 2
   }
+  _chp_gitlab_require_project mergeable || return 1
   local raw
-  raw="$(_gl_api "/projects/${GITLAB_PROJECT}/merge_requests/${pr}" 2>/dev/null)" || return 1
+  raw="$(_gl_api "/projects/${GITLAB_PROJECT:-}/merge_requests/${pr}" 2>/dev/null)" || return 1
   [ -n "$raw" ] || return 1
   jq -e 'type == "object"' >/dev/null 2>&1 <<<"$raw" || return 1
   local dms
@@ -293,7 +323,7 @@ chp_gitlab_mergeable() {
 # chp_gitlab_pr_view PR FIELDS_CSV — MR read leaf, NORMALIZED shape (#418 R4).
 #
 # Spec cell: §3.2.1 vocabulary (14 members); §5.1 GitLab CHP reads row.
-# Endpoint: GET /projects/${GITLAB_PROJECT}/merge_requests/<pr>. When the
+# Endpoint: GET /projects/${GITLAB_PROJECT:-}/merge_requests/<pr>. When the
 # caller requests one of these fields the leaf makes an ADDITIONAL fetch
 # (fetch-cost gate — no extra HTTP when the field is NOT requested):
 #   closingIssueNumbers -> /merge_requests/<pr>/closes_issues
@@ -337,10 +367,11 @@ chp_gitlab_pr_view() {
   # through the seam.
   local _CHP_GL_PARSED_FIELDS
   _chp_gitlab_parse_pr_fields "$fields_csv" "view" || return $?
+  _chp_gitlab_require_project pr_view || return 1
 
   # Base MR view — always fetched.
   local raw
-  raw="$(_gl_api "/projects/${GITLAB_PROJECT}/merge_requests/${pr}" 2>/dev/null)" || return 1
+  raw="$(_gl_api "/projects/${GITLAB_PROJECT:-}/merge_requests/${pr}" 2>/dev/null)" || return 1
   [ -n "$raw" ] || return 1
   jq -e 'type == "object"' >/dev/null 2>&1 <<<"$raw" || return 1
 
@@ -349,7 +380,7 @@ chp_gitlab_pr_view() {
   local closes_json="null" notes_json="null" approvals_json="null"
   case ",${_CHP_GL_PARSED_FIELDS}," in
     *",closingIssueNumbers,"*)
-      closes_json="$(_gl_api "/projects/${GITLAB_PROJECT}/merge_requests/${pr}/closes_issues" 2>/dev/null)" || return 1
+      closes_json="$(_gl_api "/projects/${GITLAB_PROJECT:-}/merge_requests/${pr}/closes_issues" 2>/dev/null)" || return 1
       # Empty-200 → [] (an MR that closes zero issues is legitimate); a
       # transport/API failure was already caught above. Guard against a
       # rc-0-empty-stdout edge (a transient failure gh silently swallows).
@@ -359,14 +390,14 @@ chp_gitlab_pr_view() {
   esac
   case ",${_CHP_GL_PARSED_FIELDS}," in
     *",comments,"*)
-      notes_json="$(_gl_api --paginate "/projects/${GITLAB_PROJECT}/merge_requests/${pr}/notes?sort=asc&order_by=created_at" 2>/dev/null)" || return 1
+      notes_json="$(_gl_api --paginate "/projects/${GITLAB_PROJECT:-}/merge_requests/${pr}/notes?sort=asc&order_by=created_at" 2>/dev/null)" || return 1
       [ -n "$notes_json" ] || return 1
       jq -e 'type == "array"' >/dev/null 2>&1 <<<"$notes_json" || return 1
       ;;
   esac
   case ",${_CHP_GL_PARSED_FIELDS}," in
     *",reviews,"*)
-      approvals_json="$(_gl_api "/projects/${GITLAB_PROJECT}/merge_requests/${pr}/approvals" 2>/dev/null)" || return 1
+      approvals_json="$(_gl_api "/projects/${GITLAB_PROJECT:-}/merge_requests/${pr}/approvals" 2>/dev/null)" || return 1
       [ -n "$approvals_json" ] || return 1
       jq -e 'type == "object"' >/dev/null 2>&1 <<<"$approvals_json" || return 1
       ;;
@@ -444,7 +475,7 @@ chp_gitlab_pr_view() {
 # chp_gitlab_pr_list STATE FIELDS-CSV — normalized MR-list read leaf (#418 R5).
 #
 # Spec cell: §3.2 chp_pr_list row; §5.1 GitLab CHP reads.
-# Endpoint: GET /projects/${GITLAB_PROJECT}/merge_requests?state=<mapped>
+# Endpoint: GET /projects/${GITLAB_PROJECT:-}/merge_requests?state=<mapped>
 #           &order_by=created_at&sort=desc — page-walked via `_gl_api
 #           --paginate`.
 # State mapping (§3.2 DISJOINT — a leaf-side post-filter guarantees
@@ -475,6 +506,7 @@ chp_gitlab_pr_list() {
   # Parse + reject `comments` (list-side unsupported); `reviews` OK.
   local _CHP_GL_PARSED_FIELDS
   _chp_gitlab_parse_pr_fields "$fields" "list" || return $?
+  _chp_gitlab_require_project pr_list || return 1
 
   # Page-walk via the frozen #416 transport contract. `_gl_api --paginate`
   # owns the walk, the 429 backoff, and the merge-into-one-array — fail-CLOSED
@@ -487,7 +519,7 @@ chp_gitlab_pr_list() {
   local page_cap; page_cap="$(_chp_gitlab_pr_list_page_cap)"
   local raw_list
   raw_list="$(GL_TRANSPORT_PAGE_CAP="$page_cap" _gl_api --paginate \
-    "/projects/${GITLAB_PROJECT}/merge_requests?state=${gitlab_state}&order_by=created_at&sort=desc" \
+    "/projects/${GITLAB_PROJECT:-}/merge_requests?state=${gitlab_state}&order_by=created_at&sort=desc" \
     2>/dev/null)" || return 1
   [ -n "$raw_list" ] || return 1
   jq -e 'type == "array"' >/dev/null 2>&1 <<<"$raw_list" || return 1
@@ -529,14 +561,14 @@ chp_gitlab_pr_list() {
       record="$(jq -c ".[${i}]" <<<"$filtered" 2>/dev/null)" || return 1
       if [ "$need_closes" = "1" ]; then
         local ci_json
-        ci_json="$(_gl_api "/projects/${GITLAB_PROJECT}/merge_requests/${iid}/closes_issues" 2>/dev/null)" || return 1
+        ci_json="$(_gl_api "/projects/${GITLAB_PROJECT:-}/merge_requests/${iid}/closes_issues" 2>/dev/null)" || return 1
         [ -n "$ci_json" ] || return 1
         jq -e 'type == "array"' >/dev/null 2>&1 <<<"$ci_json" || return 1
         record="$(jq -c --argjson ci "$ci_json" '. + {_gl_closes: $ci}' <<<"$record" 2>/dev/null)" || return 1
       fi
       if [ "$need_reviews" = "1" ]; then
         local ap
-        ap="$(_gl_api "/projects/${GITLAB_PROJECT}/merge_requests/${iid}/approvals" 2>/dev/null)" || return 1
+        ap="$(_gl_api "/projects/${GITLAB_PROJECT:-}/merge_requests/${iid}/approvals" 2>/dev/null)" || return 1
         [ -n "$ap" ] || return 1
         jq -e 'type == "object"' >/dev/null 2>&1 <<<"$ap" || return 1
         record="$(jq -c --argjson ap "$ap" '. + {_gl_approvals: $ap}' <<<"$record" 2>/dev/null)" || return 1
@@ -609,7 +641,7 @@ chp_gitlab_pr_list() {
 # fetch (#418 R6).
 #
 # Spec cell: §3.2 chp_find_pr_for_issue; §5.1 GitLab CHP reads.
-# Endpoint: GET /projects/${GITLAB_PROJECT}/issues/<issue>/closed_by — the
+# Endpoint: GET /projects/${GITLAB_PROJECT:-}/issues/<issue>/closed_by — the
 # CLOSE-LINKAGE source (NOT /related_merge_requests, which lists MENTIONING
 # MRs and would bind a non-closing MR causing the wrapper to mutate the wrong
 # MR — spec §3.2 [M1] contract). Per-candidate `closingIssueNumbers` is then
@@ -632,13 +664,14 @@ chp_gitlab_find_pr_for_issue() {
   # Parse + reject `comments`; force-union the W1c1 resolution keys.
   local _CHP_GL_PARSED_FIELDS
   _chp_gitlab_parse_pr_fields "$fields" "list" number closingIssueNumbers headRefName || return $?
+  _chp_gitlab_require_project find_pr_for_issue || return 1
 
   # Fetch the close-linked candidate MRs. `_gl_api --paginate` — an issue
   # with >20 close-linked MRs is exceptional but not impossible; if the
   # transport hits the page cap, that is fail-CLOSED per §3.5.
   local candidates
   candidates="$(_gl_api --paginate \
-    "/projects/${GITLAB_PROJECT}/issues/${issue}/closed_by" \
+    "/projects/${GITLAB_PROJECT:-}/issues/${issue}/closed_by" \
     2>/dev/null)" || return 1
   [ -n "$candidates" ] || return 1
   jq -e 'type == "array"' >/dev/null 2>&1 <<<"$candidates" || return 1
@@ -663,13 +696,13 @@ chp_gitlab_find_pr_for_issue() {
     for ((i=0; i<n; i++)); do
       iid="$(jq -r ".[${i}].iid // empty" <<<"$filtered" 2>/dev/null)" || return 1
       [ -n "$iid" ] || return 1
-      ci_json="$(_gl_api "/projects/${GITLAB_PROJECT}/merge_requests/${iid}/closes_issues" 2>/dev/null)" || return 1
+      ci_json="$(_gl_api "/projects/${GITLAB_PROJECT:-}/merge_requests/${iid}/closes_issues" 2>/dev/null)" || return 1
       [ -n "$ci_json" ] || return 1
       jq -e 'type == "array"' >/dev/null 2>&1 <<<"$ci_json" || return 1
       local record="$(jq -c --argjson ci "$ci_json" ".[${i}] + {_gl_closes: \$ci}" <<<"$filtered" 2>/dev/null)" || return 1
       if [ "$need_reviews" = "1" ]; then
         local ap
-        ap="$(_gl_api "/projects/${GITLAB_PROJECT}/merge_requests/${iid}/approvals" 2>/dev/null)" || return 1
+        ap="$(_gl_api "/projects/${GITLAB_PROJECT:-}/merge_requests/${iid}/approvals" 2>/dev/null)" || return 1
         [ -n "$ap" ] || return 1
         jq -e 'type == "object"' >/dev/null 2>&1 <<<"$ap" || return 1
         record="$(jq -c --argjson ap "$ap" '. + {_gl_approvals: $ap}' <<<"$record" 2>/dev/null)" || return 1
@@ -732,7 +765,7 @@ chp_gitlab_find_pr_for_issue() {
 # read leaf, NORMALIZED + COMPLETE (#418 R7).
 #
 # Spec cell: §3.2 chp_list_inline_comments row; §5.1 GitLab CHP reads.
-# Endpoint: GET /projects/${GITLAB_PROJECT}/merge_requests/<pr>/discussions —
+# Endpoint: GET /projects/${GITLAB_PROJECT:-}/merge_requests/<pr>/discussions —
 # page-walked via `_gl_api --paginate`.
 # Element mapping (matches chp_list_inline_comments' CHP-owned flat shape):
 #   id ← note.id
@@ -755,9 +788,10 @@ chp_gitlab_list_inline_comments() {
     echo "ERROR: chp_gitlab_list_inline_comments requires PR (1st arg, non-empty numeric): got '${pr}'" >&2
     return 2
   }
+  _chp_gitlab_require_project list_inline_comments || return 1
   local raw
   raw="$(_gl_api --paginate \
-    "/projects/${GITLAB_PROJECT}/merge_requests/${pr}/discussions" \
+    "/projects/${GITLAB_PROJECT:-}/merge_requests/${pr}/discussions" \
     2>/dev/null)" || return 1
   [ -n "$raw" ] || return 1
   jq -e 'type == "array"' >/dev/null 2>&1 <<<"$raw" || return 1
@@ -780,7 +814,7 @@ chp_gitlab_list_inline_comments() {
 # chp_gitlab_review_threads PR — COMPLETE review-thread set, M8 shape (#418 R8).
 #
 # Spec cell: §3.2 [M8]; §3.5 COMPLETE; §5.1 GitLab CHP reads.
-# Endpoint: GET /projects/${GITLAB_PROJECT}/merge_requests/<pr>/discussions —
+# Endpoint: GET /projects/${GITLAB_PROJECT:-}/merge_requests/<pr>/discussions —
 # page-walked via `_gl_api --paginate`. GitLab returns all notes per
 # discussion in ONE response, so ONE pagination level suffices (simpler than
 # the GitHub W1f two-level walk — pinned in §5.1).
@@ -815,6 +849,7 @@ chp_gitlab_review_threads() {
     echo "ERROR: chp_gitlab_review_threads requires PR (1st arg, non-empty numeric): got '${pr}'" >&2
     return 2
   }
+  _chp_gitlab_require_project review_threads || return 1
   local page_cap; page_cap="$(_chp_gitlab_review_threads_page_cap)"
   # Forward the per-verb cap to the transport as its own PAGE-CAP env var
   # (#416 R1: `GL_TRANSPORT_PAGE_CAP` scoped per call). This is the
@@ -824,7 +859,7 @@ chp_gitlab_review_threads() {
   # which would violate §3.5's fail-CLOSED-on-cap-hit MUST.
   local raw
   raw="$(GL_TRANSPORT_PAGE_CAP="$page_cap" _gl_api --paginate \
-    "/projects/${GITLAB_PROJECT}/merge_requests/${pr}/discussions" \
+    "/projects/${GITLAB_PROJECT:-}/merge_requests/${pr}/discussions" \
     2>/dev/null)" || return 1
   [ -n "$raw" ] || return 1
   jq -e 'type == "array"' >/dev/null 2>&1 <<<"$raw" || return 1

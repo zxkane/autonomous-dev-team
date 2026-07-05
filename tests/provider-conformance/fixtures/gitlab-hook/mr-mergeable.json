@@ -1,0 +1,13 @@
+{
+  "id": 700042,
+  "iid": 42,
+  "state": "opened",
+  "title": "hook MR",
+  "description": null,
+  "source_branch": "feat/x",
+  "sha": "aaaa",
+  "detailed_merge_status": "mergeable",
+  "head_pipeline": {
+    "status": "success"
+  }
+}

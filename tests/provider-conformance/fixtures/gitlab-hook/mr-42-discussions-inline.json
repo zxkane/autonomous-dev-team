@@ -1,0 +1,68 @@
+[
+  {
+    "id": "disc-inline-a",
+    "individual_note": false,
+    "notes": [
+      {
+        "id": 6000001,
+        "type": "DiffNote",
+        "body": "first in time — originalLine-only",
+        "author": {"username": "alice"},
+        "created_at": "2026-01-01T10:00:00Z",
+        "system": false,
+        "resolvable": true,
+        "resolved": false,
+        "position": {
+          "new_path": null,
+          "old_path": "src/foo.py",
+          "new_line": null,
+          "old_line": 7
+        }
+      }
+    ]
+  },
+  {
+    "id": "disc-inline-b",
+    "individual_note": false,
+    "notes": [
+      {
+        "id": 6000002,
+        "type": "DiffNote",
+        "body": "no line at all",
+        "author": {"username": "bob"},
+        "created_at": "2026-01-01T11:00:00Z",
+        "system": false,
+        "resolvable": true,
+        "resolved": false,
+        "position": {
+          "new_path": null,
+          "old_path": null,
+          "new_line": null,
+          "old_line": null
+        }
+      }
+    ]
+  },
+  {
+    "id": "disc-inline-c",
+    "individual_note": false,
+    "notes": [
+      {
+        "id": 6000003,
+        "type": "DiffNote",
+        "body": "regular inline",
+        "author": {"username": "carol"},
+        "created_at": "2026-01-01T12:00:00Z",
+        "system": false,
+        "resolvable": true,
+        "resolved": false,
+        "position": {
+          "new_path": "src/bar.py",
+          "old_path": "src/bar.py",
+          "new_line": 12,
+          "old_line": null
+        }
+      }
+    ]
+  }
+]
