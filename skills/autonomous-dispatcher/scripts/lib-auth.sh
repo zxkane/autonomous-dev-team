@@ -157,8 +157,22 @@ _ensure_gh_wrapper_dir() {
 # scrub-worthy gh-CLI-recognized token var. Echoes $! via the caller's own
 # `$!` (backgrounds in the caller's shell via `&`, same as a bare `bash …&`).
 _spawn_token_daemon() {
-  env -u GH_TOKEN -u GITHUB_TOKEN -u GITHUB_PERSONAL_ACCESS_TOKEN -u GH_USER_PAT \
-    bash "${_LIB_AUTH_DIR}/gh-token-refresh-daemon.sh" "$@" &
+  # [Lane-GC PR-5 / INV-118] FD hygiene: this is a long-lived background
+  # daemon (survives for the whole wrapper run) — close its inherited copy
+  # of the guardian write-fd first, else the daemon becomes a permanent
+  # second write-holder of the fifo and the guardian never sees EOF even
+  # after the wrapper's own copy closes in cleanup(). Wrapped in a subshell
+  # (not an inline redirect on `env …`) for the same "ambiguous redirect on
+  # an unset brace-fd var" reason documented at the _run_with_timeout spawn
+  # site in lib-agent.sh; the trailing `exec` replaces the subshell with
+  # `env` (which itself execs bash, which execs the daemon script) so `$!`
+  # still resolves to the daemon's real PID, unchanged from the pre-fix
+  # bare `env … &` shape.
+  (
+    [[ -n "${ADT_GUARD_FD:-}" ]] && exec {ADT_GUARD_FD}>&-
+    exec env -u GH_TOKEN -u GITHUB_TOKEN -u GITHUB_PERSONAL_ACCESS_TOKEN -u GH_USER_PAT \
+      bash "${_LIB_AUTH_DIR}/gh-token-refresh-daemon.sh" "$@"
+  ) &
 }
 
 # Setup GitHub authentication based on GH_AUTH_MODE.

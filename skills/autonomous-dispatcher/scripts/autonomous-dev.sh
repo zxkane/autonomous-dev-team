@@ -165,6 +165,55 @@ if declare -F lane_mint >/dev/null 2>&1; then
 fi
 
 # ---------------------------------------------------------------------------
+# [Lane-GC PR-5 / INV-118] Guardian sidecar install (design §4-C3).
+#
+# Install order is load-bearing: `mkfifo` -> `exec {ADT_GUARD_FD}<>` (the
+# wrapper's write end, opened BEFORE the guardian spawns, so the guardian's
+# own read-side open never blocks) -> spawn the setsid-detached guardian ->
+# record GUARDIAN_PID. Runs immediately after lane_install so the guardian
+# watches the lane for its ENTIRE remaining lifetime, including the auth
+# setup below (the first background-child class INV-109/[INV-118] already
+# requires ADT_LANE_ID to precede).
+#
+# `setsid` is a HARD prerequisite per the design (a same-PGID guardian dies
+# with the wrapper on every group-kill, which is the routine re-dispatch
+# path — the exact failure this series exists to close). A host missing
+# `setsid` still degrades to GC-only reaping (~10min, per Lane-GC PR-4/
+# INV-117) rather than bricking the wrapper run entirely — see the WARNING
+# below for the deliberate deviation-from-strict-reading rationale.
+# ---------------------------------------------------------------------------
+ADT_GUARD_FD=""
+if [[ -n "$ADT_LANE_DIR" ]]; then
+  if ! command -v setsid >/dev/null 2>&1; then
+    echo "[autonomous-dev] ERROR: setsid (util-linux) is missing — the guardian sidecar cannot be installed for this run. On macOS: brew install util-linux. Proceeding WITHOUT a guardian; the periodic GC (adt-gc.sh) remains the backstop reaper for this lane (degraded but not a hard abort — bricking every dispatch on a host missing setsid would be worse than degraded-to-GC-only reaping)." >&2
+  elif ! mkfifo "${ADT_LANE_DIR}/guard.fifo" 2>/dev/null; then
+    echo "[autonomous-dev] WARNING: mkfifo failed for the guardian's FIFO — proceeding without a guardian for this run (GC remains the backstop)." >&2
+  else
+    # `<>` (O_RDWR), never a plain `>` — a plain write-open would block until
+    # a reader exists, which is exactly backwards for the "writer opens
+    # first" ordering this design mandates (design §12 R7).
+    exec {ADT_GUARD_FD}<>"${ADT_LANE_DIR}/guard.fifo"
+    export ADT_GUARD_FD
+    # [FD hygiene] The guardian process ITSELF inherits ADT_GUARD_FD via
+    # fork — if it never closes its own inherited copy, it becomes a
+    # permanent second write-holder of the very fifo it is supposed to
+    # watch, and EOF then never arrives even after THIS wrapper closes its
+    # own copy in cleanup() (verified empirically). The inline `exec
+    # {ADT_GUARD_FD}>&-` inside the spawned command closes it in the
+    # CHILD's fd table only — this shell's own "$ADT_GUARD_FD" is
+    # untouched.
+    setsid bash -c '[[ -n "${ADT_GUARD_FD:-}" ]] && exec {ADT_GUARD_FD}>&-; exec bash "$1" --lane-dir "$2"' \
+      _ "${LIB_DIR}/lib-guardian.sh" "$ADT_LANE_DIR" \
+      </dev/null >>"${ADT_LANE_DIR}/guardian.log" 2>&1 &
+    ADT_GUARDIAN_PID=$!
+    disown "$ADT_GUARDIAN_PID" 2>/dev/null || true
+    if declare -F lane_set >/dev/null 2>&1; then
+      lane_set "$ADT_LANE_DIR" GUARDIAN_PID "$ADT_GUARDIAN_PID" || true
+    fi
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 # GitHub authentication
 # ---------------------------------------------------------------------------
 # [#416 R2 P1-2] Wrap the whole wrapper-level auth setup in a shared
@@ -336,7 +385,13 @@ fi
 # never breaks the wrapper. The seeded first-line pointer (run-dir:/tmp-log:) was
 # already written by run_artifacts_init, so we append from here on.
 if [[ -n "${RUN_DIR:-}" ]] && [[ -d "${RUN_DIR}" ]]; then
-  exec > >(tee -a "${RUN_DIR}/run.log") 2>&1 || true
+  # [Lane-GC PR-5 / INV-118 FD hygiene] The process substitution's tee is a
+  # forked child and inherits ADT_GUARD_FD like any other spawn — without
+  # the close it becomes a second write-mode holder of guard.fifo, and a
+  # SIGKILLed wrapper whose descendants still hold stdout leaves tee alive
+  # holding the guard fd: EOF never arrives and the guardian never reaps
+  # (review round-1 [P1]). Close it FIRST inside the substitution.
+  exec > >([[ -n "${ADT_GUARD_FD:-}" ]] && exec {ADT_GUARD_FD}>&- 2>/dev/null; exec tee -a "${RUN_DIR}/run.log") 2>&1 || true
 fi
 if declare -F metrics_emit >/dev/null 2>&1; then
   metrics_emit wrapper_start side=dev "mode=${MODE}" "issue=${ISSUE_NUMBER}" \
@@ -811,6 +866,30 @@ cleanup() {
 
   # Cleanup PID file and heartbeat sibling (INV-29) always.
   rm -f "$PID_FILE" "${PID_FILE%.pid}.heartbeat" 2>/dev/null || true
+
+  # [Lane-GC PR-5 / INV-118] Guardian clean-exit handshake — replaces the
+  # feature-guarded no-op INV-115 (PR-3) reserved this slot for ("there is
+  # no FIFO to signal yet" — there is now). Sent AFTER the reap-first block
+  # above (STATE is already `cleaning` — a state the guardian's own
+  # `do_reap` already treats as "in-progress by a peer, skip", so sending
+  # this even a moment before the LATER `STATE=clean-exit` promotion is
+  # still race-free) and BEFORE any network work below — an EXIT trap that
+  # gets group-KILLed mid-network (a TERM-trap escalator, per the design's
+  # C3 text) has therefore already told the guardian "nothing more to do"
+  # before that later kill can ever land, so the guardian can never be left
+  # to double-reap active pgids this run's own reap-first block already
+  # handled. `exec {ADT_GUARD_FD}>&-` makes THIS shell the one that
+  # triggers EOF (assuming it is the sole remaining write-fd holder, per
+  # the fd-hygiene contract at every spawn site) — the `printf` itself is
+  # cosmetic (the guardian's `read` treats ANY line, or EOF, as a wake), but
+  # sending it before the close gives the guardian's log a distinguishable
+  # "graceful" data point separate from a bare EOF with no payload. No-op
+  # when no guardian was installed this run (ADT_GUARD_FD unset — either
+  # `setsid` was missing, `mkfifo` failed, or lib-lane.sh degraded).
+  if [[ -n "${ADT_GUARD_FD:-}" ]]; then
+    { printf 'done\n' >&"$ADT_GUARD_FD"; } 2>/dev/null || true
+    exec {ADT_GUARD_FD}>&- 2>/dev/null || true
+  fi
 
   # Wrapper failed before invoking the agent (e.g. gh-with-token-refresh
   # couldn't find a real gh — issue #92, or any future startup-time

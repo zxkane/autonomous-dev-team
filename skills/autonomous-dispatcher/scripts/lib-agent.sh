@@ -369,7 +369,27 @@ _run_with_timeout() {
   # branch, breaking the off-argv channel.
   local launcher=()
   command -v setsid >/dev/null 2>&1 && launcher=(setsid)
-  "${launcher[@]}" "${cmd[@]}" &
+  # [Lane-GC PR-5 / INV-118] FD hygiene: close the inherited guardian write-
+  # fd in THIS spawn's fd table before exec'ing into setsid/the agent CLI —
+  # `{ADT_GUARD_FD}` fds are NOT close-on-exec by default (verified
+  # empirically: they survive across exec() into any binary), so every
+  # background spawn site must close its own inherited copy or the
+  # guardian's fifo never reaches EOF even after the wrapper itself closes
+  # its copy in cleanup(). Wrapped in a subshell (not an inline `cmd
+  # {ADT_GUARD_FD}>&-` redirect) because bash treats a redirect naming an
+  # UNSET brace-fd variable as an "ambiguous redirect" hard failure — the
+  # guarded `[[ -n ]] && exec …` form inside the subshell is a no-op when no
+  # guardian was installed this run, and the `exec` on the following line
+  # (not a plain invocation) means the subshell process is REPLACED by the
+  # command rather than kept around as an extra wrapper layer, so `$!`
+  # below still resolves to the actual agent CLI's own PID/PGID (setsid
+  # makes it the session leader = the PGID the rest of this function
+  # already relies on). stdin is unaffected (the subshell inherits the
+  # calling function's stdin exactly like the un-subshelled form did).
+  (
+    [[ -n "${ADT_GUARD_FD:-}" ]] && exec {ADT_GUARD_FD}>&-
+    exec "${launcher[@]}" "${cmd[@]}"
+  ) &
   _AGENT_RUN_PID=$!
 
   # [Lane-GC PR-2 / INV-110] Append this spawn's PGID to the lane registry
@@ -541,10 +561,17 @@ _agent_sigterm_handler() {
   local _setsid=()
   command -v setsid >/dev/null 2>&1 && _setsid=(setsid)
   local _pg
+  # [Lane-GC PR-5 / INV-118] FD hygiene: these escalators are short-lived
+  # (bounded at ~5s) and NOT in the design's explicit fd-hygiene spawn list
+  # (§4-C3 names `_run_with_timeout`, heartbeat, token daemons, fan-out/E2E/
+  # smoke — long-lived spawns), so a forgotten close here would only ever
+  # degrade the guardian's EOF by a few seconds (design §10's accepted
+  # "subtree died, not wrapper died" degradation) — closed anyway since the
+  # fix is one line per branch and this function is already being touched.
   if declare -F _kill_group_escalate >/dev/null 2>&1; then
     export -f _kill_group_escalate
     for _pg in "${_term_pgids[@]:-}"; do
-      "${_setsid[@]}" bash -c '_kill_group_escalate "$1" "$2"' _ "$_pg" 5 &
+      "${_setsid[@]}" bash -c '[[ -n "${ADT_GUARD_FD:-}" ]] && exec {ADT_GUARD_FD}>&-; _kill_group_escalate "$1" "$2"' _ "$_pg" 5 &
       disown 2>/dev/null || true
     done
   else
@@ -553,6 +580,7 @@ _agent_sigterm_handler() {
     done
     if [[ "${#_term_pgids[@]}" -gt 0 ]]; then
       "${_setsid[@]}" bash -c '
+        [[ -n "${ADT_GUARD_FD:-}" ]] && exec {ADT_GUARD_FD}>&-
         sleep 5
         for pg in "$@"; do
           kill -0 -- "-${pg}" 2>/dev/null && kill -KILL -- "-${pg}" 2>/dev/null || true
@@ -616,6 +644,12 @@ install_agent_heartbeat() {
   local hb_file="${pid_file%.pid}.heartbeat"
 
   (
+    # [Lane-GC PR-5 / INV-118] FD hygiene: close the inherited guardian
+    # write-fd — this subshell backgrounds a long-lived loop (never exec's
+    # away), so a bare `[[ -n ]] && exec {ADT_GUARD_FD}>&-` at the top
+    # closes it in THIS subshell's own fd table without affecting the
+    # wrapper's copy.
+    [[ -n "${ADT_GUARD_FD:-}" ]] && exec {ADT_GUARD_FD}>&-
     while command kill -0 "$parent_pid" 2>/dev/null; do
       # Re-check parent liveness immediately before each touch. The outer
       # `while` test fires only once per iteration, but the wrapper can

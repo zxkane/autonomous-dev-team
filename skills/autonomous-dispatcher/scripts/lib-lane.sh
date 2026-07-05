@@ -854,7 +854,12 @@ lane_kill() {
     command -v setsid >/dev/null 2>&1 && _lk_setsid=(setsid)
     export -f _kill_group_escalate
     for pg in "${seen[@]}"; do
-      "${_lk_setsid[@]}" bash -c '_kill_group_escalate "$1" "$2"' _ "$pg" "$grace" &
+      # [Lane-GC PR-5 / INV-118] FD hygiene: close an inherited guardian
+      # write-fd before the bounded (≤grace-second) escalation body — same
+      # accepted-degradation posture as the sigterm-trap escalators in
+      # lib-agent.sh (a forgotten close here only defers EOF by the grace
+      # window, never blocks it indefinitely).
+      "${_lk_setsid[@]}" bash -c '[[ -n "${ADT_GUARD_FD:-}" ]] && exec {ADT_GUARD_FD}>&-; _kill_group_escalate "$1" "$2"' _ "$pg" "$grace" &
       escalate_pids+=("$!")
     done
     wait "${escalate_pids[@]}" 2>/dev/null || true
@@ -971,7 +976,20 @@ _bounded_call() {
   local _old_monitor=0
   case "$-" in *m*) _old_monitor=1 ;; esac
   set -m
-  "$@" > "$outfile" 2> "$errfile" &
+  # [Lane-GC PR-5 / INV-118] FD hygiene: close an inherited guardian
+  # write-fd before running the wrapped call — `_bounded_call` backs every
+  # teardown-path network call in cleanup() (up to 60s each), so a
+  # forgotten close here would be the single biggest source of deferred
+  # guardian EOF on a wrapper crash mid-network-call. Wrapped in an
+  # (unnamed) subshell rather than `exec`'d directly — the wrapped "$@" is
+  # a bash FUNCTION (itp_post_comment, etc.), never a real binary, so it
+  # cannot itself be exec'd in place the way lib-agent.sh's CLI spawn can;
+  # `$!`/rc/stdout/stderr are all unaffected by the extra subshell layer
+  # (verified empirically).
+  (
+    [[ -n "${ADT_GUARD_FD:-}" ]] && exec {ADT_GUARD_FD}>&-
+    "$@"
+  ) > "$outfile" 2> "$errfile" &
   local cpid=$! i rc
   # Restore the caller's monitor-mode setting immediately — the child's
   # pgid is already fixed at this point (fork-time property), so this

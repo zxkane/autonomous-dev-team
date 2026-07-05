@@ -439,7 +439,19 @@ _run_command_e2e_verify() {
   local _setsid=()
   command -v setsid >/dev/null 2>&1 && _setsid=(setsid)
 
-  "${_setsid[@]}" "${_to_cmd[@]}" bash -c "${E2E_COMMAND_RENDERED}" &
+  # [Lane-GC PR-5 / INV-118 FD hygiene] Close the inherited guard fd BEFORE
+  # exec'ing into the lane — the command-mode E2E lane is a long-lived
+  # subtree reached after guardian install; without the close it holds the
+  # guard fifo's write end and defers the guardian's EOF wake until the
+  # whole E2E timeout elapses after a wrapper death (review round-1 [P2]).
+  # Shaped as subshell-close-then-exec (not a prefix inside the bash -c
+  # string) so the rendered command's own invocation stays byte-identical —
+  # the exec'd process replaces the subshell in place, so $! below is still
+  # the lane's pid/pgid exactly as before.
+  (
+    [[ -n "${ADT_GUARD_FD:-}" ]] && exec {ADT_GUARD_FD}>&- 2>/dev/null
+    exec "${_setsid[@]}" "${_to_cmd[@]}" bash -c "${E2E_COMMAND_RENDERED}"
+  ) &
   _E2E_LANE_PGID=$!
   # [Lane-GC PR-2 / INV-110] This lane bypasses _run_with_timeout (it is a
   # pure shell subshell, not an agent CLI spawn), so it records its own PGID

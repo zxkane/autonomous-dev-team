@@ -384,6 +384,33 @@ if declare -F lane_mint >/dev/null 2>&1; then
 fi
 
 # ---------------------------------------------------------------------------
+# [Lane-GC PR-5 / INV-118] Guardian sidecar install (design §4-C3). Same
+# contract as the dev side (autonomous-dev.sh) — see that file's comment
+# block for the full install-order rationale and the setsid-degradation
+# decision. Kept byte-for-byte structurally identical between both wrappers
+# so a future doc/test change to one obviously applies to the other.
+# ---------------------------------------------------------------------------
+ADT_GUARD_FD=""
+if [[ -n "$ADT_LANE_DIR" ]]; then
+  if ! command -v setsid >/dev/null 2>&1; then
+    echo "[autonomous-review] ERROR: setsid (util-linux) is missing — the guardian sidecar cannot be installed for this run. On macOS: brew install util-linux. Proceeding WITHOUT a guardian; the periodic GC (adt-gc.sh) remains the backstop reaper for this lane (degraded but not a hard abort)." >&2
+  elif ! mkfifo "${ADT_LANE_DIR}/guard.fifo" 2>/dev/null; then
+    echo "[autonomous-review] WARNING: mkfifo failed for the guardian's FIFO — proceeding without a guardian for this run (GC remains the backstop)." >&2
+  else
+    exec {ADT_GUARD_FD}<>"${ADT_LANE_DIR}/guard.fifo"
+    export ADT_GUARD_FD
+    setsid bash -c '[[ -n "${ADT_GUARD_FD:-}" ]] && exec {ADT_GUARD_FD}>&-; exec bash "$1" --lane-dir "$2"' \
+      _ "${LIB_DIR}/lib-guardian.sh" "$ADT_LANE_DIR" \
+      </dev/null >>"${ADT_LANE_DIR}/guardian.log" 2>&1 &
+    ADT_GUARDIAN_PID=$!
+    disown "$ADT_GUARDIAN_PID" 2>/dev/null || true
+    if declare -F lane_set >/dev/null 2>&1; then
+      lane_set "$ADT_LANE_DIR" GUARDIAN_PID "$ADT_GUARDIAN_PID" || true
+    fi
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 # GitHub authentication
 # ---------------------------------------------------------------------------
 # [#416 R2 P1-2] Wrapper-level app-mode credential FATAL gated on the shared
@@ -692,7 +719,11 @@ PID_FILE="${PID_DIR}/review-${ISSUE_NUMBER}.pid"
 # ALSO redirects fd1/fd2 to the legacy /tmp/agent-*-review-*.log (unchanged);
 # this tee is additive and also covers a direct `bash autonomous-review.sh` run.
 if [[ -n "${RUN_DIR:-}" ]] && [[ -d "${RUN_DIR}" ]]; then
-  exec > >(tee -a "${RUN_DIR}/run.log") 2>&1 || true
+  # [Lane-GC PR-5 / INV-118 FD hygiene] Same as the dev side: tee (a forked
+  # process-substitution child) inherits ADT_GUARD_FD and would hold the
+  # guard fifo's write end past a SIGKILLed wrapper — close it FIRST inside
+  # the substitution (review round-1 [P1]).
+  exec > >([[ -n "${ADT_GUARD_FD:-}" ]] && exec {ADT_GUARD_FD}>&- 2>/dev/null; exec tee -a "${RUN_DIR}/run.log") 2>&1 || true
 fi
 
 # Create log file with restrictive permissions (sensitive agent output)
@@ -813,6 +844,15 @@ cleanup() {
 
   # Cleanup PID file and heartbeat sibling (INV-29) always.
   rm -f "$PID_FILE" "${PID_FILE%.pid}.heartbeat" 2>/dev/null || true
+
+  # [Lane-GC PR-5 / INV-118] Guardian clean-exit handshake — same contract
+  # as the dev side (autonomous-dev.sh::cleanup()); see that file's comment
+  # block for the full rationale. Sent after the reap-first block above and
+  # before any network work below.
+  if [[ -n "${ADT_GUARD_FD:-}" ]]; then
+    { printf 'done\n' >&"$ADT_GUARD_FD"; } 2>/dev/null || true
+    exec {ADT_GUARD_FD}>&- 2>/dev/null || true
+  fi
 
   # [INV-70] Metrics: wrapper_end. Fires once for BOTH the normal (RESULT_PARSED)
   # and crash paths — placed before the early return. Best-effort, observe-only.
@@ -1805,6 +1845,14 @@ if [[ "${REVIEW_SMOKE_ENABLED:-false}" == "true" ]]; then
     # neutralized; claude → keeps the rebound AGENT_LAUNCHER_ARGV).
     _smoke_model=$(_resolve_review_agent_model "$_smoke_agent")
     (
+      # [Lane-GC PR-5 / INV-118] FD hygiene: close this subshell's inherited
+      # copy of the guardian write-fd. This subshell outlives the wrapper's
+      # normal `wait` only in a non-graceful (SIGKILLed-wrapper) scenario;
+      # closing here means a SIGKILL of just the wrapper's own PID (not a
+      # full group kill) doesn't leave this fan-out member holding the fifo
+      # open and deferring the guardian's EOF for the member's own
+      # (bounded, but non-zero) remaining runtime.
+      [[ -n "${ADT_GUARD_FD:-}" ]] && exec {ADT_GUARD_FD}>&-
       # Scope ALL of this member's env to the subshell — never leaks to a sibling
       # smoke or to the fan-out below (mirrors the fan-out subshell).
       AGENT_CMD="$_smoke_agent"
@@ -2187,6 +2235,13 @@ for _agent in "${REVIEW_AGENTS_LIST[@]}"; do
   _agent_rc_file="${_FANOUT_DIR}/${_agent_session_id}.rc"
 
   (
+    # [Lane-GC PR-5 / INV-118] FD hygiene: close this fan-out member's
+    # inherited copy of the guardian write-fd — same rationale as the smoke
+    # probe subshell above; a fan-out member can run for the agent's full
+    # timeout, so leaving the fd open here would defer the guardian's EOF
+    # by up to that timeout on a SIGKILLed-wrapper-only (not full-group)
+    # death.
+    [[ -n "${ADT_GUARD_FD:-}" ]] && exec {ADT_GUARD_FD}>&-
     # Per-subshell AGENT_CMD override so run_agent dispatches to THIS CLI.
     AGENT_CMD="$_agent"
     # INV-78 (#233): export this agent's verdict-artifact path into its
