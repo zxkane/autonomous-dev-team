@@ -73,8 +73,17 @@ fi
 # Fail LOUD naming the offending path rather than installing a broken timer.
 _gct_reject_unsafe_path() {
   local path="$1" label="$2"
-  if [[ "$path" == *"%"* || "$path" == *$'\n'* ]]; then
-    echo "install-gc-timer.sh: ${label} contains '%' or a newline — refusing to install a timer with an unsafe path: ${path}" >&2
+  # `'` is rejected alongside `%`/newline (review round-3 [P2]): the cron
+  # entry single-quotes both paths, and a single quote INSIDE a
+  # single-quoted shell string terminates the quoting — a path like
+  # /tmp/x'root would split the cron command mid-token and let the
+  # remainder parse as fresh shell words (token injection), exactly what
+  # the quoting exists to prevent. Escaping ('\'' splicing) was rejected
+  # in favor of rejection-with-a-loud-error: no legitimate ADT_STATE_ROOT
+  # or skill-tree path contains a quote, so the added complexity would
+  # only ever serve a misconfiguration.
+  if [[ "$path" == *"%"* || "$path" == *"'"* || "$path" == *$'\n'* ]]; then
+    echo "install-gc-timer.sh: ${label} contains '%', a single quote, or a newline — refusing to install a timer with an unsafe path: ${path}" >&2
     exit 1
   fi
 }

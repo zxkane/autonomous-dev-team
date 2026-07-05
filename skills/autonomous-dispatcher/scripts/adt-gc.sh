@@ -286,37 +286,50 @@ _gc_own_pgid() {
   printf '%s\n' "$_GC_OWN_PGID"
 }
 
-# _gc_safe_kill_pid <pid> — [Lane-GC PR-4 review round-2, P1-3] true iff
-# <pid> is a SAFE individual-kill target: numeric, and NOT this process's
-# own $$. Every individual-PID kill site (`_gc_term_then_kill_pid`, rule
-# 1.4's guardian kill, `_gc_kill_candidate`'s pgid-invalid fallback) MUST
-# gate on this before signaling — `_gc_same_uid_pids` already excludes
-# `$$` from Pass 2/3's OWN candidate enumeration, but that exclusion lives
-# in one call site and does not protect callers reached indirectly (rule
-# 1.4's `GUARDIAN_PID` comes from registry content, not the same-uid
-# enumeration, so it has no such built-in exclusion).
+# _gc_safe_kill_pid <pid> — [Lane-GC PR-4 review round-2, P1-3; round-4
+# [P1] tightened] true iff <pid> is a SAFE individual-kill target:
+# numeric, **> 0** (pid 0 is a kernel alias — a bare `kill -TERM 0`, same
+# as `kill -TERM -- -0`, signals the CALLER's own process group, not any
+# candidate's; the original round-2 regex `^[0-9]+$` matched the literal
+# string "0" and let this through), and NOT this process's own $$. Every
+# individual-PID kill site (`_gc_term_then_kill_pid`, rule 1.4's guardian
+# kill, `_gc_kill_candidate`'s pgid-invalid fallback) MUST gate on this
+# before signaling — `_gc_same_uid_pids` already excludes `$$` from Pass
+# 2/3's OWN candidate enumeration, but that exclusion lives in one call
+# site and does not protect callers reached indirectly (rule 1.4's
+# `GUARDIAN_PID` comes from registry content, not the same-uid
+# enumeration — a corrupt or hostile `GUARDIAN_PID=0` in a lane file would
+# otherwise reach `kill -TERM 0` and self-signal GC's own group).
 _gc_safe_kill_pid() {
   local pid="$1"
   [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  [[ "$pid" -gt 0 ]] || return 1
   [[ "$pid" != "$$" ]]
 }
 
-# _gc_safe_kill_pgid <pgid> — [Lane-GC PR-4 review round-2, P1-3] true iff
-# <pgid> is a SAFE process-GROUP kill target: numeric, > 1 (pgid 0 is a
-# kernel alias for "the SENDER's own process group" — `kill -TERM -- -0`
-# or a bare `kill -TERM 0` signals US, not any classified candidate; pgid
-# 1 is the init/systemd group and must never be targeted regardless), and
-# not equal to this process's OWN pgid (`_gc_own_pgid`) — a `proc_pgid`
-# read racing a process's exit, or any future refactor that lets a
-# candidate's pgid alias GC's own group, must never be able to
-# self-signal. Every group-form kill site (`_gc_kill_candidate`,
-# `_kill_group_escalate` callers here) gates on this FIRST.
+# _gc_safe_kill_pgid <pgid> — [Lane-GC PR-4 review round-2, P1-3; round-4
+# [P2] tightened] true iff <pgid> is a SAFE process-GROUP kill target:
+# numeric, > 1 (pgid 0 is a kernel alias for "the SENDER's own process
+# group" — `kill -TERM -- -0` or a bare `kill -TERM 0` signals US, not any
+# classified candidate; pgid 1 is the init/systemd group and must never be
+# targeted regardless), and not equal to this process's OWN pgid
+# (`_gc_own_pgid`) — a `proc_pgid` read racing a process's exit, or any
+# future refactor that lets a candidate's pgid alias GC's own group, must
+# never be able to self-signal. **If GC's own pgid cannot be determined**
+# (a transient `proc_pgid "$$"`/`ps` failure — round-2's original
+# `[[ -z "$own_pg" || ... ]]` treated this as "safe", which is backwards:
+# "I can't prove this ISN'T my own group" must fail toward REFUSING, the
+# same fail-toward-leak posture applied everywhere else in this guard —
+# not toward allowing a kill whose self-safety is unverifiable), refuse.
+# Every group-form kill site (`_gc_kill_candidate`, `_kill_group_escalate`
+# callers here) gates on this FIRST.
 _gc_safe_kill_pgid() {
   local pg="$1" own_pg
   [[ "$pg" =~ ^[0-9]+$ ]] || return 1
   [[ "$pg" -gt 1 ]] || return 1
   own_pg="$(_gc_own_pgid)"
-  [[ -z "$own_pg" || "$pg" != "$own_pg" ]]
+  [[ -n "$own_pg" ]] || return 1
+  [[ "$pg" != "$own_pg" ]]
 }
 
 # _gc_term_then_kill_pid <pid> — individual-PID TERM->1s->KILL (the

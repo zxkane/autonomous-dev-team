@@ -173,3 +173,42 @@ function every Pass-2/3 kill-authorization site now calls, a new
 | TC-LGC4-212 | (P2-4) the installed cron entry | both the `adt-gc.sh` path and the logfile redirect target are single-quoted |
 | TC-LGC4-213 | (P2-5) grep-pin: `_gc_rotate_log`'s call site vs. the singleton lock acquisition | rotate call is strictly AFTER the `flock`, never before |
 | TC-LGC4-214 | (bash dynamic-scoping landmine, found while hardening P1-2) `_gc_proc_age` called with NO enclosing caller-scope variable literally named `pid` | still honors its `_GC_PROC_AGE_OVERRIDE` seam — proves the fix to a `local pid="$1" v="X${pid}"` compound-statement bug where `${pid}` was expanding via the CALLER's scope, not the value just assigned on the same line |
+
+## Review round-3 regressions (post-PR verification pass)
+
+Round-3 verification confirmed all nine round-2 findings FIXED and surfaced
+two NEW defects, both fixed with the TCs below: (1) on Darwin,
+`env_readable` probed readability via the procargs2 shim while
+`env_of`/`env_lookup` stayed Linux-only — a "readable" process whose env
+reads were silently empty re-opened the P1-2 fail-open hole one layer down;
+`env_of` now reads via the SAME procargs2 source (source-aligned by
+contract). (2) the timer installer's cron entry single-quotes its paths but
+did not reject a path CONTAINING a single quote — which terminates the
+quoting mid-token (shell token injection); `'` joins `%`/newline in the
+reject set.
+
+| ID | Scenario | Expected |
+|----|----------|----------|
+| TC-LGC4-215 | (round-3 P1) Darwin (`_LANE_UNAME_OVERRIDE`) with a stub procargs2 shim emitting a synthetic ENV section containing `TERM_PROGRAM` | `env_of` returns that ENV section (rc 0), so `env_lookup pid TERM_PROGRAM` sees it — pre-fix `env_of` returned rc 1/empty on Darwin and the operator process probed "readable but env-clean" |
+| TC-LGC4-215c | same fixture | ARGV lines never bleed into `env_of` output (ENV-section extraction only) |
+| TC-LGC4-216 | (round-3 P2) `ADT_STATE_ROOT` containing a single quote | install-gc-timer.sh fails loud (rc 1), nothing lands in the crontab |
+
+## Review round-4 regressions (re-review of round-2's own kill-primitive fixes)
+
+An independent re-review of the round-2 hardening itself (not the original
+9 findings) surfaced two more gaps in `_gc_safe_kill_pid`/
+`_gc_safe_kill_pgid` — both fixed here: (1) `_gc_safe_kill_pid`'s regex
+`^[0-9]+$` matched the literal string "0", so pid 0 (a kernel alias for the
+CALLER's own process group, same as pgid 0) was never rejected — a corrupt
+or hostile `GUARDIAN_PID=0` registry value reaching rule 1.4's guardian-kill
+path would self-signal GC's own group. (2) `_gc_safe_kill_pgid`'s
+`[[ -z "$own_pg" || "$pg" != "$own_pg" ]]` treated an UNKNOWABLE own pgid
+(a transient `proc_pgid "$$"`/`ps` failure) as "therefore safe" — backwards
+under design principle 5: inability to prove a candidate pgid ISN'T GC's
+own group must fail toward refusing, not toward authorizing a kill whose
+self-safety cannot be verified.
+
+| ID | Scenario | Expected |
+|----|----------|----------|
+| TC-LGC4-217 | (round-4 P1) `_gc_safe_kill_pid` given pid 0 | refuses — pid 0 is a kernel alias for the SENDER's own process group, identical in effect to pgid 0 |
+| TC-LGC4-218 | (round-4 P2) `_gc_safe_kill_pgid` when `_gc_own_pgid` cannot be determined (stubbed to empty) | refuses (fail toward leak), never treats an unknowable own-pgid as proof of safety |

@@ -1865,6 +1865,134 @@ rm -rf "$P200ROOT"
 
 # ===========================================================================
 echo ""
+echo "=== TC-LGC4-215/216: review round-3 — env_of/env_readable source alignment; quote-unsafe path rejection ==="
+# ===========================================================================
+
+# TC-LGC4-215 (round-3 [P1]): on Darwin (via the _LANE_UNAME_OVERRIDE test
+# seam) env_of MUST consult the SAME procargs2 source env_readable does —
+# pre-fix, env_readable probed readable via _procargs2_py while env_of
+# stayed Linux-only and returned rc 1/empty, so a TERM_PROGRAM-protected
+# operator process was "readable but env-clean" → kill-eligible (the exact
+# fail-open shape P1-2's fix was meant to close, re-opened one layer down).
+# Proven via a stub _procargs2_py that emits a synthetic ENV section: on
+# the pre-fix code env_of returns nothing (FAIL); post-fix it returns the
+# stubbed TERM_PROGRAM line.
+OUT215=$(bash -c '
+  set -uo pipefail
+  source "'"$LIB_LANE"'"
+  _LANE_UNAME_OVERRIDE=Darwin
+  _lane_procargs2_available() { return 0; }
+  _procargs2_py() { printf "ARGV\n/usr/bin/thing\nENV\nTERM_PROGRAM=Apple_Terminal\nHOME=/Users/op\n"; }
+  # 4194304 > kernel.pid_max default (4194304 is the max itself; use a pid
+  # that cannot exist so the Linux /proc branch can never shadow the
+  # Darwin seam on the CI runner).
+  env_of 4999999 || echo "ENV_OF_FAILED"
+' 2>&1)
+assert_contains "TC-LGC4-215 (round-3 P1): Darwin env_of reads via the SAME procargs2 source env_readable probes (TERM_PROGRAM visible)" "TERM_PROGRAM=Apple_Terminal" "$OUT215"
+if [[ "$OUT215" == *"ENV_OF_FAILED"* ]]; then
+  assert_fail "TC-LGC4-215b: env_of returned rc 1 on Darwin despite a working procargs2 shim (env_readable/env_of source split regressed)"
+else
+  assert_pass "TC-LGC4-215b: env_of rc 0 on Darwin with a working procargs2 shim"
+fi
+# And the ARGV section must NOT bleed into the env output:
+if [[ "$OUT215" == *"/usr/bin/thing"* ]]; then
+  assert_fail "TC-LGC4-215c: env_of leaked ARGV lines into its env output"
+else
+  assert_pass "TC-LGC4-215c: env_of emits only the ENV section, never ARGV lines"
+fi
+
+# TC-LGC4-216 (round-3 [P2]): a path containing a single quote must be
+# REJECTED by the timer installer — the cron entry single-quotes both
+# paths, and an embedded quote terminates the quoting mid-token (shell
+# token injection). Pre-fix, /tmp/x'root passed the %/newline check and
+# installed a syntactically broken entry.
+QUOTE_DIR_216="$TMPROOT/x'quote"
+mkdir -p "$QUOTE_DIR_216"
+# Branch 1: quote in the derived LOGFILE path (ADT_STATE_ROOT), Linux.
+OUT216=$(cd "$TMPROOT" && bash -c '
+  _LANE_UNAME_OVERRIDE=Linux ADT_STATE_ROOT="'"$QUOTE_DIR_216"'" \
+    bash "'"$SCRIPTS"'/install-gc-timer.sh" 2>&1
+'; echo "rc=$?")
+assert_contains "TC-LGC4-216 (round-3 P2): quote-bearing ADT_STATE_ROOT is rejected loudly, never installed" "refusing to install" "$OUT216"
+assert_contains "TC-LGC4-216b: rejection exits non-zero" "rc=1" "$OUT216"
+if crontab -l 2>/dev/null | grep -qF "$QUOTE_DIR_216"; then
+  assert_fail "TC-LGC4-216c: a quote-bearing path LANDED in the real crontab (must never happen)"
+  crontab -l 2>/dev/null | grep -vF "$QUOTE_DIR_216" | crontab - 2>/dev/null || true
+else
+  assert_pass "TC-LGC4-216c: no quote-bearing entry reached the crontab"
+fi
+# Branch 2: quote in the ADT_GC_SH path itself — the checked path derives
+# from the installer's own resolved location, so exercise it by invoking a
+# COPY of the installer from inside the quote-bearing dir (with a sibling
+# adt-gc.sh so the existence check passes and the path check is reached).
+cp "$SCRIPTS/adt-gc.sh" "$QUOTE_DIR_216/adt-gc.sh"
+cp "$SCRIPTS/install-gc-timer.sh" "$QUOTE_DIR_216/install-gc-timer.sh"
+OUT216D=$(bash -c '
+  _LANE_UNAME_OVERRIDE=Linux ADT_STATE_ROOT="'"$TMPROOT"'/plain-state" \
+    bash "'"$QUOTE_DIR_216"'/install-gc-timer.sh" 2>&1
+'; echo "rc=$?")
+assert_contains "TC-LGC4-216d: quote-bearing adt-gc.sh path itself is rejected (ADT_GC_SH call site)" "refusing to install" "$OUT216D"
+# Branch 3: macOS branch rejects a quote-bearing logfile path BEFORE any
+# plist/launchctl work (the reject call precedes the plist heredoc).
+OUT216E=$(HOME="$TMPROOT/fake-home-216" bash -c '
+  mkdir -p "$HOME"
+  _LANE_UNAME_OVERRIDE=Darwin ADT_STATE_ROOT="'"$QUOTE_DIR_216"'" \
+    bash "'"$SCRIPTS"'/install-gc-timer.sh" 2>&1
+'; echo "rc=$?")
+assert_contains "TC-LGC4-216e: macOS branch rejects quote-bearing logfile path" "refusing to install" "$OUT216E"
+if [[ -e "$TMPROOT/fake-home-216/Library/LaunchAgents/com.adt.lane-gc.plist" ]]; then
+  assert_fail "TC-LGC4-216f: plist was written despite the unsafe path"
+else
+  assert_pass "TC-LGC4-216f: no plist written for an unsafe path"
+fi
+
+# TC-LGC4-217 (round-4 [P1], found by an independent re-review of round-2's
+# OWN fixes): `_gc_safe_kill_pid` must refuse pid 0 — a bare `kill -TERM 0`
+# is a kernel alias for the CALLER's own process group, identical in
+# effect to `kill -TERM -- -0`. Round-2's original regex `^[0-9]+$`
+# matches the literal string "0" and let it through; a corrupt or hostile
+# `GUARDIAN_PID=0` registry value reaching rule 1.4's guardian-kill path
+# would have self-signaled GC's own group.
+PID_SRC_217=$(sed -n '/^_gc_own_pgid()/,/^_gc_kill_candidate() {$/p' "$ADT_GC" | sed '$d')
+# POSITIVE CONTROL first (safe pid must be ALLOWED): a broken sed
+# extraction leaves the function undefined, and `cmd && A || B` treats
+# command-not-found the same as a refusal — the control makes that
+# false-pass shape impossible (it would print allowed-check=MISSING).
+OUT217=$(bash -c '
+  source "'"$LIB_LANE"'"
+  '"$PID_SRC_217"'
+  declare -F _gc_safe_kill_pid >/dev/null || { echo "allowed-check=MISSING"; exit 0; }
+  _gc_safe_kill_pid 424242 && echo "safe-pid=allowed" || echo "safe-pid=REFUSED"
+  _gc_safe_kill_pid 0 && echo "pid0=UNSAFE" || echo "pid0=refused"
+')
+assert_contains "TC-LGC4-217a (extraction control): _gc_safe_kill_pid is defined and allows an ordinary safe pid" "safe-pid=allowed" "$OUT217"
+assert_contains "TC-LGC4-217 (round-4 P1): _gc_safe_kill_pid refuses pid 0 (kernel alias for the SENDER's own process group)" "pid0=refused" "$OUT217"
+
+# TC-LGC4-218 (round-4 [P2], same re-review): `_gc_safe_kill_pgid` must
+# REFUSE, not allow, when GC's own pgid cannot be determined (a transient
+# `proc_pgid "$$"`/`ps` failure). Round-2's original
+# `[[ -z "$own_pg" || "$pg" != "$own_pg" ]]` treated an unreadable own-pgid
+# as "therefore safe" — backwards: inability to PROVE a candidate pgid
+# ISN'T GC's own group must fail toward refusing (design principle 5),
+# not toward authorizing the kill.
+PGID_SRC_218=$(sed -n '/^_gc_own_pgid()/,/^_gc_kill_candidate() {$/p' "$ADT_GC" | sed '$d')
+# Same positive-control pattern as TC-LGC4-217a: prove the function exists
+# and ALLOWS a safe pgid under a RESOLVABLE own-pgid before asserting the
+# refusal branch, so a broken extraction can't false-pass as "refused".
+OUT218=$(bash -c '
+  source "'"$LIB_LANE"'"
+  '"$PGID_SRC_218"'
+  declare -F _gc_safe_kill_pgid >/dev/null || { echo "allowed-check=MISSING"; exit 0; }
+  _gc_own_pgid() { echo "999999"; }
+  _gc_safe_kill_pgid 424242 && echo "safe-pgid=allowed" || echo "safe-pgid=REFUSED"
+  _gc_own_pgid() { echo ""; }
+  _gc_safe_kill_pgid 12345 && echo "emptyown=ALLOWED" || echo "emptyown=refused"
+')
+assert_contains "TC-LGC4-218a (extraction control): _gc_safe_kill_pgid is defined and allows a safe pgid under a resolvable own-pgid" "safe-pgid=allowed" "$OUT218"
+assert_contains "TC-LGC4-218 (round-4 P2): _gc_safe_kill_pgid refuses when GC's own pgid is unknowable, never fails open" "emptyown=refused" "$OUT218"
+
+# ===========================================================================
+echo ""
 echo "=== Summary ==="
 echo "PASS: $PASS, FAIL: $FAIL"
 [[ "$FAIL" -eq 0 ]] && exit 0 || exit 1

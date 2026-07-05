@@ -125,6 +125,35 @@ skill: pick the simpler, more maintainable option)
   proceeding. On macOS without the procargs2 shim this correctly makes
   every env-dependent Pass 2/3 kill refuse too, matching the design's
   registry-authoritative-only posture for that platform.
+- **Review round-3 (post-round-2 verification pass): `env_of`/`env_readable`
+  source alignment on Darwin, and single-quote path rejection.** Round-2's
+  `env_readable` primitive probes via the procargs2 shim on Darwin, but
+  `env_of`/`env_lookup` stayed Linux-only (`/proc/PID/environ` only) —
+  re-opening the P1-2 hole one layer down: a TERM_PROGRAM-protected
+  operator process on macOS probed "readable" via `env_readable`, then
+  `env_lookup` found nothing (an empty read from a source it never
+  actually consulted) and the candidate fell through to full kill
+  eligibility. Fixed by making `env_of` consult the SAME procargs2 source
+  on non-Linux, under the explicit contract that any read path added to
+  one of the two functions must be added to both. Separately,
+  `install-gc-timer.sh`'s cron entry single-quotes both paths but did not
+  reject a path CONTAINING a single quote — which terminates the quoting
+  mid-token (shell token injection, the same class of bug the `%`/newline
+  rejection exists to prevent); `'` now joins that reject set.
+- **Review round-4 (re-review of round-2's OWN kill-primitive fixes):
+  `_gc_safe_kill_pid`/`_gc_safe_kill_pgid` themselves had two residual
+  gaps.** `_gc_safe_kill_pid`'s regex `^[0-9]+$` matches the literal string
+  "0" — pid 0 is a kernel alias for the CALLER's own process group (same
+  effect as pgid 0, which the function's sibling already rejected), so a
+  corrupt or hostile `GUARDIAN_PID=0` registry value reaching rule 1.4's
+  guardian-kill path would have self-signaled GC's own group; fixed with
+  an explicit `-gt 0` check. `_gc_safe_kill_pgid`'s
+  `[[ -z "$own_pg" || "$pg" != "$own_pg" ]]` treated an UNKNOWABLE own
+  pgid (a transient `proc_pgid "$$"`/`ps` failure) as "therefore safe" —
+  backwards under design principle 5: not being able to prove a candidate
+  pgid ISN'T GC's own group must fail toward refusing the kill, not toward
+  authorizing one whose self-safety cannot be verified; fixed by requiring
+  `own_pg` to be non-empty before comparing.
 
 ## Out of scope (unchanged from parent design §11, §9 PR-4's own carve-out)
 

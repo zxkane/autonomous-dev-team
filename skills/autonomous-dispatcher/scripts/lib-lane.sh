@@ -131,15 +131,29 @@ proc_age() {
 # `[ -r ]`, NEVER `[ -s ]` — `stat -c %s /proc/PID/environ` reports 0 even on
 # a readable, non-empty environ (procfs quirk); an `-s` gate would silently
 # treat every live process as "no env" and defeat env-tag matching entirely
-# (design §4-C2 platform:F5). Echoes nothing + rc 1 when unreadable (dead
-# process, permission, or — on macOS with no python3 shim installed — always,
-# by design: this lib does not ship the macOS `sysctl kern.procargs2` shim;
-# that is deferred to the GC PR, so env_of is Linux-only for now and callers
-# must tolerate an empty result on macOS).
+# (design §4-C2 platform:F5). macOS: the `sysctl kern.procargs2` shim
+# (`_procargs2_py`, this PR) when python3 is present — the SAME source of
+# truth `env_readable` consults, deliberately: `env_readable` answering
+# "readable" (via a successful procargs2 probe) while env_of/env_lookup
+# silently returned nothing (the pre-round-3 state — env_of was
+# Linux-only) re-opened on Darwin the exact fail-open hole `env_readable`
+# exists to close: a TERM_PROGRAM-protected operator process probed
+# READABLE, then env_lookup found no TERM_PROGRAM in an EMPTY read, and
+# the candidate fell through to full kill eligibility. The two functions
+# MUST stay source-aligned — any read path added to one must be added to
+# both (review round-3 [P1]). Echoes nothing + rc 1 when unreadable (dead
+# process, permission, or macOS with no python3 shim).
 env_of() {
   local pid="$1"
   if [[ -r "/proc/${pid}/environ" ]]; then
     tr '\0' '\n' < "/proc/${pid}/environ" 2>/dev/null
+    return 0
+  fi
+  if [[ "$(_lane_uname)" != "Linux" ]] && _lane_procargs2_available; then
+    local out
+    out="$(_procargs2_py "$pid" 2>/dev/null)" || return 1
+    [[ -n "$out" ]] || return 1
+    awk '/^ENV$/{f=1;next} f' <<<"$out"
     return 0
   fi
   return 1
