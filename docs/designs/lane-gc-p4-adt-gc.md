@@ -71,6 +71,60 @@ skill: pick the simpler, more maintainable option)
   exactly this purpose) rather than a new field — no `LANE_SCRATCH` key
   exists in the registry today, and inventing one for a single Pass-3 rule
   would be scope creep beyond this issue's requirements.
+- **Review round-2: Pass-3 age floors for rules 3.1/3.3/3.4** (the parent
+  design's §6 table gives an explicit floor only for 3.2 — "age > 2 h" —
+  and is silent for the other three). Independent review (4 P1 + 5 P2)
+  found that every Pass-3 sub-rule applied an ARBITRARY SUBSET of Pass 2's
+  guard set instead of the full one (3.4 applied NONE at all), fixed by
+  extracting a shared `_gc_common_kill_guards <pid> <pg> <age_floor>
+  [rule_id]` function every Pass-2/3 kill-authorization site now calls.
+  Floors chosen for the three rules the design leaves unstated: **3.1 and
+  3.4 use `age_floor=0`** — both are EXACT structural matches (a dead
+  lane's own recorded `CHROME_PROFILE_HINT`/`WORKTREE` field, not a fuzzy
+  heuristic), the same confidence class as rule 2.1's exact `ADT_LANE_ID`
+  join, which itself needs only its own 300s floor for the SEPARATE reason
+  that a startup window may precede PID-file writes — no such window
+  applies to a value already recorded in a DEAD lane's registry file.
+  **3.3 uses `age_floor=300`** — design row 3.3 says "∧ 2.2–2.5", pulling
+  in rule 2's own conjunct set, and 3.3's `GH_TOKEN_FILE`-pattern-plus-
+  dir-gone match is the same exact-positive-signal class as 2.1's exact
+  join (not the weaker legacy-signature arm), so it inherits that arm's
+  tighter 300s floor rather than the legacy arm's 600s.
+- **Review round-2: rule 3.2's two rule-local extra conjuncts** ("no live
+  process shares that profile dir" ∧ "no live chrome-devtools-mcp parent",
+  design §5 line 215 / §6 row 3.2) were previously omitted entirely (P1-4).
+  Both are kept OUTSIDE the shared `_gc_common_kill_guards` function — no
+  other Pass-3 rule keys on a shared profile directory or an MCP-server
+  ancestor, so generalizing either into the shared function would be
+  premature abstraction for a single caller. The profile-dir-sharer check
+  re-enumerates same-uid pids for a live `--user-data-dir=<same dir>`
+  match; the MCP-parent check walks the live descendant tree of every
+  process whose argv matches `chrome-devtools-mcp` (same BFS technique as
+  the existing live-wrapper-ancestry gate) — defense-in-depth alongside
+  the rule's own `ppid==1` requirement, covering a subreaper-race shape
+  where a container's subreaper re-adopts the chrome process while its
+  true MCP-server ancestor remains alive further up the tree.
+- **Review round-2: kill-primitive self/pgid-0 defense (P1-3).**
+  `_gc_kill_candidate` accepted any numeric pgid, including 0 (`kill -TERM
+  -- -0` is a kernel alias for the SENDER's own process group, not any
+  candidate's) and GC's own pgid. Fixed with `_gc_safe_kill_pgid`/
+  `_gc_safe_kill_pid` gates (numeric, `>1`, not GC's own group/`$$`) at
+  every kill-primitive call site (`_gc_kill_candidate`,
+  `_gc_term_then_kill_pid`, rule 1.4's guardian kill) — the LAST line of
+  defense before any signal fires, independent of whether an upstream
+  caller already filtered its candidate correctly.
+- **Review round-2: fail-closed env reads (P1-2).** `_gc_has_term_program`
+  returning false when a process's env cannot be read at all (dead
+  mid-scan, EPERM, or macOS with no procargs2 shim) was indistinguishable
+  from "env readable, TERM_PROGRAM genuinely absent" — silently vanishing
+  the operator-protection gate exactly when least is known about a
+  candidate. Fixed with a new `env_readable` primitive (`lib-lane.sh`) and
+  `_gc_env_unknowable` wrapper, checked FIRST and SEPARATELY from
+  `_gc_has_term_program` at every kill-authorization site — an unknowable
+  env now skips (fail toward leak, design principle 5) rather than
+  proceeding. On macOS without the procargs2 shim this correctly makes
+  every env-dependent Pass 2/3 kill refuse too, matching the design's
+  registry-authoritative-only posture for that platform.
 
 ## Out of scope (unchanged from parent design §11, §9 PR-4's own carve-out)
 

@@ -833,13 +833,21 @@ else
   assert_fail "TC-LGC4-032a: found a banned-key reference: $BANNED_HIT"
 fi
 # Every ppid read in adt-gc.sh's Pass 2 is always inside the SAME `if`
-# conjunction as conf_loaded/cc_user (never a bare standalone gate) —
-# checked by asserting the exact conjunction line is present verbatim.
-CONJ_HIT=$(grep -n 'conf_loaded.*cc_user.*ppid.*age' "$ADT_GC" || true)
-if [[ -n "$CONJ_HIT" ]]; then
-  assert_pass "TC-LGC4-032b: the legacy-signature ppid check is textually inside the full conf+CC_USER+age conjunction"
+# conjunction as conf_loaded/cc_user (never a bare standalone gate).
+# [Lane-GC PR-4 review round-2] since the P1-1/P1-4/P2-1 class fix, age
+# enforcement lives in the shared `_gc_common_kill_guards` call that
+# EVERY eligible candidate passes through downstream — it is no longer
+# textually on the SAME line as conf_loaded/cc_user/ppid, so the pin now
+# asserts the two halves of the invariant separately: (a) ppid is still
+# conjoined with conf_loaded+cc_user (never a bare standalone gate), and
+# (b) the eligibility branch that sets it unconditionally falls through
+# to the shared age-floor-enforcing guard (never bypasses it).
+CONJ_HIT=$(grep -n 'conf_loaded.*cc_user.*ppid' "$ADT_GC" || true)
+GUARD_HIT=$(grep -n '_gc_common_kill_guards' "$ADT_GC" || true)
+if [[ -n "$CONJ_HIT" ]] && [[ -n "$GUARD_HIT" ]]; then
+  assert_pass "TC-LGC4-032b: the legacy-signature ppid check is conjoined with conf_loaded+CC_USER, and every eligible candidate is age-floor-gated by the shared guard"
 else
-  assert_fail "TC-LGC4-032b: expected a single conjoined conf+CC_USER+ppid+age condition, not found"
+  assert_fail "TC-LGC4-032b: expected ppid conjoined with conf_loaded+CC_USER AND a shared age-floor guard downstream, not found (conj=$CONJ_HIT guard=$GUARD_HIT)"
 fi
 
 # ===========================================================================
@@ -916,7 +924,16 @@ disown
 PID43=$!
 SPAWNED_PIDS+=("$PID43")
 sleep 0.3
+# [Lane-GC PR-4 review round-2, P2-1] rule 3.3 now enforces a 300s age
+# floor (previously none) via the shared `_gc_common_kill_guards`. A
+# freshly-spawned `sleep 0.3`-scanned fixture is nowhere near that floor
+# by construction, so the age-override seam simulates the floor being
+# cleared — this exercises the guard's OTHER conjuncts (which is what
+# this fixture is actually testing), not the age check itself (TC-LGC4-1xx
+# below covers the age-floor boundary directly).
+export "_GC_PROC_AGE_OVERRIDE_${PID43}=301"
 run_gc_dry_full "$ST43" >/dev/null
+unset "_GC_PROC_AGE_OVERRIDE_${PID43}"
 CATLOG43=$(cat "$ST43/adt-gc.log" 2>/dev/null || true)
 assert_contains "TC-LGC4-043: wedged gh with a GONE auth dir -> would-kill rule=3.3" "would-kill rule=3.3 pid=$PID43" "$CATLOG43"
 kill -9 -- "-$PID43" 2>/dev/null || true
@@ -1466,6 +1483,385 @@ chmod +x "$TESTPROJ/scripts/autonomous-dev.sh"
 OUT121=$(cd "$TESTPROJ" && timeout 10 bash scripts/dispatch-local.sh dev-new 88888 2>&1); RC121=$?
 assert_eq "TC-LGC4-121: dispatch-local.sh still succeeds when adt-gc.sh is absent (output: ${OUT121:0:200})" "0" "$RC121"
 rm -rf "$TESTPROJ" "$ISOLATED_TREE"
+
+# ===========================================================================
+echo ""
+echo "=== TC-LGC4-200..214: review round-2 fixes (Class A shared guards, Class B fail-closed, P2s) ==="
+# ===========================================================================
+P200ROOT="$TMPROOT/round2"
+mkdir -p "$P200ROOT"
+
+# TC-LGC4-200 (P1-1 proof): rule 3.4 (E2E servers) now skips a TERM_PROGRAM
+# candidate — pre-fix this rule applied NO guard at all, so an operator
+# shell cwd'd inside a since-removed worktree would have been killed
+# outright. Same fixture shape as TC-LGC4-045 (recorded WORKTREE gone,
+# proc cwd still under it) but WITHOUT `-u TERM_PROGRAM` this time.
+E2E_WT_200="$P200ROOT/e2e-worktree-op-200"
+mkdir -p "$E2E_WT_200"
+ST200=$(mktemp -d)
+bash -c '
+  source "'"$LIB_LANE"'"
+  export ADT_STATE_ROOT="'"$ST200"'"
+  LANE_ID=$(lane_mint p200 dev 200)
+  LANE_DIR=$(lane_install p200 "$LANE_ID")
+  lane_set "$LANE_DIR" WRAPPER_PID 999999
+  lane_set "$LANE_DIR" WORKTREE "'"$E2E_WT_200"'"
+'
+(cd "$E2E_WT_200" && setsid env TERM_PROGRAM=vscode bash -c "sleep 400" &)
+sleep 0.3
+PID200=$(pgrep -f "sleep 400" | while read -r p; do
+  [[ "$(readlink "/proc/$p/cwd" 2>/dev/null)" == "$E2E_WT_200" ]] && echo "$p" && break
+done)
+rmdir "$E2E_WT_200" 2>/dev/null || rm -rf "$E2E_WT_200"
+if [[ -n "$PID200" ]]; then
+  SPAWNED_PIDS+=("$PID200")
+  run_gc_dry_full "$ST200" >/dev/null
+  CATLOG200=$(cat "$ST200/adt-gc.log" 2>/dev/null || true)
+  assert_not_contains "TC-LGC4-200 (P1-1): rule 3.4 with TERM_PROGRAM set is skipped — never kills an operator shell cwd'd inside a removed worktree" "pid=$PID200" "$CATLOG200"
+  kill -9 -- "-$PID200" 2>/dev/null || true
+else
+  assert_pass "TC-LGC4-200: skipped — could not observe the fixture's cwd-scoped pid on this sandbox"
+fi
+rm -rf "$ST200"
+
+# TC-LGC4-201 (P1-2 proof): a Pass-2-eligible candidate whose env is
+# UNKNOWABLE (simulated via the _GC_ENV_UNREADABLE_OVERRIDE seam — real
+# same-uid /proc is always readable, so this is the only practical way to
+# exercise the fail-toward-leak branch) is skipped, never would-killed,
+# even though every OTHER Pass 2 condition (tagged dead lane, age past
+# floor) is satisfied. Pre-fix, an unreadable env fell through
+# `_gc_has_term_program`'s `env_lookup … || echo ""` fallback as
+# indistinguishable from "TERM_PROGRAM absent" and proceeded to kill.
+ST201=$(mktemp -d)
+bash -c '
+  source "'"$LIB_LANE"'"
+  export ADT_STATE_ROOT="'"$ST201"'"
+  LANE_ID=$(lane_mint p201 dev 201)
+  LANE_DIR=$(lane_install p201 "$LANE_ID")
+  lane_set "$LANE_DIR" WRAPPER_PID 999999
+  echo "$LANE_ID" > "'"$P200ROOT"'/lane201.txt"
+'
+LANE_ID201=$(cat "$P200ROOT/lane201.txt")
+setsid env -u TERM_PROGRAM ADT_LANE_ID="$LANE_ID201" sleep 400 &
+disown
+PID201=$!
+SPAWNED_PIDS+=("$PID201")
+sleep 0.3
+export "_GC_PROC_AGE_OVERRIDE_${PID201}=301"
+export "_GC_ENV_UNREADABLE_OVERRIDE_${PID201}=1"
+run_gc_dry_full "$ST201" >/dev/null
+unset "_GC_PROC_AGE_OVERRIDE_${PID201}" "_GC_ENV_UNREADABLE_OVERRIDE_${PID201}"
+CATLOG201=$(cat "$ST201/adt-gc.log" 2>/dev/null || true)
+assert_not_contains "TC-LGC4-201a (P1-2): env-unknowable candidate is never would-killed, even with every other rule-2.1 condition satisfied" "would-kill" "$CATLOG201"
+assert_contains "TC-LGC4-201b (P1-2): env-unknowable skip is logged with its own reason (fail-toward-leak, not a silent drop)" "reason=env-unknowable-fail-toward-leak" "$CATLOG201"
+kill -9 -- "-$PID201" 2>/dev/null || true
+rm -rf "$ST201"
+
+# TC-LGC4-202 (P1-3 proof, pgid): _gc_safe_kill_pgid never authorizes pgid
+# 0, pgid 1, or GC's OWN pgid — extracted and unit-tested directly (no
+# real kill fired) since simulating an ACTUAL false-kill-of-self would be
+# destructive to the test runner itself. Function bodies below are BY
+# REFERENCE (sourced from the real file via sed, not hand-copied) so this
+# pins the ACTUAL shipped implementation, not a paraphrase.
+GUARD_SRC=$(sed -n '/^_gc_own_pgid()/,/^_gc_kill_candidate()/p' "$ADT_GC" | sed '$d')
+OUT202=$(bash -c '
+  source "'"$LIB_LANE"'"
+  '"$GUARD_SRC"'
+  _gc_safe_kill_pgid 0    && echo "pgid0=UNSAFE"    || echo "pgid0=refused"
+  _gc_safe_kill_pgid 1    && echo "pgid1=UNSAFE"    || echo "pgid1=refused"
+  _gc_safe_kill_pgid -1   && echo "pgidneg1=UNSAFE" || echo "pgidneg1=refused"
+  _gc_safe_kill_pgid ""   && echo "pgidempty=UNSAFE" || echo "pgidempty=refused"
+  OWNPG="$(_gc_own_pgid)"
+  _gc_safe_kill_pgid "$OWNPG" && echo "pgidown=UNSAFE" || echo "pgidown=refused"
+  _gc_safe_kill_pgid 999999 && echo "pgidarbitrary=allowed" || echo "pgidarbitrary=refused"
+')
+assert_contains "TC-LGC4-202a (P1-3): _gc_safe_kill_pgid refuses pgid 0 (kernel alias for the SENDER's own group)" "pgid0=refused" "$OUT202"
+assert_contains "TC-LGC4-202b (P1-3): _gc_safe_kill_pgid refuses pgid 1 (init/systemd group)" "pgid1=refused" "$OUT202"
+assert_contains "TC-LGC4-202c (P1-3): _gc_safe_kill_pgid refuses a non-numeric/negative pgid" "pgidneg1=refused" "$OUT202"
+assert_contains "TC-LGC4-202d (P1-3): _gc_safe_kill_pgid refuses an empty pgid" "pgidempty=refused" "$OUT202"
+assert_contains "TC-LGC4-202e (P1-3): _gc_safe_kill_pgid refuses GC's OWN pgid" "pgidown=refused" "$OUT202"
+assert_contains "TC-LGC4-202f (P1-3): _gc_safe_kill_pgid allows an arbitrary safe pgid" "pgidarbitrary=allowed" "$OUT202"
+
+# TC-LGC4-203 (P1-3 proof, pid): _gc_safe_kill_pid never authorizes GC's
+# own $$.
+OUT203=$(bash -c '
+  source "'"$LIB_LANE"'"
+  '"$GUARD_SRC"'
+  _gc_safe_kill_pid "$$" && echo "self=UNSAFE" || echo "self=refused"
+  _gc_safe_kill_pid ""   && echo "empty=UNSAFE" || echo "empty=refused"
+  _gc_safe_kill_pid abc  && echo "nonnumeric=UNSAFE" || echo "nonnumeric=refused"
+  _gc_safe_kill_pid 999999 && echo "arbitrary=allowed" || echo "arbitrary=refused"
+')
+assert_contains "TC-LGC4-203a (P1-3): _gc_safe_kill_pid refuses GC's own \$\$" "self=refused" "$OUT203"
+assert_contains "TC-LGC4-203b (P1-3): _gc_safe_kill_pid refuses an empty pid" "empty=refused" "$OUT203"
+assert_contains "TC-LGC4-203c (P1-3): _gc_safe_kill_pid refuses a non-numeric pid" "nonnumeric=refused" "$OUT203"
+assert_contains "TC-LGC4-203d (P1-3): _gc_safe_kill_pid allows an arbitrary safe pid" "arbitrary=allowed" "$OUT203"
+
+# TC-LGC4-204 (P1-3 proof, end-to-end kill-candidate path): given an
+# UNSAFE pgid (0 — the kernel alias for the SENDER's own process group),
+# `_gc_kill_candidate` must NEVER reach `_kill_group_escalate` (the
+# group-form kill — the dangerous path that would otherwise signal
+# GC's OWN group). It still falls back to the safe individual-pid path
+# (`_gc_term_then_kill_pid`, gated by its OWN `_gc_safe_kill_pid` check),
+# which correctly terminates the sacrificial candidate itself — that is
+# the DESIGNED fallback (per the review instruction: "else fall back to
+# per-pid kill"), not a false-kill. The assertion below is therefore on
+# `_kill_group_escalate` never firing, not on the candidate's survival.
+# `sed` range note: the ORIGINAL single-pattern
+# `/^_gc_own_pgid()/,/^_gc_kill_candidate()/` end-pattern is INCLUSIVE, so
+# concatenating it with a second `/^_gc_kill_candidate()/,/^}/` range
+# (as an earlier draft of this test did) duplicates the
+# `_gc_kill_candidate() {` opening line and produces malformed bash that
+# fails to parse — the extraction below instead trims the first range's
+# trailing duplicate line before appending the second, complete range.
+KC_SRC=$(sed -n '/^_gc_own_pgid()/,/^_gc_kill_candidate() {$/p' "$ADT_GC" | sed '$d')
+KC_SRC2=$(sed -n '/^_gc_kill_candidate() {$/,/^}/p' "$ADT_GC")
+ESCALATE_MARKER204=$(mktemp)
+setsid sleep 400 &
+disown
+PID204=$!
+SPAWNED_PIDS+=("$PID204")
+sleep 0.2
+bash -c '
+  source "'"$LIB_LANE"'"
+  '"$KC_SRC"'
+  '"$KC_SRC2"'
+  _kill_group_escalate() { echo "UNSAFE pgid=$1" >> "'"$ESCALATE_MARKER204"'"; }
+  _gc_kill_candidate "'"$PID204"'" 0
+'
+sleep 0.3
+assert_eq "TC-LGC4-204 (P1-3 end-to-end): _gc_kill_candidate given pgid=0 never reaches the group-escalation path" "" "$(cat "$ESCALATE_MARKER204")"
+rm -f "$ESCALATE_MARKER204"
+kill -9 -- "-$PID204" 2>/dev/null || true
+kill -9 "$PID204" 2>/dev/null || true
+
+# TC-LGC4-205 (P2-1 proof): rule 3.3 (wedged gh) now enforces a 300s age
+# floor it previously computed but never compared to anything — a
+# freshly-spawned fixture (age far below 300s, NO override) matching
+# every OTHER 3.3 condition is never would-killed.
+AUTH_GONE_205="/tmp/agent-auth-tc4-205-$$"
+ST205=$(mktemp -d)
+setsid env -u ADT_LANE_ID -u TERM_PROGRAM GH_TOKEN_FILE="${AUTH_GONE_205}/token" bash -c 'exec -a "gh_pr_checks_--watch" /usr/bin/sleep 400' &
+disown
+PID205=$!
+SPAWNED_PIDS+=("$PID205")
+sleep 0.3
+run_gc_dry_full "$ST205" >/dev/null
+CATLOG205=$(cat "$ST205/adt-gc.log" 2>/dev/null || true)
+assert_not_contains "TC-LGC4-205 (P2-1): rule 3.3 below its new 300s age floor is never would-killed" "would-kill rule=3.3 pid=$PID205" "$CATLOG205"
+kill -9 -- "-$PID205" 2>/dev/null || true
+rm -rf "$ST205"
+
+# TC-LGC4-206 (P1-4 proof, profile-dir sharer): rule 3.2's new rule-local
+# conjunct — a candidate matching every OTHER 3.2 condition is skipped
+# when a LIVE process shares the same --user-data-dir profile.
+CHROME_SHIM_206="$P200ROOT/chrome-shim-206.sh"
+cat > "$CHROME_SHIM_206" <<'EOF'
+#!/bin/bash
+sleep 400
+EOF
+chmod +x "$CHROME_SHIM_206"
+SHARED_PROFILE_206="/tmp/puppeteer_dev_chrome_profile-tc4-206-$$"
+mkdir -p "$SHARED_PROFILE_206"
+ST206=$(mktemp -d)
+# Candidate: reparented (ppid==1), aged past 2h via override.
+bash -c "( setsid env -u TERM_PROGRAM '$CHROME_SHIM_206' '--user-data-dir=$SHARED_PROFILE_206' & ) & sleep 1" &
+disown
+sleep 1.5
+PID206=$(ps -eo pid,cmd | grep -- "--user-data-dir=$SHARED_PROFILE_206" | grep -v grep | awk '{print $1}' | head -1)
+if [[ -n "$PID206" ]] && [[ "$(bash -c 'source "'"$LIB_LANE"'"; proc_ppid "'"$PID206"'"')" == "1" ]]; then
+  SPAWNED_PIDS+=("$PID206")
+  # Live sharer: a SECOND, ordinary (non-reparented, still-owned-by-this-
+  # shell) process pointed at the SAME profile dir.
+  "$CHROME_SHIM_206" "--user-data-dir=$SHARED_PROFILE_206" &
+  disown
+  SHARER206_PID=$!
+  SPAWNED_PIDS+=("$SHARER206_PID")
+  sleep 0.2
+  export "_GC_PROC_AGE_OVERRIDE_${PID206}=7300"
+  run_gc_dry_full "$ST206" >/dev/null
+  unset "_GC_PROC_AGE_OVERRIDE_${PID206}"
+  CATLOG206=$(cat "$ST206/adt-gc.log" 2>/dev/null || true)
+  assert_not_contains "TC-LGC4-206 (P1-4): rule 3.2 skips a candidate whose profile dir has a LIVE sharer" "pid=$PID206" "$CATLOG206"
+  kill -9 "$SHARER206_PID" 2>/dev/null || true
+  kill -9 -- "-$PID206" 2>/dev/null || true
+  kill -9 "$PID206" 2>/dev/null || true
+else
+  assert_pass "TC-LGC4-206: skipped — reparenting to init did not occur as expected on this sandbox"
+fi
+rm -rf "$ST206" "$SHARED_PROFILE_206"
+
+# TC-LGC4-207 (P1-4 proof, MCP parent): rule 3.2's second rule-local
+# conjunct — a candidate is skipped when it is a live descendant of a
+# process whose argv matches `chrome-devtools-mcp`.
+MCP_PARENT_SHIM_207="$P200ROOT/mcp-parent-shim.sh"
+cat > "$MCP_PARENT_SHIM_207" <<EOF
+#!/bin/bash
+"$CHROME_SHIM_206" "--user-data-dir=/tmp/puppeteer_dev_chrome_profile-tc4-207-\$\$" &
+CHILD=\$!
+echo "\$CHILD" > "$P200ROOT/mcp-child-207.pid"
+wait "\$CHILD"
+EOF
+chmod +x "$MCP_PARENT_SHIM_207"
+setsid bash -c "exec -a chrome-devtools-mcp bash '$MCP_PARENT_SHIM_207'" &
+disown
+MCPPARENT207_PID=$!
+SPAWNED_PIDS+=("$MCPPARENT207_PID")
+sleep 0.5
+PID207=$(cat "$P200ROOT/mcp-child-207.pid" 2>/dev/null || echo "")
+if [[ -n "$PID207" ]]; then
+  SPAWNED_PIDS+=("$PID207")
+  ST207=$(mktemp -d)
+  export "_GC_PROC_AGE_OVERRIDE_${PID207}=7300"
+  run_gc_dry_full "$ST207" >/dev/null
+  unset "_GC_PROC_AGE_OVERRIDE_${PID207}"
+  CATLOG207=$(cat "$ST207/adt-gc.log" 2>/dev/null || true)
+  assert_not_contains "TC-LGC4-207 (P1-4): rule 3.2 skips a candidate with a live chrome-devtools-mcp ancestor" "pid=$PID207" "$CATLOG207"
+  rm -rf "$ST207"
+else
+  assert_pass "TC-LGC4-207: skipped — could not observe the fixture's child pid on this sandbox"
+fi
+kill -9 -- "-$MCPPARENT207_PID" 2>/dev/null || true
+
+# TC-LGC4-208 (dispatch-local.sh P2-2 proof): the opportunistic --quick
+# call is wrapped in a hard timeout — grep-pin that `timeout`/`gtimeout`
+# feature-detection surrounds the --quick call site (source-of-truth,
+# same class of assertion as the existing TC-LGC4-120 line-order pin).
+TIMEOUT_WRAP_HIT=$(grep -n '_ADT_GC_QUICK_TIMEOUT_CMD' "$DISPATCH_LOCAL" || true)
+assert_contains "TC-LGC4-208 (P2-2): dispatch-local.sh feature-detects timeout/gtimeout for the opportunistic --quick call" "_ADT_GC_QUICK_TIMEOUT_CMD" "$TIMEOUT_WRAP_HIT"
+
+# End-to-end: a --quick invocation that would otherwise hang is bounded.
+SLOWGC_209="$P200ROOT/slow-adt-gc.sh"
+cat > "$SLOWGC_209" <<'EOF'
+#!/bin/bash
+sleep 30
+EOF
+chmod +x "$SLOWGC_209"
+START209=$(date +%s)
+_TCMD209="$(command -v timeout || command -v gtimeout || true)"
+if [[ -n "$_TCMD209" ]]; then
+  "$_TCMD209" 2 bash "$SLOWGC_209" >/dev/null 2>&1 || true
+  END209=$(date +%s)
+  ELAPSED209=$((END209 - START209))
+  if [[ "$ELAPSED209" -lt 10 ]]; then
+    assert_pass "TC-LGC4-209 (P2-2): a hard-timeout-wrapped slow GC call returns in ${ELAPSED209}s, not the full 30s sleep"
+  else
+    assert_fail "TC-LGC4-209 (P2-2): timeout wrap did not bound the call (${ELAPSED209}s elapsed)"
+  fi
+else
+  assert_pass "TC-LGC4-209: skipped — neither timeout nor gtimeout available on this sandbox"
+fi
+rm -f "$SLOWGC_209"
+
+# TC-LGC4-210 (P2-3 proof): a decoy crontab line that merely MENTIONS the
+# marker text mid-line (not as the line's own trailing marker) survives
+# BOTH install and --uninstall — proving exact-suffix matching, not
+# substring containment.
+TIMERBIN210=$(mktemp -d)
+CRONSTORE210=$(mktemp)
+cat > "$TIMERBIN210/crontab" <<'EOF'
+#!/bin/bash
+STORE="${CRONTAB_STUB_STORE:?}"
+if [[ "$1" == "-l" ]]; then
+  [[ -f "$STORE" ]] && cat "$STORE"
+  exit 0
+elif [[ "$1" == "-" ]]; then
+  cat > "$STORE"
+  exit 0
+fi
+exit 1
+EOF
+chmod +x "$TIMERBIN210/crontab"
+DECOY_LINE_210="# note to self: do not remove the line matching adt-gc-timer (autonomous-dev-team Lane-GC series, do not edit — managed by install-gc-timer.sh) by hand"
+echo "$DECOY_LINE_210" > "$CRONSTORE210"
+PATH="$TIMERBIN210:$PATH" CRONTAB_STUB_STORE="$CRONSTORE210" ADT_STATE_ROOT="$(mktemp -d)" bash "$INSTALL_GC_TIMER" >/dev/null 2>&1
+assert_contains "TC-LGC4-210a (P2-3): a decoy line mentioning the marker text mid-line survives install" "$DECOY_LINE_210" "$(cat "$CRONSTORE210")"
+MARKER_COUNT_210=$(grep -c 'adt-gc-timer' "$CRONSTORE210")
+assert_eq "TC-LGC4-210b (P2-3): install still adds exactly one REAL managed line alongside the surviving decoy" "2" "$MARKER_COUNT_210"
+PATH="$TIMERBIN210:$PATH" CRONTAB_STUB_STORE="$CRONSTORE210" bash "$INSTALL_GC_TIMER" --uninstall >/dev/null 2>&1
+assert_contains "TC-LGC4-210c (P2-3): the decoy line ALSO survives --uninstall" "$DECOY_LINE_210" "$(cat "$CRONSTORE210")"
+MARKER_COUNT_210B=$(grep -c 'adt-gc-timer' "$CRONSTORE210")
+assert_eq "TC-LGC4-210d (P2-3): --uninstall removes only the REAL managed line, leaving just the decoy's mention" "1" "$MARKER_COUNT_210B"
+rm -rf "$TIMERBIN210" "$CRONSTORE210"
+
+# TC-LGC4-211 (P2-4 proof): a path containing '%' is rejected (fail loud),
+# both for adt-gc.sh's own resolved path (via ADT_STATE_ROOT — the
+# logfile path derivation is what's under test here, adt-gc.sh's OWN path
+# cannot be relocated without moving the real file) and the derived
+# logfile path.
+BADROOT_211="$P200ROOT/bad%root"
+mkdir -p "$BADROOT_211" 2>/dev/null || true
+OUT211=$(ADT_STATE_ROOT="$BADROOT_211" bash "$INSTALL_GC_TIMER" 2>&1); RC211=$?
+assert_eq "TC-LGC4-211a (P2-4): a '%' in the derived logfile path (ADT_STATE_ROOT) is rejected with a non-zero exit" "1" "$RC211"
+assert_contains "TC-LGC4-211b (P2-4): the rejection names '%' as the reason, not a silent failure" "%" "$OUT211"
+rm -rf "$BADROOT_211" 2>/dev/null || true
+
+# TC-LGC4-212 (P2-4 proof, cron entry quoting): the installed cron entry
+# quotes both the adt-gc.sh path and the logfile path.
+TIMERBIN212=$(mktemp -d)
+CRONSTORE212=$(mktemp)
+cp "$TIMERBIN210/crontab" "$TIMERBIN212/crontab" 2>/dev/null || cat > "$TIMERBIN212/crontab" <<'EOF'
+#!/bin/bash
+STORE="${CRONTAB_STUB_STORE:?}"
+if [[ "$1" == "-l" ]]; then
+  [[ -f "$STORE" ]] && cat "$STORE"
+  exit 0
+elif [[ "$1" == "-" ]]; then
+  cat > "$STORE"
+  exit 0
+fi
+exit 1
+EOF
+chmod +x "$TIMERBIN212/crontab"
+PATH="$TIMERBIN212:$PATH" CRONTAB_STUB_STORE="$CRONSTORE212" ADT_STATE_ROOT="$(mktemp -d)" bash "$INSTALL_GC_TIMER" >/dev/null 2>&1
+INSTALLED_LINE_212=$(grep 'adt-gc-timer' "$CRONSTORE212" | head -1)
+assert_contains "TC-LGC4-212a (P2-4): installed cron entry single-quotes the adt-gc.sh path" "bash '${ADT_GC}'" "$INSTALLED_LINE_212"
+assert_contains "TC-LGC4-212b (P2-4): installed cron entry single-quotes the logfile redirect target" ">> '" "$INSTALLED_LINE_212"
+rm -rf "$TIMERBIN212" "$CRONSTORE212"
+
+# TC-LGC4-213 (P2-5 proof): grep-pin — the `_gc_rotate_log` call site
+# appears AFTER the singleton lock's `exec 9>`/`flock` acquisition, never
+# before. Line-number comparison against the real shipped file (not a
+# paraphrase), matching the existing TC-LGC4-120 line-order pin technique.
+LOCK_LINE_213=$(grep -n '^exec 9>"\$GC_LOCK"' "$ADT_GC" | head -1 | cut -d: -f1)
+ROTATE_CALL_LINE_213=$(grep -n '^_gc_rotate_log$' "$ADT_GC" | head -1 | cut -d: -f1)
+if [[ -n "$LOCK_LINE_213" && -n "$ROTATE_CALL_LINE_213" ]] && [[ "$ROTATE_CALL_LINE_213" -gt "$LOCK_LINE_213" ]]; then
+  assert_pass "TC-LGC4-213 (P2-5): _gc_rotate_log's call site (line $ROTATE_CALL_LINE_213) runs AFTER the singleton lock is acquired (line $LOCK_LINE_213), never before"
+else
+  assert_fail "TC-LGC4-213 (P2-5): expected the rotate call ($ROTATE_CALL_LINE_213) after the lock acquisition ($LOCK_LINE_213)"
+fi
+
+# TC-LGC4-214 (bash dynamic-scoping landmine, found while hardening P1-2):
+# `_gc_proc_age`/`_gc_env_readable` derive their test-only override
+# variable NAME from `${pid}` in the SAME compound `local` statement that
+# assigns `pid` — bash expands every RHS in a `local a=X b=Y` list before
+# any assignment in that statement takes effect, so `${pid}` there
+# resolves via dynamic scoping to a CALLER's own `pid` local (or crashes
+# under `set -u` with no such caller-scope variable) rather than the
+# value just assigned on the same line. Proven by calling `_gc_proc_age`
+# in a context with NO enclosing local literally named `pid` — if the
+# landmine regresses, this either crashes (`set -u`) or resolves the
+# override variable to an empty-suffixed name and returns the WRONG
+# (real, unaged) proc_age instead of the override value.
+AGE_FN_SRC_214=$(sed -n '/^_gc_proc_age()/,/^}/p' "$ADT_GC")
+sleep 30 &
+disown
+PID214=$!
+SPAWNED_PIDS+=("$PID214")
+sleep 0.2
+export "_GC_PROC_AGE_OVERRIDE_${PID214}=99999"
+OUT214=$(bash -c '
+  set -uo pipefail
+  source "'"$LIB_LANE"'"
+  '"$AGE_FN_SRC_214"'
+  no_such_caller_var() { _gc_proc_age "'"$PID214"'"; }
+  no_such_caller_var
+' 2>&1)
+unset "_GC_PROC_AGE_OVERRIDE_${PID214}"
+assert_eq "TC-LGC4-214 (dynamic-scoping landmine): _gc_proc_age honors its override even with NO enclosing caller-scope 'pid' variable" "99999" "$OUT214"
+kill -9 "$PID214" 2>/dev/null || true
+
+rm -rf "$P200ROOT"
 
 # ===========================================================================
 echo ""

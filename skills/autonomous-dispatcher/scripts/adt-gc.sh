@@ -105,12 +105,46 @@ GC_PASS4_STATE="${ADT_STATE_ROOT}/adt-gc-pass4.state"
 # (no override set in production), a unit test sets the per-pid override
 # to simulate an aged process without a real multi-minute sleep.
 _gc_proc_age() {
-  local pid="$1" override_var="_GC_PROC_AGE_OVERRIDE_${pid}"
+  # [Lane-GC PR-4 review round-2 hardening] `local pid="$1" v="X${pid}"` in
+  # ONE compound statement is a bash landmine: every RHS in a `local ...`
+  # list is expanded BEFORE any assignment in that same statement takes
+  # effect, so `${pid}` here would resolve via dynamic scoping to whatever
+  # a CALLER's own local variable literally named `pid` holds (or crash
+  # under `set -u` if no such caller-scope variable exists) — NOT the
+  # value just assigned on this same line. Every current call site happens
+  # to have an enclosing `pid` of the identical value, which is why this
+  # "worked" by coincidence; splitting into two statements makes the
+  # second's expansion see this function's OWN just-assigned value
+  # unconditionally, regardless of what the caller's scope contains.
+  local pid="$1"
+  local override_var="_GC_PROC_AGE_OVERRIDE_${pid}"
   if [[ -n "${!override_var:-}" ]]; then
     printf '%s\n' "${!override_var}"
     return 0
   fi
   proc_age "$pid"
+}
+
+# _gc_env_readable <pid> — thin wrapper over lib-lane.sh::env_readable with
+# a test-only override seam (`_GC_ENV_UNREADABLE_OVERRIDE_<pid>`), mirroring
+# `_gc_proc_age`'s pattern immediately above. Same-uid `/proc/PID/environ`
+# is ALWAYS readable in a unit-test sandbox (the fixture and the test
+# harness run as the same user), so there is no practical way to make a
+# real process's env genuinely unreadable to prove the P1-2 fail-closed
+# fix behaviorally — production code always calls the real `env_readable`
+# (no override set in production); a unit test sets the per-pid override
+# to simulate the "env unreadable" case (dead-mid-scan / EPERM / macOS
+# without the shim) without needing a privilege-dropped or cross-uid
+# fixture process.
+_gc_env_readable() {
+  # See `_gc_proc_age`'s comment for why this is two statements, not one
+  # compound `local` — the same dynamic-scoping landmine applies here.
+  local pid="$1"
+  local override_var="_GC_ENV_UNREADABLE_OVERRIDE_${pid}"
+  if [[ -n "${!override_var:-}" ]]; then
+    return 1
+  fi
+  env_readable "$pid"
 }
 
 # _gc_now_ms — epoch milliseconds. GNU date supports %3N; BSD/macOS date
@@ -241,14 +275,61 @@ WOULD_KILL_LEGACY=0
 UNKNOWN_CLASS=0
 LIVE_BURNER_ALERTS=0
 
+# _gc_own_pgid — cache-once, echo THIS process's own pgid (numeric string).
+# Every kill-authorization site consults this to refuse touching its own
+# group; computed once since it cannot change during a single run.
+_GC_OWN_PGID=""
+_gc_own_pgid() {
+  if [[ -z "$_GC_OWN_PGID" ]]; then
+    _GC_OWN_PGID="$(proc_pgid "$$" 2>/dev/null || echo "")"
+  fi
+  printf '%s\n' "$_GC_OWN_PGID"
+}
+
+# _gc_safe_kill_pid <pid> — [Lane-GC PR-4 review round-2, P1-3] true iff
+# <pid> is a SAFE individual-kill target: numeric, and NOT this process's
+# own $$. Every individual-PID kill site (`_gc_term_then_kill_pid`, rule
+# 1.4's guardian kill, `_gc_kill_candidate`'s pgid-invalid fallback) MUST
+# gate on this before signaling — `_gc_same_uid_pids` already excludes
+# `$$` from Pass 2/3's OWN candidate enumeration, but that exclusion lives
+# in one call site and does not protect callers reached indirectly (rule
+# 1.4's `GUARDIAN_PID` comes from registry content, not the same-uid
+# enumeration, so it has no such built-in exclusion).
+_gc_safe_kill_pid() {
+  local pid="$1"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  [[ "$pid" != "$$" ]]
+}
+
+# _gc_safe_kill_pgid <pgid> — [Lane-GC PR-4 review round-2, P1-3] true iff
+# <pgid> is a SAFE process-GROUP kill target: numeric, > 1 (pgid 0 is a
+# kernel alias for "the SENDER's own process group" — `kill -TERM -- -0`
+# or a bare `kill -TERM 0` signals US, not any classified candidate; pgid
+# 1 is the init/systemd group and must never be targeted regardless), and
+# not equal to this process's OWN pgid (`_gc_own_pgid`) — a `proc_pgid`
+# read racing a process's exit, or any future refactor that lets a
+# candidate's pgid alias GC's own group, must never be able to
+# self-signal. Every group-form kill site (`_gc_kill_candidate`,
+# `_kill_group_escalate` callers here) gates on this FIRST.
+_gc_safe_kill_pgid() {
+  local pg="$1" own_pg
+  [[ "$pg" =~ ^[0-9]+$ ]] || return 1
+  [[ "$pg" -gt 1 ]] || return 1
+  own_pg="$(_gc_own_pgid)"
+  [[ -z "$own_pg" || "$pg" != "$own_pg" ]]
+}
+
 # _gc_term_then_kill_pid <pid> — individual-PID TERM->1s->KILL (the
 # non-group escalation shape rule 1.4's guardian-first kill and Pass 2/3's
 # _gc_kill_candidate fallback both need). Distinct from lib-lane.sh's
 # `_kill_group_escalate` (which signals a whole process GROUP over a 10s
 # grace) — this is the shorter, single-pid variant used where there is no
 # group to reach (a guardian pid, or a candidate whose pgid lookup failed).
+# [P1-3] Refuses to signal unless `_gc_safe_kill_pid` clears it — this is
+# the LAST line of defense before every individual-pid kill in this file.
 _gc_term_then_kill_pid() {
   local pid="$1"
+  _gc_safe_kill_pid "$pid" || return 0
   kill -TERM "$pid" 2>/dev/null || true
   sleep 1
   kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null || true
@@ -408,8 +489,27 @@ _gc_same_uid_pids() {
 # of what else matches). Centralizes the identical
 # `env_lookup … TERM_PROGRAM || echo ""` + emptiness check every Pass-2/3
 # rule repeats.
+#
+# [Lane-GC PR-4 review round-2, P1-2] Deliberately does NOT itself decide
+# the "env unreadable" case — that is `_gc_env_unknowable`'s job (below),
+# called SEPARATELY and FIRST by every guard site. Collapsing both checks
+# into one function would make "unreadable" and "readable-but-absent"
+# indistinguishable to a caller that only checks a single boolean, which
+# is the exact class of bug being fixed here: this function's OWN
+# `env_lookup … || echo ""` fallback still can't tell why the lookup
+# failed, so it must never be the only gate protecting a kill decision.
 _gc_has_term_program() {
   [[ -n "$(env_lookup "$1" TERM_PROGRAM 2>/dev/null || echo "")" ]]
+}
+
+# _gc_env_unknowable <pid> — true iff this pid's environment cannot be
+# read at all right now (fail-toward-leak per design principle 5: skip,
+# never kill, whenever we cannot positively confirm the ABSENCE of
+# TERM_PROGRAM or any other env-tag signal). MUST be checked before, and
+# independently of, `_gc_has_term_program`/`env_lookup` at every
+# kill-authorization site in Pass 2/3 — see `_gc_common_kill_guards`.
+_gc_env_unknowable() {
+  ! _gc_env_readable "$1"
 }
 
 # _gc_group_has_live_wrapper <pgid> — rule 2.3: argv-based (never
@@ -483,6 +583,74 @@ _gc_pgid_in_live_wrapper_ancestry() {
   return 1
 }
 
+# _gc_common_kill_guards <pid> <pg> <age_floor> [rule_id] — [Lane-GC PR-4
+# review round-2, Class A / P1-1, P1-4, P2-1] the ONE shared guard set
+# every Pass-2/3 kill-authorization site must clear before signaling
+# anything. <pg> is the candidate's pgid, resolved by the CALLER (every
+# call site already needs it for its own `_gc_kill_candidate`/log-line
+# purposes, so this function does not re-resolve it). Returns 0 when
+# every guard passes; returns 1 (caller must skip) otherwise. Order
+# matters: cheapest/most decisive checks first so a rejected candidate
+# short-circuits before any process-table walk.
+#
+#   1. env-unknowable  → skip (fail toward leak; P1-2's fix, checked
+#      FIRST and SEPARATELY from TERM_PROGRAM so an unreadable env is
+#      never silently treated as "TERM_PROGRAM absent"; logged with its
+#      own reason when [rule_id] is given, per the design's
+#      registry-authoritative-only posture on macOS-without-shim)
+#   2. TERM_PROGRAM present → skip (rule 2.2, unconditional)
+#   3. age < floor → skip (the caller passes ITS OWN floor: 300s/600s
+#      exact-vs-legacy for rule 2, and per Pass-3 sub-rule below)
+#   4. pgid is a SAFE kill target (`_gc_safe_kill_pgid` — numeric, not
+#      0/1, not GC's own group; P1-3's self/pgid-0 fix)
+#   5. `_gc_group_has_live_wrapper` — pgid contains no live wrapper-argv
+#      match (rule 2.3)
+#   6. `_gc_pgid_in_live_lane_pgids` — pgid not recorded by any live lane
+#      (rule 2.4 first conjunct)
+#   7. `_gc_pgid_is_live_pidfile_pgid` — pgid not a live PID-file's own
+#      group (rule 2.4 second conjunct)
+#   8. `_gc_pgid_in_live_wrapper_ancestry` — pgid outside every live
+#      wrapper's descendant tree (rule 2.4 third conjunct)
+#
+# Before this PR's round-2 fix, Pass 2 alone applied this full set;
+# EVERY Pass-3 sub-rule (3.1 lane-scoped Chrome, 3.2 Chrome heuristic,
+# 3.3 wedged gh, 3.4 E2E servers) applied only an ARBITRARY SUBSET —
+# 3.4 applied NONE of it at all (P1-1: an operator shell cwd'd inside a
+# since-removed worktree directory was killable outright, whole pgid,
+# no TERM_PROGRAM check, no age floor, no live-anything guard); 3.2
+# omitted the design's two Chrome-specific conjuncts (added separately,
+# see `_gc_pass3_chrome_heuristic`); 3.3 computed an age but never
+# compared it to a floor and omitted the live-lane-pgids/live-pidfile-pgid
+# checks (P2-1). Extracting one function that EVERY rule calls makes the
+# guard set structurally impossible to omit a conjunct from again — a
+# future Pass-3 rule that skips calling this has an immediately visible
+# gap in its own body, rather than a silently-incomplete inline copy.
+_gc_common_kill_guards() {
+  local pid="$1" pg="$2" age_floor="$3" rule_id="${4:-}" age
+
+  if _gc_env_unknowable "$pid"; then
+    if [[ -n "$rule_id" ]]; then
+      SKIPS=$((SKIPS + 1))
+      _gc_log "skip rule=${rule_id}-env-unreadable pid=$pid reason=env-unknowable-fail-toward-leak"
+    fi
+    return 1
+  fi
+  _gc_has_term_program "$pid" && return 1
+
+  age="$(_gc_proc_age "$pid" 2>/dev/null || echo 0)"
+  [[ "$age" =~ ^[0-9]+$ ]] || age=0
+  [[ "$age" -ge "$age_floor" ]] || return 1
+
+  _gc_safe_kill_pgid "$pg" || return 1
+
+  _gc_group_has_live_wrapper "$pg" && return 1
+  _gc_pgid_in_live_lane_pgids "$pg" && return 1
+  _gc_pgid_is_live_pidfile_pgid "$pg" && return 1
+  _gc_pgid_in_live_wrapper_ancestry "$pg" && return 1
+
+  return 0
+}
+
 # _gc_kill_candidate <pid> <pgid> <rule> — apply the design's TERM->10s->
 # KILL escalation (group-form where the pgid is real, individual-pid form
 # as a fallback) under `reap.lock`-free best-effort (GC's own kills are
@@ -492,7 +660,14 @@ _gc_pgid_in_live_wrapper_ancestry() {
 # definition have no live lane, so no reap.lock exists to take).
 _gc_kill_candidate() {
   local pid="$1" pg="$2"
-  if [[ "$pg" =~ ^[0-9]+$ ]]; then
+  # [P1-3] Group-form is authorized ONLY through `_gc_safe_kill_pgid` —
+  # numeric, > 1, and not GC's own pgid (see that function's own comment
+  # for why pgid 0/1 and self-pgid are all refused here rather than
+  # trusting the caller to have filtered them out already: this is the
+  # LAST line of defense before the group-form kill fires). The pid-form
+  # fallback is gated by `_gc_term_then_kill_pid`'s own `_gc_safe_kill_pid`
+  # check, so a bad pgid never silently escalates to an unsafe pid kill.
+  if _gc_safe_kill_pgid "$pg"; then
     _kill_group_escalate "$pg" 10
   else
     _gc_term_then_kill_pid "$pid"
@@ -500,18 +675,33 @@ _gc_kill_candidate() {
 }
 
 _gc_pass2() {
-  local pid lane_id age pg is_legacy eligible
+  local pid lane_id pg is_legacy eligible age_floor
   local conf_loaded cc_user ppid lane_dir_match
   while IFS= read -r pid; do
     [[ -n "$pid" ]] || continue
 
+    # [P1-2] env-unknowable is checked HERE too (not only inside
+    # `_gc_common_kill_guards` below) because Pass 2's OWN eligibility
+    # decision (rules 2.1's exact-join vs the legacy-signature arm) reads
+    # ADT_LANE_ID/AUTONOMOUS_CONF_LOADED_FROM/CC_USER directly — an
+    # unreadable env must skip BEFORE those reads are even attempted, not
+    # just before the final kill. `_gc_has_term_program`'s own
+    # `env_lookup … || echo ""` fallback can't distinguish "unreadable"
+    # from "TERM_PROGRAM absent", so this early env-unknowable check is
+    # the fix, not a redundant belt-and-suspenders duplicate of the guard
+    # function's own internal check (which still applies again below,
+    # defending the age/pgid/live-* conjuncts against a TOCTOU env change
+    # between here and there).
+    if _gc_env_unknowable "$pid"; then
+      SKIPS=$((SKIPS + 1))
+      _gc_log "skip rule=2-env-unreadable pid=$pid reason=env-unknowable-fail-toward-leak"
+      continue
+    fi
     _gc_has_term_program "$pid" && continue  # rule 2.2 — unconditional skip
-
-    age="$(_gc_proc_age "$pid" 2>/dev/null || echo "")"
-    [[ "$age" =~ ^[0-9]+$ ]] || age=0
 
     is_legacy=false
     eligible=false
+    age_floor=0
 
     lane_id="$(env_lookup "$pid" ADT_LANE_ID 2>/dev/null || echo "")"
     if [[ -n "$lane_id" ]]; then
@@ -523,8 +713,9 @@ _gc_pass2() {
         _gc_log "skip rule=2.1-unknown-lane-id pid=$pid lane_id=$lane_id"
         continue
       fi
-      if [[ "$(lane_probe "$lane_dir_match" 2>/dev/null)" == "dead" ]] && [[ "$age" -ge 300 ]]; then
+      if [[ "$(lane_probe "$lane_dir_match" 2>/dev/null)" == "dead" ]]; then
         eligible=true
+        age_floor=300
       fi
     else
       conf_loaded="$(env_lookup "$pid" AUTONOMOUS_CONF_LOADED_FROM 2>/dev/null || echo "")"
@@ -534,21 +725,17 @@ _gc_pass2() {
       # is ALWAYS in conjunction with the conf+CC_USER signature and the
       # age floor below — never as a bare `ppid==1` kill key on its own
       # (design's explicit banned-keys list, §6).
-      if [[ -n "$conf_loaded" ]] && [[ "$cc_user" =~ ^autonomous-(dev|review)-bot$ ]] && [[ "$ppid" == "1" ]] && [[ "$age" -ge 600 ]]; then
+      if [[ -n "$conf_loaded" ]] && [[ "$cc_user" =~ ^autonomous-(dev|review)-bot$ ]] && [[ "$ppid" == "1" ]]; then
         eligible=true
         is_legacy=true
+        age_floor=600
       fi
     fi
 
     [[ "$eligible" == true ]] || continue
 
     pg="$(proc_pgid "$pid" 2>/dev/null || echo "")"
-    [[ -n "$pg" ]] || continue
-
-    _gc_group_has_live_wrapper "$pg" && continue
-    _gc_pgid_in_live_lane_pgids "$pg" && continue
-    _gc_pgid_is_live_pidfile_pgid "$pg" && continue
-    _gc_pgid_in_live_wrapper_ancestry "$pg" && continue
+    _gc_common_kill_guards "$pid" "$pg" "$age_floor" || continue
 
     if [[ "$GC_MODE" == "kill" ]]; then
       _gc_kill_candidate "$pid" "$pg"
@@ -567,7 +754,7 @@ _gc_pass2() {
 # ---------------------------------------------------------------------------
 
 _gc_pass3_chrome_lane_scoped() {
-  local lane_dir hint pid argv
+  local lane_dir hint pid argv pg
   while IFS= read -r lane_dir; do
     [[ -n "$lane_dir" ]] || continue
     [[ "$(lane_probe "$lane_dir" 2>/dev/null)" == "dead" ]] || continue
@@ -577,9 +764,14 @@ _gc_pass3_chrome_lane_scoped() {
       [[ -n "$pid" ]] || continue
       argv="$(proc_argv "$pid" 2>/dev/null | tr '\n' ' ')"
       [[ "$argv" == *"--user-data-dir=${hint}"* || "$argv" == *"$hint"* ]] || continue
-      _gc_has_term_program "$pid" && continue
-      local pg
       pg="$(proc_pgid "$pid" 2>/dev/null || echo "")"
+      # [Lane-GC PR-4 review round-2, P1-1 class fix] age_floor=0 — design
+      # §6 row 3.1 lists no age conjunct for this rule; the dead-lane
+      # CHROME_PROFILE_HINT match is already an exact, positive join (same
+      # confidence class as rule 2.1's exact ADT_LANE_ID join). Every OTHER
+      # shared guard now applies too — pre-fix this rule checked ONLY
+      # TERM_PROGRAM, nothing else.
+      _gc_common_kill_guards "$pid" "$pg" 0 "3.1" || continue
       if [[ "$GC_MODE" == "kill" ]]; then
         _gc_kill_candidate "$pid" "$pg"
         KILLED=$((KILLED + 1))
@@ -592,20 +784,80 @@ _gc_pass3_chrome_lane_scoped() {
   done < <(_gc_all_lane_dirs)
 }
 
+# _gc_chrome_profile_has_live_sharer <profile_dir> <exclude_pid> — rule
+# 3.2's first rule-local extra conjunct (design §6 row 3.2 / §5 line 215:
+# "no live process shares that profile dir"). Kept OUTSIDE
+# `_gc_common_kill_guards` — no other Pass-3 rule keys on a shared
+# filesystem profile directory, so this concept has exactly one caller.
+_gc_chrome_profile_has_live_sharer() {
+  local profile_dir="$1" exclude_pid="$2" pid argv
+  while IFS= read -r pid; do
+    [[ -n "$pid" && "$pid" != "$exclude_pid" ]] || continue
+    argv="$(proc_argv "$pid" 2>/dev/null | tr '\n' ' ')"
+    [[ "$argv" == *"--user-data-dir=${profile_dir}"* ]] && return 0
+  done < <(_gc_same_uid_pids)
+  return 1
+}
+
+# _gc_chrome_has_live_mcp_parent <pid> — rule 3.2's second rule-local
+# extra conjunct (design §6 row 3.2 / §5 line 215: "no live
+# chrome-devtools-mcp parent... Operator chromes have a live MCP parent,
+# so ppid≠1 — validated live"). The caller already requires ppid==1, so a
+# genuinely orphaned chrome has no live ancestor at all in the common
+# case; this is defense-in-depth for a subreaper/race shape where the
+# ppid==1 read and this check straddle a respawn, or a containerized
+# subreaper re-adopts the chrome while an MCP server process remains
+# alive. Walks the live descendant tree of every live
+# chrome-devtools-mcp-matching process (same BFS technique as
+# `_gc_pgid_in_live_wrapper_ancestry`) and also checks the immediate ppid
+# directly.
+_gc_chrome_has_live_mcp_parent() {
+  local pid="$1" ppid mp queue cur kids k
+  ppid="$(proc_ppid "$pid" 2>/dev/null || echo "")"
+  while IFS= read -r mp; do
+    [[ -n "$mp" ]] || continue
+    [[ "$mp" == "$ppid" ]] && return 0
+    queue="$mp"
+    while [[ -n "$queue" ]]; do
+      cur="${queue%%$'\n'*}"
+      if [[ "$queue" == *$'\n'* ]]; then queue="${queue#*$'\n'}"; else queue=""; fi
+      kids="$(pgrep -P "$cur" 2>/dev/null || true)"
+      [[ -z "$kids" ]] && continue
+      for k in $kids; do
+        [[ "$k" == "$pid" ]] && return 0
+        queue="${queue:+$queue$'\n'}$k"
+      done
+    done
+  done < <(pgrep -f 'chrome-devtools-mcp' 2>/dev/null | grep -vw "$$" || true)
+  return 1
+}
+
 _gc_pass3_chrome_heuristic() {
-  local pid argv age ppid pg
+  local pid argv ppid pg hint_dir
   while IFS= read -r pid; do
     [[ -n "$pid" ]] || continue
     argv="$(proc_argv "$pid" 2>/dev/null | tr '\n' ' ')"
     [[ "$argv" == *"--user-data-dir=/tmp/puppeteer_dev_chrome_profile-"* ]] || continue
     ppid="$(proc_ppid "$pid" 2>/dev/null || echo "")"
     [[ "$ppid" == "1" ]] || continue
-    age="$(_gc_proc_age "$pid" 2>/dev/null || echo 0)"
-    [[ "$age" =~ ^[0-9]+$ ]] || age=0
-    [[ "$age" -gt 7200 ]] || continue
-    _gc_has_term_program "$pid" && continue
     pg="$(proc_pgid "$pid" 2>/dev/null || echo "")"
-    [[ -n "$pg" ]] && _gc_pgid_in_live_wrapper_ancestry "$pg" && continue
+    # [Lane-GC PR-4 review round-2, P1-4 class fix] floor=7200 unchanged
+    # from the pre-fix inline check (design row 3.2: "age > 2h"); the
+    # shared guard's `-ge` vs the design's literal `>` differ by at most
+    # 1s, immaterial at 10-min cron granularity. Every OTHER shared guard
+    # now applies too — pre-fix this rule checked ONLY ppid==1, age, and
+    # TERM_PROGRAM (no live-wrapper/live-lane-pgid/live-pidfile-pgid/
+    # ancestry guards at all).
+    _gc_common_kill_guards "$pid" "$pg" 7200 "3.2" || continue
+
+    # [P1-4] rule-local extra conjuncts (design §6 row 3.2) — kept OUTSIDE
+    # _gc_common_kill_guards; see the two helper functions' own docstrings.
+    hint_dir="$(printf '%s' "$argv" | grep -oE -- '--user-data-dir=/tmp/puppeteer_dev_chrome_profile-[^ ]*' | head -1 | cut -d= -f2-)"
+    if [[ -n "$hint_dir" ]] && _gc_chrome_profile_has_live_sharer "$hint_dir" "$pid"; then
+      continue
+    fi
+    _gc_chrome_has_live_mcp_parent "$pid" && continue
+
     if [[ "$GC_MODE" == "kill" ]]; then
       _gc_kill_candidate "$pid" "$pg"
       KILLED=$((KILLED + 1))
@@ -618,19 +870,40 @@ _gc_pass3_chrome_heuristic() {
 }
 
 _gc_pass3_wedged_gh() {
-  local pid argv token_file age pg
+  local pid argv token_file pg
   while IFS= read -r pid; do
     [[ -n "$pid" ]] || continue
     argv="$(proc_argv "$pid" 2>/dev/null | tr '\n' ' ')"
     [[ "$argv" == *"gh"*"pr"*"checks"*"--watch"* || "$argv" == *"gh"*"api"* ]] || continue
+
+    # [P1-2 class parity] env-unknowable is checked HERE, before reading
+    # GH_TOKEN_FILE, for the same reason Pass 2 checks it before reading
+    # ADT_LANE_ID/CC_USER: this rule's OWN eligibility test reads the env
+    # directly, so an unreadable env must be logged and skipped before
+    # that read is even attempted, not just inside the shared guard below.
+    if _gc_env_unknowable "$pid"; then
+      SKIPS=$((SKIPS + 1))
+      _gc_log "skip rule=3.3-env-unreadable pid=$pid reason=env-unknowable-fail-toward-leak"
+      continue
+    fi
     token_file="$(env_lookup "$pid" GH_TOKEN_FILE 2>/dev/null || echo "")"
     [[ "$token_file" == /tmp/agent-auth-* ]] || continue
     [[ -e "$(dirname "$token_file")" ]] && continue
-    _gc_has_term_program "$pid" && continue
-    age="$(_gc_proc_age "$pid" 2>/dev/null || echo 0)"
-    [[ "$age" =~ ^[0-9]+$ ]] || age=0
+
     pg="$(proc_pgid "$pid" 2>/dev/null || echo "")"
-    [[ -n "$pg" ]] && { _gc_group_has_live_wrapper "$pg" && continue; _gc_pgid_in_live_wrapper_ancestry "$pg" && continue; }
+    # [Lane-GC PR-4 review round-2, P2-1 class fix] floor=300 — design row
+    # 3.3 says "∧ 2.2–2.5", inheriting rule 2's full conjunct set; 3.3 has
+    # no ADT_LANE_ID/legacy-signature arm of its own, so there is no
+    # direct analog to 2.1's floor SELECTOR. The GH_TOKEN_FILE-pattern +
+    # dir-gone match is an exact, specific positive signal (same
+    # confidence class as 2.1's exact ADT_LANE_ID join), so it gets that
+    # join's tighter 300s floor rather than the legacy signature's weaker
+    # 600s. Every OTHER shared guard now applies too — pre-fix this rule
+    # computed an age but never compared it to ANY floor, and never
+    # checked live-lane-pgids/live-pidfile-pgid (only live-wrapper-in-pgid
+    # + ancestry).
+    _gc_common_kill_guards "$pid" "$pg" 300 "3.3" || continue
+
     if [[ "$GC_MODE" == "kill" ]]; then
       _gc_kill_candidate "$pid" "$pg"
       KILLED=$((KILLED + 1))
@@ -655,6 +928,15 @@ _gc_pass3_e2e_servers() {
       cwd="$(readlink "/proc/${pid}/cwd" 2>/dev/null || echo "")"
       [[ "$cwd" == "${worktree}"* || "$cwd" == "${worktree} (deleted)"* ]] || continue
       pg="$(proc_pgid "$pid" 2>/dev/null || echo "")"
+      # [Lane-GC PR-4 review round-2, P1-1] this rule previously applied
+      # NO guard at all before killing — no TERM_PROGRAM skip, no age
+      # floor, no live-pgid/ancestry check — so an operator shell (or a
+      # still-useful dev server) `cwd`'d inside a worktree directory that
+      # has since been `rm -rf`'d got its WHOLE PGID killed outright.
+      # floor=0: design row 3.4 lists no age conjunct (like 3.1, this is
+      # an exact structural match — dead lane + WORKTREE path gone + cwd
+      # still points there — not a fuzzy heuristic needing a wait).
+      _gc_common_kill_guards "$pid" "$pg" 0 "3.4" || continue
       if [[ "$GC_MODE" == "kill" ]]; then
         _gc_kill_candidate "$pid" "$pg"
         KILLED=$((KILLED + 1))
@@ -799,8 +1081,19 @@ fi
 # ---------------------------------------------------------------------------
 # Singleton lock + run
 # ---------------------------------------------------------------------------
-_gc_rotate_log
-
+# [Lane-GC PR-4 review round-2, P2-5] Lock BEFORE rotate, never the reverse.
+# Rotation was previously called before the flock acquisition — two
+# concurrent invocations (e.g. a --quick opportunistic call racing a cron
+# tick) could BOTH observe the log over the 25MB threshold and both run
+# `mv -f "$GC_LOG" "${GC_LOG}.1"`, with the second mv silently destroying
+# the first mv's just-rotated history (mv -f is not atomic against a
+# second mv -f to the same destination) before either had exclusive
+# ownership of the log file. Moving rotation inside the lock (after a
+# successful flock, before any pass runs) makes rotation itself
+# single-writer, matching every other GC_LOG-mutating operation (_gc_log
+# itself is only ever called after the lock is held). --doctor never
+# reaches this block at all (it returns above, at the GC_DOCTOR check) —
+# doctor's read-only probes correctly never rotate the log.
 exec 9>"$GC_LOCK" || exit 0
 if [[ "$GC_QUICK" == true ]]; then
   # F6 selfdefeat: `-w 3`, never `-n` — a quick opportunistic call queues
@@ -809,6 +1102,8 @@ if [[ "$GC_QUICK" == true ]]; then
 else
   flock -n 9 2>/dev/null || exit 0
 fi
+
+_gc_rotate_log
 
 START_MS="$(_gc_now_ms)"
 

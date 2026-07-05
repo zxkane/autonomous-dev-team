@@ -64,7 +64,24 @@ source "${LIB_DIR}/lib-lane.sh" 2>/dev/null || true
 # `flock -w 3` internally (never `-n`) so this never unconditionally bails
 # out under concurrent GC activity. `|| true` — GC is best-effort and must
 # never abort or delay a dispatch (a missing adt-gc.sh degrades silently).
-bash "${LIB_DIR}/adt-gc.sh" --quick >/dev/null 2>&1 || true
+#
+# [Lane-GC PR-4 review round-2, P2-2] Wrapped in a HARD wall-clock cap: the
+# internal `flock -w 3` bounds lock-contention wait, but not a hung Pass-1
+# body (e.g. a stat()/readlink() on a wedged NFS-mounted ADT_STATE_ROOT).
+# Without an outer cap, dispatch-local.sh — which every dispatcher tick
+# invokes — could hang indefinitely on a box with a stuck mount, turning a
+# best-effort opportunistic call into an availability outage for every
+# project. Feature-detected like lib-agent.sh's own `timeout`/`gtimeout`
+# resolution (dispatch-local.sh does not source lib-agent.sh, so this is a
+# short independent probe, not a duplicate of it) — absent both, the call
+# degrades to unwrapped (still `|| true`, so a genuine hang there is the
+# SAME exposure `--quick`'s design already accepts, not a regression).
+_ADT_GC_QUICK_TIMEOUT_CMD="$(command -v timeout || command -v gtimeout || true)"
+if [[ -n "$_ADT_GC_QUICK_TIMEOUT_CMD" ]]; then
+  "$_ADT_GC_QUICK_TIMEOUT_CMD" 15 bash "${LIB_DIR}/adt-gc.sh" --quick >/dev/null 2>&1 || true
+else
+  bash "${LIB_DIR}/adt-gc.sh" --quick >/dev/null 2>&1 || true
+fi
 
 PID_DIR=$(pid_dir_for_project) || { echo "ERROR: cannot resolve PID dir" >&2; exit 1; }
 

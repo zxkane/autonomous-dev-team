@@ -143,3 +143,33 @@ shim), and `proc_ppid`/`proc_pgid`/`proc_argv` each get a direct unit test
 |----|----------|----------|
 | TC-LGC4-120 | grep-pin: `dispatch-local.sh` calls `adt-gc.sh --quick` before `kill_stale_wrapper` | source-of-truth line-order assertion |
 | TC-LGC4-121 | `dispatch-local.sh` runs successfully when `adt-gc.sh` is DELETED/absent (simulated stale skill tree) | the `|| true` guard means dispatch still proceeds — never a hard dependency |
+
+## Review round-2 fixes (Class A shared kill guards, Class B fail-closed, P2s)
+
+Independent review found 4 P1 + 5 P2 findings clustering into two classes: (A)
+Pass-3 sub-rules each applied an ARBITRARY SUBSET of Pass 2's guard set
+(3.4 applied none at all); (B) protective checks (`_gc_has_term_program`)
+failed OPEN when a process's env could not be read at all, and
+`_gc_kill_candidate` accepted an unsafe pgid (0/1/GC's own group) or pid
+(GC's own `$$`). Fixed by extracting one shared `_gc_common_kill_guards`
+function every Pass-2/3 kill-authorization site now calls, a new
+`env_readable`/`_gc_env_unknowable` primitive pair, and `_gc_safe_kill_pid`/
+`_gc_safe_kill_pgid` gates at every kill-primitive call site.
+
+| ID | Scenario | Expected |
+|----|----------|----------|
+| TC-LGC4-200 | (P1-1) rule 3.4 (E2E servers) candidate with `TERM_PROGRAM` set | skip — pre-fix this rule applied NO guard at all before killing |
+| TC-LGC4-201 | (P1-2) a Pass-2-eligible candidate whose env is UNKNOWABLE (`_GC_ENV_UNREADABLE_OVERRIDE` seam), every other rule-2.1 condition satisfied | skip, logged with `reason=env-unknowable-fail-toward-leak` — never would-killed |
+| TC-LGC4-202 | (P1-3) `_gc_safe_kill_pgid` given pgid 0, 1, negative, empty, GC's own pgid, and an arbitrary safe pgid | refuses the first five, allows the arbitrary safe one |
+| TC-LGC4-203 | (P1-3) `_gc_safe_kill_pid` given GC's own `$$`, empty, non-numeric, and an arbitrary safe pid | refuses the first three, allows the arbitrary safe one |
+| TC-LGC4-204 | (P1-3 end-to-end) `_gc_kill_candidate` given pgid=0 | never reaches `_kill_group_escalate` (falls back to the safe per-pid path instead) |
+| TC-LGC4-205 | (P2-1) rule 3.3 (wedged gh) candidate below its new 300s age floor | skip — pre-fix this rule computed an age but never compared it to any floor |
+| TC-LGC4-206 | (P1-4) rule 3.2 candidate whose profile dir has a LIVE sharer | skip (rule-local extra conjunct, design §6 row 3.2) |
+| TC-LGC4-207 | (P1-4) rule 3.2 candidate with a live `chrome-devtools-mcp` ancestor | skip (rule-local extra conjunct) |
+| TC-LGC4-208 | (P2-2) grep-pin: `dispatch-local.sh` feature-detects `timeout`/`gtimeout` around the opportunistic `--quick` call | source-of-truth assertion |
+| TC-LGC4-209 | (P2-2) a hard-timeout-wrapped slow GC call | returns at the timeout bound, not the full underlying sleep |
+| TC-LGC4-210 | (P2-3) a decoy crontab line mentioning the marker text mid-line (not as its own trailing marker) | survives BOTH install and `--uninstall`; only the real managed line is added/removed |
+| TC-LGC4-211 | (P2-4) a `%` in the derived logfile path (`ADT_STATE_ROOT`) | install-gc-timer.sh fails loud, naming `%` as the reason |
+| TC-LGC4-212 | (P2-4) the installed cron entry | both the `adt-gc.sh` path and the logfile redirect target are single-quoted |
+| TC-LGC4-213 | (P2-5) grep-pin: `_gc_rotate_log`'s call site vs. the singleton lock acquisition | rotate call is strictly AFTER the `flock`, never before |
+| TC-LGC4-214 | (bash dynamic-scoping landmine, found while hardening P1-2) `_gc_proc_age` called with NO enclosing caller-scope variable literally named `pid` | still honors its `_GC_PROC_AGE_OVERRIDE` seam — proves the fix to a `local pid="$1" v="X${pid}"` compound-statement bug where `${pid}` was expanding via the CALLER's scope, not the value just assigned on the same line |

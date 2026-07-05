@@ -60,32 +60,88 @@ if [[ ! -f "$ADT_GC_SH" ]]; then
   exit 1
 fi
 
+# [Lane-GC PR-4 review round-2, P2-4] Reject any path that would land
+# unescaped inside the cron entry / plist and either break the schedule or
+# be silently mis-parsed. `%` is cron's command/stdin-continuation separator
+# — an unquoted `%` in a path SILENTLY TRUNCATES the command at that point
+# (cron treats everything after the FIRST unescaped `%` as stdin for the
+# job, not part of argv), which for `bash ${ADT_GC_SH} ...` means either a
+# corrupted invocation or the wrong script running unattended every 10
+# minutes. A literal newline would either terminate the crontab line
+# early (splitting one entry into two, one of which cron may reject or
+# silently ignore) or break `cat > "$LAUNCHD_PLIST"` on the macOS side.
+# Fail LOUD naming the offending path rather than installing a broken timer.
+_gct_reject_unsafe_path() {
+  local path="$1" label="$2"
+  if [[ "$path" == *"%"* || "$path" == *$'\n'* ]]; then
+    echo "install-gc-timer.sh: ${label} contains '%' or a newline — refusing to install a timer with an unsafe path: ${path}" >&2
+    exit 1
+  fi
+}
+_gct_reject_unsafe_path "$ADT_GC_SH" "adt-gc.sh path"
+
 _gct_install_linux() {
   local logfile="${ADT_STATE_ROOT:-$HOME/.local/state}/adt-gc-cron.log"
-  local entry="*/10 * * * * bash ${ADT_GC_SH} >> ${logfile} 2>&1 ${GC_MARKER}"
+  _gct_reject_unsafe_path "$logfile" "GC log path (ADT_STATE_ROOT)"
+  # [P2-4] Quote both paths inside the cron command — a path containing
+  # whitespace (unusual but possible under an operator-chosen
+  # ADT_STATE_ROOT) would otherwise be word-split by the shell cron execs
+  # the entry with, silently changing argv.
+  local entry="*/10 * * * * bash '${ADT_GC_SH}' >> '${logfile}' 2>&1 ${GC_MARKER}"
   local existing new
   existing="$(crontab -l 2>/dev/null || true)"
+
+  # [Lane-GC PR-4 review round-2, P2-3] Exact-line matching, not
+  # substring-containment: `grep -vF "$GC_MARKER"` (the pre-fix behavior)
+  # dropped EVERY line that merely CONTAINS the marker text anywhere —
+  # including an unrelated operator comment that happens to mention the
+  # marker string mid-line (e.g. documentation, a decoy, or a copy-pasted
+  # snippet) — silently destroying crontab content this tool never
+  # installed and has no business touching. The managed entry always ends
+  # with the marker (it's appended as the LAST token of `$entry` above,
+  # verbatim, every time this script writes it), so "is this OUR line"
+  # is correctly decided by an EXACT SUFFIX match, not containment.
+  # Bash substring suffix (`${line: -N}`) is used instead of `awk`/`sed`
+  # regex to avoid re-deriving marker-escaping rules for two more tools —
+  # the marker contains parens and an em-dash that would need escaping in
+  # both awk's and sed's own regex dialects.
+  _gct_is_managed_line() {
+    local line="$1"
+    [[ "${#line}" -ge "${#GC_MARKER}" ]] || return 1
+    [[ "${line: -${#GC_MARKER}}" == "$GC_MARKER" ]]
+  }
+  _gct_filter_managed() {
+    local input="$1" line out=""
+    while IFS= read -r line; do
+      _gct_is_managed_line "$line" && continue
+      out+="${line}"$'\n'
+    done <<<"$input"
+    printf '%s' "${out%$'\n'}"
+  }
 
   if [[ "$UNINSTALL" == true ]]; then
     if [[ -z "$existing" ]]; then
       echo "install-gc-timer.sh: no crontab present — nothing to uninstall"
       return 0
     fi
-    new="$(grep -vF "$GC_MARKER" <<<"$existing" || true)"
+    new="$(_gct_filter_managed "$existing")"
     printf '%s\n' "$new" | crontab -
     echo "install-gc-timer.sh: removed GC cron entry"
     return 0
   fi
 
-  if grep -qF "$GC_MARKER" <<<"$existing" 2>/dev/null; then
-    # Idempotent replace: drop the old marked line, then re-add the
-    # current one — so a re-run after adt-gc.sh moves on disk (a
-    # `npx skills update -g` refresh) repoints the entry instead of
-    # leaving a stale duplicate.
-    new="$(grep -vF "$GC_MARKER" <<<"$existing")"
-    new="$(printf '%s\n%s\n' "$new" "$entry")"
-  elif [[ -n "$existing" ]]; then
-    new="$(printf '%s\n%s\n' "$existing" "$entry")"
+  if [[ -n "$existing" ]]; then
+    # Idempotent replace: drop the old managed line (exact-suffix match
+    # only — never touches an operator line that merely mentions the
+    # marker text), then re-add the current one — so a re-run after
+    # adt-gc.sh moves on disk (a `npx skills update -g` refresh) repoints
+    # the entry instead of leaving a stale duplicate.
+    new="$(_gct_filter_managed "$existing")"
+    if [[ -n "$new" ]]; then
+      new="$(printf '%s\n%s\n' "$new" "$entry")"
+    else
+      new="$entry"
+    fi
   else
     new="$entry"
   fi
@@ -104,6 +160,7 @@ _gct_install_macos() {
   fi
 
   local logfile="${ADT_STATE_ROOT:-$HOME/.local/state}/adt-gc-launchd.log"
+  _gct_reject_unsafe_path "$logfile" "GC log path (ADT_STATE_ROOT)"
   local bash_bin
   bash_bin="$(command -v bash)"
 

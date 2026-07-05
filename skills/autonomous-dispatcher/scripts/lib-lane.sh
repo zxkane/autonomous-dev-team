@@ -145,6 +145,44 @@ env_of() {
   return 1
 }
 
+# env_readable <pid> — true iff `env_of` can actually READ this process's
+# environment (Linux: `[ -r /proc/PID/environ ]`; macOS: the procargs2 shim
+# is installed AND actually returns data for THIS pid, not merely "python3
+# exists somewhere on PATH" — `_lane_procargs2_available` alone answers a
+# host-wide question, not a per-pid one).
+#
+# [Lane-GC PR-4 review round-2, P1-2] Exists to let a caller distinguish
+# two DIFFERENT reasons `env_lookup`/`_gc_has_term_program`-style callers
+# see "no TERM_PROGRAM found": (a) the environment IS readable and
+# TERM_PROGRAM genuinely is not set — proceed with the rest of the
+# decision table; vs. (b) the environment is UNREADABLE (the process died
+# between the enumeration and the env read, EPERM from a uid mismatch, or
+# macOS with no shim) — the process is UNKNOWABLE, not "known clean", and
+# every kill-authorization path must therefore skip it (fail toward leak,
+# design principle 5), the same posture the design already mandates for
+# TERM_PROGRAM itself. Before this primitive existed, callers could not
+# tell the two cases apart: `env_lookup … TERM_PROGRAM || echo ""` returns
+# an identical empty string for both, so an unreadable-env process
+# (whose true env is entirely unknown) was silently treated the same as
+# an env-clean one and fell through to full kill eligibility — exactly
+# the moment the least is known about a candidate.
+env_readable() {
+  local pid="$1"
+  if [[ "$(_lane_uname)" == "Linux" ]]; then
+    [[ -r "/proc/${pid}/environ" ]]
+    return $?
+  fi
+  # macOS: readable only if the shim is installed AND its LIVE fetch (by
+  # pid, not the synthetic-buffer parser-only test path) actually
+  # succeeds for this specific pid right now — `_procargs2_py`'s own rc
+  # already distinguishes "parsed a real procargs2 buffer" (0) from
+  # "sysctl failed (dead pid / EPERM) or the buffer was too short /
+  # malformed" (1); a dead-pid probe or a permission error both correctly
+  # report unreadable here, never masquerading as "readable, empty env".
+  _lane_procargs2_available || return 1
+  _procargs2_py "$pid" >/dev/null 2>&1
+}
+
 # file_mtime <path> — echo the file's mtime as an epoch integer. Linux
 # `stat -c %Y`, macOS/BSD `stat -f %m`. Echoes nothing + rc 1 on a missing
 # file (mirrors the dual-pattern already used by lib-run-artifacts.sh/status.sh).
