@@ -1698,7 +1698,20 @@ _assert_verb() {
       _run_positional_reject "$verb" 'chp_review_threads abc'
       ;;
     chp_resolve_thread)
-      _run_write_assert "$verb" "graphql -F threadId=TID" "TID"
+      case "$CHP_NAME" in
+        gitlab)
+          # GitLab: compound `<mr-iid>:<discussion-id>` decode (P3-3 M8 pin,
+          # #419 R7) → PUT /merge_requests/:iid/discussions/:disc body
+          # `{"resolved":true}`. Fixture discussion id is `disc-abc`.
+          _run_gl_write_assert "$verb" \
+            'chp_resolve_thread 42:disc-abc' \
+            "PUT" "path=projects/group%2Fproject/merge_requests/42/discussions/disc-abc" \
+            '"resolved":true'
+          ;;
+        *)
+          _run_write_assert "$verb" "graphql -F threadId=TID" "TID"
+          ;;
+      esac
       # Positional-validation gate (#401 review r2): THREAD_ID must be
       # non-empty — resolve-threads.sh gates on `[ -n "$thread_id" ]`, so an
       # empty positional here is operator misuse.
@@ -1708,14 +1721,41 @@ _assert_verb() {
       _run_write_assert "$verb" "pr review 42 --repo o/r --request-changes --body msg" "42 msg"
       ;;
     chp_reply_review_comment)
-      _run_write_assert "$verb" "api repos/o/r/pulls/42/comments -X POST" "42 1 hello"
+      case "$CHP_NAME" in
+        gitlab)
+          # GitLab: walk /discussions to resolve COMMENT_ID → discussion id,
+          # then POST /discussions/:d/notes ([INV-96], #419 R6). Fixture
+          # discussions contain note id 7000001 in discussion `disc-abc`.
+          _run_gl_write_assert "$verb" \
+            'chp_reply_review_comment 42 7000001 hello' \
+            "POST" "path=projects/group%2Fproject/merge_requests/42/discussions/disc-abc/notes" \
+            '"body":"hello"'
+          ;;
+        *)
+          _run_write_assert "$verb" "api repos/o/r/pulls/42/comments -X POST" "42 1 hello"
+          ;;
+      esac
       ;;
     chp_create_pr)
-      # W1e (#400): abstract positional contract — caller passes <head> <title>
-      # <body>; the GitHub leaf owns `--head/--title/--body`. Under the stub gh
-      # the leaf emits the fixed flag-tail from the positional inputs.
-      _run_write_assert "$verb" "pr create --repo o/r --head feat/x --title t --body b" \
-        "feat/x t b"
+      case "$CHP_NAME" in
+        gitlab)
+          # GitLab: GET /projects/:id to resolve default_branch, then POST
+          # /merge_requests with `{source_branch, target_branch, title,
+          # description, squash:true, remove_source_branch:true}` (#419 R2,
+          # CONTRACT-FIXED W1e). Substring needle catches the POST regardless
+          # of the preceding GET on the recorded argv trace.
+          _run_gl_write_assert "$verb" \
+            'chp_create_pr feat/x t b' \
+            "POST" "path=projects/group%2Fproject/merge_requests" \
+            '"source_branch":"feat/x"'
+          ;;
+        *)
+          # W1e (#400): abstract positional contract — caller passes <head>
+          # <title> <body>; the GitHub leaf owns `--head/--title/--body`.
+          _run_write_assert "$verb" "pr create --repo o/r --head feat/x --title t --body b" \
+            "feat/x t b"
+          ;;
+      esac
       # Positional-validation gate (#400 review r1): HEAD_BRANCH and TITLE
       # empty → rc≠0 + no gh call. BODY MAY be empty by design (caller
       # `drain_agent_pr_create` derives body from `tail -n +2/+3` yielding
@@ -1725,22 +1765,46 @@ _assert_verb() {
       _run_positional_reject "$verb" 'chp_create_pr feat/x "" b'
       ;;
     chp_approve)
-      # W1e (#400): abstract positional contract — caller passes <pr> <body>;
-      # the GitHub leaf owns `--approve --body`. The leaf's emitted argv is
-      # `gh pr review $PR --repo $REPO --approve --body $BODY`.
-      _run_write_assert "$verb" "pr review 42 --repo o/r --approve --body msg" \
-        "42 msg"
+      case "$CHP_NAME" in
+        gitlab)
+          # GitLab: TWO calls, ordering load-bearing (#419 R3). (1) POST
+          # /approve — the load-bearing action. (2) POST /notes with the body
+          # — diagnostic. The recorded argv contains BOTH; the substring
+          # needle catches the /approve path AND the note-body payload.
+          _run_gl_write_assert "$verb" \
+            'chp_approve 42 msg' \
+            "POST" "path=projects/group%2Fproject/merge_requests/42/approve" \
+            ''
+          ;;
+        *)
+          # W1e (#400): abstract positional contract — caller passes <pr>
+          # <body>; the GitHub leaf owns `--approve --body`.
+          _run_write_assert "$verb" "pr review 42 --repo o/r --approve --body msg" \
+            "42 msg"
+          ;;
+      esac
       # Positional-validation gate: PR must be numeric, BODY must be non-empty.
       _run_positional_reject "$verb" 'chp_approve "" msg'
       _run_positional_reject "$verb" 'chp_approve abc msg'
       _run_positional_reject "$verb" 'chp_approve 42 ""'
       ;;
     chp_merge)
-      # W1e (#400): abstract positional contract — caller passes <pr> only;
-      # merge strategy is contract-fixed (squash + delete). The leaf's emitted
-      # argv is `gh pr merge $PR --repo $REPO --squash --delete-branch`.
-      _run_write_assert "$verb" "pr merge 42 --repo o/r --squash --delete-branch" \
-        "42"
+      case "$CHP_NAME" in
+        gitlab)
+          # GitLab: PUT /merge_requests/:pr/merge body
+          # `{squash:true, should_remove_source_branch:true}` (#419 R4).
+          _run_gl_write_assert "$verb" \
+            'chp_merge 42' \
+            "PUT" "path=projects/group%2Fproject/merge_requests/42/merge" \
+            '"squash":true'
+          ;;
+        *)
+          # W1e (#400): abstract positional contract — caller passes <pr>
+          # only; merge strategy is contract-fixed (squash + delete).
+          _run_write_assert "$verb" "pr merge 42 --repo o/r --squash --delete-branch" \
+            "42"
+          ;;
+      esac
       # Positional-validation gate: PR must be non-empty numeric. This is the
       # highest-blast-radius verb — merging the wrong PR would be catastrophic
       # so we assert the reject explicitly.

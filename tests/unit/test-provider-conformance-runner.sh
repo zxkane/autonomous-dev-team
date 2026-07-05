@@ -576,5 +576,28 @@ assert_eq "TC-RGH-050: github/github byte-identical (32 PASS lines; +1 for #419 
 
 # ===========================================================================
 echo ""
+echo "=== TC-RGH-060: --itp gitlab --chp gitlab + hook armed (P3-4, #419) — the #414 AC1 gate ==="
+# ===========================================================================
+# With the fixture transport hook armed, EVERY ITP + CHP verb reaches the
+# leaf's path/argv assertion via _gl_api → _gl_http → the fixture hook.
+# Post-P3-4 (#419), all 10 CHP writes + chp_file_url land, and the runner's
+# gitlab-arm case branches (#419 R15) drive each with a GitLab-shaped argv
+# needle. Expected: fail=0, pending=0, exactly 1 SKIP for chp_request_changes
+# (rest_request_changes=0 cap). This is the #414 AC1 gate.
+_hook_path="$PCONF_DIR/fixtures/gitlab-hook/gitlab-transport-hook.sh"
+[[ -f "$_hook_path" ]] || bad "TC-RGH-060: fixture hook missing at $_hook_path"
+gl_hook_out=$(bash "$RUNNER" --transport-hook "$_hook_path" --itp gitlab --chp gitlab 2>&1); gl_hook_rc=$?
+assert_eq "TC-RGH-060: gitlab/gitlab + hook → rc 0 (#414 AC1 pass gate)" "0" "$gl_hook_rc"
+gl_hook_fail_count="$(grep -c '^CONFORMANCE-PCONF gitlab/gitlab .* FAIL' <<<"$gl_hook_out")"
+assert_eq "TC-RGH-060: gitlab/gitlab + hook → 0 FAILs (every verb asserts green)" "0" "$gl_hook_fail_count"
+gl_hook_skip_count="$(grep -c '^CONFORMANCE-PCONF gitlab/gitlab .* SKIP' <<<"$gl_hook_out")"
+assert_eq "TC-RGH-060: gitlab/gitlab + hook → 1 SKIP (chp_request_changes, cap: rest_request_changes)" "1" "$gl_hook_skip_count"
+assert_contains "TC-RGH-060: gitlab/gitlab + hook → chp_request_changes SKIP by cap" \
+  "chp_request_changes SKIP (cap: rest_request_changes)" "$gl_hook_out"
+assert_contains "TC-RGH-060: gitlab/gitlab + hook → CONFORMANCE-SUMMARY line" \
+  "CONFORMANCE-SUMMARY total=30 pass=29 fail=0 skip=1 pending=0" "$gl_hook_out"
+
+# ===========================================================================
+echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 [[ "$FAIL" -eq 0 ]] && exit 0 || exit 1
