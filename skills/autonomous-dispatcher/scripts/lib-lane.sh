@@ -620,7 +620,7 @@ lane_kill() {
   done < "$pgids_file"
 
   if [[ "${#seen[@]}" -gt 0 ]]; then
-    # [INV-113] Escalator pgid isolation (review round-8 [P1], same class as
+    # [INV-114] Escalator pgid isolation (review round-8 [P1], same class as
     # the sigterm-trap escalators): a bare backgrounded escalator is a direct
     # child sharing the CALLER's pgid — when the caller's own group is later
     # group-SIGKILLed mid-escalation (kill_stale_wrapper escalating against a

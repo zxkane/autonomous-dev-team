@@ -486,7 +486,7 @@ _agent_sigterm_handler() {
   RECEIVED_SIGTERM=1
 
   # Direct-children fallback for the pre-spawn race window (pre-#109
-  # behavior, unchanged). Pinned narrow to `-P $$` — [INV-113] grep-pin:
+  # behavior, unchanged). Pinned narrow to `-P $$` — [INV-114] grep-pin:
   # NEVER widen to `-f <script-name>` (widening would cross-kill sibling
   # lanes on a multi-issue/multi-project host sharing the same wrapper
   # script name). Runs FIRST — see the ordering pin above.
@@ -507,7 +507,7 @@ _agent_sigterm_handler() {
     done < "$_pgids_file"
   fi
 
-  # [Lane-GC PR-3 / INV-113] Escalator process-group isolation (review
+  # [Lane-GC PR-3 / INV-114] Escalator process-group isolation (review
   # round-5 [P1], reproduced empirically): a backgrounded escalator that is a
   # DIRECT CHILD of this trap's own shell — with no `setsid` of its own —
   # shares THIS WRAPPER's own pgid. That is fatal to the escalator's own
