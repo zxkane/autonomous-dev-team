@@ -24,6 +24,12 @@ LIB_REVIEW_BOTS_SRC="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-revi
 # [INV-72] dispatcher-tick.sh now sources lib-error.sh (real, not stubbed) for
 # the config-class abort envelopes; stage it into the sandbox.
 LIB_ERROR_SRC="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-error.sh"
+# [#416 R2 / P1-2] dispatcher-tick.sh now sources lib-auth.sh for the shared
+# `github_seam_active` predicate that gates the app-mode credential FATAL.
+# lib-auth.sh in turn sources lib-code-host.sh (chp shim setup at module init).
+# Both need to be stageable in the sandbox for the tick to run at all.
+LIB_AUTH_SRC="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-auth.sh"
+LIB_CODE_HOST_SRC="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-code-host.sh"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -78,6 +84,10 @@ cp "$TICK_SRC" "$SANDBOX/dispatcher-tick.sh"
 cp "$LIB_CONFIG_SRC" "$SANDBOX/lib-config.sh"
 cp "$LIB_REVIEW_BOTS_SRC" "$SANDBOX/lib-review-bots.sh"
 cp "$LIB_ERROR_SRC" "$SANDBOX/lib-error.sh"
+# [#416 R2 / P1-2] lib-auth.sh + lib-code-host.sh — dispatcher-tick.sh now
+# sources lib-auth.sh; lib-auth.sh sources lib-code-host.sh at module init.
+cp "$LIB_AUTH_SRC" "$SANDBOX/lib-auth.sh"
+cp "$LIB_CODE_HOST_SRC" "$SANDBOX/lib-code-host.sh"
 
 # Stub lib-dispatch.sh: provide every helper dispatcher-tick.sh expects, but
 # return empty/no-op so the tick exercises only the upfront validation +

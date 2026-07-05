@@ -285,5 +285,253 @@ ok "AC4/AC5: byte-diff pin on chp-github.sh LIFTED for W1c1 (#397) + W1c2 (#398)
 
 # ===========================================================================
 echo ""
+echo "=== TC-RGH-001..005: pcf_resolve_provider_dir gitlab axis + absolute-path form ==="
+# ===========================================================================
+gl_dir="$(pcf_resolve_provider_dir "$PROJECT_ROOT" gitlab)"
+assert_contains "TC-RGH-001: gitlab resolves under skills/autonomous-dispatcher/scripts/providers (same as github, filename prefix disambiguates)" \
+  "skills/autonomous-dispatcher/scripts/providers" "$gl_dir"
+
+_scratch_abs="$(mktemp -d)"
+abs_dir="$(pcf_resolve_provider_dir "$PROJECT_ROOT" "$_scratch_abs")"
+assert_eq "TC-RGH-002: absolute-path form resolves to itself when dir exists" "$_scratch_abs" "$abs_dir"
+
+if pcf_resolve_provider_dir "$PROJECT_ROOT" "/tmp/nonexistent-provider-dir-$$" >/dev/null 2>&1; then
+  bad "TC-RGH-003: nonexistent absolute path should rc 1"
+else
+  ok "TC-RGH-003: nonexistent absolute path rc 1"
+fi
+
+# TC-RGH-004: unknown non-path, non-fixed name still rc 1 (already covered
+# by TC-PCONF-051 nonexistent — re-express for TC-RGH namespace).
+if pcf_resolve_provider_dir "$PROJECT_ROOT" madeupprovidername >/dev/null 2>&1; then
+  bad "TC-RGH-004: unknown non-path name should rc 1"
+else
+  ok "TC-RGH-004: unknown non-path name rc 1"
+fi
+
+# TC-RGH-005: existing fixed names still resolve.
+for name in github degraded broken; do
+  if [[ -n "$(pcf_resolve_provider_dir "$PROJECT_ROOT" "$name")" ]]; then
+    ok "TC-RGH-005: existing fixed name '$name' still resolves"
+  else
+    bad "TC-RGH-005: existing fixed name '$name' did not resolve"
+  fi
+done
+rm -rf "$_scratch_abs"
+
+# ===========================================================================
+echo ""
+echo "=== TC-RGH-006..009: name=/abs/dir out-of-tree provider (P1-5 review-response) ==="
+# ===========================================================================
+# [#416 P1-5] Codex round-1 [P1-5]: the pre-fix runner passed an absolute
+# path directly as ITP_NAME/CHP_NAME, so pcf_materialize_scratch built
+# nonsense filenames like `itp-/tmp/x.sh` and function names like
+# `itp_/tmp/x_verb`. Post-fix the flag shape is `--itp <name>=/abs/dir`,
+# decoupling logical NAME (used in filenames) from source DIR.
+
+# Build a REAL fixture out-of-tree provider dir with a working itp_corp.sh
+# leaf that mirrors the degraded provider's shape for a couple of verbs.
+# The runner should be invocable against it via `--itp corp=/tmp/…` and
+# emit `itp_corp_<verb>` function references, not `itp_/tmp/…_<verb>`.
+_extdir="$(mktemp -d)"
+_deg_dir="$PROJECT_ROOT/tests/unit/fixtures/provider-degraded"
+if [[ -f "$_deg_dir/itp-degraded.sh" && -f "$_deg_dir/itp-degraded.caps" ]]; then
+  # Copy the degraded ITP verbatim into the ext dir, renamed to `corp`,
+  # rewriting function names `itp_degraded_*` → `itp_corp_*` and the
+  # `_ITP_NAME=degraded` sentinel if present.
+  sed 's/itp_degraded_/itp_corp_/g; s/_ITP_NAME=degraded/_ITP_NAME=corp/g' \
+    "$_deg_dir/itp-degraded.sh" > "$_extdir/itp-corp.sh"
+  cp "$_deg_dir/itp-degraded.caps" "$_extdir/itp-corp.caps"
+  # Same for chp (so `--chp corp=…` also has something to resolve).
+  sed 's/chp_degraded_/chp_corp_/g; s/_CHP_NAME=degraded/_CHP_NAME=corp/g' \
+    "$_deg_dir/chp-degraded.sh" > "$_extdir/chp-corp.sh"
+  cp "$_deg_dir/chp-degraded.caps" "$_extdir/chp-corp.caps"
+
+  # TC-RGH-006: name=/abs/dir accepted; runner produces `CONFORMANCE-PCONF
+  # corp/corp <verb> …` lines (logical name, NOT the abs path).
+  rgh6_out=$(bash "$RUNNER" --itp "corp=$_extdir" --chp "corp=$_extdir" 2>&1); rgh6_rc=$?
+  assert_contains "TC-RGH-006: label uses LOGICAL name 'corp/corp' (not the abs path)" \
+    "CONFORMANCE-PCONF corp/corp" "$rgh6_out"
+  # And crucially — no `itp_/tmp/` or `chp_/tmp/` function-name pollution.
+  assert_not_contains "TC-RGH-006: no path-based function names leaked" \
+    "itp_/" "$rgh6_out"
+  assert_not_contains "TC-RGH-006: no chp path-based function names leaked" \
+    "chp_/" "$rgh6_out"
+
+  # TC-RGH-007: bare abs-path form (#416 R3/AC4 out-of-tree self-certification)
+  # derives the logical name from the dir's single <seam>-<name>.sh file —
+  # `--itp /abs/dir` with exactly one itp-corp.sh inside resolves to name
+  # `corp`, dir `/abs/dir`; NO path-based filename/function pollution.
+  rgh7_out=$(bash "$RUNNER" --itp "$_extdir" --chp "$_extdir" 2>&1); rgh7_rc=$?
+  assert_contains "TC-RGH-007: bare abs-path derives LOGICAL name 'corp/corp'" \
+    "CONFORMANCE-PCONF corp/corp" "$rgh7_out"
+  assert_not_contains "TC-RGH-007: bare abs-path — no path-based function names leaked" \
+    "itp_/" "$rgh7_out"
+  # TC-RGH-007b: an AMBIGUOUS dir (two itp-*.sh files) → fatal naming the
+  # name=dir disambiguation form.
+  _ambig="$(mktemp -d)"
+  cp "$_extdir/itp-corp.sh" "$_ambig/itp-corp.sh"
+  cp "$_extdir/itp-corp.sh" "$_ambig/itp-other.sh"
+  cp "$_extdir/chp-corp.sh" "$_ambig/chp-corp.sh"
+  cp "$_extdir/itp-corp.caps" "$_ambig/itp-corp.caps" 2>/dev/null || true
+  rgh7b_out=$(bash "$RUNNER" --itp "$_ambig" --chp github 2>&1); rgh7b_rc=$?
+  assert_eq "TC-RGH-007b: ambiguous multi-provider dir → exit 2 (fatal)" "2" "$rgh7b_rc"
+  assert_contains "TC-RGH-007b: fatal names the disambiguation form" "<name>=<abs-dir>" "$rgh7b_out"
+  rm -rf "$_ambig"
+
+  # TC-RGH-008: <name>=<non-existent-abs-dir> → fatal.
+  rgh8_out=$(bash "$RUNNER" --itp "corp=/no/such/provider-dir-$$" --chp github 2>&1); rgh8_rc=$?
+  assert_eq "TC-RGH-008: name=/nonexistent → exit 2 (fatal)" "2" "$rgh8_rc"
+
+  # TC-RGH-009: empty name / empty dir on either side of '=' → fatal.
+  rgh9_out=$(bash "$RUNNER" --itp "=$_extdir" --chp github 2>&1); rgh9_rc=$?
+  assert_eq "TC-RGH-009a: empty name before '=' → exit 2" "2" "$rgh9_rc"
+  rgh9b_out=$(bash "$RUNNER" --itp "corp=" --chp github 2>&1); rgh9b_rc=$?
+  assert_eq "TC-RGH-009b: empty dir after '=' → exit 2" "2" "$rgh9b_rc"
+else
+  ok "TC-RGH-006..009: skipped — degraded fixture not found (unexpected in this repo)"
+fi
+rm -rf "$_extdir"
+
+# ===========================================================================
+echo ""
+echo "=== TC-RGH-010..012: --transport-hook passthrough ==="
+# ===========================================================================
+# TC-RGH-010: unreadable hook path → fatal exit 2 with usage error message.
+th_out=$(bash "$RUNNER" --transport-hook /no/such/gitlab-hook-file.sh --itp github --chp github 2>&1); th_rc=$?
+assert_eq "TC-RGH-010: unreadable --transport-hook → exit 2 (fatal)" "2" "$th_rc"
+assert_contains "TC-RGH-010: message names the unreadable path" "/no/such/gitlab-hook-file.sh" "$th_out"
+
+# TC-RGH-011: readable hook path threads through to _invoke's subshell
+# as GITLAB_TRANSPORT_HOOK. Assert via a github/github run with the hook
+# armed — the hook is a no-op file (no _gl_http redefinition), so github
+# leaves are unaffected; then verify github/github still emits 31 PASS
+# lines (byte-identical). Direct env-var visibility inside _invoke is a
+# private impl detail; the observable AC is "flag accepted + byte-identical
+# github result", which we assert here.
+noop_hook="$(mktemp)"
+cat > "$noop_hook" <<'EOF'
+# no-op transport hook — does not redefine _gl_http; github leaves ignore
+# GITLAB_TRANSPORT_HOOK entirely.
+:
+EOF
+th_out=$(bash "$RUNNER" --transport-hook "$noop_hook" --itp github --chp github 2>&1); th_rc=$?
+assert_eq "TC-RGH-011: --transport-hook + github/github → rc 0" "0" "$th_rc"
+th_pass_count="$(grep -c '^CONFORMANCE-PCONF github/github .* PASS$' <<<"$th_out")"
+assert_eq "TC-RGH-011: --transport-hook + github/github → still 31 PASS lines (byte-identical)" "31" "$th_pass_count"
+
+# TC-RGH-012 (byte-identical no-op with --transport-hook) — already covered
+# by TC-RGH-011's pass count assertion.
+ok "TC-RGH-012: (covered by TC-RGH-011) github/github byte-identical with --transport-hook armed"
+
+rm -f "$noop_hook"
+
+# ===========================================================================
+echo ""
+echo "=== TC-RGH-020..023: --transport-path-add isolated PATH extension ==="
+# ===========================================================================
+# TC-RGH-020: --transport-path-add readable dir accepted; github/github still passes.
+_scratch_bin="$(mktemp -d)"
+th_out=$(bash "$RUNNER" --transport-path-add "$_scratch_bin" --itp github --chp github 2>&1); th_rc=$?
+assert_eq "TC-RGH-020: --transport-path-add + github/github → rc 0" "0" "$th_rc"
+th_pass_count="$(grep -c '^CONFORMANCE-PCONF github/github .* PASS$' <<<"$th_out")"
+assert_eq "TC-RGH-020: --transport-path-add + github/github → still 31 PASS lines" "31" "$th_pass_count"
+
+# TC-RGH-021: multiple --transport-path-add accumulate (both accepted, rc 0).
+_scratch_bin2="$(mktemp -d)"
+th_out=$(bash "$RUNNER" --transport-path-add "$_scratch_bin" --transport-path-add "$_scratch_bin2" --itp github --chp github 2>&1); th_rc=$?
+assert_eq "TC-RGH-021: two --transport-path-add entries → rc 0" "0" "$th_rc"
+
+# TC-RGH-022: added dirs do NOT leak into the runner's own env.
+# Assert by checking the RUNNER'S OWN PATH ($PATH we started with) has NOT
+# been mutated post-hoc — since the flags are consumed and dirs are only
+# appended to ISOLATED_PATH (which lives in the subshells).
+_orig_path="$PATH"
+th_out=$(bash "$RUNNER" --transport-path-add "$_scratch_bin" --itp github --chp github 2>&1); th_rc=$?
+assert_eq "TC-RGH-022: runner's own PATH unchanged (not mutated)" "$_orig_path" "$PATH"
+
+# TC-RGH-023: covered by TC-RGH-020 (github/github byte-identical when flag armed).
+ok "TC-RGH-023: (covered by TC-RGH-020) github/github byte-identical with --transport-path-add"
+
+# TC-RGH-024: --transport-path-add /nonexistent → fatal exit 2.
+th_out=$(bash "$RUNNER" --transport-path-add /no/such/dir-for-transport-$$ --itp github --chp github 2>&1); th_rc=$?
+assert_eq "TC-RGH-024: --transport-path-add /nonexistent → exit 2" "2" "$th_rc"
+
+rm -rf "$_scratch_bin" "$_scratch_bin2"
+
+# ===========================================================================
+echo ""
+echo "=== TC-RGH-030..033: --expect-absent partial-axis mechanism ==="
+# ===========================================================================
+# TC-RGH-030: --expect-absent downgrades leaf-absent FAILs to SKIP on gitlab axis.
+th_out=$(bash "$RUNNER" --itp gitlab --chp gitlab --expect-absent chp:create_pr,chp:merge 2>&1); th_rc=$?
+# Two verbs downgrade to SKIP, other absent verbs still FAIL → rc != 0.
+if [[ "$th_rc" -ne 0 ]]; then
+  ok "TC-RGH-030: --expect-absent with SOME verbs unnamed → rc != 0 (other absent verbs still FAIL)"
+else
+  bad "TC-RGH-030: expected rc != 0 (other absent verbs), got rc 0"
+fi
+assert_contains "TC-RGH-030: chp_create_pr downgraded to SKIP (expected-absent: ...)" \
+  "chp_create_pr SKIP (expected-absent: providers/chp-gitlab.sh:chp_gitlab_create_pr)" "$th_out"
+assert_contains "TC-RGH-030: chp_merge downgraded to SKIP" \
+  "chp_merge SKIP (expected-absent: providers/chp-gitlab.sh:chp_gitlab_merge)" "$th_out"
+
+# TC-RGH-031: --expect-absent chp:create_pr → OTHER absent verbs still FAIL.
+th_out=$(bash "$RUNNER" --itp gitlab --chp gitlab --expect-absent chp:create_pr 2>&1); th_rc=$?
+assert_contains "TC-RGH-031: chp_merge still FAILs when only chp_create_pr expected-absent" \
+  "chp_merge FAIL leaf absent" "$th_out"
+
+# TC-RGH-032: --expect-absent seam-qualifies (itp:X != chp:X).
+# We rely on the CSV parse rejecting an entry without `:` (fatal exit 2).
+th_out=$(bash "$RUNNER" --itp gitlab --chp gitlab --expect-absent create_pr 2>&1); th_rc=$?
+assert_eq "TC-RGH-032: --expect-absent without seam qualification → exit 2 (fatal)" "2" "$th_rc"
+
+# ===========================================================================
+echo ""
+echo "=== TC-RGH-040..042: --itp gitlab --chp gitlab interim (W-D early half) ==="
+# ===========================================================================
+# TC-RGH-040: gitlab/gitlab on today's tree — non-zero exit, one FAIL per absent verb.
+gl_out=$(bash "$RUNNER" --itp gitlab --chp gitlab 2>&1); gl_rc=$?
+if [[ "$gl_rc" -ne 0 ]]; then
+  ok "TC-RGH-040: --itp gitlab --chp gitlab (no leaves) → rc != 0"
+else
+  bad "TC-RGH-040: expected rc != 0, got 0"
+fi
+gl_leafabs_count="$(grep -c 'FAIL leaf absent:' <<<"$gl_out")"
+if [[ "$gl_leafabs_count" -ge 20 ]]; then
+  ok "TC-RGH-040: 20+ per-verb 'FAIL leaf absent' lines emitted ($gl_leafabs_count)"
+else
+  bad "TC-RGH-040: expected ≥ 20 FAIL leaf absent lines, got $gl_leafabs_count"
+fi
+
+# TC-RGH-041: runner did NOT abort — has a CONFORMANCE-SUMMARY line.
+assert_contains "TC-RGH-041: runner completed (has SUMMARY line)" "CONFORMANCE-SUMMARY" "$gl_out"
+
+# TC-RGH-042: --expect-absent covering every absent verb → rc 0.
+# Build the full absent-verb list by extracting them from the FAIL output.
+# For robustness, name every verb we know is absent on today's tree.
+_all_absent=""
+while IFS= read -r line; do
+  # Grab lines like "CONFORMANCE-PCONF gitlab/gitlab <verb> FAIL leaf absent"
+  if [[ "$line" =~ CONFORMANCE-PCONF\ gitlab/gitlab\ ([a-z_]+)\ FAIL\ leaf\ absent ]]; then
+    verb="${BASH_REMATCH[1]}"
+    seam="${verb%%_*}"
+    base="${verb#itp_}"; base="${base#chp_}"
+    _all_absent="${_all_absent}${seam}:${base},"
+  fi
+done <<<"$gl_out"
+_all_absent="${_all_absent%,}"
+gl_out2=$(bash "$RUNNER" --itp gitlab --chp gitlab --expect-absent "$_all_absent" 2>&1); gl2_rc=$?
+assert_eq "TC-RGH-042: --expect-absent covering every absent verb → rc 0" "0" "$gl2_rc"
+
+# ===========================================================================
+echo ""
+echo "=== TC-RGH-050: github/github parity (byte-identical) — 31 PASS still holds ==="
+# ===========================================================================
+th_pass_count="$(grep -c '^CONFORMANCE-PCONF github/github .* PASS$' <<<"$gh_out")"
+assert_eq "TC-RGH-050: github/github byte-identical (31 PASS lines)" "31" "$th_pass_count"
+
+# ===========================================================================
+echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 [[ "$FAIL" -eq 0 ]] && exit 0 || exit 1

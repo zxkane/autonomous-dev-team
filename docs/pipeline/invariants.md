@@ -6434,3 +6434,42 @@ The FIFO clean-exit handshake the design's normative table also lists in this ro
 
 ---
 
+## INV-116: the GitLab transport is a two-layer choke-point (`_gl_http` request primitive + `_gl_api` public function); pagination + backoff + fail-closed live in `_gl_api`; the override hook may redefine `_gl_http` ONLY
+
+_Triage (issue #236): [machine-checked: tests/unit/test-lib-gitlab-transport.sh]_
+
+**Rule**: the GitLab transport is a FROZEN two-layer contract implemented by `skills/autonomous-dispatcher/scripts/providers/lib-gitlab-transport.sh` (issue #416, phase-3 #414 W-A). Every GitLab leaf (W-B / W-C, upcoming) reaches the network EXCLUSIVELY through the public `_gl_api` function; `_gl_api` reaches the network EXCLUSIVELY through the private `_gl_http` primitive; there is NO third path.
+
+1. **`_gl_http <method> <path-or-url> <headers_out_file> [body-json]`** is the SINGLE-REQUEST primitive AND the sole out-of-tree hook point. Default impl uses curl only (no `glab` — a CLI carries its own auth/config state, blurring the standard-auth-only boundary per #414 pillar 2). Sends `PRIVATE-TOKEN: ${GITLAB_TOKEN}` against `https://${GITLAB_HOST}/api/v4/<path>` (a `<path>` beginning with `http` is used verbatim so `_gl_api`'s pagination walker can pass an absolute next-page URL). Response body → stdout for ALL HTTP statuses (including 4xx/5xx — `_gl_api` needs the body for tolerated statuses and error excerpts). HTTP status + response headers (at minimum `x-next-page`, `x-total-pages`, `retry-after`) → `<headers_out_file>` in a stable line-oriented format. rc 0 iff TRANSPORT succeeded (curl exit 0); HTTP-status classification is EXCLUSIVELY `_gl_api`'s job. No retries here. No pagination here.
+
+2. **`_gl_api [--method M] [--paginate] [--body JSON] [--tolerate-status CSV] [--max-items N] [--status-out FILE] <path>`** is the PUBLIC function every GitLab leaf calls. It owns pagination walk (with `--paginate`, loops `x-next-page` until exhausted, merges pages into ONE JSON array via `jq -s add`, page cap `GL_TRANSPORT_PAGE_CAP` default 50 → cap-hit or ANY mid-walk failure = rc ≠ 0 with NO partial output — the §3.5/#401 fail-CLOSED discipline verbatim); `429`/`Retry-After` bounded backoff (default 3 retries per request, cap 60s per sleep); fail-loud error surfacing (HTTP status + response body excerpt). Next-page reconstruction sets/replaces `page=<n>` on the ORIGINAL path (GitLab's `x-next-page` is a page number, not a URL). Sets `GL_API_STATUS` (final HTTP status) in the calling shell on EVERY return; ALSO mirrors it into `--status-out <file>` for harnesses that must capture stdout. `--tolerate-status CSV` makes named statuses rc 0 with the body on stdout. `--max-items N` bounds the pagination walk.
+
+3. **Override hook (`GITLAB_TRANSPORT_HOOK`)** — if set, the transport lib sources the file at library-init BEFORE any leaf runs. The hook MAY redefine `_gl_http` ONLY (same signature/contract); `_gl_api` stays lib-owned so pagination + backoff + fail-closed cannot be lost by a variant. **Trust model**: operator-owned local code, same privileges as `autonomous.conf` — explicitly NOT a sandbox (#414 pillar 3). The hook MAY define private helper functions alongside (that is operator-owned code); only the PUBLIC override point (`_gl_http`) is validated post-source. **The hook MUST actually redefine `_gl_http`** — a no-op source that leaves the default body in place fails preflight loudly (see the codex round-1 [P1-4] fix): the preflight captures `declare -f _gl_http` BEFORE sourcing and requires the body to CHANGE after. This closes the "hook armed but silently does nothing" failure mode where a mis-authored hook (typo, syntax error suppressed by the operator) would masquerade as the default transport.
+
+4. **Preflight fail-loud, latched once per process** — `GITLAB_TOKEN` unset when no hook is armed → rc ≠ 0 with recovery guidance; `GITLAB_TRANSPORT_HOOK` set but path unreadable → rc ≠ 0 naming the path; after sourcing the hook, `_gl_http` must exist AND its body must differ from the pre-source default or preflight fails rc ≠ 0 naming the hook path. The latch mirrors `_AGENT_TOKEN_PAT_WARNED` at `lib-auth.sh:93`.
+
+**set -e safety (codex round-1 [P1-3])**: every `_gl_http` call inside `_gl_api` uses the `if ! _gl_http …; then http_rc=$?; fi` pattern rather than a bare simple command. Under a caller's `set -euo pipefail`, a bare-command transport failure would abort the CALLING shell before `_gl_api`'s own rc/cleanup/`--status-out` mirroring ran; the guarded form keeps every failure paths reachable.
+
+**Contract note for leaf authors — command substitution loses shell variables**: a leaf that needs status discrimination MUST invoke `_gl_api … > "$tmpfile"` directly in the CURRENT shell (redirect, NOT `$( … )` capture) so the `GL_API_STATUS` assignment survives. This is how W-B's `provision_states` discriminates 200-probe/404-create/409-race and W-C's `commit_file` runs its branch/file preflights WITHOUT parsing stderr or reaching for `_gl_http`.
+
+**Cutover-guard extension ([INV-91], #416 R4)** — `check-provider-cutover.sh` gains two class detectors: raw `glab ` outside `providers/` and the transport allowlist FAILs; `curl` argv mentioning `/api/v4` outside `providers/lib-gitlab-transport.sh` FAILs. Both strict-from-zero on the gitlab axis. LEAVES NEVER call curl or `_gl_http` directly — the guard enforces this. The `/api/v4` detector is SAME-LINE-ONLY (matching the existing gh matcher's line-oriented discipline); multi-line evasion (`url="…/api/v4/…"` on one line, `curl "$url"` on another) is out of scope for a lint — the review gate catches it. This bound is documented in the checker comment (codex round-1 [P2-6]).
+
+**Numbering note**: this invariant was drafted as INV-113 pre-rebase (before origin/main's #412 landed as INV-113 and #405 landed as INV-114/115). Per the repo's INV number collision convention ("first-merged keeps it; renumber-on-rebase-collision"), it claims the first free slot INV-116 instead. Same convention that INV-114/INV-115 note above.
+
+**Why**: without a shared transport lib, every W-B / W-C leaf would re-implement pagination, backoff, and header parsing individually — the "single choke-point" discipline (#414 pillar 2) would exist in prose only. Freezing the contract before leaf work is a hard sequencing gate (#414 W-A).
+
+**Producer**: `skills/autonomous-dispatcher/scripts/providers/lib-gitlab-transport.sh` (`_gl_http` / `_gl_api` / `_gl_urlencode` / preflight latch).
+
+**Consumer**: every GitLab leaf (`itp-gitlab.sh` / `chp-gitlab.sh`, upcoming W-B / W-C), the conformance runner's `--transport-hook` / `--transport-path-add` flags (`tests/provider-conformance/run-provider-conformance.sh`, #416 R3), and the cutover guard's new Check 5 + Check 6 (`check-provider-cutover.sh`, #416 R4).
+
+**Status**: **ENFORCED** (closes #416 W-A; frozen contract; W-B / W-C leaves land against this shape).
+
+**Test**: `tests/unit/test-lib-gitlab-transport.sh` — covers preflight fail-loud (incl. no-op hook rejection, TC-GLT-003), `_gl_http` shape, `_gl_api` pagination walk, 429 backoff, HTTP-status channel + `--tolerate-status` + `--max-items`, `_gl_urlencode`, override-hook end-to-end, AND the `set -e` propagation regression (TC-GLT-070 — sourced under `set -euo pipefail`, a transport failure inside `_gl_api` returns rc ≠ 0 to the caller instead of aborting the caller's shell).
+
+**Cross-references**:
+- [`provider-spec.md` §transport](provider-spec.md#35-list-completeness-pagination--retry) — the normative statement of the two-layer contract; leaf authors build against §transport, not this rule.
+- [INV-79](#inv-79-two-token-split-app-mode-mints-a-scoped-installation-token-into-a-second-file-that-lives-only-in-the-agent-subprocess-env-the-wrapper-keeps-its-full-write-token-in-its-own-shell-only) — GitLab has no GitHub-App equivalent (§5.1), so agent GITLAB_TOKEN posture degrades to convention (parallel WARN latched in `lib-auth.sh` — `_AGENT_GITLAB_TOKEN_PAT_WARNED`).
+- [INV-91](#inv-91-provider-dispatch-is-spec-defined-and-regression-pinned-by-a-tree-wide-cutover-guard-that-forbids-a-new-raw-gh-outside-the-migrated-providers-tree-or-a-narrowly-allowlisted-file) — the cutover-guard extension in R4 rides on the same anti-regression mechanism; the gitlab class is strict-from-zero, the gh class stays baseline-anchored.
+
+---
+

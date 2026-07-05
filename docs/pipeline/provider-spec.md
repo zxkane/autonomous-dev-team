@@ -478,6 +478,28 @@ provider-internal** — callers never see a partial page or a 429.
 > + per-thread comment level) itself, capped at 50 pages per level with loud
 > rc != 0 on any mid-walk failure or cap-hit and no partial output.
 
+### 3.5.1 GitLab transport contract (§transport) — the two-layer choke-point
+
+The GitLab transport lib (`skills/autonomous-dispatcher/scripts/providers/lib-gitlab-transport.sh`, #416 W-A) is the FROZEN two-layer artifact every W-B / W-C GitLab leaf builds against. It is the load-bearing "single choke-point" (#414 pillar 2) — the pagination walker, `429`/`Retry-After` backoff, and §3.5 fail-CLOSED discipline live HERE, not in each leaf.
+
+**`_gl_http <method> <path-or-url> <headers_out_file> [body-json]`** — SINGLE-REQUEST primitive AND the OUT-OF-TREE HOOK POINT. Default impl uses curl only (no `glab` — a CLI carries its own auth/config state, blurring the standard-auth-only boundary per #414 pillar 2). Sends `PRIVATE-TOKEN: ${GITLAB_TOKEN}` against `https://${GITLAB_HOST}/api/v4/<path>`. A `<path>` that begins with `http` is used VERBATIM (used by `_gl_api`'s pagination walker to pass an absolute next-page URL). Response body → stdout for ALL HTTP statuses (including 4xx/5xx — `_gl_api` needs the body for tolerated statuses and error excerpts; no body-to-stderr split). HTTP status + response headers (at minimum `x-next-page`, `x-total-pages`, `retry-after`) → `<headers_out_file>` in a stable line-oriented format. rc 0 iff TRANSPORT succeeded (request sent, response received — curl exit 0); HTTP-status classification (≥ 400 → error, tolerated statuses, retry triggers) is EXCLUSIVELY `_gl_api`'s job. No retries here. No pagination here.
+
+**`_gl_api [--method M] [--paginate] [--body JSON] [--tolerate-status CSV] [--max-items N] [--status-out FILE] <path>`** — the PUBLIC function every GitLab leaf calls. Owns pagination walk (with `--paginate`, loops `x-next-page` until exhausted, merges pages into ONE JSON array via `jq -s add`; page cap `GL_TRANSPORT_PAGE_CAP` default 50 → cap-hit or ANY mid-walk failure = rc ≠ 0 with NO partial output — the §3.5/#401 fail-closed discipline verbatim); `429`/`Retry-After` bounded backoff (default 3 retries per request, cap 60s per sleep); fail-loud error surfacing (HTTP status + response body excerpt). Calls `_gl_http` per request.
+
+**HTTP-status channel (load-bearing for leaf preflights; SUBSHELL-SAFE by design)**: `_gl_api` sets `GL_API_STATUS` (final HTTP status) in the calling shell on EVERY return, and `--tolerate-status 404,409` makes the named statuses return rc 0 with the body on stdout and `GL_API_STATUS` observable. **CONTRACT NOTE — command substitution loses shell variables**: a leaf that needs status discrimination MUST invoke `_gl_api … > "$tmpfile"` directly in the CURRENT shell (redirect, NOT `$( … )` capture) so the `GL_API_STATUS` assignment survives; `_gl_api` ADDITIONALLY mirrors the status into a caller-suppliable `--status-out <file>` for harnesses that must capture stdout. This is how W-B's `provision_states` discriminates 200-probe/404-create/409-race and W-C's `commit_file` runs its branch/file preflights WITHOUT parsing stderr or reaching for `_gl_http`.
+
+**Bounded reads**: `--max-items N` stops the pagination walk once N items are merged (so a LIMIT-bounded list verb cannot spuriously hit the page cap on a large project).
+
+**Next-page reconstruction**: GitLab's `x-next-page` is a page NUMBER, not a URL — `_gl_api` reconstructs the next request by setting/replacing the `page=<n>` query param on the ORIGINAL path (documented; `_gl_http`'s verbatim-absolute-URL affordance stays but is not the pagination mechanism).
+
+**`_gl_urlencode <string>`** (jq `@uri`) — leaves (dynamic project refs, label names, file paths) share ONE encoder; the STATIC `GITLAB_PROJECT` config value is stored ALREADY-URL-ENCODED per §3.4 (`group%2Fsubgroup%2Fproject`) and used verbatim.
+
+**Leaves NEVER call curl or `_gl_http` directly** — the [INV-91] cutover guard (#416 R4) enforces this: any `curl` argv mentioning `/api/v4` outside `providers/lib-gitlab-transport.sh` FAILs strict-from-zero.
+
+**Override hook (`GITLAB_TRANSPORT_HOOK`)** — if set (conf-declared path), the transport lib sources it at library-init BEFORE any leaf runs. The hook MAY redefine `_gl_http` ONLY (same signature/contract); `_gl_api` stays lib-owned so pagination + backoff + fail-closed cannot be lost by a variant. **Trust model**: operator-owned local code, same privileges as `autonomous.conf` — explicitly NOT a sandbox (#414 pillar 3). Preflight fail-loud, latched once per process (mirrors `_AGENT_TOKEN_PAT_WARNED` at `lib-auth.sh:93`): `GITLAB_TOKEN` unset when no hook is armed → rc ≠ 0 with recovery guidance; `GITLAB_TRANSPORT_HOOK` set but path unreadable → rc ≠ 0 naming the path; after sourcing the hook, `_gl_http` must exist and be callable or preflight fails rc ≠ 0. `GITLAB_HOST` default: `gitlab.com`.
+
+The two-layer contract is normatively pinned by [INV-116](invariants.md#inv-116-the-gitlab-transport-is-a-two-layer-choke-point-_gl_http-request-primitive--_gl_api-public-function-pagination--backoff--fail-closed-live-in-_gl_api-the-override-hook-may-redefine-_gl_http-only). A future amendment (spec + INV entry + code) is the ONLY way to change it — a W-B slice cannot redesign it silently.
+
 ### 3.6 Tick lifecycle hook (`itp_begin_tick`)
 
 The cross-repo dependency lookup mints a **target-repo-scoped** GitHub-App token
@@ -631,6 +653,8 @@ provider broke its own capability declaration).
 ## 5. Per-backend feasibility (research summary)
 
 ### 5.1 GitLab (issue tracker + code host) — viable end-to-end
+
+> **Transport contract shipped in #416 W-A** — see [§3.5.1 GitLab transport contract](#351-gitlab-transport-contract-transport--the-two-layer-choke-point). Every GitLab leaf (W-B / W-C, upcoming) reaches the network through `_gl_api` (public function; owns pagination + `429`/`Retry-After` backoff + `§3.5` fail-CLOSED discipline) → `_gl_http` (single-request primitive; the OUT-OF-TREE hook point). Instance-specific auth (SSO gateways, cookie-sync tooling, forked CLIs) is served by the operator-owned `GITLAB_TRANSPORT_HOOK` (redefines `_gl_http` only). PAT is the reference default via `GITLAB_TOKEN` against `${GITLAB_HOST}` (default `gitlab.com`). GitLab has no GitHub-App equivalent (see below), so the agent's `GITLAB_TOKEN` posture degrades to convention — parallel to the existing GH_AUTH_MODE=token WARN (`_AGENT_GITLAB_TOKEN_PAT_WARNED` latch in `lib-auth.sh`, #416 R2). `LEAVES NEVER call curl or _gl_http directly` — enforced by the [INV-91] cutover-guard extension (#416 R4).
 
 Maps almost 1:1; several verbs are a **cleaner** fit than GitHub: native label
 AND (`labels=A,B`) and negation (`not[labels]=Y`, no jq post-filter); atomic
@@ -841,6 +865,23 @@ independently. **GitHub auth code is UNCHANGED in this PR** — this section
 documents the ownership cut only, so the later GitLab/Asana PRs don't re-cut it.
 `REPO` / `GH_AUTH_MODE` / `*_APP_ID` / `*_APP_PEM` stay as the GitHub provider's
 config namespace (§3.4).
+
+**Auth-lifecycle gating (#416 R2, shipped):** the whole GitHub auth lifecycle
+(`setup_github_auth`'s daemon spawn + `gh` wrapper install; `setup_agent_token`'s
+scoped-mint or PAT WARN; `dispatcher-tick.sh`'s app-mode credential FATAL) is
+now gated on `_github_seam_active` — `ISSUE_PROVIDER=github OR CODE_HOST=github`
+(default `${…:-github}`, so today's github/github topology is byte-identical).
+Under `gitlab`/`gitlab` the whole lifecycle is a clean no-op: no daemon, no
+`gh` wrapper, no FATAL, no `GH_TOKEN`-related WARN.
+
+**GitLab auth rows (#416 W-A, transport shipped; leaves W-B / W-C):**
+
+| Seam | GitLab auth context | Notes |
+|---|---|---|
+| ITP (`itp-gitlab`) | PAT via `GITLAB_TOKEN` against `${GITLAB_HOST}` per §3.4 (namespace reserved at [§3.4](#34-repo-stays--as-the-github-providers-config-namespace)); the wrapper-held full-write posture stays. INV-79 containment **degrades to convention** on the gitlab seam — a WARN is latched once per process (`_AGENT_GITLAB_TOKEN_PAT_WARNED`, `lib-auth.sh:98`) mirroring the existing `GH_AUTH_MODE=token` PAT posture. | GitLab has no GitHub-App equivalent (§5.1). A scoped agent-mint is impossible; the PreToolUse hook layer + wrapper gates remain the sole approve/merge containment on the gitlab lane. |
+| CHP (`chp-gitlab`) | Same as ITP row — PAT via `GITLAB_TOKEN` (a single PAT covers both seams for a `gitlab`/`gitlab` topology; the auth-context ownership boundary is documented, not enforced by two separate token files). | Instance-specific auth (SSO gateway, cookie-sync tooling, forked CLI) served OUT-OF-TREE via the `GITLAB_TRANSPORT_HOOK` (§3.5.1). |
+
+**Transport contract**: see [§3.5.1](#351-gitlab-transport-contract-transport--the-two-layer-choke-point) for the frozen two-layer contract every GitLab leaf builds against.
 
 ---
 

@@ -167,35 +167,52 @@ fi
 # ---------------------------------------------------------------------------
 # GitHub authentication
 # ---------------------------------------------------------------------------
-if [[ "$GH_AUTH_MODE" == "app" ]]; then
-  if [[ -z "${DEV_AGENT_APP_ID:-}" || -z "${DEV_AGENT_APP_PEM:-}" ]]; then
-    # [INV-72] auth-class config failure → surface on the issue when known.
-    error_surface "$ISSUE_NUMBER" ADT_AUTH_APP_CREDS_MISSING \
-      "GH_AUTH_MODE=app but the dev agent's App credentials are unset" \
-      "DEV_AGENT_APP_ID and/or DEV_AGENT_APP_PEM is empty in autonomous.conf" \
-      "Set DEV_AGENT_APP_ID and DEV_AGENT_APP_PEM (see docs/github-app-setup.md), then re-dispatch" \
-      "docs/pipeline/errors.md#authentication-class-class-auth" auth
-    echo "Error: GH_AUTH_MODE=app requires DEV_AGENT_APP_ID and DEV_AGENT_APP_PEM" >&2
-    exit 1
+# [#416 R2 P1-2] Wrap the whole wrapper-level auth setup in a shared
+# `github_seam_active` gate (lib-auth.sh) — the SAME predicate lib-auth.sh's
+# internals gate on, so no expression is duplicated across the four consumer
+# sites (this wrapper, autonomous-review.sh, dispatcher-tick.sh, and the
+# two internal lib-auth functions). A `gitlab`/`gitlab` topology skips the
+# ENTIRE block: no App-cred FATAL, no PAT-mode fallback, no `setup_github_auth`
+# call. A mixed `github`/`gitlab` topology STILL runs it — the active github
+# seam's leaves call `gh`. Under the default `${…:-github}` this predicate is
+# always true, so the github/github tree stays byte-identical.
+if github_seam_active; then
+  if [[ "$GH_AUTH_MODE" == "app" ]]; then
+    if [[ -z "${DEV_AGENT_APP_ID:-}" || -z "${DEV_AGENT_APP_PEM:-}" ]]; then
+      # [INV-72] auth-class config failure → surface on the issue when known.
+      error_surface "$ISSUE_NUMBER" ADT_AUTH_APP_CREDS_MISSING \
+        "GH_AUTH_MODE=app but the dev agent's App credentials are unset" \
+        "DEV_AGENT_APP_ID and/or DEV_AGENT_APP_PEM is empty in autonomous.conf" \
+        "Set DEV_AGENT_APP_ID and DEV_AGENT_APP_PEM (see docs/github-app-setup.md), then re-dispatch" \
+        "docs/pipeline/errors.md#authentication-class-class-auth" auth
+      echo "Error: GH_AUTH_MODE=app requires DEV_AGENT_APP_ID and DEV_AGENT_APP_PEM" >&2
+      exit 1
+    fi
+    if ! setup_github_auth "${DEV_AGENT_APP_ID}" "${DEV_AGENT_APP_PEM}"; then
+      # [INV-72] token-mint failure (auth-class) → surface on the issue when known.
+      # The proxy may have no valid token, so error_surface likely degrades to
+      # log-only — that's the correct best-effort behavior.
+      error_surface "$ISSUE_NUMBER" ADT_AUTH_TOKEN_MINT_FAILED \
+        "The dev agent's GitHub App installation token could not be minted" \
+        "The token-refresh daemon never wrote an initial token (see lib-auth.sh FATAL above)" \
+        "Verify DEV_AGENT_APP_ID, the installation id, and DEV_AGENT_APP_PEM on the execution host and that the App has the required repo permissions; check the token-daemon log, then re-dispatch" \
+        "docs/pipeline/errors.md#authentication-class-class-auth" auth
+      exit 1
+    fi
+    # [INV-79] Mint the SECOND, scoped token for the agent subtree (reuses the dev
+    # App credentials). Best-effort: a mint failure WARNs and leaves the agent on
+    # the full-write credential (no scrub) rather than blocking the run.
+    setup_agent_token "${DEV_AGENT_APP_ID}" "${DEV_AGENT_APP_PEM}"
+  else
+    setup_github_auth
+    # [INV-79] PAT mode: no second token possible — logs a one-time WARN.
+    setup_agent_token
   fi
-  if ! setup_github_auth "${DEV_AGENT_APP_ID}" "${DEV_AGENT_APP_PEM}"; then
-    # [INV-72] token-mint failure (auth-class) → surface on the issue when known.
-    # The proxy may have no valid token, so error_surface likely degrades to
-    # log-only — that's the correct best-effort behavior.
-    error_surface "$ISSUE_NUMBER" ADT_AUTH_TOKEN_MINT_FAILED \
-      "The dev agent's GitHub App installation token could not be minted" \
-      "The token-refresh daemon never wrote an initial token (see lib-auth.sh FATAL above)" \
-      "Verify DEV_AGENT_APP_ID, the installation id, and DEV_AGENT_APP_PEM on the execution host and that the App has the required repo permissions; check the token-daemon log, then re-dispatch" \
-      "docs/pipeline/errors.md#authentication-class-class-auth" auth
-    exit 1
-  fi
-  # [INV-79] Mint the SECOND, scoped token for the agent subtree (reuses the dev
-  # App credentials). Best-effort: a mint failure WARNs and leaves the agent on
-  # the full-write credential (no scrub) rather than blocking the run.
-  setup_agent_token "${DEV_AGENT_APP_ID}" "${DEV_AGENT_APP_PEM}"
 else
-  setup_github_auth
-  # [INV-79] PAT mode: no second token possible — logs a one-time WARN.
+  # [#416 R2] gitlab/gitlab (or any non-github topology): no GitHub App
+  # identity needed. Call setup_agent_token so the GitLab PAT-posture WARN
+  # (gitlab seam + GITLAB_TOKEN set) still fires; setup_agent_token is
+  # itself no-op past that WARN when the github seam is inactive.
   setup_agent_token
 fi
 
