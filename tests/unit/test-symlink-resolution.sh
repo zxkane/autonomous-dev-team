@@ -627,7 +627,17 @@ chmod +x "$PROJ5/scripts/autonomous-dev.sh"
 # log to verify both env vars propagated.
 LOG5="/tmp/agent-marker-e2e-issue-${_INV14_ISSUE}.log"
 : > "$LOG5"
-( cd "$PROJ5" && PROJECT_DIR="$PROJ5" bash "$PROJ5/scripts/dispatch-local.sh" dev-new "$_INV14_ISSUE" >/dev/null 2>&1 ) || true
+# [Lane-GC PR-6 / INV-119] Force the back-pressure admission gate healthy
+# via its test-only override seam — this test exercises INV-14 env
+# propagation, not the gate, and must not depend on this host's actual box
+# health (a host near/over the gate's default thresholds would otherwise
+# defer this dispatch with rc=75, independent of the code under test).
+( cd "$PROJ5" && PROJECT_DIR="$PROJ5" \
+  _GATE_LOAD1_PER_CORE_OVERRIDE="0.1" \
+  _GATE_MEM_AVAILABLE_MB_OVERRIDE="999999" \
+  _GATE_SWAP_PCT_OVERRIDE="0" \
+  _GATE_LIVE_LANE_COUNT_OVERRIDE="0" \
+  bash "$PROJ5/scripts/dispatch-local.sh" dev-new "$_INV14_ISSUE" >/dev/null 2>&1 ) || true
 for _ in 1 2 3 4 5 6 7 8 9 10; do
   if grep -q 'PROJECT_ID=' "$LOG5" 2>/dev/null; then break; fi
   sleep 0.1

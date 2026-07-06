@@ -65,6 +65,20 @@ PROJECTS+=( "/data/git/myrepo-local/scripts/autonomous.conf" )
 # GitHub App auth (when GH_AUTH_MODE=app):
 #   DISPATCHER_APP_ID, DISPATCHER_APP_PEM   — read by gh-app-token.sh
 #
+# Back-pressure admission gate ([Lane-GC PR-6], design
+# docs/designs/lane-containment-gc.md §4-C6; INV-119) — these govern the
+# REMOTE box's own dispatch-local.sh gate (they take effect on the execution
+# host via the remote project's own autonomous.conf, NOT this dispatcher-side
+# file — listed here only as a reminder that they exist; see
+# autonomous.conf.example for the authoritative documentation):
+#   GATE_LOAD_PER_CORE, GATE_MIN_MEM_MB, GATE_SWAP_PCT, MAX_TOTAL_CONCURRENT
+#
+# DEFER_MARKER_MAX_AGE_SECONDS (default 900, 15 min) — bounds how long the
+# remote liveness probe (liveness-check-remote-aws-ssm.sh) treats a defer
+# marker on the EXECUTION host as fresh enough to surface as `DEFERRED`
+# rather than falling through to the ALIVE/DEAD tiers. Set on the
+# DISPATCHER side (it is read by the dispatcher's own SSM query, not the
+# remote autonomous.conf).
 PROJECTS+=( '
 PROJECT_ID=projB
 REPO=myorg/projB

@@ -454,6 +454,14 @@ The Step 5a code does fail-closed on malformed inputs, by design:
 
 The wrapper has exited; its own trap has already (or attempted to) update labels. The dispatcher reads the post-trap state and reconciles.
 
+#### DEFERRED fast-return ([Lane-GC PR-6, INV-119], #382)
+
+Checked FIRST, immediately upon entering the DEAD branch — BEFORE either of the in-progress/reviewing sub-branches below. `pid_alive` returned 1 (not-alive) above, but this does not necessarily mean a crash: under `EXECUTION_BACKEND=remote-aws-ssm`, `pid_alive`'s remote query can surface a fourth verdict, `DEFERRED`, meaning the wrapper HOST's own back-pressure admission gate (`dispatch-local.sh`) DEFINITELY refused to spawn for this exact dispatch attempt — a known, not an unknown, state, and never a crash. The verdict (plus the defer marker's age in seconds) is carried on a side channel, `PID_ALIVE_LAST_VERDICT`/`PID_ALIVE_LAST_DEFERRED_AGE` (`pid_alive`'s own return contract is boolean, with no third code path for a 4th verdict).
+
+When `PID_ALIVE_LAST_VERDICT = DEFERRED`: log a one-line INFO naming the age, and move to the next candidate. **No comment is posted, no label is flipped, no retry budget is decremented** — exactly the local-backend behavior `handle_dispatch_deferred` already produces synchronously at the `dispatch()` call site (Steps 2-4), extended here to the case where a LATER tick observes the DEAD verdict on a wrapper that was never actually launched by an EARLIER tick's own (now-completed) dispatch attempt under the remote backend, where the earlier tick's own `dispatch()` call returned 0 (SSM accepted the command) the instant it was sent — the remote box's own gate verdict was never observed synchronously there.
+
+This is UNCONDITIONAL for both `kind = issue` and `kind = review` — the fast-return happens before the kind-specific `in-progress`/`reviewing` branching below.
+
 #### DEAD + `in-progress`
 
 Look for a PR linked to the issue (same query Step 5a uses):

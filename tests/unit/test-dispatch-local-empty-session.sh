@@ -126,7 +126,17 @@ run_dispatch() {
   local stderr_capture="$TMPROOT/stderr.log"
   : > "$stderr_capture"
   local rc=0
-  ( cd "$PROJ" && bash "$DISPATCH_ENTRY" "$@" >/dev/null 2>"$stderr_capture" ) || rc=$?
+  # [Lane-GC PR-6 / INV-119] Force the back-pressure admission gate healthy
+  # via its test-only override seam — this test exercises session_id
+  # forwarding, not the gate, and must not depend on this host's actual
+  # box health (a dev box under real swap pressure would otherwise defer
+  # every invocation here with rc=75, independent of the code under test).
+  ( cd "$PROJ" && \
+    _GATE_LOAD1_PER_CORE_OVERRIDE="0.1" \
+    _GATE_MEM_AVAILABLE_MB_OVERRIDE="999999" \
+    _GATE_SWAP_PCT_OVERRIDE="0" \
+    _GATE_LIVE_LANE_COUNT_OVERRIDE="0" \
+    bash "$DISPATCH_ENTRY" "$@" >/dev/null 2>"$stderr_capture" ) || rc=$?
   # Wait briefly for the stub to write argv (dispatch-local nohup'd it).
   local _i found=""
   for _i in 1 2 3 4 5 6 7 8 9 10; do

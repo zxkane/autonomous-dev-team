@@ -382,7 +382,31 @@ for i in $(seq 0 $((new_count - 1))); do
   # dispatch timestamp ([INV-17]). Step 5 uses this to honor a cold-start
   # grace window before classifying the wrapper as crashed.
   post_dispatch_token "$issue_num" "dev-new"
-  dispatch dev-new "$issue_num"
+  # [Lane-GC PR-6 / INV-119] rc=75 (EX_TEMPFAIL) is the back-pressure gate's
+  # DEFER sentinel, not a crash — capture the rc explicitly (never a bare
+  # `dispatch ... || …` here, which would also swallow a genuine non-75
+  # failure into the SAME branch) so it routes to `handle_dispatch_deferred`,
+  # which REVERTS the `label_swap "" → in-progress` above (args reversed:
+  # `in-progress → ""`) so the issue reappears in Step 2's own selector next
+  # tick instead of being misclassified as crashed by Step 5.
+  #
+  # [review P1-2] A non-75, non-zero rc is NOT a defer and must NOT fall
+  # through to `dispatch_marker_confirm_launched` below — pre-P6, this
+  # call site was a bare top-level `dispatch dev-new "$issue_num"` with no
+  # rc capture at all, so under this script's own `set -euo pipefail` any
+  # non-zero return aborted the ENTIRE TICK immediately (never reaching
+  # Step 5, never confirming any marker). Capturing the rc via `|| _rc=$?`
+  # suppresses that abort for every rc, not just 75 — so a genuine
+  # dispatch failure must be explicitly re-raised via `exit` to restore
+  # the exact pre-P6 behavior for that case.
+  _dispatch_rc=0
+  dispatch dev-new "$issue_num" || _dispatch_rc=$?
+  if is_dispatch_deferred_rc "$_dispatch_rc"; then
+    handle_dispatch_deferred "$issue_num" "dev-new" "in-progress" ""
+    continue
+  elif [ "$_dispatch_rc" -ne 0 ]; then
+    exit "$_dispatch_rc"
+  fi
   # [INV-108] (#361 review [P1]): dispatch() returned — a wrapper is
   # confirmed launched. Confirm so the EXIT-trap release above leaves this
   # marker alone; it lives out its normal TTL.
@@ -418,7 +442,17 @@ for i in $(seq 0 $((pr_count - 1))); do
   log "  dispatching review for issue #${issue_num}"
   label_swap "$issue_num" "pending-review" "reviewing"
   post_dispatch_token "$issue_num" "review"
-  dispatch review "$issue_num"
+  # [Lane-GC PR-6 / INV-119] — see the Step 2 rc=75 comment above. Revert
+  # args are the `label_swap` call above, reversed. [review P1-2] non-75
+  # non-zero rc re-raises via exit — see the Step 2 comment above.
+  _dispatch_rc=0
+  dispatch review "$issue_num" || _dispatch_rc=$?
+  if is_dispatch_deferred_rc "$_dispatch_rc"; then
+    handle_dispatch_deferred "$issue_num" "review" "reviewing" "pending-review"
+    continue
+  elif [ "$_dispatch_rc" -ne 0 ]; then
+    exit "$_dispatch_rc"
+  fi
   # [INV-108] (#361 review [P1]) — see the Step 2 confirm comment above.
   dispatch_marker_confirm_launched "$issue_num" "review"
   JUST_DISPATCHED+=("$issue_num")
@@ -565,7 +599,17 @@ for i in $(seq 0 $((pd_count - 1))); do
       log "  dispatching dev-new for issue #${issue_num} (fresh after prompt_too_long)"
       label_swap "$issue_num" "pending-dev" "in-progress"
       post_dispatch_token "$issue_num" "dev-new"
-      dispatch dev-new "$issue_num"
+      # [Lane-GC PR-6 / INV-119] — see the Step 2 rc=75 comment above.
+      # [review P1-2] non-75 non-zero rc re-raises via exit — see the Step 2
+      # comment above.
+      _dispatch_rc=0
+      dispatch dev-new "$issue_num" || _dispatch_rc=$?
+      if is_dispatch_deferred_rc "$_dispatch_rc"; then
+        handle_dispatch_deferred "$issue_num" "dev-new" "in-progress" "pending-dev"
+        continue
+      elif [ "$_dispatch_rc" -ne 0 ]; then
+        exit "$_dispatch_rc"
+      fi
       # [INV-108] (#361 review [P1]) — see the Step 2 confirm comment above.
       dispatch_marker_confirm_launched "$issue_num" "dev-new"
       JUST_DISPATCHED+=("$issue_num")
@@ -595,7 +639,17 @@ for i in $(seq 0 $((pd_count - 1))); do
   log "  dispatching dev-resume for issue #${issue_num} (session: ${session_id:-<none>})"
   label_swap "$issue_num" "pending-dev" "in-progress"
   post_dispatch_token "$issue_num" "dev-resume"
-  dispatch dev-resume "$issue_num" "$session_id"
+  # [Lane-GC PR-6 / INV-119] — see the Step 2 rc=75 comment above.
+  # [review P1-2] non-75 non-zero rc re-raises via exit — see the Step 2
+  # comment above.
+  _dispatch_rc=0
+  dispatch dev-resume "$issue_num" "$session_id" || _dispatch_rc=$?
+  if is_dispatch_deferred_rc "$_dispatch_rc"; then
+    handle_dispatch_deferred "$issue_num" "dev-resume" "in-progress" "pending-dev"
+    continue
+  elif [ "$_dispatch_rc" -ne 0 ]; then
+    exit "$_dispatch_rc"
+  fi
   # [INV-108] (#361 review [P1]) — see the Step 2 confirm comment above.
   dispatch_marker_confirm_launched "$issue_num" "dev-resume"
   JUST_DISPATCHED+=("$issue_num")
@@ -707,6 +761,22 @@ for i in $(seq 0 $((cand_count - 1))); do
 
   else
     # DEAD branch — Step 5b.
+    #
+    # [Lane-GC PR-6 / INV-119] DEFERRED fast-return — BEFORE the no-PR /
+    # near-success checks below. `pid_alive` returned 1 (not-alive) above,
+    # but a DEFERRED verdict means the wrapper host's own back-pressure
+    # gate DEFINITELY refused to spawn (a known state), never a crash — the
+    # dev/review no-PR crash branches below would otherwise post a false
+    # "Task appears to have crashed" comment and flip the label, exactly
+    # the misattribution this PR closes for the remote-aws-ssm backend
+    # (under the local backend, the SAME rc=75 never reaches Step 5 at all
+    # — it is caught synchronously by `handle_dispatch_deferred` at the
+    # `dispatch()` call site itself, same PR). No comment, no label flip,
+    # no retry decrement — just log and move to the next candidate.
+    if [ "$PID_ALIVE_LAST_VERDICT" = "DEFERRED" ]; then
+      log "  issue #${issue_num} (${kind}) dispatch DEFERRED by the wrapper host's back-pressure gate (age=${PID_ALIVE_LAST_DEFERRED_AGE:-?}s) — not a crash, no label change, no retry decrement ([Lane-GC PR-6 / INV-119])"
+      continue
+    fi
     if [ "$kind" = "issue" ]; then
       # DEAD + in-progress: branch on whether a PR exists, and if it does,
       # branch again on whether its HEAD has new commits since the last
