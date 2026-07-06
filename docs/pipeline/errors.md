@@ -51,6 +51,8 @@ The `error_envelope` / `error_surface` helpers live in
 | `ADT_CFG_SMOKE_TIMEOUT_INVALID` | `REVIEW_SMOKE_TIMEOUT_SECONDS` is not a valid positive timeout | INV-64: the value is not a positive coreutils-`timeout` duration | Set `REVIEW_SMOKE_TIMEOUT_SECONDS` to a positive value, then re-dispatch | issue-comment |
 | `ADT_CFG_REVIEW_BOTS_INVALID` | `REVIEW_BOTS` contains an unrecognized token | A `REVIEW_BOTS` entry is not a known bot short-name (`q` / `codex` / `claude` / a configured custom bot) | Fix `REVIEW_BOTS` in `autonomous.conf` to a space-separated list of known bot short-names (or empty), then re-dispatch | issue-comment / dispatcher-alert |
 | `ADT_CFG_EXECUTION_BACKEND_INVALID` | `EXECUTION_BACKEND` has an unrecognized value | The dispatcher's `EXECUTION_BACKEND` is not `local` or `remote-aws-ssm` | Set `EXECUTION_BACKEND` to `local` or `remote-aws-ssm` in `dispatcher.conf`/`autonomous.conf` | dispatcher-alert |
+| `ADT_CFG_ISSUE_FILTER_INVALID` | `ISSUE_FILTER` failed validation | The filter is malformed (compiler error), references a reserved pipeline-state/`autonomous` label, or contains an `assignee:` atom against a provider whose caps lack `assignees=1` ([INV-121]) | Fix `ISSUE_FILTER` in `autonomous.conf`/`dispatcher.conf` per the grammar in `autonomous.conf.example`, then re-dispatch | dispatcher-alert |
+| `ADT_CFG_ISSUE_SCAN_LIMIT_INVALID` | `ISSUE_SCAN_LIMIT` has an invalid value | The value is not a positive integer | Set `ISSUE_SCAN_LIMIT` to a positive integer (or unset for the default 100) in `autonomous.conf`/`dispatcher.conf`, then re-dispatch | dispatcher-alert |
 
 ## Authentication class (`class: auth`)
 

@@ -172,6 +172,14 @@ tick_inline_project() {
 
   (
     set +u
+    # [#436, ISSUE_FILTER review finding] Clear any ISSUE_FILTER/ISSUE_SCAN_LIMIT
+    # inherited by this subshell fork (from a dispatcher.conf-level assignment or
+    # the ambient process environment) BEFORE eval'ing the block. Without this, an
+    # inline project whose own block omits these keys would silently inherit a
+    # stale value instead of taking the documented unfiltered/default-100 path
+    # (AC-B8) — the conditional exports below only add a var, they never remove
+    # one the fork already carried in.
+    unset ISSUE_FILTER ISSUE_SCAN_LIMIT
     # shellcheck disable=SC2294
     eval "$block"
     : "${REPO:?inline project missing REPO}"
@@ -194,6 +202,14 @@ tick_inline_project() {
     [[ -n "${GH_AUTH_MODE:-}" ]]           && export GH_AUTH_MODE
     [[ -n "${MAX_CONCURRENT:-}" ]]         && export MAX_CONCURRENT
     [[ -n "${MAX_RETRIES:-}" ]]            && export MAX_RETRIES
+    # [#436, ISSUE_FILTER] per-dispatcher issue-selection scope + its scan-
+    # limit companion. Absent -> unfiltered at limit 100 (unchanged default,
+    # AC-B8). Charset-restricted by validate_inline_block above like every
+    # other inline RHS — an ISSUE_FILTER value containing `$`/backtick/`;`/
+    # `&`/`|`/`\` fails the block validation loudly before reaching this
+    # export (documented in dispatcher.conf.example).
+    [[ -n "${ISSUE_FILTER:-}" ]]           && export ISSUE_FILTER
+    [[ -n "${ISSUE_SCAN_LIMIT:-}" ]]       && export ISSUE_SCAN_LIMIT
     # Inline projects don't have a dispatcher-side PROJECT_DIR (the source
     # lives on the remote box). dispatcher-tick.sh validates PROJECT_DIR is
     # non-empty; for the local backend it's the project root, for remote

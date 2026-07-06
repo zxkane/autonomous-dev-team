@@ -148,6 +148,13 @@ list_hygiene_residue() { echo '[]'; }
 hygiene_strip_residual_labels() { :; }
 hygiene_post_audit_comment() { :; }
 _has_terminal_label() { return 1; }
+# [#436, ISSUE_FILTER] dispatcher-tick.sh's upfront validator block calls
+# issue_filter_validate unconditionally (same slot as EXECUTION_BACKEND/
+# REVIEW_BOTS above); auth tests don't set ISSUE_FILTER, so a stub that
+# always clears is sufficient (real lazy-compile/reserved-label/capability-
+# gate logic is covered by test-issue-filter.sh and
+# test-dispatcher-tick-issue-filter.sh, not this suite).
+issue_filter_validate() { return 0; }
 EOF
 
 # Stub gh-app-token.sh: record the call, return a sentinel token. The token

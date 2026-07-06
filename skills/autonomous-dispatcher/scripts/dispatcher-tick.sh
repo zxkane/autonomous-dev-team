@@ -152,6 +152,47 @@ if ! parse_review_bots "${REVIEW_BOTS:-}" >/dev/null; then
   exit 1
 fi
 
+# [#436, ISSUE_FILTER, design §4.3] Validate ISSUE_FILTER + ISSUE_SCAN_LIMIT
+# upfront, same slot and same reasoning as EXECUTION_BACKEND/REVIEW_BOTS
+# above: a poisoned filter must never dispatch anything and must never fall
+# back to unfiltered scanning (an unfiltered fallback would silently violate
+# the multi-dispatcher disjointness contract, [INV-121]). issue_filter_validate
+# (lib-issue-filter.sh, sourced transitively via lib-dispatch.sh above) runs
+# the compile + dry-run-eval, the reserved-label gate, and the assignee
+# capability gate (itp_caps, already resolvable — lib-issue-provider.sh is
+# sourced by lib-dispatch.sh before this point).
+if ! _ift_err=$(issue_filter_validate "${ISSUE_FILTER:-}" 2>&1); then
+  error_surface - ADT_CFG_ISSUE_FILTER_INVALID \
+    "ISSUE_FILTER failed validation (dispatcher tick)" \
+    "${_ift_err:-issue_filter_validate rejected the configured ISSUE_FILTER}" \
+    "Fix ISSUE_FILTER in scripts/autonomous.conf (or the project's dispatcher.conf block) per the grammar documented in autonomous.conf.example, then the next tick proceeds" \
+    "docs/pipeline/errors.md#configuration-class-class-config"
+  echo "[dispatcher-tick] FATAL: ISSUE_FILTER validation failed: ${_ift_err:-see error above}. Fix autonomous.conf before the next tick." >&2
+  unset _ift_err
+  exit 1
+fi
+unset _ift_err
+
+case "${ISSUE_SCAN_LIMIT:-100}" in
+  ''|*[!0-9]*)
+    _ift_bad_limit=1 ;;
+  0)
+    _ift_bad_limit=1 ;;
+  *)
+    _ift_bad_limit=0 ;;
+esac
+if [[ "$_ift_bad_limit" -eq 1 ]]; then
+  error_surface - ADT_CFG_ISSUE_SCAN_LIMIT_INVALID \
+    "ISSUE_SCAN_LIMIT has an invalid value (dispatcher tick)" \
+    "ISSUE_SCAN_LIMIT='${ISSUE_SCAN_LIMIT:-}' is not a positive integer" \
+    "Set ISSUE_SCAN_LIMIT to a positive integer (or unset it for the default 100) in scripts/autonomous.conf, then the next tick proceeds" \
+    "docs/pipeline/errors.md#configuration-class-class-config"
+  echo "[dispatcher-tick] FATAL: ISSUE_SCAN_LIMIT='${ISSUE_SCAN_LIMIT:-}' is not a positive integer. Fix autonomous.conf before the next tick." >&2
+  unset _ift_bad_limit
+  exit 1
+fi
+unset _ift_bad_limit
+
 # Generate a GitHub App installation token for the dispatcher when
 # GH_AUTH_MODE=app (closes #91). Pre-fix, the dispatcher's `gh` calls fell
 # back to the user's `gh auth login` token, so issue comments + label

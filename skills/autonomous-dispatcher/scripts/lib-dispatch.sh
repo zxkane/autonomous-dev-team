@@ -76,6 +76,22 @@ if ! declare -F chp_ci_status >/dev/null 2>&1; then
   unset _ld_self _ld_dir
 fi
 
+# [#436, ISSUE_FILTER] Per-dispatcher issue-selection scope. `issue_filter_*`
+# (compile/apply/validate/fields) live in lib-issue-filter.sh — sourced from
+# the REAL skill tree via the same readlink -f idiom as the itp/chp sources
+# above, so a standalone unit test that sources only lib-dispatch.sh still
+# resolves `issue_filter_apply` unchanged. Idempotent (the lib guards its own
+# redefinition).
+if ! declare -F issue_filter_apply >/dev/null 2>&1; then
+  _ld_self="${BASH_SOURCE[0]:-$0}"
+  _ld_dir="$(cd "$(dirname "$(readlink -f "$_ld_self")")" && pwd 2>/dev/null)" || _ld_dir=""
+  if [ -n "$_ld_dir" ] && [ -r "${_ld_dir}/lib-issue-filter.sh" ]; then
+    # shellcheck source=lib-issue-filter.sh
+    source "${_ld_dir}/lib-issue-filter.sh"
+  fi
+  unset _ld_self _ld_dir
+fi
+
 # [INV-108] (302b, #361): pid_dir_for_project() (lib-config.sh) is the shared
 # per-user runtime-dir resolver the controller-side dispatch marker (below)
 # reuses — same idempotent, symlink-defended directory `acquire_pid_guard`
@@ -101,11 +117,31 @@ fi
 # Echoes a non-negative integer.
 #
 # [INV-87]/[W1a, #371] Routes through the ABSTRACT itp_count_by_state contract:
-# state=open, labels-AND="autonomous", limit=100, any-of="in-progress,reviewing".
-# No gh flags/jq programs cross the seam — the leaf owns the enumeration AND the
-# any-of-label count; only the abstract filter set is caller-side.
+# state=open, labels-AND="autonomous", limit=ISSUE_SCAN_LIMIT,
+# any-of="in-progress,reviewing". No gh flags/jq programs cross the seam —
+# the leaf owns the enumeration AND the any-of-label count; only the
+# abstract filter set is caller-side.
+#
+# [#436, ISSUE_FILTER, design §3.3/§6] Empty ISSUE_FILTER takes the ORIGINAL
+# server-side-count path unchanged (AC-B1 identity — `count_active` must
+# still route through `itp_count_by_state`). A non-empty filter switches to
+# an enumerate-then-filter-then-count path: `itp_list_by_state` requests
+# `assignees` too (the filter may need it), pipes through `issue_filter_apply`
+# (fail-closed — no `2>/dev/null || true` framing, so a leaf failure aborts
+# under `set -e` exactly like the empty-filter path), then re-derives the
+# same any-of-label count caller-side over the filtered array. Both paths
+# share `${ISSUE_SCAN_LIMIT:-100}` (§3.3) — a raised limit on the filtered
+# path without raising it on the count path would under-count actives beyond
+# the first 100 and dispatch past MAX_CONCURRENT.
 count_active() {
-  itp_count_by_state open "autonomous" 100 "in-progress,reviewing"
+  local limit="${ISSUE_SCAN_LIMIT:-100}"
+  if _issue_filter_is_unset "${ISSUE_FILTER:-}"; then
+    itp_count_by_state open "autonomous" "$limit" "in-progress,reviewing"
+  else
+    itp_list_by_state open "autonomous" "$limit" "number,labels,assignees" \
+      | issue_filter_apply \
+      | jq '[.[] | select(.labels | any(. == "in-progress" or . == "reviewing"))] | length'
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -116,15 +152,21 @@ count_active() {
 # Echoes JSON array of {number, labels, title}.
 #
 # [INV-87]/[W1a, #371] The enumeration routes through the ABSTRACT
-# itp_list_by_state contract (state=open, labels-AND="autonomous", limit=100,
-# fields=number,labels,title — normalized `labels` is an array of NAME
-# strings). The no-state-label jq subtraction is re-derived CALLER-side over
-# the normalized array (spec §3.1 note / mapping appendix).
+# itp_list_by_state contract (state=open, labels-AND="autonomous",
+# limit=ISSUE_SCAN_LIMIT, fields=number,labels,title — normalized `labels`
+# is an array of NAME strings). The no-state-label jq subtraction is
+# re-derived CALLER-side over the normalized array (spec §3.1 note / mapping
+# appendix).
+#
+# [#436, ISSUE_FILTER, design §6] `issue_filter_fields` widens the requested
+# fields with `assignees` only when a filter is set; `issue_filter_apply`
+# narrows the result to this instance's slice AFTER the existing predicate
+# (empty filter → semantic no-op, still strips any `assignees` key).
 list_new_issues() {
-  itp_list_by_state open "autonomous" 100 "number,labels,title" | jq '[.[] | select(
+  itp_list_by_state open "autonomous" "${ISSUE_SCAN_LIMIT:-100}" "$(issue_filter_fields "number,labels,title")" | jq '[.[] | select(
     (.labels | any(. == "in-progress" or . == "pending-review" or . == "reviewing"
                    or . == "pending-dev" or . == "stalled" or . == "approved")) | not
-  )]'
+  )]' | issue_filter_apply
 }
 
 # Step 3: issues with `autonomous` + `pending-review` AND NOT `reviewing`.
@@ -143,11 +185,13 @@ list_pending_review() {
   # [INV-25] terminal-state subtraction (`reviewing`/`approved`/`stalled`
   # defense-in-depth, #115 Bug C) STAYS caller-side, re-derived over the
   # normalized `labels` name-string array.
-  itp_list_by_state open "autonomous,pending-review" 100 "number,labels" | jq '[.[] | select(
+  # [#436, ISSUE_FILTER, design §6] filter applied AFTER the terminal-state
+  # subtraction, per the standard evaluation-point pattern.
+  itp_list_by_state open "autonomous,pending-review" "${ISSUE_SCAN_LIMIT:-100}" "$(issue_filter_fields "number,labels")" | jq '[.[] | select(
     (.labels | any(. == "reviewing") | not) and
     (.labels | any(. == "approved") | not) and
     (.labels | any(. == "stalled") | not)
-  )]'
+  )]' | issue_filter_apply
 }
 
 # Step 4: issues with `autonomous` + `pending-dev`.
@@ -163,10 +207,12 @@ list_pending_dev() {
   # fields=number,labels,comments field set (comments is the [INV-90]
   # normalized array) and the [INV-25] terminal-state subtraction stay
   # caller-side per spec §3.1, re-derived over the normalized shape.
-  itp_list_by_state open "autonomous,pending-dev" 100 "number,labels,comments" | jq '[.[] | select(
+  # [#436, ISSUE_FILTER, design §6] filter applied AFTER the terminal-state
+  # subtraction.
+  itp_list_by_state open "autonomous,pending-dev" "${ISSUE_SCAN_LIMIT:-100}" "$(issue_filter_fields "number,labels,comments")" | jq '[.[] | select(
     (.labels | any(. == "approved") | not) and
     (.labels | any(. == "stalled") | not)
-  )]'
+  )]' | issue_filter_apply
 }
 
 # Step 5: issues currently in active state (in-progress OR reviewing) — same
@@ -183,10 +229,12 @@ list_stale_candidates() {
   # [INV-87]/[W1a, #371] leaf via the ABSTRACT itp_list_by_state contract; the
   # active-state selector + the `approved` subtraction (#115 Bug A) stay
   # caller-side per spec §3.1, re-derived over the normalized `labels` array.
-  itp_list_by_state open "autonomous" 100 "number,labels" | jq '[.[] | select(
+  # [#436, ISSUE_FILTER, design §6] filter applied AFTER the active-state
+  # selection.
+  itp_list_by_state open "autonomous" "${ISSUE_SCAN_LIMIT:-100}" "$(issue_filter_fields "number,labels")" | jq '[.[] | select(
     (.labels | any(. == "in-progress" or . == "reviewing")) and
     (.labels | any(. == "approved") | not)
-  )]'
+  )]' | issue_filter_apply
 }
 
 # ---------------------------------------------------------------------------
@@ -216,7 +264,11 @@ list_hygiene_residue() {
   # contract: the 2-axis (terminal AND transitional) [INV-25] forbidden-combo
   # predicate MOVED INTO THE LEAF (spec R1's one deliberate exception to
   # "predicates stay caller-side") — this caller is now a thin pass-through.
-  itp_list_forbidden_combos open "autonomous" 100
+  # [#436, ISSUE_FILTER, design §6/§7] the leaf always returns `assignees`
+  # (this verb takes no FIELDS_CSV, PR-A's unconditional widening) so
+  # `issue_filter_apply` can see assignee data too — per-slice Step-0
+  # hygiene, the INV-25 scope amendment.
+  itp_list_forbidden_combos open "autonomous" "${ISSUE_SCAN_LIMIT:-100}" | issue_filter_apply
 }
 
 # Strip transitional labels from an issue that also carries a terminal

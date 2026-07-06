@@ -143,6 +143,22 @@ The self-heal is **scoped narrowly** — only the two directly-executed scripts.
 
 Defense in depth: the same heal also runs in every `install-*-hooks.sh` via `lib-installer.sh::ensure_dispatcher_scripts_executable`, so consumers re-running the installer get the heal even if their installed skill version still has the broken mode (the skills CLI's `computedHash` is content-only, not mode-aware).
 
+## Pre-step: `ISSUE_FILTER` / `ISSUE_SCAN_LIMIT` validation (issue #436, [INV-121])
+
+Implementation: `dispatcher-tick.sh`, immediately after the `EXECUTION_BACKEND`/`REVIEW_BOTS` upfront checks and **before** the GitHub App token mint (the next pre-step below) — same slot, same reasoning: a poisoned config must never reach a side effect.
+
+`issue_filter_validate "${ISSUE_FILTER:-}"` (`lib-issue-filter.sh`, sourced transitively via `lib-dispatch.sh`) runs three checks in order, any of which fails closed:
+
+1. **Compile + dry-run evaluation** — the boolean expression over `label:<v>` / `assignee:<v>` / `assignee:none` atoms (`and`/`or`/`not`, parentheses) must parse and evaluate against `[]` without error.
+2. **Reserved-label gate** — no atom may reference a pipeline state label (`in-progress`, `reviewing`, `pending-review`, `pending-dev`, `stalled`, `approved`) or the `autonomous` baseline label. Slice membership keyed on a state label would mutate as the state machine runs.
+3. **Assignee capability gate** — if the compiled filter contains any `assignee:` atom, the provider's `.caps` file must declare `assignees=1` (PR-A/#435). Without this gate, a provider leaf that omits `assignees` would make every issue look unassigned, silently WIDENING the slice via `assignee:none`/`not assignee:X` — the exact failure `ISSUE_FILTER` exists to prevent.
+
+`ISSUE_SCAN_LIMIT` (default `100` when unset) is validated separately, immediately after: it must be a positive integer.
+
+**Failure mode**: any of the four checks failing aborts the ENTIRE tick rc≠0 with the `ADT_CFG_ISSUE_FILTER_INVALID` (checks 1-3) or `ADT_CFG_ISSUE_SCAN_LIMIT_INVALID` (scan-limit check) [INV-72] error envelope, surfaced as a dispatcher alert (no per-issue context yet — this is a tick-global config check). **There is no unfiltered fallback** — falling back to unfiltered scanning would silently violate the multi-dispatcher disjointness contract ([INV-121]) and double-dispatch against sibling instances, which is worse than refusing to run the tick. No `gh` call, no token mint, no label edit, no dispatch marker happens before this check runs.
+
+An empty/unset `ISSUE_FILTER` and an unset/valid `ISSUE_SCAN_LIMIT` clear this slot with no envelope — byte-identical to pre-#436 behavior.
+
 ## Pre-step: GitHub authentication (closes #91)
 
 `dispatcher-tick.sh` resolves auth before any `gh` call so the dispatcher's
@@ -191,6 +207,8 @@ The four existing `list_*` selectors (Steps 2–5) already inline an `approved` 
 - Manual operator label edits during reconciliation.
 - Future bug producers we haven't found yet — Step 0 closes the class regardless of producer.
 
+**`ISSUE_FILTER` conjunction (issue #436, [INV-121]).** `list_hygiene_residue` pipes its result through `issue_filter_apply` — with a non-empty filter, this instance only heals residue on issues matching its own slice. Residue on an issue outside every configured instance's slice is left for whichever instance's filter does match it, or for the operator, per the [INV-25] scope amendment and [INV-121] rule 7. Empty/unset filter is unaffected (heals every match, as before #436).
+
 ## Step 1: concurrency gate
 
 Implementation: `lib-dispatch.sh::count_active`.
@@ -203,6 +221,8 @@ if ACTIVE >= MAX_CONCURRENT: abort tick
 `MAX_CONCURRENT` defaults to 5. Counts both kinds of active wrappers because both consume Opus / Sonnet quota and local PID slots.
 
 If the cap is hit, the tick aborts entirely — no Step 2/3/4/5. This is intentional: dispatching new work while at the cap would just produce wrappers that immediately collide with `acquire_pid_guard` or starve on quota.
+
+**`ISSUE_FILTER` conjunction (issue #436, [INV-121]).** With an empty/unset filter, `count_active` is unchanged — it routes through `itp_count_by_state` (server-side count, capped at `${ISSUE_SCAN_LIMIT:-100}`). With a non-empty filter, it switches to an enumerate-then-filter-then-count path: `itp_list_by_state` (same limit) piped through `issue_filter_apply`, then the same any-of-transitional-label count is re-derived caller-side over the filtered array. Both paths fail closed on a leaf error (never coerce to 0 — see [Failure modes by step](#failure-modes-by-step)). The practical effect: **`MAX_CONCURRENT` becomes a per-dispatcher-instance-slice limit** when a filter is set, not a repo-wide limit — the desired semantics for multi-instance operation (design §3.2).
 
 ## Step 2: scan-new
 
@@ -223,6 +243,8 @@ For each match, in order:
 
 The issue is now in `in-progress`; the dev wrapper is launching via `nohup`. Step 5 must skip this issue this tick ([INV-09](invariants.md#inv-09-just_dispatched-skip-rule)) and for the duration of the dispatch-token grace period ([INV-18](invariants.md#inv-18-cold-start-grace-period-before-stale-detection)).
 
+**`ISSUE_FILTER` conjunction (issue #436, [INV-121]).** `list_new_issues` requests fields via `issue_filter_fields` (widens to include `assignees` only when a filter is set) and pipes its result through `issue_filter_apply` AFTER the existing state-label subtraction above — this instance only picks up issues in its own slice.
+
 ## Step 3: scan-pending-review
 
 Implementation: `lib-dispatch.sh::list_pending_review`, `label_swap`.
@@ -240,6 +262,8 @@ For each match, in order:
 5. **Confirm the dispatch marker launched**: `dispatch_marker_confirm_launched <issue> review`.
 6. **Append to `JUST_DISPATCHED`.**
 
+**`ISSUE_FILTER` conjunction (issue #436, [INV-121]).** `list_pending_review` applies `issue_filter_apply` AFTER the terminal-state subtraction above — same standard evaluation-point pattern as every other selector.
+
 ## Step 4: scan-pending-dev
 
 Implementation: `lib-dispatch.sh::list_pending_dev`, `count_retries`, `mark_stalled`, `extract_dev_session_id`, `label_swap`.
@@ -247,6 +271,8 @@ Implementation: `lib-dispatch.sh::list_pending_dev`, `count_retries`, `mark_stal
 > **Provider seam ([INV-87](invariants.md#inv-87-provider-dispatch-is-spec-defined--callers-route-every-issuecode-host-op-through-itp_chp_-never-a-raw-gh-in-the-caller-layer), #283/#282/#285).** Step 4's two entangled orchestrators — `mark_stalled` (the retry-cap terminal, Step 4a) and `handle_completed_session_routing` (the completed-session router, Step 4b.5.1) — now route ALL their leaf I/O through ITP/CHP verbs: comment dedup reads via `itp_list_comments`, comment posts via `itp_post_comment` (the [INV-89](invariants.md#inv-89-every-machine-marker--agent-and-dispatcher-inv-18inv-39-included--is-posted-only-through-the-declared-marker_channel-the-read-side-capture-regex-branches-on-channel) marker choke-point), the `pending-dev → stalled`/`pending-review`/`in-progress` label moves via `label_swap` (→ `itp_transition_state`), and the PR lookup via `fetch_pr_for_issue` (→ `chp_find_pr_for_issue`). The [INV-26](invariants.md#inv-26-stall-decision-excludes-dispatcher-induced-terminations-and-defers-on-live-wrappers)/[INV-30](invariants.md#inv-30-pid_alive-is-authoritative-under-all-execution-backends)/[INV-35](invariants.md#inv-35-review-aware-resume-routing-for-completed-sessions)/[INV-85](invariants.md#inv-85-the-completed-session-failed-substantive-route-is-bounded-to-one-dev-new-per-unchanged-head-a-no-progress-or-bot-unfixable-finding-escalates-to-stalled-never-loops) timing + routing decision, the liveness gates (`pid_alive`/`get_pid`), the retry counters, the `: > $log` truncate, and `dispatch dev-new` stay **provider-neutral** caller-side (§7.1(b)). The `gh issue edit`/`gh issue comment` shown in the pseudocode below is the conceptual leaf — the actual emit is the verb. The byte-identical verb argv is gated by `tests/unit/test-mark-stalled-golden-trace.sh` and `tests/unit/test-handle-completed-routing-golden-trace.sh` (#285).
 
 Find issues labeled `autonomous` AND `pending-dev` AND NOT (`approved` OR `stalled`). The terminal-label exclusion is defense-in-depth on top of [INV-25](invariants.md#inv-25-terminal-labels-approved-stalled-are-sticky-transitional-residue-is-healed-at-tick-start) Step 0 hygiene; without it, an `approved + pending-dev` residue would trigger Step 4's `pending-dev → in-progress` swap and spawn dev-resume against an approved issue (the actual mechanism behind the wedge that motivated #115).
+
+**`ISSUE_FILTER` conjunction (issue #436, [INV-121]).** `list_pending_dev` applies `issue_filter_apply` AFTER the terminal-state subtraction above — same standard evaluation-point pattern as every other selector.
 
 For each match, in order:
 
@@ -405,6 +431,8 @@ Implementation: `lib-dispatch.sh::list_stale_candidates`, `was_just_dispatched`,
 
 Find issues labeled `in-progress` OR `reviewing` **and not also `approved`**. The `approved` exclusion is critical: an issue in the `approved` terminal state that still carries a transitional label (residue from a wrapper crash between two label edits, or from the [INV-15](invariants.md#inv-15-step-5a-sigterm-race-is-non-deterministic) SIGTERM race) must not be treated as stale. Without the exclusion, Step 5 would swap the active label to `pending-dev`, which re-arms Step 4 on the next tick — an infinite loop burning tokens on a terminally-decided issue (issue #115 Bug A).
 
+**`ISSUE_FILTER` conjunction (issue #436, [INV-121]).** `list_stale_candidates` applies `issue_filter_apply` AFTER the active-state selection above — same standard evaluation-point pattern as every other selector. This instance's stale-detection sweep only touches issues in its own slice.
+
 For each match:
 
 1. **Skip if in `JUST_DISPATCHED`** ([INV-09](invariants.md#inv-09-just_dispatched-skip-rule)).
@@ -499,6 +527,7 @@ This branch is the safety net for the case where the wrapper died so abruptly th
 | `JUST_DISPATCHED` not maintained | Step 5 | Step 5 evaluates a freshly-dispatched issue, sees no PID file yet, diagnoses DEAD-no-PR, increments crash counter, eventually marks stalled. **This was the root of #34, #41 — the array exists specifically to prevent this.** |
 | Resume against a completed session | Step 4b.5 / 4b.5.1 | PR-6 added `is_session_completed` ([INV-12](invariants.md#inv-12-resume-only-against-unfinished-sessions)) — never resume into a closed SSE stream. Step 4b.5.1 ([INV-35](invariants.md#inv-35-review-aware-resume-routing-for-completed-sessions), #149) then routes the `completed` case based on the most recent post-completion review verdict: no verdict → operator handoff (original INV-12 notice); non-substantive failure → label-flip back to `pending-review`; substantive failure → `dev-new` (PTL pattern). Pre-INV-35, every completed-with-failed-review issue stuck indefinitely. The wall-clock timeout ([INV-13](invariants.md#inv-13-wall-clock-cap-on-agent-invocations)) remains the safety net for false negatives. |
 | Agent invocation hangs in CLI | wrapper, not dispatcher | Bounded by future wall-clock timeout ([#60](https://github.com/zxkane/autonomous-dev-team/issues/60), [INV-13](invariants.md#inv-13-wall-clock-cap-on-agent-invocations)). Until then the dispatcher's Step 5a is the only way to clear it. |
+| Malformed `ISSUE_FILTER` / invalid `ISSUE_SCAN_LIMIT` | pre-step (before token mint) | `issue_filter_validate` (compile + dry-run eval + reserved-label gate + assignee-capability gate) or the scan-limit numeric check fails → tick aborts rc≠0 with `ADT_CFG_ISSUE_FILTER_INVALID` / `ADT_CFG_ISSUE_SCAN_LIMIT_INVALID` ([INV-72], [INV-121] rule 5). No side effects — no token mint, no Step 0, no label edit, no dispatch marker, no agent spawn. **No unfiltered fallback**: falling back to unfiltered scanning would violate the multi-dispatcher disjointness contract. |
 
 ## Observe-only metrics emission ([INV-70](invariants.md#inv-70-metrics-emission-is-observe-only--silent-to-pipeline-loud-to-report))
 

@@ -644,6 +644,74 @@ REAL_GH=""
 MAX_CONCURRENT=5
 MAX_RETRIES=3
 
+# === ISSUE_FILTER — per-dispatcher issue-selection scope (issue #436,
+# design docs/designs/issue-filter.md, [INV-121]) ===
+#
+# Optional. Scopes THIS dispatcher instance to a subset of open `autonomous`
+# issues, applied at every selection point (scan-new, pending-review,
+# pending-dev, stale detection, Step-0 hygiene, and the concurrency count).
+# Empty/unset = no additional filtering (today's behavior — jq-equal output).
+#
+# Grammar:
+#   atoms      label:<name>  |  label:"name with spaces"  |
+#              assignee:<login>  |  assignee:"login"  |  assignee:none
+#              (unquoted `assignee:none` = unassigned; a real login literally
+#              named "none" must be quoted: `assignee:"none"`)
+#   ops        not > and > or, in that precedence order; parentheses group
+#   matching   exact, case-sensitive string comparison (provider-neutral;
+#              GitLab labels ARE case-sensitive)
+#   reserved   pipeline state labels (in-progress, reviewing, pending-review,
+#              pending-dev, stalled, approved) and the `autonomous` baseline
+#              label are REJECTED as atoms — the tick aborts with a
+#              conf error rather than accepting a filter whose membership
+#              would mutate as the state machine runs.
+#
+# The filter is a CONJUNCTIVE REFINEMENT on top of the `autonomous` baseline
+# every selector already enumerates — it can only narrow the selection,
+# never widen it past `autonomous`. A malformed filter (bad grammar, a
+# reserved-label atom, or an `assignee:` atom against a provider whose caps
+# lack `assignees=1`) aborts the ENTIRE tick before any side effect — there
+# is NO fallback to unfiltered scanning (that would silently violate the
+# disjointness contract below).
+#
+# ISSUE_FILTER='label:team-a and (label:frontend or label:backend) and not label:wip and (assignee:alice or assignee:none)'
+ISSUE_FILTER=""
+#
+# MULTI-DISPATCHER DISJOINTNESS CONTRACT ([INV-121]): when more than one
+# dispatcher instance serves this repo, their `ISSUE_FILTER` values MUST be
+# configured pairwise disjoint — no issue should match two instances'
+# filters. This is an OPERATIONAL contract, not code-enforced (no
+# cross-host claiming mechanism); an overlapping pair of filters silently
+# double-dispatches. Recommended pattern: one routing label per
+# dispatcher instance/box —
+#   box-tokyo:  ISSUE_FILTER='label:box-tokyo'
+#   box-sg:     ISSUE_FILTER='label:box-sg'
+# An issue matching NO instance's filter is simply never dispatched by any
+# instance — that is operator-visible backlog (check via an ordinary
+# issue-list query), not a pipeline error. Do NOT edit routing labels or
+# assignees on an issue while it carries a transitional state label
+# (in-progress / reviewing / pending-review / pending-dev) — re-slice only
+# at rest, or two instances can briefly both see the same issue in their
+# slice (see [INV-121] rule 3).
+#
+# MAX_CONCURRENT SEMANTICS UNDER A FILTER: with a non-empty ISSUE_FILTER,
+# `MAX_CONCURRENT` above becomes a PER-INSTANCE-SLICE limit (only this
+# instance's in-progress/reviewing count is checked), not a repo-wide limit.
+# This is the intended semantics for multi-instance operation.
+#
+# ISSUE_SCAN_LIMIT — default 100 (matches every enumeration site's
+# pre-#436 hardcoded limit). Every selector, INCLUDING both `count_active`
+# code paths (the empty-filter server-side count AND the filtered
+# enumerate-then-count path), caps its server-side enumeration at this
+# value BEFORE ISSUE_FILTER narrows the result. If this repo's open
+# `autonomous` issue count can approach 100, and you set a non-empty
+# ISSUE_FILTER, raise ISSUE_SCAN_LIMIT well above that count — otherwise
+# matching issues that sit beyond the first 100 server-side results are
+# invisible to this instance until older issues close (filter-after-limit
+# truncation, [INV-121] rule 8). Must be a positive integer; an invalid
+# value aborts the tick the same way a malformed ISSUE_FILTER does.
+# ISSUE_SCAN_LIMIT=100
+
 # Lane-GC systemd --user scope backend ([Lane-GC PR-7], design
 # docs/designs/lane-containment-gc.md §4-C7; INV-120). Linux-only, feature-
 # detected, and NEVER load-bearing — the portable pgid backend (PR-2..PR-5)
