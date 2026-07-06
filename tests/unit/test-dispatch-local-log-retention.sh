@@ -146,7 +146,17 @@ DISPATCH_ENTRY="$PROJ/scripts/dispatch-local.sh"
 # Invoke dispatch-local.sh and wait for the spawned wrapper to be running.
 run_dispatch() {
   rm -f "$PROJ/.pids/"*.pid 2>/dev/null
-  ( cd "$PROJ" && bash "$DISPATCH_ENTRY" "$@" >/dev/null 2>&1 ) || true
+  # [Lane-GC PR-6 / INV-119] Force the back-pressure admission gate healthy
+  # via its test-only override seam — this test exercises log rotation, not
+  # the gate, and must not depend on this host's actual box health (a dev
+  # box under real swap pressure would otherwise defer every invocation
+  # here with rc=75, independent of the code under test).
+  ( cd "$PROJ" && \
+    _GATE_LOAD1_PER_CORE_OVERRIDE="0.1" \
+    _GATE_MEM_AVAILABLE_MB_OVERRIDE="999999" \
+    _GATE_SWAP_PCT_OVERRIDE="0" \
+    _GATE_LIVE_LANE_COUNT_OVERRIDE="0" \
+    bash "$DISPATCH_ENTRY" "$@" >/dev/null 2>&1 ) || true
   # Give the nohup'd stub a moment to start writing.
   sleep 0.5
 }

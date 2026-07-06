@@ -8,8 +8,15 @@
 #   session_id: required for dev-resume
 #
 # Exit codes:
-#   0 — Process spawned successfully
-#   1 — Error (invalid input, missing config)
+#   0  — Process spawned successfully
+#   1  — Error (invalid input, missing config)
+#   75 — [Lane-GC PR-6 / INV-119] Deferred: the back-pressure admission gate
+#        refused to spawn (box distress persisted after one `adt-gc.sh
+#        --quick` reclaim attempt). NOT an error — the caller (lib-dispatch.sh
+#        via dispatcher-tick.sh's `dispatch()`) treats rc=75 as a defer: no
+#        retry-budget decrement, no label change, no crash comment. The
+#        issue is picked up again on the next tick. See design
+#        docs/designs/lane-containment-gc.md §4-C6.
 
 set -euo pipefail
 
@@ -77,11 +84,263 @@ source "${LIB_DIR}/lib-lane.sh" 2>/dev/null || true
 # degrades to unwrapped (still `|| true`, so a genuine hang there is the
 # SAME exposure `--quick`'s design already accepts, not a regression).
 _ADT_GC_QUICK_TIMEOUT_CMD="$(command -v timeout || command -v gtimeout || true)"
-if [[ -n "$_ADT_GC_QUICK_TIMEOUT_CMD" ]]; then
-  "$_ADT_GC_QUICK_TIMEOUT_CMD" 15 bash "${LIB_DIR}/adt-gc.sh" --quick >/dev/null 2>&1 || true
-else
-  bash "${LIB_DIR}/adt-gc.sh" --quick >/dev/null 2>&1 || true
-fi
+# [Lane-GC PR-6] Resolvable entry point (test-only `_ADT_GC_ENTRY_OVERRIDE`
+# seam) shared by this opportunistic call AND the admission gate's own
+# reclaim attempt below — one var, one resolution, no drift between the two
+# call sites. Production always resolves to the real `${LIB_DIR}/adt-gc.sh`.
+ADT_GC_ENTRY="${_ADT_GC_ENTRY_OVERRIDE:-${LIB_DIR}/adt-gc.sh}"
+_run_adt_gc_quick() {
+  if [[ -n "$_ADT_GC_QUICK_TIMEOUT_CMD" ]]; then
+    "$_ADT_GC_QUICK_TIMEOUT_CMD" 15 bash "$ADT_GC_ENTRY" --quick >/dev/null 2>&1 || true
+  else
+    bash "$ADT_GC_ENTRY" --quick >/dev/null 2>&1 || true
+  fi
+}
+_run_adt_gc_quick
+
+# ---------------------------------------------------------------------------
+# [Lane-GC PR-6 / INV-119] Back-pressure admission gate (design §4-C6).
+# ---------------------------------------------------------------------------
+#
+# Refuses to spawn (exit 75, EX_TEMPFAIL) when box distress crosses any of
+# four INDEPENDENT thresholds — load/core, available memory, swap%, or the
+# GLOBAL (cross-project) live-lane count — so a busy/thrashing box stops
+# feeding the OOM-feedback amplifier the design's §1 problem statement
+# describes: pressure kills wrappers non-gracefully, each death sheds a new
+# orphan batch, which raises pressure further. The gate is PURE admission
+# control — it never kills or signals any process; a deferred dispatch is
+# simply picked up again on the next tick (rc=75 attribution lives in
+# lib-dispatch.sh's INV-26 exit-code table, this same PR).
+#
+# Knobs (autonomous.conf / dispatcher.conf, all optional — see
+# autonomous.conf.example / dispatcher.conf.example):
+#   GATE_LOAD_PER_CORE   (default 3)     — load1 / nproc threshold
+#   GATE_MIN_MEM_MB      (default 2048)  — MemAvailable floor (MB)
+#   GATE_SWAP_PCT        (default 90)    — swap-used percentage ceiling
+#   MAX_TOTAL_CONCURRENT (default 12)    — GLOBAL live-lane cap, cross-project
+#     (distinct from the existing per-project MAX_CONCURRENT — the registry
+#     is what finally makes a CROSS-project cap possible; MAX_CONCURRENT is
+#     unchanged and still governs Steps 2-4's per-project fan-out)
+#
+# TEST-ONLY override seam (never read by a production dispatch — each var
+# lets a unit test inject synthetic pressure on exactly ONE signal without
+# loading the real box or minting real lane fixtures for the 4th). Kept as
+# four independent vars rather than one bundled `_GATE_BOX_HEALTH_OVERRIDE`
+# blob so a test can isolate ONE signal while the other three read the
+# box's REAL (presumably healthy) values — proving per-signal independence,
+# not merely an OR-of-everything:
+#   _GATE_LOAD1_PER_CORE_OVERRIDE / _GATE_MEM_AVAILABLE_MB_OVERRIDE /
+#   _GATE_SWAP_PCT_OVERRIDE / _GATE_LIVE_LANE_COUNT_OVERRIDE
+#
+# A second, FILE-based variant of the same four (`_GATE_*_OVERRIDE_FILE`,
+# read fresh on every `_gate_check_signals` call, contents = the value)
+# exists solely so a test's fake `adt-gc.sh --quick` stub — a SEPARATE
+# process, which cannot mutate this shell's env vars — can simulate an
+# actual reclaim between the first failing check and the re-check-once
+# pass: the stub overwrites the file, the second `_gate_check_signals`
+# call reads the new value. A bare env-var override is static for the
+# whole dispatch and cannot exercise that path. Env override takes
+# precedence when both are set (matches "most specific wins"); production
+# sets neither.
+GATE_LOAD_PER_CORE="${GATE_LOAD_PER_CORE:-3}"
+GATE_MIN_MEM_MB="${GATE_MIN_MEM_MB:-2048}"
+GATE_SWAP_PCT="${GATE_SWAP_PCT:-90}"
+MAX_TOTAL_CONCURRENT="${MAX_TOTAL_CONCURRENT:-12}"
+
+# `_gate_kind_for_type` maps dispatch-local.sh's own TYPE vocabulary
+# (dev-new|dev-resume|review) onto the SAME `issue|review` kind vocabulary
+# `liveness-check-remote-aws-ssm.sh` and the PID-file scheme already use
+# (`${kind}-${N}.pid`) — so the defer marker this gate writes is directly
+# consumable by that script via the KIND variable it already has, no
+# separate translation table needed on the remote-probe side.
+_gate_kind_for_type() {
+  case "$TYPE" in
+    dev-new|dev-resume) echo "issue" ;;
+    review)             echo "review" ;;
+    *)                  echo "$TYPE" ;;
+  esac
+}
+GATE_KIND="$(_gate_kind_for_type)"
+
+# [review P1-1] Dispatch-attempt token — the verifiable-on-the-wrapper-host
+# freshness anchor the remote liveness snippet compares a defer marker
+# against. `dispatch-local.sh` is what runs ON THE WRAPPER HOST for every
+# single dispatch attempt (directly under the local backend; via the SSM
+# inner-command under the remote-aws-ssm backend) — it is therefore the one
+# component that can HONESTLY record "when did the dispatcher last attempt
+# to dispatch THIS (kind, issue) on THIS host", which is what the design's
+# "compare the marker against the last dispatch attempt" mechanism actually
+# needs. The controller-side `dispatch-marker-<issue>-<mode>` file
+# ([INV-108]'s `acquire_dispatch_marker`) is NOT usable for this: it lives
+# on the DISPATCHER host, and under remote-aws-ssm the dispatcher and
+# wrapper hosts are different machines — the remote liveness snippet (which
+# runs entirely on the wrapper host, with no GitHub API / no dispatcher-host
+# filesystem access) can never read it.
+#
+# Written UNCONDITIONALLY, as early as possible (before the gate even
+# checks its signals) — this file's mtime is "the start of THIS attempt",
+# and everything the gate does afterward (the reclaim call, the re-check,
+# writing/refreshing the defer marker) happens AFTER this write, in the
+# same script run. A later dispatch attempt (a genuine re-dispatch)
+# overwrites this SAME path with a fresh mtime the instant it starts —
+# which is exactly what lets the remote snippet recognize a PRIOR run's
+# now-stale defer marker as superseded, never something to shadow a real
+# DEAD verdict with (see the liveness snippet's own comparison logic).
+GATE_ATTEMPT_MARKER_ROOT="${ADT_STATE_ROOT:-$HOME/.local/state}/autonomous-${PROJECT_ID}/lanes"
+mkdir -p "$GATE_ATTEMPT_MARKER_ROOT" 2>/dev/null || true
+: > "${GATE_ATTEMPT_MARKER_ROOT}/.attempt-${GATE_KIND}-${ISSUE_NUM}" 2>/dev/null || true
+
+# _gate_health_field <health_line> <key> — echo the numeric value for <key>
+# out of box_health()'s space-separated `key=value` line, or nothing (rc 1)
+# if absent. `box_health` OMITS a signal entirely when its source is
+# unavailable — an absent field must never be coerced to 0: that would read
+# as "healthy" for a min-floor check (MemAvailable) but "maximally
+# distressed" for a max-ceiling check (load/swap) — two different wrong
+# answers from the same coercion. Absent therefore means "unknown for this
+# ONE signal", handled by the caller as a skip, never a guess.
+_gate_health_field() {
+  local health="$1" key="$2" tok
+  for tok in $health; do
+    [[ "$tok" == "${key}="* ]] && { printf '%s\n' "${tok#*=}"; return 0; }
+  done
+  return 1
+}
+
+# _gate_check_signals — evaluates all four signals against the REAL (or
+# test-overridden) box/registry state. Checked in a FIXED, documented order
+# (load, mem, swap, lane-cap) so a test asserting "load fired" can't be
+# accidentally satisfied by a coincidentally-also-failing later signal.
+# Echoes the fired reason and returns 1 on the FIRST signal that crosses its
+# threshold; echoes nothing and returns 0 when every signal is within
+# bounds OR unknown (an unreadable/unavailable signal never gates — the
+# same fail-toward-leak-not-refuse default this whole design series applies
+# to kill decisions, applied here to admission instead).
+#
+# Guarded on `declare -F box_health`/`lane_global_live_count`: if lib-lane.sh
+# failed to source (dispatch-local.sh's own `2>/dev/null || true` guard on
+# that source line, matching kill_stale_wrapper's identical degrade), the
+# gate degrades to "never fires" rather than aborting or erroring — the same
+# posture the existing opportunistic GC call already takes on a missing
+# adt-gc.sh.
+# _gate_override <env_override> <file_override> — echo the effective
+# override value: the static env var if set, else the CURRENT content of
+# the file override (re-read every call, unlike the env var — see the
+# file-override rationale above), else nothing.
+_gate_override() {
+  local env_val="$1" file_path="$2"
+  if [[ -n "$env_val" ]]; then
+    printf '%s\n' "$env_val"
+    return 0
+  fi
+  if [[ -n "$file_path" && -f "$file_path" ]]; then
+    cat "$file_path" 2>/dev/null | tr -d '[:space:]'
+    return 0
+  fi
+  return 1
+}
+
+_gate_check_signals() {
+  local health="" load1pc="" memavail="" swappct="" livecount=""
+
+  if [[ -n "${_GATE_LOAD1_PER_CORE_OVERRIDE:-}${_GATE_MEM_AVAILABLE_MB_OVERRIDE:-}${_GATE_SWAP_PCT_OVERRIDE:-}${_GATE_LOAD1_PER_CORE_OVERRIDE_FILE:-}${_GATE_MEM_AVAILABLE_MB_OVERRIDE_FILE:-}${_GATE_SWAP_PCT_OVERRIDE_FILE:-}" ]] \
+     || declare -F box_health >/dev/null 2>&1; then
+    health="$(box_health 2>/dev/null || true)"
+  fi
+
+  load1pc="$(_gate_override "${_GATE_LOAD1_PER_CORE_OVERRIDE:-}" "${_GATE_LOAD1_PER_CORE_OVERRIDE_FILE:-}" || true)"
+  [[ -n "$load1pc" ]] || load1pc="$(_gate_health_field "$health" load1_per_core || true)"
+  if [[ -n "$load1pc" ]] && awk -v v="$load1pc" -v t="$GATE_LOAD_PER_CORE" 'BEGIN{exit !(v>t)}' 2>/dev/null; then
+    printf 'load1_per_core=%s > GATE_LOAD_PER_CORE=%s' "$load1pc" "$GATE_LOAD_PER_CORE"
+    return 1
+  fi
+
+  memavail="$(_gate_override "${_GATE_MEM_AVAILABLE_MB_OVERRIDE:-}" "${_GATE_MEM_AVAILABLE_MB_OVERRIDE_FILE:-}" || true)"
+  [[ -n "$memavail" ]] || memavail="$(_gate_health_field "$health" mem_available_mb || true)"
+  if [[ "$memavail" =~ ^[0-9]+$ ]] && [[ "$memavail" -lt "$GATE_MIN_MEM_MB" ]]; then
+    printf 'mem_available_mb=%s < GATE_MIN_MEM_MB=%s' "$memavail" "$GATE_MIN_MEM_MB"
+    return 1
+  fi
+
+  swappct="$(_gate_override "${_GATE_SWAP_PCT_OVERRIDE:-}" "${_GATE_SWAP_PCT_OVERRIDE_FILE:-}" || true)"
+  [[ -n "$swappct" ]] || swappct="$(_gate_health_field "$health" swap_pct || true)"
+  if [[ "$swappct" =~ ^[0-9]+$ ]] && [[ "$swappct" -gt "$GATE_SWAP_PCT" ]]; then
+    printf 'swap_pct=%s > GATE_SWAP_PCT=%s' "$swappct" "$GATE_SWAP_PCT"
+    return 1
+  fi
+
+  livecount="$(_gate_override "${_GATE_LIVE_LANE_COUNT_OVERRIDE:-}" "${_GATE_LIVE_LANE_COUNT_OVERRIDE_FILE:-}" || true)"
+  if [[ -z "$livecount" ]] && declare -F lane_global_live_count >/dev/null 2>&1; then
+    # [review P2-3] Pass the cap so the scan short-circuits the instant the
+    # running count proves "at or above the cap" — the gate never needs
+    # the exact total, only the threshold comparison below.
+    livecount="$(lane_global_live_count "$MAX_TOTAL_CONCURRENT" 2>/dev/null || true)"
+  fi
+  if [[ "$livecount" =~ ^[0-9]+$ ]] && [[ "$livecount" -ge "$MAX_TOTAL_CONCURRENT" ]]; then
+    printf 'live_lane_count=%s >= MAX_TOTAL_CONCURRENT=%s' "$livecount" "$MAX_TOTAL_CONCURRENT"
+    return 1
+  fi
+
+  return 0
+}
+
+# _admission_gate — the refusal path (design §4-C6 "Refusal path"): log →
+# one bounded `adt-gc.sh --quick` reclaim attempt → re-check the signals
+# ONCE → defer marker + `exit 75`, or fall through and let the caller
+# proceed to `kill_stale_wrapper`/spawn. Grep-pin (TC-LGC6 suite): this
+# function's own body — and every helper it calls above — contains no
+# `kill`/`pkill`/SIGTERM/SIGKILL literal: the ADMISSION DECISION itself is
+# pure — the gate never signals any process to reach its own defer/proceed
+# verdict (design: "the gate is pure admission control: it never kills
+# running lanes").
+#
+# [review P2-1, honest contract scope] This does NOT mean the reclaim call
+# below can never result in a kill anywhere on the host. `adt-gc.sh
+# --quick` is a SEPARATE component governed by its OWN safety predicate
+# ([INV-117]): under its default `--dry-run` mode (the common case, and
+# the only mode every existing test here exercises) the reclaim attempt
+# classifies dead-lane residue and kills nothing. If an operator has
+# separately opted a host into `ADT_GC_ENFORCE=1` (GC's own enforce-mode),
+# that SAME `--quick` call CAN perform a real kill of registry-DEAD-lane
+# residue — but that kill is authorized by [INV-117]'s own decision table
+# (dead-lane-only, never a live lane), not by this gate, and would fire
+# identically on this host regardless of whether the gate ever called
+# `--quick` at all (the box-wide cron/opportunistic `--quick` invocation
+# already runs on every dispatch, gate or no gate). The grep-pin below is
+# therefore scoped precisely to THIS function's own admission-decision
+# code — never a claim about `adt-gc.sh`'s own, separately-invariant-
+# governed, reclaim-step side effects.
+_admission_gate() {
+  local reason
+  if reason="$(_gate_check_signals)"; then
+    return 0
+  fi
+  echo "dispatch deferred: back-pressure (${reason})" >&2
+
+  # One reclaim attempt before giving up. Shares `_run_adt_gc_quick` (and
+  # therefore `ADT_GC_ENTRY`/the timeout feature-detection) with the
+  # unconditional top-of-file opportunistic call — Pass 1 GC is idempotent,
+  # so a second back-to-back invocation this same dispatch is cheap and
+  # safe, never double-counted by anything downstream.
+  _run_adt_gc_quick
+
+  # Re-check ONCE — the design's exact wording. A test that clears the
+  # injected override between the first failing check and this point
+  # (simulating what a real reclaim would achieve) proves dispatch proceeds
+  # instead of deferring a second time.
+  if reason="$(_gate_check_signals)"; then
+    echo "dispatch proceeding: back-pressure cleared after --quick reclaim attempt" >&2
+    return 0
+  fi
+
+  echo "dispatch deferred: back-pressure (${reason}) — persists after --quick reclaim attempt" >&2
+  local marker_root
+  marker_root="${ADT_STATE_ROOT:-$HOME/.local/state}/autonomous-${PROJECT_ID}/lanes"
+  mkdir -p "$marker_root" 2>/dev/null || true
+  printf '%s\n' "$reason" > "${marker_root}/.defer-${GATE_KIND}-${ISSUE_NUM}" 2>/dev/null || true
+  exit 75
+}
+
+_admission_gate
 
 PID_DIR=$(pid_dir_for_project) || { echo "ERROR: cannot resolve PID dir" >&2; exit 1; }
 
@@ -490,4 +749,14 @@ if ! kill -0 "$CHILD_PID" 2>/dev/null; then
   echo "ERROR: ${TYPE} process for issue #${ISSUE_NUM} exited immediately. Check log: /tmp/agent-${PROJECT_ID}-*-${ISSUE_NUM}.log" >&2
   exit 1
 fi
+
+# [Lane-GC PR-6 / INV-119] Marker cleanup on next successful dispatch (design
+# §5: "removed on next successful dispatch"). A prior tick's defer marker for
+# this exact (kind, issue) is now stale — this dispatch just proved the gate
+# no longer fires — so it is removed here rather than left for the remote
+# DEFERRED probe to keep surfacing after the fact. Best-effort: a removal
+# failure (permissions, already gone) never fails an otherwise-successful
+# dispatch.
+rm -f "${ADT_STATE_ROOT:-$HOME/.local/state}/autonomous-${PROJECT_ID}/lanes/.defer-${GATE_KIND}-${ISSUE_NUM}" 2>/dev/null || true
+
 echo "Dispatched ${TYPE} for issue #${ISSUE_NUM} (PID: ${CHILD_PID})"

@@ -164,6 +164,23 @@ jobs:
             exit 1
           }
 
+      # Lane-GC PR-6 back-pressure admission gate E2E (issue #382, INV-119):
+      # drives the REAL, unmodified dispatch-local.sh CLI entry point through
+      # the gate's refusal->spawn lifecycle. TC-LGC6-E2E-01 injects synthetic
+      # box distress via the test-only override env vars and asserts exit 75
+      # + a defer marker + NO fixture wrapper spawn; TC-LGC6-E2E-02 repeats
+      # the SAME invocation with the overrides cleared and asserts exit 0 +
+      # a genuine fixture-wrapper spawn + defer-marker cleanup. No network /
+      # credentials — always-on hermetic tier.
+      - name: lane-gc-p6 back-pressure gate E2E (real dispatch-local.sh)
+        run: |
+          out=$(bash tests/e2e/run-lane-gc-p6-gate-e2e.sh)
+          echo "$out"
+          echo "$out" | grep -q 'LANE-GC-P6-GATE-E2E-SUMMARY pass=7 fail=0' || {
+            echo "::error::lane-gc-p6 back-pressure gate E2E did not produce the expected summary"
+            exit 1
+          }
+
   # Executable-spec gate (INV-80, #236): the issue-label state machine is encoded
   # in docs/pipeline/transitions.json; the mermaid diagram is GENERATED from it,
   # and every guard/action + every dispatcher label-write must be declared. This
@@ -256,6 +273,8 @@ jobs:
             skills/autonomous-dispatcher/scripts/lib-lane.sh \
             tests/e2e/run-lane-gc-p5-guardian-e2e.sh \
             skills/autonomous-dispatcher/scripts/lib-guardian.sh \
+            skills/autonomous-dispatcher/scripts/liveness-check-remote-aws-ssm.sh \
+            tests/e2e/run-lane-gc-p6-gate-e2e.sh \
             tests/conformance/run-conformance.sh \
             tests/conformance/lib-conformance.sh \
             skills/autonomous-dispatcher/scripts/post-verdict.sh \

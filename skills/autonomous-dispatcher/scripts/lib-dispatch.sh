@@ -1989,10 +1989,26 @@ CBREPORT
       # phantom per-HEAD attempt marker posted below. Guard each step
       # explicitly: on failure, release the marker (owned — acquire appended
       # it) and bail; the next tick retries under MAX_RETRIES.
+      #
+      # [Lane-GC PR-6 / INV-119] `dispatch` is pulled out of the OR-chain so
+      # an rc=75 (back-pressure DEFER) can be distinguished from a genuine
+      # label/token failure: a defer is not an ERROR and must revert the
+      # `pending-dev → in-progress` swap the line above just performed
+      # (never leave the issue label-stranded in-progress with no wrapper
+      # ever spawned — Step 5 would misclassify that as a crash next tick).
       if ! label_swap "$issue_num" "pending-dev" "in-progress" ||
-         ! post_dispatch_token "$issue_num" "dev-new" ||
-         ! dispatch dev-new "$issue_num"; then
-        log "  ERROR: INV-35 fresh-dev pre-spawn step failed for issue #${issue_num} (label/token/dispatch) — releasing the dispatch marker; next tick retries ([INV-108])."
+         ! post_dispatch_token "$issue_num" "dev-new"; then
+        log "  ERROR: INV-35 fresh-dev pre-spawn step failed for issue #${issue_num} (label/token) — releasing the dispatch marker; next tick retries ([INV-108])."
+        release_dispatch_marker "$issue_num" "dev-new"
+        return 0
+      fi
+      local _dispatch_rc=0
+      dispatch dev-new "$issue_num" || _dispatch_rc=$?
+      if is_dispatch_deferred_rc "$_dispatch_rc"; then
+        handle_dispatch_deferred "$issue_num" "dev-new" "in-progress" "pending-dev"
+        return 0
+      elif [ "$_dispatch_rc" -ne 0 ]; then
+        log "  ERROR: INV-35 fresh-dev dispatch failed (rc=${_dispatch_rc}) for issue #${issue_num} — releasing the dispatch marker; next tick retries ([INV-108])."
         release_dispatch_marker "$issue_num" "dev-new"
         return 0
       fi
@@ -2586,8 +2602,16 @@ _pid_file_for() {
 #
 # Synchronous SSM query into the wrapper box's PID file + heartbeat
 # state. Used by `pid_alive` under `EXECUTION_BACKEND=remote-aws-ssm`
-# ([INV-30]). Prints exactly one of `ALIVE` / `DEAD` / empty on stdout
-# (the tri-state contract from `liveness-check-remote-aws-ssm.sh`).
+# ([INV-30]). Prints exactly one of `ALIVE` / `DEAD` / `DEFERRED:<age_s>`
+# / empty on stdout — [Lane-GC PR-6 / INV-119] extends the prior tri-state
+# contract with a FOURTH verdict, re-encoded from the driver's own two-line
+# `DEFERRED\n<age_s>` stdout into a single colon-joined token
+# (`DEFERRED:<age_s>`) precisely because THIS function's own return value
+# is consumed by callers via `$(...)` — a bare newline inside that would
+# collapse under normal word-splitting the instant a caller does
+# `case "$_verdict" in DEFERRED)` (no age accessible) or, worse, treats
+# the two lines as two separate tokens. The colon-joined form is a single
+# atom callers can split with `${_verdict#*:}` / `${_verdict%%:*}`.
 #
 # Resolves the driver path via parameter expansion (no `dirname`) so
 # PATH-scrubbed callers still work. Test override:
@@ -2616,6 +2640,20 @@ _remote_pid_alive_query() {
   case "$rc:$out" in
     0:ALIVE) printf 'ALIVE' ;;
     0:DEAD)  printf 'DEAD'  ;;
+    0:DEFERRED$'\n'*)
+      # [Lane-GC PR-6 / INV-119] line 1 is the literal `DEFERRED` token,
+      # line 2 is the age in whole seconds (driver contract). Validate the
+      # age is a plain non-negative integer before trusting it — a
+      # malformed/truncated SSM transport reply must fall through to
+      # indeterminate (empty), never fabricate a DEFERRED verdict with
+      # garbage age data.
+      local _age="${out#DEFERRED$'\n'}"
+      if [[ "$_age" =~ ^[0-9]+$ ]]; then
+        printf 'DEFERRED:%s' "$_age"
+      else
+        printf ''
+      fi
+      ;;
     *)       printf ''      ;;
   esac
   return 0
@@ -2628,16 +2666,53 @@ _remote_pid_alive_query() {
 # dispatcher's box doesn't host the wrapper's filesystem, so all three
 # legacy tiers always miss. A remote-backend short-circuit consults
 # `liveness-check-remote-aws-ssm.sh` (which reaches the wrapper box via
-# SSM) and returns its tri-state verdict. Indeterminate verdicts
-# (transport fault, timeout, parse error) bias toward ALIVE — the
-# whole point of [INV-30] is that the dispatcher must never declare
-# crashed because it lacks information.
+# SSM) and returns its verdict — ALIVE / DEAD / DEFERRED / indeterminate
+# (the ORIGINAL tri-state was ALIVE/DEAD/indeterminate; [Lane-GC PR-6 /
+# INV-119] adds DEFERRED as a FOURTH, distinct verdict — see below).
+# Indeterminate verdicts (transport fault, timeout, parse error) bias
+# toward ALIVE — the whole point of [INV-30] is that the dispatcher must
+# never declare crashed because it lacks information.
+#
+# [Lane-GC PR-6 / INV-119] DEFERRED is NOT the same thing as indeterminate,
+# and is handled by an entirely SEPARATE code path (checked first, before
+# the at-cap/indeterminate logic below): it means the wrapper host's own
+# back-pressure admission gate (`dispatch-local.sh`) DEFINITELY refused to
+# spawn for this exact dispatch attempt — a KNOWN, not an unknown, state.
+# `pid_alive` returns 1 (not-alive — no wrapper was launched) for DEFERRED,
+# but ALSO records the verdict (and the marker's age in seconds) on a
+# side-channel (`PID_ALIVE_LAST_VERDICT`/`PID_ALIVE_LAST_DEFERRED_AGE` —
+# `pid_alive`'s own return contract is boolean, with no third code path for
+# a 4th verdict) so `dispatcher-tick.sh` Step 5b can fast-return BEFORE its
+# no-PR/near-success crash-declaration logic — a defer must never be
+# misattributed as a crash, exactly the failure mode this PR closes for the
+# remote backend (under the LOCAL backend, the SAME rc=75 is caught
+# synchronously by the caller of `dispatch()` itself and never reaches
+# `pid_alive` at all — see `handle_dispatch_deferred`, same PR).
 #
 # `_REMOTE_LIVENESS_DEGRADED_COUNT` (per-process counter) records
 # consecutive indeterminate verdicts; `_remote_pid_alive_query` emits
 # a WARN to stderr on the 1st and every 10th indeterminate tick so
-# operators see the degraded state without per-tick log spam.
+# operators see the degraded state without per-tick log spam. DEFERRED
+# verdicts do NOT increment this counter — they are a definite verdict,
+# not a degraded-transport signal.
 _REMOTE_LIVENESS_DEGRADED_COUNT="${_REMOTE_LIVENESS_DEGRADED_COUNT:-0}"
+
+# [Lane-GC PR-6 / INV-119] `pid_alive`'s own contract is boolean (0=alive,
+# 1=dead) — there is no third return-code slot for a fourth verdict. DEFERRED
+# is therefore plumbed through as a SIDE-CHANNEL global, set on every remote-
+# backend call (reset to empty first, so a caller can distinguish "this
+# probe was DEFERRED" from "a PRIOR probe was DEFERRED and nothing since
+# reset it") — the same pattern this file already uses for
+# `_REMOTE_LIVENESS_DEGRADED_COUNT`. `pid_alive` itself returns 1 (not-alive)
+# for a DEFERRED verdict — no wrapper was ever actually launched for this
+# dispatch attempt, so "not alive" is the correct boolean answer for any
+# caller that ignores the side channel — but `dispatcher-tick.sh` Step 5b
+# checks `PID_ALIVE_LAST_VERDICT` immediately upon entering its DEAD branch
+# and fast-returns BEFORE the no-PR/near-success crash-declaration logic,
+# exactly the design's "DEFERRED fast-return… before the near-success
+# check" ordering.
+PID_ALIVE_LAST_VERDICT=""
+PID_ALIVE_LAST_DEFERRED_AGE=""
 
 pid_alive() {
   # Optional leading `--at-cap` positional flag ([INV-30] at-cap exception,
@@ -2657,6 +2732,12 @@ pid_alive() {
   local kind="$1" issue_num="$2"
   local pid_file pid hb_file
 
+  # [Lane-GC PR-6 / INV-119] Reset the side-channel BEFORE the probe (every
+  # call, not just remote-backend calls) — a caller must never see a STALE
+  # DEFERRED verdict left over from a PRIOR issue's probe this same tick.
+  PID_ALIVE_LAST_VERDICT=""
+  PID_ALIVE_LAST_DEFERRED_AGE=""
+
   # Remote-backend short-circuit ([INV-30]). Runs first because under
   # remote-aws-ssm the legacy three-tier below would all miss; running
   # them anyway just wastes filesystem stat calls.
@@ -2664,6 +2745,15 @@ pid_alive() {
      && [ "${REMOTE_LIVENESS_CHECK_DISABLE:-false}" != "true" ]; then
     local _verdict
     _verdict=$(_remote_pid_alive_query "$kind" "$issue_num")
+    # [Lane-GC PR-6 / INV-119] DEFERRED (see docstring above) is a DEFINITE
+    # verdict, checked before the at-cap/indeterminate logic below.
+    case "$_verdict" in
+      DEFERRED:*)
+        PID_ALIVE_LAST_VERDICT="DEFERRED"
+        PID_ALIVE_LAST_DEFERRED_AGE="${_verdict#DEFERRED:}"
+        return 1
+        ;;
+    esac
     # At-cap exception ([INV-30], issue #263): when the caller has proven
     # retry budget is exhausted, an indeterminate verdict means "stop
     # waiting" — return DEAD instead of biasing ALIVE. Placed BEFORE the
@@ -3427,10 +3517,21 @@ handle_pending_dev_pr_exists() {
             log "  issue #${issue_num} self-heal dev-new dispatch marker held by a concurrent tick — skipping ([INV-108])"
           else
             log "  issue #${issue_num} PR ${pr_ref} HEAD \`${current_head}\` reviewed FAILED with NO resolvable session id and no live wrapper — self-healing with a fresh dev-new ([INV-111])"
+            # [Lane-GC PR-6 / INV-119] — see the earlier INV-35 fresh-dev
+            # comment in this file for the rc=75 rationale; identical shape.
             if ! label_swap "$issue_num" "pending-dev" "in-progress" ||
-               ! post_dispatch_token "$issue_num" "dev-new" ||
-               ! dispatch dev-new "$issue_num"; then
-              log "  ERROR: self-heal dev-new pre-spawn step failed for issue #${issue_num} (label/token/dispatch) — releasing the dispatch marker; next tick retries ([INV-108])."
+               ! post_dispatch_token "$issue_num" "dev-new"; then
+              log "  ERROR: self-heal dev-new pre-spawn step failed for issue #${issue_num} (label/token) — releasing the dispatch marker; next tick retries ([INV-108])."
+              release_dispatch_marker "$issue_num" "dev-new"
+              return 0
+            fi
+            local _dispatch_rc=0
+            dispatch dev-new "$issue_num" || _dispatch_rc=$?
+            if is_dispatch_deferred_rc "$_dispatch_rc"; then
+              handle_dispatch_deferred "$issue_num" "dev-new" "in-progress" "pending-dev"
+              return 0
+            elif [ "$_dispatch_rc" -ne 0 ]; then
+              log "  ERROR: self-heal dev-new dispatch failed (rc=${_dispatch_rc}) for issue #${issue_num} — releasing the dispatch marker; next tick retries ([INV-108])."
               release_dispatch_marker "$issue_num" "dev-new"
               return 0
             fi
@@ -3494,6 +3595,91 @@ handle_pending_dev_pr_exists() {
 label_swap() {
   local issue_num="$1" remove="$2" add="$3"
   itp_transition_state "$issue_num" "$remove" "$add"
+}
+
+# ---------------------------------------------------------------------------
+# [Lane-GC PR-6 / INV-119] rc=75 (EX_TEMPFAIL) back-pressure defer attribution
+# ---------------------------------------------------------------------------
+#
+# `dispatch()`'s underlying driver (`dispatch-local.sh`) returns exit code 75
+# when its own admission gate refuses to spawn under box distress (design
+# §4-C6). This is a DEFER, not a crash and not a dispatcher-side error: the
+# issue's label has NOT been swapped to an active state by the caller yet
+# (every call site below invokes `dispatch()` strictly AFTER its own
+# `label_swap`/`post_dispatch_token`/`acquire_dispatch_marker` side effects —
+# see the design's own "before kill_stale_wrapper/spawn" placement), so the
+# correct recovery is simply "try again next tick with NO side effect
+# reverted and NO retry-budget decrement" — the exact opposite of the
+# existing failure branches at each of these call sites, which release the
+# dispatch marker AND leave the label wherever it already was (never
+# advance it further). A defer must be economically invisible: no
+# `failed-*` label, no crash comment, no `count_retries` consumption.
+#
+# is_dispatch_deferred_rc <rc> — true iff <rc> is the gate's defer sentinel.
+# Centralized so every call site tests the SAME literal, and a future PR
+# changing the sentinel value touches exactly one line.
+is_dispatch_deferred_rc() {
+  [ "${1:-}" -eq 75 ] 2>/dev/null
+}
+
+# handle_dispatch_deferred <issue_num> <mode> <revert_from_label> <revert_to_label>
+#
+# The shared recovery action for an rc=75 `dispatch()` return under the
+# SYNCHRONOUS local backend (`EXECUTION_BACKEND=local`, where
+# `dispatch-local.sh` runs in-process and its exit code is observed
+# immediately by the SAME tick that just label-swapped the issue into an
+# active state). Two things must happen, both reversing exactly what the
+# caller's own pre-dispatch side effects just did, so a defer nets to ZERO
+# observable change on the issue for this tick:
+#
+#   1. Release the dispatch marker — the NEXT tick's `acquire_dispatch_marker`
+#      for this same (issue, mode) must not see a stale "concurrent tick
+#      owns this" marker sitting out its TTL for an attempt that never
+#      actually launched a wrapper.
+#   2. Revert the label swap the caller performed immediately before
+#      calling `dispatch()` — <revert_from_label>/<revert_to_label> are the
+#      caller's OWN `label_swap` args in REVERSE (e.g. the caller did
+#      `label_swap "$n" "" "in-progress"`; this reverts via `label_swap "$n"
+#      "in-progress" ""`). Without this, the issue is left in an active
+#      state (in-progress/reviewing) with NO wrapper ever spawned, and the
+#      NEXT tick's Step 5 stale-detection would see `pid_alive` miss (no PID
+#      file was ever written — dispatch-local.sh's gate fires before
+#      `kill_stale_wrapper`/spawn) with no near-success signal either (no
+#      Session Report, no Dev Session ID comment ever posted) and
+#      misclassify the defer as a crash — posting a false crash comment and
+#      flipping the label anyway, exactly the outcome INV-119 forbids
+#      ("no label flip"). Reverting immediately makes the defer indistin-
+#      guishable, from the issue's OWN label history, from "this tick never
+#      ran" — the issue naturally reappears in the SAME selector query
+#      (list_new_issues / list_pending_review / list_pending_dev) next tick.
+#
+# Deliberately does NOT post a comment or call `count_retries`/
+# `mark_stalled` — a defer is invisible to the retry-budget economy by
+# design (INV-26's exit-code table gains this as its explicit rc=75 row).
+#
+# Scope note: this function is for the LOCAL-backend synchronous catch
+# ONLY. Under `EXECUTION_BACKEND=remote-aws-ssm`, `dispatch()`'s underlying
+# `dispatch-remote-aws-ssm.sh` returns 0 the instant SSM ACCEPTS the
+# command — the remote wrapper-host's own `dispatch-local.sh` gate verdict
+# is never observed synchronously, so this function's rc=75 branch never
+# fires there. The remote case is instead covered by the DEFERRED verdict
+# surfaced through `liveness-check-remote-aws-ssm.sh` /
+# `_remote_pid_alive_query` and consumed by `dispatcher-tick.sh` Step 5b on
+# a LATER tick (this same PR) — the label is left in its active state on
+# purpose for that path, and Step 5b's DEFERRED fast-return (not a label
+# revert) is what keeps it from being misclassified there.
+#
+# Idempotent / best-effort: `release_dispatch_marker` already no-ops when
+# the marker isn't owned by this tick; `label_swap` failing here degrades
+# to "issue stuck in the active state, Step 5 eventually reconciles it as
+# a false-stall" — the same pre-existing exposure any `label_swap` failure
+# already carries elsewhere in this file, not a new regression.
+handle_dispatch_deferred() {
+  local issue_num="$1" mode="$2" revert_from="$3" revert_to="$4"
+  echo "[lib-dispatch] INFO: dispatch deferred (rc=75, back-pressure) for issue #${issue_num} mode=${mode} — reverting label, releasing dispatch marker, no retry-budget decrement, no crash comment; next tick retries" >&2
+  release_dispatch_marker "$issue_num" "$mode"
+  label_swap "$issue_num" "$revert_from" "$revert_to" 2>/dev/null || true
+  return 0
 }
 
 # ---------------------------------------------------------------------------

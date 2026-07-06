@@ -856,8 +856,16 @@ extract_branch_c_dispatch_block() {
     start && /^      return 0$/ { exit }
   ' "$LIB"
 }
+# [Lane-GC PR-6 / INV-119] `dispatch dev-new` was pulled OUT of the
+# `! label_swap || ! post_dispatch_token || ! dispatch` OR-chain so an
+# rc=75 back-pressure DEFER can be distinguished from a genuine dispatch
+# failure (a defer reverts the label instead of merely releasing the
+# marker) — the literal substring `! dispatch dev-new` this control
+# previously matched no longer appears. `dispatch dev-new "$issue_num" ||`
+# is the new call-site shape that still covers a non-zero dispatch rc (via
+# the `elif [ "$_dispatch_rc" -ne 0 ]` branch immediately after).
 BRANCH_C_FULL=$(extract_branch_c_dispatch_block)
-if [[ -z "$BRANCH_C_FULL" ]] || ! grep -q '! dispatch dev-new' <<<"$BRANCH_C_FULL"; then
+if [[ -z "$BRANCH_C_FULL" ]] || ! grep -q 'dispatch dev-new "\$issue_num" ||' <<<"$BRANCH_C_FULL"; then
   echo -e "  ${RED}FAIL${NC}: TC-DEDUP-361-034 could not extract Branch C's guarded dispatch block (source drifted, or the round-9 explicit guard is missing)"
   FAIL=$((FAIL + 1))
 else

@@ -670,6 +670,37 @@ LANE_TASKS_MAX=512
 # Leave empty/unset unless you've measured your own workload's footprint.
 LANE_MEMORY_MAX=
 
+# === Back-pressure admission gate ([Lane-GC PR-6], design
+# docs/designs/lane-containment-gc.md §4-C6; INV-119) ===
+#
+# dispatch-local.sh refuses to spawn (exit 75, deferred — no retry-budget
+# decrement, no label change, picked up again next tick) when box distress
+# crosses ANY of these four independent thresholds, after one bounded
+# `adt-gc.sh --quick` reclaim attempt. All four are optional; the defaults
+# below match a typical single-tenant dev box.
+#
+# GATE_LOAD_PER_CORE — load1 / nproc threshold. Default 3 (a load average
+# three times the core count is a conservative "this box is thrashing" bar).
+# GATE_LOAD_PER_CORE=3
+#
+# GATE_MIN_MEM_MB — MemAvailable floor in MB. Default 2048.
+# GATE_MIN_MEM_MB=2048
+#
+# GATE_SWAP_PCT — swap-used percentage ceiling (STRICTLY greater-than: the
+# gate fires only above this value, e.g. the default 90 first fires at
+# 91%, never at a steady 90.x% — swap_pct itself is floor-rounded, see
+# lib-lane.sh::box_health, so a boundary reading never flaps between two
+# adjacent integers tick to tick).
+# GATE_SWAP_PCT=90
+#
+# MAX_TOTAL_CONCURRENT — GLOBAL live-lane cap, counted ACROSS every project
+# sharing this box's lane registry (distinct from MAX_CONCURRENT above,
+# which is per-project and governs Steps 2-4's own fan-out). Default 12.
+# The registry ([Lane-GC PR-2], INV-109/110) is what finally makes a
+# cross-project cap possible — a fresh host with no registry yet falls back
+# to counting live PID files instead.
+# MAX_TOTAL_CONCURRENT=12
+
 # Cold-start grace window for stale detection ([INV-18], #99 Bug 1).
 # After a Step 2/3/4 dispatch, the wrapper needs time to spawn the session,
 # have the agent CLI make its first API call, and write its PID file. Step 5

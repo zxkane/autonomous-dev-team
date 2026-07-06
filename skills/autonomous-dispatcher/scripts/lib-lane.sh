@@ -411,18 +411,43 @@ env_lookup() {
 }
 
 # box_health — echo `load1_per_core=<f> mem_available_mb=<n> swap_pct=<n>` for
-# a future admission-gate PR to consume. Best-effort: any unavailable signal is
-# omitted from the line rather than aborting. Not consumed by this PR's own
-# code — provided now so PR-6 (back-pressure gate) needs no lib-lane.sh change.
+# the back-pressure admission gate ([Lane-GC PR-6], design §4-C6) to consume.
+# Best-effort: any unavailable signal is omitted from the line rather than
+# aborting — a caller that greps for one key and finds it absent must treat
+# that signal as "unknown", never as "0" (fail toward NOT gating, mirroring
+# the design's fail-toward-leak posture applied to admission instead of kill).
+#
+# Linux: /proc/loadavg + nproc, /proc/meminfo (MemAvailable is the kernel's
+# own "how much can be allocated without swapping" estimate — do not
+# reimplement it from MemFree+Buffers+Cached, which undercounts reclaimable
+# page cache), /proc/meminfo Swap{Total,Free}.
+#
+# macOS/BSD fallback (no /proc): `sysctl -n vm.loadavg` (format
+# `{ 1.23 1.45 1.67 }` — the leading `{ ` token is stripped by taking the
+# SECOND field, not the first, after word-splitting) + `sysctl -n hw.ncpu`;
+# `vm_stat`'s `Pages free` + `Pages inactive` (the two reclaimable-without-
+# swapping classes — the same free+inactive approximation the design's own
+# §4-C6 wording specifies) times the page size vm_stat reports in its own
+# header line (`page size of 4096 bytes`, NOT a hardcoded 4096 — Apple
+# Silicon commonly reports 16384); `sysctl vm.swapusage`'s `used`/`total`
+# fields (format `vm.swapusage: total = 2048.00M used = 512.00M free =
+# 1536.00M`) parsed via a value+unit split (M/G/K) rather than assumed-M,
+# so a future macOS revision changing the unit doesn't silently miscompute.
 box_health() {
-  local out="" load1 ncpu mem_avail mem_total swap_used swap_total
+  local out="" load1 ncpu mem_avail swap_used swap_total
   if [[ -r /proc/loadavg ]]; then
     load1="$(awk '{print $1}' /proc/loadavg 2>/dev/null)"
     ncpu="$(nproc 2>/dev/null || echo 1)"
-    if [[ -n "$load1" && "$ncpu" -gt 0 ]] 2>/dev/null; then
-      out+=" load1_per_core=$(awk -v l="$load1" -v n="$ncpu" 'BEGIN{printf "%.2f", l/n}')"
-    fi
+  elif command -v sysctl >/dev/null 2>&1; then
+    # `sysctl -n vm.loadavg` → `{ 1.23 1.45 1.67 }`; field 2 (1-indexed) is
+    # the 1-minute average — field 1 is the literal `{` token.
+    load1="$(sysctl -n vm.loadavg 2>/dev/null | awk '{print $2}')"
+    ncpu="$(sysctl -n hw.ncpu 2>/dev/null || echo 1)"
   fi
+  if [[ -n "${load1:-}" && "${ncpu:-0}" -gt 0 ]] 2>/dev/null; then
+    out+=" load1_per_core=$(awk -v l="$load1" -v n="$ncpu" 'BEGIN{printf "%.2f", l/n}')"
+  fi
+
   if [[ -r /proc/meminfo ]]; then
     mem_avail="$(awk '/^MemAvailable:/{print $2}' /proc/meminfo 2>/dev/null)"
     [[ -n "$mem_avail" ]] && out+=" mem_available_mb=$((mem_avail / 1024))"
@@ -431,10 +456,172 @@ box_health() {
     swap_free="$(awk '/^SwapFree:/{print $2}' /proc/meminfo 2>/dev/null)"
     if [[ -n "$swap_total" && "$swap_total" -gt 0 ]] 2>/dev/null; then
       swap_used=$((swap_total - swap_free))
-      out+=" swap_pct=$(awk -v u="$swap_used" -v t="$swap_total" 'BEGIN{printf "%.0f", (u/t)*100}')"
+      # [review P3-1] FLOOR, never round-to-nearest: `%.0f` rounds 90.5+ up
+      # to 91, so a host sitting at a steady 90.4x% would occasionally
+      # round to 90 and occasionally to 91 as the free/total counters
+      # shift by a few KB tick to tick — flapping across the default
+      # GATE_SWAP_PCT=90 boundary with no real change in box health.
+      # `int(x)` truncates toward zero (equivalent to floor for our
+      # always-non-negative ratio), so a steady 90.x% always reports
+      # exactly 90 and the gate only ever fires at a genuine >=91%.
+      out+=" swap_pct=$(awk -v u="$swap_used" -v t="$swap_total" 'BEGIN{printf "%d", int((u/t)*100)}')"
+    fi
+  elif command -v vm_stat >/dev/null 2>&1; then
+    local vmstat_out page_size pages_free pages_inactive
+    vmstat_out="$(vm_stat 2>/dev/null)"
+    page_size="$(awk '/page size of/{for(i=1;i<=NF;i++) if ($i ~ /^[0-9]+$/) print $i}' <<<"$vmstat_out" | head -1)"
+    pages_free="$(awk -F: '/^Pages free/{gsub(/[^0-9]/,"",$2); print $2}' <<<"$vmstat_out")"
+    pages_inactive="$(awk -F: '/^Pages inactive/{gsub(/[^0-9]/,"",$2); print $2}' <<<"$vmstat_out")"
+    if [[ "${page_size:-0}" -gt 0 && "${pages_free:-0}" =~ ^[0-9]+$ && "${pages_inactive:-0}" =~ ^[0-9]+$ ]] 2>/dev/null; then
+      out+=" mem_available_mb=$(( (pages_free + pages_inactive) * page_size / 1024 / 1024 ))"
+    fi
+    if command -v sysctl >/dev/null 2>&1; then
+      local swapusage total_val total_unit used_val used_unit
+      swapusage="$(sysctl vm.swapusage 2>/dev/null)"
+      total_val="$(awk '{for(i=1;i<=NF;i++) if ($i=="total") {print $(i+2); exit}}' <<<"$swapusage")"
+      used_val="$(awk '{for(i=1;i<=NF;i++) if ($i=="used") {print $(i+2); exit}}' <<<"$swapusage")"
+      total_unit="${total_val: -1}"; total_val="${total_val%?}"
+      used_unit="${used_val: -1}"; used_val="${used_val%?}"
+      # Normalize both to the same unit (bytes) before dividing — a future
+      # macOS revision reporting `total` in G and `used` in M (or vice
+      # versa under extreme swap sizes) must not silently compute a bogus
+      # ratio from mismatched units.
+      _swapusage_bytes() {
+        local val="$1" unit="$2"
+        case "$unit" in
+          K) awk -v v="$val" 'BEGIN{printf "%.0f", v*1024}' ;;
+          M) awk -v v="$val" 'BEGIN{printf "%.0f", v*1024*1024}' ;;
+          G) awk -v v="$val" 'BEGIN{printf "%.0f", v*1024*1024*1024}' ;;
+          *) echo "" ;;
+        esac
+      }
+      if [[ "$total_val" =~ ^[0-9.]+$ && "$used_val" =~ ^[0-9.]+$ ]]; then
+        local total_bytes used_bytes
+        total_bytes="$(_swapusage_bytes "$total_val" "$total_unit")"
+        used_bytes="$(_swapusage_bytes "$used_val" "$used_unit")"
+        if [[ -n "$total_bytes" && -n "$used_bytes" && "$total_bytes" -gt 0 ]] 2>/dev/null; then
+          # [review P3-1] FLOOR, not round-to-nearest — see the Linux branch
+          # above for the full boundary-flapping rationale; identical fix.
+          out+=" swap_pct=$(awk -v u="$used_bytes" -v t="$total_bytes" 'BEGIN{printf "%d", int((u/t)*100)}')"
+        fi
+      fi
     fi
   fi
   printf '%s\n' "${out# }"
+}
+
+# lane_global_live_count [cap] — echo an integer: the number of LIVE lanes
+# across EVERY project's registry under `${ADT_STATE_ROOT}/autonomous-*/lanes/`
+# ([Lane-GC PR-6], design §4-C6's `MAX_TOTAL_CONCURRENT` cross-project cap —
+# the registry, not any per-project PID dir, is what finally makes a GLOBAL
+# cap possible). "Live" is `lane_probe`'s own `live` verdict (pid ∧
+# start-time ∧, on macOS, fingerprint match) — the exact-join, registry-
+# authoritative liveness this whole series is built on; never a bare
+# same-uid process count.
+#
+# [review P2-3] Two scan-cost bounds, both because the ONLY question the
+# gate ever needs answered is "is the count AT OR ABOVE the cap", never the
+# exact total — an unbounded probe sweep across every registered lane on a
+# box with dozens of onboarded projects (this series' own dev/CI box has
+# 63 at last count) is real, avoidable cost paid on every single dispatch:
+#   1. Terminal-state skip: a lane whose `STATE` is `clean-exit`,
+#      `reaped-by-guardian`, or `gc-reaped` (the SAME terminal vocabulary
+#      `adt-gc.sh`'s own decision table rule 1.3 already uses) can, BY
+#      DEFINITION, never be live — `lane_probe` only ever promotes AWAY
+#      from these states via a fresh `lane_install` (a new lane id, a new
+#      directory), never back into a live PID/start-time pair on the SAME
+#      directory. Reading `STATE` (`lane_get`, `grep -m1` over one small
+#      flat-KV file) is far cheaper than `lane_probe`'s `kill -0` + a
+#      `/proc/PID/stat` or `ps` read, so this skip is applied BEFORE the
+#      probe call, not merely used to interpret its result.
+#   2. Cap short-circuit: when the optional <cap> argument is given and the
+#      running count reaches it, return immediately without scanning any
+#      further lanes/projects — the gate's own `_gate_check_signals` call
+#      passes `$MAX_TOTAL_CONCURRENT` here for exactly this reason. Omit
+#      <cap> (or pass a non-numeric value) to get the exact uncapped total,
+#      e.g. for a `--doctor`-style diagnostic that wants the real number.
+#
+# Fallback (fresh host / pre-registry install, design §4-C6 "falls back to
+# counting live PID files when no registry content exists"): when NO
+# `autonomous-*/lanes` directory exists under `ADT_STATE_ROOT` at all (a
+# host where no wrapper has ever minted a lane — the registry itself is
+# absent, not merely empty), count live PID files instead — `kill -0` each
+# `*.pid` under every `autonomous-*` project dir (mirrors
+# `adt-gc.sh::_gc_pgid_is_live_pidfile_pgid`'s best-effort scan, scoped
+# here to a plain liveness count rather than a pgid match). A project whose
+# lanes dir exists but is simply EMPTY (a normal idle project, most of the
+# time) is NOT a fallback trigger — it correctly contributes 0 to the
+# count via the registry path, same as any other project. The cap
+# short-circuit applies to this fallback path too.
+#
+# Best-effort: any unreadable/malformed lane or PID file is silently
+# skipped (fail toward under-count, never toward over-count — the design's
+# fail-toward-leak posture applied to the gate: undercounting can only
+# under-throttle, matching the design's "worst case = slow pipeline, never
+# a kill" residual-risk framing; over-counting would falsely defer a
+# healthy dispatch).
+lane_global_live_count() {
+  local cap="${1:-}"
+  [[ "$cap" =~ ^[0-9]+$ ]] || cap=""
+  local count=0 lanes_dir lane_dir base state saw_any_lanes_dir=false
+  for lanes_dir in "${ADT_STATE_ROOT}"/autonomous-*/lanes; do
+    [[ -d "$lanes_dir" ]] || continue
+    saw_any_lanes_dir=true
+    for lane_dir in "$lanes_dir"/*/; do
+      [[ -d "$lane_dir" ]] || continue
+      lane_dir="${lane_dir%/}"
+      base="$(basename "$lane_dir")"
+      [[ "$base" == .pending-* ]] && continue
+      # [review P2-3] Terminal-state skip BEFORE the (comparatively
+      # expensive) lane_probe call — a lane in one of these states can
+      # never be live; adt-gc.sh's own rule 1.3 decision table uses this
+      # SAME terminal vocabulary.
+      state="$(lane_get "$lane_dir" STATE 2>/dev/null || echo "")"
+      case "$state" in
+        clean-exit|reaped-by-guardian|gc-reaped) continue ;;
+      esac
+      if [[ "$(lane_probe "$lane_dir" 2>/dev/null)" == "live" ]]; then
+        count=$((count + 1))
+        # [review P2-3] Cap short-circuit: the gate only ever needs
+        # "at or above the cap" — stop scanning the instant we know that,
+        # regardless of how many more projects/lanes remain unvisited.
+        if [[ -n "$cap" ]] && [[ "$count" -ge "$cap" ]]; then
+          printf '%s\n' "$count"
+          return 0
+        fi
+      fi
+    done
+  done
+
+  if [[ "$saw_any_lanes_dir" == true ]]; then
+    printf '%s\n' "$count"
+    return 0
+  fi
+
+  # Fallback: no registry at all on this host — count live PID files across
+  # both possible project-dir roots (mirrors pid_dir_for_project's own
+  # ADT_STATE_ROOT / XDG_RUNTIME_DIR duality; this helper has no single
+  # PROJECT_ID to call pid_dir_for_project with, so it globs both roots
+  # directly, same pattern adt-gc.sh already uses for its own PID-file scan).
+  # The cap short-circuit applies here identically.
+  count=0
+  local root f pid
+  for root in "${ADT_STATE_ROOT}" "${XDG_RUNTIME_DIR:-}"; do
+    [[ -n "$root" && -d "$root" ]] || continue
+    for f in "$root"/autonomous-*/*.pid; do
+      [[ -f "$f" ]] || continue
+      pid="$(cat "$f" 2>/dev/null)"
+      [[ "$pid" =~ ^[0-9]+$ ]] || continue
+      if kill -0 "$pid" 2>/dev/null; then
+        count=$((count + 1))
+        if [[ -n "$cap" ]] && [[ "$count" -ge "$cap" ]]; then
+          printf '%s\n' "$count"
+          return 0
+        fi
+      fi
+    done
+  done
+  printf '%s\n' "$count"
 }
 
 # ---------------------------------------------------------------------------
