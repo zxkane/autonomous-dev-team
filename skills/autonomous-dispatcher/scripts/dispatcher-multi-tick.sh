@@ -172,6 +172,14 @@ tick_inline_project() {
 
   (
     set +u
+    # [#436, ISSUE_FILTER review finding] Clear any ISSUE_FILTER/ISSUE_SCAN_LIMIT
+    # inherited by this subshell fork (from a dispatcher.conf-level assignment or
+    # the ambient process environment) BEFORE eval'ing the block. Without this, an
+    # inline project whose own block omits these keys would silently inherit a
+    # stale value instead of taking the documented unfiltered/default-100 path
+    # (AC-B8) — the conditional exports below only add a var, they never remove
+    # one the fork already carried in.
+    unset ISSUE_FILTER ISSUE_SCAN_LIMIT
     # shellcheck disable=SC2294
     eval "$block"
     : "${REPO:?inline project missing REPO}"

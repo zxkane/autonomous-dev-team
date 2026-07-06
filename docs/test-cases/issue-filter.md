@@ -155,6 +155,7 @@ extensions to `tests/unit/test-lib-dispatch.sh` /
 | TC-IFILT-121 | per-project inline block omits both attributes | project subshell runs unfiltered at limit 100 (unchanged default) |
 | TC-IFILT-122 | inline `ISSUE_FILTER` value containing a `validate_inline_block`-rejected character (e.g. `` ` ``, `$`, `;`) | the whole inline block fails `validate_inline_block` loudly — the project is skipped with a WARN, not silently truncated |
 | TC-IFILT-123 | path-entry project (`autonomous.conf` file, not inline) with `ISSUE_FILTER` set | no charset restriction — the file is sourced directly, same as any other conf var |
+| TC-IFILT-124 | two inline projects in one tick: project A's block sets `ISSUE_FILTER`/`ISSUE_SCAN_LIMIT`, project B's block omits both | project B's subshell does NOT inherit A's values — B still runs unfiltered at limit 100 even though it forked after A's tick (guards against ambient/inherited-env leakage into a project that never declared these keys) |
 
 ## Non-goals (documented, not tested as bugs)
 

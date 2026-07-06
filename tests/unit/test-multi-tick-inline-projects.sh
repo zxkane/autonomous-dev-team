@@ -433,6 +433,43 @@ assert_contains "TC-IFILT-123 path-entry ISSUE_FILTER sourced verbatim (no chars
 
 # ---------------------------------------------------------------------------
 echo ""
+echo "=== TC-IFILT-124: ambient ISSUE_FILTER/ISSUE_SCAN_LIMIT does NOT leak into an inline project that omits both ==="
+# ---------------------------------------------------------------------------
+# Regression for the codex review finding on PR #438: tick_inline_project's
+# subshell only ever ADDED the export when the block declared the key; it
+# never cleared an ambient value the fork already inherited (e.g. exported by
+# dispatcher.conf itself, or by the parent process env). Simulate that by
+# exporting a stale ISSUE_FILTER/ISSUE_SCAN_LIMIT into the multi-tick
+# process's OWN environment before it forks the per-project subshells, then
+# assert a project whose inline block omits both keys still lands on the
+# documented unfiltered/default-100 path (AC-B8), not the ambient value.
+CONF="$TMPROOT/disp-ifilt-124.conf"
+RECORD="$TMPROOT/record-ifilt-124"
+: > "$RECORD"
+cat > "$CONF" <<'EOF'
+PROJECTS=()
+PROJECTS+=( '
+PROJECT_ID=projNoFilterAttr
+REPO=myorg/projNoFilterAttr
+EXECUTION_BACKEND=remote-aws-ssm
+SSM_INSTANCE_ID=i-nofilt
+SSM_REMOTE_PROJECT_DIR=/data/git/projNoFilterAttr
+SSM_REMOTE_PROJECT_ID=projNoFilterAttr
+' )
+EOF
+ISSUE_FILTER="label:stale-ambient" ISSUE_SCAN_LIMIT="999" \
+  DISPATCHER_CONF="$CONF" TICK_RECORD_FILE="$RECORD" \
+  bash "$SANDBOX/dispatcher-multi-tick.sh" >/dev/null 2>&1
+rc=$?
+assert_rc "TC-IFILT-124 rc=0 despite ambient ISSUE_FILTER/ISSUE_SCAN_LIMIT" 0 "$rc"
+record=$(cat "$RECORD")
+assert_contains "TC-IFILT-124 ambient ISSUE_FILTER does NOT leak into omitting project" "ISSUE_FILTER=<unset>" "$record"
+assert_contains "TC-IFILT-124 ambient ISSUE_SCAN_LIMIT does NOT leak into omitting project" "ISSUE_SCAN_LIMIT=<unset>" "$record"
+assert_not_contains "TC-IFILT-124 stale ambient filter value absent from record" "label:stale-ambient" "$record"
+assert_not_contains "TC-IFILT-124 stale ambient scan limit absent from record" "ISSUE_SCAN_LIMIT=999" "$record"
+
+# ---------------------------------------------------------------------------
+echo ""
 echo "=== Summary ==="
 echo "  PASS: $PASS"
 echo "  FAIL: $FAIL"
