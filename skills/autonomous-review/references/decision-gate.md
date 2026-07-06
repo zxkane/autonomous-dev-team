@@ -1,5 +1,7 @@
 # Findings -> Decision Gate — MANDATORY
 
+> **Provider-lane scope.** Every `gh pr …` / `gh issue …` command in this document is the GitHub-lane concrete form. The gate's rules — agent posts a verdict comment, wrapper submits `--approve` / `--request-changes` / merge, wrapper enforces the mergeable gate ([INV-44](../../../docs/pipeline/invariants.md)) — are provider-agnostic and apply to the GitLab lane (`CODE_HOST=gitlab`) verbatim through the `chp_approve` / `chp_merge` / `chp_mergeable` provider seams. On the GitLab lane, treat the `gh` examples as placeholders for those seams; the wrapper drives them the same way. Do not hand-roll `glab` equivalents.
+
 > **This gate is NON-NEGOTIABLE. Execute this self-check BEFORE submitting any PR review (APPROVE or REQUEST_CHANGES) and BEFORE posting the verdict comment on the issue. If this gate is skipped, the review is invalid.**
 
 After completing steps 1-11, all findings across checklist categories will have been collected. Before making the PASS/FAIL decision, execute the following self-check:

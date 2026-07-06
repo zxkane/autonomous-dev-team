@@ -1,5 +1,7 @@
 # Review Thread Management
 
+> **GitHub-lane reference (`CODE_HOST=github`).** The thread-reply mechanics, GraphQL `resolveReviewThread` mutations, and the WRONG-approach warning below are GitHub-specific. On the GitLab lane (`CODE_HOST=gitlab`) merge-request discussions and their `resolvable`/`resolved` state are managed through the pipeline's provider seam (`chp_list_inline_comments`, `chp_reply_review_comment`, plus the wrapper's resolve helper); agents don't hand-roll `glab api /projects/.../discussions/...`. See `docs/gitlab-setup.md` and the leaf-header docstrings in `skills/autonomous-dispatcher/scripts/providers/chp-gitlab.sh` for GitLab equivalents. Do not port these commands verbatim.
+
 ## Critical Rules
 
 - **Reply DIRECTLY to each comment thread** -- NOT a single general PR comment

@@ -14,14 +14,17 @@ Create well-structured GitHub issues from user descriptions through interactive 
 
 ## Repository Detection
 
-Detect the repository from the current git remote:
+Detect the repository from the current git remote using your platform's CLI. Examples:
 
 ```bash
+# GitHub lane (CODE_HOST=github):
 REPO=$(gh repo view --json nameWithOwner -q '.nameWithOwner')
-# Splits into OWNER and REPO_NAME
+
+# GitLab lane (CODE_HOST=gitlab):
+REPO=$(glab repo view -F json | jq -r '.path_with_namespace')
 ```
 
-If detection fails, ask the user for the target repository.
+Both split into `OWNER` and `REPO_NAME` (or `NAMESPACE` and `PROJECT` on GitLab). If detection fails, ask the user for the target repository.
 
 ## Process
 

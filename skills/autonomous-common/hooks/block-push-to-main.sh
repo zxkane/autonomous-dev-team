@@ -49,7 +49,7 @@ Pushing directly to `main` is **not allowed**. All changes must go through a Pul
 3. Install dependencies and make your changes
 4. Commit inside the worktree
 5. Push to the feature branch: `git push -u origin feat/<name>`
-6. Create a PR via `gh pr create`
+6. Open a pull/merge request via your platform CLI or the wrapper — e.g. `gh pr create` on GitHub, `glab mr create` on GitLab, or the pipeline's provider seam (`chp_create_pr`).
 
 ### See CLAUDE.md for the full development workflow.
 EOF

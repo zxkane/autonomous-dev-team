@@ -1,5 +1,7 @@
 # Review Commands Reference
 
+> **GitHub-lane reference (`CODE_HOST=github`).** Every command below is deliberately GitHub-specific — this file exists as the concrete `gh` CLI + GraphQL cookbook for GitHub-lane review work. On the GitLab lane (`CODE_HOST=gitlab`) these operations route through the pipeline's provider seam (`chp_*` / `itp_*` verbs) or the review wrapper; the GitLab REST equivalents live in the leaf-header docstrings of `skills/autonomous-dispatcher/scripts/providers/chp-gitlab.sh`. See `docs/gitlab-setup.md` for lane configuration and `skills/autonomous-dispatcher/scripts/providers/provider-spec.md` for the seam contract. Do not port these commands into a GitLab-lane workflow verbatim.
+
 Complete reference for GitHub CLI and GraphQL commands used in the PR review workflow.
 
 ## gh CLI Commands

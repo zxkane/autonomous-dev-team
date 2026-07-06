@@ -1,5 +1,7 @@
 # Merge Conflict Resolution — Pre-Review Step
 
+> **Provider-lane scope.** The `gh pr view … --json mergeable` and `gh pr checks --watch` commands below are the GitHub-lane concrete forms; the rebase-and-force-push procedure itself is git-native and provider-agnostic. On the GitLab lane (`CODE_HOST=gitlab`), the wrapper reads mergeability through the `chp_mergeable` provider seam and CI state through `chp_ci_status` — the review agent is fed the resolved state in its prompt (or invokes the seam), not a raw `glab mr view`. Treat the `gh pr …` calls as placeholders when running under `CODE_HOST=gitlab`.
+
 Before starting the review, check whether the PR branch has merge conflicts with main. If it does, rebase the branch so the PR is mergeable.
 
 > **This pre-review rebase is best-effort prompt guidance — the wrapper enforces the same rule mechanically.** Even if you skip this step, the review wrapper re-checks `mergeable` after aggregating verdicts and before approving: a `CONFLICTING` PR can never reach `approved` ([INV-44](../../../docs/pipeline/invariants.md)). Running this step proactively still helps — a clean rebase here gets the PR merged this round instead of bouncing back to dev — but a missed step is no longer a way for a conflicting PR to slip through.

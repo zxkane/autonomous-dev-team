@@ -273,6 +273,8 @@ git push -u origin <branch-name>
 
 ### Create PR
 
+> **GitHub lane (`CODE_HOST=github`)** — the example below uses the GitHub CLI. On the GitLab lane, the wrapper opens the merge request via the `chp_create_pr` provider seam; agents don't hand-roll the platform API call. Substitute `glab mr create --title … --description …` if you must invoke the CLI directly.
+
 ```bash
 gh pr create --title "type(scope): description" --body "$(cat <<'EOF'
 ## Summary
@@ -302,12 +304,18 @@ EOF
 
 ### Update PR Checklist
 
-After completing each step, update the PR description:
+After completing each step, update the PR/MR description. Fetch the current body, mark items as `[x]`, and write it back.
 
 ```bash
+# GitHub lane (CODE_HOST=github):
 gh pr view {pr_number} --json body --jq '.body' > /tmp/pr_body.md
 # Edit the checklist (mark items as [x])
 gh pr edit {pr_number} --body "$(cat /tmp/pr_body.md)"
+
+# GitLab lane (CODE_HOST=gitlab):
+glab mr view {mr_number} -F json | jq -r .description > /tmp/pr_body.md
+# Edit the checklist (mark items as [x])
+glab mr update {mr_number} --description "$(cat /tmp/pr_body.md)"
 ```
 
 ---
@@ -329,11 +337,14 @@ gh pr edit {pr_number} --body "$(cat /tmp/pr_body.md)"
 
 ## Step 9: Wait for All CI Checks (MANDATORY -- DO NOT SKIP)
 
-Execute in your terminal:
+Execute in your terminal. On the GitHub lane use the GitHub CLI; on the GitLab lane use `glab` (or the pipeline's `chp_ci_status` seam, which normalizes both hosts to `green`/`pending`/`failed`/`none`).
 
 ```bash
-# Watch all checks until completion
+# GitHub lane (CODE_HOST=github):
 gh pr checks {pr_number} --watch --interval 30
+
+# GitLab lane (CODE_HOST=gitlab):
+glab ci status {mr_number}   # add `--live` on newer glab for continuous updates
 ```
 
 ALL checks must pass: Lint, Unit Tests, Build, Deploy Preview, E2E Tests.
@@ -396,9 +407,12 @@ For the full retrigger commands, reply patterns, and thread resolution semantics
 3. Update PR checklist to show all items complete
 4. **STOP HERE**: report status to the user (interactive mode) or post a summary comment on the issue (autonomous mode). In autonomous mode, post via the project-vendored wrapper so the comment is attributed to the configured identity (bot in app mode, host user in token mode):
    ```bash
+   # GitHub lane (CODE_HOST=github):
    bash scripts/gh issue comment <ISSUE_NUMBER> --body "<summary>"
    ```
    Do **not** call bare `gh issue comment` — the agent's Bash tool does not reliably resolve `gh` through the wrapper-injected PATH, so a bare call falls through to the system `gh` and posts under the host operator's identity. See [`references/autonomous-mode.md`](references/autonomous-mode.md#posting-issuepr-comments) for the full rule.
+
+   > **GitLab lane (`CODE_HOST=gitlab`)** — the same principle applies: the wrapper/`itp_post_comment` provider seam posts the comment under the configured identity. Agents don't hand-roll `glab issue note` or the REST API; the seam handles auth and identity.
 5. User or review agent decides when to merge
 
 ---
