@@ -79,6 +79,24 @@ PROJECTS+=( "/data/git/myrepo-local/scripts/autonomous.conf" )
 # rather than falling through to the ALIVE/DEAD tiers. Set on the
 # DISPATCHER side (it is read by the dispatcher's own SSM query, not the
 # remote autonomous.conf).
+#
+# ISSUE_FILTER / ISSUE_SCAN_LIMIT (issue #436, [INV-121]) — per-project
+# issue-selection scope. Same grammar and semantics as
+# autonomous.conf.example's ISSUE_FILTER block (grammar, the multi-
+# dispatcher pairwise-disjointness contract, the MAX_CONCURRENT-becomes-
+# per-slice note, and the ISSUE_SCAN_LIMIT filter-after-limit-truncation
+# guidance — see that file for the full writeup, not duplicated here).
+#
+# INLINE-BLOCK CHARSET RESTRICTION: unlike a per-project autonomous.conf
+# file (sourced directly, no restriction), an INLINE ISSUE_FILTER value in
+# THIS file is validated by `validate_inline_block` before it is eval'd —
+# the value may NOT contain `$`, a backtick, `;`, `&`, `|`, or `\`
+# (CWE-95 defense-in-depth against injecting code via a conf value). A
+# rejected character fails the WHOLE inline block loudly (the project is
+# skipped with a WARN, not silently truncated) — it does NOT fall back to
+# unfiltered scanning. Most real-world label/login values never need these
+# characters; if yours genuinely does, give that project its own
+# autonomous.conf file (Example 1 above) instead of an inline block.
 PROJECTS+=( '
 PROJECT_ID=projB
 REPO=myorg/projB
@@ -95,6 +113,8 @@ DISPATCHER_APP_ID=3013418
 DISPATCHER_APP_PEM=/data/auth/projB.pem
 MAX_CONCURRENT=5
 MAX_RETRIES=3
+ISSUE_FILTER=label:box-tokyo
+ISSUE_SCAN_LIMIT=100
 ' )
 
 # ---------------------------------------------------------------------------

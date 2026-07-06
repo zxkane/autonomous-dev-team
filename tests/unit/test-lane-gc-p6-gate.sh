@@ -794,10 +794,10 @@ _run_tick_site_harness() {
 }
 
 declare -A TICK_SITES=(
-  ["step2-dev-new"]="402"
-  ["step3-review"]="448"
-  ["step4-ptl-dev-new"]="605"
-  ["step4-dev-resume"]="645"
+  ["step2-dev-new"]="443"
+  ["step3-review"]="489"
+  ["step4-ptl-dev-new"]="646"
+  ["step4-dev-resume"]="686"
 )
 for site_label in step2-dev-new step3-review step4-ptl-dev-new step4-dev-resume; do
   start_line="${TICK_SITES[$site_label]}"

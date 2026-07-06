@@ -84,6 +84,8 @@ fi
   printf 'EXECUTION_BACKEND=%s\n' "${EXECUTION_BACKEND:-<unset>}"
   printf 'SSM_INSTANCE_ID=%s\n' "${SSM_INSTANCE_ID:-<unset>}"
   printf 'SSM_REMOTE_PROJECT_DIR=%s\n' "${SSM_REMOTE_PROJECT_DIR:-<unset>}"
+  printf 'ISSUE_FILTER=%s\n' "${ISSUE_FILTER:-<unset>}"
+  printf 'ISSUE_SCAN_LIMIT=%s\n' "${ISSUE_SCAN_LIMIT:-<unset>}"
   printf '%s\n' '---'
 } >> "$TICK_RECORD_FILE"
 exit 0
@@ -313,6 +315,121 @@ DISPATCHER_CONF="$LOCAL_ONLY_CONF" TICK_RECORD_FILE="$RECORD" \
 assert_rc "rc=0 for PR-8-shape pure-path PROJECTS" 0 "$?"
 record=$(cat "$RECORD")
 assert_contains "PR-8 path entry: AUTONOMOUS_CONF set" "AUTONOMOUS_CONF=$LOCAL_CONF" "$record"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-IFILT-120: ISSUE_FILTER/ISSUE_SCAN_LIMIT export into inline project subshell ==="
+# ---------------------------------------------------------------------------
+CONF="$TMPROOT/disp-ifilt-120.conf"
+RECORD="$TMPROOT/record-ifilt-120"
+: > "$RECORD"
+cat > "$CONF" <<'EOF'
+PROJECTS=()
+PROJECTS+=( '
+PROJECT_ID=projFiltered
+REPO=myorg/projFiltered
+EXECUTION_BACKEND=remote-aws-ssm
+SSM_INSTANCE_ID=i-filt
+SSM_REMOTE_PROJECT_DIR=/data/git/projFiltered
+SSM_REMOTE_PROJECT_ID=projFiltered
+ISSUE_FILTER=label:box-a
+ISSUE_SCAN_LIMIT=200
+' )
+EOF
+DISPATCHER_CONF="$CONF" TICK_RECORD_FILE="$RECORD" \
+  bash "$SANDBOX/dispatcher-multi-tick.sh" >/dev/null 2>&1
+rc=$?
+assert_rc "rc=0 for ISSUE_FILTER inline project" 0 "$rc"
+record=$(cat "$RECORD")
+assert_contains "TC-IFILT-120 ISSUE_FILTER propagated" "ISSUE_FILTER=label:box-a" "$record"
+assert_contains "TC-IFILT-120 ISSUE_SCAN_LIMIT propagated" "ISSUE_SCAN_LIMIT=200" "$record"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-IFILT-121: project without ISSUE_FILTER/ISSUE_SCAN_LIMIT stays unfiltered at default ==="
+# ---------------------------------------------------------------------------
+CONF="$TMPROOT/disp-ifilt-121.conf"
+RECORD="$TMPROOT/record-ifilt-121"
+: > "$RECORD"
+cat > "$CONF" <<'EOF'
+PROJECTS=()
+PROJECTS+=( '
+PROJECT_ID=projUnfiltered
+REPO=myorg/projUnfiltered
+EXECUTION_BACKEND=remote-aws-ssm
+SSM_INSTANCE_ID=i-unfilt
+SSM_REMOTE_PROJECT_DIR=/data/git/projUnfiltered
+SSM_REMOTE_PROJECT_ID=projUnfiltered
+' )
+EOF
+DISPATCHER_CONF="$CONF" TICK_RECORD_FILE="$RECORD" \
+  bash "$SANDBOX/dispatcher-multi-tick.sh" >/dev/null 2>&1
+rc=$?
+assert_rc "rc=0 for project without ISSUE_FILTER" 0 "$rc"
+record=$(cat "$RECORD")
+assert_contains "TC-IFILT-121 ISSUE_FILTER stays unset (unfiltered)" "ISSUE_FILTER=<unset>" "$record"
+assert_contains "TC-IFILT-121 ISSUE_SCAN_LIMIT stays unset (default 100 applies downstream)" "ISSUE_SCAN_LIMIT=<unset>" "$record"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-IFILT-122: inline ISSUE_FILTER with a rejected metachar fails block validation loudly ==="
+# ---------------------------------------------------------------------------
+for badval in \
+  'ISSUE_FILTER=label:$(evil)' \
+  'ISSUE_FILTER=label:`evil`' \
+  'ISSUE_FILTER=label:a;evil' \
+  'ISSUE_FILTER=label:a&evil' \
+  'ISSUE_FILTER=label:a|evil' ; do
+  CONF="$TMPROOT/disp-ifilt-122.conf"
+  RECORD="$TMPROOT/record-ifilt-122"
+  : > "$RECORD"
+  printf 'PROJECTS=()\nPROJECTS+=( '\''\nPROJECT_ID=test\nREPO=myorg/test\n%s\nEXECUTION_BACKEND=remote-aws-ssm\nSSM_INSTANCE_ID=i-x\nSSM_REMOTE_PROJECT_DIR=/data/test\nSSM_REMOTE_PROJECT_ID=test\n'\'' )\n' "$badval" > "$CONF"
+  stderr_log="$TMPROOT/stderr-ifilt-122"
+  DISPATCHER_CONF="$CONF" TICK_RECORD_FILE="$RECORD" \
+    bash "$SANDBOX/dispatcher-multi-tick.sh" >/dev/null 2>"$stderr_log"
+  rc=$?
+  if [ "$rc" -eq 0 ] && [ ! -s "$RECORD" ]; then
+    echo -e "  ${GREEN}PASS${NC}: rejected metachar ISSUE_FILTER value: $badval"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${NC}: did NOT reject: $badval (rc=$rc, record=$(wc -l <"$RECORD"))"
+    FAIL=$((FAIL + 1))
+  fi
+  case "$(cat "$stderr_log")" in
+    *"non-assignment lines"*)
+      echo -e "  ${GREEN}PASS${NC}: stderr explains the validator rejection for: $badval"
+      PASS=$((PASS + 1)) ;;
+    *)
+      echo -e "  ${RED}FAIL${NC}: expected 'non-assignment lines' in stderr for: $badval"
+      FAIL=$((FAIL + 1)) ;;
+  esac
+done
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-IFILT-123: path-entry project (autonomous.conf file) has NO charset restriction ==="
+# ---------------------------------------------------------------------------
+PATH_CONF="$TMPROOT/path-autoconf-ifilt.conf"
+cat > "$PATH_CONF" <<'EOF'
+REPO=myorg/path-proj
+REPO_OWNER=myorg
+REPO_NAME=path-proj
+PROJECT_ID=path-proj
+PROJECT_DIR=/tmp/path-proj
+ISSUE_FILTER='label:box-a and not label:$special'
+EOF
+CONF="$TMPROOT/disp-ifilt-123.conf"
+RECORD="$TMPROOT/record-ifilt-123"
+: > "$RECORD"
+{
+  echo 'PROJECTS=()'
+  printf 'PROJECTS+=( %q )\n' "$PATH_CONF"
+} > "$CONF"
+DISPATCHER_CONF="$CONF" TICK_RECORD_FILE="$RECORD" \
+  bash "$SANDBOX/dispatcher-multi-tick.sh" >/dev/null 2>&1
+assert_rc "rc=0 for path-entry project with a metachar in ISSUE_FILTER" 0 "$?"
+record=$(cat "$RECORD")
+assert_contains "TC-IFILT-123 path-entry ISSUE_FILTER sourced verbatim (no charset gate)" 'ISSUE_FILTER=label:box-a and not label:$special' "$record"
 
 # ---------------------------------------------------------------------------
 echo ""
