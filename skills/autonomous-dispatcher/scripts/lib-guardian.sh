@@ -165,6 +165,18 @@ do_reap() {
 
   lane_set_state "$LANE_DIR" reaping 2>/dev/null || true
 
+  # [Lane-GC PR-7 / INV-120] cgroup fast path FIRST — a no-op unless this
+  # lane's OWN recorded BACKEND is `systemd-scope` (`_lane_scope_kill`,
+  # lib-lane.sh, decides that by reading the `lane` file, never by
+  # re-probing the host). Runs strictly BEFORE the pgid escalation below,
+  # matching the design's own ordering ("cgroup fast path (C7); else
+  # per-pgid TERM→10s→KILL") — but "before", not "instead of": the pgid
+  # escalation ALWAYS still runs afterward regardless of what the scope
+  # path did or didn't reap (defense in depth, same rationale `lane_kill`
+  # documents at its own call site). Grace matches the pgid escalation's
+  # own hardcoded 10s below for symmetry.
+  _lane_scope_kill "$LANE_DIR" 10
+
   # Registry pgid escalation. Deliberately calls `_kill_group_escalate`
   # DIRECTLY (the primitive `lane_kill` itself builds on) rather than
   # `lane_kill` — see the load-bearing note above: `lane_kill` would try to

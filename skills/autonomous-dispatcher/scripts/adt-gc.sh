@@ -1052,12 +1052,40 @@ _gc_doctor() {
       echo "[WARN] no GC cron marker found — run install-gc-timer.sh"
     fi
     local linger
-    linger="$(loginctl show-user -p Linger --value 2>/dev/null || echo "")"
+    # [Lane-GC PR-7 review round-1, P1-2] Bounded — same rationale as
+    # `_lane_backend`'s own probe: a wedged user bus must never hang a
+    # --doctor invocation (this is a read-only diagnostic, but an operator
+    # running it interactively should never see it hang either).
+    linger="$(_lane_bounded 5 loginctl show-user -p Linger --value 2>/dev/null || echo "")"
     if [[ "$linger" == "yes" ]]; then
       echo "[ok]   linger enabled (systemd-scope backend eligible)"
     else
       echo "[WARN] linger not enabled — systemd-scope backend unavailable, pgid backend remains sufficient"
     fi
+
+    # [Lane-GC PR-7 / INV-120] Bus-socket check — a linger=yes host can still
+    # have no reachable user bus (e.g. XDG_RUNTIME_DIR pointed somewhere the
+    # invoking shell doesn't share, or the user manager crashed) — surface
+    # this as its OWN [ok]/[WARN] line rather than folding it silently into
+    # the linger check, so an operator reading --doctor output can tell
+    # WHICH of the two independent prerequisites is missing.
+    local xdg_doctor
+    xdg_doctor="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+    if [[ -S "${xdg_doctor}/bus" ]]; then
+      echo "[ok]   user bus socket reachable at ${xdg_doctor}/bus"
+    else
+      echo "[WARN] no user bus socket at ${xdg_doctor}/bus — systemd-scope backend unavailable, pgid backend remains sufficient"
+    fi
+
+    # [Lane-GC PR-7 / INV-120] One summary line naming the ACTUAL backend a
+    # freshly-minted lane on this host would get right now — the same
+    # `_lane_backend()` probe every real `lane_install` call makes (this is
+    # the one place in --doctor that performs a real (harmless, self-
+    # cleaning) probe spawn rather than only inspecting state, mirroring the
+    # probe's own cost/behavior for an operator debugging eligibility).
+    local eligible_backend
+    eligible_backend="$(_lane_backend 2>/dev/null)"
+    echo "backend_eligibility=${eligible_backend}"
   else
     if launchctl list 2>/dev/null | grep -q 'com.adt.lane-gc'; then
       echo "[ok]   GC timer installed (launchd label found)"

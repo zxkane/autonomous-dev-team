@@ -65,7 +65,12 @@ bash -c '
     v=$(lane_get "$LANE_DIR" "$key") || { echo "MISSING-KEY:$key"; exit 1; }
   done
   echo "OK"
-' > "$TMPROOT/tc001.out" 2>&1
+' > "$TMPROOT/tc001.out" 2>/dev/null
+# [Lane-GC PR-7] stderr is discarded, not merged: `lane_install` now calls
+# `_lane_backend()`, which WARNs on stderr on any host without linger
+# enabled (this suite's own dev/CI host included) — expected, by-design
+# output this test was never asserting on; only the trailing "OK" marker
+# matters here.
 if [[ "$(cat "$TMPROOT/tc001.out")" == "OK" ]]; then
   assert_pass "TC-LGC2-001: lane_install produces a fully parseable registry entry"
 else
@@ -118,7 +123,10 @@ bash -c '
   OUT=$(lane_install myproj "$LANE_ID"); RC=$?
   chmod 755 "$RO"
   [[ -z "$OUT" && "$RC" -ne 0 ]] && echo "DEGRADED-OK" || echo "UNEXPECTED rc=$RC out=$OUT"
-' > "$TMPROOT/tc005.out" 2>&1
+' > "$TMPROOT/tc005.out" 2>/dev/null
+# [Lane-GC PR-7] stderr discarded — see the identical note on TC-LGC2-001
+# above (a `_lane_backend()` WARN on this no-linger host is expected,
+# by-design output this test never asserted on).
 if [[ "$(cat "$TMPROOT/tc005.out")" == "DEGRADED-OK" ]]; then
   assert_pass "TC-LGC2-005: lane_install failure returns empty + nonzero rc"
 else
@@ -278,7 +286,9 @@ bash -c '
   BAD=$(grep -vcE "^[0-9]+ \S+ [0-9]+\$" "$LANE_DIR/pgids" 2>/dev/null)
   LINES=$(wc -l < "$LANE_DIR/pgids")
   echo "bad=$BAD lines=$LINES"
-' > "$TMPROOT/tc034.out" 2>&1
+' > "$TMPROOT/tc034.out" 2>/dev/null
+# [Lane-GC PR-7] stderr discarded — see the identical note on TC-LGC2-001
+# above.
 OUT34=$(cat "$TMPROOT/tc034.out")
 if [[ "$OUT34" == "bad=0 lines=30" ]]; then
   assert_pass "TC-LGC2-034: 30 concurrent appenders produce 30 well-formed lines, zero corruption"

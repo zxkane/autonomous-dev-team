@@ -57,6 +57,45 @@ _lane_uname() {
 }
 
 # ---------------------------------------------------------------------------
+# [Lane-GC PR-7 review round-1, P1-2/P2-1] Bounded systemd/loginctl calls.
+#
+# The scope backend is explicitly "never load-bearing" (design principle 8) —
+# but EVERY `systemd-run`/`systemctl`/`loginctl` invocation this file makes
+# was, before this fix, unbounded. A wedged user bus (a real, observed
+# systemd failure mode — this box's own `systemctl --user status` already
+# reports 3 failed units) would hang:
+#   - `_lane_backend`'s mint-time probe -> hangs the WRAPPER before the
+#     registry even exists, on every single dispatch, not just scope hosts.
+#   - `_lane_scope_kill`'s TERM/show calls -> hangs `lane_kill` WHILE IT
+#     HOLDS `reap.lock`, starving the pgid escalation that must always run
+#     afterward per this same function's own "defense in depth" contract.
+# `_LANE_TIMEOUT_CMD` is resolved ONCE at source time (mirrors
+# `lib-agent.sh`'s `_AGENT_TIMEOUT_CMD` resolution verbatim — same
+# timeout/gtimeout feature-detection, same "absent -> unwrapped, degraded
+# posture" fallback, since a bounding tool is a nice-to-have hardener here,
+# not a hard dependency the way `flock`/`setsid` are).
+_LANE_TIMEOUT_CMD="$(command -v timeout || command -v gtimeout || true)"
+
+# _lane_bounded <secs> <cmd...> — run "$@" bounded to <secs> wall-clock
+# seconds when a `timeout`/`gtimeout` binary is available; otherwise runs
+# "$@" unwrapped (absence of a bounding tool must never be a HARDER failure
+# mode than having one — every call site already treats a non-zero rc as
+# "prerequisite failed, fall back", so an unbounded call here still fails
+# SOMETHING eventually via the wedged command's own eventual rc, it just
+# loses the wall-clock guarantee). `timeout`/`gtimeout` cleanly wraps a REAL
+# exec'd binary (systemd-run/systemctl/loginctl are all real binaries, never
+# shell functions), unlike the `_bounded_call` background+poll technique
+# `lane_kill`'s own network-call primitive uses for wrapping bash FUNCTIONS.
+_lane_bounded() {
+  local secs="$1"; shift
+  if [[ -n "$_LANE_TIMEOUT_CMD" ]]; then
+    "$_LANE_TIMEOUT_CMD" "$secs" "$@"
+  else
+    "$@"
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # Portability shims
 # ---------------------------------------------------------------------------
 
@@ -399,12 +438,164 @@ box_health() {
 }
 
 # ---------------------------------------------------------------------------
+# Backend selection ([Lane-GC PR-7], design §4-C1/§4-C7; INV-120) — probed
+# ONCE per wrapper run at mint time (lane_install calls this), recorded into
+# the lane's own BACKEND field so every later kill-side consumer (lane_kill,
+# the guardian, GC) reads the DECISION instead of re-probing. Re-probing at
+# kill time would let the host's linger/bus state drift between mint and
+# kill and disagree with what was actually spawned.
+# ---------------------------------------------------------------------------
+
+# _lane_warn <msg> — the one WARN sink this file already has a scattered
+# convention for (`echo "[lib-lane] WARN: ..." >&2` at the two _bounded_call
+# sites); centralized here so the backend probe's own WARN (design §4-C1
+# "any prerequisite missing -> BACKEND=pgid + WARN, silent full fallback")
+# uses the identical prefix instead of inventing a second wording.
+_lane_warn() {
+  echo "[lib-lane] WARN: $*" >&2
+}
+
+# _lane_backend — echo `systemd-scope` or `pgid` (design §4-C1 `_lane_backend`,
+# §4-C7, §7 platform:F3; INV-120). Every prerequisite is a SILENT fallback to
+# `pgid` (never a hard failure — the pgid path must remain fully sufficient
+# alone, design principle 8) with exactly one WARN line naming the missing
+# prerequisite, so an operator reading the wrapper's own stderr/log can tell
+# WHY a host never enrolls without digging into this function.
+#
+# [Lane-GC PR-7 review round-1, P1-1] `ADT_LANE_BACKEND_OVERRIDE` (test-only
+# seam) may ONLY NARROW the result, never WIDEN it:
+#   - `ADT_LANE_BACKEND_OVERRIDE=pgid`  -> unconditionally forces pgid. Always
+#     safe (pgid is the universally-sufficient backend), so no checks are
+#     needed or run.
+#   - `ADT_LANE_BACKEND_OVERRIDE=systemd-scope` -> REQUESTS scope, but the
+#     request still has to pass every real linger/bus/probe check below —
+#     it does NOT skip them. Before this fix, an inherited (even
+#     accidental) `ADT_LANE_BACKEND_OVERRIDE=systemd-scope` in a wrapper's
+#     environment would enroll scopes on a Linger=no host by skipping the
+#     ENTIRE probe including the load-bearing linger gate — exactly the
+#     mass-SIGKILL-on-last-logout scenario the design forbids (§4-C7,
+#     platform:F3). A test that needs a deterministic scope-backend lane on
+#     a Linger=no CI/dev box must therefore mutate the LANE FILE directly
+#     after installation (`lane_set "$LANE_DIR" BACKEND systemd-scope`),
+#     not rely on this override to manufacture a scope backend the real
+#     host doesn't actually support — the override's only reachable
+#     positive outcome is "this host genuinely qualifies anyway".
+#   - unset -> normal probe, no forcing either direction.
+#
+# Order matters — cheapest/most-decisive checks first, so a host that is
+# obviously ineligible (non-Linux, no systemd-run) never pays for a bus-probe
+# spawn:
+#   1. Linux only (uname).
+#   2. `systemd-run` on PATH.
+#   3. Linger=yes — checked at SELECTION time, not merely at probe time (the
+#      design's platform:F3 finding): a linger-less host's user@.service dies
+#      with the last operator session and cascade-SIGKILLs every enrolled
+#      scope, so this gate is checked before any bus/probe work, and its
+#      absence produces the WARN unconditionally (the other candidate
+#      failures are comparatively rare in production; this one is the
+#      documented default posture on a freshly onboarded host — see the
+#      design's own "this host currently has Linger=no").
+#   4. The user bus socket exists (`$XDG_RUNTIME_DIR/bus`, self-exporting
+#      XDG_RUNTIME_DIR exactly like the design's C7 spawn snippet does — the
+#      SSM dispatch chain does not set it).
+#   5. A real probe spawn (`systemd-run --user --scope --quiet -- true`)
+#      actually succeeds — the preceding checks establish plausibility, this
+#      one proves it (a degraded user manager, e.g. `systemctl --user status`
+#      showing failed units as observed on THIS box, can still fail an actual
+#      spawn even with linger=yes and a live bus).
+#
+# [Lane-GC PR-7 review round-1, P1-2/P2-1] Every `loginctl`/`systemd-run`
+# call below is bounded via `_lane_bounded` — a wedged user bus must never
+# hang the WRAPPER at mint time, before the registry even exists. A timeout
+# is treated identically to any other probe failure: silent fallback to
+# pgid, one WARN naming which check timed out.
+_lane_backend() {
+  if [[ "${ADT_LANE_BACKEND_OVERRIDE:-}" == "pgid" ]]; then
+    echo "pgid"
+    return 0
+  fi
+  if [[ "$(_lane_uname)" != "Linux" ]]; then
+    echo "pgid"
+    return 0
+  fi
+  if ! command -v systemd-run >/dev/null 2>&1; then
+    _lane_warn "systemd-scope backend requires 'systemd-run' on PATH; falling back to pgid"
+    echo "pgid"
+    return 0
+  fi
+
+  local linger
+  linger="$(_lane_bounded 5 loginctl show-user -p Linger --value 2>/dev/null || echo no)"
+  if [[ "$linger" != "yes" ]]; then
+    _lane_warn "systemd-scope backend requires 'loginctl enable-linger \$USER' (Linger=yes at backend-selection time — without it, the last operator logout cascade-SIGKILLs every enrolled scope), or the linger probe timed out; falling back to pgid"
+    echo "pgid"
+    return 0
+  fi
+
+  local xdg="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+  if [[ ! -S "${xdg}/bus" ]]; then
+    _lane_warn "systemd-scope backend requires a reachable user bus socket at '${xdg}/bus'; falling back to pgid"
+    echo "pgid"
+    return 0
+  fi
+
+  if ! XDG_RUNTIME_DIR="$xdg" _lane_bounded 5 systemd-run --user --scope --quiet -- true >/dev/null 2>&1; then
+    _lane_warn "systemd-scope backend probe spawn failed or timed out ('systemd-run --user --scope --quiet -- true'); falling back to pgid"
+    echo "pgid"
+    return 0
+  fi
+
+  echo "systemd-scope"
+}
+
+# ---------------------------------------------------------------------------
 # Lane naming
 # ---------------------------------------------------------------------------
 
 # _lane_id_fs <lane_id> — echo the filesystem/systemd-safe form (`:` → `.`).
 _lane_id_fs() {
   printf '%s' "${1//:/.}"
+}
+
+# _lane_unit_name <lane_id> — echo the systemd `--unit` name for <lane_id>
+# (design §4-C7: `adt-<lane_id_fs>`). `lane_id_fs` already carries the mint
+# epoch + rand4 (from lane_mint's own collision-avoidance), so a unit name
+# derived from it is collision-free by construction — no separate rand
+# suffix needed here (design §4-C7 "Unit name derives from the (epoch+
+# rand-suffixed) lane id — no collisions").
+#
+# [Lane-GC PR-7 review round-1, P2-2] `PROJECT_ID` is caller-supplied
+# (dispatcher conf, not this file's own invariant), so `_lane_id_fs`'s bare
+# `:`->`.` substitution alone does not guarantee a systemd-acceptable unit
+# name: empirically verified on this box, `@` is rejected outright
+# (`systemd-run --unit` fails with "Invalid argument"), and unit names are
+# capped at 255 bytes TOTAL including the `.scope` suffix systemd appends
+# (`adt-<name>.scope` at 250 raw chars => 256 total => rejected; 249 raw
+# chars => 255 total => accepted — the exact boundary probed live). Two
+# independent hardenings, both load-bearing given `lane_spawn`'s own
+# fallback added in the same PR-7 review round (a rejected unit name must
+# never mean "the payload never ran" — see `lane_spawn`'s own comment):
+#   1. Sanitize: replace every byte OUTSIDE systemd's own safe unit-name
+#      alphabet (`[A-Za-z0-9:_.\-]` per systemd.unit(5) "Unit names must
+#      consist only of...") with `-`. `:` survives this class but is
+#      ALREADY converted to `.` upstream by `_lane_id_fs`, so in practice
+#      this step only ever fires on `PROJECT_ID`-contributed bytes.
+#   2. Truncate to a total budget of 200 chars (well under systemd's 255,
+#      matching the review's own margin) while PRESERVING THE TAIL — the
+#      `.<epoch>.<rand4>` suffix `lane_mint` appended for uniqueness is
+#      the part that MUST survive truncation intact, or two lanes with a
+#      long, truncation-colliding PROJECT_ID prefix would mint identical
+#      unit names. The head (project_id.role.issue) is truncated first;
+#      the tail is re-appended verbatim.
+_lane_unit_name() {
+  local lane_id="$1" project role issue epoch rand4
+  IFS=: read -r project role issue epoch rand4 <<<"$lane_id"
+  local safe_project
+  safe_project="$(printf '%s' "$project" | tr -c 'A-Za-z0-9:_.-' '-')"
+  local tail=".${role}.${issue}.${epoch}.${rand4}"
+  local budget=$(( 200 - 4 - ${#tail} ))   # 4 = strlen("adt-")
+  [[ "$budget" -lt 1 ]] && budget=1
+  printf 'adt-%s%s' "${safe_project:0:$budget}" "$tail"
 }
 
 # _lanes_root <project_id> — echo the registry parent dir for this project,
@@ -620,6 +811,16 @@ lane_install() {
     [[ -n "$wrapper_fingerprint" ]] || wrapper_fingerprint="-"
   fi
 
+  # [Lane-GC PR-7 / INV-120] Probed ONCE, here, at mint — never re-probed at
+  # kill time (design §4-C1: "recorded in BACKEND so kill-side never
+  # re-guesses"). `_lane_backend` itself owns the (narrowing-only)
+  # `ADT_LANE_BACKEND_OVERRIDE` test seam — see its own doc comment; this
+  # call site does NOT re-implement any override logic, so a real linger/
+  # bus/probe check is never skippable from here.
+  local backend unit_name="-"
+  backend="$(_lane_backend)"
+  [[ "$backend" == "systemd-scope" ]] && unit_name="$(_lane_unit_name "$lane_id")"
+
   rm -rf "$pending" 2>/dev/null || true
   if ! mkdir -p "$pending" 2>/dev/null; then
     return 1
@@ -632,8 +833,8 @@ lane_install() {
     printf 'ISSUE=%s\n' "$issue"
     printf 'ROLE=%s\n' "$role"
     printf 'MODE=%s\n' "${ADT_LANE_MODE:-new}"
-    printf 'BACKEND=pgid\n'
-    printf 'UNIT=-\n'
+    printf 'BACKEND=%s\n' "$backend"
+    printf 'UNIT=%s\n' "$unit_name"
     printf 'WRAPPER_PID=%s\n' "$wrapper_pid"
     printf 'WRAPPER_PPID=%s\n' "$wrapper_ppid"
     printf 'WRAPPER_START=%s\n' "$wrapper_start"
@@ -792,12 +993,131 @@ _kill_group_escalate() {
   return 0
 }
 
+# _lane_cgroup_path <unit_scope> — echo the cgroupfs directory for a loaded
+# scope unit, or nothing + rc 1 when the unit isn't loaded / has no
+# ControlGroup. Resolved via the unit's OWN reported `ControlGroup` property
+# rather than hand-assembling `user.slice/user-<uid>.slice/.../<unit>.scope`
+# — the design's §4-C7 mentions both forms; ControlGroup is the portable
+# source of truth (correct regardless of which slice systemd actually placed
+# the scope under, including future systemd versions or a delegated slice).
+_lane_cgroup_path() {
+  local unit_scope="$1" xdg="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+  local cgrel
+  # [Lane-GC PR-7 review round-1, P1-2] Bounded — see `_lane_bounded`'s own
+  # header comment (a wedged bus must never hang `lane_kill` while it holds
+  # `reap.lock`).
+  cgrel="$(XDG_RUNTIME_DIR="$xdg" _lane_bounded 10 systemctl --user show -p ControlGroup --value "$unit_scope" 2>/dev/null)" || return 1
+  [[ -n "$cgrel" ]] || return 1
+  # _LANE_CGROUP_ROOT_OVERRIDE — test-only seam (never read anywhere else,
+  # never documented to operators). Real cgroupfs is mounted at a fixed
+  # kernel-controlled path (`/sys/fs/cgroup`) that an unprivileged test
+  # cannot remount or fake in-place; this lets a unit test point at a
+  # PATH-shim-controlled fixture directory tree instead while exercising
+  # the exact same relative-path-join logic production uses.
+  # `${VAR-default}` (no colon) — substitutes the default only when UNSET,
+  # never when set-but-empty. A test needs the empty string to be a valid,
+  # deliberate override value (see the seam's own comment above), which the
+  # `:-` form would incorrectly treat as "unset" and silently ignore.
+  printf '%s%s\n' "${_LANE_CGROUP_ROOT_OVERRIDE-/sys/fs/cgroup}" "$cgrel"
+}
+
+# _lane_cgroup_empty <cgroup_dir> — true iff <cgroup_dir>/cgroup.procs has no
+# member pids (or the path/file is already gone — torn-down cgroup, treated
+# as empty). Deliberately reads the FILE CONTENT rather than gating on
+# `[[ -s ]]` — empirically verified on this series' own dev box: cgroupfs's
+# `cgroup.procs` reports `stat`-size 0 EVEN WHILE listing a live member pid
+# (the exact same procfs-style quirk design §7 platform:F5 already
+# documents for `/proc/PID/environ`, confirmed here to extend to cgroupfs
+# pseudo-files too) — a `-s`-gated check would misclassify a POPULATED
+# cgroup as already-empty and skip straight to declaring victory without
+# ever escalating to `cgroup.kill`.
+_lane_cgroup_empty() {
+  local cgdir="$1"
+  [[ -f "${cgdir}/cgroup.procs" ]] || return 0
+  local procs
+  procs="$(cat "${cgdir}/cgroup.procs" 2>/dev/null)"
+  [[ -z "$procs" ]]
+}
+
+# _lane_scope_kill <lane_dir> [grace_secs] — the cgroup fast path (design
+# §4-C4 choreography row 3, §4-C7; INV-120). A silent no-op (rc 0, no side
+# effect) unless the LANE'S OWN recorded BACKEND is `systemd-scope` — this
+# function never re-probes the host, it only acts on what `lane_install`
+# already decided once at mint (kill-side never re-guesses, design §4-C1).
+#
+# Sequence, TERM-first per INV-106/120 (so a compliant member still exits
+# 143 before any KILL-class escalation):
+#   1. `systemctl --user kill -s TERM <unit>.scope` (graceful).
+#   2. Poll `cgroup.procs` for emptiness across the grace window.
+#   3. `echo 1 > cgroup.kill` (kernel >= 5.14, atomic, includes fork races —
+#      feature-detected; a pre-5.14 kernel without the file falls back to a
+#      best-effort per-pid KILL loop over whatever cgroup.procs still lists).
+#
+# ANY failure at ANY step (unit not loaded — e.g. it already exited and
+# `--collect` cleaned it up, cgroup path unresolvable, cgroup.kill absent)
+# degrades silently to a plain return. This is safe specifically BECAUSE the
+# caller (`lane_kill`, below) unconditionally ALSO runs the pgid escalation
+# afterward regardless of this function's outcome (design's own "defense in
+# depth" framing) — the scope's own leader process is ALSO always
+# pgid-recorded by `lane_spawn`, so the portable pgid path alone still
+# reaches at least the leader even when this entire function no-ops.
+_lane_scope_kill() {
+  local lane_dir="$1" grace="${2:-10}"
+  local backend unit
+  backend="$(lane_get "$lane_dir" BACKEND 2>/dev/null)" || return 0
+  [[ "$backend" == "systemd-scope" ]] || return 0
+  unit="$(lane_get "$lane_dir" UNIT 2>/dev/null)" || return 0
+  [[ -n "$unit" && "$unit" != "-" ]] || return 0
+  command -v systemctl >/dev/null 2>&1 || return 0
+
+  local xdg="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+  local unit_scope="${unit}.scope"
+
+  # [Lane-GC PR-7 review round-1, P1-2] Bounded — a wedged user bus must
+  # never hang `lane_kill` while it holds `reap.lock`, starving the
+  # unconditional pgid escalation that must always run afterward (this
+  # function's own "defense in depth" contract, its caller's own comment).
+  XDG_RUNTIME_DIR="$xdg" _lane_bounded 10 systemctl --user kill -s TERM "$unit_scope" >/dev/null 2>&1 || true
+
+  local cgdir
+  cgdir="$(_lane_cgroup_path "$unit_scope")" || return 0
+  [[ -n "$cgdir" && -d "$cgdir" ]] || return 0
+
+  local i
+  for ((i = 0; i < grace; i++)); do
+    _lane_cgroup_empty "$cgdir" && return 0
+    sleep 1
+  done
+
+  if [[ -f "${cgdir}/cgroup.kill" ]]; then
+    echo 1 > "${cgdir}/cgroup.kill" 2>/dev/null || true
+  else
+    # Pre-5.14 kernel — no cgroup.kill feature file. Best-effort per-pid
+    # KILL over whatever is still listed; never fails the caller.
+    local cp
+    while read -r cp; do
+      [[ "$cp" =~ ^[0-9]+$ ]] || continue
+      kill -KILL "$cp" 2>/dev/null || true
+    done < "${cgdir}/cgroup.procs" 2>/dev/null || true
+  fi
+  return 0
+}
+
 # lane_kill <lane_dir> [grace_secs] — registry-authoritative TERM→grace→KILL
-# over every DISTINCT pgid recorded in <lane_dir>/pgids. Does NOT consult
-# lane_probe — callers (the kill_stale_wrapper delegate, guardian, GC) decide
-# liveness first; this function only performs the escalation once a caller
-# has decided a lane's pgids should die. Idempotent: an already-empty/missing
-# pgids file is a clean no-op.
+# over every DISTINCT pgid recorded in <lane_dir>/pgids, PLUS (design §4-C7;
+# INV-120) the cgroup fast path when this lane's own recorded BACKEND is
+# `systemd-scope` — see `_lane_scope_kill` immediately above. The scope path
+# runs FIRST but is never the only mechanism: the pgid escalation below
+# ALWAYS also runs afterward, unconditionally, regardless of whether the
+# scope path found anything to do (defense in depth — a scope kill that
+# silently no-ops for any reason, e.g. an already-collected transient unit,
+# must never leave a still-registered pgid unreaped).
+#
+# Does NOT consult lane_probe — callers (the kill_stale_wrapper delegate,
+# guardian, GC) decide liveness first; this function only performs the
+# escalation once a caller has decided a lane's residue should die.
+# Idempotent: an already-empty/missing pgids file (and, for the scope path,
+# an already-gone unit) is a clean no-op.
 #
 # Serialized on the lane's own `reap.lock` (design §4-C4/INV-114 selfdefeat
 # F3) — shared with `cleanup()`'s own reap so a re-dispatch's delegate call
@@ -818,12 +1138,18 @@ _kill_group_escalate() {
 lane_kill() {
   local lane_dir="$1" grace="${2:-10}"
   local pgids_file="${lane_dir}/pgids"
-  [[ -f "$pgids_file" ]] || return 0
 
   local lock_fd=""
   if [[ -f "${lane_dir}/reap.lock" ]]; then
     exec {lock_fd}>>"${lane_dir}/reap.lock" 2>/dev/null || lock_fd=""
     [[ -n "$lock_fd" ]] && { flock -w 10 "$lock_fd" 2>/dev/null || true; }
+  fi
+
+  _lane_scope_kill "$lane_dir" "$grace"
+
+  if [[ ! -f "$pgids_file" ]]; then
+    [[ -n "$lock_fd" ]] && exec {lock_fd}>&-
+    return 0
   fi
 
   local seen=() pg
@@ -1027,29 +1353,174 @@ _bounded_call() {
   return 124
 }
 
-# lane_spawn <lane_dir> <role> -- <cmd...> — pgid-backend spawn (the ONLY
-# backend this PR ships; systemd-scope enrollment is a later PR, §4-C7). Runs
-# `setsid <cmd...>` in the background, records the resulting PGID into
-# <lane_dir>/pgids via lane_record_pgid, waits for it, and returns its exit
-# code. `--` is a REQUIRED separator (keeps <role> unambiguous from the
-# command's own argv, which may itself contain `--`).
+# lane_spawn <lane_dir> <role> -- <cmd...> — backend-dispatching spawn.
+# Reads the lane's OWN recorded BACKEND (written once by `lane_install` at
+# mint — this function never re-probes, per design §4-C1 "recorded in
+# BACKEND so kill-side never re-guesses"; the same "decide once" contract
+# applies spawn-side, not just kill-side) and either:
+#   - `systemd-scope`: `systemd-run --user --scope --collect --quiet --unit
+#     <UNIT> -p TasksMax=... [-p MemoryMax=...] -- setsid <cmd...>` (design
+#     §4-C7). cgroup membership survives re-setsid — the structural defeat
+#     of RC3 that is this whole PR's point (empirically verified on this
+#     series' own dev box: a `setsid`-escaping grandchild inside the scope
+#     stayed in `cgroup.procs` and was reaped by `cgroup.kill`).
+#   - `pgid` (default; also the silent fallback for every missing
+#     prerequisite, and the ONLY backend this file shipped pre-PR-7): plain
+#     `setsid <cmd...>`.
+# EITHER WAY, the resulting PGID is recorded into <lane_dir>/pgids via
+# `lane_record_pgid` — the registry stays the kill-side's authoritative
+# join key regardless of backend (design §4-C7 "backend is recorded
+# per-lane" — that's the UNIT field; the pgids file is unconditional so a
+# scope lane whose systemd/cgroup path degrades at kill time still has a
+# working pgid fallback, per row 3 of the kill choreography table).
+#
+# `$!` from a backgrounded `systemd-run --user --scope ... -- setsid <cmd>`
+# resolves to the scope's own leader PID, which IS also its PGID (setsid
+# puts it in a fresh session/group) — verified empirically on this box: no
+# separate "extract the scope's leader pid" step is needed beyond the same
+# `$!` capture the pgid branch already does.
+#
+# `--` is a REQUIRED separator (keeps <role> unambiguous from the command's
+# own argv, which may itself contain `--`).
 #
 # This is a convenience wrapper for NEW spawn sites this PR adds (E2E/smoke
 # lane callers may prefer it); it deliberately does NOT replace
 # `_run_with_timeout` (lib-agent.sh) — that primitive already owns the agent
 # spawn path (env-scrub ordering, launcher-argv, AGENT_PID_FILE) and gets its
 # PGID recorded into the lane via a direct `lane_record_pgid` call at its own
-# call site instead (see autonomous-dev.sh/autonomous-review.sh).
+# call site instead (see autonomous-dev.sh/autonomous-review.sh). A future
+# PR may teach `_run_with_timeout` the same backend dispatch; out of scope
+# here (the design's own §9 PR-7 scope is `lane_spawn`/`lane_kill`/guardian/
+# GC, not the agent-CLI spawn path).
+# [Lane-GC PR-7 review round-1, P2-2] `systemd-run`'s OWN registration can
+# fail for reasons that have NOTHING to do with the payload (an unacceptable
+# unit name — empirically verified even after this PR's own `_lane_unit_name`
+# sanitizer, e.g. a not-yet-anticipated systemd version's stricter rules; a
+# bus that wedged/died between mint-time probe and spawn-time; a transient
+# resource limit). When that happens, `systemd-run` exits non-zero having
+# NEVER exec'd the payload at all — empirically verified: no process bearing
+# the payload's argv exists anywhere on the host afterward. Silently
+# swallowing that failure would mean "the agent/E2E/smoke lane this call was
+# supposed to run… never ran, with no error surfaced" — the single worst
+# possible outcome for a "never load-bearing" enhancement (design principle
+# 8). `lane_spawn` therefore detects a REGISTRATION failure specifically
+# (vs. the PAYLOAD's own exit code on a successful registration) and retries
+# via the portable pgid path instead of losing the spawn.
+#
+# Discriminator (empirically verified, both directions, on this box):
+# `systemd-run`'s OWN failure diagnostics are ALWAYS emitted to stderr with
+# an English `Failed to ...` prefix, REGARDLESS of `--quiet` (`--quiet`
+# suppresses its INFORMATIONAL "Running as unit..." line, never its ERROR
+# path) — and a payload that runs at all (even one that itself exits
+# non-zero, even one that itself writes to stderr) produces NO such line
+# from systemd-run itself (the payload's own stderr is passed through
+# unmodified alongside it, which is why the check is anchored to the START
+# of a line, not a bare substring match, to minimize — though, being a
+# translated CLI message, not eliminate — collision with payload output
+# that happens to start the same way; see the residual note in the design
+# doc).
+#
+# IMPLEMENTATION NOTE (why this logic lives inline in `lane_spawn`, not in
+# a separate helper function backgrounded with `&`): backgrounding a
+# FUNCTION CALL (`some_func ... &`) makes `$!` resolve to the subshell that
+# runs the function body, never to a process spawned INSIDE that function —
+# verified empirically while writing this fix. `lane_spawn`'s entire
+# contract is that `$!` after the background spawn IS the payload's own
+# pgid (systemd-run's own scope leader, in the scope-backend case); wrapping
+# the systemd-run invocation in a helper and backgrounding the HELPER would
+# silently break that contract (the recorded "pgid" would be the wrapper
+# subshell's pid, in the WRONG process group, and `lane_kill`'s group-form
+# signals would never reach the real payload). `systemd-run` is therefore
+# backgrounded DIRECTLY here, exactly as the pgid branch already does.
 lane_spawn() {
   local lane_dir="$1" role="$2"
   shift 2
   [[ "${1:-}" == "--" ]] && shift
 
-  local launcher=()
-  command -v setsid >/dev/null 2>&1 && launcher=(setsid)
+  local backend="pgid" unit_name="-"
+  if [[ -d "$lane_dir" ]]; then
+    backend="$(lane_get "$lane_dir" BACKEND 2>/dev/null)" || backend="pgid"
+    unit_name="$(lane_get "$lane_dir" UNIT 2>/dev/null)" || unit_name="-"
+  fi
 
-  "${launcher[@]}" "$@" &
-  local pgid=$!
+  local pgid used_scope=false errfile="" _spawn_startmark=""
+  if [[ "$backend" == "systemd-scope" && "$unit_name" != "-" ]] && command -v systemd-run >/dev/null 2>&1; then
+    local xdg="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+    local setsid_launcher=()
+    command -v setsid >/dev/null 2>&1 && setsid_launcher=(setsid)
+    local mem_opt=()
+    [[ -n "${LANE_MEMORY_MAX:-}" ]] && mem_opt=(-p "MemoryMax=${LANE_MEMORY_MAX}")
+    used_scope=true
+    errfile="$(mktemp 2>/dev/null)" || errfile=""
+    if [[ -n "$errfile" ]]; then
+      # Start marker (review round-2 [P1]): the stderr `^Failed to ` prefix
+      # alone cannot distinguish "systemd-run refused registration, payload
+      # NEVER ran" from "payload ran, wrote a line that happens to start
+      # with `Failed to `, and exited non-zero" — the fds are merged, so a
+      # payload like that would be DOUBLE-RUN by the pgid retry below. The
+      # payload's provable first act is therefore touching a marker file
+      # (`: > marker; exec real-command` — the exec keeps pid/pgid/argv
+      # identical after the one-instruction prelude): marker present ⇒ the
+      # payload started ⇒ NEVER retry, regardless of rc or stderr content.
+      _spawn_startmark="${errfile}.ran"
+      XDG_RUNTIME_DIR="$xdg" systemd-run --user --scope --collect --quiet \
+        --unit "$unit_name" -p "TasksMax=${LANE_TASKS_MAX:-512}" "${mem_opt[@]}" \
+        -- "${setsid_launcher[@]}" bash -c ': > "$1"; shift; exec "$@"' _ "$_spawn_startmark" "$@" 2>"$errfile" &
+    else
+      # tmpfile creation itself failed (e.g. /tmp unwritable) — degrade to
+      # an unwrapped call; the registration-failure discriminator below is
+      # skipped for this attempt (a registration failure and a payload
+      # failure both surface as a plain non-zero rc with no way to tell
+      # them apart), matching `_bounded_call`'s own documented degraded
+      # posture for the identical tmpfile-failure case.
+      XDG_RUNTIME_DIR="$xdg" systemd-run --user --scope --collect --quiet \
+        --unit "$unit_name" -p "TasksMax=${LANE_TASKS_MAX:-512}" "${mem_opt[@]}" \
+        -- "${setsid_launcher[@]}" "$@" &
+    fi
+    pgid=$!
+  else
+    local launcher=()
+    command -v setsid >/dev/null 2>&1 && launcher=(setsid)
+    "${launcher[@]}" "$@" &
+    pgid=$!
+  fi
+
   lane_record_pgid "$lane_dir" "$pgid" "$role"
-  wait "$pgid"
+  # `|| rc=$?` — never a bare wait: under a caller's `set -e` a non-zero
+  # payload exit would otherwise unwind the CALLING shell right here,
+  # skipping both the registration-fallback discriminator and the tmpfile
+  # cleanup below (review round-2 [P2]).
+  local rc=0
+  wait "$pgid" || rc=$?
+
+  if [[ "$used_scope" == true && -n "$errfile" ]]; then
+    # Registration failure ⇔ rc≠0 ∧ systemd-run's `^Failed to ` diagnostic
+    # present ∧ the payload's start-marker ABSENT (review round-2 [P1]: the
+    # marker is the authoritative "did the payload ever start" signal — a
+    # payload that started, printed its own `Failed to …` line, and exited
+    # non-zero has the marker and is NEVER retried; only a spawn whose
+    # payload provably never began is re-run via pgid).
+    if [[ "$rc" -ne 0 && ! -e "$_spawn_startmark" ]] && grep -qm1 '^Failed to ' "$errfile" 2>/dev/null; then
+      cat "$errfile" >&2
+      rm -f "$errfile" "$_spawn_startmark" 2>/dev/null
+      # Retry via a real pgid spawn so the caller's command still executes —
+      # the ONLY case where `lane_spawn` runs the command more than once.
+      # `lane_record_pgid` is called again for the NEW pgid — the stale
+      # scope-attempt pgid is harmless (lane_kill against a dead pgid is a
+      # documented no-op).
+      _lane_warn "systemd-scope spawn registration failed for unit '$unit_name' — payload never ran; falling back to a pgid spawn now"
+      local launcher=()
+      command -v setsid >/dev/null 2>&1 && launcher=(setsid)
+      "${launcher[@]}" "$@" &
+      pgid=$!
+      lane_record_pgid "$lane_dir" "$pgid" "$role"
+      rc=0
+      wait "$pgid" || rc=$?
+    else
+      cat "$errfile" >&2
+      rm -f "$errfile" "${_spawn_startmark:-}" 2>/dev/null
+    fi
+  fi
+
+  return "$rc"
 }
