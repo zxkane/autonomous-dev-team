@@ -21,7 +21,7 @@
 
 ## Development Workflow (TDD + Agent-Assisted)
 
-This project enforces a strict TDD development workflow through agent hooks. The workflow applies to all supported coding agents (Claude Code, Kiro CLI, Cursor, Windsurf, Gemini CLI, etc.).
+This project enforces a strict TDD development workflow through agent hooks. The workflow applies to all supported coding agents (Claude Code, Kiro CLI, Cursor, Windsurf, Antigravity, etc.).
 
 ### Mandatory Rules (Hook Enforced)
 
@@ -31,7 +31,7 @@ This project enforces a strict TDD development workflow through agent hooks. The
 4. **Code review before commit** — code-simplifier must run before committing (Claude Code only)
 5. **PR review before push** — pr-review agent must run before pushing (Claude Code only)
 
-> Hooks are supported in Claude Code and Kiro CLI. For agents without hook support (Cursor, Windsurf, Gemini CLI), follow each step manually — the discipline is the same.
+> Hooks are supported in Claude Code and Kiro CLI. For agents without hook support (Cursor, Windsurf), follow each step manually — the discipline is the same.
 
 > ⚠️ **This repo is self-hosting — never edit files in the main workdir; always use a worktree.** This checkout of `zxkane/autonomous-dev-team` is consumed by the autonomous dispatcher running on the same box: its `scripts/` symlink resolves into this repo's own `skills/autonomous-dispatcher/scripts/` tree, so the dispatcher executes these exact files via `scripts/autonomous-{dev,review}.sh`. **Any uncommitted change in the main workdir becomes live for every dispatched dev/review wrapper.** A half-finished edit can crash a wrapper mid-run — e.g. an incomplete per-side `AGENT_REVIEW_CMD` rebind aborts the review wrapper with `AGENT_REVIEW_CMD: unbound variable`, leaving the issue stuck in `reviewing` with no verdict and no re-dispatch.
 >

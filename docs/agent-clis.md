@@ -12,13 +12,19 @@ The pipeline spawns dev/review agents through a pluggable abstraction layer
 | Codex CLI | `codex` | `exec --json "<prompt>"` | `exec resume <thread-id>` (captured from JSON stream) | Full support |
 | Kiro CLI | `kiro-cli` | `chat --no-interactive [--agent <name>]` | (falls back to new) | Basic support |
 | Cursor Agent | `agent` | `-p "<prompt>"` | `--resume=<chat-id>` | Generic fallback (untested explicit branch) |
-| Gemini CLI | `gemini` | `--session-id <UUID> -p "<prompt>"` | `--resume <UUID>` | Full support |
+| Antigravity CLI | `agy` | `-p "<prompt>" --log-file <path>` (conversation UUID grepped from the log) | `--conversation <UUID>` | Full support |
 | opencode | `opencode` | `run --format json [PROMPT]` | `run --session <sessionID>` (captured from JSON stream) | Full support † |
 
-The `claude`, `codex`, `gemini`, `kiro`, and `opencode` rows have explicit
+The `claude`, `codex`, `agy`, `kiro`, and `opencode` rows have explicit
 adapters; the others run through the generic `<cli> -p <prompt>` fallback.
 Any CLI not listed should still work if it accepts a `-p <prompt>`
 non-interactive flag — the abstraction layer is intentionally permissive.
+
+> **Gemini CLI is retired upstream** and no longer has an adapter row here.
+> Antigravity CLI (`agy`) is the replacement for Gemini-family models — it
+> ships its own conversation-UUID session model (grepped from `--log-file`,
+> not the `--session-id`/`--resume` pair Gemini CLI used) and `--model`
+> validation against `agy models` (see the EXTRA_ARGS table below).
 
 ## Per-CLI required EXTRA_ARGS (post-#102 / #140)
 
@@ -31,7 +37,7 @@ snippet per CLI:
 |-----------|---------------------|---------------------|-----|
 | `claude` | R1 | (none — `--permission-mode` is structural) | claude's tool-trust knob is an existing structural flag |
 | `codex` | R3 | (none) | `exec --json` is structural; no operator-tunable trust default |
-| `gemini` | R2 / R2'' | `--approval-mode yolo --output-format stream-json` | Without yolo, every shell/write tool defaults to ask_user→deny in headless mode (silent fabrication failure mode) |
+| `agy` | — | (none — `--dangerously-skip-permissions --print-timeout "$AGENT_TIMEOUT"` are structural, hardcoded in the adapter) | Without `--dangerously-skip-permissions` headless mode blocks on every tool-use prompt (agy's counterpart to kiro's `--trust-all-tools`); `--print-timeout` overrides agy's internal 5m default cap |
 | `kiro` | R5 / R5' | `--trust-all-tools` | Stock kiro installs deny every coding tool in `--no-interactive` mode without the trust flag (silent fabrication failure mode) |
 | `opencode` | R4 | (none) | `run --format json` is structural; provider/model selector handled via `AGENT_DEV_MODEL` |
 

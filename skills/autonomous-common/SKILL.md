@@ -77,7 +77,7 @@ Claude Code only. The installer prompts for these; if installing manually, add t
 }
 ```
 
-> IDEs without hook support (Cursor, Windsurf, Gemini CLI) skip both the installer and the symlinks — the skills work without hooks, but workflow steps must be followed manually.
+> IDEs without hook support (Cursor, Windsurf) skip both the installer and the symlinks — the skills work without hooks, but workflow steps must be followed manually.
 
 ## What's here
 

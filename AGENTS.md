@@ -8,7 +8,7 @@ Install all skills into any of 40+ supported coding agents:
 npx skills add zxkane/autonomous-dev-team
 ```
 
-Supports Claude Code, Cursor, Windsurf, Gemini CLI, Kiro CLI, and [more](https://skills.sh).
+Supports Claude Code, Cursor, Windsurf, Antigravity, Kiro CLI, and [more](https://skills.sh).
 
 ## Available Skills
 
