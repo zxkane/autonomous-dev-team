@@ -135,7 +135,7 @@ fi
 # the first 100 and dispatch past MAX_CONCURRENT.
 count_active() {
   local limit="${ISSUE_SCAN_LIMIT:-100}"
-  if [[ -z "${ISSUE_FILTER:-}" ]]; then
+  if _issue_filter_is_unset "${ISSUE_FILTER:-}"; then
     itp_count_by_state open "autonomous" "$limit" "in-progress,reviewing"
   else
     itp_list_by_state open "autonomous" "$limit" "number,labels,assignees" \

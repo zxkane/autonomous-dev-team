@@ -42,6 +42,21 @@ _LIB_ISSUE_FILTER_SOURCED=1
 # runs (the §7.2 stability corollary), and `autonomous` is already implicit.
 _ISSUE_FILTER_RESERVED_LABELS="in-progress reviewing pending-review pending-dev stalled approved autonomous"
 
+# _issue_filter_is_unset <value> — true (rc 0) when <value> is empty OR
+# whitespace-only. issue_filter_compile already treats a whitespace-only
+# ISSUE_FILTER as unset (identity with the empty-filter path); every OTHER
+# raw `[[ -z/-n "${ISSUE_FILTER:-}" ]]` emptiness check (count_active's
+# path switch, issue_filter_fields' field widening) must agree with that
+# same normalization, or a whitespace-only ISSUE_FILTER silently takes the
+# filtered/widened branch while issue_filter_compile treats it as unset —
+# breaking AC-B1 identity for exactly that value.
+_issue_filter_is_unset() {
+  local v="${1-}"
+  v="${v#"${v%%[![:space:]]*}"}"
+  v="${v%"${v##*[![:space:]]}"}"
+  [[ -z "$v" ]]
+}
+
 # ---------------------------------------------------------------------------
 # Tokenizer — character scanner, NOT a whitespace split. `(` / `)` self-
 # delimit (so "(label:a" tokenizes as "(" + "label:a" with no space needed);
@@ -120,11 +135,21 @@ _issue_filter_atom_kv() {
     echo "issue_filter_compile: empty atom value in '${tok}'" >&2
     return 1
   fi
-  if [[ "$raw" == \"*\" && ${#raw} -ge 2 ]]; then
-    _IFT_ATOM_QUOTED=1
-    _IFT_ATOM_VAL="${raw:1:-1}"
-    if [[ -z "$_IFT_ATOM_VAL" ]]; then
-      echo "issue_filter_compile: empty atom value in '${tok}'" >&2
+  if [[ "$raw" == \"* ]]; then
+    # Value opens with a quote — it must be a single quoted segment spanning
+    # the whole value (quote at start AND end, nothing trailing after the
+    # closing quote). A token like `label:"team"a` starts with `"` but ends
+    # in `a`, so it fails this check and is rejected rather than silently
+    # falling through to the unquoted path with the quote characters intact.
+    if [[ "$raw" == \"*\" && ${#raw} -ge 2 ]]; then
+      _IFT_ATOM_QUOTED=1
+      _IFT_ATOM_VAL="${raw:1:-1}"
+      if [[ -z "$_IFT_ATOM_VAL" ]]; then
+        echo "issue_filter_compile: empty atom value in '${tok}'" >&2
+        return 1
+      fi
+    else
+      echo "issue_filter_compile: trailing characters after quoted atom value in '${tok}'" >&2
       return 1
     fi
   else
@@ -287,11 +312,7 @@ _issue_filter_p_expr() {
 #   ISSUE_FILTER_ARGS — array of "--arg" "aN" "<value>" triples, in order.
 issue_filter_compile() {
   local expr="${1:-}"
-  local trimmed="$expr"
-  # Trim leading/trailing whitespace to detect the whitespace-only case.
-  trimmed="${trimmed#"${trimmed%%[![:space:]]*}"}"
-  trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
-  if [[ -z "$trimmed" ]]; then
+  if _issue_filter_is_unset "$expr"; then
     ISSUE_FILTER_JQ=""
     ISSUE_FILTER_ARGS=()
     return 0
@@ -333,7 +354,7 @@ issue_filter_compile() {
 # that never ran issue_filter_validate still gets defined, fail-closed
 # behavior: a compile failure here returns rc≠0, never `[]`).
 issue_filter_apply() {
-  if [[ -z "${ISSUE_FILTER:-}" ]]; then
+  if _issue_filter_is_unset "${ISSUE_FILTER:-}"; then
     jq 'map(del(.assignees))'
     return $?
   fi
@@ -344,7 +365,7 @@ issue_filter_apply() {
   fi
   # Re-check: a whitespace-only ISSUE_FILTER compiles to an empty
   # ISSUE_FILTER_JQ (identity path) even though ISSUE_FILTER itself is
-  # non-empty by the `[[ -z ]]` test above.
+  # non-empty by the `_issue_filter_is_unset` test above.
   if [[ -z "$ISSUE_FILTER_JQ" ]]; then
     jq 'map(del(.assignees))'
     return $?
@@ -358,7 +379,7 @@ issue_filter_apply() {
 # will actually consume it.
 issue_filter_fields() {
   local base_csv="${1:-}"
-  if [[ -n "${ISSUE_FILTER:-}" ]]; then
+  if ! _issue_filter_is_unset "${ISSUE_FILTER:-}"; then
     if [[ -n "$base_csv" ]]; then
       printf '%s,assignees' "$base_csv"
     else
@@ -412,10 +433,7 @@ _issue_filter_uses_reserved_label() {
 # always passes (nothing to validate).
 issue_filter_validate() {
   local filter="${1:-${ISSUE_FILTER:-}}"
-  local trimmed="$filter"
-  trimmed="${trimmed#"${trimmed%%[![:space:]]*}"}"
-  trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
-  if [[ -z "$trimmed" ]]; then
+  if _issue_filter_is_unset "$filter"; then
     return 0
   fi
 

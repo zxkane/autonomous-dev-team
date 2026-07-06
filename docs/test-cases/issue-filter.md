@@ -51,6 +51,8 @@ extensions to `tests/unit/test-lib-dispatch.sh` /
 | TC-IFILT-028 | `label:a label:b` (trailing tokens after a complete expression — no operator between them) | rc≠0; error names the unexpected trailing token `label:b` |
 | TC-IFILT-029 | `label:"unterminated` (embedded/unterminated quote — no closing `"`) | rc≠0; error names the unterminated quoted value |
 | TC-IFILT-030 | `label` (bare token, missing `:value`) | rc≠0; error names the bare token `label` |
+| TC-IFILT-031 | `label:"team"a` (stray characters after a closing quote) | rc≠0; error names the malformed token — a typo after a quoted value must fail validation, not silently fall back to the unquoted literal `"team"a` |
+| TC-IFILT-032 | `assignee:"bob"x` (same class, `assignee:` key) | rc≠0; same rejection |
 
 ### Reserved-label rejection (AC-B5, `issue_filter_validate`)
 
@@ -94,6 +96,7 @@ extensions to `tests/unit/test-lib-dispatch.sh` /
 | TC-IFILT-074 | non-empty filter that fails to compile (malformed `ISSUE_FILTER` set directly, `issue_filter_validate` never called) | `issue_filter_apply` itself returns rc≠0 — fail-closed even for a standalone caller |
 | TC-IFILT-075 | non-empty filter, matching array | output never contains an `assignees` key on ANY row, matched or not |
 | TC-IFILT-076 | non-empty filter, array with zero matches | output is `[]` |
+| TC-IFILT-077 | whitespace-only `ISSUE_FILTER` (e.g. `"   "`) | treated as unset (no select applied) — identity with the empty-filter path; `assignees` is still stripped |
 
 ## Tick-level fail-closed validation ordering (AC-B5)
 
@@ -129,6 +132,7 @@ extensions to `tests/unit/test-lib-dispatch.sh` /
 | TC-IFILT-106 | `count_active`, non-empty filter matching ALL active issues | fixture where the filter matches every active issue | count equals the empty-filter count on the same fixture (dual-path equivalence) |
 | TC-IFILT-107 | `count_active`, non-empty filter matching a SUBSET | fixture with some active issues outside the filter | count is strictly less than the unfiltered count |
 | TC-IFILT-108 | any evaluation point, empty/unset filter | — | jq-equal to pre-PR output (AC-B1 identity, re-asserted per site) |
+| TC-IFILT-109 | `count_active`, whitespace-only `ISSUE_FILTER` | fixture with active issues outside a would-be label match | routes through the SAME empty-filter (`itp_count_by_state`) path — count equals the unfiltered count, never switches to the enumerate-then-filter path on raw non-empty-string alone |
 
 ## `ISSUE_SCAN_LIMIT` (AC-B9)
 

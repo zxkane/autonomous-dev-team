@@ -199,6 +199,8 @@ assert_fail_contains "TC-IFILT-027 empty atom value quoted" 'label:""' issue_fil
 assert_fail_contains "TC-IFILT-028 trailing tokens" "label:b" issue_filter_compile "label:a label:b"
 assert_fail_contains "TC-IFILT-029 unterminated quote" "unterminated" issue_filter_compile 'label:"unterminated'
 assert_fail_contains "TC-IFILT-030 bare token" "label" issue_filter_compile "label"
+assert_fail_contains "TC-IFILT-031 trailing chars after quoted value" 'label:"team"a' issue_filter_compile 'label:"team"a'
+assert_fail_contains "TC-IFILT-032 trailing chars after quoted assignee value" 'assignee:"bob"x' issue_filter_compile 'assignee:"bob"x'
 
 # ---------------------------------------------------------------------------
 echo ""
@@ -298,6 +300,12 @@ assert_eq "TC-IFILT-075 filters to the matching row only" "1" "$(jq 'length' <<<
 out=$(echo '[{"number":1,"labels":["z"],"assignees":[]}]' | issue_filter_apply)
 assert_eq "TC-IFILT-076 zero matches -> []" "0" "$(jq 'length' <<<"$out")"
 
+unset ISSUE_FILTER_JQ ISSUE_FILTER_ARGS
+ISSUE_FILTER="   "
+out=$(echo '[{"number":1,"labels":["z"],"assignees":["x"]}]' | issue_filter_apply)
+assert_eq "TC-IFILT-077 whitespace-only filter: unset-identity, no select" "1" "$(jq 'length' <<<"$out")"
+assert_not_contains "TC-IFILT-077 whitespace-only filter: still strips assignees" "assignees" "$(jq -c "$out")"
+
 unset ISSUE_FILTER ISSUE_FILTER_JQ ISSUE_FILTER_ARGS
 
 # ---------------------------------------------------------------------------
@@ -310,6 +318,10 @@ assert_eq "empty filter: fields unchanged" "number,labels" "$(issue_filter_field
 ISSUE_FILTER="label:x"
 assert_eq "non-empty filter: fields gain ,assignees" "number,labels,assignees" "$(issue_filter_fields "number,labels")"
 assert_eq "non-empty filter, empty base: assignees alone" "assignees" "$(issue_filter_fields "")"
+unset ISSUE_FILTER
+
+ISSUE_FILTER="   "
+assert_eq "whitespace-only filter: fields unchanged (treated as unset)" "number,labels" "$(issue_filter_fields "number,labels")"
 unset ISSUE_FILTER
 
 # ---------------------------------------------------------------------------

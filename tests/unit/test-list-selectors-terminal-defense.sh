@@ -267,6 +267,15 @@ assert_eq_field "count_active empty-filter path returns 2 (both active)" "2" "$u
 assert_eq_field "count_active filtered path (subset) returns 1" "1" "$filtered_count"
 unset ISSUE_FILTER ISSUE_FILTER_JQ ISSUE_FILTER_ARGS
 
+echo "--- TC-IFILT-109: whitespace-only ISSUE_FILTER preserves the empty-filter (unfiltered) path ---"
+_MOCK_ISSUE_LIST="[$(mkissue 721 autonomous in-progress team-a),$(mkissue 722 autonomous reviewing team-b)]"
+unset ISSUE_FILTER ISSUE_FILTER_JQ ISSUE_FILTER_ARGS
+unfiltered_count=$(count_active)
+ISSUE_FILTER="   "
+whitespace_count=$(count_active)
+assert_eq_field "count_active whitespace-only filter matches the unfiltered count" "$unfiltered_count" "$whitespace_count"
+unset ISSUE_FILTER ISSUE_FILTER_JQ ISSUE_FILTER_ARGS
+
 echo
 echo "=== TC-IFILT-110..113: ISSUE_SCAN_LIMIT reaches selectors + count_active (both paths) (#436, AC-B9) ==="
 
