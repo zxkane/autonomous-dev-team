@@ -1,0 +1,16 @@
+[
+  {
+    "number": 7,
+    "title": "residue",
+    "labels": [ { "name": "approved" }, { "name": "in-progress" } ],
+    "assignees": [ { "login": "alice" } ],
+    "comments": []
+  },
+  {
+    "number": 9,
+    "title": "clean",
+    "labels": [ { "name": "autonomous" } ],
+    "assignees": [],
+    "comments": []
+  }
+]

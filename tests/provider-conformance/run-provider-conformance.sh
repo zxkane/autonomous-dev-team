@@ -1631,6 +1631,47 @@ _assert_verb() {
           _run_gl_shape_assert "$verb" \
             'itp_list_by_state open autonomous 100 number,title,labels' \
             "$PAYLOADS/gitlab-issues-list.json" number
+          # [#435] exact-key assignees assertions (AC-A1/A2/A3): requested →
+          # array of login/username strings, [] when unassigned; NOT
+          # requested → key absent from every row.
+          local _lbs_gl_out
+          _lbs_gl_out="$(_invoke _PCF_GL_PAYLOAD="$PAYLOADS/gitlab-issues-list.json" _PCF_GL_ARGV_FILE="$work_root/.argv-gl-lbs-435.json" 'itp_list_by_state open autonomous 100 number,assignees' 2>/dev/null)"
+          if jq -e '(length == 2) and all(.[]; (.assignees | type) == "array" and all(.assignees[]; type == "string"))
+                     and ([.[] | select(.number == 5)][0].assignees == ["alice","bob"])
+                     and ([.[] | select(.number == 3)][0].assignees == [])' >/dev/null 2>&1 <<<"$_lbs_gl_out"; then
+            emit PASS "$verb" "[#435] assignees requested: array-of-strings, [] when unassigned"
+          else
+            emit FAIL "$verb" "[#435] assignees requested: wrong shape (${_lbs_gl_out:0:200})"
+          fi
+          _lbs_gl_out="$(_invoke _PCF_GL_PAYLOAD="$PAYLOADS/gitlab-issues-list.json" _PCF_GL_ARGV_FILE="$work_root/.argv-gl-lbs-435b.json" 'itp_list_by_state open autonomous 100 number,labels' 2>/dev/null)"
+          if jq -e '[.[] | select(has("assignees"))] | length == 0' >/dev/null 2>&1 <<<"$_lbs_gl_out"; then
+            emit PASS "$verb" "[#435] assignees NOT requested: key absent (projection honesty)"
+          else
+            emit FAIL "$verb" "[#435] assignees NOT requested but key present (${_lbs_gl_out:0:200})"
+          fi
+          ;;
+        github)
+          _run_shape_assert "$verb" 'itp_list_by_state open autonomous 100 number,title,labels,comments' \
+            "$PAYLOADS/issue-list-valid.json" number
+          # [#435] exact-key assignees assertions (AC-A1/A2/A3). github-only
+          # (not the catch-all `*)` below) — the degraded/broken fixtures'
+          # state-read leaves do not normalize an `assignees` field, so this
+          # assertion would be a false FAIL against them.
+          local _lbs_gh_out
+          _lbs_gh_out="$(_invoke _PCF_GH_MODE="ok" _PCF_GH_PAYLOAD="$PAYLOADS/issue-list-valid.json" _PCF_ARGV_FILE="$work_root/.argv-gh-lbs-435.json" 'itp_list_by_state open autonomous 100 number,assignees' 2>&1)"
+          if jq -e '(length == 2) and all(.[]; (.assignees | type) == "array" and all(.assignees[]; type == "string"))
+                     and ([.[] | select(.number == 5)][0].assignees == ["alice","bob"])
+                     and ([.[] | select(.number == 3)][0].assignees == [])' >/dev/null 2>&1 <<<"$_lbs_gh_out"; then
+            emit PASS "$verb" "[#435] assignees requested: array-of-strings, [] when unassigned"
+          else
+            emit FAIL "$verb" "[#435] assignees requested: wrong shape (${_lbs_gh_out:0:200})"
+          fi
+          _lbs_gh_out="$(_invoke _PCF_GH_MODE="ok" _PCF_GH_PAYLOAD="$PAYLOADS/issue-list-valid.json" _PCF_ARGV_FILE="$work_root/.argv-gh-lbs-435b.json" 'itp_list_by_state open autonomous 100 number,labels' 2>&1)"
+          if jq -e '[.[] | select(has("assignees"))] | length == 0' >/dev/null 2>&1 <<<"$_lbs_gh_out"; then
+            emit PASS "$verb" "[#435] assignees NOT requested: key absent (projection honesty)"
+          else
+            emit FAIL "$verb" "[#435] assignees NOT requested but key present (${_lbs_gh_out:0:200})"
+          fi
           ;;
         *)
           _run_shape_assert "$verb" 'itp_list_by_state open autonomous 100 number,title,labels,comments' \
@@ -1657,6 +1698,35 @@ _assert_verb() {
           _run_gl_shape_assert "$verb" \
             'itp_list_forbidden_combos open autonomous 100' \
             "$PAYLOADS/gitlab-issues-list.json" number
+          # [#435] exact-key assertion (AC-A4/A5): rows carry EXACTLY
+          # number,labels,assignees — using a fixture with an ACTUAL combo
+          # match (gitlab-issues-list.json never matches: its two rows
+          # never intersect terminal+transitional).
+          local _fc_gl_out
+          _fc_gl_out="$(_invoke _PCF_GL_PAYLOAD="$PAYLOADS/gitlab-forbidden-combos-valid.json" _PCF_GL_ARGV_FILE="$work_root/.argv-gl-fc-435.json" 'itp_list_forbidden_combos open autonomous 100' 2>/dev/null)"
+          if jq -e '(length == 1) and (.[0].number == 7)
+                     and ((.[0] | keys_unsorted | sort) == ["assignees","labels","number"])
+                     and (.[0].assignees == ["alice"])' >/dev/null 2>&1 <<<"$_fc_gl_out"; then
+            emit PASS "$verb" "[#435] exact-key number,labels,assignees + assignees normalized"
+          else
+            emit FAIL "$verb" "[#435] widened shape mismatch (${_fc_gl_out:0:200})"
+          fi
+          ;;
+        github)
+          _run_shape_assert "$verb" 'itp_list_forbidden_combos open autonomous 100' \
+            "$PAYLOADS/issue-list-valid.json" number
+          # [#435] exact-key assertion (AC-A4/A5) — see gitlab arm comment.
+          # github-only (not the catch-all `*)` below) — the degraded/broken
+          # fixtures' leaves do not widen to the number,labels,assignees shape.
+          local _fc_gh_out
+          _fc_gh_out="$(_invoke _PCF_GH_MODE="ok" _PCF_GH_PAYLOAD="$PAYLOADS/forbidden-combos-valid.json" _PCF_ARGV_FILE="$work_root/.argv-gh-fc-435.json" 'itp_list_forbidden_combos open autonomous 100' 2>&1)"
+          if jq -e '(length == 1) and (.[0].number == 7)
+                     and ((.[0] | keys_unsorted | sort) == ["assignees","labels","number"])
+                     and (.[0].assignees == ["alice"])' >/dev/null 2>&1 <<<"$_fc_gh_out"; then
+            emit PASS "$verb" "[#435] exact-key number,labels,assignees + assignees normalized"
+          else
+            emit FAIL "$verb" "[#435] widened shape mismatch (${_fc_gh_out:0:200})"
+          fi
           ;;
         *)
           _run_shape_assert "$verb" 'itp_list_forbidden_combos open autonomous 100' \

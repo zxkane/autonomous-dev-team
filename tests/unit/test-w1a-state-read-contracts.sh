@@ -156,8 +156,8 @@ echo ""
 echo "=== LEAF SHAPE: itp_github_list_by_state normalization ==="
 
 _GH_PAYLOAD='[
-  {"number":5,"title":"t5","labels":[{"name":"autonomous"},{"name":"in-progress"}],"comments":[]},
-  {"number":3,"title":"t3","labels":[{"name":"autonomous"}],"comments":[{"url":"https://x/issues/3#issuecomment-1","author":{"login":"alice"},"body":"hi","createdAt":"2026-01-01T00:00:00Z"}]}
+  {"number":5,"title":"t5","labels":[{"name":"autonomous"},{"name":"in-progress"}],"assignees":[{"login":"alice"},{"login":"bob"}],"comments":[]},
+  {"number":3,"title":"t3","labels":[{"name":"autonomous"}],"assignees":[],"comments":[{"url":"https://x/issues/3#issuecomment-1","author":{"login":"alice"},"body":"hi","createdAt":"2026-01-01T00:00:00Z"}]}
 ]'
 gh() { printf '%s' "$_GH_PAYLOAD"; }
 export -f gh
@@ -177,6 +177,21 @@ assert_eq "leaf normalizes comments to the INV-90 array shape" \
 _GH_PAYLOAD='[]'
 out="$(itp_github_list_by_state open autonomous 100 "number")"
 assert_eq "no matches → [] (never null, never empty string)" "[]" "$out"
+
+echo ""
+echo "=== [#435] LEAF SHAPE: itp_github_list_by_state — assignees field ==="
+_GH_PAYLOAD='[
+  {"number":5,"title":"t5","labels":[{"name":"autonomous"}],"assignees":[{"login":"alice"},{"login":"bob"}],"comments":[]},
+  {"number":3,"title":"t3","labels":[{"name":"autonomous"}],"assignees":[],"comments":[]}
+]'
+out="$(itp_github_list_by_state open autonomous 100 "number,assignees")"
+assert_eq "assignees requested → array of login strings (not {login} objects)" \
+  '["alice","bob"]' "$(jq -c '.[1].assignees' <<<"$out")"
+assert_eq "unassigned issue → assignees: [] (never null)" \
+  '[]' "$(jq -c '.[0].assignees' <<<"$out")"
+out="$(itp_github_list_by_state open autonomous 100 "number,labels")"
+assert_eq "assignees NOT requested → key absent from every row (projection honesty)" \
+  "0" "$(jq '[.[] | select(has("assignees"))] | length' <<<"$out")"
 
 echo ""
 echo "=== LEAF FIELD PROJECTION: FIELDS_CSV controls exactly the returned keys ==="
@@ -201,16 +216,20 @@ assert_eq "empty any-of → count ALL matches" "3" "$out"
 echo ""
 echo "=== LEAF itp_github_list_forbidden_combos: leaf owns the combo filter ==="
 _GH_PAYLOAD='[
-  {"number":1,"title":"","labels":[{"name":"approved"},{"name":"in-progress"}],"comments":[]},
-  {"number":2,"title":"","labels":[{"name":"autonomous"}],"comments":[]},
-  {"number":3,"title":"","labels":[{"name":"stalled"},{"name":"pending-dev"}],"comments":[]},
-  {"number":4,"title":"","labels":[{"name":"approved"}],"comments":[]}
+  {"number":1,"title":"","labels":[{"name":"approved"},{"name":"in-progress"}],"assignees":[{"login":"alice"}],"comments":[]},
+  {"number":2,"title":"","labels":[{"name":"autonomous"}],"assignees":[],"comments":[]},
+  {"number":3,"title":"","labels":[{"name":"stalled"},{"name":"pending-dev"}],"assignees":[],"comments":[]},
+  {"number":4,"title":"","labels":[{"name":"approved"}],"assignees":[],"comments":[]}
 ]'
 out="$(itp_github_list_forbidden_combos open autonomous 100)"
 assert_eq "combo filter: only terminal+transitional issues survive (1,3)" \
   "1 3" "$(jq -r '[.[].number] | join(" ")' <<<"$out")"
-assert_eq "combo filter output fields are exactly number,labels" \
-  "number,labels" "$(jq -r '.[0] | keys_unsorted | join(",")' <<<"$out")"
+assert_eq "[#435] combo filter output fields are exactly number,labels,assignees" \
+  "number,labels,assignees" "$(jq -r '.[0] | keys_unsorted | join(",")' <<<"$out")"
+assert_eq "[#435] combo filter normalizes assignees to a login-string array" \
+  '["alice"]' "$(jq -c '.[0].assignees' <<<"$out")"
+assert_eq "[#435] combo filter: unassigned row → assignees: [] (never null)" \
+  '[]' "$(jq -c '.[1].assignees' <<<"$out")"
 
 # ===========================================================================
 # R2 FAIL-CLOSED: gh rc≠0 → leaf rc≠0, no partial output.

@@ -99,11 +99,11 @@ mapfile -t CHP_VERBS < <(spec_verbs '^### 3\.2' '^### 3\.3' chp "$SPEC")
 # ground truth TC-PROVIDER-SPEC-016/017 reconcile the spec-derived sets against.
 mapfile -t ITP_SHIMS < <(shipped_shims "$ITP_LIB" itp)
 mapfile -t CHP_SHIMS < <(shipped_shims "$CHP_LIB" chp)
-# The 9 ITP + 4 CHP capability keys (spec §4).
+# The 10 ITP + 4 CHP capability keys (spec §4; `assignees` added #435).
 ITP_CAPS=(
   server_side_state_and server_side_state_negation distinct_bot_author
   read_after_write_state cross_ref_shorthand body_checkbox edit_comment
-  label_colors marker_channel
+  label_colors marker_channel assignees
 )
 CHP_CAPS=(
   native_issue_pr_link rest_request_changes review_bots merge_closes_issue
@@ -175,7 +175,7 @@ else
 fi
 rm -rf "$NEG_WORK"
 
-echo "=== TC-PROVIDER-SPEC-006: all 13 capability keys ==="
+echo "=== TC-PROVIDER-SPEC-006: all 14 capability keys ==="
 for c in "${ITP_CAPS[@]}"; do assert_grep "ITP cap $c" "$c" "$SPEC"; done
 for c in "${CHP_CAPS[@]}"; do assert_grep "CHP cap $c" "$c" "$SPEC"; done
 

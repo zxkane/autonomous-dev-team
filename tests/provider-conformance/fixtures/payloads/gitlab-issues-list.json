@@ -5,7 +5,8 @@
     "title": "second issue",
     "description": "body five",
     "state": "opened",
-    "labels": ["autonomous", "in-progress"]
+    "labels": ["autonomous", "in-progress"],
+    "assignees": [ { "username": "alice" }, { "username": "bob" } ]
   },
   {
     "iid": 3,
@@ -13,6 +14,7 @@
     "title": "first issue",
     "description": "body three",
     "state": "opened",
-    "labels": ["autonomous"]
+    "labels": ["autonomous"],
+    "assignees": []
   }
 ]

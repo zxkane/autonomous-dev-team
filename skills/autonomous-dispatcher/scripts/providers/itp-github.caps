@@ -15,3 +15,4 @@ body_checkbox=1              # markdown checkbox in body (else native subtask)
 edit_comment=1               # comment edit-in-place exists (INV-46 stamp; else re-post full report+marker)  [M5]
 label_colors=1               # state primitive carries a hex color (GitHub/GitLab; Asana: n/a)  [m5]
 marker_channel=html          # html=HTML comments survive; text=plain only (covers dispatcher markers too)  [M6]
+assignees=1                  # itp_list_by_state/itp_list_forbidden_combos normalize an assignees field (#435, ISSUE_FILTER seam)
