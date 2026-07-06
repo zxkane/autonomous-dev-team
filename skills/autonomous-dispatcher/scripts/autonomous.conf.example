@@ -644,6 +644,32 @@ REAL_GH=""
 MAX_CONCURRENT=5
 MAX_RETRIES=3
 
+# Lane-GC systemd --user scope backend ([Lane-GC PR-7], design
+# docs/designs/lane-containment-gc.md §4-C7; INV-120). Linux-only, feature-
+# detected, and NEVER load-bearing — the portable pgid backend (PR-2..PR-5)
+# remains fully sufficient alone on every platform, and macOS always uses
+# it. These two knobs only take effect when the host is ALREADY eligible
+# for the systemd-scope backend (Linux, systemd-run present, a reachable
+# user bus, AND `loginctl show-user -p Linger --value` == yes — see
+# `adt-gc.sh --doctor`'s `backend_eligibility=` line); on any other host
+# they are read but never acted on.
+#
+# LANE_TASKS_MAX: `-p TasksMax=<n>` on the enrolling scope — caps fork
+# bombs inside one lane (a lane's process count can never exceed this,
+# enforced by the kernel's pids controller, independent of any pgid/
+# registry bookkeeping). Default 512 comfortably covers the deepest
+# observed wrapper subtree (agent CLI + MCP servers + browser + E2E
+# server) with headroom; raise it if a legitimate workload trips it.
+LANE_TASKS_MAX=512
+
+# LANE_MEMORY_MAX: `-p MemoryMax=<value>` on the enrolling scope (systemd
+# byte-suffix syntax, e.g. `2G`, `512M`) — localizes an OOM to the LANE's
+# own cgroup instead of the whole host. Unset by default: the design
+# defers a default until real per-lane RSS distributions are observed
+# (see the design doc's "Out of Scope" — "Per-lane MemoryMax defaults").
+# Leave empty/unset unless you've measured your own workload's footprint.
+LANE_MEMORY_MAX=
+
 # Cold-start grace window for stale detection ([INV-18], #99 Bug 1).
 # After a Step 2/3/4 dispatch, the wrapper needs time to spawn the session,
 # have the agent CLI make its first API call, and write its PID file. Step 5
