@@ -237,6 +237,29 @@ out=$(itp_gitlab_list_by_state open autonomous 100 "number,labels") || true
 assert_eq "TC-WB-006 FIELDS=number,labels → exactly those two keys" \
   "number,labels" "$(jq -r '.[0] | keys_unsorted | join(",")' <<<"$out")"
 
+# [#435] TC-WB-007: assignees field — array of username strings, [] when
+# unassigned, absent when not requested (projection honesty).
+_gl_stub_reset
+assignees_pl=$(mktemp)
+cat > "$assignees_pl" <<'JSON'
+[
+  {"iid": 5, "id": 500005, "title": "second issue", "description": "body five", "state": "opened", "labels": ["autonomous"], "assignees": [{"username": "alice"}, {"username": "bob"}]},
+  {"iid": 3, "id": 500003, "title": "first issue", "description": "body three", "state": "opened", "labels": ["autonomous"], "assignees": []}
+]
+JSON
+_GL_STUB_PAYLOAD="$assignees_pl"
+out=$(itp_gitlab_list_by_state open autonomous 100 "number,assignees") || true
+assert_eq "TC-WB-007 assignees requested → array of username strings" \
+  '["alice","bob"]' "$(jq -c '.[1].assignees' <<<"$out")"
+assert_eq "TC-WB-007 unassigned issue → assignees: [] (never null)" \
+  '[]' "$(jq -c '.[0].assignees' <<<"$out")"
+_gl_stub_reset
+_GL_STUB_PAYLOAD="$assignees_pl"
+out=$(itp_gitlab_list_by_state open autonomous 100 "number,labels") || true
+assert_eq "TC-WB-007 assignees NOT requested → key absent from every row" \
+  "0" "$(jq '[.[] | select(has("assignees"))] | length' <<<"$out")"
+rm -f "$assignees_pl"
+
 # TC-WB-004: multi-page merge — the transport is responsible for merging, so
 # the leaf gets a MERGED array from the stub. Prove the leaf just consumes
 # a longer merged array.
@@ -329,18 +352,22 @@ _gl_stub_reset
 pl=$(mktemp)
 cat > "$pl" <<'JSON'
 [
-  {"iid": 1, "id": 1, "title": "", "description": "", "state": "opened", "labels": ["approved", "in-progress"]},
-  {"iid": 2, "id": 2, "title": "", "description": "", "state": "opened", "labels": ["autonomous"]},
-  {"iid": 3, "id": 3, "title": "", "description": "", "state": "opened", "labels": ["stalled", "pending-dev"]},
-  {"iid": 4, "id": 4, "title": "", "description": "", "state": "opened", "labels": ["approved"]}
+  {"iid": 1, "id": 1, "title": "", "description": "", "state": "opened", "labels": ["approved", "in-progress"], "assignees": [{"username": "alice"}]},
+  {"iid": 2, "id": 2, "title": "", "description": "", "state": "opened", "labels": ["autonomous"], "assignees": []},
+  {"iid": 3, "id": 3, "title": "", "description": "", "state": "opened", "labels": ["stalled", "pending-dev"], "assignees": []},
+  {"iid": 4, "id": 4, "title": "", "description": "", "state": "opened", "labels": ["approved"], "assignees": []}
 ]
 JSON
 _GL_STUB_PAYLOAD="$pl"
 out=$(itp_gitlab_list_forbidden_combos open autonomous 100) || true
 assert_eq "TC-WB-020 filters to mixed-combo issues (1 and 3)" \
   "1 3" "$(jq -r '[.[].number] | join(" ")' <<<"$out")"
-assert_eq "TC-WB-020 output fields are exactly number,labels" \
-  "number,labels" "$(jq -r '.[0] | keys_unsorted | join(",")' <<<"$out")"
+assert_eq "[#435] TC-WB-020 output fields are exactly number,labels,assignees" \
+  "number,labels,assignees" "$(jq -r '.[0] | keys_unsorted | join(",")' <<<"$out")"
+assert_eq "[#435] TC-WB-020 assignees normalized to username-string array" \
+  '["alice"]' "$(jq -c '.[0].assignees' <<<"$out")"
+assert_eq "[#435] TC-WB-020 unassigned combo row → assignees: [] (never null)" \
+  '[]' "$(jq -c '.[1].assignees' <<<"$out")"
 rm -f "$pl"
 
 _gl_stub_reset
@@ -860,6 +887,7 @@ assert_eq "TC-WB-135 cross_ref_shorthand=1"      "1"    "$(_caps_read cross_ref_
 assert_eq "TC-WB-136 body_checkbox=1"            "1"    "$(_caps_read body_checkbox)"
 assert_eq "TC-WB-137 edit_comment=1"             "1"    "$(_caps_read edit_comment)"
 assert_eq "TC-WB-138 label_colors=1"             "1"    "$(_caps_read label_colors)"
+assert_eq "TC-WB-139 [#435] assignees=1"         "1"    "$(_caps_read assignees)"
 
 echo ""
 echo "==================================================================="

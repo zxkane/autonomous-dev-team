@@ -3,6 +3,7 @@
     "number": 5,
     "title": "second",
     "labels": [ { "name": "autonomous" }, { "name": "in-progress" } ],
+    "assignees": [ { "login": "alice" }, { "login": "bob" } ],
     "comments": [
       {
         "author": { "login": "zxkane" },
@@ -16,6 +17,7 @@
     "number": 3,
     "title": "first",
     "labels": [ { "name": "autonomous" }, { "name": "approved" } ],
+    "assignees": [],
     "comments": []
   }
 ]

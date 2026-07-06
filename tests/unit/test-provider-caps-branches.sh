@@ -11,13 +11,14 @@
 #
 # REALITY (spec §4.3, the no-behavior-change / GitHub-only first deliverable):
 # "the only live branches are GitHub's current ones." grep proves exactly 8 of the
-# 13 caps have a LIVE caller-side branch that reads the cap TODAY; the other 5
-# caller branches land later with the GitLab/Asana PRs (their .caps degraded value
-# is already declared, but no caller-side code branches on them yet, and the
-# degraded fixture .sh are empty scaffolds — there is NO branch to run). Exercising
+# 14 caps have a LIVE caller-side branch that reads the cap TODAY; the other 6
+# caller branches land later with the GitLab/Asana PRs (or, for `assignees`
+# #435, the follow-up ISSUE_FILTER PR-B) — their .caps degraded value is already
+# declared, but no caller-side code branches on them yet, and the degraded
+# fixture .sh are empty scaffolds — there is NO branch to run). Exercising
 # a branch that does not exist is impossible, and writing a test-only consumer to
 # fake it would test a path that is not in production (violating §4.3). So this gate
-# splits the 13 into two honestly-distinguished sets and is GREEN only because the
+# splits the 14 into two honestly-distinguished sets and is GREEN only because the
 # deferred set is explicitly WAIVED with a fail-on-wiring tripwire — never a bare PASS:
 #
 #   EXERCISED (8): the cap has a live caller branch AND
@@ -25,14 +26,14 @@
 #       AND for a representative subset the branch is RUN END-TO-END against the
 #       degraded fixture and its degraded observable asserted (so "reachable" is
 #       demonstrated by execution, not just by grep + value-read);
-#   WAIVED  (5): NO caller branch reads the cap yet (asserted absent). This is NOT
+#   WAIVED  (6): NO caller branch reads the cap yet (asserted absent). This is NOT
 #     a pass — it is a tripwired waiver: if a caller branch EVER appears for a
 #     waived cap, TC-CAPS-010..015 FAIL ("wiring landed → move it to EXERCISED and
 #     add a real exercise test"), so no future caps=0 branch can ship untested.
 #
-# The headline prints `exercised=8 waived=5 total=13` and asserts the split sums to
-# the full 9 ITP + 4 CHP matrix — the gate cannot go green while hiding an
-# unaccounted cap, and cannot claim all 13 are exercised when 5 have no branch.
+# The headline prints `exercised=8 waived=6 total=14` and asserts the split sums to
+# the full 10 ITP + 4 CHP matrix — the gate cannot go green while hiding an
+# unaccounted cap, and cannot claim all 14 are exercised when 6 have no branch.
 #
 # Fixture: tests/unit/fixtures/provider-degraded/, selected through the PUBLIC seam
 # (ISSUE_PROVIDER=degraded / CODE_HOST=degraded + AUTONOMOUS_PROVIDERS_DIR), per
@@ -111,13 +112,18 @@ LIVE_BRANCH_CAPS=(
   "chp review_bots 0"
   "chp merge_closes_issue 0"
 )
-# 5 caps whose caller branch is NOT yet wired (spec §4.3). "<seam> <cap>".
+# 6 caps whose caller branch is NOT yet wired (spec §4.3). "<seam> <cap>".
+# `assignees` (#435, ISSUE_FILTER seam PR-A) is a NEW cap this PR — no caller
+# branches on it yet; wiring lands with the follow-up ISSUE_FILTER PR-B's
+# assignee-atom capability gate (§4.3 pattern: the .caps bit ships now,
+# honestly declared, before the caller-side branch exists).
 WAIVED_CAPS=(
   "itp server_side_state_and"
   "itp server_side_state_negation"
   "itp distinct_bot_author"
   "itp read_after_write_state"
   "itp marker_channel"
+  "itp assignees"
 )
 
 EXERCISED=0; WAIVED=0; EXECUTED=0
@@ -254,17 +260,17 @@ done
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== TC-CAPS-020: coverage accounting — exercised + waived = 13 (9 ITP + 4 CHP), no cap unaccounted ==="
+echo "=== TC-CAPS-020: coverage accounting — exercised + waived = 14 (10 ITP + 4 CHP), no cap unaccounted ==="
 # ---------------------------------------------------------------------------
 n_live=${#LIVE_BRANCH_CAPS[@]}; n_waived=${#WAIVED_CAPS[@]}; total=$((n_live + n_waived))
 echo "  COVERAGE: exercised=$EXERCISED (driveable) / executed-end-to-end=$EXECUTED / waived=$WAIVED / declared-live=$n_live declared-waived=$n_waived total=$total"
-if [ "$total" -eq 13 ]; then ok "13 caps total ($n_live live + $n_waived waived)"; else bad "cap accounting wrong: $n_live + $n_waived = $total (expected 13)"; fi
+if [ "$total" -eq 14 ]; then ok "14 caps total ($n_live live + $n_waived waived)"; else bad "cap accounting wrong: $n_live + $n_waived = $total (expected 14)"; fi
 if [ "$EXERCISED" -eq "$n_live" ]; then ok "every declared-live cap is reachable + driveable ($EXERCISED/$n_live)"; else bad "only $EXERCISED/$n_live live caps driveable"; fi
 if [ "$WAIVED" -eq "$n_waived" ]; then ok "every declared-waived cap is still unwired ($WAIVED/$n_waived) — none silently gained a branch"; else bad "a waived cap gained a branch ($WAIVED/$n_waived still unwired) — see TC-CAPS-010..015"; fi
 if [ "$EXECUTED" -ge 3 ]; then ok "at least 3 caps=0 branches RUN end-to-end ($EXECUTED) — 'reachable' is demonstrated by execution, not just grep"; else bad "only $EXECUTED caps=0 branches executed end-to-end (need >=3 to demonstrate the harness drives real branches)"; fi
 n_itp=$(printf '%s\n' "${LIVE_BRANCH_CAPS[@]}" "${WAIVED_CAPS[@]}" | awk '$1=="itp"' | wc -l | tr -d ' ')
 n_chp=$(printf '%s\n' "${LIVE_BRANCH_CAPS[@]}" "${WAIVED_CAPS[@]}" | awk '$1=="chp"' | wc -l | tr -d ' ')
-if [ "$n_itp" -eq 9 ] && [ "$n_chp" -eq 4 ]; then ok "9 ITP + 4 CHP caps (matches §4.1/§4.2)"; else bad "ITP/CHP split wrong: $n_itp ITP + $n_chp CHP (expected 9 + 4)"; fi
+if [ "$n_itp" -eq 10 ] && [ "$n_chp" -eq 4 ]; then ok "10 ITP + 4 CHP caps (matches §4.1/§4.2)"; else bad "ITP/CHP split wrong: $n_itp ITP + $n_chp CHP (expected 10 + 4)"; fi
 
 # ---------------------------------------------------------------------------
 echo ""
@@ -280,7 +286,7 @@ for row in "${LIVE_BRANCH_CAPS[@]}" "${WAIVED_CAPS[@]}"; do
   read -r seam cap _ <<<"$row"
   [ -n "$(read_degraded_cap "$seam" "$cap")" ] || missing="$missing $cap"
 done
-if [ -z "$missing" ]; then ok "all 13 caps resolve through the degraded fixture seam"; else bad "caps with no fixture value:$missing"; fi
+if [ -z "$missing" ]; then ok "all 14 caps resolve through the degraded fixture seam"; else bad "caps with no fixture value:$missing"; fi
 
 # ===========================================================================
 echo ""

@@ -1,0 +1,14 @@
+source: hand-authored (#435, ISSUE_FILTER seam PR-A)
+capture_date: 2026-07-06
+gitlab_version: 17.x
+endpoint: GET /projects/:id/issues?state=opened&labels=autonomous&per_page=100
+shape: array of issue objects (single page); .iid used as spec `number`;
+  labels[] as name strings; assignees[] as {username} objects. Dedicated
+  fixture (distinct from gitlab-issues-list.json) because
+  itp_list_forbidden_combos needs a row that ACTUALLY matches the [INV-25]
+  terminal+transitional combo — the exact-key `number,labels,assignees`
+  assertion needs a non-empty result to inspect.
+notes: iid 7 carries BOTH `approved` (terminal) and `in-progress`
+  (transitional) so it matches the forbidden-combo filter and carries a
+  non-empty `assignees` (["alice"]); iid 9 is a clean `autonomous`-only
+  issue that must NOT survive the filter.

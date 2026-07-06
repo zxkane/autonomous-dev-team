@@ -16,3 +16,4 @@ body_checkbox=0              # itp_mark_checkbox maps to subtask-complete
 edit_comment=0               # INV-46 stamp falls back to re-posting the full report body + marker (never marker-only)
 label_colors=0               # itp_provision_states skips color
 marker_channel=text          # plain text channel (HTML comments stripped — Asana-like)
+assignees=0                  # itp_list_by_state/itp_list_forbidden_combos normalize NO assignees field (#435)

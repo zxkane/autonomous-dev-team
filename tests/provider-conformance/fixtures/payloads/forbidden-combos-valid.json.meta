@@ -1,0 +1,14 @@
+source: hand-authored (#435, ISSUE_FILTER seam PR-A)
+capture_date: 2026-07-06
+shape: raw `gh issue list --json number,title,labels,comments,assignees`
+  object array (pre-transform) — the stub applies the leaf's own jq
+  normalization. Dedicated fixture (distinct from issue-list-valid.json)
+  because itp_list_forbidden_combos needs a row that ACTUALLY matches the
+  [INV-25] terminal+transitional combo (issue-list-valid.json's two rows
+  never intersect: #5 is transitional-only, #3 is terminal-only) — the
+  exact-key `number,labels,assignees` assertion needs a non-empty result
+  to inspect.
+notes: issue #7 carries BOTH `approved` (terminal) and `in-progress`
+  (transitional) so it matches the forbidden-combo filter and carries a
+  non-empty `assignees` (["alice"]); issue #9 is a clean `autonomous`-only
+  issue that must NOT survive the filter.

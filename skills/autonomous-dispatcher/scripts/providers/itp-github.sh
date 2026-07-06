@@ -48,10 +48,14 @@
 # _itp_github_state_read <state> <labels-and-csv> <limit> — internal helper
 # shared by list_by_state/count_by_state/list_forbidden_combos: runs the
 # server-side state+label-AND+limit enumeration and normalizes to the full
-# {number, title, labels, comments} shape (comments per [INV-90]/§3.3), sorted
-# ascending by number. <labels-and-csv> empty → no --label flag. Fail-closed:
-# a `gh` failure propagates its non-zero rc with no partial stdout (no `|| true`
-# anywhere in this chain).
+# {number, title, labels, assignees, comments} shape (comments per
+# [INV-90]/§3.3), sorted ascending by number. <labels-and-csv> empty → no
+# --label flag. Fail-closed: a `gh` failure propagates its non-zero rc with
+# no partial stdout (no `|| true` anywhere in this chain).
+# [#435, ISSUE_FILTER PR-A] `assignees` normalizes to an array of login
+# strings (like `labels`, never `{login}` objects) — same single `gh` call,
+# zero extra API cost. Projection (`_itp_github_project_fields`) already
+# generic, so a caller that never requests `assignees` never sees the key.
 # [#393] state-read comments' authorKind is GraphQL-DERIVED and therefore
 # CANNOT distinguish App bots (GraphQL strips the `[bot]` suffix and exposes
 # no author type): an App-authored comment reports authorKind="human" here.
@@ -65,12 +69,13 @@ _itp_github_state_read() {
   local state="$1" labels_csv="$2" limit="$3"
   local -a args=(issue list --repo "$REPO" --state "$state" --limit "$limit")
   [[ -n "$labels_csv" ]] && args+=(--label "$labels_csv")
-  args+=(--json number,title,labels,comments)
+  args+=(--json number,title,labels,comments,assignees)
   gh "${args[@]}" | jq --arg bot "${BOT_LOGIN:-}" '
     [ .[] | {
         number: .number,
         title: (.title // ""),
         labels: [ (.labels // [])[].name ],
+        assignees: [ (.assignees // [])[].login ],
         comments: [ (.comments // [])[]
           | { id: ( ( (.url // "") | capture("issuecomment-(?<n>[0-9]+)$") | .n | tonumber ) // null ),
               author: (.author.login // null),
@@ -89,7 +94,7 @@ _itp_github_state_read() {
 
 # _itp_github_project_fields <fields-csv> — internal helper: reads the full
 # normalized array on stdin and projects down to EXACTLY the requested fields
-# (spec R1). <fields-csv> ⊆ number,title,labels,comments.
+# (spec R1). <fields-csv> ⊆ number,title,labels,assignees,comments.
 _itp_github_project_fields() {
   local fields_csv="$1" fields_json
   fields_json=$(printf '%s' "$fields_csv" | jq -R -s -c 'split(",") | map(select(length > 0))')
@@ -102,7 +107,7 @@ _itp_github_project_fields() {
 # <state> ∈ open|closed|all. <labels-and-csv> comma-separated label names,
 # AND semantics (gh's own --label comma behavior), empty = no filter.
 # <limit> applied SERVER-SIDE (gh --limit) before any caller-side subtraction.
-# <fields-csv> ⊆ number,title,labels,comments. No matches → `[]`.
+# <fields-csv> ⊆ number,title,labels,assignees,comments. No matches → `[]`.
 itp_github_list_by_state() {
   local state="$1" labels_csv="$2" limit="$3" fields_csv="$4"
   _itp_github_state_read "$state" "$labels_csv" "$limit" | _itp_github_project_fields "$fields_csv"
@@ -135,8 +140,12 @@ itp_github_count_by_state() {
 # query languages): terminal set = {approved, stalled}; transitional set =
 # {in-progress, reviewing, pending-review, pending-dev}; forbidden = terminal
 # AND transitional (per [INV-25]). Returns the normalized array shape with
-# fields number,labels, already filtered to the forbidden combos — the caller
-# (list_hygiene_residue) is a thin pass-through.
+# fields number,labels,assignees, already filtered to the forbidden combos —
+# the caller (list_hygiene_residue) is a thin pass-through.
+# [#435, ISSUE_FILTER PR-A] `assignees` widens this UNCONDITIONALLY (this verb
+# takes no FIELDS_CSV) so a follow-up per-slice Step-0 hygiene filter can see
+# assignee data too — a documented spec amendment, additive-safe: existing
+# callers read only `number`/`labels`.
 itp_github_list_forbidden_combos() {
   local state="$1" labels_csv="$2" limit="$3"
   _itp_github_state_read "$state" "$labels_csv" "$limit" | jq '
@@ -144,7 +153,7 @@ itp_github_list_forbidden_combos() {
         (.labels | any(. == "approved" or . == "stalled"))
         and
         (.labels | any(. == "in-progress" or . == "reviewing" or . == "pending-review" or . == "pending-dev"))
-      ) | {number, labels}
+      ) | {number, labels, assignees}
     ]
   '
 }

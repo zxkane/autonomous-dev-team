@@ -134,18 +134,22 @@ _itp_gitlab_enumerate() {
 
 # _itp_gitlab_normalize_issue_row <bot-login> — internal jq stanza applied to
 # a RAW GitLab issue array; emits the provider-neutral normalized array with
-# fields {number,title,labels,comments}. `comments` STARTS as an empty array
-# — the caller (list_by_state) fetches per-issue comments in a second pass
-# only when FIELDS_CSV asks for them (mirrors #396-r2 discipline: no bulk
-# state-read comment fetch, matches _itp_github_state_read's GraphQL-embedded
-# array on the GitHub side, adjusted for GitLab which has no bulk-comments
-# equivalent). Sort ascending by number.
+# fields {number,title,labels,assignees,comments}. `comments` STARTS as an
+# empty array — the caller (list_by_state) fetches per-issue comments in a
+# second pass only when FIELDS_CSV asks for them (mirrors #396-r2 discipline:
+# no bulk state-read comment fetch, matches _itp_github_state_read's
+# GraphQL-embedded array on the GitHub side, adjusted for GitLab which has no
+# bulk-comments equivalent). Sort ascending by number.
+# [#435, ISSUE_FILTER PR-A] `assignees` normalizes the REST response's
+# `assignees` array (already present on the standard `/issues` payload — no
+# extra API call) to an array of USERNAME strings, mirroring `labels`.
 _itp_gitlab_normalize_issue_row() {
   jq '
     [ .[] | {
         number: (.iid // 0),
         title:  (.title // ""),
         labels: (.labels // []),
+        assignees: [ (.assignees // [])[].username ],
         comments: []
       }
     ] | sort_by(.number)
@@ -215,7 +219,9 @@ itp_gitlab_count_by_state() {
 #
 # Spec §3.1 [W1a] / [INV-25]. GitLab's `not[labels]=X` is useful but
 # insufficient for an intersection-of-incompatible-sets — enumerate then
-# apply the SAME jq combo filter as the GitHub leaf. Fields: `number,labels`.
+# apply the SAME jq combo filter as the GitHub leaf. Fields:
+# `number,labels,assignees` ([#435, ISSUE_FILTER PR-A] — widened
+# unconditionally, mirroring the GitHub leaf).
 itp_gitlab_list_forbidden_combos() {
   local state="$1" labels_csv="$2" limit="$3"
   local raw normalized
@@ -227,7 +233,7 @@ itp_gitlab_list_forbidden_combos() {
         (.labels | any(. == "approved" or . == "stalled"))
         and
         (.labels | any(. == "in-progress" or . == "reviewing" or . == "pending-review" or . == "pending-dev"))
-      ) | {number, labels}
+      ) | {number, labels, assignees}
     ]
   '
 }
