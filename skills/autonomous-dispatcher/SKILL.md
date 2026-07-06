@@ -74,7 +74,7 @@ DISPATCHER_APP_PEM=<absolute path to PEM>
 
 If any of those are missing, or if token generation fails, the tick exits 1 with a `FATAL` message — there is no silent fallback to user auth.
 
-The token is valid for 1 hour and scoped to the target repo only. `dispatcher-tick.sh` typically completes in well under a minute, so a single token covers the whole tick. When `GH_AUTH_MODE=token` (default) or unset, the dispatcher uses whatever `GH_TOKEN` / `gh auth login` token the caller provides.
+The token is valid for 1 hour and scoped to the target repo only. `dispatcher-tick.sh` typically completes in well under a minute, so a single token covers the whole tick. When `GH_AUTH_MODE=token` (default) or unset, the dispatcher uses whatever token the caller provides through the code-host's standard channel — on GitHub, `GH_TOKEN` or a `gh auth login` session; on GitLab (`CODE_HOST=gitlab`), `GITLAB_TOKEN` or a `glab auth login` session. The `chp_*`/`itp_*` provider seams route through whichever is present.
 
 ## Dispatch Helpers
 

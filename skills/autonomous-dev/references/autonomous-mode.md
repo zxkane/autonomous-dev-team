@@ -18,6 +18,8 @@ When a decision would normally require user input:
 
 ## Posting Issue/PR Comments
 
+> **GitHub-lane operational rules (`CODE_HOST=github`).** The two-wrapper split and the "never bare `gh`" rule below apply verbatim to the GitHub lane, because the `bash scripts/gh …` and `bash scripts/gh-as-user.sh …` shims are GitHub-CLI wrappers. On the GitLab lane (`CODE_HOST=gitlab`), agents don't post comments directly at all: the wrapper and the `itp_post_comment` / `chp_pr_comment` provider seams handle every status, verdict, and trigger post — including the two-identity split (bot vs. host user) under the equivalent GitLab auth modes. When your prompt is running under `CODE_HOST=gitlab`, ignore the `bash scripts/gh …` commands in this section and defer to the wrapper-supplied helpers in your prompt.
+
 In autonomous mode there are **two** wrappers, and they are not interchangeable. Pick the right one or your comment is attributed to the wrong identity.
 
 | Comment purpose | Wrapper to use | Resulting identity |
@@ -52,6 +54,8 @@ bash scripts/gh api user --jq .login
 ```
 
 ## Resume Awareness
+
+> **GitHub-lane examples below (`CODE_HOST=github`).** The `gh issue view` / `gh pr list` / `gh api …/pulls/…/comments` calls are the GitHub concrete forms of "read issue body", "find open PR linked to issue", "fetch inline review comments". On the GitLab lane (`CODE_HOST=gitlab`) these route through the `itp_read_task`, `chp_find_pr_for_issue`, and `chp_list_inline_comments` provider seams — the wrapper hands you the resolved data (or the seam call, whichever the prompt injects); don't hand-roll the `glab` / REST equivalents.
 
 On resume (or new session for a previously started issue), perform these checks before writing code:
 
@@ -155,6 +159,8 @@ git commit -m "apply: pre-existing workspace changes from issue #<number>"
 **Error handling**: If cherry-pick or apply fails due to conflicts, log a warning in the issue comment and proceed with normal development. If the branch does not exist, skip silently.
 
 ## Bot Review Integration
+
+> **GitHub-lane section (`CODE_HOST=github`).** The built-in bots (Amazon Q, Codex, Claude) are GitHub App bots; `bash scripts/gh-as-user.sh` and the `gh api …/pulls/…/reviews` polling loop below are GitHub-CLI wrappers. On the GitLab lane (`CODE_HOST=gitlab`) the equivalents are configured via the project's own bot roster (see `docs/gitlab-setup.md` and `REVIEW_BOTS_<NAME>_*` variables) and drive comments through the `chp_pr_comment` / `chp_count_reviews_by_login` provider seams. If your prompt is running on the GitLab lane, defer to the wrapper-injected trigger/polling instructions.
 
 After creating a PR, trigger and handle each bot listed in the project's `REVIEW_BOTS` (per-project `autonomous.conf` setting). Empty `REVIEW_BOTS` means no bot is mandatory — skip this section.
 
