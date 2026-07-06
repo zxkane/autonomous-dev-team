@@ -90,6 +90,14 @@ assert_not_contains() {
   fi
 }
 
+# lib-issue-filter.sh calls itp_caps (the ITP seam's capability reader) from
+# issue_filter_validate's assignee-capability gate. Stub it before the lib
+# source (test-seam-source-meta.sh's harness rule, option ii: every verb of a
+# consumer lib's missing family must be stubbed BEFORE the lib source in this
+# shell context) — the real per-scenario definitions below override this
+# default as needed.
+itp_caps() { [[ "$1" == "assignees" ]] && echo 1 || echo 0; }
+
 # shellcheck source=../../skills/autonomous-dispatcher/scripts/lib-issue-filter.sh
 source "$LIB"
 set +e
