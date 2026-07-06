@@ -102,7 +102,7 @@ Triggered when running inside the `scripts/autonomous-dev.sh` wrapper. The workf
 
 ## Cross-Platform Notes
 
-This skill works across IDEs that support skills.sh. Map generic verbs in this doc to your IDE's tools (Claude Code's Bash → terminal in Cursor, etc.). Hook-based enforcement is available on Claude Code and Kiro CLI; on Cursor / Windsurf / Gemini CLI, follow each step manually — the discipline is the same.
+This skill works across IDEs that support skills.sh. Map generic verbs in this doc to your IDE's tools (Claude Code's Bash → terminal in Cursor, etc.). Hook-based enforcement is available on Claude Code and Kiro CLI; on Cursor / Windsurf, follow each step manually — the discipline is the same.
 
 For the full IDE table + verb-to-tool map, see [`references/cross-platform.md`](references/cross-platform.md).
 

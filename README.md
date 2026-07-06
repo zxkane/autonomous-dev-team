@@ -11,8 +11,8 @@ schedule.
   instance) via pluggable provider seams — see
   [GitLab support](#gitlab-support).
 - **Agent CLIs**: Claude Code, Codex CLI, Kiro CLI, opencode, Cursor Agent,
-  Gemini CLI, and most CLIs with a `-p <prompt>` non-interactive flag — see
-  [docs/agent-clis.md](docs/agent-clis.md).
+  Antigravity CLI (agy), and most CLIs with a `-p <prompt>` non-interactive
+  flag — see [docs/agent-clis.md](docs/agent-clis.md).
 
 ## Quick Start
 
@@ -30,7 +30,7 @@ npx skills add zxkane/autonomous-dev-team
 | **autonomous-common** | Shared workflow-enforcement hooks and agent-callable utility scripts |
 | **create-issue** | Structured issue creation with templates, autonomous label guidance, and workspace change attachment |
 
-Works with Claude Code, Cursor, Windsurf, Gemini CLI, Kiro CLI, and
+Works with Claude Code, Cursor, Windsurf, Antigravity, Kiro CLI, and
 [40+ agents](https://skills.sh). After installing, follow
 **[docs/installation.md](docs/installation.md)** for the post-install wiring
 (symlinks, plugins, `autonomous.conf`, labels) — it includes a copy-paste

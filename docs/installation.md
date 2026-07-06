@@ -57,8 +57,8 @@ test -f scripts/autonomous.conf.example && echo "scripts OK"
 > agent-callable utility scripts referenced by the skills (e.g.,
 > `scripts/gh-as-user.sh`).
 
-If your IDE has no hook support (Cursor, Windsurf, Gemini CLI), skip this
-step — the skills still work; you just enforce the workflow manually.
+If your IDE has no hook support (Cursor, Windsurf), skip this step — the
+skills still work; you just enforce the workflow manually.
 
 ## Step 3 — Enable required Claude Code plugins
 
@@ -94,7 +94,7 @@ wrapper invocation. Fill in these required values:
 | `REPO_OWNER`, `REPO_NAME` | Yes | Split form of `REPO` | Used for App-token scoping (GitHub). |
 | `PROJECT_DIR` | Yes | Absolute path to the project root on the dispatcher box | Where the agent runs. |
 | `ISSUE_PROVIDER`, `CODE_HOST` | No (default `github`) | `github` or `gitlab` | The two provider seams (issue tracker / code host). See [gitlab-setup.md](gitlab-setup.md) for the GitLab lane. |
-| `AGENT_CMD` | No (default `claude`) | `claude`, `codex`, `kiro`, `gemini`, or `opencode` | The CLI used to spawn dev/review agents. See [agent-clis.md](agent-clis.md) for per-CLI notes and resume semantics. |
+| `AGENT_CMD` | No (default `claude`) | `claude`, `codex`, `kiro`, `agy`, or `opencode` | The CLI used to spawn dev/review agents. See [agent-clis.md](agent-clis.md) for per-CLI notes and resume semantics. |
 | `AGENT_DEV_MODEL`, `AGENT_REVIEW_MODEL` | No (default empty / `sonnet`) | Model name passed to the agent CLI | Empty = let the CLI pick. The review model defaults to `sonnet` to keep review costs predictable. |
 | `AGENT_REVIEW_AGENTS` | No (default empty) | Space-separated CLI list (e.g. `agy kiro`) | Run **multiple** independent review agents and gate the merge on unanimous agreement. See [agent-clis.md](agent-clis.md#multiple-review-agents). |
 | `AGENT_PERMISSION_MODE` | No (default `auto`) | `auto`, `plan`, or `bypassPermissions` | `bypassPermissions` grants the agent unrestricted shell access — only use in a trusted sandbox. |

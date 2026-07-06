@@ -17,7 +17,7 @@ What differs between agents is **how to declare which script runs when** — i.e
 | **Antigravity** | `.antigravity/hooks.json` | Identical to Claude Code (undocumented) | `Bash` | `2` | `install-antigravity-hooks.sh` (PR-11a) |
 | **Cursor** | `.cursor/hooks.json` | Claude-style, camelCase events, `version: 1` envelope | `Shell` (or pipe regex on cmd) | `2` | `install-cursor-hooks.sh` (PR-11b) |
 | **Kiro CLI / Amazon Q** | `.kiro/agents/<name>.json` | Agent definition; camelCase events; `timeout_ms` (ms not seconds) | `execute_bash`, `fs_write` (Write+Edit unified) | `2` | `install-kiro-hooks.sh` (PR-11b) |
-| **Gemini CLI** | `.gemini/settings.json` | `BeforeTool`/`AfterTool` events; provides `$CLAUDE_PROJECT_DIR` env compat alias | `run_shell_command`, `write_file`, `replace` | `2` | `install-gemini-hooks.sh` (PR-11b) |
+| **Gemini CLI** ⚠️ retired | `.gemini/settings.json` | `BeforeTool`/`AfterTool` events; provides `$CLAUDE_PROJECT_DIR` env compat alias | `run_shell_command`, `write_file`, `replace` | `2` | `install-gemini-hooks.sh` (PR-11b) — kept for historical installs; Gemini CLI has been discontinued upstream, use Antigravity CLI (`agy`) instead |
 | **Codex CLI** | `.codex/hooks.json` + `[features]codex_hooks=true` in `config.toml` | Claude-style (modeled verbatim) | `Bash`, `Write`, `Edit` (undocumented but inferred) | `2` | `install-codex-hooks.sh` (PR-11b) |
 | **Windsurf** | `.windsurf/hooks.json` | snake_case events that fold matcher info; **no matcher field** on entries | event encodes the kind: `pre_run_command` (Bash) / `pre_write_code` (Write+Edit merged) / etc. | `2` | `install-windsurf-hooks.sh` (PR-11c) |
 | **Kimi CLI** | `~/.kimi/config.toml` (or `.kimi/config.toml` with `--project`) | TOML, `[[hooks]]` array of tables | exact / regex (`RunShell`, `WriteFile`, `StrReplaceFile`) | `2` | `install-kimi-hooks.sh` (PR-11c) |
@@ -42,7 +42,7 @@ bash .claude/skills/autonomous-common/scripts/install-cursor-hooks.sh
 # Kiro CLI / Amazon Q (default agent name is "default"; override with --agent <name>)
 bash .claude/skills/autonomous-common/scripts/install-kiro-hooks.sh
 
-# Gemini CLI
+# Gemini CLI (retired upstream — see the matrix note above; use Antigravity instead)
 bash .claude/skills/autonomous-common/scripts/install-gemini-hooks.sh
 
 # Codex CLI (also enables [features] codex_hooks = true in .codex/config.toml)

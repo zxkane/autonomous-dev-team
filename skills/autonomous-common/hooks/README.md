@@ -29,7 +29,7 @@ Kiro CLI supports hooks. Adapt the Claude Code hook configuration for Kiro's hoo
 
 ## Other IDEs
 
-IDEs without hook support (Cursor, Windsurf, Gemini CLI, etc.) rely on skill instructions for workflow enforcement. Follow each step in the autonomous-dev skill manually.
+IDEs without hook support (Cursor, Windsurf, etc.) rely on skill instructions for workflow enforcement. Follow each step in the autonomous-dev skill manually.
 
 ## Hook Reference
 
