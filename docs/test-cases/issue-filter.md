@@ -53,6 +53,9 @@ extensions to `tests/unit/test-lib-dispatch.sh` /
 | TC-IFILT-030 | `label` (bare token, missing `:value`) | rc≠0; error names the bare token `label` |
 | TC-IFILT-031 | `label:"team"a` (stray characters after a closing quote) | rc≠0; error names the malformed token — a typo after a quoted value must fail validation, not silently fall back to the unquoted literal `"team"a` |
 | TC-IFILT-032 | `assignee:"bob"x` (same class, `assignee:` key) | rc≠0; same rejection |
+| TC-IFILT-033 | `label:foo" bar"` (quote embedded mid-value, not immediately after `key:`) | rc≠0; error names the embedded quote — must fail-closed rather than reinterpreting the rest of the word as a second quoted segment |
+| TC-IFILT-034 | `"foo"` (quote with no `key:` prefix at all) | rc≠0; same embedded-quote rejection |
+| TC-IFILT-035 | `label:foo:"bar"` (a second colon precedes the quote — `buf` still ends in `:` but isn't the bare `key:`) | rc≠0; same embedded-quote rejection — a second colon must not let a literal `"` slip into the atom value |
 
 ### Reserved-label rejection (AC-B5, `issue_filter_validate`)
 

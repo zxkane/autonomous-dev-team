@@ -90,6 +90,18 @@ _issue_filter_tokenize() {
         break
       fi
       if [[ "$c" == '"' ]]; then
+        # A quote only opens a value when it immediately follows the token's
+        # FIRST (and only) colon — i.e. buf is exactly "key:" with nothing
+        # consumed since. A second colon before the quote (e.g.
+        # `label:foo:"bar"`) means buf still ends in ':' but is NOT a bare
+        # "key:" — it would let a literal `"` slip into the atom value. A `"`
+        # anywhere else in the word (e.g. `label:foo" bar"`) is likewise an
+        # embedded quote with no escape mechanism — reject both rather than
+        # reinterpreting the rest of the word as a second quoted segment.
+        if [[ ! "$buf" =~ ^[^:]+:$ ]]; then
+          echo "issue_filter_compile: unexpected embedded quote in '${buf}\"...'" >&2
+          return 1
+        fi
         # Opening quote: consume through the NEXT `"`. Embedded `"` is
         # unsupported (no escape mechanism) — the first closing quote wins.
         local qbuf="" closed=0

@@ -209,6 +209,9 @@ assert_fail_contains "TC-IFILT-029 unterminated quote" "unterminated" issue_filt
 assert_fail_contains "TC-IFILT-030 bare token" "label" issue_filter_compile "label"
 assert_fail_contains "TC-IFILT-031 trailing chars after quoted value" 'label:"team"a' issue_filter_compile 'label:"team"a'
 assert_fail_contains "TC-IFILT-032 trailing chars after quoted assignee value" 'assignee:"bob"x' issue_filter_compile 'assignee:"bob"x'
+assert_fail_contains "TC-IFILT-033 embedded quote inside unquoted value" "embedded quote" issue_filter_compile 'label:foo" bar"'
+assert_fail_contains "TC-IFILT-034 embedded quote with no key prefix" "embedded quote" issue_filter_compile '"foo"'
+assert_fail_contains "TC-IFILT-035 second colon before quote lets a literal \" slip in" "embedded quote" issue_filter_compile 'label:foo:"bar"'
 
 # ---------------------------------------------------------------------------
 echo ""
