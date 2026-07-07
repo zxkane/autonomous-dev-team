@@ -285,16 +285,18 @@ _agy_known_model() {
     if listing=$("${AGENT_CMD:-agy}" models 2>/dev/null) && [[ -n "$listing" ]]; then
       _LIB_AGENT_AGY_MODELS_CACHE="$listing"
     else
-      _LIB_AGENT_AGY_MODELS_CACHE=$'\x01enum-failed\x01'   # sentinel
+      _LIB_AGENT_AGY_MODELS_CACHE=$'\x01__ENUM_FAILED__\x01'   # \x01-wrapped: readable yet un-typeable, no real listing can collide
     fi
     export _LIB_AGENT_AGY_MODELS_CACHE
   fi
-  [[ "$_LIB_AGENT_AGY_MODELS_CACHE" == $'\x01enum-failed\x01' ]] && return 2  # can't validate
+  [[ "$_LIB_AGENT_AGY_MODELS_CACHE" == $'\x01__ENUM_FAILED__\x01' ]] && return 2  # can't validate
+  model="${model//[[:cntrl:]]/}"   # strip control chars: grep -Fxq splits on \n; a \r could whole-line-match a CRLF listing
   printf '%s\n' "$_LIB_AGENT_AGY_MODELS_CACHE" | grep -Fxq -- "$model"
 }
 
 _agy_build_model_args() {
   local model="$1" out_name="$2"
+  model="${model//[[:cntrl:]]/}"   # strip up-front so the SAME clean value is validated AND forwarded (same [[:cntrl:]] class as _agy_known_model + INV-60)
   eval "$out_name=()"
   [[ -n "$model" ]] || return 0
   _agy_known_model "$model"
@@ -312,7 +314,19 @@ _agy_build_model_args() {
 `grep -Fxq` is load-bearing: model names contain spaces and parens, so a
 fixed-string (`-F`) whole-line (`-x`) match keeps `"Gemini 3.5 Flash
 (High)"` literal and ensures a prefix (`"Gemini 3.5 Flash"`) or a string
-with regex metachars never matches. The return-code 2 sentinel keeps
+with regex metachars never matches. The resolved id is **control-char-stripped
+before it is validated or forwarded** (`model="${model//[[:cntrl:]]/}"` — a
+newline *and* a carriage return): a multi-line value otherwise smuggles its way
+past `grep -Fxq`, which treats each line of the *pattern* as a separate
+fixed-string, so `"EVIL\nGemini 3.5 Flash (High)"` would match the legitimate
+listing line and validate — then forward the raw composite to agy's `--model`;
+a trailing `\r` would likewise whole-line-match a CRLF listing yet survive into
+the argv. Both functions strip the SAME `[[:cntrl:]]` class —
+`_agy_build_model_args` up-front so the same clean value is both validated and
+forwarded, the strip in `_agy_known_model` guards any direct caller — mirroring
+the [INV-60](invariants.md#inv-60-the-review-model-is-shown-inline-on-every-verdict-comments-review-agent-line)
+`[[:cntrl:]]` guard in `post-verdict.sh` so the two model sites agree. The
+return-code 2 sentinel keeps
 "can't validate" distinct from "validated as unknown" so the two collapse
 to *forward* vs. *omit+WARN* respectively. `_LIB_AGENT_AGY_MODEL_WARNED`
 is repurposed from the old warn-and-ignore guard to the new
