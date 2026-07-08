@@ -835,7 +835,16 @@ for i in $(seq 0 $((cand_count - 1))); do
       _defer_max_age="$(_defer_marker_max_age)"
       if [[ "${PID_ALIVE_LAST_DEFERRED_AGE:-}" =~ ^[0-9]+$ ]] && [ "$PID_ALIVE_LAST_DEFERRED_AGE" -ge "$_defer_max_age" ]; then
         log "  issue #${issue_num} (${kind}) dispatch DEFERRED verdict has EXPIRED (age=${PID_ALIVE_LAST_DEFERRED_AGE}s >= ${_defer_max_age}s) — reverting label (not a crash), no comment, no retry decrement ([#444, B1])"
-        _revert_defer_strand "$issue_num" "$kind"
+        # [review P1, #444] _revert_defer_strand's own rc is checked (not
+        # swallowed) — a failed revert (code host still unreachable) still
+        # `continue`s (this stays a defer, never a crash, regardless), but
+        # the failure is logged so it's operator-visible and so it's clear
+        # the label may STILL be stranded; the SAME EXPIRED verdict simply
+        # recomputes and retries on the very next tick since nothing here
+        # persists a "handled" signal for the remote path to consume.
+        if ! _revert_defer_strand "$issue_num" "$kind"; then
+          log "  issue #${issue_num} (${kind}) EXPIRED remote DEFERRED revert FAILED — label may still be stranded; will retry next tick ([#444, B1, review P1])"
+        fi
       else
         log "  issue #${issue_num} (${kind}) dispatch DEFERRED by the wrapper host's back-pressure gate (age=${PID_ALIVE_LAST_DEFERRED_AGE:-?}s) — not a crash, no label change, no retry decrement ([Lane-GC PR-6 / INV-119])"
       fi
@@ -862,8 +871,20 @@ for i in $(seq 0 $((cand_count - 1))); do
           ;;
         EXPIRED)
           log "  issue #${issue_num} (${kind}) has an EXPIRED local defer marker — reverting label (not a crash), no comment, no retry decrement ([#444, B1])"
-          _revert_defer_strand "$issue_num" "$kind"
-          rm -f "$(_local_defer_marker_path "$kind" "$issue_num")" 2>/dev/null || true
+          # [review P1, #444] Only consume (remove) the defer marker AFTER a
+          # CONFIRMED label revert. If the code host is still unreachable
+          # (the same condition that stranded the label in the first place
+          # may still hold), removing the marker here would delete the one
+          # signal a LATER tick uses to know this is a defer, not a crash —
+          # once connectivity returns, that later tick would fall straight
+          # into the normal crash-declare branch for what was always a
+          # defer. Leaving the (still-EXPIRED) marker in place means this
+          # SAME branch simply re-attempts the revert next tick instead.
+          if _revert_defer_strand "$issue_num" "$kind"; then
+            rm -f "$(_local_defer_marker_path "$kind" "$issue_num")" 2>/dev/null || true
+          else
+            log "  issue #${issue_num} (${kind}) EXPIRED local defer revert FAILED — marker kept for a retry next tick, label may still be stranded ([#444, B1, review P1])"
+          fi
           continue
           ;;
       esac

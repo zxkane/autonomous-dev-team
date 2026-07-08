@@ -1186,6 +1186,18 @@ touch -d "@$((NOW153C + 1000))" "$LANE_DIR153C/.defer-issue-153"
 VERDICT153C=$(ADT_STATE_ROOT="$STATE153C" PROJECT_ID=lgc6-150 _local_defer_marker_verdict issue 153)
 assert_eq "TC-LGC6-153c: future-mtime defer marker (clock skew) -> EXPIRED (never misclassified as FRESH)" "EXPIRED" "$VERDICT153C"
 
+# TC-LGC6-153d/e: [review P1, #444] _revert_defer_strand's own return code —
+# driven directly (not through the Step 5 loop harness) against a
+# succeeding vs. a failing `label_swap`, proving the function itself
+# propagates the outcome rather than swallowing it with a bare `|| true`.
+label_swap() { return 0; }
+_revert_defer_strand 9153 issue
+assert_eq "TC-LGC6-153d: _revert_defer_strand returns 0 when label_swap succeeds" "0" "$?"
+
+label_swap() { return 1; }
+_revert_defer_strand 9153 issue >/dev/null 2>&1
+assert_eq "TC-LGC6-153e: _revert_defer_strand returns non-zero when label_swap FAILS (the exact P1 regression: a prior draft always returned 0 here)" "1" "$?"
+
 # End-to-end through dispatcher-tick.sh's Step 5 loop body — reuses the
 # SAME $STEP5_BODY extraction TC-LGC6-110 already captured above (identical
 # awk range, same file — no need for a second extraction) — EXPIRED reverts
@@ -1208,7 +1220,7 @@ fi
 # local vs. none for remote) and the pid_alive stub itself vary between the
 # two call sites.
 _run_step5_loop_harness() {
-  local env_setup_lines="$1" pid_alive_stub_line="$2"
+  local env_setup_lines="$1" pid_alive_stub_line="$2" label_swap_stub="${3:-}"
   local harness="$TMPROOT/harness-step5-$$-$RANDOM.sh"
   {
     echo '#!/bin/bash'
@@ -1223,7 +1235,15 @@ _run_step5_loop_harness() {
     echo 'was_just_dispatched() { return 1; }'
     echo 'is_within_grace_period() { return 1; }'
     echo 'itp_post_comment() { POSTED=$((POSTED + 1)); }'
-    echo 'label_swap() { LABEL_SWAPS=$((LABEL_SWAPS + 1)); }'
+    # [review P1, #444] default stub always succeeds; a per-test override
+    # (3rd arg) lets a caller simulate a FAILED revert (unreachable code
+    # host) to prove _revert_defer_strand's failure propagates instead of
+    # being swallowed.
+    if [[ -n "$label_swap_stub" ]]; then
+      printf '%s\n' "$label_swap_stub"
+    else
+      echo 'label_swap() { LABEL_SWAPS=$((LABEL_SWAPS + 1)); }'
+    fi
     echo 'count_retries() { RETRY_CALLS=$((RETRY_CALLS + 1)); echo 0; }'
     printf '%s\n' "$pid_alive_stub_line"
     echo 'get_pid() { echo ""; }'
@@ -1247,12 +1267,13 @@ _run_step5_loop_harness() {
 }
 
 _run_step5_b1_harness() {
-  local state_root="$1"
+  local state_root="$1" label_swap_stub="${2:-}"
   _run_step5_loop_harness \
     "ADT_STATE_ROOT='$state_root'
 PROJECT_ID=lgc6-150
 EXECUTION_BACKEND=local" \
-    'pid_alive() { PID_ALIVE_LAST_VERDICT=""; PID_ALIVE_LAST_DEFERRED_AGE=""; return 1; }'
+    'pid_alive() { PID_ALIVE_LAST_VERDICT=""; PID_ALIVE_LAST_DEFERRED_AGE=""; return 1; }' \
+    "$label_swap_stub"
 }
 
 # TC-LGC6-155: EXPIRED marker -> revert (LABEL_SWAPS=1), no comment, no
@@ -1294,16 +1315,55 @@ assert_contains "TC-LGC6-157b: counter-test — no marker at all falls through t
 
 # ===========================================================================
 echo ""
+echo "=== TC-LGC6-158/159: [#444, B1, review P1] EXPIRED local defer — FAILED revert must NOT consume the marker ==="
+# ===========================================================================
+# Regression for the review's blocking P1: a prior draft's _revert_defer_strand
+# swallowed label_swap's failure (bare `|| true`), so this caller removed the
+# defer marker unconditionally — even when the revert itself did not happen.
+# Once the code host became reachable again, a LATER tick would then find NO
+# marker at all and misclassify the still-stranded label as a genuine crash
+# (false crash comment + retry burn), for what was always just a defer.
+STATE158="$TMPROOT/state158"; LANE_DIR158="$STATE158/autonomous-lgc6-150/lanes"
+mkdir -p "$LANE_DIR158"
+NOW158=$(date -u +%s)
+touch -d "@$((NOW158 - 1000))" "$LANE_DIR158/.attempt-issue-9999" "$LANE_DIR158/.defer-issue-9999"
+OUT158=$(_run_step5_b1_harness "$STATE158" 'label_swap() { LABEL_SWAPS=$((LABEL_SWAPS + 1)); return 1; }')
+assert_contains "TC-LGC6-158: EXPIRED local defer + FAILED revert -> attempts the revert (LABEL_SWAPS still incremented by the attempt)" "LABEL_SWAPS=1" "$OUT158"
+assert_contains "TC-LGC6-158b: EXPIRED local defer + FAILED revert -> still posts NO crash comment" "POSTED=0" "$OUT158"
+assert_contains "TC-LGC6-158c: EXPIRED local defer + FAILED revert -> still NO retry-budget decrement" "RETRY_CALLS=0" "$OUT158"
+if [[ -f "$LANE_DIR158/.defer-issue-9999" ]]; then
+  assert_pass "TC-LGC6-158d: marker is KEPT (not consumed) after a FAILED revert — a later tick can retry once the code host is reachable"
+else
+  assert_fail "TC-LGC6-158d: marker was removed despite the revert FAILING — this is the exact P1 regression (stranded label with no defer signal left)"
+fi
+
+# Counter-test proving 158 isn't vacuous: the SAME EXPIRED marker with a
+# SUCCEEDING revert still removes the marker (TC-LGC6-155's own assertion,
+# re-affirmed here alongside 158 for direct side-by-side contrast).
+STATE159="$TMPROOT/state159"; LANE_DIR159="$STATE159/autonomous-lgc6-150/lanes"
+mkdir -p "$LANE_DIR159"
+NOW159=$(date -u +%s)
+touch -d "@$((NOW159 - 1000))" "$LANE_DIR159/.attempt-issue-9999" "$LANE_DIR159/.defer-issue-9999"
+OUT159=$(_run_step5_b1_harness "$STATE159")
+if [[ -f "$LANE_DIR159/.defer-issue-9999" ]]; then
+  assert_fail "TC-LGC6-159: counter-test — marker should be removed after a SUCCEEDING revert (proves 158 is gating on the revert outcome, not something else)"
+else
+  assert_pass "TC-LGC6-159: counter-test — marker removed after a SUCCEEDING revert (proves 158d is gating on the revert outcome)"
+fi
+
+# ===========================================================================
+echo ""
 echo "=== TC-LGC6-160/161: [#444, B1 edit 2] remote DEFERRED fast-return gains an age bound ==="
 # ===========================================================================
 # Same shared Step 5 loop-body harness as TC-LGC6-155/156/157, but this time
 # pid_alive sets the REMOTE side channel (PID_ALIVE_LAST_VERDICT=DEFERRED)
 # with an age at/above vs. below DEFER_MARKER_MAX_AGE_SECONDS.
 _run_step5_b1_remote_harness() {
-  local age="$1"
+  local age="$1" label_swap_stub="${2:-}"
   _run_step5_loop_harness \
     "PROJECT_ID=lgc6-160" \
-    "pid_alive() { PID_ALIVE_LAST_VERDICT=DEFERRED; PID_ALIVE_LAST_DEFERRED_AGE=$age; return 1; }"
+    "pid_alive() { PID_ALIVE_LAST_VERDICT=DEFERRED; PID_ALIVE_LAST_DEFERRED_AGE=$age; return 1; }" \
+    "$label_swap_stub"
 }
 
 # TC-LGC6-160: age >= 900 (default threshold) -> revert-not-crash (label
@@ -1317,6 +1377,20 @@ assert_contains "TC-LGC6-160c: remote DEFERRED age>=threshold -> NO retry-budget
 OUT161=$(_run_step5_b1_remote_harness 45)
 assert_contains "TC-LGC6-161: remote DEFERRED age<threshold -> NO label change (today's fast-return)" "LABEL_SWAPS=0" "$OUT161"
 assert_contains "TC-LGC6-161b: remote DEFERRED age<threshold -> posts NO comment" "POSTED=0" "$OUT161"
+
+# TC-LGC6-162: [#444, B1 edit 2, review P1] age >= threshold + FAILED revert —
+# same failure-propagation regression as TC-LGC6-158, remote side. This path
+# has no marker to (mis)consume (the remote side channel is transient, reset
+# every `pid_alive` call, [INV-119]'s own point 3) — so the observable
+# contract is narrower than the local side's TC-LGC6-158d: a failed revert
+# must still never post a crash comment or decrement retry budget (the event
+# is still a defer, not a crash); `_revert_defer_strand`'s own rc is now
+# checked rather than swallowed (see the `if ! _revert_defer_strand` guard in
+# dispatcher-tick.sh), which is what this test pins.
+OUT162=$(_run_step5_b1_remote_harness 900 'label_swap() { LABEL_SWAPS=$((LABEL_SWAPS + 1)); return 1; }')
+assert_contains "TC-LGC6-162: remote DEFERRED age>=threshold + FAILED revert -> attempts the revert" "LABEL_SWAPS=1" "$OUT162"
+assert_contains "TC-LGC6-162b: remote DEFERRED age>=threshold + FAILED revert -> still posts NO crash comment" "POSTED=0" "$OUT162"
+assert_contains "TC-LGC6-162c: remote DEFERRED age>=threshold + FAILED revert -> still NO retry-budget decrement" "RETRY_CALLS=0" "$OUT162"
 
 # ===========================================================================
 echo ""

@@ -148,9 +148,13 @@ machine under `EXECUTION_BACKEND=local`).
 | TC-LGC6-151 | Marker older than `DEFER_MARKER_MAX_AGE_SECONDS` (default 900), not superseded | `EXPIRED` |
 | TC-LGC6-152 | Marker superseded by a later `.attempt-<kind>-<N>` token | `NONE` (never shadows a newer attempt) |
 | TC-LGC6-153 | No marker at all | `NONE` |
+| TC-LGC6-153d | `_revert_defer_strand`, `label_swap` stubbed to succeed | returns 0 |
+| TC-LGC6-153e | `_revert_defer_strand`, `label_swap` stubbed to FAIL | returns non-zero (propagates the failure — the exact review P1 regression: a prior draft always returned 0 via a bare `\|\| true`) |
 | TC-LGC6-155 | End-to-end (Step 5 loop body extracted + driven): EXPIRED marker | label reverted exactly once; NO crash comment; NO retry decrement; stale marker removed |
 | TC-LGC6-156 | Same harness: FRESH marker | NO label change; NO comment; marker left in place |
 | TC-LGC6-157 | Counter-test: no marker at all | falls through to the pre-existing crash-declare (posts + flips) — proves 155/156 aren't vacuous |
+| TC-LGC6-158 | **[review P1]** Same EXPIRED-marker scenario as TC-LGC6-155, but `label_swap` stubbed to FAIL | revert attempted; NO crash comment; NO retry decrement; but the stale marker is KEPT (not consumed) so a later tick retries once the code host is reachable |
+| TC-LGC6-159 | Counter-test: same scenario, `label_swap` succeeds | stale marker IS removed — proves TC-LGC6-158 is gating on the revert's own outcome, not something else |
 
 ## [#444] Remote DEFERRED fast-return age bound (B1 edit 2)
 
@@ -164,6 +168,7 @@ change.
 |----|----------|----------|
 | TC-LGC6-160 | `PID_ALIVE_LAST_VERDICT=DEFERRED`, age ≥ `DEFER_MARKER_MAX_AGE_SECONDS` | reverts the label exactly once; NO comment; NO retry decrement |
 | TC-LGC6-161 | Same, age < threshold | today's fast-return: NO label change; NO comment |
+| TC-LGC6-162 | **[review P1]** Same age ≥ threshold scenario, `label_swap` stubbed to FAIL | revert attempted; still NO crash comment; still NO retry decrement (no marker to consume on this side-channel path) |
 
 ## Hygiene
 

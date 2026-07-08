@@ -3780,6 +3780,18 @@ handle_dispatch_deferred() {
 # expired defer), observed on a LATER tick instead of synchronously by the
 # dispatching tick itself. Same posture as handle_dispatch_deferred: no
 # comment, no retry-budget decrement — only the label revert.
+#
+# [review P1, #444] Returns `label_swap`'s own exit status — it must NOT
+# swallow a failure with a trailing `|| true` the way `handle_dispatch_deferred`
+# does. That function's own `|| true` is safe because it has nothing left to
+# gate on the outcome (it always releases the dispatch marker regardless).
+# This function's callers DO have something to gate: the local-backend
+# caller only removes the (still-authoritative) `.defer-*` marker after a
+# confirmed revert, and both callers only log "reverted" when it actually
+# was. Swallowing the failure here previously let the local-backend caller
+# delete the marker unconditionally, discarding the one signal that would
+# have let a later tick — once the code host is reachable again — retry the
+# revert instead of misclassifying the still-stranded label as a crash.
 _revert_defer_strand() {
   local issue_num="$1" kind="$2" revert_from revert_to
   if [ "$kind" = "issue" ]; then
@@ -3787,7 +3799,11 @@ _revert_defer_strand() {
   else
     revert_from="reviewing"; revert_to="pending-review"
   fi
-  label_swap "$issue_num" "$revert_from" "$revert_to" 2>/dev/null || true
+  if label_swap "$issue_num" "$revert_from" "$revert_to" 2>/dev/null; then
+    return 0
+  fi
+  echo "[lib-dispatch] WARN: expired-defer label-revert failed for issue #${issue_num} (${revert_from} -> ${revert_to}) — label may still be stranded; will retry next tick" >&2
+  return 1
 }
 
 # _local_defer_marker_verdict <kind> <issue_num>
