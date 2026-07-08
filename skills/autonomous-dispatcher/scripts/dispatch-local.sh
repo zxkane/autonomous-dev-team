@@ -400,23 +400,38 @@ _gate_revert_label() {
     *)      return 0 ;;
   esac
 
-  source "${LIB_DIR}/lib-issue-provider.sh" 2>/dev/null || true
+  # Everything below runs inside a SUBSHELL. `itp_github_transition_state`
+  # (and, in app-auth mode, the token-mint helper) reference `$REPO`/
+  # `$REPO_OWNER`/`$REPO_NAME` with no `:-` default — under a minimal conf
+  # that omits `REPO`, expanding an unset var trips THIS script's own
+  # `set -euo pipefail` and ABORTS THE WHOLE PROCESS, defeating the
+  # "fail-open, unconditionally" contract: a trailing `2>/dev/null || true`
+  # on a direct function call only catches an ordinary nonzero RETURN — it
+  # cannot catch `set -e` unwinding the entire script, which happens before
+  # the `|| true` ever gets control (verified empirically: `foo 2>/dev/null
+  # || true` does NOT survive `foo` referencing an unset var under `set -u`).
+  # A subshell boundary is what actually contains that: its own fatal exit
+  # only ends the subshell, and its exit status reaches the `if` below as an
+  # ordinary nonzero return.
+  if (
+    source "${LIB_DIR}/lib-issue-provider.sh" 2>/dev/null || true
 
-  # One-shot GitHub App token mint (app mode only) — never the
-  # daemon-spawning setup_github_auth. Best-effort: a failed mint just
-  # means the subsequent itp_transition_state call relies on ambient `gh`
-  # credentials (may also fail, which is fine — fail-open).
-  if [[ "${GH_AUTH_MODE:-token}" == "app" ]] && [[ -n "${DISPATCHER_APP_ID:-}" ]] && [[ -n "${DISPATCHER_APP_PEM:-}" ]]; then
-    source "${LIB_DIR}/gh-app-token.sh" 2>/dev/null || true
-    if declare -F get_gh_app_token >/dev/null 2>&1; then
-      local _revert_owner="${REPO_OWNER:-${REPO%%/*}}" _revert_name="${REPO_NAME:-${REPO##*/}}" _revert_token
-      _revert_token="$(get_gh_app_token "$DISPATCHER_APP_ID" "$DISPATCHER_APP_PEM" "$_revert_owner" "$_revert_name" 2>/dev/null || true)"
-      [[ -n "$_revert_token" ]] && export GH_TOKEN="$_revert_token"
+    # One-shot GitHub App token mint (app mode only) — never the
+    # daemon-spawning setup_github_auth. Best-effort: a failed mint just
+    # means the subsequent itp_transition_state call relies on ambient `gh`
+    # credentials (may also fail, which is fine — fail-open).
+    if [[ "${GH_AUTH_MODE:-token}" == "app" ]] && [[ -n "${DISPATCHER_APP_ID:-}" ]] && [[ -n "${DISPATCHER_APP_PEM:-}" ]]; then
+      source "${LIB_DIR}/gh-app-token.sh" 2>/dev/null || true
+      if declare -F get_gh_app_token >/dev/null 2>&1; then
+        _revert_owner="${REPO_OWNER:-${REPO%%/*}}"; _revert_name="${REPO_NAME:-${REPO##*/}}"
+        _revert_token="$(get_gh_app_token "$DISPATCHER_APP_ID" "$DISPATCHER_APP_PEM" "$_revert_owner" "$_revert_name" 2>/dev/null || true)"
+        [[ -n "$_revert_token" ]] && export GH_TOKEN="$_revert_token"
+      fi
     fi
-  fi
 
-  if declare -F itp_transition_state >/dev/null 2>&1 \
-     && itp_transition_state "$ISSUE_NUM" "$revert_from" "$revert_to" 2>/dev/null; then
+    declare -F itp_transition_state >/dev/null 2>&1 \
+      && itp_transition_state "$ISSUE_NUM" "$revert_from" "$revert_to"
+  ) 2>/dev/null; then
     echo "[dispatch-local] INFO: defer label-revert succeeded for issue ${ISSUE_NUM} (${revert_from} -> ${revert_to})" >&2
   else
     echo "[dispatch-local] WARN: defer label-revert failed for issue ${ISSUE_NUM} — label may be stranded until the next tick" >&2

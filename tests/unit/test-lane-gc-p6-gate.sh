@@ -1032,6 +1032,69 @@ fi
 
 # ===========================================================================
 echo ""
+echo "=== TC-LGC6-143b: [#444, A2] fail-open — REPO unset triggers an unbound-variable set -u abort INSIDE the revert, gate still exits 75 ==="
+# ===========================================================================
+# Regression for a real bug in an earlier draft of _gate_revert_label: a
+# bare `itp_transition_state ... 2>/dev/null || true` does NOT survive
+# itp_github_transition_state's `gh issue edit ... --repo "$REPO"`
+# expanding an UNSET $REPO under this script's own `set -euo pipefail` —
+# that trips a fatal unbound-variable exit that unwinds the WHOLE dispatch-
+# local.sh process before the `|| true` ever gets a chance to catch it
+# (`2>/dev/null || true` on a direct call only catches an ordinary nonzero
+# RETURN, not `set -e` terminating the process). The fix wraps the revert
+# body in a subshell `( ... ) 2>/dev/null` — a fatal exit inside the
+# subshell only ends THAT subshell, and its exit status reaches the `if`
+# as an ordinary nonzero return. This fixture deliberately OMITS REPO from
+# autonomous.conf (unlike _mk_fixture_project's normal conf) to reproduce
+# the exact unbound-variable trigger.
+PROJ143B="$TMPROOT/proj-revert-143b"
+mkdir -p "$PROJ143B/scripts"
+cat > "$PROJ143B/scripts/autonomous-dev.sh" <<'STUB'
+#!/bin/bash
+sleep 5
+STUB
+chmod +x "$PROJ143B/scripts/autonomous-dev.sh"
+cp "$PROJ143B/scripts/autonomous-dev.sh" "$PROJ143B/scripts/autonomous-review.sh"
+cat > "$PROJ143B/scripts/autonomous.conf" <<CONF
+PROJECT_ID="gatetest143b"
+PROJECT_DIR="$PROJ143B"
+AGENT_CMD="claude"
+GH_AUTH_MODE="token"
+CONF
+for lf in dispatch-local.sh lib-config.sh lib-lane.sh; do
+  ln -sf "$SCRIPTS/$lf" "$PROJ143B/scripts/$lf"
+done
+STATE143B="$TMPROOT/state-revert-143b"
+BIN143B="$TMPROOT/bin-revert-143b"
+mkdir -p "$BIN143B"
+cat > "$BIN143B/gh" <<'EOF'
+#!/bin/bash
+exit 0
+EOF
+chmod +x "$BIN143B/gh"
+# `env -u` strips REPO/REPO_OWNER/REPO_NAME explicitly — an EARLIER test
+# block in this same file (TC-LGC6-050) `export`s REPO into this shared
+# test-runner shell, which would otherwise leak into the child `bash -c`
+# below and silently defeat the very scenario this test exists to
+# reproduce (REPO genuinely absent from the fixture's own autonomous.conf).
+OUT143B=$(
+  env -u REPO -u REPO_OWNER -u REPO_NAME \
+  PATH="$BIN143B:$PATH" \
+  ADT_STATE_ROOT="$STATE143B" \
+  _GATE_LOAD1_PER_CORE_OVERRIDE="99" \
+  bash -c "cd '$PROJ143B' && bash scripts/dispatch-local.sh dev-new 9024" 2>&1
+)
+RC143B=$?
+assert_eq "TC-LGC6-143b: unset REPO -> exit still 75 (not 1 from an unbound-variable abort)" "75" "$RC143B"
+assert_contains "TC-LGC6-143b: one WARN naming the failed revert" "WARN: defer label-revert failed for issue 9024" "$OUT143B"
+if [[ -f "$STATE143B/autonomous-gatetest143b/lanes/.defer-issue-9024" ]]; then
+  assert_pass "TC-LGC6-143b: defer marker still written despite the unset-REPO abort inside the revert"
+else
+  assert_fail "TC-LGC6-143b: defer marker NOT written"
+fi
+
+# ===========================================================================
+echo ""
 echo "=== TC-LGC6-144: [#444, A2+dispatcher] idempotence — a second revert via handle_dispatch_deferred also succeeds ==="
 # ===========================================================================
 # After the gate's own revert lands (in-progress -> pending-dev), a SEPARATE
