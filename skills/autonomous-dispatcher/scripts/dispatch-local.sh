@@ -342,6 +342,86 @@ _gate_check_signals() {
 # therefore scoped precisely to THIS function's own admission-decision
 # code — never a claim about `adt-gc.sh`'s own, separately-invariant-
 # governed, reclaim-step side effects.
+# [#444, A2] _gate_revert_label — source-level defer revert. The gate is the
+# only process GUARANTEED to run for a deferred dispatch: the caller
+# (dispatcher-tick.sh, local backend) only observes rc=75 synchronously if
+# its OWN process survives the dispatch call, and under
+# EXECUTION_BACKEND=remote-aws-ssm the caller never observes rc=75 at all
+# (dispatch-remote-aws-ssm.sh returns 0 at SSM-accept). Relying exclusively
+# on a later tick to notice and repair the strand left #439/#440 stuck
+# in-progress for 10+ hours with no tick ever running again for that
+# project. So the gate reverts the label ITSELF, right here, before
+# `exit 75` — "the process that refuses the dispatch cleans up the
+# dispatch's side effects."
+#
+# Integration contract (reviewed against the real sourcing graph — see the
+# issue's "Exact integration contract"):
+#   - Sources ONLY lib-issue-provider.sh (it self-resolves its provider leaf
+#     via `readlink -f` of its own BASH_SOURCE) and calls itp_transition_state
+#     directly. Deliberately does NOT source lib-dispatch.sh for label_swap —
+#     that 3700+-line lib pulls further libs and has `:?`-guarded expansions
+#     that can abort under this script's `set -euo pipefail` when conf is
+#     minimal. label_swap is a one-line delegator to itp_transition_state
+#     anyway, so calling the verb directly loses nothing.
+#   - Fail-open, unconditionally: every source/call is `2>/dev/null || true`
+#     (or guarded by `declare -F`) so an unreachable code host, a missing
+#     provider file, or an auth failure NEVER changes the exit code — the
+#     gate still exits 75 with the defer marker written, and the
+#     pre-existing tick-side recovery (handle_dispatch_deferred /
+#     [B1] below) remains the fallback. One WARN to stderr on failure so the
+#     operator can see it happened.
+#   - REPO is already in scope (autonomous.conf, sourced at the top of this
+#     script) — itp_github_transition_state reads it directly, no extra
+#     sourcing needed.
+#   - Auth is one-shot, no daemon: in GH_AUTH_MODE=app, mint a single
+#     installation token via gh-app-token.sh (the same one-shot pattern
+#     dispatcher-tick.sh's own dep-lookup uses) and export GH_TOKEN for this
+#     one call. Deliberately does NOT call lib-auth.sh::setup_github_auth —
+#     that spawns a background token-refresh daemon + a `gh` wrapper dir
+#     that requires cleanup_github_auth, which would leak a daemon per
+#     defer (this function can run on every single deferred dispatch). In
+#     token mode, ambient `gh` credentials are relied on as-is.
+#
+# Revert mapping (per TYPE, spec-verified — see the issue body's "Notes on
+# the mapping"): dev-new/dev-resume revert to `pending-dev` (not bare
+# `autonomous`) — Step 4's scan-pending-dev picks it up with no session
+# comment, dev-resume dispatches with an empty SESSION_ID, and
+# autonomous-dev.sh normalizes resume+empty-session to MODE=new, so the
+# retry runs as a fresh dev with no double-dispatch window
+# (list_new_issues excludes pending-dev). review reverts to
+# `pending-review`.
+_gate_revert_label() {
+  local revert_from revert_to
+  case "$TYPE" in
+    dev-new|dev-resume) revert_from="in-progress"; revert_to="pending-dev" ;;
+    review)             revert_from="reviewing";   revert_to="pending-review" ;;
+    *)                  return 0 ;;
+  esac
+
+  source "${LIB_DIR}/lib-issue-provider.sh" 2>/dev/null || true
+
+  # One-shot GitHub App token mint (app mode only) — never the
+  # daemon-spawning setup_github_auth. Best-effort: a failed mint just
+  # means the subsequent itp_transition_state call relies on ambient `gh`
+  # credentials (may also fail, which is fine — fail-open).
+  if [[ "${GH_AUTH_MODE:-token}" == "app" ]] && [[ -n "${DISPATCHER_APP_ID:-}" ]] && [[ -n "${DISPATCHER_APP_PEM:-}" ]]; then
+    source "${LIB_DIR}/gh-app-token.sh" 2>/dev/null || true
+    if declare -F get_gh_app_token >/dev/null 2>&1; then
+      local _revert_owner="${REPO_OWNER:-${REPO%%/*}}" _revert_name="${REPO_NAME:-${REPO##*/}}" _revert_token
+      _revert_token="$(get_gh_app_token "$DISPATCHER_APP_ID" "$DISPATCHER_APP_PEM" "$_revert_owner" "$_revert_name" 2>/dev/null || true)"
+      [[ -n "$_revert_token" ]] && export GH_TOKEN="$_revert_token"
+    fi
+  fi
+
+  if declare -F itp_transition_state >/dev/null 2>&1 \
+     && itp_transition_state "$ISSUE_NUM" "$revert_from" "$revert_to" 2>/dev/null; then
+    echo "[dispatch-local] INFO: defer label-revert succeeded for issue ${ISSUE_NUM} (${revert_from} -> ${revert_to})" >&2
+  else
+    echo "[dispatch-local] WARN: defer label-revert failed for issue ${ISSUE_NUM} — label may be stranded until the next tick" >&2
+  fi
+  return 0
+}
+
 _admission_gate() {
   local reason
   if reason="$(_gate_check_signals)"; then
@@ -370,6 +450,7 @@ _admission_gate() {
   marker_root="${ADT_STATE_ROOT:-$HOME/.local/state}/autonomous-${PROJECT_ID}/lanes"
   mkdir -p "$marker_root" 2>/dev/null || true
   printf '%s\n' "$reason" > "${marker_root}/.defer-${GATE_KIND}-${ISSUE_NUM}" 2>/dev/null || true
+  _gate_revert_label
   exit 75
 }
 

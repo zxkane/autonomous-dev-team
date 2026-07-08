@@ -120,6 +120,51 @@ Step 5b posts nothing, flips nothing, decrements nothing")
 | TC-LGC6-110 | Step 5b's loop body extracted and driven with `pid_alive` stubbed to set the DEFERRED side channel + return 1 | posts NO comment; flips NO label |
 | TC-LGC6-111 | Counter-test: same harness, `pid_alive` returns 1 with an EMPTY side channel (a plain DEAD, not DEFERRED) | DOES post the crash comment; DOES flip the label — proves TC-LGC6-110's fast-return is gated on the verdict, not dead code |
 
+## [#444] Gate-side label revert (A2) — the source-level fix
+
+`dispatch-local.sh` reverts the issue's label itself, immediately before
+`exit 75`, so a defer nets to zero observable label change even with no
+future dispatcher tick. Sources ONLY `lib-issue-provider.sh` and calls
+`itp_transition_state` directly; every source/call is fail-open guarded.
+
+| ID | Scenario | Expected |
+|----|----------|----------|
+| TC-LGC6-140 | `dev-new`, distressed gate, stub `gh` records argv | exit 75; exactly one `gh issue edit <N> --repo … --remove-label in-progress --add-label pending-dev`; defer marker still written |
+| TC-LGC6-141 | `dev-resume`, same | exit 75; `--remove-label in-progress --add-label pending-dev` |
+| TC-LGC6-142 | `review`, same | exit 75; `--remove-label reviewing --add-label pending-review` |
+| TC-LGC6-143 | Fail-open: stub `gh` exits non-zero | exit still 75; defer marker still written; one WARN naming the failed revert; no abort under `set -euo pipefail` |
+| TC-LGC6-144 | Idempotence: after the gate's own revert, `handle_dispatch_deferred` (the pre-existing dispatcher-side revert) runs against the same stub | second revert also exits 0; marker release + label-revert contract unchanged; no comment; no retry decrement |
+
+## [#444] Local-backend expired-defer revert (B1 edit 1)
+
+`dispatcher-tick.sh` Step 5's DEAD branch, local backend: before the no-PR/
+near-success crash-declare logic, check the local defer marker directly
+(same path the gate writes — dispatcher and wrapper host are the same
+machine under `EXECUTION_BACKEND=local`).
+
+| ID | Scenario | Expected |
+|----|----------|----------|
+| TC-LGC6-150 | `_local_defer_marker_verdict`, fresh marker (age 0), not superseded | `FRESH` |
+| TC-LGC6-151 | Marker older than `DEFER_MARKER_MAX_AGE_SECONDS` (default 900), not superseded | `EXPIRED` |
+| TC-LGC6-152 | Marker superseded by a later `.attempt-<kind>-<N>` token | `NONE` (never shadows a newer attempt) |
+| TC-LGC6-153 | No marker at all | `NONE` |
+| TC-LGC6-155 | End-to-end (Step 5 loop body extracted + driven): EXPIRED marker | label reverted exactly once; NO crash comment; NO retry decrement; stale marker removed |
+| TC-LGC6-156 | Same harness: FRESH marker | NO label change; NO comment; marker left in place |
+| TC-LGC6-157 | Counter-test: no marker at all | falls through to the pre-existing crash-declare (posts + flips) — proves 155/156 aren't vacuous |
+
+## [#444] Remote DEFERRED fast-return age bound (B1 edit 2)
+
+Consistency edit: the existing Step 5b DEFERRED fast-return gains the same
+age check the local path uses. Currently unreachable in production for
+ages ≥ threshold (the remote probe itself stops reporting DEFERRED past
+`DEFER_MAX_AGE`) — deliberate belt-and-suspenders against a future probe
+change.
+
+| ID | Scenario | Expected |
+|----|----------|----------|
+| TC-LGC6-160 | `PID_ALIVE_LAST_VERDICT=DEFERRED`, age ≥ `DEFER_MARKER_MAX_AGE_SECONDS` | reverts the label exactly once; NO comment; NO retry decrement |
+| TC-LGC6-161 | Same, age < threshold | today's fast-return: NO label change; NO comment |
+
 ## Hygiene
 
 | ID | Scenario | Expected |

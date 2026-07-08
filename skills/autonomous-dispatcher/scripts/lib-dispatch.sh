@@ -3721,6 +3721,24 @@ is_dispatch_deferred_rc() {
 # purpose for that path, and Step 5b's DEFERRED fast-return (not a label
 # revert) is what keeps it from being misclassified there.
 #
+# [#444] The "left in its active state on purpose" window above is now
+# BOUNDED, not unconditional: dispatch-local.sh's own gate additionally
+# reverts the label at the SOURCE (see `_gate_revert_label` in that
+# script), fail-open-guarded, so the active-label window this function's
+# synchronous local-only reach cannot cover is closed independently for
+# BOTH backends the instant the gate itself runs. This function's own
+# scope and behavior are UNCHANGED by that addition — it still only ever
+# fires on the local-backend synchronous catch, and a defer it observes
+# here is idempotently re-reverted by it regardless of whether the gate's
+# own revert already succeeded (a `gh issue edit` remove/add of an
+# already-absent/-present label is a no-op). Two further defense-in-depth
+# layers exist on later ticks for the case where BOTH the gate's own
+# revert AND this function's synchronous catch are bypassed (e.g. the
+# dispatching session ended before either could run): `dispatcher-tick.sh`
+# Step 5's local-backend defer-marker check (`_local_defer_marker_verdict`)
+# and Step 5b's now-age-bounded remote DEFERRED fast-return — both revert
+# an EXPIRED defer instead of misclassifying it as a crash.
+#
 # Idempotent / best-effort: `release_dispatch_marker` already no-ops when
 # the marker isn't owned by this tick; `label_swap` failing here degrades
 # to "issue stuck in the active state, Step 5 eventually reconciles it as
@@ -3732,6 +3750,98 @@ handle_dispatch_deferred() {
   release_dispatch_marker "$issue_num" "$mode"
   label_swap "$issue_num" "$revert_from" "$revert_to" 2>/dev/null || true
   return 0
+}
+
+# ---------------------------------------------------------------------------
+# [B1, #444] Tick-side defense-in-depth for an expired defer that A2's
+# source-level revert (dispatch-local.sh) already fail-open-guards against,
+# but which A2 cannot guarantee (unreachable code host, auth failure) — see
+# the issue's "Fix shape" for the two-layer rationale.
+# ---------------------------------------------------------------------------
+
+# _revert_defer_strand <issue_num> <kind> — shared action for "this active-
+# label issue was actually a defer, not a crash, and the defer is stale
+# enough that leaving the label as-is would strand it forever." Used by
+# BOTH the local-backend expired-marker path (edit 1) and the remote-
+# backend expired-DEFERRED-verdict path (edit 2) — same logical event (an
+# expired defer), observed on a LATER tick instead of synchronously by the
+# dispatching tick itself. Same posture as handle_dispatch_deferred: no
+# comment, no retry-budget decrement — only the label revert.
+_revert_defer_strand() {
+  local issue_num="$1" kind="$2" revert_from revert_to
+  if [ "$kind" = "issue" ]; then
+    revert_from="in-progress"; revert_to="pending-dev"
+  else
+    revert_from="reviewing"; revert_to="pending-review"
+  fi
+  label_swap "$issue_num" "$revert_from" "$revert_to" 2>/dev/null || true
+}
+
+# _local_defer_marker_verdict <kind> <issue_num>
+#
+# Local-backend analog of liveness-check-remote-aws-ssm.sh's own DEFER_MARKER
+# freshness comparison (that snippet's ~lines 225-260) — reusable directly
+# here because under EXECUTION_BACKEND=local, dispatcher-tick.sh runs on the
+# SAME HOST as dispatch-local.sh and can read the marker file itself; no SSM
+# round-trip needed. The local backend never sets PID_ALIVE_LAST_VERDICT via
+# the remote side-channel (only the remote short-circuit does — see
+# pid_alive above), so this is the ONLY place a local-backend defer strand
+# is ever caught.
+#
+# Echoes exactly one of FRESH | EXPIRED | NONE on stdout; never mutates or
+# removes the marker itself (the caller owns that side effect):
+#   NONE    — no marker, or superseded by a later `.attempt-<kind>-<N>`
+#             token (a newer dispatch attempt happened since this defer was
+#             written) — fall through to the existing crash-declare logic.
+#   FRESH   — marker exists, not superseded, age < DEFER_MARKER_MAX_AGE_SECONDS
+#             (default 900, the same existing knob the remote probe uses) —
+#             fast-return, no crash.
+#   EXPIRED — marker exists, not superseded, age >= the threshold — an
+#             expired defer is still a defer, not a crash.
+# _local_defer_marker_path <kind> <issue_num> — the single computation shared
+# by _local_defer_marker_verdict and the caller's own post-EXPIRED cleanup
+# (dispatcher-tick.sh), so the path can never drift between "where we
+# checked" and "where we remove".
+_local_defer_marker_path() {
+  local kind="$1" issue_num="$2"
+  echo "${ADT_STATE_ROOT:-$HOME/.local/state}/autonomous-${PROJECT_ID}/lanes/.defer-${kind}-${issue_num}"
+}
+
+_local_defer_marker_verdict() {
+  local kind="$1" issue_num="$2"
+  local lane_dir defer_marker attempt_marker defer_m attempt_m now age max_age
+  lane_dir="${ADT_STATE_ROOT:-$HOME/.local/state}/autonomous-${PROJECT_ID}/lanes"
+  defer_marker="$(_local_defer_marker_path "$kind" "$issue_num")"
+  attempt_marker="${lane_dir}/.attempt-${kind}-${issue_num}"
+
+  if [[ ! -f "$defer_marker" ]] || [[ -L "$defer_marker" ]]; then
+    echo NONE
+    return 0
+  fi
+  defer_m=$(_mtime_epoch "$defer_marker")
+  if [[ -z "$defer_m" ]]; then
+    echo NONE
+    return 0
+  fi
+
+  if [[ -f "$attempt_marker" ]] && [[ ! -L "$attempt_marker" ]]; then
+    attempt_m=$(_mtime_epoch "$attempt_marker")
+    if [[ -n "$attempt_m" ]] && [[ "$defer_m" -lt "$attempt_m" ]]; then
+      echo NONE   # superseded by a later attempt — never shadow it
+      return 0
+    fi
+  fi
+
+  now=$(date -u +%s)
+  age=$((now - defer_m))
+  max_age="${DEFER_MARKER_MAX_AGE_SECONDS:-900}"
+  [[ "$max_age" =~ ^[0-9]+$ ]] || max_age=900
+
+  if [[ "$age" -ge 0 ]] && [[ "$age" -lt "$max_age" ]]; then
+    echo FRESH
+  else
+    echo EXPIRED
+  fi
 }
 
 # ---------------------------------------------------------------------------

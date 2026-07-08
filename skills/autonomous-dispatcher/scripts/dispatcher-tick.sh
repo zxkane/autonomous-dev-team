@@ -809,15 +809,73 @@ for i in $(seq 0 $((cand_count - 1))); do
     # gate DEFINITELY refused to spawn (a known state), never a crash — the
     # dev/review no-PR crash branches below would otherwise post a false
     # "Task appears to have crashed" comment and flip the label, exactly
-    # the misattribution this PR closes for the remote-aws-ssm backend
-    # (under the local backend, the SAME rc=75 never reaches Step 5 at all
-    # — it is caught synchronously by `handle_dispatch_deferred` at the
-    # `dispatch()` call site itself, same PR). No comment, no label flip,
-    # no retry decrement — just log and move to the next candidate.
+    # the misattribution this PR closes for the remote-aws-ssm backend.
+    # This side channel (`PID_ALIVE_LAST_VERDICT`) is set ONLY by the
+    # remote-backend short-circuit inside `pid_alive` — under the local
+    # backend it is always empty here; the SAME rc=75 is normally caught
+    # synchronously by `handle_dispatch_deferred` at the `dispatch()` call
+    # site itself, and — as of [#444] — additionally reverted at the
+    # SOURCE by the gate itself (`dispatch-local.sh::_gate_revert_label`)
+    # and, as a last-resort defense-in-depth net for a local-backend defer
+    # that bypassed BOTH of those, by the local-backend defer-marker check
+    # immediately below ([#444, B1 edit 1]). No comment, no label flip, no
+    # retry decrement — just log and move to the next candidate.
     if [ "$PID_ALIVE_LAST_VERDICT" = "DEFERRED" ]; then
-      log "  issue #${issue_num} (${kind}) dispatch DEFERRED by the wrapper host's back-pressure gate (age=${PID_ALIVE_LAST_DEFERRED_AGE:-?}s) — not a crash, no label change, no retry decrement ([Lane-GC PR-6 / INV-119])"
+      # [#444, B1 edit 2] Age bound on the remote fast-return — consistency
+      # with the local-backend expiry handling below. Currently unreachable
+      # in production for ages >= the threshold: the remote probe itself
+      # (liveness-check-remote-aws-ssm.sh) stops reporting DEFERRED past
+      # DEFER_MAX_AGE, so PID_ALIVE_LAST_VERDICT never carries an
+      # already-expired age here. This is deliberate, documented
+      # belt-and-suspenders against a future probe change — the label-
+      # active-on-purpose window this DEFERRED fast-return relies on is now
+      # bounded, matching the local-backend behavior instead of leaving a
+      # theoretical unbounded active-label window if that probe's own
+      # ceiling were ever relaxed.
+      _defer_max_age="${DEFER_MARKER_MAX_AGE_SECONDS:-900}"
+      [[ "$_defer_max_age" =~ ^[0-9]+$ ]] || _defer_max_age=900
+      if [[ "${PID_ALIVE_LAST_DEFERRED_AGE:-}" =~ ^[0-9]+$ ]] && [ "$PID_ALIVE_LAST_DEFERRED_AGE" -ge "$_defer_max_age" ]; then
+        log "  issue #${issue_num} (${kind}) dispatch DEFERRED verdict has EXPIRED (age=${PID_ALIVE_LAST_DEFERRED_AGE}s >= ${_defer_max_age}s) — reverting label (not a crash), no comment, no retry decrement ([#444, B1])"
+        _revert_defer_strand "$issue_num" "$kind"
+      else
+        log "  issue #${issue_num} (${kind}) dispatch DEFERRED by the wrapper host's back-pressure gate (age=${PID_ALIVE_LAST_DEFERRED_AGE:-?}s) — not a crash, no label change, no retry decrement ([Lane-GC PR-6 / INV-119])"
+      fi
+      unset _defer_max_age
       continue
     fi
+
+    # [#444, B1 edit 1] Local-backend defer-marker check. The remote
+    # short-circuit above (PID_ALIVE_LAST_VERDICT) is the ONLY place a
+    # remote-backend defer is ever surfaced to pid_alive's side channel —
+    # under EXECUTION_BACKEND=local that side channel is never set (the
+    # SAME rc=75 is instead caught synchronously by handle_dispatch_deferred
+    # at the dispatch() call site, or — when that catch is bypassed, e.g. the
+    # dispatching session ended before observing rc=75 — left stranded with
+    # no verdict at all). This is dispatcher-tick.sh's only chance to notice
+    # a stranded local-backend defer: the dispatcher and wrapper host are
+    # the SAME machine under the local backend, so the marker
+    # dispatch-local.sh wrote is directly readable here.
+    if [ "${EXECUTION_BACKEND:-local}" = "local" ]; then
+      _defer_verdict=$(_local_defer_marker_verdict "$kind" "$issue_num")
+      case "$_defer_verdict" in
+        FRESH)
+          log "  issue #${issue_num} (${kind}) has a FRESH local defer marker — not a crash, no label change, no retry decrement ([#444, B1])"
+          unset _defer_verdict
+          continue
+          ;;
+        EXPIRED)
+          log "  issue #${issue_num} (${kind}) has an EXPIRED local defer marker — reverting label (not a crash), no comment, no retry decrement ([#444, B1])"
+          _revert_defer_strand "$issue_num" "$kind"
+          rm -f "$(_local_defer_marker_path "$kind" "$issue_num")" 2>/dev/null || true
+          unset _defer_verdict
+          continue
+          ;;
+        *)
+          unset _defer_verdict
+          ;;
+      esac
+    fi
+
     if [ "$kind" = "issue" ]; then
       # DEAD + in-progress: branch on whether a PR exists, and if it does,
       # branch again on whether its HEAD has new commits since the last

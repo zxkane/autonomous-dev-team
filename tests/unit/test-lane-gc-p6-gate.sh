@@ -948,6 +948,316 @@ done
 
 # ===========================================================================
 echo ""
+echo "=== TC-LGC6-140/141/142: [#444, A2] gate-side label revert, per TYPE — stub gh records argv ==="
+# ===========================================================================
+# The gate runs as a SEPARATE bash process (dispatch-local.sh), so the only
+# observable seam is the `gh` binary on PATH — matching the pattern this
+# fixture already uses for adt-gc.sh. Asserts: exit is still 75, the
+# recorded gh argv contains exactly one `issue edit <N> --remove-label
+# <active> --add-label <target>` per the mapping, and the defer marker is
+# still written. Must fail against pre-#444 dispatch-local.sh (zero gh
+# invocations) and pass after.
+_run_gate_revert_case() {
+  local case_id="$1" type="$2" issue="$3"
+  local proj="$TMPROOT/proj-revert-$case_id"
+  _mk_fixture_project "$proj"
+  local state="$TMPROOT/state-revert-$case_id"
+  local bin="$TMPROOT/bin-revert-$case_id"
+  local record="$TMPROOT/gh-argv-$case_id"
+  mkdir -p "$bin"
+  : > "$record"
+  cat > "$bin/gh" <<EOF
+#!/bin/bash
+echo "\$*" >> "$record"
+exit 0
+EOF
+  chmod +x "$bin/gh"
+  PATH="$bin:$PATH" \
+  ADT_STATE_ROOT="$state" \
+  _GATE_LOAD1_PER_CORE_OVERRIDE="99" \
+  bash -c "cd '$proj' && bash scripts/dispatch-local.sh '$type' '$issue'" 2>&1
+  echo "__RC__:$?"
+  echo "__RECORD__:$(cat "$record" 2>/dev/null)"
+  echo "__MARKER__:$state/autonomous-gatetest/lanes/.defer-$([ "$type" = "review" ] && echo review || echo issue)-${issue}"
+}
+
+for spec in \
+  "140:dev-new:9020:in-progress:pending-dev" \
+  "141:dev-resume:9021:in-progress:pending-dev" \
+  "142:review:9022:reviewing:pending-review" \
+; do
+  IFS=: read -r cid type issue from to <<<"$spec"
+  RAW=$(_run_gate_revert_case "$cid" "$type" "$issue")
+  RC=$(grep -o '__RC__:[0-9]*' <<<"$RAW" | cut -d: -f2)
+  RECORD_LINE=$(grep '^__RECORD__:' <<<"$RAW" | sed 's/^__RECORD__://')
+  MARKER_PATH=$(grep '^__MARKER__:' <<<"$RAW" | sed 's/^__MARKER__://')
+  assert_eq "TC-LGC6-$cid ($type): exit still 75 after gate-side revert" "75" "$RC"
+  EXPECTED_ARGV="issue edit ${issue} --repo test/test --remove-label ${from} --add-label ${to}"
+  assert_eq "TC-LGC6-$cid ($type): exactly one gh invocation, correct remove/add pair" "$EXPECTED_ARGV" "$RECORD_LINE"
+  if [[ -f "$MARKER_PATH" ]]; then
+    assert_pass "TC-LGC6-$cid ($type): defer marker still written"
+  else
+    assert_fail "TC-LGC6-$cid ($type): defer marker NOT written at $MARKER_PATH"
+  fi
+done
+
+# ===========================================================================
+echo ""
+echo "=== TC-LGC6-143: [#444, A2] fail-open — gh exits non-zero, gate still exits 75, marker written, WARN logged, no abort ==="
+# ===========================================================================
+PROJ143="$TMPROOT/proj-revert-143"
+_mk_fixture_project "$PROJ143"
+STATE143="$TMPROOT/state-revert-143"
+BIN143="$TMPROOT/bin-revert-143"
+mkdir -p "$BIN143"
+cat > "$BIN143/gh" <<'EOF'
+#!/bin/bash
+exit 1
+EOF
+chmod +x "$BIN143/gh"
+OUT143=$(
+  PATH="$BIN143:$PATH" \
+  ADT_STATE_ROOT="$STATE143" \
+  _GATE_LOAD1_PER_CORE_OVERRIDE="99" \
+  bash -c "cd '$PROJ143' && bash scripts/dispatch-local.sh dev-new 9023" 2>&1
+)
+RC143=$?
+assert_eq "TC-LGC6-143: fail-open — exit still 75 when gh fails" "75" "$RC143"
+assert_contains "TC-LGC6-143: one WARN naming the failed revert" "WARN: defer label-revert failed for issue 9023" "$OUT143"
+if [[ -f "$STATE143/autonomous-gatetest/lanes/.defer-issue-9023" ]]; then
+  assert_pass "TC-LGC6-143: defer marker still written despite the revert failure"
+else
+  assert_fail "TC-LGC6-143: defer marker NOT written"
+fi
+
+# ===========================================================================
+echo ""
+echo "=== TC-LGC6-144: [#444, A2+dispatcher] idempotence — a second revert via handle_dispatch_deferred also succeeds ==="
+# ===========================================================================
+# After the gate's own revert lands (in-progress -> pending-dev), a SEPARATE
+# tick observing the same rc=75 synchronously (the local backend's normal
+# path) calls handle_dispatch_deferred, which issues its OWN label_swap
+# (pending-dev -> "" per its reverse-of-caller-swap contract in this test,
+# matching TC-LGC6-050's existing convention) against the SAME stub gh —
+# `gh issue edit --remove-label` of an absent label / `--add-label` of a
+# present one are no-ops at the real API, so the stub (always exit 0) must
+# not error and handle_dispatch_deferred's own contract (marker release +
+# label revert, no comment, no retry) must hold unchanged.
+export REPO=zxkane/autonomous-dev-team REPO_OWNER=zxkane PROJECT_ID=test-lgc6-144 MAX_RETRIES=3 MAX_CONCURRENT=5
+# shellcheck source=../../skills/autonomous-dispatcher/scripts/lib-dispatch.sh
+source "$LIB_DISPATCH"
+set +e
+_RELEASE_CALLS_144=()
+_LABEL_SWAP_CALLS_144=()
+_POST_COMMENT_CALLS_144=0
+_COUNT_RETRIES_CALLS_144=0
+release_dispatch_marker() { _RELEASE_CALLS_144+=("$1:$2"); }
+label_swap() { _LABEL_SWAP_CALLS_144+=("$1:$2:$3"); return 0; }
+itp_post_comment() { _POST_COMMENT_CALLS_144=$((_POST_COMMENT_CALLS_144 + 1)); }
+count_retries() { _COUNT_RETRIES_CALLS_144=$((_COUNT_RETRIES_CALLS_144 + 1)); echo 0; }
+handle_dispatch_deferred 9020 "dev-new" "in-progress" ""
+RC144=$?
+assert_eq "TC-LGC6-144: handle_dispatch_deferred (the second, dispatcher-side revert) exits 0" "0" "$RC144"
+assert_eq "TC-LGC6-144b: still releases the dispatch marker" "9020:dev-new" "${_RELEASE_CALLS_144[0]:-}"
+assert_eq "TC-LGC6-144c: still issues its own label_swap unchanged (idempotent second revert)" "9020:in-progress:" "${_LABEL_SWAP_CALLS_144[0]:-}"
+assert_eq "TC-LGC6-144d: never posts a comment" "0" "$_POST_COMMENT_CALLS_144"
+assert_eq "TC-LGC6-144e: never decrements retry budget" "0" "$_COUNT_RETRIES_CALLS_144"
+
+# ===========================================================================
+echo ""
+echo "=== TC-LGC6-150/151: [#444, B1 edit 1] local-backend expired vs fresh defer marker ==="
+# ===========================================================================
+# Drives _local_defer_marker_verdict directly (lib-dispatch.sh) against real
+# fixture marker files with real mtimes — same style as TC-LGC6-083..087's
+# real-snippet-comparison approach, but for the LOCAL-backend helper this
+# issue adds (the remote snippet's comparison logic is untouched).
+export REPO=zxkane/autonomous-dev-team REPO_OWNER=zxkane PROJECT_ID=lgc6-150 MAX_RETRIES=3 MAX_CONCURRENT=5
+# shellcheck source=../../skills/autonomous-dispatcher/scripts/lib-dispatch.sh
+source "$LIB_DISPATCH"
+set +e
+
+STATE150="$TMPROOT/state150"; LANE_DIR150="$STATE150/autonomous-lgc6-150/lanes"
+mkdir -p "$LANE_DIR150"
+NOW150=$(date -u +%s)
+touch -d "@${NOW150}" "$LANE_DIR150/.attempt-issue-150" "$LANE_DIR150/.defer-issue-150"
+VERDICT150=$(ADT_STATE_ROOT="$STATE150" PROJECT_ID=lgc6-150 _local_defer_marker_verdict issue 150)
+assert_eq "TC-LGC6-150: fresh local defer marker (age 0) -> FRESH" "FRESH" "$VERDICT150"
+
+STATE151="$TMPROOT/state151"; LANE_DIR151="$STATE151/autonomous-lgc6-150/lanes"
+mkdir -p "$LANE_DIR151"
+NOW151=$(date -u +%s)
+touch -d "@$((NOW151 - 1000))" "$LANE_DIR151/.attempt-issue-151" "$LANE_DIR151/.defer-issue-151"
+VERDICT151=$(ADT_STATE_ROOT="$STATE151" PROJECT_ID=lgc6-150 _local_defer_marker_verdict issue 151)
+assert_eq "TC-LGC6-151: not-superseded but past DEFER_MARKER_MAX_AGE_SECONDS (default 900) -> EXPIRED" "EXPIRED" "$VERDICT151"
+
+STATE152="$TMPROOT/state152"; LANE_DIR152="$STATE152/autonomous-lgc6-150/lanes"
+mkdir -p "$LANE_DIR152"
+NOW152=$(date -u +%s)
+touch -d "@$((NOW152 - 100))" "$LANE_DIR152/.defer-issue-152"
+touch -d "@${NOW152}" "$LANE_DIR152/.attempt-issue-152"
+VERDICT152=$(ADT_STATE_ROOT="$STATE152" PROJECT_ID=lgc6-150 _local_defer_marker_verdict issue 152)
+assert_eq "TC-LGC6-152: superseded by a later attempt marker -> NONE (falls through to crash-declare)" "NONE" "$VERDICT152"
+
+STATE153="$TMPROOT/state153"; LANE_DIR153="$STATE153/autonomous-lgc6-150/lanes"
+mkdir -p "$LANE_DIR153"
+VERDICT153=$(ADT_STATE_ROOT="$STATE153" PROJECT_ID=lgc6-150 _local_defer_marker_verdict issue 153)
+assert_eq "TC-LGC6-153: no marker at all -> NONE" "NONE" "$VERDICT153"
+
+# End-to-end through dispatcher-tick.sh's Step 5 loop body (extracted, same
+# harness style as TC-LGC6-110) — EXPIRED reverts with no comment/retry,
+# marker removed; FRESH fast-returns untouched.
+STEP5_BODY_B1=$(awk '/^for i in \$\(seq 0 \$\(\(cand_count - 1\)\)\); do$/{f=1} f{print} f && /^done$/{exit}' "$TICK")
+if [[ -z "$STEP5_BODY_B1" ]] || ! grep -q 'B1 edit 1' <<<"$STEP5_BODY_B1"; then
+  assert_fail "TC-LGC6-154 (extraction control): Step 5 loop body extraction is empty or missing the B1 edit 1 marker — dispatcher-tick.sh structure drifted"
+else
+  assert_pass "TC-LGC6-154 (extraction control): extracted Step 5 loop body contains the B1 edit 1 marker"
+fi
+
+_run_step5_b1_harness() {
+  local state_root="$1"
+  local harness="$TMPROOT/harness-b1-$$-$RANDOM.sh"
+  {
+    echo '#!/bin/bash'
+    echo 'set -u'
+    echo "ADT_STATE_ROOT='$state_root'"
+    echo "PROJECT_ID=lgc6-150"
+    echo "EXECUTION_BACKEND=local"
+    # Source lib-dispatch.sh FIRST (this is where the B1 helpers the
+    # extracted body calls — _local_defer_marker_verdict, _revert_defer_strand,
+    # _local_defer_marker_path — come from), THEN override the specific
+    # collaborator functions below — override order must be AFTER the
+    # source, or the real label_swap/itp_post_comment/count_retries/
+    # pid_alive definitions from the sourced file win instead of these stubs.
+    # shellcheck source=../../skills/autonomous-dispatcher/scripts/lib-dispatch.sh
+    echo "source '$LIB_DISPATCH'"
+    echo 'POSTED=0'
+    echo 'LABEL_SWAPS=0'
+    echo 'RETRY_CALLS=0'
+    echo 'log() { :; }'
+    echo 'was_just_dispatched() { return 1; }'
+    echo 'is_within_grace_period() { return 1; }'
+    echo 'itp_post_comment() { POSTED=$((POSTED + 1)); }'
+    echo 'label_swap() { LABEL_SWAPS=$((LABEL_SWAPS + 1)); }'
+    echo 'count_retries() { RETRY_CALLS=$((RETRY_CALLS + 1)); echo 0; }'
+    echo 'pid_alive() { PID_ALIVE_LAST_VERDICT=""; PID_ALIVE_LAST_DEFERRED_AGE=""; return 1; }'
+    echo 'get_pid() { echo ""; }'
+    echo 'fetch_pr_for_issue() { echo ""; }'
+    echo 'ci_is_green() { return 1; }'
+    echo 'pr_idle_seconds() { echo ""; }'
+    echo 'dev_near_success() { return 1; }'
+    echo 'review_near_success() { return 1; }'
+    echo 'recent_error_envelope() { echo ""; }'
+    echo 'last_reviewed_head() { echo ""; }'
+    echo 'declare -F metrics_emit >/dev/null 2>&1 || metrics_emit() { :; }'
+    echo 'candidates='"'"'[{"number":9999,"labels":["autonomous","in-progress"]}]'"'"''
+    echo 'cand_count=1'
+    echo "$STEP5_BODY_B1"
+    echo 'echo "POSTED=$POSTED"'
+    echo 'echo "LABEL_SWAPS=$LABEL_SWAPS"'
+    echo 'echo "RETRY_CALLS=$RETRY_CALLS"'
+  } > "$harness"
+  bash "$harness" 2>&1
+  rm -f "$harness"
+}
+
+# TC-LGC6-155: EXPIRED marker -> revert (LABEL_SWAPS=1), no comment, no
+# retry decrement, marker removed.
+STATE155="$TMPROOT/state155"; LANE_DIR155="$STATE155/autonomous-lgc6-150/lanes"
+mkdir -p "$LANE_DIR155"
+NOW155=$(date -u +%s)
+touch -d "@$((NOW155 - 1000))" "$LANE_DIR155/.attempt-issue-9999" "$LANE_DIR155/.defer-issue-9999"
+OUT155=$(_run_step5_b1_harness "$STATE155")
+assert_contains "TC-LGC6-155: EXPIRED local defer -> reverts the label exactly once" "LABEL_SWAPS=1" "$OUT155"
+assert_contains "TC-LGC6-155b: EXPIRED local defer -> posts NO comment" "POSTED=0" "$OUT155"
+assert_contains "TC-LGC6-155c: EXPIRED local defer -> NO retry-budget decrement" "RETRY_CALLS=0" "$OUT155"
+if [[ -f "$LANE_DIR155/.defer-issue-9999" ]]; then
+  assert_fail "TC-LGC6-155d: stale marker should be removed after the EXPIRED revert"
+else
+  assert_pass "TC-LGC6-155d: stale marker removed after the EXPIRED revert"
+fi
+
+# TC-LGC6-156: FRESH marker -> fast-return (no label change, no comment).
+STATE156="$TMPROOT/state156"; LANE_DIR156="$STATE156/autonomous-lgc6-150/lanes"
+mkdir -p "$LANE_DIR156"
+NOW156=$(date -u +%s)
+touch -d "@${NOW156}" "$LANE_DIR156/.attempt-issue-9999" "$LANE_DIR156/.defer-issue-9999"
+OUT156=$(_run_step5_b1_harness "$STATE156")
+assert_contains "TC-LGC6-156: FRESH local defer -> NO label change" "LABEL_SWAPS=0" "$OUT156"
+assert_contains "TC-LGC6-156b: FRESH local defer -> posts NO comment" "POSTED=0" "$OUT156"
+if [[ -f "$LANE_DIR156/.defer-issue-9999" ]]; then
+  assert_pass "TC-LGC6-156c: FRESH marker is left in place (not removed)"
+else
+  assert_fail "TC-LGC6-156c: FRESH marker should NOT be removed"
+fi
+
+# Counter-test: no marker at all -> falls through to the pre-existing no-PR
+# crash-declare logic (proves 155/156 aren't gating on something vacuous).
+STATE157="$TMPROOT/state157"
+OUT157=$(_run_step5_b1_harness "$STATE157")
+assert_contains "TC-LGC6-157: counter-test — no marker at all falls through to crash-declare (posts + flips)" "POSTED=1" "$OUT157"
+assert_contains "TC-LGC6-157b: counter-test — no marker at all falls through to crash-declare (flips label)" "LABEL_SWAPS=1" "$OUT157"
+
+# ===========================================================================
+echo ""
+echo "=== TC-LGC6-160/161: [#444, B1 edit 2] remote DEFERRED fast-return gains an age bound ==="
+# ===========================================================================
+# Same Step 5 loop-body harness as TC-LGC6-110/111, but this time pid_alive
+# sets the REMOTE side channel (PID_ALIVE_LAST_VERDICT=DEFERRED) with an
+# age at/above vs. below DEFER_MARKER_MAX_AGE_SECONDS.
+_run_step5_b1_remote_harness() {
+  local age="$1"
+  local harness="$TMPROOT/harness-b1r-$$-$RANDOM.sh"
+  {
+    echo '#!/bin/bash'
+    echo 'set -u'
+    echo 'PROJECT_ID=lgc6-160'
+    # Source FIRST, override collaborator stubs AFTER (same ordering
+    # rationale as _run_step5_b1_harness above).
+    echo "source '$LIB_DISPATCH'"
+    echo 'POSTED=0'
+    echo 'LABEL_SWAPS=0'
+    echo 'RETRY_CALLS=0'
+    echo 'log() { :; }'
+    echo 'was_just_dispatched() { return 1; }'
+    echo 'is_within_grace_period() { return 1; }'
+    echo 'itp_post_comment() { POSTED=$((POSTED + 1)); }'
+    echo 'label_swap() { LABEL_SWAPS=$((LABEL_SWAPS + 1)); }'
+    echo 'count_retries() { RETRY_CALLS=$((RETRY_CALLS + 1)); echo 0; }'
+    echo "pid_alive() { PID_ALIVE_LAST_VERDICT=DEFERRED; PID_ALIVE_LAST_DEFERRED_AGE=$age; return 1; }"
+    echo 'get_pid() { echo ""; }'
+    echo 'fetch_pr_for_issue() { echo ""; }'
+    echo 'ci_is_green() { return 1; }'
+    echo 'pr_idle_seconds() { echo ""; }'
+    echo 'dev_near_success() { return 1; }'
+    echo 'review_near_success() { return 1; }'
+    echo 'recent_error_envelope() { echo ""; }'
+    echo 'last_reviewed_head() { echo ""; }'
+    echo 'declare -F metrics_emit >/dev/null 2>&1 || metrics_emit() { :; }'
+    echo 'candidates='"'"'[{"number":9999,"labels":["autonomous","in-progress"]}]'"'"''
+    echo 'cand_count=1'
+    echo "$STEP5_BODY_B1"
+    echo 'echo "POSTED=$POSTED"'
+    echo 'echo "LABEL_SWAPS=$LABEL_SWAPS"'
+    echo 'echo "RETRY_CALLS=$RETRY_CALLS"'
+  } > "$harness"
+  bash "$harness" 2>&1
+  rm -f "$harness"
+}
+
+# TC-LGC6-160: age >= 900 (default threshold) -> revert-not-crash (label
+# swap fires exactly once, no comment, no retry decrement).
+OUT160=$(_run_step5_b1_remote_harness 900)
+assert_contains "TC-LGC6-160: remote DEFERRED age>=threshold -> reverts the label exactly once" "LABEL_SWAPS=1" "$OUT160"
+assert_contains "TC-LGC6-160b: remote DEFERRED age>=threshold -> posts NO comment" "POSTED=0" "$OUT160"
+assert_contains "TC-LGC6-160c: remote DEFERRED age>=threshold -> NO retry-budget decrement" "RETRY_CALLS=0" "$OUT160"
+
+# TC-LGC6-161: age < threshold -> today's fast-return (no label change, no comment).
+OUT161=$(_run_step5_b1_remote_harness 45)
+assert_contains "TC-LGC6-161: remote DEFERRED age<threshold -> NO label change (today's fast-return)" "LABEL_SWAPS=0" "$OUT161"
+assert_contains "TC-LGC6-161b: remote DEFERRED age<threshold -> posts NO comment" "POSTED=0" "$OUT161"
+
+# ===========================================================================
+echo ""
 echo "=== TC-LGC6-120: no forbidden phrases / private-repo references in touched files ==="
 # ===========================================================================
 TOUCHED_FILES=("$LIB_LANE" "$LIB_DISPATCH" "$DISPATCH_LOCAL" "$TICK" "$LIVENESS_DRIVER")
