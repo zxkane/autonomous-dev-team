@@ -56,6 +56,7 @@ abundant; genuine-pressure case still defers")
 | TC-LGC6-003c | `_GATE_SWAP_PCT_OVERRIDE=89` (within limit), `_GATE_MEM_AVAILABLE_MB_OVERRIDE=5000` (same mid-band value as 003b), other two healthy | exit 0 — the memory check inside the swap branch never engages when swap itself is not over `GATE_SWAP_PCT` |
 | TC-LGC6-003d | `_GATE_SWAP_PCT_OVERRIDE=91`, `_GATE_MEM_AVAILABLE_MB_OVERRIDE` set to a non-numeric/unavailable value, other two healthy | exit 75; stderr/marker record the unresolved `mem_available_mb` value — fails toward the pre-#441 behavior when the rescue evidence itself is unknown |
 | TC-LGC6-003e | `GATE_SWAP_REQUIRES_MEM_MULTIPLE="not-a-number"` (operator typo), high swap (99), abundant memory (999999) | exit 0, dispatch actually proceeds — a malformed multiplier falls back to the default (3) instead of crashing the gate's arithmetic under `set -euo pipefail` |
+| TC-LGC6-003f | `_GATE_SWAP_PCT_OVERRIDE=91`, `_GATE_MEM_AVAILABLE_MB_OVERRIDE=1000` (below the 2048 hard floor — the true OOM-adjacent case), other two healthy | exit 75; stderr/marker name `mem_available_mb=1000 < GATE_MIN_MEM_MB=2048` — the genuine-pressure case (high swap AND genuinely low MemAvailable) still defers exactly as before #441, caught by the pre-existing mem-floor check before the swap branch is even reached |
 
 ## Healthy box proceeds to spawn (AC: "healthy box → proceeds")
 

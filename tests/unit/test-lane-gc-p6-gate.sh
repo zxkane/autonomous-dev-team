@@ -241,6 +241,21 @@ RC003e=$?
 assert_eq "TC-LGC6-003e: malformed GATE_SWAP_REQUIRES_MEM_MULTIPLE falls back to default -> rc=0 (no crash, rescue still applies)" "0" "$RC003e"
 assert_contains "TC-LGC6-003e: dispatch actually proceeded to spawn (proves the gate evaluated all signals, not just crashed silently)" "Dispatched dev-new for issue #9014" "$OUT003e"
 
+# TC-LGC6-003f: high swap (91) + genuinely low memory (1000 — below the hard
+# floor 2048, i.e. the true OOM-adjacent case from issue #441's second
+# Testing Requirement) -> still DEFERS, exactly as before #441. At this
+# memory level the pre-existing, unchanged mem-floor check (checked BEFORE
+# the swap branch in the fixed load/mem/swap/lanecap order) fires first and
+# short-circuits — the swap branch's own internal rescue check is never even
+# reached. This is the "belt and suspenders" case the design doc's behavior
+# table calls out explicitly: genuine pressure is still caught, just by the
+# pre-existing signal rather than the new swap-branch predicate.
+RAW003f=$(_run_swap_case "003f" 9015 "91" "1000")
+RC003f=$(grep -o '__RC__:[0-9]*' <<<"$RAW003f" | cut -d: -f2)
+OUT003f=$(sed '$d' <<<"$RAW003f")
+assert_eq "TC-LGC6-003f: high swap + genuinely low memory (below hard floor) -> rc=75 (genuine-pressure case still defers)" "75" "$RC003f"
+assert_contains "TC-LGC6-003f: logged reason names the mem-floor signal (fires before the swap branch is reached)" "mem_available_mb=1000 < GATE_MIN_MEM_MB=2048" "$OUT003f"
+
 # ===========================================================================
 echo ""
 echo "=== TC-LGC6-010: healthy box (all four signals cleared) -> dispatch proceeds to spawn ==="
