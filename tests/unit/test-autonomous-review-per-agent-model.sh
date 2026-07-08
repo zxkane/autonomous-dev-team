@@ -23,6 +23,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 WRAPPER="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/autonomous-review.sh"
 RESOLVE_LIB="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-review-resolve.sh"
+AGY_ADAPTER="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/adapters/agy.sh"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -75,6 +76,20 @@ assert_not_contains() {
     echo "      should NOT contain='$needle'"
     echo "      haystack='${haystack:0:300}'"
     FAIL=$((FAIL + 1))
+  fi
+}
+
+# Issue #440: asserts the string has NO [[:cntrl:]] byte (covers \r, embedded
+# \n, and any other control char) — the label-honesty contract this bug broke.
+assert_no_cntrl() {
+  local desc="$1" haystack="$2"
+  if [[ "$haystack" =~ [[:cntrl:]] ]]; then
+    echo -e "  ${RED}FAIL${NC}: $desc"
+    echo "      contains a control character: $(printf '%q' "$haystack")"
+    FAIL=$((FAIL + 1))
+  else
+    echo -e "  ${GREEN}PASS${NC}: $desc"
+    PASS=$((PASS + 1))
   fi
 }
 
@@ -209,6 +224,10 @@ paml08=$(
 )
 assert_contains "TC-PAML-08a no-model agy → agy default" "agy default" "$paml08"
 assert_not_contains "TC-PAML-08b no-model agy does NOT assert 'sonnet'" "sonnet" "$paml08"
+# Issue #440: empty/unset resolved (sonnet fallback, before the agy branch is
+# even reached) is trivially unaffected by the [[:cntrl:]] strip — asserted
+# explicitly so the fix's diff is visibly scoped (no control char regardless).
+assert_no_cntrl "TC-PAML-08c no-model agy (sonnet fallback) has no control char" "$paml08"
 
 # TC-PAML-09 — case-insensitive agy name match (AGY / Agy still take the branch).
 paml09u=$(
@@ -241,6 +260,83 @@ paml10bare=$(
   echo "reached-after-bare-call rc=$?"
 )
 assert_contains "TC-PAML-10b bare call reaches next stmt under set -euo" "reached-after-bare-call rc=0" "$paml10bare"
+
+# ---------------------------------------------------------------------------
+echo "=== TC-PAML-CNTRL: control-char strip before agy validation+display (issue #440) ==="
+# ---------------------------------------------------------------------------
+# Regression coverage for issue #440: the agy branch of
+# _resolve_review_agent_model_label must strip [[:cntrl:]] from $resolved ONCE,
+# before BOTH the _agy_known_model validation call and the rc=0 printf — so the
+# value that validates is byte-identical to the value displayed.
+#
+# The lightweight _stub_agy_known_only helper (used by TC-PAML-02 etc. above)
+# does an exact string `==` comparison and does NOT replicate
+# _agy_known_model's own internal strip-then-compare behavior — a
+# control-char-bearing candidate against that stub returns rc 1 (falls to the
+# literal default-label branch, which trivially has no control character),
+# masking the bug: the test would pass before AND after the fix. So these two
+# cases instead source the REAL adapters/agy.sh with a stub `agy` binary on
+# PATH — mirroring the pattern in tests/unit/test-lib-agent-agy.sh:465-490 —
+# rather than the rc-only stub.
+CNTRL_BIN="$(mktemp -d)"
+trap 'rm -rf "$CNTRL_BIN"' EXIT
+
+# Shared helper for TC-PAML-11/12: stub a real `agy models` binary that
+# echoes $1 (the already-sanitized known name), then source the REAL
+# adapters/agy.sh + lib-review-resolve.sh with AGENT_REVIEW_MODEL_AGY=$2
+# (the control-char-bearing candidate) and print the label helper's output.
+_run_agy_label_with_real_stub() {
+  local known="$1" candidate="$2"
+  cat > "$CNTRL_BIN/agy" <<STUB
+#!/bin/bash
+if [[ "\${1:-}" == "models" ]]; then
+  printf '%s\n' "$known"
+  exit 0
+fi
+exit 0
+STUB
+  chmod +x "$CNTRL_BIN/agy"
+  PATH="$CNTRL_BIN:$PATH" AGENT_REVIEW_MODEL_AGY="$candidate" \
+  bash -c '
+    unset _LIB_AGENT_AGY_MODELS_CACHE _LIB_AGENT_AGY_MODEL_WARNED
+    source "'"$AGY_ADAPTER"'"
+    source "'"$RESOLVE_LIB"'"
+    _resolve_review_agent_model_label agy
+  '
+}
+
+# TC-PAML-11 — a known agy model name carrying a TRAILING carriage return
+# (\r). Command substitution (line 168's `resolved="$(...)"`) strips trailing
+# \n but NOT \r, so the \r survives into $resolved untouched until the fix's
+# strip point.
+cr_candidate="$(printf 'Gemini 3.5 Flash (High)\r')"
+cr_known="${cr_candidate//[[:cntrl:]]/}"
+paml11=$(_run_agy_label_with_real_stub "$cr_known" "$cr_candidate")
+assert_no_cntrl "TC-PAML-11a trailing \\r: label has no control char" "$paml11"
+assert_eq "TC-PAML-11b trailing \\r: label equals the sanitized name" "$cr_known" "$paml11"
+
+# TC-PAML-12 — a known agy model name carrying an EMBEDDED (non-trailing) \n.
+# This is a second, independently-reproducing variant of the same bug class
+# (do NOT test a trailing \n — command substitution strips that before it ever
+# reaches $resolved, which would be a false-negative regression test).
+nl_candidate="$(printf 'Gemini 3.5\nFlash (High)')"
+nl_known="${nl_candidate//[[:cntrl:]]/}"
+paml12=$(_run_agy_label_with_real_stub "$nl_known" "$nl_candidate")
+assert_no_cntrl "TC-PAML-12a embedded LF: label has no control char" "$paml12"
+assert_eq "TC-PAML-12b embedded LF: label equals the sanitized name" "$nl_known" "$paml12"
+
+# TC-PAML-14 — the non-agy verbatim early-return branch (name != "agy") must
+# remain a byte-for-byte pass-through, UNCHANGED by this fix, even when the
+# caller hands it a control-char-bearing value — that branch's contract is
+# "echo whatever came in" and is explicitly Out of Scope for issue #440.
+kiro_cntrl_candidate="$(printf 'claude-sonnet-4.6\r')"
+paml14=$(
+  AGENT_REVIEW_MODEL_KIRO="$kiro_cntrl_candidate"
+  source "$RESOLVE_LIB"
+  _resolve_review_agent_model_label kiro
+)
+assert_eq "TC-PAML-14 non-agy verbatim branch is untouched (control char preserved)" \
+  "$kiro_cntrl_candidate" "$paml14"
 
 # ---------------------------------------------------------------------------
 echo "=== TC-PAML-FAN: _review_fanout_model_label honesty (INV-58 producer) ==="

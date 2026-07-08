@@ -190,6 +190,13 @@ _resolve_review_agent_model_label() {
   # `local` shadow never leaks past this function.
   local AGENT_CMD="agy"
   local rc=0
+  # Strip control chars ONCE, before validation, so the value that validates is
+  # byte-identical to the value the rc=0 branch prints below — _agy_known_model
+  # only sanitizes its own internal copy for the grep check and never returns it,
+  # so without this the caller's copy could still carry e.g. a trailing \r or an
+  # embedded \n through to the rc=0 printf. Mirrors _agy_build_model_args's
+  # up-front strip in adapters/agy.sh.
+  resolved="${resolved//[[:cntrl:]]/}"
   _agy_known_model "$resolved" || rc=$?
   case "$rc" in
     0)  printf '%s' "$resolved" ;;                              # known agy id → ran as-is
