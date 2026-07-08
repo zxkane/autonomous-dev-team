@@ -57,7 +57,7 @@ Placement: replaces the existing swap-check block in `_gate_check_signals` (`dis
 
 `dispatch-local.sh`'s own design comment block above `_gate_check_signals` (the "proving per-signal independence, not merely an OR-of-everything" paragraph) is updated to match: three signals remain independent for that rationale; the swap signal is called out as the one exception, with a one-line pointer to this doc.
 
-`docs/designs/lane-containment-gc.md` §4-C6 gets a short amendment pointer (not a rewrite — that doc is the historical parent design) noting that the swap signal's independence assumption was revised by #441; see this doc for the current behavior.
+`docs/designs/lane-containment-gc.md` §4-C6 is **left byte-identical to the prework branch copy** — `tests/unit/test-lane-gc-p1-source-hygiene.sh`'s `TC-LGC1-040` hard-pins that file's SHA-256, so no amendment pointer is added there. The pointer to this doc lives in INV-119's amendment note (`docs/pipeline/invariants.md`) instead, which is the correct place per the repo's existing "Numbering note" convention for later-PR revisions of an earlier invariant's assumption.
 
 ## Test changes
 
