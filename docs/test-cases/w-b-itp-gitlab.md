@@ -157,8 +157,13 @@ true` in its `.meta`).
   `OWNER_REPO="group/subgroup/project"` (slash-bearing) is URL-encoded via
   `_gl_urlencode` before the lookup path is built. `state=opened` → `OPEN`,
   `state=closed` → `CLOSED` (uppercase tokens per §3.1 W1b precedent).
+  **[#439]** OUT_VAR is the literal `state` — matches the REAL production
+  call site (`lib-dispatch.sh`'s `check_deps_resolved` calls
+  `resolve_dep_state ... state`). The leaf's internal locals MUST NOT
+  collide with this name — see #439, where an unprefixed `local state`
+  shadowed the caller's out-var and every write silently never reached it.
 - **TC-WB-081**: fail-SOFT — `_gl_api` rc≠0 → empty out-var, leaf rc 0 (caller
-  fail-safe-blocks).
+  fail-safe-blocks). Also uses the literal out-var `state` (#439).
 - **TC-WB-082**: no per-dep-repo token mint under [INV-83] simplification
   (single `GITLAB_TOKEN` spans all accessible projects); assert the leaf
   never sources `gh-app-token.sh` and never references a `_DEP_TOKEN_CACHE`.

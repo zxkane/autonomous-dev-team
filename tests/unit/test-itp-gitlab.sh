@@ -632,11 +632,14 @@ echo "=== TC-WB-080..082: itp_gitlab_resolve_dep"
 echo "==================================================================="
 
 # TC-WB-080 slash-bearing group path, closed state → CLOSED (uppercase).
+# Out-var is the literal `state`, matching the real call site
+# (lib-dispatch.sh's check_deps_resolved) — see #439 / itp-gitlab.sh's
+# itp_gitlab_resolve_dep header comment for why that name matters here.
 _gl_stub_reset
 _GL_STUB_PAYLOAD="$PAYLOADS/gitlab-issue-view-crossproj.json"
-itp_gitlab_resolve_dep "group/subgroup/project" 99 _out
+itp_gitlab_resolve_dep "group/subgroup/project" 99 state
 assert_eq "TC-WB-080 slash-bearing path encoded via _gl_urlencode" \
-  "CLOSED" "$_out"
+  "CLOSED" "$state"
 argv=$(cat "$_GL_STUB_ARGV_FILE")
 # _gl_urlencode replaces / with %2F.
 assert_contains "TC-WB-080 encoded path used in URL" \
@@ -648,17 +651,17 @@ pl=$(mktemp); cat > "$pl" <<'JSON'
 {"iid": 99, "state": "opened"}
 JSON
 _GL_STUB_PAYLOAD="$pl"
-itp_gitlab_resolve_dep "g/p" 99 _out
-assert_eq "TC-WB-080 opened → OPEN" "OPEN" "$_out"
+itp_gitlab_resolve_dep "g/p" 99 state
+assert_eq "TC-WB-080 opened → OPEN" "OPEN" "$state"
 rm -f "$pl"
 
 # TC-WB-081 fail-SOFT (rc 0 with empty out-var on transport failure).
 _gl_stub_reset
 _GL_STUB_MODE="fail"
-_out="preserved"
-itp_gitlab_resolve_dep "g/p" 99 _out; rc=$?
+state="preserved"
+itp_gitlab_resolve_dep "g/p" 99 state; rc=$?
 assert_eq "TC-WB-081 fail-SOFT rc 0" "0" "$rc"
-assert_eq "TC-WB-081 fail-SOFT empty out-var" "" "$_out"
+assert_eq "TC-WB-081 fail-SOFT empty out-var" "" "$state"
 
 # TC-WB-082 [INV-83] simplification — no `_DEP_TOKEN_CACHE` declaration or
 # actual index access; no source of gh-app-token. (Doc-comment mentions of

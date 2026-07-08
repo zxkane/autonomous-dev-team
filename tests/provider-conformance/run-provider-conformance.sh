@@ -1602,6 +1602,17 @@ _assert_verb() {
     itp_resolve_dep)
       case "$ITP_NAME" in
         gitlab)
+          # [#439] Success-path assertion, previously missing (only the
+          # fail-soft branch below was exercised). Out-var is literally
+          # `state`, matching the real call site — see itp-gitlab.sh's
+          # itp_gitlab_resolve_dep header comment for why that name matters.
+          local _rd_gl_out
+          _rd_gl_out="$(_invoke _PCF_GL_ARGV_FILE="$work_root/.argv-gl-rd-439.json" 'itp_resolve_dep "group/project" 42 state; printf "%s" "$state"' 2>/dev/null)"
+          if [[ "$_rd_gl_out" == "OPEN" ]]; then
+            emit PASS "$verb" "[#439] success-path: closed/opened dependency resolves through out-var literally named 'state'"
+          else
+            emit FAIL "$verb" "[#439] success-path: expected OPEN, got '${_rd_gl_out:0:200}'"
+          fi
           # Fail-SOFT under HTTP 500 → empty out-var, rc 0.
           _run_gl_failsoft_assert "$verb" \
             'itp_resolve_dep "group/project" 42 _out; printf "%s" "$_out"' '^$'
