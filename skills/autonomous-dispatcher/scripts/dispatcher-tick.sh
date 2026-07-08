@@ -832,15 +832,13 @@ for i in $(seq 0 $((cand_count - 1))); do
       # bounded, matching the local-backend behavior instead of leaving a
       # theoretical unbounded active-label window if that probe's own
       # ceiling were ever relaxed.
-      _defer_max_age="${DEFER_MARKER_MAX_AGE_SECONDS:-900}"
-      [[ "$_defer_max_age" =~ ^[0-9]+$ ]] || _defer_max_age=900
+      _defer_max_age="$(_defer_marker_max_age)"
       if [[ "${PID_ALIVE_LAST_DEFERRED_AGE:-}" =~ ^[0-9]+$ ]] && [ "$PID_ALIVE_LAST_DEFERRED_AGE" -ge "$_defer_max_age" ]; then
         log "  issue #${issue_num} (${kind}) dispatch DEFERRED verdict has EXPIRED (age=${PID_ALIVE_LAST_DEFERRED_AGE}s >= ${_defer_max_age}s) — reverting label (not a crash), no comment, no retry decrement ([#444, B1])"
         _revert_defer_strand "$issue_num" "$kind"
       else
         log "  issue #${issue_num} (${kind}) dispatch DEFERRED by the wrapper host's back-pressure gate (age=${PID_ALIVE_LAST_DEFERRED_AGE:-?}s) — not a crash, no label change, no retry decrement ([Lane-GC PR-6 / INV-119])"
       fi
-      unset _defer_max_age
       continue
     fi
 
@@ -860,18 +858,13 @@ for i in $(seq 0 $((cand_count - 1))); do
       case "$_defer_verdict" in
         FRESH)
           log "  issue #${issue_num} (${kind}) has a FRESH local defer marker — not a crash, no label change, no retry decrement ([#444, B1])"
-          unset _defer_verdict
           continue
           ;;
         EXPIRED)
           log "  issue #${issue_num} (${kind}) has an EXPIRED local defer marker — reverting label (not a crash), no comment, no retry decrement ([#444, B1])"
           _revert_defer_strand "$issue_num" "$kind"
           rm -f "$(_local_defer_marker_path "$kind" "$issue_num")" 2>/dev/null || true
-          unset _defer_verdict
           continue
-          ;;
-        *)
-          unset _defer_verdict
           ;;
       esac
     fi

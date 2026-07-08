@@ -3674,6 +3674,19 @@ is_dispatch_deferred_rc() {
   [ "${1:-}" -eq 75 ] 2>/dev/null
 }
 
+# [#444] _defer_marker_max_age — echoes the effective DEFER_MARKER_MAX_AGE_SECONDS
+# (default 900), falling back to the default on a non-numeric operator typo.
+# Centralized (same rationale as is_dispatch_deferred_rc above) so the two
+# tick-side consumers of this threshold — Step 5's local-backend expiry
+# check (_local_defer_marker_verdict) and Step 5b's remote-DEFERRED age
+# bound (dispatcher-tick.sh) — read the SAME resolved value rather than
+# each re-deriving it from the raw env var independently.
+_defer_marker_max_age() {
+  local v="${DEFER_MARKER_MAX_AGE_SECONDS:-900}"
+  [[ "$v" =~ ^[0-9]+$ ]] || v=900
+  echo "$v"
+}
+
 # handle_dispatch_deferred <issue_num> <mode> <revert_from_label> <revert_to_label>
 #
 # The shared recovery action for an rc=75 `dispatch()` return under the
@@ -3809,10 +3822,13 @@ _local_defer_marker_path() {
 
 _local_defer_marker_verdict() {
   local kind="$1" issue_num="$2"
-  local lane_dir defer_marker attempt_marker defer_m attempt_m now age max_age
-  lane_dir="${ADT_STATE_ROOT:-$HOME/.local/state}/autonomous-${PROJECT_ID}/lanes"
+  local defer_marker attempt_marker defer_m attempt_m now age max_age
   defer_marker="$(_local_defer_marker_path "$kind" "$issue_num")"
-  attempt_marker="${lane_dir}/.attempt-${kind}-${issue_num}"
+  # Derived from defer_marker's own dirname rather than re-deriving
+  # ADT_STATE_ROOT/PROJECT_ID independently — the path root lives in exactly
+  # one place (_local_defer_marker_path), matching that function's own
+  # "never drift" rationale.
+  attempt_marker="$(dirname "$defer_marker")/.attempt-${kind}-${issue_num}"
 
   if [[ ! -f "$defer_marker" ]] || [[ -L "$defer_marker" ]]; then
     echo NONE
@@ -3834,8 +3850,7 @@ _local_defer_marker_verdict() {
 
   now=$(date -u +%s)
   age=$((now - defer_m))
-  max_age="${DEFER_MARKER_MAX_AGE_SECONDS:-900}"
-  [[ "$max_age" =~ ^[0-9]+$ ]] || max_age=900
+  max_age="$(_defer_marker_max_age)"
 
   if [[ "$age" -ge 0 ]] && [[ "$age" -lt "$max_age" ]]; then
     echo FRESH

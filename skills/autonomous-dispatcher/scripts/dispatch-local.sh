@@ -382,20 +382,22 @@ _gate_check_signals() {
 #     defer (this function can run on every single deferred dispatch). In
 #     token mode, ambient `gh` credentials are relied on as-is.
 #
-# Revert mapping (per TYPE, spec-verified — see the issue body's "Notes on
-# the mapping"): dev-new/dev-resume revert to `pending-dev` (not bare
-# `autonomous`) — Step 4's scan-pending-dev picks it up with no session
-# comment, dev-resume dispatches with an empty SESSION_ID, and
+# Revert mapping (per GATE_KIND, spec-verified — see the issue body's "Notes
+# on the mapping"): `issue` (dev-new/dev-resume) reverts to `pending-dev`
+# (not bare `autonomous`) — Step 4's scan-pending-dev picks it up with no
+# session comment, dev-resume dispatches with an empty SESSION_ID, and
 # autonomous-dev.sh normalizes resume+empty-session to MODE=new, so the
-# retry runs as a fresh dev with no double-dispatch window
-# (list_new_issues excludes pending-dev). review reverts to
-# `pending-review`.
+# retry runs as a fresh dev with no double-dispatch window (list_new_issues
+# excludes pending-dev). `review` reverts to `pending-review`. Keyed on
+# $GATE_KIND (already computed above via `_gate_kind_for_type`) rather than
+# re-switching on $TYPE — dev-new/dev-resume collapse to the same pair, which
+# is exactly the fact GATE_KIND already encodes; no need to re-derive it.
 _gate_revert_label() {
   local revert_from revert_to
-  case "$TYPE" in
-    dev-new|dev-resume) revert_from="in-progress"; revert_to="pending-dev" ;;
-    review)             revert_from="reviewing";   revert_to="pending-review" ;;
-    *)                  return 0 ;;
+  case "$GATE_KIND" in
+    issue)  revert_from="in-progress"; revert_to="pending-dev" ;;
+    review) revert_from="reviewing";   revert_to="pending-review" ;;
+    *)      return 0 ;;
   esac
 
   source "${LIB_DIR}/lib-issue-provider.sh" 2>/dev/null || true

@@ -1103,31 +1103,54 @@ mkdir -p "$LANE_DIR153"
 VERDICT153=$(ADT_STATE_ROOT="$STATE153" PROJECT_ID=lgc6-150 _local_defer_marker_verdict issue 153)
 assert_eq "TC-LGC6-153: no marker at all -> NONE" "NONE" "$VERDICT153"
 
-# End-to-end through dispatcher-tick.sh's Step 5 loop body (extracted, same
-# harness style as TC-LGC6-110) — EXPIRED reverts with no comment/retry,
-# marker removed; FRESH fast-returns untouched.
-STEP5_BODY_B1=$(awk '/^for i in \$\(seq 0 \$\(\(cand_count - 1\)\)\); do$/{f=1} f{print} f && /^done$/{exit}' "$TICK")
-if [[ -z "$STEP5_BODY_B1" ]] || ! grep -q 'B1 edit 1' <<<"$STEP5_BODY_B1"; then
-  assert_fail "TC-LGC6-154 (extraction control): Step 5 loop body extraction is empty or missing the B1 edit 1 marker — dispatcher-tick.sh structure drifted"
+# TC-LGC6-153b (CWE-59): a SYMLINKED defer marker must never be followed —
+# same posture as kill_stale_wrapper's PID-file symlink refusal elsewhere in
+# this codebase.
+STATE153B="$TMPROOT/state153b"; LANE_DIR153B="$STATE153B/autonomous-lgc6-150/lanes"
+mkdir -p "$LANE_DIR153B"
+echo "not a real marker" > "$TMPROOT/symlink-target-153b"
+ln -s "$TMPROOT/symlink-target-153b" "$LANE_DIR153B/.defer-issue-153"
+VERDICT153B=$(ADT_STATE_ROOT="$STATE153B" PROJECT_ID=lgc6-150 _local_defer_marker_verdict issue 153)
+assert_eq "TC-LGC6-153b: symlinked defer marker -> NONE (never followed, CWE-59)" "NONE" "$VERDICT153B"
+
+# TC-LGC6-153c: a defer marker with a FUTURE mtime (clock skew) must never be
+# misclassified as FRESH — a negative age fails the "age -ge 0" guard and
+# falls to EXPIRED, never a crash and never a false fast-return.
+STATE153C="$TMPROOT/state153c"; LANE_DIR153C="$STATE153C/autonomous-lgc6-150/lanes"
+mkdir -p "$LANE_DIR153C"
+NOW153C=$(date -u +%s)
+touch -d "@$((NOW153C + 1000))" "$LANE_DIR153C/.defer-issue-153"
+VERDICT153C=$(ADT_STATE_ROOT="$STATE153C" PROJECT_ID=lgc6-150 _local_defer_marker_verdict issue 153)
+assert_eq "TC-LGC6-153c: future-mtime defer marker (clock skew) -> EXPIRED (never misclassified as FRESH)" "EXPIRED" "$VERDICT153C"
+
+# End-to-end through dispatcher-tick.sh's Step 5 loop body — reuses the
+# SAME $STEP5_BODY extraction TC-LGC6-110 already captured above (identical
+# awk range, same file — no need for a second extraction) — EXPIRED reverts
+# with no comment/retry, marker removed; FRESH fast-returns untouched.
+if ! grep -q 'B1 edit 1' <<<"$STEP5_BODY"; then
+  assert_fail "TC-LGC6-154 (extraction control): the shared Step 5 loop body extraction is missing the B1 edit 1 marker — dispatcher-tick.sh structure drifted"
 else
-  assert_pass "TC-LGC6-154 (extraction control): extracted Step 5 loop body contains the B1 edit 1 marker"
+  assert_pass "TC-LGC6-154 (extraction control): the shared Step 5 loop body extraction contains the B1 edit 1 marker"
 fi
 
-_run_step5_b1_harness() {
-  local state_root="$1"
-  local harness="$TMPROOT/harness-b1-$$-$RANDOM.sh"
+# _run_step5_loop_harness <env_setup_lines> <pid_alive_stub_line> — shared
+# builder for both the local-backend (TC-LGC6-155/156/157) and remote-backend
+# (TC-LGC6-160/161) Step 5 loop-body drives: identical collaborator-stub set
+# and identical source-then-override ordering (source lib-dispatch.sh FIRST —
+# that's where the B1 helpers the extracted body calls, e.g.
+# _local_defer_marker_verdict/_revert_defer_strand, come from — THEN override
+# collaborators, since override order must be AFTER the source or the real
+# label_swap/itp_post_comment/count_retries/pid_alive definitions win instead
+# of these stubs). Only the env setup (ADT_STATE_ROOT/EXECUTION_BACKEND for
+# local vs. none for remote) and the pid_alive stub itself vary between the
+# two call sites.
+_run_step5_loop_harness() {
+  local env_setup_lines="$1" pid_alive_stub_line="$2"
+  local harness="$TMPROOT/harness-step5-$$-$RANDOM.sh"
   {
     echo '#!/bin/bash'
     echo 'set -u'
-    echo "ADT_STATE_ROOT='$state_root'"
-    echo "PROJECT_ID=lgc6-150"
-    echo "EXECUTION_BACKEND=local"
-    # Source lib-dispatch.sh FIRST (this is where the B1 helpers the
-    # extracted body calls — _local_defer_marker_verdict, _revert_defer_strand,
-    # _local_defer_marker_path — come from), THEN override the specific
-    # collaborator functions below — override order must be AFTER the
-    # source, or the real label_swap/itp_post_comment/count_retries/
-    # pid_alive definitions from the sourced file win instead of these stubs.
+    printf '%s\n' "$env_setup_lines"
     # shellcheck source=../../skills/autonomous-dispatcher/scripts/lib-dispatch.sh
     echo "source '$LIB_DISPATCH'"
     echo 'POSTED=0'
@@ -1139,7 +1162,7 @@ _run_step5_b1_harness() {
     echo 'itp_post_comment() { POSTED=$((POSTED + 1)); }'
     echo 'label_swap() { LABEL_SWAPS=$((LABEL_SWAPS + 1)); }'
     echo 'count_retries() { RETRY_CALLS=$((RETRY_CALLS + 1)); echo 0; }'
-    echo 'pid_alive() { PID_ALIVE_LAST_VERDICT=""; PID_ALIVE_LAST_DEFERRED_AGE=""; return 1; }'
+    printf '%s\n' "$pid_alive_stub_line"
     echo 'get_pid() { echo ""; }'
     echo 'fetch_pr_for_issue() { echo ""; }'
     echo 'ci_is_green() { return 1; }'
@@ -1151,13 +1174,22 @@ _run_step5_b1_harness() {
     echo 'declare -F metrics_emit >/dev/null 2>&1 || metrics_emit() { :; }'
     echo 'candidates='"'"'[{"number":9999,"labels":["autonomous","in-progress"]}]'"'"''
     echo 'cand_count=1'
-    echo "$STEP5_BODY_B1"
+    echo "$STEP5_BODY"
     echo 'echo "POSTED=$POSTED"'
     echo 'echo "LABEL_SWAPS=$LABEL_SWAPS"'
     echo 'echo "RETRY_CALLS=$RETRY_CALLS"'
   } > "$harness"
   bash "$harness" 2>&1
   rm -f "$harness"
+}
+
+_run_step5_b1_harness() {
+  local state_root="$1"
+  _run_step5_loop_harness \
+    "ADT_STATE_ROOT='$state_root'
+PROJECT_ID=lgc6-150
+EXECUTION_BACKEND=local" \
+    'pid_alive() { PID_ALIVE_LAST_VERDICT=""; PID_ALIVE_LAST_DEFERRED_AGE=""; return 1; }'
 }
 
 # TC-LGC6-155: EXPIRED marker -> revert (LABEL_SWAPS=1), no comment, no
@@ -1201,47 +1233,14 @@ assert_contains "TC-LGC6-157b: counter-test — no marker at all falls through t
 echo ""
 echo "=== TC-LGC6-160/161: [#444, B1 edit 2] remote DEFERRED fast-return gains an age bound ==="
 # ===========================================================================
-# Same Step 5 loop-body harness as TC-LGC6-110/111, but this time pid_alive
-# sets the REMOTE side channel (PID_ALIVE_LAST_VERDICT=DEFERRED) with an
-# age at/above vs. below DEFER_MARKER_MAX_AGE_SECONDS.
+# Same shared Step 5 loop-body harness as TC-LGC6-155/156/157, but this time
+# pid_alive sets the REMOTE side channel (PID_ALIVE_LAST_VERDICT=DEFERRED)
+# with an age at/above vs. below DEFER_MARKER_MAX_AGE_SECONDS.
 _run_step5_b1_remote_harness() {
   local age="$1"
-  local harness="$TMPROOT/harness-b1r-$$-$RANDOM.sh"
-  {
-    echo '#!/bin/bash'
-    echo 'set -u'
-    echo 'PROJECT_ID=lgc6-160'
-    # Source FIRST, override collaborator stubs AFTER (same ordering
-    # rationale as _run_step5_b1_harness above).
-    echo "source '$LIB_DISPATCH'"
-    echo 'POSTED=0'
-    echo 'LABEL_SWAPS=0'
-    echo 'RETRY_CALLS=0'
-    echo 'log() { :; }'
-    echo 'was_just_dispatched() { return 1; }'
-    echo 'is_within_grace_period() { return 1; }'
-    echo 'itp_post_comment() { POSTED=$((POSTED + 1)); }'
-    echo 'label_swap() { LABEL_SWAPS=$((LABEL_SWAPS + 1)); }'
-    echo 'count_retries() { RETRY_CALLS=$((RETRY_CALLS + 1)); echo 0; }'
-    echo "pid_alive() { PID_ALIVE_LAST_VERDICT=DEFERRED; PID_ALIVE_LAST_DEFERRED_AGE=$age; return 1; }"
-    echo 'get_pid() { echo ""; }'
-    echo 'fetch_pr_for_issue() { echo ""; }'
-    echo 'ci_is_green() { return 1; }'
-    echo 'pr_idle_seconds() { echo ""; }'
-    echo 'dev_near_success() { return 1; }'
-    echo 'review_near_success() { return 1; }'
-    echo 'recent_error_envelope() { echo ""; }'
-    echo 'last_reviewed_head() { echo ""; }'
-    echo 'declare -F metrics_emit >/dev/null 2>&1 || metrics_emit() { :; }'
-    echo 'candidates='"'"'[{"number":9999,"labels":["autonomous","in-progress"]}]'"'"''
-    echo 'cand_count=1'
-    echo "$STEP5_BODY_B1"
-    echo 'echo "POSTED=$POSTED"'
-    echo 'echo "LABEL_SWAPS=$LABEL_SWAPS"'
-    echo 'echo "RETRY_CALLS=$RETRY_CALLS"'
-  } > "$harness"
-  bash "$harness" 2>&1
-  rm -f "$harness"
+  _run_step5_loop_harness \
+    "PROJECT_ID=lgc6-160" \
+    "pid_alive() { PID_ALIVE_LAST_VERDICT=DEFERRED; PID_ALIVE_LAST_DEFERRED_AGE=$age; return 1; }"
 }
 
 # TC-LGC6-160: age >= 900 (default threshold) -> revert-not-crash (label
