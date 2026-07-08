@@ -219,6 +219,28 @@ OUT003d=$(sed '$d' <<<"$RAW003d")
 assert_eq "TC-LGC6-003d: high swap + non-numeric memory signal -> rc=75 (fails toward pre-#441 behavior)" "75" "$RC003d"
 assert_contains "TC-LGC6-003d: logged reason records the unresolved mem_available_mb value" "mem_available_mb=unavailable" "$OUT003d"
 
+# TC-LGC6-003e: a malformed GATE_SWAP_REQUIRES_MEM_MULTIPLE (operator typo in
+# autonomous.conf) must fall back to the documented default (3), never crash
+# the gate's arithmetic under `set -euo pipefail` (an unbound-variable error
+# there would abort _gate_check_signals before it reaches the lane-cap check,
+# and the caller's `reason="$(_gate_check_signals)"` would silently swallow
+# it into an EMPTY reason string rather than surfacing a diagnostic).
+PROJ003e="$TMPROOT/proj-swap-003e"
+_mk_fixture_project "$PROJ003e"
+STATE003e="$TMPROOT/state-swap-003e"
+OUT003e=$(
+  ADT_STATE_ROOT="$STATE003e" \
+  GATE_SWAP_REQUIRES_MEM_MULTIPLE="not-a-number" \
+  _GATE_LOAD1_PER_CORE_OVERRIDE="0.1" \
+  _GATE_MEM_AVAILABLE_MB_OVERRIDE="999999" \
+  _GATE_SWAP_PCT_OVERRIDE="99" \
+  _GATE_LIVE_LANE_COUNT_OVERRIDE="0" \
+  bash -c "cd '$PROJ003e' && bash scripts/dispatch-local.sh dev-new 9014" 2>&1
+)
+RC003e=$?
+assert_eq "TC-LGC6-003e: malformed GATE_SWAP_REQUIRES_MEM_MULTIPLE falls back to default -> rc=0 (no crash, rescue still applies)" "0" "$RC003e"
+assert_contains "TC-LGC6-003e: dispatch actually proceeded to spawn (proves the gate evaluated all signals, not just crashed silently)" "Dispatched dev-new for issue #9014" "$OUT003e"
+
 # ===========================================================================
 echo ""
 echo "=== TC-LGC6-010: healthy box (all four signals cleared) -> dispatch proceeds to spawn ==="

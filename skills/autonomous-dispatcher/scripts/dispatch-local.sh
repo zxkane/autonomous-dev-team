@@ -159,6 +159,11 @@ GATE_LOAD_PER_CORE="${GATE_LOAD_PER_CORE:-3}"
 GATE_MIN_MEM_MB="${GATE_MIN_MEM_MB:-2048}"
 GATE_SWAP_PCT="${GATE_SWAP_PCT:-90}"
 GATE_SWAP_REQUIRES_MEM_MULTIPLE="${GATE_SWAP_REQUIRES_MEM_MULTIPLE:-3}"
+# A non-numeric override (operator typo in autonomous.conf) would otherwise
+# crash the arithmetic below under `set -euo pipefail` with an unbound-
+# variable error, producing an empty/garbled defer reason instead of a
+# clean signal evaluation — fall back to the documented default instead.
+[[ "$GATE_SWAP_REQUIRES_MEM_MULTIPLE" =~ ^[0-9]+$ ]] || GATE_SWAP_REQUIRES_MEM_MULTIPLE=3
 MAX_TOTAL_CONCURRENT="${MAX_TOTAL_CONCURRENT:-12}"
 
 # `_gate_kind_for_type` maps dispatch-local.sh's own TYPE vocabulary
