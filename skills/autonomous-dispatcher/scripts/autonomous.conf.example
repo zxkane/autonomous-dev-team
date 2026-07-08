@@ -761,6 +761,21 @@ LANE_MEMORY_MAX=
 # adjacent integers tick to tick).
 # GATE_SWAP_PCT=90
 #
+# GATE_SWAP_REQUIRES_MEM_MULTIPLE ([#441], default 3) — the swap signal
+# above only FIRES the gate when mem_available_mb is ALSO below
+# GATE_MIN_MEM_MB * this multiple (default 2048*3=6144 MB). Without this
+# rescue, a large-RAM host with a comparatively small, rarely-cycled swap
+# file can have swap_pct sit permanently above GATE_SWAP_PCT from stale
+# accumulation by processes entirely outside the dispatcher's own process
+# tree — with zero relationship to actual MemAvailable — deferring dispatch
+# indefinitely with no real resource constraint. Lower this (e.g. 2) on a
+# tighter box to restore more of the old early-warning sensitivity; raise
+# it (e.g. 4+) to make the rescue apply more readily. Recommended: disable
+# the false-positive risk entirely on a large-RAM host by raising this, or
+# raise GATE_SWAP_PCT itself if swap accumulation from unrelated processes
+# is expected and tolerated.
+# GATE_SWAP_REQUIRES_MEM_MULTIPLE=3
+#
 # MAX_TOTAL_CONCURRENT — GLOBAL live-lane cap, counted ACROSS every project
 # sharing this box's lane registry (distinct from MAX_CONCURRENT above,
 # which is per-project and governs Steps 2-4's own fan-out). Default 12.

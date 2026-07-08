@@ -71,7 +71,8 @@ PROJECTS+=( "/data/git/myrepo-local/scripts/autonomous.conf" )
 # host via the remote project's own autonomous.conf, NOT this dispatcher-side
 # file — listed here only as a reminder that they exist; see
 # autonomous.conf.example for the authoritative documentation):
-#   GATE_LOAD_PER_CORE, GATE_MIN_MEM_MB, GATE_SWAP_PCT, MAX_TOTAL_CONCURRENT
+#   GATE_LOAD_PER_CORE, GATE_MIN_MEM_MB, GATE_SWAP_PCT,
+#   GATE_SWAP_REQUIRES_MEM_MULTIPLE, MAX_TOTAL_CONCURRENT
 #
 # DEFER_MARKER_MAX_AGE_SECONDS (default 900, 15 min) — bounds how long the
 # remote liveness probe (liveness-check-remote-aws-ssm.sh) treats a defer

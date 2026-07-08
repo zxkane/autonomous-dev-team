@@ -103,11 +103,13 @@ _run_dispatch() {
 
 # ===========================================================================
 echo ""
-echo "=== TC-LGC6-001..004: each signal fires INDEPENDENTLY -> exit 75 + marker + logged reason ==="
+echo "=== TC-LGC6-001/002/004: load, mem-floor, lane-cap each fire INDEPENDENTLY -> exit 75 + marker + logged reason ==="
 # ===========================================================================
 # Each case sets ONE signal to a distressed value and the other three to a
 # healthy baseline, so a pass proves that ONE signal alone is sufficient to
-# fire the gate — not merely that "some combination" fires it.
+# fire the gate — not merely that "some combination" fires it. The swap
+# signal is NOT part of this loop as of [#441] — it is no longer strictly
+# independent (see the dedicated TC-LGC6-003/003b/003c/003d block below).
 _run_signal_case() {
   local sig="$1" issue="$2" load="$3" mem="$4" swap="$5" lanes="$6"
   local proj="$TMPROOT/proj-sig-$sig"
@@ -125,7 +127,6 @@ _run_signal_case() {
 for spec in \
   "load:9001:99:999999:0:0:load1_per_core" \
   "mem:9002:0.1:1:0:0:mem_available_mb" \
-  "swap:9003:0.1:999999:99:0:swap_pct" \
   "lanecap:9004:0.1:999999:0:999:live_lane_count" \
 ; do
   IFS=: read -r sig issue load mem swap lanes reason_substr <<<"$spec"
@@ -142,6 +143,118 @@ for spec in \
     assert_fail "TC-LGC6-00x ($sig): defer marker NOT touched at $MARKER"
   fi
 done
+
+# ===========================================================================
+echo ""
+echo "=== TC-LGC6-003/003b/003c/003d: swap signal rescued by memory headroom ([#441], amends INV-119) ==="
+# ===========================================================================
+# GATE_MIN_MEM_MB default 2048, GATE_SWAP_REQUIRES_MEM_MULTIPLE default 3 ->
+# rescue floor (swap_mem_gate_mb) = 6144.
+_run_swap_case() {
+  local case_id="$1" issue="$2" swap="$3" mem="$4"
+  local proj="$TMPROOT/proj-swap-$case_id"
+  _mk_fixture_project "$proj"
+  local state="$TMPROOT/state-swap-$case_id"
+  # mem is always set explicitly (never left to fall through to the real
+  # box_health reading, which would leak the test-runner box's own actual
+  # MemAvailable). "unavailable" is simulated with a non-numeric override
+  # value ("unavailable") — _gate_override returns it verbatim (env override
+  # always wins), and the gate's own `[[ "$memavail" =~ ^[0-9]+$ ]]` check
+  # then correctly treats it as unknown, exactly as an absent box_health
+  # field would be treated.
+  ADT_STATE_ROOT="$state" \
+  _GATE_LOAD1_PER_CORE_OVERRIDE="0.1" \
+  _GATE_MEM_AVAILABLE_MB_OVERRIDE="$mem" \
+  _GATE_SWAP_PCT_OVERRIDE="$swap" \
+  _GATE_LIVE_LANE_COUNT_OVERRIDE="0" \
+  bash -c "cd '$proj' && bash scripts/dispatch-local.sh dev-new $issue" 2>&1
+  echo "__RC__:$?"
+}
+
+# TC-LGC6-003: high swap (99) + abundant memory (999999) -> dispatch now
+# PROCEEDS (pre-#441 behavior: exit 75). This is the reported false-positive
+# case (large-RAM host, stale swap accumulation, healthy MemAvailable).
+RAW003=$(_run_swap_case "003" 9010 "99" "999999")
+RC003=$(grep -o '__RC__:[0-9]*' <<<"$RAW003" | cut -d: -f2)
+OUT003=$(sed '$d' <<<"$RAW003")
+assert_eq "TC-LGC6-003: high swap + abundant memory -> rc=0 (memory-headroom rescue, [#441])" "0" "$RC003"
+assert_contains "TC-LGC6-003: dispatch actually proceeded to spawn" "Dispatched dev-new for issue #9010" "$OUT003"
+if [[ -f "$TMPROOT/state-swap-003/autonomous-gatetest/lanes/.defer-issue-9010" ]]; then
+  assert_fail "TC-LGC6-003: no defer marker should exist when the swap signal is rescued by memory headroom"
+else
+  assert_pass "TC-LGC6-003: no defer marker when the swap signal is rescued by memory headroom"
+fi
+
+# TC-LGC6-003b: high swap (91) + mid-band memory (5000 — below the default
+# rescue floor 6144, above the hard floor 2048) -> still DEFERS. Proves the
+# early-warning band survives: memory headroom shrinking toward the hard
+# floor while swap is also saturated is still informative.
+RAW003b=$(_run_swap_case "003b" 9011 "91" "5000")
+RC003b=$(grep -o '__RC__:[0-9]*' <<<"$RAW003b" | cut -d: -f2)
+OUT003b=$(sed '$d' <<<"$RAW003b")
+assert_eq "TC-LGC6-003b: high swap + mid-band memory (below rescue floor) -> rc=75 (early-warning band preserved)" "75" "$RC003b"
+assert_contains "TC-LGC6-003b: logged reason names both swap_pct and the rescue floor" "swap_mem_gate_mb" "$OUT003b"
+
+# TC-LGC6-003c: swap within limit (89) + the SAME mid-band memory (5000) ->
+# dispatch PROCEEDS. Proves the new memory check inside the swap branch only
+# engages when swap itself is already over GATE_SWAP_PCT — no new
+# false-positive introduced on the memory axis alone (that's still owned
+# entirely by the pre-existing, unchanged GATE_MIN_MEM_MB branch).
+RAW003c=$(_run_swap_case "003c" 9012 "89" "5000")
+RC003c=$(grep -o '__RC__:[0-9]*' <<<"$RAW003c" | cut -d: -f2)
+OUT003c=$(sed '$d' <<<"$RAW003c")
+assert_eq "TC-LGC6-003c: swap within limit + mid-band memory -> rc=0 (swap branch doesn't engage when swap itself is healthy)" "0" "$RC003c"
+assert_contains "TC-LGC6-003c: dispatch actually proceeded to spawn" "Dispatched dev-new for issue #9012" "$OUT003c"
+
+# TC-LGC6-003d: high swap (91) + memory signal non-numeric/unavailable ->
+# still DEFERS. Proves the fail-toward-pre-#441-behavior default when the
+# rescue evidence itself is unknown (absence of evidence is not evidence of
+# headroom). "unavailable" is a non-numeric override value — the env
+# override always wins over the real box_health reading (see
+# _run_swap_case's own comment), so this is deterministic regardless of the
+# test-runner box's actual MemAvailable.
+RAW003d=$(_run_swap_case "003d" 9013 "91" "unavailable")
+RC003d=$(grep -o '__RC__:[0-9]*' <<<"$RAW003d" | cut -d: -f2)
+OUT003d=$(sed '$d' <<<"$RAW003d")
+assert_eq "TC-LGC6-003d: high swap + non-numeric memory signal -> rc=75 (fails toward pre-#441 behavior)" "75" "$RC003d"
+assert_contains "TC-LGC6-003d: logged reason records the unresolved mem_available_mb value" "mem_available_mb=unavailable" "$OUT003d"
+
+# TC-LGC6-003e: a malformed GATE_SWAP_REQUIRES_MEM_MULTIPLE (operator typo in
+# autonomous.conf) must fall back to the documented default (3), never crash
+# the gate's arithmetic under `set -euo pipefail` (an unbound-variable error
+# there would abort _gate_check_signals before it reaches the lane-cap check,
+# and the caller's `reason="$(_gate_check_signals)"` would silently swallow
+# it into an EMPTY reason string rather than surfacing a diagnostic).
+PROJ003e="$TMPROOT/proj-swap-003e"
+_mk_fixture_project "$PROJ003e"
+STATE003e="$TMPROOT/state-swap-003e"
+OUT003e=$(
+  ADT_STATE_ROOT="$STATE003e" \
+  GATE_SWAP_REQUIRES_MEM_MULTIPLE="not-a-number" \
+  _GATE_LOAD1_PER_CORE_OVERRIDE="0.1" \
+  _GATE_MEM_AVAILABLE_MB_OVERRIDE="999999" \
+  _GATE_SWAP_PCT_OVERRIDE="99" \
+  _GATE_LIVE_LANE_COUNT_OVERRIDE="0" \
+  bash -c "cd '$PROJ003e' && bash scripts/dispatch-local.sh dev-new 9014" 2>&1
+)
+RC003e=$?
+assert_eq "TC-LGC6-003e: malformed GATE_SWAP_REQUIRES_MEM_MULTIPLE falls back to default -> rc=0 (no crash, rescue still applies)" "0" "$RC003e"
+assert_contains "TC-LGC6-003e: dispatch actually proceeded to spawn (proves the gate evaluated all signals, not just crashed silently)" "Dispatched dev-new for issue #9014" "$OUT003e"
+
+# TC-LGC6-003f: high swap (91) + genuinely low memory (1000 — below the hard
+# floor 2048, i.e. the true OOM-adjacent case from issue #441's second
+# Testing Requirement) -> still DEFERS, exactly as before #441. At this
+# memory level the pre-existing, unchanged mem-floor check (checked BEFORE
+# the swap branch in the fixed load/mem/swap/lanecap order) fires first and
+# short-circuits — the swap branch's own internal rescue check is never even
+# reached. This is the "belt and suspenders" case the design doc's behavior
+# table calls out explicitly: genuine pressure is still caught, just by the
+# pre-existing signal rather than the new swap-branch predicate.
+RAW003f=$(_run_swap_case "003f" 9015 "91" "1000")
+RC003f=$(grep -o '__RC__:[0-9]*' <<<"$RAW003f" | cut -d: -f2)
+OUT003f=$(sed '$d' <<<"$RAW003f")
+assert_eq "TC-LGC6-003f: high swap + genuinely low memory (below hard floor) -> rc=75 (genuine-pressure case still defers)" "75" "$RC003f"
+assert_contains "TC-LGC6-003f: logged reason names the mem-floor signal (fires before the swap branch is reached)" "mem_available_mb=1000 < GATE_MIN_MEM_MB=2048" "$OUT003f"
 
 # ===========================================================================
 echo ""
