@@ -597,7 +597,7 @@ assert_contains "TC-RGH-060: gitlab/gitlab + hook → chp_request_changes SKIP b
 assert_contains "TC-RGH-060: gitlab/gitlab + hook → chp_trigger_bot SKIP by cap (#419-r4)" \
   "chp_trigger_bot SKIP (cap: review_bots)" "$gl_hook_out"
 assert_contains "TC-RGH-060: gitlab/gitlab + hook → CONFORMANCE-SUMMARY line" \
-  "CONFORMANCE-SUMMARY total=37 pass=35 fail=0 skip=2 pending=0" "$gl_hook_out"
+  "CONFORMANCE-SUMMARY total=38 pass=36 fail=0 skip=2 pending=0" "$gl_hook_out"
 
 # ===========================================================================
 echo ""

@@ -403,24 +403,30 @@ itp_gitlab_list_comments() {
 # accordingly stays as a no-op (see below).
 itp_gitlab_resolve_dep() {
   local owner_repo="$1" num="$2" out_var="$3"
-  local encoded raw state resolved=""
+  # Locals are `_`-prefixed (matching itp_github_resolve_dep's `_state`
+  # convention) so none of them can collide with whatever name the caller
+  # passes as `out_var` — production callers pass the literal `"state"`
+  # (lib-dispatch.sh's check_deps_resolved), and `printf -v "$out_var"`
+  # resolves by name in THIS scope, so an unprefixed `local state` here
+  # would shadow the caller's variable and the write would never reach it.
+  local _encoded _raw _state _resolved=""
   # _gl_urlencode is defined by lib-gitlab-transport.sh (or the unit test's
   # local stub). Guard on its presence so the leaf fails soft (empty
   # out-var, rc 0) rather than aborting under set -e if the transport lib
   # isn't sourced yet on some ad-hoc invocation path.
   if declare -F _gl_urlencode >/dev/null 2>&1; then
-    encoded=$(_gl_urlencode "$owner_repo" 2>/dev/null) || encoded=""
+    _encoded=$(_gl_urlencode "$owner_repo" 2>/dev/null) || _encoded=""
   else
-    encoded=""
+    _encoded=""
   fi
-  if [[ -n "$encoded" ]]; then
-    raw=$(_gl_api "/projects/${encoded}/issues/${num}" 2>/dev/null) || raw=""
-    if [[ -n "$raw" ]]; then
-      state=$(printf '%s' "$raw" | jq -r '.state // ""' 2>/dev/null) || state=""
-      resolved=$(_itp_gitlab_normalize_state "$state")
+  if [[ -n "$_encoded" ]]; then
+    _raw=$(_gl_api "/projects/${_encoded}/issues/${num}" 2>/dev/null) || _raw=""
+    if [[ -n "$_raw" ]]; then
+      _state=$(printf '%s' "$_raw" | jq -r '.state // ""' 2>/dev/null) || _state=""
+      _resolved=$(_itp_gitlab_normalize_state "$_state")
     fi
   fi
-  printf -v "$out_var" '%s' "$resolved"
+  printf -v "$out_var" '%s' "$_resolved"
 }
 
 # itp_gitlab_mark_checkbox <issue> <new-body>
