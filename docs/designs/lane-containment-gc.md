@@ -342,6 +342,8 @@ Opportunistic `adt-gc.sh --quick || true` at the top of every `dispatch-local.sh
 
 ### C6. Back-pressure admission gate (amplifier) — with remote DEFERRED plumbing
 
+> **Amendment (2026-07-08, #441):** the swap-used% signal's independence assumption below was revised — it false-positived on large-RAM hosts with stale swap accumulation unrelated to dispatcher-managed processes. The signal now also requires `MemAvailable` to be below a headroom multiple of `GATE_MIN_MEM_MB` before it fires. This section is the historical parent design and is not rewritten in place; see `docs/designs/back-pressure-swap-mem-headroom-441.md` and INV-119's amendment note (`docs/pipeline/invariants.md`) for the current behavior.
+
 In `dispatch-local.sh`, before `kill_stale_wrapper`/spawn:
 
 - **Signals:** `load1/ncpu > ${GATE_LOAD_PER_CORE:-3}` (`/proc/loadavg` ∥ `sysctl -n vm.loadavg`; `nproc` ∥ `sysctl -n hw.ncpu`); `MemAvailable < ${GATE_MIN_MEM_MB:-2048}` (`/proc/meminfo` ∥ `vm_stat` free+inactive×pagesize); swap-used% > `${GATE_SWAP_PCT:-90}` (`/proc/meminfo` ∥ `sysctl vm.swapusage`); live-lane registry count across **all** `autonomous-*/lanes/` ≥ `${MAX_TOTAL_CONCURRENT:-12}` (the registry finally makes a cross-project global cap possible; per-project `MAX_CONCURRENT` unchanged).

@@ -10,9 +10,11 @@ plumbing so a deferral is never misattributed as a crash:
 
 1. **`skills/autonomous-dispatcher/scripts/dispatch-local.sh`**: a
    back-pressure admission gate before `kill_stale_wrapper`/spawn — four
-   independent signals (load/core, MemAvailable, swap%, global live-lane
-   count), one bounded `adt-gc.sh --quick` reclaim attempt on refusal, a
-   re-check-once, a defer marker + `exit 75` on persistent distress.
+   signals (load/core, MemAvailable, swap%, global live-lane count; three
+   strictly independent, the swap signal conditionally rescued by memory
+   headroom as of **#441**, see below), one bounded `adt-gc.sh --quick`
+   reclaim attempt on refusal, a re-check-once, a defer marker + `exit 75`
+   on persistent distress.
 2. **`lib-lane.sh::lane_global_live_count`** (new): registry-driven global
    live-lane count across every project, falling back to a PID-file count
    on a fresh host with no registry yet. `box_health` gains macOS/BSD
@@ -31,15 +33,28 @@ the CI `hermetic-unit` job's `tests/unit/test-*.sh` glob) plus the E2E
 `tests/unit/test-lane-gc-p6-gate-e2e.sh`, and its own dedicated CI job). Run
 the unit suite under `env -u PROJECT_DIR bash ...` too, for CI parity.
 
-## The four gate signals fire independently (AC: "each signal independently
-→ exit 75 + marker + logged reason")
+## Load/mem-floor/lane-cap signals fire independently (AC: "each signal
+independently → exit 75 + marker + logged reason")
 
 | ID | Scenario | Expected |
 |----|----------|----------|
 | TC-LGC6-001 | `_GATE_LOAD1_PER_CORE_OVERRIDE=99`, other three signals healthy, real `dispatch-local.sh dev-new` invocation | exit 75; stderr names `load1_per_core`; defer marker touched naming the same reason |
 | TC-LGC6-002 | `_GATE_MEM_AVAILABLE_MB_OVERRIDE=1`, other three healthy | exit 75; stderr/marker name `mem_available_mb` |
-| TC-LGC6-003 | `_GATE_SWAP_PCT_OVERRIDE=99`, other three healthy | exit 75; stderr/marker name `swap_pct` |
 | TC-LGC6-004 | `_GATE_LIVE_LANE_COUNT_OVERRIDE=999`, other three healthy | exit 75; stderr/marker name `live_lane_count` |
+
+## Swap signal — memory-headroom rescue (**#441**, amends INV-119; AC: "swap
+false-positive on large-RAM hosts no longer defers when MemAvailable is
+abundant; genuine-pressure case still defers")
+
+`GATE_MIN_MEM_MB` default 2048, `GATE_SWAP_REQUIRES_MEM_MULTIPLE` default 3
+→ rescue floor (`swap_mem_gate_mb`) = 6144 MB with defaults.
+
+| ID | Scenario | Expected |
+|----|----------|----------|
+| TC-LGC6-003 | `_GATE_SWAP_PCT_OVERRIDE=99`, `_GATE_MEM_AVAILABLE_MB_OVERRIDE=999999` (abundant), other two healthy | exit **0** (was exit 75 pre-#441) — dispatch actually proceeds to spawn; no defer marker. The reported false-positive case (large-RAM host, healthy MemAvailable). |
+| TC-LGC6-003b | `_GATE_SWAP_PCT_OVERRIDE=91`, `_GATE_MEM_AVAILABLE_MB_OVERRIDE=5000` (mid-band: below the 6144 rescue floor, above the 2048 hard floor), other two healthy | exit 75; stderr/marker name `swap_mem_gate_mb` — early-warning band preserved |
+| TC-LGC6-003c | `_GATE_SWAP_PCT_OVERRIDE=89` (within limit), `_GATE_MEM_AVAILABLE_MB_OVERRIDE=5000` (same mid-band value as 003b), other two healthy | exit 0 — the memory check inside the swap branch never engages when swap itself is not over `GATE_SWAP_PCT` |
+| TC-LGC6-003d | `_GATE_SWAP_PCT_OVERRIDE=91`, `_GATE_MEM_AVAILABLE_MB_OVERRIDE` set to a non-numeric/unavailable value, other two healthy | exit 75; stderr/marker record the unresolved `mem_available_mb` value — fails toward the pre-#441 behavior when the rescue evidence itself is unknown |
 
 ## Healthy box proceeds to spawn (AC: "healthy box → proceeds")
 

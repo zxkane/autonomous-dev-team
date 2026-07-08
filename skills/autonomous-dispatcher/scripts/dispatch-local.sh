@@ -103,20 +103,33 @@ _run_adt_gc_quick
 # ---------------------------------------------------------------------------
 #
 # Refuses to spawn (exit 75, EX_TEMPFAIL) when box distress crosses any of
-# four INDEPENDENT thresholds — load/core, available memory, swap%, or the
-# GLOBAL (cross-project) live-lane count — so a busy/thrashing box stops
-# feeding the OOM-feedback amplifier the design's §1 problem statement
-# describes: pressure kills wrappers non-gracefully, each death sheds a new
-# orphan batch, which raises pressure further. The gate is PURE admission
+# four thresholds — load/core, available memory, swap%, or the GLOBAL
+# (cross-project) live-lane count — so a busy/thrashing box stops feeding
+# the OOM-feedback amplifier the design's §1 problem statement describes:
+# pressure kills wrappers non-gracefully, each death sheds a new orphan
+# batch, which raises pressure further. The gate is PURE admission
 # control — it never kills or signals any process; a deferred dispatch is
 # simply picked up again on the next tick (rc=75 attribution lives in
 # lib-dispatch.sh's INV-26 exit-code table, this same PR).
+#
+# Three of the four signals (load/core, MemAvailable floor, global live-lane
+# count) remain strictly INDEPENDENT — any one alone fires the gate. The
+# swap signal is the one exception ([#441] amendment to INV-119): it is
+# conditionally gated by available-memory headroom (see the swap branch in
+# `_gate_check_signals` below) because swap-used% on a large-RAM host with a
+# small, rarely-cycled swap file can sit permanently above GATE_SWAP_PCT from
+# stale accumulation unrelated to dispatcher-managed processes, with zero
+# relationship to actual MemAvailable — see docs/designs/back-pressure-swap-
+# mem-headroom-441.md for the false-positive mechanism and fix rationale.
 #
 # Knobs (autonomous.conf / dispatcher.conf, all optional — see
 # autonomous.conf.example / dispatcher.conf.example):
 #   GATE_LOAD_PER_CORE   (default 3)     — load1 / nproc threshold
 #   GATE_MIN_MEM_MB      (default 2048)  — MemAvailable floor (MB)
 #   GATE_SWAP_PCT        (default 90)    — swap-used percentage ceiling
+#   GATE_SWAP_REQUIRES_MEM_MULTIPLE (default 3) — the swap signal only fires
+#     when mem_available_mb is ALSO below GATE_MIN_MEM_MB * this multiple
+#     ([#441]); see the swap branch below.
 #   MAX_TOTAL_CONCURRENT (default 12)    — GLOBAL live-lane cap, cross-project
 #     (distinct from the existing per-project MAX_CONCURRENT — the registry
 #     is what finally makes a CROSS-project cap possible; MAX_CONCURRENT is
@@ -145,6 +158,7 @@ _run_adt_gc_quick
 GATE_LOAD_PER_CORE="${GATE_LOAD_PER_CORE:-3}"
 GATE_MIN_MEM_MB="${GATE_MIN_MEM_MB:-2048}"
 GATE_SWAP_PCT="${GATE_SWAP_PCT:-90}"
+GATE_SWAP_REQUIRES_MEM_MULTIPLE="${GATE_SWAP_REQUIRES_MEM_MULTIPLE:-3}"
 MAX_TOTAL_CONCURRENT="${MAX_TOTAL_CONCURRENT:-12}"
 
 # `_gate_kind_for_type` maps dispatch-local.sh's own TYPE vocabulary
@@ -240,7 +254,7 @@ _gate_override() {
 }
 
 _gate_check_signals() {
-  local health="" load1pc="" memavail="" swappct="" livecount=""
+  local health="" load1pc="" memavail="" swappct="" livecount="" swap_mem_gate_mb=""
 
   if [[ -n "${_GATE_LOAD1_PER_CORE_OVERRIDE:-}${_GATE_MEM_AVAILABLE_MB_OVERRIDE:-}${_GATE_SWAP_PCT_OVERRIDE:-}${_GATE_LOAD1_PER_CORE_OVERRIDE_FILE:-}${_GATE_MEM_AVAILABLE_MB_OVERRIDE_FILE:-}${_GATE_SWAP_PCT_OVERRIDE_FILE:-}" ]] \
      || declare -F box_health >/dev/null 2>&1; then
@@ -261,11 +275,25 @@ _gate_check_signals() {
     return 1
   fi
 
+  # [#441] The swap signal is rescued by memory headroom: swap_pct over the
+  # ceiling only fires the gate when mem_available_mb is ALSO below
+  # GATE_MIN_MEM_MB * GATE_SWAP_REQUIRES_MEM_MULTIPLE — a large-RAM host
+  # with a small, rarely-cycled swap file can otherwise sit permanently
+  # above GATE_SWAP_PCT from stale accumulation unrelated to
+  # dispatcher-managed processes, with abundant real MemAvailable. Absent/
+  # non-numeric memavail fails TOWARD the pre-#441 behavior (fires) — an
+  # unknown rescue signal is never treated as headroom. Reuses the SAME
+  # $memavail the mem-floor check above already resolved (unconditionally
+  # reachable here: that check only returns early on ITS OWN failure).
   swappct="$(_gate_override "${_GATE_SWAP_PCT_OVERRIDE:-}" "${_GATE_SWAP_PCT_OVERRIDE_FILE:-}" || true)"
   [[ -n "$swappct" ]] || swappct="$(_gate_health_field "$health" swap_pct || true)"
   if [[ "$swappct" =~ ^[0-9]+$ ]] && [[ "$swappct" -gt "$GATE_SWAP_PCT" ]]; then
-    printf 'swap_pct=%s > GATE_SWAP_PCT=%s' "$swappct" "$GATE_SWAP_PCT"
-    return 1
+    swap_mem_gate_mb=$((GATE_MIN_MEM_MB * GATE_SWAP_REQUIRES_MEM_MULTIPLE))
+    if ! [[ "$memavail" =~ ^[0-9]+$ ]] || [[ "$memavail" -lt "$swap_mem_gate_mb" ]]; then
+      printf 'swap_pct=%s > GATE_SWAP_PCT=%s and mem_available_mb=%s < swap_mem_gate_mb=%s' \
+        "$swappct" "$GATE_SWAP_PCT" "${memavail:-unknown}" "$swap_mem_gate_mb"
+      return 1
+    fi
   fi
 
   livecount="$(_gate_override "${_GATE_LIVE_LANE_COUNT_OVERRIDE:-}" "${_GATE_LIVE_LANE_COUNT_OVERRIDE_FILE:-}" || true)"
