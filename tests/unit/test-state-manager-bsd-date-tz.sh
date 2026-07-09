@@ -51,19 +51,27 @@ assert_exit() {
 # additions/removals of empty dirs are also caught.
 snapshot_dir() {
   local dir="$1"
-  local sha_bin=""
+  local -a sha_cmd=()
   [[ -d "$dir" ]] || return 0
   if command -v sha256sum >/dev/null 2>&1; then
-    sha_bin="sha256sum"
+    sha_cmd=(sha256sum)
   elif command -v shasum >/dev/null 2>&1; then
-    sha_bin="shasum -a 256"
+    sha_cmd=(shasum -a 256)
   fi
   {
     find "$dir" -mindepth 1 -type d 2>/dev/null | LC_ALL=C sort | sed 's/^/DIR /'
-    if [[ -n "$sha_bin" ]]; then
-      find "$dir" -mindepth 1 -type f -print0 2>/dev/null \
-        | LC_ALL=C sort -z \
-        | xargs -0 -r "$sha_bin" 2>/dev/null \
+    if [[ ${#sha_cmd[@]} -gt 0 ]]; then
+      # Hash each file individually via a NUL-delimited read loop instead
+      # of `sort -z` + `xargs -0 -r`: both are GNU-only (BSD/macOS sort
+      # has no -z, and BSD xargs has no -r), so that pipeline silently
+      # produced zero hash lines on a stock macOS shell. This form also
+      # invokes the checksum tool as a proper argv array (`"${sha_cmd[@]}"`)
+      # rather than as a single string ("shasum -a 256"), which xargs
+      # would otherwise try to exec as one non-existent binary.
+      local f
+      while IFS= read -r -d '' f; do
+        "${sha_cmd[@]}" "$f" 2>/dev/null
+      done < <(find "$dir" -mindepth 1 -type f -print0 2>/dev/null) \
         | LC_ALL=C sort -k2
     else
       # Last-resort fallback if no checksum tool is available: fall back
@@ -248,11 +256,22 @@ run_check() {
 
 # Backdates a state file's timestamp by N minutes, using the REAL date
 # binary directly (test scaffolding, not the code under test).
+#
+# Tries GNU `date -d "N minutes ago"` first; on macOS/BSD, REAL_DATE is
+# the BSD `date` binary, which has no `-d` and exits non-zero (empty
+# stdout), so old_ts would silently become "" and the subsequent `check`
+# call would fail on an invalid timestamp -- passing TC-SMTZ-002 for the
+# wrong reason (bad input) instead of the real invariant (stale mark).
+# Falls back to BSD `date -v-NM`, which adjusts the current time by N
+# minutes without needing `-d`.
 backdate_state() {
   local project="$1" action="$2" minutes="$3"
   local state_file="$project/.claude/state/${action}.json"
   local old_ts
-  old_ts=$("$REAL_DATE" -u -d "$minutes minutes ago" +"%Y-%m-%dT%H:%M:%SZ")
+  old_ts=$("$REAL_DATE" -u -d "$minutes minutes ago" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null)
+  if [[ -z "$old_ts" ]]; then
+    old_ts=$("$REAL_DATE" -u -v"-${minutes}M" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null)
+  fi
   jq --arg ts "$old_ts" '.timestamp = $ts' "$state_file" > "$state_file.tmp" && mv "$state_file.tmp" "$state_file"
 }
 
