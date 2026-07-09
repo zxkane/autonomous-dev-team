@@ -145,7 +145,11 @@ check_action() {
       exit 1
     fi
     local state_time
-    state_time=$(date -d "$timestamp" +%s 2>/dev/null || date -j -f "%Y-%m-%dT%H:%M:%SZ" "$timestamp" +%s 2>/dev/null || echo "0")
+    # BSD `date -j -f` (macOS fallback) ignores the trailing `Z` and parses
+    # the timestamp as local time; `-u` forces UTC to match how it was
+    # written (line 74). GNU `date -d` already handles `Z` correctly, so
+    # only the BSD branch needs it. See issue #446.
+    state_time=$(date -d "$timestamp" +%s 2>/dev/null || date -u -j -f "%Y-%m-%dT%H:%M:%SZ" "$timestamp" +%s 2>/dev/null || echo "0")
     local current_time
     current_time=$(date +%s)
     local age=$((current_time - state_time))
