@@ -33,6 +33,18 @@ own `.agents/state/`.
 - Pre-fix: fails (exit 0, falsely "fresh") — age is deflated by the
   negative offset, masking real staleness.
 
+### TC-SMTZ-005: Negative-offset freshness (America/New_York, UTC-5)
+
+- Force BSD branch (shim rejects `-d`).
+- `TZ=America/New_York`.
+- `mark <action>` then immediately `check <action>` (no backdating).
+- Expect: exit 0 (fresh) with the fix applied.
+- Covers the mark→check *fresh* path under a negative offset, mirroring
+  TC-SMTZ-001's positive-offset fresh case. TC-SMTZ-002 alone only
+  exercises the negative-offset *stale* path, so this closes the gap for
+  an immediate mark→check under a negative offset (issue #446 review
+  finding, 2026-07-09).
+
 ### TC-SMTZ-003: GNU `date -d` branch unaffected (regression guard)
 
 - Do NOT force the BSD branch (real `date -d` available, as on this
@@ -51,8 +63,8 @@ own `.agents/state/`.
 
 ## Shim Contract (`fake date` binary)
 
-Placed ahead of the real `date` in `PATH` for TC-SMTZ-001/002 only. See
-the shim's contract comment in
+Placed ahead of the real `date` in `PATH` for TC-SMTZ-001/002/005 only.
+See the shim's contract comment in
 `tests/unit/test-state-manager-bsd-date-tz.sh` for the exact emulated
 semantics (passthrough for write/now calls, `-d` rejection to force the
 BSD fallthrough, and pre-fix vs post-fix `-j -f` emulation).

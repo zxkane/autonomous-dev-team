@@ -352,6 +352,24 @@ unset TZ
 
 # ===========================================================================
 echo ""
+echo "=== TC-SMTZ-005: forced-BSD branch + negative offset (America/New_York) is fresh ==="
+echo ""
+# Covers the mark->check *fresh* path under a negative UTC offset, mirroring
+# TC-SMTZ-001's positive-offset fresh case. TC-SMTZ-002 only exercises the
+# negative-offset *stale* path (after backdating), so a regression that broke
+# an immediate mark->check specifically under a negative offset (e.g. a sign
+# error that only manifests when the offset subtracts rather than adds) could
+# slip through with the suite still green. This closes that gap.
+PROJECT5="$TMPDIR/proj5"
+setup_project "$PROJECT5"
+export TZ="America/New_York"
+run_mark "$PROJECT5" "pr-review" "$SHIM_DIR"
+exit_code=$(TZ="America/New_York" run_check "$PROJECT5" "pr-review" "$SHIM_DIR")
+assert_exit "check returns 0 for a fresh mark under UTC-5 forced-BSD parsing" "0" "$exit_code"
+unset TZ
+
+# ===========================================================================
+echo ""
 echo "=== TC-SMTZ-003: GNU date -d branch unaffected (no shim, real date) ==="
 echo ""
 PROJECT3="$TMPDIR/proj3"
