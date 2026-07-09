@@ -121,7 +121,22 @@ trap 'rm -rf "$TMPDIR" "$SHIM_DIR" "$TRACE_DIR"' EXIT
 # would stay green. Mirror the exact resolution order here (falling back
 # to --show-toplevel, then PROJECT_ROOT itself) so the watched dirs match
 # what the code under test actually resolves to.
-REPO_STATE_ROOT="$(cd "$PROJECT_ROOT" && { git rev-parse --path-format=absolute --git-common-dir 2>/dev/null | sed 's|/\.git$||'; } || git -C "$PROJECT_ROOT" rev-parse --show-toplevel 2>/dev/null)"
+# NOTE: the git-common-dir probe's raw output is checked for emptiness
+# *before* piping into sed, rather than relying on the exit status of a
+# `cmd | sed ...` pipeline. A `cmd | sed` group's exit status is sed's,
+# not cmd's -- sed exits 0 even on empty stdin -- so `{ cmd | sed ...; } ||
+# fallback` would never reach the fallback when the git-common-dir probe
+# itself fails (e.g. older Git without --path-format=absolute), silently
+# collapsing REPO_STATE_ROOT to PROJECT_ROOT's worktree path instead.
+REPO_STATE_ROOT="$(
+  cd "$PROJECT_ROOT" || exit 1
+  _git_common_dir="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"
+  if [[ -n "$_git_common_dir" ]]; then
+    printf '%s\n' "$_git_common_dir" | sed 's|/\.git$||'
+  else
+    git rev-parse --show-toplevel 2>/dev/null
+  fi
+)"
 if [[ -z "$REPO_STATE_ROOT" ]]; then
   REPO_STATE_ROOT="$PROJECT_ROOT"
 fi
