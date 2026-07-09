@@ -39,14 +39,40 @@ assert_exit() {
   fi
 }
 
-# Snapshots a directory's contents (sorted `find` listing) so a later call
-# can prove nothing changed. Returns empty string for a missing directory,
-# which is a valid "nothing there" baseline distinct from "has entries".
+# Snapshots a directory's contents so a later call can prove nothing
+# changed. Returns empty string for a missing directory, which is a valid
+# "nothing there" baseline distinct from "has entries".
+#
+# Hashes each regular file's content (not just its path) so an in-place
+# rewrite of an existing file -- same path, new bytes -- shows up as a
+# diff. A path-only `find` listing would miss that: entry names would be
+# identical before and after even though the file's contents changed.
+# Directory entries (including empty dirs) are still recorded by path so
+# additions/removals of empty dirs are also caught.
 snapshot_dir() {
   local dir="$1"
-  if [[ -d "$dir" ]]; then
-    find "$dir" -mindepth 1 2>/dev/null | LC_ALL=C sort
+  local sha_bin=""
+  [[ -d "$dir" ]] || return 0
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha_bin="sha256sum"
+  elif command -v shasum >/dev/null 2>&1; then
+    sha_bin="shasum -a 256"
   fi
+  {
+    find "$dir" -mindepth 1 -type d 2>/dev/null | LC_ALL=C sort | sed 's/^/DIR /'
+    if [[ -n "$sha_bin" ]]; then
+      find "$dir" -mindepth 1 -type f -print0 2>/dev/null \
+        | LC_ALL=C sort -z \
+        | xargs -0 -r $sha_bin 2>/dev/null \
+        | LC_ALL=C sort -k2
+    else
+      # Last-resort fallback if no checksum tool is available: fall back
+      # to path + size + mtime, which still catches in-place rewrites
+      # (unlike a bare path listing) even though it's weaker than a hash.
+      find "$dir" -mindepth 1 -type f -exec stat -c '%s %Y %n' {} + 2>/dev/null \
+        | LC_ALL=C sort -k3
+    fi
+  }
 }
 
 # Asserts a directory's contents are unchanged from a prior snapshot taken
