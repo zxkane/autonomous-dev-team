@@ -110,12 +110,28 @@ SHIM_DIR=$(mktemp -d)
 TRACE_DIR=$(mktemp -d)
 trap 'rm -rf "$TMPDIR" "$SHIM_DIR" "$TRACE_DIR"' EXIT
 
+# Repo-owned state root to watch for TC-SMTZ-004, derived the same way
+# state-manager.sh's resolve_project_root() derives it when
+# CLAUDE_PROJECT_DIR is unset. When this test runs from a git worktree
+# (the normal workflow in this repo), `git rev-parse --git-common-dir`
+# resolves to the *main* checkout's .git dir, not the worktree path in
+# $PROJECT_ROOT -- so a regression that stops honoring CLAUDE_PROJECT_DIR
+# in run_mark/run_check could leak writes into the main checkout's state
+# dir while this test, watching only $PROJECT_ROOT (the worktree path),
+# would stay green. Mirror the exact resolution order here (falling back
+# to --show-toplevel, then PROJECT_ROOT itself) so the watched dirs match
+# what the code under test actually resolves to.
+REPO_STATE_ROOT="$(cd "$PROJECT_ROOT" && { git rev-parse --path-format=absolute --git-common-dir 2>/dev/null | sed 's|/\.git$||'; } || git -C "$PROJECT_ROOT" rev-parse --show-toplevel 2>/dev/null)"
+if [[ -z "$REPO_STATE_ROOT" ]]; then
+  REPO_STATE_ROOT="$PROJECT_ROOT"
+fi
+
 # Baseline snapshots of this repo's own state dirs, taken before any test
 # case runs. Used only as the fallback isolation signal when live syscall
 # tracing (below) is unavailable.
-BASELINE_CLAUDE_STATE="$(snapshot_dir "$PROJECT_ROOT/.claude/state")"
-BASELINE_KIRO_STATE="$(snapshot_dir "$PROJECT_ROOT/.kiro/state")"
-BASELINE_AGENTS_STATE="$(snapshot_dir "$PROJECT_ROOT/.agents/state")"
+BASELINE_CLAUDE_STATE="$(snapshot_dir "$REPO_STATE_ROOT/.claude/state")"
+BASELINE_KIRO_STATE="$(snapshot_dir "$REPO_STATE_ROOT/.kiro/state")"
+BASELINE_AGENTS_STATE="$(snapshot_dir "$REPO_STATE_ROOT/.agents/state")"
 
 # ---------------------------------------------------------------------------
 # Live filesystem-write tracing (primary isolation signal).
@@ -352,15 +368,15 @@ echo "=== TC-SMTZ-004: state isolation — repo's own state dirs untouched ==="
 echo ""
 if [[ $TRACE_AVAILABLE -eq 1 ]]; then
   echo "  (live syscall tracing active — catches transient writes, not just net state)"
-  check_trace_for_leak "$PROJECT_ROOT/.claude/state" "repo .claude/state: no filesystem writes during this test run"
-  check_trace_for_leak "$PROJECT_ROOT/.kiro/state" "repo .kiro/state: no filesystem writes during this test run"
-  check_trace_for_leak "$PROJECT_ROOT/.agents/state" "repo .agents/state: no filesystem writes during this test run"
+  check_trace_for_leak "$REPO_STATE_ROOT/.claude/state" "repo .claude/state: no filesystem writes during this test run"
+  check_trace_for_leak "$REPO_STATE_ROOT/.kiro/state" "repo .kiro/state: no filesystem writes during this test run"
+  check_trace_for_leak "$REPO_STATE_ROOT/.agents/state" "repo .agents/state: no filesystem writes during this test run"
 else
   echo "  (strace/ptrace unavailable in this sandbox — falling back to before/after snapshot;"
   echo "   this fallback cannot detect a transient write that is undone before the run ends)"
-  assert_dir_untouched "repo .claude/state unchanged by this test run" "$PROJECT_ROOT/.claude/state" "$BASELINE_CLAUDE_STATE"
-  assert_dir_untouched "repo .kiro/state unchanged by this test run" "$PROJECT_ROOT/.kiro/state" "$BASELINE_KIRO_STATE"
-  assert_dir_untouched "repo .agents/state unchanged by this test run" "$PROJECT_ROOT/.agents/state" "$BASELINE_AGENTS_STATE"
+  assert_dir_untouched "repo .claude/state unchanged by this test run" "$REPO_STATE_ROOT/.claude/state" "$BASELINE_CLAUDE_STATE"
+  assert_dir_untouched "repo .kiro/state unchanged by this test run" "$REPO_STATE_ROOT/.kiro/state" "$BASELINE_KIRO_STATE"
+  assert_dir_untouched "repo .agents/state unchanged by this test run" "$REPO_STATE_ROOT/.agents/state" "$BASELINE_AGENTS_STATE"
 fi
 
 # Summary
