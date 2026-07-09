@@ -63,7 +63,7 @@ snapshot_dir() {
     if [[ -n "$sha_bin" ]]; then
       find "$dir" -mindepth 1 -type f -print0 2>/dev/null \
         | LC_ALL=C sort -z \
-        | xargs -0 -r $sha_bin 2>/dev/null \
+        | xargs -0 -r "$sha_bin" 2>/dev/null \
         | LC_ALL=C sort -k2
     else
       # Last-resort fallback if no checksum tool is available: fall back
@@ -91,25 +91,96 @@ assert_dir_untouched() {
     ((PASS++))
   else
     echo -e "  ${RED}FAIL${NC}: $desc (contents changed)"
-    echo "    before: $(echo "$before" | tr '\n' ' ')"
-    echo "    after:  $(echo "$after" | tr '\n' ' ')"
+    echo "    before: ${before//$'\n'/ }"
+    echo "    after:  ${after//$'\n'/ }"
     ((FAIL++))
   fi
 }
 
 TMPDIR=$(mktemp -d)
 SHIM_DIR=$(mktemp -d)
-trap 'rm -rf "$TMPDIR" "$SHIM_DIR"' EXIT
+TRACE_DIR=$(mktemp -d)
+trap 'rm -rf "$TMPDIR" "$SHIM_DIR" "$TRACE_DIR"' EXIT
 
 # Baseline snapshots of this repo's own state dirs, taken before any test
-# case runs. Every `run_mark`/`run_check` call below is scoped to a
-# `$TMPDIR/projN` sandbox via `CLAUDE_PROJECT_DIR`, so none of them should
-# touch these paths — but capture the "before" state explicitly rather than
-# assuming empty, since a contributor's own dev/review session can leave
-# legitimate marks here.
+# case runs. Used only as the fallback isolation signal when live syscall
+# tracing (below) is unavailable.
 BASELINE_CLAUDE_STATE="$(snapshot_dir "$PROJECT_ROOT/.claude/state")"
 BASELINE_KIRO_STATE="$(snapshot_dir "$PROJECT_ROOT/.kiro/state")"
 BASELINE_AGENTS_STATE="$(snapshot_dir "$PROJECT_ROOT/.agents/state")"
+
+# ---------------------------------------------------------------------------
+# Live filesystem-write tracing (primary isolation signal).
+#
+# The before/after snapshot above only proves the *net* state after the run
+# matches the baseline. It cannot see a transient write: `check` legitimately
+# deletes a stale/invalid mark file it just read (see clear-on-expiry logic
+# in state-manager.sh), so a bug that makes it resolve to *this repo's own*
+# state dir instead of the sandboxed project could create-then-remove a file
+# there and still leave the final snapshot unchanged.
+#
+# strace -f -e trace=%file captures every filesystem-path syscall (openat,
+# unlink[at], mkdir[at], rename[at], rmdir, ...) made by the traced command
+# and its children, including ones that are undone before exit. We check the
+# trace for any such syscall whose path argument falls under this repo's
+# own .claude/state, .kiro/state, or .agents/state -- which should never
+# happen since every run_mark/run_check call below pins CLAUDE_PROJECT_DIR
+# to an isolated $TMPDIR/projN sandbox.
+#
+# Falls back to the weaker before/after snapshot (assert_dir_untouched)
+# when strace isn't available or ptrace is denied in the sandbox (e.g. a
+# restrictive seccomp/AppArmor profile) -- detected via a one-time probe
+# rather than assumed from `command -v` alone, since strace can be present
+# but unusable.
+TRACE_AVAILABLE=0
+if command -v strace >/dev/null 2>&1; then
+  if strace -f -o /dev/null -- true >/dev/null 2>&1; then
+    TRACE_AVAILABLE=1
+  fi
+fi
+
+# Runs a command, tracing its filesystem-path syscalls (and its children's)
+# into a fresh file under $TRACE_DIR when tracing is available; otherwise
+# just runs it directly. Each call gets its own trace file named from a
+# fresh mktemp (not an incrementing counter): run_traced is invoked from
+# inside a `(...)` subshell in run_mark/run_check, and subshells don't
+# share writes to a parent-scope counter variable, so a counter would
+# collide and overwrite trace files across calls.
+run_traced() {
+  if [[ $TRACE_AVAILABLE -eq 1 ]]; then
+    local trace_file
+    trace_file=$(mktemp "$TRACE_DIR/trace-XXXXXX.log")
+    strace -f -e trace=%file -o "$trace_file" -- "$@"
+  else
+    "$@"
+  fi
+}
+
+# Scans all accumulated trace logs for any filesystem-path syscall whose
+# path argument is under the given repo-owned state directory. Matches on
+# the directory's real (symlink-resolved) absolute path so a sandboxed
+# tmp dir can never false-positive-match by string prefix alone.
+check_trace_for_leak() {
+  local dir="$1" desc="$2"
+  local real_dir
+  real_dir=$(cd "$dir" 2>/dev/null && pwd -P) || real_dir="$dir"
+  if ! compgen -G "$TRACE_DIR/trace-*.log" >/dev/null; then
+    echo -e "  ${GREEN}PASS${NC}: $desc (no trace activity recorded)"
+    ((PASS++))
+    return
+  fi
+  local hit
+  hit=$(grep -F "$real_dir/" "$TRACE_DIR"/trace-*.log 2>/dev/null | head -3)
+  if [[ -z "$hit" ]]; then
+    echo -e "  ${GREEN}PASS${NC}: $desc"
+    ((PASS++))
+  else
+    echo -e "  ${RED}FAIL${NC}: $desc (filesystem syscall touched $real_dir during the run)"
+    hit="${hit//$'\n'/$'\n    '}"
+    echo "    $hit"
+    ((FAIL++))
+  fi
+}
 
 # ---------------------------------------------------------------------------
 # Fake `date` binary. Placed ahead of the real `date` in PATH for the
@@ -167,12 +238,12 @@ setup_project() {
 
 run_mark() {
   local project="$1" action="$2" path_prefix="$3"
-  ( cd "$project" && CLAUDE_PROJECT_DIR="$project" PATH="${path_prefix}${path_prefix:+:}$PATH" "$STATE_MANAGER" mark "$action" >/dev/null 2>&1 )
+  ( cd "$project" && CLAUDE_PROJECT_DIR="$project" PATH="${path_prefix}${path_prefix:+:}$PATH" run_traced "$STATE_MANAGER" mark "$action" >/dev/null 2>&1 )
 }
 
 run_check() {
   local project="$1" action="$2" path_prefix="$3"
-  ( cd "$project" && CLAUDE_PROJECT_DIR="$project" PATH="${path_prefix}${path_prefix:+:}$PATH" "$STATE_MANAGER" check "$action" >/dev/null 2>&1; echo $? )
+  ( cd "$project" && CLAUDE_PROJECT_DIR="$project" PATH="${path_prefix}${path_prefix:+:}$PATH" run_traced "$STATE_MANAGER" check "$action" >/dev/null 2>&1; echo $? )
 }
 
 # Backdates a state file's timestamp by N minutes, using the REAL date
@@ -226,9 +297,18 @@ unset TZ
 echo ""
 echo "=== TC-SMTZ-004: state isolation — repo's own state dirs untouched ==="
 echo ""
-assert_dir_untouched "repo .claude/state unchanged by this test run" "$PROJECT_ROOT/.claude/state" "$BASELINE_CLAUDE_STATE"
-assert_dir_untouched "repo .kiro/state unchanged by this test run" "$PROJECT_ROOT/.kiro/state" "$BASELINE_KIRO_STATE"
-assert_dir_untouched "repo .agents/state unchanged by this test run" "$PROJECT_ROOT/.agents/state" "$BASELINE_AGENTS_STATE"
+if [[ $TRACE_AVAILABLE -eq 1 ]]; then
+  echo "  (live syscall tracing active — catches transient writes, not just net state)"
+  check_trace_for_leak "$PROJECT_ROOT/.claude/state" "repo .claude/state: no filesystem writes during this test run"
+  check_trace_for_leak "$PROJECT_ROOT/.kiro/state" "repo .kiro/state: no filesystem writes during this test run"
+  check_trace_for_leak "$PROJECT_ROOT/.agents/state" "repo .agents/state: no filesystem writes during this test run"
+else
+  echo "  (strace/ptrace unavailable in this sandbox — falling back to before/after snapshot;"
+  echo "   this fallback cannot detect a transient write that is undone before the run ends)"
+  assert_dir_untouched "repo .claude/state unchanged by this test run" "$PROJECT_ROOT/.claude/state" "$BASELINE_CLAUDE_STATE"
+  assert_dir_untouched "repo .kiro/state unchanged by this test run" "$PROJECT_ROOT/.kiro/state" "$BASELINE_KIRO_STATE"
+  assert_dir_untouched "repo .agents/state unchanged by this test run" "$PROJECT_ROOT/.agents/state" "$BASELINE_AGENTS_STATE"
+fi
 
 # Summary
 echo ""
