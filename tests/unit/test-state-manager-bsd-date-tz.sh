@@ -196,15 +196,38 @@ check_trace_for_leak() {
 #
 #   date -u +FORMAT / date +%s        -> passthrough to real date
 #   date -d ...                       -> exit 1 (forces fallthrough)
-#   date -j -f FORMAT VALUE +%s       -> pre-fix BSD emulation: strip
+#   date -j -f FORMAT VALUE +%s       -> pre-fix BSD semantics: strip
 #                                         trailing Z, parse under ambient
 #                                         $TZ as local time
-#   date -u -j -f FORMAT VALUE +%s    -> post-fix BSD emulation: strip
+#   date -u -j -f FORMAT VALUE +%s    -> post-fix BSD semantics: strip
 #                                         trailing Z, parse as UTC
+#
+# On a GNU-date host (this repo's Linux CI) the above two -j -f forms are
+# emulated by delegating through the real GNU `date -d`, since GNU date
+# has no native -j -f. On a real BSD/macOS host, the shim delegates
+# straight to the real `date -j -f` instead, which already natively
+# implements those exact semantics -- re-emulating it via `-d` would
+# break, since BSD date has no `-d` at all.
 # ---------------------------------------------------------------------------
+# Probe REAL_DATE's own flavor once, at shim-generation time, so the shim
+# can pick the right emulation strategy for -j -f instead of assuming GNU:
+#   - GNU date (Linux CI): has -d, no real -j -f. The shim must emulate
+#     BSD -j -f semantics by delegating through -d.
+#   - BSD/macOS date (real macOS run): -j -f is native and already gets
+#     the -u/no-u + literal-Z semantics right (that's the exact behavior
+#     issue #446's production fix relies on). Forcing it through a
+#     GNU-only `-d` call breaks it, since BSD date has no `-d`. Delegate
+#     straight to the real binary instead of re-implementing what it
+#     already does correctly.
+REAL_DATE_IS_GNU=0
+if TZ=UTC "$REAL_DATE" -d "1970-01-01T00:00:00Z" +%s >/dev/null 2>&1; then
+  REAL_DATE_IS_GNU=1
+fi
+
 cat > "$SHIM_DIR/date" <<SHIMEOF
 #!/bin/bash
 REAL_DATE="$REAL_DATE"
+REAL_DATE_IS_GNU=$REAL_DATE_IS_GNU
 args=("\$@")
 for a in "\${args[@]}"; do
   if [[ "\$a" == "-d" ]]; then
@@ -218,15 +241,26 @@ if [[ "\${rest[0]:-}" == "-u" ]]; then
   rest=("\${rest[@]:1}")
 fi
 if [[ "\${rest[0]:-}" == "-j" ]]; then
-  value="\${rest[3]}"
-  outfmt="\${rest[4]}"
-  stripped="\${value%Z}"
-  if [[ \$use_utc -eq 1 ]]; then
-    TZ=UTC "\$REAL_DATE" -d "\$stripped" "\$outfmt"
+  if [[ \$REAL_DATE_IS_GNU -eq 1 ]]; then
+    # Forced-BSD-branch emulation on a GNU-date host (Linux CI): strip the
+    # trailing Z and re-parse via the real GNU date's -d, honoring -u the
+    # same way real BSD -j -f would (no -u => ambient TZ as local time;
+    # -u => UTC), since GNU date has no native -j -f to fall back on.
+    value="\${rest[3]}"
+    outfmt="\${rest[4]}"
+    stripped="\${value%Z}"
+    if [[ \$use_utc -eq 1 ]]; then
+      TZ=UTC "\$REAL_DATE" -d "\$stripped" "\$outfmt"
+    else
+      TZ="\${TZ:-UTC}" "\$REAL_DATE" -d "\$stripped" "\$outfmt"
+    fi
+    exit \$?
   else
-    TZ="\${TZ:-UTC}" "\$REAL_DATE" -d "\$stripped" "\$outfmt"
+    # Real BSD/macOS host: the real date binary already natively
+    # supports -j -f with correct -u/local-time and literal-Z semantics,
+    # so delegate straight to it instead of re-emulating.
+    exec "\$REAL_DATE" "\${args[@]}"
   fi
-  exit \$?
 fi
 exec "\$REAL_DATE" "\${args[@]}"
 SHIMEOF
