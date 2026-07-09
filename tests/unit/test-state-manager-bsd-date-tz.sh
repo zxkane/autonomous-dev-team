@@ -39,13 +39,34 @@ assert_exit() {
   fi
 }
 
-assert_empty_dir() {
-  local desc="$1" dir="$2"
-  if [[ ! -d "$dir" ]] || [[ -z "$(ls -A "$dir" 2>/dev/null)" ]]; then
+# Snapshots a directory's contents (sorted `find` listing) so a later call
+# can prove nothing changed. Returns empty string for a missing directory,
+# which is a valid "nothing there" baseline distinct from "has entries".
+snapshot_dir() {
+  local dir="$1"
+  if [[ -d "$dir" ]]; then
+    find "$dir" -mindepth 1 2>/dev/null | LC_ALL=C sort
+  fi
+}
+
+# Asserts a directory's contents are unchanged from a prior snapshot taken
+# before the test ran. This replaces an earlier "must be empty" assertion:
+# on this self-hosting repo, contributors can have legitimate pre-existing
+# state under .claude/state, .kiro/state, or .agents/state (e.g. from their
+# own dev/review sessions), so requiring emptiness produced false failures.
+# Requiring "untouched by this test run" is the actual invariant that
+# matters and holds regardless of what was there beforehand.
+assert_dir_untouched() {
+  local desc="$1" dir="$2" before="$3"
+  local after
+  after="$(snapshot_dir "$dir")"
+  if [[ "$before" == "$after" ]]; then
     echo -e "  ${GREEN}PASS${NC}: $desc"
     ((PASS++))
   else
-    echo -e "  ${RED}FAIL${NC}: $desc (found: $(ls -A "$dir" 2>/dev/null | tr '\n' ' '))"
+    echo -e "  ${RED}FAIL${NC}: $desc (contents changed)"
+    echo "    before: $(echo "$before" | tr '\n' ' ')"
+    echo "    after:  $(echo "$after" | tr '\n' ' ')"
     ((FAIL++))
   fi
 }
@@ -53,6 +74,16 @@ assert_empty_dir() {
 TMPDIR=$(mktemp -d)
 SHIM_DIR=$(mktemp -d)
 trap 'rm -rf "$TMPDIR" "$SHIM_DIR"' EXIT
+
+# Baseline snapshots of this repo's own state dirs, taken before any test
+# case runs. Every `run_mark`/`run_check` call below is scoped to a
+# `$TMPDIR/projN` sandbox via `CLAUDE_PROJECT_DIR`, so none of them should
+# touch these paths — but capture the "before" state explicitly rather than
+# assuming empty, since a contributor's own dev/review session can leave
+# legitimate marks here.
+BASELINE_CLAUDE_STATE="$(snapshot_dir "$PROJECT_ROOT/.claude/state")"
+BASELINE_KIRO_STATE="$(snapshot_dir "$PROJECT_ROOT/.kiro/state")"
+BASELINE_AGENTS_STATE="$(snapshot_dir "$PROJECT_ROOT/.agents/state")"
 
 # ---------------------------------------------------------------------------
 # Fake `date` binary. Placed ahead of the real `date` in PATH for the
@@ -169,9 +200,9 @@ unset TZ
 echo ""
 echo "=== TC-SMTZ-004: state isolation — repo's own state dirs untouched ==="
 echo ""
-assert_empty_dir "repo .claude/state has no test-created marks" "$PROJECT_ROOT/.claude/state"
-assert_empty_dir "repo .kiro/state has no test-created marks" "$PROJECT_ROOT/.kiro/state"
-assert_empty_dir "repo .agents/state has no test-created marks" "$PROJECT_ROOT/.agents/state"
+assert_dir_untouched "repo .claude/state unchanged by this test run" "$PROJECT_ROOT/.claude/state" "$BASELINE_CLAUDE_STATE"
+assert_dir_untouched "repo .kiro/state unchanged by this test run" "$PROJECT_ROOT/.kiro/state" "$BASELINE_KIRO_STATE"
+assert_dir_untouched "repo .agents/state unchanged by this test run" "$PROJECT_ROOT/.agents/state" "$BASELINE_AGENTS_STATE"
 
 # Summary
 echo ""
