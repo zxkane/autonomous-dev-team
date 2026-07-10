@@ -30,6 +30,20 @@
 #   chp_github_close_keyword
 # (chp_caps reads the .caps manifest in the dispatcher, not a function here.)
 
+# TRANSPORT-LIB SELF-SOURCE: `gh_version_ok` (the `--slurp` capability check
+# some leaves below preflight on) lives in `lib-github-transport.sh` (a
+# sibling file in `providers/`, shared with itp-github.sh — mirrors the
+# lib-gitlab-transport.sh self-source pattern, #416). Guarded on `declare -F
+# gh_version_ok`: a unit test with a test-local stub, or the sibling
+# itp-github.sh already sourcing it, must not be clobbered by a re-source.
+if ! declare -F gh_version_ok >/dev/null 2>&1; then
+  _CHP_GITHUB_SELF="${BASH_SOURCE[0]:-$0}"
+  _CHP_GITHUB_DIR="$(cd "$(dirname "$(readlink -f "$_CHP_GITHUB_SELF")")" && pwd)"
+  # shellcheck source=lib-github-transport.sh
+  [[ -f "${_CHP_GITHUB_DIR}/lib-github-transport.sh" ]] && \
+    source "${_CHP_GITHUB_DIR}/lib-github-transport.sh"
+fi
+
 # ---------------------------------------------------------------------------
 # W1c1 (#397) PR-read leaf machinery, shared by chp_github_find_pr_for_issue
 # and chp_github_pr_list.

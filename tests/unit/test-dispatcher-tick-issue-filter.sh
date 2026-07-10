@@ -58,6 +58,10 @@ BIN="$TMPROOT/bin"
 mkdir -p "$BIN"
 cat > "$BIN/gh" <<EOF
 #!/bin/bash
+if [[ "\$1" == "--version" ]]; then
+  echo "gh version 2.96.0 (2026-01-01)"
+  exit 0
+fi
 echo "GH_CALLED \$*" >> "$TMPROOT/gh-calls"
 exit 0
 EOF

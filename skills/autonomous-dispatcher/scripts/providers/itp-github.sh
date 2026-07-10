@@ -33,6 +33,22 @@
 #   itp_github_label_event_ts                                       [#323 OBSERVE]
 # (itp_caps reads the .caps manifest in the dispatcher, not a function here.)
 
+# TRANSPORT-LIB SELF-SOURCE: `gh_version_ok` (the `--slurp` capability check
+# `itp_github_list_comments` below preflights on) lives in
+# `lib-github-transport.sh` (a sibling file in `providers/`, shared with
+# chp-github.sh — mirrors the lib-gitlab-transport.sh self-source pattern,
+# #416). Guarded on `declare -F gh_version_ok`: a unit test with a test-local
+# stub, or the sibling chp-github.sh already sourcing it, must not be
+# clobbered by a re-source. Resolve via `readlink -f` of this file's own
+# BASH_SOURCE so a symlinked skill-tree resolves the real sibling.
+if ! declare -F gh_version_ok >/dev/null 2>&1; then
+  _ITP_GITHUB_SELF="${BASH_SOURCE[0]:-$0}"
+  _ITP_GITHUB_DIR="$(cd "$(dirname "$(readlink -f "$_ITP_GITHUB_SELF")")" && pwd)"
+  # shellcheck source=lib-github-transport.sh
+  [[ -f "${_ITP_GITHUB_DIR}/lib-github-transport.sh" ]] && \
+    source "${_ITP_GITHUB_DIR}/lib-github-transport.sh"
+fi
+
 # ---------------------------------------------------------------------------
 # W1a abstract state-read contracts (#371, #347 phase-2). Unlike the other ITP
 # leaves in this file (byte-identical gh-argv pass-throughs, #281), these three

@@ -143,9 +143,19 @@ The self-heal is **scoped narrowly** — only the two directly-executed scripts.
 
 Defense in depth: the same heal also runs in every `install-*-hooks.sh` via `lib-installer.sh::ensure_dispatcher_scripts_executable`, so consumers re-running the installer get the heal even if their installed skill version still has the broken mode (the skills CLI's `computedHash` is content-only, not mode-aware).
 
+## Pre-step: `gh` CLI minimum-version validation
+
+Implementation: `dispatcher-tick.sh`, immediately after the `EXECUTION_BACKEND` check and before `REVIEW_BOTS` — same slot, same reasoning: a broken dependency must never reach a side effect.
+
+The GitHub-provider ITP/CHP leaves (`providers/itp-github.sh`, `providers/chp-github.sh`) call `gh api --paginate --slurp` to fetch issue/PR comments. `--slurp` was added in gh v2.48.0 (2024-04-17); on an older (or absent) `gh`, the call prints `unknown flag: --slurp` to stderr and the pipeline returns empty. Left unchecked, that empty result surfaces much later and opaquely — e.g. a `-ge` integer comparison over an empty retry count trips `set -euo pipefail` and aborts the tick mid-run, well past Step 4, with Step 5 (stale detection) never executing that tick.
+
+`gh_version_ok "$GH_MIN_VERSION"` (`providers/lib-github-transport.sh`, `GH_MIN_VERSION="2.48.0"` — the same `gh --version` capability probe self-sourced by both `providers/itp-github.sh` and `providers/chp-github.sh`, mirroring the `lib-gitlab-transport.sh` pattern, and reachable from `dispatcher-tick.sh` because `lib-dispatch.sh` transitively sources the GitHub ITP/CHP leaves) parses the first `X.Y.Z` token out of `gh --version`'s first line and numeric-sorts it (`sort -V`) against the minimum. Gated on `github_seam_active` (`lib-auth.sh`) — a `gitlab`/`gitlab` topology never calls `gh` and must not be blocked by a `gh` version it doesn't need. Kept under `providers/` (not the provider-neutral caller layer) because it is itself a raw `gh` invocation, subject to the same [INV-91] cutover-guard scan as every other GitHub-CLI call site.
+
+**Failure mode**: a missing `gh`, an unparseable `--version` output, or a version below the minimum aborts the ENTIRE tick rc≠0 with the `ADT_CFG_GH_VERSION_TOO_OLD` [INV-72] error envelope, surfaced as a dispatcher alert. No `gh` API call happens before this check runs (`gh --version` itself is a local, no-network invocation).
+
 ## Pre-step: `ISSUE_FILTER` / `ISSUE_SCAN_LIMIT` validation (issue #436, [INV-121])
 
-Implementation: `dispatcher-tick.sh`, immediately after the `EXECUTION_BACKEND`/`REVIEW_BOTS` upfront checks and **before** the GitHub App token mint (the next pre-step below) — same slot, same reasoning: a poisoned config must never reach a side effect.
+Implementation: `dispatcher-tick.sh`, immediately after the `EXECUTION_BACKEND`/`gh`-version/`REVIEW_BOTS` upfront checks and **before** the GitHub App token mint (the next pre-step below) — same slot, same reasoning: a poisoned config must never reach a side effect.
 
 `issue_filter_validate "${ISSUE_FILTER:-}"` (`lib-issue-filter.sh`, sourced transitively via `lib-dispatch.sh`) runs three checks in order, any of which fails closed:
 

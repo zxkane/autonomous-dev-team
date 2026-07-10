@@ -53,6 +53,7 @@ The `error_envelope` / `error_surface` helpers live in
 | `ADT_CFG_EXECUTION_BACKEND_INVALID` | `EXECUTION_BACKEND` has an unrecognized value | The dispatcher's `EXECUTION_BACKEND` is not `local` or `remote-aws-ssm` | Set `EXECUTION_BACKEND` to `local` or `remote-aws-ssm` in `dispatcher.conf`/`autonomous.conf` | dispatcher-alert |
 | `ADT_CFG_ISSUE_FILTER_INVALID` | `ISSUE_FILTER` failed validation | The filter is malformed (compiler error), references a reserved pipeline-state/`autonomous` label, or contains an `assignee:` atom against a provider whose caps lack `assignees=1` ([INV-121]) | Fix `ISSUE_FILTER` in `autonomous.conf`/`dispatcher.conf` per the grammar in `autonomous.conf.example`, then re-dispatch | dispatcher-alert |
 | `ADT_CFG_ISSUE_SCAN_LIMIT_INVALID` | `ISSUE_SCAN_LIMIT` has an invalid value | The value is not a positive integer | Set `ISSUE_SCAN_LIMIT` to a positive integer (or unset for the default 100) in `autonomous.conf`/`dispatcher.conf`, then re-dispatch | dispatcher-alert |
+| `ADT_CFG_GH_VERSION_TOO_OLD` | The `gh` CLI on the execution host is missing or older than the minimum required version | The GitHub-provider ITP/CHP leaves call `gh api --paginate --slurp`; `--slurp` was added in gh v2.48.0, and an older/absent `gh` fails that call silently, surfacing much later as an opaque abort mid-tick | Upgrade `gh` to >= 2.48.0 on the execution host, then re-dispatch | dispatcher-alert |
 
 ## Authentication class (`class: auth`)
 
