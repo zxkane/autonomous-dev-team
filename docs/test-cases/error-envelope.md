@@ -90,7 +90,8 @@ binary is genuinely absent.
 | TC-BINPATH-005 | launcher configured (regression pin) | preflight skipped entirely regardless of probe-dir contents — unchanged existing behavior. |
 | TC-BINPATH-006 | binary present only in `$HOME/bin` but not on `PATH` | same PATH-specific branch as TC-BINPATH-002, naming the `~/bin` path. |
 | TC-BINPATH-007 | binary present only in `$HOME/.npm-global/bin` but not on `PATH` | same PATH-specific branch as TC-BINPATH-002, naming the `~/.npm-global/bin` path. |
-| TC-BINPATH-008 | multiple nvm node-version dirs, the lexically-first one non-executable, a later one executable | probe returns "not found" (first GLOB match wins per the issue's stated semantics, even when it's unusable) — falls to the genuinely-missing branch, does NOT skip ahead to the later working copy. |
+| TC-BINPATH-008a | single nvm node-version dir, binary present but not executable | probe returns "not found" (matched path fails the `-x` check) — falls to the genuinely-missing branch. |
+| TC-BINPATH-008b | multiple nvm node-version dirs, all executable | probe returns the found branch naming one of the valid matches — `compgen -G`'s cross-directory match order is host/filesystem-dependent, so this case only asserts a match was found, not which one. |
 | TC-BINPATH-009 | `$HOME` unset | `_probe_user_install_dirs` returns "not found" immediately (no `set -u` crash); preflight falls to the genuinely-missing branch cleanly. |
 | TC-BINPATH-010 | a directory (not a file) exists at the probed path with the binary's name | rejected by the `-f` check; falls to the genuinely-missing branch rather than reporting the directory as a launchable binary. |
 

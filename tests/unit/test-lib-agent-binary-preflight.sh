@@ -332,20 +332,38 @@ GHBODY=$(cat "$GH_CALLS")
 [[ "$GHBODY" == *"Extend PATH"* ]] && ok "BINPATH-007 remediation is PATH-specific" || bad "BINPATH-007 remediation not PATH-specific"
 
 echo ""
-echo "=== TC-BINPATH-008: multiple nvm node-version dirs -> first glob match wins (pinned, per issue spec) ==="
+echo "=== TC-BINPATH-008a: single nvm version dir, binary present but NOT executable ==="
+: > "$GH_CALLS"
+FAKEHOME="$TMPROOT/home-nvm-noexec"
+mkdir -p "$FAKEHOME/.nvm/versions/node/v18.20.4/bin"
+printf '#!/bin/bash\nexit 0\n' > "$FAKEHOME/.nvm/versions/node/v18.20.4/bin/codex"   # not chmod +x
+out=$(preflight_userhome codex 338 "$FAKEHOME")
+assert_rc "BINPATH-008a preflight returns 1 (nvm glob match exists but is not executable -> genuinely-missing branch)" 1 "$(rc_of "$out")"
+GHBODY=$(cat "$GH_CALLS")
+[[ "$GHBODY" == *"Install 'codex'"* ]] && ok "BINPATH-008a falls to install-focused remediation (non-executable match rejected)" || bad "BINPATH-008a unexpected remediation branch"
+
+echo ""
+echo "=== TC-BINPATH-008b: multiple nvm node-version dirs, all executable -> probe still finds one ==="
 : > "$GH_CALLS"
 FAKEHOME="$TMPROOT/home-nvm-multi"
 mkdir -p "$FAKEHOME/.nvm/versions/node/v18.20.4/bin" "$FAKEHOME/.nvm/versions/node/v22.3.0/bin"
-# v18 sorts before v22 lexically; leave it non-executable so the pin proves
-# "first GLOB match wins" (the issue's stated semantics) rather than "first
-# EXECUTABLE match wins" — a later version having a working copy does not
-# make the probe skip past an earlier, broken one.
-printf '#!/bin/bash\nexit 0\n' > "$FAKEHOME/.nvm/versions/node/v18.20.4/bin/codex"   # not chmod +x
+# `compgen -G`'s match order across multiple directories is NOT guaranteed to
+# be sorted identically on every host/filesystem (observed empirically:
+# v18-then-v22 locally, v22-then-v18 on a CI runner) — so this case makes
+# BOTH candidates valid and asserts only that ONE of them was found, never
+# asserting which. TC-BINPATH-008a above (single dir) is what pins the
+# "found but not executable -> rejected" behavior deterministically.
+printf '#!/bin/bash\nexit 0\n' > "$FAKEHOME/.nvm/versions/node/v18.20.4/bin/codex"; chmod +x "$FAKEHOME/.nvm/versions/node/v18.20.4/bin/codex"
 printf '#!/bin/bash\nexit 0\n' > "$FAKEHOME/.nvm/versions/node/v22.3.0/bin/codex"; chmod +x "$FAKEHOME/.nvm/versions/node/v22.3.0/bin/codex"
-out=$(preflight_userhome codex 338 "$FAKEHOME")
-assert_rc "BINPATH-008 preflight returns 1 (first glob match is v18, non-executable -> genuinely-missing branch)" 1 "$(rc_of "$out")"
+out=$(preflight_userhome codex 3381 "$FAKEHOME")
+assert_rc "BINPATH-008b preflight returns 1 (found via nvm glob, not on PATH)" 1 "$(rc_of "$out")"
 GHBODY=$(cat "$GH_CALLS")
-[[ "$GHBODY" == *"Install 'codex'"* ]] && ok "BINPATH-008 falls to install-focused remediation (v18 match rejected, v22 never probed)" || bad "BINPATH-008 unexpected remediation branch"
+if [[ "$GHBODY" == *"$FAKEHOME/.nvm/versions/node/v18.20.4/bin/codex"* || "$GHBODY" == *"$FAKEHOME/.nvm/versions/node/v22.3.0/bin/codex"* ]]; then
+  ok "BINPATH-008b cause names one of the two valid nvm-version matches"
+else
+  bad "BINPATH-008b cause names neither valid nvm-version match"
+fi
+[[ "$GHBODY" == *"Extend PATH"* ]] && ok "BINPATH-008b remediation is PATH-specific" || bad "BINPATH-008b remediation not PATH-specific"
 
 echo ""
 echo "=== TC-BINPATH-009: \$HOME unset -> genuinely-missing branch, no crash (regression pin) ==="
