@@ -309,6 +309,19 @@
       "note": "Prior session end_turn|completed + substantive review-failure newer than session end → fresh dev-new. Per-issue log truncated (fail-closed)."
     },
     {
+      "id": "dispatch-review-aware-none-nopr-fresh-dev",
+      "from": "pending_dev",
+      "to": "in_progress",
+      "event": "dispatcher-step4-review-aware-none-nopr",
+      "actor": "dispatcher",
+      "guards": ["concurrency-below-cap", "retries-below-max", "session-completed", "verdict-none", "no-pr-for-issue"],
+      "actions": ["remove-label:pending-dev", "add-label:in-progress", "comment:resuming-fresh-session-no-pr"],
+      "code_site": "lib-dispatch.sh handle_completed_session_routing(): label_swap \"$issue_num\" \"pending-dev\" \"in-progress\"",
+      "mermaid": "pending_dev --> in_progress: Step 4 review-aware (completed session, verdict=none, no PR → dev-new) [INV-123]",
+      "inv_refs": ["INV-123"],
+      "note": "#456/#461: prior session end_turn|completed + verdict=none (no qualifying review comment found) + NO PR exists for the issue → fresh dev-new, mirroring the substantive Branch C dispatch mechanics exactly (distinct marker INV-12-no-pr-fresh-dev:<sid>, no per-HEAD attempt marker — there is no HEAD). A none verdict WITH a PR existing takes the unchanged INV-12-completed operator-handoff path instead (no transition, not this row)."
+    },
+    {
       "id": "dispatch-review-aware-reroute-review",
       "from": "pending_dev",
       "to": "pending_review",

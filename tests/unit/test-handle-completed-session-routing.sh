@@ -197,6 +197,10 @@ _MOCK_ATTEMPT_WRITE_FAILS="0"    # 1 = reject attempt-marker writes (finding 2)
 _MOCK_ATTEMPT_WRITE_TRIES=0
 
 fetch_pr_for_issue() {
+  # [INV-123] (#461): a nonzero return simulates a resolve_pr_for_issue
+  # transport/read failure — must be treated the SAME as "PR exists" by the
+  # caller (fail closed), never as "no PR".
+  [ "${_MOCK_PR_LOOKUP_FAILS:-0}" = "1" ] && return 1
   # Emits the same single-line JSON shape the real helper does, or empty.
   [ -n "$_MOCK_PR_HEAD" ] || { printf '%s' ""; return 0; }
   printf '{"number":777,"headRefOid":"%s"}\n' "$_MOCK_PR_HEAD"
@@ -237,7 +241,7 @@ itp_list_comments() {
     # nothing, so a stray _MOCK_NOTICE_PRESENT=1 without a session never
     # accidentally suppresses).
     local _sid="${_MOCK_NOTICE_SESSION:-__no_session__}"
-    _bodies+=("INV-12-completed:${_sid} INV-35-fresh-dev:${_sid} prior notice")
+    _bodies+=("INV-12-completed:${_sid} INV-35-fresh-dev:${_sid} INV-12-no-pr-fresh-dev:${_sid} prior notice")
   fi
   local _json="[]" _ts=0 b
   for b in "${_bodies[@]}"; do
@@ -271,6 +275,7 @@ reset_mocks() {
   _MOCK_ATTEMPT_WRITE_FAILS="0"
   _MOCK_ATTEMPT_WRITE_TRIES=0
   _MOCK_NOTICE_SESSION=""   # #281: session id the synthesized INV-12/INV-35 marker carries
+  _MOCK_PR_LOOKUP_FAILS="0" # [INV-123] (#461): simulate fetch_pr_for_issue transport failure
   unset REVIEW_RETRY_LIMIT
   if [[ -n "$_MOCK_LOG_FILE" ]]; then
     chmod u+w "$_MOCK_LOG_FILE" 2>/dev/null || true
@@ -348,9 +353,13 @@ fi
 echo "=== handle_completed_session_routing (INV-35) ==="
 # ---------------------------------------------------------------------------
 
-# TC-INV35-RT-001: completed + no verdict → INV-12 operator notice
+# TC-INV35-RT-001: completed + no verdict + PR EXISTS → INV-12 operator notice
+# ([INV-123], #461: a PR-exists `none` still fails closed to the unchanged
+# operator handoff — a review SHOULD have run against this PR and something
+# prevented it).
 reset_mocks
 _MOCK_VERDICT="none"
+_MOCK_PR_HEAD="deadbeef"
 assert_returns "RT-001 returns 0 (handled, INV-12 fallthrough emit)" 0 \
   handle_completed_session_routing 100 "sid-001" "2026-05-21T03:18:00Z"
 assert_eq "RT-001 emits one notice comment" "1" "$_MOCK_COMMENT_COUNT"
@@ -361,11 +370,74 @@ assert_eq "RT-001 no dispatch" "" "$_MOCK_DISPATCH_CALLS"
 # RT-001 idempotency: notice already present → no second post
 reset_mocks
 _MOCK_VERDICT="none"
+_MOCK_PR_HEAD="deadbeef"
 _MOCK_NOTICE_PRESENT="1"
 _MOCK_NOTICE_SESSION="sid-001"   # #281: existing INV-12 marker carries this session id
 assert_returns "RT-001-idem returns 0 even when marker present" 0 \
   handle_completed_session_routing 100 "sid-001" "2026-05-21T03:18:00Z"
 assert_eq "RT-001-idem suppresses duplicate" "0" "$_MOCK_COMMENT_COUNT"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== [INV-123] (#456/#461): completed + verdict=none + NO PR → bounded fresh dev-new ==="
+# ---------------------------------------------------------------------------
+
+# TC-461-RT-001: verdict=none, NO PR (default _MOCK_PR_HEAD="") → mirrors
+# Branch C's dispatch mechanics exactly, distinct marker text, no per-HEAD
+# attempt marker.
+reset_mocks
+_MOCK_VERDICT="none"
+prepare_log 100
+assert_returns "TC-461-RT-001 returns 0" 0 \
+  handle_completed_session_routing 100 "sid-461-001" "2026-05-21T03:18:00Z"
+assert_contains "TC-461-RT-001 INV-12-no-pr-fresh-dev marker comment" "INV-12-no-pr-fresh-dev:sid-461-001" "$_MOCK_LAST_COMMENT_BODY"
+assert_eq "TC-461-RT-001 label swap pending-dev → in-progress" "100:pending-dev:in-progress " "$_MOCK_LABEL_SWAPS"
+assert_eq "TC-461-RT-001 dispatch token = dev-new" "100:dev-new " "$_MOCK_POST_TOKEN_CALLS"
+assert_eq "TC-461-RT-001 dispatch dev-new fired" "dev-new:100 " "$_MOCK_DISPATCH_CALLS"
+log_size=$(stat -c '%s' "$_MOCK_LOG_FILE")
+assert_eq "TC-461-RT-001 log truncated to 0 bytes" "0" "$log_size"
+assert_eq "TC-461-RT-001 NO INV-12-completed notice" "" "$(grep -o 'INV-12-completed' <<<"$_MOCK_FULL_COMMENT_LOG")"
+if [[ "$_MOCK_FULL_COMMENT_LOG" != *"no-progress-substantive-attempt:"* ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-461-RT-001 NO per-HEAD attempt marker (unlike Branch C — there is no HEAD)"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-461-RT-001 unexpectedly posted a per-HEAD attempt marker"
+  FAIL=$((FAIL + 1))
+fi
+
+# TC-461-RT-002: idempotency — marker already present, same session id → still
+# dispatches (mechanics unchanged), no duplicate notice.
+reset_mocks
+_MOCK_VERDICT="none"
+_MOCK_NOTICE_PRESENT="1"
+_MOCK_NOTICE_SESSION="sid-461-001"
+prepare_log 100
+assert_returns "TC-461-RT-002 returns 0" 0 \
+  handle_completed_session_routing 100 "sid-461-001" "2026-05-21T03:18:00Z"
+assert_eq "TC-461-RT-002 no duplicate notice" "0" "$_MOCK_COMMENT_COUNT"
+assert_eq "TC-461-RT-002 dispatch dev-new still fired" "dev-new:100 " "$_MOCK_DISPATCH_CALLS"
+
+# TC-461-RT-003: truncate-fail → fail-closed, no dispatch.
+reset_mocks
+_MOCK_VERDICT="none"
+prepare_readonly_log 100
+assert_returns "TC-461-RT-003 returns 0 (handled, fail-closed)" 0 \
+  handle_completed_session_routing 100 "sid-461-003" "2026-05-21T03:18:00Z"
+assert_contains "TC-461-RT-003 operator-actionable comment posted" "permission" "$_MOCK_LAST_COMMENT_BODY"
+assert_eq "TC-461-RT-003 NO label swap" "" "$_MOCK_LABEL_SWAPS"
+assert_eq "TC-461-RT-003 NO dispatch" "" "$_MOCK_DISPATCH_CALLS"
+
+# TC-461-RT-004: fetch_pr_for_issue transport failure (nonzero rc) → fails
+# CLOSED to the PR-exists operator handoff, never the no-PR branch.
+reset_mocks
+_MOCK_VERDICT="none"
+_MOCK_PR_LOOKUP_FAILS="1"
+assert_returns "TC-461-RT-004 returns 0" 0 \
+  handle_completed_session_routing 100 "sid-461-004" "2026-05-21T03:18:00Z"
+assert_contains "TC-461-RT-004 fails closed to INV-12-completed handoff" "INV-12-completed:sid-461-004" "$_MOCK_LAST_COMMENT_BODY"
+assert_eq "TC-461-RT-004 NO label swap" "" "$_MOCK_LABEL_SWAPS"
+assert_eq "TC-461-RT-004 NO dispatch" "" "$_MOCK_DISPATCH_CALLS"
+_MOCK_PR_LOOKUP_FAILS="0"
 
 # TC-INV35-RT-010: First non-substantive failure → flip to pending-review
 reset_mocks

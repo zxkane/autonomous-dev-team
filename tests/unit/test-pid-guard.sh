@@ -204,10 +204,12 @@ if [[ -f "$SKILL_MD" ]]; then
 
   echo "TC-SKILL-003: SKILL.md counts dispatcher crashes in retry count"
   # PR-3 renamed UPPER_CASE → lowercase locals in lib-dispatch.sh helpers.
-  # The semantics (counting two crash sources) are preserved via separate
+  # The semantics (counting crash/failure sources) are preserved via separate
   # count_agent_failures + count_dispatcher_crashes functions.
+  # [INV-123] (#461): count_retries also sums count_no_pr_attempts
+  # unconditionally, so the combined-count substring gained a third term.
   assert_contains "dispatcher_crashes counter exists" "dispatcher_crashes" "$SKILL_CONTENT"
-  assert_contains "Combined retry count via two sources" "agent_failures + dispatcher_crashes" "$SKILL_CONTENT"
+  assert_contains "Combined retry count via three sources" "agent_failures + no_pr_attempts + dispatcher_crashes" "$SKILL_CONTENT"
 else
   echo -e "  ${RED}FAIL${NC}: SKILL.md not found at $SKILL_MD"
   ((FAIL++))

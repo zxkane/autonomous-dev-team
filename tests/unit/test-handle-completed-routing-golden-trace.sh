@@ -208,16 +208,19 @@ _reset_mocks() {
 # ===================================================================
 echo "=== TC-HCGT-001..003: none / passed arms ==="
 
-# TC-HCGT-001 — none, notice absent: dedup read then operator-handoff post.
+# TC-HCGT-001 — none, PR exists (this harness's chp_find_pr_for_issue always
+# returns a PR), notice absent: [INV-123] (#461) PR-exists check, then dedup
+# read, then operator-handoff post.
 _reset_mocks; _MOCK_VERDICT="none"; _MOCK_SID="sidA"
 handle_completed_session_routing 301 sidA "2026-06-28T00:00:00Z" >/dev/null 2>&1
-assert_eq     "TC-HCGT-001 none arm verb order = list,post" "itp_list_comments,itp_post_comment" "$(_trace_verbs | paste -sd, -)"
+assert_eq     "TC-HCGT-001 none arm (PR exists) verb order = fetch,chp_find,list,post" "fetch_pr_for_issue,chp_find_pr_for_issue,itp_list_comments,itp_post_comment" "$(_trace_verbs | paste -sd, -)"
 assert_match  "TC-HCGT-001 post body carries INV-12-completed marker" "INV-12-completed:sidA" "$(_trace_nth itp_post_comment 1)"
 
-# TC-HCGT-002 — none, notice PRESENT: dedup read only, NO post.
+# TC-HCGT-002 — none, PR exists, notice PRESENT: PR-exists check + dedup read
+# only, NO post.
 _reset_mocks; _MOCK_VERDICT="none"; _MOCK_SID="sidA"; _MOCK_NOTICE_PRESENT=1
 handle_completed_session_routing 302 sidA "2026-06-28T00:00:00Z" >/dev/null 2>&1
-assert_eq     "TC-HCGT-002 none arm (notice present) verb order = list only" "itp_list_comments" "$(_trace_verbs | paste -sd, -)"
+assert_eq     "TC-HCGT-002 none arm (PR exists, notice present) verb order = fetch,chp_find,list only" "fetch_pr_for_issue,chp_find_pr_for_issue,itp_list_comments" "$(_trace_verbs | paste -sd, -)"
 
 # TC-HCGT-003 — passed (race no-op): ZERO verb calls.
 _reset_mocks; _MOCK_VERDICT="passed"

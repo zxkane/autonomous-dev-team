@@ -22,6 +22,7 @@
     "verdict-fail": { "kind": "function", "file": "lib-dispatch.sh", "name": "classify_recent_review_verdict", "note": "Substantive FAIL (agent posted findings)." },
     "verdict-fail-substantive": { "kind": "function", "file": "lib-dispatch.sh", "name": "classify_recent_review_verdict", "note": "INV-35 review-aware routing input." },
     "verdict-fail-nonsubstantive": { "kind": "function", "file": "lib-dispatch.sh", "name": "classify_recent_review_verdict", "note": "INV-35 non-substantive cause (mergeable-unknown / e2e-evidence-missing / smoke-config-error / unavailable)." },
+    "verdict-none": { "kind": "function", "file": "lib-dispatch.sh", "name": "classify_recent_review_verdict", "note": "INV-123: no qualifying review comment found at all — branches on PR existence (dispatch-review-aware-none-nopr-fresh-dev vs. the unchanged INV-12-completed handoff, not a transition)." },
     "no-auto-close-present": { "kind": "predicate", "file": "autonomous-review.sh", "pattern": "no-auto-close", "note": "Maintainer label gates auto-merge skip." },
     "no-auto-close-absent": { "kind": "predicate", "file": "autonomous-review.sh", "pattern": "no-auto-close", "note": "Same label read; absence allows auto-merge." },
     "pr-merge-succeeded": { "kind": "predicate", "file": "autonomous-review.sh", "pattern": "pr merge", "note": "gh pr merge --squash succeeded." },
