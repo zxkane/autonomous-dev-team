@@ -1798,7 +1798,13 @@ if [[ "${E2E_ACTIVE:-false}" == "true" ]]; then
     # for free: we ARE that wrapper, executing right now, and the
     # `reviewing`-label single-writer invariant (flock-guarded PID-file
     # guard) rules out a second one running concurrently.
-    if [[ "$_gf_already_stalled" != "true" ]] && [[ "$_gf_next_count" -ge "$_gf_threshold" ]]; then
+    #
+    # [#453 codex review round-3, P2] Require a non-empty PR_HEAD_SHA before
+    # tripping. PR_HEAD_SHA is read with `|| true` (line ~1089) and can be
+    # empty on a chp_pr_view failure. An empty head is not "the same head" —
+    # it's "we don't know the head" — so a fingerprint keyed on it must never
+    # satisfy the same-HEAD safety condition this breaker exists to enforce.
+    if [[ "$_gf_already_stalled" != "true" ]] && [[ -n "$PR_HEAD_SHA" ]] && [[ "$_gf_next_count" -ge "$_gf_threshold" ]]; then
       log "[#453] same-HEAD gate-fail breaker TRIPPED: head=${PR_HEAD_SHA} rc=${_e2e_lane_rc} count=${_gf_next_count} (threshold=${_gf_threshold}) — halting re-dispatch, transitioning to stalled."
       # Transition FIRST, atomically — mirrors INV-105's TOCTOU fix (a
       # failed transition aborts under set -euo pipefail BEFORE RESULT_PARSED

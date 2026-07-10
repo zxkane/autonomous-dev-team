@@ -97,10 +97,16 @@ Every round, before deciding whether to trip:
    prematurely).
 3. Compute this round's count and construct this round's marker.
 
-When not-already-stalled AND count `>=` `GATE_FAIL_STALL_THRESHOLD` both hold
-(deliberately no `may_stall_now` gate — see the rationale in §2 above: that
-predicate's dispatch-marker-freshness check is for the dispatcher to ask
-about an EXTERNAL process; this breaker's caller IS the live process):
+When not-already-stalled AND `PR_HEAD_SHA` is non-empty AND count `>=`
+`GATE_FAIL_STALL_THRESHOLD` all hold (deliberately no `may_stall_now` gate —
+see the rationale in §2 above: that predicate's dispatch-marker-freshness
+check is for the dispatcher to ask about an EXTERNAL process; this breaker's
+caller IS the live process). The non-empty-head check (codex review round 3
+[P2] finding, fixed pre-merge) matters because `PR_HEAD_SHA` is read with
+`|| true` and can be empty on a `chp_pr_view` failure — an empty head means
+"we don't know the head," not "the same head," so a fingerprint keyed on it
+must never satisfy the same-HEAD safety condition this breaker exists to
+enforce:
 
 1. `itp_transition_state "$ISSUE_NUMBER" "reviewing" "stalled"` — lands FIRST,
    atomically, before `RESULT_PARSED` is set (mirrors INV-105's TOCTOU fix: a

@@ -6794,17 +6794,22 @@ genuine failure to trip prematurely).
    wrapper, executing right now, and the `reviewing`-label single-writer
    invariant (flock-guarded PID-file guard) rules out a second one running
    concurrently.
-3. `itp_transition_state "$ISSUE_NUMBER" "reviewing" "stalled"` runs FIRST,
+3. **`PR_HEAD_SHA` must be non-empty** (codex review round 3 [P2] finding,
+   fixed pre-merge): `PR_HEAD_SHA` is read with `|| true` and can be empty on
+   a `chp_pr_view` failure. An empty head is "we don't know the head," not
+   "the same head," so a fingerprint keyed on it must never satisfy the
+   same-HEAD safety condition this breaker exists to enforce.
+4. `itp_transition_state "$ISSUE_NUMBER" "reviewing" "stalled"` runs FIRST,
    atomically, BEFORE `RESULT_PARSED` is set — mirrors [INV-105]'s TOCTOU fix:
    a failed transition aborts the whole wrapper under `set -euo pipefail`
    before `RESULT_PARSED` is touched, so the crash-cleanup EXIT trap correctly
    treats it as a genuine crash rather than masking a landed stall.
-4. `RESULT_PARSED=true` is set IMMEDIATELY after the transition lands, BEFORE
+5. `RESULT_PARSED=true` is set IMMEDIATELY after the transition lands, BEFORE
    the report post (codex review [P1] finding, fixed pre-merge): a transient
    failure in the report post must not leave `RESULT_PARSED=false`, which
    would make the crash-cleanup EXIT trap re-add `pending-dev` on top of an
    already-landed stall.
-5. Post exactly ONE structured report (marker + human-readable body,
+6. Post exactly ONE structured report (marker + human-readable body,
    `reason=same-head-gate-failure`) embedding a best-effort environment-class
    classification (see below), then `exit 0` — never reaching the normal
    `pending-dev` routing.

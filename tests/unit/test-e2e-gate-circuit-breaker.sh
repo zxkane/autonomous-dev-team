@@ -359,6 +359,15 @@ assert_eq "TC-CIRCUIT-028a wrapper does not CALL may_stall_now (comment mentions
 assert_eq "TC-CIRCUIT-028b wrapper does not source lib-dispatch.sh" \
   "" "$(grep -vE '^\s*#' "$WRAPPER" | grep -o 'source.*lib-dispatch\.sh')"
 
+# TC-CIRCUIT-029 (codex round-3 review [P2]): the trip condition must require
+# a non-empty PR_HEAD_SHA. PR_HEAD_SHA is read with `|| true` and can be
+# empty on a chp_pr_view failure — an empty head is "we don't know the head",
+# not "the same head", so a fingerprint keyed on it must never satisfy the
+# same-HEAD safety condition this breaker exists to enforce.
+trip_condition_line=$(grep -n '_gf_already_stalled.*!=.*"true".*&&.*_gf_next_count.*-ge.*_gf_threshold' "$WRAPPER" | head -1)
+assert_contains "TC-CIRCUIT-029 trip condition requires a non-empty PR_HEAD_SHA" \
+  "$trip_condition_line" '-n "$PR_HEAD_SHA"'
+
 echo
 echo "=== Summary ==="
 echo "Passed: $PASS"

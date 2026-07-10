@@ -60,11 +60,11 @@ same-HEAD circuit breaker, plus a source-of-truth grep pin that
 | TC-CIRCUIT-022 | The breaker's own trip path `exit`s (or `return`s) before reaching the existing pending-dev routing | control-flow short-circuit present |
 | TC-CIRCUIT-023 | `docs/pipeline/errors.md` contains the literal `ADT_TRANSIENT_E2E_DEPLOY_FAIL` string (drift-guard `TC-ERR-ENVELOPE-020` forward-check) | present |
 
-### Group E — codex review regression pins (TC-CIRCUIT-024..028)
+### Group E — codex review regression pins (TC-CIRCUIT-024..029)
 
-Two rounds of independent codex review on the implementation found, in total,
-three [P1] correctness bugs and two [P2] hardening gaps, all fixed in the
-same PR. These pins guard against regressing any of them.
+Three rounds of independent codex review on the implementation found, in
+total, three [P1] correctness bugs and three [P2] hardening gaps, all fixed
+in the same PR. These pins guard against regressing any of them.
 
 | ID | Scenario | Expected |
 |----|----------|----------|
@@ -73,6 +73,7 @@ same PR. These pins guard against regressing any of them.
 | TC-CIRCUIT-026 | [P2] The threshold-fallback warning must go to stderr directly, never through `log()` — every call site captures `_gate_breaker_threshold`'s stdout via `$(...)` for the numeric result; a `log()`-routed warning (which echoes to stdout) corrupts the captured value, breaking the downstream numeric comparison | captured value is exactly `2`, not the warning text + `2` |
 | TC-CIRCUIT-027 | [P2] The marker read must filter to machine-authored comments only (`authorKind != "human"`), mirroring INV-105's own marker-authenticity filter — otherwise any repo collaborator able to comment could pre-seed a forged marker at a high count to force a premature trip | `select(.authorKind != "human")` present in the marker-read jq filter |
 | TC-CIRCUIT-028 | [P1] (round 2) The trip condition must NOT call `may_stall_now` (or source `lib-dispatch.sh` at all) — that predicate's dispatch-marker-freshness check is designed for the DISPATCHER to ask whether an EXTERNAL process might be alive; called from inside the very review wrapper the dispatcher just launched, it would always see its own fresh `review`-mode dispatch marker and defer for the marker's full TTL (default 600s), silently defeating the breaker for any E2E failure completing within that window — the common case | no `may_stall_now` call and no `lib-dispatch.sh` source in `autonomous-review.sh` |
+| TC-CIRCUIT-029 | [P2] (round 3) The trip condition must require a non-empty `PR_HEAD_SHA` — it is read with `\|\| true` and can be empty on a `chp_pr_view` failure; an empty head means "we don't know the head," not "the same head," so a fingerprint keyed on it must never satisfy the same-HEAD safety condition | `-n "$PR_HEAD_SHA"` present in the trip condition's boolean-AND chain |
 
 ## Acceptance criteria for this change (pre-merge verifiable)
 
