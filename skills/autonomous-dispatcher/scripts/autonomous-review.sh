@@ -326,18 +326,6 @@ for _req in PROJECT_ID REPO REPO_OWNER REPO_NAME PROJECT_DIR; do
   fi
 done
 
-# shellcheck source=lib-dispatch.sh
-# [#453] Reuse the dispatcher-side may_stall_now live-PID pre-gate for the
-# same-HEAD E2E-gate circuit breaker below — the same shared eligibility
-# predicate INV-105's convergence breaker uses, so this breaker never fights
-# a dev wrapper that just started. No function-name collisions with any lib
-# already sourced above (checked). Sourced HERE, AFTER the INV-72 config
-# validation loop above — lib-dispatch.sh's own top-level `: "${REPO:?...}"`
-# require-guards would otherwise abort with a raw "unbound variable" on an
-# incomplete autonomous.conf, pre-empting the graceful ADT_CFG_MISSING_KEY
-# envelope the loop above exists to surface (a PR review finding on #453).
-source "${LIB_DIR}/lib-dispatch.sh"
-
 # Validate REVIEW_BOTS at startup so a typo (e.g. REVIEW_BOTS="q codx")
 # fails fast with a clear error instead of silently dropping the bot.
 # Empty REVIEW_BOTS is allowed — the bot-review section is omitted from
@@ -1794,7 +1782,23 @@ if [[ "${E2E_ACTIVE:-false}" == "true" ]]; then
     _gf_next_count=$(_gate_breaker_next_count "$_gf_prior_marker" "$PR_HEAD_SHA" "$_e2e_lane_rc")
     _gf_threshold=$(_gate_breaker_threshold)
     _gf_marker=$(_gate_breaker_marker "$ISSUE_NUMBER" "$PR_HEAD_SHA" "$_e2e_lane_rc" "$_gf_next_count")
-    if [[ "$_gf_already_stalled" != "true" ]] && [[ "$_gf_next_count" -ge "$_gf_threshold" ]] && may_stall_now "$ISSUE_NUMBER"; then
+    # [#453 codex review round-2, P1] NO may_stall_now / lib-dispatch.sh
+    # liveness pre-gate here (unlike INV-105's dispatcher-side call). That
+    # predicate's dispatch-marker-freshness check exists so the DISPATCHER
+    # can ask "might some OTHER process be alive for this issue" before it
+    # mutates labels from outside. This breaker instead runs SYNCHRONOUSLY
+    # INSIDE the very review wrapper the dispatcher just launched — the
+    # marker `may_stall_now` would inspect is this process's OWN fresh
+    # `review` dispatch marker, so it would see the marker as
+    # cold-starting and defer for its full TTL (default 600s) on every
+    # invocation, silently defeating the breaker for any E2E failure that
+    # completes within that window (the common case). The safety property
+    # `may_stall_now` provides elsewhere — "don't stall out from under a
+    # wrapper that's still alive and making progress" — already holds here
+    # for free: we ARE that wrapper, executing right now, and the
+    # `reviewing`-label single-writer invariant (flock-guarded PID-file
+    # guard) rules out a second one running concurrently.
+    if [[ "$_gf_already_stalled" != "true" ]] && [[ "$_gf_next_count" -ge "$_gf_threshold" ]]; then
       log "[#453] same-HEAD gate-fail breaker TRIPPED: head=${PR_HEAD_SHA} rc=${_e2e_lane_rc} count=${_gf_next_count} (threshold=${_gf_threshold}) — halting re-dispatch, transitioning to stalled."
       # Transition FIRST, atomically — mirrors INV-105's TOCTOU fix (a
       # failed transition aborts under set -euo pipefail BEFORE RESULT_PARSED

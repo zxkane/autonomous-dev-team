@@ -6682,7 +6682,7 @@ _Triage (issue #236): [machine-checked: tests/unit/test-issue-filter.sh, tests/u
 
 ---
 
-## INV-122: a same-HEAD repeated E2E-gate failure (an INV-46 `fail` verdict against an UNCHANGED `(head_sha, e2e_lane_rc)` fingerprint, ≥`GATE_FAIL_STALL_THRESHOLD` consecutive rounds) is detected and HALTED — the breaker transitions `reviewing → stalled` then posts ONE structured `reason=same-head-gate-failure` report, gated behind the shared `may_stall_now` live-PID pre-gate and an already-`stalled` skip
+## INV-122: a same-HEAD repeated E2E-gate failure (an INV-46 `fail` verdict against an UNCHANGED `(head_sha, e2e_lane_rc)` fingerprint, ≥`GATE_FAIL_STALL_THRESHOLD` consecutive rounds) is detected and HALTED — the breaker transitions `reviewing → stalled` then posts ONE structured `reason=same-head-gate-failure` report, gated on an already-`stalled` skip (deliberately NOT the dispatcher-side `may_stall_now` live-PID pre-gate — see rationale below)
 
 _Triage (issue #236): [machine-checked: tests/unit/test-e2e-gate-circuit-breaker.sh]_
 
@@ -6775,10 +6775,25 @@ genuine failure to trip prematurely).
    distinguishes this trigger's `reason=same-head-gate-failure` from
    [INV-105]'s `reason=non-convergence` (the same reuse tradeoff INV-105
    itself already accepted for its own trigger).
-2. `may_stall_now "$ISSUE_NUMBER"` (the shared INV-26 live-PID eligibility
-   predicate, sourced from `lib-dispatch.sh` — reused verbatim, not
-   reimplemented, so this breaker never fights a dev wrapper that just
-   started).
+2. **No `may_stall_now` call** (codex review round 2 [P1] finding, fixed
+   pre-merge — an EARLIER version of this invariant called it, mirroring
+   [INV-105]'s reuse of the shared INV-26 live-PID eligibility predicate).
+   `may_stall_now`'s dispatch-marker-freshness check exists so the
+   *dispatcher* can ask "might some OTHER process be alive for this issue"
+   before it mutates labels from outside. This breaker instead runs
+   synchronously INSIDE the very review wrapper the dispatcher just
+   launched — the marker `may_stall_now` would inspect is this process's OWN
+   fresh `review`-mode dispatch marker (`acquire_dispatch_marker … "review"`
+   at dispatch time, held for its full TTL — default 600s — per
+   `dispatch_marker_confirm_launched`'s own "it lives out its normal TTL"
+   design), so the call would always see a fresh marker and defer,
+   defeating the breaker for any E2E failure that completes within that
+   window (the common case). The safety property `may_stall_now` provides
+   elsewhere — never stalling out from under a wrapper that is still alive
+   and making progress — already holds here for free: this code IS that
+   wrapper, executing right now, and the `reviewing`-label single-writer
+   invariant (flock-guarded PID-file guard) rules out a second one running
+   concurrently.
 3. `itp_transition_state "$ISSUE_NUMBER" "reviewing" "stalled"` runs FIRST,
    atomically, BEFORE `RESULT_PARSED` is set — mirrors [INV-105]'s TOCTOU fix:
    a failed transition aborts the whole wrapper under `set -euo pipefail`
@@ -6833,10 +6848,11 @@ plan: `docs/test-cases/e2e-gate-circuit-breaker.md`.
 **Producer**: `autonomous-review.sh` (the E2E-gate `fail` branch) + pure
 helpers in `lib-review-e2e.sh` (`_gate_breaker_marker`,
 `_gate_breaker_parse_count`, `_gate_breaker_next_count`,
-`_gate_breaker_threshold`) + the reused `may_stall_now`/`pid_alive`/`get_pid`
-from `lib-dispatch.sh` (newly sourced by `autonomous-review.sh` for this
-invariant — no function-name collisions with any lib the wrapper already
-sources, checked at implementation time).
+`_gate_breaker_threshold`). Does NOT source `lib-dispatch.sh` or reuse
+`may_stall_now`/`pid_alive`/`get_pid` (see the "No `may_stall_now` call"
+rationale above — an earlier version did, before a codex review round-2
+[P1] finding identified why that predicate cannot apply from inside the
+wrapper it would be checking).
 
 **Tests**: `tests/unit/test-e2e-gate-circuit-breaker.sh` (fingerprint/counter/
 threshold pure-logic assertions + source-of-truth wiring greps against
@@ -6846,10 +6862,12 @@ two-pronged style since the wrapper itself is too heavy to run end-to-end).
 **See also**:
 - [INV-46] — the E2E hard gate this breaker sits inside; only its `fail`
   branch is intercepted.
-- [INV-105] — the sibling breaker whose marker/threshold/report/`may_stall_now`
-  pattern this invariant mirrors, for a DIFFERENT trigger (divergent findings
-  on a completed dev session vs. fixed-point gate-failure repetition) and a
-  DIFFERENT label movement (`pending-dev → stalled` vs. `reviewing → stalled`).
+- [INV-105] — the sibling breaker whose marker/threshold/report shape this
+  invariant mirrors, for a DIFFERENT trigger (divergent findings on a
+  completed dev session vs. fixed-point gate-failure repetition), a
+  DIFFERENT label movement (`pending-dev → stalled` vs. `reviewing → stalled`),
+  and — unlike INV-105 — deliberately WITHOUT the shared `may_stall_now`
+  live-PID pre-gate, which does not apply from this breaker's call site.
 - [INV-72] — the config-class error-envelope contract this invariant's
   environment-class slice deliberately does NOT extend (reuses `transient`,
   already allowed).

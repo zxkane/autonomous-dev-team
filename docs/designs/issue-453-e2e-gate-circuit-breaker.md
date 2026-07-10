@@ -27,13 +27,16 @@ block, **before** the existing `itp_post_comment` / `emit_verdict_trailer` /
 sequence. This intercepts the loop at its source, inside the review wrapper
 that owns the E2E gate — no `dispatcher-tick.sh` / `lib-dispatch.sh` changes.
 
-This mirrors INV-105's convergence breaker (same shared-helper reuse pattern:
-`may_stall_now` pre-gate, `stalled` label reuse, one structured report,
-transition-then-report atomicity ordering) but for a **different trigger** —
-INV-105 fires from the *dispatcher* side on a *completed dev session*; this
-breaker fires from the *review wrapper* side on a *repeated gate failure*, and
-therefore performs a **different label movement**: `reviewing → stalled`
-(INV-105's is `pending_dev → stalled`).
+This mirrors INV-105's convergence breaker (same shared shape: `stalled`
+label reuse, one structured report, transition-then-report atomicity
+ordering) but for a **different trigger** — INV-105 fires from the
+*dispatcher* side on a *completed dev session*; this breaker fires from the
+*review wrapper* side on a *repeated gate failure*, and therefore performs a
+**different label movement**: `reviewing → stalled` (INV-105's is
+`pending_dev → stalled`). One deliberate NON-mirror: INV-105's shared
+`may_stall_now` live-PID pre-gate does NOT apply here (see §5) — an earlier
+draft of this design reused it anyway, before a codex review caught why it
+can't work from this call site.
 
 ## 3. Fingerprint and counter
 
@@ -94,8 +97,10 @@ Every round, before deciding whether to trip:
    prematurely).
 3. Compute this round's count and construct this round's marker.
 
-When not-already-stalled AND count `>=` `GATE_FAIL_STALL_THRESHOLD` AND
-`may_stall_now` (the shared live-PID pre-gate) all hold:
+When not-already-stalled AND count `>=` `GATE_FAIL_STALL_THRESHOLD` both hold
+(deliberately no `may_stall_now` gate — see the rationale in §2 above: that
+predicate's dispatch-marker-freshness check is for the dispatcher to ask
+about an EXTERNAL process; this breaker's caller IS the live process):
 
 1. `itp_transition_state "$ISSUE_NUMBER" "reviewing" "stalled"` — lands FIRST,
    atomically, before `RESULT_PARSED` is set (mirrors INV-105's TOCTOU fix: a
@@ -182,9 +187,10 @@ The hook point lives inside `autonomous-review.sh` (a heavy wrapper sourcing
 recommendation, the breaker's core logic (fingerprint construction, marker
 parse/round-trip, threshold bounds, already-stalled skip) is factored into pure
 helper functions in `lib-review-e2e.sh` and unit-tested directly by mocking
-`itp_list_comments` / `itp_read_task` / `may_stall_now` / `itp_transition_state`
-/ `itp_post_comment`, mirroring `test-convergence-breaker.sh`'s mock style. A
-thin source-of-truth grep test (mirroring
+`itp_list_comments` / `itp_read_task` / `itp_transition_state` /
+`itp_post_comment`, mirroring `test-convergence-breaker.sh`'s mock style
+(minus `may_stall_now`, which this breaker deliberately does not call — see
+§5). A thin source-of-truth grep test (mirroring
 `test-autonomous-review-e2e-gate-open-guard.sh`) pins that the wrapper wires
 the helper in at the correct point, before the existing `pending-dev` routing.
 

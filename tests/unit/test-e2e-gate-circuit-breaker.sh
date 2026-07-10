@@ -344,6 +344,21 @@ assert_contains "TC-CIRCUIT-026b _gate_breaker_threshold's fallback warning is a
 assert_contains "TC-CIRCUIT-027 marker read filters authorKind != \"human\" (forgery guard, mirrors INV-105)" \
   "$wrapper_src" 'select(.authorKind != "human")'
 
+# TC-CIRCUIT-028 (codex round-2 review [P1]): the trip condition must NOT call
+# may_stall_now (or source lib-dispatch.sh at all) — a live function CALL
+# (may_stall_now "$ISSUE_NUMBER"), not merely the identifier appearing in an
+# explanatory comment (which legitimately documents WHY it is absent). That
+# predicate's dispatch-marker-freshness check is designed for the DISPATCHER
+# to ask whether some EXTERNAL process might be alive; called from INSIDE the
+# very review wrapper the dispatcher just launched, it would always see its
+# own fresh `review`-mode dispatch marker and defer for the marker's full TTL
+# (default 600s) — silently defeating the breaker for any E2E failure that
+# completes within that window, which is the common case.
+assert_eq "TC-CIRCUIT-028a wrapper does not CALL may_stall_now (comment mentions are fine)" \
+  "" "$(grep -vE '^\s*#' "$WRAPPER" | grep -o 'may_stall_now "\$ISSUE_NUMBER"')"
+assert_eq "TC-CIRCUIT-028b wrapper does not source lib-dispatch.sh" \
+  "" "$(grep -vE '^\s*#' "$WRAPPER" | grep -o 'source.*lib-dispatch\.sh')"
+
 echo
 echo "=== Summary ==="
 echo "Passed: $PASS"

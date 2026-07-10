@@ -223,12 +223,12 @@
       "to": "stalled",
       "event": "e2e-hard-gate-fail-same-head-breaker",
       "actor": "review-wrapper",
-      "guards": ["e2e-gate-fail", "same-head-same-rc-threshold-reached", "not-already-stalled", "pid-dead"],
+      "guards": ["e2e-gate-fail", "same-head-same-rc-threshold-reached", "not-already-stalled"],
       "actions": ["remove-label:reviewing", "add-label:stalled", "comment:same-head-gate-failure"],
       "code_site": "autonomous-review.sh E2E gate FAIL same-HEAD breaker: --remove-label reviewing --add-label stalled",
       "mermaid": "reviewing --> stalled: E2E hard gate FAIL repeated on unchanged (head, rc) >= GATE_FAIL_STALL_THRESHOLD [INV-122]",
       "inv_refs": ["INV-122", "INV-46", "INV-105"],
-      "note": "INV-122 (#453): the same-HEAD circuit breaker for a REPEATED INV-46 E2E-gate fail against an unchanged (head, rc) pair. Runs INSIDE the existing E2E_GATE==fail branch, BEFORE the review-e2e-gate-fail transition below — a trip short-circuits that transition entirely via label_swap reviewing→stalled FIRST (atomic, mirrors INV-105's TOCTOU fix), then posts exactly ONE reason=same-head-gate-failure report. Checks the issue is not already stalled (e.g. INV-105 tripped first) before running. Fingerprint is (head_sha, e2e_lane_rc), not head alone — a different rc on the same head resets the counter rather than accumulating it, so an unrelated transient failure followed by a genuinely new substantive bug on the same untouched head is never misclassified as non-convergent."
+      "note": "INV-122 (#453): the same-HEAD circuit breaker for a REPEATED INV-46 E2E-gate fail against an unchanged (head, rc) pair. Runs INSIDE the existing E2E_GATE==fail branch, BEFORE the review-e2e-gate-fail transition below — a trip short-circuits that transition entirely via label_swap reviewing→stalled FIRST (atomic, mirrors INV-105's TOCTOU fix), then posts exactly ONE reason=same-head-gate-failure report. Checks the issue is not already stalled (e.g. INV-105 tripped first) before running. Fingerprint is (head_sha, e2e_lane_rc), not head alone — a different rc on the same head resets the counter rather than accumulating it, so an unrelated transient failure followed by a genuinely new substantive bug on the same untouched head is never misclassified as non-convergent. Deliberately does NOT gate on may_stall_now/pid-dead (codex review round 2 [P1]): that predicate's dispatch-marker-freshness check exists for the DISPATCHER to ask whether an EXTERNAL wrapper might still be alive; this breaker instead runs synchronously inside the very review wrapper the dispatcher just launched, so it would always see its own fresh review-mode dispatch marker and defer for the full TTL, silently defeating the breaker for any E2E failure completing within that window. The reviewing-label single-writer invariant already provides the liveness guarantee may_stall_now exists to add."
     },
     {
       "id": "review-e2e-gate-fail",
