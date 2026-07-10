@@ -441,6 +441,31 @@ _agent_launch_binary() {
   fi
 }
 
+# _probe_user_install_dirs <bin> — [#458] on a `command -v` miss, check a small
+# fixed list of common user-level install dirs before concluding the binary is
+# genuinely absent. Read-only (a handful of `[ -x ... ]` checks) — never
+# mutates PATH; that fix is the operator's call. Echoes the first matching
+# directory's binary path on stdout and returns 0; returns 1 (no output) when
+# not found in any probed dir. Order: ~/.local/bin, ~/bin, ~/.npm-global/bin,
+# then the first nvm shim dir that has it (nvm installs one copy per node
+# version under ~/.nvm/versions/node/<v>/bin — we only need one match).
+_probe_user_install_dirs() {
+  local bin="$1" dir
+  for dir in "$HOME/.local/bin" "$HOME/bin" "$HOME/.npm-global/bin"; do
+    if [[ -x "$dir/$bin" ]]; then
+      echo "$dir/$bin"
+      return 0
+    fi
+  done
+  local nvm_hit
+  nvm_hit=$(compgen -G "$HOME/.nvm/versions/node/*/bin/$bin" 2>/dev/null | head -1) || true
+  if [[ -n "$nvm_hit" && -x "$nvm_hit" ]]; then
+    echo "$nvm_hit"
+    return 0
+  fi
+  return 1
+}
+
 # preflight_agent_binary — [INV-72] config-class preflight: confirm the resolved
 # agent CLI binary is actually on PATH BEFORE launching/resuming, so a missing
 # binary surfaces an operator error envelope instead of failing through
@@ -451,6 +476,17 @@ _agent_launch_binary() {
 # (run_agent / resume_agent) returns that as a config failure rather than
 # launching a non-existent command. Returns 0 (proceed) when the binary resolves
 # OR when a launcher is configured (binary resolution delegated to the launcher).
+#
+# [#458] A `command -v` miss does not necessarily mean "not installed" — a
+# binary living under a user-level install dir (~/.local/bin, an nvm shim,
+# etc.) is invisible to a non-login shell's PATH (cron / SSM / nohup), and the
+# original single remediation ("Install '<bin>'...") steered operators at a
+# perfectly fine install. Before composing the envelope, probe those dirs
+# (_probe_user_install_dirs) and branch the cause/remediation: found there →
+# name the found path and point at PATH/launcher/absolute-AGENT_CMD fixes;
+# not found anywhere → keep the install-focused remediation, but now also
+# include the effective $PATH so the operator can see what a fresh install
+# would need to land on.
 preflight_agent_binary() {
   local bin; bin="$(_agent_launch_binary)"
   # Launcher configured (empty bin) → skip; nothing to preflight here.
@@ -458,10 +494,22 @@ preflight_agent_binary() {
   if command -v "$bin" >/dev/null 2>&1; then
     return 0
   fi
+  local found_path
+  if found_path=$(_probe_user_install_dirs "$bin"); then
+    if command -v error_surface >/dev/null 2>&1; then
+      error_surface "${ISSUE_NUMBER:--}" ADT_CFG_AGENT_BINARY_MISSING \
+        "The configured agent CLI binary '${bin}' is not on PATH" \
+        "AGENT_CMD=${AGENT_CMD} resolves to the launch binary '${bin}'; it exists at ${found_path} but that directory is not on the wrapper's PATH (non-login shell — cron/SSM/nohup do not source the interactive profile)" \
+        "Extend PATH in the dispatcher/wrapper environment to include $(dirname "$found_path"), use an AGENT_LAUNCHER that sources the user profile, or set AGENT_CMD to the absolute path ${found_path}, then re-dispatch" \
+        "docs/pipeline/errors.md#configuration-class-class-config" || true
+    fi
+    echo "[lib-agent] ERROR: agent CLI binary '${bin}' (AGENT_CMD=${AGENT_CMD}) found at ${found_path} but not on PATH; aborting before launch (ADT_CFG_AGENT_BINARY_MISSING)." >&2
+    return 1
+  fi
   if command -v error_surface >/dev/null 2>&1; then
     error_surface "${ISSUE_NUMBER:--}" ADT_CFG_AGENT_BINARY_MISSING \
       "The configured agent CLI binary '${bin}' is not on PATH" \
-      "AGENT_CMD=${AGENT_CMD} resolves to the launch binary '${bin}', which 'command -v' cannot find on the execution host's PATH" \
+      "AGENT_CMD=${AGENT_CMD} resolves to the launch binary '${bin}', which 'command -v' cannot find on the execution host's PATH (also checked ~/.local/bin, ~/bin, ~/.npm-global/bin, and nvm shim dirs); effective PATH=${PATH}" \
       "Install '${bin}' on the execution host (or fix PATH / AGENT_CMD in scripts/autonomous.conf), then re-dispatch" \
       "docs/pipeline/errors.md#configuration-class-class-config" || true
   fi

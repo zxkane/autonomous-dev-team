@@ -50,7 +50,7 @@ grep -q 'ADT_CFG_AGENT_BINARY_MISSING' "$ERRORS_DOC" && ok "ADT_CFG_AGENT_BINARY
 # ---------------------------------------------------------------------------
 TMPROOT=$(mktemp -d)
 trap 'rm -rf "$TMPROOT"' EXIT
-mkdir -p "$TMPROOT/scripts" "$TMPROOT/bin" "$TMPROOT/cu"
+mkdir -p "$TMPROOT/scripts" "$TMPROOT/bin" "$TMPROOT/cu" "$TMPROOT/home-none"
 GH_CALLS="$TMPROOT/gh-calls.log"
 
 # Hermetic coreutils dir ($TMPROOT/cu): the preflight subshell runs with a
@@ -80,12 +80,16 @@ make_stub_bin() { printf '#!/bin/bash\nexit 0\n' > "$TMPROOT/bin/$1"; chmod +x "
 # preflight <agent_cmd> <issue> [launcher_argv...] — run preflight_agent_binary
 # in a clean subshell with a controlled PATH (only $TMPROOT/bin + coreutils),
 # the stub gh proxy, and the given AGENT_CMD / ISSUE_NUMBER / launcher. Echoes
-# `RC=<n>` last; the gh-calls log is shared via $GH_CALLS.
+# `RC=<n>` last; the gh-calls log is shared via $GH_CALLS. HOME is pinned to an
+# empty dir ($TMPROOT/home-none, #458) — otherwise the #458 user-install-dir
+# probe would read the REAL $HOME's ~/.local/bin/etc and could resolve the
+# host's actual agent CLI, defeating this test's "missing binary" premise.
 preflight() {
   local agent_cmd="$1" issue="$2"; shift 2
   ( set -uo pipefail
     export AUTONOMOUS_CONF_DIR="$TMPROOT/scripts" REPO="o/r" ISSUE_NUMBER="$issue"
     export AGENT_CMD="$agent_cmd"
+    export HOME="$TMPROOT/home-none"
     export PATH="$TMPROOT/bin:$TMPROOT/cu"
     # shellcheck disable=SC1090
     source "$LIB_ERROR"
@@ -193,6 +197,7 @@ codex_out=$(
   ( set -uo pipefail
     export AUTONOMOUS_CONF_DIR="$TMPROOT/scripts" REPO="o/r" ISSUE_NUMBER=231
     export AGENT_CMD=codex
+    export HOME="$TMPROOT/home-none"   # #458: keep the probe off the real $HOME
     export PATH="$TMPROOT/bin:$TMPROOT/cu"   # no `codex` here
     # shellcheck disable=SC1090
     source "$LIB_ERROR"; source "$LIB_AGENT" 2>/dev/null; source "$LIB_REVIEW_CODEX" 2>/dev/null
@@ -207,6 +212,100 @@ if grep -q 'ADT_CFG_AGENT_BINARY_MISSING' "$GH_CALLS"; then ok "CODEX envelope p
 [[ "$(cat "$GH_CALLS")" == *"codex"* ]] && ok "CODEX envelope names the missing 'codex' binary" || bad "CODEX envelope omits binary name"
 # Sanity: codex was never actually launched (no stdout capture written).
 [[ ! -s "$TMPROOT/codex-stdout.txt" ]] && ok "CODEX no codex launch (aborted at preflight)" || bad "CODEX codex appears to have launched despite missing binary"
+
+# ---------------------------------------------------------------------------
+# TC-BINPATH-NNN (#458): probe user-level install dirs before declaring the
+# binary genuinely missing.
+# ---------------------------------------------------------------------------
+# preflight_userhome <agent_cmd> <issue> <fake_home> — like preflight() above
+# but with a controlled $HOME (for the ~/.local/bin etc. probe dirs) and a
+# PATH that deliberately excludes every dir under it, so only the real
+# `command -v` PATH lookup or the probe (which reads $HOME directly, not
+# PATH) can find a binary.
+preflight_userhome() {
+  local agent_cmd="$1" issue="$2" fake_home="$3"
+  ( set -uo pipefail
+    export AUTONOMOUS_CONF_DIR="$TMPROOT/scripts" REPO="o/r" ISSUE_NUMBER="$issue"
+    export AGENT_CMD="$agent_cmd"
+    export HOME="$fake_home"
+    export PATH="$TMPROOT/cu"   # no $TMPROOT/bin — only coreutils, never the probe dirs
+    # shellcheck disable=SC1090
+    source "$LIB_ERROR"
+    # shellcheck disable=SC1090
+    source "$LIB_AGENT"
+    AGENT_CMD="$agent_cmd"
+    preflight_agent_binary
+    echo "RC=$?"
+  )
+}
+
+echo ""
+echo "=== TC-BINPATH-001: binary absent everywhere -> install remediation + PATH included ==="
+: > "$GH_CALLS"
+FAKEHOME="$TMPROOT/home-empty"
+mkdir -p "$FAKEHOME/.local/bin" "$FAKEHOME/bin" "$FAKEHOME/.npm-global/bin"
+out=$(preflight_userhome claude 331 "$FAKEHOME")
+assert_rc "BINPATH-001 preflight returns 1 (genuinely absent)" 1 "$(rc_of "$out")"
+GHBODY=$(cat "$GH_CALLS")
+[[ "$GHBODY" == *"Install 'claude'"* ]] && ok "BINPATH-001 keeps install-focused remediation" || bad "BINPATH-001 remediation changed unexpectedly"
+[[ "$GHBODY" == *"effective PATH="* ]] && ok "BINPATH-001 cause includes the effective \$PATH" || bad "BINPATH-001 cause missing \$PATH for diagnosis"
+
+echo ""
+echo "=== TC-BINPATH-002: binary present in \$HOME/.local/bin but not on PATH ==="
+: > "$GH_CALLS"
+FAKEHOME="$TMPROOT/home-localbin"
+mkdir -p "$FAKEHOME/.local/bin"
+printf '#!/bin/bash\nexit 0\n' > "$FAKEHOME/.local/bin/claude"; chmod +x "$FAKEHOME/.local/bin/claude"
+out=$(preflight_userhome claude 332 "$FAKEHOME")
+assert_rc "BINPATH-002 preflight returns 1 (found but not on PATH)" 1 "$(rc_of "$out")"
+GHBODY=$(cat "$GH_CALLS")
+[[ "$GHBODY" == *"$FAKEHOME/.local/bin/claude"* ]] && ok "BINPATH-002 cause names the found path" || bad "BINPATH-002 cause missing the found path"
+[[ "$GHBODY" == *"not on the wrapper's PATH"* || "$GHBODY" == *"non-login shell"* ]] && ok "BINPATH-002 cause names the non-login-shell PATH gap" || bad "BINPATH-002 cause missing the PATH-gap explanation"
+[[ "$GHBODY" == *"Extend PATH"* ]] && ok "BINPATH-002 remediation is PATH-specific" || bad "BINPATH-002 remediation not PATH-specific"
+[[ "$GHBODY" != *"Install 'claude' on the execution host"* ]] && ok "BINPATH-002 does NOT use the generic install remediation" || bad "BINPATH-002 wrongly used the generic install remediation"
+
+echo ""
+echo "=== TC-BINPATH-003: binary present in an nvm shim dir but not on PATH ==="
+: > "$GH_CALLS"
+FAKEHOME="$TMPROOT/home-nvm"
+mkdir -p "$FAKEHOME/.nvm/versions/node/v24.0.0/bin"
+printf '#!/bin/bash\nexit 0\n' > "$FAKEHOME/.nvm/versions/node/v24.0.0/bin/codex"; chmod +x "$FAKEHOME/.nvm/versions/node/v24.0.0/bin/codex"
+out=$(preflight_userhome codex 333 "$FAKEHOME")
+assert_rc "BINPATH-003 preflight returns 1 (found via nvm glob, not on PATH)" 1 "$(rc_of "$out")"
+GHBODY=$(cat "$GH_CALLS")
+[[ "$GHBODY" == *"$FAKEHOME/.nvm/versions/node/v24.0.0/bin/codex"* ]] && ok "BINPATH-003 cause names the nvm-found path" || bad "BINPATH-003 cause missing the nvm-found path"
+[[ "$GHBODY" == *"Extend PATH"* ]] && ok "BINPATH-003 remediation is PATH-specific" || bad "BINPATH-003 remediation not PATH-specific"
+
+echo ""
+echo "=== TC-BINPATH-004: binary on PATH -> preflight passes, no envelope (regression pin) ==="
+: > "$GH_CALLS"
+make_stub_bin claude
+out=$(preflight claude 334)
+assert_rc "BINPATH-004 preflight returns 0 when binary on PATH" 0 "$(rc_of "$out")"
+if grep -q 'ADT_CFG_AGENT_BINARY_MISSING' "$GH_CALLS"; then bad "BINPATH-004 envelope wrongly posted"; else ok "BINPATH-004 no envelope when binary on PATH"; fi
+rm -f "$TMPROOT/bin/claude"
+
+echo ""
+echo "=== TC-BINPATH-005: launcher configured -> preflight skipped regardless of probe dirs (regression pin) ==="
+: > "$GH_CALLS"
+FAKEHOME="$TMPROOT/home-launcher"
+mkdir -p "$FAKEHOME/.local/bin"
+printf '#!/bin/bash\nexit 0\n' > "$FAKEHOME/.local/bin/claude"; chmod +x "$FAKEHOME/.local/bin/claude"
+out=$(
+  ( set -uo pipefail
+    export AUTONOMOUS_CONF_DIR="$TMPROOT/scripts" REPO="o/r" ISSUE_NUMBER=335
+    export AGENT_CMD=claude HOME="$FAKEHOME"
+    export PATH="$TMPROOT/cu"
+    # shellcheck disable=SC1090
+    source "$LIB_ERROR"; source "$LIB_AGENT"
+    AGENT_CMD=claude
+    AGENT_LAUNCHER_ARGV=("cc-launcher" "--role" "dev")
+    preflight_agent_binary
+    echo "RC=$?"
+  )
+)
+assert_rc "BINPATH-005 preflight returns 0 with a launcher configured" 0 "$(rc_of "$out")"
+if grep -q 'ADT_CFG_AGENT_BINARY_MISSING' "$GH_CALLS"; then bad "BINPATH-005 envelope wrongly posted with launcher"; else ok "BINPATH-005 no envelope with launcher (preflight skipped, probe dirs irrelevant)"; fi
 
 echo ""
 echo "============================================"
