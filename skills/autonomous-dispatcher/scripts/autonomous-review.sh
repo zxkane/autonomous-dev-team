@@ -88,14 +88,6 @@ source "${LIB_DIR}/lib-code-host.sh"
 # helpers (_run_command_e2e_lane / _fetch_sha_evidence) live there so they are
 # unit-testable in isolation. Inert when E2E_MODE=none.
 source "${LIB_DIR}/lib-review-e2e.sh"
-# shellcheck source=lib-dispatch.sh
-# [#453] Reuse the dispatcher-side may_stall_now live-PID pre-gate for the
-# same-HEAD E2E-gate circuit breaker below — the same shared eligibility
-# predicate INV-105's convergence breaker uses, so this breaker never fights
-# a dev wrapper that just started. No function-name collisions with any lib
-# already sourced above (checked); its only top-level side effects are the
-# same REPO/REPO_OWNER/PROJECT_ID require-guards this wrapper already sets.
-source "${LIB_DIR}/lib-dispatch.sh"
 # shellcheck source=lib-review-codex.sh
 # INV-62 (#218): codex-specific review path. The codex review member runs the
 # purpose-built `codex review "<prompt>"` subcommand (_run_codex_review) — natively
@@ -333,6 +325,18 @@ for _req in PROJECT_ID REPO REPO_OWNER REPO_NAME PROJECT_DIR; do
     exit 1
   fi
 done
+
+# shellcheck source=lib-dispatch.sh
+# [#453] Reuse the dispatcher-side may_stall_now live-PID pre-gate for the
+# same-HEAD E2E-gate circuit breaker below — the same shared eligibility
+# predicate INV-105's convergence breaker uses, so this breaker never fights
+# a dev wrapper that just started. No function-name collisions with any lib
+# already sourced above (checked). Sourced HERE, AFTER the INV-72 config
+# validation loop above — lib-dispatch.sh's own top-level `: "${REPO:?...}"`
+# require-guards would otherwise abort with a raw "unbound variable" on an
+# incomplete autonomous.conf, pre-empting the graceful ADT_CFG_MISSING_KEY
+# envelope the loop above exists to surface (a PR review finding on #453).
+source "${LIB_DIR}/lib-dispatch.sh"
 
 # Validate REVIEW_BOTS at startup so a typo (e.g. REVIEW_BOTS="q codx")
 # fails fast with a clear error instead of silently dropping the bot.
