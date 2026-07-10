@@ -3090,10 +3090,13 @@ emitted code is still `ADT_CFG_AGENT_BINARY_MISSING` either way, but the
 found path and calls out the non-login-shell PATH gap; remediation points at
 extending `PATH` in the wrapper environment, an `AGENT_LAUNCHER` that sources
 the user profile, or an absolute-path `AGENT_CMD` — **genuinely not found
-anywhere** (including the `HOME`-unset case) → the original install-focused
-remediation, now with the effective `$PATH` appended to the cause for
-diagnosis. Fixing PATH itself stays the operator's call — the preflight only
-diagnoses.
+anywhere** → the original install-focused remediation, now with the
+effective `$PATH` appended to the cause for diagnosis. The cause text's
+"also checked ~/.local/bin, ~/bin, ~/.npm-global/bin, and nvm shim dirs"
+claim is swapped for "HOME is unset/empty, so the user-level install dirs
+could not be probed" in the `HOME`-unset sub-case, so the envelope never
+claims a probe happened when it didn't. Fixing PATH itself stays the
+operator's call — the preflight only diagnoses.
 
 Each config-class abort path carries a **stable `UPPER_SNAKE` code** documented
 in the append-only registry [`errors.md`](errors.md) (codes never renumber). The

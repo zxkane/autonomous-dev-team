@@ -366,6 +366,8 @@ out=$(
 assert_rc "BINPATH-009 preflight returns 1 cleanly with HOME unset (no crash)" 1 "$(rc_of "$out")"
 GHBODY=$(cat "$GH_CALLS")
 [[ "$GHBODY" == *"Install 'claude'"* ]] && ok "BINPATH-009 falls to install-focused remediation with HOME unset" || bad "BINPATH-009 unexpected remediation with HOME unset"
+[[ "$GHBODY" == *"HOME is unset/empty"* ]] && ok "BINPATH-009 cause accurately says HOME is unset (not the generic probe-dir claim)" || bad "BINPATH-009 cause should not claim probe dirs were checked when HOME is unset"
+[[ "$GHBODY" != *"also checked ~/.local/bin"* ]] && ok "BINPATH-009 cause does NOT claim probe dirs were checked" || bad "BINPATH-009 wrongly claims probe dirs were checked despite HOME being unset"
 
 echo ""
 echo "=== TC-BINPATH-010: a directory named like the binary is not treated as found ==="

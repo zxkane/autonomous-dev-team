@@ -511,9 +511,11 @@ preflight_agent_binary() {
     return 1
   fi
   if command -v error_surface >/dev/null 2>&1; then
+    local _probe_note="also checked ~/.local/bin, ~/bin, ~/.npm-global/bin, and nvm shim dirs"
+    [[ -z "${HOME:-}" ]] && _probe_note="HOME is unset/empty, so the user-level install dirs could not be probed"
     error_surface "${ISSUE_NUMBER:--}" ADT_CFG_AGENT_BINARY_MISSING \
       "The configured agent CLI binary '${bin}' is not on PATH" \
-      "AGENT_CMD=${AGENT_CMD} resolves to the launch binary '${bin}', which 'command -v' cannot find on the execution host's PATH (also checked ~/.local/bin, ~/bin, ~/.npm-global/bin, and nvm shim dirs); effective PATH=${PATH}" \
+      "AGENT_CMD=${AGENT_CMD} resolves to the launch binary '${bin}', which 'command -v' cannot find on the execution host's PATH (${_probe_note}); effective PATH=${PATH}" \
       "Install '${bin}' on the execution host (or fix PATH / AGENT_CMD in scripts/autonomous.conf), then re-dispatch" \
       "docs/pipeline/errors.md#configuration-class-class-config" || true
   fi
