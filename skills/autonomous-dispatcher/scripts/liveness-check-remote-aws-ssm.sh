@@ -284,7 +284,11 @@ EOF
 )
 
 # Wrap in sudo + login shell so the remote profile (when set) is loaded.
-FULL_CMD="sudo -u ${SSM_REMOTE_USER} ${SSM_REMOTE_SHELL} -l -c '${INNER_CMD}'"
+# [#454] Built via _ssm_build_full_cmd (lib-ssm.sh), which base64-encodes
+# INNER_CMD instead of interpolating it inside an outer single-quote wrap —
+# a heredoc comment's apostrophe (or any future one) can no longer break
+# the outer quoting. See that function's docstring for the full rationale.
+FULL_CMD=$(_ssm_build_full_cmd "$SSM_REMOTE_USER" "$SSM_REMOTE_SHELL" "$INNER_CMD")
 
 # ---------------------------------------------------------------------------
 # Execute via shared helper, parse verdict

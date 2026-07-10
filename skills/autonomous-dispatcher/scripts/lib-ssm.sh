@@ -52,6 +52,36 @@ _has_shell_metachar() {
   esac
 }
 
+# _ssm_build_full_cmd <user> <shell> <inner_cmd>
+#
+# Builds the `sudo -u $user $shell -l -c '...'` command string sent over
+# SSM, WITHOUT ever placing $inner_cmd's literal text inside the outer
+# single-quote wrap (#454). $inner_cmd is base64-encoded and decoded +
+# `eval`'d remotely instead of being interpolated verbatim — so a
+# heredoc body's own comments/strings (English contractions, embedded
+# quotes, backticks, anything) can never break the outer quoting no
+# matter what characters they contain. This is the STRUCTURAL fix the
+# issue asked for: it protects every future edit to a heredoc body, not
+# just today's offending apostrophe.
+#
+# The base64 alphabet is [A-Za-z0-9+/=] only — it cannot itself contain
+# a `'`, so the outer single-quote wrap around the `eval "$(printf ...)"`
+# expression stays balanced regardless of $inner_cmd's content. $user and
+# $shell are still interpolated directly into the outer wrap (as before);
+# callers MUST validate them against `^[a-zA-Z0-9_-]+$` /
+# `^(bash|zsh|sh)$` first, same as always.
+#
+# Exit-code / stdout passthrough: `eval "$(...)"` runs $inner_cmd in the
+# CURRENT shell (not a subshell), so `exit N` inside $inner_cmd still
+# terminates the -c shell with rc=N, and stdout/stderr are unbuffered
+# pass-through — the ALIVE/DEAD/DEFERRED contract (INV-30, INV-119) is
+# unchanged.
+_ssm_build_full_cmd() {
+  local user="$1" shell="$2" inner_cmd="$3" b64
+  b64=$(printf '%s' "$inner_cmd" | base64 | tr -d '\n')
+  printf '%s' "sudo -u ${user} ${shell} -l -c 'eval \"\$(printf %s ${b64} | base64 -d)\"'"
+}
+
 # _ssm_run_remote_command <instance-id> <region> <inner-cmd>
 #
 # Synchronous: send-command + poll get-command-invocation until terminal

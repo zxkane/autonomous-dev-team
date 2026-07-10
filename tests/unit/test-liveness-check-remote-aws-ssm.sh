@@ -302,12 +302,16 @@ assert_contains "TC-LCS-010 argv contains --region" "--region" "$argv"
 assert_contains "TC-LCS-010 argv carries SSM_REGION value" "ap-southeast-1" "$argv"
 assert_contains "TC-LCS-010 argv contains --instance-ids" "--instance-ids" "$argv"
 assert_contains "TC-LCS-010 argv carries SSM_INSTANCE_ID value" "i-test" "$argv"
-# The remote snippet must carry the kind ("issue") and issue number (99)
-# verbatim. The argv lands inside a JSON payload (--parameters) so the
-# inner double-quotes are JSON-escaped to \" — assert against that form.
-assert_contains "TC-LCS-010 remote inner-cmd carries KIND=\"issue\"" 'KIND=\"issue\"' "$argv"
-assert_contains "TC-LCS-010 remote inner-cmd carries N=\"99\"" 'N=\"99\"' "$argv"
-assert_contains "TC-LCS-010 remote inner-cmd derives PID file via \${KIND}-\${N}.pid" '${KIND}-${N}.pid' "$argv"
+# [#454] FULL_CMD no longer interpolates INNER_CMD verbatim inside the outer
+# single-quote wrap — it base64-encodes it (via _ssm_build_full_cmd,
+# lib-ssm.sh) and decodes+evals it remotely. So the kind/issue-number/PID-
+# file-derivation assertions below must decode that payload first, rather
+# than grepping the raw argv for JSON-escaped literal text.
+b64_payload=$(printf '%s' "$argv" | grep -oE 'printf %s [A-Za-z0-9+/=]+ \| base64 -d' | sed -E 's/^printf %s //; s/ \| base64 -d$//')
+decoded_inner=$(printf '%s' "$b64_payload" | base64 -d)
+assert_contains "TC-LCS-010 remote inner-cmd carries KIND=\"issue\"" 'KIND="issue"' "$decoded_inner"
+assert_contains "TC-LCS-010 remote inner-cmd carries N=\"99\"" 'N="99"' "$decoded_inner"
+assert_contains "TC-LCS-010 remote inner-cmd derives PID file via \${KIND}-\${N}.pid" '${KIND}-${N}.pid' "$decoded_inner"
 
 # ---------------------------------------------------------------------------
 echo ""
@@ -375,6 +379,126 @@ SSM_COMMAND_TIMEOUT_SECONDS=10 \
 bash "$DRIVER" issue 99 >/dev/null 2>/dev/null
 rc_pre_fix=$?
 assert_rc "TC-LCS-012 pre-fix value (10) DOES hit the real ParamValidation rejection through the driver (proves the fixture is faithful)" 2 "$rc_pre_fix"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-LCS-013: FULL_CMD sent to SSM is syntactically balanced (#454) ==="
+# ---------------------------------------------------------------------------
+# #454: b6bf6fa's Lane-GC PR-6 heredoc comment ("...THIS run's own defer...")
+# contains a literal apostrophe. Extract the EXACT `commands[0]` string the
+# driver hands to `aws ssm send-command` and prove it round-trips through
+# `bash -n` cleanly — the same check that, against the pre-fix construction
+# (INNER_CMD interpolated verbatim inside the outer single-quote wrap),
+# fails with "Unterminated quoted string" on 100% of invocations.
+LIB_SSM="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-ssm.sh"
+reset_recorder
+PATH="$STUB_BIN:$PATH" \
+AWS_RECORD_FILE="$TMPROOT/aws-record" \
+AWS_GET_STATUS="Success" \
+AWS_GET_STDOUT="ALIVE" \
+bash "$DRIVER" issue 99 >/dev/null 2>&1
+# The recorded --parameters argv element is itself multi-line (it embeds
+# the whole INNER_CMD heredoc's newlines) and is followed by a fixed
+# `--output` / `json` pair the stub always appends last — grab everything
+# between the `--parameters` marker line and that trailing pair.
+params_json=$(awk '
+  found && /^--output$/ { exit }
+  found { print }
+  /^--parameters$/ { found=1; next }
+' "$TMPROOT/aws-record")
+full_cmd=$(printf '%s' "$params_json" | jq -r '.commands[0]')
+printf '%s' "$full_cmd" > "$TMPROOT/full_cmd_013.sh"
+if bash -n "$TMPROOT/full_cmd_013.sh" 2>"$TMPROOT/full_cmd_013.err"; then
+  echo -e "  ${GREEN}PASS${NC}: TC-LCS-013 captured FULL_CMD parses cleanly under bash -n"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-LCS-013 captured FULL_CMD is syntactically broken: $(cat "$TMPROOT/full_cmd_013.err")"
+  FAIL=$((FAIL + 1))
+fi
+
+# Fidelity check: reconstruct what FULL_CMD would have been under the
+# PRE-FIX construction (INNER_CMD interpolated verbatim inside the outer
+# single-quote wrap) using the SAME real INNER_CMD text (decoded from the
+# base64 payload the fixed driver actually sent) and prove THAT string is
+# NOT syntactically balanced — i.e. this test would have failed against
+# main before the fix, reproducing the exact "Unterminated quoted string"
+# class of bug rather than testing a strawman.
+b64_payload=$(printf '%s' "$full_cmd" | grep -oE 'printf %s [A-Za-z0-9+/=]+ \| base64 -d' | sed -E 's/^printf %s //; s/ \| base64 -d$//')
+real_inner_cmd=$(printf '%s' "$b64_payload" | base64 -d)
+pre_fix_full_cmd="sudo -u ubuntu bash -l -c '${real_inner_cmd}'"
+printf '%s' "$pre_fix_full_cmd" > "$TMPROOT/full_cmd_013_prefix.sh"
+if bash -n "$TMPROOT/full_cmd_013_prefix.sh" 2>/dev/null; then
+  echo -e "  ${RED}FAIL${NC}: TC-LCS-013 pre-fix reconstruction unexpectedly parses cleanly (fixture not faithful — apostrophe missing from real INNER_CMD?)"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${NC}: TC-LCS-013 pre-fix reconstruction (naive interpolation of the SAME real INNER_CMD) DOES hit the syntax error, proving this test is a faithful regression check"
+  PASS=$((PASS + 1))
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-LCS-014: no unescaped ' reaches the outer FULL_CMD wrap (#454 structural guard) ==="
+# ---------------------------------------------------------------------------
+# The base64 alphabet is [A-Za-z0-9+/=] only, so once INNER_CMD is
+# transported through _ssm_build_full_cmd, FULL_CMD can contain exactly the
+# TWO single quotes that delimit the outer `-c '...'` argument — never a
+# third one contributed by INNER_CMD's own content. Count them directly on
+# the real captured FULL_CMD.
+quote_count=$(printf '%s' "$full_cmd" | tr -dc "'" | wc -c)
+assert_eq "TC-LCS-014 FULL_CMD contains exactly 2 single quotes (the outer -c delimiters, nothing from INNER_CMD)" "2" "$quote_count"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-LCS-015: structural guard survives a FUTURE apostrophe reintroduced into the heredoc (#454, reproduces b6bf6fa) ==="
+# ---------------------------------------------------------------------------
+# This is the regression the issue asks for by name: prove that re-adding a
+# comment containing a literal apostrophe inside the INNER_CMD heredoc body
+# — exactly what b6bf6fa did — cannot reintroduce the bug, because the fix
+# is structural (base64 transport), not a one-off character removal from
+# today's specific comment. Drive lib-ssm.sh's _ssm_build_full_cmd (the
+# REAL function the driver calls) directly with a synthetic INNER_CMD that
+# reintroduces the apostrophe pattern, and prove the result still parses.
+# shellcheck source=/dev/null
+source "$LIB_SSM"
+regressed_inner_cmd=$(cat <<'INNEREOF'
+set -u
+# a brand-new hypothetical comment about THIS run's own state, added long
+# after this fix shipped, containing a fresh apostrophe
+echo DEAD
+INNEREOF
+)
+if ! declare -F _ssm_build_full_cmd >/dev/null; then
+  echo -e "  ${RED}FAIL${NC}: TC-LCS-015 _ssm_build_full_cmd is not defined after sourcing lib-ssm.sh — cannot exercise the structural guard"
+  FAIL=$((FAIL + 1))
+else
+  regressed_full_cmd=$(_ssm_build_full_cmd "ubuntu" "bash" "$regressed_inner_cmd")
+  if [[ -z "$regressed_full_cmd" ]]; then
+    echo -e "  ${RED}FAIL${NC}: TC-LCS-015 _ssm_build_full_cmd produced empty output — cannot exercise the structural guard"
+    FAIL=$((FAIL + 1))
+  else
+    printf '%s' "$regressed_full_cmd" > "$TMPROOT/full_cmd_015.sh"
+    if bash -n "$TMPROOT/full_cmd_015.sh" 2>"$TMPROOT/full_cmd_015.err"; then
+      echo -e "  ${GREEN}PASS${NC}: TC-LCS-015 a freshly reintroduced heredoc apostrophe still produces a syntactically balanced FULL_CMD"
+      PASS=$((PASS + 1))
+    else
+      echo -e "  ${RED}FAIL${NC}: TC-LCS-015 structural guard failed to protect against a reintroduced apostrophe: $(cat "$TMPROOT/full_cmd_015.err")"
+      FAIL=$((FAIL + 1))
+    fi
+  fi
+fi
+
+# Negative control: prove the SAME synthetic apostrophe-laden INNER_CMD
+# WOULD break the pre-fix (naive-interpolation) construction — i.e. this
+# guard is exercising a real hazard, not a no-op.
+regressed_pre_fix_full_cmd="sudo -u ubuntu bash -l -c '${regressed_inner_cmd}'"
+printf '%s' "$regressed_pre_fix_full_cmd" > "$TMPROOT/full_cmd_015_prefix.sh"
+if bash -n "$TMPROOT/full_cmd_015_prefix.sh" 2>/dev/null; then
+  echo -e "  ${RED}FAIL${NC}: TC-LCS-015 negative control unexpectedly parses cleanly (synthetic fixture not faithful)"
+  FAIL=$((FAIL + 1))
+else
+  echo -e "  ${GREEN}PASS${NC}: TC-LCS-015 negative control confirms the SAME apostrophe DOES break naive interpolation (guard is meaningful)"
+  PASS=$((PASS + 1))
+fi
 
 echo ""
 echo "==============================================="

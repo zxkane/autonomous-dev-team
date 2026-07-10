@@ -169,7 +169,10 @@ esac
 # /etc/profile, ~/.profile (or ~/.zprofile), making PATH and env vars
 # available. The explicit `source $SSM_REMOTE_PROFILE` above is for
 # files that interactive shells normally don't load (~/.bash_aliases).
-FULL_CMD="sudo -u ${SSM_REMOTE_USER} ${SSM_REMOTE_SHELL} -l -c '${INNER_CMD}'"
+# [#454] Built via _ssm_build_full_cmd (lib-ssm.sh) — base64-encodes
+# INNER_CMD instead of interpolating it inside the outer single-quote
+# wrap, so it can never be broken by a `'` in INNER_CMD's content.
+FULL_CMD=$(_ssm_build_full_cmd "$SSM_REMOTE_USER" "$SSM_REMOTE_SHELL" "$INNER_CMD")
 
 # Build the SSM commands JSON safely. jq -n --arg quotes the value as a JSON
 # string with all escaping handled — guards against shell-injection in any
