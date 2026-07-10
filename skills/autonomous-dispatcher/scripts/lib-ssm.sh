@@ -83,6 +83,18 @@ _has_shell_metachar() {
 # parses fine, "succeeds" at the transport layer, and executes nothing on
 # the remote host — a false-success that's far harder to diagnose than a
 # loud local failure. Callers must check the return code.
+#
+# Fail-closed on the REMOTE decode too (codex review of #454 follow-up):
+# the local encoding check above cannot see whether the remote host has
+# `base64` on its PATH. If it doesn't, `base64 -d` there fails but a bare
+# `eval "$(...)"` swallows that — the failed command substitution expands
+# to an empty string, `eval ""` is a silent no-op, and the remote shell (and
+# therefore the whole SSM command) still exits 0. The remote script now
+# captures the decode into `_d` and `exit 1`s BEFORE `eval` if that capture
+# fails, so a missing remote `base64` produces a loud remote failure
+# instead of a false SSM "Success" that executed nothing. `$INNER_CMD`'s
+# own `exit N` still propagates normally: `eval "$_d"` is the last command
+# run only once decode has already succeeded.
 _ssm_build_full_cmd() {
   local user="$1" shell="$2" inner_cmd="$3" b64
   b64=$(printf '%s' "$inner_cmd" | base64 | tr -d '\n') || {
@@ -93,7 +105,7 @@ _ssm_build_full_cmd() {
     echo "[lib-ssm] ERROR: base64 encoding of inner_cmd produced empty output" >&2
     return 1
   fi
-  printf '%s' "sudo -u ${user} ${shell} -l -c 'eval \"\$(printf %s ${b64} | base64 -d)\"'"
+  printf '%s' "sudo -u ${user} ${shell} -l -c '_d=\$(printf %s ${b64} | base64 -d) || exit 1; eval \"\$_d\"'"
 }
 
 # _ssm_run_remote_command <instance-id> <region> <inner-cmd>
