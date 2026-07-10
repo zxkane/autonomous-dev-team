@@ -28,17 +28,51 @@ GH_MIN_VERSION="2.48.0"
 # message without invoking `gh --version` a second time.
 GH_INSTALLED_VERSION=""
 
-# gh_version_ok MIN_VERSION — 0 if `gh --version`'s parsed version is >=
+# _gh_transport_binary — echo the `gh` binary to invoke, honoring the same
+# `REAL_GH` escape hatch gh-with-token-refresh.sh resolves (#92): an
+# executable `REAL_GH` is used directly (installs outside the minimal
+# non-interactive PATH — cron/systemd/SSM — that never sourced rc files);
+# otherwise fall back to the bare `gh` name so a normal PATH lookup applies.
+# This precheck runs standalone, BEFORE dispatcher-tick.sh's auth/wrapper
+# setup installs the token-refresh proxy, so it must resolve independently
+# rather than assume the proxy is already on PATH.
+_gh_transport_binary() {
+  if [[ -n "${REAL_GH:-}" && -x "$REAL_GH" ]]; then
+    printf '%s\n' "$REAL_GH"
+  else
+    printf 'gh\n'
+  fi
+}
+
+# _gh_version_ge MIN INSTALLED — 0 if INSTALLED (an "X.Y.Z" string) is >=
+# MIN, 1 otherwise. Numeric per-component comparison (major, then minor,
+# then patch) — portable across GNU/BSD/macOS/uutils, unlike `sort -V`
+# (not part of POSIX/BSD sort; a host without GNU coreutils would silently
+# misreport every version as "too old" when the -V flag itself errors).
+_gh_version_ge() {
+  local min="$1" installed="$2"
+  local -a min_parts installed_parts
+  IFS='.' read -r -a min_parts <<<"$min"
+  IFS='.' read -r -a installed_parts <<<"$installed"
+  local i
+  for i in 0 1 2; do
+    local m="${min_parts[$i]:-0}" v="${installed_parts[$i]:-0}"
+    (( v > m )) && return 0
+    (( v < m )) && return 1
+  done
+  return 0
+}
+
+# gh_version_ok MIN_VERSION — 0 if the resolved gh binary's `--version` is >=
 # MIN_VERSION, 1 otherwise (including "gh not on PATH" / unparseable output).
-# Uses `sort -V` (numeric-aware version sort, GNU/uutils/BSD-portable) rather
-# than a bespoke field-by-field comparator. Sets GH_INSTALLED_VERSION as a
-# side effect (single `gh --version` invocation for the whole preflight).
+# Sets GH_INSTALLED_VERSION as a side effect (single `gh --version`
+# invocation for the whole preflight).
 gh_version_ok() {
-  local min_version="$1" installed first
-  installed="$(gh --version 2>/dev/null | head -1)"
+  local min_version="$1" bin installed
+  bin="$(_gh_transport_binary)"
+  installed="$("$bin" --version 2>/dev/null | head -1)"
   GH_INSTALLED_VERSION="${installed:-<not found>}"
   installed="$(grep -oE '[0-9]+\.[0-9]+\.[0-9]+' <<<"$installed" | head -1)"
   [[ -n "$installed" ]] || return 1
-  first="$(printf '%s\n%s\n' "$min_version" "$installed" | sort -V | head -1)"
-  [[ "$first" == "$min_version" ]]
+  _gh_version_ge "$min_version" "$installed"
 }

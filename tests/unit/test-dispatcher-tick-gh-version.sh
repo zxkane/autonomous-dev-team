@@ -80,6 +80,7 @@ EOF
 }
 
 write_conf() {
+  local real_gh_line="${1:-}"
   cat > "$TMPROOT/autonomous.conf" <<EOF
 PROJECT_ID="testproj"
 REPO="owner/repo"
@@ -89,6 +90,7 @@ PROJECT_DIR="$PROJECT_DIR_FAKE"
 MAX_CONCURRENT=5
 MAX_RETRIES=3
 REVIEW_BOTS=""
+$real_gh_line
 EOF
 }
 
@@ -183,6 +185,60 @@ else
   FAIL=$((FAIL + 1))
 fi
 assert_contains "envelope code present for unparseable gh --version" "ADT_CFG_GH_VERSION_TOO_OLD" "$output"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-DT-GHV-06: REAL_GH is honored when no bare gh is on PATH ==="
+# ---------------------------------------------------------------------------
+# gh-with-token-refresh.sh's REAL_GH escape hatch (#92) lets an operator
+# point at a gh binary installed outside the minimal non-interactive PATH
+# (cron/systemd/SSM never sourced rc files). The version precheck must
+# resolve the SAME binary, not always shell out to bare `gh` — otherwise a
+# host with a perfectly good REAL_GH but no bare `gh` on PATH gets a false
+# "<not found>" FATAL.
+REALBIN="$TMPROOT/realbin"
+mkdir -p "$REALBIN"
+cat > "$REALBIN/gh" <<EOF
+#!/bin/bash
+if [[ "\$1" == "--version" ]]; then
+  echo "gh version 2.96.0 (2026-01-01)"
+  exit 0
+fi
+echo "GH_CALLED \$*" >> "$TMPROOT/gh-calls"
+exit 0
+EOF
+chmod +x "$REALBIN/gh"
+rm -f "$BIN/gh"  # no bare `gh` anywhere on PATH — only REAL_GH resolves.
+write_conf "REAL_GH=\"$REALBIN/gh\""
+output=$(run_tick)
+assert_not_contains "REAL_GH resolves — no false 'gh CLI is missing' FATAL" \
+  "ADT_CFG_GH_VERSION_TOO_OLD" "$output"
+assert_not_contains "REAL_GH resolves — GH_INSTALLED_VERSION is not '<not found>'" \
+  "<not found>" "$output"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-DT-GHV-07: REAL_GH below the minimum version still aborts ==="
+# ---------------------------------------------------------------------------
+cat > "$REALBIN/gh" <<EOF
+#!/bin/bash
+if [[ "\$1" == "--version" ]]; then
+  echo "gh version 2.40.0 (2025-01-01)"
+  exit 0
+fi
+exit 0
+EOF
+chmod +x "$REALBIN/gh"
+write_conf "REAL_GH=\"$REALBIN/gh\""
+output=$(run_tick)
+assert_contains "REAL_GH below minimum still trips the precheck" \
+  "ADT_CFG_GH_VERSION_TOO_OLD" "$output"
+assert_contains "stderr names the REAL_GH-reported version" "2.40.0" "$output"
+
+# Restore the plain-PATH `gh` stub and default conf (no REAL_GH) for any
+# tests appended after this point.
+write_gh_stub "2.96.0"
+write_conf
 
 # ---------------------------------------------------------------------------
 echo ""
