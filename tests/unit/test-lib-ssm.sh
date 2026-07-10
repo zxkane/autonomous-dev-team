@@ -323,6 +323,51 @@ bash -c "unset SSM_COMMAND_TIMEOUT_SECONDS; source '$LIB'; _ssm_run_remote_comma
 argv=$(cat "$TMPROOT/aws-record")
 assert_contains "TC-LSSM-010 inherited _SSM_MIN_COMMAND_TIMEOUT_SECONDS=20 does not lower --timeout-seconds below 30" $'--timeout-seconds\n30' "$argv"
 
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-LSSM-011: _ssm_build_full_cmd fails closed when base64 is missing (#454 review follow-up) ==="
+# ---------------------------------------------------------------------------
+# Round-005 llm-team review (codex): before this fix, a missing/failing
+# `base64` binary made _ssm_build_full_cmd still return 0 and print a
+# syntactically-valid FULL_CMD with an EMPTY payload
+# (`eval "$(printf %s  | base64 -d)"`) — a false success that "sends
+# successfully" over SSM but executes nothing remotely. Verified locally
+# with a stub `base64` binary that exits 127, ahead of the real one on
+# PATH, reproducing this exact failure mode before the fix shipped. The
+# fix must return non-zero and print nothing so callers can fail loud
+# instead of silently no-op'ing on the remote host.
+FAILING_BASE64_BIN="$TMPROOT/failing-base64-bin"
+mkdir -p "$FAILING_BASE64_BIN"
+cat > "$FAILING_BASE64_BIN/base64" <<'STUBEOF'
+#!/bin/bash
+exit 127
+STUBEOF
+chmod +x "$FAILING_BASE64_BIN/base64"
+out_011=$(
+  PATH="$FAILING_BASE64_BIN:$PATH" \
+  bash -c "source '$LIB'; _ssm_build_full_cmd ubuntu bash 'echo hi'" \
+  2>"$TMPROOT/stderr-011"
+)
+rc_011=$?
+assert_rc "TC-LSSM-011 rc=1 when base64 is unavailable" 1 "$rc_011"
+if [[ -z "$out_011" ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-LSSM-011 stdout is empty (no partial/broken FULL_CMD emitted)"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-LSSM-011 stdout should be empty on failure, got: '$out_011'"
+  FAIL=$((FAIL + 1))
+fi
+assert_contains "TC-LSSM-011 stderr names the failure" "base64" "$(cat "$TMPROOT/stderr-011")"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-LSSM-012: _ssm_build_full_cmd still succeeds when base64 IS available (regression guard) ==="
+# ---------------------------------------------------------------------------
+out_012=$(bash -c "source '$LIB'; _ssm_build_full_cmd ubuntu bash 'echo hi'")
+rc_012=$?
+assert_rc "TC-LSSM-012 rc=0 on the normal path" 0 "$rc_012"
+assert_contains "TC-LSSM-012 FULL_CMD has the expected sudo/eval/base64 shape" "sudo -u ubuntu bash -l -c 'eval " "$out_012"
+
 echo ""
 echo "==============================================="
 echo -e "Total: $((PASS + FAIL)) tests, ${GREEN}${PASS} pass${NC}, ${RED}${FAIL} fail${NC}"

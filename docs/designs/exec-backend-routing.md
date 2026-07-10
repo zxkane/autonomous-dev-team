@@ -221,7 +221,21 @@ FULL_CMD="sudo -u $SSM_REMOTE_USER $SSM_REMOTE_SHELL -l -c '$INNER_CMD'"
 
 # JSON-safe via jq --arg (no shell-injection regression)
 COMMANDS_JSON=$(jq -n --arg cmd "$FULL_CMD" '[$cmd]')
+```
 
+> **[#454, 2026-07-10] Superseded.** The `FULL_CMD="... -c '$INNER_CMD'"` line
+> above interpolated `$INNER_CMD` directly inside the outer single-quote wrap
+> — a `'` anywhere in `$INNER_CMD`'s content (e.g. an English-contraction
+> apostrophe in a heredoc comment) broke the quoting and produced
+> `Unterminated quoted string` on 100% of SSM invocations. This snippet is
+> preserved as the original as-designed shape; the shipped implementation
+> builds `FULL_CMD` via `lib-ssm.sh`'s `_ssm_build_full_cmd`, which
+> base64-encodes `$INNER_CMD` and decodes+`eval`s it remotely instead, so no
+> character in `$INNER_CMD` can ever break the outer wrap. See
+> `docs/pipeline/dispatcher-flow.md`'s backend-routing table and
+> `_ssm_build_full_cmd`'s docstring in `lib-ssm.sh` for the current shape.
+
+```bash
 aws ssm send-command \
   --instance-ids "$SSM_INSTANCE_ID" \
   --document-name "AWS-RunShellScript" \

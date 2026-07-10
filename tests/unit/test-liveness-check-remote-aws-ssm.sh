@@ -425,14 +425,24 @@ fi
 # class of bug rather than testing a strawman.
 b64_payload=$(printf '%s' "$full_cmd" | grep -oE 'printf %s [A-Za-z0-9+/=]+ \| base64 -d' | sed -E 's/^printf %s //; s/ \| base64 -d$//')
 real_inner_cmd=$(printf '%s' "$b64_payload" | base64 -d)
-pre_fix_full_cmd="sudo -u ubuntu bash -l -c '${real_inner_cmd}'"
-printf '%s' "$pre_fix_full_cmd" > "$TMPROOT/full_cmd_013_prefix.sh"
-if bash -n "$TMPROOT/full_cmd_013_prefix.sh" 2>/dev/null; then
-  echo -e "  ${RED}FAIL${NC}: TC-LCS-013 pre-fix reconstruction unexpectedly parses cleanly (fixture not faithful — apostrophe missing from real INNER_CMD?)"
+if [[ -z "$b64_payload" || -z "$real_inner_cmd" ]]; then
+  # Fail loud and specific: an empty extraction collapses pre_fix_full_cmd to
+  # `sudo -u ubuntu bash -l -c ''`, which is syntactically VALID and would
+  # otherwise be misreported below as "fixture not faithful" — masking the
+  # real cause (the grep pattern no longer matches _ssm_build_full_cmd's
+  # current output shape, e.g. after a future refactor of that function).
+  echo -e "  ${RED}FAIL${NC}: TC-LCS-013 could not extract the base64 payload from captured FULL_CMD — the grep pattern likely no longer matches _ssm_build_full_cmd's output shape (check lib-ssm.sh for a format change), not a fixture-fidelity issue"
   FAIL=$((FAIL + 1))
 else
-  echo -e "  ${GREEN}PASS${NC}: TC-LCS-013 pre-fix reconstruction (naive interpolation of the SAME real INNER_CMD) DOES hit the syntax error, proving this test is a faithful regression check"
-  PASS=$((PASS + 1))
+  pre_fix_full_cmd="sudo -u ubuntu bash -l -c '${real_inner_cmd}'"
+  printf '%s' "$pre_fix_full_cmd" > "$TMPROOT/full_cmd_013_prefix.sh"
+  if bash -n "$TMPROOT/full_cmd_013_prefix.sh" 2>/dev/null; then
+    echo -e "  ${RED}FAIL${NC}: TC-LCS-013 pre-fix reconstruction unexpectedly parses cleanly (fixture not faithful — apostrophe missing from real INNER_CMD?)"
+    FAIL=$((FAIL + 1))
+  else
+    echo -e "  ${GREEN}PASS${NC}: TC-LCS-013 pre-fix reconstruction (naive interpolation of the SAME real INNER_CMD) DOES hit the syntax error, proving this test is a faithful regression check"
+    PASS=$((PASS + 1))
+  fi
 fi
 
 # ---------------------------------------------------------------------------

@@ -173,7 +173,10 @@ fi
 
 # Wrap in sudo + login shell so the remote profile (when set) is loaded.
 # [#454] Built via _ssm_build_full_cmd (lib-ssm.sh) — see its docstring.
-FULL_CMD=$(_ssm_build_full_cmd "$SSM_REMOTE_USER" "$SSM_REMOTE_SHELL" "$INNER_CMD")
+FULL_CMD=$(_ssm_build_full_cmd "$SSM_REMOTE_USER" "$SSM_REMOTE_SHELL" "$INNER_CMD") || {
+  echo "ERROR: failed to build FULL_CMD (base64 encoding failed)" >&2
+  exit 1
+}
 
 # ---------------------------------------------------------------------------
 # Execute via shared helper

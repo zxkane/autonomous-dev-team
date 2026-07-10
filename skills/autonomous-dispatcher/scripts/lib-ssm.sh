@@ -76,9 +76,23 @@ _has_shell_metachar() {
 # terminates the -c shell with rc=N, and stdout/stderr are unbuffered
 # pass-through — the ALIVE/DEAD/DEFERRED contract (INV-30, INV-119) is
 # unchanged.
+#
+# Fail-closed on encoding failure: if `base64` is missing or the encode
+# pipeline fails, prints nothing and returns 1 instead of silently emitting
+# a FULL_CMD with an empty payload (`eval "$(printf %s  | base64 -d)"`) that
+# parses fine, "succeeds" at the transport layer, and executes nothing on
+# the remote host — a false-success that's far harder to diagnose than a
+# loud local failure. Callers must check the return code.
 _ssm_build_full_cmd() {
   local user="$1" shell="$2" inner_cmd="$3" b64
-  b64=$(printf '%s' "$inner_cmd" | base64 | tr -d '\n')
+  b64=$(printf '%s' "$inner_cmd" | base64 | tr -d '\n') || {
+    echo "[lib-ssm] ERROR: base64 encoding of inner_cmd failed" >&2
+    return 1
+  }
+  if [[ -z "$b64" && -n "$inner_cmd" ]]; then
+    echo "[lib-ssm] ERROR: base64 encoding of inner_cmd produced empty output" >&2
+    return 1
+  fi
   printf '%s' "sudo -u ${user} ${shell} -l -c 'eval \"\$(printf %s ${b64} | base64 -d)\"'"
 }
 

@@ -172,7 +172,10 @@ esac
 # [#454] Built via _ssm_build_full_cmd (lib-ssm.sh) — base64-encodes
 # INNER_CMD instead of interpolating it inside the outer single-quote
 # wrap, so it can never be broken by a `'` in INNER_CMD's content.
-FULL_CMD=$(_ssm_build_full_cmd "$SSM_REMOTE_USER" "$SSM_REMOTE_SHELL" "$INNER_CMD")
+FULL_CMD=$(_ssm_build_full_cmd "$SSM_REMOTE_USER" "$SSM_REMOTE_SHELL" "$INNER_CMD") || {
+  echo "ERROR: failed to build FULL_CMD (base64 encoding failed)" >&2
+  exit 1
+}
 
 # Build the SSM commands JSON safely. jq -n --arg quotes the value as a JSON
 # string with all escaping handled — guards against shell-injection in any
