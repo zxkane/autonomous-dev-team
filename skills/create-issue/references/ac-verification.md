@@ -175,10 +175,52 @@ human resolves after deploy.
 
 ---
 
+## 5. A pre-merge-verifiable AC can still stall — if the surface is agent-unwritable
+
+Section 1's rubric asks "can the evidence be obtained before merge?" That is
+necessary but not sufficient. A second, independent question matters just as
+much: **can the dev agent's scoped token actually write to that surface?**
+
+Per the two-token split (#234), the autonomous pipeline splits write access:
+
+- **Agent-writable** (the dev agent's scoped token can write here): a **PR
+  comment**, an **issue comment**, a **committed file** (code, docs, test
+  output committed to the branch).
+- **Maintainer-or-wrapper only** (the scoped token cannot write here): the
+  **PR body**, **PR title**, **labels**, **milestone** — PR/issue *metadata*.
+  Editing these returns `Resource not accessible by integration` for the
+  scoped token; only the full-write wrapper token or a human maintainer can
+  edit them.
+
+An AC that names a maintainer-or-wrapper-only surface is **pre-merge
+verifiable in principle** — the evidence could exist before merge — but is
+**guaranteed to stall** in practice: the dev agent produces the evidence
+wherever it *can* write, the review agent (correctly) checks the literal
+surface named in the AC, finds it empty, and marks the issue
+`dev-actionable=false`. Every component behaves correctly; the defect is the
+AC's choice of surface.
+
+**The fix is almost always a one-word rewrite**, not a redesign — a PR
+comment carries the same evidentiary value as a PR-body paragraph:
+
+- ❌ "Curl transcript showing the PUT→GET round-trip **in PR body**."
+- ✅ "Curl transcript showing the PUT→GET round-trip **as a PR comment**."
+
+When drafting or reviewing an AC, check both axes:
+
+1. **Pre-merge verifiable?** (§1) — if not, split per §3.
+2. **Agent-writable surface?** (this section) — if the named surface is
+   PR body/title/labels/milestone, reword to a PR comment, issue comment, or
+   committed file instead. This is an advisory rewrite, not a hard block —
+   see `SKILL.md` Step 4's agent-unwritable-surface self-scan.
+
+---
+
 ## See also
 
 - `references/issue-templates.md` — both templates carry an always-present
   pre-merge-classification note in their `## Acceptance Criteria` section.
 - `SKILL.md` Step 1 (per-AC classification prompt), Writing Guidelines
   ("AC verification surface" bullet), and Step 4 (advisory self-scan for
-  post-merge phrasing on AC checkbox lines).
+  post-merge phrasing, and the agent-unwritable-surface self-scan, both on
+  AC checkbox lines).

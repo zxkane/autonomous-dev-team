@@ -123,6 +123,18 @@ blocking)** and offer to split it per **`references/ac-verification.md`** §3 (c
 a non-blocking, non-`autonomous` follow-up; reference it under `## Out of Scope`,
 never under `## Dependencies`). Do not hard-fail the draft on a match.
 
+**Advisory agent-unwritable-surface self-scan** (same AC-checkbox-lines-only
+scope, a second pass over the same lines): also scan for phrasing that names a
+verification surface the dev agent's **scoped token** cannot write to — at
+minimum `in (the )?PR (body|description|title)` and `PR metadata`. Such an AC
+can be fully pre-merge verifiable and still guarantee a `dev-actionable=false`
+stall, because the scoped token can post PR/issue comments and commit files but
+cannot edit PR metadata (`Resource not accessible by integration`, by design
+per the two-token split — see **`references/ac-verification.md`** §5). On a
+match, **warn the author (advisory, not blocking)** and suggest rewording to
+name an agent-writable surface instead — e.g. "…in PR body" →
+"…as a PR comment". Do not hard-fail the draft on a match.
+
 ### Step 5: Create the Issue
 
 Use GitHub MCP tools or `gh` CLI to create the issue with:
