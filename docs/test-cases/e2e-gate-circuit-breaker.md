@@ -60,6 +60,19 @@ same-HEAD circuit breaker, plus a source-of-truth grep pin that
 | TC-CIRCUIT-022 | The breaker's own trip path `exit`s (or `return`s) before reaching the existing pending-dev routing | control-flow short-circuit present |
 | TC-CIRCUIT-023 | `docs/pipeline/errors.md` contains the literal `ADT_TRANSIENT_E2E_DEPLOY_FAIL` string (drift-guard `TC-ERR-ENVELOPE-020` forward-check) | present |
 
+### Group E — codex review regression pins (TC-CIRCUIT-024..027)
+
+An independent codex review pass on the initial implementation found two [P1]
+correctness bugs and two [P2] hardening gaps, all fixed in the same PR. These
+pins guard against regressing any of them.
+
+| ID | Scenario | Expected |
+|----|----------|----------|
+| TC-CIRCUIT-024 | [P1] The marker must be posted on EVERY round (embedded in the normal, non-trip "Review findings" comment), not only on the trip — otherwise the first failure (count=1, below the default threshold=2) never leaves a marker for the next round to find, and the counter can never advance past 1 | the normal-path FAIL comment also embeds `${_gf_marker}` |
+| TC-CIRCUIT-025 | [P1] `RESULT_PARSED=true` must be set immediately after the `reviewing→stalled` transition lands, BEFORE the report post — a transient report-post failure under `set -e` must not leave `RESULT_PARSED=false`, which would make the crash-cleanup EXIT trap re-add `pending-dev` on top of an already-landed stall | `RESULT_PARSED=true` precedes the report `itp_post_comment` call |
+| TC-CIRCUIT-026 | [P2] The threshold-fallback warning must go to stderr directly, never through `log()` — every call site captures `_gate_breaker_threshold`'s stdout via `$(...)` for the numeric result; a `log()`-routed warning (which echoes to stdout) corrupts the captured value, breaking the downstream numeric comparison | captured value is exactly `2`, not the warning text + `2` |
+| TC-CIRCUIT-027 | [P2] The marker read must filter to machine-authored comments only (`authorKind != "human"`), mirroring INV-105's own marker-authenticity filter — otherwise any repo collaborator able to comment could pre-seed a forged marker at a high count to force a premature trip | `select(.authorKind != "human")` present in the marker-read jq filter |
+
 ## Acceptance criteria for this change (pre-merge verifiable)
 
 - [ ] **Surface**: CI job `hermetic-unit` runs `tests/unit/test-*.sh`; the new

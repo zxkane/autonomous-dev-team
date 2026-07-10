@@ -6754,6 +6754,19 @@ failure, defeating "repeated") and a logged warning on any fallback
 stricter posture than INV-105's own silent threshold fallback, per this
 invariant's own testing requirements).
 
+**The marker is computed and posted on EVERY round, not only on a trip**
+(codex review [P1] finding on #453, fixed pre-merge): with the default
+threshold of 2, the first failure computes count=1 (below threshold) — if no
+marker were posted on that round, the second failure would also find no
+prior marker and compute count=1 again, so the breaker could never trip in
+normal operation. The marker is embedded in whichever comment the round
+actually posts: the trip report on a trip, or the ordinary "Review findings"
+FAIL comment on a non-trip round. The marker read filters to
+`authorKind != "human"` (codex review [P2] finding, fixed pre-merge — mirrors
+[INV-105]'s own marker-authenticity filter; without it, any collaborator able
+to comment could pre-seed a forged marker at a high count and force the next
+genuine failure to trip prematurely).
+
 **Trip behavior**, gated in this order:
 
 1. Check current issue labels for `stalled` FIRST — if already stalled (e.g.
@@ -6767,11 +6780,16 @@ invariant's own testing requirements).
    reimplemented, so this breaker never fights a dev wrapper that just
    started).
 3. `itp_transition_state "$ISSUE_NUMBER" "reviewing" "stalled"` runs FIRST,
-   atomically, BEFORE the marker/report — mirrors [INV-105]'s TOCTOU fix: a
-   failed transition aborts the whole wrapper under `set -euo pipefail`
-   before any orphan marker could ever be posted on a still-`reviewing`
-   issue.
-4. Post exactly ONE structured report (marker + human-readable body,
+   atomically, BEFORE `RESULT_PARSED` is set — mirrors [INV-105]'s TOCTOU fix:
+   a failed transition aborts the whole wrapper under `set -euo pipefail`
+   before `RESULT_PARSED` is touched, so the crash-cleanup EXIT trap correctly
+   treats it as a genuine crash rather than masking a landed stall.
+4. `RESULT_PARSED=true` is set IMMEDIATELY after the transition lands, BEFORE
+   the report post (codex review [P1] finding, fixed pre-merge): a transient
+   failure in the report post must not leave `RESULT_PARSED=false`, which
+   would make the crash-cleanup EXIT trap re-add `pending-dev` on top of an
+   already-landed stall.
+5. Post exactly ONE structured report (marker + human-readable body,
    `reason=same-head-gate-failure`) embedding a best-effort environment-class
    classification (see below), then `exit 0` — never reaching the normal
    `pending-dev` routing.

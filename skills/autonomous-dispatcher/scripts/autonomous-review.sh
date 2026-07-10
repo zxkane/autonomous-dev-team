@@ -1776,35 +1776,49 @@ if [[ "${E2E_ACTIVE:-false}" == "true" ]]; then
     # submit_request_changes/pending-dev routing below — a trip short-
     # circuits ALL of it via `exit 0`.
     # ---------------------------------------------------------------------
+    # [#453 codex review, P1] The marker must be computed and PERSISTED on
+    # EVERY round (embedded in the normal-path comment below when the trip
+    # does not fire), not only on the trip itself — otherwise the very first
+    # failure never leaves a marker for the SECOND failure to find, and
+    # count() can never advance past 1 in normal operation.
     _gf_already_stalled=$(itp_read_task "$ISSUE_NUMBER" labels \
       | jq -r '.labels | any(. == "stalled")' 2>/dev/null || echo "false")
-    if [[ "$_gf_already_stalled" != "true" ]]; then
-      _gf_prior_marker=$(itp_list_comments "$ISSUE_NUMBER" 2>/dev/null \
-        | jq -r '[.[] | select(.body | contains("dispatcher-gate-fail-breaker:"))] | sort_by(.createdAt) | last | .body // ""' \
-        2>/dev/null || echo "")
-      _gf_next_count=$(_gate_breaker_next_count "$_gf_prior_marker" "$PR_HEAD_SHA" "$_e2e_lane_rc")
-      _gf_threshold=$(_gate_breaker_threshold)
-      if [[ "$_gf_next_count" -ge "$_gf_threshold" ]] && may_stall_now "$ISSUE_NUMBER"; then
-        log "[#453] same-HEAD gate-fail breaker TRIPPED: head=${PR_HEAD_SHA} rc=${_e2e_lane_rc} count=${_gf_next_count} (threshold=${_gf_threshold}) — halting re-dispatch, transitioning to stalled."
-        # Transition FIRST, atomically — mirrors INV-105's TOCTOU fix (a
-        # failed transition aborts under set -euo pipefail BEFORE any
-        # marker/report is ever posted, so no orphan marker can exist on a
-        # still-`reviewing` issue).
-        itp_transition_state "$ISSUE_NUMBER" "reviewing" "stalled"
-        _gf_marker=$(_gate_breaker_marker "$ISSUE_NUMBER" "$PR_HEAD_SHA" "$_e2e_lane_rc" "$_gf_next_count")
-        # class=transient is log-only by contract (lib-error.sh Clause E2) —
-        # error_surface would never post it. Call error_envelope directly to
-        # RENDER the canonical classification text and splice it into this
-        # breaker's own report (best-effort local heuristic: no E2E evidence
-        # posted is the only available "E2E likely never ran" signal without
-        # a new GitHub Actions API call).
-        _gf_envelope=$(error_envelope ADT_TRANSIENT_E2E_DEPLOY_FAIL \
-          "The E2E gate failed repeatedly on an unchanged PR head" \
-          "lane rc=${_e2e_lane_rc}, evidence_present=${_e2e_evidence_present} — consistent with the E2E job never actually running (e.g. a preview deploy failed on an out-of-band prerequisite)" \
-          "An operator must fix the external prerequisite (e.g. grant a missing deploy-role permission), then push a new commit to re-arm review" \
-          "docs/pipeline/errors.md#transient-class-class-transient-best-effort-not-operator-actionable" \
-          transient 2>/dev/null || true)
-        itp_post_comment "$ISSUE_NUMBER" "$(cat <<GATEBREAKREPORT
+    # [#453 codex review, P2] `authorKind != "human"` — same authenticity
+    # filter INV-105's own marker read uses (lib-dispatch.sh). Without it, any
+    # repo collaborator able to comment on the issue could pre-seed a forged
+    # marker at a high count and force the NEXT genuine failure to trip the
+    # breaker prematurely.
+    _gf_prior_marker=$(itp_list_comments "$ISSUE_NUMBER" 2>/dev/null \
+      | jq -r '[.[] | select(.authorKind != "human") | select(.body | contains("dispatcher-gate-fail-breaker:"))] | sort_by(.createdAt) | last | .body // ""' \
+      2>/dev/null || echo "")
+    _gf_next_count=$(_gate_breaker_next_count "$_gf_prior_marker" "$PR_HEAD_SHA" "$_e2e_lane_rc")
+    _gf_threshold=$(_gate_breaker_threshold)
+    _gf_marker=$(_gate_breaker_marker "$ISSUE_NUMBER" "$PR_HEAD_SHA" "$_e2e_lane_rc" "$_gf_next_count")
+    if [[ "$_gf_already_stalled" != "true" ]] && [[ "$_gf_next_count" -ge "$_gf_threshold" ]] && may_stall_now "$ISSUE_NUMBER"; then
+      log "[#453] same-HEAD gate-fail breaker TRIPPED: head=${PR_HEAD_SHA} rc=${_e2e_lane_rc} count=${_gf_next_count} (threshold=${_gf_threshold}) — halting re-dispatch, transitioning to stalled."
+      # Transition FIRST, atomically — mirrors INV-105's TOCTOU fix (a
+      # failed transition aborts under set -euo pipefail BEFORE RESULT_PARSED
+      # is set, so the crash-cleanup EXIT trap correctly treats it as a
+      # genuine crash rather than masking a landed stall).
+      itp_transition_state "$ISSUE_NUMBER" "reviewing" "stalled"
+      # [#453 codex review, P1] Set RESULT_PARSED=true IMMEDIATELY after the
+      # transition lands, BEFORE the report post — a transient failure in the
+      # report post below must not make the crash-cleanup EXIT trap re-add
+      # pending-dev on top of an already-landed stall.
+      RESULT_PARSED=true
+      # class=transient is log-only by contract (lib-error.sh Clause E2) —
+      # error_surface would never post it. Call error_envelope directly to
+      # RENDER the canonical classification text and splice it into this
+      # breaker's own report (best-effort local heuristic: no E2E evidence
+      # posted is the only available "E2E likely never ran" signal without
+      # a new GitHub Actions API call).
+      _gf_envelope=$(error_envelope ADT_TRANSIENT_E2E_DEPLOY_FAIL \
+        "The E2E gate failed repeatedly on an unchanged PR head" \
+        "lane rc=${_e2e_lane_rc}, evidence_present=${_e2e_evidence_present} — consistent with the E2E job never actually running (e.g. a preview deploy failed on an out-of-band prerequisite)" \
+        "An operator must fix the external prerequisite (e.g. grant a missing deploy-role permission), then push a new commit to re-arm review" \
+        "docs/pipeline/errors.md#transient-class-class-transient-best-effort-not-operator-actionable" \
+        transient 2>/dev/null || true)
+      itp_post_comment "$ISSUE_NUMBER" "$(cat <<GATEBREAKREPORT
 ${_gf_marker}
 ## ⛔ Same-HEAD E2E-gate circuit-breaker tripped — halting repeated re-dispatch (\`reason=same-head-gate-failure\`, [#453])
 
@@ -1840,10 +1854,8 @@ the \`stalled\` label (the \`autonomous\` label is retained; removal re-arms
 the pipeline).**
 @${REPO_OWNER}
 GATEBREAKREPORT
-)"
-        RESULT_PARSED=true
-        exit 0
-      fi
+)" 2>/dev/null || true
+      exit 0
     fi
 
     itp_post_comment "$ISSUE_NUMBER" \
@@ -1851,7 +1863,9 @@ GATEBREAKREPORT
 
 Findings->Decision Gate: 1 blocking finding(s) -- FAIL.
 
-1. **[BLOCKING] E2E verification failed** — the wrapper ran the project E2E once before review (INV-46) and it did NOT pass (lane exit code ${_e2e_lane_rc}). See the E2E failure comment on PR #${PR_NUMBER}. The review agents were NOT run because a failing E2E is a hard gate. Fix the failure and push; the next review round re-runs E2E.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
+1. **[BLOCKING] E2E verification failed** — the wrapper ran the project E2E once before review (INV-46) and it did NOT pass (lane exit code ${_e2e_lane_rc}). See the E2E failure comment on PR #${PR_NUMBER}. The review agents were NOT run because a failing E2E is a hard gate. Fix the failure and push; the next review round re-runs E2E.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)
+
+${_gf_marker}" 2>/dev/null || true
     # INV-92 (#298): a failing E2E is a dev-actionable code defect (fail-open).
     emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-substantive" "" "true" 2>/dev/null || true
 

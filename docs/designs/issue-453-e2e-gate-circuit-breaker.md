@@ -72,19 +72,51 @@ silent fallback, per this issue's own testing requirements).
 
 ## 5. Trip behavior
 
-When the incremented count reaches `GATE_FAIL_STALL_THRESHOLD`:
+**The marker must be computed and posted on EVERY round, not only on a trip**
+(codex review [P1] finding, fixed pre-merge): with the default threshold of 2,
+the first failure computes count=1, which is below threshold — if no marker
+were posted on that round, the second failure would also find no prior marker
+and compute count=1 again, so the breaker could never trip in normal
+operation. The marker is therefore embedded in whichever comment actually
+posts each round: the trip report on a trip, or the ordinary "Review
+findings" FAIL comment on a non-trip round.
 
-1. Check current issue labels for `stalled` FIRST — if already stalled (e.g.
-   INV-105 tripped first), do not re-trip or post a competing report.
-2. Gate behind the shared `may_stall_now` pre-gate (live-PID check).
-3. `itp_transition_state "$ISSUE_NUMBER" "reviewing" "stalled"` — lands FIRST,
-   atomically, before the report (mirrors INV-105's TOCTOU fix: a failed
-   transition aborts under `set -euo pipefail` before any orphan marker posts).
-4. Post exactly ONE structured report (marker + human-readable body), reason
+Every round, before deciding whether to trip:
+
+1. Check current issue labels for `stalled` — if already stalled (e.g.
+   INV-105 tripped first), the trip condition below is unconditionally false;
+   do not re-trip or post a competing report (the marker is still embedded in
+   the ordinary FAIL comment, but that comment does not itself change state).
+2. Read the prior marker, filtered to `authorKind != "human"` (mirrors
+   INV-105's own marker-authenticity filter — codex review [P2] finding, fixed
+   pre-merge — without it, any collaborator able to comment could pre-seed a
+   forged marker at a high count and force the next genuine failure to trip
+   prematurely).
+3. Compute this round's count and construct this round's marker.
+
+When not-already-stalled AND count `>=` `GATE_FAIL_STALL_THRESHOLD` AND
+`may_stall_now` (the shared live-PID pre-gate) all hold:
+
+1. `itp_transition_state "$ISSUE_NUMBER" "reviewing" "stalled"` — lands FIRST,
+   atomically, before `RESULT_PARSED` is set (mirrors INV-105's TOCTOU fix: a
+   failed transition aborts under `set -euo pipefail` before `RESULT_PARSED`
+   is touched, so the crash-cleanup EXIT trap correctly treats it as a genuine
+   crash rather than masking a landed stall).
+2. Set `RESULT_PARSED=true` IMMEDIATELY after the transition lands, BEFORE the
+   report post (codex review [P1] finding, fixed pre-merge): if the report
+   post below hits a transient failure, `set -e` would otherwise exit before
+   `RESULT_PARSED` is set, and the crash-cleanup EXIT trap would then add a
+   competing `pending-dev` label/comment on top of the already-landed stall.
+3. Post exactly ONE structured report (marker + human-readable body), reason
    tag `reason=same-head-gate-failure` — the structured body, not the label,
    is what distinguishes this trigger from INV-105's `reason=non-convergence`
    (same reuse tradeoff INV-105 itself accepted).
-5. Skip the normal `pending-dev` routing entirely — return before it runs.
+4. `exit 0` — skips the normal `pending-dev` routing entirely.
+
+Otherwise, fall through to the normal FAIL routing (post the ordinary "Review
+findings" comment — now embedding this round's marker — then the existing
+`emit_verdict_trailer`/`submit_request_changes`/`pending-dev` sequence,
+unchanged).
 
 Concurrency: no new locking — the existing `reviewing`-label single-writer
 invariant (flock-guarded PID-file guard) already rules out two concurrent

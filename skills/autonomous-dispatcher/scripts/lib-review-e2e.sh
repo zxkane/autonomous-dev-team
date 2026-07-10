@@ -151,14 +151,12 @@ _gate_breaker_threshold() {
   local raw="${GATE_FAIL_STALL_THRESHOLD:-2}"
   local val="$raw"
   if ! [[ "$val" =~ ^[0-9]+$ ]] || [[ "$val" -lt 2 ]]; then
-    # `log()` may not be defined yet when this lib is sourced standalone
-    # (e.g. under test) — fall back to a bare `echo >&2`, matching the
-    # pre-log-availability pattern already used elsewhere in this wrapper.
-    if declare -F log >/dev/null 2>&1; then
-      log "WARNING: GATE_FAIL_STALL_THRESHOLD='${raw}' invalid (must be an integer >=2) — falling back to default 2"
-    else
-      echo "WARNING: GATE_FAIL_STALL_THRESHOLD='${raw}' invalid (must be an integer >=2) — falling back to default 2" >&2
-    fi
+    # Always stderr, NEVER via log() — the wrapper's log() writes to stdout
+    # (`echo`), and every call site captures this function's own stdout via
+    # `$(...)` for the numeric result. Routing the warning through log()
+    # would append it to the captured value, corrupting the downstream
+    # numeric comparison (codex review [P2] on #453).
+    echo "WARNING: GATE_FAIL_STALL_THRESHOLD='${raw}' invalid (must be an integer >=2) — falling back to default 2" >&2
     val=2
   fi
   printf '%s\n' "$val"

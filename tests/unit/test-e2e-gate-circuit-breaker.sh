@@ -284,6 +284,66 @@ if [[ -f "$ERRORS_DOC" ]]; then
     "$(cat "$ERRORS_DOC")" "ADT_TRANSIENT_E2E_DEPLOY_FAIL"
 fi
 
+# ===========================================================================
+echo
+echo "=== TC-CIRCUIT-024..027: codex review regression pins ==="
+# ===========================================================================
+
+# TC-CIRCUIT-024 (codex [P1] #1): the marker must be computed and posted on
+# EVERY round, not only on the trip. Otherwise the very first failure (count=1,
+# below the default threshold=2) never leaves a marker for the next round to
+# find, and the counter can never advance past 1 in normal operation — the
+# breaker would never trip. Pin: the normal (non-trip) "Review findings:"
+# comment posted on the fall-through path must ALSO embed the marker.
+normal_path_comment_line=$(grep -n 'Review findings:$' "$WRAPPER" | head -1 | cut -d: -f1)
+normal_path_marker_line=$(awk -v start="$normal_path_comment_line" \
+  'NR >= start && /\$\{_gf_marker\}/ { print NR; exit }' "$WRAPPER")
+if [[ -n "$normal_path_comment_line" && -n "$normal_path_marker_line" ]] \
+   && [[ "$normal_path_marker_line" -gt "$normal_path_comment_line" ]] \
+   && [[ $((normal_path_marker_line - normal_path_comment_line)) -le 10 ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-CIRCUIT-024 the normal (non-trip) FAIL comment (line $normal_path_comment_line) also embeds \${_gf_marker} (line $normal_path_marker_line) — counter persists every round"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-CIRCUIT-024 the normal FAIL comment must embed \${_gf_marker} so the counter persists across rounds"
+  echo "      normal_path_comment_line=$normal_path_comment_line normal_path_marker_line=$normal_path_marker_line"
+  FAIL=$((FAIL + 1))
+fi
+
+# TC-CIRCUIT-025 (codex [P1] #2): RESULT_PARSED=true must be set immediately
+# after the transition lands and BEFORE the report post — a transient report-
+# post failure under set -e must not leave RESULT_PARSED=false, which would
+# make the crash-cleanup EXIT trap re-add pending-dev on top of an
+# already-landed stall.
+result_parsed_line=$(awk -v start="$transition_line" \
+  'NR > start && /RESULT_PARSED=true/ { print NR; exit }' "$WRAPPER")
+gatebreak_report_line=$(grep -n 'itp_post_comment "\$ISSUE_NUMBER" "\$(cat <<GATEBREAKREPORT' "$WRAPPER" | head -1 | cut -d: -f1)
+if [[ -n "$result_parsed_line" && -n "$gatebreak_report_line" ]] \
+   && [[ "$result_parsed_line" -lt "$gatebreak_report_line" ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-CIRCUIT-025 RESULT_PARSED=true (line $result_parsed_line) is set BEFORE the report post (line $gatebreak_report_line)"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-CIRCUIT-025 RESULT_PARSED=true must be set before the report post, so a failed post can't trigger the crash-cleanup pending-dev route on top of a landed stall"
+  echo "      result_parsed_line=$result_parsed_line gatebreak_report_line=$gatebreak_report_line"
+  FAIL=$((FAIL + 1))
+fi
+
+# TC-CIRCUIT-026 (codex [P2] #1): the threshold-fallback warning must go to
+# stderr directly, NEVER through log() — every call site captures this
+# function's stdout via $(...) for the numeric result, so a log()-routed
+# warning (which echoes to stdout) would corrupt the captured value.
+assert_eq "TC-CIRCUIT-026a invalid threshold warning does not corrupt the captured numeric value" \
+  "2" "$(GATE_FAIL_STALL_THRESHOLD="bogus" bash -c 'source "'"$LIB"'"; _gate_breaker_threshold 2>/dev/null')"
+lib_src=$(cat "$LIB")
+assert_contains "TC-CIRCUIT-026b _gate_breaker_threshold's fallback warning is a bare stderr echo (not log())" \
+  "$(sed -n '/_gate_breaker_threshold()/,/^}/p' <<<"$lib_src")" 'echo "WARNING'
+
+# TC-CIRCUIT-027 (codex [P2] #2): the marker read must filter to
+# machine-authored comments only (authorKind != "human"), mirroring INV-105's
+# own marker-authenticity filter — otherwise any collaborator able to comment
+# could pre-seed a forged marker to force a premature trip.
+assert_contains "TC-CIRCUIT-027 marker read filters authorKind != \"human\" (forgery guard, mirrors INV-105)" \
+  "$wrapper_src" 'select(.authorKind != "human")'
+
 echo
 echo "=== Summary ==="
 echo "Passed: $PASS"
