@@ -90,20 +90,33 @@ assert_file_exists "TC-AC-SURFACE-000 SKILL.md exists" "$SKILL_MD"
 
 step4_block=$(extract_section "$SKILL_MD" "### Step 4: Confirm with User" "^### ")
 
+# TC-AC-SURFACE-001/002 anchor to strings that ONLY exist in the new paragraph,
+# so scoping to the full Step 4 block (which also contains the pre-existing
+# #273 paragraph) is safe here.
 assert_contains_ci "TC-AC-SURFACE-001 Step 4 lists 'in (the )?PR (body|description|title)' phrasing" \
   "$step4_block" "PR (body|description|title)"
 
 assert_contains "TC-AC-SURFACE-002 Step 4 lists 'PR metadata' phrasing" \
   "$step4_block" "PR metadata"
 
-assert_contains_ci "TC-AC-SURFACE-003 Step 4 suggests rewording to 'as a PR comment'" \
-  "$step4_block" "as a PR comment"
+# TC-AC-SURFACE-003/004/005/012 assert wording ('advisory', 'as a PR comment',
+# 'scoped token', the ac-verification.md cross-ref) that the pre-existing #273
+# paragraph in the SAME Step 4 block ALSO carries — a codex review finding on
+# this PR noted that scoping to step4_block alone would let these pass even if
+# the NEW "Advisory agent-unwritable-surface self-scan" paragraph regressed.
+# Scope explicitly to that paragraph (from its own heading up to the next
+# paragraph boundary) so a regression there is caught.
+new_para_block=$(printf '%s\n' "$step4_block" \
+  | awk '/^\*\*Advisory agent-unwritable-surface self-scan\*\*/{f=1} f{print; if (/Do not hard-fail the draft on a match\.$/) exit}')
 
-assert_contains_ci "TC-AC-SURFACE-004 Step 4 explains WHY: scoped token cannot edit PR metadata" \
-  "$step4_block" "scoped token"
+assert_contains_ci "TC-AC-SURFACE-003 new paragraph suggests rewording to 'as a PR comment'" \
+  "$new_para_block" "as a PR comment"
 
-assert_contains_ci "TC-AC-SURFACE-005 Step 4 still frames this axis as advisory, not a hard fail" \
-  "$step4_block" "advisory"
+assert_contains_ci "TC-AC-SURFACE-004 new paragraph explains WHY: scoped token cannot edit PR metadata" \
+  "$new_para_block" "scoped token"
+
+assert_contains_ci "TC-AC-SURFACE-005 new paragraph frames this axis as advisory, not a hard fail" \
+  "$new_para_block" "warn the author (advisory, not blocking)"
 
 skill_all=$(cat "$SKILL_MD")
 assert_contains "TC-AC-SURFACE-006 SKILL.md links to references/ac-verification.md" \
@@ -145,8 +158,8 @@ assert_contains_ci "TC-AC-SURFACE-011a canonical rewrite example names 'in PR bo
 assert_contains_ci "TC-AC-SURFACE-011b canonical rewrite example names 'as a PR comment'" \
   "$acv_all" "as a PR comment"
 
-assert_contains "TC-AC-SURFACE-012 Step 4 cross-references the new section" \
-  "$step4_block" "references/ac-verification.md"
+assert_contains "TC-AC-SURFACE-012 new paragraph cross-references the new §5 section" \
+  "$new_para_block" "references/ac-verification.md"
 
 # ===================================================================
 # Group C — scan-scope regression (unchanged from #273)
