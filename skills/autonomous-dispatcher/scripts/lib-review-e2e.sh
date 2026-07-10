@@ -95,6 +95,76 @@ _classify_e2e_gate() {
 }
 
 # ---------------------------------------------------------------------------
+# Same-HEAD E2E-gate circuit breaker (issue #453) — pure helpers.
+#
+# Halts a repeated INV-46 E2E-gate `fail` against an unchanged PR head/rc pair
+# instead of re-dispatching review indefinitely (observed: 21 rounds against
+# one commit before an operator intervened, when a PR preview deploy 403'd on
+# a missing out-of-band grant). Mirrors INV-105's convergence-breaker pattern
+# (marker/threshold/report shape) for a DIFFERENT trigger: this one fires from
+# inside the review wrapper on a repeated GATE failure, not from the
+# dispatcher on a completed dev session — so its label movement is
+# `reviewing -> stalled`, distinct from INV-105's `pending-dev -> stalled`.
+#
+# Fingerprint is (head_sha, e2e_lane_rc), NOT sha alone: an unrelated transient
+# failure (rc=A) followed by a genuinely new substantive bug (rc=B) on the same
+# untouched head must reset the counter, not accumulate into one trip.
+
+# _gate_breaker_marker <issue> <head> <rc> <count> — construct the marker text.
+_gate_breaker_marker() {
+  local issue="$1" head="$2" rc="$3" count="$4"
+  printf '<!-- dispatcher-gate-fail-breaker: issue=%s head=%s rc=%s count=%s -->' \
+    "$issue" "$head" "$rc" "$count"
+}
+
+# _gate_breaker_parse_count <marker_text> <head> <rc> — echo the count field
+# from marker_text IFF it matches the given (head, rc) pair; else echo 0.
+# Pure substring/regex extraction — no I/O. A malformed, absent, or
+# non-matching marker all collapse to 0 (bias to MISS: never crash, never
+# silently inherit an unrelated round's count).
+_gate_breaker_parse_count() {
+  local marker_text="$1" head="$2" rc="$3"
+  local pattern="dispatcher-gate-fail-breaker: issue=[0-9]+ head=${head} rc=${rc} count=([0-9]+)"
+  if [[ "$marker_text" =~ $pattern ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+  else
+    printf '0\n'
+  fi
+}
+
+# _gate_breaker_next_count <marker_text> <head> <rc> — the count this round's
+# marker should carry: stored_count+1 when marker_text matches (head, rc)
+# exactly, else 1 (a fresh series under a new sha and/or a new rc).
+_gate_breaker_next_count() {
+  local marker_text="$1" head="$2" rc="$3" stored
+  stored=$(_gate_breaker_parse_count "$marker_text" "$head" "$rc")
+  printf '%s\n' "$((stored + 1))"
+}
+
+# _gate_breaker_threshold — read GATE_FAIL_STALL_THRESHOLD with the same
+# regex-then-fallback shape as INV-105's CONVERGENCE_STALL_THRESHOLD read
+# (lib-dispatch.sh), plus an explicit floor of 2 (a threshold of 1 would trip
+# on the very first failure, defeating "repeated") and a logged warning on
+# any fallback (INV-105's own threshold read has no such warning; this
+# breaker's testing requirements explicitly ask for one).
+_gate_breaker_threshold() {
+  local raw="${GATE_FAIL_STALL_THRESHOLD:-2}"
+  local val="$raw"
+  if ! [[ "$val" =~ ^[0-9]+$ ]] || [[ "$val" -lt 2 ]]; then
+    # `log()` may not be defined yet when this lib is sourced standalone
+    # (e.g. under test) — fall back to a bare `echo >&2`, matching the
+    # pre-log-availability pattern already used elsewhere in this wrapper.
+    if declare -F log >/dev/null 2>&1; then
+      log "WARNING: GATE_FAIL_STALL_THRESHOLD='${raw}' invalid (must be an integer >=2) — falling back to default 2"
+    else
+      echo "WARNING: GATE_FAIL_STALL_THRESHOLD='${raw}' invalid (must be an integer >=2) — falling back to default 2" >&2
+    fi
+    val=2
+  fi
+  printf '%s\n' "$val"
+}
+
+# ---------------------------------------------------------------------------
 # _validate_ac_coverage_json — read a candidate JSON on stdin, echo the
 # canonical compact form (jq -c) iff it is a non-empty flat object whose every
 # value is exactly "pass" or "fail"; else echo EMPTY. Returns 0 always (fail-
