@@ -88,6 +88,11 @@ binary is genuinely absent.
 | TC-BINPATH-003 | binary present in an nvm shim dir (`$HOME/.nvm/versions/node/<v>/bin`) but not on `PATH` | same PATH-specific branch as TC-BINPATH-002; `_probe_user_install_dirs` first-match via the nvm glob. |
 | TC-BINPATH-004 | binary on `PATH` (regression pin) | preflight passes, no envelope, no probing needed (short-circuits at the `command -v` check). |
 | TC-BINPATH-005 | launcher configured (regression pin) | preflight skipped entirely regardless of probe-dir contents — unchanged existing behavior. |
+| TC-BINPATH-006 | binary present only in `$HOME/bin` but not on `PATH` | same PATH-specific branch as TC-BINPATH-002, naming the `~/bin` path. |
+| TC-BINPATH-007 | binary present only in `$HOME/.npm-global/bin` but not on `PATH` | same PATH-specific branch as TC-BINPATH-002, naming the `~/.npm-global/bin` path. |
+| TC-BINPATH-008 | multiple nvm node-version dirs, the lexically-first one non-executable, a later one executable | probe returns "not found" (first GLOB match wins per the issue's stated semantics, even when it's unusable) — falls to the genuinely-missing branch, does NOT skip ahead to the later working copy. |
+| TC-BINPATH-009 | `$HOME` unset | `_probe_user_install_dirs` returns "not found" immediately (no `set -u` crash); preflight falls to the genuinely-missing branch cleanly. |
+| TC-BINPATH-010 | a directory (not a file) exists at the probed path with the binary's name | rejected by the `-f` check; falls to the genuinely-missing branch rather than reporting the directory as a launchable binary. |
 
 ## E2E
 

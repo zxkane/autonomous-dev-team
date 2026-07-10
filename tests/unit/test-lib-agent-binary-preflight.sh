@@ -308,6 +308,76 @@ assert_rc "BINPATH-005 preflight returns 0 with a launcher configured" 0 "$(rc_o
 if grep -q 'ADT_CFG_AGENT_BINARY_MISSING' "$GH_CALLS"; then bad "BINPATH-005 envelope wrongly posted with launcher"; else ok "BINPATH-005 no envelope with launcher (preflight skipped, probe dirs irrelevant)"; fi
 
 echo ""
+echo "=== TC-BINPATH-006: binary present only in \$HOME/bin but not on PATH ==="
+: > "$GH_CALLS"
+FAKEHOME="$TMPROOT/home-bin"
+mkdir -p "$FAKEHOME/bin"
+printf '#!/bin/bash\nexit 0\n' > "$FAKEHOME/bin/claude"; chmod +x "$FAKEHOME/bin/claude"
+out=$(preflight_userhome claude 336 "$FAKEHOME")
+assert_rc "BINPATH-006 preflight returns 1 (found in ~/bin, not on PATH)" 1 "$(rc_of "$out")"
+GHBODY=$(cat "$GH_CALLS")
+[[ "$GHBODY" == *"$FAKEHOME/bin/claude"* ]] && ok "BINPATH-006 cause names the ~/bin path" || bad "BINPATH-006 cause missing the ~/bin path"
+[[ "$GHBODY" == *"Extend PATH"* ]] && ok "BINPATH-006 remediation is PATH-specific" || bad "BINPATH-006 remediation not PATH-specific"
+
+echo ""
+echo "=== TC-BINPATH-007: binary present only in \$HOME/.npm-global/bin but not on PATH ==="
+: > "$GH_CALLS"
+FAKEHOME="$TMPROOT/home-npmglobal"
+mkdir -p "$FAKEHOME/.npm-global/bin"
+printf '#!/bin/bash\nexit 0\n' > "$FAKEHOME/.npm-global/bin/claude"; chmod +x "$FAKEHOME/.npm-global/bin/claude"
+out=$(preflight_userhome claude 337 "$FAKEHOME")
+assert_rc "BINPATH-007 preflight returns 1 (found in ~/.npm-global/bin, not on PATH)" 1 "$(rc_of "$out")"
+GHBODY=$(cat "$GH_CALLS")
+[[ "$GHBODY" == *"$FAKEHOME/.npm-global/bin/claude"* ]] && ok "BINPATH-007 cause names the ~/.npm-global/bin path" || bad "BINPATH-007 cause missing the ~/.npm-global/bin path"
+[[ "$GHBODY" == *"Extend PATH"* ]] && ok "BINPATH-007 remediation is PATH-specific" || bad "BINPATH-007 remediation not PATH-specific"
+
+echo ""
+echo "=== TC-BINPATH-008: multiple nvm node-version dirs -> first glob match wins (pinned, per issue spec) ==="
+: > "$GH_CALLS"
+FAKEHOME="$TMPROOT/home-nvm-multi"
+mkdir -p "$FAKEHOME/.nvm/versions/node/v18.20.4/bin" "$FAKEHOME/.nvm/versions/node/v22.3.0/bin"
+# v18 sorts before v22 lexically; leave it non-executable so the pin proves
+# "first GLOB match wins" (the issue's stated semantics) rather than "first
+# EXECUTABLE match wins" — a later version having a working copy does not
+# make the probe skip past an earlier, broken one.
+printf '#!/bin/bash\nexit 0\n' > "$FAKEHOME/.nvm/versions/node/v18.20.4/bin/codex"   # not chmod +x
+printf '#!/bin/bash\nexit 0\n' > "$FAKEHOME/.nvm/versions/node/v22.3.0/bin/codex"; chmod +x "$FAKEHOME/.nvm/versions/node/v22.3.0/bin/codex"
+out=$(preflight_userhome codex 338 "$FAKEHOME")
+assert_rc "BINPATH-008 preflight returns 1 (first glob match is v18, non-executable -> genuinely-missing branch)" 1 "$(rc_of "$out")"
+GHBODY=$(cat "$GH_CALLS")
+[[ "$GHBODY" == *"Install 'codex'"* ]] && ok "BINPATH-008 falls to install-focused remediation (v18 match rejected, v22 never probed)" || bad "BINPATH-008 unexpected remediation branch"
+
+echo ""
+echo "=== TC-BINPATH-009: \$HOME unset -> genuinely-missing branch, no crash (regression pin) ==="
+: > "$GH_CALLS"
+out=$(
+  ( set -uo pipefail
+    export AUTONOMOUS_CONF_DIR="$TMPROOT/scripts" REPO="o/r" ISSUE_NUMBER=339
+    export AGENT_CMD=claude
+    export PATH="$TMPROOT/cu"
+    unset HOME
+    # shellcheck disable=SC1090
+    source "$LIB_ERROR"; source "$LIB_AGENT"
+    AGENT_CMD=claude
+    preflight_agent_binary
+    echo "RC=$?"
+  )
+)
+assert_rc "BINPATH-009 preflight returns 1 cleanly with HOME unset (no crash)" 1 "$(rc_of "$out")"
+GHBODY=$(cat "$GH_CALLS")
+[[ "$GHBODY" == *"Install 'claude'"* ]] && ok "BINPATH-009 falls to install-focused remediation with HOME unset" || bad "BINPATH-009 unexpected remediation with HOME unset"
+
+echo ""
+echo "=== TC-BINPATH-010: a directory named like the binary is not treated as found ==="
+: > "$GH_CALLS"
+FAKEHOME="$TMPROOT/home-dirname"
+mkdir -p "$FAKEHOME/.local/bin/claude"   # a directory, not a file, named "claude"
+out=$(preflight_userhome claude 340 "$FAKEHOME")
+assert_rc "BINPATH-010 preflight returns 1 (same-named directory is not a launchable binary)" 1 "$(rc_of "$out")"
+GHBODY=$(cat "$GH_CALLS")
+[[ "$GHBODY" == *"Install 'claude'"* ]] && ok "BINPATH-010 falls to install-focused remediation (directory rejected by -f)" || bad "BINPATH-010 wrongly treated a directory as the found binary"
+
+echo ""
 echo "============================================"
 echo -e "Results: ${GREEN}${PASS} passed${NC}, ${RED}${FAIL} failed${NC}"
 echo "============================================"

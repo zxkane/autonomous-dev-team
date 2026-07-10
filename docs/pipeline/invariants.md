@@ -3077,16 +3077,23 @@ non-login shell's `PATH` (cron / SSM / nohup do not source the interactive
 profile) even though it resolves fine interactively — the original single
 remediation ("Install '\<bin\>'...") misdiagnosed this as an install problem.
 `preflight_agent_binary` now calls `_probe_user_install_dirs` (read-only, a
-handful of `[[ -x ... ]]` checks + one `~/.nvm/versions/node/*/bin` glob,
-first match, no PATH mutation) before composing the envelope. The emitted code
-is still `ADT_CFG_AGENT_BINARY_MISSING` either way, but the `cause`/
-`remediation` branch: **found in a probed dir** → cause names the found path
-and calls out the non-login-shell PATH gap; remediation points at extending
-`PATH` in the wrapper environment, an `AGENT_LAUNCHER` that sources the user
-profile, or an absolute-path `AGENT_CMD` — **genuinely not found anywhere** →
-the original install-focused remediation, now with the effective `$PATH`
-appended to the cause for diagnosis. Fixing PATH itself stays the operator's
-call — the preflight only diagnoses.
+handful of `[[ -f ... && -x ... ]]` checks + one `~/.nvm/versions/node/*/bin`
+glob, first match, no PATH mutation) before composing the envelope. The `-f`
+alongside `-x` excludes a same-named directory, which passes a bare `-x` test
+but is not a launchable binary. `_probe_user_install_dirs` returns "not found"
+immediately when `$HOME` is unset/empty (nothing to probe under `set -u`)
+rather than referencing `$HOME` unguarded, matching the existing
+`pid_dir_for_project`/`lib-config.sh` convention of treating an absent `HOME`
+as an expected condition on a minimal non-login shell, not a crash. The
+emitted code is still `ADT_CFG_AGENT_BINARY_MISSING` either way, but the
+`cause`/`remediation` branch: **found in a probed dir** → cause names the
+found path and calls out the non-login-shell PATH gap; remediation points at
+extending `PATH` in the wrapper environment, an `AGENT_LAUNCHER` that sources
+the user profile, or an absolute-path `AGENT_CMD` — **genuinely not found
+anywhere** (including the `HOME`-unset case) → the original install-focused
+remediation, now with the effective `$PATH` appended to the cause for
+diagnosis. Fixing PATH itself stays the operator's call — the preflight only
+diagnoses.
 
 Each config-class abort path carries a **stable `UPPER_SNAKE` code** documented
 in the append-only registry [`errors.md`](errors.md) (codes never renumber). The

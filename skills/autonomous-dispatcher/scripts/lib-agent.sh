@@ -443,23 +443,27 @@ _agent_launch_binary() {
 
 # _probe_user_install_dirs <bin> — [#458] on a `command -v` miss, check a small
 # fixed list of common user-level install dirs before concluding the binary is
-# genuinely absent. Read-only (a handful of `[ -x ... ]` checks) — never
+# genuinely absent. Read-only (a handful of `[[ -x ... ]]` checks) — never
 # mutates PATH; that fix is the operator's call. Echoes the first matching
 # directory's binary path on stdout and returns 0; returns 1 (no output) when
-# not found in any probed dir. Order: ~/.local/bin, ~/bin, ~/.npm-global/bin,
-# then the first nvm shim dir that has it (nvm installs one copy per node
-# version under ~/.nvm/versions/node/<v>/bin — we only need one match).
+# not found in any probed dir (including when `$HOME` is unset/empty, in
+# which case there is nothing to probe under `set -u`). Order: ~/.local/bin,
+# ~/bin, ~/.npm-global/bin, then the first nvm shim dir that has it (nvm
+# installs one copy per node version under ~/.nvm/versions/node/<v>/bin — we
+# only need one match). `-f` alongside `-x` excludes a same-named directory
+# (which passes a bare `-x` test but isn't a launchable binary).
 _probe_user_install_dirs() {
   local bin="$1" dir
+  [[ -z "${HOME:-}" ]] && return 1
   for dir in "$HOME/.local/bin" "$HOME/bin" "$HOME/.npm-global/bin"; do
-    if [[ -x "$dir/$bin" ]]; then
+    if [[ -f "$dir/$bin" && -x "$dir/$bin" ]]; then
       echo "$dir/$bin"
       return 0
     fi
   done
   local nvm_hit
   nvm_hit=$(compgen -G "$HOME/.nvm/versions/node/*/bin/$bin" 2>/dev/null | head -1) || true
-  if [[ -n "$nvm_hit" && -x "$nvm_hit" ]]; then
+  if [[ -n "$nvm_hit" && -f "$nvm_hit" && -x "$nvm_hit" ]]; then
     echo "$nvm_hit"
     return 0
   fi
