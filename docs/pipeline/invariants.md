@@ -6682,3 +6682,205 @@ _Triage (issue #236): [machine-checked: tests/unit/test-issue-filter.sh, tests/u
 
 ---
 
+## INV-122: a same-HEAD repeated E2E-gate failure (an INV-46 `fail` verdict against an UNCHANGED `(head_sha, e2e_lane_rc)` fingerprint, ≥`GATE_FAIL_STALL_THRESHOLD` consecutive rounds) is detected and HALTED — the breaker transitions `reviewing → stalled` then posts ONE structured `reason=same-head-gate-failure` report, gated on an already-`stalled` skip (deliberately NOT the dispatcher-side `may_stall_now` live-PID pre-gate — see rationale below)
+
+_Triage (issue #236): [machine-checked: tests/unit/test-e2e-gate-circuit-breaker.sh]_
+
+**Rule**: the review wrapper detects a **fixed-point repetition** of the INV-46
+E2E hard gate's `fail` verdict against an unchanged PR head and halts
+re-dispatch automatically, instead of the dispatcher re-queuing review
+indefinitely against a HEAD the dev agent never touches. The motivating case:
+a downstream consumer project burned **21 review rounds** (~30 min apart, the
+last 6+ byte-identical) against one commit, when the PR's preview deploy 403'd
+on a missing out-of-band deploy-role grant — every round hit the same
+`_classify_e2e_gate → fail` outcome before any review agent ever ran, so no
+finding-space divergence existed for [INV-105]'s convergence breaker (a
+*different* non-convergence mode: divergent findings, not fixed-point
+repetition) to detect.
+
+**Where** (single insertion point): inside `autonomous-review.sh`'s existing
+`E2E_GATE == "fail"` branch, BEFORE the branch's existing
+`itp_post_comment`/`emit_verdict_trailer`/`submit_request_changes`/
+`itp_transition_state "reviewing" "pending-dev"` sequence ([`review-e2e-gate-fail`](state-machine.md#transition-table)).
+A trip short-circuits ALL of that via an early `exit 0` — the existing
+`pending-dev` routing never runs for a tripped round.
+
+**Distinct label movement from [INV-105]**: INV-105's breaker is dispatcher-
+side (`lib-dispatch.sh`, triggered on a *completed dev session*) and moves
+`pending-dev → stalled`. This breaker is review-wrapper-side
+(`autonomous-review.sh`, triggered on a *repeated gate failure*) and moves
+`reviewing → stalled` — a genuinely new, distinct movement (declared as the
+`review-e2e-gate-fail-breaker` transition in `transitions.json`), not merely a
+reuse of the existing `pending-dev → stalled` movement. Reusing the `stalled`
+*label* avoids a new label-vocabulary row (and the dispatcher scan-predicate
+exclusions that would ripple everywhere `stalled` is already excluded); it
+does NOT avoid a new *transition* declaration — `check-spec-drift.sh` Check
+C.2 requires every write-site movement to be declared, and no pre-existing
+transition declared `reviewing → stalled`.
+
+**Fingerprint (C1-equivalent to INV-105's frozen-head signal)**: the counter
+key is `(head_sha, e2e_lane_rc)` — NOT head alone. An outside-voice codex
+review of issue #453 itself flagged that pure-head counting would misclassify
+a genuinely NEW substantive bug as "stuck in a loop" if it happened to follow
+an unrelated transient failure on the same untouched head:
+
+- Same head + same rc as the immediately-prior marker → increment count.
+- Same head + a DIFFERENT rc → reset to count=1 under the new rc (does NOT
+  accumulate into the old series).
+- A different head (new commit pushed) → reset to count=1 under the new
+  head/rc pair.
+
+**State storage**: a structured HTML-comment marker posted by
+`autonomous-review.sh`, following the `dispatcher-convergence-breaker` marker
+convention ([INV-105]):
+
+```
+<!-- dispatcher-gate-fail-breaker: issue=<N> head=<sha> rc=<e2e_lane_rc> count=<n> -->
+```
+
+Not a label (per the movement-vs-vocabulary distinction above); not
+`run-artifacts` (wrapper-side only, keyed per-run, never readable
+cross-tick by the dispatcher). Marker scan is **unbounded** — full comment
+history via `itp_list_comments` (already paginates the full history) — this
+breaker cannot tolerate a miss the way `_fetch_sha_evidence`'s bounded retry
+can; losing the marker on a comment-heavy issue would silently re-enable the
+exact loop this invariant exists to stop.
+
+**Threshold**: `GATE_FAIL_STALL_THRESHOLD` (default `2`), read via the same
+regex-then-fallback shape as [INV-105]'s `CONVERGENCE_STALL_THRESHOLD` read,
+plus an explicit floor of `>=2` (a threshold of 1 would trip on the very first
+failure, defeating "repeated") and a logged warning on any fallback
+(non-numeric or `<2` → falls back to 2, with a `WARNING:` log line — a
+stricter posture than INV-105's own silent threshold fallback, per this
+invariant's own testing requirements).
+
+**The marker is computed and posted on EVERY round, not only on a trip**
+(codex review [P1] finding on #453, fixed pre-merge): with the default
+threshold of 2, the first failure computes count=1 (below threshold) — if no
+marker were posted on that round, the second failure would also find no
+prior marker and compute count=1 again, so the breaker could never trip in
+normal operation. The marker is embedded in whichever comment the round
+actually posts: the trip report on a trip, or the ordinary "Review findings"
+FAIL comment on a non-trip round. The marker read filters to
+`authorKind != "human"` (codex review [P2] finding, fixed pre-merge — mirrors
+[INV-105]'s own marker-authenticity filter; without it, any collaborator able
+to comment could pre-seed a forged marker at a high count and force the next
+genuine failure to trip prematurely).
+
+**Trip behavior**, gated in this order:
+
+1. Check current issue labels for `stalled` FIRST — if already stalled (e.g.
+   [INV-105] tripped first for a different reason), do NOT re-trip or post a
+   competing report. The structured comment body — not the label — is what
+   distinguishes this trigger's `reason=same-head-gate-failure` from
+   [INV-105]'s `reason=non-convergence` (the same reuse tradeoff INV-105
+   itself already accepted for its own trigger).
+2. **No `may_stall_now` call** (codex review round 2 [P1] finding, fixed
+   pre-merge — an EARLIER version of this invariant called it, mirroring
+   [INV-105]'s reuse of the shared INV-26 live-PID eligibility predicate).
+   `may_stall_now`'s dispatch-marker-freshness check exists so the
+   *dispatcher* can ask "might some OTHER process be alive for this issue"
+   before it mutates labels from outside. This breaker instead runs
+   synchronously INSIDE the very review wrapper the dispatcher just
+   launched — the marker `may_stall_now` would inspect is this process's OWN
+   fresh `review`-mode dispatch marker (`acquire_dispatch_marker … "review"`
+   at dispatch time, held for its full TTL — default 600s — per
+   `dispatch_marker_confirm_launched`'s own "it lives out its normal TTL"
+   design), so the call would always see a fresh marker and defer,
+   defeating the breaker for any E2E failure that completes within that
+   window (the common case). The safety property `may_stall_now` provides
+   elsewhere — never stalling out from under a wrapper that is still alive
+   and making progress — already holds here for free: this code IS that
+   wrapper, executing right now, and the `reviewing`-label single-writer
+   invariant (flock-guarded PID-file guard) rules out a second one running
+   concurrently.
+3. **`PR_HEAD_SHA` must be non-empty** (codex review round 3 [P2] finding,
+   fixed pre-merge): `PR_HEAD_SHA` is read with `|| true` and can be empty on
+   a `chp_pr_view` failure. An empty head is "we don't know the head," not
+   "the same head," so a fingerprint keyed on it must never satisfy the
+   same-HEAD safety condition this breaker exists to enforce.
+4. `itp_transition_state "$ISSUE_NUMBER" "reviewing" "stalled"` runs FIRST,
+   atomically, BEFORE `RESULT_PARSED` is set — mirrors [INV-105]'s TOCTOU fix:
+   a failed transition aborts the whole wrapper under `set -euo pipefail`
+   before `RESULT_PARSED` is touched, so the crash-cleanup EXIT trap correctly
+   treats it as a genuine crash rather than masking a landed stall.
+5. `RESULT_PARSED=true` is set IMMEDIATELY after the transition lands, BEFORE
+   the report post (codex review [P1] finding, fixed pre-merge): a transient
+   failure in the report post must not leave `RESULT_PARSED=false`, which
+   would make the crash-cleanup EXIT trap re-add `pending-dev` on top of an
+   already-landed stall.
+6. Post exactly ONE structured report (marker + human-readable body,
+   `reason=same-head-gate-failure`) embedding a best-effort environment-class
+   classification (see below), then `exit 0` — never reaching the normal
+   `pending-dev` routing.
+
+**Environment-class awareness (thin slice, no new error-envelope `class`)**:
+reuses the existing `transient` class (`lib-error.sh`'s case-statement
+already allows `config|auth|quota|transient` — zero changes to the shared
+allow-list). Registers exactly one new code,
+`ADT_TRANSIENT_E2E_DEPLOY_FAIL` ([`docs/pipeline/errors.md`](errors.md#transient-class-class-transient-best-effort-not-operator-actionable)).
+Because `error_surface` with `class=transient` is unconditionally log-only
+(never posts, regardless of any surface override — Clause E2), the breaker
+calls `error_envelope` DIRECTLY (not `error_surface`) to render the canonical
+classification text and splices it into its own report rather than relying on
+`error_surface`'s posting path, which would silently swallow it. The
+classification signal is local-only: `_e2e_evidence_present == 0` at the
+gate's `fail` branch is the only available "E2E likely never ran"
+discriminator without a new GitHub Actions API call — `_classify_e2e_gate`
+already collapses every non-zero rc to `fail` without preserving *why*, so no
+rc-value-based heuristic is possible without changing that classifier (out of
+scope for this invariant).
+
+**Concurrency**: no new locking — the existing `reviewing`-label
+single-writer invariant (the flock-guarded PID-file guard) already rules out
+two concurrent writers to the same issue's marker.
+
+**Bias to MISS**: an absent, malformed, or non-matching marker all collapse to
+count=0 (never a crash, never a silent inherit of an unrelated round's count).
+An operator removing `stalled` WITHOUT pushing a new commit leaves the marker
+still armed at (or past) `threshold - 1`; the very next same-head-same-rc
+failure re-trips immediately — documented, intentional (a new commit is the
+only real reset path; matches the `stalled`-reuse contract's "removal re-arms
+the pipeline" convention).
+
+**Status**: **ENFORCED**. New `transitions.json` entry
+(`review-e2e-gate-fail-breaker`, `reviewing → stalled`) + regenerated
+`state-machine.md` mermaid + prose row + `spec-guard-map.json` /
+`spec-codesite-map.json` entries (`check-spec-drift.sh` Checks A/B/C all
+green). Design doc: `docs/designs/issue-453-e2e-gate-circuit-breaker.md`; test
+plan: `docs/test-cases/e2e-gate-circuit-breaker.md`.
+
+**Producer**: `autonomous-review.sh` (the E2E-gate `fail` branch) + pure
+helpers in `lib-review-e2e.sh` (`_gate_breaker_marker`,
+`_gate_breaker_parse_count`, `_gate_breaker_next_count`,
+`_gate_breaker_threshold`). Does NOT source `lib-dispatch.sh` or reuse
+`may_stall_now`/`pid_alive`/`get_pid` (see the "No `may_stall_now` call"
+rationale above — an earlier version did, before a codex review round-2
+[P1] finding identified why that predicate cannot apply from inside the
+wrapper it would be checking).
+
+**Tests**: `tests/unit/test-e2e-gate-circuit-breaker.sh` (fingerprint/counter/
+threshold pure-logic assertions + source-of-truth wiring greps against
+`autonomous-review.sh`, mirroring `test-autonomous-review-e2e-gate-open-guard.sh`'s
+two-pronged style since the wrapper itself is too heavy to run end-to-end).
+
+**See also**:
+- [INV-46] — the E2E hard gate this breaker sits inside; only its `fail`
+  branch is intercepted.
+- [INV-105] — the sibling breaker whose marker/threshold/report shape this
+  invariant mirrors, for a DIFFERENT trigger (divergent findings on a
+  completed dev session vs. fixed-point gate-failure repetition), a
+  DIFFERENT label movement (`pending-dev → stalled` vs. `reviewing → stalled`),
+  and — unlike INV-105 — deliberately WITHOUT the shared `may_stall_now`
+  live-PID pre-gate, which does not apply from this breaker's call site.
+- [INV-72] — the config-class error-envelope contract this invariant's
+  environment-class slice deliberately does NOT extend (reuses `transient`,
+  already allowed).
+- #449 — the complementary non-convergence mode (divergent findings /
+  round-cap / severity-ratchet), out of scope for this invariant.
+- `docs/designs/issue-453-e2e-gate-circuit-breaker.md` — the full design,
+  including the spec-drift implications this invariant's transition
+  declaration resolves.
+
+---
+

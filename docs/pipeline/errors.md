@@ -62,6 +62,24 @@ The `error_envelope` / `error_surface` helpers live in
 | `ADT_AUTH_APP_CREDS_MISSING` | `GH_AUTH_MODE=app` but the App credentials are unset | The side's `*_APP_ID` / `*_APP_PEM` (dev/review/dispatcher) is missing | Set the App id + PEM path for this side in `autonomous.conf`/`dispatcher.conf` (see `docs/github-app-setup.md`), then re-dispatch | issue-comment / dispatcher-alert |
 | `ADT_AUTH_TOKEN_MINT_FAILED` | A GitHub App installation token could not be minted | The token-refresh daemon never wrote an initial token, or `gh-app-token` returned empty/non-zero | Verify the App id, installation id, and PEM are correct on the execution host and the App has the required repo permissions; check the token-daemon log, then re-dispatch | issue-comment / dispatcher-alert |
 
+## Transient class (`class: transient`, best-effort, NOT operator-actionable)
+
+Per the rules above, `class: transient` envelopes are log-only by contract
+(`error_surface` never posts them) and are **not otherwise registered here**
+— they are auto-retried, no operator action. One exception, documented for
+discoverability rather than as a registry row:
+
+- **`ADT_TRANSIENT_E2E_DEPLOY_FAIL`** ([#453](https://github.com/zxkane/autonomous-dev-team/issues/453)) — the same-HEAD E2E-gate circuit breaker's best-effort
+  classification, embedded in the breaker's own `stalled`-transition report
+  (not surfaced via `error_surface`, which would swallow it): the E2E hard
+  gate ([INV-46](invariants.md#inv-46-e2e-runs-once-in-a-dedicated-lane-before-the-review-fan-out--gated-not-per-agent))
+  failed repeatedly on an unchanged PR head with no SHA-matching evidence
+  ever posted — consistent with the E2E job never actually running (e.g. a
+  preview deploy 403'd on a missing out-of-band deploy-role grant). The
+  breaker calls `error_envelope` directly (not `error_surface`) to render
+  this classification text, then splices it into its own report — see
+  [invariants.md](invariants.md) for the full breaker mechanism.
+
 ## Notes
 
 - **Surface column** lists where each code surfaces. A code that can fire both
