@@ -70,6 +70,19 @@ assert_contains() {
   fi
 }
 
+# decode_inner_cmd <argv-record>
+#
+# [#454] FULL_CMD no longer interpolates INNER_CMD verbatim inside the outer
+# single-quote wrap — it base64-encodes it (via _ssm_build_full_cmd,
+# lib-ssm.sh) and decodes+evals it remotely. Assertions on INNER_CMD's
+# actual content must decode that payload first rather than grepping the
+# raw argv for literal text.
+decode_inner_cmd() {
+  local argv="$1" b64
+  b64=$(printf '%s' "$argv" | grep -oE 'printf %s [A-Za-z0-9+/=]+ \| base64 -d' | sed -E 's/^printf %s //; s/ \| base64 -d$//')
+  printf '%s' "$b64" | base64 -d
+}
+
 TMPROOT=$(mktemp -d)
 trap 'rm -rf "$TMPROOT"' EXIT
 
@@ -244,8 +257,9 @@ rc=$?
 assert_rc "TC-SLP-007 rc=0" 0 "$rc"
 assert_eq "TC-SLP-007 stdout empty" "" "$out"
 argv=$(cat "$TMPROOT/aws-record")
+decoded=$(decode_inner_cmd "$argv")
 assert_contains "TC-SLP-007 remote inner-cmd truncates the SSM_REMOTE_PROJECT_ID-keyed log path" \
-  'agent-${PROJECT_ID}-issue-${N}.log' "$argv"
+  'agent-${PROJECT_ID}-issue-${N}.log' "$decoded"
 
 # ---------------------------------------------------------------------------
 echo ""
@@ -302,12 +316,13 @@ argv=$(cat "$TMPROOT/aws-record")
 assert_contains "TC-SLP-010 argv contains --region" "--region" "$argv"
 assert_contains "TC-SLP-010 argv carries SSM_REGION value" "ap-southeast-1" "$argv"
 assert_contains "TC-SLP-010 argv contains --instance-ids" "--instance-ids" "$argv"
-assert_contains "TC-SLP-010 remote inner-cmd carries the REMOTE project id" 'PROJECT_ID=\"remote-proj-xyz\"' "$argv"
-assert_contains "TC-SLP-010 remote inner-cmd carries N=\"77\"" 'N=\"77\"' "$argv"
+decoded=$(decode_inner_cmd "$argv")
+assert_contains "TC-SLP-010 remote inner-cmd carries the REMOTE project id" 'PROJECT_ID="remote-proj-xyz"' "$decoded"
+assert_contains "TC-SLP-010 remote inner-cmd carries N=\"77\"" 'N="77"' "$decoded"
 # The controller sets a totally different PROJECT_ID env var locally — this
 # driver must never read $PROJECT_ID, only $SSM_REMOTE_PROJECT_ID (#356
 # PROJECT_ID != SSM_REMOTE_PROJECT_ID requirement).
-if [[ "$argv" == *'PROJECT_ID=\"controller-proj\"'* ]]; then
+if [[ "$decoded" == *'PROJECT_ID="controller-proj"'* ]]; then
   echo -e "  ${RED}FAIL${NC}: TC-SLP-010 leaked the controller PROJECT_ID into remote argv"
   FAIL=$((FAIL + 1))
 else

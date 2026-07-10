@@ -52,6 +52,62 @@ _has_shell_metachar() {
   esac
 }
 
+# _ssm_build_full_cmd <user> <shell> <inner_cmd>
+#
+# Builds the `sudo -u $user $shell -l -c '...'` command string sent over
+# SSM, WITHOUT ever placing $inner_cmd's literal text inside the outer
+# single-quote wrap (#454). $inner_cmd is base64-encoded and decoded +
+# `eval`'d remotely instead of being interpolated verbatim — so a
+# heredoc body's own comments/strings (English contractions, embedded
+# quotes, backticks, anything) can never break the outer quoting no
+# matter what characters they contain. This is the STRUCTURAL fix the
+# issue asked for: it protects every future edit to a heredoc body, not
+# just today's offending apostrophe.
+#
+# The base64 alphabet is [A-Za-z0-9+/=] only — it cannot itself contain
+# a `'`, so the outer single-quote wrap around the `eval "$(printf ...)"`
+# expression stays balanced regardless of $inner_cmd's content. $user and
+# $shell are still interpolated directly into the outer wrap (as before);
+# callers MUST validate them against `^[a-zA-Z0-9_-]+$` /
+# `^(bash|zsh|sh)$` first, same as always.
+#
+# Exit-code / stdout passthrough: `eval "$(...)"` runs $inner_cmd in the
+# CURRENT shell (not a subshell), so `exit N` inside $inner_cmd still
+# terminates the -c shell with rc=N, and stdout/stderr are unbuffered
+# pass-through — the ALIVE/DEAD/DEFERRED contract (INV-30, INV-119) is
+# unchanged.
+#
+# Fail-closed on encoding failure: if `base64` is missing or the encode
+# pipeline fails, prints nothing and returns 1 instead of silently emitting
+# a FULL_CMD with an empty payload (`eval "$(printf %s  | base64 -d)"`) that
+# parses fine, "succeeds" at the transport layer, and executes nothing on
+# the remote host — a false-success that's far harder to diagnose than a
+# loud local failure. Callers must check the return code.
+#
+# Fail-closed on the REMOTE decode too (codex review of #454 follow-up):
+# the local encoding check above cannot see whether the remote host has
+# `base64` on its PATH. If it doesn't, `base64 -d` there fails but a bare
+# `eval "$(...)"` swallows that — the failed command substitution expands
+# to an empty string, `eval ""` is a silent no-op, and the remote shell (and
+# therefore the whole SSM command) still exits 0. The remote script now
+# captures the decode into `_d` and `exit 1`s BEFORE `eval` if that capture
+# fails, so a missing remote `base64` produces a loud remote failure
+# instead of a false SSM "Success" that executed nothing. `$INNER_CMD`'s
+# own `exit N` still propagates normally: `eval "$_d"` is the last command
+# run only once decode has already succeeded.
+_ssm_build_full_cmd() {
+  local user="$1" shell="$2" inner_cmd="$3" b64
+  b64=$(printf '%s' "$inner_cmd" | base64 | tr -d '\n') || {
+    echo "[lib-ssm] ERROR: base64 encoding of inner_cmd failed" >&2
+    return 1
+  }
+  if [[ -z "$b64" && -n "$inner_cmd" ]]; then
+    echo "[lib-ssm] ERROR: base64 encoding of inner_cmd produced empty output" >&2
+    return 1
+  fi
+  printf '%s' "sudo -u ${user} ${shell} -l -c '_d=\$(printf %s ${b64} | base64 -d) || exit 1; eval \"\$_d\"'"
+}
+
 # _ssm_run_remote_command <instance-id> <region> <inner-cmd>
 #
 # Synchronous: send-command + poll get-command-invocation until terminal

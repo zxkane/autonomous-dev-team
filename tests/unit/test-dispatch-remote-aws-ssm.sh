@@ -57,6 +57,20 @@ assert_not_contains() {
   fi
 }
 
+# decode_inner_cmd <argv-record>
+#
+# [#454] FULL_CMD no longer interpolates INNER_CMD verbatim inside the outer
+# single-quote wrap — it base64-encodes it (via _ssm_build_full_cmd,
+# lib-ssm.sh) and decodes+evals it remotely. Assertions on INNER_CMD's
+# actual content (profile source, dispatch-local.sh args, session id) must
+# decode that payload first rather than grepping the raw argv for literal
+# text.
+decode_inner_cmd() {
+  local argv="$1" b64
+  b64=$(printf '%s' "$argv" | grep -oE 'printf %s [A-Za-z0-9+/=]+ \| base64 -d' | sed -E 's/^printf %s //; s/ \| base64 -d$//')
+  printf '%s' "$b64" | base64 -d
+}
+
 # Sandbox: stub `aws` to record argv; jq stays real.
 TMPROOT=$(mktemp -d)
 trap 'rm -rf "$TMPROOT"' EXIT
@@ -191,10 +205,12 @@ run_driver dev-new 99 >/dev/null 2>&1
 assert_rc "happy path → rc=0" 0 "$?"
 record=$(cat "$TMPROOT/aws-record")
 assert_contains "default SSM_REGION ap-southeast-1 reaches aws" "ap-southeast-1" "$record"
-# INNER_CMD shape ends up inside the JSON parameters; capture it via grep.
-assert_contains "default user=ubuntu in INNER_CMD" "sudo -u ubuntu" "$record"
-assert_contains "default shell=bash with -l in INNER_CMD" "bash -l" "$record"
-assert_not_contains "no profile source when SSM_REMOTE_PROFILE empty" "source /home" "$record"
+# The outer FULL_CMD (user/shell/sudo wrap) still appears in plaintext in the
+# argv — only INNER_CMD itself is now base64-encoded.
+assert_contains "default user=ubuntu in FULL_CMD" "sudo -u ubuntu" "$record"
+assert_contains "default shell=bash with -l in FULL_CMD" "bash -l" "$record"
+decoded=$(decode_inner_cmd "$record")
+assert_not_contains "no profile source when SSM_REMOTE_PROFILE empty" "source /home" "$decoded"
 
 # ---------------------------------------------------------------------------
 echo ""
@@ -203,7 +219,8 @@ echo "=== TC-EB-009: SSM_REMOTE_PROFILE prepends source ==="
 : > "$TMPROOT/aws-record"
 ( export SSM_REMOTE_PROFILE=/home/ubuntu/.bash_aliases; run_driver dev-new 99 >/dev/null 2>&1 )
 record=$(cat "$TMPROOT/aws-record")
-assert_contains "INNER_CMD has 'source /home/ubuntu/.bash_aliases;'" "source /home/ubuntu/.bash_aliases;" "$record"
+decoded=$(decode_inner_cmd "$record")
+assert_contains "INNER_CMD has 'source /home/ubuntu/.bash_aliases;'" "source /home/ubuntu/.bash_aliases;" "$decoded"
 
 # Non-absolute SSM_REMOTE_PROFILE is rejected
 ( export SSM_REMOTE_PROFILE='.bash_aliases'; run_driver dev-new 99 >/dev/null 2>&1 )
@@ -259,7 +276,8 @@ assert_rc "dev-resume without session_id succeeds" 0 "$rc"
 # The constructed inner command must include `dev-resume 99` (3-arg form,
 # no trailing session id).
 record=$(cat "$TMPROOT/aws-record")
-assert_contains "inner command contains dev-resume 99" "dev-resume 99" "$record"
+decoded=$(decode_inner_cmd "$record")
+assert_contains "inner command contains dev-resume 99" "dev-resume 99" "$decoded"
 assert_not_contains "stderr does NOT say 'session_id required'" "session_id required" "$err"
 
 # Regression: real session_id still gets forwarded as the 4th arg.
@@ -268,7 +286,8 @@ err=$(run_driver dev-resume 99 abc-session-id-123 2>&1 >/dev/null)
 rc=$?
 assert_rc "dev-resume with session_id succeeds" 0 "$rc"
 record=$(cat "$TMPROOT/aws-record")
-assert_contains "inner command contains session id" "abc-session-id-123" "$record"
+decoded=$(decode_inner_cmd "$record")
+assert_contains "inner command contains session id" "abc-session-id-123" "$decoded"
 
 # ---------------------------------------------------------------------------
 echo ""

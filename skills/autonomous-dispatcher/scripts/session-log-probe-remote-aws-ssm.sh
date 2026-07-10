@@ -142,12 +142,10 @@ fi
 
 if [[ "$MODE_FLAG" == "--probe" ]]; then
   # NOTE: the grep pattern and printf format below MUST use double quotes,
-  # not single quotes. INNER_CMD is later interpolated inside an OUTER
-  # single-quoted `-c '...'` wrapper (see FULL_CMD below) — any single quote
-  # in INNER_CMD's literal text would prematurely close that outer quoting
-  # and corrupt the argv the remote shell receives (verified: an embedded
-  # `grep '^{"type":"result"'` truncates FULL_CMD's quoting, and the remote
-  # `sudo … bash -l -c '<truncated>'` mis-parses everything after it).
+  # not single quotes, as a defense-in-depth habit — but see [#454]: FULL_CMD
+  # below now base64-encodes INNER_CMD via _ssm_build_full_cmd rather than
+  # interpolating it inside an outer single-quote wrap, so a stray `'` here
+  # would no longer corrupt the transport even if this habit were dropped.
   INNER_CMD=$(cat <<EOF
 ${profile_prefix}set -u
 PROJECT_ID="${SSM_REMOTE_PROJECT_ID}"
@@ -174,7 +172,11 @@ EOF
 fi
 
 # Wrap in sudo + login shell so the remote profile (when set) is loaded.
-FULL_CMD="sudo -u ${SSM_REMOTE_USER} ${SSM_REMOTE_SHELL} -l -c '${INNER_CMD}'"
+# [#454] Built via _ssm_build_full_cmd (lib-ssm.sh) — see its docstring.
+FULL_CMD=$(_ssm_build_full_cmd "$SSM_REMOTE_USER" "$SSM_REMOTE_SHELL" "$INNER_CMD") || {
+  echo "ERROR: failed to build FULL_CMD (base64 encoding failed)" >&2
+  exit 1
+}
 
 # ---------------------------------------------------------------------------
 # Execute via shared helper

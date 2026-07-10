@@ -323,6 +323,85 @@ bash -c "unset SSM_COMMAND_TIMEOUT_SECONDS; source '$LIB'; _ssm_run_remote_comma
 argv=$(cat "$TMPROOT/aws-record")
 assert_contains "TC-LSSM-010 inherited _SSM_MIN_COMMAND_TIMEOUT_SECONDS=20 does not lower --timeout-seconds below 30" $'--timeout-seconds\n30' "$argv"
 
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-LSSM-011: _ssm_build_full_cmd fails closed when base64 is missing (#454 review follow-up) ==="
+# ---------------------------------------------------------------------------
+# Round-005 llm-team review (codex): before this fix, a missing/failing
+# `base64` binary made _ssm_build_full_cmd still return 0 and print a
+# syntactically-valid FULL_CMD with an EMPTY payload
+# (`eval "$(printf %s  | base64 -d)"`) — a false success that "sends
+# successfully" over SSM but executes nothing remotely. Verified locally
+# with a stub `base64` binary that exits 127, ahead of the real one on
+# PATH, reproducing this exact failure mode before the fix shipped. The
+# fix must return non-zero and print nothing so callers can fail loud
+# instead of silently no-op'ing on the remote host.
+FAILING_BASE64_BIN="$TMPROOT/failing-base64-bin"
+mkdir -p "$FAILING_BASE64_BIN"
+cat > "$FAILING_BASE64_BIN/base64" <<'STUBEOF'
+#!/bin/bash
+exit 127
+STUBEOF
+chmod +x "$FAILING_BASE64_BIN/base64"
+out_011=$(
+  PATH="$FAILING_BASE64_BIN:$PATH" \
+  bash -c "source '$LIB'; _ssm_build_full_cmd ubuntu bash 'echo hi'" \
+  2>"$TMPROOT/stderr-011"
+)
+rc_011=$?
+assert_rc "TC-LSSM-011 rc=1 when base64 is unavailable" 1 "$rc_011"
+if [[ -z "$out_011" ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-LSSM-011 stdout is empty (no partial/broken FULL_CMD emitted)"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-LSSM-011 stdout should be empty on failure, got: '$out_011'"
+  FAIL=$((FAIL + 1))
+fi
+assert_contains "TC-LSSM-011 stderr names the failure" "base64" "$(cat "$TMPROOT/stderr-011")"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-LSSM-012: _ssm_build_full_cmd still succeeds when base64 IS available (regression guard) ==="
+# ---------------------------------------------------------------------------
+out_012=$(bash -c "source '$LIB'; _ssm_build_full_cmd ubuntu bash 'echo hi'")
+rc_012=$?
+assert_rc "TC-LSSM-012 rc=0 on the normal path" 0 "$rc_012"
+assert_contains "TC-LSSM-012 FULL_CMD has the expected sudo/decode/eval shape" "sudo -u ubuntu bash -l -c '_d=" "$out_012"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-LSSM-013: remote decode failure fails closed instead of silently no-op'ing (codex review of #454 follow-up) ==="
+# ---------------------------------------------------------------------------
+# TC-LSSM-011 covers LOCAL base64 encoding failure. This covers the
+# DIFFERENT failure the codex reviewer found: the REMOTE host running the
+# SSM command may lack `base64` even though the LOCAL host (which only
+# encodes) has it. Before this fix, the inner payload was a bare
+# `eval "$(printf %s <b64> | base64 -d)"` — when the remote `base64 -d`
+# fails, the failed command substitution silently expands to an empty
+# string, `eval ""` is a no-op, and the WHOLE inner -c shell still exits 0.
+# That is a false SSM "Success" that executed nothing remotely — the same
+# failure class as #454 itself, just triggered by a missing remote binary
+# instead of a broken local encoding step. Reproduce by extracting the
+# REAL inner -c payload from a real _ssm_build_full_cmd call and running it
+# with base64 absent from PATH, exactly as it would run on an
+# under-provisioned remote host.
+out_013=$(bash -c "source '$LIB'; _ssm_build_full_cmd ubuntu bash 'echo remote-should-not-run'")
+# Extract the payload between the outer -c '...' quotes.
+inner_payload_013=$(printf '%s' "$out_013" | sed -E "s/^sudo -u ubuntu bash -l -c '//; s/'\$//")
+NO_BASE64_BIN="$TMPROOT/no-base64-bin"
+mkdir -p "$NO_BASE64_BIN"
+ln -sf /bin/bash "$NO_BASE64_BIN/bash"
+remote_out_013=$(env -i PATH="$NO_BASE64_BIN" "$NO_BASE64_BIN/bash" -c "$inner_payload_013" 2>"$TMPROOT/stderr-013")
+remote_rc_013=$?
+assert_rc "TC-LSSM-013 rc!=0 when remote base64 is unavailable (was rc=0, a false SSM success)" 1 "$remote_rc_013"
+if [[ -z "$remote_out_013" ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-LSSM-013 stdout is empty — the inner echo did NOT run"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-LSSM-013 inner command executed despite missing remote base64: '$remote_out_013'"
+  FAIL=$((FAIL + 1))
+fi
+
 echo ""
 echo "==============================================="
 echo -e "Total: $((PASS + FAIL)) tests, ${GREEN}${PASS} pass${NC}, ${RED}${FAIL} fail${NC}"
