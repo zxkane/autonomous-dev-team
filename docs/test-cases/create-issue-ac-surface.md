@@ -5,7 +5,7 @@ the `create-issue` skill so future doc rewrites cannot silently relax it. Mirror
 the #273 `test-create-issue-ac-verification-guidance.sh` harness
 (`extract_section` / `assert_contains`).
 
-The skill change extends the #273 advisory self-scan with a **third axis**:
+The skill change extends the #273 advisory self-scan with a **second axis**:
 pre-merge verifiable, but on a surface the dev/review agents' **scoped token**
 cannot write to (PR body/description/title, PR metadata). Such an AC is
 guaranteed to end in a `dev-actionable=false` stall regardless of how much
