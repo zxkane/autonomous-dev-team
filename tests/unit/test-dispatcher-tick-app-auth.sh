@@ -100,6 +100,11 @@ cat > "$SANDBOX/lib-dispatch.sh" <<'EOF'
 MAX_RETRIES="${MAX_RETRIES:-3}"
 MAX_CONCURRENT="${MAX_CONCURRENT:-5}"
 
+# gh-version precheck helpers (see lib-dispatch.sh): this sandbox's auth-block
+# tests don't exercise the gh-version gate, so always report OK.
+GH_MIN_VERSION="2.48.0"
+gh_version_ok() { return 0; }
+
 count_active() { echo 0; }
 list_new_issues() { echo '[]'; }
 list_pending_review() { echo '[]'; }

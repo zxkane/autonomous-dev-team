@@ -134,6 +134,25 @@ case "${EXECUTION_BACKEND:-local}" in
     ;;
 esac
 
+# Validate the GitHub CLI version upfront, same slot and reasoning as
+# EXECUTION_BACKEND above: the GitHub-provider ITP/CHP leaves (providers/
+# itp-github.sh, providers/chp-github.sh — gh_version_ok / GH_MIN_VERSION /
+# GH_INSTALLED_VERSION live in the shared providers/lib-github-transport.sh,
+# transitively sourced via lib-dispatch.sh above) depend on the '--slurp'
+# pagination flag, and an older CLI fails that call silently deep inside
+# Step 3/4 instead of here, aborting the tick opaquely well past any label
+# transition. Gated on `github_seam_active` — a gitlab/gitlab topology never
+# calls the GitHub CLI and must not be blocked by its version (or absence).
+if github_seam_active && ! gh_version_ok "$GH_MIN_VERSION"; then
+  error_surface - ADT_CFG_GH_VERSION_TOO_OLD \
+    "The GitHub CLI on PATH is missing or older than the minimum required version (dispatcher tick)" \
+    "The installed CLI reported '${GH_INSTALLED_VERSION}'; the GitHub provider requires the CLI to be >= ${GH_MIN_VERSION} for the '--slurp' pagination flag (added in GitHub CLI v2.48.0)" \
+    "Upgrade the GitHub CLI to >= ${GH_MIN_VERSION} on the execution host, then the next tick proceeds" \
+    "docs/pipeline/errors.md#configuration-class-class-config"
+  echo "[dispatcher-tick] FATAL: the GitHub CLI is missing or older than the minimum required version ${GH_MIN_VERSION} (got '${GH_INSTALLED_VERSION}'). The '--slurp' pagination flag requires version >= 2.48.0. Upgrade before the next tick." >&2
+  exit 1
+fi
+
 # Validate REVIEW_BOTS upfront for the same reason: a typo (e.g.
 # REVIEW_BOTS="q codx") would let the tick swap labels to `reviewing` and
 # spawn the review wrapper, which then exits 1 at startup — burning a
