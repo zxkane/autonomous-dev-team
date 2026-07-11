@@ -355,10 +355,23 @@
       "actor": "dispatcher",
       "guards": ["concurrency-below-cap", "same-head-reviewed-failed", "no-session-id-resolvable", "no-live-dev-wrapper"],
       "actions": ["remove-label:pending-dev", "add-label:in-progress", "comment:self-heal-lost-session"],
-      "code_site": "lib-dispatch.sh handle_pending_dev_pr_exists(): self-healing with a fresh dev-new",
+      "code_site": "lib-dispatch.sh _same_head_verdict_aware_recovery() {",
       "mermaid": "pending_dev --> in_progress: Step 4a.5 self-heal (same-HEAD FAILED verdict + no resolvable session id + no live wrapper -> bounded dev-new) [INV-111]",
       "inv_refs": ["INV-111"],
-      "note": "Session-report comment was lost (e.g. auth-shim teardown race, #402) so extract_dev_session_id is empty and INV-98's delegation can never fire. Bounded to ONE dev-new per unchanged HEAD via the self-heal-lost-session:<head> marker; falls back to the residual stale-verdict park if already attempted or a wrapper is alive."
+      "note": "Session-report comment was lost (e.g. auth-shim teardown race, #402) so extract_dev_session_id is empty and INV-98's delegation can never fire. Bounded to ONE dev-new per unchanged HEAD via a shared self-heal-lost-session:<head> / crashed-session-retry:<head> budget ([INV-125], #466); a spent budget or non-substantive re-review cap now escalates to mark_stalled instead of the residual park."
+    },
+    {
+      "id": "dispatch-pending-dev-crashed-session-retry",
+      "from": "pending_dev",
+      "to": "in_progress",
+      "event": "dispatcher-step4a5-crashed-session-retry",
+      "actor": "dispatcher",
+      "guards": ["concurrency-below-cap", "same-head-reviewed-failed", "session-id-resolvable", "session-completion-unprovable", "no-live-dev-wrapper"],
+      "actions": ["remove-label:pending-dev", "add-label:in-progress", "comment:crashed-session-retry"],
+      "code_site": "lib-dispatch.sh _same_head_verdict_aware_recovery() { reviewed FAILED (${cause}) with no live wrapper",
+      "mermaid": "pending_dev --> in_progress: Step 4a.5 crashed-session recovery (same-HEAD FAILED verdict + resolved session id whose completion is unprovable + no live wrapper -> bounded dev-new) [INV-125]",
+      "inv_refs": ["INV-125"],
+      "note": "#466: a resolved dev session id whose `is_session_completed` check returned false (non-terminal stop reason such as api_error, non-claude dev CLI, or unreadable log) with no live wrapper — the shared _same_head_verdict_aware_recovery helper's OTHER disjoint precondition from dispatch-pending-dev-selfheal-lost-session (session id resolved vs. empty). Shares the SAME per-HEAD dev-new budget (self-heal-lost-session:<head> OR crashed-session-retry:<head>, either blocks the other) so neither cause can double-spend the one bounded retry; a spent budget escalates to mark_stalled instead of the residual park."
     },
     {
       "id": "dispatch-stalled-retries",
