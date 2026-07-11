@@ -104,3 +104,36 @@ _aggregate_review_verdicts() {
     printf 'pass\n'
   fi
 }
+
+# _aggregate_has_substantive_fail <outcome...>
+#
+# Issue #449 codex review round 4 [P1] #1/#2: `_aggregate_review_verdicts`
+# folds an INV-48 `timed-out` veto into the SAME `fail` aggregate as a
+# genuine per-agent `fail` (a real, severity-scored blocking finding) —
+# correct for the merge-gate decision itself (a hung reviewer still blocks
+# the merge), but WRONG for any caller asking "did a review agent actually
+# SCORE a blocking finding this round". R1's `review-round-counter` and
+# INV-126's round-cap both need exactly that narrower distinction: a
+# `timed-out` agent posted no findings text, so it carries no severity to
+# score and is no evidence the severity ratchet's own P0/P1 floor is STILL
+# failing — a round where EVERY deciding fail is a bare timeout veto (no
+# agent actually reviewed the diff) must not advance either counter, or a
+# handful of transient hangs could inflate REVIEW_ROUND (prematurely
+# loosening the severity floor) or the INV-126 cap (eventually stalling a PR
+# that no review agent ever actually found a live P0/P1 in).
+#
+# Echoes "true" iff at least one outcome is the literal token `fail` (a
+# per-agent verdict that survived the severity filter carrying an actual
+# blocking finding); "false" otherwise (all `timed-out`/`unavailable`/`pass`,
+# or the input is empty). Pure; rc 0 always.
+_aggregate_has_substantive_fail() {
+  local outcome
+  for outcome in "$@"; do
+    if [[ "$outcome" == "fail" ]]; then
+      printf 'true\n'
+      return 0
+    fi
+  done
+  printf 'false\n'
+  return 0
+}

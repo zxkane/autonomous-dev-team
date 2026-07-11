@@ -3328,6 +3328,18 @@ done
 AGGREGATE=$(_aggregate_review_verdicts "${AGENT_VERDICTS[@]}")
 log "Per-agent verdicts: ${AGENT_VERDICTS[*]} → aggregate: ${AGGREGATE}"
 
+# [P1] #1/#2 (#449 codex review round 4): a `fail` aggregate can be produced
+# EITHER by a genuine per-agent `fail` (a real, severity-scored blocking
+# finding survived the ratchet) OR by an INV-48 `timed-out` veto with NO
+# findings text at all — `_aggregate_review_verdicts` correctly folds both
+# into the same merge-blocking `fail` (a hung reviewer still blocks the
+# merge), but neither R1's round counter nor INV-126's cap should advance on
+# a round where EVERY deciding fail was a bare timeout: no agent actually
+# scored a severity, so there is no evidence the ratchet's own floor is
+# "still failing". `_aggregate_has_substantive_fail` (lib-review-aggregate.sh)
+# makes this narrower distinction available to both gates below.
+_AGGREGATE_SUBSTANTIVE_FAIL=$(_aggregate_has_substantive_fail "${AGENT_VERDICTS[@]}")
+
 # [P1] #2 (#449 review): post the review-round-counter marker HERE — only
 # once a genuine verdict has landed (AGGREGATE is a DECIDED pass/fail, per
 # R1's own "how many times has the review fan-out actually run" definition),
@@ -3341,7 +3353,15 @@ log "Per-agent verdicts: ${AGENT_VERDICTS[*]} → aggregate: ${AGGREGATE}"
 # fix) — a PASS round has no other FAIL-only comment path to embed it in, so
 # it is posted as its own small comment exactly as before. Skipped when
 # PR_HEAD_SHA is empty (see the original guard's rationale above).
-if [[ -n "$PR_HEAD_SHA" ]] && { [[ "$AGGREGATE" == "pass" ]] || [[ "$AGGREGATE" == "fail" ]]; }; then
+#
+# [P1] #1 (#449 codex review round 4): a `fail` aggregate ALSO requires
+# `_AGGREGATE_SUBSTANTIVE_FAIL == true` — an all-timeout-veto `fail` (no
+# agent posted findings text, nothing for the severity ratchet to score) must
+# not advance REVIEW_ROUND, or a run of transient timeouts on the same head
+# could prematurely narrow the blocking floor before any real review round
+# ever completed against it.
+if [[ -n "$PR_HEAD_SHA" ]] \
+   && { [[ "$AGGREGATE" == "pass" ]] || { [[ "$AGGREGATE" == "fail" ]] && [[ "$_AGGREGATE_SUBSTANTIVE_FAIL" == "true" ]]; }; }; then
   itp_post_comment "$ISSUE_NUMBER" "$(_review_round_marker "$ISSUE_NUMBER" "$PR_HEAD_SHA" "$REVIEW_ROUND")" 2>/dev/null || true
 fi
 
@@ -4315,7 +4335,17 @@ else
     # of scope (already governed by REVIEW_RETRY_LIMIT). The entire breaker —
     # counter read, trip decision, and marker persistence — is skipped
     # wholesale for a non-`fail` aggregate.
-    if [[ "$AGGREGATE" == "fail" ]]; then
+    #
+    # [P1] #2 (#449 codex review round 4): ALSO requires
+    # `_AGGREGATE_SUBSTANTIVE_FAIL == true` (computed right after AGGREGATE,
+    # lib-review-aggregate.sh::_aggregate_has_substantive_fail). A `fail`
+    # produced entirely by INV-48 timeout vetoes (no agent posted findings
+    # text — nothing for the severity ratchet to score) is not evidence the
+    # P0/P1 floor is "still failing"; without this, a run of transient
+    # per-agent timeouts could advance the SAME head-agnostic counter this
+    # breaker uses and eventually stall a PR no review agent ever actually
+    # found a live P0/P1 in.
+    if [[ "$AGGREGATE" == "fail" ]] && [[ "$_AGGREGATE_SUBSTANTIVE_FAIL" == "true" ]]; then
       _rc_already_stalled=$(itp_read_task "$ISSUE_NUMBER" labels \
         | jq -r '.labels | any(. == "stalled")' 2>/dev/null || echo "false")
       # [P1] #3 (#449 review): cutoff-then-scan, mirroring [INV-05]'s

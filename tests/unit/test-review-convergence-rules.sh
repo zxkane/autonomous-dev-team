@@ -437,6 +437,30 @@ assert_eq "TC-REVIEW-CONV-048c unavailable+unavailable → all-unavailable (unch
   "$(_aggregate_review_verdicts unavailable unavailable)"
 assert_eq "TC-REVIEW-CONV-048d timed-out is a deciding FAIL (unchanged)" "fail" "$(_aggregate_review_verdicts timed-out)"
 
+# TC-REVIEW-CONV-048e..h: _aggregate_has_substantive_fail — the narrower
+# distinction R1's round counter and INV-126's cap need: did any agent
+# actually SCORE a blocking finding, vs. an all-timeout `fail` with no
+# findings text at all (codex review round 4 [P1] #1/#2).
+assert_eq "TC-REVIEW-CONV-048e all timed-out → no substantive fail" "false" \
+  "$(_aggregate_has_substantive_fail timed-out timed-out)"
+assert_eq "TC-REVIEW-CONV-048f a genuine fail present → substantive" "true" \
+  "$(_aggregate_has_substantive_fail timed-out fail)"
+assert_eq "TC-REVIEW-CONV-048g all pass/unavailable → no substantive fail" "false" \
+  "$(_aggregate_has_substantive_fail pass unavailable)"
+assert_eq "TC-REVIEW-CONV-048h single genuine fail → substantive" "true" \
+  "$(_aggregate_has_substantive_fail fail)"
+
+# TC-REVIEW-CONV-048i/j: wiring pins — both the review-round-counter marker
+# post and the INV-126 cap block must consult
+# `_AGGREGATE_SUBSTANTIVE_FAIL`/`_aggregate_has_substantive_fail` alongside
+# `$AGGREGATE == "fail"`, not the bare aggregate alone.
+round_marker_gate_region=$(sed -n "${aggregate_call_line},$((aggregate_call_line + 25))p" "$WRAPPER")
+assert_contains "TC-REVIEW-CONV-048i review-round-counter marker gate consults substantive-fail" \
+  "$round_marker_gate_region" '_AGGREGATE_SUBSTANTIVE_FAIL'
+inv126_gate_line=$(grep -n '^    if \[\[ "\$AGGREGATE" == "fail" \]\]' "$WRAPPER" | head -1 | cut -d: -f1)
+assert_eq "TC-REVIEW-CONV-048j INV-126 cap gate ALSO consults substantive-fail" "true" \
+  "$([[ -n "$inv126_gate_line" ]] && grep -q '_AGGREGATE_SUBSTANTIVE_FAIL' <<<"$(sed -n "${inv126_gate_line}p" "$WRAPPER")" && echo true || echo false)"
+
 # ===========================================================================
 echo
 echo "=== TC-REVIEW-CONV-049..052: artifact-channel severity round-trip (INV-78) ==="
@@ -515,9 +539,11 @@ aggregate_compute_line=$(grep -n '^AGGREGATE=\$(_aggregate_review_verdicts' "$WR
 assert_eq "TC-REVIEW-CONV-055 review-round-counter marker IS posted, but strictly after AGGREGATE is computed" "true" \
   "$([[ -n "$aggregate_marker_line" && -n "$aggregate_compute_line" && "$aggregate_marker_line" -gt "$aggregate_compute_line" ]] && echo true || echo false)"
 
-marker_post_region=$(sed -n "${aggregate_compute_line},$((aggregate_compute_line + 20))p" "$WRAPPER")
+marker_post_region=$(sed -n "${aggregate_compute_line},$((aggregate_marker_line + 1))p" "$WRAPPER")
 assert_contains "TC-REVIEW-CONV-056 the post-aggregation marker post is gated on a DECIDED verdict (pass/fail)" \
-  "$marker_post_region" '[[ "$AGGREGATE" == "pass" ]] || [[ "$AGGREGATE" == "fail" ]]'
+  "$marker_post_region" '[[ "$AGGREGATE" == "pass" ]]'
+assert_contains "TC-REVIEW-CONV-056b the marker post's fail arm also requires substantive fail (codex round 4 [P1] #1)" \
+  "$marker_post_region" '[[ "$AGGREGATE" == "fail" ]] && [[ "$_AGGREGATE_SUBSTANTIVE_FAIL" == "true" ]]'
 
 # TC-REVIEW-CONV-057..059c: [P1] #3 — the INV-126 round-cap series must be
 # CUT OFF at the latest trip report so that after an operator removes

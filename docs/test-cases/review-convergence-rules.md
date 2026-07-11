@@ -16,6 +16,7 @@ itself is too heavy to run end-to-end.
 | `skills/autonomous-dispatcher/scripts/lib-review-poll.sh` | `_classify_verdict_body` unchanged; new sibling severity extraction for the generic numbered-list body |
 | `skills/autonomous-dispatcher/scripts/lib-review-round.sh` (NEW) | `review-round-counter` marker helpers: parse/increment/reset, authenticity filter |
 | `skills/autonomous-dispatcher/scripts/lib-review-cap.sh` (NEW) | INV-126 pure helpers: `_review_cap_next_count`, `_review_cap_threshold` |
+| `skills/autonomous-dispatcher/scripts/lib-review-aggregate.sh` | `_aggregate_review_verdicts` unchanged; NEW `_aggregate_has_substantive_fail` ([P1] codex review round 4) — distinguishes a genuine per-agent `fail` from an all-timeout-veto `fail`, consumed by both the round-counter marker gate and the INV-126 cap gate |
 | `skills/autonomous-dispatcher/scripts/lib-review-e2e.sh` | R3: `_e2e_ci_green_precheck` pre-check helper feeding the E2E gate's evidence-present signal |
 | `skills/autonomous-dispatcher/scripts/lib-review-artifact.sh` | `_verdict_body_from_artifact_json` renders the OPTIONAL `severity` field inline so the JSON verdict-artifact channel (INV-78, the primary resolution path) feeds real severity into the ratchet |
 | `docs/pipeline/schemas/verdict-artifact.schema.json` | New OPTIONAL `severity` enum (`P0`\|`P1`\|`P2`\|`P3`) on the finding definition |
@@ -108,6 +109,8 @@ itself is too heavy to run end-to-end.
 | TC-REVIEW-CONV-046 | Per-agent raw findings + round fed into the filter, at least one finding at/above the round's floor | agent's verdict stays `fail` |
 | TC-REVIEW-CONV-047 | Severity filter runs strictly between the terminal no-verdict sweep and `_aggregate_review_verdicts` | wiring grep: filter call line > terminal-sweep line, filter call line < aggregation call line |
 | TC-REVIEW-CONV-048 | `_aggregate_review_verdicts` itself is unchanged (still consumes `pass\|fail\|unavailable\|timed-out`) | regression pin — no signature/vocabulary change |
+| TC-REVIEW-CONV-048e..h | `_aggregate_has_substantive_fail` ([P1] codex review round 4): all-timeout vs. a genuine `fail` present vs. all-pass/unavailable vs. a single genuine `fail` | `false`/`true`/`false`/`true` respectively — the narrower "did any agent actually score a blocking finding" signal, distinct from the merge-blocking `AGGREGATE` |
+| TC-REVIEW-CONV-048i..j | Wiring pins: both the `review-round-counter` marker post and the INV-126 cap block reference `_AGGREGATE_SUBSTANTIVE_FAIL`/`_aggregate_has_substantive_fail`, not `$AGGREGATE == "fail"` alone | present at both gate sites |
 
 ### Group G — artifact-channel severity round-trip (TC-REVIEW-CONV-049..052)
 

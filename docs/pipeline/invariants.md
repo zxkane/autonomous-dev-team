@@ -7253,6 +7253,24 @@ of scope (already governed by `REVIEW_RETRY_LIMIT` /
 does not touch). The all-unavailable sub-path (no verdict at all) also never
 reaches the trip logic (see the `$AGGREGATE == "fail"` gate above).
 
+**An all-timeout `fail` also never reaches the trip logic ([P1] codex review
+round 4, fixed pre-merge)**: `AGGREGATE == "fail"` is produced by
+`_aggregate_review_verdicts` for TWO distinct causes — a genuine per-agent
+`fail` (a real, severity-scored blocking finding survived the ratchet) OR an
+[INV-48] `timed-out` veto with no findings text at all (a reviewer hung and
+was killed by its wall-clock cap). Both correctly block the merge, but only
+the first is evidence the severity ratchet's own P0/P1 floor is "still
+failing" — a round where EVERY deciding fail is a bare timeout veto has no
+agent-scored finding to point to. `_aggregate_has_substantive_fail`
+(`lib-review-aggregate.sh`) makes this narrower distinction: "true" iff at
+least one per-agent verdict is the literal token `fail` (post severity
+filter), "false" if every deciding fail was `timed-out`. Both this
+invariant's trip block and R1's `review-round-counter` marker post are gated
+on `$AGGREGATE == "fail" && $_AGGREGATE_SUBSTANTIVE_FAIL == "true"` — without
+this, a run of transient per-agent timeouts on successive heads could
+advance the SAME head-agnostic counter this breaker uses and eventually
+stall a PR that no review agent ever actually found a live P0/P1 in.
+
 **Trip behavior**, gated in this order:
 
 1. Check current issue labels for `stalled` FIRST — if already stalled (e.g.
