@@ -163,7 +163,9 @@ _Triage (issue #236): [design-rationale]_
 
 **Producer**: dispatcher Step 2/3/4 (all append to `JUST_DISPATCHED`).
 **Consumer**: dispatcher Step 5.
-**Test**: TODO: add test that simulates a Step 2 → Step 5 within the same tick.
+**Test**: `tests/unit/test-lib-dispatch.sh` (`was_just_dispatched` IN/NOT_IN/boundary/unset cases) and `tests/unit/test-issue-456-just-dispatched-export.sh` (the Step 5 array→scalar export handoff itself — see the note below).
+
+**Export mechanism note** (#456): at the top of Step 5, `dispatcher-tick.sh` re-`export`s the joined `JUST_DISPATCHED` array as a scalar under the SAME name so `was_just_dispatched()` can read it in scalar context across the `dispatch()`/subshell boundary — the re-export MUST `unset JUST_DISPATCHED` immediately before that scalar assignment, or bash's `existing_array_name="scalar"` only overwrites index 0 and leaves stale higher indices behind, corrupting `${JUST_DISPATCHED[*]}`'s printed form. Full repro and impact analysis: `docs/test-cases/issue-456-just-dispatched-export.md`.
 
 ## INV-10: 5-minute idle gate before SIGTERM
 

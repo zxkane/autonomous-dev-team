@@ -721,7 +721,12 @@ done
 log "Step 5: stale detection..."
 
 # Export JUST_DISPATCHED so was_just_dispatched() in lib-dispatch.sh can read.
+# [#456] `unset` before the scalar assignment: bash's `existing_array_name=
+# "scalar"` only overwrites index 0 of an existing array, leaving indices
+# >= 1 untouched, which left the printed array form (and the "Tick complete"
+# log line) with duplicated trailing entries (e.g. "84 85" -> "84 85 85").
 JUST_DISPATCHED_STR="${JUST_DISPATCHED[*]:-}"
+unset JUST_DISPATCHED
 export JUST_DISPATCHED="$JUST_DISPATCHED_STR"
 
 candidates=$(list_stale_candidates)
