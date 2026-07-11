@@ -85,7 +85,7 @@ binary is genuinely absent.
 |---|---|---|
 | TC-BINPATH-001 | binary absent everywhere (not on `PATH`, not in any probed dir) | preflight returns 1; envelope keeps the install-focused remediation; cause includes the effective `$PATH`. |
 | TC-BINPATH-002 | binary present in `$HOME/.local/bin` but that dir is not on `PATH` | preflight returns 1; envelope cause names the found path and the non-login-shell PATH gap; remediation is PATH-specific (extend `PATH`, use a profile-sourcing `AGENT_LAUNCHER`, or an absolute-path `AGENT_CMD`) — NOT the generic "Install '\<bin\>'" text. |
-| TC-BINPATH-003 | binary present in an nvm shim dir (`$HOME/.nvm/versions/node/<v>/bin`) but not on `PATH` | same PATH-specific branch as TC-BINPATH-002; `_probe_user_install_dirs` first-match via the nvm glob. |
+| TC-BINPATH-003 | binary present in an nvm shim dir (`$HOME/.nvm/versions/node/<v>/bin`) but not on `PATH` | same PATH-specific branch as TC-BINPATH-002; `_probe_user_install_dirs` finds it by scanning the nvm glob matches for the first executable one. |
 | TC-BINPATH-004 | binary on `PATH` (regression pin) | preflight passes, no envelope, no probing needed (short-circuits at the `command -v` check). |
 | TC-BINPATH-005 | launcher configured (regression pin) | preflight skipped entirely regardless of probe-dir contents — unchanged existing behavior. |
 | TC-BINPATH-006 | binary present only in `$HOME/bin` but not on `PATH` | same PATH-specific branch as TC-BINPATH-002, naming the `~/bin` path. |
@@ -94,6 +94,8 @@ binary is genuinely absent.
 | TC-BINPATH-008b | multiple nvm node-version dirs, all executable | probe returns the found branch naming one of the valid matches — `compgen -G`'s cross-directory match order is host/filesystem-dependent, so this case only asserts a match was found, not which one. |
 | TC-BINPATH-009 | `$HOME` unset | `_probe_user_install_dirs` returns "not found" immediately (no `set -u` crash); preflight falls to the genuinely-missing branch cleanly. |
 | TC-BINPATH-010 | a directory (not a file) exists at the probed path with the binary's name | rejected by the `-f` check; falls to the genuinely-missing branch rather than reporting the directory as a launchable binary. |
+| TC-BINPATH-011 | multiple nvm node-version dirs; the first `compgen -G` match is stale/non-executable, a later match is valid | probe scans past the rejected match and finds the valid one — a stale copy under an earlier-sorting node version must not shadow a working install under a later one. |
+| TC-BINPATH-012 | `$PATH` unset when the genuinely-missing envelope is composed | cause reports `effective PATH=<unset>` rather than crashing on an unbound-variable reference under `set -u`. |
 
 ## E2E
 

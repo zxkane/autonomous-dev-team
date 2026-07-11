@@ -448,12 +448,15 @@ _agent_launch_binary() {
 # directory's binary path on stdout and returns 0; returns 1 (no output) when
 # not found in any probed dir (including when `$HOME` is unset/empty, in
 # which case there is nothing to probe under `set -u`). Order: ~/.local/bin,
-# ~/bin, ~/.npm-global/bin, then the first nvm shim dir that has it (nvm
-# installs one copy per node version under ~/.nvm/versions/node/<v>/bin — we
-# only need one match). `-f` alongside `-x` excludes a same-named directory
-# (which passes a bare `-x` test but isn't a launchable binary).
+# ~/bin, ~/.npm-global/bin, then the first EXECUTABLE match across all nvm
+# shim dirs (nvm installs one copy per node version under
+# ~/.nvm/versions/node/<v>/bin — a stale/non-executable copy under one
+# version must not shadow a valid one under another, so every glob match is
+# checked in turn rather than only the first). `-f` alongside `-x` excludes a
+# same-named directory (which passes a bare `-x` test but isn't a launchable
+# binary).
 _probe_user_install_dirs() {
-  local bin="$1" dir
+  local bin="$1" dir nvm_hit
   [[ -z "${HOME:-}" ]] && return 1
   for dir in "$HOME/.local/bin" "$HOME/bin" "$HOME/.npm-global/bin"; do
     if [[ -f "$dir/$bin" && -x "$dir/$bin" ]]; then
@@ -461,12 +464,12 @@ _probe_user_install_dirs() {
       return 0
     fi
   done
-  local nvm_hit
-  nvm_hit=$(compgen -G "$HOME/.nvm/versions/node/*/bin/$bin" 2>/dev/null | head -1) || true
-  if [[ -n "$nvm_hit" && -f "$nvm_hit" && -x "$nvm_hit" ]]; then
-    echo "$nvm_hit"
-    return 0
-  fi
+  while IFS= read -r nvm_hit; do
+    if [[ -n "$nvm_hit" && -f "$nvm_hit" && -x "$nvm_hit" ]]; then
+      echo "$nvm_hit"
+      return 0
+    fi
+  done < <(compgen -G "$HOME/.nvm/versions/node/*/bin/$bin" 2>/dev/null)
   return 1
 }
 
@@ -489,8 +492,9 @@ _probe_user_install_dirs() {
 # (_probe_user_install_dirs) and branch the cause/remediation: found there →
 # name the found path and point at PATH/launcher/absolute-AGENT_CMD fixes;
 # not found anywhere → keep the install-focused remediation, but now also
-# include the effective $PATH so the operator can see what a fresh install
-# would need to land on.
+# include the effective $PATH (or the literal "<unset>" marker if $PATH
+# itself is unbound, so composing this cause text can never crash under
+# `set -u`) so the operator can see what a fresh install would need to land on.
 preflight_agent_binary() {
   local bin; bin="$(_agent_launch_binary)"
   # Launcher configured (empty bin) → skip; nothing to preflight here.
@@ -515,7 +519,7 @@ preflight_agent_binary() {
     [[ -z "${HOME:-}" ]] && _probe_note="HOME is unset/empty, so the user-level install dirs could not be probed"
     error_surface "${ISSUE_NUMBER:--}" ADT_CFG_AGENT_BINARY_MISSING \
       "The configured agent CLI binary '${bin}' is not on PATH" \
-      "AGENT_CMD=${AGENT_CMD} resolves to the launch binary '${bin}', which 'command -v' cannot find on the execution host's PATH (${_probe_note}); effective PATH=${PATH}" \
+      "AGENT_CMD=${AGENT_CMD} resolves to the launch binary '${bin}', which 'command -v' cannot find on the execution host's PATH (${_probe_note}); effective PATH=${PATH:-<unset>}" \
       "Install '${bin}' on the execution host (or fix PATH / AGENT_CMD in scripts/autonomous.conf), then re-dispatch" \
       "docs/pipeline/errors.md#configuration-class-class-config" || true
   fi

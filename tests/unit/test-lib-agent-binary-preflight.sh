@@ -398,6 +398,62 @@ GHBODY=$(cat "$GH_CALLS")
 [[ "$GHBODY" == *"Install 'claude'"* ]] && ok "BINPATH-010 falls to install-focused remediation (directory rejected by -f)" || bad "BINPATH-010 wrongly treated a directory as the found binary"
 
 echo ""
+echo "=== TC-BINPATH-011: nvm glob's FIRST match is stale/non-executable, a LATER match is valid ==="
+# #460 review [P2]: the probe must not stop at the first `compgen -G` hit — a
+# stale/non-executable copy under one node version must not shadow a valid
+# executable under another. v18 sorts before v22, so a `head -1`-style probe
+# that stops at the first match would see the non-executable v18 copy and
+# wrongly report "not found", even though v22's copy is a perfectly fine
+# install. The probe must keep scanning past the rejected match.
+: > "$GH_CALLS"
+FAKEHOME="$TMPROOT/home-nvm-mixed"
+mkdir -p "$FAKEHOME/.nvm/versions/node/v18.20.4/bin" "$FAKEHOME/.nvm/versions/node/v22.3.0/bin"
+printf '#!/bin/bash\nexit 0\n' > "$FAKEHOME/.nvm/versions/node/v18.20.4/bin/codex"   # NOT chmod +x — stale/broken
+printf '#!/bin/bash\nexit 0\n' > "$FAKEHOME/.nvm/versions/node/v22.3.0/bin/codex"; chmod +x "$FAKEHOME/.nvm/versions/node/v22.3.0/bin/codex"
+out=$(preflight_userhome codex 341 "$FAKEHOME")
+assert_rc "BINPATH-011 preflight returns 1 (found the v22 match past the rejected v18 match)" 1 "$(rc_of "$out")"
+GHBODY=$(cat "$GH_CALLS")
+[[ "$GHBODY" == *"$FAKEHOME/.nvm/versions/node/v22.3.0/bin/codex"* ]] && ok "BINPATH-011 cause names the v22 match, not stopping at the non-executable v18 match" || bad "BINPATH-011 did not find the valid match past the rejected one"
+[[ "$GHBODY" == *"Extend PATH"* ]] && ok "BINPATH-011 remediation is PATH-specific" || bad "BINPATH-011 remediation not PATH-specific"
+
+echo ""
+echo "=== TC-BINPATH-012: \$PATH unset -> genuinely-missing branch, no crash (regression pin) ==="
+# #460 review [P2]: the genuinely-missing envelope cause interpolates
+# ${PATH:-<unset>} rather than a bare ${PATH}, which under `set -u` would
+# crash mid-envelope-composition (unbound variable) instead of surfacing
+# ADT_CFG_AGENT_BINARY_MISSING. PATH stays populated through lib sourcing
+# (dirname/readlink/jq etc. are needed for that) and is unset only for the
+# preflight_agent_binary call itself, isolating the assertion to the single
+# interpolation being pinned rather than lib-loading fallout.
+#
+# Scope note (pr-test-analyzer, this review round): this pin covers ONLY the
+# human-readable cause text this commit touches. With PATH unset, downstream
+# `error_surface` (lib-error.sh) also invokes `jq` by bare name to build the
+# machine-readable `<!-- adt-error-envelope: ... -->` marker; jq itself is
+# then unresolvable and that marker degrades to empty JSON. That is a
+# pre-existing lib-error.sh gap affecting every error_surface caller, not
+# something this preflight-specific fix introduces or is scoped to close —
+# not asserted here.
+: > "$GH_CALLS"
+out=$(
+  ( set -uo pipefail
+    export AUTONOMOUS_CONF_DIR="$TMPROOT/scripts" REPO="o/r" ISSUE_NUMBER=342
+    export AGENT_CMD=claude
+    export HOME="$TMPROOT/home-none"
+    export PATH="$TMPROOT/cu"
+    # shellcheck disable=SC1090
+    source "$LIB_ERROR"; source "$LIB_AGENT"
+    AGENT_CMD=claude
+    unset PATH
+    preflight_agent_binary
+    echo "RC=$?"
+  )
+)
+assert_rc "BINPATH-012 preflight returns 1 cleanly with PATH unset (no crash)" 1 "$(rc_of "$out")"
+GHBODY=$(cat "$GH_CALLS")
+[[ "$GHBODY" == *"effective PATH=<unset>"* ]] && ok "BINPATH-012 cause reports PATH as unset rather than crashing" || bad "BINPATH-012 cause missing the unset-PATH marker"
+
+echo ""
 echo "============================================"
 echo -e "Results: ${GREEN}${PASS} passed${NC}, ${RED}${FAIL} failed${NC}"
 echo "============================================"
