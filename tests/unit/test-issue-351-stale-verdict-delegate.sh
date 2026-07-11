@@ -265,18 +265,39 @@ assert_no_match "TC-351-DELEG-5 NO mark_stalled" "^mark_stalled" "$(_trace_all)"
 
 # ===================================================================
 echo
-echo "=== TC-351-DELEG-6: non-claude dev CLI (no result line) same-HEAD → residual park ==="
+echo "=== TC-351-DELEG-6: non-claude dev CLI (no result line) same-HEAD, no live wrapper → [INV-125] crashed-session-retry dev-new, NOT the park ==="
 # is_session_completed returns 1 by design for non-claude CLIs (per-CLI scope).
+# [INV-125] (#466): this is no longer a permanent park — a resolved session
+# id whose completion is unprovable, with no live wrapper, gets the SAME
+# verdict-aware recovery as the [INV-111] self-heal branch.
 _reset; _same_head_completed
 _MOCK_COMPLETED_RC=1        # non-claude → is_session_completed false BY DESIGN
 _MOCK_SESSION_ID='sid351'   # a session id may exist, but the log has no result line
 _MOCK_VERDICT='failed-substantive'
+_MOCK_MAY_STALL_NOW=0       # no live wrapper — eligible for recovery
 handle_pending_dev_pr_exists 99
 rc=$?
-assert_eq   "TC-351-DELEG-6 returns 0 (park)" "0" "$rc"
-assert_match "TC-351-DELEG-6 posts stale-verdict residual park" "stale-verdict:sha-A" "$(_trace_all)"
-assert_eq   "TC-351-DELEG-6 ZERO dev-new" "0" "$(_trace_verbs | grep -c '^dispatch$')"
-assert_no_match "TC-351-DELEG-6 no delegation label move" "pending-dev${US}in-progress" "$(_trace_all)"
+assert_eq   "TC-351-DELEG-6 returns 0" "0" "$rc"
+assert_match "TC-351-DELEG-6 dispatched exactly one crashed-session-retry dev-new" "^dispatch${US}dev-new${US}99$" "$(_trace_all)"
+assert_eq   "TC-351-DELEG-6 dev-new dispatched exactly once" "1" "$(_trace_verbs | grep -c '^dispatch$')"
+assert_match "TC-351-DELEG-6 label_swap pending-dev → in-progress" "itp_transition_state${US}99${US}pending-dev${US}in-progress" "$(_trace_all)"
+assert_match "TC-351-DELEG-6 posts crashed-session-retry marker" "crashed-session-retry:sha-A" "$(_trace_all)"
+assert_no_match "TC-351-DELEG-6 NO stale-verdict park notice posted" "stale-verdict:" "$(_trace_all)"
+
+# ===================================================================
+echo
+echo "=== TC-351-DELEG-6-LIVE: non-claude dev CLI, a dev wrapper IS alive → residual park unchanged (never race a healthy wrapper) ==="
+_reset; _same_head_completed
+_MOCK_COMPLETED_RC=1
+_MOCK_SESSION_ID='sid351'
+_MOCK_VERDICT='failed-substantive'
+_MOCK_MAY_STALL_NOW=1       # a wrapper is alive — defer
+handle_pending_dev_pr_exists 99
+rc=$?
+assert_eq   "TC-351-DELEG-6-LIVE returns 0 (park)" "0" "$rc"
+assert_match "TC-351-DELEG-6-LIVE posts stale-verdict residual park" "stale-verdict:sha-A" "$(_trace_all)"
+assert_eq   "TC-351-DELEG-6-LIVE ZERO dev-new" "0" "$(_trace_verbs | grep -c '^dispatch$')"
+assert_no_match "TC-351-DELEG-6-LIVE no delegation label move" "pending-dev${US}in-progress" "$(_trace_all)"
 
 # ===================================================================
 echo
@@ -311,7 +332,11 @@ assert_no_match "TC-351-DELEG-7a-SELFHEAL NO stale-verdict park notice posted" "
 
 # ===================================================================
 echo
-echo "=== TC-351-DELEG-7a-SELFHEAL-BOUND: self-heal marker already present for this HEAD → no 2nd dev-new, falls to residual park ==="
+echo "=== TC-351-DELEG-7a-SELFHEAL-BOUND: self-heal marker already present for this HEAD → no 2nd dev-new, [INV-125] mark_stalled (NOT the park) ==="
+# [INV-125] (#466) Part 2: a marker-present same-HEAD fall-through is a
+# spent recovery budget, not a transient wait — it now reaches mark_stalled
+# directly instead of the residual stale-verdict park (which would freeze
+# count_retries forever with no way for MAX_RETRIES to ever trip).
 _reset; _same_head_completed
 _MOCK_SESSION_ID=''
 _MOCK_COMPLETED_RC=0; _MOCK_TERMINAL_REASON='completed'
@@ -321,7 +346,8 @@ handle_pending_dev_pr_exists 99
 rc=$?
 assert_eq   "TC-351-DELEG-7a-SELFHEAL-BOUND returns 0" "0" "$rc"
 assert_eq   "TC-351-DELEG-7a-SELFHEAL-BOUND ZERO dev-new (bounded)" "0" "$(_trace_verbs | grep -c '^dispatch$')"
-assert_match "TC-351-DELEG-7a-SELFHEAL-BOUND falls to residual stale-verdict park" "stale-verdict:sha-A" "$(_trace_all)"
+assert_match "TC-351-DELEG-7a-SELFHEAL-BOUND marks stalled instead of parking" "^mark_stalled" "$(_trace_all)"
+assert_no_match "TC-351-DELEG-7a-SELFHEAL-BOUND NO stale-verdict park" "stale-verdict:" "$(_trace_all)"
 
 # ===================================================================
 echo
@@ -359,7 +385,8 @@ assert_no_match "TC-351-DELEG-7a-SELFHEAL-NONSUB NO stale-verdict park" "stale-v
 
 # ===================================================================
 echo
-echo "=== TC-351-DELEG-7a-SELFHEAL-NONSUB-BOUND: second same-HEAD non-substantive verdict (marker present) → falls to residual park, NOT a second re-review flip ==="
+echo "=== TC-351-DELEG-7a-SELFHEAL-NONSUB-BOUND: second same-HEAD non-substantive verdict (marker present) → [INV-125] mark_stalled, NOT a second re-review flip, NOT the park ==="
+# [INV-125] (#466) Part 2: same reasoning as SELFHEAL-BOUND above.
 _reset; _same_head_completed
 _MOCK_SESSION_ID=''
 _MOCK_COMPLETED_RC=0; _MOCK_TERMINAL_REASON='completed'
@@ -371,7 +398,8 @@ rc=$?
 assert_eq   "TC-351-DELEG-7a-SELFHEAL-NONSUB-BOUND returns 0" "0" "$rc"
 assert_eq   "TC-351-DELEG-7a-SELFHEAL-NONSUB-BOUND ZERO dev-new" "0" "$(_trace_verbs | grep -c '^dispatch$')"
 assert_no_match "TC-351-DELEG-7a-SELFHEAL-NONSUB-BOUND no second pending-review flip" "pending-dev${US}pending-review" "$(_trace_all)"
-assert_match "TC-351-DELEG-7a-SELFHEAL-NONSUB-BOUND falls to residual stale-verdict park" "stale-verdict:sha-A" "$(_trace_all)"
+assert_match "TC-351-DELEG-7a-SELFHEAL-NONSUB-BOUND marks stalled instead of parking" "^mark_stalled" "$(_trace_all)"
+assert_no_match "TC-351-DELEG-7a-SELFHEAL-NONSUB-BOUND NO stale-verdict park" "stale-verdict:" "$(_trace_all)"
 
 # ===================================================================
 echo
@@ -405,15 +433,32 @@ assert_match "TC-351-DELEG-7a-SELFHEAL-SUBSTANTIVE posts self-heal marker" "self
 
 # ===================================================================
 echo
-echo "=== TC-351-DELEG-7b: residual park — session id present but NOT completed (live/crashed) ==="
+echo "=== TC-351-DELEG-7b: session id present but NOT completed, a dev wrapper IS alive → residual park (never race a healthy wrapper) ==="
 _reset; _same_head_completed
 _MOCK_SESSION_ID='sid351'
-_MOCK_COMPLETED_RC=1        # is_session_completed false → live/crashed wrapper
+_MOCK_COMPLETED_RC=1        # is_session_completed false → completion unprovable
+_MOCK_MAY_STALL_NOW=1       # a wrapper is alive — defer
+_MOCK_VERDICT='failed-substantive'
 handle_pending_dev_pr_exists 99
 rc=$?
 assert_eq   "TC-351-DELEG-7b returns 0 (park)" "0" "$rc"
 assert_match "TC-351-DELEG-7b posts stale-verdict residual park" "stale-verdict:sha-A" "$(_trace_all)"
 assert_eq   "TC-351-DELEG-7b ZERO dev-new" "0" "$(_trace_verbs | grep -c '^dispatch$')"
+
+# ===================================================================
+echo
+echo "=== TC-351-DELEG-7b-RECOVER: session id present but NOT completed, NO live wrapper → [INV-125] crashed-session-retry dev-new, NOT the park ==="
+_reset; _same_head_completed
+_MOCK_SESSION_ID='sid351'
+_MOCK_COMPLETED_RC=1        # is_session_completed false → completion unprovable (e.g. api_error)
+_MOCK_MAY_STALL_NOW=0       # no live wrapper — eligible for recovery
+_MOCK_VERDICT='failed-substantive'
+handle_pending_dev_pr_exists 99
+rc=$?
+assert_eq   "TC-351-DELEG-7b-RECOVER returns 0" "0" "$rc"
+assert_match "TC-351-DELEG-7b-RECOVER dispatched exactly one crashed-session-retry dev-new" "^dispatch${US}dev-new${US}99$" "$(_trace_all)"
+assert_match "TC-351-DELEG-7b-RECOVER posts crashed-session-retry marker" "crashed-session-retry:sha-A" "$(_trace_all)"
+assert_no_match "TC-351-DELEG-7b-RECOVER NO stale-verdict park" "stale-verdict:" "$(_trace_all)"
 
 # ===================================================================
 echo
