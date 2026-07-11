@@ -73,34 +73,61 @@
 #       the [INV-91] cutover guard enforces this.
 #
 #   _gl_graphql <query> [variables-json] (#452, first GitLab GraphQL call
-#       site): single-shot POST to `https://${GITLAB_HOST}/api/graphql` with
+#       site): dispatcher + default impl for a single-shot POST to
+#       `https://${GITLAB_HOST}/api/graphql`. Default auth is
 #       `Authorization: Bearer ${GITLAB_TOKEN}` (GraphQL does NOT accept the
 #       REST PRIVATE-TOKEN header `_gl_http` sends — a SEPARATE primitive, not
 #       a `_gl_http`/`_gl_api` call). NO pagination, NO 429 retry (unlike
 #       `_gl_api`) — the sole caller is a single object-shaped read behind a
-#       fail-open soft signal. Fail-CLOSED on token-unset / transport failure /
-#       non-2xx / empty body / a populated `errors` array / null `data`; on
-#       success echoes the inner `.data` object. Does NOT go through
-#       `GITLAB_TRANSPORT_HOOK` (that hook's contract covers `_gl_http`'s REST
-#       shape only).
+#       fail-open soft signal. Fail-CLOSED on token-unset / transport failure
+#       / non-2xx / empty body / a populated `errors` array / null `data`; on
+#       success echoes the inner `.data` object.
 #
-# Override hook (GITLAB_TRANSPORT_HOOK):
+#       **OPTIONAL second hook point, `_gl_graphql_hook`** (#452 amendment,
+#       [INV-124]): before running its default Bearer-token impl,
+#       `_gl_graphql` ensures the transport preflight has run (sourcing
+#       `GITLAB_TRANSPORT_HOOK` if armed — idempotent/latched, safe to call
+#       from here regardless of whether `_gl_api` has already run in this
+#       process) and then checks whether the hook defined a function named
+#       `_gl_graphql_hook <query> <variables-json>`. If so, `_gl_graphql`
+#       delegates to it and returns its rc/stdout verbatim — letting a
+#       hook-only / token-less GitLab installation (`GITLAB_TRANSPORT_HOOK`
+#       armed, no `GITLAB_TOKEN`) answer the `lines` dimension through its
+#       own auth path instead of always degrading it to unreadable. This is
+#       an ADDITIVE, OPTIONAL point, distinct from the mandatory `_gl_http`
+#       override — a hook that defines `_gl_http` only (the pre-#452
+#       contract) keeps working unchanged, and `_gl_graphql` simply falls
+#       through to its default Bearer-token impl (still requires
+#       `GITLAB_TOKEN` in that case; the `lines` dimension degrades to
+#       unreadable exactly as before #452's amendment when the hook does not
+#       opt in AND no token is configured).
+#
+# Override hooks (GITLAB_TRANSPORT_HOOK):
 #   If GITLAB_TRANSPORT_HOOK (conf-declared path) is set, the transport lib
-#   sources it at library-init BEFORE any leaf runs. The hook MAY redefine
-#   `_gl_http` ONLY (same signature/contract); `_gl_api` stays lib-owned so
-#   pagination + backoff + fail-closed cannot be lost by a variant.
+#   sources it at library-init BEFORE any leaf runs (and, defensively, again
+#   on first `_gl_graphql` call if that happens to run before any `_gl_api`
+#   call — the source is idempotent/latched either way). The hook MUST
+#   redefine `_gl_http` (same signature/contract) — `_gl_api` stays lib-owned
+#   so pagination + backoff + fail-closed cannot be lost by a variant. The
+#   hook MAY ADDITIONALLY define `_gl_graphql_hook <query> <variables-json>`
+#   (optional, #452 amendment) to answer the GraphQL endpoint through the
+#   same custom auth/transport; if it does not, `_gl_graphql`'s default
+#   Bearer-token impl stays in force.
 #
 #   Trust model: operator-owned local code, same privileges as
 #   autonomous.conf — explicitly NOT a sandbox (#414 pillar 3). The hook MAY
 #   define private helper functions (that is operator-owned code); only the
-#   PUBLIC override point (`_gl_http`) is validated post-source.
+#   PUBLIC override points (`_gl_http` mandatory, `_gl_graphql_hook`
+#   optional) are validated/dispatched by name.
 #
 # Preflight fail-loud (latched once per process — mirrors _AGENT_TOKEN_PAT_WARNED
 # at lib-auth.sh:93):
 #   - GITLAB_TOKEN unset when no hook is armed -> rc != 0 with recovery guidance;
 #   - GITLAB_TRANSPORT_HOOK set but path unreadable -> rc != 0 naming the path;
 #   - after sourcing the hook, `_gl_http` must exist and be callable or
-#     preflight fails rc != 0.
+#     preflight fails rc != 0. (`_gl_graphql_hook` is NOT preflight-validated
+#     — its absence is a valid, expected state, unlike `_gl_http` which the
+#     hook MUST cover; `_gl_graphql` probes for it lazily at call time.)
 #
 # GITLAB_HOST default: `gitlab.com`. Overridable per-project.
 #
@@ -297,10 +324,9 @@ _gl_api_extract_header() {
 # accept the REST `PRIVATE-TOKEN` header `_gl_http` sends — it authenticates
 # via `Authorization: Bearer <token>` (or a `private_token=`/`access_token=`
 # query param; GitLab's docs list no PRIVATE-TOKEN-header form for GraphQL).
-# So this is a SEPARATE minimal primitive, not a call through `_gl_http`/
-# `_gl_api` (whose frozen #416 contract is REST-path + PRIVATE-TOKEN shaped)
-# — it does not go through the `GITLAB_TRANSPORT_HOOK` override point either
-# (that hook's contract is `_gl_http`'s REST signature only).
+# So the default impl below is a SEPARATE minimal primitive, not a call
+# through `_gl_http`/`_gl_api` (whose frozen #416 contract is REST-path +
+# PRIVATE-TOKEN shaped).
 #
 # <query> is a GraphQL query STRING; <variables-json> is an optional JSON
 # object of GraphQL variables (defaults to `{}`). Single-shot, NO pagination,
@@ -310,16 +336,36 @@ _gl_api_extract_header() {
 # PR-diff-soft-cap), so a hard one-shot failure is an acceptable, honestly
 # fail-CLOSED outcome rather than added retry complexity.
 #
-# Fail-CLOSED: rc≠0 with NO stdout on: GITLAB_TOKEN unset, transport failure,
-# non-2xx HTTP status, empty response body, a populated GraphQL `errors`
-# array, or a null/absent top-level `data`. On success echoes the INNER
-# `.data` object (NOT the `{data: ...}` envelope) so callers project straight
-# into it.
+# Fail-CLOSED: rc≠0 with NO stdout on: GITLAB_TOKEN unset (and no
+# `_gl_graphql_hook` override — see below), transport failure, non-2xx HTTP
+# status, empty response body, a populated GraphQL `errors` array, or a
+# null/absent top-level `data`. On success echoes the INNER `.data` object
+# (NOT the `{data: ...}` envelope) so callers project straight into it.
 _gl_graphql() {
   local query="$1" variables="${2:-}"
   [[ -n "$variables" ]] || variables='{}'
+
+  # Ensure GITLAB_TRANSPORT_HOOK (if armed) has been sourced before probing
+  # for the optional `_gl_graphql_hook` override — `_gl_preflight_check` is
+  # idempotent/latched, so this is a no-op if `_gl_api` already ran in this
+  # process, and safe to call here even if this is the very first transport
+  # call the process makes.
+  _gl_preflight_check || return 1
+
+  # Optional second hook point (#452 amendment, [INV-124]): a
+  # GITLAB_TRANSPORT_HOOK that defines `_gl_graphql_hook <query>
+  # <variables-json>` answers the GraphQL endpoint through its own
+  # auth/transport (e.g. a hook-only / token-less GitLab installation that
+  # cannot use the default Bearer-token impl below). Absence is a valid,
+  # expected state — the pre-#452 hook contract (redefine `_gl_http` only)
+  # keeps working unchanged and simply falls through to the default impl.
+  if declare -F _gl_graphql_hook >/dev/null 2>&1; then
+    _gl_graphql_hook "$query" "$variables"
+    return $?
+  fi
+
   if [[ -z "${GITLAB_TOKEN:-}" ]]; then
-    echo "ERROR: [INV-116] GITLAB_TOKEN is unset — the GitLab GraphQL endpoint requires a Bearer-capable personal/project access token (it does not accept the REST PRIVATE-TOKEN header _gl_http uses)." >&2
+    echo "ERROR: [INV-116] GITLAB_TOKEN is unset — the GitLab GraphQL endpoint requires a Bearer-capable personal/project access token (it does not accept the REST PRIVATE-TOKEN header _gl_http uses), and GITLAB_TRANSPORT_HOOK (if armed) did not define _gl_graphql_hook to cover it. Set GITLAB_TOKEN=<token>, or define _gl_graphql_hook in the hook (see docs/gitlab-token-setup.md)." >&2
     return 1
   fi
   local body

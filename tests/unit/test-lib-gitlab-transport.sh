@@ -825,5 +825,114 @@ fi
 
 # ===========================================================================
 echo ""
+echo "=== TC-GLT-093..097: _gl_graphql_hook optional override (#452 amendment, INV-124) ==="
+# ===========================================================================
+# Review finding: _gl_graphql hard-required GITLAB_TOKEN even when a
+# GITLAB_TRANSPORT_HOOK was armed, so a hook-only / token-less GitLab
+# installation could never compute the `lines` dimension. Fix: _gl_graphql
+# now probes for an OPTIONAL `_gl_graphql_hook <query> <variables-json>`
+# function (the hook may define it alongside the mandatory `_gl_http`) and
+# delegates to it when present, before falling back to the default
+# Bearer-token impl.
+
+# TC-GLT-093: hook defines _gl_http only (pre-#452 contract) + GITLAB_TOKEN
+# unset → _gl_graphql still fails closed, and the message names
+# _gl_graphql_hook (not just GITLAB_TOKEN) so an operator knows the second,
+# optional hook point exists.
+_reset_control
+unset GITLAB_TOKEN
+export GITLAB_TOKEN=""
+hook_http_only="$WORK/hook-http-only.sh"
+cat > "$hook_http_only" <<'EOF'
+_gl_http() {
+  local method="$1" path="$2" hdr="$3"
+  printf 'HTTP/1.1 200 OK\r\n\r\n' > "$hdr"
+  printf '{"ok":true}'
+}
+EOF
+export GITLAB_TRANSPORT_HOOK="$hook_http_only"
+out=$(_run_with_lib "_gl_graphql 'query { x }'" 2>&1); rc=$?
+assert_rc_nonzero "TC-GLT-093: hook without _gl_graphql_hook + no token → rc != 0" "$rc"
+assert_contains "TC-GLT-093: message names _gl_graphql_hook" "_gl_graphql_hook" "$out"
+
+# TC-GLT-094: hook defines BOTH _gl_http and _gl_graphql_hook, GITLAB_TOKEN
+# unset → _gl_graphql delegates to the hook and succeeds; the default
+# Bearer-token curl POST is NEVER invoked (curl invocation count stays 0 —
+# the hook's own _gl_graphql_hook body below never shells out to curl).
+_reset_control
+unset GITLAB_TOKEN
+export GITLAB_TOKEN=""
+hook_with_gql="$WORK/hook-with-gql.sh"
+cat > "$hook_with_gql" <<'EOF'
+_gl_http() {
+  local method="$1" path="$2" hdr="$3"
+  printf 'HTTP/1.1 200 OK\r\n\r\n' > "$hdr"
+  printf '{"ok":true}'
+}
+_gl_graphql_hook() {
+  printf '{"project":{"mergeRequest":{"diffStatsSummary":{"additions":7,"deletions":3}}}}'
+}
+EOF
+export GITLAB_TRANSPORT_HOOK="$hook_with_gql"
+out=$(_run_with_lib "_gl_graphql 'query { x }' '{\"iid\":\"1\"}'" 2>/dev/null); rc=$?
+assert_eq "TC-GLT-094: hook WITH _gl_graphql_hook + no token → rc 0" "0" "$rc"
+assert_contains "TC-GLT-094: output is the hook's canned data" '"additions":7' "$out"
+assert_eq "TC-GLT-094: curl NEVER invoked (hook answers directly, no token needed)" "0" "$(_curl_inv_count "$_CURL_ARGV_FILE")"
+
+# TC-GLT-095: argument-passing fidelity — _gl_graphql_hook receives the EXACT
+# query and variables-json _gl_graphql was called with.
+_reset_control
+unset GITLAB_TOKEN
+export GITLAB_TOKEN=""
+gql_args_log="$WORK/gql-hook-args.log"
+hook_arg_check="$WORK/hook-arg-check.sh"
+cat > "$hook_arg_check" <<EOF
+_gl_http() {
+  local method="\$1" path="\$2" hdr="\$3"
+  printf 'HTTP/1.1 200 OK\r\n\r\n' > "\$hdr"
+  printf '{}'
+}
+_gl_graphql_hook() {
+  printf '%s\n%s\n' "\$1" "\$2" > "$gql_args_log"
+  printf '{"data":{"echoed":true}}'
+}
+EOF
+export GITLAB_TRANSPORT_HOOK="$hook_arg_check"
+out=$(_run_with_lib "_gl_graphql 'query(\$iid: String!) { x }' '{\"iid\":\"99\"}'" 2>/dev/null); rc=$?
+assert_eq "TC-GLT-095: hook-delegated call rc 0" "0" "$rc"
+assert_eq "TC-GLT-095: _gl_graphql_hook received the exact query string" 'query($iid: String!) { x }' "$(sed -n '1p' "$gql_args_log")"
+assert_eq "TC-GLT-095: _gl_graphql_hook received the exact variables-json" '{"iid":"99"}' "$(sed -n '2p' "$gql_args_log")"
+
+# TC-GLT-096: preflight latch is reused, not re-sourced — calling _gl_api
+# FIRST (which sources+latches the hook) then _gl_graphql must NOT re-source
+# the hook file a second time (single "preflight OK" log line).
+_reset_control
+unset GITLAB_TOKEN
+export GITLAB_TOKEN=""
+body_ok="$WORK/body-ok-096.json"; printf '{"iid":1}' > "$body_ok"
+_CURL_BODY_SEQ="$body_ok"
+export _CURL_BODY_SEQ
+export GITLAB_TRANSPORT_HOOK="$hook_with_gql"
+out=$(_run_with_lib '_gl_api /projects/1/merge_requests/1 >/dev/null; _gl_graphql "query { x }" "{}"' 2>&1); rc=$?
+assert_eq "TC-GLT-096: _gl_api then _gl_graphql (hook-delegated) → rc 0" "0" "$rc"
+preflight_count=$(grep -c "gitlab-transport preflight OK" <<<"$out")
+assert_eq "TC-GLT-096: preflight logged exactly ONCE across both calls (latched, not re-sourced)" "1" "$preflight_count"
+
+# TC-GLT-097: default behavior is UNCHANGED when the hook does not define
+# _gl_graphql_hook — declare -F reports absent, and (with a token present)
+# the default Bearer-token curl path still fires exactly as before.
+_reset_control
+export GITLAB_TOKEN="test-token"
+unset GITLAB_TRANSPORT_HOOK
+body_097="$WORK/body-097.json"; printf '{"data":{"ok":true}}' > "$body_097"
+_CURL_STATUS_SEQ="200"; _CURL_BODY_SEQ="$body_097"
+export _CURL_STATUS_SEQ _CURL_BODY_SEQ
+out=$(_run_with_lib '_gl_graphql "query { x }"' 2>/dev/null); rc=$?
+assert_eq "TC-GLT-097: no hook armed → default Bearer-token path still rc 0" "0" "$rc"
+assert_eq "TC-GLT-097: exactly ONE curl invocation (default path unchanged)" "1" "$(_curl_inv_count "$_CURL_ARGV_FILE")"
+assert_contains "TC-GLT-097: curl argv carries Authorization: Bearer" "Authorization: Bearer test-token" "$(cat "$_CURL_ARGV_FILE")"
+
+# ===========================================================================
+echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 [[ "$FAIL" -eq 0 ]] && exit 0 || exit 1
