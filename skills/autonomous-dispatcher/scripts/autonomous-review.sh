@@ -88,6 +88,17 @@ source "${LIB_DIR}/lib-code-host.sh"
 # helpers (_run_command_e2e_lane / _fetch_sha_evidence) live there so they are
 # unit-testable in isolation. Inert when E2E_MODE=none.
 source "${LIB_DIR}/lib-review-e2e.sh"
+# shellcheck source=lib-review-severity.sh
+# Issue #449 (R1): severity-aware blocking ratchet. shouldBlockFinding +
+# severity-tag extraction, consumed by the pre-aggregation filter below.
+source "${LIB_DIR}/lib-review-severity.sh"
+# shellcheck source=lib-review-round.sh
+# Issue #449 (R1): the review-round counter feeding the ratchet, independent
+# of REVIEW_RETRY_LIMIT and INV-105's dev-resume-round counter.
+source "${LIB_DIR}/lib-review-round.sh"
+# shellcheck source=lib-review-cap.sh
+# Issue #449 (R2): INV-124 review-round-cap escalation breaker.
+source "${LIB_DIR}/lib-review-cap.sh"
 # shellcheck source=lib-review-codex.sh
 # INV-62 (#218): codex-specific review path. The codex review member runs the
 # purpose-built `codex review "<prompt>"` subcommand (_run_codex_review) — natively
@@ -1094,6 +1105,36 @@ PR_BRANCH=$(chp_pr_view "$PR_NUMBER" "headRefName" 2>/dev/null | jq -r '.headRef
 PR_HEAD_SHA=$(chp_pr_view "$PR_NUMBER" "headRefOid" 2>/dev/null | jq -r '.headRefOid' 2>/dev/null || true)
 log "PR branch: ${PR_BRANCH:-UNKNOWN} (HEAD: ${PR_HEAD_SHA:0:7})"
 
+# ---------------------------------------------------------------------------
+# Issue #449 (R1): review-round counter — feeds the severity-aware blocking
+# ratchet's floor (lib-review-severity.sh::shouldBlockFinding) and the
+# round-1-vs-round>1 prompt wording below. Scoped to (issue, head): a new
+# HEAD resets to round=1; the counter increments only while the HEAD is
+# unchanged. Read the prior marker the same way INV-122 reads its own
+# (unbounded scan via itp_list_comments, filtered to authorKind != "human" so
+# an ordinary collaborator comment can never be read as a forged round).
+_rr_prior_marker=$(itp_list_comments "$ISSUE_NUMBER" 2>/dev/null \
+  | jq -r '[.[] | select(.authorKind != "human") | select(.body | contains("review-round-counter:"))] | sort_by(.createdAt) | last | .body // ""' \
+  2>/dev/null || echo "")
+REVIEW_ROUND=$(_review_round_next_count "$_rr_prior_marker" "$PR_HEAD_SHA")
+# Human-readable floor label for the log line only — the authoritative
+# per-round floor lives in shouldBlockFinding (lib-review-severity.sh).
+if [[ "$REVIEW_ROUND" -le 2 ]]; then
+  _rr_floor_label="P0-P3"
+elif [[ "$REVIEW_ROUND" -le 4 ]]; then
+  _rr_floor_label="P0-P2"
+else
+  _rr_floor_label="P0-P1"
+fi
+log "Issue #449: review round ${REVIEW_ROUND} for HEAD ${PR_HEAD_SHA:0:7} (severity-ratchet floor: ${_rr_floor_label})."
+# Post the marker unconditionally, right away — every round (pass, fail, or
+# crash) must leave a marker for the NEXT round to find, or the counter can
+# never advance past 1 (the same "must persist every round" fix INV-122
+# documents for its own marker). Posted as its own small comment rather than
+# folded into a later verdict comment because a PASS round or a crash-before-
+# verdict round never reaches this issue's FAIL-only comment paths.
+itp_post_comment "$ISSUE_NUMBER" "$(_review_round_marker "$ISSUE_NUMBER" "$PR_HEAD_SHA" "$REVIEW_ROUND")" 2>/dev/null || true
+
 # Verdict-detection bindings: actor + time window + body-trailer
 # presence. Replaces the prior session-id-only binding (which depended
 # on the agent echoing the wrapper's UUID verbatim).
@@ -1240,11 +1281,12 @@ The PR diff is already SCOPED to this PR's merge target and available to you —
 \`codex review\` fetches it for you. You do NOT need to run \`git diff\` or
 $(provider_prompt_fragment review.codex_gh_pr_diff_reconstruct)
 
-Prefix EACH blocking finding with \`[P1]\` (priority 1). Non-blocking observations
-may use \`[P2]\`/\`[P3]\`. After your analysis, post your verdict via
-\`bash scripts/post-verdict.sh\` (the helper described in the Decision section
+$(_review_severity_prompt_block "$REVIEW_ROUND")
+
+After your analysis, post your verdict via \`bash scripts/post-verdict.sh\`
+(the helper described in the Decision section
 $(provider_prompt_fragment review.codex_do_not_hand_roll)
-you raised any \`[P1]\`, a PASS otherwise.
+you raised any \`[P0]\`-\`[P3]\` finding, a PASS otherwise.
 CODEX_REVIEW_NOTE
 fi)
 
@@ -1472,6 +1514,8 @@ Write the artifact FIRST, then ALSO post the human-facing verdict comment via
 VERDICT_ARTIFACT_INSTRUCTION
 fi)
 
+$(if [[ "${_agent_name}" != "codex" ]]; then _review_severity_prompt_block "$REVIEW_ROUND"; fi)
+
 **CRITICAL — verdict phrasing**: the wrapper script polls for your
 verdict comment by matching specific keywords. If your comment doesn't
 contain one of the recognized phrasings, the wrapper falls through to
@@ -1533,14 +1577,15 @@ bash scripts/post-verdict.sh ${ISSUE_NUMBER} <pass|fail> ${_verdict_body_path} $
 
 - If ANY item fails$(if [[ "${E2E_ACTIVE:-false}" == "true" ]]; then echo " OR the posted E2E evidence does NOT cover an acceptance criterion"; fi) OR requirement drift is detected:
   Post your verdict via the helper with the **\`fail\`** argument. Your body
-  is a numbered list of each failing item with specific remediation
+  is a numbered list of each failing item, EACH TAGGED with its severity
+  (\`[P0]\`-\`[P3]\`, see above) with specific remediation
   instructions (a body that doesn't already start with \`Review findings:\`
   gets that exact prefix prepended by the helper).$(if [[ "${E2E_ACTIVE:-false}" == "true" ]]; then echo "
   For any E2E gap, quote the relevant row of the posted evidence comment (the wrapper ran E2E once — do NOT re-run it)."; fi) Concretely:
   \`\`\`bash
   cat > ${_verdict_body_path} <<'VERDICT'
-  1. <first finding + remediation>
-  2. <second finding + remediation>
+  1. [P1] <first finding + remediation>
+  2. [P3] <second finding + remediation>
   VERDICT
   bash scripts/post-verdict.sh ${ISSUE_NUMBER} fail ${_verdict_body_path} ${_agent_name} ${_agent_session_id} '${_agent_model}'
   \`\`\`
@@ -1717,6 +1762,18 @@ if [[ "${E2E_ACTIVE:-false}" == "true" ]]; then
   _e2e_evidence=$(_fetch_sha_evidence 3 5)
   _e2e_evidence_present=0
   [[ -n "$_e2e_evidence" ]] && _e2e_evidence_present=1
+  # [#449] R3: evidence-freshness pre-check. Only consulted when the lane
+  # itself ran clean (rc==0) but no SHA-matching evidence is visible yet —
+  # i.e. exactly the case _classify_e2e_gate would otherwise route to
+  # `block-nonsubstantive` (a propagation-lag re-queue, not a lane failure).
+  # A rc!=0 lane failure is untouched — it always routes to `fail` regardless
+  # of CI status, so a red/pending CI never changes existing fail semantics.
+  if [[ "$_e2e_lane_rc" -eq 0 ]] && [[ "$_e2e_evidence_present" -eq 0 ]]; then
+    if _e2e_ci_green_precheck "$PR_NUMBER"; then
+      log "INV-46/#449: E2E lane ran clean but no SHA-matching evidence is visible yet on HEAD ${PR_HEAD_SHA:0:7} — PR's overall CI status is green, accepting that as satisfying the evidence requirement rather than forcing a wait for a fresh evidence post."
+      _e2e_evidence_present=1
+    fi
+  fi
   E2E_GATE=$(_classify_e2e_gate "$_e2e_lane_rc" "$_e2e_evidence_present")
   log "INV-46: E2E hard gate: lane_rc=${_e2e_lane_rc}, evidence_present=${_e2e_evidence_present} → gate=${E2E_GATE}"
 
@@ -3177,6 +3234,37 @@ _reap_fanout_controller_subshells "${_fanout_pids[@]:-}"
 # one the first pass structurally could not see yet.
 _reap_fanout_recorded_descendants "ADT_FANOUT_LANE_MARKER" "${AGENT_SESSION_IDS[@]:-}"
 
+# ---------------------------------------------------------------------------
+# Issue #449 (R1): pre-aggregation severity-aware blocking ratchet.
+# ---------------------------------------------------------------------------
+# Runs AFTER per-agent pass/fail classification (the terminal no-verdict sweep
+# above) and BEFORE _aggregate_review_verdicts below — the exact hook point
+# the issue specifies. For each agent classified `fail`, extract the highest
+# severity tag from its findings text and demote to `pass` (non-blocking for
+# THIS round) when `shouldBlockFinding` says the round's floor doesn't reach
+# it. `unavailable`/`timed-out` agents pass through unchanged (no findings
+# text to score). Consumes AGENT_CODEX_LOGS[i] (the raw codex-review stdout
+# capture — the SAME text `_codex_review_classify_stdout` scanned) for a codex
+# agent when that file is non-empty and readable; every other agent (and a
+# codex agent with no stdout capture) is scored from AGENT_VERDICT_BODIES[i]
+# (the rendered comment body — populated whether the agent self-posted or the
+# wrapper posted on its behalf).
+declare -a AGENT_HIGHEST_SEVERITY=()
+for _i in "${!AGENT_NAMES[@]}"; do
+  _sev_text=""
+  if [[ "${AGENT_NAMES[$_i]}" == "codex" && -n "${AGENT_CODEX_LOGS[$_i]:-}" && -f "${AGENT_CODEX_LOGS[$_i]}" ]]; then
+    _sev_text=$(cat -- "${AGENT_CODEX_LOGS[$_i]}" 2>/dev/null || true)
+  else
+    _sev_text="${AGENT_VERDICT_BODIES[$_i]:-}"
+  fi
+  AGENT_HIGHEST_SEVERITY[$_i]=$(_review_extract_highest_severity "$_sev_text")
+  _pre_filter_verdict="${AGENT_VERDICTS[$_i]}"
+  AGENT_VERDICTS[$_i]=$(_review_apply_severity_filter "${AGENT_VERDICTS[$_i]}" "$_sev_text" "$REVIEW_ROUND")
+  if [[ "$_pre_filter_verdict" == "fail" && "${AGENT_VERDICTS[$_i]}" == "pass" ]]; then
+    log "Issue #449: severity ratchet demoted '${AGENT_NAMES[$_i]}' fail→pass at round ${REVIEW_ROUND} (highest severity: ${AGENT_HIGHEST_SEVERITY[$_i]}, below this round's blocking floor)."
+  fi
+done
+
 # Aggregate under the unanimous-PASS rule (INV-40). Map the aggregate onto the
 # existing PASSED_VERDICT / LATEST_COMMENT / AGENT_EXIT variables so the
 # downstream PASS / FAIL / crash branches and the six emit_verdict_trailer
@@ -4131,6 +4219,99 @@ else
     # No FAILing agent resolved an artifact (e.g. comment-only fallback) → fail-open.
     [[ "$_any_fail_seen" == "true" ]] || _AGG_DEV_ACTIONABLE="true"
     log "INV-92: aggregate dev-actionable=${_AGG_DEV_ACTIONABLE} for the substantive FAIL trailer (any-fail-seen=${_any_fail_seen})."
+
+    # -----------------------------------------------------------------------
+    # [#449] INV-124: review-round-cap escalation breaker.
+    # -----------------------------------------------------------------------
+    # A NEW, independent breaker (does not touch INV-105's or INV-122's own
+    # fingerprint/trigger) — halts re-dispatch once R1's severity-ratchet
+    # floor (P0/P1) is STILL failing after too many rounds, on a substantive
+    # FAIL where the dev agent DID push new commits (INV-105's dev-side
+    # zero-commit-inaction fingerprint would not catch this; INV-122's
+    # same-HEAD E2E-gate fingerprint would not either — this is a review-side
+    # divergent-findings signal). Runs BEFORE this round's `emit_verdict_trailer
+    # "failed-substantive"` call below — mirroring INV-122's insertion shape
+    # relative to its own E2E_GATE=="fail" branch.
+    #
+    # Gated on `$AGGREGATE == "fail"` — this substantive sub-path is ALSO
+    # reached by `all-unavailable` with AGENT_EXIT=0 (every agent exited
+    # clean but posted no verdict at all — no findings text, no severity to
+    # score, no evidence the ratchet's floor is "still failing"). Only a
+    # genuine deciding FAIL (a real P0/P1 finding, per R1's filter) counts
+    # toward the round cap; per the issue's own R2 spec, only
+    # `failed-substantive` rounds count and `failed-non-substantive` is out
+    # of scope (already governed by REVIEW_RETRY_LIMIT). The entire breaker —
+    # counter read, trip decision, and marker persistence — is skipped
+    # wholesale for a non-`fail` aggregate.
+    if [[ "$AGGREGATE" == "fail" ]]; then
+      _rc_already_stalled=$(itp_read_task "$ISSUE_NUMBER" labels \
+        | jq -r '.labels | any(. == "stalled")' 2>/dev/null || echo "false")
+      # Authenticity filter mirrors INV-105/INV-122's own marker-read guard
+      # (authorKind != "human") — an ordinary collaborator comment must never
+      # be readable as a forged round-cap marker.
+      _rc_prior_marker=$(itp_list_comments "$ISSUE_NUMBER" 2>/dev/null \
+        | jq -r '[.[] | select(.authorKind != "human") | select(.body | contains("dispatcher-review-cap-breaker:"))] | sort_by(.createdAt) | last | .body // ""' \
+        2>/dev/null || echo "")
+      _rc_next_count=$(_review_cap_next_count "$_rc_prior_marker")
+      _rc_threshold=$(_review_cap_threshold)
+      _rc_marker=$(_review_cap_marker "$ISSUE_NUMBER" "$PR_HEAD_SHA" "$_rc_next_count")
+
+      if [[ "$_rc_already_stalled" != "true" ]] && [[ "$_rc_next_count" -ge "$_rc_threshold" ]]; then
+        log "[#449] INV-124 review-round-cap breaker TRIPPED: round=${_rc_next_count} (threshold=${_rc_threshold}) — the severity ratchet's own P0/P1 floor is still failing; halting re-dispatch, transitioning to stalled."
+        # Transition FIRST, atomically — mirrors INV-105/INV-122's TOCTOU fix (a
+        # failed transition aborts under set -euo pipefail BEFORE RESULT_PARSED
+        # is set, so the crash-cleanup EXIT trap correctly treats it as a
+        # genuine crash rather than masking a landed stall).
+        itp_transition_state "$ISSUE_NUMBER" "reviewing" "stalled"
+        # Set RESULT_PARSED=true IMMEDIATELY after the transition lands, BEFORE
+        # the report post — a transient failure in the report post must not
+        # make the crash-cleanup EXIT trap re-add pending-dev on top of an
+        # already-landed stall.
+        RESULT_PARSED=true
+        itp_post_comment "$ISSUE_NUMBER" "$(cat <<ROUNDCAPREPORT
+${_rc_marker}
+## ⛔ Review-round-cap circuit-breaker tripped — halting repeated re-dispatch (\`reason=review-round-cap\`, [#449])
+
+This PR has reached **${_rc_next_count}** consecutive \`failed-substantive\`
+review rounds (>= threshold ${_rc_threshold}) and the review still finds a
+P0/P1 blocking finding — the severity ratchet's own floor, which always
+blocks at any round. Every fix so far has legitimately created the surface
+for the next finding without the review converging.
+
+**Dispatcher actions taken** (this loop is now HALTED):
+- Transitioned the issue to \`stalled\` (autonomy halted; \`autonomous\` is
+  retained) — REMOVING the \`stalled\` label is the operator's explicit
+  opt-in to resume.
+- Posted this one-time report.
+
+**Evidence**
+- PR: #${PR_NUMBER:-<none>}
+- Current PR head: \`${PR_HEAD_SHA:-<unknown>}\`
+- Consecutive failed-substantive rounds: **${_rc_next_count}**
+- Still-open blocking findings: see the latest \`Review findings:\` comment
+  on this issue.
+
+**Human action needed** — review the accumulated findings directly, then
+either fix the remaining P0/P1 issue(s) yourself or push a targeted commit,
+and REMOVE the \`stalled\` label (the \`autonomous\` label is retained;
+removal re-arms the pipeline).
+@${REPO_OWNER}
+ROUNDCAPREPORT
+)" 2>/dev/null || true
+        log "Issue #${ISSUE_NUMBER} moved to stalled (INV-124 review-round-cap breaker)."
+        log "Review complete."
+        exit 0
+      fi
+
+      # Non-trip fall-through: embed the marker in the ordinary FAIL comment so
+      # the counter persists every round (mirrors INV-122's "computed and
+      # posted on EVERY round" fix — the very first failure must leave a marker
+      # for the next round to find, or the counter can never advance). Reached
+      # only on a genuine deciding FAIL (this whole block is gated on
+      # `$AGGREGATE == "fail"`), so `_rc_marker` is always non-empty here.
+      itp_post_comment "$ISSUE_NUMBER" "${_rc_marker}" 2>/dev/null || true
+    fi
+
     emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-substantive" "" "$_AGG_DEV_ACTIONABLE" 2>/dev/null || true
 
     # INV-52: assert the blocking verdict on the PR's GitHub-native state so

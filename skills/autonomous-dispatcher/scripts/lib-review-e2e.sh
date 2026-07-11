@@ -95,6 +95,49 @@ _classify_e2e_gate() {
 }
 
 # ---------------------------------------------------------------------------
+# [#449] R3: evidence-freshness pre-check on a new HEAD.
+# ---------------------------------------------------------------------------
+# Same-HEAD reuse (`_fetch_sha_evidence` + `_run_command_e2e_lane`'s reuse
+# block above) already works for a repeat check against an UNCHANGED head.
+# The gap this closes: after a NEW head, the lane ran (rc==0) but a
+# SHA-matching evidence comment is not yet visible on re-fetch — purely a
+# GitHub propagation lag on the comment the lane itself JUST posted, not a
+# code defect. `_classify_e2e_gate` currently routes rc==0+no-evidence to
+# `block-nonsubstantive` (a transient re-queue) in that case. When the PR's
+# overall CI status (chp_ci_status — every configured GitHub Actions check,
+# independent of the wrapper's own dedicated E2E lane) is ALREADY `green` for
+# this exact HEAD, that is strong independent corroboration that the code is
+# good; there is no need to force a wait for the wrapper's own evidence
+# comment to propagate.
+#
+# _e2e_ci_green_precheck <pr_num> — rc-boolean contract (mirrors ci_is_green
+# in lib-dispatch.sh, which this review wrapper does NOT source — see the
+# design note below): rc 0 iff chp_ci_status reports the literal token
+# `green` for <pr_num>. A query failure fails SAFE (never treated as green).
+#
+# Design note: `ci_is_green` (lib-dispatch.sh:3056-3068) is the dispatcher-side
+# helper issue #449 names, but `autonomous-review.sh` does not source
+# `lib-dispatch.sh` (no precedent for cross-sourcing dispatcher logic into the
+# review wrapper — mirrors INV-122's own deliberate non-reuse of
+# `may_stall_now`). This is a review-wrapper-local equivalent that calls the
+# SAME already-sourced `chp_ci_status` primitive directly, consistent with how
+# the rest of this lib (`_fetch_sha_evidence`) calls `chp_pr_view` directly
+# rather than going through a dispatcher-side wrapper.
+#
+# ONLY consulted from the `rc==0` branch at the call site (autonomous-review.sh)
+# — a genuine lane verify failure (`_e2e_lane_rc != 0`) always routes to
+# `fail` via `_classify_e2e_gate` regardless of this pre-check, so a red/pending
+# CI status never changes the gate's existing fail semantics (this pre-check
+# is never even consulted on that path).
+_e2e_ci_green_precheck() {
+  local pr_num="${1:-}"
+  [[ -n "$pr_num" ]] || return 1
+  local ci_token
+  ci_token=$(chp_ci_status "$pr_num" 2>/dev/null) || return 1
+  [[ "$ci_token" == "green" ]]
+}
+
+# ---------------------------------------------------------------------------
 # Same-HEAD E2E-gate circuit breaker (issue #453) — pure helpers.
 #
 # Halts a repeated INV-46 E2E-gate `fail` against an unchanged PR head/rc pair
