@@ -374,9 +374,15 @@ _gl_graphql() {
   # error/log object with the real data object) only checks the LAST parsed
   # value and would wrongly pass; `length == 1` closes that gap.
   if declare -F _gl_graphql_hook >/dev/null 2>&1; then
-    local hook_out hook_rc
-    hook_out="$(_gl_graphql_hook "$query" "$variables")"
-    hook_rc=$?
+    # [#416 P1-3 idiom, reused here for consistency] `cmd || rc=$?` keeps
+    # the assignment a TESTED command, matching the `_gl_http` call inside
+    # `_do_request_with_backoff` below — defends any future caller that
+    # might invoke `_gl_graphql` directly under `set -e` without its own
+    # `||`/`if` guard (the sole current caller, `chp_gitlab_pr_diffstat`,
+    # already guards its call, so this is prophylactic, not a fix for an
+    # observed failure).
+    local hook_out hook_rc=0
+    hook_out="$(_gl_graphql_hook "$query" "$variables")" || hook_rc=$?
     [[ $hook_rc -eq 0 ]] || return "$hook_rc"
     jq -e -cs 'length == 1 and (.[0] | type == "object")' >/dev/null 2>&1 <<<"$hook_out" || return 1
     printf '%s' "$hook_out"
