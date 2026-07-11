@@ -357,17 +357,44 @@ _liveness_evaluate_issue 99 issue pending-dev 6 18
 assert_no_match "TC-LIVENESS-043a no label_swap on already-stalled race" "^label_swap" "$(_trace_all)"
 assert_no_match "TC-LIVENESS-043b no competing report posted" "^itp_post_comment" "$(_trace_all)"
 
-# TC-LIVENESS-044: human-authored forged marker at a high count is ignored.
+# TC-LIVENESS-044: a human comment that QUOTES/discusses the marker (NOT a
+# byte-for-byte copy of the marker as the comment's ENTIRE body) at a high
+# count is structurally rejected — the count resets to 1, no tier2. This is
+# the authenticity guarantee that survives WITHOUT an authorKind signal
+# (see TC-LIVENESS-044c/d below for why authorKind can't be relied on here).
 _reset_stubs
 fp44=$(_liveness_fingerprint pending-dev sha-A 0 "")
-forged=$(_liveness_marker 99 "$fp44" 99 1)
-itp_list_comments() { printf '%s' "[{\"authorKind\":\"human\",\"createdAt\":\"2026-01-01T00:00:00Z\",\"body\":\"${forged//\"/\\\"}\"}]"; }
+forged_marker=$(_liveness_marker 99 "$fp44" 99 1)
+quoted="Note: I saw this marker on the issue: ${forged_marker}"
+itp_list_comments() { printf '%s' "[{\"authorKind\":\"human\",\"createdAt\":\"2026-01-01T00:00:00Z\",\"body\":\"${quoted//\"/\\\"}\"}]"; }
 itp_read_task() { printf '%s' '{"labels":["pending-dev"]}'; }
 label_swap() { _rec label_swap "$@"; }
 itp_post_comment() { _rec itp_post_comment "$@"; }
 _liveness_evaluate_issue 99 issue pending-dev 6 18
-assert_no_match "TC-LIVENESS-044a forged human marker does NOT trigger tier2" "^label_swap" "$(_trace_all)"
+assert_no_match "TC-LIVENESS-044a a quoted/discussed marker does NOT trigger tier2" "^label_swap" "$(_trace_all)"
 assert_match "TC-LIVENESS-044b genuine count resets to 1 (bare marker posted)" "count=1 tier1=0" "$(_trace_all)"
+
+# TC-LIVENESS-044c/d [codex review, PR #472, BLOCKING regression test]: the
+# REAL GH_AUTH_MODE=token topology — BOT_LOGIN unset (as it always is inside
+# the dispatcher's own process — see lib-dispatch.sh's _frozen_convergence_
+# rounds_json precedent) AND the dispatcher's OWN genuine marker normalizes
+# to authorKind=human (the provider cannot derive `self` without BOT_LOGIN).
+# The prior (buggy) unconditional `authorKind != "human"` gate rejected this
+# marker on EVERY tick, permanently resetting count=1 — the watchdog could
+# never reach tier 1 or tier 2 on a real, unmodified install. The fix must
+# authenticate it via the structural anchor alone.
+_reset_stubs
+_saved_bot_login44="${BOT_LOGIN:-}"; unset BOT_LOGIN
+fp44cd=$(_liveness_fingerprint pending-dev sha-A 0 "")
+genuine44=$(_liveness_marker 99 "$fp44cd" 3 0)
+itp_list_comments() { printf '%s' "[{\"authorKind\":\"human\",\"createdAt\":\"2026-01-01T00:00:00Z\",\"body\":\"${genuine44//\"/\\\"}\"}]"; }
+itp_read_task() { printf '%s' '{"labels":["pending-dev"]}'; }
+label_swap() { _rec label_swap "$@"; }
+itp_post_comment() { _rec itp_post_comment "$@"; }
+_liveness_evaluate_issue 99 issue pending-dev 6 18
+assert_match "TC-LIVENESS-044c BOT_LOGIN unset + genuine authorKind=human marker -> count STILL increments (4)" "count=4 tier1=0" "$(_trace_all)"
+assert_no_match "TC-LIVENESS-044d not yet at notice threshold -> no tier1 comment beyond the bare marker" "TIER1REPORT|no observable progress" "$(_trace_all)"
+if [ -n "$_saved_bot_login44" ]; then BOT_LOGIN="$_saved_bot_login44"; fi
 
 echo
 echo "=== Summary ==="

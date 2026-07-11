@@ -86,7 +86,8 @@ disabled.
 | TC-LIVENESS-041 | Fingerprint changes at tick 10 | count/tier1 reset; tick 10 evaluates as count=1; tier-2 never reached on the interrupted series |
 | TC-LIVENESS-042 | Tier-2 report includes the last-known fingerprint components, tick counts, and pointers to the newest session report / verdict / markers | pinned string content |
 | TC-LIVENESS-043 | Already-`stalled` race: a specific breaker (e.g. INV-105) stalls the issue between the candidate list fetch and this evaluation | watchdog re-checks labels immediately before the transition and does NOT re-transition or post a competing report |
-| TC-LIVENESS-044 | Human-authored comment forging the watchdog's own marker text at a high count | ignored by the `authorKind != "human"` authenticity filter — genuine count unaffected |
+| TC-LIVENESS-044 | (a/b) Human comment quoting/discussing the marker (not a byte-for-byte copy as the entire body) at a high count | rejected by the structural anchor — genuine count unaffected, restarts at 1 |
+| TC-LIVENESS-044 | (c/d) `BOT_LOGIN` unset (the real `GH_AUTH_MODE=token` topology) + a GENUINE marker that normalizes to `authorKind=human` | still authenticated via the structural anchor — count increments normally, watchdog is NOT permanently inert |
 
 ## Group G — E2E stub-dispatcher replay (TC-LIVENESS-045)
 

@@ -109,16 +109,33 @@ _liveness_non_idempotent_count() {
 # _liveness_marker_digest <comments_json>
 #
 # Echoes a stable digest of which known marker grammars are PRESENT
-# (authorKind-gated, mirrors INV-105/INV-122's own marker-authenticity
-# filter) — a sorted, comma-joined list of matched grammar prefixes. A NEW
-# grammar appearing changes the digest (progress), even when that same
-# grammar is excluded from the non-idempotent comment count above. Uses
-# _LIVENESS_DIGEST_PATTERN (NOT the count pattern) — deliberately excludes
-# the watchdog's own marker, see that pattern's docstring.
+# (authorKind-gated when possible, mirrors INV-105/INV-122's own
+# marker-authenticity filter) — a sorted, comma-joined list of matched
+# grammar prefixes. A NEW grammar appearing changes the digest (progress),
+# even when that same grammar is excluded from the non-idempotent comment
+# count above. Uses _LIVENESS_DIGEST_PATTERN (NOT the count pattern) —
+# deliberately excludes the watchdog's own marker, see that pattern's
+# docstring.
+#
+# [codex review, PR #472, BLOCKING sibling fix] Every listed grammar
+# (`dispatcher-convergence-breaker:`, `dispatcher-token:`,
+# `INV-25-hygiene:`, etc.) is posted by the DISPATCHER's own process
+# (dispatcher-tick.sh / lib-dispatch.sh), which — like the watchdog's own
+# marker read-back this mirrors — NEVER resolves `BOT_LOGIN`. An
+# unconditional `authorKind != "human"` gate would therefore reject EVERY
+# one of these genuine markers under `GH_AUTH_MODE=token` (the dispatcher's
+# comments there normalize to `authorKind=human`), collapsing the digest to
+# "" on every tick regardless of which markers are actually present — dead
+# on the "a NEW marker appearing = progress" signal in the common topology.
+# Same fix as `_liveness_evaluate_issue`'s prior-marker readback: apply the
+# authorKind filter only when `BOT_LOGIN` is actually set (the rare/never
+# case at this call site today), else rely on the pattern match alone.
 _liveness_marker_digest() {
   local comments_json="${1:-[]}"
-  jq -r --arg pat "$_LIVENESS_DIGEST_PATTERN" '
-    [.[] | select((.authorKind // "human") != "human") | select(.body | test($pat)) | .body
+  local _strict=0
+  [ -n "${BOT_LOGIN:-}" ] && _strict=1
+  jq -r --arg pat "$_LIVENESS_DIGEST_PATTERN" --arg strict "$_strict" '
+    [.[] | select(($strict == "0") or ((.authorKind // "human") != "human")) | select(.body | test($pat)) | .body
      | [scan("(?:^|[^A-Za-z0-9_-])((?:" + $pat + "))")[0]]]
     | flatten | unique | sort | join(",")
   ' <<<"$comments_json" 2>/dev/null || echo ""

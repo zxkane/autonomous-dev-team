@@ -4152,14 +4152,42 @@ _liveness_evaluate_issue() {
   marker_digest=$(_liveness_marker_digest "$comments_json")
   fingerprint=$(_liveness_fingerprint "$active_label" "$current_head" "$non_idem_count" "$marker_digest")
 
-  # Read back the prior watchdog marker: the LAST authorKind != "human"
-  # comment carrying the marker grammar (unbounded scan, mirrors
-  # INV-105/INV-122's own marker-authenticity filter — a human comment
-  # forging the marker text at a high count must never inflate the genuine
-  # counter, R testing requirement).
+  # Read back the prior watchdog marker: the LAST comment STRUCTURALLY
+  # anchored on the exact grammar `_liveness_marker` itself emits — either
+  # the WHOLE body (the bare "none"-tier post) or the marker as the FIRST
+  # LINE followed by more report prose (the tier1/tier2 posts; see the
+  # TIER1REPORT/TIER2REPORT heredocs below). Anchoring at both `^` and
+  # `($|\n)` rejects a forgery that embeds the marker text ANYWHERE inside a
+  # larger human comment (e.g. "I saw someone write `<!--
+  # dispatcher-liveness-watchdog: ... -->` in a doc") — the plain
+  # `contains()` this replaces would have accepted that.
+  #
+  # [codex review, PR #472, BLOCKING] Deliberately NOT gated on an
+  # unconditional `authorKind != "human"`: this marker is posted AND read
+  # back in the SAME dispatcher process (dispatcher-tick.sh ->
+  # lib-dispatch.sh), which NEVER resolves `BOT_LOGIN` — that variable is
+  # only ever resolved inside autonomous-review.sh's SEPARATE process (see
+  # the extensive `_frozen_convergence_rounds_json` precedent above: "BOT_LOGIN
+  # is NEVER set in the dispatcher's own process... ALWAYS takes the
+  # empty-BOT_LOGIN branch, in EVERY GH_AUTH_MODE"). So in `GH_AUTH_MODE=token`
+  # — the permanent, common topology — the dispatcher's OWN genuine marker is
+  # posted under the shared PAT identity and normalizes to `authorKind=human`;
+  # an unconditional `!= "human"` gate REJECTS every genuine marker, resetting
+  # `count` to 1 on every tick and making the watchdog permanently inert on
+  # real installs. Mirrors the established `_strict_author` gating pattern:
+  # apply the authorKind filter ONLY when `BOT_LOGIN` happens to be set (never
+  # true at this call site today, kept for parity/defense-in-depth); otherwise
+  # rely on the structural anchor alone — the SAME accepted residual this
+  # codebase documents everywhere else a structural-only anchor is used (a
+  # human posting a byte-for-byte copy of the genuine marker line, with
+  # arbitrary content on subsequent lines, is indistinguishable from genuine
+  # and is NOT defended against — see TC-LIVENESS-044's revised scenario).
+  local _liveness_strict_author=0
+  [ -n "${BOT_LOGIN:-}" ] && _liveness_strict_author=1
+  local _liveness_marker_anchor='^<!-- dispatcher-liveness-watchdog: issue=[0-9]+ fingerprint=[0-9a-f]+ count=[0-9]+ tier1=[01] -->($|\n)'
   local prior_marker
-  prior_marker=$(jq -r \
-    '[.[] | select((.authorKind // "human") != "human") | select(.body | contains("dispatcher-liveness-watchdog:"))] | sort_by(.createdAt) | last | .body // ""' \
+  prior_marker=$(jq -r --arg strict "$_liveness_strict_author" --arg anchor "$_liveness_marker_anchor" \
+    '[.[] | select(($strict == "0") or ((.authorKind // "human") != "human")) | select(.body | test($anchor))] | sort_by(.createdAt) | last | .body // ""' \
     <<<"$comments_json" 2>/dev/null || echo "")
 
   local count tier1
