@@ -459,7 +459,7 @@ _codex_review_compose_body() {
 
   if [[ "$verdict" == "fail" ]]; then
     if [[ -z "${text//[[:space:]]/}" ]]; then
-      printf '%s\n' "codex review reported a blocking [P1] finding (see the per-agent log for details)."
+      printf '%s\n' "codex review reported a blocking [P0]-[P3] finding (see the per-agent log for details)."
     else
       printf '%s\n' "$text"
     fi
@@ -467,7 +467,7 @@ _codex_review_compose_body() {
     if [[ -z "${text//[[:space:]]/}" ]]; then
       printf '%s\n' "codex review found no blocking findings."
     else
-      printf '%s\n' "codex review found no blocking ([P1]) findings. Review output:
+      printf '%s\n' "codex review found no blocking ([P0]-[P3]) findings. Review output:
 
 ${text}"
     fi

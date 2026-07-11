@@ -37,9 +37,20 @@
 #
 #   <!-- dispatcher-review-cap-breaker: issue=<N> head=<sha> round=<n> -->
 
-# _review_cap_marker <issue> <head> <round> — construct the marker text.
+# _review_cap_marker <issue> <head> <round> — construct the marker text. An
+# empty/unset <head> (e.g. a transient chp_pr_view failure upstream) renders
+# as the literal token "unknown" rather than an empty field — the head is
+# forensic-only here (this counter is head-AGNOSTIC, see the design note
+# above), but an empty field would render an ugly "head= round=N" AND could
+# accidentally fail to match `_review_cap_parse_count`'s own regex on some
+# future stricter rewrite. Substituting a non-empty placeholder keeps the
+# marker's round field reliably parseable regardless of head availability —
+# a transient PR_HEAD_SHA read failure must never silently reset this
+# breaker's counter (the counter's whole purpose is catching the case where
+# something keeps going wrong round after round).
 _review_cap_marker() {
-  local issue="$1" head="$2" round="$3"
+  local issue="$1" head="${2:-unknown}" round="$3"
+  [[ -n "$head" ]] || head="unknown"
   printf '<!-- dispatcher-review-cap-breaker: issue=%s head=%s round=%s -->' \
     "$issue" "$head" "$round"
 }
@@ -47,12 +58,16 @@ _review_cap_marker() {
 # _review_cap_parse_count <marker_text> — echo the round field from
 # marker_text (head-AGNOSTIC — see the design note above: this counter
 # accumulates across head changes, so unlike INV-122's `_gate_breaker_parse_count`
-# it does not gate the match on a specific head). A malformed or absent
-# marker collapses to 0 (bias to MISS: never crash, never silently inherit a
+# it does not gate the match on a specific head). The head token itself is
+# matched permissively (`.*`, not requiring non-whitespace) so an OLDER
+# marker posted with a genuinely empty head field (pre-placeholder-fix) still
+# parses instead of silently collapsing to 0 — a malformed round field is the
+# only thing that should ever collapse to 0. A malformed or absent marker
+# collapses to 0 (bias to MISS: never crash, never silently inherit a
 # garbled count).
 _review_cap_parse_count() {
   local marker_text="$1"
-  local pattern="dispatcher-review-cap-breaker: issue=[0-9]+ head=[^[:space:]]+ round=([0-9]+)"
+  local pattern="dispatcher-review-cap-breaker: issue=[0-9]+ head=.* round=([0-9]+)"
   if [[ "$marker_text" =~ $pattern ]]; then
     printf '%s\n' "${BASH_REMATCH[1]}"
   else

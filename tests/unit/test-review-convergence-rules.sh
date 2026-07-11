@@ -28,6 +28,7 @@ E2E_LIB="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-review-e2e.sh"
 CODEX_ADAPTER="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/adapters/codex.sh"
 WRAPPER="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/autonomous-review.sh"
 AGGREGATE_LIB="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-review-aggregate.sh"
+ARTIFACT_LIB="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-review-artifact.sh"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -89,6 +90,8 @@ source "$E2E_LIB"
 source "$AGGREGATE_LIB"
 # shellcheck source=../../skills/autonomous-dispatcher/scripts/adapters/codex.sh
 source "$CODEX_ADAPTER"
+# shellcheck source=../../skills/autonomous-dispatcher/scripts/lib-review-artifact.sh
+source "$ARTIFACT_LIB"
 
 FIXTURES="$SCRIPT_DIR/fixtures"
 
@@ -108,6 +111,11 @@ assert_eq "TC-REVIEW-CONV-009 round=4 P3 does NOT block" "false" "$(shouldBlockF
 assert_eq "TC-REVIEW-CONV-010 round=5 P1 blocks" "true" "$(shouldBlockFinding 5 P1 && echo true || echo false)"
 assert_eq "TC-REVIEW-CONV-011 round=5 P2 does NOT block" "false" "$(shouldBlockFinding 5 P2 && echo true || echo false)"
 assert_eq "TC-REVIEW-CONV-012 round=5 P3 does NOT block" "false" "$(shouldBlockFinding 5 P3 && echo true || echo false)"
+# Boundary pin: round=4 P2 blocks (the P2 floor is "round <= 4"), mirroring
+# the P3 boundary's own both-edges coverage (TC-005 round=2 blocks, TC-008
+# round=3 doesn't) — this edge (round=4 blocks, round=5 doesn't) was
+# previously untested on the blocking side.
+assert_eq "TC-REVIEW-CONV-012d round=4 P2 blocks (boundary)" "true" "$(shouldBlockFinding 4 P2 && echo true || echo false)"
 
 # Regression pin: "none" (untagged) ALWAYS blocks, at every round — fail-safe.
 assert_eq "TC-REVIEW-CONV-012b round=10 'none' still blocks (fail-safe)" "true" "$(shouldBlockFinding 10 none && echo true || echo false)"
@@ -156,6 +164,33 @@ assert_eq "TC-REVIEW-CONV-020c classify_stdout flags fail on P2/P3 too (#449 rat
 
 # ===========================================================================
 echo
+echo "=== TC-REVIEW-CONV-020d..020g: per-finding severity scan (untagged-masking fix) ==="
+# ===========================================================================
+
+# TC-REVIEW-CONV-020d: a numbered body with one correctly-tagged low-severity
+# finding and one UNTAGGED finding must extract "none" (fail-safe) — NOT the
+# lone tag found elsewhere in the body. A whole-body "highest tag anywhere"
+# scan would wrongly report P3 here and let the severity filter demote the
+# whole verdict, silently dropping the untagged (potentially severe) finding.
+assert_eq "TC-REVIEW-CONV-020d numbered body: one [P3] + one untagged finding → none (fail-safe, not masked)" "none" \
+  "$(_review_extract_highest_severity $'1. [P3] minor nit\n2. untagged severe finding')"
+
+# TC-REVIEW-CONV-020e: every numbered finding tagged → normal highest-wins.
+assert_eq "TC-REVIEW-CONV-020e numbered body: all findings tagged → highest wins" "P1" \
+  "$(_review_extract_highest_severity $'1. [P2] narrow gap\n2. [P1] blocker')"
+
+# TC-REVIEW-CONV-020f: codex free-form (no numbered lines at all) keeps the
+# original whole-text scan — an unstructured capture has no per-finding
+# boundary to key an "untagged finding" check on.
+assert_eq "TC-REVIEW-CONV-020f free-form (no numbering) still scans whole text" "P0" \
+  "$(_review_extract_highest_severity $'[P2] minor nit\n[P0] catastrophic')"
+
+# TC-REVIEW-CONV-020g: a single numbered finding with no tag anywhere → none.
+assert_eq "TC-REVIEW-CONV-020g single untagged numbered finding → none" "none" \
+  "$(_review_extract_highest_severity '1. missing null check')"
+
+# ===========================================================================
+echo
 echo "=== TC-REVIEW-CONV-021..027: review-round-counter marker ==="
 # ===========================================================================
 
@@ -188,6 +223,18 @@ assert_eq "TC-REVIEW-CONV-027a marker round-trip contains issue" "true" \
   "$([[ "$m27" == *"issue=100"* ]] && echo true || echo false)"
 assert_eq "TC-REVIEW-CONV-027b marker round-trip: parse returns the same round" "3" \
   "$(_review_round_parse_count "$m27" deadbeef)"
+
+# TC-REVIEW-CONV-027c: the wrapper-level empty-PR_HEAD_SHA guard (pinned as a
+# wiring grep, since the pure lib functions themselves are head-value-agnostic
+# — the guard lives at the CALL SITE, deciding whether to call them at all).
+# A chp_pr_view failure must default to the strictest floor (round=1) and
+# skip posting a marker, mirroring INV-122's own non-empty-PR_HEAD_SHA guard.
+assert_contains "TC-REVIEW-CONV-027c wrapper guards the R1 counter on a non-empty PR_HEAD_SHA" \
+  "$(cat "$WRAPPER")" 'if [[ -n "$PR_HEAD_SHA" ]]'
+round1_guard_line=$(grep -n 'if \[\[ -n "\$PR_HEAD_SHA" \]\]; then' "$WRAPPER" | head -1 | cut -d: -f1)
+round1_default_line=$(awk -v start="$round1_guard_line" 'NR>start && /REVIEW_ROUND=1/ { print NR; exit }' "$WRAPPER")
+assert_eq "TC-REVIEW-CONV-027d empty-PR_HEAD_SHA branch defaults REVIEW_ROUND to 1 (strictest floor)" "true" \
+  "$([[ -n "$round1_default_line" ]] && echo true || echo false)"
 
 # ===========================================================================
 echo
@@ -237,6 +284,26 @@ done
 assert_eq "TC-REVIEW-CONV-034 6th consecutive failed-substantive round (progressively new HEADs) reaches round=6" "6" "$_sim_round"
 assert_eq "TC-REVIEW-CONV-034b round=6 >= default threshold=5 → trip" "true" \
   "$([[ "$_sim_round" -ge "$(_review_cap_threshold 2>/dev/null)" ]] && echo true || echo false)"
+
+# TC-REVIEW-CONV-034c: exact-threshold boundary — the round that reaches
+# EXACTLY the threshold (not one past it) must trip (the comparison is `-ge`,
+# not `-gt`) — the 6-round simulation above only exercises one-past-threshold.
+m34c=$(_review_cap_marker 100 deadbeef 4)
+assert_eq "TC-REVIEW-CONV-034c next_count==threshold (5==5) trips" "true" \
+  "$([[ "$(_review_cap_next_count "$m34c")" -ge "$(_review_cap_threshold 2>/dev/null)" ]] && echo true || echo false)"
+# One below the threshold must NOT trip.
+m34d=$(_review_cap_marker 100 deadbeef 3)
+assert_eq "TC-REVIEW-CONV-034d next_count==threshold-1 (4<5) does not trip" "false" \
+  "$([[ "$(_review_cap_next_count "$m34d")" -ge "$(_review_cap_threshold 2>/dev/null)" ]] && echo true || echo false)"
+
+# TC-REVIEW-CONV-034e: an empty/unknown head in the marker (e.g. a transient
+# PR_HEAD_SHA read failure upstream) must NOT silently reset this
+# head-AGNOSTIC counter — the round field must still parse correctly.
+m34e=$(_review_cap_marker 100 "" 3)
+assert_contains "TC-REVIEW-CONV-034e empty head renders as 'unknown' placeholder, not an empty field" \
+  "$m34e" "head=unknown"
+assert_eq "TC-REVIEW-CONV-034f empty-head marker's round still parses and increments" "4" \
+  "$(_review_cap_next_count "$m34e")"
 
 # TC-REVIEW-CONV-035: already-stalled skip is enforced at the wrapper call
 # site (source grep — mirrors how the pure lib holds no label-state itself).
@@ -369,6 +436,50 @@ assert_eq "TC-REVIEW-CONV-048b pass+fail → fail (unchanged)" "fail" "$(_aggreg
 assert_eq "TC-REVIEW-CONV-048c unavailable+unavailable → all-unavailable (unchanged)" "all-unavailable" \
   "$(_aggregate_review_verdicts unavailable unavailable)"
 assert_eq "TC-REVIEW-CONV-048d timed-out is a deciding FAIL (unchanged)" "fail" "$(_aggregate_review_verdicts timed-out)"
+
+# ===========================================================================
+echo
+echo "=== TC-REVIEW-CONV-049..052: artifact-channel severity round-trip (INV-78) ==="
+# ===========================================================================
+
+# TC-REVIEW-CONV-049: a schema-conformant artifact FAIL with a severity-tagged
+# finding renders that tag inline in the body — closing the gap where the
+# PRIMARY documented resolution channel (the JSON artifact, not just codex's
+# free-form stdout) fed the severity filter no usable signal at all.
+art_json='{"schema_version":1,"verdict":"FAIL","blockingFindings":[{"title":"minor nit","severity":"P3"}],"runId":"abc","agent":"agy"}'
+art_body=$(_verdict_body_from_artifact_json "$art_json")
+assert_contains "TC-REVIEW-CONV-049a artifact-rendered body carries the [P3] tag" "$art_body" "[P3]"
+assert_eq "TC-REVIEW-CONV-049b severity filter extracts P3 from the artifact-rendered body" "P3" \
+  "$(_review_extract_highest_severity "$art_body")"
+assert_eq "TC-REVIEW-CONV-049c that P3 finding is demoted (non-blocking) at round 5" "pass" \
+  "$(_review_apply_severity_filter fail "$art_body" 5)"
+
+# TC-REVIEW-CONV-050: an artifact FAIL with a P1 finding stays blocking at any
+# round (regression pin — the artifact channel must not accidentally make
+# EVERYTHING non-blocking).
+art_json_p1='{"schema_version":1,"verdict":"FAIL","blockingFindings":[{"title":"null deref","severity":"P1"}],"runId":"abc","agent":"agy"}'
+art_body_p1=$(_verdict_body_from_artifact_json "$art_json_p1")
+assert_eq "TC-REVIEW-CONV-050 artifact P1 finding still blocks at round 5" "fail" \
+  "$(_review_apply_severity_filter fail "$art_body_p1" 5)"
+
+# TC-REVIEW-CONV-051: an artifact finding with NO severity field (legacy /
+# non-compliant agent) renders untagged and is treated as unscoreable — it
+# ALWAYS blocks (fail-safe), matching the pre-#449 unconditional-block
+# behavior for every artifact-sourced FAIL.
+art_json_untagged='{"schema_version":1,"verdict":"FAIL","blockingFindings":[{"title":"untagged finding"}],"runId":"abc","agent":"agy"}'
+art_body_untagged=$(_verdict_body_from_artifact_json "$art_json_untagged")
+assert_eq "TC-REVIEW-CONV-051a untagged artifact finding extracts as none" "none" \
+  "$(_review_extract_highest_severity "$art_body_untagged")"
+assert_eq "TC-REVIEW-CONV-051b untagged artifact finding still blocks at round 5 (fail-safe)" "fail" \
+  "$(_review_apply_severity_filter fail "$art_body_untagged" 5)"
+
+# TC-REVIEW-CONV-052: schema accepts the new optional severity enum and
+# rejects an invalid value (drift guard — the schema and the prompt/renderer
+# must agree on the P0-P3 vocabulary).
+if command -v jq >/dev/null 2>&1 && [[ -f "$PROJECT_ROOT/docs/pipeline/schemas/verdict-artifact.schema.json" ]]; then
+  assert_contains "TC-REVIEW-CONV-052 schema declares the P0-P3 severity enum on the finding definition" \
+    "$(cat "$PROJECT_ROOT/docs/pipeline/schemas/verdict-artifact.schema.json")" '"enum": ["P0", "P1", "P2", "P3"]'
+fi
 
 echo
 echo "=== Summary ==="

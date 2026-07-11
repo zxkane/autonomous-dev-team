@@ -67,13 +67,43 @@ shouldBlockFinding() {
 #
 # Echo the highest-priority severity tag found in <text> — checked in
 # P0 > P1 > P2 > P3 order so a body carrying multiple tags reports the most
-# severe one. Echoes `none` when no `[P0]`-`[P3]` tag is present. Works on ANY
-# findings text: a codex `codex review` stdout capture, or a generic
-# numbered-list verdict body (`1. [P2] ...`) — both are plain text scans, no
-# CLI-specific structure assumed. Pure (no I/O beyond the grep over the
+# severe one. Echoes `none` when no `[P0]`-`[P3]` tag is present at all, OR
+# when <text> contains a numbered finding line (`N. ...`) that carries NO
+# tag — a per-finding scan, not a whole-body scan: a body with one correctly
+# tagged `[P3]` finding and one UNTAGGED finding must not let the tagged
+# finding's low severity mask the untagged one (which — per the "none" branch
+# below — is fail-safe and always blocks). Without this, a global "highest
+# tag found anywhere" scan would report `P3` for that body and demote the
+# whole verdict, silently dropping the untagged finding's block at a
+# late round.
+#
+# The numbered-list check applies to the generic post-verdict.sh path and
+# the artifact-rendered body (`lib-review-artifact.sh::_verdict_body_from_
+# artifact_json`), both of which render findings as `N. ...` lines. A body
+# with NO numbered lines at all (the codex free-form capture, whose findings
+# are `[Pn] ...` lines with no numbering) falls back to the whole-text scan —
+# detecting "an untagged finding" in unstructured prose is not reliably
+# possible, so that path keeps the original highest-tag-anywhere behavior
+# (unchanged from the codex path's existing classify_stdout gate, which the
+# codex prompt already instructs to tag EVERY finding).
+#
+# Works on ANY findings text: a codex `codex review` stdout capture, or a
+# generic numbered-list verdict body. Pure (no I/O beyond grep/awk over the
 # argument string); rc 0 always.
 _review_extract_highest_severity() {
   local text="${1:-}"
+  local _numbered_lines
+  _numbered_lines=$(grep -E '^[[:space:]]*[0-9]+\.[[:space:]]' <<<"$text" 2>/dev/null || true)
+  if [[ -n "$_numbered_lines" ]]; then
+    # Per-finding scan: any numbered line missing a [P0]-[P3] tag → none
+    # (fail-safe — an untagged finding must never be masked by a sibling
+    # finding's lower, correctly-tagged severity).
+    if grep -vE '\[P[0123]\]' <<<"$_numbered_lines" 2>/dev/null | grep -q '.'; then
+      printf 'none\n'
+      return 0
+    fi
+    text="$_numbered_lines"
+  fi
   if grep -qF '[P0]' <<<"$text" 2>/dev/null; then
     printf 'P0\n'
   elif grep -qF '[P1]' <<<"$text" 2>/dev/null; then

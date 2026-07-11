@@ -115,6 +115,11 @@
         "detail": { "type": "string" },
         "file": { "type": "string" },
         "line": { "type": "integer", "minimum": 0 },
+        "severity": {
+          "description": "Issue #449 (R1) severity-aware blocking ratchet: P0 (catastrophic — data loss/corruption, security, unrecoverable), P1 (clear correctness/reliability merge blocker), P2 (narrower but real correctness/reliability gap), P3 (low-severity residual risk or test gap). OPTIONAL — absent is rendered as an UNTAGGED finding (the wrapper's severity extraction treats an untagged finding as unscoreable and, per lib-review-severity.sh's fail-safe rule, it always blocks at every round, exactly like today's pre-#449 behavior). Only a POSITIVELY set severity can ever be demoted below the round's blocking floor.",
+          "type": "string",
+          "enum": ["P0", "P1", "P2", "P3"]
+        },
         "actionable_by_dev_agent": {
           "description": "INV-92 (#298): whether the autonomous dev agent can act on this finding. Absent ⇒ true (a legacy finding omitting it behaves as today). The dispatcher routes off the aggregate-OR of this over the blocking findings, folded into the `dev-actionable` verdict-trailer token; `false` diverts routing away from dev-resume (escalate), it does NOT remove the finding from blockingFindings (the FAIL⇔≥1-blocking rule is unchanged).",
           "type": "boolean"

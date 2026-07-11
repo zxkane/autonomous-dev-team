@@ -16,8 +16,10 @@ itself is too heavy to run end-to-end.
 | `skills/autonomous-dispatcher/scripts/lib-review-poll.sh` | `_classify_verdict_body` unchanged; new sibling severity extraction for the generic numbered-list body |
 | `skills/autonomous-dispatcher/scripts/lib-review-round.sh` (NEW) | `review-round-counter` marker helpers: parse/increment/reset, authenticity filter |
 | `skills/autonomous-dispatcher/scripts/lib-review-cap.sh` (NEW) | INV-124 pure helpers: `_review_cap_next_count`, `_review_cap_threshold` |
-| `skills/autonomous-dispatcher/scripts/lib-review-e2e.sh` | R3: `_ci_green_precheck` pre-check helper feeding the E2E gate's evidence-present signal |
-| `skills/autonomous-dispatcher/scripts/autonomous-review.sh` | Wiring: severity filter runs pre-aggregation; INV-124 breaker runs in the FAIL substantive branch before `emit_verdict_trailer`; R3 pre-check runs before `_classify_e2e_gate` |
+| `skills/autonomous-dispatcher/scripts/lib-review-e2e.sh` | R3: `_e2e_ci_green_precheck` pre-check helper feeding the E2E gate's evidence-present signal |
+| `skills/autonomous-dispatcher/scripts/lib-review-artifact.sh` | `_verdict_body_from_artifact_json` renders the OPTIONAL `severity` field inline so the JSON verdict-artifact channel (INV-78, the primary resolution path) feeds real severity into the ratchet |
+| `docs/pipeline/schemas/verdict-artifact.schema.json` | New OPTIONAL `severity` enum (`P0`\|`P1`\|`P2`\|`P3`) on the finding definition |
+| `skills/autonomous-dispatcher/scripts/autonomous-review.sh` | Wiring: severity filter runs pre-aggregation; INV-124 breaker runs in the FAIL substantive branch before `emit_verdict_trailer`; R3 pre-check runs before `_classify_e2e_gate`; empty-`PR_HEAD_SHA` guard on the R1 round counter; demoted-verdict body re-rendering |
 | `tests/unit/test-review-convergence-rules.sh` (NEW) | This regression suite |
 
 ## Test scenarios
@@ -51,6 +53,10 @@ itself is too heavy to run end-to-end.
 | TC-REVIEW-CONV-018 | generic numbered-list body: all `[P3]` | extracted highest = `P3` |
 | TC-REVIEW-CONV-019 | generic numbered-list body with no tags (legacy FAIL body) | extracted = `none` |
 | TC-REVIEW-CONV-020 | codex malformed-output finding-boundary regex recognizes `[P0]` (regression: pre-#449 regex was `P[123]` only) | `[P0]` line is treated as a finding boundary, not echo-region text |
+| TC-REVIEW-CONV-020d | Numbered body: one correctly-tagged `[P3]` finding + one UNTAGGED finding | extracted = `none` (fail-safe — the untagged finding is not masked by the sibling tag) |
+| TC-REVIEW-CONV-020e | Numbered body: every finding tagged (`[P2]`+`[P1]`) | extracted highest = `P1` (normal highest-wins, unaffected) |
+| TC-REVIEW-CONV-020f | Free-form body, no numbered lines (codex-shaped) | falls back to whole-text scan (per-finding check does not apply — no numbering to key it on) |
+| TC-REVIEW-CONV-020g | Single numbered finding, no tag anywhere | extracted = `none` |
 
 ### Group C — `review-round-counter` marker (TC-REVIEW-CONV-021..027)
 
@@ -63,6 +69,7 @@ itself is too heavy to run end-to-end.
 | TC-REVIEW-CONV-025 | Marker authored by a human (`authorKind == "human"`) | ignored — not read as the prior round marker (forgery guard) |
 | TC-REVIEW-CONV-026 | Marker authored by a bot (`authorKind != "human"`) | read normally |
 | TC-REVIEW-CONV-027 | Marker round-trip: construct then parse | fields match exactly |
+| TC-REVIEW-CONV-027c/d | `PR_HEAD_SHA` is empty (transient `chp_pr_view` failure) | wrapper defaults `REVIEW_ROUND=1` (strictest floor) and skips posting a marker this round — mirrors INV-122's own non-empty-`PR_HEAD_SHA` guard |
 
 ### Group D — INV-124 round-cap breaker (TC-REVIEW-CONV-028..038)
 
@@ -79,6 +86,8 @@ itself is too heavy to run end-to-end.
 | TC-REVIEW-CONV-036 | Round cap reached but the round's own severity floor is NOT failing (e.g. only P3 findings at round 5+, demoted to non-blocking) | breaker does not trip — the ratchet's own floor must still be failing |
 | TC-REVIEW-CONV-037 | `failed-non-substantive` rounds | do not count toward the round-cap (out of scope; governed by `REVIEW_RETRY_LIMIT`) |
 | TC-REVIEW-CONV-038 | Trip report is posted exactly once, transition precedes report (mirrors INV-122's TOCTOU-safe ordering) | transition call line precedes report call line |
+| TC-REVIEW-CONV-034c/d | Exact-threshold boundary: `next_count == threshold` (5==5) trips; `next_count == threshold-1` (4<5) does not | `-ge` comparison confirmed at the exact boundary, not just one-past-it |
+| TC-REVIEW-CONV-034e/f | Marker constructed with an empty/unknown head (e.g. a transient `PR_HEAD_SHA` read failure) | renders as the `unknown` placeholder (not an empty field) and the round field still parses/increments correctly — this counter is head-AGNOSTIC by design, so an unknown head must never silently reset it |
 
 ### Group E — R3 evidence-freshness on a new HEAD (TC-REVIEW-CONV-039..044)
 
@@ -99,6 +108,25 @@ itself is too heavy to run end-to-end.
 | TC-REVIEW-CONV-046 | Per-agent raw findings + round fed into the filter, at least one finding at/above the round's floor | agent's verdict stays `fail` |
 | TC-REVIEW-CONV-047 | Severity filter runs strictly between the terminal no-verdict sweep and `_aggregate_review_verdicts` | wiring grep: filter call line > terminal-sweep line, filter call line < aggregation call line |
 | TC-REVIEW-CONV-048 | `_aggregate_review_verdicts` itself is unchanged (still consumes `pass\|fail\|unavailable\|timed-out`) | regression pin — no signature/vocabulary change |
+
+### Group G — artifact-channel severity round-trip (TC-REVIEW-CONV-049..052)
+
+| ID | Scenario | Expected |
+|----|----------|----------|
+| TC-REVIEW-CONV-049 | Schema-conformant artifact FAIL with a `severity: "P3"` field on a blocking finding | rendered body carries `[P3]` inline; severity filter extracts `P3`; demoted to non-blocking at round 5 |
+| TC-REVIEW-CONV-050 | Artifact FAIL with `severity: "P1"` | still blocks at round 5 (regression pin) |
+| TC-REVIEW-CONV-051 | Artifact FAIL finding with `severity` OMITTED | extracts as `none`; still blocks at round 5 (fail-safe — matches pre-#449 unconditional-block behavior) |
+| TC-REVIEW-CONV-052 | Schema declares the `P0`-`P3` enum on the finding's `severity` field | present (drift guard between the schema and the renderer/prompt) |
+
+### Group H — demoted-verdict body consistency (covered inline in Group F's wiring, manual verification below)
+
+A demoted `fail→pass` round re-renders `AGENT_VERDICT_BODIES[i]`: the `Review
+findings:` prefix and `[BLOCKING]` markers are replaced with an explicit
+non-blocking note (the original finding text is retained for transparency).
+Manually verified via `_review_apply_severity_filter` + a direct read of the
+mutated `AGENT_VERDICT_BODIES` array in `autonomous-review.sh` — not a
+standalone TC id (the transformation is inline in the wrapper, not a separate
+pure function), but exercised end-to-end by TC-REVIEW-CONV-045/049.
 
 ## Acceptance criteria for this change (pre-merge verifiable)
 

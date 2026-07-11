@@ -1113,10 +1113,30 @@ log "PR branch: ${PR_BRANCH:-UNKNOWN} (HEAD: ${PR_HEAD_SHA:0:7})"
 # unchanged. Read the prior marker the same way INV-122 reads its own
 # (unbounded scan via itp_list_comments, filtered to authorKind != "human" so
 # an ordinary collaborator comment can never be read as a forged round).
-_rr_prior_marker=$(itp_list_comments "$ISSUE_NUMBER" 2>/dev/null \
-  | jq -r '[.[] | select(.authorKind != "human") | select(.body | contains("review-round-counter:"))] | sort_by(.createdAt) | last | .body // ""' \
-  2>/dev/null || echo "")
-REVIEW_ROUND=$(_review_round_next_count "$_rr_prior_marker" "$PR_HEAD_SHA")
+#
+# Require a non-empty PR_HEAD_SHA before trusting/advancing the counter
+# (mirrors INV-122's own "[#453 codex review round-3, P2] Require a
+# non-empty PR_HEAD_SHA" fix, autonomous-review.sh's E2E-gate breaker below):
+# PR_HEAD_SHA is read with `|| true` and can be empty on a chp_pr_view
+# failure. An empty head is "we don't know the head," not "the same head,"
+# so a marker keyed on it must never be trusted to represent this HEAD's
+# series — reading it back would either falsely reset a real series (if a
+# transient failure produces an empty-head marker that a later real-head
+# read can't match) or falsely accumulate across genuinely different heads
+# (if two different transient failures both produce empty-head markers that
+# DO match each other). Fail toward the strictest floor instead: default to
+# round=1 (round 1-2's floor is P0-P3, the strictest — never silently widen
+# the blocking floor on an unknown head) and skip posting a marker this round
+# (posting one keyed on an empty head would corrupt a LATER real-head read).
+if [[ -n "$PR_HEAD_SHA" ]]; then
+  _rr_prior_marker=$(itp_list_comments "$ISSUE_NUMBER" 2>/dev/null \
+    | jq -r '[.[] | select(.authorKind != "human") | select(.body | contains("review-round-counter:"))] | sort_by(.createdAt) | last | .body // ""' \
+    2>/dev/null || echo "")
+  REVIEW_ROUND=$(_review_round_next_count "$_rr_prior_marker" "$PR_HEAD_SHA")
+else
+  log "WARNING: Issue #449: PR_HEAD_SHA is empty (chp_pr_view failure?) — defaulting review round to 1 (strictest severity floor) and skipping the review-round-counter marker this round."
+  REVIEW_ROUND=1
+fi
 # Human-readable floor label for the log line only — the authoritative
 # per-round floor lives in shouldBlockFinding (lib-review-severity.sh).
 if [[ "$REVIEW_ROUND" -le 2 ]]; then
@@ -1132,8 +1152,11 @@ log "Issue #449: review round ${REVIEW_ROUND} for HEAD ${PR_HEAD_SHA:0:7} (sever
 # never advance past 1 (the same "must persist every round" fix INV-122
 # documents for its own marker). Posted as its own small comment rather than
 # folded into a later verdict comment because a PASS round or a crash-before-
-# verdict round never reaches this issue's FAIL-only comment paths.
-itp_post_comment "$ISSUE_NUMBER" "$(_review_round_marker "$ISSUE_NUMBER" "$PR_HEAD_SHA" "$REVIEW_ROUND")" 2>/dev/null || true
+# verdict round never reaches this issue's FAIL-only comment paths. Skipped
+# when PR_HEAD_SHA is empty (see above).
+if [[ -n "$PR_HEAD_SHA" ]]; then
+  itp_post_comment "$ISSUE_NUMBER" "$(_review_round_marker "$ISSUE_NUMBER" "$PR_HEAD_SHA" "$REVIEW_ROUND")" 2>/dev/null || true
+fi
 
 # Verdict-detection bindings: actor + time window + body-trailer
 # presence. Replaces the prior session-id-only binding (which depended
@@ -1448,6 +1471,7 @@ ${_DIFF_CAP_PROMPT_NOTE:-}
 
 ## Decision
 After thorough review:
+$(if [[ "${_agent_name}" != "codex" ]]; then _review_severity_prompt_block "$REVIEW_ROUND"; fi)
 $(if [[ -n "${_verdict_artifact_path}" ]]; then cat <<VERDICT_ARTIFACT_INSTRUCTION
 
 **PRIMARY — write the verdict artifact (INV-78, #233)**: the wrapper now reads
@@ -1471,6 +1495,7 @@ cat > "${_verdict_artifact_path}.tmp.\$\$" <<VERDICT_JSON
         "detail": "...",
         "file": "...",
         "line": 0,
+        "severity": "P1",
         "actionable_by_dev_agent": true,
         "requires_human": false,
         "requires_privileged_token": false,
@@ -1494,6 +1519,14 @@ issue, NOT silently ignored):
   MUST have \`blockingFindings\` empty/absent. (FAIL ⇔ ≥1 blocking finding.)
 - \`runId\` MUST be \`${_agent_session_id}\` and \`agent\` MUST be \`${_agent_name}\`.
 
+**Severity tagging (issue #449, R1) — set \`severity\` on EVERY blocking finding**:
+use exactly one of \`"P0"\`, \`"P1"\`, \`"P2"\`, or \`"P3"\` (the vocabulary defined
+above) so the wrapper's convergence ratchet can score this finding correctly. A
+finding with \`severity\` OMITTED is treated as UNSCOREABLE and ALWAYS blocks —
+so omitting it is never a way to make a low-severity finding non-blocking; only
+an HONEST \`"P2"\`/\`"P3"\` tag can do that, and only once enough review rounds
+have run.
+
 **Per-finding actionability classification ([INV-92], #298)** — for EACH blocking
 finding, classify WHO can fix it so the dispatcher does not re-dispatch the dev
 agent on a finding it provably cannot act on (these five fields are OPTIONAL; omit
@@ -1513,8 +1546,6 @@ Write the artifact FIRST, then ALSO post the human-facing verdict comment via
 \`post-verdict.sh\` below (the comment stays for humans + as a fallback channel).
 VERDICT_ARTIFACT_INSTRUCTION
 fi)
-
-$(if [[ "${_agent_name}" != "codex" ]]; then _review_severity_prompt_block "$REVIEW_ROUND"; fi)
 
 **CRITICAL — verdict phrasing**: the wrapper script polls for your
 verdict comment by matching specific keywords. If your comment doesn't
@@ -3262,6 +3293,29 @@ for _i in "${!AGENT_NAMES[@]}"; do
   AGENT_VERDICTS[$_i]=$(_review_apply_severity_filter "${AGENT_VERDICTS[$_i]}" "$_sev_text" "$REVIEW_ROUND")
   if [[ "$_pre_filter_verdict" == "fail" && "${AGENT_VERDICTS[$_i]}" == "pass" ]]; then
     log "Issue #449: severity ratchet demoted '${AGENT_NAMES[$_i]}' fail→pass at round ${REVIEW_ROUND} (highest severity: ${AGENT_HIGHEST_SEVERITY[$_i]}, below this round's blocking floor)."
+    # Re-render AGENT_VERDICT_BODIES[i] on demotion. It still holds the
+    # ORIGINAL "Review findings:" / "[BLOCKING]" text, which would otherwise
+    # flow unchanged into LATEST_COMMENT and get posted as
+    # "Review PASSED - Review findings: ... [BLOCKING] ..." — not just
+    # confusing to a human reader, but a LIVE parsing hazard: the dev-resume
+    # prompt (autonomous-mode.md) explicitly scans issue comments for
+    # "Review findings:" as an actionable-feedback signal, so a demoted PASS
+    # comment that still contains that literal substring could make a future
+    # dev-resume session treat an ALREADY-PASSED review as still having
+    # outstanding blocking feedback. Strip the two load-bearing substrings
+    # (`Review findings:` prefix line, `[BLOCKING]` per-finding marker) while
+    # KEEPING the rest of the original findings text for transparency (the
+    # operator can still see what was found and why it no longer blocks).
+    _demoted_body="${AGENT_VERDICT_BODIES[$_i]:-}"
+    _demoted_body="${_demoted_body#Review findings:}"
+    _demoted_body="${_demoted_body//\[BLOCKING\]/[non-blocking]}"
+    # Also de-fang the decision-gate summary line (still says "-- FAIL." and
+    # "blocking finding(s)" verbatim, both load-bearing tokens the dev-resume
+    # prompt's [P1]/BLOCKING scan and lib-review-poll.sh's FAIL classifier
+    # key on — a regex substitution, not a literal replace, since N varies).
+    _demoted_body=$(printf '%s' "$_demoted_body" | sed -E 's/Findings->Decision Gate: ([0-9]+) blocking finding\(s\) -- FAIL\./Findings->Decision Gate: \1 finding(s) below this round'"'"'s severity floor -- non-blocking./')
+    AGENT_VERDICT_BODIES[$_i]="Non-blocking note (severity ratchet, round ${REVIEW_ROUND}, issue #449): '${AGENT_NAMES[$_i]}' found only ${AGENT_HIGHEST_SEVERITY[$_i]}-severity finding(s), below this round's blocking floor. Recorded for visibility, not blocking this review.
+${_demoted_body}"
   fi
 done
 
