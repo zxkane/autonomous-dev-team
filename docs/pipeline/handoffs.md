@@ -218,6 +218,30 @@ An HTML-comment marker (`<!-- marker-name: key=value ... -->`) is the standing c
 
 All three are read via an **unbounded** full-comment-history scan (`itp_list_comments`, no pagination cap) filtered to `authorKind != "human"` — an ordinary collaborator comment can never be read as a forged marker of any of these three kinds (the same authenticity-filter convention [INV-105]'s own marker read established first). All three are posted on EVERY qualifying round, not only on a trip — a marker that only appears when the breaker fires would never let the SECOND occurrence find the FIRST one's count, and the counter could never advance past 1. "Qualifying round" for the first two markers ALSO requires `_aggregate_has_substantive_fail` (`lib-review-aggregate.sh`, [P1] codex review round 4) — a `fail` aggregate produced entirely by [INV-48] timeout vetoes (no agent posted findings text) does not post either marker, since it carries no evidence a real blocking finding exists.
 
+### Liveness watchdog self-referential marker (Step 6) — [INV-128](invariants.md#inv-128-any-non-terminal-issue-whose-observable-state-fingerprint-label-pr-head-non-idempotent-comment-count-marker-digest-stays-unchanged-for-liveness_notice_ticks-default-6-consecutive-dispatcher-ticks-gets-one-operator-visible-tier-1-escalation-and-after-liveness_stall_ticks-default-18-further-unchanged-ticks-is-unconditionally-transitioned-to-stalled-with-a-structured-reasonliveness-timeout-report--the-pipelines-first-global-liveness-invariant-every-non-terminal-issue-either-changes-observable-state-or-is-escalated-within-a-bounded-number-of-ticks)
+
+Unlike H1-H5c, producer and consumer are the **same actor across ticks**: Step 6 of one dispatcher tick posts the marker, and Step 6 of the *next* tick is the one that reads it back. There is no wrapper on either side of this handoff — it never leaves the dispatcher process.
+
+**Marker**: `<!-- dispatcher-liveness-watchdog: issue=<N> fingerprint=<hash> count=<n> tier1=<0|1> -->`, where `fingerprint = hash(active_label, pr_head_sha_or_empty, non_idempotent_comment_count, marker_set_digest)`.
+
+**Producer-side invariants** (`_liveness_evaluate_issue`, `lib-dispatch.sh`):
+
+- Posted/updated via `itp_post_comment` on **every** evaluated tick, not only when the count advances — mirrors [INV-122](invariants.md#inv-122-a-same-head-repeated-e2e-gate-failure-an-inv-46-fail-verdict-against-an-unchanged-head_sha-e2e_lane_rc-fingerprint-gate_fail_stall_threshold-consecutive-rounds-is-detected-and-halted--the-breaker-transitions-reviewing--stalled-then-posts-one-structured-reasonsame-head-gate-failure-report-gated-on-an-already-stalled-skip-deliberately-not-the-dispatcher-side-may_stall_now-live-pid-pre-gate--see-rationale-below)'s "computed on EVERY round" rule. Without this, the first no-op tick would leave no marker for the second to find, and the counter could never advance.
+- `count` and `tier1` are computed by the pure helpers in `lib-liveness.sh` (`_liveness_next_count`, `_liveness_next_tier1`) from the **prior** marker, then the new marker is composed and posted in the same evaluation — never a two-phase read-then-write across ticks.
+- The marker's own grammar (`dispatcher-liveness-watchdog:`) is included in `_LIVENESS_IDEMPOTENT_PATTERN` and excluded from `marker_set_digest` (INV-128 above) — a self-referential fingerprint would otherwise flip the digest exactly once when tier 1 first posts, then permanently pollute the fingerprint with a component that carries no further information.
+- A post failure (`itp_post_comment` non-zero) is swallowed (`|| true`) — the tier decision and any label transition already happened; only the audit trail is missing for this tick.
+
+**Consumer-side invariants** (the *next* tick's `_liveness_evaluate_issue`):
+
+- Reads back via `itp_list_comments`, filters to `authorKind != "human"`, sorts by `createdAt`, takes the **last** match — the same forgery-resistant pattern [INV-105](invariants.md#inv-105-a-non-converging-devreview-loop-a-failed-substantivedev-actionabletrue-verdict-that-churns-n-completed-zero-commit-dev-resume-rounds-against-a-frozen-pr-head-is-detected-and-halted--the-breaker-transitions-to-stalled-then-posts-one-structured-reasonnon-convergence-report-gated-behind-the-shared-may_stall_now-live-pid-pre-gate-idempotent-per-issue-head-trailer-hash-session_id)/INV-122 above use for their own markers. A human pasting the marker text verbatim at a high count can never inflate the genuine counter.
+- Fingerprint match against the stored marker → `count = stored.count + 1`, `tier1 = stored.tier1` (latch persists). Fingerprint mismatch → full reset (`count = 1`, `tier1 = 0`) — any observable change re-arms both tiers.
+- A malformed, absent, or non-matching marker collapses to `count = 0` (bias to MISS, never a crash) — an `itp_list_comments` transient failure defers the whole tick rather than risking a false read.
+
+**Failure modes**:
+
+- `itp_post_comment` fails after a tier-2 transition already committed the `stalled` label → the label change is durable (already applied via `label_swap` before the report post) but the structured report is missing; an operator sees `stalled` with no explanation until the next tick's log. Non-fatal, self-healing on the next successful post is moot at that point since the issue is already terminal — this is the one place a lost marker has a user-visible (if minor) consequence.
+- `itp_list_comments` fails transiently → the tick logs and returns without evaluating this issue at all (no marker write, no count change) — fail-toward-defer, consistent with [INV-125](invariants.md#inv-125-a-resolved-dev-session-id-whose-completion-is_session_completed-cannot-confirm-a-non-terminal-stop-reason-such-as-api_error-a-non-claude-dev-cli-or-an-unreadable-log-with-no-live-wrapper-gets-the-same-bounded-verdict-aware-recovery-as-the-inv-111-self-heal-branch--and-every-marker-present-same-head-fall-through-escalates-to-mark_stalled-never-the-residual-park)'s preflight posture.
+
 ## Cross-references
 
 - [`state-machine.md`](state-machine.md) — the label edges these handoffs traverse.
