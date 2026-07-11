@@ -2299,6 +2299,8 @@ if [[ -n "$_DIFF_CAP_DIMENSIONS" ]]; then
   if [[ -n "$_diffstat_json" ]]; then
     _DIFF_CAP_CHANGED_FILES=$(jq -r '.changed_files // empty' <<<"$_diffstat_json" 2>/dev/null || true)
     _DIFF_CAP_CHANGED_LINES=$(jq -r '.changed_lines // empty' <<<"$_diffstat_json" 2>/dev/null || true)
+  else
+    log "INV-124: chp_pr_diffstat read failed or returned empty for PR #${PR_NUMBER} — over_reach will be false for every configured dimension (fail-open)."
   fi
   # A read failure (rc≠0, empty, unparseable) leaves both empty — fail-open:
   # review_diff_over_reach never fabricates a warning from an unreadable stat.

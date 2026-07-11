@@ -316,7 +316,8 @@ _gl_api_extract_header() {
 # `.data` object (NOT the `{data: ...}` envelope) so callers project straight
 # into it.
 _gl_graphql() {
-  local query="$1" variables="${2:-{}}"
+  local query="$1" variables="${2:-}"
+  [[ -n "$variables" ]] || variables='{}'
   if [[ -z "${GITLAB_TOKEN:-}" ]]; then
     echo "ERROR: [INV-116] GITLAB_TOKEN is unset — the GitLab GraphQL endpoint requires a Bearer-capable personal/project access token (it does not accept the REST PRIVATE-TOKEN header _gl_http uses)." >&2
     return 1

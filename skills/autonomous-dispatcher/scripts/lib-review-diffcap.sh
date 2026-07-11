@@ -54,26 +54,44 @@ review_diff_soft_cap_dimensions_needed() {
 
 # review_diff_over_reach <changed-files> <changed-lines> <files-cap> <lines-cap>
 #
-# Pure threshold comparison. Each of the four args is either a non-negative
-# integer or empty (empty changed-files/changed-lines means "the provider-seam
-# read did not return this dimension — treat as unreadable"; empty
-# files-cap/lines-cap means "that dimension is not configured").
+# Pure threshold comparison. Each of the four args is EXPECTED to be either a
+# non-negative integer or empty (empty changed-files/changed-lines means "the
+# provider-seam read did not return this dimension — treat as unreadable";
+# empty files-cap/lines-cap means "that dimension is not configured"). A
+# changed-files/changed-lines value that is non-empty but NOT a valid integer
+# (a malformed/multi-line provider-seam response) is treated IDENTICALLY to
+# empty — `_diff_cap_is_uint` gates every numeric comparison below.
 #
 #   over_reach = (files-cap set AND changed-files >  files-cap)
 #             OR (lines-cap set AND changed-lines >  lines-cap)
 #
-# Strict `>` (never `>=` — exactly-at-cap does NOT trigger). An unreadable
-# stat (empty changed-files/changed-lines) NEVER contributes `true` for that
-# dimension, regardless of whether its cap is set — fail-open, never
-# fabricates a warning from an unreadable stat. Echoes `true` or `false`;
-# always rc 0.
+# Strict `>` (never `>=` — exactly-at-cap does NOT trigger). An unreadable OR
+# malformed stat NEVER contributes `true` for that dimension, regardless of
+# whether its cap is set — fail-open, never fabricates a warning from an
+# unreadable stat, and never aborts the caller (no unguarded `-gt` on a
+# non-numeric operand, which would throw under the wrapper's `set -e`).
+# Echoes `true` or `false`; always rc 0.
+# _diff_cap_is_uint <value>
+#
+# rc 0 iff <value> is a non-empty non-negative integer — the guard every
+# numeric comparison below runs through FIRST. `[[ "$x" -gt "$y" ]]` throws
+# "unbound variable"/"syntax error" under `set -e` on a non-numeric operand
+# (e.g. a malformed or multi-line provider-seam response), which would abort
+# the WHOLE review round rather than degrading this one dimension — the
+# opposite of the fail-open contract this file exists to provide. A
+# non-numeric changed-files/changed-lines is therefore treated EXACTLY like
+# an unreadable (empty) stat: never contributes `true`, never crashes.
+_diff_cap_is_uint() {
+  [[ "${1:-}" =~ ^[0-9]+$ ]]
+}
+
 review_diff_over_reach() {
   local changed_files="${1:-}" changed_lines="${2:-}" files_cap="${3:-}" lines_cap="${4:-}"
   local over_reach=false
-  if [[ -n "$files_cap" && -n "$changed_files" ]] && [[ "$changed_files" -gt "$files_cap" ]]; then
+  if [[ -n "$files_cap" ]] && _diff_cap_is_uint "$changed_files" && [[ "$changed_files" -gt "$files_cap" ]]; then
     over_reach=true
   fi
-  if [[ -n "$lines_cap" && -n "$changed_lines" ]] && [[ "$changed_lines" -gt "$lines_cap" ]]; then
+  if [[ -n "$lines_cap" ]] && _diff_cap_is_uint "$changed_lines" && [[ "$changed_lines" -gt "$lines_cap" ]]; then
     over_reach=true
   fi
   printf '%s' "$over_reach"
@@ -93,10 +111,10 @@ review_diff_soft_cap_prompt_note() {
   [[ "$over_reach" == "true" ]] || return 0
 
   local files_exceeded=false lines_exceeded=false
-  if [[ -n "$files_cap" && -n "$changed_files" ]] && [[ "$changed_files" -gt "$files_cap" ]]; then
+  if [[ -n "$files_cap" ]] && _diff_cap_is_uint "$changed_files" && [[ "$changed_files" -gt "$files_cap" ]]; then
     files_exceeded=true
   fi
-  if [[ -n "$lines_cap" && -n "$changed_lines" ]] && [[ "$changed_lines" -gt "$lines_cap" ]]; then
+  if [[ -n "$lines_cap" ]] && _diff_cap_is_uint "$changed_lines" && [[ "$changed_lines" -gt "$lines_cap" ]]; then
     lines_exceeded=true
   fi
 

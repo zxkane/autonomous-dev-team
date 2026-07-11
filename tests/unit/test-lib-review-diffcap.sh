@@ -98,6 +98,58 @@ assert_eq "both exceeded → true" "true" \
 assert_eq "both caps unset → false regardless of stats" "false" \
   "$(review_diff_over_reach "9999" "9999" "" "")"
 
+# Non-numeric changed_files/changed_lines (a malformed/corrupted provider-seam
+# response) must degrade to "unreadable" — NOT crash the caller. Run under
+# `set -euo pipefail` in a subshell to reproduce the wrapper's real shell
+# options: pre-fix, `[[ "abc" -gt "40" ]]` throws "unbound variable" and the
+# subshell aborts before ever reaching `echo rc=$?`.
+NONNUM_OUT=$(bash -c "set -euo pipefail; source '$LIB'; review_diff_over_reach 'abc' '' '40' ''; echo; echo RC=\$?" 2>&1)
+case "$NONNUM_OUT" in
+  *"RC=0"*)
+    case "$NONNUM_OUT" in
+      false*) echo -e "  ${GREEN}PASS${NC}: non-numeric changed_files degrades to false under set -e (no crash)"; PASS=$((PASS+1));;
+      *) echo -e "  ${RED}FAIL${NC}: non-numeric changed_files did not echo false"; echo "      got: $NONNUM_OUT"; FAIL=$((FAIL+1));;
+    esac
+    ;;
+  *)
+    echo -e "  ${RED}FAIL${NC}: non-numeric changed_files CRASHED the caller under set -e"; echo "      got: $NONNUM_OUT"; FAIL=$((FAIL+1));;
+esac
+
+NONNUM_LINES_OUT=$(bash -c "set -euo pipefail; source '$LIB'; review_diff_over_reach '' 'abc' '' '3000'; echo; echo RC=\$?" 2>&1)
+case "$NONNUM_LINES_OUT" in
+  *"RC=0"*)
+    case "$NONNUM_LINES_OUT" in
+      false*) echo -e "  ${GREEN}PASS${NC}: non-numeric changed_lines degrades to false under set -e (no crash)"; PASS=$((PASS+1));;
+      *) echo -e "  ${RED}FAIL${NC}: non-numeric changed_lines did not echo false"; echo "      got: $NONNUM_LINES_OUT"; FAIL=$((FAIL+1));;
+    esac
+    ;;
+  *)
+    echo -e "  ${RED}FAIL${NC}: non-numeric changed_lines CRASHED the caller under set -e"; echo "      got: $NONNUM_LINES_OUT"; FAIL=$((FAIL+1));;
+esac
+
+# A decimal value (a plausible malformed-jq-output shape) must also degrade,
+# not throw a bash arithmetic-syntax error.
+DECIMAL_OUT=$(bash -c "set -euo pipefail; source '$LIB'; review_diff_over_reach '45.5' '' '40' ''; echo; echo RC=\$?" 2>&1)
+case "$DECIMAL_OUT" in
+  *"RC=0"*)
+    case "$DECIMAL_OUT" in
+      false*) echo -e "  ${GREEN}PASS${NC}: decimal changed_files degrades to false under set -e (no crash)"; PASS=$((PASS+1));;
+      *) echo -e "  ${RED}FAIL${NC}: decimal changed_files did not echo false"; echo "      got: $DECIMAL_OUT"; FAIL=$((FAIL+1));;
+    esac
+    ;;
+  *)
+    echo -e "  ${RED}FAIL${NC}: decimal changed_files CRASHED the caller under set -e"; echo "      got: $DECIMAL_OUT"; FAIL=$((FAIL+1));;
+esac
+
+# review_diff_soft_cap_prompt_note must degrade the same way — a non-numeric
+# stat must not crash the note renderer when over_reach happens to be "true"
+# (e.g. because the OTHER dimension legitimately exceeded its cap).
+NOTE_NONNUM_OUT=$(bash -c "set -euo pipefail; source '$LIB'; review_diff_soft_cap_prompt_note 'true' 'abc' '4000' '40' '3000' >/dev/null; echo RC=\$?" 2>&1)
+case "$NOTE_NONNUM_OUT" in
+  "RC=0") echo -e "  ${GREEN}PASS${NC}: review_diff_soft_cap_prompt_note does not crash on a non-numeric changed_files under set -e"; PASS=$((PASS+1));;
+  *) echo -e "  ${RED}FAIL${NC}: review_diff_soft_cap_prompt_note CRASHED on a non-numeric changed_files"; echo "      got: $NOTE_NONNUM_OUT"; FAIL=$((FAIL+1));;
+esac
+
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== review_diff_soft_cap_prompt_note ==="

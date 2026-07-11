@@ -763,5 +763,67 @@ assert_eq "TC-GLT-085: ARG_MAX-boundary body (~128KB) via --body-file → rc 0" 
 
 # ===========================================================================
 echo ""
+echo "=== TC-GLT-090..092: _gl_graphql (#452) — the {} default-expansion regression ==="
+# ===========================================================================
+# TC-GLT-090: variables OMITTED → the request body carries a well-formed
+# empty object {} (a #452 code-review [Critical] finding: bash parses
+# "${2:-{}}" as default-value "{" followed by a literal trailing "}", NOT
+# the two-char string "{}" — so a query WITH variables got a spurious
+# trailing "}" appended, corrupting the JSON on every call that passed any).
+_reset_control
+export _CURL_STATUS_SEQ="200"
+_gql_body_noargs="$WORK/gql-body-noargs.json"
+printf '{"data":{"ok":true}}' > "$_gql_body_noargs"
+export _CURL_BODY_SEQ="$_gql_body_noargs"
+out=$(_run_with_lib "_gl_graphql 'query { x }'" 2>&1); rc=$?
+assert_eq "TC-GLT-090: _gl_graphql with NO variables arg → rc 0" "0" "$rc"
+# The recorded curl argv contains --data-binary "<body>" as two consecutive
+# array entries; extract the JSON payload and prove it parses AND its
+# .variables key is exactly {}.
+_gql_payload_noargs=$(awk '/^--data-binary$/{getline; print; exit}' "$_CURL_ARGV_FILE")
+if jq -e '.variables == {}' >/dev/null 2>&1 <<<"$_gql_payload_noargs"; then
+  ok "TC-GLT-090: request body's .variables is exactly {} (no args case)"
+else
+  bad "TC-GLT-090: request body's .variables is NOT {} — got: ${_gql_payload_noargs:0:200}"
+fi
+
+# TC-GLT-091: variables SUPPLIED → the request body is valid JSON with NO
+# spurious trailing brace (the exact regression: pre-fix this produced
+# {"query":"...","variables":{"iid":"42"}} PLUS a stray "}" that broke
+# `jq -cn --argjson vars "$variables"` upstream, so _gl_graphql returned 1
+# on every variables-bearing call before the request was even sent).
+_reset_control
+export _CURL_STATUS_SEQ="200"
+_gql_body_args="$WORK/gql-body-args.json"
+printf '{"data":{"project":{"mergeRequest":{"diffStatsSummary":{"additions":10,"deletions":5}}}}}' > "$_gql_body_args"
+export _CURL_BODY_SEQ="$_gql_body_args"
+out=$(_run_with_lib "_gl_graphql 'query(\$iid: String!) { x }' '{\"iid\":\"42\"}'" 2>&1); rc=$?
+assert_eq "TC-GLT-091: _gl_graphql WITH a variables arg → rc 0 (pre-fix: rc 1, request never sent)" "0" "$rc"
+_gql_payload_args=$(awk '/^--data-binary$/{getline; print; exit}' "$_CURL_ARGV_FILE")
+if jq -e '.variables == {"iid":"42"}' >/dev/null 2>&1 <<<"$_gql_payload_args"; then
+  ok "TC-GLT-091: request body's .variables round-trips exactly {\"iid\":\"42\"} (no stray trailing brace)"
+else
+  bad "TC-GLT-091: request body's .variables is malformed — got: ${_gql_payload_args:0:200}"
+fi
+assert_contains "TC-GLT-091: _gl_graphql echoes the inner .data object (not the {data:...} envelope)" \
+  '"additions":10' "$out"
+
+# TC-GLT-092: an empty-string variables arg (as chp_gitlab_pr_diffstat could
+# pass on an upstream jq-encode failure) is treated the SAME as omitted —
+# still degrades to {}, never sends a malformed body.
+_reset_control
+export _CURL_STATUS_SEQ="200"
+export _CURL_BODY_SEQ="$_gql_body_noargs"
+out=$(_run_with_lib "_gl_graphql 'query { x }' ''" 2>&1); rc=$?
+assert_eq "TC-GLT-092: _gl_graphql with an EMPTY-STRING variables arg → rc 0" "0" "$rc"
+_gql_payload_empty=$(awk '/^--data-binary$/{getline; print; exit}' "$_CURL_ARGV_FILE")
+if jq -e '.variables == {}' >/dev/null 2>&1 <<<"$_gql_payload_empty"; then
+  ok "TC-GLT-092: empty-string variables arg degrades to {} (same as omitted)"
+else
+  bad "TC-GLT-092: empty-string variables arg produced malformed body — got: ${_gql_payload_empty:0:200}"
+fi
+
+# ===========================================================================
+echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 [[ "$FAIL" -eq 0 ]] && exit 0 || exit 1

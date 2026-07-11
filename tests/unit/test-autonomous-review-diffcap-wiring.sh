@@ -58,12 +58,13 @@ _run_block() {
     RUN_ID="run-test"
     PR_DIFF_SOFT_CAP_FILES="${1:-}"
     PR_DIFF_SOFT_CAP_LINES="${2:-}"
-    log() { :; }
     _CALL_COUNT_FILE=$(mktemp)
     _METRICS_COUNT_FILE=$(mktemp)
     _METRICS_LAST_FILE=$(mktemp)
+    _LOG_FILE=$(mktemp)
     echo 0 > "$_CALL_COUNT_FILE"
     echo 0 > "$_METRICS_COUNT_FILE"
+    log() { printf '%s\n' "$*" >> "$_LOG_FILE"; }
     chp_pr_diffstat() {
       local n; n=$(<"$_CALL_COUNT_FILE"); n=$((n + 1)); echo "$n" > "$_CALL_COUNT_FILE"
       printf '%s' "${DIFFSTAT_PAYLOAD:-}"
@@ -80,7 +81,8 @@ _run_block() {
     echo "METRICS_LAST_ARGS=$(cat "$_METRICS_LAST_FILE" 2>/dev/null)"
     echo "OVER_REACH=${_DIFF_CAP_OVER_REACH}"
     echo "PROMPT_NOTE_LEN=${#_DIFF_CAP_PROMPT_NOTE}"
-    rm -f "$_CALL_COUNT_FILE" "_METRICS_COUNT_FILE" "$_METRICS_LAST_FILE" 2>/dev/null
+    echo "LOG_OUTPUT=$(cat "$_LOG_FILE" 2>/dev/null | tr '\n' '|')"
+    rm -f "$_CALL_COUNT_FILE" "_METRICS_COUNT_FILE" "$_METRICS_LAST_FILE" "$_LOG_FILE" 2>/dev/null
   )
 }
 
@@ -135,6 +137,16 @@ assert_eq "under-cap: over_reach=false" "false" "$(_field "$OUT_UNDER" OVER_REAC
 OUT_READFAIL=$(DIFFSTAT_PAYLOAD='' _run_block "40" "3000")
 assert_eq "diffstat read failure: over_reach=false (fail-open)" "false" "$(_field "$OUT_READFAIL" OVER_REACH)"
 assert_eq "diffstat read failure: metrics_emit still called once" "1" "$(_field "$OUT_READFAIL" METRICS_CALLS)"
+case "$(_field "$OUT_READFAIL" LOG_OUTPUT)" in
+  *"chp_pr_diffstat read failed"*) ok "diffstat read failure: a diagnostic log line names the read failure (debuggability)";;
+  *) bad "diffstat read failure: no diagnostic log line emitted"; echo "      got: $(_field "$OUT_READFAIL" LOG_OUTPUT)";;
+esac
+
+# The happy path must NOT emit the read-failure diagnostic.
+case "$(_field "$OUT_ENABLED" LOG_OUTPUT)" in
+  *"chp_pr_diffstat read failed"*) bad "happy path: unexpectedly emitted the read-failure diagnostic";;
+  *) ok "happy path: no read-failure diagnostic emitted";;
+esac
 
 # ===========================================================================
 echo ""
@@ -215,6 +227,34 @@ case "$RENDER_DISABLED" in
   *)
     ok "disabled-state render contains no diff-size advisory section";;
 esac
+
+# ===========================================================================
+echo ""
+echo "=== TC-OVERREACH-016: verdict-aggregation code has ZERO coupling to over_reach ==="
+# ===========================================================================
+# Structural regression guard for the INV-124 "soft signal, never a gate"
+# invariant: none of the verdict-aggregation / gate-classification libs may
+# ever reference _DIFF_CAP_*/over_reach/diff_cap. This is a cheap grep-based
+# proof that a future edit cannot accidentally wire the signal into a
+# PASS/FAIL decision without this test catching it — the aggregation code's
+# CURRENT independence from `over_reach` is what makes "toggling over_reach
+# leaves aggregation output byte-identical" true by construction.
+AGG_LIBS=(
+  "$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-review-aggregate.sh"
+  "$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-review-classify.sh"
+  "$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-review-mergeable.sh"
+  "$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-review-request-changes.sh"
+  "$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-review-verdict.sh"
+)
+_agg_hit=0
+for _al in "${AGG_LIBS[@]}"; do
+  [ -f "$_al" ] || continue
+  if grep -qE '_DIFF_CAP|over_reach|diff_cap' "$_al"; then
+    bad "TC-OVERREACH-016: $(basename "$_al") references the diff-cap signal — verdict aggregation must have ZERO coupling to over_reach"
+    _agg_hit=1
+  fi
+done
+[ "$_agg_hit" -eq 0 ] && ok "TC-OVERREACH-016: no verdict-aggregation/gate-classification lib references _DIFF_CAP/over_reach/diff_cap"
 
 # ===========================================================================
 echo ""
