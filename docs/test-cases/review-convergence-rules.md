@@ -71,6 +71,7 @@ itself is too heavy to run end-to-end.
 | TC-REVIEW-CONV-026 | Marker authored by a bot (`authorKind != "human"`) | read normally |
 | TC-REVIEW-CONV-027 | Marker round-trip: construct then parse | fields match exactly |
 | TC-REVIEW-CONV-027c/d | `PR_HEAD_SHA` is empty (transient `chp_pr_view` failure) | wrapper defaults `REVIEW_ROUND=1` (strictest floor) and skips posting a marker this round — mirrors INV-122's own non-empty-`PR_HEAD_SHA` guard |
+| TC-REVIEW-CONV-027e | A bot comment with a `null` `.body` (a real GitHub REST shape) is present alongside a genuine `review-round-counter` marker | the jq scan does not crash (`.body \| type == "string"` guard before `contains()`, mirroring `_review_cap_prior_marker`'s own guard); the null row is skipped and the genuine marker is still read, so `REVIEW_ROUND` correctly increments instead of silently resetting to 1 |
 
 ### Group D — INV-127 round-cap breaker (TC-REVIEW-CONV-028..038)
 

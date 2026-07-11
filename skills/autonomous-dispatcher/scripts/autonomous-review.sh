@@ -1128,9 +1128,17 @@ log "PR branch: ${PR_BRANCH:-UNKNOWN} (HEAD: ${PR_HEAD_SHA:0:7})"
 # round=1 (round 1-2's floor is P0-P3, the strictest — never silently widen
 # the blocking floor on an unknown head) and skip posting a marker this round
 # (posting one keyed on an empty head would corrupt a LATER real-head read).
+#
+# [P1] (#449 codex review round 6): `.body | type == "string"` guard before
+# `contains()` — mirrors `_review_cap_prior_marker`'s (lib-review-cap.sh) own
+# guard. GitHub can return a bot comment with `body: null` (a real REST
+# shape); `contains()` on a non-string is a jq RUNTIME ERROR that aborts the
+# WHOLE pipeline, not a per-row non-match, so one such comment collapses
+# `_rr_prior_marker` to "" via the `|| echo ""` fallback — silently resetting
+# REVIEW_ROUND to 1 on a same-head re-review instead of incrementing it.
 if [[ -n "$PR_HEAD_SHA" ]]; then
   _rr_prior_marker=$(itp_list_comments "$ISSUE_NUMBER" 2>/dev/null \
-    | jq -r '[.[] | select(.authorKind != "human") | select(.body | contains("review-round-counter:"))] | sort_by(.createdAt) | last | .body // ""' \
+    | jq -r '[.[] | select(.authorKind != "human") | select(.body | type == "string") | select(.body | contains("review-round-counter:"))] | sort_by(.createdAt) | last | .body // ""' \
     2>/dev/null || echo "")
   REVIEW_ROUND=$(_review_round_next_count "$_rr_prior_marker" "$PR_HEAD_SHA")
 else

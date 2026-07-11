@@ -236,6 +236,18 @@ round1_default_line=$(awk -v start="$round1_guard_line" 'NR>start && /REVIEW_ROU
 assert_eq "TC-REVIEW-CONV-027d empty-PR_HEAD_SHA branch defaults REVIEW_ROUND to 1 (strictest floor)" "true" \
   "$([[ -n "$round1_default_line" ]] && echo true || echo false)"
 
+# TC-REVIEW-CONV-027e: [P1] #449 codex review round 6 — a null .body (a real
+# GitHub REST shape) must not crash the review-round-counter jq scan.
+# contains() on a non-string is a jq RUNTIME ERROR, not a non-match; without
+# a `.body | type == "string"` guard before contains(), one such row
+# collapses the whole scan via the `|| echo ""` fallback, silently resetting
+# REVIEW_ROUND to 1 on a same-head re-review instead of incrementing it.
+# Pinned as a wiring grep (the round-counter read is inline at the wrapper
+# call site, not extracted into a pure fixture-testable function like
+# _review_cap_prior_marker).
+assert_contains "TC-REVIEW-CONV-027e wrapper guards .body type before contains() on the round-counter read" \
+  "$(cat "$WRAPPER")" 'select(.body | type == "string") | select(.body | contains("review-round-counter:"))'
+
 # ===========================================================================
 echo
 echo "=== TC-REVIEW-CONV-028..038: INV-127 round-cap breaker ==="
