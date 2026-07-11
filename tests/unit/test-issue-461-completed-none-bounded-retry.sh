@@ -178,7 +178,7 @@ assert_eq "TC-461-NONE-001 verb order = fetch,acquire,list,post,reset_log,label_
 assert_match "TC-461-NONE-001 notice carries INV-12-no-pr-fresh-dev marker" "INV-12-no-pr-fresh-dev:sidA" "$(_trace_nth itp_post_comment 1)"
 assert_eq "TC-461-NONE-001 label_swap argv = issue,pending-dev,in-progress" "label_swap${US}601${US}pending-dev${US}in-progress" "$(_trace_nth label_swap 1)"
 assert_eq "TC-461-NONE-001 dispatch argv = dev-new,issue" "dispatch${US}dev-new${US}601" "$(_trace_nth dispatch 1)"
-assert_eq "TC-461-NONE-001 NO INV-12-completed post" "" "$(_trace_verbs | grep -c 'itp_transition_state' | grep -v '^0$')"
+assert_eq "TC-461-NONE-001 no bare itp_transition_state call (label_swap owns the transition)" "" "$(_trace_verbs | grep -c 'itp_transition_state' | grep -v '^0$')"
 
 # TC-461-NONE-002 — same but the INV-12-no-pr-fresh-dev marker is already
 # present (repeat tick, same session id): dispatch mechanics still proceed
