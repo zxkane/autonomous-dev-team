@@ -104,31 +104,56 @@ _review_cap_threshold() {
 
 # _review_cap_prior_marker <comments_json>
 #
-# Pure resume-cutoff logic ([P1] #3, #449 codex review): given the FULL
-# itp_list_comments JSON array for the issue, echoes the prior
-# dispatcher-review-cap-breaker marker body that _review_cap_next_count
+# Pure resume-cutoff logic ([P1] #3 + follow-up [P1] #449 codex review round
+# 3): given the FULL itp_list_comments JSON array for the issue, echoes the
+# prior dispatcher-review-cap-breaker marker body that _review_cap_next_count
 # should read — or "" if none qualifies. Extracted from the wrapper call
 # site (rather than left as an inline two-query block) so the fix's crux
-# behavior — the cutoff must exclude the TRIP REPORT'S OWN embedded marker —
-# is fixture-testable in isolation, not just wiring-greppable; a mutation
-# like `>` → `>=` on the cutoff comparison is invisible to a source grep but
-# changes this function's return value on a constructed fixture.
+# behavior — the cutoff must exclude the TRIP REPORT'S OWN embedded marker,
+# AND must reset on an intervening non-failing round — is fixture-testable
+# in isolation, not just wiring-greppable; a mutation like `>` → `>=` on
+# either cutoff comparison is invisible to a source grep but changes this
+# function's return value on a constructed fixture.
 #
-# Two-step cutoff-then-scan, mirroring [INV-05]'s "Marking as stalled"
+# Three-input cutoff-then-scan, mirroring [INV-05]'s "Marking as stalled"
 # cutoff convention (lib-dispatch.sh's count_retries family):
-#   1. Cutoff = the latest authorKind!=human comment whose body matches the
-#      trip-report heading ("Review-round-cap circuit-breaker tripped"); the
-#      epoch if no trip has ever been reported. Because a trip report EMBEDS
-#      its own marker (see autonomous-review.sh's ROUNDCAPREPORT heredoc),
-#      without this cutoff the very next round would read that embedded
-#      marker back as "the latest marker" and re-trip immediately after an
-#      operator removes `stalled` to resume.
-#   2. Scan authorKind!=human comments containing the marker fence, STRICTLY
-#      (`>`, not `>=`) after the cutoff — the strict inequality is what
-#      excludes the trip report's own marker (its createdAt EQUALS the
-#      cutoff) while still admitting a genuinely later post-resume marker.
-#      Echo the latest qualifying body, or "" if none.
-# Both steps additionally require `.body` to be a JSON string before
+#   1. trip_cutoff = the latest authorKind!=human comment whose body matches
+#      the trip-report heading ("Review-round-cap circuit-breaker tripped");
+#      the epoch if no trip has ever been reported. Because a trip report
+#      EMBEDS its own marker (see autonomous-review.sh's ROUNDCAPREPORT
+#      heredoc), without this cutoff the very next round would read that
+#      embedded marker back as "the latest marker" and re-trip immediately
+#      after an operator removes `stalled` to resume.
+#   2. reset_cutoff ([P1] #449 review round 3): the latest authorKind!=human
+#      comment carrying a `<!-- review-verdict: … -->` trailer whose verdict
+#      is `passed` or `failed-non-substantive` (NOT `failed-substantive`);
+#      the epoch if none exists. `dispatcher-review-cap-breaker` markers are
+#      posted ONLY on `failed-substantive` rounds (see autonomous-review.sh's
+#      `$AGGREGATE == "fail"` gate), so an intervening PASS or
+#      failed-non-substantive round leaves no marker of its own to advance
+#      the cutoff past — without this second cutoff, a later
+#      failed-substantive round would resume counting from the OLDER
+#      pre-intervening-round marker instead of restarting at 1, letting the
+#      breaker trip on N total (not N CONSECUTIVE) substantive failures.
+#      Anchored to the literal `passed`/`failed-non-substantive` tokens (not
+#      a bare `failed-` prefix) so it never matches `failed-substantive`
+#      itself. FULL-BODY anchored (`^...$`, not a bare `test()` substring
+#      search) — mirrors `lib-dispatch.sh::authentic_verdict()`'s own
+#      anchored pattern (its round-13/14 fix history is exactly this bug: a
+#      bare substring/`startswith` match lets a REAL agent's own FAIL body
+#      that merely quotes or discusses a prior trailer in prose — e.g. "the
+#      earlier `<!-- review-verdict: passed -->` trailer was wrong" — falsely
+#      satisfy the pattern. `emit_verdict_trailer` always posts the genuine
+#      trailer as a bare, standalone comment with no other text, so the
+#      anchor never rejects a real trailer while it reliably excludes any
+#      trailer-shaped substring embedded in a larger comment.
+#   3. cutoff = max(trip_cutoff, reset_cutoff). Scan authorKind!=human
+#      comments containing the marker fence, STRICTLY (`>`, not `>=`) after
+#      the cutoff — the strict inequality is what excludes the trip report's
+#      own marker (its createdAt EQUALS trip_cutoff) while still admitting a
+#      genuinely later post-resume marker. Echo the latest qualifying body,
+#      or "" if none.
+# All three steps additionally require `.body` to be a JSON string before
 # `test()`/`contains()` runs on it — a bot-authored comment can carry a
 # `null` body (rare, but a real GitHub REST shape), and `test()` on `null`
 # is a jq RUNTIME ERROR, not merely a non-match; guarding the type keeps a
@@ -140,14 +165,13 @@ _review_cap_threshold() {
 _review_cap_prior_marker() {
   local comments_json="$1"
   jq -r '
-    ( [ .[] | select(.authorKind != "human")
-             | select(.body | type == "string")
-             | select(.body | test("Review-round-cap circuit-breaker tripped")) ]
-      | sort_by(.createdAt) | last | .createdAt // "1970-01-01T00:00:00Z" ) as $cutoff
-    | [ .[] | select(.authorKind != "human")
-             | select(.body | type == "string")
-             | select(.body | contains("dispatcher-review-cap-breaker:"))
-             | select(.createdAt > $cutoff) ]
-      | sort_by(.createdAt) | last | .body // ""
+    ( [ .[] | select(.authorKind != "human") | select(.body | type == "string") ] ) as $rows
+    | ( [ $rows[] | select(.body | test("Review-round-cap circuit-breaker tripped")) | .createdAt ]
+        + ["1970-01-01T00:00:00Z"] | max ) as $trip_cutoff
+    | ( [ $rows[] | select(.body | test("^<!--[[:space:]]*review-verdict:[[:space:]]*(passed|failed-non-substantive)[^>]*-->[[:space:]]*$")) | .createdAt ]
+        + ["1970-01-01T00:00:00Z"] | max ) as $reset_cutoff
+    | ( [$trip_cutoff, $reset_cutoff] | max ) as $cutoff
+    | ( [ $rows[] | select(.body | contains("dispatcher-review-cap-breaker:")) | select(.createdAt > $cutoff) ]
+        | sort_by(.createdAt) | last | .body // "" )
   ' <<<"$comments_json" 2>/dev/null || printf ''
 }

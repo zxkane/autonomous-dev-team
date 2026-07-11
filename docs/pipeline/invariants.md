@@ -7195,6 +7195,51 @@ qualifying prior marker and starts a genuinely new count at 1. No trip yet ⇒
 the cutoff is the epoch and every marker counts, unchanged from the
 pre-cutoff behavior.
 
+**Reset on an intervening non-failing round ([P1] codex review round 3, #449,
+fixed pre-merge)**: the trip-report cutoff above only excludes markers at or
+before a past TRIP. It does not, by itself, reset the series when a
+`Review PASSED` or `failed-non-substantive` round lands BETWEEN two
+`failed-substantive` rounds — no `dispatcher-review-cap-breaker` marker is
+posted on a PASS or non-substantive round (the marker is posted only inside
+the `$AGGREGATE == "fail"` substantive branch), so without an additional
+cutoff the NEXT substantive-FAIL round would read the OLDER
+pre-intervening-round marker back and resume counting from it, letting the
+breaker trip on `REVIEW_CONVERGENCE_CAP` *total* substantive failures rather
+than `REVIEW_CONVERGENCE_CAP` *consecutive* ones — silently defeating the
+"consecutive" half of this invariant's own fingerprint. Fixed by adding a
+second cutoff input to `_review_cap_prior_marker`: the latest
+authorKind!=human comment carrying a `<!-- review-verdict: … -->` trailer
+whose verdict is `passed` or `failed-non-substantive` (anchored to those
+literal tokens so it never matches `failed-substantive` itself). The
+EFFECTIVE cutoff used for the marker scan is `max(trip_cutoff, reset_cutoff)`
+— whichever boundary is more recent governs, so a reset that lands after the
+last trip excludes an intervening marker even though the trip itself would
+not have, and conversely a stale reset that predates the last trip is
+correctly superseded by the trip cutoff. The `authorKind != "human"`
+authenticity filter applies to the reset scan identically to the marker scan
+— a collaborator quoting `<!-- review-verdict: passed -->` in an ordinary
+comment cannot forge a reset.
+
+**Reset-cutoff is FULL-BODY anchored, not a substring test ([CRITICAL,
+silent-failure-hunter finding, fixed pre-merge])**: the reset-cutoff pattern
+is `^<!--...-->[[:space:]]*$` — it requires the trailer to be the ENTIRE
+comment body, not merely present somewhere in it. A bare `test()` substring
+match (the pattern's first-draft shape) would have let a genuine review
+agent's OWN `Review findings:` FAIL body falsely satisfy the reset — agents
+are prompted to read all prior issue comments and can legitimately quote or
+discuss an earlier trailer in prose (e.g. "the earlier `<!-- review-verdict:
+passed -->` trailer turned out to be wrong"). Because that FAIL comment is
+itself `authorKind != "human"` (bot/App-authored), the authenticity filter
+above does not catch this case — only the full-body anchor does. This is the
+identical bug class `lib-dispatch.sh::authentic_verdict()` was hardened
+against in its own round-13/14 fix history (a `startswith`-only match let
+extra trailing content past the gate); `_review_cap_prior_marker`'s
+reset-cutoff query reuses that anchored shape rather than reintroducing the
+weaker substring form. `emit_verdict_trailer` always posts the genuine
+trailer as a bare, standalone comment with no other text, so the anchor
+never rejects an authentic reset while reliably excluding a trailer-shaped
+substring embedded in a larger comment.
+
 **Threshold**: `REVIEW_CONVERGENCE_CAP` (new env var, default `5`), read via
 the same regex-then-fallback shape as [INV-122]'s `GATE_FAIL_STALL_THRESHOLD`
 read (`lib-review-cap.sh::_review_cap_threshold`), plus an explicit floor of

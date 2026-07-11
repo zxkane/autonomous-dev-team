@@ -608,6 +608,163 @@ assert_eq "TC-REVIEW-CONV-059c a null .body row does not crash the scan and is s
 assert_contains "TC-REVIEW-CONV-059d wrapper calls _review_cap_prior_marker instead of inlining the cutoff-then-scan" \
   "$(cat "$WRAPPER")" '_rc_prior_marker=$(_review_cap_prior_marker "$_rc_comments_json")'
 
+# TC-REVIEW-CONV-060..066: [P1] codex review round 3 — an intervening
+# non-`failed-substantive` round (a `Review PASSED` or `failed-non-substantive`
+# round) must reset the round-cap series, not merely the trip report. Without
+# this, `dispatcher-review-cap-breaker` markers are posted ONLY on
+# `failed-substantive` rounds, so the cutoff-then-scan would resume counting
+# from the OLDER pre-intervening-round marker on the next substantive fail,
+# letting the breaker trip on N total (not N CONSECUTIVE) substantive
+# failures. The reset cutoff is the latest `<!-- review-verdict: … -->`
+# trailer whose verdict is `passed` or `failed-non-substantive` (never
+# `failed-substantive` itself).
+
+# TC-REVIEW-CONV-060: an intervening PASS after a failed-substantive round
+# resets the series — no dispatcher-review-cap-breaker marker exists yet
+# after the reset (none is posted on a PASS round), so no prior marker
+# qualifies.
+FIXTURE_060=$(cat <<'JSON'
+[
+  {"authorKind":"bot","createdAt":"2026-01-01T10:00:00Z","body":"<!-- dispatcher-review-cap-breaker: issue=1 head=aaa round=3 -->"},
+  {"authorKind":"bot","createdAt":"2026-01-01T11:00:00Z","body":"<!-- review-verdict: passed -->"}
+]
+JSON
+)
+assert_eq "TC-REVIEW-CONV-060 an intervening PASS resets the series (no qualifying prior marker)" "" \
+  "$(_review_cap_prior_marker "$FIXTURE_060")"
+assert_eq "TC-REVIEW-CONV-060b next_count after a PASS-reset restarts at 1, not 4" "1" \
+  "$(_review_cap_next_count "$(_review_cap_prior_marker "$FIXTURE_060")")"
+
+# TC-REVIEW-CONV-061: an intervening failed-non-substantive round also resets
+# the series (out-of-scope for REVIEW_CONVERGENCE_CAP, but its trailer must
+# still act as a reset boundary for the NEXT substantive failure).
+FIXTURE_061=$(cat <<'JSON'
+[
+  {"authorKind":"bot","createdAt":"2026-01-01T10:00:00Z","body":"<!-- dispatcher-review-cap-breaker: issue=1 head=aaa round=3 -->"},
+  {"authorKind":"bot","createdAt":"2026-01-01T11:00:00Z","body":"<!-- review-verdict: failed-non-substantive cause=other -->"}
+]
+JSON
+)
+assert_eq "TC-REVIEW-CONV-061 an intervening failed-non-substantive round resets the series" "" \
+  "$(_review_cap_prior_marker "$FIXTURE_061")"
+
+# TC-REVIEW-CONV-062: a failed-substantive verdict trailer must NOT be
+# mistaken for a reset (regression pin against the `failed-non-substantive`
+# vs `failed-substantive` substring confusion) — the prior marker still
+# qualifies and the series still accumulates.
+FIXTURE_062=$(cat <<'JSON'
+[
+  {"authorKind":"bot","createdAt":"2026-01-01T10:00:00Z","body":"<!-- dispatcher-review-cap-breaker: issue=1 head=aaa round=3 -->"},
+  {"authorKind":"bot","createdAt":"2026-01-01T11:00:00Z","body":"<!-- review-verdict: failed-substantive dev-actionable=false -->"}
+]
+JSON
+)
+assert_eq "TC-REVIEW-CONV-062 a failed-substantive trailer is NOT a reset boundary" \
+  "<!-- dispatcher-review-cap-breaker: issue=1 head=aaa round=3 -->" \
+  "$(_review_cap_prior_marker "$FIXTURE_062")"
+assert_eq "TC-REVIEW-CONV-062b next_count still accumulates across a failed-substantive trailer" "4" \
+  "$(_review_cap_next_count "$(_review_cap_prior_marker "$FIXTURE_062")")"
+
+# TC-REVIEW-CONV-063: a HUMAN-authored `review-verdict: passed` forgery must
+# NOT reset the series (mirrors the existing authenticity filter on the
+# marker fence itself, TC-059b) — only a genuine bot/App trailer resets.
+FIXTURE_063=$(cat <<'JSON'
+[
+  {"authorKind":"bot","createdAt":"2026-01-01T10:00:00Z","body":"<!-- dispatcher-review-cap-breaker: issue=1 head=aaa round=3 -->"},
+  {"authorKind":"human","createdAt":"2026-01-01T11:00:00Z","body":"<!-- review-verdict: passed -->"}
+]
+JSON
+)
+assert_eq "TC-REVIEW-CONV-063 a human-authored review-verdict:passed forgery does not reset the series" \
+  "<!-- dispatcher-review-cap-breaker: issue=1 head=aaa round=3 -->" \
+  "$(_review_cap_prior_marker "$FIXTURE_063")"
+
+# TC-REVIEW-CONV-064: the reset cutoff and the trip cutoff combine via max()
+# — a reset that lands AFTER the most recent trip report still excludes the
+# older marker (the later of the two cutoffs governs).
+FIXTURE_064=$(cat <<'JSON'
+[
+  {"authorKind":"bot","createdAt":"2026-01-01T10:00:00Z","body":"<!-- dispatcher-review-cap-breaker: issue=1 head=aaa round=4 -->"},
+  {"authorKind":"bot","createdAt":"2026-01-01T11:00:00Z","body":"<!-- dispatcher-review-cap-breaker: issue=1 head=bbb round=5 -->\n## Review-round-cap circuit-breaker tripped"},
+  {"authorKind":"bot","createdAt":"2026-01-01T12:00:00Z","body":"<!-- dispatcher-review-cap-breaker: issue=1 head=ccc round=1 -->"},
+  {"authorKind":"bot","createdAt":"2026-01-01T13:00:00Z","body":"<!-- review-verdict: passed -->"}
+]
+JSON
+)
+assert_eq "TC-REVIEW-CONV-064 a reset later than the last trip report also excludes the post-resume marker" "" \
+  "$(_review_cap_prior_marker "$FIXTURE_064")"
+assert_eq "TC-REVIEW-CONV-064b next_count after the later reset restarts at 1" "1" \
+  "$(_review_cap_next_count "$(_review_cap_prior_marker "$FIXTURE_064")")"
+
+# TC-REVIEW-CONV-065: conversely, a reset EARLIER than the last trip report
+# is superseded by the trip cutoff — unchanged TC-057/058 behavior.
+FIXTURE_065=$(cat <<'JSON'
+[
+  {"authorKind":"bot","createdAt":"2026-01-01T09:00:00Z","body":"<!-- review-verdict: passed -->"},
+  {"authorKind":"bot","createdAt":"2026-01-01T10:00:00Z","body":"<!-- dispatcher-review-cap-breaker: issue=1 head=aaa round=4 -->"},
+  {"authorKind":"bot","createdAt":"2026-01-01T11:00:00Z","body":"<!-- dispatcher-review-cap-breaker: issue=1 head=bbb round=5 -->\n## Review-round-cap circuit-breaker tripped"},
+  {"authorKind":"bot","createdAt":"2026-01-01T12:00:00Z","body":"<!-- dispatcher-review-cap-breaker: issue=1 head=ccc round=1 -->"}
+]
+JSON
+)
+assert_eq "TC-REVIEW-CONV-065 a reset earlier than the last trip is superseded by the trip cutoff" \
+  "<!-- dispatcher-review-cap-breaker: issue=1 head=ccc round=1 -->" \
+  "$(_review_cap_prior_marker "$FIXTURE_065")"
+
+# TC-REVIEW-CONV-066: the addressed [P1] scenario itself — 5 total
+# `failed-substantive` rounds split across TWO series by an intervening PASS
+# (3 then reset then 2) must NOT trip the breaker (only 2 consecutive since
+# the reset, well under the default threshold of 5).
+FIXTURE_066=$(cat <<'JSON'
+[
+  {"authorKind":"bot","createdAt":"2026-01-01T10:00:00Z","body":"<!-- dispatcher-review-cap-breaker: issue=1 head=aaa round=3 -->"},
+  {"authorKind":"bot","createdAt":"2026-01-01T11:00:00Z","body":"<!-- review-verdict: passed -->"},
+  {"authorKind":"bot","createdAt":"2026-01-01T12:00:00Z","body":"<!-- dispatcher-review-cap-breaker: issue=1 head=bbb round=1 -->"}
+]
+JSON
+)
+_066_next=$(_review_cap_next_count "$(_review_cap_prior_marker "$FIXTURE_066")")
+assert_eq "TC-REVIEW-CONV-066 the next round after a 3-then-PASS-then-1 progression is 2, not 4 (breaker does not trip against threshold 5)" "2" \
+  "$_066_next"
+
+# TC-REVIEW-CONV-067: [CRITICAL, silent-failure-hunter finding on the reset
+# fix itself] the reset-cutoff pattern must be FULL-BODY anchored, not a bare
+# substring test(). A genuine review agent's own FAIL body can legitimately
+# quote or discuss a prior trailer in prose (agents are prompted to read all
+# issue comments) — that must NOT be mistaken for a genuine reset boundary.
+# Mirrors lib-dispatch.sh's authentic_verdict() round-13/14 fix history (a
+# bare startswith/substring match let a human/agent's incidental mention of
+# the trailer forge the same class of false signal).
+FIXTURE_067=$(cat <<'JSON'
+[
+  {"authorKind":"bot","createdAt":"2026-01-01T10:00:00Z","body":"<!-- dispatcher-review-cap-breaker: issue=1 head=aaa round=3 -->"},
+  {"authorKind":"bot","createdAt":"2026-01-01T11:00:00Z","body":"Review findings:\n\n1. [P1] The fix regresses. Note: the earlier <!-- review-verdict: passed --> trailer was wrong.\n\nReview Session: abc123"}
+]
+JSON
+)
+assert_eq "TC-REVIEW-CONV-067 a bot FAIL body that embeds a review-verdict trailer substring in prose does NOT reset the series" \
+  "<!-- dispatcher-review-cap-breaker: issue=1 head=aaa round=3 -->" \
+  "$(_review_cap_prior_marker "$FIXTURE_067")"
+assert_eq "TC-REVIEW-CONV-067b next_count still accumulates (4), not falsely reset to 1" "4" \
+  "$(_review_cap_next_count "$(_review_cap_prior_marker "$FIXTURE_067")")"
+
+# TC-REVIEW-CONV-068: the same embedded-substring risk for the trip-heading
+# text itself is already covered by TC-059b (human-authored); this pins the
+# BOT-authored analog — a bot FAIL body merely mentioning "circuit-breaker"
+# text must not be misread as a trip report if it lacks the exact heading
+# AND doesn't carry the marker fence.
+FIXTURE_068=$(cat <<'JSON'
+[
+  {"authorKind":"bot","createdAt":"2026-01-01T10:00:00Z","body":"<!-- dispatcher-review-cap-breaker: issue=1 head=aaa round=2 -->"},
+  {"authorKind":"bot","createdAt":"2026-01-01T11:00:00Z","body":"Review findings:\n\n1. [P1] Unrelated to any circuit-breaker tripping logic.\n\nReview Session: xyz789"},
+  {"authorKind":"bot","createdAt":"2026-01-01T12:00:00Z","body":"<!-- dispatcher-review-cap-breaker: issue=1 head=bbb round=3 -->"}
+]
+JSON
+)
+assert_eq "TC-REVIEW-CONV-068 a bot FAIL body mentioning circuit-breaker in passing is not misread as a trip report" \
+  "<!-- dispatcher-review-cap-breaker: issue=1 head=bbb round=3 -->" \
+  "$(_review_cap_prior_marker "$FIXTURE_068")"
+
 echo
 echo "=== Summary ==="
 echo "Passed: $PASS"

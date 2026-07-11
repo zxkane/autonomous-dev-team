@@ -155,6 +155,33 @@ tests instead.
 | TC-REVIEW-CONV-059c | `_review_cap_prior_marker` given a fixture with a `null` `.body` row | does not crash (jq `test()`/`contains()` on `null` is a runtime error, not a non-match); the null row is skipped and the genuine marker is still found |
 | TC-REVIEW-CONV-059d | Wrapper wiring | `autonomous-review.sh` calls `_review_cap_prior_marker`, not an inlined two-query block |
 
+### Group J — round-cap series reset on an intervening non-failing round (TC-REVIEW-CONV-060..066)
+
+A [P1]-tagged finding from the second codex review round on this issue's
+own PR: `_review_cap_prior_marker` cut off at the last trip report only,
+so an intervening `Review PASSED` or `failed-non-substantive` round did
+not reset the series — the next substantive FAIL resumed counting from the
+OLDER pre-intervening-round marker instead of restarting at 1, letting the
+breaker trip on N *total* substantive failures rather than N *consecutive*
+ones. Fixed by adding a second cutoff input: the latest `<!-- review-verdict:
+… -->` trailer whose verdict is `passed` or `failed-non-substantive` (never
+`failed-substantive` itself); the effective cutoff is the max of the
+trip-report cutoff and this reset cutoff.
+
+| ID | Scenario | Expected |
+|----|----------|----------|
+| TC-REVIEW-CONV-060 | `_review_cap_prior_marker` given a fixture with a `failed-substantive` marker followed by a `<!-- review-verdict: passed -->` trailer, no marker posted since | echoes `""` — the PASS resets the series |
+| TC-REVIEW-CONV-060b | Same fixture fed into `_review_cap_next_count` | returns `1`, not a carry-forward of the pre-reset count |
+| TC-REVIEW-CONV-061 | Same shape, but the intervening trailer is `failed-non-substantive` instead of `passed` | also resets — echoes `""` |
+| TC-REVIEW-CONV-062 | A `failed-substantive` verdict trailer (including with `dev-actionable=false`) between two markers | does NOT reset — the prior marker still qualifies and the count still accumulates (regression pin against a `failed-non-substantive`/`failed-substantive` substring mix-up) |
+| TC-REVIEW-CONV-063 | A HUMAN-authored `<!-- review-verdict: passed -->` forgery between two markers | does NOT reset (authenticity filter — mirrors the existing `authorKind != "human"` guard on the marker fence itself) |
+| TC-REVIEW-CONV-064 | A genuine reset trailer timestamped AFTER the latest trip report | the effective cutoff is the reset cutoff (the later of the two), excluding a marker posted between the trip and the reset |
+| TC-REVIEW-CONV-065 | A genuine reset trailer timestamped BEFORE the latest trip report | the effective cutoff is the trip cutoff (the later of the two) — unchanged TC-057/058 behavior |
+| TC-REVIEW-CONV-066 | A 3-round series, reset by a PASS, then 1 more `failed-substantive` round (3 total, 2 "generations") | next round is `2`, not `4` — confirms the breaker (default threshold 5) would not trip on 5 total-but-non-consecutive substantive failures |
+| TC-REVIEW-CONV-067 | [CRITICAL, silent-failure-hunter finding on the reset fix above] A bot-authored FAIL body that merely quotes/discusses a prior `<!-- review-verdict: passed -->` trailer in prose (not as a bare, standalone trailer) | does NOT reset the series — the reset-cutoff test is full-body anchored (`^...$`), not a bare substring `test()`, mirroring `lib-dispatch.sh::authentic_verdict()`'s own anchored pattern (which itself was hardened against this exact class of false-match in earlier review rounds) |
+| TC-REVIEW-CONV-067b | Same fixture fed into `_review_cap_next_count` | returns `4` (accumulates), not falsely reset to `1` |
+| TC-REVIEW-CONV-068 | A bot-authored FAIL body mentioning "circuit-breaker" in passing (not the exact trip heading, no marker fence) | is not misread as a trip report — the genuine later marker still wins |
+
 ## Acceptance criteria for this change (pre-merge verifiable)
 
 - [ ] **Surface**: CI job `hermetic-unit` runs `tests/unit/test-*.sh`; the new
