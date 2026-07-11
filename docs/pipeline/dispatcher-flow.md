@@ -538,6 +538,32 @@ Labels: `−reviewing +pending-dev`.
 
 This branch is the safety net for the case where the wrapper died so abruptly that even its trap didn't fire. The `pid_alive` check that gates entry to this branch ALSO honors a heartbeat-based mtime fallback ([INV-24](invariants.md#inv-24-review-wrapper-dead-detection-requires-both-pid_alive-miss-and-no-near-success-pr-signal), extended by [INV-29](invariants.md#inv-29-pid_alive-heartbeat-is-owned-exclusively-by-the-wrapper-not-by-the-pid-file-alone)): a fresh mtime on EITHER the PID file OR the wrapper-owned `<base>.heartbeat` sibling (within `HEARTBEAT_INTERVAL_SECONDS * 3`) keeps the wrapper in the ALIVE bucket, eliminating false alarms from transient races AND from spurious PID-file deletions against still-alive long-running wrappers.
 
+## Step 6: liveness watchdog ([INV-127])
+
+Implementation: `run_liveness_watchdog`/`_liveness_evaluate_issue` (`lib-dispatch.sh`), pure fingerprint/counter/threshold/tier-decision helpers in `lib-liveness.sh`.
+
+Five "permanent silent park" bugs shipped point-fixes in six months (INV-105, INV-111, INV-122, INV-123, INV-125): the label is legal and stable, but the decision layer falls into an absorbing loop that posts one idempotent notice and then no-ops every tick. Step 6 is the class-level backstop, run unconditionally after Step 5 (so `JUST_DISPATCHED` also protects any issue Steps 2-4 dispatched THIS tick) unless `LIVENESS_WATCHDOG_ENABLED=false`.
+
+**Scope**: `pending-dev` and `pending-review` only, via the existing `list_pending_dev`/`list_pending_review` selectors — which already exclude `approved`/`stalled`, so the terminal-label exemption is structural. `in-progress`/`reviewing` are already covered by Step 5b's DEAD-process scans above; extending the watchdog there is deferred (double-escalation risk).
+
+**Fingerprint**: for each candidate issue, `_liveness_fingerprint(label, pr_head_sha_or_empty, non_idempotent_comment_count, marker_digest)` hashes the pipe-delimited canonical string (mirrors INV-105's `convergence_trailer_hash`):
+
+- `non_idempotent_comment_count` — total comments MINUS comments matching any of a fixed pattern list covering every known idempotent-notice/marker grammar this repo's breakers post (so a park's own first notice never resets the clock).
+- `marker_digest` — a sorted digest of which of those grammars are PRESENT (authorKind-gated), deliberately excluding the watchdog's OWN marker (which would otherwise flip the digest exactly once and then permanently pollute the fingerprint with a component carrying no further information).
+
+A tick where this fingerprint is unchanged from the prior tick is a **no-op tick**; the running count persists via a `<!-- dispatcher-liveness-watchdog: issue=<N> fingerprint=<hash> count=<n> tier1=<0|1> -->` marker, posted/updated on every evaluated tick (mirrors INV-122's "computed on EVERY round" requirement), read back via the LAST `authorKind != "human"` match (forgery-resistant).
+
+**Exemptions** (never a false-positive no-op): `was_just_dispatched` ([INV-09]); `is_within_grace_period` ([INV-18]); a live wrapper or fresh dispatch marker (`_liveness_wrapper_alive`, composing the SAME `_dispatch_marker_recent` + `pid_alive` primitives [INV-26]'s `may_stall_now` uses — never a new liveness check); an `itp_list_comments` transient failure (skip the tick entirely, fail-toward-defer).
+
+**Two tiers**:
+
+- **Tier 1** (`count >= LIVENESS_NOTICE_TICKS`, default 6): ONE non-idempotent comment — "no observable progress for N ticks" + the fingerprint components + `@REPO_OWNER`. Latches (`tier1=1` in the marker) so it never re-fires while the fingerprint stays unchanged.
+- **Tier 2** (`count >= LIVENESS_STALL_TICKS`, default 18): re-checks current labels for `stalled` immediately before acting (mirrors INV-122's already-stalled skip — a specific breaker may have won the race); otherwise `label_swap` to `stalled` runs FIRST atomically (mirrors INV-105/INV-122's TOCTOU fix), THEN posts ONE structured `reason=liveness-timeout` report with the last-known fingerprint, tick counts, and a pointer to the newest session-report/verdict comment.
+
+Both thresholds are read with the same regex-then-fallback-with-stderr-only-warning shape as INV-122's `_gate_breaker_threshold`; `LIVENESS_STALL_TICKS` additionally validates `> LIVENESS_NOTICE_TICKS`. With a 5-minute tick cadence, the defaults give ~30 min to tier 1 and ~90 min to tier 2 — versus the ~23h and 21-round incidents this closes.
+
+An operator can reset the clock at any time by causing ANY observable change (a comment, a label edit, a push) — the same "removal re-arms" posture [INV-05]/[INV-105] already establish.
+
 ## Failure modes by step
 
 | Failure | Where | Behavior |
@@ -576,5 +602,5 @@ count, or a stale/DEAD declaration. See [`metrics.md`](metrics.md).
 - [`state-machine.md`](state-machine.md) — the label transitions each step performs.
 - [`dev-agent-flow.md`](dev-agent-flow.md), [`review-agent-flow.md`](review-agent-flow.md) — what the dispatched wrapper does next.
 - [`handoffs.md`](handoffs.md) — Step 5 is the most race-prone handoff.
-- [`invariants.md`](invariants.md) — INV-01 through INV-11 are all referenced from this file.
+- [`invariants.md`](invariants.md) — INV-01 through INV-11 are all referenced from this file; [INV-127](invariants.md#inv-127-any-non-terminal-issue-whose-observable-state-fingerprint-label-pr-head-non-idempotent-comment-count-marker-digest-stays-unchanged-for-liveness_notice_ticks-default-6-consecutive-dispatcher-ticks-gets-one-operator-visible-tier-1-escalation-and-after-liveness_stall_ticks-default-18-further-unchanged-ticks-is-unconditionally-transitioned-to-stalled-with-a-structured-reasonliveness-timeout-report--the-pipelines-first-global-liveness-invariant-every-non-terminal-issue-either-changes-observable-state-or-is-escalated-within-a-bounded-number-of-ticks) is Step 6's full spec.
 - [`metrics.md`](metrics.md) — the observe-only event log the tick appends to (INV-70).

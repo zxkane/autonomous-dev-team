@@ -819,6 +819,30 @@ LANE_MEMORY_MAX=
 # positive crash detection is the failure mode this knob exists to prevent).
 DISPATCH_GRACE_PERIOD_SECONDS=600
 
+# Generic liveness watchdog ([INV-127], #467).
+# A class-level backstop for the "permanent silent park" bug class
+# (INV-105/111/122/123/125 were per-entry point-fixes): any pending-dev or
+# pending-review issue whose observable state fingerprint (label, PR head,
+# non-idempotent comment count, marker digest) stays unchanged for
+# LIVENESS_NOTICE_TICKS consecutive ticks gets one operator-visible
+# escalation comment; after LIVENESS_STALL_TICKS further unchanged ticks it
+# is unconditionally transitioned to `stalled` with a structured report.
+#
+# With a 5-minute tick cadence, the defaults give ~30 min to the tier-1
+# notice and ~90 min to the tier-2 stall — versus the ~23h and 21-round
+# silent-park incidents this closes. Both integers must be >=2;
+# LIVENESS_STALL_TICKS must additionally be > LIVENESS_NOTICE_TICKS (an
+# invalid or inverted pair falls back to the defaults, with a warning).
+LIVENESS_NOTICE_TICKS=6
+LIVENESS_STALL_TICKS=18
+
+# Escape hatch: `false` disables the watchdog's evaluation entirely (no
+# fingerprinting, no marker reads/writes) — for a misbehaving rollout.
+# Existing specific breakers (INV-105/111/122/123/125) are unaffected either
+# way; they always remain the faster, better-diagnosed paths for their own
+# park shapes.
+LIVENESS_WATCHDOG_ENABLED=true
+
 # Wrapper heartbeat interval ([INV-24], #111 Part B).
 # autonomous-dev.sh / autonomous-review.sh spawn a background loop that
 # touches their PID file every HEARTBEAT_INTERVAL_SECONDS while they're

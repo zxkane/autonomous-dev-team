@@ -79,6 +79,13 @@ unset _req
 # shellcheck source=lib-dispatch.sh
 source "${LIB_DIR}/lib-dispatch.sh"
 
+# [INV-127] Step 6 liveness watchdog's pure fingerprint/counter/threshold
+# helpers. Sourced unconditionally (cheap, no I/O at source time) so
+# _liveness_watchdog_enabled is always resolvable, even when the watchdog
+# itself is disabled.
+# shellcheck source=lib-liveness.sh
+source "${LIB_DIR}/lib-liveness.sh"
+
 # [INV-108] (#361 review [P1]): release any controller-side dispatch marker
 # that was acquired but never confirmed launched, no matter how this tick
 # process ends. `acquire_dispatch_marker` runs before label edits, notice
@@ -1018,6 +1025,18 @@ for i in $(seq 0 $((cand_count - 1))); do
     fi
   fi
 done
+
+# ---------------------------------------------------------------------------
+# Step 6: liveness watchdog ([INV-127])
+# ---------------------------------------------------------------------------
+# Generic class-level backstop for the "permanent silent park" bug class
+# (INV-105/111/122/123/125 were all per-entry point-fixes). Runs AFTER Step 5
+# so was_just_dispatched (JUST_DISPATCHED, exported as a scalar above) also
+# protects any issue Steps 2-4 dispatched THIS tick. Scoped to `pending-dev`
+# and `pending-review` only this iteration ([R2]) — `in-progress`/`reviewing`
+# are already covered by Step 5b's DEAD-process scans.
+log "Step 6: liveness watchdog..."
+run_liveness_watchdog
 
 # [INV-70] Retention built into the collector: prune the metrics log once per
 # tick (default 90d). The dispatcher runs on a cron cadence, so this is the

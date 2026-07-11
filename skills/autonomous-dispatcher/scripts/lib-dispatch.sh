@@ -4094,3 +4094,196 @@ was_just_dispatched() {
     *) return 1 ;;
   esac
 }
+
+# ---------------------------------------------------------------------------
+# Step 6: generic liveness watchdog ([INV-127], issue #467)
+# ---------------------------------------------------------------------------
+# Pure fingerprint/counter/threshold/tier-decision helpers live in
+# lib-liveness.sh (sourced by dispatcher-tick.sh before this file). The
+# orchestration below is the ONLY call site that performs the watchdog's
+# label_swap — deliberately kept in lib-dispatch.sh (one of the four files
+# check-spec-drift.sh's Check C scans for label writes), not in
+# lib-liveness.sh, so the new pending-dev/pending-review -> stalled movement
+# is visible to the spec-drift gate.
+
+# _liveness_evaluate_issue <issue_num> <kind> <active_label> <notice> <stall>
+#
+# The per-issue orchestration ([R6]): computes the fingerprint, reads back
+# the prior watchdog marker, decides the tier action, and performs exactly
+# one side effect (bare marker / tier-1 comment / tier-2 transition+report).
+# All I/O through existing itp_*/pid_alive/label_swap verbs (INV-91) — this
+# function has no verbs of its own. `kind` is `issue` for a pending-dev
+# candidate, `review` for a pending-review candidate (see
+# _liveness_wrapper_alive, lib-liveness.sh). Assumes `log` is defined by the
+# caller (dispatcher-tick.sh convention, mirrors run_hygiene_pass).
+_liveness_evaluate_issue() {
+  local issue_num="$1" kind="$2" active_label="$3" notice="$4" stall="$5"
+
+  if was_just_dispatched "$issue_num"; then
+    log "  issue #${issue_num} liveness watchdog: just dispatched this tick — skipping ([INV-09])"
+    return 0
+  fi
+
+  if is_within_grace_period "$issue_num"; then
+    log "  issue #${issue_num} liveness watchdog: within dispatch grace period — skipping ([INV-18])"
+    return 0
+  fi
+
+  if _liveness_wrapper_alive "$kind" "$issue_num"; then
+    log "  issue #${issue_num} liveness watchdog: wrapper alive or dispatch in flight — not counted as a no-op tick"
+    return 0
+  fi
+
+  local comments_json
+  comments_json=$(itp_list_comments "$issue_num" 2>/dev/null) || {
+    log "  issue #${issue_num} liveness watchdog: itp_list_comments failed — deferring this tick (transient, [INV-125] preflight posture)"
+    return 0
+  }
+  [ -n "$comments_json" ] || comments_json="[]"
+
+  local pr_info current_head=""
+  pr_info=$(fetch_pr_for_issue "$issue_num" "headRefOid" 2>/dev/null) || pr_info=""
+  if [ -n "$pr_info" ]; then
+    current_head=$(jq -r '.headRefOid // empty' <<<"$pr_info" 2>/dev/null || echo "")
+  fi
+
+  local non_idem_count marker_digest fingerprint
+  non_idem_count=$(_liveness_non_idempotent_count "$comments_json")
+  marker_digest=$(_liveness_marker_digest "$comments_json")
+  fingerprint=$(_liveness_fingerprint "$active_label" "$current_head" "$non_idem_count" "$marker_digest")
+
+  # Read back the prior watchdog marker: the LAST authorKind != "human"
+  # comment carrying the marker grammar (unbounded scan, mirrors
+  # INV-105/INV-122's own marker-authenticity filter — a human comment
+  # forging the marker text at a high count must never inflate the genuine
+  # counter, R testing requirement).
+  local prior_marker
+  prior_marker=$(jq -r \
+    '[.[] | select((.authorKind // "human") != "human") | select(.body | contains("dispatcher-liveness-watchdog:"))] | sort_by(.createdAt) | last | .body // ""' \
+    <<<"$comments_json" 2>/dev/null || echo "")
+
+  local count tier1
+  count=$(_liveness_next_count "$prior_marker" "$fingerprint")
+  tier1=$(_liveness_next_tier1 "$prior_marker" "$fingerprint")
+
+  local action
+  action=$(_liveness_tier_action "$count" "$tier1" "$notice" "$stall")
+
+  local marker_tier1="$tier1"
+  [ "$action" = "tier1" ] && marker_tier1=1
+  local new_marker
+  new_marker=$(_liveness_marker "$issue_num" "$fingerprint" "$count" "$marker_tier1")
+
+  case "$action" in
+    none)
+      itp_post_comment "$issue_num" "$new_marker" 2>/dev/null || true
+      ;;
+    tier1)
+      log "  issue #${issue_num} liveness watchdog: TIER 1 — ${count} consecutive no-op ticks (fingerprint=${fingerprint}) — posting operator escalation"
+      itp_post_comment "$issue_num" "$(cat <<TIER1REPORT
+${new_marker}
+No observable progress for **${count}** ticks on issue #${issue_num} (\`reason=liveness-no-progress\`, [INV-127]):
+- Label: \`${active_label}\`
+- PR head: \`${current_head:-<none>}\`
+- Non-idempotent comment count: ${non_idem_count}
+- Marker digest: \`${marker_digest:-<none>}\`
+
+@${REPO_OWNER} this issue may need attention. If this is a legitimate slow wait, any observable change (a comment, a label edit, or a push) resets the clock. Without one, this issue transitions to \`stalled\` after **${stall}** total unchanged ticks.
+TIER1REPORT
+)" 2>/dev/null || true
+      ;;
+    tier2)
+      # Already-stalled race re-check IMMEDIATELY before the transition
+      # (mirrors INV-122's `_gf_already_stalled` check) — a specific
+      # breaker may have won the race between the candidate-list fetch and
+      # this evaluation. Never post a competing report.
+      local already_stalled
+      already_stalled=$(itp_read_task "$issue_num" labels 2>/dev/null \
+        | jq -r '.labels | any(. == "stalled")' 2>/dev/null || echo "false")
+      if [ "$already_stalled" = "true" ]; then
+        log "  issue #${issue_num} liveness watchdog: already stalled by another breaker — skipping competing report"
+        return 0
+      fi
+
+      log "  issue #${issue_num} liveness watchdog: TIER 2 — ${count} consecutive no-op ticks (fingerprint=${fingerprint}) — halting per [INV-127]"
+
+      # Transition FIRST, atomically — mirrors INV-105/INV-122's TOCTOU fix:
+      # a failed transition aborts under set -euo pipefail BEFORE the report
+      # is posted, so the next tick re-evaluates from scratch instead of an
+      # orphan report existing against a still-non-stalled issue.
+      #
+      # Branches on `kind` (rather than passing $active_label straight through)
+      # so BOTH label_swap operands are LITERAL — check-spec-drift.sh's Check C
+      # movement scanner only recognizes a literal (non-`$`-prefixed) operand as
+      # part of a declared movement; a variable second argument here would
+      # register as an incomplete, undeclared movement and fail CI (or worse,
+      # silently escape C.2's coverage). Mirrors the two declared transitions
+      # (liveness-watchdog-stall-pending-dev / -pending-review) exactly.
+      if [ "$kind" = "issue" ]; then
+        # liveness-watchdog-stall-pending-dev [INV-127]
+        label_swap "$issue_num" "pending-dev" "stalled"
+      else
+        # liveness-watchdog-stall-pending-review [INV-127]
+        label_swap "$issue_num" "pending-review" "stalled"
+      fi
+
+      local pointer
+      pointer=$(_liveness_newest_pointer "$comments_json")
+      itp_post_comment "$issue_num" "$(cat <<TIER2REPORT
+${new_marker}
+## ⛔ Liveness watchdog tripped — halting a silently-parked issue (\`reason=liveness-timeout\`, [INV-127])
+
+This issue's observable state (label + PR head + non-idempotent comments + marker set) has not changed for **${count}** consecutive dispatcher ticks — well past the **${stall}**-tick stall threshold.
+
+**Evidence**
+- Last-known fingerprint: \`${fingerprint}\`
+- Label at time of trip: \`${active_label}\`
+- PR head: \`${current_head:-<none>}\`
+- Non-idempotent comment count: ${non_idem_count}
+- Marker digest (known grammars present): \`${marker_digest:-<none>}\`
+- Tick counts: count=${count}, notice_threshold=${notice}, stall_threshold=${stall}
+- Newest session report / verdict pointer: ${pointer:-(none found)}
+
+**Dispatcher actions taken** (autonomy halted for this issue):
+- Transitioned to \`stalled\` (\`autonomous\` is retained — removing \`stalled\` re-arms via Step 2 and resets the retry counter, [INV-05]).
+- Posted this one-time report.
+
+@${REPO_OWNER} please investigate — this is the class-level backstop (a specific breaker for this park shape may not exist yet). To resume: fix per the evidence above, then remove the \`stalled\` label.
+TIER2REPORT
+)" 2>/dev/null || true
+      ;;
+  esac
+}
+
+# run_liveness_watchdog — Step 6 entry point ([R6]). Iterates issues labeled
+# `autonomous` + (`pending-dev` OR `pending-review`) via the existing
+# list_pending_dev/list_pending_review selectors (which already exclude
+# `approved`/`stalled` — the terminal-label exemption is structural, not a
+# separate runtime check, [R2]). No-op entirely when the watchdog is
+# disabled ([R5]).
+run_liveness_watchdog() {
+  if ! _liveness_watchdog_enabled; then
+    log "  liveness watchdog disabled (LIVENESS_WATCHDOG_ENABLED=false) — skipping"
+    return 0
+  fi
+
+  local notice stall
+  notice=$(_liveness_notice_ticks 2>/dev/null)
+  stall=$(_liveness_stall_ticks "$notice" 2>/dev/null)
+
+  local pending_dev pending_review pd_count pr_count i issue_num
+  pending_dev=$(list_pending_dev)
+  pending_review=$(list_pending_review)
+  pd_count=$(jq 'length' <<<"$pending_dev")
+  pr_count=$(jq 'length' <<<"$pending_review")
+
+  for i in $(seq 0 $((pd_count - 1))); do
+    issue_num=$(jq -r ".[$i].number" <<<"$pending_dev")
+    _liveness_evaluate_issue "$issue_num" issue pending-dev "$notice" "$stall"
+  done
+
+  for i in $(seq 0 $((pr_count - 1))); do
+    issue_num=$(jq -r ".[$i].number" <<<"$pending_review")
+    _liveness_evaluate_issue "$issue_num" review pending-review "$notice" "$stall"
+  done
+}
