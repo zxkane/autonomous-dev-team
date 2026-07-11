@@ -277,9 +277,9 @@ _codex_review_stdout_is_malformed() {
     /^[[:space:]]*$/ { exit }                             # blank line → end of header region
     /^[[:space:]]*```/ { exit }                           # code fence → review body starts
     /^[[:space:]]*#/ { exit }                             # markdown heading → review body
-    /^[[:space:]]*([0-9]+[.)][[:space:]]*)?([-*>][[:space:]]*)*(\*\*[[:space:]]*)?\[P[123]\]/ { exit }  # finding (a)
+    /^[[:space:]]*([0-9]+[.)][[:space:]]*)?([-*>][[:space:]]*)*(\*\*[[:space:]]*)?\[P[0123]\]/ { exit }  # finding (a) — includes P0 (#449 severity ratchet)
     /"(severity|priority)"[[:space:]]*:/ { exit }         # finding (b) JSON key
-    /["'"'"'[:space:]]P[123]["'"'"']/ { exit }            # finding (c) JSON value
+    /["'"'"'[:space:]]P[0123]["'"'"']/ { exit }            # finding (c) JSON value
     { print }
   ' "$f" 2>/dev/null) || _leading_region=""
 
@@ -332,9 +332,9 @@ _codex_review_stdout_is_malformed() {
   # finding-quote is stripped, not treated as the boundary).
   local _echo_region
   _echo_region=$(awk '
-    !infence && /^[[:space:]]*([0-9]+[.)][[:space:]]*)?([-*>][[:space:]]*)*(\*\*[[:space:]]*)?\[P[123]\]/ { exit }  # finding (a)
+    !infence && /^[[:space:]]*([0-9]+[.)][[:space:]]*)?([-*>][[:space:]]*)*(\*\*[[:space:]]*)?\[P[0123]\]/ { exit }  # finding (a) — includes P0 (#449)
     !infence && /"(severity|priority)"[[:space:]]*:/ { exit }    # finding (b) JSON key
-    !infence && /["'"'"'[:space:]]P[123]["'"'"']/ { exit }       # finding (c) JSON value
+    !infence && /["'"'"'[:space:]]P[0123]["'"'"']/ { exit }       # finding (c) JSON value
     /^[[:space:]]*```/ { infence = !infence; next }       # toggle fence; drop the ``` line itself
     infence { next }                                       # inside a fenced quote → skip
     { print }
@@ -383,8 +383,8 @@ _codex_review_stdout_is_malformed() {
   [[ "$nchars" =~ ^[0-9]+$ ]] || nchars=0
   if [[ "$nchars" -ge 45000 ]] \
      && ! grep -qiE 'Review PASSED|Review findings:|^Summary:|^Findings|no blocking' "$f" 2>/dev/null \
-     && ! grep -qE '^[[:space:]]*([0-9]+[.)][[:space:]]*)?([-*>][[:space:]]*)*(\*\*[[:space:]]*)?\[P[123]\]' "$f" 2>/dev/null \
-     && ! grep -qE '"(severity|priority)"[[:space:]]*:|["'"'"'[:space:]]P[123]["'"'"']' "$f" 2>/dev/null; then
+     && ! grep -qE '^[[:space:]]*([0-9]+[.)][[:space:]]*)?([-*>][[:space:]]*)*(\*\*[[:space:]]*)?\[P[0123]\]' "$f" 2>/dev/null \
+     && ! grep -qE '"(severity|priority)"[[:space:]]*:|["'"'"'[:space:]]P[0123]["'"'"']' "$f" 2>/dev/null; then
     return 0
   fi
   return 1
@@ -394,25 +394,33 @@ _codex_review_stdout_is_malformed() {
 #
 # Echoes ONE token (`pass` | `fail` | `malformed`) classifying a `codex review`
 # stdout capture. The `malformed` check (INV-73, #252) runs FIRST — a prompt-echo /
-# startup-trace stdout is NOT a real review, so the `[P1]` scan must NOT run over it
-# (its `[P1]` is only quoted instruction text → a phantom FAIL). Then the gate logic
-# the manual `/codex review` skill uses: ANY `[P1]` (a codex priority-1 / blocking
-# finding marker) anywhere in the (non-malformed) output → `fail`; otherwise →
-# `pass`. An empty / missing / unreadable file → `pass` (no `[P1]` ⇒ no blocking
-# finding; the wrapper still posts a `Review PASSED` verdict so a comment always
-# lands). rc 0 ALWAYS — fail-safe under `set -euo pipefail` (a bare call must not
-# abort the wrapper).
+# startup-trace stdout is NOT a real review, so the severity-tag scan must NOT run
+# over it (its tags are only quoted instruction text → a phantom FAIL). Then the
+# gate logic: ANY severity tag (`[P0]`-`[P3]`, issue #449's severity-aware blocking
+# ratchet) anywhere in the (non-malformed) output → `fail`; otherwise → `pass`. An
+# empty / missing / unreadable file → `pass` (no tag ⇒ no finding; the wrapper still
+# posts a `Review PASSED` verdict so a comment always lands). rc 0 ALWAYS —
+# fail-safe under `set -euo pipefail` (a bare call must not abort the wrapper).
 #
-# Conservative on `[P1]` (AFTER the malformed gate): a blocking finding wins even if
-# the `[P1]` appears inside a quoted code block of a REAL review — a false FAIL only
-# re-queues the PR to dev, whereas a missed `[P1]` would let a blocking finding
-# through to merge. So the cheap substring match is the safe direction — but ONLY
-# once the capture is confirmed to be a review, not the prompt echoed back (#252).
+# Pre-#449 this classified `fail` ONLY on `[P1]` — `[P2]`/`[P3]` were purely
+# non-blocking observations with no ratchet. Under the ratchet a `[P2]`/`[P3]`
+# finding CAN still block at an early round (see lib-review-severity.sh's
+# `shouldBlockFinding`), so this classifier now flags `fail` on ANY tag; the
+# round-aware demotion decision happens LATER, in the wrapper's pre-aggregation
+# severity filter (lib-review-severity.sh), which re-scans the same text this
+# function classified and may demote a `fail` back to `pass` for that round.
+#
+# Conservative on a tag match (AFTER the malformed gate): a blocking finding wins
+# even if the tag appears inside a quoted code block of a REAL review — a false
+# FAIL only re-queues the PR to dev, whereas a missed tag would let a blocking
+# finding through to merge. So the cheap substring match is the safe direction —
+# but ONLY once the capture is confirmed to be a review, not the prompt echoed
+# back (#252).
 _codex_review_classify_stdout() {
   local f="${1:-}"
   if _codex_review_stdout_is_malformed "$f"; then
     printf 'malformed\n'
-  elif [[ -n "$f" && -f "$f" && -r "$f" ]] && grep -qF '[P1]' "$f" 2>/dev/null; then
+  elif [[ -n "$f" && -f "$f" && -r "$f" ]] && grep -qE '\[P[0123]\]' "$f" 2>/dev/null; then
     printf 'fail\n'
   else
     printf 'pass\n'
@@ -451,7 +459,7 @@ _codex_review_compose_body() {
 
   if [[ "$verdict" == "fail" ]]; then
     if [[ -z "${text//[[:space:]]/}" ]]; then
-      printf '%s\n' "codex review reported a blocking [P1] finding (see the per-agent log for details)."
+      printf '%s\n' "codex review reported a blocking [P0]-[P3] finding (see the per-agent log for details)."
     else
       printf '%s\n' "$text"
     fi
@@ -459,7 +467,7 @@ _codex_review_compose_body() {
     if [[ -z "${text//[[:space:]]/}" ]]; then
       printf '%s\n' "codex review found no blocking findings."
     else
-      printf '%s\n' "codex review found no blocking ([P1]) findings. Review output:
+      printf '%s\n' "codex review found no blocking ([P0]-[P3]) findings. Review output:
 
 ${text}"
     fi

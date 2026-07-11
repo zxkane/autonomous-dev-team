@@ -6915,8 +6915,9 @@ two-pronged style since the wrapper itself is too heavy to run end-to-end).
 - [INV-72] — the config-class error-envelope contract this invariant's
   environment-class slice deliberately does NOT extend (reuses `transient`,
   already allowed).
-- #449 — the complementary non-convergence mode (divergent findings /
-  round-cap / severity-ratchet), out of scope for this invariant.
+- [INV-127] — the complementary non-convergence mode this invariant
+  originally forward-referenced as "#449" (divergent findings / round-cap /
+  severity-ratchet), now implemented as its own sibling breaker.
 - `docs/designs/issue-453-e2e-gate-circuit-breaker.md` — the full design,
   including the spec-drift implications this invariant's transition
   declaration resolves.
@@ -7082,5 +7083,325 @@ TC-TIMEOUTGUARD-032 is the regression test: a plain TERM-obeying leader with no 
 - [INV-72](#inv-72-config-class-failures-must-surface-on-the-issue-never-log-only) — `ADT_CFG_TIMEOUT_TOOL_MISSING` is a config-class failure and surfaces accordingly (issue-comment when `--issue` is known, else dispatcher-alert).
 - [INV-114](#inv-114-every-pipeline-initiated-kill-escalates-term--bounded-grace--sigkill-gated-on-groupscope-emptiness-never-on-leader-liveness-alone) — the watchdog fallback's kill escalation follows the same TERM→bounded-grace→KILL shape INV-114 defines.
 - [INV-48](#inv-48-per-side-review-wall-clock-timeout-agentreviewtimeout-1h-default-with-browser-e2e-exclusion-and-timeout-veto) — the review-side timeout-veto aggregation this invariant's rc normalization (124/137, never a raw signal-death status) must feed correctly; an un-normalized watchdog expiry would silently degrade a should-veto timeout into a dropped `unavailable` vote.
+
+---
+
+## INV-127: a review-side divergent-findings non-convergence (`REVIEW_CONVERGENCE_CAP` consecutive `failed-substantive` rounds where the severity ratchet's own P0/P1 floor is STILL failing) is detected and HALTED — the breaker transitions `reviewing → stalled` then posts ONE structured `reason=review-round-cap` report, gated on an already-`stalled` skip (does NOT gate on `may_stall_now`, mirroring [INV-122]'s own rationale)
+
+_Triage (issue #236): [machine-checked: tests/unit/test-review-convergence-rules.sh]_
+
+**Numbering note**: this invariant has now been renumbered TWICE due to
+successive rebase collisions, per the repo's INV number collision convention
+("first-merged keeps it; renumber-on-rebase-collision" — see [INV-116]'s own
+numbering note):
+1. Drafted as INV-124 pre-rebase, before origin/main's #468 landed as INV-124
+   for the unrelated PR-diff-size soft-cap signal. Renumbered to INV-126
+   (INV-125 was already taken by #466's crashed-session recovery work).
+2. Before THIS branch's own INV-126 could be rebased onto main, origin/main's
+   #469 independently landed its OWN INV-126 (the wall-clock-timeout-binary
+   fail-closed fix) first. Renumbered a second time to INV-127, the next free
+   slot after main's INV-126.
+
+**Rule**: alongside [INV-127]'s two siblings — [INV-105] (dev-side zero-commit
+inaction on a frozen head) and [INV-122] (a fixed-point repetition of the
+E2E gate on an unchanged (head, rc) pair) — this invariant closes the THIRD
+non-convergence mode: the review agent(s) keep finding a genuine blocking
+P0/P1 finding, round after round, even though the dev agent DOES push new
+commits each round. The motivating case: a downstream consumer project's
+"clean up E2E fixture accumulation" bug fix grew two production DELETE
+routes during development, and the review loop ran **10 rounds over ~6
+hours** without converging — round themes escalated monotonically in
+exoticness while each finding stayed individually valid, and the loop was
+broken only by operator takeover. The severity-aware blocking ratchet
+(issue #449's R1 requirement — `shouldBlockFinding`, `lib-review-severity.sh`)
+loosens the blocking floor as rounds progress (P0-P3 all block at rounds 1-2;
+P0-P2 at 3-4; only P0/P1 at 5+), so if the review is STILL failing that
+late-round floor, the PR is not converging toward mergeability no matter how
+many more rounds run — this invariant halts the loop rather than burning
+rounds indefinitely.
+
+**Where** (single insertion point): inside `autonomous-review.sh`'s existing
+substantive-FAIL sub-path (`$AGGREGATE == "fail"`, the branch that also
+computes `_AGG_DEV_ACTIONABLE` for [INV-92]), BEFORE that branch's existing
+`emit_verdict_trailer "failed-substantive"` / `submit_request_changes` /
+`itp_transition_state "reviewing" "pending-dev"` sequence
+([`review-fail-substantive`](state-machine.md#transition-table)). A trip
+short-circuits ALL of that via an early `exit 0` — the existing `pending-dev`
+routing never runs for a tripped round. Gated on `$AGGREGATE == "fail"`
+specifically (not merely `$PASSED_VERDICT == false`) so the sibling
+`all-unavailable` outcome (every agent exited clean but posted no verdict at
+all — no findings text, no severity to score) never reaches the trip logic.
+
+**Distinct fingerprint from both siblings**:
+- [INV-105] (dispatcher-side, `lib-dispatch.sh`) counts consecutive
+  zero-commit dev-RESUME rounds against a FROZEN head — a dev-side inaction
+  signal. Moves `pending_dev → stalled`.
+- [INV-122] (review-wrapper-side, `lib-review-e2e.sh`) counts a repeated
+  E2E-gate `fail` against an UNCHANGED `(head_sha, e2e_lane_rc)` pair — a
+  fixed-point-repetition signal, where the review agents never even ran.
+  Moves `reviewing → stalled`.
+- INV-127 (review-wrapper-side, `lib-review-cap.sh`) counts consecutive
+  `failed-substantive` review ROUNDS where the dev agent DID push new
+  commits each round and the review DID run — a divergent-findings
+  non-convergence signal. Also moves `reviewing → stalled`, declared as its
+  own `review-round-cap-breaker` transition in `transitions.json` (same
+  precedent [INV-122] itself established for reusing the `stalled` label
+  without reusing an existing transition).
+
+**Why the counter is head-AGNOSTIC (deliberately UNLIKE [INV-122]'s
+fingerprint)**: [INV-122]'s counter resets whenever the head changes — correct
+for its trigger (a fixed-point repetition requires an UNCHANGED head). This
+invariant's motivating case has a NEW head every round (the dev agent keeps
+pushing fixes) — a head-scoped counter would never reach any cap in that
+exact scenario, defeating the breaker's purpose. So `_review_cap_next_count`
+(`lib-review-cap.sh`) accumulates across CONSECUTIVE `failed-substantive`
+rounds regardless of whether the head changed between them; the marker still
+RECORDS the head at each round (forensic/audit value — which head was under
+review at each round), but does not use it as a reset key. This is also why
+INV-127's round counter is a SEPARATE marker from R1's own
+`review-round-counter` (`lib-review-round.sh`): that marker IS
+head-scoped by design (it feeds the severity ratchet's blocking floor, which
+correctly loosens for repeated re-review PRESSURE against unchanged code) —
+reusing it here would inherit the wrong reset semantics.
+
+**State storage**: a structured HTML-comment marker posted by
+`autonomous-review.sh`, following the `dispatcher-gate-fail-breaker` /
+`dispatcher-convergence-breaker` marker convention ([INV-105], [INV-122]):
+
+```
+<!-- dispatcher-review-cap-breaker: issue=<N> head=<sha> round=<n> -->
+```
+
+Marker scan is **unbounded** — full comment history via `itp_list_comments`
+(mirrors [INV-105]/[INV-122] — this breaker cannot tolerate a miss the way a
+bounded-retry read can; losing the marker would silently re-enable the exact
+loop this invariant exists to stop). The marker is computed and posted on
+EVERY `failed-substantive` round (not only on a trip) — embedded in the
+ordinary "Review findings:" FAIL comment on a non-trip round — mirroring
+[INV-122]'s own "must persist every round" fix (the very first failure must
+leave a marker for the next round to find, or the counter can never
+advance). The marker read filters to `authorKind != "human"` (mirrors
+[INV-105]/[INV-122]'s own marker-authenticity filter — without it, any
+collaborator able to comment on the issue could pre-seed a forged marker at
+a high count and force the next genuine failure to trip prematurely).
+
+**Cutoff on resume ([P1] codex review finding, fixed pre-merge)**: because
+this counter is head-AGNOSTIC (see above), the marker scan is ALSO cut off at
+the latest `reason=review-round-cap` trip report's `createdAt` — mirroring
+[INV-05]'s "Marking as stalled" cutoff convention
+(`lib-dispatch.sh::count_retries` family). Without the cutoff, the marker
+read would keep finding the OLD trip's own marker (embedded in that same
+report) as the "latest" one forever, so the very next `failed-substantive`
+round after an operator removes `stalled` to resume would compute
+`round = threshold + 1` and re-trip immediately — the resume flow could never
+actually accumulate a fresh series. With the cutoff, any marker AT OR BEFORE
+the last trip report is excluded from the scan, so a resumed round finds no
+qualifying prior marker and starts a genuinely new count at 1. No trip yet ⇒
+the cutoff is the epoch and every marker counts, unchanged from the
+pre-cutoff behavior.
+
+**Reset on an intervening non-failing round ([P1] codex review round 3, #449,
+fixed pre-merge)**: the trip-report cutoff above only excludes markers at or
+before a past TRIP. It does not, by itself, reset the series when a
+`Review PASSED` or `failed-non-substantive` round lands BETWEEN two
+`failed-substantive` rounds — no `dispatcher-review-cap-breaker` marker is
+posted on a PASS or non-substantive round (the marker is posted only inside
+the `$AGGREGATE == "fail"` substantive branch), so without an additional
+cutoff the NEXT substantive-FAIL round would read the OLDER
+pre-intervening-round marker back and resume counting from it, letting the
+breaker trip on `REVIEW_CONVERGENCE_CAP` *total* substantive failures rather
+than `REVIEW_CONVERGENCE_CAP` *consecutive* ones — silently defeating the
+"consecutive" half of this invariant's own fingerprint. Fixed by adding a
+second cutoff input to `_review_cap_prior_marker`: the latest
+authorKind!=human comment carrying a `<!-- review-verdict: … -->` trailer
+whose verdict is `passed` or `failed-non-substantive` (anchored to those
+literal tokens so it never matches `failed-substantive` itself). The
+EFFECTIVE cutoff used for the marker scan is `max(trip_cutoff, reset_cutoff)`
+— whichever boundary is more recent governs, so a reset that lands after the
+last trip excludes an intervening marker even though the trip itself would
+not have, and conversely a stale reset that predates the last trip is
+correctly superseded by the trip cutoff. The `authorKind != "human"`
+authenticity filter applies to the reset scan identically to the marker scan
+— a collaborator quoting `<!-- review-verdict: passed -->` in an ordinary
+comment cannot forge a reset.
+
+**Reset-cutoff is FULL-BODY anchored, not a substring test ([CRITICAL,
+silent-failure-hunter finding, fixed pre-merge])**: the reset-cutoff pattern
+is `^<!--...-->[[:space:]]*$` — it requires the trailer to be the ENTIRE
+comment body, not merely present somewhere in it. A bare `test()` substring
+match (the pattern's first-draft shape) would have let a genuine review
+agent's OWN `Review findings:` FAIL body falsely satisfy the reset — agents
+are prompted to read all prior issue comments and can legitimately quote or
+discuss an earlier trailer in prose (e.g. "the earlier `<!-- review-verdict:
+passed -->` trailer turned out to be wrong"). Because that FAIL comment is
+itself `authorKind != "human"` (bot/App-authored), the authenticity filter
+above does not catch this case — only the full-body anchor does. This is the
+identical bug class `lib-dispatch.sh::authentic_verdict()` was hardened
+against in its own round-13/14 fix history (a `startswith`-only match let
+extra trailing content past the gate); `_review_cap_prior_marker`'s
+reset-cutoff query reuses that anchored shape rather than reintroducing the
+weaker substring form. `emit_verdict_trailer` always posts the genuine
+trailer as a bare, standalone comment with no other text, so the anchor
+never rejects an authentic reset while reliably excluding a trailer-shaped
+substring embedded in a larger comment.
+
+**Threshold**: `REVIEW_CONVERGENCE_CAP` (new env var, default `5`), read via
+the same regex-then-fallback shape as [INV-122]'s `GATE_FAIL_STALL_THRESHOLD`
+read (`lib-review-cap.sh::_review_cap_threshold`), plus an explicit floor of
+`>=2` and a logged `WARNING:` on any fallback (non-numeric or `<2` → falls
+back to 5) — the same explicit-floor-plus-warning posture [INV-122] adopted,
+stricter than [INV-105]'s own silent threshold fallback.
+
+**Only `failed-substantive` rounds count** — `failed-non-substantive` is out
+of scope (already governed by `REVIEW_RETRY_LIMIT` /
+`count_review_aware_flips`, a structurally distinct counter this invariant
+does not touch). The all-unavailable sub-path (no verdict at all) also never
+reaches the trip logic (see the `$AGGREGATE == "fail"` gate above).
+
+**An all-timeout `fail` also never reaches the trip logic ([P1] codex review
+round 4, fixed pre-merge)**: `AGGREGATE == "fail"` is produced by
+`_aggregate_review_verdicts` for TWO distinct causes — a genuine per-agent
+`fail` (a real, severity-scored blocking finding survived the ratchet) OR an
+[INV-48] `timed-out` veto with no findings text at all (a reviewer hung and
+was killed by its wall-clock cap). Both correctly block the merge, but only
+the first is evidence the severity ratchet's own P0/P1 floor is "still
+failing" — a round where EVERY deciding fail is a bare timeout veto has no
+agent-scored finding to point to. `_aggregate_has_substantive_fail`
+(`lib-review-aggregate.sh`) makes this narrower distinction: "true" iff at
+least one per-agent verdict is the literal token `fail` (post severity
+filter), "false" if every deciding fail was `timed-out`. Both this
+invariant's trip block and R1's `review-round-counter` marker post are gated
+on `$AGGREGATE == "fail" && $_AGGREGATE_SUBSTANTIVE_FAIL == "true"` — without
+this, a run of transient per-agent timeouts on successive heads could
+advance the SAME head-agnostic counter this breaker uses and eventually
+stall a PR that no review agent ever actually found a live P0/P1 in.
+
+**A P2/P3-only substantive fail ALSO never reaches the trip logic ([P1] codex
+review round 7, fixed pre-merge)**: `_AGGREGATE_SUBSTANTIVE_FAIL == true`
+confirms a REAL (non-timeout) fail survived the severity filter at the
+CURRENT round's floor — it does not say WHICH severity survived. This
+invariant's own fingerprint is narrower: the ratchet's TERMINAL floor
+(P0/P1) must still be failing, not merely "some fail survived at whatever
+this round's floor happens to be." A P2 finding blocks (survives as `fail`)
+at rounds 1-4, and R1's `review-round-counter` is head-SCOPED — it resets to
+1 on every new HEAD. This invariant's own counter is deliberately
+head-AGNOSTIC because its motivating scenario has a NEW head every round
+(see the "head-AGNOSTIC" design note above) — so a PR that surfaces only P2
+findings across a run of new heads would keep re-entering the round 1-4
+floor (never reaching round 5+, since each new head resets R1's own
+counter), yet its P2 `fail` would still satisfy the old
+`_AGGREGATE_SUBSTANTIVE_FAIL` gate every round and eventually trip THIS
+breaker despite no P0/P1 ever existing — a false stall.
+`_aggregate_has_p0p1_fail` (`lib-review-aggregate.sh`) closes this: given
+each agent's (verdict, highest-severity) pair, it echoes "true" iff at least one `fail`
+verdict's severity is NOT `P2`/`P3` (i.e. is `P0`, `P1`, `none`, or any
+unrecognized token — the same severities that still block under
+`shouldBlockFinding`'s own round>=5 case arms). This invariant's trip block
+now additionally requires `$_AGGREGATE_HAS_P0P1_FAIL == "true"`; R1's
+`review-round-counter` marker post is UNCHANGED (it feeds "how many rounds
+have run", not "is the terminal floor failing", so the broader
+`_AGGREGATE_SUBSTANTIVE_FAIL` remains correct there).
+
+**Trip behavior**, gated in this order:
+
+1. Check current issue labels for `stalled` FIRST — if already stalled (e.g.
+   [INV-105] or [INV-122] tripped first), do NOT re-trip or post a competing
+   report. **[P1 fix, review round 5]**: the already-stalled check
+   short-circuits the ENTIRE ordinary failed-substantive routing, not merely
+   the trip report — `exit 0` immediately after the check (no round-cap
+   counter read/persist, no `emit_verdict_trailer`, no
+   `submit_request_changes`, and critically no
+   `itp_transition_state "reviewing" "pending-dev"`). The pre-fix code only
+   skipped the trip-report branch and then fell through to the normal FAIL
+   routing, which included the unconditional `pending-dev` transition at the
+   end of the substantive-FAIL sub-path — clobbering a sibling breaker's
+   `stalled` label with a COMPETING `pending-dev` flip on the very same
+   wrapper invocation, silently re-arming the loop the sibling breaker just
+   halted (the issue would bounce `stalled → pending-dev` despite no operator
+   ever removing `stalled`). Exiting immediately leaves the sibling's
+   `stalled` label as the sole, uncontested terminal state.
+2. **No `may_stall_now` call** — same rationale [INV-122] documents: this
+   breaker runs synchronously INSIDE the very review wrapper the dispatcher
+   just launched, so `may_stall_now` would always see this process's own
+   fresh `review`-mode dispatch marker and defer for its full TTL, silently
+   defeating the breaker for any FAIL completing within that window (the
+   common case). The `reviewing`-label single-writer invariant already
+   provides the liveness guarantee `may_stall_now` exists to add.
+3. `itp_transition_state "$ISSUE_NUMBER" "reviewing" "stalled"` runs FIRST,
+   atomically, BEFORE `RESULT_PARSED` is set — mirrors [INV-105]/[INV-122]'s
+   TOCTOU fix: a failed transition aborts the whole wrapper under
+   `set -euo pipefail` before `RESULT_PARSED` is touched, so the
+   crash-cleanup EXIT trap correctly treats it as a genuine crash rather than
+   masking a landed stall.
+4. `RESULT_PARSED=true` is set IMMEDIATELY after the transition lands, BEFORE
+   the report post — a transient failure in the report post must not leave
+   `RESULT_PARSED=false`, which would make the crash-cleanup EXIT trap re-add
+   `pending-dev` on top of an already-landed stall.
+5. Post exactly ONE structured report (marker + human-readable body,
+   `reason=review-round-cap`) summarizing the still-open P0/P1 findings, then
+   `exit 0` — never reaching the normal `failed-substantive`/`pending-dev`
+   routing.
+
+**Concurrency**: no new locking — the existing `reviewing`-label
+single-writer invariant (the flock-guarded PID-file guard) already rules out
+two concurrent writers to the same issue's marker.
+
+**Bias to MISS**: an absent, malformed, or non-matching marker collapses to
+count=0 (never a crash, never a silent inherit of a garbled count). Because
+of the resume cutoff above, an operator removing `stalled` re-arms a
+genuinely FRESH series (round 1) regardless of how the underlying findings
+were addressed — the very next `failed-substantive` round does NOT re-trip
+immediately; it takes another full `threshold` count of consecutive
+`failed-substantive` rounds. This is a deliberate divergence from
+[INV-105]/[INV-122]'s literal "removal re-arms the pipeline" mechanics (their
+head-scoped/frozen-head fingerprints naturally reset on the next real change
+without needing a report-timestamp cutoff); INV-127's counter is
+head-AGNOSTIC by design (see above), so without the cutoff "removal re-arms
+the pipeline" would be neutered — the very first post-resume failure would
+immediately re-read the old trip's own marker and re-trip.
+
+**Status**: **ENFORCED**. New `transitions.json` entry
+(`review-round-cap-breaker`, `reviewing → stalled`) + regenerated
+`state-machine.md` mermaid + prose row + `spec-guard-map.json` /
+`spec-codesite-map.json` entries (`check-spec-drift.sh` Checks A/B/C all
+green). Test plan: `docs/test-cases/review-convergence-rules.md`.
+
+**Producer**: `autonomous-review.sh` (the substantive-FAIL sub-path) + pure
+helpers in `lib-review-cap.sh` (`_review_cap_marker`, `_review_cap_parse_count`,
+`_review_cap_next_count`, `_review_cap_threshold`, `_review_cap_prior_marker`).
+The resume cutoff-then-scan (see above) is itself `_review_cap_prior_marker`
+— a pure function over the full `itp_list_comments` JSON, not inlined at the
+wrapper call site — so its self-referential-exclusion behavior (the trip
+report's own embedded marker must NOT satisfy the cutoff) is fixture-testable
+rather than only wiring-greppable. Does NOT modify [INV-105]'s or
+[INV-122]'s own fingerprint/trigger; does NOT source `lib-dispatch.sh` or
+reuse `may_stall_now`/`pid_alive`/`get_pid` (same rationale [INV-122]
+already established).
+
+**Tests**: `tests/unit/test-review-convergence-rules.sh` (threshold/counter
+pure-logic assertions + source-of-truth wiring greps against
+`autonomous-review.sh`, mirroring [INV-122]'s
+`test-e2e-gate-circuit-breaker.sh` two-pronged style).
+
+**See also**:
+- [INV-40] — the unanimous-PASS aggregation this breaker's `$AGGREGATE ==
+  "fail"` gate reads; unchanged.
+- [INV-92] — the per-finding dev-actionability classification computed in the
+  same substantive-FAIL sub-path this breaker's trip check sits inside;
+  unrelated axis, unaffected.
+- [INV-105] — the sibling breaker whose marker/threshold/report shape this
+  invariant mirrors, for a DIFFERENT trigger (dev-side zero-commit inaction
+  on a frozen head vs. review-side divergent findings across changing heads).
+- [INV-122] — the sibling breaker whose marker/threshold/report shape this
+  invariant ALSO mirrors, for a DIFFERENT trigger (fixed-point E2E-gate
+  repetition on an unchanged head vs. divergent findings across changing
+  heads) — and whose "must persist the marker every round" / "no
+  `may_stall_now`" / "already-stalled skip" fixes this invariant inherits
+  directly.
+- #449 — the issue that introduced the severity-aware blocking ratchet (R1)
+  whose own P0/P1 floor this breaker's trigger condition depends on, the
+  `review-round-counter` marker (also R1) this breaker's counter is
+  deliberately NOT the same as, and the R3 evidence-freshness fix (narrower,
+  unrelated to this breaker).
 
 ---

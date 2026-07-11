@@ -162,13 +162,22 @@ _validate_verdict_artifact_jq() {
     # checked here — a malformed classification (non-boolean, bad enum) is a
     # malformed artifact, not silently accepted (Clause V1). Absent ⇒ legacy
     # behavior (this `is_finding` still accepts a {title}-only finding).
+    #
+    # Issue #449 (R1) [P1 codex review finding]: "severity" (OPTIONAL,
+    # P0|P1|P2|P3) is the per-finding severity tag the ratchet reads. Without
+    # it in BOTH the allow-list and its own enum check, a non-codex agent
+    # that follows the new prompt and writes "severity" into its artifact
+    # fails additionalProperties:false on the packaged (schema-less) jq
+    # fallback path -- the artifact is downgraded to "malformed" and that
+    # vote is lost entirely instead of feeding the severity ratchet.
     def is_finding:
       (type == "object")
       and (has("title") and (.title | type == "string") and ((.title | length) >= 1))
-      and ((keys - ["title","detail","file","line","actionable_by_dev_agent","requires_human","requires_privileged_token","blocking_for_merge","recommended_next_owner"]) | length == 0)
+      and ((keys - ["title","detail","file","line","severity","actionable_by_dev_agent","requires_human","requires_privileged_token","blocking_for_merge","recommended_next_owner"]) | length == 0)
       and ((has("detail") | not) or (.detail | type == "string"))
       and ((has("file")   | not) or (.file   | type == "string"))
       and ((has("line")   | not) or (.line   | (type == "number") and (. == floor) and (. >= 0)))
+      and ((has("severity") | not) or (.severity | IN("P0","P1","P2","P3")))
       and ((has("actionable_by_dev_agent")   | not) or (.actionable_by_dev_agent   | type == "boolean"))
       and ((has("requires_human")            | not) or (.requires_human            | type == "boolean"))
       and ((has("requires_privileged_token") | not) or (.requires_privileged_token | type == "boolean"))
@@ -388,7 +397,18 @@ _verdict_body_from_artifact_json() {
         (.blockingFindings // [])
         | to_entries
         | map(
-            "\(.key + 1). **[BLOCKING] \(.value.title)**"
+            "\(.key + 1). "
+            # Issue #449 (R1): render the OPTIONAL severity field inline as a
+            # [P0]-[P3] tag, the SAME token shape the codex/generic free-form
+            # paths already emit, so the wrapper severity filter
+            # (lib-review-severity.sh _review_extract_highest_severity),
+            # which scans this rendered body verbatim, can score an
+            # artifact-sourced finding exactly like a free-form one. An
+            # absent severity renders NO tag (an untagged finding -- the
+            # filter treats that as none, which always blocks, matching
+            # this array own pre-#449 unconditional-block behavior).
+            + (if .value.severity then "[" + .value.severity + "] " else "" end)
+            + "**[BLOCKING] \(.value.title)**"
             + (if .value.detail then " — " + .value.detail else "" end)
             + (if .value.file then " (" + .value.file + (if .value.line then ":" + (.value.line|tostring) else "" end) + ")" else "" end)
             # INV-92 (#298): surface the recommended owner for humans when the

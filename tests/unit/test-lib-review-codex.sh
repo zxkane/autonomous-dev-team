@@ -127,9 +127,12 @@ F="$TMP/stdout.txt"
 printf '%s\n' '[P1] src/x.ts:1 — silent failure.' > "$F"
 assert_eq "TC-CXRS-CLS-01 [P1] present → fail" "fail" "$(_codex_review_classify_stdout "$F")"
 
-# TC-CXRS-CLS-02 — only [P2]/[P3] → pass
+# TC-CXRS-CLS-02 — only [P2]/[P3] → fail (issue #449: the severity ratchet can
+# still block a P2/P3 finding at an early round; the classifier flags ANY tag
+# as `fail` and the wrapper's pre-aggregation severity filter — NOT this
+# function — makes the round-aware demotion decision).
 printf '%s\n' '[P2] minor nit' '[P3] consider a test' > "$F"
-assert_eq "TC-CXRS-CLS-02 only [P2]/[P3] → pass" "pass" "$(_codex_review_classify_stdout "$F")"
+assert_eq "TC-CXRS-CLS-02 only [P2]/[P3] → fail (#449 ratchet; demotion happens post-classification)" "fail" "$(_codex_review_classify_stdout "$F")"
 
 # TC-CXRS-CLS-03 — no priority markers at all → pass
 printf '%s\n' 'Looks good to merge. No issues.' > "$F"
@@ -162,7 +165,12 @@ assert_eq "TC-CXRS-CLS-07 no abort under set -euo pipefail" "rc=0|pass" "$cls07"
 
 # fixture-backed
 assert_eq "TC-CXRS-CLS-08 p1 fixture → fail" "fail" "$(_codex_review_classify_stdout "$FIXTURES/codex-review-stdout-p1.txt")"
-assert_eq "TC-CXRS-CLS-09 clean fixture → pass" "pass" "$(_codex_review_classify_stdout "$FIXTURES/codex-review-stdout-clean.txt")"
+# The "clean" fixture actually carries [P2]/[P3] findings (non-blocking
+# observations pre-#449). Under the #449 severity ratchet ANY tag (P0-P3)
+# classifies fail here — the round-aware demotion happens LATER, in the
+# wrapper's pre-aggregation severity filter (lib-review-severity.sh), not in
+# this classifier.
+assert_eq "TC-CXRS-CLS-09 clean-but-P2/P3-tagged fixture → fail (#449 ratchet; demotion is post-classification)" "fail" "$(_codex_review_classify_stdout "$FIXTURES/codex-review-stdout-clean.txt")"
 
 # ---------------------------------------------------------------------------
 echo ""
@@ -1162,9 +1170,11 @@ PV
 assert_eq "TC-CXRS-INT-01 [P1] not self-posted → wrapper posts FAIL → resolves fail" \
   "POST|fail|fail" "$(fallback_case "$FIXTURES/codex-review-stdout-p1.txt" "" "")"
 
-# TC-CXRS-INT-02 — clean stdout, not self-posted → wrapper posts PASS, resolves pass
-assert_eq "TC-CXRS-INT-02 clean not self-posted → wrapper posts PASS → resolves pass" \
-  "POST|pass|pass" "$(fallback_case "$FIXTURES/codex-review-stdout-clean.txt" "" "")"
+# TC-CXRS-INT-02 — the "clean" fixture carries [P2]/[P3] tags; under the #449
+# ratchet ANY tag classifies fail (round-aware demotion is a later, separate
+# stage) — not self-posted → wrapper posts FAIL, resolves fail.
+assert_eq "TC-CXRS-INT-02 P2/P3-tagged fixture not self-posted → wrapper posts FAIL → resolves fail (#449)" \
+  "POST|fail|fail" "$(fallback_case "$FIXTURES/codex-review-stdout-clean.txt" "" "")"
 
 # TC-CXRS-INT-03 — codex self-posted (pre_body set) → NO double-post
 assert_eq "TC-CXRS-INT-03 codex self-posted → wrapper does NOT double-post" \
@@ -1191,14 +1201,17 @@ assert_eq "TC-CXRS-INT-04b rc-0 review MENTIONING stream-error phrase (no [P1]) 
   "POST|pass|pass" "$(fallback_case "$FIXTURES/codex-review-stdout-stream-error.txt" "" "" "" 0)"
 
 # TC-CXRS-INT-05 — re-fetch LAGS (comments API hasn't surfaced the just-posted
-# verdict yet) on a clean PASS → the agent MUST still resolve `pass` from the
+# verdict yet) → the agent MUST still resolve its composed verdict from the
 # wrapper's own composed body, NOT be left unresolved (→ spuriously dropped
 # `unavailable` by the post-window sweep). Guards the M1 propagation race: the
 # wrapper KNOWS the verdict it composed + posted; classifying the posted comment
 # is identical (post-verdict.sh prepends `Review PASSED`/`Review findings:`), so a
 # lagging API read must never demote a successfully-posted verdict to no-verdict.
-assert_eq "TC-CXRS-INT-05 PASS with lagging re-fetch → still resolves pass (not dropped unavailable)" \
-  "POST|pass|pass" "$(fallback_case "$FIXTURES/codex-review-stdout-clean.txt" "" "" lag)"
+# The "clean" fixture carries [P2]/[P3] tags, so under the #449 ratchet the
+# composed verdict is `fail` (not `pass`) — the lag-survival guarantee this
+# test exists to pin is orthogonal to which verdict token it is.
+assert_eq "TC-CXRS-INT-05 FAIL (P2/P3-tagged) with lagging re-fetch → still resolves fail (not dropped unavailable)" \
+  "POST|fail|fail" "$(fallback_case "$FIXTURES/codex-review-stdout-clean.txt" "" "" lag)"
 
 # TC-CXRS-INT-06 — re-fetch LAGS on a [P1] FAIL → still resolves `fail` from the
 # wrapper's own composed body (a passing-merge veto must survive the lag too).
@@ -1221,10 +1234,12 @@ assert_eq "TC-CXRS-INT-07 non-zero exit (CLI error, no [P1]) → NOT posted as f
 assert_eq "TC-CXRS-INT-08 non-zero exit with [P1] in partial stdout → still unresolved (rc-0 gate)" \
   "NOPOST|-|" "$(fallback_case "$FIXTURES/codex-review-stdout-p1.txt" "" "" "" 1)"
 
-# TC-CXRS-INT-09 — the rc-0 happy path is unaffected: an explicit rc 0 with a clean
-# review still posts PASS (the gate admits a completed review).
-assert_eq "TC-CXRS-INT-09 rc 0 clean review → posts PASS (gate admits completed review)" \
-  "POST|pass|pass" "$(fallback_case "$FIXTURES/codex-review-stdout-clean.txt" "" "" "" 0)"
+# TC-CXRS-INT-09 — the rc-0 happy path is unaffected: an explicit rc 0 with a
+# completed review still posts a verdict (the gate admits a completed
+# review) — the "clean" fixture carries [P2]/[P3] tags, so under the #449
+# ratchet the posted verdict is FAIL (any tag), not PASS.
+assert_eq "TC-CXRS-INT-09 rc 0 P2/P3-tagged review → posts FAIL (gate admits completed review, #449 ratchet)" \
+  "POST|fail|fail" "$(fallback_case "$FIXTURES/codex-review-stdout-clean.txt" "" "" "" 0)"
 
 # TC-CXRS-INT-10 — #218 review finding 2: an rc-0 review that did NOT self-post and
 # produced an EMPTY capture (the diff had nothing blocking; codex emitted little/no
@@ -1914,9 +1929,15 @@ assert_eq "TC-CXRS-MAL-CLS-02e genuine [P1] review in numbered+bold format quoti
 { printf '%s\n' '1. **[P1] The handler swallows the error** — propagate it.'; head -c 60000 /dev/zero | tr '\0' 'x'; } > "$MF"
 assert_eq "TC-CXRS-MAL-CLS-02f long genuine [P1] review (no heading) → fail (NOT malformed) [5th-round finding-2]" \
   "fail" "$(_codex_review_classify_stdout "$MF")"
-# TC-CXRS-MAL-CLS-03 — a genuine clean review still PASSes
-assert_eq "TC-CXRS-MAL-CLS-03 genuine clean review → still pass" \
-  "pass" "$(_codex_review_classify_stdout "$FIXTURES/codex-review-stdout-clean.txt")"
+# TC-CXRS-MAL-CLS-03 — a genuine (non-malformed) review is classified on its
+# tags, not treated as malformed. The "clean" fixture carries [P2]/[P3] tags,
+# so under the #449 ratchet it classifies fail (any tag) while still NOT
+# being malformed — the malformed detector and the severity classification
+# are orthogonal.
+_codex_review_stdout_is_malformed "$FIXTURES/codex-review-stdout-clean.txt"
+assert_eq "TC-CXRS-MAL-CLS-03a genuine P2/P3-tagged review is NOT malformed (rc 1)" "1" "$?"
+assert_eq "TC-CXRS-MAL-CLS-03b genuine P2/P3-tagged review classifies fail (#449 ratchet, not malformed)" \
+  "fail" "$(_codex_review_classify_stdout "$FIXTURES/codex-review-stdout-clean.txt")"
 # TC-CXRS-MAL-CLS-04 — empty capture still PASSes (unchanged — a valid clean review)
 : > "$MF"
 assert_eq "TC-CXRS-MAL-CLS-04 empty capture → pass (unchanged)" "pass" "$(_codex_review_classify_stdout "$MF")"
@@ -1973,9 +1994,11 @@ run_codex_mal_case() {
   rm -rf "$sandbox"
 }
 
-# TC-CXRS-MAL-RUN-01 — malformed turn 1, clean re-run → 2 runs, rc 0, final pass
-assert_eq "TC-CXRS-MAL-RUN-01 malformed rc-0 then clean re-run → 2 runs, rc 0, final pass" \
-  "0|2|pass" "$(run_codex_mal_case $'malformed\nverdict' 3 $'0\n10\n20\n30')"
+# TC-CXRS-MAL-RUN-01 — malformed turn 1, re-run lands the "clean" fixture (which
+# carries [P2]/[P3] tags — under the #449 ratchet ANY tag classifies fail, the
+# round-aware demotion is a separate later stage) → 2 runs, rc 0, final fail.
+assert_eq "TC-CXRS-MAL-RUN-01 malformed rc-0 then P2/P3-tagged re-run → 2 runs, rc 0, final fail (#449)" \
+  "0|2|fail" "$(run_codex_mal_case $'malformed\nverdict' 3 $'0\n10\n20\n30')"
 # TC-CXRS-MAL-RUN-02 — malformed on every run, max=3 → 4 runs, rc 0, final still malformed
 assert_eq "TC-CXRS-MAL-RUN-02 malformed throughout, max=3 → 4 runs, rc 0, final malformed" \
   "0|4|malformed" "$(run_codex_mal_case $'malformed\nmalformed\nmalformed\nmalformed' 3 $'0\n5\n10\n15\n20')"
@@ -1985,9 +2008,12 @@ assert_eq "TC-CXRS-MAL-RUN-03 max=0 → 1 run, no malformed re-run, final malfor
 # TC-CXRS-MAL-RUN-04 — malformed then a genuine [P1] review → 2 runs, final fail (no over-retry past a real verdict)
 assert_eq "TC-CXRS-MAL-RUN-04 malformed then genuine [P1] → 2 runs, rc 0, final fail" \
   "0|2|fail" "$(run_codex_mal_case $'malformed\np1' 3 $'0\n10\n20\n30')"
-# TC-CXRS-MAL-RUN-05 — a clean rc-0 run on turn 1 → NO malformed re-run (happy path unaffected)
-assert_eq "TC-CXRS-MAL-RUN-05 clean turn 1 → 1 run (no malformed re-run), final pass" \
-  "0|1|pass" "$(run_codex_mal_case $'verdict\nverdict' 3 $'0\n5')"
+# TC-CXRS-MAL-RUN-05 — a clean (non-malformed) rc-0 run on turn 1 → NO malformed
+# re-run (happy path unaffected). The "clean" fixture carries [P2]/[P3] tags,
+# so under the #449 ratchet the final classification is fail (any tag) — the
+# no-re-run behavior this test pins is orthogonal to which token it is.
+assert_eq "TC-CXRS-MAL-RUN-05 P2/P3-tagged turn 1 → 1 run (no malformed re-run), final fail (#449)" \
+  "0|1|fail" "$(run_codex_mal_case $'verdict\nverdict' 3 $'0\n5')"
 
 # --- _classify_codex_drop_reason gains a `malformed-output` bucket ---
 DM="$TMP/dropmal.txt"
@@ -2028,9 +2054,12 @@ assert_eq "TC-CXRS-MAL-INT-01 rc-0 prompt-echo → NOT posted as FAIL, left unre
 # TC-CXRS-MAL-INT-02 — rc-0 genuine [P1] review → wrapper still posts FAIL (regression guard)
 assert_eq "TC-CXRS-MAL-INT-02 rc-0 genuine [P1] → still posts FAIL" \
   "POST|fail|fail" "$(fallback_case "$FIXTURES/codex-review-stdout-p1.txt" "" "" "" 0)"
-# TC-CXRS-MAL-INT-03 — rc-0 clean review → wrapper still posts PASS (regression guard)
-assert_eq "TC-CXRS-MAL-INT-03 rc-0 clean review → still posts PASS" \
-  "POST|pass|pass" "$(fallback_case "$FIXTURES/codex-review-stdout-clean.txt" "" "" "" 0)"
+# TC-CXRS-MAL-INT-03 — rc-0 non-malformed review → wrapper still posts a
+# verdict (regression guard: the malformed gate must not swallow a genuine
+# review). The "clean" fixture carries [P2]/[P3] tags, so under the #449
+# ratchet the posted verdict is FAIL (any tag), not PASS.
+assert_eq "TC-CXRS-MAL-INT-03 rc-0 P2/P3-tagged review → still posts FAIL (#449 ratchet, not swallowed by the malformed gate)" \
+  "POST|fail|fail" "$(fallback_case "$FIXTURES/codex-review-stdout-clean.txt" "" "" "" 0)"
 
 # --- wrapper wiring (source-of-truth) ---
 # TC-CXRS-MAL-WIRE-01 — the wrapper fallback gates on the `malformed` classifier
