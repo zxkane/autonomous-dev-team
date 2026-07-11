@@ -3282,6 +3282,19 @@ _reap_fanout_recorded_descendants "ADT_FANOUT_LANE_MARKER" "${AGENT_SESSION_IDS[
 # (the rendered comment body — populated whether the agent self-posted or the
 # wrapper posted on its behalf).
 declare -a AGENT_HIGHEST_SEVERITY=()
+# [P1] #2 (#449 review round 5): tracks whether ANY agent's verdict was
+# demoted by the severity ratchet this round, independent of
+# `_any_deciding_artifact`. The demotion rewrites AGENT_VERDICT_BODIES[i] in
+# memory, but that corrected body was previously posted ONLY when
+# `_any_deciding_artifact` was true — on a comment-only/fallback run (e.g. the
+# codex stdout fallback, or any agent resolved via `_classify_verdict_body`
+# rather than the verdict-artifact channel) `_any_deciding_artifact` is
+# false, so the wrapper skipped posting and the agent's ORIGINAL, now-STALE
+# "Review findings: ... [BLOCKING] ..." comment remained the only visible
+# verdict — misleading a human reader and the dev-resume prompt's
+# `[P1]`/`BLOCKING` scan (autonomous-mode.md), which would treat an
+# internally-demoted PASS as still having outstanding blocking feedback.
+_any_severity_demotion=false
 for _i in "${!AGENT_NAMES[@]}"; do
   _sev_text=""
   if [[ "${AGENT_NAMES[$_i]}" == "codex" && -n "${AGENT_CODEX_LOGS[$_i]:-}" && -f "${AGENT_CODEX_LOGS[$_i]}" ]]; then
@@ -3293,6 +3306,7 @@ for _i in "${!AGENT_NAMES[@]}"; do
   _pre_filter_verdict="${AGENT_VERDICTS[$_i]}"
   AGENT_VERDICTS[$_i]=$(_review_apply_severity_filter "${AGENT_VERDICTS[$_i]}" "$_sev_text" "$REVIEW_ROUND")
   if [[ "$_pre_filter_verdict" == "fail" && "${AGENT_VERDICTS[$_i]}" == "pass" ]]; then
+    _any_severity_demotion=true
     log "Issue #449: severity ratchet demoted '${AGENT_NAMES[$_i]}' fail→pass at round ${REVIEW_ROUND} (highest severity: ${AGENT_HIGHEST_SEVERITY[$_i]}, below this round's blocking floor)."
     # Re-render AGENT_VERDICT_BODIES[i] on demotion. It still holds the
     # ORIGINAL "Review findings:" / "[BLOCKING]" text, which would otherwise
@@ -3636,10 +3650,19 @@ Findings->Decision Gate: 1 blocking finding(s) -- FAIL.
 # single newest authoritative comment and a standalone here would just duplicate
 # it. When NO deciding agent was artifact-sourced (the aggregate is skipped), this
 # standalone IS the timeout surface, so it still fires.
+#
+# [P1] #2 (#449 review round 5) ALSO skips when `_any_severity_demotion` is
+# true — that condition now ALSO makes the aggregate comment below fire (see
+# its gate), and that aggregate folds in the SAME `_timeout_veto_finding` via
+# LATEST_COMMENT unconditionally whenever `_timed_out_agents` is set. Without
+# this, a round with both a severity demotion AND a timeout veto would post
+# the timeout finding TWICE: once here standalone, once folded into the
+# aggregate.
 if [[ -n "$_timed_out_agents" ]]; then
   log "INV-48: review agent(s) timed out (rc 124/137, no verdict) — VETO (deciding FAIL): ${_timed_out_agents%% }"
 fi
-if [[ -n "$_timed_out_agents" && "$_any_deciding_artifact" != "true" ]]; then
+if [[ -n "$_timed_out_agents" ]] \
+   && [[ "$_any_deciding_artifact" != "true" ]] && [[ "$_any_severity_demotion" != "true" ]]; then
   itp_post_comment "$ISSUE_NUMBER" \
     "$(_timeout_veto_finding)$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
 fi
@@ -3675,11 +3698,20 @@ fi
 # contradictory per-agent PASS+FAIL comments).
 #
 # Gate (avoids double-posting on the legacy comment-channel path):
-#   - only when at least one DECIDING agent was ARTIFACT-sourced
-#     (`_any_deciding_artifact`). A pure comment-channel deciding surface means
-#     the agents already posted their own comment (today's behavior) — posting
-#     again would duplicate it. An artifact-sourced surface may have NO landed
-#     comment, so the wrapper must render the authoritative aggregate.
+#   - fires when at least one DECIDING agent was ARTIFACT-sourced
+#     (`_any_deciding_artifact`) — an artifact-sourced surface may have NO
+#     landed comment, so the wrapper must render the authoritative aggregate.
+#   - [P1] #2 (#449 review round 5) ALSO fires when the severity ratchet
+#     DEMOTED any agent's verdict this round (`_any_severity_demotion`),
+#     REGARDLESS of `_any_deciding_artifact`. On a pure comment-channel
+#     round, each agent already posted its own `Review findings:`/`[BLOCKING]`
+#     comment BEFORE the ratchet ran — that comment is now STALE (the
+#     in-memory AGENT_VERDICT_BODIES[i] was re-rendered as a non-blocking
+#     note, but nothing else re-posts it), so skipping here (the pre-fix
+#     behavior) left the original blocking comment as the only visible
+#     verdict. This is not a duplicate-post risk: the ratchet unconditionally
+#     changed at least one agent's rendered body, so this comment is NEW
+#     content the agent never posted itself.
 #   - only for a decided aggregate (pass/fail). `all-unavailable` has no rendered
 #     surface (its branch handles its own messaging + empties LATEST_COMMENT).
 #   - only when LATEST_COMMENT is non-empty (something to render).
@@ -3691,9 +3723,9 @@ fi
 # INV-35 `<!-- review-verdict: … -->` trailer is still emitted separately in the
 # PASS/FAIL branches below — unchanged. Best-effort: a non-zero post is logged,
 # never fatal (the aggregate verdict already drives the label transition).
-if [[ "$_any_deciding_artifact" == "true" && -n "$LATEST_COMMENT" ]] \
+if [[ ( "$_any_deciding_artifact" == "true" || "$_any_severity_demotion" == "true" ) && -n "$LATEST_COMMENT" ]] \
    && { [[ "$AGGREGATE" == "pass" ]] || [[ "$AGGREGATE" == "fail" ]]; }; then
-  log "INV-78: posting ONE wrapper-owned aggregate verdict comment (verdict=${AGGREGATE}; ≥1 deciding agent was artifact-sourced) so the comment-format consumers have an authoritative rendered surface."
+  log "INV-78: posting ONE wrapper-owned aggregate verdict comment (verdict=${AGGREGATE}; artifact-sourced=${_any_deciding_artifact}, severity-demoted=${_any_severity_demotion}) so the comment-format consumers have an authoritative rendered surface."
   _agg_body_file=$(mktemp "/tmp/aggregate-verdict-${ISSUE_NUMBER}-XXXXXX.md" 2>/dev/null) || _agg_body_file=""
   if [[ -n "$_agg_body_file" ]]; then
     printf '%s' "$LATEST_COMMENT" > "$_agg_body_file" 2>/dev/null || true
@@ -4348,6 +4380,28 @@ else
     if [[ "$AGGREGATE" == "fail" ]] && [[ "$_AGGREGATE_SUBSTANTIVE_FAIL" == "true" ]]; then
       _rc_already_stalled=$(itp_read_task "$ISSUE_NUMBER" labels \
         | jq -r '.labels | any(. == "stalled")' 2>/dev/null || echo "false")
+
+      # [P1] #1 (#449 review round 5): if a SIBLING breaker (INV-105/INV-122)
+      # has ALREADY moved this issue to `stalled` since this review run
+      # started, do not merely skip the trip REPORT below — short-circuit the
+      # ENTIRE ordinary failed-substantive routing (marker persist,
+      # `emit_verdict_trailer`, `submit_request_changes`, and critically
+      # `itp_transition_state "reviewing" "pending-dev"`). Falling through to
+      # that routing (the pre-fix behavior) would clobber the sibling
+      # breaker's stall with a COMPETING pending-dev flip, silently re-arming
+      # the very loop the other breaker just halted — the issue would bounce
+      # `stalled` -> `pending-dev` on the next label read despite an operator
+      # never having removed `stalled`. Exiting here (RESULT_PARSED=true, no
+      # transition call at all) leaves the sibling's `stalled` label as the
+      # sole, uncontested terminal state — same "respect an existing halt"
+      # contract [INV-126]'s own trip branch already applies to itself.
+      if [[ "$_rc_already_stalled" == "true" ]]; then
+        log "[#449] INV-126: issue #${ISSUE_NUMBER} is already stalled (tripped by a sibling breaker) — skipping the round-cap counter AND the ordinary failed-substantive routing to avoid a competing pending-dev flip."
+        RESULT_PARSED=true
+        log "Review complete."
+        exit 0
+      fi
+
       # [P1] #3 (#449 review): cutoff-then-scan, mirroring [INV-05]'s
       # "Marking as stalled" cutoff convention (lib-dispatch.sh's
       # count_retries family). Without a cutoff, `_review_cap_next_count`
@@ -4368,7 +4422,10 @@ else
       _rc_threshold=$(_review_cap_threshold)
       _rc_marker=$(_review_cap_marker "$ISSUE_NUMBER" "$PR_HEAD_SHA" "$_rc_next_count")
 
-      if [[ "$_rc_already_stalled" != "true" ]] && [[ "$_rc_next_count" -ge "$_rc_threshold" ]]; then
+      # `_rc_already_stalled` is guaranteed "false" here (the check above
+      # already exited on "true") — the trip decision below is now a plain
+      # threshold compare, unchanged from the issue's own R2 spec.
+      if [[ "$_rc_next_count" -ge "$_rc_threshold" ]]; then
         log "[#449] INV-126 review-round-cap breaker TRIPPED: round=${_rc_next_count} (threshold=${_rc_threshold}) — the severity ratchet's own P0/P1 floor is still failing; halting re-dispatch, transitioning to stalled."
         # Transition FIRST, atomically — mirrors INV-105/INV-122's TOCTOU fix (a
         # failed transition aborts under set -euo pipefail BEFORE RESULT_PARSED

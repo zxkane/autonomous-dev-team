@@ -310,6 +310,46 @@ assert_eq "TC-REVIEW-CONV-034f empty-head marker's round still parses and increm
 assert_contains "TC-REVIEW-CONV-035 wrapper checks already-stalled before tripping INV-126" \
   "$(cat "$WRAPPER")" '_rc_already_stalled'
 
+# TC-REVIEW-CONV-035b/c/d [P1 fix, review round 5]: the already-stalled check
+# must short-circuit the ENTIRE substantive-FAIL routing (an `exit 0`
+# immediately after the check), not merely skip the trip-report branch and
+# fall through to the ordinary FAIL routing — the pre-fix shape would let an
+# already-stalled issue get a COMPETING `pending-dev` transition from THIS
+# breaker's own normal-FAIL fall-through, clobbering a sibling breaker's
+# (INV-105/INV-122) stall.
+already_stalled_block=$(awk '/_rc_already_stalled=\$\(itp_read_task/,/_rc_comments_json=\$\(itp_list_comments/' "$WRAPPER")
+# The `if` guard's own executable BODY only (excludes the doc comment above
+# it, which legitimately mentions pending-dev in prose while explaining the
+# bug being fixed) — from the `if` line through its matching `fi`.
+already_stalled_if_body=$(awk '/if \[\[ "\$_rc_already_stalled" == "true" \]\]/{f=1} f{print} f && /^      fi$/{exit}' "$WRAPPER")
+assert_contains "TC-REVIEW-CONV-035b the already-stalled branch exits immediately (exit 0)" \
+  "$already_stalled_if_body" 'exit 0'
+assert_contains "TC-REVIEW-CONV-035c the already-stalled branch sets RESULT_PARSED=true before exiting" \
+  "$already_stalled_if_body" 'RESULT_PARSED=true'
+# The counter read (`_rc_comments_json=$(itp_list_comments ...)`, the first
+# statement of the round-cap-counter logic) must appear STRICTLY AFTER the
+# already-stalled check's own `if` guard — i.e. the short-circuit runs BEFORE
+# any counter read/persist, not after. Pinned via line-number ordering
+# (mirrors TC-038's own transition-precedes-report ordering pin).
+already_stalled_if_line=$(grep -n 'if \[\[ "\$_rc_already_stalled" == "true" \]\]' "$WRAPPER" | head -1 | cut -d: -f1)
+counter_read_line=$(grep -n '_rc_comments_json=\$(itp_list_comments' "$WRAPPER" | head -1 | cut -d: -f1)
+if [[ -n "$already_stalled_if_line" && -n "$counter_read_line" && "$already_stalled_if_line" -lt "$counter_read_line" ]]; then
+  echo -e "  ${GREEN}PASS${NC}: TC-REVIEW-CONV-035d already-stalled check (line $already_stalled_if_line) precedes the round-cap counter read (line $counter_read_line)"
+  PASS=$((PASS + 1))
+else
+  echo -e "  ${RED}FAIL${NC}: TC-REVIEW-CONV-035d already-stalled check must precede the round-cap counter read"
+  echo "      already_stalled_if_line=$already_stalled_if_line counter_read_line=$counter_read_line"
+  FAIL=$((FAIL + 1))
+fi
+# The already-stalled branch's EXECUTABLE body itself must NOT contain a
+# pending-dev transition call (the bug this fix closes: falling through to
+# the ordinary FAIL routing's unconditional pending-dev flip, clobbering a
+# sibling breaker's stall). Checked against the `if`-body-only slice above so
+# a legitimate prose mention of "pending-dev" in the preceding doc comment
+# (explaining the bug) doesn't produce a false failure.
+assert_eq "TC-REVIEW-CONV-035e already-stalled branch's executable body contains no pending-dev transition call" "" \
+  "$(grep -o 'itp_transition_state.*pending-dev' <<<"$already_stalled_if_body")"
+
 # TC-REVIEW-CONV-036: only fires when AGGREGATE=="fail" — pinned as a wiring
 # grep (the breaker must not run on the all-unavailable / crash-without-verdict
 # sub-path, which has no severity floor to evaluate).
@@ -460,6 +500,38 @@ assert_contains "TC-REVIEW-CONV-048i review-round-counter marker gate consults s
 inv126_gate_line=$(grep -n '^    if \[\[ "\$AGGREGATE" == "fail" \]\]' "$WRAPPER" | head -1 | cut -d: -f1)
 assert_eq "TC-REVIEW-CONV-048j INV-126 cap gate ALSO consults substantive-fail" "true" \
   "$([[ -n "$inv126_gate_line" ]] && grep -q '_AGGREGATE_SUBSTANTIVE_FAIL' <<<"$(sed -n "${inv126_gate_line}p" "$WRAPPER")" && echo true || echo false)"
+
+# TC-REVIEW-CONV-048k..n [P1 fix, review round 5]: a severity-ratchet
+# demotion must re-post the corrected body even on the COMMENT-ONLY path
+# (`_any_deciding_artifact == false`) — previously the aggregate-verdict
+# comment post was gated SOLELY on `_any_deciding_artifact`, so a demotion
+# with no artifact-sourced agent computed a corrected body but never posted
+# it, leaving the agent's stale, still-"[BLOCKING]" comment as the only
+# visible verdict.
+assert_contains "TC-REVIEW-CONV-048k wrapper tracks _any_severity_demotion" \
+  "$(cat "$WRAPPER")" '_any_severity_demotion'
+# The flag must be set to true exactly where a fail->pass demotion happens —
+# same guard the log line already uses (`_pre_filter_verdict == fail &&
+# AGENT_VERDICTS[$_i] == pass`), so the set can't be reached for a non-demoted
+# agent.
+demotion_set_region=$(awk '/"\$_pre_filter_verdict" == "fail" && "\$\{AGENT_VERDICTS\[\$_i\]\}" == "pass"/{f=1} f{print; if (/^  fi\$/) exit}' "$WRAPPER")
+assert_contains "TC-REVIEW-CONV-048l _any_severity_demotion is set true inside the demotion branch" \
+  "$demotion_set_region" '_any_severity_demotion=true'
+# The aggregate-verdict-comment post gate must OR-in `_any_severity_demotion`
+# alongside `_any_deciding_artifact` (never AND-only, which would still miss
+# the comment-only + demotion case this fix targets) — anchored on `==` so it
+# cannot false-match the sibling `!=`-guarded skip condition below.
+agg_post_gate_line=$(grep -n '_any_deciding_artifact" == "true".*||.*_any_severity_demotion" == "true"' "$WRAPPER" | head -1)
+assert_contains "TC-REVIEW-CONV-048m aggregate-post gate ORs _any_deciding_artifact with _any_severity_demotion" \
+  "$agg_post_gate_line" '||'
+# The sibling INV-48 standalone timeout-veto post must ALSO skip when a
+# demotion occurred (else a round with both a timeout veto and a demotion
+# would post the timeout finding twice: once standalone, once folded into
+# the now-also-firing aggregate comment). Anchored on `!=` (the skip
+# condition), distinct from the `==` OR-gate pinned above.
+timeout_standalone_gate_line=$(grep -n '_any_deciding_artifact" != "true".*_any_severity_demotion" != "true"' "$WRAPPER" | head -1)
+assert_contains "TC-REVIEW-CONV-048n INV-48 standalone timeout post also skips on a severity demotion (no double-post)" \
+  "$timeout_standalone_gate_line" '_any_severity_demotion'
 
 # ===========================================================================
 echo

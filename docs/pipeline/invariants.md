@@ -7275,7 +7275,20 @@ stall a PR that no review agent ever actually found a live P0/P1 in.
 
 1. Check current issue labels for `stalled` FIRST — if already stalled (e.g.
    [INV-105] or [INV-122] tripped first), do NOT re-trip or post a competing
-   report.
+   report. **[P1 fix, review round 5]**: the already-stalled check
+   short-circuits the ENTIRE ordinary failed-substantive routing, not merely
+   the trip report — `exit 0` immediately after the check (no round-cap
+   counter read/persist, no `emit_verdict_trailer`, no
+   `submit_request_changes`, and critically no
+   `itp_transition_state "reviewing" "pending-dev"`). The pre-fix code only
+   skipped the trip-report branch and then fell through to the normal FAIL
+   routing, which included the unconditional `pending-dev` transition at the
+   end of the substantive-FAIL sub-path — clobbering a sibling breaker's
+   `stalled` label with a COMPETING `pending-dev` flip on the very same
+   wrapper invocation, silently re-arming the loop the sibling breaker just
+   halted (the issue would bounce `stalled → pending-dev` despite no operator
+   ever removing `stalled`). Exiting immediately leaves the sibling's
+   `stalled` label as the sole, uncontested terminal state.
 2. **No `may_stall_now` call** — same rationale [INV-122] documents: this
    breaker runs synchronously INSIDE the very review wrapper the dispatcher
    just launched, so `may_stall_now` would always see this process's own

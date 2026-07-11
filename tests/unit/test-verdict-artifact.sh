@@ -400,7 +400,13 @@ assert_grep "TC-VERDICT-ARTIFACT-W24 timeout finding folded into LATEST_COMMENT 
 assert_grep "TC-VERDICT-ARTIFACT-W24b LATEST_COMMENT appends the shared timeout-veto finding builder (+=)" \
   'LATEST_COMMENT\+="\$\(_timeout_veto_finding\)"' "$WRAPPER"
 assert_grep "TC-VERDICT-ARTIFACT-W24c standalone INV-48 timeout comment is skipped when the aggregate carries it" \
-  '_timed_out_agents" && "\$_any_deciding_artifact" != "true"' "$WRAPPER"
+  '"\$_any_deciding_artifact" != "true"' "$WRAPPER"
+# [P1] #2 (#449 review round 5): the standalone timeout post is ALSO skipped
+# when the severity ratchet demoted a verdict this round — that condition
+# now ALSO makes the aggregate comment fire (folding in the same timeout
+# finding), so without this the timeout finding would post twice.
+assert_grep "TC-VERDICT-ARTIFACT-W24c2 standalone INV-48 timeout comment is ALSO skipped on a severity demotion (#449, no double-post)" \
+  '"\$_any_deciding_artifact" != "true" \]\] && \[\[ "\$_any_severity_demotion" != "true"' "$WRAPPER"
 assert_grep "TC-VERDICT-ARTIFACT-W24d the timeout-veto finding is a SINGLE shared builder (no verbatim duplication)" \
   '_timeout_veto_finding\(\) \{' "$WRAPPER"
 
