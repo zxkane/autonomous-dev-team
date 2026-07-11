@@ -1005,6 +1005,32 @@ out=$(_run_with_lib "_gl_graphql 'query { x }'" 2>/dev/null); rc=$?
 assert_rc_nonzero "TC-GLT-100: hook rc 0 + top-level null → _gl_graphql rc != 0 (fails closed)" "$rc"
 assert_eq "TC-GLT-100: no null payload reaches the caller" "" "$out"
 
+# TC-GLT-101 (round-3 review finding): a hook that returns rc 0 with a
+# MULTI-DOCUMENT JSON stream (e.g. a buggy double-print that concatenates an
+# error/log object with the real data object) must also fail CLOSED. A bare
+# `jq -e 'type == "object"'` only checks the LAST parsed value from a
+# multi-document here-string and would wrongly accept this — the shape guard
+# must slurp (`jq -s`) and require exactly one top-level value.
+_reset_control
+unset GITLAB_TOKEN
+export GITLAB_TOKEN=""
+hook_multidoc="$WORK/hook-multidoc.sh"
+cat > "$hook_multidoc" <<'EOF'
+_gl_http() {
+  local method="$1" path="$2" hdr="$3"
+  printf 'HTTP/1.1 200 OK\r\n\r\n' > "$hdr"
+  printf '{"ok":true}'
+}
+_gl_graphql_hook() {
+  printf '{"errors":["stray diagnostic"]}{"project":{"mergeRequest":{"diffStatsSummary":{"additions":1,"deletions":1}}}}'
+  return 0
+}
+EOF
+export GITLAB_TRANSPORT_HOOK="$hook_multidoc"
+out=$(_run_with_lib "_gl_graphql 'query { x }'" 2>/dev/null); rc=$?
+assert_rc_nonzero "TC-GLT-101: hook rc 0 + multi-document JSON → _gl_graphql rc != 0 (fails closed)" "$rc"
+assert_eq "TC-GLT-101: no multi-document payload reaches the caller" "" "$out"
+
 # ===========================================================================
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="

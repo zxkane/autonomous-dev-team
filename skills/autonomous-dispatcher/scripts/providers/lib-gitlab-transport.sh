@@ -365,16 +365,20 @@ _gl_graphql() {
   # keeps working unchanged and simply falls through to the default impl.
   # The hook's stdout is CAPTURED (not streamed straight to the caller) so a
   # nonzero rc can never leak partial output, and its shape is validated
-  # (non-null JSON object — the same currency `_gl_graphql` itself returns
-  # on success) before being handed back; a hook that returns rc 0 with
-  # garbage/null output fails closed here rather than propagating malformed
-  # data to the caller (round-2 review finding).
+  # (EXACTLY ONE non-null JSON object — the same currency `_gl_graphql`
+  # itself returns on success) before being handed back; a hook that returns
+  # rc 0 with garbage/null output fails closed here rather than propagating
+  # malformed data to the caller (round-2 review finding). `jq -s` (slurp)
+  # is REQUIRED, not `jq -e 'type == "object"'` alone — a bare `jq -e` on a
+  # multi-document stream (e.g. a hook that double-prints, concatenating an
+  # error/log object with the real data object) only checks the LAST parsed
+  # value and would wrongly pass; `length == 1` closes that gap.
   if declare -F _gl_graphql_hook >/dev/null 2>&1; then
     local hook_out hook_rc
     hook_out="$(_gl_graphql_hook "$query" "$variables")"
     hook_rc=$?
     [[ $hook_rc -eq 0 ]] || return "$hook_rc"
-    jq -e 'type == "object"' >/dev/null 2>&1 <<<"$hook_out" || return 1
+    jq -e -cs 'length == 1 and (.[0] | type == "object")' >/dev/null 2>&1 <<<"$hook_out" || return 1
     printf '%s' "$hook_out"
     return 0
   fi

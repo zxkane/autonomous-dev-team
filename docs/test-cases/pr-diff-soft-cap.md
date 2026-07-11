@@ -97,7 +97,7 @@ both hosts" contract. Fix: `_gl_graphql` now probes for an optional
 `_gl_graphql_hook <query> <variables-json>` function the hook may additionally
 define (alongside its mandatory `_gl_http`) and delegates to it when present.
 Covered at the transport layer by `tests/unit/test-lib-gitlab-transport.sh`
-TC-GLT-093..100:
+TC-GLT-093..101:
 - a hook that defines `_gl_http` only + no token ⇒ `_gl_graphql` still fails
   closed, with an error message that names `_gl_graphql_hook` (not just
   `GITLAB_TOKEN`) so the operator knows the opt-in override exists;
@@ -111,13 +111,17 @@ TC-GLT-093..100:
 - with NO hook armed and a token present, the default Bearer-token path is
   byte-for-byte unchanged (exactly one curl call, `Authorization: Bearer`
   header present);
-- (TC-GLT-098..100, round-2 review finding) `_gl_graphql` does NOT trust the
-  hook verbatim: a hook that returns rc≠0 never leaks stdout it printed
-  before failing (output is captured, not streamed); a hook that returns
-  rc 0 with non-JSON or top-level-`null` output fails CLOSED instead of
-  handing malformed data to the caller — the same shape guarantee
-  (`type == "object"`, non-null) the default Bearer-token impl already
-  enforces on its own curl response.
+- (TC-GLT-098..101, round-2/round-3 review findings) `_gl_graphql` does NOT
+  trust the hook verbatim: a hook that returns rc≠0 never leaks stdout it
+  printed before failing (output is captured, not streamed); a hook that
+  returns rc 0 with non-JSON, top-level-`null`, or multi-document JSON output
+  (e.g. a buggy double-print concatenating a stray error/log object with the
+  real data object) fails CLOSED instead of handing malformed data to the
+  caller — enforced via `jq`'s slurp mode requiring EXACTLY ONE non-null
+  JSON object, not a bare `type == "object"` check (which only inspects the
+  LAST value parsed from a multi-document stream and would wrongly pass the
+  double-print case) — mirroring the shape guarantee the default
+  Bearer-token impl already enforces on its own curl response.
 
 ### TC-OVERREACH-013 — threshold-comparison OR logic across both dimensions
 Every combination of {files exceeded, lines exceeded, neither, both} against
