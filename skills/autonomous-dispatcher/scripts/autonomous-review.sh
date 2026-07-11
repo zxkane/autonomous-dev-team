@@ -97,7 +97,7 @@ source "${LIB_DIR}/lib-review-severity.sh"
 # of REVIEW_RETRY_LIMIT and INV-105's dev-resume-round counter.
 source "${LIB_DIR}/lib-review-round.sh"
 # shellcheck source=lib-review-cap.sh
-# Issue #449 (R2): INV-124 review-round-cap escalation breaker.
+# Issue #449 (R2): INV-126 review-round-cap escalation breaker.
 source "${LIB_DIR}/lib-review-cap.sh"
 # shellcheck source=lib-review-codex.sh
 # INV-62 (#218): codex-specific review path. The codex review member runs the
@@ -4293,7 +4293,7 @@ else
     log "INV-92: aggregate dev-actionable=${_AGG_DEV_ACTIONABLE} for the substantive FAIL trailer (any-fail-seen=${_any_fail_seen})."
 
     # -----------------------------------------------------------------------
-    # [#449] INV-124: review-round-cap escalation breaker.
+    # [#449] INV-126: review-round-cap escalation breaker.
     # -----------------------------------------------------------------------
     # A NEW, independent breaker (does not touch INV-105's or INV-122's own
     # fingerprint/trigger) — halts re-dispatch once R1's severity-ratchet
@@ -4339,7 +4339,7 @@ else
       _rc_marker=$(_review_cap_marker "$ISSUE_NUMBER" "$PR_HEAD_SHA" "$_rc_next_count")
 
       if [[ "$_rc_already_stalled" != "true" ]] && [[ "$_rc_next_count" -ge "$_rc_threshold" ]]; then
-        log "[#449] INV-124 review-round-cap breaker TRIPPED: round=${_rc_next_count} (threshold=${_rc_threshold}) — the severity ratchet's own P0/P1 floor is still failing; halting re-dispatch, transitioning to stalled."
+        log "[#449] INV-126 review-round-cap breaker TRIPPED: round=${_rc_next_count} (threshold=${_rc_threshold}) — the severity ratchet's own P0/P1 floor is still failing; halting re-dispatch, transitioning to stalled."
         # Transition FIRST, atomically — mirrors INV-105/INV-122's TOCTOU fix (a
         # failed transition aborts under set -euo pipefail BEFORE RESULT_PARSED
         # is set, so the crash-cleanup EXIT trap correctly treats it as a
@@ -4380,7 +4380,7 @@ removal re-arms the pipeline).
 @${REPO_OWNER}
 ROUNDCAPREPORT
 )" 2>/dev/null || true
-        log "Issue #${ISSUE_NUMBER} moved to stalled (INV-124 review-round-cap breaker)."
+        log "Issue #${ISSUE_NUMBER} moved to stalled (INV-126 review-round-cap breaker)."
         log "Review complete."
         exit 0
       fi

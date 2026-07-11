@@ -7293,7 +7293,7 @@ immediately; it takes another full `threshold` count of consecutive
 `failed-substantive` rounds. This is a deliberate divergence from
 [INV-105]/[INV-122]'s literal "removal re-arms the pipeline" mechanics (their
 head-scoped/frozen-head fingerprints naturally reset on the next real change
-without needing a report-timestamp cutoff); INV-124's counter is
+without needing a report-timestamp cutoff); INV-126's counter is
 head-AGNOSTIC by design (see above), so without the cutoff "removal re-arms
 the pipeline" would be neutered — the very first post-resume failure would
 immediately re-read the old trip's own marker and re-trip.
