@@ -580,6 +580,69 @@ echo "--- TC-TIMEOUTGUARD-028: rescinded-marker race — natural finish between 
 wd028_out=$(cat "$TMPROOT/wd028-out.log")
 assert_rc "028 natural exit code (0) preserved, not replayed as the stale rescinded 124 marker" 0 "$(rc_of "$wd028_out")"
 
+echo ""
+echo "--- TC-TIMEOUTGUARD-029: boundary-tie race — leader exits at the deadline, BEFORE the watchdog writes any marker, but a TERM-ignoring descendant must still be reaped ---"
+# PR #469 review round-5 [P1]: the marker is written only AFTER the
+# watchdog's deadline `sleep "$1"` returns — there is a real gap between the
+# watchdog waking up and the marker landing on disk. If the wrapped
+# command's LEADER exits naturally inside that exact gap (a genuine deadline
+# tie, not a fast-finish well before AGENT_TIMEOUT), the old reconciliation
+# read an EMPTY marker and took the "watchdog never fired, safe to cancel"
+# branch — even though a TERM-ignoring descendant was still alive and the
+# watchdog was already past its sleep, about to signal the group. Cancelling
+# the watchdog there abandoned the pending TERM/KILL escalation, leaking the
+# descendant past this function's return with an un-normalized natural rc.
+# _AGENT_WATCHDOG_WAKE_DELAY_SECS (test-only seam) widens the wake-to-marker
+# window so this lands deterministically: the leader dies at ~1s (exactly
+# AGENT_TIMEOUT), well inside the 2s wake-to-marker delay, so the parent's
+# `wait` on the leader is guaranteed to unblock while the marker file still
+# does not exist. The fix must fall back to checking the process GROUP's own
+# liveness (not just the marker) before treating an empty marker as "nothing
+# left to protect".
+WD029_MARKER_DIR="$TMPROOT/wd029-marker"
+mkdir -p "$WD029_MARKER_DIR"
+(
+  set -uo pipefail
+  export AUTONOMOUS_CONF_DIR="$TMPROOT/scripts" REPO="o/r" REPO_OWNER=o REPO_NAME=r PROJECT_ID=t PROJECT_DIR="$PROJECT_ROOT" GH_AUTH_MODE=token
+  export PATH="$TMPROOT/cu-notimeout"
+  export AGENT_TIMEOUT_WATCHDOG_FALLBACK=true
+  export _AGENT_WATCHDOG_WAKE_DELAY_SECS=2
+  export _AGENT_WATCHDOG_GRACE_SECS=1
+  # shellcheck disable=SC1090
+  source "$LIB_ERROR"
+  # shellcheck disable=SC1090
+  source "$LIB" --issue 451 >/dev/null 2>&1
+  AGENT_TIMEOUT=1
+  # Leader dies naturally at ~1s (the deadline itself), leaving a
+  # TERM-ignoring descendant alive; the watchdog wakes at ~1s too but won't
+  # write its marker until ~3s (the 2s wake delay).
+  _run_with_timeout bash -c '
+    ( trap "" TERM; while true; do date +%s >> "'"$WD029_MARKER_DIR"'/alive"; sleep 0.2; done ) &
+    sleep 1
+  '
+  echo "RC=$?"
+  if kill -0 -- "-$_AGENT_RUN_PID" 2>/dev/null; then
+    echo "GROUP_STILL_ALIVE=1"
+  else
+    echo "GROUP_STILL_ALIVE=0"
+  fi
+) >"$TMPROOT/wd029-out.log" 2>&1
+wd029_out=$(cat "$TMPROOT/wd029-out.log")
+assert_rc "029 rc normalized to 137 (KILL reaped the surviving descendant), not the leader's own natural 0" 137 "$(rc_of "$wd029_out")"
+[[ "$wd029_out" == *"GROUP_STILL_ALIVE=0"* ]] \
+  && ok "029 _run_with_timeout did not abandon the watchdog despite an empty marker at leader-exit time" \
+  || bad "029 _run_with_timeout returned while the TERM-ignoring descendant was still alive — got: $wd029_out"
+sleep 1
+if [[ -f "$WD029_MARKER_DIR/alive" ]]; then
+  last_write_epoch=$(tail -1 "$WD029_MARKER_DIR/alive")
+  now_epoch=$(date +%s)
+  age=$((now_epoch - last_write_epoch))
+  [[ "$age" -ge 1 ]] && ok "029 descendant marker went stale (age=${age}s) — not abandoned at the boundary tie" \
+    || bad "029 descendant still writing after _run_with_timeout returned (age=${age}s) — the boundary-tie abandon bug"
+else
+  bad "029 descendant marker file never created — test harness issue"
+fi
+
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== TC-TIMEOUTGUARD-030/031: source-location static assertion ==="

@@ -548,13 +548,25 @@ _run_with_timeout() {
     # land a natural finish inside it (TC-TIMEOUTGUARD-028 — the round-4
     # rescinded-marker race). Zero in production, so no behavior change.
     local _wd_term_delay="${_AGENT_WATCHDOG_TERM_DELAY_SECS:-0}"
+    # _AGENT_WATCHDOG_WAKE_DELAY_SECS — test-only seam (never read anywhere
+    # else, never documented to operators): widens the window between the
+    # watchdog's deadline `sleep "$1"` returning and its marker write, so a
+    # unit test can deterministically land the leader's natural exit AND the
+    # parent's `wait "$_AGENT_RUN_PID"` unblocking inside that window —
+    # before any marker exists on disk (TC-TIMEOUTGUARD-029, the round-5
+    # boundary-tie race: the reconciliation's cancel-vs-wait decision must
+    # not rely on marker presence alone). Zero in production, so no
+    # behavior change.
+    local _wd_wake_delay="${_AGENT_WATCHDOG_WAKE_DELAY_SECS:-0}"
     # Watchdog body ("$1"=sleep seconds, "$2"=setsid PGID, "$3"=result-marker
-    # path, "$4"=grace seconds, "$5"=marker-to-kill test delay). Kept a full
-    # single-quoted literal so `$1`/`$2`/`$3`/`$4`/`$5`/`${ADT_GUARD_FD}`
-    # expand inside the spawned shell, not out here.
+    # path, "$4"=grace seconds, "$5"=marker-to-kill test delay, "$6"=wake-to-
+    # marker test delay). Kept a full single-quoted literal so
+    # `$1`/`$2`/`$3`/`$4`/`$5`/`$6`/`${ADT_GUARD_FD}` expand inside the
+    # spawned shell, not out here.
     local _wd_body='
       [[ -n "${ADT_GUARD_FD:-}" ]] && exec {ADT_GUARD_FD}>&-
       sleep "$1"
+      sleep "$6"
       if [[ -n "$3" ]]; then
         printf "%s" 124 > "$3.tmp" && mv -f "$3.tmp" "$3"
       fi
@@ -576,7 +588,7 @@ _run_with_timeout() {
         printf "%s" 137 > "$3.tmp" && mv -f "$3.tmp" "$3"
       fi
     '
-    "${_wd_setsid[@]}" bash -c "$_wd_body" _ "$_wd_secs" "$_AGENT_RUN_PID" "$_wd_result_file" "$_wd_grace" "$_wd_term_delay" &
+    "${_wd_setsid[@]}" bash -c "$_wd_body" _ "$_wd_secs" "$_AGENT_RUN_PID" "$_wd_result_file" "$_wd_grace" "$_wd_term_delay" "$_wd_wake_delay" &
     _watchdog_pid=$!
   fi
 
@@ -644,10 +656,31 @@ _run_with_timeout() {
   #    "$_AGENT_RUN_PID"` above. Falling back to the stale pre-wait
   #    `_wd_marker` value here (the prior bug) would relabel a genuine
   #    natural exit as a fabricated 124 timeout.
+  # 5. Boundary-tie race (PR #469 review round-5 [P1]): the marker is not
+  #    written until AFTER the watchdog's own `sleep "$1"` returns, so if
+  #    the wrapped command's leader exits naturally at essentially the same
+  #    instant `AGENT_TIMEOUT` elapses, this `wait "$_AGENT_RUN_PID"` can
+  #    unblock BEFORE the watchdog has gotten around to writing anything —
+  #    the marker read below (step 3's empty-marker "safe to cancel" case)
+  #    would then wrongly treat "watchdog hasn't fired" as "nothing left to
+  #    protect" and kill the watchdog job outright, abandoning any
+  #    TERM-ignoring descendant that outlived the leader. Marker presence is
+  #    only a PROXY for "is anything left to reap" — the process GROUP's own
+  #    liveness (`kill -0 -- "-$_AGENT_RUN_PID"`) is the authoritative
+  #    signal and is checked directly here as well: an empty marker is only
+  #    treated as "safe to cancel" when the group is ALSO already empty. A
+  #    still-alive group defers to the watchdog exactly like a fired marker
+  #    would — even though the marker hasn't landed on disk yet, the
+  #    watchdog is either about to write it or already past the sleep and
+  #    mid-write, so blocking here converges on the same outcome without
+  #    the race. This also makes reconciliation robust to a `mktemp`
+  #    failure (`_wd_result_file=""`, no marker ever possible) — group
+  #    liveness alone is enough to decide whether a still-alive descendant
+  #    needs the watchdog's escalation, independent of the marker file.
   if [[ -n "$_watchdog_pid" ]]; then
     local _wd_marker=""
     [[ -n "$_wd_result_file" && -s "$_wd_result_file" ]] && _wd_marker="$(cat "$_wd_result_file" 2>/dev/null)"
-    if [[ -n "$_wd_marker" ]]; then
+    if [[ -n "$_wd_marker" ]] || kill -0 -- "-$_AGENT_RUN_PID" 2>/dev/null; then
       wait "$_watchdog_pid" 2>/dev/null || true
       # Re-read: the watchdog may have escalated 124 -> 137 while we were
       # waiting on it just now, OR rescinded (removed the file) if its
