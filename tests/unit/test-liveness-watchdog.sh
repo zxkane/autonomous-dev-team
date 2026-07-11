@@ -301,6 +301,22 @@ tier2_count=$(jq '[.[] | select(.body | contains("reason=liveness-timeout"))] | 
 assert_eq "TC-LIVENESS-040a 18 no-op ticks -> exactly one reason=liveness-timeout report" "1" "$tier2_count"
 assert_match "TC-LIVENESS-040b stalled transition performed" "^label_swap${US}99${US}pending-dev${US}stalled$" "$(_trace_all)"
 
+# TC-LIVENESS-040c/d: pending-review mirror — the OTHER new declared movement
+# (liveness-watchdog-stall-pending-review) must actually fire, not just be
+# spec-drift-covered as a declared transition.
+_reset_stubs
+_seq_pr_comments='[]'
+itp_list_comments() { printf '%s' "$_seq_pr_comments"; }
+itp_post_comment() { _rec itp_post_comment "$@"; _seq_pr_comments=$(jq --arg b "$2" '. + [{"authorKind":"bot","createdAt":"2026-01-01T00:00:00Z","body":$b}]' <<<"$_seq_pr_comments"); }
+label_swap() { _rec label_swap "$@"; }
+itp_read_task() { printf '%s' '{"labels":["pending-review"]}'; }
+for _t in $(seq 1 18); do
+  _liveness_evaluate_issue 99 review pending-review 6 18
+done
+tier2_pr_count=$(jq '[.[] | select(.body | contains("reason=liveness-timeout"))] | length' <<<"$_seq_pr_comments")
+assert_eq "TC-LIVENESS-040c pending-review: 18 no-op ticks -> exactly one reason=liveness-timeout report" "1" "$tier2_pr_count"
+assert_match "TC-LIVENESS-040d pending-review: stalled transition performed" "^label_swap${US}99${US}pending-review${US}stalled$" "$(_trace_all)"
+
 # TC-LIVENESS-041: fingerprint change at tick 10 -> full reset, no tier-2.
 _reset_stubs
 _seq2_comments='[]'

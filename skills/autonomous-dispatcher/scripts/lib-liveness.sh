@@ -96,7 +96,9 @@ _liveness_watchdog_enabled() {
 # Echoes the count of comments in the normalized itp_list_comments array
 # whose body does NOT match any known idempotent-notice/marker grammar
 # (_LIVENESS_IDEMPOTENT_PATTERN). Pure — comments_json is already fetched by
-# the caller.
+# the caller. Relies on the itp_list_comments contract (INV-90) that `body`
+# is always a string, never JSON null — a null would error `test()` under
+# `2>/dev/null` and collapse the count to 0 (bias to MISS, not a crash).
 _liveness_non_idempotent_count() {
   local comments_json="${1:-[]}"
   jq -r --arg pat "$_LIVENESS_IDEMPOTENT_PATTERN" \
