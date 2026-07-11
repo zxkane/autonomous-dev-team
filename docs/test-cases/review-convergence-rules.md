@@ -128,6 +128,24 @@ mutated `AGENT_VERDICT_BODIES` array in `autonomous-review.sh` — not a
 standalone TC id (the transformation is inline in the wrapper, not a separate
 pure function), but exercised end-to-end by TC-REVIEW-CONV-045/049.
 
+### Group I — codex-review [P1] fixes (TC-REVIEW-CONV-053..059)
+
+Three [P1]-tagged findings from the initial codex review round on this
+issue's own PR. All three are wiring/behavioral gaps in the wrapper, not the
+pure helper functions (which already had correct standalone logic) — pinned
+as source-of-truth wiring greps against `autonomous-review.sh`, mirroring
+this test file's existing two-pronged style.
+
+| ID | Scenario | Expected |
+|----|----------|----------|
+| TC-REVIEW-CONV-053 | jq structural fallback validates a finding carrying the new `severity` key | valid with `severity` in-enum (`P0`-`P3`); malformed with an out-of-enum value — closes the gap where a non-codex agent's `severity`-tagged artifact was downgraded to `malformed` and lost its vote entirely |
+| TC-REVIEW-CONV-054 | No unconditional `review-round-counter` post in the prompt-render region (before the E2E gate / smoke gate / fan-out have run) | wiring grep finds no `itp_post_comment` of the round marker in that region |
+| TC-REVIEW-CONV-055 | The `review-round-counter` marker IS posted, but only after `AGGREGATE` is computed | wiring grep: marker-post line > aggregate-compute line |
+| TC-REVIEW-CONV-056 | The post-aggregation marker post is gated on a decided verdict | wiring grep: gate condition checks `$AGGREGATE == "pass"` or `"fail"` (excludes `all-unavailable`) |
+| TC-REVIEW-CONV-057 | INV-124 block computes a last-trip cutoff before reading the prior `dispatcher-review-cap-breaker` marker | wiring grep: `_rc_last_trip_at=` assignment present inside the INV-124 block |
+| TC-REVIEW-CONV-058 | The prior-marker scan excludes markers at/before the cutoff | wiring grep: `select(.createdAt > $cutoff)` present |
+| TC-REVIEW-CONV-059 | The cutoff is computed strictly before the prior-marker scan reads it | wiring grep: cutoff-assignment line < prior-marker-scan line — closes the gap where resuming after an INV-124 trip (removing `stalled`) re-read the old trip's own marker and immediately re-tripped |
+
 ## Acceptance criteria for this change (pre-merge verifiable)
 
 - [ ] **Surface**: CI job `hermetic-unit` runs `tests/unit/test-*.sh`; the new

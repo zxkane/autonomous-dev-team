@@ -1147,16 +1147,17 @@ else
   _rr_floor_label="P0-P1"
 fi
 log "Issue #449: review round ${REVIEW_ROUND} for HEAD ${PR_HEAD_SHA:0:7} (severity-ratchet floor: ${_rr_floor_label})."
-# Post the marker unconditionally, right away — every round (pass, fail, or
-# crash) must leave a marker for the NEXT round to find, or the counter can
-# never advance past 1 (the same "must persist every round" fix INV-122
-# documents for its own marker). Posted as its own small comment rather than
-# folded into a later verdict comment because a PASS round or a crash-before-
-# verdict round never reaches this issue's FAIL-only comment paths. Skipped
-# when PR_HEAD_SHA is empty (see above).
-if [[ -n "$PR_HEAD_SHA" ]]; then
-  itp_post_comment "$ISSUE_NUMBER" "$(_review_round_marker "$ISSUE_NUMBER" "$PR_HEAD_SHA" "$REVIEW_ROUND")" 2>/dev/null || true
-fi
+# [P1] #2 (#449 review): the marker is intentionally NOT posted here. Posting
+# it this early — before the E2E gate, the pre-fan-out smoke gate, or the
+# review fan-out have even run — means a crash/no-verdict round (malformed
+# output, an unavailable agent, an E2E-gate short-circuit) still advances the
+# counter that feeds the severity ratchet's floor: a couple of infra retries
+# on the SAME head could put the very first COMPLETED review at round 3+,
+# silently demoting P2/P3 findings before any real review ever ran. The
+# marker is posted instead right after `AGGREGATE` is computed below, gated
+# on a DECIDED verdict (pass/fail) — see that site for the persistence
+# rationale (mirrors INV-122's own "must persist every round" fix, but only
+# once a round has genuinely completed).
 
 # Verdict-detection bindings: actor + time window + body-trailer
 # presence. Replaces the prior session-id-only binding (which depended
@@ -3327,6 +3328,23 @@ done
 AGGREGATE=$(_aggregate_review_verdicts "${AGENT_VERDICTS[@]}")
 log "Per-agent verdicts: ${AGENT_VERDICTS[*]} → aggregate: ${AGGREGATE}"
 
+# [P1] #2 (#449 review): post the review-round-counter marker HERE — only
+# once a genuine verdict has landed (AGGREGATE is a DECIDED pass/fail, per
+# R1's own "how many times has the review fan-out actually run" definition),
+# not on every wrapper invocation. `all-unavailable` (every agent crashed or
+# posted nothing at all — no findings, no severity to score) does NOT count
+# as a completed round and must not advance the counter; posting here instead
+# of unconditionally at prompt-render time (the pre-fix location) stops a
+# crash/malformed-output retry on the SAME head from silently inflating
+# REVIEW_ROUND before any real review ever completed. Still leaves a marker
+# on EVERY decided round (mirrors INV-122's own "must persist every round"
+# fix) — a PASS round has no other FAIL-only comment path to embed it in, so
+# it is posted as its own small comment exactly as before. Skipped when
+# PR_HEAD_SHA is empty (see the original guard's rationale above).
+if [[ -n "$PR_HEAD_SHA" ]] && { [[ "$AGGREGATE" == "pass" ]] || [[ "$AGGREGATE" == "fail" ]]; }; then
+  itp_post_comment "$ISSUE_NUMBER" "$(_review_round_marker "$ISSUE_NUMBER" "$PR_HEAD_SHA" "$REVIEW_ROUND")" 2>/dev/null || true
+fi
+
 # [INV-70] Metrics: aggregated verdict. Best-effort, observe-only — emitted
 # AFTER the decision is made, never gating it.
 if declare -F metrics_emit >/dev/null 2>&1; then
@@ -4300,11 +4318,37 @@ else
     if [[ "$AGGREGATE" == "fail" ]]; then
       _rc_already_stalled=$(itp_read_task "$ISSUE_NUMBER" labels \
         | jq -r '.labels | any(. == "stalled")' 2>/dev/null || echo "false")
+      # [P1] #3 (#449 review): cutoff-then-scan, mirroring [INV-05]'s
+      # "Marking as stalled" cutoff convention (lib-dispatch.sh's
+      # count_retries family). Without a cutoff, `_review_cap_next_count`
+      # always increments the LATEST marker ever posted — including the
+      # marker embedded in a PAST trip's own report comment — so after an
+      # operator removes `stalled` to resume (this breaker's own documented
+      # "removal re-arms the pipeline" contract), the very next
+      # failed-substantive round reads that old trip-report marker back,
+      # computes round=(threshold+1), and immediately re-trips before a
+      # fresh series can ever accumulate. The cutoff is the latest trip
+      # report's own createdAt (matched on its unique heading, not the
+      # generic `reason=` token that also appears in this file's comments):
+      # any marker AT OR BEFORE it belongs to the OLD (already-reported)
+      # series and is excluded, so the resumed round finds no qualifying
+      # prior marker and starts a genuinely fresh count at 1 — exactly like
+      # [INV-05] resets `count_retries` after `mark_stalled`'s own report.
+      # No trip yet ⇒ cutoff is the epoch and every marker counts, unchanged
+      # from before.
+      # Same `authorKind != "human"` gate as the marker scan below — a
+      # collaborator comment merely quoting the trip heading (e.g. discussing
+      # a past trip) must never be able to shift this cutoff and suppress a
+      # genuine marker read.
+      _rc_last_trip_at=$(itp_list_comments "$ISSUE_NUMBER" 2>/dev/null \
+        | jq -r '[.[] | select(.authorKind != "human") | select(.body | test("Review-round-cap circuit-breaker tripped"))] | sort_by(.createdAt) | last | .createdAt // "1970-01-01T00:00:00Z"' \
+        2>/dev/null || echo "1970-01-01T00:00:00Z")
       # Authenticity filter mirrors INV-105/INV-122's own marker-read guard
       # (authorKind != "human") — an ordinary collaborator comment must never
       # be readable as a forged round-cap marker.
       _rc_prior_marker=$(itp_list_comments "$ISSUE_NUMBER" 2>/dev/null \
-        | jq -r '[.[] | select(.authorKind != "human") | select(.body | contains("dispatcher-review-cap-breaker:"))] | sort_by(.createdAt) | last | .body // ""' \
+        | jq -r --arg cutoff "$_rc_last_trip_at" \
+          '[.[] | select(.authorKind != "human") | select(.body | contains("dispatcher-review-cap-breaker:")) | select(.createdAt > $cutoff)] | sort_by(.createdAt) | last | .body // ""' \
         2>/dev/null || echo "")
       _rc_next_count=$(_review_cap_next_count "$_rc_prior_marker")
       _rc_threshold=$(_review_cap_threshold)

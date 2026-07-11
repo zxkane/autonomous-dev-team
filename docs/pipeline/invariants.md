@@ -7180,6 +7180,21 @@ advance). The marker read filters to `authorKind != "human"` (mirrors
 collaborator able to comment on the issue could pre-seed a forged marker at
 a high count and force the next genuine failure to trip prematurely).
 
+**Cutoff on resume ([P1] codex review finding, fixed pre-merge)**: because
+this counter is head-AGNOSTIC (see above), the marker scan is ALSO cut off at
+the latest `reason=review-round-cap` trip report's `createdAt` — mirroring
+[INV-05]'s "Marking as stalled" cutoff convention
+(`lib-dispatch.sh::count_retries` family). Without the cutoff, the marker
+read would keep finding the OLD trip's own marker (embedded in that same
+report) as the "latest" one forever, so the very next `failed-substantive`
+round after an operator removes `stalled` to resume would compute
+`round = threshold + 1` and re-trip immediately — the resume flow could never
+actually accumulate a fresh series. With the cutoff, any marker AT OR BEFORE
+the last trip report is excluded from the scan, so a resumed round finds no
+qualifying prior marker and starts a genuinely new count at 1. No trip yet ⇒
+the cutoff is the epoch and every marker counts, unchanged from the
+pre-cutoff behavior.
+
 **Threshold**: `REVIEW_CONVERGENCE_CAP` (new env var, default `5`), read via
 the same regex-then-fallback shape as [INV-122]'s `GATE_FAIL_STALL_THRESHOLD`
 read (`lib-review-cap.sh::_review_cap_threshold`), plus an explicit floor of
@@ -7225,11 +7240,18 @@ single-writer invariant (the flock-guarded PID-file guard) already rules out
 two concurrent writers to the same issue's marker.
 
 **Bias to MISS**: an absent, malformed, or non-matching marker collapses to
-count=0 (never a crash, never a silent inherit of a garbled count). An
-operator removing `stalled` WITHOUT addressing the underlying findings leaves
-the marker still armed at (or past) `threshold - 1`; the very next
-`failed-substantive` round re-trips immediately — documented, intentional
-(mirrors [INV-105]/[INV-122]'s "removal re-arms the pipeline" convention).
+count=0 (never a crash, never a silent inherit of a garbled count). Because
+of the resume cutoff above, an operator removing `stalled` re-arms a
+genuinely FRESH series (round 1) regardless of how the underlying findings
+were addressed — the very next `failed-substantive` round does NOT re-trip
+immediately; it takes another full `threshold` count of consecutive
+`failed-substantive` rounds. This is a deliberate divergence from
+[INV-105]/[INV-122]'s literal "removal re-arms the pipeline" mechanics (their
+head-scoped/frozen-head fingerprints naturally reset on the next real change
+without needing a report-timestamp cutoff); INV-124's counter is
+head-AGNOSTIC by design (see above), so without the cutoff "removal re-arms
+the pipeline" would be neutered — the very first post-resume failure would
+immediately re-read the old trip's own marker and re-trip.
 
 **Status**: **ENFORCED**. New `transitions.json` entry
 (`review-round-cap-breaker`, `reviewing → stalled`) + regenerated

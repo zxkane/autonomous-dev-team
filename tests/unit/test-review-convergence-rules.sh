@@ -481,6 +481,68 @@ if command -v jq >/dev/null 2>&1 && [[ -f "$PROJECT_ROOT/docs/pipeline/schemas/v
     "$(cat "$PROJECT_ROOT/docs/pipeline/schemas/verdict-artifact.schema.json")" '"enum": ["P0", "P1", "P2", "P3"]'
 fi
 
+# ===========================================================================
+echo
+echo "=== TC-REVIEW-CONV-053..059: codex-review [P1] fixes (severity artifact key, marker timing, cap-cutoff resume) ==="
+# ===========================================================================
+
+# TC-REVIEW-CONV-053: [P1] #1 — the jq structural fallback must accept the
+# OPTIONAL "severity" finding key (P0-P3), not just the INV-92 classification
+# fields. Pre-fix, a non-codex agent that followed the new severity prompt
+# and wrote "severity" into its artifact was downgraded to malformed by
+# additionalProperties:false, losing that agent's vote entirely.
+TMP53="$(mktemp -d)"
+mk53() { printf '%s' "$2" > "$TMP53/$1.json"; }
+mk53 sev-p3 '{"schema_version":1,"verdict":"FAIL","blockingFindings":[{"title":"x","severity":"P3"}],"runId":"r","agent":"a"}'
+mk53 sev-bad '{"schema_version":1,"verdict":"FAIL","blockingFindings":[{"title":"x","severity":"P9"}],"runId":"r","agent":"a"}'
+assert_eq "TC-REVIEW-CONV-053a jq fallback accepts a finding with a valid severity tag" "valid" \
+  "$(_validate_verdict_artifact_jq "$TMP53/sev-p3.json" && echo valid || echo malformed)"
+assert_eq "TC-REVIEW-CONV-053b jq fallback rejects an out-of-enum severity value" "malformed" \
+  "$(_validate_verdict_artifact_jq "$TMP53/sev-bad.json" && echo valid || echo malformed)"
+rm -rf "$TMP53"
+
+# TC-REVIEW-CONV-054..056: [P1] #2 — the review-round-counter marker must be
+# posted only AFTER a decided verdict (pass/fail), not unconditionally at
+# prompt-render time (pre-fix location, before the E2E gate / smoke gate /
+# fan-out have even run) — a crash/no-verdict round on the same head must not
+# silently advance the counter that feeds the severity ratchet's floor.
+prompt_render_region=$(sed -n '1,1160p' "$WRAPPER")
+assert_eq "TC-REVIEW-CONV-054 no unconditional review-round-counter post before the fan-out (prompt-render region)" "" \
+  "$(grep -o 'itp_post_comment "\$ISSUE_NUMBER" "\$(_review_round_marker' <<<"$prompt_render_region")"
+
+aggregate_marker_line=$(grep -n 'itp_post_comment "\$ISSUE_NUMBER" "\$(_review_round_marker' "$WRAPPER" | head -1 | cut -d: -f1)
+aggregate_compute_line=$(grep -n '^AGGREGATE=\$(_aggregate_review_verdicts' "$WRAPPER" | head -1 | cut -d: -f1)
+assert_eq "TC-REVIEW-CONV-055 review-round-counter marker IS posted, but strictly after AGGREGATE is computed" "true" \
+  "$([[ -n "$aggregate_marker_line" && -n "$aggregate_compute_line" && "$aggregate_marker_line" -gt "$aggregate_compute_line" ]] && echo true || echo false)"
+
+marker_post_region=$(sed -n "${aggregate_compute_line},$((aggregate_compute_line + 20))p" "$WRAPPER")
+assert_contains "TC-REVIEW-CONV-056 the post-aggregation marker post is gated on a DECIDED verdict (pass/fail)" \
+  "$marker_post_region" '[[ "$AGGREGATE" == "pass" ]] || [[ "$AGGREGATE" == "fail" ]]'
+
+# TC-REVIEW-CONV-057..059: [P1] #3 — the INV-124 round-cap series must be
+# CUT OFF at the latest trip report so that after an operator removes
+# `stalled` to resume, the very next failed-substantive round starts a fresh
+# count instead of reading the OLD trip's own marker back and immediately
+# re-tripping (mirrors [INV-05]'s "Marking as stalled" cutoff convention).
+inv124_cutoff_region=$(awk '/\[#449\] INV-124/,/_rc_next_count=\$\(_review_cap_next_count/' "$WRAPPER")
+assert_contains "TC-REVIEW-CONV-057 INV-124 block computes a last-trip cutoff before reading the prior marker" \
+  "$inv124_cutoff_region" '_rc_last_trip_at='
+assert_contains "TC-REVIEW-CONV-058 the prior-marker scan excludes markers at/before the cutoff" \
+  "$inv124_cutoff_region" 'select(.createdAt > $cutoff)'
+
+cutoff_line=$(grep -n '_rc_last_trip_at=\$(itp_list_comments' "$WRAPPER" | head -1 | cut -d: -f1)
+prior_marker_line=$(grep -n '_rc_prior_marker=\$(itp_list_comments' "$WRAPPER" | tail -1 | cut -d: -f1)
+assert_eq "TC-REVIEW-CONV-059 the cutoff is computed strictly BEFORE the prior-marker scan reads it" "true" \
+  "$([[ -n "$cutoff_line" && -n "$prior_marker_line" && "$cutoff_line" -lt "$prior_marker_line" ]] && echo true || echo false)"
+
+# TC-REVIEW-CONV-059b: the cutoff scan itself is authenticity-filtered
+# (authorKind != "human") — a collaborator comment merely quoting the trip
+# heading (e.g. discussing a past trip) must never be able to shift the
+# cutoff and suppress a genuine marker read.
+cutoff_scan_line=$(sed -n "${cutoff_line},$((cutoff_line + 2))p" "$WRAPPER")
+assert_contains "TC-REVIEW-CONV-059b the cutoff scan filters authorKind != \"human\"" \
+  "$cutoff_scan_line" 'select(.authorKind != "human")'
+
 echo
 echo "=== Summary ==="
 echo "Passed: $PASS"
