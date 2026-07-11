@@ -69,6 +69,19 @@ echo "$line1" | jq -e '.ts | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}
 # TC-METRICS-006: numeric `issue` is a JSON number, not a string.
 assert_eq "TC-METRICS-006 issue is number" "number" "$(echo "$line1" | jq -r '.issue | type')"
 
+# TC-METRICS-006b (#452): the pr_diff_soft_cap num_keys additions
+# (changed_files/changed_lines/files_cap/lines_cap) serialize as JSON
+# numbers, not strings — a regression here would silently break
+# metrics-report.sh's numeric aggregation over these fields.
+: > "$MF"
+metrics_emit pr_diff_soft_cap side=review over_reach=true changed_files=45 changed_lines=3500 files_cap=40 lines_cap=3000
+diffcap_line="$(head -1 "$MF")"
+for k in changed_files changed_lines files_cap lines_cap; do
+  assert_eq "TC-METRICS-006b $k is number" "number" "$(echo "$diffcap_line" | jq -r --arg k "$k" '.[$k] | type')"
+done
+assert_eq "TC-METRICS-006b changed_files value round-trips" "45" "$(echo "$diffcap_line" | jq -r '.changed_files')"
+assert_eq "TC-METRICS-006b over_reach stays a string (bool fields are not in num_keys)" "string" "$(echo "$diffcap_line" | jq -r '.over_reach | type')"
+
 # TC-METRICS-002: value with double quotes round-trips.
 : > "$MF"
 metrics_emit weird val='he said "no"'

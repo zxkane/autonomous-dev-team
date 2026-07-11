@@ -763,5 +763,275 @@ assert_eq "TC-GLT-085: ARG_MAX-boundary body (~128KB) via --body-file → rc 0" 
 
 # ===========================================================================
 echo ""
+echo "=== TC-GLT-090..092: _gl_graphql (#452) — the {} default-expansion regression ==="
+# ===========================================================================
+# TC-GLT-090: variables OMITTED → the request body carries a well-formed
+# empty object {} (a #452 code-review [Critical] finding: bash parses
+# "${2:-{}}" as default-value "{" followed by a literal trailing "}", NOT
+# the two-char string "{}" — so a query WITH variables got a spurious
+# trailing "}" appended, corrupting the JSON on every call that passed any).
+_reset_control
+export _CURL_STATUS_SEQ="200"
+_gql_body_noargs="$WORK/gql-body-noargs.json"
+printf '{"data":{"ok":true}}' > "$_gql_body_noargs"
+export _CURL_BODY_SEQ="$_gql_body_noargs"
+out=$(_run_with_lib "_gl_graphql 'query { x }'" 2>&1); rc=$?
+assert_eq "TC-GLT-090: _gl_graphql with NO variables arg → rc 0" "0" "$rc"
+# The recorded curl argv contains --data-binary "<body>" as two consecutive
+# array entries; extract the JSON payload and prove it parses AND its
+# .variables key is exactly {}.
+_gql_payload_noargs=$(awk '/^--data-binary$/{getline; print; exit}' "$_CURL_ARGV_FILE")
+if jq -e '.variables == {}' >/dev/null 2>&1 <<<"$_gql_payload_noargs"; then
+  ok "TC-GLT-090: request body's .variables is exactly {} (no args case)"
+else
+  bad "TC-GLT-090: request body's .variables is NOT {} — got: ${_gql_payload_noargs:0:200}"
+fi
+
+# TC-GLT-091: variables SUPPLIED → the request body is valid JSON with NO
+# spurious trailing brace (the exact regression: pre-fix this produced
+# {"query":"...","variables":{"iid":"42"}} PLUS a stray "}" that broke
+# `jq -cn --argjson vars "$variables"` upstream, so _gl_graphql returned 1
+# on every variables-bearing call before the request was even sent).
+_reset_control
+export _CURL_STATUS_SEQ="200"
+_gql_body_args="$WORK/gql-body-args.json"
+printf '{"data":{"project":{"mergeRequest":{"diffStatsSummary":{"additions":10,"deletions":5}}}}}' > "$_gql_body_args"
+export _CURL_BODY_SEQ="$_gql_body_args"
+out=$(_run_with_lib "_gl_graphql 'query(\$iid: String!) { x }' '{\"iid\":\"42\"}'" 2>&1); rc=$?
+assert_eq "TC-GLT-091: _gl_graphql WITH a variables arg → rc 0 (pre-fix: rc 1, request never sent)" "0" "$rc"
+_gql_payload_args=$(awk '/^--data-binary$/{getline; print; exit}' "$_CURL_ARGV_FILE")
+if jq -e '.variables == {"iid":"42"}' >/dev/null 2>&1 <<<"$_gql_payload_args"; then
+  ok "TC-GLT-091: request body's .variables round-trips exactly {\"iid\":\"42\"} (no stray trailing brace)"
+else
+  bad "TC-GLT-091: request body's .variables is malformed — got: ${_gql_payload_args:0:200}"
+fi
+assert_contains "TC-GLT-091: _gl_graphql echoes the inner .data object (not the {data:...} envelope)" \
+  '"additions":10' "$out"
+
+# TC-GLT-092: an empty-string variables arg (as chp_gitlab_pr_diffstat could
+# pass on an upstream jq-encode failure) is treated the SAME as omitted —
+# still degrades to {}, never sends a malformed body.
+_reset_control
+export _CURL_STATUS_SEQ="200"
+export _CURL_BODY_SEQ="$_gql_body_noargs"
+out=$(_run_with_lib "_gl_graphql 'query { x }' ''" 2>&1); rc=$?
+assert_eq "TC-GLT-092: _gl_graphql with an EMPTY-STRING variables arg → rc 0" "0" "$rc"
+_gql_payload_empty=$(awk '/^--data-binary$/{getline; print; exit}' "$_CURL_ARGV_FILE")
+if jq -e '.variables == {}' >/dev/null 2>&1 <<<"$_gql_payload_empty"; then
+  ok "TC-GLT-092: empty-string variables arg degrades to {} (same as omitted)"
+else
+  bad "TC-GLT-092: empty-string variables arg produced malformed body — got: ${_gql_payload_empty:0:200}"
+fi
+
+# ===========================================================================
+echo ""
+echo "=== TC-GLT-093..097: _gl_graphql_hook optional override (#452 amendment, INV-124) ==="
+# ===========================================================================
+# Review finding: _gl_graphql hard-required GITLAB_TOKEN even when a
+# GITLAB_TRANSPORT_HOOK was armed, so a hook-only / token-less GitLab
+# installation could never compute the `lines` dimension. Fix: _gl_graphql
+# now probes for an OPTIONAL `_gl_graphql_hook <query> <variables-json>`
+# function (the hook may define it alongside the mandatory `_gl_http`) and
+# delegates to it when present, before falling back to the default
+# Bearer-token impl.
+
+# TC-GLT-093: hook defines _gl_http only (pre-#452 contract) + GITLAB_TOKEN
+# unset → _gl_graphql still fails closed, and the message names
+# _gl_graphql_hook (not just GITLAB_TOKEN) so an operator knows the second,
+# optional hook point exists.
+_reset_control
+unset GITLAB_TOKEN
+export GITLAB_TOKEN=""
+hook_http_only="$WORK/hook-http-only.sh"
+cat > "$hook_http_only" <<'EOF'
+_gl_http() {
+  local method="$1" path="$2" hdr="$3"
+  printf 'HTTP/1.1 200 OK\r\n\r\n' > "$hdr"
+  printf '{"ok":true}'
+}
+EOF
+export GITLAB_TRANSPORT_HOOK="$hook_http_only"
+out=$(_run_with_lib "_gl_graphql 'query { x }'" 2>&1); rc=$?
+assert_rc_nonzero "TC-GLT-093: hook without _gl_graphql_hook + no token → rc != 0" "$rc"
+assert_contains "TC-GLT-093: message names _gl_graphql_hook" "_gl_graphql_hook" "$out"
+
+# TC-GLT-094: hook defines BOTH _gl_http and _gl_graphql_hook, GITLAB_TOKEN
+# unset → _gl_graphql delegates to the hook and succeeds; the default
+# Bearer-token curl POST is NEVER invoked (curl invocation count stays 0 —
+# the hook's own _gl_graphql_hook body below never shells out to curl).
+_reset_control
+unset GITLAB_TOKEN
+export GITLAB_TOKEN=""
+hook_with_gql="$WORK/hook-with-gql.sh"
+cat > "$hook_with_gql" <<'EOF'
+_gl_http() {
+  local method="$1" path="$2" hdr="$3"
+  printf 'HTTP/1.1 200 OK\r\n\r\n' > "$hdr"
+  printf '{"ok":true}'
+}
+_gl_graphql_hook() {
+  printf '{"project":{"mergeRequest":{"diffStatsSummary":{"additions":7,"deletions":3}}}}'
+}
+EOF
+export GITLAB_TRANSPORT_HOOK="$hook_with_gql"
+out=$(_run_with_lib "_gl_graphql 'query { x }' '{\"iid\":\"1\"}'" 2>/dev/null); rc=$?
+assert_eq "TC-GLT-094: hook WITH _gl_graphql_hook + no token → rc 0" "0" "$rc"
+assert_contains "TC-GLT-094: output is the hook's canned data" '"additions":7' "$out"
+assert_eq "TC-GLT-094: curl NEVER invoked (hook answers directly, no token needed)" "0" "$(_curl_inv_count "$_CURL_ARGV_FILE")"
+
+# TC-GLT-095: argument-passing fidelity — _gl_graphql_hook receives the EXACT
+# query and variables-json _gl_graphql was called with.
+_reset_control
+unset GITLAB_TOKEN
+export GITLAB_TOKEN=""
+gql_args_log="$WORK/gql-hook-args.log"
+hook_arg_check="$WORK/hook-arg-check.sh"
+cat > "$hook_arg_check" <<EOF
+_gl_http() {
+  local method="\$1" path="\$2" hdr="\$3"
+  printf 'HTTP/1.1 200 OK\r\n\r\n' > "\$hdr"
+  printf '{}'
+}
+_gl_graphql_hook() {
+  printf '%s\n%s\n' "\$1" "\$2" > "$gql_args_log"
+  printf '{"data":{"echoed":true}}'
+}
+EOF
+export GITLAB_TRANSPORT_HOOK="$hook_arg_check"
+out=$(_run_with_lib "_gl_graphql 'query(\$iid: String!) { x }' '{\"iid\":\"99\"}'" 2>/dev/null); rc=$?
+assert_eq "TC-GLT-095: hook-delegated call rc 0" "0" "$rc"
+assert_eq "TC-GLT-095: _gl_graphql_hook received the exact query string" 'query($iid: String!) { x }' "$(sed -n '1p' "$gql_args_log")"
+assert_eq "TC-GLT-095: _gl_graphql_hook received the exact variables-json" '{"iid":"99"}' "$(sed -n '2p' "$gql_args_log")"
+
+# TC-GLT-096: preflight latch is reused, not re-sourced — calling _gl_api
+# FIRST (which sources+latches the hook) then _gl_graphql must NOT re-source
+# the hook file a second time (single "preflight OK" log line).
+_reset_control
+unset GITLAB_TOKEN
+export GITLAB_TOKEN=""
+body_ok="$WORK/body-ok-096.json"; printf '{"iid":1}' > "$body_ok"
+_CURL_BODY_SEQ="$body_ok"
+export _CURL_BODY_SEQ
+export GITLAB_TRANSPORT_HOOK="$hook_with_gql"
+out=$(_run_with_lib '_gl_api /projects/1/merge_requests/1 >/dev/null; _gl_graphql "query { x }" "{}"' 2>&1); rc=$?
+assert_eq "TC-GLT-096: _gl_api then _gl_graphql (hook-delegated) → rc 0" "0" "$rc"
+preflight_count=$(grep -c "gitlab-transport preflight OK" <<<"$out")
+assert_eq "TC-GLT-096: preflight logged exactly ONCE across both calls (latched, not re-sourced)" "1" "$preflight_count"
+
+# TC-GLT-097: default behavior is UNCHANGED when the hook does not define
+# _gl_graphql_hook — declare -F reports absent, and (with a token present)
+# the default Bearer-token curl path still fires exactly as before.
+_reset_control
+export GITLAB_TOKEN="test-token"
+unset GITLAB_TRANSPORT_HOOK
+body_097="$WORK/body-097.json"; printf '{"data":{"ok":true}}' > "$body_097"
+_CURL_STATUS_SEQ="200"; _CURL_BODY_SEQ="$body_097"
+export _CURL_STATUS_SEQ _CURL_BODY_SEQ
+out=$(_run_with_lib '_gl_graphql "query { x }"' 2>/dev/null); rc=$?
+assert_eq "TC-GLT-097: no hook armed → default Bearer-token path still rc 0" "0" "$rc"
+assert_eq "TC-GLT-097: exactly ONE curl invocation (default path unchanged)" "1" "$(_curl_inv_count "$_CURL_ARGV_FILE")"
+assert_contains "TC-GLT-097: curl argv carries Authorization: Bearer" "Authorization: Bearer test-token" "$(cat "$_CURL_ARGV_FILE")"
+
+# TC-GLT-098 (round-2 review finding): a hook that returns rc≠0 must NOT leak
+# any stdout it printed before failing — _gl_graphql captures the hook's
+# output rather than streaming it, so a nonzero rc always means empty stdout
+# to the caller, matching the fail-CLOSED contract the default impl upholds.
+_reset_control
+unset GITLAB_TOKEN
+export GITLAB_TOKEN=""
+hook_leaky_fail="$WORK/hook-leaky-fail.sh"
+cat > "$hook_leaky_fail" <<'EOF'
+_gl_http() {
+  local method="$1" path="$2" hdr="$3"
+  printf 'HTTP/1.1 200 OK\r\n\r\n' > "$hdr"
+  printf '{"ok":true}'
+}
+_gl_graphql_hook() {
+  printf '{"partial":"leaked-before-failure"}'
+  return 1
+}
+EOF
+export GITLAB_TRANSPORT_HOOK="$hook_leaky_fail"
+out=$(_run_with_lib "_gl_graphql 'query { x }'" 2>/dev/null); rc=$?
+assert_rc_nonzero "TC-GLT-098: hook rc != 0 → _gl_graphql rc != 0" "$rc"
+assert_eq "TC-GLT-098: no partial hook stdout leaks to the caller on nonzero rc" "" "$out"
+
+# TC-GLT-099 (round-2 review finding): a hook that returns rc 0 but with
+# malformed/non-JSON output must fail CLOSED, not hand garbage to the
+# caller — _gl_graphql validates the hook's stdout is a JSON object before
+# returning it, the same shape guarantee the default Bearer-token impl
+# enforces via its own `jq -e 'type == "object" ...'` check.
+_reset_control
+unset GITLAB_TOKEN
+export GITLAB_TOKEN=""
+hook_malformed="$WORK/hook-malformed.sh"
+cat > "$hook_malformed" <<'EOF'
+_gl_http() {
+  local method="$1" path="$2" hdr="$3"
+  printf 'HTTP/1.1 200 OK\r\n\r\n' > "$hdr"
+  printf '{"ok":true}'
+}
+_gl_graphql_hook() {
+  printf 'not valid json {{{'
+  return 0
+}
+EOF
+export GITLAB_TRANSPORT_HOOK="$hook_malformed"
+out=$(_run_with_lib "_gl_graphql 'query { x }'" 2>/dev/null); rc=$?
+assert_rc_nonzero "TC-GLT-099: hook rc 0 + non-JSON stdout → _gl_graphql rc != 0 (fails closed)" "$rc"
+assert_eq "TC-GLT-099: no malformed output reaches the caller" "" "$out"
+
+# TC-GLT-100 (round-2 review finding): a hook that returns rc 0 with a
+# top-level JSON `null` (valid JSON, wrong shape — `jq type` is "null", not
+# "object") must also fail CLOSED, mirroring the default impl's `.data !=
+# null` guard.
+_reset_control
+unset GITLAB_TOKEN
+export GITLAB_TOKEN=""
+hook_null="$WORK/hook-null.sh"
+cat > "$hook_null" <<'EOF'
+_gl_http() {
+  local method="$1" path="$2" hdr="$3"
+  printf 'HTTP/1.1 200 OK\r\n\r\n' > "$hdr"
+  printf '{"ok":true}'
+}
+_gl_graphql_hook() {
+  printf 'null'
+  return 0
+}
+EOF
+export GITLAB_TRANSPORT_HOOK="$hook_null"
+out=$(_run_with_lib "_gl_graphql 'query { x }'" 2>/dev/null); rc=$?
+assert_rc_nonzero "TC-GLT-100: hook rc 0 + top-level null → _gl_graphql rc != 0 (fails closed)" "$rc"
+assert_eq "TC-GLT-100: no null payload reaches the caller" "" "$out"
+
+# TC-GLT-101 (round-3 review finding): a hook that returns rc 0 with a
+# MULTI-DOCUMENT JSON stream (e.g. a buggy double-print that concatenates an
+# error/log object with the real data object) must also fail CLOSED. A bare
+# `jq -e 'type == "object"'` only checks the LAST parsed value from a
+# multi-document here-string and would wrongly accept this — the shape guard
+# must slurp (`jq -s`) and require exactly one top-level value.
+_reset_control
+unset GITLAB_TOKEN
+export GITLAB_TOKEN=""
+hook_multidoc="$WORK/hook-multidoc.sh"
+cat > "$hook_multidoc" <<'EOF'
+_gl_http() {
+  local method="$1" path="$2" hdr="$3"
+  printf 'HTTP/1.1 200 OK\r\n\r\n' > "$hdr"
+  printf '{"ok":true}'
+}
+_gl_graphql_hook() {
+  printf '{"errors":["stray diagnostic"]}{"project":{"mergeRequest":{"diffStatsSummary":{"additions":1,"deletions":1}}}}'
+  return 0
+}
+EOF
+export GITLAB_TRANSPORT_HOOK="$hook_multidoc"
+out=$(_run_with_lib "_gl_graphql 'query { x }'" 2>/dev/null); rc=$?
+assert_rc_nonzero "TC-GLT-101: hook rc 0 + multi-document JSON → _gl_graphql rc != 0 (fails closed)" "$rc"
+assert_eq "TC-GLT-101: no multi-document payload reaches the caller" "" "$out"
+
+# ===========================================================================
+echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 [[ "$FAIL" -eq 0 ]] && exit 0 || exit 1

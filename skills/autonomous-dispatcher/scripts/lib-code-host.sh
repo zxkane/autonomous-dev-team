@@ -13,14 +13,14 @@
 # normative; this header's verb list is a convenience index, not a second
 # source of truth):
 #   CODE_HOST ∈ { github (default), gitlab }  (spec §2)
-#   19 CHP verbs (18 §3.2 table rows — one row names both chp_review_threads
+#   20 CHP verbs (19 §3.2 table rows — one row names both chp_review_threads
 #   and chp_resolve_thread), each forwarding to chp_${CODE_HOST}_<verb> "$@":
 #     chp_find_pr_for_issue chp_ci_status chp_mergeable chp_create_pr
 #     chp_approve chp_request_changes chp_merge chp_review_threads
 #     chp_resolve_thread chp_trigger_bot chp_close_keyword
 #     chp_reply_review_comment chp_pr_view chp_pr_list chp_pr_comment
 #     chp_list_inline_comments chp_count_reviews_by_login chp_commit_file
-#     chp_caps
+#     chp_pr_diffstat chp_caps
 #   chp_has_leaf is a caller-side guard helper, NOT a verb (no `.caps` entry,
 #   never forwards "$@" to a leaf) — see spec §3.2 "What this section owns".
 #
@@ -183,6 +183,38 @@ chp_pr_comment() {
     return 1
   fi
   chp_${CODE_HOST}_pr_comment "$@"
+}
+
+# chp_pr_diffstat PR DIMENSIONS-CSV — diff-size read primitive (#452).
+#
+# DIMENSIONS-CSV ∈ any non-empty subset of {files,lines} (comma-separated,
+# e.g. "files", "lines", "files,lines"). Returns a SINGLE normalized JSON
+# object carrying ONLY the requested dimension key(s):
+#   files → {"changed_files": <int>}
+#   lines → {"changed_lines": <int>}
+# (both requested → both keys). A dimension is OMITTED (never fabricated as
+# 0/null) when the provider could not determine it — the PR-diff-soft-cap
+# caller (lib-review-diffcap.sh) treats a missing key as a read failure for
+# that dimension only (fail-open: over_reach=false for it, never a fabricated
+# warning). rc≠0 on a hard transport/auth failure with NO partial output.
+#
+# NOT one of the 11 named PR-lifecycle verbs — a general READ primitive
+# alongside chp_pr_view/chp_pr_list, added so the PR-diff-soft-cap caller in
+# autonomous-review.sh carries ZERO raw `gh pr view --json
+# additions,deletions,changedFiles` ([INV-91] cutover guard). Provider cost
+# differs, not capability: the GitHub leaf answers BOTH dimensions from ONE
+# `gh pr view` call regardless of which is requested (no extra API cost either
+# way); the GitLab leaf answers `files` from the already-fetched base MR view
+# (`changes_count`) but `lines` requires a SEPARATE GraphQL `diffStatsSummary`
+# call — issued ONLY when `lines` is actually in DIMENSIONS-CSV (pay-only-if-
+# requested). Self-guarding shim (mirrors chp_pr_view/chp_pr_list): a
+# leaf-absent provider degrades to WARN + rc 1 rather than a `set -e` abort.
+chp_pr_diffstat() {
+  if ! declare -F "chp_${CODE_HOST}_pr_diffstat" >/dev/null 2>&1; then
+    echo "WARN: [INV-87] CODE_HOST='${CODE_HOST}' provider defines no chp_${CODE_HOST}_pr_diffstat leaf — PR diff-stat read unavailable (a non-GitHub CHP provider MUST implement it)." >&2
+    return 1
+  fi
+  chp_${CODE_HOST}_pr_diffstat "$@"
 }
 
 # chp_list_inline_comments PR [extra gh args…] — PR inline (file-anchored)

@@ -71,6 +71,12 @@ fi
 #     chp_gitlab_trigger_bot          chp_gitlab_count_reviews_by_login
 #     chp_gitlab_file_url
 #
+#   PR-diff-soft-cap read (#452):
+#     chp_gitlab_pr_diffstat — the first leaf in this file to issue a GraphQL
+#     call (`_gl_graphql`, lib-gitlab-transport.sh), for the `lines` dimension
+#     only; `files` reads the base MR view's `.changes_count` at zero extra
+#     cost (same REST-only `_gl_api` path every other leaf here uses).
+#
 # `chp_gitlab_request_changes` is DELIBERATELY ABSENT (cap
 # `rest_request_changes=0`, §5.1; the caller's cap=0 branch posts the
 # request-changes marker via `itp_post_comment`).
@@ -1440,4 +1446,96 @@ chp_gitlab_file_url() {
   local project_raw
   project_raw="$(_chp_gitlab_project_raw "$project_encoded")" || return 1
   printf 'https://%s/%s/-/blob/%s/%s' "$GITLAB_HOST" "$project_raw" "$branch" "$file_path"
+}
+
+# ---------------------------------------------------------------------------
+# chp_gitlab_pr_diffstat PR DIMENSIONS-CSV  (#452)
+#
+# `files` ← the base MR view's `.changes_count` (string; populated
+# asynchronously, capped and rendered as the literal `"1000+"` above 1000 —
+# parsed down to the integer `1000` here). Zero extra API cost: the base MR
+# view is a single `_gl_api` GET regardless of which dimension(s) are
+# requested.
+#
+# `lines` ← a SEPARATE GraphQL `diffStatsSummary { additions deletions }`
+# call (`_gl_graphql`, lib-gitlab-transport.sh) — issued ONLY when `lines` is
+# actually in DIMENSIONS-CSV (pay-only-if-requested; a `files`-only request
+# never reaches the GraphQL leaf at all). `changed_lines` is
+# `additions + deletions`.
+#
+# Independent failure domains (data-source honesty, mirrors
+# chp_gitlab_pr_view's fetch-cost-gated sub-resources): a GraphQL failure
+# (auth/network/schema error) does NOT suppress a `files` result already read
+# successfully from the base MR view — the leaf omits ONLY the `changed_lines`
+# key on that failure, still returning `{changed_files: N}` at rc 0 when
+# `files` was also requested. The base MR view read failing is a HARD failure
+# for the whole call (rc≠0, no partial output) — `files` cannot be answered
+# without it, and if `lines` was also requested there is no MR to fetch the
+# GraphQL side against either.
+# ---------------------------------------------------------------------------
+chp_gitlab_pr_diffstat() {
+  local pr="${1:-}" dims="${2:-}"
+  [[ "$pr" =~ ^[0-9]+$ ]] || {
+    echo "ERROR: chp_gitlab_pr_diffstat requires PR (1st arg, non-empty numeric): got '${pr}'" >&2
+    return 2
+  }
+  [ -n "$dims" ] || {
+    echo "ERROR: chp_gitlab_pr_diffstat requires DIMENSIONS-CSV (2nd arg, non-empty subset of files,lines)" >&2
+    return 2
+  }
+  local want_files=0 want_lines=0
+  case ",${dims}," in *",files,"*) want_files=1 ;; esac
+  case ",${dims}," in *",lines,"*) want_lines=1 ;; esac
+  if [[ "$want_files" -eq 0 && "$want_lines" -eq 0 ]]; then
+    echo "ERROR: chp_gitlab_pr_diffstat: DIMENSIONS-CSV '${dims}' contains no recognized dimension (files|lines)" >&2
+    return 2
+  fi
+  _chp_gitlab_require_project pr_diffstat || return 1
+
+  # Base MR view — always fetched (both dimensions need the MR to exist; the
+  # `files` dimension reads `.changes_count` directly from it).
+  local raw
+  raw="$(_gl_api "/projects/${GITLAB_PROJECT:-}/merge_requests/${pr}" 2>/dev/null)" || return 1
+  [ -n "$raw" ] || return 1
+  jq -e 'type == "object"' >/dev/null 2>&1 <<<"$raw" || return 1
+
+  local out='{}'
+  if [[ "$want_files" -eq 1 ]]; then
+    local changes_count files_n
+    changes_count="$(jq -r '.changes_count // ""' <<<"$raw" 2>/dev/null)"
+    if [[ -n "$changes_count" ]]; then
+      # The capped-string case: "1000+" → integer 1000.
+      if [[ "$changes_count" == "1000+" ]]; then
+        files_n=1000
+      elif [[ "$changes_count" =~ ^[0-9]+$ ]]; then
+        files_n="$changes_count"
+      fi
+      [[ -n "${files_n:-}" ]] && out="$(jq -c --argjson n "$files_n" '. + {changed_files: $n}' <<<"$out")"
+    fi
+  fi
+
+  if [[ "$want_lines" -eq 1 ]]; then
+    local project_raw gql_data additions deletions
+    project_raw="$(_chp_gitlab_project_raw)" 2>/dev/null || project_raw=""
+    if [[ -n "$project_raw" ]]; then
+      local query='query($fullPath: ID!, $iid: String!) { project(fullPath: $fullPath) { mergeRequest(iid: $iid) { diffStatsSummary { additions deletions } } } }'
+      local vars
+      vars="$(jq -cn --arg fp "$project_raw" --arg iid "$pr" '{fullPath: $fp, iid: $iid}' 2>/dev/null)"
+      if [[ -n "$vars" ]]; then
+        gql_data="$(_gl_graphql "$query" "$vars" 2>/dev/null)" || gql_data=""
+      fi
+    fi
+    if [[ -n "${gql_data:-}" ]] && jq -e '.project.mergeRequest.diffStatsSummary != null' >/dev/null 2>&1 <<<"$gql_data"; then
+      additions="$(jq -r '.project.mergeRequest.diffStatsSummary.additions // 0' <<<"$gql_data" 2>/dev/null)"
+      deletions="$(jq -r '.project.mergeRequest.diffStatsSummary.deletions // 0' <<<"$gql_data" 2>/dev/null)"
+      if [[ "$additions" =~ ^[0-9]+$ && "$deletions" =~ ^[0-9]+$ ]]; then
+        out="$(jq -c --argjson n "$((additions + deletions))" '. + {changed_lines: $n}' <<<"$out")"
+      fi
+    fi
+    # GraphQL failure (auth/network/schema/empty project path) → `changed_lines`
+    # simply stays absent from `out`; a `files` result already assembled above
+    # is UNAFFECTED (data-source honesty — independent failure domains).
+  fi
+
+  printf '%s' "$out"
 }

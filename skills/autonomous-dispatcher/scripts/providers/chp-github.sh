@@ -1389,3 +1389,38 @@ chp_github_pr_comment() {
   local pr="$1"; shift
   gh pr comment "$pr" --repo "$REPO" "$@"
 }
+
+# chp_github_pr_diffstat PR DIMENSIONS-CSV — diff-size read leaf (#452).
+#
+# GitHub's `gh pr view --json additions,deletions,changedFiles` returns ALL
+# THREE fields together in ONE call — zero extra API cost regardless of which
+# dimension(s) DIMENSIONS-CSV requests. So the leaf ALWAYS issues exactly one
+# `gh pr view` call and PROJECTS ONLY the requested key(s) into the output —
+# never fabricates the unrequested dimension. `changed_lines` is
+# `additions + deletions` (the issue's definition of "changed lines").
+#
+# Fail-CLOSED via capture-then-check (mirrors chp_github_pr_view): rc≠0 on gh
+# failure / empty stdout / non-object JSON / missing additions|deletions|
+# changedFiles keys — no partial output, so the caller's per-dimension
+# fail-open (over_reach=false for an unreadable stat) triggers honestly rather
+# than computing over_reach against a zero/null this leaf never actually read.
+chp_github_pr_diffstat() {
+  local pr="${1:-}" dims="${2:-}"
+  [[ "$pr" =~ ^[0-9]+$ ]] || { echo "ERROR: chp_github_pr_diffstat requires PR (1st arg, non-empty numeric): got '${pr}'" >&2; return 2; }
+  [ -n "$dims" ] || { echo "ERROR: chp_github_pr_diffstat requires DIMENSIONS-CSV (2nd arg, non-empty subset of files,lines)" >&2; return 2; }
+  local want_files=0 want_lines=0
+  case ",${dims}," in *",files,"*) want_files=1 ;; esac
+  case ",${dims}," in *",lines,"*) want_lines=1 ;; esac
+  if [[ "$want_files" -eq 0 && "$want_lines" -eq 0 ]]; then
+    echo "ERROR: chp_github_pr_diffstat: DIMENSIONS-CSV '${dims}' contains no recognized dimension (files|lines)" >&2
+    return 2
+  fi
+  local raw
+  raw=$(gh pr view "$pr" --repo "$REPO" --json additions,deletions,changedFiles 2>/dev/null) || return 1
+  [[ -n "$raw" ]] || return 1
+  jq -e 'type == "object" and (.additions|type)=="number" and (.deletions|type)=="number" and (.changedFiles|type)=="number"' >/dev/null 2>&1 <<<"$raw" || return 1
+  jq -c --argjson wf "$want_files" --argjson wl "$want_lines" '
+    (if $wf == 1 then {changed_files: .changedFiles} else {} end)
+    + (if $wl == 1 then {changed_lines: (.additions + .deletions)} else {} end)
+  ' <<<"$raw"
+}

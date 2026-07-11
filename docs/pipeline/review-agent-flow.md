@@ -488,6 +488,7 @@ Major prompt sections:
 | **Acceptance criteria verification** | For each `## Acceptance Criteria` checkbox in the issue body, verify against PR code/tests/build then mark via `bash scripts/mark-issue-checkbox.sh`. ALL must be checked before approving. |
 | **Amazon Q Developer trigger** | Mandatory bot-review trigger. Q ignores `/q review` from bot accounts ⇒ in PAT/no-scope mode the wrapper instructs the agent to use `bash scripts/gh-as-user.sh pr comment N --body "/q review"` and poll up to 3 min. Under the [INV-79] scoped scrub (`GH_USER_PAT` removed) the trigger is **brokered**: the agent writes the phrase to `$AGENT_BOT_TRIGGER_FILE` and the wrapper posts it via `gh-as-user.sh` post-run; the next review tick verifies the bot's review is present. |
 | **E2E verification (if `E2E_MODE` ∈ {browser, command})** | Branch on `E2E_MODE`. `browser`: Chrome DevTools MCP procedure (navigate, login, execute happy-path + feature test cases, screenshot+upload each, post structured E2E report on PR). `command`: invoke project-supplied `E2E_COMMAND`, run `E2E_COMMAND_EVIDENCE_PARSER`, post evidence block ending with SHA-bound marker `<!-- e2e-evidence: complete sha="${PR_HEAD_SHA}" -->` as PR comment. See **E2E mode dispatch** above. |
+| **Diff-size advisory (if a `PR_DIFF_SOFT_CAP_*` cap is set and exceeded)** | Informational-only note naming the exceeded dimension(s) and measured stat(s), explicitly labeled advisory/not-a-verdict. Empty when both caps are unset or the PR is under cap. See [PR-diff-size (over-reach) soft signal (INV-124)](#pr-diff-size-over-reach-soft-signal-inv-124) below. |
 | **Decision** | PASS ⇒ post a "Review PASSED ..." verdict on the **issue** (not PR). FAIL ⇒ post a "Review findings: ..." verdict with a numbered remediation list. **The verdict is posted ONLY via `bash scripts/post-verdict.sh` — never a bare `gh issue comment`** ([INV-56](invariants.md#inv-56-review-verdict-is-posted-via-the-deterministic-post-verdict-helper-not-the-agents-bare-gh)); the helper guarantees the first-line phrasing and appends the `Review Session:` / `Review Agent:` trailer itself. See [Verdict posting (INV-56)](#verdict-posting-inv-56) below. |
 
 The `Review Session:` trailer (presence) + the `Review Agent: <name>` discriminator (per-agent) are how the wrapper identifies which comment is each agent's verdict — see [Verdict polling](#verdict-polling) below.
@@ -507,6 +508,20 @@ the pre-#421 hardcoded prose. This is distinct from [INV-91]'s cutover guard:
 that guard covers the EXECUTABLE `gh` calls this wrapper itself makes (`gh api
 user` for bot-login detection, the [INV-33] interim `gh issue close`); this
 covers what the wrapper TELLS the review agent to run.
+
+## PR-diff-size (over-reach) soft signal (INV-124)
+
+Computed ONCE per review round, in the wrapper, BEFORE the fan-out loop — `build_review_prompt()` is called once per fan-out member, so per-member computation would redundantly re-read the provider seam and duplicate the metrics row. The wrapper:
+
+1. Normalizes `PR_DIFF_SOFT_CAP_FILES` / `PR_DIFF_SOFT_CAP_LINES` (`lib-review-diffcap.sh::_diff_cap_normalize`) — empty/unset/`0`/negative/non-numeric all silently normalize to "disabled" for that key.
+2. When BOTH are disabled, skips everything below entirely: no provider-seam call, no prompt note, no metrics event — `build_review_prompt()` output is byte-identical to pre-#452.
+3. Otherwise reads the applicable dimension(s) via the provider seam (`chp_pr_diffstat PR DIMENSIONS-CSV`, `docs/pipeline/provider-spec.md` §3.2) and computes `over_reach` via strict-`>` OR-across-dimensions (`lib-review-diffcap.sh::review_diff_over_reach`) — a read failure for a dimension (rc≠0/empty/unparseable) leaves it unset, and an unset stat never contributes `true` (fail-open).
+4. Renders the advisory note (`lib-review-diffcap.sh::review_diff_soft_cap_prompt_note`, an `echo`-only pure helper mirroring `review_protected_paths_prompt_rule` — empty when `over_reach=false`) into the prompt, right before the `## Decision` section.
+5. Emits exactly one `pr_diff_soft_cap` metrics event (`docs/pipeline/metrics.md`) — never folded into the per-member `review_agent_run` event.
+
+**Provider cost, not capability.** Both `files` and `lines` are supported on both hosts. GitHub answers both from ONE `gh pr view --json additions,deletions,changedFiles` call regardless of which is requested. GitLab answers `files` from the base MR view's `changes_count` (a string, parsing the capped `"1000+"` literal down to the integer `1000`) at zero extra cost, but `lines` requires a SEPARATE GraphQL `diffStatsSummary` call — issued ONLY when `lines` is actually requested. This is the first GraphQL call site in `chp-gitlab.sh`; GitLab's GraphQL endpoint authenticates via `Authorization: Bearer`, not the REST `PRIVATE-TOKEN` header the rest of the GitLab leaves use via `_gl_api`/`_gl_http`, so it routes through a new sibling transport primitive, `_gl_graphql` (`providers/lib-gitlab-transport.sh`). A GraphQL failure degrades ONLY the `lines` dimension — it never suppresses a `files` result the base MR view already answered. A `GITLAB_TRANSPORT_HOOK`-only installation with no `GITLAB_TOKEN` (SSO gateway, cookie-sync tooling, forked CLI) is NOT stuck with that degrade: the hook may additionally define an optional `_gl_graphql_hook` function to answer the GraphQL call through its own auth path (round-2 review amendment; see [INV-116](invariants.md#inv-116-the-gitlab-transport-is-a-two-layer-choke-point-_gl_http-request-primitive--_gl_api-public-function-pagination--backoff--fail-closed-live-in-_gl_api-the-override-hook-may-redefine-_gl_http-only)'s amendment note) — absent that override, the token-required degrade is unchanged.
+
+**Soft signal, never a gate.** `over_reach` is a prompt-weighting advisory only — see [INV-124](invariants.md#inv-124-the-pr-diff-size-over-reach-signal-is-a-default-off-fail-open-soft-signal-never-read-by-verdict-aggregation) for the full invariant. It is never read by verdict aggregation, any `_classify_*_gate`, or the merge decision; a legitimately large PR still reaches PASS and auto-merges regardless of its value.
 
 ## Verdict posting (INV-56)
 
@@ -816,7 +831,10 @@ post-fan-out loop iterates only the surviving set, so without this the smoke
 drop's quota/capacity reason would never reach metrics (a smoke that hits an
 auth/config error is a FAIL that aborts the whole gate, not a per-member drop, so
 only UNAVAILABLE-class smoke outcomes flow through `phase=smoke`). Each member
-therefore reaches the metrics stream exactly once. Then `merge`
+therefore reaches the metrics stream exactly once. One `pr_diff_soft_cap`
+event per enabled review round ([INV-124](invariants.md#inv-124-the-pr-diff-size-over-reach-signal-is-a-default-off-fail-open-soft-signal-never-read-by-verdict-aggregation),
+issue #452) — emitted ONCE before the fan-out, never per-member, and only when
+at least one `PR_DIFF_SOFT_CAP_*` cap is configured. Then `merge`
 (success/failure, the TTHW merged endpoint + the `infra` failure class); and
 `wrapper_end` (in `cleanup()`, fired once for both the normal and crash paths).
 At `wrapper_end` it also **prunes the metrics log once per run**
