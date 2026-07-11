@@ -894,6 +894,37 @@ REVIEW_BOTS=""
 # finding is then treated as dev-actionable — the pre-#298 behavior).
 # REVIEW_PROTECTED_PATHS=".github/workflows/** CODEOWNERS .github/CODEOWNERS"
 
+# PR_DIFF_SOFT_CAP_FILES / PR_DIFF_SOFT_CAP_LINES: independent soft-signal
+# thresholds for the PR-diff-size (over-reach) advisory (INV-124, #452). When a
+# PR's changed-files count exceeds PR_DIFF_SOFT_CAP_FILES, or its changed-lines
+# count (additions + deletions) exceeds PR_DIFF_SOFT_CAP_LINES, the review
+# prompt gets an advisory note naming the exceeded dimension(s) — informational
+# only, NEVER a gate: it cannot block a PASS or auto-merge, and a legitimately
+# large PR (migration, refactor) still merges normally regardless of this
+# signal. Cheap and deterministic — a provider-seam read, no model/agent tokens
+# spent either way.
+#
+# Default (both unset): the feature is fully disabled — zero behavior change,
+# no provider-seam call, no metrics event. Each key is independent: setting
+# only one enables just that dimension. A key holding an invalid value (`0`,
+# negative, non-numeric, or unset) is silently treated as disabled for that
+# key — never a startup error.
+#
+# There is NO cross-repo default prescribed here — a fixed number baked into
+# the wrapper would be noise for a small repo and too loose to mean anything
+# for a dogfooding/infra-heavy one. The commented-out example below is THIS
+# repo's OWN historical p90 (rounded up), not a universal default. Recompute
+# it for your own repo via:
+#   gh pr list --state merged --json additions,deletions,changedFiles
+# and take the p90 (or p75, per team preference) of changedFiles / (additions
+# + deletions) across the result. File-count is intentionally set LOOSER than
+# its own percentile would suggest — mechanical cross-file changes (bulk
+# rename, formatting) inflate file count without being real over-reach;
+# line-count more directly tracks actual work volume, so it tracks its
+# percentile more tightly.
+# PR_DIFF_SOFT_CAP_FILES=40    # this repo's own historical p90, rounded up
+# PR_DIFF_SOFT_CAP_LINES=3000  # this repo's own historical p90, rounded up
+
 # === E2E Verification (optional) ===
 #
 # E2E has three modes (issue #161). The mode is selected by E2E_MODE.

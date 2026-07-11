@@ -106,6 +106,12 @@ note() { echo -e "  ${YEL}NOTE${NC}: $1"; }
 #     on their own; the whole-harness waiver is the right granularity because the
 #     rule keys on source statements, not call graphs — same precedent as
 #     test-issue-308-b3b4-chp-reads.sh above.)
+#   - test-autonomous-review-diffcap-wiring.sh:dynamic-source: PERMANENT (#452).
+#     BLOCK_SLICE (the once-per-round INV-124 diffcap block, `awk`-extracted from
+#     the wrapper) and _FN_SLICE (build_review_prompt, same mktemp function-slice
+#     pattern as test-autonomous-review-verdict-via-helper.sh's own waiver above)
+#     are both mktemp-fixture vars this test authors inline — same shape as every
+#     other dynamic-source waiver in this list.
 WAIVERS=(
   "test-issue-308-b3b4-chp-reads.sh:lib-review-e2e.sh:permanent — #308 AC4 FAIL-SOFT proof sources the lib with NO CHP seam on purpose"
   "test-autonomous-review-sequential-e2e.sh:lib-review-e2e.sh:owned by open PR #337 (adds sandbox seam repairs); remove waiver post-#337"
@@ -120,6 +126,7 @@ WAIVERS=(
   "test-lib-lane.sh:dynamic-source:KSW_SLICE is a mktemp function-slice fixture (kill_stale_wrapper extracted from dispatch-local.sh)"
   "test-w1d-ci-status-mergeable-parity.sh:dynamic-source:_W1D_LIB_DISPATCH is env-threaded from the harness's literal \$SCRIPTS/lib-dispatch.sh binding; the gh stub is defined in the SAME bash -c scope BEFORE the source (seam precedes source)"
   "test-lane-gc-p3-kill-paths.sh:dynamic-source:PGA_SLICE/KSW_SLICE are mktemp function-slice fixtures (_pid_or_group_alive/kill_stale_wrapper extracted from dispatch-local.sh)"
+  "test-autonomous-review-diffcap-wiring.sh:dynamic-source:BLOCK_SLICE/_FN_SLICE are mktemp function-slice fixtures (the INV-124 diffcap block / build_review_prompt extracted from the wrapper)"
 )
 is_waived() { # <harness> <lib-or-pseudo-lib>
   local h="$1" l="$2" e key rest elib

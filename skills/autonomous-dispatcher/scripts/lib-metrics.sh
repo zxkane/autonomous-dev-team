@@ -116,7 +116,7 @@ metrics_emit() {
 
   # Numeric keys are coerced to JSON numbers; everything else stays a string.
   # Space-padded so a substring test matches whole tokens only.
-  local num_keys=" issue retry_count rc duration_s input_tokens output_tokens total_tokens "
+  local num_keys=" issue retry_count rc duration_s input_tokens output_tokens total_tokens changed_files changed_lines files_cap lines_cap "
 
   # Build the jq --arg / --argjson argument list and the object body.
   local -a jq_args=(-nc

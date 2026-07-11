@@ -72,6 +72,18 @@
 #       and used verbatim. LEAVES NEVER call curl or _gl_http directly —
 #       the [INV-91] cutover guard enforces this.
 #
+#   _gl_graphql <query> [variables-json] (#452, first GitLab GraphQL call
+#       site): single-shot POST to `https://${GITLAB_HOST}/api/graphql` with
+#       `Authorization: Bearer ${GITLAB_TOKEN}` (GraphQL does NOT accept the
+#       REST PRIVATE-TOKEN header `_gl_http` sends — a SEPARATE primitive, not
+#       a `_gl_http`/`_gl_api` call). NO pagination, NO 429 retry (unlike
+#       `_gl_api`) — the sole caller is a single object-shaped read behind a
+#       fail-open soft signal. Fail-CLOSED on token-unset / transport failure /
+#       non-2xx / empty body / a populated `errors` array / null `data`; on
+#       success echoes the inner `.data` object. Does NOT go through
+#       `GITLAB_TRANSPORT_HOOK` (that hook's contract covers `_gl_http`'s REST
+#       shape only).
+#
 # Override hook (GITLAB_TRANSPORT_HOOK):
 #   If GITLAB_TRANSPORT_HOOK (conf-declared path) is set, the transport lib
 #   sources it at library-init BEFORE any leaf runs. The hook MAY redefine
@@ -275,6 +287,61 @@ _gl_api_extract_header() {
     }
     END { if (value != "") print value }
   ' "$headers_file"
+}
+
+# _gl_graphql <query> [variables-json] — GitLab GraphQL endpoint primitive
+# (#452, the first GitLab leaf that needs GraphQL; `chp-gitlab.sh` had none
+# before this — REST-only via `_gl_api`).
+#
+# GitLab's GraphQL endpoint (`https://${GITLAB_HOST}/api/graphql`) does NOT
+# accept the REST `PRIVATE-TOKEN` header `_gl_http` sends — it authenticates
+# via `Authorization: Bearer <token>` (or a `private_token=`/`access_token=`
+# query param; GitLab's docs list no PRIVATE-TOKEN-header form for GraphQL).
+# So this is a SEPARATE minimal primitive, not a call through `_gl_http`/
+# `_gl_api` (whose frozen #416 contract is REST-path + PRIVATE-TOKEN shaped)
+# — it does not go through the `GITLAB_TRANSPORT_HOOK` override point either
+# (that hook's contract is `_gl_http`'s REST signature only).
+#
+# <query> is a GraphQL query STRING; <variables-json> is an optional JSON
+# object of GraphQL variables (defaults to `{}`). Single-shot, NO pagination,
+# NO 429 retry/backoff (unlike `_gl_api`) — the sole caller
+# (`chp_gitlab_pr_diffstat`'s `diffStatsSummary` lookup) is a single
+# object-shaped read behind a fail-open soft-signal feature (#452
+# PR-diff-soft-cap), so a hard one-shot failure is an acceptable, honestly
+# fail-CLOSED outcome rather than added retry complexity.
+#
+# Fail-CLOSED: rc≠0 with NO stdout on: GITLAB_TOKEN unset, transport failure,
+# non-2xx HTTP status, empty response body, a populated GraphQL `errors`
+# array, or a null/absent top-level `data`. On success echoes the INNER
+# `.data` object (NOT the `{data: ...}` envelope) so callers project straight
+# into it.
+_gl_graphql() {
+  local query="$1" variables="${2:-{}}"
+  if [[ -z "${GITLAB_TOKEN:-}" ]]; then
+    echo "ERROR: [INV-116] GITLAB_TOKEN is unset — the GitLab GraphQL endpoint requires a Bearer-capable personal/project access token (it does not accept the REST PRIVATE-TOKEN header _gl_http uses)." >&2
+    return 1
+  fi
+  local body
+  body=$(jq -cn --arg q "$query" --argjson vars "$variables" '{query: $q, variables: $vars}' 2>/dev/null) || return 1
+  local hdr_file resp_file
+  hdr_file=$(mktemp)
+  resp_file=$(mktemp)
+  # Self-disarming function-scoped RETURN trap (the #330/[INV-99] discipline —
+  # cleans these temps at THIS invocation's return, then clears itself so it
+  # does not persist into a caller's own later return).
+  trap 'rm -f "$hdr_file" "$resp_file"; trap - RETURN' RETURN
+  curl -sS -X POST \
+    -H "Authorization: Bearer ${GITLAB_TOKEN}" \
+    -H "Content-Type: application/json" \
+    -D "$hdr_file" \
+    --data-binary "$body" \
+    "https://${GITLAB_HOST}/api/graphql" > "$resp_file" 2>/dev/null || return 1
+  local status
+  status=$(_gl_api_extract_status "$hdr_file")
+  [[ -n "$status" ]] && [[ "$status" -ge 200 && "$status" -lt 300 ]] || return 1
+  [[ -s "$resp_file" ]] || return 1
+  jq -e 'type == "object" and ((.errors // []) | length) == 0 and (.data != null)' >/dev/null 2>&1 < "$resp_file" || return 1
+  jq -c '.data' < "$resp_file"
 }
 
 # _gl_api_reconstruct_next_url <path-or-url> <next-page-number>

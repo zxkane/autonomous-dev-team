@@ -172,6 +172,11 @@ source "${LIB_DIR}/lib-review-artifact.sh"
 # derivation the wrapper folds into the verdict trailer. Pure config-var probes
 # (no API, no sidecar). [INV-65] sourced from the real skill tree via LIB_DIR.
 source "${LIB_DIR}/lib-review-classify.sh"
+# shellcheck source=lib-review-diffcap.sh
+# INV-124 (#452): PR-diff-size (over-reach) soft signal — the deterministic
+# threshold-comparison + prompt-note pure functions. No I/O here; the
+# provider-seam read (chp_pr_diffstat) and metrics_emit call stay wrapper-side.
+source "${LIB_DIR}/lib-review-diffcap.sh"
 # shellcheck source=lib-review-request-changes.sh
 # INV-52 (#193): the wrapper OWNS the GitHub-native PR review action — `--approve`
 # on a PASS and `--request-changes` on a SUBSTANTIVE FAIL — so the PR's
@@ -1397,6 +1402,7 @@ browser flow.
 E2E_EVIDENCE_INPUT
   fi
 fi)
+${_DIFF_CAP_PROMPT_NOTE:-}
 
 ## Decision
 After thorough review:
@@ -2268,6 +2274,48 @@ _FANOUT_DIR=$(mktemp -d "/tmp/agent-review-fanout-${ISSUE_NUMBER}-XXXXXX")
 # `model: <id>` when all agents resolve to the same id, else
 # `models: <agent>=<id>, …` so every member's effective model is visible.
 log "Fanning out ${#REVIEW_AGENTS_LIST[@]} review agent(s): ${REVIEW_AGENTS_LIST[*]} ($(_review_fanout_model_label "${REVIEW_AGENTS_LIST[@]}"))"
+
+# ---------------------------------------------------------------------------
+# INV-124 (#452): PR-diff-size (over-reach) soft signal — computed ONCE per
+# review round, HERE (before the fan-out loop below), NOT once per fan-out
+# member. build_review_prompt() is called once per member; computing this
+# per-member would redundantly re-read the provider seam and re-log, and
+# would emit a duplicate pr_diff_soft_cap metrics row per member.
+#
+# Both caps unset (the default) ⇒ _DIFF_CAP_DIMENSIONS is empty ⇒ NO
+# chp_pr_diffstat call, NO prompt note, NO metrics event — zero behavior
+# change from pre-#452. _DIFF_CAP_PROMPT_NOTE is referenced (not
+# re-computed) inside build_review_prompt()'s heredoc below.
+# ---------------------------------------------------------------------------
+_DIFF_CAP_FILES_CAP=$(_diff_cap_normalize "${PR_DIFF_SOFT_CAP_FILES:-}")
+_DIFF_CAP_LINES_CAP=$(_diff_cap_normalize "${PR_DIFF_SOFT_CAP_LINES:-}")
+_DIFF_CAP_DIMENSIONS=$(review_diff_soft_cap_dimensions_needed "$_DIFF_CAP_FILES_CAP" "$_DIFF_CAP_LINES_CAP")
+_DIFF_CAP_CHANGED_FILES=""
+_DIFF_CAP_CHANGED_LINES=""
+_DIFF_CAP_OVER_REACH="false"
+_DIFF_CAP_PROMPT_NOTE=""
+if [[ -n "$_DIFF_CAP_DIMENSIONS" ]]; then
+  _diffstat_json=$(chp_pr_diffstat "$PR_NUMBER" "$_DIFF_CAP_DIMENSIONS" 2>/dev/null || true)
+  if [[ -n "$_diffstat_json" ]]; then
+    _DIFF_CAP_CHANGED_FILES=$(jq -r '.changed_files // empty' <<<"$_diffstat_json" 2>/dev/null || true)
+    _DIFF_CAP_CHANGED_LINES=$(jq -r '.changed_lines // empty' <<<"$_diffstat_json" 2>/dev/null || true)
+  fi
+  # A read failure (rc≠0, empty, unparseable) leaves both empty — fail-open:
+  # review_diff_over_reach never fabricates a warning from an unreadable stat.
+  _DIFF_CAP_OVER_REACH=$(review_diff_over_reach "$_DIFF_CAP_CHANGED_FILES" "$_DIFF_CAP_CHANGED_LINES" "$_DIFF_CAP_FILES_CAP" "$_DIFF_CAP_LINES_CAP")
+  _DIFF_CAP_PROMPT_NOTE=$(review_diff_soft_cap_prompt_note "$_DIFF_CAP_OVER_REACH" "$_DIFF_CAP_CHANGED_FILES" "$_DIFF_CAP_CHANGED_LINES" "$_DIFF_CAP_FILES_CAP" "$_DIFF_CAP_LINES_CAP")
+  log "INV-124: PR-diff-soft-cap over_reach=${_DIFF_CAP_OVER_REACH} (changed_files=${_DIFF_CAP_CHANGED_FILES:-n/a}/${_DIFF_CAP_FILES_CAP:-unset}, changed_lines=${_DIFF_CAP_CHANGED_LINES:-n/a}/${_DIFF_CAP_LINES_CAP:-unset})"
+  # Emit exactly once per enabled review round (NOT once per fan-out member —
+  # distinct from the per-member review_agent_run event below).
+  if declare -F metrics_emit >/dev/null 2>&1; then
+    metrics_emit pr_diff_soft_cap side=review "issue=${ISSUE_NUMBER:-}" "pr=${PR_NUMBER:-}" "run_id=${RUN_ID:-}" \
+      "over_reach=${_DIFF_CAP_OVER_REACH}" \
+      ${_DIFF_CAP_CHANGED_FILES:+"changed_files=${_DIFF_CAP_CHANGED_FILES}"} \
+      ${_DIFF_CAP_CHANGED_LINES:+"changed_lines=${_DIFF_CAP_CHANGED_LINES}"} \
+      ${_DIFF_CAP_FILES_CAP:+"files_cap=${_DIFF_CAP_FILES_CAP}"} \
+      ${_DIFF_CAP_LINES_CAP:+"lines_cap=${_DIFF_CAP_LINES_CAP}"} || true
+  fi
+fi
 
 # INV-46 (#182): these are PURE code-review agents. The E2E ran ONCE in Phase A
 # above and its evidence is already posted as a PR comment; the review prompt
