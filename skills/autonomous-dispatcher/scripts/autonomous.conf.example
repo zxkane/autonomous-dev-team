@@ -185,6 +185,28 @@ AGENT_TIMEOUT="4h"
 # (`timeout 0` would DISABLE the cap). Leave unset for the 1h default.
 # AGENT_REVIEW_TIMEOUT="1h"
 
+# AGENT_TIMEOUT_WATCHDOG_FALLBACK (INV-126, #451): fail-closed default when
+# NEITHER coreutils `timeout` NOR macOS `gtimeout` is found on PATH at
+# lib-agent.sh source time. AGENT_TIMEOUT/AGENT_REVIEW_TIMEOUT is the ONLY
+# wall-clock bound on an agent run (no --max-turns, no token gate), so
+# lib-agent.sh now REFUSES to launch any agent (source itself aborts with
+# ADT_CFG_TIMEOUT_TOOL_MISSING) rather than silently running unbounded — this
+# is most likely to bite a fresh macOS host missing coreutils
+# ('brew install coreutils' installs gtimeout).
+#
+# Set to "true" to opt into a pure-shell watchdog (background
+# `sleep $AGENT_TIMEOUT && kill` targeting the same setsid process group)
+# instead of refusing to launch. Default "false" (fail-closed) is the safer
+# choice for most deployments; only opt in if availability matters more than
+# strictness and installing coreutils/gtimeout is not feasible.
+#
+# NOTE: the watchdog also requires `setsid` (util-linux) on PATH to establish
+# a killable process group. If `setsid` is ALSO missing, this toggle has no
+# effect — lib-agent.sh still fails closed with ADT_CFG_TIMEOUT_TOOL_MISSING,
+# because a watchdog with no PGID to signal would silently leave the run
+# unbounded, defeating the point of opting in.
+# AGENT_TIMEOUT_WATCHDOG_FALLBACK="false"
+
 # Optional launcher prefix wrapped around every claude CLI invocation
 # in run_agent / resume_agent. Use case: bridge dispatcher-spawned
 # wrappers into the same env you set up for interactive `claude` runs
