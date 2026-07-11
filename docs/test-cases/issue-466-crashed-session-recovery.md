@@ -25,8 +25,7 @@ Golden-trace style tests mirror `test-issue-351-stale-verdict-delegate.sh`'s exi
 | ID | Scenario | Expected |
 |---|---|---|
 | TC-466-CRASH-001 | Same-HEAD, review verdict `failed-substantive` (dev-actionable=true), session id resolves, `is_session_completed` returns false with `terminal_reason=api_error`, no live wrapper (`may_stall_now`=eligible) | Dispatches exactly ONE `dev-new`: `acquire_dispatch_marker` → `label_swap pending-dev→in-progress` → `post_dispatch_token` → `dispatch dev-new` rc=0 → `dispatch_marker_confirm_launched` → posts `crashed-session-retry:<head>` marker. **NO** `stale-verdict:<head>` park. **Must fail before the fix** (pre-fix: falls straight to the residual park, since `_sid` is non-empty so the old self-heal `if [ -z "$_sid" ]` guard never engaged). |
-| TC-466-CRASH-002 | Same as CRASH-001 but `AGENT_DEV_CMD=codex` (non-claude dev CLI — `is_session_completed` returns false by design, unrelated to `api_error`) | Same dispatch sequence as CRASH-001 — the helper's precondition is CLI-agnostic ("completion is unprovable"), not `api_error`-specific. |
-| TC-466-CRASH-003 | Same as CRASH-001 but the per-issue log file is missing/unreadable (`is_session_completed` returns false via its `[ -r "$log_file" ]` guard) | Same dispatch sequence — a missing log is just another "completion unprovable" cause. |
+| TC-466-CRASH-002 | Same as CRASH-001 but `AGENT_DEV_CMD=codex` (non-claude dev CLI — `is_session_completed` returns false by design, unrelated to `api_error`) | Same dispatch sequence as CRASH-001 — the helper's precondition is CLI-agnostic ("completion is unprovable"), not `api_error`-specific. (The unreadable-log cause is not separately pinned: the harness stubs `is_session_completed` at the return-code level, so it cannot distinguish `api_error` from an unreadable log from a non-claude CLI — all three reach `_same_head_verdict_aware_recovery` identically. CRASH-001/002 exercise the shared code path; the per-cause distinction lives in `is_session_completed`'s own tests, not here.) |
 
 ## Verdict-aware routing (shared by both causes)
 
@@ -35,7 +34,10 @@ Golden-trace style tests mirror `test-issue-351-stale-verdict-delegate.sh`'s exi
 | TC-466-VERDICT-001 | `crashed-session` cause, verdict=`passed` (race) | No-op: `return 0`, ZERO dev-new, no marker posted, no park. Mirrors `handle_completed_session_routing`'s own `passed` branch. |
 | TC-466-VERDICT-002 | `crashed-session` cause, verdict=`dev-actionable=false` | `mark_stalled`, ZERO dev-new. Posts `crashed-session-non-actionable:<head>` marker (own namespace per cause — the [INV-92] non-actionable posture doesn't need cross-cause budget sharing since it never dispatches). |
 | TC-466-VERDICT-003 | `crashed-session` cause, verdict=`failed-non-substantive` | `label_swap pending-dev→pending-review`, ZERO dev-new. Posts the **shared** `self-heal-non-substantive:<head>` marker (same namespace `cause=self-heal` uses — see Shared-Budget section). |
-| TC-466-VERDICT-004 | `crashed-session` cause, verdict=`failed-substantive` (dev-actionable=true) or `none` | Bounded `dev-new` dispatch (TC-466-CRASH-001's sequence), posts `crashed-session-retry:<head>` marker. |
+
+The `failed-substantive` (dev-actionable=true) / `none` verdict arm (bounded `dev-new` dispatch,
+posting `crashed-session-retry:<head>`) is exercised directly by TC-466-CRASH-001/002 above — no
+separate `TC-466-VERDICT-004` is needed since it is the identical code path with a different name.
 
 ## Shared-budget pins (neither cause double-spends the other)
 
@@ -68,6 +70,7 @@ With `MAX_RETRIES=3` and `count_retries` frozen at 1 (no countable comment poste
 | TC-466-INV108-001 | `crashed-session` cause, dev-new arm reached, `acquire_dispatch_marker` returns non-zero (held by a concurrent tick) | Helper returns 1 (NOT 0) — caller falls through to the residual `stale-verdict:<head>` park (a transient race, not a marker-present exhaustion). ZERO dev-new. |
 | TC-466-INV108-002 | `crashed-session` cause, acquire succeeds but `label_swap pending-dev→in-progress` fails | `release_dispatch_marker`, `return 0` (handled, no park) — NO `post_dispatch_token`, NO `dispatch`. |
 | TC-466-INV108-003 | `crashed-session` cause, `dispatch dev-new` returns rc=75 (DEFER) | `handle_dispatch_deferred(issue, dev-new, in-progress, pending-dev)`, `return 0` — NO confirm-launched. |
+| TC-466-INV108-003b | `crashed-session` cause, `dispatch dev-new` returns a hard error (rc≠0, rc≠75) | `release_dispatch_marker(issue, dev-new)`, `return 0` — NO confirm-launched, NO `crashed-session-retry:<head>` marker posted (so the next tick's retry isn't blocked by a phantom budget marker on a dispatch that never actually launched). |
 | TC-466-INV108-004 | `crashed-session` cause, `dispatch dev-new` returns rc=0 | `dispatch_marker_confirm_launched` called, `crashed-session-retry:<head>` marker posted. |
 
 ## Regression gates (existing suites stay green)

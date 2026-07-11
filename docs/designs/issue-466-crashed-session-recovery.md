@@ -29,12 +29,17 @@ one — a `dev-new` — will never be dispatched, because the HEAD is already-re
 ## Implementation shape
 
 Extract the self-heal branch's case-statement body into a shared helper,
-`_dispatch_same_head_verdict_aware_recovery(issue_num, pr_ref, current_head, cause)`,
-called from two call sites with disjoint preconditions:
+`_same_head_verdict_aware_recovery(issue_num, pr_ref, current_head, cause)`,
+called from a single call site with a `cause` derived from a disjoint precondition
+(the two preconditions are mutually exclusive on `_sid`, and both gate on the same
+`may_stall_now` check, so it is only evaluated once):
 
 ```
-if   [ -z "$_sid" ] && may_stall_now "$issue_num"; then   # [INV-111] cause=self-heal
-elif [ -n "$_sid" ] && may_stall_now "$issue_num"; then   # [INV-125] cause=crashed-session
+local _recovery_cause="crashed-session"        # [INV-125] _sid resolved
+[ -z "$_sid" ] && _recovery_cause="self-heal"   # [INV-111] _sid empty
+if may_stall_now "$issue_num"; then
+  _same_head_verdict_aware_recovery "$issue_num" "$pr_ref" "$current_head" "$_recovery_cause" && return 0
+fi
 ```
 
 `cause` only changes: the dev-new-arm's post-dispatch notice wording, and the log text. All
