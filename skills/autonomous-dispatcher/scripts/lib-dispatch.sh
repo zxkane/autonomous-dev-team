@@ -601,8 +601,9 @@ check_deps_resolved() {
 
 # Echoes the count of failure events on the issue, using the stalled-cutoff
 # rule [INV-05]: only count failures after the most recent
-# "Marking as stalled" comment. Two event sources are counted:
+# "Marking as stalled" comment. Three event sources are counted:
 #   - Agent Session Report (Dev) comments with non-zero exit code (always)
+#   - No-PR retry WARNING comments (always — see count_no_pr_attempts)
 #   - Dispatcher-detected crash comments matching [INV-06]'s keyword regex,
 #     BUT only when the agent has confirmed startup at some point in the
 #     current retry cycle (a "Dev Session ID:" comment exists post-cutoff).
@@ -613,18 +614,27 @@ check_deps_resolved() {
 # When MAX_RETRIES is hit, mark_stalled() is the appropriate action.
 count_retries() {
   local issue_num="$1"
-  local agent_failures dispatcher_crashes
+  local agent_failures no_pr_attempts dispatcher_crashes
   agent_failures=$(count_agent_failures "$issue_num")
+  no_pr_attempts=$(count_no_pr_attempts "$issue_num")
   dispatcher_crashes=$(count_dispatcher_crashes "$issue_num")
 
   # Bug 5 (#99): only count dispatcher-detected crashes when the agent has
   # confirmed startup at some point in this retry cycle. Pre-confirmation
   # crashes are dispatcher-side false positives (cold-start window, missing
   # exec bit, broken auth handoff) and must NOT consume MAX_RETRIES.
+  #
+  # [INV-123] (#461): no_pr_attempts is summed UNCONDITIONALLY, alongside
+  # agent_failures — NOT behind the _agent_started_since_stall gate that
+  # only guards dispatcher_crashes. The no-PR WARNING only ever posts on the
+  # wrapper's AGENT_RAN=true path (the startup-failure branch exits before
+  # reaching it), so a no-PR attempt always implies the agent genuinely
+  # started; gating it here would just be redundant, and omitting it would
+  # reopen the counting gap this fix exists to close.
   if _agent_started_since_stall "$issue_num"; then
-    echo $((agent_failures + dispatcher_crashes))
+    echo $((agent_failures + no_pr_attempts + dispatcher_crashes))
   else
-    echo "$agent_failures"
+    echo $((agent_failures + no_pr_attempts))
   fi
 }
 
@@ -688,6 +698,32 @@ count_agent_failures() {
          and (.body | test(\"Exit code: 0\\\\b\") | not)
          and (.body | test(\"Exit code: 143\\\\b\") | not)
          and (.body | test(\"Exit code: 137\\\\b\") | not)
+       )] | length"
+}
+
+# [INV-123] (#461): echoes the count of "no PR was created" WARNING
+# comments — a SEPARATE, independent comment the dev wrapper posts (in
+# addition to, not part of, the Agent Session Report — see [INV-03]) when
+# the agent exits 0 but never created a PR. Uses the SAME stalled-cutoff
+# rule as count_agent_failures/count_dispatcher_crashes ([INV-05]) so the
+# sub-count resets identically on unstall. This is a NEW, INDEPENDENT
+# regex — NOT a rewrite of count_agent_failures's "Agent Session Report
+# (Dev)" pattern — because the two comments are different text on
+# different lines; conflating them into one regex would be fragile.
+#
+# Without this, an issue whose dev agent keeps ending its turn cleanly
+# without ever opening a PR consumed ZERO retry budget: count_agent_failures
+# matches only the literal "Agent Session Report (Dev)" substring, which
+# this WARNING never contains.
+count_no_pr_attempts() {
+  local issue_num="$1"
+  local last_stalled_at
+  last_stalled_at=$(itp_list_comments "$issue_num" \
+    | jq -r '[.[] | select(.body | test("Marking as stalled"))] | last | .createdAt // "1970-01-01T00:00:00Z"')
+  itp_list_comments "$issue_num" \
+    | jq -r "[.[] | select(
+         (.createdAt > \"${last_stalled_at}\")
+         and (.body | test(\"Agent exited successfully but no PR was created\"))
        )] | length"
 }
 
@@ -847,8 +883,9 @@ mark_stalled() {
     return 0
   fi
 
-  local agent_failures dispatcher_crashes false_positives
+  local agent_failures no_pr_attempts dispatcher_crashes false_positives
   agent_failures=$(count_agent_failures "$issue_num")
+  no_pr_attempts=$(count_no_pr_attempts "$issue_num")
   dispatcher_crashes=$(count_dispatcher_crashes "$issue_num")
   false_positives=$(count_dispatcher_false_positives "$issue_num")
   # [INV-87]/[INV-89] The pending-dev→stalled transition routes through the single
@@ -861,8 +898,9 @@ mark_stalled() {
   # agent confirmed startup (no Dev Session ID written) — these are
   # dispatcher-side false positives and do NOT consume MAX_RETRIES.
   local counted_dispatcher_crashes=$(( dispatcher_crashes - false_positives ))
+  # [INV-123]: no_pr_attempts is an additional named term below.
   itp_post_comment "$issue_num" \
-    "Issue has exceeded the maximum retry limit (${MAX_RETRIES} failed attempts: ${agent_failures} agent failures + ${counted_dispatcher_crashes} dispatcher-detected crashes; ${false_positives} dispatcher false positives suppressed per #99). Marking as stalled. @${REPO_OWNER} please investigate manually."
+    "Issue has exceeded the maximum retry limit (${MAX_RETRIES} failed attempts: ${agent_failures} agent failures + ${no_pr_attempts} no-PR retry attempts + ${counted_dispatcher_crashes} dispatcher-detected crashes; ${false_positives} dispatcher false positives suppressed per #99). Marking as stalled. @${REPO_OWNER} please investigate manually."
 }
 
 # ---------------------------------------------------------------------------
@@ -1626,15 +1664,92 @@ handle_completed_session_routing() {
 
   case "$_verdict" in
     none)
-      # Original INV-12 operator handoff — preserved for back-compat.
-      log "  issue #${issue_num} session ${session_id} already completed (no post-session verdict) — operator handoff"
-      local _notice_marker="INV-12-completed:${session_id}"
+      # [INV-123] (#461): `none` means "no qualifying review comment was found
+      # at all" — this happens BOTH when no PR was ever created (no review
+      # could run) and when a PR exists but review never posted a qualifying
+      # comment (crash, actor-predicate mismatch). Those two cases need
+      # different treatment: a PR-exists `none` means a review SHOULD have
+      # run and something prevented it — fail closed to the operator exactly
+      # as INV-12 originally intended (unchanged below). A no-PR `none` means
+      # the dev agent hasn't produced anything for review to look at yet — a
+      # plain, bounded dev-retry situation, mechanically identical to
+      # failed-substantive's Branch C. `fetch_pr_for_issue` returning nonzero
+      # (transport/read failure) is treated the SAME as "PR exists" (fail
+      # closed) — never as "no PR" — so a transient read failure can never
+      # misroute into a fresh dev-new against an issue that actually has a PR
+      # the lookup just failed to see.
+      local _np_pr_info _np_pr_rc=0
+      _np_pr_info=$(fetch_pr_for_issue "$issue_num" "number") || _np_pr_rc=$?
+      if [ "$_np_pr_rc" -ne 0 ] || [ -n "$_np_pr_info" ]; then
+        # PR exists (or the lookup failed transiently) — original INV-12
+        # operator handoff, unchanged.
+        log "  issue #${issue_num} session ${session_id} already completed (no post-session verdict) — operator handoff"
+        local _notice_marker="INV-12-completed:${session_id}"
+        if itp_list_comments "$issue_num" 2>/dev/null \
+            | jq -r "[.[].body | select(contains(\"${_notice_marker}\"))] | length" \
+            2>/dev/null | grep -q '^0$'; then
+          itp_post_comment "$issue_num" \
+            "Session \`${session_id}\` already ended (stop_reason=end_turn, terminal_reason=completed) and no post-session review verdict was found. Resume would hang on idle SSE — skipping. If review findings exist, unpark by flipping to \`in-progress\` + posting a dispatcher-token comment + running \`dispatch-local.sh dev-resume <issue>\` (a fresh session re-reads the issue and findings; do NOT flip to \`pending-review\` — the stale-verdict guard rejects an already-reviewed HEAD). Close the issue if the work is done. (\`${_notice_marker}\`)"
+        fi
+        return 0
+      fi
+
+      # No PR exists — mirror failed-substantive's Branch C exactly
+      # (acquire-before-side-effects / errexit-safe guard / explicit-rc-branch
+      # / confirm-after-launch), substituting only the marker text and
+      # dropping the per-HEAD attempt marker (there is no HEAD to key one
+      # on). [INV-108]: acquire FIRST, before any other side effect — this
+      # router is reachable via an `if` condition ([INV-98] delegation) where
+      # bash suppresses errexit.
+      if ! acquire_dispatch_marker "$issue_num" "dev-new"; then
+        log "  issue #${issue_num} dev-new dispatch marker held by a concurrent tick — skipping INV-12 no-PR fresh-dev ([INV-108])"
+        return 0
+      fi
+      log "  issue #${issue_num} completed session ${session_id} has verdict=none and NO PR — minting bounded fresh dev session ([INV-123])"
+      local _nopr_marker="INV-12-no-pr-fresh-dev:${session_id}"
       if itp_list_comments "$issue_num" 2>/dev/null \
-          | jq -r "[.[].body | select(contains(\"${_notice_marker}\"))] | length" \
+          | jq -r "[.[].body | select(contains(\"${_nopr_marker}\"))] | length" \
           2>/dev/null | grep -q '^0$'; then
         itp_post_comment "$issue_num" \
-          "Session \`${session_id}\` already ended (stop_reason=end_turn, terminal_reason=completed) and no post-session review verdict was found. Resume would hang on idle SSE — skipping. If review findings exist, unpark by flipping to \`in-progress\` + posting a dispatcher-token comment + running \`dispatch-local.sh dev-resume <issue>\` (a fresh session re-reads the issue and findings; do NOT flip to \`pending-review\` — the stale-verdict guard rejects an already-reviewed HEAD). Close the issue if the work is done. (\`${_notice_marker}\`)"
+          "Session \`${session_id}\` ended cleanly (stop_reason=end_turn, terminal_reason=completed) but no PR was ever created, so no review could run. Minting a fresh dev session (bounded by \`MAX_RETRIES\`). (\`${_nopr_marker}\`)"
       fi
+      # Truncate per-issue log so the next tick doesn't re-detect this stale
+      # `completed` line. Fail-closed (mirrors the INV-35 Branch C guard
+      # below): a skipped truncate would let a deferred/crashed retry
+      # re-trigger this branch WITHOUT a fresh WARNING comment — the exact
+      # one-level-down unbounded loop this fix exists to close.
+      local _nopr_log_file _nopr_log_location
+      if [ "${EXECUTION_BACKEND:-local}" = "remote-aws-ssm" ]; then
+        _nopr_log_file="/tmp/agent-${SSM_REMOTE_PROJECT_ID:-?}-issue-${issue_num}.log"
+        _nopr_log_location="${_nopr_log_file} on the execution host (SSM_INSTANCE_ID=${SSM_INSTANCE_ID:-?})"
+      else
+        _nopr_log_file="/tmp/agent-${PROJECT_ID}-issue-${issue_num}.log"
+        _nopr_log_location="${_nopr_log_file}"
+      fi
+      if ! _reset_session_log "$issue_num"; then
+        log "  ERROR: failed to truncate ${_nopr_log_location} (perm/disk/SSM?). Skipping INV-12 no-PR fresh-dev dispatch to avoid re-detection loop."
+        itp_post_comment "$issue_num" \
+          "Could not reset agent log at \`${_nopr_log_location}\` for fresh no-PR dispatch (permission, disk, or SSM transport error). Operator: please clear the log file and retry. Skipping dispatch to prevent a silent retry loop." 2>/dev/null || true
+        release_dispatch_marker "$issue_num" "dev-new"
+        return 0
+      fi
+      if ! label_swap "$issue_num" "pending-dev" "in-progress" ||
+         ! post_dispatch_token "$issue_num" "dev-new"; then
+        log "  ERROR: INV-12 no-PR fresh-dev pre-spawn step failed for issue #${issue_num} (label/token) — releasing the dispatch marker; next tick retries ([INV-108])."
+        release_dispatch_marker "$issue_num" "dev-new"
+        return 0
+      fi
+      local _nopr_dispatch_rc=0
+      dispatch dev-new "$issue_num" || _nopr_dispatch_rc=$?
+      if is_dispatch_deferred_rc "$_nopr_dispatch_rc"; then
+        handle_dispatch_deferred "$issue_num" "dev-new" "in-progress" "pending-dev"
+        return 0
+      elif [ "$_nopr_dispatch_rc" -ne 0 ]; then
+        log "  ERROR: INV-12 no-PR fresh-dev dispatch failed (rc=${_nopr_dispatch_rc}) for issue #${issue_num} — releasing the dispatch marker; next tick retries ([INV-108])."
+        release_dispatch_marker "$issue_num" "dev-new"
+        return 0
+      fi
+      dispatch_marker_confirm_launched "$issue_num" "dev-new"
       return 0
       ;;
 

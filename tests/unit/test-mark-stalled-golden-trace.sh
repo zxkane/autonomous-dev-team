@@ -81,7 +81,11 @@ itp_transition_state(){ _rec itp_transition_state "$@"; }
 
 # Non-host caller-side ops the counters need — keep them deterministic so the
 # terminal-stall path is reached without real gh / comment scraping.
+# count_no_pr_attempts (#461, [INV-123]) is mocked the same way: a real call
+# would invoke itp_list_comments a second time and pollute the verb trace
+# this suite asserts byte-identical order over.
 count_agent_failures()            { echo 3; }
+count_no_pr_attempts()            { echo 0; }
 count_dispatcher_crashes()        { echo 0; }
 count_dispatcher_false_positives(){ echo 0; }
 
@@ -93,7 +97,8 @@ _TRACE_FILE="$TMPDIR_T/trace"
 # dedup `itp_list_comments | jq | grep`) record into the SAME file.
 export _TRACE_FILE US _MOCK_MARKER_PRESENT _MOCK_PRESENT_MARKER
 export -f _rec itp_list_comments itp_post_comment itp_transition_state \
-          count_agent_failures count_dispatcher_crashes count_dispatcher_false_positives 2>/dev/null || true
+          count_agent_failures count_no_pr_attempts count_dispatcher_crashes \
+          count_dispatcher_false_positives 2>/dev/null || true
 
 # shellcheck source=../../skills/autonomous-dispatcher/scripts/lib-dispatch.sh
 source "$LIB"
@@ -116,10 +121,12 @@ itp_list_comments() {
 itp_post_comment()    { _rec itp_post_comment "$@"; }
 itp_transition_state(){ _rec itp_transition_state "$@"; }
 count_agent_failures()            { echo 3; }
+count_no_pr_attempts()            { echo 0; }
 count_dispatcher_crashes()        { echo 0; }
 count_dispatcher_false_positives(){ echo 0; }
 export -f _rec itp_list_comments itp_post_comment itp_transition_state \
-          count_agent_failures count_dispatcher_crashes count_dispatcher_false_positives 2>/dev/null || true
+          count_agent_failures count_no_pr_attempts count_dispatcher_crashes \
+          count_dispatcher_false_positives 2>/dev/null || true
 
 # Sandbox the PID dir so pid_alive/get_pid read our fixtures.
 pid_dir_for_project() { echo "$TMPDIR_T"; }
@@ -236,7 +243,7 @@ gh_exec=$(grep -nE '\bgh ' <<<"$MS_BODY" | grep -vE '^\s*[0-9]*:?\s*#' || true)
 assert_eq        "TC-MSGT-006 mark_stalled body has ZERO executable raw 'gh ' invocations" "" "$gh_exec"
 
 # TC-MSGT-007 — caller-side non-host ops remain literal calls (NOT verb-wrapped).
-for op in pid_alive get_pid count_agent_failures count_dispatcher_crashes count_dispatcher_false_positives; do
+for op in pid_alive get_pid count_agent_failures count_no_pr_attempts count_dispatcher_crashes count_dispatcher_false_positives; do
   assert_match   "TC-MSGT-007 caller-side op '$op' is a literal call in mark_stalled" "\b${op}\b" "$MS_BODY"
 done
 
