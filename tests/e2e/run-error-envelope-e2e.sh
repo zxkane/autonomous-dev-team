@@ -22,6 +22,10 @@
 # This is the #231 E2E artifact: it runs the real lib-error.sh against a stub
 # `gh` proxy (no network, no credentials), so CI runs it on bare ubuntu.
 #
+# Also covers TC-BINPATH-E2E (#458): preflight_agent_binary's user-level
+# install-dir probe, driven the same way — real lib-agent.sh + lib-error.sh
+# against a stub `gh` proxy, with PATH stripped of a stub HOME/.local/bin.
+#
 # Run: bash tests/e2e/run-error-envelope-e2e.sh
 
 set -uo pipefail
@@ -29,6 +33,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 LIB_ERROR="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-error.sh"
+LIB_AGENT="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-agent.sh"
 SCHEMA="$PROJECT_ROOT/docs/pipeline/schemas/error-envelope.schema.json"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; NC='\033[0m'
@@ -228,6 +233,76 @@ if grep -qE 'error_envelope ADT_CFG_LAUNCHER_(PARSE|CLI_MISMATCH)' "$LIB_AGENT";
 else
   ok "041 launcher guards use error_surface (GitHub-visible), not error_envelope-to-stderr"
 fi
+
+echo ""
+echo "=== TC-BINPATH-E2E (#458): PATH stripped of ~/.local/bin, stub binary placed there ==="
+# Simulates the exact motivating scenario: a cron/SSM-spawned non-login shell
+# whose PATH lacks ~/.local/bin, where the agent CLI is nonetheless installed.
+# Drives preflight_agent_binary directly (the real lib-agent.sh function, not a
+# parallel invocation path) against a stub HOME + stripped PATH + the real
+# lib-error.sh gh-proxy resolution, and asserts the posted comment carries the
+# PATH-specific remediation and the found path — not the generic install text.
+[[ -f "$LIB_AGENT" ]] || { echo -e "${RED}FATAL${NC}: lib-agent.sh missing"; exit 1; }
+
+BINPATH_SANDBOX=$(mktemp -d)
+mkdir -p "$BINPATH_SANDBOX/scripts" "$BINPATH_SANDBOX/home/.local/bin" "$BINPATH_SANDBOX/cu"
+BINPATH_CALLS="$BINPATH_SANDBOX/gh-calls.log"; : > "$BINPATH_CALLS"
+
+cat > "$BINPATH_SANDBOX/scripts/gh" <<EOF
+#!/bin/bash
+{ echo "GH-INVOCATION"; printf '%s\n' "\$@"; echo "---"; } >> "$BINPATH_CALLS"
+echo "https://github.com/zxkane/autonomous-dev-team/issues/458#issuecomment-9999"
+exit 0
+EOF
+chmod +x "$BINPATH_SANDBOX/scripts/gh"
+
+# Hermetic coreutils dir — PATH is ONLY this + nothing else, so the stub binary
+# under ~/.local/bin is invisible to `command -v` (the non-login-shell gap) but
+# still discoverable by the #458 probe, which reads $HOME directly.
+for _u in bash sh env jq sed grep cat date dirname basename readlink \
+          mkdir rm chmod ln mktemp timeout cut tr head tail wc sort uniq awk tee cp mv compgen; do
+  _p=$(command -v "$_u" 2>/dev/null) && ln -sf "$_p" "$BINPATH_SANDBOX/cu/$_u"
+done
+
+printf '#!/bin/bash\nexit 0\n' > "$BINPATH_SANDBOX/home/.local/bin/agy"
+chmod +x "$BINPATH_SANDBOX/home/.local/bin/agy"
+
+(
+  set -uo pipefail
+  export AUTONOMOUS_CONF_DIR="$BINPATH_SANDBOX/scripts" REPO="zxkane/autonomous-dev-team" ISSUE_NUMBER=458
+  export AGENT_CMD=agy
+  export HOME="$BINPATH_SANDBOX/home"
+  export PATH="$BINPATH_SANDBOX/cu"
+  # shellcheck disable=SC1090
+  source "$LIB_ERROR"
+  # shellcheck disable=SC1090
+  source "$LIB_AGENT"
+  AGENT_CMD=agy
+  preflight_agent_binary
+) 2>/dev/null
+BINPATH_RC=$?
+
+[[ "$BINPATH_RC" -eq 1 ]] && ok "preflight_agent_binary returns 1 (binary found but not on PATH)" \
+  || bad "preflight_agent_binary returned $BINPATH_RC (expected 1)"
+
+BINPATH_BODY=$(cat "$BINPATH_CALLS")
+if [[ "$BINPATH_BODY" == *"$BINPATH_SANDBOX/home/.local/bin/agy"* ]]; then
+  ok "comment names the found path under ~/.local/bin"
+else
+  bad "comment missing the found ~/.local/bin path"
+fi
+if [[ "$BINPATH_BODY" == *"Extend PATH"* ]]; then
+  ok "comment carries the PATH-specific remediation"
+else
+  bad "comment missing the PATH-specific remediation"
+fi
+if [[ "$BINPATH_BODY" == *"Install 'agy' on the execution host"* ]]; then
+  bad "comment wrongly used the generic install remediation"
+else
+  ok "comment does NOT use the generic install remediation"
+fi
+
+rm -rf "$BINPATH_SANDBOX"
 
 echo ""
 echo "============================================"

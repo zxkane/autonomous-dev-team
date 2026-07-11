@@ -3070,6 +3070,41 @@ When a launcher is configured (`AGENT_LAUNCHER_ARGV` non-empty) the preflight
 **stands down** — the launcher owns binary resolution and a misconfigured
 launcher is already its own config-class abort (INV-38 / `ADT_CFG_LAUNCHER_*`).
 
+**[#458] A `command -v` miss probes user-level install dirs before declaring
+the binary missing.** A binary installed under a user-level dir (`~/.local/bin`,
+an nvm shim under `~/.nvm/versions/node/*/bin`, etc.) is invisible to a
+non-login shell's `PATH` (cron / SSM / nohup do not source the interactive
+profile) even though it resolves fine interactively — the original single
+remediation ("Install '\<bin\>'...") misdiagnosed this as an install problem.
+`preflight_agent_binary` now calls `_probe_user_install_dirs` (read-only, a
+handful of `[[ -f ... && -x ... ]]` checks + a scan of every
+`~/.nvm/versions/node/*/bin` glob match, no PATH mutation) before composing
+the envelope. The nvm scan checks EVERY glob match in turn, not just the
+first (#460 review) — a stale/non-executable copy under one node version
+must not shadow a valid install under another; `compgen -G`'s cross-directory
+match order is host/filesystem-dependent, so stopping at the first hit would
+non-deterministically misreport a working install as missing. The `-f`
+alongside `-x` excludes a same-named directory, which passes a bare `-x` test
+but is not a launchable binary. `_probe_user_install_dirs` returns "not found"
+immediately when `$HOME` is unset/empty (nothing to probe under `set -u`)
+rather than referencing `$HOME` unguarded, matching the existing
+`pid_dir_for_project`/`lib-config.sh` convention of treating an absent `HOME`
+as an expected condition on a minimal non-login shell, not a crash. The
+emitted code is still `ADT_CFG_AGENT_BINARY_MISSING` either way, but the
+`cause`/`remediation` branch: **found in a probed dir** → cause names the
+found path and calls out the non-login-shell PATH gap; remediation points at
+extending `PATH` in the wrapper environment, an `AGENT_LAUNCHER` that sources
+the user profile, or an absolute-path `AGENT_CMD` — **genuinely not found
+anywhere** → the original install-focused remediation, now with the
+effective `$PATH` (or the literal `<unset>` marker if `$PATH` itself is
+unbound — #460 review, so composing this cause text can never itself crash
+under `set -u`) appended to the cause for diagnosis. The cause text's "also
+checked ~/.local/bin, ~/bin, ~/.npm-global/bin, and nvm shim dirs" claim is
+swapped for "HOME is unset/empty, so the user-level install dirs could not be
+probed" in the `HOME`-unset sub-case, so the envelope never claims a probe
+happened when it didn't. Fixing PATH itself stays the operator's call — the
+preflight only diagnoses.
+
 Each config-class abort path carries a **stable `UPPER_SNAKE` code** documented
 in the append-only registry [`errors.md`](errors.md) (codes never renumber). The
 **dispatcher Step-5 stale handler** ([`dispatcher-flow.md`](dispatcher-flow.md))
