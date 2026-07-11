@@ -3362,6 +3362,27 @@ log "Per-agent verdicts: ${AGENT_VERDICTS[*]} → aggregate: ${AGGREGATE}"
 # makes this narrower distinction available to both gates below.
 _AGGREGATE_SUBSTANTIVE_FAIL=$(_aggregate_has_substantive_fail "${AGENT_VERDICTS[@]}")
 
+# [P1] (#449 codex review round 7): `_AGGREGATE_SUBSTANTIVE_FAIL` only tells
+# INV-127 that a REAL (non-timeout) fail survived the severity filter — not
+# WHICH severity survived. INV-127's own fingerprint requires the ratchet's
+# TERMINAL floor (P0/P1) to still be failing, not merely "a fail survived at
+# THIS round's possibly-low floor" — a P2 finding blocks at rounds 1-4, and
+# R1's `review-round-counter` is head-SCOPED (resets to 1 on every new push),
+# so a PR that surfaces only P2 findings across a run of new heads (INV-127's
+# own motivating scenario) would keep re-entering round 1-4 and never
+# actually have a P0/P1 in play, yet would still advance INV-127's
+# head-AGNOSTIC counter under the old (mere-substantive) gate.
+# `_aggregate_has_p0p1_fail` (lib-review-aggregate.sh) makes the narrower
+# distinction available to the INV-127 cap gate below; the review-round-
+# counter marker gate above/below intentionally keeps using the broader
+# `_AGGREGATE_SUBSTANTIVE_FAIL` (it feeds "how many rounds have run", not
+# "is the terminal floor failing").
+_AGGREGATE_VERDICT_SEVERITY_PAIRS=()
+for _i in "${!AGENT_NAMES[@]}"; do
+  _AGGREGATE_VERDICT_SEVERITY_PAIRS+=("${AGENT_VERDICTS[$_i]}" "${AGENT_HIGHEST_SEVERITY[$_i]:-none}")
+done
+_AGGREGATE_HAS_P0P1_FAIL=$(_aggregate_has_p0p1_fail "${_AGGREGATE_VERDICT_SEVERITY_PAIRS[@]}")
+
 # [P1] #2 (#449 review): post the review-round-counter marker HERE — only
 # once a genuine verdict has landed (AGGREGATE is a DECIDED pass/fail, per
 # R1's own "how many times has the review fan-out actually run" definition),
@@ -4385,7 +4406,20 @@ else
     # per-agent timeouts could advance the SAME head-agnostic counter this
     # breaker uses and eventually stall a PR no review agent ever actually
     # found a live P0/P1 in.
-    if [[ "$AGGREGATE" == "fail" ]] && [[ "$_AGGREGATE_SUBSTANTIVE_FAIL" == "true" ]]; then
+    #
+    # [P1] (#449 codex review round 7): ALSO requires
+    # `_AGGREGATE_HAS_P0P1_FAIL == true` (lib-review-aggregate.sh::
+    # _aggregate_has_p0p1_fail). `_AGGREGATE_SUBSTANTIVE_FAIL` alone only
+    # confirms a REAL (non-timeout) fail survived the severity filter at
+    # THIS round's floor — a P2 finding survives as `fail` at rounds 1-4,
+    # and R1's `review-round-counter` is head-SCOPED (resets to 1 on every
+    # new push), so a PR surfacing only P2 findings across a run of new
+    # heads (this breaker's own head-agnostic, new-head-every-round
+    # motivating scenario) would keep re-entering the round 1-4 floor and
+    # never actually have a live P0/P1, yet would still advance and
+    # eventually trip THIS counter without the narrower check.
+    if [[ "$AGGREGATE" == "fail" ]] && [[ "$_AGGREGATE_SUBSTANTIVE_FAIL" == "true" ]] \
+       && [[ "$_AGGREGATE_HAS_P0P1_FAIL" == "true" ]]; then
       _rc_already_stalled=$(itp_read_task "$ISSUE_NUMBER" labels \
         | jq -r '.labels | any(. == "stalled")' 2>/dev/null || echo "false")
 

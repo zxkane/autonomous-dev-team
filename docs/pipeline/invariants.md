@@ -7276,6 +7276,32 @@ this, a run of transient per-agent timeouts on successive heads could
 advance the SAME head-agnostic counter this breaker uses and eventually
 stall a PR that no review agent ever actually found a live P0/P1 in.
 
+**A P2/P3-only substantive fail ALSO never reaches the trip logic ([P1] codex
+review round 7, fixed pre-merge)**: `_AGGREGATE_SUBSTANTIVE_FAIL == true`
+confirms a REAL (non-timeout) fail survived the severity filter at the
+CURRENT round's floor — it does not say WHICH severity survived. This
+invariant's own fingerprint is narrower: the ratchet's TERMINAL floor
+(P0/P1) must still be failing, not merely "some fail survived at whatever
+this round's floor happens to be." A P2 finding blocks (survives as `fail`)
+at rounds 1-4, and R1's `review-round-counter` is head-SCOPED — it resets to
+1 on every new HEAD. This invariant's own counter is deliberately
+head-AGNOSTIC because its motivating scenario has a NEW head every round
+(see the "head-AGNOSTIC" design note above) — so a PR that surfaces only P2
+findings across a run of new heads would keep re-entering the round 1-4
+floor (never reaching round 5+, since each new head resets R1's own
+counter), yet its P2 `fail` would still satisfy the old
+`_AGGREGATE_SUBSTANTIVE_FAIL` gate every round and eventually trip THIS
+breaker despite no P0/P1 ever existing — a false stall.
+`_aggregate_has_p0p1_fail` (`lib-review-aggregate.sh`) closes this: given
+each agent's (verdict, highest-severity) pair, it echoes "true" iff at least one `fail`
+verdict's severity is NOT `P2`/`P3` (i.e. is `P0`, `P1`, `none`, or any
+unrecognized token — the same severities that still block under
+`shouldBlockFinding`'s own round>=5 case arms). This invariant's trip block
+now additionally requires `$_AGGREGATE_HAS_P0P1_FAIL == "true"`; R1's
+`review-round-counter` marker post is UNCHANGED (it feeds "how many rounds
+have run", not "is the terminal floor failing", so the broader
+`_AGGREGATE_SUBSTANTIVE_FAIL` remains correct there).
+
 **Trip behavior**, gated in this order:
 
 1. Check current issue labels for `stalled` FIRST — if already stalled (e.g.

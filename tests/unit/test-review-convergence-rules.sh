@@ -513,6 +513,78 @@ inv127_gate_line=$(grep -n '^    if \[\[ "\$AGGREGATE" == "fail" \]\]' "$WRAPPER
 assert_eq "TC-REVIEW-CONV-048j INV-127 cap gate ALSO consults substantive-fail" "true" \
   "$([[ -n "$inv127_gate_line" ]] && grep -q '_AGGREGATE_SUBSTANTIVE_FAIL' <<<"$(sed -n "${inv127_gate_line}p" "$WRAPPER")" && echo true || echo false)"
 
+# TC-REVIEW-CONV-036b..e [P1, #449 codex review round 7]:
+# _aggregate_has_p0p1_fail — the narrower distinction ONLY INV-127's cap
+# needs (not R1's round-counter marker gate): did the surviving fail's
+# severity actually reach the ratchet's terminal P0/P1 floor, vs. merely
+# surviving at THIS round's possibly-looser floor (a P2 blocks at rounds
+# 1-4). Takes alternating (verdict, severity) pairs.
+assert_eq "TC-REVIEW-CONV-036b a fail+P2 pair only → false (P2 never counts as terminal-floor evidence)" "false" \
+  "$(_aggregate_has_p0p1_fail fail P2)"
+assert_eq "TC-REVIEW-CONV-036c a fail+P0 pair → true" "true" \
+  "$(_aggregate_has_p0p1_fail fail P0)"
+assert_eq "TC-REVIEW-CONV-036d a fail+P1 pair → true" "true" \
+  "$(_aggregate_has_p0p1_fail fail P1)"
+assert_eq "TC-REVIEW-CONV-036e a fail+none pair → true (untagged/unrecognized is fail-safe, always counts)" "true" \
+  "$(_aggregate_has_p0p1_fail fail none)"
+assert_eq "TC-REVIEW-CONV-036e2 a fail+P3 pair → false" "false" \
+  "$(_aggregate_has_p0p1_fail fail P3)"
+assert_eq "TC-REVIEW-CONV-036e3 a pass+P0 pair (non-fail verdict) → false (severity is irrelevant unless the verdict is fail)" "false" \
+  "$(_aggregate_has_p0p1_fail pass P0)"
+assert_eq "TC-REVIEW-CONV-036e4 multiple agents: one fail+P2, one fail+P1 → true (any qualifying pair wins)" "true" \
+  "$(_aggregate_has_p0p1_fail fail P2 fail P1)"
+assert_eq "TC-REVIEW-CONV-036e5 multiple agents, all fail+P2/P3 → false" "false" \
+  "$(_aggregate_has_p0p1_fail fail P2 fail P3)"
+assert_eq "TC-REVIEW-CONV-036e6 no pairs at all → false" "false" \
+  "$(_aggregate_has_p0p1_fail)"
+
+# TC-REVIEW-CONV-036f/g: single-round pins for the two poles of the actual
+# motivating scenario — a run of new-HEAD rounds where R1's head-scoped
+# review-round-counter resets to 1 every round, so each round re-enters the
+# round 1-4 floor (P0-P2 all block) even though INV-127's own counter
+# (head-AGNOSTIC) keeps accumulating across those rounds. Each assertion
+# below is one round's `_aggregate_has_p0p1_fail` result in isolation (the
+# function is pure/stateless — it does not itself simulate the multi-round
+# accumulation; that is exercised separately by the existing TC-034
+# progression against `_review_cap_next_count`). A P2-only round must
+# contribute `false` (never terminal-floor evidence); a P1 round must
+# contribute `true`.
+assert_eq "TC-REVIEW-CONV-036f a single P2-only round → false (never terminal-floor evidence, regardless of how many such rounds accumulate)" "false" \
+  "$(_aggregate_has_p0p1_fail fail P2)"
+assert_eq "TC-REVIEW-CONV-036g a single P1 round → true (terminal-floor evidence, even amid an otherwise P2-only progression)" "true" \
+  "$(_aggregate_has_p0p1_fail fail P1)"
+
+# TC-REVIEW-CONV-036j [silent-failure-hunter finding, #449 codex review
+# round 7]: drift guard between `_aggregate_has_p0p1_fail`'s hardcoded
+# severity case arms and `shouldBlockFinding`'s own round>=5 case arms
+# (lib-review-severity.sh). The former deliberately DUPLICATES the latter's
+# logic rather than sourcing it (see this file's own doc comment), so
+# nothing forces the two to stay in sync if the severity vocabulary ever
+# changes (e.g. a future tier added between P1 and P2, or a currently-P2-like
+# tag reclassified as always-blocking). A silent divergence here would let
+# INV-127's cap gate read `_AGGREGATE_HAS_P0P1_FAIL=false` for a finding that
+# `shouldBlockFinding` itself treats as terminal-floor-blocking — exactly
+# the failure mode this PR's fix closes, reintroduced via maintenance drift
+# rather than a runtime bug. Iterate the full known vocabulary and assert
+# agreement at round 5 (the terminal floor: only P0/P1 block).
+for _sev in P0 P1 P2 P3 none GARBAGE ""; do
+  _sbf_blocks=$(shouldBlockFinding 5 "$_sev" && echo true || echo false)
+  _p0p1_result=$(_aggregate_has_p0p1_fail fail "$_sev")
+  assert_eq "TC-REVIEW-CONV-036j severity='${_sev}': _aggregate_has_p0p1_fail (${_p0p1_result}) agrees with shouldBlockFinding-at-round-5 (${_sbf_blocks})" \
+    "$_sbf_blocks" "$_p0p1_result"
+done
+
+# TC-REVIEW-CONV-036h: wiring pin — the INV-127 cap gate must ALSO consult
+# `_AGGREGATE_HAS_P0P1_FAIL` (the round-counter marker gate deliberately does
+# NOT — it feeds "how many rounds have run", not "is the terminal floor
+# failing", so `_AGGREGATE_SUBSTANTIVE_FAIL` alone remains correct there;
+# TC-048i's earlier pin confirms the marker gate region only, not this one).
+inv127_gate_block=$(awk '/^    if \[\[ "\$AGGREGATE" == "fail" \]\]/{f=1} f{print} f && /then$/{exit}' "$WRAPPER")
+assert_contains "TC-REVIEW-CONV-036h INV-127 cap gate ALSO consults _AGGREGATE_HAS_P0P1_FAIL" \
+  "$inv127_gate_block" '_AGGREGATE_HAS_P0P1_FAIL'
+assert_eq "TC-REVIEW-CONV-036i the round-counter marker gate region does NOT reference _AGGREGATE_HAS_P0P1_FAIL (deliberately unchanged)" "" \
+  "$(grep -o '_AGGREGATE_HAS_P0P1_FAIL' <<<"$round_marker_gate_region")"
+
 # TC-REVIEW-CONV-048k..n [P1 fix, review round 5]: a severity-ratchet
 # demotion must re-post the corrected body even on the COMMENT-ONLY path
 # (`_any_deciding_artifact == false`) — previously the aggregate-verdict
