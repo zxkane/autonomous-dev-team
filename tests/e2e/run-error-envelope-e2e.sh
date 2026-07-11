@@ -305,6 +305,79 @@ fi
 rm -rf "$BINPATH_SANDBOX"
 
 echo ""
+echo "=== TC-TIMEOUTGUARD-060/061 (#451, INV-126): PATH stubbed to hide timeout/gtimeout -> wrapper source fails closed ==="
+# Simulates the motivating scenario: a fresh macOS host (or a remote-aws-ssm
+# execution host, simulated by this stripped PATH regardless of what the
+# LOCAL/dispatcher host's own PATH looks like) with neither coreutils
+# `timeout` nor `gtimeout` on PATH. lib-agent.sh's fail-closed default (#451
+# / INV-126) must refuse the source itself and post a real
+# ADT_CFG_TIMEOUT_TOOL_MISSING envelope through the real lib-error.sh
+# gh-proxy resolution path — no agent launch is possible because sourcing
+# lib-agent.sh itself aborts.
+LIB_AGENT="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-agent.sh"
+[[ -f "$LIB_AGENT" ]] || { echo -e "${RED}FATAL${NC}: lib-agent.sh missing"; exit 1; }
+
+TG_SANDBOX=$(mktemp -d)
+mkdir -p "$TG_SANDBOX/scripts" "$TG_SANDBOX/cu-notimeout"
+TG_CALLS="$TG_SANDBOX/gh-calls.log"; : > "$TG_CALLS"
+
+cat > "$TG_SANDBOX/scripts/gh" <<EOF
+#!/bin/bash
+{ echo "GH-INVOCATION"; printf '%s\n' "\$@"; echo "---"; } >> "$TG_CALLS"
+echo "https://github.com/zxkane/autonomous-dev-team/issues/451#issuecomment-9999"
+exit 0
+EOF
+chmod +x "$TG_SANDBOX/scripts/gh"
+
+# Hermetic coreutils dir WITHOUT timeout/gtimeout — stands in for the
+# execution host that sources lib-agent.sh (TC-TIMEOUTGUARD-060), and,
+# reused verbatim, for a simulated remote-aws-ssm execution host
+# (TC-TIMEOUTGUARD-061) regardless of what this test RUNNER's own ambient
+# PATH contains (it has a real 'timeout', proving local presence never
+# leaks into the sourcing site's decision).
+for _u in bash sh env jq sed grep cat date dirname basename readlink \
+          mkdir rm chmod ln mktemp cut tr head tail wc sort uniq awk tee cp mv setsid sleep; do
+  _p=$(command -v "$_u" 2>/dev/null) && ln -sf "$_p" "$TG_SANDBOX/cu-notimeout/$_u"
+done
+
+TG_OUT=$(
+  ( set -uo pipefail
+    export AUTONOMOUS_CONF_DIR="$TG_SANDBOX/scripts" REPO="zxkane/autonomous-dev-team"
+    export REPO_OWNER=zxkane REPO_NAME=autonomous-dev-team PROJECT_ID=t PROJECT_DIR="$PROJECT_ROOT" GH_AUTH_MODE=token
+    export PATH="$TG_SANDBOX/cu-notimeout"
+    # shellcheck disable=SC1090
+    source "$LIB_ERROR"
+    # shellcheck disable=SC1090
+    source "$LIB_AGENT" --issue 451
+    echo "RC=$?"
+  ) 2>&1
+)
+TG_RC=$(sed -n 's/.*RC=\([0-9]*\).*/\1/p' <<<"$TG_OUT" | tail -1)
+
+[[ "${TG_RC:-99}" -eq 1 ]] && ok "TIMEOUTGUARD-060 lib-agent.sh source refuses to complete (fail-closed) when neither binary is on PATH" \
+  || bad "TIMEOUTGUARD-060 expected source rc=1, got ${TG_RC:-<none>}"
+
+TG_BODY=$(cat "$TG_CALLS")
+if [[ "$TG_BODY" == *"ADT_CFG_TIMEOUT_TOOL_MISSING"* ]]; then
+  ok "TIMEOUTGUARD-060 a real issue-comment-shaped envelope naming ADT_CFG_TIMEOUT_TOOL_MISSING was posted"
+else
+  bad "TIMEOUTGUARD-060 no ADT_CFG_TIMEOUT_TOOL_MISSING envelope posted"
+fi
+[[ "$TG_BODY" == *"adt-error-envelope:"* ]] && ok "TIMEOUTGUARD-060 envelope carries the machine-readable marker" || bad "TIMEOUTGUARD-060 envelope missing the marker"
+
+# TC-TIMEOUTGUARD-061: this test runner's own host genuinely has 'timeout' —
+# confirms the fail-closed result above is NOT an artifact of a host that
+# happens to lack it everywhere, i.e. the check that matters is the one at
+# the sourcing site (simulated remote), not the caller's ambient PATH.
+if command -v timeout >/dev/null 2>&1; then
+  ok "TIMEOUTGUARD-061 test-runner host has 'timeout' in its own ambient PATH, yet the simulated remote sourcing site still failed closed — local presence is not sufficient"
+else
+  echo -e "  ${YELLOW}NOTE${NC}: TIMEOUTGUARD-061 runner host lacks 'timeout' too — the contrast is less sharp here but the fail-closed result still holds"
+fi
+
+rm -rf "$TG_SANDBOX"
+
+echo ""
 echo "============================================"
 echo -e "Results: ${GREEN}${PASS} passed${NC}, ${RED}${FAIL} failed${NC}"
 echo "============================================"

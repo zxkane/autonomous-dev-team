@@ -275,13 +275,67 @@ _parse_extra_args() {
 # the hang case sat for 8h+. Override per-deployment in autonomous.conf.
 #
 # We resolve the binary once at source time (not per-call): on macOS users
-# install GNU coreutils via Homebrew, which provides `gtimeout`. If neither
-# is available we fall through to an unwrapped invocation with a one-time
-# WARN log — no hard requirement.
+# install GNU coreutils via Homebrew, which provides `gtimeout`. This
+# resolution is SHARED between the dev (AGENT_TIMEOUT, 4h default) and review
+# (AGENT_REVIEW_TIMEOUT, 1h default) call sites — binary presence is
+# orthogonal to which duration value is in effect, so there is exactly one
+# detection path, not one per timeout value.
 AGENT_TIMEOUT="${AGENT_TIMEOUT:-4h}"
 _AGENT_TIMEOUT_CMD="$(command -v timeout || command -v gtimeout || true)"
-if [[ -z "$_AGENT_TIMEOUT_CMD" ]]; then
-  echo "[lib-agent] WARN: neither 'timeout' nor 'gtimeout' found on PATH; agent invocations will run without a wall-clock bound. Install coreutils to enable INV-13." >&2
+
+# AGENT_TIMEOUT_WATCHDOG_FALLBACK (#451) — opt-in escape valve for a host
+# missing BOTH coreutils `timeout` and macOS `gtimeout`. Default OFF: the
+# safer default (below) is fail-closed, since AGENT_TIMEOUT/_AGENT_TIMEOUT_CMD
+# is the ONLY hard per-run bound in the system (no --max-turns, no token
+# gate) — silently proceeding unbounded here would remove the last
+# containment for a runaway agent. Set to "true" in autonomous.conf to accept
+# a pure-shell sleep+kill watchdog (targeting the same setsid PGID
+# _run_with_timeout already establishes) instead of refusing to launch.
+AGENT_TIMEOUT_WATCHDOG_FALLBACK="${AGENT_TIMEOUT_WATCHDOG_FALLBACK:-false}"
+
+# [INV-126] Fail-closed default when neither binary is found (closes #451).
+# Mirrors the INV-38 launcher-mismatch guard shape exactly: this runs at
+# lib-agent.sh SOURCE TIME, so it fires on whichever host actually executes
+# the wrapper (the execution host under EXECUTION_BACKEND=local OR
+# remote-aws-ssm) — never at dispatcher-tick.sh, which may be a different
+# host entirely. A pre-arg-parse `error_surface "$(error_peek_issue_arg "$@")"`
+# call (the wrapper's own "$@" is in scope while sourced) surfaces on the
+# issue when known, else as a dispatcher-alert, exactly like the launcher
+# guards above.
+if [[ -n "$_AGENT_TIMEOUT_CMD" ]]; then
+  echo "[lib-agent] Wall-clock timeout mechanism: $(basename "$_AGENT_TIMEOUT_CMD") (AGENT_TIMEOUT=${AGENT_TIMEOUT})" >&2
+elif [[ "$AGENT_TIMEOUT_WATCHDOG_FALLBACK" == "true" ]] && command -v setsid >/dev/null 2>&1; then
+  echo "[lib-agent] WARN: neither 'timeout' nor 'gtimeout' found on PATH; falling back to the opt-in pure-shell watchdog (AGENT_TIMEOUT_WATCHDOG_FALLBACK=true). Wall-clock timeout mechanism: watchdog-fallback (AGENT_TIMEOUT=${AGENT_TIMEOUT})." >&2
+elif [[ "$AGENT_TIMEOUT_WATCHDOG_FALLBACK" == "true" ]]; then
+  # The watchdog's kill targets the setsid-established process GROUP
+  # (_run_with_timeout's `setsid` call, below) — without `setsid` on PATH,
+  # _AGENT_RUN_PID is an ordinary PID, not a session leader/PGID, so the
+  # watchdog's group-form kill silently finds nothing to signal and the
+  # agent would run unbounded despite the opt-in. This is exactly the
+  # platform combination most likely in practice (a macOS host lacking
+  # coreutils often lacks `setsid` too), so it is not a hypothetical edge
+  # case — it is treated the same as the plain fail-closed branch below
+  # (PR #469 review [P1]: warn-and-proceed here left the run genuinely
+  # unbounded, defeating the opt-in's own purpose).
+  if command -v error_surface >/dev/null 2>&1; then
+    error_surface "$(error_peek_issue_arg "$@")" ADT_CFG_TIMEOUT_TOOL_MISSING \
+      "Neither 'timeout' nor 'gtimeout' is available, and AGENT_TIMEOUT_WATCHDOG_FALLBACK=true cannot compensate because 'setsid' is also missing on the host that sources lib-agent.sh" \
+      "AGENT_TIMEOUT (INV-13) is the only wall-clock bound on an agent run; the opt-in watchdog fallback requires 'setsid' to establish a killable process group, and without it the watchdog's kill would silently target nothing, leaving the run unbounded" \
+      "Install coreutils so 'timeout'/'gtimeout' is on PATH (macOS: 'brew install coreutils'), or install util-linux so 'setsid' is on PATH to make the watchdog fallback effective, then re-dispatch" \
+      "docs/pipeline/errors.md#configuration-class-class-config" || true
+  fi
+  echo "[lib-agent] ERROR: neither 'timeout' nor 'gtimeout' found on PATH, and 'setsid' is also missing so the opt-in watchdog fallback (AGENT_TIMEOUT_WATCHDOG_FALLBACK=true) cannot establish a killable process group; refusing to launch an agent unbounded (ADT_CFG_TIMEOUT_TOOL_MISSING). Wall-clock timeout mechanism: fail-closed-abort. Install coreutils, or install util-linux so 'setsid' is on PATH." >&2
+  return 1 2>/dev/null || exit 1
+else
+  if command -v error_surface >/dev/null 2>&1; then
+    error_surface "$(error_peek_issue_arg "$@")" ADT_CFG_TIMEOUT_TOOL_MISSING \
+      "Neither 'timeout' nor 'gtimeout' is available on the host that sources lib-agent.sh" \
+      "AGENT_TIMEOUT (INV-13) is the only wall-clock bound on an agent run; coreutils 'timeout' (Linux) or 'gtimeout' (macOS, via 'brew install coreutils') is required to enforce it and neither was found on PATH" \
+      "Install coreutils so 'timeout'/'gtimeout' is on PATH (macOS: 'brew install coreutils'), or set AGENT_TIMEOUT_WATCHDOG_FALLBACK=true in autonomous.conf to opt into a pure-shell watchdog bound instead, then re-dispatch" \
+      "docs/pipeline/errors.md#configuration-class-class-config" || true
+  fi
+  echo "[lib-agent] ERROR: neither 'timeout' nor 'gtimeout' found on PATH; refusing to launch an agent unbounded (ADT_CFG_TIMEOUT_TOOL_MISSING). Wall-clock timeout mechanism: fail-closed-abort. Install coreutils, or set AGENT_TIMEOUT_WATCHDOG_FALLBACK=true to opt into a watchdog fallback." >&2
+  return 1 2>/dev/null || exit 1
 fi
 
 # _is_positive_timeout_value <value> — true (rc 0) iff <value> is a positive
@@ -299,13 +353,46 @@ _is_positive_timeout_value() {
   [[ "$v" =~ ^[1-9][0-9]*[smhd]?$ ]]
 }
 
-# _run_with_timeout — invoke "$@" under timeout if available, otherwise run
-# directly. AGENT_LAUNCHER_ARGV (if set) is prepended to the command inside
-# the timeout boundary so a hung launcher is still killed.
+# _timeout_value_to_seconds <value> — convert a coreutils-`timeout`-style
+# duration to whole seconds, for the watchdog fallback's `sleep` (#451). GNU
+# `sleep` accepts the same s/m/h/d suffixes as `timeout`, but the watchdog
+# fallback exists PRECISELY for hosts lacking GNU coreutils, where `sleep`
+# may be the BSD/macOS variant that only accepts a plain integer — so we
+# convert ourselves rather than assuming GNU `sleep` semantics. Falls back to
+# the INV-13 4h default (14400s) on a value that fails
+# `_is_positive_timeout_value` (defensive only; AGENT_TIMEOUT is normally
+# either the literal default or an operator-set valid value).
+_timeout_value_to_seconds() {
+  local v="${1:-}"
+  if [[ "$v" =~ ^([1-9][0-9]*)([smhd])?$ ]]; then
+    local n="${BASH_REMATCH[1]}" unit="${BASH_REMATCH[2]:-s}"
+    case "$unit" in
+      s) echo "$n" ;;
+      m) echo $((n * 60)) ;;
+      h) echo $((n * 3600)) ;;
+      d) echo $((n * 86400)) ;;
+    esac
+  else
+    echo 14400
+  fi
+}
+
+# _run_with_timeout — invoke "$@" under timeout if available, otherwise (with
+# AGENT_TIMEOUT_WATCHDOG_FALLBACK=true, #451) under a pure-shell watchdog.
+# AGENT_LAUNCHER_ARGV (if set) is prepended to the command inside the timeout
+# boundary so a hung launcher is still killed.
 # --kill-after=30s escalates to SIGKILL if the agent ignores the initial
 # SIGTERM (some MCP children trap TERM and need the harder push).
 # --signal=TERM lets the agent flush any final SSE bytes before dying.
 # Exit codes: passthrough on normal exit; 124 on TERM-timeout; 137 on KILL.
+# The watchdog fallback path (PR #469 review round-2) mirrors this exactly —
+# it normalizes the wrapped command's raw signal-death status to 124 (TERM
+# reaped it) or 137 (grace expired, KILL reaped it) rather than leaking a
+# bare `wait`-reported value like 143, so downstream consumers that key off
+# the 124/137 contract (INV-48 review-veto aggregation, count_agent_failures'
+# 124/137 exclusions) see a watchdog expiry exactly like a coreutils
+# `timeout` expiry. Only a command that finishes on its own, before the
+# watchdog ever fires, passes through its own unmodified exit code.
 #
 # Process-group ownership (closes #109):
 # We launch the command under `setsid` so the agent and every descendant
@@ -392,6 +479,107 @@ _run_with_timeout() {
   ) &
   _AGENT_RUN_PID=$!
 
+  # Watchdog fallback (#451, opt-in via AGENT_TIMEOUT_WATCHDOG_FALLBACK):
+  # neither 'timeout' nor 'gtimeout' is on PATH (the fail-closed default at
+  # source time already refused to get here unless the operator opted in).
+  # A pure-shell `sleep $AGENT_TIMEOUT && kill -TERM -- -<pgid>` stands in for
+  # coreutils `timeout`, targeting the SAME PGID `setsid` established above
+  # (never a lone PID — a single-PID kill would leave orphaned descendants
+  # the PGID-based kill_stale_wrapper/lane-GC machinery is designed to
+  # reap). Isolated in its own `setsid` (when available) so it is never a
+  # member of the group it is about to signal.
+  #
+  # Deliberately NOT `disown`ed (PR #469 review round-3 [P1]): the
+  # reconciliation block below needs `wait "$_watchdog_pid"` to actually
+  # BLOCK until the watchdog's own escalation finishes — bash's `wait <pid>`
+  # on a disowned job returns immediately with rc 0 without waiting for it
+  # (verified against bash 5.3; a disowned PID is dropped from the shell's
+  # job table, and an untracked job can't be waited on). Leaving it un-
+  # disowned does NOT make `wait "$_AGENT_RUN_PID"` below block on it too —
+  # `wait` given an explicit PID targets only that PID, regardless of what
+  # else is running in the job table.
+  #
+  # Self-contained TERM→30s-grace→KILL body (not a delegate to the shared
+  # `_kill_group_escalate`, lib-lane.sh): the caller below needs to know
+  # WHETHER the watchdog actually fired and WHICH signal finally reaped the
+  # group, and `_kill_group_escalate` exposes neither (it always returns 0).
+  # `$3` is a result-marker file path, written (via atomic tmp+mv) — "124"
+  # for the TERM step, overwritten with "137" if the grace window elapses
+  # and KILL is needed.
+  #
+  # Ordering is load-bearing (TC-TIMEOUTGUARD-025): the marker is written
+  # BEFORE `kill -TERM` is sent, not after. `_run_with_timeout`'s own `wait`
+  # on the wrapped command races the watchdog's own script independently —
+  # if the marker write came AFTER the kill, a TERM-obeying leader could die
+  # from the signal and unblock that `wait` before the watchdog's next
+  # statement (the marker write) ever executed, so the caller could observe
+  # "command exited" with no marker on disk yet and wrongly keep the raw
+  # signal-death rc. Writing the marker first closes that window; if the
+  # kill then turns out to be a no-op (group already gone — the command
+  # finished naturally at the same instant the watchdog woke, a coincidence
+  # any timeout mechanism can race), the marker is removed again so the
+  # caller correctly keeps its own already-captured natural exit code.
+  local _watchdog_pid="" _wd_result_file=""
+  if [[ -z "$_AGENT_TIMEOUT_CMD" && "${AGENT_TIMEOUT_WATCHDOG_FALLBACK:-false}" == "true" ]]; then
+    local _wd_secs; _wd_secs="$(_timeout_value_to_seconds "$AGENT_TIMEOUT")"
+    # AGENT_TIMEOUT accepts values coreutils `timeout` supports but this
+    # helper does not model exactly (e.g. `1.5h`, `infinity` — both
+    # documented as legitimate dev-side values elsewhere in the codebase):
+    # those silently fall through to the 14400s (4h) default inside
+    # _timeout_value_to_seconds. Surface that divergence instead of leaving
+    # it silent, since a watchdog bound that doesn't match the operator's
+    # configured AGENT_TIMEOUT is exactly the kind of drift this feature
+    # exists to prevent.
+    if ! _is_positive_timeout_value "$AGENT_TIMEOUT"; then
+      echo "[lib-agent] WARN: AGENT_TIMEOUT='${AGENT_TIMEOUT}' is not an integer+unit value the watchdog fallback can parse; using the 14400s (4h) default bound instead." >&2
+    fi
+    _wd_result_file="$(mktemp 2>/dev/null)" || _wd_result_file=""
+    local _wd_setsid=()
+    command -v setsid >/dev/null 2>&1 && _wd_setsid=(setsid)
+    # _AGENT_WATCHDOG_GRACE_SECS — test-only seam (never read anywhere else,
+    # never documented to operators) to shrink the 30s TERM->KILL grace
+    # window so unit tests can exercise the KILL-escalation path without a
+    # real 30s sleep.
+    local _wd_grace="${_AGENT_WATCHDOG_GRACE_SECS:-30}"
+    # _AGENT_WATCHDOG_TERM_DELAY_SECS — test-only seam (never read anywhere
+    # else, never documented to operators), same spirit as
+    # _AGENT_WATCHDOG_GRACE_SECS above: widens the window between the marker
+    # write and the `kill -TERM` attempt so a unit test can deterministically
+    # land a natural finish inside it (TC-TIMEOUTGUARD-028 — the round-4
+    # rescinded-marker race). Zero in production, so no behavior change.
+    local _wd_term_delay="${_AGENT_WATCHDOG_TERM_DELAY_SECS:-0}"
+    # Watchdog body ("$1"=sleep seconds, "$2"=setsid PGID, "$3"=result-marker
+    # path, "$4"=grace seconds, "$5"=marker-to-kill test delay). Kept a full
+    # single-quoted literal so `$1`/`$2`/`$3`/`$4`/`$5`/`${ADT_GUARD_FD}`
+    # expand inside the spawned shell, not out here.
+    local _wd_body='
+      [[ -n "${ADT_GUARD_FD:-}" ]] && exec {ADT_GUARD_FD}>&-
+      sleep "$1"
+      if [[ -n "$3" ]]; then
+        printf "%s" 124 > "$3.tmp" && mv -f "$3.tmp" "$3"
+      fi
+      sleep "$5"
+      if ! kill -TERM -- "-$2" 2>/dev/null; then
+        # Group already gone: a natural-finish race (the wrapped command
+        # exited on its own the instant the watchdog woke up). Our signal
+        # never landed, so take back the marker — the caller must keep its
+        # own already-captured natural exit code, not a fabricated 124.
+        [[ -n "$3" ]] && rm -f "$3" "$3.tmp" 2>/dev/null
+        exit 0
+      fi
+      for ((i = 0; i < "$4"; i++)); do
+        kill -0 -- "-$2" 2>/dev/null || exit 0
+        sleep 1
+      done
+      kill -KILL -- "-$2" 2>/dev/null || true
+      if [[ -n "$3" ]]; then
+        printf "%s" 137 > "$3.tmp" && mv -f "$3.tmp" "$3"
+      fi
+    '
+    "${_wd_setsid[@]}" bash -c "$_wd_body" _ "$_wd_secs" "$_AGENT_RUN_PID" "$_wd_result_file" "$_wd_grace" "$_wd_term_delay" &
+    _watchdog_pid=$!
+  fi
+
   # [Lane-GC PR-2 / INV-110] Append this spawn's PGID to the lane registry
   # (durable — survives ANY sidecar tmpdir being rm -rf'd, unlike
   # AGENT_PID_FILE above). ADT_LANE_DIR is exported by the wrapper after
@@ -415,7 +603,67 @@ _run_with_timeout() {
     printf '%s\n' "$_AGENT_RUN_PID" > "$AGENT_PID_FILE" 2>/dev/null || true
   fi
 
+  local _rc
   wait "$_AGENT_RUN_PID"
+  _rc=$?
+
+  # Reconcile with the watchdog (PR #469 review round-2, both [P1]s):
+  #
+  # 1. If the watchdog has ALREADY signalled the group (result-marker file
+  #    non-empty), do NOT cancel it — let it run its own grace-then-KILL
+  #    escalation to completion before we return. Cancelling here on the
+  #    leader's `wait` alone was the bug: a TERM-ignoring descendant that
+  #    outlives the leader needs the watchdog's still-pending 30s-grace →
+  #    KILL step to actually be reaped, and killing the watchdog job the
+  #    instant the LEADER dies abandoned that pending KILL, leaving the
+  #    descendant to survive indefinitely past this function's return.
+  #    The watchdog writes its marker BEFORE calling `kill -TERM` (not
+  #    after), so there is no race window here: the only way this `wait`
+  #    can unblock AS A RESULT OF the watchdog's TERM is if the marker was
+  #    already written first (sequential within the watchdog's own script).
+  # 2. Normalize `_rc` to the marker's 124 (TERM) / 137 (KILL) value instead
+  #    of the raw signal-death status `wait` reports (e.g. 143 for a plain
+  #    SIGTERM death) — the rest of the pipeline's timeout contract
+  #    (INV-48 review-veto aggregation via _classify_noverdict_agent,
+  #    count_agent_failures' 124/137 exclusions) keys off exactly 124/137;
+  #    an un-normalized 143 previously fell through to the "unavailable /
+  #    dropped" path (or "real failure") instead of the timeout veto a
+  #    watchdog-expired review is supposed to trigger.
+  # 3. If the watchdog has NOT fired yet (empty marker), it's genuinely safe
+  #    to cancel immediately — the original TC-TIMEOUTGUARD-022 fast-finish
+  #    case (a deferred kill left armed against a PGID a later spawn could
+  #    reuse).
+  # 4. Rescind race (PR #469 review round-4 [P1]): the watchdog writes its
+  #    124 marker BEFORE `kill -TERM`, so we can observe a non-empty marker
+  #    here even when the wrapped command finished naturally the instant the
+  #    watchdog woke — the watchdog's own `kill -TERM` then finds the group
+  #    already gone and rescinds by deleting the marker file (see the
+  #    watchdog body above). If our post-`wait` re-read fails because the
+  #    file is GONE (rescinded), that is authoritative proof of a natural
+  #    finish — keep the natural `_rc` already captured at the `wait
+  #    "$_AGENT_RUN_PID"` above. Falling back to the stale pre-wait
+  #    `_wd_marker` value here (the prior bug) would relabel a genuine
+  #    natural exit as a fabricated 124 timeout.
+  if [[ -n "$_watchdog_pid" ]]; then
+    local _wd_marker=""
+    [[ -n "$_wd_result_file" && -s "$_wd_result_file" ]] && _wd_marker="$(cat "$_wd_result_file" 2>/dev/null)"
+    if [[ -n "$_wd_marker" ]]; then
+      wait "$_watchdog_pid" 2>/dev/null || true
+      # Re-read: the watchdog may have escalated 124 -> 137 while we were
+      # waiting on it just now, OR rescinded (removed the file) if its
+      # kill turned out to be a no-op — only trust a marker that still
+      # exists post-wait; a missing file means "keep the natural _rc".
+      if [[ -s "$_wd_result_file" ]]; then
+        _rc="$(cat "$_wd_result_file" 2>/dev/null)"
+      fi
+    else
+      kill "$_watchdog_pid" 2>/dev/null || true
+      wait "$_watchdog_pid" 2>/dev/null || true
+    fi
+    rm -f "$_wd_result_file" "${_wd_result_file}.tmp" 2>/dev/null || true
+  fi
+
+  return "$_rc"
 }
 
 # _agent_launch_binary — the binary that run_agent/resume_agent will actually
