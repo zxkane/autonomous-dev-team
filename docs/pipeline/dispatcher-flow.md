@@ -538,7 +538,7 @@ Labels: `−reviewing +pending-dev`.
 
 This branch is the safety net for the case where the wrapper died so abruptly that even its trap didn't fire. The `pid_alive` check that gates entry to this branch ALSO honors a heartbeat-based mtime fallback ([INV-24](invariants.md#inv-24-review-wrapper-dead-detection-requires-both-pid_alive-miss-and-no-near-success-pr-signal), extended by [INV-29](invariants.md#inv-29-pid_alive-heartbeat-is-owned-exclusively-by-the-wrapper-not-by-the-pid-file-alone)): a fresh mtime on EITHER the PID file OR the wrapper-owned `<base>.heartbeat` sibling (within `HEARTBEAT_INTERVAL_SECONDS * 3`) keeps the wrapper in the ALIVE bucket, eliminating false alarms from transient races AND from spurious PID-file deletions against still-alive long-running wrappers.
 
-## Step 6: liveness watchdog ([INV-127])
+## Step 6: liveness watchdog ([INV-128])
 
 Implementation: `run_liveness_watchdog`/`_liveness_evaluate_issue` (`lib-dispatch.sh`), pure fingerprint/counter/threshold/tier-decision helpers in `lib-liveness.sh`.
 
@@ -602,5 +602,5 @@ count, or a stale/DEAD declaration. See [`metrics.md`](metrics.md).
 - [`state-machine.md`](state-machine.md) — the label transitions each step performs.
 - [`dev-agent-flow.md`](dev-agent-flow.md), [`review-agent-flow.md`](review-agent-flow.md) — what the dispatched wrapper does next.
 - [`handoffs.md`](handoffs.md) — Step 5 is the most race-prone handoff.
-- [`invariants.md`](invariants.md) — INV-01 through INV-11 are all referenced from this file; [INV-127](invariants.md#inv-127-any-non-terminal-issue-whose-observable-state-fingerprint-label-pr-head-non-idempotent-comment-count-marker-digest-stays-unchanged-for-liveness_notice_ticks-default-6-consecutive-dispatcher-ticks-gets-one-operator-visible-tier-1-escalation-and-after-liveness_stall_ticks-default-18-further-unchanged-ticks-is-unconditionally-transitioned-to-stalled-with-a-structured-reasonliveness-timeout-report--the-pipelines-first-global-liveness-invariant-every-non-terminal-issue-either-changes-observable-state-or-is-escalated-within-a-bounded-number-of-ticks) is Step 6's full spec.
+- [`invariants.md`](invariants.md) — INV-01 through INV-11 are all referenced from this file; [INV-128](invariants.md#inv-128-any-non-terminal-issue-whose-observable-state-fingerprint-label-pr-head-non-idempotent-comment-count-marker-digest-stays-unchanged-for-liveness_notice_ticks-default-6-consecutive-dispatcher-ticks-gets-one-operator-visible-tier-1-escalation-and-after-liveness_stall_ticks-default-18-further-unchanged-ticks-is-unconditionally-transitioned-to-stalled-with-a-structured-reasonliveness-timeout-report--the-pipelines-first-global-liveness-invariant-every-non-terminal-issue-either-changes-observable-state-or-is-escalated-within-a-bounded-number-of-ticks) is Step 6's full spec.
 - [`metrics.md`](metrics.md) — the observe-only event log the tick appends to (INV-70).

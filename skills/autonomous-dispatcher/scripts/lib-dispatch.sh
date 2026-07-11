@@ -4096,7 +4096,7 @@ was_just_dispatched() {
 }
 
 # ---------------------------------------------------------------------------
-# Step 6: generic liveness watchdog ([INV-127], issue #467)
+# Step 6: generic liveness watchdog ([INV-128], issue #467)
 # ---------------------------------------------------------------------------
 # Pure fingerprint/counter/threshold/tier-decision helpers live in
 # lib-liveness.sh (sourced by dispatcher-tick.sh before this file). The
@@ -4210,7 +4210,7 @@ _liveness_evaluate_issue() {
       log "  issue #${issue_num} liveness watchdog: TIER 1 — ${count} consecutive no-op ticks (fingerprint=${fingerprint}) — posting operator escalation"
       itp_post_comment "$issue_num" "$(cat <<TIER1REPORT
 ${new_marker}
-No observable progress for **${count}** ticks on issue #${issue_num} (\`reason=liveness-no-progress\`, [INV-127]):
+No observable progress for **${count}** ticks on issue #${issue_num} (\`reason=liveness-no-progress\`, [INV-128]):
 - Label: \`${active_label}\`
 - PR head: \`${current_head:-<none>}\`
 - Non-idempotent comment count: ${non_idem_count}
@@ -4233,7 +4233,7 @@ TIER1REPORT
         return 0
       fi
 
-      log "  issue #${issue_num} liveness watchdog: TIER 2 — ${count} consecutive no-op ticks (fingerprint=${fingerprint}) — halting per [INV-127]"
+      log "  issue #${issue_num} liveness watchdog: TIER 2 — ${count} consecutive no-op ticks (fingerprint=${fingerprint}) — halting per [INV-128]"
 
       # Transition FIRST, atomically — mirrors INV-105/INV-122's TOCTOU fix:
       # a failed transition aborts under set -euo pipefail BEFORE the report
@@ -4248,10 +4248,10 @@ TIER1REPORT
       # silently escape C.2's coverage). Mirrors the two declared transitions
       # (liveness-watchdog-stall-pending-dev / -pending-review) exactly.
       if [ "$kind" = "issue" ]; then
-        # liveness-watchdog-stall-pending-dev [INV-127]
+        # liveness-watchdog-stall-pending-dev [INV-128]
         label_swap "$issue_num" "pending-dev" "stalled"
       else
-        # liveness-watchdog-stall-pending-review [INV-127]
+        # liveness-watchdog-stall-pending-review [INV-128]
         label_swap "$issue_num" "pending-review" "stalled"
       fi
 
@@ -4259,7 +4259,7 @@ TIER1REPORT
       pointer=$(_liveness_newest_pointer "$comments_json")
       itp_post_comment "$issue_num" "$(cat <<TIER2REPORT
 ${new_marker}
-## ⛔ Liveness watchdog tripped — halting a silently-parked issue (\`reason=liveness-timeout\`, [INV-127])
+## ⛔ Liveness watchdog tripped — halting a silently-parked issue (\`reason=liveness-timeout\`, [INV-128])
 
 This issue's observable state (label + PR head + non-idempotent comments + marker set) has not changed for **${count}** consecutive dispatcher ticks — well past the **${stall}**-tick stall threshold.
 

@@ -1,5 +1,5 @@
 #!/bin/bash
-# lib-liveness.sh — INV-127 (issue #467): generic liveness watchdog.
+# lib-liveness.sh — INV-128 (issue #467): generic liveness watchdog.
 #
 # Five "permanent silent park" incidents shipped point-fixes in six months
 # (INV-105, INV-111, INV-122, INV-123, INV-125): the label is legal and

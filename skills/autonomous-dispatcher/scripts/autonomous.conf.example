@@ -819,7 +819,7 @@ LANE_MEMORY_MAX=
 # positive crash detection is the failure mode this knob exists to prevent).
 DISPATCH_GRACE_PERIOD_SECONDS=600
 
-# Generic liveness watchdog ([INV-127], #467).
+# Generic liveness watchdog ([INV-128], #467).
 # A class-level backstop for the "permanent silent park" bug class
 # (INV-105/111/122/123/125 were per-entry point-fixes): any pending-dev or
 # pending-review issue whose observable state fingerprint (label, PR head,

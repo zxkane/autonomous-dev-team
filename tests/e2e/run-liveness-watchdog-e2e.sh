@@ -1,6 +1,6 @@
 #!/bin/bash
 # run-liveness-watchdog-e2e.sh — E2E for the generic liveness watchdog
-# (issue #467, INV-127). TC-LIVENESS-045.
+# (issue #467, INV-128). TC-LIVENESS-045.
 #
 # WHAT IT DOES
 # ------------

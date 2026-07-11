@@ -86,6 +86,6 @@ untouched). All I/O through existing `itp_*`/`chp_*` verbs (INV-91). No new live
 
 ## New invariant
 
-Claims **INV-127** (INV-126 is claimed by the in-flight #449 branch; all other higher numbers
-on open branches at design time are already spoken for — see the invariants.md entry for the
-verified free-slot check).
+Claims **INV-128** (drafted as INV-127 at design time; renumbered on rebase after origin/main's
+concurrently-merged #470 independently claimed INV-127 first — see the invariants.md entry's
+numbering note for the full history).

@@ -30,7 +30,7 @@ LIB_ERROR_SRC="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-error.sh"
 # Both need to be stageable in the sandbox for the tick to run at all.
 LIB_AUTH_SRC="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-auth.sh"
 LIB_CODE_HOST_SRC="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-code-host.sh"
-# [INV-127] dispatcher-tick.sh now sources lib-liveness.sh (real, pure
+# [INV-128] dispatcher-tick.sh now sources lib-liveness.sh (real, pure
 # helpers only — no I/O) right after lib-dispatch.sh. Auth tests don't
 # exercise Step 6, but the stub lib-dispatch.sh below must still define
 # run_liveness_watchdog() since dispatcher-tick.sh calls it unconditionally.
@@ -166,7 +166,7 @@ _has_terminal_label() { return 1; }
 # gate logic is covered by test-issue-filter.sh and
 # test-dispatcher-tick-issue-filter.sh, not this suite).
 issue_filter_validate() { return 0; }
-# [INV-127] Step 6 liveness watchdog. dispatcher-tick.sh calls this
+# [INV-128] Step 6 liveness watchdog. dispatcher-tick.sh calls this
 # unconditionally after Step 5; auth tests don't exercise it.
 run_liveness_watchdog() { :; }
 EOF

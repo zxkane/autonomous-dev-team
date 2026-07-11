@@ -64,8 +64,8 @@ pending_dev --> stalled: Dispatcher Step 4 (retries at MAX)
 pending_dev --> stalled: Step 4 review-aware (non-substantive review-retry cap reached) [INV-35]
 pending_dev --> stalled: Step 4 review-aware (completed session + substantive review failure, no HEAD progress or bot-unfixable) [INV-85]
 pending_dev --> stalled: Step 4 convergence breaker (completed session + substantive review failure + frozen HEAD >=N completed zero-commit rounds) [INV-105]
-pending_dev --> stalled: Step 6 liveness watchdog (observable-state fingerprint frozen >=LIVENESS_STALL_TICKS ticks) [INV-127]
-pending_review --> stalled: Step 6 liveness watchdog (observable-state fingerprint frozen >=LIVENESS_STALL_TICKS ticks) [INV-127]
+pending_dev --> stalled: Step 6 liveness watchdog (observable-state fingerprint frozen >=LIVENESS_STALL_TICKS ticks) [INV-128]
+pending_review --> stalled: Step 6 liveness watchdog (observable-state fingerprint frozen >=LIVENESS_STALL_TICKS ticks) [INV-128]
 reviewing --> approved: Review PASS + no-auto-close (PR open, awaiting manual merge)
 reviewing --> approved: Review PASS but gh pr review --approve failed (manual approval needed)
 reviewing --> pending_dev: Review found no PR (all 3 discovery methods failed)

@@ -79,7 +79,7 @@ unset _req
 # shellcheck source=lib-dispatch.sh
 source "${LIB_DIR}/lib-dispatch.sh"
 
-# [INV-127] Step 6 liveness watchdog's pure fingerprint/counter/threshold
+# [INV-128] Step 6 liveness watchdog's pure fingerprint/counter/threshold
 # helpers. Sourced unconditionally (cheap, no I/O at source time) so
 # _liveness_watchdog_enabled is always resolvable, even when the watchdog
 # itself is disabled.
@@ -1027,7 +1027,7 @@ for i in $(seq 0 $((cand_count - 1))); do
 done
 
 # ---------------------------------------------------------------------------
-# Step 6: liveness watchdog ([INV-127])
+# Step 6: liveness watchdog ([INV-128])
 # ---------------------------------------------------------------------------
 # Generic class-level backstop for the "permanent silent park" bug class
 # (INV-105/111/122/123/125 were all per-entry point-fixes). Runs AFTER Step 5

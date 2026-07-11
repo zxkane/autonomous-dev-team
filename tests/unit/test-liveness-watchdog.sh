@@ -1,5 +1,5 @@
 #!/bin/bash
-# test-liveness-watchdog.sh — issue #467, INV-127.
+# test-liveness-watchdog.sh — issue #467, INV-128.
 #
 # Pins the pure fingerprint/counter/threshold/tier-decision helpers in
 # lib-liveness.sh, plus the orchestration (_liveness_evaluate_issue /
