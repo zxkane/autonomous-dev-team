@@ -43,7 +43,7 @@ in_progress --> pending_dev: Dispatcher Step 5b (DEAD+PR, no new commits)
 in_progress --> pending_dev: Dispatcher Step 5b (DEAD, no PR)
 pending_review --> reviewing: Dispatcher Step 3 scan-pending-review
 reviewing --> approved: Review wrapper verdict PASS (merged or manual)
-reviewing --> stalled: severity ratchet's P0/P1 floor still failing after REVIEW_CONVERGENCE_CAP consecutive failed-substantive rounds [INV-126]
+reviewing --> stalled: severity ratchet's P0/P1 floor still failing after REVIEW_CONVERGENCE_CAP consecutive failed-substantive rounds [INV-127]
 reviewing --> pending_dev: Review wrapper verdict FAIL
 reviewing --> pending_dev: Review wrapper PASS but auto-merge failed (INV-33)
 reviewing --> pending_dev: Review wrapper PASS but PR CONFLICTING (mergeable gate, INV-44)

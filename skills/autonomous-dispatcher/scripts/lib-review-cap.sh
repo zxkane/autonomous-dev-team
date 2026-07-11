@@ -1,5 +1,5 @@
 #!/bin/bash
-# lib-review-cap.sh — INV-126 review-round-cap escalation breaker (issue #449, R2).
+# lib-review-cap.sh — INV-127 review-round-cap escalation breaker (issue #449, R2).
 #
 # A new, independent breaker — does NOT modify INV-105 (lib-dispatch.sh's
 # `count_frozen_convergence_rounds`, a dev-side zero-commit-inaction signal)

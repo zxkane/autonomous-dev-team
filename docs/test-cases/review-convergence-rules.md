@@ -1,7 +1,7 @@
 # Test Cases — review convergence rules: severity ratchet, round cap, evidence freshness (issue #449)
 
 Pins the pure decision-logic helpers added for the severity-aware blocking
-ratchet (R1), the INV-126 review-round-cap escalation breaker (R2), and the
+ratchet (R1), the INV-127 review-round-cap escalation breaker (R2), and the
 E2E evidence-freshness pre-check (R3). Mirrors
 `docs/test-cases/e2e-gate-circuit-breaker.md`'s structure: pure logic tables +
 source-of-truth wiring greps against `autonomous-review.sh`, since the wrapper
@@ -15,12 +15,12 @@ itself is too heavy to run end-to-end.
 | `skills/autonomous-dispatcher/scripts/adapters/codex.sh` | `_codex_review_classify_stdout` extended to extract highest severity, not just `[P1]`; finding-boundary regex extended to recognize `[P0]` |
 | `skills/autonomous-dispatcher/scripts/lib-review-poll.sh` | `_classify_verdict_body` unchanged; new sibling severity extraction for the generic numbered-list body |
 | `skills/autonomous-dispatcher/scripts/lib-review-round.sh` (NEW) | `review-round-counter` marker helpers: parse/increment/reset, authenticity filter |
-| `skills/autonomous-dispatcher/scripts/lib-review-cap.sh` (NEW) | INV-126 pure helpers: `_review_cap_next_count`, `_review_cap_threshold` |
-| `skills/autonomous-dispatcher/scripts/lib-review-aggregate.sh` | `_aggregate_review_verdicts` unchanged; NEW `_aggregate_has_substantive_fail` ([P1] codex review round 4) — distinguishes a genuine per-agent `fail` from an all-timeout-veto `fail`, consumed by both the round-counter marker gate and the INV-126 cap gate |
+| `skills/autonomous-dispatcher/scripts/lib-review-cap.sh` (NEW) | INV-127 pure helpers: `_review_cap_next_count`, `_review_cap_threshold` |
+| `skills/autonomous-dispatcher/scripts/lib-review-aggregate.sh` | `_aggregate_review_verdicts` unchanged; NEW `_aggregate_has_substantive_fail` ([P1] codex review round 4) — distinguishes a genuine per-agent `fail` from an all-timeout-veto `fail`, consumed by both the round-counter marker gate and the INV-127 cap gate |
 | `skills/autonomous-dispatcher/scripts/lib-review-e2e.sh` | R3: `_e2e_ci_green_precheck` pre-check helper feeding the E2E gate's evidence-present signal |
 | `skills/autonomous-dispatcher/scripts/lib-review-artifact.sh` | `_verdict_body_from_artifact_json` renders the OPTIONAL `severity` field inline so the JSON verdict-artifact channel (INV-78, the primary resolution path) feeds real severity into the ratchet |
 | `docs/pipeline/schemas/verdict-artifact.schema.json` | New OPTIONAL `severity` enum (`P0`\|`P1`\|`P2`\|`P3`) on the finding definition |
-| `skills/autonomous-dispatcher/scripts/autonomous-review.sh` | Wiring: severity filter runs pre-aggregation; INV-126 breaker runs in the FAIL substantive branch before `emit_verdict_trailer`; R3 pre-check runs before `_classify_e2e_gate`; empty-`PR_HEAD_SHA` guard on the R1 round counter; demoted-verdict body re-rendering |
+| `skills/autonomous-dispatcher/scripts/autonomous-review.sh` | Wiring: severity filter runs pre-aggregation; INV-127 breaker runs in the FAIL substantive branch before `emit_verdict_trailer`; R3 pre-check runs before `_classify_e2e_gate`; empty-`PR_HEAD_SHA` guard on the R1 round counter; demoted-verdict body re-rendering |
 | `tests/unit/test-review-convergence-rules.sh` (NEW) | This regression suite |
 
 ## Test scenarios
@@ -72,7 +72,7 @@ itself is too heavy to run end-to-end.
 | TC-REVIEW-CONV-027 | Marker round-trip: construct then parse | fields match exactly |
 | TC-REVIEW-CONV-027c/d | `PR_HEAD_SHA` is empty (transient `chp_pr_view` failure) | wrapper defaults `REVIEW_ROUND=1` (strictest floor) and skips posting a marker this round — mirrors INV-122's own non-empty-`PR_HEAD_SHA` guard |
 
-### Group D — INV-126 round-cap breaker (TC-REVIEW-CONV-028..038)
+### Group D — INV-127 round-cap breaker (TC-REVIEW-CONV-028..038)
 
 | ID | Scenario | Expected |
 |----|----------|----------|
@@ -83,7 +83,7 @@ itself is too heavy to run end-to-end.
 | TC-REVIEW-CONV-032 | Same head → next count = stored + 1 | `_review_cap_next_count` returns `stored+1` |
 | TC-REVIEW-CONV-033 | New head → resets to 1 | does not accumulate |
 | TC-REVIEW-CONV-034 | 5 consecutive `failed-substantive` rounds with a P1 finding present each round on the SAME HEAD progression | 6th round blocked, issue transitions to `stalled`, exactly one `reason=review-round-cap` report |
-| TC-REVIEW-CONV-035 | Already `stalled` (e.g. INV-105 or INV-122 tripped first) | INV-126 does not re-trip, does not post a competing report |
+| TC-REVIEW-CONV-035 | Already `stalled` (e.g. INV-105 or INV-122 tripped first) | INV-127 does not re-trip, does not post a competing report |
 | TC-REVIEW-CONV-036 | Round cap reached but the round's own severity floor is NOT failing (e.g. only P3 findings at round 5+, demoted to non-blocking) | breaker does not trip — the ratchet's own floor must still be failing |
 | TC-REVIEW-CONV-037 | `failed-non-substantive` rounds | do not count toward the round-cap (out of scope; governed by `REVIEW_RETRY_LIMIT`) |
 | TC-REVIEW-CONV-038 | Trip report is posted exactly once, transition precedes report (mirrors INV-122's TOCTOU-safe ordering) | transition call line precedes report call line |
@@ -110,7 +110,7 @@ itself is too heavy to run end-to-end.
 | TC-REVIEW-CONV-047 | Severity filter runs strictly between the terminal no-verdict sweep and `_aggregate_review_verdicts` | wiring grep: filter call line > terminal-sweep line, filter call line < aggregation call line |
 | TC-REVIEW-CONV-048 | `_aggregate_review_verdicts` itself is unchanged (still consumes `pass\|fail\|unavailable\|timed-out`) | regression pin — no signature/vocabulary change |
 | TC-REVIEW-CONV-048e..h | `_aggregate_has_substantive_fail` ([P1] codex review round 4): all-timeout vs. a genuine `fail` present vs. all-pass/unavailable vs. a single genuine `fail` | `false`/`true`/`false`/`true` respectively — the narrower "did any agent actually score a blocking finding" signal, distinct from the merge-blocking `AGGREGATE` |
-| TC-REVIEW-CONV-048i..j | Wiring pins: both the `review-round-counter` marker post and the INV-126 cap block reference `_AGGREGATE_SUBSTANTIVE_FAIL`/`_aggregate_has_substantive_fail`, not `$AGGREGATE == "fail"` alone | present at both gate sites |
+| TC-REVIEW-CONV-048i..j | Wiring pins: both the `review-round-counter` marker post and the INV-127 cap block reference `_AGGREGATE_SUBSTANTIVE_FAIL`/`_aggregate_has_substantive_fail`, not `$AGGREGATE == "fail"` alone | present at both gate sites |
 
 ### Group G — artifact-channel severity round-trip (TC-REVIEW-CONV-049..052)
 
@@ -137,7 +137,7 @@ Three [P1]-tagged findings from the initial codex review round on this
 issue's own PR. Fix #1 (severity in the jq fallback) and fix #2 (marker-post
 timing) are pinned as source-of-truth wiring greps against
 `autonomous-review.sh`, mirroring this test file's existing two-pronged
-style. Fix #3 (the INV-126 resume cutoff) was found by a follow-up
+style. Fix #3 (the INV-127 resume cutoff) was found by a follow-up
 pr-test-analyzer pass to be under-tested by wiring greps alone — a
 `>`→`>=` mutation on the cutoff comparison is invisible to a substring grep
 but changes the breaker's actual trip behavior — so its cutoff-then-scan

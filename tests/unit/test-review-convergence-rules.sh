@@ -2,7 +2,7 @@
 # test-review-convergence-rules.sh — issue #449.
 #
 # Pins the pure decision-logic helpers added for the severity-aware blocking
-# ratchet (R1: lib-review-severity.sh + lib-review-round.sh), the INV-126
+# ratchet (R1: lib-review-severity.sh + lib-review-round.sh), the INV-127
 # review-round-cap escalation breaker (R2: lib-review-cap.sh), and the R3
 # E2E evidence-freshness pre-check (lib-review-e2e.sh), plus source-of-truth
 # wiring greps against autonomous-review.sh (mirrors
@@ -238,7 +238,7 @@ assert_eq "TC-REVIEW-CONV-027d empty-PR_HEAD_SHA branch defaults REVIEW_ROUND to
 
 # ===========================================================================
 echo
-echo "=== TC-REVIEW-CONV-028..038: INV-126 round-cap breaker ==="
+echo "=== TC-REVIEW-CONV-028..038: INV-127 round-cap breaker ==="
 # ===========================================================================
 
 unset REVIEW_CONVERGENCE_CAP
@@ -307,7 +307,7 @@ assert_eq "TC-REVIEW-CONV-034f empty-head marker's round still parses and increm
 
 # TC-REVIEW-CONV-035: already-stalled skip is enforced at the wrapper call
 # site (source grep — mirrors how the pure lib holds no label-state itself).
-assert_contains "TC-REVIEW-CONV-035 wrapper checks already-stalled before tripping INV-126" \
+assert_contains "TC-REVIEW-CONV-035 wrapper checks already-stalled before tripping INV-127" \
   "$(cat "$WRAPPER")" '_rc_already_stalled'
 
 # TC-REVIEW-CONV-035b/c/d [P1 fix, review round 5]: the already-stalled check
@@ -353,17 +353,17 @@ assert_eq "TC-REVIEW-CONV-035e already-stalled branch's executable body contains
 # TC-REVIEW-CONV-036: only fires when AGGREGATE=="fail" — pinned as a wiring
 # grep (the breaker must not run on the all-unavailable / crash-without-verdict
 # sub-path, which has no severity floor to evaluate).
-inv126_block=$(awk '/\[#449\] INV-126/,/emit_verdict_trailer "\$ISSUE_NUMBER" "\$REPO" "failed-substantive"/' "$WRAPPER")
-assert_contains "TC-REVIEW-CONV-036 INV-126 block is gated on \$AGGREGATE == \"fail\"" \
-  "$inv126_block" '$AGGREGATE" == "fail"'
+inv127_block=$(awk '/\[#449\] INV-127/,/emit_verdict_trailer "\$ISSUE_NUMBER" "\$REPO" "failed-substantive"/' "$WRAPPER")
+assert_contains "TC-REVIEW-CONV-036 INV-127 block is gated on \$AGGREGATE == \"fail\"" \
+  "$inv127_block" '$AGGREGATE" == "fail"'
 
 # TC-REVIEW-CONV-037: failed-non-substantive is out of scope — pinned via the
 # same gating (the crash-without-verdict branch, which emits
 # failed-non-substantive, sits in the sibling `if` arm, never reaching the
-# INV-126 block at all).
+# INV-127 block at all).
 crash_branch=$(awk '/AGENT_EXIT -ne 0.*LATEST_COMMENT/,/failed-non-substantive.*other/' "$WRAPPER")
-assert_eq "TC-REVIEW-CONV-037 crash-without-verdict (non-substantive) branch has no INV-126 reference" "" \
-  "$(grep -o 'INV-126' <<<"$crash_branch")"
+assert_eq "TC-REVIEW-CONV-037 crash-without-verdict (non-substantive) branch has no INV-127 reference" "" \
+  "$(grep -o 'INV-127' <<<"$crash_branch")"
 
 # TC-REVIEW-CONV-038: transition precedes report (ordering pin, mirrors
 # INV-122's TOCTOU-safe ordering).
@@ -478,7 +478,7 @@ assert_eq "TC-REVIEW-CONV-048c unavailable+unavailable → all-unavailable (unch
 assert_eq "TC-REVIEW-CONV-048d timed-out is a deciding FAIL (unchanged)" "fail" "$(_aggregate_review_verdicts timed-out)"
 
 # TC-REVIEW-CONV-048e..h: _aggregate_has_substantive_fail — the narrower
-# distinction R1's round counter and INV-126's cap need: did any agent
+# distinction R1's round counter and INV-127's cap need: did any agent
 # actually SCORE a blocking finding, vs. an all-timeout `fail` with no
 # findings text at all (codex review round 4 [P1] #1/#2).
 assert_eq "TC-REVIEW-CONV-048e all timed-out → no substantive fail" "false" \
@@ -491,15 +491,15 @@ assert_eq "TC-REVIEW-CONV-048h single genuine fail → substantive" "true" \
   "$(_aggregate_has_substantive_fail fail)"
 
 # TC-REVIEW-CONV-048i/j: wiring pins — both the review-round-counter marker
-# post and the INV-126 cap block must consult
+# post and the INV-127 cap block must consult
 # `_AGGREGATE_SUBSTANTIVE_FAIL`/`_aggregate_has_substantive_fail` alongside
 # `$AGGREGATE == "fail"`, not the bare aggregate alone.
 round_marker_gate_region=$(sed -n "${aggregate_call_line},$((aggregate_call_line + 25))p" "$WRAPPER")
 assert_contains "TC-REVIEW-CONV-048i review-round-counter marker gate consults substantive-fail" \
   "$round_marker_gate_region" '_AGGREGATE_SUBSTANTIVE_FAIL'
-inv126_gate_line=$(grep -n '^    if \[\[ "\$AGGREGATE" == "fail" \]\]' "$WRAPPER" | head -1 | cut -d: -f1)
-assert_eq "TC-REVIEW-CONV-048j INV-126 cap gate ALSO consults substantive-fail" "true" \
-  "$([[ -n "$inv126_gate_line" ]] && grep -q '_AGGREGATE_SUBSTANTIVE_FAIL' <<<"$(sed -n "${inv126_gate_line}p" "$WRAPPER")" && echo true || echo false)"
+inv127_gate_line=$(grep -n '^    if \[\[ "\$AGGREGATE" == "fail" \]\]' "$WRAPPER" | head -1 | cut -d: -f1)
+assert_eq "TC-REVIEW-CONV-048j INV-127 cap gate ALSO consults substantive-fail" "true" \
+  "$([[ -n "$inv127_gate_line" ]] && grep -q '_AGGREGATE_SUBSTANTIVE_FAIL' <<<"$(sed -n "${inv127_gate_line}p" "$WRAPPER")" && echo true || echo false)"
 
 # TC-REVIEW-CONV-048k..n [P1 fix, review round 5]: a severity-ratchet
 # demotion must re-post the corrected body even on the COMMENT-ONLY path
@@ -617,7 +617,7 @@ assert_contains "TC-REVIEW-CONV-056 the post-aggregation marker post is gated on
 assert_contains "TC-REVIEW-CONV-056b the marker post's fail arm also requires substantive fail (codex round 4 [P1] #1)" \
   "$marker_post_region" '[[ "$AGGREGATE" == "fail" ]] && [[ "$_AGGREGATE_SUBSTANTIVE_FAIL" == "true" ]]'
 
-# TC-REVIEW-CONV-057..059c: [P1] #3 — the INV-126 round-cap series must be
+# TC-REVIEW-CONV-057..059c: [P1] #3 — the INV-127 round-cap series must be
 # CUT OFF at the latest trip report so that after an operator removes
 # `stalled` to resume, the very next failed-substantive round starts a fresh
 # count instead of reading the OLD trip's own marker back and immediately

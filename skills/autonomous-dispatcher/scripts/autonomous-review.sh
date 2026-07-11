@@ -97,7 +97,7 @@ source "${LIB_DIR}/lib-review-severity.sh"
 # of REVIEW_RETRY_LIMIT and INV-105's dev-resume-round counter.
 source "${LIB_DIR}/lib-review-round.sh"
 # shellcheck source=lib-review-cap.sh
-# Issue #449 (R2): INV-126 review-round-cap escalation breaker.
+# Issue #449 (R2): INV-127 review-round-cap escalation breaker.
 source "${LIB_DIR}/lib-review-cap.sh"
 # shellcheck source=lib-review-codex.sh
 # INV-62 (#218): codex-specific review path. The codex review member runs the
@@ -3347,7 +3347,7 @@ log "Per-agent verdicts: ${AGENT_VERDICTS[*]} → aggregate: ${AGGREGATE}"
 # finding survived the ratchet) OR by an INV-48 `timed-out` veto with NO
 # findings text at all — `_aggregate_review_verdicts` correctly folds both
 # into the same merge-blocking `fail` (a hung reviewer still blocks the
-# merge), but neither R1's round counter nor INV-126's cap should advance on
+# merge), but neither R1's round counter nor INV-127's cap should advance on
 # a round where EVERY deciding fail was a bare timeout: no agent actually
 # scored a severity, so there is no evidence the ratchet's own floor is
 # "still failing". `_aggregate_has_substantive_fail` (lib-review-aggregate.sh)
@@ -4345,7 +4345,7 @@ else
     log "INV-92: aggregate dev-actionable=${_AGG_DEV_ACTIONABLE} for the substantive FAIL trailer (any-fail-seen=${_any_fail_seen})."
 
     # -----------------------------------------------------------------------
-    # [#449] INV-126: review-round-cap escalation breaker.
+    # [#449] INV-127: review-round-cap escalation breaker.
     # -----------------------------------------------------------------------
     # A NEW, independent breaker (does not touch INV-105's or INV-122's own
     # fingerprint/trigger) — halts re-dispatch once R1's severity-ratchet
@@ -4394,9 +4394,9 @@ else
       # never having removed `stalled`. Exiting here (RESULT_PARSED=true, no
       # transition call at all) leaves the sibling's `stalled` label as the
       # sole, uncontested terminal state — same "respect an existing halt"
-      # contract [INV-126]'s own trip branch already applies to itself.
+      # contract [INV-127]'s own trip branch already applies to itself.
       if [[ "$_rc_already_stalled" == "true" ]]; then
-        log "[#449] INV-126: issue #${ISSUE_NUMBER} is already stalled (tripped by a sibling breaker) — skipping the round-cap counter AND the ordinary failed-substantive routing to avoid a competing pending-dev flip."
+        log "[#449] INV-127: issue #${ISSUE_NUMBER} is already stalled (tripped by a sibling breaker) — skipping the round-cap counter AND the ordinary failed-substantive routing to avoid a competing pending-dev flip."
         RESULT_PARSED=true
         log "Review complete."
         exit 0
@@ -4426,7 +4426,7 @@ else
       # already exited on "true") — the trip decision below is now a plain
       # threshold compare, unchanged from the issue's own R2 spec.
       if [[ "$_rc_next_count" -ge "$_rc_threshold" ]]; then
-        log "[#449] INV-126 review-round-cap breaker TRIPPED: round=${_rc_next_count} (threshold=${_rc_threshold}) — the severity ratchet's own P0/P1 floor is still failing; halting re-dispatch, transitioning to stalled."
+        log "[#449] INV-127 review-round-cap breaker TRIPPED: round=${_rc_next_count} (threshold=${_rc_threshold}) — the severity ratchet's own P0/P1 floor is still failing; halting re-dispatch, transitioning to stalled."
         # Transition FIRST, atomically — mirrors INV-105/INV-122's TOCTOU fix (a
         # failed transition aborts under set -euo pipefail BEFORE RESULT_PARSED
         # is set, so the crash-cleanup EXIT trap correctly treats it as a
@@ -4467,7 +4467,7 @@ removal re-arms the pipeline).
 @${REPO_OWNER}
 ROUNDCAPREPORT
 )" 2>/dev/null || true
-        log "Issue #${ISSUE_NUMBER} moved to stalled (INV-126 review-round-cap breaker)."
+        log "Issue #${ISSUE_NUMBER} moved to stalled (INV-127 review-round-cap breaker)."
         log "Review complete."
         exit 0
       fi

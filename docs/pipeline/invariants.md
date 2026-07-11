@@ -6915,7 +6915,7 @@ two-pronged style since the wrapper itself is too heavy to run end-to-end).
 - [INV-72] — the config-class error-envelope contract this invariant's
   environment-class slice deliberately does NOT extend (reuses `transient`,
   already allowed).
-- [INV-126] — the complementary non-convergence mode this invariant
+- [INV-127] — the complementary non-convergence mode this invariant
   originally forward-referenced as "#449" (divergent findings / round-cap /
   severity-ratchet), now implemented as its own sibling breaker.
 - `docs/designs/issue-453-e2e-gate-circuit-breaker.md` — the full design,
@@ -7086,18 +7086,23 @@ TC-TIMEOUTGUARD-032 is the regression test: a plain TERM-obeying leader with no 
 
 ---
 
-## INV-126: a review-side divergent-findings non-convergence (`REVIEW_CONVERGENCE_CAP` consecutive `failed-substantive` rounds where the severity ratchet's own P0/P1 floor is STILL failing) is detected and HALTED — the breaker transitions `reviewing → stalled` then posts ONE structured `reason=review-round-cap` report, gated on an already-`stalled` skip (does NOT gate on `may_stall_now`, mirroring [INV-122]'s own rationale)
+## INV-127: a review-side divergent-findings non-convergence (`REVIEW_CONVERGENCE_CAP` consecutive `failed-substantive` rounds where the severity ratchet's own P0/P1 floor is STILL failing) is detected and HALTED — the breaker transitions `reviewing → stalled` then posts ONE structured `reason=review-round-cap` report, gated on an already-`stalled` skip (does NOT gate on `may_stall_now`, mirroring [INV-122]'s own rationale)
 
 _Triage (issue #236): [machine-checked: tests/unit/test-review-convergence-rules.sh]_
 
-**Numbering note**: this invariant was drafted as INV-124 pre-rebase (before
-origin/main's #468 landed as INV-124 for the unrelated PR-diff-size soft-cap
-signal). Per the repo's INV number collision convention ("first-merged keeps
-it; renumber-on-rebase-collision" — see [INV-116]'s own numbering note), it
-claims the first free slot, INV-126 (INV-125 was already taken by #466's
-crashed-session recovery work).
+**Numbering note**: this invariant has now been renumbered TWICE due to
+successive rebase collisions, per the repo's INV number collision convention
+("first-merged keeps it; renumber-on-rebase-collision" — see [INV-116]'s own
+numbering note):
+1. Drafted as INV-124 pre-rebase, before origin/main's #468 landed as INV-124
+   for the unrelated PR-diff-size soft-cap signal. Renumbered to INV-126
+   (INV-125 was already taken by #466's crashed-session recovery work).
+2. Before THIS branch's own INV-126 could be rebased onto main, origin/main's
+   #469 independently landed its OWN INV-126 (the wall-clock-timeout-binary
+   fail-closed fix) first. Renumbered a second time to INV-127, the next free
+   slot after main's INV-126.
 
-**Rule**: alongside [INV-126]'s two siblings — [INV-105] (dev-side zero-commit
+**Rule**: alongside [INV-127]'s two siblings — [INV-105] (dev-side zero-commit
 inaction on a frozen head) and [INV-122] (a fixed-point repetition of the
 E2E gate on an unchanged (head, rc) pair) — this invariant closes the THIRD
 non-convergence mode: the review agent(s) keep finding a genuine blocking
@@ -7135,7 +7140,7 @@ all — no findings text, no severity to score) never reaches the trip logic.
   E2E-gate `fail` against an UNCHANGED `(head_sha, e2e_lane_rc)` pair — a
   fixed-point-repetition signal, where the review agents never even ran.
   Moves `reviewing → stalled`.
-- INV-126 (review-wrapper-side, `lib-review-cap.sh`) counts consecutive
+- INV-127 (review-wrapper-side, `lib-review-cap.sh`) counts consecutive
   `failed-substantive` review ROUNDS where the dev agent DID push new
   commits each round and the review DID run — a divergent-findings
   non-convergence signal. Also moves `reviewing → stalled`, declared as its
@@ -7153,7 +7158,7 @@ exact scenario, defeating the breaker's purpose. So `_review_cap_next_count`
 rounds regardless of whether the head changed between them; the marker still
 RECORDS the head at each round (forensic/audit value — which head was under
 review at each round), but does not use it as a reset key. This is also why
-INV-126's round counter is a SEPARATE marker from R1's own
+INV-127's round counter is a SEPARATE marker from R1's own
 `review-round-counter` (`lib-review-round.sh`): that marker IS
 head-scoped by design (it feeds the severity ratchet's blocking floor, which
 correctly loosens for repeated re-review PRESSURE against unchanged code) —
@@ -7324,7 +7329,7 @@ immediately; it takes another full `threshold` count of consecutive
 `failed-substantive` rounds. This is a deliberate divergence from
 [INV-105]/[INV-122]'s literal "removal re-arms the pipeline" mechanics (their
 head-scoped/frozen-head fingerprints naturally reset on the next real change
-without needing a report-timestamp cutoff); INV-126's counter is
+without needing a report-timestamp cutoff); INV-127's counter is
 head-AGNOSTIC by design (see above), so without the cutoff "removal re-arms
 the pipeline" would be neutered — the very first post-resume failure would
 immediately re-read the old trip's own marker and re-trip.
