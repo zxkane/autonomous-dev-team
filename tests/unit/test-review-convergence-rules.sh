@@ -513,10 +513,18 @@ assert_contains "TC-REVIEW-CONV-048k wrapper tracks _any_severity_demotion" \
 # The flag must be set to true exactly where a fail->pass demotion happens —
 # same guard the log line already uses (`_pre_filter_verdict == fail &&
 # AGENT_VERDICTS[$_i] == pass`), so the set can't be reached for a non-demoted
-# agent.
-demotion_set_region=$(awk '/"\$_pre_filter_verdict" == "fail" && "\$\{AGENT_VERDICTS\[\$_i\]\}" == "pass"/{f=1} f{print; if (/^  fi\$/) exit}' "$WRAPPER")
+# agent. Terminator is the branch's own closing `fi` (2-space indent, matching
+# the `if` line's own 2-space indent) — NOT `\$` (a literal backslash-dollar
+# inside a single-quoted awk regex, matching nothing), which would let the
+# slice run unbounded to EOF and silently stop enforcing "inside the branch."
+demotion_set_region=$(awk '/"\$_pre_filter_verdict" == "fail" && "\$\{AGENT_VERDICTS\[\$_i\]\}" == "pass"/{f=1} f{print; if (/^  fi$/) exit}' "$WRAPPER")
 assert_contains "TC-REVIEW-CONV-048l _any_severity_demotion is set true inside the demotion branch" \
   "$demotion_set_region" '_any_severity_demotion=true'
+# Positive bound check: the slice must actually terminate at the branch's own
+# `fi`, not leak to EOF (which would silently defeat the "inside the branch"
+# scoping this pin claims to enforce).
+assert_eq "TC-REVIEW-CONV-048l2 the demotion-branch slice is bounded (does not leak to end of file)" "true" \
+  "$([[ "$(wc -l <<<"$demotion_set_region")" -lt 50 ]] && echo true || echo false)"
 # The aggregate-verdict-comment post gate must OR-in `_any_severity_demotion`
 # alongside `_any_deciding_artifact` (never AND-only, which would still miss
 # the comment-only + demotion case this fix targets) — anchored on `==` so it

@@ -113,13 +113,13 @@ _aggregate_review_verdicts() {
 # correct for the merge-gate decision itself (a hung reviewer still blocks
 # the merge), but WRONG for any caller asking "did a review agent actually
 # SCORE a blocking finding this round". R1's `review-round-counter` and
-# INV-126's round-cap both need exactly that narrower distinction: a
+# INV-127's round-cap both need exactly that narrower distinction: a
 # `timed-out` agent posted no findings text, so it carries no severity to
 # score and is no evidence the severity ratchet's own P0/P1 floor is STILL
 # failing — a round where EVERY deciding fail is a bare timeout veto (no
 # agent actually reviewed the diff) must not advance either counter, or a
 # handful of transient hangs could inflate REVIEW_ROUND (prematurely
-# loosening the severity floor) or the INV-126 cap (eventually stalling a PR
+# loosening the severity floor) or the INV-127 cap (eventually stalling a PR
 # that no review agent ever actually found a live P0/P1 in).
 #
 # Echoes "true" iff at least one outcome is the literal token `fail` (a
