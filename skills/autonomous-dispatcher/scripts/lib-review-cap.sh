@@ -101,3 +101,53 @@ _review_cap_threshold() {
   fi
   printf '%s\n' "$val"
 }
+
+# _review_cap_prior_marker <comments_json>
+#
+# Pure resume-cutoff logic ([P1] #3, #449 codex review): given the FULL
+# itp_list_comments JSON array for the issue, echoes the prior
+# dispatcher-review-cap-breaker marker body that _review_cap_next_count
+# should read — or "" if none qualifies. Extracted from the wrapper call
+# site (rather than left as an inline two-query block) so the fix's crux
+# behavior — the cutoff must exclude the TRIP REPORT'S OWN embedded marker —
+# is fixture-testable in isolation, not just wiring-greppable; a mutation
+# like `>` → `>=` on the cutoff comparison is invisible to a source grep but
+# changes this function's return value on a constructed fixture.
+#
+# Two-step cutoff-then-scan, mirroring [INV-05]'s "Marking as stalled"
+# cutoff convention (lib-dispatch.sh's count_retries family):
+#   1. Cutoff = the latest authorKind!=human comment whose body matches the
+#      trip-report heading ("Review-round-cap circuit-breaker tripped"); the
+#      epoch if no trip has ever been reported. Because a trip report EMBEDS
+#      its own marker (see autonomous-review.sh's ROUNDCAPREPORT heredoc),
+#      without this cutoff the very next round would read that embedded
+#      marker back as "the latest marker" and re-trip immediately after an
+#      operator removes `stalled` to resume.
+#   2. Scan authorKind!=human comments containing the marker fence, STRICTLY
+#      (`>`, not `>=`) after the cutoff — the strict inequality is what
+#      excludes the trip report's own marker (its createdAt EQUALS the
+#      cutoff) while still admitting a genuinely later post-resume marker.
+#      Echo the latest qualifying body, or "" if none.
+# Both steps additionally require `.body` to be a JSON string before
+# `test()`/`contains()` runs on it — a bot-authored comment can carry a
+# `null` body (rare, but a real GitHub REST shape), and `test()` on `null`
+# is a jq RUNTIME ERROR, not merely a non-match; guarding the type keeps a
+# stray null body from tripping fail-safe defaults on the WHOLE issue's
+# comment scan rather than being skipped as a single non-matching row.
+# Fail-safe: a jq failure of any kind (bad JSON, jq missing) yields "" —
+# "no prior marker" is the same first-round default this fix would want on a
+# genuine crash-then-recovery.
+_review_cap_prior_marker() {
+  local comments_json="$1"
+  jq -r '
+    ( [ .[] | select(.authorKind != "human")
+             | select(.body | type == "string")
+             | select(.body | test("Review-round-cap circuit-breaker tripped")) ]
+      | sort_by(.createdAt) | last | .createdAt // "1970-01-01T00:00:00Z" ) as $cutoff
+    | [ .[] | select(.authorKind != "human")
+             | select(.body | type == "string")
+             | select(.body | contains("dispatcher-review-cap-breaker:"))
+             | select(.createdAt > $cutoff) ]
+      | sort_by(.createdAt) | last | .body // ""
+  ' <<<"$comments_json" 2>/dev/null || printf ''
+}

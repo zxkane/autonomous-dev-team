@@ -128,13 +128,19 @@ mutated `AGENT_VERDICT_BODIES` array in `autonomous-review.sh` — not a
 standalone TC id (the transformation is inline in the wrapper, not a separate
 pure function), but exercised end-to-end by TC-REVIEW-CONV-045/049.
 
-### Group I — codex-review [P1] fixes (TC-REVIEW-CONV-053..059)
+### Group I — codex-review [P1] fixes (TC-REVIEW-CONV-053..059d)
 
 Three [P1]-tagged findings from the initial codex review round on this
-issue's own PR. All three are wiring/behavioral gaps in the wrapper, not the
-pure helper functions (which already had correct standalone logic) — pinned
-as source-of-truth wiring greps against `autonomous-review.sh`, mirroring
-this test file's existing two-pronged style.
+issue's own PR. Fix #1 (severity in the jq fallback) and fix #2 (marker-post
+timing) are pinned as source-of-truth wiring greps against
+`autonomous-review.sh`, mirroring this test file's existing two-pronged
+style. Fix #3 (the INV-124 resume cutoff) was found by a follow-up
+pr-test-analyzer pass to be under-tested by wiring greps alone — a
+`>`→`>=` mutation on the cutoff comparison is invisible to a substring grep
+but changes the breaker's actual trip behavior — so its cutoff-then-scan
+logic was extracted into a pure function, `_review_cap_prior_marker`
+(`lib-review-cap.sh`), and is now covered by fixture-driven behavioral
+tests instead.
 
 | ID | Scenario | Expected |
 |----|----------|----------|
@@ -142,9 +148,12 @@ this test file's existing two-pronged style.
 | TC-REVIEW-CONV-054 | No unconditional `review-round-counter` post in the prompt-render region (before the E2E gate / smoke gate / fan-out have run) | wiring grep finds no `itp_post_comment` of the round marker in that region |
 | TC-REVIEW-CONV-055 | The `review-round-counter` marker IS posted, but only after `AGGREGATE` is computed | wiring grep: marker-post line > aggregate-compute line |
 | TC-REVIEW-CONV-056 | The post-aggregation marker post is gated on a decided verdict | wiring grep: gate condition checks `$AGGREGATE == "pass"` or `"fail"` (excludes `all-unavailable`) |
-| TC-REVIEW-CONV-057 | INV-124 block computes a last-trip cutoff before reading the prior `dispatcher-review-cap-breaker` marker | wiring grep: `_rc_last_trip_at=` assignment present inside the INV-124 block |
-| TC-REVIEW-CONV-058 | The prior-marker scan excludes markers at/before the cutoff | wiring grep: `select(.createdAt > $cutoff)` present |
-| TC-REVIEW-CONV-059 | The cutoff is computed strictly before the prior-marker scan reads it | wiring grep: cutoff-assignment line < prior-marker-scan line — closes the gap where resuming after an INV-124 trip (removing `stalled`) re-read the old trip's own marker and immediately re-tripped |
+| TC-REVIEW-CONV-057 | `_review_cap_prior_marker` given a fixture where a trip report (embedding its own marker) is the newest comment | echoes `""` — the trip report's own embedded marker does NOT satisfy the cutoff (the self-referential-exclusion case the whole fix exists for) |
+| TC-REVIEW-CONV-058 | `_review_cap_prior_marker` given a fixture with a marker genuinely AFTER the trip report | echoes that marker; feeding it into `_review_cap_next_count` continues a fresh series (2), not a re-trip (6) |
+| TC-REVIEW-CONV-059 | `_review_cap_prior_marker` given a fixture with no trip report at all | cutoff is the epoch; the only marker present still qualifies (unchanged pre-fix behavior) |
+| TC-REVIEW-CONV-059b | `_review_cap_prior_marker` given a fixture with a human comment forging the trip heading and a human comment forging a marker | both are ignored (`authorKind != "human"`); the genuine bot marker wins |
+| TC-REVIEW-CONV-059c | `_review_cap_prior_marker` given a fixture with a `null` `.body` row | does not crash (jq `test()`/`contains()` on `null` is a runtime error, not a non-match); the null row is skipped and the genuine marker is still found |
+| TC-REVIEW-CONV-059d | Wrapper wiring | `autonomous-review.sh` calls `_review_cap_prior_marker`, not an inlined two-query block |
 
 ## Acceptance criteria for this change (pre-merge verifiable)
 

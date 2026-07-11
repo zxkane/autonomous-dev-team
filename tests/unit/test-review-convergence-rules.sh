@@ -308,7 +308,7 @@ assert_eq "TC-REVIEW-CONV-034f empty-head marker's round still parses and increm
 # TC-REVIEW-CONV-035: already-stalled skip is enforced at the wrapper call
 # site (source grep — mirrors how the pure lib holds no label-state itself).
 assert_contains "TC-REVIEW-CONV-035 wrapper checks already-stalled before tripping INV-124" \
-  "$(cat "$WRAPPER")" 'dispatcher-review-cap-breaker'
+  "$(cat "$WRAPPER")" '_rc_already_stalled'
 
 # TC-REVIEW-CONV-036: only fires when AGGREGATE=="fail" — pinned as a wiring
 # grep (the breaker must not run on the all-unavailable / crash-without-verdict
@@ -519,29 +519,94 @@ marker_post_region=$(sed -n "${aggregate_compute_line},$((aggregate_compute_line
 assert_contains "TC-REVIEW-CONV-056 the post-aggregation marker post is gated on a DECIDED verdict (pass/fail)" \
   "$marker_post_region" '[[ "$AGGREGATE" == "pass" ]] || [[ "$AGGREGATE" == "fail" ]]'
 
-# TC-REVIEW-CONV-057..059: [P1] #3 — the INV-124 round-cap series must be
+# TC-REVIEW-CONV-057..059c: [P1] #3 — the INV-124 round-cap series must be
 # CUT OFF at the latest trip report so that after an operator removes
 # `stalled` to resume, the very next failed-substantive round starts a fresh
 # count instead of reading the OLD trip's own marker back and immediately
 # re-tripping (mirrors [INV-05]'s "Marking as stalled" cutoff convention).
-inv124_cutoff_region=$(awk '/\[#449\] INV-124/,/_rc_next_count=\$\(_review_cap_next_count/' "$WRAPPER")
-assert_contains "TC-REVIEW-CONV-057 INV-124 block computes a last-trip cutoff before reading the prior marker" \
-  "$inv124_cutoff_region" '_rc_last_trip_at='
-assert_contains "TC-REVIEW-CONV-058 the prior-marker scan excludes markers at/before the cutoff" \
-  "$inv124_cutoff_region" 'select(.createdAt > $cutoff)'
+# These are BEHAVIORAL tests against `_review_cap_prior_marker` (the extracted
+# pure function, lib-review-cap.sh) with constructed fixtures — not wiring
+# greps — so a mutation on the cutoff comparison (e.g. `>` -> `>=`) or the
+# trip-heading regex actually fails a test, not just disappears a substring.
 
-cutoff_line=$(grep -n '_rc_last_trip_at=\$(itp_list_comments' "$WRAPPER" | head -1 | cut -d: -f1)
-prior_marker_line=$(grep -n '_rc_prior_marker=\$(itp_list_comments' "$WRAPPER" | tail -1 | cut -d: -f1)
-assert_eq "TC-REVIEW-CONV-059 the cutoff is computed strictly BEFORE the prior-marker scan reads it" "true" \
-  "$([[ -n "$cutoff_line" && -n "$prior_marker_line" && "$cutoff_line" -lt "$prior_marker_line" ]] && echo true || echo false)"
+# TC-REVIEW-CONV-057: the crux self-referential case. A trip report at T1
+# EMBEDS its own dispatcher-review-cap-breaker marker (round=5) — exactly how
+# autonomous-review.sh's ROUNDCAPREPORT heredoc renders it. Without the
+# cutoff, the next failed-substantive round would read that T1 marker back
+# and immediately re-trip (round=6). With the cutoff, no marker after T1
+# qualifies yet, so _review_cap_prior_marker must resolve to "".
+FIXTURE_057=$(cat <<'JSON'
+[
+  {"authorKind":"bot","createdAt":"2026-01-01T10:00:00Z","body":"<!-- dispatcher-review-cap-breaker: issue=1 head=aaa round=4 -->"},
+  {"authorKind":"bot","createdAt":"2026-01-01T11:00:00Z","body":"<!-- dispatcher-review-cap-breaker: issue=1 head=bbb round=5 -->\n## Review-round-cap circuit-breaker tripped"}
+]
+JSON
+)
+assert_eq "TC-REVIEW-CONV-057 trip report's own embedded marker is excluded — no qualifying prior marker right after a trip" "" \
+  "$(_review_cap_prior_marker "$FIXTURE_057")"
 
-# TC-REVIEW-CONV-059b: the cutoff scan itself is authenticity-filtered
-# (authorKind != "human") — a collaborator comment merely quoting the trip
-# heading (e.g. discussing a past trip) must never be able to shift the
-# cutoff and suppress a genuine marker read.
-cutoff_scan_line=$(sed -n "${cutoff_line},$((cutoff_line + 2))p" "$WRAPPER")
-assert_contains "TC-REVIEW-CONV-059b the cutoff scan filters authorKind != \"human\"" \
-  "$cutoff_scan_line" 'select(.authorKind != "human")'
+# TC-REVIEW-CONV-058: a genuinely POST-resume marker (T2 > T1, the trip
+# report's timestamp) DOES qualify — resuming after removing `stalled` must
+# start a fresh series, not stay permanently excluded.
+FIXTURE_058=$(cat <<'JSON'
+[
+  {"authorKind":"bot","createdAt":"2026-01-01T10:00:00Z","body":"<!-- dispatcher-review-cap-breaker: issue=1 head=aaa round=4 -->"},
+  {"authorKind":"bot","createdAt":"2026-01-01T11:00:00Z","body":"<!-- dispatcher-review-cap-breaker: issue=1 head=bbb round=5 -->\n## Review-round-cap circuit-breaker tripped"},
+  {"authorKind":"bot","createdAt":"2026-01-01T12:00:00Z","body":"<!-- dispatcher-review-cap-breaker: issue=1 head=ccc round=1 -->"}
+]
+JSON
+)
+assert_eq "TC-REVIEW-CONV-058a post-resume marker qualifies (strictly after the trip report)" \
+  "<!-- dispatcher-review-cap-breaker: issue=1 head=ccc round=1 -->" \
+  "$(_review_cap_prior_marker "$FIXTURE_058")"
+assert_eq "TC-REVIEW-CONV-058b feeding that marker into _review_cap_next_count continues a FRESH series (2), not a re-trip (6)" "2" \
+  "$(_review_cap_next_count "$(_review_cap_prior_marker "$FIXTURE_058")")"
+
+# TC-REVIEW-CONV-059: no trip has ever happened — cutoff is the epoch, every
+# marker counts (unchanged pre-fix behavior).
+FIXTURE_059=$(cat <<'JSON'
+[
+  {"authorKind":"bot","createdAt":"2026-01-01T10:00:00Z","body":"<!-- dispatcher-review-cap-breaker: issue=1 head=aaa round=3 -->"}
+]
+JSON
+)
+assert_eq "TC-REVIEW-CONV-059 no-trip case: cutoff is the epoch, the only marker still qualifies" \
+  "<!-- dispatcher-review-cap-breaker: issue=1 head=aaa round=3 -->" \
+  "$(_review_cap_prior_marker "$FIXTURE_059")"
+
+# TC-REVIEW-CONV-059b: authenticity filter — a human comment quoting either
+# the trip heading or the marker fence must never shift the cutoff or be
+# read back as a genuine marker.
+FIXTURE_059B=$(cat <<'JSON'
+[
+  {"authorKind":"human","createdAt":"2026-01-01T09:00:00Z","body":"just discussing: ## Review-round-cap circuit-breaker tripped"},
+  {"authorKind":"human","createdAt":"2026-01-01T09:30:00Z","body":"<!-- dispatcher-review-cap-breaker: issue=1 head=forged round=99 -->"},
+  {"authorKind":"bot","createdAt":"2026-01-01T10:00:00Z","body":"<!-- dispatcher-review-cap-breaker: issue=1 head=aaa round=2 -->"}
+]
+JSON
+)
+assert_eq "TC-REVIEW-CONV-059b human comments (forged trip-heading quote + forged marker) are ignored; the genuine bot marker wins" \
+  "<!-- dispatcher-review-cap-breaker: issue=1 head=aaa round=2 -->" \
+  "$(_review_cap_prior_marker "$FIXTURE_059B")"
+
+# TC-REVIEW-CONV-059c: a null .body (a real GitHub REST shape) must not crash
+# the jq scan (test()/contains() on null is a runtime error, not a
+# non-match) — it must be treated as a non-matching row, fail-safe.
+FIXTURE_059C=$(cat <<'JSON'
+[
+  {"authorKind":"bot","createdAt":"2026-01-01T09:00:00Z","body":null},
+  {"authorKind":"bot","createdAt":"2026-01-01T10:00:00Z","body":"<!-- dispatcher-review-cap-breaker: issue=1 head=aaa round=1 -->"}
+]
+JSON
+)
+assert_eq "TC-REVIEW-CONV-059c a null .body row does not crash the scan and is skipped" \
+  "<!-- dispatcher-review-cap-breaker: issue=1 head=aaa round=1 -->" \
+  "$(_review_cap_prior_marker "$FIXTURE_059C")"
+
+# TC-REVIEW-CONV-059d: wiring pin — the wrapper actually delegates to the
+# extracted pure function rather than re-inlining the two-query block.
+assert_contains "TC-REVIEW-CONV-059d wrapper calls _review_cap_prior_marker instead of inlining the cutoff-then-scan" \
+  "$(cat "$WRAPPER")" '_rc_prior_marker=$(_review_cap_prior_marker "$_rc_comments_json")'
 
 echo
 echo "=== Summary ==="

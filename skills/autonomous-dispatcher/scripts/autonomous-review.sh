@@ -4327,29 +4327,13 @@ else
       # "removal re-arms the pipeline" contract), the very next
       # failed-substantive round reads that old trip-report marker back,
       # computes round=(threshold+1), and immediately re-trips before a
-      # fresh series can ever accumulate. The cutoff is the latest trip
-      # report's own createdAt (matched on its unique heading, not the
-      # generic `reason=` token that also appears in this file's comments):
-      # any marker AT OR BEFORE it belongs to the OLD (already-reported)
-      # series and is excluded, so the resumed round finds no qualifying
-      # prior marker and starts a genuinely fresh count at 1 — exactly like
-      # [INV-05] resets `count_retries` after `mark_stalled`'s own report.
-      # No trip yet ⇒ cutoff is the epoch and every marker counts, unchanged
-      # from before.
-      # Same `authorKind != "human"` gate as the marker scan below — a
-      # collaborator comment merely quoting the trip heading (e.g. discussing
-      # a past trip) must never be able to shift this cutoff and suppress a
-      # genuine marker read.
-      _rc_last_trip_at=$(itp_list_comments "$ISSUE_NUMBER" 2>/dev/null \
-        | jq -r '[.[] | select(.authorKind != "human") | select(.body | test("Review-round-cap circuit-breaker tripped"))] | sort_by(.createdAt) | last | .createdAt // "1970-01-01T00:00:00Z"' \
-        2>/dev/null || echo "1970-01-01T00:00:00Z")
-      # Authenticity filter mirrors INV-105/INV-122's own marker-read guard
-      # (authorKind != "human") — an ordinary collaborator comment must never
-      # be readable as a forged round-cap marker.
-      _rc_prior_marker=$(itp_list_comments "$ISSUE_NUMBER" 2>/dev/null \
-        | jq -r --arg cutoff "$_rc_last_trip_at" \
-          '[.[] | select(.authorKind != "human") | select(.body | contains("dispatcher-review-cap-breaker:")) | select(.createdAt > $cutoff)] | sort_by(.createdAt) | last | .body // ""' \
-        2>/dev/null || echo "")
+      # fresh series can ever accumulate. Delegated to
+      # `_review_cap_prior_marker` (lib-review-cap.sh) — a pure function over
+      # the full comments JSON — so the cutoff-then-scan behavior is
+      # fixture-testable, not just wiring-greppable (see its own doc comment
+      # for the two-step algorithm and the authenticity/type guards).
+      _rc_comments_json=$(itp_list_comments "$ISSUE_NUMBER" 2>/dev/null || echo "[]")
+      _rc_prior_marker=$(_review_cap_prior_marker "$_rc_comments_json")
       _rc_next_count=$(_review_cap_next_count "$_rc_prior_marker")
       _rc_threshold=$(_review_cap_threshold)
       _rc_marker=$(_review_cap_marker "$ISSUE_NUMBER" "$PR_HEAD_SHA" "$_rc_next_count")

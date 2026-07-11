@@ -7261,10 +7261,15 @@ green). Test plan: `docs/test-cases/review-convergence-rules.md`.
 
 **Producer**: `autonomous-review.sh` (the substantive-FAIL sub-path) + pure
 helpers in `lib-review-cap.sh` (`_review_cap_marker`, `_review_cap_parse_count`,
-`_review_cap_next_count`, `_review_cap_threshold`). Does NOT modify
-[INV-105]'s or [INV-122]'s own fingerprint/trigger; does NOT source
-`lib-dispatch.sh` or reuse `may_stall_now`/`pid_alive`/`get_pid` (same
-rationale [INV-122] already established).
+`_review_cap_next_count`, `_review_cap_threshold`, `_review_cap_prior_marker`).
+The resume cutoff-then-scan (see above) is itself `_review_cap_prior_marker`
+— a pure function over the full `itp_list_comments` JSON, not inlined at the
+wrapper call site — so its self-referential-exclusion behavior (the trip
+report's own embedded marker must NOT satisfy the cutoff) is fixture-testable
+rather than only wiring-greppable. Does NOT modify [INV-105]'s or
+[INV-122]'s own fingerprint/trigger; does NOT source `lib-dispatch.sh` or
+reuse `may_stall_now`/`pid_alive`/`get_pid` (same rationale [INV-122]
+already established).
 
 **Tests**: `tests/unit/test-review-convergence-rules.sh` (threshold/counter
 pure-logic assertions + source-of-truth wiring greps against
