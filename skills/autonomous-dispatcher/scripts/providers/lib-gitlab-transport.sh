@@ -340,7 +340,11 @@ _gl_api_extract_header() {
 # `_gl_graphql_hook` override — see below), transport failure, non-2xx HTTP
 # status, empty response body, a populated GraphQL `errors` array, or a
 # null/absent top-level `data`. On success echoes the INNER `.data` object
-# (NOT the `{data: ...}` envelope) so callers project straight into it.
+# (NOT the `{data: ...}` envelope) so callers project straight into it. This
+# guarantee is UNIFORM across both the default impl and the optional
+# `_gl_graphql_hook` override below — the hook's raw stdout is validated
+# (non-null JSON object) before being returned, and a nonzero hook rc never
+# lets partial hook stdout leak to the caller.
 _gl_graphql() {
   local query="$1" variables="${2:-}"
   [[ -n "$variables" ]] || variables='{}'
@@ -359,9 +363,20 @@ _gl_graphql() {
   # cannot use the default Bearer-token impl below). Absence is a valid,
   # expected state — the pre-#452 hook contract (redefine `_gl_http` only)
   # keeps working unchanged and simply falls through to the default impl.
+  # The hook's stdout is CAPTURED (not streamed straight to the caller) so a
+  # nonzero rc can never leak partial output, and its shape is validated
+  # (non-null JSON object — the same currency `_gl_graphql` itself returns
+  # on success) before being handed back; a hook that returns rc 0 with
+  # garbage/null output fails closed here rather than propagating malformed
+  # data to the caller (round-2 review finding).
   if declare -F _gl_graphql_hook >/dev/null 2>&1; then
-    _gl_graphql_hook "$query" "$variables"
-    return $?
+    local hook_out hook_rc
+    hook_out="$(_gl_graphql_hook "$query" "$variables")"
+    hook_rc=$?
+    [[ $hook_rc -eq 0 ]] || return "$hook_rc"
+    jq -e 'type == "object"' >/dev/null 2>&1 <<<"$hook_out" || return 1
+    printf '%s' "$hook_out"
+    return 0
   fi
 
   if [[ -z "${GITLAB_TOKEN:-}" ]]; then

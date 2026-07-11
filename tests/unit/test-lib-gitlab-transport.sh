@@ -932,6 +932,79 @@ assert_eq "TC-GLT-097: no hook armed → default Bearer-token path still rc 0" "
 assert_eq "TC-GLT-097: exactly ONE curl invocation (default path unchanged)" "1" "$(_curl_inv_count "$_CURL_ARGV_FILE")"
 assert_contains "TC-GLT-097: curl argv carries Authorization: Bearer" "Authorization: Bearer test-token" "$(cat "$_CURL_ARGV_FILE")"
 
+# TC-GLT-098 (round-2 review finding): a hook that returns rc≠0 must NOT leak
+# any stdout it printed before failing — _gl_graphql captures the hook's
+# output rather than streaming it, so a nonzero rc always means empty stdout
+# to the caller, matching the fail-CLOSED contract the default impl upholds.
+_reset_control
+unset GITLAB_TOKEN
+export GITLAB_TOKEN=""
+hook_leaky_fail="$WORK/hook-leaky-fail.sh"
+cat > "$hook_leaky_fail" <<'EOF'
+_gl_http() {
+  local method="$1" path="$2" hdr="$3"
+  printf 'HTTP/1.1 200 OK\r\n\r\n' > "$hdr"
+  printf '{"ok":true}'
+}
+_gl_graphql_hook() {
+  printf '{"partial":"leaked-before-failure"}'
+  return 1
+}
+EOF
+export GITLAB_TRANSPORT_HOOK="$hook_leaky_fail"
+out=$(_run_with_lib "_gl_graphql 'query { x }'" 2>/dev/null); rc=$?
+assert_rc_nonzero "TC-GLT-098: hook rc != 0 → _gl_graphql rc != 0" "$rc"
+assert_eq "TC-GLT-098: no partial hook stdout leaks to the caller on nonzero rc" "" "$out"
+
+# TC-GLT-099 (round-2 review finding): a hook that returns rc 0 but with
+# malformed/non-JSON output must fail CLOSED, not hand garbage to the
+# caller — _gl_graphql validates the hook's stdout is a JSON object before
+# returning it, the same shape guarantee the default Bearer-token impl
+# enforces via its own `jq -e 'type == "object" ...'` check.
+_reset_control
+unset GITLAB_TOKEN
+export GITLAB_TOKEN=""
+hook_malformed="$WORK/hook-malformed.sh"
+cat > "$hook_malformed" <<'EOF'
+_gl_http() {
+  local method="$1" path="$2" hdr="$3"
+  printf 'HTTP/1.1 200 OK\r\n\r\n' > "$hdr"
+  printf '{"ok":true}'
+}
+_gl_graphql_hook() {
+  printf 'not valid json {{{'
+  return 0
+}
+EOF
+export GITLAB_TRANSPORT_HOOK="$hook_malformed"
+out=$(_run_with_lib "_gl_graphql 'query { x }'" 2>/dev/null); rc=$?
+assert_rc_nonzero "TC-GLT-099: hook rc 0 + non-JSON stdout → _gl_graphql rc != 0 (fails closed)" "$rc"
+assert_eq "TC-GLT-099: no malformed output reaches the caller" "" "$out"
+
+# TC-GLT-100 (round-2 review finding): a hook that returns rc 0 with a
+# top-level JSON `null` (valid JSON, wrong shape — `jq type` is "null", not
+# "object") must also fail CLOSED, mirroring the default impl's `.data !=
+# null` guard.
+_reset_control
+unset GITLAB_TOKEN
+export GITLAB_TOKEN=""
+hook_null="$WORK/hook-null.sh"
+cat > "$hook_null" <<'EOF'
+_gl_http() {
+  local method="$1" path="$2" hdr="$3"
+  printf 'HTTP/1.1 200 OK\r\n\r\n' > "$hdr"
+  printf '{"ok":true}'
+}
+_gl_graphql_hook() {
+  printf 'null'
+  return 0
+}
+EOF
+export GITLAB_TRANSPORT_HOOK="$hook_null"
+out=$(_run_with_lib "_gl_graphql 'query { x }'" 2>/dev/null); rc=$?
+assert_rc_nonzero "TC-GLT-100: hook rc 0 + top-level null → _gl_graphql rc != 0 (fails closed)" "$rc"
+assert_eq "TC-GLT-100: no null payload reaches the caller" "" "$out"
+
 # ===========================================================================
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="

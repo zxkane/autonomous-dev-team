@@ -97,20 +97,27 @@ both hosts" contract. Fix: `_gl_graphql` now probes for an optional
 `_gl_graphql_hook <query> <variables-json>` function the hook may additionally
 define (alongside its mandatory `_gl_http`) and delegates to it when present.
 Covered at the transport layer by `tests/unit/test-lib-gitlab-transport.sh`
-TC-GLT-093..097:
+TC-GLT-093..100:
 - a hook that defines `_gl_http` only + no token ⇒ `_gl_graphql` still fails
   closed, with an error message that names `_gl_graphql_hook` (not just
   `GITLAB_TOKEN`) so the operator knows the opt-in override exists;
 - a hook that ALSO defines `_gl_graphql_hook` + no token ⇒ `_gl_graphql`
-  delegates to it and returns its rc/stdout verbatim; the default
-  Bearer-token curl POST is never invoked;
+  delegates to it and returns its output; the default Bearer-token curl POST
+  is never invoked;
 - the hook receives the exact `query` and `variables-json` `_gl_graphql` was
   called with (argument-passing fidelity);
 - calling `_gl_api` (which sources+latches the hook) before `_gl_graphql` in
   the same process does not re-source the hook a second time;
 - with NO hook armed and a token present, the default Bearer-token path is
   byte-for-byte unchanged (exactly one curl call, `Authorization: Bearer`
-  header present).
+  header present);
+- (TC-GLT-098..100, round-2 review finding) `_gl_graphql` does NOT trust the
+  hook verbatim: a hook that returns rc≠0 never leaks stdout it printed
+  before failing (output is captured, not streamed); a hook that returns
+  rc 0 with non-JSON or top-level-`null` output fails CLOSED instead of
+  handing malformed data to the caller — the same shape guarantee
+  (`type == "object"`, non-null) the default Bearer-token impl already
+  enforces on its own curl response.
 
 ### TC-OVERREACH-013 — threshold-comparison OR logic across both dimensions
 Every combination of {files exceeded, lines exceeded, neither, both} against
