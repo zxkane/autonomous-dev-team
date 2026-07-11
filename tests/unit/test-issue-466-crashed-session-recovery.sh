@@ -64,6 +64,7 @@ _MOCK_NONSUB_PRESENT=0          # self-heal-non-substantive:<head> present
 _MOCK_ACQUIRE_RC=0
 _MOCK_LABEL_SWAP_RC=0
 _MOCK_DISPATCH_RC=0
+_MOCK_COMMENT_FETCH_RC=0        # 1 = itp_list_comments fails (rate-limit/auth/transport blip)
 
 _TRACE_FILE=""
 _rec() {
@@ -84,6 +85,9 @@ set +e
 
 itp_list_comments() {
   _rec itp_list_comments "$@"
+  if [ "$_MOCK_COMMENT_FETCH_RC" != "0" ]; then
+    return "$_MOCK_COMMENT_FETCH_RC"
+  fi
   local body="baseline comment"
   [ "$_MOCK_NOTICE_PRESENT" = "1" ] && body+=" stale-verdict:${_MOCK_CURRENT_HEAD}"
   [ "$_MOCK_SELF_HEAL_PRESENT" = "1" ] && body+=" self-heal-lost-session:${_MOCK_CURRENT_HEAD}"
@@ -143,6 +147,7 @@ _reset() {
   _MOCK_CURRENT_HEAD='sha-A'; _MOCK_NOTICE_PRESENT=0; _MOCK_SELF_HEAL_PRESENT=0
   _MOCK_CRASHED_RETRY_PRESENT=0; _MOCK_NONSUB_PRESENT=0
   _MOCK_ACQUIRE_RC=0; _MOCK_LABEL_SWAP_RC=0; _MOCK_DISPATCH_RC=0
+  _MOCK_COMMENT_FETCH_RC=0
 }
 
 # ===========================================================================
@@ -369,6 +374,42 @@ rc=$?
 assert_eq   "TC-466-INV108-004 returns 0" "0" "$rc"
 assert_match "TC-466-INV108-004 confirmed the launch" "^dispatch_marker_confirm_launched${US}99${US}dev-new$" "$(_trace_all)"
 assert_match "TC-466-INV108-004 posted the crashed-session-retry marker" "crashed-session-retry:sha-A" "$(_trace_all)"
+
+# ===========================================================================
+echo
+echo "=== TC-466-FETCH-001: itp_list_comments transient failure → residual park, NEVER mark_stalled/dev-new (codex review, PR #471) ==="
+# Regression for the reviewer finding: `classify_recent_review_verdict` and
+# the marker-present checks both treat an EMPTY itp_list_comments read as a
+# legitimate negative (verdict=none / marker absent). Without a preflight,
+# a rate-limit/auth/transport blip on the SAME read would misclassify into
+# "budget already spent" (mark_stalled) or a fresh dev-new dispatch on an
+# otherwise-healthy issue — exactly the transient class issue #466 reserved
+# the residual stale-verdict park for.
+# ===========================================================================
+_reset
+_MOCK_VERDICT='failed-substantive'; _MOCK_DEV_ACTIONABLE='true'
+_MOCK_COMMENT_FETCH_RC=1
+handle_pending_dev_pr_exists 99
+rc=$?
+assert_eq   "TC-466-FETCH-001 returns 0 (handled via park)" "0" "$rc"
+assert_eq   "TC-466-FETCH-001 ZERO dev-new dispatched" "0" "$(_trace_verbs | grep -c '^dispatch$')"
+assert_no_match "TC-466-FETCH-001 mark_stalled NOT fired (fetch failure is transient, not budget exhaustion)" "^mark_stalled" "$(_trace_all)"
+assert_no_match "TC-466-FETCH-001 no acquire_dispatch_marker attempted" "^acquire_dispatch_marker" "$(_trace_all)"
+assert_no_match "TC-466-FETCH-001 no crashed-session-retry marker posted" "crashed-session-retry:" "$(_trace_all)"
+
+# ===========================================================================
+echo
+echo "=== TC-466-FETCH-002: same fetch failure via the self-heal (empty _sid) cause → identical park, no mark_stalled ==="
+# ===========================================================================
+_reset
+_MOCK_SESSION_ID=''   # switches to the self-heal cause call site
+_MOCK_VERDICT='failed-substantive'; _MOCK_DEV_ACTIONABLE='true'
+_MOCK_COMMENT_FETCH_RC=1
+handle_pending_dev_pr_exists 99
+rc=$?
+assert_eq   "TC-466-FETCH-002 returns 0 (handled via park)" "0" "$rc"
+assert_eq   "TC-466-FETCH-002 ZERO dev-new dispatched" "0" "$(_trace_verbs | grep -c '^dispatch$')"
+assert_no_match "TC-466-FETCH-002 mark_stalled NOT fired" "^mark_stalled" "$(_trace_all)"
 
 echo
 echo "=== Summary ==="

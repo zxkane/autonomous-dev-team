@@ -3545,11 +3545,34 @@ recent_error_envelope() {
 #
 # Returns:
 #   0 — handled (caller should `return 0`).
-#   1 — the dev-new dispatch marker is held by a concurrent tick ([INV-108]):
-#       a transient race, NOT a marker-present exhaustion. Caller falls
-#       through to the residual `stale-verdict:<head>` park, unchanged.
+#   1 — EITHER the dev-new dispatch marker is held by a concurrent tick
+#       ([INV-108]) OR the comment-read preflight below failed (rate-limit /
+#       auth / transport blip). Both are transient races, NOT a
+#       marker-present exhaustion. Caller falls through to the residual
+#       `stale-verdict:<head>` park, unchanged.
 _same_head_verdict_aware_recovery() {
   local issue_num="$1" pr_ref="$2" current_head="$3" cause="$4"
+
+  # (codex review, PR #471 / [INV-125]): every verdict/marker check below
+  # reads `itp_list_comments` and treats EMPTY jq output as a legitimate
+  # negative (verdict=none, marker absent) — the same shape a transient
+  # comment-fetch failure (rate-limit/auth/network blip) produces. Left
+  # unguarded, a fetch blip would misclassify as "budget already spent" or
+  # "verdict=none" and dispatch a fresh dev-new / mark_stalled on an
+  # otherwise-healthy issue, instead of the residual park issue #466 reserved
+  # for exactly this transient class. Preflight the same read once: on
+  # failure (non-zero rc OR empty output — this same-HEAD branch is only
+  # reached after a review verdict comment has already posted, so a
+  # genuinely empty comment list can never be legitimate here), return 1 so
+  # the caller falls through to the residual `stale-verdict:<head>` park
+  # unchanged — the identical fail-closed posture [INV-123]'s
+  # `fetch_pr_for_issue` transport-failure check takes (treat "can't tell" as
+  # "assume the worse, non-terminal state").
+  if ! itp_list_comments "$issue_num" >/dev/null 2>&1; then
+    log "  WARN: issue #${issue_num} ${cause} same-HEAD branch: comment-read preflight failed (transient) — falling back to the residual stale-verdict park rather than misclassifying verdict/markers"
+    return 1
+  fi
+
   local _cause_desc
   if [ "$cause" = "self-heal" ]; then
     _cause_desc="no \`Dev Session ID:\` could be resolved for the prior dev session (its session-report comment was likely lost — e.g. a mid-cleanup auth-teardown race)"
@@ -3689,8 +3712,10 @@ _same_head_verdict_aware_recovery() {
 #     never an unconditional dev-new). It falls back to the idempotent
 #     `stale-verdict:<sha>` park (label stays pending-dev) ONLY for the
 #     residual, genuinely transient cases: a dev wrapper IS still alive
-#     (`may_stall_now` defers), or a concurrent tick holds the dev-new
-#     dispatch marker ([INV-108]).
+#     (`may_stall_now` defers), a concurrent tick holds the dev-new dispatch
+#     marker ([INV-108]), or the helper's own comment-read preflight failed
+#     (rate-limit/auth/transport blip, [INV-125] follow-up, PR #471 review) —
+#     never misclassified as a genuine verdict=none / marker-absent read.
 handle_pending_dev_pr_exists() {
   local issue_num="$1"
   local pr_info pr_num current_head pr_ref last_head notice_marker
