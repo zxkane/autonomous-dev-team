@@ -313,9 +313,9 @@ assert_contains "TC-REVIEW-CONV-035 wrapper checks already-stalled before trippi
 # TC-REVIEW-CONV-036: only fires when AGGREGATE=="fail" — pinned as a wiring
 # grep (the breaker must not run on the all-unavailable / crash-without-verdict
 # sub-path, which has no severity floor to evaluate).
-inv124_block=$(awk '/\[#449\] INV-126/,/emit_verdict_trailer "\$ISSUE_NUMBER" "\$REPO" "failed-substantive"/' "$WRAPPER")
+inv126_block=$(awk '/\[#449\] INV-126/,/emit_verdict_trailer "\$ISSUE_NUMBER" "\$REPO" "failed-substantive"/' "$WRAPPER")
 assert_contains "TC-REVIEW-CONV-036 INV-126 block is gated on \$AGGREGATE == \"fail\"" \
-  "$inv124_block" '$AGGREGATE" == "fail"'
+  "$inv126_block" '$AGGREGATE" == "fail"'
 
 # TC-REVIEW-CONV-037: failed-non-substantive is out of scope — pinned via the
 # same gating (the crash-without-verdict branch, which emits
