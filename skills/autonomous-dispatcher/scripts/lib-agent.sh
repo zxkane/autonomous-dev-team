@@ -519,6 +519,18 @@ _run_with_timeout() {
   # finished naturally at the same instant the watchdog woke, a coincidence
   # any timeout mechanism can race), the marker is removed again so the
   # caller correctly keeps its own already-captured natural exit code.
+  #
+  # The watchdog's OWN exit status mirrors the marker contract exactly (0 =
+  # rescinded/never fired, 124 = TERM reaped the group, 137 = grace elapsed
+  # and KILL reaped it) — PR #469 review round-6 [P1]: if `mktemp` fails
+  # (below, `_wd_result_file=""`), there is no marker file for the
+  # reconciliation block to read at all, but the watchdog still runs and
+  # still kills the group correctly. Without this, a genuine timeout came
+  # back as the wrapped command's raw signal-death status (e.g. 0 or 143)
+  # instead of 124/137, silently defeating the INV-48 review-veto/
+  # count_agent_failures 124/137 contract. The watchdog's `wait`-reported
+  # exit code becomes the fallback result channel in exactly that case (see
+  # the reconciliation block below).
   local _watchdog_pid="" _wd_result_file=""
   if [[ -z "$_AGENT_TIMEOUT_CMD" && "${AGENT_TIMEOUT_WATCHDOG_FALLBACK:-false}" == "true" ]]; then
     local _wd_secs; _wd_secs="$(_timeout_value_to_seconds "$AGENT_TIMEOUT")"
@@ -567,6 +579,22 @@ _run_with_timeout() {
       [[ -n "${ADT_GUARD_FD:-}" ]] && exec {ADT_GUARD_FD}>&-
       sleep "$1"
       sleep "$6"
+      # Committed: from this point on, the watchdog ignores TERM sent to
+      # ITSELF (never to the group it is about to signal — a separate
+      # `kill -TERM -- "-$2"` a few lines down). Before this point, the
+      # reconciliation caller cancelling a genuinely fast-finishing command
+      # (TC-TIMEOUTGUARD-022) still kills this job promptly via the default
+      # disposition. After this point, the deadline has passed and the
+      # watchdog is committed to evaluating/signalling — the caller MUST
+      # NOT be able to truncate that with its own cancel signal (round-6
+      # follow-up [P1]): without this, a cancel landing between this
+      # watchdog''s own `kill -TERM` (which can reap the ENTIRE group, not
+      # just the leader, when there is no surviving descendant) and its
+      # `exit 124` a few lines down killed the watchdog via a raw SIGTERM
+      # death (rc 143, not 124) before it reached that statement — silently
+      # discarding the correct 124 in the exact `mktemp`-failure scenario
+      # round-6 exists to protect (see the reconciliation block below).
+      trap "" TERM
       if [[ -n "$3" ]]; then
         printf "%s" 124 > "$3.tmp" && mv -f "$3.tmp" "$3"
       fi
@@ -580,13 +608,14 @@ _run_with_timeout() {
         exit 0
       fi
       for ((i = 0; i < "$4"; i++)); do
-        kill -0 -- "-$2" 2>/dev/null || exit 0
+        kill -0 -- "-$2" 2>/dev/null || exit 124
         sleep 1
       done
       kill -KILL -- "-$2" 2>/dev/null || true
       if [[ -n "$3" ]]; then
         printf "%s" 137 > "$3.tmp" && mv -f "$3.tmp" "$3"
       fi
+      exit 137
     '
     "${_wd_setsid[@]}" bash -c "$_wd_body" _ "$_wd_secs" "$_AGENT_RUN_PID" "$_wd_result_file" "$_wd_grace" "$_wd_term_delay" "$_wd_wake_delay" &
     _watchdog_pid=$!
@@ -673,15 +702,54 @@ _run_with_timeout() {
   #    would — even though the marker hasn't landed on disk yet, the
   #    watchdog is either about to write it or already past the sleep and
   #    mid-write, so blocking here converges on the same outcome without
-  #    the race. This also makes reconciliation robust to a `mktemp`
-  #    failure (`_wd_result_file=""`, no marker ever possible) — group
-  #    liveness alone is enough to decide whether a still-alive descendant
-  #    needs the watchdog's escalation, independent of the marker file.
+  #    the race.
+  # 6. `mktemp` failure (PR #469 review round-6 [P1]): when `_wd_result_file`
+  #    is empty (the `mktemp` call above failed), there is no marker file for
+  #    ANY of steps 1-5 to read, ever — the watchdog still runs and still
+  #    kills the group correctly, but reconciliation had nothing to
+  #    normalize `_rc` from, so a genuine timeout silently kept the wrapped
+  #    command's raw signal-death status (0/143) instead of 124/137,
+  #    defeating the INV-48 review-veto / count_agent_failures contract.
+  #    The watchdog's own exit status mirrors the marker contract exactly
+  #    (0 = rescinded, 124 = TERM reaped it, 137 = KILL reaped it — see the
+  #    watchdog body above), so it is the fallback result channel used ONLY
+  #    when `_wd_result_file` is empty; when the marker file mechanism IS
+  #    available, the file (not the watchdog's exit status) stays the sole
+  #    source of truth per steps 1-5 above, unchanged.
+  #
+  #    `_wd_wait_rc` is captured from a single `wait "$_watchdog_pid"` that
+  #    runs whether or not the cancel `kill` fired (round-6 follow-up, same
+  #    PR): a `kill` sent to an already-exited watchdog is a harmless no-op,
+  #    and `wait` on an already-exited job still returns its real exit code
+  #    (verified: bash reports the process's actual exit status, not a
+  #    kill-related error) — so capturing on the cancel path too costs
+  #    nothing on the marker-available paths (rounds 2-5 unchanged, since the
+  #    marker file is consulted first and wins whenever it exists) but closes
+  #    a gap the first round-6 attempt missed: with `mktemp` failing AND a
+  #    TERM-obeying leader with NO surviving descendant (the direct analog
+  #    of TC-TIMEOUTGUARD-025's shape, just without a marker file), the
+  #    watchdog's OWN `kill -TERM` already reaped the entire group before
+  #    this check runs, so `kill -0 -- "-$_AGENT_RUN_PID"` reports "gone" and
+  #    control fell into the cancel branch — which, before this follow-up,
+  #    discarded the watchdog's exit code unconditionally instead of
+  #    consulting it, silently keeping the leader's natural rc (0) instead
+  #    of the correct 124.
   if [[ -n "$_watchdog_pid" ]]; then
     local _wd_marker=""
     [[ -n "$_wd_result_file" && -s "$_wd_result_file" ]] && _wd_marker="$(cat "$_wd_result_file" 2>/dev/null)"
-    if [[ -n "$_wd_marker" ]] || kill -0 -- "-$_AGENT_RUN_PID" 2>/dev/null; then
-      wait "$_watchdog_pid" 2>/dev/null || true
+    local _wd_wait_rc=0
+    # Cancel the watchdog ONLY when neither a fired marker nor a still-live
+    # group is left to protect (steps 3/5): nothing has escalated and nothing
+    # remains to reap, so tearing it down leaves no stray delayed kill. In
+    # every other case we let it run to completion (steps 1/2/4). Either way
+    # we then `wait` on it — a `kill` sent to an already-exited watchdog is a
+    # harmless no-op and `wait` still returns its real exit code, which is the
+    # only result channel when `mktemp` failed (step 6).
+    if [[ -z "$_wd_marker" ]] && ! kill -0 -- "-$_AGENT_RUN_PID" 2>/dev/null; then
+      kill "$_watchdog_pid" 2>/dev/null || true
+    fi
+    wait "$_watchdog_pid" 2>/dev/null || _wd_wait_rc=$?
+    if [[ -n "$_wd_result_file" ]]; then
       # Re-read: the watchdog may have escalated 124 -> 137 while we were
       # waiting on it just now, OR rescinded (removed the file) if its
       # kill turned out to be a no-op — only trust a marker that still
@@ -689,9 +757,12 @@ _run_with_timeout() {
       if [[ -s "$_wd_result_file" ]]; then
         _rc="$(cat "$_wd_result_file" 2>/dev/null)"
       fi
-    else
-      kill "$_watchdog_pid" 2>/dev/null || true
-      wait "$_watchdog_pid" 2>/dev/null || true
+    elif [[ "$_wd_wait_rc" == "124" || "$_wd_wait_rc" == "137" ]]; then
+      # No marker file was ever possible (mktemp failed) — trust the
+      # watchdog's own exit status instead (step 6 above). Any other value
+      # (0 rescinded, or a plain signal-death like 143 from the cancel
+      # branch's own `kill`) means "keep the natural _rc" already captured.
+      _rc="$_wd_wait_rc"
     fi
     rm -f "$_wd_result_file" "${_wd_result_file}.tmp" 2>/dev/null || true
   fi

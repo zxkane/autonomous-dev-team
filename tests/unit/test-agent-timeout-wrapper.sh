@@ -109,7 +109,7 @@ fi
 # ---------------------------------------------------------------------------
 TMPROOT=$(mktemp -d)
 trap 'rm -rf "$TMPROOT"' EXIT
-mkdir -p "$TMPROOT/scripts" "$TMPROOT/cu" "$TMPROOT/cu-notimeout" "$TMPROOT/cu-nosetsid" "$TMPROOT/bin-gtimeout"
+mkdir -p "$TMPROOT/scripts" "$TMPROOT/cu" "$TMPROOT/cu-notimeout" "$TMPROOT/cu-nosetsid" "$TMPROOT/bin-gtimeout" "$TMPROOT/cu-notimeout-badmktemp"
 GH_CALLS="$TMPROOT/gh-calls.log"
 
 # Hermetic coreutils dir WITH a real `timeout`.
@@ -141,6 +141,17 @@ cat > "$TMPROOT/bin-gtimeout/gtimeout" <<'EOF'
 exec timeout "$@"
 EOF
 chmod +x "$TMPROOT/bin-gtimeout/gtimeout"
+
+# A directory with ONLY a fake `mktemp` that always fails (simulates a
+# read-only/exhausted TMPDIR — TC-TIMEOUTGUARD-032 below), layered on top of
+# the no-timeout coreutils dir via PATH ordering so every OTHER binary still
+# resolves normally.
+cat > "$TMPROOT/cu-notimeout-badmktemp/mktemp" <<'EOF'
+#!/bin/bash
+echo "mktemp: stub failure (TC-TIMEOUTGUARD-032)" >&2
+exit 1
+EOF
+chmod +x "$TMPROOT/cu-notimeout-badmktemp/mktemp"
 
 # Stub token-refresh `gh` proxy: record issue-comment posts.
 cat > "$TMPROOT/scripts/gh" <<EOF
@@ -642,6 +653,54 @@ if [[ -f "$WD029_MARKER_DIR/alive" ]]; then
 else
   bad "029 descendant marker file never created — test harness issue"
 fi
+
+echo ""
+echo "--- TC-TIMEOUTGUARD-032: mktemp failure — no marker file is ever possible, but the watchdog's own exit status still normalizes rc to 124 ---"
+# PR #469 review round-6 [P1]: if `mktemp` fails (a read-only/exhausted
+# TMPDIR), `_wd_result_file` is empty for the ENTIRE life of this
+# _run_with_timeout call — none of TC-TIMEOUTGUARD-025..029's marker-based
+# reconciliation has anything to read, ever. The watchdog still runs and
+# still kills the group correctly, but before the fix, rc normalization
+# depended entirely on that marker file — with no marker EVER possible, a
+# genuine timeout silently kept the wrapped command's own raw exit status
+# instead of 124/137. `cu-notimeout-badmktemp` is layered FIRST on PATH so
+# its `mktemp` stub (always exit 1) shadows the real one in `cu-notimeout`,
+# while every other binary still resolves normally.
+#
+# Mirrors the TC-TIMEOUTGUARD-025 shape exactly (a plain TERM-obeying
+# leader, no descendant at all) rather than TC-026/027's shape: those two
+# shrink _AGENT_WATCHDOG_GRACE_SECS to 1 so their (deliberately
+# TERM-ignoring) leader/descendant reaches the KILL step quickly — but a
+# 1-grace-iteration window combined with a TERM-OBEYING leader is a genuine
+# race (kill -0 checked immediately after kill -TERM can still observe the
+# not-yet-fully-reaped process, escalating to KILL even though TERM would
+# have worked), independent of this fix; TC-025 avoids it by using the
+# real 30s grace default, so this case does too. The leader's own natural
+# exit is `0` (it obeys TERM and exits cleanly), so only a working 124
+# fallback (the watchdog's own exit status, since no marker file exists)
+# can turn that back into the correct `124` — proving reconciliation
+# source, not coincidence — and specifically exercises the round-6
+# follow-up (an earlier version of this fix normalized wait-on-cancel only
+# on the "cancel" branch's own explicit kill, not the watchdog's own
+# already-committed TERM racing that same cancel).
+(
+  set -uo pipefail
+  export AUTONOMOUS_CONF_DIR="$TMPROOT/scripts" REPO="o/r" REPO_OWNER=o REPO_NAME=r PROJECT_ID=t PROJECT_DIR="$PROJECT_ROOT" GH_AUTH_MODE=token
+  export PATH="$TMPROOT/cu-notimeout-badmktemp:$TMPROOT/cu-notimeout"
+  export AGENT_TIMEOUT_WATCHDOG_FALLBACK=true
+  # shellcheck disable=SC1090
+  source "$LIB_ERROR"
+  # shellcheck disable=SC1090
+  source "$LIB" --issue 451 >/dev/null 2>&1
+  AGENT_TIMEOUT=1
+  # A well-behaved (TERM-obeying) command with no descendant, same as
+  # TC-TIMEOUTGUARD-025 — but with mktemp broken so no result-marker file
+  # can ever exist.
+  _run_with_timeout bash -c 'trap "exit 0" TERM; sleep 30'
+  echo "RC=$?"
+) >"$TMPROOT/wd032-out.log" 2>&1
+wd032_out=$(cat "$TMPROOT/wd032-out.log")
+assert_rc "032 watchdog TERM-expiry normalizes rc to 124 (not the leader's own natural 0) even with mktemp failing (no marker file ever existed)" 124 "$(rc_of "$wd032_out")"
 
 # ---------------------------------------------------------------------------
 echo ""
