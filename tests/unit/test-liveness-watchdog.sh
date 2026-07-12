@@ -465,50 +465,52 @@ if [ -n "$_saved_bot_login44" ]; then BOT_LOGIN="$_saved_bot_login44"; fi
 echo
 echo "=== TC-LIVENESS-046..049: prior-marker cutoff (resume-after-un-stall) ==="
 # ===========================================================================
-# [codex review, PR #472, BLOCKING #2] At the time this was fixed, the tier-2
-# TIER2REPORT heredoc EMBEDDED its own dispatcher-liveness-watchdog marker (R4
-# requires posting on EVERY evaluated tick, including the trip tick). Without
-# a cutoff, an operator who fixes the park and removes `stalled` (re-arming
-# via Step 2) with an otherwise-unchanged fingerprint would have the very next
-# evaluation read that OLD trip report's marker back (high count, tier1=1)
-# and immediately re-trip tier 2 again. [round 6] Production no longer embeds
-# the marker this way (it is always its own separate comment posted strictly
-# BEFORE the report — see TC-040e/f/g and TC-045i/j) — but these fixtures
-# still deliberately construct the embedded shape as a synthetic stress case
-# against the extracted pure function `_liveness_prior_marker` itself: the
-# cutoff-then-scan logic must exclude ANY marker at-or-before the trip
-# heading's timestamp, regardless of what produced that shape. These are
-# BEHAVIORAL tests with constructed fixtures — not wiring greps — so a
-# mutation on the cutoff comparison (e.g. `>` -> `>=`) or the trip-heading
-# string actually fails a test.
+# [codex review, PR #472, BLOCKING #2] Without a cutoff, an operator who fixes
+# the park and removes `stalled` (re-arming via Step 2) with an
+# otherwise-unchanged fingerprint would have the very next evaluation read the
+# OLD trip report's marker back (high count, tier1=1) and immediately re-trip
+# tier 2 again. Production always posts the bare marker STRICTLY BEFORE the
+# trip report as two separate comments (round 6; see TC-040e/f/g and
+# TC-045i/j) — these fixtures model that exact two-comment shape (marker at an
+# earlier timestamp, report — whose body starts with the real
+# `_LIVENESS_TIER2_HEADING` — at a later or equal one) so the cutoff-then-scan
+# logic is pinned against the real producer shape, not a synthetic embed.
+# These are BEHAVIORAL tests with constructed fixtures — not wiring greps —
+# so a mutation on the cutoff comparison (e.g. `>` -> `>=`) or the heading
+# constant itself actually fails a test.
 
 fp46=$(_liveness_fingerprint pending-dev sha-A 0 "")
 trip_marker46=$(_liveness_marker 99 "$fp46" 18 1)
+# One trip-report body shared by every fixture in this section (TC-046/047/049/
+# 050): a body that STARTS WITH the real `_LIVENESS_TIER2_HEADING`, so the
+# cutoff `startswith($heading)` scan treats it as a genuine trip. `_reset_stubs`
+# (called before TC-049) only rebinds functions, never unsets variables, so this
+# survives across it.
+trip_report_body="${_LIVENESS_TIER2_HEADING} (\`reason=liveness-timeout\`, [INV-128])"$'\n\nEvidence...'
 
-# TC-LIVENESS-046: the crux self-referential case — a constructed fixture
-# comment at T1 whose body is a marker (count=18) followed by the trip
-# heading on a later line (the shape production used to emit pre-round-6;
-# kept here as a stress case for the pure helper, see the group header
-# above). Without the cutoff, the next evaluation on the SAME (post-resume,
-# unchanged) fingerprint would read that T1 marker back and immediately
-# re-trip.
-comments46=$(jq -n --arg m "$trip_marker46" '
-  [{"authorKind":"bot","createdAt":"2026-01-01T10:00:00Z",
-    "body":($m + "\n## Liveness watchdog tripped — halting a silently-parked issue")}]
+# TC-LIVENESS-046: the crux self-referential case — a constructed fixture with
+# the bare marker (count=18) at T1a and the trip report (whose body starts
+# with the real heading) at T1b >= T1a, mirroring the marker-before-report
+# post order the production code always uses within one evaluation. Without
+# the cutoff, the next evaluation on the SAME (post-resume, unchanged)
+# fingerprint would read that T1a marker back and immediately re-trip.
+comments46=$(jq -n --arg m "$trip_marker46" --arg r "$trip_report_body" '
+  [{"authorKind":"bot","createdAt":"2026-01-01T09:59:59Z","body":$m},
+   {"authorKind":"bot","createdAt":"2026-01-01T10:00:00Z","body":$r}]
 ')
-assert_eq "TC-LIVENESS-046 trip report's own embedded marker is excluded — no qualifying prior marker right after a trip" "" \
+assert_eq "TC-LIVENESS-046 trip report's own preceding marker is excluded — no qualifying prior marker right after a trip" "" \
   "$(_liveness_prior_marker "$comments46" 0)"
 assert_eq "TC-LIVENESS-046b feeding that into _liveness_next_count starts a FRESH series (1), not a re-trip (19)" "1" \
   "$(_liveness_next_count "$(_liveness_prior_marker "$comments46" 0)" "$fp46")"
 
-# TC-LIVENESS-047: a genuinely POST-resume marker (T2 > T1, the trip report's
+# TC-LIVENESS-047: a genuinely POST-resume marker (T2 > T1b, the trip report's
 # timestamp) DOES qualify — resuming after removing `stalled` must start a
 # fresh series that then continues counting normally, not stay permanently
 # excluded.
 post_resume_marker47=$(_liveness_marker 99 "$fp46" 2 0)
-comments47=$(jq -n --arg m "$trip_marker46" --arg p "$post_resume_marker47" '
-  [{"authorKind":"bot","createdAt":"2026-01-01T10:00:00Z",
-    "body":($m + "\n## Liveness watchdog tripped — halting a silently-parked issue")},
+comments47=$(jq -n --arg m "$trip_marker46" --arg r "$trip_report_body" --arg p "$post_resume_marker47" '
+  [{"authorKind":"bot","createdAt":"2026-01-01T09:59:59Z","body":$m},
+   {"authorKind":"bot","createdAt":"2026-01-01T10:00:00Z","body":$r},
    {"authorKind":"bot","createdAt":"2026-01-01T12:00:00Z","body":$p}]
 ')
 assert_eq "TC-LIVENESS-047a post-resume marker qualifies (strictly after the trip report)" \
@@ -532,9 +534,9 @@ assert_eq "TC-LIVENESS-048 no-trip case: cutoff is the epoch, the only marker st
 _reset_stubs
 fp49=$(_liveness_fingerprint pending-dev sha-A 0 "")
 trip_marker49=$(_liveness_marker 99 "$fp49" 18 1)
-_seq49_comments=$(jq -n --arg m "$trip_marker49" '
-  [{"authorKind":"bot","createdAt":"2026-01-01T10:00:00Z",
-    "body":($m + "\n## Liveness watchdog tripped — halting a silently-parked issue")}]
+_seq49_comments=$(jq -n --arg m "$trip_marker49" --arg r "$trip_report_body" '
+  [{"authorKind":"bot","createdAt":"2026-01-01T09:59:59Z","body":$m},
+   {"authorKind":"bot","createdAt":"2026-01-01T10:00:00Z","body":$r}]
 ')
 itp_list_comments() { printf '%s' "$_seq49_comments"; }
 itp_post_comment() { _rec itp_post_comment "$@"; _seq49_comments=$(jq --arg b "$2" '. + [{"authorKind":"bot","createdAt":"2026-01-01T11:00:00Z","body":$b}]' <<<"$_seq49_comments"); }
@@ -547,23 +549,41 @@ assert_match "TC-LIVENESS-049b re-armed issue restarts the count at 1 (fresh epi
 
 # TC-LIVENESS-050 [pr-test-analyzer gap]: a SECOND trip-resume cycle — the
 # cutoff must track the LATEST trip report, not the FIRST. History: trip #1
-# at T1, a post-resume marker at T2, trip #2 at T3 (which embeds ITS OWN
-# marker), then nothing after T3. If the cutoff computation regressed from
-# `max` to `min`/`first`, T3's cutoff would incorrectly equal T1, and the T2
-# post-resume marker (T2 < T3) would wrongly qualify as "the prior marker"
+# at T1 (marker+report), a post-resume marker at T2, trip #2 at T3
+# (marker+report), then nothing after T3. If the cutoff computation regressed
+# from `max` to `min`/`first`, T3's cutoff would incorrectly equal T1, and the
+# T2 post-resume marker (T2 < T3) would wrongly qualify as "the prior marker"
 # even though it is now BEFORE the second trip.
 trip_marker50a=$(_liveness_marker 99 "$fp46" 18 1)
 post_resume_marker50=$(_liveness_marker 99 "$fp46" 5 0)
 trip_marker50b=$(_liveness_marker 99 "$fp46" 18 1)
-comments50=$(jq -n --arg m1 "$trip_marker50a" --arg p "$post_resume_marker50" --arg m2 "$trip_marker50b" '
-  [{"authorKind":"bot","createdAt":"2026-01-01T10:00:00Z",
-    "body":($m1 + "\n## Liveness watchdog tripped — halting a silently-parked issue")},
+comments50=$(jq -n --arg m1 "$trip_marker50a" --arg r "$trip_report_body" --arg p "$post_resume_marker50" --arg m2 "$trip_marker50b" '
+  [{"authorKind":"bot","createdAt":"2026-01-01T09:59:59Z","body":$m1},
+   {"authorKind":"bot","createdAt":"2026-01-01T10:00:00Z","body":$r},
    {"authorKind":"bot","createdAt":"2026-01-01T12:00:00Z","body":$p},
-   {"authorKind":"bot","createdAt":"2026-01-01T14:00:00Z",
-    "body":($m2 + "\n## Liveness watchdog tripped — halting a silently-parked issue")}]
+   {"authorKind":"bot","createdAt":"2026-01-01T13:59:59Z","body":$m2},
+   {"authorKind":"bot","createdAt":"2026-01-01T14:00:00Z","body":$r}]
 ')
 assert_eq "TC-LIVENESS-050 second trip cycle: cutoff tracks the LATEST trip (T3), not the first (T1) — no qualifying marker after T3" "" \
   "$(_liveness_prior_marker "$comments50" 0)"
+
+# TC-LIVENESS-059 [round 7 regression pin]: the round-6 unanchored
+# `contains("Liveness watchdog tripped")` cutoff detection let a human
+# comment that merely MENTIONS the phrase — anywhere in its body, with no
+# report structure — falsely register as a trip and become the cutoff,
+# excluding the genuine earlier marker and permanently resetting a frozen
+# issue's series to count=1. Pin the fix: a human comment quoting/discussing
+# the phrase (not starting with the exact heading) must NOT act as a cutoff —
+# the earlier genuine marker must still qualify.
+fp59=$(_liveness_fingerprint pending-dev sha-A 0 "")
+genuine_marker59=$(_liveness_marker 99 "$fp59" 17 1)
+forged_mention59="A collaborator can post or quote that phrase: ${_LIVENESS_TIER2_HEADING} — see the discussion above."
+comments59=$(jq -n --arg m "$genuine_marker59" --arg f "$forged_mention59" '
+  [{"authorKind":"human","createdAt":"2026-01-01T10:00:00Z","body":$m},
+   {"authorKind":"human","createdAt":"2026-01-01T11:00:00Z","body":$f}]
+')
+assert_eq "TC-LIVENESS-059 a mid-comment mention of the trip heading does NOT act as a forged cutoff — the genuine earlier marker still qualifies" \
+  "$genuine_marker59" "$(_liveness_prior_marker "$comments59" 0)"
 
 # ===========================================================================
 echo

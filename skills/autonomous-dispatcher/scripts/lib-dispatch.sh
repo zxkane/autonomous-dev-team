@@ -4269,8 +4269,8 @@ TIER1REPORT
       # trip report — never embedded inside it. This ordering is what makes
       # `_liveness_prior_marker`'s cutoff exclusion hold WITHOUT relying on
       # same-second timestamp coincidence: the cutoff is the trip report's
-      # own `createdAt` (it carries the "Liveness watchdog tripped" heading),
-      # and this marker is posted strictly before that report, so its
+      # own `createdAt` (it carries the `_LIVENESS_TIER2_HEADING` opening
+      # line), and this marker is posted strictly before that report, so its
       # `createdAt` can never exceed the cutoff it precedes — the strict `>`
       # scan on the NEXT tick always excludes it. Posting the marker AFTER
       # the report instead would reopen exactly the round-3 [codex review,
@@ -4280,8 +4280,15 @@ TIER1REPORT
 
       local pointer
       pointer=$(_liveness_newest_pointer "$comments_json")
+      # [codex review, PR #472, round 7 BLOCKING] The heading line is
+      # rendered from `_LIVENESS_TIER2_HEADING` (lib-liveness.sh) — the SAME
+      # constant `_liveness_prior_marker`'s cutoff detection matches via
+      # `startswith()` — never a second hand-typed copy. A literal duplicate
+      # here is exactly how the round-6 producer/detector text silently
+      # diverged from an unanchored `contains()` scan; single-sourcing closes
+      # that class of drift permanently, not just this one instance of it.
       itp_post_comment "$issue_num" "$(cat <<TIER2REPORT
-## ⛔ Liveness watchdog tripped — halting a silently-parked issue (\`reason=liveness-timeout\`, [INV-128])
+${_LIVENESS_TIER2_HEADING} (\`reason=liveness-timeout\`, [INV-128])
 
 This issue's observable state (label + PR head + non-idempotent comments + marker set) has not changed for **${count}** consecutive dispatcher ticks — well past the **${stall}**-tick stall threshold.
 

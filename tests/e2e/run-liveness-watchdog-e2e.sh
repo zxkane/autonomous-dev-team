@@ -180,11 +180,12 @@ run_liveness_watchdog
 
 # ---------------------------------------------------------------------------
 # TC-LIVENESS-045h [codex review, PR #472, BLOCKING #2]: operator resume after
-# the tier-2 report already fired. The tier-2 TIER2REPORT comment embeds its
-# OWN watchdog marker. An operator who fixes the park and removes `stalled`
+# the tier-2 report already fired. The trip's bare marker (posted strictly
+# BEFORE the trip report, per round 6) sits right before the cutoff the trip
+# report's heading sets. An operator who fixes the park and removes `stalled`
 # (restoring `pending-dev`), with the fingerprint's OTHER components
 # otherwise unchanged, must get a FRESH liveness episode — not an immediate
-# re-trip from the old trip report's high count read back.
+# re-trip from the old trip's high count read back.
 ISSUE_LABEL="pending-dev"
 run_liveness_watchdog
 [[ "$ISSUE_LABEL" == "pending-dev" ]] \
@@ -195,6 +196,59 @@ fresh_marker=$(jq -r '[.[] | select(.body | test("^<!-- dispatcher-liveness-watc
 [[ "$fresh_marker" == *"count=1 tier1=0"* ]] \
   && ok "TC-LIVENESS-045h2 resume after un-stall restarts the count at 1 (fresh episode)" \
   || bad "TC-LIVENESS-045h2 expected a fresh count=1 tier1=0 marker, got: ${fresh_marker}"
+
+# ---------------------------------------------------------------------------
+# TC-LIVENESS-045k [codex review, PR #472, round 7 BLOCKING]: a human comment
+# that merely MENTIONS the tier-2 trip heading — anywhere in its body, not as
+# its own opening line — must NOT act as a forged cutoff. The round-6 cutoff
+# detection used an unanchored `contains("Liveness watchdog tripped")`, so
+# ANY comment referencing that bare phrase (e.g. a collaborator discussing a
+# past trip in prose) would register as a NEW trip and move the cutoff past
+# the genuine earlier marker, permanently resetting a still-frozen issue's
+# series to count=1 and letting it dodge tier 2 forever.
+#
+# Fresh in-memory issue #199 (not #99's history above) so this scenario's own
+# `itp_post_comment` stub can stamp STRICTLY INCREASING timestamps — reusing
+# #99's stub (which stamps every post with the SAME fixed timestamp) would
+# make the marker's own `createdAt` collide with an earlier tier-2 trip's
+# fixed-timestamp cutoff and never satisfy the real leaf's `createdAt >
+# $cutoff` requirement, a stub artifact unrelated to the bug under test.
+ISSUE_LABEL_K="pending-dev"
+ISSUE_COMMENTS_K='[{"authorKind":"bot","createdAt":"2026-07-10T09:00:00Z","body":"Dev Session ID: `sid-round7-1`"}]'
+PR_HEAD_K="sha-round7-regression"
+_k_clock=0
+list_pending_dev() { printf '%s' '[{"number":199,"labels":["autonomous","pending-dev"]}]'; }
+fetch_pr_for_issue() { printf '%s' "{\"headRefOid\":\"${PR_HEAD_K}\"}"; }
+itp_list_comments() { printf '%s' "$ISSUE_COMMENTS_K"; }
+itp_read_task() { printf '%s' "{\"labels\":[\"${ISSUE_LABEL_K}\"]}"; }
+itp_post_comment() {
+  _k_clock=$((_k_clock + 1))
+  ISSUE_COMMENTS_K=$(jq --arg b "$2" --arg t "$(printf '2026-07-10T%02d:00:00Z' $((9 + _k_clock)))" \
+    '. + [{"authorKind":"bot","createdAt":$t,"body":$b}]' <<<"$ISSUE_COMMENTS_K")
+}
+label_swap() { ISSUE_LABEL_K="$3"; }
+
+# Build up 10 no-op ticks on a genuine, still-in-progress episode.
+for tick in $(seq 1 10); do
+  run_liveness_watchdog
+done
+marker_before_forgery=$(jq -r '[.[] | select(.body | test("^<!-- dispatcher-liveness-watchdog:"))] | last | .body' <<<"$ISSUE_COMMENTS_K")
+
+# Inject the forged comment: matches `_LIVENESS_IDEMPOTENT_PATTERN` via
+# `reason=liveness-timeout` (so it does NOT itself change the fingerprint's
+# comment-count component), but also contains the bare trip-heading phrase
+# mid-sentence — the exact round-6 false-cutoff shape.
+_k_clock=$((_k_clock + 1))
+forged_mention="A collaborator can copy the tier-2 header (excluded via reason=liveness-timeout), quoting: ${_LIVENESS_TIER2_HEADING}"
+ISSUE_COMMENTS_K=$(jq --arg b "$forged_mention" --arg t "$(printf '2026-07-10T%02d:00:00Z' $((9 + _k_clock)))" \
+  '. + [{"authorKind":"human","createdAt":$t,"body":$b}]' <<<"$ISSUE_COMMENTS_K")
+
+run_liveness_watchdog
+marker_after_forgery=$(jq -r '[.[] | select(.body | test("^<!-- dispatcher-liveness-watchdog:"))] | last | .body' <<<"$ISSUE_COMMENTS_K")
+
+[[ "$marker_before_forgery" == *"count=10"* && "$marker_after_forgery" == *"count=11"* ]] \
+  && ok "TC-LIVENESS-045k a forged mid-comment mention of the trip heading does not reset the count (10 -> 11, not 10 -> 1)" \
+  || bad "TC-LIVENESS-045k expected count 10 -> 11 across the forged comment; saw '${marker_before_forgery}' -> '${marker_after_forgery}'"
 
 # ---------------------------------------------------------------------------
 echo ""

@@ -55,6 +55,23 @@ _LIVENESS_IDEMPOTENT_PATTERN='stale-verdict:|INV-12-completed:|INV-12-no-pr-fres
 # from the digest for the same reason it is excluded from the count.
 _LIVENESS_DIGEST_PATTERN='stale-verdict:|INV-12-completed:|INV-12-no-pr-fresh-dev:|INV-35-fresh-dev:|no-progress-substantive(-attempt)?:|non-actionable-finding:|self-heal-lost-session:|self-heal-non-substantive:|crashed-session-retry:|crashed-session-non-actionable:|dispatcher-convergence-breaker:|dispatcher-gate-fail-breaker:|dispatcher-token:|INV-25-hygiene:'
 
+# _LIVENESS_TIER2_HEADING — the tier-2 trip report's exact opening line
+# ([codex review, PR #472, round 7 BLOCKING]). Single-sourced here so
+# `_liveness_evaluate_issue`'s TIER2REPORT heredoc (lib-dispatch.sh) and
+# `_liveness_prior_marker`'s cutoff detection below can never drift apart —
+# a producer/detector text mismatch would silently reopen the cutoff bug this
+# constant exists to close. `_liveness_prior_marker` matches it via
+# `startswith()` (whole-body-PREFIX anchored, mirroring the marker's own
+# whole-body anchor), NOT `contains()`: the round-7 finding was that
+# `contains("Liveness watchdog tripped")` let ANY comment merely mentioning
+# that phrase — anywhere in its body, e.g. a collaborator quoting or
+# discussing the phrase in prose — falsely become the cutoff, excluding the
+# genuine earlier marker and resetting a frozen issue's series back to
+# count=1, indefinitely dodging tier 2. Anchoring to "the report's own exact
+# opening line" closes that gap the same way the marker's whole-body anchor
+# already closes the marker-forgery gap.
+_LIVENESS_TIER2_HEADING='## ⛔ Liveness watchdog tripped — halting a silently-parked issue'
+
 # _liveness_notice_ticks — read LIVENESS_NOTICE_TICKS with the same
 # regex-then-fallback-with-warning shape as `_gate_breaker_threshold`
 # (lib-review-e2e.sh), floor >=2 (R5). Warning goes to stderr ONLY, never via
@@ -266,12 +283,27 @@ _liveness_parse_marker() {
 # that OLD trip report's marker back — high count, tier1=1 — and immediately
 # re-trip tier 2 again, instead of starting a fresh liveness episode.
 #
-# cutoff = the latest qualifying comment whose body contains the tier-2 trip
-# heading ("Liveness watchdog tripped"); the epoch if no trip has ever fired.
-# Markers AT OR BEFORE the cutoff are excluded (strict `>`, mirrors
-# `_review_cap_prior_marker`'s own strict inequality) — this excludes the trip
-# report's own embedded marker (its createdAt EQUALS the cutoff) while still
-# admitting a genuinely later post-resume marker.
+# cutoff = the latest qualifying comment whose body STARTS WITH the tier-2
+# trip report's exact opening line (`_LIVENESS_TIER2_HEADING`); the epoch if
+# no trip has ever fired. Markers AT OR BEFORE the cutoff are excluded
+# (strict `>`, mirrors `_review_cap_prior_marker`'s own strict inequality) —
+# this excludes the trip report's own embedded marker (its createdAt EQUALS
+# the cutoff) while still admitting a genuinely later post-resume marker.
+#
+# [codex review, PR #472, round 7 BLOCKING] The cutoff match is a WHOLE-BODY
+# PREFIX anchor (`startswith`), NOT the round-6 `contains("Liveness watchdog
+# tripped")` substring test it replaces: `contains()` let ANY comment merely
+# mentioning that bare phrase ANYWHERE in its body — a collaborator quoting or
+# discussing it in prose, with no report structure at all — falsely register
+# as a trip and become the cutoff. That forged cutoff would sit AFTER the
+# genuine earlier marker, excluding it and resetting a frozen issue's series
+# to count=1 on every tick indefinitely, letting a real park dodge tier 2
+# forever. `startswith($heading)` requires the comment's body to OPEN with
+# the report's exact heading line — the same posture the marker's own
+# whole-body anchor already takes on the marker grammar, and `_LIVENESS_TIER2_
+# HEADING` is the single source of truth the TIER2REPORT heredoc
+# (`_liveness_evaluate_issue`, lib-dispatch.sh) renders verbatim, so producer
+# and detector can never drift apart.
 #
 # [operator guidance, round 6] `anchor` is a WHOLE-BODY anchor
 # (`^...-->[[:space:]]*$`, mirroring `classify_recent_review_verdict`'s own
@@ -294,9 +326,9 @@ _liveness_parse_marker() {
 _liveness_prior_marker() {
   local comments_json="${1:-[]}" strict="${2:-0}"
   local anchor='^<!-- dispatcher-liveness-watchdog: issue=[0-9]+ fingerprint=[0-9a-f]+ count=[0-9]+ tier1=[01] -->[[:space:]]*$'
-  jq -r --arg strict "$strict" --arg anchor "$anchor" '
+  jq -r --arg strict "$strict" --arg anchor "$anchor" --arg heading "$_LIVENESS_TIER2_HEADING" '
     ( [ .[] | select(($strict == "0") or ((.authorKind // "human") != "human")) | select(.body | type == "string") ] ) as $rows
-    | ( [ $rows[] | select(.body | contains("Liveness watchdog tripped")) | .createdAt ]
+    | ( [ $rows[] | select(.body | startswith($heading)) | .createdAt ]
         + ["1970-01-01T00:00:00Z"] | max ) as $cutoff
     | ( [ $rows[] | select(.body | test($anchor)) | select(.createdAt > $cutoff) ]
         | sort_by(.createdAt) | last | .body // "" )
