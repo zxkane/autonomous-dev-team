@@ -94,3 +94,15 @@ disabled.
 | ID | Scenario | Expected |
 |----|----------|----------|
 | TC-LIVENESS-045 | Replay the `api_error` park shape (`pending-dev`, resolvable sid, dead wrapper, frozen fingerprint) with the INV-125 crashed-session recovery path's one-shot budget already spent (so the specific breaker cannot fire again) — run the stub dispatcher tick-by-tick | tier-1 comment appears at tick `LIVENESS_NOTICE_TICKS`; `stalled` + one report appears at tick `LIVENESS_STALL_TICKS`; each exactly once |
+| TC-LIVENESS-045h | Operator resume: after the tier-2 report fires, remove `stalled` (restoring `pending-dev`) with the fingerprint's other components unchanged, then run one more tick | does NOT immediately re-transition to `stalled`; the watchdog marker restarts at `count=1 tier1=0` — a fresh episode, not a re-trip off the old trip report's embedded marker |
+
+## Group H — prior-marker cutoff / resume-after-un-stall (TC-LIVENESS-046..049)
+
+`_liveness_prior_marker` ([codex review, PR #472, BLOCKING #2]) is the cutoff-then-scan pure helper that fixes a self-referential read: the tier-2 `TIER2REPORT` comment embeds its own watchdog marker (R4 requires posting on every evaluated tick, including the trip tick). Without a cutoff at the latest "Liveness watchdog tripped" report, an operator resuming a stalled issue with an otherwise-unchanged fingerprint would have the very next evaluation read that old trip report's marker back and immediately re-trip tier 2 again.
+
+| ID | Scenario | Expected |
+|----|----------|----------|
+| TC-LIVENESS-046 | A trip report comment embeds its own marker (`count=18 tier1=1`); no comment exists after it | `_liveness_prior_marker` returns `""` — the embedded marker is excluded (its `createdAt` equals the cutoff, and the cutoff comparison is strict `>`) |
+| TC-LIVENESS-047 | A trip report at T1, then a genuinely later bare marker at T2 > T1 | `_liveness_prior_marker` returns the T2 marker; feeding it into `_liveness_next_count` continues a fresh post-resume series, not a re-trip off T1's count |
+| TC-LIVENESS-048 | No trip report has ever been posted | cutoff is the epoch; the existing marker still qualifies (unchanged behavior for the common, no-trip-yet case) |
+| TC-LIVENESS-049 | End-to-end through `_liveness_evaluate_issue`: a trip report already fired, then a re-arm tick runs against the SAME fingerprint (as if `stalled` were removed with nothing else changed) | does NOT immediately re-transition to `stalled`; the fresh marker restarts at `count=1 tier1=0` |

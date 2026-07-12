@@ -163,6 +163,24 @@ run_liveness_watchdog
   || bad "TC-LIVENESS-045f post-stall ticks must not touch an already-stalled issue"
 
 # ---------------------------------------------------------------------------
+# TC-LIVENESS-045h [codex review, PR #472, BLOCKING #2]: operator resume after
+# the tier-2 report already fired. The tier-2 TIER2REPORT comment embeds its
+# OWN watchdog marker. An operator who fixes the park and removes `stalled`
+# (restoring `pending-dev`), with the fingerprint's OTHER components
+# otherwise unchanged, must get a FRESH liveness episode — not an immediate
+# re-trip from the old trip report's high count read back.
+ISSUE_LABEL="pending-dev"
+run_liveness_watchdog
+[[ "$ISSUE_LABEL" == "pending-dev" ]] \
+  && ok "TC-LIVENESS-045h1 resume after un-stall does NOT immediately re-transition to stalled" \
+  || bad "TC-LIVENESS-045h1 resume after un-stall re-tripped immediately (label='${ISSUE_LABEL}')"
+
+fresh_marker=$(jq -r '[.[] | select(.body | test("^<!-- dispatcher-liveness-watchdog:"))] | last | .body' <<<"$ISSUE_COMMENTS")
+[[ "$fresh_marker" == *"count=1 tier1=0"* ]] \
+  && ok "TC-LIVENESS-045h2 resume after un-stall restarts the count at 1 (fresh episode)" \
+  || bad "TC-LIVENESS-045h2 expected a fresh count=1 tier1=0 marker, got: ${fresh_marker}"
+
+# ---------------------------------------------------------------------------
 echo ""
 echo "=== TC-LIVENESS-045g: dispatcher-tick.sh wires Step 6 in after Step 5 ==="
 # Source-of-truth grep pin: Step 6 must be sourced/invoked, and it must sit

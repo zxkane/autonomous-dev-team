@@ -191,6 +191,45 @@ _liveness_parse_marker() {
   fi
 }
 
+# _liveness_prior_marker <comments_json> <strict_author> — the CUTOFF-then-
+# scan prior-marker read ([codex review, PR #472, BLOCKING] fix #2). Mirrors
+# `_review_cap_prior_marker`'s cutoff convention (lib-review-cap.sh, itself
+# mirroring [INV-05]'s "Marking as stalled" cutoff): the tier-2 TIER2REPORT
+# heredoc EMBEDS its own `dispatcher-liveness-watchdog:` marker (R4 requires
+# posting on EVERY evaluated tick, including the trip tick itself). Without a
+# cutoff, an operator who fixes whatever caused the park and re-arms the
+# issue (removes `stalled`, restoring `pending-dev`/`pending-review`) with an
+# otherwise-UNCHANGED fingerprint would have the very next evaluation read
+# that OLD trip report's marker back — high count, tier1=1 — and immediately
+# re-trip tier 2 again, instead of starting a fresh liveness episode.
+#
+# cutoff = the latest qualifying comment whose body contains the tier-2 trip
+# heading ("Liveness watchdog tripped"); the epoch if no trip has ever fired.
+# Markers AT OR BEFORE the cutoff are excluded (strict `>`, mirrors
+# `_review_cap_prior_marker`'s own strict inequality) — this excludes the trip
+# report's own embedded marker (its createdAt EQUALS the cutoff) while still
+# admitting a genuinely later post-resume marker.
+#
+# `strict_author` uses the SAME BOT_LOGIN-gated authenticity filter as the
+# marker-fence scan itself (NOT an unconditional `authorKind != "human"`,
+# which would reject the genuine trip report in the common
+# `GH_AUTH_MODE=token` topology and leave the cutoff permanently at the
+# epoch — reopening the exact BOT_LOGIN-empty bug the marker-fence
+# authenticity fix already closed). Both the cutoff computation and the
+# final scan are derived from the SAME filtered `$rows` so they never
+# disagree on which comments are eligible.
+_liveness_prior_marker() {
+  local comments_json="${1:-[]}" strict="${2:-0}"
+  local anchor='^<!-- dispatcher-liveness-watchdog: issue=[0-9]+ fingerprint=[0-9a-f]+ count=[0-9]+ tier1=[01] -->($|\n)'
+  jq -r --arg strict "$strict" --arg anchor "$anchor" '
+    ( [ .[] | select(($strict == "0") or ((.authorKind // "human") != "human")) | select(.body | type == "string") ] ) as $rows
+    | ( [ $rows[] | select(.body | contains("Liveness watchdog tripped")) | .createdAt ]
+        + ["1970-01-01T00:00:00Z"] | max ) as $cutoff
+    | ( [ $rows[] | select(.body | test($anchor)) | select(.createdAt > $cutoff) ]
+        | sort_by(.createdAt) | last | .body // "" )
+  ' <<<"$comments_json" 2>/dev/null || printf ''
+}
+
 # _liveness_next_count <marker_text> <fingerprint> — stored_count+1 when
 # marker_text matches fingerprint exactly, else 1 (fresh series under a new
 # fingerprint — full reset, R1/R4).

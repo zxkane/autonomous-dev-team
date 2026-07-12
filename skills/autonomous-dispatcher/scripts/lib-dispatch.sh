@@ -4152,17 +4152,24 @@ _liveness_evaluate_issue() {
   marker_digest=$(_liveness_marker_digest "$comments_json")
   fingerprint=$(_liveness_fingerprint "$active_label" "$current_head" "$non_idem_count" "$marker_digest")
 
-  # Read back the prior watchdog marker: the LAST comment STRUCTURALLY
-  # anchored on the exact grammar `_liveness_marker` itself emits — either
-  # the WHOLE body (the bare "none"-tier post) or the marker as the FIRST
-  # LINE followed by more report prose (the tier1/tier2 posts; see the
-  # TIER1REPORT/TIER2REPORT heredocs below). Anchoring at both `^` and
-  # `($|\n)` rejects a forgery that embeds the marker text ANYWHERE inside a
-  # larger human comment (e.g. "I saw someone write `<!--
-  # dispatcher-liveness-watchdog: ... -->` in a doc") — the plain
-  # `contains()` this replaces would have accepted that.
+  # Read back the prior watchdog marker via `_liveness_prior_marker`
+  # (lib-liveness.sh) — the CUTOFF-then-scan pure helper, mirroring
+  # `_review_cap_prior_marker`'s own cutoff convention. The LAST comment
+  # STRUCTURALLY anchored on the exact grammar `_liveness_marker` itself
+  # emits — either the WHOLE body (the bare "none"-tier post) or the marker
+  # as the FIRST LINE followed by more report prose (the tier1/tier2 posts;
+  # see the TIER1REPORT/TIER2REPORT heredocs below) — STRICTLY AFTER the
+  # latest tier-2 trip report ("Liveness watchdog tripped"), if any.
+  # Anchoring at both `^` and `($|\n)` rejects a forgery that embeds the
+  # marker text ANYWHERE inside a larger human comment; the cutoff rejects
+  # the trip report's OWN embedded marker specifically — [codex review, PR
+  # #472, BLOCKING #2] without it, an operator who fixes the park and
+  # removes `stalled` (re-arming via Step 2) with an otherwise-unchanged
+  # fingerprint would have the very next evaluation read that OLD trip
+  # report's high count/tier1=1 marker back and immediately re-trip tier 2
+  # again, instead of starting a fresh liveness episode.
   #
-  # [codex review, PR #472, BLOCKING] Deliberately NOT gated on an
+  # [codex review, PR #472, BLOCKING #1] Deliberately NOT gated on an
   # unconditional `authorKind != "human"`: this marker is posted AND read
   # back in the SAME dispatcher process (dispatcher-tick.sh ->
   # lib-dispatch.sh), which NEVER resolves `BOT_LOGIN` — that variable is
@@ -4184,11 +4191,8 @@ _liveness_evaluate_issue() {
   # and is NOT defended against — see TC-LIVENESS-044's revised scenario).
   local _liveness_strict_author=0
   [ -n "${BOT_LOGIN:-}" ] && _liveness_strict_author=1
-  local _liveness_marker_anchor='^<!-- dispatcher-liveness-watchdog: issue=[0-9]+ fingerprint=[0-9a-f]+ count=[0-9]+ tier1=[01] -->($|\n)'
   local prior_marker
-  prior_marker=$(jq -r --arg strict "$_liveness_strict_author" --arg anchor "$_liveness_marker_anchor" \
-    '[.[] | select(($strict == "0") or ((.authorKind // "human") != "human")) | select(.body | test($anchor))] | sort_by(.createdAt) | last | .body // ""' \
-    <<<"$comments_json" 2>/dev/null || echo "")
+  prior_marker=$(_liveness_prior_marker "$comments_json" "$_liveness_strict_author")
 
   local count tier1
   count=$(_liveness_next_count "$prior_marker" "$fingerprint")

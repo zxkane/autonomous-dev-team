@@ -396,6 +396,81 @@ assert_match "TC-LIVENESS-044c BOT_LOGIN unset + genuine authorKind=human marker
 assert_no_match "TC-LIVENESS-044d not yet at notice threshold -> no tier1 comment beyond the bare marker" "TIER1REPORT|no observable progress" "$(_trace_all)"
 if [ -n "$_saved_bot_login44" ]; then BOT_LOGIN="$_saved_bot_login44"; fi
 
+# ===========================================================================
+echo
+echo "=== TC-LIVENESS-046..049: prior-marker cutoff (resume-after-un-stall) ==="
+# ===========================================================================
+# [codex review, PR #472, BLOCKING #2] The tier-2 TIER2REPORT heredoc EMBEDS
+# its own dispatcher-liveness-watchdog marker (R4 requires posting on EVERY
+# evaluated tick, including the trip tick). Without a cutoff, an operator who
+# fixes the park and removes `stalled` (re-arming via Step 2) with an
+# otherwise-unchanged fingerprint would have the very next evaluation read
+# that OLD trip report's marker back (high count, tier1=1) and immediately
+# re-trip tier 2 again. These are BEHAVIORAL tests against the extracted pure
+# function `_liveness_prior_marker` with constructed fixtures — not wiring
+# greps — so a mutation on the cutoff comparison (e.g. `>` -> `>=`) or the
+# trip-heading string actually fails a test.
+
+fp46=$(_liveness_fingerprint pending-dev sha-A 0 "")
+trip_marker46=$(_liveness_marker 99 "$fp46" 18 1)
+
+# TC-LIVENESS-046: the crux self-referential case. A trip report at T1 EMBEDS
+# its own marker (count=18) — exactly how the TIER2REPORT heredoc renders it.
+# Without the cutoff, the next evaluation on the SAME (post-resume, unchanged)
+# fingerprint would read that T1 marker back and immediately re-trip.
+comments46=$(jq -n --arg m "$trip_marker46" '
+  [{"authorKind":"bot","createdAt":"2026-01-01T10:00:00Z",
+    "body":($m + "\n## Liveness watchdog tripped — halting a silently-parked issue")}]
+')
+assert_eq "TC-LIVENESS-046 trip report's own embedded marker is excluded — no qualifying prior marker right after a trip" "" \
+  "$(_liveness_prior_marker "$comments46" 0)"
+assert_eq "TC-LIVENESS-046b feeding that into _liveness_next_count starts a FRESH series (1), not a re-trip (19)" "1" \
+  "$(_liveness_next_count "$(_liveness_prior_marker "$comments46" 0)" "$fp46")"
+
+# TC-LIVENESS-047: a genuinely POST-resume marker (T2 > T1, the trip report's
+# timestamp) DOES qualify — resuming after removing `stalled` must start a
+# fresh series that then continues counting normally, not stay permanently
+# excluded.
+post_resume_marker47=$(_liveness_marker 99 "$fp46" 2 0)
+comments47=$(jq -n --arg m "$trip_marker46" --arg p "$post_resume_marker47" '
+  [{"authorKind":"bot","createdAt":"2026-01-01T10:00:00Z",
+    "body":($m + "\n## Liveness watchdog tripped — halting a silently-parked issue")},
+   {"authorKind":"bot","createdAt":"2026-01-01T12:00:00Z","body":$p}]
+')
+assert_eq "TC-LIVENESS-047a post-resume marker qualifies (strictly after the trip report)" \
+  "$post_resume_marker47" "$(_liveness_prior_marker "$comments47" 0)"
+assert_eq "TC-LIVENESS-047b feeding that marker into _liveness_next_count continues the fresh post-resume series (3)" "3" \
+  "$(_liveness_next_count "$(_liveness_prior_marker "$comments47" 0)" "$fp46")"
+
+# TC-LIVENESS-048: no trip has ever happened — cutoff is the epoch, the only
+# marker still qualifies (unchanged pre-fix behavior for the common case).
+comments48=$(jq -n --arg m "$post_resume_marker47" '
+  [{"authorKind":"bot","createdAt":"2026-01-01T09:00:00Z","body":$m}]
+')
+assert_eq "TC-LIVENESS-048 no-trip case: cutoff is the epoch, the only marker still qualifies" \
+  "$post_resume_marker47" "$(_liveness_prior_marker "$comments48" 0)"
+
+# TC-LIVENESS-049: full end-to-end re-arm sequence through
+# _liveness_evaluate_issue itself (not just the pure helper) — an issue whose
+# tier-2 report already fired, then a human removes `stalled` restoring
+# `pending-dev` with the SAME fingerprint, must NOT immediately re-transition
+# to stalled on the next tick; it must restart the count at 1.
+_reset_stubs
+fp49=$(_liveness_fingerprint pending-dev sha-A 0 "")
+trip_marker49=$(_liveness_marker 99 "$fp49" 18 1)
+_seq49_comments=$(jq -n --arg m "$trip_marker49" '
+  [{"authorKind":"bot","createdAt":"2026-01-01T10:00:00Z",
+    "body":($m + "\n## Liveness watchdog tripped — halting a silently-parked issue")}]
+')
+itp_list_comments() { printf '%s' "$_seq49_comments"; }
+itp_post_comment() { _rec itp_post_comment "$@"; _seq49_comments=$(jq --arg b "$2" '. + [{"authorKind":"bot","createdAt":"2026-01-01T11:00:00Z","body":$b}]' <<<"$_seq49_comments"); }
+fetch_pr_for_issue() { printf '%s' '{"headRefOid":"sha-A"}'; }
+label_swap() { _rec label_swap "$@"; }
+itp_read_task() { printf '%s' '{"labels":["pending-dev"]}'; }
+_liveness_evaluate_issue 99 issue pending-dev 6 18
+assert_no_match "TC-LIVENESS-049a re-armed issue does NOT immediately re-transition to stalled" "^label_swap" "$(_trace_all)"
+assert_match "TC-LIVENESS-049b re-armed issue restarts the count at 1 (fresh episode)" "count=1 tier1=0" "$(_trace_all)"
+
 echo
 echo "=== Summary ==="
 echo "Passed: $PASS"
