@@ -151,3 +151,32 @@ disabled.
 | round 8 #4 | `run_liveness_watchdog` redirected both threshold readers' stderr straight to `/dev/null`, so R5's required invalid-config warning never reached the dispatcher's own log | Each reader's stderr is captured via `mktemp` (mirroring `ci_is_green`'s capture-then-relog pattern) and re-emitted through `log()` | manually verified (WARNING lines observed in `log()` output for an injected invalid config); no dedicated TC-LIVENESS ID — this is a logging-only change with no decision-function behavior to pin beyond Group D's existing fallback coverage |
 
 **[round 9, independent self-review gap]** The `tripped` field introduced by round 8 #1 has TWO forgery directions, not one: a forged HIGH count still TRIGGERS an early tier action (bounded by the pre-existing count cap, TC-LIVENESS-056..058), but a forged `tripped=1` marker can also SUPPRESS an in-progress series by moving the cutoff forward past a genuine, still-relevant marker — a direction round 8's own tests never pinned. TC-LIVENESS-065/066 close that gap: in the default `GH_AUTH_MODE=token` topology a forged human `tripped=1` marker DOES suppress a genuine bot in-progress marker (the same documented, accepted residual class INV-105's round-14 finding already carries — token mode has no actor signal to add); in `GH_AUTH_MODE=app` the SAME forgery is rejected by the `authorKind` gate and the genuine marker still qualifies.
+
+## Group M — round 9: count's authorKind gate + write-failure retry/notice (TC-LIVENESS-067..074)
+
+[codex review, PR #472, round 9, 2 BLOCKING findings]
+
+| ID | Finding | Fix | Covered by |
+|----|---------|-----|------------|
+| round 9 #1 | `_liveness_non_idempotent_count` had NO `authorKind` gate at all, unlike `_liveness_marker_digest`/`_liveness_prior_marker` (both app-mode-only gated) — in `GH_AUTH_MODE=app`, a human comment wrapping a known token correctly (e.g. `` `reason=liveness-timeout` ``) was masked as idempotent, undercounting genuine progress | Reclassify (not exclude) an untrusted match: a comment counts as progress if its body doesn't match the pattern, OR it matches but was posted by a human AND `GH_AUTH_MODE=app` — the mirror-image polarity of the digest's own gate (see D18) | TC-LIVENESS-067..069 |
+| round 9 #2 | Every `itp_post_comment` call for the watchdog's own marker/report was swallowed with `\|\| true` — a lost MARKER write (which carries the counter/tier1-latch/`tripped` state, R4) silently resets the series to `count=1` next tick, or (for a lost `tripped=1` write) reopens the round-3/6/7/8 resume-re-trip bug | `_liveness_post_marker`/`_liveness_post_report` (`lib-dispatch.sh`) retry once; the marker helper additionally posts a loud `@REPO_OWNER` notice and returns 1 on persistent failure so the `tier1` branch can skip a now-pointless dependent report post | TC-LIVENESS-070..074 |
+
+| ID | Scenario | Expected |
+|----|----------|----------|
+| TC-LIVENESS-067 | `GH_AUTH_MODE=app`, a human's backtick-wrapped token comment alongside a genuinely new human comment | BOTH count as progress (count=2) — the untrusted match is reclassified as counted, not masked |
+| TC-LIVENESS-068 | `GH_AUTH_MODE=app`, the SAME wrapped token from a bot/App identity alongside a genuinely new human comment | only the genuine comment counts (count=1) — a TRUSTED match is still trusted and excluded |
+| TC-LIVENESS-069 | `GH_AUTH_MODE=token`, a human's wrapped-token comment alongside a genuinely new human comment | only the genuine comment counts (count=1) — token-mode behavior is byte-for-byte unchanged (the gate is a no-op there) |
+| TC-LIVENESS-070 | `_liveness_post_marker`, first `itp_post_comment` attempt succeeds | exactly one call, no WARNING logged, returns 0 |
+| TC-LIVENESS-071 | `_liveness_post_marker`, first attempt fails, retry succeeds | exactly two calls (both the marker body), no operator notice, returns 0 |
+| TC-LIVENESS-072 | `_liveness_post_marker`, BOTH attempts fail | three `itp_post_comment` calls total (2 marker + 1 loud `@REPO_OWNER` notice), a WARNING is logged, returns 1 |
+| TC-LIVENESS-073 | `_liveness_post_report`, BOTH attempts fail | exactly two calls (no third loud-notice call — reports don't escalate as loudly as markers), a WARNING is logged, returns 1 |
+| TC-LIVENESS-074 | End-to-end through `_liveness_evaluate_issue`: the tick-6 tier-1 marker write persistently fails | the marker write is attempted twice (initial + retry); the dependent tier-1 report is never posted (short-circuited via `_liveness_post_marker ... \|\| return 0`) |
+
+**[round 9 follow-up self-review]** D19's helpers can return 1, and a BARE call to either (no `&&`/`\|\|`/`if`) trips `set -e` (both `lib-dispatch.sh` and `dispatcher-tick.sh` run under `set -euo pipefail`) — aborting not just the current issue's evaluation but the ENTIRE dispatcher tick. This is caught by spawning a REAL `bash -euo pipefail` subshell, since the surrounding test harness sources everything under `set +e` (line 60) and cannot detect this class of regression at all.
+
+| ID | Scenario | Expected |
+|----|----------|----------|
+| TC-LIVENESS-075 | `none` branch, real `set -e` subshell, persistent marker-write failure | `_liveness_evaluate_issue` returns normally (reaches `echo "REACHED_END"` after the call) rather than aborting |
+| TC-LIVENESS-076 | `tier2` branch, real `set -e` subshell, persistent marker-write failure (report also fails, since `itp_post_comment` always fails in this probe) | same — reaches the end normally |
+| TC-LIVENESS-077 | `tier1` branch, real `set -e` subshell, marker write SUCCEEDS but the report write persistently fails (a prior marker is seeded so the evaluation actually reaches `tier1`, not `none`) | reaches the end normally — isolates the tier1-report `\|\| true` guard specifically |
+| TC-LIVENESS-078 | `tier2` branch, same shape as 077 but with a seeded count landing on the stall threshold | reaches the end normally — isolates the tier2-report `\|\| true` guard specifically |

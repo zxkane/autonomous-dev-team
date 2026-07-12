@@ -756,6 +756,217 @@ assert_eq "TC-LIVENESS-066 app-mode: the SAME forged human tripped=1 marker is r
   "$genuine65" "$(_liveness_prior_marker "$comments65" "$(_liveness_strict_author_flag)")"
 unset GH_AUTH_MODE
 
+# ===========================================================================
+echo
+echo "=== TC-LIVENESS-067..069 [codex review, PR #472, round 9 BLOCKING #1]: ==="
+echo "=== _liveness_non_idempotent_count gains the SAME authorKind gate the ==="
+echo "=== digest/marker reads already have                                 ==="
+# ===========================================================================
+# Pre-round-9, _liveness_non_idempotent_count had NO authorKind gate at all:
+# a human comment merely wrapping a known token in a backtick span or an
+# HTML-comment opening satisfied the round-8 wrapper anchor exactly as well
+# as a genuine producer's comment, so it was (wrongly) treated as idempotent
+# and excluded from the count. The fix RECLASSIFIES an untrusted match as
+# counted (not "excluded from consideration") — in GH_AUTH_MODE=app, via
+# _liveness_strict_author_flag, a human's wrapped-token comment now counts
+# as genuine progress instead of being masked as an idempotent notice.
+
+_saved_gh_auth_mode67="${GH_AUTH_MODE:-}"
+GH_AUTH_MODE=app
+assert_eq "TC-LIVENESS-067 app-mode: a human's backtick-wrapped token comment now COUNTS as progress (untrusted match reclassified, not masked as idempotent)" "2" \
+  "$(_liveness_non_idempotent_count '[{"authorKind":"human","body":"a genuinely new update"},{"authorKind":"human","body":"see `reason=liveness-timeout` for details"}]')"
+assert_eq "TC-LIVENESS-068 app-mode: the SAME wrapped token from a bot/App identity is STILL excluded (a trusted match is trusted)" "1" \
+  "$(_liveness_non_idempotent_count '[{"authorKind":"human","body":"a genuinely new update"},{"authorKind":"bot","body":"see `reason=liveness-timeout` for details"}]')"
+if [ -n "$_saved_gh_auth_mode67" ]; then GH_AUTH_MODE="$_saved_gh_auth_mode67"; else unset GH_AUTH_MODE; fi
+
+# TC-LIVENESS-069: token-mode residual — UNCHANGED behavior, the gate is a
+# no-op there ($strict == "0"), matching the documented, accepted exposure
+# every other liveness read carries in GH_AUTH_MODE=token.
+_saved_gh_auth_mode69="${GH_AUTH_MODE:-}"
+GH_AUTH_MODE=token
+assert_eq "TC-LIVENESS-069 token-mode: a human's wrapped-token comment is still excluded from the count via the idempotent-pattern match (gate is a no-op here, documented residual)" "1" \
+  "$(_liveness_non_idempotent_count '[{"authorKind":"human","body":"a genuinely new update"},{"authorKind":"human","body":"see `reason=liveness-timeout` for details"}]')"
+if [ -n "$_saved_gh_auth_mode69" ]; then GH_AUTH_MODE="$_saved_gh_auth_mode69"; else unset GH_AUTH_MODE; fi
+
+# ===========================================================================
+echo
+echo "=== TC-LIVENESS-070..074 [codex review, PR #472, round 9 BLOCKING #2]: ==="
+echo "=== marker/report writes retry once and surface a loud notice on    ==="
+echo "=== persistent failure instead of a silent || true                   ==="
+# ===========================================================================
+
+# TC-LIVENESS-070: _liveness_post_marker succeeds on the first attempt ->
+# exactly one itp_post_comment call, no WARNING, returns 0.
+_trace_reset
+log() { _rec log "$@"; }
+itp_post_comment() { _rec itp_post_comment "$@"; return 0; }
+_liveness_post_marker 99 "<!-- marker -->"
+_pm70_rc=$?
+assert_eq "TC-LIVENESS-070a first-attempt success -> exactly one itp_post_comment call" "1" "$(_trace_verbs | grep -c '^itp_post_comment$')"
+assert_eq "TC-LIVENESS-070b first-attempt success -> no WARNING logged" "0" "$(_trace_verbs | grep -c '^log$')"
+assert_eq "TC-LIVENESS-070c first-attempt success -> returns 0" "0" "$_pm70_rc"
+
+# TC-LIVENESS-071: first attempt fails, retry succeeds -> exactly two
+# itp_post_comment calls (both the marker body), no operator notice, returns 0.
+_trace_reset
+_pm71_calls=0
+itp_post_comment() { _rec itp_post_comment "$@"; _pm71_calls=$((_pm71_calls + 1)); [ "$_pm71_calls" -ge 2 ] && return 0; return 1; }
+_liveness_post_marker 99 "<!-- marker -->"
+_pm71_rc=$?
+assert_eq "TC-LIVENESS-071a fail-then-succeed -> exactly two itp_post_comment calls, both the marker" "2" \
+  "$(_trace_all | grep -c 'marker -->')"
+assert_eq "TC-LIVENESS-071b fail-then-succeed -> no operator notice (only the marker body was ever posted)" "0" \
+  "$(_trace_all | grep -c 'liveness watchdog could not record')"
+assert_eq "TC-LIVENESS-071c fail-then-succeed -> returns 0" "0" "$_pm71_rc"
+
+# TC-LIVENESS-072: BOTH attempts fail -> a WARNING is logged AND a loud
+# operator notice is posted as a THIRD itp_post_comment call; returns 1.
+_trace_reset
+itp_post_comment() { _rec itp_post_comment "$@"; return 1; }
+_liveness_post_marker 99 "<!-- marker -->"
+_pm72_rc=$?
+assert_eq "TC-LIVENESS-072a persistent failure -> three itp_post_comment attempts (2 marker + 1 notice)" "3" "$(_trace_verbs | grep -c '^itp_post_comment$')"
+assert_match "TC-LIVENESS-072b persistent failure -> a WARNING is logged" "WARNING.*failed to post the bookkeeping marker" "$(_trace_all)"
+assert_match "TC-LIVENESS-072c persistent failure -> the third call is the loud @REPO_OWNER operator notice" "could not record its bookkeeping marker" "$(_trace_all)"
+assert_eq "TC-LIVENESS-072d persistent failure -> returns 1" "1" "$_pm72_rc"
+
+# TC-LIVENESS-073: _liveness_post_report mirrors the same retry shape (no
+# loud notice — see the helper's own docstring for why the report doesn't
+# need one) — both attempts fail -> exactly 2 calls, one WARNING, returns 1.
+_trace_reset
+itp_post_comment() { _rec itp_post_comment "$@"; return 1; }
+_liveness_post_report 99 "some report text"
+_pr73_rc=$?
+assert_eq "TC-LIVENESS-073a report persistent failure -> exactly two itp_post_comment attempts (no third loud-notice call)" "2" "$(_trace_verbs | grep -c '^itp_post_comment$')"
+assert_match "TC-LIVENESS-073b report persistent failure -> a WARNING is logged" "WARNING.*failed to post the human-readable report" "$(_trace_all)"
+assert_eq "TC-LIVENESS-073c report persistent failure -> returns 1" "1" "$_pr73_rc"
+
+# TC-LIVENESS-074: end-to-end through _liveness_evaluate_issue — when the
+# TIER-1 marker write persistently fails, the dependent tier-1 REPORT is
+# skipped entirely (never posted with stale/absent counter state), proving
+# the tier1 branch's `_liveness_post_marker ... || return 0` short-circuit.
+_reset_stubs
+FP74=$(_liveness_fingerprint pending-dev sha-A 0 "")
+_seq74_comments='[]'
+itp_list_comments() { printf '%s' "$_seq74_comments"; }
+itp_read_task() { printf '%s' '{"labels":["pending-dev"]}'; }
+label_swap() { _rec label_swap "$@"; }
+log() { :; }
+# First 5 ticks succeed normally so the counter reaches 5 (one below notice).
+itp_post_comment() { _rec itp_post_comment "$@"; _seq74_comments=$(jq --arg b "$2" '. + [{"authorKind":"bot","createdAt":"2026-01-01T00:00:00Z","body":$b}]' <<<"$_seq74_comments"); return 0; }
+for _t74 in $(seq 1 5); do
+  _liveness_evaluate_issue 99 issue pending-dev 6 18
+done
+# The 6th tick (tier1 threshold) has EVERY itp_post_comment call fail.
+_trace_reset
+itp_post_comment() { _rec itp_post_comment "$@"; return 1; }
+_liveness_evaluate_issue 99 issue pending-dev 6 18
+assert_eq "TC-LIVENESS-074a tier1 marker persistently fails -> zero report posts (short-circuited)" "0" \
+  "$(_trace_all | grep -c 'reason=liveness-no-progress')"
+assert_eq "TC-LIVENESS-074b tier1 marker write was attempted twice (initial + one retry) despite failing" "2" \
+  "$(_trace_all | grep -cE 'fingerprint=[0-9a-f]+ count=6 tier1=1 tripped=0')"
+
+# ===========================================================================
+echo
+echo "=== TC-LIVENESS-075..078 [codex review, PR #472, round 9 follow-up]: ==="
+echo "=== bare helper calls must not trip set -e and abort the tick        ==="
+# ===========================================================================
+# CRITICAL: this file and dispatcher-tick.sh both run under
+# `set -euo pipefail` in production, but this test harness runs under
+# `set +e` (line 60 above) so it can keep counting PASS/FAIL after an
+# assertion failure. _liveness_post_marker/_liveness_post_report were
+# introduced to RETURN 1 on persistent failure (so the tier1 branch can
+# detect it) — but a BARE call to a function that can return 1, under real
+# `set -e`, aborts the calling function immediately, which then propagates
+# up through run_liveness_watchdog's loop and aborts the ENTIRE dispatcher
+# tick. Every call site EXCEPT the tier1 marker (which is deliberately
+# gated on `|| return 0`) must swallow that non-zero return with `|| true`
+# to preserve the pre-round-9 never-abort-the-tick guarantee. The `set +e`
+# harness above cannot catch this class of regression — sourcing under
+# `set +e` makes every bare call "safe" regardless of whether `|| true` is
+# present. These four cases spawn a FRESH bash subshell with REAL
+# `set -euo pipefail` (mirroring production) to prove the function returns
+# normally instead of aborting.
+
+_sete_probe() {
+  local action_ticks="$1"
+  bash -euo pipefail -c '
+    export REPO=zxkane/autonomous-dev-team REPO_OWNER=zxkane PROJECT_ID=sete-probe-$$ MAX_RETRIES=3 MAX_CONCURRENT=5
+    source "'"$LIB"'"
+    source "'"$LIB_DISPATCH"'"
+    was_just_dispatched() { return 1; }
+    is_within_grace_period() { return 1; }
+    _dispatch_marker_recent() { return 1; }
+    pid_alive() { return 1; }
+    log() { :; }
+    fetch_pr_for_issue() { printf "%s" "{\"headRefOid\":\"sha-A\"}"; }
+    itp_list_comments() { printf "%s" "[]"; }
+    itp_read_task() { printf "%s" "{\"labels\":[\"pending-dev\"]}"; }
+    label_swap() { :; }
+    itp_post_comment() { return 1; }
+    _liveness_evaluate_issue 99 issue pending-dev '"$action_ticks"'
+    echo "REACHED_END"
+  ' 2>/dev/null
+}
+
+assert_eq "TC-LIVENESS-075 none branch: persistent marker-write failure under real set -e does NOT abort the function" "REACHED_END" \
+  "$(_sete_probe '99 6 18')"
+assert_eq "TC-LIVENESS-076 tier2 branch: persistent marker-write failure under real set -e does NOT abort (report still attempted)" "REACHED_END" \
+  "$(_sete_probe '99 18 18')"
+
+# TC-LIVENESS-077/078: same probe, but only the REPORT post fails (the
+# marker succeeds) — isolates the tier1-report and tier2-report `|| true`
+# guards specifically, since TC-075/076 exercise a total itp_post_comment
+# failure that could mask a report-only regression. A prior marker at
+# count=(threshold-1) is SEEDED into itp_list_comments so the fresh
+# evaluation's `count = stored+1` actually LANDS on the tier1/tier2
+# threshold and reaches that branch (a fresh series with no prior marker
+# would take the `none` action regardless of `notice`/`stall`, which would
+# make this probe pass VACUOUSLY without ever exercising the report path).
+_sete_probe_report_only() {
+  local notice="$1" stall="$2" seed_count="$3"
+  bash -euo pipefail -c '
+    export REPO=zxkane/autonomous-dev-team REPO_OWNER=zxkane PROJECT_ID=sete-probe2-$$ MAX_RETRIES=3 MAX_CONCURRENT=5
+    source "'"$LIB"'"
+    source "'"$LIB_DISPATCH"'"
+    was_just_dispatched() { return 1; }
+    is_within_grace_period() { return 1; }
+    _dispatch_marker_recent() { return 1; }
+    pid_alive() { return 1; }
+    log() { :; }
+    fetch_pr_for_issue() { printf "%s" "{\"headRefOid\":\"sha-A\"}"; }
+    itp_read_task() { printf "%s" "{\"labels\":[\"pending-dev\"]}"; }
+    label_swap() { :; }
+    # Seed a prior marker whose fingerprint matches what this evaluation
+    # will freshly compute from (pending-dev, sha-A, 0, ""): the watchdog own
+    # marker is idempotent-pattern-excluded from the count and digest-pattern
+    # excluded from the digest (D3), so a comments array containing ONLY the
+    # prior marker yields the identical fingerprint as an EMPTY comments
+    # array — `_liveness_non_idempotent_count`/`_liveness_marker_digest` both
+    # see it and exclude it either way.
+    _seed_fp=$(_liveness_fingerprint pending-dev sha-A 0 "")
+    _seed_marker=$(_liveness_marker 99 "$_seed_fp" '"$seed_count"' 0 0)
+    itp_list_comments() { printf "%s" "[{\"authorKind\":\"bot\",\"createdAt\":\"2026-01-01T00:00:00Z\",\"body\":\"$(printf "%s" "$_seed_marker" | sed "s/\"/\\\\\"/g")\"}]"; }
+    _sp_n=0
+    itp_post_comment() {
+      _sp_n=$((_sp_n + 1))
+      # Every call whose body starts with the marker HTML-comment prefix
+      # succeeds; every other call (the human-readable report) fails.
+      case "$2" in
+        "<!-- dispatcher-liveness-watchdog:"*) return 0 ;;
+        *) return 1 ;;
+      esac
+    }
+    _liveness_evaluate_issue 99 issue pending-dev '"$notice"' '"$stall"'
+    echo "REACHED_END"
+  ' 2>/dev/null
+}
+
+assert_eq "TC-LIVENESS-077 tier1 branch: marker succeeds, report persistently fails under real set -e -> still does NOT abort" "REACHED_END" \
+  "$(_sete_probe_report_only 6 18 5)"
+assert_eq "TC-LIVENESS-078 tier2 branch: marker succeeds, report persistently fails under real set -e -> still does NOT abort" "REACHED_END" \
+  "$(_sete_probe_report_only 6 18 17)"
+
 echo
 echo "=== Summary ==="
 echo "Passed: $PASS"

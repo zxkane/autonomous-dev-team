@@ -4106,6 +4106,56 @@ was_just_dispatched() {
 # lib-liveness.sh, so the new pending-dev/pending-review -> stalled movement
 # is visible to the spec-drift gate.
 
+# _liveness_post_marker <issue_num> <marker_text> — post the watchdog's own
+# bare bookkeeping marker, retrying once on failure and posting a loud
+# best-effort operator notice if BOTH attempts fail ([codex review, PR #472,
+# round 9 BLOCKING #2]; mirrors the established INV-85 retry-then-notice
+# shape already used for the `no-progress-substantive-attempt:<head>` marker
+# above). Every prior round swallowed a marker-post failure with a bare
+# `itp_post_comment ... || true` — fine for a comment that merely records
+# events for a human, but wrong for THIS comment: it IS the counter/tier1-
+# latch/`tripped`-field persistence mechanism (R4). A silently lost post
+# means the very next tick reads back NOTHING via `_liveness_prior_marker`,
+# `_liveness_next_count` resets to `count=1` under an otherwise-unchanged
+# fingerprint, and the series can never advance past that reset — a
+# self-inflicted instance of the exact "permanent silent park" bug class
+# this watchdog exists to close. Losing a `tripped=1` marker specifically is
+# worse still: a LATER resume tick's cutoff computation
+# (`_liveness_prior_marker`) finds no qualifying `tripped=1` marker at all,
+# falls back to the epoch, and reads the OLD pre-trip marker back as
+# "prior" — reproducing the round-3/6/7/8 immediate-re-trip-on-resume bug via
+# a lost write instead of a design gap. Returns 1 on persistent failure so
+# the caller (see the `tier1` branch below) can skip a dependent report post
+# that would otherwise repeat every tick while the marker keeps failing to
+# land (the marker carries the `tier1=1` latch that suppresses the re-fire).
+_liveness_post_marker() {
+  local issue_num="$1" marker_text="$2"
+  itp_post_comment "$issue_num" "$marker_text" 2>/dev/null && return 0
+  itp_post_comment "$issue_num" "$marker_text" 2>/dev/null && return 0
+  log "  WARNING: issue #${issue_num} liveness watchdog: failed to post the bookkeeping marker after retry — the no-op counter may reset to count=1 next tick (degraded, not a crash; [INV-128])."
+  itp_post_comment "$issue_num" \
+    "⚠️ The liveness watchdog could not record its bookkeeping marker for issue #${issue_num} this tick (GitHub API rejected the comment twice). The no-op counter may reset next tick — a transient degradation, not a stall. If this issue was JUST transitioned to \`stalled\`, the resume-cutoff marker may be missing; please verify before removing the label. @${REPO_OWNER}" \
+    2>/dev/null \
+    || log "  WARNING: issue #${issue_num} liveness watchdog: operator notice for the degraded marker write also failed to post."
+  return 1
+}
+
+# _liveness_post_report <issue_num> <report_text> — post a tier-1/tier-2
+# human-readable report with ONE retry on failure ([codex review, PR #472,
+# round 9 BLOCKING #2]). Unlike `_liveness_post_marker` above, a lost report
+# costs only operator-facing prose — R4's counter/tier1-latch/`tripped` state
+# is carried entirely by the marker, posted (and retried) independently
+# beforehand — so this does not need the marker's loud-notice escalation,
+# just a best-effort retry (mirrors the plentiful existing single-retry
+# `itp_post_comment` call sites elsewhere in this file).
+_liveness_post_report() {
+  local issue_num="$1" report_text="$2"
+  itp_post_comment "$issue_num" "$report_text" 2>/dev/null && return 0
+  itp_post_comment "$issue_num" "$report_text" 2>/dev/null && return 0
+  log "  WARNING: issue #${issue_num} liveness watchdog: failed to post the human-readable report after retry — state (marker/label) already committed; only the operator-facing explanation is missing."
+  return 1
+}
+
 # _liveness_evaluate_issue <issue_num> <kind> <active_label> <notice> <stall>
 #
 # The per-issue orchestration ([R6]): computes the fingerprint, reads back
@@ -4229,7 +4279,18 @@ _liveness_evaluate_issue() {
 
   case "$action" in
     none)
-      itp_post_comment "$issue_num" "$new_marker" 2>/dev/null || true
+      # `|| true`: this file and dispatcher-tick.sh both run under
+      # `set -euo pipefail` — a BARE call to a function that can return 1
+      # (persistent post failure) trips `set -e` and aborts this function,
+      # then propagates up through run_liveness_watchdog's loop and aborts
+      # the ENTIRE dispatcher tick before the metrics-prune tail. The
+      # pre-round-9 code (`itp_post_comment ... || true`) could never
+      # return non-zero, so `set -e` was never a factor; `_liveness_post_marker`
+      # deliberately CAN return 1 (so the tier1 branch below can detect and
+      # act on persistent failure) and every OTHER call site must therefore
+      # explicitly swallow that non-zero return with `|| true` to preserve
+      # the never-abort-the-tick guarantee.
+      _liveness_post_marker "$issue_num" "$new_marker" || true
       ;;
     tier1)
       log "  issue #${issue_num} liveness watchdog: TIER 1 — ${count} consecutive no-op ticks (fingerprint=${fingerprint}) — posting operator escalation"
@@ -4242,8 +4303,23 @@ _liveness_evaluate_issue() {
       # `_LIVENESS_IDEMPOTENT_PATTERN` (lib-liveness.sh) so the report itself
       # never registers as "a new comment" against the fingerprint's own
       # comment-count component on the next tick.
-      itp_post_comment "$issue_num" "$new_marker" 2>/dev/null || true
-      itp_post_comment "$issue_num" "$(cat <<TIER1REPORT
+      #
+      # [codex review, PR #472, round 9 BLOCKING #2] Both posts now retry
+      # once and surface a loud operator notice on persistent failure
+      # (`_liveness_post_marker`/`_liveness_post_report`, defined above) —
+      # a swallowed `|| true` here previously meant the tier1=1 latch could
+      # silently fail to land, letting tier 1 re-fire every tick the
+      # fingerprint stayed frozen instead of firing exactly once (R3). If
+      # the marker write itself fails after retry, skip the report post too
+      # — the counter state didn't advance, so re-posting the same
+      # escalation prose would just repeat every tick until a write
+      # succeeds; that repetition is the marker-failure's own loud notice.
+      _liveness_post_marker "$issue_num" "$new_marker" || return 0
+      # `|| true`: same `set -e` hazard as the `none` branch above —
+      # `_liveness_post_report` can return 1 on persistent failure, and a
+      # bare call would abort this function (and the whole tick) rather
+      # than degrade gracefully to "the report is missing this tick."
+      _liveness_post_report "$issue_num" "$(cat <<TIER1REPORT
 No observable progress for **${count}** ticks on issue #${issue_num} (\`reason=liveness-no-progress\`, [INV-128]):
 - Label: \`${active_label}\`
 - PR head: \`${current_head:-<none>}\`
@@ -4252,7 +4328,7 @@ No observable progress for **${count}** ticks on issue #${issue_num} (\`reason=l
 
 @${REPO_OWNER} this issue may need attention. If this is a legitimate slow wait, any observable change (a comment, a label edit, or a push) resets the clock. Without one, this issue transitions to \`stalled\` after **${stall}** total unchanged ticks.
 TIER1REPORT
-)" 2>/dev/null || true
+)" || true
       ;;
     tier2)
       # Already-stalled race re-check IMMEDIATELY before the transition
@@ -4300,7 +4376,24 @@ TIER1REPORT
       # marker first (a reader sees the bookkeeping comment land, then the
       # narrative), but it is no longer LOAD-BEARING for the cutoff's
       # correctness the way it was pre-round-8.
-      itp_post_comment "$issue_num" "$new_marker" 2>/dev/null || true
+      #
+      # [codex review, PR #472, round 9 BLOCKING #2] `_liveness_post_marker`
+      # retries once and posts a loud operator notice (flagging that the
+      # `tripped=1` resume-cutoff marker may be missing) on persistent
+      # failure — see that helper's docstring. UNLIKE the tier1 branch
+      # above, the report post below is NOT gated on the marker's success:
+      # `label_swap` already committed the `stalled` transition
+      # unconditionally (this is irreversible for this tick), so the report
+      # is the operator's one explanation for why the issue just halted —
+      # losing it on top of a lost marker would leave a `stalled` issue with
+      # zero context. Best-effort via its own retry
+      # (`_liveness_post_report`) either way. `|| true` on BOTH calls here
+      # (and below) for the SAME `set -e` reason as the `none`/`tier1`
+      # branches — `label_swap` already landed, so a persistently failing
+      # marker or report must degrade to "missing this tick's audit trail,"
+      # never abort the function (which would also skip the report below,
+      # or — for the report — abort the whole dispatcher tick).
+      _liveness_post_marker "$issue_num" "$new_marker" || true
 
       local pointer
       pointer=$(_liveness_newest_pointer "$comments_json")
@@ -4311,7 +4404,7 @@ TIER1REPORT
       # docstring). Kept as a single-sourced constant purely so the report's
       # heading text has one place to edit, not because a mismatch here
       # could reopen a cutoff bug the way it could pre-round-8.
-      itp_post_comment "$issue_num" "$(cat <<TIER2REPORT
+      _liveness_post_report "$issue_num" "$(cat <<TIER2REPORT
 ${_LIVENESS_TIER2_HEADING} (\`reason=liveness-timeout\`, [INV-128])
 
 This issue's observable state (label + PR head + non-idempotent comments + marker set) has not changed for **${count}** consecutive dispatcher ticks — well past the **${stall}**-tick stall threshold.
@@ -4331,7 +4424,7 @@ This issue's observable state (label + PR head + non-idempotent comments + marke
 
 @${REPO_OWNER} please investigate — this is the class-level backstop (a specific breaker for this park shape may not exist yet). To resume: fix per the evidence above, then remove the \`stalled\` label.
 TIER2REPORT
-)" 2>/dev/null || true
+)" || true
       ;;
   esac
 }

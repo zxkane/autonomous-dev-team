@@ -213,10 +213,39 @@ _liveness_strict_author_flag() {
 # the caller. Relies on the itp_list_comments contract (INV-90) that `body`
 # is always a string, never JSON null — a null would error `test()` under
 # `2>/dev/null` and collapse the count to 0 (bias to MISS, not a crash).
+#
+# [codex review, PR #472, round 9 BLOCKING #1] [operator guidance] Prior to
+# this fix, this function had NO authorKind gate at all: a human comment that
+# merely wraps a known token in a backtick span or an HTML-comment opening
+# (e.g. `` `reason=liveness-timeout` `` in prose, or a quoted `<!--
+# dispatcher-token: ... -->`) satisfied the round-8 wrapper anchor exactly as
+# well as a genuine producer's comment, so it was (wrongly) treated as an
+# IDEMPOTENT notice and excluded from the count — masking real progress
+# ("fail to reset the clock", per the round-9 finding). The fix gates the
+# PATTERN MATCH's trustworthiness, not the comment's membership in the count:
+# a comment counts as non-idempotent (genuine progress) if EITHER its body
+# doesn't match any known grammar, OR it matches but — in `GH_AUTH_MODE=app`
+# only, via `_liveness_strict_author_flag` — was posted by an untrusted
+# (`authorKind == "human"`) author, so the "this is a genuine idempotent
+# notice" claim itself is not trusted and the comment is counted as real
+# progress instead. This is DELIBERATELY the mirror image of
+# `_liveness_marker_digest`'s own gate (which excludes an untrusted match
+# from registering PRESENCE) — here an untrusted match must NOT be excluded
+# from the comment universe entirely (that would just silently drop the
+# comment, undercounting genuine human traffic that happens to quote a
+# token), it must be RECLASSIFIED as counted. In `GH_AUTH_MODE=token`
+# (`strict=="0"`), the added disjunct is always false, so behavior is
+# UNCHANGED from pre-round-9: the pattern match alone decides, and the
+# documented token-mode residual (a human's wrapped-token comment is treated
+# as idempotent, same as a genuine one) is unaffected — token mode has no
+# actor signal to add (INV-105's round-14 precedent). Pinned by
+# TC-LIVENESS-067..069.
 _liveness_non_idempotent_count() {
   local comments_json="${1:-[]}"
-  jq -r --arg pat "$_LIVENESS_IDEMPOTENT_PATTERN" \
-    '[.[] | select(.body | test($pat) | not)] | length' \
+  local _strict
+  _strict=$(_liveness_strict_author_flag)
+  jq -r --arg pat "$_LIVENESS_IDEMPOTENT_PATTERN" --arg strict "$_strict" \
+    '[.[] | select((.body | test($pat) | not) or (($strict == "1") and ((.authorKind // "human") == "human")))] | length' \
     <<<"$comments_json" 2>/dev/null || echo 0
 }
 
