@@ -18,14 +18,17 @@ escalation, and after M further unchanged ticks (M > N) is unconditionally trans
 | # | Question | Decision |
 |---|---|---|
 | D1 | What counts as "no progress"? | A fingerprint over 4 observable components: active label, PR head SHA (or empty), a count of comments MINUS known-idempotent-notice matches, and a digest of which known marker grammars are present. Unchanged fingerprint across a tick = no-op tick. |
-| D2 | How is the counter persisted across tick processes? | A single HTML-comment marker (`<!-- dispatcher-liveness-watchdog: issue=<N> fingerprint=<hash> count=<n> tier1=<0\|1> -->`), posted/updated every evaluated tick — mirrors INV-122's "computed and posted on EVERY round, not only on a trip" requirement. On an ordinary counting tick (below tier 1), the posted comment is the BARE marker with no other text (the codebase already has this pattern: `emit_verdict_trailer` posts a separate bare comment whose body is JUST the trailer line, INV-105's round-13 fix). Read back via the LAST `authorKind != "human"` comment matching the grammar (unbounded scan, mirrors INV-105/INV-122). |
+| D2 | How is the counter persisted across tick processes? | A single HTML-comment marker (`<!-- dispatcher-liveness-watchdog: issue=<N> fingerprint=<hash> count=<n> tier1=<0\|1> -->`), posted/updated every evaluated tick — mirrors INV-122's "computed and posted on EVERY round, not only on a trip" requirement. **[operator guidance, PR #472 round 6]** The posted comment is ALWAYS the BARE marker with no other text, on EVERY path — `none`, `tier1`, AND `tier2` alike (the pre-round-6 design embedded the marker as the first line of the tier1/tier2 report; round 6 splits them into two separate `itp_post_comment` calls, marker first) — mirroring the codebase's existing `emit_verdict_trailer` pattern (a separate bare comment whose body is JUST the trailer line, INV-105's round-13 fix) unconditionally rather than only below tier 1. Read back via a WHOLE-BODY structurally-anchored scan (round 6, see D10), gated by `authorKind != "human"` ONLY in `GH_AUTH_MODE=app` (round 6, see D11). |
 | D3 | Does the watchdog's own bookkeeping comment count as progress? | No — its marker grammar (`dispatcher-liveness-watchdog:`) is added to the SAME idempotent-exclusion list the tier-1 comment needs (R1). Without this the watchdog would defeat itself: its own per-tick post would look like "a new comment" and the fingerprint's comment-count component would grow every tick, so two consecutive ticks would never look equal. |
 | D4 | Which liveness predicate for the "wrapper alive" exemption? | Reuse, never reinvent: `_dispatch_marker_recent` (fresh-dispatch-marker check) + `pid_alive <kind> <issue>`, where `<kind>` is `issue` for a `pending-dev` candidate and `review` for a `pending-review` candidate — the SAME two primitives `may_stall_now` already composes, just parameterized by which wrapper kind is relevant to the label actually being evaluated (a pending-dev issue's live-wrapper question is about the DEV pid file, not the review one). |
 | D5 | Threshold validation shape? | Mirror `_gate_breaker_threshold`'s regex-then-fallback-with-warning (stderr-only, never through `log()`, so the numeric capture isn't corrupted). `LIVENESS_STALL_TICKS` additionally validates `> LIVENESS_NOTICE_TICKS` (itself validated `>= 2` first); if the relative constraint fails even after each falls back to its own default, `LIVENESS_STALL_TICKS` falls back to its own default 18 (see D9 — an earlier revision clamped to `notice+1` instead, which is wrong). |
 | D6 | Scope this iteration? | `pending-dev` and `pending-review` only (R2). `in-progress`/`reviewing` are already covered by Step 5b's DEAD-process scans; unifying the two mechanisms risks double-escalation and is deferred. |
 | D7 | Already-stalled race? | Re-check `itp_read_task` labels for `stalled` immediately before the tier-2 transition (mirrors INV-122's `_gf_already_stalled` check) — a specific breaker may have won the race between candidate-list fetch and this evaluation. |
-| D8 | [codex review, PR #472, BLOCKING #2] Resume-after-un-stall re-trip? | The tier-2 report EMBEDS its own marker (D2/R4 requires posting on every evaluated tick, including the trip tick). D2's original "read back the LAST matching marker" has no cutoff, so the tick right after an operator removes `stalled` with the fingerprint otherwise unchanged would read that trip report's own high-count marker back and immediately re-trip. Fixed with `_liveness_prior_marker`: a cutoff-then-scan (mirrors `_review_cap_prior_marker`, itself mirroring INV-05's "Marking as stalled" cutoff) that excludes any marker at or before the latest "Liveness watchdog tripped" report (strict `>`, so the trip report's own embedded marker — `createdAt` EQUAL to the cutoff — is excluded while a genuinely later post-resume marker still qualifies). |
+| D8 | [codex review, PR #472, BLOCKING #2] Resume-after-un-stall re-trip? | At the time this was fixed, the tier-2 report EMBEDDED its own marker (D2/R4 requires posting on every evaluated tick, including the trip tick), and D2's original "read back the LAST matching marker" had no cutoff — so the tick right after an operator removed `stalled` with the fingerprint otherwise unchanged would read that trip report's own high-count marker back and immediately re-trip. Fixed with `_liveness_prior_marker`: a cutoff-then-scan (mirrors `_review_cap_prior_marker`, itself mirroring INV-05's "Marking as stalled" cutoff) that excludes any marker at or before the latest "Liveness watchdog tripped" report (strict `>`). **[round 6 update]** D2 subsequently stopped embedding the marker at all — the marker is now ALWAYS a comment distinct from, and posted STRICTLY BEFORE, the report (never the reverse). The cutoff-then-scan mechanism here is UNCHANGED, but the reason the exclusion holds shifted: pre-round-6 it relied on the trip report's OWN embedded marker sharing the report's exact `createdAt` (equality at the cutoff); post-round-6 it relies on POST ORDER — the marker's `createdAt` is now strictly earlier than the report's, so it is excluded by the cutoff's strict `>` for the same structural reason, without depending on same-second timestamp coincidence. See D10/D11 for the anchor and authorKind changes this same round made alongside it. |
 | D9 | [codex review, PR #472, BLOCKING #3] Invalid `stall <= notice` pair — clamp or fall back to default? | Fall back to the documented default (18), not an unconditional `notice+1` clamp. The requirements and `autonomous.conf.example` both say an inverted/invalid pair falls back to defaults; clamping to `notice+1` instead silently turns a config typo (e.g. `LIVENESS_NOTICE_TICKS=6 LIVENESS_STALL_TICKS=6`) into an aggressive 7-tick stall threshold — a misconfiguration becoming a false-stall path for otherwise-legitimate slow waits, exactly the failure mode two-tier escalation exists to avoid. One exception: a validly-configured `LIVENESS_NOTICE_TICKS >= 18` means the default 18 itself would fail `stall > notice`, so the fallback escalates to `notice+1` only in that case, preserving the invariant for every caller. |
+| D10 | [operator guidance, PR #472 round 6] The whole-body anchor tightens beyond the round-5 forgery gap — does it also reject the OLD embedded-marker shape? | Yes, and that is now load-bearing rather than incidental. Switching the marker to `[[:space:]]*$` (whole-body, round 6) instead of `($\|\n)` (marker-then-optional-more, pre-round-6) means a comment shaped like the pre-round-6 tier1/tier2 embed (marker line, then report prose) is now REJECTED by the anchor outright — not merely "still correctly excluded by the cutoff" as before. This is safe specifically BECAUSE D2 (round 6) stopped ever producing that shape: a genuine marker's entire body is now always JUST the marker, so tightening the anchor to match introduces no false negative against genuine traffic, only against forgeries and (as a side effect) the retired pre-round-6 embed shape. |
+| D11 | [operator guidance, PR #472 round 6] Round 2 (BLOCKING: unconditional `authorKind != "human"` makes the watchdog inert in token mode) and round 5 (BLOCKING: no `authorKind` gate lets a human forge a trip) pull in opposite directions — how are both satisfied? | They cannot both be satisfied by ONE unconditional gate; tightening/loosening a single `authorKind != "human"` check just re-opens whichever round's bug the other round's fix required. Resolved by mirroring the SAME two-part pattern already established at `classify_recent_review_verdict` ([#389]/[#393]): (1) the whole-body structural anchor (D10) carries authenticity in EVERY mode — this is what round 2 depends on continuing to work; (2) `authorKind != "human"` is layered on top ONLY when `GH_AUTH_MODE=app` (`_liveness_strict_author_flag`) — this is what closes round 5's gap, but ONLY in app mode, where the genuine wrapper's REST-derived `authorKind` (`user.type == "Bot"`, independent of whether `BOT_LOGIN` itself ever resolves) reliably distinguishes it from a human forger. The token-mode residual round 5 flagged (a human posting a byte-for-byte bare marker) remains open in token mode specifically BECAUSE token mode has no actor signal to add — this is the SAME class of accepted exposure INV-105's round-14 finding already documents elsewhere in this codebase, not a new gap. Its blast radius is bounded separately by D12's count cap. |
+| D12 | [operator guidance, PR #472 round 6, defense-in-depth] Given D11 leaves a token-mode forgery residual open, is there anything cheap that bounds its damage? | Cap the count `_liveness_next_count` accepts at `LIVENESS_STALL_TICKS`. This is NOT a second authentication layer (a forger who can already construct a fingerprint-matching bare marker simply picks `count = stall_ticks - 1` and the cap does nothing to stop the next genuine no-op tick from tripping tier 2) — it bounds how far an absurd forged value (`count=999999999`) can propagate into the tier-action decision and the operator-facing report text, rather than surfacing verbatim as a meaningless, alarming number. Applied ONLY after the fingerprint-match gate — a mismatched fingerprint still resets to `count=1` regardless of any forged value, capped or not. |
 
 ## Fingerprint
 
@@ -39,16 +42,21 @@ pattern list (`_LIVENESS_IDEMPOTENT_MARKERS`) covering `stale-verdict:`, `INV-12
 `INV-12-no-pr-fresh-dev:`, `INV-35-fresh-dev:`, `no-progress-substantive(-attempt)?:`,
 `non-actionable-finding:`, `self-heal-lost-session:`, `self-heal-non-substantive:`,
 `crashed-session-retry:`, `dispatcher-convergence-breaker:`, `dispatcher-gate-fail-breaker:`,
-and `dispatcher-liveness-watchdog:` (this watchdog's own marker, D3). `marker_digest` scans
-the SAME pattern list and joins the sorted subset actually present (authorKind-gated) — a
-NEW grammar appearing changes the digest even though it may already be excluded from the
-count (e.g. a FIRST `self-heal-lost-session:` marker is progress; the SAME one persisting
-next tick is not).
+`dispatcher-liveness-watchdog:` (this watchdog's own marker, D3), and — **[round 6]** since
+the tier1/tier2 reports are now separate comments from the marker (D2) —
+`reason=liveness-no-progress`/`reason=liveness-timeout` (the report text itself, so its own
+posting never registers as progress against itself, the same self-pollution class D3 fixes
+for the marker). `marker_digest` scans the SAME pattern list MINUS the watchdog's own marker
+grammar and joins the sorted subset actually present (`authorKind`-gated via
+`_liveness_strict_author_flag`, D11 — app-mode-only) — a NEW grammar appearing changes the
+digest even though it may already be excluded from the count (e.g. a FIRST
+`self-heal-lost-session:` marker is progress; the SAME one persisting next tick is not).
 
 ## Counter + tier action (pure)
 
 ```
-_liveness_next_count(stored_marker, fingerprint)  = stored.count+1 if stored.fingerprint==fingerprint else 1
+_liveness_next_count(stored_marker, fingerprint, stall_ticks?) = min(stored.count+1, stall_ticks) if stored.fingerprint==fingerprint else 1
+                                                                  (stall_ticks omitted -> uncapped, D12)
 _liveness_next_tier1(stored_marker, fingerprint)  = stored.tier1   if stored.fingerprint==fingerprint else 0
 _liveness_tier_action(count, tier1, notice, stall):
   count >= stall                    -> "tier2"
@@ -72,13 +80,18 @@ tier-1 warning even on a HEAD/label that previously tripped tier 1 before recove
 have dispatched some of these issues away) already exclude `approved`/`stalled` — the
 terminal-label exemption is structural, not a separate runtime check.
 
-## Side effects — exactly one comment per evaluated issue per tick
+## Side effects — comments per evaluated issue per tick
 
-| Action | Label transition | Comment |
+[operator guidance, PR #472 round 6] The marker is now ALWAYS its own separate comment,
+posted BEFORE any human-readable report — never embedded as the report's first line. `none`
+still posts exactly one comment (the bare marker); `tier1`/`tier2` each post exactly TWO
+(the bare marker, then the report) — never a single comment combining both.
+
+| Action | Label transition | Comment(s), in post order |
 |---|---|---|
-| `none` | none | bare marker only (D2/D3) |
-| `tier1` | none | human-readable escalation + `@REPO_OWNER` + marker (`tier1=1`) |
-| `tier2` | `pending-{dev,review} -> stalled` (transition FIRST, mirrors INV-105's TOCTOU fix) | structured `reason=liveness-timeout` report + marker |
+| `none` | none | (1) bare marker only (D2/D3) |
+| `tier1` | none | (1) bare marker (`tier1=1`), THEN (2) human-readable escalation + `@REPO_OWNER` |
+| `tier2` | `pending-{dev,review} -> stalled` (transition FIRST, mirrors INV-105's TOCTOU fix) | (1) bare marker, THEN (2) structured `reason=liveness-timeout` report |
 
 ## Guards preserved
 

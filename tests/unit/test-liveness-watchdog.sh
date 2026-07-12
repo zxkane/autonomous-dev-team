@@ -324,6 +324,17 @@ tier1_count=$(jq '[.[] | select(.body | contains("reason=liveness-no-progress"))
 assert_eq "TC-LIVENESS-038 6 no-op ticks -> tier-1 comment posted exactly once" "1" "$tier1_count"
 assert_no_match "TC-LIVENESS-038b no label_swap yet" "^label_swap" "$(_trace_all)"
 
+# TC-LIVENESS-038c/d [operator guidance, round 6]: the tier-1 report is now a
+# SEPARATE comment from the bare marker — the report body itself no longer
+# starts with the marker's `<!--` prefix (it starts with the human-readable
+# "No observable progress" text), and a distinct bare-marker comment exists
+# in the same tick's output.
+tier1_report_body=$(jq -r '[.[] | select(.body | contains("reason=liveness-no-progress"))] | last | .body' <<<"$_seq_comments")
+assert_no_match "TC-LIVENESS-038c tier-1 report body does NOT start with the marker prefix (split into two comments)" \
+  "^<!-- dispatcher-liveness-watchdog:" "$tier1_report_body"
+bare_marker_count_at_tick6=$(jq --arg fp "$FP" '[.[] | select(.body | test("^<!-- dispatcher-liveness-watchdog: issue=99 fingerprint=" + $fp + " count=6 tier1=1 -->[[:space:]]*$"))] | length' <<<"$_seq_comments")
+assert_eq "TC-LIVENESS-038d a distinct bare tier1=1 marker comment exists alongside the tier-1 report" "1" "$bare_marker_count_at_tick6"
+
 _liveness_evaluate_issue 99 issue pending-dev 6 18
 tier1_count_after=$(jq '[.[] | select(.body | contains("reason=liveness-no-progress"))] | length' <<<"$_seq_comments")
 assert_eq "TC-LIVENESS-039 tick 7 (tier1 already fired) -> no second tier-1 comment" "1" "$tier1_count_after"
@@ -334,6 +345,26 @@ done
 tier2_count=$(jq '[.[] | select(.body | contains("reason=liveness-timeout"))] | length' <<<"$_seq_comments")
 assert_eq "TC-LIVENESS-040a 18 no-op ticks -> exactly one reason=liveness-timeout report" "1" "$tier2_count"
 assert_match "TC-LIVENESS-040b stalled transition performed" "^label_swap${US}99${US}pending-dev${US}stalled$" "$(_trace_all)"
+
+# TC-LIVENESS-040e/f/g [operator guidance, round 6]: same split for tier 2 —
+# the trip report is a separate comment from the bare marker, and the marker
+# is posted BEFORE the report in the SAME evaluation's post ORDER (array
+# index, not createdAt — the test stub stamps every posted comment with an
+# identical fixed createdAt, so index is the only signal available here; the
+# real itp_post_comment leaf timestamps each call with the actual post time).
+# Post order matters: it is what makes the NEXT tick's cutoff-scan exclude
+# the count=18 marker without depending on a same-second timestamp tie.
+tier2_report_body=$(jq -r '[.[] | select(.body | contains("reason=liveness-timeout"))] | last | .body' <<<"$_seq_comments")
+assert_no_match "TC-LIVENESS-040e tier-2 report body does NOT start with the marker prefix (split into two comments)" \
+  "^<!-- dispatcher-liveness-watchdog:" "$tier2_report_body"
+bare_marker_count_at_tick18=$(jq --arg fp "$FP" '[.[] | select(.body | test("^<!-- dispatcher-liveness-watchdog: issue=99 fingerprint=" + $fp + " count=18 tier1=1 -->[[:space:]]*$"))] | length' <<<"$_seq_comments")
+assert_eq "TC-LIVENESS-040f a distinct bare count=18 marker comment exists alongside the tier-2 report" "1" "$bare_marker_count_at_tick18"
+marker_then_report=$(jq --arg fp "$FP" '
+  ([to_entries[] | select(.value.body | test("^<!-- dispatcher-liveness-watchdog: issue=99 fingerprint=" + $fp + " count=18 tier1=1 -->[[:space:]]*$")) | .key] | last) as $mi
+  | ([to_entries[] | select(.value.body | contains("reason=liveness-timeout")) | .key] | last) as $ri
+  | $mi < $ri
+' <<<"$_seq_comments")
+assert_eq "TC-LIVENESS-040g the count=18 marker is posted BEFORE the trip report in this evaluation" "true" "$marker_then_report"
 
 # TC-LIVENESS-040c/d: pending-review mirror — the OTHER new declared movement
 # (liveness-watchdog-stall-pending-review) must actually fire, not just be
@@ -434,24 +465,33 @@ if [ -n "$_saved_bot_login44" ]; then BOT_LOGIN="$_saved_bot_login44"; fi
 echo
 echo "=== TC-LIVENESS-046..049: prior-marker cutoff (resume-after-un-stall) ==="
 # ===========================================================================
-# [codex review, PR #472, BLOCKING #2] The tier-2 TIER2REPORT heredoc EMBEDS
-# its own dispatcher-liveness-watchdog marker (R4 requires posting on EVERY
-# evaluated tick, including the trip tick). Without a cutoff, an operator who
-# fixes the park and removes `stalled` (re-arming via Step 2) with an
-# otherwise-unchanged fingerprint would have the very next evaluation read
-# that OLD trip report's marker back (high count, tier1=1) and immediately
-# re-trip tier 2 again. These are BEHAVIORAL tests against the extracted pure
-# function `_liveness_prior_marker` with constructed fixtures — not wiring
-# greps — so a mutation on the cutoff comparison (e.g. `>` -> `>=`) or the
-# trip-heading string actually fails a test.
+# [codex review, PR #472, BLOCKING #2] At the time this was fixed, the tier-2
+# TIER2REPORT heredoc EMBEDDED its own dispatcher-liveness-watchdog marker (R4
+# requires posting on EVERY evaluated tick, including the trip tick). Without
+# a cutoff, an operator who fixes the park and removes `stalled` (re-arming
+# via Step 2) with an otherwise-unchanged fingerprint would have the very next
+# evaluation read that OLD trip report's marker back (high count, tier1=1)
+# and immediately re-trip tier 2 again. [round 6] Production no longer embeds
+# the marker this way (it is always its own separate comment posted strictly
+# BEFORE the report — see TC-040e/f/g and TC-045i/j) — but these fixtures
+# still deliberately construct the embedded shape as a synthetic stress case
+# against the extracted pure function `_liveness_prior_marker` itself: the
+# cutoff-then-scan logic must exclude ANY marker at-or-before the trip
+# heading's timestamp, regardless of what produced that shape. These are
+# BEHAVIORAL tests with constructed fixtures — not wiring greps — so a
+# mutation on the cutoff comparison (e.g. `>` -> `>=`) or the trip-heading
+# string actually fails a test.
 
 fp46=$(_liveness_fingerprint pending-dev sha-A 0 "")
 trip_marker46=$(_liveness_marker 99 "$fp46" 18 1)
 
-# TC-LIVENESS-046: the crux self-referential case. A trip report at T1 EMBEDS
-# its own marker (count=18) — exactly how the TIER2REPORT heredoc renders it.
-# Without the cutoff, the next evaluation on the SAME (post-resume, unchanged)
-# fingerprint would read that T1 marker back and immediately re-trip.
+# TC-LIVENESS-046: the crux self-referential case — a constructed fixture
+# comment at T1 whose body is a marker (count=18) followed by the trip
+# heading on a later line (the shape production used to emit pre-round-6;
+# kept here as a stress case for the pure helper, see the group header
+# above). Without the cutoff, the next evaluation on the SAME (post-resume,
+# unchanged) fingerprint would read that T1 marker back and immediately
+# re-trip.
 comments46=$(jq -n --arg m "$trip_marker46" '
   [{"authorKind":"bot","createdAt":"2026-01-01T10:00:00Z",
     "body":($m + "\n## Liveness watchdog tripped — halting a silently-parked issue")}]
@@ -524,6 +564,103 @@ comments50=$(jq -n --arg m1 "$trip_marker50a" --arg p "$post_resume_marker50" --
 ')
 assert_eq "TC-LIVENESS-050 second trip cycle: cutoff tracks the LATEST trip (T3), not the first (T1) — no qualifying marker after T3" "" \
   "$(_liveness_prior_marker "$comments50" 0)"
+
+# ===========================================================================
+echo
+echo "=== TC-LIVENESS-051..058 [operator guidance, round 6]: whole-body anchor, ==="
+echo "=== app-mode authorKind gate, and count-cap defense-in-depth           ==="
+# ===========================================================================
+
+# TC-LIVENESS-051: the whole-body anchor rejects the OLD pre-round-6 shape —
+# a marker followed by trailing report prose on later lines, with NO trip
+# heading at all (so the cutoff logic can't be what's excluding it). Before
+# round 6 this exact shape was the tier1/tier2 post itself and WAS accepted
+# (`($|\n)` tolerated trailing content); after round 6 the marker is never
+# posted with trailing prose in the same comment, so a comment shaped like
+# the old embed must now be rejected outright — regression pin against a
+# `[[:space:]]*$` -> `($|\n)` revert.
+fp51=$(_liveness_fingerprint pending-dev sha-A 0 "")
+old_style_embed51=$(_liveness_marker 99 "$fp51" 12 1)
+comments51=$(jq -n --arg m "$old_style_embed51" '
+  [{"authorKind":"bot","createdAt":"2026-01-01T09:00:00Z",
+    "body":($m + "\nNo observable progress for 12 ticks — some other trailing prose, no trip heading")}]
+')
+assert_eq "TC-LIVENESS-051 whole-body anchor rejects a marker-plus-trailing-prose shape (the pre-round-6 embed)" "" \
+  "$(_liveness_prior_marker "$comments51" 0)"
+
+# TC-LIVENESS-052: the whole-body anchor STILL accepts the marker with only
+# trailing whitespace/newline (GitHub commonly appends a trailing newline to
+# posted comment bodies) — `[[:space:]]*$` must not be so strict it rejects
+# the genuine bare-marker post itself.
+bare52=$(_liveness_marker 99 "$fp51" 4 0)
+comments52=$(jq -n --arg m "$bare52" '[{"authorKind":"bot","createdAt":"2026-01-01T09:00:00Z","body":($m + "\n")}]')
+assert_eq "TC-LIVENESS-052 whole-body anchor still accepts the bare marker plus a trailing newline" "$bare52" \
+  "$(_liveness_prior_marker "$comments52" 0)"
+
+# TC-LIVENESS-053/054 [operator guidance, round 6]: GH_AUTH_MODE=app
+# authorKind gate. In app mode the genuine wrapper posts under a GitHub App
+# identity (authorKind=bot); a forged bare marker posted by a human collaborator
+# must now be REJECTED in app mode specifically (closing the round-5 [BLOCKING]
+# gap that a bare structural anchor alone cannot close) — WITHOUT reintroducing
+# the round-2 [BLOCKING] token-mode-inert bug (TC-LIVENESS-044c/d above pin that
+# the default/token mode is UNCHANGED).
+_saved_gh_auth_mode53="${GH_AUTH_MODE:-}"
+
+GH_AUTH_MODE=app
+fp53=$(_liveness_fingerprint pending-dev sha-A 0 "")
+forged_bare53=$(_liveness_marker 99 "$fp53" 17 1)
+comments53=$(jq -n --arg m "$forged_bare53" '[{"authorKind":"human","createdAt":"2026-01-01T09:00:00Z","body":$m}]')
+assert_eq "TC-LIVENESS-053 GH_AUTH_MODE=app: a forged bare marker from a human is rejected by the authorKind gate" "" \
+  "$(_liveness_prior_marker "$comments53" "$(_liveness_strict_author_flag)")"
+
+comments54=$(jq -n --arg m "$forged_bare53" '[{"authorKind":"bot","createdAt":"2026-01-01T09:00:00Z","body":$m}]')
+assert_eq "TC-LIVENESS-054 GH_AUTH_MODE=app: the SAME bare marker from a bot/App identity is accepted" "$forged_bare53" \
+  "$(_liveness_prior_marker "$comments54" "$(_liveness_strict_author_flag)")"
+
+if [ -n "$_saved_gh_auth_mode53" ]; then GH_AUTH_MODE="$_saved_gh_auth_mode53"; else unset GH_AUTH_MODE; fi
+
+# TC-LIVENESS-055: `_liveness_strict_author_flag` itself — the single source
+# of truth the two call sites (_liveness_evaluate_issue's marker read,
+# _liveness_marker_digest) both delegate to.
+assert_eq "TC-LIVENESS-055a GH_AUTH_MODE unset -> token-mode default -> flag=0" "0" \
+  "$(GH_AUTH_MODE= bash -c 'unset GH_AUTH_MODE; source "'"$LIB"'"; _liveness_strict_author_flag')"
+assert_eq "TC-LIVENESS-055b GH_AUTH_MODE=token -> flag=0" "0" \
+  "$(GH_AUTH_MODE=token bash -c 'source "'"$LIB"'"; _liveness_strict_author_flag')"
+assert_eq "TC-LIVENESS-055c GH_AUTH_MODE=app -> flag=1" "1" \
+  "$(GH_AUTH_MODE=app bash -c 'source "'"$LIB"'"; _liveness_strict_author_flag')"
+
+# TC-LIVENESS-056/057 [operator guidance, round 6, defense-in-depth]: the
+# _liveness_next_count cap. A forged marker at an absurd count must never
+# propagate past LIVENESS_STALL_TICKS into the tier-action decision or the
+# emitted marker text.
+m56=$(_liveness_marker 99 "$fp_base" 999999 1)
+assert_eq "TC-LIVENESS-056 an absurd stored count is capped at stall_ticks (18), not 1000000" "18" \
+  "$(_liveness_next_count "$m56" "$fp_base" 18)"
+
+assert_eq "TC-LIVENESS-057a without a stall_ticks arg, the increment is uncapped (back-compat for direct pure-helper use)" "1000000" \
+  "$(_liveness_next_count "$m56" "$fp_base")"
+
+# A count that would land BELOW stall_ticks after the +1 must be completely
+# unaffected by the cap (the cap is a ceiling, not a floor or a rewrite).
+m57=$(_liveness_marker 99 "$fp_base" 5 0)
+assert_eq "TC-LIVENESS-057b a count that lands below stall_ticks after +1 is untouched by the cap" "6" \
+  "$(_liveness_next_count "$m57" "$fp_base" 18)"
+
+# TC-LIVENESS-058: end-to-end through _liveness_evaluate_issue — a forged
+# bare marker at count=999999 on a FRESH (never-seen) fingerprint must still
+# reset to count=1 (the anchor/fingerprint-match gate runs BEFORE the cap
+# ever applies — the cap only bounds an ALREADY-matching series), proving the
+# cap is genuinely defense-in-depth and not a replacement for the anchor.
+_reset_stubs
+fp58=$(_liveness_fingerprint pending-dev sha-A 0 "")
+forged58=$(_liveness_marker 99 "different-fingerprint-entirely" 999999 1)
+itp_list_comments() { printf '%s' "[{\"authorKind\":\"human\",\"createdAt\":\"2026-01-01T00:00:00Z\",\"body\":\"${forged58//\"/\\\"}\"}]"; }
+itp_read_task() { printf '%s' '{"labels":["pending-dev"]}'; }
+label_swap() { _rec label_swap "$@"; }
+itp_post_comment() { _rec itp_post_comment "$@"; }
+_liveness_evaluate_issue 99 issue pending-dev 6 18
+assert_no_match "TC-LIVENESS-058a a fingerprint-mismatched forged marker never causes an immediate tier2" "^label_swap" "$(_trace_all)"
+assert_match "TC-LIVENESS-058b fingerprint mismatch resets to count=1 regardless of the forged marker's count" "count=1 tier1=0" "$(_trace_all)"
 
 echo
 echo "=== Summary ==="

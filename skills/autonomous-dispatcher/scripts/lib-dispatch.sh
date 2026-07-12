@@ -4156,46 +4156,43 @@ _liveness_evaluate_issue() {
   # (lib-liveness.sh) — the CUTOFF-then-scan pure helper, mirroring
   # `_review_cap_prior_marker`'s own cutoff convention. The LAST comment
   # STRUCTURALLY anchored on the exact grammar `_liveness_marker` itself
-  # emits — either the WHOLE body (the bare "none"-tier post) or the marker
-  # as the FIRST LINE followed by more report prose (the tier1/tier2 posts;
-  # see the TIER1REPORT/TIER2REPORT heredocs below) — STRICTLY AFTER the
-  # latest tier-2 trip report ("Liveness watchdog tripped"), if any.
-  # Anchoring at both `^` and `($|\n)` rejects a forgery that embeds the
-  # marker text ANYWHERE inside a larger human comment; the cutoff rejects
-  # the trip report's OWN embedded marker specifically — [codex review, PR
-  # #472, BLOCKING #2] without it, an operator who fixes the park and
+  # emits — [operator guidance, round 6] its ENTIRE body, now ALWAYS: round 6
+  # stopped embedding the marker as the first line of the tier1/tier2 report
+  # (see the posting sequence below) specifically so `_liveness_prior_marker`
+  # can use a WHOLE-BODY anchor instead of the old "marker line, then
+  # optionally more prose" `($|\n)` form — mirrors
+  # `classify_recent_review_verdict`'s own whole-body `_anchored_trailer_re`.
+  # The scan is STRICTLY AFTER the latest tier-2 trip report's heading
+  # ("Liveness watchdog tripped"), if any — see [codex review, PR #472,
+  # BLOCKING #2]: without this cutoff, an operator who fixes the park and
   # removes `stalled` (re-arming via Step 2) with an otherwise-unchanged
-  # fingerprint would have the very next evaluation read that OLD trip
-  # report's high count/tier1=1 marker back and immediately re-trip tier 2
-  # again, instead of starting a fresh liveness episode.
+  # fingerprint would have the very next evaluation read that OLD trip's
+  # marker back and immediately re-trip tier 2 again, instead of starting a
+  # fresh liveness episode. The tier-2 posting sequence below (marker BEFORE
+  # the trip report) guarantees the marker's `createdAt` never exceeds the
+  # cutoff it would itself set, so this exclusion holds without relying on
+  # same-second timestamp coincidence.
   #
-  # [codex review, PR #472, BLOCKING #1] Deliberately NOT gated on an
-  # unconditional `authorKind != "human"`: this marker is posted AND read
-  # back in the SAME dispatcher process (dispatcher-tick.sh ->
-  # lib-dispatch.sh), which NEVER resolves `BOT_LOGIN` — that variable is
-  # only ever resolved inside autonomous-review.sh's SEPARATE process (see
-  # the extensive `_frozen_convergence_rounds_json` precedent above: "BOT_LOGIN
-  # is NEVER set in the dispatcher's own process... ALWAYS takes the
-  # empty-BOT_LOGIN branch, in EVERY GH_AUTH_MODE"). So in `GH_AUTH_MODE=token`
-  # — the permanent, common topology — the dispatcher's OWN genuine marker is
-  # posted under the shared PAT identity and normalizes to `authorKind=human`;
-  # an unconditional `!= "human"` gate REJECTS every genuine marker, resetting
-  # `count` to 1 on every tick and making the watchdog permanently inert on
-  # real installs. Mirrors the established `_strict_author` gating pattern:
-  # apply the authorKind filter ONLY when `BOT_LOGIN` happens to be set (never
-  # true at this call site today, kept for parity/defense-in-depth); otherwise
-  # rely on the structural anchor alone — the SAME accepted residual this
-  # codebase documents everywhere else a structural-only anchor is used (a
-  # human posting a byte-for-byte copy of the genuine marker line, with
-  # arbitrary content on subsequent lines, is indistinguishable from genuine
-  # and is NOT defended against — see TC-LIVENESS-044's revised scenario).
-  local _liveness_strict_author=0
-  [ -n "${BOT_LOGIN:-}" ] && _liveness_strict_author=1
+  # `_liveness_strict_author_flag` resolves the authorKind gate: [operator
+  # guidance, round 6] app-mode-only (mirrors
+  # `classify_recent_review_verdict`'s [#389]/[#393] two-part fix) — NOT the
+  # unconditional `authorKind != "human"` gate round 5's finding warned would
+  # reintroduce round 2's "watchdog permanently inert in GH_AUTH_MODE=token"
+  # bug (this marker is posted AND read back in the SAME dispatcher process,
+  # which NEVER resolves `BOT_LOGIN` regardless of `GH_AUTH_MODE` — see the
+  # `_frozen_convergence_rounds_json` precedent). In `GH_AUTH_MODE=token` the
+  # whole-body structural anchor carries authenticity alone; the accepted
+  # residual (a human posting a byte-for-byte bare marker as their entire
+  # comment) is the SAME documented exposure every other structural-only
+  # anchor in this codebase carries, now bounded in blast radius by the
+  # `_liveness_next_count` cap below.
+  local _liveness_strict_author
+  _liveness_strict_author=$(_liveness_strict_author_flag)
   local prior_marker
   prior_marker=$(_liveness_prior_marker "$comments_json" "$_liveness_strict_author")
 
   local count tier1
-  count=$(_liveness_next_count "$prior_marker" "$fingerprint")
+  count=$(_liveness_next_count "$prior_marker" "$fingerprint" "$stall")
   tier1=$(_liveness_next_tier1 "$prior_marker" "$fingerprint")
 
   local action
@@ -4212,8 +4209,17 @@ _liveness_evaluate_issue() {
       ;;
     tier1)
       log "  issue #${issue_num} liveness watchdog: TIER 1 — ${count} consecutive no-op ticks (fingerprint=${fingerprint}) — posting operator escalation"
+      # [operator guidance, round 6] The marker is posted as its OWN bare
+      # comment, BEFORE the human-readable report — never embedded as the
+      # report's first line. This is what lets `_liveness_prior_marker` use
+      # a whole-body anchor: a genuine marker comment now NEVER contains
+      # anything else, so a forgery with ANY extra content (leading or
+      # trailing) fails the anchor. `reason=liveness-no-progress` is in
+      # `_LIVENESS_IDEMPOTENT_PATTERN` (lib-liveness.sh) so the report itself
+      # never registers as "a new comment" against the fingerprint's own
+      # comment-count component on the next tick.
+      itp_post_comment "$issue_num" "$new_marker" 2>/dev/null || true
       itp_post_comment "$issue_num" "$(cat <<TIER1REPORT
-${new_marker}
 No observable progress for **${count}** ticks on issue #${issue_num} (\`reason=liveness-no-progress\`, [INV-128]):
 - Label: \`${active_label}\`
 - PR head: \`${current_head:-<none>}\`
@@ -4240,9 +4246,9 @@ TIER1REPORT
       log "  issue #${issue_num} liveness watchdog: TIER 2 — ${count} consecutive no-op ticks (fingerprint=${fingerprint}) — halting per [INV-128]"
 
       # Transition FIRST, atomically — mirrors INV-105/INV-122's TOCTOU fix:
-      # a failed transition aborts under set -euo pipefail BEFORE the report
-      # is posted, so the next tick re-evaluates from scratch instead of an
-      # orphan report existing against a still-non-stalled issue.
+      # a failed transition aborts under set -euo pipefail BEFORE either
+      # comment is posted, so the next tick re-evaluates from scratch instead
+      # of an orphan report/marker existing against a still-non-stalled issue.
       #
       # Branches on `kind` (rather than passing $active_label straight through)
       # so BOTH label_swap operands are LITERAL — check-spec-drift.sh's Check C
@@ -4259,10 +4265,22 @@ TIER1REPORT
         label_swap "$issue_num" "pending-review" "stalled"
       fi
 
+      # [operator guidance, round 6] The bare marker is posted BEFORE the
+      # trip report — never embedded inside it. This ordering is what makes
+      # `_liveness_prior_marker`'s cutoff exclusion hold WITHOUT relying on
+      # same-second timestamp coincidence: the cutoff is the trip report's
+      # own `createdAt` (it carries the "Liveness watchdog tripped" heading),
+      # and this marker is posted strictly before that report, so its
+      # `createdAt` can never exceed the cutoff it precedes — the strict `>`
+      # scan on the NEXT tick always excludes it. Posting the marker AFTER
+      # the report instead would reopen exactly the round-3 [codex review,
+      # BLOCKING #2] self-referential re-trip bug this ordering exists to
+      # prevent (the "resume after un-stall re-trip" fix).
+      itp_post_comment "$issue_num" "$new_marker" 2>/dev/null || true
+
       local pointer
       pointer=$(_liveness_newest_pointer "$comments_json")
       itp_post_comment "$issue_num" "$(cat <<TIER2REPORT
-${new_marker}
 ## ⛔ Liveness watchdog tripped — halting a silently-parked issue (\`reason=liveness-timeout\`, [INV-128])
 
 This issue's observable state (label + PR head + non-idempotent comments + marker set) has not changed for **${count}** consecutive dispatcher ticks — well past the **${stall}**-tick stall threshold.

@@ -149,6 +149,22 @@ done
   && ok "TC-LIVENESS-045d tier-2 report posted exactly once across the whole run" \
   || bad "TC-LIVENESS-045d expected exactly 1 tier-2 report, got ${tier2_fire_count}"
 
+# TC-LIVENESS-045i [operator guidance, round 6]: the trip report itself no
+# longer embeds the bare marker as its first line — round 6 split the marker
+# out into its own comment so `_liveness_prior_marker` can use a whole-body
+# anchor. Assert the split held through the full 25-tick stub-dispatcher
+# replay, not just the constructed-fixture unit tests.
+trip_report_body=$(jq -r '[.[] | select(.body | contains("reason=liveness-timeout"))] | last | .body' <<<"$ISSUE_COMMENTS")
+if [[ "$trip_report_body" != "<!--"* ]]; then
+  ok "TC-LIVENESS-045i the trip report body does not start with the marker prefix (split into two comments)"
+else
+  bad "TC-LIVENESS-045i trip report body unexpectedly starts with the marker prefix: ${trip_report_body:0:80}"
+fi
+bare_marker_count=$(jq '[.[] | select(.body | test("^<!-- dispatcher-liveness-watchdog: .*-->[[:space:]]*$"))] | length' <<<"$ISSUE_COMMENTS")
+[[ "$bare_marker_count" -ge 2 ]] \
+  && ok "TC-LIVENESS-045j at least a tier-1 and a tier-2 bare marker comment exist (whole-body-anchored)" \
+  || bad "TC-LIVENESS-045j expected >=2 whole-body-anchored bare marker comments, got ${bare_marker_count}"
+
 [[ "$ISSUE_LABEL" == "stalled" ]] \
   && ok "TC-LIVENESS-045e issue #99 ended the run transitioned to stalled" \
   || bad "TC-LIVENESS-045e issue #99 ended the run with label '${ISSUE_LABEL}' (expected stalled)"

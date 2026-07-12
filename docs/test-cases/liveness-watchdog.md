@@ -9,7 +9,7 @@ disabled.
 
 | File | Role |
 |------|------|
-| `skills/autonomous-dispatcher/scripts/lib-liveness.sh` (NEW) | Pure helpers: `_liveness_fingerprint`, `_liveness_next_count`, `_liveness_next_tier1`, `_liveness_tier_action`, `_liveness_notice_ticks`, `_liveness_stall_ticks`, `_liveness_wrapper_alive`, `_liveness_marker`, `_liveness_parse_marker` |
+| `skills/autonomous-dispatcher/scripts/lib-liveness.sh` (NEW) | Pure helpers: `_liveness_fingerprint`, `_liveness_next_count` (accepts an optional `stall_ticks` cap, round 6), `_liveness_next_tier1`, `_liveness_tier_action`, `_liveness_notice_ticks`, `_liveness_stall_ticks`, `_liveness_wrapper_alive`, `_liveness_marker`, `_liveness_parse_marker`, `_liveness_prior_marker` (whole-body anchor, round 6), `_liveness_strict_author_flag` (NEW, round 6 — app-mode-only authorKind gate) |
 | `skills/autonomous-dispatcher/scripts/dispatcher-tick.sh` | New Step 6, after Step 5 |
 | `tests/unit/test-liveness-watchdog.sh` (NEW) | Pure-logic + wiring regression suite |
 | `tests/e2e/run-liveness-watchdog-e2e.sh` (NEW) | Stub-dispatcher replay |
@@ -80,9 +80,9 @@ disabled.
 
 | ID | Scenario | Expected |
 |----|----------|----------|
-| TC-LIVENESS-038 | 6 consecutive no-op ticks (default `LIVENESS_NOTICE_TICKS`) | tier-1 comment posted exactly once, `@REPO_OWNER` mentioned, no label change |
+| TC-LIVENESS-038 | 6 consecutive no-op ticks (default `LIVENESS_NOTICE_TICKS`) | tier-1 comment posted exactly once, `@REPO_OWNER` mentioned, no label change; (c/d, round 6) the report is a comment DISTINCT from a separately-posted bare `tier1=1` marker |
 | TC-LIVENESS-039 | Tick 7 with fingerprint still unchanged (tier1 already fired) | no second tier-1 comment |
-| TC-LIVENESS-040 | 18 consecutive no-op ticks (default `LIVENESS_STALL_TICKS`) | `stalled` transition + exactly one `reason=liveness-timeout` report |
+| TC-LIVENESS-040 | 18 consecutive no-op ticks (default `LIVENESS_STALL_TICKS`) | `stalled` transition + exactly one `reason=liveness-timeout` report; (e/f/g, round 6) the report is a comment DISTINCT from a separately-posted bare marker, posted in marker-then-report order |
 | TC-LIVENESS-041 | Fingerprint changes at tick 10 | count/tier1 reset; tick 10 evaluates as count=1; tier-2 never reached on the interrupted series |
 | TC-LIVENESS-042 | Tier-2 report includes the last-known fingerprint components, tick counts, and pointers to the newest session report / verdict / markers | pinned string content |
 | TC-LIVENESS-043 | Already-`stalled` race: a specific breaker (e.g. INV-105) stalls the issue between the candidate list fetch and this evaluation | watchdog re-checks labels immediately before the transition and does NOT re-transition or post a competing report |
@@ -98,12 +98,34 @@ disabled.
 
 ## Group H — prior-marker cutoff / resume-after-un-stall (TC-LIVENESS-046..049)
 
-`_liveness_prior_marker` ([codex review, PR #472, BLOCKING #2]) is the cutoff-then-scan pure helper that fixes a self-referential read: the tier-2 `TIER2REPORT` comment embeds its own watchdog marker (R4 requires posting on every evaluated tick, including the trip tick). Without a cutoff at the latest "Liveness watchdog tripped" report, an operator resuming a stalled issue with an otherwise-unchanged fingerprint would have the very next evaluation read that old trip report's marker back and immediately re-trip tier 2 again.
+`_liveness_prior_marker` ([codex review, PR #472, BLOCKING #2]) is the cutoff-then-scan pure helper that fixes a self-referential read. At the time this was written, the tier-2 report embedded its own watchdog marker (R4 requires posting on every evaluated tick, including the trip tick) — these fixture tests construct that exact shape (a comment whose body is the marker text followed by the trip heading on a later line) to pin the cutoff logic in isolation, regardless of which production code path produces it. **[round 6 update]**: production no longer embeds the marker this way — the marker is always its own separate comment, posted strictly BEFORE the report (see Group I/E2E TC-045i below) — but the fixtures below still deliberately construct the embedded shape as a synthetic stress case for `_liveness_prior_marker` itself: if a comment happens to contain a bare-marker-anchored line followed by the trip heading on a subsequent line (whatever produced it), the cutoff-then-scan must still exclude it correctly. Without a cutoff at the latest "Liveness watchdog tripped" report, an operator resuming a stalled issue with an otherwise-unchanged fingerprint would have the very next evaluation read that old trip report's marker back and immediately re-trip tier 2 again.
 
 | ID | Scenario | Expected |
 |----|----------|----------|
-| TC-LIVENESS-046 | A trip report comment embeds its own marker (`count=18 tier1=1`); no comment exists after it | `_liveness_prior_marker` returns `""` — the embedded marker is excluded (its `createdAt` equals the cutoff, and the cutoff comparison is strict `>`) |
+| TC-LIVENESS-046 | A constructed fixture comment whose body is a marker (`count=18 tier1=1`) followed by the trip heading on a later line; no comment exists after it | `_liveness_prior_marker` returns `""` — the marker is excluded (its `createdAt` equals the cutoff, and the cutoff comparison is strict `>`) |
 | TC-LIVENESS-047 | A trip report at T1, then a genuinely later bare marker at T2 > T1 | `_liveness_prior_marker` returns the T2 marker; feeding it into `_liveness_next_count` continues a fresh post-resume series, not a re-trip off T1's count |
 | TC-LIVENESS-048 | No trip report has ever been posted | cutoff is the epoch; the existing marker still qualifies (unchanged behavior for the common, no-trip-yet case) |
 | TC-LIVENESS-049 | End-to-end through `_liveness_evaluate_issue`: a trip report already fired, then a re-arm tick runs against the SAME fingerprint (as if `stalled` were removed with nothing else changed) | does NOT immediately re-transition to `stalled`; the fresh marker restarts at `count=1 tier1=0` |
-| TC-LIVENESS-050 | A SECOND trip-resume cycle: trip #1, a post-resume marker, trip #2 (which embeds its own marker) | cutoff tracks the LATEST trip (#2), not the first — no qualifying prior marker after the second trip, regression pin against a `max`→`min`/`first` mutation |
+| TC-LIVENESS-050 | A SECOND trip-resume cycle: constructed trip-shaped fixture #1, a post-resume marker, constructed trip-shaped fixture #2 | cutoff tracks the LATEST trip (#2), not the first — no qualifying prior marker after the second trip, regression pin against a `max`→`min`/`first` mutation |
+
+## Group I — round-6 hardening: whole-body anchor, app-mode authorKind gate, count cap (TC-LIVENESS-051..058)
+
+[operator guidance, PR #472 round 6] Rounds 2 and 5 pulled the marker's authenticity gate in opposite directions (round 2: an unconditional `authorKind != "human"` gate makes the watchdog permanently inert in the default `GH_AUTH_MODE=token` topology; round 5: no `authorKind` gate lets any human forge a bare marker and force an immediate trip). Resolved by mirroring `classify_recent_review_verdict`'s established two-part pattern: a whole-body structural anchor in every mode, plus `authorKind != "human"` layered on top ONLY in `GH_AUTH_MODE=app`. This also required splitting the marker out into its own comment (never embedded as the report's first line) so the anchor could tighten from "marker line, then optionally more prose" to "the entire body is the marker" without rejecting genuine traffic. A count cap adds defense-in-depth against the token-mode residual's blast radius.
+
+| ID | Scenario | Expected |
+|----|----------|----------|
+| TC-LIVENESS-051 | A comment shaped like the PRE-round-6 embed (marker line + trailing report prose, no trip heading) | rejected by the whole-body anchor (regression pin against `[[:space:]]*$` reverting to `($\|\n)`) |
+| TC-LIVENESS-052 | The bare marker plus only a trailing newline (GitHub's typical comment-body normalization) | still accepted — the anchor tolerates trailing whitespace, not trailing content |
+| TC-LIVENESS-053 | `GH_AUTH_MODE=app` + a forged bare marker authored by a human | rejected by the `authorKind` gate |
+| TC-LIVENESS-054 | `GH_AUTH_MODE=app` + the SAME bare marker authored by a bot/App identity | accepted |
+| TC-LIVENESS-055 | `_liveness_strict_author_flag` across `GH_AUTH_MODE` ∈ {unset, token, app} | flag=0, 0, 1 respectively |
+| TC-LIVENESS-056 | A stored marker claims an absurd count (e.g. 999999) on a matching fingerprint, with `stall_ticks` supplied | the accepted count is capped at `stall_ticks`, not the forged value |
+| TC-LIVENESS-057 | (a) same forged marker WITHOUT a `stall_ticks` arg; (b) a count that lands below `stall_ticks` after +1 | (a) uncapped increment (back-compat); (b) untouched by the cap — it is a ceiling, not a rewrite |
+| TC-LIVENESS-058 | End-to-end through `_liveness_evaluate_issue`: a forged marker at an absurd count, but on a fingerprint that does NOT match the current one | resets to `count=1` regardless of the forged count — proves the cap is defense-in-depth, not a substitute for the fingerprint-match gate |
+
+## Group J — E2E regression: marker/report split holds through a full replay (TC-LIVENESS-045i/j)
+
+| ID | Scenario | Expected |
+|----|----------|----------|
+| TC-LIVENESS-045i | The tier-2 trip report, after the full 25-tick stub-dispatcher replay | its body does not start with the marker prefix (split into two comments, round 6) |
+| TC-LIVENESS-045j | Whole-body-anchored bare marker comments across the full replay | at least two exist (one from tier 1, one from tier 2) |

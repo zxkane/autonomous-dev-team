@@ -30,8 +30,18 @@
 # and the park would never be detected (the exact failure mode this lib exists
 # to close). The watchdog's OWN marker (`dispatcher-liveness-watchdog:`) is
 # included so its own per-tick bookkeeping comment never counts as progress
-# against itself.
-_LIVENESS_IDEMPOTENT_PATTERN='stale-verdict:|INV-12-completed:|INV-12-no-pr-fresh-dev:|INV-35-fresh-dev:|no-progress-substantive(-attempt)?:|non-actionable-finding:|self-heal-lost-session:|self-heal-non-substantive:|crashed-session-retry:|crashed-session-non-actionable:|dispatcher-convergence-breaker:|dispatcher-gate-fail-breaker:|dispatcher-token:|INV-25-hygiene:|dispatcher-liveness-watchdog:'
+# against itself. `reason=liveness-no-progress`/`reason=liveness-timeout`
+# (the tier-1/tier-2 human-readable reports) are ALSO included: [operator
+# guidance, round 6] the marker is now ALWAYS posted as its own bare comment
+# (never embedded as the report's first line — see `_liveness_evaluate_issue`)
+# so the tier-1/tier-2 REPORT is a second, textually-distinct comment that no
+# longer contains the `dispatcher-liveness-watchdog:` substring itself. Without
+# this addition the report's own posting would register as "a genuinely new
+# comment" against `non_idempotent_count`, changing the fingerprint on the very
+# next tick and resetting the counter — the SAME self-referential-pollution bug
+# D3 already fixed for the marker, now reintroduced by the report text once the
+# two were split apart.
+_LIVENESS_IDEMPOTENT_PATTERN='stale-verdict:|INV-12-completed:|INV-12-no-pr-fresh-dev:|INV-35-fresh-dev:|no-progress-substantive(-attempt)?:|non-actionable-finding:|self-heal-lost-session:|self-heal-non-substantive:|crashed-session-retry:|crashed-session-non-actionable:|dispatcher-convergence-breaker:|dispatcher-gate-fail-breaker:|dispatcher-token:|INV-25-hygiene:|dispatcher-liveness-watchdog:|reason=liveness-no-progress|reason=liveness-timeout'
 
 # Marker-digest pattern ([R1]/[D3]) — the SAME grammar list, MINUS
 # `dispatcher-liveness-watchdog:` itself. The digest's whole purpose is "a
@@ -96,6 +106,50 @@ _liveness_watchdog_enabled() {
 }
 
 # ---------------------------------------------------------------------------
+# _liveness_strict_author_flag — [operator guidance, round 6] the SINGLE
+# source of truth for "should the marker read-back additionally require
+# authorKind != human". Two independent tensions collide at this call site
+# (both raised by codex review on PR #472):
+#
+#   (a) round 2 [BLOCKING]: an unconditional `authorKind != "human"` gate
+#       rejects the dispatcher's OWN genuine marker under the permanent
+#       `GH_AUTH_MODE=token` topology, because `BOT_LOGIN` is never resolved
+#       in the dispatcher's own process (only inside autonomous-review.sh's
+#       separate process) — the marker normalizes to `authorKind=human` and
+#       an unconditional gate makes the watchdog permanently inert.
+#   (b) round 5 [BLOCKING]: with NO authorKind gate at all, any collaborator
+#       can post a bare forged marker and force an immediate tier-2 trip.
+#
+# These cannot BOTH be satisfied by tightening/loosening one unconditional
+# gate — the operator (see PR #472 review-round-6 guidance) directed: do NOT
+# re-tighten unconditionally; instead mirror the established two-part
+# resolution already used at four other call sites in this codebase
+# (`classify_recent_review_verdict`'s [#389]/[#393] fix, mirrored again here):
+#   1. Structural authentication (the whole-body anchor, see
+#      `_liveness_prior_marker`) carries authenticity in the COMMON
+#      `GH_AUTH_MODE=token` case — this is the part that must NOT regress to
+#      an authorKind-only design.
+#   2. In `GH_AUTH_MODE=app` SPECIFICALLY, additionally require
+#      `authorKind != "human"` — the genuine wrapper posts under a GitHub App
+#      identity there (`…[bot]` login ⇒ authorKind=bot via REST's
+#      `user.type == "Bot"`, [#393]), so this shrinks the forgery surface
+#      from "anyone who can comment" to "bot/App actors on the repo" WITHOUT
+#      touching the token-mode path the round-2 fix depends on.
+#
+# The token-mode residual (a human posting a byte-for-byte copy of the bare
+# marker as their ENTIRE comment) remains a documented, accepted exposure —
+# the SAME class every other structural-only anchor in this codebase carries
+# (INV-105's round-14 finding) — because GH_AUTH_MODE=token has no actor
+# signal to layer on top. Echoes "1" (apply the authorKind filter) or "0".
+_liveness_strict_author_flag() {
+  if [[ "${GH_AUTH_MODE:-token}" == "app" ]]; then
+    echo 1
+  else
+    echo 0
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # _liveness_non_idempotent_count <comments_json>
 #
 # Echoes the count of comments in the normalized itp_list_comments array
@@ -122,8 +176,8 @@ _liveness_non_idempotent_count() {
 # deliberately excludes the watchdog's own marker, see that pattern's
 # docstring.
 #
-# [codex review, PR #472, BLOCKING sibling fix] Every listed grammar
-# (`dispatcher-convergence-breaker:`, `dispatcher-token:`,
+# [codex review, PR #472, BLOCKING sibling fix; round 6 generalized] Every
+# listed grammar (`dispatcher-convergence-breaker:`, `dispatcher-token:`,
 # `INV-25-hygiene:`, etc.) is posted by the DISPATCHER's own process
 # (dispatcher-tick.sh / lib-dispatch.sh), which — like the watchdog's own
 # marker read-back this mirrors — NEVER resolves `BOT_LOGIN`. An
@@ -132,13 +186,17 @@ _liveness_non_idempotent_count() {
 # comments there normalize to `authorKind=human`), collapsing the digest to
 # "" on every tick regardless of which markers are actually present — dead
 # on the "a NEW marker appearing = progress" signal in the common topology.
-# Same fix as `_liveness_evaluate_issue`'s prior-marker readback: apply the
-# authorKind filter only when `BOT_LOGIN` is actually set (the rare/never
-# case at this call site today), else rely on the pattern match alone.
+# Uses `_liveness_strict_author_flag` — the SAME app-mode-only gate
+# `_liveness_prior_marker` applies — rather than a `BOT_LOGIN`-presence
+# check: `BOT_LOGIN` is NEVER set in the dispatcher's own process regardless
+# of `GH_AUTH_MODE`, but `authorKind` itself is independently REST-derived
+# from `user.type == "Bot"` ([#393]), so it correctly reports "bot" for the
+# GitHub App identity the dispatcher posts under in app mode even without
+# `BOT_LOGIN` ever being resolved.
 _liveness_marker_digest() {
   local comments_json="${1:-[]}"
-  local _strict=0
-  [ -n "${BOT_LOGIN:-}" ] && _strict=1
+  local _strict
+  _strict=$(_liveness_strict_author_flag)
   jq -r --arg pat "$_LIVENESS_DIGEST_PATTERN" --arg strict "$_strict" '
     [.[] | select(($strict == "0") or ((.authorKind // "human") != "human")) | select(.body | test($pat)) | .body
      | [scan("(?:^|[^A-Za-z0-9_-])((?:" + $pat + "))")[0]]]
@@ -215,17 +273,27 @@ _liveness_parse_marker() {
 # report's own embedded marker (its createdAt EQUALS the cutoff) while still
 # admitting a genuinely later post-resume marker.
 #
-# `strict_author` uses the SAME BOT_LOGIN-gated authenticity filter as the
-# marker-fence scan itself (NOT an unconditional `authorKind != "human"`,
-# which would reject the genuine trip report in the common
-# `GH_AUTH_MODE=token` topology and leave the cutoff permanently at the
-# epoch — reopening the exact BOT_LOGIN-empty bug the marker-fence
-# authenticity fix already closed). Both the cutoff computation and the
+# [operator guidance, round 6] `anchor` is a WHOLE-BODY anchor
+# (`^...-->[[:space:]]*$`, mirroring `classify_recent_review_verdict`'s own
+# `_anchored_trailer_re` and INV-105's round-14 verdict anchor) — NOT the
+# prior `^...-->($|\n)` form that tolerated trailing report prose after the
+# marker line. This tightens the structural guarantee now that the marker is
+# ALWAYS posted as its own bare comment (see `_liveness_evaluate_issue` —
+# round 6 stopped embedding the marker as the tier-1/tier-2 report's first
+# line): a genuine marker's ENTIRE body is the marker, so a forgery with ANY
+# extra content — leading prose, trailing content, or a marker embedded
+# inside a larger comment — fails the anchor. The old `($|\n)` form was
+# necessary ONLY because the marker used to be the first line of a longer
+# report body; that reason no longer applies.
+#
+# `strict_author` selects the authorKind filter via `_liveness_strict_author_flag`
+# — app-mode-only (round 6; NOT the token-mode-reintroducing unconditional
+# gate round 5's finding warned against). Both the cutoff computation and the
 # final scan are derived from the SAME filtered `$rows` so they never
 # disagree on which comments are eligible.
 _liveness_prior_marker() {
   local comments_json="${1:-[]}" strict="${2:-0}"
-  local anchor='^<!-- dispatcher-liveness-watchdog: issue=[0-9]+ fingerprint=[0-9a-f]+ count=[0-9]+ tier1=[01] -->($|\n)'
+  local anchor='^<!-- dispatcher-liveness-watchdog: issue=[0-9]+ fingerprint=[0-9a-f]+ count=[0-9]+ tier1=[01] -->[[:space:]]*$'
   jq -r --arg strict "$strict" --arg anchor "$anchor" '
     ( [ .[] | select(($strict == "0") or ((.authorKind // "human") != "human")) | select(.body | type == "string") ] ) as $rows
     | ( [ $rows[] | select(.body | contains("Liveness watchdog tripped")) | .createdAt ]
@@ -235,13 +303,34 @@ _liveness_prior_marker() {
   ' <<<"$comments_json" 2>/dev/null || printf ''
 }
 
-# _liveness_next_count <marker_text> <fingerprint> — stored_count+1 when
-# marker_text matches fingerprint exactly, else 1 (fresh series under a new
-# fingerprint — full reset, R1/R4).
+# _liveness_next_count <marker_text> <fingerprint> [stall_ticks] —
+# stored_count+1 when marker_text matches fingerprint exactly, else 1 (fresh
+# series under a new fingerprint — full reset, R1/R4).
+#
+# [operator guidance, round 6, defense-in-depth] Optional 3rd arg caps the
+# result at `stall_ticks`. This is a bound on BLAST RADIUS, not an additional
+# authentication layer — the anchor (`_liveness_prior_marker`) is what
+# authenticates; the token-mode residual it still accepts (a human posting a
+# byte-for-byte bare marker as their entire comment) can already force a
+# tier-2 trip on ANY tick simply by choosing a count `>= stall_ticks - 1`, cap
+# or no cap. What the cap actually bounds: (a) a forged absurd count (e.g.
+# `count=999999999`) no longer propagates verbatim into the tier-2 report's
+# operator-facing tick-count text — the report always shows a sane,
+# threshold-bounded number; (b) `_liveness_tier_action`/the emitted marker
+# never observe a count arbitrarily far past `stall_ticks`, keeping the
+# decision function's practical input range bounded to what the two
+# configured thresholds actually describe. Omit (or pass empty) to skip
+# capping — the fixture-level pure-helper tests below exercise the uncapped
+# increment directly; the one production call site
+# (`_liveness_evaluate_issue`) always supplies `stall_ticks`.
 _liveness_next_count() {
-  local marker_text="$1" fingerprint="$2" stored
+  local marker_text="$1" fingerprint="$2" stall_ticks="${3:-}" stored next
   stored=$(_liveness_parse_marker "$marker_text" "$fingerprint" count)
-  printf '%s\n' "$((stored + 1))"
+  next=$((stored + 1))
+  if [[ -n "$stall_ticks" ]] && [[ "$stall_ticks" =~ ^[0-9]+$ ]] && [[ "$next" -gt "$stall_ticks" ]]; then
+    next="$stall_ticks"
+  fi
+  printf '%s\n' "$next"
 }
 
 # _liveness_next_tier1 <marker_text> <fingerprint> — stored tier1 latch when
