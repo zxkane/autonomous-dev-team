@@ -307,9 +307,12 @@ _liveness_marker() {
 }
 
 # _liveness_parse_marker <marker_text> <fingerprint> <field> — echo the
-# named field (count|tier1|tripped) from marker_text IFF it matches the given
-# fingerprint; else echo 0. Pure substring/regex extraction — a malformed,
-# absent, or non-matching marker all collapse to 0 (bias to MISS).
+# named field from marker_text IFF it matches the given fingerprint; else
+# echo 0. `field` MUST be exactly one of `count`|`tier1`|`tripped` — no other
+# value is handled (the `case` below has no default arm; every one of the
+# three call sites in this file passes a literal). Pure substring/regex
+# extraction — a malformed, absent, or non-matching marker all collapse to 0
+# (bias to MISS).
 _liveness_parse_marker() {
   local marker_text="$1" fingerprint="$2" field="$3"
   local pattern="dispatcher-liveness-watchdog: issue=[0-9]+ fingerprint=${fingerprint} count=([0-9]+) tier1=([01]) tripped=([01])"
@@ -318,7 +321,6 @@ _liveness_parse_marker() {
       count)   printf '%s\n' "${BASH_REMATCH[1]}" ;;
       tier1)   printf '%s\n' "${BASH_REMATCH[2]}" ;;
       tripped) printf '%s\n' "${BASH_REMATCH[3]}" ;;
-      *)       printf '%s\n' "${BASH_REMATCH[2]}" ;;
     esac
   else
     printf '0\n'

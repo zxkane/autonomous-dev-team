@@ -727,6 +727,35 @@ fetch_pr_for_issue() { :; }
 _liveness_evaluate_issue 99 issue pending-dev 6 18
 assert_eq "TC-LIVENESS-064 genuinely-no-PR (rc=0, empty result) still proceeds and posts the bare marker" "1" "$(_trace_verbs | grep -c '^itp_post_comment$')"
 
+# TC-LIVENESS-065/066 [round-9 independent review gap]: the `tripped` field
+# added in round 8 has TWO forgery directions, not one (see
+# `_liveness_strict_author_flag`'s docstring) — a forged HIGH count still
+# TRIGGERS an early tier action (bounded by the count cap, TC-056..058
+# above), but a forged `tripped=1` marker can also SUPPRESS an in-progress
+# series by moving the cutoff forward past a genuine, still-relevant marker.
+# The trigger direction was pinned; the suppression direction was not. Pin
+# it now: in the default GH_AUTH_MODE=token topology (no authorKind signal
+# to layer on top — the SAME documented residual class INV-105's round-14
+# finding already carries), a human's forged `tripped=1` marker DOES suppress
+# a genuine bot-authored in-progress marker; in GH_AUTH_MODE=app, the SAME
+# forgery is rejected by the authorKind gate and the genuine marker still
+# qualifies. Any tightening of this is a conscious future change, not a
+# silent regression.
+fp65=$(_liveness_fingerprint pending-dev sha-A 0 "")
+genuine65=$(_liveness_marker 99 "$fp65" 10 0 0)
+forged65=$(_liveness_marker 99 "$fp65" 2 0 1)
+comments65=$(jq -n --arg g "$genuine65" --arg f "$forged65" '
+  [{"authorKind":"bot","createdAt":"2026-01-01T00:00:00Z","body":$g},
+   {"authorKind":"human","createdAt":"2026-01-01T01:00:00Z","body":$f}]
+')
+GH_AUTH_MODE=token
+assert_eq "TC-LIVENESS-065 token-mode residual: a forged human tripped=1 marker DOES suppress a genuine bot in-progress marker (documented, accepted exposure)" \
+  "" "$(_liveness_prior_marker "$comments65" "$(_liveness_strict_author_flag)")"
+GH_AUTH_MODE=app
+assert_eq "TC-LIVENESS-066 app-mode: the SAME forged human tripped=1 marker is rejected by the authorKind gate — the genuine bot marker still qualifies" \
+  "$genuine65" "$(_liveness_prior_marker "$comments65" "$(_liveness_strict_author_flag)")"
+unset GH_AUTH_MODE
+
 echo
 echo "=== Summary ==="
 echo "Passed: $PASS"
