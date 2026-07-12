@@ -181,9 +181,43 @@ unset LIVENESS_NOTICE_TICKS
 LIVENESS_STALL_TICKS="6"
 warn_out=$(_liveness_stall_ticks 6 2>&1 1>/dev/null)
 val_out=$(_liveness_stall_ticks 6 2>/dev/null)
-assert_eq "TC-LIVENESS-027a stall<=notice falls back to notice+1" "7" "$val_out"
-assert_contains "TC-LIVENESS-027b stall<=notice logs a warning" "$warn_out" "WARNING"
+assert_eq "TC-LIVENESS-027a stall==notice falls back to default 18" "18" "$val_out"
+assert_contains "TC-LIVENESS-027b stall==notice logs a warning" "$warn_out" "WARNING"
 unset LIVENESS_STALL_TICKS
+
+# [codex review, PR #472, BLOCKING] regression pin: stall < notice must fall
+# back to the documented default 18, NOT clamp to notice+1 (11) — a
+# misconfigured pair is a config error, not a near-miss to nudge.
+LIVENESS_STALL_TICKS="3"
+warn_out=$(_liveness_stall_ticks 10 2>&1 1>/dev/null)
+val_out=$(_liveness_stall_ticks 10 2>/dev/null)
+assert_eq "TC-LIVENESS-027c stall<notice falls back to default 18, not notice+1" "18" "$val_out"
+assert_contains "TC-LIVENESS-027d stall<notice logs a warning" "$warn_out" "WARNING"
+unset LIVENESS_STALL_TICKS
+
+# Regression pin: a validly-configured notice_ticks >= 18 means the default
+# 18 no longer satisfies `stall > notice` either — the fallback must escalate
+# to notice+1 in THIS case (unlike the two cases above), or the function
+# would return an inverted pair to every caller.
+unset LIVENESS_STALL_TICKS
+warn_out=$(_liveness_stall_ticks 20 2>&1 1>/dev/null)
+val_out=$(_liveness_stall_ticks 20 2>/dev/null)
+assert_eq "TC-LIVENESS-027e notice>=18 unset stall escalates past the default to notice+1" "21" "$val_out"
+assert_contains "TC-LIVENESS-027f notice>=18 unset stall logs a warning" "$warn_out" "WARNING"
+
+# [pr-review-toolkit:code-reviewer self-review] pin the exact escalation
+# pivot: notice=17 must still keep the clean default 18 (no warning), while
+# notice=18 must escalate to 19 WITH a warning — the tie case. Without this,
+# a future `-le` -> `-lt` typo on the escalation check would slip through.
+unset LIVENESS_STALL_TICKS
+assert_eq "TC-LIVENESS-027g notice=17 (just below pivot) keeps clean default 18" \
+  "18" "$(_liveness_stall_ticks 17 2>/dev/null)"
+assert_eq "TC-LIVENESS-027h notice=17 keeps default with no warning" \
+  "" "$(_liveness_stall_ticks 17 2>&1 1>/dev/null)"
+assert_eq "TC-LIVENESS-027i notice=18 (tie at pivot) escalates to 19" \
+  "19" "$(_liveness_stall_ticks 18 2>/dev/null)"
+assert_contains "TC-LIVENESS-027j notice=18 escalation logs a warning" \
+  "$(_liveness_stall_ticks 18 2>&1 1>/dev/null)" "WARNING"
 
 LIVENESS_NOTICE_TICKS="6"; LIVENESS_STALL_TICKS="18"
 notice_out=$(_liveness_notice_ticks 2>/dev/null)

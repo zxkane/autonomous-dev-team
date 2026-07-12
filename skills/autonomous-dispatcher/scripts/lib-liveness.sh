@@ -61,25 +61,30 @@ _liveness_notice_ticks() {
 }
 
 # _liveness_stall_ticks <notice_ticks> — read LIVENESS_STALL_TICKS with the
-# same shape, plus the relative constraint `stall > notice` (R5). When the
-# configured value fails the relative constraint (even after its own
-# numeric/floor validation passed), clamp to `notice + 1` as a last-resort —
-# defaults (6/18) never hit this branch.
+# same shape, plus the relative constraint `stall > notice` (R5). A
+# configured pair that fails the relative constraint is a config error, not
+# a near-miss to nudge: [codex review, PR #472, BLOCKING] unconditionally
+# clamping to `notice + 1` would silently turn e.g. a `6/6` typo into an
+# aggressive 7-tick stall threshold instead of the documented/default 18 —
+# a misconfiguration turning into a false-stall path for legitimate slow
+# waits. Fall back to the default 18 — UNLESS the caller's (independently
+# validated, uncapped) notice_ticks is itself >= 18, in which case the
+# default no longer satisfies `stall > notice` either, and the fallback
+# must escalate to `notice + 1` to preserve the invariant this function
+# guarantees to every caller. Defaults (6/18) never hit either branch.
 _liveness_stall_ticks() {
   local notice="${1:?_liveness_stall_ticks requires notice_ticks}"
   local raw="${LIVENESS_STALL_TICKS:-18}"
   local val="$raw"
-  local warned=false
   if ! [[ "$val" =~ ^[0-9]+$ ]] || [[ "$val" -lt 2 ]]; then
     echo "WARNING: LIVENESS_STALL_TICKS='${raw}' invalid (must be an integer >=2) — falling back to default 18" >&2
     val=18
-    warned=true
   fi
   if [[ "$val" -le "$notice" ]]; then
-    if [[ "$warned" != true ]]; then
-      echo "WARNING: LIVENESS_STALL_TICKS='${raw}' must be > LIVENESS_NOTICE_TICKS=${notice} — falling back to $((notice + 1))" >&2
-    fi
-    val=$((notice + 1))
+    local fallback=18
+    [[ "$fallback" -le "$notice" ]] && fallback=$((notice + 1))
+    echo "WARNING: LIVENESS_STALL_TICKS='${raw}' must be > LIVENESS_NOTICE_TICKS=${notice} — falling back to ${fallback}" >&2
+    val=$fallback
   fi
   printf '%s\n' "$val"
 }

@@ -59,7 +59,7 @@ disabled.
 | TC-LIVENESS-024 | `LIVENESS_STALL_TICKS` unset | defaults to 18 |
 | TC-LIVENESS-025 | `LIVENESS_NOTICE_TICKS` non-numeric | falls back to 6, warning on stderr |
 | TC-LIVENESS-026 | `LIVENESS_NOTICE_TICKS=1` (below floor `>=2`) | falls back to 6, warning on stderr |
-| TC-LIVENESS-027 | `LIVENESS_STALL_TICKS` <= `LIVENESS_NOTICE_TICKS` (e.g. both=6) | `LIVENESS_STALL_TICKS` falls back to a value > notice, warning on stderr |
+| TC-LIVENESS-027 | `LIVENESS_STALL_TICKS` <= `LIVENESS_NOTICE_TICKS` (e.g. both=6, or stall=3/notice=10) | [codex review, PR #472, BLOCKING] `LIVENESS_STALL_TICKS` falls back to the documented default 18 — NOT an unconditional `notice+1` clamp — warning on stderr. Exception: if the (validly-configured) notice is itself `>= 18`, the default 18 would also fail `stall > notice`, so the fallback escalates to `notice+1` only in that case. |
 | TC-LIVENESS-028 | Both valid and `stall > notice` | honored verbatim, no warning |
 | TC-LIVENESS-029 | Warning text goes to stderr only, never corrupts the captured numeric value (mirrors `_gate_breaker_threshold`'s codex [P2] fix) | `$(... 2>/dev/null)` is a clean integer |
 | TC-LIVENESS-030 | `LIVENESS_WATCHDOG_ENABLED=false` | Step 6 evaluates zero issues (no fingerprinting, no marker reads/writes) |
