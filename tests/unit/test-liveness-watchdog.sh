@@ -711,6 +711,36 @@ assert_eq "TC-LIVENESS-061b the SAME grammar, as a genuine HTML-comment marker, 
 assert_eq "TC-LIVENESS-062 a grammar with an inner optional group (no-progress-substantive(-attempt)?:) still extracts cleanly through the wrapper anchor" "no-progress-substantive-attempt:" \
   "$(_liveness_marker_digest '[{"authorKind":"human","createdAt":"t","body":"<!-- no-progress-substantive-attempt:sha session=abc -->"}]')"
 
+# ===========================================================================
+echo
+echo "=== TC-LIVENESS-079..083 [codex review, PR #472, round 10 BLOCKING]: ==="
+echo "=== the wrapper anchor now requires the CLOSING delimiter too, not   ==="
+echo "=== just the opening one                                              ==="
+# ===========================================================================
+# [round 10] The round-8 pattern required only an OPENING backtick or
+# `<!--` immediately before the token, with no requirement that the span
+# ever CLOSE — an unclosed backtick/HTML-comment opening still satisfied it.
+# Pin both directions of that gap now closed: an unclosed span must NOT
+# reduce the count and must NOT register in the digest, while a genuinely
+# closed span (the real producer shape) still does both, unchanged.
+
+assert_eq "TC-LIVENESS-079a an UNCLOSED backtick span does NOT reduce the non-idempotent count" "1" \
+  "$(_liveness_non_idempotent_count '[{"authorKind":"human","body":"I saw `reason=liveness-timeout mentioned somewhere, never closed"}]')"
+assert_eq "TC-LIVENESS-079b an UNCLOSED HTML-comment opening does NOT reduce the non-idempotent count" "1" \
+  "$(_liveness_non_idempotent_count '[{"authorKind":"human","body":"I saw a <!-- dispatcher-token: mentioned in the logs"}]')"
+assert_eq "TC-LIVENESS-080a an UNCLOSED backtick span does NOT register in the digest" "" \
+  "$(_liveness_marker_digest '[{"authorKind":"human","createdAt":"t","body":"quoting the marker: `dispatcher-convergence-breaker: issue=1 head=abc, never closed"}]')"
+assert_eq "TC-LIVENESS-080b an UNCLOSED HTML-comment opening does NOT register in the digest" "" \
+  "$(_liveness_marker_digest '[{"authorKind":"human","createdAt":"t","body":"I saw <!-- dispatcher-token: mentioned, but never closed the comment"}]')"
+assert_eq "TC-LIVENESS-081 a backtick span that closes only after a newline (not a real Markdown code span) is still rejected" "1" \
+  "$(_liveness_non_idempotent_count '[{"authorKind":"human","body":"`dispatcher-token: abc\nstill inside`"}]')"
+assert_eq "TC-LIVENESS-082a a genuinely CLOSED backtick span (the real producer shape) is still excluded from the count" "0" \
+  "$(_liveness_non_idempotent_count '[{"authorKind":"human","body":"see `reason=liveness-timeout` for details"}]')"
+assert_eq "TC-LIVENESS-082b a genuinely CLOSED single-line HTML-comment marker (the real producer shape) still registers in the digest" "dispatcher-token:" \
+  "$(_liveness_marker_digest '[{"authorKind":"human","createdAt":"t","body":"<!-- dispatcher-token: abc at 2026-01-01T00:00:00Z mode=dev-new run=1-2 -->\nDispatching autonomous development..."}]')"
+assert_eq "TC-LIVENESS-083 the closed-span extraction still works when TWO distinct grammars are present across two comments" "dispatcher-convergence-breaker:,dispatcher-token:" \
+  "$(_liveness_marker_digest '[{"authorKind":"human","createdAt":"t1","body":"<!-- dispatcher-token: abc at 2026-01-01T00:00:00Z mode=dev-new run=1-2 -->\nDispatching..."},{"authorKind":"human","createdAt":"t2","body":"<!-- dispatcher-convergence-breaker: issue=1 head=abc trailer=xyz session=s1 -->\n## tripped"}]')"
+
 # [round 8 BLOCKING #3] fetch_pr_for_issue transport failure (nonzero rc) must
 # defer the WHOLE tick — never fall through to "no PR" (empty head), which
 # would silently reset the counter and mask a park.

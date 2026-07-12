@@ -180,3 +180,19 @@ disabled.
 | TC-LIVENESS-076 | `tier2` branch, real `set -e` subshell, persistent marker-write failure (report also fails, since `itp_post_comment` always fails in this probe) | same — reaches the end normally |
 | TC-LIVENESS-077 | `tier1` branch, real `set -e` subshell, marker write SUCCEEDS but the report write persistently fails (a prior marker is seeded so the evaluation actually reaches `tier1`, not `none`) | reaches the end normally — isolates the tier1-report `\|\| true` guard specifically |
 | TC-LIVENESS-078 | `tier2` branch, same shape as 077 but with a seeded count landing on the stall threshold | reaches the end normally — isolates the tier2-report `\|\| true` guard specifically |
+
+## Group N — round 10: closed-span wrapper anchor (TC-LIVENESS-079..083)
+
+[codex review, PR #472, round 10, 1 BLOCKING finding]
+
+| ID | Finding | Fix | Covered by |
+|----|---------|-----|------------|
+| round 10 | Round 8's wrapper anchor required only the OPENING delimiter of a backtick/HTML-comment span immediately before the token, with no check that the span ever CLOSED — a human comment that opens a wrapper but never closes it (e.g. an unclosed backtick before a token mentioned in running prose) still satisfied the pattern identically to a genuine, well-formed marker/report line, reopening the SAME masking-real-progress / falsely-registers-in-digest bug via an unclosed span instead of a bare mention | Both `_LIVENESS_IDEMPOTENT_PATTERN`/`_LIVENESS_DIGEST_PATTERN` now require BOTH delimiters of the SAME span — `` `(TOKEN)[^`\n]*` `` for the backtick form, `` <!--[ \t]*(TOKEN)[^\n]*--> `` for the HTML-comment form (one capturing group per alternative, since Oniguruma has no branch-reset group syntax) — matching the exact producer shape (a closed, single-line span) rather than a mere look-alike opening. `_liveness_marker_digest`'s extraction updated from `.[-1]` to filtering the null out of each match's own result and taking the remaining value | TC-LIVENESS-079..083 |
+
+| ID | Scenario | Expected |
+|----|----------|----------|
+| TC-LIVENESS-079 | An UNCLOSED backtick span (079a) or an UNCLOSED HTML-comment opening (079b), each a human comment | does NOT reduce the non-idempotent count (still counts as genuine progress) |
+| TC-LIVENESS-080 | The SAME two unclosed shapes, fed through `_liveness_marker_digest` | does NOT register the grammar as present in the digest |
+| TC-LIVENESS-081 | A backtick span whose "closing" backtick is on the line AFTER an embedded newline (not a valid single-line Markdown code span) | still rejected — behaves the same as an unclosed span, not as a closed one |
+| TC-LIVENESS-082 | A genuinely CLOSED backtick span (082a) and a genuinely closed single-line HTML-comment marker (082b) — the real producer shape, unchanged from round 8 | behaves exactly as before round 10: excluded from the count / registers in the digest |
+| TC-LIVENESS-083 | Two comments, each carrying a DIFFERENT genuinely-closed grammar (`dispatcher-token:` and `dispatcher-convergence-breaker:`) | the digest extraction correctly joins both distinct tokens — the two-independent-capturing-groups rework didn't break multi-match extraction |

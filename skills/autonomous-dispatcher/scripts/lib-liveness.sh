@@ -41,28 +41,53 @@
 # next tick and resetting the counter — the SAME self-referential-pollution bug
 # D3 already fixed for the marker, now reintroduced by the report text once the
 # two were split apart.
-# [codex review, PR #472, round 8 BLOCKING #2] This alternation is a
-# substring test (`test($pat)`), NOT an anchored one — a HUMAN comment
-# merely DISCUSSING or QUOTING a token in prose (e.g. "I saw
-# reason=liveness-timeout mentioned somewhere") satisfied the bare
-# alternation exactly as well as the genuine wrapped marker/report text
-# does, wrongly EXCLUDING that prose comment from the count and masking real
-# progress. Every genuine producer wraps its token in EXACTLY one of two
-# ways — a backtick-fenced code span (`` `token` ``, e.g. this file's own
-# `` `reason=liveness-timeout` `` report line) or the literal opening of an
-# HTML comment (`<!-- token`, e.g. `dispatcher-token:`/this watchdog's own
-# `dispatcher-liveness-watchdog:` marker) — never bare in running prose. The
-# `` (?:\`|<!--[ \t]*) `` prefix requires one of those two wrappers
-# immediately before the token; every existing call site already wraps this
-# way, so no genuine marker/report is rejected, only bare-prose mentions.
-# Oniguruma-safe (jq's `test`/`scan` engine, not `gh --jq`'s RE2) — the
-# wrapper is matched literally in front of the token, not via look-behind,
-# so the RE2 "no variable-width look-behind" constraint never applies here.
-# The wrapper group and every inner alternative group are NON-capturing
-# (`(?:...)`) so `_liveness_marker_digest`'s `scan()` extraction (which reads
-# the LAST capture group) is never confused by a nested group — see
-# `no-progress-substantive(?:-attempt)?:`'s own inner group below.
-_LIVENESS_IDEMPOTENT_PATTERN='(?:`|<!--[ \t]*)(stale-verdict:|INV-12-completed:|INV-12-no-pr-fresh-dev:|INV-35-fresh-dev:|no-progress-substantive(?:-attempt)?:|non-actionable-finding:|self-heal-lost-session:|self-heal-non-substantive:|crashed-session-retry:|crashed-session-non-actionable:|dispatcher-convergence-breaker:|dispatcher-gate-fail-breaker:|dispatcher-token:|INV-25-hygiene:|dispatcher-liveness-watchdog:|reason=liveness-no-progress|reason=liveness-timeout)'
+# [codex review, PR #472, round 10 BLOCKING] The round-8 fix above only
+# required an OPENING wrapper delimiter (a backtick or the literal `<!--`)
+# immediately before the token, with NO requirement that the wrapper ever
+# CLOSE. That still let a human comment satisfy the alternation with an
+# unclosed span — e.g. "I saw `reason=liveness-timeout mentioned somewhere,
+# never closed" (an open backtick, no matching close) — because the pattern
+# never checked for the closing delimiter at all, only the opening one. Two
+# distinct comments in round-10 review illustrated the same gap from two
+# directions: a bare backtick/HTML-comment-opening mention could (a) mask a
+# genuinely new human comment as idempotent (wrongly excluding it from
+# progress), or (b) falsely register a grammar as PRESENT in the digest — in
+# both cases because "starts with a wrapper" was treated as equivalent to
+# "IS the wrapped grammar," which it is not. Every genuine producer's marker
+# or report line is a well-formed, single-line SPAN of its wrapper — a
+# backtick code span (`` `token...` ``, opens and closes with a backtick, no
+# embedded newline — a backtick spanning a newline is not a valid Markdown
+# code span) or a single-line HTML comment (`<!-- token... -->`, opens and
+# closes on the same line — every genuine producer's HTML-comment marker in
+# this codebase is emitted on one line). The fix requires BOTH delimiters of
+# the SAME span, each on the token's own alternative branch (backtick-open
+# needs backtick-close; HTML-comment-open needs `-->`-close) rather than a
+# single shared opening-only prefix — this is "the exact producer grammar,"
+# not "starts with a look-alike prefix." `[^`\n]*`/`[^\n]*-->` both exclude
+# a newline from the span body, so a forged backtick that never closes (or
+# closes only after a line break) fails to match, closing exactly the gap
+# above. Each alternative's token sub-pattern is its OWN capturing group
+# (not shared) because Oniguruma (jq's `test`/`scan` engine) has no
+# branch-reset group syntax — `_liveness_marker_digest`'s extraction below
+# filters out the null from whichever branch did NOT match, rather than
+# relying on a single shared group position.
+#
+# [operator guidance, PR #472, 2026-07-12] This closes the SAME class of
+# finding the round-6/7/8 cutoff-anchor rounds closed for the marker's OWN
+# read (a second, independently-typed free-text signal that can be forged
+# without needing to reproduce the genuine producer's actual output) — here
+# applied to the idempotent-count/digest classification specifically. The
+# accepted token-mode residual is unchanged in KIND from every other
+# structural-only anchor in this codebase ([INV-105]'s round-14 precedent):
+# a human who posts a byte-for-byte CLOSED span identical to what a genuine
+# producer would emit (e.g. `` `reason=liveness-timeout` `` verbatim, not
+# merely opening with it) still satisfies the grammar and is indistinguishable
+# from the real thing in `GH_AUTH_MODE=token` — there is no actor signal to
+# add there. This is a strict narrowing (fewer false positives), never a
+# widening: every fixture in TC-LIVENESS-060/061/062 that passed before this
+# change (a genuine, well-formed marker/report line) still passes unchanged;
+# only a previously-accepted UNCLOSED span now correctly fails.
+_LIVENESS_IDEMPOTENT_PATTERN='(?:`(stale-verdict:|INV-12-completed:|INV-12-no-pr-fresh-dev:|INV-35-fresh-dev:|no-progress-substantive(?:-attempt)?:|non-actionable-finding:|self-heal-lost-session:|self-heal-non-substantive:|crashed-session-retry:|crashed-session-non-actionable:|dispatcher-convergence-breaker:|dispatcher-gate-fail-breaker:|dispatcher-token:|INV-25-hygiene:|dispatcher-liveness-watchdog:|reason=liveness-no-progress|reason=liveness-timeout)[^`\n]*`|<!--[ \t]*(stale-verdict:|INV-12-completed:|INV-12-no-pr-fresh-dev:|INV-35-fresh-dev:|no-progress-substantive(?:-attempt)?:|non-actionable-finding:|self-heal-lost-session:|self-heal-non-substantive:|crashed-session-retry:|crashed-session-non-actionable:|dispatcher-convergence-breaker:|dispatcher-gate-fail-breaker:|dispatcher-token:|INV-25-hygiene:|dispatcher-liveness-watchdog:|reason=liveness-no-progress|reason=liveness-timeout)[^\n]*-->)'
 
 # Marker-digest pattern ([R1]/[D3]) — the SAME grammar list, MINUS
 # `dispatcher-liveness-watchdog:` itself. The digest's whole purpose is "a
@@ -74,13 +99,15 @@ _LIVENESS_IDEMPOTENT_PATTERN='(?:`|<!--[ \t]*)(stale-verdict:|INV-12-completed:|
 # tick 2 that then permanently pollutes the fingerprint with a component
 # that carries no information (it is always present from then on). Excluded
 # from the digest for the same reason it is excluded from the count.
-# Wrapped in the SAME `` (?:\`|<!--[ \t]*) `` anchor as
-# `_LIVENESS_IDEMPOTENT_PATTERN`, for the identical reason (round 8): without
-# it, a human comment merely quoting/discussing a grammar prefix in prose —
-# e.g. "quoting the marker: dispatcher-convergence-breaker: issue=1
-# head=abc" — would falsely register that grammar as PRESENT in the digest,
-# a false "progress" signal usable to reset the watchdog's clock on demand.
-_LIVENESS_DIGEST_PATTERN='(?:`|<!--[ \t]*)(stale-verdict:|INV-12-completed:|INV-12-no-pr-fresh-dev:|INV-35-fresh-dev:|no-progress-substantive(?:-attempt)?:|non-actionable-finding:|self-heal-lost-session:|self-heal-non-substantive:|crashed-session-retry:|crashed-session-non-actionable:|dispatcher-convergence-breaker:|dispatcher-gate-fail-breaker:|dispatcher-token:|INV-25-hygiene:)'
+# [round 10] Requires the SAME closed-span grammar as
+# `_LIVENESS_IDEMPOTENT_PATTERN` above (both delimiters of the span, not
+# just the opening one) for the identical reason: without it, a human
+# comment that merely OPENS a wrapper before a grammar prefix — e.g.
+# "quoting the marker: `dispatcher-convergence-breaker: issue=1 head=abc"
+# (an unclosed backtick) — would falsely register that grammar as PRESENT
+# in the digest, a false "progress" signal usable to reset the watchdog's
+# clock on demand.
+_LIVENESS_DIGEST_PATTERN='(?:`(stale-verdict:|INV-12-completed:|INV-12-no-pr-fresh-dev:|INV-35-fresh-dev:|no-progress-substantive(?:-attempt)?:|non-actionable-finding:|self-heal-lost-session:|self-heal-non-substantive:|crashed-session-retry:|crashed-session-non-actionable:|dispatcher-convergence-breaker:|dispatcher-gate-fail-breaker:|dispatcher-token:|INV-25-hygiene:)[^`\n]*`|<!--[ \t]*(stale-verdict:|INV-12-completed:|INV-12-no-pr-fresh-dev:|INV-35-fresh-dev:|no-progress-substantive(?:-attempt)?:|non-actionable-finding:|self-heal-lost-session:|self-heal-non-substantive:|crashed-session-retry:|crashed-session-non-actionable:|dispatcher-convergence-breaker:|dispatcher-gate-fail-breaker:|dispatcher-token:|INV-25-hygiene:)[^\n]*-->)'
 
 # _LIVENESS_TIER2_HEADING — the tier-2 trip report's exact opening line
 # ([codex review, PR #472, round 7 BLOCKING]). Single-sourced here so
@@ -281,21 +308,20 @@ _liveness_marker_digest() {
   local comments_json="${1:-[]}"
   local _strict
   _strict=$(_liveness_strict_author_flag)
-  # `.[-1]` (equivalent to `.[0]` today, but robust against a future
-  # capture-group addition) — `$pat`'s wrapper (`(?:` `|<!--[ \t]*)`) and
-  # every inner alternative's own group (e.g. `no-progress-substantive
-  # (?:-attempt)?:`) are deliberately ALL non-capturing, so the token
-  # alternation is the ONLY capturing group `scan()` yields per match today —
-  # `.[0]` and `.[-1]` currently return byte-identical results. `.[-1]`
-  # is used anyway because it is the position-INDEPENDENT choice: the token
-  # (what the digest actually wants to join on) is always the LAST capture
-  # regardless of how many non-capturing groups precede it, so a future edit
-  # that adds a genuine capturing group in front of the token (accidentally
-  # or otherwise) fails safe here instead of silently swapping in the wrong
-  # substring the way `.[0]` would.
+  # [round 10] `$pat` now has TWO capturing groups per match — one per
+  # alternative branch (backtick-span token, HTML-comment-span token) — since
+  # Oniguruma (jq's `test`/`scan` engine) has no branch-reset group syntax to
+  # give both alternatives a single shared capture slot (see
+  # `_LIVENESS_DIGEST_PATTERN`'s own docstring). Exactly one of the two is
+  # non-null per match (whichever branch actually matched); the other is
+  # always `null`. `map(select(. != null)) | last` on EACH match's own
+  # 2-element array picks out the one real token and discards the null,
+  # rather than the pre-round-10 `.[-1]` (which assumed a single shared
+  # capture position and would silently return `null` for exactly half of
+  # every match — the backtick branch — under the new two-group pattern).
   jq -r --arg pat "$_LIVENESS_DIGEST_PATTERN" --arg strict "$_strict" '
     [.[] | select(($strict == "0") or ((.authorKind // "human") != "human")) | select(.body | test($pat)) | .body
-     | [scan("(?:^|[^A-Za-z0-9_-])(?:" + $pat + ")")[-1]]]
+     | [scan($pat)] | map(map(select(. != null)) | last)]
     | flatten | unique | sort | join(",")
   ' <<<"$comments_json" 2>/dev/null || echo ""
 }
