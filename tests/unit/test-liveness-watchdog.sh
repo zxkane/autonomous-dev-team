@@ -471,6 +471,26 @@ _liveness_evaluate_issue 99 issue pending-dev 6 18
 assert_no_match "TC-LIVENESS-049a re-armed issue does NOT immediately re-transition to stalled" "^label_swap" "$(_trace_all)"
 assert_match "TC-LIVENESS-049b re-armed issue restarts the count at 1 (fresh episode)" "count=1 tier1=0" "$(_trace_all)"
 
+# TC-LIVENESS-050 [pr-test-analyzer gap]: a SECOND trip-resume cycle — the
+# cutoff must track the LATEST trip report, not the FIRST. History: trip #1
+# at T1, a post-resume marker at T2, trip #2 at T3 (which embeds ITS OWN
+# marker), then nothing after T3. If the cutoff computation regressed from
+# `max` to `min`/`first`, T3's cutoff would incorrectly equal T1, and the T2
+# post-resume marker (T2 < T3) would wrongly qualify as "the prior marker"
+# even though it is now BEFORE the second trip.
+trip_marker50a=$(_liveness_marker 99 "$fp46" 18 1)
+post_resume_marker50=$(_liveness_marker 99 "$fp46" 5 0)
+trip_marker50b=$(_liveness_marker 99 "$fp46" 18 1)
+comments50=$(jq -n --arg m1 "$trip_marker50a" --arg p "$post_resume_marker50" --arg m2 "$trip_marker50b" '
+  [{"authorKind":"bot","createdAt":"2026-01-01T10:00:00Z",
+    "body":($m1 + "\n## Liveness watchdog tripped — halting a silently-parked issue")},
+   {"authorKind":"bot","createdAt":"2026-01-01T12:00:00Z","body":$p},
+   {"authorKind":"bot","createdAt":"2026-01-01T14:00:00Z",
+    "body":($m2 + "\n## Liveness watchdog tripped — halting a silently-parked issue")}]
+')
+assert_eq "TC-LIVENESS-050 second trip cycle: cutoff tracks the LATEST trip (T3), not the first (T1) — no qualifying marker after T3" "" \
+  "$(_liveness_prior_marker "$comments50" 0)"
+
 echo
 echo "=== Summary ==="
 echo "Passed: $PASS"
