@@ -30,6 +30,11 @@ LIB_ERROR_SRC="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-error.sh"
 # Both need to be stageable in the sandbox for the tick to run at all.
 LIB_AUTH_SRC="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-auth.sh"
 LIB_CODE_HOST_SRC="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-code-host.sh"
+# [INV-128] dispatcher-tick.sh now sources lib-liveness.sh (real, pure
+# helpers only — no I/O) right after lib-dispatch.sh. Auth tests don't
+# exercise Step 6, but the stub lib-dispatch.sh below must still define
+# run_liveness_watchdog() since dispatcher-tick.sh calls it unconditionally.
+LIB_LIVENESS_SRC="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-liveness.sh"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -88,6 +93,7 @@ cp "$LIB_ERROR_SRC" "$SANDBOX/lib-error.sh"
 # sources lib-auth.sh; lib-auth.sh sources lib-code-host.sh at module init.
 cp "$LIB_AUTH_SRC" "$SANDBOX/lib-auth.sh"
 cp "$LIB_CODE_HOST_SRC" "$SANDBOX/lib-code-host.sh"
+cp "$LIB_LIVENESS_SRC" "$SANDBOX/lib-liveness.sh"
 
 # Stub lib-dispatch.sh: provide every helper dispatcher-tick.sh expects, but
 # return empty/no-op so the tick exercises only the upfront validation +
@@ -160,6 +166,9 @@ _has_terminal_label() { return 1; }
 # gate logic is covered by test-issue-filter.sh and
 # test-dispatcher-tick-issue-filter.sh, not this suite).
 issue_filter_validate() { return 0; }
+# [INV-128] Step 6 liveness watchdog. dispatcher-tick.sh calls this
+# unconditionally after Step 5; auth tests don't exercise it.
+run_liveness_watchdog() { :; }
 EOF
 
 # Stub gh-app-token.sh: record the call, return a sentinel token. The token

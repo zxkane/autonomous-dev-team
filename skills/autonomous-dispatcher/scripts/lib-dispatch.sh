@@ -4094,3 +4094,387 @@ was_just_dispatched() {
     *) return 1 ;;
   esac
 }
+
+# ---------------------------------------------------------------------------
+# Step 6: generic liveness watchdog ([INV-128], issue #467)
+# ---------------------------------------------------------------------------
+# Pure fingerprint/counter/threshold/tier-decision helpers live in
+# lib-liveness.sh (sourced by dispatcher-tick.sh before this file). The
+# orchestration below is the ONLY call site that performs the watchdog's
+# label_swap — deliberately kept in lib-dispatch.sh (one of the four files
+# check-spec-drift.sh's Check C scans for label writes), not in
+# lib-liveness.sh, so the new pending-dev/pending-review -> stalled movement
+# is visible to the spec-drift gate.
+
+# _liveness_post_marker <issue_num> <marker_text> — post the watchdog's own
+# bare bookkeeping marker, retrying once on failure and posting a loud
+# best-effort operator notice if BOTH attempts fail ([codex review, PR #472,
+# round 9 BLOCKING #2]; mirrors the established INV-85 retry-then-notice
+# shape already used for the `no-progress-substantive-attempt:<head>` marker
+# above). Every prior round swallowed a marker-post failure with a bare
+# `itp_post_comment ... || true` — fine for a comment that merely records
+# events for a human, but wrong for THIS comment: it IS the counter/tier1-
+# latch/`tripped`-field persistence mechanism (R4). A silently lost post
+# means the very next tick reads back NOTHING via `_liveness_prior_marker`,
+# `_liveness_next_count` resets to `count=1` under an otherwise-unchanged
+# fingerprint, and the series can never advance past that reset — a
+# self-inflicted instance of the exact "permanent silent park" bug class
+# this watchdog exists to close. Losing a `tripped=1` marker specifically is
+# worse still: a LATER resume tick's cutoff computation
+# (`_liveness_prior_marker`) finds no qualifying `tripped=1` marker at all,
+# falls back to the epoch, and reads the OLD pre-trip marker back as
+# "prior" — reproducing the round-3/6/7/8 immediate-re-trip-on-resume bug via
+# a lost write instead of a design gap. Returns 1 on persistent failure so
+# the caller (see the `tier1` branch below) can skip a dependent report post
+# that would otherwise repeat every tick while the marker keeps failing to
+# land (the marker carries the `tier1=1` latch that suppresses the re-fire).
+_liveness_post_marker() {
+  local issue_num="$1" marker_text="$2"
+  itp_post_comment "$issue_num" "$marker_text" 2>/dev/null && return 0
+  itp_post_comment "$issue_num" "$marker_text" 2>/dev/null && return 0
+  log "  WARNING: issue #${issue_num} liveness watchdog: failed to post the bookkeeping marker after retry — the no-op counter may reset to count=1 next tick (degraded, not a crash; [INV-128])."
+  itp_post_comment "$issue_num" \
+    "⚠️ The liveness watchdog could not record its bookkeeping marker for issue #${issue_num} this tick (GitHub API rejected the comment twice). The no-op counter may reset next tick — a transient degradation, not a stall. If this issue was JUST transitioned to \`stalled\`, the resume-cutoff marker may be missing; please verify before removing the label. @${REPO_OWNER}" \
+    2>/dev/null \
+    || log "  WARNING: issue #${issue_num} liveness watchdog: operator notice for the degraded marker write also failed to post."
+  return 1
+}
+
+# _liveness_post_report <issue_num> <report_text> — post a tier-1/tier-2
+# human-readable report with ONE retry on failure ([codex review, PR #472,
+# round 9 BLOCKING #2]). Unlike `_liveness_post_marker` above, a lost report
+# costs only operator-facing prose — R4's counter/tier1-latch/`tripped` state
+# is carried entirely by the marker, posted (and retried) independently
+# beforehand — so this does not need the marker's loud-notice escalation,
+# just a best-effort retry (mirrors the plentiful existing single-retry
+# `itp_post_comment` call sites elsewhere in this file).
+_liveness_post_report() {
+  local issue_num="$1" report_text="$2"
+  itp_post_comment "$issue_num" "$report_text" 2>/dev/null && return 0
+  itp_post_comment "$issue_num" "$report_text" 2>/dev/null && return 0
+  log "  WARNING: issue #${issue_num} liveness watchdog: failed to post the human-readable report after retry — state (marker/label) already committed; only the operator-facing explanation is missing."
+  return 1
+}
+
+# _liveness_evaluate_issue <issue_num> <kind> <active_label> <notice> <stall>
+#
+# The per-issue orchestration ([R6]): computes the fingerprint, reads back
+# the prior watchdog marker, decides the tier action, and performs exactly
+# one side effect (bare marker / tier-1 comment / tier-2 transition+report).
+# All I/O through existing itp_*/pid_alive/label_swap verbs (INV-91) — this
+# function has no verbs of its own. `kind` is `issue` for a pending-dev
+# candidate, `review` for a pending-review candidate (see
+# _liveness_wrapper_alive, lib-liveness.sh). Assumes `log` is defined by the
+# caller (dispatcher-tick.sh convention, mirrors run_hygiene_pass).
+_liveness_evaluate_issue() {
+  local issue_num="$1" kind="$2" active_label="$3" notice="$4" stall="$5"
+
+  if was_just_dispatched "$issue_num"; then
+    log "  issue #${issue_num} liveness watchdog: just dispatched this tick — skipping ([INV-09])"
+    return 0
+  fi
+
+  if is_within_grace_period "$issue_num"; then
+    log "  issue #${issue_num} liveness watchdog: within dispatch grace period — skipping ([INV-18])"
+    return 0
+  fi
+
+  if _liveness_wrapper_alive "$kind" "$issue_num"; then
+    log "  issue #${issue_num} liveness watchdog: wrapper alive or dispatch in flight — not counted as a no-op tick"
+    return 0
+  fi
+
+  local comments_json
+  comments_json=$(itp_list_comments "$issue_num" 2>/dev/null) || {
+    log "  issue #${issue_num} liveness watchdog: itp_list_comments failed — deferring this tick (transient, [INV-125] preflight posture)"
+    return 0
+  }
+  [ -n "$comments_json" ] || comments_json="[]"
+
+  # [codex review, PR #472, round 8 BLOCKING #3] `fetch_pr_for_issue`
+  # (-> `resolve_pr_for_issue` -> `chp_find_pr_for_issue`) is FAIL-CLOSED on
+  # transport error: `chp_find_pr_for_issue`'s underlying page-walk returns
+  # rc≠0 on a `gh` transport failure / cap-hit / non-JSON response, and
+  # `resolve_pr_for_issue` propagates that rc via `|| return 1` — it is only
+  # rc=0 with EMPTY stdout that means "genuinely no PR is bound to this
+  # issue" (`[ -n "$candidates" ] || return 0`). The pre-fix `|| pr_info=""`
+  # collapsed BOTH outcomes into the same "no PR" reading — a transient API
+  # blip on an issue that DOES have a PR would silently change the
+  # fingerprint's head component from the real SHA to empty, resetting the
+  # no-op counter and masking a genuine park exactly on the tick meant to
+  # detect it. Distinguish by checking the rc BEFORE assuming "no PR": a
+  # nonzero rc defers this tick entirely (same posture as the
+  # `itp_list_comments` preflight above), never posting a marker/report
+  # this evaluation.
+  local pr_info current_head=""
+  if ! pr_info=$(fetch_pr_for_issue "$issue_num" "headRefOid" 2>/dev/null); then
+    log "  issue #${issue_num} liveness watchdog: fetch_pr_for_issue transport failure — deferring this tick (transient, mirrors the itp_list_comments preflight posture)"
+    return 0
+  fi
+  if [ -n "$pr_info" ]; then
+    current_head=$(jq -r '.headRefOid // empty' <<<"$pr_info" 2>/dev/null || echo "")
+  fi
+
+  local non_idem_count marker_digest fingerprint
+  non_idem_count=$(_liveness_non_idempotent_count "$comments_json")
+  marker_digest=$(_liveness_marker_digest "$comments_json")
+  fingerprint=$(_liveness_fingerprint "$active_label" "$current_head" "$non_idem_count" "$marker_digest")
+
+  # Read back the prior watchdog marker via `_liveness_prior_marker`
+  # (lib-liveness.sh) — the CUTOFF-then-scan pure helper, mirroring
+  # `_review_cap_prior_marker`'s own cutoff convention. The LAST comment
+  # STRUCTURALLY anchored on the exact grammar `_liveness_marker` itself
+  # emits — [operator guidance, round 6] its ENTIRE body, now ALWAYS: round 6
+  # stopped embedding the marker as the first line of the tier1/tier2 report
+  # (see the posting sequence below) specifically so `_liveness_prior_marker`
+  # can use a WHOLE-BODY anchor instead of the old "marker line, then
+  # optionally more prose" `($|\n)` form — mirrors
+  # `classify_recent_review_verdict`'s own whole-body `_anchored_trailer_re`.
+  # The scan is STRICTLY AFTER the latest tier-2 trip report's heading
+  # ("Liveness watchdog tripped"), if any — see [codex review, PR #472,
+  # BLOCKING #2]: without this cutoff, an operator who fixes the park and
+  # removes `stalled` (re-arming via Step 2) with an otherwise-unchanged
+  # fingerprint would have the very next evaluation read that OLD trip's
+  # marker back and immediately re-trip tier 2 again, instead of starting a
+  # fresh liveness episode. The tier-2 posting sequence below (marker BEFORE
+  # the trip report) guarantees the marker's `createdAt` never exceeds the
+  # cutoff it would itself set, so this exclusion holds without relying on
+  # same-second timestamp coincidence.
+  #
+  # `_liveness_strict_author_flag` resolves the authorKind gate: [operator
+  # guidance, round 6] app-mode-only (mirrors
+  # `classify_recent_review_verdict`'s [#389]/[#393] two-part fix) — NOT the
+  # unconditional `authorKind != "human"` gate round 5's finding warned would
+  # reintroduce round 2's "watchdog permanently inert in GH_AUTH_MODE=token"
+  # bug (this marker is posted AND read back in the SAME dispatcher process,
+  # which NEVER resolves `BOT_LOGIN` regardless of `GH_AUTH_MODE` — see the
+  # `_frozen_convergence_rounds_json` precedent). In `GH_AUTH_MODE=token` the
+  # whole-body structural anchor carries authenticity alone; the accepted
+  # residual (a human posting a byte-for-byte bare marker as their entire
+  # comment) is the SAME documented exposure every other structural-only
+  # anchor in this codebase carries, now bounded in blast radius by the
+  # `_liveness_next_count` cap below.
+  local _liveness_strict_author
+  _liveness_strict_author=$(_liveness_strict_author_flag)
+  local prior_marker
+  prior_marker=$(_liveness_prior_marker "$comments_json" "$_liveness_strict_author")
+
+  local count tier1
+  count=$(_liveness_next_count "$prior_marker" "$fingerprint" "$stall")
+  tier1=$(_liveness_next_tier1 "$prior_marker" "$fingerprint")
+
+  local action
+  action=$(_liveness_tier_action "$count" "$tier1" "$notice" "$stall")
+
+  local marker_tier1="$tier1"
+  [ "$action" = "tier1" ] && marker_tier1=1
+  # `tripped` ([codex review, PR #472, round 8 BLOCKING #1]) is set ONLY on
+  # the tier-2 marker — it is what `_liveness_prior_marker`'s cutoff now
+  # keys on, replacing the old separate (and three times forged/re-forged)
+  # heading-text cutoff. See that function's docstring for the full history.
+  local marker_tripped=0
+  [ "$action" = "tier2" ] && marker_tripped=1
+  local new_marker
+  new_marker=$(_liveness_marker "$issue_num" "$fingerprint" "$count" "$marker_tier1" "$marker_tripped")
+
+  case "$action" in
+    none)
+      # `|| true`: this file and dispatcher-tick.sh both run under
+      # `set -euo pipefail` — a BARE call to a function that can return 1
+      # (persistent post failure) trips `set -e` and aborts this function,
+      # then propagates up through run_liveness_watchdog's loop and aborts
+      # the ENTIRE dispatcher tick before the metrics-prune tail. The
+      # pre-round-9 code (`itp_post_comment ... || true`) could never
+      # return non-zero, so `set -e` was never a factor; `_liveness_post_marker`
+      # deliberately CAN return 1 (so the tier1 branch below can detect and
+      # act on persistent failure) and every OTHER call site must therefore
+      # explicitly swallow that non-zero return with `|| true` to preserve
+      # the never-abort-the-tick guarantee.
+      _liveness_post_marker "$issue_num" "$new_marker" || true
+      ;;
+    tier1)
+      log "  issue #${issue_num} liveness watchdog: TIER 1 — ${count} consecutive no-op ticks (fingerprint=${fingerprint}) — posting operator escalation"
+      # [operator guidance, round 6] The marker is posted as its OWN bare
+      # comment, BEFORE the human-readable report — never embedded as the
+      # report's first line. This is what lets `_liveness_prior_marker` use
+      # a whole-body anchor: a genuine marker comment now NEVER contains
+      # anything else, so a forgery with ANY extra content (leading or
+      # trailing) fails the anchor. `reason=liveness-no-progress` is in
+      # `_LIVENESS_IDEMPOTENT_PATTERN` (lib-liveness.sh) so the report itself
+      # never registers as "a new comment" against the fingerprint's own
+      # comment-count component on the next tick.
+      #
+      # [codex review, PR #472, round 9 BLOCKING #2] Both posts now retry
+      # once and surface a loud operator notice on persistent failure
+      # (`_liveness_post_marker`/`_liveness_post_report`, defined above) —
+      # a swallowed `|| true` here previously meant the tier1=1 latch could
+      # silently fail to land, letting tier 1 re-fire every tick the
+      # fingerprint stayed frozen instead of firing exactly once (R3). If
+      # the marker write itself fails after retry, skip the report post too
+      # — the counter state didn't advance, so re-posting the same
+      # escalation prose would just repeat every tick until a write
+      # succeeds; that repetition is the marker-failure's own loud notice.
+      _liveness_post_marker "$issue_num" "$new_marker" || return 0
+      # `|| true`: same `set -e` hazard as the `none` branch above —
+      # `_liveness_post_report` can return 1 on persistent failure, and a
+      # bare call would abort this function (and the whole tick) rather
+      # than degrade gracefully to "the report is missing this tick."
+      _liveness_post_report "$issue_num" "$(cat <<TIER1REPORT
+No observable progress for **${count}** ticks on issue #${issue_num} (\`reason=liveness-no-progress\`, [INV-128]):
+- Label: \`${active_label}\`
+- PR head: \`${current_head:-<none>}\`
+- Non-idempotent comment count: ${non_idem_count}
+- Marker digest: \`${marker_digest:-<none>}\`
+
+@${REPO_OWNER} this issue may need attention. If this is a legitimate slow wait, any observable change (a comment, a label edit, or a push) resets the clock. Without one, this issue transitions to \`stalled\` after **${stall}** total unchanged ticks.
+TIER1REPORT
+)" || true
+      ;;
+    tier2)
+      # Already-stalled race re-check IMMEDIATELY before the transition
+      # (mirrors INV-122's `_gf_already_stalled` check) — a specific
+      # breaker may have won the race between the candidate-list fetch and
+      # this evaluation. Never post a competing report.
+      local already_stalled
+      already_stalled=$(itp_read_task "$issue_num" labels 2>/dev/null \
+        | jq -r '.labels | any(. == "stalled")' 2>/dev/null || echo "false")
+      if [ "$already_stalled" = "true" ]; then
+        log "  issue #${issue_num} liveness watchdog: already stalled by another breaker — skipping competing report"
+        return 0
+      fi
+
+      log "  issue #${issue_num} liveness watchdog: TIER 2 — ${count} consecutive no-op ticks (fingerprint=${fingerprint}) — halting per [INV-128]"
+
+      # Transition FIRST, atomically — mirrors INV-105/INV-122's TOCTOU fix:
+      # a failed transition aborts under set -euo pipefail BEFORE either
+      # comment is posted, so the next tick re-evaluates from scratch instead
+      # of an orphan report/marker existing against a still-non-stalled issue.
+      #
+      # Branches on `kind` (rather than passing $active_label straight through)
+      # so BOTH label_swap operands are LITERAL — check-spec-drift.sh's Check C
+      # movement scanner only recognizes a literal (non-`$`-prefixed) operand as
+      # part of a declared movement; a variable second argument here would
+      # register as an incomplete, undeclared movement and fail CI (or worse,
+      # silently escape C.2's coverage). Mirrors the two declared transitions
+      # (liveness-watchdog-stall-pending-dev / -pending-review) exactly.
+      if [ "$kind" = "issue" ]; then
+        # liveness-watchdog-stall-pending-dev [INV-128]
+        label_swap "$issue_num" "pending-dev" "stalled"
+      else
+        # liveness-watchdog-stall-pending-review [INV-128]
+        label_swap "$issue_num" "pending-review" "stalled"
+      fi
+
+      # [operator guidance, round 6] The bare marker is posted BEFORE the
+      # human-readable trip report — never embedded inside it. [round 8
+      # update] The cutoff `_liveness_prior_marker` computes no longer
+      # depends on post ORDER or same-second timestamp coincidence at all —
+      # it keys directly on this marker's own `tripped=1` field (set above),
+      # which is part of the marker's already-authenticated, whole-body-
+      # anchored grammar. Posting the marker before the report is still done
+      # for the SAME operator-facing reason every other tier posts the
+      # marker first (a reader sees the bookkeeping comment land, then the
+      # narrative), but it is no longer LOAD-BEARING for the cutoff's
+      # correctness the way it was pre-round-8.
+      #
+      # [codex review, PR #472, round 9 BLOCKING #2] `_liveness_post_marker`
+      # retries once and posts a loud operator notice (flagging that the
+      # `tripped=1` resume-cutoff marker may be missing) on persistent
+      # failure — see that helper's docstring. UNLIKE the tier1 branch
+      # above, the report post below is NOT gated on the marker's success:
+      # `label_swap` already committed the `stalled` transition
+      # unconditionally (this is irreversible for this tick), so the report
+      # is the operator's one explanation for why the issue just halted —
+      # losing it on top of a lost marker would leave a `stalled` issue with
+      # zero context. Best-effort via its own retry
+      # (`_liveness_post_report`) either way. `|| true` on BOTH calls here
+      # (and below) for the SAME `set -e` reason as the `none`/`tier1`
+      # branches — `label_swap` already landed, so a persistently failing
+      # marker or report must degrade to "missing this tick's audit trail,"
+      # never abort the function (which would also skip the report below,
+      # or — for the report — abort the whole dispatcher tick).
+      _liveness_post_marker "$issue_num" "$new_marker" || true
+
+      local pointer
+      pointer=$(_liveness_newest_pointer "$comments_json")
+      # `_LIVENESS_TIER2_HEADING` (lib-liveness.sh) is rendered here as
+      # operator-facing display text ONLY as of round 8 — no detector reads
+      # it anymore (`_liveness_prior_marker`'s cutoff now keys on the
+      # marker's own `tripped` field instead, see that function's
+      # docstring). Kept as a single-sourced constant purely so the report's
+      # heading text has one place to edit, not because a mismatch here
+      # could reopen a cutoff bug the way it could pre-round-8.
+      _liveness_post_report "$issue_num" "$(cat <<TIER2REPORT
+${_LIVENESS_TIER2_HEADING} (\`reason=liveness-timeout\`, [INV-128])
+
+This issue's observable state (label + PR head + non-idempotent comments + marker set) has not changed for **${count}** consecutive dispatcher ticks — well past the **${stall}**-tick stall threshold.
+
+**Evidence**
+- Last-known fingerprint: \`${fingerprint}\`
+- Label at time of trip: \`${active_label}\`
+- PR head: \`${current_head:-<none>}\`
+- Non-idempotent comment count: ${non_idem_count}
+- Marker digest (known grammars present): \`${marker_digest:-<none>}\`
+- Tick counts: count=${count}, notice_threshold=${notice}, stall_threshold=${stall}
+- Newest session report / verdict pointer: ${pointer:-(none found)}
+
+**Dispatcher actions taken** (autonomy halted for this issue):
+- Transitioned to \`stalled\` (\`autonomous\` is retained — removing \`stalled\` re-arms via Step 2 and resets the retry counter, [INV-05]).
+- Posted this one-time report.
+
+@${REPO_OWNER} please investigate — this is the class-level backstop (a specific breaker for this park shape may not exist yet). To resume: fix per the evidence above, then remove the \`stalled\` label.
+TIER2REPORT
+)" || true
+      ;;
+  esac
+}
+
+# run_liveness_watchdog — Step 6 entry point ([R6]). Iterates issues labeled
+# `autonomous` + (`pending-dev` OR `pending-review`) via the existing
+# list_pending_dev/list_pending_review selectors (which already exclude
+# `approved`/`stalled` — the terminal-label exemption is structural, not a
+# separate runtime check, [R2]). No-op entirely when the watchdog is
+# disabled ([R5]).
+run_liveness_watchdog() {
+  if ! _liveness_watchdog_enabled; then
+    log "  liveness watchdog disabled (LIVENESS_WATCHDOG_ENABLED=false) — skipping"
+    return 0
+  fi
+
+  # [codex review, PR #472, round 8 BLOCKING #4] Both threshold readers
+  # write their invalid-config WARNING to stderr ONLY (by design — see each
+  # function's own docstring: routing through `log()` would corrupt the
+  # numeric `$(...)` capture). Piping that stderr straight to `/dev/null`
+  # here, rather than capturing and re-emitting it through `log()`, meant
+  # R5's required warning never reached the dispatcher's own log output on a
+  # real misconfigured run — the fallback still applied correctly, but
+  # silently, making a `LIVENESS_NOTICE_TICKS`/`LIVENESS_STALL_TICKS` typo
+  # far harder to diagnose than the requirement intends. Mirrors this same
+  # file's `ci_is_green` mktemp-capture-then-relog pattern (Step 5a) rather
+  # than inventing a new shape.
+  local notice stall _lw_err_file _lw_err
+  _lw_err_file=$(mktemp)
+  notice=$(_liveness_notice_ticks 2>"$_lw_err_file")
+  _lw_err=$(cat "$_lw_err_file"); : >"$_lw_err_file"
+  [ -n "$_lw_err" ] && log "  ${_lw_err}"
+  stall=$(_liveness_stall_ticks "$notice" 2>"$_lw_err_file")
+  _lw_err=$(cat "$_lw_err_file")
+  rm -f "$_lw_err_file"
+  [ -n "$_lw_err" ] && log "  ${_lw_err}"
+
+  local pending_dev pending_review pd_count pr_count i issue_num
+  pending_dev=$(list_pending_dev)
+  pending_review=$(list_pending_review)
+  pd_count=$(jq 'length' <<<"$pending_dev")
+  pr_count=$(jq 'length' <<<"$pending_review")
+
+  for i in $(seq 0 $((pd_count - 1))); do
+    issue_num=$(jq -r ".[$i].number" <<<"$pending_dev")
+    _liveness_evaluate_issue "$issue_num" issue pending-dev "$notice" "$stall"
+  done
+
+  for i in $(seq 0 $((pr_count - 1))); do
+    issue_num=$(jq -r ".[$i].number" <<<"$pending_review")
+    _liveness_evaluate_issue "$issue_num" review pending-review "$notice" "$stall"
+  done
+}

@@ -439,6 +439,32 @@
       "note": "INV-105 (#297): the deterministic >=N belt to INV-85's single-shot suspenders. A failed-substantive + dev-actionable=true verdict that churns >=CONVERGENCE_STALL_THRESHOLD (default 3) completed zero-commit dev-resume rounds against a frozen PR head is halted: this pending-dev -> stalled transition (via label_swap, NOT mark_stalled, so exactly one terminal comment) lands FIRST, then one reason=non-convergence report + marker is posted (transition-then-report ordering closes a TOCTOU where a failed transition could leave an orphan marker). Gated behind the shared may_stall_now live-PID pre-gate (pid-dead). autonomous is retained throughout — never removed by this movement."
     },
     {
+      "id": "liveness-watchdog-stall-pending-dev",
+      "from": "pending_dev",
+      "to": "stalled",
+      "event": "dispatcher-step6-liveness-watchdog",
+      "actor": "dispatcher",
+      "guards": ["liveness-not-already-stalled", "liveness-fingerprint-frozen-at-stall-threshold"],
+      "actions": ["remove-label:pending-dev", "add-label:stalled", "comment:liveness-timeout"],
+      "code_site": "lib-dispatch.sh _liveness_evaluate_issue() tier2 case (label_swap runs FIRST, atomically BEFORE the reason=liveness-timeout report + marker are posted)",
+      "mermaid": "pending_dev --> stalled: Step 6 liveness watchdog (observable-state fingerprint frozen >=LIVENESS_STALL_TICKS ticks) [INV-128]",
+      "inv_refs": ["INV-128", "INV-105", "INV-122"],
+      "note": "INV-128 (#467): the class-level backstop for the 'permanent silent park' bug class (INV-105/111/122/123/125 were per-entry point-fixes). Any pending-dev issue whose observable state fingerprint (label, PR head, non-idempotent comment count, marker digest) is unchanged for >=LIVENESS_STALL_TICKS (default 18) consecutive ticks is halted: this pending-dev -> stalled transition (via label_swap) lands FIRST, then one reason=liveness-timeout report + marker is posted (mirrors INV-105/INV-122's TOCTOU-safe transition-then-report ordering). Re-checks current labels for stalled immediately before acting (mirrors INV-122's already-stalled skip) — a specific breaker may have won the race. autonomous is retained throughout — never removed by this movement."
+    },
+    {
+      "id": "liveness-watchdog-stall-pending-review",
+      "from": "pending_review",
+      "to": "stalled",
+      "event": "dispatcher-step6-liveness-watchdog",
+      "actor": "dispatcher",
+      "guards": ["liveness-not-already-stalled", "liveness-fingerprint-frozen-at-stall-threshold"],
+      "actions": ["remove-label:pending-review", "add-label:stalled", "comment:liveness-timeout"],
+      "code_site": "lib-dispatch.sh _liveness_evaluate_issue() tier2 case (label_swap runs FIRST, atomically BEFORE the reason=liveness-timeout report + marker are posted)",
+      "mermaid": "pending_review --> stalled: Step 6 liveness watchdog (observable-state fingerprint frozen >=LIVENESS_STALL_TICKS ticks) [INV-128]",
+      "inv_refs": ["INV-128", "INV-105", "INV-122"],
+      "note": "INV-128 (#467): the pending-review sibling of liveness-watchdog-stall-pending-dev — a genuinely NEW movement (no prior transition declared pending_review -> stalled). A pending-review issue whose observable state fingerprint is unchanged for >=LIVENESS_STALL_TICKS (default 18) consecutive ticks is halted the same way. autonomous is retained throughout."
+    },
+    {
       "id": "review-pass-no-auto-close",
       "from": "reviewing",
       "to": "approved",
