@@ -23,7 +23,7 @@ disabled.
 | TC-LIVENESS-003 | PR head SHA changes, all else equal | different fingerprint |
 | TC-LIVENESS-004 | Non-idempotent comment count changes, all else equal | different fingerprint |
 | TC-LIVENESS-005 | Marker digest changes (a new marker grammar appears), all else equal | different fingerprint |
-| TC-LIVENESS-006 | A new `stale-verdict:<head>`-style idempotent notice is posted | fingerprint's comment-count component is UNCHANGED (excluded) |
+| TC-LIVENESS-006 | A new `` `stale-verdict:<head>` ``-style idempotent notice is posted, backtick-wrapped as every genuine producer renders it | fingerprint's comment-count component is UNCHANGED (excluded) |
 | TC-LIVENESS-007 | A genuinely new (non-idempotent) comment is posted | fingerprint's comment-count component changes |
 | TC-LIVENESS-008 | The watchdog's own tier-1 comment is posted | excluded from the count component (self-exclusion, D3) |
 
@@ -98,15 +98,15 @@ disabled.
 
 ## Group H — prior-marker cutoff / resume-after-un-stall (TC-LIVENESS-046..050)
 
-`_liveness_prior_marker` ([codex review, PR #472, BLOCKING #2]) is the cutoff-then-scan pure helper that fixes a self-referential read. Fixtures model the real producer shape (marker at T-epsilon, trip report — whose body starts with the real `_LIVENESS_TIER2_HEADING`, [round 7] — at T): the marker is posted STRICTLY BEFORE the report as a separate comment (round 6), and the cutoff is computed by matching `startswith($heading)` against that same single-sourced constant ([round 7] — see Group K for the regression this closed). Without a cutoff at the latest genuine trip report, an operator resuming a stalled issue with an otherwise-unchanged fingerprint would have the very next evaluation read that old trip's marker back and immediately re-trip tier 2 again.
+`_liveness_prior_marker` ([codex review, PR #472, BLOCKING #2]; cutoff signal REDESIGNED [round 8], see Group L) is the cutoff-then-scan pure helper that fixes a self-referential read. Fixtures model the real producer shape (marker at T-epsilon, trip report at T): the marker is posted STRICTLY BEFORE the report as a separate comment (round 6), and — as of round 8 — the cutoff is computed directly from the LATEST marker whose OWN `tripped` field equals `1`, not from any text pattern on the report. Without a cutoff at the latest genuine trip, an operator resuming a stalled issue with an otherwise-unchanged fingerprint would have the very next evaluation read that old trip's marker back and immediately re-trip tier 2 again.
 
 | ID | Scenario | Expected |
 |----|----------|----------|
-| TC-LIVENESS-046 | A constructed fixture: a marker (`count=18 tier1=1`) immediately followed by a trip report (body starting with the real heading) at the next timestamp; no comment exists after it | `_liveness_prior_marker` returns `""` — the marker is excluded (it precedes the cutoff, and the cutoff comparison is strict `>`) |
-| TC-LIVENESS-047 | A trip report at T1, then a genuinely later bare marker at T2 > T1 | `_liveness_prior_marker` returns the T2 marker; feeding it into `_liveness_next_count` continues a fresh post-resume series, not a re-trip off T1's count |
-| TC-LIVENESS-048 | No trip report has ever been posted | cutoff is the epoch; the existing marker still qualifies (unchanged behavior for the common, no-trip-yet case) |
-| TC-LIVENESS-049 | End-to-end through `_liveness_evaluate_issue`: a trip report already fired, then a re-arm tick runs against the SAME fingerprint (as if `stalled` were removed with nothing else changed) | does NOT immediately re-transition to `stalled`; the fresh marker restarts at `count=1 tier1=0` |
-| TC-LIVENESS-050 | A SECOND trip-resume cycle: trip #1 (marker+report), a post-resume marker, trip #2 (marker+report) | cutoff tracks the LATEST trip (#2), not the first — no qualifying prior marker after the second trip, regression pin against a `max`→`min`/`first` mutation |
+| TC-LIVENESS-046 | A constructed fixture: a `tripped=1` marker (`count=18 tier1=1`) immediately followed by a trip report at the next timestamp; no comment exists after it | `_liveness_prior_marker` returns `""` — the `tripped=1` marker is excluded (it precedes the cutoff, and the cutoff comparison is strict `>`) |
+| TC-LIVENESS-047 | A `tripped=1` marker at T1, then a genuinely later bare `tripped=0` marker at T2 > T1 | `_liveness_prior_marker` returns the T2 marker; feeding it into `_liveness_next_count` continues a fresh post-resume series, not a re-trip off T1's count |
+| TC-LIVENESS-048 | No `tripped=1` marker has ever been posted | cutoff is the epoch; the existing marker still qualifies (unchanged behavior for the common, no-trip-yet case) |
+| TC-LIVENESS-049 | End-to-end through `_liveness_evaluate_issue`: a `tripped=1` marker already fired, then a re-arm tick runs against the SAME fingerprint (as if `stalled` were removed with nothing else changed) | does NOT immediately re-transition to `stalled`; the fresh marker restarts at `count=1 tier1=0 tripped=0` |
+| TC-LIVENESS-050 | A SECOND trip-resume cycle: trip #1 (`tripped=1` marker + report), a post-resume `tripped=0` marker, trip #2 (`tripped=1` marker + report) | cutoff tracks the LATEST `tripped=1` marker (#2), not the first — no qualifying prior marker after the second trip, regression pin against a `max`→`min`/`first` mutation |
 
 ## Group I — round-6 hardening: whole-body anchor, app-mode authorKind gate, count cap (TC-LIVENESS-051..058)
 
@@ -130,11 +130,22 @@ disabled.
 | TC-LIVENESS-045i | The tier-2 trip report, after the full 25-tick stub-dispatcher replay | its body does not start with the marker prefix (split into two comments, round 6) |
 | TC-LIVENESS-045j | Whole-body-anchored bare marker comments across the full replay | at least two exist (one from tier 1, one from tier 2) |
 
-## Group K — round-7 regression: forged mid-comment cutoff mention (TC-LIVENESS-045k, TC-LIVENESS-059)
+## Group K — round-7/8 regression: forged cutoff-text mentions (TC-LIVENESS-045k, TC-LIVENESS-059)
 
-[codex review, PR #472, round 7 BLOCKING] Until round 7, `_liveness_prior_marker`'s cutoff detection was an UNANCHORED `contains("Liveness watchdog tripped")` substring test. Any comment merely MENTIONING that bare phrase anywhere in its body — not as a report's own opening line, e.g. a human collaborator discussing a past trip in prose — falsely registered as a trip and became the cutoff, excluding the genuine earlier marker and permanently resetting a still-frozen issue's series to `count=1` on every subsequent tick, letting a real park dodge tier 2 indefinitely. Fixed by anchoring the cutoff match to `startswith($heading)` against the new single-sourced `_LIVENESS_TIER2_HEADING` constant.
+[codex review, PR #472, rounds 7-8] Until round 7, `_liveness_prior_marker`'s cutoff detection was an UNANCHORED `contains("Liveness watchdog tripped")` substring test — any comment merely MENTIONING that bare phrase anywhere in its body falsely registered as a trip. Round 7 tightened this to `startswith($heading)`; round 8 found `startswith()` was STILL forgeable (a comment merely OPENING with the exact heading, with no real marker at all, satisfied it too) and eliminated the free-text cutoff signal entirely — see Group L. These test cases now pin BOTH historical forgery shapes against the round-8 fix, proving neither can register as a cutoff regardless of the (now-decorative) heading text.
 
 | ID | Scenario | Expected |
 |----|----------|----------|
-| TC-LIVENESS-059 | (unit, pure helper) A genuine earlier marker, then a human comment that mentions the trip heading mid-sentence (not as its own opening line) | `_liveness_prior_marker` still returns the genuine earlier marker — the mid-comment mention does NOT act as a forged cutoff |
-| TC-LIVENESS-045k | (E2E, through `_liveness_evaluate_issue`) A fresh in-progress episode built up to `count=10`, then the SAME forged mid-comment mention (also idempotent-pattern-excluded via `reason=liveness-timeout` so it doesn't itself change the fingerprint) | the count continues incrementing across the forged comment (10 → 11), not reset to 1 |
+| TC-LIVENESS-059 | (unit, pure helper) A genuine earlier marker, then (a) a human comment that mentions the trip heading mid-sentence, and (b) a human comment that OPENS with the exact heading text but contains no real marker at all | `_liveness_prior_marker` still returns the genuine earlier marker — neither forgery shape acts as a cutoff, since the cutoff no longer reads free text at all (round 8) |
+| TC-LIVENESS-045k | (E2E, through `_liveness_evaluate_issue`) A fresh in-progress episode built up to `count=10`, then a forged mid-comment mention (idempotent-pattern-excluded via a backtick-wrapped `` `reason=liveness-timeout` ``, [round 8], so it doesn't itself change the fingerprint) | the count continues incrementing across the forged comment (10 → 11), not reset to 1 |
+
+## Group L — round 8: tripped-field cutoff redesign, wrapper-anchored idempotent patterns, PR-lookup transport-failure exemption, threshold-warning relogging
+
+[codex review, PR #472, round 8, 4 BLOCKING findings] A single review round surfaced four independent gaps, all fixed together:
+
+| ID | Finding | Fix | Covered by |
+|----|---------|-----|------------|
+| round 8 #1 | The cutoff (`_liveness_prior_marker`) still keyed on a separately-typed heading-text pattern (`startswith($heading)`), forgeable by any comment that simply opens with the exact heading | `tripped=<0\|1>` added as a FIELD on the marker's own already-authenticated, whole-body-anchored grammar; the cutoff now keys on that field instead of any free text | TC-LIVENESS-046..050, 059 (Groups H/K, rewritten) |
+| round 8 #2 | `_LIVENESS_IDEMPOTENT_PATTERN`/`_LIVENESS_DIGEST_PATTERN` were bare alternations (substring tests) — a human comment merely discussing/quoting a token in prose matched identically to a genuine wrapped marker/report | Both patterns require a leading wrapper anchor (a backtick code span or an HTML-comment opening) immediately before the token; every genuine producer already wraps this way | TC-LIVENESS-006 (Group A, updated); new unit coverage in `test-liveness-watchdog.sh` for the wrapper-anchor exclusion/inclusion behavior directly |
+| round 8 #3 | `fetch_pr_for_issue` transport failure was collapsed into "no PR" (`current_head=""`), silently resetting the counter on a transient API blip | The call site checks the rc BEFORE reading the head; a nonzero rc defers the entire tick (fail-toward-defer, mirrors the `itp_list_comments` preflight) | new unit coverage in `test-liveness-watchdog.sh` pinning the defer-on-transport-failure behavior |
+| round 8 #4 | `run_liveness_watchdog` redirected both threshold readers' stderr straight to `/dev/null`, so R5's required invalid-config warning never reached the dispatcher's own log | Each reader's stderr is captured via `mktemp` (mirroring `ci_is_green`'s capture-then-relog pattern) and re-emitted through `log()` | manually verified (WARNING lines observed in `log()` output for an injected invalid config); no dedicated TC-LIVENESS ID — this is a logging-only change with no decision-function behavior to pin beyond Group D's existing fallback coverage |

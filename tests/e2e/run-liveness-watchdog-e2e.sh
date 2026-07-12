@@ -234,12 +234,14 @@ for tick in $(seq 1 10); do
 done
 marker_before_forgery=$(jq -r '[.[] | select(.body | test("^<!-- dispatcher-liveness-watchdog:"))] | last | .body' <<<"$ISSUE_COMMENTS_K")
 
-# Inject the forged comment: matches `_LIVENESS_IDEMPOTENT_PATTERN` via
-# `reason=liveness-timeout` (so it does NOT itself change the fingerprint's
-# comment-count component), but also contains the bare trip-heading phrase
-# mid-sentence — the exact round-6 false-cutoff shape.
+# Inject the forged comment: matches `_LIVENESS_IDEMPOTENT_PATTERN` via a
+# backtick-wrapped `` `reason=liveness-timeout` `` (so it does NOT itself
+# change the fingerprint's comment-count component — round 8 requires the
+# wrapper anchor for this exclusion to apply, see that pattern's docstring),
+# but also contains the bare trip-heading phrase mid-sentence — the exact
+# round-6 false-cutoff shape.
 _k_clock=$((_k_clock + 1))
-forged_mention="A collaborator can copy the tier-2 header (excluded via reason=liveness-timeout), quoting: ${_LIVENESS_TIER2_HEADING}"
+forged_mention="A collaborator can copy the tier-2 header (excluded via \`reason=liveness-timeout\`), quoting: ${_LIVENESS_TIER2_HEADING}"
 ISSUE_COMMENTS_K=$(jq --arg b "$forged_mention" --arg t "$(printf '2026-07-10T%02d:00:00Z' $((9 + _k_clock)))" \
   '. + [{"authorKind":"human","createdAt":$t,"body":$b}]' <<<"$ISSUE_COMMENTS_K")
 

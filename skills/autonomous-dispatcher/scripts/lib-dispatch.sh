@@ -4141,8 +4141,26 @@ _liveness_evaluate_issue() {
   }
   [ -n "$comments_json" ] || comments_json="[]"
 
+  # [codex review, PR #472, round 8 BLOCKING #3] `fetch_pr_for_issue`
+  # (-> `resolve_pr_for_issue` -> `chp_find_pr_for_issue`) is FAIL-CLOSED on
+  # transport error: `chp_find_pr_for_issue`'s underlying page-walk returns
+  # rc≠0 on a `gh` transport failure / cap-hit / non-JSON response, and
+  # `resolve_pr_for_issue` propagates that rc via `|| return 1` — it is only
+  # rc=0 with EMPTY stdout that means "genuinely no PR is bound to this
+  # issue" (`[ -n "$candidates" ] || return 0`). The pre-fix `|| pr_info=""`
+  # collapsed BOTH outcomes into the same "no PR" reading — a transient API
+  # blip on an issue that DOES have a PR would silently change the
+  # fingerprint's head component from the real SHA to empty, resetting the
+  # no-op counter and masking a genuine park exactly on the tick meant to
+  # detect it. Distinguish by checking the rc BEFORE assuming "no PR": a
+  # nonzero rc defers this tick entirely (same posture as the
+  # `itp_list_comments` preflight above), never posting a marker/report
+  # this evaluation.
   local pr_info current_head=""
-  pr_info=$(fetch_pr_for_issue "$issue_num" "headRefOid" 2>/dev/null) || pr_info=""
+  if ! pr_info=$(fetch_pr_for_issue "$issue_num" "headRefOid" 2>/dev/null); then
+    log "  issue #${issue_num} liveness watchdog: fetch_pr_for_issue transport failure — deferring this tick (transient, mirrors the itp_list_comments preflight posture)"
+    return 0
+  fi
   if [ -n "$pr_info" ]; then
     current_head=$(jq -r '.headRefOid // empty' <<<"$pr_info" 2>/dev/null || echo "")
   fi
@@ -4200,8 +4218,14 @@ _liveness_evaluate_issue() {
 
   local marker_tier1="$tier1"
   [ "$action" = "tier1" ] && marker_tier1=1
+  # `tripped` ([codex review, PR #472, round 8 BLOCKING #1]) is set ONLY on
+  # the tier-2 marker — it is what `_liveness_prior_marker`'s cutoff now
+  # keys on, replacing the old separate (and three times forged/re-forged)
+  # heading-text cutoff. See that function's docstring for the full history.
+  local marker_tripped=0
+  [ "$action" = "tier2" ] && marker_tripped=1
   local new_marker
-  new_marker=$(_liveness_marker "$issue_num" "$fingerprint" "$count" "$marker_tier1")
+  new_marker=$(_liveness_marker "$issue_num" "$fingerprint" "$count" "$marker_tier1" "$marker_tripped")
 
   case "$action" in
     none)
@@ -4266,27 +4290,27 @@ TIER1REPORT
       fi
 
       # [operator guidance, round 6] The bare marker is posted BEFORE the
-      # trip report — never embedded inside it. This ordering is what makes
-      # `_liveness_prior_marker`'s cutoff exclusion hold WITHOUT relying on
-      # same-second timestamp coincidence: the cutoff is the trip report's
-      # own `createdAt` (it carries the `_LIVENESS_TIER2_HEADING` opening
-      # line), and this marker is posted strictly before that report, so its
-      # `createdAt` can never exceed the cutoff it precedes — the strict `>`
-      # scan on the NEXT tick always excludes it. Posting the marker AFTER
-      # the report instead would reopen exactly the round-3 [codex review,
-      # BLOCKING #2] self-referential re-trip bug this ordering exists to
-      # prevent (the "resume after un-stall re-trip" fix).
+      # human-readable trip report — never embedded inside it. [round 8
+      # update] The cutoff `_liveness_prior_marker` computes no longer
+      # depends on post ORDER or same-second timestamp coincidence at all —
+      # it keys directly on this marker's own `tripped=1` field (set above),
+      # which is part of the marker's already-authenticated, whole-body-
+      # anchored grammar. Posting the marker before the report is still done
+      # for the SAME operator-facing reason every other tier posts the
+      # marker first (a reader sees the bookkeeping comment land, then the
+      # narrative), but it is no longer LOAD-BEARING for the cutoff's
+      # correctness the way it was pre-round-8.
       itp_post_comment "$issue_num" "$new_marker" 2>/dev/null || true
 
       local pointer
       pointer=$(_liveness_newest_pointer "$comments_json")
-      # [codex review, PR #472, round 7 BLOCKING] The heading line is
-      # rendered from `_LIVENESS_TIER2_HEADING` (lib-liveness.sh) — the SAME
-      # constant `_liveness_prior_marker`'s cutoff detection matches via
-      # `startswith()` — never a second hand-typed copy. A literal duplicate
-      # here is exactly how the round-6 producer/detector text silently
-      # diverged from an unanchored `contains()` scan; single-sourcing closes
-      # that class of drift permanently, not just this one instance of it.
+      # `_LIVENESS_TIER2_HEADING` (lib-liveness.sh) is rendered here as
+      # operator-facing display text ONLY as of round 8 — no detector reads
+      # it anymore (`_liveness_prior_marker`'s cutoff now keys on the
+      # marker's own `tripped` field instead, see that function's
+      # docstring). Kept as a single-sourced constant purely so the report's
+      # heading text has one place to edit, not because a mismatch here
+      # could reopen a cutoff bug the way it could pre-round-8.
       itp_post_comment "$issue_num" "$(cat <<TIER2REPORT
 ${_LIVENESS_TIER2_HEADING} (\`reason=liveness-timeout\`, [INV-128])
 
@@ -4324,9 +4348,26 @@ run_liveness_watchdog() {
     return 0
   fi
 
-  local notice stall
-  notice=$(_liveness_notice_ticks 2>/dev/null)
-  stall=$(_liveness_stall_ticks "$notice" 2>/dev/null)
+  # [codex review, PR #472, round 8 BLOCKING #4] Both threshold readers
+  # write their invalid-config WARNING to stderr ONLY (by design — see each
+  # function's own docstring: routing through `log()` would corrupt the
+  # numeric `$(...)` capture). Piping that stderr straight to `/dev/null`
+  # here, rather than capturing and re-emitting it through `log()`, meant
+  # R5's required warning never reached the dispatcher's own log output on a
+  # real misconfigured run — the fallback still applied correctly, but
+  # silently, making a `LIVENESS_NOTICE_TICKS`/`LIVENESS_STALL_TICKS` typo
+  # far harder to diagnose than the requirement intends. Mirrors this same
+  # file's `ci_is_green` mktemp-capture-then-relog pattern (Step 5a) rather
+  # than inventing a new shape.
+  local notice stall _lw_err_file _lw_err
+  _lw_err_file=$(mktemp)
+  notice=$(_liveness_notice_ticks 2>"$_lw_err_file")
+  _lw_err=$(cat "$_lw_err_file"); : >"$_lw_err_file"
+  [ -n "$_lw_err" ] && log "  ${_lw_err}"
+  stall=$(_liveness_stall_ticks "$notice" 2>"$_lw_err_file")
+  _lw_err=$(cat "$_lw_err_file")
+  rm -f "$_lw_err_file"
+  [ -n "$_lw_err" ] && log "  ${_lw_err}"
 
   local pending_dev pending_review pd_count pr_count i issue_num
   pending_dev=$(list_pending_dev)

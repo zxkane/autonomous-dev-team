@@ -41,7 +41,28 @@
 # next tick and resetting the counter — the SAME self-referential-pollution bug
 # D3 already fixed for the marker, now reintroduced by the report text once the
 # two were split apart.
-_LIVENESS_IDEMPOTENT_PATTERN='stale-verdict:|INV-12-completed:|INV-12-no-pr-fresh-dev:|INV-35-fresh-dev:|no-progress-substantive(-attempt)?:|non-actionable-finding:|self-heal-lost-session:|self-heal-non-substantive:|crashed-session-retry:|crashed-session-non-actionable:|dispatcher-convergence-breaker:|dispatcher-gate-fail-breaker:|dispatcher-token:|INV-25-hygiene:|dispatcher-liveness-watchdog:|reason=liveness-no-progress|reason=liveness-timeout'
+# [codex review, PR #472, round 8 BLOCKING #2] This alternation is a
+# substring test (`test($pat)`), NOT an anchored one — a HUMAN comment
+# merely DISCUSSING or QUOTING a token in prose (e.g. "I saw
+# reason=liveness-timeout mentioned somewhere") satisfied the bare
+# alternation exactly as well as the genuine wrapped marker/report text
+# does, wrongly EXCLUDING that prose comment from the count and masking real
+# progress. Every genuine producer wraps its token in EXACTLY one of two
+# ways — a backtick-fenced code span (`` `token` ``, e.g. this file's own
+# `` `reason=liveness-timeout` `` report line) or the literal opening of an
+# HTML comment (`<!-- token`, e.g. `dispatcher-token:`/this watchdog's own
+# `dispatcher-liveness-watchdog:` marker) — never bare in running prose. The
+# `` (?:\`|<!--[ \t]*) `` prefix requires one of those two wrappers
+# immediately before the token; every existing call site already wraps this
+# way, so no genuine marker/report is rejected, only bare-prose mentions.
+# Oniguruma-safe (jq's `test`/`scan` engine, not `gh --jq`'s RE2) — the
+# wrapper is matched literally in front of the token, not via look-behind,
+# so the RE2 "no variable-width look-behind" constraint never applies here.
+# The wrapper group and every inner alternative group are NON-capturing
+# (`(?:...)`) so `_liveness_marker_digest`'s `scan()` extraction (which reads
+# the LAST capture group) is never confused by a nested group — see
+# `no-progress-substantive(?:-attempt)?:`'s own inner group below.
+_LIVENESS_IDEMPOTENT_PATTERN='(?:`|<!--[ \t]*)(stale-verdict:|INV-12-completed:|INV-12-no-pr-fresh-dev:|INV-35-fresh-dev:|no-progress-substantive(?:-attempt)?:|non-actionable-finding:|self-heal-lost-session:|self-heal-non-substantive:|crashed-session-retry:|crashed-session-non-actionable:|dispatcher-convergence-breaker:|dispatcher-gate-fail-breaker:|dispatcher-token:|INV-25-hygiene:|dispatcher-liveness-watchdog:|reason=liveness-no-progress|reason=liveness-timeout)'
 
 # Marker-digest pattern ([R1]/[D3]) — the SAME grammar list, MINUS
 # `dispatcher-liveness-watchdog:` itself. The digest's whole purpose is "a
@@ -53,7 +74,13 @@ _LIVENESS_IDEMPOTENT_PATTERN='stale-verdict:|INV-12-completed:|INV-12-no-pr-fres
 # tick 2 that then permanently pollutes the fingerprint with a component
 # that carries no information (it is always present from then on). Excluded
 # from the digest for the same reason it is excluded from the count.
-_LIVENESS_DIGEST_PATTERN='stale-verdict:|INV-12-completed:|INV-12-no-pr-fresh-dev:|INV-35-fresh-dev:|no-progress-substantive(-attempt)?:|non-actionable-finding:|self-heal-lost-session:|self-heal-non-substantive:|crashed-session-retry:|crashed-session-non-actionable:|dispatcher-convergence-breaker:|dispatcher-gate-fail-breaker:|dispatcher-token:|INV-25-hygiene:'
+# Wrapped in the SAME `` (?:\`|<!--[ \t]*) `` anchor as
+# `_LIVENESS_IDEMPOTENT_PATTERN`, for the identical reason (round 8): without
+# it, a human comment merely quoting/discussing a grammar prefix in prose —
+# e.g. "quoting the marker: dispatcher-convergence-breaker: issue=1
+# head=abc" — would falsely register that grammar as PRESENT in the digest,
+# a false "progress" signal usable to reset the watchdog's clock on demand.
+_LIVENESS_DIGEST_PATTERN='(?:`|<!--[ \t]*)(stale-verdict:|INV-12-completed:|INV-12-no-pr-fresh-dev:|INV-35-fresh-dev:|no-progress-substantive(?:-attempt)?:|non-actionable-finding:|self-heal-lost-session:|self-heal-non-substantive:|crashed-session-retry:|crashed-session-non-actionable:|dispatcher-convergence-breaker:|dispatcher-gate-fail-breaker:|dispatcher-token:|INV-25-hygiene:)'
 
 # _LIVENESS_TIER2_HEADING — the tier-2 trip report's exact opening line
 # ([codex review, PR #472, round 7 BLOCKING]). Single-sourced here so
@@ -157,7 +184,18 @@ _liveness_watchdog_enabled() {
 # marker as their ENTIRE comment) remains a documented, accepted exposure —
 # the SAME class every other structural-only anchor in this codebase carries
 # (INV-105's round-14 finding) — because GH_AUTH_MODE=token has no actor
-# signal to layer on top. Echoes "1" (apply the authorKind filter) or "0".
+# signal to layer on top. [round 8] This residual now has TWO directions,
+# not one: a forged high-count marker still TRIGGERS an early tier action
+# (bounded by the count cap, `_liveness_next_count`'s 3rd arg), and — new
+# since `tripped` replaced the heading-text cutoff — a forged `tripped=1`
+# marker can also SUPPRESS an in-progress series by moving the cutoff
+# forward and resetting it to `count=1`. The count cap bounds ONLY the
+# trigger direction; the suppression direction is self-limiting instead (the
+# genuine watchdog re-posts its own marker on the very next tick and resumes
+# counting, so indefinite suppression requires the forger to keep posting a
+# fresh audit-visible forgery roughly every `stall_ticks`, not a one-time
+# action) rather than being capped. Echoes "1" (apply the authorKind filter)
+# or "0".
 _liveness_strict_author_flag() {
   if [[ "${GH_AUTH_MODE:-token}" == "app" ]]; then
     echo 1
@@ -214,9 +252,21 @@ _liveness_marker_digest() {
   local comments_json="${1:-[]}"
   local _strict
   _strict=$(_liveness_strict_author_flag)
+  # `.[-1]` (equivalent to `.[0]` today, but robust against a future
+  # capture-group addition) — `$pat`'s wrapper (`(?:` `|<!--[ \t]*)`) and
+  # every inner alternative's own group (e.g. `no-progress-substantive
+  # (?:-attempt)?:`) are deliberately ALL non-capturing, so the token
+  # alternation is the ONLY capturing group `scan()` yields per match today —
+  # `.[0]` and `.[-1]` currently return byte-identical results. `.[-1]`
+  # is used anyway because it is the position-INDEPENDENT choice: the token
+  # (what the digest actually wants to join on) is always the LAST capture
+  # regardless of how many non-capturing groups precede it, so a future edit
+  # that adds a genuine capturing group in front of the token (accidentally
+  # or otherwise) fails safe here instead of silently swapping in the wrong
+  # substring the way `.[0]` would.
   jq -r --arg pat "$_LIVENESS_DIGEST_PATTERN" --arg strict "$_strict" '
     [.[] | select(($strict == "0") or ((.authorKind // "human") != "human")) | select(.body | test($pat)) | .body
-     | [scan("(?:^|[^A-Za-z0-9_-])((?:" + $pat + "))")[0]]]
+     | [scan("(?:^|[^A-Za-z0-9_-])(?:" + $pat + ")")[-1]]]
     | flatten | unique | sort | join(",")
   ' <<<"$comments_json" 2>/dev/null || echo ""
 }
@@ -245,93 +295,102 @@ _liveness_fingerprint() {
 }
 
 # ---------------------------------------------------------------------------
-# _liveness_marker <issue> <fingerprint> <count> <tier1> — construct the
-# marker text ([R4]).
+# _liveness_marker <issue> <fingerprint> <count> <tier1> [tripped] —
+# construct the marker text ([R4]). `tripped` (default 0) records whether
+# THIS marker was posted as part of a tier-2 transition ([codex review, PR
+# #472, round 8 BLOCKING #1] — see `_liveness_prior_marker`'s docstring for
+# why this field replaces the old separate-heading-text cutoff).
 _liveness_marker() {
-  local issue="$1" fingerprint="$2" count="$3" tier1="$4"
-  printf '<!-- dispatcher-liveness-watchdog: issue=%s fingerprint=%s count=%s tier1=%s -->' \
-    "$issue" "$fingerprint" "$count" "$tier1"
+  local issue="$1" fingerprint="$2" count="$3" tier1="$4" tripped="${5:-0}"
+  printf '<!-- dispatcher-liveness-watchdog: issue=%s fingerprint=%s count=%s tier1=%s tripped=%s -->' \
+    "$issue" "$fingerprint" "$count" "$tier1" "$tripped"
 }
 
 # _liveness_parse_marker <marker_text> <fingerprint> <field> — echo the
-# named field (count|tier1) from marker_text IFF it matches the given
+# named field (count|tier1|tripped) from marker_text IFF it matches the given
 # fingerprint; else echo 0. Pure substring/regex extraction — a malformed,
 # absent, or non-matching marker all collapse to 0 (bias to MISS).
 _liveness_parse_marker() {
   local marker_text="$1" fingerprint="$2" field="$3"
-  local pattern="dispatcher-liveness-watchdog: issue=[0-9]+ fingerprint=${fingerprint} count=([0-9]+) tier1=([01])"
+  local pattern="dispatcher-liveness-watchdog: issue=[0-9]+ fingerprint=${fingerprint} count=([0-9]+) tier1=([01]) tripped=([01])"
   if [[ "$marker_text" =~ $pattern ]]; then
-    if [[ "$field" == "count" ]]; then
-      printf '%s\n' "${BASH_REMATCH[1]}"
-    else
-      printf '%s\n' "${BASH_REMATCH[2]}"
-    fi
+    case "$field" in
+      count)   printf '%s\n' "${BASH_REMATCH[1]}" ;;
+      tier1)   printf '%s\n' "${BASH_REMATCH[2]}" ;;
+      tripped) printf '%s\n' "${BASH_REMATCH[3]}" ;;
+      *)       printf '%s\n' "${BASH_REMATCH[2]}" ;;
+    esac
   else
     printf '0\n'
   fi
 }
 
 # _liveness_prior_marker <comments_json> <strict_author> — the CUTOFF-then-
-# scan prior-marker read ([codex review, PR #472, BLOCKING] fix #2). Mirrors
+# scan prior-marker read ([codex review, PR #472, BLOCKING] fix #2, then
+# round 8's structural rework of the cutoff itself). Mirrors
 # `_review_cap_prior_marker`'s cutoff convention (lib-review-cap.sh, itself
-# mirroring [INV-05]'s "Marking as stalled" cutoff): the tier-2 TIER2REPORT
-# heredoc EMBEDS its own `dispatcher-liveness-watchdog:` marker (R4 requires
-# posting on EVERY evaluated tick, including the trip tick itself). Without a
-# cutoff, an operator who fixes whatever caused the park and re-arms the
-# issue (removes `stalled`, restoring `pending-dev`/`pending-review`) with an
-# otherwise-UNCHANGED fingerprint would have the very next evaluation read
-# that OLD trip report's marker back — high count, tier1=1 — and immediately
-# re-trip tier 2 again, instead of starting a fresh liveness episode.
+# mirroring [INV-05]'s "Marking as stalled" cutoff): a tier-2 transition
+# posts a marker with `tripped=1` (R4 requires posting on EVERY evaluated
+# tick, including the trip tick itself). Without a cutoff, an operator who
+# fixes whatever caused the park and re-arms the issue (removes `stalled`,
+# restoring `pending-dev`/`pending-review`) with an otherwise-UNCHANGED
+# fingerprint would have the very next evaluation read that OLD trip
+# marker back — high count, tier1=1 — and immediately re-trip tier 2 again,
+# instead of starting a fresh liveness episode.
 #
-# cutoff = the latest qualifying comment whose body STARTS WITH the tier-2
-# trip report's exact opening line (`_LIVENESS_TIER2_HEADING`); the epoch if
+# cutoff = the latest qualifying `tripped=1` marker's createdAt; the epoch if
 # no trip has ever fired. Markers AT OR BEFORE the cutoff are excluded
 # (strict `>`, mirrors `_review_cap_prior_marker`'s own strict inequality) —
-# this excludes the trip report's own embedded marker (its createdAt EQUALS
-# the cutoff) while still admitting a genuinely later post-resume marker.
+# this excludes the trip marker itself (its createdAt EQUALS the cutoff)
+# while still admitting a genuinely later post-resume marker.
 #
-# [codex review, PR #472, round 7 BLOCKING] The cutoff match is a WHOLE-BODY
-# PREFIX anchor (`startswith`), NOT the round-6 `contains("Liveness watchdog
-# tripped")` substring test it replaces: `contains()` let ANY comment merely
-# mentioning that bare phrase ANYWHERE in its body — a collaborator quoting or
-# discussing it in prose, with no report structure at all — falsely register
-# as a trip and become the cutoff. That forged cutoff would sit AFTER the
-# genuine earlier marker, excluding it and resetting a frozen issue's series
-# to count=1 on every tick indefinitely, letting a real park dodge tier 2
-# forever. `startswith($heading)` requires the comment's body to OPEN with
-# the report's exact heading line — the same posture the marker's own
-# whole-body anchor already takes on the marker grammar, and `_LIVENESS_TIER2_
-# HEADING` is the single source of truth the TIER2REPORT heredoc
-# (`_liveness_evaluate_issue`, lib-dispatch.sh) renders verbatim, so producer
-# and detector can never drift apart.
+# [codex review, PR #472, round 8 BLOCKING #1] Rounds 6/7 anchored the cutoff
+# to a SEPARATE, hand-typed heading string (`_LIVENESS_TIER2_HEADING`),
+# tightened from `contains()` to `startswith()` after round 7 found the
+# substring form let ANY comment merely mentioning the phrase register as a
+# trip. Round 8 found `startswith()` was STILL forgeable in the default
+# GH_AUTH_MODE=token topology: `_LIVENESS_TIER2_HEADING` is prose text, not
+# part of the marker's own already-authenticated grammar, so an unauthenti-
+# cated collaborator comment that simply OPENS with that exact heading line
+# (trivial to copy) satisfied `startswith()` just as well as the genuine
+# report — moving the cutoff forward, excluding the real earlier marker, and
+# resetting a still-frozen series to count=1 indefinitely. Each round's fix
+# patched the SAME underlying design flaw (a second, independently-typed
+# text pattern carries no authentication of its own) without addressing it:
+# the cutoff detector and the marker's own whole-body structural anchor were
+# two different mechanisms that had to be kept in sync, and round 6->7->8
+# is the history of them drifting apart three times. The structural fix is
+# to stop using free-text prose as the cutoff signal ENTIRELY: `tripped` is
+# now a FIELD on the marker itself, so cutoff detection reuses the EXACT
+# SAME whole-body anchor (`$anchor` below) and the EXACT SAME authenticity
+# filter (`$strict`) as the prior-marker scan it feeds — there is no second
+# pattern left to drift out of sync with. `_LIVENESS_TIER2_HEADING` remains
+# as the report's display heading (operator-facing prose, still rendered by
+# the TIER2REPORT heredoc) but is no longer read by any detector — a human
+# copying that heading text now does nothing, because the cutoff no longer
+# looks at prose at all.
 #
 # [operator guidance, round 6] `anchor` is a WHOLE-BODY anchor
 # (`^...-->[[:space:]]*$`, mirroring `classify_recent_review_verdict`'s own
-# `_anchored_trailer_re` and INV-105's round-14 verdict anchor) — NOT the
-# prior `^...-->($|\n)` form that tolerated trailing report prose after the
-# marker line. This tightens the structural guarantee now that the marker is
-# ALWAYS posted as its own bare comment (see `_liveness_evaluate_issue` —
-# round 6 stopped embedding the marker as the tier-1/tier-2 report's first
-# line): a genuine marker's ENTIRE body is the marker, so a forgery with ANY
-# extra content — leading prose, trailing content, or a marker embedded
-# inside a larger comment — fails the anchor. The old `($|\n)` form was
-# necessary ONLY because the marker used to be the first line of a longer
-# report body; that reason no longer applies.
+# `_anchored_trailer_re` and INV-105's round-14 verdict anchor): a genuine
+# marker's ENTIRE body is the marker, so a forgery with ANY extra content —
+# leading prose, trailing content, or a marker embedded inside a larger
+# comment — fails the anchor.
 #
 # `strict_author` selects the authorKind filter via `_liveness_strict_author_flag`
 # — app-mode-only (round 6; NOT the token-mode-reintroducing unconditional
-# gate round 5's finding warned against). Both the cutoff computation and the
-# final scan are derived from the SAME filtered `$rows` so they never
-# disagree on which comments are eligible.
+# gate round 5's finding warned against). The cutoff computation and the
+# final scan are derived from the SAME filtered+anchored `$rows` so they can
+# never disagree on which comments are eligible or authentic.
 _liveness_prior_marker() {
   local comments_json="${1:-[]}" strict="${2:-0}"
-  local anchor='^<!-- dispatcher-liveness-watchdog: issue=[0-9]+ fingerprint=[0-9a-f]+ count=[0-9]+ tier1=[01] -->[[:space:]]*$'
-  jq -r --arg strict "$strict" --arg anchor "$anchor" --arg heading "$_LIVENESS_TIER2_HEADING" '
-    ( [ .[] | select(($strict == "0") or ((.authorKind // "human") != "human")) | select(.body | type == "string") ] ) as $rows
-    | ( [ $rows[] | select(.body | startswith($heading)) | .createdAt ]
+  local anchor='^<!-- dispatcher-liveness-watchdog: issue=[0-9]+ fingerprint=[0-9a-f]+ count=[0-9]+ tier1=[01] tripped=(?<tripped>[01]) -->[[:space:]]*$'
+  jq -r --arg strict "$strict" --arg anchor "$anchor" '
+    ( [ .[] | select(($strict == "0") or ((.authorKind // "human") != "human")) | select(.body | type == "string")
+        | select(.body | test($anchor)) ] ) as $rows
+    | ( [ $rows[] | select((.body | capture($anchor)).tripped == "1") | .createdAt ]
         + ["1970-01-01T00:00:00Z"] | max ) as $cutoff
-    | ( [ $rows[] | select(.body | test($anchor)) | select(.createdAt > $cutoff) ]
-        | sort_by(.createdAt) | last | .body // "" )
+    | ( [ $rows[] | select(.createdAt > $cutoff) ] | sort_by(.createdAt) | last | .body // "" )
   ' <<<"$comments_json" 2>/dev/null || printf ''
 }
 
