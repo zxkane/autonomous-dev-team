@@ -4300,9 +4300,9 @@ _liveness_evaluate_issue() {
       # a whole-body anchor: a genuine marker comment now NEVER contains
       # anything else, so a forgery with ANY extra content (leading or
       # trailing) fails the anchor. `reason=liveness-no-progress` is in
-      # `_LIVENESS_IDEMPOTENT_PATTERN` (lib-liveness.sh) so the report itself
-      # never registers as "a new comment" against the fingerprint's own
-      # comment-count component on the next tick.
+      # `_LIVENESS_GRAMMARS_JSON` (lib-liveness.sh, issue #473) so the report
+      # itself never registers as "a new comment" against the fingerprint's
+      # own comment-count component on the next tick.
       #
       # [codex review, PR #472, round 9 BLOCKING #2] Both posts now retry
       # once and surface a loud operator notice on persistent failure

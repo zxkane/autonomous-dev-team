@@ -196,3 +196,23 @@ disabled.
 | TC-LIVENESS-081 | A backtick span whose "closing" backtick is on the line AFTER an embedded newline (not a valid single-line Markdown code span) | still rejected — behaves the same as an unclosed span, not as a closed one |
 | TC-LIVENESS-082 | A genuinely CLOSED backtick span (082a) and a genuinely closed single-line HTML-comment marker (082b) — the real producer shape, unchanged from round 8 | behaves exactly as before round 10: excluded from the count / registers in the digest |
 | TC-LIVENESS-083 | Two comments, each carrying a DIFFERENT genuinely-closed grammar (`dispatcher-token:` and `dispatcher-convergence-breaker:`) | the digest extraction correctly joins both distinct tokens — the two-independent-capturing-groups rework didn't break multi-match extraction |
+
+## Group O — issue #473: whole-body grammar conversion (TC-LIVENESS-084..085)
+
+Rounds 6-10 above converted the classification anchor incrementally (bare substring → opening-wrapper → closed-span) but never past a PER-TOKEN span.
+
+| ID | Finding | Fix | Covered by |
+|----|---------|-----|------------|
+| issue #473 | A human comment that merely QUOTES a closed, well-formed span around a known token (e.g. "please see `` `reason=liveness-timeout` `` for context") still satisfied every round-10 anchor exactly as well as the genuine producer's own report, wrongly excluding it from the non-idempotent count. Separately, a comment whose FIRST LINE looks like a canonical marker but whose remainder is noncanonical prose still registered that grammar as present in the digest. | `_LIVENESS_IDEMPOTENT_PATTERN`/`_LIVENESS_DIGEST_PATTERN` (per-token alternations) are REPLACED by `_LIVENESS_GRAMMARS_JSON` (`lib-liveness.sh`) — one WHOLE-BODY regex PER PRODUCER, built directly from that producer's actual `itp_post_comment` call site. A comment counts as a grammar ONLY when its ENTIRE body matches, start to end. | TC-LIVENESS-084..085, plus the TC-LIVENESS-060b/061b/067..069/082/083 rewrites above |
+
+| ID | Scenario | Expected |
+|----|----------|----------|
+| TC-LIVENESS-084 | A human comment quoting `reason=liveness-timeout` backtick-wrapped inside prose (084a) vs. the genuine full-body `reason=liveness-timeout` notice (084b) | (a) counts toward the non-idempotent progress count; (b) does not |
+| TC-LIVENESS-085 | A comment whose first line is a canonical `<!-- dispatcher-token: ... -->` marker but continues with prose (085a) vs. the genuine full-body `dispatcher-token:` marker (085b) | (a) does NOT alter the digest; (b) DOES register in the digest |
+
+**[pr-test-analyzer gap, self-review]** TC-084/085 pin the issue's two mandated cases, but 9 of the 18 `_LIVENESS_GRAMMARS_JSON` entries — including `dispatcher-gate-fail-breaker:`, the SECOND big multi-line breaker report (sibling to `dispatcher-convergence-breaker:`, TC-083) — were never exercised against a full-body fixture transcribed from their real producer call site; a future edit to one of those heredocs could silently desync the grammar from the producer with zero red tests. TC-LIVENESS-086..094 close this: one full-body fixture per previously-uncovered grammar, each transcribed byte-for-byte from its `itp_post_comment` call site (`lib-dispatch.sh`/`autonomous-review.sh`), pinning that it registers correctly in the digest.
+
+| ID | Scenario | Expected |
+|----|----------|----------|
+| TC-LIVENESS-086..093 | Genuine full-body fixtures for `INV-12-completed:`, `INV-12-no-pr-fresh-dev:`, `INV-35-fresh-dev:`, `no-progress-substantive:` (non-attempt form), `non-actionable-finding:`, `self-heal-non-substantive:`, `crashed-session-non-actionable:`, `INV-25-hygiene:` | each registers as its own grammar name in the digest |
+| TC-LIVENESS-094 | Genuine full-body `dispatcher-gate-fail-breaker:` report, transcribed from `autonomous-review.sh`'s `GATEBREAKREPORT` heredoc | registers as `dispatcher-gate-fail-breaker:` in the digest |
