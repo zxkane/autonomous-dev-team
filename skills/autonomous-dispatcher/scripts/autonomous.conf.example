@@ -106,6 +106,33 @@ REPO_OWNER="owner"
 REPO_NAME="repo-name"
 PROJECT_DIR="/path/to/project"
 
+# BASE_BRANCH — the branch PRs/MRs merge into (issue #478, [INV-131]). Every
+# dev/review wrapper prompt, the mergeable-gate messages, and the PR-create
+# provider leaves target this branch instead of a hardcoded `main`. One
+# dispatcher instance serves exactly one base branch — this is NOT per-issue
+# routing (see the design notes in issue #478 for why that's a separable
+# follow-up).
+#
+# Resolution chain (lib-config.sh::resolve_base_branch): BASE_BRANCH (this
+# key) → DEFAULT_BRANCH (deprecated fallback — the pre-#478 name; still
+# honored but logs a one-time deprecation WARNING) → "main" (default).
+#
+# Validation: must match ^[A-Za-z0-9._/-]+$ (no spaces/quotes — the value is
+# interpolated into agent prompts AND git/gh command lines). An invalid value
+# falls back to "main" with a loud WARNING (mirrors REVIEW_CONVERGENCE_CAP's
+# fallback posture).
+#
+# Byte-identical-default guarantee: leaving this unset (the default) is
+# byte-for-byte today's `main`-hardcoded behavior — no prompt text, hook
+# decision, or provider argv changes.
+#
+# Operator responsibility: this assumes the configured base branch carries
+# the SAME branch protections `main` has here (PR-only, required checks) —
+# the pipeline does not verify this at runtime.
+#
+#   BASE_BRANCH="develop"
+BASE_BRANCH=""
+
 # === Agent Configuration ===
 # AGENT_CMD: which coding-agent CLI to spawn for dev/review wrappers.
 # First-class support: claude, codex, gemini, kiro, opencode, agy. Other

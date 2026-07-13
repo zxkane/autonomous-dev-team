@@ -25,6 +25,7 @@ source-of-truth greps (same pattern as `test-autonomous-dev-rebase-marker.sh`).
 | TC-CR-012 | Detection globs both `feat/issue-N*` and `fix/issue-N*` (source pins both) | grep: `ls-remote` glob pattern present |
 | TC-CR-013 | Wrapper still passes `bash -n` | syntax check |
 | TC-CR-014 | resume-fallback (new-session) prompt and MODE=new prompt also include the fast-path block | grep: block referenced for both full-prompt builders |
+| TC-CR-016 | Only the deprecated `DEFAULT_BRANCH=develop` is set (no `BASE_BRANCH`); branch ahead of `origin/develop` (issue #478, [INV-131]) | `needs_open_pr_only 178` resolves base to `develop` (not `main`) → 0 (fast path) |
 
 ## Acceptance mapping (issue #178 Acceptance Criteria)
 

@@ -220,6 +220,18 @@ out=$(chp_gitlab_create_pr "feat/x" "" "b" 2>/dev/null); rc=$?
 assert_rc "TC-P34-006 empty TITLE → rc 2" "2" "$rc"
 assert_eq "TC-P34-006 0 _gl_api calls" "0" "$(_call_count)"
 
+# TC-P34-006b — #478 ([INV-131]): explicit BASE_BRANCH skips the project
+# probe (explicit-deterministic) and targets it directly.
+_reset_stub
+export _GL_API_PAYLOAD_SEQ="$PAYLOADS/gitlab-chp-write-create-pr-response.json"
+export BASE_BRANCH="develop"
+out=$(chp_gitlab_create_pr "feat/x" "title" "body"); rc=$?
+unset BASE_BRANCH
+assert_rc "TC-P34-006b rc" "0" "$rc"
+assert_eq "TC-P34-006b exactly 1 _gl_api call (project probe skipped)" "1" "$(_call_count)"
+assert_contains "TC-P34-006b call #1 = --method POST /merge_requests" "--method|POST" "$(_call_n 1)"
+assert_contains "TC-P34-006b POST body has target_branch=\"develop\"" '"target_branch":"develop"' "$(_call_n 1)"
+
 # ============================================================================
 # R3 — chp_gitlab_approve
 # ============================================================================

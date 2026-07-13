@@ -123,12 +123,26 @@ cat > "$STUB_DIR/git" <<'EOF'
 #!/bin/bash
 if [[ "$1" == "ls-remote" ]]; then
   [[ "${GIT_LSREMOTE_FAIL:-0}" == "1" ]] && exit 2
-  # `git ls-remote origin <base>` → single base SHA line.
+  # `git ls-remote origin <base>` → single base SHA line. `GIT_BASE_REF`
+  # (default "main") lets scenarios exercise a non-default resolved base
+  # (e.g. DEFAULT_BRANCH=develop, TC-CR-016). A query for the CONFIGURED
+  # base_ref returns GIT_BASE_SHA (the correct answer); a query for the
+  # literal main/master alias, when base_ref is something else, returns
+  # GIT_WRONG_BASE_SHA instead — so a caller that mis-resolves the base
+  # (e.g. falls back to "main" instead of honoring DEFAULT_BRANCH) gets a
+  # detectably wrong SHA rather than accidentally the right one.
+  base_ref="${GIT_BASE_REF:-main}"
   # `git ls-remote origin 'refs/heads/*issue-N*'` → candidate branch lines.
   for a in "$@"; do
     case "$a" in
-      refs/heads/main|refs/heads/master|main|master)
-        echo -e "${GIT_BASE_SHA:-baseaaaa}\trefs/heads/main"; exit 0 ;;
+      "refs/heads/${base_ref}"|"${base_ref}")
+        echo -e "${GIT_BASE_SHA:-baseaaaa}\trefs/heads/${base_ref}"; exit 0 ;;
+      refs/heads/main|main|refs/heads/master|master)
+        if [[ "$base_ref" == "main" || "$base_ref" == "master" ]]; then
+          echo -e "${GIT_BASE_SHA:-baseaaaa}\trefs/heads/${base_ref}"; exit 0
+        fi
+        echo -e "${GIT_WRONG_BASE_SHA:-baseaaaa}\trefs/heads/main"; exit 0
+        ;;
     esac
   done
   printf '%b' "${GIT_LSREMOTE_OUT:-}"
@@ -270,6 +284,34 @@ run_helper 178 \
   GIT_BASE_SHA=baseaaaa \
   GIT_AHEAD_COUNT=5
 assert_rc "issue-1789 branch does NOT satisfy issue 178 → 1" "$?" "1"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== TC-CR-016: DEFAULT_BRANCH-only (deprecated, issue #478/[INV-131]) resolves base to develop ==="
+# ---------------------------------------------------------------------------
+# run_helper's env always sets DEFAULT_BRANCH="main" (line 151); override it
+# here to prove needs_open_pr_only honors the deprecated fallback rather than
+# silently dropping to "main" when only DEFAULT_BRANCH is set — the exact gap
+# the review flagged in the extracted-function harness this test file owns.
+#
+# Discriminating fixture: GIT_AHEAD_COUNT=0 (rev-list count fallback
+# unavailable) forces the helper onto the SHA-inequality fallback, which
+# compares the candidate branch head against whatever base SHA it resolved.
+# The candidate branch head SHA is deliberately set equal to
+# GIT_WRONG_BASE_SHA (the SHA `origin/main` would report). If the helper
+# mis-resolves base to "main" (the pre-fix bug), base_sha == branch head sha
+# → the fallback's inequality check is false → no ahead branch found → rc=1
+# (test fails). Only the correct resolution to "develop" (base_sha=devbase01
+# != deadbeef) makes the fallback fire and return 0.
+run_helper 178 \
+  DEFAULT_BRANCH=develop \
+  GH_PR_COUNT=0 \
+  GIT_BASE_REF=develop \
+  GIT_LSREMOTE_OUT='deadbeef\trefs/heads/feat/issue-178-foo\n' \
+  GIT_BASE_SHA=devbase01 \
+  GIT_WRONG_BASE_SHA=deadbeef \
+  GIT_AHEAD_COUNT=0
+assert_rc "DEFAULT_BRANCH=develop, branch ahead of origin/develop, no PR → 0 (fast path)" "$?" "0"
 
 echo ""
 echo "=== Source-of-truth grep assertions (prompt wiring) ==="

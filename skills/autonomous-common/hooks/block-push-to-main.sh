@@ -22,9 +22,11 @@ if ! is_git_command "push" "$command"; then
   exit 0
 fi
 
-# Trunk branch name. Default to `main`; respect TRUNK_BRANCH override
-# for repos with a different trunk (e.g. `master`, `trunk`).
-trunk="${TRUNK_BRANCH:-main}"
+# Trunk branch name (issue #478, [INV-131]): BASE_BRANCH (the wrapper
+# resolves+exports it once at startup) → TRUNK_BRANCH (this hook's pre-#478
+# override, still honored standalone e.g. for a manually-run hook outside the
+# wrapper) → "main" default. Byte-identical to today when neither is set.
+trunk="${BASE_BRANCH:-${TRUNK_BRANCH:-main}}"
 
 # Parse the destination ref(s) the push would write to. Block if any of
 # them target the trunk (covers --all/--mirror via __ALL__/__MIRROR__).
@@ -38,18 +40,18 @@ while IFS= read -r ref; do
 done < <(parse_push_target_refspec "$command")
 
 if (( should_block == 1 )); then
-  cat >&2 <<'EOF'
-## BLOCKED - Direct Push to Main
+  cat >&2 <<EOF
+## BLOCKED - Direct Push to \`${trunk}\`
 
-Pushing directly to `main` is **not allowed**. All changes must go through a Pull Request.
+Pushing directly to \`${trunk}\` is **not allowed**. All changes must go through a Pull Request.
 
 ### Required Workflow:
-1. Create a worktree: `git worktree add .worktrees/feat/<name> -b feat/<name>`
-2. Enter the worktree: `cd .worktrees/feat/<name>`
+1. Create a worktree: \`git worktree add .worktrees/feat/<name> -b feat/<name>\`
+2. Enter the worktree: \`cd .worktrees/feat/<name>\`
 3. Install dependencies and make your changes
 4. Commit inside the worktree
-5. Push to the feature branch: `git push -u origin feat/<name>`
-6. Open a pull/merge request via your platform CLI or the wrapper — e.g. `gh pr create` on GitHub, `glab mr create` on GitLab, or the pipeline's provider seam (`chp_create_pr`).
+5. Push to the feature branch: \`git push -u origin feat/<name>\`
+6. Open a pull/merge request via your platform CLI or the wrapper — e.g. \`gh pr create\` on GitHub, \`glab mr create\` on GitLab, or the pipeline's provider seam (\`chp_create_pr\`).
 
 ### See CLAUDE.md for the full development workflow.
 EOF

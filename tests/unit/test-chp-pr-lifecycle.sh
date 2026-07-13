@@ -133,10 +133,18 @@ assert_eq "TC-CHP-MERGEABLE chp_mergeable emits gh pr view --json mergeable -q .
 # TC-CHP-CREATE — W1e (#400) abstract positional contract: `chp_create_pr
 # <head-branch> <title> <body>`; the GitHub leaf owns `--head/--title/--body`,
 # so the emitted `gh pr create` argv is IDENTICAL to the pre-#400 caller-
-# composed line but is now driven by three positionals.
+# composed line but is now driven by three positionals. Issue #478 ([INV-131])
+# adds an unconditional trailing `--base "${BASE_BRANCH:-main}"` — with
+# BASE_BRANCH unset this is the byte-identical-default-plus-`--base main` pin.
 argv=$(run_trace chp_create_pr feat/x T B)
-assert_eq "TC-CHP-CREATE chp_create_pr leaf-emitted gh pr create argv from positional inputs (W1e #400)" \
-  "pr create --repo $REPO --head feat/x --title T --body B " "$argv"
+assert_eq "TC-CHP-CREATE chp_create_pr leaf-emitted gh pr create argv from positional inputs (W1e #400 + #478 --base main default)" \
+  "pr create --repo $REPO --head feat/x --title T --body B --base main " "$argv"
+
+# TC-CHP-CREATE-BASE — #478 ([INV-131]): BASE_BRANCH override flows through to
+# the emitted --base flag.
+argv=$(BASE_BRANCH=develop run_trace chp_create_pr feat/x T B)
+assert_eq "TC-CHP-CREATE-BASE chp_create_pr honors BASE_BRANCH override in --base (#478)" \
+  "pr create --repo $REPO --head feat/x --title T --body B --base develop " "$argv"
 
 # TC-CHP-APPROVE — W1e (#400) abstract positional contract: `chp_approve
 # <pr> <body>`; the GitHub leaf owns `--approve --body`.

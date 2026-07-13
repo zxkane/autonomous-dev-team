@@ -7696,3 +7696,43 @@ itself has never driven a label transition.
 - `docs/test-cases/inv-129-head-agnostic-review-round.md` — the TC-INV129-* scenario matrix.
 
 ---
+
+## INV-131: the pipeline's base branch is a resolved, exported, validated conf value — never a hardcoded `main` literal in a prompt, hook, or provider argv
+
+_Triage (issue #236): [machine-checked: tests/unit/test-base-branch-conf.sh]_
+
+**Rule**: every site that previously hardcoded the literal branch name `main` — the dev wrapper's two rebase-instruction prompt blocks, `needs_open_pr_only`'s base-branch read, the review wrapper's merge-conflict-resolution prompt block and the INV-44 mergeable-gate finding/comment/notification texts, the two branch-aware hooks (`check-rebase-before-push.sh`, `verify-completion.sh`), `block-push-to-main.sh`'s trunk resolution, the `merge-conflict-resolution.md` skill reference, and the `chp_github_create_pr` / `chp_gitlab_create_pr` provider PR-create leaves — instead reads a single resolved `BASE_BRANCH` value, computed ONCE per wrapper invocation and exported for subprocess/hook inheritance.
+
+**Resolution chain** (`lib-config.sh::resolve_base_branch`):
+
+1. `BASE_BRANCH` (first-class `autonomous.conf` key) — wins if set.
+2. `DEFAULT_BRANCH` (deprecated fallback — the sole pre-#478 code reference, `autonomous-dev.sh::needs_open_pr_only`) — honored, but logs a one-time `WARNING: DEFAULT_BRANCH is deprecated` to stderr.
+3. `"main"` — the default when neither is set.
+
+**Validation**: the winning raw value MUST match `^[A-Za-z0-9._/-]+$` (a git ref-name-safe charset — no spaces or quotes, since the value is interpolated into agent prompt text AND git/gh command lines; anything else is an injection/parse hazard). An invalid value falls back to `"main"` with a loud `WARNING` to stderr — the same fallback posture `REVIEW_CONVERGENCE_CAP` uses (`lib-review-cap.sh::_review_cap_threshold`).
+
+**Resolve once, export once**: `autonomous-dev.sh` and `autonomous-review.sh` each call `BASE_BRANCH="$(resolve_base_branch)"; export BASE_BRANCH` in their own startup, immediately after the required-config validation loop (`for _req in PROJECT_ID REPO REPO_OWNER REPO_NAME PROJECT_DIR`) and before any prompt is rendered. Exporting is load-bearing: the spawned agent CLI subprocess AND the two branch-aware hooks inherit it via plain env-var lookup — hooks stay zero-dependency shell (no conf parsing inside a hook). `check-rebase-before-push.sh` / `verify-completion.sh` read `${BASE_BRANCH:-${TRUNK_BRANCH:-main}}`; `block-push-to-main.sh` extends its pre-existing `TRUNK_BRANCH` override to the same chain (`${BASE_BRANCH:-${TRUNK_BRANCH:-main}}`), so a hook run standalone (outside a wrapper-spawned session) still honors a bare `TRUNK_BRANCH` env override exactly as it did pre-#478. Each wrapper logs the effective value once at startup, but ONLY when it differs from `"main"`.
+
+`needs_open_pr_only` (`autonomous-dev.sh`) does not call `resolve_base_branch` itself — it is sometimes exercised standalone (extracted-function test harnesses, direct invocation) without the wrapper's startup resolution. Its local fallback therefore mirrors the SAME chain inline: `local base="${BASE_BRANCH:-${DEFAULT_BRANCH:-main}}"`. Dropping the `DEFAULT_BRANCH` link here (leaving only `${BASE_BRANCH:-main}`) is a regression: a caller that sets only the deprecated `DEFAULT_BRANCH` (e.g. `tests/unit/test-autonomous-dev-pushed-no-pr-resume.sh`'s extracted-function harness) would silently compare against `origin/main` instead of the configured branch, and pushed-no-PR detection would miss the fast path in a real `DEFAULT_BRANCH`-only deployment.
+
+`verify-completion.sh`'s legacy unconditional `master` fallback (pre-#478: `main` OR `master` were both always trunk) is scoped to ONLY the case where neither `BASE_BRANCH` nor `TRUNK_BRANCH` is configured. Once either var is set to something other than `master`, a checkout literally named `master` is an ordinary feature branch and must go through the full CI/E2E/review-thread gate — treating it as trunk unconditionally would silently bypass verification on any repo that happens to keep a `master` branch around alongside a configured non-`master` base branch.
+
+`block-push-to-main.sh`'s BLOCKED message interpolates the resolved `$trunk` variable in both the heading (`## BLOCKED - Direct Push to \`${trunk}\``) and the body prose, rather than a hardcoded `main` literal — so a `BASE_BRANCH=develop` deployment reports the push it actually blocked (`develop`), not a misleading reference to `main`.
+
+**Byte-identical-default guarantee**: with `BASE_BRANCH` (and `DEFAULT_BRANCH`) unset — today's universal deployment shape — `resolve_base_branch` echoes `"main"` with NO stderr output, and every rendered prompt, hook decision, and provider argv is BYTE-IDENTICAL to pre-#478, with exactly one narrow, deliberate exception: `chp_github_create_pr` / `chp_gitlab_create_pr` now UNCONDITIONALLY pass an explicit target-branch flag (`--base main` on GitHub by default) instead of omitting it and relying on the host repo's own default-branch setting — explicit-deterministic beats implicit, and the provider-conformance golden-trace tests pin the exact `--base main` addition (and nothing else) as the only argv delta.
+
+**GitLab default-branch auto-detection is unaffected**: `chp_gitlab_create_pr` still probes `GET /projects/:id` for `default_branch` when `BASE_BRANCH` is unset (unchanged pre-#478 behavior); an explicit `BASE_BRANCH` skips that probe entirely and targets the configured branch directly (one fewer `_gl_api` call). Auto-detecting a *default* branch for a *non-default* GitLab target is explicitly out of scope for this invariant.
+
+**Scope boundary — deliberately per-dispatcher, not per-issue**: one dispatcher instance serves exactly one base branch (mirrors `ISSUE_FILTER`'s per-instance scoping, [INV-121]). Per-issue base-branch routing via a label (e.g. `base:develop`) is a separable follow-up with its own label-parsing surface. The operator is responsible for ensuring the configured base branch carries the SAME branch protections `main` has here (PR-only, required status checks) — documented in the `autonomous.conf.example` comment block, NOT verified at runtime. Automated main-workdir branch switching and live E2E against a real non-main repository are both explicitly out of scope (operational validation, not a pre-merge-verifiable acceptance criterion).
+
+**Status**: **ENFORCED**. No `transitions.json` / `state-machine.md` change — no label semantics are touched; this invariant only changes which branch name a prompt/command/argv interpolates.
+
+**Test**: `tests/unit/test-base-branch-conf.sh` — resolution-chain precedence (BASE_BRANCH wins / DEFAULT_BRANCH deprecated-fallback / neither → main), validation (space/quote/leading-`-` → warning + fallback), prompt-rendering golden pins (unset → byte-identical to pre-#478 fixtures; `BASE_BRANCH=develop` → zero `origin/main` occurrences in the rendered dev rebase block and review conflict block), `chp_github_create_pr` argv (`--base develop` under override, `--base main` by default), and hook fixtures (`check-rebase-before-push.sh` computes behind-count against `origin/develop` when `BASE_BRANCH=develop`, unchanged when unset).
+
+**Cross-references**:
+- [INV-44](#inv-44-mergeable-hard-gate--a-conflicting-pr-can-never-reach-approved) — the mergeable-gate finding/comment/notification texts this invariant re-interpolates with `${BASE_BRANCH}` instead of the literal `main`; the gate's own classification logic (`_classify_mergeable_gate`) is untouched.
+- [INV-14](#inv-14-config-lookup-honors-symlink-vendor-pattern) / [INV-65] — the same `${BASH_SOURCE[0]:-$0}`-anchored conf-lookup machinery `resolve_base_branch` is layered on top of (`lib-config.sh`).
+- [`dispatcher-flow.md`](dispatcher-flow.md#conf-schema-base_branch--configurable-base-branch-issue-478-inv-131) § Conf schema: `BASE_BRANCH` — the conf-key documentation, resolution chain, and byte-identical-default guarantee in narrative form.
+- [`skills/autonomous-review/references/merge-conflict-resolution.md`](../../skills/autonomous-review/references/merge-conflict-resolution.md) — the agent-facing rebase procedure, rephrased to reference "the base branch (`$BASE_BRANCH`, default `main`)" instead of asserting a literal `main`.
+
+---

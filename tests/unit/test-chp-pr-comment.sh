@@ -208,8 +208,10 @@ echo "=== TC-CPC-010..016: per-site framing preserved verbatim ==="
 assert_eq "TC-CPC-010 review:3342 chp_pr_comment '\\' continuation present (conflict marker post)" \
   "1" "$(grep -cE '^[[:space:]]*chp_pr_comment "\$PR_NUMBER" \\$' "$REVIEW_SH" || true)"
 # The conflict-marker body tail keeps its `2>/dev/null || true` framing.
+# issue #478 ([INV-131]): the literal `main.` in this tail is now
+# `${BASE_BRANCH}.` — the configurable-base-branch interpolation.
 assert_eq "TC-CPC-010 review:3342 conflict body tail keeps '2>/dev/null || true'" \
-  "1" "$(grep -cF 'main.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true' "$REVIEW_SH" || true)"
+  "1" "$(grep -cF 'Re-dispatching dev agent to rebase onto ${BASE_BRANCH}.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true' "$REVIEW_SH" || true)"
 # 3538: capture form `if ! _comment_err=$(chp_pr_comment … 2>&1 >/dev/null); then`
 assert_eq "TC-CPC-011 review:3538 keeps the '2>&1 >/dev/null' capture form" \
   "1" "$(grep -cF 'if ! _comment_err=$(chp_pr_comment "$PR_NUMBER" \' "$REVIEW_SH" || true)"

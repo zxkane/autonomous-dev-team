@@ -124,6 +124,14 @@ SANDBOX_OUT=$(
   }
   PR_NUMBER=210; ISSUE_NUMBER=202; REPO="owner/repo"; REPO_OWNER="owner"
   REPO_NAME="repo"; PR_BRANCH="feat/x"; REVIEW_BOTS_VALIDATED=""; E2E_ACTIVE="false"
+  # issue #478 ([INV-131]): build_review_prompt's Step 0 block now interpolates
+  # ${BASE_BRANCH} — the real wrapper resolves+exports it at startup, well
+  # before any prompt builder runs, so the sandbox mirrors that ordering here.
+  BASE_BRANCH="main"
+  # Issue #449/#475 (INV-129): build_review_prompt's severity-ratchet prompt
+  # block interpolates ${REVIEW_ROUND} — the real wrapper computes it once at
+  # startup (_review_round_next_count) before any prompt builder runs.
+  REVIEW_ROUND="1"
   # #355: pin PROJECT_ID for a deterministic self-provisioned lane-dir path
   # (build_review_prompt's 2-arg legacy callers self-provision one) — without
   # this, the ambient PROJECT_ID from whatever project's autonomous.conf

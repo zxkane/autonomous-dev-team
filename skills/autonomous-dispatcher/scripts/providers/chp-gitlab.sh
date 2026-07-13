@@ -948,10 +948,19 @@ _chp_gitlab_project_raw() {
 # chp_gitlab_create_pr HEAD_BRANCH TITLE BODY  (#419 R2)
 #
 # POST /projects/${GITLAB_PROJECT}/merge_requests with body
-# `{source_branch, target_branch:<default_branch>, title, description,
+# `{source_branch, target_branch:<target>, title, description,
 #   squash:true, remove_source_branch:true}` (CONTRACT-FIXED per W1e).
-# `<default_branch>` resolved by ONE `GET /projects/${GITLAB_PROJECT}` per
-# invocation (no cache — stale-cache hazard).
+#
+# `<target>` resolution (issue #478, [INV-131]): when `BASE_BRANCH` is set
+# (the wrapper resolves+exports it once at startup — see
+# lib-config.sh::resolve_base_branch), it is used DIRECTLY as the explicit
+# target — no project probe, matching R5's "pass the flag unconditionally,
+# explicit-deterministic beats relying on the host's repo-default-branch
+# setting" posture. With `BASE_BRANCH` unset (today's universal case), this
+# leaf is BYTE-IDENTICAL to pre-#478: it still resolves the project's
+# `default_branch` via ONE `GET /projects/${GITLAB_PROJECT}` per invocation
+# (no cache — stale-cache hazard). GitLab default-branch auto-DETECTION
+# itself is unchanged/out of scope for #478 — only the override path is new.
 #
 # Positional validation mirrors the GitHub leaf: HEAD_BRANCH and TITLE non-empty
 # (rc 2 loud, NO HTTP); BODY MAY be empty (the broker's title-only create is
@@ -967,12 +976,19 @@ chp_gitlab_create_pr() {
   [ -n "$title" ]       || { echo "ERROR: chp_gitlab_create_pr requires TITLE (2nd arg, non-empty)" >&2; return 2; }
   # BODY may be empty by design — do NOT gate.
 
-  # Resolve default branch per invocation.
-  local project_raw default_branch
-  project_raw="$(_gl_api "/projects/${GITLAB_PROJECT}" 2>/dev/null)" || return 1
-  [ -n "$project_raw" ] || return 1
-  default_branch="$(jq -r '.default_branch // ""' <<<"$project_raw" 2>/dev/null)"
-  [ -n "$default_branch" ] || return 1
+  # Resolve target branch. #478: an explicit BASE_BRANCH skips the project
+  # probe entirely (explicit-deterministic). Otherwise, resolve the
+  # project's default branch per invocation (pre-#478 behavior, unchanged).
+  local default_branch
+  if [ -n "${BASE_BRANCH:-}" ]; then
+    default_branch="$BASE_BRANCH"
+  else
+    local project_raw
+    project_raw="$(_gl_api "/projects/${GITLAB_PROJECT}" 2>/dev/null)" || return 1
+    [ -n "$project_raw" ] || return 1
+    default_branch="$(jq -r '.default_branch // ""' <<<"$project_raw" 2>/dev/null)"
+    [ -n "$default_branch" ] || return 1
+  fi
 
   # Build MR-create body via jq (injection-safe: title/body/branch names go
   # through jq --arg, never spliced into a string).

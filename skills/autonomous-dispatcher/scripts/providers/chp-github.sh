@@ -489,12 +489,21 @@ chp_github_mergeable() {
 #
 # PAT-mode / app-mode-without-scoping creates the PR via the agent directly
 # (prompt-driven `gh pr create`), unchanged.
+#
+# `--base "${BASE_BRANCH:-main}"` (issue #478, [INV-131]) is added
+# UNCONDITIONALLY — explicit-deterministic beats relying on the host repo's
+# default-branch setting. The wrapper resolves+exports BASE_BRANCH once at
+# startup (lib-config.sh::resolve_base_branch); the `:-main` fallback here
+# only covers a direct/test invocation of this leaf outside the wrapper.
+# With BASE_BRANCH unset (today's universal case), this emits the SAME argv
+# as before plus exactly the `--base main` pair — the byte-identical-default
+# guarantee for every OTHER flag.
 chp_github_create_pr() {
   local head_branch="${1:-}" title="${2:-}" body="${3:-}"
   [ -n "$head_branch" ] || { echo "ERROR: chp_github_create_pr requires HEAD_BRANCH (1st arg, non-empty)" >&2; return 2; }
   [ -n "$title" ]       || { echo "ERROR: chp_github_create_pr requires TITLE (2nd arg, non-empty)" >&2; return 2; }
   # BODY may be empty by design — do NOT gate.
-  gh pr create --repo "$REPO" --head "$head_branch" --title "$title" --body "$body"
+  gh pr create --repo "$REPO" --head "$head_branch" --title "$title" --body "$body" --base "${BASE_BRANCH:-main}"
 }
 
 # chp_github_approve PR BODY — approve a PR.

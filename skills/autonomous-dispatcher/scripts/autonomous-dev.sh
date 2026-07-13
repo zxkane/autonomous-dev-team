@@ -138,6 +138,21 @@ for _req in PROJECT_ID REPO REPO_OWNER REPO_NAME PROJECT_DIR; do
   fi
 done
 
+# Resolve + export the effective base branch ONCE, right after conf is loaded
+# (issue #478, [INV-131]). `export` so the agent CLI subprocess (and its
+# hooks — check-rebase-before-push.sh / verify-completion.sh) inherit it.
+# resolve_base_branch (lib-config.sh) implements the BASE_BRANCH →
+# DEFAULT_BRANCH (deprecated) → "main" chain + validation; with neither var
+# set this echoes "main" with no stderr output (byte-identical default).
+BASE_BRANCH="$(resolve_base_branch)"
+export BASE_BRANCH
+# NOTE: `log()` is not defined until later in the file (see below) — bare
+# `echo >&2` (matching its format) so logging the resolved value can't abort
+# the wrapper under `set -e` before `log` exists.
+if [[ "$BASE_BRANCH" != "main" ]]; then
+  echo "[autonomous-dev] $(date -u +%H:%M:%S) Effective base branch: ${BASE_BRANCH}" >&2
+fi
+
 # ---------------------------------------------------------------------------
 # [INV-109] Lane identity + atomic registry mint (Lane-GC PR-2).
 #
@@ -501,9 +516,16 @@ log() { echo "[autonomous-dev] $(date -u +%H:%M:%S) $*"; }
 # from the wrapper box regardless of EXECUTION_BACKEND.
 needs_open_pr_only() {
   local issue_num="$1"
-  # Base branch. Optional `DEFAULT_BRANCH` conf override (unset everywhere
-  # today — the codebase hardcodes `main` elsewhere too), defaulting to `main`.
-  local base="${DEFAULT_BRANCH:-main}"
+  # Base branch. `BASE_BRANCH` is resolved+exported once at wrapper startup
+  # (issue #478, [INV-131], resolve_base_branch in lib-config.sh implements
+  # the BASE_BRANCH → DEFAULT_BRANCH-deprecated → "main" chain). The
+  # `${BASE_BRANCH:-${DEFAULT_BRANCH:-main}}` fallback here mirrors that same
+  # chain for direct/test invocations that source this function without the
+  # wrapper's startup resolution (e.g. tests/unit/test-autonomous-dev-pushed-no-pr-resume.sh's
+  # extracted-function harness, which sets only DEFAULT_BRANCH) — without it,
+  # such a caller silently drops back to "main" and pushed-no-PR detection
+  # compares against the wrong remote ref.
+  local base="${BASE_BRANCH:-${DEFAULT_BRANCH:-main}}"
 
   # (1) No open PR for this issue. Reuse the same body-reference selector the
   # cleanup trap uses. Any non-zero count means a PR exists → not our state.
@@ -1410,13 +1432,13 @@ ${OPEN_PR_FAST_PATH}
 ${PR_CREATE_BROKER_BLOCK}
 ${POST_APPROVAL_FINDINGS}
 $(if [[ -n "$AUTO_MERGE_FAILURE_MARKER" ]]; then cat <<REBASE_BLOCK
-## Pre-implementation: rebase onto main — MANDATORY FIRST STEP
+## Pre-implementation: rebase onto ${BASE_BRANCH} — MANDATORY FIRST STEP
 
 The review wrapper posted an auto-merge-failure marker on PR #${PR_NUM}. This
 $(provider_prompt_fragment dev.merge_failed_likely_reason)
-conflict against main, branch behind, or branch-protection check missing).
+conflict against ${BASE_BRANCH}, branch behind, or branch-protection check missing).
 Your **first** action this session is to rebase the PR branch onto the latest
-\`main\` and force-push the result, BEFORE touching any other review-finding work.
+\`${BASE_BRANCH}\` and force-push the result, BEFORE touching any other review-finding work.
 
 Marker content:
 <user-issue-content>
@@ -1425,8 +1447,8 @@ ${AUTO_MERGE_FAILURE_MARKER}
 
 Rebase procedure (run from inside the PR's worktree):
 \`\`\`bash
-git fetch origin main
-git rebase origin/main
+git fetch origin ${BASE_BRANCH}
+git rebase origin/${BASE_BRANCH}
 # If clean: git push --force-with-lease
 # If conflicts: resolve, git rebase --continue, then force-push.
 # If conflicts are not auto-resolvable: git rebase --abort, post a clear
@@ -1515,11 +1537,11 @@ ${OPEN_PR_FAST_PATH}
 ${PR_CREATE_BROKER_BLOCK}
 ${POST_APPROVAL_FINDINGS}
 $(if [[ -n "$AUTO_MERGE_FAILURE_MARKER" ]]; then cat <<REBASE_BLOCK2
-## Pre-implementation: rebase onto main — MANDATORY FIRST STEP
+## Pre-implementation: rebase onto ${BASE_BRANCH} — MANDATORY FIRST STEP
 
 The review wrapper posted an auto-merge-failure marker on PR #${PR_NUM} (the
 $(provider_prompt_fragment dev.merge_failed_rebase_parenthetical)
-\`origin/main\` and force-push BEFORE addressing other review findings.
+\`origin/${BASE_BRANCH}\` and force-push BEFORE addressing other review findings.
 
 Marker content:
 <user-issue-content>

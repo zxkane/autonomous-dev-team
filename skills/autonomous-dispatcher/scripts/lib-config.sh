@@ -69,6 +69,50 @@ load_autonomous_conf() {
   return 0
 }
 
+# resolve_base_branch — echo the effective base/trunk branch the pipeline
+# targets, per the [INV-131] resolution chain (issue #478):
+#
+#   BASE_BRANCH (new, first-class conf key) → DEFAULT_BRANCH (deprecated
+#   fallback; the one pre-#478 code reference, autonomous-dev.sh's
+#   needs_open_pr_only) → "main" (default).
+#
+# Whichever value wins is validated against ^[A-Za-z0-9._/-]+$ (a git
+# ref-name-safe charset with no spaces/quotes — the value is interpolated
+# into agent prompts AND git/gh command lines, so anything else is an
+# injection/parse hazard) PLUS a leading-`-` rejection (a value starting with
+# `-` risks being parsed as a flag by a downstream `git`/`gh` invocation,
+# even though `-` itself is a legal mid-branch-name character). An invalid
+# value falls back to "main" with a loud stderr WARNING, mirroring
+# `lib-review-cap.sh::_review_cap_threshold`'s fallback posture. A value that
+# came from the deprecated DEFAULT_BRANCH also gets a one-time stderr
+# deprecation notice pointing at BASE_BRANCH — even when that value is itself
+# invalid (the operator needs both signals: "you're on the old key" AND "the
+# value is malformed").
+#
+# With NEITHER var set (today's universal deployment shape), this echoes
+# "main" with NO stderr output — byte-identical to pre-#478 behavior.
+resolve_base_branch() {
+  local raw="" source=""
+  if [[ -n "${BASE_BRANCH:-}" ]]; then
+    raw="$BASE_BRANCH"
+    source="BASE_BRANCH"
+  elif [[ -n "${DEFAULT_BRANCH:-}" ]]; then
+    raw="$DEFAULT_BRANCH"
+    source="DEFAULT_BRANCH"
+    echo "WARNING: DEFAULT_BRANCH is deprecated — set BASE_BRANCH instead (DEFAULT_BRANCH will be removed in a future release)" >&2
+  else
+    printf '%s\n' "main"
+    return 0
+  fi
+
+  if [[ "$raw" =~ ^[A-Za-z0-9._/-]+$ ]] && [[ "$raw" != -* ]]; then
+    printf '%s\n' "$raw"
+  else
+    echo "WARNING: ${source}='${raw}' is not a valid branch name (must match ^[A-Za-z0-9._/-]+\$ with no leading '-' — no spaces/quotes) — falling back to 'main'" >&2
+    printf '%s\n' "main"
+  fi
+}
+
 # pid_dir_for_project — echo the per-user directory holding wrapper PID
 # files for this project. Replaces the predictable `/tmp/agent-...` paths
 # (CWE-377, #72) with a path under $XDG_RUNTIME_DIR (canonical Linux per-user

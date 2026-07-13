@@ -82,6 +82,11 @@ render() {
     gh() { return 0; }
     PR_NUMBER=210; ISSUE_NUMBER="$issue"; REPO="owner/repo"; REPO_OWNER="owner"
     REPO_NAME="repo"; PR_BRANCH="feat/x"; REVIEW_BOTS_VALIDATED=""; E2E_ACTIVE="false"
+    # issue #478 ([INV-131]) / issue #449-#475 (INV-129): build_review_prompt
+    # interpolates ${BASE_BRANCH} and ${REVIEW_ROUND} — both resolved once at
+    # the real wrapper's startup, before any prompt builder runs.
+    BASE_BRANCH="main"
+    REVIEW_ROUND="1"
     PROJECT_ID="$project"
     unset AGENT_REVIEW_MODEL AGENT_REVIEW_MODEL_CLAUDE AGENT_REVIEW_MODEL_CODEX AGENT_REVIEW_MODEL_AGY
     source "$_RESOLVE_LIB"
@@ -191,6 +196,11 @@ PROMPT_EMPTY_SID=$(
   gh() { return 0; }
   PR_NUMBER=210; ISSUE_NUMBER=800; REPO="owner/repo"; REPO_OWNER="owner"
   REPO_NAME="repo"; PR_BRANCH="feat/x"; REVIEW_BOTS_VALIDATED=""; E2E_ACTIVE="false"
+  # issue #478 ([INV-131]) / issue #449-#475 (INV-129): build_review_prompt
+  # interpolates ${BASE_BRANCH} and ${REVIEW_ROUND} — both resolved once at
+  # the real wrapper's startup, before any prompt builder runs.
+  BASE_BRANCH="main"
+  REVIEW_ROUND="1"
   PROJECT_ID="proj-epsilon"
   unset AGENT_REVIEW_MODEL AGENT_REVIEW_MODEL_CLAUDE AGENT_REVIEW_MODEL_CODEX
   source "$_RESOLVE_LIB"

@@ -342,6 +342,21 @@ for _req in PROJECT_ID REPO REPO_OWNER REPO_NAME PROJECT_DIR; do
   fi
 done
 
+# Resolve + export the effective base branch ONCE, right after conf is loaded
+# (issue #478, [INV-131]). `export` so the agent CLI subprocess (and its
+# hooks — check-rebase-before-push.sh / verify-completion.sh) inherit it.
+# resolve_base_branch (lib-config.sh) implements the BASE_BRANCH →
+# DEFAULT_BRANCH (deprecated) → "main" chain + validation; with neither var
+# set this echoes "main" with no stderr output (byte-identical default).
+BASE_BRANCH="$(resolve_base_branch)"
+export BASE_BRANCH
+# NOTE: `log()` is not defined until later in the file — bare `echo >&2`
+# (matching its format) so logging the resolved value can't abort the
+# wrapper under `set -e` before `log` exists.
+if [[ "$BASE_BRANCH" != "main" ]]; then
+  echo "[autonomous-review] $(date -u +%H:%M:%S) Effective base branch: ${BASE_BRANCH}" >&2
+fi
+
 # Validate REVIEW_BOTS at startup so a typo (e.g. REVIEW_BOTS="q codx")
 # fails fast with a clear error instead of silently dropping the bot.
 # Empty REVIEW_BOTS is allowed — the bot-review section is omitted from
@@ -1317,16 +1332,16 @@ Before doing anything else, check the PR mergeable status and rebase if needed.
 Quick reference:
 $(provider_prompt_fragment review.check_mergeable "${PR_NUMBER}" "${REPO}")
 2. If "MERGEABLE" — proceed to the review checklist below
-3. If "CONFLICTING" — rebase the PR branch onto main:
+3. If "CONFLICTING" — rebase the PR branch onto ${BASE_BRANCH}:
    \`\`\`bash
-   git fetch origin main ${PR_BRANCH}
+   git fetch origin ${BASE_BRANCH} ${PR_BRANCH}
    # [INV-100] (#355): idempotent pre-clean — a crashed prior lane (this
    # project, this agent, this PR) can leave this exact dir behind; remove it
    # BEFORE \`git worktree add\` so a retry never wedges on a stale worktree.
    git worktree remove --force /tmp/rebase-${PROJECT_ID}-${_agent_name}-pr-${PR_NUMBER} 2>/dev/null || rm -rf /tmp/rebase-${PROJECT_ID}-${_agent_name}-pr-${PR_NUMBER}
    git worktree add /tmp/rebase-${PROJECT_ID}-${_agent_name}-pr-${PR_NUMBER} ${PR_BRANCH}
    cd /tmp/rebase-${PROJECT_ID}-${_agent_name}-pr-${PR_NUMBER}
-   git rebase origin/main
+   git rebase origin/${BASE_BRANCH}
    # If rebase succeeds:
    git push --force-with-lease origin ${PR_BRANCH}
    cd -
@@ -1335,9 +1350,9 @@ $(provider_prompt_fragment review.check_mergeable "${PR_NUMBER}" "${REPO}")
    sleep 10
    $(provider_prompt_fragment review.watch_ci_checks "${PR_NUMBER}")
    \`\`\`
-4. If rebase fails (conflicts) — FAIL the review with "[BLOCKING] Merge conflict with main".
+4. If rebase fails (conflicts) — FAIL the review with "[BLOCKING] Merge conflict with ${BASE_BRANCH}".
    Include the list of conflicting files and step-by-step instructions for the dev agent:
-   \`git fetch origin main\`, \`git rebase origin/main\`, resolve conflicts, \`git rebase --continue\`,
+   \`git fetch origin ${BASE_BRANCH}\`, \`git rebase origin/${BASE_BRANCH}\`, resolve conflicts, \`git rebase --continue\`,
    \`git push --force-with-lease origin ${PR_BRANCH}\`. Then exit.
 5. If "UNKNOWN" — wait 10s and retry up to 3 times
 
@@ -4112,10 +4127,10 @@ Findings->Decision Gate: 1 blocking finding(s) -- FAIL.
 
 Findings->Decision Gate: 1 blocking finding(s) -- FAIL.
 
-1. **[BLOCKING] Merge conflict with main** — PR #${PR_NUMBER} (\`${PR_BRANCH:-the PR branch}\`) is \`CONFLICTING\` with the base branch and cannot be merged. The review agent's PASS verdict is overridden by the wrapper-enforced mergeable gate (INV-44).
+1. **[BLOCKING] Merge conflict with ${BASE_BRANCH}** — PR #${PR_NUMBER} (\`${PR_BRANCH:-the PR branch}\`) is \`CONFLICTING\` with the base branch and cannot be merged. The review agent's PASS verdict is overridden by the wrapper-enforced mergeable gate (INV-44).
    - Dev agent must rebase before re-review:
-     1. \`git fetch origin main\`
-     2. \`git rebase origin/main\`
+     1. \`git fetch origin ${BASE_BRANCH}\`
+     2. \`git rebase origin/${BASE_BRANCH}\`
      3. Resolve conflicts, then \`git rebase --continue\`
      4. \`git push --force-with-lease origin ${PR_BRANCH:-<PR_BRANCH>}\`$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
 
@@ -4125,7 +4140,7 @@ Findings->Decision Gate: 1 blocking finding(s) -- FAIL.
     # gives the conflict a deterministic owner (the next dev session) instead
     # of letting it fall through the cracks.
     chp_pr_comment "$PR_NUMBER" \
-      --body "Auto-merge failed: PR is CONFLICTING with main (mergeable gate, INV-44). Re-dispatching dev agent to rebase onto main.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
+      --body "Auto-merge failed: PR is CONFLICTING with ${BASE_BRANCH} (mergeable gate, INV-44). Re-dispatching dev agent to rebase onto ${BASE_BRANCH}.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
 
     # INV-35: a merge conflict is a real, dev-actionable finding — substantive.
     # INV-92 (#298): a rebase is exactly what the dev agent does — dev-actionable.
@@ -4135,7 +4150,7 @@ Findings->Decision Gate: 1 blocking finding(s) -- FAIL.
     # GitHub-native state too (reviewDecision → CHANGES_REQUESTED) so the
     # blocking state is authoritative, not just an issue comment. Best-effort.
     submit_request_changes "$PR_NUMBER" \
-      "Merge conflict with main: PR \`${PR_BRANCH:-the PR branch}\` is CONFLICTING with the base branch and cannot be merged (mergeable hard gate, INV-44). Rebase onto main before re-review — see the \`Review findings:\` comment on issue #${ISSUE_NUMBER} for the step-by-step rebase instructions (INV-52)." \
+      "Merge conflict with ${BASE_BRANCH}: PR \`${PR_BRANCH:-the PR branch}\` is CONFLICTING with the base branch and cannot be merged (mergeable hard gate, INV-44). Rebase onto ${BASE_BRANCH} before re-review — see the \`Review findings:\` comment on issue #${ISSUE_NUMBER} for the step-by-step rebase instructions (INV-52)." \
       || log "WARNING: submit_request_changes returned non-zero (unexpected — helper is best-effort); continuing the FAIL route."
 
     itp_transition_state "$ISSUE_NUMBER" "reviewing" "pending-dev" 2>/dev/null || true
@@ -4338,7 +4353,7 @@ if [[ "$PASSED_VERDICT" == "true" ]]; then
       if ! _comment_err=$(chp_pr_comment "$PR_NUMBER" \
         --body "Auto-merge failed: ${_err_excerpt}
 
-Re-dispatching dev agent to rebase onto main.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>&1 >/dev/null); then
+Re-dispatching dev agent to rebase onto ${BASE_BRANCH}.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>&1 >/dev/null); then
         log "WARNING: Failed to post auto-merge-failure marker on PR #${PR_NUMBER} (non-fatal — label transition still proceeds): ${_comment_err}"
       fi
       # INV-35: auto-merge-failure is a non-substantive cause; the dev
