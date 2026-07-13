@@ -7484,3 +7484,194 @@ Fingerprint unchanged across a tick = a **no-op tick**.
 - `docs/designs/issue-467-liveness-watchdog.md` — the full design, including the D3 self-marker-pollution bug caught during implementation and its fix (a separate digest pattern excluding the watchdog's own marker).
 
 ---
+
+## INV-129: `REVIEW_ROUND` is a head-agnostic series of consecutive decided `failed-substantive` rounds — the severity ratchet's blocking floor loosens across an ACTIVE dev↔review loop (new commit every round), not only against a frozen head
+
+_Triage (issue #236): [machine-checked: tests/unit/test-review-convergence-rules.sh]_
+
+**Rule**: the #449 R1 severity ratchet's `REVIEW_ROUND` counter
+(`lib-review-round.sh`) was originally scoped to `(issue, head)` and reset to
+1 on every push. In an ACTIVE dev↔review loop — a new fix commit every
+round, which is #449's own motivating scenario — that reset-on-push behavior
+meant the blocking floor never loosened past round 1-2, no matter how many
+rounds ran. Combined with [INV-127]'s deliberate `_aggregate_has_p0p1_fail`
+gate (which only counts a round toward ITS OWN cap when a P0/P1 survives),
+a loop sustained by a **new P2/P3 finding each round** was bounded by no
+mechanism at all: R1's ratchet never reached a loosening round, and INV-127
+never counted the round either. This invariant redefines `REVIEW_ROUND` as a
+**head-agnostic series of consecutive decided `failed-substantive` rounds**
+(plus 1), reusing INV-127's proven cutoff-then-scan grammar
+(`_review_round_prior_marker`, mirroring `_review_cap_prior_marker`) instead
+of a head match. `head` is now recorded in the marker for forensic/audit
+value only, never as a reset key — the identical design INV-127 already
+established for its own counter.
+
+**Motivation — six existing mechanisms, none of which bounded the "new P2 per
+round" loop**:
+
+| Mechanism | Why it did not engage |
+|---|---|
+| R1 severity ratchet (#449) | `REVIEW_ROUND` reset to 1 on every new head → floor stayed P0-P3 forever |
+| [INV-127] round-cap breaker | its round-7 gate (`_aggregate_has_p0p1_fail`) deliberately excludes P2/P3-only rounds |
+| `REVIEW_RETRY_LIMIT` | only counts `failed-non-substantive` flips |
+| [INV-105] frozen-convergence | dev pushes a commit every round — never a frozen head |
+| [INV-122] same-HEAD E2E breaker | head changes every round |
+| [INV-128] liveness watchdog | fingerprint (label/head/comment count) changes every tick — the loop *is* progress |
+
+A downstream consumer project's PR churned 10 review↔dev rounds over ~6
+hours with a new commit every round; this repo's own history has a 7-round
+single-theme loop of the same shape. In both, the pre-#475 ratchet would have
+stayed frozen at round 1. Gap analysis and the chosen approach were
+confirmed by a multi-model design review (unanimous on both the gap and the
+redefinition-over-a-second-counter approach).
+
+**Why redefine `REVIEW_ROUND` rather than add a second counter or widen
+INV-127's gate**: a parallel head-scoped + head-agnostic pair (floor = max)
+preserves nothing of value — the head-scoped counter is 1 in every scenario
+where the two would differ — while doubling the marker surface. Widening
+INV-127's gate to trip on P2-only loops converts a convergence problem into
+guaranteed operator work for every narrow-finding loop. Redefinition fixes
+the root premise with one marker grammar and no new state.
+
+**State storage**: unchanged marker grammar, now head-AGNOSTIC in meaning
+(`head` forensic-only):
+
+```
+<!-- review-round-counter: issue=<N> head=<sha|unknown> round=<n> -->
+```
+
+An empty/unavailable head (e.g. a transient `chp_pr_view` failure) renders as
+the literal placeholder `unknown` (`_review_round_marker`, mirroring
+`_review_cap_marker`'s own placeholder rationale) rather than an empty field
+— the head no longer gates trust in the marker, so a transient read failure
+must never block the round from counting or being recorded. Unlike the
+pre-#475 code, the wrapper no longer forces `round=1`/skips the marker post
+on an empty `PR_HEAD_SHA` — that guard existed solely to prevent head-KEY
+contamination, which no longer applies once the head is forensic-only.
+
+**Parse regex is head-permissive**: `_review_round_parse_count` (and
+`_review_round_next_count`, which no longer takes a `<head>` parameter at
+all) match `head=.*` rather than a specific head value — mirroring
+`_review_cap_parse_count`'s own permissive head match — so a LEGACY,
+pre-#475 head-KEYED marker (posted before this invariant shipped) still
+parses instead of silently collapsing to 0. `_review_round_marker` keeps its
+3-arg `(issue, head, round)` signature unchanged; only the two reader
+functions dropped the parameter.
+
+**Reset semantics — cutoff-then-scan (`_review_round_prior_marker`,
+`lib-review-round.sh`), mirroring `_review_cap_prior_marker`
+(`lib-review-cap.sh`)**: a NEW sibling function, NOT a widening of the cap's
+own function ([INV-122]'s sibling-breaker precedent) — the two counters keep
+independent state and independent reset triggers even though they now share
+the same cutoff-then-scan shape. Cutoff = max of:
+
+1. The latest full-body-anchored `passed`/`failed-non-substantive`
+   `review-verdict` trailer (`^<!--[[:space:]]*review-verdict:[[:space:]]*(passed|failed-non-substantive)[^>]*-->[[:space:]]*$`,
+   `authorKind != "human"`, `.body | type == "string"` guarded — identical
+   shape to the cap function's own reset-cutoff query, including the
+   null-body guard).
+2. The latest INV-127 trip report (body matching `Review-round-cap
+   circuit-breaker tripped`). **Explicit rule: an INV-127 trip report is
+   ITSELF a reset cutoff** — after an operator removes `stalled` and the
+   loop resumes, the next review runs at round 1 (the strictest floor),
+   rather than inheriting the pre-trip series.
+
+Scan strictly (`>`, not `>=`) after the cutoff for the latest
+`review-round-counter` marker matching the FULL-BODY-anchored grammar
+(`^<!--[[:space:]]*review-round-counter:[[:space:]]*issue=[0-9]+ head=[^ ]+ round=[0-9]+[[:space:]]*-->[[:space:]]*$`)
+— this replaces the pre-#475 read site's bare `contains("review-round-counter:")`
+substring match. The marker is always posted as a standalone comment, so the
+anchor never rejects a genuine marker while it reliably excludes a
+marker-shaped substring embedded in a larger comment (the same class of fix
+[INV-128]'s own whole-body-grammar conversion made for its own marker
+reads). `authorKind != "human"` filtering is unchanged (mirrors
+[INV-105]/[INV-122]/[INV-127]'s own marker-authenticity filter).
+
+**[INV-105]/[INV-122] trip reports are deliberately NOT cutoffs**: those
+stalls are dev-side inaction / same-head E2E-gate fixed points — neither is
+evidence the review-round series itself was wrong, and the series
+legitimately continues across them.
+
+**`round=0` explicit reset marker on PASS rounds (mandatory, not optional)**:
+at the existing marker-post site in `autonomous-review.sh` (right after
+`AGGREGATE` is computed), a `pass` aggregate now posts
+`<!-- review-round-counter: issue=<N> head=<sha|unknown> round=0 -->` instead
+of the (already-incremented) `$REVIEW_ROUND`; a substantive `fail` posts the
+incremented round exactly as before #475. This makes the reset
+**dual-channel**: the `passed` trailer is a cutoff (above), AND the
+`round=0` marker independently yields `next_count = 1` through the ordinary
+parse path — so a transient trailer-post failure (`emit_verdict_trailer`'s
+own `|| true`) can no longer let a later fail round inherit a stale high
+round and prematurely widen the floor (the unsafe direction: a false-high
+round demotes a finding that should still block). The posting *conditions*
+are otherwise unchanged: only decided rounds post a marker at all (never
+`all-unavailable`); a fail round additionally requires
+`_AGGREGATE_SUBSTANTIVE_FAIL` (an all-timeout-veto `fail` still posts no
+marker, same as before #475).
+
+**INV-127's `_aggregate_has_p0p1_fail` gate: unchanged, re-documented (not
+re-purposed)**: `_aggregate_has_p0p1_fail` (`lib-review-aggregate.sh`) and
+its call site in the INV-127 breaker are byte-identical to the #449-era
+code — no behavioral change (pinned by a regression test asserting the
+function's output is unchanged on the existing fixture set). Its ORIGINAL
+justification cited the round counter's head-scoped reset: at round 1-4 a
+P2-only finding is a genuine `fail` that must not count toward INV-127's
+P0/P1-only cap. Under INV-129, that same P2-only round is now demoted to
+`pass` by the severity ratchet itself once `REVIEW_ROUND` reaches 5+
+(`shouldBlockFinding`) — because the round counter is now head-agnostic and
+therefore actually reaches round 5+ in the motivating "new P2 every round"
+scenario, where the pre-#475 head-scoped counter never would have. A P2-only
+round at round ≥5 is therefore demoted to `pass` BEFORE aggregation and never
+reaches INV-127's `_aggregate_has_p0p1_fail` counting branch at all — the
+gate is harmless defense-in-depth now, not the mechanism preventing INV-127's
+false stall. The code comments at the gate's call site and at
+`_aggregate_has_p0p1_fail`'s own definition were updated to say exactly this,
+so a future reader — or a review agent — does not "fix" the gate (it needs
+no fix) or believe it still carries its original load.
+
+**Interaction with INV-127 under the new semantics**: a pure-P0/P1 loop
+advances both counters in lockstep and INV-127 trips at its own cap as
+before. A P2-only loop now terminates via ratchet demotion at round 5
+(merge) instead of running unbounded. Mixed loops advance the ratchet on
+every substantive fail but INV-127 only on P0/P1 rounds. No interference:
+the ratchet's reset channels (trailer cutoff, trip-report cutoff, `round=0`
+marker) are a strict superset of INV-127's own reset channels (INV-127's own
+trip-report cutoff exists on both sides; the ratchet ALSO resets on a plain
+`passed`/`failed-non-substantive` trailer and the `round=0` marker, which
+INV-127's own counter does not need since it only ever advances on
+`failed-substantive`).
+
+**Deliberately NOT distinguished**: the "new P2 each round" and "same P2
+never fixed" loops are treated identically — finding-identity tracking would
+need persistent finding state the marker-only architecture doesn't have, and
+both loops warrant the same treatment: P2s block for 4 full rounds
+(operator-visible via the existing non-blocking-note comments), then the
+ratchet accepts residual-risk merge exactly as #449 designed.
+
+**Documented residual — `GH_AUTH_MODE=token` with `BOT_LOGIN` unset**: under
+that configuration, `itp_list_comments` normalizes the wrapper's own
+comments to `authorKind="human"`, so every marker/trailer read by
+`_review_round_prior_marker` sees nothing. `REVIEW_ROUND` stays 1 (the
+strictest floor — fail-safe) and all reset channels are moot (there is
+nothing to reset). This mirrors [INV-105]'s own documented token-mode
+residual for its own marker reads. Not fixed here — an `authorKind`
+derivation change is an auth-architecture change, out of scope for this
+invariant.
+
+**Bias to MISS**: an absent, malformed, or non-full-body-matching marker
+collapses to count=0 (never a crash, never a silent inherit of a garbled
+count) — unchanged from the #449-era `_review_round_parse_count` contract.
+
+**Status**: **ENFORCED**. No new `transitions.json` entry and no
+`state-machine.md` change — INV-129 changes when an existing mechanism's
+(the severity ratchet's) INPUTS move, not the state graph; the ratchet
+itself has never driven a label transition.
+
+**Cross-references**:
+- [INV-127](#inv-127-a-review-side-divergent-findings-non-convergence-review_convergence_cap-consecutive-failed-substantive-rounds-where-the-severity-ratchet-s-own-p0p1-floor-is-still-failing-is-detected-and-halted--the-breaker-transitions-reviewing--stalled-then-posts-one-structured-reasonreview-round-cap-report-gated-on-an-already-stalled-skip-does-not-gate-on-may_stall_now-mirroring-inv-122s-own-rationale) — the cutoff-then-scan grammar (`_review_cap_prior_marker`) this invariant's `_review_round_prior_marker` reuses, and the complementary non-convergence mode (a P0/P1 that never clears) this invariant's ratchet demotion now correctly interacts with.
+- [INV-105](#inv-105-a-non-converging-devreview-loop-a-failed-substantivedev-actionabletrue-verdict-that-churns-n-completed-zero-commit-dev-resume-rounds-against-a-frozen-pr-head-is-detected-and-halted--the-breaker-transitions-to-stalled-then-posts-one-structured-reasonnon-convergence-report-gated-behind-the-shared-may_stall_now-live-pid-pre-gate-idempotent-per-issue-head-trailer-hash-session_id) — the documented `GH_AUTH_MODE=token`/`BOT_LOGIN`-unset residual this invariant's own token-mode note mirrors.
+- [INV-128](#inv-128-any-non-terminal-issue-whose-observable-state-fingerprint-label-pr-head-non-idempotent-comment-count-marker-digest-stays-unchanged-for-liveness_notice_ticks-default-6-consecutive-dispatcher-ticks-gets-one-operator-visible-tier-1-escalation-and-after-liveness_stall_ticks-default-18-further-unchanged-ticks-is-unconditionally-transitioned-to-stalled-with-a-structured-reasonliveness-timeout-report--the-pipelines-first-global-liveness-invariant-every-non-terminal-issue-either-changes-observable-state-or-is-escalated-within-a-bounded-number-of-ticks) — the whole-body-anchored-marker-grammar precedent this invariant's read-site hardening (R4) follows.
+- [`review-agent-flow.md`](review-agent-flow.md#prompt-construction) § Prompt construction — the `review-round-counter` marker and severity-ratchet prompt wording this invariant redefines the semantics of.
+- `docs/test-cases/inv-129-head-agnostic-review-round.md` — the TC-INV129-* scenario matrix.
+
+---

@@ -148,12 +148,23 @@ _aggregate_has_substantive_fail() {
 # fail-safe always blocks — never P2/P3) to be genuinely failing, not merely
 # "a fail survived at THIS round's possibly-low floor". A P2 finding blocks
 # at rounds 1-4 and would therefore survive as `fail` whenever
-# R1's head-scoped `review-round-counter` happens to be low — which it
-# always is right after a new HEAD, precisely INV-127's own motivating
-# scenario (a new head every round). Without this narrower check, a PR that
-# keeps surfacing ONLY P2 findings across a run of new heads would still
-# advance the head-AGNOSTIC INV-127 counter and eventually trip it despite
-# no P0/P1 ever existing.
+# R1's `review-round-counter` happens to be low — which, when this function
+# was written, was ALWAYS true right after a new HEAD (the counter was
+# head-scoped, resetting to 1 on every push), precisely INV-127's own
+# motivating scenario (a new head every round). Without this narrower check,
+# a PR that keeps surfacing ONLY P2 findings across a run of new heads would
+# still advance the head-AGNOSTIC INV-127 counter and eventually trip it
+# despite no P0/P1 ever existing.
+#
+# [INV-129, issue #475] `review-round-counter` was later redefined
+# head-AGNOSTIC (it now accumulates across consecutive failed-substantive
+# rounds, same as this file's own counter), so a P2-only round now gets
+# demoted to `pass` by the severity ratchet at round 5+ BEFORE it ever
+# reaches this function as a `fail` — this function's output is unchanged
+# (still correct, still called identically by INV-127's gate), but it is now
+# harmless defense-in-depth rather than the mechanism that prevents INV-127's
+# false stall on a P2-only loop. See the call site in autonomous-review.sh
+# for the fuller account.
 #
 # Takes alternating (verdict, severity) pairs — one per fan-out agent, in the
 # SAME order AGENT_VERDICTS/AGENT_HIGHEST_SEVERITY are populated in

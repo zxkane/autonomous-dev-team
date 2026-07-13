@@ -1106,45 +1106,31 @@ PR_HEAD_SHA=$(chp_pr_view "$PR_NUMBER" "headRefOid" 2>/dev/null | jq -r '.headRe
 log "PR branch: ${PR_BRANCH:-UNKNOWN} (HEAD: ${PR_HEAD_SHA:0:7})"
 
 # ---------------------------------------------------------------------------
-# Issue #449 (R1): review-round counter — feeds the severity-aware blocking
-# ratchet's floor (lib-review-severity.sh::shouldBlockFinding) and the
-# round-1-vs-round>1 prompt wording below. Scoped to (issue, head): a new
-# HEAD resets to round=1; the counter increments only while the HEAD is
-# unchanged. Read the prior marker the same way INV-122 reads its own
-# (unbounded scan via itp_list_comments, filtered to authorKind != "human" so
-# an ordinary collaborator comment can never be read as a forged round).
+# Issue #449 (R1), redefined head-agnostic by issue #475 [INV-129]:
+# review-round counter — feeds the severity-aware blocking ratchet's floor
+# (lib-review-severity.sh::shouldBlockFinding) and the round-1-vs-round>1
+# prompt wording below. REVIEW_ROUND is the length of the current series of
+# consecutive decided `failed-substantive` rounds (plus 1), accumulating
+# ACROSS head changes — the original (issue #449) head-scoped
+# reset-on-every-push semantics never let the floor loosen in an ACTIVE
+# dev↔review loop (a new fix commit every round), so a loop sustained by a
+# new P2/P3 finding each round was bounded by no mechanism at all. `head` is
+# now forensic-only (recorded in the marker, not a reset key) — resets happen
+# via explicit channels: a `passed`/`failed-non-substantive` `review-verdict`
+# trailer, an INV-127 trip report, or an explicit `round=0` marker (R3,
+# posted on every PASS round). See `_review_round_prior_marker`
+# (lib-review-round.sh) for the cutoff-then-scan algorithm, mirroring
+# INV-127's own `_review_cap_prior_marker`.
 #
-# Require a non-empty PR_HEAD_SHA before trusting/advancing the counter
-# (mirrors INV-122's own "[#453 codex review round-3, P2] Require a
-# non-empty PR_HEAD_SHA" fix, autonomous-review.sh's E2E-gate breaker below):
-# PR_HEAD_SHA is read with `|| true` and can be empty on a chp_pr_view
-# failure. An empty head is "we don't know the head," not "the same head,"
-# so a marker keyed on it must never be trusted to represent this HEAD's
-# series — reading it back would either falsely reset a real series (if a
-# transient failure produces an empty-head marker that a later real-head
-# read can't match) or falsely accumulate across genuinely different heads
-# (if two different transient failures both produce empty-head markers that
-# DO match each other). Fail toward the strictest floor instead: default to
-# round=1 (round 1-2's floor is P0-P3, the strictest — never silently widen
-# the blocking floor on an unknown head) and skip posting a marker this round
-# (posting one keyed on an empty head would corrupt a LATER real-head read).
-#
-# [P1] (#449 codex review round 6): `.body | type == "string"` guard before
-# `contains()` — mirrors `_review_cap_prior_marker`'s (lib-review-cap.sh) own
-# guard. GitHub can return a bot comment with `body: null` (a real REST
-# shape); `contains()` on a non-string is a jq RUNTIME ERROR that aborts the
-# WHOLE pipeline, not a per-row non-match, so one such comment collapses
-# `_rr_prior_marker` to "" via the `|| echo ""` fallback — silently resetting
-# REVIEW_ROUND to 1 on a same-head re-review instead of incrementing it.
-if [[ -n "$PR_HEAD_SHA" ]]; then
-  _rr_prior_marker=$(itp_list_comments "$ISSUE_NUMBER" 2>/dev/null \
-    | jq -r '[.[] | select(.authorKind != "human") | select(.body | type == "string") | select(.body | contains("review-round-counter:"))] | sort_by(.createdAt) | last | .body // ""' \
-    2>/dev/null || echo "")
-  REVIEW_ROUND=$(_review_round_next_count "$_rr_prior_marker" "$PR_HEAD_SHA")
-else
-  log "WARNING: Issue #449: PR_HEAD_SHA is empty (chp_pr_view failure?) — defaulting review round to 1 (strictest severity floor) and skipping the review-round-counter marker this round."
-  REVIEW_ROUND=1
-fi
+# Unlike the pre-#475 code, an empty PR_HEAD_SHA (a transient chp_pr_view
+# failure) no longer forces round=1/skips the marker — that guard existed
+# solely to prevent head-KEY contamination, which no longer applies now that
+# the head is forensic-only (`_review_round_marker` renders an empty head as
+# the literal placeholder "unknown", mirroring `_review_cap_marker`). An
+# empty-head round both counts normally and posts its marker.
+_rr_comments_json=$(itp_list_comments "$ISSUE_NUMBER" 2>/dev/null || echo "[]")
+_rr_prior_marker=$(_review_round_prior_marker "$_rr_comments_json")
+REVIEW_ROUND=$(_review_round_next_count "$_rr_prior_marker")
 # Human-readable floor label for the log line only — the authoritative
 # per-round floor lives in shouldBlockFinding (lib-review-severity.sh).
 if [[ "$REVIEW_ROUND" -le 2 ]]; then
@@ -3362,17 +3348,28 @@ log "Per-agent verdicts: ${AGENT_VERDICTS[*]} → aggregate: ${AGGREGATE}"
 # makes this narrower distinction available to both gates below.
 _AGGREGATE_SUBSTANTIVE_FAIL=$(_aggregate_has_substantive_fail "${AGENT_VERDICTS[@]}")
 
-# [P1] (#449 codex review round 7): `_AGGREGATE_SUBSTANTIVE_FAIL` only tells
-# INV-127 that a REAL (non-timeout) fail survived the severity filter — not
-# WHICH severity survived. INV-127's own fingerprint requires the ratchet's
-# TERMINAL floor (P0/P1) to still be failing, not merely "a fail survived at
-# THIS round's possibly-low floor" — a P2 finding blocks at rounds 1-4, and
-# R1's `review-round-counter` is head-SCOPED (resets to 1 on every new push),
-# so a PR that surfaces only P2 findings across a run of new heads (INV-127's
-# own motivating scenario) would keep re-entering round 1-4 and never
-# actually have a P0/P1 in play, yet would still advance INV-127's
-# head-AGNOSTIC counter under the old (mere-substantive) gate.
-# `_aggregate_has_p0p1_fail` (lib-review-aggregate.sh) makes the narrower
+# [P1] (#449 codex review round 7; R5 re-documented by issue #475, INV-129):
+# `_AGGREGATE_SUBSTANTIVE_FAIL` only tells INV-127 that a REAL (non-timeout)
+# fail survived the severity filter — not WHICH severity survived. INV-127's
+# own fingerprint requires the ratchet's TERMINAL floor (P0/P1) to still be
+# failing, not merely "a fail survived at THIS round's possibly-low floor" —
+# a P2 finding blocks at rounds 1-4. This gate (`_aggregate_has_p0p1_fail`,
+# lib-review-aggregate.sh) and its call site below are UNCHANGED by INV-129
+# — byte-identical to the #449-era code — but its original justification no
+# longer carries load: it was written when R1's `review-round-counter` was
+# head-SCOPED (reset to 1 on every new push), so a PR surfacing only P2
+# findings across a run of new heads would keep re-entering the round 1-4
+# floor and never actually reach a P0/P1, yet would still advance INV-127's
+# head-AGNOSTIC counter under a mere-substantive gate. Under INV-129 the
+# round counter is ITSELF head-agnostic and accumulates every consecutive
+# substantive fail, so a P2-only round is demoted to `pass` by the severity
+# ratchet BEFORE aggregation once the round reaches 5+ (`shouldBlockFinding`)
+# and never reaches this counting branch as a `fail` at all — this gate is
+# now harmless defense-in-depth, not the mechanism preventing INV-127's false
+# stall. Kept (rather than removed) because it is still correct and a future
+# reader — or a review agent — should not "fix" it by deleting it; a
+# regression pin (`tests/unit/test-review-convergence-rules.sh`) asserts its
+# output is unchanged. `_aggregate_has_p0p1_fail` makes the narrower
 # distinction available to the INV-127 cap gate below; the review-round-
 # counter marker gate above/below intentionally keeps using the broader
 # `_AGGREGATE_SUBSTANTIVE_FAIL` (it feeds "how many rounds have run", not
@@ -3394,8 +3391,7 @@ _AGGREGATE_HAS_P0P1_FAIL=$(_aggregate_has_p0p1_fail "${_AGGREGATE_VERDICT_SEVERI
 # REVIEW_ROUND before any real review ever completed. Still leaves a marker
 # on EVERY decided round (mirrors INV-122's own "must persist every round"
 # fix) — a PASS round has no other FAIL-only comment path to embed it in, so
-# it is posted as its own small comment exactly as before. Skipped when
-# PR_HEAD_SHA is empty (see the original guard's rationale above).
+# it is posted as its own small comment exactly as before.
 #
 # [P1] #1 (#449 codex review round 4): a `fail` aggregate ALSO requires
 # `_AGGREGATE_SUBSTANTIVE_FAIL == true` — an all-timeout-veto `fail` (no
@@ -3403,8 +3399,20 @@ _AGGREGATE_HAS_P0P1_FAIL=$(_aggregate_has_p0p1_fail "${_AGGREGATE_VERDICT_SEVERI
 # not advance REVIEW_ROUND, or a run of transient timeouts on the same head
 # could prematurely narrow the blocking floor before any real review round
 # ever completed against it.
-if [[ -n "$PR_HEAD_SHA" ]] \
-   && { [[ "$AGGREGATE" == "pass" ]] || { [[ "$AGGREGATE" == "fail" ]] && [[ "$_AGGREGATE_SUBSTANTIVE_FAIL" == "true" ]]; }; }; then
+#
+# [INV-129, issue #475 R3] A `pass` aggregate posts an explicit `round=0`
+# reset marker instead of the (already-incremented) `$REVIEW_ROUND` — a
+# SECOND, independent reset channel alongside the `passed` trailer cutoff
+# (`_review_round_prior_marker` above): the trailer post uses `|| true` and
+# can silently fail, and without this marker-side reset a LATER
+# failed-substantive round would read the stale pre-reset marker back
+# through the ordinary parse path and inherit a high round, prematurely
+# widening the floor (the unsafe direction). `round=0` independently yields
+# `next_count = 1` on the next read regardless of whether the trailer cutoff
+# landed. A substantive fail posts the incremented round exactly as before.
+if [[ "$AGGREGATE" == "pass" ]]; then
+  itp_post_comment "$ISSUE_NUMBER" "$(_review_round_marker "$ISSUE_NUMBER" "$PR_HEAD_SHA" 0)" 2>/dev/null || true
+elif [[ "$AGGREGATE" == "fail" ]] && [[ "$_AGGREGATE_SUBSTANTIVE_FAIL" == "true" ]]; then
   itp_post_comment "$ISSUE_NUMBER" "$(_review_round_marker "$ISSUE_NUMBER" "$PR_HEAD_SHA" "$REVIEW_ROUND")" 2>/dev/null || true
 fi
 
@@ -4407,17 +4415,23 @@ else
     # breaker uses and eventually stall a PR no review agent ever actually
     # found a live P0/P1 in.
     #
-    # [P1] (#449 codex review round 7): ALSO requires
-    # `_AGGREGATE_HAS_P0P1_FAIL == true` (lib-review-aggregate.sh::
-    # _aggregate_has_p0p1_fail). `_AGGREGATE_SUBSTANTIVE_FAIL` alone only
-    # confirms a REAL (non-timeout) fail survived the severity filter at
-    # THIS round's floor — a P2 finding survives as `fail` at rounds 1-4,
-    # and R1's `review-round-counter` is head-SCOPED (resets to 1 on every
-    # new push), so a PR surfacing only P2 findings across a run of new
-    # heads (this breaker's own head-agnostic, new-head-every-round
+    # [P1] (#449 codex review round 7; R5 re-documented by issue #475,
+    # INV-129): ALSO requires `_AGGREGATE_HAS_P0P1_FAIL == true`
+    # (lib-review-aggregate.sh::_aggregate_has_p0p1_fail), byte-identical to
+    # the #449-era gate. `_AGGREGATE_SUBSTANTIVE_FAIL` alone only confirms a
+    # REAL (non-timeout) fail survived the severity filter at THIS round's
+    # floor — a P2 finding survives as `fail` at rounds 1-4. At the time this
+    # gate was written, R1's `review-round-counter` was head-SCOPED (reset to
+    # 1 on every new push), so a PR surfacing only P2 findings across a run
+    # of new heads (this breaker's own head-agnostic, new-head-every-round
     # motivating scenario) would keep re-entering the round 1-4 floor and
     # never actually have a live P0/P1, yet would still advance and
-    # eventually trip THIS counter without the narrower check.
+    # eventually trip THIS counter without the narrower check. Under INV-129
+    # the round counter is itself head-agnostic, so that exact scenario now
+    # gets demoted to `pass` by the severity ratchet at round 5+ before ever
+    # reaching this `if` as a `fail` — this check is harmless defense-in-depth
+    # now, not the load-bearing fix it originally was; see the R5 comment
+    # above `_AGGREGATE_HAS_P0P1_FAIL`'s computation for the full account.
     if [[ "$AGGREGATE" == "fail" ]] && [[ "$_AGGREGATE_SUBSTANTIVE_FAIL" == "true" ]] \
        && [[ "$_AGGREGATE_HAS_P0P1_FAIL" == "true" ]]; then
       _rc_already_stalled=$(itp_read_task "$ISSUE_NUMBER" labels \
