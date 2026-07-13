@@ -1123,6 +1123,93 @@ genuine_firstline_085=$(printf '<!-- dispatcher-token: abc at 2026-01-01T00:00:0
 assert_eq "TC-LIVENESS-085b the genuine full-body dispatcher-token: marker DOES register in the digest" "dispatcher-token:" \
   "$(_liveness_marker_digest "$(jq -n --arg b "$genuine_firstline_085" '[{"authorKind":"human","createdAt":"t","body":$b}]')")"
 
+# ===========================================================================
+echo
+echo "=== TC-LIVENESS-086..094 [issue #473 UPDATE, pr-test-analyzer gap]: ==="
+echo "=== full-body fixture coverage for the 9 producer grammars that     ==="
+echo "=== TC-006..085 never exercised directly (only via digest/count     ==="
+echo "=== plumbing tests) -- each fixture is transcribed byte-for-byte    ==="
+echo "=== from its real itp_post_comment call site so a future producer- ==="
+echo "=== text edit trips a red test instead of silently desyncing.      ==="
+# ===========================================================================
+
+genuine_inv12completed_086='Session `sess-1` already ended (stop_reason=end_turn, terminal_reason=completed) and no post-session review verdict was found. Resume would hang on idle SSE — skipping. If review findings exist, unpark by flipping to `in-progress` + posting a dispatcher-token comment + running `dispatch-local.sh dev-resume <issue>` (a fresh session re-reads the issue and findings; do NOT flip to `pending-review` — the stale-verdict guard rejects an already-reviewed HEAD). Close the issue if the work is done. (`INV-12-completed:sess-1`)'
+assert_eq "TC-LIVENESS-086 genuine full-body INV-12-completed: registers in the digest" "INV-12-completed:" \
+  "$(_liveness_marker_digest "$(jq -n --arg b "$genuine_inv12completed_086" '[{"authorKind":"bot","createdAt":"t","body":$b}]')")"
+
+genuine_inv12nopr_087='Session `sess-1` ended cleanly (stop_reason=end_turn, terminal_reason=completed) but no PR was ever created, so no review could run. Minting a fresh dev session (bounded by `MAX_RETRIES`). (`INV-12-no-pr-fresh-dev:sess-1`)'
+assert_eq "TC-LIVENESS-087 genuine full-body INV-12-no-pr-fresh-dev: registers in the digest" "INV-12-no-pr-fresh-dev:" \
+  "$(_liveness_marker_digest "$(jq -n --arg b "$genuine_inv12nopr_087" '[{"authorKind":"bot","createdAt":"t","body":$b}]')")"
+
+genuine_inv35_088='Review failed substantively on completed session `sess-1`. A completed session cannot be resumed; minting a fresh dev session via the INV-12 PTL recovery pattern. (`INV-35-fresh-dev:sess-1`)'
+assert_eq "TC-LIVENESS-088 genuine full-body INV-35-fresh-dev: registers in the digest" "INV-35-fresh-dev:" \
+  "$(_liveness_marker_digest "$(jq -n --arg b "$genuine_inv35_088" '[{"authorKind":"bot","createdAt":"t","body":$b}]')")"
+
+genuine_noprogress_089='Substantive review failure on completed session `sess-1` is **not resolvable by the autonomous dev agent**: its scoped token hit `Resource not accessible by integration` on a PR-metadata edit, or the finding requires a maintainer / post-merge action. Marking stalled — no further `dev-new` will be dispatched. @zxkane please apply the PR-body / metadata change manually, or split the post-merge criterion into a follow-up. (`no-progress-substantive:sess-1`)'
+assert_eq "TC-LIVENESS-089 genuine full-body no-progress-substantive: (non-attempt form) registers in the digest" "no-progress-substantive:" \
+  "$(_liveness_marker_digest "$(jq -n --arg b "$genuine_noprogress_089" '[{"authorKind":"bot","createdAt":"t","body":$b}]')")"
+
+genuine_nonactionable_090='Substantive review failure on completed session `sess-1` is **not resolvable by the autonomous dev agent**: the review classified every blocking finding as requiring a human or a privileged token the agent'"'"'s scoped token lacks (e.g. a `.github/workflows` edit needs the `workflows` scope, or a CODEOWNERS / maintainer-owned change — [INV-92]). Marking stalled — no `dev-new` will be dispatched (`reason=non_actionable_finding`). @zxkane please apply the change manually, grant the required scope, or split the criterion into a maintainer follow-up. (`non-actionable-finding:sess-1`)'
+assert_eq "TC-LIVENESS-090 genuine full-body non-actionable-finding: registers in the digest" "non-actionable-finding:" \
+  "$(_liveness_marker_digest "$(jq -n --arg b "$genuine_nonactionable_090" '[{"authorKind":"bot","createdAt":"t","body":$b}]')")"
+
+genuine_selfhealnonsub_091='PR #12 HEAD `sha-A` was reviewed with a non-substantive FAILED verdict (cause=`some-cause`), and no `Dev Session ID:` could be resolved for the prior dev session (its session-report comment was likely lost — e.g. a mid-cleanup auth-teardown race). Re-routing to review rather than dispatching a fresh dev session. (`self-heal-non-substantive:sha-A`)'
+assert_eq "TC-LIVENESS-091 genuine full-body self-heal-non-substantive: registers in the digest" "self-heal-non-substantive:" \
+  "$(_liveness_marker_digest "$(jq -n --arg b "$genuine_selfhealnonsub_091" '[{"authorKind":"bot","createdAt":"t","body":$b}]')")"
+
+genuine_crashednonact_092='PR #12 HEAD `sha-A` was reviewed with a FAILED verdict that classified every blocking finding as **not resolvable by the autonomous dev agent** (requires a human or a privileged token the agent'"'"'s scoped token lacks, [INV-92]), and a `Dev Session ID:` was resolved for the prior dev session, but its completion could not be confirmed (a non-terminal stop reason such as `api_error`, a non-claude dev CLI, or an unreadable session log). Marking stalled — no `dev-new` will be dispatched. @zxkane please apply the change manually. (`crashed-session-non-actionable:sha-A`)'
+assert_eq "TC-LIVENESS-092 genuine full-body crashed-session-non-actionable: registers in the digest" "crashed-session-non-actionable:" \
+  "$(_liveness_marker_digest "$(jq -n --arg b "$genuine_crashednonact_092" '[{"authorKind":"bot","createdAt":"t","body":$b}]')")"
+
+genuine_inv25_093='Label hygiene: stripped `foo`, `bar` from `some-issue` issue (INV-25). <!-- INV-25-hygiene:foo,bar; -->'
+assert_eq "TC-LIVENESS-093 genuine full-body INV-25-hygiene: registers in the digest" "INV-25-hygiene:" \
+  "$(_liveness_marker_digest "$(jq -n --arg b "$genuine_inv25_093" '[{"authorKind":"bot","createdAt":"t","body":$b}]')")"
+
+# TC-LIVENESS-094: dispatcher-gate-fail-breaker: — the SECOND big multi-line
+# breaker report (sibling to dispatcher-convergence-breaker:, pinned by
+# TC-LIVENESS-083 above), transcribed byte-for-byte from its real
+# `itp_post_comment` heredoc (autonomous-review.sh's GATEBREAKREPORT).
+gatebreak_marker094='<!-- dispatcher-gate-fail-breaker: issue=1 head=sha-A rc=1 count=3 -->'
+gatebreak_body094=$(cat <<GATEBREAK094
+${gatebreak_marker094}
+## ⛔ Same-HEAD E2E-gate circuit-breaker tripped — halting repeated re-dispatch (\`reason=same-head-gate-failure\`, [#453])
+
+The E2E hard gate (INV-46) has failed **3** times in a row
+against the SAME PR head \`sha-A\` with the SAME lane exit code
+\`1\` (>= threshold 3). Re-dispatching review
+against this unchanged head would only repeat the identical failure —
+nothing the dev agent can fix without a new commit.
+
+**Dispatcher actions taken** (this loop is now HALTED):
+- Transitioned the issue to \`stalled\` (autonomy halted; \`autonomous\` is
+  retained) — REMOVING the \`stalled\` label is the operator's explicit
+  opt-in to resume.
+- Posted this one-time report.
+
+**Best-effort classification**
+lane rc=1 is consistent with the E2E job never actually running
+
+**Evidence**
+- PR: #12
+- Frozen PR head: \`sha-A\`
+- E2E lane exit code: \`1\` (evidence_present=0)
+- Repeated-failure count on this frozen (head, rc) pair: **3**
+
+**Human action needed** — pick one, then push a new commit to resume:
+- [ ] Fix the external/environment prerequisite the E2E gate depends on
+      (e.g. deploy the missing IAM grant), OR
+- [ ] Fix a genuine code defect the E2E gate is correctly catching, OR
+- [ ] Close the issue if the feature is no longer wanted.
+
+**To resume: fix per the checklist above, then push a new commit and REMOVE
+the \`stalled\` label (the \`autonomous\` label is retained; removal re-arms
+the pipeline).**
+@zxkane
+GATEBREAK094
+)
+assert_eq "TC-LIVENESS-094 genuine full-body dispatcher-gate-fail-breaker: registers in the digest" "dispatcher-gate-fail-breaker:" \
+  "$(_liveness_marker_digest "$(jq -n --arg b "$gatebreak_body094" '[{"authorKind":"bot","createdAt":"t","body":$b}]')")"
+
 echo
 echo "=== Summary ==="
 echo "Passed: $PASS"
