@@ -91,8 +91,49 @@ tree — had no direct test).
 
 | ID | Scenario | Expected |
 |----|----------|----------|
-| TC-IDIOM-032 | `foo \|\| truex` (not the bare `true` token) | NOT flagged — regression pin for the unbounded-alternation bug; the fix wraps the whole `(true\|echo)` alternation in one POSIX word-end boundary `([[:space:]]\|$)`, which is also portable to `mawk` (`\>` is a GNU-awk-only extension) |
+| TC-IDIOM-032 | `foo \|\| truex` (not the bare `true` token) | NOT flagged — regression pin for the unbounded-alternation bug; the fix wraps the whole `(true\|echo)` alternation in one POSIX non-word-character boundary `([^[:alnum:]_]\|$)`, which is also portable to `mawk` (`\>` is a GNU-awk-only extension) |
 | TC-IDIOM-033 | A clean baseline is committed to a trusted ref; the WORKING TREE (uncommitted) then adds a new swallow violation; run with `--require-trusted-ref` against that ref | FAIL — proves strict mode catches working-tree growth against the trusted baseline, not just baseline-vs-baseline drift |
+
+## Group I — second review pass: whitespace-boundary false negative + baseline schema validation (TC-IDIOM-034..036)
+
+Added during a second review pass: TC-IDIOM-034 pins a false-negative bug
+(the `([[:space:]]|$)` boundary only matched swallows followed by
+whitespace-or-EOL, missing the single most common real-world shape —
+paren/semicolon/brace-terminated, e.g. `x=$(cmd || true)` — confirmed ~130
+such sites tree-wide); TC-IDIOM-035/036 pin a silent-failure bug (the
+baseline was validated as parseable JSON but never schema-validated, so a
+malformed entry silently exempted that file from the ratchet under
+`set -uo pipefail`'s no-`-e` semantics, reproducible even under
+`--require-trusted-ref` fail-closed strict mode).
+
+| ID | Scenario | Expected |
+|----|----------|----------|
+| TC-IDIOM-034 | `x=$(cmd1 \|\| true)`, `y=$(cmd2 \|\| echo "fallback")`, `cmd3 \|\| true;`, `{ cmd4 \|\| true; }` — all paren/semicolon/brace-terminated, no trailing whitespace | ALL flagged (4 unjustified occurrences) — regression pin; the fix widens the boundary from `([[:space:]]\|$)` to any non-word character `([^[:alnum:]_]\|$)` |
+| TC-IDIOM-035 | A baseline entry with a non-numeric `jq_unguarded` value (`"N/A"`) against a file with real unguarded occurrences, default (non-strict) mode | exit 2 (fails loud) — regression pin; previously the malformed value degraded to a silently-skipped file and a false PASS |
+| TC-IDIOM-036 | The same malformed-value shape committed to a trusted ref, checked via `--require-trusted-ref` | exit 1 (fails closed) — regression pin for the strict-mode variant of the same bug, the exact self-ratification bypass this mode exists to prevent |
+
+## Group J — forward-window direction, invalid-JSON baseline, cross-engine parity (TC-IDIOM-037..039)
+
+| ID | Scenario | Expected |
+|----|----------|----------|
+| TC-IDIOM-037 | Rule J's `type == "string"` guard 15 lines AFTER the match (forward direction — Group A only tested backward) | NOT flagged — the `hi = n + window` boundary is symmetric |
+| TC-IDIOM-038 | An existing baseline file containing invalid JSON (not merely absent) in default mode | exit 2 — distinct usage/env error from a missing-file baseline (TC-IDIOM-031) |
+| TC-IDIOM-039 | The same fixture tree checked once under `awk` (gawk) and once with `mawk` shadowing `awk` on `PATH` | byte-identical output on both — proves the mawk-portability claim behind TC-IDIOM-032/034's fix rather than resting on a one-time manual check; skips gracefully if mawk isn't installed on the runner |
+
+## Group K — empty-scan-root sanity check, third review round (TC-IDIOM-040..042)
+
+A third review pass (silent-failure-hunter) found a Critical gap: a wrong or
+missing `--scan-root` made file discovery silently return nothing. Every
+baseline entry then looked like it had "shrunk to 0," and the reconciliation
+loop PASSed trivially — even under `--require-trusted-ref` — with zero real
+files actually checked. The checker now requires at least one scanned
+`*.sh` file before reconciling.
+
+| ID | Scenario | Expected |
+|----|----------|----------|
+| TC-IDIOM-040 | `--scan-root` pointing at a directory that does not exist, default mode | exit 2 — not a trivial PASS |
+| TC-IDIOM-041 | A `--scan-root` that exists but contains zero `*.sh` files, checked via `--require-trusted-ref` against a non-empty trusted baseline | exit 1 (fail-closed) — every baseline entry would otherwise look like a shrink |
+| TC-IDIOM-042 | A `--scan-root` with real `*.sh` files and zero violations (the ordinary clean case) | PASSes normally — the guard triggers on zero FILES scanned, never on zero violations found |
 
 ## Acceptance criteria for this change (pre-merge verifiable)
 

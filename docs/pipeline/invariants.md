@@ -7722,13 +7722,21 @@ the pre-existing guard in `_review_cap_prior_marker` are the motivating
 precedents). Widening to other fields is explicitly out of scope for #477.
 
 **Rule S (swallow justification)** — mechanically exact: an occurrence is any
-line matching the ERE `\|\|[[:space:]]*(true|echo)([[:space:]]|$)` (the
+line matching the ERE `\|\|[[:space:]]*(true|echo)([^[:alnum:]_]|$)` (the
 issue's own `\|\|[[:space:]]*(true|echo\b)` word-boundary intent, rendered as
-a POSIX `([[:space:]]|$)` boundary wrapping the WHOLE alternation rather than
-GNU-awk's `\b`/`\>` — an earlier draft anchored only the `echo` branch,
+a POSIX non-word-character boundary wrapping the WHOLE alternation rather
+than GNU-awk's `\b`/`\>` — an earlier draft anchored only the `echo` branch,
 which left bare `true` unanchored and let it prefix-match `truex`; the POSIX
-form is both correct and `mawk`-portable, caught in review, TC-IDIOM-032)
-whose match is not itself inside a comment. Comment handling: a whole-line
+form is both correct and `mawk`-portable, caught in review, TC-IDIOM-032).
+A second review pass caught that a whitespace-or-EOL-only boundary
+(`([[:space:]]|$)`) still missed the single most common real-world swallow
+shape — paren/semicolon/brace-terminated, e.g. `x=$(cmd || true)`, `cmd ||
+true;`, `{ cmd || true; }` (confirmed ~130 such sites tree-wide) — because
+none of those are followed by whitespace or end-of-line; the boundary was
+widened to any non-word character (`[^[:alnum:]_]`) to also catch these,
+TC-IDIOM-034. Both fixes landed before this PR's initial merge (the ratchet
+gate has never shipped with either bug live). The match must not itself be
+inside a comment. Comment handling: a whole-line
 comment (first
 non-space character `#`) is skipped entirely (no occurrence at all — a
 swallow token merely *mentioned* in prose is not a call site); an inline
@@ -7756,6 +7764,17 @@ implicit shrink (not a crash, not a failure) — cleanup and file removal are
 first-class, unlike [INV-91] which explicitly FAILs a stale baseline entry
 naming a nonexistent file. Baseline (re)generation happens ONLY via the
 explicit `--write-baseline` flag, never silently during a normal check run.
+The resolved baseline is schema-validated (every value must be an object
+whose `jq_unguarded`/`swallow_unjustified`, if present, are numbers), not
+merely parseable JSON — caught in review: a malformed entry (e.g. a string
+where a number is expected) let the reconciliation loop's
+`jq -r '...\(.value.field // 0)'` abort mid-stream or feed a non-numeric
+string into `[ -gt ]`/`[ -lt ]`, and under `set -uo pipefail` (no `-e`) that
+degraded to a silently-skipped file rather than a hard failure — reproduced
+even under `--require-trusted-ref` fail-closed strict mode, defeating the
+exact self-ratification protection that mode exists to provide. A schema
+mismatch now FAILs loud: exit 2 in default mode, exit 1 (fail-closed) under
+`--require-trusted-ref` (TC-IDIOM-035/036).
 
 **`--require-trusted-ref` (fail-closed strict mode)**: reads the baseline
 from the TRUSTED ref (default `origin/main`, override via `--trusted-ref` /
@@ -7821,20 +7840,38 @@ maintainer follow-up**, not part of #477 (identical posture to [INV-91]'s
 #295 deferral, forced by the same [INV-83] scoped-token constraint).
 
 **Tests**: `tests/unit/test-check-shell-idioms.sh` (TC-IDIOM-001 through
-TC-IDIOM-033 — Rule J guarded/unguarded/window-boundary/six-ops/`.body`-only
-scoping; Rule S same-line/lookback/outside-lookback/echo-variant/
-comment-only/word-boundary; baseline equal/exceed/shrink/absent-file/
-removed-file reconciliation; `tests/` scan exclusion + recursive nested
-inclusion; `--require-trusted-ref` fail-closed on unresolvable ref and on a
-resolvable-ref-without-baseline, PASS on a valid matching trusted baseline,
-and PASS against the real committed baseline in default mode;
-`--write-baseline` determinism + round-trip; usage/infra exit-2 cases;
+TC-IDIOM-042 — Rule J guarded/unguarded/window-boundary-both-directions/
+six-ops/`.body`-only scoping; Rule S same-line/lookback/outside-lookback/
+echo-variant/comment-only/word-boundary; baseline equal/exceed/shrink/
+absent-file/removed-file reconciliation; `tests/` scan exclusion + recursive
+nested inclusion; `--require-trusted-ref` fail-closed on unresolvable ref
+and on a resolvable-ref-without-baseline, PASS on a valid matching trusted
+baseline, and PASS against the real committed baseline in default mode;
+`--write-baseline` determinism + round-trip; usage/infra exit-2 cases
+(missing `jq`, unknown flag, missing baseline, invalid-JSON baseline);
 **TC-IDIOM-032 regression-pins the unbounded-`true`-alternation bug found in
 review** (`truex` no longer prefix-matches); **TC-IDIOM-033 closes a
 review-flagged coverage gap** — a working-tree-only violation added past a
 clean COMMITTED trusted baseline FAILs under `--require-trusted-ref`, the
 core same-PR self-ratification property Check 4-equivalent logic exists to
-prove, not just baseline-vs-baseline drift).
+prove, not just baseline-vs-baseline drift); **TC-IDIOM-034 regression-pins
+the whitespace-only-boundary false negative found in a second review pass**
+— paren/semicolon/brace-terminated swallows (`x=$(cmd || true)` and friends)
+are now flagged; **TC-IDIOM-035/036 regression-pin the baseline
+schema-validation gap found in the same pass** — a baseline entry that is
+valid JSON but has a non-numeric `jq_unguarded`/`swallow_unjustified` value
+FAILs loud (exit 2 default mode, exit 1 fail-closed under
+`--require-trusted-ref`) instead of silently exempting that file from the
+ratchet; **TC-IDIOM-039 proves cross-engine (gawk/mawk) parity** for the
+Rule S boundary fix, skipping gracefully when mawk isn't installed;
+**TC-IDIOM-040/041 regression-pin a THIRD review-round Critical finding** —
+a wrong/missing `--scan-root` (bad flag, wrong-directory checkout, sparse
+checkout missing `skills/`) made discovery silently return zero files,
+which made every baseline entry look like a shrink and PASS trivially with
+zero real coverage, even under `--require-trusted-ref`; the checker now
+requires ≥1 scanned file before reconciling (FAIL exit 2 default / exit 1
+strict), while TC-IDIOM-042 pins that a genuinely clean, non-empty scan
+root is unaffected (the guard is scoped to zero-FILES, not zero-violations).
 
 **Cross-references**:
 - [INV-91](#inv-91-the-provider-neutral-caller-layer-routes-all-host-io-through-itp_chp_-verbs--a-new-raw-gh-outside-providers-is-a-ci-failing-cutover-regression-baseline-anchored) — the baseline-anchored ratchet shape (committed manifest, growth-only FAIL, `--require-trusted-ref` fail-closed monotonicity, deferred `ci.yml` wiring via #295) this invariant mirrors structurally.

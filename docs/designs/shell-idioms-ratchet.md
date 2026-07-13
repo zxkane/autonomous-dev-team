@@ -42,18 +42,29 @@ and let the baseline shrink voluntarily as code is cleaned up.
   lines, clipped to the file) contains the literal `type == "string"`
   anywhere. Unguarded matches are counted per file.
 - **Rule S detector**: a non-comment line matches the ERE
-  `\|\|[[:space:]]*(true|echo\b)` (comment-stripped the same way
-  `check-provider-cutover.sh` strips gh-detector comment lines — first
-  non-space char `#` skips the whole line). It is **justified** iff the same
-  line carries a trailing `#` comment after the match, OR any of the 3
-  immediately preceding lines is a comment line (`^[[:space:]]*#`).
-  Unjustified matches are counted per file.
+  `\|\|[[:space:]]*(true|echo)([^[:alnum:]_]|$)` (comment-stripped the same
+  way `check-provider-cutover.sh` strips gh-detector comment lines — first
+  non-space char `#` skips the whole line). The boundary went through two
+  review-driven fixes: first, wrapping the whole `(true|echo)` alternation
+  in one boundary instead of only bounding `echo` (a bare `true` had
+  prefix-matched `truex`); second, widening the boundary from
+  whitespace-or-EOL to any non-word character, since real swallows are
+  routinely paren/semicolon/brace-terminated (`x=$(cmd || true)`) and a
+  whitespace/EOL-only boundary missed ~130 such sites tree-wide. It is
+  **justified** iff the same line carries a trailing `#` comment after the
+  match, OR any of the 3 immediately preceding lines is a comment line
+  (`^[[:space:]]*#`). Unjustified matches are counted per file.
 - **Baseline** (R5): `shell-idioms-baseline.json`, shape
   `{ "<repo-relative-path>": { "jq_unguarded": N, "swallow_unjustified": N }, ... }`,
   sorted keys for reviewable diffs. Per file: `current > baseline` → FAIL
   (print the delta + offending lines); file absent from baseline with
   count > 0 → FAIL; `current < baseline` → PASS + a regeneration notice
   (ratchet-down is a separate voluntary commit, mirroring INV-91's posture).
+  The resolved baseline is schema-validated, not just parsed as JSON — a
+  malformed entry (e.g. a string where a number is expected) previously
+  degraded to a silently-skipped file under `set -uo pipefail`'s no-`-e`
+  semantics instead of a hard failure, found in review; a schema mismatch
+  now FAILs loud (exit 2 default mode, exit 1 under `--require-trusted-ref`).
 - **`--require-trusted-ref`** (mirrors INV-91's Check 4/strict mode): reads
   the baseline from `origin/main` via `git show` instead of the working
   tree, and **fails closed** (exit 1) if the trusted ref or its baseline
@@ -61,6 +72,16 @@ and let the baseline shrink voluntarily as code is cleaned up.
   and self-ratify in the same change.
 - **`--write-baseline`**: emits a freshly generated baseline for the current
   tree to stdout, sorted-key deterministic.
+- **Empty-scan-root guard** (found in review): before reconciling, the
+  checker requires at least one `*.sh` file to have been discovered under
+  `SCAN_ROOT`. Without this, a wrong `--scan-root`, a checkout run from the
+  wrong directory, or a sparse checkout missing `skills/` makes discovery
+  silently return nothing — every baseline entry then looks like it "shrank
+  to 0" and the reconciliation PASSes trivially, even under
+  `--require-trusted-ref`, with zero real coverage. Zero scanned files now
+  FAILs (exit 2 default mode, exit 1 strict mode); a scan root with real
+  files and zero violations still PASSes normally (the guard is scoped to
+  "no files scanned," not "no violations found").
 
 Exit codes: `0` pass, `1` violations, `2` usage/infra error (missing `jq`,
 unknown flag, unreadable baseline in default mode).

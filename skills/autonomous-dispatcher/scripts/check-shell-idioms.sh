@@ -97,13 +97,18 @@ info() { echo "  $*"; }
 # error — awk warns "escape sequence treated as plain" and keeps going).
 RULE_J_ERE='\\.body[[:space:]]*\\|[[:space:]]*(test|contains|startswith|endswith|sub|gsub)\\('
 # Rule S: an error-swallow, comment-scoped per R3 (stripped before matching).
-# POSIX word-end boundary `([[:space:]]|$)` wraps the WHOLE alternation, not
+# POSIX word-end boundary `([^[:alnum:]_]|$)` wraps the WHOLE alternation, not
 # gawk's `\>` on a single branch — `(true|echo\>)` looked plausible but only
 # bounded `echo`, leaving bare `true` unanchored so it prefix-matched
 # `truex`; `\>` is also a GNU-awk extension absent under mawk (a silent
-# under-count of `|| echo` there). The POSIX form is correct AND portable —
-# verified identical under both gawk and mawk.
-RULE_S_ERE='\\|\\|[[:space:]]*(true|echo)([[:space:]]|$)'
+# under-count of `|| echo` there). A NON-WORD-CHAR boundary (rather than
+# whitespace-or-EOL) is load-bearing: real swallows are routinely
+# paren/semicolon/brace-terminated — `x=$(cmd || true)`, `cmd || true;`,
+# `{ cmd || true; }` — and a whitespace/EOL-only boundary silently missed
+# every one of them (confirmed ~130 such sites tree-wide). The bracket
+# expression is plain POSIX (no `\b`/`\>`) — verified identical under both
+# gawk and mawk.
+RULE_S_ERE='\\|\\|[[:space:]]*(true|echo)([^[:alnum:]_]|$)'
 
 # Every *.sh under SCAN_ROOT, EXCLUDING any path with a `tests` path segment
 # (R4 — test scaffolding legitimately swallows). `find -L` follows symlinks
@@ -242,6 +247,48 @@ else
   fi
   if ! BASELINE_JSON="$(cat "$BASELINE")" || ! jq -e . >/dev/null 2>&1 <<<"$BASELINE_JSON"; then
     echo "check-shell-idioms.sh: baseline is not valid JSON / unreadable: $BASELINE" >&2
+    exit 2
+  fi
+fi
+
+# Schema-validate the resolved baseline: every value must be an object whose
+# jq_unguarded/swallow_unjustified (if present) are numbers. "Parseable JSON"
+# alone is not enough — a malformed entry (e.g. a string where a number is
+# expected) makes the reconciliation loop's `jq -r '...\(.value.field // 0)'`
+# either abort mid-stream or feed a non-numeric string into `[ -gt ]`/`[ -lt ]`,
+# and under `set -uo pipefail` (no `-e`) that degrades to a silently-skipped
+# file rather than a hard failure — defeating the ratchet for exactly that
+# file, even under --require-trusted-ref fail-closed strict mode. Checked
+# after both baseline-resolution branches so one check covers both.
+if ! jq -e 'type == "object" and (to_entries | all(.value | type == "object"
+      and ((.jq_unguarded // 0) | type == "number")
+      and ((.swallow_unjustified // 0) | type == "number")))' \
+    >/dev/null 2>&1 <<<"$BASELINE_JSON"; then
+  if [ "$REQUIRE_TRUSTED_REF" = "1" ]; then
+    fail "strict mode: trusted baseline at '${TRUSTED_REF}:${TRUSTED_BASELINE_PATH}' is valid JSON but does not match the expected shape ({\"<path>\": {\"jq_unguarded\": <number>, \"swallow_unjustified\": <number>}}) — a malformed entry would otherwise silently exempt that file from the ratchet. Regenerate with --write-baseline."
+    echo "shell-idioms-guard: FAIL"; exit 1
+  else
+    echo "check-shell-idioms.sh: baseline at '$BASELINE' is valid JSON but does not match the expected shape ({\"<path>\": {\"jq_unguarded\": <number>, \"swallow_unjustified\": <number>}}) — regenerate with --write-baseline" >&2
+    exit 2
+  fi
+fi
+
+# Sanity check (found in review): a wrong/missing SCAN_ROOT (bad --scan-root,
+# a checkout run from the wrong directory, a sparse checkout missing skills/)
+# makes tree_sh_files() silently return nothing. Every baseline entry then
+# looks like it "shrank to 0" — the reconciliation loop below would PASS
+# trivially, even under --require-trusted-ref, defeating the entire ratchet
+# with zero real coverage. Require at least one scanned file before
+# reconciling. Not checked before --write-baseline (above) — emitting an
+# empty `{}` baseline for a genuinely-empty scan root is legitimate there.
+SCANNED_COUNT="$(tree_sh_files | wc -l | tr -d ' ')"
+if [ "$SCANNED_COUNT" -eq 0 ]; then
+  msg="scan root '$SCAN_ROOT' yielded ZERO *.sh files to check — likely a wrong --scan-root, a missing skills/ directory, or a sparse checkout. Refusing to reconcile against a baseline with nothing to check, which would otherwise PASS trivially (every baseline entry looks like a shrink)."
+  if [ "$REQUIRE_TRUSTED_REF" = "1" ]; then
+    fail "strict mode: $msg"
+    echo "shell-idioms-guard: FAIL"; exit 1
+  else
+    echo "check-shell-idioms.sh: $msg" >&2
     exit 2
   fi
 fi

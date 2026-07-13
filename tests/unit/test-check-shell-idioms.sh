@@ -390,10 +390,10 @@ echo clean
 EOF
 echo '{"foo/removed.sh": {"jq_unguarded": 0, "swallow_unjustified": 2}}' > "$WORK/c020-baseline.json"
 out="$(bash "$CHECK" --scan-root "$R" --baseline "$WORK/c020-baseline.json" 2>&1)"; rc=$?
-if [ "$rc" -eq 0 ]; then
-  ok "TC-IDIOM-020: baseline entry for a file no longer present does not crash and is treated as a shrink"
+if [ "$rc" -eq 0 ] && grep -q 'foo/removed.sh' <<<"$out" && grep -qi 'notice\|shrank' <<<"$out"; then
+  ok "TC-IDIOM-020: baseline entry for a file no longer present does not crash, PASSes, and is actually reconciled as a shrink (not silently dropped)"
 else
-  bad "TC-IDIOM-020: expected no crash / PASS, got rc=$rc: $out"
+  bad "TC-IDIOM-020: expected PASS + a shrink notice naming foo/removed.sh, got rc=$rc: $out"
 fi
 
 # ---------------------------------------------------------------------------
@@ -631,6 +631,198 @@ if [ "$rc" -ne 0 ] && grep -q 'bar.sh' <<<"$out"; then
   ok "TC-IDIOM-033: --require-trusted-ref FAILs when the WORKING TREE adds a violation past a clean committed trusted baseline (closes the self-ratification bypass)"
 else
   bad "TC-IDIOM-033: expected FAIL on working-tree growth vs trusted baseline, got rc=$rc: $out"
+fi
+
+# TC-IDIOM-034: regression pin for a review-flagged false negative — the
+# original boundary required whitespace-or-EOL after true/echo, so the most
+# common real-world swallow shapes (paren/semicolon/brace-terminated, e.g.
+# `x=$(cmd || true)`) were never detected at all (confirmed ~130 such sites
+# tree-wide). The fix widens the boundary to any non-word character.
+R="$(fresh_root H034)"
+write_script "$R" foo/bar.sh <<'EOF'
+#!/bin/bash
+set -euo pipefail
+
+foo() {
+  a=$(cmd1 || true)
+  b=$(cmd2 || echo "fallback")
+  cmd3 || true;
+  { cmd4 || true; }
+}
+EOF
+out="$(bash "$CHECK" --scan-root "$R" --write-baseline)"
+if echo "$out" | jq -e '."foo/bar.sh".swallow_unjustified == 4' >/dev/null 2>&1; then
+  ok "TC-IDIOM-034: paren/semicolon/brace-terminated swallows are flagged — regression pin for the whitespace-only-boundary false negative"
+else
+  bad "TC-IDIOM-034: expected 4 unjustified swallow occurrences, got: $out"
+fi
+
+# TC-IDIOM-035: regression pin — a baseline value that is valid JSON but
+# does not match the expected {"<path>": {"jq_unguarded": N, ...}} shape
+# (e.g. a string where a number is expected) must FAIL loud (exit 2 in
+# default mode), not silently exempt that file from the ratchet. Prior to
+# the fix, `set -uo pipefail` (no `-e`) absorbed the resulting jq/arithmetic
+# errors into a false PASS.
+R="$(fresh_root H035)"
+write_script "$R" foo/bar.sh <<'EOF'
+#!/bin/bash
+set -euo pipefail
+
+foo() {
+  x=$(jq -r 'select(.body | test("x"))')
+  y=$(jq -r 'select(.body | contains("y"))')
+}
+EOF
+echo '{"foo/bar.sh": {"jq_unguarded": "N/A", "swallow_unjustified": 0}}' > "$WORK/h035-baseline.json"
+out="$(bash "$CHECK" --scan-root "$R" --baseline "$WORK/h035-baseline.json" 2>&1)"; rc=$?
+if [ "$rc" -eq 2 ]; then
+  ok "TC-IDIOM-035: a baseline entry with a non-numeric field FAILs loud (exit 2) instead of silently exempting the file"
+else
+  bad "TC-IDIOM-035: expected exit 2 for malformed baseline entry, got rc=$rc: $out"
+fi
+
+# TC-IDIOM-036: the same malformed-baseline shape under --require-trusted-ref
+# must FAIL CLOSED (exit 1), not silently PASS — the exact strict-mode
+# self-ratification bypass this schema check exists to prevent.
+GITROOT3="$WORK/gitfixture3"
+git init -q "$GITROOT3"
+git -C "$GITROOT3" config user.email test@test.com
+git -C "$GITROOT3" config user.name test
+mkdir -p "$GITROOT3/skills/foo"
+write_script "$GITROOT3" skills/foo/bar.sh <<'EOF'
+#!/bin/bash
+set -euo pipefail
+
+foo() {
+  rm -rf "$STUFF" 2>/dev/null || true
+}
+EOF
+echo '{"foo/bar.sh": {"jq_unguarded": 0, "swallow_unjustified": "CORRUPTED"}}' > "$GITROOT3/skills/foo/baseline.json"
+git -C "$GITROOT3" add -A
+git -C "$GITROOT3" commit -q -m "malformed baseline"
+out="$(cd "$GITROOT3" && bash "$CHECK" --scan-root "$GITROOT3/skills" --require-trusted-ref --trusted-ref HEAD --trusted-baseline-path skills/foo/baseline.json 2>&1)"; rc=$?
+if [ "$rc" -ne 0 ]; then
+  ok "TC-IDIOM-036: a malformed trusted baseline FAILs closed under --require-trusted-ref instead of silently exempting the file"
+else
+  bad "TC-IDIOM-036: expected FAIL closed on malformed trusted baseline, got rc=$rc: $out"
+fi
+
+# ---------------------------------------------------------------------------
+echo "=== Group J: forward-window direction, invalid-JSON baseline, cross-engine parity — TC-IDIOM-037..039 ==="
+# ---------------------------------------------------------------------------
+
+# TC-IDIOM-037: Group A only tested the guard BEFORE the match (backward
+# window). Rule J's window is symmetric (+/-15) — pin the forward direction
+# too, so a `hi = n + window` off-by-one regression is caught.
+R="$(fresh_root J037)"
+{
+  echo '#!/bin/bash'
+  echo 'set -euo pipefail'
+  echo ''
+  echo 'select(.body | test("x"))'
+  for i in $(seq 1 14); do echo "filler_$i=1"; done
+  echo 'select(.body | type == "string")'
+} | write_script "$R" foo/bar.sh
+out="$(bash "$CHECK" --scan-root "$R" --write-baseline)"
+if [ "$out" = "{}" ]; then
+  ok "TC-IDIOM-037: a guard 15 lines AFTER the match (forward window direction) also suppresses the flag"
+else
+  bad "TC-IDIOM-037: expected empty baseline (forward guard within window), got: $out"
+fi
+
+# TC-IDIOM-038: invalid JSON (not just "file absent") in the working-tree
+# baseline is a distinct exit-2 usage/env error, never a false PASS.
+R="$(fresh_root J038)"
+write_script "$R" foo/bar.sh <<'EOF'
+#!/bin/bash
+set -euo pipefail
+echo clean
+EOF
+printf '{not valid json' > "$WORK/j038-baseline.json"
+out="$(bash "$CHECK" --scan-root "$R" --baseline "$WORK/j038-baseline.json" 2>&1)"; rc=$?
+if [ "$rc" -eq 2 ]; then
+  ok "TC-IDIOM-038: invalid JSON in the working-tree baseline (file present, unparseable) → exit 2, distinct from a missing-file baseline"
+else
+  bad "TC-IDIOM-038: expected exit 2 for invalid-JSON baseline, got rc=$rc: $out"
+fi
+
+# TC-IDIOM-039: cross-engine parity — the Rule S detector must produce
+# IDENTICAL results whether the system `awk` resolves to gawk or mawk (the
+# whole point of the TC-IDIOM-032/034 boundary fix). Skips gracefully if
+# mawk isn't installed on the runner rather than failing the suite on a
+# packaging difference unrelated to this script's correctness.
+if command -v mawk >/dev/null 2>&1; then
+  R="$(fresh_root J039)"
+  write_script "$R" foo/bar.sh <<'EOF'
+#!/bin/bash
+set -euo pipefail
+
+foo() {
+  a=$(cmd1 || true)
+  b=$(cmd2 || echo "fallback")
+  cmd3 || truex
+  cmd4 || echoinvalid
+}
+EOF
+  MAWK_DIR="$WORK/mawk-path"
+  mkdir -p "$MAWK_DIR"
+  ln -sf "$(command -v mawk)" "$MAWK_DIR/awk"
+  out_gawk="$(bash "$CHECK" --scan-root "$R" --write-baseline)"
+  out_mawk="$(PATH="$MAWK_DIR:$PATH" bash "$CHECK" --scan-root "$R" --write-baseline)"
+  if [ "$out_gawk" = "$out_mawk" ] && echo "$out_gawk" | jq -e '."foo/bar.sh".swallow_unjustified == 2' >/dev/null 2>&1; then
+    ok "TC-IDIOM-039: Rule S detection is byte-identical under gawk vs mawk (2 real swallows, 'truex'/'echoinvalid' excluded on both)"
+  else
+    bad "TC-IDIOM-039: gawk/mawk output mismatch or wrong count — gawk=[$out_gawk] mawk=[$out_mawk]"
+  fi
+else
+  ok "TC-IDIOM-039: skipped — mawk not installed on this runner (portability claim not exercisable here)"
+fi
+
+# ---------------------------------------------------------------------------
+echo "=== Group K: empty-scan-root sanity check (silent-failure-hunter finding) — TC-IDIOM-040..042 ==="
+# ---------------------------------------------------------------------------
+
+# TC-IDIOM-040/041: a --scan-root that doesn't exist (or exists but has zero
+# *.sh files) must FAIL, not trivially PASS. Without this check, EVERY
+# baseline entry looks like a shrink against an empty discovery — the exact
+# silent-degrade-to-pass gap flagged in review, defeating the ratchet with
+# zero real coverage even under --require-trusted-ref.
+NONEXISTENT="$WORK/definitely-does-not-exist-$$"
+out="$(bash "$CHECK" --scan-root "$NONEXISTENT" 2>&1)"; rc=$?
+if [ "$rc" -eq 2 ]; then
+  ok "TC-IDIOM-040: a nonexistent --scan-root FAILs (exit 2), not a trivial PASS"
+else
+  bad "TC-IDIOM-040: expected exit 2 for nonexistent scan root, got rc=$rc: $out"
+fi
+
+GITROOT4="$WORK/gitfixture4"
+git init -q "$GITROOT4"
+git -C "$GITROOT4" config user.email test@test.com
+git -C "$GITROOT4" config user.name test
+mkdir -p "$GITROOT4/skills"
+echo '{"foo/bar.sh": {"jq_unguarded": 0, "swallow_unjustified": 5}}' > "$GITROOT4/baseline.json"
+git -C "$GITROOT4" add -A
+git -C "$GITROOT4" commit -q -m "baseline, no scripts"
+out="$(cd "$GITROOT4" && bash "$CHECK" --scan-root "$GITROOT4/skills" --require-trusted-ref --trusted-ref HEAD --trusted-baseline-path baseline.json 2>&1)"; rc=$?
+if [ "$rc" -ne 0 ]; then
+  ok "TC-IDIOM-041: an empty (zero-*.sh) scan root under --require-trusted-ref FAILs closed rather than treating every baseline entry as a shrink"
+else
+  bad "TC-IDIOM-041: expected FAIL closed on an empty scan root, got rc=$rc: $out"
+fi
+
+# TC-IDIOM-042: the sanity check must NOT trip on a scan root that genuinely
+# HAS *.sh files with zero violations — only "no .sh files scanned at all" is
+# the failure condition, not "no violations found."
+R="$(fresh_root K042)"
+write_script "$R" foo/bar.sh <<'EOF'
+#!/bin/bash
+set -euo pipefail
+echo clean
+EOF
+if bash "$CHECK" --scan-root "$R" >/dev/null 2>&1; then
+  ok "TC-IDIOM-042: a scan root with real (clean) *.sh files still PASSes normally — the check is scoped to zero-files, not zero-violations"
+else
+  bad "TC-IDIOM-042: expected a clean-but-nonempty scan root to PASS"
 fi
 
 # ---------------------------------------------------------------------------

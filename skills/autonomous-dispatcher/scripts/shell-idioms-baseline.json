@@ -17,23 +17,27 @@
   },
   "autonomous-dispatcher/scripts/adapters/codex.sh": {
     "jq_unguarded": 0,
-    "swallow_unjustified": 2
+    "swallow_unjustified": 3
   },
   "autonomous-dispatcher/scripts/adt-gc.sh": {
     "jq_unguarded": 0,
-    "swallow_unjustified": 36
+    "swallow_unjustified": 42
   },
   "autonomous-dispatcher/scripts/autonomous-dev.sh": {
     "jq_unguarded": 7,
-    "swallow_unjustified": 9
+    "swallow_unjustified": 13
   },
   "autonomous-dispatcher/scripts/autonomous-review.sh": {
     "jq_unguarded": 2,
-    "swallow_unjustified": 48
+    "swallow_unjustified": 56
+  },
+  "autonomous-dispatcher/scripts/check-spec-drift.sh": {
+    "jq_unguarded": 0,
+    "swallow_unjustified": 1
   },
   "autonomous-dispatcher/scripts/dispatch-local.sh": {
     "jq_unguarded": 0,
-    "swallow_unjustified": 8
+    "swallow_unjustified": 16
   },
   "autonomous-dispatcher/scripts/dispatcher-tick.sh": {
     "jq_unguarded": 0,
@@ -57,7 +61,7 @@
   },
   "autonomous-dispatcher/scripts/lib-auth.sh": {
     "jq_unguarded": 2,
-    "swallow_unjustified": 9
+    "swallow_unjustified": 11
   },
   "autonomous-dispatcher/scripts/lib-code-host.sh": {
     "jq_unguarded": 1,
@@ -65,11 +69,11 @@
   },
   "autonomous-dispatcher/scripts/lib-dispatch.sh": {
     "jq_unguarded": 22,
-    "swallow_unjustified": 16
+    "swallow_unjustified": 17
   },
   "autonomous-dispatcher/scripts/lib-guardian.sh": {
     "jq_unguarded": 0,
-    "swallow_unjustified": 10
+    "swallow_unjustified": 13
   },
   "autonomous-dispatcher/scripts/lib-issue-filter.sh": {
     "jq_unguarded": 0,
@@ -77,7 +81,7 @@
   },
   "autonomous-dispatcher/scripts/lib-lane.sh": {
     "jq_unguarded": 0,
-    "swallow_unjustified": 23
+    "swallow_unjustified": 24
   },
   "autonomous-dispatcher/scripts/lib-liveness.sh": {
     "jq_unguarded": 3,
@@ -93,15 +97,19 @@
   },
   "autonomous-dispatcher/scripts/lib-review-artifact.sh": {
     "jq_unguarded": 0,
-    "swallow_unjustified": 3
+    "swallow_unjustified": 9
   },
   "autonomous-dispatcher/scripts/lib-review-e2e.sh": {
     "jq_unguarded": 3,
-    "swallow_unjustified": 3
+    "swallow_unjustified": 4
   },
   "autonomous-dispatcher/scripts/lib-review-poll.sh": {
     "jq_unguarded": 3,
     "swallow_unjustified": 5
+  },
+  "autonomous-dispatcher/scripts/lib-review-severity.sh": {
+    "jq_unguarded": 0,
+    "swallow_unjustified": 1
   },
   "autonomous-dispatcher/scripts/lib-review-smoke.sh": {
     "jq_unguarded": 0,
@@ -113,7 +121,7 @@
   },
   "autonomous-dispatcher/scripts/liveness-check-remote-aws-ssm.sh": {
     "jq_unguarded": 0,
-    "swallow_unjustified": 2
+    "swallow_unjustified": 4
   },
   "autonomous-dispatcher/scripts/metrics-report.sh": {
     "jq_unguarded": 0,
@@ -125,15 +133,19 @@
   },
   "autonomous-dispatcher/scripts/providers/chp-github.sh": {
     "jq_unguarded": 2,
-    "swallow_unjustified": 5
+    "swallow_unjustified": 6
   },
   "autonomous-dispatcher/scripts/providers/itp-github.sh": {
+    "jq_unguarded": 0,
+    "swallow_unjustified": 2
+  },
+  "autonomous-dispatcher/scripts/providers/itp-gitlab.sh": {
     "jq_unguarded": 0,
     "swallow_unjustified": 1
   },
   "autonomous-dispatcher/scripts/providers/lib-gitlab-transport.sh": {
     "jq_unguarded": 0,
-    "swallow_unjustified": 1
+    "swallow_unjustified": 2
   },
   "autonomous-dispatcher/scripts/session-log-probe-remote-aws-ssm.sh": {
     "jq_unguarded": 0,
