@@ -100,14 +100,14 @@ assert_eq "TC-LIVENESS-004 comment-count change -> different fingerprint" "true"
 fp_digest=$(_liveness_fingerprint "pending-dev" "sha-A" "2" "self-heal-lost-session:")
 assert_eq "TC-LIVENESS-005 marker-digest change -> different fingerprint" "true" "$([ "$fp_base" != "$fp_digest" ] && echo true || echo false)"
 
-# [round 8] Every genuine producer wraps its marker/idempotent token in a
-# backtick code span or an HTML comment (see `_LIVENESS_IDEMPOTENT_PATTERN`'s
-# docstring, lib-liveness.sh) — never bare in prose. This fixture mirrors the
-# REAL production shape (lib-dispatch.sh's `notice_marker="stale-verdict:..."`
-# is always rendered inside a `` (`${notice_marker}`) `` parenthetical), not a
-# synthetic bare string that no real breaker ever actually posts.
+# [issue #473 UPDATE] Every genuine producer's grammar in
+# `_LIVENESS_GRAMMARS_JSON` is now a WHOLE-BODY match, not a wrapped-token
+# substring test — this fixture uses the GENUINE full-body `stale-verdict:`
+# producer shape (lib-dispatch.sh's `_same_head_verdict_aware_recovery`),
+# byte-matched from that call site, not a shortened parenthetical.
 comments_baseline='[{"authorKind":"bot","body":"hello"}]'
-comments_with_idempotent='[{"authorKind":"bot","body":"hello"},{"authorKind":"bot","body":"already reviewed; awaiting new commits (`stale-verdict:sha-A`)"}]'
+stale_verdict_body006='PR #12 HEAD `sha-A` already reviewed with FAILED verdict; awaiting new commits before re-review. A dev wrapper appears to still be running for this issue, or a concurrent dispatcher tick is mid-dispatch — this is a transient wait, not a permanent park (`stale-verdict:sha-A`).'
+comments_with_idempotent=$(jq -n --arg b "$stale_verdict_body006" '[{"authorKind":"bot","body":"hello"},{"authorKind":"bot","body":$b}]')
 count_baseline=$(_liveness_non_idempotent_count "$comments_baseline")
 count_with_idempotent=$(_liveness_non_idempotent_count "$comments_with_idempotent")
 assert_eq "TC-LIVENESS-006 a new stale-verdict idempotent notice does NOT change the count component" "$count_baseline" "$count_with_idempotent"
@@ -116,7 +116,13 @@ comments_with_genuine='[{"authorKind":"bot","body":"hello"},{"authorKind":"bot",
 count_with_genuine=$(_liveness_non_idempotent_count "$comments_with_genuine")
 assert_eq "TC-LIVENESS-007 a genuinely new comment changes the count component" "2" "$count_with_genuine"
 
-comments_with_tier1='[{"authorKind":"bot","body":"hello"},{"authorKind":"bot","body":"<!-- dispatcher-liveness-watchdog: issue=1 fingerprint=abc count=6 tier1=1 -->"}]'
+# [issue #473 UPDATE] The watchdog's own marker grammar requires the
+# `tripped=<0|1>` field ([round 8] — see `_liveness_marker`'s docstring); the
+# pre-round-8 fixture below omitted it, which the whole-body anchor now
+# correctly rejects as non-canonical. Use `_liveness_marker` itself to build
+# the fixture so it can never drift from the producer's actual grammar.
+watchdog_marker008=$(_liveness_marker 1 abc 6 1 0)
+comments_with_tier1=$(jq -n --arg b "$watchdog_marker008" '[{"authorKind":"bot","body":"hello"},{"authorKind":"bot","body":$b}]')
 count_with_tier1=$(_liveness_non_idempotent_count "$comments_with_tier1")
 assert_eq "TC-LIVENESS-008 the watchdog's own marker is excluded from the count component" "1" "$count_with_tier1"
 
@@ -699,16 +705,27 @@ echo "=== idempotent/digest patterns and the PR-lookup transport-failure defer  
 # [round 8 BLOCKING #2] Both _LIVENESS_IDEMPOTENT_PATTERN and
 # _LIVENESS_DIGEST_PATTERN require a leading wrapper (backtick or HTML-comment
 # opening) immediately before the token — a bare-prose mention must NOT match.
+#
+# [issue #473 UPDATE] TC-LIVENESS-060b/061b are REWRITTEN here: the
+# whole-body conversion overturns the round-8/round-10 assumption that a
+# CLOSED backtick/HTML-comment span around a token is sufficient — issue
+# #473's own quoted-token-is-progress requirement is exactly "a human comment
+# quoting `reason=liveness-timeout` in prose (even backtick-wrapped) must
+# NOT be excluded from the count," so a merely wrapped token (060b) or a bare
+# marker line with no report (061b) no longer match ANY grammar. The
+# "genuinely CLOSED span, real producer shape, still matches" pin moves to
+# TC-LIVENESS-082a/b below, now using an ACTUAL full-body producer report
+# (not a bare wrapped token) — see that group's docstring.
 
 assert_eq "TC-LIVENESS-060a a bare mid-prose mention of a token does NOT reduce the non-idempotent count" "1" \
   "$(_liveness_non_idempotent_count '[{"authorKind":"human","body":"I saw reason=liveness-timeout mentioned somewhere in prose"}]')"
-assert_eq "TC-LIVENESS-060b the SAME token, backtick-wrapped as every genuine producer renders it, IS excluded" "0" \
+assert_eq "TC-LIVENESS-060b [issue #473] a backtick-WRAPPED quote of the token (not the genuine full-body report) is NOT excluded — it counts as progress" "1" \
   "$(_liveness_non_idempotent_count '[{"authorKind":"human","body":"see `reason=liveness-timeout` for details"}]')"
 assert_eq "TC-LIVENESS-061a a bare mid-prose mention of a marker grammar does NOT register in the digest" "" \
   "$(_liveness_marker_digest '[{"authorKind":"human","createdAt":"t","body":"quoting the marker: dispatcher-convergence-breaker: issue=1 head=abc"}]')"
-assert_eq "TC-LIVENESS-061b the SAME grammar, as a genuine HTML-comment marker, DOES register" "dispatcher-convergence-breaker:" \
+assert_eq "TC-LIVENESS-061b [issue #473] a bare HTML-comment marker line with NO accompanying report (not the genuine whole-body producer shape) does NOT register in the digest" "" \
   "$(_liveness_marker_digest '[{"authorKind":"human","createdAt":"t","body":"<!-- dispatcher-convergence-breaker: issue=1 head=abc trailer=xyz session=s1 -->"}]')"
-assert_eq "TC-LIVENESS-062 a grammar with an inner optional group (no-progress-substantive(-attempt)?:) still extracts cleanly through the wrapper anchor" "no-progress-substantive-attempt:" \
+assert_eq "TC-LIVENESS-062 [issue #473] a BARE no-progress-substantive-attempt: marker (its genuine whole-body producer shape — a standalone HTML comment, unlike the OTHER grammars above) still registers in the digest" "no-progress-substantive-attempt:" \
   "$(_liveness_marker_digest '[{"authorKind":"human","createdAt":"t","body":"<!-- no-progress-substantive-attempt:sha session=abc -->"}]')"
 
 # ===========================================================================
@@ -734,12 +751,59 @@ assert_eq "TC-LIVENESS-080b an UNCLOSED HTML-comment opening does NOT register i
   "$(_liveness_marker_digest '[{"authorKind":"human","createdAt":"t","body":"I saw <!-- dispatcher-token: mentioned, but never closed the comment"}]')"
 assert_eq "TC-LIVENESS-081 a backtick span that closes only after a newline (not a real Markdown code span) is still rejected" "1" \
   "$(_liveness_non_idempotent_count '[{"authorKind":"human","body":"`dispatcher-token: abc\nstill inside`"}]')"
-assert_eq "TC-LIVENESS-082a a genuinely CLOSED backtick span (the real producer shape) is still excluded from the count" "0" \
-  "$(_liveness_non_idempotent_count '[{"authorKind":"human","body":"see `reason=liveness-timeout` for details"}]')"
+# TC-LIVENESS-082a [issue #473 UPDATE]: the round-10 "genuinely CLOSED span,
+# real producer shape, still excluded" pin now uses the ACTUAL genuine
+# dispatcher-token: whole-body shape (marker line + enum human line) rather
+# than a bare wrapped token — see TC-LIVENESS-060b's docstring for why a
+# merely wrapped token no longer qualifies as the genuine producer shape
+# post-#473.
+dispatcher_token_body82=$(printf '<!-- dispatcher-token: abc at 2026-01-01T00:00:00Z mode=dev-new run=1-2 -->\nDispatching autonomous development...')
+assert_eq "TC-LIVENESS-082a [issue #473] a genuine whole-body dispatcher-token: producer comment is still excluded from the count" "0" \
+  "$(_liveness_non_idempotent_count "$(jq -n --arg b "$dispatcher_token_body82" '[{"authorKind":"human","body":$b}]')")"
 assert_eq "TC-LIVENESS-082b a genuinely CLOSED single-line HTML-comment marker (the real producer shape) still registers in the digest" "dispatcher-token:" \
-  "$(_liveness_marker_digest '[{"authorKind":"human","createdAt":"t","body":"<!-- dispatcher-token: abc at 2026-01-01T00:00:00Z mode=dev-new run=1-2 -->\nDispatching autonomous development..."}]')"
-assert_eq "TC-LIVENESS-083 the closed-span extraction still works when TWO distinct grammars are present across two comments" "dispatcher-convergence-breaker:,dispatcher-token:" \
-  "$(_liveness_marker_digest '[{"authorKind":"human","createdAt":"t1","body":"<!-- dispatcher-token: abc at 2026-01-01T00:00:00Z mode=dev-new run=1-2 -->\nDispatching..."},{"authorKind":"human","createdAt":"t2","body":"<!-- dispatcher-convergence-breaker: issue=1 head=abc trailer=xyz session=s1 -->\n## tripped"}]')"
+  "$(_liveness_marker_digest "$(jq -n --arg b "$dispatcher_token_body82" '[{"authorKind":"human","createdAt":"t","body":$b}]')")"
+# TC-LIVENESS-083 [issue #473 UPDATE]: the dispatcher-convergence-breaker:
+# entry is now a full-body grammar (marker + the ENTIRE CBREPORT), so the
+# fixture's second comment must be the genuine full report body, not a
+# truncated "## tripped" placeholder — captured via a real heredoc
+# expansion of the SAME template lib-dispatch.sh's CBREPORT renders, so this
+# fixture can never drift from the producer's actual text.
+cbreport_marker83='<!-- dispatcher-convergence-breaker: issue=1 head=sha-A trailer=abc123 session=s1 -->'
+cbreport_body83=$(cat <<CBREPORT83
+${cbreport_marker83}
+## ⛔ Convergence circuit-breaker tripped — halting a non-converging dev↔review loop (\`reason=non-convergence\`, [INV-105])
+
+The autonomous dev↔review loop is **not converging**: the review keeps failing
+substantively on PR **#12** while the PR head SHA stays **frozen**
+— the dev agent completed **3** dev-resume rounds against
+\`sha-A\` (≥ threshold 3) and produced **zero new
+commits** each time. This is the #286 deadlock shape: a \`failed-substantive\`
+verdict the dev agent cannot satisfy (typically a self-contradictory / malformed
+acceptance criterion, or a fix the agent's scoped token can't apply).
+
+**Dispatcher actions taken** (this loop is now HALTED — no more \`dev-resume\`):
+- Transitioned the issue to \`stalled\` (autonomy halted; \`pending-dev\` removed; \`autonomous\` is retained) — REMOVING the \`stalled\` label is the operator's explicit opt-in to resume (re-enters via Step 2; retry counter resets, INV-05).
+- Posted this one-time report.
+
+**Evidence**
+- PR: #12
+- Frozen PR head: \`sha-A\`
+- Repeated substantive review verdict (\`cause=some-cause\`, \`dev-actionable=true\`):
+  > some quoted verdict text
+- Repeated-failure count on this frozen head: **3**
+- Counted completed dev-resume rounds (timestamps): 2026-01-01T00:00:00Z, 2026-01-01T01:00:00Z
+
+**Human action needed** — pick one, then resume:
+- [ ] Rewrite the invalid / self-contradictory acceptance criterion in the issue body, OR
+- [ ] Grant the permission / scope the dev agent lacked (if the fix needs a privileged token or a protected-path edit), OR
+- [ ] Close the issue, or split the un-satisfiable part into a maintainer follow-up.
+
+**To resume: fix per the checklist above, then REMOVE the \`stalled\` label (the \`autonomous\` label is retained; removal re-arms the pipeline and resets the retry counter, INV-05).**
+@zxkane
+CBREPORT83
+)
+assert_eq "TC-LIVENESS-083 the whole-body extraction still works when TWO distinct grammars are present across two comments" "dispatcher-convergence-breaker:,dispatcher-token:" \
+  "$(_liveness_marker_digest "$(jq -n --arg b1 "$dispatcher_token_body82" --arg b2 "$cbreport_body83" '[{"authorKind":"human","createdAt":"t1","body":$b1},{"authorKind":"human","createdAt":"t2","body":$b2}]')")"
 
 # [round 8 BLOCKING #3] fetch_pr_for_issue transport failure (nonzero rc) must
 # defer the WHOLE tick — never fall through to "no PR" (empty head), which
@@ -800,13 +864,24 @@ echo "=== digest/marker reads already have                                 ==="
 # counted (not "excluded from consideration") — in GH_AUTH_MODE=app, via
 # _liveness_strict_author_flag, a human's wrapped-token comment now counts
 # as genuine progress instead of being masked as an idempotent notice.
+#
+# [issue #473 UPDATE] TC-067/068/069 are REWRITTEN here to use a GENUINE
+# whole-body dispatcher-token: producer comment instead of a merely
+# backtick-wrapped token: post-#473 a wrapped-token quote (TC-LIVENESS-060b's
+# new fixture) no longer matches ANY grammar regardless of authorKind, so it
+# can no longer exercise this gate at all (it always counts as progress —
+# the trust distinction below is meaningless against a fixture that never
+# matches in the first place). The gate this group pins is about an
+# authentic-shaped comment from an UNTRUSTED author, which requires the
+# genuine full-body shape to even reach the grammar-match branch.
 
+dispatcher_token_body67=$(printf '<!-- dispatcher-token: abc at 2026-01-01T00:00:00Z mode=dev-new run=1-2 -->\nDispatching autonomous development...')
 _saved_gh_auth_mode67="${GH_AUTH_MODE:-}"
 GH_AUTH_MODE=app
-assert_eq "TC-LIVENESS-067 app-mode: a human's backtick-wrapped token comment now COUNTS as progress (untrusted match reclassified, not masked as idempotent)" "2" \
-  "$(_liveness_non_idempotent_count '[{"authorKind":"human","body":"a genuinely new update"},{"authorKind":"human","body":"see `reason=liveness-timeout` for details"}]')"
-assert_eq "TC-LIVENESS-068 app-mode: the SAME wrapped token from a bot/App identity is STILL excluded (a trusted match is trusted)" "1" \
-  "$(_liveness_non_idempotent_count '[{"authorKind":"human","body":"a genuinely new update"},{"authorKind":"bot","body":"see `reason=liveness-timeout` for details"}]')"
+assert_eq "TC-LIVENESS-067 app-mode: a human posting the genuine whole-body dispatcher-token: shape now COUNTS as progress (untrusted match reclassified, not masked as idempotent)" "2" \
+  "$(_liveness_non_idempotent_count "$(jq -n --arg b "$dispatcher_token_body67" '[{"authorKind":"human","body":"a genuinely new update"},{"authorKind":"human","body":$b}]')")"
+assert_eq "TC-LIVENESS-068 app-mode: the SAME genuine whole-body shape from a bot/App identity is STILL excluded (a trusted match is trusted)" "1" \
+  "$(_liveness_non_idempotent_count "$(jq -n --arg b "$dispatcher_token_body67" '[{"authorKind":"human","body":"a genuinely new update"},{"authorKind":"bot","body":$b}]')")"
 if [ -n "$_saved_gh_auth_mode67" ]; then GH_AUTH_MODE="$_saved_gh_auth_mode67"; else unset GH_AUTH_MODE; fi
 
 # TC-LIVENESS-069: token-mode residual — UNCHANGED behavior, the gate is a
@@ -814,8 +889,8 @@ if [ -n "$_saved_gh_auth_mode67" ]; then GH_AUTH_MODE="$_saved_gh_auth_mode67"; 
 # every other liveness read carries in GH_AUTH_MODE=token.
 _saved_gh_auth_mode69="${GH_AUTH_MODE:-}"
 GH_AUTH_MODE=token
-assert_eq "TC-LIVENESS-069 token-mode: a human's wrapped-token comment is still excluded from the count via the idempotent-pattern match (gate is a no-op here, documented residual)" "1" \
-  "$(_liveness_non_idempotent_count '[{"authorKind":"human","body":"a genuinely new update"},{"authorKind":"human","body":"see `reason=liveness-timeout` for details"}]')"
+assert_eq "TC-LIVENESS-069 token-mode: a human posting the genuine whole-body dispatcher-token: shape is still excluded from the count via the grammar match (gate is a no-op here, documented residual)" "1" \
+  "$(_liveness_non_idempotent_count "$(jq -n --arg b "$dispatcher_token_body67" '[{"authorKind":"human","body":"a genuinely new update"},{"authorKind":"human","body":$b}]')")"
 if [ -n "$_saved_gh_auth_mode69" ]; then GH_AUTH_MODE="$_saved_gh_auth_mode69"; else unset GH_AUTH_MODE; fi
 
 # ===========================================================================
@@ -996,6 +1071,57 @@ assert_eq "TC-LIVENESS-077 tier1 branch: marker succeeds, report persistently fa
   "$(_sete_probe_report_only 6 18 5)"
 assert_eq "TC-LIVENESS-078 tier2 branch: marker succeeds, report persistently fails under real set -e -> still does NOT abort" "REACHED_END" \
   "$(_sete_probe_report_only 6 18 17)"
+
+# ===========================================================================
+echo
+echo "=== TC-LIVENESS-084..085 [issue #473]: whole-body grammar conversion — ==="
+echo "=== the two Acceptance Criteria pins, quoted verbatim from the issue  ==="
+# ===========================================================================
+# These two pins are stated directly (not merely exercised indirectly by the
+# TC-060b/067-069/082/083 rewrites above) so the issue's own Requirements
+# checklist has dedicated, unambiguous evidence.
+
+# TC-LIVENESS-084: "Quoted-token-is-progress pin for
+# _liveness_non_idempotent_count: a human comment quoting
+# reason=liveness-timeout (backtick-wrapped, inside prose) counts toward the
+# non-idempotent progress count; the genuine full-body notice does not."
+quoted_token_prose_084="please see \`reason=liveness-timeout\` for context, everything is fine"
+assert_eq "TC-LIVENESS-084a a human comment quoting reason=liveness-timeout backtick-wrapped inside prose COUNTS as progress" "1" \
+  "$(_liveness_non_idempotent_count "$(jq -n --arg b "$quoted_token_prose_084" '[{"authorKind":"human","body":$b}]')")"
+genuine_tier2_body084=$(cat <<TIER2GENUINE084
+${_LIVENESS_TIER2_HEADING} (\`reason=liveness-timeout\`, [INV-128])
+
+This issue's observable state (label + PR head + non-idempotent comments + marker set) has not changed for **18** consecutive dispatcher ticks — well past the **18**-tick stall threshold.
+
+**Evidence**
+- Last-known fingerprint: \`abc123\`
+- Label at time of trip: \`pending-dev\`
+- PR head: \`sha-A\`
+- Non-idempotent comment count: 3
+- Marker digest (known grammars present): \`dispatcher-token:\`
+- Tick counts: count=18, notice_threshold=6, stall_threshold=18
+- Newest session report / verdict pointer: (none found)
+
+**Dispatcher actions taken** (autonomy halted for this issue):
+- Transitioned to \`stalled\` (\`autonomous\` is retained — removing \`stalled\` re-arms via Step 2 and resets the retry counter, [INV-05]).
+- Posted this one-time report.
+
+@zxkane please investigate — this is the class-level backstop (a specific breaker for this park shape may not exist yet). To resume: fix per the evidence above, then remove the \`stalled\` label.
+TIER2GENUINE084
+)
+assert_eq "TC-LIVENESS-084b the genuine full-body reason=liveness-timeout notice does NOT count as progress" "0" \
+  "$(_liveness_non_idempotent_count "$(jq -n --arg b "$genuine_tier2_body084" '[{"authorKind":"bot","body":$b}]')")"
+
+# TC-LIVENESS-085: "First-line-forgery pin for _liveness_marker_digest: a
+# comment whose first line is a canonical <!-- dispatcher-token: ... --> but
+# whose body continues with prose does NOT alter the digest; the genuine
+# full-body marker does."
+forged_firstline_085=$(printf '<!-- dispatcher-token: abc at 2026-01-01T00:00:00Z mode=dev-new run=1-2 -->\nthis is prose that continues, not the real enum human line')
+assert_eq "TC-LIVENESS-085a a comment whose FIRST LINE is a canonical dispatcher-token: marker but continues with prose does NOT alter the digest" "" \
+  "$(_liveness_marker_digest "$(jq -n --arg b "$forged_firstline_085" '[{"authorKind":"human","createdAt":"t","body":$b}]')")"
+genuine_firstline_085=$(printf '<!-- dispatcher-token: abc at 2026-01-01T00:00:00Z mode=dev-new run=1-2 -->\nDispatching autonomous development...')
+assert_eq "TC-LIVENESS-085b the genuine full-body dispatcher-token: marker DOES register in the digest" "dispatcher-token:" \
+  "$(_liveness_marker_digest "$(jq -n --arg b "$genuine_firstline_085" '[{"authorKind":"human","createdAt":"t","body":$b}]')")"
 
 echo
 echo "=== Summary ==="

@@ -234,23 +234,33 @@ for tick in $(seq 1 10); do
 done
 marker_before_forgery=$(jq -r '[.[] | select(.body | test("^<!-- dispatcher-liveness-watchdog:"))] | last | .body' <<<"$ISSUE_COMMENTS_K")
 
-# Inject the forged comment: matches `_LIVENESS_IDEMPOTENT_PATTERN` via a
-# backtick-wrapped `` `reason=liveness-timeout` `` (so it does NOT itself
-# change the fingerprint's comment-count component — round 8 requires the
-# wrapper anchor for this exclusion to apply, see that pattern's docstring),
-# but also contains the bare trip-heading phrase mid-sentence — the exact
-# round-6 false-cutoff shape.
+# Inject the forged comment: a human quoting a backtick-wrapped
+# `` `reason=liveness-timeout` `` alongside a bare mid-sentence mention of the
+# trip heading — the exact round-6 false-cutoff shape. [issue #473 UPDATE]
+# Pre-#473, a CLOSED backtick span around a known token alone satisfied
+# `_LIVENESS_IDEMPOTENT_PATTERN` and was excluded from the count regardless
+# of context; post-#473 the whole-body conversion means this body — which
+# matches NONE of `_LIVENESS_GRAMMARS_JSON`'s full-body producer templates —
+# is genuine, non-idempotent progress (issue #473's own quoted-token-is-
+# progress requirement), so the fingerprint's comment-count component
+# changes and the series correctly RESETS to count=1 rather than continuing
+# to 11. The property this test still isolates — that a bare/quoted mention
+# of the tier-2 heading can NEVER act as a forged CUTOFF (round 7/8's fix,
+# separately and exhaustively pinned via `_liveness_prior_marker` directly in
+# TC-LIVENESS-059, tests/unit/test-liveness-watchdog.sh) — is confirmed here
+# by the label staying `pending-dev` (no spurious tier-2 trip) rather than by
+# the count continuing unbroken.
 _k_clock=$((_k_clock + 1))
-forged_mention="A collaborator can copy the tier-2 header (excluded via \`reason=liveness-timeout\`), quoting: ${_LIVENESS_TIER2_HEADING}"
+forged_mention="A collaborator can copy the tier-2 header (quoting \`reason=liveness-timeout\`): ${_LIVENESS_TIER2_HEADING}"
 ISSUE_COMMENTS_K=$(jq --arg b "$forged_mention" --arg t "$(printf '2026-07-10T%02d:00:00Z' $((9 + _k_clock)))" \
   '. + [{"authorKind":"human","createdAt":$t,"body":$b}]' <<<"$ISSUE_COMMENTS_K")
 
 run_liveness_watchdog
 marker_after_forgery=$(jq -r '[.[] | select(.body | test("^<!-- dispatcher-liveness-watchdog:"))] | last | .body' <<<"$ISSUE_COMMENTS_K")
 
-[[ "$marker_before_forgery" == *"count=10"* && "$marker_after_forgery" == *"count=11"* ]] \
-  && ok "TC-LIVENESS-045k a forged mid-comment mention of the trip heading does not reset the count (10 -> 11, not 10 -> 1)" \
-  || bad "TC-LIVENESS-045k expected count 10 -> 11 across the forged comment; saw '${marker_before_forgery}' -> '${marker_after_forgery}'"
+[[ "$marker_before_forgery" == *"count=10"* && "$marker_after_forgery" == *"count=1 tier1=0"* && "$ISSUE_LABEL_K" == "pending-dev" ]] \
+  && ok "TC-LIVENESS-045k [issue #473] a quoted/mentioned trip heading is genuine progress (fingerprint changes, count resets 10 -> 1) and never a forged cutoff (label stays pending-dev, no spurious tier-2)" \
+  || bad "TC-LIVENESS-045k expected count 10 -> 1 (tier1=0) and label=pending-dev across the forged comment; saw '${marker_before_forgery}' -> '${marker_after_forgery}', label=${ISSUE_LABEL_K}"
 
 # ---------------------------------------------------------------------------
 echo ""
