@@ -126,6 +126,24 @@ A consumer project bootstraps against this skill set by symlinking the dispatche
 
 It also **prunes stale per-lib symlinks** a pre-#227 install left behind (harmless dead weight, since lib sourcing no longer reads `<project>/scripts/`).
 
+## Conf schema: `BASE_BRANCH` — configurable base branch (issue #478, [INV-131])
+
+`autonomous.conf` gains a `BASE_BRANCH` key (`autonomous.conf.example`, documented block near `PROJECT_DIR`). This is the branch every dev/review wrapper prompt, the mergeable-gate messages, and the PR-create provider leaves target instead of a hardcoded `main`. One dispatcher instance serves exactly one base branch — deliberately per-dispatcher, not per-issue (mirrors `ISSUE_FILTER`'s per-instance scoping; per-issue base-branch routing via a label is a separable follow-up, out of scope here).
+
+**Resolution chain** (`lib-config.sh::resolve_base_branch`, called once by each wrapper right after `load_autonomous_conf`):
+
+1. `BASE_BRANCH` — the first-class key, wins if set.
+2. `DEFAULT_BRANCH` — deprecated fallback (the sole pre-#478 code reference, `autonomous-dev.sh::needs_open_pr_only`); still honored but logs a one-time `WARNING: DEFAULT_BRANCH is deprecated` to stderr.
+3. `"main"` — the default when neither is set.
+
+**Validation**: the winning raw value must match `^[A-Za-z0-9._/-]+$` (no spaces/quotes — the value is interpolated into agent prompts AND git/gh command lines, so anything else is an injection/parse hazard). An invalid value falls back to `"main"` with a loud `WARNING` to stderr, mirroring `REVIEW_CONVERGENCE_CAP`'s fallback posture (`lib-review-cap.sh::_review_cap_threshold`).
+
+**Resolve once, export once** (dev-agent-flow.md / review-agent-flow.md, each wrapper's own startup, right after the required-config validation loop): `BASE_BRANCH="$(resolve_base_branch)"; export BASE_BRANCH`. Exporting makes the value visible to the spawned agent CLI subprocess and — critically — to the two branch-aware hooks (`check-rebase-before-push.sh`, `verify-completion.sh`) and `block-push-to-main.sh`, which read the chain `${BASE_BRANCH:-${TRUNK_BRANCH:-main}}` (hooks stay zero-dependency shell — no conf parsing inside a hook; they consume only what the wrapper already exported). Each wrapper logs the effective value once at startup, but ONLY when it differs from `"main"` — so the byte-identical-default guarantee below extends to log output, not just prompts/commands.
+
+**Byte-identical-default guarantee**: with `BASE_BRANCH` (and `DEFAULT_BRANCH`) unset — today's universal deployment shape — `resolve_base_branch` echoes `"main"` with NO stderr output, and every consumer (prompt text, hook decision, provider argv) renders EXACTLY as it did before #478, with one narrow exception: the PR-create provider leaves (`chp_github_create_pr`, `chp_gitlab_create_pr`) now always pass an explicit `--base`/target-branch flag — `--base main` by default — instead of omitting it and relying on the host repo's configured default branch. This is a deliberate explicit-deterministic tightening, not a behavior regression, and is pinned in the provider-conformance golden-trace tests.
+
+**Operator responsibility**: the pipeline assumes the configured base branch carries the SAME protections `main` has here (PR-only, required status checks) — this is documented in the conf comment block, not verified at runtime. GitLab default-branch auto-detection is unaffected/out of scope: `chp_gitlab_create_pr` still probes `GET /projects/:id` for `default_branch` when `BASE_BRANCH` is unset (pre-#478 behavior, unchanged); an explicit `BASE_BRANCH` simply skips that probe and targets the configured branch directly.
+
 ## Pre-step: opportunistic lane GC ([INV-117](invariants.md#inv-117-a-periodic-box-wide-gc-reclaims-dead-lane-process-residue-under-a-decision-table-that-fails-toward-leak-never-toward-false-kill--dry-run-by-default), #380)
 
 Before `kill_stale_wrapper` runs, `dispatch-local.sh` opportunistically invokes `adt-gc.sh --quick || true` — Pass 1 (registry-driven) only, flock-guarded (`flock -w 3`, never `-n`, so a quick call queues briefly behind a concurrent full run instead of starving), dry-run by default. This means a busy box self-cleans dead-lane process residue on every dispatch even when no periodic timer (`install-gc-timer.sh`) has been installed on the host. `|| true` — GC is best-effort; a missing/broken `adt-gc.sh` (stale skill tree) never blocks or delays a dispatch.
@@ -605,7 +623,7 @@ count, or a stale/DEAD declaration. See [`metrics.md`](metrics.md).
 ## Cross-references
 
 - [`state-machine.md`](state-machine.md) — the label transitions each step performs.
-- [`dev-agent-flow.md`](dev-agent-flow.md), [`review-agent-flow.md`](review-agent-flow.md) — what the dispatched wrapper does next.
+- [`dev-agent-flow.md`](dev-agent-flow.md), [`review-agent-flow.md`](review-agent-flow.md) — what the dispatched wrapper does next; both wrappers resolve+export `BASE_BRANCH` ([INV-131]) at their own startup, not in this file's tick.
 - [`handoffs.md`](handoffs.md) — Step 5 is the most race-prone handoff.
 - [`invariants.md`](invariants.md) — INV-01 through INV-11 are all referenced from this file; [INV-128](invariants.md#inv-128-any-non-terminal-issue-whose-observable-state-fingerprint-label-pr-head-non-idempotent-comment-count-marker-digest-stays-unchanged-for-liveness_notice_ticks-default-6-consecutive-dispatcher-ticks-gets-one-operator-visible-tier-1-escalation-and-after-liveness_stall_ticks-default-18-further-unchanged-ticks-is-unconditionally-transitioned-to-stalled-with-a-structured-reasonliveness-timeout-report--the-pipelines-first-global-liveness-invariant-every-non-terminal-issue-either-changes-observable-state-or-is-escalated-within-a-bounded-number-of-ticks) is Step 6's full spec.
 - [`metrics.md`](metrics.md) — the observe-only event log the tick appends to (INV-70).

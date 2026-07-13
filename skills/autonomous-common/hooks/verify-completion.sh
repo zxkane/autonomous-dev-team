@@ -18,8 +18,13 @@ if [[ -z "$current_branch" ]]; then
   exit 0
 fi
 
-# Skip verification on main branch (no PR workflow)
-if [[ "$current_branch" == "main" || "$current_branch" == "master" ]]; then
+# Skip verification on the base/trunk branch (no PR workflow). Hooks stay
+# zero-dependency shell (no conf parsing) — issue #478 ([INV-131]): read the
+# env chain BASE_BRANCH → TRUNK_BRANCH → "main" the wrapper resolves+exports
+# at startup. `master` is kept as an extra legacy fallback for repos that
+# never configured either var. Byte-identical to today when neither is set.
+base_branch="${BASE_BRANCH:-${TRUNK_BRANCH:-main}}"
+if [[ "$current_branch" == "$base_branch" || "$current_branch" == "master" ]]; then
   exit 0
 fi
 

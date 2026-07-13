@@ -2,7 +2,7 @@
 
 > **Provider-lane scope.** The `gh pr view … --json mergeable` and `gh pr checks --watch` commands below are the GitHub-lane concrete forms; the rebase-and-force-push procedure itself is git-native and provider-agnostic. On the GitLab lane (`CODE_HOST=gitlab`), the wrapper reads mergeability through the `chp_mergeable` provider seam and CI state through `chp_ci_status` — the review agent is fed the resolved state in its prompt (or invokes the seam), not a raw `glab mr view`. Treat the `gh pr …` calls as placeholders when running under `CODE_HOST=gitlab`.
 
-Before starting the review, check whether the PR branch has merge conflicts with main. If it does, rebase the branch so the PR is mergeable.
+Before starting the review, check whether the PR branch has merge conflicts with the base branch (`$BASE_BRANCH`, default `main`). If it does, rebase the branch so the PR is mergeable.
 
 > **This pre-review rebase is best-effort prompt guidance — the wrapper enforces the same rule mechanically.** Even if you skip this step, the review wrapper re-checks `mergeable` after aggregating verdicts and before approving: a `CONFLICTING` PR can never reach `approved` ([INV-44](../../../docs/pipeline/invariants.md)). Running this step proactively still helps — a clean rebase here gets the PR merged this round instead of bouncing back to dev — but a missed step is no longer a way for a conflicting PR to slip through.
 
@@ -15,10 +15,10 @@ Before starting the review, check whether the PR branch has merge conflicts with
 
 2. **If MERGEABLE is "MERGEABLE"** — skip to the Review Process.
 
-3. **If MERGEABLE is "CONFLICTING"** — rebase the PR branch onto main:
+3. **If MERGEABLE is "CONFLICTING"** — rebase the PR branch onto the base branch (`$BASE_BRANCH`, default `main`):
    ```bash
-   # Fetch latest main and the PR branch
-   git fetch origin main <PR_BRANCH>
+   # Fetch latest base branch and the PR branch
+   git fetch origin $BASE_BRANCH <PR_BRANCH>
 
    # [INV-100] (#355): idempotent pre-clean — a crashed prior lane (same
    # project, same agent, same PR) can leave this exact dir behind; remove it
@@ -32,8 +32,8 @@ Before starting the review, check whether the PR branch has merge conflicts with
    git worktree add /tmp/rebase-<PROJECT_ID>-<AGENT_NAME>-pr-<PR_NUMBER> <PR_BRANCH>
    cd /tmp/rebase-<PROJECT_ID>-<AGENT_NAME>-pr-<PR_NUMBER>
 
-   # Rebase onto main
-   git rebase origin/main
+   # Rebase onto the base branch
+   git rebase origin/$BASE_BRANCH
    ```
 
 4. **If rebase succeeds** (no conflicts):
@@ -70,12 +70,12 @@ Before starting the review, check whether the PR branch has merge conflicts with
 
    Findings->Decision Gate: 1 blocking finding(s) -- FAIL.
 
-   1. **[BLOCKING] Merge conflict with main** - The PR branch `<PR_BRANCH>` has conflicts
-      with `main` that the review agent could not auto-resolve.
+   1. **[BLOCKING] Merge conflict with the base branch** - The PR branch `<PR_BRANCH>` has conflicts
+      with the base branch (`$BASE_BRANCH`, default `main`) that the review agent could not auto-resolve.
       - Conflicting files: <list from CONFLICT_FILES>
       - Dev agent must resolve these conflicts before re-review:
-        1. `git fetch origin main`
-        2. `git rebase origin/main`
+        1. `git fetch origin $BASE_BRANCH`
+        2. `git rebase origin/$BASE_BRANCH`
         3. Resolve conflicts in the listed files
         4. `git rebase --continue`
         5. `git push --force-with-lease origin <PR_BRANCH>`

@@ -149,6 +149,11 @@ render_for_issue() {
     gh() { return 0; }
     PR_NUMBER=210; ISSUE_NUMBER="$issue"; REPO="owner/repo"; REPO_OWNER="owner"
     REPO_NAME="repo"; PR_BRANCH="feat/x"; REVIEW_BOTS_VALIDATED=""; E2E_ACTIVE="false"
+    # issue #478 ([INV-131]) / issue #449-#475 (INV-129): build_review_prompt
+    # interpolates ${BASE_BRANCH} and ${REVIEW_ROUND} — both resolved once at
+    # the real wrapper's startup, before any prompt builder runs.
+    BASE_BRANCH="main"
+    REVIEW_ROUND="1"
     # #355: PROJECT_ID feeds the self-provisioning lane-dir fallback below —
     # empty when the caller wants the "no PROJECT_ID set" degraded case.
     PROJECT_ID="$project"

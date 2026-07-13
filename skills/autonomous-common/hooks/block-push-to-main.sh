@@ -22,9 +22,11 @@ if ! is_git_command "push" "$command"; then
   exit 0
 fi
 
-# Trunk branch name. Default to `main`; respect TRUNK_BRANCH override
-# for repos with a different trunk (e.g. `master`, `trunk`).
-trunk="${TRUNK_BRANCH:-main}"
+# Trunk branch name (issue #478, [INV-131]): BASE_BRANCH (the wrapper
+# resolves+exports it once at startup) → TRUNK_BRANCH (this hook's pre-#478
+# override, still honored standalone e.g. for a manually-run hook outside the
+# wrapper) → "main" default. Byte-identical to today when neither is set.
+trunk="${BASE_BRANCH:-${TRUNK_BRANCH:-main}}"
 
 # Parse the destination ref(s) the push would write to. Block if any of
 # them target the trunk (covers --all/--mirror via __ALL__/__MIRROR__).
