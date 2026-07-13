@@ -191,62 +191,54 @@ assert_eq "TC-REVIEW-CONV-020g single untagged numbered finding → none" "none"
 
 # ===========================================================================
 echo
-echo "=== TC-REVIEW-CONV-021..027: review-round-counter marker ==="
+echo "=== TC-REVIEW-CONV-021..027: review-round-counter marker (head-agnostic, INV-129) ==="
 # ===========================================================================
 
 assert_eq "TC-REVIEW-CONV-021 fresh issue, no prior marker → round=1" "1" \
-  "$(_review_round_next_count "" deadbeef)"
+  "$(_review_round_next_count "")"
 
 m22=$(_review_round_marker 100 deadbeef 1)
-assert_eq "TC-REVIEW-CONV-022 same HEAD increments" "2" \
-  "$(_review_round_next_count "$m22" deadbeef)"
+assert_eq "TC-REVIEW-CONV-022 same-head marker increments" "2" \
+  "$(_review_round_next_count "$m22")"
 
+# TC-REVIEW-CONV-023 [INV-129]: a DIFFERENT head no longer resets the
+# counter — it is now head-AGNOSTIC. Regression pin for the OLD (#449-era)
+# head-scoped behavior's ABSENCE: pre-#475 this would have echoed 1.
 m23=$(_review_round_marker 100 deadbeef 3)
-assert_eq "TC-REVIEW-CONV-023 new HEAD resets to 1" "1" \
-  "$(_review_round_next_count "$m23" cafebabe)"
+assert_eq "TC-REVIEW-CONV-023 [INV-129] new head does NOT reset — still increments (head is forensic-only)" "4" \
+  "$(_review_round_next_count "$m23")"
 
 assert_eq "TC-REVIEW-CONV-024a malformed marker parses to round=0" "0" \
-  "$(_review_round_parse_count "not a marker at all {{{" deadbeef)"
+  "$(_review_round_parse_count "not a marker at all {{{")"
 assert_eq "TC-REVIEW-CONV-024b malformed marker → next round=1 (no crash)" "1" \
-  "$(_review_round_next_count "<!-- review-round-counter: garbage -->" deadbeef)"
+  "$(_review_round_next_count "<!-- review-round-counter: garbage -->")"
 
 # TC-REVIEW-CONV-025/026: authenticity filter is enforced at the WRAPPER call
 # site (jq `select(.authorKind != "human")`), mirrored here as a source grep
 # (the pure marker helpers themselves are author-agnostic by design — the
 # filtering happens on the comment SCAN before the marker text ever reaches
 # them, exactly like INV-105/INV-122).
-assert_contains "TC-REVIEW-CONV-025/026 wrapper filters authorKind != \"human\" on the round-counter read" \
-  "$(cat "$WRAPPER")" 'contains("review-round-counter:")'
+assert_contains "TC-REVIEW-CONV-025/026 wrapper reads the round-counter via _review_round_prior_marker (authorKind filter lives inside it)" \
+  "$(cat "$WRAPPER")" '_review_round_prior_marker'
 
 m27=$(_review_round_marker 100 deadbeef 3)
 assert_eq "TC-REVIEW-CONV-027a marker round-trip contains issue" "true" \
   "$([[ "$m27" == *"issue=100"* ]] && echo true || echo false)"
 assert_eq "TC-REVIEW-CONV-027b marker round-trip: parse returns the same round" "3" \
-  "$(_review_round_parse_count "$m27" deadbeef)"
+  "$(_review_round_parse_count "$m27")"
 
-# TC-REVIEW-CONV-027c: the wrapper-level empty-PR_HEAD_SHA guard (pinned as a
-# wiring grep, since the pure lib functions themselves are head-value-agnostic
-# — the guard lives at the CALL SITE, deciding whether to call them at all).
-# A chp_pr_view failure must default to the strictest floor (round=1) and
-# skip posting a marker, mirroring INV-122's own non-empty-PR_HEAD_SHA guard.
-assert_contains "TC-REVIEW-CONV-027c wrapper guards the R1 counter on a non-empty PR_HEAD_SHA" \
-  "$(cat "$WRAPPER")" 'if [[ -n "$PR_HEAD_SHA" ]]'
-round1_guard_line=$(grep -n 'if \[\[ -n "\$PR_HEAD_SHA" \]\]; then' "$WRAPPER" | head -1 | cut -d: -f1)
-round1_default_line=$(awk -v start="$round1_guard_line" 'NR>start && /REVIEW_ROUND=1/ { print NR; exit }' "$WRAPPER")
-assert_eq "TC-REVIEW-CONV-027d empty-PR_HEAD_SHA branch defaults REVIEW_ROUND to 1 (strictest floor)" "true" \
-  "$([[ -n "$round1_default_line" ]] && echo true || echo false)"
+# TC-REVIEW-CONV-027c/d [INV-129, issue #475]: the pre-#475 wrapper-level
+# empty-PR_HEAD_SHA guard (defaulting REVIEW_ROUND=1 and skipping the marker
+# post) is REMOVED — that guard existed solely to prevent head-KEY
+# contamination, which no longer applies now that the head is forensic-only.
+assert_eq "TC-REVIEW-CONV-027c [INV-129] wrapper no longer special-cases an empty PR_HEAD_SHA for the round counter" "" \
+  "$(grep -o 'PR_HEAD_SHA is empty (chp_pr_view failure?) — defaulting review round to 1' "$WRAPPER")"
 
-# TC-REVIEW-CONV-027e: [P1] #449 codex review round 6 — a null .body (a real
-# GitHub REST shape) must not crash the review-round-counter jq scan.
-# contains() on a non-string is a jq RUNTIME ERROR, not a non-match; without
-# a `.body | type == "string"` guard before contains(), one such row
-# collapses the whole scan via the `|| echo ""` fallback, silently resetting
-# REVIEW_ROUND to 1 on a same-head re-review instead of incrementing it.
-# Pinned as a wiring grep (the round-counter read is inline at the wrapper
-# call site, not extracted into a pure fixture-testable function like
-# _review_cap_prior_marker).
-assert_contains "TC-REVIEW-CONV-027e wrapper guards .body type before contains() on the round-counter read" \
-  "$(cat "$WRAPPER")" 'select(.body | type == "string") | select(.body | contains("review-round-counter:"))'
+# TC-REVIEW-CONV-027e [INV-129]: a null .body (a real GitHub REST shape) must
+# not crash `_review_round_prior_marker`'s jq scan — now covered by a
+# BEHAVIORAL fixture test (TC-INV129-029, Group E below) rather than a wiring
+# grep, since the read moved from an inline jq one-liner into a pure
+# fixture-testable function.
 
 # ===========================================================================
 echo
@@ -689,22 +681,34 @@ assert_eq "TC-REVIEW-CONV-053b jq fallback rejects an out-of-enum severity value
   "$(_validate_verdict_artifact_jq "$TMP53/sev-bad.json" && echo valid || echo malformed)"
 rm -rf "$TMP53"
 
-# TC-REVIEW-CONV-054..056: [P1] #2 — the review-round-counter marker must be
-# posted only AFTER a decided verdict (pass/fail), not unconditionally at
+# TC-REVIEW-CONV-054..056: [P1] #2 — the review-round-counter marker that
+# ADVANCES the round (posts the live `$REVIEW_ROUND` value) must be posted
+# only AFTER a decided verdict (pass/fail), not unconditionally at
 # prompt-render time (pre-fix location, before the E2E gate / smoke gate /
 # fan-out have even run) — a crash/no-verdict round on the same head must not
 # silently advance the counter that feeds the severity ratchet's floor.
+#
+# [INV-129, issue #475 codex review round-1 [P3]] Several EARLIER exit paths
+# (no-pr-found, smoke-config-error, …) now ALSO call `_review_round_marker`
+# — but always with the literal RESET value `0`, never `$REVIEW_ROUND`. A
+# `round=0` post can only ever narrow the series back to its safest state
+# (next read = 1); it can never advance/inflate the round, so posting it
+# early is safe and does not reintroduce the bug TC-REVIEW-CONV-054/055
+# originally guarded against. These assertions were narrowed from "no
+# `_review_round_marker` call at all" to "no call carrying `$REVIEW_ROUND`
+# (the only value that can advance the series)" to keep pinning the actual
+# invariant.
 prompt_render_region=$(sed -n '1,1160p' "$WRAPPER")
-assert_eq "TC-REVIEW-CONV-054 no unconditional review-round-counter post before the fan-out (prompt-render region)" "" \
-  "$(grep -o 'itp_post_comment "\$ISSUE_NUMBER" "\$(_review_round_marker' <<<"$prompt_render_region")"
+assert_eq "TC-REVIEW-CONV-054 no unconditional review-round-counter ADVANCE post before the fan-out (prompt-render region)" "" \
+  "$(grep -o 'itp_post_comment "\$ISSUE_NUMBER" "\$(_review_round_marker "\$ISSUE_NUMBER" "\$PR_HEAD_SHA" "\$REVIEW_ROUND"' <<<"$prompt_render_region")"
 
-aggregate_marker_line=$(grep -n 'itp_post_comment "\$ISSUE_NUMBER" "\$(_review_round_marker' "$WRAPPER" | head -1 | cut -d: -f1)
+aggregate_marker_line=$(grep -n '_review_round_marker "\$ISSUE_NUMBER" "\$PR_HEAD_SHA" "\$REVIEW_ROUND"' "$WRAPPER" | head -1 | cut -d: -f1)
 aggregate_compute_line=$(grep -n '^AGGREGATE=\$(_aggregate_review_verdicts' "$WRAPPER" | head -1 | cut -d: -f1)
-assert_eq "TC-REVIEW-CONV-055 review-round-counter marker IS posted, but strictly after AGGREGATE is computed" "true" \
+assert_eq "TC-REVIEW-CONV-055 review-round-counter ADVANCE marker IS posted, but strictly after AGGREGATE is computed" "true" \
   "$([[ -n "$aggregate_marker_line" && -n "$aggregate_compute_line" && "$aggregate_marker_line" -gt "$aggregate_compute_line" ]] && echo true || echo false)"
 
 marker_post_region=$(sed -n "${aggregate_compute_line},$((aggregate_marker_line + 1))p" "$WRAPPER")
-assert_contains "TC-REVIEW-CONV-056 the post-aggregation marker post is gated on a DECIDED verdict (pass/fail)" \
+assert_contains "TC-REVIEW-CONV-056 the post-aggregation ADVANCE marker post is gated on a DECIDED verdict (pass/fail)" \
   "$marker_post_region" '[[ "$AGGREGATE" == "pass" ]]'
 assert_contains "TC-REVIEW-CONV-056b the marker post's fail arm also requires substantive fail (codex round 4 [P1] #1)" \
   "$marker_post_region" '[[ "$AGGREGATE" == "fail" ]] && [[ "$_AGGREGATE_SUBSTANTIVE_FAIL" == "true" ]]'
@@ -954,6 +958,365 @@ JSON
 assert_eq "TC-REVIEW-CONV-068 a bot FAIL body mentioning circuit-breaker in passing is not misread as a trip report" \
   "<!-- dispatcher-review-cap-breaker: issue=1 head=bbb round=3 -->" \
   "$(_review_cap_prior_marker "$FIXTURE_068")"
+
+# ===========================================================================
+echo
+echo "=== TC-INV129-001..036: head-agnostic review-round counter (issue #475) ==="
+# ===========================================================================
+# See docs/test-cases/inv-129-head-agnostic-review-round.md for the full
+# scenario matrix. Pins the redefinition of REVIEW_ROUND from an
+# (issue, head)-scoped counter reset on every push to a head-agnostic series
+# of consecutive decided failed-substantive rounds.
+
+# --- Group A: head-agnostic parse/next (no <head> param) ---
+
+# TC-INV129-001: new-head-every-round series increments 1→2→3 — the exact
+# scenario the OLD head-scoped semantics froze at 1.
+_i129_marker=""
+_i129_heads=(head1 head2 head3)
+_i129_round=0
+for _h in "${_i129_heads[@]}"; do
+  _i129_round=$(_review_round_next_count "$_i129_marker")
+  _i129_marker=$(_review_round_marker 200 "$_h" "$_i129_round")
+done
+assert_eq "TC-INV129-001 new-head-every-round series increments 1→2→3 (regression pin: old semantics froze at 1)" "3" "$_i129_round"
+
+# TC-INV129-002: same-head consecutive fails still increment (superset of
+# the old by-design behavior).
+_i129_m1=$(_review_round_marker 200 samehead 1)
+assert_eq "TC-INV129-002 same-head consecutive fails still increment" "2" \
+  "$(_review_round_next_count "$_i129_m1")"
+
+# TC-INV129-003/004: signatures are single-arg now (a stray second arg is
+# silently ignored by bash positional-arg semantics, so this is pinned as a
+# source grep on the function definitions instead of a runtime behavior
+# difference).
+assert_contains "TC-INV129-003 _review_round_next_count signature is single-arg" \
+  "$(grep -A1 '^_review_round_next_count()' "$ROUND_LIB")" 'local marker_text="$1" stored'
+assert_contains "TC-INV129-004 _review_round_parse_count signature is single-arg" \
+  "$(grep -A1 '^_review_round_parse_count()' "$ROUND_LIB")" 'local marker_text="$1"'
+
+# TC-INV129-005: a legacy head-KEYED marker (as pre-#475 code would have
+# posted, with a real head value) still parses under the new permissive
+# head=.* regex.
+_i129_legacy=$(_review_round_marker 200 abc123def 4)
+assert_eq "TC-INV129-005 legacy head-keyed marker parses head-agnostically" "4" \
+  "$(_review_round_parse_count "$_i129_legacy")"
+
+# TC-INV129-006: malformed marker → round=0, next=1, no crash (unchanged
+# bias-to-MISS contract).
+assert_eq "TC-INV129-006 malformed marker parses to round=0 (bias to MISS)" "0" \
+  "$(_review_round_parse_count "garbage, not a marker")"
+
+# TC-INV129-007/008: empty head renders as the "unknown" placeholder and its
+# round field still parses/increments.
+_i129_unknown=$(_review_round_marker 200 "" 3)
+assert_contains "TC-INV129-007 empty head renders as 'unknown' placeholder" \
+  "$_i129_unknown" "head=unknown"
+assert_eq "TC-INV129-008 empty-head marker's round still parses and increments" "4" \
+  "$(_review_round_next_count "$_i129_unknown")"
+
+# --- Group B: reset channel 1 — passed/failed-non-substantive trailer cutoff ---
+
+FIXTURE_I129_009=$(cat <<'JSON'
+[
+  {"authorKind":"bot","createdAt":"2026-02-01T10:00:00Z","body":"<!-- review-round-counter: issue=200 head=aaa round=3 -->"},
+  {"authorKind":"bot","createdAt":"2026-02-01T11:00:00Z","body":"<!-- review-verdict: passed -->"}
+]
+JSON
+)
+assert_eq "TC-INV129-009 a passed trailer resets the series (no qualifying prior marker)" "" \
+  "$(_review_round_prior_marker "$FIXTURE_I129_009")"
+assert_eq "TC-INV129-010 next_count after a passed-trailer reset restarts at 1" "1" \
+  "$(_review_round_next_count "$(_review_round_prior_marker "$FIXTURE_I129_009")")"
+
+FIXTURE_I129_011=$(cat <<'JSON'
+[
+  {"authorKind":"bot","createdAt":"2026-02-01T10:00:00Z","body":"<!-- review-round-counter: issue=200 head=aaa round=3 -->"},
+  {"authorKind":"bot","createdAt":"2026-02-01T11:00:00Z","body":"<!-- review-verdict: failed-non-substantive cause=other -->"}
+]
+JSON
+)
+assert_eq "TC-INV129-011 a failed-non-substantive trailer also resets the series" "" \
+  "$(_review_round_prior_marker "$FIXTURE_I129_011")"
+
+FIXTURE_I129_012=$(cat <<'JSON'
+[
+  {"authorKind":"bot","createdAt":"2026-02-01T10:00:00Z","body":"<!-- review-round-counter: issue=200 head=aaa round=3 -->"},
+  {"authorKind":"human","createdAt":"2026-02-01T11:00:00Z","body":"<!-- review-verdict: passed -->"}
+]
+JSON
+)
+assert_eq "TC-INV129-012 a HUMAN-forged passed trailer does NOT reset the series" \
+  "<!-- review-round-counter: issue=200 head=aaa round=3 -->" \
+  "$(_review_round_prior_marker "$FIXTURE_I129_012")"
+
+FIXTURE_I129_013=$(cat <<'JSON'
+[
+  {"authorKind":"bot","createdAt":"2026-02-01T10:00:00Z","body":"<!-- review-round-counter: issue=200 head=aaa round=3 -->"},
+  {"authorKind":"bot","createdAt":"2026-02-01T11:00:00Z","body":"Review findings:\n\n1. [P1] the earlier `<!-- review-verdict: passed -->` trailer turned out to be wrong.\n\nReview Session: abc"}
+]
+JSON
+)
+assert_eq "TC-INV129-013 a bot FAIL body merely quoting a passed trailer in prose does NOT reset (full-body anchor)" \
+  "<!-- review-round-counter: issue=200 head=aaa round=3 -->" \
+  "$(_review_round_prior_marker "$FIXTURE_I129_013")"
+
+FIXTURE_I129_014=$(cat <<'JSON'
+[
+  {"authorKind":"bot","createdAt":"2026-02-01T10:00:00Z","body":"<!-- review-round-counter: issue=200 head=aaa round=3 -->"},
+  {"authorKind":"bot","createdAt":"2026-02-01T11:00:00Z","body":"<!-- review-verdict: failed-substantive -->"}
+]
+JSON
+)
+assert_eq "TC-INV129-014 a failed-substantive trailer is NOT a reset boundary" \
+  "<!-- review-round-counter: issue=200 head=aaa round=3 -->" \
+  "$(_review_round_prior_marker "$FIXTURE_I129_014")"
+
+# --- Group C: reset channel 2 — INV-127 trip report cutoff ---
+
+FIXTURE_I129_015=$(cat <<'JSON'
+[
+  {"authorKind":"bot","createdAt":"2026-02-01T10:00:00Z","body":"<!-- review-round-counter: issue=200 head=aaa round=4 -->"},
+  {"authorKind":"bot","createdAt":"2026-02-01T11:00:00Z","body":"<!-- dispatcher-review-cap-breaker: issue=200 head=aaa round=5 -->\n## Review-round-cap circuit-breaker tripped — halting repeated re-dispatch"}
+]
+JSON
+)
+assert_eq "TC-INV129-015 an INV-127 trip report is itself a reset cutoff" "" \
+  "$(_review_round_prior_marker "$FIXTURE_I129_015")"
+
+FIXTURE_I129_016=$(cat <<'JSON'
+[
+  {"authorKind":"bot","createdAt":"2026-02-01T10:00:00Z","body":"<!-- review-round-counter: issue=200 head=aaa round=3 -->"},
+  {"authorKind":"bot","createdAt":"2026-02-01T11:00:00Z","body":"## Non-convergence circuit-breaker tripped — dev-side zero-commit inaction"}
+]
+JSON
+)
+assert_eq "TC-INV129-016 an INV-105-style (non-convergence) trip report is NOT a reset cutoff — the marker still qualifies" \
+  "<!-- review-round-counter: issue=200 head=aaa round=3 -->" \
+  "$(_review_round_prior_marker "$FIXTURE_I129_016")"
+
+FIXTURE_I129_017=$(cat <<'JSON'
+[
+  {"authorKind":"bot","createdAt":"2026-02-01T10:00:00Z","body":"<!-- review-round-counter: issue=200 head=aaa round=3 -->"},
+  {"authorKind":"bot","createdAt":"2026-02-01T11:00:00Z","body":"## Same-HEAD gate-failure circuit-breaker tripped — halting repeated re-dispatch"}
+]
+JSON
+)
+assert_eq "TC-INV129-017 an INV-122-style (same-head gate-failure) trip report is NOT a reset cutoff either" \
+  "<!-- review-round-counter: issue=200 head=aaa round=3 -->" \
+  "$(_review_round_prior_marker "$FIXTURE_I129_017")"
+
+FIXTURE_I129_018=$(cat <<'JSON'
+[
+  {"authorKind":"bot","createdAt":"2026-02-01T10:00:00Z","body":"<!-- dispatcher-review-cap-breaker: issue=200 head=aaa round=5 -->\n## Review-round-cap circuit-breaker tripped — halting repeated re-dispatch"},
+  {"authorKind":"bot","createdAt":"2026-02-01T12:00:00Z","body":"<!-- review-round-counter: issue=200 head=bbb round=1 -->"}
+]
+JSON
+)
+assert_eq "TC-INV129-018 a genuine marker AFTER an INV-127 trip report qualifies" \
+  "<!-- review-round-counter: issue=200 head=bbb round=1 -->" \
+  "$(_review_round_prior_marker "$FIXTURE_I129_018")"
+
+# --- Group D: reset channel 3 — explicit round=0 marker ---
+
+assert_contains "TC-INV129-019 a pass aggregate posts round=0 (wiring grep)" \
+  "$(cat "$WRAPPER")" '_review_round_marker "$ISSUE_NUMBER" "$PR_HEAD_SHA" 0'
+
+assert_contains "TC-INV129-020 a substantive fail posts the incremented round (unchanged)" \
+  "$(cat "$WRAPPER")" '_review_round_marker "$ISSUE_NUMBER" "$PR_HEAD_SHA" "$REVIEW_ROUND"'
+
+# TC-INV129-037..043 (codex review round-1 [P3]): EVERY failed-non-substantive
+# exit path must ALSO post its own round=0 marker — the trailer-cutoff channel
+# (channel 1, `_review_round_prior_marker`) is not enough on its own because
+# `emit_verdict_trailer`'s own itp_post_comment carries `|| true` and can
+# silently fail, letting a later failed-substantive round inherit a stale
+# high count. Pinned as a wiring grep: for each failed-non-substantive cause
+# token's emit_verdict_trailer call site, a `_review_round_marker ... 0)`
+# post must appear within the next 10 source lines.
+declare -A _I129_NONSUB_CAUSES=(
+  [no-pr-found]=1
+  [e2e-evidence-missing]=1
+  [smoke-config-error]=1
+  [awaiting-bot-review]=1
+  [mergeable-unknown]=1
+  [merge-conflict-unresolvable]=1
+  [other]=1
+)
+for _cause in "${!_I129_NONSUB_CAUSES[@]}"; do
+  _cause_line=$(grep -n "emit_verdict_trailer \"\$ISSUE_NUMBER\" \"\$REPO\" \"failed-non-substantive\" \"${_cause}\"" "$WRAPPER" | head -1 | cut -d: -f1)
+  if [[ -z "$_cause_line" ]]; then
+    echo -e "  ${RED}FAIL${NC}: TC-INV129-037..043 could not locate emit_verdict_trailer call site for cause=${_cause}"
+    FAIL=$((FAIL + 1))
+    continue
+  fi
+  _cause_block=$(sed -n "${_cause_line},$((_cause_line + 10))p" "$WRAPPER")
+  assert_contains "TC-INV129-037..043 cause=${_cause} also posts a round=0 reset marker within 10 lines" \
+    "$_cause_block" '_review_round_marker "$ISSUE_NUMBER"'
+  assert_contains "TC-INV129-037..043 cause=${_cause} round=0 marker literal" \
+    "$_cause_block" ' 0)" 2>/dev/null || true'
+done
+
+_i129_round0=$(_review_round_marker 200 aaa 0)
+assert_eq "TC-INV129-021 _review_round_next_count fed a round=0 marker directly returns 1" "1" \
+  "$(_review_round_next_count "$_i129_round0")"
+
+FIXTURE_I129_022=$(cat <<'JSON'
+[
+  {"authorKind":"bot","createdAt":"2026-02-01T10:00:00Z","body":"<!-- review-round-counter: issue=200 head=aaa round=4 -->"},
+  {"authorKind":"bot","createdAt":"2026-02-01T11:00:00Z","body":"<!-- review-round-counter: issue=200 head=bbb round=0 -->"}
+]
+JSON
+)
+assert_eq "TC-INV129-022 round=0 marker resets even with NO qualifying trailer present at all (dual-channel)" \
+  "<!-- review-round-counter: issue=200 head=bbb round=0 -->" \
+  "$(_review_round_prior_marker "$FIXTURE_I129_022")"
+assert_eq "TC-INV129-022b next_count after that round=0 marker is 1" "1" \
+  "$(_review_round_next_count "$(_review_round_prior_marker "$FIXTURE_I129_022")")"
+
+FIXTURE_I129_023=$(cat <<'JSON'
+[
+  {"authorKind":"bot","createdAt":"2026-02-01T10:00:00Z","body":"<!-- review-round-counter: issue=200 head=aaa round=0 -->"},
+  {"authorKind":"bot","createdAt":"2026-02-01T11:00:00Z","body":"<!-- review-round-counter: issue=200 head=bbb round=2 -->"}
+]
+JSON
+)
+assert_eq "TC-INV129-023 a later genuine marker after a round=0 reset wins (latest-qualifying-marker semantics)" \
+  "<!-- review-round-counter: issue=200 head=bbb round=2 -->" \
+  "$(_review_round_prior_marker "$FIXTURE_I129_023")"
+
+# --- Group E: read-site wiring — full-body anchor + empty-head handling ---
+
+assert_eq "TC-INV129-024 a marker-shaped substring embedded in a larger comment is rejected" "" \
+  "$(_review_round_prior_marker "$(cat <<'JSON'
+[
+  {"authorKind":"bot","createdAt":"2026-02-01T10:00:00Z","body":"discussing <!-- review-round-counter: issue=200 head=aaa round=9 --> in prose"}
+]
+JSON
+)")"
+
+assert_eq "TC-INV129-025 a genuine standalone marker comment is accepted" \
+  "<!-- review-round-counter: issue=200 head=aaa round=2 -->" \
+  "$(_review_round_prior_marker "$(cat <<'JSON'
+[
+  {"authorKind":"bot","createdAt":"2026-02-01T10:00:00Z","body":"<!-- review-round-counter: issue=200 head=aaa round=2 -->"}
+]
+JSON
+)")"
+
+assert_eq "TC-INV129-026 the OLD empty-PR_HEAD_SHA-forces-round=1 branch is gone (regression pin)" "" \
+  "$(grep -o 'defaulting review round to 1' "$WRAPPER")"
+
+assert_contains "TC-INV129-027 read site calls _review_round_prior_marker unconditionally (no PR_HEAD_SHA guard around it)" \
+  "$(cat "$WRAPPER")" '_rr_prior_marker=$(_review_round_prior_marker "$_rr_comments_json")'
+
+assert_contains "TC-INV129-028 marker post site passes PR_HEAD_SHA through unconditionally (head=unknown handled inside _review_round_marker)" \
+  "$(cat "$WRAPPER")" 'itp_post_comment "$ISSUE_NUMBER" "$(_review_round_marker "$ISSUE_NUMBER" "$PR_HEAD_SHA" 0)"'
+
+FIXTURE_I129_029=$(cat <<'JSON'
+[
+  {"authorKind":"bot","createdAt":"2026-02-01T10:00:00Z","body":"<!-- review-round-counter: issue=200 head=aaa round=2 -->"},
+  {"authorKind":"bot","createdAt":"2026-02-01T11:00:00Z","body":null}
+]
+JSON
+)
+assert_eq "TC-INV129-029 a null .body row does not crash the scan; genuine marker still found" \
+  "<!-- review-round-counter: issue=200 head=aaa round=2 -->" \
+  "$(_review_round_prior_marker "$FIXTURE_I129_029")"
+
+# --- Group F: INV-127 gate regression pin (R5) ---
+
+assert_eq "TC-INV129-030 _aggregate_has_p0p1_fail output is unchanged on the existing fixture set" "true" \
+  "$(_aggregate_has_p0p1_fail fail P1 fail P2)"
+assert_eq "TC-INV129-030b _aggregate_has_p0p1_fail P2-only still returns false (unchanged)" "false" \
+  "$(_aggregate_has_p0p1_fail fail P2 fail P3)"
+
+# TC-INV129-031: R5 requires lib-review-aggregate.sh's CODE (non-comment
+# lines) be byte-identical to main. Stripping `#`-led/blank lines and diffing
+# against the pre-#475 baseline is the closest we can pin without a live git
+# checkout of `main` inside this test run (git availability is not
+# guaranteed in the test harness) — so this is a structural pin: the
+# function body (the executable lines between the `_aggregate_has_p0p1_fail()`
+# signature and its closing brace) must still be exactly the documented
+# while/case/printf shape.
+p0p1_body=$(awk '/^_aggregate_has_p0p1_fail\(\)/{f=1} f{print} f && /^}$/{exit}' "$AGGREGATE_LIB")
+assert_contains "TC-INV129-031 _aggregate_has_p0p1_fail's executable body is unchanged (while/case/printf shape)" \
+  "$p0p1_body" 'case "$severity" in
+        P2|P3) ;;'
+
+# TC-INV129-032/033: the acceptance-criteria scenario — a simulated loop
+# where every round pushes a new head and each round's only finding is
+# [P2] — the review demotes the fail to pass at round 5. TC-INV129-033a
+# (the round-4 intermediate value) is folded into this same loop rather than
+# a separate 4-then-1-more progression, since a second loop would only add
+# scaffolding for the one new fact (round 4).
+_i129_p2_marker=""
+_i129_p2_round=0
+_i129_p2_iter=0
+for _h in newhead1 newhead2 newhead3 newhead4 newhead5; do
+  _i129_p2_iter=$((_i129_p2_iter + 1))
+  _i129_p2_round=$(_review_round_next_count "$_i129_p2_marker")
+  _i129_p2_marker=$(_review_round_marker 200 "$_h" "$_i129_p2_round")
+  if [[ "$_i129_p2_iter" -eq 4 ]]; then
+    assert_eq "TC-INV129-033a after 4 consecutive new-head fails, round is 4" "4" "$_i129_p2_round"
+  fi
+done
+assert_eq "TC-INV129-032 new-head-every-round P2-only loop reaches round 5" "5" "$_i129_p2_round"
+assert_eq "TC-INV129-032b at round 5, shouldBlockFinding demotes the P2 finding (does not block)" "false" \
+  "$(shouldBlockFinding "$_i129_p2_round" P2 && echo true || echo false)"
+assert_eq "TC-INV129-032c _aggregate_has_p0p1_fail on that same P2-only round is false — the round never reaches INV-127's counting branch as a fail at all" "false" \
+  "$(_aggregate_has_p0p1_fail fail P2)"
+
+# --- Group G: end-to-end round-progression simulations ---
+
+# TC-INV129-034: an all-timeout fail (no substantive fail) posts no marker
+# at all, so the round number does not advance on that round — pinned via
+# a direct counter-side simulation (the wrapper's own `elif …
+# _AGGREGATE_SUBSTANTIVE_FAIL == true` gate that decides whether to post is
+# exercised by the pre-existing TC-REVIEW-CONV-056b wiring pin; this test
+# confirms the CONSEQUENCE of that gate skipping a post — the next read must
+# not see a phantom round).
+_i129_before_timeout=$(_review_round_marker 300 gh2 2)
+# No new marker posted for the timeout round — the next read still sees the
+# round-2 marker and increments from it, not from a phantom round-3.
+assert_eq "TC-INV129-034 no marker posted on an all-timeout round → next read still increments from the last REAL marker" "3" \
+  "$(_review_round_next_count "$_i129_before_timeout")"
+
+# TC-INV129-035: a genuine PASS mid-series resets to 1 on the next round —
+# via BOTH channels (trailer cutoff and round=0 marker), confirmed together.
+FIXTURE_I129_035=$(cat <<'JSON'
+[
+  {"authorKind":"bot","createdAt":"2026-02-01T10:00:00Z","body":"<!-- review-round-counter: issue=300 head=gh1 round=1 -->"},
+  {"authorKind":"bot","createdAt":"2026-02-01T11:00:00Z","body":"<!-- review-round-counter: issue=300 head=gh2 round=2 -->"},
+  {"authorKind":"bot","createdAt":"2026-02-01T12:00:00Z","body":"<!-- review-verdict: passed -->"},
+  {"authorKind":"bot","createdAt":"2026-02-01T12:00:01Z","body":"<!-- review-round-counter: issue=300 head=gh3 round=0 -->"}
+]
+JSON
+)
+assert_eq "TC-INV129-035 round resets to 1 after a genuine PASS (both channels agree)" "1" \
+  "$(_review_round_next_count "$(_review_round_prior_marker "$FIXTURE_I129_035")")"
+
+# TC-INV129-036: mixed loop — rounds 1-2 are P1 (advance both R1's ratchet
+# and INV-127's cap-relevant _aggregate_has_p0p1_fail), rounds 3-5 are
+# P2-only (advance R1's ratchet only). R1's REVIEW_ROUND reaches 6; INV-127's
+# own _aggregate_has_p0p1_fail is false for every P2-only round, so its
+# independent counter (lib-review-cap.sh, not under test here) never
+# advances past round 2 in a real run — this pin exercises the per-round
+# _aggregate_has_p0p1_fail decision for each round of the mix.
+_i129_mixed_marker=""
+_i129_mixed_round=0
+_i129_mixed_severities=(P1 P1 P2 P2 P2 P2)
+for _sev in "${_i129_mixed_severities[@]}"; do
+  _i129_mixed_round=$(_review_round_next_count "$_i129_mixed_marker")
+  _i129_mixed_marker=$(_review_round_marker 400 "mixedhead-$_i129_mixed_round" "$_i129_mixed_round")
+  _i129_mixed_p0p1=$(_aggregate_has_p0p1_fail fail "$_sev")
+  if [[ "$_sev" == "P1" ]]; then
+    assert_eq "TC-INV129-036 round ${_i129_mixed_round} (severity ${_sev}) counts as INV-127 terminal-floor evidence" "true" "$_i129_mixed_p0p1"
+  else
+    assert_eq "TC-INV129-036 round ${_i129_mixed_round} (severity ${_sev}) does NOT count as INV-127 terminal-floor evidence" "false" "$_i129_mixed_p0p1"
+  fi
+done
+assert_eq "TC-INV129-036f R1's ratchet round reaches 6 across the mixed P1/P2 series" "6" "$_i129_mixed_round"
 
 echo
 echo "=== Summary ==="
