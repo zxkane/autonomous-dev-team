@@ -493,7 +493,7 @@ Major prompt sections:
 
 | Section | Purpose |
 |---|---|
-| **Step 0: merge-conflict resolution** | Mandatory pre-review. `gh pr view --json mergeable` ⇒ proceed (`MERGEABLE`), rebase (`CONFLICTING`), wait+retry (`UNKNOWN`). On rebase failure the agent FAILs with "[BLOCKING] Merge conflict with main" and step-by-step rebase instructions. |
+| **Step 0: merge-conflict resolution** | Mandatory pre-review. `gh pr view --json mergeable` ⇒ proceed (`MERGEABLE`), rebase (`CONFLICTING`), wait+retry (`UNKNOWN`). On rebase failure the agent FAILs with "[BLOCKING] Merge conflict with ${BASE_BRANCH}" (the resolved base branch, default `main`, [INV-131](invariants.md#inv-131-the-pipelines-base-branch-is-a-resolved-exported-validated-conf-value--never-a-hardcoded-main-literal-in-a-prompt-hook-or-provider-argv)) and step-by-step rebase instructions. |
 | **Step 0.5: requirement drift detection** | Read all issue comments before reading the PR diff. Find scope changes posted after implementation began. Drift ⇒ FAIL with "[BLOCKING] Requirement drift". |
 | **Review checklist** | Process compliance, code quality, testing, infra. The Kiro path skips `code-simplifier` / `pr-review` items since Kiro doesn't support those. |
 | **Acceptance criteria verification** | For each `## Acceptance Criteria` checkbox in the issue body, verify against PR code/tests/build then mark via `bash scripts/mark-issue-checkbox.sh`. ALL must be checked before approving. |
@@ -667,8 +667,8 @@ if PASSED_VERDICT == true:
   gate = _classify_mergeable_gate "$MERGEABLE_STATUS"   # lib-review-mergeable.sh
     MERGEABLE   → proceed → fall through to the PASS path below (UNCHANGED)
     CONFLICTING → block-substantive:
-        issue comment "Review findings: ... [BLOCKING] Merge conflict with main ... rebase steps"
-        PR    comment "Auto-merge failed: PR is CONFLICTING ... Re-dispatching dev agent to rebase onto main."
+        issue comment "Review findings: ... [BLOCKING] Merge conflict with ${BASE_BRANCH} ... rebase steps"
+        PR    comment "Auto-merge failed: PR is CONFLICTING ... Re-dispatching dev agent to rebase onto ${BASE_BRANCH}."
         emit_verdict_trailer failed-substantive
         submit_request_changes <PR> "<merge-conflict body>"  # INV-52, best-effort (CONFLICTING is substantive)
         −reviewing +pending-dev ; exit 0
@@ -743,7 +743,7 @@ if PASSED_VERDICT == true:           # PR-open guard already passed; mergeable g
        −autonomous −reviewing +approved
        (issue auto-closes via GitHub's `Closes #N` resolution — wrapper does NOT call `gh issue close`, INV-33)
      else (auto-merge failed — INV-33):
-       PR comment "Auto-merge failed: <stderr-excerpt>. Re-dispatching dev agent to rebase onto main."
+       PR comment "Auto-merge failed: <stderr-excerpt>. Re-dispatching dev agent to rebase onto ${BASE_BRANCH}."
        −reviewing +pending-dev (autonomous retained)
        (next dispatcher tick re-dispatches dev; dev resume detects the marker and rebases first)
 ```
@@ -753,11 +753,11 @@ if PASSED_VERDICT == true:           # PR-open guard already passed; mergeable g
 When `gh pr merge` returns non-zero, the wrapper:
 
 1. Captures `MERGE_OUT` (combined stdout+stderr, truncated to 500 chars for the comment).
-2. Posts a comment on the **PR** (not the issue) with prefix `Auto-merge failed:` followed by the captured excerpt and the directive `Re-dispatching dev agent to rebase onto main.`
+2. Posts a comment on the **PR** (not the issue) with prefix `Auto-merge failed:` followed by the captured excerpt and the directive `Re-dispatching dev agent to rebase onto ${BASE_BRANCH}.` (`BASE_BRANCH` is the wrapper's resolved base branch, default `main`, [INV-131](invariants.md#inv-131-the-pipelines-base-branch-is-a-resolved-exported-validated-conf-value--never-a-hardcoded-main-literal-in-a-prompt-hook-or-provider-argv)).
 3. Does NOT call `gh issue close`. Does NOT add `+approved`. Does NOT remove `autonomous` (the dispatcher's `list_pending_dev` selector gates on `autonomous`).
 4. Edits the issue: `−reviewing +pending-dev`.
 
-The dev wrapper's resume branch detects the marker by querying PR-issue comments for one whose body starts with `Auto-merge failed:`, and prepends a `## Pre-implementation: rebase` section to the resume prompt instructing `git fetch origin && git rebase origin/main && git push --force-with-lease`. Once the rebase succeeds, the dev wrapper trap transitions back to `+pending-review`, the next dispatcher tick re-dispatches review, and the merge succeeds — at which point GitHub closes the issue via the PR's `Closes #N` keyword.
+The dev wrapper's resume branch detects the marker by querying PR-issue comments for one whose body starts with `Auto-merge failed:`, and prepends a `## Pre-implementation: rebase` section to the resume prompt instructing `git fetch origin && git rebase origin/${BASE_BRANCH} && git push --force-with-lease`. Once the rebase succeeds, the dev wrapper trap transitions back to `+pending-review`, the next dispatcher tick re-dispatches review, and the merge succeeds — at which point GitHub closes the issue via the PR's `Closes #N` keyword.
 
 If the rebase has unresolvable conflicts, the dev agent posts a `needs human` comment and exits cleanly. The dispatcher's MAX_RETRIES gate eventually transitions the issue to `stalled` if the loop fails to converge.
 

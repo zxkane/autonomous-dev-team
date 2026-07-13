@@ -140,7 +140,7 @@ Two sub-handoffs depending on verdict:
 
 **Failure modes**:
 
-- Auto-merge fails (CI red, branch protection, transient API error) → wrapper posts the `Auto-merge failed:` marker on the **PR** and transitions the issue to `+pending-dev` (autonomous retained), NOT to `+approved` ([INV-33](invariants.md#inv-33-review-wrapper-must-not-close-the-linked-issue)). The next dispatcher tick re-dispatches dev to rebase onto main; on success the merge happens at the next review pass and GitHub closes the issue via `Closes #N`. This is now H5c (separate handoff below).
+- Auto-merge fails (CI red, branch protection, transient API error) → wrapper posts the `Auto-merge failed:` marker on the **PR** and transitions the issue to `+pending-dev` (autonomous retained), NOT to `+approved` ([INV-33](invariants.md#inv-33-review-wrapper-must-not-close-the-linked-issue)). The next dispatcher tick re-dispatches dev to rebase onto `${BASE_BRANCH}` (the wrapper's resolved base branch, default `main`, [INV-131](invariants.md#inv-131-the-pipelines-base-branch-is-a-resolved-exported-validated-conf-value--never-a-hardcoded-main-literal-in-a-prompt-hook-or-provider-argv)); on success the merge happens at the next review pass and GitHub closes the issue via `Closes #N`. This is now H5c (separate handoff below).
 - Approval API call itself fails → labels are `+approved -reviewing` (autonomous kept) and the wrapper posts a "please approve and merge manually" comment. Maintainer intervention required — this is a permission/config bug, not an auto-merge failure.
 
 ### H5b: review → dev (verdict FAIL)
@@ -170,14 +170,14 @@ Distinct from H5b: verdict was PASS and PR approval succeeded, but `gh pr merge`
 - Verdict was PASS (`Review PASSED` comment with session-id trailer).
 - `gh pr review --approve` succeeded.
 - `gh pr merge --squash --delete-branch` returned non-zero. `MERGE_OUT` (combined stdout+stderr, truncated to 500 chars) is captured.
-- The wrapper posts a comment on the **PR** (not the issue) with prefix `Auto-merge failed:` followed by the captured excerpt and the directive `Re-dispatching dev agent to rebase onto main.`
+- The wrapper posts a comment on the **PR** (not the issue) with prefix `Auto-merge failed:` followed by the captured excerpt and the directive `Re-dispatching dev agent to rebase onto ${BASE_BRANCH}.`
 - The wrapper edits the issue: `−reviewing +pending-dev`. Does NOT remove `autonomous`. Does NOT call `gh issue close`. Does NOT add `+approved`.
 - Reviewed-HEAD trailer was already posted (before the merge attempt, in the earlier section of the wrapper).
 
 **Consumer-side invariants** (dev wrapper resume must tolerate):
 
 - The dev resume branch (`autonomous-dev.sh` MODE=resume) queries PR-issue comments via `gh api repos/.../issues/<PR>/comments` with selector `startswith("Auto-merge failed:")`.
-- When the marker is present, the resume prompt prepends a `## Pre-implementation: rebase onto main — MANDATORY FIRST STEP` section with `git fetch origin && git rebase origin/main && git push --force-with-lease`.
+- When the marker is present, the resume prompt prepends a `## Pre-implementation: rebase onto ${BASE_BRANCH} — MANDATORY FIRST STEP` section with `git fetch origin && git rebase origin/${BASE_BRANCH} && git push --force-with-lease` (`BASE_BRANCH` is the wrapper's resolved base branch, default `main`, [INV-131](invariants.md#inv-131-the-pipelines-base-branch-is-a-resolved-exported-validated-conf-value--never-a-hardcoded-main-literal-in-a-prompt-hook-or-provider-argv)).
 - When the marker is absent, the resume prompt is unchanged — H5b semantics apply.
 
 **Failure modes**:
