@@ -7695,6 +7695,152 @@ itself has never driven a label transition.
 - [`review-agent-flow.md`](review-agent-flow.md#prompt-construction) § Prompt construction — the `review-round-counter` marker and severity-ratchet prompt wording this invariant redefines the semantics of.
 - `docs/test-cases/inv-129-head-agnostic-review-round.md` — the TC-INV129-* scenario matrix.
 
+## INV-130: a shell-idiom ratchet gate blocks GROWTH of unguarded nullable-jq `.body` string-ops and unjustified `|| true`/`|| echo` swallows across `skills/` — baseline-anchored, never a from-zero ban
+
+_Triage (issue #477): [machine-checked: tests/unit/test-check-shell-idioms.sh]_
+
+**Rule**: `check-shell-idioms.sh` scans every `*.sh` under `skills/` (recursive
+`find -L`, so tracked symlinked scripts stay in scope; any path containing a
+`tests/` segment is excluded — test scaffolding legitimately swallows) for
+two recurring shell-idiom bug surfaces and blocks their **growth** per file
+against a committed baseline (`shell-idioms-baseline.json`), mirroring
+[INV-91](#inv-91-the-provider-neutral-caller-layer-routes-all-host-io-through-itp_chp_-verbs--a-new-raw-gh-outside-providers-is-a-ci-failing-cutover-regression-baseline-anchored)'s `check-provider-cutover.sh` shape (baseline-anchored regression guard, not a strict ban — the ~580 jq call sites and ~629 swallow sites tree-wide make a from-zero ban a high-risk mass-retrofit rather than a growth-prevention gate).
+
+**Rule J (jq nullable-`.body` guard)** — mechanically exact: an occurrence is
+any line whose text matches the ERE
+`\.body[[:space:]]*\|[[:space:]]*(test|contains|startswith|endswith|sub|gsub)\(`.
+An occurrence is **guarded** iff the literal substring `type == "string"`
+appears anywhere within the window of lines from 15 lines before to 15 lines
+after the match (clipped to file bounds) — the "surrounding 15 lines"
+approximation the issue specifies for "the same jq invocation's program
+text." Unguarded occurrences are counted per file. **Deliberately scoped to
+`.body` only** — the one field with a confirmed null-crash history (a bot
+comment with `body: null`, a real GitHub REST shape, makes an unguarded
+`test`/`contains`/etc. a jq **runtime error** that aborts the whole
+invocation, not a per-row non-match — the round-6 fix in the #449 series and
+the pre-existing guard in `_review_cap_prior_marker` are the motivating
+precedents). Widening to other fields is explicitly out of scope for #477.
+
+**Rule S (swallow justification)** — mechanically exact: an occurrence is any
+line matching the ERE `\|\|[[:space:]]*(true|echo)([[:space:]]|$)` (the
+issue's own `\|\|[[:space:]]*(true|echo\b)` word-boundary intent, rendered as
+a POSIX `([[:space:]]|$)` boundary wrapping the WHOLE alternation rather than
+GNU-awk's `\b`/`\>` — an earlier draft anchored only the `echo` branch,
+which left bare `true` unanchored and let it prefix-match `truex`; the POSIX
+form is both correct and `mawk`-portable, caught in review, TC-IDIOM-032)
+whose match is not itself inside a comment. Comment handling: a whole-line
+comment (first
+non-space character `#`) is skipped entirely (no occurrence at all — a
+swallow token merely *mentioned* in prose is not a call site); an inline
+trailing comment (the text from the first `#` preceded by whitespace onward)
+is stripped before matching, so a swallow appearing only inside a stripped
+comment tail is likewise never counted. An occurrence is **justified** iff
+EITHER the same line carries a trailing `#` comment after the match (i.e.
+something was stripped), OR at least one of the 3 immediately preceding
+lines is a comment line (`^[[:space:]]*#`) — note this means a swallow within
+3 lines of a file's shebang is auto-justified by the shebang line itself,
+a corner case absorbed by the baseline like any other. Unjustified
+occurrences are counted per file.
+
+**Baseline semantics** (mirrors [INV-91] exactly): `shell-idioms-baseline.json`
+has the shape `{ "<repo-relative-path>": { "jq_unguarded": N,
+"swallow_unjustified": N } }`, sorted keys (`jq -S`) so regeneration diffs are
+reviewable. Per file, per rule: `current > baseline` → **FAIL**, printing each
+offending `file:line` + the matched (trimmed) text; a file **absent** from
+the baseline with `current > 0` also FAILs (falls out of the same
+comparison against an implicit baseline of 0 — no special case); `current <
+baseline` → **PASS** with an informational notice recommending baseline
+regeneration (a ratchet-DOWN is a separate voluntary commit, never forced by
+this gate); a baseline entry naming a file no longer scanned is treated as an
+implicit shrink (not a crash, not a failure) — cleanup and file removal are
+first-class, unlike [INV-91] which explicitly FAILs a stale baseline entry
+naming a nonexistent file. Baseline (re)generation happens ONLY via the
+explicit `--write-baseline` flag, never silently during a normal check run.
+
+**`--require-trusted-ref` (fail-closed strict mode)**: reads the baseline
+from the TRUSTED ref (default `origin/main`, override via `--trusted-ref` /
+`SHELL_IDIOMS_TRUSTED_REF`) using `git show <ref>:<path>` instead of the
+working tree, so a PR cannot regenerate its own baseline and self-ratify a
+newly-introduced violation in the same change — the identical same-PR
+self-ratification bypass [INV-91]'s Check 4 closes. An unresolvable trusted
+ref (not a git work tree, ref absent — shallow/fork checkout) OR a resolvable
+ref carrying no readable/parseable baseline at the expected path is a hard
+**FAILURE** (exit 1), never a silent pass; a baseline is rebuilt only via
+`--write-baseline` as a maintainer action. Default (non-strict) mode reads
+the working-tree baseline directly and treats a missing/unreadable baseline
+file as a usage/env error (exit 2), distinct from a strict-mode fail-closed
+FAIL (exit 1) — a bare run with no baseline is a setup mistake, not a ratchet
+regression.
+
+**Exit codes**: `0` pass; `1` violations (or strict-mode fail-closed); `2`
+usage/infra error (`jq` missing, unknown flag, unreadable baseline in
+default mode).
+
+**Heuristic bounds (deliberate, not a defect)**: both detectors are
+line-window heuristics over the raw source text, not a bash/jq parser — the
+issue body explicitly rules out attempting real parsing (`Do not attempt full
+bash/jq parsing`). A false positive in EXISTING code is absorbed by the
+baseline; a false positive in NEW code costs the author one guard/comment —
+exactly the behavior the gate wants to encourage. Rule J's window is a
+textual line-distance proxy for "the same jq invocation's program text," not
+a program-boundary detector — a guard 16 lines away in the SAME jq program
+still misses (documented bound, absorbed by baseline for existing code).
+
+**Why a ratchet, not a fix-all**: retro-fixing ~1200 combined sites is
+high-risk noise; [INV-91] already proved this shape works in this repo (the
+provider-cutover guard: freeze today's occurrences, fail CI only on growth,
+let the baseline shrink voluntarily). ShellCheck is deliberately NOT
+extended for these idioms — they are project-idiom rules, not shell-syntax
+rules, and belong in a repo checker like `check-spec-drift.sh`/
+`check-provider-cutover.sh`, not in ShellCheck flags.
+
+**CI wiring — deferred, non-blocking follow-up (mirrors [INV-91]'s #295
+precedent exactly)**: the issue asks for a step in the `hermetic-shellcheck`
+job in `.github/workflows/ci.yml`. **The dev agent's scoped GitHub App token
+has no `workflows` permission and cannot push a `.github/workflows/`
+change** — `git push` of any workflow-file diff is rejected outright
+(`without 'workflows' permission`), the identical constraint that forced
+[INV-91]'s own CI step into a separate maintainer-only follow-up PR (#295)
+after the guard itself landed in #286. This PR therefore ships the checker
+script, the committed baseline, the full unit-test suite, and this INV-130
+entry; the `ci.yml` step is called out in the PR description as a
+maintainer follow-up. Until that step lands, the checker still runs in CI
+through the existing `tests/unit/test-*.sh` glob (`test-check-shell-idioms.sh`
+invokes it against the real repo — TC-IDIOM-026), so a regression is caught
+by the hermetic-unit job even without the dedicated `ci.yml` step.
+
+**Producer**: `skills/autonomous-dispatcher/scripts/check-shell-idioms.sh` +
+`skills/autonomous-dispatcher/scripts/shell-idioms-baseline.json` (the
+regression anchor, regenerated only via `--write-baseline`).
+**Consumer**: the hermetic-unit CI job (via the `tests/unit/test-*.sh` glob
+today; the dedicated `ci.yml` step is the deferred #295-style follow-up).
+
+**Status**: **IMPLEMENTED** in #477 — checker + baseline + unit tests +
+this doc entry. The dedicated `ci.yml` step wiring is a **NON-BLOCKING
+maintainer follow-up**, not part of #477 (identical posture to [INV-91]'s
+#295 deferral, forced by the same [INV-83] scoped-token constraint).
+
+**Tests**: `tests/unit/test-check-shell-idioms.sh` (TC-IDIOM-001 through
+TC-IDIOM-033 — Rule J guarded/unguarded/window-boundary/six-ops/`.body`-only
+scoping; Rule S same-line/lookback/outside-lookback/echo-variant/
+comment-only/word-boundary; baseline equal/exceed/shrink/absent-file/
+removed-file reconciliation; `tests/` scan exclusion + recursive nested
+inclusion; `--require-trusted-ref` fail-closed on unresolvable ref and on a
+resolvable-ref-without-baseline, PASS on a valid matching trusted baseline,
+and PASS against the real committed baseline in default mode;
+`--write-baseline` determinism + round-trip; usage/infra exit-2 cases;
+**TC-IDIOM-032 regression-pins the unbounded-`true`-alternation bug found in
+review** (`truex` no longer prefix-matches); **TC-IDIOM-033 closes a
+review-flagged coverage gap** — a working-tree-only violation added past a
+clean COMMITTED trusted baseline FAILs under `--require-trusted-ref`, the
+core same-PR self-ratification property Check 4-equivalent logic exists to
+prove, not just baseline-vs-baseline drift).
+
+**Cross-references**:
+- [INV-91](#inv-91-the-provider-neutral-caller-layer-routes-all-host-io-through-itp_chp_-verbs--a-new-raw-gh-outside-providers-is-a-ci-failing-cutover-regression-baseline-anchored) — the baseline-anchored ratchet shape (committed manifest, growth-only FAIL, `--require-trusted-ref` fail-closed monotonicity, deferred `ci.yml` wiring via #295) this invariant mirrors structurally.
+- [INV-83](#inv-83-cross-repo-dependency-lookups-use-a-per-dep-repo-scoped-read-token-the-app-must-be-installed-on-the-dep-repo) — the scoped-token `workflows`-permission gap that forces the CI-wiring deferral, same as [INV-91]'s.
+- `docs/designs/shell-idioms-ratchet.md`, `docs/test-cases/shell-idioms-ratchet.md` — design + the TC-IDIOM-* scenario matrix.
+
 ---
 
 ## INV-131: the pipeline's base branch is a resolved, exported, validated conf value — never a hardcoded `main` literal in a prompt, hook, or provider argv
