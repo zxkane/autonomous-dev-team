@@ -1000,6 +1000,8 @@ _review_abort_no_valid_pr() {
   itp_post_comment "$ISSUE_NUMBER" \
     "${_comment_body}$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
   emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-non-substantive" "no-pr-found" 2>/dev/null || true
+  # [INV-129 [P3]] round=0 second reset channel (see the R3 comment near the AGGREGATE=="pass" branch).
+  itp_post_comment "$ISSUE_NUMBER" "$(_review_round_marker "$ISSUE_NUMBER" "${PR_HEAD_SHA:-}" 0)" 2>/dev/null || true
   itp_transition_state "$ISSUE_NUMBER" "reviewing" "pending-dev" 2>/dev/null || true
   # The wrapper has fully HANDLED this exit: it posted the non-substantive
   # `no-pr-found` verdict and flipped the label itself. Mark RESULT_PARSED=true
@@ -1986,6 +1988,8 @@ ${_gf_marker}" 2>/dev/null || true
     itp_post_comment "$ISSUE_NUMBER" \
       "Review held: the wrapper ran E2E once (INV-46) and it exited clean, but no SHA-matching e2e-evidence comment for HEAD \`${PR_HEAD_SHA:0:7}\` is visible (likely transient — comment-post or GitHub propagation). The PR is NOT auto-reviewed while the evidence is missing; it will be re-reviewed on the next dispatch tick.$(declare -F run_footer >/dev/null 2>&1 && run_footer || true)" 2>/dev/null || true
     emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-non-substantive" "e2e-evidence-missing" 2>/dev/null || true
+    # [INV-129 [P3]] round=0 second reset channel (see the R3 comment near the AGGREGATE=="pass" branch).
+    itp_post_comment "$ISSUE_NUMBER" "$(_review_round_marker "$ISSUE_NUMBER" "$PR_HEAD_SHA" 0)" 2>/dev/null || true
     itp_transition_state "$ISSUE_NUMBER" "reviewing" "pending-dev" 2>/dev/null || true
     log "Issue #${ISSUE_NUMBER} moved to pending-dev (E2E evidence missing — re-queue, no fan-out)."
     RESULT_PARSED=true
@@ -2176,6 +2180,8 @@ The review was NOT run and the PR was NOT evaluated. The issue stays \`reviewing
       # dispatcher re-routes to review, not a dev retry. The cause token matches
       # the trailer cause whitelist (^[a-z0-9-]+$).
       emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-non-substantive" "smoke-config-error" 2>/dev/null || true
+      # [INV-129 [P3]] round=0 second reset channel (see the R3 comment near the AGGREGATE=="pass" branch).
+      itp_post_comment "$ISSUE_NUMBER" "$(_review_round_marker "$ISSUE_NUMBER" "${PR_HEAD_SHA:-}" 0)" 2>/dev/null || true
       # Stay `reviewing` — do NOT add pending-dev. RESULT_PARSED=true so the crash
       # EXIT trap (which would flip reviewing→pending-dev on a non-zero exit) does
       # NOT override this deliberate decision.
@@ -3410,6 +3416,15 @@ _AGGREGATE_HAS_P0P1_FAIL=$(_aggregate_has_p0p1_fail "${_AGGREGATE_VERDICT_SEVERI
 # widening the floor (the unsafe direction). `round=0` independently yields
 # `next_count = 1` on the next read regardless of whether the trailer cutoff
 # landed. A substantive fail posts the incremented round exactly as before.
+#
+# [INV-129 codex review round-1 [P3]] Every `failed-non-substantive` exit
+# path in this wrapper ALSO posts its own `round=0` marker right after its
+# own non-substantive verdict-trailer call, for the identical reason: that
+# trailer is already a reset cutoff (channel 1), but the post can silently
+# fail too, and a `failed-non-substantive` round is NOT itself decided as
+# `$AGGREGATE == "pass"` here (it short-circuits out of one of several
+# earlier gates), so this `if` never runs for it — each of those gates
+# carries its own `round=0` post inline.
 if [[ "$AGGREGATE" == "pass" ]]; then
   itp_post_comment "$ISSUE_NUMBER" "$(_review_round_marker "$ISSUE_NUMBER" "$PR_HEAD_SHA" 0)" 2>/dev/null || true
 elif [[ "$AGGREGATE" == "fail" ]] && [[ "$_AGGREGATE_SUBSTANTIVE_FAIL" == "true" ]]; then
@@ -4051,6 +4066,8 @@ Findings->Decision Gate: 1 blocking finding(s) -- FAIL.
       # SHA-bound wait marker bounds the loop (BOT_REVIEW_WAIT_MAX) and resets when
       # dev pushes a new HEAD.
       emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-non-substantive" "awaiting-bot-review" 2>/dev/null || true
+      # [INV-129 [P3]] round=0 second reset channel (see the R3 comment near the AGGREGATE=="pass" branch).
+      itp_post_comment "$ISSUE_NUMBER" "$(_review_round_marker "$ISSUE_NUMBER" "$PR_HEAD_SHA" 0)" 2>/dev/null || true
       itp_transition_state "$ISSUE_NUMBER" "reviewing" "pending-review" 2>/dev/null || true
       RESULT_PARSED=true
       exit 0
@@ -4140,6 +4157,8 @@ Findings->Decision Gate: 1 blocking finding(s) -- FAIL.
 
     # INV-35: not a code issue — GitHub-side transient. Re-route through review.
     emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-non-substantive" "mergeable-unknown" 2>/dev/null || true
+    # [INV-129 [P3]] round=0 second reset channel (see the R3 comment near the AGGREGATE=="pass" branch).
+    itp_post_comment "$ISSUE_NUMBER" "$(_review_round_marker "$ISSUE_NUMBER" "$PR_HEAD_SHA" 0)" 2>/dev/null || true
 
     itp_transition_state "$ISSUE_NUMBER" "reviewing" "pending-dev" 2>/dev/null || true
 
@@ -4326,6 +4345,8 @@ Re-dispatching dev agent to rebase onto main.$(declare -F run_footer >/dev/null 
       # session's code is fine, only the merge step couldn't complete.
       # Routes back through review on the next tick once the rebase lands.
       emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-non-substantive" "merge-conflict-unresolvable" 2>/dev/null || true
+      # [INV-129 [P3]] round=0 second reset channel (see the R3 comment near the AGGREGATE=="pass" branch).
+      itp_post_comment "$ISSUE_NUMBER" "$(_review_round_marker "$ISSUE_NUMBER" "$PR_HEAD_SHA" 0)" 2>/dev/null || true
 
       # Capture stderr so a failed label transition is diagnosable from logs —
       # otherwise the issue would silently stick in `reviewing` and the next
@@ -4351,6 +4372,8 @@ else
     # (transport / mid-stream failure, not a code issue identified by the
     # agent). Cause `other` because we don't have a more specific signal.
     emit_verdict_trailer "$ISSUE_NUMBER" "$REPO" "failed-non-substantive" "other" 2>/dev/null || true
+    # [INV-129 [P3]] round=0 second reset channel (see the R3 comment near the AGGREGATE=="pass" branch).
+    itp_post_comment "$ISSUE_NUMBER" "$(_review_round_marker "$ISSUE_NUMBER" "$PR_HEAD_SHA" 0)" 2>/dev/null || true
   else
     # INV-35: agent posted a verdict comment but the verdict was FAILED
     # (or pattern-matched only fail keywords). This is a substantive

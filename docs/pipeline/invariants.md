@@ -7592,9 +7592,10 @@ stalls are dev-side inaction / same-head E2E-gate fixed points — neither is
 evidence the review-round series itself was wrong, and the series
 legitimately continues across them.
 
-**`round=0` explicit reset marker on PASS rounds (mandatory, not optional)**:
-at the existing marker-post site in `autonomous-review.sh` (right after
-`AGGREGATE` is computed), a `pass` aggregate now posts
+**`round=0` explicit reset marker on PASS rounds AND every
+`failed-non-substantive` exit path (mandatory, not optional)**: at the
+existing marker-post site in `autonomous-review.sh` (right after `AGGREGATE`
+is computed), a `pass` aggregate now posts
 `<!-- review-round-counter: issue=<N> head=<sha|unknown> round=0 -->` instead
 of the (already-incremented) `$REVIEW_ROUND`; a substantive `fail` posts the
 incremented round exactly as before #475. This makes the reset
@@ -7608,6 +7609,26 @@ are otherwise unchanged: only decided rounds post a marker at all (never
 `all-unavailable`); a fail round additionally requires
 `_AGGREGATE_SUBSTANTIVE_FAIL` (an all-timeout-veto `fail` still posts no
 marker, same as before #475).
+
+Every one of the wrapper's seven `failed-non-substantive` exit paths
+(`no-pr-found`, `e2e-evidence-missing`, `smoke-config-error`,
+`awaiting-bot-review`, `mergeable-unknown`, `merge-conflict-unresolvable`,
+`other`) ALSO posts its own `round=0` marker immediately after its
+`emit_verdict_trailer failed-non-substantive` call, for the identical
+dual-channel reason: a `failed-non-substantive` trailer is already a reset
+cutoff via channel 1 above, but that post can silently fail too
+(`emit_verdict_trailer`'s own `|| true`), and none of these seven exit paths
+is reached via the `$AGGREGATE == "pass"` branch that carries the original
+PASS-round `round=0` post — each short-circuits out of an earlier gate
+(no-valid-PR abort, the E2E hard gate, the pre-fan-out smoke gate, the
+mandatory-bot-review gate, the mergeable hard gate, the auto-merge-failure
+branch, or the no-verdict-comment crash fallback) before ever reaching that
+`if`. Closes a gap flagged by an independent review pass on this same
+change (issue #475 round 1): without this, a silently-failed
+`failed-non-substantive` trailer post left `_review_round_prior_marker` with
+no reset signal at all, so the next substantive fail could inherit the stale
+pre-reset marker and prematurely narrow the ratchet's blocking floor — the
+unsafe direction.
 
 **INV-127's `_aggregate_has_p0p1_fail` gate: unchanged, re-documented (not
 re-purposed)**: `_aggregate_has_p0p1_fail` (`lib-review-aggregate.sh`) and

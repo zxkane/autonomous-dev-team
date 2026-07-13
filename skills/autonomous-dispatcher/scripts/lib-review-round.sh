@@ -33,11 +33,16 @@
 # a reset key. Resets happen via explicit channels only (see
 # `_review_round_prior_marker` below): a `passed`/`failed-non-substantive`
 # `review-verdict` trailer, an INV-127 trip report, or an explicit `round=0`
-# marker (R3, posted on every PASS round). The marker read at the call site
-# (autonomous-review.sh) filters to `authorKind != "human"` (mirrors
-# INV-105/INV-122's own marker-authenticity filter) so a forged marker from
-# an ordinary collaborator comment can never be read as the prior round
-# count.
+# marker (R3, posted on every PASS round AND every `failed-non-substantive`
+# round — the latter closes a codex review-round-1 [P3] gap: a
+# `failed-non-substantive` trailer is already a reset cutoff via channel 1,
+# but `emit_verdict_trailer`'s own `|| true` can silently drop that post; the
+# `round=0` marker independently yields `next_count = 1` through the ordinary
+# parse path regardless of whether the trailer landed, exactly like the
+# PASS-round hardening). The marker read at the call site (autonomous-review.sh)
+# filters to `authorKind != "human"` (mirrors INV-105/INV-122's own
+# marker-authenticity filter) so a forged marker from an ordinary collaborator
+# comment can never be read as the prior round count.
 
 # _review_round_marker <issue> <head> <round> — construct the marker text.
 # An empty/unset <head> renders as the literal placeholder "unknown" rather
@@ -101,10 +106,11 @@ _review_round_next_count() {
 #       guarded) — a PASS or non-substantive-FAIL round is evidence the
 #       series was resolved/not-a-real-substantive-failure, so a LATER
 #       substantive fail must not inherit a stale pre-reset round. (R3 also
-#       posts an explicit `round=0` marker on PASS rounds as a second,
-#       independent reset channel — see this file's own module doc — but
-#       this trailer-based cutoff catches the case where that marker post
-#       itself failed, e.g. a transient itp_post_comment failure.)
+#       posts an explicit `round=0` marker on every PASS round AND every
+#       `failed-non-substantive` exit path as a second, independent reset
+#       channel — see this file's own module doc — but this trailer-based
+#       cutoff catches the case where that marker post itself failed, e.g. a
+#       transient itp_post_comment failure.)
 #   (b) the latest INV-127 trip report (body matching
 #       "Review-round-cap circuit-breaker tripped"). Explicit rule: an
 #       INV-127 trip is ITSELF a reset cutoff — after an operator removes

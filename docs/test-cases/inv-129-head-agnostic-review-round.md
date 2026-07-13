@@ -63,6 +63,7 @@ end-to-end.
 | TC-INV129-021 | `_review_round_next_count` fed a `round=0` marker directly (via the ordinary parse path, NOT the trailer cutoff) | returns `1` — the marker-side channel independently resets even with no qualifying trailer at all |
 | TC-INV129-022 | `round=0` marker present with NO `passed`/`failed-non-substantive` trailer anywhere in the fixture (models a transient `emit_verdict_trailer` post failure) | the series still resets to 1 via the marker-side channel alone — proves the reset is dual-channel, not solely dependent on the trailer |
 | TC-INV129-023 | A `round=0` marker followed by a later genuine `failed-substantive` marker at round N | the later marker wins (normal "latest qualifying marker" behavior — the round=0 marker is not itself a permanent floor) |
+| TC-INV129-037..043 | Each of the wrapper's seven `failed-non-substantive` exit paths (`no-pr-found`, `e2e-evidence-missing`, `smoke-config-error`, `awaiting-bot-review`, `mergeable-unknown`, `merge-conflict-unresolvable`, `other`) | ALSO posts its own `round=0` reset marker immediately after its `emit_verdict_trailer failed-non-substantive` call — closes a round-1 review finding: a silently-failed non-substantive trailer post left `_review_round_prior_marker` with no reset signal at all (channel 1 alone was insufficient for these seven paths, since none of them runs through the `pass`-gated post site) |
 
 ### Group E — read-site wiring: full-body anchor + empty-head handling (TC-INV129-024..029)
 

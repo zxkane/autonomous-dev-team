@@ -681,22 +681,34 @@ assert_eq "TC-REVIEW-CONV-053b jq fallback rejects an out-of-enum severity value
   "$(_validate_verdict_artifact_jq "$TMP53/sev-bad.json" && echo valid || echo malformed)"
 rm -rf "$TMP53"
 
-# TC-REVIEW-CONV-054..056: [P1] #2 — the review-round-counter marker must be
-# posted only AFTER a decided verdict (pass/fail), not unconditionally at
+# TC-REVIEW-CONV-054..056: [P1] #2 — the review-round-counter marker that
+# ADVANCES the round (posts the live `$REVIEW_ROUND` value) must be posted
+# only AFTER a decided verdict (pass/fail), not unconditionally at
 # prompt-render time (pre-fix location, before the E2E gate / smoke gate /
 # fan-out have even run) — a crash/no-verdict round on the same head must not
 # silently advance the counter that feeds the severity ratchet's floor.
+#
+# [INV-129, issue #475 codex review round-1 [P3]] Several EARLIER exit paths
+# (no-pr-found, smoke-config-error, …) now ALSO call `_review_round_marker`
+# — but always with the literal RESET value `0`, never `$REVIEW_ROUND`. A
+# `round=0` post can only ever narrow the series back to its safest state
+# (next read = 1); it can never advance/inflate the round, so posting it
+# early is safe and does not reintroduce the bug TC-REVIEW-CONV-054/055
+# originally guarded against. These assertions were narrowed from "no
+# `_review_round_marker` call at all" to "no call carrying `$REVIEW_ROUND`
+# (the only value that can advance the series)" to keep pinning the actual
+# invariant.
 prompt_render_region=$(sed -n '1,1160p' "$WRAPPER")
-assert_eq "TC-REVIEW-CONV-054 no unconditional review-round-counter post before the fan-out (prompt-render region)" "" \
-  "$(grep -o 'itp_post_comment "\$ISSUE_NUMBER" "\$(_review_round_marker' <<<"$prompt_render_region")"
+assert_eq "TC-REVIEW-CONV-054 no unconditional review-round-counter ADVANCE post before the fan-out (prompt-render region)" "" \
+  "$(grep -o 'itp_post_comment "\$ISSUE_NUMBER" "\$(_review_round_marker "\$ISSUE_NUMBER" "\$PR_HEAD_SHA" "\$REVIEW_ROUND"' <<<"$prompt_render_region")"
 
-aggregate_marker_line=$(grep -n 'itp_post_comment "\$ISSUE_NUMBER" "\$(_review_round_marker' "$WRAPPER" | head -1 | cut -d: -f1)
+aggregate_marker_line=$(grep -n '_review_round_marker "\$ISSUE_NUMBER" "\$PR_HEAD_SHA" "\$REVIEW_ROUND"' "$WRAPPER" | head -1 | cut -d: -f1)
 aggregate_compute_line=$(grep -n '^AGGREGATE=\$(_aggregate_review_verdicts' "$WRAPPER" | head -1 | cut -d: -f1)
-assert_eq "TC-REVIEW-CONV-055 review-round-counter marker IS posted, but strictly after AGGREGATE is computed" "true" \
+assert_eq "TC-REVIEW-CONV-055 review-round-counter ADVANCE marker IS posted, but strictly after AGGREGATE is computed" "true" \
   "$([[ -n "$aggregate_marker_line" && -n "$aggregate_compute_line" && "$aggregate_marker_line" -gt "$aggregate_compute_line" ]] && echo true || echo false)"
 
 marker_post_region=$(sed -n "${aggregate_compute_line},$((aggregate_marker_line + 1))p" "$WRAPPER")
-assert_contains "TC-REVIEW-CONV-056 the post-aggregation marker post is gated on a DECIDED verdict (pass/fail)" \
+assert_contains "TC-REVIEW-CONV-056 the post-aggregation ADVANCE marker post is gated on a DECIDED verdict (pass/fail)" \
   "$marker_post_region" '[[ "$AGGREGATE" == "pass" ]]'
 assert_contains "TC-REVIEW-CONV-056b the marker post's fail arm also requires substantive fail (codex round 4 [P1] #1)" \
   "$marker_post_region" '[[ "$AGGREGATE" == "fail" ]] && [[ "$_AGGREGATE_SUBSTANTIVE_FAIL" == "true" ]]'
@@ -1113,6 +1125,37 @@ assert_contains "TC-INV129-019 a pass aggregate posts round=0 (wiring grep)" \
 
 assert_contains "TC-INV129-020 a substantive fail posts the incremented round (unchanged)" \
   "$(cat "$WRAPPER")" '_review_round_marker "$ISSUE_NUMBER" "$PR_HEAD_SHA" "$REVIEW_ROUND"'
+
+# TC-INV129-037..043 (codex review round-1 [P3]): EVERY failed-non-substantive
+# exit path must ALSO post its own round=0 marker — the trailer-cutoff channel
+# (channel 1, `_review_round_prior_marker`) is not enough on its own because
+# `emit_verdict_trailer`'s own itp_post_comment carries `|| true` and can
+# silently fail, letting a later failed-substantive round inherit a stale
+# high count. Pinned as a wiring grep: for each failed-non-substantive cause
+# token's emit_verdict_trailer call site, a `_review_round_marker ... 0)`
+# post must appear within the next 10 source lines.
+declare -A _I129_NONSUB_CAUSES=(
+  [no-pr-found]=1
+  [e2e-evidence-missing]=1
+  [smoke-config-error]=1
+  [awaiting-bot-review]=1
+  [mergeable-unknown]=1
+  [merge-conflict-unresolvable]=1
+  [other]=1
+)
+for _cause in "${!_I129_NONSUB_CAUSES[@]}"; do
+  _cause_line=$(grep -n "emit_verdict_trailer \"\$ISSUE_NUMBER\" \"\$REPO\" \"failed-non-substantive\" \"${_cause}\"" "$WRAPPER" | head -1 | cut -d: -f1)
+  if [[ -z "$_cause_line" ]]; then
+    echo -e "  ${RED}FAIL${NC}: TC-INV129-037..043 could not locate emit_verdict_trailer call site for cause=${_cause}"
+    FAIL=$((FAIL + 1))
+    continue
+  fi
+  _cause_block=$(sed -n "${_cause_line},$((_cause_line + 10))p" "$WRAPPER")
+  assert_contains "TC-INV129-037..043 cause=${_cause} also posts a round=0 reset marker within 10 lines" \
+    "$_cause_block" '_review_round_marker "$ISSUE_NUMBER"'
+  assert_contains "TC-INV129-037..043 cause=${_cause} round=0 marker literal" \
+    "$_cause_block" ' 0)" 2>/dev/null || true'
+done
 
 _i129_round0=$(_review_round_marker 200 aaa 0)
 assert_eq "TC-INV129-021 _review_round_next_count fed a round=0 marker directly returns 1" "1" \
