@@ -21,10 +21,20 @@ fi
 # Skip verification on the base/trunk branch (no PR workflow). Hooks stay
 # zero-dependency shell (no conf parsing) — issue #478 ([INV-131]): read the
 # env chain BASE_BRANCH → TRUNK_BRANCH → "main" the wrapper resolves+exports
-# at startup. `master` is kept as an extra legacy fallback for repos that
-# never configured either var. Byte-identical to today when neither is set.
+# at startup. Byte-identical to today when neither is set.
 base_branch="${BASE_BRANCH:-${TRUNK_BRANCH:-main}}"
-if [[ "$current_branch" == "$base_branch" || "$current_branch" == "master" ]]; then
+if [[ "$current_branch" == "$base_branch" ]]; then
+  exit 0
+fi
+
+# Legacy `master` fallback — ONLY when neither BASE_BRANCH nor TRUNK_BRANCH
+# is configured (pre-#478 behavior treated both `main` and `master` as
+# trunk unconditionally). Once an explicit base branch is configured (e.g.
+# BASE_BRANCH=develop), a literal `master` checkout is an ordinary branch,
+# not the trunk, and must still go through the full verification gate —
+# otherwise a repo that keeps a `master` branch around gets a silent
+# CI/E2E/review-thread bypass on it.
+if [[ -z "${BASE_BRANCH:-}" && -z "${TRUNK_BRANCH:-}" && "$current_branch" == "master" ]]; then
   exit 0
 fi
 

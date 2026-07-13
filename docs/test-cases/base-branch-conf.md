@@ -83,10 +83,17 @@ The `block-substantive` finding comment, the `Auto-merge failed:` PR marker,
 and the `submit_request_changes` body all reference `develop` (not `main`)
 in both the prose and the `git fetch`/`git rebase` command lines.
 
-### TC-BASEBR-013 — `needs_open_pr_only` reads `BASE_BRANCH` (with a `:-main` direct-invocation fallback)
+### TC-BASEBR-013 — `needs_open_pr_only` reads the `BASE_BRANCH → DEFAULT_BRANCH → main` chain (direct-invocation fallback)
 With `BASE_BRANCH=develop` exported, `needs_open_pr_only`'s ahead-check
-resolves `origin/develop` (not `origin/main`) as the comparison base.
-Unexported (direct extraction / legacy invocation) falls back to `main`.
+resolves `origin/develop` (not `origin/main`) as the comparison base. A
+direct/test invocation that sources only the extracted function (no wrapper
+startup) mirrors the SAME chain — `${BASE_BRANCH:-${DEFAULT_BRANCH:-main}}`
+— rather than dropping straight to `main`, so a caller that sets only the
+deprecated `DEFAULT_BRANCH` (as `tests/unit/test-autonomous-dev-pushed-no-pr-resume.sh`'s
+harness does) still gets the correct comparison base. TC-CR-016 in that file
+pins this behaviorally: `DEFAULT_BRANCH=develop` with a branch ahead of
+`origin/develop` (and NOT ahead of `origin/main`, discriminating the two)
+correctly returns the fast path.
 
 ### TC-BASEBR-014 — `chp_github_create_pr` argv includes `--base develop` under override
 `BASE_BRANCH=develop` → the emitted `gh pr create` argv ends with
@@ -125,8 +132,17 @@ self-skip, generalized).
 
 ### TC-BASEBR-021 — `verify-completion.sh` skips verification on the resolved base branch
 `BASE_BRANCH=develop`, current branch `develop` → hook exits 0 (no jq/gh
-calls attempted). Current branch `master` (legacy fallback, independent of
-`BASE_BRANCH`) also exits 0.
+calls attempted).
+
+### TC-BASEBR-021b — `verify-completion.sh` only treats a literal `master` checkout as trunk when NEITHER `BASE_BRANCH` nor `TRUNK_BRANCH` is configured
+Fixture repo checked out on `master`. With neither var set, the hook exits
+before invoking `gh` (legacy unconditional `master` fallback — regression
+pin). With `BASE_BRANCH=develop` set, `master` is an ordinary branch under
+that deployment — the hook proceeds past the trunk-skip and DOES invoke
+`gh` (verified via a stub `gh` on `PATH` that logs invocation). Without this
+case, a repo that keeps a `master` branch around would get its CI/E2E/
+review-thread verification silently bypassed on `master` even though the
+configured base branch is `develop`.
 
 ### TC-BASEBR-022 — `block-push-to-main.sh` blocks a push to the resolved `BASE_BRANCH`, not just `main`
 `BASE_BRANCH=develop`, push destination `refs/heads/develop` → exit 2
@@ -143,6 +159,13 @@ trunk is `develop` (BASE_BRANCH takes precedence in the chain
 `TRUNK_BRANCH=master`, `BASE_BRANCH` unset → identical behavior to the
 pre-#478 hook (protects `master`) — TC-BP-10 in `test-block-push-regex.sh`
 stays green unmodified.
+
+### TC-BASEBR-024b — `block-push-to-main.sh`'s BLOCKED message names the resolved trunk, not a hardcoded `main`
+`BASE_BRANCH=develop`, blocked push to `refs/heads/develop` → the stderr
+message contains `` `develop` `` and contains NEITHER `Direct Push to Main`
+nor `` directly to `main` `` — the heading and prose both interpolate the
+resolved `$trunk` variable. With `BASE_BRANCH` unset (regression pin), the
+message still names `` `main` ``, unchanged from pre-#478.
 
 ### TC-BASEBR-025 — wiring pins: both wrappers resolve+export `BASE_BRANCH` immediately after the required-config validation loop
 Source-of-truth grep: `BASE_BRANCH="$(resolve_base_branch)"` and

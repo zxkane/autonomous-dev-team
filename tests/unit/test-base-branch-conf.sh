@@ -65,6 +65,17 @@ assert_contains() {
   fi
 }
 
+assert_no_contains() {
+  local desc="$1" haystack="$2" needle="$3"
+  if [[ "$haystack" != *"$needle"* ]]; then
+    echo -e "  ${GREEN}PASS${NC}: $desc"
+    PASS=$((PASS + 1))
+  else
+    echo -e "  ${RED}FAIL${NC}: $desc — should NOT contain: $needle"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
 assert_empty() {
   local desc="$1" actual="$2"
   if [[ -z "$actual" ]]; then
@@ -257,10 +268,10 @@ assert_grep "TC-BASEBR-012 submit_request_changes body names \${BASE_BRANCH}" \
 
 # ===========================================================================
 echo ""
-echo "=== TC-BASEBR-013: needs_open_pr_only reads BASE_BRANCH ==="
+echo "=== TC-BASEBR-013: needs_open_pr_only reads the BASE_BRANCH->DEFAULT_BRANCH->main chain ==="
 # ===========================================================================
-assert_grep "TC-BASEBR-013 needs_open_pr_only reads \${BASE_BRANCH:-main}" \
-  'local base="\$\{BASE_BRANCH:-main\}"' "$DEV_WRAPPER"
+assert_grep "TC-BASEBR-013 needs_open_pr_only reads \${BASE_BRANCH:-\${DEFAULT_BRANCH:-main}}" \
+  'local base="\$\{BASE_BRANCH:-\$\{DEFAULT_BRANCH:-main\}\}"' "$DEV_WRAPPER"
 
 # ===========================================================================
 echo ""
@@ -410,6 +421,51 @@ assert_grep "TC-BASEBR-021 verify-completion.sh resolves \${BASE_BRANCH:-\${TRUN
 assert_grep "TC-BASEBR-021 verify-completion.sh skip-check compares against \$base_branch" \
   '"\$current_branch" == "\$base_branch"' "$VERIFY_HOOK"
 
+# ---------------------------------------------------------------------------
+# TC-BASEBR-021b: with BASE_BRANCH configured to a non-master value, a
+# checkout literally named `master` must NOT get the unconditional trunk-skip
+# bypass — it's an ordinary branch and must go through the full CI/E2E/
+# review-thread gate, same as any other feature branch. Legacy behavior
+# (neither BASE_BRANCH nor TRUNK_BRANCH set) must still skip `master`
+# unconditionally (regression pin).
+# ---------------------------------------------------------------------------
+VC_TMPDIR=$(mktemp -d)
+register_cleanup "$VC_TMPDIR"
+git -C "$VC_TMPDIR" init --quiet --initial-branch=master
+git -C "$VC_TMPDIR" -c user.email=t@t -c user.name=t commit --quiet --allow-empty -m init
+
+# Stub `gh`/`jq` on PATH: the hook gates on `command -v jq` then `command -v
+# gh` (silently exit 0 if either is missing) before making any gh call, so
+# `jq` must resolve to the REAL binary; `gh` is a fake that just records that
+# it was invoked — proving the hook proceeded PAST the trunk-skip early-exit
+# rather than actually driving real network calls.
+VC_STUB_DIR="$VC_TMPDIR/bin"
+mkdir -p "$VC_STUB_DIR"
+REAL_JQ="$(command -v jq)"
+ln -sf "$REAL_JQ" "$VC_STUB_DIR/jq"
+VC_GH_LOG="$VC_TMPDIR/gh-invoked.log"
+cat > "$VC_STUB_DIR/gh" <<EOF
+#!/bin/bash
+echo "\$*" >> "$VC_GH_LOG"
+echo "[]"
+exit 1
+EOF
+chmod +x "$VC_STUB_DIR/gh"
+
+run_verify_hook() {
+  local base_branch_env="${1:-}"
+  rm -f "$VC_GH_LOG"
+  (cd "$VC_TMPDIR" && env PATH="$VC_STUB_DIR:$PATH" ${base_branch_env:+BASE_BRANCH="$base_branch_env"} bash "$VERIFY_HOOK" <<<'{}' >/dev/null 2>&1)
+}
+
+run_verify_hook ""
+gh_called_legacy="no"; [[ -s "$VC_GH_LOG" ]] && gh_called_legacy="yes"
+assert_eq "TC-BASEBR-021b legacy (no BASE_BRANCH/TRUNK_BRANCH): master unconditionally skips (gh never called)" "no" "$gh_called_legacy"
+
+run_verify_hook "develop"
+gh_called_configured="no"; [[ -s "$VC_GH_LOG" ]] && gh_called_configured="yes"
+assert_eq "TC-BASEBR-021b BASE_BRANCH=develop: master is NOT the trunk, hook proceeds (gh called)" "yes" "$gh_called_configured"
+
 # ===========================================================================
 echo ""
 echo "=== TC-BASEBR-022..024: block-push-to-main.sh BASE_BRANCH precedence ==="
@@ -428,11 +484,12 @@ setup_bp_repo() {
   fi
 }
 
+# Build the hook's PreToolUse JSON payload for a `git push` command.
+bp_hook_input() { printf '{"tool_input":{"command":%s}}' "$(jq -Rn --arg c "$1" '$c')"; }
+
 run_block_hook() {
   local cmd="$1"; shift
-  local input
-  input=$(printf '{"tool_input":{"command":%s}}' "$(jq -Rn --arg c "$cmd" '$c')")
-  (cd "$BP_TMPDIR/repo" && CLAUDE_PROJECT_DIR="$BP_TMPDIR/repo" env "$@" bash "$BLOCK_HOOK" <<<"$input")
+  (cd "$BP_TMPDIR/repo" && CLAUDE_PROJECT_DIR="$BP_TMPDIR/repo" env "$@" bash "$BLOCK_HOOK" <<<"$(bp_hook_input "$cmd")")
   echo $?
 }
 
@@ -451,6 +508,28 @@ assert_exit "TC-BASEBR-023 BASE_BRANCH wins over TRUNK_BRANCH (master NOT protec
 
 out=$(run_block_hook "git push -u origin master" TRUNK_BRANCH=master)
 assert_exit "TC-BASEBR-024 only TRUNK_BRANCH set → unchanged pre-#478 behavior (master protected)" "2" "$out"
+
+# ---------------------------------------------------------------------------
+# TC-BASEBR-024b: the BLOCKED message text names the resolved trunk branch,
+# not a hardcoded "main" — otherwise a BASE_BRANCH=develop deployment shows
+# a misleading "Direct Push to Main" / "Pushing directly to main" message
+# while actually blocking a push to develop.
+# ---------------------------------------------------------------------------
+# Same invocation as run_block_hook, but capture stderr (the BLOCKED message)
+# instead of the exit code.
+run_block_hook_stderr() {
+  local cmd="$1"; shift
+  (cd "$BP_TMPDIR/repo" && CLAUDE_PROJECT_DIR="$BP_TMPDIR/repo" env "$@" bash "$BLOCK_HOOK" <<<"$(bp_hook_input "$cmd")" 2>&1 1>/dev/null)
+}
+
+setup_bp_repo "main"
+msg=$(run_block_hook_stderr "git push -u origin develop" BASE_BRANCH=develop)
+assert_contains "TC-BASEBR-024b BASE_BRANCH=develop block message names 'develop', not 'main'" "$msg" '`develop`'
+assert_no_contains "TC-BASEBR-024b BASE_BRANCH=develop block message has no 'Direct Push to Main'" "$msg" "Direct Push to Main"
+assert_no_contains "TC-BASEBR-024b BASE_BRANCH=develop block message has no 'directly to \`main\`'" "$msg" 'directly to `main`'
+
+msg=$(run_block_hook_stderr "git push -u origin main")
+assert_contains "TC-BASEBR-024b BASE_BRANCH unset block message still names 'main' (regression pin)" "$msg" '`main`'
 
 # ===========================================================================
 echo ""

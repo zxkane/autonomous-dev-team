@@ -518,10 +518,14 @@ needs_open_pr_only() {
   local issue_num="$1"
   # Base branch. `BASE_BRANCH` is resolved+exported once at wrapper startup
   # (issue #478, [INV-131], resolve_base_branch in lib-config.sh implements
-  # the BASE_BRANCH → DEFAULT_BRANCH-deprecated → "main" chain); the `:-main`
-  # fallback here only covers direct/test invocations that source this
-  # function without the wrapper's startup resolution.
-  local base="${BASE_BRANCH:-main}"
+  # the BASE_BRANCH → DEFAULT_BRANCH-deprecated → "main" chain). The
+  # `${BASE_BRANCH:-${DEFAULT_BRANCH:-main}}` fallback here mirrors that same
+  # chain for direct/test invocations that source this function without the
+  # wrapper's startup resolution (e.g. tests/unit/test-autonomous-dev-pushed-no-pr-resume.sh's
+  # extracted-function harness, which sets only DEFAULT_BRANCH) — without it,
+  # such a caller silently drops back to "main" and pushed-no-PR detection
+  # compares against the wrong remote ref.
+  local base="${BASE_BRANCH:-${DEFAULT_BRANCH:-main}}"
 
   # (1) No open PR for this issue. Reuse the same body-reference selector the
   # cleanup trap uses. Any non-zero count means a PR exists → not our state.
