@@ -252,23 +252,26 @@ else
 fi
 
 # Schema-validate the resolved baseline: every value must be an object whose
-# jq_unguarded/swallow_unjustified (if present) are numbers. "Parseable JSON"
-# alone is not enough — a malformed entry (e.g. a string where a number is
-# expected) makes the reconciliation loop's `jq -r '...\(.value.field // 0)'`
-# either abort mid-stream or feed a non-numeric string into `[ -gt ]`/`[ -lt ]`,
-# and under `set -uo pipefail` (no `-e`) that degrades to a silently-skipped
-# file rather than a hard failure — defeating the ratchet for exactly that
-# file, even under --require-trusted-ref fail-closed strict mode. Checked
-# after both baseline-resolution branches so one check covers both.
-if ! jq -e 'type == "object" and (to_entries | all(.value | type == "object"
-      and ((.jq_unguarded // 0) | type == "number")
-      and ((.swallow_unjustified // 0) | type == "number")))' \
+# jq_unguarded/swallow_unjustified (if present) are non-negative INTEGERS —
+# not merely jq `number`s. "Parseable JSON" alone is not enough, and neither
+# is a bare `type == "number"`: a malformed entry (a string, or a non-integer
+# number like 1.5/1e2, where an integer is expected) feeds the reconciliation
+# loop's `[ -gt ]`/`[ -lt ]` a non-integer. Bash then prints "integer
+# expected" to stderr but still returns non-zero (false), and under
+# `set -uo pipefail` (no `-e`) that degrades to a silently-skipped file rather
+# than a hard failure — defeating the ratchet for exactly that file, even
+# under --require-trusted-ref fail-closed strict mode.
+# Checked after both baseline-resolution branches so one check covers both.
+if ! jq -e 'def nonneg_int: type == "number" and . >= 0 and (. == (. | floor));
+      type == "object" and (to_entries | all(.value | type == "object"
+      and ((.jq_unguarded // 0) | nonneg_int)
+      and ((.swallow_unjustified // 0) | nonneg_int)))' \
     >/dev/null 2>&1 <<<"$BASELINE_JSON"; then
   if [ "$REQUIRE_TRUSTED_REF" = "1" ]; then
-    fail "strict mode: trusted baseline at '${TRUSTED_REF}:${TRUSTED_BASELINE_PATH}' is valid JSON but does not match the expected shape ({\"<path>\": {\"jq_unguarded\": <number>, \"swallow_unjustified\": <number>}}) — a malformed entry would otherwise silently exempt that file from the ratchet. Regenerate with --write-baseline."
+    fail "strict mode: trusted baseline at '${TRUSTED_REF}:${TRUSTED_BASELINE_PATH}' is valid JSON but does not match the expected shape ({\"<path>\": {\"jq_unguarded\": <non-negative integer>, \"swallow_unjustified\": <non-negative integer>}}) — a malformed entry would otherwise silently exempt that file from the ratchet. Regenerate with --write-baseline."
     echo "shell-idioms-guard: FAIL"; exit 1
   else
-    echo "check-shell-idioms.sh: baseline at '$BASELINE' is valid JSON but does not match the expected shape ({\"<path>\": {\"jq_unguarded\": <number>, \"swallow_unjustified\": <number>}}) — regenerate with --write-baseline" >&2
+    echo "check-shell-idioms.sh: baseline at '$BASELINE' is valid JSON but does not match the expected shape ({\"<path>\": {\"jq_unguarded\": <non-negative integer>, \"swallow_unjustified\": <non-negative integer>}}) — regenerate with --write-baseline" >&2
     exit 2
   fi
 fi
@@ -302,7 +305,12 @@ DISC_TMP="$(mktemp)"; BASE_TMP="$(mktemp)"; ALL_FILES_TMP="$(mktemp)"
 trap 'rm -f "$DISC_TMP" "$BASE_TMP" "$ALL_FILES_TMP"' EXIT
 
 discover_counts > "$DISC_TMP"
-jq -r 'to_entries[] | "\(.key)\t\(.value.jq_unguarded // 0)\t\(.value.swallow_unjustified // 0)"' <<<"$BASELINE_JSON" \
+# `| floor` normalizes the rendered TEXT, not the value: a schema-valid
+# integer-valued number in exponent form (e.g. `1e2`) interpolates as "1E+2",
+# which would then fail the same `[ -gt ]`/`[ -lt ]` integer comparisons the
+# schema check above protects against. `floor` is a no-op on an already-integer
+# value but forces jq to print it in plain decimal form.
+jq -r 'to_entries[] | "\(.key)\t\((.value.jq_unguarded // 0) | floor)\t\((.value.swallow_unjustified // 0) | floor)"' <<<"$BASELINE_JSON" \
   | LC_ALL=C sort > "$BASE_TMP"
 
 { cut -f1 "$DISC_TMP"; cut -f1 "$BASE_TMP"; } | LC_ALL=C sort -u > "$ALL_FILES_TMP"

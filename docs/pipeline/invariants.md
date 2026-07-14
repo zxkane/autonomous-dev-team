@@ -7765,16 +7765,27 @@ first-class, unlike [INV-91] which explicitly FAILs a stale baseline entry
 naming a nonexistent file. Baseline (re)generation happens ONLY via the
 explicit `--write-baseline` flag, never silently during a normal check run.
 The resolved baseline is schema-validated (every value must be an object
-whose `jq_unguarded`/`swallow_unjustified`, if present, are numbers), not
-merely parseable JSON — caught in review: a malformed entry (e.g. a string
-where a number is expected) let the reconciliation loop's
-`jq -r '...\(.value.field // 0)'` abort mid-stream or feed a non-numeric
-string into `[ -gt ]`/`[ -lt ]`, and under `set -uo pipefail` (no `-e`) that
-degraded to a silently-skipped file rather than a hard failure — reproduced
-even under `--require-trusted-ref` fail-closed strict mode, defeating the
-exact self-ratification protection that mode exists to provide. A schema
-mismatch now FAILs loud: exit 2 in default mode, exit 1 (fail-closed) under
-`--require-trusted-ref` (TC-IDIOM-035/036).
+whose `jq_unguarded`/`swallow_unjustified`, if present, are **non-negative
+integers** — not merely jq `number`s, and not merely parseable JSON) — caught in
+review: a malformed entry (e.g. a string where a number is expected) let the
+reconciliation loop's `jq -r '...\(.value.field // 0)'` abort mid-stream or
+feed a non-numeric string into `[ -gt ]`/`[ -lt ]`, and under `set -uo
+pipefail` (no `-e`) that degraded to a silently-skipped file rather than a
+hard failure — reproduced even under `--require-trusted-ref` fail-closed
+strict mode, defeating the exact self-ratification protection that mode
+exists to provide. A schema mismatch now FAILs loud: exit 2 in default mode,
+exit 1 (fail-closed) under `--require-trusted-ref` (TC-IDIOM-035/036). A
+second review pass caught that a bare `type == "number"` check was still
+insufficient: jq `number` includes non-integers (`1.5`) and exponent-form
+values (`1e2`) — a non-integer numeric field passes `type == "number"` but
+still breaks the same `[ -gt ]`/`[ -lt ]` integer comparisons downstream
+(same silent-skip degradation), and even an integer-*valued* exponent-form
+number (`1e2 == 100`) round-trips through naive `jq -r "\(...)"` string
+interpolation as `"1E+2"`, which is equally non-numeric to `[ -gt ]`. The
+schema check now asserts `type == "number" and . >= 0 and (. == (. |
+floor))` (non-negative integer), and the reconciliation extraction pipes
+each field through `| floor` before interpolation so an integer-valued
+exponent-form number always renders in plain decimal form (TC-IDIOM-043..045).
 
 **`--require-trusted-ref` (fail-closed strict mode)**: reads the baseline
 from the TRUSTED ref (default `origin/main`, override via `--trusted-ref` /

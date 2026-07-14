@@ -826,6 +826,81 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+echo "=== Group L: non-integer numeric baseline values (review finding) — TC-IDIOM-043..045 ==="
+# ---------------------------------------------------------------------------
+
+# TC-IDIOM-043: a baseline count that is a valid jq `number` but NOT an
+# integer (e.g. 1.5) must FAIL loud (exit 2 in default mode), not silently
+# exempt the file. Prior to the fix, the schema check only asserted
+# `type == "number"`, so 1.5 passed schema validation and then broke the
+# `[ -gt ]`/`[ -lt ]` integer comparisons downstream — which degrade to a
+# silent false PASS under `set -uo pipefail` (no `-e`).
+R="$(fresh_root L043)"
+write_script "$R" foo/bar.sh <<'EOF'
+#!/bin/bash
+set -euo pipefail
+
+foo() {
+  x=$(jq -r 'select(.body | test("x"))')
+  y=$(jq -r 'select(.body | contains("y"))')
+}
+EOF
+echo '{"foo/bar.sh": {"jq_unguarded": 1.5, "swallow_unjustified": 0}}' > "$WORK/l043-baseline.json"
+out="$(bash "$CHECK" --scan-root "$R" --baseline "$WORK/l043-baseline.json" 2>&1)"; rc=$?
+if [ "$rc" -eq 2 ]; then
+  ok "TC-IDIOM-043: a non-integer numeric baseline field (1.5) FAILs loud (exit 2) instead of silently exempting the file"
+else
+  bad "TC-IDIOM-043: expected exit 2 for non-integer baseline field, got rc=$rc: $out"
+fi
+
+# TC-IDIOM-044: the same non-integer shape under --require-trusted-ref must
+# FAIL CLOSED (exit 1), not silently PASS.
+GITROOT5="$WORK/gitfixture5"
+git init -q "$GITROOT5"
+git -C "$GITROOT5" config user.email test@test.com
+git -C "$GITROOT5" config user.name test
+mkdir -p "$GITROOT5/skills/foo"
+write_script "$GITROOT5" skills/foo/bar.sh <<'EOF'
+#!/bin/bash
+set -euo pipefail
+
+foo() {
+  rm -rf "$STUFF" 2>/dev/null || true
+}
+EOF
+echo '{"foo/bar.sh": {"jq_unguarded": 0, "swallow_unjustified": 2.7}}' > "$GITROOT5/skills/foo/baseline.json"
+git -C "$GITROOT5" add -A
+git -C "$GITROOT5" commit -q -m "non-integer baseline"
+out="$(cd "$GITROOT5" && bash "$CHECK" --scan-root "$GITROOT5/skills" --require-trusted-ref --trusted-ref HEAD --trusted-baseline-path skills/foo/baseline.json 2>&1)"; rc=$?
+if [ "$rc" -ne 0 ]; then
+  ok "TC-IDIOM-044: a non-integer trusted baseline field FAILs closed under --require-trusted-ref instead of silently exempting the file"
+else
+  bad "TC-IDIOM-044: expected FAIL closed on non-integer trusted baseline field, got rc=$rc: $out"
+fi
+
+# TC-IDIOM-045: an integer-VALUED number written in exponent notation (e.g.
+# 1e2 == 100) is schema-valid (it IS an integer), but naive jq string
+# interpolation renders it as "1E+2" — which then fails the same integer
+# comparisons. This must reconcile normally (as a shrink notice, matching the
+# real discovered count), not error out.
+R="$(fresh_root L045)"
+write_script "$R" foo/bar.sh <<'EOF'
+#!/bin/bash
+set -euo pipefail
+
+foo() {
+  x=$(jq -r 'select(.body | test("x"))')
+}
+EOF
+echo '{"foo/bar.sh": {"jq_unguarded": 1e2, "swallow_unjustified": 0}}' > "$WORK/l045-baseline.json"
+out="$(bash "$CHECK" --scan-root "$R" --baseline "$WORK/l045-baseline.json" 2>&1)"; rc=$?
+if [ "$rc" -eq 0 ] && ! grep -qi "integer expected" <<<"$out"; then
+  ok "TC-IDIOM-045: an exponent-notation integer baseline value (1e2) reconciles cleanly, no 'integer expected' error"
+else
+  bad "TC-IDIOM-045: expected clean PASS for exponent-notation integer baseline, got rc=$rc: $out"
+fi
+
+# ---------------------------------------------------------------------------
 echo ""
 echo "=== Summary: $PASS passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ]
