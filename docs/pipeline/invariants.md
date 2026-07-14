@@ -7786,6 +7786,19 @@ schema check now asserts `type == "number" and . >= 0 and (. == (. |
 floor))` (non-negative integer), and the reconciliation extraction pipes
 each field through `| floor` before interpolation so an integer-valued
 exponent-form number always renders in plain decimal form (TC-IDIOM-043..045).
+A third review pass caught that the integer check alone was still
+insufficient: jq stores numbers as IEEE-754 doubles, which represent
+integers exactly only up to 2^53 (`9007199254740992`) — beyond that, `floor`
+rendering itself flips to exponential notation (e.g. `1e20` renders as
+`"1e+20"`, not a plain-decimal string), and even a PLAIN-DECIMAL literal
+just past bash's int64 ceiling rounds UP past it when jq renders it
+(`9223372036854775808` → `"9223372036854776000"`), which is itself
+unparsable by `[ -gt ]`/`[ -lt ]` — so a digits-only string check on the
+rendered text would not have caught this; the value itself must be bounded.
+The schema check now additionally requires `. <= 9007199254740992`, rejecting
+any count that could ever render outside bash's safe plain-decimal integer
+range regardless of its literal notation in the source JSON — no legitimate
+per-file occurrence count is anywhere near this ceiling (TC-IDIOM-050..052).
 
 **`--require-trusted-ref` (fail-closed strict mode)**: reads the baseline
 from the TRUSTED ref (default `origin/main`, override via `--trusted-ref` /

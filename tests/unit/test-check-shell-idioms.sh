@@ -918,6 +918,81 @@ for opt in --scan-root --baseline --trusted-ref --trusted-baseline-path; do
 done
 
 # ---------------------------------------------------------------------------
+echo "=== Group N: baseline counts too large for bash comparisons (review finding) — TC-IDIOM-050..052 ==="
+# ---------------------------------------------------------------------------
+
+# TC-IDIOM-050: a baseline count that IS an integer per the (. == (.|floor))
+# check, but exceeds 2^53 (9007199254740992, the largest integer jq's
+# IEEE-754 doubles represent exactly), must FAIL loud (exit 2 in default
+# mode) rather than silently exempt the file. Prior to this fix, `1e20`
+# passed the integer check, then `floor` rendered it as "1e+20" — which
+# broke the downstream `[ -gt ]`/`[ -lt ]` comparisons and, under
+# `set -uo pipefail` (no `-e`), silently PASSed instead of failing.
+R="$(fresh_root N050)"
+write_script "$R" foo/bar.sh <<'EOF'
+#!/bin/bash
+set -euo pipefail
+
+foo() {
+  echo "$1" || true
+}
+EOF
+echo '{"foo/bar.sh": {"jq_unguarded": 0, "swallow_unjustified": 1e20}}' > "$WORK/n050-baseline.json"
+out="$(bash "$CHECK" --scan-root "$R" --baseline "$WORK/n050-baseline.json" 2>&1)"; rc=$?
+if [ "$rc" -eq 2 ] && ! grep -qi "integer expected" <<<"$out"; then
+  ok "TC-IDIOM-050: an out-of-range exponent-notation baseline value (1e20) FAILs loud (exit 2), not a silent PASS via 'integer expected'"
+else
+  bad "TC-IDIOM-050: expected exit 2 for out-of-range baseline field, got rc=$rc: $out"
+fi
+
+# TC-IDIOM-051: a PLAIN-DECIMAL integer literal just past bash's int64
+# ceiling (9223372036854775808 == INT64_MAX + 1) is also rejected. jq's
+# `floor` rounds this to "9223372036854776000" when rendered, which ALSO
+# overflows `[ -gt ]`/`[ -lt ]` — so a digits-only string check alone would
+# not have caught this; the fix bounds the numeric VALUE at 2^53.
+R="$(fresh_root N051)"
+write_script "$R" foo/bar.sh <<'EOF'
+#!/bin/bash
+set -euo pipefail
+
+foo() {
+  echo "$1" || true
+}
+EOF
+echo '{"foo/bar.sh": {"jq_unguarded": 9223372036854775808, "swallow_unjustified": 0}}' > "$WORK/n051-baseline.json"
+out="$(bash "$CHECK" --scan-root "$R" --baseline "$WORK/n051-baseline.json" 2>&1)"; rc=$?
+if [ "$rc" -eq 2 ] && ! grep -qi "integer expected" <<<"$out"; then
+  ok "TC-IDIOM-051: a plain-decimal baseline value past bash's int64 ceiling FAILs loud (exit 2), not a silent PASS via 'integer expected'"
+else
+  bad "TC-IDIOM-051: expected exit 2 for int64-overflow baseline field, got rc=$rc: $out"
+fi
+
+# TC-IDIOM-052: the same out-of-range shape under --require-trusted-ref must
+# FAIL CLOSED (exit 1), not silently PASS.
+GITROOT6="$WORK/gitfixture6"
+git init -q "$GITROOT6"
+git -C "$GITROOT6" config user.email test@test.com
+git -C "$GITROOT6" config user.name test
+mkdir -p "$GITROOT6/skills/foo"
+write_script "$GITROOT6" skills/foo/bar.sh <<'EOF'
+#!/bin/bash
+set -euo pipefail
+
+foo() {
+  echo "$1" || true
+}
+EOF
+echo '{"foo/bar.sh": {"jq_unguarded": 0, "swallow_unjustified": 9223372036854775808}}' > "$GITROOT6/skills/foo/baseline.json"
+git -C "$GITROOT6" add -A
+git -C "$GITROOT6" commit -q -m "out-of-range baseline"
+out="$(cd "$GITROOT6" && bash "$CHECK" --scan-root "$GITROOT6/skills" --require-trusted-ref --trusted-ref HEAD --trusted-baseline-path skills/foo/baseline.json 2>&1)"; rc=$?
+if [ "$rc" -eq 1 ] && ! grep -qi "integer expected" <<<"$out"; then
+  ok "TC-IDIOM-052: an out-of-range trusted baseline field FAILs closed (exit 1) under --require-trusted-ref instead of silently exempting the file"
+else
+  bad "TC-IDIOM-052: expected FAIL closed (exit 1) on out-of-range trusted baseline field, got rc=$rc: $out"
+fi
+
+# ---------------------------------------------------------------------------
 echo ""
 echo "=== Summary: $PASS passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ]

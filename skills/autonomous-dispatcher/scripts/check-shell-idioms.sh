@@ -270,17 +270,29 @@ fi
 # `set -uo pipefail` (no `-e`) that degrades to a silently-skipped file rather
 # than a hard failure — defeating the ratchet for exactly that file, even
 # under --require-trusted-ref fail-closed strict mode.
+#
+# The upper bound (review finding, round 3): an integer-VALUED count can
+# still break the same comparisons even after the integer check above. jq
+# stores numbers as IEEE-754 doubles, which represent integers exactly only
+# up to 2^53 (9007199254740992); beyond that, `floor` rendering flips to
+# exponential notation (e.g. 1e20), and even a plain-decimal value close to
+# bash's int64 ceiling can round UP past it (9223372036854775808 renders as
+# "9223372036854776000", which itself overflows `[ -gt ]`/`[ -lt ]` with the
+# same silently-swallowed "integer expected" failure). Capping at 2^53 keeps
+# every accepted value both exactly representable in jq and guaranteed to
+# render in plain decimal well inside bash's integer range — no legitimate
+# per-file occurrence count is anywhere near this ceiling.
 # Checked after both baseline-resolution branches so one check covers both.
-if ! jq -e 'def nonneg_int: type == "number" and . >= 0 and (. == (. | floor));
+if ! jq -e 'def nonneg_int: type == "number" and . >= 0 and (. == (. | floor)) and . <= 9007199254740992;
       type == "object" and (to_entries | all(.value | type == "object"
       and ((.jq_unguarded // 0) | nonneg_int)
       and ((.swallow_unjustified // 0) | nonneg_int)))' \
     >/dev/null 2>&1 <<<"$BASELINE_JSON"; then
   if [ "$REQUIRE_TRUSTED_REF" = "1" ]; then
-    fail "strict mode: trusted baseline at '${TRUSTED_REF}:${TRUSTED_BASELINE_PATH}' is valid JSON but does not match the expected shape ({\"<path>\": {\"jq_unguarded\": <non-negative integer>, \"swallow_unjustified\": <non-negative integer>}}) — a malformed entry would otherwise silently exempt that file from the ratchet. Regenerate with --write-baseline."
+    fail "strict mode: trusted baseline at '${TRUSTED_REF}:${TRUSTED_BASELINE_PATH}' is valid JSON but does not match the expected shape ({\"<path>\": {\"jq_unguarded\": <non-negative integer <= 9007199254740992>, \"swallow_unjustified\": <non-negative integer <= 9007199254740992>}}) — a malformed entry would otherwise silently exempt that file from the ratchet. Regenerate with --write-baseline."
     echo "shell-idioms-guard: FAIL"; exit 1
   else
-    echo "check-shell-idioms.sh: baseline at '$BASELINE' is valid JSON but does not match the expected shape ({\"<path>\": {\"jq_unguarded\": <non-negative integer>, \"swallow_unjustified\": <non-negative integer>}}) — regenerate with --write-baseline" >&2
+    echo "check-shell-idioms.sh: baseline at '$BASELINE' is valid JSON but does not match the expected shape ({\"<path>\": {\"jq_unguarded\": <non-negative integer <= 9007199254740992>, \"swallow_unjustified\": <non-negative integer <= 9007199254740992>}}) — regenerate with --write-baseline" >&2
     exit 2
   fi
 fi

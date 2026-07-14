@@ -135,6 +135,53 @@ files actually checked. The checker now requires at least one scanned
 | TC-IDIOM-041 | A `--scan-root` that exists but contains zero `*.sh` files, checked via `--require-trusted-ref` against a non-empty trusted baseline | exit 1 (fail-closed) — every baseline entry would otherwise look like a shrink |
 | TC-IDIOM-042 | A `--scan-root` with real `*.sh` files and zero violations (the ordinary clean case) | PASSes normally — the guard triggers on zero FILES scanned, never on zero violations found |
 
+## Group L — non-integer numeric baseline values, fourth review round (TC-IDIOM-043..045)
+
+A fourth review pass found that the baseline schema check asserted only
+`type == "number"`, not integrality. A non-integer value (e.g. `1.5`) passed
+schema validation and then broke the downstream `[ -gt ]`/`[ -lt ]` integer
+comparisons, which under `set -uo pipefail` (no `-e`) degrades to a
+silently-skipped file rather than a hard failure — defeating the ratchet
+even under `--require-trusted-ref`.
+
+| ID | Scenario | Expected |
+|----|----------|----------|
+| TC-IDIOM-043 | A baseline count that is a valid jq `number` but not an integer (`1.5`), default mode | exit 2 (fails loud) — regression pin |
+| TC-IDIOM-044 | The same non-integer shape committed to a trusted ref, checked via `--require-trusted-ref` | exit 1 (fails closed) — regression pin for the strict-mode variant |
+| TC-IDIOM-045 | An integer-VALUED number in exponent notation (`1e2 == 100`), which is schema-valid but naively interpolates as `"1E+2"` | reconciles cleanly (no `integer expected` error) — the fix applies `\| floor` to normalize the rendered text before comparison |
+
+## Group M — missing option-argument usage errors, fifth review round (TC-IDIOM-046..049)
+
+A fifth review pass found that a value-taking option (`--scan-root`,
+`--baseline`, `--trusted-ref`, `--trusted-baseline-path`) given with no
+following value died on an unbound `$2` under `set -u`, exiting 1 (looking
+like an internal shell crash) instead of the documented exit-2 usage error.
+
+| ID | Scenario | Expected |
+|----|----------|----------|
+| TC-IDIOM-046..049 | Each of `--scan-root`/`--baseline`/`--trusted-ref`/`--trusted-baseline-path` given as the last (bare) argument, with no following value | exit 2 (usage error), never an unbound-variable crash — regression pin, one case per option |
+
+## Group N — baseline counts too large for bash comparisons, sixth review round (TC-IDIOM-050..052)
+
+A sixth review pass (the "third review pass" in `invariants.md`'s INV-130
+entry, which counts only the schema-validation rounds) found that the Group L
+integer fix was insufficient: an integer-VALUED count that exceeds 2^53
+(9007199254740992 — the largest
+integer jq's IEEE-754 doubles represent exactly) still breaks the same
+comparisons. `floor` renders such values in exponential notation (e.g.
+`1e20`), and even a plain-decimal value just past bash's int64 ceiling
+rounds UP past it when rendered (`9223372036854775808` → `9223372036854776000`,
+itself unparsable by `[ -gt ]`/`[ -lt ]`) — both silently PASS under
+`set -uo pipefail`'s no-`-e` semantics, even under `--require-trusted-ref`.
+The fix bounds the schema check's accepted value at `<= 9007199254740992`,
+not just "is an integer."
+
+| ID | Scenario | Expected |
+|----|----------|----------|
+| TC-IDIOM-050 | A baseline count that is schema-integer but exceeds the bound in exponent notation (`1e20`), default mode | exit 2 (fails loud), no `integer expected` leak — regression pin |
+| TC-IDIOM-051 | A baseline count that is a PLAIN-DECIMAL integer literal just past bash's int64 ceiling (`9223372036854775808`) | exit 2 (fails loud), no `integer expected` leak — proves the fix bounds the numeric value, not just the literal's notation |
+| TC-IDIOM-052 | The same out-of-range shape committed to a trusted ref, checked via `--require-trusted-ref` | exit 1 (fails closed) — regression pin for the strict-mode variant |
+
 ## Acceptance criteria for this change (pre-merge verifiable)
 
 - [ ] `check-shell-idioms.sh --write-baseline` run against the current tree
