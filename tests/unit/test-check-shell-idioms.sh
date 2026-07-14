@@ -901,6 +901,23 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+echo "=== Group M: missing option-argument usage errors (review finding) — TC-IDIOM-046..049 ==="
+# ---------------------------------------------------------------------------
+
+# TC-IDIOM-046..049: each value-taking option, given with no following value
+# (i.e. as the last argument), must FAIL with the documented exit-2 usage
+# error, not die on an unbound `$2` under `set -u` (which exited 1 and looked
+# like an internal shell crash rather than a handled usage error).
+for opt in --scan-root --baseline --trusted-ref --trusted-baseline-path; do
+  out="$(bash "$CHECK" "$opt" 2>&1)"; rc=$?
+  if [ "$rc" -eq 2 ] && ! grep -qi "unbound variable" <<<"$out"; then
+    ok "TC-IDIOM-046..049: '$opt' with no value exits 2 (usage error), not an unbound-variable crash"
+  else
+    bad "TC-IDIOM-046..049: expected exit 2 for '$opt' with no value, got rc=$rc: $out"
+  fi
+done
+
+# ---------------------------------------------------------------------------
 echo ""
 echo "=== Summary: $PASS passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ]

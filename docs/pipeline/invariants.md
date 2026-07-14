@@ -7804,7 +7804,12 @@ regression.
 
 **Exit codes**: `0` pass; `1` violations (or strict-mode fail-closed); `2`
 usage/infra error (`jq` missing, unknown flag, unreadable baseline in
-default mode).
+default mode, or a value-taking option given with no following value —
+caught in review round 2: `--scan-root`/`--baseline`/`--trusted-ref`/
+`--trusted-baseline-path` supplied as the last argument previously died on
+an unbound `$2` under `set -u`, exiting 1 and looking like an internal shell
+crash rather than a handled usage error; a `require_value` guard now checks
+the remaining-argument count before dereferencing `$2`, TC-IDIOM-046..049).
 
 **Heuristic bounds (deliberate, not a defect)**: both detectors are
 line-window heuristics over the raw source text, not a bash/jq parser — the

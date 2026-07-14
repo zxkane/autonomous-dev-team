@@ -67,13 +67,22 @@ TRUSTED_REF="${SHELL_IDIOMS_TRUSTED_REF:-origin/main}"
 TRUSTED_BASELINE_PATH="${SHELL_IDIOMS_TRUSTED_BASELINE_PATH:-skills/autonomous-dispatcher/scripts/shell-idioms-baseline.json}"
 REQUIRE_TRUSTED_REF="${SHELL_IDIOMS_REQUIRE_TRUSTED_REF:-0}"
 
+# Usage guard for value-taking options (review finding, round 2): without
+# this, an option given with no following value (e.g. a bare trailing
+# `--scan-root`) died on an unbound `$2` under `set -u`, exiting 1 (looks
+# like an internal shell crash) instead of the documented exit-2 usage error.
+# $1 = option name (for the message), $2 = the loop's remaining arg count.
+require_value() {
+  [ "$2" -ge 2 ] || { echo "check-shell-idioms.sh: $1 requires an argument" >&2; exit 2; }
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
-    --scan-root)              SCAN_ROOT="$2"; shift ;;
-    --baseline)                BASELINE="$2"; shift ;;
+    --scan-root)              require_value "$1" "$#"; SCAN_ROOT="$2"; shift ;;
+    --baseline)                require_value "$1" "$#"; BASELINE="$2"; shift ;;
     --write-baseline)           WRITE_BASELINE=1 ;;
-    --trusted-ref)              TRUSTED_REF="$2"; shift ;;
-    --trusted-baseline-path)    TRUSTED_BASELINE_PATH="$2"; shift ;;
+    --trusted-ref)              require_value "$1" "$#"; TRUSTED_REF="$2"; shift ;;
+    --trusted-baseline-path)    require_value "$1" "$#"; TRUSTED_BASELINE_PATH="$2"; shift ;;
     --require-trusted-ref)      REQUIRE_TRUSTED_REF=1 ;;
     -h|--help)                  sed -n '2,50p' "$0"; exit 0 ;;
     *) echo "check-shell-idioms.sh: unknown argument: $1" >&2; exit 2 ;;
