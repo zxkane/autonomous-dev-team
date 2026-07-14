@@ -47,3 +47,25 @@ by both suites.
 - **Over-stripping fixture**: `tests/unit/fixtures/codex-review-stdout-turns-overstrip.txt` — reviewed-content that legitimately quotes the literal words `user`/`codex`/`system` inside a backtick-fenced code block, positioned after the real response marker. Proves the boundary detector never mistakes reviewed/tool-output content for a genuine turn marker (TC-SEVEXT-008, TC-CXSTRIP-006).
 - **Tilde-fence fixture**: `tests/unit/fixtures/codex-review-stdout-turns-tilde-fence.txt` — the same over-stripping hazard as above, but quoted inside a `~~~`-fenced block instead of a backtick-fenced one (TC-CXSTRIP-009).
 - **5-round P2-only loop**: driven through the PRODUCTION helper (`_codex_review_strip_prompt_echo` on the reproduction fixture) at each simulated round via `_review_round_next_count`, then `_review_apply_severity_filter` + `_aggregate_has_p0p1_fail` — rounds 1-4 stay `fail`, round 5 demotes to `pass`, and INV-127's simulated count stays `false` throughout.
+
+## TC-CXRS-MAL: review round 2 — the malformed-echo guard made the fallback route unreachable
+
+Round-1's fix (the sections above) was correct but structurally dead code: a
+genuine `codex review` TURN-MARKER capture opens with the wrapper's own
+prompt echoed verbatim (that IS the `user` turn's content), which trivially
+satisfies [INV-73]'s `_codex_review_stdout_is_malformed` signals 1/2 — the
+exact structure a pure prompt-echo/startup-trace triggers on. Since
+`_codex_review_classify_stdout` runs the malformed check FIRST, EVERY
+turn-marker capture — including one whose final `codex` turn carries a
+genuine, fully-formed `[P2]` review — classified `malformed` and never
+reached the `codex-stdout-fallback` tagging at all. `tests/unit/test-lib-review-codex.sh` covers the fix (a new signal 0 in
+`_codex_review_stdout_is_malformed`, `adapters/codex.sh`):
+
+| ID | Scenario | Expected |
+|----|----------|----------|
+| TC-CXRS-MAL-DET-29 | The real-shaped reproduction fixture (`codex-review-stdout-turns-p2-only.txt`) | `_codex_review_stdout_is_malformed` → NOT malformed (rc 1) |
+| TC-CXRS-MAL-DET-30 | The tilde-fence over-strip fixture | → NOT malformed (rc 1) |
+| TC-CXRS-MAL-DET-31 | The backtick-fence over-strip fixture | → NOT malformed (rc 1) |
+| TC-CXRS-MAL-DET-32 | Turn markers present (header + `user` + `codex`) but NO text after the last `codex` marker (trace captured mid-turn) | signal 0 does not fire (strip helper's output equals the original); falls through to signals 1-3 → STILL malformed (rc 0) |
+| TC-CXRS-MAL-CLS-07 | Classifier-level pin on the reproduction fixture | `_codex_review_classify_stdout` → `fail` (the `[P2]` tags survive), NOT `malformed` |
+| TC-CXRS-INT-11 | End-to-end: drives the ACTUAL wrapper stdout-fallback block (not a reimplementation) against the reproduction fixture | reaches the fallback and posts `fail` (proves the round-2 fix closes the reachability gap at the wrapper-integration level, not just the unit level) |

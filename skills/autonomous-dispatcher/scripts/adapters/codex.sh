@@ -198,7 +198,28 @@ _codex_review_deadline_seconds() {
 # STRUCTURE, not on a bare keyword that a genuine review could legitimately mention.
 # rc 0/1 only — never aborts under `set -euo pipefail` (a bare call is fail-safe).
 #
-# Three cheap, robust signals (ANY one is sufficient — defense in depth):
+# Signal 0 (checked FIRST, issue #481 review round 2): a genuine `codex review`
+# TURN-MARKER capture — `<CLI header> → <user marker> → <echoed prompt> →
+# <reasoning/tool-trace turns> → <codex marker(s)> → <final response>` — ALSO
+# opens with the exact banner/header structure signal 1 below matches (the
+# prompt IS echoed verbatim as the `user` turn's content, by construction of
+# `_run_codex_review`'s capture). Without this signal, EVERY such capture —
+# including one whose final `codex` turn is a genuine, fully-formed review —
+# was misclassified `malformed` by signal 1 before ever reaching signal 0's
+# check, making the codex-stdout-fallback route ([INV-132], `AGENT_VERDICT_
+# SOURCES[i]=="codex-stdout-fallback"`) permanently unreachable for any real
+# review shaped this way — the round-2 review finding this signal closes.
+# `_codex_review_strip_prompt_echo` locates the SAME structural boundary
+# ([INV-132]'s own turn-marker parser): a validated header, the FIRST `user`
+# marker after it, the LAST `codex` marker after THAT. If all three are
+# present AND the text strictly after the last `codex` marker is non-empty
+# (a real final-response turn exists), this is a completed turn-marker
+# review, never malformed — regardless of what its leading region contains.
+# A capture with the turn markers but NO text after the last `codex` marker
+# (e.g. the trace was captured mid-turn) is NOT covered by this signal and
+# falls through to signals 1-3 unchanged.
+#
+# Three cheap, robust signals below (ANY one is sufficient — defense in depth):
 #   1. Banner/header — the codex startup banner is the capture's FIRST non-empty
 #      line (`^OpenAI Codex v`), OR a `workdir:`+`model:`+`provider:` triple appears
 #      in the CONTIGUOUS LEADING HEADER REGION (the run of lines from the top up to
@@ -231,6 +252,21 @@ _codex_review_deadline_seconds() {
 _codex_review_stdout_is_malformed() {
   local f="${1:-}"
   [[ -n "$f" && -f "$f" && -r "$f" ]] || return 1
+
+  # Signal 0: a genuine turn-marker capture with real content after the LAST
+  # `codex` marker is NEVER malformed — checked before signals 1-3 so a
+  # completed turn-marker review's OWN header/echo (which trivially satisfies
+  # signal 1/2's structural match) can never misclassify it. Fail-safe: if
+  # the strip helper found no header/no markers/no post-marker text, it
+  # echoes the ORIGINAL capture unchanged, so the inequality below is false
+  # and this signal is silently skipped (falls through to signals 1-3).
+  local _turn_stripped
+  _turn_stripped=$(_codex_review_strip_prompt_echo "$f") || _turn_stripped=""
+  if [[ -n "$_turn_stripped" ]]; then
+    local _turn_original
+    _turn_original=$(cat -- "$f" 2>/dev/null) || _turn_original=""
+    [[ "$_turn_stripped" != "$_turn_original" ]] && return 1
+  fi
 
   # Banner/header signals 1a/1b match ONLY the ACTUAL startup header — the codex
   # launch trace at the very top of the capture — NOT arbitrary lines that merely
