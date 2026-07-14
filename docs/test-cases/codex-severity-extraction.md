@@ -87,3 +87,35 @@ candidate — it won the "last marker" search and discarded every real finding
 preceded by a blank line (the CLI always closes out the prior turn before
 opening a new one); the fix requires that immediately before accepting a
 candidate as the last marker (TC-CXSTRIP-011, TC-CXRS-MAL-DET-33).
+
+## TC-CXRS round 4 — `_codex_review_classify_stdout` itself scanned the raw whole capture
+
+Rounds 1-3 fixed the severity FILTER's input selection and the malformed
+gate's reachability, but `_codex_review_classify_stdout` — the fallback
+classifier that decides the raw `pass`/`fail` BEFORE the severity filter ever
+runs — still scanned the ENTIRE raw capture for `[P0]`-`[P3]` once signal 0
+admitted a turn-marker capture past the malformed gate. A genuine
+turn-marker capture echoes the wrapper's OWN severity-tagging prompt block
+verbatim (as the `user` turn's content), and that block literally quotes
+`` `[P0]` ``…`` `[P3]` `` as backtick-fenced markers defining the vocabulary
+— a substring match with no structural awareness, so it fired on the quoted
+instruction text exactly like a real finding tag. A codex review whose final
+response carries NO findings at all therefore still classified `fail`, and
+the severity filter downstream could never rescue it (the correctly-stripped
+clean response scores `none`, which always blocks) — a clean review would
+block indefinitely, at every round. The fix: `_codex_review_classify_stdout`
+now scans `_codex_review_strip_prompt_echo`'s output whenever stripping
+actually changed the text (the identical condition signal 0 uses), and
+falls back to the whole capture only when there is no turn-marker structure
+to strip (`tests/unit/test-lib-review-codex.sh` TC-CXRS-CLS-10..13,
+TC-CXRS-INT-12).
+
+| ID | Scenario | Expected |
+|----|----------|----------|
+| TC-CXRS-CLS-10 | A NEW turn-marker capture (`codex-review-stdout-turns-clean-response.txt`) whose final `codex` response has no findings tags at all — only the echoed prompt's quoted `[P0]`-`[P3]` vocabulary | `_codex_review_classify_stdout` → `pass`, not `fail` |
+| TC-CXRS-CLS-11 | The P2-only turn-marker reproduction fixture, post-fix | still → `fail` (genuine tags survive stripping; no over-correction to a blanket `pass`) |
+| TC-CXRS-CLS-12 / 12b | A capture with NO turn-marker structure at all (legacy free-form shape), clean and then genuinely `[P1]`-tagged | scanned WHOLE, unchanged in both directions (`pass` / `fail`) — the fix is scoped to turn-marker captures via the strip helper's own fail-safe passthrough |
+| TC-CXRS-CLS-13 | Bare call under `set -euo pipefail` on the clean-response fixture | no abort (rc 0) |
+| TC-CXRS-INT-12 | End-to-end: drives the ACTUAL wrapper stdout-fallback block (not a reimplementation) against the clean-response fixture | reaches the fallback and posts `pass` (proves the round-4 fix closes the phantom-FAIL gap at the wrapper-integration level, not just the unit level) |
+
+**New fixture**: `tests/unit/fixtures/codex-review-stdout-turns-clean-response.txt` — the same header/`user`-marker/echoed-severity-prompt shape as the P2-only reproduction fixture, but a final `codex` response with NO findings tags at all.

@@ -433,10 +433,35 @@ _codex_review_stdout_is_malformed() {
 # startup-trace stdout is NOT a real review, so the severity-tag scan must NOT run
 # over it (its tags are only quoted instruction text → a phantom FAIL). Then the
 # gate logic: ANY severity tag (`[P0]`-`[P3]`, issue #449's severity-aware blocking
-# ratchet) anywhere in the (non-malformed) output → `fail`; otherwise → `pass`. An
+# ratchet) anywhere in the SCANNED text → `fail`; otherwise → `pass`. An
 # empty / missing / unreadable file → `pass` (no tag ⇒ no finding; the wrapper still
 # posts a `Review PASSED` verdict so a comment always lands). rc 0 ALWAYS —
 # fail-safe under `set -euo pipefail` (a bare call must not abort the wrapper).
+#
+# [INV-132] (#481, review round 4): the SCANNED text is the STRUCTURALLY
+# STRIPPED final response (`_codex_review_strip_prompt_echo`) whenever the
+# capture validates as a genuine turn-marker review — the SAME boundary
+# signal 0 (above) uses to admit it past the malformed gate in the first
+# place. A genuine turn-marker capture echoes the wrapper's OWN prompt
+# verbatim as the `user` turn's content, and that prompt's severity-tagging
+# instructions (`_review_severity_prompt_block`) literally quote `[P0]`-`[P3]`
+# as backtick-fenced markers (e.g. `` `[P1]` — a clear correctness/reliability
+# merge blocker``) — a substring scan of the RAW capture matches those quoted
+# instruction tokens exactly like a real finding tag, misclassifying `fail`
+# for a review whose actual final response is completely clean (no findings,
+# no tags at all). Because that misclassification happens HERE — before the
+# pre-aggregation severity filter ever runs — the ratchet can never rescue it:
+# `_review_extract_highest_severity` on the (correctly stripped) clean final
+# response finds no tag at all and reports `none`, which
+# `shouldBlockFinding` ALWAYS blocks (fail-safe), so a clean stdout-fallback
+# review would block indefinitely regardless of round. The fix reuses the
+# SAME strip helper the malformed gate already validated the structure with:
+# if stripping changed the text (a genuine turn-marker capture with real
+# content after the last `codex` marker), scan ONLY that stripped final
+# response; otherwise (no structure — a legacy free-form capture, or a
+# turn-marker capture with no post-marker text, which is already `malformed`
+# and never reaches this line) scan the whole capture unchanged — the
+# original, byte-identical behavior for every non-turn-marker shape.
 #
 # Pre-#449 this classified `fail` ONLY on `[P1]` — `[P2]`/`[P3]` were purely
 # non-blocking observations with no ratchet. Under the ratchet a `[P2]`/`[P3]`
@@ -451,12 +476,26 @@ _codex_review_stdout_is_malformed() {
 # FAIL only re-queues the PR to dev, whereas a missed tag would let a blocking
 # finding through to merge. So the cheap substring match is the safe direction —
 # but ONLY once the capture is confirmed to be a review, not the prompt echoed
-# back (#252).
+# back (#252), and ONLY over the text that is actually the review (not the
+# echoed prompt's own instruction text, #481 round 4).
 _codex_review_classify_stdout() {
   local f="${1:-}"
   if _codex_review_stdout_is_malformed "$f"; then
     printf 'malformed\n'
-  elif [[ -n "$f" && -f "$f" && -r "$f" ]] && grep -qE '\[P[0123]\]' "$f" 2>/dev/null; then
+    return 0
+  fi
+  local _scan_text=""
+  if [[ -n "$f" && -f "$f" && -r "$f" ]]; then
+    local _cls_stripped _cls_original
+    _cls_stripped=$(_codex_review_strip_prompt_echo "$f") || _cls_stripped=""
+    _cls_original=$(cat -- "$f" 2>/dev/null) || _cls_original=""
+    if [[ -n "$_cls_stripped" && "$_cls_stripped" != "$_cls_original" ]]; then
+      _scan_text="$_cls_stripped"
+    else
+      _scan_text="$_cls_original"
+    fi
+  fi
+  if [[ -n "$_scan_text" ]] && grep -qE '\[P[0123]\]' <<<"$_scan_text" 2>/dev/null; then
     printf 'fail\n'
   else
     printf 'pass\n'

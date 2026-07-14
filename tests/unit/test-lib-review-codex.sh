@@ -172,6 +172,48 @@ assert_eq "TC-CXRS-CLS-08 p1 fixture → fail" "fail" "$(_codex_review_classify_
 # this classifier.
 assert_eq "TC-CXRS-CLS-09 clean-but-P2/P3-tagged fixture → fail (#449 ratchet; demotion is post-classification)" "fail" "$(_codex_review_classify_stdout "$FIXTURES/codex-review-stdout-clean.txt")"
 
+# TC-CXRS-CLS-10 — issue #481 review round 4: a genuine turn-marker capture
+# whose final response is CLEAN classifies `pass`, not `fail`. Pre-fix, this
+# function scanned the WHOLE raw capture for `[P0]`-`[P3]` — but a genuine
+# turn-marker capture echoes the wrapper's OWN severity-tagging prompt block
+# verbatim (the `user` turn's content), which itself quotes `` `[P0]` ``..
+# `` `[P3]` `` as backtick-fenced markers. That substring match alone made
+# EVERY such capture classify `fail`, even one whose final `codex` response
+# carries no findings at all — the pre-aggregation severity filter can never
+# rescue this, because the (correctly stripped) clean response scores `none`
+# (no tag present), and `none` ALWAYS blocks (shouldBlockFinding's fail-safe
+# default) — a clean stdout-fallback review would block indefinitely
+# regardless of round.
+assert_eq "TC-CXRS-CLS-10 turn-marker capture, clean final response → pass (#481 round-4 regression)" \
+  "pass" "$(_codex_review_classify_stdout "$FIXTURES/codex-review-stdout-turns-clean-response.txt")"
+
+# TC-CXRS-CLS-11 — the P2-only turn-marker reproduction fixture still
+# classifies `fail` post-fix (its genuine [P2] tags survive stripping) —
+# proves the fix does not over-correct into a blanket `pass`.
+assert_eq "TC-CXRS-CLS-11 turn-marker capture, genuine [P2] findings → fail (unaffected by round-4 fix)" \
+  "fail" "$(_codex_review_classify_stdout "$FIXTURES/codex-review-stdout-turns-p2-only.txt")"
+
+# TC-CXRS-CLS-12 — a capture with NO turn-marker structure at all (the
+# pre-#481 legacy free-form shape) is scanned WHOLE, unchanged — the fix is
+# scoped to turn-marker captures via the strip helper's own fail-safe
+# passthrough (stripped == original → scan the original).
+printf '%s\n' 'Codex review of PR #999' 'Looks good, no issues.' > "$F"
+assert_eq "TC-CXRS-CLS-12 no turn-marker structure → whole-capture scan unchanged (pass)" \
+  "pass" "$(_codex_review_classify_stdout "$F")"
+printf '%s\n' 'Codex review of PR #999' '[P1] genuine finding, no structure.' > "$F"
+assert_eq "TC-CXRS-CLS-12b no turn-marker structure, genuine [P1] → still fail (whole-capture scan unchanged)" \
+  "fail" "$(_codex_review_classify_stdout "$F")"
+
+# TC-CXRS-CLS-13 — runs under set -euo pipefail without aborting on the
+# clean-response turn-marker fixture (the new code path added in round 4).
+cls13=$(
+  set -euo pipefail
+  source "$LIB"
+  out=$(_codex_review_classify_stdout "$FIXTURES/codex-review-stdout-turns-clean-response.txt")
+  echo "rc=$?|$out"
+)
+assert_eq "TC-CXRS-CLS-13 no abort under set -euo pipefail (turn-marker clean-response path)" "rc=0|pass" "$cls13"
+
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== TC-CXRS-BODY: _codex_review_compose_body ==="
@@ -1274,6 +1316,19 @@ assert_eq "TC-CXRS-INT-10 rc 0, empty capture, no self-post → posts default PA
 # review from a pure prompt-echo BEFORE signals 1-3 run.
 assert_eq "TC-CXRS-INT-11 real turn-marker P2-only capture reaches the fallback → posts FAIL (#481 round-2 regression)" \
   "POST|fail|fail" "$(fallback_case "$FIXTURES/codex-review-stdout-turns-p2-only.txt" "" "" "" 0)"
+
+# TC-CXRS-INT-12 — issue #481 review round 4: a REAL-SHAPED turn-marker
+# capture whose final response is CLEAN (no findings at all) reaches the
+# stdout fallback and posts PASS — end-to-end through the ACTUAL wrapper
+# block above (not a reimplementation). Pre-fix, `_codex_review_classify_
+# stdout` scanned the WHOLE raw capture, whose echoed prompt quotes
+# `` `[P1]` `` etc. as backtick-fenced severity-tag markers — a substring
+# match that misclassified `fail` for a review with no findings at all,
+# blocking indefinitely regardless of round (the pre-aggregation severity
+# filter cannot rescue it: the correctly-stripped clean response scores
+# `none`, which always blocks).
+assert_eq "TC-CXRS-INT-12 real turn-marker clean-response capture reaches the fallback → posts PASS (#481 round-4 regression)" \
+  "POST|pass|pass" "$(fallback_case "$FIXTURES/codex-review-stdout-turns-clean-response.txt" "" "" "" 0)"
 
 # ---------------------------------------------------------------------------
 echo ""
