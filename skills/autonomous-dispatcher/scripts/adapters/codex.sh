@@ -574,14 +574,29 @@ _codex_review_strip_prompt_echo() {
   fi
 
   # Step 3: locate the LAST standalone `codex` turn-marker line AFTER the
-  # `user` marker — same column-0/exact-word/unfenced discipline. Multiple
-  # `codex` turns are expected (reasoning, tool calls, final response); the
-  # LAST one bounds the final response, which is the only text scored.
+  # `user` marker — same column-0/exact-word/unfenced discipline, PLUS a
+  # blank line immediately before it. Multiple `codex` turns are expected
+  # (reasoning, tool calls, final response); the LAST one bounds the final
+  # response, which is the only text scored.
+  #
+  # The blank-line-before requirement (round-3 review finding [P2], PR #484):
+  # every genuine turn marker in a real `codex review` capture is emitted as
+  # its own paragraph — preceded by a blank line — because the CLI always
+  # closes out the PRIOR turn's text before opening a new one. Reviewed
+  # content or captured tool output, by contrast, can legitimately contain an
+  # UN-FENCED, column-0 `codex` word flowing directly out of the preceding
+  # prose line with NO blank line before it (e.g. "Tool output follows:" then
+  # "codex" as literal quoted output). Without this check that inline word was
+  # mistaken for a later turn marker, discarding every real finding before it.
+  # A candidate on line 1 of the file trivially has no line before it, so it
+  # is never treated as blank-preceded (a marker can only be real starting
+  # from line 2 — line 1 is always inside/before the header region anyway).
   local _codex_line_no
   _codex_line_no=$(awk -v start="$_user_line_no" '
-    /^[[:space:]]*(```|~~~)/ { infence = !infence; next }
-    infence { next }
-    NR > start && !infence && /^codex[[:space:]]*$/ { last = NR }
+    /^[[:space:]]*(```|~~~)/ { infence = !infence; prev = $0; next }
+    infence { prev = $0; next }
+    NR > start && !infence && /^codex[[:space:]]*$/ && NR > 1 && prev == "" { last = NR }
+    { prev = $0 }
     END { if (last) print last }
   ' "$f" 2>/dev/null) || _codex_line_no=""
   if [[ -z "$_codex_line_no" ]]; then

@@ -1516,6 +1516,27 @@ assert_eq "TC-CXSTRIP-010c severity extraction on a footer-only-P3 capture is P3
   "$(_review_extract_highest_severity "$_cxstrip010b")"
 rm -f "$TMP_CXSTRIP010"
 
+# TC-CXSTRIP-011: an UN-FENCED, column-0 `codex` word appearing mid-paragraph
+# in quoted tool/reviewed-file output — with NO blank line before it — must
+# NOT be mistaken for a later genuine turn marker (round-3 review finding
+# [P2], PR #484). Pre-fix, the Step-3 scan required only column-0/exact-word/
+# unfenced, so this inline word won this file's "last codex marker" search
+# and everything before it (including a real [P1]) was discarded, leaving
+# only the trailing [P2] — a P1 finding silently reduced to P2-only and
+# demoted at round 5. Every genuine marker in a real capture is its own
+# paragraph (blank line before it); this fixture's hazard line flows directly
+# out of the preceding prose sentence with no blank line, so the fix's
+# blank-line-before requirement must reject it as a boundary.
+CX_UNFENCED_INLINE_FIXTURE="$FIXTURES/codex-review-stdout-turns-unfenced-inline-marker.txt"
+assert_file_exists "TC-CXSTRIP-011 setup: unfenced-inline-marker fixture exists" "$CX_UNFENCED_INLINE_FIXTURE"
+_cxstrip011=$(_codex_review_strip_prompt_echo "$CX_UNFENCED_INLINE_FIXTURE")
+assert_contains "TC-CXSTRIP-011a unfenced-inline-marker fixture: the earlier [P1] finding survives" \
+  "$_cxstrip011" '[P1] src/auth.ts:10'
+assert_contains "TC-CXSTRIP-011b unfenced-inline-marker fixture: the later [P2] finding survives" \
+  "$_cxstrip011" '[P2] src/docs.ts:20'
+assert_eq "TC-CXSTRIP-011c severity extraction on the unfenced-inline-marker fixture is P1 (not demoted to P2 by over-stripping)" "P1" \
+  "$(_review_extract_highest_severity "$_cxstrip011")"
+
 # ===========================================================================
 echo
 echo "=== TC-SEVEXT-011..013: simulated 5-round P2-only codex loop demotes at round 5 (spec revision 2 AC procedure) ==="

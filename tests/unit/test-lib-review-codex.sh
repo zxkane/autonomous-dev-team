@@ -1913,6 +1913,14 @@ printf '%s\n' \
   'codex' > "$MF"
 _codex_review_stdout_is_malformed "$MF"; assert_eq "TC-CXRS-MAL-DET-32 turn markers present but NO text after the last codex marker → STILL malformed (rc 0)" 0 "$?"
 
+# TC-CXRS-MAL-DET-33 — the unfenced-inline-marker over-strip-hazard fixture
+# (a genuine final response with an EARLIER un-fenced, column-0 `codex` word
+# inline in quoted tool output, no blank line before it — round-3 review
+# finding [P2], PR #484) → NOT malformed (rc 1). Signal 0 must locate the
+# TRUE last marker (blank-line-preceded), not the inline hazard word.
+_codex_review_stdout_is_malformed "$FIXTURES/codex-review-stdout-turns-unfenced-inline-marker.txt"
+assert_eq "TC-CXRS-MAL-DET-33 unfenced-inline-marker turn-marker capture → NOT malformed (rc 1)" 1 "$?"
+
 # TC-CXRS-MAL-CLS-07 — classifier-level pin: the real turn-marker P2-only
 # fixture classifies `fail` (the [P2] tags survive), NOT `malformed`.
 assert_eq "TC-CXRS-MAL-CLS-07 real turn-marker P2-only capture → fail (NOT malformed) [#481 round-2 regression]" \
