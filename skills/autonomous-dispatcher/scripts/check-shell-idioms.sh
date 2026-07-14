@@ -202,16 +202,51 @@ rule_s_unjustified_lines_in() {
   ' "$path"
 }
 
+# A tab byte inside a *.sh path would split discover_counts' tab-delimited
+# "<file>\t<jq>\t<swallow>" rows into garbage fields downstream (R3) — reject
+# it loudly at scan time rather than let it corrupt the table silently. No
+# legitimate script path in this repo contains a tab, so fail-closed rejection
+# costs nothing real.
+reject_if_tab_in_path() {
+  case "$1" in
+    *$'\t'*)
+      # Shell-escape (review finding, round 1): the raw path contains a
+      # literal tab byte, which is ambiguous/invisible when interpolated
+      # unescaped into a terminal or log line. `printf %q` renders it as a
+      # visible `$'...\t...'`-style escape so the offending path is legible.
+      printf 'check-shell-idioms.sh: refusing to scan %q — path contains a literal tab, which would corrupt the internal tab-delimited count table\n' "$1" >&2
+      exit 2
+      ;;
+  esac
+}
+
 # Discover per-file counts across the scan tree. Emits "<file>\t<jq>\t<swallow>"
 # rows, ONLY for files with at least one occurrence of either rule (mirrors
 # check-provider-cutover.sh's "only surviving sites" baseline convention).
+#
+# Both detector calls are exit-status-checked (R1): under `set -uo pipefail`
+# (no `-e`), an awk that cannot execute or exits non-zero (corrupt PATH, OOM
+# kill, an awk-program bug) makes the surrounding pipeline's `wc -l` see EMPTY
+# input — `wc -l` itself still exits 0 and prints "0", which `tr -d ' '`
+# passes through unchanged. Read naively, that "0" means "clean file",
+# silently defeating the ratchet for exactly that file. `pipefail` (already
+# set) makes the command substitution's own exit status the detector's
+# (rightmost non-zero across the 3-stage pipe), so a checked `||` here catches
+# it; the digits-only re-check below guards the other failure shape — a
+# detector that exits 0 but emits non-numeric/empty text (e.g. a corrupted
+# awk build), which pipefail's exit code alone would not catch.
 discover_counts() {
   local rel path jq_n sw_n
   while IFS= read -r rel; do
     [ -z "$rel" ] && continue
+    reject_if_tab_in_path "$rel"
     path="$SCAN_ROOT/$rel"
-    jq_n=$(rule_j_unguarded_lines_in "$path" | wc -l | tr -d ' ')
-    sw_n=$(rule_s_unjustified_lines_in "$path" | wc -l | tr -d ' ')
+    jq_n=$(rule_j_unguarded_lines_in "$path" | wc -l | tr -d ' ') \
+      || { echo "check-shell-idioms.sh: Rule J detector failed on '$rel' (awk error) — cannot verify this file is clean" >&2; exit 2; }
+    sw_n=$(rule_s_unjustified_lines_in "$path" | wc -l | tr -d ' ') \
+      || { echo "check-shell-idioms.sh: Rule S detector failed on '$rel' (awk error) — cannot verify this file is clean" >&2; exit 2; }
+    case "$jq_n" in ''|*[!0-9]*) echo "check-shell-idioms.sh: Rule J detector on '$rel' produced a non-numeric count: '$jq_n'" >&2; exit 2 ;; esac
+    case "$sw_n" in ''|*[!0-9]*) echo "check-shell-idioms.sh: Rule S detector on '$rel' produced a non-numeric count: '$sw_n'" >&2; exit 2 ;; esac
     if [ "$jq_n" -gt 0 ] || [ "$sw_n" -gt 0 ]; then
       printf '%s\t%s\t%s\n' "$rel" "$jq_n" "$sw_n"
     fi
@@ -222,12 +257,24 @@ discover_counts() {
 # --write-baseline — emit a fresh, deterministic (sorted-key) baseline JSON.
 # ---------------------------------------------------------------------------
 if [ "$WRITE_BASELINE" -eq 1 ]; then
-  discover_counts | jq -R -S -s '
+  DISC_OUT="$(mktemp)" || { echo "check-shell-idioms.sh: mktemp failed — cannot allocate scratch file for discovered counts" >&2; exit 2; }
+  # A `trap ... EXIT` (not a `||` handler after the call) is load-bearing
+  # here: discover_counts's own detector-failure branches call `exit 2`
+  # directly (review finding, round 2) — that terminates the whole process
+  # immediately rather than returning a non-zero status to this call site,
+  # so a `discover_counts > "$DISC_OUT" || { rm -f "$DISC_OUT"; ...; }`
+  # handler would never run on that path and would leak the scratch file.
+  # A trap fires on every exit, including one triggered deep inside the
+  # function. Mirrors the reconciliation branch's trap below.
+  trap 'rm -f "$DISC_OUT"' EXIT
+  discover_counts > "$DISC_OUT" \
+    || { rc=$?; echo "check-shell-idioms.sh: discover_counts failed while writing --write-baseline output" >&2; exit "$rc"; }
+  jq -R -S -s '
     [ split("\n")[] | select(length > 0) | split("\t")
       | { key: .[0], value: { jq_unguarded: (.[1] | tonumber), swallow_unjustified: (.[2] | tonumber) } } ]
     | from_entries
-  '
-  exit 0
+  ' < "$DISC_OUT"
+  exit $?
 fi
 
 # ---------------------------------------------------------------------------
@@ -346,7 +393,18 @@ jq -r 'to_entries[] | "\(.key)\t\((.value.jq_unguarded // 0) | floor)\t\((.value
   | LC_ALL=C sort > "$BASE_TMP" \
   || { echo "check-shell-idioms.sh: failed to write baseline counts to scratch file" >&2; exit 2; }
 
-{ cut -f1 "$DISC_TMP"; cut -f1 "$BASE_TMP"; } | LC_ALL=C sort -u > "$ALL_FILES_TMP" \
+# R2: each `cut` is captured and checked SEPARATELY, not combined inside a
+# `{ cmd1; cmd2; }` group. A bash command group's exit status is only its
+# LAST command's — if the first `cut` fails (e.g. DISC_TMP becomes unreadable)
+# but the second succeeds, the group itself still reports success, and the
+# `||` guard below it never fires. That silently drops every discovered-side
+# file from the union: a current-only file with a real violation vanishes
+# from reconciliation and the checker PASSes as if it never existed.
+DISC_FILES="$(cut -f1 "$DISC_TMP")" \
+  || { echo "check-shell-idioms.sh: failed to read discovered-file names from scratch file" >&2; exit 2; }
+BASE_FILES="$(cut -f1 "$BASE_TMP")" \
+  || { echo "check-shell-idioms.sh: failed to read baseline-file names from scratch file" >&2; exit 2; }
+printf '%s\n%s\n' "$DISC_FILES" "$BASE_FILES" | LC_ALL=C sort -u > "$ALL_FILES_TMP" \
   || { echo "check-shell-idioms.sh: failed to write the file-union list to scratch file" >&2; exit 2; }
 
 # Column <fld> of the row for file <rel> in a "<file>\t<jq>\t<swallow>" table
@@ -366,20 +424,35 @@ while IFS= read -r rel; do
   base_sw=$(field_or_zero "$BASE_TMP" "$rel" 3)
 
   if [ "$cur_jq" -gt "$base_jq" ]; then
+    # R1 (review finding, round 1): this diagnostic re-run of the detector is a
+    # SEPARATE awk invocation from the one discover_counts already used to
+    # compute cur_jq — a transient failure here (flaky awk, OOM) is independent
+    # and must not be read as "no offending lines." Capturing via command
+    # substitution (not process substitution) lets `||` see its exit status;
+    # a failure is itself reported via fail() so the already-detected growth
+    # is never silently dropped just because we couldn't enumerate it.
+    j_lines="$(rule_j_unguarded_lines_in "$SCAN_ROOT/$rel")" || {
+      fail "Rule J diagnostic re-run failed on '$rel' while reporting a detected regression (baseline=${base_jq}, current=${cur_jq}) — cannot enumerate the offending lines, but the growth itself must not be silently dropped."
+      j_lines=""
+    }
     while IFS=$'\t' read -r ln content; do
       [ -z "$ln" ] && continue
       fail "Rule J (jq nullable-.body guard) regression at ${rel}:${ln} (baseline=${base_jq}, current=${cur_jq}): '$content'. Add a select(.body | type == \"string\") guard within 15 lines, or route through an existing guarded helper. If this is a legitimate baseline change, regenerate shell-idioms-baseline.json (--write-baseline)."
-    done < <(rule_j_unguarded_lines_in "$SCAN_ROOT/$rel")
+    done <<< "$j_lines"
   elif [ "$cur_jq" -lt "$base_jq" ]; then
     any_shrink=1
     info "notice: $rel Rule J count shrank (baseline=${base_jq}, current=${cur_jq}) — consider regenerating shell-idioms-baseline.json (--write-baseline)"
   fi
 
   if [ "$cur_sw" -gt "$base_sw" ]; then
+    s_lines="$(rule_s_unjustified_lines_in "$SCAN_ROOT/$rel")" || {
+      fail "Rule S diagnostic re-run failed on '$rel' while reporting a detected regression (baseline=${base_sw}, current=${cur_sw}) — cannot enumerate the offending lines, but the growth itself must not be silently dropped."
+      s_lines=""
+    }
     while IFS=$'\t' read -r ln content; do
       [ -z "$ln" ] && continue
       fail "Rule S (swallow justification) regression at ${rel}:${ln} (baseline=${base_sw}, current=${cur_sw}): '$content'. Add a same-line trailing comment or a comment on one of the 3 preceding lines explaining which direction this fails. If this is a legitimate baseline change, regenerate shell-idioms-baseline.json (--write-baseline)."
-    done < <(rule_s_unjustified_lines_in "$SCAN_ROOT/$rel")
+    done <<< "$s_lines"
   elif [ "$cur_sw" -lt "$base_sw" ]; then
     any_shrink=1
     info "notice: $rel Rule S count shrank (baseline=${base_sw}, current=${cur_sw}) — consider regenerating shell-idioms-baseline.json (--write-baseline)"
