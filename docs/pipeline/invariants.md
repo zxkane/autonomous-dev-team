@@ -7697,7 +7697,7 @@ itself has never driven a label transition.
 
 ## INV-130: a shell-idiom ratchet gate blocks GROWTH of unguarded nullable-jq `.body` string-ops and unjustified `|| true`/`|| echo` swallows across `skills/` — baseline-anchored, never a from-zero ban
 
-_Triage (issue #477): [machine-checked: tests/unit/test-check-shell-idioms.sh]_
+_Triage (issue #236): [machine-checked: tests/unit/test-check-shell-idioms.sh]_
 
 **Rule**: `check-shell-idioms.sh` scans every `*.sh` under `skills/` (recursive
 `find -L`, so tracked symlinked scripts stay in scope; any path containing a
