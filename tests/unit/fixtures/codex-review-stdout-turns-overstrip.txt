@@ -1,0 +1,33 @@
+OpenAI Codex v0.139.0
+--------
+workdir: /tmp/codex-review-wt-999-abc123
+model: openai.gpt-5.4
+provider: amazon-bedrock
+approval: never
+sandbox: read-only
+--------
+
+user
+You are an autonomous PR reviewer for PR #999.
+
+## Review Checklist
+1. [ ] Design canvas created (docs/designs/ or docs/plans/)
+2. [ ] Git worktree used (branch name starts with feat/, fix/, etc.)
+
+codex
+Reading the diff. The changed file defines a role-column enum with values
+like:
+
+```
+user
+codex
+system
+```
+
+This is unrelated CLI transcript vocabulary the diff happens to define as
+string constants — it must not be mistaken for a genuine turn marker.
+
+[P2] src/roles.ts:12 — minor: the enum lacks a doc comment explaining the
+`user`/`codex`/`system` values.
+
+Summary: 1 non-blocking finding (P2). No P0/P1 issues found.

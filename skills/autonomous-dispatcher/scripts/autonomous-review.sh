@@ -3123,6 +3123,16 @@ for _i in "${!AGENT_NAMES[@]}"; do
     continue
   fi
   log "INV-62: codex did not self-post a verdict — wrapper deriving '${_cx_verdict}' from codex review stdout and posting on its behalf."
+  # [INV-132] (#481, R1): record that THIS agent's verdict came from the
+  # legacy stdout-classify route (_codex_review_classify_stdout supplied
+  # `$_cx_verdict`) — a real, branchable flag the severity-scoring call site
+  # below consults, NOT a log line. This is the ONLY route where the raw
+  # capture (AGENT_CODEX_LOGS[i]) may be scored for severity (after
+  # stripping); an artifact-resolved or ordinary comment-poll-resolved codex
+  # verdict is NEVER tagged this way and always scores AGENT_VERDICT_BODIES[i]
+  # like every other agent. Set BEFORE the post so a failed post (the `else`
+  # branch below) still records the route accurately for its own retry.
+  AGENT_VERDICT_SOURCES[$_i]="codex-stdout-fallback"
   _cx_body_file=$(mktemp "/tmp/codex-review-fallback-${ISSUE_NUMBER}-XXXXXX.md")
   _codex_review_compose_body "$_cx_verdict" "$_cx_stdout" > "$_cx_body_file" 2>/dev/null || true
   # [INV-81] AC1: this is a WRAPPER-owned verdict post (codex didn't self-post) —
@@ -3292,27 +3302,28 @@ _reap_fanout_recorded_descendants "ADT_FANOUT_LANE_MARKER" "${AGENT_SESSION_IDS[
 # it. `unavailable`/`timed-out` agents pass through unchanged (no findings
 # text to score).
 #
-# [INV-132] (#481): the text scored is chosen by RESOLUTION CHANNEL, not by
-# agent identity. Every agent — codex included — is scored from
-# AGENT_VERDICT_BODIES[i] (the rendered findings body: the artifact-rendered
-# body for an artifact-resolved agent, or the comment-fallback body for a
-# comment-resolved one) WHENEVER that body is non-empty. Pre-fix, a codex
-# member with a captured stdout file was ALWAYS scored from its RAW stdout —
-# even when its verdict was resolved from a clean artifact body — and that
-# raw capture always starts with build_review_prompt's own echoed prompt (a
-# large block of UNTAGGED numbered checklist/instruction lines), which
+# [INV-132] (#481): the text scored is chosen by RESOLUTION CHANNEL — a real,
+# branchable value in AGENT_VERDICT_SOURCES[i], NOT agent identity and NOT a
+# parsed log line. An artifact-resolved (source=="artifact") or ordinary
+# comment-poll-resolved (source=="comment-fallback") codex verdict scores
+# AGENT_VERDICT_BODIES[i] — identical to every other agent's path. ONLY a
+# verdict resolved via the legacy stdout-classify route
+# (source=="codex-stdout-fallback", set at the exact call site where
+# `_codex_review_classify_stdout` supplied the verdict, above) scores the raw
+# AGENT_CODEX_LOGS[i] capture — and even then, only after stripping the
+# echoed prompt (`_codex_review_strip_prompt_echo`, adapters/codex.sh).
+#
+# Pre-fix, a codex member with a captured stdout file was ALWAYS scored from
+# its RAW stdout regardless of resolution channel — even an artifact-resolved
+# verdict, whose clean rendered body sat unused in AGENT_VERDICT_BODIES[i].
+# The raw capture always starts with build_review_prompt's own echoed prompt
+# (a large block of UNTAGGED numbered checklist/instruction lines), which
 # _review_extract_highest_severity's per-finding fail-safe scan (correctly)
 # collapses to `none`. `none` always blocks (shouldBlockFinding's fail-safe
 # default) AND counts as P0/P1-class for _aggregate_has_p0p1_fail, so R1's
 # ratchet never demoted a codex verdict and INV-127's round-cap counter
 # advanced even on a P2-only round, eventually tripping a false "P0/P1 floor
-# is still failing" report. The raw AGENT_CODEX_LOGS[i] stdout is consulted
-# ONLY when AGENT_VERDICT_BODIES[i] is empty (a codex agent resolved purely
-# via the legacy stdout-classify path with no rendered body at all) — and
-# even then, the echoed prompt is stripped first
-# (_codex_review_strip_prompt_echo, adapters/codex.sh) so only the agent's
-# own authored text is scored; a capture with no recognizable echo boundary
-# is returned unchanged (fail-safe).
+# is still failing" report.
 declare -a AGENT_HIGHEST_SEVERITY=()
 # [P1] #2 (#449 review round 5): tracks whether ANY agent's verdict was
 # demoted by the severity ratchet this round, independent of
@@ -3329,18 +3340,20 @@ declare -a AGENT_HIGHEST_SEVERITY=()
 _any_severity_demotion=false
 for _i in "${!AGENT_NAMES[@]}"; do
   _sev_text=""
-  if [[ -n "${AGENT_VERDICT_BODIES[$_i]:-}" ]]; then
-    # [INV-132] (#481): prefer the already-rendered verdict body for EVERY
-    # agent, codex included — identical to the non-codex path. This is the
-    # PRIMARY branch; it wins whenever a body exists, regardless of agent
-    # identity or verdict source (artifact vs comment-fallback).
-    _sev_text="${AGENT_VERDICT_BODIES[$_i]}"
-  elif [[ "${AGENT_NAMES[$_i]}" == "codex" && -n "${AGENT_CODEX_LOGS[$_i]:-}" && -f "${AGENT_CODEX_LOGS[$_i]}" ]]; then
-    # Legacy fallback: a codex agent with NO rendered body at all (resolved
-    # purely via the stdout-classify path). Strip the echoed prompt before
-    # scoring — the raw capture always leads with build_review_prompt's own
-    # echoed checklist, which would otherwise fail-safe-collapse to `none`.
+  if [[ "${AGENT_VERDICT_SOURCES[$_i]:-}" == "codex-stdout-fallback" && -n "${AGENT_CODEX_LOGS[$_i]:-}" && -f "${AGENT_CODEX_LOGS[$_i]}" ]]; then
+    # [INV-132] (#481 R1): the ONLY branch that scores the raw capture — a
+    # verdict resolved via the legacy stdout-classify route
+    # (_codex_review_classify_stdout supplied it, tagged at that exact call
+    # site above), which never rendered a findings BODY the way the artifact
+    # or comment-poll channels do. Strip the echoed prompt before scoring —
+    # the raw capture always leads with build_review_prompt's own echoed
+    # checklist, which would otherwise fail-safe-collapse to `none`.
     _sev_text=$(_codex_review_strip_prompt_echo "${AGENT_CODEX_LOGS[$_i]}")
+  else
+    # Every other resolution channel — artifact, comment-fallback, or a
+    # codex agent that self-posted via the ordinary poll loop — scores
+    # AGENT_VERDICT_BODIES[i], identical to the non-codex path (R1).
+    _sev_text="${AGENT_VERDICT_BODIES[$_i]:-}"
   fi
   AGENT_HIGHEST_SEVERITY[$_i]=$(_review_extract_highest_severity "$_sev_text")
   _pre_filter_verdict="${AGENT_VERDICTS[$_i]}"

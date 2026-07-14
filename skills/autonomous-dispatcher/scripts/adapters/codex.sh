@@ -429,40 +429,51 @@ _codex_review_classify_stdout() {
 }
 
 # ===========================================================================
-# Issue #481 (R2): strip the echoed prompt from a codex review stdout capture
-# before scoring it for severity.
+# Issue #481 (R2, spec revision 2): strip the echoed prompt from a codex
+# review stdout capture before scoring it for severity — ONLY on the legacy
+# stdout-classify fallback route (AGENT_VERDICT_SOURCES[i]=="codex-stdout-
+# fallback" at the autonomous-review.sh call site; every other resolution
+# channel scores AGENT_VERDICT_BODIES[i] directly, per R1).
 # ===========================================================================
 # `_review_extract_highest_severity` (lib-review-severity.sh) is a per-finding
 # fail-safe scan: ANY numbered line with no `[P0]`-`[P3]` tag collapses the
 # WHOLE scan to `none` (deliberately — issue #449's own fix for a tagged
-# low-severity finding masking a genuine untagged one). `build_review_prompt`
-# always echoes a large NUMBERED checklist/instructions block ahead of a
-# codex agent's own output (`1. [ ] Design canvas created...`, `## Review
-# Checklist`, etc.), so scoring the RAW capture always hits that fail-safe
-# and reports `none` regardless of what the agent actually tagged. This
-# helper strips the echo so only the agent's own authored text is scored —
-# used ONLY on the legacy fallback path (autonomous-review.sh prefers the
-# already-rendered `AGENT_VERDICT_BODIES[i]` when one exists; see the R1 call
-# site there).
+# low-severity finding masking a genuine untagged one). A `codex review`
+# combined stdout/stderr capture, per `_run_codex_review`, has the shape
+# `<CLI header> → <user turn marker> → <echoed prompt, dozens of untagged
+# numbered checklist lines> → <reasoning/tool trace> → <codex turn marker> →
+# <final response>`, so scoring the raw capture always hits the fail-safe on
+# the echoed checklist and reports `none` regardless of what the agent
+# actually tagged in its final response.
+#
+# The boundary this helper locates is STRUCTURAL, not a bare substring
+# search: (1) a VALIDATED leading CLI header (reusing
+# `_codex_review_stdout_is_malformed`'s own header signals — the banner as
+# the first non-empty line, or the workdir:+model:+provider: triple in the
+# contiguous leading region); (2) the FIRST standalone turn-marker line
+# reading exactly `user` (column 0, no other content, outside any fenced
+# block) AFTER that header; (3) the LAST standalone turn-marker line reading
+# exactly `codex` (same column-0/exact/unfenced discipline) anywhere in the
+# file. Only text STRICTLY AFTER that last `codex` marker is returned — the
+# final response turn, never a reasoning/tool-trace turn that merely
+# precedes it.
+#
+# This deliberately does NOT search for the LAST `user` line (a review's own
+# reviewed-file content or tool-execution output could legitimately contain
+# an incidental bare `user`/`codex` word) — only the FIRST `user` marker
+# (immediately bounding the header) is ever consulted, and marker candidates
+# are restricted to column-0, exact-word, UNFENCED lines so a quoted/fenced
+# reviewed-file snippet or an indented tool-output line can never masquerade
+# as a genuine turn boundary (mirrors this file's own established
+# fenced-block-exclusion discipline from `_echo_region`/`_leading_region`
+# above).
+#
+# ANY missing piece of that structure (no validated header, no `user` marker
+# after it, no `codex` marker after THAT) is fail-safe: echoes the ORIGINAL
+# content UNCHANGED, never a guessed boundary. Empty/missing/unreadable input
+# echoes empty. rc 0 ALWAYS (fail-safe under `set -euo pipefail`).
 
 # _codex_review_strip_prompt_echo <stdout-file>
-#
-# Echoes <stdout-file>'s content with the echoed-prompt LEADING region
-# removed, so only codex's own authored output remains. Reuses the SAME
-# FINDING-BOUNDARY grammar `_codex_review_stdout_is_malformed`'s `_echo_region`
-# (INV-73) already established, but INVERTED: instead of keeping the prefix
-# BEFORE the first finding, this keeps everything FROM the first finding
-# onward. A finding line is direct/numbered/bulleted/bold `[P0]`-`[P3]`, or a
-# JSON severity/priority key or value, matched outside any fenced code block —
-# the boundary between the echoed prompt and the agent's real output.
-#
-# When the capture has NO recognizable boundary at all (a short, well-formed
-# review with no prompt scaffolding echoed; the WHOLE file is the echo region)
-# OR is missing/empty/unreadable, this echoes the ORIGINAL content UNCHANGED —
-# fail-safe: never silently drop real output because no boundary was found. A
-# no-boundary capture is exactly the case where the strip awk prints nothing,
-# so the empty-result fallback below covers it. rc 0 ALWAYS (fail-safe under
-# `set -euo pipefail`).
 _codex_review_strip_prompt_echo() {
   local f="${1:-}"
   local original=""
@@ -471,19 +482,74 @@ _codex_review_strip_prompt_echo() {
   fi
   [[ -n "$original" ]] || { printf '%s' "$original"; return 0; }
 
-  # Keep only the lines FROM the first finding-boundary line onward (the
-  # agent's own authored output) — everything before it is the echoed prompt.
-  # `body` never turns on when the capture has no boundary, so `_stripped` is
-  # then empty and the fallback returns `original` unchanged.
-  local _stripped
-  _stripped=$(awk '
-    !infence && /^[[:space:]]*([0-9]+[.)][[:space:]]*)?([-*>][[:space:]]*)*(\*\*[[:space:]]*)?\[P[0123]\]/ { body=1 }
-    !infence && /"(severity|priority)"[[:space:]]*:/ { body=1 }
-    !infence && /["'"'"'[:space:]]P[0123]["'"'"']/ { body=1 }
-    /^[[:space:]]*```/ { infence = !infence }
-    body { print }
-  ' "$f" 2>/dev/null) || _stripped=""
+  # Step 1: validate a leading CLI header exists at all — reuses the SAME
+  # structural signals _codex_review_stdout_is_malformed established (INV-73):
+  # the banner as the capture's first non-empty line, OR the
+  # workdir:+model:+provider: triple within the contiguous leading region (the
+  # run of lines from the top up to the first blank/fence/heading/turn-marker
+  # line). No header at all → fail-safe, return the original unchanged.
+  local _first_nonempty _has_header=false
+  _first_nonempty=$(awk 'NF{print; exit}' "$f" 2>/dev/null) || _first_nonempty=""
+  if [[ "$_first_nonempty" =~ ^OpenAI\ Codex\ v[0-9] ]]; then
+    _has_header=true
+  else
+    local _leading_region
+    _leading_region=$(awk '
+      NR==1 && $0=="" { next }
+      /^[[:space:]]*$/ { exit }
+      /^[[:space:]]*```/ { exit }
+      /^[[:space:]]*#/ { exit }
+      /^(user|codex)[[:space:]]*$/ { exit }
+      { print }
+    ' "$f" 2>/dev/null) || _leading_region=""
+    if [[ -n "$_leading_region" ]] \
+       && grep -qiE '^workdir:' <<<"$_leading_region" 2>/dev/null \
+       && grep -qiE '^model:' <<<"$_leading_region" 2>/dev/null \
+       && grep -qiE '^provider:' <<<"$_leading_region" 2>/dev/null; then
+      _has_header=true
+    fi
+  fi
+  if [[ "$_has_header" != true ]]; then
+    printf '%s' "$original"
+    return 0
+  fi
 
+  # Step 2: locate the FIRST standalone `user` turn-marker line — column 0,
+  # exact word, nothing else on the line, outside any fenced block. This is
+  # the header-owned marker: the header's own key:value/banner lines never
+  # match it, so it is genuinely the first one AFTER the header. Never search
+  # for the LAST `user` line — reviewed content quoted later could contain
+  # one incidentally.
+  local _user_line_no
+  _user_line_no=$(awk '
+    /^[[:space:]]*```/ { infence = !infence; next }
+    infence { next }
+    !infence && /^user[[:space:]]*$/ { print NR; exit }
+  ' "$f" 2>/dev/null) || _user_line_no=""
+  if [[ -z "$_user_line_no" ]]; then
+    printf '%s' "$original"
+    return 0
+  fi
+
+  # Step 3: locate the LAST standalone `codex` turn-marker line AFTER the
+  # `user` marker — same column-0/exact-word/unfenced discipline. Multiple
+  # `codex` turns are expected (reasoning, tool calls, final response); the
+  # LAST one bounds the final response, which is the only text scored.
+  local _codex_line_no
+  _codex_line_no=$(awk -v start="$_user_line_no" '
+    /^[[:space:]]*```/ { infence = !infence; next }
+    infence { next }
+    NR > start && !infence && /^codex[[:space:]]*$/ { last = NR }
+    END { if (last) print last }
+  ' "$f" 2>/dev/null) || _codex_line_no=""
+  if [[ -z "$_codex_line_no" ]]; then
+    printf '%s' "$original"
+    return 0
+  fi
+
+  # Return everything STRICTLY AFTER the last `codex` marker line.
+  local _stripped
+  _stripped=$(awk -v boundary="$_codex_line_no" 'NR > boundary { print }' "$f" 2>/dev/null) || _stripped=""
   if [[ -z "$_stripped" ]]; then
     printf '%s' "$original"
   else
@@ -507,23 +573,17 @@ _codex_review_strip_prompt_echo() {
 #   pass → a one-line passing summary noting codex review ran (no blocking findings).
 #   fail → the captured codex review findings text (so the dev agent sees them).
 #
-# [INV-132] (#481, PR review round-1 [P1]): the FAIL branch strips the echoed
-# prompt from `f` via `_codex_review_strip_prompt_echo` BEFORE composing —
-# this is the body `autonomous-review.sh`'s wrapper-posted stdout-fallback
-# path (INV-62) writes into `AGENT_VERDICT_BODIES[i]`, and the severity loop
-# there PREFERS a non-empty body over the raw stdout. Without stripping HERE,
-# that preferred body still carried the raw echo verbatim, so the severity
-# loop's own echo-stripping fallback branch (`_codex_review_strip_prompt_echo`
-# on `AGENT_CODEX_LOGS[i]`) never actually ran on this path — the body was
-# never empty, just still poisoned. Stripping at composition time closes that
-# gap for every consumer of this composed body (the severity scan AND the
-# human-facing GitHub comment), not just a hypothetical empty-body case.
+# [INV-132] (#481): this composer is UNCHANGED by the severity-extraction fix —
+# it still embeds the raw capture (echo included) as the human-facing comment
+# body. R2's echo-stripping is scoped to SEVERITY SCORING only (the
+# `_sev_text` selection in autonomous-review.sh), not to what gets posted for
+# a human reader; the wrapper separately records this agent's verdict SOURCE
+# as `codex-stdout-fallback` so the severity loop knows to score the
+# stripped RAW CAPTURE (`AGENT_CODEX_LOGS[i]`) instead of this composed body.
 _codex_review_compose_body() {
   local verdict="${1:-pass}" f="${2:-}"
   local cap=50000 text=""
-  if [[ "$verdict" == "fail" ]]; then
-    text=$(_codex_review_strip_prompt_echo "$f")
-  elif [[ -n "$f" && -f "$f" && -r "$f" ]]; then
+  if [[ -n "$f" && -f "$f" && -r "$f" ]]; then
     text=$(cat -- "$f" 2>/dev/null || true)
   fi
   # Truncate to the cap (character count); append a marker so a reader knows it

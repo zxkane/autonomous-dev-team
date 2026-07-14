@@ -1,5 +1,14 @@
 # Design: codex severity extraction scores the wrong text (issue #481)
 
+> **Spec revision 2** (operator, applied mid-implementation): this design
+> reflects the FINAL mechanism after the issue's operator posted a
+> pre-merge ambiguity review. Two deltas from the original issue body:
+> R1 must branch on `AGENT_VERDICT_SOURCES[$_i]` — a real, branchable
+> per-agent flag — rather than "prefer the body when non-empty"; R2 must
+> locate a structural `user`→echo→trace→`codex` turn-marker boundary in the
+> combined `codex review` capture, not the finding-tag boundary the
+> malformed-prompt-echo detector (INV-73) uses. Both are reflected below.
+
 ## Problem
 
 `autonomous-review.sh`'s pre-aggregation severity ratchet (issue #449 R1,
@@ -15,22 +24,21 @@ fi
 ```
 
 For a codex member with a captured stdout file, this ALWAYS scores the raw
-`codex review` stdout — even when the agent's verdict was actually resolved
-from a validated verdict ARTIFACT (`AGENT_VERDICT_SOURCES[i] == "artifact"`,
-`AGENT_VERDICT_BODIES[i]` already holds the clean, artifact-rendered
-findings body). The raw stdout capture, per `build_review_prompt`, always
-begins with the full rendered prompt echoed back by `codex exec`/`codex
-review`'s own turn transcript before any agent output — dozens of numbered
-instruction/checklist lines (`1. [ ] Design canvas created...`, `## Review
-Checklist`, etc.) with no `[P0]`-`[P3]` tags. `_review_extract_highest_severity`'s
-per-finding fail-safe scan (added by issue #449 to stop a correctly-tagged
-low-severity finding from masking a genuinely untagged one) sees those
-untagged numbered lines and collapses the WHOLE scan to `none` — regardless
-of what severity tags the agent's actual findings carried.
+`codex review` combined stdout/stderr capture — even when the agent's
+verdict was actually resolved from a validated verdict ARTIFACT or the
+ordinary comment-poll path, both of which already produced a clean rendered
+findings body in `AGENT_VERDICT_BODIES[i]`. The raw capture, per
+`_run_codex_review`, has the shape `<CLI header> → <user turn marker> →
+<echoed prompt, dozens of untagged numbered instruction/checklist lines> →
+<reasoning/tool trace> → <codex turn marker(s)> → <final response>`.
+`_review_extract_highest_severity`'s per-finding fail-safe scan (added by
+issue #449 to stop a correctly-tagged low-severity finding from masking a
+genuinely untagged one) sees the echoed checklist's untagged numbered lines
+and collapses the WHOLE scan to `none` — regardless of what severity tags
+the agent's actual final response carried.
 
 `none` always blocks (`shouldBlockFinding`'s fail-safe default), so:
-- R1's ratchet never demotes a codex verdict, ever (INV-126/INV-129 inert on
-  the codex path).
+- R1's ratchet never demotes a codex verdict resolved this way, ever.
 - `_aggregate_has_p0p1_fail` treats `none` as P0/P1-class (by design — an
   unscoreable finding must never be excluded from the terminal floor), so
   INV-127's round-cap counter advances even on a P2-only round, and
@@ -42,92 +50,83 @@ The call site picks its input by **agent identity** (`codex` vs not), not by
 **how the verdict was actually resolved**. Every other agent scores
 `AGENT_VERDICT_BODIES[i]` — the rendered findings text, whichever channel
 produced it. Codex is special-cased to score its raw stdout unconditionally,
-even on the artifact-resolved path where a clean, already-rendered body is
-sitting right there in `AGENT_VERDICT_BODIES[i]`.
+even on the artifact-resolved / comment-poll-resolved paths where a clean,
+already-rendered body is sitting right there in `AGENT_VERDICT_BODIES[i]`.
 
 ## Fix
 
-**R1 — prefer the artifact/verdict body.** Change the call-site selection so
-a codex agent scores `AGENT_VERDICT_BODIES[i]` whenever its verdict was
-resolved via a channel that already rendered a findings body (artifact,
-comment-fallback, or the wrapper's own stdout-derived fallback post — all of
-which populate `AGENT_VERDICT_BODIES[i]` before this loop runs). The raw
-`AGENT_CODEX_LOGS[i]` stdout is consulted ONLY as a legacy fallback when
-`AGENT_VERDICT_BODIES[i]` is empty (the historical shape this code inherited
-from before the artifact channel existed, and still exercised by codex
-agents whose verdict comes purely from a stdout-derived post).
-
-Concretely: swap the branch condition from "is this agent named codex" to
-"is `AGENT_VERDICT_BODIES[i]` non-empty" first, falling back to the codex
-stdout only when the body is empty:
+**R1 — branch on `AGENT_VERDICT_SOURCES`, never parsed logs.** A NEW,
+distinct value — `codex-stdout-fallback` — is assigned into
+`AGENT_VERDICT_SOURCES[$_i]` at the EXACT call site in `autonomous-review.sh`
+where `_codex_review_classify_stdout` supplies the verdict (the legacy
+stdout-classify route, INV-62) — a real, branchable per-agent array entry,
+not a log line. The severity call site then branches on that value
+explicitly:
 
 ```bash
-if [[ -n "${AGENT_VERDICT_BODIES[$_i]:-}" ]]; then
-  _sev_text="${AGENT_VERDICT_BODIES[$_i]}"
-elif [[ "${AGENT_NAMES[$_i]}" == "codex" && -n "${AGENT_CODEX_LOGS[$_i]:-}" && -f "${AGENT_CODEX_LOGS[$_i]}" ]]; then
+if [[ "${AGENT_VERDICT_SOURCES[$_i]:-}" == "codex-stdout-fallback" && -n "${AGENT_CODEX_LOGS[$_i]:-}" && -f "${AGENT_CODEX_LOGS[$_i]}" ]]; then
   _sev_text=$(_codex_review_strip_prompt_echo "${AGENT_CODEX_LOGS[$_i]}")
 else
   _sev_text="${AGENT_VERDICT_BODIES[$_i]:-}"
 fi
 ```
 
-This is a pure input-selection change — no change to
-`_review_extract_highest_severity`'s scan semantics (R3) and no change to any
-non-codex path (both already score `AGENT_VERDICT_BODIES[i]` and this branch
-order is a no-op for them: they hit the first `-n` check exactly like today,
-or fall through to the same `else` if somehow empty).
+Every OTHER resolution channel — `artifact`, `artifact-malformed` (never
+reaches this point live), `comment-fallback`, or a codex agent that
+self-posted through the ordinary poll loop — falls into the `else` branch
+and scores `AGENT_VERDICT_BODIES[i]`, identical to the non-codex path. This
+is a strict narrowing versus a body-emptiness check: it is possible (though
+not the live-path norm) for `AGENT_VERDICT_BODIES[i]` to be non-empty on the
+stdout-fallback route too (the wrapper's own composed post), but that body
+is NOT what gets scored — the raw capture, stripped, is — because the
+resolution-channel flag is the authority, not body presence.
 
-**R2 — harden the raw-stdout fallback, at the point the body is COMPOSED, not
-just where it's later read.** New helper `_codex_review_strip_prompt_echo`
-(`adapters/codex.sh`, sibling to `_codex_review_stdout_is_malformed`): reuses
-the SAME finding-boundary grammar the malformed-prompt-echo detector (INV-73)
-already established for its `_echo_region` extraction — truncate at the
-codex CLI's own launch-header + prompt-echo boundary (a `[P0]`-`[P3]`
-finding line, direct/numbered/bulleted/bold, or a JSON severity/priority key
-or value, outside any fenced block) and return everything FROM that boundary
-onward. If no such boundary is found (a capture that never echoed the
-prompt at all — e.g. a short, well-formed review), the helper returns the
-ORIGINAL text unchanged (fail-safe — R2's "no change to current behavior"
-clause).
+**R2 — harden the stdout fallback with structural turn-marker stripping.**
+New helper `_codex_review_strip_prompt_echo` (`adapters/codex.sh`, sibling
+to `_codex_review_stdout_is_malformed`). The boundary is located in three
+validated steps:
 
-**Where the stripping actually needs to happen (closing a gap found in PR
-self-review, round 1):** an initial draft called this helper ONLY at the
-severity-loop call site's `elif` branch — i.e. only when
-`AGENT_VERDICT_BODIES[i]` is empty. But every LIVE codex resolution path that
-produces a `fail` verdict populates that body BEFORE the severity loop runs,
-including the wrapper's own stdout-derived fallback post (INV-62,
-`_codex_review_compose_body`) — which, pre-fix, embedded the RAW,
-un-stripped stdout (echo included) as the body text. So the `elif` branch
-was reachable only in a body-less codex-fail case that does not occur on the
-live wrapper path (an empty-body codex `fail` resolves `unavailable`, never
-reaches the severity loop as `fail` at all) — the helper's call site alone
-did not close the bug for the actual stdout-fallback path; it only worked in
-tests that called the helper directly.
+1. **Validate a leading CLI header** — reuses `_codex_review_stdout_is_malformed`'s
+   own established signals (the `OpenAI Codex v…` banner as the capture's
+   first non-empty line, OR the `workdir:`+`model:`+`provider:` triple in
+   the contiguous leading region). No header at all → fail-safe, whole
+   capture unchanged.
+2. **Locate the FIRST standalone `user` turn-marker line** (column 0, exact
+   word, nothing else on the line, outside any fenced block) — this is the
+   header's OWN marker, immediately bounding it. Never the LAST `user` line:
+   reviewed file content or tool-execution output quoted later in the
+   capture could legitimately contain a bare `user` word (the "over-
+   stripping" hazard the revised issue calls out), and searching for the
+   last one would silently truncate real findings text. No `user` marker
+   after a validated header → fail-safe, whole capture unchanged.
+3. **Locate the LAST standalone `codex` turn-marker line** after that `user`
+   marker (same column-0/exact-word/unfenced discipline) — a `codex review`
+   turn typically emits several `codex`-role turns (reasoning, tool calls,
+   final response); the LAST one bounds the FINAL response, which is the
+   only text that should ever be scored (an earlier reasoning/tool-trace
+   turn is not the agent's verdict). No `codex` marker found → fail-safe,
+   whole capture unchanged.
 
-The fix: call `_codex_review_strip_prompt_echo` INSIDE
-`_codex_review_compose_body`'s FAIL branch, so the body it hands back —
-which becomes `AGENT_VERDICT_BODIES[i]` for every consumer, not just the
-severity loop — is already clean. This closes the gap for the human-facing
-GitHub comment too (a demoted-worthy P2 finding no longer arrives buried in
-an echoed checklist). The severity loop's `elif` branch and the helper
-remain in place as the correct handling for the (currently unreached, but
-structurally possible) case where a codex agent's body is genuinely empty —
-belt-and-suspenders, not dead code removed, since a future resolution-path
-change could make that branch reachable again.
+Only text STRICTLY AFTER that last `codex` marker is returned. The
+fenced-block exclusion (mirroring `_echo_region`'s own established
+discipline) means a reviewed diff snippet or tool-output line that happens
+to quote the literal words `user`/`codex` inside a fenced block is never
+mistaken for a genuine marker — closing the over-stripping gap the revised
+issue explicitly requires a fixture for.
 
 **R3 — no scanner change.** `_review_extract_highest_severity` is untouched.
 Its per-finding fail-safe (an untagged numbered line collapses the whole
 scan to `none`) is exactly what we want it to keep doing — on the RIGHT
-input.
+input, selected by the RIGHT mechanism.
 
-**R4 — docs.** Update the INV-127 gate description and the R1
-call-site paragraph (`review-agent-flow.md`'s severity-filter section) to
-name the corrected source-selection order, and record this bug (issue #481)
-as the motivating incident. New invariant `INV-132` (INV-131 is already
-claimed by the base-branch work) documents the call-site contract itself:
-"the pre-aggregation severity filter always scores a RENDERED verdict body
-when one exists; the raw per-CLI stdout capture is a fallback ONLY for a
-resolution path that produced no body at all."
+**R4 — docs.** Amend the pre-aggregation severity section of
+`docs/pipeline/review-agent-flow.md` and the INV-127/INV-129 paragraphs in
+`docs/pipeline/invariants.md` to state the scored-text source per resolution
+path (verdict body for artifact/comment-poll; stripped final response for
+the stdout-classify fallback) and record this bug as the motivating
+incident. New invariant `INV-132` (INV-131 is already claimed by the
+base-branch work) documents the call-site contract itself. INV-126 (the
+unrelated timeout-binary invariant) is NOT touched.
 
 ## Alternatives considered
 
@@ -136,13 +135,33 @@ resolution path that produced no body at all."
   risks reintroducing the very untagged-finding-masking bug #449 fixed) when
   the actual defect is at the call site: the wrong text is being handed to a
   scanner that is behaving exactly as designed.
-- **Always strip the prompt echo from `AGENT_CODEX_LOGS` regardless of
-  `AGENT_VERDICT_BODIES`.** Rejected — the artifact-rendered body is already
-  clean findings text with zero echo risk; running echo-stripping heuristics
-  over it is unnecessary surface area. Preferring the body when present is
-  strictly simpler and matches every other agent's path (R1's own framing:
-  "identical to the non-codex path").
+- **Branch on body-emptiness instead of an explicit `AGENT_VERDICT_SOURCES`
+  flag (round-1 draft of this fix).** Rejected by the issue's own
+  spec-revision-2 operator review: body-emptiness is an indirect proxy for
+  "which channel resolved this verdict" and is fragile if a future change
+  populates a body on the stdout-fallback route too (which the wrapper's own
+  composed-post-then-refetch flow already does) — an explicit, real
+  branchable flag set exactly where the resolution happens is the correct
+  mechanism.
+- **Strip the echo based on the finding-tag boundary (round-1 draft,
+  reusing `_echo_region`'s grammar verbatim).** Rejected — that boundary is
+  "the first tagged/JSON finding line," which happens to work for a
+  wrapper-authored prompt's checklist shape but is not actually where the
+  echoed PROMPT ends in a real `codex review` transcript; the transcript's
+  own `user`/`codex` role structure is the authoritative, CLI-defined
+  boundary and is what the revised issue specifies.
+- **Strip at `_codex_review_compose_body` composition time (round-1
+  follow-up fix, addressing a gap where the severity call site's fallback
+  branch was unreachable on the live path).** Superseded by R1's explicit
+  `AGENT_VERDICT_SOURCES` branch: because the severity call site now keys on
+  the resolution-channel FLAG rather than body-emptiness, the
+  `codex-stdout-fallback`-tagged branch always fires for that route
+  regardless of whether a body happens to exist — so the composed body
+  (still un-stripped, deliberately — R2 scopes stripping to severity scoring
+  only, not the human-facing comment) is never scored, and the round-1
+  reachability gap does not apply to this mechanism.
 
 ## Test plan
 
-See `docs/test-cases/codex-severity-extraction.md` (`TC-SEVEXT-NNN`).
+See `docs/test-cases/codex-severity-extraction.md` (`TC-SEVEXT-NNN`,
+`TC-CXSTRIP-NNN`).

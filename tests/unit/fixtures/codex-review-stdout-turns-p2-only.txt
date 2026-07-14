@@ -7,6 +7,7 @@ approval: never
 sandbox: read-only
 --------
 
+user
 You are an autonomous PR reviewer for PR #999. You are running inside `codex
 review`, so the diff is already scoped to the PR's merge target — do NOT re-run
 `git diff` or `gh pr diff`.
@@ -16,8 +17,6 @@ review`, so the diff is already scoped to the PR's merge target — do NOT re-ru
 Before doing anything else, check the PR mergeable status and rebase if needed.
 
 ## Review Checklist
-Verify ALL of the following were completed:
-
 1. [ ] Design canvas created (docs/designs/ or docs/plans/)
 2. [ ] Git worktree used (branch name starts with feat/, fix/, etc.)
 3. [ ] Test cases documented (docs/test-cases/)
@@ -29,6 +28,14 @@ Verify ALL of the following were completed:
 9. [ ] Reviewer bot findings addressed
 10. [ ] PR description follows template
 
+codex
+I'll start by reading the PR diff and the issue comments.
+
+codex
+Running: git diff origin/main...HEAD
+Reading src/handler.ts and src/other.ts.
+
+codex
 I reviewed the scoped diff (the PR's merge-target range).
 
 Findings:
@@ -40,3 +47,5 @@ Findings:
 `src/shared/validate.ts`; consider extracting a shared helper.
 
 Summary: 2 non-blocking findings (P2). No P0/P1 issues found.
+
+tokens used: 54210
