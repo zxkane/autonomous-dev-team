@@ -1440,6 +1440,46 @@ else
   bad "TC-IDIOM-065: expected non-zero exit and no PASS output when the diagnostic re-run fails on a real regression, got rc=$rc: $out"
 fi
 
+# TC-IDIOM-066: regression pin for the round-2 review finding — when a
+# detector fails under --write-baseline, discover_counts's own detector-
+# failure branch calls `exit 2` directly (to propagate the failure per R1),
+# which terminates the whole process immediately rather than returning to
+# the `discover_counts > "$DISC_OUT" || { ...; }` call site. A cleanup
+# handler living only in that `||` branch therefore never runs, leaking the
+# DISC_OUT scratch file. Uses a scoped, otherwise-empty TMPDIR so any file
+# left behind by the failing run is directly observable.
+FAKE_AWK_DIR4="$WORK/fake-awk-write-baseline-leak-path"
+mkdir -p "$FAKE_AWK_DIR4"
+cat > "$FAKE_AWK_DIR4/awk" <<'EOF'
+#!/bin/bash
+echo "awk: simulated failure" >&2
+exit 1
+EOF
+chmod +x "$FAKE_AWK_DIR4/awk"
+for b in bash sed grep find sort cut mktemp cat tr jq git dirname wc rm; do
+  real="$(PATH="/usr/bin:/bin" command -v "$b" 2>/dev/null)"
+  [ -n "$real" ] && ln -sf "$real" "$FAKE_AWK_DIR4/$b"
+done
+
+R="$(fresh_root P066)"
+write_script "$R" foo/bar.sh <<'EOF'
+#!/bin/bash
+set -euo pipefail
+
+foo() {
+  x=$(jq -r 'select(.body | test("x"))')
+}
+EOF
+SCOPED_TMPDIR="$WORK/p066-tmpdir"
+mkdir -p "$SCOPED_TMPDIR"
+PATH="$FAKE_AWK_DIR4" TMPDIR="$SCOPED_TMPDIR" bash "$CHECK" --scan-root "$R" --write-baseline >/dev/null 2>&1; rc=$?
+leftover="$(ls -A "$SCOPED_TMPDIR" 2>/dev/null)"
+if [ "$rc" -eq 2 ] && [ -z "$leftover" ]; then
+  ok "TC-IDIOM-066: a failing detector under --write-baseline leaves no scratch file behind — regression pin for the discover_counts-internal-exit-2 leak"
+else
+  bad "TC-IDIOM-066: expected exit 2 and an empty scratch TMPDIR, got rc=$rc leftover=[$leftover]"
+fi
+
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== Summary: $PASS passed, $FAIL failed ==="

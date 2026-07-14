@@ -7910,6 +7910,20 @@ tool failure, and the surrounding logic reads "no rows" as "no violations"):
   own failure via `fail()` — the already-detected growth is never silently
   dropped merely because the offending lines couldn't be enumerated
   (TC-IDIOM-065).
+- **`--write-baseline` scratch-file cleanup on a detector-failure exit**
+  (review round 2): the `--write-baseline` branch's own `discover_counts >
+  "$DISC_OUT" || { rm -f "$DISC_OUT"; …; exit "$rc"; }` cleanup handler
+  never ran when a Rule J/S detector failed, because `discover_counts`'s
+  detector-failure branches call `exit 2` directly (to propagate the
+  failure per the detector-propagation fix above) — that terminates the
+  whole process immediately rather than returning a non-zero status to the
+  `||` at the call site, leaking the `DISC_OUT` `mktemp` scratch file on
+  every such failure. The fix installs a `trap 'rm -f "$DISC_OUT"' EXIT`
+  immediately after allocating `$DISC_OUT`, mirroring the reconciliation
+  branch's existing `trap` pattern — a trap fires on every exit path,
+  including one triggered deep inside `discover_counts`, so the scratch
+  file is always removed regardless of where the failure originates
+  (TC-IDIOM-066).
 
 **Heuristic bounds (deliberate, not a defect)**: both detectors are
 line-window heuristics over the raw source text, not a bash/jq parser — the
@@ -8051,7 +8065,15 @@ the reconciliation loop's DIAGNOSTIC re-run of a detector (used only to
 enumerate offending lines for an already-detected regression) is itself
 reported rather than silently swallowed by the then-unchecked process
 substitution feeding that loop — the fix switches the re-run's capture from
-process substitution to a checked command substitution.
+process substitution to a checked command substitution. A review round 2
+found a fifth gap: **TC-IDIOM-066** pins that a failing detector under
+`--write-baseline` leaves no leaked `mktemp` scratch file behind — the
+`||` cleanup handler wrapped around the `discover_counts` call never ran on
+this path, because `discover_counts`'s own detector-failure branches
+`exit 2` directly rather than returning to the caller; the fix installs a
+`trap 'rm -f "$DISC_OUT"' EXIT` immediately after allocation, matching the
+reconciliation branch's existing pattern, and the test asserts against a
+scoped, otherwise-empty `TMPDIR` so a leaked file is directly observable.
 
 **Cross-references**:
 - [INV-91](#inv-91-the-provider-neutral-caller-layer-routes-all-host-io-through-itp_chp_-verbs--a-new-raw-gh-outside-providers-is-a-ci-failing-cutover-regression-baseline-anchored) — the baseline-anchored ratchet shape (committed manifest, growth-only FAIL, `--require-trusted-ref` fail-closed monotonicity, deferred `ci.yml` wiring via #295) this invariant mirrors structurally.

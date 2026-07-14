@@ -208,7 +208,7 @@ fail-closed path).
 | TC-IDIOM-054 | The same simulated `mktemp` failure under `--require-trusted-ref` against a clean committed trusted baseline | exit 2 (infra error, not the strict-mode exit-1 fail-closed path), output never contains `shell-idioms-guard: PASS` |
 | TC-IDIOM-055 | A healthy `mktemp` (no fake `PATH`) against a clean tree | exit 0, output contains `shell-idioms-guard: PASS` — proves the fix does not regress the normal PASS path |
 
-## Group P — current-tree infra-failure hardening, issue #482 (TC-IDIOM-056..065)
+## Group P — current-tree infra-failure hardening, issue #482 (TC-IDIOM-056..066)
 
 Three narrow infra-failure paths in the CURRENT-TREE scan side, split out from
 #480/INV-130's review loop at operator takeover (round-5 residual `[P2]`
@@ -217,8 +217,9 @@ three share one shape: an unchecked command substitution in the
 discover/reconcile pipeline collapses to empty output on tool failure, and the
 surrounding logic reads "no rows" as "no violations." TC-IDIOM-062..065 were
 added after an eighth review pass (spec revision 2, round 1) sharpened R1's
-scope and flagged gaps in the initial Group P test set — see the per-row notes
-below.
+scope and flagged gaps in the initial Group P test set; TC-IDIOM-066 was
+added after a review round 2 pass found a scratch-file cleanup gap in the
+R1 fix itself — see the per-row notes below.
 
 | ID | Scenario | Expected |
 |----|----------|----------|
@@ -232,6 +233,7 @@ below.
 | TC-IDIOM-063 | A fake `wc` that exits 0 but prints EMPTY text (simulating a corrupted `wc` build, distinct from an outright non-zero exit) for the detector-count pipeline | exit 2, output never contains `shell-idioms-guard: PASS` — exercises the digits-only `case … in ''\|*[!0-9]*)` re-check, which pipefail's exit-status check alone would not catch (the pipeline's last stage still exits 0 on empty input) |
 | TC-IDIOM-064 | A fake `wc` that exits 0 but prints NON-NUMERIC garbage text for the detector-count pipeline | exit 2, output never contains `shell-idioms-guard: PASS` — same digits-only re-check, distinct failure shape from TC-IDIOM-063's empty-output case |
 | TC-IDIOM-065 | A fake `awk` that fails only on its 3rd detector invocation — `discover_counts` already found a real Rule J regression (calls #1/#2 succeed), then the reconciliation loop's DIAGNOSTIC RE-RUN of the Rule J detector (used only to enumerate offending line numbers for the error message) fails on call #3 | non-zero exit, output never contains `shell-idioms-guard: PASS` — regression pin; previously the diagnostic re-run's failure status was read via an unchecked process substitution (`done < <(rule_j_unguarded_lines_in …)`), so a failure there was silently swallowed and an already-detected regression could still print PASS |
+| TC-IDIOM-066 | A simulated `awk` detector failure under `--write-baseline`, run with a scoped `TMPDIR` pointed at an otherwise-empty scratch directory | exit 2, and the scoped `TMPDIR` is left EMPTY — regression pin (review round 2) for a leaked `DISC_OUT` `mktemp` scratch file: `discover_counts`'s own detector-failure branches `exit 2` directly, which bypasses the `||` cleanup handler wrapped around the `discover_counts` call at the `--write-baseline` call site entirely; the fix installs `trap 'rm -f "$DISC_OUT"' EXIT` right after allocation |
 
 ## Acceptance criteria for this change (pre-merge verifiable)
 

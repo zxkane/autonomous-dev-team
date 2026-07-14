@@ -258,16 +258,23 @@ discover_counts() {
 # ---------------------------------------------------------------------------
 if [ "$WRITE_BASELINE" -eq 1 ]; then
   DISC_OUT="$(mktemp)" || { echo "check-shell-idioms.sh: mktemp failed — cannot allocate scratch file for discovered counts" >&2; exit 2; }
+  # A `trap ... EXIT` (not a `||` handler after the call) is load-bearing
+  # here: discover_counts's own detector-failure branches call `exit 2`
+  # directly (review finding, round 2) — that terminates the whole process
+  # immediately rather than returning a non-zero status to this call site,
+  # so a `discover_counts > "$DISC_OUT" || { rm -f "$DISC_OUT"; ...; }`
+  # handler would never run on that path and would leak the scratch file.
+  # A trap fires on every exit, including one triggered deep inside the
+  # function. Mirrors the reconciliation branch's trap below.
+  trap 'rm -f "$DISC_OUT"' EXIT
   discover_counts > "$DISC_OUT" \
-    || { rc=$?; rm -f "$DISC_OUT"; echo "check-shell-idioms.sh: discover_counts failed while writing --write-baseline output" >&2; exit "$rc"; }
+    || { rc=$?; echo "check-shell-idioms.sh: discover_counts failed while writing --write-baseline output" >&2; exit "$rc"; }
   jq -R -S -s '
     [ split("\n")[] | select(length > 0) | split("\t")
       | { key: .[0], value: { jq_unguarded: (.[1] | tonumber), swallow_unjustified: (.[2] | tonumber) } } ]
     | from_entries
   ' < "$DISC_OUT"
-  rc=$?
-  rm -f "$DISC_OUT"
-  exit "$rc"
+  exit $?
 fi
 
 # ---------------------------------------------------------------------------
