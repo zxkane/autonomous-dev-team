@@ -248,6 +248,27 @@ By default the wrapper runs exactly ONE verdict-reaching agent (`AGENT_REVIEW_CM
 
 > **Distinct from `REVIEW_BOTS`.** `REVIEW_BOTS` (`/q review`, `/codex review`) triggers *external GitHub bots* whose review comments are read as **input** by the verdict agent(s). `AGENT_REVIEW_AGENTS` runs N *independent verdict-reaching* agents — each reaches its own approve/pushback decision, and the wrapper aggregates them.
 
+### Internal subagents are advisory
+
+Internal Claude or Codex subagents may inspect security, tests,
+maintainability, or other dimensions for one wrapper-launched review session.
+They return evidence to their parent and do not become entries in
+`AGENT_REVIEW_AGENTS`.
+
+Within each wrapper-assigned verdict session, the parent session alone executes
+the Findings -> Decision Gate and invokes `post-verdict.sh` with that session's
+assigned agent name and session id. An internal subagent must never invoke
+`post-verdict.sh` or post an independent verdict. Each parent reconciles its
+advisory findings into one PASS/FAIL result; the wrapper remains the only
+component that aggregates sessions, submits the native review action, or
+merges.
+
+The three mechanisms therefore remain disjoint:
+
+- internal subagents: advisory evidence inside one session;
+- `AGENT_REVIEW_AGENTS`: independent wrapper-managed verdict sessions;
+- `REVIEW_BOTS`: external code-host reviewers whose comments are evidence.
+
 ### Agent-list resolution
 
 `REVIEW_AGENTS_LIST` resolves once at startup:

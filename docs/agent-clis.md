@@ -28,13 +28,15 @@ The first-class mixed setup is `AGENT_DEV_CMD=codex, AGENT_REVIEW_CMD=claude`:
 AGENT_CMD="claude"
 AGENT_DEV_CMD="codex"
 AGENT_REVIEW_CMD="claude"
+AGENT_LAUNCHER=""
 AGENT_DEV_LAUNCHER=""
 AGENT_REVIEW_AGENTS="" # one wrapper-assigned Claude verdict session
 ```
 
-Use `AGENT_REVIEW_LAUNCHER` only when the Claude review process needs a
-Claude-specific bridge; leave the dev launcher empty so it cannot wrap Codex.
-The wrappers rebind the selected CLI and launcher per side before dispatch.
+Clear a legacy shared `AGENT_LAUNCHER`; an explicitly empty per-side value
+otherwise inherits it for backward compatibility. Set `AGENT_REVIEW_LAUNCHER`
+only when the Claude review process needs that bridge. The wrappers rebind the
+selected CLI and launcher per side before dispatch.
 
 Codex/Claude internal subagents, `AGENT_REVIEW_AGENTS`, and `REVIEW_BOTS` are
 three separate mechanisms: internal subagents are advisory workers within one

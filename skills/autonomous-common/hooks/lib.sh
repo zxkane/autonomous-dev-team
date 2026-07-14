@@ -17,14 +17,17 @@ read_hook_stdin() {
   printf '%s' "$input"
 }
 
-# Resolve main project root (works from worktrees and subdirectories).
-# Git worktrees have their own .git file pointing to the main repo's .git/worktrees/<name>.
-# --git-common-dir returns the main repo's .git directory in both cases.
+# Resolve the current worktree root from worktrees and subdirectories.
+# Workflow state is per worktree; only fall back to the common checkout when
+# no worktree toplevel can be resolved.
 resolve_project_root() {
   if [[ -n "${CLAUDE_PROJECT_DIR:-}" ]]; then
     echo "$CLAUDE_PROJECT_DIR"
   else
-    git rev-parse --path-format=absolute --git-common-dir 2>/dev/null | sed 's|/\.git$||' || git rev-parse --show-toplevel 2>/dev/null || pwd
+    git rev-parse --show-toplevel 2>/dev/null ||
+      git rev-parse --path-format=absolute --git-common-dir 2>/dev/null |
+        sed 's|/\.git$||' ||
+      pwd
   fi
 }
 
@@ -145,24 +148,24 @@ parse_edit_file_operations() {
       fi
       printf 'edit\t%s\n' "$file_path"
       ;;
-    fs_write)
+    fs_write|write|fsWrite)
       if ! file_path=$(parse_json_string_field "${input_prefix}.path" "$json_input"); then
-        echo "Error: fs_write hook payload is missing a string ${input_prefix}.path" >&2
+        echo "Error: $tool_name hook payload is missing a string ${input_prefix}.path" >&2
         return 1
       fi
       if ! command=$(parse_json_string_field "${input_prefix}.command" "$json_input"); then
-        echo "Error: fs_write hook payload is missing a string ${input_prefix}.command" >&2
+        echo "Error: $tool_name hook payload is missing a string ${input_prefix}.command" >&2
         return 1
       fi
       if [[ "$file_path" == *$'\t'* || "$file_path" == *$'\n'* ]]; then
-        echo "Error: fs_write hook path contains an unsupported tab or newline" >&2
+        echo "Error: $tool_name hook path contains an unsupported tab or newline" >&2
         return 1
       fi
       case "$command" in
         create) printf 'add\t%s\n' "$file_path" ;;
         str_replace|insert|append) printf 'edit\t%s\n' "$file_path" ;;
         *)
-          echo "Error: fs_write hook payload has unsupported command: $command" >&2
+          echo "Error: $tool_name hook payload has unsupported command: $command" >&2
           return 1
           ;;
       esac

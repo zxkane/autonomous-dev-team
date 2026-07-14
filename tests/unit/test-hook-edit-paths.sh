@@ -64,11 +64,14 @@ for tool_name in replace StrReplaceFile; do
     $'edit\tsrc/translated.ts' "$out" \
     || bad "$tool_name emits an edit operation (rc=$rc)"
 done
-kiro_create_payload='{"tool_name":"fs_write","tool_input":{"command":"create","path":"src/kiro-new.ts"}}'
-out=$(parse_edit_file_operations "$kiro_create_payload" 2>/dev/null); rc=$?
-[[ "$rc" -eq 0 ]] && assert_eq "Kiro create uses path and emits an add candidate" \
-  $'add\tsrc/kiro-new.ts' "$out" \
-  || bad "Kiro create uses path and emits an add candidate (rc=$rc)"
+for tool_name in fs_write write fsWrite; do
+  kiro_create_payload=$(jq -nc --arg tool "$tool_name" \
+    '{tool_name:$tool,tool_input:{command:"create",path:"src/kiro-new.ts"}}')
+  out=$(parse_edit_file_operations "$kiro_create_payload" 2>/dev/null); rc=$?
+  [[ "$rc" -eq 0 ]] && assert_eq "Kiro $tool_name create emits an add candidate" \
+    $'add\tsrc/kiro-new.ts' "$out" \
+    || bad "Kiro $tool_name create emits an add candidate (rc=$rc)"
+done
 for kiro_command in str_replace insert append; do
   kiro_edit_payload=$(jq -nc --arg command "$kiro_command" \
     '{tool_name:"fs_write",tool_input:{command:$command,path:"src/kiro-old.ts"}}')
@@ -201,6 +204,21 @@ else
   bad "native Windsurf write still triggers file-creation policy (rc=$rc)"
 fi
 
+mkdir -p "$repo/nested/src"
+printf 'existing only below cwd\n' > "$repo/nested/src/root-relative.ts"
+root_relative_payload=$(jq -n --arg command '*** Begin Patch
+*** Add File: src/root-relative.ts
++export const rootRelative = true;
+*** End Patch' \
+  '{tool_name:"apply_patch",tool_input:{command:$command}}')
+policy_out=$(cd "$repo/nested" && CLAUDE_PROJECT_DIR="$repo" \
+  bash "$CHECK_TEST_PLAN" <<<"$root_relative_payload" 2>&1); rc=$?
+if [[ "$rc" -eq 0 && "$policy_out" == *"Reminder: Test Plan First"* ]]; then
+  ok "Codex relative paths are checked only against the worktree root"
+else
+  bad "Codex relative paths are checked only against the worktree root (rc=$rc)"
+fi
+
 malformed_file_payload='{"tool_name":"Write","tool_input":{"file_path":42}}'
 (cd "$repo" && CLAUDE_PROJECT_DIR="$repo" bash "$CHECK_TEST_PLAN" \
   <<<"$malformed_file_payload" >/dev/null 2>&1)
@@ -263,6 +281,34 @@ if [[ "$rc" -eq 2 ]]; then
   ok "malformed generated hook invocation exits exactly 2"
 else
   bad "malformed generated hook invocation exits exactly 2 (rc=$rc)"
+fi
+
+echo "=== TC-CDCR-027: generated command isolates linked-worktree state ==="
+main_repo="$TMPDIR/state-main"
+worktree="$TMPDIR/state-worktree"
+mkdir -p "$main_repo"
+git -C "$main_repo" init --quiet --initial-branch=main
+git -C "$main_repo" config user.name test
+git -C "$main_repo" config user.email test@example.com
+printf 'seed\n' > "$main_repo/README.md"
+git -C "$main_repo" add README.md
+git -C "$main_repo" commit --quiet -m seed
+git -C "$main_repo" worktree add --quiet -b feature "$worktree"
+CLAUDE_PROJECT_DIR="$main_repo" \
+  "$PROJECT_ROOT/skills/autonomous-common/hooks/state-manager.sh" \
+  mark test-plan >/dev/null
+mkdir -p "$worktree/src"
+linked_payload=$(jq -n --arg command '*** Begin Patch
+*** Add File: src/worktree-only.ts
++export const isolated = true;
+*** End Patch' \
+  '{tool_name:"apply_patch",tool_input:{command:$command}}')
+linked_out=$(cd "$worktree" && unset CLAUDE_PROJECT_DIR && \
+  bash "$CHECK_TEST_PLAN" <<<"$linked_payload" 2>&1); rc=$?
+if [[ "$rc" -eq 0 && "$linked_out" == *"Reminder: Test Plan First"* ]]; then
+  ok "linked worktree does not consume the main checkout test-plan mark"
+else
+  bad "linked worktree does not consume the main checkout test-plan mark (rc=$rc)"
 fi
 
 echo "=== Summary ==="

@@ -118,7 +118,10 @@ The function resolves each `(claude_event, claude_matcher)` pair into a Windsurf
 
 ## Why no shared TOML serializer lib
 
-The Codex installer also touches TOML (PR-11b), but only to insert a single line into a `[features]` block — different problem. The Kimi case is "generate a sequence of `[[hooks]]` blocks from JSON". A real TOML serializer would be over-engineered; a small purpose-built bash function inline in `install-kimi-hooks.sh` is enough. We document the contract clearly so a future TOML-needing installer can extract a shared lib if it makes sense.
+The current Codex installer uses a validated, transactional TOML migration for
+the canonical `[features] hooks` key, which remains a different problem from
+Kimi's generation of a sequence of `[[hooks]]` blocks from JSON. A shared TOML
+serializer is still unnecessary; each path has a deliberately narrow contract.
 
 ## Tests
 

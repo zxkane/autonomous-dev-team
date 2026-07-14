@@ -236,7 +236,7 @@ else
   bad "migration does not rewrite keys in unrelated array tables"
 fi
 
-echo "=== TC-CDCR-008B: quoted table headers refuse mutable migration ==="
+echo "=== TC-CDCR-008B: unrelated quoted table headers survive migration ==="
 repo=$(new_repo legacy_with_quoted_table)
 mkdir -p "$repo/.codex"
 cat > "$repo/.codex/config.toml" <<'EOF'
@@ -246,14 +246,41 @@ codex_hooks = true
 ["operator#table"]
 codex_hooks = "operator-data"
 EOF
+if install "$repo" &&
+   python3 - "$repo/.codex/config.toml" <<'PY'
+import sys
+import tomllib
+
+config = tomllib.load(open(sys.argv[1], "rb"))
+assert config["features"]["hooks"] is True
+assert "codex_hooks" not in config["features"]
+assert config["operator#table"]["codex_hooks"] == "operator-data"
+PY
+then
+  ok "unrelated quoted table survives canonical migration"
+else
+  bad "unrelated quoted table survives canonical migration"
+fi
+
+echo "=== TC-CDCR-008C: multiline arrays cannot hide a failed migration ==="
+repo=$(new_repo legacy_with_multiline_array)
+mkdir -p "$repo/.codex"
+cat > "$repo/.codex/config.toml" <<'EOF'
+[features]
+matrix = [
+  [1, 2]
+]
+codex_hooks = true
+EOF
 cp "$repo/.codex/config.toml" "$repo/before.toml"
 if install "$repo"; then
-  bad "quoted table header must refuse mutable migration"
+  bad "unsafe multiline-array migration must refuse"
 elif cmp -s "$repo/.codex/config.toml" "$repo/before.toml" &&
-     [[ ! -e "$repo/.codex/hooks.json" ]]; then
-  ok "quoted table header refuses without changing either destination"
+     [[ ! -e "$repo/.codex/hooks.json" ]] &&
+     grep -q 'could not safely canonicalize' "$repo/install.err"; then
+  ok "semantic postcondition refuses a missed multiline-array migration"
 else
-  bad "quoted table header refuses without changing either destination"
+  bad "semantic postcondition refuses a missed multiline-array migration"
 fi
 
 echo "=== TC-CDCR-009: legacy false is preserved ==="
@@ -407,7 +434,7 @@ for form in array duplicate_key duplicate_table; do
   fi
 done
 
-echo "=== TC-CDCR-017: second-file failure rolls back config ==="
+echo "=== TC-CDCR-017: config failure rolls back the earlier hooks install ==="
 repo=$(new_repo rollback)
 mkdir -p "$repo/.codex" "$repo/fakebin"
 cat > "$repo/.codex/config.toml" <<'EOF'
@@ -418,29 +445,72 @@ printf '{"sentinel":true}\n' > "$repo/.codex/hooks.json"
 cp "$repo/.codex/config.toml" "$repo/config.before"
 cp "$repo/.codex/hooks.json" "$repo/hooks.before"
 real_mv=$(command -v mv)
-cat > "$repo/fakebin/mv" <<'EOF'
+real_python=$(command -v python3)
+cat > "$repo/fakebin/python3" <<'EOF'
 #!/bin/bash
-if [[ "${FAIL_MOVE_DEST:-}" == "${@: -1}" ]]; then
+if [[ "${CODEX_ATOMIC_PLACE:-}" == "1" &&
+      "${FAIL_PLACE_DEST:-}" == "${3:-}" &&
+      "${2:-}" == *".pending."* ]]; then
   exit 73
 fi
-exec "$REAL_MV" "$@"
+exec "$REAL_PYTHON" "$@"
 EOF
-chmod +x "$repo/fakebin/mv"
+chmod +x "$repo/fakebin/python3"
 if (
   cd "$repo" &&
-    REAL_MV="$real_mv" FAIL_MOVE_DEST="$repo/.codex/hooks.json" \
+    REAL_PYTHON="$real_python" FAIL_PLACE_DEST="config.toml" \
       PATH="$repo/fakebin:$PATH" \
       bash "$INSTALLER" --no-git-hook >/dev/null 2>"$repo/install.err"
 ); then
-  bad "simulated hooks replacement failure must fail"
+  bad "simulated config replacement failure must fail"
 else
-  ok "simulated hooks replacement failure fails"
+  ok "simulated config replacement failure fails"
 fi
 if cmp -s "$repo/.codex/config.toml" "$repo/config.before" &&
    cmp -s "$repo/.codex/hooks.json" "$repo/hooks.before"; then
   ok "config and hooks are restored after second-file failure"
 else
   bad "config and hooks are restored after second-file failure"
+fi
+
+echo "=== TC-CDCR-017B: hooks install before the enabling feature flag ==="
+repo=$(new_repo replacement_order)
+mkdir -p "$repo/.codex" "$repo/fakebin"
+cat > "$repo/.codex/config.toml" <<'EOF'
+[features]
+codex_hooks = true
+EOF
+printf '{"sentinel":true}\n' > "$repo/.codex/hooks.json"
+cat > "$repo/fakebin/python3" <<'EOF'
+#!/bin/bash
+if [[ "${CODEX_ATOMIC_PLACE:-}" == "1" &&
+      "${2:-}" == *".pending."* &&
+      ( "${3:-}" == "$ORDER_HOOKS" || "${3:-}" == "$ORDER_CONFIG" ) ]]; then
+  printf '%s\n' "$3" >> "$ORDER_LOG"
+fi
+exec "$REAL_PYTHON" "$@"
+EOF
+chmod +x "$repo/fakebin/python3"
+if (
+  cd "$repo" &&
+    REAL_PYTHON="$real_python" ORDER_LOG="$repo/move-order" \
+      ORDER_HOOKS="hooks.json" \
+      ORDER_CONFIG="config.toml" \
+      PATH="$repo/fakebin:$PATH" \
+      bash "$INSTALLER" --no-git-hook >/dev/null 2>"$repo/install.err"
+); then
+  move_order=()
+  while IFS= read -r item; do
+    move_order[${#move_order[@]}]="$item"
+  done < "$repo/move-order"
+  if [[ "${move_order[0]:-}" == "hooks.json" &&
+        "${move_order[1]:-}" == "config.toml" ]]; then
+    ok "hooks are replaced before config enables them"
+  else
+    bad "hooks are replaced before config enables them"
+  fi
+else
+  bad "replacement-order fixture installs"
 fi
 
 echo "=== TC-CDCR-017A: rollback preserves a concurrent operator edit ==="
@@ -451,27 +521,42 @@ cat > "$repo/.codex/config.toml" <<'EOF'
 codex_hooks = true
 EOF
 printf '{"sentinel":true}\n' > "$repo/.codex/hooks.json"
-cat > "$repo/fakebin/mv" <<'EOF'
+cat > "$repo/fakebin/python3" <<'EOF'
 #!/bin/bash
-if [[ "${FAIL_MOVE_DEST:-}" == "${@: -1}" ]]; then
-  printf '\n# operator edit during rollback window\n' >> "$ROLLBACK_RACE_CONFIG"
+if [[ "${CODEX_ATOMIC_PLACE:-}" == "1" &&
+      "${FAIL_PLACE_DEST:-}" == "${3:-}" &&
+      "${2:-}" == *".pending."* ]]; then
   exit 73
 fi
-exec "$REAL_MV" "$@"
+if [[ "${CODEX_ATOMIC_PLACE:-}" == "1" &&
+      "${2:-}" == "$ROLLBACK_RACE_HOOKS" &&
+      "${3:-}" == *".rollback-current."* &&
+      ! -e "$ROLLBACK_SIGNAL_STATE" ]]; then
+  : > "$ROLLBACK_SIGNAL_STATE"
+  "$REAL_PYTHON" "$@"
+  rc=$?
+  printf '\n// operator edit during rollback window\n' >> "$3"
+  kill -TERM "$PPID"
+  sleep 1
+  exit "$rc"
+fi
+exec "$REAL_PYTHON" "$@"
 EOF
-chmod +x "$repo/fakebin/mv"
+chmod +x "$repo/fakebin/python3"
 if (
   cd "$repo" &&
-    REAL_MV="$real_mv" FAIL_MOVE_DEST="$repo/.codex/hooks.json" \
-      ROLLBACK_RACE_CONFIG="$repo/.codex/config.toml" \
+    REAL_PYTHON="$real_python" FAIL_PLACE_DEST="config.toml" \
+      ROLLBACK_RACE_HOOKS="hooks.json" \
+      ROLLBACK_SIGNAL_STATE="$repo/rollback-signal-fired" \
       PATH="$repo/fakebin:$PATH" \
       bash "$INSTALLER" --no-git-hook >/dev/null 2>"$repo/install.err"
 ); then
-  bad "hooks failure with concurrent config edit must fail"
-elif grep -q 'operator edit during rollback window' "$repo/.codex/config.toml" &&
-     grep -q '^hooks = true' "$repo/.codex/config.toml" &&
+  bad "config failure with concurrent hooks edit must fail"
+elif grep -q 'operator edit during rollback window' "$repo/.codex/hooks.json" &&
+     grep -q '^codex_hooks = true' "$repo/.codex/config.toml" &&
+     [[ -e "$repo/rollback-signal-fired" ]] &&
      grep -q 'refusing to overwrite a concurrent edit' "$repo/install.err" &&
-     grep -q '"sentinel":true' "$repo/.codex/hooks.json"; then
+     ! grep -q '"sentinel":true' "$repo/.codex/hooks.json"; then
   ok "rollback refuses to overwrite the concurrent operator edit"
 else
   bad "rollback refuses to overwrite the concurrent operator edit"
@@ -509,6 +594,11 @@ fi
    "$(file_mode "$repo/.codex/hooks.json")" == "600" ]] \
   && ok "fresh generated files remain private under permissive umask" \
   || bad "fresh generated files remain private under permissive umask"
+[[ "$(file_mode "$repo/.codex")" == "700" ]] \
+  && ok "fresh Codex directory remains private under permissive umask" \
+  || bad "fresh Codex directory remains private under permissive umask"
+assert_file_not_contains "transaction scratch names are not PID-predictable" \
+  "$INSTALLER" 'pending\.\$\$|rollback\.\$\$'
 
 echo "=== TC-CDCR-019: non-regular destinations refuse ==="
 repo=$(new_repo config_directory)
@@ -562,24 +652,42 @@ EOF
 printf '{"sentinel":true}\n' > "$repo/.codex/hooks.json"
 cp "$repo/.codex/config.toml" "$repo/config.before"
 cp "$repo/.codex/hooks.json" "$repo/hooks.before"
-cat > "$repo/fakebin/mv" <<'EOF'
+cat > "$repo/fakebin/python3" <<'EOF'
 #!/bin/bash
-if [[ "${FAIL_SIGNAL_DEST:-}" == "${@: -1}" &&
+if [[ "${CODEX_ATOMIC_PLACE:-}" == "1" ]]; then
+  printf '%s\n' "${3:-}" >> "$SIGNAL_ORDER"
+fi
+if [[ "${CODEX_ATOMIC_PLACE:-}" == "1" &&
+      "${FAIL_SIGNAL_DEST:-}" == "${3:-}" &&
+      "${2:-}" == *".pending."* &&
       ! -e "${FAIL_SIGNAL_STATE:-}" ]]; then
   : > "$FAIL_SIGNAL_STATE"
-  "$REAL_MV" "$@"
+  "$REAL_PYTHON" "$@"
   rc=$?
   kill -TERM "$PPID"
   sleep 1
   exit "$rc"
 fi
-exec "$REAL_MV" "$@"
+if [[ "${CODEX_ATOMIC_PLACE:-}" == "1" &&
+      "${FAIL_SIGNAL_DEST:-}" == "${3:-}" &&
+      "${2:-}" == *".rollback."* &&
+      ! -e "${FAIL_SIGNAL_SECOND_STATE:-}" ]]; then
+  : > "$FAIL_SIGNAL_SECOND_STATE"
+  "$REAL_PYTHON" "$@"
+  rc=$?
+  kill -TERM "$PPID"
+  sleep 1
+  exit "$rc"
+fi
+exec "$REAL_PYTHON" "$@"
 EOF
-chmod +x "$repo/fakebin/mv"
+chmod +x "$repo/fakebin/python3"
 (
   cd "$repo" &&
-    REAL_MV="$real_mv" FAIL_SIGNAL_DEST="$repo/.codex/config.toml" \
+    REAL_PYTHON="$real_python" FAIL_SIGNAL_DEST="config.toml" \
       FAIL_SIGNAL_STATE="$repo/signal-fired" \
+      FAIL_SIGNAL_SECOND_STATE="$repo/second-signal-fired" \
+      SIGNAL_ORDER="$repo/signal-order" \
       PATH="$repo/fakebin:$PATH" \
       bash "$INSTALLER" --no-git-hook >/dev/null 2>"$repo/install.err"
 )
@@ -594,6 +702,19 @@ if cmp -s "$repo/.codex/config.toml" "$repo/config.before" &&
   ok "signal handler restores both destinations"
 else
   bad "signal handler restores both destinations"
+fi
+signal_order=()
+while IFS= read -r item; do
+  signal_order[${#signal_order[@]}]="$item"
+done < <(grep -Fx -e "config.toml" -e "hooks.json" "$repo/signal-order")
+signal_count=${#signal_order[@]}
+if [[ -e "$repo/second-signal-fired" &&
+      "$signal_count" -ge 4 &&
+      "${signal_order[signal_count - 2]}" == "config.toml" &&
+      "${signal_order[signal_count - 1]}" == "hooks.json" ]]; then
+  ok "rollback ignores a repeated signal and restores config before hooks"
+else
+  bad "rollback ignores a repeated signal and restores config before hooks"
 fi
 if compgen -G "$repo/.codex/*.pending.*" >/dev/null; then
   bad "signal handler removes pending files"
@@ -706,6 +827,373 @@ elif [[ "$(file_mode "$repo/.codex/config.toml")" == "600" ]] &&
   ok "concurrent mode change survives and neither destination is replaced"
 else
   bad "concurrent mode change survives and neither destination is replaced"
+fi
+
+echo "=== TC-CDCR-019E: edit in the final placement window is preserved ==="
+repo=$(new_repo final_placement_race)
+mkdir -p "$repo/.codex" "$repo/fakebin"
+cat > "$repo/.codex/config.toml" <<'EOF'
+[features]
+codex_hooks = true
+EOF
+printf '{"sentinel":true}\n' > "$repo/.codex/hooks.json"
+cp "$repo/.codex/hooks.json" "$repo/hooks.before"
+cat > "$repo/fakebin/python3" <<'EOF'
+#!/bin/bash
+if [[ "${CODEX_ATOMIC_PLACE:-}" == "1" &&
+      "${3:-}" == "$RACE_CONFIG" &&
+      "${2:-}" == *".pending."* &&
+      ! -e "$RACE_STATE" ]]; then
+  : > "$RACE_STATE"
+  printf '[features]\ncodex_hooks = true\n# final-window operator edit\n' \
+    > "$RACE_CONFIG"
+fi
+exec "$REAL_PYTHON" "$@"
+EOF
+chmod +x "$repo/fakebin/python3"
+if (
+  cd "$repo" &&
+    REAL_PYTHON="$real_python" RACE_CONFIG="config.toml" \
+      RACE_STATE="$repo/race-fired" PATH="$repo/fakebin:$PATH" \
+      bash "$INSTALLER" --no-git-hook >/dev/null 2>"$repo/install.err"
+); then
+  bad "final-window edit must abort installation"
+elif grep -q 'final-window operator edit' "$repo/.codex/config.toml" &&
+     cmp -s "$repo/.codex/hooks.json" "$repo/hooks.before"; then
+  ok "final-window edit survives and the earlier hooks replacement rolls back"
+else
+  bad "final-window edit survives and the earlier hooks replacement rolls back"
+fi
+
+echo "=== TC-CDCR-019F: a losing capture leaves ownership with its winner ==="
+repo=$(new_repo capture_loser)
+mkdir -p "$repo/.codex" "$repo/fakebin"
+cat > "$repo/.codex/config.toml" <<'EOF'
+[features]
+codex_hooks = true
+EOF
+printf '{"sentinel":true}\n' > "$repo/.codex/hooks.json"
+cp "$repo/.codex/config.toml" "$repo/config.before"
+cat > "$repo/fakebin/python3" <<'EOF'
+#!/bin/bash
+if [[ "${CODEX_ATOMIC_PLACE:-}" == "1" &&
+      "${2:-}" == "$CAPTURE_SOURCE" &&
+      "${3:-}" == "$CAPTURE_SOURCE".bak.* ]]; then
+  "$REAL_MV" "$2" "$CAPTURE_HELD"
+fi
+exec "$REAL_PYTHON" "$@"
+EOF
+chmod +x "$repo/fakebin/python3"
+if (
+  cd "$repo" &&
+    REAL_MV="$real_mv" REAL_PYTHON="$real_python" \
+      CAPTURE_SOURCE="hooks.json" \
+      CAPTURE_HELD="$repo/concurrent-capture.json" \
+      PATH="$repo/fakebin:$PATH" \
+      bash "$INSTALLER" --no-git-hook >/dev/null 2>"$repo/install.err"
+); then
+  bad "losing capture must abort installation"
+elif [[ ! -e "$repo/.codex/hooks.json" ]] &&
+     grep -q '"sentinel":true' "$repo/concurrent-capture.json" &&
+     cmp -s "$repo/.codex/config.toml" "$repo/config.before" &&
+     ! compgen -G "$repo/.codex/*.bak.*" >/dev/null; then
+  ok "losing capture leaves ownership with the concurrent installer"
+else
+  bad "losing capture leaves ownership with the concurrent installer"
+fi
+
+echo "=== TC-CDCR-019H: ambiguous capture failure reconciles its postcondition ==="
+repo=$(new_repo ambiguous_capture)
+mkdir -p "$repo/.codex" "$repo/fakebin"
+cat > "$repo/.codex/config.toml" <<'EOF'
+[features]
+codex_hooks = true
+EOF
+printf '{"sentinel":true}\n' > "$repo/.codex/hooks.json"
+cat > "$repo/fakebin/python3" <<'EOF'
+#!/bin/bash
+if [[ "${CODEX_ATOMIC_PLACE:-}" == "1" &&
+      "${2:-}" == "$CAPTURE_SOURCE" &&
+      "${3:-}" == "$CAPTURE_SOURCE".bak.* &&
+      ! -e "$CAPTURE_STATE" ]]; then
+  : > "$CAPTURE_STATE"
+  "$REAL_PYTHON" "$@"
+  exit 73
+fi
+exec "$REAL_PYTHON" "$@"
+EOF
+chmod +x "$repo/fakebin/python3"
+if (
+  cd "$repo" &&
+    REAL_PYTHON="$real_python" CAPTURE_SOURCE="hooks.json" \
+      CAPTURE_STATE="$repo/capture-fired" PATH="$repo/fakebin:$PATH" \
+      bash "$INSTALLER" --no-git-hook >/dev/null 2>"$repo/install.err"
+) &&
+   grep -q '^hooks = true' "$repo/.codex/config.toml" &&
+   ! grep -q '"sentinel":true' "$repo/.codex/hooks.json" &&
+   grep -q '"sentinel":true' "$repo"/.codex/hooks.json.bak.*; then
+  ok "completed capture is accepted despite an ambiguous helper status"
+else
+  bad "completed capture is accepted despite an ambiguous helper status"
+fi
+
+echo "=== TC-CDCR-019I: capture never treats its backup path as a directory ==="
+repo=$(new_repo capture_backup_directory)
+mkdir -p "$repo/.codex" "$repo/fakebin"
+cat > "$repo/.codex/config.toml" <<'EOF'
+[features]
+codex_hooks = true
+EOF
+printf '{"sentinel":true}\n' > "$repo/.codex/hooks.json"
+cp "$repo/.codex/config.toml" "$repo/config.before"
+cat > "$repo/fakebin/python3" <<'EOF'
+#!/bin/bash
+if [[ "${CODEX_ATOMIC_PLACE:-}" == "1" &&
+      "${2:-}" == "$CAPTURE_SOURCE" &&
+      "${3:-}" == "$CAPTURE_SOURCE".bak.* &&
+      ! -e "$CAPTURE_STATE" ]]; then
+  : > "$CAPTURE_STATE"
+  mkdir "$3"
+fi
+exec "$REAL_PYTHON" "$@"
+EOF
+chmod +x "$repo/fakebin/python3"
+if (
+  cd "$repo" &&
+    REAL_PYTHON="$real_python" CAPTURE_SOURCE="hooks.json" \
+      CAPTURE_STATE="$repo/capture-fired" PATH="$repo/fakebin:$PATH" \
+      bash "$INSTALLER" --no-git-hook >/dev/null 2>"$repo/install.err"
+); then
+  bad "capture backup directory must abort installation"
+else
+  backup_dir=$(find "$repo/.codex" -maxdepth 1 -type d \
+    -name 'hooks.json.bak.*' -print -quit)
+  if [[ -n "$backup_dir" ]] &&
+     [[ -z "$(find "$backup_dir" -mindepth 1 -print -quit)" ]] &&
+     grep -q '"sentinel":true' "$repo/.codex/hooks.json" &&
+     cmp -s "$repo/.codex/config.toml" "$repo/config.before"; then
+    ok "capture preserves both the canonical file and concurrent directory"
+  else
+    bad "capture preserves both the canonical file and concurrent directory"
+  fi
+fi
+
+echo "=== TC-CDCR-019J: rollback capture never targets a concurrent directory ==="
+repo=$(new_repo rollback_capture_directory)
+mkdir -p "$repo/.codex" "$repo/fakebin"
+cat > "$repo/.codex/config.toml" <<'EOF'
+[features]
+codex_hooks = true
+EOF
+printf '{"sentinel":true}\n' > "$repo/.codex/hooks.json"
+cp "$repo/.codex/config.toml" "$repo/config.before"
+cat > "$repo/fakebin/python3" <<'EOF'
+#!/bin/bash
+if [[ "${CODEX_ATOMIC_PLACE:-}" == "1" &&
+      "${2:-}" == *".pending."* &&
+      "${3:-}" == "$FAIL_PLACE_DEST" ]]; then
+  exit 73
+fi
+if [[ "${CODEX_ATOMIC_PLACE:-}" == "1" &&
+      "${2:-}" == "$ROLLBACK_SOURCE" &&
+      "${3:-}" == *".rollback-current."* &&
+      ! -e "$ROLLBACK_STATE" ]]; then
+  : > "$ROLLBACK_STATE"
+  mkdir "$3"
+fi
+exec "$REAL_PYTHON" "$@"
+EOF
+chmod +x "$repo/fakebin/python3"
+if (
+  cd "$repo" &&
+    REAL_PYTHON="$real_python" FAIL_PLACE_DEST="config.toml" \
+      ROLLBACK_SOURCE="hooks.json" \
+      ROLLBACK_STATE="$repo/rollback-fired" PATH="$repo/fakebin:$PATH" \
+      bash "$INSTALLER" --no-git-hook >/dev/null 2>"$repo/install.err"
+); then
+  bad "rollback capture directory race must fail installation"
+else
+  rollback_dir=$(find "$repo/.codex" -maxdepth 1 -type d \
+    -name 'hooks.json.rollback-current.*' -print -quit)
+  if [[ -n "$rollback_dir" ]] &&
+     [[ -z "$(find "$rollback_dir" -mindepth 1 -print -quit)" ]] &&
+     [[ -f "$repo/.codex/hooks.json" ]] &&
+     cmp -s "$repo/.codex/config.toml" "$repo/config.before"; then
+    ok "rollback preserves the canonical file and concurrent directory"
+  else
+    bad "rollback preserves the canonical file and concurrent directory"
+  fi
+fi
+
+echo "=== TC-CDCR-019K: capture-time SIGTERM is handled, not discarded ==="
+repo=$(new_repo signal_during_capture)
+mkdir -p "$repo/.codex" "$repo/fakebin"
+cat > "$repo/.codex/config.toml" <<'EOF'
+[features]
+codex_hooks = true
+EOF
+printf '{"sentinel":true}\n' > "$repo/.codex/hooks.json"
+cp "$repo/.codex/config.toml" "$repo/config.before"
+cp "$repo/.codex/hooks.json" "$repo/hooks.before"
+cat > "$repo/fakebin/python3" <<'EOF'
+#!/bin/bash
+if [[ "${CODEX_ATOMIC_PLACE:-}" == "1" &&
+      "${2:-}" == "$CAPTURE_SOURCE" &&
+      "${3:-}" == "$CAPTURE_SOURCE".bak.* &&
+      ! -e "$CAPTURE_STATE" ]]; then
+  : > "$CAPTURE_STATE"
+  "$REAL_PYTHON" "$@"
+  rc=$?
+  kill -TERM "$PPID"
+  sleep 1
+  exit "$rc"
+fi
+exec "$REAL_PYTHON" "$@"
+EOF
+chmod +x "$repo/fakebin/python3"
+(
+  cd "$repo" &&
+    REAL_PYTHON="$real_python" CAPTURE_SOURCE="hooks.json" \
+      CAPTURE_STATE="$repo/capture-fired" PATH="$repo/fakebin:$PATH" \
+      bash "$INSTALLER" --no-git-hook >/dev/null 2>"$repo/install.err"
+)
+rc=$?
+if [[ "$rc" -eq 143 ]] &&
+   cmp -s "$repo/.codex/config.toml" "$repo/config.before" &&
+   cmp -s "$repo/.codex/hooks.json" "$repo/hooks.before"; then
+  ok "capture-time SIGTERM exits 143 and restores both destinations"
+else
+  bad "capture-time SIGTERM exits 143 and restores both destinations (rc=$rc)"
+fi
+
+echo "=== TC-CDCR-019L: a concurrent directory is never used as a move target ==="
+repo=$(new_repo final_directory_race)
+mkdir -p "$repo/.codex" "$repo/fakebin"
+cat > "$repo/.codex/config.toml" <<'EOF'
+[features]
+codex_hooks = true
+EOF
+printf '{"sentinel":true}\n' > "$repo/.codex/hooks.json"
+cp "$repo/.codex/config.toml" "$repo/config.before"
+cat > "$repo/fakebin/python3" <<'EOF'
+#!/bin/bash
+if [[ "${CODEX_ATOMIC_PLACE:-}" == "1" &&
+      "${3:-}" == "$RACE_HOOKS" &&
+      "${2:-}" == *".pending."* &&
+      ! -e "$RACE_STATE" ]]; then
+  : > "$RACE_STATE"
+  mkdir "$RACE_HOOKS"
+fi
+exec "$REAL_PYTHON" "$@"
+EOF
+chmod +x "$repo/fakebin/python3"
+if (
+  cd "$repo" &&
+    REAL_PYTHON="$real_python" RACE_HOOKS="hooks.json" \
+      RACE_STATE="$repo/race-fired" PATH="$repo/fakebin:$PATH" \
+      bash "$INSTALLER" --no-git-hook >/dev/null 2>"$repo/install.err"
+); then
+  bad "concurrent directory must abort installation"
+elif [[ -d "$repo/.codex/hooks.json" ]] &&
+     [[ -z "$(find "$repo/.codex/hooks.json" -mindepth 1 -print -quit)" ]] &&
+     cmp -s "$repo/.codex/config.toml" "$repo/config.before"; then
+  ok "concurrent directory stays empty and config remains unchanged"
+else
+  bad "concurrent directory stays empty and config remains unchanged"
+fi
+
+echo "=== TC-CDCR-019M: parent-directory swap cannot redirect writes ==="
+repo=$(new_repo parent_directory_swap)
+mkdir -p "$repo/.codex" "$repo/external-codex" "$repo/fakebin"
+cat > "$repo/.codex/config.toml" <<'EOF'
+[features]
+codex_hooks = true
+EOF
+printf '{"sentinel":true}\n' > "$repo/.codex/hooks.json"
+cp "$repo/.codex/config.toml" "$repo/config.before"
+cp "$repo/.codex/hooks.json" "$repo/hooks.before"
+cat > "$repo/fakebin/python3" <<'EOF'
+#!/bin/bash
+if [[ "${CODEX_ATOMIC_PLACE:-}" == "1" &&
+      "${2:-}" == *".pending."* &&
+      "${3:-}" == "config.toml" &&
+      ! -e "$SWAP_STATE" ]]; then
+  : > "$SWAP_STATE"
+  "$REAL_PYTHON" "$@"
+  rc=$?
+  "$REAL_MV" "$PROJECT_CODEX" "$HELD_CODEX"
+  ln -s "$EXTERNAL_CODEX" "$PROJECT_CODEX"
+  exit "$rc"
+fi
+exec "$REAL_PYTHON" "$@"
+EOF
+chmod +x "$repo/fakebin/python3"
+if (
+  cd "$repo" &&
+    REAL_PYTHON="$real_python" REAL_MV="$real_mv" \
+      PROJECT_CODEX="$repo/.codex" HELD_CODEX="$repo/held-codex" \
+      EXTERNAL_CODEX="$repo/external-codex" SWAP_STATE="$repo/swap-fired" \
+      PATH="$repo/fakebin:$PATH" \
+      bash "$INSTALLER" --no-git-hook >/dev/null 2>"$repo/install.err"
+); then
+  bad "parent-directory swap must abort installation"
+elif [[ -L "$repo/.codex" ]] &&
+     cmp -s "$repo/held-codex/config.toml" "$repo/config.before" &&
+     cmp -s "$repo/held-codex/hooks.json" "$repo/hooks.before" &&
+     [[ -z "$(find "$repo/external-codex" -mindepth 1 -print -quit)" ]]; then
+  ok "anchored rollback restores the original directory without external writes"
+else
+  bad "anchored rollback restores the original directory without external writes"
+fi
+
+echo "=== TC-CDCR-019N: rollback never claims an unowned scratch object ==="
+repo=$(new_repo rollback_scratch_ownership)
+mkdir -p "$repo/.codex" "$repo/fakebin"
+cat > "$repo/.codex/config.toml" <<'EOF'
+[features]
+codex_hooks = true
+EOF
+printf '{"sentinel":true}\n' > "$repo/.codex/hooks.json"
+cp "$repo/.codex/config.toml" "$repo/config.before"
+cat > "$repo/fakebin/python3" <<'EOF'
+#!/bin/bash
+if [[ "${CODEX_ATOMIC_PLACE:-}" == "1" &&
+      "${2:-}" == *".pending."* &&
+      "${3:-}" == "config.toml" ]]; then
+  exit 73
+fi
+if [[ "${CODEX_ATOMIC_PLACE:-}" == "1" &&
+      "${2:-}" == "hooks.json" &&
+      "${3:-}" == *".rollback-current."* &&
+      ! -e "$OWNERSHIP_STATE" ]]; then
+  : > "$OWNERSHIP_STATE"
+  "$REAL_MV" "$2" "$OPERATOR_HELD"
+  printf 'operator-owned scratch\n' > "$3"
+  exit 73
+fi
+exec "$REAL_PYTHON" "$@"
+EOF
+chmod +x "$repo/fakebin/python3"
+if (
+  cd "$repo" &&
+    REAL_PYTHON="$real_python" REAL_MV="$real_mv" \
+      OPERATOR_HELD="$repo/operator-held-hooks.json" \
+      OWNERSHIP_STATE="$repo/ownership-fired" PATH="$repo/fakebin:$PATH" \
+      bash "$INSTALLER" --no-git-hook >/dev/null 2>"$repo/install.err"
+); then
+  bad "unowned rollback scratch race must fail installation"
+else
+  scratch_file=$(find "$repo/.codex" -maxdepth 1 -type f \
+    -name 'hooks.json.rollback-current.*' -print -quit)
+  if [[ ! -e "$repo/.codex/hooks.json" ]] &&
+     [[ -n "$scratch_file" ]] &&
+     grep -q 'operator-owned scratch' "$scratch_file" &&
+     [[ -f "$repo/operator-held-hooks.json" ]] &&
+     cmp -s "$repo/.codex/config.toml" "$repo/config.before"; then
+    ok "rollback preserves both unowned objects without moving either one"
+  else
+    bad "rollback preserves both unowned objects without moving either one"
+  fi
 fi
 
 echo "=== Summary ==="

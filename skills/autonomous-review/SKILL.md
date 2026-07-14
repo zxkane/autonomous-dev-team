@@ -283,10 +283,11 @@ or other review dimensions in parallel. They return evidence and findings to
 their parent; they are advisory and are not entries in
 `AGENT_REVIEW_AGENTS`.
 
-The assigned main review session alone executes the Findings -> Decision Gate
-and calls `post-verdict.sh` with the wrapper-provided agent name and session
-id. Do not delegate `post-verdict.sh` to an internal subagent. The main session
-must reconcile the advisory findings into its own single PASS/FAIL decision.
+Within each wrapper-assigned verdict session, the parent review session alone
+executes the Findings -> Decision Gate and calls `post-verdict.sh` with the
+wrapper-provided agent name and session id. Do not delegate `post-verdict.sh`
+to an internal subagent. Each parent must reconcile the advisory findings into
+its own single PASS/FAIL decision.
 
 Keep these three mechanisms distinct: `REVIEW_BOTS` are external code-host
 reviewers, `AGENT_REVIEW_AGENTS` are independent wrapper-managed

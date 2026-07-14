@@ -87,14 +87,14 @@ fi
 echo ""
 echo "=== TC-WS-04: pre_write_code dedups Write+Edit hooks ==="
 # ---------------------------------------------------------------------------
-# Canonical template: PreToolUse + Write has 1 hook, PreToolUse + Edit has
-# 1 hook. After folding both into pre_write_code, expect 2 hooks total.
+# Canonical Write and Edit currently name the same command. Folding them into
+# one event must execute that command once.
 pre_write_count=$(jq '.hooks.pre_write_code | length' "$target")
-if [[ "$pre_write_count" -eq 2 ]]; then
-  echo -e "  ${GREEN}PASS${NC}: pre_write_code has 2 merged hooks (Write + Edit)"
+if [[ "$pre_write_count" -eq 1 ]]; then
+  echo -e "  ${GREEN}PASS${NC}: pre_write_code deduplicates the shared hook command"
   PASS=$((PASS + 1))
 else
-  echo -e "  ${RED}FAIL${NC}: pre_write_code expected 2, got $pre_write_count"
+  echo -e "  ${RED}FAIL${NC}: pre_write_code expected 1 command, got $pre_write_count"
   FAIL=$((FAIL + 1))
 fi
 

@@ -30,7 +30,7 @@ PR-11b and PR-11c will pick up the harder translations.
 | Cursor (PR-11b) | `.cursor/hooks.json` | Claude-style + shell-specific event | `Shell` (or pipe regex on cmd) | 2 |
 | Kiro CLI (PR-11b) | `.kiro/agents/*.json` | camelCase events, `timeout_ms` | `execute_bash`, `fs_write` | 2 |
 | Gemini CLI (PR-11b) | `.gemini/settings.json` | `BeforeTool`/`AfterTool` regex | `run_shell_command`, `write_file`, `replace` | 2 |
-| Codex CLI (PR-11b) | `.codex/hooks.json` + flag | Claude-style (modeled on it) | undocumented | 2 |
+| Codex CLI (PR-11b) | `.codex/hooks.json` + `[features] hooks = true` | Official Claude-compatible event schema | `Bash`, `apply_patch` | 2 |
 | Windsurf (PR-11c) | `.windsurf/hooks.json` | snake_case, **no matcher** | filter inside script | 2 |
 | Kimi CLI (PR-11c) | `~/.kimi/config.toml` | TOML, `[[hooks]]` array | regex (e.g. `WriteFile\|StrReplaceFile`) | 2 |
 

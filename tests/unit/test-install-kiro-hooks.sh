@@ -134,16 +134,14 @@ else
   FAIL=$((FAIL + 1))
 fi
 
-# The merged fs_write entry should contain hooks from BOTH Write and Edit.
-# In the canonical template, Write has 1 hook (check-test-plan.sh) and
-# Edit has 1 hook (also check-test-plan.sh). After dedup, fs_write should
-# have 2 hooks total (the concat).
+# Write and Edit currently name the same hook command, so the merged matcher
+# must execute it once.
 fs_write_hooks=$(jq '.hooks.preToolUse[] | select(.matcher == "fs_write") | .hooks | length' "$target")
-if [[ "$fs_write_hooks" -ge 2 ]]; then
-  echo -e "  ${GREEN}PASS${NC}: fs_write entry has $fs_write_hooks merged hooks (Write+Edit both preserved)"
+if [[ "$fs_write_hooks" -eq 1 ]]; then
+  echo -e "  ${GREEN}PASS${NC}: duplicate Write/Edit hook command executes once"
   PASS=$((PASS + 1))
 else
-  echo -e "  ${RED}FAIL${NC}: fs_write entry has only $fs_write_hooks hook(s) — Write+Edit not merged"
+  echo -e "  ${RED}FAIL${NC}: fs_write entry has $fs_write_hooks duplicate hook commands"
   FAIL=$((FAIL + 1))
 fi
 

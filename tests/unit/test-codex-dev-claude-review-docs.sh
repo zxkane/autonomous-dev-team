@@ -25,10 +25,14 @@ DEV_CROSS="$PROJECT_ROOT/skills/autonomous-dev/references/cross-platform.md"
 REVIEW_SKILL="$PROJECT_ROOT/skills/autonomous-review/SKILL.md"
 AGENT_DOC="$PROJECT_ROOT/docs/agent-clis.md"
 HOOK_DOC="$PROJECT_ROOT/docs/cross-agent-hooks.md"
+PIPELINE_AGENT_DOC="$PROJECT_ROOT/docs/pipeline/per-side-agent-cmd.md"
+PIPELINE_REVIEW_DOC="$PROJECT_ROOT/docs/pipeline/review-agent-flow.md"
 SIMPLIFIER_HOOK="$PROJECT_ROOT/skills/autonomous-common/hooks/check-code-simplifier.sh"
 PR_REVIEW_HOOK="$PROJECT_ROOT/skills/autonomous-common/hooks/check-pr-review.sh"
 CONF="$PROJECT_ROOT/scripts/autonomous.conf.example"
 VENDORED_CONF="$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/autonomous.conf.example"
+HISTORICAL_HOOK_DESIGN="$PROJECT_ROOT/docs/designs/cross-agent-hooks.md"
+HISTORICAL_HOOK_DESIGN_C="$PROJECT_ROOT/docs/designs/cross-agent-hooks-c.md"
 
 echo "=== TC-CDCR-030: Codex-native dev quality passes ==="
 require_text "dev skill names Codex native subagents" "$DEV_SKILL" \
@@ -46,17 +50,25 @@ echo "=== TC-CDCR-031/032: final-review ownership and mechanism separation ==="
 require_text "internal subagents are advisory" "$REVIEW_SKILL" \
   'internal.*subagents?.*advisory|subagents?.*advisory'
 require_text "main review session owns decision gate" "$REVIEW_SKILL" \
-  'main review session.*Findings.*Decision Gate|assigned main.*Decision Gate'
+  'parent review session.*Findings.*Decision Gate|assigned main.*Decision Gate'
 require_text "main review session alone calls post-verdict" "$REVIEW_SKILL" \
   'main review session.*post-verdict\.sh|only.*main.*post-verdict\.sh'
 require_text "operator docs distinguish all three review mechanisms" "$AGENT_DOC" \
   'REVIEW_BOTS.*AGENT_REVIEW_AGENTS.*internal subagents|internal subagents.*AGENT_REVIEW_AGENTS.*REVIEW_BOTS'
+require_text "pipeline spec makes internal subagents advisory" "$PIPELINE_REVIEW_DOC" \
+  'internal.*subagents?.*advisory|subagents?.*advisory'
+require_text "pipeline spec reserves post-verdict for the main session" "$PIPELINE_REVIEW_DOC" \
+  'within each.*session.*parent.*post-verdict\.sh|each.*session.*parent.*post-verdict\.sh'
 
 echo "=== TC-CDCR-033: canonical mixed topology guidance ==="
 require_text "agent docs name Codex-dev Claude-review topology" "$AGENT_DOC" \
   'AGENT_DEV_CMD="?codex"?.*AGENT_REVIEW_CMD="?claude"?'
+require_text "pipeline spec names Codex-dev Claude-review topology" "$PIPELINE_AGENT_DOC" \
+  'AGENT_DEV_CMD="?codex"?.*AGENT_REVIEW_CMD="?claude"?'
 require_text "config example names Codex-dev Claude-review topology" "$CONF" \
   'AGENT_DEV_CMD="?codex"?.*AGENT_REVIEW_CMD="?claude"?'
+require_text "canonical mixed config clears the legacy shared launcher" "$CONF" \
+  'Canonical Codex-dev/Claude-review.*AGENT_LAUNCHER=""'
 require_text "hook docs use canonical features.hooks" "$HOOK_DOC" \
   'features\][[:space:]]*hooks[[:space:]]*=[[:space:]]*true'
 require_text "hook docs describe project trust" "$HOOK_DOC" \
@@ -65,6 +77,15 @@ require_text "hook docs state the tomllib prerequisite" "$HOOK_DOC" \
   'Python 3\.11.*tomllib|tomllib.*Python 3\.11'
 require_text "hook docs name operation-aware normalization" "$HOOK_DOC" \
   'parse_edit_file_operations.*operation.*path'
+if grep -qiE 'Codex CLI.*(undocumented|modeled on it)' \
+    "$HISTORICAL_HOOK_DESIGN"; then
+  bad "historical hook design no longer states stale Codex assumptions"
+else
+  ok "historical hook design no longer states stale Codex assumptions"
+fi
+require_text "historical TOML design points to the current transactional installer" \
+  "$HISTORICAL_HOOK_DESIGN_C" \
+  'Codex installer.*transactional|transactional.*Codex installer'
 if cmp -s "$CONF" "$VENDORED_CONF"; then
   ok "root and vendored config examples remain identical"
 else

@@ -39,7 +39,9 @@ while IFS=$'\t' read -r operation file_path; do
   [[ "$file_path" =~ (__tests__|\.test\.|\.spec\.|tests/) ]] && continue
   [[ "$file_path" =~ (\.config\.|\.d\.ts$) ]] && continue
 
-  if [[ -f "$file_path" || -f "$worktree_root/$file_path" ]]; then
+  if [[ "$file_path" == /* ]]; then
+    [[ -f "$file_path" ]] && continue
+  elif [[ -f "$worktree_root/$file_path" ]]; then
     continue
   fi
 

@@ -52,9 +52,13 @@ No-op configurations such as a quoted canonical `"hooks" = true` or dotted
 `features.hooks = true` are accepted without textual rewriting. Any operation
 that must insert, rename, or remove a key is intentionally limited to one
 ordinary `[features]` table with bare keys, no multiline strings, and no
-quoted table headers. Other valid but noncanonical mutable forms are refused
-with an operator-facing diagnostic instead of risking comment or string
-corruption.
+quoted representation of the features table itself. Unrelated quoted tables
+are preserved. Other valid but noncanonical mutable forms are refused with an
+operator-facing diagnostic instead of risking comment or string corruption.
+After every textual rewrite, the parsed staging file must contain canonical
+`hooks = true` and no legacy alias; a complex form such as a multiline nested
+array therefore fails safely instead of reporting a migration that did not
+occur.
 
 | Existing `[features]` state | Result |
 |---|---|
@@ -74,13 +78,25 @@ Unrelated TOML sections, comments, quoted keys, and multiline strings are
 retained. Both generated files are rendered before installation. Existing
 changed destinations receive timestamped backups and retain their original
 file modes; fresh files are private even under a permissive umask.
-Same-directory atomic replacements are used, and a hooks replacement failure
-or termination between replacements rolls both files back. Directory and
-symbolic-link destinations, including a symlinked `.codex` parent, are
-refused. Rollback content is itself staged and atomically renamed, and pending
-files are removed on handled termination. Original content and mode snapshots
-are revalidated immediately before each replacement so an operator edit made
-during rendering is not silently overwritten.
+Same-directory atomic replacements use unpredictable `mktemp` paths, and a
+replacement failure or handled termination between replacements rolls both
+files back. Hook definitions are installed before the feature config enables
+them, so an uncatchable process death cannot newly enable stale hooks.
+Exact-target no-clobber links are used for install, capture, and rollback, so a
+concurrently created directory cannot become an implicit move target. Capture
+postconditions use inode plus content/mode snapshots to reconcile an operation
+that completed before its helper returned a failure. The transaction enters
+the physical `.codex` directory and uses relative target names, then verifies
+that the project path still names the same directory before replacement and
+commit. A concurrent parent rename/symlink swap therefore cannot redirect
+writes outside the repository. Directory and symbolic-link destinations,
+including a symlinked `.codex` parent, are refused; a newly created `.codex`
+directory is private regardless of the caller's umask. Rollback content is
+itself staged and atomically placed, rollback ignores repeated termination
+signals, and pending files are removed on handled termination. Original
+content, inode ownership, and mode snapshots are revalidated immediately
+before each replacement so an operator edit made during rendering is not
+silently overwritten.
 
 ## Hook input normalization
 
@@ -95,8 +111,9 @@ The primary API emits `operation<TAB>path` records in source order with
 duplicates removed:
 
 - Claude/Cursor `Write`: `add`; Claude/Cursor `Edit`: `edit`
-- Existing installer translations remain supported. Kiro `fs_write` uses
-  `tool_input.path` plus `command`: `create` maps to `add`, while
+- Existing installer translations remain supported. Kiro
+  `fs_write`/`write`/`fsWrite` uses `tool_input.path` plus `command`: `create`
+  maps to `add`, while
   `str_replace`/`insert`/`append` map to `edit`. Gemini
   `write_file`/`replace` and Kimi `WriteFile`/`StrReplaceFile` use
   `tool_input.file_path`; Windsurf `pre_write_code` uses
@@ -133,8 +150,9 @@ Codex patch, while updates, deletes, and pure moves cannot produce a false
 - Claude plugins/subagents remain valid equivalents.
 - Internal Codex or Claude subagents are advisory and return evidence to their
   parent session.
-- The main process launched by the review wrapper is the only session that
-  runs the Findings -> Decision Gate and invokes `post-verdict.sh`.
+- Within each wrapper-assigned verdict session, only the parent process runs
+  the Findings -> Decision Gate and invokes `post-verdict.sh`; its internal
+  subagents never do.
 - `AGENT_REVIEW_AGENTS` means independent wrapper-managed verdict agents;
   `REVIEW_BOTS` means external GitHub reviewers. Neither includes internal
   subagents.

@@ -147,6 +147,9 @@ translate_template_hooks() {
                     (if $entry | has("matcher") then .matcher = $entry.matcher else . end)
                     | .hooks += $entry.hooks
                   )
+                  | .hooks |= unique_by(
+                      [.type, .command, .timeout, .timeout_ms, .max_output_size]
+                    )
                 )
             )
       )
@@ -245,7 +248,15 @@ fold_matcher_into_event() {
     | flatten
     | map(select(.__target != null))
     | group_by(.__target)
-    | map({key: .[0].__target, value: map(del(.__target))})
+    | map({
+        key: .[0].__target,
+        value: (
+          map(del(.__target))
+          | unique_by(
+              [.type, .command, .timeout, .timeout_ms, .max_output_size]
+            )
+        )
+      })
     | from_entries
   ' "$template"
 }

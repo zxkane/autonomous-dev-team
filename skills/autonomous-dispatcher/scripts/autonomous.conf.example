@@ -336,6 +336,7 @@ AGENT_REVIEW_EXTRA_ARGS=""
 #   AGENT_CMD="claude"
 #   AGENT_DEV_CMD="codex"
 #   AGENT_REVIEW_CMD="claude"
+#   AGENT_LAUNCHER=""           # clear a legacy shared Claude-only bridge
 #   AGENT_DEV_LAUNCHER=""       # do not leak a Claude bridge into Codex
 #   AGENT_REVIEW_AGENTS=""      # one wrapper-assigned Claude verdict agent
 #
