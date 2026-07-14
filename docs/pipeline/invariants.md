@@ -7813,31 +7813,43 @@ extended for these idioms — they are project-idiom rules, not shell-syntax
 rules, and belong in a repo checker like `check-spec-drift.sh`/
 `check-provider-cutover.sh`, not in ShellCheck flags.
 
-**CI wiring — deferred, non-blocking follow-up (mirrors [INV-91]'s #295
-precedent exactly)**: the issue asks for a step in the `hermetic-shellcheck`
-job in `.github/workflows/ci.yml`. **The dev agent's scoped GitHub App token
-has no `workflows` permission and cannot push a `.github/workflows/`
-change** — `git push` of any workflow-file diff is rejected outright
-(`without 'workflows' permission`), the identical constraint that forced
-[INV-91]'s own CI step into a separate maintainer-only follow-up PR (#295)
-after the guard itself landed in #286. This PR therefore ships the checker
-script, the committed baseline, the full unit-test suite, and this INV-130
-entry; the `ci.yml` step is called out in the PR description as a
-maintainer follow-up. Until that step lands, the checker still runs in CI
-through the existing `tests/unit/test-*.sh` glob (`test-check-shell-idioms.sh`
-invokes it against the real repo — TC-IDIOM-026), so a regression is caught
-by the hermetic-unit job even without the dedicated `ci.yml` step.
+**CI wiring**: the strict-mode step lives in the `hermetic-shellcheck` job
+in `.github/workflows/ci.yml` (`check-shell-idioms.sh --require-trusted-ref`,
+preceded by an explicit full-refspec fetch of `origin/main` — that job's
+checkout is shallow and actions/checkout narrows the remote fetch refspec
+to the PR ref, so without the explicit refspec `origin/main` would be
+unresolvable and strict mode would fail closed on every PR). The step
+carries a one-time BOOTSTRAP guard: it skips (with a `::notice::`) while
+`origin/main` has no baseline file at all, because the baseline lands on
+main in the same PR that adds the step — without the guard, strict mode's
+fail-closed posture would make that introducing PR permanently
+un-mergeable (it can only pass once its own baseline is on main). The
+guard tests `origin/main` (remote-fetched — a PR cannot fabricate the
+condition) and the window closes permanently the moment the baseline
+merges; from then on a missing/unreadable trusted baseline is a genuine
+fail-closed error exactly as strict mode documents. The dev
+agent's scoped GitHub App token has no `workflows` permission and cannot
+push `.github/workflows/` changes (the same [INV-83] constraint that forced
+[INV-91]'s CI step into the maintainer follow-up #295), so this step was
+pushed by the MAINTAINER onto the same PR branch rather than authored by
+the dev agent. Defense in depth: the checker also runs in CI through the
+existing `tests/unit/test-*.sh` glob (`test-check-shell-idioms.sh` invokes
+it against the real repo — TC-IDIOM-026), but only the dedicated
+strict-mode step checks against the TRUSTED baseline on `origin/main` —
+the unit-suite run reads the PR's own working tree, which a hostile PR
+could regenerate alongside its violations.
 
 **Producer**: `skills/autonomous-dispatcher/scripts/check-shell-idioms.sh` +
 `skills/autonomous-dispatcher/scripts/shell-idioms-baseline.json` (the
 regression anchor, regenerated only via `--write-baseline`).
-**Consumer**: the hermetic-unit CI job (via the `tests/unit/test-*.sh` glob
-today; the dedicated `ci.yml` step is the deferred #295-style follow-up).
+**Consumer**: the `hermetic-shellcheck` CI job (dedicated strict-mode step)
+plus the hermetic-unit CI job (via the `tests/unit/test-*.sh` glob).
 
-**Status**: **IMPLEMENTED** in #477 — checker + baseline + unit tests +
-this doc entry. The dedicated `ci.yml` step wiring is a **NON-BLOCKING
-maintainer follow-up**, not part of #477 (identical posture to [INV-91]'s
-#295 deferral, forced by the same [INV-83] scoped-token constraint).
+**Status**: **ENFORCED** in #477 — checker + baseline + unit tests + the
+strict-mode `ci.yml` step (maintainer-pushed onto the PR branch, per the
+[INV-83] scoped-token constraint above) + this doc entry. On #477's own
+CI the step reports the bootstrap `::notice::` (baseline not on main yet);
+enforcement is live from the first PR after #477 merges.
 
 **Tests**: `tests/unit/test-check-shell-idioms.sh` (TC-IDIOM-001 through
 TC-IDIOM-042 — Rule J guarded/unguarded/window-boundary-both-directions/
