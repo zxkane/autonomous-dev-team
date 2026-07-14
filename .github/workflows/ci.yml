@@ -286,6 +286,36 @@ jobs:
             skills/autonomous-common/scripts/install-claude-hooks.sh \
             skills/autonomous-common/scripts/install-project-hooks.sh
 
+      # Shell-idiom ratchet ([INV-130]): no growth of unguarded nullable-jq
+      # `.body` string-ops or unjustified `|| true`/`|| echo` swallows vs the
+      # trusted baseline on origin/main. Strict mode (--require-trusted-ref)
+      # fails closed so a PR cannot regenerate its own baseline and
+      # self-ratify (same posture as check-provider-cutover.sh above).
+      # This job's checkout is shallow (no fetch-depth: 0), so origin/main is
+      # not resolvable by default — fetch it explicitly first, with a full
+      # refspec (actions/checkout narrows the remote's fetch refspec to the
+      # PR ref, so a bare `git fetch origin main` would only update
+      # FETCH_HEAD and leave refs/remotes/origin/main unresolvable); strict
+      # mode FAILs closed (never skips) if this fetch is removed.
+      - name: Fetch trusted baseline ref
+        run: git fetch --no-tags --depth=1 origin +refs/heads/main:refs/remotes/origin/main
+
+      # Bootstrap guard: the baseline lands on main IN the same PR that adds
+      # this step, so on that PR's own CI origin/main has no baseline yet and
+      # strict mode would fail closed forever (un-mergeable chicken-and-egg).
+      # Skip ONLY while origin/main lacks the baseline — origin/main is
+      # fetched from the remote, so a PR cannot fabricate this condition;
+      # the window closes permanently the moment the baseline merges.
+      - name: Check shell-idiom ratchet (no growth vs trusted baseline)
+        run: |
+          set -euo pipefail
+          baseline="skills/autonomous-dispatcher/scripts/shell-idioms-baseline.json"
+          if git cat-file -e "origin/main:${baseline}" 2>/dev/null; then
+            bash skills/autonomous-dispatcher/scripts/check-shell-idioms.sh --require-trusted-ref
+          else
+            echo "::notice::bootstrap: ${baseline} not on origin/main yet — the strict ratchet activates once the baseline merges"
+          fi
+
       # actionlint over the workflows — catches a `pull_request_target` foot-gun,
       # expression typos, and shellcheck issues inside `run:` blocks. Pinned by
       # commit SHA. This is the deeper syntax lint; the always-runnable

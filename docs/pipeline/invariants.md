@@ -7695,6 +7695,269 @@ itself has never driven a label transition.
 - [`review-agent-flow.md`](review-agent-flow.md#prompt-construction) § Prompt construction — the `review-round-counter` marker and severity-ratchet prompt wording this invariant redefines the semantics of.
 - `docs/test-cases/inv-129-head-agnostic-review-round.md` — the TC-INV129-* scenario matrix.
 
+## INV-130: a shell-idiom ratchet gate blocks GROWTH of unguarded nullable-jq `.body` string-ops and unjustified `|| true`/`|| echo` swallows across `skills/` — baseline-anchored, never a from-zero ban
+
+_Triage (issue #236): [machine-checked: tests/unit/test-check-shell-idioms.sh]_
+
+**Rule**: `check-shell-idioms.sh` scans every `*.sh` under `skills/` (recursive
+`find -L`, so tracked symlinked scripts stay in scope; any path containing a
+`tests/` segment is excluded — test scaffolding legitimately swallows) for
+two recurring shell-idiom bug surfaces and blocks their **growth** per file
+against a committed baseline (`shell-idioms-baseline.json`), mirroring
+[INV-91](#inv-91-the-provider-neutral-caller-layer-routes-all-host-io-through-itp_chp_-verbs--a-new-raw-gh-outside-providers-is-a-ci-failing-cutover-regression-baseline-anchored)'s `check-provider-cutover.sh` shape (baseline-anchored regression guard, not a strict ban — the ~580 jq call sites and ~629 swallow sites tree-wide make a from-zero ban a high-risk mass-retrofit rather than a growth-prevention gate).
+
+**Rule J (jq nullable-`.body` guard)** — mechanically exact: an occurrence is
+any line whose text matches the ERE
+`\.body[[:space:]]*\|[[:space:]]*(test|contains|startswith|endswith|sub|gsub)\(`.
+An occurrence is **guarded** iff the literal substring `type == "string"`
+appears anywhere within the window of lines from 15 lines before to 15 lines
+after the match (clipped to file bounds) — the "surrounding 15 lines"
+approximation the issue specifies for "the same jq invocation's program
+text." Unguarded occurrences are counted per file. **Deliberately scoped to
+`.body` only** — the one field with a confirmed null-crash history (a bot
+comment with `body: null`, a real GitHub REST shape, makes an unguarded
+`test`/`contains`/etc. a jq **runtime error** that aborts the whole
+invocation, not a per-row non-match — the round-6 fix in the #449 series and
+the pre-existing guard in `_review_cap_prior_marker` are the motivating
+precedents). Widening to other fields is explicitly out of scope for #477.
+
+**Rule S (swallow justification)** — mechanically exact: an occurrence is any
+line matching the ERE `\|\|[[:space:]]*(true|echo)([^[:alnum:]_]|$)` (the
+issue's own `\|\|[[:space:]]*(true|echo\b)` word-boundary intent, rendered as
+a POSIX non-word-character boundary wrapping the WHOLE alternation rather
+than GNU-awk's `\b`/`\>` — an earlier draft anchored only the `echo` branch,
+which left bare `true` unanchored and let it prefix-match `truex`; the POSIX
+form is both correct and `mawk`-portable, caught in review, TC-IDIOM-032).
+A second review pass caught that a whitespace-or-EOL-only boundary
+(`([[:space:]]|$)`) still missed the single most common real-world swallow
+shape — paren/semicolon/brace-terminated, e.g. `x=$(cmd || true)`, `cmd ||
+true;`, `{ cmd || true; }` (confirmed ~130 such sites tree-wide) — because
+none of those are followed by whitespace or end-of-line; the boundary was
+widened to any non-word character (`[^[:alnum:]_]`) to also catch these,
+TC-IDIOM-034. Both fixes landed before this PR's initial merge (the ratchet
+gate has never shipped with either bug live). The match must not itself be
+inside a comment. Comment handling: a whole-line
+comment (first
+non-space character `#`) is skipped entirely (no occurrence at all — a
+swallow token merely *mentioned* in prose is not a call site); an inline
+trailing comment (the text from the first `#` preceded by whitespace onward)
+is stripped before matching, so a swallow appearing only inside a stripped
+comment tail is likewise never counted. An occurrence is **justified** iff
+EITHER the same line carries a trailing `#` comment after the match (i.e.
+something was stripped), OR at least one of the 3 immediately preceding
+lines is a comment line (`^[[:space:]]*#`) — note this means a swallow within
+3 lines of a file's shebang is auto-justified by the shebang line itself,
+a corner case absorbed by the baseline like any other. Unjustified
+occurrences are counted per file.
+
+**Baseline semantics** (mirrors [INV-91] exactly): `shell-idioms-baseline.json`
+has the shape `{ "<repo-relative-path>": { "jq_unguarded": N,
+"swallow_unjustified": N } }`, sorted keys (`jq -S`) so regeneration diffs are
+reviewable. Per file, per rule: `current > baseline` → **FAIL**, printing each
+offending `file:line` + the matched (trimmed) text; a file **absent** from
+the baseline with `current > 0` also FAILs (falls out of the same
+comparison against an implicit baseline of 0 — no special case); `current <
+baseline` → **PASS** with an informational notice recommending baseline
+regeneration (a ratchet-DOWN is a separate voluntary commit, never forced by
+this gate); a baseline entry naming a file no longer scanned is treated as an
+implicit shrink (not a crash, not a failure) — cleanup and file removal are
+first-class, unlike [INV-91] which explicitly FAILs a stale baseline entry
+naming a nonexistent file. Baseline (re)generation happens ONLY via the
+explicit `--write-baseline` flag, never silently during a normal check run.
+The resolved baseline is schema-validated (every value must be an object
+whose `jq_unguarded`/`swallow_unjustified`, if present, are **non-negative
+integers** — not merely jq `number`s, and not merely parseable JSON) — caught in
+review: a malformed entry (e.g. a string where a number is expected) let the
+reconciliation loop's `jq -r '...\(.value.field // 0)'` abort mid-stream or
+feed a non-numeric string into `[ -gt ]`/`[ -lt ]`, and under `set -uo
+pipefail` (no `-e`) that degraded to a silently-skipped file rather than a
+hard failure — reproduced even under `--require-trusted-ref` fail-closed
+strict mode, defeating the exact self-ratification protection that mode
+exists to provide. A schema mismatch now FAILs loud: exit 2 in default mode,
+exit 1 (fail-closed) under `--require-trusted-ref` (TC-IDIOM-035/036). A
+second review pass caught that a bare `type == "number"` check was still
+insufficient: jq `number` includes non-integers (`1.5`) and exponent-form
+values (`1e2`) — a non-integer numeric field passes `type == "number"` but
+still breaks the same `[ -gt ]`/`[ -lt ]` integer comparisons downstream
+(same silent-skip degradation), and even an integer-*valued* exponent-form
+number (`1e2 == 100`) round-trips through naive `jq -r "\(...)"` string
+interpolation as `"1E+2"`, which is equally non-numeric to `[ -gt ]`. The
+schema check now asserts `type == "number" and . >= 0 and (. == (. |
+floor))` (non-negative integer), and the reconciliation extraction pipes
+each field through `| floor` before interpolation so an integer-valued
+exponent-form number always renders in plain decimal form (TC-IDIOM-043..045).
+A third review pass caught that the integer check alone was still
+insufficient: jq stores numbers as IEEE-754 doubles, which represent
+integers exactly only up to 2^53 (`9007199254740992`) — beyond that, `floor`
+rendering itself flips to exponential notation (e.g. `1e20` renders as
+`"1e+20"`, not a plain-decimal string), and even a PLAIN-DECIMAL literal
+just past bash's int64 ceiling rounds UP past it when jq renders it
+(`9223372036854775808` → `"9223372036854776000"`), which is itself
+unparsable by `[ -gt ]`/`[ -lt ]` — so a digits-only string check on the
+rendered text would not have caught this; the value itself must be bounded.
+The schema check now additionally requires `. <= 9007199254740992`, rejecting
+any count that could ever render outside bash's safe plain-decimal integer
+range regardless of its literal notation in the source JSON — no legitimate
+per-file occurrence count is anywhere near this ceiling (TC-IDIOM-050..052).
+
+**`--require-trusted-ref` (fail-closed strict mode)**: reads the baseline
+from the TRUSTED ref (default `origin/main`, override via `--trusted-ref` /
+`SHELL_IDIOMS_TRUSTED_REF`) using `git show <ref>:<path>` instead of the
+working tree, so a PR cannot regenerate its own baseline and self-ratify a
+newly-introduced violation in the same change — the identical same-PR
+self-ratification bypass [INV-91]'s Check 4 closes. An unresolvable trusted
+ref (not a git work tree, ref absent — shallow/fork checkout) OR a resolvable
+ref carrying no readable/parseable baseline at the expected path is a hard
+**FAILURE** (exit 1), never a silent pass; a baseline is rebuilt only via
+`--write-baseline` as a maintainer action. Default (non-strict) mode reads
+the working-tree baseline directly and treats a missing/unreadable baseline
+file as a usage/env error (exit 2), distinct from a strict-mode fail-closed
+FAIL (exit 1) — a bare run with no baseline is a setup mistake, not a ratchet
+regression.
+
+**Exit codes**: `0` pass; `1` violations (or strict-mode fail-closed); `2`
+usage/infra error (`jq` missing, unknown flag, unreadable baseline in
+default mode, or a value-taking option given with no following value —
+caught in review round 2: `--scan-root`/`--baseline`/`--trusted-ref`/
+`--trusted-baseline-path` supplied as the last argument previously died on
+an unbound `$2` under `set -u`, exiting 1 and looking like an internal shell
+crash rather than a handled usage error; a `require_value` guard now checks
+the remaining-argument count before dereferencing `$2`, TC-IDIOM-046..049).
+
+**Scratch-file allocation is fail-closed, not fail-open** (a fourth review
+pass caught this): the reconciliation phase allocates three `mktemp` scratch
+files (discovered counts, baseline counts, the file-union list) and writes
+each of `discover_counts`, the baseline-extraction `jq | sort`, and the
+`cut | sort -u` union through a redirect into one of them. Under `set -uo
+pipefail` (no `-e`), a failed `mktemp` call (e.g. an unavailable `TMPDIR`)
+leaves the corresponding shell variable empty; every subsequent read/write
+against that empty path (`> ""`, `cut -f1 ""`) also fails, but the failure
+was silently absorbed rather than propagated — every table then looked
+empty, the reconciliation loop read that as "every baseline entry shrank to
+0," and the checker printed `shell-idioms-guard: PASS` with exit 0 even
+though the ratchet comparison never actually ran, reproducing under
+`--require-trusted-ref` fail-closed strict mode too. Each of the three
+`mktemp` calls and each of the three scratch-file writes is now checked
+explicitly (`|| { echo …; exit 2; }`); a failure here is infra/environment
+breakage, not a ratchet violation, so the contract is the documented exit-2
+usage/infra error in BOTH default and strict mode — not the strict-mode
+exit-1 fail-closed path, which is reserved for a resolved-but-violating
+ratchet comparison (TC-IDIOM-053..055).
+
+**Heuristic bounds (deliberate, not a defect)**: both detectors are
+line-window heuristics over the raw source text, not a bash/jq parser — the
+issue body explicitly rules out attempting real parsing (`Do not attempt full
+bash/jq parsing`). A false positive in EXISTING code is absorbed by the
+baseline; a false positive in NEW code costs the author one guard/comment —
+exactly the behavior the gate wants to encourage. Rule J's window is a
+textual line-distance proxy for "the same jq invocation's program text," not
+a program-boundary detector — a guard 16 lines away in the SAME jq program
+still misses (documented bound, absorbed by baseline for existing code).
+
+**Why a ratchet, not a fix-all**: retro-fixing ~1200 combined sites is
+high-risk noise; [INV-91] already proved this shape works in this repo (the
+provider-cutover guard: freeze today's occurrences, fail CI only on growth,
+let the baseline shrink voluntarily). ShellCheck is deliberately NOT
+extended for these idioms — they are project-idiom rules, not shell-syntax
+rules, and belong in a repo checker like `check-spec-drift.sh`/
+`check-provider-cutover.sh`, not in ShellCheck flags.
+
+**CI wiring**: the strict-mode step lives in the `hermetic-shellcheck` job
+in `.github/workflows/ci.yml` (`check-shell-idioms.sh --require-trusted-ref`,
+preceded by an explicit full-refspec fetch of `origin/main` — that job's
+checkout is shallow and actions/checkout narrows the remote fetch refspec
+to the PR ref, so without the explicit refspec `origin/main` would be
+unresolvable and strict mode would fail closed on every PR). The step
+carries a one-time BOOTSTRAP guard: it skips (with a `::notice::`) while
+`origin/main` has no baseline file at all, because the baseline lands on
+main in the same PR that adds the step — without the guard, strict mode's
+fail-closed posture would make that introducing PR permanently
+un-mergeable (it can only pass once its own baseline is on main). The
+guard tests `origin/main` (remote-fetched — a PR cannot fabricate the
+condition) and the window closes permanently the moment the baseline
+merges; from then on a missing/unreadable trusted baseline is a genuine
+fail-closed error exactly as strict mode documents. The dev
+agent's scoped GitHub App token has no `workflows` permission and cannot
+push `.github/workflows/` changes (the same [INV-83] constraint that forced
+[INV-91]'s CI step into the maintainer follow-up #295), so this step was
+pushed by the MAINTAINER onto the same PR branch rather than authored by
+the dev agent. Defense in depth: the checker also runs in CI through the
+existing `tests/unit/test-*.sh` glob (`test-check-shell-idioms.sh` invokes
+it against the real repo — TC-IDIOM-026), but only the dedicated
+strict-mode step checks against the TRUSTED baseline on `origin/main` —
+the unit-suite run reads the PR's own working tree, which a hostile PR
+could regenerate alongside its violations.
+
+**Producer**: `skills/autonomous-dispatcher/scripts/check-shell-idioms.sh` +
+`skills/autonomous-dispatcher/scripts/shell-idioms-baseline.json` (the
+regression anchor, regenerated only via `--write-baseline`).
+**Consumer**: the `hermetic-shellcheck` CI job (dedicated strict-mode step)
+plus the hermetic-unit CI job (via the `tests/unit/test-*.sh` glob).
+
+**Status**: **ENFORCED** in #477 — checker + baseline + unit tests + the
+strict-mode `ci.yml` step (maintainer-pushed onto the PR branch, per the
+[INV-83] scoped-token constraint above) + this doc entry. On #477's own
+CI the step reports the bootstrap `::notice::` (baseline not on main yet);
+enforcement is live from the first PR after #477 merges.
+
+**Tests**: `tests/unit/test-check-shell-idioms.sh` (TC-IDIOM-001 through
+TC-IDIOM-042 — Rule J guarded/unguarded/window-boundary-both-directions/
+six-ops/`.body`-only scoping; Rule S same-line/lookback/outside-lookback/
+echo-variant/comment-only/word-boundary; baseline equal/exceed/shrink/
+absent-file/removed-file reconciliation; `tests/` scan exclusion + recursive
+nested inclusion; `--require-trusted-ref` fail-closed on unresolvable ref
+and on a resolvable-ref-without-baseline, PASS on a valid matching trusted
+baseline, and PASS against the real committed baseline in default mode;
+`--write-baseline` determinism + round-trip; usage/infra exit-2 cases
+(missing `jq`, unknown flag, missing baseline, invalid-JSON baseline);
+**TC-IDIOM-032 regression-pins the unbounded-`true`-alternation bug found in
+review** (`truex` no longer prefix-matches); **TC-IDIOM-033 closes a
+review-flagged coverage gap** — a working-tree-only violation added past a
+clean COMMITTED trusted baseline FAILs under `--require-trusted-ref`, the
+core same-PR self-ratification property Check 4-equivalent logic exists to
+prove, not just baseline-vs-baseline drift); **TC-IDIOM-034 regression-pins
+the whitespace-only-boundary false negative found in a second review pass**
+— paren/semicolon/brace-terminated swallows (`x=$(cmd || true)` and friends)
+are now flagged; **TC-IDIOM-035/036 regression-pin the baseline
+schema-validation gap found in the same pass** — a baseline entry that is
+valid JSON but has a non-numeric `jq_unguarded`/`swallow_unjustified` value
+FAILs loud (exit 2 default mode, exit 1 fail-closed under
+`--require-trusted-ref`) instead of silently exempting that file from the
+ratchet; **TC-IDIOM-039 proves cross-engine (gawk/mawk) parity** for the
+Rule S boundary fix, skipping gracefully when mawk isn't installed;
+**TC-IDIOM-040/041 regression-pin a THIRD review-round Critical finding** —
+a wrong/missing `--scan-root` (bad flag, wrong-directory checkout, sparse
+checkout missing `skills/`) made discovery silently return zero files,
+which made every baseline entry look like a shrink and PASS trivially with
+zero real coverage, even under `--require-trusted-ref`; the checker now
+requires ≥1 scanned file before reconciling (FAIL exit 2 default / exit 1
+strict), while TC-IDIOM-042 pins that a genuinely clean, non-empty scan
+root is unaffected (the guard is scoped to zero-FILES, not zero-violations).
+**TC-IDIOM-043..045** regression-pin the non-integer/exponent-notation
+baseline-schema gap (a second review pass); **TC-IDIOM-046..049** regression-pin
+the missing-option-argument usage-error gap (a second review pass);
+**TC-IDIOM-050..052** regression-pin the 2^53/int64-overflow baseline-value
+gap (a third review pass); **TC-IDIOM-053..055 regression-pin the
+mktemp/scratch-write fail-open gap found in a fourth review pass** — a
+simulated `mktemp` failure (via a fake `PATH` entry) now exits 2 and never
+prints `shell-idioms-guard: PASS`, in both default mode (TC-IDIOM-053) and
+under `--require-trusted-ref` (TC-IDIOM-054), while TC-IDIOM-055 pins that a
+healthy `mktemp` on a clean tree is unaffected (still exits 0, still prints
+PASS). The fake-`PATH` fixture's real-binary symlink list initially omitted
+`dirname`/`wc` (both used by the checker before the mktemp guard is even
+reached) and resolved binary paths via a plain `command -v` that could
+observe a calling shell's own `grep`/`find` overrides rather than the real
+filesystem binary — either gap let the fixture "pass" via an unrelated
+missing-command crash instead of exercising the mktemp guard (same-review
+self-catch); the fixture now lists every external binary the checker
+invokes anywhere in its control flow and resolves each via an
+absolute-`PATH`-scoped `command -v` subshell.
+
+**Cross-references**:
+- [INV-91](#inv-91-the-provider-neutral-caller-layer-routes-all-host-io-through-itp_chp_-verbs--a-new-raw-gh-outside-providers-is-a-ci-failing-cutover-regression-baseline-anchored) — the baseline-anchored ratchet shape (committed manifest, growth-only FAIL, `--require-trusted-ref` fail-closed monotonicity, deferred `ci.yml` wiring via #295) this invariant mirrors structurally.
+- [INV-83](#inv-83-cross-repo-dependency-lookups-use-a-per-dep-repo-scoped-read-token-the-app-must-be-installed-on-the-dep-repo) — the scoped-token `workflows`-permission gap that forces the CI-wiring deferral, same as [INV-91]'s.
+- `docs/designs/shell-idioms-ratchet.md`, `docs/test-cases/shell-idioms-ratchet.md` — design + the TC-IDIOM-* scenario matrix.
+
 ---
 
 ## INV-131: the pipeline's base branch is a resolved, exported, validated conf value — never a hardcoded `main` literal in a prompt, hook, or provider argv
