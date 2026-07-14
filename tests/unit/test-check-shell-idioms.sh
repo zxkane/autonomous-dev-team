@@ -993,6 +993,100 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+echo "=== Group O: mktemp/scratch-write failures must fail closed (review finding) — TC-IDIOM-053..055 ==="
+# ---------------------------------------------------------------------------
+
+# A PATH dir whose 'mktemp' always fails (simulates e.g. an unavailable
+# TMPDIR), with every other tool the checker needs left as a real symlink —
+# mirrors TC-IDIOM-029's fake-PATH pattern but breaks only mktemp. The list
+# below is every external binary check-shell-idioms.sh invokes ANYWHERE in
+# its control flow (including dirname/wc, used before the mktemp guard is
+# even reached) — an incomplete list would make the checker die on a missing
+# tool for an unrelated reason and reach exit 2 for the WRONG reason, which
+# would pass this assertion by accident rather than by exercising the fix
+# (caught in review). `command -v` is resolved via an absolute-PATH bash
+# subshell so it reports a real filesystem path even if the CALLING shell has
+# a shell-function/alias override for the same name (e.g. some `grep`/`find`
+# wrappers).
+FAKE_MKTEMP_DIR="$WORK/fake-mktemp-path"
+mkdir -p "$FAKE_MKTEMP_DIR"
+cat > "$FAKE_MKTEMP_DIR/mktemp" <<'EOF'
+#!/bin/bash
+echo "mktemp: simulated failure" >&2
+exit 1
+EOF
+chmod +x "$FAKE_MKTEMP_DIR/mktemp"
+for b in bash sed grep find sort cut cat awk tr jq git dirname wc; do
+  real="$(PATH="/usr/bin:/bin" command -v "$b" 2>/dev/null)"
+  [ -n "$real" ] && ln -sf "$real" "$FAKE_MKTEMP_DIR/$b"
+done
+
+# TC-IDIOM-053: a failing mktemp in default mode must exit 2 (infra error)
+# and must NOT print "shell-idioms-guard: PASS". Prior to this fix, the
+# three `DISC_TMP="$(mktemp)"`-style assignments were unchecked, so under
+# `set -uo pipefail` (no `-e`) the empty-path redirects/cut calls were
+# silently ignored and the checker printed PASS with exit 0 — a violation
+# that exists in the scanned tree would never be reported.
+R="$(fresh_root O053)"
+write_script "$R" foo/bar.sh <<'EOF'
+#!/bin/bash
+set -euo pipefail
+
+foo() {
+  x=$(jq -r 'select(.body | test("x"))')
+}
+EOF
+echo '{}' > "$WORK/o053-baseline.json"
+out="$(PATH="$FAKE_MKTEMP_DIR" bash "$CHECK" --scan-root "$R" --baseline "$WORK/o053-baseline.json" 2>&1)"; rc=$?
+if [ "$rc" -eq 2 ] && ! grep -qi "shell-idioms-guard: PASS" <<<"$out"; then
+  ok "TC-IDIOM-053: a failing mktemp in default mode exits 2 (infra error), not a silent PASS"
+else
+  bad "TC-IDIOM-053: expected exit 2 and no PASS output for a failing mktemp, got rc=$rc: $out"
+fi
+
+# TC-IDIOM-054: the same failure under --require-trusted-ref must ALSO exit
+# non-zero — this is a scratch-space allocation failure, not a ratchet
+# violation, so the documented contract is exit 2 (infra error) even in
+# strict mode, not the strict-mode exit-1 fail-closed path.
+GITROOT7="$WORK/gitfixture7"
+git init -q "$GITROOT7"
+git -C "$GITROOT7" config user.email test@test.com
+git -C "$GITROOT7" config user.name test
+mkdir -p "$GITROOT7/skills/foo"
+write_script "$GITROOT7" skills/foo/bar.sh <<'EOF'
+#!/bin/bash
+set -euo pipefail
+
+foo() {
+  echo "$1" || true
+}
+EOF
+echo '{"foo/bar.sh": {"jq_unguarded": 0, "swallow_unjustified": 1}}' > "$GITROOT7/skills/foo/baseline.json"
+git -C "$GITROOT7" add -A
+git -C "$GITROOT7" commit -q -m "clean baseline"
+out="$(cd "$GITROOT7" && PATH="$FAKE_MKTEMP_DIR" bash "$CHECK" --scan-root "$GITROOT7/skills" --require-trusted-ref --trusted-ref HEAD --trusted-baseline-path skills/foo/baseline.json 2>&1)"; rc=$?
+if [ "$rc" -eq 2 ] && ! grep -qi "shell-idioms-guard: PASS" <<<"$out"; then
+  ok "TC-IDIOM-054: a failing mktemp under --require-trusted-ref exits 2 (infra error), not a silent PASS"
+else
+  bad "TC-IDIOM-054: expected exit 2 and no PASS output for a failing mktemp in strict mode, got rc=$rc: $out"
+fi
+
+# TC-IDIOM-055: a healthy mktemp (baseline/no fake PATH) is unaffected by
+# this fix — a normal PASS still exits 0 and still prints the PASS line.
+R="$(fresh_root O055)"
+write_script "$R" foo/bar.sh <<'EOF'
+#!/bin/bash
+echo hi
+EOF
+echo '{}' > "$WORK/o055-baseline.json"
+out="$(bash "$CHECK" --scan-root "$R" --baseline "$WORK/o055-baseline.json" 2>&1)"; rc=$?
+if [ "$rc" -eq 0 ] && grep -qi "shell-idioms-guard: PASS" <<<"$out"; then
+  ok "TC-IDIOM-055: a clean tree with a healthy mktemp still exits 0 and prints PASS (no regression from the mktemp-check fix)"
+else
+  bad "TC-IDIOM-055: expected exit 0 and PASS output for a clean tree, got rc=$rc: $out"
+fi
+
+# ---------------------------------------------------------------------------
 echo ""
 echo "=== Summary: $PASS passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ]

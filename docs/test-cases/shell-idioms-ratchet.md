@@ -182,6 +182,32 @@ not just "is an integer."
 | TC-IDIOM-051 | A baseline count that is a PLAIN-DECIMAL integer literal just past bash's int64 ceiling (`9223372036854775808`) | exit 2 (fails loud), no `integer expected` leak — proves the fix bounds the numeric value, not just the literal's notation |
 | TC-IDIOM-052 | The same out-of-range shape committed to a trusted ref, checked via `--require-trusted-ref` | exit 1 (fails closed) — regression pin for the strict-mode variant |
 
+## Group O — mktemp/scratch-write failures must fail closed, seventh review round (TC-IDIOM-053..055)
+
+A seventh review pass (the "fourth review pass" in `invariants.md`'s INV-130
+entry, which counts only the schema-validation/reconciliation-robustness
+rounds — see Group N's note on the same numbering split) found that the
+reconciliation phase's three `mktemp`
+scratch-file allocations, and the writes into them (`discover_counts`, the
+baseline-extraction `jq | sort`, the `cut | sort -u` union), were unchecked.
+Under `set -uo pipefail` (no `-e`), a failed `mktemp` (e.g. an unavailable
+`TMPDIR`) left the corresponding variable empty; every downstream
+redirect/read against that empty path also failed silently, every table
+looked empty, and the reconciliation loop read that as "every baseline entry
+shrank to 0" — the checker printed `shell-idioms-guard: PASS` with exit 0
+even though the ratchet comparison never ran, reproducing under
+`--require-trusted-ref` too. The fix checks each `mktemp` call and each
+scratch-file write explicitly, treating a failure as the documented exit-2
+usage/infra error in both default and strict mode (this is a scratch-space
+failure, not a ratchet violation, so it does not take the strict-mode exit-1
+fail-closed path).
+
+| ID | Scenario | Expected |
+|----|----------|----------|
+| TC-IDIOM-053 | A simulated `mktemp` failure (fake `PATH` entry) during a default-mode run against a tree with a real violation | exit 2, output never contains `shell-idioms-guard: PASS` — regression pin |
+| TC-IDIOM-054 | The same simulated `mktemp` failure under `--require-trusted-ref` against a clean committed trusted baseline | exit 2 (infra error, not the strict-mode exit-1 fail-closed path), output never contains `shell-idioms-guard: PASS` |
+| TC-IDIOM-055 | A healthy `mktemp` (no fake `PATH`) against a clean tree | exit 0, output contains `shell-idioms-guard: PASS` — proves the fix does not regress the normal PASS path |
+
 ## Acceptance criteria for this change (pre-merge verifiable)
 
 - [ ] `check-shell-idioms.sh --write-baseline` run against the current tree

@@ -322,19 +322,32 @@ fi
 # ---------------------------------------------------------------------------
 echo "=== Shell-idiom ratchet: Rule J (jq nullable-.body guard) + Rule S (swallow justification) ==="
 
-DISC_TMP="$(mktemp)"; BASE_TMP="$(mktemp)"; ALL_FILES_TMP="$(mktemp)"
+# Under `set -uo pipefail` (no `-e`), an unchecked `mktemp`/write failure does
+# NOT stop the script: reads of the empty temp path degrade to "no rows", the
+# reconciliation loop reads that as "every baseline entry shrank to 0", and the
+# checker PASSes without running the ratchet (INV-130). Each allocation/write is
+# therefore checked and treated as an exit-2 infra error in both modes — this is
+# scratch-space breakage, not a ratchet violation. Keep the `mktemp` guards
+# inline (NOT via a command-substitution helper): an `exit 2` inside `$(...)`
+# only kills the subshell, leaving the assignment empty and reintroducing the bug.
+DISC_TMP="$(mktemp)" || { echo "check-shell-idioms.sh: mktemp failed — cannot allocate scratch file for discovered counts" >&2; exit 2; }
+BASE_TMP="$(mktemp)" || { echo "check-shell-idioms.sh: mktemp failed — cannot allocate scratch file for baseline counts" >&2; exit 2; }
+ALL_FILES_TMP="$(mktemp)" || { echo "check-shell-idioms.sh: mktemp failed — cannot allocate scratch file for the file-union list" >&2; exit 2; }
 trap 'rm -f "$DISC_TMP" "$BASE_TMP" "$ALL_FILES_TMP"' EXIT
 
-discover_counts > "$DISC_TMP"
+discover_counts > "$DISC_TMP" \
+  || { echo "check-shell-idioms.sh: failed to write discovered counts to scratch file" >&2; exit 2; }
 # `| floor` normalizes the rendered TEXT, not the value: a schema-valid
 # integer-valued number in exponent form (e.g. `1e2`) interpolates as "1E+2",
 # which would then fail the same `[ -gt ]`/`[ -lt ]` integer comparisons the
 # schema check above protects against. `floor` is a no-op on an already-integer
 # value but forces jq to print it in plain decimal form.
 jq -r 'to_entries[] | "\(.key)\t\((.value.jq_unguarded // 0) | floor)\t\((.value.swallow_unjustified // 0) | floor)"' <<<"$BASELINE_JSON" \
-  | LC_ALL=C sort > "$BASE_TMP"
+  | LC_ALL=C sort > "$BASE_TMP" \
+  || { echo "check-shell-idioms.sh: failed to write baseline counts to scratch file" >&2; exit 2; }
 
-{ cut -f1 "$DISC_TMP"; cut -f1 "$BASE_TMP"; } | LC_ALL=C sort -u > "$ALL_FILES_TMP"
+{ cut -f1 "$DISC_TMP"; cut -f1 "$BASE_TMP"; } | LC_ALL=C sort -u > "$ALL_FILES_TMP" \
+  || { echo "check-shell-idioms.sh: failed to write the file-union list to scratch file" >&2; exit 2; }
 
 # Column <fld> of the row for file <rel> in a "<file>\t<jq>\t<swallow>" table
 # (DISC_TMP/BASE_TMP), defaulting to 0 when the file has no row. Both tables

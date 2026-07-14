@@ -7824,6 +7824,26 @@ an unbound `$2` under `set -u`, exiting 1 and looking like an internal shell
 crash rather than a handled usage error; a `require_value` guard now checks
 the remaining-argument count before dereferencing `$2`, TC-IDIOM-046..049).
 
+**Scratch-file allocation is fail-closed, not fail-open** (a fourth review
+pass caught this): the reconciliation phase allocates three `mktemp` scratch
+files (discovered counts, baseline counts, the file-union list) and writes
+each of `discover_counts`, the baseline-extraction `jq | sort`, and the
+`cut | sort -u` union through a redirect into one of them. Under `set -uo
+pipefail` (no `-e`), a failed `mktemp` call (e.g. an unavailable `TMPDIR`)
+leaves the corresponding shell variable empty; every subsequent read/write
+against that empty path (`> ""`, `cut -f1 ""`) also fails, but the failure
+was silently absorbed rather than propagated — every table then looked
+empty, the reconciliation loop read that as "every baseline entry shrank to
+0," and the checker printed `shell-idioms-guard: PASS` with exit 0 even
+though the ratchet comparison never actually ran, reproducing under
+`--require-trusted-ref` fail-closed strict mode too. Each of the three
+`mktemp` calls and each of the three scratch-file writes is now checked
+explicitly (`|| { echo …; exit 2; }`); a failure here is infra/environment
+breakage, not a ratchet violation, so the contract is the documented exit-2
+usage/infra error in BOTH default and strict mode — not the strict-mode
+exit-1 fail-closed path, which is reserved for a resolved-but-violating
+ratchet comparison (TC-IDIOM-053..055).
+
 **Heuristic bounds (deliberate, not a defect)**: both detectors are
 line-window heuristics over the raw source text, not a bash/jq parser — the
 issue body explicitly rules out attempting real parsing (`Do not attempt full
@@ -7913,6 +7933,25 @@ zero real coverage, even under `--require-trusted-ref`; the checker now
 requires ≥1 scanned file before reconciling (FAIL exit 2 default / exit 1
 strict), while TC-IDIOM-042 pins that a genuinely clean, non-empty scan
 root is unaffected (the guard is scoped to zero-FILES, not zero-violations).
+**TC-IDIOM-043..045** regression-pin the non-integer/exponent-notation
+baseline-schema gap (a second review pass); **TC-IDIOM-046..049** regression-pin
+the missing-option-argument usage-error gap (a second review pass);
+**TC-IDIOM-050..052** regression-pin the 2^53/int64-overflow baseline-value
+gap (a third review pass); **TC-IDIOM-053..055 regression-pin the
+mktemp/scratch-write fail-open gap found in a fourth review pass** — a
+simulated `mktemp` failure (via a fake `PATH` entry) now exits 2 and never
+prints `shell-idioms-guard: PASS`, in both default mode (TC-IDIOM-053) and
+under `--require-trusted-ref` (TC-IDIOM-054), while TC-IDIOM-055 pins that a
+healthy `mktemp` on a clean tree is unaffected (still exits 0, still prints
+PASS). The fake-`PATH` fixture's real-binary symlink list initially omitted
+`dirname`/`wc` (both used by the checker before the mktemp guard is even
+reached) and resolved binary paths via a plain `command -v` that could
+observe a calling shell's own `grep`/`find` overrides rather than the real
+filesystem binary — either gap let the fixture "pass" via an unrelated
+missing-command crash instead of exercising the mktemp guard (same-review
+self-catch); the fixture now lists every external binary the checker
+invokes anywhere in its control flow and resolves each via an
+absolute-`PATH`-scoped `command -v` subshell.
 
 **Cross-references**:
 - [INV-91](#inv-91-the-provider-neutral-caller-layer-routes-all-host-io-through-itp_chp_-verbs--a-new-raw-gh-outside-providers-is-a-ci-failing-cutover-regression-baseline-anchored) — the baseline-anchored ratchet shape (committed manifest, growth-only FAIL, `--require-trusted-ref` fail-closed monotonicity, deferred `ci.yml` wiring via #295) this invariant mirrors structurally.
