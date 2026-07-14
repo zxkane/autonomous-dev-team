@@ -557,10 +557,13 @@ _codex_review_strip_prompt_echo() {
   # CLI's own trailing `tokens used: <N>` footer (the same line
   # `metrics_parse_tokens` reads, lib-metrics.sh) — a token count is never
   # part of the agent's findings and must not reach the severity scanner.
+  # Case-insensitivity is done via `tolower()` (POSIX, mawk-portable) rather
+  # than gawk's `IGNORECASE` extension — this subsystem's awk must stay
+  # portable to any POSIX awk (mirrors the `_codex_capture_thread` discipline
+  # documented in INV-91).
   local _stripped
   _stripped=$(awk -v boundary="$_codex_line_no" '
-    BEGIN { IGNORECASE = 1 }
-    NR > boundary && !/^[[:space:]]*tokens used:[[:space:]]*[0-9]+[[:space:]]*$/ { print }
+    NR > boundary && tolower($0) !~ /^[[:space:]]*tokens used:[[:space:]]*[0-9]+[[:space:]]*$/ { print }
   ' "$f" 2>/dev/null) || _stripped=""
   if [[ -z "$_stripped" ]]; then
     printf '%s' "$original"
