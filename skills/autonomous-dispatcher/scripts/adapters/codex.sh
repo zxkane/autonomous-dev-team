@@ -506,10 +506,24 @@ _codex_review_strip_prompt_echo() {
 #
 #   pass → a one-line passing summary noting codex review ran (no blocking findings).
 #   fail → the captured codex review findings text (so the dev agent sees them).
+#
+# [INV-132] (#481, PR review round-1 [P1]): the FAIL branch strips the echoed
+# prompt from `f` via `_codex_review_strip_prompt_echo` BEFORE composing —
+# this is the body `autonomous-review.sh`'s wrapper-posted stdout-fallback
+# path (INV-62) writes into `AGENT_VERDICT_BODIES[i]`, and the severity loop
+# there PREFERS a non-empty body over the raw stdout. Without stripping HERE,
+# that preferred body still carried the raw echo verbatim, so the severity
+# loop's own echo-stripping fallback branch (`_codex_review_strip_prompt_echo`
+# on `AGENT_CODEX_LOGS[i]`) never actually ran on this path — the body was
+# never empty, just still poisoned. Stripping at composition time closes that
+# gap for every consumer of this composed body (the severity scan AND the
+# human-facing GitHub comment), not just a hypothetical empty-body case.
 _codex_review_compose_body() {
   local verdict="${1:-pass}" f="${2:-}"
   local cap=50000 text=""
-  if [[ -n "$f" && -f "$f" && -r "$f" ]]; then
+  if [[ "$verdict" == "fail" ]]; then
+    text=$(_codex_review_strip_prompt_echo "$f")
+  elif [[ -n "$f" && -f "$f" && -r "$f" ]]; then
     text=$(cat -- "$f" 2>/dev/null || true)
   fi
   # Truncate to the cap (character count); append a marker so a reader knows it

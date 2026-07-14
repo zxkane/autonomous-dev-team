@@ -114,6 +114,11 @@ assert_not_contains() {
 
 # shellcheck source=../../skills/autonomous-dispatcher/scripts/lib-review-codex.sh
 source "$LIB"
+# [INV-132] #481: needed by TC-CXRS-BODY-05c, which confirms a composed FAIL
+# body's severity extracts correctly end-to-end (not just that the echo text
+# is gone).
+# shellcheck source=../../skills/autonomous-dispatcher/scripts/lib-review-severity.sh
+source "$PROJECT_ROOT/skills/autonomous-dispatcher/scripts/lib-review-severity.sh"
 
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
@@ -206,6 +211,27 @@ else
   echo -e "  ${RED}FAIL${NC}: TC-CXRS-BODY-04a large stdout NOT truncated (len=${#body04})"; FAIL=$((FAIL + 1))
 fi
 assert_contains "TC-CXRS-BODY-04b truncation marker present" "truncated" "$body04"
+
+# TC-CXRS-BODY-05 [INV-132, #481 PR review round-1 [P1]]: a FAIL body composed
+# from a capture that echoes the prompt (CLI header + numbered checklist) must
+# NOT carry that echo through into AGENT_VERDICT_BODIES[i] — this is the exact
+# body the wrapper's stdout-fallback path (INV-62) writes, and
+# autonomous-review.sh's severity loop PREFERS a non-empty body over raw
+# stdout, so an un-stripped body here would silently re-poison the severity
+# scan even though _codex_review_strip_prompt_echo exists as a fallback.
+body05=$(_codex_review_compose_body fail "$FIXTURES/codex-review-stdout-echo-p2-only.txt")
+assert_eq "TC-CXRS-BODY-05a fail body from an echo+findings capture strips the checklist" "" \
+  "$(grep -o '1\. \[ \] Design canvas created' <<<"$body05")"
+assert_contains "TC-CXRS-BODY-05b fail body still carries the real [P2] finding" "[P2] src/handler.ts:88" "$body05"
+assert_eq "TC-CXRS-BODY-05c severity extraction on the composed body now scores P2 (not none)" "P2" \
+  "$(_review_extract_highest_severity "$body05")"
+
+# TC-CXRS-BODY-06: a PASS body is UNCHANGED by this fix — the strip helper
+# only runs on the FAIL branch (a PASS body has no severity to protect, and
+# changing its composition would be an unrelated behavior change).
+printf '%s\n' 'OpenAI Codex v0.139.0' '## Step 0: Merge Conflict Resolution — MANDATORY PRE-REVIEW' 'No blocking findings.' > "$F"
+body06=$(_codex_review_compose_body pass "$F")
+assert_contains "TC-CXRS-BODY-06 pass body composition is untouched by the strip fix" 'OpenAI Codex v0.139.0' "$body06"
 
 # ---------------------------------------------------------------------------
 echo ""

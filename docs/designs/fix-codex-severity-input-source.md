@@ -77,23 +77,43 @@ non-codex path (both already score `AGENT_VERDICT_BODIES[i]` and this branch
 order is a no-op for them: they hit the first `-n` check exactly like today,
 or fall through to the same `else` if somehow empty).
 
-**R2 — harden the raw-stdout fallback.** For the residual case where a codex
-agent has NO rendered verdict body at all (pure legacy stdout-classify path,
-`AGENT_VERDICT_BODIES[i]` empty), strip the echoed prompt before scoring
-instead of scanning the whole capture. New helper
-`_codex_review_strip_prompt_echo` (`adapters/codex.sh`, sibling to
-`_codex_review_stdout_is_malformed`): reuses the SAME `_echo_region`
-boundary logic already proven by the malformed-prompt-echo detector (INV-73)
-— truncate at the codex CLI's own launch-header + prompt-echo boundary and
-return everything AFTER it. Concretely, the boundary is the last line of the
-contiguous LEADING region that structurally matches the wrapper's own
-`build_review_prompt` scaffolding (the same `## Step 0:` / `## You are
-running inside` / `Prefix EACH...`-style markers `_codex_review_stdout_is_malformed`
-already recognizes) — everything up to and including that region is the
-echoed prompt; everything after is codex's own authored output. If no such
-boundary is found (a capture that never echoed the prompt at all — e.g. a
-short, well-formed review), the helper returns the ORIGINAL text unchanged
-(fail-safe — R2's "no change to current behavior" clause).
+**R2 — harden the raw-stdout fallback, at the point the body is COMPOSED, not
+just where it's later read.** New helper `_codex_review_strip_prompt_echo`
+(`adapters/codex.sh`, sibling to `_codex_review_stdout_is_malformed`): reuses
+the SAME finding-boundary grammar the malformed-prompt-echo detector (INV-73)
+already established for its `_echo_region` extraction — truncate at the
+codex CLI's own launch-header + prompt-echo boundary (a `[P0]`-`[P3]`
+finding line, direct/numbered/bulleted/bold, or a JSON severity/priority key
+or value, outside any fenced block) and return everything FROM that boundary
+onward. If no such boundary is found (a capture that never echoed the
+prompt at all — e.g. a short, well-formed review), the helper returns the
+ORIGINAL text unchanged (fail-safe — R2's "no change to current behavior"
+clause).
+
+**Where the stripping actually needs to happen (closing a gap found in PR
+self-review, round 1):** an initial draft called this helper ONLY at the
+severity-loop call site's `elif` branch — i.e. only when
+`AGENT_VERDICT_BODIES[i]` is empty. But every LIVE codex resolution path that
+produces a `fail` verdict populates that body BEFORE the severity loop runs,
+including the wrapper's own stdout-derived fallback post (INV-62,
+`_codex_review_compose_body`) — which, pre-fix, embedded the RAW,
+un-stripped stdout (echo included) as the body text. So the `elif` branch
+was reachable only in a body-less codex-fail case that does not occur on the
+live wrapper path (an empty-body codex `fail` resolves `unavailable`, never
+reaches the severity loop as `fail` at all) — the helper's call site alone
+did not close the bug for the actual stdout-fallback path; it only worked in
+tests that called the helper directly.
+
+The fix: call `_codex_review_strip_prompt_echo` INSIDE
+`_codex_review_compose_body`'s FAIL branch, so the body it hands back —
+which becomes `AGENT_VERDICT_BODIES[i]` for every consumer, not just the
+severity loop — is already clean. This closes the gap for the human-facing
+GitHub comment too (a demoted-worthy P2 finding no longer arrives buried in
+an echoed checklist). The severity loop's `elif` branch and the helper
+remain in place as the correct handling for the (currently unreached, but
+structurally possible) case where a codex agent's body is genuinely empty —
+belt-and-suspenders, not dead code removed, since a future resolution-path
+change could make that branch reachable again.
 
 **R3 — no scanner change.** `_review_extract_highest_severity` is untouched.
 Its per-finding fail-safe (an untagged numbered line collapses the whole

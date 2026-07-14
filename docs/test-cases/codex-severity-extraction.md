@@ -26,6 +26,23 @@ by `tests/unit/test-lib-review-codex.sh`.
 | TC-CXSTRIP-003 | Empty / missing / unreadable file | returns empty, rc 0 (fail-safe, no crash under `set -euo pipefail`) |
 | TC-CXSTRIP-004 | A genuine review with leading prose before its first tagged finding (no prompt scaffolding at all) | the finding + its tag survive stripping; severity extraction on the result is unaffected (the boundary is "first genuine finding line", so harmless leading prose before it is dropped without changing the scoring outcome) |
 
+## TC-CXRS-BODY: `_codex_review_compose_body` end-to-end echo stripping (PR review round-1 [P1])
+
+The severity call site's `elif` branch (TC-SEVEXT-003/004) only strips the
+echo when `AGENT_VERDICT_BODIES[i]` is empty — but on the live wrapper path,
+the stdout-derived fallback post ([INV-62]) populates that body via
+`_codex_review_compose_body` BEFORE the severity loop ever runs. Pre-fix,
+that composer embedded the raw un-stripped stdout as the FAIL body, so the
+severity loop's PRIMARY (body-preferred) branch re-poisoned the scan anyway.
+These tests pin the fix at its actual point of effect: composition time.
+
+| ID | Scenario | Expected |
+|----|----------|----------|
+| TC-CXRS-BODY-05a | `_codex_review_compose_body fail <echo+P2 fixture>` | composed body contains no numbered checklist line (`1. [ ] Design canvas created` absent) |
+| TC-CXRS-BODY-05b | Same call | composed body still carries the real `[P2] src/handler.ts:88` finding |
+| TC-CXRS-BODY-05c | `_review_extract_highest_severity` on that composed body | → `P2` (not `none`) — the end-to-end proof the gap is closed, not just that the echo text is visually gone |
+| TC-CXRS-BODY-06 | `_codex_review_compose_body pass <capture with a CLI header>` | composed body is UNCHANGED by the strip fix — stripping is gated on `verdict == "fail"` only |
+
 ## Acceptance-criteria fixtures
 
 - **Reproduction fixture** (issue body): a real-shaped codex stdout capture
