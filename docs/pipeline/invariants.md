@@ -7852,19 +7852,25 @@ tool failure, and the surrounding logic reads "no rows" as "no violations"):
 
 - **Detector-failure propagation**: `discover_counts` invokes the Rule
   J/S awk detectors per file via `rule_j_unguarded_lines_in "$path" | wc -l |
-  tr -d ' '` (and the Rule S equivalent). If the awk detector cannot execute
-  or exits non-zero (corrupt `PATH`, an OOM kill, an awk-program bug), `wc -l`
-  still sees a (possibly empty) stream and still exits 0, printing a count
-  that reads as "clean" even though the detector never actually ran. Each
-  detector call is now captured and `||`-checked (pipefail makes the
-  substitution's exit status the detector's), and the resulting count is
-  additionally re-validated as digits-only — catching a detector that exits 0
-  but emits non-numeric/empty text, a shape pipefail's exit code alone would
-  not catch. Either failure exits 2, in both default mode and under
-  `--write-baseline` (which now captures `discover_counts`' output into a
-  checked scratch file before piping it to `jq`, rather than piping
+  tr -d ' '` (and the Rule S equivalent) — each detector call is independent,
+  so a stateful failure that hits only the SECOND (Rule S) call after the
+  FIRST (Rule J) call already succeeded is a distinct failure mode from an
+  outright first-call failure. If the awk detector cannot execute or exits
+  non-zero (corrupt `PATH`, an OOM kill, an awk-program bug), `wc -l` still
+  sees a (possibly empty) stream and still exits 0, printing a count that
+  reads as "clean" even though the detector never actually ran. Each detector
+  call is now captured and `||`-checked (pipefail makes the substitution's
+  exit status the detector's), and the resulting count is additionally
+  re-validated as digits-only against `^[0-9]+$` — catching a detector that
+  exits 0 but emits non-numeric OR empty text (two distinct shapes of a
+  corrupted `wc`, both exercised independently), which pipefail's exit code
+  alone would not catch. Either failure exits 2, in both default mode and
+  under `--write-baseline` (which now captures `discover_counts`' output into
+  a checked scratch file before piping it to `jq`, rather than piping
   `discover_counts` directly into `jq` and letting a mid-stream failure
-  potentially render as importable-but-wrong JSON) (TC-IDIOM-056..058).
+  potentially render as importable-but-wrong JSON, and — spec revision 2 —
+  emits NO baseline JSON on stdout on the failure path) (TC-IDIOM-056..058,
+  062..064).
 - **Partial file-union build**: the reconciliation phase originally built the
   union of baseline-files ∪ current-files via `{ cut -f1 "$DISC_TMP"; cut -f1
   "$BASE_TMP"; } | sort -u`. A bash command GROUP's exit status is only its
@@ -7881,10 +7887,29 @@ tool failure, and the surrounding logic reads "no rows" as "no violations"):
   containing a literal tab byte would split into extra fields and corrupt
   every downstream `cut -f1` / `awk -F'\t'` read for that row, bypassing the
   ratchet for exactly that file. Rather than switch the whole table to a
-  NUL-delimited format, the checker rejects any such path loudly at scan time
-  (exit 2, naming the offending path) — no legitimate script path in this
-  repo contains a tab, so fail-closed rejection costs nothing real
-  (TC-IDIOM-061).
+  NUL-delimited format (explicitly out of scope), the checker rejects any
+  such path loudly at scan time (exit 2, naming the offending path,
+  shell-escaped via `printf %q` per spec revision 2 rather than interpolated
+  raw — a literal tab in an unescaped error line is invisible/ambiguous in
+  terminal or log output) — no legitimate script path in this repo contains a
+  tab, so fail-closed rejection costs nothing real (TC-IDIOM-061).
+- **Diagnostic re-run failures on an already-detected regression**: when the
+  reconciliation loop finds `current > baseline` for a file, it re-invokes the
+  relevant detector a SECOND time purely to enumerate the offending line
+  numbers/text for the `fail()` message — a separate awk invocation from the
+  one `discover_counts` already used to compute the count. This diagnostic
+  re-run was read via an unchecked process substitution
+  (`done < <(rule_j_unguarded_lines_in …)`), whose exit status is invisible to
+  the surrounding `while` loop: a transient failure here (flaky awk, OOM)
+  degraded to "the re-run enumerated zero lines," which — because `fail()` is
+  only called from inside the loop body reading that output — meant the
+  already-detected regression could still result in a printed
+  `shell-idioms-guard: PASS`. The fix captures the re-run via command
+  substitution instead (`j_lines="$(rule_j_unguarded_lines_in …)" || { fail
+  …; j_lines=""; }`), so `||` sees its exit status and reports the re-run's
+  own failure via `fail()` — the already-detected growth is never silently
+  dropped merely because the offending lines couldn't be enumerated
+  (TC-IDIOM-065).
 
 **Heuristic bounds (deliberate, not a defect)**: both detectors are
 line-window heuristics over the raw source text, not a bash/jq parser — the
@@ -7996,20 +8021,37 @@ filesystem binary — either gap let the fixture "pass" via an unrelated
 missing-command crash instead of exercising the mktemp guard (same-review
 self-catch); the fixture now lists every external binary the checker
 invokes anywhere in its control flow and resolves each via an
-absolute-`PATH`-scoped `command -v` subshell. **TC-IDIOM-056..061
+absolute-`PATH`-scoped `command -v` subshell. **TC-IDIOM-056..065
 (issue #482) harden the CURRENT-TREE scan side** — split out at operator
 takeover from #480's review loop: TC-IDIOM-056/057 pin that a failing `awk`
 detector (fake `PATH` stub) exits 2 rather than letting `wc -l` read the
 resulting empty stream as "zero occurrences," in both default mode and under
-`--write-baseline` (TC-IDIOM-058 pins the healthy-awk path is unaffected);
-TC-IDIOM-059 pins that a `cut` failing on its first invocation (deterministically
-simulating a `DISC_TMP` read failure, since it is always cut first) during the
-file-union build exits 2 rather than silently dropping that file from the
-union — the fix reads each `cut` into its own checked variable instead of a
-combined `{ cut; cut; }` group, whose exit status is only its last command's
-(TC-IDIOM-060 pins the healthy-cut path is unaffected); TC-IDIOM-061 pins that
-a `.sh` path containing a literal tab byte is rejected loudly (exit 2, naming
-the path) rather than corrupting the tab-delimited count table.
+`--write-baseline` — TC-IDIOM-057 asserts stdout is captured and checked
+SEPARATELY from stderr, so a hypothetical implementation that emits a clean
+`{}` on stdout alongside an stderr error line would still fail this test
+(TC-IDIOM-058 pins the healthy-awk path is unaffected); TC-IDIOM-059 pins
+that a `cut` failing on its first invocation (deterministically simulating a
+`DISC_TMP` read failure, since it is always cut first) during the file-union
+build exits 2 rather than silently dropping that file from the union — the
+fix reads each `cut` into its own checked variable instead of a combined
+`{ cut; cut; }` group, whose exit status is only its last command's
+(TC-IDIOM-060 pins the healthy-cut path is unaffected); TC-IDIOM-061 pins
+that a `.sh` path containing a literal tab byte is rejected loudly (exit 2,
+naming the shell-escaped path) rather than corrupting the tab-delimited
+count table. A review pass on spec revision 2 found four further gaps in
+this initial Group P set: **TC-IDIOM-062** uses a stateful fake `awk` (real
+on call 1, failing on call 2) to pin that a Rule S detector failure AFTER
+Rule J already succeeded for the same file is independently caught — the
+Group P `awk` fixture through TC-IDIOM-056 only ever failed the FIRST
+invocation, so this path was previously untested; **TC-IDIOM-063/064** pin
+the digits-only re-check with a fake `wc` that exits 0 but prints empty/
+non-numeric text respectively — a shape distinct from (and not covered by)
+an outright non-zero detector exit; **TC-IDIOM-065** pins that a failure in
+the reconciliation loop's DIAGNOSTIC re-run of a detector (used only to
+enumerate offending lines for an already-detected regression) is itself
+reported rather than silently swallowed by the then-unchecked process
+substitution feeding that loop — the fix switches the re-run's capture from
+process substitution to a checked command substitution.
 
 **Cross-references**:
 - [INV-91](#inv-91-the-provider-neutral-caller-layer-routes-all-host-io-through-itp_chp_-verbs--a-new-raw-gh-outside-providers-is-a-ci-failing-cutover-regression-baseline-anchored) — the baseline-anchored ratchet shape (committed manifest, growth-only FAIL, `--require-trusted-ref` fail-closed monotonicity, deferred `ci.yml` wiring via #295) this invariant mirrors structurally.

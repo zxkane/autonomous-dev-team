@@ -210,7 +210,11 @@ rule_s_unjustified_lines_in() {
 reject_if_tab_in_path() {
   case "$1" in
     *$'\t'*)
-      echo "check-shell-idioms.sh: refusing to scan '$1' — path contains a literal tab, which would corrupt the internal tab-delimited count table" >&2
+      # Shell-escape (review finding, round 1): the raw path contains a
+      # literal tab byte, which is ambiguous/invisible when interpolated
+      # unescaped into a terminal or log line. `printf %q` renders it as a
+      # visible `$'...\t...'`-style escape so the offending path is legible.
+      printf 'check-shell-idioms.sh: refusing to scan %q — path contains a literal tab, which would corrupt the internal tab-delimited count table\n' "$1" >&2
       exit 2
       ;;
   esac
@@ -413,20 +417,35 @@ while IFS= read -r rel; do
   base_sw=$(field_or_zero "$BASE_TMP" "$rel" 3)
 
   if [ "$cur_jq" -gt "$base_jq" ]; then
+    # R1 (review finding, round 1): this diagnostic re-run of the detector is a
+    # SEPARATE awk invocation from the one discover_counts already used to
+    # compute cur_jq — a transient failure here (flaky awk, OOM) is independent
+    # and must not be read as "no offending lines." Capturing via command
+    # substitution (not process substitution) lets `||` see its exit status;
+    # a failure is itself reported via fail() so the already-detected growth
+    # is never silently dropped just because we couldn't enumerate it.
+    j_lines="$(rule_j_unguarded_lines_in "$SCAN_ROOT/$rel")" || {
+      fail "Rule J diagnostic re-run failed on '$rel' while reporting a detected regression (baseline=${base_jq}, current=${cur_jq}) — cannot enumerate the offending lines, but the growth itself must not be silently dropped."
+      j_lines=""
+    }
     while IFS=$'\t' read -r ln content; do
       [ -z "$ln" ] && continue
       fail "Rule J (jq nullable-.body guard) regression at ${rel}:${ln} (baseline=${base_jq}, current=${cur_jq}): '$content'. Add a select(.body | type == \"string\") guard within 15 lines, or route through an existing guarded helper. If this is a legitimate baseline change, regenerate shell-idioms-baseline.json (--write-baseline)."
-    done < <(rule_j_unguarded_lines_in "$SCAN_ROOT/$rel")
+    done <<< "$j_lines"
   elif [ "$cur_jq" -lt "$base_jq" ]; then
     any_shrink=1
     info "notice: $rel Rule J count shrank (baseline=${base_jq}, current=${cur_jq}) — consider regenerating shell-idioms-baseline.json (--write-baseline)"
   fi
 
   if [ "$cur_sw" -gt "$base_sw" ]; then
+    s_lines="$(rule_s_unjustified_lines_in "$SCAN_ROOT/$rel")" || {
+      fail "Rule S diagnostic re-run failed on '$rel' while reporting a detected regression (baseline=${base_sw}, current=${cur_sw}) — cannot enumerate the offending lines, but the growth itself must not be silently dropped."
+      s_lines=""
+    }
     while IFS=$'\t' read -r ln content; do
       [ -z "$ln" ] && continue
       fail "Rule S (swallow justification) regression at ${rel}:${ln} (baseline=${base_sw}, current=${cur_sw}): '$content'. Add a same-line trailing comment or a comment on one of the 3 preceding lines explaining which direction this fails. If this is a legitimate baseline change, regenerate shell-idioms-baseline.json (--write-baseline)."
-    done < <(rule_s_unjustified_lines_in "$SCAN_ROOT/$rel")
+    done <<< "$s_lines"
   elif [ "$cur_sw" -lt "$base_sw" ]; then
     any_shrink=1
     info "notice: $rel Rule S count shrank (baseline=${base_sw}, current=${cur_sw}) — consider regenerating shell-idioms-baseline.json (--write-baseline)"

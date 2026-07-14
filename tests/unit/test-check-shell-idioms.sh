@@ -1087,7 +1087,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-echo "=== Group P: current-tree infra-failure hardening (issue #482) — TC-IDIOM-056..061 ==="
+echo "=== Group P: current-tree infra-failure hardening (issue #482) — TC-IDIOM-056..065 ==="
 # ---------------------------------------------------------------------------
 #
 # Round-5 residual findings from #480's (INV-130) review loop, split out at
@@ -1129,7 +1129,11 @@ else
 fi
 
 # TC-IDIOM-057: the same failing-awk scenario under --write-baseline must
-# also exit 2, not emit a (falsely clean) baseline document.
+# also exit 2, and must emit NO baseline JSON on stdout. Stdout and stderr
+# are captured SEPARATELY (review finding, round 1) — a combined-stream
+# assertion (`out != "{}"`) would pass even if an implementation emitted a
+# clean "{}" on stdout alongside an error line on stderr, which does not
+# verify the actual requirement ("no baseline JSON is emitted").
 R="$(fresh_root P057)"
 write_script "$R" foo/bar.sh <<'EOF'
 #!/bin/bash
@@ -1139,11 +1143,13 @@ foo() {
   x=$(jq -r 'select(.body | test("x"))')
 }
 EOF
-out="$(PATH="$FAKE_AWK_DIR" bash "$CHECK" --scan-root "$R" --write-baseline 2>&1)"; rc=$?
-if [ "$rc" -eq 2 ] && [ "$out" != "{}" ]; then
-  ok "TC-IDIOM-057: a failing awk detector under --write-baseline exits 2, never emits a baseline document"
+STDOUT_FILE="$WORK/p057-stdout"
+STDERR_FILE="$WORK/p057-stderr"
+PATH="$FAKE_AWK_DIR" bash "$CHECK" --scan-root "$R" --write-baseline >"$STDOUT_FILE" 2>"$STDERR_FILE"; rc=$?
+if [ "$rc" -eq 2 ] && [ ! -s "$STDOUT_FILE" ]; then
+  ok "TC-IDIOM-057: a failing awk detector under --write-baseline exits 2 with EMPTY stdout — no baseline JSON emitted on the failure path"
 else
-  bad "TC-IDIOM-057: expected exit 2 and no baseline emitted, got rc=$rc: $out"
+  bad "TC-IDIOM-057: expected exit 2 and empty stdout, got rc=$rc stdout=[$(cat "$STDOUT_FILE")] stderr=[$(cat "$STDERR_FILE")]"
 fi
 
 # TC-IDIOM-058: a healthy awk (no fake PATH) is unaffected by the fix — a
@@ -1247,6 +1253,185 @@ if [ "$rc" -eq 2 ] && grep -q 'tab' <<<"$out"; then
   ok "TC-IDIOM-061: a .sh path containing a literal tab is rejected loudly (exit 2, error names the tab), never PASS"
 else
   bad "TC-IDIOM-061: expected exit 2 naming the tab, got rc=$rc: $out"
+fi
+
+# TC-IDIOM-062: Rule S detector failure AFTER Rule J succeeds for the same
+# file (review finding, round 1: TC-IDIOM-056 only ever failed on awk's
+# FIRST invocation, so it exercised Rule J alone — Rule S's independent
+# `|| { ...; exit 2; }` guard at check-shell-idioms.sh's discover_counts was
+# never actually driven). A stateful stub: real awk on the 1st invocation
+# (Rule J succeeds normally), simulated failure on the 2nd (Rule S) —
+# discover_counts calls rule_j_unguarded_lines_in then
+# rule_s_unjustified_lines_in per file, so with exactly one scanned file
+# this deterministically targets Rule S's call.
+FAKE_AWK_DIR2="$WORK/fake-awk-second-call-fails-path"
+mkdir -p "$FAKE_AWK_DIR2"
+REAL_AWK="$(PATH="/usr/bin:/bin" command -v awk)"
+AWK_CALL_COUNT_FILE="$WORK/p062-awk-call-count"
+rm -f "$AWK_CALL_COUNT_FILE"
+cat > "$FAKE_AWK_DIR2/awk" <<EOF
+#!/bin/bash
+n=0
+[ -f "$AWK_CALL_COUNT_FILE" ] && n="\$(cat "$AWK_CALL_COUNT_FILE")"
+n=\$((n + 1))
+echo "\$n" > "$AWK_CALL_COUNT_FILE"
+if [ "\$n" -eq 2 ]; then
+  echo "awk: simulated failure on 2nd invocation (Rule S detector)" >&2
+  exit 1
+fi
+exec "$REAL_AWK" "\$@"
+EOF
+chmod +x "$FAKE_AWK_DIR2/awk"
+for b in bash sed grep find sort cut mktemp cat tr jq git dirname wc; do
+  real="$(PATH="/usr/bin:/bin" command -v "$b" 2>/dev/null)"
+  [ -n "$real" ] && ln -sf "$real" "$FAKE_AWK_DIR2/$b"
+done
+
+R="$(fresh_root P062)"
+write_script "$R" foo/bar.sh <<'EOF'
+#!/bin/bash
+set -euo pipefail
+
+foo() {
+  x=$(jq -r 'select(.body | test("x"))')
+}
+EOF
+echo '{}' > "$WORK/p062-baseline.json"
+out="$(PATH="$FAKE_AWK_DIR2" bash "$CHECK" --scan-root "$R" --baseline "$WORK/p062-baseline.json" 2>&1)"; rc=$?
+if [ "$rc" -eq 2 ] && ! grep -qi "shell-idioms-guard: PASS" <<<"$out"; then
+  ok "TC-IDIOM-062: Rule S detector failure AFTER Rule J succeeds (stateful 2nd-call failure) exits 2, not a silent PASS"
+else
+  bad "TC-IDIOM-062: expected exit 2 and no PASS output for a Rule-S-only detector failure, got rc=$rc: $out"
+fi
+
+# TC-IDIOM-063: the detector-count pipeline exits 0 but emits EMPTY count
+# text (a corrupted `wc` build, distinct from TC-IDIOM-056/062's "awk exits
+# non-zero" shape) — the digits-only `case "$jq_n" in ''|*[!0-9]*)` re-check
+# must catch this, since pipefail's exit-status check alone would not (the
+# pipeline's last stage, `tr -d ' '`, still exits 0 on empty input).
+FAKE_WC_EMPTY_DIR="$WORK/fake-wc-empty-path"
+mkdir -p "$FAKE_WC_EMPTY_DIR"
+cat > "$FAKE_WC_EMPTY_DIR/wc" <<'EOF'
+#!/bin/bash
+# Simulate a corrupted wc: consume stdin, exit 0, print nothing.
+cat >/dev/null
+exit 0
+EOF
+chmod +x "$FAKE_WC_EMPTY_DIR/wc"
+for b in bash sed grep find sort cut mktemp cat awk tr jq git dirname; do
+  real="$(PATH="/usr/bin:/bin" command -v "$b" 2>/dev/null)"
+  [ -n "$real" ] && ln -sf "$real" "$FAKE_WC_EMPTY_DIR/$b"
+done
+
+R="$(fresh_root P063)"
+write_script "$R" foo/bar.sh <<'EOF'
+#!/bin/bash
+set -euo pipefail
+
+foo() {
+  x=$(jq -r 'select(.body | test("x"))')
+}
+EOF
+echo '{}' > "$WORK/p063-baseline.json"
+out="$(PATH="$FAKE_WC_EMPTY_DIR" bash "$CHECK" --scan-root "$R" --baseline "$WORK/p063-baseline.json" 2>&1)"; rc=$?
+if [ "$rc" -eq 2 ] && ! grep -qi "shell-idioms-guard: PASS" <<<"$out"; then
+  ok "TC-IDIOM-063: an empty detector-count output (wc exits 0, prints nothing) exits 2, not a silent PASS"
+else
+  bad "TC-IDIOM-063: expected exit 2 and no PASS output for an empty detector count, got rc=$rc: $out"
+fi
+
+# TC-IDIOM-064: the detector-count pipeline exits 0 but emits NON-NUMERIC
+# count text (a different corrupted-wc shape than TC-IDIOM-063's empty-output
+# case) — must also be caught by the digits-only re-check, not misread as a
+# count of 0 or silently ignored by an arithmetic comparison.
+FAKE_WC_GARBAGE_DIR="$WORK/fake-wc-garbage-path"
+mkdir -p "$FAKE_WC_GARBAGE_DIR"
+cat > "$FAKE_WC_GARBAGE_DIR/wc" <<'EOF'
+#!/bin/bash
+# Simulate a corrupted wc: consume stdin, exit 0, print non-numeric garbage.
+cat >/dev/null
+echo "not-a-number"
+exit 0
+EOF
+chmod +x "$FAKE_WC_GARBAGE_DIR/wc"
+for b in bash sed grep find sort cut mktemp cat awk tr jq git dirname; do
+  real="$(PATH="/usr/bin:/bin" command -v "$b" 2>/dev/null)"
+  [ -n "$real" ] && ln -sf "$real" "$FAKE_WC_GARBAGE_DIR/$b"
+done
+
+R="$(fresh_root P064)"
+write_script "$R" foo/bar.sh <<'EOF'
+#!/bin/bash
+set -euo pipefail
+
+foo() {
+  x=$(jq -r 'select(.body | test("x"))')
+}
+EOF
+echo '{}' > "$WORK/p064-baseline.json"
+out="$(PATH="$FAKE_WC_GARBAGE_DIR" bash "$CHECK" --scan-root "$R" --baseline "$WORK/p064-baseline.json" 2>&1)"; rc=$?
+if [ "$rc" -eq 2 ] && ! grep -qi "shell-idioms-guard: PASS" <<<"$out"; then
+  ok "TC-IDIOM-064: a non-numeric detector-count output (wc exits 0, prints garbage) exits 2, not a silent PASS"
+else
+  bad "TC-IDIOM-064: expected exit 2 and no PASS output for a non-numeric detector count, got rc=$rc: $out"
+fi
+
+# TC-IDIOM-065: regression pin for the round-1 review finding — a detected
+# regression (discover_counts already succeeded and found cur_jq > base_jq)
+# whose LATER diagnostic re-run (the second, separate awk invocation used
+# only to enumerate offending line numbers for the error message) itself
+# fails must still be reported as a failure, never a silent PASS. Targets
+# ONLY awk invocations carrying `-v rule_re=` (i.e. the two detector
+# functions, not field_or_zero's unrelated awk program) and fails the 3rd
+# such call: #1 = discover_counts' Rule J (real, finds 1 line), #2 =
+# discover_counts' Rule S (real, finds 0 lines, so no Rule S growth/re-run
+# below), #3 = the reconciliation loop's Rule J diagnostic re-run (fails).
+FAKE_AWK_DIR3="$WORK/fake-awk-detector-3rd-call-fails-path"
+mkdir -p "$FAKE_AWK_DIR3"
+REAL_AWK="$(PATH="/usr/bin:/bin" command -v awk)"
+DETECTOR_CALL_COUNT_FILE="$WORK/p065-detector-call-count"
+rm -f "$DETECTOR_CALL_COUNT_FILE"
+cat > "$FAKE_AWK_DIR3/awk" <<EOF
+#!/bin/bash
+is_detector=0
+for a in "\$@"; do
+  case "\$a" in
+    rule_re=*) is_detector=1 ;;
+  esac
+done
+if [ "\$is_detector" -eq 1 ]; then
+  n=0
+  [ -f "$DETECTOR_CALL_COUNT_FILE" ] && n="\$(cat "$DETECTOR_CALL_COUNT_FILE")"
+  n=\$((n + 1))
+  echo "\$n" > "$DETECTOR_CALL_COUNT_FILE"
+  if [ "\$n" -eq 3 ]; then
+    echo "awk: simulated failure on detector call #3 (diagnostic re-run)" >&2
+    exit 1
+  fi
+fi
+exec "$REAL_AWK" "\$@"
+EOF
+chmod +x "$FAKE_AWK_DIR3/awk"
+for b in bash sed grep find sort cut mktemp cat tr jq git dirname wc; do
+  real="$(PATH="/usr/bin:/bin" command -v "$b" 2>/dev/null)"
+  [ -n "$real" ] && ln -sf "$real" "$FAKE_AWK_DIR3/$b"
+done
+
+R="$(fresh_root P065)"
+write_script "$R" foo/bar.sh <<'EOF'
+#!/bin/bash
+set -euo pipefail
+
+foo() {
+  x=$(jq -r 'select(.body | test("x"))')
+}
+EOF
+echo '{}' > "$WORK/p065-baseline.json"
+out="$(PATH="$FAKE_AWK_DIR3" bash "$CHECK" --scan-root "$R" --baseline "$WORK/p065-baseline.json" 2>&1)"; rc=$?
+if [ "$rc" -ne 0 ] && ! grep -qi "shell-idioms-guard: PASS" <<<"$out"; then
+  ok "TC-IDIOM-065: a failing diagnostic re-run on an already-detected regression is reported as a failure, not a silent PASS — regression pin for the ignored-process-substitution-status bug"
+else
+  bad "TC-IDIOM-065: expected non-zero exit and no PASS output when the diagnostic re-run fails on a real regression, got rc=$rc: $out"
 fi
 
 # ---------------------------------------------------------------------------
