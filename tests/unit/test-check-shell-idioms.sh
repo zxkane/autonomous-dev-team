@@ -1237,7 +1237,13 @@ fi
 # TC-IDIOM-061: a *.sh path containing a literal tab is rejected loudly
 # (exit 2, naming the offending path) rather than silently corrupting the
 # tab-delimited "<file>\t<jq>\t<swallow>" count table and bypassing the
-# ratchet for that file.
+# ratchet for that file. The path must be SHELL-ESCAPED in the message
+# (review finding, round 1) — asserting merely on the static word "tab" in
+# the surrounding message text would pass even against the pre-fix raw
+# interpolation (that prose also contains "tab"), so this checks for the
+# `printf %q` escaped rendering of the literal tab byte itself
+# (`$'...\t...'`-style), which only appears if the path was actually
+# escaped rather than interpolated raw.
 R="$(fresh_root P061)"
 TAB_REL="$(printf 'foo/a\tb.sh')"
 write_script "$R" "$TAB_REL" <<'EOF'
@@ -1249,8 +1255,8 @@ foo() {
 }
 EOF
 out="$(bash "$CHECK" --scan-root "$R" --write-baseline 2>&1)"; rc=$?
-if [ "$rc" -eq 2 ] && grep -q 'tab' <<<"$out"; then
-  ok "TC-IDIOM-061: a .sh path containing a literal tab is rejected loudly (exit 2, error names the tab), never PASS"
+if [ "$rc" -eq 2 ] && grep -qF "\$'" <<<"$out"; then
+  ok "TC-IDIOM-061: a .sh path containing a literal tab is rejected loudly (exit 2, error names the SHELL-ESCAPED tab), never PASS"
 else
   bad "TC-IDIOM-061: expected exit 2 naming the tab, got rc=$rc: $out"
 fi
