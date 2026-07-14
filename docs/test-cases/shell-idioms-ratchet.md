@@ -208,6 +208,24 @@ fail-closed path).
 | TC-IDIOM-054 | The same simulated `mktemp` failure under `--require-trusted-ref` against a clean committed trusted baseline | exit 2 (infra error, not the strict-mode exit-1 fail-closed path), output never contains `shell-idioms-guard: PASS` |
 | TC-IDIOM-055 | A healthy `mktemp` (no fake `PATH`) against a clean tree | exit 0, output contains `shell-idioms-guard: PASS` — proves the fix does not regress the normal PASS path |
 
+## Group P — current-tree infra-failure hardening, issue #482 (TC-IDIOM-056..061)
+
+Three narrow infra-failure paths in the CURRENT-TREE scan side, split out from
+#480/INV-130's review loop at operator takeover (round-5 residual `[P2]`
+findings the severity ratchet should have demoted per INV-129's floor). All
+three share one shape: an unchecked command substitution in the
+discover/reconcile pipeline collapses to empty output on tool failure, and the
+surrounding logic reads "no rows" as "no violations."
+
+| ID | Scenario | Expected |
+|----|----------|----------|
+| TC-IDIOM-056 | A simulated `awk` failure (fake `PATH` stub exiting 1) during `discover_counts`' Rule J/S detector calls, default mode against a tree with a real violation | exit 2, output never contains `shell-idioms-guard: PASS` — regression pin (R1) |
+| TC-IDIOM-057 | The same simulated `awk` failure under `--write-baseline` | exit 2, never emits a baseline document (not even a falsely-clean `{}`) |
+| TC-IDIOM-058 | A healthy `awk` (no fake `PATH`) against a clean tree | exit 0 — proves the detector-failure check does not regress the normal PASS path |
+| TC-IDIOM-059 | A fake `cut` that fails only on its FIRST invocation (deterministically simulating a DISC_TMP read failure, since DISC_TMP is always cut first in the reconciliation phase) during the file-union build, against a tree with a real violation | exit 2, output never contains `shell-idioms-guard: PASS` — regression pin (R2) for the combined-`{ cut; cut; }`-group bug, where the group's exit status is only its LAST command's and silently absorbed a failing first `cut` |
+| TC-IDIOM-060 | A healthy `cut` (no fake `PATH`) against a tree matching its baseline | exit 0 — proves the two-separate-cut rewrite does not regress the normal reconciliation path |
+| TC-IDIOM-061 | A `.sh` fixture path containing a literal tab byte, with a real violation inside it | exit 2, error names the tab — rejected loudly (R3) rather than corrupting the tab-delimited count table and silently bypassing the ratchet for that file |
+
 ## Acceptance criteria for this change (pre-merge verifiable)
 
 - [ ] `check-shell-idioms.sh --write-baseline` run against the current tree
