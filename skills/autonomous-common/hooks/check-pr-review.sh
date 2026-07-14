@@ -29,17 +29,17 @@ fi
 
 # Block the push
 cat >&2 <<'EOF'
-## ⛔ BLOCKED - Run PR Review First
+## BLOCKED - Run PR Review First
 
-Before pushing, you must complete a code review using the PR review toolkit.
+Before pushing, you must complete an independent review of the full branch diff.
 The mark is bound to the current HEAD commit: any new commit invalidates it,
 so you must re-run the review after each commit (issue #48).
 
 ### Required Steps:
-1. Run the PR review command:
-   ```
-   /pr-review-toolkit:review-pr
-   ```
+1. Use the native option for this client:
+   - Codex: spawn a reviewer subagent or run `codex review --base <base-branch>`.
+   - Claude Code: run `/pr-review-toolkit:review-pr`.
+   - Other clients: use an available review agent or review the diff manually.
 
 2. Resolve all Critical/High/Medium severity findings:
    - 🔴 Critical/Severe: MUST fix
@@ -63,7 +63,7 @@ so you must re-run the review after each commit (issue #48).
 - Test coverage gaps
 - Security vulnerabilities
 
-### Why This Is Required (CLAUDE.md Step 6):
+### Why This Is Required:
 Per development workflow, code review must be completed before pushing.
 
 **To bypass (emergency only):** Use `--no-verify` flag and document the reason

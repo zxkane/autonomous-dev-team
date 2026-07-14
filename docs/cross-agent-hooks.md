@@ -4,7 +4,11 @@ Reference for installing the autonomous-dev-team workflow hooks across coding ag
 
 ## Canonical hook intent (agent-agnostic)
 
-The hooks themselves live in `skills/autonomous-common/hooks/` and are agent-portable: they read JSON from stdin, exit `0` to allow or `2` to block, and use `$CLAUDE_PROJECT_DIR` to find scripts. This contract works on every agent in the table below.
+The hooks themselves live in `skills/autonomous-common/hooks/` and are
+agent-portable: they read JSON from stdin and exit `0` to allow or `2` to
+block. Installers render agent-specific command paths; shared scripts resolve
+the repository from the hook payload or git when an agent does not provide
+`$CLAUDE_PROJECT_DIR`.
 
 What differs between agents is **how to declare which script runs when** — i.e. the per-agent config file path, schema, event names, and tool-name matchers.
 
@@ -18,7 +22,7 @@ What differs between agents is **how to declare which script runs when** — i.e
 | **Cursor** | `.cursor/hooks.json` | Claude-style, camelCase events, `version: 1` envelope | `Shell` (or pipe regex on cmd) | `2` | `install-cursor-hooks.sh` (PR-11b) |
 | **Kiro CLI / Amazon Q** | `.kiro/agents/<name>.json` | Agent definition; camelCase events; `timeout_ms` (ms not seconds) | `execute_bash`, `fs_write` (Write+Edit unified) | `2` | `install-kiro-hooks.sh` (PR-11b) |
 | **Gemini CLI** ⚠️ retired | `.gemini/settings.json` | `BeforeTool`/`AfterTool` events; provides `$CLAUDE_PROJECT_DIR` env compat alias | `run_shell_command`, `write_file`, `replace` | `2` | `install-gemini-hooks.sh` (PR-11b) — kept for historical installs; Gemini CLI has been discontinued upstream, use Antigravity CLI (`agy`) instead |
-| **Codex CLI** | `.codex/hooks.json` + `[features]codex_hooks=true` in `config.toml` | Claude-style (modeled verbatim) | `Bash`, `Write`, `Edit` (undocumented but inferred) | `2` | `install-codex-hooks.sh` (PR-11b) |
+| **Codex CLI** | `.codex/hooks.json` + `[features] hooks = true` in `config.toml` | Official Claude-compatible event schema | `Bash`, `apply_patch` (`Write`/`Edit` aliases are also supported) | `2` | `install-codex-hooks.sh` |
 | **Windsurf** | `.windsurf/hooks.json` | snake_case events that fold matcher info; **no matcher field** on entries | event encodes the kind: `pre_run_command` (Bash) / `pre_write_code` (Write+Edit merged) / etc. | `2` | `install-windsurf-hooks.sh` (PR-11c) |
 | **Kimi CLI** | `~/.kimi/config.toml` (or `.kimi/config.toml` with `--project`) | TOML, `[[hooks]]` array of tables | exact / regex (`RunShell`, `WriteFile`, `StrReplaceFile`) | `2` | `install-kimi-hooks.sh` (PR-11c) |
 
@@ -45,7 +49,8 @@ bash .claude/skills/autonomous-common/scripts/install-kiro-hooks.sh
 # Gemini CLI (retired upstream — see the matrix note above; use Antigravity instead)
 bash .claude/skills/autonomous-common/scripts/install-gemini-hooks.sh
 
-# Codex CLI (also enables [features] codex_hooks = true in .codex/config.toml)
+# Codex CLI (also writes canonical [features] hooks = true)
+# Requires Python 3.11+ for standard-library tomllib validation.
 bash .claude/skills/autonomous-common/scripts/install-codex-hooks.sh
 
 # Windsurf (folds Bash/Write/Edit matchers into pre_run_command / pre_write_code events)
@@ -60,7 +65,15 @@ Each installer is idempotent and preserves any other top-level keys you have in 
 ## Caveats
 
 - **Antigravity**: Google has not documented hook support. Community evidence shows the Claude Code schema works in practice, but it could change without notice. Treat as best-effort.
-- **Codex CLI** (PR-11b): hook support is behind an experimental feature flag (`codex_hooks = true` in `~/.codex/config.toml`). Tool-name matchers like `Bash`, `Write` are modeled on Claude Code but not officially documented.
+- **Codex CLI**: hooks are stable and enabled by default in current releases;
+  the installer records canonical `[features] hooks = true`.
+  `codex_hooks` remains a deprecated alias and is migrated only when doing so
+  cannot override an explicit disable. The installer requires Python 3.11+
+  (`tomllib`) and refuses noncanonical TOML forms when migration would require
+  unsafe textual rewriting. Project hook layers and each changed hook
+  definition must be trusted with `/hooks`. Vetted unattended automation can
+  pass `--dangerously-bypass-hook-trust`. See the official
+  [Codex hooks documentation](https://developers.openai.com/codex/hooks/).
 - **Windsurf**: no per-tool matcher field — `pre_run_command` fires for every shell command, `pre_write_code` for every file write/edit. Hooks must self-filter inside the script (e.g., `block-push-to-main.sh` already inspects the command). The installer folds Claude's `(event, matcher)` pairs into Windsurf's tool-specific events.
 - **Kimi CLI**: TOML config, beta feature upstream. Tool names differ (`WriteFile`/`StrReplaceFile`/`RunShell` rather than Claude's `Write`/`Edit`/`Bash`). Default install target is user-level (`~/.kimi/config.toml`); `--project` writes `.kimi/config.toml` (experimental — Kimi may only read user-level).
 
@@ -72,10 +85,14 @@ Scripts under `skills/autonomous-common/hooks/` use the canonical contract:
 stdin: {"hook_event_name": "...", "tool_name": "...", "tool_input": {...}, "cwd": "...", ...}
 exit 0: allow (stdout added to agent context)
 exit 2: block (stderr fed back to LLM as the reason)
-env:   $CLAUDE_PROJECT_DIR points at the repo root
+root:  use the agent-specific rendered command or git worktree root
 ```
 
-This works on every agent in the matrix. **Gemini CLI explicitly provides `$CLAUDE_PROJECT_DIR`** as a Claude Code compatibility alias. The other agents either provide an equivalent (e.g. `CURSOR_PROJECT_DIR`) or run hooks with `cwd = project root` so the relative path inside `tool_input.cwd` works.
+For edit-sensitive hooks, Claude `Write`/`Edit` provides
+`tool_input.file_path`. Codex provides `tool_name: "apply_patch"` and the
+structured patch in `tool_input.command`; `parse_edit_file_operations`
+normalizes both forms into `operation<TAB>path` records.
+`parse_edit_file_paths` remains the path-only compatibility projection.
 
 ## Adding a new agent
 

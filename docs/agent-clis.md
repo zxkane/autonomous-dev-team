@@ -20,6 +20,27 @@ adapters; the others run through the generic `<cli> -p <prompt>` fallback.
 Any CLI not listed should still work if it accepts a `-p <prompt>`
 non-interactive flag — the abstraction layer is intentionally permissive.
 
+## Canonical Codex-dev / Claude-review topology
+
+The first-class mixed setup is `AGENT_DEV_CMD=codex, AGENT_REVIEW_CMD=claude`:
+
+```bash
+AGENT_CMD="claude"
+AGENT_DEV_CMD="codex"
+AGENT_REVIEW_CMD="claude"
+AGENT_DEV_LAUNCHER=""
+AGENT_REVIEW_AGENTS="" # one wrapper-assigned Claude verdict session
+```
+
+Use `AGENT_REVIEW_LAUNCHER` only when the Claude review process needs a
+Claude-specific bridge; leave the dev launcher empty so it cannot wrap Codex.
+The wrappers rebind the selected CLI and launcher per side before dispatch.
+
+Codex/Claude internal subagents, `AGENT_REVIEW_AGENTS`, and `REVIEW_BOTS` are
+three separate mechanisms: internal subagents are advisory workers within one
+session, `AGENT_REVIEW_AGENTS` are independent verdict-reaching CLI sessions,
+and `REVIEW_BOTS` are external code-host reviewers whose comments are evidence.
+
 > **Gemini CLI is retired upstream** and no longer has an adapter row here.
 > Antigravity CLI (`agy`) is the replacement for Gemini-family models — it
 > ships its own conversation-UUID session model (grepped from `--log-file`,

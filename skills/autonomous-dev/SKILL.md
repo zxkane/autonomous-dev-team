@@ -102,7 +102,7 @@ Triggered when running inside the `scripts/autonomous-dev.sh` wrapper. The workf
 
 ## Cross-Platform Notes
 
-This skill works across IDEs that support skills.sh. Map generic verbs in this doc to your IDE's tools (Claude Code's Bash → terminal in Cursor, etc.). Hook-based enforcement is available on Claude Code and Kiro CLI; on Cursor / Windsurf, follow each step manually — the discipline is the same.
+This skill works across IDEs that support skills.sh. Map generic verbs in this doc to your IDE's tools (Claude Code's Bash → terminal in Cursor, etc.). Hook-based enforcement is available on Claude Code, Codex CLI, and Kiro CLI; on clients without installed hooks, follow each step manually — the discipline is the same.
 
 For the full IDE table + verb-to-tool map, see [`references/cross-platform.md`](references/cross-platform.md).
 
@@ -250,7 +250,10 @@ Run your project's build/test suite as **one synchronous command with a generous
 
 ## Step 6: Code Simplification
 
-1. Use a subagent if your IDE supports them (e.g., `code-simplifier:code-simplifier`), otherwise review the code manually for unnecessary complexity.
+1. Run an independent simplification pass using the strongest native option:
+   - **Codex CLI**: ask Codex to spawn a native reviewer subagent focused on unnecessary complexity, duplication, and repository conventions. Keep the subagent advisory; the main session applies any changes.
+   - **Claude Code**: use `code-simplifier:code-simplifier` when the plugin is installed.
+   - **Other clients**: use an available review subagent or perform the same review manually.
 2. Address simplification suggestions.
 3. Mark complete (if hooks are installed):
    ```bash
@@ -322,7 +325,10 @@ glab mr update {mr_number} --description "$(cat /tmp/pr_body.md)"
 
 ## Step 8: PR Review Agent (MANDATORY)
 
-1. Use a subagent if your IDE supports them (e.g., `/pr-review-toolkit:review-pr`), otherwise perform a self-review against the PR diff.
+1. Run an independent dev-side review:
+   - **Codex CLI**: use a native reviewer subagent, or run `codex review --uncommitted` before the first commit and `codex review --base <base-branch>` for the committed branch diff.
+   - **Claude Code**: use `/pr-review-toolkit:review-pr` when the plugin is installed.
+   - **Other clients**: use an available review agent or review the complete diff manually.
 2. Address findings by severity:
    - Critical/Severe: Must fix
    - High: Must fix

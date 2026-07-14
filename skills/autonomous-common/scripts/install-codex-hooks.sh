@@ -2,21 +2,16 @@
 # install-codex-hooks.sh — bootstrap project-scoped OpenAI Codex CLI hooks
 # from the canonical template.
 #
-# Codex CLI's hook system is modeled directly on Claude Code's
-# (per github.com/openai/codex codex-rs/hooks/) and accepts the same
-# event names + matcher field. The differences:
+# Codex accepts the same hook event structure as Claude Code, with two
+# project-specific adaptations:
 #
 #   1. Hooks live in `.codex/hooks.json` (NOT `.claude/settings.json`).
 #      The file is hooks-only — no other top-level keys.
-#   2. The feature is gated behind `[features] codex_hooks = true` in
-#      `~/.codex/config.toml` or the project's `.codex/config.toml`.
-#      We toggle the project-level flag here.
+#   2. The canonical feature key is `[features] hooks = true`.
 #
-# Caveat: Codex hook support is experimental upstream. The exact tool-
-# name matchers ("Bash", "Write", "Edit") are modeled on Claude Code's
-# but not officially documented in the Codex docs at
-# developers.openai.com/codex/config-advanced. Verify your first hook
-# fires before relying on the install.
+# Codex project hooks and each changed hook definition must be trusted before
+# they run. Use /hooks interactively, or --dangerously-bypass-hook-trust only
+# in automation that vets the installed hook source independently.
 #
 # Usage:
 #   bash skills/autonomous-common/scripts/install-codex-hooks.sh
@@ -44,6 +39,16 @@ source "$SCRIPT_DIR/lib-installer.sh"
 
 require_jq
 
+require_tomllib() {
+  if ! command -v python3 >/dev/null 2>&1 ||
+     ! python3 -c 'import tomllib' >/dev/null 2>&1; then
+    echo "ERROR: Python 3.11+ with the standard-library tomllib module is required." >&2
+    exit 1
+  fi
+}
+
+require_tomllib
+
 TEMPLATE="$SCRIPT_DIR/claude-settings.template.json"
 if [[ ! -f "$TEMPLATE" ]]; then
   echo "ERROR: canonical template not found at: $TEMPLATE" >&2
@@ -54,88 +59,550 @@ target_dir="$(project_root)/.codex"
 target="$target_dir/hooks.json"
 config_toml="$target_dir/config.toml"
 
-# Codex's hooks.json is hooks-only (same shape as Antigravity). Use the
-# hooks-only writer.
-write_hooks_only_settings "$TEMPLATE" "$target"
-
-# Toggle the [features] codex_hooks = true flag. This is required
-# upstream; without it, the hooks.json file is ignored.
-#
-# TOML constraint (PR-11b code review C1): defining `[features]` more
-# than once is invalid TOML — the Rust `toml` crate that Codex uses
-# rejects the entire config. So we MUST NOT blindly append a second
-# `[features]` block. The strategy:
-#
-#   1. No file → create a fresh one with a single `[features]` block.
-#   2. File has `codex_hooks = true` already (anywhere) → no-op.
-#   3. File has `codex_hooks = false` → refuse + ask operator to fix.
-#      (We assume `false` is intentional; flipping it would surprise.)
-#   4. File has a `[features]` section → insert `codex_hooks = true` as
-#      the first line of that section.
-#   5. File has no `[features]` section → append a new one at EOF.
+if [[ -L "$target_dir" ]]; then
+  echo "ERROR: refusing to install through symbolic-link directory: $target_dir" >&2
+  exit 1
+fi
+if [[ -e "$target_dir" && ! -d "$target_dir" ]]; then
+  echo "ERROR: Codex config path exists but is not a directory: $target_dir" >&2
+  exit 1
+fi
 mkdir -p "$target_dir"
 
-toggle_codex_hooks_flag() {
-  local file="$1"
-
-  if [[ ! -f "$file" ]]; then
-    cat > "$file" <<'EOF'
-# Created by install-codex-hooks.sh — required for hooks.json to take effect.
-[features]
-codex_hooks = true
-EOF
-    echo "Created: $file" >&2
-    return 0
-  fi
-
-  # Already enabled? (No-op.)
-  if grep -qE '^[[:space:]]*codex_hooks[[:space:]]*=[[:space:]]*true' "$file"; then
-    echo "Note: codex_hooks already enabled in $file" >&2
-    return 0
-  fi
-
-  # Explicitly disabled? Refuse — operator likely set it on purpose.
-  if grep -qE '^[[:space:]]*codex_hooks[[:space:]]*=[[:space:]]*false' "$file"; then
-    echo "ERROR: $file contains 'codex_hooks = false'. Hooks would not fire." >&2
-    echo "       Edit that line to 'true' (or remove it) and re-run." >&2
+_require_regular_destination() {
+  local path="$1"
+  if [[ -L "$path" ]]; then
+    echo "ERROR: refusing to replace symbolic-link destination: $path" >&2
     return 1
   fi
-
-  # Insert into existing [features] section, or append a new section.
-  if grep -qE '^[[:space:]]*\[features\][[:space:]]*$' "$file"; then
-    # Use awk to insert `codex_hooks = true` as the first line after
-    # the `[features]` header. Robust against trailing whitespace and
-    # blank lines.
-    local tmp
-    tmp=$(mktemp)
-    # shellcheck disable=SC2064
-    trap "rm -f '$tmp'" RETURN
-    awk '
-      BEGIN { inserted = 0 }
-      /^[[:space:]]*\[features\][[:space:]]*$/ {
-        print
-        if (!inserted) {
-          print "codex_hooks = true  # added by install-codex-hooks.sh"
-          inserted = 1
-        }
-        next
-      }
-      { print }
-    ' "$file" > "$tmp"
-    mv "$tmp" "$file"
-    trap - RETURN
-    echo "Updated: $file (inserted codex_hooks = true into existing [features] section)" >&2
-  else
-    {
-      printf '\n# Added by install-codex-hooks.sh — required for hooks.json to take effect.\n'
-      printf '[features]\n'
-      printf 'codex_hooks = true\n'
-    } >> "$file"
-    echo "Updated: $file (appended new [features] section)" >&2
+  if [[ -e "$path" && ! -f "$path" ]]; then
+    echo "ERROR: destination exists but is not a regular file: $path" >&2
+    return 1
   fi
 }
 
-toggle_codex_hooks_flag "$config_toml" || exit 1
+# Parse the complete TOML document before making any textual change. Python's
+# standard-library parser catches quoted/dotted keys, arrays of tables,
+# multiline strings, and duplicate definitions that a line parser cannot.
+_analyze_codex_config() {
+  python3 - "$1" "${2:-$1}" <<'PY'
+import json
+import sys
+import tomllib
+
+path = sys.argv[1]
+display_path = sys.argv[2]
+try:
+    with open(path, "rb") as stream:
+        config = tomllib.load(stream)
+except (OSError, tomllib.TOMLDecodeError) as exc:
+    print(f"ERROR: cannot parse {display_path}: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+
+if "features" not in config:
+    print(json.dumps({"features_present": False, "hooks": None, "codex_hooks": None}))
+    raise SystemExit(0)
+
+features = config["features"]
+if not isinstance(features, dict):
+    print(f"ERROR: {display_path} must define features as a TOML table", file=sys.stderr)
+    raise SystemExit(1)
+
+values = {}
+for key in ("hooks", "codex_hooks"):
+    value = features.get(key)
+    if value is not None and type(value) is not bool:
+        print(f"ERROR: [features].{key} must be boolean in {display_path}", file=sys.stderr)
+        raise SystemExit(1)
+    values[key] = value
+
+print(json.dumps({"features_present": True, **values}))
+PY
+}
+
+_canonical_line_count() {
+  local file="$1" kind="$2" pattern
+  case "$kind" in
+    header) pattern='^[[:space:]]*\[[[:space:]]*features[[:space:]]*\][[:space:]]*(#.*)?$' ;;
+    legacy) pattern='^[[:space:]]*codex_hooks[[:space:]]*=[[:space:]]*(true|false)[[:space:]]*(#.*)?$' ;;
+    *) return 2 ;;
+  esac
+  # grep -c prints the desired zero count but exits 1 when no line matches.
+  grep -cE "$pattern" "$file" 2>/dev/null || true
+}
+
+# Comment-preserving edits are intentionally limited to one ordinary
+# [features] table with bare keys. tomllib still validates every other shape;
+# valid but noncanonical forms are refused rather than rewritten unsafely.
+_require_mutable_feature_table() {
+  local file="$1" require_legacy="${2:-0}" display_file="${3:-$1}"
+  local header_count legacy_count
+
+  if grep -qE "'''|\"\"\"" "$file"; then
+    echo "ERROR: $display_file uses multiline TOML strings; automatic [features] edits are disabled." >&2
+    return 1
+  fi
+  if grep -qE "^[[:space:]]*\\[\\[?[^]]*['\"]" "$file"; then
+    echo "ERROR: $display_file uses quoted TOML table headers; automatic [features] edits are disabled." >&2
+    return 1
+  fi
+
+  header_count=$(_canonical_line_count "$file" "header")
+  if (( header_count != 1 )); then
+    echo "ERROR: $display_file does not use one canonical [features] table." >&2
+    echo "       Normalize that table to a bare [features] header, then re-run." >&2
+    return 1
+  fi
+
+  if (( require_legacy == 1 )); then
+    legacy_count=$(_canonical_line_count "$file" "legacy")
+    if (( legacy_count != 1 )); then
+      echo "ERROR: $display_file uses a noncanonical codex_hooks key representation." >&2
+      echo "       Replace it with a bare boolean key in [features], then re-run." >&2
+      return 1
+    fi
+  fi
+}
+
+_rewrite_staged_config() {
+  local file="$1" action="$2"
+  local tmp
+  tmp=$(mktemp "${file}.next.XXXXXX")
+
+  if ! awk -v action="$action" '
+    function trim(value) {
+      sub(/^[[:space:]]+/, "", value)
+      sub(/[[:space:]]+$/, "", value)
+      return value
+    }
+    {
+      raw = $0
+      comparable = raw
+      sub(/[[:space:]]*#.*/, "", comparable)
+      comparable = trim(comparable)
+
+      if (comparable ~ /^\[\[.*\]\]$/) {
+        section = "other"
+        print raw
+        next
+      }
+
+      if (comparable ~ /^\[[^]]+\]$/) {
+        section = (comparable ~ /^\[[[:space:]]*features[[:space:]]*\]$/) ? "features" : "other"
+        print raw
+        if (section == "features" && action == "insert") {
+          print "hooks = true  # added by install-codex-hooks.sh"
+        }
+        next
+      }
+
+      if (section == "features" &&
+          comparable ~ /^codex_hooks[[:space:]]*=/) {
+        if (action == "migrate") {
+          sub(/codex_hooks/, "hooks", raw)
+          print raw
+        } else if (action != "drop-legacy") {
+          print raw
+        }
+        next
+      }
+
+      print raw
+    }
+    END {
+      if (action == "append") {
+        print ""
+        print "# Added by install-codex-hooks.sh."
+        print "[features]"
+        print "hooks = true"
+      }
+    }
+  ' "$file" > "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+
+  # Keep the staged file's mode; replacing it with the umask-created temp file
+  # could widen permissions inherited from a private config.
+  if ! cat "$tmp" > "$file"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  rm -f "$tmp"
+}
+
+_stage_codex_config() {
+  local file="$1" staged="$2" display_file="${3:-$1}"
+
+  if [[ ! -f "$file" ]]; then
+    cat > "$staged" <<'EOF'
+# Created by install-codex-hooks.sh.
+[features]
+hooks = true
+EOF
+    _analyze_codex_config "$staged" >/dev/null
+    return 0
+  fi
+
+  local analysis features_present canonical legacy
+  if ! analysis=$(_analyze_codex_config "$file" "$display_file"); then
+    return 1
+  fi
+  features_present=$(jq -r '.features_present' <<<"$analysis")
+  canonical=$(jq -r 'if .hooks == null then "" else (.hooks | tostring) end' <<<"$analysis")
+  legacy=$(jq -r 'if .codex_hooks == null then "" else (.codex_hooks | tostring) end' <<<"$analysis")
+
+  if [[ -n "$canonical" && -n "$legacy" && "$canonical" != "$legacy" ]]; then
+    echo "ERROR: $display_file has conflicting hooks=$canonical and codex_hooks=$legacy." >&2
+    echo "       Resolve the conflict explicitly, then re-run." >&2
+    return 1
+  fi
+
+  if [[ "$canonical" == "false" || "$legacy" == "false" ]]; then
+    echo "ERROR: $display_file explicitly disables Codex hooks." >&2
+    echo "       Preserve that choice, or set the relevant feature key to true and re-run." >&2
+    return 1
+  fi
+
+  cp -p "$file" "$staged"
+
+  if [[ "$canonical" == "true" && "$legacy" == "true" ]]; then
+    _require_mutable_feature_table "$file" 1 "$display_file" || return 1
+    _rewrite_staged_config "$staged" "drop-legacy"
+  elif [[ "$legacy" == "true" ]]; then
+    _require_mutable_feature_table "$file" 1 "$display_file" || return 1
+    _rewrite_staged_config "$staged" "migrate"
+  elif [[ "$canonical" == "true" ]]; then
+    :
+  elif [[ "$features_present" == "true" ]]; then
+    _require_mutable_feature_table "$file" 0 "$display_file" || return 1
+    _rewrite_staged_config "$staged" "insert"
+  else
+    _rewrite_staged_config "$staged" "append"
+  fi
+
+  _analyze_codex_config "$staged" >/dev/null
+}
+
+render_codex_hooks() {
+  local template="$1" output="$2"
+  if ! jq '
+    ._managed_note = "This hooks block is maintained by skills/autonomous-common/scripts/install-codex-hooks.sh. Hand-edits inside this block are overwritten on the next install."
+    | .hooks.PreToolUse as $pre
+    | ([
+        $pre[]
+        | select(.matcher == "Write" or .matcher == "Edit")
+        | .hooks[]
+      ] | unique_by(.command)) as $edit_hooks
+    | .hooks.PreToolUse = (
+        [$pre[] | select(.matcher != "Write" and .matcher != "Edit")]
+        + (if ($edit_hooks | length) > 0
+           then [{matcher: "^apply_patch$", hooks: $edit_hooks}]
+           else []
+           end)
+      )
+    | (.hooks[][] | .hooks[] | .command) |=
+        sub("^\"\\$CLAUDE_PROJECT_DIR\"/hooks/";
+            "\"$(git rev-parse --show-toplevel)\"/hooks/")
+  ' "$template" > "$output"; then
+    echo "ERROR: failed to render Codex hook configuration" >&2
+    return 1
+  fi
+
+  if ! jq -e '
+    ([.hooks.PreToolUse[] | select(.matcher == "^apply_patch$")] | length == 1)
+    and ([.. | strings | select(contains("$CLAUDE_PROJECT_DIR"))] | length == 0)
+  ' "$output" >/dev/null; then
+    echo "ERROR: rendered Codex hooks failed validation" >&2
+    return 1
+  fi
+}
+
+_CODEX_TXN_ACTIVE=0
+_CODEX_TXN_CONFIG_CHANGED=0
+_CODEX_TXN_CONFIG_EXISTED=0
+_CODEX_TXN_CONFIG_BACKUP=""
+_CODEX_TXN_CONFIG_PATH=""
+_CODEX_TXN_HOOKS_CHANGED=0
+_CODEX_TXN_HOOKS_EXISTED=0
+_CODEX_TXN_HOOKS_BACKUP=""
+_CODEX_TXN_HOOKS_PATH=""
+_CODEX_TXN_PENDING_CONFIG=""
+_CODEX_TXN_PENDING_HOOKS=""
+_CODEX_TXN_STAGED_CONFIG=""
+_CODEX_TXN_STAGED_HOOKS=""
+_CODEX_TXN_REPLACEMENTS_STARTED=0
+
+_restore_codex_destination() {
+  local backup="$1" path="$2"
+  local restore_tmp="${path}.rollback.$$"
+
+  rm -f "$restore_tmp"
+  if ! cp -p "$backup" "$restore_tmp"; then
+    rm -f "$restore_tmp"
+    return 1
+  fi
+  if ! mv "$restore_tmp" "$path"; then
+    rm -f "$restore_tmp"
+    return 1
+  fi
+}
+
+_rollback_codex_destination() {
+  local path="$1" original="$2" existed="$3" installed="$4"
+
+  if (( existed == 1 )); then
+    if _destination_matches_snapshot "$path" "$original" 1; then
+      return 0
+    fi
+    if ! _destination_matches_snapshot "$path" "$installed" 1; then
+      echo "ERROR: refusing to overwrite a concurrent edit at $path during rollback" >&2
+      return 1
+    fi
+    _restore_codex_destination "$original" "$path"
+    return
+  fi
+
+  if [[ ! -e "$path" && ! -L "$path" ]]; then
+    return 0
+  fi
+  if ! _destination_matches_snapshot "$path" "$installed" 1; then
+    echo "ERROR: refusing to remove a concurrent file at $path during rollback" >&2
+    return 1
+  fi
+  rm -f "$path"
+}
+
+_rollback_codex_transaction() {
+  (( _CODEX_TXN_ACTIVE == 1 )) || return 0
+  local rollback_failed=0
+
+  rm -f "$_CODEX_TXN_PENDING_CONFIG" "$_CODEX_TXN_PENDING_HOOKS"
+
+  if (( _CODEX_TXN_REPLACEMENTS_STARTED == 1 )); then
+    if (( _CODEX_TXN_HOOKS_CHANGED == 1 )) &&
+       ! _rollback_codex_destination \
+         "$_CODEX_TXN_HOOKS_PATH" "$_CODEX_TXN_HOOKS_BACKUP" \
+         "$_CODEX_TXN_HOOKS_EXISTED" "$_CODEX_TXN_STAGED_HOOKS"; then
+      echo "ERROR: failed to restore $_CODEX_TXN_HOOKS_PATH" >&2
+      rollback_failed=1
+    fi
+
+    if (( _CODEX_TXN_CONFIG_CHANGED == 1 )) &&
+       ! _rollback_codex_destination \
+         "$_CODEX_TXN_CONFIG_PATH" "$_CODEX_TXN_CONFIG_BACKUP" \
+         "$_CODEX_TXN_CONFIG_EXISTED" "$_CODEX_TXN_STAGED_CONFIG"; then
+      echo "ERROR: failed to restore $_CODEX_TXN_CONFIG_PATH" >&2
+      rollback_failed=1
+    fi
+  fi
+
+  _CODEX_TXN_ACTIVE=0
+  return "$rollback_failed"
+}
+
+_cancel_codex_transaction() {
+  local rollback_failed=0
+  if ! _rollback_codex_transaction; then
+    rollback_failed=1
+  fi
+  trap - HUP INT TERM
+  return "$rollback_failed"
+}
+
+_abort_codex_transaction() {
+  local exit_code="$1"
+  trap - HUP INT TERM
+  echo "ERROR: hook installation interrupted; rolling back config and hooks" >&2
+  if ! _rollback_codex_transaction; then
+    echo "ERROR: interrupted installation could not be fully rolled back" >&2
+  fi
+  exit "$exit_code"
+}
+
+_file_mode() {
+  stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null
+}
+
+_destination_matches_snapshot() {
+  local path="$1" snapshot="$2" existed="$3"
+  if (( existed == 1 )); then
+    [[ -f "$path" && ! -L "$path" ]] &&
+      cmp -s "$snapshot" "$path" &&
+      [[ "$(_file_mode "$snapshot")" == "$(_file_mode "$path")" ]]
+  else
+    [[ ! -e "$path" && ! -L "$path" ]]
+  fi
+}
+
+_commit_codex_files() {
+  local staged_config="$1" config="$2" staged_hooks="$3" hooks="$4"
+  local expected_config="$5" config_existed="$6"
+  local expected_hooks="$7" hooks_existed="$8"
+  local config_changed=1 hooks_changed=1
+  local config_backup="" hooks_backup=""
+  local pending_config="${config}.pending.$$"
+  local pending_hooks="${hooks}.pending.$$"
+
+  (( config_existed == 1 )) &&
+    cmp -s "$staged_config" "$expected_config" &&
+    config_changed=0
+  (( hooks_existed == 1 )) &&
+    cmp -s "$staged_hooks" "$expected_hooks" &&
+    hooks_changed=0
+
+  if ! _destination_matches_snapshot "$config" "$expected_config" "$config_existed" ||
+     ! _destination_matches_snapshot "$hooks" "$expected_hooks" "$hooks_existed"; then
+    echo "ERROR: Codex config changed while hooks were being rendered; refusing to overwrite it." >&2
+    return 1
+  fi
+
+  _CODEX_TXN_ACTIVE=1
+  _CODEX_TXN_CONFIG_CHANGED=$config_changed
+  _CODEX_TXN_CONFIG_EXISTED=$config_existed
+  _CODEX_TXN_CONFIG_PATH=$config
+  _CODEX_TXN_HOOKS_CHANGED=$hooks_changed
+  _CODEX_TXN_HOOKS_EXISTED=$hooks_existed
+  _CODEX_TXN_HOOKS_PATH=$hooks
+  _CODEX_TXN_PENDING_CONFIG=$pending_config
+  _CODEX_TXN_PENDING_HOOKS=$pending_hooks
+  _CODEX_TXN_STAGED_CONFIG=$staged_config
+  _CODEX_TXN_STAGED_HOOKS=$staged_hooks
+  _CODEX_TXN_REPLACEMENTS_STARTED=0
+  trap '_abort_codex_transaction 129' HUP
+  trap '_abort_codex_transaction 130' INT
+  trap '_abort_codex_transaction 143' TERM
+
+  # Copy across filesystem boundaries before touching either destination.
+  # The final moves stay within target_dir, so each individual replacement is
+  # atomic and the config can be rolled back if the hooks replacement fails.
+  if (( config_changed == 1 )) && ! cp -p "$staged_config" "$pending_config"; then
+    echo "ERROR: failed to stage $config" >&2
+    _cancel_codex_transaction
+    return 1
+  fi
+  if (( hooks_changed == 1 )) && ! cp -p "$staged_hooks" "$pending_hooks"; then
+    echo "ERROR: failed to stage $hooks" >&2
+    _cancel_codex_transaction
+    return 1
+  fi
+
+  if (( config_changed == 1 )) && [[ -f "$config" ]]; then
+    config_backup=$(backup_path "$config")
+    if ! cp -p "$config" "$config_backup" ||
+       ! cmp -s "$expected_config" "$config_backup"; then
+      echo "ERROR: $config changed before backup; refusing to overwrite it." >&2
+      _cancel_codex_transaction
+      return 1
+    fi
+  fi
+  if (( hooks_changed == 1 )) && [[ -f "$hooks" ]]; then
+    hooks_backup=$(backup_path "$hooks")
+    if ! cp -p "$hooks" "$hooks_backup" ||
+       ! cmp -s "$expected_hooks" "$hooks_backup"; then
+      echo "ERROR: $hooks changed before backup; refusing to overwrite it." >&2
+      _cancel_codex_transaction
+      return 1
+    fi
+  fi
+
+  if ! _destination_matches_snapshot "$config" "$expected_config" "$config_existed" ||
+     ! _destination_matches_snapshot "$hooks" "$expected_hooks" "$hooks_existed"; then
+    echo "ERROR: Codex config changed before replacement; refusing to overwrite it." >&2
+    _cancel_codex_transaction
+    return 1
+  fi
+
+  _CODEX_TXN_CONFIG_BACKUP=$config_backup
+  _CODEX_TXN_HOOKS_BACKUP=$hooks_backup
+  _CODEX_TXN_REPLACEMENTS_STARTED=1
+
+  if ! _destination_matches_snapshot "$config" "$expected_config" "$config_existed"; then
+    echo "ERROR: $config changed immediately before replacement; refusing to overwrite it." >&2
+    _cancel_codex_transaction
+    return 1
+  fi
+  if (( config_changed == 1 )) && ! mv "$pending_config" "$config"; then
+    echo "ERROR: failed to install $config" >&2
+    if ! _rollback_codex_transaction; then
+      echo "ERROR: failed config installation could not be fully rolled back" >&2
+    fi
+    trap - HUP INT TERM
+    rm -f "$pending_config" "$pending_hooks"
+    return 1
+  fi
+
+  if ! _destination_matches_snapshot "$hooks" "$expected_hooks" "$hooks_existed"; then
+    echo "ERROR: $hooks changed immediately before replacement; rolling back config." >&2
+    _cancel_codex_transaction
+    return 1
+  fi
+  if (( hooks_changed == 1 )) && ! mv "$pending_hooks" "$hooks"; then
+    echo "ERROR: failed to install $hooks; rolling back config and hooks" >&2
+    if ! _rollback_codex_transaction; then
+      echo "ERROR: failed hooks installation could not be fully rolled back" >&2
+    fi
+    trap - HUP INT TERM
+    rm -f "$pending_config" "$pending_hooks"
+    return 1
+  fi
+
+  _CODEX_TXN_ACTIVE=0
+  trap - HUP INT TERM
+  rm -f "$pending_config" "$pending_hooks"
+
+  if (( config_changed == 1 )); then
+    if [[ -n "$config_backup" ]]; then
+      echo "Updated: $config (backup at $config_backup)" >&2
+    else
+      echo "Created: $config" >&2
+    fi
+  else
+    echo "Note: Codex feature config already current in $config" >&2
+  fi
+
+  if (( hooks_changed == 1 )); then
+    if [[ -n "$hooks_backup" ]]; then
+      echo "Updated: $hooks (backup at $hooks_backup)" >&2
+    else
+      echo "Created: $hooks" >&2
+    fi
+  else
+    echo "Note: Codex hooks already current in $hooks" >&2
+  fi
+}
+
+_require_regular_destination "$config_toml" || exit 1
+_require_regular_destination "$target" || exit 1
+
+staged_config=$(mktemp)
+staged_hooks=$(mktemp)
+original_config=$(mktemp)
+original_hooks=$(mktemp)
+rm -f "$original_config" "$original_hooks"
+trap 'rm -f "$staged_config" "$staged_hooks" "$original_config" "$original_hooks"' EXIT
+
+config_existed=0
+hooks_existed=0
+if [[ -f "$config_toml" ]]; then
+  cp -p "$config_toml" "$original_config"
+  config_existed=1
+fi
+if [[ -f "$target" ]]; then
+  cp -p "$target" "$original_hooks"
+  cp -p "$original_hooks" "$staged_hooks"
+  hooks_existed=1
+fi
+
+_stage_codex_config "$original_config" "$staged_config" "$config_toml" || exit 1
+render_codex_hooks "$TEMPLATE" "$staged_hooks" || exit 1
+_commit_codex_files \
+  "$staged_config" "$config_toml" "$staged_hooks" "$target" \
+  "$original_config" "$config_existed" "$original_hooks" "$hooks_existed" ||
+  exit 1
+
+rm -f "$staged_config" "$staged_hooks" "$original_config" "$original_hooks"
+trap - EXIT
 
 if (( INSTALL_GIT_HOOK == 1 )); then
   install_per_worktree_pre_push
@@ -145,11 +612,9 @@ ensure_dispatcher_scripts_executable
 
 cat <<'EOF' >&2
 
-NOTE: Codex CLI hook support is experimental upstream. Tool-name
-matchers (Bash, Write, Edit) are modeled on Claude Code but not
-officially documented. Run a no-op test (e.g., a benign shell command
-that triggers the push-to-main hook by mistake) to verify hooks fire
-before relying on them.
+NOTE: Codex project hooks run only after the project and current hook
+definitions are trusted. Review them with /hooks. For vetted unattended
+automation, Codex also provides --dangerously-bypass-hook-trust.
 
 EOF
 echo "Done. Project-scoped Codex hooks installed at $target." >&2

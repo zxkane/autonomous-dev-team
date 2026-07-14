@@ -44,7 +44,7 @@ steps use Chrome DevTools MCP — ensure your IDE has this MCP server configured
 for E2E verification.
 
 ### Hooks (Optional)
-If your IDE supports hooks (Claude Code, Kiro CLI), workflow enforcement
+If your IDE supports hooks (Claude Code, Codex CLI, Kiro CLI), workflow enforcement
 hooks in `hooks/` provide automatic gate checks. Without hooks, follow
 each step manually.
 
@@ -275,6 +275,23 @@ When the project sets `AGENT_REVIEW_AGENTS` to more than one CLI, several review
 - Run the Findings -> Decision Gate **independently** — reach your own PASS/FAIL based on your own findings. Do NOT try to coordinate with or defer to the other agents; you cannot see their verdicts.
 - Post your own verdict via `bash scripts/post-verdict.sh` with your assigned agent name + session id (both are in your prompt) — never a bare `gh issue comment` ([INV-56](../../docs/pipeline/invariants.md)). The helper writes your `Review Agent: <name>` discriminator line from the argument you pass, so it is always correct; that line is how the wrapper attributes your verdict among the parallel reviewers ([INV-40](../../docs/pipeline/invariants.md)).
 - The wrapper aggregates all agents' verdicts under a **unanimous-PASS** rule: the wrapper approves+merges only if **every** available agent passed; any single FAIL makes the wrapper submit `--request-changes` and send the PR back to dev. This mirrors the gate's own "any blocking finding → FAIL" philosophy, applied across agents. As above, **no agent submits the GitHub-native action** — the wrapper does, once, after aggregating.
+
+### Internal review subagents are advisory
+
+Claude or Codex internal subagents may inspect security, tests, maintainability,
+or other review dimensions in parallel. They return evidence and findings to
+their parent; they are advisory and are not entries in
+`AGENT_REVIEW_AGENTS`.
+
+The assigned main review session alone executes the Findings -> Decision Gate
+and calls `post-verdict.sh` with the wrapper-provided agent name and session
+id. Do not delegate `post-verdict.sh` to an internal subagent. The main session
+must reconcile the advisory findings into its own single PASS/FAIL decision.
+
+Keep these three mechanisms distinct: `REVIEW_BOTS` are external code-host
+reviewers, `AGENT_REVIEW_AGENTS` are independent wrapper-managed
+verdict-reaching sessions, and internal subagents are advisory workers inside
+one such session.
 
 ---
 

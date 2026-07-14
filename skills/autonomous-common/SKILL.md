@@ -28,7 +28,7 @@ After `npx skills add`, run the installer for your coding agent once from the pr
 | Cursor | `bash .claude/skills/autonomous-common/scripts/install-cursor-hooks.sh` | `.cursor/hooks.json` |
 | Kiro CLI | `bash .claude/skills/autonomous-common/scripts/install-kiro-hooks.sh [--agent <name>]` | `.kiro/agents/<name>.json` (default: `default`) |
 | Gemini CLI | `bash .claude/skills/autonomous-common/scripts/install-gemini-hooks.sh` | `.gemini/settings.json` |
-| Codex CLI | `bash .claude/skills/autonomous-common/scripts/install-codex-hooks.sh` | `.codex/hooks.json` + `.codex/config.toml` |
+| Codex CLI | `bash .claude/skills/autonomous-common/scripts/install-codex-hooks.sh` (Python 3.11+) | `.codex/hooks.json` + `.codex/config.toml` |
 | Windsurf | `bash .claude/skills/autonomous-common/scripts/install-windsurf-hooks.sh` | `.windsurf/hooks.json` |
 | Kimi CLI | `bash .claude/skills/autonomous-common/scripts/install-kimi-hooks.sh [--project]` | `~/.kimi/config.toml` (default; `--project` writes `.kimi/config.toml`) |
 
@@ -92,7 +92,7 @@ Claude Code only. The installer prompts for these; if installing manually, add t
   - `install-cursor-hooks.sh` — Cursor installer (writes `.cursor/hooks.json` — `version: 1` envelope, camelCase events, `Shell` matcher)
   - `install-kiro-hooks.sh` — Kiro CLI / Amazon Q installer (writes `.kiro/agents/<name>.json` — agent definition with camelCase events, `execute_bash`/`fs_write` matchers, `timeout_ms` in milliseconds)
   - `install-gemini-hooks.sh` — Gemini CLI installer (writes `.gemini/settings.json` — `BeforeTool`/`AfterTool` events, `run_shell_command`/`write_file`/`replace` matchers)
-  - `install-codex-hooks.sh` — Codex CLI installer (writes `.codex/hooks.json` + sets `[features] codex_hooks = true` in `.codex/config.toml`)
+  - `install-codex-hooks.sh` — Codex CLI installer (requires Python 3.11+ `tomllib`, renders worktree-root-resolvable `.codex/hooks.json`, sets canonical `[features] hooks = true`, and safely migrates the deprecated `codex_hooks` alias)
   - `install-windsurf-hooks.sh` — Windsurf installer (writes `.windsurf/hooks.json` — snake_case events that fold matcher info; no per-tool matcher field)
   - `install-kimi-hooks.sh` — Kimi CLI installer (writes `~/.kimi/config.toml` user-level by default, or `.kimi/config.toml` with `--project`; emits TOML `[[hooks]]` blocks)
   - `claude-settings.template.json` — canonical hook list applied by all per-agent installers

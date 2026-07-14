@@ -38,23 +38,25 @@ fi
 
 # Block the commit
 cat >&2 <<'EOF'
-## ⛔ BLOCKED - Run Code Simplifier First
+## BLOCKED - Run Code Simplification Review First
 
-Before committing, you must run the code-simplifier agent to review and clean up your changes.
+Before committing, run an independent simplification review of your changes.
 
 ### Required Steps:
-1. Run the code-simplifier agent (try in order):
-   a. Use Agent tool with subagent_type: code-simplifier:code-simplifier
-   b. If agent not found, fallback to: /simplify skill
+1. Use the native option for this client:
+   a. Codex: spawn a reviewer subagent focused on simplification, or run
+      `codex review --uncommitted "Focus on unnecessary complexity and duplication."`
+   b. Claude Code: use the code-simplifier agent/plugin or `/simplify`.
+   c. Other clients: use an available review agent or inspect the diff manually.
 
-2. After code-simplifier/simplify completes, mark it:
+2. After the simplification pass completes, mark it:
    ```bash
    hooks/state-manager.sh mark code-simplifier
    ```
 
 3. Retry the commit
 
-### Why This Is Required (CLAUDE.md Step 5):
+### Why This Is Required:
 - Ensures consistent code style
 - Removes redundant code
 - Validates changes follow project patterns

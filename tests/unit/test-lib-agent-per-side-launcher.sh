@@ -164,6 +164,15 @@ assert_contains "guard returns rc=1 (source aborted)" "RC=1" "$out"
 
 # ---------------------------------------------------------------------------
 echo ""
+echo "=== PSL-S8b: canonical Codex-dev / Claude-review launcher isolation ==="
+# ---------------------------------------------------------------------------
+# A Claude-only launcher is valid on the review side while Codex dev runs
+# naked. This is the first-class mixed topology from issue #486.
+out=$(launcher_guard "" "" "cc" "codex" "claude")
+assert_contains "review-only Claude launcher is accepted with Codex dev" "RC=0" "$out"
+
+# ---------------------------------------------------------------------------
+echo ""
 echo "=== PSL-S9: autonomous-dev.sh — launcher rebind AFTER source lib-auth.sh ==="
 # ---------------------------------------------------------------------------
 # Same invariant as INV-37 PSC-S9: the per-side rebind MUST come AFTER

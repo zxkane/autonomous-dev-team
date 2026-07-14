@@ -53,6 +53,28 @@ parse_json_field() {
   echo "$json_input" | jq -r --arg path "$field_path" 'getpath($path | split(".")) // ""'
 }
 
+# Parse a required nonempty JSON string field.
+# Usage: parse_json_string_field "field.path" "$json_input"
+parse_json_string_field() {
+  local field_path="$1"
+  local json_input="$2"
+
+  if ! command -v jq &> /dev/null; then
+    echo "Error: jq is required but not installed" >&2
+    return 1
+  fi
+  if [[ ! "$field_path" =~ ^[]a-zA-Z0-9._[\"]+$ ]]; then
+    echo "Error: Invalid field path" >&2
+    return 1
+  fi
+
+  echo "$json_input" |
+    jq -er --arg path "$field_path" '
+      getpath($path | split("."))
+      | select((type == "string") and (length > 0))
+    ' 2>/dev/null
+}
+
 # Parse tool input command from hook JSON
 # Usage: parse_command "$json_input"
 parse_command() {
@@ -77,6 +99,173 @@ parse_exit_code() {
 # Usage: parse_file_path "$json_input"
 parse_file_path() {
   parse_json_field "tool_input.file_path" "$1"
+}
+
+# Parse edit operations as tab-separated operation/path records.
+#
+# Claude Write/Edit calls provide one tool_input.file_path. Codex apply_patch
+# calls provide the patch in tool_input.command and may touch multiple paths.
+# Recognized edit tools fail when their expected path data is malformed;
+# unrelated tools remain a successful no-op.
+#
+# Operations are: add, edit, delete, move.
+parse_edit_file_operations() {
+  local json_input="$1"
+  local tool_name file_path command input_prefix
+
+  if tool_name=$(parse_json_string_field "tool_name" "$json_input"); then
+    input_prefix="tool_input"
+  elif tool_name=$(parse_json_string_field "agent_action_name" "$json_input"); then
+    input_prefix="tool_info"
+  else
+    echo "Error: hook payload is missing a string tool discriminator" >&2
+    return 1
+  fi
+
+  case "$tool_name" in
+    Write|write_file|WriteFile|pre_write_code)
+      if ! file_path=$(parse_json_string_field "${input_prefix}.file_path" "$json_input"); then
+        echo "Error: $tool_name hook payload is missing a string ${input_prefix}.file_path" >&2
+        return 1
+      fi
+      if [[ "$file_path" == *$'\t'* || "$file_path" == *$'\n'* ]]; then
+        echo "Error: $tool_name hook path contains an unsupported tab or newline" >&2
+        return 1
+      fi
+      printf 'add\t%s\n' "$file_path"
+      ;;
+    Edit|replace|StrReplaceFile)
+      if ! file_path=$(parse_json_string_field "${input_prefix}.file_path" "$json_input"); then
+        echo "Error: $tool_name hook payload is missing a string ${input_prefix}.file_path" >&2
+        return 1
+      fi
+      if [[ "$file_path" == *$'\t'* || "$file_path" == *$'\n'* ]]; then
+        echo "Error: $tool_name hook path contains an unsupported tab or newline" >&2
+        return 1
+      fi
+      printf 'edit\t%s\n' "$file_path"
+      ;;
+    fs_write)
+      if ! file_path=$(parse_json_string_field "${input_prefix}.path" "$json_input"); then
+        echo "Error: fs_write hook payload is missing a string ${input_prefix}.path" >&2
+        return 1
+      fi
+      if ! command=$(parse_json_string_field "${input_prefix}.command" "$json_input"); then
+        echo "Error: fs_write hook payload is missing a string ${input_prefix}.command" >&2
+        return 1
+      fi
+      if [[ "$file_path" == *$'\t'* || "$file_path" == *$'\n'* ]]; then
+        echo "Error: fs_write hook path contains an unsupported tab or newline" >&2
+        return 1
+      fi
+      case "$command" in
+        create) printf 'add\t%s\n' "$file_path" ;;
+        str_replace|insert|append) printf 'edit\t%s\n' "$file_path" ;;
+        *)
+          echo "Error: fs_write hook payload has unsupported command: $command" >&2
+          return 1
+          ;;
+      esac
+      ;;
+    apply_patch)
+      if ! command=$(parse_json_string_field "${input_prefix}.command" "$json_input"); then
+        echo "Error: apply_patch hook payload is missing a string ${input_prefix}.command" >&2
+        return 1
+      fi
+
+      local line operation candidate
+      local begun=0 ended=0 found=0 malformed=0
+      declare -A seen=()
+      local -a operation_records=()
+      while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line%$'\r'}"
+
+        if (( begun == 0 )); then
+          if [[ "$line" == "*** Begin Patch" ]]; then
+            begun=1
+          else
+            malformed=1
+          fi
+          continue
+        fi
+
+        if (( ended == 1 )); then
+          [[ -z "$line" ]] || malformed=1
+          continue
+        fi
+
+        if [[ "$line" == "*** End Patch" ]]; then
+          ended=1
+          continue
+        fi
+        if [[ "$line" == "*** Begin Patch" ]]; then
+          malformed=1
+          continue
+        fi
+
+        operation=""
+        candidate=""
+        case "$line" in
+          '*** Add File: '*)
+            operation="add"
+            candidate="${line#'*** Add File: '}"
+            ;;
+          '*** Update File: '*)
+            operation="edit"
+            candidate="${line#'*** Update File: '}"
+            ;;
+          '*** Delete File: '*)
+            operation="delete"
+            candidate="${line#'*** Delete File: '}"
+            ;;
+          '*** Move to: '*)
+            operation="move"
+            candidate="${line#'*** Move to: '}"
+            ;;
+        esac
+
+        [[ -z "$operation" ]] && continue
+        if [[ -z "$candidate" || "$candidate" == *$'\t'* ]]; then
+          malformed=1
+          continue
+        fi
+
+        local record_key="${operation}"$'\034'"${candidate}"
+        if [[ ! ${seen["$record_key"]+present} ]]; then
+          seen["$record_key"]=1
+          operation_records+=("${operation}"$'\t'"${candidate}")
+          found=1
+        fi
+      done <<< "$command"
+
+      if (( begun == 0 || ended == 0 || found == 0 || malformed == 1 )); then
+        echo "Error: apply_patch payload is not a complete supported patch" >&2
+        return 1
+      fi
+      printf '%s\n' "${operation_records[@]}"
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+}
+
+# Parse all paths affected by an edit tool, one path per output line.
+# This compatibility projection intentionally drops operation semantics.
+parse_edit_file_paths() {
+  local json_input="$1"
+  local records operation file_path
+
+  records=$(parse_edit_file_operations "$json_input") || return 1
+
+  declare -A seen=()
+  while IFS=$'\t' read -r operation file_path; do
+    [[ -z "$operation" || -z "$file_path" ]] && continue
+    if [[ ! ${seen["$file_path"]+present} ]]; then
+      seen["$file_path"]=1
+      printf '%s\n' "$file_path"
+    fi
+  done <<< "$records"
 }
 
 # Check if command invokes a given git subcommand.

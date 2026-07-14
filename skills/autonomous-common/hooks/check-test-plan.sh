@@ -7,10 +7,13 @@ source "$SCRIPT_DIR/lib.sh"
 STATE_MANAGER="$SCRIPT_DIR/state-manager.sh"
 
 input=$(read_hook_stdin)
-file_path=$(parse_file_path "$input")
+if ! edit_operations=$(parse_edit_file_operations "$input"); then
+  echo "Error: could not normalize edit operations; refusing to skip the test-plan gate" >&2
+  exit 2
+fi
 
-# Skip if no file path
-if [[ -z "$file_path" ]]; then
+# Skip non-edit tools.
+if [[ -z "$edit_operations" ]]; then
   exit 0
 fi
 
@@ -18,31 +21,38 @@ fi
 # Default: TypeScript/JavaScript files in src/ directory
 IMPL_PATTERN='src/.*\.(ts|tsx|js|jsx)$'
 
-# Skip if not an implementation file
-if [[ ! "$file_path" =~ $IMPL_PATTERN ]]; then
+# Skip every path if the test plan is already marked.
+if "$STATE_MANAGER" check test-plan 2>/dev/null; then
   exit 0
 fi
 
-# Skip test files
-if [[ "$file_path" =~ (__tests__|\.test\.|\.spec\.|tests/) ]]; then
-  exit 0
-fi
+# Only creation operations can require a test plan. Updates, deletes, and move
+# destinations may name paths that do not exist yet without creating new code.
+# Patch paths are normally worktree-relative; Claude may provide an absolute
+# path.
+worktree_root=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+needs_test_plan=false
+while IFS=$'\t' read -r operation file_path; do
+  [[ "$operation" == "add" && -n "$file_path" ]] || continue
 
-# Skip config files
-if [[ "$file_path" =~ (\.config\.|\.d\.ts$) ]]; then
-  exit 0
-fi
+  [[ "$file_path" =~ $IMPL_PATTERN ]] || continue
+  [[ "$file_path" =~ (__tests__|\.test\.|\.spec\.|tests/) ]] && continue
+  [[ "$file_path" =~ (\.config\.|\.d\.ts$) ]] && continue
 
-# Skip if test-plan state exists or file already exists (editing existing code)
-if "$STATE_MANAGER" check test-plan 2>/dev/null || [[ -f "$file_path" ]]; then
-  exit 0
-fi
+  if [[ -f "$file_path" || -f "$worktree_root/$file_path" ]]; then
+    continue
+  fi
 
-# Warn about test plan for new file creation
+  needs_test_plan=true
+  break
+done <<< "$edit_operations"
+
+[[ "$needs_test_plan" == "true" ]] || exit 0
+
 cat >&2 <<'EOF'
 ## Reminder: Test Plan First (TDD Workflow)
 
-You're creating a new implementation file. Per CLAUDE.md Step 2, the test-driven workflow requires:
+You're creating a new implementation file. The project workflow requires:
 
 ### Before Writing Implementation:
 1. **Create test case document**: `docs/test-cases/<feature>.md`
