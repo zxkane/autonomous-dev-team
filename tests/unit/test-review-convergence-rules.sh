@@ -1483,6 +1483,39 @@ assert_eq "TC-CXSTRIP-008 indented/trailing-content lines are not markers → wh
   "$(cat "$TMP_CXSTRIP008")" "$(_codex_review_strip_prompt_echo "$TMP_CXSTRIP008")"
 rm -f "$TMP_CXSTRIP008"
 
+# TC-CXSTRIP-009: a ~~~-fenced (not just ```-fenced) reviewed-content snippet
+# quoting column-zero `user`/`codex`/`system` lines must NOT be mistaken for a
+# later genuine turn marker — the fence-toggle awk must recognize BOTH fence
+# styles, or the helper would discard the real findings that precede the
+# tilde-fenced snippet and extract none instead of demoting (review round-1
+# finding 2, PR #484).
+CX_TILDE_FIXTURE="$FIXTURES/codex-review-stdout-turns-tilde-fence.txt"
+assert_file_exists "TC-CXSTRIP-009 setup: tilde-fence fixture exists" "$CX_TILDE_FIXTURE"
+_cxstrip009=$(_codex_review_strip_prompt_echo "$CX_TILDE_FIXTURE")
+assert_contains "TC-CXSTRIP-009a tilde-fenced fixture: first real [P2] finding survives" \
+  "$_cxstrip009" '[P2] src/handler.ts:88'
+assert_contains "TC-CXSTRIP-009b tilde-fenced fixture: second real [P2] finding survives" \
+  "$_cxstrip009" '[P2] src/other.ts:42'
+assert_eq "TC-CXSTRIP-009c severity extraction on the tilde-fence fixture's stripped result is P2 (not falsely collapsed to none)" "P2" \
+  "$(_review_extract_highest_severity "$_cxstrip009")"
+
+# TC-CXSTRIP-010: the CLI's own trailing `tokens used: <N>` footer must never
+# reach the scored text — a bare token count is not review findings and must
+# not be able to influence severity extraction (review round-1 finding 3, PR
+# #484). The p2-only fixture already carries a `tokens used: 54210` footer
+# line after the final response.
+_cxstrip010=$(_codex_review_strip_prompt_echo "$CX_TURNS_P2_FIXTURE")
+assert_eq "TC-CXSTRIP-010a stripped result contains no 'tokens used' footer line" "" \
+  "$(grep -io 'tokens used' <<<"$_cxstrip010")"
+TMP_CXSTRIP010=$(mktemp)
+printf '%s\n' 'OpenAI Codex v0.139.0' '--------' 'workdir: /tmp/x' 'model: m' 'provider: p' '--------' '' 'user' 'echoed prompt' '' 'codex' '[P3] a real finding, low severity only.' '' 'Tokens Used: 12345' > "$TMP_CXSTRIP010"
+_cxstrip010b=$(_codex_review_strip_prompt_echo "$TMP_CXSTRIP010")
+assert_eq "TC-CXSTRIP-010b mixed-case 'Tokens Used:' footer stripped" "" \
+  "$(grep -io 'tokens used' <<<"$_cxstrip010b")"
+assert_eq "TC-CXSTRIP-010c severity extraction on a footer-only-P3 capture is P3, not polluted by the footer" "P3" \
+  "$(_review_extract_highest_severity "$_cxstrip010b")"
+rm -f "$TMP_CXSTRIP010"
+
 # ===========================================================================
 echo
 echo "=== TC-SEVEXT-011..013: simulated 5-round P2-only codex loop demotes at round 5 (spec revision 2 AC procedure) ==="

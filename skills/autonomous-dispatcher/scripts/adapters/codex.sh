@@ -466,12 +466,18 @@ _codex_review_classify_stdout() {
 # reviewed-file snippet or an indented tool-output line can never masquerade
 # as a genuine turn boundary (mirrors this file's own established
 # fenced-block-exclusion discipline from `_echo_region`/`_leading_region`
-# above).
+# above). Both ``` and ~~~ fence styles toggle the same `infence` state, so a
+# tilde-fenced reviewed snippet is excluded from marker detection exactly like
+# a backtick-fenced one.
 #
 # ANY missing piece of that structure (no validated header, no `user` marker
 # after it, no `codex` marker after THAT) is fail-safe: echoes the ORIGINAL
 # content UNCHANGED, never a guessed boundary. Empty/missing/unreadable input
 # echoes empty. rc 0 ALWAYS (fail-safe under `set -euo pipefail`).
+#
+# The returned text also drops the CLI's own trailing `tokens used: <N>`
+# footer line (case-insensitive) — a token count is never review findings and
+# must never influence severity extraction.
 
 # _codex_review_strip_prompt_echo <stdout-file>
 _codex_review_strip_prompt_echo() {
@@ -522,7 +528,7 @@ _codex_review_strip_prompt_echo() {
   # one incidentally.
   local _user_line_no
   _user_line_no=$(awk '
-    /^[[:space:]]*```/ { infence = !infence; next }
+    /^[[:space:]]*(```|~~~)/ { infence = !infence; next }
     infence { next }
     !infence && /^user[[:space:]]*$/ { print NR; exit }
   ' "$f" 2>/dev/null) || _user_line_no=""
@@ -537,7 +543,7 @@ _codex_review_strip_prompt_echo() {
   # LAST one bounds the final response, which is the only text scored.
   local _codex_line_no
   _codex_line_no=$(awk -v start="$_user_line_no" '
-    /^[[:space:]]*```/ { infence = !infence; next }
+    /^[[:space:]]*(```|~~~)/ { infence = !infence; next }
     infence { next }
     NR > start && !infence && /^codex[[:space:]]*$/ { last = NR }
     END { if (last) print last }
@@ -547,9 +553,15 @@ _codex_review_strip_prompt_echo() {
     return 0
   fi
 
-  # Return everything STRICTLY AFTER the last `codex` marker line.
+  # Return everything STRICTLY AFTER the last `codex` marker line, minus the
+  # CLI's own trailing `tokens used: <N>` footer (the same line
+  # `metrics_parse_tokens` reads, lib-metrics.sh) — a token count is never
+  # part of the agent's findings and must not reach the severity scanner.
   local _stripped
-  _stripped=$(awk -v boundary="$_codex_line_no" 'NR > boundary { print }' "$f" 2>/dev/null) || _stripped=""
+  _stripped=$(awk -v boundary="$_codex_line_no" '
+    BEGIN { IGNORECASE = 1 }
+    NR > boundary && !/^[[:space:]]*tokens used:[[:space:]]*[0-9]+[[:space:]]*$/ { print }
+  ' "$f" 2>/dev/null) || _stripped=""
   if [[ -z "$_stripped" ]]; then
     printf '%s' "$original"
   else
